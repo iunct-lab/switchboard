@@ -1,0 +1,18 @@
+{
+  "name": "ops-kit",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Backlog tools (GitHub Issues + Projects) shared by every repository that runs the same development flow. Each repository keeps only its ops.config.json.",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "bun check -p tsconfig.json"
+  },
+  "dependencies": {
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.9.0"
+  }
+}

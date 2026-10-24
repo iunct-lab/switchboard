@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily encrypted history archive to S3
+
+[Service]
+Type=oneshot
+User=@USER@
+Environment=HOME=@HOME@
+Environment=PATH=/usr/local/bin:@HOME@/.bun/bin:/usr/bin:/bin
+EnvironmentFile=/etc/switchboard-host.env
+ExecStart=/usr/local/bin/sb-archive

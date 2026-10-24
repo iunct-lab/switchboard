@@ -1,0 +1,26 @@
+{
+  "name": "@switchboard/core",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/main.ts",
+    "start": "bun src/main.ts",
+    "typecheck": "bun check -p tsconfig.json",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@switchboard/adapter-claude": "workspace:*",
+    "@switchboard/adapter-codex": "workspace:*",
+    "@switchboard/adapter-dak": "workspace:*",
+    "@switchboard/protocol": "workspace:*",
+    "bun-pty": "0.4.10",
+    "yaml": "^2.9.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.9.0"
+  }
+}

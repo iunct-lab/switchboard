@@ -1,0 +1,30 @@
+name: Close pull requests
+
+# This repository is a read-only copy of a private development repository and takes no pull requests
+# (README, "How this repository works"). A pull request from anyone but a maintainer, dependabot, or this
+# repository's own sync branches is answered with the policy and closed. The pull request's code is never
+# checked out or run: the job only comments and closes, with the workflow's own token.
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  close:
+    if: >-
+      ${{ !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)
+          && github.event.pull_request.user.login != 'dependabot[bot]'
+          && !(github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.head.ref, 'sync/')) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Answer with the policy and close
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          README_URL: ${{ github.server_url }}/${{ github.repository }}#how-this-repository-works
+          ISSUES_URL: ${{ github.server_url }}/${{ github.repository }}/issues/new/choose
+        run: |
+          gh pr comment "$PR_URL" --body "Thank you for the pull request. This repository is a read-only copy of a private development repository and does not accept pull requests, so this one is closed automatically. Requests and bug reports are welcome as an Issue (Request): $ISSUES_URL — see $README_URL."
+          gh pr close "$PR_URL"

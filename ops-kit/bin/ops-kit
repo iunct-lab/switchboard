@@ -1,0 +1,7 @@
+#!/usr/bin/env bun
+// ops-kit
+// The kit's CLI (#969). The commands that read no configuration (`scan-issues` / `scan-text`) are called through this,
+// with no entry in the repository that uses the kit (a Task and the host's shell have `ops-kit/bin` on PATH).
+import { main } from "../src/cli.ts";
+
+process.exit(await main(process.argv.slice(2)));

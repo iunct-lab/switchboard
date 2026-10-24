@@ -1,0 +1,28 @@
+# The host user's rootless dockerd in a cgroup of its own, with its own ceiling. It used to run inside switchboard.service
+# (started with setsid from a runner's docker call), where a Task's detached `docker compose up --build` (a few large
+# images, several containers, a rebuild) could fill that unit's memory and swap until the host stopped answering.
+# Here docker, its builds and its containers can use at most MemoryMax + MemorySwapMax; past that the kernel kills in this
+# unit, and the daemon, the runners and the rescue page go on. Started on demand by dockerd-up (sudoers allows only that).
+# @USER@ and @HOME@ are filled in by bootstrap.sh.
+[Unit]
+Description=rootless dockerd of the host user
+After=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Environment=HOME=@HOME@
+Environment=XDG_RUNTIME_DIR=@HOME@/.docker/run
+Environment=PATH=/usr/local/lib/docker-rootless/bin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin
+Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_NET=pasta
+Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=implicit
+ExecStartPre=/bin/sh -c 'mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"'
+ExecStart=/usr/local/lib/docker-rootless/bin/dockerd-rootless.sh
+Restart=on-failure
+RestartSec=5
+MemoryMax=1536M
+MemorySwapMax=256M
+OOMPolicy=continue
+# no MemoryHigh and oomd on pressure, as in switchboard.service (a unit throttled between high and max stalls)
+ManagedOOMMemoryPressure=kill
+ManagedOOMMemoryPressureLimit=50%

@@ -1,0 +1,49 @@
+name: 要望 (Request)
+description: 利用者の要望（意図を変えずに整えた文）。ここから PBI を切る（.claude/skills/request-to-backlog）。要望と PBI は 1 対 1 ではない
+title: "要望: "
+labels: ["type:request"]
+body:
+  - type: textarea
+    id: request
+    attributes:
+      label: 要望
+      description: 言いたいこと。「〜できると嬉しい」でも「〜が今できず困っている」でもよい。意図を変えずに整えてよい（誤字・話し言葉・並び）。意味・範囲・優先度の強さは変えない。PBI から参照される。
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: 出典
+      description: 誰の言葉（利用者 / エージェント / 定期の検査。利用者は利用者の文そのものを引けるときだけ）/ いつ / 経路（チャット、フィードバックボタン、別 Issue のコメント …）
+      value: |
+        - 誰の言葉: 利用者
+        - いつ:
+        - 経路:
+    validations:
+      required: true
+  - type: textarea
+    id: attachments
+    attributes:
+      label: 添付
+      description: スクリーンショットなど。API から作るときは feedback-assets ブランチに置いた画像の URL（request-to-backlog の手順）。個人情報が写るものは載せない。
+      value: なし
+  - type: dropdown
+    id: area
+    attributes:
+      label: 対象コンポーネント / Component
+      multiple: true
+      options:
+        - __AREA__
+    validations:
+      required: false
+  - type: textarea
+    id: derived
+    attributes:
+      label: 派生 PBI
+      description: PBI を切ったら追記（`- #N 題 — Priority`）。全部 Done でこの Issue を閉じる。
+      value: （PBI を作ったら追記）
+  - type: textarea
+    id: notes
+    attributes:
+      label: 解釈メモ
+      description: 曖昧な箇所をどう読んだか、聞きたいこと。意味が変わりうる読み替えはここに書く。

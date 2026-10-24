@@ -1,0 +1,88 @@
+name: PBI (Product Backlog Item)
+description: 利用者から見た成果。ユーザーストーリー・検証つき受け入れ条件・Story Points が揃って Backlog に入る。Task に分解して sub-issue が揃ったら Ready（.claude/skills/issue-workflow）
+title: "PBI: "
+labels: ["type:pbi"]
+body:
+  - type: textarea
+    id: story
+    attributes:
+      label: ユーザーストーリー
+      description: 「<誰> として、<何ができる> ようにしたい。<何のため> に。」の 1 文。主語は利用者の立場（LLM やデーモンを主語にしない）。「何ができる」は成果で、「〜を実装する」は書かない。
+      placeholder: <誰> として、<何ができる> ようにしたい。<何のため> に。
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: 背景 / 課題
+      description: 何が今できず困るか。既存の仕組みのどこが足りないかをファイル名・Issue 番号で名指しする。
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 到達点 / 受け入れ条件
+      description: 1 行 1 条件、`- [ ]` で始める。行ごとに検証方法（コマンド・テスト名・画面操作と期待結果）を併記。「動く」「使える」だけの行は書かない。ここに書けないものは Task に落とせない。
+      placeholder: |
+        - [ ] 〜できる（検証: `bun test <file> -t "..."` が pass / Chrome で〜すると〜が出る）
+    validations:
+      required: true
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: スコープ外
+      description: やらないと決めたことと理由。この環境で検証できないもの（他 OS・GUI・実機依存）はここに書き、Task にしない。
+    validations:
+      required: true
+  - type: input
+    id: origin
+    attributes:
+      label: 元要望
+      description: この PBI を切った要望 Issue（type:request）の番号と、要望のどの部分か。要望 Issue が無い過去のものは「なし（理由）」。lint が見る（.claude/skills/request-to-backlog）。
+      placeholder: "#1（要望のどの部分か）"
+    validations:
+      required: true
+  - type: dropdown
+    id: story_points
+    attributes:
+      label: Story Points
+      description: 相対見積り（フィボナッチ）。基準にする閉じた PBI は root の CLAUDE.md の「Story Points の基準」。13 は「大きすぎる」の印で、lint が弾くので分割してから入れる。作成後に `bash scripts/setup/set_project_field.sh <num> "Story Points" <N>`（数字だけ）で Project にも入れる。
+      options: ["1", "2", "3", "5", "8", "13"]
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 対象コンポーネント / Area
+      multiple: true
+      options: [__AREA__]
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: |
+        **作成したあとにやること**（この Issue には書かない）
+
+        - `bash scripts/setup/triage_issue.sh <num> <area> <kind> <prio>` で Project のフィールドを付ける
+        - 今のゴールに効く PBI なら `gh issue edit <num> --milestone "<今のゴール>"`。効かないなら Milestone は付けない（着手順は Priority が決める）
+        - **PBI に親 Issue は付けない**（付けると Project の Backlog ビューから消える）
+        - triage は Status も毎回上書きする。最後の引数を省くと `Backlog` になるので、着手済みの Issue には `… <prio> "" "In progress"` のように今の Status を渡す
+  - type: textarea
+    id: tasks
+    attributes:
+      label: Tasks
+      description: 本文には書かない（sub-issue で紐づけ、GitHub が一覧化する）。着手順だけ 1 行。
+      value: |
+        sub-issue 参照。順番:
+  - type: textarea
+    id: decisions
+    attributes:
+      label: 決定ログ
+      description: 着手後に追記。日付 / 決めたこと / 理由。スコープの増減・別案・保留・Story Points の変更は必ずここに。
+      value: |
+        - YYYY-MM-DD:
+  - type: textarea
+    id: result
+    attributes:
+      label: 結果（閉じるときに記入）
+      description: 受け入れ条件ごとの検証結果、残したもの、次に繋がるもの。

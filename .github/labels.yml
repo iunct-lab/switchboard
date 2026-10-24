@@ -1,0 +1,96 @@
+# ラベル体系（宣言的）。`.github/workflows/labels.yml` が main への push で同期する。
+# 色は 6桁hex（# なし）。DAK の体系を踏襲し、Area をこのリポジトリのパッケージ構成に合わせている。
+
+# --- 種別 / Type ---
+- name: bug
+  color: d73a4a
+  description: 想定と異なる動作
+- name: enhancement
+  color: a2eeef
+  description: 新機能・改善
+- name: docs
+  color: 0075ca
+  description: ドキュメント
+- name: spike
+  color: fbca04
+  description: 技術リスクの検証（時間制限つき）
+- name: chore
+  color: ededed
+  description: 保守・整備
+
+# --- 階層 / Hierarchy（.claude/skills/issue-workflow）: 要望 → PBI → Task。Task だけが PR を持つ ---
+- name: "type:request"
+  color: e99695
+  description: 利用者の要望の原文。PBI に分解され、派生 PBI が全部 Done で閉じる
+- name: "type:epic"
+  color: 3e4b9e
+  description: Phase の到達点。子は PBI（sub-issue）
+- name: "type:pbi"
+  color: 5c7cfa
+  description: 利用者から見た成果と受け入れ条件。Task に分解され sub-issue が揃ったら Ready
+- name: "type:task"
+  color: 91a7ff
+  description: 実装可能な単位（触る場所・検証・完了条件が書ける）。1 Task = 1 PR
+
+# --- 自動化ドメイン / Automation domains ---
+- name: deps
+  color: 0366d6
+  description: 依存ライブラリの更新
+- name: security
+  color: b60205
+  description: 脆弱性・セキュリティ
+- name: license
+  color: c5def5
+  description: ライセンス・公開判断
+- name: eval
+  color: fbca04
+  description: 録画再生テスト・実ランナー検証
+- name: automation
+  color: ededed
+  description: 自動化ワークフロー由来
+
+# --- 対象コンポーネント / Area（Project の Area フィールドと一致）---
+- name: "area:protocol"
+  color: bfdadc
+  description: packages/protocol
+- name: "area:core"
+  color: bfdadc
+  description: packages/core（デーモン・ストア・Workspace MCP）
+- name: "area:adapter-claude"
+  color: bfdadc
+  description: packages/adapters/claude
+- name: "area:adapter-codex"
+  color: bfdadc
+  description: packages/adapters/codex
+- name: "area:adapter-dak"
+  color: bfdadc
+  description: packages/adapters/dak
+- name: "area:web"
+  color: bfdadc
+  description: apps/web
+- name: "area:desktop"
+  color: bfdadc
+  description: apps/desktop（Tauri）
+- name: "area:knowledge"
+  color: bfdadc
+  description: Knowledge Store / Materializer / Inbox
+- name: "area:ledger"
+  color: bfdadc
+  description: コスト台帳・枠・価格表
+- name: "area:infra"
+  color: bfdadc
+  description: .github / scripts / release
+
+# --- ロードマップ / Phase（Project の Phase フィールドと一致）---
+- name: "phase:0"
+  color: d4d4d4
+  description: 骨格
+- name: "phase:1"
+  color: 1d76db
+  description: 2 ランナーと正本
+- name: "phase:2"
+  color: "5319e7"
+  description: デスクトップ化と自己更新
+- name: "phase:3"
+  color: 0e8a16
+  description: 公開と学習

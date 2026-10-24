@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Switchboard は停止中</title>
+<!--
+  CloudFront shows this when the host does not answer (stopped, starting, interrupted; its 502/504). Logging in and
+  starting live on /_auth/ (the Starter Lambda, #211), which works while the machine is stopped: go there, and come back
+  to the page the person asked for once it runs. Nothing to type here.
+-->
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+  body { margin: 0; padding: 24px 16px; max-width: 480px; margin-inline: auto; line-height: 1.6; }
+</style>
+</head>
+<body>
+<p>Switchboard は停止中です。<a id="go" href="/_auth/">ログインして起動する</a></p>
+<script>
+  const here = location.pathname + location.search;
+  const target = "/_auth/" + (here.startsWith("/_auth") || here === "/" ? "" : "?next=" + encodeURIComponent(here));
+  document.getElementById("go").href = target;
+  // /_auth/ itself is the Lambda and does not come here; if it ever does, stay (no loop)
+  if (!location.pathname.startsWith("/_auth")) location.replace(target);
+</script>
+</body>
+</html>

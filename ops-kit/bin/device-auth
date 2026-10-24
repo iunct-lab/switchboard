@@ -1,0 +1,9 @@
+#!/usr/bin/env bun
+// device-auth
+// Runs a command that asks for an approval elsewhere and hands its URL and code to the screen of the app running the
+// Task, withheld from the output the agent reads (docs/design/device-auth.md in the app that ships the kit).
+import { runDeviceAuth } from "../src/device-auth.ts";
+
+const stop = new AbortController();
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(sig, () => stop.abort());
+process.exit(await runDeviceAuth(process.argv.slice(2), process.env, { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) }, stop.signal));

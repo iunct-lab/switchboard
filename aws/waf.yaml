@@ -1,0 +1,43 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Emergency switch (#1492): the WAF Web ACL for Switchboard's CloudFront distribution. A Web ACL for CloudFront exists
+  only in us-east-1, so it is a stack of its own: deploy it there, then give its WebAclArn output to
+  aws/template.yaml's WebAclArn. Two rate-based rules per source IP: the login (/_auth/) and everything. Deployed by a
+  person: see aws/README.md. It costs money every month while it exists.
+Resources:
+  WebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub '${AWS::StackName}'
+      Scope: CLOUDFRONT
+      DefaultAction: { Allow: {} }
+      # a sampled request keeps the headers: the login cookies must not be kept in it
+      DataProtectionConfig:
+        DataProtections: [{ Field: { FieldType: SINGLE_HEADER, FieldKeys: [cookie] }, Action: SUBSTITUTION }]
+      VisibilityConfig: { CloudWatchMetricsEnabled: true, MetricName: !Sub '${AWS::StackName}', SampledRequestsEnabled: true }
+      Rules:
+        # the limits are constants here: change them in this file, not with a parameter
+        - Name: auth-rate
+          Priority: 0
+          Action: { Block: {} }
+          Statement:
+            RateBasedStatement:
+              Limit: 100
+              EvaluationWindowSec: 300
+              AggregateKeyType: IP
+              ScopeDownStatement:
+                ByteMatchStatement:
+                  SearchString: /_auth/
+                  FieldToMatch: { UriPath: {} }
+                  PositionalConstraint: STARTS_WITH
+                  TextTransformations: [{ Priority: 0, Type: NONE }]
+          VisibilityConfig: { CloudWatchMetricsEnabled: true, MetricName: !Sub '${AWS::StackName}-auth-rate', SampledRequestsEnabled: true }
+        - Name: all-rate
+          Priority: 1
+          Action: { Block: {} }
+          Statement:
+            RateBasedStatement: { Limit: 2000, EvaluationWindowSec: 300, AggregateKeyType: IP }
+          VisibilityConfig: { CloudWatchMetricsEnabled: true, MetricName: !Sub '${AWS::StackName}-all-rate', SampledRequestsEnabled: true }
+Outputs:
+  WebAclArn:
+    Value: !GetAtt WebAcl.Arn

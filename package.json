@@ -1,0 +1,29 @@
+{
+  "name": "switchboard",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Local control plane for coding agents (Claude Code, Codex, DAK): one screen, one knowledge base, one ledger.",
+  "license": "Apache-2.0",
+  "workspaces": [
+    "packages/*",
+    "packages/adapters/*",
+    "apps/*",
+    "rescue",
+    "aws",
+    "ops-kit"
+  ],
+  "scripts": {
+    "dev": "bun run scripts/dev.ts",
+    "core": "bun run --cwd packages/core dev",
+    "web": "bun run --cwd apps/web dev",
+    "test": "bun test",
+    "typecheck": "bun run --cwd packages/protocol typecheck && bun run --cwd packages/adapters/claude typecheck && bun run --cwd packages/adapters/codex typecheck && bun run --cwd packages/adapters/dak typecheck && bun run --cwd packages/core typecheck && bun run --cwd apps/web typecheck && bun run --cwd rescue typecheck && bun run --cwd aws typecheck && bun run --cwd ops-kit typecheck",
+    "rescue:install": "bun rescue/install.ts",
+    "codex:types": "bun run scripts/codex_types.ts",
+    "merge-gate": "bun scripts/merge-gate.ts",
+    "licenses:check": "bun run scripts/check-licenses.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}

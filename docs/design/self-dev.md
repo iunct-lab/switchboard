@@ -1,0 +1,22 @@
+# Self-dev — changing Switchboard from inside Switchboard
+
+Issue #18, proposal §5 "Self-dev を成立させる構造" and Screen D. The daemon registers its own repository as the **meta** workspace at boot; "このアプリを改善" on Home selects it and puts the architecture map and test commands in front of the request (whatever is already typed stays).
+
+The prefix is not a constant in the UI: `GET /api/workspaces/:id/brief` (`packages/core/src/brief.ts`) writes it per workspace. The meta workspace gets the Switchboard map plus the check commands read from `package.json`; any other workspace gets its own name and path, the top-level layout, a pointer to `CLAUDE.md` / `AGENTS.md` when present, the test commands the manifests imply (`bun test`, `uv run pytest`, `cargo test`, …) and `docker compose up` when a compose file is at the root. On Home a repo workspace gets a second button, "<name> を改善", next to "このアプリを改善" (which still jumps to the meta workspace). Both keep what is already typed: a prompt that starts with a previous brief has that prefix replaced, anything else gets the brief prepended. While the prompt still starts with the inserted prefix, changing the Workspace select swaps only that prefix — the request typed after "やってほしいこと:" stays; once the prefix has been edited by hand the text is left alone (the title prefix "<name> を改善: " is still swapped as long as it is untouched). Before this, the one hard-coded paragraph kept saying "you are working in Switchboard" after a switch, so an improvement request for another repository (DAK, say) could not be phrased from the button.
+
+## Loop
+
+1. The task (Claude / Codex) edits the repository. The 差分 tab shows what changed.
+2. When a turn on a meta-workspace task ends with `done`, the daemon runs the repository's checks — `bun run typecheck` then `bun test` — in a clean environment (no `SWITCHBOARD_*`, no Claude session markers), captures the output (last 20 KB), and stores the run per task (`check_runs`). `checks.updated` is broadcast; the Brief shows `typecheck ok · 41 pass, 0 fail` with the output one click away. `POST /api/tasks/:id/checks` re-runs them; `GET` reads the last run.
+3. **適用してデーモン再起動** (`POST /api/daemon/restart {taskId}`). Gates (409 unless `force: true`): no task running/waiting, no check in flight, and a **current** passing run for that task — any later turn on the meta workspace invalidates earlier runs, because the tree changed. The gate is re-checked right before stopping. Then:
+   - **Under `bun run dev`** (`SWITCHBOARD_SUPERVISED=1`, set by `scripts/dev.ts`): the daemon exits with code 75 and dev.ts respawns `bun --watch src/main.ts`. Note that `--watch` already restarts the daemon on every file change in `packages/core`, so in dev mode an agent's edits take effect as they land; the button is the deliberate, checked restart.
+   - **Standalone** (`bun run core`): the daemon stops its server, spawns a replacement through `sh -c 'nohup … &'` (Bun.spawn has no setsid; the replacement's output goes to `~/.switchboard/daemon.log`), waits up to 15 s for it to answer `/api/health` on the same port, and only then exits 0. If the replacement never comes up, the old process exits with code 75 after logging why — a supervisor respawns the old code; without one, `bun run core` again.
+   - **Under sb-rescue** (`SWITCHBOARD_RESCUE_URL`, the daemon runs from an immutable release — `docs/design/releases-and-rescue.md`): edits to the working tree do not reach the running daemon at all, and the button becomes **この版を昇格**. sb-rescue builds the commit, boots it on a spare port against a copy of the database, switches only if that works, and goes back by itself if the new daemon is not confirmed within 60 s. A restart request (exit 75) restarts the same release.
+   The UI receives `daemon.restarting`, keeps its state, and reconnects over WebSocket (`connectEvents` backs off up to 8 s); after 45 s without a daemon it drops the banner and points at the log.
+
+`apps/web` changes never need a restart: Vite HMR applies them. Only `packages/core` / `packages/adapters` / `packages/protocol` do.
+
+## Not covered
+
+- Checks run with `SWITCHBOARD_CHECKS_CHILD=1` in the environment and are off by default under `NODE_ENV=test` or inside such a child, so `bun test` inside the daemon never recurses.
+- A desktop shell: there is none (Tauri was not adopted, #1145; the single binary #21 was closed as not planned). Running for real is under sb-rescue, above.

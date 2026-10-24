@@ -1,0 +1,12 @@
+{
+ "repositoryOwner": {"projectV2": {"id": "P1"}},
+ "repository": { "issues": {
+  "pageInfo": {"hasNextPage": false, "endCursor": null},
+  "nodes": [
+   {"number": 3, "body": "## 要望\n整えた文\n\n## 出典\n- 誰から: 利用者\n- いつ: 2026-01-01\n", "labels": {"nodes": [{"name": "type:request"}]}, "parent": null, "subIssues": {"totalCount": 0}, "projectItems": {"nodes": []}},
+   {"number": 4, "body": "## 要望\n整えた文\n\n## 出典\n- 誰の言葉: 利用者の決定\n- 誰の言葉: 所有者\n", "labels": {"nodes": [{"name": "type:request"}]}, "parent": null, "subIssues": {"totalCount": 0}, "projectItems": {"nodes": []}},
+   {"number": 5, "body": "## 要望\n- 誰の言葉: 利用者\n\n## 出典\n- いつ: 2026-01-01\n\n## 解釈メモ\n- 誰の言葉: 利用者\n", "labels": {"nodes": [{"name": "type:request"}]}, "parent": null, "subIssues": {"totalCount": 0}, "projectItems": {"nodes": []}},
+   {"number": 6, "body": "## 要望\n整えた文\n\n## 出典\n- いつ: 2026-01-01\n- 誰の言葉: 定期の検査（check-models）\n", "labels": {"nodes": [{"name": "type:request"}]}, "parent": null, "subIssues": {"totalCount": 0}, "projectItems": {"nodes": []}}
+  ]
+ } }
+}

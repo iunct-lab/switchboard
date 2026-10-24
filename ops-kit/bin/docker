@@ -1,0 +1,32 @@
+#!/usr/bin/env bun
+// docker-mark
+// The front of `docker` (#1417, docs/design/task-cleanup.md). When the caller sets DOCKER_MARK_LABEL (`key=value`), a
+// container that `docker run` / `create` makes gets it as a label, and when DOCKER_MARK_LOG is a file, the compose
+// project that `up` etc. starts is added to it as a line, so that the caller can remove them later. Everything goes on
+// to the real docker.
+import { appendFileSync } from "node:fs";
+import { COMPOSE_STARTS, composeTarget, DOCKER_MARK, markArgs } from "../src/docker-mark.ts";
+import { realCommand } from "../src/gh-guard.ts";
+
+const argv = process.argv.slice(2);
+const real = realCommand("docker", process.env.PATH ?? "", import.meta.path, DOCKER_MARK);
+if (real === null) {
+  console.error("docker-mark: docker が PATH にありません");
+  process.exit(127);
+}
+const label = process.env.DOCKER_MARK_LABEL;
+const args = label ? markArgs(argv, label) : argv;
+const p = Bun.spawnSync([real, ...args], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+const log = process.env.DOCKER_MARK_LOG;
+const target = label && log ? composeTarget(argv) : null;
+if (p.exitCode === 0 && target && COMPOSE_STARTS.has(target.sub)) {
+  try {
+    const c = Bun.spawnSync([real, "compose", ...target.globals, "config", "--format", "json"], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const name = c.exitCode === 0 ? (JSON.parse(c.stdout.toString()) as { name?: string }).name : undefined;
+    if (!name) throw new Error(`compose config が名前を返しませんでした（終了コード ${c.exitCode}）`);
+    appendFileSync(log!, `${JSON.stringify({ project: name, cwd: process.cwd(), globals: target.globals })}\n`);
+  } catch (e) {
+    console.error(`docker-mark: compose のプロジェクトを記録できませんでした: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+process.exit(p.exitCode ?? 1);

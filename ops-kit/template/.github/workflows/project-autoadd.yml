@@ -1,0 +1,30 @@
+name: Add to Project
+
+# 新規 Issue / PR をリポジトリ変数の Project に追加する。
+#
+# pull_request_target を使う理由: このジョブは PR コードを checkout も実行もせず
+# GitHub API を呼ぶだけなので、通常 pull_request_target で懸念される特権実行のリスクがない。
+# 一方 Dependabot 起点の pull_request では通常の Actions secrets が渡らず失敗するため。
+on:
+  issues:
+    types: [opened, reopened]
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  add-to-project:
+    runs-on: ubuntu-latest
+    # Project 未設定（bootstrap_project.sh 実行前）はスキップして失敗にしない。
+    if: ${{ vars[format('{0}_PROJECT_URL', '__PREFIX__')] != '' }}
+    steps:
+      - uses: actions/add-to-project@v2.0.0
+        with:
+          # 例: gh variable set <PREFIX>_PROJECT_URL --body "https://github.com/orgs/<org>/projects/N"
+          project-url: ${{ vars[format('{0}_PROJECT_URL', '__PREFIX__')] }}
+          # Fine-grained PAT（Resource owner は Org、Organization permissions → Projects: Read and write、本リポジトリの Issues/PR: Read）。
+          # Free の Org では Org の secret を private リポジトリに渡せないので、リポジトリの secret に登録する:
+          #   gh secret set <PREFIX>_PROJECT_TOKEN -R "$(gh repo view --json nameWithOwner -q .nameWithOwner)"
+          github-token: ${{ secrets[format('{0}_PROJECT_TOKEN', '__PREFIX__')] }}

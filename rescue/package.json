@@ -1,0 +1,15 @@
+{
+  "name": "sb-rescue",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Supervisor and rescue page for a Switchboard that runs from immutable releases. Shares no code with Switchboard.",
+  "scripts": {
+    "start": "bun src/main.ts",
+    "typecheck": "bun check -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.9.0"
+  }
+}

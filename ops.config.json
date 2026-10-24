@@ -1,0 +1,28 @@
+{
+  "envPrefix": "SWITCHBOARD",
+  "forge": { "service": "github" },
+  "fields": {
+    "area": ["protocol", "core", "adapter-claude", "adapter-codex", "adapter-dak", "web", "desktop", "knowledge", "ledger", "infra"],
+    "kind": ["bug", "feature", "deps", "tech-watch", "eval", "chore"],
+    "priority": ["P0", "P1", "P2", "P3"],
+    "phase": ["Phase 0", "Phase 1", "Phase 2", "Phase 3"]
+  },
+  "milestone": {
+    "pattern": "^Phase \\d+ — "
+  },
+  "sections": {
+    "pbi": ["ユーザーストーリー", "到達点 / 受け入れ条件", "スコープ外", {"name": "元要望", "hint": "要望 Issue の番号。無ければ「なし（理由）」"}],
+    "task": ["親 PBI", "やること", "手順", "検証", "完了条件"],
+    "request": [{"name": "要望", "hint": "意図を変えずに整えた文を入れる"}, {"name": "出典", "hint": "誰の言葉 / いつ / 経路"}],
+    "origin": {"name": "元要望", "pattern": "^(#[0-9]+([^0-9].*)?|なし[（(].+[）)].*)$", "hint": "`#N（要望のどの部分か）` か `なし（理由）`"}
+  },
+  "storyPoints": [1, 2, 3, 5, 8],
+  "publicSync": {
+    "target": "iunct-lab/switchboard",
+    "include": [".claude/", ".github/", ".gitignore", "AGENTS.md", "CLAUDE.md", "LICENSE", "NOTICE", "README.md", "SECURITY.md", "apps/", "aws/", "bun.lock", "bunfig.toml", "docs/", "ops-kit/", "ops.config.json", "package.json", "packages/", "rescue/", "scripts/", "tsconfig.base.json"],
+    "exclude": [".github/workflows/project-autoadd.yml", "private/"],
+    "rewrite": ["SECURITY.md"],
+    "serviceUsers": ["switchboard"],
+    "versioning": "independent"
+  }
+}

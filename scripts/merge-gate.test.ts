@@ -1,0 +1,609 @@
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { checksFromRuns, designRulesTouched, judge, MERGE_ANSWER, MERGE_ASK, PROTECTED, readPr, type PrFacts, type RecheckKind } from "./merge-gate";
+
+// The default repository (no --repo) is GH_REPO, else the origin (scripts/repo.ts): fixed here, so a leak of it shows.
+const REPO = "example/development";
+const savedRepo = process.env.GH_REPO;
+beforeAll(() => { process.env.GH_REPO = REPO; });
+afterAll(() => { if (savedRepo === undefined) delete process.env.GH_REPO; else process.env.GH_REPO = savedRepo; });
+
+const base = (over: Partial<PrFacts> = {}): PrFacts => ({
+  files: [{ path: "packages/core/src/tasks.ts", additions: 20, deletions: 5 }],
+  headCommittedAt: "2026-09-24T10:00:00Z",
+  checks: [{ name: "test", conclusion: "SUCCESS" }],
+  unresolvedThreads: 0,
+  mergeState: "CLEAN",
+  reviewComments: [{ body: "[codex] review\n\n### Intent and design", createdAt: "2026-09-24T11:00:00Z" }],
+  ...over,
+});
+const off = { allowLarge: false };
+
+describe("merge-gate judge", () => {
+  test("a small reviewed PR with green CI merges", () => {
+    expect(judge(base(), off)).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [] });
+  });
+
+  test("301 counted lines is large and stops", () => {
+    const j = judge(base({ files: [{ path: "apps/web/src/App.tsx", additions: 300, deletions: 1 }] }), off);
+    expect(j.impact).toBe("large");
+    expect(j.verdict).toBe("stop");
+    expect(j.reasons).toEqual(["[再チェック size] テストと docs を除いた変更が 301 行で、300 行を超えている"]);
+  });
+
+  test("300 counted lines is still small", () => {
+    expect(judge(base({ files: [{ path: "apps/web/src/App.tsx", additions: 300, deletions: 0 }] }), off).impact).toBe("small");
+  });
+
+  test("tests, e2e scripts and docs do not count", () => {
+    const files = [
+      { path: "packages/core/src/tasks.test.ts", additions: 1000, deletions: 0 },
+      { path: "scripts/backlog-e2e.ts", additions: 400, deletions: 0 },
+      { path: "docs/guide/backlog.md", additions: 400, deletions: 0 },
+      { path: "README.md", additions: 400, deletions: 0 },
+    ];
+    expect(judge(base({ files }), off)).toMatchObject({ verdict: "merge", impact: "small" });
+  });
+
+  test("skill markdown counts and is a responsibility", () => {
+    const j = judge(base({ files: [{ path: ".claude/skills/pbi-complete/SKILL.md", additions: 1, deletions: 0 }] }), off);
+    expect(j.impact).toBe("large");
+    expect(j.reasons).toEqual(["[再チェック responsibility] 責務: .claude/skills/pbi-complete/SKILL.md"]);
+    const big = judge(base({ files: [{ path: ".claude/skills/pbi-complete/SKILL.md", additions: 301, deletions: 0 }] }), off);
+    expect(big.reasons[0]).toBe("[再チェック size] テストと docs を除いた変更が 301 行で、300 行を超えている");
+    // the shared skills in the kit are skills too
+    const kit = judge(base({ files: [{ path: "ops-kit/skills/pbi-complete/SKILL.md", additions: 301, deletions: 0 }] }), off);
+    expect(kit.impact).toBe("large");
+    expect(kit.reasons).toEqual(["[再チェック size] テストと docs を除いた変更が 301 行で、300 行を超えている", "[再チェック responsibility] 責務: ops-kit/skills/pbi-complete/SKILL.md"]);
+  });
+
+  test.each([
+    ["rescue/src/server.ts", "[聞く] rescue"],
+    [".github/workflows/ci.yml", "[聞く] セキュリティ"],
+    ["packages/core/src/db.ts", "[再チェック migration] 保護するパスに触れている"],
+    ["packages/core/src/schema-baseline.json", "[再チェック migration] 保護するパスに触れている"],
+    ["packages/core/src/auth.ts", "[聞く] セキュリティ"],
+    ["packages/core/src/approval.ts", "[聞く] セキュリティ"],
+    ["packages/core/src/selfdev.ts", "[再チェック size] 保護するパスに触れている"],
+    ["packages/core/config/pricing.json", "[再チェック size] 保護するパスに触れている"],
+    ["scripts/setup/lint_backlog.sh", "[再チェック size] 保護するパスに触れている"],
+    [".claude/skills/x/SKILL.md", "[再チェック responsibility] 責務"],
+    ["ops-kit/skills/x/SKILL.md", "[再チェック responsibility] 責務"],
+    ["package.json", "[再チェック size] 保護するパスに触れている"],
+    ["bun.lock", "[聞く] セキュリティ"],
+  ])("one line in %s is large: %s", (path, why) => {
+    const j = judge(base({ files: [{ path, additions: 1, deletions: 0 }] }), off);
+    expect(j.impact).toBe("large");
+    expect(j.reasons).toEqual([`${why}: ${path}`]);
+  });
+
+  test("every PROTECTED pattern is covered above", () => {
+    expect(PROTECTED.length).toBe(13);
+  });
+
+  test("a nested package.json is not protected", () => {
+    expect(judge(base({ files: [{ path: "apps/web/package.json", additions: 1, deletions: 0 }] }), off).impact).toBe("small");
+  });
+
+  test("a failing or pending check stops", () => {
+    const j = judge(base({ checks: [{ name: "test", conclusion: "FAILURE" }, { name: "lint", conclusion: "" }] }), off);
+    expect(j.verdict).toBe("stop");
+    expect(j.reasons).toEqual(["CI のチェック test が FAILURE", "CI のチェック lint が 未完了"]);
+  });
+
+  test("skipped checks pass, no checks at all stops", () => {
+    expect(judge(base({ checks: [{ name: "a", conclusion: "SUCCESS" }, { name: "b", conclusion: "SKIPPED" }] }), off).verdict).toBe("merge");
+    expect(judge(base({ checks: [] }), off).reasons).toEqual(["CI のチェックが 1 つも無い"]);
+  });
+
+  test("an unresolved review thread stops", () => {
+    expect(judge(base({ unresolvedThreads: 2 }), off).reasons).toEqual(["解決していないレビュースレッドが 2 件ある"]);
+  });
+
+  test("a commit after the last main review stops", () => {
+    const j = judge(base({ headCommittedAt: "2026-09-24T12:00:00Z" }), off);
+    expect(j.verdict).toBe("stop");
+    expect(j.reasons).toEqual([
+      "最後のコミット（2026-09-24T12:00:00Z）より新しい主レビュー（[codex] review / [claude] review）が無い",
+    ]);
+  });
+
+  test("a [claude] review counts, a [dak] review or a triage summary does not", () => {
+    const at = "2026-09-24T11:00:00Z";
+    expect(judge(base({ reviewComments: [{ body: "[claude] review\n", createdAt: at }] }), off).verdict).toBe("merge");
+    const j = judge(base({ reviewComments: [{ body: "[dak] review\n", createdAt: at }, { body: "## レビュー対応 [codex] review", createdAt: at }] }), off);
+    expect(j.verdict).toBe("stop");
+  });
+
+  test("a merge state other than CLEAN stops", () => {
+    expect(judge(base({ mergeState: "BLOCKED" }), off).reasons).toEqual(["mergeStateStatus が CLEAN でない: BLOCKED"]);
+  });
+
+  test("--allow-large lifts the security and responsibility stops too", () => {
+    const files = [
+      { path: "src/auth/session.ts", additions: 1, deletions: 0 },
+      { path: "docs/design/x.md", additions: 1, deletions: 0 },
+    ];
+    expect(judge(base({ files }), off).reasons).toEqual(["[聞く] セキュリティ: src/auth/session.ts", "[再チェック responsibility] 責務: docs/design/x.md"]);
+    expect(judge(base({ files, designRulesTouched: true }), { allowLarge: true })).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: ["security", "design-rules"], recheck: ["responsibility"] });
+  });
+
+  test("--allow-large lifts every large reason, not the others", () => {
+    const files = [{ path: "rescue/src/server.ts", additions: 400, deletions: 0 }];
+    expect(judge(base({ files }), { allowLarge: true })).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: ["rescue"], recheck: ["size"] });
+    const j = judge(base({ files, headCommittedAt: "2026-09-24T12:00:00Z" }), { allowLarge: true });
+    expect(j.verdict).toBe("stop");
+    expect(j.impact).toBe("large");
+    expect(j.reasons).toHaveLength(1);
+    expect(j.reasons[0]).toStartWith("最後のコミット");
+  });
+});
+
+describe("security", () => {
+  test.each([
+    "src/auth.ts",
+    "internal/auth/x.go",
+    "app/Approval.py",
+    "server/permissions.ts",
+    "config/secrets.yaml",
+    "pkg/credential_store.rs",
+    "api/tokens/refresh.ts",
+    "src/crypto-utils.ts",
+    "runner/sandbox/profile.sb",
+    ".github/workflows/release.yml",
+    ".github/CODEOWNERS",
+    ".env",
+    "apps/api/.env.production",
+    ".gitleaks.toml",
+    "bun.lock",
+    "apps/web/package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "py/uv.lock",
+    "poetry.lock",
+    "requirements.txt",
+    "svc/requirements-dev.txt",
+    "go.sum",
+    "crates/x/Cargo.lock",
+    // the gate and the stand-in for CI decide merges themselves (#751)
+    "scripts/merge-gate.ts",
+    "scripts/local-ci.ts",
+  ])("one line in %s stops as セキュリティ", (path) => {
+    const j = judge(base({ files: [{ path, additions: 1, deletions: 0 }] }), off);
+    expect(j).toMatchObject({ verdict: "stop", impact: "large" });
+    expect(j.reasons).toEqual([`[聞く] セキュリティ: ${path}`]);
+  });
+
+  test("a security reason for aws/host/** points at #852; other security reasons do not change (#852)", () => {
+    const host = judge(base({ files: [{ path: "aws/host/sb-env.sh", additions: 1, deletions: 0 }] }), off);
+    expect(host).toMatchObject({ verdict: "stop", impact: "large", ask: ["security"] });
+    expect(host.reasons).toEqual([expect.stringMatching(/^\[聞く\] セキュリティ: aws\/host\/sb-env\.sh（aws\/host は.*root が main から.*#852.*docs\/design\/cloud-hosting\.md §6\.5）$/)]);
+    const ci = judge(base({ files: [{ path: ".github/workflows/ci.yml", additions: 1, deletions: 0 }] }), off);
+    expect(ci.reasons).toEqual(["[聞く] セキュリティ: .github/workflows/ci.yml"]);
+  });
+
+  test.each(["src/tokenizer.ts", "apps/web/package.json", "src/authorize.ts", "docs/guide/sandboxing.md"])("%s alone does not stop", (path) => {
+    expect(judge(base({ files: [{ path, additions: 1, deletions: 0 }] }), off)).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [] });
+  });
+
+  test("several paths go in one reason, in the PR's order", () => {
+    const files = ["src/a.ts", "go.sum", "src/token.ts"].map((path) => ({ path, additions: 1, deletions: 0 }));
+    expect(judge(base({ files }), off).reasons).toEqual(["[聞く] セキュリティ: go.sum, src/token.ts"]);
+  });
+});
+
+describe("responsibility", () => {
+  test.each(["docs/design/x.md", "CLAUDE.md", "packages/core/CLAUDE.md", "AGENTS.md", "ops.config.json", ".claude/skills/a/SKILL.md", "ops-kit/skills/a/SKILL.md"])(
+    "one line in %s stops as 責務",
+    (path) => {
+      const j = judge(base({ files: [{ path, additions: 1, deletions: 0 }] }), off);
+      expect(j).toMatchObject({ verdict: "stop", impact: "large" });
+      expect(j.reasons).toEqual([`[再チェック responsibility] 責務: ${path}`]);
+    },
+  );
+
+  test("docs outside docs/design do not stop", () => {
+    expect(judge(base({ files: [{ path: "docs/guide/setup.md", additions: 1, deletions: 0 }] }), off).verdict).toBe("merge");
+  });
+
+  test("README.md's Design rules: in the reason when touched, nothing when not", () => {
+    const files = [{ path: "README.md", additions: 1, deletions: 0 }];
+    expect(judge(base({ files, designRulesTouched: true }), off).reasons).toEqual(["[聞く] 責務: README.md の ## Design rules"]);
+    expect(judge(base({ files }), off)).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [] });
+  });
+
+  // lines: 1 # T / 2 intro / 3 (blank) / 4 ## Design rules / 5 - rule one / 6 - rule two / 7 (blank) / 8 ## License / 9 Apache
+  const readme = "# T\nintro\n\n## Design rules\n- rule one\n- rule two\n\n## License\nApache\n";
+
+  test("designRulesTouched: a line outside the section does not count", () => {
+    expect(designRulesTouched(readme, "@@ -1,3 +1,3 @@\n # T\n-intro\n+intro, changed\n \n")).toBe(false);
+    expect(designRulesTouched(readme, "@@ -8,2 +8,3 @@\n ## License\n Apache\n+more\n")).toBe(false);
+    // added just before the heading: still outside
+    expect(designRulesTouched(readme, "@@ -2,2 +2,3 @@\n intro\n \n+new\n")).toBe(false);
+  });
+
+  test("designRulesTouched: a changed, deleted or added line inside counts", () => {
+    expect(designRulesTouched(readme, "@@ -4,3 +4,3 @@\n ## Design rules\n-- rule one\n+- rule 1\n - rule two\n")).toBe(true);
+    expect(designRulesTouched(readme, "@@ -5,2 +5,1 @@\n - rule one\n-- rule two\n")).toBe(true);
+    // appended at the end of the section, right before ## License
+    expect(designRulesTouched(readme, "@@ -6,3 +6,4 @@\n - rule two\n \n+- rule three\n ## License\n")).toBe(true);
+    // a hunk with no context: -6,0 adds after old line 6
+    expect(designRulesTouched(readme, "@@ -6,0 +7 @@\n+- rule three\n")).toBe(true);
+    // the heading itself
+    expect(designRulesTouched(readme, "@@ -4 +4 @@\n-## Design rules\n+## Rules\n")).toBe(true);
+  });
+
+  test("designRulesTouched: a README without the heading is not looked at", () => {
+    expect(designRulesTouched("# T\nall about it\n", "@@ -2 +2 @@\n-all about it\n+changed\n")).toBe(false);
+  });
+
+  test("designRulesTouched: the section runs to the end when no heading follows", () => {
+    expect(designRulesTouched("# T\n## Design rules\n- a\n", "@@ -3 +3,2 @@\n - a\n+- b\n")).toBe(true);
+  });
+});
+
+describe("recheck", () => {
+  const one = (path: string, additions = 1) => [{ path, additions, deletions: 0 }];
+  const marked = (files: PrFacts["files"], rechecks: RecheckKind[], over: Partial<PrFacts> = {}) => judge(base({ files, rechecks, ...over }), off);
+
+  test.each([
+    ["security only", one("src/auth.ts"), ["[聞く] セキュリティ: src/auth.ts"], ["security"], []],
+    ["rescue only", one("rescue/src/server.ts"), ["[聞く] rescue: rescue/src/server.ts"], ["rescue"], []],
+    ["Design rules only", one("README.md"), ["[聞く] 責務: README.md の ## Design rules"], ["design-rules"], []],
+    ["responsibility only", one("docs/design/x.md"), ["[再チェック responsibility] 責務: docs/design/x.md"], [], ["responsibility"]],
+    ["size only", one("apps/web/src/App.tsx", 301), ["[再チェック size] テストと docs を除いた変更が 301 行で、300 行を超えている"], [], ["size"]],
+    ["another protected path", one("scripts/setup/x.sh"), ["[再チェック size] 保護するパスに触れている: scripts/setup/x.sh"], [], ["size"]],
+    ["db.ts only", one("packages/core/src/db.ts"), ["[再チェック migration] 保護するパスに触れている: packages/core/src/db.ts"], [], ["migration"]],
+  ] as const)("%s: the reason's head, ask and recheck", (_, files, reasons, ask, recheck) => {
+    const j = judge(base({ files: [...files], designRulesTouched: files[0]!.path === "README.md" || undefined }), off);
+    expect(j).toEqual({ verdict: "stop", impact: "large", reasons: [...reasons], ask: [...ask], recheck: [...recheck] });
+  });
+
+  test("ask: each kind once, in the order security, rescue, design-rules; kept with --allow-large", () => {
+    const files = [...one("README.md"), ...one("rescue/src/server.ts"), ...one("src/auth.ts"), ...one("go.sum")];
+    expect(judge(base({ files, designRulesTouched: true }), off).ask).toEqual(["security", "rescue", "design-rules"]);
+    expect(judge(base({ files, designRulesTouched: true }), { allowLarge: true })).toMatchObject({ verdict: "merge", ask: ["security", "rescue", "design-rules"] });
+  });
+
+  test("the kinds come once each, in the order size, responsibility, migration", () => {
+    const files = [
+      { path: "packages/core/src/db.ts", additions: 1, deletions: 0 },
+      { path: "docs/design/x.md", additions: 1, deletions: 0 },
+      { path: "apps/web/src/App.tsx", additions: 301, deletions: 0 },
+      { path: "package.json", additions: 1, deletions: 0 },
+    ];
+    expect(judge(base({ files }), off).recheck).toEqual(["size", "responsibility", "migration"]);
+  });
+
+  test("a recheck-only PR with a mark per kind merges; impact stays large", () => {
+    expect(marked(one("docs/design/x.md"), ["responsibility"])).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: [] });
+    const files = [...one("apps/web/src/App.tsx", 301), ...one("docs/design/x.md"), ...one("packages/core/src/schema-baseline.json")];
+    expect(marked(files, ["size", "responsibility", "migration"])).toMatchObject({ verdict: "merge", reasons: [], ask: [], recheck: [] });
+  });
+
+  test("a kind without its mark still stops, and only that kind is left", () => {
+    const files = [...one("apps/web/src/App.tsx", 301), ...one("docs/design/x.md")];
+    expect(marked(files, ["responsibility"])).toEqual({
+      verdict: "stop",
+      impact: "large",
+      reasons: ["[再チェック size] テストと docs を除いた変更が 301 行で、300 行を超えている"],
+      ask: [],
+      recheck: ["size"],
+    });
+  });
+
+  test("a mark does not lift an ask reason", () => {
+    const files = [...one("src/auth.ts"), ...one("docs/design/x.md")];
+    expect(marked(files, ["size", "responsibility", "migration"])).toMatchObject({ verdict: "stop", reasons: ["[聞く] セキュリティ: src/auth.ts"], recheck: [] });
+    expect(marked(one("rescue/x.ts"), ["size"]).reasons).toEqual(["[聞く] rescue: rescue/x.ts"]);
+    // a responsibility file inside rescue is still rescue; a security one there says セキュリティ
+    expect(marked(one("rescue/CLAUDE.md"), ["responsibility"])).toMatchObject({ verdict: "stop", reasons: ["[聞く] rescue: rescue/CLAUDE.md"], recheck: [] });
+    expect(marked(one("rescue/src/auth.ts"), []).reasons).toEqual(["[聞く] セキュリティ: rescue/src/auth.ts"]);
+    expect(marked(one("README.md"), ["responsibility"], { designRulesTouched: true }).reasons).toEqual(["[聞く] 責務: README.md の ## Design rules"]);
+  });
+
+  test.each([
+    ["a failing CI", { checks: [{ name: "test", conclusion: "FAILURE" }] }, "CI のチェック test が FAILURE"],
+    ["an unresolved thread", { unresolvedThreads: 1 }, "解決していないレビュースレッドが 1 件ある"],
+    ["a commit after the review", { headCommittedAt: "2026-09-24T12:00:00Z" }, "最後のコミット（2026-09-24T12:00:00Z）より新しい主レビュー（[codex] review / [claude] review）が無い"],
+    ["not CLEAN", { mergeState: "BLOCKED" }, "mergeStateStatus が CLEAN でない: BLOCKED"],
+  ] as const)("a mark does not lift %s", (_, over, reason) => {
+    expect(marked(one("docs/design/x.md"), ["responsibility"], over as Partial<PrFacts>)).toMatchObject({ verdict: "stop", reasons: [reason] });
+  });
+});
+
+describe("merge-gate readPr", () => {
+  const view = {
+    files: [{ path: "a.ts", additions: 1, deletions: 2, changeType: "MODIFIED" }],
+    commits: [
+      { authoredDate: "2026-09-24T09:00:00Z", committedDate: "2026-09-24T13:00:00Z" },
+      { authoredDate: "2026-09-24T10:00:00Z", committedDate: "2026-09-24T13:00:00Z" },
+    ],
+    headRefOid: "abc123",
+    mergeStateStatus: "CLEAN",
+    comments: [{ body: "[codex] review", createdAt: "2026-09-24T11:00:00Z", author: { login: "x" }, authorAssociation: "MEMBER" }],
+  };
+  const threads = (nodes: { isResolved: boolean }[], totalCount = nodes.length) =>
+    ({ data: { repository: { pullRequest: { reviewThreads: { totalCount, nodes } } } } });
+  const runs = {
+    total_count: 3,
+    workflow_runs: [
+      { id: 2, name: "CI", status: "completed", conclusion: "success", created_at: "2026-09-24T12:00:00Z" }, // a later run of the same workflow
+      { id: 1, name: "CI", status: "completed", conclusion: "failure", created_at: "2026-09-24T11:00:00Z" },
+      { id: 3, name: "labels", status: "in_progress", conclusion: null, created_at: "2026-09-24T11:30:00Z" },
+    ],
+  };
+  const calls: string[][] = [];
+  const fake = (t: unknown) => async (args: string[]) => {
+    calls.push(args);
+    return JSON.stringify(args[0] === "pr" ? view : args[1]?.includes("/actions/runs") ? runs : t);
+  };
+
+  test("maps gh output to PrFacts; the head time is the newest author date", async () => {
+    const f = await readPr(1, fake(threads([{ isResolved: true }, { isResolved: false }])));
+    expect(f).toEqual({
+      files: [{ path: "a.ts", additions: 1, deletions: 2 }],
+      headCommittedAt: "2026-09-24T10:00:00Z",
+      checks: [{ name: "CI", conclusion: "SUCCESS" }, { name: "labels", conclusion: "" }],
+      unresolvedThreads: 1,
+      mergeState: "CLEAN",
+      reviewComments: [{ body: "[codex] review", createdAt: "2026-09-24T11:00:00Z" }],
+    });
+  });
+
+  test("CI comes from the head commit's Actions runs, not statusCheckRollup (a fine-grained token has no Checks)", async () => {
+    calls.length = 0;
+    await readPr(1, fake(threads([])));
+    expect(calls[0]!.join(" ")).not.toContain("statusCheckRollup");
+    expect(calls[0]!.join(" ")).toContain("headRefOid");
+    expect(calls.find((a) => a[0] === "api" && a[1]!.includes("/actions/runs"))![1]).toBe(`repos/${REPO}/actions/runs?head_sha=abc123&per_page=100`);
+  });
+
+  test("another repository (--repo): the PR, its runs and its review threads are read there", async () => {
+    calls.length = 0;
+    await readPr(7, fake(threads([])), "acme/lib");
+    expect(calls[0]!.slice(0, 5)).toEqual(["pr", "view", "7", "-R", "acme/lib"]);
+    expect(calls.find((a) => a[0] === "api" && a[1]!.includes("/actions/runs"))![1]).toBe("repos/acme/lib/actions/runs?head_sha=abc123&per_page=100");
+    const q = calls.find((a) => a[1] === "graphql")!;
+    expect(q[q.indexOf("o=acme") - 1]).toBe("-f"); // a string even for a name like "123" or "true"
+    expect(q[q.indexOf("r=lib") - 1]).toBe("-f");
+    expect(calls.flat().join(" ")).not.toContain("switchboard");
+  });
+
+  test("checksFromRuns: the newest run per workflow; not completed is 未完了; the conclusion upper-cased", () => {
+    expect(checksFromRuns([
+      { id: 1, name: "CI", status: "completed", conclusion: "success", created_at: "2026-09-24T12:00:00Z" },
+      { id: 2, name: "CI", status: "queued", conclusion: null, created_at: "2026-09-24T13:00:00Z" }, // a later run just started
+      { id: 3, name: "release", status: "completed", conclusion: "skipped", created_at: "2026-09-24T12:00:00Z" },
+    ])).toEqual([{ name: "CI", conclusion: "" }, { name: "release", conclusion: "SKIPPED" }]);
+    expect(judge({ files: [], headCommittedAt: "2026-09-24T10:00:00Z", checks: checksFromRuns([{ id: 1, name: "CI", status: "completed", conclusion: "failure", created_at: "x" }]), unresolvedThreads: 0, mergeState: "CLEAN", reviewComments: [{ body: "[codex] review", createdAt: "2026-09-24T11:00:00Z" }] }, { allowLarge: false }).reasons)
+      .toEqual(["CI のチェック CI が FAILURE"]);
+    expect(checksFromRuns([])).toEqual([]);
+  });
+
+  describe("local CI in place of an Actions CI that never started or never ran (#387, #914)", () => {
+    const HEAD = "0123456789abcdef0123456789abcdef01234567";
+    const OTHER = "fedcba9876543210fedcba9876543210fedcba98";
+    const BASE = "3333333333333333333333333333333333333333";
+    const pass = (head = HEAD, base = BASE) => `[local-ci] pass ${head} base=${base}\n\n| 手順 | 結果 |`;
+    const fail = (head = HEAD, base = BASE) => `[local-ci] fail ${head} base=${base}\n\n結果: \`bun test\` が exit 1`;
+    /** `comment` / `comments`: PR comments by the owner, a minute apart in order. `runs: false` = no Actions run at all. */
+    const facts = (opts: { comment?: string; comments?: string[]; steps: number; runs?: boolean; mergeState?: string }) => {
+      const bodies = opts.comments ?? (opts.comment ? [opts.comment] : []);
+      const v = { ...view, headRefOid: HEAD, baseRefName: "main", mergeStateStatus: opts.mergeState ?? "CLEAN", comments: [...view.comments, ...bodies.map((body, i) => ({ body, createdAt: `2026-09-24T11:3${i}:00Z`, authorAssociation: "OWNER" }))] };
+      const r = { workflow_runs: opts.runs === false ? [] : [{ id: 7, name: "CI", status: "completed", conclusion: "failure", created_at: "2026-09-24T12:00:00Z" }] };
+      const jobs = { jobs: [{ name: "test", steps: Array.from({ length: opts.steps }, () => ({ name: "x" })) }] };
+      const asked: string[] = [];
+      return {
+        asked,
+        read: (repo?: string) => readPr(1, async (args) => {
+          asked.push(args.join(" "));
+          if (args[0] === "pr") return JSON.stringify(v);
+          // the base branch's tip now, read with -q .object.sha
+          if (args[1]?.endsWith("/git/ref/heads/main")) return `${BASE}\n`;
+          if (args[1]?.endsWith("/actions/runs/7/jobs")) return JSON.stringify(jobs);
+          if (args[1]?.includes("/actions/runs")) return JSON.stringify(r);
+          return JSON.stringify(threads([]));
+        }, repo),
+      };
+    };
+    const reasons = (f: PrFacts) => judge({ ...f, unresolvedThreads: 0 }, { allowLarge: false }).reasons;
+
+    test("never started (no steps) + the pass of the head and the base's tip now → SUCCESS", async () => {
+      const x = facts({ comment: pass(), steps: 0 });
+      const f = await x.read();
+      expect(f.checks).toEqual([{ name: "CI（Actions が始まらず、ローカルで pass）", conclusion: "SUCCESS" }]);
+      expect(f.localCi).toBe(true);
+      expect(x.asked).toContain(`api repos/${REPO}/git/ref/heads/main -q .object.sha`);
+      // GitHub calls it UNSTABLE for the failed run; that alone does not stop the merge then
+      expect(reasons({ ...f, mergeState: "UNSTABLE" })).toEqual([]);
+      expect(reasons({ ...f, mergeState: "UNSTABLE", localCi: undefined })).toEqual(["mergeStateStatus が CLEAN でない: UNSTABLE"]);
+    });
+
+    test("no Actions run at all + the pass of the head and base → one local-ci SUCCESS check; without it, no check", async () => {
+      const f = await facts({ comment: pass(), steps: 0, runs: false }).read();
+      expect(f.checks).toEqual([{ name: "local-ci（Actions の run が無く、ローカルで pass）", conclusion: "SUCCESS" }]);
+      expect(f.localCi).toBe(true);
+      expect(reasons(f)).toEqual([]);
+      expect(reasons(await facts({ steps: 0, runs: false }).read())).toEqual(["CI のチェックが 1 つも無い"]);
+    });
+
+    test("--repo: another repository's pass → SUCCESS, read from that repository (#1203)", async () => {
+      const x = facts({ comment: pass(), steps: 0 });
+      const f = await x.read("o/r");
+      expect(f.checks).toEqual([{ name: "CI（Actions が始まらず、ローカルで pass）", conclusion: "SUCCESS" }]);
+      expect(f.localCi).toBe(true);
+      expect(x.asked.length).toBeGreaterThan(0);
+      for (const a of x.asked) expect(a.includes("o/r") || a.includes("o=o")).toBe(true);
+      expect(x.asked.some((a) => a.includes(REPO))).toBe(false);
+    });
+
+    test("a CI whose steps ran and failed stays FAILURE even with the pass", async () => {
+      const f = await facts({ comment: pass(), steps: 5 }).read();
+      expect(f.checks).toEqual([{ name: "CI", conclusion: "FAILURE" }]);
+      expect(f.localCi).toBeUndefined();
+    });
+
+    test("another head's pass, the older head-only mark, a mark not at the start, or none: FAILURE; neither the base nor the jobs are read", async () => {
+      for (const comment of [pass(OTHER), `[local-ci] pass ${HEAD}`, `ok ${pass()}`, undefined]) {
+        const x = facts({ comment, steps: 0 });
+        const f = await x.read();
+        expect(f.checks).toEqual([{ name: "CI", conclusion: "FAILURE" }]);
+        expect(f.localCiNote).toBeUndefined();
+        expect(x.asked.some((a) => a.includes("/jobs") || a.includes("/git/ref/"))).toBe(false);
+      }
+    });
+
+    test("a pass of an older base: FAILURE, and the reason says the base moved", async () => {
+      const f = await facts({ comment: pass(HEAD, OTHER), steps: 0 }).read();
+      expect(f.checks).toEqual([{ name: "CI", conclusion: "FAILURE" }]);
+      expect(reasons(f)).toEqual(["CI のチェック CI が FAILURE", "local-ci の結果が今の base（main 3333333）のものでない（base が進んだ。回し直す）"]);
+    });
+
+    test("the newest result of the head and base counts: a fail after a pass is no pass; a pass after a fail is", async () => {
+      const failed = await facts({ comments: [pass(), fail()], steps: 0 }).read();
+      expect(failed.checks).toEqual([{ name: "CI", conclusion: "FAILURE" }]);
+      expect(reasons(failed)).toContain("local-ci の最新の結果が fail（今の head と base で落ちた）");
+      const passed = await facts({ comments: [fail(), pass()], steps: 0 }).read();
+      expect(passed.checks).toEqual([{ name: "CI（Actions が始まらず、ローカルで pass）", conclusion: "SUCCESS" }]);
+      // a newer fail of an older base does not undo the pass of the current one
+      expect((await facts({ comments: [pass(), fail(HEAD, OTHER)], steps: 0 }).read()).localCi).toBe(true);
+    });
+
+    test("BLOCKED with the local pass: the base branch's protection stops it, and the reason says local-ci cannot meet it", async () => {
+      const f = await facts({ comment: pass(), steps: 0, mergeState: "BLOCKED" }).read();
+      expect(reasons(f)).toEqual(["mergeStateStatus が BLOCKED: base の枝の保護（必須のチェックか承認）がマージを止めている。local-ci の結果は PR コメントで、GitHub の必須チェックにはならない（docs/design/merge-gate.md の「保護枝とローカルの結果」）"]);
+      // without a local pass BLOCKED is said as before
+      expect(reasons({ ...f, localCi: undefined, checks: [{ name: "CI", conclusion: "SUCCESS" }] })).toEqual(["mergeStateStatus が CLEAN でない: BLOCKED"]);
+    });
+
+    test("unknown: mergeStateStatus UNKNOWN or an unreadable base tip is no judgement (readPr throws → exit 2)", async () => {
+      await expect(facts({ comment: pass(), steps: 0, mergeState: "UNKNOWN" }).read()).rejects.toThrow("UNKNOWN");
+      const v = { ...view, headRefOid: HEAD, baseRefName: "main", comments: [{ body: pass(), createdAt: "2026-09-24T11:30:00Z", authorAssociation: "OWNER" }] };
+      await expect(readPr(1, async (args) => (args[0] === "pr" ? JSON.stringify(v) : args[1]?.includes("/git/ref/") ? "\n" : JSON.stringify(args[1]?.includes("/actions/runs") ? runs : threads([]))))).rejects.toThrow("先端が読めない");
+    });
+  });
+
+  test("recheck: only the head's [recheck] <kind> pass marks go in rechecks", async () => {
+    const HEAD = "0123456789abcdef0123456789abcdef01234567";
+    const OTHER = "fedcba9876543210fedcba9876543210fedcba98";
+    const read = (bodies: string[]) => {
+      const v = { ...view, headRefOid: HEAD, comments: [...view.comments, ...bodies.map((body) => ({ body, createdAt: "2026-09-24T11:30:00Z", authorAssociation: "COLLABORATOR" }))] };
+      return readPr(1, async (args) => JSON.stringify(args[0] === "pr" ? v : args[1]?.includes("/actions/runs") ? runs : threads([])));
+    };
+    const f = await read([
+      `[recheck] migration pass ${HEAD}\n\n24 pass`,
+      `[recheck] responsibility pass ${HEAD}`,
+      `[recheck] size pass ${OTHER}`, // an older head
+      `ok [recheck] size pass ${HEAD}`, // not at the start
+      `[recheck] security pass ${HEAD}`, // not a kind
+    ]);
+    expect(f.rechecks).toEqual(["responsibility", "migration"]);
+    expect((await read([])).rechecks).toBeUndefined();
+  });
+
+  test("marks by an author outside the repository (a public --repo) do not count: review, [local-ci], [recheck]", async () => {
+    const HEAD = "0123456789abcdef0123456789abcdef01234567";
+    const OTHER = "fedcba9876543210fedcba9876543210fedcba98";
+    const outsider = (body: string, authorAssociation?: string) => ({ body, createdAt: "2026-09-24T11:30:00Z", ...(authorAssociation ? { authorAssociation } : {}) });
+    const v = {
+      ...view,
+      headRefOid: HEAD,
+      comments: [
+        outsider("[claude] review"),
+        outsider(`[recheck] migration pass ${HEAD}`, "CONTRIBUTOR"),
+        outsider(`[local-ci] pass ${HEAD} base=${OTHER}`, "NONE"),
+        { ...view.comments[0]!, authorAssociation: "FIRST_TIME_CONTRIBUTOR" },
+      ],
+    };
+    const r = { workflow_runs: [{ id: 7, name: "CI", status: "completed", conclusion: "failure", created_at: "2026-09-24T12:00:00Z" }] };
+    const f = await readPr(1, async (args) => JSON.stringify(args[0] === "pr" ? v : args[1]?.endsWith("/jobs") ? { jobs: [{ steps: [] }] } : args[1]?.includes("/actions/runs") ? r : threads([])));
+    expect(f.reviewComments).toEqual([]);
+    expect(f.rechecks).toBeUndefined();
+    expect(f.checks).toEqual([{ name: "CI", conclusion: "FAILURE" }]);
+  });
+
+  describe("README.md's Design rules", () => {
+    const readme = "# T\n\n## Design rules\n- a\n\n## License\n";
+    const read = (file: object | null, changeType = "MODIFIED", base = readme) => {
+      const asked: string[][] = [];
+      const v = { ...view, baseRefOid: "base1", files: [{ path: "README.md", additions: 1, deletions: 0, changeType }] };
+      return {
+        asked,
+        facts: readPr(1, async (args) => {
+          asked.push(args);
+          if (args[0] === "pr") return JSON.stringify(v);
+          if (args.some((a) => a.includes("/pulls/1/files"))) return file ? JSON.stringify(file) + "\n" : "";
+          if (args.some((a) => a.includes("/compare/"))) return "merge1\n";
+          if (args.some((a) => a.includes("/contents/README.md"))) return base;
+          if (args[1]?.includes("/actions/runs")) return JSON.stringify(runs);
+          return JSON.stringify(threads([]));
+        }),
+      };
+    };
+
+    test("the patch is read against the README at the merge base", async () => {
+      const x = read({ filename: "README.md", patch: "@@ -4 +4 @@\n-- a\n+- b\n" });
+      expect((await x.facts).designRulesTouched).toBe(true);
+      expect(x.asked.find((a) => a.some((s) => s.includes("/compare/")))).toContain(`repos/${REPO}/compare/base1...abc123`);
+      expect(x.asked.find((a) => a.some((s) => s.includes("/contents/")))).toContain(`repos/${REPO}/contents/README.md?ref=merge1`);
+    });
+
+    test("outside the section: no field", async () => {
+      expect((await read({ filename: "README.md", patch: "@@ -1 +1 @@\n-# T\n+# U\n" }).facts).designRulesTouched).toBeUndefined();
+    });
+
+    test("no patch (too large for GitHub) counts as touched when the README has the heading", async () => {
+      expect((await read({ filename: "README.md" }).facts).designRulesTouched).toBe(true);
+      const x = read({ filename: "README.md" }, "MODIFIED", "# T\nno rules here\n");
+      expect((await x.facts).designRulesTouched).toBeUndefined();
+      expect(x.asked.some((a) => a.some((s) => s.includes("/pulls/1/files")))).toBe(false);
+    });
+
+    test("a new README, or none in the PR, reads nothing more", async () => {
+      const x = read(null, "ADDED");
+      expect((await x.facts).designRulesTouched).toBeUndefined();
+      expect(x.asked.some((a) => a.some((s) => s.includes("/pulls/1/files") || s.includes("/contents/")))).toBe(false);
+      calls.length = 0;
+      await readPr(1, fake(threads([])));
+      expect(calls.some((a) => a.some((s) => s.includes("/pulls/1/files")))).toBe(false);
+    });
+  });
+
+  test("more review threads than one page fails instead of judging", async () => {
+    const nodes = Array.from({ length: 100 }, () => ({ isResolved: true }));
+    expect(readPr(1, fake(threads(nodes, 101)))).rejects.toThrow("101");
+  });
+});
+
+describe("record marks", () => {
+  const SHA = "0123456789abcdef0123456789abcdef01234567";
+
+  test("[merge-ask] reads the kinds and the head sha on the first line", () => {
+    expect(MERGE_ASK.exec(`[merge-ask] security,size ${SHA}`)?.slice(1)).toEqual(["security,size", SHA]);
+    expect(MERGE_ASK.exec(`[merge-ask] design-rules ${SHA}\n\nPR #1 をマージしてよいか`)?.slice(1)).toEqual(["design-rules", SHA]);
+  });
+
+  test("[merge-answer] reads yes / no, the kinds and the head sha", () => {
+    expect(MERGE_ANSWER.exec(`[merge-answer] yes rescue,responsibility ${SHA}`)?.slice(1)).toEqual(["yes", "rescue,responsibility", SHA]);
+    expect(MERGE_ANSWER.exec(`[merge-answer] no security ${SHA}`)?.slice(1)).toEqual(["no", "security", SHA]);
+  });
+
+  test.each([
+    [MERGE_ASK, `[merge-ask] security ${SHA.slice(0, 7)}`], // a short sha
+    [MERGE_ASK, `ok [merge-ask] security ${SHA}`], // not at the start
+    [MERGE_ASK, `x\n[merge-ask] security ${SHA}`], // not the first line
+    [MERGE_ANSWER, `[merge-answer] maybe security ${SHA}`], // not yes / no
+    [MERGE_ANSWER, `[merge-answer] yes ${SHA}`], // no kinds
+  ])("%p does not read %p", (re, body) => {
+    expect(re.exec(body)).toBeNull();
+  });
+});
+
+describe("merge-gate reads GitHub, not the stored backlog (#909)", () => {
+  test("it does not import the daemon's database or the stored backlog: a PR's head, reviews, checks and protection are read from gh each time", async () => {
+    const src = await Bun.file(new URL("./merge-gate.ts", import.meta.url)).text();
+    const imports = [...src.matchAll(/^import .* from "([^"]+)"/gm)].map((m) => m[1]!);
+    expect(imports.filter((i) => /packages\/core|db|backlog|sqlite/.test(i))).toEqual([]);
+    expect(src).not.toMatch(/bun:sqlite|switchboard\.db|readStoredBacklog|listBacklogRecords/);
+  });
+});

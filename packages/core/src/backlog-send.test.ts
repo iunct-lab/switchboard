@@ -1,0 +1,940 @@
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { BacklogIssueData, BacklogSource } from "@switchboard/protocol";
+import { Db } from "./db.ts";
+import { answerStoredDecision, createStoredIssue, editStoredIssue, readStoredIssue, type GhRunner } from "./backlog.ts";
+import { forgeKind, Limit, sendGithubOperations } from "./backlog-send.ts";
+import { backlogFieldValue, conflictRevision } from "./backlog-merge.ts";
+import { BacklogSync } from "./backlog-sync.ts";
+
+// Sending the edits kept here (#886) to a fake GitHub: what it ends up with, and what was asked of it.
+
+const S: BacklogSource = { service: "github", host: "github.com", repository: "acme/app", project: { owner: "acme", number: 1 } };
+type Issue = { node_id: string; number: number; title: string; body: string; state: string; labels: string[]; parent: number | null; milestone?: number | null; comments: Array<{ node_id: string; body: string; created_at: string }> };
+
+/** A fake GitHub: its Issues, Project items and every write; `fail` answers a call instead of it (after carrying it out when `after`). */
+function fakeGithub() {
+  const issues = new Map<number, Issue>([
+    [12, { node_id: "I_12", number: 12, title: "PBI", body: "本文", state: "OPEN", labels: ["type:pbi", "needs-decision"], parent: null, comments: [] }],
+    [3, { node_id: "I_3", number: 3, title: "親", body: "", state: "OPEN", labels: ["type:pbi"], parent: null, comments: [] }],
+  ]);
+  const milestones = [{ number: 7, title: "Phase 2" }];
+  const items = new Map<string, { issue: string; fields: Record<string, string | number | null> }>([["PVTI_I_12", { issue: "I_12", fields: { Status: "Backlog" } }]]);
+  const writes: string[] = [];
+  const fail: Array<{ match: (a: string[]) => boolean; status: number; headers?: string; after?: boolean; stderr?: string }> = [];
+  // GitHub's edit history (#1329): who wrote which field to what, when (`deleted`: the revision's content is gone)
+  const history: Array<{ issue: number; by: string; at: string; field: string; value?: unknown; deleted?: boolean }> = [];
+  // autoAdd: the Project's own auto-add puts a new Issue in it, and an add of one already there is refused as GitHub does
+  const state = { viewer: "me", historyNext: false, editsNext: false, lastWrite: "", autoAdd: false };
+  const ok = (body: unknown) => ({ code: 0, stdout: `HTTP/2.0 200 OK\ncontent-type: application/json\ndate: ${new Date(t).toUTCString()}\n\n${JSON.stringify(body)}`, stderr: "" });
+  const byId = (id: string) => [...issues.values()].find((i) => i.node_id === id)!;
+  const gh: GhRunner = async (args) => {
+    const v: Record<string, any> = {};
+    for (let k = 0; k < args.length; k++) if (args[k] === "-f" || args[k] === "-F") {
+      const [key, ...rest] = args[k + 1]!.split("=");
+      const val = rest.join("=");
+      if (key!.endsWith("[]")) (v[key!.slice(0, -2)] ??= []).push(val);
+      else v[key!] = args[k] === "-F" && /^\d+$/.test(val) ? Number(val) : val;
+    }
+    const method = args.includes("-X") ? args[args.indexOf("-X") + 1]! : "GET";
+    const f = fail.findIndex((x) => x.match(args));
+    const failure = f >= 0 ? fail.splice(f, 1)[0]! : null;
+    const answer = (body: unknown) => (failure ? { code: 1, stdout: `HTTP/2.0 ${failure.status} X\ncontent-type: application/json\n${failure.headers ?? ""}\n{}`, stderr: failure.stderr ?? `HTTP ${failure.status}` } : ok(body));
+    if (failure && !failure.after) return answer(null);
+    const path = args[1]!;
+    const q: string = v.query ?? "";
+    if (method !== "GET" || q.startsWith("mutation")) writes.push(q ? q.slice(10, q.indexOf("(input")) : `${method} ${path}`);
+    if (method === "PATCH") state.lastWrite = Object.keys(v)[0] ?? "";
+    if (q.includes("updateProjectV2ItemFieldValue")) state.lastWrite = "field:Status";
+    if (path === "graphql") {
+      if (q.includes("timelineItems")) {
+        // the read after a write: the Issue's fields (or the item's field), the history since $s, the viewer
+        const i = issues.get(v.n);
+        const since = String(v.s);
+        const ev = (e: (typeof history)[number], node: Record<string, unknown>) => ({ actor: { login: e.by }, createdAt: e.at, ...node });
+        const events = history.filter((e) => e.issue === v.n && e.at >= since && e.field !== "body").map((e) =>
+          e.field === "title" ? ev(e, { __typename: "RenamedTitleEvent", currentTitle: e.value })
+          : e.field === "state" ? ev(e, { __typename: e.value === "CLOSED" ? "ClosedEvent" : "ReopenedEvent" })
+          : e.field.startsWith("label:") ? ev(e, { __typename: e.value ? "LabeledEvent" : "UnlabeledEvent", label: { name: e.field.slice("label:".length) } })
+          : e.field === "milestone" ? ev(e, e.value === null ? { __typename: "DemilestonedEvent" } : { __typename: "MilestonedEvent", milestoneTitle: e.value })
+          : e.field === "parent" ? ev(e, e.value === null ? { __typename: "ParentIssueRemovedEvent" } : { __typename: "ParentIssueAddedEvent", parent: { number: e.value } })
+          : ev(e, { __typename: "ProjectV2ItemStatusChangedEvent", status: e.value, project: { id: e.value === "Other" ? "P_other" : "P_1" } }));
+        // GitHub lists the content edits newest first, the body's whole life (no `since` on them)
+        const edits = history.filter((e) => e.issue === v.n && e.field === "body").reverse().map((e) => ({ editedAt: e.at, editor: { login: e.by }, diff: e.deleted ? null : e.value, deletedAt: e.deleted ? e.at : null }));
+        // the body's content edits are asked for a body write only (#1384 review)
+        if (q.includes("userContentEdits") && state.lastWrite !== "body") throw new Error(`the body's edits were asked after a write of ${state.lastWrite || "nothing"}`);
+        const issue = i && { id: i.node_id, title: i.title, body: i.body, state: i.state, milestone: milestones.find((m) => m.number === i.milestone) ?? null, parent: i.parent && { id: issues.get(i.parent)!.node_id, number: i.parent }, labels: { nodes: i.labels.map((name) => ({ name })) },
+          timelineItems: { pageInfo: { hasNextPage: state.historyNext }, nodes: events }, userContentEdits: { pageInfo: { hasNextPage: state.editsNext }, nodes: edits } };
+        return answer({ data: { viewer: { login: state.viewer }, repository: { issue }, node: v.i ? { fieldValueByName: items.get(v.i)?.fields[v.f] != null ? { name: items.get(v.i)!.fields[v.f] } : null } : null } });
+      }
+      if (q.includes("issue(number:$n)")) {
+        const i = issues.get(v.n);
+        return answer({ data: { repository: { issue: i && { id: i.node_id, title: i.title, body: i.body, state: i.state, milestone: milestones.find((m) => m.number === i.milestone) ?? null, parent: i.parent && { id: issues.get(i.parent)!.node_id, number: i.parent }, labels: { nodes: i.labels.map((name) => ({ name })) } } } } });
+      }
+      if (q.includes("projectV2(number:$p)")) return answer({ data: { repositoryOwner: { projectV2: { id: "P_1", fields: { nodes: [{ id: "F_s", name: "Status", dataType: "SINGLE_SELECT", options: [{ id: "o1", name: "Backlog" }, { id: "o2", name: "Ready" }] }] } } } } });
+      if (q.includes("addProjectV2ItemById")) {
+        const id = `PVTI_${v.c}`;
+        if (state.autoAdd && items.has(id)) return { code: 1, stdout: `HTTP/2.0 200 OK\ncontent-type: application/json\n\n${JSON.stringify({ data: { addProjectV2ItemById: null }, errors: [{ type: "UNPROCESSABLE", message: "Content already exists in this project" }] })}`, stderr: "gh: Content already exists in this project" };
+        items.set(id, items.get(id) ?? { issue: v.c, fields: {} });
+        return answer({ data: { addProjectV2ItemById: { item: { id } } } });
+      }
+      if (q.includes("projectItems")) return answer({ data: { node: { projectItems: { nodes: [...items].filter(([, i]) => i.issue === v.c).map(([id]) => ({ id, project: { id: "P_1" } })) } } } });
+      if (q.includes("updateProjectV2ItemFieldValue")) return (items.get(v.i)!.fields.Status = v.value === "o1" ? "Backlog" : "Ready"), answer({ data: {} });
+      if (q.includes("deleteProjectV2Item")) return items.delete(v.i), answer({ data: {} });
+      if (q.includes("removeSubIssue")) return (byId(v.c).parent = null), answer({ data: {} });
+      if (q.includes("addSubIssue")) return (byId(v.c).parent = byId(v.p).number), answer({ data: {} });
+      if (q.includes("... on Issue{ node_id")) {
+        const i = byId(v.i);
+        return answer({ data: { node: { ...i, html_url: `https://github.com/acme/app/issues/${i.number}`, created_at: "2026-10-08T00:00:00Z", updated_at: "2026-10-08T00:00:00Z" } } });
+      }
+      if (q.includes("fieldValueByName")) return answer({ data: { node: { fieldValueByName: items.get(v.i)?.fields[v.f] != null ? { name: items.get(v.i)!.fields[v.f] } : null } } });
+    }
+    if (path.startsWith("repos/acme/app/milestones")) return answer(milestones);
+    const m = /^repos\/acme\/app\/issues(?:\/(\d+))?(\/comments|\/labels(?:\/(.+))?)?(?:\?(.*))?$/.exec(path)!;
+    const n = Number(m[1]);
+    if (!m[1] && method === "POST") {
+      const i: Issue = { node_id: `I_${issues.size + 100}`, number: issues.size + 100, title: v.title, body: v.body, state: "OPEN", labels: v.labels ?? [], parent: null, comments: [] };
+      issues.set(i.number, i);
+      if (state.autoAdd) items.set(`PVTI_${i.node_id}`, { issue: i.node_id, fields: {} });
+      return answer({ ...i, html_url: `https://github.com/acme/app/issues/${i.number}`, created_at: "2026-10-08T00:00:00Z", updated_at: "2026-10-08T00:00:00Z" });
+    }
+    if (!m[1]) return answer([...issues.values()]);
+    if (m[2] === "/comments" && method === "POST") {
+      const c = { node_id: `IC_${n}_${issues.get(n)!.comments.length}`, body: v.body, created_at: "2026-10-08T00:00:00Z" };
+      issues.get(n)!.comments.push(c);
+      return answer(c);
+    }
+    if (m[2] === "/comments") return answer(issues.get(n)!.comments);
+    if (m[2]?.startsWith("/labels")) {
+      const i = issues.get(n)!;
+      i.labels = method === "POST" ? [...i.labels, ...v.labels] : i.labels.filter((l) => l !== decodeURIComponent(m[3]!));
+      return answer([]);
+    }
+    if (method === "PATCH") Object.assign(issues.get(n)!, v.state ? { state: v.state.toUpperCase() } : "milestone" in v ? { milestone: v.milestone === "null" ? null : v.milestone } : v);
+    return answer({});
+  };
+  return { gh, issues, items, writes, fail, history, state };
+}
+
+/** The fake GitHub answering an import's reads too (backlog-sync.ts), from the same Issues. */
+function importsToo(g: ReturnType<typeof fakeGithub>): GhRunner {
+  const raw = (i: Issue) => ({ id: i.node_id, number: i.number, title: i.title, url: "", state: i.state, body: i.body, createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z", milestone: null, parent: null,
+    labels: { totalCount: i.labels.length, nodes: i.labels.map((name) => ({ name })) }, subIssues: { totalCount: 0, nodes: [] }, comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] }, projectItems: { totalCount: 0, nodes: [] } });
+  const page = (nodes: unknown[]) => ({ code: 0, stdout: JSON.stringify({ data: { repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes }, pullRequests: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } }), stderr: "" });
+  return async (args, cwd) => {
+    if (args[0] === "repo") return { code: 0, stdout: "acme/app\n", stderr: "" };
+    if (args[0] === "variable") return { code: 0, stdout: "https://github.com/orgs/acme/projects/1\n", stderr: "" };
+    const q = args.find((a) => a.startsWith("query=")) ?? "";
+    if (q.includes("states:[OPEN,CLOSED]")) return page([raw(g.issues.get(12)!)]);
+    if (q.includes("states:OPEN")) return page([]);
+    if (q.includes("issueOrPullRequest")) return { code: 0, stdout: JSON.stringify({ data: { repository: Object.fromEntries([...q.matchAll(/w(\d+): /g)].map((m) => [`w${m[1]}`, { __typename: "Issue", ...raw(g.issues.get(Number(m[1]))!) }])) } }), stderr: "" };
+    return g.gh(args, cwd);
+  };
+}
+
+const syncs: BacklogSync[] = [];
+function makeSync(...args: ConstructorParameters<typeof BacklogSync>): BacklogSync {
+  const sync = new BacklogSync(...args);
+  syncs.push(sync);
+  return sync;
+}
+
+let dir: string;
+let db: Db;
+let t = 1_000_000;
+const clock = () => t;
+function seed(db: Db) {
+  const issue: BacklogIssueData = { number: 12, title: "PBI", url: "", state: "OPEN", stateReason: null, body: "本文", labels: ["type:pbi", "needs-decision"], milestone: null, parent: null, subIssues: [], createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z", closedAt: null };
+  db.putBacklogSnapshot(S, { records: [
+    { objectKind: "issue", externalId: "I_12", remote: issue, fetchState: "fetched" },
+    { objectKind: "issue", externalId: "I_3", remote: { ...issue, number: 3, title: "親", labels: ["type:pbi"] }, fetchState: "fetched" },
+    { objectKind: "project-item", externalId: "PVTI_I_12", remote: { issue: 12, owner: "acme", project: 1, fields: { Status: "Backlog" } }, fetchState: "fetched" },
+  ], cursor: null, syncedAt: 1 });
+}
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), "switchboard-send-"));
+  db = new Db(join(dir, "switchboard.db"));
+  seed(db);
+});
+afterEach(() => {
+  for (const sync of syncs.splice(0)) sync.stop();
+  db.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+const send = (gh: GhRunner) => sendGithubOperations(gh, db, dir, S, clock);
+const statuses = () => db.listPendingBacklogOperations(S).map((o) => [o.kind, o.field, o.status]);
+
+test("a field is written only while GitHub still has the value it was made on; one changed there is held and nothing is written", async () => {
+  const g = fakeGithub();
+  editStoredIssue(db, S, 12, { title: "直した題" });
+  expect(await send(g.gh)).toBe(1);
+  expect(g.issues.get(12)!.title).toBe("直した題");
+  expect(g.writes).toEqual(["PATCH repos/acme/app/issues/12"]);
+
+  editStoredIssue(db, S, 12, { body: "手元の本文" });
+  g.issues.get(12)!.body = "GitHub で書いた本文";
+  g.writes.length = 0;
+  expect(await send(g.gh)).toBe(0);
+  expect(statuses()).toEqual([["set", "body", "conflict"]]);
+  expect(g.writes).toEqual([]);
+  expect(g.issues.get(12)!.body).toBe("GitHub で書いた本文");
+});
+
+test("an edit an import held as a conflict is not written; one whose conflict is chosen on during a run is not sent (#887)", async () => {
+  const g = fakeGithub();
+  // #3 first: the run reaches #12 after it
+  editStoredIssue(db, S, 3, { title: "親の新しい題" });
+  editStoredIssue(db, S, 12, { title: "手元の題" });
+  // an import reads another title on GitHub: held before any send
+  const twelve = db.getBacklogRecord({ ...S, objectKind: "issue", externalId: "I_12" })!.remote as BacklogIssueData;
+  g.issues.get(12)!.title = "GitHub の題";
+  db.putBacklogSnapshot(S, { records: [{ objectKind: "issue", externalId: "I_12", remote: { ...twelve, title: "GitHub の題" }, fetchState: "fetched" }], cursor: null, syncedAt: 2 });
+  const held = db.listPendingBacklogOperations(S).find((o) => o.issue === "I_12")!;
+  expect(held.status).toBe("conflict");
+  // while the run writes #3, the user keeps GitHub's title of #12
+  const gh: GhRunner = async (args, cwd) => {
+    const r = await g.gh(args, cwd);
+    if (args.includes("PATCH") && db.getBacklogOperation(held.id)!.status === "conflict") db.resolveBacklogConflict(S, held.id, "remote", conflictRevision(db.getBacklogOperation(held.id)!, "GitHub の題"));
+    return r;
+  };
+  expect(await send(gh)).toBe(1);
+  expect(g.writes).toEqual(["PATCH repos/acme/app/issues/3"]);
+  expect(db.getBacklogOperation(held.id)!.status).toBe("done");
+  expect(g.issues.get(12)!.title).toBe("GitHub の題");
+  expect(backlogFieldValue("issue", db.getBacklogRecord({ ...S, objectKind: "issue", externalId: "I_12" })!.local ?? db.getBacklogRecord({ ...S, objectKind: "issue", externalId: "I_12" })!.remote, "title")).toBe("GitHub の題");
+});
+
+test("A's window, replayed (#887): an edit on GitHub between the check and the write is overwritten and not seen; one after the write is held — neither is told as kept", async () => {
+  const g = fakeGithub();
+  const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
+  db.setWorkspaceBacklogSource(ws.id, S);
+  // someone writes on GitHub right after the check read (v1 → v2), then this write lands (v3)
+  let between: (() => void) | null = () => (g.issues.get(12)!.title = "GitHub の v2");
+  const gh: GhRunner = async (args, cwd) => {
+    const r = await g.gh(args, cwd);
+    if (between && args.some((a) => a.includes("issue(number:$n)"))) between(), (between = null);
+    return r;
+  };
+  editStoredIssue(db, S, 12, { title: "手元の v3" });
+  expect(await send(gh)).toBe(1);
+  // v2 is gone and nothing here saw it: the check after the write reads its own v3 (the fake's history has no event
+  // for the edit — with one, the read after the write holds the edit: the tests of #1329 below)
+  expect(g.issues.get(12)!.title).toBe("手元の v3");
+  expect(db.listPendingBacklogOperations(S)).toEqual([]);
+  // what is told with the Issue says so, and does not claim it was kept
+  const told = readStoredIssue(db, ws, 12)!;
+  expect(told.limits).toContain("上書きしうる");
+  expect(told.limits).toContain("#1329");
+  expect(told.limits).toContain("Project フィールド");
+  expect(told.limits).not.toMatch(/保証します|防ぎます/);
+
+  // someone writes right after this write, before the check after it: seen, held with GitHub's value
+  let written = false;
+  const gh2: GhRunner = async (args, cwd) => {
+    if (written && args.some((a) => a.includes("issue(number:$n)"))) (g.issues.get(12)!.title = "GitHub の v5"), (written = false);
+    const r = await g.gh(args, cwd);
+    if (args.includes("PATCH")) written = true;
+    return r;
+  };
+  editStoredIssue(db, S, 12, { title: "手元の v4" });
+  expect(await send(gh2)).toBe(0);
+  expect(g.issues.get(12)!.title).toBe("GitHub の v5");
+  expect(readStoredIssue(db, ws, 12)!.held).toEqual([expect.objectContaining({ field: "title", status: "conflict", reason: expect.stringContaining("GitHub の v5") })]);
+});
+
+test("an answer is posted with its marker, then the label comes off; the comment takes GitHub's id", async () => {
+  const g = fakeGithub();
+  answerStoredDecision(db, S, 12, "A で");
+  expect(await send(g.gh)).toBe(2);
+  expect(g.writes).toEqual(["POST repos/acme/app/issues/12/comments", "DELETE repos/acme/app/issues/12/labels/needs-decision"]);
+  expect(g.issues.get(12)!.comments[0]!.body).toMatch(/^## 回答\n\nA で\n\n<!-- switchboard-op:[0-9a-f-]+ -->$/);
+  expect(g.issues.get(12)!.labels).toEqual(["type:pbi"]);
+  expect(db.getBacklogRecord({ ...S, objectKind: "comment", externalId: "IC_12_0" })).toMatchObject({ fetchState: "fetched", local: null });
+  expect(statuses()).toEqual([]);
+});
+
+test("an answer GitHub posted but whose reply was lost is found by its marker, not posted again; the label waits for it", async () => {
+  const g = fakeGithub();
+  answerStoredDecision(db, S, 12, "A で");
+  g.fail.push({ match: (a) => a[1]!.endsWith("/comments") && a.includes("POST"), status: 502, after: true });
+  expect(await send(g.gh)).toBe(0);
+  expect(statuses()).toEqual([["comment", null, "unknown"], ["set", "label:needs-decision", "pending"]]);
+  expect(g.issues.get(12)!.labels).toContain("needs-decision");
+  // the daemon restarts in between: nothing changes for an unknown one
+  db.recoverBacklogOperations();
+  expect(await send(g.gh)).toBe(2);
+  expect(g.issues.get(12)!.comments).toHaveLength(1);
+  expect(g.issues.get(12)!.labels).toEqual(["type:pbi"]);
+});
+
+test("GitHub not reached at all: nothing left, so a post waits as it was and is sent once GitHub answers; it is not a try", async () => {
+  const g = fakeGithub();
+  answerStoredDecision(db, S, 12, "オフラインで書いた");
+  const offline = { code: 1, stdout: "", stderr: "error connecting to api.github.com" };
+  await expect(send(async () => offline)).rejects.toBeInstanceOf(Limit);
+  // it waits for the repository (BacklogSync keeps the time), not for a time of its own: once GitHub answers it goes
+  expect(db.listPendingBacklogOperations(S)[0]).toMatchObject({ status: "pending", attempt: 0, retryAt: null });
+  expect(await send(g.gh)).toBe(2);
+  expect(g.issues.get(12)!.comments).toHaveLength(1);
+});
+
+test("the state and a Project field of an Issue are written, each checked first", async () => {
+  const g = fakeGithub();
+  editStoredIssue(db, S, 12, { state: "CLOSED", fields: { Status: "Ready" }, labels: { add: ["TYPE:PBI"], remove: [] } });
+  // a label GitHub has under another case is already there
+  expect(await send(g.gh)).toBe(3);
+  expect(g.issues.get(12)!.state).toBe("CLOSED");
+  expect(g.items.get("PVTI_I_12")!.fields.Status).toBe("Ready");
+  expect(g.writes.map((w) => (w.includes("updateProjectV2ItemFieldValue") ? "updateProjectV2ItemFieldValue" : w))).toEqual(["PATCH repos/acme/app/issues/12", "updateProjectV2ItemFieldValue"]);
+});
+
+test("a label added, a milestone, a parent and leaving the Project are each sent", async () => {
+  const g = fakeGithub();
+  editStoredIssue(db, S, 12, { labels: { add: ["P1"], remove: [] }, milestone: "Phase 2", parent: 3, project: false });
+  expect(await send(g.gh)).toBe(4);
+  expect(g.issues.get(12)).toMatchObject({ labels: ["type:pbi", "needs-decision", "P1"], milestone: 7, parent: 3 });
+  expect(g.items.has("PVTI_I_12")).toBe(false);
+  // and back: the milestone off, under no parent
+  editStoredIssue(db, S, 12, { milestone: null, parent: null });
+  expect(await send(g.gh)).toBe(2);
+  expect(g.issues.get(12)).toMatchObject({ milestone: null, parent: null });
+});
+
+test("a look for an unknown post that fails keeps it unknown: it is looked for again, never posted again", async () => {
+  const g = fakeGithub();
+  answerStoredDecision(db, S, 12, "A で");
+  g.fail.push({ match: (a) => a[1]!.endsWith("/comments") && a.includes("POST"), status: 502, after: true });
+  await send(g.gh);
+  g.fail.push({ match: (a) => a[1]!.includes("/comments?"), status: 503 });
+  expect(await send(g.gh)).toBe(0);
+  expect(statuses()[0]).toEqual(["comment", null, "unknown"]);
+  expect(await send(g.gh)).toBe(2);
+  expect(g.issues.get(12)!.comments).toHaveLength(1);
+});
+
+test("a post GitHub refused is failed, not unknown; a limit on a post stops the run with it pending", async () => {
+  const g = fakeGithub();
+  answerStoredDecision(db, S, 12, "長すぎる");
+  g.fail.push({ match: (a) => a[1]!.endsWith("/comments") && a.includes("POST"), status: 422 });
+  expect(await send(g.gh)).toBe(0);
+  expect(statuses()).toEqual([["comment", null, "failed"], ["set", "label:needs-decision", "pending"]]);
+  db.sqlite.query("DELETE FROM backlog_operations").run();
+  answerStoredDecision(db, S, 12, "制限中");
+  g.fail.push({ match: (a) => a[1]!.endsWith("/comments") && a.includes("POST"), status: 429 });
+  await expect(send(g.gh)).rejects.toBeInstanceOf(Limit);
+  expect(statuses()[0]).toEqual(["comment", null, "pending"]);
+  expect(g.issues.get(12)!.comments).toHaveLength(0);
+});
+
+test("a create whose later step fails for good keeps the Issue it made: the record takes its id, nothing is made twice", async () => {
+  const g = fakeGithub();
+  const { localId } = createStoredIssue(db, S, { title: "選択肢の無い Status", body: "", labels: [], milestone: null, parent: null, fields: { Status: "無い選択肢" } });
+  expect(await send(g.gh)).toBe(0);
+  const made = [...g.issues.values()].find((i) => i.title === "選択肢の無い Status")!;
+  expect(db.getBacklogOperation(localId)).toMatchObject({ status: "failed", remoteId: made.node_id, target: made.node_id });
+  expect(db.getBacklogRecord({ ...S, objectKind: "issue", externalId: made.node_id })?.remote).toMatchObject({ number: made.number });
+  await send(g.gh);
+  expect([...g.issues.values()].filter((i) => i.title === "選択肢の無い Status")).toHaveLength(1);
+});
+
+test("a permission refused on one thing fails that operation only; the login refused stops the run and says why", async () => {
+  const g = fakeGithub();
+  answerStoredDecision(db, S, 12, "ロックされた Issue へ");
+  editStoredIssue(db, S, 3, { title: "別の Issue" });
+  g.fail.push({ match: (a) => a[1]!.endsWith("/comments") && a.includes("POST"), status: 403 });
+  expect(await send(g.gh)).toBe(1);
+  expect(statuses()).toEqual([["comment", null, "failed"], ["set", "label:needs-decision", "pending"]]);
+  expect(g.issues.get(3)!.title).toBe("別の Issue");
+  db.sqlite.query("DELETE FROM backlog_operations").run();
+  editStoredIssue(db, S, 12, { title: "期限切れ" });
+  g.fail.push({ match: (a) => a.includes("PATCH"), status: 401 });
+  await expect(send(g.gh)).rejects.toMatchObject({ kind: "auth" });
+  expect(db.listPendingBacklogOperations(S)[0]).toMatchObject({ status: "pending", attempt: 0, error: expect.stringContaining("ログイン") });
+});
+
+test("a field read again right after it was written: another value there is held as a conflict", async () => {
+  const g = fakeGithub();
+  editStoredIssue(db, S, 12, { title: "こちらの題" });
+  // someone writes the title between this write and the read after it
+  const gh: GhRunner = async (args, cwd) => {
+    const r = await g.gh(args, cwd);
+    if (args.includes("PATCH")) g.issues.get(12)!.title = "あちらの題";
+    return r;
+  };
+  expect(await send(gh)).toBe(0);
+  expect(db.listPendingBacklogOperations(S)[0]).toMatchObject({ status: "conflict", error: expect.stringContaining('GitHub は "あちらの題"') });
+});
+
+test("a field edit left unknown by a restart is checked again like any edit: refused, it is failed, not unknown", async () => {
+  const g = fakeGithub();
+  editStoredIssue(db, S, 12, { title: "再起動の前" });
+  db.setBacklogOperationResult(db.listPendingBacklogOperations(S)[0]!.id, { status: "sending" });
+  db.recoverBacklogOperations();
+  g.fail.push({ match: (a) => a.includes("PATCH"), status: 422 });
+  expect(await send(g.gh)).toBe(0);
+  expect(statuses()).toEqual([["set", "title", "failed"]]);
+});
+
+test("a Project item added and taken out again before anything was sent: nothing is sent for it, and the Issue goes on", async () => {
+  const g = fakeGithub();
+  editStoredIssue(db, S, 3, { fields: { Status: "Ready" } });
+  editStoredIssue(db, S, 3, { project: false });
+  editStoredIssue(db, S, 3, { title: "その後の編集" });
+  // the add and its removal end in one (taken out: nothing to do), its field is not sent, the title is
+  expect(await send(g.gh)).toBe(2);
+  expect(statuses()).toEqual([]);
+  // the item never made is not shown, and in the Project again makes a new one
+  expect(db.listBacklogRecords(S, "project-item").filter((r) => r.externalId.startsWith("local:")).map((r) => r.local)).toEqual([null]);
+  editStoredIssue(db, S, 3, { project: true });
+  expect(statuses()).toEqual([["set", "member", "pending"]]);
+  expect([...g.items.values()].some((i) => i.issue === "I_3")).toBe(false);
+  expect(g.issues.get(3)!.title).toBe("その後の編集");
+});
+
+// The read after a write carries the history (#1329): what another login wrote in the window is held, not lost.
+
+const later = () => new Date(t + 1000).toISOString();
+
+test("history (#1329): another login's edit between the check and the write is held with its value, editor and time — for each field the history tells; one that made the field the value sent is nothing lost", async () => {
+  const cases: Array<{ edit: object; field: string; theirs: { field: string; value?: unknown; deleted?: boolean }; expect: Record<string, unknown> | "done" }> = [
+    { edit: { title: "手元の題" }, field: "title", theirs: { field: "title", value: "相手の題" }, expect: { value: "相手の題" } },
+    { edit: { body: "手元の本文" }, field: "body", theirs: { field: "body", value: "相手の本文" }, expect: { value: "相手の本文" } },
+    { edit: { body: "手元の本文" }, field: "body", theirs: { field: "body", deleted: true }, expect: { editor: "them" } },
+    { edit: { state: "CLOSED" }, field: "state", theirs: { field: "state", value: "CLOSED" }, expect: "done" },
+    { edit: { labels: { add: [], remove: ["needs-decision"] } }, field: "label:needs-decision", theirs: { field: "label:needs-decision", value: true }, expect: { value: true } },
+    { edit: { milestone: "Phase 2" }, field: "milestone", theirs: { field: "milestone", value: "Phase 3" }, expect: { value: "Phase 3" } },
+    { edit: { parent: 3 }, field: "parent", theirs: { field: "parent", value: null }, expect: { value: null } },
+    { edit: { fields: { Status: "Ready" } }, field: "field:Status", theirs: { field: "field:Status", value: "Done" }, expect: { value: "Done" } },
+  ];
+  for (const [i, c] of cases.entries()) {
+    const g = fakeGithub();
+    const d = new Db(join(dir, `case${i}.db`));
+    seed(d);
+    g.history.push({ issue: 12, by: "them", at: later(), ...c.theirs });
+    editStoredIssue(d, S, 12, c.edit as never, t);
+    const n = await sendGithubOperations(g.gh, d, dir, S, clock);
+    const op = d.listPendingBacklogOperations(S).find((o) => o.field === c.field);
+    if (c.expect === "done") {
+      expect([c.field, n, op]).toEqual([c.field, 1, undefined]);
+    } else {
+      expect([c.field, n]).toEqual([c.field, 0]);
+      expect(op).toMatchObject({ status: "conflict", overwritten: { editor: "them", at: later(), ...c.expect }, error: expect.stringContaining("them") });
+      if (!("value" in c.expect)) expect(op!.overwritten).not.toHaveProperty("value");
+    }
+    d.close();
+  }
+});
+
+test("history (#1329): the history refused or not read whole after the write holds the edit as unverified — never failed or pending; a write refused with 412 or 409 is held too", async () => {
+  const g = fakeGithub();
+  const afterRead = (a: string[]) => a.some((x) => x.includes("timelineItems"));
+  // refused (403): GitHub has the value, nothing is known of the window
+  g.fail.push({ match: afterRead, status: 403 });
+  editStoredIssue(db, S, 12, { title: "v3" }, t);
+  expect(await send(g.gh)).toBe(0);
+  expect(db.listPendingBacklogOperations(S)[0]).toMatchObject({ status: "conflict", overwritten: { editor: null, at: null, unreadable: expect.stringContaining("403") }, error: expect.stringContaining("読めませんでした") });
+  expect(g.issues.get(12)!.title).toBe("v3");
+  // not read whole (a second page): the same
+  const g2 = fakeGithub();
+  const d2 = new Db(join(dir, "two.db"));
+  seed(d2);
+  g2.state.historyNext = true;
+  editStoredIssue(d2, S, 12, { title: "v4" }, t);
+  expect(await sendGithubOperations(g2.gh, d2, dir, S, clock)).toBe(0);
+  expect(d2.listPendingBacklogOperations(S)[0]).toMatchObject({ status: "conflict", overwritten: { unreadable: expect.stringContaining("読み切れ") } });
+  d2.close();
+  // a write GitHub refuses for the state it is in: checked again and held, not failed
+  const g3 = fakeGithub();
+  const d3 = new Db(join(dir, "three.db"));
+  seed(d3);
+  g3.fail.push({ match: (a) => a.includes("PATCH"), status: 412 });
+  editStoredIssue(d3, S, 12, { title: "v5" }, t);
+  expect(await sendGithubOperations(g3.gh, d3, dir, S, clock)).toBe(0);
+  expect(d3.listPendingBacklogOperations(S)[0]).toMatchObject({ status: "conflict", error: expect.stringContaining("412") });
+  d3.close();
+});
+
+test("history (#1329): two edits of theirs in the same second keep the newer; another Project's Status change is not this one's; a limit met by the read after the write keeps the outcome and stops the run", async () => {
+  // two revisions of the body at the same second, the older one the value sent: the newer is what was overwritten
+  const g = fakeGithub();
+  g.history.push({ issue: 12, by: "them", at: later(), field: "body", value: "手元の本文" }, { issue: 12, by: "them", at: later(), field: "body", value: "相手の新しい本文" });
+  editStoredIssue(db, S, 12, { body: "手元の本文" }, t);
+  expect(await send(g.gh)).toBe(0);
+  expect(db.listPendingBacklogOperations(S)[0]).toMatchObject({ status: "conflict", overwritten: { value: "相手の新しい本文" } });
+  // a Status change of another Project is not an edit of this field
+  const g2 = fakeGithub();
+  const d2 = new Db(join(dir, "two.db"));
+  seed(d2);
+  g2.history.push({ issue: 12, by: "them", at: later(), field: "field:Status", value: "Other" });
+  editStoredIssue(d2, S, 12, { fields: { Status: "Ready" } }, t);
+  expect(await sendGithubOperations(g2.gh, d2, dir, S, clock)).toBe(1);
+  expect(d2.listPendingBacklogOperations(S)).toEqual([]);
+  d2.close();
+  // a limit on the read after the write: the edit is held as unverified, and the run stops before the next Issue's edits
+  const g3 = fakeGithub();
+  const d3 = new Db(join(dir, "three.db"));
+  seed(d3);
+  g3.fail.push({ match: (a) => a.some((x) => x.includes("timelineItems")), status: 429, headers: "retry-after: 120\n" });
+  editStoredIssue(d3, S, 12, { title: "v3" }, t);
+  editStoredIssue(d3, S, 3, { title: "親の v3" }, t);
+  await expect(sendGithubOperations(g3.gh, d3, dir, S, clock)).rejects.toBeInstanceOf(Limit);
+  expect(d3.listPendingBacklogOperations(S).map((o) => [o.issue, o.status])).toEqual([["I_12", "conflict"], ["I_3", "pending"]]);
+  expect(g3.issues.get(3)!.title).toBe("親");
+  d3.close();
+});
+
+test("history (#1329): a title write does not ask for the body's edits — a body edit of theirs in the history is not its concern", async () => {
+  const g = fakeGithub();
+  g.history.push({ issue: 12, by: "them", at: later(), field: "body", value: "相手の本文" });
+  editStoredIssue(db, S, 12, { title: "v3" }, t);
+  expect(await send(g.gh)).toBe(1);
+  expect(db.listPendingBacklogOperations(S)).toEqual([]);
+});
+
+test("history (#1329): the body's edits have no since — a page that reaches back before the check read is whole, however many edits the body had; one that does not is not", async () => {
+  // an old edit of theirs (before the check read) on a body edited many times: the newest page reaches past the window
+  const g = fakeGithub();
+  g.state.editsNext = true;
+  g.history.push({ issue: 12, by: "them", at: new Date(t - 600_000).toISOString(), field: "body", value: "ずっと前の本文" });
+  editStoredIssue(db, S, 12, { body: "v3" }, t);
+  expect(await send(g.gh)).toBe(1);
+  expect(db.listPendingBacklogOperations(S)).toEqual([]);
+  // every edit on the page is inside the window and there is another page: not whole, held as unverified
+  const g2 = fakeGithub();
+  const d2 = new Db(join(dir, "two.db"));
+  seed(d2);
+  g2.state.editsNext = true;
+  g2.history.push({ issue: 12, by: "them", at: later(), field: "body", value: "相手の本文" });
+  editStoredIssue(d2, S, 12, { body: "v4" }, t);
+  expect(await sendGithubOperations(g2.gh, d2, dir, S, clock)).toBe(0);
+  expect(d2.listPendingBacklogOperations(S)[0]).toMatchObject({ status: "conflict", overwritten: { unreadable: expect.stringContaining("読み切れ") } });
+  d2.close();
+});
+
+test("history (#1329): one's own login's edit is not another's; the read after the write stays one call", async () => {
+  const g = fakeGithub();
+  let reads = 0;
+  const counted: GhRunner = async (args, cwd) => {
+    if (args.includes("graphql")) reads++;
+    return g.gh(args, cwd);
+  };
+  g.history.push({ issue: 12, by: "me", at: later(), field: "title", value: "自分の v2" });
+  editStoredIssue(db, S, 12, { title: "v3" }, t);
+  expect(await send(counted)).toBe(1);
+  expect(db.listPendingBacklogOperations(S)).toEqual([]);
+  // the check before and the read after: two GraphQL reads, as before the history came along
+  expect(reads).toBe(2);
+});
+
+test("chosen (#1329): remote on a conflict found after the write sends the other's value back on the next run, and GitHub comes to it", async () => {
+  const g = fakeGithub();
+  g.history.push({ issue: 12, by: "them", at: later(), field: "title", value: "相手の題" });
+  editStoredIssue(db, S, 12, { title: "手元の題" }, t);
+  expect(await send(g.gh)).toBe(0);
+  const op = db.listPendingBacklogOperations(S)[0]!;
+  expect(g.issues.get(12)!.title).toBe("手元の題");
+  // the import after the run reads the local value back: the conflict stays (#1354)
+  db.putBacklogSnapshot(S, { records: [{ objectKind: "issue", externalId: "I_12", remote: { ...(db.getBacklogRecord({ ...S, objectKind: "issue", externalId: "I_12" })!.remote as BacklogIssueData), title: "手元の題" }, fetchState: "fetched" }], cursor: null, syncedAt: t });
+  expect(db.getBacklogOperation(op.id)).toMatchObject({ status: "conflict" });
+  db.resolveBacklogConflict(S, op.id, "remote", conflictRevision(db.getBacklogOperation(op.id)!, db.backlogRemoteValue(db.getBacklogOperation(op.id)!)));
+  g.history.length = 0;
+  t += 2000;
+  expect(await send(g.gh)).toBe(1);
+  expect(g.issues.get(12)!.title).toBe("相手の題");
+  expect(db.listPendingBacklogOperations(S)).toEqual([]);
+});
+
+test("BacklogSync: a limit is kept for the repository and the host and nothing is asked before it; the login refused is shown; what was written is imported back", async () => {
+  const g = fakeGithub();
+  const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
+  db.setWorkspaceBacklogSource(ws.id, S);
+  const calls: string[][] = [];
+  const gh: GhRunner = (args, cwd) => (calls.push(args), g.gh(args, cwd));
+  const sync = makeSync(db, gh, clock);
+  editStoredIssue(db, S, 12, { title: "制限の前" });
+  g.fail.push({ match: (a) => a.includes("PATCH"), status: 403, headers: `x-ratelimit-remaining: 0\nx-ratelimit-reset: ${(t + 120_000) / 1000}\n` });
+  await sync.send(ws);
+  expect(db.getBacklogRepository(S)?.retryAt).toBe(t + 120_000);
+  calls.length = 0;
+  await sync.send(ws);
+  expect(calls).toEqual([]);
+  t += 120_000;
+  await sync.send(ws);
+  expect(g.issues.get(12)!.title).toBe("制限の前");
+  // the write is read back: an import is asked for (it begins with the repository)
+  expect(calls.some((a) => a[0] === "repo")).toBe(true);
+
+  editStoredIssue(db, S, 12, { title: "期限切れ" });
+  g.fail.push({ match: (a) => a.includes("PATCH"), status: 401 });
+  await sync.send(ws);
+  expect(sync.read(ws).error).toContain("ログイン");
+});
+
+test("BacklogSync: an import that read before a write of a send run under way stores nothing, so the next edit of the field is not judged on the older value (#887)", async () => {
+  const g = fakeGithub();
+  const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
+  db.setWorkspaceBacklogSource(ws.id, S);
+  // the title twice, an answer between: the second edit is made on the first one's value
+  editStoredIssue(db, S, 12, { title: "一つ目" });
+  answerStoredDecision(db, S, 12, "A");
+  editStoredIssue(db, S, 12, { title: "二つ目" });
+  let wrote!: () => void;
+  const written = new Promise<void>((r) => (wrote = r));
+  let reading!: () => void;
+  const begun = new Promise<void>((r) => (reading = r));
+  let imported!: () => void;
+  const read = new Promise<void>((r) => (imported = r));
+  let first = true;
+  const answers = importsToo(g);
+  const gh: GhRunner = async (args, cwd) => {
+    const q = args.find((a) => a.startsWith("query=")) ?? "";
+    if (q.includes("states:[OPEN,CLOSED]")) {
+      const answer = await answers(args, cwd); // what GitHub has when it is read
+      if (first) (first = false), reading(), await written;
+      return answer;
+    }
+    if (args.some((a) => a.endsWith("/comments")) && args.includes("POST")) await read;
+    const r = await answers(args, cwd);
+    if (args.includes("PATCH")) wrote();
+    return r;
+  };
+  const sync = makeSync(db, gh, clock);
+  const importing = sync.sync(ws); // reads the title before the send writes it
+  await begun;
+  // the send's answer waits until that import is over (stored, or not)
+  void importing.then(imported);
+  await Promise.all([importing, sync.send(ws)]);
+  expect(g.issues.get(12)!.title).toBe("二つ目");
+  expect(db.listPendingBacklogOperations(S)).toEqual([]);
+});
+
+test("BacklogSync: the notice of the daemon's own send (#887) reads what it wrote, sends nothing more, and leaves the notice window as it was", async () => {
+  const g = fakeGithub();
+  const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
+  db.setWorkspaceBacklogSource(ws.id, S);
+  const sync = makeSync(db, importsToo(g), clock);
+  sync.startPolling();
+  const idle = async () => {
+    for (let i = 0; i < 200 && sync.read(ws).syncing; i++) await Bun.sleep(2);
+  };
+  editStoredIssue(db, S, 12, { title: "手元の題" });
+  await sync.send(ws); // written, then read back
+  await idle();
+  expect(g.writes).toEqual(["PATCH repos/acme/app/issues/12"]);
+  // GitHub's Webhook of that edit arrives a moment later
+  t += 5_000;
+  expect(sync.hint(ws)).toBe(true);
+  await idle();
+  await sync.send(ws);
+  expect(g.writes).toEqual(["PATCH repos/acme/app/issues/12"]);
+  expect(db.listPendingBacklogOperations(S)).toEqual([]);
+  expect(readStoredIssue(db, ws, 12)!.issue.title).toBe("手元の題");
+  // the echo found nothing new, but the window stays a minute: a teammate's edit next is read at once
+  t += 61_000;
+  g.issues.get(12)!.title = "あちらの題";
+  expect(sync.hint(ws)).toBe(true);
+  await idle();
+  expect(readStoredIssue(db, ws, 12)!.issue.title).toBe("あちらの題");
+  sync.stop();
+});
+
+test("BacklogSync: an echo that comes while the read-back runs, or to another checkout of the repository, is folded and read without widening the notice window", async () => {
+  const g = fakeGithub();
+  const a = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
+  const b = db.upsertWorkspace({ name: "app2", path: join(dir, "b"), kind: "repo" });
+  db.setWorkspaceBacklogSource(a.id, S);
+  db.setWorkspaceBacklogSource(b.id, S);
+  const sync = makeSync(db, importsToo(g), clock);
+  sync.startPolling();
+  const idle = async () => {
+    for (let i = 0; i < 200 && (sync.read(a).syncing || sync.read(b).syncing); i++) await Bun.sleep(2);
+  };
+  await sync.sync(b);
+  editStoredIssue(db, S, 12, { title: "手元の題" });
+  await sync.send(a); // written; its read-back starts
+  t += 1_000;
+  expect(sync.read(a).syncing).toBe(true);
+  expect(sync.hint(a)).toBe(false); // during the read-back: folded
+  await idle();
+  expect(sync.hint(b)).toBe(true); // the other checkout of the same repository, after the read-back stored the write
+  await idle();
+  // the folded echo is read at its minute and finds nothing new
+  t += 60_000;
+  await sync.sync(a);
+  // neither window widened: a teammate's edit next is read within a minute through both
+  expect([sync.hintWindow(a.id), sync.hintWindow(b.id)]).toEqual([60_000, 60_000]);
+  t += 61_000;
+  g.issues.get(12)!.title = "あちらの題";
+  expect(sync.hint(a)).toBe(true);
+  await idle();
+  expect(readStoredIssue(db, a, 12)!.issue.title).toBe("あちらの題");
+  sync.stop();
+});
+
+test("BacklogSync: an edit held at the check before the write is offered with GitHub's value it found (an import reads it); a refused write is held as failed with why (#887)", async () => {
+  const g = fakeGithub();
+  const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
+  db.setWorkspaceBacklogSource(ws.id, S);
+  const sync = makeSync(db, importsToo(g), clock);
+  const idle = async () => {
+    for (let i = 0; i < 200 && sync.read(ws).syncing; i++) await Bun.sleep(2);
+  };
+  editStoredIssue(db, S, 12, { title: "手元の題" });
+  g.issues.get(12)!.title = "GitHub の題";
+  await sync.send(ws);
+  await Bun.sleep(5);
+  await idle();
+  expect(g.writes).toEqual([]);
+  const held = readStoredIssue(db, ws, 12)!.held;
+  expect(held).toEqual([expect.objectContaining({ field: "title", status: "conflict", conflict: expect.objectContaining({ base: "PBI", local: "手元の題", remote: "GitHub の題", remoteRead: true }) })]);
+
+  // GitHub refuses the write (403 on that Issue): failed, held with GitHub's reason, never told as sent
+  db.resolveBacklogConflict(S, held[0]!.operation, "remote", held[0]!.conflict!.revision);
+  editStoredIssue(db, S, 12, { body: "書けない本文" });
+  g.fail.push({ match: (a) => a.includes("PATCH"), status: 403 });
+  await sync.send(ws);
+  expect(readStoredIssue(db, ws, 12)!.held).toEqual([expect.objectContaining({ field: "body", status: "failed", reason: expect.stringContaining("403"), conflict: null })]);
+  expect(g.issues.get(12)!.body).toBe("本文");
+});
+
+test("a post left sending by a run that broke off is looked for, not posted again; an answer with no id is unknown", async () => {
+  const g = fakeGithub();
+  answerStoredDecision(db, S, 12, "途中で切れた");
+  // GitHub took it, but its answer had no id: the result cannot be stored
+  const gh: GhRunner = async (args, cwd) => {
+    const r = await g.gh(args, cwd);
+    return args.includes("POST") ? { ...r, stdout: r.stdout.replace(/"node_id":"[^"]+",/, "") } : r;
+  };
+  expect(await send(gh)).toBe(0);
+  expect(statuses()[0]).toEqual(["comment", null, "unknown"]);
+  // and one left sending without a restart in between
+  db.setBacklogOperationResult(db.listPendingBacklogOperations(S)[0]!.id, { status: "sending" });
+  expect(await send(g.gh)).toBe(2);
+  expect(g.issues.get(12)!.comments).toHaveLength(1);
+});
+
+test("an outage: a field edit waits a minute, then twice as long, and after five tries is failed — not retried for ever", async () => {
+  const g = fakeGithub();
+  editStoredIssue(db, S, 12, { title: "障害の間" });
+  const waits: number[] = [];
+  for (let k = 0; k < 5; k++) {
+    g.fail.push({ match: (a) => a.includes("PATCH"), status: 502 });
+    const before = t;
+    expect(await send(g.gh)).toBe(0);
+    const op = db.listPendingBacklogOperations(S)[0]!;
+    if (op.status === "failed") break;
+    waits.push(op.retryAt! - before);
+    t = op.retryAt!;
+  }
+  expect(waits).toEqual([60_000, 120_000, 240_000, 480_000]);
+  expect(db.listPendingBacklogOperations(S)[0]).toMatchObject({ status: "failed", attempt: 5, error: expect.stringContaining("5 回") });
+  // and it is not sent again by itself
+  g.writes.length = 0;
+  t += 3_600_000;
+  expect(await send(g.gh)).toBe(0);
+  expect(g.writes).toEqual([]);
+});
+
+test("GitHub's \"Something went wrong\" is an outage: a create's step waits and goes on, it is not failed at once; one failed so before is sent again when the database opens", async () => {
+  const g = fakeGithub();
+  const wrong = "gh: Something went wrong while executing your query on 2026-10-21T22:52:17Z. Please include `AE90:1` when reporting this issue.";
+  const { localId } = createStoredIssue(db, S, { title: "Task: 障害の間", body: "", labels: [], milestone: null, parent: 12, fields: { Status: "Ready" } });
+  g.fail.push({ match: (a) => a.some((x) => x.includes("addSubIssue")), status: 200, stderr: wrong });
+  expect(await send(g.gh)).toBe(0);
+  expect(db.getBacklogOperation(localId)).toMatchObject({ status: "pending", retryAt: t + 60_000 });
+  t += 60_000;
+  expect(await send(g.gh)).toBe(1);
+  const made = [...g.issues.values()].filter((i) => i.title === "Task: 障害の間");
+  expect(made).toHaveLength(1);
+  expect(made[0]).toMatchObject({ parent: 12 });
+  // what the sender before the fix left: failed at once with GitHub's words — the one that gave up after 5 tries stays failed
+  const again = createStoredIssue(db, S, { title: "Task: 前に失敗", body: "", labels: [], milestone: null, parent: null, fields: null }).localId;
+  const tried = createStoredIssue(db, S, { title: "Task: 5 回", body: "", labels: [], milestone: null, parent: null, fields: null }).localId;
+  await send(g.gh);
+  db.sqlite.query("UPDATE backlog_operations SET status = 'failed', error = ? WHERE id = ?").run(`gh api graphql: ${wrong}`, again);
+  db.sqlite.query("UPDATE backlog_operations SET status = 'failed', error = ? WHERE id = ?").run(`5 回送れませんでした: gh api graphql: ${wrong}`, tried);
+  db.close();
+  db = new Db(join(dir, "switchboard.db"));
+  expect(db.getBacklogOperation(again)).toMatchObject({ status: "pending", attempt: 0 });
+  expect(db.getBacklogOperation(tried)).toMatchObject({ status: "failed" });
+  await send(g.gh);
+  expect(db.getBacklogOperation(again)).toMatchObject({ status: "done" });
+  expect([...g.issues.values()].filter((i) => i.title === "Task: 前に失敗")).toHaveLength(1);
+});
+
+test("the marker a post left is not shown, and an unchanged body (CRLF too) is not sent back without it", async () => {
+  const g = fakeGithub();
+  const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
+  db.setWorkspaceBacklogSource(ws.id, S);
+  const { localId } = createStoredIssue(db, S, { title: "印の付く Issue", body: "本文", labels: [], milestone: null, parent: null, fields: null });
+  expect(await send(g.gh)).toBe(1);
+  const made = readStoredIssue(db, ws, localId)!;
+  expect(made.issue.body).toBe("本文");
+  expect(editStoredIssue(db, S, localId, { body: "本文" }).operations).toEqual([]);
+  // GitHub gave it back with CRLF
+  const rec = db.getBacklogRecord({ ...S, objectKind: "issue", externalId: db.getBacklogOperation(localId)!.target })!;
+  db.putBacklogSnapshot(S, { records: [{ objectKind: "issue", externalId: rec.externalId, remote: { ...(rec.remote as BacklogIssueData), body: (rec.remote as BacklogIssueData).body.replaceAll("\n", "\r\n") }, fetchState: "fetched" }], cursor: null, syncedAt: 2 });
+  expect(readStoredIssue(db, ws, localId)!.issue.body).toBe("本文");
+});
+
+test("a daemon that must not write (the candidate on a copy of the database) sends nothing", async () => {
+  const g = fakeGithub();
+  const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
+  db.setWorkspaceBacklogSource(ws.id, S);
+  answerStoredDecision(db, S, 12, "候補からは送らない");
+  await makeSync(db, g.gh, clock, undefined, false).send(ws);
+  expect(g.writes).toEqual([]);
+  expect(statuses().map((o) => o[2])).toEqual(["pending", "pending"]);
+});
+
+test("gh that cannot start sent nothing: a post waits as it was, not unknown", async () => {
+  answerStoredDecision(db, S, 12, "gh が無い");
+  await expect(send(async () => ({ code: 127, stdout: "", stderr: "gh を起動できません: not found" }))).rejects.toMatchObject({ kind: "offline" });
+  expect(statuses()[0]).toEqual(["comment", null, "pending"]);
+});
+
+test("a GraphQL error GitHub answered (an input it refuses) fails the operation at once, not after five tries", async () => {
+  const g = fakeGithub();
+  editStoredIssue(db, S, 12, { fields: { Status: "Ready" } });
+  const gh: GhRunner = async (args, cwd) =>
+    args.some((a) => a.includes("updateProjectV2ItemFieldValue"))
+      ? { code: 1, stdout: `HTTP/2.0 200 OK\ncontent-type: application/json\n\n${JSON.stringify({ errors: [{ type: "UNPROCESSABLE", message: "invalid value" }] })}`, stderr: "" }
+      : g.gh(args, cwd);
+  expect(await send(gh)).toBe(0);
+  expect(db.listPendingBacklogOperations(S)[0]).toMatchObject({ status: "failed", attempt: 1 });
+});
+
+test("a post whose result is unknown and not found stays unknown: nothing is posted again by itself", async () => {
+  const g = fakeGithub();
+  const { localId } = createStoredIssue(db, S, { title: "新しい", body: "", labels: [], milestone: null, parent: null, fields: null });
+  db.setBacklogOperationResult(localId, { status: "sending" });
+  db.recoverBacklogOperations();
+  expect(await send(g.gh)).toBe(0);
+  expect(await send(g.gh)).toBe(0);
+  expect(statuses()).toEqual([["create", null, "unknown"]]);
+  expect(g.writes).toEqual([]);
+  expect(g.issues.size).toBe(2); // #12 and #3 only
+});
+
+test("a limit stops sending until GitHub's time, then it goes on; an auth refusal stops the run without failing anything", async () => {
+  const g = fakeGithub();
+  editStoredIssue(db, S, 12, { title: "制限のあと" });
+  g.fail.push({ match: (a) => a.includes("PATCH"), status: 403, headers: `x-ratelimit-remaining: 0\nx-ratelimit-reset: ${(t + 60_000) / 1000}\n` });
+  await expect(send(g.gh)).rejects.toBeInstanceOf(Limit);
+  expect(db.listPendingBacklogOperations(S)[0]).toMatchObject({ status: "pending", retryAt: t + 60_000 });
+  g.writes.length = 0;
+  expect(await send(g.gh)).toBe(0); // before the time: not asked
+  expect(g.writes).toEqual([]);
+  t += 60_000;
+  expect(await send(g.gh)).toBe(1);
+  expect(g.issues.get(12)!.title).toBe("制限のあと");
+
+  // the login refused: the run stops, nothing is failed for it, and the next send (a token renewed) goes on
+  editStoredIssue(db, S, 12, { title: "認証切れ" });
+  answerStoredDecision(db, S, 12, "B");
+  g.fail.push({ match: (a) => a.includes("PATCH"), status: 401 });
+  const auth = await send(g.gh).catch((e) => e);
+  expect(auth).toMatchObject({ kind: "auth" });
+  expect(db.listPendingBacklogOperations(S).map((o) => [o.status, o.attempt, o.retryAt])).toEqual([["pending", 0, null], ["pending", 0, null], ["pending", 0, null]]);
+  expect(g.issues.get(12)!.comments).toHaveLength(0);
+  expect(await send(g.gh)).toBe(3);
+  expect(g.issues.get(12)!.title).toBe("認証切れ");
+});
+
+test("a new Issue is made once with its marker, put in the Project with its fields and under its parent; its local id finds it", async () => {
+  const g = fakeGithub();
+  const { localId } = createStoredIssue(db, S, { title: "Task: 新しい", body: "本文", labels: ["type:task"], milestone: null, parent: 12, fields: { Status: "Ready" } });
+  editStoredIssue(db, S, localId, { title: "Task: 直した" });
+  // an outage after the Issue was made: the steps after it go on without making it again
+  g.fail.push({ match: (a) => a.some((x) => x.includes("addSubIssue")), status: 502 });
+  expect(await send(g.gh)).toBe(0);
+  t += 3_600_000;
+  expect(await send(g.gh)).toBe(1);
+  const made = [...g.issues.values()].filter((i) => i.title === "Task: 直した");
+  expect(made).toHaveLength(1);
+  expect(made[0]).toMatchObject({ parent: 12, labels: ["type:task"] });
+  expect(made[0]!.body).toMatch(/^本文\n\n<!-- switchboard-op:/);
+  expect([...g.items.values()].filter((i) => i.issue === made[0]!.node_id)).toEqual([{ issue: made[0]!.node_id, fields: { Status: "Ready" } }]);
+  // the record took the Issue's id when it was made, before the step that failed
+  expect(db.getBacklogRecord({ ...S, objectKind: "issue", externalId: `local:${localId}` })).toBeNull();
+  const op = db.getBacklogOperation(localId)!;
+  expect(op).toMatchObject({ status: "done", remoteId: made[0]!.node_id, target: made[0]!.node_id });
+  expect(db.getBacklogRecord({ ...S, objectKind: "issue", externalId: made[0]!.node_id })?.remote).toMatchObject({ number: made[0]!.number, title: "Task: 直した" });
+});
+
+test("a new Issue the Project's auto-add put in first is not failed: the item there takes its fields", async () => {
+  const g = fakeGithub();
+  g.state.autoAdd = true;
+  const { localId } = createStoredIssue(db, S, { title: "Task: 自動で入る", body: "", labels: [], milestone: null, parent: null, fields: { Status: "Ready" } });
+  expect(await send(g.gh)).toBe(1);
+  const made = [...g.issues.values()].find((i) => i.title === "Task: 自動で入る")!;
+  expect(db.getBacklogOperation(localId)).toMatchObject({ status: "done", remoteId: made.node_id });
+  expect([...g.items.values()].filter((i) => i.issue === made.node_id)).toEqual([{ issue: made.node_id, fields: { Status: "Ready" } }]);
+});
+
+test("a create failed before by the auto-add's item is sent again when the database opens: its Issue is not made twice", async () => {
+  const g = fakeGithub();
+  g.state.autoAdd = true;
+  const { localId } = createStoredIssue(db, S, { title: "Task: 前に失敗", body: "", labels: [], milestone: null, parent: null, fields: { Status: "Ready" } });
+  // what the sender before the fix left: the Issue made, the add refused, the operation failed
+  g.fail.push({ match: (a) => a.some((x) => x.includes("addProjectV2ItemById")), status: 200 });
+  expect(await send(g.gh)).toBe(0);
+  db.sqlite.query("UPDATE backlog_operations SET error = 'gh api graphql: gh: Content already exists in this project' WHERE id = ?").run(localId);
+  expect(db.getBacklogOperation(localId)).toMatchObject({ status: "failed" });
+  db.close();
+  db = new Db(join(dir, "switchboard.db"));
+  expect(db.getBacklogOperation(localId)).toMatchObject({ status: "pending", attempt: 0 });
+  expect(await send(g.gh)).toBe(1);
+  expect([...g.issues.values()].filter((i) => i.title === "Task: 前に失敗")).toHaveLength(1);
+  const made = [...g.issues.values()].find((i) => i.title === "Task: 前に失敗")!;
+  expect(db.getBacklogOperation(localId)).toMatchObject({ status: "done" });
+  expect(g.items.get(`PVTI_${made.node_id}`)).toEqual({ issue: made.node_id, fields: { Status: "Ready" } });
+});
+
+test("an add to the Project failed before as already there is sent again and takes the item; a create with no Issue made stays failed", async () => {
+  const g = fakeGithub();
+  g.state.autoAdd = true;
+  g.items.set("PVTI_I_3", { issue: "I_3", fields: {} });
+  editStoredIssue(db, S, 3, { project: true });
+  const { localId } = createStoredIssue(db, S, { title: "作れていない", body: "", labels: [], milestone: null, parent: null, fields: null });
+  db.sqlite.query("UPDATE backlog_operations SET status = 'failed', error = 'gh api graphql: gh: Content already exists in this project'").run();
+  db.close();
+  db = new Db(join(dir, "switchboard.db"));
+  expect(db.getBacklogOperation(localId)).toMatchObject({ status: "failed" });
+  const member = db.listPendingBacklogOperations(S).find((o) => o.field === "member")!;
+  expect(member.status).toBe("pending");
+  await send(g.gh);
+  expect(db.getBacklogOperation(member.id)).toMatchObject({ status: "done", remoteId: "PVTI_I_3" });
+  expect([...g.issues.values()].filter((i) => i.title === "作れていない")).toHaveLength(0);
+});
+
+/* ---------- the forge operation of the repository's service (#920) ---------- */
+
+test("an operation is sent through its service's forge operation: a service not supported, or a value that signs in, is held as failed and nothing is sent", async () => {
+  const g = fakeGithub();
+  // a value that signs in, written past the edit's own check (a copy restored from an older store): checked again right before it goes out
+  editStoredIssue(db, S, 12, { title: "直した題" });
+  db.sqlite.query("UPDATE backlog_operations SET payload = ?").run(JSON.stringify("ghp_" + "a".repeat(36)));
+  expect(await send(g.gh)).toBe(0);
+  expect(db.listPendingBacklogOperations(S).map((o) => [o.status, o.error?.includes("認証に使える値")])).toEqual([["failed", true]]);
+  expect(g.writes).toEqual([]);
+  expect(g.issues.get(12)!.title).toBe("PBI");
+  // another service's repository: the same operation is not sent some other way, it says the service is not supported
+  const L: BacklogSource = { ...S, service: "gitlab" as "github", host: "gitlab.example.com" };
+  seed(db);
+  db.putBacklogSnapshot(L, { records: [{ objectKind: "issue", externalId: "I_12", remote: { number: 12, title: "PBI", url: "", state: "OPEN", stateReason: null, body: "本文", labels: [], milestone: null, parent: null, subIssues: [], createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z", closedAt: null }, fetchState: "fetched" }], cursor: null, syncedAt: 1 });
+  editStoredIssue(db, L, 12, { title: "別のサービス" });
+  expect(await sendGithubOperations(g.gh, db, dir, L, clock)).toBe(0);
+  expect(db.listPendingBacklogOperations(L).map((o) => [o.status, o.error])).toEqual([["failed", "サービス gitlab には対応していません（対応: github）"]]);
+  expect(g.writes).toEqual([]);
+});
+
+test("forgeKind: a Project item and its fields are project, a create and a comment their own, any other field write", () => {
+  expect(forgeKind({ kind: "create", field: null, targetKind: "issue" })).toBe("create");
+  expect(forgeKind({ kind: "comment", field: null, targetKind: "comment" })).toBe("comment");
+  expect(forgeKind({ kind: "set", field: "member", targetKind: "project-item" })).toBe("project");
+  expect(forgeKind({ kind: "set", field: "field:Status", targetKind: "project-item" })).toBe("project");
+  for (const field of ["title", "body", "state", "label:type:pbi", "milestone", "parent"]) expect(forgeKind({ kind: "set", field, targetKind: "issue" })).toBe("write");
+});

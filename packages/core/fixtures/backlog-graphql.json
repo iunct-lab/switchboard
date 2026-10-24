@@ -1,0 +1,442 @@
+[
+ {
+  "data": {
+   "repository": {
+    "issues": {
+     "pageInfo": {
+      "hasNextPage": true,
+      "endCursor": "CURSOR1"
+     },
+     "nodes": [
+      {
+       "number": 306,
+       "title": "PBI: 判断待ちの PBI",
+       "url": "https://github.com/acme/app/issues/306",
+       "createdAt": "2026-09-20T06:00:00Z",
+       "updatedAt": "2026-09-22T03:00:00Z",
+       "body": "## ユーザーストーリー\n…\n\n**Story Points**: 3\n",
+       "labels": {
+        "nodes": [
+         {
+          "name": "type:pbi"
+         },
+         {
+          "name": "needs-decision"
+         }
+        ]
+       },
+       "subIssuesSummary": {
+        "total": 2,
+        "completed": 1
+       },
+       "projectItems": {
+        "nodes": [
+         {
+          "project": {
+           "number": 7
+          },
+          "fieldValues": {
+           "nodes": [
+            {
+             "name": "Done",
+             "field": {
+              "name": "Status"
+             }
+            }
+           ]
+          }
+         },
+         {
+          "project": {
+           "number": 11
+          },
+          "fieldValues": {
+           "nodes": [
+            {},
+            {
+             "name": "In progress",
+             "field": {
+              "name": "Status"
+             }
+            },
+            {
+             "name": "P1",
+             "field": {
+              "name": "Priority"
+             }
+            },
+            {
+             "number": 3,
+             "field": {
+              "name": "Story Points"
+             }
+            }
+           ]
+          }
+         }
+        ]
+       }
+      },
+      {
+       "number": 305,
+       "title": "PBI: 実装中の PBI",
+       "url": "https://github.com/acme/app/issues/305",
+       "createdAt": "2026-09-20T05:00:00Z",
+       "updatedAt": "2026-09-27T05:00:00Z",
+       "body": "**Story Points**: 5\n",
+       "labels": {
+        "nodes": [
+         {
+          "name": "type:pbi"
+         }
+        ]
+       },
+       "subIssuesSummary": {
+        "total": 3,
+        "completed": 1
+       },
+       "projectItems": {
+        "nodes": [
+         {
+          "project": {
+           "number": 7
+          },
+          "fieldValues": {
+           "nodes": [
+            {
+             "name": "Done",
+             "field": {
+              "name": "Status"
+             }
+            }
+           ]
+          }
+         },
+         {
+          "project": {
+           "number": 11
+          },
+          "fieldValues": {
+           "nodes": [
+            {},
+            {
+             "name": "In review",
+             "field": {
+              "name": "Status"
+             }
+            },
+            {
+             "name": "P0",
+             "field": {
+              "name": "Priority"
+             }
+            },
+            {
+             "number": 5,
+             "field": {
+              "name": "Story Points"
+             }
+            }
+           ]
+          }
+         }
+        ]
+       }
+      },
+      {
+       "number": 304,
+       "title": "PBI: Ready の PBI",
+       "url": "https://github.com/acme/app/issues/304",
+       "createdAt": "2026-09-20T04:00:00Z",
+       "updatedAt": "2026-09-20T04:30:00Z",
+       "body": "**Story Points**: 2\n",
+       "labels": {
+        "nodes": [
+         {
+          "name": "type:pbi"
+         }
+        ]
+       },
+       "subIssuesSummary": {
+        "total": 2,
+        "completed": 0
+       },
+       "projectItems": {
+        "nodes": [
+         {
+          "project": {
+           "number": 7
+          },
+          "fieldValues": {
+           "nodes": [
+            {
+             "name": "Done",
+             "field": {
+              "name": "Status"
+             }
+            }
+           ]
+          }
+         },
+         {
+          "project": {
+           "number": 11
+          },
+          "fieldValues": {
+           "nodes": [
+            {},
+            {
+             "name": "Ready",
+             "field": {
+              "name": "Status"
+             }
+            },
+            {
+             "name": "P2",
+             "field": {
+              "name": "Priority"
+             }
+            },
+            {
+             "number": 2,
+             "field": {
+              "name": "Story Points"
+             }
+            }
+           ]
+          }
+         }
+        ]
+       }
+      },
+      {
+       "number": 308,
+       "title": "PBI: 利用者確認の項目がある実装中の PBI",
+       "url": "https://github.com/acme/app/issues/308",
+       "createdAt": "2026-09-01T08:00:00Z",
+       "updatedAt": "2026-09-13T08:00:00Z",
+       "body": "## ユーザーストーリー\n利用者として、確認を待っている項目を画面で答えたい。\n\n## 到達点 / 受け入れ条件\n- [x] 1. 一覧が出る（検証: backlog.test.ts）（利用者確認: 画面で一覧を見た）\n- [ ] 2. ホストで動く（検証: 実機）（利用者確認: クラウドホストの画面で一覧が出る）\n- [ ] 3. 並びが Priority 順（検証: backlog.test.ts）\n- [ ] 4. スマホで読める（利用者確認: スマホで開いて文字が切れない）\n\n```markdown\n- [ ] 見本（利用者確認: フェンスの中は数えない）\n```\n\n## スコープ外\n- [ ] 節の外（利用者確認: 数えない）\n\n**Story Points**: 3\n",
+       "labels": {
+        "nodes": [
+         {
+          "name": "type:pbi"
+         }
+        ]
+       },
+       "subIssuesSummary": {
+        "total": 2,
+        "completed": 2
+       },
+       "projectItems": {
+        "nodes": [
+         {
+          "project": {
+           "number": 11
+          },
+          "fieldValues": {
+           "nodes": [
+            {
+             "name": "In review",
+             "field": {
+              "name": "Status"
+             }
+            },
+            {
+             "name": "P1",
+             "field": {
+              "name": "Priority"
+             }
+            },
+            {
+             "number": 3,
+             "field": {
+              "name": "Story Points"
+             }
+            }
+           ]
+          }
+         }
+        ]
+       }
+      }
+     ]
+    }
+   }
+  }
+ },
+ {
+  "data": {
+   "repository": {
+    "issues": {
+     "pageInfo": {
+      "hasNextPage": false,
+      "endCursor": "CURSOR2"
+     },
+     "nodes": [
+      {
+       "number": 303,
+       "title": "PBI: 分解待ちの PBI",
+       "url": "https://github.com/acme/app/issues/303",
+       "createdAt": "2026-09-20T03:00:00Z",
+       "updatedAt": "2026-09-20T03:30:00Z",
+       "body": "**Story Points**: 8\n",
+       "labels": {
+        "nodes": [
+         {
+          "name": "type:pbi"
+         }
+        ]
+       },
+       "subIssuesSummary": {
+        "total": 0,
+        "completed": 0
+       },
+       "projectItems": {
+        "nodes": [
+         {
+          "project": {
+           "number": 7
+          },
+          "fieldValues": {
+           "nodes": [
+            {
+             "name": "Done",
+             "field": {
+              "name": "Status"
+             }
+            }
+           ]
+          }
+         },
+         {
+          "project": {
+           "number": 11
+          },
+          "fieldValues": {
+           "nodes": [
+            {},
+            {
+             "name": "Backlog",
+             "field": {
+              "name": "Status"
+             }
+            },
+            {
+             "name": "P1",
+             "field": {
+              "name": "Priority"
+             }
+            },
+            {
+             "number": 8,
+             "field": {
+              "name": "Story Points"
+             }
+            }
+           ]
+          }
+         }
+        ]
+       }
+      },
+      {
+       "number": 302,
+       "title": "要望: PBI になっていない要望",
+       "url": "https://github.com/acme/app/issues/302",
+       "createdAt": "2026-09-20T02:00:00Z",
+       "updatedAt": "2026-09-20T02:30:00Z",
+       "body": "## 原文\n\n````text\n#12 のような番号を含む原文\n````\n\n## 派生 PBI\n（まだ無い）\n",
+       "labels": {
+        "nodes": [
+         {
+          "name": "type:request"
+         }
+        ]
+       },
+       "subIssuesSummary": {
+        "total": 0,
+        "completed": 0
+       },
+       "projectItems": {
+        "nodes": []
+       }
+      },
+      {
+       "number": 301,
+       "title": "要望: PBI になった要望",
+       "url": "https://github.com/acme/app/issues/301",
+       "createdAt": "2026-09-20T01:00:00Z",
+       "updatedAt": "2026-09-20T01:30:00Z",
+       "body": "## 原文\n\n````text\n元の文\n````\n\n## 派生 PBI\n- #303 PBI: 分解待ちの PBI\n\n## 解釈メモ\n- なし\n",
+       "labels": {
+        "nodes": [
+         {
+          "name": "type:request"
+         }
+        ]
+       },
+       "subIssuesSummary": {
+        "total": 0,
+        "completed": 0
+       },
+       "projectItems": {
+        "nodes": []
+       }
+      },
+      {
+       "number": 307,
+       "title": "PBI: Task が全部閉じた実装中の PBI",
+       "url": "https://github.com/acme/app/issues/307",
+       "createdAt": "2026-09-10T07:00:00Z",
+       "updatedAt": "2026-09-12T07:00:00Z",
+       "body": "**Story Points**: 3\n",
+       "labels": {
+        "nodes": [
+         {
+          "name": "type:pbi"
+         }
+        ]
+       },
+       "subIssuesSummary": {
+        "total": 2,
+        "completed": 2
+       },
+       "projectItems": {
+        "nodes": [
+         {
+          "project": {
+           "number": 11
+          },
+          "fieldValues": {
+           "nodes": [
+            {},
+            {
+             "name": "In progress",
+             "field": {
+              "name": "Status"
+             }
+            },
+            {
+             "name": "P2",
+             "field": {
+              "name": "Priority"
+             }
+            },
+            {
+             "number": 3,
+             "field": {
+              "name": "Story Points"
+             }
+            }
+           ]
+          }
+         }
+        ]
+       }
+      }
+     ]
+    }
+   }
+  }
+ }
+]

@@ -1,0 +1,20 @@
+{
+  "name": "@switchboard/adapter-codex",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "bun check -p tsconfig.json",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@switchboard/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.9.0"
+  }
+}

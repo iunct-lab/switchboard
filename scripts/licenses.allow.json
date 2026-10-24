@@ -1,0 +1,5 @@
+{
+  "_notes": "Licenses a dependency may have (docs/design/licenses.md). Permissive licenses only; CC-BY-4.0 is here for caniuse-lite, a data package. An exception names one package and license and needs a reason and an until date (YYYY-MM-DD) when it is looked at again; after that date it fails again.",
+  "allowed": ["MIT", "ISC", "0BSD", "BSD-2-Clause", "BSD-3-Clause", "Apache-2.0", "CC0-1.0", "Unlicense", "BlueOak-1.0.0", "Python-2.0", "CC-BY-4.0"],
+  "exceptions": []
+}

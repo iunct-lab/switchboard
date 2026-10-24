@@ -1,0 +1,513 @@
+:root {
+  --bg: #f5f6f3; --bg2: #eceee9; --panel: #ffffff; --line: #d5d9d2; --line2: #e6e9e3;
+  --ink: #1b232c; --ink2: #4b5563; --ink3: #7b8592;
+  --acc: #0f6e73; --acc-soft: #d9ecec; --acc-ink: #0a4e52;
+  --amber: #b7791f; --amber-soft: #f6e7c8; --red: #b4423a; --green: #2f7d4f;
+  --claude: #b85c38; --codex: #3b4252; --dak: #0f6e73;
+  --chrome: #e9ece6; --sel: #e3efef;
+  --sans: "IBM Plex Sans JP", "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", "SF Mono", Menlo, monospace;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15191e; --bg2: #1c2127; --panel: #1f252c; --line: #323a43; --line2: #2a313a;
+    --ink: #e7e9e4; --ink2: #b4bac2; --ink3: #7f8892;
+    --acc: #5fb7ba; --acc-soft: #173a3c; --acc-ink: #9ed8da;
+    --amber: #d9a24a; --amber-soft: #3a2e17; --red: #d9776f; --green: #6fbf8a;
+    --claude: #d98a66; --codex: #aeb6c4; --dak: #5fb7ba;
+    --chrome: #232930; --sel: #1e3436;
+  }
+}
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--ink); font: 13px/1.55 var(--sans); -webkit-font-smoothing: antialiased; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 5px 12px; }
+button:disabled { opacity: .5; cursor: default; }
+button.pri { background: var(--acc); border-color: var(--acc); color: #fff; }
+button.ghost, .btn.ghost { border-color: transparent; color: var(--ink2); background: transparent; }
+button:focus-visible, a:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--acc); outline-offset: 1px; }
+a.btn { display: inline-block; border: 1px solid var(--line); border-radius: 4px; padding: 5px 12px; text-decoration: none; color: var(--ink); background: var(--panel); }
+input, select, textarea { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; }
+textarea { width: 100%; resize: vertical; }
+code, pre, .mono, .num { font-family: var(--mono); }
+.num { font-variant-numeric: tabular-nums; }
+h5 { margin: 0 0 6px; font: 500 10px/1.2 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--ink3); }
+.muted, .hint { color: var(--ink3); font-size: 12px; }
+.hint b { color: var(--ink2); font-weight: 500; }
+
+/* a column, not a fixed 3-row grid: banners between the chrome and the body used to take the body's row and push it out of view */
+.app { height: 100%; display: flex; flex-direction: column; }
+.app > * { flex: none; }
+.app > .body { flex: 1; min-height: 0; }
+.chrome { height: 36px; background: var(--chrome); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 14px; padding: 0 12px; font-size: 12px; }
+.brand { font-weight: 700; letter-spacing: .02em; }
+.tabs { display: flex; gap: 2px; }
+.tabs button { border: 0; background: transparent; padding: 6px 12px; border-radius: 4px 4px 0 0; color: var(--ink3); }
+.tabs button.on { background: var(--bg); color: var(--ink); }
+.conn { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--ink3); }
+.conn.ok::before, .conn.off::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; background: var(--green); }
+.conn.off::before { background: var(--red); }
+.rescue-link { font-family: var(--mono); font-size: 10.5px; color: var(--ink3); white-space: nowrap; }
+.new-version { font-family: var(--mono); font-size: 10.5px; color: var(--ink3); white-space: nowrap; background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
+.banner { padding: 8px 14px; display: flex; justify-content: space-between; align-items: center; }
+.banner.error { background: color-mix(in srgb, var(--red) 14%, transparent); }
+
+.body { display: grid; grid-template-columns: 220px 1fr; min-height: 0; }
+.body:has(.side) { grid-template-columns: 220px 1fr 300px; }
+
+.rail { background: var(--chrome); border-right: 1px solid var(--line); padding: 10px 8px; display: flex; flex-direction: column; min-height: 0; }
+.rail .grp { margin: 12px 6px 4px; font: 500 10px/1.2 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--ink3); }
+.rail .it { width: 100%; text-align: left; display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 5px 8px; border: 0; background: transparent; border-radius: 4px; color: var(--ink2); }
+.rail .it.on { background: var(--sel); color: var(--ink); }
+.rail .it .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail .it .m { font-family: var(--mono); font-size: 10px; color: var(--ink3); }
+.tag { display: inline-block; margin-left: 6px; font: 400 9.5px/1.4 var(--mono); padding: 0 5px; border: 1px solid var(--line); border-radius: 3px; color: var(--ink3); }
+.tag.origin { border-color: var(--amber); color: var(--amber); white-space: nowrap; flex: none; }
+.tag.shadow { border-color: var(--dak); color: var(--dak); white-space: nowrap; flex: none; }
+.tag.shadow.stopped { opacity: .55; }
+.composer-hint { padding: 0 14px 8px; }
+.hint .warn { color: var(--amber); }
+
+.dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--line); display: inline-block; }
+.dot.run { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 25%, transparent); }
+.dot.wait { background: var(--amber); }
+.dot.err { background: var(--red); }
+.dot.ok { background: var(--green); }
+@media (prefers-reduced-motion: no-preference) { .dot.run { animation: pulse 1.8s ease-in-out infinite; } }
+@keyframes pulse { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--green) 10%, transparent); } }
+
+.main { padding: 16px 20px; overflow-y: auto; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.card { background: var(--panel); border: 1px solid var(--line2); border-radius: 4px; padding: 12px 14px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.row { display: flex; align-items: center; gap: 8px; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--line2); width: 100%; }
+.row:last-child { border-bottom: 0; }
+.row.head { padding-top: 0; border-bottom: 0; }
+.row.sub { border-bottom: 0; padding-bottom: 0; }
+.row.link { background: transparent; border-left: 0; border-right: 0; border-top: 0; border-radius: 0; text-align: left; padding: 7px 0; }
+.row .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .m { font-family: var(--mono); font-size: 10.5px; color: var(--ink3); white-space: nowrap; }
+.bigno { font-family: var(--mono); font-size: 24px; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.bigno small { font-size: 11px; color: var(--ink3); margin-left: 8px; font-family: var(--sans); }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12px; }
+/* Labels stay on one line and the value column absorbs the wrapping: a long unbreakable token in a value (a model
+   id, an env var name in a routing reason) would otherwise shrink the label column to one character per line.
+   `.fm-row` children span the whole grid row instead of being a label/value pair (Knowledge frontmatter, the
+   self-dev check list), so they are excluded — nowrap would make those blocks overflow sideways. */
+.kv > span:not(.fm-row):nth-child(odd) { color: var(--ink3); white-space: nowrap; }
+.kv > span:not(.fm-row):nth-child(even) { min-width: 0; overflow-wrap: anywhere; }
+.kv .num { text-align: right; }
+.kv .num.warn { color: var(--amber); }
+.meter { display: block; height: 5px; background: var(--bg2); border-radius: 3px; overflow: hidden; margin-top: 5px; }
+.meter i { display: block; height: 100%; background: var(--acc); }
+.meter.warn i { background: var(--amber); }
+
+.compose .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 8px; }
+.compose label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--ink3); }
+.compose .runners { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.runner-opt { display: inline-flex; align-items: center; gap: 4px; padding: 3px 6px; border: 1px solid transparent; border-radius: 4px; }
+.runner-opt.sel { border-color: var(--line); background: var(--bg2); }
+.runner-opt.off { opacity: .45; }
+.runner-opt input { margin: 0; }
+.compose .model { width: 200px; font-family: var(--mono); font-size: 11.5px; }
+.compose .mode { max-width: 240px; font-size: 12px; }
+/* Model select (#155): wide enough on Home for "自動選択のモデル: <label>（<id>）"; never wider than the Brief column. */
+select.model-select { max-width: 100%; min-width: 0; font-size: 12px; }
+.compose select.model-select { max-width: 340px; }
+.hint.warn { color: var(--amber); }
+.compose .hint.warn { margin-top: 6px; }
+
+.pill { display: inline-block; font: 400 10px/1.5 var(--mono); padding: 0 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink2); white-space: nowrap; }
+.pill.claude { border-color: var(--claude); color: var(--claude); }
+.pill.codex { border-color: var(--codex); color: var(--codex); }
+.pill.dak { border-color: var(--dak); color: var(--dak); }
+
+.task .task-head { display: flex; align-items: baseline; gap: 12px; }
+/* The head stays at the top of the scroll area (#1313): a long conversation's end and the head's tabs / 詳細 are seen together.
+   `.main`'s top padding moves into the head, so the stuck head covers what scrolls under it from the very top. */
+.main.task { padding-top: 0; }
+.task .task-head { position: sticky; top: 0; z-index: 1; background: var(--bg); padding-top: 16px; padding-bottom: 4px; }
+/* A long title would make the stuck head cover the conversation: it is cut at two lines (the rail's row has it in full on
+   hover), and the controls keep their own width and go to the next line instead of being squeezed into a column. */
+.task .task-head { flex-wrap: wrap; }
+.task .task-head > :not(h2, .hint) { flex: none; white-space: nowrap; }
+.task .task-head h2 { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.task h2 { margin: 0; font-size: 16px; font-weight: 700; }
+.status { font: 400 10.5px/1.6 var(--mono); padding: 0 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink3); }
+.status.running { border-color: var(--green); color: var(--green); }
+.status.waiting { border-color: var(--amber); color: var(--amber); }
+.status.error { border-color: var(--red); color: var(--red); }
+.transcript { flex: 1; display: flex; flex-direction: column; gap: 8px; max-width: 760px; }
+/* 最新へ (#1315): floats at the bottom of the scroll area while the end of the conversation is out of view; opaque over the
+   text under it (scoped to `.transcript` to outrank `button.ghost`). */
+.transcript .older { align-self: center; }
+.transcript .jump-latest { position: sticky; bottom: 8px; align-self: center; z-index: 1; background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 6px 14px; box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+.msg .who { font: 400 10px/1.4 var(--mono); color: var(--ink3); margin-bottom: 2px; display: flex; gap: 8px; align-items: center; }
+.msg .tx { white-space: pre-wrap; word-break: break-word; }
+.msg.user .tx { background: var(--panel); border: 1px solid var(--line2); border-radius: 4px; padding: 8px 10px; }
+.tool { border: 1px solid var(--line2); border-radius: 4px; background: var(--bg2); }
+.tool .tool-row { width: 100%; display: flex; gap: 10px; align-items: center; border: 0; background: transparent; padding: 5px 10px; font-family: var(--mono); font-size: 11px; color: var(--ink2); text-align: left; }
+.tool .n { color: var(--ink); flex: none; }
+.tool .s { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool .st { flex: none; color: var(--ink3); }
+.tool .dur { flex: none; color: var(--ink3); }
+.tool.ok .st { color: var(--green); }
+.tool.fail .st, .tool.denied .st { color: var(--red); }
+.tool.asking { border-color: var(--amber); }
+.tool.asking .st { color: var(--amber); }
+.tool-detail pre { margin: 0; padding: 8px 10px; border-top: 1px solid var(--line2); font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 240px; overflow: auto; }
+.tool-detail pre.err { color: var(--red); }
+/* copy buttons (#695): always visible (a phone has no hover), outside .tx so selecting the text works as before */
+button.copy { font: 400 10px/1.4 var(--mono); padding: 2px 6px; }
+.msg .who .at { flex: none; color: var(--ink3); }
+.msg .who .copy { margin-left: auto; }
+.msg .who .copy + .copy { margin-left: 0; }
+.tool-detail .copy { display: block; margin: 2px 6px 2px auto; }
+.end { font: 400 11px/1.6 var(--mono); color: var(--ink3); border-top: 1px dashed var(--line); padding-top: 6px; }
+.end.error { color: var(--red); }
+.note { font-size: 12px; color: var(--red); }
+.perm { border: 1px solid var(--amber); background: var(--amber-soft); border-radius: 4px; padding: 10px 12px; display: flex; justify-content: space-between; align-items: center; gap: 12px; max-width: 760px; }
+.perm b { margin-right: 8px; }
+.perm.question { align-items: flex-end; }
+.perm.question .questions { flex: 1; min-width: 0; }
+.perm.question fieldset { border: 0; padding: 0; margin: 8px 0 0; display: flex; flex-direction: column; gap: 4px; }
+.perm.question legend { padding: 0; margin-bottom: 4px; font-weight: 600; }
+.perm.question legend .tag { margin: 0 6px 0 0; }
+.perm.question .opt { display: flex; gap: 6px; align-items: baseline; cursor: pointer; }
+.perm.question .other { max-width: 420px; }
+.perm .tool-name { font-family: var(--mono); font-size: 11px; margin-right: 8px; color: var(--ink2); }
+.perm code { background: var(--panel); padding: 1px 6px; border-radius: 3px; font-size: 11.5px; word-break: break-all; }
+.perm.device-auth .hint { margin-left: 8px; }
+.perm.device-auth .runner-login { margin: 8px 0 4px; }
+.perm.device-auth div.hint { margin-left: 0; }
+.actions { display: flex; gap: 6px; flex: none; }
+.composer { display: flex; gap: 8px; align-items: flex-end; max-width: 760px; }
+.composer textarea { flex: 1; }
+
+.side { border-left: 1px solid var(--line); background: var(--panel); padding: 12px 14px; overflow-y: auto; font-size: 12px; }
+.side .blk { padding: 10px 0; border-bottom: 1px solid var(--line2); }
+.side .blk:last-child { border-bottom: 0; }
+/* The task's instruction in the Brief (#1314): kept as written; a long one scrolls inside its box, not the Brief's other blocks. */
+.brief-instruction .tx { white-space: pre-wrap; word-break: break-word; max-height: 40vh; overflow: auto; }
+.tree { font-family: var(--mono); font-size: 11px; line-height: 1.7; }
+.tree .on { background: var(--sel); display: inline-block; padding: 0 6px; margin-left: -6px; border-radius: 3px; }
+
+.statusbar { height: 24px; border-top: 1px solid var(--line); background: var(--chrome); display: flex; align-items: center; gap: 18px; padding: 0 12px; font: 400 10.5px/1 var(--mono); color: var(--ink3); overflow: hidden; white-space: nowrap; }
+.statusbar > span { flex: none; }
+.statusbar > span:last-child { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.statusbar b { color: var(--ink2); font-weight: 500; }
+.statusbar b.warn { color: var(--amber); }
+
+.suggestion { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.suggestion .warn { color: var(--amber); }
+
+.main.knowledge { display: grid; grid-template-columns: 300px 1fr 340px; gap: 12px; align-items: start; }
+.kn-list input { width: 100%; margin: 6px 0 8px; }
+.kn-tree { max-height: calc(100vh - 220px); overflow-y: auto; }
+.kn-tree .grp { margin: 10px 4px 4px; font: 500 10px/1.2 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--ink3); }
+.kn-tree .it { width: 100%; text-align: left; display: flex; flex-direction: column; gap: 2px; padding: 5px 8px; border: 0; background: transparent; border-radius: 4px; color: var(--ink2); }
+.kn-tree .it.on { background: var(--sel); color: var(--ink); }
+.kn-tree .it .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kn-tree .it .snip { font-size: 11px; color: var(--ink3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kn-tree .tag { font: 500 10px var(--mono); color: var(--ink3); }
+.kn-tree .tag.warn, .fm .warn, .suggestion .warn { color: var(--amber); }
+.kn-doc .kn-body { white-space: pre-wrap; font-size: 12.5px; line-height: 1.6; margin: 10px 0 0; max-height: calc(100vh - 220px); overflow: auto; }
+.fm { display: flex; flex-direction: column; gap: 2px; font-size: 11.5px; }
+.fm .fm-row { display: flex; gap: 8px; }
+.fm .k { color: var(--ink3); min-width: 72px; }
+
+.kn-mat .mat-file .m.changed { color: var(--amber); }
+.kn-mat .mat-file .m.new { color: var(--green); }
+.kn-mat .diff { white-space: pre; overflow: auto; max-height: 260px; font-size: 11.5px; background: var(--bg2); padding: 8px; border-radius: 4px; margin: 4px 0 8px; }
+
+.banner.ok { background: color-mix(in srgb, var(--green) 14%, transparent); font-size: 12px; padding: 6px 12px; border-radius: 4px; }
+.inbox-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+.inbox-row .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.staged .m.pending { color: var(--amber); }
+.staged .m.applied { color: var(--green); }
+.staged .diff { white-space: pre; overflow: auto; max-height: 220px; font-size: 11px; background: var(--bg2); padding: 6px; border-radius: 4px; margin: 4px 0; }
+.staged .actions { display: flex; gap: 6px; margin: 4px 0 8px; }
+
+.subtabs { margin-left: auto; display: flex; gap: 2px; }
+.subtabs button { border: 0; background: transparent; padding: 4px 10px; border-radius: 4px; color: var(--ink3); }
+.subtabs button.on { background: var(--sel); color: var(--ink); }
+.diffs { overflow-y: auto; padding: 8px 0; }
+.artifacts { flex: 1 0 auto; display: flex; flex-direction: column; gap: 6px; padding: 8px 0; }
+.artifacts[hidden] { display: none; }
+.art-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.art-tab { display: inline-flex; border-radius: 4px; background: transparent; }
+.art-tab button { border: 0; background: transparent; padding: 4px 8px; color: var(--ink3); }
+.art-tab.on { background: var(--sel); }
+.art-tab.on button { color: var(--ink); }
+.art-tab .art-x { padding: 4px 6px; opacity: .7; }
+.art-add { display: flex; gap: 4px; margin-left: auto; flex: 1 1 260px; max-width: 520px; }
+.art-add input { flex: 1; min-width: 0; }
+.art-undo { display: flex; align-items: center; gap: 8px; }
+.art-body { flex: 1 0 auto; display: flex; flex-direction: column; gap: 6px; }
+.art-meta { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.art-meta .mono, .art-full-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.art-meta button { flex: none; }
+.art-frame { flex: 1; min-height: 240px; width: 100%; border: 1px solid var(--line, #8883); border-radius: 4px; background: #fff; }
+.art-image { max-width: 100%; max-height: 100%; object-fit: contain; align-self: flex-start; }
+.art-text { flex: 1; min-height: 0; overflow: auto; margin: 0; white-space: pre-wrap; }
+.art-open { display: flex; gap: 8px; align-items: center; }
+/* 全画面 (#1826): above everything on the Task screen, below the passkey check (.recent-check) */
+.art-full { position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column; background: var(--panel); }
+.art-full-bar { display: flex; gap: 8px; padding: 6px 8px; }
+.art-full > :last-child { flex: 1; width: 100%; overflow: auto; border: 0; }
+.terminal-pane { flex: 1; min-height: 0; display: flex; }
+/* display: flex beats the UA's [hidden] rule — without this the transcript stays visible under the diff / terminal tab */
+.transcript[hidden], .terminal-pane[hidden] { display: none; }
+.terminal { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.terminal-host { flex: 1; min-height: 240px; background: #000; border-radius: 4px; padding: 6px; overflow: hidden; }
+.diff-file { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; border-bottom: 1px solid var(--line2); padding: 2px 0; }
+.diff-file .diff { grid-column: 1 / -1; white-space: pre; overflow: auto; max-height: 360px; font-size: 11.5px; background: var(--bg2); padding: 8px; border-radius: 4px; margin: 4px 0 8px; }
+.editor-links { display: flex; gap: 4px; }
+.editor-links .btn { padding: 2px 8px; font-size: 11px; }
+
+.main.ledger { display: flex; flex-direction: column; gap: 12px; max-width: 980px; }
+.ledger-head { display: flex; gap: 28px; flex-wrap: wrap; }
+.bars { display: flex; gap: 6px; align-items: flex-end; height: 140px; padding: 8px 0 4px; }
+.bar-col { flex: 1; display: flex; flex-direction: column; align-items: stretch; height: 100%; }
+.bar { flex: 1; display: flex; flex-direction: column-reverse; background: var(--bg2); border-radius: 3px; overflow: hidden; }
+.bar i { display: block; }
+.bar i.claude, .legend i.claude { background: var(--claude); }
+.bar i.codex, .legend i.codex { background: var(--codex); }
+.bar i.dak, .legend i.dak { background: var(--dak); }
+.bar-col .lbl { text-align: center; font: 10px var(--mono); color: var(--ink3); margin-top: 4px; }
+.legend { display: flex; gap: 14px; font-size: 11px; color: var(--ink3); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: middle; }
+table.pricing { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.pricing th, table.pricing td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line2); }
+table.pricing th { font: 500 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--ink3); }
+table.runner-stats { margin: 6px 0 10px; }
+table.runner-stats tr.thin { opacity: .5; }
+table.perf tr.slower td { color: var(--red); font-weight: 500; }
+table.flow-table { margin: 6px 0 10px; }
+table.flow-table tr[data-tone="slower"] td { color: var(--red); font-weight: 500; }
+table.flow-table tr[data-tone="faster"] td { color: var(--green); font-weight: 500; }
+
+.kv .m.ok { color: var(--green); }
+.kv .m.fail { color: var(--red); }
+
+.schedules .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.schedules .fields label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink2); }
+.schedules .fields textarea { width: 100%; resize: vertical; }
+
+/* usage-limit resume (#102) */
+.tag.resume { border-color: var(--amber); color: var(--amber); white-space: nowrap; flex: none; }
+/* In the Rail the title keeps at least 40 % of the row (Rail.tsx shows one tag at a time for the same reason). */
+.rail .it .t { min-width: 40%; }
+/* `.compose label` stacks its content (flex-direction: column); the checkbox sits beside its text. */
+.compose label.toggle, label.toggle { display: inline-flex; flex-direction: row; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; }
+label.toggle input { margin: 0; }
+label.toggle.off { opacity: .45; cursor: default; }
+
+/* attachments (#125) */
+.dropzone { position: relative; width: 100%; }
+.composer .dropzone { flex: 1; min-width: 0; }
+.dropzone.dropping textarea { outline: 2px dashed var(--amber); outline-offset: -2px; }
+.attach-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+.attach-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 320px; padding: 3px 4px 3px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); font-size: 12px; }
+.attach-chip .thumb { width: 28px; height: 28px; object-fit: cover; border-radius: 3px; }
+.attach-chip .ph { display: inline-block; width: 28px; height: 28px; border-radius: 3px; background: var(--bg2); }
+.attach-chip .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-chip .m { font-family: var(--mono); font-size: 10px; color: var(--ink3); white-space: nowrap; }
+.attach-chip .x { border: 0; background: transparent; padding: 0 4px; color: var(--ink3); font-size: 15px; line-height: 1; }
+.attach-chip .x:hover { color: var(--ink); }
+.attach-gallery { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.attach-gallery img { max-width: 260px; max-height: 200px; border: 1px solid var(--line2); border-radius: 4px; cursor: zoom-in; background: var(--panel); }
+.attach-gallery .ph { display: inline-block; width: 120px; height: 80px; border-radius: 4px; background: var(--bg2); }
+.attach-gallery a { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--ink); text-decoration: none; font-size: 12px; }
+.attach-gallery a .m { font-family: var(--mono); font-size: 10px; color: var(--ink3); }
+.attach-gallery .ph.gone, .attach-chip .ph.gone { background: repeating-linear-gradient(45deg, var(--bg2), var(--bg2) 4px, var(--line2) 4px, var(--line2) 8px); }
+.attach-gallery a.gone { color: var(--ink3); border-style: dashed; }
+.lightbox { position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; background: rgba(0, 0, 0, .78); cursor: zoom-out; }
+.lightbox img.full { max-width: 96vw; max-height: 88vh; object-fit: contain; border: 0; background: transparent; cursor: zoom-out; }
+.lightbox .hint { color: #eee; }
+
+/* Feedback stays reachable even when the task list overflows. */
+.rail-list { flex: 1; min-height: 0; overflow-y: auto; }
+.rail .rail-feedback { flex: none; margin-top: 8px; border-top: 1px solid var(--line); }
+.feedback-dialog { width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow-y: auto; padding: 24px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); }
+.feedback-dialog::backdrop { background: #0006; }
+.feedback-dialog h2 { margin: 0; font-size: 18px; }
+.feedback-dialog fieldset { border: 0; padding: 0; margin: 16px 0; min-width: 0; }
+.feedback-dialog textarea { display: block; margin: 6px 0 10px; }
+.feedback-dialog .row { flex-wrap: wrap; }
+.feedback-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.backlog pre.wrap { white-space: pre-wrap; }
+/* an in-progress row carries more facts (#522): the title gets its own line so it is not cut to a few letters */
+.backlog .backlog-item.in-progress { flex-wrap: wrap; justify-content: flex-start; column-gap: 12px; row-gap: 2px; }
+.backlog .backlog-item.in-progress .t { flex-basis: 100%; }
+.backlog .backlog-item.in-progress > button:last-child { margin-left: auto; }
+.backlog .backlog-report { margin: 0 0 8px 16px; }
+.backlog .sync[data-sync="conflict"], .backlog .sync[data-sync="error"] { color: var(--amber); }
+.backlog .backlog-syncline { margin: 0 0 4px 16px; overflow-wrap: anywhere; }
+.backlog .backlog-editor, .backlog .backlog-new { margin: 0 0 8px 16px; }
+.backlog .backlog-sync .backlog-editor { margin: 0 0 4px 16px; overflow-wrap: anywhere; }
+.backlog .backlog-sync .backlog-edit { color: var(--ink); font-size: 13px; }
+.backlog .backlog-edit { display: flex; flex-direction: column; gap: 6px; max-width: 100%; }
+.backlog .backlog-edit input, .backlog .backlog-edit textarea, .backlog .backlog-new input, .backlog .backlog-new textarea { width: 100%; box-sizing: border-box; }
+.backlog .backlog-sides { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+@media (max-width: 600px) { .backlog .backlog-sides { grid-template-columns: 1fr; } .backlog .backlog-editor, .backlog .backlog-new { margin-left: 0; } }
+.backlog [data-state="stopped"] { color: var(--amber); }
+.backlog .backlog-ws { margin-left: 0; flex-wrap: wrap; margin-top: 6px; }
+.rail-approvals { margin-bottom: 8px; }
+.rail-search { width: 100%; font: inherit; padding: 4px 8px; margin-bottom: 4px; }
+.rail-filters { display: flex; gap: 4px; align-items: center; padding: 0 8px 4px; font-size: 11px; color: var(--ink3); }
+.rail-filters select { font: inherit; }
+.badge { flex: none; min-width: 18px; padding: 0 5px; border-radius: 9px; background: var(--amber); color: #fff; font: 600 11px/18px var(--mono); text-align: center; }
+.approval .t { font-weight: 600; text-align: left; padding: 0; }
+.approval-detail { margin: 8px 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; }
+.approval-actions { display: flex; gap: 8px; }
+.approval-actions button { min-height: 44px; flex: 1; }
+/* 判断待ち (#935): a group per who acts, a card per question; its facts in two columns, one on a phone */
+.ask-group { margin-top: 12px; }
+.ask-group-head { margin: 0 0 4px; }
+/* #1673: under the screen's heading a button per Workspace (its own to answer), and in each group a heading per Workspace */
+.ask-workspaces { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.ask-workspaces button { min-height: 44px; max-width: 100%; overflow-wrap: anywhere; text-align: left; }
+.ask-workspace-head { margin: 8px 0 4px; font-size: 13px; overflow-wrap: anywhere; }
+.ask-tags { display: flex; gap: 6px; margin-bottom: 6px; }
+.ask-tags .badge { background: var(--line); color: var(--ink2); font-family: inherit; font-weight: 500; }
+.ask-tags .ask-state-open { background: var(--amber); color: #fff; }
+/* a question's screen mockups (#2221): the buttons wrap, never wider than the card */
+.mockups { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; min-width: 0; }
+.mockup-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.mockup-buttons .mockup { max-width: 100%; overflow-wrap: anywhere; text-align: left; }
+.mockup-buttons .mockup[aria-pressed="true"] { border-color: var(--acc); background: var(--acc-soft); color: var(--acc-ink); }
+.ask-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; margin: 6px 0 8px; font-size: 12px; }
+.ask-fact { display: contents; }
+.ask-fact dt { color: var(--ink3); }
+.ask-fact dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.approval-actions a.button { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; flex: 1; text-decoration: none; }
+.rail .rail-tasks { display: none; }
+.brief-toggle, .brief-close { display: none; }
+/* Phones (#26, #359): the rail shrinks to its 判断待ち and 一覧 buttons at the bottom, the tabs scroll, cards take the full width.
+   Portrait phones by width, landscape ones by height; a PC window 768px or wider keeps the layout above. */
+@media (max-width: 767px), (max-height: 480px) and (pointer: coarse) {
+  /* the tabs scroll sideways, not the whole bar: 救援画面 stays at the right edge beside them (#399) */
+  .chrome .tabs { min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  .chrome .brand, .chrome .tabs button, .chrome .rescue-link, .chrome .new-version { flex: none; }
+  .chrome .conn { display: none; }
+  .chrome .rescue-link, .chrome .new-version { margin-left: auto; }
+  .chrome .new-version + .rescue-link { margin-left: 8px; }
+  .banner { flex-wrap: wrap; }
+  .banner code { word-break: break-all; }
+  .body, .body:has(.side) { display: flex; flex-direction: column-reverse; }
+  .body > .side { display: none; }
+  .rail { flex: none; flex-direction: row; border-right: 0; border-top: 1px solid var(--line); padding: 6px 8px; }
+  .rail .rail-list, .rail .rail-feedback { display: none; }
+  .rail-approvals, .rail-tasks { margin: 0; flex: 1; min-height: 44px; }
+  .ask-facts { grid-template-columns: minmax(0, 1fr); }
+  .ask-fact dd { margin-bottom: 4px; }
+  .rail .rail-tasks { display: flex; }
+  /* 一覧 open: the rail takes the body, its list above the two buttons. */
+  .body:has(> .rail.open) > :not(.rail) { display: none; }
+  .rail.open { flex: 1; min-height: 0; display: grid; grid-template: 1fr auto / 1fr 1fr; gap: 0 8px; }
+  .rail.open .rail-list { display: block; grid-area: 1 / 1 / 2 / 3; overflow-y: auto; min-height: 0; }
+  .rail.open .rail-approvals, .rail.open .rail-tasks { grid-row: 2; }
+  .rail.open .rail-list .it { min-height: 44px; }
+  .main { flex: 1; min-height: 0; overflow: auto; padding: 8px; }
+  /* The task screen (#368): the question card stacks its buttons under the text, the composer puts its buttons under the
+     box, long lines scroll inside their own box, and every button is a 44px target. */
+  .task .task-head { padding-top: 8px; }
+  .task .subtabs { overflow-x: auto; }
+  .transcript, .composer, .perm { max-width: 100%; }
+  .perm, .perm.question { flex-direction: column; align-items: stretch; }
+  .perm .actions button { min-height: 44px; flex: 1; }
+  .diff, .diff-file { overflow-x: auto; }
+  .composer { flex-wrap: wrap; }
+  .composer .dropzone { flex: 1 0 100%; }
+  .composer button, .art-full-bar button { min-height: 44px; }
+  .composer button.pri { flex: 1; }
+  .composer textarea { font-size: 16px; } /* under 16px iOS Safari zooms the page in when the box takes focus */
+  /* The Brief (#369): 詳細 in the task's head lays it over the screen below the tabs, 閉じる at its top goes back. */
+  button.copy, .jump-latest { min-height: 44px; }
+  .brief-toggle { display: inline-block; margin-left: auto; min-height: 44px; }
+  .brief-close { display: block; width: 100%; min-height: 44px; }
+  .body > .side.open { display: block; position: fixed; inset: 36px 0 0 0; z-index: 10; overflow-y: auto; }
+  /* Home (#391): the new-task form is one column; a select as wide as its longest option (a Workspace's path) must not
+     widen the grid, and the buttons go on their own line under the options. */
+  .compose .fields, .grid2 { grid-template-columns: 1fr; }
+  .grid2 > * { min-width: 0; } /* a long task title is cut in its row, not taken as the card's width */
+  .compose .fields > label { min-width: 0; }
+  .compose .fields select, .compose .fields input { width: 100%; min-width: 0; }
+  .compose .model, .compose .mode, .compose select.model-select { width: 100%; max-width: 100%; }
+  .compose > .row > .runners { flex: 1 1 100%; min-width: 0; }
+  .compose label.toggle { white-space: normal; }
+  .compose > .row > button { flex: 1; min-height: 44px; white-space: nowrap; }
+  /* Knowledge (#392): the list, the note and its details one under another, with the page as the one scroll (a scroll
+     inside a scroll is hard to move with a finger); a long line already scrolls inside the note (`overflow: auto`). */
+  .main.knowledge { grid-template-columns: 1fr; }
+  .main.knowledge > * { min-width: 0; }
+  .kn-tree, .kn-doc .kn-body { max-height: none; }
+  .kn-tree .it { min-height: 44px; justify-content: center; }
+  /* Every screen's rows (#393, found in Ledger and Schedules with real data; Home's form relies on it too): a row wraps,
+     and its trailing text (a waiting question, a model id, a path) breaks anywhere instead of stretching the row — all
+     of it is kept, nothing is cut. Schedules' form is one column; the price table scrolls inside itself. */
+  .main .row { flex-wrap: wrap; }
+  .main .row .m, .main .hint.mono { white-space: normal; overflow-wrap: anywhere; min-width: 0; }
+  .schedules .fields { grid-template-columns: 1fr; }
+  .schedules .fields > * { min-width: 0; }
+  .schedules .fields select, .schedules .fields input { width: 100%; min-width: 0; }
+  .schedules .fields button { min-height: 44px; }
+  table.pricing { display: block; overflow-x: auto; }
+}
+/* A runner's login from the banner (#354) */
+.runner-login { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.runner-login a.button { display: inline-block; padding: 4px 12px; border-radius: 4px; text-decoration: none; background: var(--accent, #2f6fdd); color: #fff; }
+.runner-login .device-code { font-size: 15px; letter-spacing: 1px; }
+.runner-login input { min-width: 220px; }
+.runner-login-code { display: inline-flex; gap: 8px; align-items: center; flex-wrap: nowrap; }
+/* 判断待ちの回答 (#936): one button per line on a phone (they wrap below 2 × 200px); a resume badge is amber (再開待ち) unless ok / bad */
+.ask-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
+.ask-button { flex: 1 1 200px; min-width: 0; }
+.ask-button, .ask-text, .ask-resume { overflow-wrap: anywhere; }
+.ask-button button, .ask-text button { min-height: 44px; width: 100%; }
+.ask-policy { margin: 6px 0; }
+.ask-policy summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; }
+.ask-policy-body { display: grid; gap: 6px; overflow-wrap: anywhere; }
+.ask-policy-field { display: grid; gap: 2px; }
+.ask-policy-field input { min-width: 0; width: 100%; box-sizing: border-box; }
+.ask-policy-summary { margin: 0; padding-left: 18px; }
+.ask-previous ul, .ask-policy-summary { overflow-wrap: anywhere; }
+.ask-resume-ok { background: var(--green); }
+.ask-resume-bad { background: var(--red); }
+/* Evals (#1221): a count that points at trouble, and the sortable headings */
+table.evals-table td.warn, table.evals-table tr.warn td:first-child { color: var(--amber); }
+table.evals-table th button.sort { font: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit; padding: 0; }
+table.evals-table td button.open { font: inherit; color: inherit; padding: 0; text-align: left; }
+.recent-check { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; background: #0006; }
+.recent-check-box { padding: 20px 24px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); }
+
+.policy-row { display: grid; gap: 4px; padding: 8px 0; border-top: 1px solid var(--line, #3333); }
+.policy-main { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; overflow-wrap: anywhere; }
+.policy-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.policy-edit { display: grid; gap: 6px; }
+.policy-uses { margin: 0; padding-left: 18px; overflow-wrap: anywhere; }
+@media (max-width: 767px) { .policy-main { display: grid; } .policy-actions button { min-height: 44px; } }
+/* 定型の指示 (#940): the policy rows' layout; the name and text boxes take the card's width, so 390px stacks them */
+.presets .policy-edit input, .presets .policy-edit textarea { width: 100%; min-width: 0; box-sizing: border-box; }
+.preset-new { padding-top: 8px; border-top: 1px solid var(--line, #3333); }
+
+/* Insights' レポート section (#1835): the rows are the Task list's rows; the body is the 成果物 tab's. */
+.reports .row .t { text-align: left; padding: 0; }
+.reports .row.on .t { color: var(--ink); font-weight: 500; }
+.reports .art-body { margin-top: 8px; }
+.reports .art-frame { min-height: 480px; }
+/* Ledger's 使用量（枠） and Home's rows (#1836): a window the runner has not reported for a day is faded. */
+.stale { opacity: .6; }
+.usage .row.sub { margin-top: 8px; }
+.usage .kv .hint { display: block; margin-top: 3px; }
+
+/* An artifact the agent registered (#1778): one line of the conversation with its 開く. */
+.artifact-row button { margin-left: 8px; }
+/* 定型の指示 in the request / reply box (#940): one row on a wide screen, stacked at phone width */
+.preset-picker { display: grid; gap: 4px; max-width: 760px; }
+.preset-picker-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.preset-picker-row select, .preset-picker-row input { min-width: 0; }
+@media (max-width: 767px) { .preset-picker-row { display: grid; } .preset-picker-row button { min-height: 44px; } }

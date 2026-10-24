@@ -1,0 +1,60 @@
+# __REPO__ — このリポジトリ固有の値
+
+開発の流れ（要望 → PBI → Task → PR → レビュー → マージ）は共通スキル（`issue-workflow` ほか。エージェント管理アプリが Task の起動時に `.claude/skills` / `.agents/skills` へ置く）に従う。スキルに書かれていない、このリポジトリだけの値はここに置く（`issue-workflow` の「使う側のリポジトリが持つもの」の各項目）。スキルとこのファイルが食い違えば、このファイルに従う。
+
+## リポジトリと Project
+
+- リポジトリ: `__OWNER__/__REPO__`。`gh` の書き込み（issue / pr の作成・コメント・編集・マージ・クローズ）には `-R __OWNER__/__REPO__` を付ける
+- Project・選択肢（Area / Kind / Priority）・必須の節・Story Points: root の `ops.config.json`。Issue を Project に入れるのは `triage_issue.sh`（Actions の自動追加は無い）
+- 共通キットを持つリポジトリ: `__KIT_REPO__`（共通の仕組みの要望の起票先。`request-to-backlog` の「どのリポジトリにも要る仕組み」）
+- バックログの道具: `scripts/setup/` の入口（`lint_backlog.sh` / `set_project_field.sh` / `triage_issue.sh` / `request_issue.sh`）。中身は共通キット（`ops-kit`）で、`OPS_KIT`、無ければ `__KIT_HOME_VAR__/ops-kit` から呼ぶ
+- Story Points の基準（閉じた PBI）: まだ無い。最初の PBI を閉じたら、ここに「2 = #N / 3 = #N / 5 = #N / 8 = #N」で足す
+- 設計ルール・ライセンス: README に書く（無ければここに置き場を決めて書く）
+- 互換の前提: __COMPAT__
+- 並列ガード: 使わない（使うなら、ここにコマンドと `--repo __OWNER__/__REPO__` を書く）
+
+## テスト
+
+```bash
+__TEST_TYPECHECK__
+__TEST_ALL__
+__TEST_ONE__
+```
+
+変更ごとのテストの型は、最初の変更で決めてここに表で足す（変更 | テスト）。
+
+## 作業の場所
+
+- main の作業ツリーでは作業しない。`git worktree add --detach ../__REPO__-<topic> origin/main` → 依存の導入。PBI を丸ごとなら `../__REPO__-pbi<PBI>`
+- 枝: `sb/<Task番号>-<topic>`。Task を積むときは `gh stack`（`stacked-pr-delivery`）
+- 作業ファイル: `W=$(mktemp -d /tmp/__REPO__.<用途>.XXXXXX)`。`/tmp` 直下に固定の名前で置かない（別のリポジトリのセッションとぶつかる）
+
+## 動いている実物で確かめる（live check）
+
+- __LIVE_CHECK__
+
+## Issue・PR に書かない値
+
+認証に使える値（トークン・鍵・Cookie・device code・承認 URL・アカウント ID）を Issue・PR・コメントに書かない（`issue-workflow` の「Issue・PR・コメントに書かない値」）。検査は共通の仕組み（`ops-kit scan-issues`）で、このリポジトリに独自の検査を置かない。
+
+## エージェント管理アプリの Task と動いているコード
+
+- __TASK_CHECK__ なら自分はエージェント管理アプリの Task（スキルの「エージェント管理アプリの Task」）
+- マージ後の main の作業ツリーの更新は `ops-kit pull-main`（`pbi-complete` の 6）
+- 動いている実物への反映: __DEPLOY_OK__
+
+## 画像（要望・PBI に貼るもの）
+
+使わない（貼る必要が出たら、ここに置き場を決めて書く）。
+
+## 利用上限
+
+__QUOTA_CHECK__
+
+Codex の `five_hour` が 0.9 以上、または `codex exec` が使用上限で止まったら、レビューは Claude のサブエージェントで代替する（`cross-runner-review` の 0）。
+
+## マージ判定とローカル CI
+
+- マージ判定・ローカル CI・再チェックの専用コマンドは無い。`review-triage-and-merge` の 5 のチェックリストを自分で確かめる
+- CI が始まらない（請求の問題。ジョブのステップ 0 件）ときは、`.github/workflows/ci.yml` の `run:` の行を手元で順に回し、結果を PR に書く
+- `gh pr checks` が使えないときは `gh run list -R __OWNER__/__REPO__ --commit <sha>` で見る

@@ -1,0 +1,51 @@
+#!/usr/bin/env bun
+// gh-guard
+// The check in front of `gh` (#661, docs/design/secret-guard.md). A write whose text holds a value that signs someone
+// in stops here; everything else goes to the real gh unchanged.
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { bodiesOf, GUARD_MARK, realCommand } from "../src/gh-guard.ts";
+import { findSecrets, hostAws } from "../src/secrets.ts";
+
+const argv = process.argv.slice(2);
+const real = realCommand("gh", process.env.PATH ?? "", import.meta.path, GUARD_MARK);
+if (real === null) {
+  console.error("gh-guard: gh が PATH にありません");
+  process.exit(127);
+}
+// What can be read only once (the standard input, a pipe, a file descriptor) is kept as bytes and handed on
+let stdin: Uint8Array | undefined;
+const once = new Map<string, Uint8Array>();
+const reads = bodiesOf(argv, (path) => {
+  try {
+    if (path === "-") return new TextDecoder().decode((stdin ??= new Uint8Array(readFileSync(0))));
+    if (statSync(path).isFile()) return readFileSync(path, "utf8");
+    if (!once.has(path)) once.set(path, new Uint8Array(readFileSync(path)));
+    return new TextDecoder().decode(once.get(path)!);
+  } catch {
+    return null;
+  }
+});
+
+const host = hostAws();
+const hits = (reads ?? []).flatMap((r) => findSecrets(r.text, host));
+if (hits.length > 0) {
+  console.error(`gh-guard: 投稿を止めました。認証に使える値が本文にあります（${[...new Set(hits.map((h) => `${h.kind}、${h.line} 行目`))].join(" / ")}）`);
+  console.error("値を伏せて（<profile>、<account-id>、XXXX-XXXX）書き直してください。承認が要るなら、DEVICE_AUTH_URL があれば device-auth -- <command> で動かし、無ければ値を出さずに Task の会話で聞いて止めます（issue-workflow の「Issue・PR・コメントに書かない値」）");
+  process.exit(1);
+}
+// A pipe or a file descriptor was read to the end: the real gh gets the same bytes from a file
+const pass = [...argv];
+let scratch: string | undefined;
+for (const r of reads ?? []) {
+  const bytes = r.from && once.get(r.from.path);
+  if (!r.from || !bytes) continue;
+  scratch ??= mkdtempSync(join(tmpdir(), "gh-guard."));
+  const copy = join(scratch, String(r.from.index));
+  writeFileSync(copy, bytes, { mode: 0o600 });
+  pass[r.from.index] = `${r.from.prefix}${copy}`;
+}
+const p = Bun.spawnSync([real, ...pass], { stdin: stdin ?? "inherit", stdout: "inherit", stderr: "inherit" });
+if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
+process.exit(p.exitCode ?? 1);

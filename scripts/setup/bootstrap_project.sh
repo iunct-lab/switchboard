@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# bootstrap_project.sh（DRY_RUN=1 で書かない）— ops.config.json の Project とフィールドを用意する（Project は SWITCHBOARD_PROJECT_URL（環境変数 / リポジトリ変数）か ops.config.json の projectUrl で指す。題で選ぶ SWITCHBOARD_PROJECT_TITLE は無くなった） — ops-kit（bun ops-kit/src/cli.ts --help）の入口。設定は root の ops.config.json。ほかのリポジトリ（GH_REPO を含む）では SWITCHBOARD_PROJECT_URL を付ける
+R="$(cd "$(dirname "$0")/../.." && pwd)"
+[[ -n "${SWITCHBOARD_PROJECT_URL:-}" || "$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" == "$(git -C "$R" rev-parse --path-format=absolute --git-common-dir)" ]] || { echo "ここは Switchboard のリポジトリではないので、SWITCHBOARD_PROJECT_URL=<この Project の URL> を付けて実行してください" >&2; exit 1; }
+[[ -z "${SWITCHBOARD_PROJECT_TITLE:-}" ]] || { echo "SWITCHBOARD_PROJECT_TITLE で Project を選ぶのはやめた。SWITCHBOARD_PROJECT_URL（環境変数 / リポジトリ変数）か ops.config.json の projectUrl で指す" >&2; exit 1; }; exec bun "${OPS_KIT:-$R/ops-kit}/src/cli.ts" bootstrap Switchboard $([[ "${DRY_RUN:-0}" == 1 ]] && echo --dry-run) --config "$R/ops.config.json"

@@ -1,0 +1,998 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  Switchboard on one EC2 Spot instance that runs only while it is used (#181, docs/design/cloud-hosting.md §3).
+  CloudFront is the only way in; a stopped instance shows the start page. Nothing here holds a runner's credentials.
+Parameters:
+  PublicOrigin:
+    Type: String
+    Default: https://unconfigured.invalid
+    AllowedPattern: 'https://[a-zA-Z0-9.-]+'
+    Description: The distribution's own https origin. Two-step like capsule-host (aws/README.md)
+  InstanceType:
+    Type: String
+    Default: t4g.medium
+    AllowedPattern: '[a-z][a-z0-9]*g[a-z0-9]*\.[a-z0-9]+'
+    Description: A Graviton (arm64) type
+  Market:
+    Type: String
+    Default: on-demand
+    AllowedValues: [on-demand, spot]
+    Description: >-
+      on-demand (#443): Spot can stop the host every few minutes while in use and have no
+      capacity to start it again; a Spot instance's market and type cannot be changed later. Changing this replaces the
+      instance (a person's deploy, aws/README.md)
+  ImageId:
+    Type: AWS::EC2::Image::Id
+    Description: >-
+      The AL2023 arm64 AMI, pinned. Not resolved from SSM on every deploy: a new AMI changes the launch template, which
+      replaces Instance (see aws/README.md, the Spot request). Get the current one with
+      aws ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: >-
+      A subnet of VpcId with a route to an internet gateway (the instance's public IPv4 is for its own egress to GitHub
+      and the runners' APIs; nothing comes in over it). Not in apne1-az3, where CloudFront VPC origins are unsupported
+  CloudFrontPrefixListId:
+    Type: String
+    AllowedPattern: 'pl-[0-9a-f]+'
+    Description: com.amazonaws.global.cloudfront.origin-facing in this region (aws ec2 describe-managed-prefix-lists)
+  EdgeHeaderValue:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+    Description: The same value as the SecureString /switchboard/edge-header (the daemon compares x-switchboard-edge with it, #228)
+  GitHubRepo:
+    Type: String
+    AllowedPattern: '[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+'
+    Description: Development repository owner/name, supplied at deploy time; UserData clones it and its main branch is the only one the OIDC role trusts
+  GitHubSubPrefix:
+    Type: String
+    Default: ''
+    AllowedPattern: '(repo:[A-Za-z0-9_.-]+@[0-9]+/[A-Za-z0-9_.-]+@[0-9]+)?'
+    Description: >-
+      The OIDC subject prefix when the repository uses GitHub's immutable subject (sub_claim_prefix of
+      `gh api repos/<repo>/actions/oidc/customization/sub`, e.g. repo:owner@123/name@456). Empty = the plain repo:<GitHubRepo> form only
+  GitHubOidcProviderArn:
+    Type: String
+    Default: ''
+    Description: An existing token.actions.githubusercontent.com provider in this account; empty creates one
+  HostAssumeRoleArns:
+    Type: CommaDelimitedList
+    Default: ''
+    AllowedPattern: '(arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9_+=.@/-]+)?'
+    Description: Additional role ARNs the host may assume, comma separated; empty grants none
+  HostUser:
+    Type: String
+    Default: switchboard
+    AllowedPattern: '[a-z_][a-z0-9_-]*'
+    Description: The OS user Switchboard and the runners run as
+  HostHome:
+    Type: String
+    Default: /home/switchboard
+    AllowedPattern: '/[^\s]*'
+    Description: That user's HOME. Keep the default; history moved from another machine is matched to it by relocate after the import (cloud-hosting.md §5)
+  ReposDir:
+    Type: String
+    Default: /home/switchboard/repos
+    AllowedPattern: '/[^\s]*'
+    Description: Where the repositories are cloned. Keep the default, as for HostHome
+  CostTag:
+    Type: String
+    Default: switchboard
+    AllowedPattern: '[A-Za-z0-9_.:/=+@-]+'
+    Description: >-
+      Value of the Project tag deploy puts on every resource (--tags Project=<this>); the budgets count only it. Activate
+      Project as a cost allocation tag in Billing once, or the budgets see nothing (aws/README.md)
+  BudgetEmail:
+    Type: String
+    AllowedPattern: '[^@\s]+@[^@\s]+'
+    Description: Where the budget alerts (USD 7 ≈ 1,000 円 and USD 20 ≈ 3,000 円 a month) go
+  AllowedCountries:
+    Type: CommaDelimitedList
+    Default: ''
+    Description: >-
+      Emergency switch (#1492): the countries CloudFront answers, ISO 3166-1 alpha-2 codes (for example JP). Empty = no
+      geo restriction. A request from elsewhere gets 403 from CloudFront before it reaches anything
+  WebAclArn:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^arn:aws:wafv2:us-east-1:[0-9]{12}:global/webacl/.+'
+    Description: >-
+      Emergency switch (#1492): the WAF Web ACL for CloudFront (made by aws/waf.yaml in us-east-1; its WebAclArn output).
+      Empty = no WAF (a Web ACL costs money every month)
+Conditions:
+  HasHostAssumeRoles: !Not [!Equals [!Join ['', !Ref HostAssumeRoleArns], '']]
+  HasGeo: !Not [!Equals [!Join ['', !Ref AllowedCountries], '']]
+  HasWebAcl: !Not [!Equals [!Ref WebAclArn, '']]
+  CreateOidcProvider: !Equals [!Ref GitHubOidcProviderArn, '']
+  ImmutableSub: !Not [!Equals [!Ref GitHubSubPrefix, '']]
+  Spot: !Equals [!Ref Market, spot]
+Resources:
+  # ---------- data: sqlite replica (Litestream), daily history archives, releases, host scripts ----------
+  Data:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      VersioningConfiguration: { Status: Enabled }
+      BucketEncryption:
+        ServerSideEncryptionConfiguration: [{ ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 } }]
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+      # CloudFront's standard log (#1490) is written with an ACL for the delivery account, so ACLs must be usable; the
+      # public-access block above still refuses a public one
+      OwnershipControls: { Rules: [{ ObjectOwnership: BucketOwnerPreferred }] }
+      LifecycleConfiguration:
+        Rules:
+          # a delete (Litestream retention, an agent) only adds a marker; the data itself goes after 30 days
+          - { Id: old-versions, Status: Enabled, NoncurrentVersionExpiration: { NoncurrentDays: 30 }, ExpiredObjectDeleteMarker: true }
+          - { Id: archives, Status: Enabled, Prefix: archive/, ExpirationInDays: 30 }
+          # who asked CloudFront for what, kept 90 days so "was it touched since August" can still be answered (#1490)
+          - { Id: cdn-logs, Status: Enabled, Prefix: cdn-logs/, ExpirationInDays: 90 }
+          # sb-offload removes its upload when the build ends; this is for the one it could not (#678)
+          - { Id: offload, Status: Enabled, Prefix: offload/, ExpirationInDays: 1, NoncurrentVersionExpiration: { NoncurrentDays: 1 } }
+  # The daemon's output (access / operation log, #1490) from the host's daemon.log. A fixed name: the CloudWatch
+  # agent's config is installed by bootstrap, and putting the stack name in UserData would replace the instance (#465).
+  HostLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /switchboard/host
+      RetentionInDays: 90
+  # ---------- the instance ----------
+  # One group per port: CloudFront's origin-facing prefix list weighs about 55 rules, so two references in one group
+  # exceed the default 60 rules per group (RulesPerSecurityGroupLimitExceeded, seen on the first deploy of #232).
+  Sg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Only CloudFront reaches Switchboard (47831)
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 47831, ToPort: 47831, SourcePrefixListId: !Ref CloudFrontPrefixListId }
+  RescueSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Only CloudFront reaches sb-rescue (47841)
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 47841, ToPort: 47841, SourcePrefixListId: !Ref CloudFrontPrefixListId }
+  # Every role the stack makes carries this boundary, and DeployRole may create or change a role only when it does: an
+  # update that goes through DeployRole (作り直す, the workflow) cannot hand out more than these actions. Changing the
+  # boundary itself needs a person's deploy.
+  Boundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${AWS::StackName}-boundary'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # the maximum of every role below, each part on this stack's own resources only (review #338: a role made
+          # "within the boundary" must not reach another stack, bucket, secret or role in the shared account)
+          - Sid: Parameters
+            Effect: Allow
+            Action: [ssm:GetParameter, ssm:GetParameters]
+            Resource: [!Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/*', !Sub 'arn:aws:ssm:${AWS::Region}::parameter/aws/service/*']
+          - Sid: RegisterCode
+            Effect: Allow
+            Action: ssm:DeleteParameter
+            Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/register-code'
+          - Sid: Buckets
+            Effect: Allow
+            Action: [s3:GetObject, s3:PutObject, s3:DeleteObject, s3:ListBucket]
+            Resource: [!GetAtt Data.Arn, !Sub '${Data.Arn}/*', !GetAtt StartPage.Arn, !Sub '${StartPage.Arn}/*']
+          - Sid: Wake
+            Effect: Allow
+            Action: [scheduler:CreateSchedule, scheduler:UpdateSchedule, scheduler:GetSchedule, scheduler:DeleteSchedule]
+            Resource: !Sub 'arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/switchboard-wake'
+          - Sid: ThisInstance
+            Effect: Allow
+            Action: [ec2:StartInstances, ec2:StopInstances, ec2:CreateReplaceRootVolumeTask]
+            Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+            Condition: { StringEquals: { 'aws:ResourceTag/aws:cloudformation:stack-name': !Ref AWS::StackName } }
+          # what a root volume replacement to the launch state also touches: its task, the new volume, the AMI's snapshot
+          - Sid: RootReplacement
+            Effect: Allow
+            Action: ec2:CreateReplaceRootVolumeTask
+            Resource:
+              - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:replace-root-volume-task/*'
+              - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:volume/*'
+              - !Sub 'arn:aws:ec2:${AWS::Region}::snapshot/*'
+              - !Sub 'arn:aws:ec2:${AWS::Region}::image/*'
+          # Describe* has no resource-level permissions
+          - Sid: Describe
+            Effect: Allow
+            Action: [ec2:DescribeInstances, ec2:DescribeReplaceRootVolumeTasks]
+            Resource: '*'
+          - Sid: Stack
+            Effect: Allow
+            Action: [cloudformation:DescribeStacks, cloudformation:DescribeStackEvents, cloudformation:UpdateStack, cloudformation:CreateChangeSet, cloudformation:DescribeChangeSet, cloudformation:ExecuteChangeSet, cloudformation:GetTemplateSummary]
+            Resource: [!Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*', !Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31']
+          - Sid: OwnRoles
+            Effect: Allow
+            Action: iam:PassRole
+            Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-*'
+          # the Starter's geo restriction change (#1639): the ceiling only; the grant to this one distribution is StarterCountriesPolicy
+          - Sid: Countries
+            Effect: Allow
+            Action: [cloudfront:GetDistributionConfig, cloudfront:UpdateDistribution]
+            Resource: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/*'
+          # the CloudWatch agent on the host (#540): custom metrics in one namespace only (PutMetricData has no resource ARN)
+          - Sid: AgentMetrics
+            Effect: Allow
+            Action: cloudwatch:PutMetricData
+            Resource: '*'
+            Condition: { StringEquals: { 'cloudwatch:namespace': CWAgent } }
+          - Sid: OwnLogs
+            Effect: Allow
+            Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+            Resource:
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-*'
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AWS::StackName}-*'
+          # the daemon's log (#1490): the host's own group, written by the CloudWatch agent. By name, as Offload below
+          - Sid: HostLogs
+            Effect: Allow
+            Action: [logs:CreateLogStream, logs:PutLogEvents, logs:DescribeLogStreams]
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/switchboard/host:*'
+          # the host starts, watches and stops the offload project's builds and reads their log (#678); its upload to
+          # offload/ is within Buckets. By name: OffloadRole carries this boundary, so a !GetAtt Offload would be a cycle
+          - Sid: Offload
+            Effect: Allow
+            Action: [codebuild:StartBuild, codebuild:BatchGetBuilds, codebuild:StopBuild, logs:GetLogEvents]
+            Resource:
+              - !Sub 'arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${AWS::StackName}-offload'
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AWS::StackName}-offload:*'
+          # the roles the deployer names in HostAssumeRoleArns (empty = none): the one statement that can reach a role
+          # outside this stack, in any account — whoever deploys decides (the owner's host uses it for the role DAK is
+          # developed with)
+          - !If
+            - HasHostAssumeRoles
+            - Sid: HostAssumeRoles
+              Effect: Allow
+              Action: sts:AssumeRole
+              Resource: !Ref HostAssumeRoleArns
+            - !Ref AWS::NoValue
+          # SecureStrings (aws/ssm) and the encrypted root volume (aws/ebs) use AWS managed keys, whose key policies
+          # allow any principal of the account through that service. A key policy's grant to a role is still capped by
+          # the role's boundary, so the boundary has to allow the same use — only through those two services.
+          - Sid: ManagedKeysThroughServices
+            Effect: Allow
+            Action: [kms:Decrypt, kms:CreateGrant, kms:GenerateDataKeyWithoutPlaintext, kms:ReEncryptFrom, kms:ReEncryptTo, kms:DescribeKey]
+            Resource: '*'
+            Condition:
+              StringEquals: { 'kms:CallerAccount': !Ref AWS::AccountId }
+              StringLike: { 'kms:ViaService': [!Sub 'ssm.${AWS::Region}.amazonaws.com', !Sub 'ec2.${AWS::Region}.amazonaws.com'] }
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      PermissionsBoundary: !Ref Boundary
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{ Effect: Allow, Principal: { Service: ec2.amazonaws.com }, Action: sts:AssumeRole }]
+      Policies:
+        - PolicyName: host
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # only the names the host's scripts read, plus anthropic-api-key, which DAK's launcher (its agent/ssm_exec.py,
+              # #1155) reads inside its container and hands to its own process: no script here reads it, and nothing writes
+              # it to a file. Not register-code (#700): an agent could use the registration link first.
+              # Not session-signing-key (#701): the host verifies the login cookie with the public key and cannot make one
+              - Effect: Allow
+                Action: [ssm:GetParameter, ssm:GetParameters]
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/anthropic-api-key'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/archive-age-pubkey'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/claude-oauth-token'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/daemon-token'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/edge-header'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/github-repo'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/github-token'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/offload-project'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/session-public-key'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/start-token'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/starter-url'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/web-url'
+              # writes only where the host itself produces data: the sqlite replica (Litestream also prunes it) and the
+              # daily archives. Releases are read-only here: an agent that could rewrite one would get it run later.
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
+                Resource: [!Sub '${Data.Arn}/litestream/*', !Sub '${Data.Arn}/archive/*']
+              # history/ (#1436): what leaves the host's database for good (events #1431, transcripts #1432). No
+              # expiration and no delete; a put only for a new key, since an overwrite would make the old version
+              # noncurrent and old-versions would expire it after 30 days
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${Data.Arn}/history/*'
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${Data.Arn}/history/*'
+                Condition: { StringEquals: { 's3:if-none-match': '*' } }
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${Data.Arn}/releases/*'
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt Data.Arn
+              # Agents run as the same OS user and can reach these credentials (#181 判断待ち 2, option B): a delete may
+              # add a marker but never removes a version, and the bucket's own safety settings stay as they are.
+              - Effect: Deny
+                Action: [s3:DeleteObjectVersion, s3:PutBucketVersioning, s3:PutLifecycleConfiguration, s3:DeleteBucket, s3:PutBucketPolicy]
+                Resource: [!GetAtt Data.Arn, !Sub '${Data.Arn}/*']
+              - Effect: Allow
+                Action: [scheduler:CreateSchedule, scheduler:UpdateSchedule, scheduler:GetSchedule, scheduler:DeleteSchedule]
+                Resource: !Sub 'arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/switchboard-wake'
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt SchedulerRole.Arn
+              - !If
+                - HasHostAssumeRoles
+                - Effect: Allow
+                  Action: sts:AssumeRole
+                  Resource: !Ref HostAssumeRoleArns
+                - !Ref AWS::NoValue
+              # sb-offload (#678): the work tree goes to offload/, one build of the offload project runs it, its log
+              # comes back. No other project, and no project edits: the size and the time limit are the template's
+              - Effect: Allow
+                Action: [s3:PutObject, s3:DeleteObject]
+                Resource: !Sub '${Data.Arn}/offload/*'
+              - Effect: Allow
+                Action: [codebuild:StartBuild, codebuild:BatchGetBuilds, codebuild:StopBuild]
+                Resource: !GetAtt Offload.Arn
+              - Effect: Allow
+                Action: logs:GetLogEvents
+                Resource: !GetAtt OffloadLogs.Arn
+              # the daemon's log to its own group (#1490): writes only. No delete and no retention change, so the agent's
+              # credentials (the same OS user's) cannot erase what was logged about them
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents, logs:DescribeLogStreams]
+                Resource: !Sub '${HostLogs.Arn}'
+              # mem_used_percent / swap_used_percent from the CloudWatch agent (#539), in the CWAgent namespace only
+              - Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: '*'
+                Condition: { StringEquals: { 'cloudwatch:namespace': CWAgent } }
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref ImageId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile: { Arn: !GetAtt InstanceProfile.Arn }
+        InstanceInitiatedShutdownBehavior: stop
+        # Spot only (Market): persistent is what "stop on interruption" requires. It also means a terminated instance is
+        # launched again while its request is open. Nothing here terminates it (作り直す replaces the root volume, the
+        # instance stays); a deploy that replaces Instance, or delete-stack, is preceded by a person cancelling the
+        # request (aws/README.md).
+        InstanceMarketOptions: !If
+          - Spot
+          - { MarketType: spot, SpotOptions: { SpotInstanceType: persistent, InstanceInterruptionBehavior: stop } }
+          - !Ref AWS::NoValue
+        TagSpecifications:
+          - { ResourceType: instance, Tags: [{ Key: Project, Value: !Ref CostTag }] }
+          - { ResourceType: volume, Tags: [{ Key: Project, Value: !Ref CostTag }] }
+          # a tag specification for a resource the launch does not create fails it: the Spot request's only with Spot
+          - !If [Spot, { ResourceType: spot-instances-request, Tags: [{ Key: Project, Value: !Ref CostTag }, { Key: Stack, Value: !Ref AWS::StackName }] }, !Ref AWS::NoValue]
+        MetadataOptions: { HttpTokens: required, HttpPutResponseHopLimit: 1 }
+        BlockDeviceMappings:
+          - { DeviceName: /dev/xvda, Ebs: { VolumeType: gp3, VolumeSize: 20, Encrypted: true, DeleteOnTermination: true } }
+        NetworkInterfaces:
+          - { DeviceIndex: 0, SubnetId: !Ref SubnetId, AssociatePublicIpAddress: true, Groups: [!Ref Sg, !Ref RescueSg] }
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            # the host scripts come from the repository's main (aws/host), cloned with the fine-grained token in Parameter
+            # Store; nothing has to be uploaded before the first boot. 作り直す puts the root volume back to the launch
+            # state, so this runs again on the fresh disk (cloud-init keeps its once-per-instance marker on that disk)
+            set -euo pipefail
+            dnf install -y -q git
+            T="$(aws ssm get-parameter --name /switchboard/github-token --with-decryption --query Parameter.Value --output text --region ${AWS::Region})"
+            rm -rf /opt/switchboard-host
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$T" | base64 -w0)" \
+              clone --depth 1 "https://github.com/${GitHubRepo}.git" /opt/switchboard-host
+            unset T
+            SB_HOST_USER='${HostUser}' SB_HOST_HOME='${HostHome}' SB_REPOS_DIR='${ReposDir}' SB_GITHUB_REPO='${GitHubRepo}' SB_DATA_BUCKET='${Data}' SB_SCHEDULER_ROLE_ARN='${SchedulerRole.Arn}' bash /opt/switchboard-host/aws/host/bootstrap.sh
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}' }]
+  # EventBridge Scheduler wakes the instance for a resume_at or a schedule (the host registers one "at()" before it stops)
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      PermissionsBoundary: !Ref Boundary
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{ Effect: Allow, Principal: { Service: scheduler.amazonaws.com }, Action: sts:AssumeRole }]
+      Policies:
+        - PolicyName: start
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ec2:StartInstances
+                Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+                Condition: { StringEquals: { 'aws:ResourceTag/aws:cloudformation:stack-name': !Ref AWS::StackName } }
+  # ---------- the way in ----------
+  StartPage:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+  StartPageAccess:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig: { Name: !Sub '${AWS::StackName}-startpage', OriginAccessControlOriginType: s3, SigningBehavior: always, SigningProtocol: sigv4 }
+  StartPagePolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref StartPage
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: cloudfront.amazonaws.com }
+            Action: s3:GetObject
+            Resource: !Sub '${StartPage.Arn}/*'
+            Condition: { StringEquals: { 'AWS:SourceArn': !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${Cdn}' } }
+  # sb-rescue serves its page at / and calls relative api/…; under /rescue/ the prefix is taken off on the way in
+  RescuePrefix:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub '${AWS::StackName}-rescue-prefix'
+      AutoPublish: true
+      FunctionConfig: { Comment: strip /rescue for sb-rescue, Runtime: cloudfront-js-2.0 }
+      FunctionCode: |
+        function handler(event) {
+          var r = event.request;
+          // the page calls relative api/…: without the slash that would resolve to the daemon's /api
+          if (r.uri === '/rescue') return { statusCode: 301, statusDescription: 'Moved Permanently', headers: { location: { value: '/rescue/' } } };
+          r.uri = r.uri.replace(/^\/rescue/, '') || '/';
+          return r;
+        }
+  # CloudFront reaches the instance inside the VPC by its id (VPC origin), not over its public address: the private IP
+  # and DNS name survive stop/start, nothing crosses the internet in plain text, and a stopped instance's released
+  # public IP is never contacted. One per port. An origin in use cannot be updated in place (CannotUpdateEntityWhileInUse),
+  # which is why 作り直す keeps the instance and only replaces its root volume. A change that replaces the instance
+  # (Market, the launch template) must also give these new logical ids: CloudFormation then creates new origins, moves
+  # the distribution to them, and deletes the old ones once nothing uses them (2026-09-28: spot → on-demand, #443; then
+  # GitHubRepo → the development repository, which is in UserData; then HostHome / ReposDir → the defaults, #433). Doing this
+  # by hand every time is a trap: #465.
+  HostVpcOrigin4:
+    Type: AWS::CloudFront::VpcOrigin
+    Properties:
+      VpcOriginEndpointConfig:
+        Name: !Sub '${AWS::StackName}-host-4'
+        Arn: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Instance}'
+        HTTPPort: 47831
+        HTTPSPort: 443
+        OriginProtocolPolicy: http-only
+  RescueVpcOrigin4:
+    Type: AWS::CloudFront::VpcOrigin
+    Properties:
+      VpcOriginEndpointConfig:
+        Name: !Sub '${AWS::StackName}-rescue-4'
+        Arn: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Instance}'
+        HTTPPort: 47841
+        HTTPSPort: 443
+        OriginProtocolPolicy: http-only
+  Cdn:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub '${AWS::StackName}'
+        # the standard log (#1490): every request, the login's included. The query cannot be left out of it (the
+        # registration code moved to the fragment for that); cookies are not logged
+        Logging: { Bucket: !GetAtt Data.DomainName, Prefix: cdn-logs/, IncludeCookies: false }
+        HttpVersion: http2
+        PriceClass: PriceClass_200
+        Restrictions: !If [HasGeo, { GeoRestriction: { RestrictionType: whitelist, Locations: !Ref AllowedCountries } }, !Ref 'AWS::NoValue']
+        WebACLId: !If [HasWebAcl, !Ref WebAclArn, !Ref 'AWS::NoValue']
+        Origins:
+          # a stopped instance does not answer: one short attempt, then the start page (not 3 × 10 s)
+          - Id: host
+            DomainName: !GetAtt Instance.PrivateDnsName
+            VpcOriginConfig: { VpcOriginId: !GetAtt HostVpcOrigin4.Id, OriginReadTimeout: 60 }
+            ConnectionAttempts: 1
+            ConnectionTimeout: 3
+            OriginCustomHeaders: [{ HeaderName: x-switchboard-edge, HeaderValue: !Ref EdgeHeaderValue }]
+          - Id: rescue
+            DomainName: !GetAtt Instance.PrivateDnsName
+            VpcOriginConfig: { VpcOriginId: !GetAtt RescueVpcOrigin4.Id }
+            ConnectionAttempts: 1
+            ConnectionTimeout: 3
+            OriginCustomHeaders: [{ HeaderName: x-switchboard-edge, HeaderValue: !Ref EdgeHeaderValue }]
+          # passkey login and the start button (#211): the Starter's Function URL, which answers while the host is stopped
+          - Id: auth
+            DomainName: !Select [2, !Split ['/', !GetAtt StarterUrl.FunctionUrl]]
+            CustomOriginConfig: { OriginProtocolPolicy: https-only, OriginSSLProtocols: [TLSv1.2] }
+            OriginCustomHeaders: [{ HeaderName: x-switchboard-edge, HeaderValue: !Ref EdgeHeaderValue }]
+          - Id: startpage
+            DomainName: !GetAtt StartPage.RegionalDomainName
+            S3OriginConfig: { OriginAccessIdentity: '' }
+            OriginAccessControlId: !Ref StartPageAccess
+        # Everything (API, WebSocket, PTY) goes to the host uncached with the viewer's Host (the daemon's Origin check).
+        # An origin group would only fail over GET/HEAD, so a stopped host is answered by the error page instead.
+        DefaultCacheBehavior:
+          TargetOriginId: host
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # Managed-CachingDisabled
+          # AllViewer plus CloudFront's own headers: the daemon's request log reads CloudFront-Viewer-Address (#1490)
+          OriginRequestPolicyId: 33f36d7e-f396-46d9-90e0-52428a34d9dc # Managed-AllViewerAndCloudFrontHeaders-2022-06
+        CacheBehaviors:
+          - PathPattern: /rescue*
+            TargetOriginId: rescue
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
+            FunctionAssociations: [{ EventType: viewer-request, FunctionARN: !GetAtt RescuePrefix.FunctionMetadata.FunctionARN }]
+          # the Function URL needs its own Host (so not forwarded): cookies, query, and the few headers the Starter reads
+          - PathPattern: /_auth*
+            TargetOriginId: auth
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # Managed-CachingDisabled
+            OriginRequestPolicyId: !Ref AuthRequestPolicy
+          - PathPattern: /_start/*
+            TargetOriginId: startpage
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+        # the host does not answer (stopped, starting, interrupted) → the start page, never cached
+        CustomErrorResponses:
+          - { ErrorCode: 502, ResponseCode: 503, ResponsePagePath: /_start/index.html, ErrorCachingMinTTL: 0 }
+          - { ErrorCode: 504, ResponseCode: 503, ResponsePagePath: /_start/index.html, ErrorCachingMinTTL: 0 }
+  # What /_auth* forwards to the Starter (#211): its own Host stays, the cookies and query go, and of the headers only
+  # what it reads — the body's type, the device label, whether the page asks if a passkey is registered, and
+  # CloudFront-Viewer-Address, the viewer the login's rate limit is kept per (the managed AllViewer policies do not
+  # include CloudFront's own headers).
+  AuthRequestPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: !Sub '${AWS::StackName}-auth'
+        CookiesConfig: { CookieBehavior: all }
+        QueryStringsConfig: { QueryStringBehavior: all }
+        HeadersConfig:
+          HeaderBehavior: whitelist
+          Headers: [content-type, user-agent, x-switchboard-ask, CloudFront-Viewer-Address]
+  # sb-rescue's 作り直す calls the Starter (#231); the host reads its URL here (the start token is a SecureString)
+  StarterUrlParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /switchboard/starter-url
+      Type: String
+      Value: !GetAtt StarterUrl.FunctionUrl
+  # 救援画面のリンクと昇格失敗の PBI に書く外向きの URL（#399）
+  WebUrlParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /switchboard/web-url
+      Type: String
+      Value: !Sub 'https://${Cdn.DomainName}'
+  # ---------- start / rebuild ----------
+  Starter:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../dist/starter/
+      Handler: index.handler
+      Runtime: nodejs24.x
+      Architectures: [arm64]
+      PermissionsBoundary: !Ref Boundary
+      MemorySize: 256
+      Timeout: 30
+      # a public URL: at most a few at once, so abuse cannot run up the bill (one person uses it)
+      ReservedConcurrentExecutions: 5
+      FunctionUrlConfig: { AuthType: NONE, Cors: { AllowOrigins: [!Ref PublicOrigin], AllowMethods: [GET, POST], AllowHeaders: [x-switchboard-start-token, content-type] } }
+      Environment:
+        Variables:
+          SB_INSTANCE_ID: !Ref Instance
+          SB_START_TOKEN_PARAM: /switchboard/start-token
+          # passkey login (#211): WebAuthn's origin, and where the passkeys live
+          SB_PUBLIC_ORIGIN: !Ref PublicOrigin
+          SB_DATA_BUCKET: !Ref Data
+          # the always-allowed countries (#1639): the temporary extra ones are added to these, never replace them
+          SB_ALLOWED_COUNTRIES: !Join [',', !Ref AllowedCountries]
+      # every 5 minutes: end a temporary allowance, or restore it after a redeploy put the whitelist back (#1639)
+      Events:
+        CountriesTick: { Type: Schedule, Properties: { Schedule: rate(5 minutes) } }
+      # start, stop (#1394), and 作り直す as a root volume replacement on the same instance: its id, VPC origin and Spot request stay.
+      # No CloudFormation, no role to pass, no Spot cancel (review #338: those made a failed rebuild unrecoverable).
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: [ec2:StartInstances, ec2:StopInstances, ec2:CreateReplaceRootVolumeTask]
+              Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Instance}'
+            - Effect: Allow
+              Action: ec2:CreateReplaceRootVolumeTask
+              Resource:
+                - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:replace-root-volume-task/*'
+                - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:volume/*'
+                - !Sub 'arn:aws:ec2:${AWS::Region}::snapshot/*'
+                - !Sub 'arn:aws:ec2:${AWS::Region}::image/*'
+            - Effect: Allow
+              Action: [ec2:DescribeInstances, ec2:DescribeReplaceRootVolumeTasks]
+              Resource: '*'
+            - Effect: Allow
+              Action: [ssm:GetParameter]
+              Resource:
+                - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/start-token'
+                - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/session-signing-key'
+                - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/register-code'
+                - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/edge-header'
+                - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/distribution-id'
+            # the one-time registration code is removed once a passkey used it
+            - Effect: Allow
+              Action: ssm:DeleteParameter
+              Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/register-code'
+            # the passkeys (public keys and counters only), one object
+            - Effect: Allow
+              Action: [s3:GetObject, s3:PutObject]
+              Resource: !Sub '${Data.Arn}/auth/passkeys.json'
+            # the temporary extra countries (#1639), one object
+            - Effect: Allow
+              Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
+              Resource: !Sub '${Data.Arn}/auth/countries.json'
+            # without ListBucket S3 answers a missing object with AccessDenied, not NoSuchKey (the first registration)
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: !GetAtt Data.Arn
+              Condition: { StringLike: { 's3:prefix': 'auth/*' } }
+  # The Starter reads the distribution's id from here: an environment variable would make Starter -> Cdn -> Starter a cycle (#1639)
+  DistributionIdParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /switchboard/distribution-id
+      Type: String
+      Value: !Ref Cdn
+  # Only the Starter may change the geo restriction, and only this distribution's: the host (the instance role) cannot, so
+  # nothing running on it, agents included, can loosen the entrance (#1639, #701). A separate Policy rather than an inline one
+  # because the Boundary cannot name the distribution (Boundary -> Cdn -> Starter -> its role -> Boundary would be a cycle).
+  StarterCountriesPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: countries
+      Roles: [!Ref StarterRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: [cloudfront:GetDistributionConfig, cloudfront:UpdateDistribution]
+            Resource: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${Cdn}'
+  # CloudFormation's service role for updates that do not come from a person (the workflow, #232). Scoped to this
+  # stack: its buckets, its Lambda, its log group, its budgets, its distribution; roles only when they carry Boundary
+  # (so it cannot make a role stronger than the host needs, nor change itself); never the boundary, and no trust-policy
+  # edits (a role re-trusted to an outside principal would hand its permissions out). EC2 stays broad (RunInstances
+  # touches many resource types and has no stack tag yet) in this region, but an instance of another stack is off limits.
+  # The SAM transform's change set runs as this role too (--role-arn), so it may create that one and nothing else in
+  # CloudFormation (#759).
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{ Effect: Allow, Principal: { Service: cloudformation.amazonaws.com }, Action: sts:AssumeRole }]
+      Policies:
+        - PolicyName: stack
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ec2:*
+                Resource: '*'
+                Condition: { StringEquals: { 'aws:RequestedRegion': !Ref AWS::Region } }
+              - Effect: Deny
+                Action: ec2:*
+                Resource: !Sub 'arn:aws:ec2:*:${AWS::AccountId}:instance/*'
+                Condition:
+                  'Null': { 'aws:ResourceTag/aws:cloudformation:stack-name': 'false' }
+                  StringNotEquals: { 'aws:ResourceTag/aws:cloudformation:stack-name': !Ref AWS::StackName }
+              - Effect: Allow
+                Action: s3:*
+                Resource: [!GetAtt Data.Arn, !Sub '${Data.Arn}/*', !GetAtt StartPage.Arn, !Sub '${StartPage.Arn}/*']
+              - Effect: Allow
+                Action: cloudfront:*
+                Resource:
+                  - !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${Cdn}'
+                  - !Sub 'arn:aws:cloudfront::${AWS::AccountId}:vpcorigin/*'
+                  - !Sub 'arn:aws:cloudfront::${AWS::AccountId}:function/${AWS::StackName}-*'
+                  - !Sub 'arn:aws:cloudfront::${AWS::AccountId}:origin-access-control/*'
+              # attaching a Web ACL to the distribution reads it (#1492)
+              - Effect: Allow
+                Action: wafv2:GetWebACL
+                Resource: !Sub 'arn:aws:wafv2:us-east-1:${AWS::AccountId}:global/webacl/*'
+              - Effect: Allow
+                Action: lambda:*
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-*'
+              - Effect: Allow
+                Action: logs:*
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AWS::StackName}-*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/switchboard/host'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/switchboard/host:*'
+              - Effect: Allow
+                Action: codebuild:*
+                Resource: !Sub 'arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${AWS::StackName}-*'
+              - Effect: Allow
+                Action: budgets:*
+                Resource: !Sub 'arn:aws:budgets::${AWS::AccountId}:budget/${AWS::StackName}-*'
+              - Effect: Allow
+                Action: [cloudwatch:PutMetricAlarm, cloudwatch:DeleteAlarms, cloudwatch:TagResource, cloudwatch:UntagResource, cloudwatch:ListTagsForResource]
+                Resource: !Sub 'arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${AWS::StackName}-*'
+              # the Starter's alarm topic (#1639)
+              - Effect: Allow
+                Action: [sns:CreateTopic, sns:DeleteTopic, sns:GetTopicAttributes, sns:SetTopicAttributes, sns:Subscribe, sns:Unsubscribe, sns:GetSubscriptionAttributes, sns:ListSubscriptionsByTopic, sns:TagResource, sns:UntagResource, sns:ListTagsForResource, sns:GetDataProtectionPolicy]
+                Resource: !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${AWS::StackName}-*'
+              - Effect: Allow
+                Action: cloudwatch:DescribeAlarms
+                Resource: '*'
+              - Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31'
+              - Effect: Allow
+                Action: ssm:GetParameters
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}::parameter/aws/service/*'
+              - Effect: Allow
+                Action: [ssm:PutParameter, ssm:GetParameter, ssm:GetParameters, ssm:DeleteParameter, ssm:AddTagsToResource, ssm:RemoveTagsFromResource]
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/starter-url'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/offload-project'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/distribution-id'
+              # the Starter's 5-minute schedule (#1639): a SAM Schedule event is a rule on the default bus
+              - Effect: Allow
+                Action: [events:PutRule, events:DescribeRule, events:DeleteRule, events:PutTargets, events:RemoveTargets]
+                Resource: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/${AWS::StackName}-*'
+              - Effect: Allow
+                Action: [iam:CreateRole, iam:PutRolePolicy, iam:AttachRolePolicy, iam:DeleteRolePolicy, iam:DetachRolePolicy, iam:PutRolePermissionsBoundary]
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-*'
+                Condition: { StringEquals: { 'iam:PermissionsBoundary': !Ref Boundary } }
+              - Effect: Allow
+                Action: [iam:GetRole, iam:GetRolePolicy, iam:DeleteRole, iam:TagRole, iam:UntagRole, iam:PassRole, iam:ListRolePolicies, iam:ListAttachedRolePolicies]
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-*'
+              - Effect: Allow
+                Action: [iam:CreateInstanceProfile, iam:DeleteInstanceProfile, iam:GetInstanceProfile, iam:AddRoleToInstanceProfile, iam:RemoveRoleFromInstanceProfile]
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:instance-profile/${AWS::StackName}-*'
+              - Effect: Allow
+                Action: [iam:GetOpenIDConnectProvider, iam:CreateOpenIDConnectProvider, iam:DeleteOpenIDConnectProvider, iam:TagOpenIDConnectProvider]
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+              - Effect: Allow
+                Action: iam:GetPolicy
+                Resource: !Ref Boundary
+              - Effect: Deny
+                Action: [iam:DeleteRolePermissionsBoundary, iam:UpdateAssumeRolePolicy, iam:CreatePolicyVersion, iam:DeletePolicy, iam:DeletePolicyVersion, iam:SetDefaultPolicyVersion]
+                Resource: '*'
+  # ---------- GitHub Actions (#232: deploy / start with workflow_dispatch, no long-lived keys) ----------
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+  GitHubOidcRole:
+    Type: AWS::IAM::Role
+    Properties:
+      PermissionsBoundary: !Ref Boundary
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Federated: !If [CreateOidcProvider, !Ref GitHubOidcProvider, !Ref GitHubOidcProviderArn] }
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'token.actions.githubusercontent.com:aud': sts.amazonaws.com
+                # a repository with GitHub's immutable subject (iunct-lab, 2026-09-28) always sends repo:owner@id/name@id:
+                # then only that is trusted, so a deleted and re-created repository of the same name is not
+                'token.actions.githubusercontent.com:sub': !If
+                  - ImmutableSub
+                  - !Sub '${GitHubSubPrefix}:ref:refs/heads/main'
+                  - !Sub 'repo:${GitHubRepo}:ref:refs/heads/main'
+      Policies:
+        - PolicyName: host
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [cloudformation:DescribeStacks, cloudformation:DescribeStackEvents, cloudformation:CreateChangeSet, cloudformation:DescribeChangeSet, cloudformation:ExecuteChangeSet, cloudformation:UpdateStack, cloudformation:GetTemplateSummary]
+                Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*'
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt DeployRole.Arn
+              - Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31'
+              - Effect: Allow
+                Action: ec2:DescribeInstances
+                Resource: '*'
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/edge-header'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/start-token'
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: '*'
+                Condition: { StringEquals: { 'kms:ViaService': !Sub 'ssm.${AWS::Region}.amazonaws.com' } }
+              - Effect: Allow
+                Action: [s3:PutObject, s3:GetObject, s3:ListBucket]
+                Resource: [!GetAtt Data.Arn, !Sub '${Data.Arn}/releases/*', !GetAtt StartPage.Arn, !Sub '${StartPage.Arn}/*']
+  # ---------- offload (#678): docker builds and compose stacks too big for the host, one build each ----------
+  # a compose stack (DAK's, for one) can freeze the 4 GiB host; sb-dockerd is capped at 1.5 GiB, so such a check is
+  # killed there. sb-offload (aws/host/offload.sh) uploads the work tree to offload/, starts one build here with the key
+  # and the command, streams the log and exits with the command's code. Each build gets a fresh machine that goes away
+  # when it ends; the time limit and how many at once are the project's, not the host's. The size is sb-offload's per build
+  # (--compute-type-override, small unless asked); the LARGE below applies only to a build started without it (#2304).
+  OffloadLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/codebuild/${AWS::StackName}-offload'
+      RetentionInDays: 7
+  # what the build itself may do: write its log and read the upload it unpacks. No parameter, secret or host path.
+  OffloadRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-offload'
+      PermissionsBoundary: !Ref Boundary
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{ Effect: Allow, Principal: { Service: codebuild.amazonaws.com }, Action: sts:AssumeRole }]
+      Policies:
+        - PolicyName: build
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt OffloadLogs.Arn
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${Data.Arn}/offload/*'
+  # Privileged for docker in the build; not in the VPC (it reaches nothing of the host's). The build succeeds whatever
+  # the command returns: the command's code is the log's last `sb-offload: exit N` line (CodeBuild's own phase lines
+  # follow it), on a line of its own even when the command's output does not end in one; sb-offload reads the last such
+  # line. An upload that cannot be unpacked fails the build with no such line.
+  Offload:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-offload'
+      ServiceRole: !GetAtt OffloadRole.Arn
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            build:
+              commands:
+                # single-quoted: an unquoted `echo "a: b"` is a YAML map, not a command
+                - 'mkdir -p /sb/work && cd /sb/work && aws s3 cp "s3://${Data}/$SB_OFFLOAD_KEY" - | tar -xzf -'
+                - 'cd /sb/work && sh -c "$SB_OFFLOAD_CMD"; c=$?; echo; echo "sb-offload: exit $c"'
+      Artifacts: { Type: NO_ARTIFACTS }
+      Environment: { Type: ARM_CONTAINER, ComputeType: BUILD_GENERAL1_LARGE, Image: aws/codebuild/amazonlinux-aarch64-standard:3.0, PrivilegedMode: true }
+      TimeoutInMinutes: 60
+      QueuedTimeoutInMinutes: 15
+      ConcurrentBuildLimit: 2
+      LogsConfig: { CloudWatchLogs: { Status: ENABLED, GroupName: !Ref OffloadLogs } }
+      Tags: [{ Key: Project, Value: !Ref CostTag }]
+  # the host reads the project's name here: in UserData it would replace the instance
+  OffloadProject:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /switchboard/offload-project
+      Type: String
+      Value: !Ref Offload
+  # ---------- cost ----------
+  BudgetLow:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget: { BudgetName: !Sub '${AWS::StackName}-1000jpy', BudgetType: COST, TimeUnit: MONTHLY, CostFilters: { TagKeyValue: [!Sub 'user:Project$${CostTag}'] }, BudgetLimit: { Amount: 7, Unit: USD } }
+      NotificationsWithSubscribers:
+        - Notification: { NotificationType: ACTUAL, ComparisonOperator: GREATER_THAN, Threshold: 100 }
+          Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref BudgetEmail }]
+  BudgetHigh:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget: { BudgetName: !Sub '${AWS::StackName}-3000jpy', BudgetType: COST, TimeUnit: MONTHLY, CostFilters: { TagKeyValue: [!Sub 'user:Project$${CostTag}'] }, BudgetLimit: { Amount: 20, Unit: USD } }
+      NotificationsWithSubscribers:
+        - Notification: { NotificationType: ACTUAL, ComparisonOperator: GREATER_THAN, Threshold: 100 }
+          Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref BudgetEmail }]
+  # ---------- memory and disk alarms (#540): watched in the console, no action (no mail, no stop or reboot) ----------
+  # A host out of memory can read its disk at the gp3 cap for hours and answer nothing while
+  # the status checks stay green. The alarm state shows it at a glance; a person decides (stop, then start).
+  MemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-memory'
+      AlarmDescription: The host's memory has been at 80% or more for 5 minutes (runners, Chromium and Docker are competing for it; the daemon's unit is throttled from 75% and killed from 85%, so 90% is never reached). If the screen does not answer, stop the instance and start it again.
+      Namespace: CWAgent
+      MetricName: mem_used_percent
+      Dimensions: [{ Name: InstanceId, Value: !Ref Instance }]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 5
+      Threshold: 80
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+  # the unit may use 512M of the 2 GiB swap file (MemorySwapMax): 20% means it is at its swap cap, which can
+  # come minutes before the host stops answering while memory stays under 80%
+  SwapAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-swap'
+      AlarmDescription: The host has used 20% or more of its swap for 3 minutes (the runners are over their memory and at their swap cap). If the screen does not answer, stop the instance and start it again.
+      Namespace: CWAgent
+      MetricName: swap_used_percent
+      Dimensions: [{ Name: InstanceId, Value: !Ref Instance }]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 20
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+  # EC2's own metric, so it still fires when the agent is starved of memory too
+  ReadThrashAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-disk-read'
+      AlarmDescription: The host has read more than 15 GB from its disk in each of the last 15 minutes, which is what memory thrash looks like (the gp3 cap is about 37 GB per 5 minutes). If the screen does not answer, stop the instance and start it again.
+      Namespace: AWS/EC2
+      MetricName: EBSReadBytes
+      Dimensions: [{ Name: InstanceId, Value: !Ref Instance }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 15000000000
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+  # ---------- the Starter's failures (#1639): mail ----------
+  # The 5-minute countries run (reconcile) throws when it cannot finish (a missing parameter, a missing permission, an SDK
+  # fault). Then a temporary country would stay allowed past its end, and nobody would see it: three failed windows in a
+  # row mail the budget address. The first mail needs the subscription confirmed (the link AWS sends).
+  StarterAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${AWS::StackName}-starter-alarm'
+      Subscription: [{ Protocol: email, Endpoint: !Ref BudgetEmail }]
+  StarterErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-starter-errors'
+      AlarmDescription: The Starter failed in each of the last 15 minutes (the 5-minute countries run among them). A temporary extra country may stay allowed past its end; read the Starter's log group for "log":"countries" lines and the error, then fix the cause, or set AllowedCountries by a deploy.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref Starter }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref StarterAlarmTopic]
+Outputs:
+  Origin:
+    Value: !Sub 'https://${Cdn.DomainName}'
+  InstanceId:
+    Value: !Ref Instance
+  DataBucket:
+    Value: !Ref Data
+  StartPageBucket:
+    Value: !Ref StartPage
+  StarterUrl:
+    Value: !GetAtt StarterUrl.FunctionUrl
+  OidcRoleArn:
+    Value: !GetAtt GitHubOidcRole.Arn
+  DeployRoleArn:
+    Value: !GetAtt DeployRole.Arn

@@ -1,0 +1,54 @@
+# ラベル体系（宣言的）。`.github/workflows/labels.yml` が main への push で同期する。
+# ただし同期は `skip-delete: true` なので、**ここから消しても GitHub 上のラベルは消えない**。
+# 削除は `gh label delete <name> --yes` で手で行う（付いている Issue が 0 件であることを先に確かめる）。
+# 色は 6桁hex（# なし）。Area は `__AREA__` を実際の値に置き換え、1 つにつき 1 件ずつ足す。
+
+# --- 種別 / Type ---
+- name: bug
+  color: d73a4a
+  description: 想定と異なる動作
+- name: enhancement
+  color: a2eeef
+  description: 新機能・改善
+- name: docs
+  color: 0075ca
+  description: ドキュメント
+- name: spike
+  color: fbca04
+  description: 技術リスクの検証（時間制限つき）
+- name: chore
+  color: ededed
+  description: 保守・整備
+
+# --- 階層 / Hierarchy（.claude/skills/issue-workflow）: 要望 → PBI → Task。Task だけが PR を持つ ---
+- name: "type:request"
+  color: e99695
+  description: 利用者の要望の原文。PBI に分解され、派生 PBI が全部 Done で閉じる
+- name: "type:pbi"
+  color: 5c7cfa
+  description: 利用者から見た成果と受け入れ条件。Task に分解され sub-issue が揃ったら Ready
+- name: "type:task"
+  color: 91a7ff
+  description: 実装可能な単位（触る場所・検証・完了条件が書ける）。1 Task = 1 PR
+
+# --- 自動化ドメイン / Automation domains ---
+- name: deps
+  color: 0366d6
+  description: 依存ライブラリの更新
+- name: security
+  color: b60205
+  description: 脆弱性・セキュリティ
+- name: license
+  color: c5def5
+  description: ライセンス・公開判断
+- name: eval
+  color: fbca04
+  description: 実環境・実機での検証
+- name: automation
+  color: ededed
+  description: 自動化ワークフロー由来
+
+# --- 対象コンポーネント / Area（Project の Area フィールドと一致。値の数だけ足す）---
+- name: "area:__AREA__"
+  color: "bfdadc"
+  description: __AREA__ の説明

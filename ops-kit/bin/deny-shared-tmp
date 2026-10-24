@@ -1,0 +1,19 @@
+#!/usr/bin/env bun
+// deny-shared-tmp
+// Claude Code's PreToolUse hook for Bash (#764, docs/design/shared-tmp-guard.md). A command that writes or removes a
+// fixed name right under /tmp stops here with exit 2; the reason goes to the agent on the standard error. Input that
+// cannot be read lets the command through, so a fault of the hook never stops every Bash call.
+import { sharedTmpWrites } from "../src/shared-tmp.ts";
+
+let input: { tool_name?: unknown; tool_input?: { command?: unknown } };
+try {
+  input = JSON.parse(await Bun.stdin.text());
+} catch {
+  process.exit(0);
+}
+const command = input?.tool_input?.command;
+if (input?.tool_name !== "Bash" || typeof command !== "string") process.exit(0);
+const hits = sharedTmpWrites(command);
+if (hits.length === 0) process.exit(0);
+for (const path of hits) console.error(`deny-shared-tmp: /tmp 直下の固定の名前（${path}）に書く・消すコマンドは止めます。W=$(mktemp -d /tmp/<用途>.XXXXXX) の下を使ってください`);
+process.exit(2);

@@ -1,0 +1,45 @@
+name: バグ報告 (Bug report)
+description: 想定と異なる動作を報告する
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 何が起きたか / What happened
+      description: 実際の挙動と、期待した挙動。
+      placeholder: |
+        実際: ...
+        期待: ...
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 影響コンポーネント / Affected component
+      multiple: true
+      options:
+        - __AREA__
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 再現手順 / Steps to reproduce
+      description: "できれば再現できる操作か具体的なコマンドで。"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 環境とバージョン / Environment
+      description: "例 `bun 1.4.2`, `main@<sha>`, 実行している環境"
+    validations:
+      required: false
+  - type: textarea
+    id: events
+    attributes:
+      label: ログ・エラーの出力 / Logs
+      description: "コマンドの出力、ブラウザの開発者ツールの Console など該当行。認証に使える値・個人情報は貼らない"
+      render: text
+    validations:
+      required: false

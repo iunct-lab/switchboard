@@ -1,0 +1,41 @@
+# The cloud host (#181, #232): deploy / start / rebuild / status from a phone, with AWS reached through OIDC only
+# (no long-lived keys in Secrets). Repository variables: SWITCHBOARD_HOST_ROLE_ARN (the stack's GitHubOidcRole output)
+# and SWITCHBOARD_HOST_PARAMS (the non-secret --parameter-overrides, e.g. "ImageId=ami-… VpcId=vpc-… …"); SWITCHBOARD_AWS_REGION and
+# SWITCHBOARD_HOST_STACK only when they differ from ap-northeast-1 and switchboard-host.
+# The first deploy is a person's (aws/README.md); this one updates the existing stack, uploading to its data bucket.
+# The steps are scripts/host-ops.ts (#917), the same command a person runs with their own AWS login when Actions does not run.
+# Deleting the stack is not here: the Spot request has to be cancelled by a person first (aws/README.md).
+name: host
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: deploy (change set; stops if Instance would be replaced) | start | rebuild | status
+        required: true
+        type: choice
+        options: [status, start, rebuild, deploy]
+permissions:
+  id-token: write
+  contents: read
+concurrency: host
+env:
+  SWITCHBOARD_AWS_REGION: ${{ vars.SWITCHBOARD_AWS_REGION || 'ap-northeast-1' }}
+  SWITCHBOARD_HOST_STACK: ${{ vars.SWITCHBOARD_HOST_STACK || 'switchboard-host' }}
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.SWITCHBOARD_HOST_ROLE_ARN }}
+          aws-region: ${{ env.SWITCHBOARD_AWS_REGION }}
+      - uses: oven-sh/setup-bun@v2
+      - uses: aws-actions/setup-sam@v2
+        if: inputs.action == 'deploy'
+      # deploy: a change set run by DeployRole, executed only when it leaves the launch template and the instance alone
+      - name: host operation
+        env:
+          ACTION: ${{ inputs.action }}
+          SWITCHBOARD_HOST_PARAMS: ${{ vars.SWITCHBOARD_HOST_PARAMS }}
+        run: bun scripts/host-ops.ts "$ACTION" --yes

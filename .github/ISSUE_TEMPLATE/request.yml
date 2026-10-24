@@ -1,0 +1,26 @@
+name: Request
+description: A request or a bug report. The one kind of Issue this repository takes; pull requests are not accepted (see "How this repository works" in the README).
+title: "Request: "
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What you want
+      description: What should be possible, or what should stop happening. One request per Issue.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: What you are trying to do, and what gets in the way.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened (for a bug)
+      description: Steps, what you expected, what actually happened, and the commit you ran (`git rev-parse HEAD`). Leave out anything personal (paths with your user name, addresses, tokens).
+      placeholder: |
+        Steps:
+        Expected:
+        Actual:
+        Commit:

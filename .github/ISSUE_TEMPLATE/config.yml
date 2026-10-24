@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and discussion
+    url: https://github.com/iunct-lab/switchboard/discussions
+    about: Ask or discuss in Discussions. Issues are for requests and bug reports.
+  - name: Report a vulnerability
+    url: https://github.com/iunct-lab/switchboard/security/advisories/new
+    about: Report a vulnerability privately through a Security Advisory, not in a public Issue or Discussion.

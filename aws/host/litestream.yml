@@ -1,0 +1,8 @@
+# Litestream: the daemon's sqlite, replicated to the stack's data bucket continuously (#230). @HOME@, @BUCKET@ and
+# @REGION@ are filled in by bootstrap.sh. Credentials come from the instance role. The region is written out because
+# without it Litestream asks S3 for the bucket's location (s3:GetBucketLocation), which the role does not allow.
+dbs:
+  - path: @HOME@/.switchboard/switchboard.db
+    replicas:
+      - url: s3://@BUCKET@/litestream/switchboard.db
+        region: @REGION@

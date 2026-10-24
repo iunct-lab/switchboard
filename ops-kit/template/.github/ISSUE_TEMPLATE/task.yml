@@ -1,0 +1,57 @@
+name: Task
+description: 実装可能な単位。触る場所・手順・検証・完了条件が書けるもの。1 Task = 1 PR、差分 500 行以内（.claude/skills/issue-workflow）
+title: "Task: "
+labels: ["type:task"]
+body:
+  - type: input
+    id: parent
+    attributes:
+      label: 親 PBI
+      description: "覚え書き。ここに #番号を書いただけでは親は付かない。作成後に `bash scripts/setup/triage_issue.sh <num> <area> <kind> <prio> <PBI番号>` で sub-issue として紐づけること（Ready 判定は sub-issue を見る）。triage は Status も毎回上書きし、最後の引数を省くと `Backlog` になる。着手済みの Issue には `… <PBI番号> \"In progress\"` のように今の Status を渡すこと"
+      placeholder: "#21"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: やること
+      description: >-
+        1 段落。触るパッケージ / ファイルを名指しし、末尾に「満たす受け入れ条件: 親 PBI の n, m」を書く。前提となる Task があれば「前提: #N が Done」。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 手順
+      description: 3〜6 ステップ。各ステップに触るファイルと、関数名・型名・エンドポイント・設定キーなど名前を決めて書く（実装者が命名で迷わないように）。利用者の判断が要る箇所（お金・他 OS・破壊的操作・要件の解釈）は「着手前に確認してコメントで止める」と書く。
+      placeholder: |
+        1. `<path>`: 〜を追加（関数名 / エンドポイント / 設定キー）
+        2. `<path>.test.ts`: 〜のケース
+        3. docs: 〜
+    validations:
+      required: true
+  - type: textarea
+    id: verify
+    attributes:
+      label: 検証
+      description: 何を実行して何が出れば良いか。`bun test <file> -t <name>` が pass / `curl … | jq` に `<key>` / Chrome で <操作> → <結果>。この環境で実行できないなら Task にしない。
+    validations:
+      required: true
+  - type: checkboxes
+    id: dod
+    attributes:
+      label: 完了条件 (DoD)
+      options:
+        - label: 回帰テストを追加した（修正なら「修正前で fail」を確認した）
+        - label: "typecheck・test が green（`__TEST_ALL__`）"
+        - label: 実構成で確認した（動いている実物 / 実ブラウザ。やった事実だけ書く）
+        - label: docs を必要に応じ更新した
+        - label: 結果コメントを書いた（PR・変更・検証・レビュー対応・残したもの）
+  - type: dropdown
+    id: area
+    attributes:
+      label: 対象コンポーネント / Area
+      multiple: true
+      options: [__AREA__]
+    validations:
+      required: true

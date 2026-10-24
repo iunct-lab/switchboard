@@ -1,0 +1,6 @@
+[test]
+root = "."
+coverage = false
+
+[install]
+exact = false

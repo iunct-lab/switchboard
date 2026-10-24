@@ -1,0 +1,62 @@
+{
+  "github": {
+    "journeys": {
+      "launch": {
+        "requests": 13,
+        "layoutCount": 4,
+        "recalcStyleCount": 6,
+        "layoutShift": 0.1614
+      },
+      "new-task": {
+        "requests": 13,
+        "layoutCount": 8,
+        "recalcStyleCount": 8,
+        "layoutShift": 0.042
+      },
+      "open-task": {
+        "requests": 7,
+        "layoutCount": 4,
+        "recalcStyleCount": 4
+      },
+      "send": {
+        "requests": 6,
+        "recalcStyleCount": 5,
+        "layoutShift": 0.0404
+      }
+    },
+    "bundle": {
+      "js": 233519,
+      "css": 7560
+    }
+  },
+  "local": {
+    "journeys": {
+      "launch": {
+        "requests": 13,
+        "layoutCount": 5,
+        "recalcStyleCount": 7,
+        "layoutShift": 0.2371
+      },
+      "new-task": {
+        "requests": 18,
+        "layoutCount": 9,
+        "recalcStyleCount": 9,
+        "layoutShift": 0.042
+      },
+      "open-task": {
+        "requests": 9,
+        "layoutCount": 4,
+        "recalcStyleCount": 4
+      },
+      "send": {
+        "requests": 8,
+        "recalcStyleCount": 5,
+        "layoutShift": 0.0427
+      }
+    },
+    "bundle": {
+      "js": 233519,
+      "css": 7560
+    }
+  }
+}

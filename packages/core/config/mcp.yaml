@@ -1,0 +1,54 @@
+# mcp.yaml — Workspace MCP policy (proposal §3 "Workspace MCP", issue #10).
+#
+# exec.run: a command runs IMMEDIATELY only when all of these hold; anything else raises permission.ask and waits:
+#   - it parses as a single argv (quotes ok) with no shell syntax at all: no ; | & < > $ ` ( ) { } newline
+#   - argv[0] is a name, not a path
+#   - its binary name is in `readOnly`, and for git the first argument is a subcommand in `gitReadOnly` (no global
+#     option before it)
+#   - none of its arguments is in `denyFlags[<binary>]` (flags that make a read-only tool write, run a program, read a
+#     list of file names from a file, or follow symlinks while it recurses), also a denied
+#     letter inside bundled short options (sort -uo) and an abbreviation of a denied long option (sort --outp); output
+#     operands (uniq in out) are blocked too
+#   - the name resolves, on the absolute PATH entries only, to a program outside the task scope
+#   - every argument, read as a path from the command's cwd, resolves inside the task scope, and so does a path riding
+#     in an option (--from-file=<path>, -f<path>); `--` is not trusted to end the options; a word with `..` is also
+#     resolved in the order the OS opens it (a symlink before the `..`); diff with a directory asks
+# It is then spawned WITHOUT a shell, with a minimal environment (PATH with its absolute entries only, HOME, PWD, TERM,
+# LANG, LC_ALL when set, a TMPDIR that does not exist, GIT_OPTIONAL_LOCKS=0, GIT_NO_LAZY_FETCH=1, and GIT_CEILING_DIRECTORIES set
+# to the folders above the scope, so git finds no repository that holds the scope), in the task cwd.
+# servers: the MCP servers a Claude Task gets (#2090), and the only ones it reads — the user-wide ones in ~/.claude.json
+# and a project's .mcp.json are not started (--strict-mcp-config). The shape is Claude Code's `mcpServers`; `workspaces`
+# (Workspace names) limits one to the Tasks of those Workspaces, without it every Task gets it. None by default:
+#   servers:
+#     playwright:
+#       command: npx
+#       args: ["@playwright/mcp@latest", "--headless"]
+#       workspaces: [switchboard]
+# Copy to ~/.switchboard/mcp.yaml to customize.
+version: 1
+exec:
+  readOnly: [ls, cat, head, tail, wc, grep, rg, find, pwd, echo, stat, file, tree, du, which, uname, cut, uniq, diff, sort]
+  gitReadOnly: [status, log, diff, show, blame, ls-files, rev-parse, describe]
+  denyFlags:
+    find: [-exec, -execdir, -ok, -okdir, -delete, -fprint, -fprint0, -fprintf, -fls, -files0-from, -L, -follow]
+    sort: [-o, --output, --compress-program, --files0-from, -T, --temporary-directory]
+    wc: [--files0-from]
+    du: [--files0-from, -L, --dereference]
+    ls: [-L, --dereference]
+    diff: [-r, --recursive, -l, --paginate]
+    rg: [--pre, --pre-glob, -L, --follow, --hostname-bin, -z, --search-zip]
+    tree: [-o, -l, -R]
+    file: [-C, --compile, -m, --magic-file, -f, --files-from, -z, -Z, --uncompress, --uncompress-noreport]
+    git: [--output, --help, --show-signature]   # global options cannot come before the subcommand at all; a %G format asks
+    grep: [-R, --dereference-recursive, -S, --exclude-dir=]   # -S is BSD grep's; the last is harmless, an example of the "--name=" shape
+  timeoutMs: 60000
+  maxOutputBytes: 65536
+fs:
+  maxReadBytes: 262144
+  maxListEntries: 2000
+  maxGrepMatches: 500
+  maxGrepFileBytes: 1048576
+  maxGrepFiles: 5000
+sessions:
+  maxPerTask: 8
+  idleMs: 1800000

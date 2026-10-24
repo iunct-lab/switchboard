@@ -1,0 +1,308 @@
+{
+ "_note": "Shapes of the REST API responses (issues/comments item, pulls, commits/<sha>/pulls) with made-up values; the PRs are made up with marks. merged = search/issues is:pr is:merged in the period. The last log entry reverts a commit made inside a PR's branch (its pre-rebase sha is not on main). #912 answered with no ask, #913 asked and merged with no answer, #914 asked once and answered yes twice on two heads.",
+ "comments": [
+  {
+   "body": "[recheck] responsibility pass 0000000000000000000000000000000000000000\npatch-id x",
+   "created_at": "2026-10-01T08:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/804",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[merge-ask] rescue,size aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\nPR #901 をマージしてよいか",
+   "created_at": "2026-10-02T01:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/901",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[recheck] size pass aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "created_at": "2026-10-02T02:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/901",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[merge-answer] yes rescue,size aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "created_at": "2026-10-02T03:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/901",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[merge-ask] design-rules bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "created_at": "2026-10-02T01:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/902",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[merge-answer] no design-rules bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "created_at": "2026-10-02T09:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/902",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[recheck] size pass cccccccccccccccccccccccccccccccccccccccc\npatch-id x",
+   "created_at": "2026-10-02T02:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/903",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[recheck] responsibility pass dddddddddddddddddddddddddddddddddddddddd",
+   "created_at": "2026-10-02T02:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/904",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[recheck] migration pass eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+   "created_at": "2026-10-02T02:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/905",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[recheck] size pass 2222222222222222222222222222222222222222",
+   "created_at": "2026-10-02T02:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/906",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[merge-ask] security 1111111111111111111111111111111111111111",
+   "created_at": "2026-10-02T02:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/907",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[merge-answer] yes security ffffffffffffffffffffffffffffffffffffffff",
+   "created_at": "2026-10-02T02:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/908",
+   "author_association": "CONTRIBUTOR"
+  },
+  {
+   "body": "[codex] review\n\nnot a mark",
+   "created_at": "2026-10-02T02:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/909",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[recheck] size pass ffffffffffffffffffffffffffffffffffffffff",
+   "created_at": "2026-09-01T00:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/910",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[merge-answer] yes security eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+   "created_at": "2026-10-02T04:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/912",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[merge-ask] security ffffffffffffffffffffffffffffffffffffffff\n\nPR #913 をマージしてよいか",
+   "created_at": "2026-10-02T04:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/913",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[merge-ask] security cccccccccccccccccccccccccccccccccccccccc\n\nPR #914 をマージしてよいか",
+   "created_at": "2026-10-02T01:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/914",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[merge-answer] yes security cccccccccccccccccccccccccccccccccccccccc",
+   "created_at": "2026-10-02T03:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/914",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[merge-answer] yes security dddddddddddddddddddddddddddddddddddddddd",
+   "created_at": "2026-10-02T05:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/914",
+   "author_association": "MEMBER"
+  }
+ ],
+ "pulls": {
+  "804": {
+   "base": {
+    "ref": "main"
+   },
+   "head": {
+    "ref": "sb/804-x",
+    "sha": "ffffffffffffffffffffffffffffffffffffffff"
+   },
+   "merged_at": "2026-10-01T16:30:00Z",
+   "number": 804,
+   "state": "closed"
+  },
+  "901": {
+   "number": 901,
+   "state": "closed",
+   "merged_at": "2026-10-02T03:10:00Z",
+   "head": {
+    "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "ref": "sb/901-x"
+   },
+   "base": {
+    "ref": "main"
+   }
+  },
+  "902": {
+   "number": 902,
+   "state": "open",
+   "merged_at": null,
+   "head": {
+    "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "ref": "sb/902-x"
+   },
+   "base": {
+    "ref": "main"
+   }
+  },
+  "903": {
+   "number": 903,
+   "state": "closed",
+   "merged_at": "2026-10-02T02:30:00Z",
+   "head": {
+    "sha": "cccccccccccccccccccccccccccccccccccccccc",
+    "ref": "sb/903-x"
+   },
+   "base": {
+    "ref": "main"
+   }
+  },
+  "904": {
+   "number": 904,
+   "state": "closed",
+   "merged_at": "2026-10-02T02:30:00Z",
+   "head": {
+    "sha": "dddddddddddddddddddddddddddddddddddddddd",
+    "ref": "sb/904-x"
+   },
+   "base": {
+    "ref": "main"
+   }
+  },
+  "905": {
+   "number": 905,
+   "state": "closed",
+   "merged_at": "2026-10-02T02:30:00Z",
+   "head": {
+    "sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "ref": "sb/905-x"
+   },
+   "base": {
+    "ref": "main"
+   }
+  },
+  "906": {
+   "number": 906,
+   "state": "closed",
+   "merged_at": "2026-10-02T02:30:00Z",
+   "head": {
+    "sha": "ffffffffffffffffffffffffffffffffffffffff",
+    "ref": "sb/906-x"
+   },
+   "base": {
+    "ref": "main"
+   }
+  },
+  "908": {
+   "number": 908,
+   "state": "closed",
+   "merged_at": "2026-10-02T02:30:00Z",
+   "head": {
+    "sha": "ffffffffffffffffffffffffffffffffffffffff",
+    "ref": "sb/908-x"
+   },
+   "base": {
+    "ref": "main"
+   }
+  },
+  "910": {
+   "number": 910,
+   "state": "closed",
+   "merged_at": "2026-10-02T02:30:00Z",
+   "head": {
+    "sha": "ffffffffffffffffffffffffffffffffffffffff",
+    "ref": "sb/910-x"
+   },
+   "base": {
+    "ref": "main"
+   }
+  },
+  "912": {
+   "number": 912,
+   "state": "closed",
+   "merged_at": "2026-10-02T04:10:00Z",
+   "head": {
+    "sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "ref": "sb/912-x"
+   },
+   "base": {
+    "ref": "main"
+   }
+  },
+  "913": {
+   "number": 913,
+   "state": "closed",
+   "merged_at": "2026-10-02T04:10:00Z",
+   "head": {
+    "sha": "ffffffffffffffffffffffffffffffffffffffff",
+    "ref": "sb/913-x"
+   },
+   "base": {
+    "ref": "main"
+   }
+  },
+  "914": {
+   "number": 914,
+   "state": "closed",
+   "merged_at": "2026-10-02T05:10:00Z",
+   "head": {
+    "sha": "dddddddddddddddddddddddddddddddddddddddd",
+    "ref": "sb/914-x"
+   },
+   "base": {
+    "ref": "main"
+   }
+  }
+ },
+ "revParse": {
+  "4444444444444444444444444444444444444444": "4444444444444444444444444444444444444444",
+  "5555555": "5555555555555555555555555555555555555555",
+  "6666666": "6666666666666666666666666666666666666666"
+ },
+ "commitPulls": {
+  "4444444444444444444444444444444444444444": [
+   {
+    "merged_at": "2026-10-02T02:30:00Z",
+    "number": 904,
+    "state": "closed"
+   }
+  ],
+  "5555555555555555555555555555555555555555": [
+   {
+    "merged_at": "2026-10-02T02:30:00Z",
+    "number": 905,
+    "state": "closed"
+   }
+  ],
+  "6666666666666666666666666666666666666666": [
+   {
+    "merged_at": "2026-10-02T02:30:00Z",
+    "number": 911,
+    "state": "closed"
+   }
+  ]
+ },
+ "log": "7777777777777777777777777777777777777777\t2026-10-03T00:00:00+00:00\tRevert \"docs: x (#904)\"\n\nThis reverts commit 4444444444444444444444444444444444444444.\n\u0000\n8888888888888888888888888888888888888888\t2026-10-04T00:00:00+00:00\trevert: v0.9.0 に戻す\n\nv0.9.0..origin/main:\n- 5555555 feat: y (#905)\n- 6666666 fix: z\n\u0000\n6666666666666666666666666666666666666666\t2026-10-02T02:30:00+00:00\tfix: z\n\n- 1234567 a line that looks like a rollback's\n\u0000\n9999999999999999999999999999999999999999\t2026-10-02T03:00:00+00:00\tRevert \"wip\" (#906)\n\nThis reverts commit 3333333333333333333333333333333333333333.\n\u0000",
+ "merged": [
+  804,
+  901,
+  903,
+  904,
+  905,
+  906,
+  908,
+  910,
+  911,
+  912,
+  913,
+  914
+ ]
+}

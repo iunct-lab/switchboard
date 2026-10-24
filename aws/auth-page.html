@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Switchboard にログイン</title>
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+  body { margin: 0; padding: 24px 16px; max-width: 480px; margin-inline: auto; line-height: 1.6; }
+  h1 { font-size: 20px; margin: 0 0 8px; }
+  .dim { opacity: .7; font-size: 14px; }
+  .card { border: 1px solid color-mix(in srgb, currentColor 20%, transparent); border-radius: 12px; padding: 16px; margin: 16px 0; }
+  button { min-height: 48px; width: 100%; border-radius: 10px; border: 1px solid color-mix(in srgb, currentColor 35%, transparent); background: transparent; color: inherit; padding: 0 16px; font-size: 16px; font-weight: 600; margin-top: 8px; }
+  button.pri { background: #2f6fdd; border-color: #2f6fdd; color: #fff; }
+  button:disabled { opacity: .4; }
+  #msg { min-height: 1.6em; font-variant-numeric: tabular-nums; }
+  .bad { color: #c0392b; }
+  a { color: inherit; }
+  input { display: block; width: 100%; box-sizing: border-box; min-height: 40px; margin: 4px 0 8px; font-size: 16px; }
+  #passkeys { list-style: none; padding: 0; margin: 8px 0; }
+  #passkeys li { padding: 8px 0; border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent); }
+  #deviceUrl { display: block; word-break: break-all; font-size: 14px; margin: 4px 0; user-select: all; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<h1>Switchboard</h1>
+<div class="dim">パスキー（Face ID / 指紋）で入ります。パスワードはありません。</div>
+<div class="card">
+  <div id="msg">読み込み中…</div>
+  <button id="register" class="pri" hidden>この端末のパスキーを登録する</button>
+  <button id="login" class="pri" hidden>パスキーでログイン</button>
+  <button id="start" class="pri" hidden>起動する</button>
+  <button id="stop" hidden>停止する</button>
+  <button id="forceStop" hidden>強制停止</button>
+  <button id="rebuild" hidden>作り直す（ディスクを初期状態に戻して履歴を復元）</button>
+  <div id="rescue" class="dim" hidden>画面が出ないときは <a href="/rescue/">救援画面</a> を開いてください（ログを見る・前の版に戻す）。</div>
+</div>
+<div class="card" id="countries" hidden>
+  <strong>海外から使う（国の一時許可）</strong>
+  <div id="cState" class="dim">読み込み中…</div>
+  <div id="cForm" hidden>
+    <label class="dim">追加で許可する国（2 文字、カンマ区切り。例: US, GB）<input id="cCountries" autocomplete="off" autocapitalize="characters"></label>
+    <label class="dim">開始（空なら今から）<input id="cFrom" type="datetime-local"></label>
+    <label class="dim">終了（90 日まで）<input id="cUntil" type="datetime-local"></label>
+    <button id="cSave" class="pri">保存</button>
+    <button id="cClear">今すぐ取り消す</button>
+    <div class="dim">CloudFront に反映されるまで数分かかります。出発前に設定してください（国外からはこの画面も開けません）。期限が過ぎると自動で元に戻ります。</div>
+  </div>
+  <div><a id="cBack" href="/" hidden>Switchboard に戻る</a></div>
+</div>
+<div class="card" id="devices" hidden>
+  <strong>登録済みのパスキー</strong>
+  <ul id="passkeys"></ul>
+  <button id="addDevice">別の端末を追加</button>
+  <div id="deviceLink" class="dim" hidden>
+    新しい端末でこのリンクを開き、その端末のパスキーを登録してください（1 回だけ、<span id="deviceExpires"></span> まで）:
+    <code id="deviceUrl"></code>
+    <button id="copyLink">コピー</button>
+  </div>
+  <div class="dim">追加と削除の前に、この端末のパスキーで確かめます。消したパスキーの端末は、この画面ではすぐ、Switchboard の画面と救援画面でも 5 分以内に入れなくなります。</div>
+  <div><a id="dBack" href="/" hidden>Switchboard に戻る</a></div>
+</div>
+<div class="dim"><a href="#" id="logout" hidden>ログアウト</a></div>
+<script>
+const $ = (id) => document.getElementById(id);
+const q = new URLSearchParams(location.search);
+// in the fragment, not the query: a query lands in CloudFront's access log (#1490)
+const code = new URLSearchParams(location.hash.slice(1)).get("register");
+// only a page of this site, never back into /_auth: resolved against this origin (a browser turns "/\evil" into
+// "//evil"), backslashes refused outright
+function safeNext(raw) {
+  if (!raw || raw.includes("\\") || !raw.startsWith("/")) return "/";
+  let u;
+  try { u = new URL(raw, location.origin); } catch { return "/"; }
+  if (u.origin !== location.origin || u.pathname.startsWith("/_auth")) return "/";
+  return u.pathname + u.search + u.hash;
+}
+const next = safeNext(q.get("next"));
+/** Where to go once the daemon lets this browser in, marked so the daemon's UI does not send it straight back (#235). */
+function back() {
+  const u = new URL(next, location.origin);
+  u.searchParams.set("from", "auth");
+  return u.pathname + u.search + u.hash;
+}
+const b64 = (b) => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const unb64 = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+/** Closing the passkey sheet is NotAllowedError ("timed out or was not allowed"), not null: both are a cancel. */
+const cancelled = (e) => { if (e?.name === "NotAllowedError") return null; throw e; };
+const say = (text, bad) => { $("msg").textContent = text; $("msg").className = bad ? "bad" : ""; };
+const show = (...ids) => { for (const id of ["register", "login", "start", "stop", "forceStop", "rebuild", "rescue", "logout"]) $(id).hidden = !ids.includes(id); };
+async function api(path, body) {
+  // status reads the passkey list only when asked (it is open, so a bare call stays cheap)
+  const r = await fetch("/_auth/" + path, body === undefined ? { credentials: "same-origin", headers: { "x-switchboard-ask": "registered" } } : { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(data.error || `HTTP ${r.status}`), { status: r.status, reason: data.reason });
+  return data;
+}
+/** The daemon answers and lets this browser in: only an authorized caller gets `runners` (a daemon that refuses the
+ *  cookie answers 200 without them, and going there would come straight back here). */
+async function daemonUp() {
+  try {
+    const r = await fetch("/api/health", { credentials: "same-origin", cache: "no-store" });
+    if (!r.ok || !(r.headers.get("content-type") || "").includes("json")) return false;
+    const h = await r.json();
+    return Array.isArray(h.runners);
+  } catch { return false; }
+}
+/** The rescue page (sb-rescue, on the host) answers: it runs on the same machine, so if it does not, nothing there does (#1394). */
+async function rescueUp() {
+  try {
+    const r = await fetch("/rescue/api/status", { credentials: "same-origin", cache: "no-store" });
+    return r.ok && (r.headers.get("content-type") || "").includes("json");
+  } catch { return false; }
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** The section the Web UI's link (or the person) opened: the page stays on it instead of going on to Switchboard. */
+const stays = () => (location.hash === "#countries" ? "countries" : location.hash === "#devices" ? "devices" : "");
+
+async function register() {
+  try {
+    say("パスキーを作っています…");
+    const { challenge, rpId } = await api("challenge", {});
+    const cred = await navigator.credentials.create({ publicKey: { challenge: unb64(challenge), rp: { id: rpId, name: "Switchboard" }, user: { id: crypto.getRandomValues(new Uint8Array(16)), name: "Switchboard", displayName: "Switchboard" }, pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }], authenticatorSelection: { residentKey: "preferred", userVerification: "required" }, attestation: "none" } }).catch(cancelled);
+    if (!cred) return say("キャンセルしました");
+    const r = cred.response;
+    if (typeof r.getPublicKey !== "function" || typeof r.getAuthenticatorData !== "function" || !r.getPublicKey()) throw new Error("このブラウザのパスキーには対応していません。Safari か Chrome で開いてください");
+    await api("register", { code, challenge, clientDataJSON: b64(r.clientDataJSON), authenticatorData: b64(r.getAuthenticatorData()), publicKey: b64(r.getPublicKey()), algorithm: r.getPublicKeyAlgorithm() });
+    history.replaceState(null, "", "/_auth/" + (next !== "/" ? "?next=" + encodeURIComponent(next) : ""));
+    await render("登録しました。次からはこの端末のパスキーで入れます。");
+  } catch (e) { say(String(e.message || e), true); }
+}
+/** Tells the device that a passkey was removed from Switchboard (#1312): its password manager can hide it. False when the browser has no Signal API. */
+async function forgetPasskey(rpId, id) {
+  if (typeof PublicKeyCredential === "undefined" || typeof PublicKeyCredential.signalUnknownCredential !== "function") return false;
+  return await PublicKeyCredential.signalUnknownCredential({ rpId, credentialId: id }).then(() => true, () => false);
+}
+/** A passkey signature over a new challenge, as the body of login, device-code and passkeys/delete; null when cancelled. */
+async function assertFresh() {
+  say("パスキーを確かめています…");
+  const { challenge, rpId } = await api("challenge", {});
+  const cred = await navigator.credentials.get({ publicKey: { challenge: unb64(challenge), rpId, userVerification: "required" } }).catch(cancelled);
+  if (!cred) return null;
+  const r = cred.response;
+  return { rpId, signed: { challenge, id: cred.id, clientDataJSON: b64(r.clientDataJSON), authenticatorData: b64(r.authenticatorData), signature: b64(r.signature) } };
+}
+/** The passkey ceremony: logs in, and marks a check made just now (sb_recent, #497). False when cancelled. */
+async function confirmPasskey() {
+  const a = await assertFresh();
+  if (!a) return false;
+  try {
+    await api("login", a.signed);
+  } catch (e) {
+    if (e.status !== 401 || e.reason !== "unknown") throw e;
+    const told = await forgetPasskey(a.rpId, a.signed.id);
+    throw new Error(told
+      ? "このパスキーは Switchboard から外されています。この端末に知らせたので、対応していれば選ぶ画面から消えます。別のパスキーを選んでください"
+      : "このパスキーは Switchboard から外されています。端末のパスワードマネージャーの設定から消せます。別のパスキーを選んでください");
+  }
+  return true;
+}
+async function login() {
+  try {
+    if (!(await confirmPasskey())) return say("キャンセルしました");
+    await render();
+  } catch (e) { say(String(e.message || e), true); }
+}
+/** Starting and 作り直す need a passkey check within 5 minutes (#497): on that 401, check and send once more. */
+async function withRecent(send) {
+  try { return await send(); }
+  catch (e) {
+    if (e.status !== 401 || e.reason !== "recent") throw e;
+    say("操作の前にパスキーで確かめます");
+    if (!(await confirmPasskey())) throw new Error("キャンセルしました");
+    return await send();
+  }
+}
+/** Waits until the daemon answers, then goes where the person was headed. */
+async function waitForDaemon(started) {
+  show("logout");
+  const t0 = started || Date.now();
+  const mine = ++waitGen; // a newer wait (stop pressed, 作り直す) takes over the screen
+  let rescueAt = -Infinity;
+  let last = "?";
+  while (Date.now() - t0 < 10 * 60_000) {
+    if (mine !== waitGen) return;
+    if (await daemonUp()) {
+      say("起動しました");
+      if (stays()) return show("logout"); // #countries / #devices stay open; their link goes on to Switchboard
+      location.replace(back()); return;
+    }
+    const { state } = await api("status").catch(() => ({ state: "?" }));
+    if (mine !== waitGen) return;
+    last = state;
+    if (state === "stopping") return waitForStop(Date.now()); // an idle or Spot stop that hangs
+    const s = Math.round((Date.now() - t0) / 1000);
+    // the machine runs but Switchboard does not answer: stop / 作り直す at once, not after a wait (#1394)
+    const stuck = state === "running";
+    say(`起動しています… ${s} 秒（機械: ${state}）${stuck ? "。起動の途中なら 20〜30 秒で開きます" : ""}`);
+    if (stuck) {
+      show("stop", "rebuild", "rescue", "logout");
+      // the rescue page lives on the same machine: say whether it answers, once now and every 30 s
+      if (Date.now() - rescueAt >= 30_000) {
+        rescueAt = Date.now();
+        const up = await rescueUp();
+        $("rescue").replaceChildren(...(up
+          ? ["画面が出ないときは ", Object.assign(document.createElement("a"), { href: "/rescue/", textContent: "救援画面" }), " を開いてください（ログを見る・前の版に戻す）。"]
+          : ["救援画面も応答しません。停止か作り直すを使ってください。"]));
+      }
+    }
+    if (state === "stopped") { show("start", "logout"); say("機械は止まっています"); return; }
+    await sleep(3000);
+  }
+  if (mine !== waitGen) return;
+  say("10 分たっても起動しませんでした", true);
+  show(...(last === "running" ? ["stop"] : []), "rescue", "rebuild", "logout");
+}
+const FORCE_AFTER_MS = 120_000;
+let waitGen = 0;
+/** After stop was pressed: until the machine is stopped (then 起動する), offering 強制停止 when stopping drags on. */
+async function waitForStop(started) {
+  show("logout");
+  const t0 = started || Date.now();
+  const mine = ++waitGen;
+  let last = "?";
+  while (Date.now() - t0 < 10 * 60_000) {
+    const { state } = await api("status").catch(() => ({ state: "?" }));
+    if (mine !== waitGen) return;
+    last = state;
+    if (state === "running" || state === "pending") return waitForDaemon(Date.now()); // woken again meanwhile
+    if (state === "stopped") { show("start", "logout"); return say("機械は止まっています。起動すると 20〜30 秒で使えます"); }
+    const s = Math.round((Date.now() - t0) / 1000);
+    say(`停止しています… ${s} 秒（機械: ${state}）`);
+    if (Date.now() - t0 >= FORCE_AFTER_MS && state === "stopping") show("forceStop", "logout");
+    await sleep(3000);
+  }
+  if (mine !== waitGen) return;
+  say("10 分たっても止まりませんでした", true);
+  show(...(last === "stopping" ? ["forceStop"] : []), "rebuild", "logout");
+}
+async function stop(force) {
+  const ok = force
+    ? confirm("強制停止は OS の終了を待たずに電源を切ります。止まらないときだけ使ってください。進めますか？")
+    : confirm("機械を停止します。動いている Task は止まります。進めますか？");
+  if (!ok) return;
+  const button = $(force ? "forceStop" : "stop");
+  try {
+    button.disabled = true;
+    await withRecent(() => api("stop", { force }));
+    button.disabled = false; // before the wait: 強制停止 appears inside it and must be pressable
+    say("停止しています…");
+    await waitForStop(Date.now());
+  }
+  catch (e) {
+    button.disabled = false;
+    // already stopping: the way on is 強制停止, with the wait that offers it after 2 minutes
+    if (e.status === 409 && e.reason === "stopping") { say(String(e.message)); return waitForStop(Date.now()); }
+    say(String(e.message || e), true);
+  }
+}
+const START_WAIT_MS = 180_000;
+const gaveUp = (e) => (e.reason === "capacity" ? new Error(`${e.message}。3 分待っても空きませんでした。時間をおいてもう一度押してください`) : e);
+async function start() {
+  const t0 = Date.now();
+  try {
+    $("start").disabled = true;
+    // 409 = the machine is between states (still stopping, or its Spot request not startable yet), or AWS has no Spot
+    // capacity for it (#443): wait and try again, for 3 minutes
+    for (;;) {
+      try { await withRecent(() => api("start", {})); break; }
+      catch (e) {
+        if (e.status !== 409) throw e;
+        if (Date.now() - t0 >= START_WAIT_MS) throw gaveUp(e);
+        const s = Math.round((Date.now() - t0) / 1000);
+        say(e.reason === "capacity" ? `${e.message}。Spot の空き待ち… ${s} 秒（3 分まで待ちます）` : `${e.message}。待っています… ${s} 秒`);
+        await sleep(e.reason === "capacity" ? 15_000 : 5000);
+        // a sleep may run long (a phone that suspended the tab): past the deadline, stop before trying again
+        if (Date.now() - t0 >= START_WAIT_MS) throw gaveUp(e);
+      }
+    }
+    await waitForDaemon(t0);
+  }
+  catch (e) { say(String(e.message || e), true); } finally { $("start").disabled = false; }
+}
+async function rebuild() {
+  if (!confirm("機械のディスクを初期状態に戻し、履歴をバックアップから戻します。数分かかります。進めますか？")) return;
+  try { $("rebuild").disabled = true; await withRecent(() => api("rebuild", {})); say("作り直しています…"); await waitForDaemon(Date.now()); }
+  catch (e) { say(String(e.message || e), true); } finally { $("rebuild").disabled = false; }
+}
+/** What the countries section's inputs say, as the request body: the page's own clock zone reads the datetime-local values. */
+function countriesBody(text, from, until) {
+  const body = { countries: text.split(/[\s,、]+/).map((c) => c.toUpperCase()).filter(Boolean) };
+  if (from) body.from = new Date(from).getTime();
+  if (until) body.until = new Date(until).getTime();
+  return body;
+}
+const pad = (n) => String(n).padStart(2, "0");
+const when = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+/** The state line: the always-allowed countries, and the one temporary allowance. */
+function countriesText(v) {
+  if (!v.base.length) return "国の制限はありません";
+  const a = v.allowance;
+  return `常時: ${v.base.join(", ")}` + (a ? ` / 追加: ${a.countries.join(", ")}（${when(a.from)} 〜 ${when(a.until)}、${v.active ? "期間中" : "予定"}）` : " / 追加: なし");
+}
+function showCountries(v) {
+  $("countries").hidden = false;
+  $("cState").textContent = countriesText(v);
+  $("cForm").hidden = !v.base.length;
+}
+/** The countries section for a logged-in person; a Starter without it (404) or a failure leaves it hidden. */
+async function loadCountries() {
+  try { showCountries(await api("countries")); } catch { $("countries").hidden = true; }
+}
+async function saveCountries() {
+  try {
+    $("cSave").disabled = true;
+    showCountries(await withRecent(() => api("countries", countriesBody($("cCountries").value, $("cFrom").value, $("cUntil").value))));
+    say("保存しました。反映まで数分かかります");
+  } catch (e) { say(String(e.message || e), true); } finally { $("cSave").disabled = false; }
+}
+async function clearCountries() {
+  try {
+    $("cClear").disabled = true;
+    showCountries(await withRecent(() => api("countries/clear", {})));
+    say("取り消しました。反映まで数分かかります");
+  } catch (e) { say(String(e.message || e), true); } finally { $("cClear").disabled = false; }
+}
+/** One row of the passkey list: device, registered, last used, this browser's mark, and 削除. */
+function passkeyRow(p) {
+  const li = document.createElement("li");
+  const text = document.createElement("div");
+  text.textContent = `${p.device}${p.current ? "（この端末）" : ""}`;
+  const dates = document.createElement("div");
+  dates.className = "dim";
+  dates.textContent = `登録 ${when(p.created)} / 最後に使った ${p.lastUsed ? when(p.lastUsed) : "—"}`;
+  const del = document.createElement("button");
+  del.textContent = "削除";
+  del.onclick = () => removePasskey(p);
+  li.append(text, dates, del);
+  return li;
+}
+/** The registered passkeys for a logged-in person (#414); a failure leaves the section hidden. */
+async function loadDevices() {
+  try {
+    const { passkeys } = await api("passkeys");
+    $("passkeys").replaceChildren(...passkeys.map(passkeyRow));
+    $("devices").hidden = false;
+  } catch { $("devices").hidden = true; }
+}
+/** 別の端末を追加: a passkey check made for this request, then a one-time link for 10 minutes to open on the new device. */
+async function addDevice() {
+  try {
+    $("addDevice").disabled = true;
+    const a = await assertFresh();
+    if (!a) return say("キャンセルしました");
+    const { code, expires } = await api("device-code", a.signed);
+    $("deviceUrl").textContent = `${location.origin}/_auth/#register=${code}`;
+    $("deviceExpires").textContent = when(expires);
+    $("deviceLink").hidden = false;
+    say("リンクを作りました。新しい端末で開いてください");
+    await loadDevices(); // this passkey's 最後に使った moved
+  } catch (e) { say(String(e.message || e), true); } finally { $("addDevice").disabled = false; }
+}
+async function copyLink() {
+  try { await navigator.clipboard.writeText($("deviceUrl").textContent); say("コピーしました"); }
+  catch { say("コピーできませんでした。リンクを長押しして選んでください", true); }
+}
+/** 削除: after a confirmation, a passkey check made for this request; the last passkey is refused by the Starter (409). */
+async function removePasskey(p) {
+  if (!confirm(`${p.device}（登録 ${when(p.created)}）のパスキーを消します。その端末ではログインできなくなります。進めますか？`)) return;
+  try {
+    const a = await assertFresh();
+    if (!a) return say("キャンセルしました");
+    await api("passkeys/delete", { target: p.id, ...a.signed });
+    say("消しました");
+    if (p.current) return render("この端末のパスキーを消しました"); // its cookie no longer counts
+    await loadDevices();
+  } catch (e) { say(String(e.message || e), true); }
+}
+async function render(note) {
+  const st = await api("status");
+  if (!st.loggedIn) $("countries").hidden = $("devices").hidden = true;
+  if (code && !st.loggedIn) { show("register"); return say(note || "この端末のパスキーを登録します（1 回だけ）"); }
+  if (!st.loggedIn) {
+    if (st.registered) { show("login"); return say(note || "パスキーでログインしてください"); }
+    show(); return say("まだパスキーがありません。届いた登録リンクを開いてください");
+  }
+  // the Web UI's link (#countries): the section is opened, and a running daemon does not send this page on to it; a stopped or
+  // stuck host keeps its controls (start / stop / 作り直す)
+  // #devices (#414) likewise opens the passkey list
+  const stay = stays();
+  if (stay) {
+    const link = $(stay === "countries" ? "cBack" : "dBack");
+    link.hidden = false;
+    link.href = back();
+    await (stay === "countries" ? loadCountries() : loadDevices());
+    $(stay).scrollIntoView?.();
+  }
+  if (st.state === "stopped" && !stay) { loadCountries(); loadDevices(); }
+  if (st.state === "running") {
+    if (await daemonUp()) {
+      if (stay) { show("logout"); return say(note || (stay === "countries" ? "国の一時許可を設定できます" : "登録済みのパスキーを見られます")); }
+      say("開いています…"); location.replace(back()); return;
+    }
+    return waitForDaemon(Date.now());
+  }
+  if (st.state === "stopped") { show("start", "logout"); return say(note || "機械は止まっています。起動すると 20〜30 秒で使えます"); }
+  if (st.state === "stopping") return waitForStop(Date.now());
+  return waitForDaemon(Date.now()); // pending
+}
+$("register").onclick = register;
+$("login").onclick = login;
+$("start").onclick = start;
+$("stop").onclick = () => stop(false);
+$("forceStop").onclick = () => stop(true);
+$("rebuild").onclick = rebuild;
+$("cSave").onclick = saveCountries;
+$("cClear").onclick = clearCountries;
+$("addDevice").onclick = addDevice;
+$("copyLink").onclick = copyLink;
+$("logout").onclick = async (e) => { e.preventDefault(); await api("logout", {}).catch(() => {}); await render(); };
+if (!window.PublicKeyCredential) say("このブラウザはパスキーに対応していません", true);
+else render().catch((e) => say(String(e.message || e), true));
+</script>
+</body>
+</html>

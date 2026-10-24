@@ -1,0 +1,27 @@
+name: Sync labels
+
+# .github/labels.yml を唯一の真実として、リポジトリのラベルを同期する（無いものを作り、違うものを直す。既存の想定外ラベルは消さない）。
+# 中身は Actions の外でも同じコマンド `bun ops-kit/src/cli.ts sync-labels`（docs/design/github-operations.md）。
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/labels.yml
+      - .github/workflows/labels.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read   # Private リポジトリの checkout に必要（DAK は Public なので不要だった）
+  issues: write
+
+jobs:
+  labeler:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun ops-kit/src/cli.ts sync-labels .github/labels.yml
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}

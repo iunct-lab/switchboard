@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      # the steps (home paths, install, licenses, typecheck, test, web build, perf) are scripts/ci.ts's, which local-ci runs too (#912)
+      - run: bun scripts/ci.ts

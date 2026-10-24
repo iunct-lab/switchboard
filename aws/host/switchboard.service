@@ -1,0 +1,64 @@
+# Switchboard under sb-rescue (#178: the rescue service runs the daemon from an immutable release and keeps it up).
+# @USER@, @HOME@ and @REPO@ are filled in by bootstrap.sh from the stack's parameters.
+[Unit]
+Description=Switchboard (sb-rescue + daemon)
+Wants=network-online.target
+After=network-online.target litestream.service
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@HOME@
+Environment=HOME=@HOME@
+# /usr/local/bin first: claude-wrapper.sh (#180) sits there as `claude` when a setup-token is used
+Environment=PATH=/usr/local/bin:@HOME@/.local/bin:@HOME@/.bun/bin:/usr/bin:/bin
+Environment=SWITCHBOARD_REPO_ROOT=@REPO@
+Environment=SWITCHBOARD_HOST=0.0.0.0
+Environment=SWITCHBOARD_RESCUE_HOST=0.0.0.0
+Environment=SWITCHBOARD_IDLE_STOP_CMD=/usr/local/bin/sb-stop
+# 作り直す on the rescue page saves the runners' records first (#403)
+Environment=SWITCHBOARD_REBUILD_SAVE_CMD=/usr/local/bin/sb-runner-sync
+Environment=SWITCHBOARD_CLAUDE_TOKEN_PARAM=/switchboard/claude-oauth-token
+# the rescue page's 再起動 ends sb-rescue itself: systemd starts it again, and the ExecStartPre below read Parameter Store
+# and the host scripts again (#435)
+Environment=SWITCHBOARD_RESCUE_RESTART_BY_EXIT=1
+# /tmp is this machine's alone (a small tmpfs): the rescue page's /tmp clean also takes any old mktemp directory and cache,
+# not only Switchboard's own (#2058)
+Environment=SWITCHBOARD_RESCUE_OWNS_TMP=1
+# the development tools of devtools.sh (#371): the E2E scripts' browser and the rootless dockerd
+Environment=CHROME_BIN=/usr/local/bin/chromium
+Environment=CHROME_PATH=/usr/local/bin/chromium
+Environment=DOCKER_HOST=unix://@HOME@/.docker/run/docker.sock
+EnvironmentFile=/etc/switchboard-host.env
+# At every start: the host scripts again from main (#435; a failure keeps the installed ones), then the environment from
+# Parameter Store (bootstrap writes it once before the first start). These two run as root, so they get root's HOME and a
+# PATH without the host user's folders: the agents can write ~/.local/bin, ~/.aws/config and ~/.gitconfig.
+ExecStartPre=-+/usr/bin/env HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin /usr/local/bin/sb-host-update
+ExecStartPre=+/usr/bin/env HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin /usr/local/bin/sb-env /etc/switchboard.env @HOME@/.switchboard/token @USER@
+EnvironmentFile=/etc/switchboard.env
+ExecStart=@HOME@/.bun/bin/bun @HOME@/.switchboard/rescue/sb-rescue.js
+Restart=always
+RestartSec=5
+# One ceiling for everything the runners start (the daemon, claude and codex, Chromium, dev servers: setsid keeps them in
+# this cgroup). The rootless dockerd is not here: sb-dockerd.service has its own ceiling. At MemoryMax the largest process
+# in it is killed. A percentage follows the instance type. OOMPolicy=continue: one process killed by that does not take
+# the daemon's unit down with it.
+# No MemoryHigh: over it the kernel throttles the unit instead of killing anything, and it can then sit between 75%
+# and 85% for hours, reading its own pages back, with nothing answering.
+MemoryMax=85%
+# MemoryMax counts RAM only: without this the unit goes on into swap until the 2 GiB are full and the host thrashes.
+# Past 512M of swap the largest process is killed instead.
+MemorySwapMax=512M
+OOMPolicy=continue
+# systemd-oomd (started by the bootstrap) kills the unit's heaviest process when it spends over half its time waiting on
+# memory for 20 seconds: the stall that stays under MemoryMax and so never meets the kernel's OOM killer.
+ManagedOOMMemoryPressure=kill
+ManagedOOMMemoryPressureLimit=50%
+# A stop (the OS shutting down, a Spot interruption) first signals sb-rescue alone and waits for it: it stops the
+# daemon, which aborts its runners and plans each cut turn to continue on the next start. Without this the whole
+# cgroup was signalled at once and a runner died as an error before the daemon could note the turn.
+# The rest of the cgroup (dev servers) still gets systemd's SIGTERM afterwards, not a SIGKILL.
+ExecStop=/bin/sh -c 'kill -TERM ${MAINPID} 2>/dev/null; while kill -0 ${MAINPID} 2>/dev/null; do sleep 0.5; done'
+
+[Install]
+WantedBy=multi-user.target

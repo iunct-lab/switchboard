@@ -1,0 +1,83 @@
+{
+  "data": {
+    "repository": {
+      "issues": {
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        },
+        "nodes": [
+          {
+            "number": 304,
+            "title": "PBI: lib の Ready の PBI",
+            "url": "https://github.com/acme/lib/issues/304",
+            "createdAt": "2026-09-21T04:00:00Z",
+            "updatedAt": "2026-09-21T04:30:00Z",
+            "body": "**Story Points**: 1\n",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "type:pbi"
+                }
+              ]
+            },
+            "subIssuesSummary": {
+              "total": 1,
+              "completed": 0
+            },
+            "projectItems": {
+              "nodes": [
+                {
+                  "project": {
+                    "number": 11
+                  },
+                  "fieldValues": {
+                    "nodes": [
+                      {
+                        "name": "Ready",
+                        "field": {
+                          "name": "Status"
+                        }
+                      },
+                      {
+                        "number": 1,
+                        "field": {
+                          "name": "Story Points"
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "number": 306,
+            "title": "PBI: lib の判断待ち",
+            "url": "https://github.com/acme/lib/issues/306",
+            "createdAt": "2026-09-21T05:00:00Z",
+            "updatedAt": "2026-09-21T05:30:00Z",
+            "body": "",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "type:pbi"
+                },
+                {
+                  "name": "needs-decision"
+                }
+              ]
+            },
+            "subIssuesSummary": {
+              "total": 0,
+              "completed": 0
+            },
+            "projectItems": {
+              "nodes": []
+            }
+          }
+        ]
+      }
+    }
+  }
+}

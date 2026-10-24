@@ -1,0 +1,6 @@
+{
+ "repositoryOwner": {"projectV2": {"id": "P1"}},
+ "repository": { "issues": {
+  "pageInfo": {"hasNextPage": false, "endCursor": null}
+ } }
+}

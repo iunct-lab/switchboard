@@ -1,0 +1,10 @@
+{
+ "repositoryOwner": {"projectV2": {"id": "P1"}},
+ "repository": { "issues": {
+  "pageInfo": {"hasNextPage": false, "endCursor": null},
+  "nodes": [
+   {"number": 1, "body": "## 要望\n整えた文\n", "labels": {"nodes": [{"name": "type:request"}]}, "parent": null, "subIssues": {"totalCount": 0}, "projectItems": {"nodes": []}},
+   {"number": 2, "body": "本文だけ\n", "labels": {"nodes": [{"name": "type:request"}]}, "parent": null, "subIssues": {"totalCount": 0}, "projectItems": {"nodes": []}}
+  ]
+ } }
+}

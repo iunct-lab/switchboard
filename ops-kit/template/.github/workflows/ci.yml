@@ -1,0 +1,26 @@
+name: CI
+
+# 型・テストを、PR と main への push で走らせる。`run:` の行が CI の手順（Actions が始まらないときは手元で順に回す）。
+on:
+  pull_request: {}
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# PR は新しい push で古い run を取り消す。main は取り消さない（main の各コミットの結果を残す）。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false   # install・test の間、git の設定にトークンを残さない
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: __TEST_ALL__

@@ -1,0 +1,48 @@
+# routing.yaml — rule table for "which runner should take this task" (design proposal §3).
+# v1 is data only; no LLM. Rules are evaluated top to bottom, first match wins.
+# Copy this file to ~/.switchboard/routing.yaml to customize (the user file replaces this one entirely).
+#
+# when:
+#   minRepos / maxRepos : number of scope directories (cwd + extra dirs)
+#   keywords            : any of these (case-insensitive) in the title or prompt
+#   kinds               : explicit task kind passed by the UI (design | research | review | maintenance | ...)
+#   workspaceKind       : "meta" (Switchboard itself) | "repo"
+# runner  : claude | codex | dak
+# reason  : shown in the Task Brief as the recommendation's justification
+version: 1
+rules:
+  - id: multi-repo
+    when: { minRepos: 2 }
+    runner: claude
+    reason: 複数リポジトリ横断。1M コンテキストと対話での軌道修正が効く
+
+  - id: design-research
+    when:
+      kinds: [design, research]
+      keywords: [設計, 調査, 研究, 提案, 比較, 検討, design, research, investigate, spike, architecture, proposal, mcp, skill, plugin]
+    runner: claude
+    reason: 設計・調査、MCP / skills を使う仕事。プラグインと対話で軌道修正する
+
+  - id: self-dev
+    when: { workspaceKind: meta }
+    runner: claude
+    reason: Switchboard 自身の改善。構成図とテスト手順を Brief に同梱して対話で進める
+
+  - id: maintenance-routine
+    when:
+      kinds: [maintenance]
+      keywords: [依存, deps, dependency, dependencies, トリアージ, triage, 定型, nightly, 保守, lint, フォーマット, format]
+    runner: dak
+    reason: 定型の保守。DAK skill があれば DAK で足りる（ローカルモデルなら API 料金なし）。DAK の eval にも寄与する
+
+  - id: single-repo-long
+    when:
+      kinds: [review, implement]
+      keywords: [レビュー, review, 長時間, 放置, リファクタ, refactor, 移行, migrate, 一括, テストを通す, fix all]
+    runner: codex
+    reason: 単一リポジトリで完結・長時間・放置しやすい。サンドボックスが強く ChatGPT プラン内で消化できる
+
+# No rule matched → the runner last used in this workspace (recorded), else claude.
+fallback:
+  runner: claude
+  reason: 既定。前回このリポジトリで使ったランナーがあればそれを優先する

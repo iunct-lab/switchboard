@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Switchboard 救援</title>
+<style>
+  :root { color-scheme: light dark; font: 15px/1.5 system-ui, sans-serif; }
+  body { margin: 0; padding: 12px; max-width: 720px; margin-inline: auto; overflow-wrap: anywhere; }
+  h1 { font-size: 18px; margin: 0 0 8px; }
+  h2 { font-size: 14px; margin: 18px 0 6px; opacity: .7; }
+  .card { border: 1px solid color-mix(in srgb, currentColor 25%, transparent); border-radius: 10px; padding: 10px 12px; }
+  .state { font-weight: 600; }
+  .ok { color: #1a7f37; } .bad { color: #cf222e; }
+  code, pre, select { font: 12px/1.45 ui-monospace, monospace; }
+  pre { margin: 0; padding: 8px; max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: color-mix(in srgb, currentColor 8%, transparent); border-radius: 8px; }
+  button, select { min-height: 44px; border-radius: 8px; border: 1px solid color-mix(in srgb, currentColor 35%, transparent); background: transparent; color: inherit; padding: 0 12px; font-size: 15px; }
+  button { font-weight: 600; } button:disabled { opacity: .4; }
+  .row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; } .row > * { flex: 1 1 140px; min-width: 0; }
+  select { width: 100%; font-size: 13px; text-overflow: ellipsis; }
+  ul { list-style: none; margin: 0; padding: 0; } li { padding: 6px 0; border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent); overflow-wrap: anywhere; } li:first-child { border-top: 0; }
+  .dim { opacity: .65; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>Switchboard 救援</h1>
+<div class="card">
+  <div>状態: <span id="state" class="state">読み込み中…</span></div>
+  <div>今の版: <code id="current">-</code></div>
+  <div>前の版: <code id="previous">-</code></div>
+  <div id="busy" class="dim"></div>
+  <div id="error" class="bad"></div>
+</div>
+
+<h2>操作</h2>
+<div class="row">
+  <button id="restart">再起動</button>
+  <button id="rollback">前の版に戻す</button>
+</div>
+<div id="stopping" class="dim"></div>
+<div class="row">
+  <select id="release" aria-label="版"></select>
+  <button id="choose">この版に戻す</button>
+</div>
+<div class="row">
+  <select id="snapshot" aria-label="DB スナップショット"></select>
+  <button id="restore">DB をスナップショットから戻す</button>
+</div>
+
+<div class="row" id="rebuild-row" hidden>
+  <button id="rebuild">作り直す（ディスクを初期状態に戻す）</button>
+</div>
+
+<h2>/tmp</h2>
+<div class="card">
+  <div id="tmp-usage">読み込み中…</div>
+  <div id="tmp-sweep" class="dim"></div>
+  <ul id="tmp-list"></ul>
+  <div class="row">
+    <button id="tmp-reload">再読込</button>
+    <button id="tmp-clean" disabled>古い作業ディレクトリを消す</button>
+  </div>
+</div>
+
+<h2>救援エージェント</h2>
+<div class="card">
+  <div class="dim">落ちた版のログ・履歴・差分を渡して <code>claude -p</code> を新しい worktree で走らせます。修正は PR まで。コードは実行させません（テストは PR の CI が走らせます）。昇格・再起動はしません（PR を見てから、あなたが昇格します）。定額枠を使います。</div>
+  <div id="allowed" class="dim"></div>
+  <div class="row">
+    <button id="agent-start">救援エージェントを起動</button>
+    <button id="agent-stop">止める</button>
+  </div>
+  <div id="agent-state" class="dim"></div>
+  <pre id="agent-output" hidden></pre>
+</div>
+
+<h2>昇格の履歴</h2>
+<ul id="history" class="card"></ul>
+
+<h2>直近のログ（200 行）</h2>
+<pre id="log"></pre>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const token = new URLSearchParams(location.search).get("token");
+const headers = { "content-type": "application/json", ...(token ? { authorization: "Bearer " + token } : {}) };
+const short = (sha) => (sha ? sha.slice(0, 7) : "なし");
+const ACTIONS = { install: "最初の版", promote: "昇格した", rejected: "昇格を却下", "auto-rollback": "自動で戻した", rollback: "戻した", restart: "再起動", "restore-db": "DB を戻した" };
+let subjects = {};
+let tags = {};
+/** Why this page's last action failed: shown over the 2 s refresh, before the service's (older) lastError, until the next action. */
+let refused = "";
+let restartReloads = false; // 再起動 restarts sb-rescue too and reads the environment again (#435)
+let stopping = []; // the running and waiting tasks a restart or a release switch stops (#435)
+const STATUS = { running: "実行中", waiting: "承認待ち" };
+const taskName = (t) => t.title + "（" + (STATUS[t.status] || t.status) + "）";
+/** The confirm text's tail: up to 5 titles, then how many more. */
+function stopsText() {
+  if (!stopping.length) return "";
+  const more = stopping.length > 5 ? "、ほか " + (stopping.length - 5) + " 件" : "";
+  return "\n\n止まる Task: " + stopping.slice(0, 5).map(taskName).join("、") + more;
+}
+
+function options(select, items, label) {
+  const keep = select.value;
+  select.replaceChildren(...items.map((value) => Object.assign(document.createElement("option"), { value, textContent: label(value) })));
+  if (items.includes(keep)) select.value = keep;
+}
+
+function render(s) {
+  subjects = Object.fromEntries(s.releases.map((r) => [r.sha, r.subject]));
+  tags = Object.fromEntries(s.releases.filter((r) => r.tag).map((r) => [r.sha, r.tag]));
+  const name = (sha) => (sha ? (tags[sha] ? tags[sha] + " " : "") + short(sha) + " " + (subjects[sha] || "") : "なし");
+  const up = s.unhealthy === null;
+  $("state").textContent = up ? "動いています（ポート " + s.port + "）" : "応答なし: " + s.unhealthy + "（supervisor: " + s.state + "）";
+  $("state").className = "state " + (up ? "ok" : "bad");
+  $("current").textContent = name(s.current);
+  $("previous").textContent = name(s.previous);
+  $("busy").textContent = s.busy ? "実行中: " + s.busy + "…" : "";
+  $("error").textContent = refused || s.lastError || "";
+  $("rebuild-row").hidden = !s.rebuild;
+  restartReloads = !!s.restartReloads;
+  stopping = s.stopping || [];
+  // textContent: the titles are what people typed
+  $("stopping").textContent = stopping.length ? "再起動・版の切り替えで止まる Task（自動再開が有効なら起動後に続きから）: " + stopping.map(taskName).join("、") : "止まる Task はありません";
+  options($("release"), s.releases.map((r) => r.sha).filter((sha) => sha !== s.current), name);
+  options($("snapshot"), s.snapshots, (f) => f);
+  for (const id of ["restart", "rollback", "choose", "restore", "rebuild"]) $(id).disabled = !!s.busy || (id === "rebuild" && rebuilding);
+  $("rollback").disabled ||= !s.previous;
+  $("choose").disabled ||= !$("release").value;
+  $("restore").disabled ||= !$("snapshot").value;
+  $("history").replaceChildren(...(s.history.length ? s.history : [null]).map((h) => {
+    const li = document.createElement("li");
+    if (!h) return Object.assign(li, { textContent: "まだありません", className: "dim" });
+    const head = document.createElement("div");
+    head.textContent = (ACTIONS[h.action] || h.action) + ": " + short(h.from) + " → " + short(h.to);
+    head.className = h.ok ? "" : "bad";
+    const why = Object.assign(document.createElement("div"), { className: "dim", textContent: new Date(h.ts).toLocaleString() + " · " + h.reason });
+    li.append(head, why);
+    return li;
+  }));
+  const a = s.agent;
+  $("allowed").textContent = a.allowed ? "許可している操作: " + a.allowed.join(", ") : "";
+  $("agent-start").disabled = a.running;
+  $("agent-stop").disabled = !a.running;
+  $("agent-state").className = a.error ? "bad" : "dim";
+  $("agent-state").textContent = a.error ? "起動できませんでした: " + a.error : a.running ? "実行中… " + a.worktree : a.exitCode === null ? "" : "終了（exit " + a.exitCode + "）" + a.worktree;
+  const out = $("agent-output");
+  out.hidden = !a.output;
+  const outAtEnd = out.scrollTop + out.clientHeight >= out.scrollHeight - 8;
+  out.textContent = a.output;
+  if (outAtEnd) out.scrollTop = out.scrollHeight;
+  const log = $("log");
+  const atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
+  log.textContent = s.log.join("\n");
+  if (atEnd) log.scrollTop = log.scrollHeight;
+}
+
+async function refresh() {
+  try {
+    const r = await fetch("api/status", { headers });
+    if (r.ok) render(await r.json());
+    else $("state").textContent = "救援サービスが " + r.status + " を返しました";
+  } catch {
+    $("state").textContent = "救援サービスに届きません";
+  }
+}
+
+const b64 = (b) => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const unb64 = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+/** The cloud host's passkey check (#497), on this origin's login (aws/auth-page.html's login()); throws why it failed. */
+async function confirmPasskey() {
+  const post = async (path, body) => {
+    const r = await fetch(path, { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || "パスキーを確かめられませんでした (" + r.status + ")");
+    return data;
+  };
+  const { challenge, rpId } = await post("/_auth/challenge", {});
+  // closing the passkey sheet is NotAllowedError ("timed out or was not allowed"), not null
+  const cred = await navigator.credentials.get({ publicKey: { challenge: unb64(challenge), rpId, userVerification: "required" } }).catch((e) => { if (e?.name === "NotAllowedError") return null; throw e; });
+  if (!cred) throw new Error("キャンセルしました");
+  const c = cred.response;
+  await post("/_auth/login", { challenge, id: cred.id, clientDataJSON: b64(c.clientDataJSON), authenticatorData: b64(c.authenticatorData), signature: b64(c.signature) });
+}
+
+/** null when the person said no (nothing was sent), else whether the answer was ok */
+async function act(path, body, question) {
+  if (!confirm(question)) return null;
+  const fail = (text) => { refused = text; $("error").textContent = text; };
+  refused = "";
+  const send = () => fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
+  let r = await send();
+  let data = r.ok ? {} : await r.json().catch(() => ({}));
+  // with the login cookie, a change needs a passkey check within 5 minutes (#497): check, then send once more
+  if (r.status === 401 && data.reason === "recent") {
+    try {
+      await confirmPasskey();
+    } catch (e) {
+      fail(String(e.message || e));
+      await refresh();
+      return false;
+    }
+    r = await send();
+    data = r.ok ? {} : await r.json().catch(() => ({}));
+  }
+  if (!r.ok) fail(data.error || "失敗しました (" + r.status + ")");
+  await refresh();
+  return r.ok;
+}
+
+$("restart").onclick = () => act("api/restart", {}, (restartReloads ? "sb-rescue ごと再起動し、Parameter Store の値とホストのスクリプトを読み直します。実行中の Task は止まります。救援エージェントも止まります。この画面も 10〜30 秒切れます。" : "Switchboard を再起動します。実行中の Task は止まります。") + stopsText());
+$("rollback").onclick = () => act("api/rollback", {}, "前の版に戻して再起動します。" + stopsText());
+$("choose").onclick = () => act("api/rollback", { commit: $("release").value }, short($("release").value) + " に戻して再起動します。" + stopsText());
+$("restore").onclick = () => act("api/restore-db", { snapshot: $("snapshot").value }, "DB を " + $("snapshot").value + " の時点に戻します。それ以降の記録は消えます（今の DB は pre-restore として残します）。");
+// one request: the Starter answers 409 to a second while the replacement runs, and this machine reboots anyway
+var rebuilding = false; // var: render() reads it before this line runs
+$("rebuild").onclick = async () => {
+  if (rebuilding) return;
+  rebuilding = true;
+  $("rebuild").disabled = true;
+  $("error").textContent = "";
+  const sent = await act("api/rebuild", {}, "機械のディスクを初期状態に戻して作り直します。機械は再起動し、DB は Litestream の複製から戻ります（数分かかります）。この画面もいったん切れます。");
+  // cancelled, or refused (the reason stays on the page through the status' lastError): the button is usable again
+  if (sent !== true) { rebuilding = false; $("rebuild").disabled = false; }
+};
+$("agent-start").onclick = () => act("api/agent/start", {}, "救援エージェントを起動します。Claude の定額枠を使います。");
+$("agent-stop").onclick = () => act("api/agent/stop", {}, "救援エージェントを止めます。");
+
+// /tmp (#797): read on opening, 再読込 and after a clean only — walking the tree is not for the 2 s refresh
+const size = (n) => { const u = ["B", "KB", "MB", "GB"]; let i = 0; while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; } return (i ? n.toFixed(1) : n) + " " + u[i]; };
+// the host's clock, not the browser's: never "-3 分前"
+const ago = (ms) => { const m = Math.max(0, Math.floor((Date.now() - ms) / 60000)); return m < 60 ? m + " 分前" : Math.floor(m / 60) + " 時間前"; };
+const KEEP = { pattern: "型に合わない", recent: "2 時間以内に更新", owner: "持ち主が違う", "not-a-directory": "ディレクトリでない", "in-use": "使用中", "use-unknown": "使用中か確かめられない" };
+let cleanable = { names: [], bytes: 0 };
+let tmpOwned = false;
+async function loadTmp() {
+  const r = await fetch("api/tmp", { headers }).catch(() => null);
+  const t = r && r.ok ? await r.json().catch(() => null) : null;
+  if (!t) {
+    // what the last read listed may be gone: no button for it
+    cleanable = { names: [], bytes: 0 };
+    $("tmp-clean").textContent = "古い作業ディレクトリを消す";
+    $("tmp-clean").disabled = true;
+    $("tmp-usage").textContent = "/tmp を読めませんでした (" + (r ? r.status : "届きません") + ")";
+    $("tmp-sweep").textContent = "";
+    return;
+  }
+  $("tmp-usage").textContent = "使用 " + size(t.usage.used) + " / " + size(t.usage.total) + "（" + t.usage.percent + "%）";
+  $("tmp-usage").className = t.usage.percent >= 80 ? "bad" : "";
+  $("tmp-sweep").textContent = t.sweep ? "自動の片付け: " + ago(t.sweep.at) + " · " + t.sweep.removed + " 件 · " + size(t.sweep.freedBytes) : "自動の片付け: まだ（30 分ごと）";
+  $("tmp-list").replaceChildren(...t.entries.map((e) => {
+    const li = document.createElement("li");
+    const name = Object.assign(document.createElement("code"), { textContent: e.name });
+    const info = Object.assign(document.createElement("div"), { className: "dim", textContent: (e.removable ? "消せる · " : KEEP[e.keep] + " · ") + size(e.bytes) + " · " + ago(e.newestMs) });
+    li.append(name, info);
+    return li;
+  }));
+  cleanable = t.cleanable;
+  tmpOwned = t.owned;
+  $("tmp-clean").textContent = "古い作業ディレクトリを消す（" + cleanable.names.length + " 件、合計 " + size(cleanable.bytes) + "）";
+  $("tmp-clean").disabled = !cleanable.names.length;
+}
+$("tmp-reload").onclick = loadTmp;
+$("tmp-clean").onclick = async () => {
+  const { names, bytes } = cleanable;
+  await act("api/tmp/clean", { names }, "次の " + names.length + " 件（合計 " + size(bytes) + "）を消します。2 時間以上更新が無く、使われていない" + (tmpOwned ? "一時ディレクトリとキャッシュ" : "レビューの clone と昇格の候補") + "だけです。\n" + names.join("\n"));
+  await loadTmp();
+};
+refresh();
+loadTmp();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

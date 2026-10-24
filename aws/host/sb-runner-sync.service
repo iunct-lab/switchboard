@@ -1,0 +1,10 @@
+[Unit]
+Description=The runners' records (Claude / Codex sessions, Claude's memory) to S3, for 作り直す (#401)
+
+[Service]
+Type=oneshot
+User=@USER@
+Environment=HOME=@HOME@
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/etc/switchboard-host.env
+ExecStart=/usr/local/bin/sb-runner-sync

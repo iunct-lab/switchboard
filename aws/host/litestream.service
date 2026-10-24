@@ -1,0 +1,15 @@
+# Litestream (#230): the release tarball ships no unit. On stop (SIGTERM) it syncs the database and each replica one
+# last time before it exits (db.go Close, v0.3.13), which sb-stop relies on before the shutdown.
+[Unit]
+Description=Litestream: sqlite → S3
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+EnvironmentFile=/etc/switchboard-host.env
+ExecStart=/usr/local/bin/litestream replicate -config /etc/litestream.yml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
