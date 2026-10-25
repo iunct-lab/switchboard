@@ -134,7 +134,7 @@ README の原則「No keys, no telemetry. Your own login, on your own machine.�
 
 ### 4.1 切れていると分かる（#180）
 
-- `/api/health` のランナー欄に `login`（`ok` / `expired` / `unknown`）と `loginHint`（やり直しに打つコマンド）が出る。判定はランナー自身の状態コマンドの終了コード: `claude auth status`、`codex login status`（0 = ok、非 0 = expired、サブコマンドが無いか 10 秒で答えない = unknown）。出力はアカウント名を含むので読まずに捨てる。DAK には `login` が無い
+- `/api/health` のランナー欄に `login`（`ok` / `expired` / `unknown`）と `loginHint`（やり直しに打つコマンド）が出る。判定はランナー自身の状態コマンドの終了コード: `claude auth status`、`codex login status`（0 = ok、非 0 = expired、サブコマンドが無いか 10 秒で答えない = unknown）。`claude auth status` の出力は `authMethod`（`claude.ai` / `api_key`）だけ読み、`loginKind`（`claude.ai` / `console`）として出す。アカウント・メール・組織は読まない（#2528）。DAK には `login` が無い。`POST /api/runners/claude/logout` が `claude auth logout` を走らせ、続けて状態を読み直す（#2528）
 - 状態コマンドは起動時と、`/api/health` を読んだときに前回から 60 秒過ぎていれば走る。Home の「再確認」（`/api/health?recheck=1`）は待たずに走らせる
 - ターンがランナーの「未ログイン」の文（`packages/core/src/login.ts`）で終わったら、状態コマンドが ok と言っていても `expired` にし、Task に `loginHint` を出す。次の確認が ok を返すか、そのランナーのターンが通ると消える
 - Home は切れているランナーごとに警告を出す（「Task の「ターミナル」tab で `codex login --device-auth` を実行してください」）。ログインはターミナル tab か、警告の「ログインする」ボタン（#354）で、ランナー自身が行う
@@ -203,7 +203,7 @@ jq -c '.json | fromjson' <taskId>.jsonl | head          # 出来事そのもの
 
 ### 古い会話記録を S3 に移す（#1432）
 
-日次アーカイブは、`~/.claude/projects` と `~/.codex/sessions` のうち最後の更新から 21 日（`archive.sh` の `RUNNER_ARCHIVE_DAYS`。日数を設定で変える仕組みは無い）より古いファイルを、1 回の実行ごとに 1 つの `runner-<UTC 日時>.tar.zst.age`（日次アーカイブと同じ鍵）にして `s3://<DataBucket>/history/runner/` に置く（新しいキーにだけ書ける: `If-None-Match: *`）。`history/` に期限は無い。置けたことを確かめてから手元のファイルを消し、上げ損ねたら何も消さず `archive.status` は `failed <epoch> 4` になる（次の日にまた試す。events の上げ損ね `3` が同じ日にあれば `3` が出る）。
+日次アーカイブは、`~/.claude/projects` と `~/.codex/sessions` のうち新しい方からルートディスクの 10 %（`archive.sh` の `RUNNER_KEEP_MB`。ホストの env の `SB_RUNNER_KEEP_MB` で上書き）まで手元に残し、それを超える古いファイルを、1 回の実行ごとに 1 つの `runner-<UTC 日時>.tar.zst.age`（日次アーカイブと同じ鍵）にして `s3://<DataBucket>/history/runner/` に置く（新しいキーにだけ書ける: `If-None-Match: *`）。`history/` に期限は無い。置けたことを確かめてから手元のファイルを消し、上げ損ねたら何も消さず `archive.status` は `failed <epoch> 4` になる（次の日にまた試す。events の上げ損ね `3` が同じ日にあれば `3` が出る）。
 
 消さないもの: `memory/` の下（会話記録ではなく Claude が読む）、動いている・待っている（`running` / `waiting` / `idle`）Task と、再開の予定（`resume_at`）がある Task の session id をパスに含むファイル（DB を読み取りで開いて引く。DB が無い・読めなければ何も移さない）。上げている間に更新された（mtime か大きさが上げる前と違う）ファイルも消さない（確かめてから消すまでの間は 1 ファイルずつの短い隙で、そこに追記が入る確率は無視できるとして残す）。
 
@@ -215,7 +215,7 @@ aws s3 cp s3://<DataBucket>/<キー> .
 age -d -i <秘密鍵のファイル> runner-<日時>.tar.zst.age | zstd -d | tar -x -C <展開先> <元のパス>
 ```
 
-Claude Code は自分でも、既定では 30 日より古い会話記録を消す（`cleanupPeriodDays`。この版での値はホストで確かめる: #1441）。21 日で先に移すので、ホストが止まっていた日があっても 30 日の掃除より前に S3 に残る。移した Task を `--resume` しても、手元にファイルが無いので前の文脈なしで続く（`## 再開に要るファイル`と同じ）。`runner-sync` は変えない: 手元が減れば土台と差分も小さくなる。
+Claude Code は自分でも、既定では 30 日より古い会話記録を消す（`cleanupPeriodDays`。この版での値はホストで確かめる: #1441）。手元の量を超えたものに加え、25 日より古いもの（`archive.sh` の `RUNNER_MAX_AGE_DAYS`。Claude の掃除の 30 日より前）も必ず移すので、ホストが動いていれば 30 日の掃除より前に S3 に残る。移した Task を `--resume` しても、手元にファイルが無いので前の文脈なしで続く（`## 再開に要るファイル`と同じ）。`runner-sync` は変えない: 手元が減れば土台と差分も小さくなる。
 
 ### 手順
 

@@ -36,10 +36,11 @@ const NO_GH = async () => ({ code: 1, stdout: "", stderr: "no gh in this test" }
 const NO_HISTORY = { SWITCHBOARD_CLAUDE_PROJECTS: join(tmpdir(), "switchboard-test-no-claude-projects"), SWITCHBOARD_HISTORY_POLL_MS: "0" };
 
 /** A scripted fake runner: replays the recorded Claude fixture events, pauses on permission.ask until answered. */
-function fakeAdapter(script: AgentEvent[], opts: { id?: RunnerId; lingers?: boolean; starts?: StartOptions[]; sends?: string[]; modes?: string[]; dangerModes?: string[]; defaultMode?: string; liveSwitch?: boolean; refuseMode?: string; modeChanges?: string[]; slowMs?: number; closeMs?: number; models?: string[]; efforts?: string[]; cliDefaultModel?: () => string | undefined; answers?: unknown[]; detect?: () => Partial<RunnerDetection> } = {}): RunnerAdapter {
+function fakeAdapter(script: AgentEvent[], opts: { id?: RunnerId; lingers?: boolean; starts?: StartOptions[]; sends?: string[]; modes?: string[]; dangerModes?: string[]; defaultMode?: string; liveSwitch?: boolean; refuseMode?: string; modeChanges?: string[]; slowMs?: number; closeMs?: number; models?: string[]; bedrockModels?: string[]; efforts?: string[]; cliDefaultModel?: () => string | undefined; answers?: unknown[]; detect?: () => Partial<RunnerDetection> } = {}): RunnerAdapter {
   return {
     id: opts.id ?? "claude",
     models: opts.models?.map((value) => ({ value, label: value })),
+    bedrockModels: opts.bedrockModels?.map((value) => ({ value, label: value })),
     efforts: opts.efforts?.map((value) => ({ value, label: value })),
     cliDefaultModel: opts.cliDefaultModel,
     permissionModes: opts.modes?.map((value) => ({ value, label: value, description: value, danger: opts.dangerModes?.includes(value) || undefined })),
@@ -1295,6 +1296,51 @@ describe("core daemon", () => {
     }
   });
 
+  test("bedrock (#1730): PATCH saves a region per runner, null goes back, a runner without bedrockModels is 400, the health lists the Bedrock models and the kind", async () => {
+    const starts: StartOptions[] = [];
+    const h = mkdtempSync(join(tmpdir(), "switchboard-bedrock-"));
+    const cwd = mkdtempSync(join(tmpdir(), "switchboard-bedrock-cwd-"));
+    const script = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");
+    // the Claude account's login is expired: the lapse must never turn into Bedrock by itself
+    const claude = fakeAdapter(script, { starts, models: ["claude-haiku-5-5"], bedrockModels: ["global.anthropic.claude-haiku-5-5"], detect: () => ({ login: "expired", loginKind: undefined }) });
+    const cx = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [claude, fakeAdapter(script, { id: "dak" })], { port: 0 });
+    const b = `http://127.0.0.1:${cx.server.port}`;
+    const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const run = (id: string) => fetch(`${b}/api/health`).then(j).then((x) => x.runners.find((r: { id: string }) => r.id === id));
+    const create = () => fetch(`${b}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd, title: "t", prompt: "p", runner: "claude" }) }).then(j);
+    try {
+      // no saved setting: the runner's own login (expired here), own models
+      expect(await run("claude")).toMatchObject({ login: "expired", bedrockAvailable: true });
+      expect((await run("claude")).models.map((x: { value: string }) => x.value)).toEqual(["claude-haiku-5-5"]);
+      expect((await run("claude")).loginKind).toBeUndefined();
+      expect((await fetch(`${b}/api/settings`).then(j)).bedrock).toEqual({});
+      // only the region is kept; a bad region and a runner without Bedrock models are refused and save nothing
+      expect((await patch({ bedrock: { claude: { region: "nowhere" } } })).status).toBe(400);
+      expect((await patch({ bedrock: { dak: { region: "us-east-1" } } })).status).toBe(400);
+      expect((await fetch(`${b}/api/settings`).then(j)).bedrock).toEqual({});
+      const saved = await patch({ bedrock: { claude: { region: "ap-northeast-1", accessKey: "x" } } }).then(j);
+      expect(saved.bedrock).toEqual({ claude: { region: "ap-northeast-1" } });
+      expect(await run("claude")).toMatchObject({ login: "ok", loginKind: "bedrock" });
+      expect((await run("claude")).models.map((x: { value: string }) => x.value)).toEqual(["global.anthropic.claude-haiku-5-5"]);
+      expect((await run("dak")).bedrockAvailable).toBe(false);
+      await create();
+      await Bun.sleep(50);
+      expect(starts[0]?.bedrock).toEqual({ region: "ap-northeast-1" });
+      // null goes back; a Bedrock turn did not vouch for the Claude account, so the lapse stays
+      expect((await patch({ bedrock: { claude: null } })).status).toBe(200);
+      expect(await run("claude")).toMatchObject({ login: "expired" });
+      expect((await run("claude")).models.map((x: { value: string }) => x.value)).toEqual(["claude-haiku-5-5"]);
+      // the lapsed login is not worked around: the next start carries no Bedrock
+      await create();
+      await Bun.sleep(50);
+      expect(starts[1]?.bedrock).toBeUndefined();
+    } finally {
+      await cx.stop();
+      rmSync(h, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   test("permission modes (#58): resolved at creation (explicit → saved default → adapter default), validated, switched live or on resume", async () => {
     const starts: StartOptions[] = [];
     const modeChanges: string[] = [];
@@ -1333,7 +1379,7 @@ describe("core daemon", () => {
       expect(saved.defaultPermissionMode).toEqual({ claude: "plan" });
       expect(saved.runners[0].defaultPermissionMode).toBe("plan");
       expect((await fetch(`${b8}/api/health`).then(j)).runners[0].defaultPermissionMode).toBe("plan");
-      expect(c8.db.getSetting("settings", {})).toEqual({ defaultPermissionMode: { claude: "plan" }, autoResume: {}, shadowRunner: null, routing: { llm: { enabled: false, runner: "claude", model: "", timeoutMs: 5000 } }, backlogSweep: { implement: 1, plan: 1 }, judge: { enabled: true, runner: "codex", model: "gpt-6-luna" }, autoStart: { runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9 }, evals: { judge: { enabled: true } }, quotaAndResume: { backlogQuotaLimit: 0.8, retryDelayMs: 900_000, retryMaxDelayMs: 14_400_000, maxLimitStops: 8, resumePrompt: "使用上限がリセットされました。中断した箇所から作業を続けてください。", maxStopResumes: 2, thinSample: 5 }, judgeAndChoice: { judgeFallbackRunner: "claude", judgeFallbackModel: "claude-haiku-4-5", judgeTimeoutMs: 60_000, workspaceChoiceTimeoutMs: 60_000 }, newDefaults: { taskRunner: "claude", scheduleCron: "0 3 * * *" }, prices: {} });
+      expect(c8.db.getSetting("settings", {})).toEqual({ defaultPermissionMode: { claude: "plan" }, autoResume: {}, bedrock: {}, shadowRunner: null, routing: { llm: { enabled: false, runner: "claude", model: "", timeoutMs: 5000 } }, backlogSweep: { implement: 1, plan: 1 }, judge: { enabled: true, runner: "codex", model: "gpt-6-luna" }, autoStart: { runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9 }, evals: { judge: { enabled: true } }, quotaAndResume: { backlogQuotaLimit: 0.8, retryDelayMs: 900_000, retryMaxDelayMs: 14_400_000, maxLimitStops: 8, resumePrompt: "使用上限がリセットされました。中断した箇所から作業を続けてください。", maxStopResumes: 2, thinSample: 5 }, judgeAndChoice: { judgeFallbackRunner: "claude", judgeFallbackModel: "claude-haiku-4-5", judgeTimeoutMs: 60_000, workspaceChoiceTimeoutMs: 60_000 }, newDefaults: { taskRunner: "claude", scheduleCron: "0 3 * * *" }, prices: {} });
       const t4 = await post("/api/tasks", { cwd: h8, title: "t4", prompt: "p", runner: "claude" }).then(j);
       expect(t4.permissionMode).toBe("plan");
       expect(starts[2]?.permissionMode).toBe("plan");

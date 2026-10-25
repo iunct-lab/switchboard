@@ -40,7 +40,8 @@ import { parseCron } from "./cron.ts";
 import { FlowCache, flowScope, flowView, type FlowWorkspace } from "./flow.ts";
 import { interventionView } from "./interventions.ts";
 import { checkLocalFields, checkLocalParent } from "./backlog-local.ts";
-import { ACTION_FOR_STAGE, localBacklogSource, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, buildStartPrompt, failedIn, failedSince, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionStep, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, repoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, unchangedIn, heldIn, type GhRunner, type OtherRepo } from "./backlog.ts";
+import { enableGithubSync, enablingOf } from "./backlog-enable.ts";
+import { ACTION_FOR_STAGE, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, buildStartPrompt, failedIn, failedSince, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionStep, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, repoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, unchangedIn, heldIn, type GhRunner, type OtherRepo } from "./backlog.ts";
 import { issueOf, reduceStops, stopRecordsFor } from "./stops.ts";
 import { ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, policyPbi, prFacts, resumeOfTask, type PolicyEnv, type PrFacts } from "./asks.ts";
 import { checkPolicy, matchPolicies, readPolicies, recordUse, subjectChanges, writePolicies } from "./policies.ts";
@@ -152,7 +153,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   const detected: Array<{ adapter: RunnerAdapter; info: RunnerInfo }> = [];
   for (const a of adapters) {
     const d = await a.detect();
-    detected.push({ adapter: a, info: { id: a.id, ...d, permissionModes: a.permissionModes ?? [], models: a.models ?? [], efforts: a.efforts ?? [] } });
+    detected.push({ adapter: a, info: { id: a.id, ...d, permissionModes: a.permissionModes ?? [], models: a.models ?? [], efforts: a.efforts ?? [], bedrockAvailable: a.bedrockModels !== undefined } });
     if (d.available) adapterMap.set(a.id, a);
   }
   // Login (#180): the runner's own status command runs again when /api/health is read and its last answer is over a
@@ -172,7 +173,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         .map(async (d) => {
           const r = await d.adapter.detect().catch(() => null);
           if (!r?.available || r.login === undefined) return;
-          d.info = { ...d.info, login: r.login, loginHint: r.loginHint };
+          d.info = { ...d.info, login: r.login, loginKind: r.loginKind, loginHint: r.loginHint };
           if (r.login === "ok") loginExpired.delete(d.adapter.id);
         }),
     ).then(() => {
@@ -183,11 +184,14 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   };
   // A runner's login from the screen (#354): the daemon runs the runner's own login command and relays its URL / code.
   // Done → the login is checked again at once, so the banner goes away.
+  const runnerCliEnv = () => {
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) if (v !== undefined && k !== "CLAUDECODE" && !k.startsWith("CLAUDE_CODE_")) env[k] = v;
+    return env;
+  };
   const runnerLogins = new RunnerLogins(
     (argv) => {
-      const env: Record<string, string> = {};
-      for (const [k, v] of Object.entries(process.env)) if (v !== undefined && k !== "CLAUDECODE" && !k.startsWith("CLAUDE_CODE_")) env[k] = v;
-      return Bun.spawn(argv, { stdin: "pipe", stdout: "pipe", stderr: "pipe", env });
+      return Bun.spawn(argv, { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: runnerCliEnv() });
     },
     (runner) => {
       loginExpired.delete(runner);
@@ -199,9 +203,17 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     },
     opts.loginTimeoutMs,
   );
-  const loginTarget = (id: string) => {
+  const loginTarget = (id: string, api = false) => {
     const d = detected.find((x) => x.adapter.id === id);
-    return d && d.info.available && d.info.path && d.adapter.loginArgs ? { runner: d.adapter.id, argv: [d.info.path, ...d.adapter.loginArgs], hosts: d.adapter.loginHosts ?? [] } : null;
+    const args = api ? d?.adapter.loginApiArgs : d?.adapter.loginArgs;
+    return d && d.info.available && d.info.path && args ? { runner: d.adapter.id, argv: [d.info.path, ...args], hosts: d.adapter.loginHosts ?? [] } : null;
+  };
+  // The runner's own logout (#2528): its command is run with a limit, then the login is read again at once so the
+  // screen shows "logged out" and the banner's login buttons.
+  const logoutTarget = (id: string) => {
+    const d = detected.find((x) => x.adapter.id === id);
+    const args = d?.adapter.logoutArgs;
+    return d && d.info.available && d.info.path && args ? { runner: d.adapter.id, argv: [d.info.path, ...args] } : null;
   };
   // Settings (#58) live in sqlite so the UI can change them; read on every use so a PATCH takes effect at once.
   const SETTINGS_KEY = "settings";
@@ -220,10 +232,18 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   // Runner list for /api/health: detection is from boot, the effective default mode and auto-resume follow the saved
   // settings, and the models / the CLI's default model (#155) are read each time — the default is the user's own CLI
   // setting and changes there.
+  // Amazon Bedrock (#1730) only when the user chose it for the runner and the adapter has Bedrock models. Nothing
+  // switches to it by itself: a runner whose login lapsed stays `expired`.
+  const bedrockOf = (runner: RunnerId) => (adapterMap.get(runner)?.bedrockModels ? settings().bedrock[runner] : undefined);
+  // the tasks whose session was started on Bedrock: a turn's login bookkeeping follows what it ran on, not the setting at its end
+  const bedrockTasks = new Set<string>();
   const runnerInfo = (): RunnerInfo[] =>
     detected.map(({ adapter, info }) => {
-      const login = info.login !== undefined && loginExpired.has(adapter.id) ? "expired" : info.login;
-      const base = { ...info, login, autoResume: savedAutoResume(adapter.id), models: adapter.models ?? [], cliDefaultModel: adapter.cliDefaultModel?.() };
+      const bedrock = bedrockOf(adapter.id);
+      // on Bedrock the runner's own login is not used: it reads as ok, with the kind that says where the bill goes
+      const login = bedrock ? "ok" : info.login !== undefined && loginExpired.has(adapter.id) ? "expired" : info.login;
+      const loginKind = bedrock ? "bedrock" : login === "ok" ? info.loginKind : undefined;
+      const base = { ...info, login, loginKind, bedrockAvailable: adapter.bedrockModels !== undefined, autoResume: savedAutoResume(adapter.id), models: (bedrock ? adapter.bedrockModels : adapter.models) ?? [], cliDefaultModel: adapter.cliDefaultModel?.() };
       if (!info.permissionModes.length) return base;
       const saved = savedDefaultMode(adapter.id);
       const valid = saved !== undefined && info.permissionModes.some((m) => m.value === saved);
@@ -418,7 +438,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         writePolicies(db, recordUse(readPolicies(db), id, { at: Date.now(), askId: `approval:${task.id}:${ask.id}`, taskId: task.id, issue: issueOf(task), subject: { kind: "approval", op: ask.kind, target: v.match.subject, conditions: [], head: null } }));
       }
       return v;
-    }, pricing: pricingTable, defaultPermissionMode: savedDefaultMode, defaultShadowRunner: () => settings().shadowRunner, attachments, privateTmpRoot: join(cfg.home, "tmp"), deviceAuthEnv: (id) => ({ DEVICE_AUTH_URL: `${localUrl()}/api/tasks/${id}/device-auth`, DEVICE_AUTH_TOKEN_FILE: cfg.tokenPath, SWITCHBOARD_DAEMON_HOME: cfg.home, BACKLOG_URL: `${localUrl()}/api/backlog`, BACKLOG_TOKEN_FILE: cfg.tokenPath, ...localBacklogEnv(id) }), dockerEnv: (id) => ({ DOCKER_MARK_LABEL: `${LABEL_KEY}=${id}`, DOCKER_MARK_LOG: join(dockerLogDir, `${id}.jsonl`) }), maxStopResumes: () => settings().quotaAndResume.maxStopResumes, mcpServers: taskMcpServers });
+    }, pricing: pricingTable, defaultPermissionMode: savedDefaultMode, defaultShadowRunner: () => settings().shadowRunner, attachments, privateTmpRoot: join(cfg.home, "tmp"), deviceAuthEnv: (id) => ({ DEVICE_AUTH_URL: `${localUrl()}/api/tasks/${id}/device-auth`, DEVICE_AUTH_TOKEN_FILE: cfg.tokenPath, SWITCHBOARD_DAEMON_HOME: cfg.home, BACKLOG_URL: `${localUrl()}/api/backlog`, BACKLOG_TOKEN_FILE: cfg.tokenPath, ...localBacklogEnv(id) }), dockerEnv: (id) => ({ DOCKER_MARK_LABEL: `${LABEL_KEY}=${id}`, DOCKER_MARK_LOG: join(dockerLogDir, `${id}.jsonl`) }), maxStopResumes: () => settings().quotaAndResume.maxStopResumes, mcpServers: taskMcpServers, bedrock: (task) => { const b = bedrockOf(task.runner); if (b) bedrockTasks.add(task.id); else bedrockTasks.delete(task.id); return b; } });
   // Terminal sessions (#91): what Claude Code wrote to ~/.claude/projects while nobody in Switchboard was watching.
   const claudeDanger = new Set((adapters.find((a) => a.id === "claude")?.permissionModes ?? []).filter((m) => m.danger).map((m) => m.value));
   const history = new HistoryImporter(db, { projectsDir: cfg.claudeProjectsDir, pollMs: cfg.historyPollMs, pricing: pricingTable, broadcast, isLive: (id) => tasks.isLive(id), dangerModes: claudeDanger, log: (m) => console.warn(m) });
@@ -661,7 +681,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       fetchedAt: imported.length ? Math.min(...imported) : Date.now(),
       items: read.flatMap(({ stored }) => stored?.items ?? []),
       errors,
-      syncs: read.flatMap(({ ws, stored }) => (stored ? [{ workspaceId: ws.id, repository: db.getWorkspaceBacklogSource(ws.id)?.repository ?? null, syncing: stored.syncing, syncedAt: stored.fetchedAt, ...workspaceSyncOf(db, ws, { importFailed: stored.error !== null }) }] : [])),
+      syncs: read.flatMap(({ ws, stored }) => (stored ? [{ workspaceId: ws.id, backlog: ws.backlog, enabling: enablingOf(db, db.getWorkspaceBacklogSource(ws.id)), repository: db.getWorkspaceBacklogSource(ws.id)?.repository ?? null, syncing: stored.syncing, syncedAt: stored.fetchedAt, ...workspaceSyncOf(db, ws, { importFailed: stored.error !== null }) }] : [])),
     });
   };
   /** A start that failed after an answer (#936), by the question's id: kept in `ask_answers` for a day (#1139). */
@@ -1326,6 +1346,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   const isMeta = (t: { workspaceId: string | null }) => !!t.workspaceId && db.getWorkspace(t.workspaceId)?.kind === "meta";
   let restarting = false;
   tasks.onTurnEnd((taskId, t, turn) => {
+    // A turn on Amazon Bedrock (#1730) says nothing about the Claude account's login, either way
+    if (bedrockTasks.has(taskId)) return;
     if (turn.end.status === "ok") {
       // a turn that went through proves the login, also over a status-command answer from before the person logged in
       loginExpired.delete(t.runner);
@@ -1692,13 +1714,34 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           return v ? json(v) : bad("no login in progress", 404);
         },
         POST: async (req) => {
-          const t = loginTarget(req.params.id ?? "");
+          const t = loginTarget(req.params.id ?? "", new URL(req.url).searchParams.get("billing") === "api");
           if (!t) return bad(`runner "${req.params.id}" has no login here`, 404);
           return json(await runnerLogins.start(t.runner, t.argv, t.hosts));
         },
         DELETE: (req) => {
           const v = runnerLogins.cancel(req.params.id as RunnerId);
           return v ? json(v) : bad("no login in progress", 404);
+        },
+      },
+      "/api/runners/:id/logout": {
+        POST: async (req) => {
+          const t = logoutTarget(req.params.id ?? "");
+          if (!t) return bad(`runner "${req.params.id}" has no logout here`, 404);
+          let code = -1;
+          try {
+            const proc = Bun.spawn(t.argv, { stdin: "ignore", stdout: "ignore", stderr: "ignore", env: runnerCliEnv() });
+            const timer = setTimeout(() => proc.kill("SIGKILL"), 10_000);
+            code = await proc.exited;
+            clearTimeout(timer);
+          } catch {
+            // the executable detected at boot is gone or cannot run: the same answer as a command that failed
+          }
+          if (code !== 0) return bad(`${t.runner} logout failed`, 502);
+          loginExpired.add(t.runner);
+          await (loginCheck ?? Promise.resolve());
+          loginCheckedAt = 0;
+          await refreshLogins();
+          return json({ ok: true });
         },
       },
       "/api/runners/:id/login/code": {
@@ -1734,6 +1777,15 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             }
             if (!adapterMap.has(runner as RunnerId)) return bad(`runner "${runner}" is not installed`);
             next.autoResume[runner] = true;
+          }
+          // Amazon Bedrock (#1730): only a runner with Bedrock models can be switched; null goes back to its own login
+          for (const [runner, v] of Object.entries(parsed.data.bedrock ?? {})) {
+            if (v === null) {
+              delete next.bedrock[runner];
+              continue;
+            }
+            if (!adapterMap.get(runner as RunnerId)?.bedrockModels) return bad(`runner "${runner}" cannot run on Amazon Bedrock`);
+            next.bedrock[runner] = { region: v.region };
           }
           // LLM routing suggestions (#25): a partial patch; the runner must be detected because the suggestion is
           // produced by that runner's own adapter. Enabling it spends that subscription's quota per task creation.
@@ -2112,14 +2164,54 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
 
       /**
        * A workspace's settings. `projectVar`: the repository variable its Project URL is under, for the backlog (null =
-       * SWITCHBOARD_PROJECT_URL). Only the name is kept; the URL stays in the repository.
+       * SWITCHBOARD_PROJECT_URL). Only the name is kept; the URL stays in the repository. `backlog: "switchboard"` turns
+       * its GitHub sync off (#2266): the source and every record stay (GitHub's numbers, comments, fields) and are marked
+       * `disabled`, with every other workspace of the same repository's (they share the records); one never imported gets a
+       * source kept here only, as a registration with it does (#2265). Already off: 200, nothing changes.
        */
       "/api/workspaces/:id": {
         PATCH: async (req) => {
           const id = String(req.params.id);
           if (!db.getWorkspace(id)) return bad("not found", 404);
-          const body = await readJson(req, (x) => x as { projectVar?: unknown });
-          // a backlog kept here only (#2265) reads no GitHub Project
+          const body = await readJson(req, (x) => x as { projectVar?: unknown; backlog?: unknown });
+          if (body.backlog === "github") {
+            const source = db.getWorkspaceBacklogSource(id);
+            // on already (or a GitHub one never imported): nothing to do
+            if (syncsGithub(source) && !source?.enabling) return json(db.getWorkspace(id));
+            // the Project is chosen when a backlog kept here only goes to GitHub; one turned off keeps the one it had
+            if (body.projectVar !== undefined && source?.service !== "switchboard") return bad("Project の変数は、GitHub 同期を有効にした後に変えてください", 409);
+            const v = typeof body.projectVar === "string" ? body.projectVar.trim() : (body.projectVar ?? null);
+            if (v !== null && v !== "" && (typeof v !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(v))) return bad("projectVar must be a repository variable name (letters, digits, _) or null");
+            const ws = db.getWorkspace(id)!;
+            try {
+              const enabling = await enableGithubSync(opts.gh ?? runGh, db, { ...ws, projectVar: source?.service === "switchboard" ? (v as string) || undefined : ws.projectVar }, Date.now());
+              backlog.send(db.getWorkspace(id)!);
+              return json({ ...db.getWorkspace(id)!, enabling }, 202);
+            } catch (e) {
+              if (e instanceof BacklogError) return bad(e.message, 424);
+              throw e;
+            }
+          }
+          if (body.backlog !== undefined) {
+            if (body.backlog !== "switchboard") return bad('backlog must be "github" or "switchboard"');
+            if (body.projectVar !== undefined) return bad("GitHub 同期を無効にする workspace は GitHub の Project を読みません", 409);
+            const source = db.getWorkspaceBacklogSource(id);
+            if (!source) {
+              const local = localBacklogSource(id);
+              db.setWorkspaceBacklogSource(id, local);
+              db.putBacklogSnapshot(local, { records: [], cursor: null, syncedAt: Date.now() });
+            } else if (syncsGithub(source)) {
+              // the records are the repository's: another checkout of it stops with it
+              for (const w of db.listWorkspaces()) {
+                const s = db.getWorkspaceBacklogSource(w.id);
+                if (s && syncsGithub(s) && s.host === source.host && s.repository === source.repository) db.setWorkspaceBacklogSource(w.id, { ...s, disabled: true });
+              }
+            }
+            // marks them current and drops a read planned while they synced
+            for (const w of db.listWorkspaces()) if (db.getWorkspaceBacklogSource(w.id)?.repository === (source ?? localBacklogSource(id)).repository) await backlog.sync(w).catch(() => undefined);
+            return json(db.getWorkspace(id));
+          }
+          // a backlog kept here only (#2265), or one whose GitHub sync is off (#2266), reads no GitHub Project
           if (db.getWorkspace(id)!.backlog === "switchboard" && body.projectVar !== undefined) return bad("この workspace のバックログは Switchboard に置いているので、GitHub の Project は読みません", 409);
           const v = typeof body.projectVar === "string" ? body.projectVar.trim() : body.projectVar;
           if (v !== null && v !== "" && (typeof v !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(v))) return bad("projectVar must be a repository variable name (letters, digits, _) or null");
@@ -2160,7 +2252,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           try {
             // a backlog kept here only (#2265) has no service to refuse a parent that is not there, and its fields take
             // the choices of the workspace's ops.config.json
-            if (source.service === "switchboard") {
+            if (!syncsGithub(source)) {
               checkLocalParent(db, source, input.parent);
               input.fields = checkLocalFields(db.getWorkspace(workspaceId)!.path, input) ?? null;
             }
@@ -2272,7 +2364,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           if (!source) return bad("まだ GitHub から取り込んでいません", 409);
           try {
             const { resolve, ...edit } = input;
-            if (source.service === "switchboard") {
+            if (!syncsGithub(source)) {
               // the Issue's own number, whether named by it or by its local id
               checkLocalParent(db, source, edit.parent, readStoredIssue(db, { id: workspaceId }, issueRef(req.params.number ?? ""))?.issue.number);
               edit.fields = checkLocalFields(db.getWorkspace(workspaceId)!.path, edit);

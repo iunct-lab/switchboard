@@ -367,6 +367,33 @@ export class Db {
     this.sqlite.query("UPDATE workspaces SET backlog_source = ? WHERE id = ?").run(JSON.stringify(source), id);
   }
 
+  /**
+   * Moves a repository's stored records and operations under another key (#2266: a backlog kept here only, turned to
+   * GitHub). The ids do not meet: the records made here are `sb:` ones, GitHub's are its node ids. What is known of the
+   * old repository's reads goes with it (the new one has its own).
+   */
+  moveBacklogRecords(from: BacklogRepositoryKey, to: BacklogRepositoryKey): void {
+    for (const table of ["backlog_records", "backlog_operations"])
+      this.sqlite.query(`UPDATE ${table} SET service = ?, host = ?, repository = ? WHERE service = ? AND host = ? AND repository = ?`).run(to.service, to.host, to.repository, from.service, from.host, from.repository);
+    this.sqlite.query("DELETE FROM backlog_repositories WHERE service = ? AND host = ? AND repository = ?").run(from.service, from.host, from.repository);
+  }
+
+  /** A record's value as the service has it, written without a read (#2266: a comment made here moved to its Issue's new number); the repository's read state is not touched. */
+  setBacklogRecordRemote(key: BacklogRepositoryKey & { objectKind: BacklogObjectKind; externalId: string }, remote: unknown): void {
+    this.sqlite.query("UPDATE backlog_records SET remote = ?1, base = CASE WHEN local IS NULL THEN ?1 ELSE base END WHERE service = ? AND host = ? AND repository = ? AND object_kind = ? AND external_id = ?")
+      .run(JSON.stringify(remote), key.service, key.host, key.repository, key.objectKind, key.externalId);
+  }
+
+  deleteBacklogRecord(key: BacklogRepositoryKey & { objectKind: BacklogObjectKind; externalId: string }): void {
+    this.sqlite.query("DELETE FROM backlog_records WHERE service = ? AND host = ? AND repository = ? AND object_kind = ? AND external_id = ?").run(key.service, key.host, key.repository, key.objectKind, key.externalId);
+  }
+
+  /** The stage Tasks of a workspace made before `before` (ms) on Issue `from` go to `to` (#2266), all at once (a `to` that is another's `from` is not moved twice). */
+  renumberStageIssues(workspaceId: string, numbers: Array<{ from: number; to: number }>, before: number): void {
+    const ids = numbers.map((n) => ({ ...n, tasks: this.sqlite.query("SELECT id FROM tasks WHERE workspace_id = ? AND stage_issue = ? AND created_at < ?").all(workspaceId, n.from, before) as Array<{ id: string }> }));
+    for (const n of ids) for (const t of n.tasks) this.sqlite.query("UPDATE tasks SET stage_issue = ? WHERE id = ?").run(n.to, t.id);
+  }
+
   getBacklogRepository(repo: BacklogRepositoryKey): BacklogRepositorySync | null {
     const r = this.sqlite.query("SELECT * FROM backlog_repositories WHERE service = ? AND host = ? AND repository = ?").get(repo.service, repo.host, repo.repository) as any;
     return r ? { service: r.service, host: r.host, repository: r.repository, cursor: r.cursor, lastSuccessfulSync: r.last_successful_sync, retryAt: r.retry_at } : null;
@@ -468,6 +495,16 @@ export class Db {
   /** Forgets the answers older than `before` (ms). */
   pruneAskAnswers(before: number): void {
     this.sqlite.query("DELETE FROM ask_answers WHERE at < ?").run(before);
+  }
+
+  /** A waiting operation's payload, rewritten (#2266: its `#N` to GitHub's numbers). */
+  setBacklogOperationPayload(id: string, payload: unknown, now = Date.now()): void {
+    this.sqlite.query("UPDATE backlog_operations SET payload = ?, updated_at = ? WHERE id = ? AND status != 'done'").run(JSON.stringify(payload), now, id);
+  }
+
+  /** Every operation of a repository, done ones too, oldest first. */
+  listBacklogOperations(repo: BacklogRepositoryKey): BacklogOperation[] {
+    return this.sqlite.query("SELECT * FROM backlog_operations WHERE service = ? AND host = ? AND repository = ? ORDER BY seq").all(repo.service, repo.host, repo.repository).map(rowToBacklogOperation);
   }
 
   /** The operations not sent yet (every status but `done`), of one repository or of all, oldest first. */
@@ -1661,8 +1698,10 @@ function rowToBacklogOperation(r: any): BacklogOperation {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function rowToWorkspace(r: any): Workspace {
-  // a workspace whose backlog is kept here only (#2265) says so in its source; none, or a GitHub one = github
-  const backlog = r.backlog_source && (JSON.parse(r.backlog_source) as BacklogSource).service === "switchboard" ? "switchboard" : "github";
+  // a workspace whose backlog is kept here only (#2265), or whose GitHub sync is off (#2266), says so in its source
+  // (backlog.ts syncsGithub); none, or a GitHub one = github
+  const source = r.backlog_source ? (JSON.parse(r.backlog_source) as BacklogSource) : null;
+  const backlog = source && (source.service === "switchboard" || source.disabled) ? "switchboard" : "github";
   return { id: r.id, name: r.name, path: r.path, kind: r.kind, createdAt: r.created_at, backlog, ...(r.project_var ? { projectVar: r.project_var } : {}) };
 }
 

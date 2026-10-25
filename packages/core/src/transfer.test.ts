@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterAll, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -117,6 +118,24 @@ describe("export", () => {
     const before = readFileSync(cfg.dbPath);
     await expect(exportHistory(cfg, cfg.dbPath)).rejects.toThrow(/EEXIST/);
     expect(readFileSync(cfg.dbPath).equals(before)).toBe(true);
+  });
+
+  test("export takes its snapshot while another connection holds the write lock (the daemon at midnight)", async () => {
+    const { cfg } = fakeHistory(join(tmp, "lock"));
+    const d = new Db(cfg.dbPath);
+    d.insertTask(task("t3", "/Users/dev/repo")); // committed, still in the WAL: the snapshot must have it
+    const writer = new Database(cfg.dbPath);
+    writer.exec("BEGIN IMMEDIATE");
+    writer.exec("DELETE FROM tasks WHERE id = 't1'"); // uncommitted: the snapshot must still have it
+    expect(statSync(`${cfg.dbPath}-wal`).size).toBeGreaterThan(0); // t3 is in the WAL, not yet in the database file
+    try {
+      const m = await exportHistory(cfg, join(tmp, "lock.tar.zst"));
+      expect(m.counts.tasks).toBe(3);
+    } finally {
+      writer.exec("ROLLBACK");
+      writer.close();
+      d.close(); // open until here: closing the last connection would checkpoint t3 into the database file
+    }
   });
 });
 

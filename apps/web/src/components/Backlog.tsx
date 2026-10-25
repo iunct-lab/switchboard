@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import type { Artifact, Backlog as BacklogData, BacklogAction, BacklogIssueDetail, BacklogItem, BacklogStage, BacklogSyncInfo, Task, Workspace } from "@switchboard/protocol";
 import type { FeedbackTarget } from "../feedbackTarget.ts";
 import { api } from "../api.ts";
-import { backlogHeading, createWord, draftKey, editOf, formAfterRead, GUARANTEE_A, heldIssueText, loadDraft, loadNewIssueDraft, syncLine, textDraftKey, valueText, workspaceErrorGuide, type EditForm, type NewIssueDraft } from "../backlogSync.ts";
+import { backlogHeading, createWord, draftKey, editOf, formAfterRead, GUARANTEE_A, githubSyncText, heldIssueText, loadDraft, loadNewIssueDraft, syncLine, textDraftKey, valueText, workspaceErrorGuide, type EditForm, type NewIssueDraft } from "../backlogSync.ts";
 import { activeTaskLine, ago, inProgressState, lastTaskLine, overlapLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl, type PrereqPart } from "../inProgress.ts";
 import { promotionLine } from "../release.ts";
 import { Flow } from "./Flow.tsx";
@@ -107,12 +107,12 @@ function WorkspaceError(props: { error: BacklogData["errors"][number]; loaded: b
 
 
 /** A row's or a workspace's sync state (#908): the word, when it was last read in full, what waits and why; the promise on hover. */
-function SyncLine(props: { sync: BacklogSyncInfo; scope?: string }) {
-  const l = syncLine(props.sync);
+function SyncLine(props: { sync: BacklogSyncInfo; scope?: string; line?: ReturnType<typeof syncLine> }) {
+  const l = props.line ?? syncLine(props.sync);
   return (
     <span className="m sync" data-sync={l.state} title={GUARANTEE_A}>
       {props.scope && `${props.scope} `}
-      {l.label} · {l.parts.join(" · ")}
+      {[l.label, ...l.parts].join(" · ")}
     </span>
   );
 }
@@ -806,7 +806,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
         {failure && <div className="muted">GitHub を読めませんでした: {failure}</div>}
         {data?.syncs.filter((x) => inView(x.workspaceId)).map((x) => (
           <div key={x.workspaceId} className="hint backlog-sync" data-workspace={x.workspaceId}>
-            <SyncLine sync={x.sync} scope={data.syncs.length > 1 ? (workspaces?.find((w) => w.id === x.workspaceId)?.name ?? x.workspaceId) : undefined} />
+            <SyncLine sync={x.sync} line={githubSyncText(x)} scope={data.syncs.length > 1 ? (workspaces?.find((w) => w.id === x.workspaceId)?.name ?? x.workspaceId) : undefined} />
             {x.creates.map((c) => (
               <div key={c.localId} className="m" data-sync={c.state}>
                 番号なし（{createWord(c.state)}）: {c.title}

@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createClaudeAdapter } from "@switchboard/adapter-claude";
 import type { RunnerAdapter } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import { RunnerLogins } from "./runnerlogin.ts";
@@ -21,7 +22,7 @@ const PASTED = "pasted-secret-code-4242";
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "switchboard-test-runnerlogin-"));
   // claude: the URL, the prompt, then the code on stdin — echoed back (the real one may), so the test sees it never leaks
-  claude = script("claude", `echo "Opening browser to sign in…"\necho "If the browser didn't open, visit: https://claude.example/oauth/authorize?code=true&state=AbC-12345"\nprintf "Paste code here if prompted > "\nread code\necho "got $code"\n[ "$code" = "${PASTED}" ] && { echo "Login successful."; exit 0; }\nexit 1`);
+  claude = script("claude", `echo "Opening browser to sign in…"\necho "If the browser didn't open, visit: https://claude.example/oauth/authorize?code=true&state=AbC-12345&arg=$1"\nprintf "Paste code here if prompted > "\nread code\necho "got $code"\n[ "$code" = "${PASTED}" ] && { echo "Login successful."; exit 0; }\nexit 1`);
   // codex: ANSI-coloured URL and device code, then it waits for the approval elsewhere (here: 0.3 s)
   codex = script("codex", `printf '1. Open this link\\n   \\033[94mhttps://auth.example/codex/device\\033[0m\\n\\n2. Enter this one-time code \\033[90m(expires in 15 minutes)\\033[0m\\n   \\033[94mABCD-EFGHI\\033[0m\\n'\nsleep 0.3\nexit 0`);
   hangs = script("hangs", `echo "visit: https://x.example/a"\necho "Paste code here if prompted >"\nsleep 30`);
@@ -100,6 +101,86 @@ describe("RunnerLogins (#354)", () => {
   });
 });
 
+describe("logout (#2528)", () => {
+  let home: string;
+  let core: Awaited<ReturnType<typeof startServer>>;
+  let base: string;
+  let marker: string;
+  let argsFile: string;
+  beforeAll(async () => {
+    home = mkdtempSync(join(tmpdir(), "switchboard-test-logout-"));
+    marker = join(home, "loggedout");
+    argsFile = join(home, "logout-args");
+    const bin = join(home, "claude");
+    writeFileSync(bin, `#!/bin/sh\nif [ "$1 $2" = "auth logout" ]; then echo "$@" > "${argsFile}"; [ -f "${home}/fail" ] && exit 1; touch "${marker}"; exit 0; fi\nexit 9\n`);
+    chmodSync(bin, 0o755);
+    const claude: RunnerAdapter = {
+      id: "claude",
+      loginArgs: [],
+      logoutArgs: ["auth", "logout"],
+      async detect() {
+        return existsSync(marker) ? { available: true, version: "fake", path: bin, login: "expired" } : { available: true, version: "fake", path: bin, login: "ok", loginKind: "console" };
+      },
+      start() {
+        throw new Error("no runs");
+      },
+    };
+    const codex: RunnerAdapter = { id: "codex", loginArgs: [], async detect() { return { available: true, version: "fake", path: bin, login: "ok" }; }, start() { throw new Error("no runs"); } };
+    core = await startServer(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_PORT: "0", SWITCHBOARD_CLAUDE_PROJECTS: join(home, "none"), SWITCHBOARD_HISTORY_POLL_MS: "0" }), [claude, codex], { port: 0, selfdevChecks: false });
+    base = `http://127.0.0.1:${core.server.port}`;
+  });
+  afterAll(async () => {
+    await core.stop();
+    rmSync(home, { recursive: true, force: true });
+  });
+  const runners = async () => ((await (await fetch(`${base}/api/health`)).json()) as { runners: { id: string; login?: string; loginKind?: string }[] }).runners;
+
+  test("a failing logout is a 502 and leaves the login as it was", async () => {
+    writeFileSync(join(home, "fail"), "");
+    expect((await fetch(`${base}/api/runners/claude/logout`, { method: "POST" })).status).toBe(502);
+    rmSync(join(home, "fail"));
+    expect((await runners()).find((r) => r.id === "claude")).toMatchObject({ login: "ok", loginKind: "console" });
+  });
+
+  test("POST /api/runners/claude/logout runs `auth logout`, then health says expired and the kind is gone; codex has no logout", async () => {
+    expect((await runners()).find((r) => r.id === "claude")).toMatchObject({ login: "ok", loginKind: "console" });
+    const res = await fetch(`${base}/api/runners/claude/logout`, { method: "POST" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(readFileSync(argsFile, "utf8").trim()).toBe("auth logout");
+    const claude = (await runners()).find((r) => r.id === "claude");
+    expect(claude?.login).toBe("expired");
+    expect(claude?.loginKind).toBeUndefined();
+    expect((await fetch(`${base}/api/runners/codex/logout`, { method: "POST" })).status).toBe(404);
+  });
+});
+
+describe("the account behind `claude auth status` stays out of the API and the logs (#2528)", () => {
+  test("health shows the kind and nothing else of the status output; a missing executable is a 502 for logout", async () => {
+    const home = mkdtempSync(join(tmpdir(), "switchboard-test-authkind-"));
+    const bin = join(home, "claude");
+    writeFileSync(bin, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "2.1.281 (Claude Code)"; exit 0; fi\nif [ "$1 $2" = "auth status" ]; then echo '{"loggedIn":true,"authMethod":"api_key","email":"someone@example.com","orgName":"Acme Org","accountName":"Some Person"}'; exit 0; fi\nexit 9\n`);
+    chmodSync(bin, 0o755);
+    const log = spyOn(console, "log");
+    const warn = spyOn(console, "warn");
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_PORT: "0", SWITCHBOARD_CLAUDE_PROJECTS: join(home, "none"), SWITCHBOARD_HISTORY_POLL_MS: "0" }), [createClaudeAdapter({ bin })], { port: 0, selfdevChecks: false });
+    try {
+      const base = `http://127.0.0.1:${c.server.port}`;
+      const health = await (await fetch(`${base}/api/health?recheck=1`)).text();
+      expect(JSON.parse(health).runners[0]).toMatchObject({ login: "ok", loginKind: "console" });
+      const settings = await (await fetch(`${base}/api/settings`)).text();
+      for (const text of [health, settings, JSON.stringify([...log.mock.calls, ...warn.mock.calls])]) for (const secret of ["someone@example.com", "Acme Org", "Some Person"]) expect(text).not.toContain(secret);
+      rmSync(bin);
+      expect((await fetch(`${base}/api/runners/claude/logout`, { method: "POST" })).status).toBe(502);
+    } finally {
+      log.mockRestore();
+      warn.mockRestore();
+      await c.stop();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("the API (#354)", () => {
   let home: string;
   let core: Awaited<ReturnType<typeof startServer>>;
@@ -107,6 +188,7 @@ describe("the API (#354)", () => {
   const adapter = (id: "claude" | "codex", bin: () => string, login: "ok" | "expired"): RunnerAdapter => ({
     id,
     loginArgs: [],
+    loginApiArgs: id === "claude" ? ["--console"] : undefined,
     async detect() {
       return { available: true, version: "fake", path: bin(), login, loginHint: `${id} login` };
     },
@@ -151,5 +233,14 @@ describe("the API (#354)", () => {
     expect(v.code).toBe("ABCD-EFGHI");
     expect((await post("/api/runners/dak/login")).status).toBe(404);
     expect((await post("/api/runners/claude/login/code", { code: "" })).status).toBe(400);
+  });
+
+  test("billing=api runs the runner's API login (claude --console)", async () => {
+    const v = (await (await post("/api/runners/claude/login?billing=api")).json()) as { url: string };
+    expect(v.url).toContain("arg=--console");
+  });
+
+  test("billing=api needs the runner to offer an API login", async () => {
+    expect((await post("/api/runners/codex/login?billing=api")).status).toBe(404);
   });
 });

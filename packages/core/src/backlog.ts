@@ -644,6 +644,12 @@ export const LOCAL_BACKLOG = { service: "switchboard", host: "local" } as const;
 /** Its source: the Project is this workspace's stored data only (owner / number are what records are matched on, no Project elsewhere). */
 export const localBacklogSource = (workspaceId: string): BacklogSource => ({ ...LOCAL_BACKLOG, repository: workspaceId, project: { owner: "switchboard", number: 0 } });
 
+/**
+ * Whether the workspace's backlog reads and writes GitHub's Issues and Project (#2266): not one kept here only (#2265),
+ * nor one whose GitHub sync was turned off. null = a GitHub workspace not imported yet.
+ */
+export const syncsGithub = (s: BacklogSource | null | undefined) => !s || (s.service === "github" && !s.disabled);
+
 /* ---------- edits kept here and sent to GitHub later (#886) ---------- */
 
 /** An edit refused before anything is stored; `status` = the HTTP status the API answers with. */
@@ -692,7 +698,8 @@ const issueIds = (records: Iterable<BacklogRecord>) =>
 const familyOf = (own: string | undefined, subIssues: number[], ids: Map<number, string>) => new Set([own, ...subIssues.map((n) => ids.get(n))].filter((x): x is string => !!x));
 
 function issueRecord(db: Db, source: BacklogSource, ref: number | string): BacklogRecord | null {
-  if (typeof ref === "number") return (ref > 0 && db.listBacklogRecords(source, "issue").find((r) => ((r.local ?? r.remote) as BacklogIssueData | null)?.number === ref)) || null;
+  // while the sync is being turned on (#2266) an Issue made here may still have the number of one of GitHub's: #N is GitHub's
+  if (typeof ref === "number") return (ref > 0 && db.listBacklogRecords(source, "issue").filter((r) => ((r.local ?? r.remote) as BacklogIssueData | null)?.number === ref).sort((a, b) => Number(a.externalId.startsWith("sb:")) - Number(b.externalId.startsWith("sb:")))[0]) || null;
   const op = db.getBacklogOperation(ref);
   if (!op || op.kind !== "create" || op.repository !== source.repository || op.host !== source.host) return null;
   return db.getBacklogRecord({ ...source, objectKind: "issue", externalId: op.target });
@@ -1269,7 +1276,7 @@ export function readStoredRecords(db: Db, ws: Pick<BacklogWorkspace, "id" | "pat
   const unread = db.listBacklogRecords(source, "issue").flatMap((r) => (r.fetchState !== "fetched" && (r.remote as BacklogIssueData | null)?.number ? [r.remote as BacklogIssueData] : []));
   const issues = records.flatMap((r) => (r.objectKind === "issue" && r.remote && r.remote.number > 0 ? [r.remote] : []));
   return {
-    workspaceId: ws.id, service: source.service, repository: source.repository, project: source.project, fetchedAt, top,
+    workspaceId: ws.id, service: syncsGithub(source) ? source.service : "switchboard", repository: source.repository, project: source.project, fetchedAt, top,
     issues: [...issues, ...unread.filter((u) => !issues.some((i) => i.number === u.number))].map((i) => ({ ...i, fields: fields.get(i.number) ?? null })),
     unread: unread.map((i) => i.number),
     pulls: records.flatMap((r) => (r.objectKind === "pull-request" && r.remote ? [r.remote] : [])),

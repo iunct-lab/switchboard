@@ -3,7 +3,7 @@
 # Nothing is deleted here: the bucket's lifecycle expires archives after 30 days (aws/template.yaml).
 # Then the events of tasks finished 30 days ago go to s3://<Data>/history/events/ for good, and only those that arrived
 # are cut down in the database (#1431, docs/design/cloud-hosting.md). A failed upload exits 3 and is tried again next day.
-# Runners' records older than RUNNER_ARCHIVE_DAYS go to s3://<Data>/history/runner/ and off the disk (#1440); a failed one exits 4.
+# Runners' records beyond the newest budget (a tenth of the disk) go to s3://<Data>/history/runner/ and off the disk (#1440); a failed one exits 4.
 set -euo pipefail
 # shellcheck source=/dev/null
 . "${SB_HOST_ENV:-/etc/switchboard-host.env}"   # SB_DATA_BUCKET, SB_REPO_DIR
@@ -22,11 +22,15 @@ CODE="$HOME/.switchboard/releases/current"
 [ -d "$CODE" ] || CODE="$SB_REPO_DIR"
 bun "$CODE/packages/core/src/main.ts" export "$OUT/$NAME" --encrypt "$KEY"
 aws s3 cp "$OUT/$NAME" "s3://$SB_DATA_BUCKET/archive/$NAME" --only-show-errors
-# --- runner records (Claude's ~/.claude/projects, Codex's ~/.codex/sessions) older than RUNNER_ARCHIVE_DAYS (#1440) ---
+# --- runner records (Claude's ~/.claude/projects, Codex's ~/.codex/sessions) beyond the newest budget (a tenth of the disk) (#1440) ---
 # One encrypted file per run to history/runner/ (no lifecycle), removed from the disk only once it is uploaded, each file
 # listed in runner-archive.tsv (path, session id, key, date). Kept: memory/ (not a record, and Claude reads it) and the
 # files of a running / waiting / idle task (they can still be resumed). The database is only read.
-RUNNER_ARCHIVE_DAYS=21
+# How much stays on the disk: the newest records up to a tenth of the root filesystem (a bigger EBS keeps more, and a
+# faster-growing record does not need a new number); SB_RUNNER_KEEP_MB (in the host env) overrides it.
+# Whatever the budget, a record older than RUNNER_MAX_AGE_DAYS moves too: Claude deletes records after 30 days
+# (cleanupPeriodDays, cloud-hosting.md), so the copy in S3 has to exist before that, also on a big disk with few records.
+RUNNER_MAX_AGE_DAYS=25
 RUNNER_LIST="$HOME/.switchboard/runner-archive.tsv"
 DB="$HOME/.switchboard/switchboard.db"
 RUNNER_FAILED=0
@@ -41,10 +45,17 @@ runner_archive() {
     const db = new Database(process.argv[1], { readonly: true });
     for (const r of db.query("SELECT runner_session_id AS id FROM tasks WHERE (status IN (\u0027running\u0027,\u0027waiting\u0027,\u0027idle\u0027) OR resume_at IS NOT NULL) AND runner_session_id IS NOT NULL AND runner_session_id <> \u0027\u0027").all()) console.log(r.id);
   ' "$DB" > "$OUT/runner/keep-ids" || { echo "archive: could not read the running tasks; runner records stay" >&2; return 1; }
-  local ROOTS=() d
+  local ROOTS=() d KEEP_MB="${SB_RUNNER_KEEP_MB:-}"
+  if [ -z "$KEEP_MB" ]; then
+    local DISK_MB; DISK_MB="$(df -Pm / 2>/dev/null | awk 'NR==2 {print $2}')"
+    case "$DISK_MB" in ''|*[!0-9]*) ;; *) KEEP_MB=$((DISK_MB / 10));; esac
+  fi
+  case "$KEEP_MB" in ''|*[!0-9]*|0) echo "archive: no usable runner budget (SB_RUNNER_KEEP_MB / df); runner records stay" >&2; return 1;; esac
   for d in .claude/projects .codex/sessions; do [ -d "$HOME/$d" ] && ROOTS+=("$d"); done
   [ "${#ROOTS[@]}" -gt 0 ] || return 0
-  (cd "$HOME" && find "${ROOTS[@]}" -type f -mtime "+$RUNNER_ARCHIVE_DAYS" -not -path '*/memory/*') > "$OUT/runner/all.txt" || return 1
+  # newest first, running up the sizes: what falls past the budget is what moves
+  (cd "$HOME" && find "${ROOTS[@]}" -type f -not -path '*/memory/*' -printf '%T@ %s %p\n' | sort -rn \
+    | awk -v b="$((KEEP_MB * 1048576))" -v old="$(( $(date +%s) - RUNNER_MAX_AGE_DAYS * 86400 ))" '{ s += $2; if (s > b || $1 < old) { sub(/^[^ ]+ [^ ]+ /, ""); print } }') > "$OUT/runner/all.txt" || return 1
   if [ -s "$OUT/runner/keep-ids" ]; then grep -vFf "$OUT/runner/keep-ids" "$OUT/runner/all.txt" > "$OUT/runner/old.txt" || true; else cp "$OUT/runner/all.txt" "$OUT/runner/old.txt"; fi
   [ -s "$OUT/runner/old.txt" ] || return 0
   local RNAME RKEY F B SID ERR

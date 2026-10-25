@@ -7,7 +7,6 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createZstdCompress, type ZstdCompress } from "node:zlib";
 import type { CoreConfig } from "./config.ts";
-import { Db } from "./db.ts";
 
 /**
  * Moving the history to another machine (#179): one tar.zst with the database snapshot, Claude Code's and Codex's
@@ -99,9 +98,12 @@ export async function exportHistory(cfg: CoreConfig, out: string, opts: { encryp
       }
     };
     if (existsSync(cfg.dbPath)) {
-      const db = new Db(cfg.dbPath);
+      // Read-only, not `new Db`: opening a Db runs the schema and the migrations, which take the write lock. The daemon holding
+      // it past busy_timeout failed the 2026-10-24 00:00 archive with "database is locked"; a snapshot read waits for no writer.
+      const db = new Database(cfg.dbPath, { readonly: true });
       try {
-        db.snapshotTo(join(stage, DB_ENTRY));
+        db.exec(`PRAGMA busy_timeout = ${SNAPSHOT_BUSY_TIMEOUT_MS}`); // Bun's default is 0: a checkpoint in progress would fail at once
+        db.exec(`VACUUM INTO '${join(stage, DB_ENTRY).replace(/'/g, "''")}'`);
       } finally {
         db.close();
       }
@@ -133,10 +135,22 @@ export async function exportHistory(cfg: CoreConfig, out: string, opts: { encryp
     rmSync(out, { force: true }); // never leave a partial package that looks like a finished one
     throw e;
   } finally {
-    closeSync(fd);
-    rmSync(stage, { recursive: true, force: true });
+    // EBADF: a pipeline that failed has already closed the fd, and that error is the one to report. Without this guard the
+    // close threw in its place and the stage (a database copy, hundreds of MB) was never removed.
+    try {
+      try {
+        closeSync(fd);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EBADF") throw e;
+      }
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+    }
   }
 }
+
+/** How long the snapshot waits for a writer's lock (the Db default, which this read-only connection does not get from Db). */
+const SNAPSHOT_BUSY_TIMEOUT_MS = 5000;
 
 const CHUNK = 1 << 20;
 

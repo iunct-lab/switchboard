@@ -709,6 +709,11 @@ export const Settings = z.object({
   judgeAndChoice: JudgeAndChoiceSettings.default({}),
   /** What the creation forms start with (#835). */
   newDefaults: NewDefaultsSettings.default({}),
+  /**
+   * runner → region of Amazon Bedrock (#1730). Absent = the runner runs on its own login (the Claude account). Only
+   * what the user chose is saved: no key, no profile; the CLI reads AWS credentials its own way (docs/design/bedrock.md).
+   */
+  bedrock: z.record(z.object({ region: z.string() })).default({}),
   /** model → price (USD / 1M tokens) over pricing.json's row of the same model (#1402); read on every use, no restart. */
   prices: z.record(SettingsPrice).default({}),
 });
@@ -720,6 +725,8 @@ const autoStartChoicePatch = z.object({ runner: RunnerId, model: z.string(), eff
 export const SettingsPatch = z.object({
   defaultPermissionMode: z.record(z.string().nullable()).optional(),
   autoResume: z.record(z.boolean().nullable()).optional(),
+  /** null = back to the runner's own login (#1730). */
+  bedrock: z.record(z.object({ region: z.string().regex(/^[a-z]{2}(-[a-z]+)+-\d$/) }).nullable()).optional(),
   shadowRunner: RunnerId.nullable().optional(),
   /** Partial: `{ routing: { llm: { enabled: true } } }` leaves the saved runner / model alone. */
   routing: z.object({ llm: z.object({ enabled: z.boolean(), runner: RunnerId, model: z.string(), timeoutMs: z.number().int().min(1000).max(60_000) }).partial().optional() }).partial().optional(),
@@ -1376,6 +1383,10 @@ export type HistoryStatus = z.infer<typeof HistoryStatus>;
 export const RunnerLogin = z.enum(["ok", "expired", "unknown"]);
 export type RunnerLogin = z.infer<typeof RunnerLogin>;
 
+/** Which login is in use (#2528): `claude.ai` = a Claude account, `console` = an Anthropic Console account. Only from `claude auth status`'s `authMethod`; no account name, email or organization. */
+export const LoginKind = z.enum(["claude.ai", "console", "bedrock"]);
+export type LoginKind = z.infer<typeof LoginKind>;
+
 export const RunnerInfo = z.object({
   id: RunnerId,
   available: z.boolean(),
@@ -1396,6 +1407,10 @@ export const RunnerInfo = z.object({
   cliDefaultModel: z.string().optional(),
   /** Absent = the runner has no login of its own (DAK). */
   login: RunnerLogin.optional(),
+  /** Which login `login: "ok"` is (#2528); absent = not known (an older CLI, another runner, or not logged in). `bedrock` = the user chose Amazon Bedrock in the settings (#1730). */
+  loginKind: LoginKind.optional(),
+  /** The runner can run on Amazon Bedrock (it has `bedrockModels`, #1730). */
+  bedrockAvailable: z.boolean().default(false),
   /** What to type in a terminal tab to log in again. */
   loginHint: z.string().optional(),
 });
@@ -1629,6 +1644,10 @@ export const Backlog = z.object({
   /** Each workspace's sync (#885): an import under way, and when the last complete one was stored (null = never). */
   syncs: z.array(z.object({
     workspaceId: z.string(),
+    /** Whether its backlog syncs with GitHub (#2266): the same values as `Workspace.backlog`. */
+    backlog: z.enum(["github", "switchboard"]),
+    /** Turning its GitHub sync on (#2266): the Issues made here only to make on GitHub, and those made; null = not under way. */
+    enabling: z.object({ total: z.number(), done: z.number() }).nullable(),
     /** The repository its stored backlog is of (`owner/name`, #918: the kit's `backlog` finds the workspace by it); null = never imported. */
     repository: z.string().nullable(),
     syncing: z.boolean(),
@@ -1739,9 +1758,21 @@ export type BacklogRepositorySync = z.infer<typeof BacklogRepositorySync>;
 /**
  * Where a workspace's backlog comes from (#885): its repository and the Project it reads (`projectVar` /
  * SWITCHBOARD_PROJECT_URL; a Project number is unique per owner only). Written by each import, so the stored backlog is
- * read without asking GitHub which repository the checkout is.
+ * read without asking GitHub which repository the checkout is. `disabled`: the workspace's GitHub sync is off (#2266) —
+ * its records stay under this key and nothing reads or writes GitHub's Issues or Project until it is on again.
+ * `enabling` / `numbers`: turning it on (backlog-enable.ts).
  */
-export const BacklogSource = BacklogRepositoryKey.extend({ project: z.object({ owner: z.string(), number: z.number() }) });
+export const BacklogSource = BacklogRepositoryKey.extend({
+  project: z.object({ owner: z.string(), number: z.number() }),
+  disabled: z.literal(true).optional(),
+  /**
+   * Its GitHub sync being turned on (#2266): since when; the Issues made here only are being made on GitHub. `queued`:
+   * all are, and their bodies, parents and comments (with `#N` rewritten to GitHub's numbers) are being sent.
+   */
+  enabling: z.object({ since: z.number(), queued: z.literal(true).optional() }).optional(),
+  /** The Issues made on GitHub by turning it on (#2266): their number here (`from`) and GitHub's (`to`). */
+  numbers: z.array(z.object({ from: z.number(), to: z.number() })).optional(),
+});
 export type BacklogSource = z.infer<typeof BacklogSource>;
 
 /**

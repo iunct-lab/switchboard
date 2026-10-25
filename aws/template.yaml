@@ -208,6 +208,15 @@ Resources:
             Effect: Allow
             Action: [cloudformation:DescribeStacks, cloudformation:DescribeStackEvents, cloudformation:UpdateStack, cloudformation:CreateChangeSet, cloudformation:DescribeChangeSet, cloudformation:ExecuteChangeSet, cloudformation:GetTemplateSummary]
             Resource: [!Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*', !Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31']
+          # Amazon Bedrock (#1730): invoking any model and inference profile (versions change often, so none is pinned here).
+          # Only the two invoke actions, and no API key made for it: the boundary is also the ceiling of InstanceRole's host policy.
+          - Sid: Bedrock
+            Effect: Allow
+            Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
+            Resource:
+              - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*'
+              - 'arn:aws:bedrock:*::foundation-model/*'
+              - 'arn:aws:bedrock:::foundation-model/*'
           - Sid: OwnRoles
             Effect: Allow
             Action: iam:PassRole
@@ -314,6 +323,14 @@ Resources:
               - Effect: Allow
                 Action: s3:ListBucket
                 Resource: !GetAtt Data.Arn
+              # Amazon Bedrock (#1730, docs/design/bedrock.md): invoke any model; what the account can call is decided by
+              # Bedrock itself. Only the two invoke actions.
+              - Effect: Allow
+                Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
+                Resource:
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*'
+                  - 'arn:aws:bedrock:*::foundation-model/*'
+                  - 'arn:aws:bedrock:::foundation-model/*'
               # Agents run as the same OS user and can reach these credentials (#181 判断待ち 2, option B): a delete may
               # add a marker but never removes a version, and the bucket's own safety settings stay as they are.
               - Effect: Deny

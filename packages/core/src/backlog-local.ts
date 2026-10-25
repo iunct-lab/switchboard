@@ -3,8 +3,8 @@
  * is applied to the stored records at once, as if the service had answered it. The edit functions in backlog.ts are the
  * same for every workspace; only where their operations go differs (BacklogSync.send).
  */
-import type { BacklogCommentData, BacklogIssueData, BacklogObjectKind, BacklogProjectItemData, BacklogSource } from "@switchboard/protocol";
-import { applyBacklogField, type BacklogSnapshotEntry, type Db } from "./db.ts";
+import type { BacklogCommentData, BacklogIssueData, BacklogObjectKind, BacklogProjectItemData, BacklogPullRequestData, BacklogSource } from "@switchboard/protocol";
+import { applyBacklogField, type BacklogOperation, type BacklogSnapshotEntry, type Db } from "./db.ts";
 import { BacklogEditError, type BacklogCreatePayload } from "./backlog.ts";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -17,7 +17,7 @@ import { STATUS_OPTIONS } from "../../../ops-kit/src/bootstrap.ts";
  * made yet), with its Project item and its place in the parent's sub-issues; a `set` is written on the record (a parent
  * change moves it between the parents' sub-issues); a `comment` gets `sb:<seq, 12 digits>` — the order the parallel
  * guard decides who came first by. The Issue's `updatedAt` is now. The workspace then reads as synced now. Returns how
- * many were applied.
+ * many were applied; what waits (appliesHere) stays as it is.
  */
 export function applyLocalOperations(db: Db, source: BacklogSource, now = Date.now()): number {
   const at = new Date(now).toISOString();
@@ -42,12 +42,17 @@ export function applyLocalOperations(db: Db, source: BacklogSource, now = Date.n
       const next = to === null ? undefined : byNumber(to);
       if (next && !next.value.subIssues.includes(n)) store("issue", next.id, { ...next.value, subIssues: [...next.value.subIssues, n] });
     };
+    // GitHub numbers Issues and pull requests alike: a number one of the PRs it had is not given (#2266)
+    const pulls = () => db.listBacklogRecords(source, "pull-request").flatMap((r) => ((r.remote as BacklogPullRequestData | null)?.number ? [(r.remote as BacklogPullRequestData).number] : []));
+    let applied = 0;
     for (const listed of ops) {
       // an earlier create renamed what later ones name (Db.setBacklogOperationResult)
       const op = db.getBacklogOperation(listed.id)!;
+      if (!appliesHere(op)) continue;
+      applied++;
       if (op.kind === "create") {
         const p = op.payload as BacklogCreatePayload;
-        const number = Math.max(0, ...issues().map((i) => i.value.number)) + 1;
+        const number = Math.max(0, ...issues().map((i) => i.value.number), ...pulls()) + 1;
         // the API refuses a parent that is not there (checkLocalParent); one gone meanwhile is not kept
         const parent = p.parent !== null && byNumber(p.parent) ? p.parent : null;
         const id = `sb:${op.id}`;
@@ -83,9 +88,19 @@ export function applyLocalOperations(db: Db, source: BacklogSource, now = Date.n
       if (issue?.remote) store("issue", issue.externalId, { ...(issue.remote as BacklogIssueData), updatedAt: at });
     }
     db.putBacklogSnapshot(source, { records: [], cursor: null, syncedAt: now });
-    return ops.length;
+    return applied;
   })();
 }
+
+/**
+ * What is decided here at once: a create, a comment, an edit of an Issue made here (`sb:` / `local:`). An edit of an Issue
+ * GitHub has — in a workspace whose GitHub sync is off (#2266) — waits for the sync to be on, and is sent then with the
+ * check of what it was made on (#887); so does an operation sent or lost on the way (`sending` / `unknown`, …).
+ */
+const appliesHere = (op: BacklogOperation) =>
+  op.status === "pending" && !op.remoteId && (op.kind !== "set" || op.issue.startsWith("sb:") || op.issue.startsWith("local:")) &&
+  // a create of turning the sync on (#2266, backlog-enable.ts) makes an Issue made here on GitHub: it waits for GitHub
+  !(op.kind === "create" && "former" in (op.payload as object));
 
 /** The parent an edit of a backlog kept here (#2265) names must be one of its Issues, not the Issue itself: 422 otherwise, before anything is stored. */
 export function checkLocalParent(db: Db, source: BacklogSource, parent: number | null | undefined, self?: number): void {

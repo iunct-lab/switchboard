@@ -418,10 +418,46 @@ describe("login (#180)", () => {
     }
   });
 
+  test("loginKind is the authMethod of `claude auth status` (#2528): claude.ai / api_key → console / absent or an old CLI → none; the account never reaches the detection", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "claude-login-"));
+    const who = `"email":"someone@example.com","orgName":"Acme Org","accountName":"Some Person"`;
+    const kind = async (stdout: string, exit = 0) => createClaudeAdapter({ bin: fakeClaude(dir, `echo '${stdout}'; exit ${exit}`) }).detect();
+    try {
+      const claudeAi = await kind(`{"loggedIn":true,"authMethod":"claude.ai",${who}}`);
+      expect(claudeAi).toMatchObject({ login: "ok", loginKind: "claude.ai" });
+      const api = await kind(`{"loggedIn":true,"authMethod":"api_key",${who}}`);
+      expect(api).toMatchObject({ login: "ok", loginKind: "console" });
+      for (const d of [claudeAi, api]) for (const secret of ["someone@example.com", "Acme Org", "Some Person"]) expect(JSON.stringify(d)).not.toContain(secret);
+      const none = await kind(`{"loggedIn":true,${who}}`);
+      expect(none.login).toBe("ok");
+      expect(none.loginKind).toBeUndefined();
+      expect((await kind(`not json`)).loginKind).toBeUndefined();
+      expect((await kind(`{"loggedIn":false,"authMethod":"claude.ai"}`, 1))).toMatchObject({ login: "expired" });
+      expect((await kind(`{"authMethod":"other"}`)).loginKind).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a multibyte character cut at the end of stderr does not break the stdout JSON (#2528)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "claude-login-"));
+    try {
+      // 0xE3 0x81 is the first two bytes of あ: stderr ends mid-character while stdout is valid JSON
+      const r = await loginStatus(fakeClaude(dir, `printf '\\343\\201' >&2; sleep 0.2; echo '{"authMethod":"api_key"}'; exit 0`));
+      expect(r).toEqual({ login: "ok", kind: "console" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the claude adapter offers `auth logout` (#2528)", () => {
+    expect(createClaudeAdapter().logoutArgs).toEqual(["auth", "logout"]);
+  });
+
   test("a status command that does not answer in time is unknown, not expired", async () => {
     const dir = mkdtempSync(join(tmpdir(), "claude-login-"));
     try {
-      expect(await loginStatus(fakeClaude(dir, "sleep 5"), 100)).toBe("unknown");
+      expect(await loginStatus(fakeClaude(dir, "sleep 5"), 100)).toEqual({ login: "unknown" });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

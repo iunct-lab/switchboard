@@ -290,3 +290,27 @@ test("a local workspace's Task gets BACKLOG_WORKSPACE; a GitHub one does not (#2
   expect(envs.at(-1)?.BACKLOG_URL).toBe(`${t.base}/api/backlog`);
   expect(envs.at(-1)).not.toHaveProperty("BACKLOG_WORKSPACE");
 });
+
+test("PATCH backlog switchboard turns sync off and keeps the source (#2266)", async () => {
+  const { base, add, dir, send } = await boot();
+  const gh = (await (await add(dir("gh"))).json()) as Workspace;
+  const source = { service: "github" as const, host: "github.com", repository: "acme/app", project: { owner: "acme", number: 1 } };
+  core!.db.setWorkspaceBacklogSource(gh.id, source);
+  core!.db.putBacklogSnapshot(source, { records: [], cursor: null, syncedAt: Date.now() });
+  const never = (await (await add(dir("never"))).json()) as Workspace;
+  // on already: nothing changes (turning it on is backlog-enable.test.ts)
+  expect((await send("PATCH", `/api/workspaces/${gh.id}`, { backlog: "github" })).status).toBe(200);
+  expect(core!.db.getWorkspaceBacklogSource(gh.id)).toEqual(source);
+  expect((await send("PATCH", `/api/workspaces/${gh.id}`, { backlog: "gitlab" })).status).toBe(400);
+  for (const ws of [gh, never]) expect((await send("PATCH", `/api/workspaces/${ws.id}`, { backlog: "switchboard" })).body.backlog).toBe("switchboard");
+  // again: nothing changes
+  expect((await send("PATCH", `/api/workspaces/${gh.id}`, { backlog: "switchboard" })).status).toBe(200);
+  expect(core!.db.getWorkspaceBacklogSource(gh.id)).toEqual({ ...source, disabled: true });
+  expect(core!.db.getWorkspaceBacklogSource(never.id)).toEqual(localBacklogSource(never.id));
+  const all = (await (await fetch(`${base}/api/workspaces`)).json()) as Workspace[];
+  expect([gh, never].map((w) => all.find((x) => x.id === w.id)?.backlog)).toEqual(["switchboard", "switchboard"]);
+  const list = (await (await fetch(`${base}/api/backlog`)).json()) as Backlog;
+  expect([gh, never].map((w) => list.syncs.find((s) => s.workspaceId === w.id)?.backlog)).toEqual(["switchboard", "switchboard"]);
+  expect(list.errors.map((e) => e.workspaceId)).not.toContain(gh.id);
+  expect((await send("PATCH", `/api/workspaces/${gh.id}`, { projectVar: "OTHER_PROJECT_URL" })).status).toBe(409);
+});

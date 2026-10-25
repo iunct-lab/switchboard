@@ -44,6 +44,22 @@ GitHub 連携の無い workspace（#2265、保存元の `service` が `switchboa
 
 - **作成の続き**: Issue を作った時点で GitHub の id（`remoteId`）を残して記録をその id に付け替え（続きが失敗しても Issue と記録が離れない）、閉じる・親を付ける・Project に入れてフィールドを付けるは同じ操作の続きとして送る（何度送っても同じ結果になる操作だけ。途中で失敗しても作り直さない）
 
+
+## 無効の間と有効化
+
+workspace の GitHub 同期を無効にした間と、有効にする段（API と画面は [backlog.md](backlog.md) の「GitHub 同期の有効・無効」）。
+
+- **無効の間に確定する操作**（`applyLocalOperations` の `appliesHere`）: 作成（番号は保存データの Issue と PR の最大 + 1）・コメント（記録は `sb:<seq>`）・Switchboard で作った Issue（`sb:` / `local:`）への `set`。GitHub の Issue への `set` と、送っている途中・答えを失った操作（`sending` / `unknown` など）は送信待ちに残り、画面と API はそれを重ねた値を見せる。有効化の作成は無効の間も確定しない（GitHub に作るもの）
+- **止まる送信**: 無効にする前に列に並んでいた送信は走る時点の保存元で止まる。走っている送信は次の操作の前（`sendGithubOperations` の `on`）と、操作の途中の書き込みの前（`-X POST/PATCH/DELETE` と mutation。`Limit` の `off`）で止まり、残りは送信待ちのまま。GitHub に出してしまった 1 件の要求は止められない（その結果は保存する）
+- **有効化の段**（`enableGithubSync` → 送信の後の `advanceEnabling`。[`backlog-enable.ts`](../../packages/core/src/backlog-enable.ts)）:
+  1. GitHub 連携の無い workspace は GitHub から GitHub のキーに取り込み、1 トランザクションで記録と送信待ちを GitHub のキーへ移し（`moveBacklogRecords`。`sb:` の id は GitHub の id と重ならない）、保存元を GitHub のものに `enabling` を付けて書く。無効にしていた workspace は、同じリポジトリの workspace ごと `disabled` を外して `enabling` を付ける（途中で止めていたら前の `since` のまま）
+  2. Switchboard で作った Issue（`sb:` の記録）ごとに、番号の順に `create` を積む。本文は空、親は無し（`#N` がまだ Switchboard の番号なので、先に送ると GitHub の別の Issue を指す）で、元の番号・本文・親は payload の `former` に残す。今の送信が送り、作った時点で記録は GitHub の id に付け替わる（`setBacklogOperationResult`）。この段の間、作成以外の操作は送らない（`enablingWaits`）
+  3. 作成が全部 done になったら、1 トランザクションで番号の対応を保存元の `numbers` に足し、始める前に作った工程 Task とここで作ったコメント（操作が指す Issue で決める）を新しい番号に付け替え、Switchboard の Project 項目の記録を消し（GitHub が項目を持つ）、作った Issue の本文・親と、ここで作ったコメント（作った順）を `#N` を書き換えて積む。無効の間に送信待ちに残った本文とコメントの `#N` も書き換える（`enabling.queued`）
+  4. それらが全部送れたら（`sb:` のコメントが残らず、作った Issue の本文・親の `set` が送信待ちに無い）`enabling` を外し、取り込み直す
+- **続きから**: 各段は保存データ（保存元の `enabling` と、`sb:` の記録と、操作の状態）から決まるので、途中で失敗しても何も消えず、もう一度押せば続きから進む。押すと時刻待ち（502 などの後）の操作はすぐ送り、GitHub が断った（`failed`）有効化の作成はもう一度送る。二度押しで GitHub を読んでいる間に先に移ったら、その有効化で続ける
+- **二度作らない**: 答えを失った作成（`unknown`）は、送り直す前に印（`switchboard-op`）で GitHub を探し、見つかれば done（今の送信の照合のまま）。見つからなければ二度は作らない（画面に保留として出る）
+- **取込み**: 有効化の途中、GitHub にまだ無い `sb:` の Issue は、一覧に出ない Open の Issue や前提・待ちの番号として GitHub に番号で問い合わせない（ローカルの番号を GitHub の別の Issue と取り違え、読めない印を付けないため）
+
 ## GitHub だけを見る人から
 
 送った結果はふつうの Issue・コメント・ラベル・Project の値として GitHub に残る（gh や画面で書いたものと区別がつかない。末尾の印は HTML コメントで表示されない）。

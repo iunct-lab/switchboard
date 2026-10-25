@@ -45,3 +45,19 @@ test("req: the start page goes to /_auth/ only when /api/health is the start pag
     Object.assign(g, saved);
   }
 }, 20_000); // each stopped check waits the real 2 s between its two asks
+
+test("runnerLogin: the Anthropic Console button posts billing=api, the Claude account one does not", async () => {
+  const g = globalThis as Record<string, unknown>;
+  const saved = { fetch: g.fetch, localStorage: g.localStorage };
+  g.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+  const urls: string[] = [];
+  g.fetch = async (url: string) => (urls.push(url), Response.json({ runner: "claude", state: "waiting", needsCode: true }));
+  try {
+    await api.runnerLogin("claude");
+    await api.runnerLogin("claude", "console");
+    await api.runnerLogout("claude");
+    expect(urls).toEqual(["/api/runners/claude/login", "/api/runners/claude/login?billing=api", "/api/runners/claude/logout"]);
+  } finally {
+    Object.assign(g, saved);
+  }
+});

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { BacklogIssueDetail, BacklogSyncInfo } from "@switchboard/protocol";
-import { backlogHeading, createWord, draftKey, heldIssueText, editOf, formAfterRead, formOf, labelList, loadDraft, loadNewIssueDraft, PROJECT_SETUP_DOC, rebaseForm, syncLine, valueText, workspaceErrorGuide } from "./backlogSync.ts";
+import { backlogHeading, createWord, draftKey, heldIssueText, editOf, formAfterRead, formOf, githubSyncText, labelList, loadDraft, loadNewIssueDraft, PROJECT_SETUP_DOC, rebaseForm, syncLine, valueText, workspaceErrorGuide } from "./backlogSync.ts";
 
 const fmt = (ms: number) => `t${ms}`;
 const info = (over: Partial<BacklogSyncInfo>): BacklogSyncInfo => ({ state: "synced", reason: null, lastSuccessfulSync: 1000, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A", ...over });
@@ -171,4 +171,14 @@ describe("backlogHeading (#2362)", () => {
     expect(backlogHeading(null, true, true, fmt)).toBe("読み込み中…");
     expect(backlogHeading(null, false, false, fmt)).toBe("");
   });
+});
+
+test("githubSyncText says off, moving and on (#2266)", () => {
+  const row = (over: object) => ({ backlog: "github" as const, enabling: null, sync: info({}), ...over });
+  expect(githubSyncText(row({ backlog: "switchboard" }), fmt)).toEqual({ state: "synced", label: "GitHub 同期: 無効", parts: [] });
+  expect(githubSyncText(row({ backlog: "switchboard", sync: info({ state: "pending", pendingCount: 2 }) }), fmt).parts).toEqual(["未送信 2 件（有効にすると送ります）"]);
+  expect(githubSyncText(row({ enabling: { total: 3, done: 1 } }), fmt)).toEqual({ state: "pending", label: "GitHub に移しています", parts: ["1 / 3"] });
+  expect(githubSyncText(row({ enabling: { total: 3, done: 3 }, sync: info({ state: "conflict", pendingCount: 1, conflicts: [{ operation: "o", field: "body", reason: null }] as never }) }), fmt)).toEqual({ state: "conflict", label: "GitHub に移しています", parts: ["3 / 3", "競合 1 件"] });
+  expect(githubSyncText(row({ enabling: { total: 3, done: 2 }, sync: info({ state: "error", reason: "failed" }) }), fmt).parts).toEqual(["2 / 3", "GitHub が編集を受け付けませんでした"]);
+  expect(githubSyncText(row({ sync: info({ state: "conflict", pendingCount: 1, conflicts: [{ operation: "o", field: "title", reason: null }] as never }) }), fmt)).toEqual({ state: "conflict", label: "競合", parts: ["最終成功: t1000", "未送信 1 件", "競合 1 件"] });
 });

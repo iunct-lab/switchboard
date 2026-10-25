@@ -937,3 +937,94 @@ test("BacklogSync: the import is the read of the repository's forge (#920): a se
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("with GitHub sync off, create / answer / start go on stored data and gh is never called (#2266)", async () => {
+  const home = mkdtempSync(join(tmpdir(), "switchboard-sync-off-"));
+  const path = join(home, "app");
+  mkdirSync(path);
+  const { gh: github } = fakeGh({
+    changed: () => pageOf([raw(10, {
+      labels: { totalCount: 2, nodes: [{ name: "type:pbi" }, { name: "needs-decision" }] }, subIssues: { totalCount: 0, nodes: [] },
+      comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ id: "C_10_1", body: "## 判断待ち\nQ", createdAt: "2026-10-02T00:00:00Z" }] },
+      projectItems: { totalCount: 1, nodes: [item(10, "In progress")] },
+    })]),
+    open: () => pageOf([{ number: 10, projectItems: { totalCount: 1, nodes: [item(10, "In progress")] } }], null, [openPr(11, { labels: { totalCount: 0, nodes: [] } })]),
+  });
+  let off = false;
+  const asked: string[][] = [];
+  const gh: GhRunner = async (args, cwd) => {
+    if (cwd === path) asked.push(args);
+    if (off) throw new Error("spawn gh ENOENT");
+    return github(args, cwd);
+  };
+  const ending = {
+    id: "claude", detect: async () => ({ available: true }),
+    start: (_o: unknown, emit: (e: { t: "session.end"; status: "ok" }) => void) => {
+      queueMicrotask(() => emit({ t: "session.end", status: "ok" }));
+      return { send() {}, respondPermission() {}, async abort() {}, async close() {}, exited: new Promise<never>(() => {}) };
+    },
+  };
+  const core = await startServer(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_CLAUDE_PROJECTS: join(home, "none"), SWITCHBOARD_HISTORY_POLL_MS: "0" }), [ending as never], { port: 0, selfdevChecks: false, dryRunRestart: true, gh });
+  try {
+    const base = `http://127.0.0.1:${core.server.port}`;
+    const send = async (method: string, route: string, body?: object) => {
+      const r = await fetch(`${base}${route}`, { method, headers: { "content-type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) });
+      return { status: r.status, body: (await r.json()) as any };
+    };
+    const ws = core.db.upsertWorkspace({ name: "app", path, kind: "repo" });
+    await importGithubSnapshot(gh, core.db, ws);
+    const key = core.db.getWorkspaceBacklogSource(ws.id)!;
+    const before = Object.fromEntries(core.db.listBacklogRecords(key).map((r) => [r.externalId, r.remote]));
+
+    const turned = await send("PATCH", `/api/workspaces/${ws.id}`, { backlog: "switchboard" });
+    expect([turned.status, turned.body.backlog]).toEqual([200, "switchboard"]);
+    off = true;
+    asked.length = 0;
+    const made = await send("POST", "/api/backlog", { workspaceId: ws.id, title: "PBI: off", labels: ["type:pbi"] });
+    expect([made.status, made.body.number]).toEqual([202, 12]); // the PR #11 is GitHub's number too
+    expect((await send("POST", "/api/backlog/10/answer", { workspaceId: ws.id, text: "こうする" })).status).toBe(202);
+    const ten = (await send("GET", `/api/backlog/10?workspaceId=${ws.id}`)).body;
+    expect(ten.comments.map((c: { body: string }) => c.body)).toEqual(["## 判断待ち\nQ", "## 回答\n\nこうする"]);
+    expect(ten.issue.labels).toEqual(["type:pbi"]);
+    // the label taken off a GitHub record waits for the sync to be on; the comment is decided here
+    expect(ten.pending).toBe(1);
+    expect((await send("POST", "/api/backlog/10/start", { workspaceId: ws.id, action: "complete" })).status).toBe(201);
+    expect((await send("POST", "/api/backlog/sync", { workspaceId: ws.id })).status).toBe(200);
+    expect(asked).toEqual([]);
+    // GitHub's records stay as they were: its ids, numbers, comment and fields (the answer made #10 changed now)
+    const after = Object.fromEntries(core.db.listBacklogRecords(key).map((r) => [r.externalId, r.remote]));
+    for (const id of ["C_10_1", "PVTI_10", "PR_11"]) expect(after[id]).toEqual(before[id]);
+    expect({ ...(after.I_10 as object), updatedAt: null }).toEqual({ ...(before.I_10 as object), updatedAt: null });
+    expect(ten.fields).toMatchObject({ Status: "In progress" });
+    expect(core.db.getWorkspaceBacklogSource(ws.id)).toEqual({ ...key, disabled: true });
+  } finally {
+    await core.stop();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("an import or a send begun before the sync was turned off stores and sends nothing (#2266)", async () => {
+  db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
+  // the first import is under way when the workspace is turned to one kept here
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  const { gh } = fakeGh({ changed: () => pageOf([raw(12)]), open: () => pageOf([]) });
+  const slow: GhRunner = async (args, cwd) => (args[0] === "repo" ? gh(args, cwd) : held.then(() => gh(args, cwd)));
+  const importing = importGithubSnapshot(slow, db, WS, 1000);
+  const local = { service: "switchboard" as const, host: "local", repository: WS.id, project: { owner: "switchboard", number: 0 } };
+  db.setWorkspaceBacklogSource(WS.id, local);
+  release();
+  await importing;
+  expect(db.getWorkspaceBacklogSource(WS.id)).toEqual(local);
+  expect(db.listBacklogRecords(KEY)).toEqual([]);
+  // a send asked for while it synced runs after the sync is off: nothing goes to GitHub
+  db.setWorkspaceBacklogSource(WS.id, { ...KEY, project: { owner: "acme", number: 1 } });
+  db.applyBacklogEdit(KEY, { records: [], operations: [{ issue: "I_12", targetKind: "issue", target: "I_12", kind: "set", field: "title", payload: "t", base: "PBI 12" }] });
+  const asked: string[][] = [];
+  const sync = makeSync(db, async (args) => (asked.push(args), { code: 1, stdout: "", stderr: "not asked" }));
+  const sending = sync.send(WS);
+  db.setWorkspaceBacklogSource(WS.id, { ...KEY, project: { owner: "acme", number: 1 }, disabled: true });
+  await sending;
+  expect(asked).toEqual([]);
+  expect(db.listPendingBacklogOperations(KEY).map((o) => o.status)).toEqual(["pending"]);
+});
