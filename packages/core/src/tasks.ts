@@ -144,6 +144,8 @@ export interface TaskManagerOptions {
   approval?: (task: Task, ask: Extract<AgentEvent, { t: "permission.ask" }>) => { decision: "ask" | "allow"; match?: ApprovalRuleMatch };
   /** Price table (#14): usage without a reported cost is priced from it; billing decides what counts as 実課金. */
   pricing?: () => PricingTable;
+  /** Saved Amazon Bedrock region of the runner (#1730); undefined = the runner's own login. Not for cloud runs. */
+  bedrock?: (task: Task) => { region: string } | undefined;
   /** Saved per-runner default permission mode (#58); undefined = the adapter's own default. */
   defaultPermissionMode?: (runner: RunnerId) => string | undefined;
   /** Saved shadow runner (#99), used when a creation does not say; null / undefined = no shadow by default. */
@@ -198,6 +200,7 @@ export class TaskManager {
   private dockerEnv: TaskManagerOptions["dockerEnv"];
   private maxStopResumes: () => number;
   private mcpServers: TaskManagerOptions["mcpServers"];
+  private bedrock: TaskManagerOptions["bedrock"];
 
   private endListeners = new Set<(taskId: string, task: Task) => void>();
   private turnEndListeners = new Set<(taskId: string, task: Task, turn: TurnEnd) => void>();
@@ -224,6 +227,7 @@ export class TaskManager {
     this.dockerEnv = opts.dockerEnv;
     this.maxStopResumes = opts.maxStopResumes ?? (() => MAX_STOP_RESUMES);
     this.mcpServers = opts.mcpServers;
+    this.bedrock = opts.bedrock;
   }
 
   /**
@@ -1011,7 +1015,7 @@ export class TaskManager {
       // Not made = the task does not start (the error below), never a Codex without the stop.
       const privateTmp = meta && task.runner === "codex" && this.privateTmpRoot ? makePrivateTmp(this.privateTmpRoot, task.id) : undefined;
       live.session = adapter.start(
-        { cwd: task.cwd, scope: task.scope, prompt, model: task.model ?? undefined, permissionMode: task.permissionMode ?? undefined, effort: task.effort ?? undefined, resumeSessionId, preamble, env, guards, privateTmp, attachments, attachmentDir: this.attachments?.taskDir(task.id), mcpServers: this.mcpServers?.(task) },
+        { cwd: task.cwd, scope: task.scope, prompt, model: task.model ?? undefined, permissionMode: task.permissionMode ?? undefined, effort: task.effort ?? undefined, resumeSessionId, preamble, env, guards, privateTmp, bedrock: this.bedrock?.(task), attachments, attachmentDir: this.attachments?.taskDir(task.id), mcpServers: this.mcpServers?.(task) },
         (ev) => this.onEvent(task.id, live, ev),
       );
     } catch (e) {

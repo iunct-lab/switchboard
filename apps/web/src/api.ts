@@ -166,7 +166,9 @@ export const api = {
   /** 改善要望にする (#1221): the draft the feedback dialog opens with for a task's evaluations. */
   evalsDraft: (id: string) => req<{ text: string }>(`/api/tasks/${id}/evals/draft`),
   /** A runner's own login from the screen (#354): the URL / device code it prints, or a box for its page's code. */
-  runnerLogin: (runner: string) => req<RunnerLoginView>(`/api/runners/${runner}/login`, { method: "POST" }),
+  runnerLogin: (runner: string, kind?: "console") => req<RunnerLoginView>(`/api/runners/${runner}/login${kind ? "?billing=api" : ""}`, { method: "POST" }),
+  /** The runner's own logout (#2528); the login is read again, so the next health says it is logged out. */
+  runnerLogout: (runner: string) => req<{ ok: boolean }>(`/api/runners/${runner}/logout`, { method: "POST" }),
   runnerLoginState: (runner: string) => req<RunnerLoginView>(`/api/runners/${runner}/login`),
   runnerLoginCode: (runner: string, code: string) => req<RunnerLoginView>(`/api/runners/${runner}/login/code`, { method: "POST", body: JSON.stringify({ code }) }),
   runnerLoginCancel: (runner: string) => req<RunnerLoginView>(`/api/runners/${runner}/login`, { method: "DELETE" }),
@@ -175,6 +177,12 @@ export const api = {
   workspaces: () => req<Workspace[]>("/api/workspaces"),
   /** `backlog`: `switchboard` keeps the workspace's Issues and Project in Switchboard only (#2265); PRs stay with the repository. */
   addWorkspace: (path: string, backlog: "github" | "switchboard" = "github") => req<Workspace>("/api/workspaces", { method: "POST", body: JSON.stringify({ path, backlog }) }),
+  /**
+   * Turns the workspace's GitHub sync off (`switchboard`) or on (`github`, #2266): on answers how far it is (202), or
+   * rejects with why GitHub could not be read (424, nothing changed). `projectVar` = the Project of one kept here only.
+   */
+  setWorkspaceBacklog: (id: string, backlog: "github" | "switchboard", projectVar?: string | null) =>
+    req<Workspace & { enabling?: { total: number; done: number } }>(`/api/workspaces/${id}`, { method: "PATCH", body: JSON.stringify({ backlog, ...(projectVar === undefined ? {} : { projectVar }) }) }),
   setWorkspaceProjectVar: (id: string, projectVar: string | null) => req<Workspace>(`/api/workspaces/${id}`, { method: "PATCH", body: JSON.stringify({ projectVar }) }),
   workspaceBrief: (id: string) => req<{ workspaceId: string; text: string }>(`/api/workspaces/${id}/brief`),
   tasks: (opts: { archived?: boolean } = {}) => req<Task[]>(opts.archived ? "/api/tasks?archived=1" : "/api/tasks"),

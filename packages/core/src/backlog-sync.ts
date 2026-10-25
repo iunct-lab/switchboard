@@ -23,10 +23,11 @@
 import { existsSync } from "node:fs";
 import type { BacklogCommentData, BacklogErrorKind, BacklogIssueData, BacklogPullRequestData, BacklogItem, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogSource } from "@switchboard/protocol";
 import type { BacklogSnapshotEntry, Db } from "./db.ts";
-import { BacklogError, prereqsOf, projectOf, readStoredBacklog, repoOf, waitsOf, type BacklogWorkspace, type GhRunner } from "./backlog.ts";
+import { BacklogError, prereqsOf, projectOf, readStoredBacklog, repoOf, syncsGithub, waitsOf, type BacklogWorkspace, type GhRunner } from "./backlog.ts";
 import { linkedIssues } from "../../../scripts/parallel-guard.ts";
 import { Limit, sendGithubOperations } from "./backlog-send.ts";
 import { applyLocalOperations } from "./backlog-local.ts";
+import { advanceEnabling, enablingWaits } from "./backlog-enable.ts";
 import { forgeOf, ForgeUnsupported, runForgeOperation } from "../../../ops-kit/src/forge.ts";
 import { callMetric, githubHost, GithubRetryState, noCall, parseIncluded, responseOf, retryAtFromResponse, waitMessage, type GithubFailure, type MetricSink } from "../../../ops-kit/src/gh.ts";
 
@@ -210,7 +211,8 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
   // what is known after the two lists: the stored records with this import's on top
   const known = new Map(stored.map((r) => [`${r.objectKind}:${r.externalId}`, { kind: r.objectKind, id: r.externalId, remote: r.remote, state: r.fetchState }]));
   for (const [k, e] of out) known.set(k, { kind: e.objectKind, id: e.externalId, remote: e.fetchState === "fetched" ? e.remote : (known.get(k)?.remote ?? null), state: e.fetchState });
-  const issues = [...known.values()].filter((r) => r.kind === "issue" && r.remote) as Array<{ id: string; remote: BacklogIssueData }>;
+  // an Issue made here and not on GitHub yet (#2266, turning the sync on) is no Issue of GitHub's to ask for
+  const issues = [...known.values()].filter((r) => r.kind === "issue" && r.remote && !r.id.startsWith("sb:")) as Array<{ id: string; remote: BacklogIssueData }>;
   const stale = issues.filter((r) => r.remote.state === "OPEN" && !open.has(r.remote.number) && !read.has(r.remote.number)).map((r) => r.remote.number);
   const waits = issues
     .filter((r) => r.remote.state === "OPEN" && r.remote.labels.includes("type:pbi"))
@@ -220,7 +222,7 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
     });
   // the prerequisites an open PBI / Task names (#937) are asked like the waits
   const prereqs = issues.filter((r) => r.remote.state === "OPEN" && (r.remote.labels.includes("type:pbi") || r.remote.labels.includes("type:task"))).flatMap((r) => prereqsOf(r.remote.body).map((p) => p.number));
-  const byNumber = new Map([...known.values()].filter((r) => (r.kind === "issue" || r.kind === "pull-request") && r.remote).map((r) => [(r.remote as { number: number }).number, r]));
+  const byNumber = new Map([...known.values()].filter((r) => (r.kind === "issue" || r.kind === "pull-request") && r.remote && !r.id.startsWith("sb:")).map((r) => [(r.remote as { number: number }).number, r]));
   // a wait on a closed request / PBI / Task is answered by what is stored: reopening it moves its updatedAt, and the
   // first read lists it then. Another closed Issue is asked again: no list would show it reopened
   const closed = (n: number) => {
@@ -257,12 +259,13 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
  * nothing is stored; when GitHub said when to come back (a limit), that time is kept as the repository's `retryAt`.
  * `changed` = it read something other than what was stored (a value, or how a record was read). Throws BacklogError.
  */
-export async function importGithubSnapshot(gh: GhRunner, db: Db, ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">, now = Date.now(), superseded = (_key: BacklogRepositoryKey) => false): Promise<{ key: BacklogRepositoryKey; changed: boolean }> {
+export async function importGithubSnapshot(gh: GhRunner, db: Db, ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">, now = Date.now(), superseded = (_key: BacklogRepositoryKey) => false, enabling = false): Promise<{ key: BacklogRepositoryKey; changed: boolean; project: BacklogSource["project"] | null }> {
   const { repo, owner, name } = await repoOf(gh, ws.path);
   const key: BacklogRepositoryKey = { service: "github", host: githubHost(), repository: repo };
   let changed = false;
+  let project: BacklogSource["project"] | null = null;
   try {
-    const project = await projectOf(gh, ws);
+    project = await projectOf(gh, ws);
     const stored = db.listBacklogRecords(key);
     const snap = await fetchGithubSnapshot(gh, ws.path, { owner, name }, stored, db.getBacklogRepository(key)?.cursor ?? null);
     const was = new Map(stored.map((r) => [`${r.objectKind}:${r.externalId}`, r]));
@@ -270,18 +273,24 @@ export async function importGithubSnapshot(gh: GhRunner, db: Db, ws: Pick<Backlo
       const r = was.get(`${e.objectKind}:${e.externalId}`);
       return !r || r.fetchState !== e.fetchState || (e.fetchState === "fetched" && JSON.stringify(r.remote) !== JSON.stringify(e.remote));
     });
-    // the daemon wrote to the repository while this read: what it read is older than what the read-back stores
-    if (superseded(key)) return { key, changed };
+    // the daemon wrote to the repository while this read: what it read is older than what the read-back stores; or
+    // the workspace's GitHub sync was turned off meanwhile, its first import too (#2266): nothing of GitHub is stored then
+    // — unless this is the read that turns it on (enableGithubSync: it writes the source itself, after the records moved)
+    const current = db.getWorkspaceBacklogSource(ws.id);
+    if (superseded(key) || (!enabling && current && !syncsGithub(current))) return { key, changed, project };
     db.putBacklogSnapshot(key, { ...snap, syncedAt: now });
+    if (enabling) return { key, changed, project };
     // which repository and Project this workspace reads, so its backlog is read from storage without asking GitHub;
-    // not when its Project variable changed meanwhile (that forgot the source, and the next import reads the new one)
-    if ((db.getWorkspace(ws.id)?.projectVar ?? null) === (ws.projectVar ?? null)) db.setWorkspaceBacklogSource(ws.id, { ...key, project });
+    // not when its Project variable changed meanwhile (that forgot the source, and the next import reads the new one).
+    // Turning the sync on (#2266) and the numbers it gave stay
+    const kept = current?.service === key.service && current.host === key.host && current.repository === key.repository ? { ...(current.enabling ? { enabling: current.enabling } : {}), ...(current.numbers ? { numbers: current.numbers } : {}) } : {};
+    if ((db.getWorkspace(ws.id)?.projectVar ?? null) === (ws.projectVar ?? null)) db.setWorkspaceBacklogSource(ws.id, { ...key, project, ...kept });
   } catch (e) {
     const at = e instanceof BacklogError && e.response ? retryAtFromResponse(e.response, now)?.at : null;
     if (at) db.setBacklogRetryAt(key, at);
     throw e;
   }
-  return { key, changed };
+  return { key, changed, project };
 }
 
 /**
@@ -306,7 +315,7 @@ export function noticeTargets(payload: unknown, workspaces: Array<{ id: string; 
   const repo = name(p?.repository?.full_name);
   const org = repo ? null : name(p?.organization?.login);
   return workspaces.flatMap(({ id, source }) =>
-    source?.service === "github" && ((repo && source.repository.toLowerCase() === repo) || (org && source.project.owner.toLowerCase() === org)) ? [id] : [],
+    source?.service === "github" && !source.disabled && ((repo && source.repository.toLowerCase() === repo) || (org && source.project.owner.toLowerCase() === org)) ? [id] : [],
   );
 }
 
@@ -373,10 +382,14 @@ export class BacklogSync {
     const now = this.clock();
     // the repository the workspace reads, for the measures of what asks nothing (null before its first import)
     const source = this.db.getWorkspaceBacklogSource(ws.id);
-    // a backlog kept here only (#2265): what is stored is the newest there is — nothing is asked, waited for or read again
-    if (source?.service === "switchboard") {
+    // a backlog kept here only (#2265), or one whose GitHub sync is off (#2266): what is stored is the newest there is —
+    // nothing is asked, waited for or read again
+    if (source && !syncsGithub(source)) {
       this.db.putBacklogSnapshot(source, { records: [], cursor: null, syncedAt: now });
       this.failures.delete(ws.id);
+      // a read planned while it still synced is not made
+      clearTimeout(this.polls.get(ws.id)?.timer);
+      this.polls.delete(ws.id);
       return Promise.resolve();
     }
     const repo = source?.repository ?? null;
@@ -500,8 +513,9 @@ export class BacklogSync {
   send(ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">): Promise<void> {
     if (this.stopped) return Promise.resolve();
     const source = this.db.getWorkspaceBacklogSource(ws.id);
-    // a backlog kept here only (#2265): applied at once, nothing goes out — on sb-rescue's candidate too (it sends nothing)
-    if (source?.service === "switchboard") {
+    // a backlog kept here only (#2265), or one whose GitHub sync is off (#2266): applied at once, nothing goes out — on
+    // sb-rescue's candidate too (it sends nothing). An edit of a GitHub record of the latter waits (applyLocalOperations)
+    if (source && !syncsGithub(source)) {
       try {
         applyLocalOperations(this.db, source, this.clock());
         this.failures.delete(ws.id);
@@ -519,6 +533,8 @@ export class BacklogSync {
   }
 
   private async sendNow(ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">, source: BacklogSource): Promise<void> {
+    // one queued behind another send while the workspace's GitHub sync was turned off (#2266) sends nothing
+    if (!syncsGithub(this.db.getWorkspaceBacklogSource(ws.id))) return;
     const now = this.clock();
     const stored = this.db.getBacklogRepository(source)?.retryAt;
     const until = this.limits.waiting(githubHost())?.until ?? (stored && stored > now ? stored : null);
@@ -533,9 +549,11 @@ export class BacklogSync {
       await sendGithubOperations(this.gh, this.db, ws.path, source, this.clock, () => {
         wrote = true;
         this.written(ws);
-      });
+      }, () => syncsGithub(this.db.getWorkspaceBacklogSource(ws.id)), (op) => enablingWaits(this.db.getWorkspaceBacklogSource(ws.id), op));
     } catch (e) {
       if (!(e instanceof Limit)) throw e;
+      // turned off meanwhile (#2266): nothing more goes, nothing waits for a time
+      if (e.kind === "off") return;
       // a login refused waits for the next send (an edit, an import), and says why where the backlog shows errors (an
       // import would only fail the same way); a limit is the host's, as the imports' are
       if (e.kind === "auth") return void this.failures.set(ws.id, { message: e.message, kind: "gh-login" });
@@ -544,6 +562,12 @@ export class BacklogSync {
       if (wrote) this.wrote(ws);
       return this.later(ws, source, until);
     }
+    // turning the sync on (#2266): once every Issue made here has GitHub's number, its bodies, parents and comments are
+    // sent next; once they are, GitHub's Project items replace the ones kept here (a create resumed after an outage
+    // wrote no post, so nothing else reads them)
+    const step = this.db.getWorkspaceBacklogSource(ws.id)?.enabling ? advanceEnabling(this.db, ws.id, this.clock()) : null;
+    if (step === "queued") void this.send(ws);
+    if (step === "ended") this.request(ws);
     const pending = this.db.listPendingBacklogOperations(source);
     if (wrote) this.wrote(ws);
     // held at the check before the write (#887): nothing written, but GitHub's value it read is not stored — an import
@@ -659,8 +683,8 @@ export class BacklogSync {
   private pollLater(ws: Pick<BacklogWorkspace, "id">): void {
     if (!this.polling) return;
     const source = this.db.getWorkspaceBacklogSource(ws.id);
-    // a backlog kept here only (#2265) has nothing to read again
-    if (source?.service === "switchboard") return;
+    // a backlog kept here only (#2265), or one whose GitHub sync is off (#2266), has nothing to read again
+    if (!syncsGithub(source)) return;
     const now = this.clock();
     const wait = this.waitUntil(ws);
     // one never imported may be no GitHub checkout (the meta workspace), or its first import failed for a while: tried

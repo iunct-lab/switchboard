@@ -3,7 +3,7 @@ import type { RunnerId } from "@switchboard/protocol";
 import { api, type RunnerLoginView } from "../api.ts";
 
 /**
- * "ログインする" on the banner of a runner whose login ran out (#354). The daemon runs the runner's own login and relays
+ * The login buttons on the banner of a runner whose login ran out (#354). The daemon runs the runner's own login and relays
  * what it prints: codex a device URL and a one-time code (approve on the page, this goes away by itself), claude a URL
  * and a box for the code its page shows. No terminal.
  */
@@ -25,9 +25,9 @@ export function RunnerLogin(props: { runner: RunnerId; onDone: () => void; onErr
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view?.state, props.runner]);
 
-  const start = () => {
+  const start = (kind?: "console") => {
     setBusy(true);
-    api.runnerLogin(props.runner).then(setView).catch((e) => props.onError(`${props.runner} のログインを始められません: ${e.message}`)).finally(() => setBusy(false));
+    api.runnerLogin(props.runner, kind).then(setView).catch((e) => props.onError(`${props.runner} のログインを始められません: ${e.message}`)).finally(() => setBusy(false));
   };
   const send = () => {
     setBusy(true);
@@ -42,9 +42,14 @@ export function RunnerLogin(props: { runner: RunnerId; onDone: () => void; onErr
     return (
       <span className="runner-login">
         {view?.error && <span className="hint">{view.error}</span>}
-        <button className="pri" disabled={busy} onClick={start}>
-          {busy ? "準備しています…" : "ログインする"}
+        <button className="pri" disabled={busy} onClick={() => start()}>
+          {busy ? "準備しています…" : props.runner === "claude" ? "Claude アカウントでログイン" : "ログインする"}
         </button>
+        {props.runner === "claude" && (
+          <button className="ghost" disabled={busy} onClick={() => start("console")}>
+            Anthropic Console でログイン
+          </button>
+        )}
       </span>
     );
   const cancel = () => {
@@ -59,7 +64,7 @@ export function RunnerLogin(props: { runner: RunnerId; onDone: () => void; onErr
         <button className="ghost" onClick={cancel}>
           取り消す
         </button>
-        <button className="pri" disabled={busy} onClick={() => api.runnerLoginCancel(props.runner).catch(() => undefined).then(start)}>
+        <button className="pri" disabled={busy} onClick={() => api.runnerLoginCancel(props.runner).catch(() => undefined).then(() => start())}>
           やり直す
         </button>
       </span>

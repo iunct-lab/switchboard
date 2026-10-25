@@ -41,8 +41,12 @@ export interface Usage {
 export function resolveModel(table: PricingTable, model: string | null | undefined, runner: RunnerId): { name: string; price: PricingTable["models"][string] } | null {
   const hit = (m: string | undefined) => (m && table.models[m] ? { name: m, price: table.models[m]! } : null);
   if (model) {
-    const name = model.replace(/\[[^\]]*\]$/, "");
-    const direct = hit(name) ?? hit(table.aliases[name]) ?? hit(name.replace(/-\d{8}$/, ""));
+    const tagless = model.replace(/\[[^\]]*\]$/, "");
+    const lookup = (n: string) => hit(n) ?? hit(table.aliases[n]) ?? hit(n.replace(/-\d{8}(-v\d+:\d+)?$/, ""));
+    // Amazon Bedrock's form (global.anthropic.claude-haiku-5-5, #1730) is the same model: after the id as written (a row or an
+    // alias of the user's own wins), the Anthropic row prices it
+    const name = tagless.replace(/^([a-z]+\.)?anthropic\./, "");
+    const direct = lookup(tagless) ?? lookup(name);
     if (direct) return direct;
     const prefix = Object.keys(table.models)
       .filter((m) => name.startsWith(m + "@") || (name.startsWith(m + "-") && !/^\d{1,7}(\D|$)/.test(name.slice(m.length + 1))))
@@ -78,8 +82,17 @@ export function priceUsage(table: PricingTable, model: string | null | undefined
  * What the user actually pays for this usage: API price for pay-as-you-go runners, 0 under a subscription.
  * A runner missing from `billing` counts as pay-as-you-go: the conservative reading for the money column.
  */
-export function billedUsd(table: PricingTable, runner: RunnerId, apiCostUsd: number): number {
+export function billedUsd(table: PricingTable, runner: RunnerId, apiCostUsd: number, model?: string | null): number {
+  if (model && isBedrockModel(model)) return apiCostUsd;
   return (table.billing[runner] ?? "api") === "api" ? apiCostUsd : 0;
+}
+
+/**
+ * A model id in Amazon Bedrock's form (`global.anthropic.claude-haiku-5-5`, `us.anthropic.…`, `anthropic.…`) (#1730).
+ * Bedrock is metered by AWS whatever the runner's own plan says, so such a row is billed at the API price.
+ */
+export function isBedrockModel(model: string): boolean {
+  return /^([a-z]+\.)?(anthropic|openai)\./.test(model);
 }
 
 /**
@@ -100,7 +113,7 @@ export function ledgerRowFor(table: PricingTable | undefined, task: Pick<Task, "
     cacheWrite: ev.cacheWriteTokens,
     cacheWrite1h: ev.cacheWrite1hTokens ?? 0,
     costUsd,
-    billedUsd: table ? billedUsd(table, task.runner, costUsd) : costUsd,
+    billedUsd: table ? billedUsd(table, task.runner, costUsd, ev.model ?? task.model ?? priced?.model) : costUsd,
     source: ev.costUsd !== undefined ? "reported" : priced?.priced ? "priced" : "unpriced",
     ts,
   };

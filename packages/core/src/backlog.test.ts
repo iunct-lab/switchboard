@@ -110,7 +110,7 @@ test("GET /api/backlog: stage per request / PBI, Project fields, Task counts, bo
   expect(r.status).toBe(200);
   const body = await r.json() as Backlog;
   // the first look waits for the first import (#885): nothing was stored before it
-  expect(body.syncs).toEqual([{ workspaceId: expect.any(String), repository: "acme/app", syncing: false, syncedAt: body.fetchedAt, creates: [], issues: [], sync: expect.objectContaining({ state: "synced", reason: null, lastSuccessfulSync: body.fetchedAt, guarantee: "A" }) }]);
+  expect(body.syncs).toEqual([{ workspaceId: expect.any(String), backlog: "github", enabling: null, repository: "acme/app", syncing: false, syncedAt: body.fetchedAt, creates: [], issues: [], sync: expect.objectContaining({ state: "synced", reason: null, lastSuccessfulSync: body.fetchedAt, guarantee: "A" }) }]);
   expect(body.items.map((i) => [i.number, i.type, i.stage])).toEqual([
     [306, "pbi", "needs-decision"], // label wins over Status In progress
     [305, "pbi", "in-progress"], // In review
@@ -3229,7 +3229,7 @@ test("GET /api/backlog before the first import: no items, the workspace in error
   const first = await (await fetch(`${base}/api/backlog`)).json() as Backlog;
   expect(first.items).toEqual([]);
   expect(first.errors).toEqual([{ workspaceId: meta.id, workspaceName: meta.name, message: "まだ GitHub から取り込んでいません", kind: "other" }]);
-  expect(first.syncs).toEqual([{ workspaceId: meta.id, repository: null, syncing: true, syncedAt: null, creates: [], issues: [], sync: expect.objectContaining({ state: "error", reason: "unfetched", lastSuccessfulSync: null }) }]);
+  expect(first.syncs).toEqual([{ workspaceId: meta.id, backlog: "github", enabling: null, repository: null, syncing: true, syncedAt: null, creates: [], issues: [], sync: expect.objectContaining({ state: "error", reason: "unfetched", lastSuccessfulSync: null }) }]);
   // an answer or a start has nothing stored to check against: 424, nothing written
   const answer = await fetch(`${base}/api/backlog/306/answer`, { method: "POST", body: JSON.stringify({ workspaceId: meta.id, text: "A" }) });
   expect(answer.status).toBe(424);

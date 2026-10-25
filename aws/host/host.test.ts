@@ -461,7 +461,7 @@ ${clone}`);
     const put = (rel: string, daysOld: number) => {
       const f = join(home(), rel);
       mkdirSync(join(f, ".."), { recursive: true });
-      writeFileSync(f, "x");
+      writeFileSync(f, Buffer.alloc(1048576)); // 1 MiB each: the budget counts bytes
       const t = new Date(Date.now() - daysOld * 86400_000);
       utimesSync(f, t, t);
     };
@@ -483,7 +483,8 @@ ${clone}`);
     };
     // tar / age are fakes only here; later tests use the real ones
     afterAll(() => { for (const n of ["tar", "age"]) rmSync(join(dir, "bin", n), { force: true }); });
-    const archive = (env: Record<string, string> = {}) => run("archive.sh", [], { HOME: home(), RUNNING_IDS: RUNNING, ...env });
+    // the newest 1 MiB stays (the 3-day-old file); everything past it moves
+    const archive = (env: Record<string, string> = {}) => run("archive.sh", [], { HOME: home(), RUNNING_IDS: RUNNING, SB_RUNNER_KEEP_MB: "1", ...env });
     const list = () => (existsSync(join(sb(), "runner-archive.tsv")) ? readFileSync(join(sb(), "runner-archive.tsv"), "utf8") : "");
 
     test("old runner records go to history/runner and are listed, then removed", () => {
@@ -502,6 +503,52 @@ ${clone}`);
       expect(existsSync(join(home(), `.claude/projects/-w/${OLD}.jsonl`))).toBe(false);
       expect(existsSync(join(home(), `.codex/sessions/2026/09/01/rollout-2026-09-01T00-00-00-${CODEX}.jsonl`))).toBe(false);
       expect(readFileSync(join(sb(), "archive.status"), "utf8")).toMatch(/^ok /);
+    });
+
+    test("without SB_RUNNER_KEEP_MB the budget is a tenth of the root filesystem", () => {
+      setup();
+      const MID = join(home(), `.claude/projects/-w/${"5".repeat(8)}-5555-4555-8555-${"5".repeat(12)}.jsonl`);
+      put(MID.slice(home().length + 1), 10); // inside the 25 days: only the budget can move it
+      fake("df", `echo Filesystem 1048576-blocks Used Available Capacity Mounted; echo /dev/x $DF_MB 1 1 1% /`);
+      try {
+        // 40 GiB root: 4 GiB budget, the 10-day-old file stays
+        expect(archive({ SB_RUNNER_KEEP_MB: "", DF_MB: "40960" }).code).toBe(0);
+        expect(existsSync(MID)).toBe(true);
+        // 10 MiB root: 1 MiB budget, it moves
+        expect(archive({ SB_RUNNER_KEEP_MB: "", DF_MB: "10" }).code).toBe(0);
+        expect(existsSync(MID)).toBe(false);
+      } finally { rmSync(join(dir, "bin", "df"), { force: true }); }
+    });
+
+    test("a budget that cannot be worked out fails the run (exit 4) and keeps the records, the events still go", () => {
+      for (const keep of ["", "abc"]) {
+        setup();
+        // a release that has events-archive; prepare writes one task file and its manifest, commit is only logged
+        mkdirSync(join(home(), ".switchboard", "releases", "current", "packages", "core", "src"), { recursive: true });
+        writeFileSync(join(home(), ".switchboard", "releases", "current", "packages", "core", "src", "main.ts"), `if (cmd === "events-archive") {}`);
+        fake("bun", `echo "bun $*" >> "${log}"; [ "$1" = -e ] && { for i in $RUNNING_IDS; do echo "$i"; done; exit 0; }
+          case "$2 $3" in "export "*) echo pkg > "$3";;
+            "events-archive prepare") mkdir -p "$4"; echo a > "$4/task_a.5.jsonl.zst.age"
+              echo '[{"taskId":"task_a","file":"task_a.5.jsonl.zst.age","count":5,"maxSeq":5,"sha256":"x"}]' > "$4/manifest.json";; esac; exit 0`);
+        fake("df", "exit 1");
+        try {
+          const r = archive({ SB_RUNNER_KEEP_MB: keep });
+          expect(r.code).toBe(4);
+          expect(r.err).toContain("no usable runner budget");
+          expect(existsSync(join(home(), `.claude/projects/-w/${OLD}.jsonl`))).toBe(true);
+          const c = calls();
+          expect(c.some((l) => l.includes("events-archive prepare"))).toBe(true);
+          expect(c.some((l) => l.startsWith("aws s3api put-object") && l.includes("history/events/"))).toBe(true);
+          expect(c.some((l) => l.includes("events-archive commit"))).toBe(true);
+        } finally { rmSync(join(dir, "bin", "df"), { force: true }); }
+      }
+    });
+
+    test("a record older than 25 days moves even when it is inside the budget", () => {
+      setup();
+      expect(archive({ SB_RUNNER_KEEP_MB: "100" }).code).toBe(0);
+      expect(existsSync(join(home(), `.claude/projects/-w/${OLD}.jsonl`))).toBe(false);
+      expect(readdirSync(join(home(), ".claude/projects/-w")).length).toBe(3);
     });
 
     test("memory/, a running task's session and a recent file stay", () => {

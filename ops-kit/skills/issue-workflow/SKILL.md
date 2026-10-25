@@ -277,7 +277,7 @@ Status 遷移（Project の Status。設定するのは作業者 = このワー�
 手順そのものはスキルにある: 要望 → PBI は `request-to-backlog`、PBI → Task と Ready 化は `pbi-to-tasks`、Task → PR は `task-to-pr`、
 レビューは `cross-runner-review` → `review-triage-and-merge`、PBI 単位の一気通貫は `pbi-complete`。ここはコマンドの控え。
 
-**エージェント管理アプリの Task の中**（環境に `BACKLOG_URL` がある）では、Issue・Project の照会と編集は、アプリの保存値を使う `ops-kit backlog`（`--help`）と `ops-kit lint --fresh` で完結する: 作成・編集・コメント・判断待ちと回答（`--add-label needs-decision` とコメント、回答は `## 回答` のコメントと `--remove-label needs-decision`）・閉じる（`--state closed`）・sub-issue の付け替え（`edit --parent <PBI>` / `--no-parent`）・Project のフィールド（`set` / `triage`）・Milestone。照会のたびに GitHub へは行かず、編集はアプリに保存されてアプリが GitHub に送る（画面と同じ経路。認証に使える値は送らない）。GitHub 連携の無い workspace（アプリが `BACKLOG_WORKSPACE` を渡す。Issue と Project はアプリの中だけ）では、作成で番号が付き、編集はその場で確定する。GitHub の Issue・Project を直接触る操作（下の「`BACKLOG_URL` の無い環境だけ」のブロック）はこの Task では使わない。PR・レビュー・マージ判定は workspace によらず GitHub（リポジトリの forge）のまま。
+**エージェント管理アプリの Task の中**（環境に `BACKLOG_URL` がある）では、Issue・Project の照会と編集は、アプリの保存値を使う `ops-kit backlog`（`--help`）と `ops-kit lint --fresh` で完結する: 作成・編集・コメント・判断待ちと回答（`--add-label needs-decision` とコメント、回答は `## 回答` のコメントと `--remove-label needs-decision`）・閉じる（`--state closed`）・sub-issue の付け替え（`edit --parent <PBI>` / `--no-parent`）・Project のフィールド（`set` / `triage`）・Milestone。照会のたびに GitHub へは行かず、編集はアプリに保存されてアプリが GitHub に送る（画面と同じ経路。認証に使える値は送らない）。GitHub 連携の無い workspace（アプリが `BACKLOG_WORKSPACE` を渡す。Issue と Project はアプリの中だけ）では、作成で番号が付き、編集はその場で確定する。GitHub 同期を無効にした workspace も同じ（`gh issue` / `scripts/setup/*` を使わない）。GitHub の Issue・Project を直接触る操作（下の「`BACKLOG_URL` の無い環境だけ」のブロック）はこの Task では使わない。PR・レビュー・マージ判定は workspace によらず GitHub（リポジトリの forge）のまま。
 
 ```bash
 ops-kit backlog view <num> [--fresh]          # 本文・コメント・Project のフィールドと「最終取得 … 同期 …」

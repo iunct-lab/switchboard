@@ -1,5 +1,5 @@
 import type { AgentEvent, PermissionDecision, RunnerId } from "./events.ts";
-import type { ExecutionMode, Attachment, ModelOption, PermissionModeOption, RunnerLogin } from "./model.ts";
+import type { ExecutionMode, Attachment, ModelOption, PermissionModeOption, RunnerLogin, LoginKind } from "./model.ts";
 
 /** One MCP server as Claude Code's `mcpServers` holds it (stdio: command/args/env; http / sse: url/headers). */
 export interface McpServerConfig {
@@ -18,6 +18,8 @@ export interface StartOptions {
   scope: string[];
   prompt: string;
   model?: string;
+  /** Run on Amazon Bedrock in this region (#1730). Set only when the user chose it in the settings; the adapter turns it into its CLI's own variables. */
+  bedrock?: { region: string };
   /** Runner-native permission mode (one of RunnerAdapter.permissionModes). Unset = the adapter's default. */
   permissionMode?: string;
   /** Runner-native thinking effort (one of RunnerAdapter.efforts, #833). Unset = the CLI's own default. */
@@ -103,6 +105,8 @@ export interface RunnerDetection {
    * reads the credential files. Absent = the runner has no such login (DAK).
    */
   login?: RunnerLogin;
+  /** Which login it is while `login` is `ok` (#2528). */
+  loginKind?: LoginKind;
   /** What to type in a terminal tab to log in again. */
   loginHint?: string;
 }
@@ -119,6 +123,8 @@ export interface RunnerAdapter {
   readonly defaultPermissionMode?: string;
   /** Models this runner offers, in display order (#155). Omit / empty when the runner picks its model itself (DAK). */
   readonly models?: ModelOption[];
+  /** Models when run on Amazon Bedrock (#1730), in display order. Having this = the runner can be switched to Bedrock. */
+  readonly bedrockModels?: ModelOption[];
   /** Thinking efforts this runner offers, in display order (#833). Omit / empty when the runner decides itself (DAK). */
   readonly efforts?: ModelOption[];
   /**
@@ -139,6 +145,10 @@ export interface RunnerAdapter {
    * it prints to the screen, so nobody opens a terminal. Omit when the runner has no login of its own (DAK).
    */
   readonly loginArgs?: string[];
+  /** The same login with an Anthropic Console account instead of a Claude account (claude: `--console`); the screen offers it as a second button. */
+  readonly loginApiArgs?: string[];
+  /** The runner's own logout command, after its executable (#2528): the screen logs out first, then picks a login again. */
+  readonly logoutArgs?: string[];
   /** Hosts the login URL may be on: another URL the CLI prints first (an update notice) is not relayed. */
   readonly loginHosts?: string[];
 }

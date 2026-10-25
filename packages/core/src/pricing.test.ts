@@ -2,9 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createClaudeHistoryParser } from "@switchboard/adapter-claude";
+import { CLAUDE_BEDROCK_MODELS, createClaudeHistoryParser } from "@switchboard/adapter-claude";
 import type { AgentEvent } from "@switchboard/protocol";
-import { billedUsd, ledgerRowFor, loadPricing, priceUsage, resolveModel, usageSince } from "./pricing.ts";
+import { billedUsd, isBedrockModel, ledgerRowFor, loadPricing, priceUsage, resolveModel, usageSince } from "./pricing.ts";
 
 const { table, source } = loadPricing([join(import.meta.dir, "..", "config", "pricing.json")]);
 
@@ -65,6 +65,28 @@ describe("pricing (#14)", () => {
     expect(billedUsd(table, "claude", 1.23)).toBe(0);
     expect(billedUsd(table, "codex", 1.23)).toBe(0);
     expect(billedUsd(table, "dak", 1.23)).toBe(1.23);
+  });
+
+  test("billedUsd: a Bedrock model id is billed at the API price under a subscription runner (#1730)", () => {
+    expect(isBedrockModel("global.anthropic.claude-haiku-5-5")).toBe(true);
+    expect(isBedrockModel("anthropic.claude-haiku-5-5")).toBe(true);
+    expect(isBedrockModel("claude-haiku-5-5")).toBe(false);
+    expect(billedUsd(table, "claude", 1.23, "global.anthropic.claude-haiku-5-5")).toBe(1.23);
+    expect(billedUsd(table, "claude", 1.23, "claude-haiku-5-5")).toBe(0);
+    expect(billedUsd(table, "claude", 1.23, null)).toBe(0);
+  });
+
+  test("every Bedrock id of the claude adapter is priced (#1730)", () => {
+    const u = { inputTokens: 1000, outputTokens: 1000, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    for (const m of CLAUDE_BEDROCK_MODELS) expect(priceUsage(table, m.value, "claude", u)).toMatchObject({ priced: true });
+    expect(priceUsage(table, "global.anthropic.claude-haiku-5-5", "claude", u).model).toBe("claude-haiku-5-5");
+    expect(priceUsage(table, "global.anthropic.claude-haiku-4-5-20251001-v1:0", "claude", u).model).toBe("claude-haiku-4-5");
+    // a row or an alias the user wrote for the Bedrock id wins over the Anthropic row
+    const own = { ...table, models: { ...table.models, "global.anthropic.claude-haiku-5-5": { input: 9, output: 9, cacheRead: 0, cacheWrite: 0 } } };
+    expect(priceUsage(own, "global.anthropic.claude-haiku-5-5", "claude", u).model).toBe("global.anthropic.claude-haiku-5-5");
+    const aliased = { ...table, aliases: { ...table.aliases, "us.anthropic.claude-haiku-5-5": "claude-haiku-4-5" } };
+    expect(priceUsage(aliased, "us.anthropic.claude-haiku-5-5", "claude", u).model).toBe("claude-haiku-4-5");
+    expect(priceUsage(table, "us.anthropic.claude-haiku-5-5", "claude", u).costUsd).toBe(priceUsage(table, "claude-haiku-5-5", "claude", u).costUsd);
   });
 
   test("an invalid user file is skipped with the problem reported", () => {

@@ -30,7 +30,7 @@ export function workspaceErrorGuide(e: Backlog["errors"][number], projectVar: st
       lead: `${e.workspaceName} の Project の URL がリポジトリ変数 ${projectVar ?? "SWITCHBOARD_PROJECT_URL"} にありません。次のどちらかで始められます`,
       steps: [
         { text: "Project を用意する: 手順に従って Project を作り、変数に URL を設定してから「再読込」を押す", link: PROJECT_SETUP_DOC },
-        { text: "GitHub と連携しないで使う: Home の「Workspace を追加」で「GitHub と連携しない」に印を付けて自分のリポジトリを追加する（この workspace 自身を後から連携なしに切り替える機能はまだありません）" },
+        { text: "GitHub と連携しないで使う: Home の「Workspace を追加」で「GitHub と連携しない」に印を付けて自分のリポジトリを追加するか、設定の「GitHub 同期」でこの workspace の同期を無効にする" },
       ],
     };
   return { lead: `${e.workspaceName} を読めませんでした: ${e.message}`, steps: [] };
@@ -43,6 +43,20 @@ export function workspaceErrorGuide(e: Backlog["errors"][number], projectVar: st
 export function backlogHeading(fetchedAt: number | null, busy: boolean, github: boolean | null, fmt: (ms: number) => string = jstTime): string {
   if (fetchedAt === null) return busy ? "読み込み中…" : "";
   return `${github === false ? "Switchboard に保存（GitHub と連携しない）" : `${fmt(fetchedAt)} に GitHub から取得`}${busy ? " · 読み込み中…" : ""}`;
+}
+
+/**
+ * A workspace's GitHub sync (#2266), for the settings and the backlog's sync line: off (with what waits to go when it is
+ * on), being turned on (how many of the Issues made here GitHub has made), or on — then the line of `syncLine`.
+ */
+export function githubSyncText(s: Pick<Backlog["syncs"][number], "backlog" | "enabling" | "sync">, fmt: (ms: number) => string = jstDateTime): { state: BacklogSyncState; label: string; parts: string[] } {
+  // a conflict or a refusal on the way is said with the progress: the turning on waits for it
+  if (s.enabling) {
+    const held = [s.sync.conflicts.length > 0 ? `競合 ${s.sync.conflicts.length} 件` : "", s.sync.reason ? REASON_LABEL[s.sync.reason] : ""].filter(Boolean);
+    return { state: s.sync.state === "conflict" || s.sync.state === "error" ? s.sync.state : "pending", label: "GitHub に移しています", parts: [`${s.enabling.done} / ${s.enabling.total}`, ...held] };
+  }
+  if (s.backlog === "switchboard") return { state: "synced", label: "GitHub 同期: 無効", parts: s.sync.pendingCount > 0 ? [`未送信 ${s.sync.pendingCount} 件（有効にすると送ります）`] : [] };
+  return syncLine(s.sync, fmt);
 }
 
 /** One line's parts for a row or workspace: the state's word, when it was last read, what it waits for and why. */

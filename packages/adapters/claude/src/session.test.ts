@@ -58,3 +58,36 @@ describe("preamble", () => {
     }
   });
 });
+
+describe("bedrock (#1730)", () => {
+  test("the child gets CLAUDE_CODE_USE_BEDROCK and AWS_REGION only when StartOptions.bedrock is set, even if the parent env has CLAUDE_CODE_USE_BEDROCK", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sb-claude-bedrock-"));
+    const bin = join(dir, "claude");
+    // writes the two variables (empty when unset) and exits
+    writeFileSync(bin, `#!/bin/sh\nhead -n 2 >/dev/null\nprintf '%s|%s|%s' "$CLAUDE_CODE_USE_BEDROCK" "$AWS_REGION" "\${AWS_SECRET_ACCESS_KEY:-none}" > "$OUT"\nexit 0\n`);
+    chmodSync(bin, 0o755);
+    const out = join(dir, "env.txt");
+    const before = { use: process.env.CLAUDE_CODE_USE_BEDROCK, region: process.env.AWS_REGION, out: process.env.OUT, key: process.env.AWS_SECRET_ACCESS_KEY };
+    const run = async (bedrock?: { region: string }) => {
+      const s = createClaudeAdapter({ bin }).start({ cwd: dir, scope: [dir], prompt: "p", bedrock }, () => undefined);
+      await s.exited;
+      const v = readFileSync(out, "utf8");
+      rmSync(out);
+      return v;
+    };
+    try {
+      process.env.OUT = out;
+      process.env.CLAUDE_CODE_USE_BEDROCK = "1"; // the daemon's own env must not decide
+      delete process.env.AWS_REGION;
+      delete process.env.AWS_SECRET_ACCESS_KEY;
+      expect(await run()).toBe("||none");
+      expect(await run({ region: "ap-northeast-1" })).toBe("1|ap-northeast-1|none");
+    } finally {
+      for (const [k, v] of [["CLAUDE_CODE_USE_BEDROCK", before.use], ["AWS_REGION", before.region], ["OUT", before.out], ["AWS_SECRET_ACCESS_KEY", before.key]] as const) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

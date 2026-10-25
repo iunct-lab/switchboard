@@ -34,12 +34,13 @@ const marked = (body: string, id: string) => `${body}\n\n${marker(id)}`;
 /**
  * The run stops and the operation waits as it was (not a try): `limit` = GitHub said to wait until `until` (its answer
  * in `response`, for the host's wait); `offline` = GitHub was not reached (the repository waits a minute); `auth` = the
- * login was refused (401) — asked again by the next send, not by a time. A permission refused on one thing is not this:
+ * login was refused (401) — asked again by the next send, not by a time; `off` = the workspace's GitHub sync was turned
+ * off (#2266) before the write went out. A permission refused on one thing is not this:
  * that operation is failed.
  */
 export class Limit extends Error {
-  constructor(readonly until: number, readonly kind: "limit" | "offline" | "auth" = "limit", readonly response?: GithubResponse) {
-    super(kind === "auth" ? "GitHub のログインが通らないため送りません（次の送信で確かめ直します）" : `GitHub の利用制限か接続できないため ${new Date(until).toISOString()} まで送りません`);
+  constructor(readonly until: number, readonly kind: "limit" | "offline" | "auth" | "off" = "limit", readonly response?: GithubResponse) {
+    super(kind === "auth" ? "GitHub のログインが通らないため送りません（次の送信で確かめ直します）" : kind === "off" ? "GitHub 同期を無効にしたので送りません" : `GitHub の利用制限か接続できないため ${new Date(until).toISOString()} まで送りません`);
   }
 }
 
@@ -379,6 +380,8 @@ class Sender {
     try {
       return op.kind === "set" ? await this.set(op) : op.kind === "comment" ? await this.comment(op, posting) : await this.create(op, posting);
     } catch (e) {
+      // the sync turned off before a write went out: the operation waits as it was
+      if (e instanceof Limit && e.kind === "off") throw e;
       const at = this.now();
       const message = String((e as Error)?.message ?? e).slice(0, 300);
       // whether GitHub carried out a post is not known (its answer lost or unreadable, or the look for it failed):
@@ -413,10 +416,14 @@ export const forgeKind = (op: Pick<BacklogOperation, "kind" | "field" | "targetK
 
 /**
  * Sends what is waiting for one repository (`source`, gh run in `cwd`), oldest first; resolves to how many were done.
- * Throws Limit when GitHub said to wait (the rest waits too).
+ * Throws Limit when GitHub said to wait (the rest waits too). `on` is asked before each operation and each write:
+ * false (the workspace's GitHub sync turned off meanwhile, #2266) stops the run there (Limit `off`), the rest waiting
+ * as it is. `waits`: an operation not to send yet (it holds the ones of its Issue after it).
  */
-export async function sendGithubOperations(gh: GhRunner, db: Db, cwd: string, source: BacklogSource, now = () => Date.now(), onWrite?: () => void): Promise<number> {
-  const sender = new Sender(gh, db, cwd, source, now);
+export async function sendGithubOperations(gh: GhRunner, db: Db, cwd: string, source: BacklogSource, now = () => Date.now(), onWrite?: () => void, on = () => true, waits = (_op: BacklogOperation) => false): Promise<number> {
+  // a write is not made once the sync is off, inside an operation too (a set reads GitHub before it writes)
+  const writes = (args: string[]) => args.some((a, i) => (args[i - 1] === "-X" && a !== "GET") || /^query=\s*mutation/.test(a));
+  const sender = new Sender((args, c) => (writes(args) && !on() ? Promise.reject(new Limit(now(), "off")) : gh(args, c)), db, cwd, source, now);
   if (onWrite) sender.onWrite = onWrite;
   const send = (o: ForgeOperation<BacklogOperation>) => sender.send(o.payload);
   // the services an operation can be sent to: a second service adds its entry here (docs/design/forge-integration.md)
@@ -424,6 +431,7 @@ export async function sendGithubOperations(gh: GhRunner, db: Db, cwd: string, so
   const held = new Set<string>();
   let done = 0;
   for (const listed of db.listPendingBacklogOperations(source)) {
+    if (!on()) break;
     // the operation as it is now: one done before it may have given its Issue an id
     let op = db.getBacklogOperation(listed.id)!;
     // done meanwhile: an import found GitHub at its value, or the user kept GitHub's value on its conflict (#887)
@@ -433,7 +441,7 @@ export async function sendGithubOperations(gh: GhRunner, db: Db, cwd: string, so
       db.setBacklogOperationResult(op.id, { status: op.kind === "set" || op.remoteId ? "pending" : "unknown" }, now());
       op = db.getBacklogOperation(op.id)!;
     }
-    if (held.has(op.issue) || op.status === "conflict" || op.status === "failed" || (op.retryAt ?? 0) > now()) {
+    if (held.has(op.issue) || op.status === "conflict" || op.status === "failed" || (op.retryAt ?? 0) > now() || waits(op)) {
       held.add(op.issue);
       continue;
     }

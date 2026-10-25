@@ -378,6 +378,26 @@ describe("aws/template.yaml memory alarms (#540)", () => {
     expect(resource("Instance")).not.toMatch(/cloudwatch|CWAgent|alarm/i);
   });
 
+  test("host bedrock (#1730): InstanceRole and Boundary invoke any model but have no other bedrock action", () => {
+    const resources = [
+      "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*",
+      "arn:aws:bedrock:*::foundation-model/*",
+      "arn:aws:bedrock:::foundation-model/*",
+    ];
+    for (const name of ["InstanceRole", "Boundary"]) {
+      const body = resource(name);
+      expect([...body.matchAll(/(?<!aws:)bedrock:[A-Za-z*]+/g)].map((m) => m[0])).toEqual(["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]);
+      // the statement's whole Resource list, to its last line
+      const list = body.match(/Action: \[bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream\]\n( +)Resource:\n((?:\1  - .*\n)+)/)?.[2];
+      expect(list).toBeDefined();
+      const lines = list!.trim().split("\n").map((l) => l.replace(/^\s*- (!Sub )?'?|'?$/g, ""));
+      expect(lines).toEqual(resources);
+      expect(body).not.toMatch(/(?<!aws:)bedrock:(CreateApiKey|\*|Create|Put|Delete|List)/);
+    }
+    // no key of any kind is made by this stack for it
+    expect(text).not.toMatch(/iam:CreateAccessKey|bedrock:CreateApiKey|AWS::IAM::AccessKey|AWS::IAM::User\b/);
+  });
+
   test("cloudwatch permissions: PutMetricData for CWAgent only (host and boundary), and the deploy role names this stack's alarms", () => {
     const put = "Action: cloudwatch:PutMetricData";
     for (const name of ["InstanceRole", "Boundary"]) {
@@ -397,7 +417,7 @@ describe("aws/template.yaml memory alarms (#540)", () => {
     expect(deploy).not.toMatch(/cloudwatch:\*|sns:\*|PutMetricData/);
     // nothing else in the boundary changed: its statements are the ones before plus Countries (#1639), AgentMetrics and HostLogs (#1490)
     const sids = resource("Boundary").split("- Sid: ").slice(1).map((x) => x.split("\n")[0]);
-    expect(sids).toEqual(["Parameters", "RegisterCode", "Buckets", "Wake", "ThisInstance", "RootReplacement", "Describe", "Stack", "OwnRoles", "Countries", "AgentMetrics", "OwnLogs", "HostLogs", "Offload", "HostAssumeRoles", "ManagedKeysThroughServices"]);
+    expect(sids).toEqual(["Parameters", "RegisterCode", "Buckets", "Wake", "ThisInstance", "RootReplacement", "Describe", "Stack", "Bedrock", "OwnRoles", "Countries", "AgentMetrics", "OwnLogs", "HostLogs", "Offload", "HostAssumeRoles", "ManagedKeysThroughServices"]);
   });
 });
 

@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import type { AutoStartKind, JudgeSettings, LlmRoutingSettings, Preset, RunnerId, RunnerInfo, Settings as SettingsData, SettingsPrice } from "@switchboard/protocol";
+import type { AutoStartKind, Backlog, JudgeSettings, LlmRoutingSettings, Preset, RunnerId, RunnerInfo, Settings as SettingsData, SettingsPrice, Workspace } from "@switchboard/protocol";
 import { api, type Health, type SettingsResponse } from "../api.ts";
 import { ModelSelect } from "./ModelSelect.tsx";
+import { ClaudeLoginRow } from "./ClaudeLoginRow.tsx";
 import { ReleasePanel } from "./ReleasePanel.tsx";
 import { PolicySettings } from "./PolicySettings.tsx";
 import { EffortSelect } from "./EffortSelect.tsx";
@@ -9,6 +10,7 @@ import { notifyPermission } from "../notify.ts";
 import { EMPTY_PRICE_FORM, parsePriceForm, priceFormOf, type PriceForm } from "../priceForm.ts";
 import { countriesUrl } from "../login.ts";
 import { presetRow } from "../presets.ts";
+import { githubSyncText } from "../backlogSync.ts";
 
 const RUNNERS: RunnerId[] = ["claude", "codex", "dak"];
 /** The kinds of Task that start by themselves (#1337), in the order of the 既定 card: the feedback modes, then the backlog stages. */
@@ -48,6 +50,8 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
   const save = async (patch: Parameters<typeof api.updateSettings>[0]) => {
     await trySave(patch);
   };
+  // after a login or logout: the runners' status commands are asked again now (#2528)
+  const refresh = () => api.health({ recheck: true }).then((h) => h.runners && props.onRunners(h.runners)).catch(() => undefined);
   // the header's 「新しい版 →」: the section exists only once the settings have loaded
   const loaded = s !== null;
   useEffect(() => {
@@ -188,10 +192,13 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
         <h5>使用上限での自動再開</h5>
         <div className="muted">ランナーが 5 時間 / 7 日の使用上限で止まったとき、枠が戻った時点で同じセッションに「続きを」と送ります（Task ごとに Brief から取り消せます）。</div>
         {runners.filter((r) => r.id !== "dak").map((r) => (
-          <label key={r.id} className="hint toggle">
-            <input type="checkbox" checked={!!r.autoResume} disabled={saving} onChange={(e) => void save({ autoResume: { [r.id]: e.target.checked } })} />
-            {r.id}: 使用上限で止まったら自動再開
-          </label>
+          <div key={r.id} className="row" style={{ alignItems: "center", gap: 6 }}>
+            <label className="hint toggle">
+              <input type="checkbox" checked={!!r.autoResume} disabled={saving} onChange={(e) => void save({ autoResume: { [r.id]: e.target.checked } })} />
+              {r.id}: 使用上限で止まったら自動再開
+            </label>
+            <ClaudeLoginRow runner={r} region={s.bedrock?.[r.id]?.region} onBedrock={(next) => void save({ bedrock: { [r.id]: next } })} onChanged={refresh} onError={props.onError} />
+          </div>
         ))}
       </section>
 
@@ -206,7 +213,7 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
 
       <section className="card">
         <h5>LLM 提案</h5>
-        <div className="muted">Task を作るときに「どのランナー向きか」を 1 ターンだけ聞き、ルール表の推奨の横に並べます（提案のみ）。Workspace を「自動」にしたときに、どの Workspace かを選ぶのも同じランナー・モデルです。そのランナーの定額枠を使います。</div>
+        <div className="muted">Task を作るときに「どのランナー向きか」を 1 ターンだけ聞き、ルール表の推奨の横に並べます（提案のみ）。Workspace を「自動」にしたときに、どの Workspace かを選ぶのも同じランナー・モデルです。そのランナーの使用枠を使います。</div>
         <div className="row" style={{ alignItems: "center", gap: 6 }}>
           <label className="hint toggle">
             <input type="checkbox" checked={llm.enabled} disabled={saving} onChange={(e) => void save({ routing: { llm: { enabled: e.target.checked } } })} />
@@ -229,7 +236,7 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
 
       <section className="card">
         <h5>ターン終了時の自動判定</h5>
-        <div className="muted">終わったターンの最後の返答を 1 ターンで読み、完了 / 要対応を付けます。ターンごとにそのランナーの定額枠を 1 回使います。動かないときは Claude Haiku で判定します。</div>
+        <div className="muted">終わったターンの最後の返答を 1 ターンで読み、完了 / 要対応を付けます。ターンごとにそのランナーの使用枠を 1 回使います。動かないときは Claude Haiku で判定します。</div>
         <div className="row" style={{ alignItems: "center", gap: 6 }}>
           <label className="hint toggle">
             <input type="checkbox" checked={judge.enabled} disabled={saving} onChange={(e) => void save({ judge: { enabled: e.target.checked } })} />
@@ -250,7 +257,7 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
 
       <section className="card">
         <h5>ルーブリック判定</h5>
-        <div className="muted">done で終わったターンのあと、会話の要約とルール指標をルーブリック（5 観点、1〜5 点）で採点します。ランナーとモデルは上の自動判定と同じで、ターンごとにその定額枠を 1 回使います（上の自動判定を切っていても、これが入っていれば動きます）。ルーブリックは SWITCHBOARD_HOME/evals/rubric.json で上書きできます（デーモンの起動時に 1 回読むので、直したら再起動）。</div>
+        <div className="muted">done で終わったターンのあと、会話の要約とルール指標をルーブリック（5 観点、1〜5 点）で採点します。ランナーとモデルは上の自動判定と同じで、ターンごとにその使用枠を 1 回使います（上の自動判定を切っていても、これが入っていれば動きます）。ルーブリックは SWITCHBOARD_HOME/evals/rubric.json で上書きできます（デーモンの起動時に 1 回読むので、直したら再起動）。</div>
         <label className="hint toggle">
           <input type="checkbox" checked={s.evals.judge.enabled} disabled={saving} onChange={(e) => void save({ evals: { judge: { enabled: e.target.checked } } })} />
           ターンの終わりにルーブリックで採点する（ランナー・モデルは自動判定と同じ）
@@ -290,6 +297,11 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
         <SweepSlots onError={props.onError} />
       </section>
 
+      <section className="card">
+        <h5>GitHub 同期</h5>
+        <GithubSync />
+      </section>
+
       <section className="card presets">
         <h5>定型の指示</h5>
         <div className="muted">新規依頼と返信で選べる指示です。本文の {"{{target}}"} に選んだ Issue / PR が入ります。承認モードは含みません</div>
@@ -304,6 +316,74 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
         </section>
       )}
     </main>
+  );
+}
+
+/**
+ * Each workspace's GitHub sync (#2266): its state and the button that turns it off or on — only by this press. One kept
+ * here only names the Project it is to read (its stored variable to begin with). A press that failed says why and can be pressed again (it goes on from
+ * where it stopped); while Issues are being made on GitHub the state is read again every few seconds.
+ */
+export function GithubSync() {
+  const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
+  const [syncs, setSyncs] = useState<Backlog["syncs"]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [vars, setVars] = useState<Record<string, string>>({});
+  const load = () =>
+    Promise.all([api.workspaces(), api.backlog()])
+      .then(([w, b]) => {
+        setWorkspaces(w);
+        setSyncs(b.syncs);
+      })
+      .catch(() => undefined);
+  useEffect(() => {
+    void load();
+  }, []);
+  const moving = syncs.some((x) => x.enabling);
+  useEffect(() => {
+    if (!moving) return;
+    const t = setInterval(() => void load(), 3000);
+    return () => clearInterval(t);
+  }, [moving]);
+  const press = async (w: Workspace, to: "github" | "switchboard", local: boolean) => {
+    setBusy(w.id);
+    setErrors((e) => ({ ...e, [w.id]: "" }));
+    try {
+      await api.setWorkspaceBacklog(w.id, to, to === "github" && local ? (vars[w.id] ?? w.projectVar ?? "").trim() || null : undefined);
+    } catch (e) {
+      setErrors((x) => ({ ...x, [w.id]: String((e as Error).message ?? e) }));
+    } finally {
+      setBusy(null);
+      void load();
+    }
+  };
+  if (!workspaces) return null;
+  return (
+    <>
+      {workspaces.map((w) => {
+        const s = syncs.find((x) => x.workspaceId === w.id);
+        if (!s) return null;
+        const t = githubSyncText(s);
+        // kept here only (#2265): its stored backlog is under its own id, and it reads no Project yet
+        const local = s.backlog === "switchboard" && s.repository === w.id;
+        const to = s.enabling || s.backlog === "switchboard" ? "github" : "switchboard";
+        return (
+          <div key={w.id} className="row github-sync" data-workspace={w.id} style={{ alignItems: "center", gap: 6 }}>
+            <span>{w.name}</span>
+            <span className="hint" data-sync={t.state}>
+              {[t.label, ...t.parts].join(" · ")}
+            </span>
+            {local && <input aria-label={`${w.name} の Project の URL を持つリポジトリ変数`} placeholder="SWITCHBOARD_PROJECT_URL" value={vars[w.id] ?? w.projectVar ?? ""} onChange={(e) => setVars((v) => ({ ...v, [w.id]: e.target.value }))} />}
+            <button className={to === "github" ? "pri" : "ghost"} disabled={busy !== null} onClick={() => void press(w, to, local)}>
+              {s.enabling ? "続ける" : to === "github" ? "有効にする" : "無効にする"}
+            </button>
+            {errors[w.id] && <span className="warn">{errors[w.id]}</span>}
+          </div>
+        );
+      })}
+      <div className="hint">無効の間の編集は、有効にしたときに GitHub へ送ります。</div>
+    </>
   );
 }
 

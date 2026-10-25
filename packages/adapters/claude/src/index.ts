@@ -2,7 +2,7 @@ import { CloudSession, cloudChildEnv } from "./cloud.ts";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent, ModelOption, PermissionDecision, PermissionModeOption, RunnerAdapter, RunnerDetection, RunnerLogin, RunnerSession, StartOptions } from "@switchboard/protocol";
+import type { AgentEvent, ModelOption, PermissionDecision, PermissionModeOption, RunnerAdapter, RunnerDetection, LoginKind, RunnerLogin, RunnerSession, StartOptions } from "@switchboard/protocol";
 import { createClaudeParser, initializeLine, interruptLine, permissionResponseLine, setPermissionModeLine, userMessageLine } from "./parse.ts";
 
 export * from "./parse.ts";
@@ -36,6 +36,15 @@ export const CLAUDE_MODELS: ModelOption[] = [
   { value: "claude-haiku-5-5", label: "Haiku 5.5" },
   { value: "claude-haiku-4-5", label: "Haiku 4.5" },
 ];
+
+/**
+ * The same models by their Amazon Bedrock ids (#1730): the global inference profile of each (`global.` + the id the
+ * CLI's own Bedrock table has as `anthropic.<id>`). Offered only while the runner is switched to Bedrock; which of
+ * them the account can call is up to IAM.
+ */
+// Haiku 4.5 is the one id Bedrock spells with a version (the CLI's own table has `anthropic.claude-haiku-4-5-20251001-v1:0`).
+const BEDROCK_SPELLING: Record<string, string> = { "claude-haiku-4-5": "claude-haiku-4-5-20251001-v1:0" };
+export const CLAUDE_BEDROCK_MODELS: ModelOption[] = CLAUDE_MODELS.map((m) => ({ value: `global.anthropic.${BEDROCK_SPELLING[m.value] ?? m.value}`, label: m.label }));
 
 /** Thinking efforts offered in the UI (#833): the values `claude --effort` takes. */
 export const CLAUDE_EFFORTS: ModelOption[] = ["low", "medium", "high", "xhigh", "max"].map((value) => ({ value, label: value }));
@@ -73,6 +82,15 @@ export function childEnv(base: NodeJS.ProcessEnv = process.env, extra: Record<st
   return { ...env, ...extra };
 }
 
+/**
+ * What makes the child run on Amazon Bedrock (#1730): only when the user chose it (`opts.bedrock`). Without it nothing
+ * is added, and `childEnv` has already dropped the parent's `CLAUDE_CODE_USE_BEDROCK`, so a lapsed Claude login never
+ * turns into Bedrock by itself. No AWS key is passed or read: the CLI takes credentials from the usual AWS places.
+ */
+export function bedrockEnv(opts: Pick<StartOptions, "bedrock">): Record<string, string> {
+  return opts.bedrock ? { CLAUDE_CODE_USE_BEDROCK: "1", AWS_REGION: opts.bedrock.region } : {};
+}
+
 export function buildArgs(opts: StartOptions, extra: string[] = []): string[] {
   const args = [
     "-p",
@@ -104,28 +122,44 @@ export function buildArgs(opts: StartOptions, extra: string[] = []): string[] {
 export const CLAUDE_LOGIN_HINT = "claude auth login";
 
 /**
- * `claude auth status` (2.1.281): exit 0 = logged in, 1 = not. Its stdout names the account, so it is discarded unread;
- * the credential files are never looked at (#180). No answer within `timeoutMs`, or a CLI without the subcommand → unknown.
+ * `claude auth status` (2.1.281): exit 0 = logged in, 1 = not. Of its stdout only `authMethod` is read (`claude.ai` =
+ * a Claude account, `api_key` = an Anthropic Console account, #2528); the account, email and organization it also
+ * names are never looked at, and the credential files neither (#180). No answer within `timeoutMs`, or a CLI without
+ * the subcommand → unknown.
  */
-export async function loginStatus(exe: string, timeoutMs = 10_000): Promise<RunnerLogin> {
+export async function loginStatus(exe: string, timeoutMs = 10_000): Promise<{ login: RunnerLogin; kind?: LoginKind }> {
   try {
-    const proc = Bun.spawn([exe, "auth", "status"], { stdin: "ignore", stdout: "ignore", stderr: "pipe", env: childEnv() });
-    // stderr is collected as it arrives and awaited only briefly after the exit: a child the command left behind can
-    // hold the pipe open, and what came before must still count.
+    const proc = Bun.spawn([exe, "auth", "status"], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: childEnv() });
+    // Both pipes are collected as they arrive and awaited only briefly after the exit: a child the command left behind
+    // can hold a pipe open, and what came before must still count. stdout is capped.
+    let stdout = "";
     let stderr = "";
-    const decoder = new TextDecoder();
-    const drained = (async () => {
-      for await (const chunk of proc.stderr) stderr += decoder.decode(chunk, { stream: true });
-    })().catch(() => undefined);
+    const drain = async (stream: ReadableStream<Uint8Array>, add: (s: string) => void) => {
+      const decoder = new TextDecoder(); // one per pipe: a character cut at the end of one pipe's chunk must not prefix the other's
+      for await (const chunk of stream) add(decoder.decode(chunk, { stream: true }));
+    };
+    const drained = Promise.all([
+      drain(proc.stdout, (s) => (stdout = (stdout + s).slice(0, 64 * 1024))),
+      drain(proc.stderr, (s) => (stderr += s)),
+    ]).catch(() => undefined);
     const timer = setTimeout(() => proc.kill("SIGKILL"), timeoutMs);
     const code = await proc.exited;
     clearTimeout(timer);
-    if (proc.signalCode) return "unknown";
-    if (code === 0) return "ok";
+    if (proc.signalCode) return { login: "unknown" };
     await Promise.race([drained, Bun.sleep(500)]);
-    return /unknown (command|option)|unrecognized/i.test(stderr) ? "unknown" : "expired";
+    if (code === 0) return { login: "ok", kind: loginKindOf(stdout) };
+    return { login: /unknown (command|option)|unrecognized/i.test(stderr) ? "unknown" : "expired" };
   } catch {
-    return "unknown";
+    return { login: "unknown" };
+  }
+}
+
+function loginKindOf(stdout: string): LoginKind | undefined {
+  try {
+    const method = (JSON.parse(stdout) as { authMethod?: unknown } | null)?.authMethod;
+    return method === "claude.ai" ? "claude.ai" : method === "api_key" ? "console" : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -152,8 +186,11 @@ export function createClaudeAdapter(options: ClaudeAdapterOptions = {}): RunnerA
     permissionModes: CLAUDE_PERMISSION_MODES,
     defaultPermissionMode: CLAUDE_DEFAULT_PERMISSION_MODE,
     models: CLAUDE_MODELS,
+    bedrockModels: CLAUDE_BEDROCK_MODELS,
     efforts: CLAUDE_EFFORTS,
     loginArgs: ["auth", "login"],
+    loginApiArgs: ["auth", "login", "--console"],
+    logoutArgs: ["auth", "logout"],
     loginHosts: ["claude.ai", "claude.com", "console.anthropic.com", "platform.claude.com"],
     cliDefaultModel: () => cliDefaultModelFromSettings(options.claudeHome),
     hasSession: (id) => claudeSessionExists(id, options.claudeHome),
@@ -166,7 +203,8 @@ export function createClaudeAdapter(options: ClaudeAdapterOptions = {}): RunnerA
         await proc.exited;
         const version = text.match(/\d+\.\d+\.\d+/)?.[0] ?? text;
         if (proc.exitCode !== 0) return { available: false, version, path: which };
-        return { available: true, version, path: which, login: await loginStatus(which), loginHint: CLAUDE_LOGIN_HINT };
+        const { login, kind } = await loginStatus(which);
+        return { available: true, version, path: which, login, ...(kind ? { loginKind: kind } : {}), loginHint: CLAUDE_LOGIN_HINT };
       } catch (e) {
         return { available: false, note: String(e) };
       }
@@ -200,7 +238,7 @@ class ClaudeSession implements RunnerSession {
     const args = buildArgs(opts, extraArgs);
     this.proc = Bun.spawn([bin, ...args], {
       cwd: opts.cwd,
-      env: childEnv(process.env, opts.env),
+      env: childEnv(process.env, { ...opts.env, ...bedrockEnv(opts) }),
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
