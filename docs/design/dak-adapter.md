@@ -2,6 +2,14 @@
 
 Issue #19, proposal §3 (runner adapters) and §6 Phase 2. Decentralized-Agent-Kit's agent is a Google ADK app in a container (`agent:8000`, `adk web --a2a`). Switchboard does not run it, bundle it or speak A2A; it is an ADK REST client. Recorded fixtures (outside Git; record your own outside Git with the `runner-adapter-recording` skill; `bun scripts/fixtures.ts fetch` works only in a clone with the private history): `packages/adapters/dak/fixtures/*.sse` (DAK @ e966c05, google-adk 2.x, local llama.cpp model); a deterministic stand-in for tests: `fixtures/fake-adk.ts`.
 
+## Enabling
+
+DAK is off by default. The daemon registers the adapter only when `SWITCHBOARD_DAK_URL` is set to a non-empty value (for example `http://127.0.0.1:8000`, where `docker compose up` in the Decentralized-Agent-Kit repository serves its agent). Without it DAK is not a runner: it is absent from `/api/health` and `/api/settings` `runners`, from the startup log, and from the runner choices on Home, in Settings and in schedules (a runner already saved there, such as an existing schedule's, stays selectable for that value), and Home offers no shadow toggle (Settings keeps its toggle only while a saved shadow default of `dak` exists, so it can be switched off).
+
+With it set, the adapter detects the agent through `/list-apps` and everything below applies as written. An unreachable URL is reported as `unavailable` and DAK stays listed but greyed out.
+
+Past DAK Tasks and shadow Tasks stay readable with DAK off (`dak` stays a `RunnerId`). A saved shadow default of `dak` is kept; while DAK is off the daemon notes that it is not detected and creates no shadow.
+
 ## Wire
 
 ```

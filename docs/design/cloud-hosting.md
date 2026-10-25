@@ -359,7 +359,7 @@ DB のマイグレーションは追加だけにする（列を消さない）�
 
 ## 7. DAK との関係
 
-DAK は任意の接続先。DAK アダプタを使う場合は `SWITCHBOARD_DAK_URL` を自分の ADK REST の接続先にする。Switchboard のホスト配備に DAK の開発ロールは要らない。
+DAK は任意の接続先。`SWITCHBOARD_DAK_URL` が未設定なら DAK は登録されない（ランナーの選択肢にも出ない）。DAK アダプタを使う場合は `SWITCHBOARD_DAK_URL` を自分の ADK REST の接続先にする。Switchboard のホスト配備に DAK の開発ロールは要らない。
 
 ## 8. 配備の確認
 

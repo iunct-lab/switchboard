@@ -18,7 +18,7 @@ test("main.ts starts off loopback and prints its runners (it reads its own healt
     const deadline = Date.now() + 20_000;
     // one read in flight at a time: a read left behind by the 500 ms tick still gets its chunk, so no output is lost (#387)
     let pending = reader.read();
-    while (!/runner dak/.test(out) && Date.now() < deadline) {
+    while (!/runner codex/.test(out) && Date.now() < deadline) {
       const r = await Promise.race([pending, Bun.sleep(500).then(() => null)]);
       if (!r) continue;
       if (r.done) break;
@@ -26,7 +26,7 @@ test("main.ts starts off loopback and prints its runners (it reads its own healt
       pending = reader.read();
     }
     expect(out).toContain("switchboard core  http://0.0.0.0:");
-    expect(out).toMatch(/runner (claude|codex|dak)/);
+    expect(out).toMatch(/runner (claude|codex)/);
     expect(p.exitCode).toBeNull(); // still running
   } finally {
     p.kill();
@@ -73,7 +73,7 @@ test("SIGTERM takes the runners' children with the daemon", async () => {
     const reader = p.stdout.getReader();
     const deadline = Date.now() + 20_000;
     let pending = reader.read();
-    while (!/runner dak/.test(out) && Date.now() < deadline) {
+    while (!/runner codex/.test(out) && Date.now() < deadline) {
       const r = await Promise.race([pending, Bun.sleep(500).then(() => null)]);
       if (!r) continue;
       if (r.done) break;
@@ -101,4 +101,49 @@ test("SIGTERM takes the runners' children with the daemon", async () => {
     await p.exited;
     rmSync(home, { recursive: true, force: true });
   }
+}, 40_000);
+
+// #2558: DAK is opt-in. The URL that points at it is also the switch that registers it.
+async function bootAndRead(extraEnv: Record<string, string>): Promise<{ out: string; runners: string[] }> {
+  const home = mkdtempSync(join(tmpdir(), "switchboard-test-main-"));
+  const env: Record<string, string | undefined> = { ...process.env, SWITCHBOARD_HOME: home, SWITCHBOARD_HOST: "127.0.0.1", SWITCHBOARD_PORT: "0", SWITCHBOARD_CANDIDATE: "1", SWITCHBOARD_HISTORY_POLL_MS: "0", SWITCHBOARD_CLAUDE_PROJECTS: join(home, "none"), SWITCHBOARD_SUPERVISED: "" };
+  delete env.SWITCHBOARD_DAK_URL;
+  const p = Bun.spawn(["bun", join(import.meta.dir, "main.ts")], { env: { ...env, ...extraEnv }, stdout: "pipe", stderr: "pipe" });
+  try {
+    let out = "";
+    const reader = p.stdout.getReader();
+    const deadline = Date.now() + 20_000;
+    let pending = reader.read();
+    let seenCodexAt = 0;
+    // the banner lists the runners in order (claude, codex, dak); give a dak line a moment to follow the codex one
+    while ((!seenCodexAt || Date.now() - seenCodexAt < 1500) && Date.now() < deadline) {
+      const r = await Promise.race([pending, Bun.sleep(300).then(() => null)]);
+      if (!r) continue;
+      if (r.done) break;
+      out += new TextDecoder().decode(r.value);
+      pending = reader.read();
+      if (!seenCodexAt && /runner codex/.test(out)) seenCodexAt = Date.now();
+    }
+    const port = /switchboard core  http:\/\/127\.0\.0\.1:(\d+)/.exec(out)?.[1];
+    expect(port).toBeDefined();
+    const health = (await (await fetch(`http://127.0.0.1:${port}/api/health`)).json()) as { runners: { id: string }[] };
+    return { out, runners: health.runners.map((r) => r.id) };
+  } finally {
+    p.kill();
+    await p.exited;
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+test("main.ts lists no DAK runner unless SWITCHBOARD_DAK_URL is set", async () => {
+  const { out, runners } = await bootAndRead({});
+  expect(out).toMatch(/runner claude/);
+  expect(out).not.toMatch(/runner dak/);
+  expect(runners).not.toContain("dak");
+}, 40_000);
+
+test("main.ts lists DAK when SWITCHBOARD_DAK_URL is set", async () => {
+  const { out, runners } = await bootAndRead({ SWITCHBOARD_DAK_URL: "http://127.0.0.1:1" });
+  expect(out).toMatch(/runner dak\s+unavailable/);
+  expect(runners).toContain("dak");
 }, 40_000);

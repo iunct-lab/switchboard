@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { Workspace } from "@switchboard/protocol";
+import type { RunnerId, Workspace } from "@switchboard/protocol";
 
 /**
  * The prompt prefix "改善 →" on Home puts in front of a request. It used to be one hard-coded paragraph about Switchboard,
@@ -16,19 +16,20 @@ const NOISE = new Set(["node_modules", "dist", "build", "target", "out", "covera
 const MAX_ENTRIES = 14;
 
 /** Best effort over an arbitrary tree: a manifest of an unexpected shape degrades to the generic lines, never to a 500. */
-export function workspaceBrief(ws: Workspace): string {
+/** `runners` are the ones the daemon registered: the architecture map names only those adapters. */
+export function workspaceBrief(ws: Workspace, runners: readonly RunnerId[]): string {
   try {
-    return brief(ws);
+    return brief(ws, runners);
   } catch {
     return `${ws.kind === "meta" ? "あなたは Switchboard（このアプリ自身）のリポジトリで作業しています。" : `あなたは ${ws.name}（${ws.path}）のリポジトリで作業しています。`}\nテスト: 変更にはテストを添え、既存テストを壊さないこと。\n\n${BRIEF_REQUEST_MARKER}\n`;
   }
 }
 
-function brief(ws: Workspace): string {
+function brief(ws: Workspace, runners: readonly RunnerId[]): string {
   const lines: string[] = [];
   if (ws.kind === "meta") {
     lines.push("あなたは Switchboard（このアプリ自身）のリポジトリで作業しています。");
-    lines.push("構成: packages/protocol（AgentEvent zod スキーマ）, packages/core（Bun デーモン: server.ts / tasks.ts / db.ts）, packages/adapters/{claude,codex,dak}（各ランナーのアダプタ）, apps/web（React + Vite UI）。");
+    lines.push(`構成: packages/protocol（AgentEvent zod スキーマ）, packages/core（Bun デーモン: server.ts / tasks.ts / db.ts）, packages/adapters/{${runners.join(",")}}（各ランナーのアダプタ）, apps/web（React + Vite UI）。`);
   } else {
     lines.push(`あなたは ${ws.name}（${ws.path}）のリポジトリで作業しています。`);
     const layout = listLayout(ws.path);

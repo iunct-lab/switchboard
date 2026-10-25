@@ -1,15 +1,14 @@
 import { Fragment, useEffect, useState } from "react";
-import type { LedgerDaily, LedgerModelRow, LedgerSummary, LedgerTaskRow, PricingTable, RoutingStats, RunnerId } from "@switchboard/protocol";
+import type { LedgerDaily, LedgerModelRow, LedgerSummary, LedgerTaskRow, PricingTable, RoutingStats, RunnerId, RunnerInfo } from "@switchboard/protocol";
 import { api } from "../api.ts";
 import { quotaAsOf, quotaByRunner, quotaStale, resetLabel, windowLabel } from "../quota.ts";
 import { countLabel, fmtMedianDuration, runnerRows } from "../runnerStats.ts";
 import { fmtUsd, OriginTag, pct, RunnerPill } from "./ui.tsx";
 import { jstDay } from "../time.ts";
-
-const RUNNERS: RunnerId[] = ["claude", "codex", "dak"];
+import { ledgerRunners, listedRunners } from "../runners.ts";
 
 /** Screen D: the cost ledger. API-equivalent and actually-billed figures side by side; the price table is data. */
-export function Ledger(props: { ledger: LedgerSummary | null; onOpenTask: (id: string) => void; onOpenInsights: () => void; onError: (msg: string) => void }) {
+export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInfo[]; onOpenTask: (id: string) => void; onOpenInsights: () => void; onError: (msg: string) => void }) {
   const [days, setDays] = useState(7);
   const [daily, setDaily] = useState<LedgerDaily[]>([]);
   const [tasks, setTasks] = useState<LedgerTaskRow[]>([]);
@@ -59,6 +58,7 @@ export function Ledger(props: { ledger: LedgerSummary | null; onOpenTask: (id: s
   const periodBilled = daily.reduce((a, r) => a + r.billedUsd, 0);
 
   const dayList = [...Array(days)].map((_, i) => jstDay(Date.now() - (days - 1 - i) * 86_400_000));
+  const RUNNERS = ledgerRunners(listedRunners(props.runners), daily.map((r) => r.runner));
   const cell = (day: string, runner: RunnerId) => daily.find((r) => r.day === day && r.runner === runner);
   const max = Math.max(0.01, ...dayList.map((day) => RUNNERS.reduce((a, r) => a + (cell(day, r)?.costUsd ?? 0), 0)));
 

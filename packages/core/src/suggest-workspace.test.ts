@@ -19,7 +19,7 @@ const WORKSPACES: Workspace[] = [
   { id: "ws_dak", name: "dak", path: "/Users/dev/work/dak", kind: "repo", createdAt: 2, backlog: "github" },
   { id: "ws_blog", name: "blog", path: "/Users/dev/work/blog", kind: "repo", createdAt: 3, backlog: "github" },
 ];
-const CTX: WorkspaceContext = { title: "dak の README の誤字を直す", prompt: "dak の README にあるインストール手順の誤字を直してください。", workspaces: WORKSPACES };
+const CTX: WorkspaceContext = { title: "dak の README の誤字を直す", prompt: "dak の README にあるインストール手順の誤字を直してください。", workspaces: WORKSPACES, runners: ["claude", "codex"] };
 
 const NO_HISTORY = { SWITCHBOARD_CLAUDE_PROJECTS: join(tmpdir(), "switchboard-test-no-claude-projects"), SWITCHBOARD_HISTORY_POLL_MS: "0" };
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

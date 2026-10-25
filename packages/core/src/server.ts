@@ -344,7 +344,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const hangMs = settings().judgeAndChoice.workspaceChoiceTimeoutMs;
     const deadline = AbortSignal.timeout(hangMs);
     try {
-      const choice = await suggester.suggest({ title: input.title, prompt: input.prompt, workspaces }, deadline);
+      const choice = await suggester.suggest({ title: input.title, prompt: input.prompt, workspaces, runners: [...adapterMap.keys()] }, deadline);
       return { workspace: workspaces.find((ws) => ws.id === choice.workspaceId)!, reason: choice.reason, usage, runner: llmCfg.runner };
     } catch (e) {
       // No task exists to bill a failed turn to (ledger rows belong to a task), so what it spent is at least logged.
@@ -2229,7 +2229,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       "/api/workspaces/:id/brief": (req) => {
         const ws = db.getWorkspace(String(req.params.id));
         if (!ws) return bad("not found", 404);
-        return json({ workspaceId: ws.id, text: workspaceBrief(ws) });
+        return json({ workspaceId: ws.id, text: workspaceBrief(ws, [...adapterMap.keys()]) });
       },
 
       /**
@@ -2492,7 +2492,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           const r = await startMetaTask({
             kind: parsed.data.mode,
             ...(parsed.data.mode === "fix"
-              ? { title: fixTitle(parsed.data.text), prompt: buildFixPrompt({ brief: workspaceBrief(meta), text: parsed.data.text, when, screen: parsed.data.screen }) }
+              ? { title: fixTitle(parsed.data.text), prompt: buildFixPrompt({ brief: workspaceBrief(meta, [...adapterMap.keys()]), text: parsed.data.text, when, screen: parsed.data.screen }) }
               : { ws, title: feedbackTitle(parsed.data.text), prompt: buildFeedbackPrompt({ text: parsed.data.text, when, screen: parsed.data.screen, other, source: parsed.data.source }) }),
             attachmentIds: parsed.data.attachmentIds,
           });

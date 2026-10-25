@@ -10,6 +10,7 @@ import { reportMeta } from "../reports.ts";
 import { quotaAsOf, quotaStale, resetLabel, windowLabel } from "../quota.ts";
 import { jstTime } from "../time.ts";
 import { staleDraft } from "../presets.ts";
+import { listedRunners } from "../runners.ts";
 import { PresetPicker } from "./PresetPicker.tsx";
 
 /** The prefix "改善 →" inserted: remembered so a Workspace switch can swap it for the new workspace's brief (and only it). */
@@ -421,7 +422,7 @@ export function Home(props: {
         </div>
         <div className="row">
           <div className="runners">
-            {(["claude", "codex", "dak"] as RunnerId[]).map((r) => {
+            {listedRunners(props.health?.runners).map((r) => {
               const ok = props.runnerOk.has(r);
               const info = props.health?.runners?.find((x) => x.id === r);
               const expired = ok && info?.login === "expired";
@@ -470,7 +471,7 @@ export function Home(props: {
                 承認: DAK 側の設定で決まる
               </span>
             )}
-            {!cloud && runner !== "dak" && (
+            {!cloud && runner !== "dak" && listedRunners(props.health?.runners).includes("dak") && (
               <label
                 className={`hint toggle shadow ${!dakOk || shadowDefault === undefined ? "off" : ""}`}
                 title={!dakOk ? "DAK の agent（http://127.0.0.1:8000、SWITCHBOARD_DAK_URL で変更）に到達できません。DAK リポジトリで docker compose up" : shadowDefault === undefined ? "保存した既定を読み込み中" : "同じ依頼を DAK（DAK に設定したモデル。ローカルモデルなら API 料金なし）でも同時に実行し、並走 Task として並べます。追加の返信も写されます"}

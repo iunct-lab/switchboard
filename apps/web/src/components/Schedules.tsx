@@ -9,6 +9,7 @@ import { scheduleResultLine } from "../scheduleResult.ts";
 import { SCHEDULE_ACTIONS, scheduleActionLabel } from "../scheduleActions.ts";
 import { scheduleCreateInput, scheduleDraft, scheduleEditPatch, type ScheduleDraft } from "../scheduleEdit.ts";
 import { jstDateTime } from "../time.ts";
+import { listedRunners } from "../runners.ts";
 
 /** Scheduler screen (#20): DAK-style nightly jobs, and the morning queue of what needs a person. */
 export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[]; runnerOk: Set<RunnerId>; onOpenTask: (id: string) => void; onOpenSettings: () => void; onError: (msg: string) => void }) {
@@ -247,7 +248,7 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
                 }}
               >
                 {!defaultsReady && <option value="">読み込み中…</option>}
-                {(["claude", "codex", "dak"] as RunnerId[]).map((r) => (
+                {listedRunners(props.runners, runner).map((r) => (
                   <option key={r} value={r} disabled={!props.runnerOk.has(r)}>
                     {r}
                     {props.runnerOk.has(r) ? "" : "（未インストール）"}
@@ -347,7 +348,7 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
               <label>
                 <span>ランナー</span>
                 <select value={draft.runner} disabled={s.action === "insights"} title={s.action === "insights" ? "Claude Code Insights は claude で動きます" : undefined} onChange={(e) => setDraft({ ...draft, runner: e.target.value as RunnerId, model: "", effort: "" })}>
-                  {(["claude", "codex", "dak"] as RunnerId[]).map((r) => (
+                  {listedRunners(props.runners, s.runner).map((r) => (
                     <option key={r} value={r} disabled={!props.runnerOk.has(r) && r !== s.runner}>
                       {r}
                       {props.runnerOk.has(r) ? "" : "（未インストール）"}
