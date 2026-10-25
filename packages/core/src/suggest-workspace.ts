@@ -1,4 +1,4 @@
-import type { Workspace } from "@switchboard/protocol";
+import type { RunnerId, Workspace } from "@switchboard/protocol";
 import { BRIEF_REQUEST_MARKER, workspaceBrief } from "./brief.ts";
 import { jsonCandidates, oneLine, runSuggestionTurn, type SuggestionTurnOptions } from "./suggest-llm.ts";
 
@@ -10,6 +10,8 @@ export interface WorkspaceContext {
   prompt: string;
   /** The registered Workspaces. The answer is always one of these: nothing is registered on the model's say-so. */
   workspaces: Workspace[];
+  /** The registered runners: a brief names only these. */
+  runners: readonly RunnerId[];
 }
 
 export interface WorkspaceChoice {
@@ -43,13 +45,13 @@ export function buildWorkspacePrompt(ctx: WorkspaceContext): string {
     `prompt: ${oneLine(ctx.prompt).slice(0, 1200)}`,
     "",
     "## 候補の Workspace",
-    ...ctx.workspaces.map((ws) => `- id: ${ws.id} / name: ${oneLine(ws.name)} / kind: ${ws.kind} / path: ${ws.path}\n  ${briefHead(ws)}`),
+    ...ctx.workspaces.map((ws) => `- id: ${ws.id} / name: ${oneLine(ws.name)} / kind: ${ws.kind} / path: ${ws.path}\n  ${briefHead(ws, ctx.runners)}`),
   ].join("\n");
 }
 
 /** The brief without its closing "やってほしいこと:" marker — that line addresses the agent doing the task, not the one choosing. */
-function briefHead(ws: Workspace): string {
-  return oneLine(workspaceBrief(ws).split(BRIEF_REQUEST_MARKER)[0]!).slice(0, BRIEF_CHARS);
+function briefHead(ws: Workspace, runners: readonly RunnerId[]): string {
+  return oneLine(workspaceBrief(ws, runners).split(BRIEF_REQUEST_MARKER)[0]!).slice(0, BRIEF_CHARS);
 }
 
 /** The first JSON object naming a candidate (same scan as `parseSuggestion`). An id outside the list is never used. */

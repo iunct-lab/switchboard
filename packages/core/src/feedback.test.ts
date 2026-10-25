@@ -79,7 +79,7 @@ test("fix: すぐ直す starts a 「直す: …」 Task with the brief, the text
   for (let i = 0; !starts.length && i < 100; i++) await Bun.sleep(10);
   const prompt = starts[0]!.prompt;
   const meta = core.db.listWorkspaces().find((w) => w.kind === "meta")!;
-  expect(prompt.startsWith(workspaceBrief(meta).split("\n")[0]!)).toBe(true);
+  expect(prompt.startsWith(workspaceBrief(meta, ["claude", "codex"]).split("\n")[0]!)).toBe(true);
   expect(prompt).toContain("やってほしいこと:\nここを直して\nボタンがずれている");
   expect(prompt).toMatch(/## 出典\nフィードバックボタン「すぐ直す」、\d{4}-\d\d-\d\dT[^\n]+\n画面: Ledger/);
   expect(prompt).toContain(join(home, "attachments", task.id, "here.png"));

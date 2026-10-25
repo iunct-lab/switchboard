@@ -83,7 +83,8 @@ if (cmd === "relocate") {
 }
 
 // Adapters are plugins: any subset may be missing. Missing binaries / unreachable servers are reported, not fatal.
-const adapters = [createClaudeAdapter(), createCodexAdapter(), createDakAdapter({ baseUrl: process.env.SWITCHBOARD_DAK_URL })];
+// DAK is registered only when SWITCHBOARD_DAK_URL is set (off by default).
+const adapters = [createClaudeAdapter(), createCodexAdapter(), ...(process.env.SWITCHBOARD_DAK_URL ? [createDakAdapter({ baseUrl: process.env.SWITCHBOARD_DAK_URL })] : [])];
 
 /**
  * LLM routing suggestions (#25). Off unless the settings say otherwise; `SWITCHBOARD_SUGGESTER=fake` swaps in a

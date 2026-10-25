@@ -22,6 +22,7 @@ Issue #99. Claude に出した依頼を、そのまま DAK（草案時の構成�
 `POST /api/tasks` の `shadowRunner`:
 
 - `"dak"` など: その runner で並走 Task を作る。主と同じ runner、または未検出なら **400**（UI はチェックボックスを DAK 未検出のとき無効化する）
+- DAK を登録していない（`SWITCHBOARD_DAK_URL` なし）デーモンでは、Home と設定に並走のトグルが出ない（保存済みの既定が `dak` のときだけ設定に残る）
 - 省略: `Settings.shadowRunner`（`PATCH /api/settings {shadowRunner: "dak" | null}`、Home の「既定にする」）に従う。Inbox 昇格もここを通る。Home でトグルに触れていない作成も省略で送る（既定の判断をデーモンに任せる）
 - `null`: 既定があっても並走しない（Home でトグルを外すとこれが送られる）
 - **スケジュールは並走しない**（`Scheduler.runNow` が `null` を渡す）。無人実行に並走を付けると、重複実行ガードとキューの scheduled 節が主しか知らないまま並走が溜まり、並走の承認に答える人もいない

@@ -488,7 +488,7 @@ export function App() {
         )}
         {view.name === "task" && !currentTask && <main className="main">読み込み中…</main>}
         {view.name === "knowledge" && <Knowledge refreshKey={knowledgeRev} workspaces={workspaces} onError={setError} />}
-        {view.name === "ledger" && <Ledger ledger={ledger} onOpenTask={openTask} onOpenInsights={() => setView({ name: "evals" })} onError={setError} />}
+        {view.name === "ledger" && <Ledger ledger={ledger} runners={health?.runners ?? []} onOpenTask={openTask} onOpenInsights={() => setView({ name: "evals" })} onError={setError} />}
         {view.name === "evals" && <Evals workspaces={workspaces} runners={health?.runners} onOpenTask={openTask} onError={setError} rev={evalsAnyRev} onImprove={improveFromEvals} openReport={view.report} onOpenArtifact={(taskId, artifactId) => setView({ name: "task", id: taskId, artifact: artifactId })} />}
         {view.name === "backlog" && <Backlog onFeedback={openFeedback} onError={setError} onStarted={(task) => { upsertTask(task); openTask(task.id); }} onOpenTask={openTask} onOpenSchedules={() => setView({ name: "schedules" })} />}
         {view.name === "approvals" && (

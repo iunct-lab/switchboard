@@ -10,9 +10,9 @@ import { notifyPermission } from "../notify.ts";
 import { EMPTY_PRICE_FORM, parsePriceForm, priceFormOf, type PriceForm } from "../priceForm.ts";
 import { countriesUrl } from "../login.ts";
 import { presetRow } from "../presets.ts";
+import { listedRunners } from "../runners.ts";
 import { githubSyncText } from "../backlogSync.ts";
 
-const RUNNERS: RunnerId[] = ["claude", "codex", "dak"];
 /** The kinds of Task that start by themselves (#1337), in the order of the 既定 card: the feedback modes, then the backlog stages. */
 const AUTO_START_KINDS: Array<[AutoStartKind, string]> = [["fix", "すぐ直す"], ["request", "要望として登録"], ["to-pbi", "PBI にする"], ["to-tasks", "Task に分解"], ["complete", "実装"], ["check", "状況確認"], ["close", "閉じる"]];
 
@@ -59,8 +59,9 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
   }, [loaded, props.focusRelease]);
   if (!s) return <main className="main settings"><section className="card"><div className="muted">読み込み中…</div></section></main>;
   const dakOk = props.runnerOk.has("dak");
+  const listed = listedRunners(props.health?.runners, s.shadowRunner === "dak" ? "dak" : undefined);
   const runnerOptions = (current: RunnerId, label: string) =>
-    RUNNERS.filter((r) => props.runnerOk.has(r) || r === current).map((r) => (
+    listedRunners(props.health?.runners, current).filter((r) => props.runnerOk.has(r) || r === current).map((r) => (
       <option key={r} value={r}>
         {label}: {r}
       </option>
@@ -105,10 +106,10 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
                 </button>
               </span>
             ))}
-            {RUNNERS.some((r) => props.runnerOk.has(r) && !s.autoStart.fallback.includes(r)) && (
+            {listed.some((r) => props.runnerOk.has(r) && !s.autoStart.fallback.includes(r)) && (
               <select className="mode" value="" disabled={saving} aria-label="上限のときの代わりを追加" onChange={(e) => e.target.value && void save({ autoStart: { fallback: [...s.autoStart.fallback, e.target.value as RunnerId] } })}>
                 <option value="">追加…</option>
-                {RUNNERS.filter((r) => props.runnerOk.has(r) && !s.autoStart.fallback.includes(r)).map((r) => (
+                {listed.filter((r) => props.runnerOk.has(r) && !s.autoStart.fallback.includes(r)).map((r) => (
                   <option key={r} value={r}>
                     {r}
                   </option>
@@ -202,6 +203,7 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
         ))}
       </section>
 
+      {(listed.includes("dak") || s.shadowRunner === "dak") && (
       <section className="card">
         <h5>並走（DAK）の既定</h5>
         <label className={`hint toggle ${!dakOk && s.shadowRunner !== "dak" ? "off" : ""}`} title={dakOk ? "同じ依頼を DAK（DAK に設定したモデル。ローカルモデルなら API 料金なし）でも同時に実行し、並走 Task として並べます" : "DAK の agent（http://127.0.0.1:8000、SWITCHBOARD_DAK_URL で変更）に到達できません"}>
@@ -210,6 +212,7 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
           {!dakOk && s.shadowRunner === "dak" && <span className="hint">（DAK 未検出のため今は並走しません）</span>}
         </label>
       </section>
+      )}
 
       <section className="card">
         <h5>LLM 提案</h5>
