@@ -56,3 +56,26 @@ Switchboard の道具では置けず、人が 1 回やるもの。
 | `CLAUDE.md` の 4 項目 | `grep -nE '^## (テスト\|作業の場所\|.*live check\|.*動いているコード)' CLAUDE.md` | 4 項目が各 1 件以上: テストの 3 コマンド（型検査・全体・1 件）、作業の場所と枝、live check、反映に要る OK | A |
 
 この表と「手作業で残るもの」を実行する手順（決めること → GitHub 側 → 初期コミット → 登録 → 開始条件 → 報告）は、Switchboard 専用のスキル `.claude/skills/new-repo`（#1446）。
+
+## 既存のリポジトリを追加する
+
+GitHub にある**自分のリポジトリ**を、名前だけで Workspace に追加する入口（PBI #2575）。ホストのシェルに入れない利用者のための経路で、パスは打たない。
+
+- 入口: 設定の先頭の「Workspace」カードの「GitHub から」。`owner/name` か `https://github.com/owner/name`（末尾の `.git` と `/` は可）を入れて「追加」。API は `POST /api/workspaces` の `repo`（`path` とはどちらか一方）
+- 置き場所: Switchboard のチェックアウトの隣（`<repoRoot の親>/<name>`）。置き場所の設定は無い（新しく作る場合と同じ）
+- 断る入力（400）: `-` で始まる名前、`.` / `..`、github.com 以外の URL、余分な `/`。clone の引数は配列で渡り、シェルを通らない。同じ名前のディレクトリが既にあれば 409（上書きしない）
+- 他者のリポジトリは追加しない: clone の前に `gh api repos/<owner>/<name>` の `permissions.push` を確かめ、読めなければ 404、push できなければ 403（「他者のリポジトリはこの欄では追加しません」）で、clone も登録もしない。工程の Task が他者のリポジトリに Issue・PR を書かないため。他者のリポジトリを自分の側で開発できる形で追加する経路は別の PBI（#2576）
+- 進み具合: 要求は 202 ですぐ返り、clone は裏で進む。進行中と失敗（gh の最後の行）は `GET /api/workspaces/clones` に出て、状態が変わるたびに `workspaces.updated` で画面が読み直す。成功すると Workspace の一覧に出る。進み具合は保存しないので、デーモンの再起動で消える
+- 途中で落ちたとき: clone の途中のディレクトリは残る。次の追加は 409 になるので、人が消す（登録を外すときに「ローカルのコピーも消す」を選べば消せる。下の「登録を外す」）
+- 「GitHub と連携しない」の印は「GitHub から」にも効き、その workspace のバックログは Switchboard に置かれる
+- ホストにあるディレクトリを追加する欄（`path`）は今までどおり
+
+## 登録を外す（ローカルのコピーも消す）
+
+設定の「Workspace」カードの各 repo の行の「登録を外す」（PBI #2600）。#2575 の「登録を外してもディレクトリは消さない」は、外す機能が無かった間の文で、今は外すときに選ぶ。
+
+- 確認は行の下に開く: workspace の名前を入力（一致するまで実行できない）、「ローカルのコピーも消す」（消せないときは出ない）、警告 1 行（コピーを消す選択で変更あり / push 前のコミットあり。動いている Task があるときはその件数）。API は `GET /api/workspaces/:id/removal`（確認の内容）と `DELETE /api/workspaces/:id`（`{ deleteCopy }`）。消えると `workspaces.updated` で開いている画面の行が消える
+- コピーを消せるのは、Switchboard のチェックアウトの親ディレクトリの直下にある Git のチェックアウトだけ。meta workspace・Switchboard 自身・シンボリックリンクで外へ出るパス・入れ子は 400、Git でないディレクトリは 409（登録だけなら外せる）
+- 断る（409）: その workspace か配下のディレクトリで動いている Task（running・waiting。shadow を含む）、その workspace を使うスケジュール。終わった Task の履歴は残る
+- バックログの保存データは、同じリポジトリを指す workspace が他に残らないときだけ消える（Switchboard にだけ置いたバックログは、外すと消える）。外した後、同じパスは登録し直せる
+- GitHub 側（リポジトリ・Project・変数）は消さない。人が GitHub で行う

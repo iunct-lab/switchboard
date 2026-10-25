@@ -1,4 +1,4 @@
-import type { AnswerPolicy, Artifact, AskAnswer, AskAnswerResult, AskList, Attachment, Backlog, BacklogAction, BacklogCreateInput, BacklogEditInput, BacklogIssueDetail, CheckRun, CloudPreparation, CreateTaskInput, DeviceAuthView, EvalsListRow, EventEnvelope, FeedbackInput, FlowView, Footprint, HistoryScanResult, HistorySession, HistoryStatus, InboxNote, InterventionView, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerSummary, LedgerTaskRow, OpsLatency, OpsLoad, OpsStops, PendingApproval, PerfSample, PerfSummaryRow, PolicyInput, PolicyList, PolicyPatch, Preset, PresetExpandInput, PresetExpansion, PresetInput, PresetList, PricingTable, Queue, ReportRow, RoutingLogRow, RoutingStats, RoutingSuggestion, RunnerId, RunnerInfo, Schedule, ScheduleInput, ServerMessage, Settings, SettingsPatch, StagedChange, StopSummary, SuggestInput, Task, TaskDiffFile, TaskEvals, TaskOutcome, TeleportProgress, Workspace } from "@switchboard/protocol";
+import type { AnswerPolicy, Artifact, AskAnswer, AskAnswerResult, AskList, Attachment, Backlog, BacklogAction, BacklogCreateInput, BacklogEditInput, BacklogIssueDetail, CheckRun, CloudPreparation, CreateTaskInput, DeviceAuthView, EvalsListRow, EventEnvelope, FeedbackInput, FlowView, Footprint, HistoryScanResult, HistorySession, HistoryStatus, InboxNote, InterventionView, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerSummary, LedgerTaskRow, OpsLatency, OpsLoad, OpsStops, PendingApproval, PerfSample, PerfSummaryRow, PolicyInput, PolicyList, PolicyPatch, Preset, PresetExpandInput, PresetExpansion, PresetInput, PresetList, PricingTable, Queue, ReportRow, RoutingLogRow, RoutingStats, RoutingSuggestion, RunnerId, RunnerInfo, Schedule, ScheduleInput, ServerMessage, Settings, SettingsPatch, StagedChange, StopSummary, SuggestInput, Task, TaskDiffFile, TaskEvals, TaskOutcome, TeleportProgress, Workspace, WorkspaceRemoval } from "@switchboard/protocol";
 import { hasTypedText, hostStopped, LEAVE_STOPPED, loginRoute, stoppedRoute, type LoginMode } from "./login.ts";
 import type { ReleaseStatus } from "./release.ts";
 import type { EventsArchive } from "./events-archive.ts";
@@ -161,6 +161,9 @@ export type SettingsResponse = Settings & { runners: RunnerInfo[]; defaults: Pic
 /** Events per 「以前の会話を読む」 (#1142); the daemon sends the last 200 when a Task is opened. */
 export const OLDER_PAGE = 200;
 
+/** A clone going on or failed (#2575); a finished one is a workspace and no longer listed. */
+export type WorkspaceClone = { repo: string; path: string; state: "cloning" | "failed"; error?: string };
+
 export const api = {
   feedback: (text: string, attachmentIds?: string[], screen?: string, mode: "request" | "fix" = "request", workspaceId?: string, source?: FeedbackSource) => req<Task>("/api/feedback", { method: "POST", body: JSON.stringify({ text, attachmentIds, screen, mode, workspaceId, source }) }),
   /** 改善要望にする (#1221): the draft the feedback dialog opens with for a task's evaluations. */
@@ -177,6 +180,11 @@ export const api = {
   workspaces: () => req<Workspace[]>("/api/workspaces"),
   /** `backlog`: `switchboard` keeps the workspace's Issues and Project in Switchboard only (#2265); PRs stay with the repository. */
   addWorkspace: (path: string, backlog: "github" | "switchboard" = "github") => req<Workspace>("/api/workspaces", { method: "POST", body: JSON.stringify({ path, backlog }) }),
+  /** A GitHub repository added by name (#2575): answers at once (202); the clone goes on in the daemon, see `workspaceClones`. */
+  addWorkspaceFromGithub: (repo: string, backlog: "github" | "switchboard" = "github") => req<{ repo: string; path: string; state: "cloning" }>("/api/workspaces", { method: "POST", body: JSON.stringify({ repo, backlog }) }),
+  workspaceRemoval: (id: string) => req<WorkspaceRemoval>(`/api/workspaces/${id}/removal`),
+  removeWorkspace: (id: string, deleteCopy: boolean) => req<{ ok: true }>(`/api/workspaces/${id}`, { method: "DELETE", body: JSON.stringify({ deleteCopy }) }),
+  workspaceClones: () => req<WorkspaceClone[]>("/api/workspaces/clones"),
   /**
    * Turns the workspace's GitHub sync off (`switchboard`) or on (`github`, #2266): on answers how far it is (202), or
    * rejects with why GitHub could not be read (424, nothing changed). `projectVar` = the Project of one kept here only.
@@ -196,6 +204,7 @@ export const api = {
   /** Start the official Teleport for a Cloud Task; progress comes as task.teleport. Rejects with the reason it was refused. */
   startTeleport: (id: string) => req<{ started: true }>(`/api/tasks/${id}/teleport`, { method: "POST" }),
   deviceAuth: (id: string) => req<DeviceAuthView | null>(`/api/tasks/${id}/device-auth`),
+  newRepo: (name: string, purpose: string) => req<Task>("/api/new-repo", { method: "POST", body: JSON.stringify({ name, purpose }) }),
   createTask: (input: CreateTaskInput) => req<Task>("/api/tasks", { method: "POST", body: JSON.stringify(input) }),
   suggest: (input: SuggestInput) => req<RoutingSuggestion & { source: string; cloudPreparation?: CloudPreparation }>("/api/tasks/suggest", { method: "POST", body: JSON.stringify(input) }),
   send: (id: string, text: string, attachmentIds?: string[]) => req<Task>(`/api/tasks/${id}/send`, { method: "POST", body: JSON.stringify({ text, attachmentIds }) }),

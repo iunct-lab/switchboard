@@ -20,6 +20,8 @@ export const ServerMessage = z.discriminatedUnion("type", [
   z.object({ type: z.literal("checks.updated"), taskId: z.string(), ok: z.boolean() }),
   /** Evals (#1219): the task's judge row changed; the screen reads `GET /api/tasks/:id/evals` again. */
   z.object({ type: z.literal("evals.updated"), taskId: z.string() }),
+  /** Workspaces were registered or their settings changed (#1447); the screen reads `GET /api/workspaces` again. */
+  z.object({ type: z.literal("workspaces.updated") }),
   /** A Task's approval wait came or went (#662). Not an event: never stored, so the code stays out of the log. */
   z.object({ type: z.literal("task.deviceAuth"), taskId: z.string(), auth: DeviceAuthView.nullable() }),
   /** "Continue locally" moved on for a Cloud Task (#1306); null when it was cleared. Not an event: never stored. */
@@ -29,3 +31,6 @@ export const ServerMessage = z.discriminatedUnion("type", [
   z.object({ type: z.literal("error"), message: z.string() }),
 ]);
 export type ServerMessage = z.infer<typeof ServerMessage>;
+
+/** What removing a workspace would do (#2600), for the confirmation: the copy's reach, what it would lose, and Tasks running there. */
+export type WorkspaceRemoval = { name: string; path: string; copy: { deletable: boolean; reason?: string }; dirty: boolean; unpushed: boolean; running: number };

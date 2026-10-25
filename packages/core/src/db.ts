@@ -378,6 +378,19 @@ export class Db {
     this.sqlite.query("DELETE FROM backlog_repositories WHERE service = ? AND host = ? AND repository = ?").run(from.service, from.host, from.repository);
   }
 
+  /** A repository's stored records, operations and read state (#2600: its last workspace was removed). */
+  deleteBacklogRepository(key: BacklogRepositoryKey): void {
+    this.sqlite.transaction(() => {
+      for (const table of ["backlog_records", "backlog_operations", "backlog_repositories"])
+        this.sqlite.query(`DELETE FROM ${table} WHERE service = ? AND host = ? AND repository = ?`).run(key.service, key.host, key.repository);
+    })();
+  }
+
+  /** The registration only: Tasks keep their `workspace_id` (their history stays readable). */
+  deleteWorkspace(id: string): void {
+    this.sqlite.query("DELETE FROM workspaces WHERE id = ?").run(id);
+  }
+
   /** A record's value as the service has it, written without a read (#2266: a comment made here moved to its Issue's new number); the repository's read state is not touched. */
   setBacklogRecordRemote(key: BacklogRepositoryKey & { objectKind: BacklogObjectKind; externalId: string }, remote: unknown): void {
     this.sqlite.query("UPDATE backlog_records SET remote = ?1, base = CASE WHEN local IS NULL THEN ?1 ELSE base END WHERE service = ? AND host = ? AND repository = ? AND object_kind = ? AND external_id = ?")

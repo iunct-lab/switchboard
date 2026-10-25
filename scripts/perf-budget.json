@@ -25,7 +25,7 @@
       }
     },
     "bundle": {
-      "js": 235120,
+      "js": 236384,
       "css": 7560
     }
   },
@@ -35,7 +35,7 @@
         "requests": 13,
         "layoutCount": 5,
         "recalcStyleCount": 7,
-        "layoutShift": 0.2371
+        "layoutShift": 0.1959
       },
       "new-task": {
         "requests": 18,
@@ -55,7 +55,7 @@
       }
     },
     "bundle": {
-      "js": 235120,
+      "js": 236384,
       "css": 7560
     }
   }

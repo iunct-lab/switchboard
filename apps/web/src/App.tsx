@@ -4,7 +4,7 @@ import { applyApprovalEvent, mergeFetched } from "./approvals.ts";
 import { mergeEvents, taskReader } from "./catchup.ts";
 import { noticeFor, showNotice } from "./notify.ts";
 import { Approvals } from "./components/Approvals.tsx";
-import { api, connectEvents, getToken, setToken, type Health, type TaskDetail } from "./api.ts";
+import { api, connectEvents, getToken, setToken, type Health, type TaskDetail, type WorkspaceClone } from "./api.ts";
 import { journeyCancel, journeyEnd, journeyStart } from "./perf.ts";
 import { loginRoute, STUCK_MESSAGE, STUCK_RESCUE, withoutFromAuth } from "./login.ts";
 import { newVersionLink, rescueLink, type ReleaseStatus } from "./release.ts";
@@ -42,6 +42,15 @@ export function App() {
   const [feedbackPrefill, setFeedbackPrefill] = useState<FeedbackPrefill | undefined>();
   const [health, setHealth] = useState<Health | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [clones, setClones] = useState<WorkspaceClone[]>([]);
+  // an older answer must not overwrite a newer one (a clone that finished while the earlier read was still on the wire)
+  const clonesSeq = useRef(0);
+  const refreshClones = useCallback(() => {
+    const n = ++clonesSeq.current;
+    return api.workspaceClones().then((c) => {
+      if (n === clonesSeq.current) setClones(c);
+    }).catch(() => undefined);
+  }, []);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [listed, setListed] = useState(false); // the first task list came back
   const [ledger, setLedger] = useState<LedgerSummary | null>(null);
@@ -51,6 +60,10 @@ export function App() {
   // "continue locally" by Cloud Task (#1306): from the WebSocket; the open Task's first load brings the current one
   const [teleports, setTeleports] = useState<Record<string, TeleportProgress | null>>({});
   const [view, setView] = useState<View>(initialView);
+  // read where it is shown (not at launch: one request more there, perf budget)
+  useEffect(() => {
+    if (view.name === "settings") void refreshClones();
+  }, [view.name, refreshClones]);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [railListOpen, setRailListOpen] = useState(false);
   const [briefOpen, setBriefOpen] = useState(false);
@@ -117,10 +130,14 @@ export function App() {
   // the archived ones too once the rail has shown them (#1142): archived or brought back while away, from another tab
   const archivedShown = useRef(false);
   const catchUp = useCallback(() => {
-    if (dropped.current)
+    if (dropped.current) {
       Promise.all([api.tasks(), archivedShown.current ? api.tasks({ archived: true }) : []])
         .then(([list, archived]) => setTasks([...list, ...archived]))
         .catch(() => undefined);
+      // workspaces.updated sent while away (#1447)
+      api.workspaces().then(setWorkspaces).catch(() => undefined);
+      refreshClones();
+    }
     dropped.current = false;
     reader.connected();
   }, [reader]);
@@ -214,6 +231,9 @@ export function App() {
         }
       } else if (m.type === "knowledge.updated") {
         setKnowledgeRev((n) => n + 1);
+      } else if (m.type === "workspaces.updated") {
+        void api.workspaces().then(setWorkspaces);
+        void refreshClones();
       } else if (m.type === "checks.updated") {
         setChecksRev((n) => n + 1);
       } else if (m.type === "evals.updated") {
@@ -445,10 +465,6 @@ export function App() {
             runnerOk={runnerOk}
             onCreate={createTask}
             onOpenTask={openTask}
-            onAddWorkspace={async (path, backlog) => {
-              const ws = await api.addWorkspace(path, backlog);
-              setWorkspaces((prev) => [...prev.filter((w) => w.id !== ws.id), ws]);
-            }}
             onError={setError}
             inboxRev={knowledgeRev}
             onOpenSettings={() => setView({ name: "settings" })}
@@ -501,7 +517,23 @@ export function App() {
           />
         )}
         {view.name === "schedules" && <Schedules workspaces={workspaces} runners={health?.runners ?? []} runnerOk={runnerOk} onOpenTask={openTask} onOpenSettings={() => setView({ name: "settings" })} onError={setError} />}
-        {view.name === "settings" && <Settings focusRelease={releaseFocus} health={health} runnerOk={runnerOk} onRunners={(runners) => setHealth((h) => (h ? { ...h, runners } : h))} onError={setError} />}
+        {view.name === "settings" && <Settings
+            focusRelease={releaseFocus}
+            health={health}
+            workspaces={workspaces}
+            clones={clones}
+            onAddWorkspaceFromGithub={async (repo, backlog) => {
+              await api.addWorkspaceFromGithub(repo, backlog);
+              await refreshClones();
+            }}
+            onAddWorkspace={async (path, backlog) => {
+              const ws = await api.addWorkspace(path, backlog);
+              setWorkspaces((prev) => [...prev.filter((w) => w.id !== ws.id), ws]);
+            }}
+            onTaskStarted={(task) => {
+              upsertTask(task);
+              openTask(task.id);
+            }} runnerOk={runnerOk} onRunners={(runners) => setHealth((h) => (h ? { ...h, runners } : h))} onError={setError} />}
       </div>
 
       <FeedbackDialog open={feedbackOpen} screen={screenLabel(view, currentTask)} workspaces={workspaces} workspace={feedbackWorkspace} prefill={feedbackPrefill} onClose={() => setFeedbackOpen(false)} onSent={(task) => { upsertTask(task); openTask(task.id); }} onError={setError} />

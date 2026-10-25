@@ -30,7 +30,7 @@ export function workspaceErrorGuide(e: Backlog["errors"][number], projectVar: st
       lead: `${e.workspaceName} の Project の URL がリポジトリ変数 ${projectVar ?? "SWITCHBOARD_PROJECT_URL"} にありません。次のどちらかで始められます`,
       steps: [
         { text: "Project を用意する: 手順に従って Project を作り、変数に URL を設定してから「再読込」を押す", link: PROJECT_SETUP_DOC },
-        { text: "GitHub と連携しないで使う: Home の「Workspace を追加」で「GitHub と連携しない」に印を付けて自分のリポジトリを追加するか、設定の「GitHub 同期」でこの workspace の同期を無効にする" },
+        { text: "GitHub と連携しないで使う: 設定の「Workspace」で「ホストのパス」を選び「GitHub と連携しない」に印を付けて自分のリポジトリを追加するか、設定の「GitHub 同期」でこの workspace の同期を無効にする" },
       ],
     };
   return { lead: `${e.workspaceName} を読めませんでした: ${e.message}`, steps: [] };

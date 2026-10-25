@@ -147,7 +147,7 @@ describe("workspaceErrorGuide (#2362)", () => {
     expect(g.lead).toContain("リポジトリ変数 SWITCHBOARD_PROJECT_URL にありません");
     expect(g.steps).toHaveLength(2);
     expect(g.steps[0]).toMatchObject({ text: expect.stringMatching(/^Project を用意する/), link: PROJECT_SETUP_DOC });
-    expect(g.steps[1]!.text).toStartWith("GitHub と連携しないで使う: Home の「Workspace を追加」");
+    expect(g.steps[1]!.text).toStartWith("GitHub と連携しないで使う: 設定の「Workspace」で「ホストのパス」");
     expect(g.steps[1]!.link).toBeUndefined();
     expect(workspaceErrorGuide(err("project-var"), "CAPSULE_PROJECT_URL").lead).toContain("リポジトリ変数 CAPSULE_PROJECT_URL にありません");
     // no Issue number of this repository on the screen (the public copy cannot follow it)

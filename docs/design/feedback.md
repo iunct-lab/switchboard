@@ -23,9 +23,13 @@ meta 以外の workspace なら、Task はその workspace で始まり、`build
 
 prompt の末尾の `## 進め方`（`FIX_SCOPE`）で、Task は直した PR を main にマージするところまで進める（PR を出したまま、レビューも無いまま止まっていたため）: 別のランナーのレビュー（`cross-runner-review`）、指摘の処理とマージ（`review-triage-and-merge`。Issue が無いので、スキルが Issue から作るレビューの材料は PR 本文に引用した利用者の言葉で代え、Issue に書く記録は PR に書く。範囲外の指摘の Issue 化はスキルどおり。枝 `sb/fix-<topic>` は Issue に結び付けない）、CI とマージ判定（CLAUDE.md の「マージ判定とローカル CI」、`[再チェック]` は [merge-gate.md](merge-gate.md) の「再チェック」）。範囲はバックログの「実装」の `COMPLETE_SCOPE`（[backlog.ts](../../packages/core/src/backlog.ts)）と同じ: merge-gate が merge を返せば聞き直さずにマージし、`[聞く]` の停止・昇格・デーモンの再起動・認証は Task の会話で聞く。
 
+### 新しいリポジトリ（#1447）
+
+`POST /api/new-repo`（`{ name, purpose }`）が meta workspace に「新しいリポジトリ: <名前>」の Task を 1 つ始める（種類 `new-repo`）。prompt は [`buildNewRepoPrompt`](../../packages/core/src/feedback.ts) で、`.claude/skills/new-repo/SKILL.md` に従うこと・残りの決めることは Task の会話で聞くこと・終わったら登録の結果と手作業で残るもの（Project のビュー 2 つ）を報告すること、の 3 文と、名前・用途（データのフェンス）・出典だけ。リポジトリの作成・雛形の展開・登録の手順はスキルが持ち、デーモンは持たない。画面の入口は設定の先頭の「Workspace」カードの「追加」→「新しく作る」（名前と用途 → 「作成を頼む」で Task の画面へ）。同じカードの「ホストのパス」が既存のディレクトリの登録（以前は Home）で、repo の Workspace が 0 件のときだけ Home に「設定で追加 →」の 1 行が出る。ランナー・モデル・思考の深さは下の「ランナーと設定」と同じ（種類ごとの既定 `byKind["new-repo"]` を持てる）。
+
 ## ランナーと設定
 
-`Settings.autoStart`（設定画面の「自動で始まる Task の既定」、#832）のランナーとモデルを使い、ランナーが未検出なら Claude（モデルは CLI の既定）にフォールバックする。共通のランナーと Claude が両方とも未検出、または meta workspace が存在しない場合は 409。LLM 提案用の `routing.llm.runner` とは別の設定。「すぐ直す」（`fix`）と「要望として登録」（`request`）は種類ごとの既定（`autoStart.byKind`、#1337）を持てて、あってそのランナーが検出済みならそれで始まり、無い・未検出なら上の共通の値の決め方に進む。
+`Settings.autoStart`（設定画面の「自動で始まる Task の既定」、#832）のランナーとモデルを使い、ランナーが未検出なら Claude（モデルは CLI の既定）にフォールバックする。共通のランナーと Claude が両方とも未検出、または meta workspace が存在しない場合は 409。LLM 提案用の `routing.llm.runner` とは別の設定。「すぐ直す」（`fix`）・「要望として登録」（`request`）・「新しいリポジトリ」（`new-repo`）は種類ごとの既定（`autoStart.byKind`、#1337）を持てて、あってそのランナーが検出済みならそれで始まり、無い・未検出なら上の共通の値の決め方に進む。
 
 通常の Task と同様、提案とその使用量の記録を経て作成する。`routing.llm.model` は継承しない。承認モードも既存の Task の既定値に従う。
 
