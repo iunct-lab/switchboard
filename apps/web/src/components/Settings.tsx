@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import type { AutoStartKind, Backlog, JudgeSettings, LlmRoutingSettings, Preset, RunnerId, RunnerInfo, Settings as SettingsData, SettingsPrice, Workspace } from "@switchboard/protocol";
-import { api, type Health, type SettingsResponse } from "../api.ts";
+import type { AutoStartKind, Backlog, JudgeSettings, LlmRoutingSettings, Preset, RunnerId, RunnerInfo, Settings as SettingsData, SettingsPrice, Task, Workspace } from "@switchboard/protocol";
+import { api, type Health, type SettingsResponse, type WorkspaceClone } from "../api.ts";
 import { ModelSelect } from "./ModelSelect.tsx";
 import { ClaudeLoginRow } from "./ClaudeLoginRow.tsx";
 import { ReleasePanel } from "./ReleasePanel.tsx";
@@ -12,16 +12,17 @@ import { countriesUrl } from "../login.ts";
 import { presetRow } from "../presets.ts";
 import { listedRunners } from "../runners.ts";
 import { githubSyncText } from "../backlogSync.ts";
+import { WorkspaceCard } from "./WorkspaceCard.tsx";
 
 /** The kinds of Task that start by themselves (#1337), in the order of the 既定 card: the feedback modes, then the backlog stages. */
-const AUTO_START_KINDS: Array<[AutoStartKind, string]> = [["fix", "すぐ直す"], ["request", "要望として登録"], ["to-pbi", "PBI にする"], ["to-tasks", "Task に分解"], ["complete", "実装"], ["check", "状況確認"], ["close", "閉じる"]];
+const AUTO_START_KINDS: Array<[AutoStartKind, string]> = [["fix", "すぐ直す"], ["request", "要望として登録"], ["to-pbi", "PBI にする"], ["to-tasks", "Task に分解"], ["complete", "実装"], ["check", "状況確認"], ["close", "閉じる"], ["new-repo", "新しいリポジトリ"]];
 
 /**
  * 設定 (#832): every default the daemon keeps in its settings, in one screen. Each control saves as soon as it
  * changes (a partial PATCH /api/settings), so a value takes effect on the next use. The per-Task choices (mode, model,
  * budget, shadow for one Task) stay on the Home form; what is saved here is only what they start from.
  */
-export function Settings(props: { focusRelease?: number; health: Health | null; runnerOk: Set<RunnerId>; onRunners: (runners: RunnerInfo[]) => void; onError: (msg: string) => void }) {
+export function Settings(props: { focusRelease?: number; health: Health | null; workspaces: Workspace[]; clones: WorkspaceClone[]; onAddWorkspaceFromGithub: (repo: string, backlog: "github" | "switchboard") => Promise<void>; onAddWorkspace: (path: string, backlog: "github" | "switchboard") => Promise<void>; onTaskStarted: (task: Task) => void; runnerOk: Set<RunnerId>; onRunners: (runners: RunnerInfo[]) => void; onError: (msg: string) => void }) {
   const [s, setS] = useState<SettingsResponse | null>(null);
   const [saving, setSaving] = useState(false);
   // 端末通知 (#1138): the browser's permission is the only switch; asked for only from the button
@@ -72,6 +73,7 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
   const d = s.defaults;
   return (
     <main className="main settings">
+      <WorkspaceCard workspaces={props.workspaces} clones={props.clones} onAddWorkspaceFromGithub={props.onAddWorkspaceFromGithub} onAddWorkspace={props.onAddWorkspace} onTaskStarted={props.onTaskStarted} onError={props.onError} />
       <section className="card">
         <h5>自動で始まる Task の既定</h5>
         <div className="muted">バックログの工程ボタン・フィードバックボタンで始まる Task と、定期実行の新規作成フォームの初期値のランナー・モデル・思考の深さです。モデル・思考の深さが「CLI 既定」ならランナー自身の設定で動きます。種類ごとに変えられます。変えていない種類は共通の値で始まります（バックログを進めるはスケジュールの値）。</div>

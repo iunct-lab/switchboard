@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
-import { AskAnswerInput, AutoStartKind, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, HumanEvalInput, InboxAddInput, InboxPromoteInput, MaterializeApplyInput, PerfSamplesInput, PermissionAnswers, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskList, type Backlog, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type Workspace } from "@switchboard/protocol";
+import { AskAnswerInput, AutoStartKind, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, InboxAddInput, InboxPromoteInput, MaterializeApplyInput, PerfSamplesInput, PermissionAnswers, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskList, type Backlog, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type Workspace, type WorkspaceRemoval } from "@switchboard/protocol";
 import type { CoreConfig } from "./config.ts";
 import { abortOrphanedTasks, Db, type ApiRequestRow } from "./db.ts";
 import { opsLatency } from "./ops-latency.ts";
@@ -17,7 +17,7 @@ import { AttachmentError, AttachmentStore, extValue, formatBytes, isActiveConten
 import { MAX_PTY_SESSIONS, type PtyAttached, type PtyClient, PtyClientMessage, PtyManager } from "./pty.ts";
 import { accessLine, authKind, opLine } from "./accesslog.ts";
 import { addressKey, EDGE_HEADER, edgeOk, hostAllowed, isLoopback, isLoopbackAddress, LOOPBACK_HOSTNAMES, loadOrCreateToken, makeFailureLimit, makeSessionCheck, recentOk, sameOrigin, SESSION_COOKIE, SESSION_RECHECK_MS, tokenEquals, tokenFromRequest } from "./auth.ts";
-import { buildFeedbackPrompt, buildFixPrompt, feedbackTitle, fixTitle } from "./feedback.ts";
+import { buildFeedbackPrompt, buildFixPrompt, buildNewRepoPrompt, feedbackTitle, fixTitle, newRepoTitle } from "./feedback.ts";
 import { measureFootprint } from "./footprint.ts";
 import { loadMcpPolicy, mcpServersFor, WorkspaceMcp } from "./mcp.ts";
 import { ApprovalRules, subjectsOf } from "./approval.ts";
@@ -41,6 +41,8 @@ import { FlowCache, flowScope, flowView, type FlowWorkspace } from "./flow.ts";
 import { interventionView } from "./interventions.ts";
 import { checkLocalFields, checkLocalParent } from "./backlog-local.ts";
 import { enableGithubSync, enablingOf } from "./backlog-enable.ts";
+import { CloneError, parseGithubRepo, registerWorkspace, WorkspaceClones } from "./workspace-clone.ts";
+import { copyDeletable, inspectRemoval } from "./workspace-remove.ts";
 import { ACTION_FOR_STAGE, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, buildStartPrompt, failedIn, failedSince, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionStep, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, repoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, unchangedIn, heldIn, type GhRunner, type OtherRepo } from "./backlog.ts";
 import { issueOf, reduceStops, stopRecordsFor } from "./stops.ts";
 import { ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, policyPbi, prFacts, resumeOfTask, type PolicyEnv, type PrFacts } from "./asks.ts";
@@ -512,6 +514,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   // the backlog is read from what was imported (#885); GitHub is asked by the sync only, and for its budget (#549, below)
   // the candidate runs on a copy of the database: it sends nothing, or what it sent would be sent again (#886)
   const backlog = new BacklogSync(db, opts.gh ?? runGh, undefined, undefined, !cfg.candidate);
+  const clones = new WorkspaceClones(db, opts.gh ?? runGh, cfg.repoRoot, () => broadcast({ type: "workspaces.updated" }));
   // GitHub's GraphQL budget (#549): read at most once a minute, for backlog-next, the stage buttons and the ledger
   const githubBudget = new GithubBudgetCache(opts.gh ?? runGh, undefined, undefined, undefined, () => backlog.hostWait());
   // the flow of the closed PBIs (#651): GitHub is read for it, so an hour is held; the repository is the import's, as for the backlog
@@ -1552,6 +1555,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     }
     return Buffer.concat(chunks);
   };
+  /** Tasks (a shadow too) running or waiting in a workspace (#2600): named for it, or working inside its directory (a worktree made under it). */
+  const runningTasksIn = (ws: Workspace) => [...db.listTasksByStatus("running"), ...db.listTasksByStatus("waiting")].filter((t) => t.workspaceId === ws.id || t.cwd === ws.path || t.cwd.startsWith(`${ws.path}/`)).length;
+
   const readJson = async <T>(req: Request, parse: (x: unknown) => T): Promise<T> => parse(await req.json().catch(() => ({})));
 
   // Every /api route except health goes through the token check when off-loopback.
@@ -2135,6 +2141,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       // the per-task tokens too count only from this machine on the cloud host (#748): the runners call 127.0.0.1
       "/mcp/:id": (req, srv) => (tokenCounts(req, srv) ? mcp.handle(String(req.params.id), tokenFromRequest(req, true), req) : refused(req, srv, bad("unauthorized", 401))),
 
+      "/api/workspaces/clones": { GET: () => json(clones.list()) },
+
       "/api/workspaces": {
         GET: () => json(db.listWorkspaces()),
         /**
@@ -2143,21 +2151,29 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
          * registered keeps its own). A path already registered with the other one is 409 (switching is #2266).
          */
         POST: strong(async (req, srv) => {
-          const body = await readJson(req, (x) => x as { path?: string; name?: string; backlog?: unknown });
-          if (!body.path || !existsSync(body.path)) return bad("path must exist");
+          const body = await readJson(req, (x) => x as { path?: string; name?: string; repo?: string; backlog?: unknown });
           // absent = github; any other value (null too) is refused
           const backlogAt = body.backlog === undefined ? "github" : body.backlog;
           if (backlogAt !== "github" && backlogAt !== "switchboard") return bad('backlog must be "github" or "switchboard"');
+          if (body.repo !== undefined) {
+            if (body.path !== undefined) return bad("path と repo はどちらか一方です");
+            const repo = typeof body.repo === "string" ? parseGithubRepo(body.repo) : null;
+            if (!repo) return bad("repo は owner/name か https://github.com/owner/name の形で指定してください");
+            try {
+              const row = await clones.start(repo, { backlog: body.backlog === undefined ? undefined : backlogAt });
+              logOp(req, srv, "workspace.clone", { detail: { repo: row.repo, path: row.path } });
+              return json({ repo: row.repo, path: row.path, state: row.state }, 202);
+            } catch (e) {
+              if (e instanceof CloneError) return bad(e.message, e.status);
+              throw e;
+            }
+          }
+          if (!body.path || !existsSync(body.path)) return bad("path must exist");
           const had = db.listWorkspaces().find((w) => w.path === body.path);
           if (had && body.backlog !== undefined && had.backlog !== backlogAt) return bad(`この workspace のバックログは ${had.backlog} に置いています。切り替えは #2266 です`, 409);
-          let ws = db.upsertWorkspace({ path: body.path, name: body.name ?? basename(body.path), kind: "repo" });
-          if (backlogAt === "switchboard" && !had) {
-            const source = localBacklogSource(ws.id);
-            db.setWorkspaceBacklogSource(ws.id, source);
-            db.putBacklogSnapshot(source, { records: [], cursor: null, syncedAt: Date.now() });
-            ws = db.getWorkspace(ws.id)!;
-          }
+          const ws = registerWorkspace(db, { path: body.path, name: body.name ?? basename(body.path), backlog: backlogAt, had });
           logOp(req, srv, "workspace.add", { detail: { path: body.path, backlog: backlogAt } });
+          broadcast({ type: "workspaces.updated" });
           return json(ws, 201);
         }),
       },
@@ -2170,6 +2186,42 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
        * source kept here only, as a registration with it does (#2265). Already off: 200, nothing changes.
        */
       "/api/workspaces/:id": {
+        /**
+         * Removes the registration (#2600); `deleteCopy` deletes the directory too, only a Git checkout next to this one
+         * (`copyDeletable`). A running Task there or a schedule that names it refuses (409). Tasks keep their history. The
+         * stored backlog is the repository's: it goes only with the last workspace of that repository.
+         */
+        DELETE: strong(async (req, srv) => {
+          const id = String(req.params.id);
+          const ws = db.getWorkspace(id);
+          if (!ws) return bad("not found", 404);
+          if (ws.kind === "meta") return bad("meta workspace は外せません", 400);
+          // read the body first: from the checks to the delete nothing yields, so no Task starts in between
+          const body = await readJson(req, (x) => (x ?? {}) as { deleteCopy?: unknown });
+          const deleteCopy = body.deleteCopy === true;
+          const running = runningTasksIn(ws);
+          if (running > 0) return bad(`この workspace で動いている Task が ${running} 件あります。終えてから外してください`, 409);
+          const schedule = db.listSchedules().find((x) => x.workspaceId === id);
+          if (schedule) return bad(`スケジュール「${schedule.title}」がこの workspace を使っています。先にスケジュールを変えるか消してください`, 409);
+          if (deleteCopy) {
+            const copy = copyDeletable(ws, cfg.repoRoot);
+            if (!copy.ok) return bad(copy.reason, copy.code);
+          }
+          const source = db.getWorkspaceBacklogSource(id);
+          if (deleteCopy && existsSync(ws.path)) {
+            try {
+              // synchronous on purpose: nothing yields between the checks above and the delete (a Task cannot start in between)
+              rmSync(realpathSync(ws.path), { recursive: true, force: true });
+            } catch (e) {
+              return bad(`ディレクトリを消せませんでした（登録はそのままです）: ${(e as Error).message}`, 500);
+            }
+          }
+          if (source && !db.listWorkspaces().some((w) => w.id !== id && db.getWorkspaceBacklogSource(w.id)?.repository === source.repository && db.getWorkspaceBacklogSource(w.id)?.host === source.host && db.getWorkspaceBacklogSource(w.id)?.service === source.service)) db.deleteBacklogRepository(source);
+          db.deleteWorkspace(id);
+          logOp(req, srv, "workspace.remove", { detail: { path: ws.path, deleteCopy } });
+          broadcast({ type: "workspaces.updated" });
+          return json({ ok: true });
+        }),
         PATCH: async (req) => {
           const id = String(req.params.id);
           if (!db.getWorkspace(id)) return bad("not found", 404);
@@ -2186,6 +2238,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             try {
               const enabling = await enableGithubSync(opts.gh ?? runGh, db, { ...ws, projectVar: source?.service === "switchboard" ? (v as string) || undefined : ws.projectVar }, Date.now());
               backlog.send(db.getWorkspace(id)!);
+              broadcast({ type: "workspaces.updated" });
               return json({ ...db.getWorkspace(id)!, enabling }, 202);
             } catch (e) {
               if (e instanceof BacklogError) return bad(e.message, 424);
@@ -2209,6 +2262,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             }
             // marks them current and drops a read planned while they synced
             for (const w of db.listWorkspaces()) if (db.getWorkspaceBacklogSource(w.id)?.repository === (source ?? localBacklogSource(id)).repository) await backlog.sync(w).catch(() => undefined);
+            broadcast({ type: "workspaces.updated" });
             return json(db.getWorkspace(id));
           }
           // a backlog kept here only (#2265), or one whose GitHub sync is off (#2266), reads no GitHub Project
@@ -2221,7 +2275,20 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           const ws = db.setWorkspaceProjectVar(id, next);
           // not an import begun with the old variable: it does not write its source back (backlog-sync.ts)
           if (ws && existsSync(ws.path)) backlog.wrote(ws);
+          broadcast({ type: "workspaces.updated" });
           return json(ws);
+        },
+      },
+
+      /** What removing the workspace would do (#2600), for the confirmation `DELETE /api/workspaces/:id` follows. */
+      "/api/workspaces/:id/removal": {
+        GET: async (req) => {
+          const ws = db.getWorkspace(String(req.params.id));
+          if (!ws) return bad("not found", 404);
+          const copy = copyDeletable(ws, cfg.repoRoot);
+          const lost = copy.ok && existsSync(ws.path) ? await inspectRemoval(ws.path) : { dirty: false, unpushed: false };
+          const running = runningTasksIn(ws);
+          return json({ name: ws.name, path: ws.path, copy: copy.ok ? { deletable: true } : { deletable: false, reason: copy.reason }, ...lost, running } satisfies WorkspaceRemoval);
         },
       },
 
@@ -2496,6 +2563,15 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
               : { ws, title: feedbackTitle(parsed.data.text), prompt: buildFeedbackPrompt({ text: parsed.data.text, when, screen: parsed.data.screen, other, source: parsed.data.source }) }),
             attachmentIds: parsed.data.attachmentIds,
           });
+          return "task" in r ? json(r.task, 201) : bad(r.error, r.status);
+        },
+      },
+
+      "/api/new-repo": {
+        POST: async (req) => {
+          const parsed = NewRepoInput.safeParse(await req.json().catch(() => null));
+          if (!parsed.success) return bad(parsed.error.message);
+          const r = await startMetaTask({ kind: "new-repo", title: newRepoTitle(parsed.data.name), prompt: buildNewRepoPrompt({ ...parsed.data, when: new Date() }) });
           return "task" in r ? json(r.task, 201) : bad(r.error, r.status);
         },
       },

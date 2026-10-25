@@ -3213,6 +3213,33 @@ test("PATCH /api/workspaces/:id: the same projectVar keeps the stored backlog; a
   expect(after.items.length).toBeGreaterThan(0);
 });
 
+test("a workspace registered over the API and given its projectVar is in GET /api/backlog with no errors, even with 0 Issues (#1447)", async () => {
+  const fake = fakeGh();
+  // a Project with no Issue yet: the same answers, an empty page for the GraphQL reads
+  const gh: GhRunner = async (args, cwd) => {
+    if (args[0] === "api" && args.some((a) => a.includes("issues("))) return { code: 0, stdout: JSON.stringify({ data: { repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } }), stderr: "" };
+    return fake.gh(args, cwd);
+  };
+  const base = await boot(gh);
+  const seen: string[] = [];
+  const ws = new WebSocket(`ws://127.0.0.1:${core!.server.port}/ws`);
+  ws.onmessage = (e) => { const m = JSON.parse(String(e.data)) as { type: string }; if (m.type === "workspaces.updated") seen.push(m.type); };
+  await new Promise<void>((r) => (ws.onopen = () => r()));
+  const dir = mkdtempSync(join(home!, "new-"));
+  Bun.spawnSync(["git", "init", "-q", dir]);
+  const created = (await (await fetch(`${base}/api/workspaces`, { method: "POST", body: JSON.stringify({ path: dir, name: "fresh" }) })).json()) as { id: string };
+  for (let i = 0; seen.length < 1 && i < 100; i++) await Bun.sleep(10);
+  expect(seen).toHaveLength(1);
+  expect((await fetch(`${base}/api/workspaces/${created.id}`, { method: "PATCH", body: JSON.stringify({ projectVar: "FRESH_PROJECT_URL" }) })).status).toBe(200);
+  for (let i = 0; seen.length < 2 && i < 100; i++) await Bun.sleep(10);
+  expect(seen).toHaveLength(2);
+  const after = await refreshed(base, false);
+  ws.close();
+  expect(after.errors.filter((e) => e.workspaceId === created.id)).toEqual([]);
+  expect(after.syncs.find((s) => s.workspaceId === created.id)).toMatchObject({ syncing: false, syncedAt: expect.any(Number), sync: expect.objectContaining({ state: expect.not.stringMatching(/^error$/) }) });
+  expect(after.items.filter((i) => i.workspaceId === created.id)).toEqual([]);
+});
+
 test("GET /api/backlog before the first import: no items, the workspace in errors and its import under way — never an empty list as if read (#885)", async () => {
   const ok = fakeGh();
   let release!: () => void;

@@ -3,7 +3,7 @@
  * headless Chrome (CDP) against the daemon with a gh that throws (every call recorded) and a fake runner that stays
  * running. The daemon gets no test hook. Build the screen first: `bun run --cwd apps/web build`.
  *
- * (1) Home: 「Workspace を追加」 with 「GitHub と連携しない」 checked → (2) `ops-kit backlog create` a request #1 → the
+ * (1) 設定: 「Workspace」 → ホストのパス with 「GitHub と連携しない」 checked → (2) `ops-kit backlog create` a request #1 → the
  * Backlog screen lists it under 要望のまま → (3) 「PBI にする」 → a to-pbi Task → (4) as that Task would: PBI #2
  * (`--field Status=Backlog`) and #1's `## 派生 PBI` → #2 under 分解待ち → (5) 「Task に分解」 → a to-tasks Task →
  * (6) Task #3 under #2 and `ops-kit backlog set 2 Status Ready` → #2 under Ready → (7) 「実装する」 → a complete Task.
@@ -132,12 +132,16 @@ try {
     await call("Input.dispatchMouseEvent", { type: "mouseReleased", ...point, button: "left", clickCount: 1 });
   };
   const shot = async (name: string) => writeFileSync(join(shots, `${name}.png`), Buffer.from((await call("Page.captureScreenshot", { format: "png" })).data, "base64"));
-  const addCard = `[...document.querySelectorAll('section.card')].find(s => s.querySelector('h5')?.textContent.trim() === 'Workspace を追加')`;
+  const addCard = `[...document.querySelectorAll('section.card')].find(s => s.querySelector('h5')?.textContent.trim() === 'Workspace')`;
   const pathField = `(${addCard})?.querySelector('input[placeholder="/absolute/path/to/repo"]')`;
   const localBox = `(${addCard})?.querySelector('label input[type=checkbox]')`;
   const openHome = async () => {
     await call("Page.navigate", { url: base });
-    await until(() => evaluate(`!!(${pathField})`), "Home's Workspace を追加");
+    await until(() => evaluate(`!!document.querySelector('.rail')`), "Rail");
+    await press(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Settings')`, "Settings");
+    await until(() => evaluate(`!!(${addCard})`), "設定's Workspace card");
+    await press(`[...(${addCard})?.querySelectorAll('button') ?? []].find(b => b.textContent.trim() === 'ホストのパス')`, "ホストのパス");
+    await until(() => evaluate(`!!(${pathField})`), "the path field");
   };
   const openBacklog = async () => {
     await call("Page.navigate", { url: base });
@@ -161,7 +165,7 @@ try {
   await call("Log.enable");
   await call("Page.enable");
 
-  // (1) Home: the path, 「GitHub と連携しない」, 追加
+  // (1) 設定: the path, 「GitHub と連携しない」, 追加
   await openHome();
   check("the GitHub-less box is off by default", (await evaluate(`(${localBox}).checked`)) === false);
   await evaluate(`(() => { const e = ${pathField}; e.focus(); e.select(); })()`);

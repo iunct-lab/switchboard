@@ -396,6 +396,13 @@ export const FeedbackInput = z.object({
 });
 export type FeedbackInput = z.infer<typeof FeedbackInput>;
 
+/** 新しいリポジトリ (#1447): the name and what it is for. Everything else is decided in the Task's conversation. */
+export const NewRepoInput = z.object({
+  name: z.string().regex(/^[A-Za-z0-9._-]{1,100}$/),
+  purpose: z.string().trim().min(1).max(2_000),
+});
+export type NewRepoInput = z.infer<typeof NewRepoInput>;
+
 export const CreateTaskInput = z.object({
   executionMode: ExecutionMode.default("local"),
   workspaceId: z.string().optional(),
@@ -546,7 +553,7 @@ export type TaskJudgement = z.infer<typeof TaskJudgement>;
  * The kinds of Task that start by themselves (#1337): the feedback modes (`FeedbackInput.mode`) and the backlog stages
  * (`BacklogAction`), under their own names.
  */
-export const AutoStartKind = z.enum(["fix", "request", "to-pbi", "to-tasks", "complete", "check", "close"]);
+export const AutoStartKind = z.enum(["fix", "request", "to-pbi", "to-tasks", "complete", "check", "close", "new-repo"]);
 export type AutoStartKind = z.infer<typeof AutoStartKind>;
 
 /** One kind's own runner / model / effort (#1337); `model` / `effort` empty = that runner's CLI default. */
@@ -572,6 +579,7 @@ export const AutoStartSettings = z
         complete: AutoStartChoice.optional(),
         check: AutoStartChoice.optional(),
         close: AutoStartChoice.optional(),
+        "new-repo": AutoStartChoice.optional(),
       })
       .default({}),
     /**
@@ -752,6 +760,7 @@ export const SettingsPatch = z.object({
           complete: autoStartChoicePatch,
           check: autoStartChoicePatch,
           close: autoStartChoicePatch,
+          "new-repo": autoStartChoicePatch,
         })
         .partial(),
       /** Replaces the whole order (#834). */

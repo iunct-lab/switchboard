@@ -25,7 +25,6 @@ export function Home(props: {
   runnerOk: Set<RunnerId>;
   onCreate: (input: CreateTaskInput) => Promise<void>;
   onOpenTask: (id: string) => void;
-  onAddWorkspace: (path: string, backlog: "github" | "switchboard") => Promise<void>;
   onError: (msg: string) => void;
   /** Bumped when the knowledge folder changes (inbox notes live there). */
   inboxRev: number;
@@ -54,9 +53,6 @@ export function Home(props: {
   /** undefined = not loaded yet (the toggle waits; an untouched creation leaves the choice to the daemon). */
   const [shadowDefault, setShadowDefault] = useState<RunnerId | null | undefined>(undefined);
   const [busy, setBusy] = useState(false);
-  const [newPath, setNewPath] = useState("");
-  // a workspace without GitHub (#2265): its backlog kept in Switchboard; off by default
-  const [localBacklog, setLocalBacklog] = useState(false);
   const [suggestion, setSuggestion] = useState<RoutingSuggestion | null>(null);
   const [inbox, setInbox] = useState<InboxNote[]>([]);
   const [promoteWs, setPromoteWs] = useState<Record<string, string>>({});
@@ -361,6 +357,14 @@ export function Home(props: {
 
   return (
     <main className="main home">
+      {!props.workspaces.some((w) => w.kind === "repo") && (
+        <section className="card">
+          <div className="row">
+            <span>Workspace がまだありません</span>
+            <button onClick={props.onOpenSettings}>設定で追加 →</button>
+          </div>
+        </section>
+      )}
       <section className="card compose">
         <div className="row head">
           <h5>新しいタスク · Inbox</h5>
@@ -688,30 +692,6 @@ export function Home(props: {
         <div className="hint">
           読み込み元: <span className="mono">{history?.dir ?? "~/.claude/projects"}</span>。取り込んだ Task には「Terminal」タグが付き、会話・差分・台帳は Switchboard から始めた Task と同じ見え方。Switchboard 自身が動かしたセッションは二重に入りません。
         </div>
-      </section>
-
-      <section className="card">
-        <h5>Workspace を追加</h5>
-        <div className="row">
-          <input value={newPath} onChange={(e) => setNewPath(e.target.value)} placeholder="/absolute/path/to/repo" style={{ flex: 1 }} />
-          <button
-            disabled={!newPath.trim()}
-            onClick={() =>
-              props
-                .onAddWorkspace(newPath.trim(), localBacklog ? "switchboard" : "github")
-                .then(() => {
-                  setNewPath("");
-                  setLocalBacklog(false);
-                })
-                .catch((e) => props.onError(String(e.message ?? e)))
-            }
-          >
-            追加
-          </button>
-        </div>
-        <label className="hint">
-          <input type="checkbox" checked={localBacklog} onChange={(e) => setLocalBacklog(e.target.checked)} /> GitHub と連携しない（Issue・Project を Switchboard に置く。PR は今どおり Remote）
-        </label>
       </section>
     </main>
   );
