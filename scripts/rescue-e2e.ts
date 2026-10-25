@@ -51,16 +51,26 @@ try {
   const chrome = Bun.spawn([process.env.CHROME_BIN ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-gpu", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank"], { stdout: "ignore", stderr: "ignore" });
   procs.push(chrome);
   const cdpPort = await until(() => { try { return readFileSync(join(profile, "DevToolsActivePort"), "utf8").split("\n")[0]; } catch { return null; } }, "Chrome port");
-  const tabs = (await (await fetch(`http://127.0.0.1:${cdpPort}/json/list`)).json()) as Array<{ type: string; webSocketDebuggerUrl: string }>;
-  const ws = new WebSocket(tabs.find((t) => t.type === "page")!.webSocketDebuggerUrl);
+  const tab = await until(async () => ((await (await fetch(`http://127.0.0.1:${cdpPort}/json/list`)).json()) as Array<{ type: string; webSocketDebuggerUrl: string }>).find((t) => t.type === "page"), "Chrome page");
+  const ws = new WebSocket(tab.webSocketDebuggerUrl);
   await new Promise<void>((resolve, reject) => { ws.onopen = () => resolve(); ws.onerror = () => reject(new Error("CDP socket failed")); });
   let seq = 0;
   const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   const dialogs: string[] = [];
+  let interceptionError: unknown;
   const call = (method: string, params: object = {}): Promise<any> => new Promise((resolve, reject) => { const id = ++seq; pending.set(id, { resolve, reject }); ws.send(JSON.stringify({ id, method, params })); });
   ws.onmessage = (event) => {
     const m = JSON.parse(String(event.data));
     if (m.id) { const p = pending.get(m.id); pending.delete(m.id); m.error ? p?.reject(new Error(JSON.stringify(m.error))) : p?.resolve(m.result); }
+    if (m.method === "Fetch.requestPaused") {
+      void (async () => {
+        const { requestId } = m.params;
+        const response = await call("Fetch.getResponseBody", { requestId });
+        const body = JSON.parse(response.base64Encoded ? Buffer.from(response.body, "base64").toString("utf8") : response.body);
+        body.rebuild = true;
+        await call("Fetch.fulfillRequest", { requestId, responseCode: 200, responseHeaders: [{ name: "content-type", value: "application/json" }], body: Buffer.from(JSON.stringify(body)).toString("base64") });
+      })().catch((e) => { interceptionError = e; });
+    }
     if (m.method === "Page.javascriptDialogOpening") { dialogs.push(m.params.message); void call("Page.handleJavaScriptDialog", { accept: true }); }
   };
   const evaluate = async (expression: string) => (await call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true })).result.value;
@@ -69,15 +79,18 @@ try {
   await call("Page.navigate", { url: `${base}/` });
   await until(() => evaluate(`document.getElementById("state").textContent.includes("応答なし")`), "page shows that Switchboard is down");
   say(`page at 390px: "${await evaluate(`document.getElementById("state").textContent`)}"`);
+  assert(await evaluate(`getComputedStyle(document.getElementById("rebuild-row")).display === "none"`), "rebuild: false must hide the rebuild row");
+  assert(await evaluate(`[...document.querySelectorAll("[hidden]")].every((e) => getComputedStyle(e).display === "none")`), "every hidden element must have display: none");
+  say("rebuild: false hides the row; every [hidden] element has display: none");
   const width = await evaluate("document.documentElement.scrollWidth");
   assert(width <= 390, `the page scrolls sideways at 390px (scrollWidth ${width})`);
-  const small = await evaluate(`[...document.querySelectorAll("button")].filter((b) => b.getBoundingClientRect().height < 44).length`);
+  const small = await evaluate(`[...document.querySelectorAll("button")].filter((b) => b.getClientRects().length > 0 && b.getBoundingClientRect().height < 44).length`);
   assert(small === 0, `${small} button(s) are shorter than 44px`);
   say(`scrollWidth=${width}, every button is at least 44px tall, log lines=${await evaluate(`document.getElementById("log").textContent.split("\\n").length`)}`);
   await until(() => evaluate(`document.getElementById("tmp-usage").textContent.includes("使用") && document.getElementById("tmp-sweep").textContent.includes("自動の片付け") && document.querySelectorAll("#tmp-list li").length > 0`), "the /tmp section shows the usage and the entries");
   const tmpWidth = await evaluate("document.documentElement.scrollWidth");
   assert(tmpWidth <= 390, `the page scrolls sideways at 390px with /tmp listed (scrollWidth ${tmpWidth})`);
-  const tmpSmall = await evaluate(`[...document.querySelectorAll("button")].filter((b) => b.getBoundingClientRect().height < 44).length`);
+  const tmpSmall = await evaluate(`[...document.querySelectorAll("button")].filter((b) => b.getClientRects().length > 0 && b.getBoundingClientRect().height < 44).length`);
   assert(tmpSmall === 0, `${tmpSmall} button(s) are shorter than 44px with /tmp listed`);
   // tmp-clean is not pressed: the bundle reads this host's real /tmp; bun test rescue removes on a fake one
   say(`/tmp at 390px: "${await evaluate(`document.getElementById("tmp-usage").textContent`)}", "${await evaluate(`document.getElementById("tmp-sweep").textContent`)}", first: "${await evaluate(`document.querySelector("#tmp-list li").textContent`)}", button: "${await evaluate(`document.getElementById("tmp-clean").textContent`)}"`);
@@ -110,6 +123,11 @@ try {
   assert((await status()).current === versionBefore && (await status()).history[0]!.action === "restore-db", "the agent run changed the release or the history");
   say(`clicked 救援エージェントを起動 (confirm: "${dialogs.at(-1)}") → output grew ${first} → ${grown} chars while running; first line: "${output.split("\n")[0]!.slice(0, 90)}…"; state: "${await evaluate(`document.getElementById("agent-state").textContent`)}"; current unchanged`);
   assert((await evaluate("document.documentElement.scrollWidth")) <= 390, "the page scrolls sideways with agent output");
+  await call("Fetch.enable", { patterns: [{ urlPattern: "*/api/status*", requestStage: "Response" }] });
+  await until(() => interceptionError || evaluate(`!document.getElementById("rebuild-row").hidden && getComputedStyle(document.getElementById("rebuild-row")).display !== "none" && !document.getElementById("rebuild").disabled`), "rebuild: true shows an enabled rebuild button");
+  assert(!interceptionError, `status interception failed: ${interceptionError}`);
+  say("rebuild: true (intercepted status) shows the row and enables the button");
+  await call("Fetch.disable");
   ws.close();
   say("PASS");
 } finally {
