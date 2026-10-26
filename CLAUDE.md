@@ -7,7 +7,7 @@
 - リポジトリ: このリポジトリ（`gh repo view --json nameWithOwner -q .nameWithOwner`）。`gh` の書き込み（issue / pr の作成・コメント・編集・マージ・クローズ）には `-R "$(gh repo view --json nameWithOwner -q .nameWithOwner)"` を付ける
 - Project の URL: リポジトリ変数 `SWITCHBOARD_PROJECT_URL`（同名の環境変数を優先）。選択肢（Area / Kind / Priority / Phase）・必須の節・Story Points: root の `ops.config.json`。Milestone は Phase ごと（`Phase N — …`）。自分の Project URL を登録する。Project 自動追加は `ops-kit/template/.github/workflows/project-autoadd.yml` の任意導入。未導入なら `scripts/setup/triage_issue.sh` で登録する（Status は自分で付ける）
 - バックログの道具: `scripts/setup/` の入口（`lint_backlog.sh` / `set_project_field.sh` / `triage_issue.sh` / `bootstrap_project.sh` / `request_issue.sh` / `scan_issues.sh`）。中身は `ops-kit/`（`bun ops-kit/src/cli.ts --help`）。ほかのリポジトリの Project を触るときは `SWITCHBOARD_PROJECT_URL=<URL>` を付ける
-- 公開リポジトリへの同期: `ops-kit public-sync`（共通キットの `bin/ops-kit`。`--dry-run` は送らずに結果だけ出す）。公開先・外すファイル・書き換えるファイルは root の `ops.config.json` の `publicSync`。仕組みはキットの README の「公開リポジトリへの同期」、このリポジトリの手順は `docs/design/public-repo.md`
+- 公開リポジトリへの同期: `ops-kit public-sync`（共通キットの `bin/ops-kit`。`--dry-run` は送らずに結果だけ出す）。公開先・外すファイル・書き換えるファイルは root の `ops.config.json` の `publicSync`。仕組みはキットの README の「公開リポジトリへの同期」
 - 認証に使える値（ホストの AWS のプロファイル名・SSO のセッション名も）を Issue・PR に書かない（`issue-workflow` の「Issue・PR・コメントに書かない値」）。Switchboard が起動したランナーでは `gh` の前段（`ops-kit/bin/gh`、`docs/design/secret-guard.md`）が投稿の前に止める。既に書かれたものは `bash scripts/setup/scan_issues.sh`（週に 1 回 `.github/workflows/secret-scan.yml` も走る）
 - Story Points の目安: 2 = 文書や局所的な修正、3 = 単一 API の変更、5 = 複数モジュールの変更、8 = API・UI・保存をまたぐ変更。自分の完了した PBI と比べて調整する
 - 設計ルール: README の `## Design rules`（`## License` の手前まで）。ライセンスは Apache-2.0（依存を足すなら `bun pm licenses`）
@@ -87,8 +87,8 @@ Codex の `five_hour` が 0.9 以上、または `codex exec` が使用上限で
 
 ## マージ判定とローカル CI
 
-- マージ判定: `bun scripts/merge-gate.ts <PR> [--allow-large]`（exit 0 = merge / 1 = stop / 2 = 判定不能。規則は `docs/design/merge-gate.md`）。スキルの `<マージ判定>`。large の理由のうち `[再チェック <kind>]` は、`docs/design/merge-gate.md` の「## 再チェック」（スキルの `<再チェック>`）を回して付ける印 `[recheck] <kind> pass <head sha>` で外れる。`[聞く]` は利用者が認めたとき（`--allow-large`）だけ
-- ローカル CI: Actions が始まらない（ジョブのステップ 0 件）か run が無いときは `bun scripts/local-ci.ts <PR>` で Actions と同じ手順（`scripts/ci.ts`）を、最新の head を最新の base にマージして回す。結果は PR に付き（`[local-ci] pass|fail <head sha> base=<base sha>`）、merge-gate は今の head と base の組の最新が pass のときだけその CI の成功と数える（head か base が変わったら回し直す）。base の枝の保護が必須チェックを求めると BLOCKED で止まる（ローカルの結果では満たせない。確かめ方は `docs/design/merge-gate.md` の「保護枝とローカルの結果」）。スキルの `<ローカル CI>`
+- マージ判定: `bun scripts/merge-gate.ts <PR> [--allow-large]`（exit 0 = merge / 1 = stop / 2 = 判定不能。規則は `scripts/merge-gate.ts`、手順と印は `docs/merge-gate.md`）。スキルの `<マージ判定>`。large の理由のうち `[再チェック <kind>]` は、`docs/merge-gate.md` の「## 再チェック」（スキルの `<再チェック>`）を回して付ける印 `[recheck] <kind> pass <head sha>` で外れる。`[聞く]` は利用者が認めたとき（`--allow-large`）だけ
+- ローカル CI: Actions が始まらない（ジョブのステップ 0 件）か run が無いときは `bun scripts/local-ci.ts <PR>` で Actions と同じ手順（`scripts/ci.ts`）を、最新の head を最新の base にマージして回す。結果は PR に付き（`[local-ci] pass|fail <head sha> base=<base sha>`）、merge-gate は今の head と base の組の最新が pass のときだけその CI の成功と数える（head か base が変わったら回し直す）。base の枝の保護が必須チェックを求めると BLOCKED で止まる（ローカルの結果では満たせない。確かめ方は `docs/merge-gate.md` の「保護枝とローカルの結果」）。スキルの `<ローカル CI>`
 - `gh pr checks` が権限不足で 403 になるときは、`gh run list -R "$(gh repo view --json nameWithOwner -q .nameWithOwner)" --commit <sha>` で見る
 
 ## 追加のレビュアー

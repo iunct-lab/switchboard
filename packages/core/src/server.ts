@@ -16,7 +16,7 @@ import { ArtifactError, ArtifactStore, artifactMime, checkViewKey, withCharset, 
 import { AttachmentError, AttachmentStore, extValue, formatBytes, isActiveContent, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_REQUEST } from "./attachments.ts";
 import { MAX_PTY_SESSIONS, type PtyAttached, type PtyClient, PtyClientMessage, PtyManager } from "./pty.ts";
 import { accessLine, authKind, opLine } from "./accesslog.ts";
-import { addressKey, EDGE_HEADER, edgeOk, hostAllowed, isLoopback, isLoopbackAddress, LOOPBACK_HOSTNAMES, loadOrCreateToken, makeFailureLimit, makeSessionCheck, recentOk, sameOrigin, SESSION_COOKIE, SESSION_RECHECK_MS, tokenEquals, tokenFromRequest } from "./auth.ts";
+import { addressKey, EDGE_HEADER, edgeOk, hostAllowed, isLoopback, isLoopbackAddress, LOOPBACK_HOSTNAMES, loadOrCreateToken, makeFailureLimit, makeSessionCheck, recentOk, sameOrigin, SESSION_COOKIE, SESSION_RECHECK_MS, sessionTimes, tokenEquals, tokenFromRequest } from "./auth.ts";
 import { buildFeedbackPrompt, buildFixPrompt, buildNewRepoPrompt, feedbackTitle, fixTitle, newRepoTitle } from "./feedback.ts";
 import { measureFootprint } from "./footprint.ts";
 import { loadMcpPolicy, mcpServersFor, WorkspaceMcp } from "./mcp.ts";
@@ -62,7 +62,7 @@ import { RunnerLogins } from "./runnerlogin.ts";
 import { DeviceAuths, type DeviceAuthInput } from "./deviceauth.ts";
 import { archiveProblem } from "./archive-status.ts";
 
-// Web UI policy: docs/design/web-csp.md.
+// Web UI policy (Content-Security-Policy and the other headers every page gets).
 const WEB_HEADERS = {
   "content-security-policy": "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; frame-ancestors 'none'; base-uri 'none'; object-src 'none'",
   "x-content-type-options": "nosniff",
@@ -710,7 +710,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     },
   });
   /**
-   * The questions now (#935, docs/design/asks.md): the open ones and those answered / resolved within the day, one per
+   * The questions now (#935): the open ones and those answered / resolved within the day, one per
    * question, from the stored backlog (no GitHub call) and the Tasks.
    */
   /**
@@ -1613,7 +1613,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
    * of `strong`, and it is refused to a Task. A runner can read the daemon's token, so a token is taken only from the web
    * UI's own page (this origin and Sec-Fetch-Site: same-origin); on the cloud host, where the passkey login is on, only the
    * cookie counts. Without the passkey login that is a check on how the request looks, not a proof: a Task on this machine,
-   * which runs as the same user, can forge both headers (docs/design/asks.md). Answers a Task gives to its own approval are unchanged (#936): they allow one thing, once.
+   * which runs as the same user, can forge both headers. Answers a Task gives to its own approval are unchanged (#936): they allow one thing, once.
    */
   const humanCheck = async (req: Request, srv: Peer): Promise<Response | null> => {
     const auth = await authorize(req, srv);
@@ -1739,10 +1739,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       "/api/health": async (req, srv) => {
         // `login` tells the UI how a person gets in before it is authorized: the cloud host's passkey page (#211) or the token.
         const login = cfg.sessionPublicKey ? "passkey" : "token";
-        if (!(await authorized(req, srv))) return json({ ok: true, protocol: PROTOCOL_VERSION, authRequired, login });
+        const auth = await authorize(req, srv);
+        if (!auth.ok) return json({ ok: true, protocol: PROTOCOL_VERSION, authRequired, login });
         // /api/health is open to other origins (the UI learns whether a token is needed); a forced run is not.
         await refreshLogins(new URL(req.url).searchParams.has("recheck") && sameOrigin(req));
-        return json({ ok: true, protocol: PROTOCOL_VERSION, login, runners: runnerInfo(), home: cfg.home, homeDisplay: cfg.homeDisplay, homeIsTemp: cfg.homeIsTemp, repoRoot: cfg.repoRoot, authRequired, features: { pty: pty !== null }, archive: archiveProblem(cfg.home), routing: { llm: { ...settings().routing.llm, available: adapterMap.has(settings().routing.llm.runner) } }, mcp: { base: `${publicUrl()}/mcp/<taskId>` } });
+        return json({ ok: true, protocol: PROTOCOL_VERSION, login, session: (auth.session && sessionTimes(auth.session, cfg.sessionPublicKey)) || undefined, runners: runnerInfo(), home: cfg.home, homeDisplay: cfg.homeDisplay, homeIsTemp: cfg.homeIsTemp, repoRoot: cfg.repoRoot, authRequired, features: { pty: pty !== null }, archive: archiveProblem(cfg.home), routing: { llm: { ...settings().routing.llm, available: adapterMap.has(settings().routing.llm.runner) } }, mcp: { base: `${publicUrl()}/mcp/<taskId>` } });
       },
 
       // Settings the UI can change (#58). A saved default mode must be one the runner offers and must not skip
@@ -1965,7 +1966,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       },
       "/api/schedules/log": () => json(scheduler.recentLog()),
       /**
-       * Saved instructions (#940, docs/design/presets.md). Expanding builds the text to put in the request / reply box and
+       * Saved instructions (#940). Expanding builds the text to put in the request / reply box and
        * writes nothing: the Task is created or the reply sent by POST /api/tasks / send as before, approval and all.
        */
       "/api/presets": {
@@ -2031,7 +2032,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       "/api/approvals": () => json(tasks.pendingApprovals()),
 
       /**
-       * The questions waiting on the user across the Tasks and every workspace's backlog (#935, docs/design/asks.md): the
+       * The questions waiting on the user across the Tasks and every workspace's backlog (#935): the
        * open ones and those answered / resolved within the day, one per question. The backlog is the stored copy, as GET
        * /api/backlog reads it without refresh — no GitHub call.
        */
@@ -2074,7 +2075,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       },
 
       /**
-       * Answers one question and goes on (#936, docs/design/asks.md): `{ id, answer }` as on screen. 200 = written (and the
+       * Answers one question and goes on (#936): `{ id, answer }` as on screen. 200 = written (and the
        * work asked to go on), `ask` with its resume; `already` = it was answered before (a resend, or a second click while
        * the first was written) and nothing was written again. 409 = the question changed (AskChanged), nothing written.
        */

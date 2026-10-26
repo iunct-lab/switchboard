@@ -3,7 +3,7 @@ import { findSecrets, hostAws } from "../../../ops-kit/src/secrets.ts";
 import type { Db } from "./db.ts";
 
 /**
- * Saved instructions (#940, docs/design/presets.md): a name and a request text kept in the `settings` table (key
+ * Saved instructions (#940): a name and a request text kept in the `settings` table (key
  * `presets`, a JSON array — one user, a small list). The text names the skill / Knowledge that holds the steps; the
  * Issue / PR chosen when sending goes where `{{target}}` is. Expanding only builds the text: the Task is created or the
  * reply sent by the usual routes, so the approval mode and rules are the request box's, never the preset's.

@@ -471,7 +471,7 @@ describe("merge-gate readPr", () => {
 
     test("BLOCKED with the local pass: the base branch's protection stops it, and the reason says local-ci cannot meet it", async () => {
       const f = await facts({ comment: pass(), steps: 0, mergeState: "BLOCKED" }).read();
-      expect(reasons(f)).toEqual(["mergeStateStatus が BLOCKED: base の枝の保護（必須のチェックか承認）がマージを止めている。local-ci の結果は PR コメントで、GitHub の必須チェックにはならない（docs/design/merge-gate.md の「保護枝とローカルの結果」）"]);
+      expect(reasons(f)).toEqual(["mergeStateStatus が BLOCKED: base の枝の保護（必須のチェックか承認）がマージを止めている。local-ci の結果は PR コメントで、GitHub の必須チェックにはならない（docs/merge-gate.md の「保護枝とローカルの結果」）"]);
       // without a local pass BLOCKED is said as before
       expect(reasons({ ...f, localCi: undefined, checks: [{ name: "CI", conclusion: "SUCCESS" }] })).toEqual(["mergeStateStatus が CLEAN でない: BLOCKED"]);
     });

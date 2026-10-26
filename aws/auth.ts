@@ -275,8 +275,13 @@ export function makeAuth(d: AuthDeps) {
   const recentCookie = async (passkeyId: string) =>
     `${RECENT_COOKIE}=${recentValue(await sessionKey(), passkeyId, now() + RECENT_MS)}; HttpOnly; ${secure}SameSite=Lax; Path=/; Max-Age=${RECENT_MS / 1000}`;
   const cookieValue = (req: Request, name: string) => req.cookies.map((c) => c.trim()).find((c) => c.startsWith(`${name}=`))?.slice(name.length + 1);
-  /** The request's own (valid) session cookie with the idle time moved on; its cap is the cookie's last field (#498). */
-  const renewed = async (req: Request, id: string) => cookie(id, Number(Buffer.from(cookieValue(req, SESSION_COOKIE)!.split(".")[0]!, "base64url").toString().split(".").at(-1)));
+  /** The (already verified) session cookie's two times: when the idle time and the cap end (#498). */
+  const timesOf = (req: Request) => {
+    const [, idleUntil, expiresAt] = Buffer.from(cookieValue(req, SESSION_COOKIE)!.split(".")[0]!, "base64url").toString().split(".");
+    return { idleUntil: Number(idleUntil), expiresAt: Number(expiresAt) };
+  };
+  /** The request's own (valid) session cookie with the idle time moved on; the cap stays. */
+  const renewed = async (req: Request, id: string) => cookie(id, timesOf(req).expiresAt);
   /** The passkey id of a valid session cookie, else undefined. */
   const sessionId = async (req: Request, s?: Stored): Promise<string | undefined> => {
     const value = cookieValue(req, SESSION_COOKIE);
@@ -360,7 +365,8 @@ export function makeAuth(d: AuthDeps) {
     if (req.method === "GET" && path === "/_auth/status") {
       const hasCookie = req.cookies.some((c) => c.trim().startsWith(`${SESSION_COOKIE}=`));
       const s = hasCookie || req.headers["x-switchboard-ask"] === "registered" ? await load() : undefined;
-      return json(200, { state: await d.state(), registered: s ? s.passkeys.length > 0 : null, loggedIn: hasCookie ? !!(await sessionId(req, s)) : false, rpId });
+      const loggedIn = hasCookie ? !!(await sessionId(req, s)) : false;
+      return json(200, { state: await d.state(), registered: s ? s.passkeys.length > 0 : null, loggedIn, ...(loggedIn ? { session: timesOf(req) } : {}), rpId });
     }
     if (req.method === "GET" && path === "/_auth/countries") {
       if (!(await sessionId(req))) return json(401, { error: "パスキーでログインしてください" });

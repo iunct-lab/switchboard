@@ -1,4 +1,4 @@
-/** bun run licenses:check — every dependency's license against scripts/licenses.allow.json (docs/design/licenses.md). */
+/** bun run licenses:check — every dependency's license against scripts/licenses.allow.json. */
 
 /** `bun pm licenses --json`: packages grouped under their license. */
 export type LicenseReport = Record<string, Array<{ name: string; versions: string[]; license?: unknown }>>;
@@ -105,7 +105,7 @@ if (import.meta.main) {
   const count = Object.values(report).reduce((n, g) => n + g.length, 0);
   for (const v of violations) console.error(`${v.name}@${v.version}  ${v.license}  (${v.why})`);
   if (violations.length) {
-    console.error(`${violations.length} dependency license(s) not allowed — see docs/design/licenses.md`);
+    console.error(`${violations.length} dependency license(s) not allowed — see scripts/licenses.allow.json (_notes)`);
     process.exit(1);
   }
   console.log(`licenses: ${count} packages, all allowed`);

@@ -6,7 +6,7 @@ opens after the working copy or the temp directory is cleaned up.
 
 ## Why not attachments
 
-Attachments (`docs/design/attachments.md`) are part of the conversation: they cannot be removed or taken again, they are
+Attachments are part of the conversation: they cannot be removed or taken again, they are
 single files, and HTML / SVG / XML are downloaded, never shown. Artifacts are removed, refreshed and may be folders, so
 they have their own table (`artifacts`) and folder. The header tabs are not touched (#1776): 成果物 is one more tab inside
 the Task (会話 / 差分 / 成果物 / ターミナル).
@@ -83,7 +83,7 @@ is an integer 1..100, default 20 when absent, and a blank or non-digit value is 
 
 Where they show:
 
-- **Insights** — the header tab that was Evals until #1835 (the view's name stays `evals`; `docs/design/evals.md`): a
+- **Insights** — the header tab that was Evals until #1835 (the view's name stays `evals`): a
   レポート section above the per-task evaluations (`apps/web/src/components/Reports.tsx`). A row is the title ·
   `MM/DD HH:MM · <the schedule's or the Task's title>` · Task を開く · ×. The newest report (or the one Home was pressed on)
   is open on arrival and a row switches to another, in place, with the same sandboxed body as the Task's 成果物 tab
@@ -98,7 +98,7 @@ Retention is the artifact's own (removed = 24 h of undo, then swept); nothing is
 ### The daemon's own copy (`addCopy`, #1838)
 
 `ArtifactStore.addCopy(task, path, title)` registers a file the daemon itself knows the path of — the insights schedule's
-`report.html` under Claude Code's `usage-data`, outside every task's scope (`docs/design/scheduler.md`, insights). It skips
+`report.html` under Claude Code's `usage-data`, outside every task's scope (insights). It skips
 the scope check only; the deny list (the token, the database), the store itself and the size limits apply as for `add`, and
 the same path registered again for the same task replaces that artifact's copy. Nothing else calls it: a Task's agent and
 the screen go through `add` and its scope.
@@ -115,7 +115,7 @@ or MCP endpoint:
 ````
 
 - Every start's preamble carries one paragraph saying so (`artifactPrompt()` in `packages/core/src/artifacts.ts`, after the
-  stop report's paragraph of `stopRecoveryPrompt`); the insights Task (`docs/design/scheduler.md`) gets no preamble at all.
+  stop report's paragraph of `stopRecoveryPrompt`); the insights Task gets no preamble at all.
 - The daemon reads the fence as it reads `switchboard-stop` (`FenceReader<T>` in `stops.ts`, one reader per kind on the
   live session): only a fence opened at the start of a line and outside any other fence — a quoted example in a code
   block is not a registration. A fence whose body is not JSON of `ArtifactReport` (`path` 1..4096, `title` up to 200)

@@ -1,6 +1,6 @@
 /**
- * Which status a Task may move to, and what outcome the move implies. The table and the rule follow
- * docs/design/task-outcome.md (#1140): TaskManager checks `canTransition` before it writes, and `Db.updateTask` throws
+ * Which status a Task may move to, and what outcome the move implies (#1140).
+ * TaskManager checks `canTransition` before it writes, and `Db.updateTask` throws
  * `InvalidTaskTransitionError` for a move the table does not have, so a row never takes a status it may not have.
  */
 import type { Task, TaskStatus } from "@switchboard/protocol";

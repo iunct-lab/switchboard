@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // docker-mark
-// The front of `docker` (#1417, docs/design/task-cleanup.md). When the caller sets DOCKER_MARK_LABEL (`key=value`), a
+// The front of `docker` (#1417). When the caller sets DOCKER_MARK_LABEL (`key=value`), a
 // container that `docker run` / `create` makes gets it as a label, and when DOCKER_MARK_LOG is a file, the compose
 // project that `up` etc. starts is added to it as a line, so that the caller can remove them later. Everything goes on
 // to the real docker.

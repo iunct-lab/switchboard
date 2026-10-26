@@ -32,7 +32,7 @@ describe("cron (#20)", () => {
     // 2026-03-08 is the US spring-forward day in America/New_York: 02:00 → 03:00, so 02:30 never happens. `nextRun`
     // walks hour-by-hour and never finds `hour === 2` that day (setHours(2, ...) itself gets normalized forward by
     // the JS Date engine, same as the target time would), so the day is silently skipped — documented, current
-    // behavior (docs/design/scheduler.md), pinned here so a future change can't turn it into a hang or a mismatch.
+    // behavior, pinned here so a future change can't turn it into a hang or a mismatch.
     const prevTz = process.env.TZ;
     process.env.TZ = "America/New_York";
     try {

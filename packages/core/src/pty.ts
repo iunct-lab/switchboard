@@ -1,5 +1,5 @@
 // Terminal tab (#16): one interactive shell per task, in the task's cwd. The PTY is bun-pty (bun:ffi) inside the
-// daemon — no bridge process (docs/design/pty-bridge.md). A shell outlives its WebSocket clients; it ends when
+// daemon — no bridge process. A shell outlives its WebSocket clients; it ends when
 // the task ends (onTaskEnd), when the user exits it, when close() is called, or with the daemon.
 // The first frame to a socket is PtyAttached (the session's id); after that, output as raw strings. A socket that comes
 // back with ?shell=<id> is attached to that session only — never to a new shell (#1137).
@@ -64,7 +64,7 @@ export class PtyManager {
    * null when a PTY cannot be opened here: an unsupported OS / arch, or a distribution without the native library.
    * The daemon then reports features.pty = false and refuses /ws/pty. Importing is not enough of a check — bun-pty
    * logs a failed dlopen and lets the import succeed, and only the first spawn throws — so one throwaway process is
-   * spawned (docs/design/pty-bridge.md §4).
+   * spawned.
    */
   static async load(importer: () => Promise<{ spawn: Spawn }> = () => import("bun-pty"), timings?: Partial<TeleportTimings>): Promise<PtyManager | null> {
     try {

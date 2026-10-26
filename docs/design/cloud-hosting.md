@@ -46,6 +46,7 @@ AWS に常駐デーモンを置き、使うときだけ起動する構成。実�
 - ログインはパスキー（WebAuthn）
 - ログインの流れ（#211）: URL を開く → 認可されていなければ UI が `/_auth/?next=<元のパス>` へ移る → 起動用 Lambda（CloudFront の `/_auth/*`、機械が止まっていても動く）のページで Face ID / 指紋 → Lambda が `sb_session` Cookie（HttpOnly・Secure・署名つき。ログインから 7 日、または最後の操作から 24 時間で切れる）を出す → 止まっていれば同じ画面の「起動する」→ 動いたら元のパスへ。この Cookie 1 つで Switchboard の画面（`/api`・`/ws`・`/ws/pty`）と救援画面（`/rescue/`）に入れる。Cookie は起動用 Lambda だけが読める Ed25519 の seed（`/switchboard/session-signing-key`）で署名し、デーモンと sb-rescue は公開鍵（`SWITCHBOARD_SESSION_PUBLIC_KEY`、sb-env が `/switchboard/session-public-key` から渡す）で署名と期限（アイドル期限と上限の両方が未来で、アイドル期限が上限を越えない）を確かめる。上限 7 日・アイドル 24 時間は 3 か所（`aws/auth.ts`・`packages/core/src/auth.ts`・`rescue/src/server.ts`）に同じ値で置き、`aws/session-contract.test.ts` が食い違いを止める。古い 2 項目の Cookie は読まない（切り替えで再ログイン 1 回）。反映は Lambda（`sam deploy`）を先に、次にデーモン、最後に救援画面。アイドル期限の延ばし方は次の項目。ホストには公開鍵しか無いので、ホスト上のエージェントは Cookie を作れない（#701）。Cookie の形は `sb_session=<body>.<sig>`: body は UTF-8 の `<passkeyId>.<idleUntilMs>.<expiresMs>`（アイドル期限、上限の順。最後を上限にするのは、旧版が最後を期限と読むため）を base64url にした文字列、sig はその **base64url の文字列** への Ed25519 の署名を base64url にしたもの（正準な表記だけを通す）。署名が通っても、デーモンと sb-rescue は起動用 Lambda の `/_auth/status` に「そのパスキーがまだ登録されているか」を Cookie と共有ヘッダを付けて問い、答えを Cookie ごとに 5 分覚える。問えなければ通さない。開いている WebSocket は 5 分ごとに問い直し、消えていれば閉じる（#708）。UI は `/api/health` の `login`（`passkey` / `token`）でどちらのログインかを決め、ログイン後に戻っても拒まれたら（`?from=auth`）もう一度移らずに「デーモンの再起動が要る」と出す（ループしない）。**人がトークンを入力・コピーする場面は無い**。デーモンのトークンはホストの中（ループバック: ランナーの `/mcp`、sb-rescue の死活確認、エージェントの `curl`）でだけ通り、外（CloudFront 経由）からは Cookie だけが通る（#748。判定は接続の相手のアドレスで、ヘッダは見ない）。起動トークンは機械（GitHub Actions、sb-rescue の作り直す）のために残る
 - ログインの期限の延長（#498）: 画面（チャット画面と救援画面）が状態を変える操作（GET / HEAD 以外）の後に、起動用 Lambda の `POST /_auth/renew` を間引いて呼ぶ。起動・停止・作り直しが通ったときは、その応答の Cookie でも延びる。見るだけ・自動の読み直し・WebSocket（ターミナルの入力を含む）では延びない。Lambda は Cookie の上限と passkeyId を変えずにアイドル期限を 24 時間先（上限まで）にした Cookie を出す。署名できるのは Lambda だけなので、デーモンと救援画面は Cookie を出さない（#701）。
+- ログインの期限の表示（#498）: `/api/health` と `/_auth/status` が、Cookie で入った要求にだけ `session: { idleUntil, expiresAt }`（ms）を返す（Cookie は HttpOnly のまま）。チャット画面は足元の状態バーに「ログイン 〜まで」（早い方）を出し、その時刻に `/api/health` を読み直す。延びていれば新しい時刻、切れていれば既存の流れでパスキーのログイン（`/_auth/?next=…`）へ移る。起動画面（`/_auth/`）はログイン済みの表示に「ログイン 〜まで（最長 〜）」を 1 行出す。救援画面には出さない。
 - 重要な操作は直近のパスキー確認（#497、デーモンは #1491）: 起動用 Lambda は `/_auth/login`・`/_auth/register` のたびに `sb_recent` Cookie（HttpOnly・Secure・SameSite=Lax、5 分）も出す。形は `sb_session` と同じ body に、署名の入力の前に `recent:` を付けたもの（`sb_session` の値を `sb_recent` に貼っても、その逆も通らない）で、passkeyId が `sb_session` と同じであること。次の操作は、Cookie で入った人にはこれも求め、無ければ 401 `reason: "recent"`。トークン・ループバック（ホストの中）は求めない。
 
   | 操作 | 受ける側 | Cookie で入った人 | token・loopback |
@@ -96,7 +97,7 @@ EventBridge Scheduler（resume_at / 定期実行の時刻に起こす）──�
 | オンデマンド t4g.medium | $0.0432 × 稼働時間 = 約 $7.56 / $31.54 |
 | IPv4 | $0.005 × 稼働時間 = 約 $0.88 / $3.65 |
 | EBS gp3 20 GB | 20 × $0.096 = $1.92/月 |
-| S3 | 保存 GB × 単価 + PUT・GET。版管理の古い版も数える（`host-disk.md`） |
+| S3 | 保存 GB × 単価 + PUT・GET。版管理の古い版も数える |
 | CloudWatch・CloudFront・Lambda・Scheduler | メトリクス・アラーム・要求数を加える。無料枠は自分の契約で確認する |
 
 無料枠の機械（Oracle Always Free など）は採らない: 枠が予告なく変わり、使われていない機械は 7 日で回収されるので、正本の置き場所にならない。
@@ -127,7 +128,7 @@ README の原則「No keys, no telemetry. Your own login, on your own machine.�
 - Secrets Manager（1 件 $0.40/月）は、自動ローテーションが要らないので使わない
 - Switchboard に足すのは「ログインが切れていると分かる」ことだけ（`/api/health` と Home の警告）。やり直しはターミナル tab か AWS コンソールで行い、専用の入力画面は作らない（2026-09-21 の案）。現行は #354 で、警告の「ログインする」ボタンからランナー自身のログインのコマンド（`claude auth login`、`codex login --device-auth`）を画面で回せる: codex は URL と一度限りのコード、claude は URL とコードを貼る欄。資格情報を書くのはランナーで、貼ったコードはログ・DB・API の応答に残らない（`packages/core/src/runnerlogin.ts`、`apps/web/src/components/RunnerLogin.tsx`）
 - 注意: ランナーのプロセスとその子（エージェントが使うシェル）からは、ランナーの資格情報が見える。setup-token はモデルの呼び出しにしか使えないので、漏れたときの影響は狭い
-- 規約上の扱いは `docs/design/license-review.md`。個人が自分の認証で使う構成を対象とする
+- 個人が自分の認証で使う構成を対象とする（利用条件の注意は README の「No keys, no telemetry」）
 
 - UI と救援画面への入り方は §3 のパスキー（#211）。Switchboard のコードが持つ秘密はデーモンのトークンだけで、環境の層（Parameter Store → sb-env）から来る。エージェントは同じ OS ユーザーなので読めるが、外からはそのトークンでは入れない（#748）。Cookie を確かめる公開鍵は秘密ではなく、署名の seed は起動用 Lambda だけが読む（#701）
 
@@ -188,7 +189,7 @@ knowledge/         ~/Knowledge（フォルダごと。git なら .git も入る�
 
 ### 手元から S3 に移した履歴（#1431）
 
-日次アーカイブは、アーカイブを上げたあとに、終わって（`done` / `error` / `aborted`）最後の更新から 30 日たった Task の会話の出来事（`events`）を Task ごとに 1 ファイルにして `s3://<DataBucket>/history/events/<年>/<taskId>.<最後の seq>.jsonl.zst.age` に置き、置けた Task だけ手元の行を骨（`docs/design/host-disk.md` の「30 日より前の履歴の分析」）に置き換える。暗号化の鍵は日次アーカイブと同じ（`/switchboard/archive-age-pubkey`。秘密鍵は利用者が持つ）。`history/` には期限が無く、ホストのロールは新しいキーにしか書けない（上書きも削除もできない。消すのは利用者が自分の認証で）。上げ損ねた Task は手元の行を残して次の日にまた試し、`archive.status` は `failed <epoch> 3` になる（バナーが出る）。移した Task を再開して終わると、30 日後に `seq` の続きの分が別のファイルになる。Task の `events_archive_key` に置いたキーが古い順に 1 行ずつ残る。
+日次アーカイブは、アーカイブを上げたあとに、終わって（`done` / `error` / `aborted`）最後の更新から 30 日たった Task の会話の出来事（`events`）を Task ごとに 1 ファイルにして `s3://<DataBucket>/history/events/<年>/<taskId>.<最後の seq>.jsonl.zst.age` に置き、置けた Task だけ手元の行を骨に置き換える。暗号化の鍵は日次アーカイブと同じ（`/switchboard/archive-age-pubkey`。秘密鍵は利用者が持つ）。`history/` には期限が無く、ホストのロールは新しいキーにしか書けない（上書きも削除もできない。消すのは利用者が自分の認証で）。上げ損ねた Task は手元の行を残して次の日にまた試し、`archive.status` は `failed <epoch> 3` になる（バナーが出る）。移した Task を再開して終わると、30 日後に `seq` の続きの分が別のファイルになる。Task の `events_archive_key` に置いたキーが古い順に 1 行ずつ残る。
 
 取り出し方（1 件。ファイルは 1 行 1 出来事の `{"seq":…,"ts":…,"json":"<元の行>"}`）:
 

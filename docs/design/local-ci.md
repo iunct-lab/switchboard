@@ -1,6 +1,6 @@
 # Actions が始まらないときの local-ci 相当検証
 
-通常は `bun scripts/local-ci.ts <PR>` を実行する。Actions がステップ0件で失敗した場合に、CI の全工程をローカルで実行する入口である。マージ判定の規則と通常の合格印は [merge-gate.md](merge-gate.md)、性能検査は [perf.md](perf.md) を参照する。
+通常は `bun scripts/local-ci.ts <PR>` を実行する。Actions がステップ0件で失敗した場合に、CI の全工程をローカルで実行する入口である。マージ判定の手順と印は [docs/merge-gate.md](../merge-gate.md)、性能検査は [perf.md](perf.md) を参照する。
 
 別のリポジトリの PR は `bun <Switchboard の clone>/scripts/local-ci.ts <PR> --repo <owner/name>` を、そのリポジトリの作業ツリーから実行する（#1203）。head と base の読み取り・取得・worktree・結果の投稿はすべてそのリポジトリ（実行した作業ツリーの root の clone と、その PR）に対して行い、手順はその clone の `.github/workflows/ci.yml` の `run:` から読む（そのリポジトリに `scripts/ci.ts` は無いので、`run:` がそのまま手順。下の「手順」）。`--repo` が `owner/name` の形でない、実行した場所が git の作業ツリーでない、作業ツリーの `origin` が `--repo` と違うときは、何も投稿せず理由を出して exit 2。`--repo` を付けなければ、スクリプトのある clone とその origin のリポジトリを使う（`GH_REPO` は見ない。origin が無い・GitHub の owner/name として読めなければ何も投稿せず exit 2）。印は `bun scripts/merge-gate.ts <PR> --repo <owner/name>` が数える。
 
@@ -26,7 +26,7 @@ Actions の run があってもなくても、結果は PR に forge の `verifi
 | 手順が落ちた | `[local-ci] fail <head sha> base=<base sha>` | 落ちた手順と exit、その全文から拾った `(fail)` / `over:` の行（最大 20 行）、手順の表。全文は実行したホストの記録（パスは書かない） |
 | head が base にマージできない | `[local-ci] fail <head sha> base=<base sha>` | 衝突。手順は実行していない |
 
-投稿の直前に head と base を同じ方法で読み直し（`notify`）、どちらかが実行中に変わっていたら何も投稿せず exit 1（古い組合せの合格を新しい head / base の合格と読ませない。回し直す）。読み直せなかったときも投稿しない。投稿する文はキットの認証の値の検査（`runForgeOperation`）を通る。投稿が認証・権限で失敗したら、理由を出して exit 1 で止まる（別の経路で投稿しない。Task なら会話で確認する）。結果の印の読み方は `LOCAL_CI_RESULT`（pass か fail、head、続けて `base=`。マージ判定での扱いは [merge-gate.md](merge-gate.md)）。
+投稿の直前に head と base を同じ方法で読み直し（`notify`）、どちらかが実行中に変わっていたら何も投稿せず exit 1（古い組合せの合格を新しい head / base の合格と読ませない。回し直す）。読み直せなかったときも投稿しない。投稿する文はキットの認証の値の検査（`runForgeOperation`）を通る。投稿が認証・権限で失敗したら、理由を出して exit 1 で止まる（別の経路で投稿しない。Task なら会話で確認する）。結果の印の読み方は `LOCAL_CI_RESULT`（pass か fail、head、続けて `base=`。マージ判定での扱いは [docs/merge-gate.md](../merge-gate.md)）。
 
 ## 全文と測定値を残す実行手順
 
@@ -129,7 +129,7 @@ exit 0 は全工程合格、exit 1 は不合格である（この手順は PR �
 |---|---|---|---|---|---|
 | packages/protocol | 0 件 / 0 件 | exit 2・1 件 / exit 1・1 件 | `src/adapter.ts` | 同じ | 置き換える |
 | packages/adapters/claude | 0 件 / 0 件 | exit 2・1 件 / exit 1・1 件 | `src/cloud.ts` | 同じ | 置き換える |
-| packages/adapters/codex | 0 件 / 0 件 | exit 2・1 件 / exit 1・1 件 | `src/generated/AbsolutePathBuf.ts` | 同じ | 置き換える |
+| packages/adapters/codex | 0 件 / 0 件 | exit 2・1 件 / exit 1・1 件 | `src/generated/AbsolutePathBuf.ts`（当時は Git にあった。今は typecheck が入っている Codex から生成する） | 同じ | 置き換える |
 | packages/adapters/dak | 0 件 / 0 件 | exit 2・1 件 / exit 1・1 件 | `src/artifacts.ts` | 同じ | 置き換える |
 | packages/core | 0 件 / 0 件 | exit 2・1 件 / exit 1・1 件 | `src/accesslog.ts` | 同じ | 置き換える |
 | apps/web | 0 件 / 0 件 | exit 2・1 件 / exit 1・1 件 | `src/App.tsx`（と除外したテストのファイル） | 同じ | 置き換える |

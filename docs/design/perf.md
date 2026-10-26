@@ -3,8 +3,6 @@
 Switchboard の主な操作（起動・Task を始める・開く・送る）の速さを、1 コマンドで同じ条件で測る（PBI #637）。どこが遅いかを数字で決め、速くした効果を前後の比較で確かめるため。
 計測はローカルで閉じる。measure はページに残し、ふだんの使用の記録として自分のデーモンにだけ送る（#639。外には送らない — README の「No keys, no telemetry」の範囲）。CI のラチェットは #638。
 
-デーモンの停止の回数と原因（Insights の「運用」）は [ops-metrics.md](ops-metrics.md)。サーバ側の API の所要時間（route ごと）は [ops-metrics.md の「API の所要時間」](ops-metrics.md#api-の所要時間2087)。
-
 ## 考え方（参考にしたもの）
 
 参考: claude.ai を速くした取り組み（https://claude.dev/blog/how-we-made-claude-ai-faster）。要点:

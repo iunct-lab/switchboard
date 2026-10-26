@@ -134,7 +134,10 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect(JSON.parse(t.objects.get("auth/passkeys.json")!).passkeys[0]).toMatchObject({ id: a.id, device: "iPhone / iPad" });
 
     const cookie = t.cookieOf(reg);
-    expect((await t.call("GET", "/_auth/status", undefined, cookie)).json()).toMatchObject({ registered: true, loggedIn: true });
+    const status = (await t.call("GET", "/_auth/status", undefined, cookie)).json();
+    expect(status).toMatchObject({ registered: true, loggedIn: true });
+    expect(status.session).toEqual({ idleUntil: t.nowOf() + SESSION_IDLE_MS, expiresAt: t.nowOf() + SESSION_MAX_MS }); // #498: the page shows it
+    expect((await t.call("GET", "/_auth/status")).json().session).toBeUndefined(); // not logged in: nothing
     t.advance(60_000); // inside the 5 minutes of the passkey check
     const start = await t.call("POST", "/_auth/start", {}, cookie);
     expect(start.statusCode).toBe(202);

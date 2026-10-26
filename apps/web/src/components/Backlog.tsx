@@ -436,7 +436,7 @@ function Decision(props: { item: BacklogItem; onAnswered: (item: BacklogItem) =>
     setMockups([]);
     if (!d) return;
     let live = true;
-    // the same question's id on the asks list (docs/design/asks.md の「種類と id」)
+    // the same question's id on the asks list
     const id = `decision:${workspaceId}#${d.issue}@${d.at}`;
     api.asks().then(
       (l) => live && setMockups(l.asks.find((a) => a.id === id)?.mockups ?? []),

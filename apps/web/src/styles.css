@@ -198,6 +198,8 @@ button.copy { font: 400 10px/1.4 var(--mono); padding: 2px 6px; }
 .statusbar > span:last-child { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .statusbar b { color: var(--ink2); font-weight: 500; }
 .statusbar b.warn { color: var(--amber); }
+/* a phone held upright: the bar scrolls sideways instead of hiding what does not fit (#2666) */
+@media (max-width: 640px) { .statusbar { overflow-x: auto; } .statusbar > span:last-child { flex: none; } }
 
 .suggestion { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .suggestion .warn { color: var(--amber); }

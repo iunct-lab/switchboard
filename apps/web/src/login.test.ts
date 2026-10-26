@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { countriesUrl, hasTypedText, hostStopped, loginRoute, STUCK_RESCUE, stoppedRoute, withoutFromAuth } from "./login.ts";
+import { countriesUrl, hasTypedText, hostStopped, loginRoute, sessionLabel, sessionRefreshDelay, STUCK_RESCUE, stoppedRoute, withoutFromAuth } from "./login.ts";
 
 describe("login route (#211)", () => {
   test("the daemon's login mode decides: passkey goes to /_auth/ with the way back, token asks for the token", () => {
@@ -96,4 +96,22 @@ test("hasTypedText: a non-blank text field is typed text; empty and blank ones a
   expect(hasTypedText(doc())).toBe(false);
   expect(hasTypedText(doc("", "  \n"))).toBe(false);
   expect(hasTypedText(doc("", "draft"))).toBe(true);
+});
+
+describe("sessionLabel (#498)", () => {
+  const at = (h: number, d = 27) => new Date(2026, 9, d, h, 0).getTime();
+  test("the earlier of the idle time and the cap, the cap in the hover text, expired at the idle time or the cap", () => {
+    const now = at(10, 26);
+    expect(sessionLabel({ idleUntil: at(14), expiresAt: at(9, 31) }, now)).toEqual({ text: "ログイン 10/27 14:00 まで", title: "操作するたびに 24 時間延びます（最長 10/31 09:00）", expired: false });
+    expect(sessionLabel({ idleUntil: at(14, 28), expiresAt: at(9, 27) }, now).text).toBe("ログイン 10/27 09:00 まで"); // the cap comes first
+    expect(sessionLabel({ idleUntil: at(14), expiresAt: at(9, 31) }, at(14)).expired).toBe(true); // exactly at the idle time
+    expect(sessionLabel({ idleUntil: at(14), expiresAt: at(9, 31) }, at(14) - 1).expired).toBe(false);
+    expect(sessionLabel({ idleUntil: at(14, 29), expiresAt: at(9, 27) }, at(9)).expired).toBe(true); // the cap
+  });
+});
+
+test("sessionRefreshDelay: the health read at the login's end comes a second after it, at once (+1 s) when it has passed (#498)", () => {
+  expect(sessionRefreshDelay(10_000, 4_000)).toBe(7_000);
+  expect(sessionRefreshDelay(10_000, 10_000)).toBe(1_000);
+  expect(sessionRefreshDelay(10_000, 99_000)).toBe(1_000);
 });

@@ -5,7 +5,7 @@ import { type Db, jstDayStart } from "./db.ts";
 import { DAEMON_JOB_MARK, HOME_MARK, read, statFields, TASK_MARK } from "./detached.ts";
 
 /**
- * The host's load (#2086, docs/design/ops-metrics.md): one sample of the daemon's systemd unit — the cgroup's memory,
+ * The host's load (#2086): one sample of the daemon's systemd unit — the cgroup's memory,
  * swap, limit hits and CPU — and of the processes in it, each attributed to a task (the TASK_MARK in its environment,
  * the same reading as detached.ts) or to the daemon's own work, and to the kind of operation it is. Linux with
  * cgroup v2 only: anywhere else readCgroup is null and nothing is sampled. Nothing leaves the host.

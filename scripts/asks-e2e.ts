@@ -1,6 +1,6 @@
 /**
  * Run after `bun run --cwd apps/web build`: bun scripts/asks-e2e.ts. Requires Chrome (CHROME_BIN overrides).
- * The 判断待ち screen end to end (#935, docs/design/asks.md): a fake runner and the backlog fixtures' fake `gh` (as
+ * The 判断待ち screen end to end (#935): a fake runner and the backlog fixtures' fake `gh` (as
  * scripts/backlog-e2e.ts) give every kind of question, twice where the same question comes from two records; the screen
  * is read at 1280 × 800, answered, and read again at 390 × 844. SCREENSHOT_DIR=<dir> saves both widths.
  * #1673: a second Workspace with one tool approval; its button narrows every group to it, すべて goes back.

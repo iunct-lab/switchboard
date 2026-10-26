@@ -1,7 +1,7 @@
 import type { LoadKind, OpsLatency, OpsLoadGroup, OpsLoadHour, OpsStopsRow, StopReason } from "@switchboard/protocol";
 import { fmtMs } from "./perf.ts";
 
-/** What a daemon stop's cause is called on screen (#2093, docs/design/ops-metrics.md). */
+/** What a daemon stop's cause is called on screen (#2093). */
 export const reasonLabel: Record<StopReason, string> = {
   oomd: "oomd の kill",
   restart: "再起動",
@@ -38,7 +38,7 @@ export function stopsTable(rows: OpsStopsRow[]): { reasons: StopReason[]; days: 
   return { reasons: ORDER.filter((r) => total.counts[r] > 0), days: [...byDay.values()].sort((a, b) => b.day.localeCompare(a.day)), total };
 }
 
-/** What a kind of load is called on screen (#2086, docs/design/ops-metrics.md). */
+/** What a kind of load is called on screen (#2086). */
 export const kindLabel: Record<LoadKind, string> = {
   runner: "ランナー本体",
   subagent: "サブエージェント",

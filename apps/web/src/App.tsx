@@ -6,7 +6,7 @@ import { noticeFor, showNotice } from "./notify.ts";
 import { Approvals } from "./components/Approvals.tsx";
 import { api, connectEvents, getToken, setToken, type Health, type TaskDetail, type WorkspaceClone } from "./api.ts";
 import { journeyCancel, journeyEnd, journeyStart } from "./perf.ts";
-import { loginRoute, STUCK_MESSAGE, STUCK_RESCUE, withoutFromAuth } from "./login.ts";
+import { loginRoute, sessionLabel, sessionRefreshDelay, STUCK_MESSAGE, STUCK_RESCUE, withoutFromAuth } from "./login.ts";
 import { newVersionLink, rescueLink, type ReleaseStatus } from "./release.ts";
 import { archiveBanner } from "./archive.ts";
 import { watchHealth } from "./healthWatch.ts";
@@ -166,6 +166,14 @@ export function App() {
   }, [refreshLedger, refreshApprovals, authRev]);
   // the banners (a failed archive, a runner's login) follow the daemon while the page stays open (#1600); a failed read keeps the last
   useEffect(() => watchHealth(document, () => void api.health().then(setHealth).catch(() => undefined), HEALTH_REFRESH_MS), []);
+
+  // The cloud login's end (#498): read again when it is reached: it shows the renewed cookie's later time, or the refusal, which sends the page to the passkey login below
+  const sessionEnd = health?.session ? Math.min(health.session.idleUntil, health.session.expiresAt) : undefined;
+  useEffect(() => {
+    if (sessionEnd === undefined) return;
+    const t = setTimeout(() => void api.health().then(setHealth).catch(() => undefined), sessionRefreshDelay(sessionEnd, Date.now()));
+    return () => clearTimeout(t);
+  }, [sessionEnd]);
 
   // The daemon answers health with the runner list only to an authorized caller (a token, or the cloud login cookie).
   const login = health?.authRequired ? loginRoute({ authorized: health.runners !== undefined, hasToken: !!getToken(), mode: health.login, path: location.pathname + location.search }) : { kind: "none" as const };
@@ -539,6 +547,11 @@ export function App() {
       <FeedbackDialog open={feedbackOpen} screen={screenLabel(view, currentTask)} workspaces={workspaces} workspace={feedbackWorkspace} prefill={feedbackPrefill} onClose={() => setFeedbackOpen(false)} onSent={(task) => { upsertTask(task); openTask(task.id); }} onError={setError} />
 
       <footer className="statusbar">
+        {health?.session && (
+          <span title={sessionLabel(health.session, Date.now()).title}>
+            <b>{sessionLabel(health.session, Date.now()).text}</b>
+          </span>
+        )}
         <span>
           デーモン <b>{health ? "OK" : "…"}</b>
           {health && ` · プロトコル ${health.protocol}`}

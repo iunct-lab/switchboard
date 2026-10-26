@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 /**
- * Containers a task started through docker (#1418, docs/design/task-cleanup.md). The kit's `docker` front labels what
+ * Containers a task started through docker (#1418). The kit's `docker` front labels what
  * `docker run` / `create` make with LABEL_KEY=<task id> and appends the compose project of an `up` to the task's log
  * (one JSON line each: {project, cwd, globals}, globals being compose's own options such as `-f`). When the task ends, its projects are taken down (containers and networks,
  * never volumes or images) unless another open task's log names the same project, and its labelled containers are

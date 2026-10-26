@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHmac, createPrivateKey, createPublicKey, sign } from "node:crypto";
-import { addressKey, edgeOk, EDGE_HEADER, FAILURE_WINDOW_MS, hostAllowed, LOOPBACK_HOSTNAMES, makeFailureLimit, makeSessionCheck, RECENT_COOKIE, recentOk, sameOrigin, SESSION_COOKIE, SESSION_RECHECK_MS, sessionOk } from "./auth.ts";
+import { addressKey, edgeOk, EDGE_HEADER, FAILURE_WINDOW_MS, hostAllowed, LOOPBACK_HOSTNAMES, makeFailureLimit, makeSessionCheck, RECENT_COOKIE, recentOk, sameOrigin, SESSION_COOKIE, SESSION_RECHECK_MS, sessionOk, sessionTimes } from "./auth.ts";
 import { loadConfig } from "./config.ts";
 import { startServer } from "./server.ts";
 import type { RunnerAdapter } from "@switchboard/protocol";
@@ -206,6 +206,15 @@ describe("sb_session cookie", () => {
   };
   const withCookie = (cookie: string) => new Request("http://127.0.0.1:47831/api/tasks", { headers: { cookie: `other=1; ${cookie}` } });
 
+  test("sessionTimes: a valid cookie value's idle time and cap; null for an expired or foreign-key one, or without a key (#498)", () => {
+    const now = 1_800_000_000_000;
+    const value = (c: string) => c.slice(`${SESSION_COOKIE}=`.length);
+    expect(sessionTimes(value(cookieOf(SEED, "pk1", now + 9000, now + 3000)), KEY, now)).toEqual({ idleUntil: now + 3000, expiresAt: now + 9000 });
+    expect(sessionTimes(value(cookieOf(SEED, "pk1", now - 1, now + 3000)), KEY, now)).toBeNull();
+    expect(sessionTimes(value(cookieOf("b".repeat(64), "pk1", now + 9000)), KEY, now)).toBeNull();
+    expect(sessionTimes(value(cookieOf(SEED, "pk1", now + 9000)), undefined, now)).toBeNull(); // no key (a Mac)
+  });
+
   test("sessionOk: a cookie signed by the Starter's key passes; expired, tampered, another key's, or an HMAC keyed with the public key does not (#701)", () => {
     const now = 1_800_000_000_000;
     expect(sessionOk(withCookie(cookieOf(SEED, "pk1", now + 60_000)), KEY, now)).toBe(true);
@@ -254,6 +263,26 @@ describe("sb_session cookie", () => {
       ws.onerror = () => resolve(false);
       ws.onclose = () => resolve(false);
     });
+
+  test("/api/health says when the login ends only to the cookie that let the request in; the token and strangers get no session (#498)", async () => {
+    const core = await boot(KEY);
+    const base = `http://127.0.0.1:${core.server.port}`;
+    try {
+      const now = Date.now();
+      const health = async (headers: Record<string, string> = {}) => (await fetch(`${base}/api/health`, { headers })).json() as Promise<{ runners?: unknown[]; session?: { idleUntil: number; expiresAt: number } }>;
+      expect(await health({ cookie: cookieOf(SEED, "pk1", now + 90_000, now + 60_000) })).toMatchObject({ session: { idleUntil: now + 60_000, expiresAt: now + 90_000 } });
+      // the cookie that is let in is the one reported, not the first one in the header (an expired one comes first)
+      expect((await health({ cookie: `${cookieOf(SEED, "pk1", now - 1)}; ${cookieOf(SEED, "pk1", now + 80_000, now + 50_000)}` })).session).toEqual({ idleUntil: now + 50_000, expiresAt: now + 80_000 });
+      const byToken = await health({ authorization: `Bearer ${core.token}`, cookie: cookieOf(SEED, "pk1", now + 90_000) });
+      expect(byToken.runners).toBeDefined(); // let in…
+      expect(byToken.session).toBeUndefined(); // …but not by a login
+      const stranger = await health({ cookie: cookieOf(SEED, "pk1", now - 1) });
+      expect(stranger.runners).toBeUndefined();
+      expect(stranger.session).toBeUndefined();
+    } finally {
+      await core.stop();
+    }
+  });
 
   test("off loopback the cookie stands in for the token on /api and /ws; expired or tampered cookies get 401", async () => {
     const core = await boot(KEY);

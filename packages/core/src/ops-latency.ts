@@ -2,7 +2,7 @@ import type { OpsLatency, OpsLatencyStat } from "@switchboard/protocol";
 import { type Db, jstDay, jstDayStart, nearestRank } from "./db.ts";
 
 /**
- * `GET /api/ops/latency` (#2102, docs/design/ops-metrics.md): api_requests over the last `days` JST days, per method ×
+ * `GET /api/ops/latency` (#2102): api_requests over the last `days` JST days, per method ×
  * route for the whole period and per day. api_requests keeps 7 days, so a longer period still answers 7 days; requests
  * of the last 10 s are still in the daemon's buffer.
  */

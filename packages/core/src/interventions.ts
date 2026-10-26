@@ -8,7 +8,7 @@ import { NEEDS_PERSON, placeKey, stopKey } from "./stops.ts";
 /**
  * A person's interventions (#651): approvals, decisions and resumes, counted at each look from Switchboard's records (the
  * tasks and their events) and the stored copy of the Issues (#885). No table of their own and no call to GitHub; what the
- * records cannot tell is `unknown`, not 0 and not guessed. docs/design/interventions.md.
+ * records cannot tell is `unknown`, not 0 and not guessed.
  */
 
 /** The same `## 回答` on one Issue within this is one answer sent twice. */
@@ -225,7 +225,7 @@ export function summarizeInterventions(items: Intervention[], unknown: Intervent
   const list = [...byId.values()].map((s) => ({ ...s, began: s.first.at })).sort((a, b) => a.began - b.began);
   // series → when the person answered it. Only an answer the daemon saw (`seq:`; a runner's pointer to an Issue comment is not
   // proof), and only for the series of the stop that was newest at that place when it came — an answer a later record carried
-  // over belongs to the series it was given to (the same rule as `reduceStops`, repeated-stops.md)
+  // over belongs to the series it was given to (the same rule as `reduceStops`)
   const answeredAt = new Map<string, number[]>();
   for (const s of list) {
     for (const r of [s.first, s.last]) {

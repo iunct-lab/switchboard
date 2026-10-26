@@ -1,7 +1,7 @@
 name: Sync labels
 
 # .github/labels.yml を唯一の真実として、リポジトリのラベルを同期する（無いものを作り、違うものを直す。既存の想定外ラベルは消さない）。
-# 中身は Actions の外でも同じコマンド `bun ops-kit/src/cli.ts sync-labels`（docs/design/github-operations.md）。
+# 中身は Actions の外でも同じコマンド `bun ops-kit/src/cli.ts sync-labels`。
 on:
   push:
     branches: [main]

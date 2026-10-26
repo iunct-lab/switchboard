@@ -73,7 +73,7 @@ export const FIX_SCOPE = `## 進め方
 この依頼は、直した PR を main にマージするところまでを含みます。この依頼のために要望 Issue・PBI・Task の Issue は作りません（レビューで出た範囲外の指摘は、スキルどおり Issue 化してよい）。
 - 作業の場所と枝は CLAUDE.md の「作業の場所」（Task 番号の代わりに \`sb/fix-<topic>\`）。変更にはテストを添える
 - PR の本文に上の利用者の言葉を引用し、.claude/skills/cross-runner-review/SKILL.md で別のランナーにレビューさせ、.claude/skills/review-triage-and-merge/SKILL.md で指摘を処理してマージする。スキルが Issue から作る材料（Task・PBI・再チェックの元要望）は、その引用で代える。スキルが Issue に書く記録は PR に書く
-- CI とマージ判定は CLAUDE.md の「マージ判定とローカル CI」。マージ判定（\`scripts/merge-gate.ts\`）が merge を返したらマージし、利用者へ聞き直さない。\`[再チェック <kind>]\` は docs/design/merge-gate.md の「再チェック」を回す
+- CI とマージ判定は CLAUDE.md の「マージ判定とローカル CI」。マージ判定（\`scripts/merge-gate.ts\`）が merge を返したらマージし、利用者へ聞き直さない。\`[再チェック <kind>]\` は docs/merge-gate.md の「再チェック」を回す
 - マージ判定が \`[聞く]\` で止めたとき、昇格・デーモンの再起動、認証は Task の会話で聞く
 - 終わったら最後の行に PR の番号とマージの結果を書く`;
 
