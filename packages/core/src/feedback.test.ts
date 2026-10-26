@@ -8,6 +8,7 @@ import { loadConfig } from "./config.ts";
 import { startServer, type CoreServer } from "./server.ts";
 import { buildFeedbackPrompt, buildFixPrompt, buildNewRepoPrompt, feedbackTitle, FIX_SCOPE, fixTitle } from "./feedback.ts";
 import { workspaceBrief } from "./brief.ts";
+import { LOCAL_BACKLOG_RULES } from "./backlog.ts";
 
 let core: CoreServer;
 let home: string;
@@ -284,4 +285,29 @@ test("new-repo: packages/core has no repository-creation steps", () => {
     const text = readFileSync(join(dir, f), "utf8");
     for (const word of ["repo create", "labels.yml", "ISSUE_TEMPLATE"]) expect(`${f}:${text.includes(word)}`).toBe(`${f}:false`);
   }
+});
+
+test("a request for a workspace without GitHub is filed in Switchboard, not in the GitHub repository (#2344)", async () => {
+  const when = new Date("2026-09-19T00:00:00Z");
+  const local = buildFeedbackPrompt({ text: "x", when, local: true });
+  expect(local).toContain(LOCAL_BACKLOG_RULES);
+  expect(local).toContain("GitHub には作らない");
+  expect(local).not.toContain("gh repo view");
+  expect(buildFeedbackPrompt({ text: "x", when })).not.toContain(LOCAL_BACKLOG_RULES);
+  // through the API: the Task started for a workspace registered without GitHub carries the same rules
+  const base = await boot();
+  const dir = mkdtempSync(join(home, "local-"));
+  const ws = (await (await fetch(`${base}/api/workspaces`, { method: "POST", body: JSON.stringify({ path: dir, name: "local", backlog: "switchboard" }) })).json()) as { id: string };
+  expect((await post(base, { text: "ローカルの要望", workspaceId: ws.id })).status).toBe(201);
+  for (let i = 0; !starts.length && i < 100; i++) await Bun.sleep(10);
+  expect(starts[0]!.prompt).toContain(LOCAL_BACKLOG_RULES);
+  expect(starts[0]!.prompt).not.toContain("gh repo view");
+});
+
+test("a local request for a registered repository's workspace gets the local rules, not the GitHub ones (#2344)", () => {
+  const other = { meta: "/work/switchboard", projectVar: "APP_PROJECT_URL", setup: { config: true, kit: ["triage_issue.sh"], copies: [] } };
+  const p = buildFeedbackPrompt({ text: "x", when: new Date("2026-09-19T00:00:00Z"), other, local: true });
+  expect(p).toContain(LOCAL_BACKLOG_RULES);
+  expect(p).not.toContain("gh repo view");
+  expect(p).not.toContain("gh variable get");
 });

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appBoard, claim, commentId, ghBoard, ghMaterial, holder, judge, lastClaim, overlap, pathsIn, readOthers, release, releaseArgs, releaseBody, STALE_HOURS, storedMaterial, type Work } from "./parallel-guard";
+import { appBoard, claim, commentId, ghBoard, ghMaterial, holder, judge, lastClaim, linkedIssues, overlap, pathsIn, readOthers, release, releaseArgs, releaseBody, STALE_HOURS, storedMaterial, type Work } from "./parallel-guard";
 import type { StoredRecords } from "../ops-kit/src/backlog-client";
 
 const REPO = "example/development";
@@ -543,4 +543,12 @@ test("a local backlog's Task that cannot reach the app stops (exit 2), never fal
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("a local Task's PR links by Backlog-Task without a closing keyword (#2344)", () => {
+  expect(linkedIssues({ body: "## 概要\nBacklog-Task: 12\n本文", headRefName: "feat/x" })).toEqual([12]);
+  expect(linkedIssues({ body: "Backlog-Task: 12", headRefName: "sb/12-x" })).toEqual([12, 12]);
+  // only its own line: a mention in a sentence is not a link, and the GitHub forms are unchanged
+  expect(linkedIssues({ body: "see Backlog-Task: 9 above", headRefName: null })).toEqual([]);
+  expect(linkedIssues({ body: "Closes #3", headRefName: null })).toEqual([3]);
 });

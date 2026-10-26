@@ -337,6 +337,7 @@ export const api = {
   setBudget: (id: string, budgetUsd: number | null) => req<{ task: Task; overBudget: boolean }>(`/api/tasks/${id}/budget`, { method: "POST", body: JSON.stringify({ budgetUsd }) }),
   inbox: () => req<InboxNote[]>("/api/inbox"),
   inboxAdd: (text: string, opts: { title?: string; workspaceHint?: string } = {}) => req<InboxNote>("/api/inbox", { method: "POST", body: JSON.stringify({ text, ...opts }) }),
+  inboxClose: (path: string) => req<InboxNote>("/api/inbox/close", { method: "POST", body: JSON.stringify({ path }) }),
   inboxPromote: (path: string, workspaceId: string, runner?: RunnerId) => req<{ task: Task; note: InboxNote }>("/api/inbox/promote", { method: "POST", body: JSON.stringify({ path, workspaceId, runner }) }),
   knowledge: () => req<KnowledgeIndex>("/api/knowledge"),
   knowledgeSearch: (q: string) => req<KnowledgeSearchHit[]>(`/api/knowledge/search?q=${encodeURIComponent(q)}`),

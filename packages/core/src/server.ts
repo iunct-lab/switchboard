@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
-import { AskAnswerInput, AutoStartKind, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, InboxAddInput, InboxPromoteInput, MaterializeApplyInput, PerfSamplesInput, PermissionAnswers, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskList, type Backlog, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type Workspace, type WorkspaceRemoval } from "@switchboard/protocol";
+import { AskAnswerInput, AutoStartKind, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, InboxAddInput, InboxCloseInput, InboxPromoteInput, MaterializeApplyInput, PerfSamplesInput, PermissionAnswers, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskList, type Backlog, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type Workspace, type WorkspaceRemoval } from "@switchboard/protocol";
 import type { CoreConfig } from "./config.ts";
 import { abortOrphanedTasks, Db, type ApiRequestRow } from "./db.ts";
 import { opsLatency } from "./ops-latency.ts";
@@ -1278,11 +1278,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     return { started, skipped };
   };
   // secret-scan (#775): every registered repository through the kit's scan-issues; hits or a failure leave one inbox note
-  const scanSecrets = async () => {
+  const scanSecrets = async (s: { id: string; title: string }) => {
     const meta = metaWorkspace();
     if (!meta) return { lines: ["meta workspace がない（共通キットの scan-issues を呼べない）"], summary: { repos: 0, hits: 0, failed: 1 } };
     const r = await scanAllRepos({ workspaces: db.listWorkspaces(), metaPath: meta.path, gh: opts.gh ?? runGh });
-    if (r.note) inbox.add(r.note.body, { title: r.note.title });
+    if (r.note) inbox.addNotice(r.note.body, { title: r.note.title, source: { schedule: s.id, title: s.title } });
     return r;
   };
   // Scheduler (#20): cron-fired tasks, morning queue view.
@@ -2560,7 +2560,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             kind: parsed.data.mode,
             ...(parsed.data.mode === "fix"
               ? { title: fixTitle(parsed.data.text), prompt: buildFixPrompt({ brief: workspaceBrief(meta, [...adapterMap.keys()]), text: parsed.data.text, when, screen: parsed.data.screen }) }
-              : { ws, title: feedbackTitle(parsed.data.text), prompt: buildFeedbackPrompt({ text: parsed.data.text, when, screen: parsed.data.screen, other, source: parsed.data.source }) }),
+              : { ws, title: feedbackTitle(parsed.data.text), prompt: buildFeedbackPrompt({ text: parsed.data.text, when, screen: parsed.data.screen, other, local: ws.backlog === "switchboard", source: parsed.data.source }) }),
             attachmentIds: parsed.data.attachmentIds,
           });
           return "task" in r ? json(r.task, 201) : bad(r.error, r.status);
@@ -3189,6 +3189,17 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           }
         },
       },
+      "/api/inbox/close": {
+        POST: async (req) => {
+          const parsed = InboxCloseInput.safeParse(await req.json().catch(() => ({})));
+          if (!parsed.success) return bad(parsed.error.message);
+          try {
+            return json(inbox.close(parsed.data.path));
+          } catch (e) {
+            return bad(knowledgeError(e), (e as { code?: string }).code === "EEXIST" ? 409 : knowledgeStatus(e));
+          }
+        },
+      },
       "/api/inbox/promote": {
         POST: async (req) => {
           const parsed = InboxPromoteInput.safeParse(await req.json().catch(() => ({})));
@@ -3203,6 +3214,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             return bad(knowledgeError(e), knowledgeStatus(e));
           }
           if (note.status === "promoted") return bad(`note already promoted to ${note.taskId ?? "a task"}`, 409);
+          if (note.status === "closed") return bad("note already closed", 409);
           const input = CreateTaskInput.safeParse({ workspaceId: ws.id, cwd: ws.path, title: parsed.data.title ?? note.title, prompt: note.body, runner: parsed.data.runner });
           if (!input.success) return bad(input.error.message);
           if (!adapterMap.has(input.data.runner)) return bad(`runner "${input.data.runner}" is not installed`, 409);

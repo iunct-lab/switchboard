@@ -423,6 +423,9 @@ describe("scheduler secret-scan (#775)", () => {
     setUp();
     const r = await scanAllRepos({ workspaces: db.listWorkspaces(), metaPath: join(home, "meta"), gh, spawn });
     expect(r.note!.title).toBe("認証の値の検査: 当たり 2 件 / 検査できなかった 3 リポジトリ");
+    expect(r.note!.body).toContain("1. 下の URL を開いて、当たりが本物の値か見る");
+    expect(r.note!.body).toContain("2. 本物なら、先にその値を無効にして（作り直して）から、コメントを削除する");
+    expect(r.note!.body).toContain("3. 誤検知なら、このお知らせを閉じる");
     expect(r.note!.body).toContain("- https://github.com/o/leak/issues/3: github-token（2 行目）");
     expect(r.note!.body).toContain("- https://github.com/o/leak/issues/3#issuecomment-9: account-id（1 行目）");
     expect(r.note!.body).toContain("- o/down: 検査できなかった（exit 2）");
@@ -476,6 +479,19 @@ describe("scheduler secret-scan (#775)", () => {
       const notes = (await (await fetch(`${base}/api/inbox`)).json()) as Array<{ title: string; body: string }>;
       expect(notes.map((n) => n.title)).toEqual(["認証の値の検査: 当たり 1 件 / 検査できなかった 0 リポジトリ"]);
       expect(notes[0]!.body).toContain("- https://github.com/acme/app/issues/9: device-code（1 行目）");
+      expect(notes[0]).toMatchObject({ source: { schedule: s.id, title: "検査" } });
+      // the same schedule firing again: the earlier notice is closed, one notice is left (not one per day)
+      const hitLines = async () => (await log()).filter((l) => l.includes("acme/app: 当たり")).length;
+      expect((await fetch(`${base}/api/schedules/${s.id}/run`, { method: "POST" })).status).toBe(202);
+      for (const t0 = Date.now(); (await hitLines()) < 2 && Date.now() - t0 < 20_000; ) await Bun.sleep(25);
+      const again = (await (await fetch(`${base}/api/inbox`)).json()) as Array<{ path: string; source?: { schedule: string } }>;
+      expect(again).toHaveLength(1);
+      expect(again[0]!.path).not.toBe((notes[0] as unknown as { path: string }).path);
+      // closing it: gone from the list, closing again is a 409, an unknown path is refused
+      const close = (path: string) => fetch(`${base}/api/inbox/close`, { method: "POST", body: JSON.stringify({ path }) });
+      expect((await close(again[0]!.path)).status).toBe(200);
+      expect(await (await fetch(`${base}/api/inbox`)).json()).toEqual([]);
+      expect((await close(again[0]!.path)).status).toBe(409);
       // the result is on the schedule (#1274): what the API hands the Schedules screen
       const kept = (await (await fetch(`${base}/api/schedules/${s.id}`)).json()) as { lastResult: { repos: number; hits: number; failed: number; lines: string[] } | null };
       expect(kept.lastResult).toMatchObject({ repos: 1, hits: 1, failed: 0, lines: ["acme/app: 当たり 1 件（scanned 7）", "  https://github.com/acme/app/issues/9: device-code（1 行目）"] });

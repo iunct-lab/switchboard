@@ -71,6 +71,10 @@ export async function scanAllRepos(opts: { workspaces: Array<{ name: string; pat
   const summary: ScanSummary = { repos: repos.size, hits, failed: failed.length };
   if (!found.length && !failed.length) return { lines, summary };
   const body = [
+    "1. 下の URL を開いて、当たりが本物の値か見る",
+    "2. 本物なら、先にその値を無効にして（作り直して）から、コメントを削除する",
+    "3. 誤検知なら、このお知らせを閉じる",
+    "",
     "認証に使える値が既に書かれている場所（URL と種類だけ。値は書かない）。消すかどうかは利用者が決める（docs/design/secret-guard.md）。",
     "",
     ...found,

@@ -244,7 +244,7 @@ export function otherRepoRules(other: OtherRepo, local = false): string {
  * `ops-kit backlog` (it is given the workspace, BACKLOG_WORKSPACE) and `ops-kit lint --fresh`, and the parallel guard
  * without `--repo` (it writes its claims there too).
  */
-const LOCAL_BACKLOG_RULES = "Issue・Project のフィールド・Milestone・親子（sub-issue）・コメント・lint は `ops-kit backlog`（create / edit / comment / set / triage / view）と `ops-kit lint --fresh` だけで行い、`gh issue` / `gh project` / `gh api graphql` の Issue・Project の操作 / `scripts/setup/*` / Project の変数は使わない（GitHub にこの Issue は無い）。並列ガード（`scripts/parallel-guard.ts`）は `--repo` を付けずに実行する（占有と着手の印もアプリに書く）。PR・レビュー・CI・マージはこれまでどおりリポジトリの PR で行う。";
+export const LOCAL_BACKLOG_RULES = "Issue・Project のフィールド・Milestone・親子（sub-issue）・コメント・lint は `ops-kit backlog`（create / edit / comment / set / triage / view）と `ops-kit lint --fresh` だけで行い、`gh issue` / `gh project` / `gh api graphql` の Issue・Project の操作 / `scripts/setup/*` / Project の変数は使わない（GitHub にこの Issue は無い）。並列ガード（`scripts/parallel-guard.ts`）は `--repo` を付けずに実行する（占有と着手の印もアプリに書く）。PR・レビュー・CI・マージはリポジトリの PR で行う。ただし PR の本文・コミットには GitHub の閉じるキーワード（close / fix / resolve とその -s / -d 形）も `#<番号>` の形の Task・PBI の参照も書かない（番号は Switchboard の番号で、GitHub の同じ番号の別の Issue を閉じる・参照する）。Task は PR 本文の 1 行 `Backlog-Task: <番号>` と枝 `sb/<番号>-<topic>` で示す。PR をマージしたら `ops-kit backlog edit <Task> --state closed` で Task を閉じる（自動では閉じない）。";
 
 /** The form of a ## 状況 (#522), the same in a 状況確認 and in a resume of a stalled PBI (#578). */
 const REPORT_FORMAT = "`## 状況` で始まるコメントを 1 件書いてください。中身は `### 済んだこと` / `### 残り` / `### 止まっている理由`（動いているなら「動いている」とその Task）/ `### 次にやること`。";

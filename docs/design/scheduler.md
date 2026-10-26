@@ -79,6 +79,10 @@ Three lists, meant to be read together over coffee:
 
 The Schedules screen in the web UI shows this queue on top, the list of schedules (enable/disable, 今すぐ実行, 編集, delete) below, and the scheduler log at the bottom. Every schedule row deep-links its `waiting`/`staged`/`scheduled` entries to the task, same as everywhere else in the UI — this screen adds no task-viewing code of its own. 編集 (#1480) opens a form on the row with its current values and sends only the changed fields through `PATCH /api/schedules/:id`, so the id, the nightly-result rows' schedule name and the last secret-scan result survive an edit (delete + create loses them). The kind cannot be changed (it decides the Workspace constraint and whether there is a prompt — recreate instead); backlog-next, secret-scan and insights keep their Workspace on meta, and insights its runner (the form locks the select; PATCH with another runner is refused). An edit takes effect from the next firing; a running Task is not touched.
 
+### Notices in the inbox (#2401)
+
+Every note the daemon leaves in the inbox goes through `Inbox.addNotice` (the user's own "Inbox に保存" drafts go through `add`). It records the schedule that put the note there (`source: { schedule, title }` in the frontmatter), and the previous open notice of the same schedule is closed with `superseded_by`, so a daily check leaves one notice, not one per day. Home shows notices in their own "お知らせ" section, apart from drafts, with no promotion; both can be closed. Closing is `status: closed` + `closed` in the frontmatter (`POST /api/inbox/close`): the file stays in `notes/`, like a promoted note. Later scheduled notes (#2054, #2155) use the same entry point.
+
 ## Not covered here
 
 - **Notifications** (proposal's "通知"): the queue is pull, not push. OS notifications land with the Tauri shell (#17); until then, checking `/api/queue` (or the Schedules tab) is the notification.

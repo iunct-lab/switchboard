@@ -61,7 +61,7 @@ git checkout -b <枝> && gh stack init <枝>     # 最初の枝（単発でも i
 ### 5. commit と PR
 
 ```bash
-git add <files> && git commit      # 題: feat(core): … (#Task) / fix(web): … / docs: … / test: …  本文: 何を・なぜ・検証したこと。Task の PR だけ Closes #N
+git add <files> && git commit      # 題: feat(core): … (#Task。ローカルのバックログでは題にも `#<番号>` を書かず `(Task <番号>)`） / fix(web): … / docs: … / test: …  本文: 何を・なぜ・検証したこと。Task の PR だけ Closes #N（`BACKLOG_WORKSPACE` がある（GitHub 連携の無い workspace。Task は GitHub の Issue ではなく、`#<番号>` は GitHub の同じ番号の別の Issue を閉じる・参照する）なら、閉じるキーワードも `#<番号>` も書かず `Backlog-Task: <Task>` の 1 行にする）
 gh stack submit --auto --open      # push + PR。draft なら gh pr ready <n>
 W=$(mktemp -d /tmp/<リポジトリ名>.pr<Task>.XXXXXX); echo "$W"     # 本文は "$W/pr.md" に書く（固定の /tmp/pr.md は別リポジトリの PR 本文と入れ替わりうる）
 gh pr edit <n> --title "<題>" --body-file "$W/pr.md"
@@ -79,6 +79,7 @@ PR 本文は `.github/PULL_REQUEST_TEMPLATE.md` の 4 節を埋め、**その上
 - 検証: <実行したコマンドと結果。E2E なら操作と出力>
 
 ## 概要 / Summary
+（ローカルのバックログなら `Closes #<Task>。` を書かず、この節の先頭に `Backlog-Task: <Task>` だけの 1 行を置く。後ろに文字を続けない）
 Closes #<Task>。<何を・なぜ。親 PBI #N の受け入れ条件 n, m>
 ## 影響コンポーネント / Affected components   （該当に [x]）
 ## テスト観点 / Testing                        （**実際に走らせたものだけ** [x]。テスト数、E2E の事実）

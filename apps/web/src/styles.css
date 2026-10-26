@@ -224,6 +224,8 @@ button.copy { font: 400 10px/1.4 var(--mono); padding: 2px 6px; }
 .banner.ok { background: color-mix(in srgb, var(--green) 14%, transparent); font-size: 12px; padding: 6px 12px; border-radius: 4px; }
 .inbox-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
 .inbox-row .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inbox-row details.t { white-space: normal; }
+.inbox-row pre.wrap { white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0; }
 
 .staged .m.pending { color: var(--amber); }
 .staged .m.applied { color: var(--green); }

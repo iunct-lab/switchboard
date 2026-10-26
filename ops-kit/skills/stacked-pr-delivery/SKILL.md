@@ -13,7 +13,7 @@ description: Task を Stacked PR（GitHub public preview, gh stack）として�
 
 1. origin/main から worktree を作る（`git fetch -q origin && git worktree add --detach <場所> origin/main`。main の作業ツリーでは作業しない）。最初の枝: `git checkout -b <枝> && gh stack init <枝>`。
    上に積む: その枝にいる状態で `gh stack add <次の枝>`（新枝を作って積む）。
-2. 実装 → テスト（CLAUDE.md のテストのコマンド）→ commit（本文に Issue 番号と検証内容。`Closes #N` は Task の PR だけ）。
+2. 実装 → テスト（CLAUDE.md のテストのコマンド）→ commit（本文に Issue 番号と検証内容。`Closes #N` は Task の PR だけ。`BACKLOG_WORKSPACE` がある（GitHub 連携の無い workspace。Task は GitHub の Issue ではなく、`#<番号>` は GitHub の同じ番号の別の Issue を閉じる・参照する）なら、閉じるキーワードも `#<番号>` も書かず `Backlog-Task: <Task>` の 1 行にする）。
 3. `gh stack submit --auto --open` で push + PR 作成（`--open` で最初から ready。無いと draft）。**テンプレは未記入**なので必ず
    `gh pr edit <n> --title ... --body ...`（PULL_REQUEST_TEMPLATE.md の項目を埋める）。draft のままなら `gh pr ready <n>`。
 4. レビュー: `review-with-subagent` スキルの手順で、PR ごとにサブエージェントを起動しコメントさせる。
