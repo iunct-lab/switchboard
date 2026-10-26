@@ -873,7 +873,7 @@ export const PerfPeriodStats = z.object({ count: z.number(), p50: z.number(), p9
 export const PerfSummaryRow = z.object({ journey: Journey, device: PerfSample.shape.device, size: SizeClass.nullable(), current: PerfPeriodStats.nullable(), previous: PerfPeriodStats.nullable() });
 export type PerfSummaryRow = z.infer<typeof PerfSummaryRow>;
 
-/** Why a daemon run ended (#2085, docs/design/ops-metrics.md). */
+/** Why a daemon run ended (#2085). */
 export const StopReason = z.enum(["oomd", "restart", "host-stop", "promote", "crash", "unknown"]);
 export type StopReason = z.infer<typeof StopReason>;
 /** One JST day × cause: the stops, the turns they cut (one per task per stop) and the tasks. */
@@ -883,7 +883,7 @@ export type OpsStopsRow = z.infer<typeof OpsStopsRow>;
 export const OpsStops = z.object({ days: z.number(), rows: z.array(OpsStopsRow), running: z.object({ startedAt: z.number(), version: z.string().nullable() }).nullable() });
 export type OpsStops = z.infer<typeof OpsStops>;
 
-/** What a process of the daemon's unit is doing (#2086, docs/design/ops-metrics.md). */
+/** What a process of the daemon's unit is doing (#2086). */
 export const LoadKind = z.enum(["runner", "subagent", "test", "browser", "docker", "build", "judge", "archive", "backlog", "other"]);
 export type LoadKind = z.infer<typeof LoadKind>;
 /** One JST hour of the unit's load: its peaks, and how many times it reached memory.max. */
@@ -1221,7 +1221,7 @@ export const AskResume = z.object({ state: z.enum(["answered", "queued", "runnin
 export type AskResume = z.infer<typeof AskResume>;
 
 /**
- * One question across the Tasks and the backlog (#935, docs/design/asks.md), built from the records each time it is read,
+ * One question across the Tasks and the backlog (#935), built from the records each time it is read,
  * never stored. null = not known (the screen says 不明). `needs`: person = someone has to answer, auto = it goes on by itself
  * once its `conditions` are met. `route` = where the screen sends the person to answer it.
  *
@@ -1300,7 +1300,7 @@ export const PolicyList = z.object({ policies: z.array(AnswerPolicy) });
 export type PolicyList = z.infer<typeof PolicyList>;
 
 /**
- * A saved instruction (#940, docs/design/presets.md): a name and a short request text, with `{{target}}` where the chosen
+ * A saved instruction (#940): a name and a short request text, with `{{target}}` where the chosen
  * Issue / PR goes. It carries no approval mode, runner or model — it is what to ask, never a standing permission.
  */
 export const Preset = z.object({ id: z.string(), name: z.string().trim().min(1).max(60), text: z.string().trim().min(1).max(8000), createdAt: z.number(), updatedAt: z.number() });
@@ -1514,7 +1514,7 @@ export type BacklogSyncConflict = z.infer<typeof BacklogSyncConflict>;
 /**
  * The sync of one Issue or one workspace (#908). `lastSuccessfulSync` = when it was last read in full (ms; null = never —
  * a failed read never moves it); `retryAt` = GitHub is not asked before this (ms); `pendingCount` = edits stored here, not
- * done; `guarantee` = what a send promises: "A" = checked against GitHub just before and after each write (docs/design/backlog-sync.md).
+ * done; `guarantee` = what a send promises: "A" = checked against GitHub just before and after each write.
  */
 export const BacklogSyncInfo = z.object({
   state: BacklogSyncState,

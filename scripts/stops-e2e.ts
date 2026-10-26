@@ -7,7 +7,7 @@
  * a different reason code in similar words is its own series; a bounded retry that succeeds ends resolved, one that
  * keeps failing ends as one decision item with what was done; a restart forgets nothing; a tool approval of another
  * target is not suppressed; and the Task screen at 1280 and 390 px shows count / last answer / change / next / actions
- * with 0 console errors. The retries themselves are the runner's (the daemon only records and bounds them, repeated-stops.md), so the
+ * with 0 console errors. The retries themselves are the runner's (the daemon only records and bounds them), so the
  * fake runner plays them as reports; the inbox card of a series is asks.test.ts / asks-e2e.ts's. The fake runner counts what it was told to run, so the numbers are not read off the screen only.
  * SCREENSHOT=<file.png> saves the 1280 Task screen.
  */

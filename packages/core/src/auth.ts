@@ -150,6 +150,12 @@ export function sessionOk(req: Request, publicKey: string | undefined, now = Dat
   return sessionValues(req).some((v) => sessionValueOk(v, publicKey, now));
 }
 
+/** When one login cookie value's idle time and cap end (ms), for the screen to show (#498); null when it is not valid. The value is the one the request was let in with. */
+export function sessionTimes(value: string, publicKey: string | undefined, now = Date.now()): { idleUntil: number; expiresAt: number } | null {
+  const parts = signedParts(value, publicKey, "", now);
+  return parts ? { idleUntil: parts.ms[0]!, expiresAt: parts.ms[1]! } : null;
+}
+
 /** Every `sb_session=` value in the request's cookies. */
 function sessionValues(req: Request): string[] {
   const pairs = (req.headers.get("cookie") ?? "").split(";").map((v) => v.trim()).filter((v) => v.startsWith(`${SESSION_COOKIE}=`));
@@ -218,6 +224,11 @@ function sessionValueOk(raw: string, publicKey: string | undefined, now: number)
  * value never passes as the other. Every time must be after `now`, and idle-until may not pass the cap.
  */
 function signedPasskeyId(raw: string, publicKey: string | undefined, prefix: string, now: number): string | undefined {
+  return signedParts(raw, publicKey, prefix, now)?.id;
+}
+
+/** The same check, with the body's times: a session's `[idleUntil, expires]`, a recent check's `[expires]`. */
+function signedParts(raw: string, publicKey: string | undefined, prefix: string, now: number): { id: string; ms: number[] } | undefined {
   if (!publicKey || !raw || raw.length > 512) return undefined;
   const dot = raw.lastIndexOf(".");
   if (dot <= 0) return undefined;
@@ -235,7 +246,7 @@ function signedPasskeyId(raw: string, publicKey: string | undefined, prefix: str
   const [id, ...at] = Buffer.from(body, "base64url").toString("utf8").split(".");
   const ms = at.map(Number);
   if (!id || ms.length !== (prefix === "" ? 2 : 1) || !ms.every((t) => Number.isFinite(t) && t > now)) return undefined;
-  return ms.every((t, i) => i === 0 || t >= ms[i - 1]!) ? id : undefined;
+  return ms.every((t, i) => i === 0 || t >= ms[i - 1]!) ? { id, ms } : undefined;
 }
 
 /** The Starter's "checked by passkey just now" cookie (5 minutes, #497); the daemon's strongest operations ask for it (#1491). */

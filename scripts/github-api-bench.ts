@@ -1,7 +1,7 @@
 /**
  * bun scripts/github-api-bench.ts --fixture | --sample [--task <n>]   (#895)
  *
- * What the daily backlog operations cost on GitHub, per operation, as JSON (docs/design/github-api-budget.md).
+ * What the daily backlog operations cost on GitHub, per operation, as JSON.
  * --fixture: the same fixtures every time, nothing reaches GitHub — the backlog imported once (the baseline), listed
  *   ten times from what is stored (#885), imported ten times at once, imported ten times while a limit is waited for;
  *   lint; the overlap check.

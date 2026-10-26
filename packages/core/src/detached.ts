@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
- * Processes a task left behind (#1397, docs/design/task-cleanup.md). The runner's environment carries
+ * Processes a task left behind (#1397). The runner's environment carries
  * SWITCHBOARD_TASK_ID; anything the task started (setsid and nohup keep the environment) still has it in
  * /proc/<pid>/environ after leaving the process tree. Linux only: without /proc nothing is found.
  */

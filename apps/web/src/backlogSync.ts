@@ -1,7 +1,7 @@
 import type { Backlog, BacklogEditInput, BacklogIssueDetail, BacklogSyncInfo, BacklogSyncReason, BacklogSyncState } from "@switchboard/protocol";
 import { jstDateTime, jstTime } from "./time.ts";
 
-/** What the list says a send promises (BacklogSyncInfo.guarantee "A"; docs/design/backlog-sync.md), and what it does not. */
+/** What the list says a send promises (BacklogSyncInfo.guarantee "A"), and what it does not. */
 export const GUARANTEE_A =
   "送る直前と直後に GitHub の値を読み、編集の元から変わっていれば上書きせずに競合として保留します。見つけられないもの: Status 以外の Project フィールド、同じアカウントで GitHub の画面から書いた編集、押し出された古い版。";
 

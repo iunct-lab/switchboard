@@ -24,7 +24,7 @@ Switchboard が起動したランナーの `gh` の前段に検査を置く（PB
 - どの経路で始めた Task（工程ボタン、手で作った Task、スケジュール、並走、再開）にも効く。`startSession` はスキルを置く場所（`docs/design/skill-sync.md`）と同じ
 - meta workspace が無いときは `PATH` を変えない
 - 前段は `PATH` から前段を除いた最初の `gh` を本物として呼ぶ。無ければ exit 127。別のチェックアウトの前段（ファイルの 2 行目が `// gh-guard`）も飛ばすので、`PATH` に前段が 2 つあっても呼び合わない
-- `ops-kit/bin/docker`（#1417）も同じ探し方（`realCommand`）で本物の `docker` を呼ぶ。ファイルの 2 行目は `// docker-mark`。呼び出し側が `DOCKER_MARK_LABEL`（`key=value`）を渡したときだけ `run` / `create` にその label を足し、`DOCKER_MARK_LOG` があれば compose のプロジェクト名を記録する（共通キットに固有語を置かないので、Task の印は core が渡す）。片付けは `docs/design/task-cleanup.md`（#1419）
+- `ops-kit/bin/docker`（#1417）も同じ探し方（`realCommand`）で本物の `docker` を呼ぶ。ファイルの 2 行目は `// docker-mark`。呼び出し側が `DOCKER_MARK_LABEL`（`key=value`）を渡したときだけ `run` / `create` にその label を足し、`DOCKER_MARK_LOG` があれば compose のプロジェクト名を記録する（共通キットに固有語を置かないので、Task の印は core が渡す）。片付けは #1419
 - 前段は `bun` で動く。デーモンはフルパスの `bun` で起動されることがあるので（`scripts/setup.sh`、再起動の `process.execPath`）、配線がデーモンの `bun` のフォルダ（`dirname(process.execPath)`）も `PATH` の末尾に足す（末尾なので、利用者の `PATH` にある道具より前に来ない）
 
 ## 検査する書き込み

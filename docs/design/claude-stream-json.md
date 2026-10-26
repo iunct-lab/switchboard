@@ -1,6 +1,6 @@
 # Claude Code stream-json — wire notes
 
-Switchboard starts the user's own, unmodified `claude` and never touches its credentials. As we read Anthropic's terms, using a Claude Pro / Max login this way is allowed only for the user's own, individual use (our reading, not legal advice) — see `docs/design/license-review.md`.
+Switchboard starts the user's own, unmodified `claude` and never touches its credentials. As we read Anthropic's terms, using a Claude Pro / Max login this way is allowed only for the user's own, individual use (our reading, not legal advice).
 
 Verified 2026-09-05 against Claude Code **2.1.261** by driving `claude` from Bun (`scripts` in the Phase 0 spike; recorded fixture at `packages/adapters/claude/fixtures/write-with-permission.jsonl`, outside Git; record your own outside Git with the `runner-adapter-recording` skill; `bun scripts/fixtures.ts fetch` works only in a clone with the private history).
 
@@ -65,7 +65,7 @@ Without step 1 (or without `--permission-prompt-tool stdio`) any tool that needs
 ## Cost model
 
 - `result.total_cost_usd` is computed at API list price even on a subscription. Switchboard shows it as **API-equivalent** cost.
-- `total_cost_usd` and `modelUsage` (per model: `costUSD`, `inputTokens`, `outputTokens`, `cacheReadInputTokens`, `cacheCreationInputTokens`; no 1-hour cache split) are the **session's running totals**, not the turn's: they grow over the turns of one process and carry on after `--resume` (recorded with Claude Code 2.1.308, `fixtures/resume-cost.jsonl`: two Haiku processes of one session, the second `--resume`d — its `total_cost_usd` includes the first's). `modelUsage` includes subagents' models. `result.usage` counts this process only and leaves subagents out. The parser emits one `usage(reported, cumulative: true)` per model of `modelUsage` (none when it is empty, as on a missing session); the Ledger books the difference from the previous total ([ledger.md](ledger.md), #2353).
+- `total_cost_usd` and `modelUsage` (per model: `costUSD`, `inputTokens`, `outputTokens`, `cacheReadInputTokens`, `cacheCreationInputTokens`; no 1-hour cache split) are the **session's running totals**, not the turn's: they grow over the turns of one process and carry on after `--resume` (recorded with Claude Code 2.1.308, `fixtures/resume-cost.jsonl`: two Haiku processes of one session, the second `--resume`d — its `total_cost_usd` includes the first's). `modelUsage` includes subagents' models. `result.usage` counts this process only and leaves subagents out. The parser emits one `usage(reported, cumulative: true)` per model of `modelUsage` (none when it is empty, as on a missing session); the Ledger books the difference from the previous total (#2353).
 - `rate_limit_event` gives the subscription's real constraint: 5-hour and 7-day window utilization.
 
 ## Resume (verified 2026-09-05, issue #2)

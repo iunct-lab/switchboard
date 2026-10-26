@@ -507,7 +507,7 @@ test("start: a local backlog's stage prompt says ops-kit backlog only, no gh iss
   }
   // the PR side stays: merge gate, local CI, the release tag and the rollback, with the repository named
   const complete = buildStartPrompt({ number: 1 }, "complete", { other, local: true });
-  for (const kept of ["scripts/merge-gate.ts", "scripts/local-ci.ts", "scripts/release-tag.ts", "scripts/rollback-pr.ts", "docs/design/merge-gate.md"]) expect(complete).toContain(kept);
+  for (const kept of ["scripts/merge-gate.ts", "scripts/local-ci.ts", "scripts/release-tag.ts", "scripts/rollback-pr.ts", "docs/merge-gate.md"]) expect(complete).toContain(kept);
   // a GitHub one is as before
   expect(buildStartPrompt({ number: 1 }, "complete", { other })).toContain("`gh repo view` が答えるもの");
   expect(buildStartPrompt({ number: 1 }, "complete", { other })).toContain("APP_PROJECT_URL");
@@ -2697,7 +2697,7 @@ test("backlog-next slots: one firing starts an implement and a plan stage Task o
   for (let i = 0; claude.starts.length < 6 && i < 100; i++) await Bun.sleep(10);
   const lib = claude.starts.find((x) => x.cwd === dirs.lib && x.prompt.includes("PBI #304"))!;
   expect(lib.prompt).toContain("`--repo <このリポジトリの owner/name>`");
-  expect(lib.prompt).toContain(`${meta.path}/docs/design/merge-gate.md`);
+  expect(lib.prompt).toContain(`${meta.path}/docs/merge-gate.md`);
   expect(lib.prompt).not.toContain("定期実行が始めた無人の実装");
   // every slot is taken: the same firing again starts nothing and says why per workspace
   expect((await runSchedule(base, id)).status).toBe(409);
@@ -2812,7 +2812,7 @@ test("start: another repository gets its recheck location and merge-gate reposit
   for (const p of [otherRepoRules(other), buildStartPrompt({ number: 7 }, "complete", { other })]) {
     expect(p).toContain("`scripts/merge-gate.ts`");
     expect(p).toContain("`--repo <このリポジトリの owner/name>`");
-    expect(p).toContain("`/work/switchboard/docs/design/merge-gate.md` の「再チェック」");
+    expect(p).toContain("`/work/switchboard/docs/merge-gate.md` の「再チェック」");
     expect(p).toContain("その中の `-R <owner/name>` と `origin` はこのリポジトリ。印は必ずこのリポジトリの PR に付ける");
   }
 });

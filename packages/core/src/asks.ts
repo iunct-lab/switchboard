@@ -5,7 +5,7 @@ import { matchPolicies, POLICY_DEFAULT_DAYS, subjectChanges } from "./policies.t
 import { issueOf, NEEDS_PERSON } from "./stops.ts";
 
 /**
- * The questions waiting on the user (#935, docs/design/asks.md), built from the records each time they are read — the
+ * The questions waiting on the user (#935), built from the records each time they are read — the
  * Issues' labels and comments, the PBIs' bodies, `stop.record` — never stored, as #266 and #523 read them.
  */
 

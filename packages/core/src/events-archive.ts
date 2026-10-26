@@ -4,7 +4,7 @@ import type { Database } from "bun:sqlite";
 import { ageBinary } from "./transfer.ts";
 
 /**
- * Moving the bodies of a finished task's events out of the database (#1431, `docs/design/host-disk.md` 「30 日より前の履歴の分析」).
+ * Moving the bodies of a finished task's events out of the database (#1431).
  *
  * Two steps with the upload between them, which is the shell's (`aws/host/archive.sh`, like `export`): `prepare` writes
  * one encrypted file per old finished task and a manifest; `commit` replaces the rows of the tasks the shell reports as

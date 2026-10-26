@@ -1,7 +1,7 @@
 import { currentRepo } from "./repo.ts";
 /**
  * bun scripts/merge-audit.ts [--since YYYY-MM-DD] [--until YYYY-MM-DD] — who lifted which kind of a large PR, per kind
- * (PBI #752). Reads the record marks on the PRs (docs/design/merge-gate.md の「記録の印」: `[merge-ask]`, `[merge-answer]`,
+ * (PBI #752). Reads the record marks on the PRs (docs/merge-gate.md の「記録の印」: `[merge-ask]`, `[merge-answer]`,
  * `[recheck]`) and main's commits; keeps nothing (the marks are the record). REST only (the GraphQL budget is shared).
  *
  * One line per kind with anything to count (the default period is the last 7 days, until inclusive):
@@ -9,7 +9,7 @@ import { currentRepo } from "./repo.ts";
  * After the table, one line `印の欠け: 聞かずに返事 #a / 返事なしでマージ #b` when a PR in the period was answered with no
  * recorded `[merge-ask]`, or merged with an ask and no recorded answer (#1069); nothing when there are none.
  * Each table line ends its wait with the sum: `返事まで 中央値 Nh（合計 Nh）` (#1272) — how long the person was waited for in all.
- * Then the proposals to change merge-gate's split (docs/design/merge-audit.md), one `案: …` line each, or `案なし`; with
+ * Then the proposals to change merge-gate's split, one `案: …` line each, or `案なし`; with
  * --file-request, one `要望: …` line: 起票した #N / 同じ題の開いた要望 #N があるので起票しない / 案が無いので起票しない (#1272).
  * Exit 0 = no proposal / 1 = a proposal / 2 = could not read (gh or git failed).
  *
@@ -222,11 +222,11 @@ export function requestFor(ps: Proposal[], source: { date: string }): { title: s
   const title = `マージ規則の見直し: ${sorted.map((p) => `${p.kind} を${p.to === "ask" ? "聞く" : "再チェック"}へ`).join(" / ")}`;
   const body = [
     "## 要望",
-    "マージの記録の印（docs/design/merge-gate.md の「記録の印」）の集計から、merge-gate の分け（利用者に聞く / 再チェックで外せる）を変える案が出ました。見直してください。",
+    "マージの記録の印（docs/merge-gate.md の「記録の印」）の集計から、merge-gate の分け（利用者に聞く / 再チェックで外せる）を変える案が出ました。見直してください。",
     "",
     ...sorted.map((p) => `- ${proposalText(p)}`),
     "",
-    "直し方（docs/design/merge-audit.md）: 採るなら `scripts/merge-gate.ts` の `ASK_KINDS` / `RECHECK_KINDS` と、その種類の理由の分け（`judge`）を PR で変える。採らないならこの要望を閉じる（同じ案は、閉じたあとの次の集計でまた出る）。",
+    "直し方: 採るなら `scripts/merge-gate.ts` の `ASK_KINDS` / `RECHECK_KINDS` と、その種類の理由の分け（`judge`）を PR で変える。採らないならこの要望を閉じる（同じ案は、閉じたあとの次の集計でまた出る）。",
     "",
     "## 出典",
     "- 誰の言葉: 定期の検査",

@@ -5,7 +5,7 @@ import type { CoreConfig } from "./config.ts";
 import { type Db, jstDay, jstDayStart } from "./db.ts";
 
 /**
- * One row per daemon start (#2085, docs/design/ops-metrics.md): when it started and ended, why it ended, and which
+ * One row per daemon start (#2085): when it started and ended, why it ended, and which
  * tasks it cut mid-turn. The stopping daemon writes what it knows (its own exit, the tasks its shutdown cut); the next
  * start decides the cause from local records only — its own clean exit, the version, sb-rescue's history.jsonl,
  * systemd's journal, the boot id. Nothing is sent anywhere.
@@ -52,7 +52,7 @@ function lineTime(line: string): number | null {
 }
 
 /**
- * Why `prev` ended; the first rule that fits wins (docs/design/ops-metrics.md). sb-rescue writes a promotion to
+ * Why `prev` ended; the first rule that fits wins. sb-rescue writes a promotion to
  * history.jsonl only after the new daemon is confirmed, so a start right after one finds no line yet (a changed
  * version stands for it), and the line falls in the first moments of the next run (HISTORY_GRACE_MS).
  */

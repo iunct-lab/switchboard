@@ -83,4 +83,4 @@ servers:
 
 ## 停止の報告（#939）
 
-`task.note` の引数 `stop`（`StopReport`）で停止を報告できる。`exec.run` の一時失敗は自分で再試行し、その記録も `stop.record` に残る。ランナー自身の再実行の責務と対象は `repeated-stops.md`。
+`task.note` の引数 `stop`（`StopReport`）で停止を報告できる。`exec.run` の一時失敗は自分で再試行し、その記録も `stop.record` に残る。

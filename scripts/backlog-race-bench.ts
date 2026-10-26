@@ -1,8 +1,8 @@
 /**
  * bun scripts/backlog-race-bench.ts --fixture   (#927, PBI #899)
  *
- * Replays, against a fake forge, the window the send of 初期方式 A leaves open (#887, docs/design/backlog-sync.md),
- * and what the read after the write closes of it since #1329 (the history is read back, docs/design/backlog-strict-sync.md):
+ * Replays, against a fake forge, the window the send of 初期方式 A leaves open (#887),
+ * and what the read after the write closes of it since #1329 (the history is read back):
  * one field (an Issue's body — the one whose history a revision can be deleted from or evicted out of) edited here
  * (v3) while someone edits it on the forge (v2), at each moment of the send —
  * before the edit here was made and no import told of theirs, before the check read, between the check and the

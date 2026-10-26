@@ -1,6 +1,6 @@
 /**
  * Run after `bun run --cwd apps/web build`: bun scripts/presets-e2e.ts. Requires Chrome (CHROME_BIN overrides).
- * 定型の指示 (#940, docs/design/presets.md) end to end on a daemon with a fake runner and a fake gh: saved, listed and
+ * 定型の指示 (#940) end to end on a daemon with a fake runner and a fake gh: saved, listed and
  * edited in 設定, kept over a reload, put into the request box with a target and started with one 開始, refused when
  * the target is empty / 自動 / another repository / the Workspace changed, put into a reply, and deleted. The Task it
  * starts still stops on the runner's write approval with 許可 / 拒否 (a preset is not a standing permission).

@@ -30,9 +30,9 @@ Exit 0 = no drift / 1 = drift / 2 = cannot tell (a CLI is not installed, or its 
 
 ## The daily schedule
 
-`bun scripts/check-models.ts --file-request` does the same check and, on exit 1, files a request Issue (`type:request`, via `scripts/file-request.ts` — shared with [merge-audit](merge-audit.md) — which calls `scripts/setup/request_issue.sh`) titled `モデル一覧のズレ: <runner> <kind> <ids> / …`. The title is built from the findings in a fixed order, so the same drift always has the same title; if an open request already has it (looked up over REST, `gh api repos/<owner>/<repo>/issues`, not GraphQL), nothing is filed. A different drift (another id shows up) is a new title and a new request. Exit 2 files nothing.
+`bun scripts/check-models.ts --file-request` does the same check and, on exit 1, files a request Issue (`type:request`, via `scripts/file-request.ts` — shared with `scripts/merge-audit.ts` — which calls `scripts/setup/request_issue.sh`) titled `モデル一覧のズレ: <runner> <kind> <ids> / …`. The title is built from the findings in a fixed order, so the same drift always has the same title; if an open request already has it (looked up over REST, `gh api repos/<owner>/<repo>/issues`, not GraphQL), nothing is filed. A different drift (another id shows up) is a new title and a new request. Exit 2 files nothing.
 
-It runs from the existing scheduler (`docs/design/scheduler.md`) as an ordinary prompt schedule — no new schedule action. The prompt only runs the command and reports; the script decides what to file:
+It runs from the existing scheduler as an ordinary prompt schedule — no new schedule action. The prompt only runs the command and reports; the script decides what to file:
 
 ```
 POST /api/schedules

@@ -14,9 +14,9 @@ Switchboard delegates risk decisions to the runner (Knowledge `approval:` rules 
 | Codex | `auto` · `on-request` (manual boundary review) · `read-only` · `untrusted` · `full-access` (danger) | `auto` = workspace-write + on-request + auto_review | from the next turn — `turn/start` overrides approvalPolicy / sandboxPolicy / approvalsReviewer (`codex-app-server.md`) |
 | DAK | none (`permissionModes: []`) | — | — (DAK's `require_confirmation` and `mcp.yaml` decide; same as `adk web`) |
 
-Saved answer policies (回答の方針, #938) are checked after the Knowledge `confirm` rules and before `allow` (see `asks.md`); the runner's approval mode and the runner's own refusals are not changed by them.
+Saved answer policies (回答の方針, #938) are checked after the Knowledge `confirm` rules and before `allow`; the runner's approval mode and the runner's own refusals are not changed by them.
 
-Saved instructions (定型の指示, #940, `presets.md`) only build the text to send: they carry no mode and change neither the approval mode nor the approval rules.
+Saved instructions (定型の指示, #940) only build the text to send: they carry no mode and change neither the approval mode nor the approval rules.
 
 Workspace MCP `exec.run` approvals (`mcp.yaml`) are Switchboard's own and independent of the runner mode.
 

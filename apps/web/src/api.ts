@@ -30,6 +30,8 @@ export interface Health {
   authRequired: boolean;
   /** How a person gets in before being authorized (#211): the cloud host's passkey page, or the token. */
   login?: LoginMode;
+  /** When the cloud login's idle time and cap end (ms; #498); only for a request that came in with the login cookie. */
+  session?: { idleUntil: number; expiresAt: number };
   /** LLM routing suggestions (#25): the saved setting plus whether this daemon can actually produce them. */
   routing?: { llm: { enabled: boolean; runner: RunnerId; model: string; available: boolean } };
   mcp: { base: string };

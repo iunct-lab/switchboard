@@ -57,7 +57,7 @@ const LIMIT_TEXT: Record<RunnerId, RegExp[]> = {
   // API's `rate_limit_error` body on a refused start. Anchored so "generate_limits", "cli.js:429:17", "context limit reached",
   // "max turns (429)" and the like are not mistaken for it.
   claude: [/hit your (?:session |usage |weekly |daily )?limit/i, /\busage limit/i, /\brate[ _-]?limit/i, /too many requests/i],
-  // Not recorded yet: matched on wording only (docs/design/rate-limit-resume.md lists this as unverified).
+  // Not recorded yet: matched on wording only (unverified against a recorded message).
   codex: [/\brate[ _-]?limit/i, /\busage limit/i, /too many requests/i, /credits? (?:depleted|exhausted)/i],
   dak: [],
 };

@@ -242,7 +242,7 @@ export function checksFromRuns(runs: WorkflowRun[]): PrFacts["checks"] {
  */
 const LOCAL_CI_SUFFIX = "（Actions が始まらず、ローカルで pass）";
 const LOCAL_CI_ONLY = "local-ci（Actions の run が無く、ローカルで pass）";
-const PROTECTION_DOC = "docs/design/merge-gate.md の「保護枝とローカルの結果」";
+const PROTECTION_DOC = "docs/merge-gate.md の「保護枝とローカルの結果」";
 
 /**
  * Whether the newest local-ci result of the head and the base branch's tip now is a pass; else why not (#914). Only

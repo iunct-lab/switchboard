@@ -88,3 +88,21 @@ export const LEAVE_STOPPED = "ホストが止まっているようです。ロ�
 export function hasTypedText(doc: { querySelectorAll(sel: string): ArrayLike<{ value: string }> }): boolean {
   return Array.from(doc.querySelectorAll('textarea, input:not([type]), input[type="text"], input[type="search"], input[type="url"], input[type="email"]')).some((f) => f.value.trim() !== "");
 }
+
+/** The cloud login's end, for the status bar (#498): the earlier of the idle time and the cap, with the cap in the hover text. */
+export function sessionLabel(s: { idleUntil: number; expiresAt: number }, now: number): { text: string; title: string; expired: boolean } {
+  const at = (ms: number) => {
+    const d = new Date(ms);
+    return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  };
+  return {
+    text: `ログイン ${at(Math.min(s.idleUntil, s.expiresAt))} まで`,
+    title: `操作するたびに 24 時間延びます（最長 ${at(s.expiresAt)}）`,
+    expired: now >= s.idleUntil || now >= s.expiresAt,
+  };
+}
+
+/** How long until /api/health is read again at the login's end (#498): a second after it, at once when it has passed. */
+export function sessionRefreshDelay(end: number, now: number): number {
+  return Math.max(end - now, 0) + 1000;
+}

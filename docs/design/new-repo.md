@@ -14,10 +14,10 @@ PBI #1445、要望 #1444。新しいリポジトリを Switchboard の開発資�
 | B | 共通スキル 10 本（`.claude/skills/<name>` と `.agents/skills/<name>` へ、Task のランナーを起動する直前にコピーし、`info/exclude` で Git の管理対象から外す） | Switchboard が Task の起動時に置く | [skill-sync.md 置き方](skill-sync.md#置き方) |
 | B | `gh` の前段（認証に使える値を Issue・PR に書かせない）と定期の検査 | Task の `PATH` の先頭（`ops-kit/bin`） | [secret-guard.md 部品](secret-guard.md#部品) |
 | B | 他リポジトリの読み替え（`--repo` つきのマージ判定・並列ガード・タグ付け、`otherRepoRules`） | Switchboard のスクリプトとステージの指示 | [releases-and-rescue.md Other repositories](releases-and-rescue.md#other-repositories) |
-| B | バックログ画面（Issue・Project の値の取込み。workspace ごとの `projectVar`） | Switchboard のデーモン | [backlog.md 取得](backlog.md#取得) |
+| B | バックログ画面（Issue・Project の値の取込み。workspace ごとの `projectVar`） | Switchboard のデーモン | |
 | C | Issue・sub-issue・Milestone（要望 → PBI → Task の階層） | GitHub | [issue-workflow](../../ops-kit/skills/issue-workflow/SKILL.md) |
 | C | Project とそのフィールド（Area / Kind / Priority / Story Points、Status）。ビューは作れない | GitHub（`bootstrap_project.sh` が作る） | [bootstrap.ts](../../ops-kit/src/bootstrap.ts) の `bootstrap` |
-| C | リポジトリ変数 `<PREFIX>_PROJECT_URL`（Project の URL。バックログ画面とスクリプトが読む。`<PREFIX>` は `envPrefix`） | GitHub のリポジトリ変数（`gh variable set`） | [backlog.md 取得](backlog.md#取得)、[使う側の設定](../../ops-kit/README.md#使う側の設定opsconfigjson) |
+| C | リポジトリ変数 `<PREFIX>_PROJECT_URL`（Project の URL。バックログ画面とスクリプトが読む。`<PREFIX>` は `envPrefix`） | GitHub のリポジトリ変数（`gh variable set`） | [使う側の設定](../../ops-kit/README.md#使う側の設定opsconfigjson) |
 | C | Actions: `labels.yml`（ラベル同期）・`ci.yml`。`project-autoadd`（Project 自動追加）は任意（「手作業で残るもの」の 3）。認証の値の検査は、デーモンの予定（種類「認証の値の検査」。利用者が定期タスクの画面で作る。起動時に勝手には作られない）が登録済みの全リポジトリに回し、Actions の `secret-scan.yml` はホストの外の予備（週に 1 回。[secret-guard.md](secret-guard.md#定期の検査)） | GitHub Actions | [雛形](../../ops-kit/README.md#雛形新しいリポジトリ)、[secret-guard.md 定期の検査](secret-guard.md#定期の検査) |
 
 層 A は Switchboard が無くても要る（リポジトリが自分で持つ）。層 B は Switchboard から Task を起動して初めて効く。層 C は GitHub の側で、Actions が始まらない間は動かないものがある（`labels.yml` / `ci.yml`。Actions 無しで回す仕組みは #890 / #891 の範囲で、ここでは現状だけを書く）。
