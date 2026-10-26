@@ -959,8 +959,10 @@ export const InboxNote = z.object({
   created: z.string(),
   /** Free-text hint about where this belongs (a workspace name), if the user gave one. */
   workspaceHint: z.string().optional(),
-  status: z.enum(["inbox", "promoted"]),
+  status: z.enum(["inbox", "promoted", "closed"]),
   taskId: z.string().optional(),
+  /** Set on a notice the daemon left (which schedule put it there); a note without it is the user's own draft. */
+  source: z.object({ schedule: z.string(), title: z.string() }).optional(),
 });
 export type InboxNote = z.infer<typeof InboxNote>;
 
@@ -969,6 +971,9 @@ export type InboxAddInput = z.infer<typeof InboxAddInput>;
 
 export const InboxPromoteInput = z.object({ path: z.string().min(1), workspaceId: z.string().min(1), runner: RunnerId.optional(), title: z.string().optional() });
 export type InboxPromoteInput = z.infer<typeof InboxPromoteInput>;
+
+export const InboxCloseInput = z.object({ path: z.string().min(1) });
+export type InboxCloseInput = z.infer<typeof InboxCloseInput>;
 
 export const MaterializeApplyInput = z.object({
   workspaceId: z.string().min(1).optional(),

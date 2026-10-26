@@ -495,6 +495,9 @@ test("start: a local backlog's stage prompt says ops-kit backlog only, no gh iss
       expect(p).toContain("`ops-kit backlog`");
       expect(p).toContain("`ops-kit lint --fresh`");
       expect(p).toContain("`--repo` を付けずに実行する");
+      // the PR names the Task without a closing keyword or #N (it is no GitHub Issue), and the Task is closed by hand after the merge (#2344)
+      expect(p).toContain("Backlog-Task: <番号>");
+      expect(p).toContain("`ops-kit backlog edit <Task> --state closed`");
       // nothing that sends it to GitHub's Issues or Project
       expect(p).not.toContain("gh repo view");
       expect(p).not.toContain("gh variable get");

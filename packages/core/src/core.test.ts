@@ -275,6 +275,27 @@ describe("core daemon", () => {
     }
   });
 
+  test("inbox: a draft is promoted to a task and leaves the list; a closed one cannot be promoted (#2401)", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-test-inbox-"));
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_KNOWLEDGE: join(h, "knowledge"), SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    const post = (path: string, body: unknown) => fetch(`${b}${path}`, { method: "POST", body: JSON.stringify(body) });
+    try {
+      const ws = c.db.listWorkspaces().find((w) => w.kind === "meta") ?? c.db.upsertWorkspace({ name: "w", path: h, kind: "repo" });
+      const draft = (await (await post("/api/inbox", { text: "do it", title: "draft one" })).json()) as { path: string };
+      const other = (await (await post("/api/inbox", { text: "not this", title: "draft two" })).json()) as { path: string };
+      const r = await post("/api/inbox/promote", { path: draft.path, workspaceId: ws.id, runner: "claude" });
+      expect(r.status).toBe(201);
+      expect(((await r.json()) as { task: { title: string } }).task.title).toBe("draft one");
+      expect(((await (await fetch(`${b}/api/inbox`)).json()) as Array<{ path: string }>).map((n) => n.path)).toEqual([other.path]);
+      expect((await post("/api/inbox/close", { path: other.path })).status).toBe(200);
+      expect((await post("/api/inbox/promote", { path: other.path, workspaceId: ws.id, runner: "claude" })).status).toBe(409);
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
   test("health reports a failed daily archive from archive.status, and null without one (#1201)", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-archive-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
@@ -2026,10 +2047,18 @@ describe("core daemon", () => {
     expect(noChecks.status).toBe(409);
     expect(((await noChecks.json()) as { error: string }).error).toContain("checks");
     // dry run: the argv is the running daemon's own command line
-    const dry = await fetch(`${base}/api/daemon/restart`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ force: true }) }).then(j);
-    expect(dry.restarting).toBe(false);
-    expect(dry.supervised).toBe(false);
-    expect(dry.argv[0]).toBe(process.execPath);
+    // run inside a Switchboard Task it inherits SWITCHBOARD_SUPERVISED=1, so unset it for this call only (#500)
+    const supervised = process.env.SWITCHBOARD_SUPERVISED;
+    delete process.env.SWITCHBOARD_SUPERVISED;
+    try {
+      const dry = await fetch(`${base}/api/daemon/restart`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ force: true }) }).then(j);
+      expect(dry.restarting).toBe(false);
+      expect(dry.supervised).toBe(false);
+      expect(dry.argv[0]).toBe(process.execPath);
+    } finally {
+      if (supervised === undefined) delete process.env.SWITCHBOARD_SUPERVISED;
+      else process.env.SWITCHBOARD_SUPERVISED = supervised;
+    }
   });
 
   test("schedules API: create, validate, run manually, and list; queue reflects the result", async () => {

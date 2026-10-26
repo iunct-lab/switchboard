@@ -31,7 +31,7 @@ export class Scheduler {
     private tasks: TaskManager,
     private now: () => number = Date.now,
     private startNext: (scheduleId: string) => Promise<BacklogNextResult> = async () => ({ started: [], skipped: ["backlog-next is not available"] }),
-    private scanSecrets: () => Promise<{ lines: string[]; summary: ScanSummary }> = async () => ({ lines: ["secret-scan is not available"], summary: { repos: 0, hits: 0, failed: 1 } }),
+    private scanSecrets: (schedule: { id: string; title: string }) => Promise<{ lines: string[]; summary: ScanSummary }> = async () => ({ lines: ["secret-scan is not available"], summary: { repos: 0, hits: 0, failed: 1 } }),
     /** Claude's 7-day utilization at or above this and an insights firing is skipped (#1838): the backlog's `backlogQuotaLimit`. */
     private quotaLimit: () => number = () => 0.8,
     /** 上限のときの代わり (#834): the runner a prompt schedule's Task starts on, and the status line when it is another. */
@@ -198,7 +198,7 @@ export class Scheduler {
       // comes with hits — without this, a clean day left no trace to tell "0 hits" from "did not run".
       let r: { lines: string[]; summary: ScanSummary };
       try {
-        r = await this.scanSecrets();
+        r = await this.scanSecrets({ id, title });
       } catch (e) {
         // the error's name only: what a failure prints could quote anything, a token included (docs/design/secret-guard.md), and
         // the result is kept, shown and logged — `bash scripts/setup/scan_issues.sh <owner/name>` by hand shows the reason

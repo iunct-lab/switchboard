@@ -1,13 +1,16 @@
-import { type OtherRepo, otherRepoRules } from "./backlog.ts";
+import { LOCAL_BACKLOG_RULES, type OtherRepo, otherRepoRules } from "./backlog.ts";
 
 /**
  * The request goes in as the user wrote it, for the agent to tidy without changing its intent; a longer fence keeps backticks in a report inside the block.
  * `other` = the request is for another registered workspace's repository: the Task runs there and files it in that
  * repository and its Project, reading the skills as a backlog stage Task on that workspace does.
  */
-export function buildFeedbackPrompt({ text, when, screen, other, source }: { text: string; when: Date; screen?: string; other?: OtherRepo; source?: { kind: "eval"; taskId: string } }): string {
+export function buildFeedbackPrompt({ text, when, screen, other, local, source }: { text: string; when: Date; screen?: string; other?: OtherRepo; local?: boolean; source?: { kind: "eval"; taskId: string } }): string {
   const fence = "`".repeat(Math.max(4, ...Array.from(text.matchAll(/`+/g), (m) => m[0].length + 1)));
-  const where = other
+  // a workspace whose backlog is kept in Switchboard only (#2265, #2344): the Issues are made there, not in the GitHub repository
+  const where = local
+    ? `あなたは Switchboard に登録された workspace（このディレクトリ）で動いている。要望 Issue・PBI・Task はこの workspace の Switchboard のバックログに作る（GitHub には作らない）。${other ? otherRepoRules(other, true) : LOCAL_BACKLOG_RULES}`
+    : other
     ? `あなたは Switchboard に登録された別のリポジトリ（このディレクトリ）で動いている。要望 Issue・PBI・Task はこのリポジトリ（\`gh repo view\` が答えるもの）とその Project に作る。${otherRepoRules(other)}`
     : "あなたは Switchboard の meta workspace で動いている。";
   const assets = other ? "置き場はこのリポジトリの CLAUDE.md。書かれていなければ request-to-backlog のとおり保留" : "feedback-assets ブランチ";

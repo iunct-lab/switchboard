@@ -104,7 +104,7 @@ gh pr view <next> --json baseRefName,mergeable,mergeStateStatus   # base=main �
 ```
 
 マージ直後:
-1. Task に結果コメント（`issue-workflow` のテンプレ: PR / 変更 / 検証 / レビュー指摘と対応 / 残したもの）、`set_project_field.sh <Task> Status Done`
+1. Task に結果コメント（`issue-workflow` のテンプレ: PR / 変更 / 検証 / レビュー指摘と対応 / 残したもの）、`set_project_field.sh <Task> Status Done`。GitHub 連携の無い workspace（`BACKLOG_WORKSPACE` がある）の Task は自動で閉じないので、続けて `ops-kit backlog edit <Task> --state closed`
 2. `git fetch -q origin && git ls-tree -r --name-only origin/main | grep -i <消したもの>` で復活ファイルが無いか（fetch しないと古い origin/main を見る。`-r` が無いと直下しか出ない）
 3. `cross-runner-review` で作ったレビュー用ディレクトリ（`/tmp/<リポジトリ名>.review<PR番号>.XXXXXX` の実際のパス）を消す。glob で消さない。切れたセッションの残りは、次のレビューの前（`cross-runner-review` の 1）に同じリポジトリ名 + `gh` で MERGED / CLOSED と確かめたものだけ消える。worktree はスタックが全部入ってから `git worktree remove`
 4. PBI の全 Task が Done なら PBI の結果節（`pbi-complete`）

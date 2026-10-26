@@ -65,10 +65,14 @@ gh repo clone "$REPO" "$R" -- -q --branch "$HEAD_REF"
 M="$R/_review"; mkdir -p "$M"                                     # untracked。レビュアーはここを読む
 gh pr view $N --json number,title,body,url -q '"# PR #\(.number) \(.title)\n\(.url)\n\n\(.body)"' > "$M/pr.md"
 gh pr diff $N > "$M/diff.patch"
-TASK=$(grep -oE 'Closes #[0-9]+' "$M/pr.md" | head -1 | grep -oE '[0-9]+')
-gh issue view "$TASK" --json title,body -q '"# Task #'"$TASK"' \(.title)\n\n\(.body)"' > "$M/task.md"
+TASK=$(tr -d '\r' < "$M/pr.md" | grep -oE 'Closes #[0-9]+|^Backlog-Task: [0-9]+$' | sed -n '/^Closes/{p;q}')   # Closes #N（GitHub の workspace）→
+[ -n "$TASK" ] || TASK=$(tr -d '\r' < "$M/pr.md" | grep -oE '^Backlog-Task: [0-9]+$' | head -1)   # 単独行の Backlog-Task: N（ローカルのバックログ。task-to-pr のひな形が必ず置く）
+TASK=$(echo "$TASK" | grep -oE '[0-9]+' | head -1)
+if [ -n "$BACKLOG_WORKSPACE" ]; then ops-kit backlog view "$TASK" --fresh > "$M/task.md"   # GitHub に無いので gh issue view では読めない。PBI も同じく ops-kit backlog view
+else gh issue view "$TASK" --json title,body -q '"# Task #'"$TASK"' \(.title)\n\n\(.body)"' > "$M/task.md"; fi
 PBI=$(awk '/^## 親 PBI/{f=1;next} f && match($0,/#[0-9]+/){print substr($0,RSTART+1,RLENGTH-1); exit}' "$M/task.md")
-gh issue view "$PBI" --json title,body -q '"# PBI #'"$PBI"' \(.title)\n\n\(.body)"' > "$M/pbi.md"
+if [ -n "$BACKLOG_WORKSPACE" ]; then ops-kit backlog view "$PBI" --fresh > "$M/pbi.md"
+else gh issue view "$PBI" --json title,body -q '"# PBI #'"$PBI"' \(.title)\n\n\(.body)"' > "$M/pbi.md"; fi
 sed -n '/^## Design rules/,/^## License/p' "$R/README.md" > "$M/design-rules.md"   # 設計ルールの場所が CLAUDE.md にあればそれに合わせる
 ls "$R/docs/design" > "$M/design-docs.txt"
 ```

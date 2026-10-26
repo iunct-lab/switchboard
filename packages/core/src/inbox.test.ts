@@ -75,4 +75,34 @@ describe("inbox", () => {
     expect(() => inbox.markPromoted(first!.path, "task_other")).toThrow(/already promoted/);
     expect(() => inbox.get("README.md")).toThrow(/not an inbox note/);
   });
+
+  test("close takes a draft off the list without a task; the file stays with status: closed, also for a new Inbox", () => {
+    const d = inbox.add("close me", { now: new Date(2026, 8, 6, 10, 0, 0) });
+    const c = inbox.close(d.path, { now: new Date("2026-09-06T01:00:00Z") });
+    expect(c.status).toBe("closed");
+    expect(inbox.list().some((n) => n.path === d.path)).toBe(false);
+    expect(new Inbox(store).list().some((n) => n.path === d.path)).toBe(false);
+    const raw = readFileSync(join(store.dir, d.path), "utf8");
+    expect(raw).toContain("status: closed");
+    expect(raw).toContain("closed: 2026-09-06T01:00:00.000Z");
+    expect(raw).toContain("close me");
+    expect(() => inbox.close(d.path)).toThrow(/already closed/);
+    expect(() => inbox.markPromoted(d.path, "t")).toThrow(/already closed/);
+  });
+
+  test("addNotice marks the schedule, and closes only that schedule's earlier open notice (superseded_by)", () => {
+    const src = { schedule: "sch_a", title: "検査" };
+    const draft = inbox.add("my draft");
+    const other = inbox.addNotice("other", { title: "other notice", source: { schedule: "sch_b", title: "別" } });
+    const first = inbox.addNotice("one", { title: "notice one", source: src, now: new Date(2026, 8, 7, 4, 0, 0) });
+    const second = inbox.addNotice("two", { title: "notice two", source: src, now: new Date(2026, 8, 8, 4, 0, 0) });
+    const open = inbox.list().map((n) => n.path);
+    expect(open).toContain(second.path);
+    expect(open).not.toContain(first.path);
+    expect(open).toContain(other.path);
+    expect(open).toContain(draft.path);
+    expect(inbox.get(second.path).source).toEqual(src);
+    expect(inbox.get(draft.path).source).toBeUndefined();
+    expect(readFileSync(join(store.dir, first.path), "utf8")).toContain(`superseded_by: ${second.path}`);
+  });
 });

@@ -40,7 +40,13 @@ export function renderNote(n: Omit<InboxNote, "path">, extraFrontmatter: Record<
   if (n.workspaceHint) fm.workspace = n.workspaceHint;
   else delete fm.workspace;
   if (n.taskId) fm.task = n.taskId;
+  if (n.source) fm.source = { schedule: n.source.schedule, title: n.source.title };
   return `---\n${stringifyYaml(fm)}---\n${n.body.trim()}\n`;
+}
+
+function toSource(v: unknown): InboxNote["source"] {
+  const s = v as { schedule?: unknown; title?: unknown } | null | undefined;
+  return s && typeof s.schedule === "string" && typeof s.title === "string" ? { schedule: s.schedule, title: s.title } : undefined;
 }
 
 export function toNote(doc: KnowledgeDoc, body: string): InboxNote {
@@ -51,8 +57,9 @@ export function toNote(doc: KnowledgeDoc, body: string): InboxNote {
     body: body.trim(),
     created: typeof fm.created === "string" ? fm.created : fm.created instanceof Date ? fm.created.toISOString() : new Date(doc.mtime).toISOString(),
     workspaceHint: typeof fm.workspace === "string" ? fm.workspace : undefined,
-    status: fm.status === "promoted" ? "promoted" : "inbox",
+    status: fm.status === "promoted" ? "promoted" : fm.status === "closed" ? "closed" : "inbox",
     taskId: typeof fm.task === "string" ? fm.task : undefined,
+    source: toSource(fm.source),
   };
 }
 
@@ -63,7 +70,7 @@ export class Inbox {
   list(): InboxNote[] {
     const out: InboxNote[] = [];
     for (const d of this.store.list()) {
-      if (d.kind !== "notes" || (d.frontmatter as Record<string, unknown>).status === "promoted") continue;
+      if (d.kind !== "notes" || ["promoted", "closed"].includes((d.frontmatter as Record<string, unknown>).status as string)) continue;
       try {
         const n = toNote(d, this.store.read(d.path).body);
         if (n.status === "inbox") out.push(n);
@@ -74,7 +81,7 @@ export class Inbox {
     return out.sort((a, b) => (a.created === b.created ? a.path.localeCompare(b.path) : a.created < b.created ? 1 : -1));
   }
 
-  add(text: string, opts: { title?: string; workspaceHint?: string; now?: Date } = {}): InboxNote {
+  add(text: string, opts: { title?: string; workspaceHint?: string; source?: InboxNote["source"]; now?: Date } = {}): InboxNote {
     const body = text.replace(/\r\n/g, "\n").trim();
     if (!body) throw new Error("empty note");
     const now = opts.now ?? new Date();
@@ -83,9 +90,27 @@ export class Inbox {
     // Numeric suffix on collision, checked against the filesystem (not only the index, which may lag a watcher tick).
     let path = base;
     for (let i = 2; this.store.exists(path); i++) path = base.replace(/\.md$/, `-${i}.md`);
-    const note: Omit<InboxNote, "path"> = { title, body, created: now.toISOString(), workspaceHint: opts.workspaceHint?.trim() || undefined, status: "inbox" };
+    const note: Omit<InboxNote, "path"> = { title, body, created: now.toISOString(), workspaceHint: opts.workspaceHint?.trim() || undefined, status: "inbox", source: opts.source };
     this.store.write(path, renderNote(note));
     return { ...note, path };
+  }
+
+  /**
+   * The one way the daemon leaves a note for the user (#2401): marked with the schedule that put it there, and the previous
+   * open notice of the same schedule is closed (superseded_by) so a daily check does not pile up one note per day.
+   * Written first, closed after: a failure leaves two notices, never none.
+   */
+  addNotice(text: string, opts: { title?: string; source: { schedule: string; title: string }; now?: Date }): InboxNote {
+    const note = this.add(text, { title: opts.title, now: opts.now, source: opts.source });
+    for (const old of this.list()) {
+      if (old.path === note.path || old.source?.schedule !== opts.source.schedule) continue;
+      try {
+        this.close(old.path, { supersededBy: note.path, now: opts.now });
+      } catch {
+        /* closed or gone meanwhile */
+      }
+    }
+    return note;
   }
 
   get(path: string): InboxNote {
@@ -94,20 +119,31 @@ export class Inbox {
     return toNote(doc, body);
   }
 
-  /**
-   * Mark a note as promoted to a task. The file stays in notes/ so the idea's origin is traceable; frontmatter keys the
-   * user added by hand are preserved, only status / task change and the body is written back untouched.
-   */
-  markPromoted(path: string, taskId: string): InboxNote {
+  /** Rewrite the frontmatter of a note in place: keys the user added by hand and the body are kept untouched. */
+  private patchFrontmatter(path: string, patch: Record<string, unknown>): InboxNote {
     const { doc, content, body } = this.store.read(path);
     if (doc.kind !== "notes") throw new Error("not an inbox note");
     const n = toNote(doc, body);
     if (n.status === "promoted") throw Object.assign(new Error(`note already promoted to ${n.taskId ?? "a task"}`), { code: "EEXIST" });
+    if (n.status === "closed") throw Object.assign(new Error("note already closed"), { code: "EEXIST" });
     const m = content.match(/^---[ \t]*\r?\n([\s\S]*?)^---[ \t]*\r?\n?/m);
     const existing = (m && m[1]!.trim() ? (parseYaml(m[1]!) as Record<string, unknown>) : {}) ?? {};
     const rawBody = m ? content.slice(m[0].length) : content;
-    const fm = { ...existing, status: "promoted", task: taskId };
-    this.store.write(path, `---\n${stringifyYaml(fm)}---\n${rawBody}`);
+    this.store.write(path, `---\n${stringifyYaml({ ...existing, ...patch })}---\n${rawBody}`);
+    return n;
+  }
+
+  /** Mark a note as promoted to a task. The file stays in notes/ so the idea's origin is traceable. */
+  markPromoted(path: string, taskId: string): InboxNote {
+    const n = this.patchFrontmatter(path, { status: "promoted", task: taskId });
     return { ...n, status: "promoted", taskId };
+  }
+
+  /** Close a note without making a task: it leaves the list, the file stays in notes/ with status: closed. */
+  close(path: string, opts: { supersededBy?: string; now?: Date } = {}): InboxNote {
+    const patch: Record<string, unknown> = { status: "closed", closed: (opts.now ?? new Date()).toISOString() };
+    if (opts.supersededBy) patch.superseded_by = opts.supersededBy;
+    const n = this.patchFrontmatter(path, patch);
+    return { ...n, status: "closed" };
   }
 }

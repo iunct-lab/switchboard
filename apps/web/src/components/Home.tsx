@@ -9,6 +9,7 @@ import { attentionList, needsAttention, outcomeDotClass, outcomeLabel } from "..
 import { reportMeta } from "../reports.ts";
 import { quotaAsOf, quotaStale, resetLabel, windowLabel } from "../quota.ts";
 import { jstTime } from "../time.ts";
+import { noticeSource, splitInbox } from "../inbox.ts";
 import { staleDraft } from "../presets.ts";
 import { listedRunners } from "../runners.ts";
 import { PresetPicker } from "./PresetPicker.tsx";
@@ -329,6 +330,16 @@ export function Home(props: {
     }
   };
 
+  const closeNote = async (n: InboxNote) => {
+    try {
+      await api.inboxClose(n.path);
+      await loadInbox();
+    } catch (e) {
+      props.onError(String((e as Error).message ?? e));
+    }
+  };
+  const { notices, drafts } = splitInbox(inbox);
+
   /**
    * "改善 →": put a workspace's brief (from the daemon) in front of the request. What the user already typed is kept:
    * a prompt that starts with a previous brief has that prefix replaced, anything else gets the brief prepended.
@@ -559,10 +570,27 @@ export function Home(props: {
 
       {saved && <div className="banner ok">Inbox に保存しました: {saved}</div>}
 
-      {inbox.length > 0 && (
+      {notices.length > 0 && (
+        <section className="card">
+          <h5>お知らせ（定期の予定から）</h5>
+          {notices.map((n) => (
+            <div key={n.path} className="row inbox-row" title={n.path}>
+              <details className="t">
+                <summary>
+                  {n.title} <span className="hint">{noticeSource(n)}</span>
+                </summary>
+                <pre className="wrap">{n.body}</pre>
+              </details>
+              <button onClick={() => void closeNote(n)}>閉じる</button>
+            </div>
+          ))}
+        </section>
+      )}
+
+      {drafts.length > 0 && (
         <section className="card">
           <h5>Inbox（まだリポジトリに紐づかないメモ）</h5>
-          {inbox.map((n) => (
+          {drafts.map((n) => (
             <div key={n.path} className="row inbox-row" title={n.path}>
               <span className="t">
                 {n.title}
@@ -579,6 +607,7 @@ export function Home(props: {
               <button disabled={promoting !== null} onClick={() => void promote(n)}>
                 {promoting === n.path ? "起動中…" : "Task に昇格"}
               </button>
+              <button onClick={() => void closeNote(n)}>閉じる</button>
             </div>
           ))}
         </section>

@@ -193,7 +193,7 @@ Issue は「何をやったか」の正本。PR の説明は補助。**本文 1 
 2. **逸脱時**: スコープを削る・増やす・別案にする、検証できないと分かった、依存が壊れていた — その都度コメント。
    「なぜ」を必ず書く。判断が利用者に属する（お金・他 OS・破壊的変更・要件の解釈）なら、**止めて聞く**。マージ判定が merge を返した PR のマージは依頼の範囲なので聞かない（`pbi-complete` の「この依頼が含む範囲」）。聞く場所は問いの種類で分ける（「判断待ちの出し方」。実装の判断は Issue、運用の確認は Task の会話）。
 
-3. **完了時（Task）**: PR の `Closes #N` でマージ時に自動 close される（それで良い）。**マージ直後に結果コメント**（下のテンプレ、マージ日入り）
+3. **完了時（Task）**: PR の `Closes #N` でマージ時に自動 close される（それで良い）。GitHub 連携の無い workspace（`BACKLOG_WORKSPACE` がある）の Task は GitHub に無く自動では閉じないので、マージの後に `ops-kit backlog edit <Task> --state closed` で閉じる（PR は `Backlog-Task: <Task>`。`pbi-complete` はこの Task も閉じてから PBI を閉じる）。**マージ直後に結果コメント**（下のテンプレ、マージ日入り）
    を書き、Project の Status を Done にする。結果コメントの無い Task は「閉じているが未完了」として扱う。
 4. **完了時（PBI）**: 受け入れ条件のチェックボックスを検証結果つきで埋め、「結果」節を書いてから**手動で** close（PR から Closes しない）。
 5. **Milestone**: PBI が閉じるたびに Milestone の説明を更新する（残り / やらないと決めたもの）。全 PBI が Done か「やらない」なら Milestone を close。
