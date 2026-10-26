@@ -34,7 +34,7 @@ describe("effortLabel (#833)", () => {
 });
 
 describe("Brief (#833)", () => {
-  const task: Task = { id: "task_e", executionMode: "local", cloudSession: null, sourceCloudTaskId: null, workspaceId: null, title: "e", runner: "claude", cwd: "/w", scope: ["/w"], status: "done", runnerSessionId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: "high", origin: "switchboard", resumeAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 };
+  const task: Task = { id: "task_e", executionMode: "local", cloudSession: null, sourceCloudTaskId: null, workspaceId: null, title: "e", runner: "claude", cwd: "/w", scope: ["/w"], status: "done", runnerSessionId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: "high", origin: "switchboard", resumeAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 };
   const runners: RunnerInfo[] = [{ id: "claude", available: true, permissionModes: [], models: [], efforts: [{ value: "high", label: "深い" }] }];
   const render = (t: Task) => renderToStaticMarkup(createElement(Brief, { task: t, ledger: null, onAbort: () => {}, open: true, onClose: () => {}, runners }));
   const ROW = (text: string) => `<span>思考の深さ</span><span class="brief-effort" title="作成時に決まり、途中では変えられません">${text}</span>`;

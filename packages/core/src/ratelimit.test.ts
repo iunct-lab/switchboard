@@ -453,7 +453,7 @@ describe("a turn the daemon's stop cut continues on the next start (interrupted.
 
   test("a daemon that died without its shutdown: the next start closes the orphan and plans it the same way; no session, no plan", () => {
     const now = Date.now();
-    const mk = (id: string, sess: string | null) => db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: home, scope: [home], status: "running", runnerSessionId: sess, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, stage: null, statusAt: now, createdAt: now, updatedAt: now });
+    const mk = (id: string, sess: string | null) => db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: home, scope: [home], status: "running", runnerSessionId: sess, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
     mk("task_a", "sess-a");
     mk("task_b", null);
     expect(abortOrphanedTasks(db, now)).toEqual(["task_a", "task_b"]);

@@ -75,7 +75,7 @@ Cloud runs on the official cloud infrastructure. `--remote-control` lets another
 Runners are detected on `PATH`. Install them with the vendors' official installers:
 
 - Claude Code — https://claude.com/claude-code
-- Codex CLI — `curl -fsSL https://chatgpt.com/codex/install.sh | sh` (https://developers.openai.com/codex/cli).
+- Codex CLI — `curl -fsSL https://chatgpt.com/codex/install.sh | sh` (https://developers.openai.com/codex/cli). Required for development (typecheck, CI): the Codex protocol types are generated from the installed Codex; no login is needed.
 - Optional: DAK — off by default; see `docs/design/dak-adapter.md` → Enabling.
 
 ## Develop
@@ -84,7 +84,7 @@ Runners are detected on `PATH`. Install them with the vendors' official installe
 bun test                  # recorded-replay tests for adapters + daemon lifecycle tests
 bun run typecheck
 bun run licenses:check    # every dependency's license against scripts/licenses.allow.json (docs/design/licenses.md)
-bun run codex:types      # refresh the Codex protocol type snapshot (needs codex, or CODEX_TS_DIR)
+bun run codex:types       # typecheck runs it: generate the Codex protocol types from the installed Codex
 bun run core              # daemon only, with --watch
 bun run web               # UI only
 ```

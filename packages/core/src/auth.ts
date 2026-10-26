@@ -134,12 +134,16 @@ export function isLoopbackAddress(address: string): boolean {
 
 /** The session cookie the cloud host's login (the starter Lambda, #211) issues after a passkey check. */
 export const SESSION_COOKIE = "sb_session";
+/** The login's limits (#498): 7 days from the sign-in, 24 hours from the last action. The same values as aws/auth.ts and
+ *  rescue/src/server.ts (aws/session-contract.test.ts pins them). */
+export const SESSION_MAX_MS = 7 * 24 * 3600_000;
+export const SESSION_IDLE_MS = 24 * 3600_000;
 
 /**
  * A valid `sb_session` cookie (#211, #701): `<body>.<sig>` where `body` = base64url of the UTF-8 text
- * `<passkeyId>.<expiresMs>` and `sig` = base64url of the Ed25519 signature over the base64url **text** of `body`, made by
+ * `<passkeyId>.<idleUntilMs>.<expiresMs>` and `sig` = base64url of the Ed25519 signature over the base64url **text** of `body`, made by
  * the Starter with a seed only it can read (aws/auth.ts `sessionValue`). Checked here with the public key
- * (SWITCHBOARD_SESSION_PUBLIC_KEY, the raw 32 bytes in base64url), so nothing on this machine can make one. Not expired.
+ * (SWITCHBOARD_SESSION_PUBLIC_KEY, the raw 32 bytes in base64url), so nothing on this machine can make one. Neither time has passed (idle-until, the cap), and idle-until is not past the cap.
  * Every `sb_session=` pair is tried (a stale one for a narrower path can come first). No key (a Mac) = never valid.
  */
 export function sessionOk(req: Request, publicKey: string | undefined, now = Date.now()): boolean {
@@ -210,7 +214,8 @@ function sessionValueOk(raw: string, publicKey: string | undefined, now: number)
 
 /**
  * The passkey id of one cookie value signed over `prefix + body` by the public key's seed and not expired, else undefined.
- * `prefix` is "" for `sb_session` and "recent:" for `sb_recent`, so one value never passes as the other.
+ * `prefix` is "" for `sb_session` (body `<id>.<idleUntil>.<expires>`) and "recent:" for `sb_recent` (`<id>.<expires>`), so one
+ * value never passes as the other. Every time must be after `now`, and idle-until may not pass the cap.
  */
 function signedPasskeyId(raw: string, publicKey: string | undefined, prefix: string, now: number): string | undefined {
   if (!publicKey || !raw || raw.length > 512) return undefined;
@@ -227,10 +232,10 @@ function signedPasskeyId(raw: string, publicKey: string | undefined, prefix: str
   } catch {
     return undefined;
   }
-  const text = Buffer.from(body, "base64url").toString("utf8");
-  const at = text.lastIndexOf(".");
-  const expires = Number(text.slice(at + 1));
-  return Number.isFinite(expires) && expires > now ? text.slice(0, Math.max(at, 0)) : undefined;
+  const [id, ...at] = Buffer.from(body, "base64url").toString("utf8").split(".");
+  const ms = at.map(Number);
+  if (!id || ms.length !== (prefix === "" ? 2 : 1) || !ms.every((t) => Number.isFinite(t) && t > now)) return undefined;
+  return ms.every((t, i) => i === 0 || t >= ms[i - 1]!) ? id : undefined;
 }
 
 /** The Starter's "checked by passkey just now" cookie (5 minutes, #497); the daemon's strongest operations ask for it (#1491). */

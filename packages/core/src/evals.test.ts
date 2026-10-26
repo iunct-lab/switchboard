@@ -86,7 +86,7 @@ describe("ruleMetrics (#1218)", () => {
     try {
       const db = new Db(join(dir, "switchboard.db"));
       const now = 1_700_000_000_000;
-      const task: Task = { id: "t1", workspaceId: null, title: "t1", runner: "claude", cwd: dir, scope: [dir], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, stage: null, statusAt: now, createdAt: now, updatedAt: now };
+      const task: Task = { id: "t1", workspaceId: null, title: "t1", runner: "claude", cwd: dir, scope: [dir], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now };
       db.insertTask(task);
       const events = envelopes([user("go"), { t: "tool.call", id: "a", name: "Read", input: {}, summary: "f" }, { t: "tool.result", id: "a", ok: true, summary: "" }, end("ok")]);
       const first = rulesEvalOf(task, events, { costUsd: 0.5 }, now);

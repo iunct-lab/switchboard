@@ -241,3 +241,13 @@ Task にしか無い（`CompositeSuggester` が落とした提案は行を書か
   Sonnet が答え、`modelUsage` に両方が出る）。Claude の `set_model` 制御メッセージは使わない（ランナーごとの分岐になる）
 - 古いプロセスはターンごとに自分のモデルを `session.start` で名乗る。変更後そのプロセスが付いている間は、その値を Task に
   書き戻さない（`LiveSession.modelChanged`）。再開したプロセスの `session.start` は新しいモデルの完全な id を書く
+
+## タイトル生成（PBI #491）
+
+Task 一覧のタイトルから何をした Task か見分けられるようにする。タイトルを書き換えてよいかは `Task.titlePending`（1 ビット）で持つ。
+
+- **仮タイトル**: `POST /api/tasks` で title を省略すると、依頼文の先頭 48 字（1 行にしたもの）が仮のタイトルになり `titlePending: true`。Home はタイトル欄が空（または挿入した接頭辞だけ）なら title を送らない。title を渡す経路（工程 Task・要望 Task・スケジュール・Inbox 昇格・利用者が欄に書いたもの）は `false` のままで、自動では書き換わらない。バックログの工程 Task と要望 Task はタイトルの接頭辞で探されるので、変えてはいけない。並走（#99）の Task は一覧に出る主の Task の title を使うので `false`
+- **最初のターンのあと 1 回**: `titlePending` の Task は、最初のターンが正常に終わると `titlePending` を先に false にして（1 回に限る）、依頼文と最後の返答から依頼と同じ言語の短いタイトルを付ける。生成は codex `gpt-6-luna` → claude `claude-haiku-4-5` の順（#493 の判定と同じ答え）。読み取り専用モードで 1 ターン、1 本 60 秒、動かない・読めない答えなら次へ。両方だめなら仮タイトルのまま、Task の実行は止まらない。付けるのは現在のタイトルが仮タイトルのままのときだけ（待つ間に利用者が変えたら上書きしない）。エラー・中断で終わったターンは名付けず（`titlePending` はそのまま、次の正常なターンで名付ける）、並走（主の Task の title が一覧に出る）と Cloud は対象外
+- **スキルのコマンド**: `/pbi-complete 123` のように最初の行が `/<名前> #?<番号>` の依頼は、作成時に `gh issue view` で Issue の題を引き（5 秒で打ち切り）`/<名前> #<番号> <題>` を title にする。LLM は使わず `titlePending: false`。引けなければ仮タイトル + pending。ローカルのバックログ（`backlog: switchboard`）の Workspace では番号が GitHub のものではないので引かない
+- **手で変える**: `PATCH /api/tasks/:id`（`{ title }`、前後の空白を除いて 1〜200 字）。変えた Task は `titlePending: false` になり、自動では書き換わらない。ターミナルから取り込んだ Task は取り込みのたびに Claude 側の題へ戻るので、409 で断る。Task 画面の見出しをクリックして編集する
+- **設定と費用**: `Settings.titles.auto`（既定 true、設定画面の「タスク名の自動付与」で変える）。生成のランナー・モデルは設定にしない。生成で使った usage は（失敗したターンも）その Task の Ledger に載る。既存の Task は migration の既定値 false で、付け直さない

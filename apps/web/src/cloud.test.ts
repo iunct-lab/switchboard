@@ -7,7 +7,7 @@ import { TaskView } from "./components/TaskView.tsx";
 import { Brief } from "./components/Brief.tsx";
 import { foldTranscript, transcriptMarkdown } from "./transcript.ts";
 const ref = { id: "session_0123456789abcdefghijklmn", url: "https://claude.ai/code/session_0123456789abcdefghijklmn" };
-const task: Task = { id: "task_cloud", executionMode: "cloud", cloudSession: ref, sourceCloudTaskId: null, workspaceId: null, title: "Cloud", runner: "claude", cwd: "/fixture", scope: ["/fixture"], status: "idle", runnerSessionId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 };
+const task: Task = { id: "task_cloud", executionMode: "cloud", cloudSession: ref, sourceCloudTaskId: null, workspaceId: null, title: "Cloud", runner: "claude", cwd: "/fixture", scope: ["/fixture"], status: "idle", runnerSessionId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 };
 const noop = () => {};
 const events = (list: AgentEvent[]): EventEnvelope[] => list.map((ev, i) => ({ taskId: task.id, seq: i+1, ts: i, ev }));
 

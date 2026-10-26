@@ -19,7 +19,7 @@ const tmp = mkdtempSync(join(tmpdir(), "sb-transfer-test-"));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
 function task(id: string, cwd: string): Task {
-  return { id, workspaceId: null, title: id, runner: "claude", cwd, scope: [cwd], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, stage: null, statusAt: 1_000, createdAt: 1_000, updatedAt: 1_000 };
+  return { id, workspaceId: null, title: id, runner: "claude", cwd, scope: [cwd], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1_000, createdAt: 1_000, updatedAt: 1_000 };
 }
 
 /** A HOME with a little of everything the package carries. */

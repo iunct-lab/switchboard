@@ -10,7 +10,7 @@ const task = (): Task => ({
   id: "task_cloud", workspaceId: null, title: "Cloud", runner: "claude", cwd: "/tmp", scope: [], status: "idle",
   executionMode: "cloud", cloudSession: null, sourceCloudTaskId: null, runnerSessionId: null, model: null, routing: null, budgetUsd: null,
   scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false,
-  workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, stage: null,
+  workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null,
   statusAt: 1, createdAt: 1, updatedAt: 1,
 });
 function path() { const d = mkdtempSync(join(tmpdir(), "switchboard-cloud-db-")); dirs.push(d); return join(d, "test.db"); }

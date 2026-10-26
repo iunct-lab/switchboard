@@ -19,6 +19,7 @@ export const ciSteps: Step[] = [
   },
   { name: "bun install --frozen-lockfile", run: "bun install --frozen-lockfile" },
   { name: "bun run licenses:check", run: "bun run licenses:check" },
+  // typecheck は先に入っている Codex から型を生成する（scripts/codex_types.ts）。CI を回す環境にも Codex CLI が要る
   { name: "bun run typecheck", run: "bun run typecheck" },
   // 実ランナー（claude/codex）は CI に無い。アダプタの再生テストは Git の外の録画を読み、無ければ理由を出して飛ぶ
   // （README の Development）。録画を置いた所有者のローカル CI だけが再生まで確かめる。

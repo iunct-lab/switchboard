@@ -226,6 +226,8 @@ export const Task = z.object({
   shadowStopped: z.boolean(),
   /** Why the daemon picked this task's Workspace (#135); null = the person picked it. Set at creation, never changed. */
   workspaceReason: z.string().nullable(),
+  /** The title is provisional (#491): it is set once more after the first turn. A title the person gave or changed is false. */
+  titlePending: z.boolean(),
   /** What the task came to (#492); separate from `status`. Set by the rule on a status change, by the person, and by #493's judge. */
   outcome: TaskOutcome,
   /** When the person marked the task 確認済み (ms) (#492); null = not reviewed. A new turn clears it. */
@@ -408,7 +410,8 @@ export const CreateTaskInput = z.object({
   workspaceId: z.string().optional(),
   /** Omitted together with `workspaceId` = "自動" (#135): the daemon asks the LLM to pick a registered Workspace, or answers 409. */
   cwd: z.string().optional(),
-  title: z.string().min(1),
+  /** Omitted = a provisional title from the prompt, set again after the first turn (#491). */
+  title: z.string().min(1).optional(),
   prompt: z.string().min(1),
   runner: RunnerId.default("claude"),
   scope: z.array(z.string()).optional(),
@@ -430,6 +433,10 @@ export const CreateTaskInput = z.object({
   attachmentIds: z.array(z.string()).optional(),
 });
 export type CreateTaskInput = z.infer<typeof CreateTaskInput>;
+
+/** `PATCH /api/tasks/:id` (#491): the person renames the task; it is never set again automatically. */
+export const PatchTaskInput = z.object({ title: z.string().trim().min(1).max(200) });
+export type PatchTaskInput = z.infer<typeof PatchTaskInput>;
 
 /** `POST /api/tasks/:id/send`. Text, attachments, or both (an attachment-only turn gets a fixed sentence). */
 export const SendTaskInput = z.object({
@@ -544,6 +551,10 @@ export type JudgeSettings = z.infer<typeof JudgeSettings>;
  */
 export const EvalsSettings = z.object({ judge: z.object({ enabled: z.boolean().default(true) }).default({}) }).default({});
 export type EvalsSettings = z.infer<typeof EvalsSettings>;
+
+/** Naming a task after its first turn (#491). On by default: it spends a runner's quota once per task. Runner and model are not settings (`TITLE_RUNNERS`). */
+export const TitlesSettings = z.object({ auto: z.boolean().default(true) }).default({});
+export type TitlesSettings = z.infer<typeof TitlesSettings>;
 
 /** One answer of the judge: `done` = the work asked for is finished and reported, `needs_action` = it stopped for the person. */
 export const TaskJudgement = z.object({ result: z.enum(["done", "needs_action"]), reason: z.string() });
@@ -711,6 +722,8 @@ export const Settings = z.object({
   autoStart: AutoStartSettings.default({}),
   /** The rubric judge (#1219). */
   evals: EvalsSettings.default({}),
+  /** Name a task after its first turn (#491). */
+  titles: TitlesSettings.default({}),
   /** Usage threshold and automatic resume (#835). */
   quotaAndResume: QuotaAndResumeSettings.default({}),
   /** The judge's fallback and timeouts, the Workspace choice's timeout (#835). */
@@ -771,6 +784,7 @@ export const SettingsPatch = z.object({
     .optional(),
   /** `{ evals: { judge: { enabled: false } } }` switches the rubric judge off (#1219). */
   evals: z.object({ judge: z.object({ enabled: z.boolean() }).partial().optional() }).partial().optional(),
+  titles: z.object({ auto: z.boolean() }).partial().optional(),
   /** Partial: `{ quotaAndResume: { maxLimitStops: 3 } }` leaves the rest alone; null puts the whole group back to the defaults (#835). */
   quotaAndResume: z.object(quotaAndResumeFields).partial().nullable().optional(),
   judgeAndChoice: z.object(judgeAndChoiceFields).partial().nullable().optional(),

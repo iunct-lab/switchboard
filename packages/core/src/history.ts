@@ -305,6 +305,7 @@ export class HistoryImporter {
           shadowOf: null,
           shadowStopped: false,
           workspaceReason: null,
+          titlePending: false,
           outcome: "unknown",
           // the person watched it in the terminal (#492): not listed under 要対応; a continued turn keeps it reviewed
           reviewedAt: s.lastTs ?? events.at(-1)!.ts,

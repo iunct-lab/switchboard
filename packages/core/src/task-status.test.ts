@@ -29,7 +29,7 @@ describe("task status transitions (#1140)", () => {
   });
   const mk = (id: string, status: TaskStatus, extra: Partial<Task> = {}) => {
     const now = Date.now();
-    db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: home, scope: [home], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, stage: null, statusAt: now, createdAt: now, updatedAt: now, ...extra });
+    db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: home, scope: [home], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now, ...extra });
   };
 
   test("canTransition matches the table for every pair of statuses", () => {

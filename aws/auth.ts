@@ -20,10 +20,11 @@
  *                          the cookie only; 404 when the Starter has no countries)
  *   POST /_auth/countries  { countries, from?, until } / POST /_auth/countries/clear   with the cookie + a passkey check within
  *                          5 minutes: set / drop the temporary extra countries of the geo restriction (400 for a bad allowance)
+ *   POST /_auth/renew      with the cookie: the same cookie with the idle time 24 hours on (the cap does not move; #498)
  *   POST /_auth/logout     clears the cookies
  *
  * The session cookie is the contract with the daemon and sb-rescue (#235), which verify it with the public key only (#701):
- *   sb_session=<base64url("<passkeyId>.<expiresMs>")>.<base64url(Ed25519 signature over that first part's text)>
+ *   sb_session=<base64url("<passkeyId>.<idleUntilMs>.<expiresMs>")>.<base64url(Ed25519 signature over that first part's text)>
  * The private key is /switchboard/session-signing-key (a 32-byte seed in hex), which only this Lambda reads; the host gets
  * publicKeyOf(seed) as /switchboard/session-public-key, so nothing on the host can make a cookie. Replacing the seed logs
  * every browser out. Every login and registration also sets sb_recent (5 minutes, the same body, the signature over
@@ -74,7 +75,10 @@ export interface Result {
 }
 
 export const SESSION_COOKIE = "sb_session";
-export const SESSION_MS = 30 * 24 * 3600_000;
+/** The login's two limits: at most 7 days from the sign-in, and 24 hours from the last action (#498). The same values as
+ *  packages/core/src/auth.ts and rescue/src/server.ts (aws/session-contract.test.ts pins them). */
+export const SESSION_MAX_MS = 7 * 24 * 3600_000;
+export const SESSION_IDLE_MS = 24 * 3600_000;
 export const RECENT_COOKIE = "sb_recent";
 export const RECENT_MS = 5 * 60_000;
 const CHALLENGE_MS = 5 * 60_000;
@@ -134,12 +138,13 @@ function signingKeyOf(seedHex: string): KeyObject {
 export function publicKeyOf(seedHex: string): string {
   return createPublicKey(signingKeyOf(seedHex)).export({ format: "jwk" }).x!;
 }
-function signed(seedHex: string, prefix: string, passkeyId: string, expires: number): string {
-  const body = b64(`${passkeyId}.${expires}`);
+function signed(seedHex: string, prefix: string, passkeyId: string, ...times: number[]): string {
+  const body = b64([passkeyId, ...times].join("."));
   return `${body}.${b64(sign(null, Buffer.from(prefix + body), signingKeyOf(seedHex)))}`;
 }
-function signedOf(publicKey: string, prefix: string, value: string | undefined, now: number): string | undefined {
-  if (!value || value.length > 400) return;
+/** `times` = how many time fields the body carries: 2 for a session (idle-until, then the cap), 1 for a recent check. Every one must be in the future, and the idle time may not pass the cap. */
+function signedOf(publicKey: string, prefix: string, times: 1 | 2, value: string | undefined, now: number): string | undefined {
+  if (!value || value.length > 512) return; // the same limit as the daemon and sb-rescue (#498)
   const [body, sig] = value.split(".");
   const raw = Buffer.from(sig ?? "", "base64url");
   if (!body || raw.length !== 64) return;
@@ -148,20 +153,22 @@ function signedOf(publicKey: string, prefix: string, value: string | undefined, 
   } catch {
     return;
   }
-  const [id, expires] = Buffer.from(body, "base64url").toString().split(".");
-  return id && Number(expires) > now ? id : undefined;
+  const [id, ...at] = Buffer.from(body, "base64url").toString().split(".");
+  const ms = at.map(Number);
+  if (!id || ms.length !== times || !ms.every((t) => Number.isFinite(t) && t > now)) return;
+  return ms.every((t, i) => i === 0 || t >= ms[i - 1]!) ? id : undefined;
 }
 
 /**
- * Signs `<passkeyId>.<expiresMs>` into the cookie value (exported for tests and the contract): Ed25519 with the seed,
+ * Signs `<passkeyId>.<idleUntilMs>.<expiresMs>` into the cookie value (exported for tests and the contract): Ed25519 with the seed,
  * over the base64url body text (not its bytes) — exactly what the daemon and sb-rescue verify with the public key (#701).
  */
-export function sessionValue(seedHex: string, passkeyId: string, expires: number): string {
-  return signed(seedHex, "", passkeyId, expires);
+export function sessionValue(seedHex: string, passkeyId: string, idleUntil: number, expires: number): string {
+  return signed(seedHex, "", passkeyId, idleUntil, expires);
 }
 /** The passkey id of a valid, unexpired cookie value under the public key, else undefined. */
 export function sessionOf(publicKey: string, value: string | undefined, now: number): string | undefined {
-  return signedOf(publicKey, "", value, now);
+  return signedOf(publicKey, "", 2, value, now);
 }
 
 /** Signs a passkey check made just now: the session's body, the signature over "recent:" + body (#497). */
@@ -170,7 +177,7 @@ export function recentValue(seedHex: string, passkeyId: string, expires: number)
 }
 /** The passkey id of a valid, unexpired recent-check value, else undefined. */
 export function recentOf(publicKey: string, value: string | undefined, now: number): string | undefined {
-  return signedOf(publicKey, "recent:", value, now);
+  return signedOf(publicKey, "recent:", 1, value, now);
 }
 
 export type Param = (name: string, fresh?: boolean) => Promise<string>;
@@ -260,13 +267,16 @@ export function makeAuth(d: AuthDeps) {
     s.spent = s.spent.filter((x) => x.expires > now());
     s.spent.push({ challenge: c, expires: now() + CHALLENGE_MS });
   };
-  const cookie = async (passkeyId: string) => {
-    const expires = now() + SESSION_MS;
-    return `${SESSION_COOKIE}=${sessionValue(await sessionKey(), passkeyId, expires)}; HttpOnly; ${secure}SameSite=Lax; Path=/; Max-Age=${SESSION_MS / 1000}`;
+  /** A login cookie: the cap is 7 days from now, or `expires` (a renewal keeps the cap it had); the idle time is 24 hours from now, never past the cap. */
+  const cookie = async (passkeyId: string, expires = now() + SESSION_MAX_MS) => {
+    const idleUntil = Math.min(now() + SESSION_IDLE_MS, expires);
+    return `${SESSION_COOKIE}=${sessionValue(await sessionKey(), passkeyId, idleUntil, expires)}; HttpOnly; ${secure}SameSite=Lax; Path=/; Max-Age=${Math.floor((expires - now()) / 1000)}`;
   };
   const recentCookie = async (passkeyId: string) =>
     `${RECENT_COOKIE}=${recentValue(await sessionKey(), passkeyId, now() + RECENT_MS)}; HttpOnly; ${secure}SameSite=Lax; Path=/; Max-Age=${RECENT_MS / 1000}`;
   const cookieValue = (req: Request, name: string) => req.cookies.map((c) => c.trim()).find((c) => c.startsWith(`${name}=`))?.slice(name.length + 1);
+  /** The request's own (valid) session cookie with the idle time moved on; its cap is the cookie's last field (#498). */
+  const renewed = async (req: Request, id: string) => cookie(id, Number(Buffer.from(cookieValue(req, SESSION_COOKIE)!.split(".")[0]!, "base64url").toString().split(".").at(-1)));
   /** The passkey id of a valid session cookie, else undefined. */
   const sessionId = async (req: Request, s?: Stored): Promise<string | undefined> => {
     const value = cookieValue(req, SESSION_COOKIE);
@@ -364,6 +374,13 @@ export function makeAuth(d: AuthDeps) {
     }
     if (req.method !== "POST") return json(404, { error: "not found" });
     if (path === "/_auth/challenge") return json(200, { challenge: await challenge(), rpId });
+    if (path === "/_auth/renew") {
+      // The screens call this after an action (#498): the idle time moves 24 hours on, the cap and the passkey stay. Only this
+      // Lambda holds the seed, so only here can a cookie be signed again (#701).
+      const id = await sessionId(req);
+      if (!id) return json(401, { error: "パスキーでログインしてください" });
+      return json(200, { ok: true }, [await renewed(req, id)]);
+    }
     if (path === "/_auth/logout") return json(200, { ok: true }, [SESSION_COOKIE, RECENT_COOKIE].map((n) => `${n}=; HttpOnly; ${secure}SameSite=Lax; Path=/; Max-Age=0`));
 
     if (path === "/_auth/register" || path === "/_auth/login" || path === "/_auth/device-code" || path === "/_auth/passkeys/delete") {
@@ -458,8 +475,9 @@ export function makeAuth(d: AuthDeps) {
       const id = await sessionId(req);
       if (!id) return json(401, { error: "パスキーでログインしてください" });
       if (!(await checkedRecently(req, id))) return json(401, { error: "操作の前にパスキーで確かめてください", reason: "recent" });
-      if (path === "/_auth/stop") return d.stop(body(req).force === true);
-      return path === "/_auth/start" ? d.start() : d.rebuild();
+      const r = await (path === "/_auth/stop" ? d.stop(body(req).force === true) : path === "/_auth/start" ? d.start() : d.rebuild());
+      // an action that went through counts as use (#498): the cookie comes back with the idle time moved on
+      return r.statusCode < 300 ? { ...r, cookies: [...(r.cookies ?? []), await renewed(req, id)] } : r;
     }
     if (path === "/_auth/countries" || path === "/_auth/countries/clear") {
       const id = await sessionId(req);
