@@ -195,8 +195,8 @@ describe("sb_session cookie", () => {
   const publicOf = (seedHex: string) => createPublicKey(privateOf(seedHex)).export({ format: "jwk" }).x!;
   const SEED = "a".repeat(64);
   const KEY = publicOf(SEED);
-  const cookieOf = (seedHex: string, passkeyId: string, expires: number) => {
-    const body = Buffer.from(`${passkeyId}.${expires}`).toString("base64url");
+  const cookieOf = (seedHex: string, passkeyId: string, expires: number, idleUntil = expires) => {
+    const body = Buffer.from(`${passkeyId}.${idleUntil}.${expires}`).toString("base64url");
     return `${SESSION_COOKIE}=${body}.${sign(null, Buffer.from(body), privateOf(seedHex)).toString("base64url")}`;
   };
   /** What a process on the host could make: an HMAC keyed with the only value it has, the public key. */
@@ -211,6 +211,12 @@ describe("sb_session cookie", () => {
     expect(sessionOk(withCookie(cookieOf(SEED, "pk1", now + 60_000)), KEY, now)).toBe(true);
     expect(sessionOk(withCookie(cookieOf(SEED, "pk1", now - 1)), KEY, now)).toBe(false);
     expect(sessionOk(withCookie(cookieOf("b".repeat(64), "pk1", now + 60_000)), KEY, now)).toBe(false);
+    // #498: past the cap (idle time left), past the idle time (cap left), idle beyond the cap, the old two-field body
+    expect(sessionOk(withCookie(cookieOf(SEED, "pk1", now - 1, now + 60_000)), KEY, now)).toBe(false);
+    expect(sessionOk(withCookie(cookieOf(SEED, "pk1", now + 60_000, now - 1)), KEY, now)).toBe(false);
+    expect(sessionOk(withCookie(cookieOf(SEED, "pk1", now + 60_000, now + 120_000)), KEY, now)).toBe(false);
+    const old = Buffer.from(`pk1.${now + 60_000}`).toString("base64url");
+    expect(sessionOk(withCookie(`${SESSION_COOKIE}=${old}.${sign(null, Buffer.from(old), privateOf(SEED)).toString("base64url")}`), KEY, now)).toBe(false);
     expect(sessionOk(withCookie(forgedOf("pk1", now + 60_000)), KEY, now)).toBe(false);
     const good = cookieOf(SEED, "pk1", now + 60_000);
     expect(sessionOk(withCookie(`${good}=`), KEY, now)).toBe(false); // another spelling of the same signature
@@ -634,7 +640,7 @@ describe("sb_session cookie", () => {
       const base = `http://127.0.0.1:${core.server.port}`;
       try {
         const ws = core.db.listWorkspaces()[0]!;
-        const task = (id: string) => ({ id, workspaceId: ws.id, title: id, runner: "claude" as const, cwd: ws.path, scope: [ws.path], status: "idle" as const, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto" as const, effort: null, origin: "switchboard" as const, resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown" as const, reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 });
+        const task = (id: string) => ({ id, workspaceId: ws.id, title: id, runner: "claude" as const, cwd: ws.path, scope: [ws.path], status: "idle" as const, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto" as const, effort: null, origin: "switchboard" as const, resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown" as const, reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 });
         core.db.insertTask(task("tsk_a"));
         core.db.insertTask(task("tsk_b"));
         core.db.insertStaged({ id: "stg_1", taskId: "tsk_b", path: join(ws.path, "x"), rel: "x", kind: "modify", before: "", after: "", status: "pending", ts: 1, decidedAt: null, diff: "", stat: "" } as never);

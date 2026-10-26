@@ -9,7 +9,7 @@ import { Brief } from "./components/Brief.tsx";
 
 const noop = () => undefined;
 const at = Date.UTC(2026, 9, 13, 1, 0, 0);
-const task: Task = { id: "task_gh", executionMode: "local", cloudSession: null, sourceCloudTaskId: null, workspaceId: null, title: "t", runner: "claude", cwd: "/fixture", scope: ["/fixture"], status: "done", runnerSessionId: "sess-1", model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: at, resumeReason: "github", shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "done", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 };
+const task: Task = { id: "task_gh", executionMode: "local", cloudSession: null, sourceCloudTaskId: null, workspaceId: null, title: "t", runner: "claude", cwd: "/fixture", scope: ["/fixture"], status: "done", runnerSessionId: "sess-1", model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: at, resumeReason: "github", shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "done", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 };
 
 test("ResumeTag: a GitHub wait says so (the Rail's compact form too); the runner's limit and no reason read as before; no plan, no tag", () => {
   const github = renderToStaticMarkup(createElement(ResumeTag, { resumeAt: at, reason: "github" }));

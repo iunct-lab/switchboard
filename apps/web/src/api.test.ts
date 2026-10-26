@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { api, wsUrl } from "./api.ts";
+import { api, RENEW_EVERY_MS, renewLogin, resetRenewal, wsUrl } from "./api.ts";
 
 test("wsUrl: the page's host, ws/wss by the page's scheme, the token and the query escaped", () => {
   const http = { protocol: "http:", host: "localhost:5173" };
@@ -60,4 +60,36 @@ test("runnerLogin: the Anthropic Console button posts billing=api, the Claude ac
   } finally {
     Object.assign(g, saved);
   }
+});
+
+test("renameTask: PATCH /api/tasks/:id with the title (#491)", async () => {
+  const g = globalThis as Record<string, unknown>;
+  const saved = { fetch: g.fetch, localStorage: g.localStorage };
+  g.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+  const seen: Array<{ url: string; method?: string; body?: string }> = [];
+  g.fetch = async (url: string, init?: { method?: string; body?: string }) => (seen.push({ url, method: init?.method, body: init?.body }), Response.json({ id: "t1", title: "新しい名前" }));
+  try {
+    expect((await api.renameTask("t1", "新しい名前")).title).toBe("新しい名前");
+    expect(seen[0]).toMatchObject({ url: "/api/tasks/t1", method: "PATCH", body: JSON.stringify({ title: "新しい名前" }) });
+  } finally {
+    g.fetch = saved.fetch;
+    g.localStorage = saved.localStorage;
+  }
+});
+
+test("renewLogin: only a passkey login's changing request asks the Starter, at most once per RENEW_EVERY_MS (#498)", () => {
+  resetRenewal();
+  let sent = 0;
+  const send = () => { sent++; return Promise.resolve(); };
+  expect(renewLogin("passkey", "GET", 1_000_000, send)).toBe(false);
+  expect(renewLogin("passkey", undefined, 1_000_000, send)).toBe(false);
+  expect(renewLogin("passkey", "HEAD", 1_000_000, send)).toBe(false);
+  expect(renewLogin("token", "POST", 1_000_000, send)).toBe(false);
+  expect(renewLogin(undefined, "POST", 1_000_000, send)).toBe(false);
+  expect(renewLogin("passkey", "POST", 1_000_000, send)).toBe(true);
+  expect(renewLogin("passkey", "PATCH", 1_000_000 + RENEW_EVERY_MS - 1, send)).toBe(false);
+  expect(renewLogin("passkey", "DELETE", 1_000_000 + RENEW_EVERY_MS, send)).toBe(true);
+  expect(sent).toBe(2);
+  expect(() => renewLogin("passkey", "POST", 9e9, () => Promise.reject(new Error("offline")))).not.toThrow();
+  resetRenewal();
 });

@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
-import { AskAnswerInput, AutoStartKind, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, InboxAddInput, InboxCloseInput, InboxPromoteInput, MaterializeApplyInput, PerfSamplesInput, PermissionAnswers, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskList, type Backlog, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type Workspace, type WorkspaceRemoval } from "@switchboard/protocol";
+import { AskAnswerInput, AutoStartKind, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, InboxAddInput, InboxCloseInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PermissionAnswers, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskList, type Backlog, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type Workspace, type WorkspaceRemoval } from "@switchboard/protocol";
 import type { CoreConfig } from "./config.ts";
 import { abortOrphanedTasks, Db, type ApiRequestRow } from "./db.ts";
 import { opsLatency } from "./ops-latency.ts";
@@ -23,6 +23,7 @@ import { loadMcpPolicy, mcpServersFor, WorkspaceMcp } from "./mcp.ts";
 import { ApprovalRules, subjectsOf } from "./approval.ts";
 import { workspaceBrief } from "./brief.ts";
 import { judgeTurn } from "./judge.ts";
+import { skillCommandTitle, suggestTitle } from "./suggest-title.ts";
 import { evalRequestDraft, RULES_BY, rulesEvalOf } from "./evals.ts";
 import { judgeRubric } from "./rubric-judge.ts";
 import { loadRubric } from "./rubric.ts";
@@ -54,7 +55,7 @@ import * as materializer from "./materializer.ts";
 import { CompositeSuggester, loadRoutingTable, RuleSuggester, suggestRunner, type RoutingContext, type Suggester } from "./routing.ts";
 import { DEFAULT_EXAMPLE_COUNT, LlmSuggester, readOnlyMode } from "./suggest-llm.ts";
 import { WorkspaceSuggester } from "./suggest-workspace.ts";
-import { privateTmpOf, sweepPrivateTmps, TaskManager } from "./tasks.ts";
+import { privateTmpOf, provisionalTitle, sweepPrivateTmps, TaskManager } from "./tasks.ts";
 import { HistoryImporter } from "./history.ts";
 import { HostIdle, nextWakeFrom } from "./hostidle.ts";
 import { RunnerLogins } from "./runnerlogin.ts";
@@ -121,6 +122,8 @@ export interface StartServerOptions {
   loginTimeoutMs?: number;
   /** Overrides the judge asked at the end of a turn (#493); tests answer by hand. Unset = `judgeTurn`, the configured runner's own adapter. */
   judge?: typeof judgeTurn;
+  /** Overrides the one that names a task after its first turn (#491); tests answer by hand. Unset = `suggestTitle`. */
+  titleSuggester?: typeof suggestTitle;
   /** Overrides the rubric judge (#1219) the same way; tests answer by hand. */
   rubricJudge?: typeof judgeRubric;
   /** How long a Starter answer about a login cookie is kept, and how often open cookie WebSockets are checked again (#708); tests shorten it. Unset = SESSION_RECHECK_MS. */
@@ -273,12 +276,12 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   knowledge.onChange(() => broadcast({ type: "knowledge.updated", count: knowledge.list().length }));
   // A Task's approval wait (#662, docs/design/device-auth.md): memory and the WebSocket only, never the DB.
   const deviceAuths = new DeviceAuths((taskId, auth) => broadcast({ type: "task.deviceAuth", taskId, auth }));
-  type SuggestCtxInput = { workspaceId?: string; cwd?: string; title: string; prompt: string; scope?: string[]; kind?: string };
+  type SuggestCtxInput = { workspaceId?: string; cwd?: string; title?: string; prompt: string; scope?: string[]; kind?: string };
   const routingContext = (input: SuggestCtxInput): RoutingContext => {
     const ws = input.workspaceId ? db.getWorkspace(input.workspaceId) : null;
     const cwd = input.cwd ?? ws?.path;
     const scope = Array.from(new Set([cwd, ...(input.scope ?? [])].filter((d): d is string => !!d)));
-    return { title: input.title, prompt: input.prompt, scope, kind: input.kind, workspaceKind: ws?.kind, previousRunner: db.lastRunnerFor(ws?.id, cwd), available: new Set(adapterMap.keys()) };
+    return { title: input.title ?? provisionalTitle(input.prompt), prompt: input.prompt, scope, kind: input.kind, workspaceKind: ws?.kind, previousRunner: db.lastRunnerFor(ws?.id, cwd), available: new Set(adapterMap.keys()) };
   };
   const suggestFor = (input: SuggestCtxInput) => suggestRunner(routing.table, routingContext(input));
   const ruleSuggester = new RuleSuggester(() => routing.table);
@@ -333,7 +336,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
    * (`routing.llm` runner / model; `enabled` is not consulted — leaving the select on 自動 is the instruction,
    * `enabled` is the switch for runner suggestions) picks among the registered Workspaces.
    */
-  const chooseWorkspace = async (input: { title: string; prompt: string }): Promise<{ workspace: Workspace; reason: string; usage: Extract<AgentEvent, { t: "usage" }>[]; runner: RunnerId }> => {
+  const chooseWorkspace = async (input: { title?: string; prompt: string }): Promise<{ workspace: Workspace; reason: string; usage: Extract<AgentEvent, { t: "usage" }>[]; runner: RunnerId }> => {
     const llmCfg = settings().routing.llm;
     const workspaces = db.listWorkspaces().filter((ws) => existsSync(ws.path));
     if (workspaces.length === 0) throw pickYourself("登録済みの Workspace がありません");
@@ -346,7 +349,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const hangMs = settings().judgeAndChoice.workspaceChoiceTimeoutMs;
     const deadline = AbortSignal.timeout(hangMs);
     try {
-      const choice = await suggester.suggest({ title: input.title, prompt: input.prompt, workspaces, runners: [...adapterMap.keys()] }, deadline);
+      const choice = await suggester.suggest({ title: input.title ?? provisionalTitle(input.prompt), prompt: input.prompt, workspaces, runners: [...adapterMap.keys()] }, deadline);
       return { workspace: workspaces.find((ws) => ws.id === choice.workspaceId)!, reason: choice.reason, usage, runner: llmCfg.runner };
     } catch (e) {
       // No task exists to bill a failed turn to (ledger rows belong to a task), so what it spent is at least logged.
@@ -1455,6 +1458,38 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   });
 
   /**
+   * The title after the first turn (#491): a task whose title is still provisional is named once, in the background,
+   * from its request and the turn's last reply. `titlePending` is cleared first, so it is one try per task; a title
+   * the person changed meanwhile (PATCH) is kept. A turn that ended in an error or an abort is not named (the next one
+   * is). A shadow (#99) shows the primary's title, and Cloud is not asked.
+   */
+  const titling = new Set<string>(); // naming in flight; a rename (PATCH) takes the task out, so its title is not overwritten
+  tasks.onTurnEnd((taskId, t, turn) => {
+    if (!t.titlePending || t.shadowOf || t.executionMode === "cloud" || !settings().titles.auto || judgeStop.signal.aborted) return;
+    if (turn.end.status !== "ok") return;
+    db.updateTask(taskId, { titlePending: false, updatedAt: t.updatedAt });
+    titling.add(taskId);
+    const provisional = t.title;
+    const onUsage = (runner: RunnerId, ev: Extract<AgentEvent, { t: "usage" }>) => {
+      if (!judgeStop.signal.aborted) db.insertLedger(ledgerRowFor(pricingTable(), { id: taskId, runner, model: ev.model ?? null }, ev, Date.now()));
+    };
+    void (opts.titleSuggester ?? suggestTitle)({ prompt: db.firstUserText(taskId) ?? provisional, reply: turn.end.summary?.trim() ?? "" }, { adapters: adapterMap, cwd: suggestDir, onUsage, log: (m) => console.warn(m), signal: judgeStop.signal })
+      .then((r) => {
+        if (judgeStop.signal.aborted) return;
+        const cur = db.getTask(taskId);
+        if (!cur || cur.title !== provisional || !titling.has(taskId)) return;
+        // updatedAt stays: a title is not activity and must not move the task in the list
+        const next = db.updateTask(taskId, { title: r.title, updatedAt: cur.updatedAt });
+        if (next) broadcast({ type: "task.updated", task: next });
+      })
+      .catch((e) => {
+        if (judgeStop.signal.aborted) return;
+        console.warn(`title: task ${taskId} keeps its provisional title (${String((e as Error).message ?? e)})`);
+      })
+      .finally(() => titling.delete(taskId));
+  });
+
+  /**
    * The rubric judge (#1219): a turn that ended done is scored against the rubric in the background, on the judge
    * runner (`settings.judge`); the row replaces the task's previous one and the screen is told to read it again.
    * The rubric is read once at boot — the person's edit takes effect on the next start. Not a shadow (#99), not Cloud.
@@ -1813,6 +1848,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             next.judge = { ...next.judge, ...patch };
           }
           // The rubric judge (#1219): on / off only; the runner and model are the judge's
+          if (parsed.data.titles?.auto !== undefined) next.titles = { ...next.titles, auto: parsed.data.titles.auto };
           if (parsed.data.evals?.judge?.enabled !== undefined) next.evals = { ...next.evals, judge: { ...next.evals.judge, enabled: parsed.data.evals.judge.enabled } };
           // The Tasks that start by themselves (#832): the runner must be detected. A runner change without a model
           // goes back to that runner's CLI default (a model belongs to one runner); so does the effort (#833). A sent
@@ -2624,7 +2660,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             // does not spend a turn first.
             if (!adapterMap.has(parsed.data.runner)) throw new Error(`runner "${parsed.data.runner}" is not installed`);
             const chosen = parsed.data.cwd === undefined && !named ? await chooseWorkspace(parsed.data) : null;
-            const input = chosen ? { ...parsed.data, workspaceId: chosen.workspace.id, cwd: chosen.workspace.path, workspaceReason: chosen.reason } : { ...parsed.data, cwd: parsed.data.cwd ?? named!.path };
+            const settled = chosen ? { ...parsed.data, workspaceId: chosen.workspace.id, cwd: chosen.workspace.path, workspaceReason: chosen.reason } : { ...parsed.data, cwd: parsed.data.cwd ?? named!.path };
+            // A skill command on an Issue (`/pbi-complete 123`) is named by the Issue's title at once (#491); a local backlog's numbers are not GitHub's
+            const issueTitle = settled.title === undefined && (chosen?.workspace ?? named)?.backlog !== "switchboard" ? await skillCommandTitle(settled.prompt, settled.cwd, opts.gh ?? runGh) : null;
+            const input = issueTitle ? { ...settled, title: issueTitle } : settled;
             const routed = input.executionMode === "cloud" ? null : await suggestForCreate(input);
             // What the suggestion turns spent belongs to the task they were asked about, under the runner that answered
             // (not the task's own runner): asking costs quota, and the Ledger is where that has to show up — also when
@@ -2687,7 +2726,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       // The events (#1142): the last `limit` (200 by default; 0 = none, the rest only), or with ?before=<seq> the `limit` just
       // before that seq. ?after=<seq>: every event past that seq (the web's catch-up after a dropped WebSocket, #1137), never cut.
       // The rest is always whole.
-      "/api/tasks/:id": (req) => {
+      "/api/tasks/:id": {
+        GET: (req) => {
         const t = db.getTask(String(req.params.id));
         if (!t) return bad("not found", 404);
         const q = new URL(req.url).searchParams;
@@ -2696,6 +2736,20 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         const limit = q.get("limit") === "0" ? 0 : clampLimit(q.get("limit"));
         const events = q.has("after") ? db.listEvents(t.id, afterSeq(q.get("after"))) : limit === 0 ? [] : before !== null ? db.listEventsBefore(t.id, Number(before), limit) : db.listEventsTail(t.id, limit);
         return json({ task: t, mcpServers: t.runner === "claude" && t.executionMode !== "cloud" ? Object.keys(taskMcpServers(t)) : [], events, cost: db.taskCost(t.id), history: t.executionMode === "cloud" ? null : history.forTask(t.id), localContinuations: db.listLocalTasksForCloud(t.id), sourceCloudTask: t.sourceCloudTaskId ? db.getTask(t.sourceCloudTaskId) : null, attachments: attachments.listForTask(t.id), teleport: teleports.get(t.id) ?? null, stopSummary: reduceStops(stopRecordsFor(db, t)), eventsArchive: db.eventsArchiveOf(t.id) });
+        },
+        // The person renames the task (#491): it is not set again automatically.
+        PATCH: async (req) => {
+          const parsed = PatchTaskInput.safeParse(await req.json().catch(() => ({})));
+          if (!parsed.success) return bad(parsed.error.message);
+          if (!db.getTask(String(req.params.id))) return bad("not found", 404);
+          try {
+            const renamed = tasks.rename(String(req.params.id), parsed.data.title);
+            titling.delete(renamed.id);
+            return json(renamed);
+          } catch (e) {
+            return bad(String((e as Error).message ?? e), 409);
+          }
+        },
       },
 
       // "Continue locally" (#1306): starts the official Teleport without a terminal socket; progress comes as task.teleport.

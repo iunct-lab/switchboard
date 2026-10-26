@@ -17,7 +17,7 @@
     "core": "bun run --cwd packages/core dev",
     "web": "bun run --cwd apps/web dev",
     "test": "bun test",
-    "typecheck": "bun run --cwd packages/protocol typecheck && bun run --cwd packages/adapters/claude typecheck && bun run --cwd packages/adapters/codex typecheck && bun run --cwd packages/adapters/dak typecheck && bun run --cwd packages/core typecheck && bun run --cwd apps/web typecheck && bun run --cwd rescue typecheck && bun run --cwd aws typecheck && bun run --cwd ops-kit typecheck",
+    "typecheck": "bun run codex:types && bun run --cwd packages/protocol typecheck && bun run --cwd packages/adapters/claude typecheck && bun run --cwd packages/adapters/codex typecheck && bun run --cwd packages/adapters/dak typecheck && bun run --cwd packages/core typecheck && bun run --cwd apps/web typecheck && bun run --cwd rescue typecheck && bun run --cwd aws typecheck && bun run --cwd ops-kit typecheck",
     "rescue:install": "bun rescue/install.ts",
     "codex:types": "bun run scripts/codex_types.ts",
     "merge-gate": "bun scripts/merge-gate.ts",

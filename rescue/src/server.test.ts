@@ -179,13 +179,13 @@ const cloudLogin = (label: string) => ({ sessionPublicKey: publicOf(label), star
 
 test("the cloud host's login cookie (#211) opens the page and the API off loopback; an expired, foreign-key or host-forged one does not", async () => {
   const key = "k".repeat(64);
-  const cookie = (k: string, expires: number) => {
-    const body = Buffer.from(`pk1.${expires}`).toString("base64url");
+  const cookie = (k: string, expires: number, idleUntil = expires) => {
+    const body = Buffer.from(`pk1.${idleUntil}.${expires}`).toString("base64url");
     return `sb_session=${body}.${sign(null, Buffer.from(body), privateOf(k)).toString("base64url")}`;
   };
   // what a process on the host could make: an HMAC keyed with the only value it has, the public key (#701)
   const forged = (expires: number) => {
-    const body = Buffer.from(`pk1.${expires}`).toString("base64url");
+    const body = Buffer.from(`pk1.${expires}.${expires}`).toString("base64url");
     return `sb_session=${body}.${createHmac("sha256", publicOf(key)).update(body).digest("base64url")}`;
   };
   writeFileSync(join(f.home, "token"), "sb_secret\n");
@@ -197,6 +197,11 @@ test("the cloud host's login cookie (#211) opens the page and the API off loopba
     expect((await fetch(`${url}/`, { headers: { cookie: cookie(key, Date.now() + 60_000) } })).status).toBe(200);
     expect((await fetch(`${url}/api/status`, { headers: { cookie: cookie(key, Date.now() - 1) } })).status).toBe(401);
     expect((await fetch(`${url}/api/status`, { headers: { cookie: cookie("z".repeat(64), Date.now() + 60_000) } })).status).toBe(401);
+    // #498: past the cap even with idle time left, past the idle time within the cap, idle beyond the cap, and the old two-field body
+    expect((await fetch(`${url}/api/status`, { headers: { cookie: cookie(key, Date.now() - 1, Date.now() + 60_000) } })).status).toBe(401);
+    expect((await fetch(`${url}/api/status`, { headers: { cookie: cookie(key, Date.now() + 60_000, Date.now() - 1) } })).status).toBe(401);
+    expect((await fetch(`${url}/api/status`, { headers: { cookie: cookie(key, Date.now() + 60_000, Date.now() + 120_000) } })).status).toBe(401);
+    expect((await fetch(`${url}/api/status`, { headers: { cookie: signed("sb_session", key, "pk1", [Date.now() + 60_000]) } })).status).toBe(401);
     expect((await fetch(`${url}/api/status`, { headers: { cookie: forged(Date.now() + 60_000) } })).status).toBe(401);
     expect((await fetch(`${url}/api/status`, { headers: { cookie: `${cookie(key, Date.now() + 60_000)}=` } })).status).toBe(401); // another spelling
     expect((await fetch(`${url}/api/status`, { headers: { authorization: "Bearer sb_secret" } })).status).toBe(200); // the token still works
@@ -218,12 +223,12 @@ test("the cloud host's login cookie (#211) opens the page and the API off loopba
 });
 
 /** The Starter's cookies (aws/auth.ts): sb_session, and sb_recent signed over "recent:" + body (#497). */
-const signed = (name: string, k: string, id: string, expires: number, prefix = "") => {
-  const body = Buffer.from(`${id}.${expires}`).toString("base64url");
+const signed = (name: string, k: string, id: string, times: number[], prefix = "") => {
+  const body = Buffer.from([id, ...times].join(".")).toString("base64url");
   return `${name}=${body}.${sign(null, Buffer.from(prefix + body), privateOf(k)).toString("base64url")}`;
 };
-const session = (k: string, expires = Date.now() + 60_000, id = "pk1") => signed("sb_session", k, id, expires);
-const recent = (k: string, expires = Date.now() + 60_000, id = "pk1") => signed("sb_recent", k, id, expires, "recent:");
+const session = (k: string, expires = Date.now() + 60_000, id = "pk1", idleUntil = expires) => signed("sb_session", k, id, [idleUntil, expires]);
+const recent = (k: string, expires = Date.now() + 60_000, id = "pk1") => signed("sb_recent", k, id, [expires], "recent:");
 test("sb-rescue refuses a removed passkey's cookie within SESSION_RECHECK_MS (#701)", async () => {
   writeFileSync(join(f.home, "token"), "sb_secret\n");
   authStarter.answer = true;
@@ -331,7 +336,7 @@ test("a recent cookie that is expired, signed with another key, is a session val
  * The page's script from its helpers to act() (render, refresh, confirmPasskey) runs against fakes: what was sent, in
  * order, and what the error line shows after the next 2 s refresh, with the service's status saying `lastError`.
  */
-async function runAct(answers: Record<string, Array<{ status: number; body?: unknown }>>, o: { credential?: unknown; lastError?: string | null } = {}) {
+async function runAct(answers: Record<string, Array<{ status: number; body?: unknown }>>, o: { credential?: unknown; lastError?: string | null; hostname?: string } = {}) {
   const html = readFileSync(new URL("./page.html", import.meta.url), "utf8");
   const src = html.slice(html.indexOf("const short ="), html.indexOf('$("restart").onclick'));
   const sent: string[] = [];
@@ -346,13 +351,21 @@ async function runAct(answers: Record<string, Array<{ status: number; body?: unk
     return new Response(JSON.stringify(a.body ?? {}), { status: a.status });
   };
   const credential = "credential" in o ? o.credential : { id: "pk1", response: { clientDataJSON: new Uint8Array([1]), authenticatorData: new Uint8Array([2]), signature: new Uint8Array([3]) } };
-  const page = new Function("fetch", "confirm", "navigator", "$", "document", "headers", "rebuilding", `${src}\nreturn { act, refresh };`)(
-    fetch, () => true, { credentials: { get: async () => (credential instanceof Error ? Promise.reject(credential) : credential) } }, $, { createElement: el }, {}, false,
+  const page = new Function("fetch", "confirm", "navigator", "$", "document", "headers", "rebuilding", "location", `${src}\nreturn { act, refresh };`)(
+    fetch, () => true, { credentials: { get: async () => (credential instanceof Error ? Promise.reject(credential) : credential) } }, $, { createElement: el }, {}, false, { hostname: o.hostname ?? "d111.cloudfront.net" },
   ) as { act: (path: string, body: unknown, question: string) => Promise<boolean | null>; refresh: () => Promise<void> };
   const ok = await page.act("api/restart", {}, "?");
   await page.refresh(); // the next 2 s refresh
   return { ok, sent, error: $("error").textContent };
 }
+test("after a change that went through, the page asks the Starter to renew the login once per 10 minutes, off loopback only (#498)", async () => {
+  const cloud = await runAct({ "api/restart": [{ status: 202 }], "/_auth/renew": [{ status: 200 }] });
+  expect(cloud).toMatchObject({ ok: true, sent: ["api/restart", "/_auth/renew"] });
+  const refused = await runAct({ "api/restart": [{ status: 500, body: { error: "x" } }] });
+  expect(refused.sent).toEqual(["api/restart"]);
+  const local = await runAct({ "api/restart": [{ status: 202 }] }, { hostname: "127.0.0.1" });
+  expect(local.sent).toEqual(["api/restart"]);
+});
 const needsCheck = { status: 401, body: { error: "操作の前にパスキーで確かめてください", reason: "recent" } };
 const challengeOk = { status: 200, body: { challenge: "AAAA", rpId: "d111.cloudfront.net" } };
 
@@ -371,7 +384,7 @@ test("the page checks the passkey on 401 recent and sends the same request once 
   const again = await runAct({ "api/restart": [needsCheck, needsCheck], "/_auth/challenge": [challengeOk], "/_auth/login": [{ status: 200 }] });
   expect(again).toMatchObject({ ok: false, sent: ["api/restart", "/_auth/challenge", "/_auth/login", "api/restart"], error: "操作の前にパスキーで確かめてください" });
   // the token's answers never ask for a check
-  expect(await runAct({ "api/restart": [{ status: 202 }] })).toMatchObject({ ok: true, sent: ["api/restart"], error: "" });
+  expect(await runAct({ "api/restart": [{ status: 202 }], "/_auth/renew": [{ status: 200 }] })).toMatchObject({ ok: true, sent: ["api/restart", "/_auth/renew"], error: "" });
   expect((await runAct({ "api/restart": [{ status: 202 }] }, { lastError: "restart: failed later" })).error).toBe("restart: failed later"); // the service's own failure still shows
 });
 

@@ -13,6 +13,7 @@ import { recapOf } from "./recap.ts";
 import { canTransition, IN_FLIGHT, InvalidTaskTransitionError, TERMINAL } from "./task-status.ts";
 import { setupScripts, syncSkills } from "./skillsync.ts";
 import { FenceReader, lastAttempt, openStops, reduceStops, reserveStopRetry, StopFenceReader, stopRecordsFor, stopRecoveryPrompt, stopWork, type StopReport } from "./stops.ts";
+import { oneLine } from "./suggest-llm.ts";
 
 interface LiveSession {
   session: RunnerSession;
@@ -74,6 +75,11 @@ export class ResumeSupersededError extends Error {
  * why it is not a field of `CreateTaskInput` (a client cannot claim a task was auto-routed).
  */
 export type NewTaskInput = Omit<CreateTaskInput, "executionMode"> & { cwd: string; executionMode?: CreateTaskInput["executionMode"]; workspaceReason?: string; stage?: Task["stage"] };
+
+/** The title a task has until its first turn ends (#491): the head of the prompt, on one line. */
+export function provisionalTitle(prompt: string): string {
+  return oneLine(prompt).slice(0, 48);
+}
 
 /**
  * The temp directory only this task writes under (StartOptions.privateTmp, #787): `<root>/<task id>`, where the root is
@@ -465,6 +471,15 @@ export class TaskManager {
     return t;
   }
 
+  /** The person's new title (#491): kept as it is from now on, never set again automatically. */
+  rename(taskId: string, title: string): Task {
+    // An imported terminal session takes its title from Claude's own log on every import, so a rename would not stay
+    if (this.mustGet(taskId).origin !== "switchboard") throw new Error("ターミナルから取り込んだ Task のタイトルは Claude 側のものなので変えられません");
+    const t = this.db.updateTask(taskId, { title, titlePending: false })!;
+    this.broadcast({ type: "task.updated", task: t });
+    return t;
+  }
+
   /** Hide a stopped Task from the list, or bring it back (#1142). Like setOutcome, the list order does not move. */
   setArchived(taskId: string, archived: boolean): Task {
     const cur = this.mustGet(taskId);
@@ -531,7 +546,7 @@ export class TaskManager {
     const task: Task = {
       id,
       workspaceId: input.workspaceId ?? null,
-      title: input.title,
+      title: input.title ?? provisionalTitle(input.prompt),
       runner: input.runner,
       cwd: input.cwd,
       scope,
@@ -548,6 +563,7 @@ export class TaskManager {
       shadowOf: null,
       shadowStopped: false,
       workspaceReason: input.workspaceReason ?? null,
+      titlePending: input.title === undefined,
       outcome: "unknown",
       reviewedAt: null,
       archivedAt: null,
@@ -662,6 +678,7 @@ export class TaskManager {
       shadowOf: primary.id,
       shadowStopped: false,
       workspaceReason: primary.workspaceReason,
+      titlePending: false, // the list shows the primary's title
       outcome: "unknown",
       reviewedAt: null,
       archivedAt: null,

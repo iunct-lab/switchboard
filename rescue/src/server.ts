@@ -96,10 +96,15 @@ function tokenEquals(a: string | null, b: string): boolean {
   return diff === 0;
 }
 
+/** The login's limits (#498): 7 days from the sign-in, 24 hours from the last action. The same values as aws/auth.ts and
+ *  packages/core/src/auth.ts (aws/session-contract.test.ts pins them). */
+export const SESSION_MAX_MS = 7 * 24 * 3600_000;
+export const SESSION_IDLE_MS = 24 * 3600_000;
+
 /**
- * `<body>.<sig>`: body = base64url of the UTF-8 text `<passkeyId>.<expiresMs>`, sig = base64url of the Ed25519 signature
+ * `<body>.<sig>`: body = base64url of the UTF-8 text `<passkeyId>.<idleUntilMs>.<expiresMs>` (a session) or `<passkeyId>.<expiresMs>` (a recent check), sig = base64url of the Ed25519 signature
  * over prefix + the base64url text of body (as aws/auth.ts signs it with a seed only the Starter reads), checked with the
- * public key. The passkey id when it verifies and has not expired, else undefined. Written again here rather than
+ * public key. The passkey id when it verifies, no time has passed and idle-until is not past the cap, else undefined. Written again here rather than
  * imported: sb-rescue shares no code with Switchboard (#178).
  */
 function signedId(raw: string, publicKey: string, prefix: string, now: number): string | undefined {
@@ -115,9 +120,10 @@ function signedId(raw: string, publicKey: string, prefix: string, now: number): 
   } catch {
     return;
   }
-  const text = Buffer.from(body, "base64url").toString("utf8");
-  const expires = Number(text.slice(text.lastIndexOf(".") + 1));
-  return Number.isFinite(expires) && expires > now ? text.slice(0, text.lastIndexOf(".")) : undefined;
+  const [id, ...at] = Buffer.from(body, "base64url").toString("utf8").split(".");
+  const ms = at.map(Number);
+  if (!id || ms.length !== (prefix === "" ? 2 : 1) || !ms.every((t) => Number.isFinite(t) && t > now)) return;
+  return ms.every((t, i) => i === 0 || t >= ms[i - 1]!) ? id : undefined;
 }
 /** The passkey ids of every valid `<name>=` pair (every pair is tried: a stale one first does not hide the good one). */
 function signedIds(req: Request, name: string, publicKey: string, prefix: string, now: number): string[] {

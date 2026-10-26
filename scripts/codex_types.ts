@@ -1,10 +1,10 @@
 /**
- * codex_types.ts — snapshot the subset of `codex app-server generate-ts` output that the Codex adapter uses.
+ * codex_types.ts — generate the Codex protocol types the adapter uses from the installed Codex.
  *
- * Why a subset: the full generation is ~550 files / 2.6 MB per version. The adapter reads a handful of
- * notifications and requests, so we commit the transitive import closure of those seeds only, under
- * packages/adapters/codex/src/generated/ (Apache-2.0, see packages/adapters/codex/NOTICE). CI typechecks
- * against the committed snapshot; `codex` itself is not required to build.
+ * `bun run typecheck` runs this first, so the types always match the Codex this host talks to. The output,
+ * packages/adapters/codex/src/generated/, is not kept in Git (.gitignore). Only the transitive import closure
+ * of the seeds below is written: the full generation is ~750 files, the adapter reads a handful of them.
+ * Developing (typecheck, CI) needs the Codex CLI installed; no login is needed.
  *
  * Usage:
  *   bun run scripts/codex_types.ts                 # runs `codex app-server generate-ts` (CODEX_BIN to override)
@@ -36,7 +36,7 @@ let tmp: string | undefined;
 if (!genDir) {
   const bin = process.env.CODEX_BIN ?? Bun.which("codex");
   if (!bin) {
-    console.error("codex not found on PATH. Set CODEX_BIN=/path/to/codex or CODEX_TS_DIR=/path/to/generated");
+    console.error("typecheck には Codex CLI が要ります。README の Setup に従って入れてください");
     process.exit(1);
   }
   tmp = mkdtempSync(join(tmpdir(), "codex-ts-"));
@@ -65,12 +65,12 @@ while (queue.length) {
   }
 }
 
-// License boundary: only type declarations may be vendored. Refuse anything that would ship runtime code.
+// The adapter imports these as types only. Refuse anything that would put runtime code into the build.
 const RUNTIME = /^\s*(export\s+)?(const|let|var|function|class|enum|async function)\b/m;
 for (const name of seen) {
   const src = readFileSync(join(genDir, `${name}.ts`), "utf8");
   if (RUNTIME.test(src) || /^\s*import\s+(?!type\b)/m.test(src)) {
-    console.error(`${name}.ts contains runtime code or a value import; the snapshot must stay declaration-only`);
+    console.error(`${name}.ts contains runtime code or a value import; the generated types must stay declaration-only`);
     process.exit(2);
   }
 }
@@ -82,9 +82,5 @@ for (const name of [...seen].sort()) {
   cpSync(join(genDir, `${name}.ts`), dst);
 }
 const version = existsSync(join(genDir, "VERSION")) ? readFileSync(join(genDir, "VERSION"), "utf8").trim() : "unknown";
-writeFileSync(
-  join(outDir, "README.md"),
-  `# Generated — do not edit\n\nSnapshot of \`codex app-server generate-ts\` (${version}), restricted to the ${seen.size} files reachable from the seeds in \`scripts/codex_types.ts\`.\nRegenerate with \`bun run scripts/codex_types.ts\`. License: Apache-2.0 (OpenAI), see \`packages/adapters/codex/NOTICE\`.\n`,
-);
 if (tmp) rmSync(tmp, { recursive: true, force: true });
 console.log(`wrote ${seen.size} files to ${relative(root, outDir)} (${version})`);

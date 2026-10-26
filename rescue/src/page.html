@@ -183,6 +183,15 @@ async function confirmPasskey() {
   if (!cred) throw new Error("キャンセルしました");
   const c = cred.response;
   await post("/_auth/login", { challenge, id: cred.id, clientDataJSON: b64(c.clientDataJSON), authenticatorData: b64(c.authenticatorData), signature: b64(c.signature) });
+  renewedAt = Date.now(); // the login just set a new cookie
+}
+
+/** After an action that changed something, the login's idle time is moved on (#498): only the Starter can sign the cookie again, so ask it; at most every 10 minutes, off this machine only (the token login has no cookie), and a failure is nothing to show. */
+var renewedAt = 0;
+function renewLogin() {
+  if (["127.0.0.1", "localhost", "[::1]"].includes(location.hostname) || Date.now() - renewedAt < 600000) return;
+  renewedAt = Date.now();
+  fetch("/_auth/renew", { method: "POST", credentials: "same-origin" }).catch(() => {});
 }
 
 /** null when the person said no (nothing was sent), else whether the answer was ok */
@@ -206,6 +215,7 @@ async function act(path, body, question) {
     data = r.ok ? {} : await r.json().catch(() => ({}));
   }
   if (!r.ok) fail(data.error || "失敗しました (" + r.status + ")");
+  else renewLogin();
   await refresh();
   return r.ok;
 }

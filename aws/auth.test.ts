@@ -1,10 +1,10 @@
 import { GetDistributionConfigCommand, UpdateDistributionCommand } from "@aws-sdk/client-cloudfront";
 import { describe, expect, spyOn, test } from "bun:test";
-import { createHash, createHmac, generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import { createHash, createHmac, createPrivateKey, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { DescribeInstancesCommand, StartInstancesCommand, StopInstancesCommand } from "@aws-sdk/client-ec2";
 import { DeleteParameterCommand, GetParameterCommand } from "@aws-sdk/client-ssm";
 import { GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
-import { addressKey, DEVICE_CODE_MS, MAX_FAILURES, MAX_PASSKEYS, publicKeyOf, RECENT_COOKIE, RECENT_MS, recentOf, recentValue, SESSION_COOKIE, sessionOf, sessionValue } from "./auth.ts";
+import { addressKey, DEVICE_CODE_MS, MAX_FAILURES, MAX_PASSKEYS, publicKeyOf, RECENT_COOKIE, RECENT_MS, recentOf, recentValue, SESSION_COOKIE, SESSION_IDLE_MS, SESSION_MAX_MS, sessionOf, sessionValue } from "./auth.ts";
 import { makeHandler, type Sender, type UrlEvent } from "./starter.ts";
 
 const ORIGIN = "https://d111.cloudfront.net";
@@ -129,14 +129,19 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     const c = await challenge(t);
     const reg = await t.call("POST", "/_auth/register", { code: "reg-code-1234567890", challenge: c, ...a.register(c) });
     expect(reg.statusCode).toBe(201);
-    expect(reg.cookies?.[0]).toMatch(/^sb_session=[^;]+; HttpOnly; Secure; SameSite=Lax; Path=\/; Max-Age=2592000$/);
+    expect(reg.cookies?.[0]).toMatch(/^sb_session=[^;]+; HttpOnly; Secure; SameSite=Lax; Path=\/; Max-Age=604800$/);
     expect(t.params.has("/switchboard/register-code")).toBe(false); // consumed
     expect(JSON.parse(t.objects.get("auth/passkeys.json")!).passkeys[0]).toMatchObject({ id: a.id, device: "iPhone / iPad" });
 
     const cookie = t.cookieOf(reg);
     expect((await t.call("GET", "/_auth/status", undefined, cookie)).json()).toMatchObject({ registered: true, loggedIn: true });
+    t.advance(60_000); // inside the 5 minutes of the passkey check
     const start = await t.call("POST", "/_auth/start", {}, cookie);
     expect(start.statusCode).toBe(202);
+    // a start that went through counts as use (#498): the cookie comes back with the idle time moved on, the cap kept
+    const [, idle, cap] = Buffer.from(t.cookieOf(start).slice(`${SESSION_COOKIE}=`.length).split(".")[0]!, "base64url").toString().split(".");
+    expect(Number(idle)).toBe(t.nowOf() + SESSION_IDLE_MS);
+    expect(Number(cap)).toBe(t.nowOf() - 60_000 + SESSION_MAX_MS);
     expect(t.sent.filter((x) => x instanceof StartInstancesCommand)).toHaveLength(1);
 
     // another day, another browser: log in with the passkey
@@ -147,6 +152,54 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect((await t.call("POST", "/_auth/start", {}, t.cookieOf(login))).statusCode).toBe(202);
   });
 
+  test("/_auth/renew moves the idle time 24 hours on and keeps the cap and the passkey; without a valid cookie it is 401 (#498)", async () => {
+    const t = setup({ code: "reg-code-1234567890.1900000000000" });
+    const a = authenticator();
+    const c = await challenge(t);
+    const reg = await t.call("POST", "/_auth/register", { code: "reg-code-1234567890", challenge: c, ...a.register(c) });
+    const cookie = t.cookieOf(reg).split("; ")[0]!;
+    const first = t.nowOf();
+    const parts = (value: string) => Buffer.from(value.slice(`${SESSION_COOKIE}=`.length).split(".")[0]!, "base64url").toString().split(".");
+    expect(parts(cookie)).toEqual([a.id, `${first + SESSION_IDLE_MS}`, `${first + SESSION_MAX_MS}`]);
+    t.advance(23 * 3600_000);
+    const r = await t.call("POST", "/_auth/renew", {}, cookie);
+    expect(r.statusCode).toBe(200);
+    const renewed = (r.cookies ?? [])[0]!;
+    expect(renewed).toMatch(/^sb_session=[^;]+; HttpOnly; Secure; SameSite=Lax; Path=\/; Max-Age=\d+$/);
+    expect(parts(renewed.split(";")[0]!)).toEqual([a.id, `${t.nowOf() + SESSION_IDLE_MS}`, `${first + SESSION_MAX_MS}`]); // the cap did not move
+    expect(Number(/Max-Age=(\d+)/.exec(renewed)![1])).toBe((first + SESSION_MAX_MS - t.nowOf()) / 1000);
+    // the old cookie is dead 24 hours after its last action, the renewed one is not
+    t.advance(2 * 3600_000);
+    expect((await t.call("POST", "/_auth/renew", {}, cookie)).statusCode).toBe(401);
+    const again = await t.call("POST", "/_auth/renew", {}, renewed.split(";")[0]!);
+    expect(again.statusCode).toBe(200);
+    // renewed every 23 hours the login lasts to the cap and no further: the idle time stops at the cap, then 401
+    let current = t.cookieOf(again);
+    while (t.nowOf() + 23 * 3600_000 < first + SESSION_MAX_MS) {
+      t.advance(23 * 3600_000);
+      const next = await t.call("POST", "/_auth/renew", {}, current);
+      expect(next.statusCode).toBe(200);
+      current = t.cookieOf(next);
+      const [, idle, cap] = parts(current);
+      expect(Number(idle)).toBeLessThanOrEqual(Number(cap));
+      expect(cap).toBe(`${first + SESSION_MAX_MS}`);
+    }
+    t.advance(23 * 3600_000);
+    expect((await t.call("POST", "/_auth/renew", {}, current)).statusCode).toBe(401); // past the cap
+    expect((await t.call("POST", "/_auth/renew", {})).statusCode).toBe(401);
+  });
+
+  test("/_auth/renew signs nothing for a removed passkey's cookie or a recent-check value pasted as the session (#498)", async () => {
+    const t = setup({ code: "reg-code-1234567890.1900000000000" });
+    const a = authenticator();
+    const c = await challenge(t);
+    await t.call("POST", "/_auth/register", { code: "reg-code-1234567890", challenge: c, ...a.register(c) });
+    const later = t.nowOf() + SESSION_IDLE_MS;
+    expect((await t.call("POST", "/_auth/renew", {}, `${SESSION_COOKIE}=${sessionValue(KEY, "no-such-passkey", later, later)}`)).statusCode).toBe(401); // removed passkey
+    expect((await t.call("POST", "/_auth/renew", {}, `${SESSION_COOKIE}=${recentValue(KEY, a.id, later)}`)).statusCode).toBe(401); // sb_recent's value
+    expect((await t.call("POST", "/_auth/renew", {}, `${SESSION_COOKIE}=${sessionValue(KEY, a.id, later, later)}`)).statusCode).toBe(200); // the same passkey, a real session
+  });
+
   test("a start with the cookie when AWS has no Spot capacity is 409 with reason capacity, not a Lambda error (#443)", async () => {
     const t = setup({ code: "reg-code-1234567890.1900000000000", startError: "InsufficientInstanceCapacity" });
     const a = authenticator();
@@ -154,18 +207,19 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     const cookie = t.cookieOf(await t.call("POST", "/_auth/register", { code: "reg-code-1234567890", challenge: c, ...a.register(c) }));
     const r = await t.call("POST", "/_auth/start", {}, cookie);
     expect(r.statusCode).toBe(409);
+    expect(r.cookies).toBeUndefined(); // a refused start does not renew
     expect(r.json()).toMatchObject({ reason: "capacity" });
     expect(r.json().error).toContain("Spot の空きがありません");
   });
 
-  test("the cookie is the #235 contract: base64url(\"id.expires\").Ed25519(seed, first part), 30 days (#701)", async () => {
+  test("the cookie is the #235 contract: base64url(\"id.idleUntil.expires\").Ed25519(seed, first part), 7 days and 24 hours idle (#701)", async () => {
     const t = setup({ code: "c0de-c0de-c0de-c0de.1900000000000" });
     const a = authenticator();
     const c = await challenge(t);
     const value = t.cookieOf(await t.call("POST", "/_auth/register", { code: "c0de-c0de-c0de-c0de", challenge: c, ...a.register(c) })).split("; ")[0]!.slice(`${SESSION_COOKIE}=`.length);
-    expect(value).toBe(sessionValue(KEY, a.id, t.nowOf() + 30 * 24 * 3600_000));
+    expect(value).toBe(sessionValue(KEY, a.id, t.nowOf() + SESSION_IDLE_MS, t.nowOf() + SESSION_MAX_MS));
     const [body] = value.split(".");
-    expect(Buffer.from(body!, "base64url").toString()).toBe(`${a.id}.${t.nowOf() + 30 * 24 * 3600_000}`);
+    expect(Buffer.from(body!, "base64url").toString()).toBe(`${a.id}.${t.nowOf() + SESSION_IDLE_MS}.${t.nowOf() + SESSION_MAX_MS}`);
     expect(sessionOf(PUB, value, t.nowOf())).toBe(a.id);
     expect(sessionOf(PUB, value, t.nowOf() + 31 * 24 * 3600_000)).toBeUndefined(); // expired
     expect(sessionOf(publicKeyOf(OTHER), value, t.nowOf())).toBeUndefined(); // another key (rotated)
@@ -183,8 +237,8 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     const flip = (v: string) => v.slice(0, -2) + (v.at(-2) === "A" ? "B" : "A") + v.at(-1);
     for (const [session, recent] of [
       [hmac(""), hmac("recent:")],
-      [sessionValue(OTHER, a.id, later), recentValue(OTHER, a.id, later)],
-      [flip(sessionValue(KEY, a.id, later)), recentValue(KEY, a.id, later)],
+      [sessionValue(OTHER, a.id, later, later), recentValue(OTHER, a.id, later)],
+      [flip(sessionValue(KEY, a.id, later, later)), recentValue(KEY, a.id, later)],
     ]) {
       expect((await t.call("POST", "/_auth/start", {}, `${SESSION_COOKIE}=${session}; ${RECENT_COOKIE}=${recent}`)).statusCode).toBe(401);
       expect((await t.call("GET", "/_auth/status", undefined, `${SESSION_COOKIE}=${session}`)).json()).toMatchObject({ loggedIn: false });
@@ -193,7 +247,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
   });
 
   test("a cookie the Starter signed passes; an expired or tampered one does not (Ed25519 contract, #701)", () => {
-    const now = 1_800_000_000_000, value = sessionValue(KEY, "pk-1", now + 1000);
+    const now = 1_800_000_000_000, value = sessionValue(KEY, "pk-1", now + 1000, now + 1000);
     expect(sessionOf(PUB, value, now)).toBe("pk-1");
     expect(sessionOf(PUB, value, now + 1000)).toBeUndefined(); // expired
     const [, sig] = value.split(".");
@@ -201,6 +255,19 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect(sessionOf(PUB, `${Buffer.from(`pk-1.${now + 9e9}`).toString("base64url")}.${sig}`, now)).toBeUndefined(); // a later expiry
     expect(sessionOf(PUB, `${value.split(".")[0]}.${sig!.slice(0, 40)}`, now)).toBeUndefined(); // a short signature
     expect(sessionOf("not-a-key", value, now)).toBeUndefined();
+  });
+
+  test("a session ends at the 7-day cap or the 24-hour idle time, whichever comes first; the old two-field body is refused (#498)", () => {
+    const now = 1_800_000_000_000;
+    expect(sessionOf(PUB, sessionValue(KEY, "pk-1", now + SESSION_IDLE_MS, now + SESSION_MAX_MS), now)).toBe("pk-1");
+    expect(sessionOf(PUB, sessionValue(KEY, "pk-1", now + 1000, now + SESSION_MAX_MS), now + 1000)).toBeUndefined(); // idle time over, cap left
+    expect(sessionOf(PUB, sessionValue(KEY, "pk-1", now + SESSION_IDLE_MS, now + 1000), now + 1000)).toBeUndefined(); // cap over, idle time left
+    expect(sessionOf(PUB, sessionValue(KEY, "pk-1", now + 2000, now + 1000), now)).toBeUndefined(); // idle time past the cap
+    // the old two-field body, correctly signed as a session (no "recent:" prefix): refused for its shape alone
+    const old = Buffer.from(`pk-1.${now + 1000}`).toString("base64url");
+    const seed = createPrivateKey({ key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), Buffer.from(KEY, "hex")]), format: "der", type: "pkcs8" });
+    expect(sessionOf(PUB, `${old}.${sign(null, Buffer.from(old), seed).toString("base64url")}`, now)).toBeUndefined();
+    expect(sessionOf(PUB, recentValue(KEY, "pk-1", now + 1000), now)).toBeUndefined(); // a recent body
   });
 
   test("publicKeyOf matches the key openssl derives from the same seed", () => {
@@ -301,7 +368,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     }
     expect((await t.call("POST", "/_auth/start", {})).statusCode).toBe(401);
     expect((await t.call("POST", "/_auth/rebuild", {})).statusCode).toBe(401);
-    expect((await t.call("POST", "/_auth/start", {}, `${SESSION_COOKIE}=${sessionValue(KEY, "no-such-passkey", t.nowOf() + 1000)}`)).statusCode).toBe(401); // removed passkey
+    expect((await t.call("POST", "/_auth/start", {}, `${SESSION_COOKIE}=${sessionValue(KEY, "no-such-passkey", t.nowOf() + 1000, t.nowOf() + 1000)}`)).statusCode).toBe(401); // removed passkey
     expect(t.sent.some((x) => x instanceof StartInstancesCommand)).toBe(false);
   });
 
@@ -368,7 +435,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     for (const key of [null, "", "short-key", "g".repeat(64), "a".repeat(66)]) {
       const t = setup({ sessionKey: key, code: "abcabcabcabcabcabc.1900000000000" });
       expect((await t.call("POST", "/_auth/challenge", {})).statusCode).toBe(503);
-      const forged = `${SESSION_COOKIE}=${sessionValue(KEY, "any", t.nowOf() + 1000)}`;
+      const forged = `${SESSION_COOKIE}=${sessionValue(KEY, "any", t.nowOf() + 1000, t.nowOf() + 1000)}`;
       const r = await t.call("POST", "/_auth/start", {}, forged);
       expect(r.statusCode).toBe(503);
       expect(r.json().error).toContain("session-signing-key");
@@ -569,14 +636,14 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     for (const recent of [
       recentValue(KEY, a.id, t.nowOf() - 1), // expired
       recentValue(OTHER, a.id, later), // another key
-      sessionValue(KEY, a.id, later), // the session's value pasted into sb_recent
+      sessionValue(KEY, a.id, later, later), // the session's value pasted into sb_recent
       recentValue(KEY, "another-passkey", later), // another passkey's check
     ]) {
       const r = await t.call("POST", "/_auth/start", {}, `${session}; ${RECENT_COOKIE}=${recent}`);
       expect(r.statusCode).toBe(401);
       expect(r.json()).toMatchObject({ reason: "recent" });
     }
-    expect(recentOf(PUB, sessionValue(KEY, a.id, later), t.nowOf())).toBeUndefined();
+    expect(recentOf(PUB, sessionValue(KEY, a.id, later, later), t.nowOf())).toBeUndefined();
     expect(sessionOf(PUB, recentValue(KEY, a.id, later), t.nowOf())).toBeUndefined(); // nor a recent value a session
     expect((await t.call("POST", "/_auth/start", {}, `${session}; ${RECENT_COOKIE}=${recentValue(KEY, a.id, later)}`)).statusCode).toBe(202);
   });

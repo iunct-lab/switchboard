@@ -126,6 +126,18 @@ function mayLeave(): boolean {
   return false;
 }
 
+/** After an action that changed something, the cloud login's idle time is moved on (#498): the Starter alone can sign the cookie again, so this asks it; at most once every RENEW_EVERY_MS, and a failure is not an error of the action. */
+export const RENEW_EVERY_MS = 10 * 60_000;
+let renewedAt = 0;
+export function renewLogin(mode: LoginMode | undefined, method: string | undefined, now = Date.now(), send: () => Promise<unknown> = () => fetch("/_auth/renew", { method: "POST", credentials: "same-origin" })): boolean {
+  if (mode !== "passkey" || !method || method === "GET" || method === "HEAD" || now - renewedAt < RENEW_EVERY_MS) return false;
+  renewedAt = now;
+  void send().catch(() => {});
+  return true;
+}
+/** Test hook: forget the last renewal. */
+export const resetRenewal = () => { renewedAt = 0; };
+
 async function req<T>(url: string, init?: RequestInit, retried = false): Promise<T> {
   const token = getToken();
   // A FormData body sets its own multipart content-type (with the boundary); forcing JSON here would break it.
@@ -152,6 +164,7 @@ async function req<T>(url: string, init?: RequestInit, retried = false): Promise
     // `status` and `body` ride along so a caller can tell a refusal it can act on (409, e.g. with a taskId) from a failure it cannot
     throw Object.assign(new Error((body as { error?: string }).error ?? `${r.status} ${r.statusText}`), { status: r.status, body });
   }
+  renewLogin(loginMode, init?.method?.toUpperCase());
   return (await r.json()) as T;
 }
 
@@ -205,6 +218,7 @@ export const api = {
   startTeleport: (id: string) => req<{ started: true }>(`/api/tasks/${id}/teleport`, { method: "POST" }),
   deviceAuth: (id: string) => req<DeviceAuthView | null>(`/api/tasks/${id}/device-auth`),
   newRepo: (name: string, purpose: string) => req<Task>("/api/new-repo", { method: "POST", body: JSON.stringify({ name, purpose }) }),
+  renameTask: (id: string, title: string) => req<Task>(`/api/tasks/${id}`, { method: "PATCH", body: JSON.stringify({ title }) }),
   createTask: (input: CreateTaskInput) => req<Task>("/api/tasks", { method: "POST", body: JSON.stringify(input) }),
   suggest: (input: SuggestInput) => req<RoutingSuggestion & { source: string; cloudPreparation?: CloudPreparation }>("/api/tasks/suggest", { method: "POST", body: JSON.stringify(input) }),
   send: (id: string, text: string, attachmentIds?: string[]) => req<Task>(`/api/tasks/${id}/send`, { method: "POST", body: JSON.stringify({ text, attachmentIds }) }),

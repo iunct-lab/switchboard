@@ -13,6 +13,7 @@ import { noticeSource, splitInbox } from "../inbox.ts";
 import { staleDraft } from "../presets.ts";
 import { listedRunners } from "../runners.ts";
 import { PresetPicker } from "./PresetPicker.tsx";
+import { titleToSend } from "../taskTitle.ts";
 
 /** The prefix "改善 →" inserted: remembered so a Workspace switch can swap it for the new workspace's brief (and only it). */
 type Brief = { wsId: string; text: string; title: string };
@@ -259,7 +260,8 @@ export function Home(props: {
         executionMode: cloud ? "cloud" : "local",
         workspaceId: ws?.id, // neither = 自動: the daemon chooses, or answers 409 and the person picks
         cwd: ws?.path,
-        title: title.trim() || prompt.trim().slice(0, 48),
+        // empty, or only the inserted prefix: no title, so the daemon names the task (#491)
+        title: titleToSend(title, brief?.title),
         prompt: prompt.trim(),
         runner,
         ...(!cloud ? {

@@ -8,7 +8,7 @@ Verified 2026-09-05 against **codex-cli 0.148.0-alpha.9** (driven from Bun). Rec
 codex app-server --listen stdio://        # cwd = task cwd
 ```
 
-One JSON-RPC 2.0 message per line on stdin/stdout. Protocol types come from `codex app-server generate-ts`; the subset the adapter uses is committed under `packages/adapters/codex/src/generated/` (Apache-2.0, see `NOTICE`), regenerated with `bun run codex:types`.
+One JSON-RPC 2.0 message per line on stdin/stdout. Protocol types come from `codex app-server generate-ts`; the subset the adapter uses is generated into `packages/adapters/codex/src/generated/` from the installed Codex on every typecheck (`bun run codex:types`) and is not kept in Git.
 
 Detection order: `codex` on `PATH` → unavailable with the official installer hint `curl -fsSL https://chatgpt.com/codex/install.sh | sh`. Nothing is bundled; login (`~/.codex/auth.json`) is the user's own.
 

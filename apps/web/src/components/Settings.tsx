@@ -261,6 +261,15 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
       </section>
 
       <section className="card">
+        <h5>タスク名の自動付与</h5>
+        <div className="muted">最初のターンの後に 1 回、短い名前を付けます。使用枠を 1 回使います。</div>
+        <label className="hint toggle">
+          <input type="checkbox" checked={s.titles.auto} disabled={saving} onChange={(e) => void save({ titles: { auto: e.target.checked } })} />
+          最初のターンの後に名前を付ける
+        </label>
+      </section>
+
+      <section className="card">
         <h5>ルーブリック判定</h5>
         <div className="muted">done で終わったターンのあと、会話の要約とルール指標をルーブリック（5 観点、1〜5 点）で採点します。ランナーとモデルは上の自動判定と同じで、ターンごとにその使用枠を 1 回使います（上の自動判定を切っていても、これが入っていれば動きます）。ルーブリックは SWITCHBOARD_HOME/evals/rubric.json で上書きできます（デーモンの起動時に 1 回読むので、直したら再起動）。</div>
         <label className="hint toggle">

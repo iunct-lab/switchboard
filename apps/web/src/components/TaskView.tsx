@@ -16,6 +16,7 @@ import { artifactsLabel } from "../artifacts.ts";
 import { AttachButton, AttachmentBar, AttachmentGallery, useAttachments, useDropZone } from "./Attachments.tsx";
 import { PresetPicker } from "./PresetPicker.tsx";
 import { jstDateTime, jstTime } from "../time.ts";
+import { titleToSave } from "../taskTitle.ts";
 
 export function TaskView(props: {
   task: Task;
@@ -182,6 +183,19 @@ export function TaskView(props: {
   const [importDetail, setImportDetail] = useState<TaskDetail | null>(null);
   const teleportReason = (!props.task.cloudSession || !/^session_[A-Za-z0-9_-]+$/.test(props.task.cloudSession.id) || props.task.cloudSession.url !== `https://claude.ai/code/${props.task.cloudSession.id}`) ? "Cloud IDが未確認です。公式Webで確認してください。" : (props.task.status === "running" || props.task.status === "waiting") ? "Cloud開始プロセスの終了後に操作できます。" : !props.pty ? "この環境ではPTYを利用できません。対応環境の公式CLIを使ってください。" : undefined;
   // The terminal is only for the CLI's own questions (#1306); starting does not leave the screen.
+  // The title is edited in place (#491): Enter / blur saves, Esc drops, an empty or unchanged one is not sent
+  const [editingTitle, setEditingTitle] = useState(false);
+  const escaped = useRef(false);
+  const saveTitle = (value: string) => {
+    setEditingTitle(false);
+    if (escaped.current) {
+      escaped.current = false;
+      return;
+    }
+    const next = titleToSave(value, props.task.title);
+    if (next === null) return;
+    api.renameTask(props.task.id, next).catch((e) => props.onError(String((e as Error).message ?? e)));
+  };
   const startTeleport = () => { teleportPressed.current = true; api.startTeleport(props.task.id).catch(e => { const m = String((e as Error).message ?? e); if (!m.includes("使用中")) teleportPressed.current = false; props.onError(m); }); }; // a press refused because one already runs (a double press) keeps the mark
   const answerInTerminal = () => { setTerminalOpened(true); setTab("terminal"); };
   const teleportProgress = props.teleport !== undefined ? props.teleport : props.detail?.teleport ?? null;
@@ -248,7 +262,25 @@ export function TaskView(props: {
   return (
     <main className="main task" ref={mainRef} onScroll={checkEnd}>
       <div className="task-head">
-        <h2>{props.task.title}</h2>
+        {editingTitle ? (
+          <input
+            className="task-title-edit"
+            autoFocus
+            defaultValue={props.task.title}
+            aria-label="タイトル"
+            maxLength={200}
+            onBlur={(e) => saveTitle(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.nativeEvent.isComposing) e.currentTarget.blur(); // Enter that confirms a conversion is not a save
+              else if (e.key === "Escape") {
+                escaped.current = true;
+                e.currentTarget.blur();
+              }
+            }}
+          />
+        ) : (
+          <h2 title="クリックで変更" style={{ cursor: "text" }} onClick={() => setEditingTitle(true)}>{props.task.title}</h2>
+        )}
         <span className={`status ${props.task.status}`}>{headStatus}</span>
         <span className="hint task-times">{`${times.started} · ${times.since}`}</span>
         <OriginTag origin={props.task.origin} />
