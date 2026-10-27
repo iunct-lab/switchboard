@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import type { BacklogItem } from "@switchboard/protocol";
-import { activeTaskLine, ago, inProgressState, lastTaskLine, taskTimes, overlapLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl } from "./inProgress.ts";
+import type { BacklogItem, Schedule, Workspace } from "@switchboard/protocol";
+import { activeTaskLine, ago, autoByWorkspace, inProgressState, lastTaskLine, taskTimes, overlapLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl } from "./inProgress.ts";
 
 const item = (over: Partial<BacklogItem>): BacklogItem => ({
   number: 1, title: "t", url: "u", type: "pbi", stage: "in-progress", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z",
-  tasks: { total: 3, done: 1, doneAt: null }, decision: null, activeTaskId: null, projectStatus: "In progress", lastTask: null, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
+  tasks: { total: 3, done: 1, doneAt: null }, decision: null, activeTaskId: null, projectStatus: "In progress", lastTask: null, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
 const last = (status: NonNullable<BacklogItem["lastTask"]>["status"]) => ({ id: "task_1", status, updatedAt: 0 });
 
@@ -168,4 +168,18 @@ describe("taskTimes (#2030)", () => {
     expect(activeTaskLine({ status: "waiting", statusAt: t.statusAt }, now)).toBe("承認待ち（17:40 から）");
     expect(activeTaskLine(null, now)).toBe("実行中");
   });
+});
+
+test("autoByWorkspace (#2656): a workspace at implement 0 is not moved by itself; a disabled schedule moves none", () => {
+  const ws = (id: string, implement: number): Workspace => ({ id, name: id, path: `/w/${id}`, kind: "repo", createdAt: 0, backlog: "github", sweep: { implement, plan: 1 } });
+  const schedule = (enabled: boolean) => ({ action: "backlog-next", enabled }) as Schedule;
+  const workspaces = [ws("ws_meta", 2), ws("ws_lib", 0)];
+  expect(autoByWorkspace([schedule(true)], workspaces)).toEqual({ ws_meta: true, ws_lib: false });
+  expect(autoByWorkspace([schedule(false)], workspaces)).toEqual({ ws_meta: false, ws_lib: false });
+  expect(autoByWorkspace([], workspaces)).toEqual({ ws_meta: false, ws_lib: false });
+  // the row of the workspace at 0 does not say it resumes by itself; the other one does
+  const auto = autoByWorkspace([schedule(true)], workspaces);
+  const row = (workspaceId: string) => item({ workspaceId, stage: "ready", waitsAt: "2026-10-01T00:00:00Z", waits: [] });
+  expect(waitText(row("ws_lib"), auto.ws_lib ?? false)!.next).not.toContain("次の定期実行で再開");
+  expect(waitText(row("ws_meta"), auto.ws_meta ?? false)!.next).toBe("次の定期実行で再開");
 });

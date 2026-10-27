@@ -3,7 +3,7 @@ import type { Artifact, Backlog as BacklogData, BacklogAction, BacklogIssueDetai
 import type { FeedbackTarget } from "../feedbackTarget.ts";
 import { api } from "../api.ts";
 import { backlogHeading, createWord, draftKey, editOf, formAfterRead, GUARANTEE_A, githubSyncText, heldIssueText, loadDraft, loadNewIssueDraft, syncLine, textDraftKey, valueText, workspaceErrorGuide, type EditForm, type NewIssueDraft } from "../backlogSync.ts";
-import { activeTaskLine, ago, inProgressState, lastTaskLine, overlapLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl, type PrereqPart } from "../inProgress.ts";
+import { activeTaskLine, ago, autoByWorkspace, inProgressState, lastTaskLine, overlapLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl, type PrereqPart } from "../inProgress.ts";
 import { promotionLine } from "../release.ts";
 import { Flow } from "./Flow.tsx";
 import { Interventions } from "./Interventions.tsx";
@@ -686,7 +686,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
   const [promotion, setPromotion] = useState<ReturnType<typeof promotionLine>>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
   // whether backlog-next resumes a row whose waits closed (#817): an enabled バックログを進める and an implement slot
-  const [auto, setAuto] = useState(false);
+  const [auto, setAuto] = useState<Record<string, boolean>>({});
   const [shown, setShown] = useState(() => localStorage.getItem(SHOWN_KEY) ?? "");
   const projectVars = workspaces && Object.fromEntries(workspaces.map((w) => [w.id, w.projectVar]));
   const key = (i: BacklogItem) => `${i.workspaceId}:${i.number}`;
@@ -725,9 +725,9 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
   const load = (refresh: boolean) => {
     setBusy(true);
     // read with the list (opened, 再読込): backlog-next may have been turned on or off meanwhile
-    Promise.all([api.schedules(), api.settings()])
-      .then(([schedules, settings]) => setAuto(schedules.some((s) => s.action === "backlog-next" && s.enabled) && settings.backlogSweep.implement > 0))
-      .catch(() => setAuto(false));
+    Promise.all([api.schedules(), api.workspaces()])
+      .then(([schedules, workspaces]) => setAuto(autoByWorkspace(schedules, workspaces)))
+      .catch(() => setAuto({}));
     api
       .release()
       .then((r) => setPromotion(promotionLine(r)))
@@ -900,13 +900,15 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
                 <div className="backlog-syncline">
                   <SyncLine sync={i.sync} />
                 </div>
+                {/* #2296: the screen the PBI decided, as a question's mockups (#2221); nothing without a **画面イメージ** line */}
+                <Mockups list={i.mockups} />
                 {i.stage === "in-progress" && i.report && (
                   <div className="backlog-report">
                     <div className="hint">{jstDateTime(Date.parse(i.report.at))} の状況</div>
                     <pre className="wrap">{reportHead(i.report.body)}</pre>
                   </div>
                 )}
-                <Waits item={i} items={data.items} auto={auto} starting={starting} onOpenTask={props.onOpenTask} onStart={(pbi) => start(i.workspaceId, pbi, "complete")} />
+                <Waits item={i} items={data.items} auto={auto[i.workspaceId] ?? false} starting={starting} onOpenTask={props.onOpenTask} onStart={(pbi) => start(i.workspaceId, pbi, "complete")} />
                 <Prereqs item={i} />
                 <Overlap item={i} />
                 <Stops stops={i.stopSummary} issue={i.url} />

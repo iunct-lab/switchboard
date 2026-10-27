@@ -3,12 +3,14 @@
  * the workflow reaches AWS through OIDC and then runs this; a person runs it with their own AWS CLI login (`aws sso login`,
  * a profile in AWS_PROFILE). Nothing here stores or asks for AWS credentials, and nothing goes to Switchboard.
  * start / rebuild ask the stack's Starter with the start token and the edge header (read from SSM, never printed);
- * deploy builds a change set run by the stack's DeployRole and executes it only when it touches neither the launch
- * template nor the instance (a replaced Instance orphans its Spot request: that one is a person's, aws/README.md).
+ * deploy builds a change set run by the stack's DeployRole and executes it only when aws/change-set-check.ts lets it:
+ * not when it touches the launch template or the instance (a replaced Instance is a person's deploy, aws/README.md).
  * `--dry-run` prints the plan and calls nothing (no AWS, no secret); start / rebuild / deploy need `--yes`.
  * Stack and region: SWITCHBOARD_HOST_STACK (switchboard-host), SWITCHBOARD_AWS_REGION (ap-northeast-1); deploy's
  * `--parameter-overrides` from SWITCHBOARD_HOST_PARAMS (the repository variable of the same name).
  */
+import { checkChangeSet } from "../aws/change-set-check";
+
 export const ACTIONS = ["status", "start", "rebuild", "deploy"] as const;
 export type HostAction = (typeof ACTIONS)[number];
 
@@ -43,8 +45,9 @@ export function planHostOperation(action: HostAction, e: HostEnv): string[] {
   return [
     "bun install --frozen-lockfile、bun run --cwd aws build",
     `${at} の出力 DeployRoleArn と DataBucket、SSM の /switchboard/edge-header を読む（値は出さない）`,
-    `sam deploy --no-execute-changeset（DeployRole で。parameter-overrides は SWITCHBOARD_HOST_PARAMS${e.params ? "" : "。今は未設定なので止まる"}）`,
-    "change set が LaunchTemplate か Instance に触れるなら実行せずに止める（人の deploy）",
+    "aws cloudformation package（Starter の build を DataBucket に上げる）",
+    `aws cloudformation deploy --no-execute-changeset（DeployRole で。parameter-overrides は SWITCHBOARD_HOST_PARAMS${e.params ? "" : "。今は未設定なので止まる"}）`,
+    "change set が LaunchTemplate か Instance に触れるなら実行せずに理由を出して止める（人の deploy。aws/change-set-check.ts）",
     "触れなければ execute-change-set、stack-update-complete を待つ",
   ];
 }
@@ -85,20 +88,24 @@ export async function runHostOperation(action: HostAction, e: HostEnv, d: Deps):
   const role = output("DeployRoleArn");
   const bucket = output("DataBucket");
   const edge = secret("/switchboard/edge-header");
+  // the AWS CLI, not sam: sam deploy / sam package cannot read the template's Fn::ForEach (#465). The SAM transform
+  // still runs in CloudFormation; package only uploads the Starter's build and points CodeUri at it
+  const packaged = "dist/template.packaged.yaml";
+  aws(["cloudformation", "package", "--template-file", "aws/template.yaml", "--s3-bucket", bucket, "--s3-prefix", "releases/sam", "--output-template-file", packaged]);
   // the change set runs as the stack's DeployRole (the boundary keeps it to this stack); the caller only passes it
-  const sam = d.run([
-    "sam", "deploy", "--template-file", "aws/template.yaml", "--stack-name", e.stack, "--region", e.region, "--role-arn", role, "--s3-bucket", bucket, "--s3-prefix", "releases/sam",
-    "--capabilities", "CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "--no-execute-changeset", "--no-fail-on-empty-changeset", "--tags", "Project=switchboard",
+  const deploy = d.run([
+    "aws", "cloudformation", "deploy", "--template-file", packaged, "--stack-name", e.stack, "--region", e.region, "--role-arn", role, "--s3-bucket", bucket, "--s3-prefix", "releases/sam",
+    "--capabilities", "CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND", "--no-execute-changeset", "--no-fail-on-empty-changeset", "--tags", "Project=switchboard",
     "--parameter-overrides", ...e.params!.split(/\s+/).filter(Boolean), `EdgeHeaderValue=${edge}`,
   ]);
-  // sam prints the parameter overrides: the edge header must not reach a log
-  d.log(hide(`${sam.out}\n${sam.err}`.trim(), secrets));
-  // a failed sam deploy is a failure, never "no changes" (#759)
-  if (!sam.ok) throw new Error("failed: sam deploy");
-  const cs = [...`${sam.out}\n${sam.err}`.matchAll(/arn:aws:cloudformation:[^\s]+:changeSet\/[^\s]+/g)].at(-1)?.[0];
+  // the edge header must not reach a log, whatever the CLI prints
+  d.log(hide(`${deploy.out}\n${deploy.err}`.trim(), secrets));
+  // a failed deploy is a failure, never "no changes" (#759)
+  if (!deploy.ok) throw new Error("failed: aws cloudformation deploy");
+  const cs = [...`${deploy.out}\n${deploy.err}`.matchAll(/arn:aws:cloudformation:[^\s]+:changeSet\/[^\s]+/g)].at(-1)?.[0];
   if (!cs) return "no changes";
-  const touched = aws(["cloudformation", "describe-change-set", "--change-set-name", cs, "--query", "Changes[?ResourceChange.LogicalResourceId=='Instance' || ResourceChange.LogicalResourceId=='LaunchTemplate'].ResourceChange.LogicalResourceId", "--output", "text"]);
-  if (touched && touched !== "None") throw new Error(`this change set touches the launch template or the instance (${touched}); run it by hand after cancelling the Spot request (aws/README.md)`);
+  const verdict = checkChangeSet(JSON.parse(aws(["cloudformation", "describe-change-set", "--change-set-name", cs, "--output", "json"])));
+  if (!verdict.ok) throw new Error(`not executed: ${verdict.reason}`);
   aws(["cloudformation", "execute-change-set", "--change-set-name", cs]);
   aws(["cloudformation", "wait", "stack-update-complete", "--stack-name", e.stack]);
   return `executed ${cs}`;

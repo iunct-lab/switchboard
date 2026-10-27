@@ -142,6 +142,21 @@ export function prereqsOf(body: string): Array<{ number: number; release: boolea
   return [];
 }
 
+/**
+ * The Task whose artifacts are a PBI's screen mockups (#2296): the first id on its body's first `**画面イメージ**:` line
+ * outside fences (a full-width colon too), taken as a question's (`asks.ts`, #2221). null = no such line or no id on it.
+ */
+export function mockupTaskOf(body: string): string | null {
+  let fence: string | null = null;
+  for (const raw of body.split("\n")) {
+    const before = fence;
+    fence = fenceAfter(fence, raw);
+    const m = before || fence ? null : /^\*\*画面イメージ\*\*[:：]\s*(.+)$/.exec(raw.trim());
+    if (m) return /[\w-]+/.exec(m[1]!)?.[0] ?? null;
+  }
+  return null;
+}
+
 function field(raw: RawBacklogIssue, project: number, name: string) {
   const item = raw.projectItems.nodes.find((n) => n.project.number === project);
   return item?.fieldValues.nodes.find((v) => v.field?.name === name);
@@ -190,6 +205,8 @@ export function toItem(raw: RawBacklogIssue, project: number, ws: Pick<BacklogWo
     overlap: null,
     prereqs: [],
     stopSummary: [],
+    mockupTask: pbi ? mockupTaskOf(raw.body) : null,
+    mockups: [],
     sync: noSync,
     workspaceId: ws.id,
     workspaceName: ws.name,

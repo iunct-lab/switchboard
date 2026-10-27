@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Transform: AWS::Serverless-2016-10-31
+Transform: [AWS::LanguageExtensions, AWS::Serverless-2016-10-31]
 Description: >-
   Switchboard on one EC2 Spot instance that runs only while it is used (#181, docs/design/cloud-hosting.md §3).
   CloudFront is the only way in; a stopped instance shows the start page. Nothing here holds a runner's credentials.
@@ -22,6 +22,13 @@ Parameters:
       on-demand (#443): Spot can stop the host every few minutes while in use and have no
       capacity to start it again; a Spot instance's market and type cannot be changed later. Changing this replaces the
       instance (a person's deploy, aws/README.md)
+  LaunchGeneration:
+    Type: String
+    Default: '4'
+    AllowedPattern: '[0-9]+'
+    Description: >-
+      The VPC origins' generation, part of their logical ids. A deploy that replaces the instance (the launch template or
+      Instance changes) passes a new value, e.g. $(date -u +%Y%m%d%H%M): aws/README.md, Deploys that replace the instance
   ImageId:
     Type: AWS::EC2::Image::Id
     Description: >-
@@ -207,7 +214,7 @@ Resources:
           - Sid: Stack
             Effect: Allow
             Action: [cloudformation:DescribeStacks, cloudformation:DescribeStackEvents, cloudformation:UpdateStack, cloudformation:CreateChangeSet, cloudformation:DescribeChangeSet, cloudformation:ExecuteChangeSet, cloudformation:GetTemplateSummary]
-            Resource: [!Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*', !Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31']
+            Resource: [!Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*', !Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31', !Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/LanguageExtensions']
           # Amazon Bedrock (#1730): invoking any model and inference profile (versions change often, so none is pinned here).
           # Only the two invoke actions, and no API key made for it: the boundary is also the ceiling of InstanceRole's host policy.
           - Sid: Bedrock
@@ -477,28 +484,31 @@ Resources:
   # and DNS name survive stop/start, nothing crosses the internet in plain text, and a stopped instance's released
   # public IP is never contacted. One per port. An origin in use cannot be updated in place (CannotUpdateEntityWhileInUse),
   # which is why 作り直す keeps the instance and only replaces its root volume. A change that replaces the instance
-  # (Market, the launch template) must also give these new logical ids: CloudFormation then creates new origins, moves
-  # the distribution to them, and deletes the old ones once nothing uses them (2026-09-28: spot → on-demand, #443; then
-  # GitHubRepo → the development repository, which is in UserData; then HostHome / ReposDir → the defaults, #433). Doing this
-  # by hand every time is a trap: #465.
-  HostVpcOrigin4:
-    Type: AWS::CloudFront::VpcOrigin
-    Properties:
-      VpcOriginEndpointConfig:
-        Name: !Sub '${AWS::StackName}-host-4'
-        Arn: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Instance}'
-        HTTPPort: 47831
-        HTTPSPort: 443
-        OriginProtocolPolicy: http-only
-  RescueVpcOrigin4:
-    Type: AWS::CloudFront::VpcOrigin
-    Properties:
-      VpcOriginEndpointConfig:
-        Name: !Sub '${AWS::StackName}-rescue-4'
-        Arn: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Instance}'
-        HTTPPort: 47841
-        HTTPSPort: 443
-        OriginProtocolPolicy: http-only
+  # (Market, the launch template) needs new origins: their logical ids come from LaunchGeneration, so passing a new value
+  # makes CloudFormation create new origins, move the distribution to them, and delete the old ones once nothing uses them
+  # (#465). A rename alone (Name) would be an update in place, which fails. Cdn stays outside the loop (a loop's keys must
+  # carry its identifier) and finds the origins through the same parameter.
+  Fn::ForEach::Edge:
+    - Gen
+    - [!Ref LaunchGeneration]
+    - HostVpcOrigin${Gen}:
+        Type: AWS::CloudFront::VpcOrigin
+        Properties:
+          VpcOriginEndpointConfig:
+            Name: !Sub '${AWS::StackName}-host-${Gen}'
+            Arn: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Instance}'
+            HTTPPort: 47831
+            HTTPSPort: 443
+            OriginProtocolPolicy: http-only
+      RescueVpcOrigin${Gen}:
+        Type: AWS::CloudFront::VpcOrigin
+        Properties:
+          VpcOriginEndpointConfig:
+            Name: !Sub '${AWS::StackName}-rescue-${Gen}'
+            Arn: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Instance}'
+            HTTPPort: 47841
+            HTTPSPort: 443
+            OriginProtocolPolicy: http-only
   Cdn:
     Type: AWS::CloudFront::Distribution
     Properties:
@@ -516,13 +526,13 @@ Resources:
           # a stopped instance does not answer: one short attempt, then the start page (not 3 × 10 s)
           - Id: host
             DomainName: !GetAtt Instance.PrivateDnsName
-            VpcOriginConfig: { VpcOriginId: !GetAtt HostVpcOrigin4.Id, OriginReadTimeout: 60 }
+            VpcOriginConfig: { VpcOriginId: !GetAtt [!Sub 'HostVpcOrigin${LaunchGeneration}', Id], OriginReadTimeout: 60 }
             ConnectionAttempts: 1
             ConnectionTimeout: 3
             OriginCustomHeaders: [{ HeaderName: x-switchboard-edge, HeaderValue: !Ref EdgeHeaderValue }]
           - Id: rescue
             DomainName: !GetAtt Instance.PrivateDnsName
-            VpcOriginConfig: { VpcOriginId: !GetAtt RescueVpcOrigin4.Id }
+            VpcOriginConfig: { VpcOriginId: !GetAtt [!Sub 'RescueVpcOrigin${LaunchGeneration}', Id] }
             ConnectionAttempts: 1
             ConnectionTimeout: 3
             OriginCustomHeaders: [{ HeaderName: x-switchboard-edge, HeaderValue: !Ref EdgeHeaderValue }]
@@ -690,7 +700,7 @@ Resources:
   # (so it cannot make a role stronger than the host needs, nor change itself); never the boundary, and no trust-policy
   # edits (a role re-trusted to an outside principal would hand its permissions out). EC2 stays broad (RunInstances
   # touches many resource types and has no stack tag yet) in this region, but an instance of another stack is off limits.
-  # The SAM transform's change set runs as this role too (--role-arn), so it may create that one and nothing else in
+  # The transforms' change set (SAM, LanguageExtensions) runs as this role too (--role-arn), so it may create that one and nothing else in
   # CloudFormation (#759).
   DeployRole:
     Type: AWS::IAM::Role
@@ -755,7 +765,7 @@ Resources:
                 Resource: '*'
               - Effect: Allow
                 Action: cloudformation:CreateChangeSet
-                Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31'
+                Resource: [!Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31', !Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/LanguageExtensions']
               - Effect: Allow
                 Action: ssm:GetParameters
                 Resource: !Sub 'arn:aws:ssm:${AWS::Region}::parameter/aws/service/*'
@@ -827,7 +837,7 @@ Resources:
                 Resource: !GetAtt DeployRole.Arn
               - Effect: Allow
                 Action: cloudformation:CreateChangeSet
-                Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31'
+                Resource: [!Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31', !Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/LanguageExtensions']
               - Effect: Allow
                 Action: ec2:DescribeInstances
                 Resource: '*'

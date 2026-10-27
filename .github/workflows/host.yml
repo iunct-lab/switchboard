@@ -31,8 +31,6 @@ jobs:
           role-to-assume: ${{ vars.SWITCHBOARD_HOST_ROLE_ARN }}
           aws-region: ${{ env.SWITCHBOARD_AWS_REGION }}
       - uses: oven-sh/setup-bun@v2
-      - uses: aws-actions/setup-sam@v2
-        if: inputs.action == 'deploy'
       # deploy: a change set run by DeployRole, executed only when it leaves the launch template and the instance alone
       - name: host operation
         env:

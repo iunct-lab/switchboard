@@ -517,7 +517,7 @@ if (MODE_BROWSER) {
 
     // 4e. GitHub refuses an edit for good: 同期失敗 on the row, the promise and the workspace's last time shown, and the
     // start by hand still makes the Task (#2264). On #20, which has no Task, with the slots widened: the Task of 4d does not hold it
-    await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ backlogSweep: { implement: 3, plan: 3 } }) });
+    await fetch(`${base}/api/workspaces/${ws()}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ sweep: { implement: 3, plan: 3 } }) });
     github.set(20, { id: "I_20", number: 20, title: "要望: 拒否される", body: "元の本文", state: "OPEN", labels: ["type:request"], parent: null, comments: [], item: null });
     await fetch(`${base}/api/backlog?refresh=1`);
     await until(async () => (await api("GET", `/api/backlog/20?workspaceId=${ws()}`)).status === 200, "#20 is read");

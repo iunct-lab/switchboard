@@ -401,52 +401,71 @@ export function GithubSync() {
   );
 }
 
-/** backlog-next's slots per workspace (#561): the setting each firing reads, so a save applies from the next one. */
+/** backlog-next's slots of each workspace (#561, #2656): what each firing reads, so a save applies from the next one. */
 export function SweepSlots(props: { onError: (msg: string) => void }) {
-  const [saved, setSaved] = useState<SettingsData["backlogSweep"] | null>(null);
-  const [implement, setImplement] = useState("");
-  const [plan, setPlan] = useState("");
+  const [saved, setSaved] = useState<Workspace[] | null>(null);
+  const [draft, setDraft] = useState<Record<string, { implement: string; plan: string }>>({});
   const [busy, setBusy] = useState(false);
-  const show = (v: SettingsData["backlogSweep"]) => {
-    setSaved(v);
-    setImplement(String(v.implement));
-    setPlan(String(v.plan));
+  const show = (list: Workspace[]) => {
+    setSaved(list);
+    setDraft(Object.fromEntries(list.map((w) => [w.id, { implement: String(w.sweep.implement), plan: String(w.sweep.plan) }])));
   };
   useEffect(() => {
-    api.settings().then((s) => show(s.backlogSweep)).catch((e) => props.onError(String(e.message ?? e)));
+    api.workspaces().then(show).catch((e) => props.onError(String(e.message ?? e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const save = async () => {
+    if (!saved) return;
     // an emptied box would be Number("") = 0, which switches the slot off: only a typed digit counts
-    const v = { implement: Number(implement), plan: Number(plan) };
-    if (![implement, plan].every((x) => /^\s*\d\s*$/.test(x)) || ![v.implement, v.plan].every((n) => n <= 3)) {
-      props.onError(`枠の数は 0〜3 の整数で入力してください: 実装 "${implement}" / 計画 "${plan}"`);
+    const bad = saved.find((w) => ![draft[w.id]!.implement, draft[w.id]!.plan].every((x) => /^\s*[0-3]\s*$/.test(x)));
+    if (bad) {
+      props.onError(`枠の数は 0〜3 の整数で入力してください: ${bad.name} 実装 "${draft[bad.id]!.implement}" / 計画 "${draft[bad.id]!.plan}"`);
       return;
     }
     setBusy(true);
     try {
-      show((await api.updateSettings({ backlogSweep: v })).backlogSweep);
+      for (const w of saved) {
+        const v = { implement: Number(draft[w.id]!.implement), plan: Number(draft[w.id]!.plan) };
+        if (v.implement !== w.sweep.implement || v.plan !== w.sweep.plan) await api.setWorkspaceSweep(w.id, v);
+      }
     } catch (e) {
       props.onError(String((e as Error).message ?? e));
     } finally {
+      // what was saved, also when one of them failed
+      await api.workspaces().then(show).catch(() => undefined);
       setBusy(false);
     }
   };
-  const box = (label: string, value: string, set: (v: string) => void) => (
+  const box = (w: Workspace, slot: "implement" | "plan", label: string) => (
     <>
       <span className="hint">{label}</span>
-      <input type="number" min={0} max={3} step={1} aria-label={`${label}の枠`} value={value} onChange={(e) => set(e.target.value)} style={{ width: 56 }} />
+      <input
+        type="number"
+        min={0}
+        max={3}
+        step={1}
+        aria-label={`${w.name} の${label}の枠`}
+        value={draft[w.id]?.[slot] ?? ""}
+        onChange={(e) => setDraft((d) => ({ ...d, [w.id]: { ...d[w.id]!, [slot]: e.target.value } }))}
+        style={{ width: 56 }}
+      />
     </>
   );
   return (
-    <div className="row backlog-sweep" style={{ gridColumn: "1 / -1", alignItems: "center", gap: 6 }}>
-      <span className="hint">リポジトリごとの枠:</span>
-      {box("実装", implement, setImplement)}
-      {box("計画", plan, setPlan)}
-      <button className="ghost" disabled={busy || !saved} onClick={() => void save()}>
-        保存
-      </button>
-      {saved && <span className="hint">保存済み: 実装 {saved.implement} · 計画 {saved.plan}（0 = 自動で進めない）</span>}
+    <div className="backlog-sweep" style={{ gridColumn: "1 / -1" }}>
+      {saved?.map((w) => (
+        <div key={w.id} className="row" data-workspace={w.id} style={{ alignItems: "center", gap: 6 }}>
+          <span className="t">{w.name}</span>
+          {box(w, "implement", "実装")}
+          {box(w, "plan", "計画")}
+        </div>
+      ))}
+      <div className="row" style={{ alignItems: "center", gap: 6 }}>
+        <button className="ghost" disabled={busy || !saved} onClick={() => void save()}>
+          保存
+        </button>
+        <span className="hint">0 = 自動で進めない</span>
+      </div>
     </div>
   );
 }

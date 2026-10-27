@@ -1557,7 +1557,7 @@ describe("core daemon", () => {
       expect(saved.defaultPermissionMode).toEqual({ claude: "plan" });
       expect(saved.runners[0].defaultPermissionMode).toBe("plan");
       expect((await fetch(`${b8}/api/health`).then(j)).runners[0].defaultPermissionMode).toBe("plan");
-      expect(c8.db.getSetting("settings", {})).toEqual({ defaultPermissionMode: { claude: "plan" }, autoResume: {}, bedrock: {}, shadowRunner: null, routing: { llm: { enabled: false, runner: "claude", model: "", timeoutMs: 5000 } }, backlogSweep: { implement: 1, plan: 1 }, judge: { enabled: true, runner: "codex", model: "gpt-6-luna" }, autoStart: { runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9 }, evals: { judge: { enabled: true } }, titles: { auto: true }, quotaAndResume: { backlogQuotaLimit: 0.8, retryDelayMs: 900_000, retryMaxDelayMs: 14_400_000, maxLimitStops: 8, resumePrompt: "使用上限がリセットされました。中断した箇所から作業を続けてください。", maxStopResumes: 2, thinSample: 5 }, judgeAndChoice: { judgeFallbackRunner: "claude", judgeFallbackModel: "claude-haiku-4-5", judgeTimeoutMs: 60_000, workspaceChoiceTimeoutMs: 60_000 }, newDefaults: { taskRunner: "claude", scheduleCron: "0 3 * * *" }, prices: {} });
+      expect(c8.db.getSetting("settings", {})).toEqual({ defaultPermissionMode: { claude: "plan" }, autoResume: {}, bedrock: {}, shadowRunner: null, routing: { llm: { enabled: false, runner: "claude", model: "", timeoutMs: 5000 } }, judge: { enabled: true, runner: "codex", model: "gpt-6-luna" }, autoStart: { runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9 }, evals: { judge: { enabled: true } }, titles: { auto: true }, quotaAndResume: { backlogQuotaLimit: 0.8, retryDelayMs: 900_000, retryMaxDelayMs: 14_400_000, maxLimitStops: 8, resumePrompt: "使用上限がリセットされました。中断した箇所から作業を続けてください。", maxStopResumes: 2, thinSample: 5 }, judgeAndChoice: { judgeFallbackRunner: "claude", judgeFallbackModel: "claude-haiku-4-5", judgeTimeoutMs: 60_000, workspaceChoiceTimeoutMs: 60_000 }, newDefaults: { taskRunner: "claude", scheduleCron: "0 3 * * *" }, prices: {} });
       const t4 = await post("/api/tasks", { cwd: h8, title: "t4", prompt: "p", runner: "claude" }).then(j);
       expect(t4.permissionMode).toBe("plan");
       expect(starts[2]?.permissionMode).toBe("plan");
@@ -2244,15 +2244,39 @@ describe("core daemon", () => {
     expect((await fetch(`${base}/api/schedules/${s.id}`)).status).toBe(404);
   });
 
-  test("backlogSweep (#561): backlog-next's slots default to 1 / 1, a PATCH of one keeps the other, 0〜3 only, kept in sqlite", async () => {
+  test("backlogSweep (#561) is gone from the settings (#2656): GET has no such key, a PATCH of it changes nothing", async () => {
     const patch = (body: unknown) => fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-    expect((await fetch(`${base}/api/settings`).then(j)).backlogSweep).toEqual({ implement: 1, plan: 1 });
-    expect((await patch({ backlogSweep: { implement: 2 } }).then(j)).backlogSweep).toEqual({ implement: 2, plan: 1 });
-    expect((await patch({ backlogSweep: { plan: 0 } })).status).toBe(200);
-    expect((await fetch(`${base}/api/settings`).then(j)).backlogSweep).toEqual({ implement: 2, plan: 0 });
-    for (const bad of [{ implement: 4 }, { plan: -1 }, { implement: 1.5 }, { implement: "2" }]) expect((await patch({ backlogSweep: bad })).status).toBe(400);
-    expect((core.db.getSetting("settings", {}) as { backlogSweep: unknown }).backlogSweep).toEqual({ implement: 2, plan: 0 });
-    await patch({ backlogSweep: { implement: 1, plan: 1 } });
+    expect("backlogSweep" in (await fetch(`${base}/api/settings`).then(j))).toBe(false);
+    expect("backlogSweep" in (await patch({ backlogSweep: { implement: 2 } }).then(j))).toBe(false);
+    expect("backlogSweep" in (core.db.getSetting("settings", {}) as object)).toBe(false);
+    expect(core.db.listWorkspaces().every((w) => w.sweep.implement === 1)).toBe(true);
+  });
+
+  test("workspace sweep (#2656): PATCH one side keeps the other, 0〜3 only, survives reopening the DB", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-test-sweep-"));
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
+    try {
+      const b = `http://127.0.0.1:${c.server.port}`;
+      const list = () => fetch(`${b}/api/workspaces`).then((r) => r.json() as Promise<Array<{ id: string; sweep: unknown }>>);
+      const ws = (await list())[0]!;
+      expect(ws.sweep).toEqual({ implement: 1, plan: 1 });
+      const patch = (body: unknown) => fetch(`${b}/api/workspaces/${ws.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      expect((await patch({ sweep: { implement: 2 } }).then(j)).sweep).toEqual({ implement: 2, plan: 1 });
+      expect((await patch({ sweep: { plan: 0 } })).status).toBe(200);
+      for (const bad of [{ implement: 4 }, { plan: -1 }, { implement: 1.5 }, { implement: "2" }, { other: 1 }, null]) expect((await patch({ sweep: bad })).status).toBe(400);
+      expect((await patch({ sweep: { plan: 1 }, projectVar: "X" })).status).toBe(400);
+      expect((await fetch(`${b}/api/workspaces/ws_none`, { method: "PATCH", body: JSON.stringify({ sweep: { plan: 1 } }) })).status).toBe(404);
+      expect((await list()).find((w) => w.id === ws.id)!.sweep).toEqual({ implement: 2, plan: 0 });
+    } finally {
+      await c.stop();
+    }
+    const db = new Db(join(h, "switchboard.db"));
+    try {
+      expect(db.listWorkspaces()[0]!.sweep).toEqual({ implement: 2, plan: 0 });
+    } finally {
+      db.close();
+      rmSync(h, { recursive: true, force: true });
+    }
   });
 
   test("footprint counts files and estimates tokens, skipping node_modules", async () => {

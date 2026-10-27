@@ -142,7 +142,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     const ask = await decisionOf306(base);
     const s = await fetch(`${base}/api/schedules`, { method: "POST", body: JSON.stringify({ title: "バックログを進める", cron: "0 */3 * * *", workspaceId: meta().id, runner: "claude", prompt: "", action: "backlog-next" }) });
     const id = ((await s.json()) as { id: string }).id;
-    await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ backlogSweep: { implement: 3, plan: 0 } }) });
+    await fetch(`${base}/api/workspaces/${meta().id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ sweep: { implement: 3, plan: 0 } }) });
     const [r] = await Promise.all([answer(base, ask.id, { kind: "choice", choice: B }), fetch(`${base}/api/schedules/${id}/run`, { method: "POST" })]);
     expect(r.status).toBe(200);
     // the firing (its reply awaited above) may pick #306 once answered: it finds that start under way or running, never a second one

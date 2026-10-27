@@ -18,6 +18,8 @@ const fixtures = join(import.meta.dir, "..", "packages", "core", "fixtures");
 const pages = JSON.parse(readFileSync(join(fixtures, "backlog-graphql.json"), "utf8")) as Array<{ data: { repository: { issues: { nodes: Array<{ number: number; labels: { nodes: Array<{ name: string }> } }> } } } }>;
 const decisions = JSON.parse(readFileSync(join(fixtures, "backlog-decisions.json"), "utf8")) as { data: { repository: Record<string, { subIssues?: { nodes: Array<{ number: number; labels: { nodes: Array<{ name: string }> } }> } }> } };
 const libPage = readFileSync(join(fixtures, "backlog-graphql-2.json"), "utf8");
+// #2296: acme/app's Ready #304 names the Task of its screen mockup (the fixture file stays as it is)
+for (const p of pages) for (const n of p.data.repository.issues.nodes as Array<{ number: number; body?: string }>) if (n.number === 304) n.body += "\n**画面イメージ**: task_e2emock";
 // a request in acme/lib, answered only while the backlog-next step runs (#561): lib then has an item for each slot
 const libWithRequest = (() => {
   const page = JSON.parse(libPage) as { data: { repository: { issues: { nodes: Array<Record<string, unknown>> } } } };
@@ -99,6 +101,15 @@ await fetch(`${base}/api/workspaces`, { method: "POST", body: JSON.stringify({ p
 await fetch(`${base}/api/backlog?refresh=1`); // both workspaces imported before the screen first reads what is stored (#885)
 const metaName = core.db.listWorkspaces().find((w) => w.kind === "meta")!.name;
 const libId = core.db.listWorkspaces().find((w) => w.name === "lib")!.id;
+// #2296: that Task, with one HTML mockup
+{
+  const at = Date.now() - 60_000;
+  const metaWs = core.db.listWorkspaces().find((w) => w.kind === "meta")!;
+  core.db.insertTask({ id: "task_e2emock", workspaceId: metaWs.id, title: "画面イメージを作る Task", stage: null, runner: "claude", cwd: home, scope: [home], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, statusAt: at, createdAt: at, updatedAt: at });
+  await Bun.write(join(home, "e2emock.html"), `<!doctype html><meta charset="utf-8"><body><p>e2e mockup body</p></body>`);
+  const r = await fetch(`${base}/api/tasks/task_e2emock/artifacts`, { method: "POST", body: JSON.stringify({ source: join(home, "e2emock.html"), title: "画面イメージ: e2e" }) });
+  if (r.status !== 201) throw new Error(`mockup artifact: ${r.status}`);
+}
 const assert = (ok: unknown, message: string) => { if (!ok) throw new Error(message); };
 async function until<T>(fn: () => T | Promise<T>, label: string): Promise<NonNullable<T>> {
   const end = Date.now() + 20_000;
@@ -125,6 +136,7 @@ try {
     if (m.method === "Runtime.exceptionThrown" || (m.method === "Runtime.consoleAPICalled" && m.params.type === "error")) errors.push(m);
   };
   const call = (method: string, params: object = {}): Promise<any> => new Promise((resolve, reject) => { const id = ++seq; pending.set(id, { resolve, reject }); ws!.send(JSON.stringify({ id, method, params })); });
+  const callIn = (sessionId: string, method: string, params: object = {}): Promise<any> => new Promise((resolve, reject) => { const id = ++seq; pending.set(id, { resolve, reject }); ws!.send(JSON.stringify({ id, method, params, sessionId })); });
   const evaluate = async (expression: string) => {
     const result = await call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
     if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
@@ -178,6 +190,54 @@ try {
     { ws: metaName, href: "https://github.com/acme/app/issues/304", buttons: ["実装する"] },
     { ws: "lib", href: "https://github.com/acme/lib/issues/304", buttons: ["実装する"] },
   ]), `ready rows: ${JSON.stringify(readyRows)}`);
+  // #2296: the screen mockup under acme/app's Ready #304 — one button; no other row has one; pressed it opens the HTML, again it closes
+  const mockupsOf304 = `(() => { const r = [...document.querySelectorAll('section[data-stage="ready"] .backlog-item')].find(r => r.querySelector('a').href === 'https://github.com/acme/app/issues/304'); const m = r?.nextElementSibling?.nextElementSibling; return m?.classList.contains('mockups') ? m : null; })()`;
+  const mockupButtons = await evaluate(`[...(${mockupsOf304})?.querySelectorAll('button.mockup') ?? []].map(b => b.textContent.trim())`) as string[];
+  assert(JSON.stringify(mockupButtons) === JSON.stringify(["画面イメージ: e2e"]), `#304 mockups: ${JSON.stringify(mockupButtons)}`);
+  assert(await evaluate(`document.querySelectorAll('.backlog .mockups').length === 1 && (${mockupsOf304}).querySelector('.hint').textContent === '画面イメージ'`), "only #304's row has mockups");
+  /** The text inside the opened mockup's frame: a sandboxed frame is a process of its own, read over its CDP target. */
+  const mockupText = async () => {
+    const src = await until(() => evaluate(`(${mockupsOf304}).querySelector('iframe.art-frame')?.src ?? null`) as Promise<string | null>, "the opened mockup's frame");
+    return until(async () => {
+      const target = ((await call("Target.getTargets")).targetInfos as Array<{ type: string; url: string; targetId: string }>).find((t) => t.type === "iframe" && t.url === src);
+      if (!target) return null;
+      const { sessionId } = await call("Target.attachToTarget", { targetId: target.targetId, flatten: true });
+      try {
+        return ((await callIn(sessionId, "Runtime.evaluate", { expression: "document.body?.innerText ?? ''", returnByValue: true })).result.value as string) || null;
+      } finally {
+        await call("Target.detachFromTarget", { sessionId });
+      }
+    }, "the mockup's text in its frame");
+  };
+  await call("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+  const pressMockup = () => press(`(${mockupsOf304})?.querySelector('button.mockup')`, "#304's mockup button");
+  const mockupShot = async (width: number) => {
+    if (!process.env.SCREENSHOT) return;
+    await evaluate(`(${mockupsOf304}).previousElementSibling.previousElementSibling.scrollIntoView({ block: "start" })`);
+    const shot = await call("Page.captureScreenshot", { format: "png" });
+    await Bun.write(process.env.SCREENSHOT.replace(/\.png$/, "") + `-mockup-${width}.png`, Buffer.from(shot.data, "base64"));
+  };
+  await pressMockup();
+  const mockupOpened = await mockupText();
+  assert(mockupOpened.includes("e2e mockup body") && (await evaluate(`(${mockupsOf304}).querySelector('button.mockup').getAttribute('aria-pressed') === 'true'`)), `#304 mockup: ${mockupOpened}`);
+  await mockupShot(1280);
+  await pressMockup();
+  await until(() => evaluate(`!(${mockupsOf304}).querySelector('iframe.art-frame')`), "#304 mockup closes");
+  // at 390px the button stays on screen, and opened the page does not scroll sideways (here, before the steps that
+  // start Tasks, so the check does not hang on them)
+  await call("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
+  await until(() => evaluate(`${read} && !!(${mockupsOf304})`), "backlog at 390px with #304's mockup");
+  const mockup390 = await evaluate(`(() => { const b = (${mockupsOf304})?.querySelector('button.mockup'); return b && b.getBoundingClientRect().right; })()`) as number | null;
+  assert(mockup390 !== null && mockup390 <= 390, `#304 mockup button at 390px: ${mockup390}`);
+  await pressMockup();
+  assert((await mockupText()).includes("e2e mockup body"), "#304 mockup opened at 390px");
+  const mockupScroll390 = await evaluate("document.documentElement.scrollWidth") as number;
+  assert(mockupScroll390 <= 390, `#304 mockup opened scrolls sideways at 390px (${mockupScroll390})`);
+  await mockupShot(390);
+  await pressMockup();
+  await until(() => evaluate(`!(${mockupsOf304}).querySelector('iframe.art-frame')`), "#304 mockup closes at 390px");
+  await call("Emulation.clearDeviceMetricsOverride");
+  console.log(`mockups (#2296): ${JSON.stringify({ buttons: mockupButtons, opened: mockupOpened.trim(), button390Right: mockup390, scroll390: mockupScroll390 })}`);
   // acme/lib's 判断待ち has its own answer box too (the answer names its workspace)
   const libDecision = await evaluate(`(() => { const c = [...document.querySelectorAll('section[data-stage="needs-decision"] .decision-card')].find(c => c.querySelector('a').href.includes('/acme/lib/')); return { textarea: !!c.querySelector('textarea'), button: !!c.querySelector('button'), text: c.textContent }; })()`) as { textarea: boolean; button: boolean; text: string };
   assert(libDecision.textarea && libDecision.button && libDecision.text.includes("lib"), `lib decision: ${JSON.stringify(libDecision)}`);
@@ -465,7 +525,13 @@ try {
   core.db.insertTask({ ...core.db.getTask(finished.id)!, id: "task_e2e307close", title: "#307 閉じる: PBI", stage: { issue: 307, action: "close" }, status: "done", createdAt: closedAt, updatedAt: closedAt });
   const tasksBefore = core.db.listTasks().length;
   // two implement slots for this firing: #306 takes the first, and #304 would take the second but for its overlap (#1044)
-  const setSweep = (implement: number) => fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ backlogSweep: { implement } }) });
+  // every workspace's (#2656)
+  const setSweep = async (implement: number) => {
+    for (const w of core.db.listWorkspaces()) {
+      const r = await fetch(`${base}/api/workspaces/${w.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ sweep: { implement } }) });
+      assert(r.status === 200, `sweep of ${w.name}: ${r.status}`);
+    }
+  };
   await setSweep(2);
   libRequest = true;
   await click("今すぐ実行");
@@ -497,24 +563,26 @@ try {
   const scheduledPrompt = await until(() => prompts.findLast((p) => p.startsWith("PBI #306 は実装中のまま止まっています")), "the scheduled implementation's prompt");
   assert(scheduled && scheduledPrompt.includes(".claude/skills/pbi-complete/SKILL.md") && !scheduledPrompt.includes("merge-gate"), `scheduled: ${core.db.listTasks().filter((t) => t.scheduleId).map((t) => t.title).join(" / ")}`);
 
-  // the slots per workspace (#561): on the 設定 screen (#839), implement 1 → 2, 保存, and a reload still shows 2
+  // the slots per workspace (#561, #2656): on the 設定 screen (#839), the meta's implement 1 → 2, 保存, and a reload still shows 2
+  const sweepOf = async () => ((await (await fetch(`${base}/api/workspaces`)).json()) as Array<{ id: string; sweep: unknown }>).find((w) => w.id === metaId)!.sweep;
+  const implBox = `input[aria-label="${metaName} の実装の枠"]`;
+  const planBox = `input[aria-label="${metaName} の計画の枠"]`;
   await click("Settings");
   await until(() => evaluate(`!!document.querySelector('main.settings')`), "設定 screen");
-  await until(() => evaluate(`document.querySelector('input[aria-label="実装の枠"]')?.value === "1" && document.querySelector('input[aria-label="計画の枠"]')?.value === "1"`), "slots at their default");
-  await setField('input[aria-label="実装の枠"]', "2");
+  await until(() => evaluate(`document.querySelector('${implBox}')?.value === "1" && document.querySelector('${planBox}')?.value === "1" && !!document.querySelector('input[aria-label="lib の実装の枠"]')`), "a row per workspace at its value");
+  await setField(implBox, "2");
   await click("保存");
-  await until(() => evaluate(`document.querySelector('.backlog-sweep')?.textContent.includes('保存済み: 実装 2 · 計画 1')`), "slots saved");
+  await until(async () => JSON.stringify(await sweepOf()) === JSON.stringify({ implement: 2, plan: 1 }), "slots saved");
   await call("Page.reload");
   await until(() => evaluate(`!!document.querySelector('.rail')`), "Rail after the reload");
   await click("Settings");
-  const slotsAfterReload = await until(() => evaluate(`(() => { const i = document.querySelector('input[aria-label="実装の枠"]'); const p = document.querySelector('input[aria-label="計画の枠"]'); return i && p && i.value !== "" ? i.value + "/" + p.value : null; })()`), "slots after the reload") as string;
-  const savedSlots = (await (await fetch(`${base}/api/settings`)).json() as { backlogSweep: unknown }).backlogSweep;
-  assert(slotsAfterReload === "2/1" && JSON.stringify(savedSlots) === JSON.stringify({ implement: 2, plan: 1 }), `slots: ${slotsAfterReload} ${JSON.stringify(savedSlots)}`);
+  const slotsAfterReload = await until(() => evaluate(`(() => { const i = document.querySelector('${implBox}'); const p = document.querySelector('${planBox}'); return i && p && i.value !== "" ? i.value + "/" + p.value : null; })()`), "slots after the reload") as string;
+  assert(slotsAfterReload === "2/1", `slots: ${slotsAfterReload}`);
   // an emptied box is refused, not saved as 0 (which would switch the slot off)
-  await setField('input[aria-label="計画の枠"]', "");
+  await setField(planBox, "");
   await click("保存");
   await until(() => evaluate(`document.body.textContent.includes('枠の数は 0〜3 の整数で入力してください')`), "blank slot refused");
-  const afterBlank = (await (await fetch(`${base}/api/settings`)).json() as { backlogSweep: unknown }).backlogSweep;
+  const afterBlank = await sweepOf();
   assert(JSON.stringify(afterBlank) === JSON.stringify({ implement: 2, plan: 1 }), `after a blank: ${JSON.stringify(afterBlank)}`);
 
   // the kinds of 自動で始まる Task (#1337): 7 lines on 共通 with the common selects only; 変える on 実装 → codex; a reload
@@ -663,7 +731,7 @@ try {
   const promotionLine = { waiting: waiting.text, failed: failed.text, rescueLink: failed.href };
 
   assert(!errors.length, `console errors: ${JSON.stringify(errors)}`);
-  console.log(JSON.stringify({ columns: Object.fromEntries(Object.entries(columns).map(([k, v]) => [k, v.length])), workspaceNames, workspaceSwitch, libTask: libTask.title, feedbackOpened, startedTitle, rowShowsRunning, approvalsLink, decisionShown, answered, ghCalls, scheduleLog, slotsAfterReload, kinds: { after: kindsAfter, selects: selectsAfter, saved: savedKinds, libRunner: libTask.runner, reset: resetKinds }, failures: failures.length, shownVar, slowGitHub, overlappingAnswers: cardsWhileReading, inProgress, closable, waitOwner, prereqs, overlap: overlapShown.text, taskDecision: taskDecision.line, taskAnswer, promotionLine, consoleErrors: errors.length }));
+  console.log(JSON.stringify({ columns: Object.fromEntries(Object.entries(columns).map(([k, v]) => [k, v.length])), workspaceNames, workspaceSwitch, libTask: libTask.title, feedbackOpened, startedTitle, rowShowsRunning, approvalsLink, decisionShown, answered, ghCalls, scheduleLog, slotsAfterReload, kinds: { after: kindsAfter, selects: selectsAfter, saved: savedKinds, libRunner: libTask.runner, reset: resetKinds }, failures: failures.length, shownVar, slowGitHub, overlappingAnswers: cardsWhileReading, inProgress, closable, waitOwner, prereqs, overlap: overlapShown.text, taskDecision: taskDecision.line, taskAnswer, promotionLine, mockups: { buttons: mockupButtons, opened: mockupOpened.trim(), button390Right: mockup390, scroll390: mockupScroll390 }, consoleErrors: errors.length }));
 } finally {
   ws?.close();
   chrome.kill();

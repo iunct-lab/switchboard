@@ -8,17 +8,52 @@ import { delimiter, join } from "node:path";
 /** The first line of the guard's file after the shebang; realCommand knows another copy of the guard by it. */
 export const GUARD_MARK = "// gh-guard";
 
-const WRITES: Record<string, string[]> = { issue: ["create", "new", "comment", "edit"], pr: ["create", "new", "comment", "edit", "review"] };
-/** Flags of `gh issue` / `gh pr` that take a value, by what the value is. `-R` is read so that its value is not taken for the subcommand. */
-const ISSUE_FLAGS: Record<string, "text" | "file" | "skip"> = { "--title": "text", "-t": "text", "--body": "text", "-b": "text", "--body-file": "file", "-F": "file", "--repo": "skip", "-R": "skip" };
-const API_FLAGS: Record<string, "raw" | "typed" | "file" | "skip"> = { "--raw-field": "raw", "-f": "raw", "--field": "typed", "-F": "typed", "--input": "file", "--method": "skip", "-X": "skip", "--header": "skip", "-H": "skip", "--jq": "skip", "-q": "skip", "--template": "skip", "-t": "skip", "--hostname": "skip", "--cache": "skip", "--preview": "skip", "-p": "skip" };
-
+type Flags = Record<string, "text" | "file" | "skip">;
 /**
- * The one-letter switches (flags with no value) of each write, the only letters a group of short flags may hold
- * before its value flag (`-cb x`). A letter that is neither is the value of a flag this file does not list (`-Hfeat`),
- * and the argument is not read as a group.
+ * The writes of each group, by subcommand: its flags that take a value, by what the value is, and its one-letter
+ * switches (flags with no value), the only letters a group of short flags may hold before its value flag (`-cb x`).
+ * A letter that is neither is the value of a flag this file does not list (`-Hfeat`), and the argument is not read as
+ * a group. One letter means another thing in another subcommand (`-c` is the text in `pr close`, a switch in
+ * `pr review`), so each subcommand has its own row. `-R` is read so that its value is not taken for the subcommand.
  */
-const SWITCHES: Record<string, string> = { "issue create": "ew", "issue new": "ew", "issue comment": "ew", "pr create": "defw", "pr new": "defw", "pr comment": "ew", "pr review": "acr", api: "i" };
+const ISSUE_FLAGS: Flags = { "--title": "text", "-t": "text", "--body": "text", "-b": "text", "--body-file": "file", "-F": "file", "--repo": "skip", "-R": "skip" };
+const CLOSE_FLAGS: Flags = { "--comment": "text", "-c": "text", "--repo": "skip", "-R": "skip" };
+const RELEASE_FLAGS: Flags = { "--title": "text", "-t": "text", "--notes": "text", "-n": "text", "--notes-file": "file", "-F": "file", "--target": "skip", "--discussion-category": "skip", "--notes-start-tag": "skip", "--repo": "skip", "-R": "skip" };
+/**
+ * `positional`: the arguments after the subcommand that are not flags are files whose content is sent (`-` is the
+ * standard input) — all of them (`files`), or the one after the id (`source`).
+ */
+const GIST_FLAGS: Flags = { "--desc": "text", "-d": "text", "--filename": "skip", "-f": "skip" };
+const COMMANDS: Record<string, Record<string, { flags: Flags; switches: string; positional?: "files" | "source" }>> = {
+  issue: {
+    create: { flags: ISSUE_FLAGS, switches: "ew" },
+    new: { flags: ISSUE_FLAGS, switches: "ew" },
+    comment: { flags: ISSUE_FLAGS, switches: "ew" },
+    edit: { flags: ISSUE_FLAGS, switches: "" },
+    close: { flags: { ...CLOSE_FLAGS, "--reason": "skip", "-r": "skip", "--duplicate-of": "skip" }, switches: "" },
+  },
+  pr: {
+    create: { flags: ISSUE_FLAGS, switches: "defw" },
+    new: { flags: ISSUE_FLAGS, switches: "defw" },
+    comment: { flags: ISSUE_FLAGS, switches: "ew" },
+    edit: { flags: ISSUE_FLAGS, switches: "" },
+    review: { flags: ISSUE_FLAGS, switches: "acr" },
+    close: { flags: CLOSE_FLAGS, switches: "d" },
+    merge: { flags: { "--body": "text", "-b": "text", "--body-file": "file", "-F": "file", "--subject": "text", "-t": "text", "--author-email": "skip", "-A": "skip", "--match-head-commit": "skip", "--repo": "skip", "-R": "skip" }, switches: "dmrs" },
+  },
+  release: {
+    create: { flags: RELEASE_FLAGS, switches: "dp" },
+    new: { flags: RELEASE_FLAGS, switches: "dp" },
+    edit: { flags: { ...RELEASE_FLAGS, "--tag": "skip" }, switches: "" },
+  },
+  gist: {
+    create: { flags: GIST_FLAGS, switches: "pw", positional: "files" },
+    new: { flags: GIST_FLAGS, switches: "pw", positional: "files" },
+    edit: { flags: { ...GIST_FLAGS, "--add": "file", "-a": "file", "--remove": "skip", "-r": "skip" }, switches: "", positional: "source" },
+  },
+};
+const API_FLAGS: Record<string, "raw" | "typed" | "file" | "skip"> = { "--raw-field": "raw", "-f": "raw", "--field": "typed", "-F": "typed", "--input": "file", "--method": "skip", "-X": "skip", "--header": "skip", "-H": "skip", "--jq": "skip", "-q": "skip", "--template": "skip", "-t": "skip", "--hostname": "skip", "--cache": "skip", "--preview": "skip", "-p": "skip" };
+const API_SWITCHES = "i";
 
 export interface Read {
   /** What findSecrets reads. */
@@ -65,30 +100,60 @@ function stringsOf(text: string): string[] {
 }
 
 /**
- * The texts of a command that writes (title, body, fields), or null for a command the check lets through unread:
- * a read, an interactive write with no text on the command line, anything that is not an Issue / pull request /
- * API call. `gh api` is read whatever its method: a field is a text on its way to GitHub. `read` gives the text of
- * a file (`-` is the standard input), or null when it cannot be read — gh then says so in its own words.
+ * Where the subcommand stands, found as gh (cobra) finds it: the first argument that is neither a flag nor the value of
+ * one. A flag before the subcommand has its value in the next argument unless it is written `--flag=value` or `-xvalue`,
+ * so in `issue --body close create` the subcommand is `create`. -1 when there is none.
  */
-export function bodiesOf(argv: string[], read: (path: string) => string | null): Read[] | null {
+function subcommandAt(argv: string[], group: number): number {
+  for (let i = group + 1; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (!a.startsWith("-")) return i;
+    if ((a.startsWith("--") && !a.includes("=")) || a.length === 2) i++;
+  }
+  return -1;
+}
+
+/**
+ * The texts of a command that writes (title, body, fields), or null for a command the check lets through unread:
+ * a read, an interactive write with no text on the command line, anything that is not an Issue / pull request
+ * write (closing comment and merge commit included), release title and notes, gist, or API call. `gh api` is read whatever its method: a field is a text on its way to GitHub. `read` gives the text of
+ * a file (`-` is the standard input), or null when it cannot be read — gh then says so in its own words.
+ * `stdinPiped`: the standard input is not a terminal, so `gist create` with no file reads it.
+ */
+export function bodiesOf(argv: string[], read: (path: string) => string | null, stdinPiped = false): Read[] | null {
   const group = argv.findIndex((a) => !a.startsWith("-"));
   if (group < 0) return null;
   const api = argv[group] === "api";
-  if (!api && !(argv[group]! in WRITES)) return null;
-  const flags: Record<string, string> = api ? API_FLAGS : ISSUE_FLAGS;
-  const sub = api ? undefined : argv.slice(group + 1).find((a) => WRITES[argv[group]!]!.includes(a));
-  const switches = SWITCHES[api ? "api" : `${argv[group]} ${sub}`] ?? "";
+  let flags: Record<string, string> = API_FLAGS;
+  let switches = API_SWITCHES;
+  let positional: "files" | "source" | undefined;
+  const subAt = api ? -1 : subcommandAt(argv, group);
+  if (!api) {
+    const subs = Object.hasOwn(COMMANDS, argv[group]!) ? COMMANDS[argv[group]!]! : {};
+    const sub = argv[subAt];
+    if (sub === undefined || !Object.hasOwn(subs, sub)) return null;
+    ({ flags, switches, positional } = subs[sub]!);
+  }
   const reads: Read[] = [];
-  let write = api;
   const file = (path: string, index: number, prefix: string) => {
     const text = read(path);
     if (text !== null) reads.push(...(api ? stringsOf(text) : [text]).map((t) => ({ text: t, from: { index, path, prefix } })));
   };
+  let args = 0;
+  // after `--` gh reads no more flags: every argument is positional, even one that starts with `-`
+  let flagsEnd = false;
   for (let i = group + 1; i < argv.length; i++) {
-    const f = flagOf(argv[i]!, flags, switches);
+    const f = flagsEnd ? null : flagOf(argv[i]!, flags, switches);
     if (f === null) {
-      // the subcommand by its name wherever it stands (a flag this table does not know may come before it)
-      if (!api && WRITES[argv[group]!]!.includes(argv[i]!)) write = true;
+      if (!flagsEnd && argv[i] === "--" && i > subAt) {
+        flagsEnd = true;
+        continue;
+      }
+      // an argument after the subcommand that is not a flag: the files of a gist (the id first for `edit`)
+      if (positional !== undefined && i > subAt && (flagsEnd || argv[i] === "-" || !argv[i]!.startsWith("-"))) {
+        args++;
+        if (positional === "files" || args === 2) file(argv[i]!, i, "");
+      }
       continue;
     }
     const attached = f.value !== undefined;
@@ -107,7 +172,12 @@ export function bodiesOf(argv: string[], read: (path: string) => string | null):
       else reads.push({ text: v });
     }
   }
-  return !write || reads.length === 0 ? null : reads;
+  // `gist create` with no file sends what is piped to it; gh reads the standard input itself, so no argument is replaced
+  if (positional === "files" && args === 0 && stdinPiped) {
+    const text = read("-");
+    if (text !== null) reads.push({ text });
+  }
+  return reads.length === 0 ? null : reads;
 }
 
 /** The first `name` of the PATH that is not a guard: not this file, and not another checkout's copy of it (it holds `mark`). */

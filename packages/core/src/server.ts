@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
-import { AskAnswerInput, AutoStartKind, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, InboxAddInput, InboxCloseInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PermissionAnswers, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskList, type Backlog, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type Workspace, type WorkspaceRemoval } from "@switchboard/protocol";
+import { AskAnswerInput, AutoStartKind, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, InboxAddInput, InboxCloseInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PermissionAnswers, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskList, type Backlog, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type Workspace, type WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
 import type { CoreConfig } from "./config.ts";
 import { abortOrphanedTasks, Db, type ApiRequestRow } from "./db.ts";
 import { opsLatency } from "./ops-latency.ts";
@@ -652,6 +652,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   };
   /** Why `backlog.settle` failed, for a line in backlog-next's log (#2264). */
   const notSettled = (e: unknown) => (e instanceof BacklogError ? e.message : String((e as Error)?.message ?? e).slice(0, 200));
+  /** A Task's screen mockups (#2221, #2296): its HTML artifacts, not removed; none for a Task that does not exist. */
+  const mockupsOf = (id: string) => artifacts.list(id).filter((a) => a.removedAt === null && a.kind !== "url" && (a.mime === "text/html" || a.mime === "application/xhtml+xml"));
   const withActive = (b: Backlog): Backlog => ({
     ...b,
     items: b.items.map((i) => {
@@ -665,6 +667,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         activeTaskId: activeStageTask(i.workspaceId, i.number)?.id ?? null,
         lastTask: t ? { id: t.id, status: t.status, statusAt: t.statusAt, createdAt: t.createdAt, updatedAt: t.updatedAt, action: t.stage?.action ?? null, outcome: t.outcome, reviewedAt: t.reviewedAt, resumeAt: t.resumeAt } : null,
         stopSummary: reduceStops(db.listStopRecords(db.stageTaskIds(i.workspaceId, i.number))),
+        mockups: i.mockupTask ? mockupsOf(i.mockupTask) : [],
         ...(old ? { waits: [], waitsAt: null } : {}),
       };
     }),
@@ -744,8 +747,6 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const b = await readBacklog(false);
     const live = new Map([...db.listTasksUpdatedSince(now - ASK_HISTORY_MS), ...db.listTasksWithResume(), ...db.listTasksByStatus("waiting"), ...db.listTasksByStatus("running")].map((t) => [t.id, t]));
     const policy = policyEnv(b);
-    // the screen mockups a question names (#2221): its Task's HTML artifacts, not removed
-    const mockups = (id: string) => artifacts.list(id).filter((a) => a.removedAt === null && a.kind !== "url" && (a.mime === "text/html" || a.mime === "application/xhtml+xml"));
     const fromTasks = asksFromTasks({
       approvals: tasks.pendingApprovals(),
       tasks: [...live.values()],
@@ -756,9 +757,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       now,
       resumeFailures: failed,
       policy,
-      mockups,
+      mockups: mockupsOf,
     });
-    const all = dedupeAsks([...asksFromBacklog(b.items, now, { approvalPending: approvalPendingOf(), resumeFailures: failed, policy, mockups }), ...fromTasks]);
+    const all = dedupeAsks([...asksFromBacklog(b.items, now, { approvalPending: approvalPendingOf(), resumeFailures: failed, policy, mockups: mockupsOf }), ...fromTasks]);
     tieAnswers(all);
     for (const id of headMisses.keys()) if (!all.some((a) => a.id === id && (a.state === "open" || a.state === "held"))) headMisses.delete(id);
     return { backlog: b, asks: all.map((a) => (headMisses.has(a.id) ? { ...a, policy: { ...a.policy, previous: headMisses.get(a.id)! } } : a)) };
@@ -1125,12 +1126,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   tasks.onTaskEnd(promoteWhenIdle);
   /**
    * One backlog-next firing (#267, #561): for every registered workspace and each of its two slots (implement / plan),
-   * start the slot's next item while fewer stage Tasks of that slot run there than the setting backlogSweep allows (read
-   * per firing). While the usage of the runner it starts them on is high, one stage Task at most runs anywhere; while the newest tag waits to be
+   * start the slot's next item while fewer stage Tasks of that slot run there than the workspace's own slots allow
+   * (`Workspace.sweep`, #2656; read per firing). While the usage of the runner it starts them on is high, one stage Task at most runs anywhere; while the newest tag waits to be
    * promoted, nothing starts anywhere.
    */
   const startNext = async (scheduleId: string): Promise<BacklogNextResult> => {
-    const slots: Record<Slot, number> = settings().backlogSweep;
     const started: BacklogNextResult["started"] = [];
     const skipped: string[] = [];
     const meta = metaWorkspace();
@@ -1175,7 +1175,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const SLOT_NAME: Record<Slot, string> = { implement: "実装の枠", plan: "計画の枠" };
     // read every workspace that has a free slot in parallel (#441); one GitHub cannot be read for goes on with what is stored (#2264)
     const read = await Promise.all(db.listWorkspaces().map(async (ws) => {
-      if (!SLOTS.some((slot) => busy(ws.id, slot).length < slots[slot])) return { ws, items: [] as BacklogItem[], syncHeld: [] as string[], unsynced: null };
+      if (!SLOTS.some((slot) => busy(ws.id, slot).length < ws.sweep[slot])) return { ws, items: [] as BacklogItem[], syncHeld: [] as string[], unsynced: null };
       if (!existsSync(ws.path)) return { ws, error: "workspace directory does not exist" };
       // the stored data is what is true (#2264): GitHub is brought up to date first when it can be reached, and when it
       // cannot (a limit, an outage) the workspace goes on with what is stored; only an Issue with a conflict is not picked
@@ -1197,8 +1197,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         // checked again after GitHub was read: a button may have started a stage meanwhile
         for (let n = 0; ; n++) {
           const running = busy(ws.id, slot);
-          if (running.length >= slots[slot]) {
-            if (slots[slot] > 0 && n === 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}が埋まっている: ${running.join(" / ")}`);
+          if (running.length >= ws.sweep[slot]) {
+            if (ws.sweep[slot] > 0 && n === 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}が埋まっている: ${running.join(" / ")}`);
             break;
           }
           const slotHeld = BacklogAction.options.filter((a) => SLOT_OF_ACTION[a] === slot).map(quotaHeld);
@@ -1883,8 +1883,6 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
               next.autoStart.byKind[kind] = choice;
             }
           }
-          // backlog-next's slots (#561): read by each firing, so the next one uses them
-          if (parsed.data.backlogSweep) next.backlogSweep = { ...next.backlogSweep, ...parsed.data.backlogSweep };
           // The tunables (#835): a partial patch over the saved group, null = the whole group back to the defaults.
           // Read on every use, so the next use takes the new value without a restart.
           const defaults = tunableDefaults();
@@ -2262,7 +2260,17 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         PATCH: async (req) => {
           const id = String(req.params.id);
           if (!db.getWorkspace(id)) return bad("not found", 404);
-          const body = await readJson(req, (x) => x as { projectVar?: unknown; backlog?: unknown });
+          const body = await readJson(req, (x) => x as { projectVar?: unknown; backlog?: unknown; sweep?: unknown });
+          // backlog-next's slots (#2656): on their own, read from the next firing
+          if (body.sweep !== undefined) {
+            if (body.projectVar !== undefined || body.backlog !== undefined) return bad("sweep is changed on its own");
+            const sweep = WorkspaceSweep.partial().strict().safeParse(body.sweep);
+            if (!sweep.success) return bad("sweep: implement / plan must be integers 0〜3");
+            const ws = db.setWorkspaceSweep(id, sweep.data);
+            if (!ws) return bad("not found", 404); // removed while the body was read
+            broadcast({ type: "workspaces.updated" });
+            return json(ws);
+          }
           if (body.backlog === "github") {
             const source = db.getWorkspaceBacklogSource(id);
             // on already (or a GitHub one never imported): nothing to do

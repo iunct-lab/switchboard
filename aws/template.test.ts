@@ -16,6 +16,15 @@ function resource(name: string): string {
   return next < 0 ? rest : rest.slice(0, next + 1);
 }
 
+/** One VPC origin inside the `Fn::ForEach::Edge` loop (#465): from its `<name>${Gen}:` key to the next key at that indent. */
+function edgeOrigin(name: string): string {
+  const start = text.indexOf(`${name}\${Gen}:\n`);
+  if (start < 0) throw new Error(`no origin ${name}`);
+  const rest = text.slice(start);
+  const next = rest.slice(1).search(/\n {4,6}[A-Za-z][A-Za-z]*\$\{Gen\}:|\n {2}[A-Za-z]/);
+  return next < 0 ? rest : rest.slice(0, next + 1);
+}
+
 /** The instance role's ssm:GetParameter statement, as text. */
 function hostSsmStatement(): string {
   const role = resource("InstanceRole");
@@ -30,7 +39,7 @@ function hostParams(): Set<string> {
 
 describe("aws/template.yaml (#229)", () => {
   test("has the resources the host needs", () => {
-    for (const r of ["Data", "Sg", "RescueSg", "Boundary", "InstanceRole", "InstanceProfile", "LaunchTemplate", "Instance", "SchedulerRole", "StartPage", "StartPageAccess", "HostVpcOrigin4", "RescueVpcOrigin4", "Cdn", "Starter", "DeployRole", "GitHubOidcRole", "BudgetLow", "BudgetHigh"]) {
+    for (const r of ["Data", "Sg", "RescueSg", "Boundary", "InstanceRole", "InstanceProfile", "LaunchTemplate", "Instance", "SchedulerRole", "StartPage", "StartPageAccess", "Cdn", "Starter", "DeployRole", "GitHubOidcRole", "BudgetLow", "BudgetHigh"]) {
       expect(text).toContain(`\n  ${r}:\n`);
     }
     for (const o of ["Origin", "InstanceId", "DataBucket", "StarterUrl", "OidcRoleArn"]) expect(text).toMatch(new RegExp(`\\n  ${o}:\\n    Value:`));
@@ -105,14 +114,35 @@ describe("aws/template.yaml (#229)", () => {
     expect(cdn).not.toContain("PublicDnsName");
     // the only custom origin is the Starter's Function URL (#211), over https only
     expect(cdn.match(/CustomOriginConfig: \{[^}]*\}/g)).toEqual(["CustomOriginConfig: { OriginProtocolPolicy: https-only, OriginSSLProtocols: [TLSv1.2] }"]);
-    expect(cdn.match(/VpcOriginConfig: \{ VpcOriginId: !GetAtt (Host|Rescue)VpcOrigin4\.Id/g)).toHaveLength(2);
+    expect(cdn.match(/VpcOriginConfig: \{ VpcOriginId: !GetAtt \[!Sub '(Host|Rescue)VpcOrigin\$\{LaunchGeneration\}', Id\]/g)).toHaveLength(2);
     expect(cdn.match(/ConnectionAttempts: 1/g)).toHaveLength(2); // a stopped host falls through to the start page quickly
-    for (const o of ["HostVpcOrigin4", "RescueVpcOrigin4"]) {
-      const r = resource(o);
+    for (const o of ["HostVpcOrigin", "RescueVpcOrigin"]) {
+      const r = edgeOrigin(o);
       expect(r).toContain("Arn: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Instance}'");
       expect(r).not.toContain("InstanceGeneration"); // an origin in use cannot be replaced by a rename (re-review #338)
     }
     expect(resource("InstanceRole")).not.toContain("cloudfront:"); // nothing on the host rewrites the distribution (only the Starter does, #1639)
+  });
+
+  test("VPC origins take their logical ids from LaunchGeneration, so a launch template change creates new ones (#465)", () => {
+    // LanguageExtensions before Serverless (CloudFormation's order); Fn::ForEach is the only way to a logical id from a parameter
+    expect(text).toStartWith("AWSTemplateFormatVersion: '2010-09-09'\nTransform: [AWS::LanguageExtensions, AWS::Serverless-2016-10-31]\n");
+    // the default is the generation the stack has now: this change alone creates and deletes no origin
+    expect(text).toMatch(/\n {2}LaunchGeneration:\n {4}Type: String\n {4}Default: '4'\n {4}AllowedPattern: '\[0-9\]\+'\n/);
+    const loop = text.slice(text.indexOf("\n  Fn::ForEach::Edge:\n"), text.indexOf("\n  Cdn:\n"));
+    expect(loop).toStartWith("\n  Fn::ForEach::Edge:\n    - Gen\n    - [!Ref LaunchGeneration]\n");
+    expect(loop).toContain("\n    - HostVpcOrigin${Gen}:\n");
+    expect(loop).toContain("\n      RescueVpcOrigin${Gen}:\n");
+    expect(edgeOrigin("HostVpcOrigin")).toContain("Name: !Sub '${AWS::StackName}-host-${Gen}'");
+    expect(edgeOrigin("RescueVpcOrigin")).toContain("Name: !Sub '${AWS::StackName}-rescue-${Gen}'");
+    // Cdn keeps its logical id (a loop's keys must carry the identifier, so it stays outside and finds them by the parameter)
+    expect(text).toContain("\n  Cdn:\n    Type: AWS::CloudFront::Distribution\n");
+    expect(text).not.toMatch(/VpcOrigin[0-9]/);
+    // every role that creates the change set may run both transforms
+    for (const r of ["Boundary", "DeployRole", "GitHubOidcRole"]) {
+      const body = r === "Boundary" ? text.slice(text.indexOf("\n  Boundary:\n"), text.indexOf("\n  InstanceRole:\n")) : resource(r);
+      expect(body).toContain("!Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/LanguageExtensions'");
+    }
   });
 
   test("the Spot request is persistent (stop on interruption); nothing automatic terminates the instance or cancels the request (re-review #338)", () => {
@@ -209,15 +239,15 @@ describe("aws/template.yaml (#229)", () => {
     expect(text.match(/Action: sts:AssumeRole\n/g)).toHaveLength(2);
   });
 
-  test("UpdateStack on the SAM template may create the transform's change set (review #344)", () => {
-    expect(resource("GitHubOidcRole")).toContain("Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31'");
+  test("UpdateStack on the SAM template may create the transforms' change set (review #344, #465)", () => {
+    expect(resource("GitHubOidcRole")).toContain("Resource: [!Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31', !Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/LanguageExtensions']");
     // Describe has no resource-level permissions: never behind a tag condition
     expect(resource("GitHubOidcRole")).toMatch(/Action: ec2:DescribeInstances\n {16}Resource: '\*'\n(?! {16}Condition)/);
   });
 
-  test("DeployRole may create the SAM transform's change set and nothing else in CloudFormation (#759)", () => {
+  test("DeployRole may create the transforms' change set and nothing else in CloudFormation (#759, #465)", () => {
     const deploy = resource("DeployRole");
-    expect(deploy).toContain("- Effect: Allow\n                Action: cloudformation:CreateChangeSet\n                Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31'");
+    expect(deploy).toContain("- Effect: Allow\n                Action: cloudformation:CreateChangeSet\n                Resource: [!Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31', !Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/LanguageExtensions']");
     // every action, wildcards too; not the condition keys or ARNs (aws:cloudformation:…)
     expect([...deploy.matchAll(/(?<!aws:)cloudformation:[^\s,\]']+/g)].map((m) => m[0])).toEqual(["cloudformation:CreateChangeSet"]);
   });

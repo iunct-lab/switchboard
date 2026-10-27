@@ -13,7 +13,7 @@ import { main as opsKit } from "../../../ops-kit/src/cli.ts";
 import { fakeGh as fakeKitGh } from "../../../ops-kit/src/gh.ts";
 import { ghBoard, overlap, storedMaterial } from "../../../scripts/parallel-guard.ts";
 import { fmtTime } from "./ratelimit.ts";
-import { buildStartPrompt, canStartStoredBacklog, confirmationsOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, replyWaitingIn, stopHeld } from "./backlog.ts";
+import { buildStartPrompt, canStartStoredBacklog, confirmationsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, replyWaitingIn, stopHeld } from "./backlog.ts";
 
 // the writer of the waits (#817), read at run time: scripts/ is not type-checked under core's settings
 const guard = "../../../scripts/parallel-guard.ts";
@@ -1541,7 +1541,7 @@ test("start: the prompt says to read the newest ## 回答 first", async () => {
 });
 
 const item = (over: Partial<BacklogItem>): BacklogItem => ({
-  number: 1, title: "t", url: "u", type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
+  number: 1, title: "t", url: "u", type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
 
 test("pickNext: Ready before 分解待ち before 要望, then Priority (none last), then the oldest; skips decisions and running items", () => {
@@ -1713,7 +1713,7 @@ test("backlog-next stalled: the closable #307 is closed and #305, unmoved since 
   const base = await boot(fake.gh, claude.adapter);
   const id = await backlogNextSchedule(base);
   // implement 2: one firing would take both if both could go
-  expect((await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ backlogSweep: { implement: 2, plan: 0 } }) })).status).toBe(200);
+  expect((await sweepAll(base, { implement: 2, plan: 0 })).status).toBe(200);
   expect((await runSchedule(base, id)).status).toBe(201);
   expect(core!.db.listTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#304 実装", "#307 閉じる"]);
   const log = await scheduleLogAll(base);
@@ -1857,7 +1857,7 @@ describe("backlog-next prerequisite (#937)", () => {
     return gh;
   }
   const closedIssue = (stateReason: string) => ({ __typename: "Issue", state: "CLOSED", stateReason, labels: { nodes: [{ name: "type:pbi" }] } });
-  const slots = (base: string, implement: number) => fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ backlogSweep: { implement, plan: 0 } }) });
+  const slots = (base: string, implement: number) => sweepAll(base, { implement, plan: 0 });
   const implementing = (n: number) => core!.db.listTasks().filter((t) => t.title.startsWith(`#${n} 実装: `));
 
   test("A→B and independent C: B and C start, A is logged as waiting on B; once B is done the next firing starts A once", async () => {
@@ -2660,14 +2660,20 @@ test("backlog-next: the unattended stage Task gets no shadow and carries the sch
 });
 
 /** A fake gh for the meta workspace and two more (lib, app), each its own repository; `broken` answers 404 for every call. */
-async function threeWorkspaces(adapter: RunnerAdapter, broken?: "lib") {
-  const ok = fakeGh();
+/** backlog-next's slots (#2656) of every registered workspace, through the API; the last response. */
+async function sweepAll(base: string, sweep: { implement?: number; plan?: number }): Promise<Response> {
+  let r: Response | undefined;
+  for (const w of core!.db.listWorkspaces()) r = await fetch(`${base}/api/workspaces/${w.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ sweep }) });
+  return r!;
+}
+
+async function threeWorkspaces(adapter: RunnerAdapter, broken?: "lib", inner: GhRunner = fakeGh().gh) {
   const dirs: Record<string, string> = {};
   const gh: GhRunner = async (args, cwd) => {
     const name = Object.keys(dirs).find((k) => dirs[k] === cwd);
     if (name && name === broken) return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
     if (name && args[0] === "repo") return { code: 0, stdout: `acme/${name}\n`, stderr: "" };
-    return ok.gh(args, cwd);
+    return inner(args, cwd);
   };
   const base = await boot(gh, adapter);
   const ids: Record<string, string> = { switchboard: core!.db.listWorkspaces().find((w) => w.kind === "meta")!.id };
@@ -2706,7 +2712,7 @@ test("backlog-next slots: one firing starts an implement and a plan stage Task o
   expect(again.filter((l) => l.includes("の枠が埋まっている"))).toHaveLength(6);
 });
 
-test("backlog-next slots: the setting backlogSweep applies from the next firing — implement 2 starts two implementations on one workspace, plan 0 none", async () => {
+test("backlog-next slots: the workspace's sweep applies from the next firing — implement 2 starts two implementations on one workspace, plan 0 none", async () => {
   // a second Ready PBI (#309, a copy of #304) on the first page
   const page = structuredClone(pages[0]) as { data: { repository: { issues: { nodes: RawBacklogIssue[] } } } };
   const nodes = page.data.repository.issues.nodes;
@@ -2720,7 +2726,7 @@ test("backlog-next slots: the setting backlogSweep applies from the next firing 
     : args[0] === "api" && !args.includes("after=CURSOR1") ? { code: 0, stdout: JSON.stringify(page), stderr: "" } : ok.gh(args, cwd);
   const base = await boot(gh, holdingClaude().adapter);
   closeTried();
-  const settings = (body: unknown) => fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ backlogSweep: body }) });
+  const settings = (body: { implement?: number; plan?: number }) => sweepAll(base, body);
   const id = await backlogNextSchedule(base);
   // plan 0 with no plan Task running: #303 waits to be split, yet no plan Task starts, and the log says nothing of that slot
   expect((await settings({ implement: 1, plan: 0 })).status).toBe(200);
@@ -2737,6 +2743,27 @@ test("backlog-next slots: the setting backlogSweep applies from the next firing 
   expect((await settings({ plan: 1 })).status).toBe(200);
   expect((await runSchedule(base, id)).status).toBe(201);
   expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#303 Task に分解", "#304 実装", "#309 実装"]);
+});
+
+test("backlog-next slots per workspace (#2656): lib implement 2 starts two, app and meta at implement 0 start none and log no slot line", async () => {
+  const { base, ids } = await threeWorkspaces(holdingClaude().adapter, undefined, moreReadyGh(309));
+  closeTried(...Object.values(ids));
+  const meta = core!.db.listWorkspaces().find((w) => w.kind === "meta")!;
+  const patch = (ws: string, sweep: unknown) => fetch(`${base}/api/workspaces/${ws}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ sweep }) });
+  expect((await patch(ids.lib!, { implement: 2, plan: 0 })).status).toBe(200);
+  for (const ws of [ids.app!, meta.id]) expect((await patch(ws, { implement: 0, plan: 0 })).status).toBe(200);
+  const id = await backlogNextSchedule(base);
+  expect((await runSchedule(base, id)).status).toBe(201);
+  const tasks = startedTasks();
+  expect(tasks.filter((t) => t.workspaceId === ids.lib).map((t) => t.title.split(":")[0]).sort()).toEqual(["#304 実装", "#309 実装"]);
+  expect(tasks.filter((t) => t.workspaceId !== ids.lib)).toHaveLength(0);
+  const log = await scheduleLogAll(base);
+  expect(log.some((l) => l.includes("app:") || l.includes(`${meta.name}:`))).toBe(false);
+  // lib's slot is full now: the next firing names it there only
+  expect((await runSchedule(base, id)).status).toBe(409);
+  const again = await scheduleLog(base);
+  expect(again).toContain("lib: 実装の枠が埋まっている");
+  expect(again.includes("app:") || again.includes(`${meta.name}:`)).toBe(false);
 });
 
 /** The fixtures' gh with more Ready PBIs on the first page: copies of #304 numbered `numbers`, with no comments. */
@@ -2762,7 +2789,8 @@ test("start race: a button start in progress and a backlog-next firing on the sa
   const slow: Suggester = { suggest: async () => (await Bun.sleep(50), { runner: "claude", reason: "slow", ruleId: "llm", available: true, alternatives: [], llm: null }) };
   const base = await boot(fakeGh().gh, holdingClaude().adapter, {}, () => slow);
   closeTried();
-  await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ routing: { llm: { enabled: true } }, backlogSweep: { implement: 2, plan: 1 } }) });
+  await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ routing: { llm: { enabled: true } } }) });
+  await sweepAll(base, { implement: 2, plan: 1 });
   const id = await backlogNextSchedule(base);
   const button = start(base, 304, { action: "complete" });
   await Bun.sleep(20); // the button's routing turn is still thinking: no Task row yet
@@ -2782,7 +2810,8 @@ test("start race: a firing skips an item whose stage Task started after GitHub w
   } };
   const base = await boot(moreReadyGh(309, 310), holdingClaude().adapter, {}, () => routing);
   closeTried();
-  await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ routing: { llm: { enabled: true } }, backlogSweep: { implement: 3, plan: 0 } }) });
+  await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ routing: { llm: { enabled: true } } }) });
+  await sweepAll(base, { implement: 3, plan: 0 });
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
   expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#304 実装", "#309 実装", "#310 実装"]);
@@ -3583,4 +3612,48 @@ test("GET /api/backlog/records (#919): lint and the parallel guard read the stor
   const libId = ((await (await fetch(`${base}/api/workspaces`, { method: "POST", body: JSON.stringify({ path: lib, name: "lib" }) })).json()) as { id: string }).id;
   expect((await fetch(`${base}/api/backlog/records?workspaceId=${libId}`)).status).toBe(409);
   expect((await fetch(`${base}/api/backlog/records?workspaceId=nope`)).status).toBe(404);
+});
+
+describe("GET /api/backlog — mockups (#2296)", () => {
+  test("mockupTaskOf: the first **画面イメージ** line outside fences, its first id; a full-width colon too", () => {
+    expect(mockupTaskOf("## 元要望\n#1\n\n**Story Points**: 5\n**前提**: なし\n**画面イメージ**: task_1105031b45fa（Backlog の行）\n")).toBe("task_1105031b45fa");
+    expect(mockupTaskOf("**画面イメージ**：tsk-a\n**画面イメージ**: tsk_b")).toBe("tsk-a");
+    expect(mockupTaskOf("```\n**画面イメージ**: tsk_in_fence\n```\n")).toBeNull();
+    expect(mockupTaskOf("```\n**画面イメージ**: tsk_in_fence\n```\n**画面イメージ**: tsk_out")).toBe("tsk_out");
+    expect(mockupTaskOf("**画面イメージ**: \n")).toBeNull();
+    expect(mockupTaskOf("本文だけ")).toBeNull();
+  });
+
+  test("a PBI naming a Task gives its HTML artifacts, not a removed one nor a text one; none for no line, an unknown Task, a request", async () => {
+    const nodes = (pages as Array<{ data: { repository: { issues: { nodes: Array<{ number: number; body: string }> } } } }>).flatMap((p) => p.data.repository.issues.nodes);
+    const saved = new Map(nodes.map((n) => [n.number, n.body]));
+    const line = (n: number, id: string) => (nodes.find((x) => x.number === n)!.body += `\n**画面イメージ**: ${id}\n`);
+    line(304, "tsk_mock");
+    line(305, "tsk_nowhere");
+    line(302, "tsk_mock");
+    try {
+      const base = await boot(fakeGh().gh);
+      const at = Date.now() - 60_000;
+      core!.db.insertTask({ id: "tsk_mock", workspaceId: metaId(), title: "mockups", stage: null, runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, statusAt: at, createdAt: at, updatedAt: at });
+      const add = async (name: string, body: string, title: string) => {
+        writeFileSync(join(home!, name), body);
+        const r = await fetch(`${base}/api/tasks/tsk_mock/artifacts`, { method: "POST", body: JSON.stringify({ source: join(home!, name), title }) });
+        expect(r.status).toBe(201);
+        return (await r.json()) as { id: string };
+      };
+      const a = await add("a.html", "<p>A</p>", "画面イメージ: 行の下");
+      const b = await add("b.html", "<p>B</p>", "画面イメージ: 消した案");
+      await add("notes.txt", "text", "メモ");
+      expect((await fetch(`${base}/api/artifacts/${b.id}`, { method: "DELETE" })).status).toBe(200);
+      const items = ((await (await fetch(`${base}/api/backlog`)).json()) as Backlog).items;
+      const of = (n: number) => items.find((i) => i.number === n)!;
+      expect(of(304).mockupTask).toBe("tsk_mock");
+      expect(of(304).mockups.map((m) => [m.id, m.title, m.mime])).toEqual([[a.id, "画面イメージ: 行の下", "text/html"]]);
+      expect(of(305)).toMatchObject({ mockupTask: "tsk_nowhere", mockups: [] });
+      expect(of(302)).toMatchObject({ type: "request", mockupTask: null, mockups: [] });
+      expect(of(303)).toMatchObject({ mockupTask: null, mockups: [] });
+    } finally {
+      for (const n of nodes) n.body = saved.get(n.number)!;
+    }
+  });
 });

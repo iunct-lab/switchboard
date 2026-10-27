@@ -2,7 +2,7 @@ import { CloudSessionRef, HumanEval, JudgeEval, RuleEval, SizeClass } from "@swi
 import { Database } from "bun:sqlite";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import type { AgentEvent, AskAnswerResult, Artifact, Attachment, BacklogAction, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogRepositorySync, BacklogSource, CheckRun, EvalSource, EvalsListRow, EventEnvelope, HistorySession, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerRow, LedgerSummary, LedgerTaskRow, LoadKind, Journey, PerfSample, PerfSummaryRow, ReportRow, RoutingLogRow, RoutingStats, RunnerId, RunnerStats, Schedule, StagedChange, StopRecord, Task, TaskEvals, TaskOrigin, TaskOutcome, TaskStatus, Workspace } from "@switchboard/protocol";
+import type { AgentEvent, AskAnswerResult, Artifact, Attachment, BacklogAction, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogRepositorySync, BacklogSource, CheckRun, EvalSource, EvalsListRow, EventEnvelope, HistorySession, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerRow, LedgerSummary, LedgerTaskRow, LoadKind, Journey, PerfSample, PerfSummaryRow, ReportRow, RoutingLogRow, RoutingStats, RunnerId, RunnerStats, Schedule, StagedChange, StopRecord, Task, TaskEvals, TaskOrigin, TaskOutcome, TaskStatus, Workspace, WorkspaceSweep } from "@switchboard/protocol";
 import { teleportWorktreePath } from "./config.ts";
 import { MAX_STOP_RESUMES, planResumeAfterStop } from "./interrupted.ts";
 import { canTransition, InvalidTaskTransitionError, outcomeOnStatus } from "./task-status.ts";
@@ -292,13 +292,13 @@ export class Db {
   }
 
   /** `backlog` is not stored as such: it is read from the workspace's backlog source (#2265, setWorkspaceBacklogSource). */
-  upsertWorkspace(ws: Omit<Workspace, "id" | "createdAt" | "backlog"> & { id?: string }): Workspace {
+  upsertWorkspace(ws: Omit<Workspace, "id" | "createdAt" | "backlog" | "sweep"> & { id?: string }): Workspace {
     const existing = this.sqlite.query("SELECT * FROM workspaces WHERE path = ?").get(ws.path);
     if (existing) {
       this.sqlite.query("UPDATE workspaces SET name = ?, kind = ? WHERE path = ?").run(ws.name, ws.kind, ws.path);
       return rowToWorkspace(this.sqlite.query("SELECT * FROM workspaces WHERE path = ?").get(ws.path));
     }
-    const row: Workspace = { id: ws.id ?? newId("ws"), name: ws.name, path: ws.path, kind: ws.kind, createdAt: Date.now(), backlog: "github" };
+    const row: Workspace = { id: ws.id ?? newId("ws"), name: ws.name, path: ws.path, kind: ws.kind, createdAt: Date.now(), backlog: "github", sweep: { implement: 1, plan: 1 } };
     this.sqlite.query("INSERT INTO workspaces (id, name, path, kind, created_at) VALUES (?, ?, ?, ?, ?)").run(row.id, row.name, row.path, row.kind, row.createdAt);
     return row;
   }
@@ -310,6 +310,15 @@ export class Db {
    */
   setWorkspaceProjectVar(id: string, name: string | null): Workspace | null {
     this.sqlite.query("UPDATE workspaces SET project_var = ?, backlog_source = NULL WHERE id = ?").run(name, id);
+    return this.getWorkspace(id);
+  }
+
+  /** backlog-next's slots of the workspace (#2656); a side not given stays as it is. */
+  setWorkspaceSweep(id: string, patch: Partial<WorkspaceSweep>): Workspace | null {
+    const ws = this.getWorkspace(id);
+    if (!ws) return null;
+    const next = { ...ws.sweep, ...patch };
+    this.sqlite.query("UPDATE workspaces SET sweep_implement = ?, sweep_plan = ? WHERE id = ?").run(next.implement, next.plan, id);
     return this.getWorkspace(id);
   }
 
@@ -1555,6 +1564,20 @@ function migrate(db: Database) {
   const wsCols = new Set((db.query("PRAGMA table_info(workspaces)").all() as Array<{ name: string }>).map((c) => c.name));
   if (!wsCols.has("project_var")) db.exec("ALTER TABLE workspaces ADD COLUMN project_var TEXT");
   if (!wsCols.has("backlog_source")) db.exec("ALTER TABLE workspaces ADD COLUMN backlog_source TEXT");
+  // #2656: backlog-next's slots move from the one setting backlogSweep to every workspace, once
+  if (!wsCols.has("sweep_implement")) {
+    db.transaction(() => {
+      db.exec("ALTER TABLE workspaces ADD COLUMN sweep_implement INTEGER NOT NULL DEFAULT 1");
+      db.exec("ALTER TABLE workspaces ADD COLUMN sweep_plan INTEGER NOT NULL DEFAULT 1");
+      const r = db.query("SELECT json FROM settings WHERE key = 'settings'").get() as { json: string } | null;
+      const settings = r ? safeJson<Record<string, unknown>>(r.json, {}) : {};
+      const old = settings.backlogSweep as Partial<WorkspaceSweep> | undefined;
+      if (!old) return;
+      db.query("UPDATE workspaces SET sweep_implement = ?, sweep_plan = ?").run(old.implement ?? 1, old.plan ?? 1);
+      delete settings.backlogSweep;
+      db.query("UPDATE settings SET json = ? WHERE key = 'settings'").run(JSON.stringify(settings));
+    })();
+  }
   const logCols = new Set((db.query("PRAGMA table_info(routing_log)").all() as Array<{ name: string }>).map((c) => c.name));
   // Rows written before #25 are all rule-table suggestions, which is what the default says.
   if (!logCols.has("suggested_by")) db.exec("ALTER TABLE routing_log ADD COLUMN suggested_by TEXT NOT NULL DEFAULT 'rule'");
@@ -1716,7 +1739,7 @@ function rowToWorkspace(r: any): Workspace {
   // (backlog.ts syncsGithub); none, or a GitHub one = github
   const source = r.backlog_source ? (JSON.parse(r.backlog_source) as BacklogSource) : null;
   const backlog = source && (source.service === "switchboard" || source.disabled) ? "switchboard" : "github";
-  return { id: r.id, name: r.name, path: r.path, kind: r.kind, createdAt: r.created_at, backlog, ...(r.project_var ? { projectVar: r.project_var } : {}) };
+  return { id: r.id, name: r.name, path: r.path, kind: r.kind, createdAt: r.created_at, backlog, sweep: { implement: r.sweep_implement, plan: r.sweep_plan }, ...(r.project_var ? { projectVar: r.project_var } : {}) };
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -29,5 +29,5 @@
   "staging": ["id","task_id","path","rel","kind","before_text","after_text","status","ts","decided_at","diff_text","stat"],
   "task_evals": ["task_id","source","by","rubric","json","ts"],
   "tasks": ["id","workspace_id","title","runner","cwd","scope","status","runner_session_id","model","routing","budget_usd","schedule_id","permission_mode","origin","resume_at","resume_reason","shadow_of","shadow_stopped","workspace_reason","created_at","updated_at","outcome","reviewed_at","judged_result","judged_reason","judged_by","execution_mode","cloud_session","source_cloud_task_id","effort","events_archive_key","events_archived_at","events_archived_count","events_archived_max_seq","stage_issue","stage_action","judging_at","status_at","archived_at","title_pending"],
-  "workspaces": ["id","name","path","kind","created_at","project_var","backlog_source"]
+  "workspaces": ["id","name","path","kind","created_at","project_var","backlog_source","sweep_implement","sweep_plan"]
 }
