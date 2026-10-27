@@ -44,7 +44,7 @@ import { checkLocalFields, checkLocalParent } from "./backlog-local.ts";
 import { enableGithubSync, enablingOf } from "./backlog-enable.ts";
 import { CloneError, parseGithubRepo, registerWorkspace, WorkspaceClones } from "./workspace-clone.ts";
 import { copyDeletable, inspectRemoval } from "./workspace-remove.ts";
-import { ACTION_FOR_STAGE, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, buildStartPrompt, failedIn, failedSince, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionStep, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, repoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, unchangedIn, heldIn, type GhRunner, type OtherRepo } from "./backlog.ts";
+import { ACTION_FOR_STAGE, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, buildStartPrompt, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionStep, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, repoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, unchangedIn, heldIn, type GhRunner, type OtherRepo } from "./backlog.ts";
 import { issueOf, reduceStops, stopRecordsFor } from "./stops.ts";
 import { ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, policyPbi, prFacts, resumeOfTask, type PolicyEnv, type PrFacts } from "./asks.ts";
 import { checkPolicy, matchPolicies, readPolicies, recordUse, subjectChanges, writePolicies } from "./policies.ts";
@@ -662,7 +662,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       // then it is not started again by itself. A 状況確認 only reads, so the newest 実装 is the one compared (#853)
       const impl = i.waitsAt ? db.lastStageTask(i.workspaceId, i.number, "complete") : null;
       const old = !!impl && impl.createdAt > Date.parse(i.waitsAt!);
-      return {
+      const item: BacklogItem = {
         ...i,
         activeTaskId: activeStageTask(i.workspaceId, i.number)?.id ?? null,
         lastTask: t ? { id: t.id, status: t.status, statusAt: t.statusAt, createdAt: t.createdAt, updatedAt: t.updatedAt, action: t.stage?.action ?? null, outcome: t.outcome, reviewedAt: t.reviewedAt, resumeAt: t.resumeAt } : null,
@@ -670,6 +670,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         mockups: i.mockupTask ? mockupsOf(i.mockupTask) : [],
         ...(old ? { waits: [], waitsAt: null } : {}),
       };
+      return { ...item, replyWaiting: isReplyWaiting(item) };
     }),
   });
   /** Every workspace's stored backlog with its stage Tasks (#885, withActive); `refresh` imports each first (GET /api/backlog). */

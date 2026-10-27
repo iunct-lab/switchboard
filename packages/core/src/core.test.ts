@@ -716,6 +716,11 @@ describe("core daemon", () => {
       const guard = `'${join(h, "it'\\''s checkout")}/ops-kit/bin/deny-shared-tmp'`;
       expect(starts.map((s) => s.guards)).toEqual([[guard], [guard]]);
       expect(starts.map((s) => s.privateTmp)).toEqual([undefined, undefined]); // Claude runs the guard instead
+      // the skills' operations as allow rules (#2150): the merge gate of this checkout and of the task's own folder
+      expect(starts.map((s) => s.allow?.filter((r) => r.includes("merge-gate")))).toEqual([checkout, other].map(() => ["Bash(bun scripts/merge-gate.ts:*)", `Bash(bun ${checkout}/scripts/merge-gate.ts:*)`]));
+      expect(starts[1]!.allow).toContain(`Edit(/${other}/ops-kit/skills/**)`);
+      expect(starts[1]!.allow).toContain(`Write(/${other}-*/.claude/skills/**)`);
+      expect(starts.flatMap((s) => s.allow ?? []).filter((r) => /gh (pr|stack) merge|gh api/.test(r))).toEqual([]);
     } finally {
       await c.stop();
     }
@@ -726,6 +731,7 @@ describe("core daemon", () => {
       const tasks = new TaskManager(db, new Map([["claude", fakeAdapter(SCRIPT.filter((e) => e.t !== "permission.ask"), { starts: bare })]]), () => undefined, { idleMs: 0 });
       const t = tasks.create({ cwd: other, title: "t", prompt: "p", runner: "claude" });
       expect(bare.map((s) => s.guards)).toEqual([undefined]);
+      expect(bare.map((s) => s.allow)).toEqual([undefined]);
       // the fake turn writes to the Db after create returns: close only once it is over
       await waitFor(async () => db.getTask(t.id)?.status === "done");
       await tasks.shutdown();

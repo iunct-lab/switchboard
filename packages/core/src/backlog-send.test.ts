@@ -187,6 +187,27 @@ test("the state and a Project field of an Issue are written, each checked first"
   expect(g.writes.map((w) => (w.includes("updateProjectV2ItemFieldValue") ? "updateProjectV2ItemFieldValue" : w))).toEqual(["PATCH repos/acme/app/issues/12", "updateProjectV2ItemFieldValue"]);
 });
 
+test("Status の順の変更が競合しない (#2694): two Status edits stored one after the other are sent as the later; one written to GitHub around the store is held", async () => {
+  // a Task's order: In progress, then In review, both stored here; the second is made on the first
+  const g = fakeGithub();
+  editStoredIssue(db, S, 12, { fields: { Status: "In progress" } });
+  editStoredIssue(db, S, 12, { fields: { Status: "In review" } });
+  await send(g.gh);
+  expect(db.listPendingBacklogOperations(S).filter((o) => o.status === "conflict")).toEqual([]);
+  expect(g.items.get("PVTI_I_12")!.fields.Status).toBe("In review");
+
+  // what happened before: In progress written to GitHub directly, In review stored on the Backlog it had not seen
+  const d2 = new Db(join(dir, "other.db"));
+  seed(d2);
+  const g2 = fakeGithub();
+  g2.items.get("PVTI_I_12")!.fields.Status = "In progress";
+  editStoredIssue(d2, S, 12, { fields: { Status: "In review" } });
+  await sendGithubOperations(g2.gh, d2, dir, S, clock);
+  expect(d2.listPendingBacklogOperations(S).map((o) => [o.field, o.status])).toEqual([["field:Status", "conflict"]]);
+  expect(g2.items.get("PVTI_I_12")!.fields.Status).toBe("In progress");
+  d2.close();
+});
+
 test("a label added, a milestone, a parent and leaving the Project are each sent", async () => {
   const g = fakeGithub();
   editStoredIssue(db, S, 12, { labels: { add: ["P1"], remove: [] }, milestone: "Phase 2", parent: 3, project: false });

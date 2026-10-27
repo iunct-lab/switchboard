@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { checksFromRuns, designRulesTouched, judge, MERGE_ANSWER, MERGE_ASK, PROTECTED, readPr, type PrFacts, type RecheckKind } from "./merge-gate";
+import { checksFromRuns, designRulesTouched, judge, main, MERGE_ANSWER, MERGE_ASK, PROTECTED, readPr, type PrFacts, type RecheckKind } from "./merge-gate";
 
 // The default repository (no --repo) is GH_REPO, else the origin (scripts/repo.ts): fixed here, so a leak of it shows.
 const REPO = "example/development";
@@ -347,6 +347,8 @@ describe("merge-gate readPr", () => {
       unresolvedThreads: 1,
       mergeState: "CLEAN",
       reviewComments: [{ body: "[codex] review", createdAt: "2026-09-24T11:00:00Z" }],
+      head: "abc123",
+      base: undefined,
     });
   });
 
@@ -572,6 +574,87 @@ describe("merge-gate readPr", () => {
   test("more review threads than one page fails instead of judging", async () => {
     const nodes = Array.from({ length: 100 }, () => ({ isResolved: true }));
     expect(readPr(1, fake(threads(nodes, 101)))).rejects.toThrow("101");
+  });
+});
+
+describe("merge command merges only on verdict merge", () => {
+  const SHA = "0123456789abcdef0123456789abcdef01234567";
+  const view = (over: Record<string, unknown> = {}) => ({
+    files: [{ path: "a.ts", additions: 1, deletions: 2, changeType: "MODIFIED" }],
+    commits: [{ authoredDate: "2026-09-24T10:00:00Z" }],
+    baseRefName: "main",
+    headRefOid: SHA,
+    mergeStateStatus: "CLEAN",
+    comments: [{ body: "[codex] review", createdAt: "2026-09-24T11:00:00Z", authorAssociation: "MEMBER" }],
+    ...over,
+  });
+  const runs = { workflow_runs: [{ id: 1, name: "CI", status: "completed", conclusion: "success", created_at: "2026-09-24T12:00:00Z" }] };
+  const threads = { data: { repository: { pullRequest: { reviewThreads: { totalCount: 0, nodes: [] } } } } };
+  const gate = async (args: string[], v: Record<string, unknown> | Error = view(), o: { local?: string; headNow?: string } = {}) => {
+    const calls: string[][] = [];
+    const errs: string[] = [];
+    const code = await main(args, async (a) => {
+      calls.push(a);
+      if (a[0] === "pr" && a[1] === "view") {
+        if (v instanceof Error) throw v;
+        return a.includes("-q") ? `${o.headNow ?? SHA}\n` : JSON.stringify(v);
+      }
+      if (a[0] === "repo") return "main\n";
+      if (a[0] === "pr" || a[0] === "stack") return "";
+      return JSON.stringify(a[1]?.includes("/actions/runs") ? runs : threads);
+    }, () => {}, (e) => errs.push(e), () => o.local ?? REPO);
+    return { code, merges: calls.filter((a) => (a[0] === "pr" && a[1] === "merge") || a[0] === "stack"), errs };
+  };
+
+  test("--merge on verdict merge calls gh pr merge once, with the repository", async () => {
+    const r = await gate(["7", "--merge", "--repo", "acme/lib"]);
+    expect(r.code).toBe(0);
+    expect(r.merges).toEqual([["pr", "merge", "7", "-R", "acme/lib", "--rebase", "--delete-branch", "--match-head-commit", SHA]]);
+  });
+
+  test("--merge-stack calls gh stack merge for the bottom PR of the working tree's repository at the judged head", async () => {
+    const r = await gate(["7", "--merge-stack"]);
+    expect(r.code).toBe(0);
+    expect(r.merges).toEqual([["stack", "merge", "7", "--rebase", "-y"]]);
+    // gh stack merges everything below the PR: an upper PR (base = another branch) is not merged
+    expect(await gate(["7", "--merge-stack"], view({ baseRefName: "sb/1-lower" }))).toMatchObject({ code: 1, merges: [] });
+    // gh stack takes no -R: a --repo other than the working tree's origin would merge another repository's PR of that number
+    expect(await gate(["7", "--merge-stack", "--repo", "acme/lib"])).toMatchObject({ code: 1, merges: [] });
+    // a push after the judgement
+    expect(await gate(["7", "--merge-stack"], view(), { headNow: "e".repeat(40) })).toMatchObject({ code: 1, merges: [] });
+  });
+
+  test("stop (exit 1) and not judged (exit 2) do not merge; both flags at once are a usage error", async () => {
+    expect(await gate(["7", "--merge"], view({ mergeStateStatus: "DIRTY" }))).toMatchObject({ code: 1, merges: [] });
+    expect(await gate(["7", "--merge"], new Error("network"))).toMatchObject({ code: 2, merges: [] });
+    expect(await gate(["7", "--merge"], view({ mergeStateStatus: "UNKNOWN" }))).toMatchObject({ code: 2, merges: [] });
+    expect(await gate(["7", "--merge", "--merge-stack"])).toMatchObject({ code: 2, merges: [] });
+  });
+
+  test("--allow-large merges only after a [merge-answer] yes of the head", async () => {
+    const large = { files: [{ path: "rescue/run.sh", additions: 1, deletions: 0, changeType: "MODIFIED" }] };
+    const review = { body: "[codex] review", createdAt: "2026-09-24T11:00:00Z", authorAssociation: "MEMBER" };
+    const answer = (sha: string, yes = "yes") => ({ body: `[merge-answer] ${yes} rescue ${sha}`, createdAt: "2026-09-24T12:00:00Z", authorAssociation: "MEMBER" });
+    expect(await gate(["7", "--merge", "--allow-large"], view(large))).toMatchObject({ code: 1, merges: [] });
+    expect(await gate(["7", "--merge", "--allow-large"], view({ ...large, comments: [review, answer("f".repeat(40))] }))).toMatchObject({ code: 1, merges: [] });
+    expect(await gate(["7", "--merge", "--allow-large"], view({ ...large, comments: [review, answer(SHA, "no")] }))).toMatchObject({ code: 1, merges: [] });
+    expect((await gate(["7", "--merge", "--allow-large"], view({ ...large, comments: [review, answer(SHA)] }))).merges).toHaveLength(1);
+    // a yes about another kind does not lift this one
+    const security = { files: [{ path: "packages/core/src/auth.ts", additions: 1, deletions: 0, changeType: "MODIFIED" }] };
+    expect(await gate(["7", "--merge", "--allow-large"], view({ ...security, comments: [review, answer(SHA)] }))).toMatchObject({ code: 1, merges: [] });
+    // without --merge the judgement alone keeps its old meaning (the caller merges after the mark)
+    expect(await gate(["7", "--allow-large"], view(large))).toMatchObject({ code: 0, merges: [] });
+  });
+
+  test("a failed merge is exit 1 with gh's first line", async () => {
+    const errs: string[] = [];
+    const code = await main(["7", "--merge"], async (a) => {
+      if (a[0] === "pr" && a[1] === "merge") throw new Error("gh pr merge failed: not mergeable\nmore");
+      if (a[0] === "pr") return JSON.stringify(view());
+      return JSON.stringify(a[1]?.includes("/actions/runs") ? runs : threads);
+    }, () => {}, (e) => errs.push(e));
+    expect(code).toBe(1);
+    expect(errs).toEqual(["マージできなかった: gh pr merge failed: not mergeable"]);
   });
 });
 

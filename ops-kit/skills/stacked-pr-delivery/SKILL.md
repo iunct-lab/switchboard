@@ -19,8 +19,9 @@ description: Task を Stacked PR（GitHub public preview, gh stack）として�
 4. レビュー: `review-with-subagent` スキルの手順で、PR ごとにサブエージェントを起動しコメントさせる。
 5. 指摘対応: **指摘のある枝で**修正 → commit → `gh stack rebase`（スタック全体を下から rebase）→ `gh stack push`。
    各指摘コメントに個別返信（`gh api .../comments/<id>/replies`）し、最後に要約コメント。Issue にも結果を記録する。
-6. CI 緑・返信済みを確認して `gh stack merge <PR番号> --rebase -y`（その PR と下の PR をまとめて atomic に merge）。
-   スタックに属さない単発 PR は `gh pr merge <n> --rebase --delete-branch`（`gh stack merge` は「not a stacked pull request」で失敗する）。
+6. CI 緑・返信済みを確認して `<マージ判定> <PR番号> --merge-stack`（判定が merge のときだけ `gh stack merge <PR番号> --rebase -y` を呼ぶ。最下段だけ。`gh stack merge` はその PR と下の PR をまとめて atomic に merge する）。
+   スタックに属さない単発 PR は `<マージ判定> <n> --merge`（`gh stack merge` は「not a stacked pull request」で失敗する）。
+   マージ判定のコマンド（CLAUDE.md）にその引数が無いリポジトリでは、`gh stack merge <PR番号> --rebase -y` / 単発は `gh pr merge <n> --rebase --delete-branch`。
 7. マージそのものは `pbi-complete` の手順（下から 1 本ずつ、GitHub 側の retarget + rebase を待つ。ローカル rebase は CONFLICTING のときだけ）。
    `gh stack rebase` が要るのは**マージ後にローカルの上の枝で作業を続ける（commit を足す）とき**だけ: 同期せずに commit を足すと
    古いハッシュの commit が残り、後で `gh stack merge` が「rebase conflict」で失敗する（実際に起きた）。触らない枝は rebase しない。

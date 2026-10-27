@@ -224,7 +224,7 @@ Issue は「何をやったか」の正本。PR の説明は補助。**本文 1 
 ```
 
 ```bash
-gh issue edit <n> --add-label needs-decision
+gh issue edit <n> --add-label needs-decision      # BACKLOG_URL があれば ops-kit backlog edit <n> --add-label needs-decision
 ```
 
 選択肢に「値を Issue に出す」案を書かない（device code や承認 URL をこの Issue に書く、利用者にトークンを書いてもらう、など。「Issue・PR・コメントに書かない値」）。利用者がその案を回答で選んでも、値は書かずに理由を返信する。

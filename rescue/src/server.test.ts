@@ -593,48 +593,72 @@ test("a daemon that does not answer gives an empty list, not an error", async ()
   }
 });
 
-test("tmp: sweep — without a press, the old working directory goes on the interval and GET /api/tmp says so (#1720); another app's kind only where /tmp is Switchboard's (#2058)", async () => {
-  const before = (await fetch(`${base}/api/tmp`).then((r) => r.json())) as { sweep: unknown; owned: boolean };
-  expect(before.sweep).toBeNull(); // this server has the default 30 minutes
+test("tmp: sweep — without a press, the old working directory goes on the interval and GET /api/tmp says so (#1720); another app's kind only where /tmp is Switchboard's (#2058); local CI's leftovers everywhere, the caches and docker only there, and the root disk's usage (#2549)", async () => {
+  type Sweep = { at: number; removed: number; freedBytes: number };
+  type Answer = { owned: boolean; disk: { used: number; total: number; percent: number }; sweeps: Record<"tmp" | "work" | "cache" | "docker", Sweep | null> };
+  const before = (await fetch(`${base}/api/tmp`).then((r) => r.json())) as Answer & { sweep?: unknown };
+  expect(before.sweeps).toEqual({ tmp: null, work: null, cache: null, docker: null }); // this server has the default 30 minutes
+  expect(before.sweep).toBeUndefined();
   expect(before.owned).toBe(false);
+  expect(before.disk.total).toBeGreaterThan(0);
+  expect(before.disk.used).toBeLessThanOrEqual(before.disk.total);
   const root = mkdtempSync(join(tmpdir(), "sb-rescue-sweep-"));
+  const home = mkdtempSync(join(tmpdir(), "sb-rescue-sweep-home-"));
   const old = (Date.now() - 3 * 60 * 60 * 1000) / 1000;
-  const stale = (name: string) => {
-    mkdirSync(join(root, name));
-    writeFileSync(join(root, name, "f"), "x".repeat(4096));
-    utimesSync(join(root, name, "f"), old, old);
-    utimesSync(join(root, name), old, old);
+  const stale = (dir: string, name: string, at = old) => {
+    mkdirSync(join(dir, name), { recursive: true });
+    writeFileSync(join(dir, name, "f"), "x".repeat(4096));
+    utimesSync(join(dir, name, "f"), at, at);
+    utimesSync(join(dir, name), at, at);
   };
+  const dayAgo = (Date.now() - 25 * 60 * 60 * 1000) / 1000;
+  const twoWeeksAgo = (Date.now() - 15 * 24 * 60 * 60 * 1000) / 1000;
+  const docker: string[][] = [];
   const sweepOnce = async (tmpOwned: boolean) => {
     // one sweep walks /proc and blocks the loop: 100+ ms on a busy host, over 1 s under a full local CI (#2200). With an
     // interval well over that (and over the 50 ms polling) the first sweep's answer is read before a later, empty one
     // replaces it (#1939)
-    const fast = startRescue(ctx, { port: 0, tmpDir: root, tmpSweepMs: 4000, tmpOwned });
+    const dockerSh = async (argv: string[]) => (docker.push(argv), "Deleted Images:\ndeleted: sha256:aaa\n\nTotal reclaimed space: 2kB\n");
+    const fast = startRescue(ctx, { port: 0, tmpDir: root, cacheDir: join(home, ".cache"), home, dockerSh, tmpSweepMs: 4000, tmpOwned });
     try {
-      const get = () => fetch(`http://127.0.0.1:${fast.server.port}/api/tmp`).then((r) => r.json()) as Promise<{ owned: boolean; sweep: { at: number; removed: number; freedBytes: number } | null }>;
+      const get = () => fetch(`http://127.0.0.1:${fast.server.port}/api/tmp`).then((r) => r.json()) as Promise<Answer>;
       return await until(async () => {
         const r = await get();
-        return r.sweep ? r : null;
+        return r.sweeps.work && (!tmpOwned || r.sweeps.docker) ? r : null; // the kinds are filled in turn
       }, "the sweep ran");
     } finally {
       await fast.stop();
     }
   };
   try {
-    stale("x.review3.Ab12Cd");
-    stale("switchboard.flow.Ab12Cd");
+    stale(root, "x.review3.Ab12Cd");
+    stale(root, "switchboard.flow.Ab12Cd");
     mkdirSync(join(root, "switchboard.flow.Zz98Yy"));
+    stale(join(home, ".cache"), "switchboard.local-ci-12.Ab12Cd", dayAgo);
+    stale(join(home, ".cache"), "switchboard.local-ci-13.Ab12Cd", dayAgo);
+    stale(join(home, ".cache/uv/archive-v0"), "old1", twoWeeksAgo);
     const shared = await sweepOnce(false);
     expect(readdirSync(root).sort()).toEqual(["switchboard.flow.Ab12Cd", "switchboard.flow.Zz98Yy"]);
-    expect(shared.sweep!.removed).toBe(1);
-    expect(shared.sweep!.freedBytes).toBeGreaterThan(0);
+    expect(shared.sweeps.tmp!.removed).toBe(1);
+    expect(shared.sweeps.tmp!.freedBytes).toBeGreaterThan(0);
+    expect(shared.sweeps.work!.removed).toBe(2);
+    expect(shared.sweeps.cache).toBeNull();
+    expect(shared.sweeps.docker).toBeNull();
+    expect(docker).toEqual([]);
+    expect(readdirSync(join(home, ".cache/uv/archive-v0"))).toEqual(["old1"]);
     expect(shared.owned).toBe(false);
     const owned = await sweepOnce(true);
     expect(readdirSync(root)).toEqual(["switchboard.flow.Zz98Yy"]);
-    expect(owned.sweep!.removed).toBe(1);
+    expect(owned.sweeps.tmp!.removed).toBe(1);
+    expect(owned.sweeps.work!.removed).toBe(0);
+    expect(owned.sweeps.cache!.removed).toBe(1);
+    expect(readdirSync(join(home, ".cache/uv/archive-v0"))).toEqual([]);
+    expect(owned.sweeps.docker).toMatchObject({ removed: 1, freedBytes: 2000 });
+    expect(docker[0]).toEqual(["docker", "image", "prune", "-a", "-f", "--filter", "until=24h"]);
     expect(owned.owned).toBe(true);
   } finally {
     rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   }
 }, 20_000); // two sweeps in turn, each after a 4 s interval: over bun's 5 s (#2200)
 

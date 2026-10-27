@@ -43,6 +43,12 @@ export interface StartOptions {
    */
   guards?: string[];
   /**
+   * Claude Code permission rules (`permissions.allow`) for the operations the skills ask for (#2150): the merge through the
+   * merge gate, resolving a review thread, the merge gate's marks, editing the skills in the working tree. Claude Code puts
+   * them in the same `--settings` as `guards`; Codex does not read them.
+   */
+  allow?: string[];
+  /**
    * A directory only this task writes under (#787): the temp area of a runner that cannot run `guards`. Codex makes it
    * TMPDIR and a writable root and closes the rest of /tmp, so a fixed name there fails with a read-only error and
    * cannot meet another session's files. Claude Code ignores it. The daemon creates it and removes it when the task ends.

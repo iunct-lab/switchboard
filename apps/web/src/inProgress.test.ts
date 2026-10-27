@@ -4,7 +4,7 @@ import { activeTaskLine, ago, autoByWorkspace, inProgressState, lastTaskLine, ta
 
 const item = (over: Partial<BacklogItem>): BacklogItem => ({
   number: 1, title: "t", url: "u", type: "pbi", stage: "in-progress", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z",
-  tasks: { total: 3, done: 1, doneAt: null }, decision: null, activeTaskId: null, projectStatus: "In progress", lastTask: null, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
+  tasks: { total: 3, done: 1, doneAt: null }, decision: null, activeTaskId: null, projectStatus: "In progress", lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
 const last = (status: NonNullable<BacklogItem["lastTask"]>["status"]) => ({ id: "task_1", status, updatedAt: 0 });
 

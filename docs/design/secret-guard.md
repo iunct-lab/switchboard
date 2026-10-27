@@ -58,6 +58,11 @@ Switchboard が起動したランナーの `gh` の前段に検査を置く（PB
 
 `aws-profile` は、検査が動くホストの AWS の設定（`AWS_CONFIG_FILE`、無ければ `~/.aws/config`）の `[profile <名前>]` と `[sso-session <名前>]` の名前を、単語として含む行に当たる（SSO のセッション名も）。名前の形からは見分けられないので、規則は名前を設定から読む。`default` は名前として読まない。名前の前後が英数字・`_`・`-` のとき（`<名前>-host`）は別の語なので当たらず、大文字小文字は区別しない。英字だけの名前は普通の語（名詞）と区別できないので、`--profile <名前>`、`AWS_PROFILE=<名前>`、`[profile <名前>]`、`sso_session = <名前>` のようにプロファイル・セッションとして名指しされた位置だけで当たる（2026-10-14、実際の設定の名前が 1 つのリポジトリの散文に 245 行出て、規則を狭めた。誤検知は一覧や設定で除かず、規則を直す）。設定が読めないホスト（Actions の `secret-scan.yml`）では何にも当たらない。当たりは種類と行番号だけで、名前は出さない。切る設定は無い。
 
+## アプリの Task の中の Issue への直接の書き込み（#2694）
+
+- `BACKLOG_URL` がある（アプリの Task の中）とき、その workspace のリポジトリ（`GH_REPO`、無ければ origin。`ops-kit backlog` と同じ決め方）の Issue に `gh issue create（new）/ comment / edit / close / reopen` で書くと、秘密の検査の前に書かずに exit 1 で止め、`ops-kit backlog` の同じ操作を案内する（`backlogWrite`。直接書くと、アプリの次の編集の元が古くなり送るときに競合する。`backlog-sync.md` の「アプリの Task の中の書く経路」）
+- 通すもの: `-R` / `--repo` か Issue の URL がほかのリポジトリ（公開側の Issue への返信など）、PR、読み取り、`gh api`（mutation は解析しない）。強制ではなく歯止め（同じ OS ユーザーの Task は本物の `gh` を呼べる）
+
 ## 止めないもの
 
 - 本文を対話のエディタで書く `gh`（コマンドに文が無い）

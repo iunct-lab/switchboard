@@ -29,7 +29,7 @@ export const CLEANABLE: { own: RegExp[]; shared: RegExp[] } = {
 
 /** How the names are judged. */
 export interface TmpJudge {
-  /** /tmp is Switchboard's alone (the cloud host, a machine of its own: `SWITCHBOARD_RESCUE_OWNS_TMP=1`), so `CLEANABLE.shared` can go too. */
+  /** The machine is Switchboard's alone (the cloud host: `SWITCHBOARD_RESCUE_OWNS_TMP=1`), so `CLEANABLE.shared` can go too, and uv / bun / docker's caches (cache.ts). */
   owned: boolean;
   /** Where the running processes are read; tests point it at a folder without them. Default /proc. */
   proc?: string;
@@ -55,8 +55,6 @@ export interface TmpReport {
   entries: TmpEntry[];
   /** Every removable entry, also past LIST_LIMIT. */
   cleanable: { names: string[]; bytes: number };
-  /** The last automatic sweep; scanTmp leaves it null, the server fills it in. */
-  sweep: TmpSweep | null;
   /** TmpJudge.owned: which kinds were judged. */
   owned: boolean;
 }
@@ -126,8 +124,14 @@ export function inUse(root: string, proc = "/proc"): Set<string> | null {
   return names;
 }
 
-/** One entry right under the root, measured without following symbolic links; an unreadable child is skipped. */
-function inspect(root: string, name: string, now: number, busy: Set<string> | null, owned: boolean): TmpEntry {
+/** The kinds of names /tmp's clean takes: `own` everywhere, `shared` only where /tmp is Switchboard's alone. */
+const tmpKinds = (owned: boolean) => (owned ? [...CLEANABLE.own, ...CLEANABLE.shared] : CLEANABLE.own);
+
+/**
+ * One entry right under the root, measured without following symbolic links; an unreadable child is skipped. It can go when its
+ * name is one of `kinds`, it is this user's directory, nothing in it was touched within `staleMs` and no running process uses it.
+ */
+export function inspect(root: string, name: string, now: number, busy: Set<string> | null, kinds: RegExp[], staleMs: number): TmpEntry {
   const path = join(root, name);
   const top = lstatSync(path);
   let bytes = top.blocks * 512;
@@ -152,14 +156,13 @@ function inspect(root: string, name: string, now: number, busy: Set<string> | nu
       }
     }
   }
-  const kinds = owned ? [...CLEANABLE.own, ...CLEANABLE.shared] : CLEANABLE.own;
   const keep: Keep | null = !kinds.some((re) => re.test(name))
     ? "pattern"
     : !top.isDirectory()
       ? "not-a-directory"
       : top.uid !== process.getuid?.()
         ? "owner"
-        : now - newestMs < STALE_MS
+        : now - newestMs < staleMs
           ? "recent"
           : !busy
             ? "use-unknown"
@@ -169,25 +172,29 @@ function inspect(root: string, name: string, now: number, busy: Set<string> | nu
   return { name, bytes, newestMs, removable: keep === null, keep };
 }
 
-export function scanTmp(root: string, judge: TmpJudge, now = Date.now()): TmpReport {
-  const fs = statfsSync(root);
+/** How full the file system under `path` is. */
+export function diskUsage(path: string): TmpReport["usage"] {
+  const fs = statfsSync(path);
   const total = fs.blocks * fs.bsize;
   const used = (fs.blocks - fs.bfree) * fs.bsize;
+  return { used, total, percent: total ? Math.round((used / total) * 100) : 0 };
+}
+
+export function scanTmp(root: string, judge: TmpJudge, now = Date.now()): TmpReport {
   const all: TmpEntry[] = [];
   const busy = inUse(root, judge.proc);
   for (const name of readdirSync(root)) {
     try {
-      all.push(inspect(root, name, now, busy, judge.owned));
+      all.push(inspect(root, name, now, busy, tmpKinds(judge.owned), STALE_MS));
     } catch {} // gone since readdir
   }
   all.sort((a, b) => b.bytes - a.bytes);
   const removable = all.filter((e) => e.removable);
   return {
     root,
-    usage: { used, total, percent: total ? Math.round((used / total) * 100) : 0 },
+    usage: diskUsage(root),
     entries: all.slice(0, LIST_LIMIT),
     cleanable: { names: removable.map((e) => e.name), bytes: removable.reduce((n, e) => n + e.bytes, 0) },
-    sweep: null,
     owned: judge.owned,
   };
 }
@@ -205,7 +212,7 @@ export function cleanTmp(root: string, names: string[], judge: TmpJudge, now = D
     }
     let entry: TmpEntry;
     try {
-      entry = inspect(root, name, now, busy, judge.owned);
+      entry = inspect(root, name, now, busy, tmpKinds(judge.owned), STALE_MS);
     } catch {
       skipped.push({ name, keep: "gone" });
       continue;

@@ -61,7 +61,7 @@ gh api "repos/{owner}/{repo}/pulls/$N/comments/<id>/replies" -f body="..."
 # 指摘が片づいたことの確認は修正後の見直し（cross-runner-review の 4）が担う — 返信の前に resolve しない
 gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ pullRequest(number:$n){ reviewThreads(first:100){ nodes{ id isResolved comments(first:1){ nodes{ databaseId } } } } } } }' -F o=<owner> -F r=<repo> -F n=$N \
   -q '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved|not) | "\(.id)\t\(.comments.nodes[0].databaseId)"'
-gh api graphql -f query='mutation($t:ID!){ resolveReviewThread(input:{threadId:$t}){ thread{ isResolved } } }' -F t=<thread id>
+ops-kit pr resolve-thread <thread id>...                # resolve だけをするコマンド（Task の許可に入る。素の gh api graphql の mutation は使わない）
 gh pr comment $N --body-file "$W/summary.md"      # W=$(mktemp -d /tmp/<リポジトリ名>.triage<PR番号>.XXXXXX)。固定の /tmp/summary.md にしない
 # <owner> / <repo> は gh repo view --json owner,name で見る。{owner}/{repo} は gh api が今のリポジトリで埋める
 ```
@@ -96,10 +96,10 @@ gh pr comment $N --body-file "$W/summary.md"      # W=$(mktemp -d /tmp/<リポ�
 
 ## 6. マージと記録
 
-スタックは **main に近い方から 1 本ずつ**（`pbi-complete`）。単発は `gh pr merge $N --rebase --delete-branch`。
+スタックは **main に近い方から 1 本ずつ**（`pbi-complete`）。マージ判定のコマンド（CLAUDE.md）に `--merge` / `--merge-stack` があれば、判定とマージを 1 つのコマンドで（判定が merge のときだけマージする。Task の許可に入る）。単発は `<マージ判定> $N --merge`。その引数が無いリポジトリでは、単発は `gh pr merge $N --rebase --delete-branch`、スタックは `gh stack merge $N --rebase -y`。
 
 ```bash
-gh stack merge $N --rebase -y                      # スタックの最下段だけ。上は GitHub が retarget + rebase する
+<マージ判定> $N --merge-stack                      # スタックの最下段だけ。上は GitHub が retarget + rebase する
 gh pr view <next> --json baseRefName,mergeable,mergeStateStatus   # base=main かつ CLEAN になってから次へ（UNSTABLE = CI 中）
 ```
 

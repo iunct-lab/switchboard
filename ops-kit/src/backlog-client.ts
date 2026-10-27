@@ -288,8 +288,8 @@ function client(env: Record<string, string | undefined>, f: Fetch) {
   };
 }
 
-async function repoName(env: Record<string, string | undefined>, cwd?: string): Promise<string> {
-  // GH_REPO, else origin; GitHub is never asked for it
+/** The repository the backlog commands act on: GH_REPO, else origin; GitHub is never asked for it. */
+export async function repoName(env: Record<string, string | undefined>, cwd?: string): Promise<string> {
   const noGh = { run: async () => { throw new Unknown("リポジトリが分かりません（GH_REPO を設定するか、origin のあるディレクトリで実行するか、--workspace <id>）"); } } as unknown as Parameters<typeof repoOf>[0];
   const r = await repoOf(noGh, env, cwd);
   return `${r.owner}/${r.name}`;

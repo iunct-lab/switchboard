@@ -1,4 +1,4 @@
-import { currentRepo } from "./repo.ts";
+import { currentRepo, originRepo } from "./repo.ts";
 import { LOCAL_CI_RESULT } from "./local-ci";
 
 export const LARGE_LINES = 300;
@@ -98,6 +98,10 @@ export interface PrFacts {
   unresolvedThreads: number;
   mergeState: string;
   reviewComments: { body: string; createdAt: string }[];
+  /** The head's sha (a `[merge-answer] yes` must name it for --allow-large with --merge; --merge merges only this head); absent = not read. */
+  head?: string;
+  /** The base branch (--merge-stack merges only a PR on the default branch: the bottom of its stack); absent = not read. */
+  base?: string;
 }
 
 export interface Judgement {
@@ -152,7 +156,8 @@ function countsTowardSize(path: string): boolean {
   return !matches(DOCS, path);
 }
 
-export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
+/** `answered`: with --merge / --merge-stack, --allow-large lifts the large reasons only after a `[merge-answer] yes` of the head. */
+export function judge(f: PrFacts, opts: { allowLarge: boolean; answered?: boolean }): Judgement {
   const large: { kind: RecheckKind | AskKind; text: string }[] = [];
   const add = (kind: RecheckKind | AskKind, head: string, paths: string[], note = "") => {
     if (paths.length > 0) large.push({ kind, text: `${head}: ${paths.join(", ")}${note}` });
@@ -185,6 +190,12 @@ export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
     : large
       .filter((l) => isAsk(l.kind) || !marked.has(l.kind))
       .map((l) => `${isAsk(l.kind) ? "[聞く]" : `[再チェック ${l.kind}]`} ${l.text}`);
+  // the yes must be for this head and for every ask kind (a yes about rescue does not lift a security reason)
+  if (opts.allowLarge && opts.answered && !f.reviewComments.some((c) => {
+    const m = MERGE_ANSWER.exec(c.body);
+    const kinds = m?.[2]?.split(",") ?? [];
+    return m?.[1] === "yes" && m[3] === f.head && ask.every((k) => kinds.includes(k));
+  })) reasons.push(`[merge-answer] yes の印が無い（head ${f.head ?? "不明"}、kinds ${ask.join(",") || "なし"}）`);
   if (f.checks.length === 0) reasons.push("CI のチェックが 1 つも無い");
   for (const c of f.checks) {
     if (c.conclusion !== "SUCCESS" && c.conclusion !== "SKIPPED") {
@@ -331,26 +342,65 @@ export async function readPr(n: number, run = gh, repo = currentRepo()): Promise
     unresolvedThreads: threads.nodes.filter((t: { isResolved: boolean }) => !t.isResolved).length,
     mergeState: pr.mergeStateStatus,
     reviewComments: comments.map((c) => ({ body: c.body, createdAt: c.createdAt })),
+    head: pr.headRefOid,
+    base: pr.baseRefName,
   };
 }
 
-if (import.meta.main) {
-  const args = process.argv.slice(2);
+export type MergeMode = "merge" | "merge-stack";
+
+/**
+ * merge: one PR, only at the judged head (`gh pr merge --match-head-commit`). merge-stack: the bottom of a stack (`gh stack merge`
+ * merges every PR below the one named, so only a PR on the default branch, which has none below it). gh stack takes no -R and
+ * no head to match: it runs in the stack's worktree, whose origin must be the judged repository, and the head is read again
+ * just before it (a push in between stops it; one in the last moment is not caught).
+ */
+export async function mergePr(n: number, repo: string, mode: MergeMode, facts: PrFacts, run: (args: string[]) => Promise<string>, stackRepo: () => string | undefined = originRepo): Promise<void> {
+  if (!facts.head) throw new Error("head の sha が読めていない");
+  if (mode === "merge") {
+    await run(["pr", "merge", String(n), "-R", repo, "--rebase", "--delete-branch", "--match-head-commit", facts.head]);
+    return;
+  }
+  const local = stackRepo();
+  if (local !== repo) throw new Error(`--merge-stack は作業ツリーの origin（${local ?? "不明"}）のスタックをマージする。判定した ${repo} と違う`);
+  const branch = (await run(["repo", "view", repo, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"])).trim();
+  if (facts.base !== branch) throw new Error(`--merge-stack はスタックの最下段（base が ${branch}）だけ。この PR の base は ${facts.base}（下の PR も一緒にマージされる）`);
+  const now = (await run(["pr", "view", String(n), "-R", repo, "--json", "headRefOid", "-q", ".headRefOid"])).trim();
+  if (now !== facts.head) throw new Error(`判定の後に head が変わった（${facts.head} → ${now}）。判定し直す`);
+  await run(["stack", "merge", String(n), "--rebase", "-y"]);
+}
+
+const USAGE = "usage: bun scripts/merge-gate.ts <PR> [--allow-large] [--merge | --merge-stack] [--repo <owner/name>]";
+
+/** The command: 0 = merge (and merged, with --merge / --merge-stack) / 1 = stop, or the merge failed / 2 = not judged. Only a merge verdict merges. */
+export async function main(args: string[], run: (args: string[]) => Promise<string> = gh, log = console.log, err = console.error, stackRepo: () => string | undefined = originRepo): Promise<number> {
   const n = Number(args.find((a) => /^\d+$/.test(a)));
   const repoAt = args.indexOf("--repo");
   const repo = repoAt >= 0 ? args[repoAt + 1] : currentRepo();
-  if (!n || !repo || !/^[\w.-]+\/[\w.-]+$/.test(repo)) {
-    console.error("usage: bun scripts/merge-gate.ts <PR> [--allow-large] [--repo <owner/name>]");
-    process.exit(2);
+  const modes = (["merge", "merge-stack"] as const).filter((m) => args.includes(`--${m}`));
+  if (!n || !repo || !/^[\w.-]+\/[\w.-]+$/.test(repo) || modes.length > 1) {
+    err(USAGE);
+    return 2;
   }
   let facts: PrFacts;
   try {
-    facts = await readPr(n, gh, repo);
+    facts = await readPr(n, run, repo);
   } catch (e) {
-    console.error(`判定できなかった: ${(e as Error).message}`);
-    process.exit(2);
+    err(`判定できなかった: ${(e as Error).message}`);
+    return 2;
   }
-  const j = judge(facts, { allowLarge: args.includes("--allow-large") });
-  console.log(JSON.stringify(j, null, 2));
-  process.exit(j.verdict === "merge" ? 0 : 1);
+  const j = judge(facts, { allowLarge: args.includes("--allow-large"), answered: modes.length > 0 });
+  log(JSON.stringify(j, null, 2));
+  if (j.verdict !== "merge") return 1;
+  const mode = modes[0];
+  if (!mode) return 0;
+  try {
+    await mergePr(n, repo, mode, facts, run, stackRepo);
+  } catch (e) {
+    err(`マージできなかった: ${(e as Error).message.split("\n")[0]}`);
+    return 1;
+  }
+  return 0;
 }
+
+if (import.meta.main) process.exit(await main(process.argv.slice(2)));

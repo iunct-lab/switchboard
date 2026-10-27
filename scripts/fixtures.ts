@@ -7,7 +7,9 @@ export const RECORDINGS = [
   "packages/adapters/claude/fixtures/ask-user-question.jsonl",
   "packages/adapters/claude/fixtures/cloud-start.txt",
   "packages/adapters/claude/fixtures/cloud-trust-prompt.txt",
+  "packages/adapters/claude/fixtures/background-notification.jsonl",
   "packages/adapters/claude/fixtures/effort-high.jsonl",
+  "packages/adapters/claude/fixtures/resume-cost.jsonl",
   "packages/adapters/claude/fixtures/resume-missing.jsonl",
   "packages/adapters/claude/fixtures/resume-turn.jsonl",
   "packages/adapters/claude/fixtures/teleport-session.jsonl",
@@ -41,6 +43,7 @@ if (import.meta.main) {
       process.exit(2);
     }
   }
+  let missing = 0;
   for (const rel of RECORDINGS) {
     if (command === "list") {
       console.log(`${recording(rel) ? "present" : "missing"} ${rel}`);
@@ -48,8 +51,13 @@ if (import.meta.main) {
     }
     const result = Bun.spawnSync(["git", "show", `${RECORDINGS_COMMIT}:${rel}`], { cwd: join(import.meta.dir, "..") });
     if (result.exitCode !== 0) {
-      console.error(`Cannot fetch ${rel}: a clone with the private history at ${RECORDINGS_COMMIT} is required. Record with your own runner outside Git: .claude/skills/runner-adapter-recording/SKILL.md`);
-      process.exit(2);
+      // recorded after RECORDINGS_COMMIT: only the vault has it
+      if (recording(rel)) console.log(`kept ${rel}`);
+      else {
+        console.error(`missing ${rel} (not in history; record: .claude/skills/runner-adapter-recording/SKILL.md)`);
+        missing++;
+      }
+      continue;
     }
     const dest = join(recordingsDir(), rel);
     mkdirSync(dirname(dest), { recursive: true });
@@ -57,4 +65,5 @@ if (import.meta.main) {
     console.log(`fetched ${rel}`);
   }
   console.log("To re-record, follow .claude/skills/runner-adapter-recording/SKILL.md with a real runner; keep recordings outside Git.");
+  if (missing) process.exit(2);
 }

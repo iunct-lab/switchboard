@@ -36,7 +36,7 @@ large の PR で、どの種類を誰が外したかを PR コメントの印で
 | `[merge-ask] <kinds> <head sha>`（`MERGE_ASK`） | 利用者に「マージしてよいか」を Task の会話で聞く直前 | `<kinds>` は merge-gate の出力の `ask` と、まだ印の無い `recheck` を `,` でつないだもの（上の `MERGE_KINDS` の順） |
 | `[merge-answer] <yes\|no> <kinds> <head sha>`（`MERGE_ANSWER`） | `[merge-ask]` を付けて聞いた PR への返事を受けて再開したとき（`yes` なら続けて `--allow-large` でマージ判定。CI など large 以外の理由で聞いたときはどちらの印も付けない）。`[merge-ask]` が無ければ先に `[merge-ask]` を付けてから（時刻はどちらも付けた時刻） | `yes` = 利用者が認めた。`<kinds>` は聞いたときと同じ |
 
-投稿は `gh pr comment <PR> -R <owner/name> --body "[merge-ask] <kinds> $(gh pr view <PR> -R <owner/name> --json headRefOid -q .headRefOid)"`（`[merge-answer]` も同じ）。`--allow-large` は `[merge-answer] yes` を投稿した後（印を付けずに `--allow-large` でマージしない。`[merge-ask]` を付けずに聞いていた PR は、`[merge-ask]` → `[merge-answer]` の順に付けてから）。merge-gate の判定はこの 2 つを読まない（判定を外すのは `--allow-large` のまま）。前のマージには印を遡って付けない。
+投稿は `gh pr comment <PR> -R <owner/name> --body "[merge-ask] <kinds> $(gh pr view <PR> -R <owner/name> --json headRefOid -q .headRefOid)"`（`[merge-answer]` も同じ）。`--allow-large` は `[merge-answer] yes` を投稿した後（印を付けずに `--allow-large` でマージしない。`[merge-ask]` を付けずに聞いていた PR は、`[merge-ask]` → `[merge-answer]` の順に付けてから）。merge-gate の判定はこの 2 つを読まない（判定を外すのは `--allow-large` のまま）。ただし `--merge` / `--merge-stack` と `--allow-large` を一緒に付けたときは、head と同じ sha で、`<kinds>` が判定の出力の `ask` を全部含む `[merge-answer] yes` が無ければマージしない（`docs/design/merge-gate.md`）。前のマージには印を遡って付けない。
 
 ## 保護枝とローカルの結果
 

@@ -176,6 +176,24 @@ function shellQuote(s: string): string {
 }
 
 /**
+ * The Claude Code allow rules a task gets (#2150, docs/design/permission-modes.md): the operations the skills ask for, so that
+ * auto mode does not stop them. Only the merge through the merge gate (it merges on a merge verdict only; a bare `gh pr merge`
+ * stays with auto mode), resolving a review thread (not a general `gh api graphql`), the marks (`gh pr comment`; the check in
+ * front of `gh` still reads them) and editing the skills of the task's folder and its worktrees (`<cwd>-<topic>`, CLAUDE.md).
+ * Not a fence: the same OS user can do all of it by another way (the loopback trust model).
+ */
+export function taskAllowRules(metaPath: string, cwd: string): string[] {
+  const skills = [cwd, `${cwd}-*`].flatMap((root) => ["ops-kit/skills", ".claude/skills"].map((dir) => `/${root}/${dir}/**`));
+  return [
+    "Bash(bun scripts/merge-gate.ts:*)",
+    `Bash(bun ${join(metaPath, "scripts/merge-gate.ts")}:*)`,
+    "Bash(ops-kit pr resolve-thread:*)",
+    "Bash(gh pr comment:*)",
+    ...skills.flatMap((path) => [`Edit(${path})`, `Write(${path})`]),
+  ];
+}
+
+/**
  * What ends the runner's reply and is recorded after the fences it closes (#948, #1936): a tool call, an ask, the session's
  * end. The person's next message closes them too, but after it is recorded — its files are recorded before it, and a row
  * between them would split them.
@@ -1017,6 +1035,7 @@ export class TaskManager {
     const env = { ...path, ...deviceAuth, ...this.dockerEnv?.(task.id), SWITCHBOARD_TASK_ID: task.id };
     // The stop for writes to fixed names right under /tmp (#764, docs/design/shared-tmp-guard.md): the kit's hook
     const guards = meta ? [shellQuote(join(meta.path, "ops-kit/bin/deny-shared-tmp"))] : undefined;
+    const allow = meta ? taskAllowRules(meta.path, task.cwd) : undefined;
     // How to report a stop and when to retry (#949), with the work's stops still open: before every start's prompt.
     const recovery = stopRecoveryPrompt(reduceStops(stopRecordsFor(this.db, task)).filter((s) => s.state !== "resolved"));
     // The insights schedule's Task (#1838) sends `/insights` and nothing else: Claude Code expands a built-in slash
@@ -1032,7 +1051,7 @@ export class TaskManager {
       // Not made = the task does not start (the error below), never a Codex without the stop.
       const privateTmp = meta && task.runner === "codex" && this.privateTmpRoot ? makePrivateTmp(this.privateTmpRoot, task.id) : undefined;
       live.session = adapter.start(
-        { cwd: task.cwd, scope: task.scope, prompt, model: task.model ?? undefined, permissionMode: task.permissionMode ?? undefined, effort: task.effort ?? undefined, resumeSessionId, preamble, env, guards, privateTmp, bedrock: this.bedrock?.(task), attachments, attachmentDir: this.attachments?.taskDir(task.id), mcpServers: this.mcpServers?.(task) },
+        { cwd: task.cwd, scope: task.scope, prompt, model: task.model ?? undefined, permissionMode: task.permissionMode ?? undefined, effort: task.effort ?? undefined, resumeSessionId, preamble, env, guards, allow, privateTmp, bedrock: this.bedrock?.(task), attachments, attachmentDir: this.attachments?.taskDir(task.id), mcpServers: this.mcpServers?.(task) },
         (ev) => this.onEvent(task.id, live, ev),
       );
     } catch (e) {

@@ -52,10 +52,11 @@
   <button id="rebuild">作り直す（ディスクを初期状態に戻す）</button>
 </div>
 
-<h2>/tmp</h2>
+<h2>ディスク</h2>
 <div class="card">
-  <div id="tmp-usage">読み込み中…</div>
-  <div id="tmp-sweep" class="dim"></div>
+  <div id="disk-usage">読み込み中…</div>
+  <ul id="sweeps" class="dim"></ul>
+  <div id="tmp-usage"></div>
   <ul id="tmp-list"></ul>
   <div class="row">
     <button id="tmp-reload">再読込</button>
@@ -238,13 +239,16 @@ $("rebuild").onclick = async () => {
 $("agent-start").onclick = () => act("api/agent/start", {}, "救援エージェントを起動します。Claude の定額枠を使います。");
 $("agent-stop").onclick = () => act("api/agent/stop", {}, "救援エージェントを止めます。");
 
-// /tmp (#797): read on opening, 再読込 and after a clean only — walking the tree is not for the 2 s refresh
+// the disk and /tmp (#797, #2549): read on opening, 再読込 and after a clean only — walking the tree is not for the 2 s refresh
 const size = (n) => { const u = ["B", "KB", "MB", "GB"]; let i = 0; while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; } return (i ? n.toFixed(1) : n) + " " + u[i]; };
 // the host's clock, not the browser's: never "-3 分前"
 const ago = (ms) => { const m = Math.max(0, Math.floor((Date.now() - ms) / 60000)); return m < 60 ? m + " 分前" : Math.floor(m / 60) + " 時間前"; };
 const KEEP = { pattern: "型に合わない", recent: "2 時間以内に更新", owner: "持ち主が違う", "not-a-directory": "ディレクトリでない", "in-use": "使用中", "use-unknown": "使用中か確かめられない" };
 let cleanable = { names: [], bytes: 0 };
 let tmpOwned = false;
+// the kinds sb-rescue cleans by itself; キャッシュ and docker only on a machine of Switchboard's own (owned)
+const SWEEPS = [["tmp", "/tmp"], ["work", "作業の残り"], ["cache", "キャッシュ"], ["docker", "docker"]];
+const usageText = (u) => "使用 " + size(u.used) + " / " + size(u.total) + "（" + u.percent + "%）";
 async function loadTmp() {
   const r = await fetch("api/tmp", { headers }).catch(() => null);
   const t = r && r.ok ? await r.json().catch(() => null) : null;
@@ -253,13 +257,20 @@ async function loadTmp() {
     cleanable = { names: [], bytes: 0 };
     $("tmp-clean").textContent = "古い作業ディレクトリを消す";
     $("tmp-clean").disabled = true;
-    $("tmp-usage").textContent = "/tmp を読めませんでした (" + (r ? r.status : "届きません") + ")";
-    $("tmp-sweep").textContent = "";
+    $("disk-usage").textContent = "ディスクを読めませんでした (" + (r ? r.status : "届きません") + ")";
+    $("disk-usage").className = "";
+    $("sweeps").replaceChildren();
+    $("tmp-usage").textContent = "";
     return;
   }
-  $("tmp-usage").textContent = "使用 " + size(t.usage.used) + " / " + size(t.usage.total) + "（" + t.usage.percent + "%）";
+  $("disk-usage").textContent = "ルートディスク " + usageText(t.disk);
+  $("disk-usage").className = t.disk.percent >= 80 ? "bad" : "";
+  $("sweeps").replaceChildren(...SWEEPS.filter(([k]) => t.owned || (k !== "cache" && k !== "docker")).map(([k, label]) => {
+    const w = t.sweeps[k];
+    return Object.assign(document.createElement("li"), { textContent: "自動の片付け（" + label + "）: " + (w ? ago(w.at) + " · " + w.removed + " 件 · " + size(w.freedBytes) : "まだ（30 分ごと）") });
+  }));
+  $("tmp-usage").textContent = "/tmp " + usageText(t.usage);
   $("tmp-usage").className = t.usage.percent >= 80 ? "bad" : "";
-  $("tmp-sweep").textContent = t.sweep ? "自動の片付け: " + ago(t.sweep.at) + " · " + t.sweep.removed + " 件 · " + size(t.sweep.freedBytes) : "自動の片付け: まだ（30 分ごと）";
   $("tmp-list").replaceChildren(...t.entries.map((e) => {
     const li = document.createElement("li");
     const name = Object.assign(document.createElement("code"), { textContent: e.name });

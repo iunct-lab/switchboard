@@ -128,20 +128,22 @@ Task の途中で設計が変わった（Task に書いた場所では足りな�
 
 止めるときは `<guard> release <PBI> "返事待ち: <確認の 1 文>"`（並列ガードを使うとき）。返信を受けて再開するときは `<guard> claim <PBI>` からやり直し、**必ずマージ判定をもう一度通す**。`[merge-ask]` を付けて聞いた PR への返信なら、マージ判定の前に `[merge-answer] <yes|no> <聞いたときと同じ kinds> <head sha>` を PR に投稿する（記録の印。CI など large 以外の理由で聞いたときは `[merge-ask]` も `[merge-answer]` も付けない）。`[merge-ask]` を付けずに聞いていた（印の手順より前に始めた会話、Task の会話以外の経路で認められた、付け忘れ）なら、`[merge-answer]` の前に `[merge-ask] <kinds> <head sha>` を投稿してから付ける（`<kinds>` はマージ判定の出力の `ask` と印の無い `recheck`。印の時刻はどちらも付けた時刻で、聞いた時刻には遡れない — その PR の「返事まで」は短く出る。それでよい。#1069）。返信が大きい変更のマージを認めた（`yes`）ときだけ、`[merge-answer] yes` を投稿した**後で** `--allow-large` を付ける（印を付けずに `--allow-large` でマージしない。`[聞く]` も `[再チェック]` も外れる。CI・未解決のスレッド・見直されていないコミット・CLEAN でないことは、返信があっても外れない）。再チェックの印は head ごとなので、下の PR のマージ後の自動 rebase で head が変わったら出し直す（`<再チェック>`）。
 
+マージは `<マージ判定> <PR> --merge-stack`（スタックの最下段）/ `--merge`（単発）で、判定が merge のときだけマージまで進む（判定とマージが 1 つのコマンドなので、Task の許可に入る。`--allow-large` と一緒なら head の `[merge-answer] yes` が無ければマージしない）。マージ判定のコマンドに `--merge` / `--merge-stack` が無いリポジトリ（CLAUDE.md がマージ判定を名指ししない、またはその引数が無い）では、`<マージ判定> <PR> && gh stack merge <PR> --rebase -y`、単発は `gh pr merge <n> --rebase --delete-branch` にする。
+
 ```bash
-<マージ判定> <一番下の PR> && gh stack merge <一番下の PR> --rebase -y
+<マージ判定> <一番下の PR> --merge-stack
 # GitHub の Stacked PR が次の PR を main に retarget して rebase する。これを待つ:
 until gh pr view <次> --json baseRefName,mergeStateStatus -q '"\(.baseRefName) \(.mergeStateStatus)"' | grep -qE '^main (CLEAN|UNSTABLE)$'; do
   gh pr view <次> --json baseRefName,mergeable,mergeStateStatus -q '"\(.baseRefName) \(.mergeable) \(.mergeStateStatus)"'; sleep 30; done
 # Actions が始まらない間だけ: 自動 rebase で head の sha が変わり、前のローカル CI の合格はもう数えられないので回し直す
 <ローカル CI> <次>
-<マージ判定> <次> && gh stack merge <次> --rebase -y
+<マージ判定> <次> --merge-stack
 ```
 
 - **UNSTABLE** = CI が走っている（マージ判定が「未完了」で止めるので、待ってやり直す）か、CI が始まらずに失敗している（上のローカル CI。head の合格の印があればマージ判定は UNSTABLE のまま通す）
 - **CONFLICTING / DIRTY** = 自動 rebase が解けなかった。**このときだけ**ローカルで直す: `git fetch && git checkout <次の枝> && git rebase origin/main` → 解消 → テスト → `git push --force-with-lease`。直したら CLEAN を待って再開
 - 中身が空になった PR は GitHub が merged 扱いにする（下の PR に取り込まれたとき）。空の PR を残さない
-- スタックに属さない単発は `gh pr merge <n> --rebase --delete-branch`（`gh stack merge` は "not a stacked pull request" で失敗する）
+- スタックに属さない単発は `<マージ判定> <n> --merge`（`gh stack merge` は "not a stacked pull request" で失敗する）
 
 マージのたびに `review-triage-and-merge` の 6（結果コメント、Status Done、復活ファイルの確認）。**全 PR を一度に `gh stack merge <top>` しない**（コンフリクトが隠れる。利用者の指示）。
 
@@ -150,7 +152,7 @@ until gh pr view <次> --json baseRefName,mergeStateStatus -q '"\(.baseRefName) 
 1. 受け入れ条件の各行を `- [x]` にし、行末に検証結果（テスト名 / コマンドと出力 / 画面で見た事実）。満たせなかった行は `- [ ]` のまま理由。`（利用者確認: …）` の行は除く（自分でチェックしない。4 を見る）
 2. `## 結果`: 受け入れ条件ごとの検証、レビュー件数、Story Points の妥当性、残したもの（Issue 番号）
 3. `ops-kit scan-issues` を 1 回走らせる（`issue-workflow` の「Issue・PR・コメントに書かない値」。`ops-kit` が PATH に無い（`command -v ops-kit` が空）ときだけ走らせず、報告に「検査していない（キットが PATH に無い）」と書く）。exit 1 なら当たった場所（URL と種類。値は書かない）を PBI の `## 判断待ち` に出し、片づけの OK を聞く（その節の「書いてしまったとき」。回答が来るまで 4 で PBI は閉じない）。exit 2 は数分待って 1 回だけやり直し、まだ 2 なら報告の「利用者へ」に書いて先へ進む
-4. 利用者の確認待ちの項目があれば Status は In review のまま open。確認待ちは `gh issue list --label needs-decision --state open` で PBI と その Task を探す（`## 判断待ち` を出したのに回答が無いもの。数えるのは実装の判断だけ。運用の確認は Issue に無く、Task の会話で聞いて返事を受けてから進んでいる）と、PBI の受け入れ条件に `- [ ]` のまま残っている `（利用者確認: …）` の行（`issue-workflow` の「利用者確認の項目」。この行は自分でチェックしない。利用者が「確認した」と答えると付く）。どちらも無く Task も全部閉じていれば `gh issue close <PBI>`、Status Done（GitHub 連携の無い workspace（`BACKLOG_WORKSPACE` がある）では `ops-kit backlog edit <PBI> --state closed`。Task は PR の `Closes` で自動では閉じないので、マージした PR の Task が open のままなら先に `ops-kit backlog edit <Task> --state closed` で閉じる（`review-triage-and-merge` の 6）。閉じ忘れた Task で止まらない）。`## 回答` に「違う」の理由があれば、それを直す Task を切る（`pbi-to-tasks`）
+4. 利用者の確認待ちの項目があれば Status は In review のまま open。確認待ちは `gh issue list --label needs-decision --state open` で PBI と その Task を探す（`## 判断待ち` を出したのに回答が無いもの。数えるのは実装の判断だけ。運用の確認は Issue に無く、Task の会話で聞いて返事を受けてから進んでいる）と、PBI の受け入れ条件に `- [ ]` のまま残っている `（利用者確認: …）` の行（`issue-workflow` の「利用者確認の項目」。この行は自分でチェックしない。利用者が「確認した」と答えると付く）。どちらも無く Task も全部閉じていれば `gh issue close <PBI>`、Status Done（`BACKLOG_URL` がある（アプリの Task の中）なら `ops-kit backlog edit <PBI> --state closed`。GitHub 連携の無い workspace（`BACKLOG_WORKSPACE` がある）では `ops-kit backlog edit <PBI> --state closed`。Task は PR の `Closes` で自動では閉じないので、マージした PR の Task が open のままなら先に `ops-kit backlog edit <Task> --state closed` で閉じる（`review-triage-and-merge` の 6）。閉じ忘れた Task で止まらない）。`## 回答` に「違う」の理由があれば、それを直す Task を切る（`pbi-to-tasks`）
 5. Milestone の説明を更新（残り / やらない）。元要望 Issue の `## 派生 PBI` の行に Done と書き、派生が全部 Done ならその Issue も閉じる。要望の `## 出典` の経路が「公開側 Issue <URL>」なら、派生が全部 Done（か「やらない」）になったとき、公開側の Issue に結果を 3 行（何が変わったか / それを含む公開側の同期の PR か「まだ同期されていない」/ やらないならその理由）書いて閉じる（`gh issue close <URL> --reason completed`。やらないなら `--reason "not planned"`）。Private の Issue の番号・URL・内部の情報は書かない（`request-to-backlog` の「公開側の Issue から」）
 6. `<guard> release <PBI> "完了"`（並列ガードを使ったとき。閉じないで終わるときも理由を書いて release する。外さないと次の /pbi-complete が止まる）。PBI の worktree を `git worktree remove`、この PBI で作ったスクラッチ（`mktemp -d` が返した実際のパス）だけを `rm -rf`（`/tmp/review*` や `/tmp/<リポジトリ名>.*` の glob は並行している別のセッションのものも消す）。**main の作業ツリーの更新は `ops-kit pull-main`**（CLAUDE.md の有無によらず、どのリポジトリでも同じ既定。fast-forward でき、未コミットの変更が取り込むファイルと重ならなければ pull し、でなければ何も変えずに理由を 1 行出して exit 1。fetch できない・Git でないは exit 2）。CLAUDE.md が既定を変えている（pull が動いているサービスを再起動するので利用者の OK を取る、など）ならそれに従い、OK 待ちなら走らせない。exit 1 / 2 なら出力の 1 行を報告の `main:` に書く。`ops-kit` が PATH に無い（`command -v ops-kit` が空）ときだけ走らせず「pull していない（キットが PATH に無い）」と書く。動いているコードの更新（昇格・再起動）は CLAUDE.md が書く手順に従い、再起動するなら利用者の OK を取ってから
 
