@@ -12,6 +12,12 @@ export function currentRepo(cwd = process.cwd()): string {
   return repo;
 }
 
+/** The working tree's origin only (not GH_REPO): what a repository-local command like `gh stack` acts on. */
+export function originRepo(cwd = process.cwd()): string | undefined {
+  const result = Bun.spawnSync(["git", "-C", cwd, "remote", "get-url", "origin"], { stderr: "pipe" });
+  return result.exitCode === 0 ? parseRepo(result.stdout.toString().trim()) : undefined;
+}
+
 function parseRepo(value: string): string | undefined {
   const path = value.trim().replace(/^[a-z][a-z\d+.-]*:\/\/(?:[^/@]+@)?[^/]+\//i, "")
     .replace(/^[^/@]+@[^:]+:/, "").replace(/\.git\/?$/, "").replace(/\/$/, "");

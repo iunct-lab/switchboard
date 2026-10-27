@@ -180,6 +180,37 @@ export function bodiesOf(argv: string[], read: (path: string) => string | null, 
   return reads.length === 0 ? null : reads;
 }
 
+const BACKLOG_WRITES = new Set(["create", "new", "comment", "edit", "close", "reopen"]);
+/** The flags of `gh issue create / comment / edit / close / reopen` that take a value: the value is not the Issue argument. */
+const ISSUE_VALUE_FLAGS = new Set(["--title", "-t", "--body", "-b", "--body-file", "-F", "--comment", "-c", "--reason", "-r", "--duplicate-of", "--assignee", "-a", "--label", "-l", "--milestone", "-m", "--project", "-p", "--template", "-T", "--recover", "--add-assignee", "--remove-assignee", "--add-label", "--remove-label", "--add-project", "--remove-project"]);
+
+/**
+ * An Issue write the app's Task makes in place of `ops-kit backlog` (#2694): its subcommand, and the repository it
+ * names (`-R` / `--repo`, before the group too, or the URL given for the Issue), null when it names none — gh then
+ * writes to GH_REPO or the checkout's. Null for anything else: a read, a pull request, `gh api`.
+ */
+export function backlogWrite(argv: string[]): { sub: string; repo: string | null } | null {
+  let named: string | undefined;
+  const words: number[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    // after `--` gh reads no more flags: the rest are arguments (the Issue's URL among them)
+    if (a === "--") {
+      for (let j = i + 1; j < argv.length; j++) words.push(j);
+      break;
+    }
+    if (a === "-R" || a === "--repo") named = argv[++i];
+    else if (/^(?:--repo=|-R=?)./.test(a)) named = a.replace(/^(?:--repo=|-R=?)/, "");
+    // the value of a flag (a body that is a URL or starts with -R) names no repository and is not the Issue
+    else if (ISSUE_VALUE_FLAGS.has(a)) i++;
+    else if (!a.startsWith("-")) words.push(i);
+  }
+  const [group, sub, ...refs] = words.map((i) => argv[i]!);
+  if (group !== "issue" || sub === undefined || !BACKLOG_WRITES.has(sub)) return null;
+  const url = refs.map((r) => /^https?:\/\/[^/]+\/([^/]+\/[^/]+)\/issues\/\d+/.exec(r)?.[1]).find((r) => r !== undefined);
+  return { sub, repo: named !== undefined ? named.split("/").slice(-2).join("/") : (url ?? null) };
+}
+
 /** The first `name` of the PATH that is not a guard: not this file, and not another checkout's copy of it (it holds `mark`). */
 export function realCommand(name: string, path: string, self: string, mark: string): string | null {
   for (const dir of path.split(delimiter)) {

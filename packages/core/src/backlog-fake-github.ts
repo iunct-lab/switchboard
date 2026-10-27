@@ -6,6 +6,9 @@ import type { GhRunner } from "./backlog.ts";
 
 export type Issue = { node_id: string; number: number; title: string; body: string; state: string; labels: string[]; parent: number | null; milestone?: number | null; comments: Array<{ node_id: string; body: string; created_at: string }> };
 
+/** The Project's Status options; option `o<n>` is the n-th. */
+const STATUS = ["Backlog", "Ready", "In progress", "In review", "Done"];
+
 export function fakeGithub(now: () => number) {
   const issues = new Map<number, Issue>([
     [12, { node_id: "I_12", number: 12, title: "PBI", body: "本文", state: "OPEN", labels: ["type:pbi", "needs-decision"], parent: null, comments: [] }],
@@ -65,7 +68,7 @@ export function fakeGithub(now: () => number) {
         const i = issues.get(v.n);
         return answer({ data: { repository: { issue: i && { id: i.node_id, title: i.title, body: i.body, state: i.state, milestone: milestones.find((m) => m.number === i.milestone) ?? null, parent: i.parent && { id: issues.get(i.parent)!.node_id, number: i.parent }, labels: { nodes: i.labels.map((name) => ({ name })) } } } } });
       }
-      if (q.includes("projectV2(number:$p)")) return answer({ data: { repositoryOwner: { projectV2: { id: "P_1", fields: { nodes: [{ id: "F_s", name: "Status", dataType: "SINGLE_SELECT", options: [{ id: "o1", name: "Backlog" }, { id: "o2", name: "Ready" }] }] } } } } });
+      if (q.includes("projectV2(number:$p)")) return answer({ data: { repositoryOwner: { projectV2: { id: "P_1", fields: { nodes: [{ id: "F_s", name: "Status", dataType: "SINGLE_SELECT", options: STATUS.map((name, n) => ({ id: `o${n + 1}`, name })) }] } } } } });
       if (q.includes("addProjectV2ItemById")) {
         const id = `PVTI_${v.c}`;
         if (state.autoAdd && items.has(id)) return { code: 1, stdout: `HTTP/2.0 200 OK\ncontent-type: application/json\n\n${JSON.stringify({ data: { addProjectV2ItemById: null }, errors: [{ type: "UNPROCESSABLE", message: "Content already exists in this project" }] })}`, stderr: "gh: Content already exists in this project" };
@@ -73,7 +76,7 @@ export function fakeGithub(now: () => number) {
         return answer({ data: { addProjectV2ItemById: { item: { id } } } });
       }
       if (q.includes("projectItems")) return answer({ data: { node: { projectItems: { nodes: [...items].filter(([, i]) => i.issue === v.c).map(([id]) => ({ id, project: { id: "P_1" } })) } } } });
-      if (q.includes("updateProjectV2ItemFieldValue")) return (items.get(v.i)!.fields.Status = v.value === "o1" ? "Backlog" : "Ready"), answer({ data: {} });
+      if (q.includes("updateProjectV2ItemFieldValue")) return (items.get(v.i)!.fields.Status = STATUS[Number(String(v.value).slice(1)) - 1]!), answer({ data: {} });
       if (q.includes("deleteProjectV2Item")) return items.delete(v.i), answer({ data: {} });
       if (q.includes("removeSubIssue")) return (byId(v.c).parent = null), answer({ data: {} });
       if (q.includes("addSubIssue")) return (byId(v.c).parent = byId(v.p).number), answer({ data: {} });

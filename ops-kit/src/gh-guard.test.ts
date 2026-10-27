@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { bodiesOf, GUARD_MARK, realCommand } from "./gh-guard.ts";
+import { backlogWrite, bodiesOf, GUARD_MARK, realCommand } from "./gh-guard.ts";
 
 const GUARD = join(import.meta.dir, "../bin/gh");
 const code = ["QWJK", "ZRTP"].join("-");
@@ -23,9 +23,10 @@ beforeAll(() => {
 });
 afterAll(() => rmSync(dir, { recursive: true }));
 
-function run(argv: string[], stdin = "", awsConfigFile = awsConfig) {
+// outside the app's Task unless `env` says otherwise: a Task running these tests has BACKLOG_URL
+function run(argv: string[], stdin = "", awsConfigFile = awsConfig, env: Record<string, string | undefined> = { BACKLOG_URL: undefined }) {
   if (existsSync(log)) rmSync(log);
-  const p = Bun.spawnSync([GUARD, ...argv], { env: { ...process.env, AWS_CONFIG_FILE: awsConfigFile, PATH: `${dirname(GUARD)}:${dir}:${process.env.PATH}` }, stdin: new TextEncoder().encode(stdin), stdout: "pipe", stderr: "pipe" });
+  const p = Bun.spawnSync([GUARD, ...argv], { env: { ...process.env, ...env, AWS_CONFIG_FILE: awsConfigFile, PATH: `${dirname(GUARD)}:${dir}:${process.env.PATH}` }, stdin: new TextEncoder().encode(stdin), stdout: "pipe", stderr: "pipe" });
   return { code: p.exitCode, out: p.stdout.toString(), err: p.stderr.toString(), called: existsSync(log) ? (JSON.parse(readFileSync(log, "utf8")) as { argv: string[]; stdin: string }) : null };
 }
 
@@ -189,6 +190,62 @@ describe("ops-kit/bin/gh", () => {
   });
 });
 
+describe("backlog (#2694): in the app's Task an Issue of the workspace is not written with gh", () => {
+  const task = { BACKLOG_URL: "http://127.0.0.1:1/api/backlog", GH_REPO: "acme/app" };
+
+  test("an Issue write of the workspace stops before gh: exit 1, and the ops-kit backlog command to use", () => {
+    for (const [argv, instead] of [
+      [["issue", "edit", "5", "--body", "x"], "edit"],
+      [["issue", "comment", "5", "-R", "acme/app", "--body", "x"], "comment"],
+      [["issue", "close", "5", "--repo=ACME/App"], "edit --state closed"],
+      [["issue", "reopen", "https://github.com/acme/app/issues/5"], "edit --state open"],
+      [["issue", "-R", "github.com/acme/app", "create", "-t", "t", "-b", "b"], "create"],
+      [["-R", "acme/app", "issue", "edit", "5", "--body", "x"], "edit"],
+    ] as const) {
+      const r = run([...argv], "", awsConfig, task);
+      expect([argv, r.code, r.called]).toEqual([argv, 1, null]);
+      expect(r.err).toContain(`acme/app の Issue に直接書きません。ops-kit backlog ${instead} を使ってください`);
+    }
+  });
+
+  test("another repository's Issue, a pull request, a read and gh api reach gh", () => {
+    for (const argv of [
+      ["issue", "comment", "5", "-R", "acme/public", "--body", "x"],
+      ["issue", "close", "https://github.com/acme/public/issues/5", "--reason", "completed"],
+      ["issue", "edit", "--add-label", "bug", "https://github.com/acme/public/issues/5"],
+      ["issue", "close", "--", "https://github.com/acme/public/issues/5"],
+      ["-R", "acme/public", "issue", "comment", "5", "--body", "x"],
+      ["pr", "comment", "5", "--body", "x"],
+      ["issue", "view", "5"],
+      ["api", "repos/acme/app/issues/5/comments", "-f", "body=x"],
+    ]) expect([argv, run(argv, "", awsConfig, task).called?.argv]).toEqual([argv, argv]);
+  });
+
+  test("a body that is the URL of another repository's Issue does not name the repository written to", () => {
+    expect(run(["issue", "comment", "5", "--body", "https://github.com/acme/public/issues/9"], "", awsConfig, task)).toMatchObject({ code: 1, called: null });
+    expect(backlogWrite(["issue", "comment", "5", "-b", "-Racme/public"])).toEqual({ sub: "comment", repo: null });
+    expect(backlogWrite(["issue", "edit", "5", "--add-label", "https://github.com/acme/public/issues/9"])).toEqual({ sub: "edit", repo: null });
+  });
+
+  test("without GH_REPO the workspace is the checkout's origin, as ops-kit backlog reads it", () => {
+    const repo = mkdtempSync(join(tmpdir(), "ops-kit.gh-guard.origin."));
+    try {
+      Bun.spawnSync(["git", "init", "-q", repo]);
+      Bun.spawnSync(["git", "-C", repo, "remote", "add", "origin", "https://github.com/acme/app.git"]);
+      const at = (argv: string[]) => Bun.spawnSync([GUARD, ...argv], { cwd: repo, env: { ...process.env, BACKLOG_URL: task.BACKLOG_URL, GH_REPO: undefined, AWS_CONFIG_FILE: awsConfig, PATH: `${dirname(GUARD)}:${dir}:${process.env.PATH}` }, stdout: "pipe", stderr: "pipe" });
+      const stopped = at(["issue", "comment", "5", "--body", "x"]);
+      expect([stopped.exitCode, stopped.stderr.toString()]).toEqual([1, expect.stringContaining("acme/app の Issue に直接書きません")]);
+      expect(at(["issue", "comment", "5", "-R", "acme/public", "--body", "x"]).exitCode).toBe(3);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test("without BACKLOG_URL an Issue write reaches gh as before", () => {
+    expect(run(["issue", "edit", "5", "--body", "x"], "", awsConfig, { BACKLOG_URL: undefined, GH_REPO: "acme/app" }).called?.argv).toEqual(["issue", "edit", "5", "--body", "x"]);
+  });
+});
+
 describe("the forms gh accepts", () => {
   test("the alias new, a flag before the subcommand, a value attached to its flag, a body that starts like a flag", () => {
     for (const argv of [
@@ -242,14 +299,14 @@ describe("the forms gh accepts", () => {
   });
 
   test("a body file that is a pipe is read once and handed on as a file with the same text", () => {
-    const p = Bun.spawnSync(["bash", "-c", `"$0" issue comment 1 --body-file <(printf 'hello body\\n'); echo "exit=$?"`, GUARD], { env: { ...process.env, PATH: `${dirname(GUARD)}:${dir}:${process.env.PATH}` }, stdout: "pipe", stderr: "pipe" });
+    const p = Bun.spawnSync(["bash", "-c", `"$0" issue comment 1 --body-file <(printf 'hello body\\n'); echo "exit=$?"`, GUARD], { env: { ...process.env, BACKLOG_URL: undefined, PATH: `${dirname(GUARD)}:${dir}:${process.env.PATH}` }, stdout: "pipe", stderr: "pipe" });
     expect(p.stdout.toString()).toContain("exit=3");
     const called = JSON.parse(readFileSync(log, "utf8")) as { argv: string[] };
     expect(called.argv.slice(0, 4)).toEqual(["issue", "comment", "1", "--body-file"]);
     expect(called.argv[4]).not.toMatch(/^\/dev\/fd\//);
     // the copy is gone once gh has returned
     expect(existsSync(called.argv[4]!)).toBe(false);
-    const stopped = Bun.spawnSync(["bash", "-c", `"$0" issue comment 1 --body-file <(printf '%s\\n' "$1"); echo "exit=$?"`, GUARD, secret], { env: { ...process.env, PATH: `${dirname(GUARD)}:${dir}:${process.env.PATH}` }, stdout: "pipe", stderr: "pipe" });
+    const stopped = Bun.spawnSync(["bash", "-c", `"$0" issue comment 1 --body-file <(printf '%s\\n' "$1"); echo "exit=$?"`, GUARD, secret], { env: { ...process.env, BACKLOG_URL: undefined, PATH: `${dirname(GUARD)}:${dir}:${process.env.PATH}` }, stdout: "pipe", stderr: "pipe" });
     expect(stopped.stdout.toString()).toContain("exit=1");
   });
 

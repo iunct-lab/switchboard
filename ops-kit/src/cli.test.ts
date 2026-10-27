@@ -30,7 +30,8 @@ function run(argv: string[], responses: Parameters<typeof fakeGh>[0] = []) {
   const out: string[] = [];
   const err: string[] = [];
   const gh = fakeGh(responses);
-  return main(argv, gh, (s) => out.push(s), (s) => err.push(s), async () => {}).then((code) => ({ code, out: out.join("\n"), err: err.join("\n"), gh }));
+  // outside the app's Task: a Task running these tests has BACKLOG_URL, which sends set / triage to the app
+  return main(argv, gh, (s) => out.push(s), (s) => err.push(s), async () => {}, { ...process.env, BACKLOG_URL: undefined }).then((code) => ({ code, out: out.join("\n"), err: err.join("\n"), gh }));
 }
 
 describe("cli", () => {
@@ -196,6 +197,25 @@ describe("cli", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("pr resolve-thread resolves each thread", async () => {
+    const resolved = (call: unknown) => {
+      expect(call).toMatchObject({ kind: "graphql" });
+      return { resolveReviewThread: { thread: { isResolved: true } } };
+    };
+    const r = await run(["pr", "resolve-thread", "PRRT_a1", "PRRT_b-2"], [resolved, resolved]);
+    expect(r).toMatchObject({ code: 0, out: "PRRT_a1 resolved\nPRRT_b-2 resolved" });
+    expect(r.gh.calls.map((c) => c.kind === "graphql" && c.vars)).toEqual([{ t: "PRRT_a1" }, { t: "PRRT_b-2" }]);
+    expect((r.gh.calls[0] as { query: string }).query).toContain("resolveReviewThread(input:{threadId:$t})");
+    // an id of another shape is refused before gh is called (only review threads, not any node)
+    const bad = await run(["pr", "resolve-thread", "PRRT_a1", "I_kwDO1"]);
+    expect(bad.code).toBe(1);
+    expect(bad.gh.calls).toEqual([]);
+    expect((await run(["pr", "resolve-thread"])).code).toBe(1);
+    // GitHub not answering resolved is a failure of that thread
+    const no = await run(["pr", "resolve-thread", "PRRT_a1"], [() => ({ resolveReviewThread: { thread: { isResolved: false } } })]);
+    expect(no).toMatchObject({ code: 1, err: "PRRT_a1: PRRT_a1 が resolve にならなかった" });
+  });
 });
 
 test("lint --no-project does not resolve a missing Project URL", async () => {
@@ -236,4 +256,83 @@ test("lint without ops.config.json checks a workspace without GitHub with the te
     server.stop(true);
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+describe("set / triage with BACKLOG_URL (#2694)", () => {
+  // a fake app: what it was asked, and the stored fields of the one Issue
+  function fakeApp() {
+    const calls: Array<{ method: string; path: string; body: unknown }> = [];
+    const sync = { workspaceId: "ws_1", repository: "example/repo", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } };
+    const server = Bun.serve({
+      port: 0,
+      fetch: async (req) => {
+        const url = new URL(req.url);
+        const path = url.pathname.replace(/^\/api\/backlog/, "");
+        calls.push({ method: req.method, path, body: req.method === "PATCH" ? await req.json() : null });
+        if (path === "") return Response.json({ syncs: [sync], items: [] });
+        if (req.method === "GET") return Response.json({ issue: { number: 12 }, comments: [], fields: { Status: "Backlog", "Story Points": 3 }, fetchedAt: 1, localId: null, pending: 0 });
+        return Response.json({});
+      },
+    });
+    const env = { ...process.env, BACKLOG_URL: `http://127.0.0.1:${server.port}/api/backlog`, BACKLOG_TOKEN_FILE: undefined, BACKLOG_WORKSPACE: undefined, GH_REPO: "example/repo" };
+    return { calls, env, stop: () => server.stop(true) };
+  }
+  const patches = (calls: Array<{ method: string; body: unknown }>) => calls.filter((c) => c.method === "PATCH").map((c) => c.body);
+
+  test("set and triage are stored in the app and never written with gh", async () => {
+    const app = fakeApp();
+    try {
+      const gh = fakeGh([]);
+      const out: string[] = [];
+      expect(await main(["set", "12", "Status", "In progress", "--config", config], gh, (s) => out.push(s), () => {}, async () => {}, app.env)).toBe(0);
+      expect(await main(["triage", "12", "one", "bug", "P1", "Phase 0", "", "Ready", "--config", config], gh, (s) => out.push(s), () => {}, async () => {}, app.env)).toBe(0);
+      expect(out).toEqual(["#12 を保存しました", "#12 を保存しました"]);
+      expect(patches(app.calls)).toEqual([
+        { workspaceId: "ws_1", fields: { Status: "In progress" } },
+        { workspaceId: "ws_1", project: true, fields: { Area: "one", Kind: "bug", Priority: "P1", Phase: "Phase 0", Status: "Ready" } },
+      ]);
+      expect(gh.calls).toHaveLength(0);
+    } finally {
+      app.stop();
+    }
+  });
+
+  test("another repository's ops.config.json: its fields decide triage's arguments, and nothing goes to gh", async () => {
+    const app = fakeApp();
+    const dir = mkdtempSync(join(tmpdir(), "ops-kit.other-config."));
+    try {
+      const cfg = JSON.parse(readFileSync(config, "utf8"));
+      delete cfg.fields.phase;
+      cfg.projectUrl = "https://github.com/users/someone/projects/9";
+      writeFileSync(join(dir, "ops.config.json"), JSON.stringify(cfg));
+      const gh = fakeGh([]);
+      expect(await main(["set", "12", "Story Points", "5", "--config", join(dir, "ops.config.json")], gh, () => {}, () => {}, async () => {}, app.env)).toBe(0);
+      expect(await main(["triage", "12", "one", "bug", "P1", "", "Ready", "--config", join(dir, "ops.config.json")], gh, () => {}, () => {}, async () => {}, app.env)).toBe(0);
+      expect(patches(app.calls)).toEqual([
+        { workspaceId: "ws_1", fields: { "Story Points": 5 } },
+        { workspaceId: "ws_1", project: true, fields: { Area: "one", Kind: "bug", Priority: "P1", Status: "Ready" } },
+      ]);
+      expect(gh.calls).toHaveLength(0);
+    } finally {
+      app.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an app that cannot be reached is not told (exit 2), and gh is not used instead", async () => {
+    const gh = fakeGh([]);
+    const err: string[] = [];
+    expect(await main(["set", "12", "Status", "Ready", "--config", config], gh, () => {}, (s) => err.push(s), async () => {}, { ...process.env, BACKLOG_URL: "http://127.0.0.1:1/api/backlog", GH_REPO: "example/repo" })).toBe(2);
+    expect(err.join("\n")).toContain("アプリに届きません");
+    expect(gh.calls).toHaveLength(0);
+  });
+
+  test("without BACKLOG_URL, set still writes to GitHub with gh", async () => {
+    const r = await run(["set", "12", "Status", "Ready", "--config", config], [
+      () => ({ repositoryOwner: { projectV2: { id: "P1", field: { id: "F1", dataType: "SINGLE_SELECT", options: [{ id: "O2", name: "Ready" }] } } }, repository: { issue: { id: "I1", projectItems: { nodes: [{ id: "IT1", project: { number: 1 } }] } } } }),
+      () => ({}),
+    ]);
+    expect(r).toMatchObject({ code: 0, out: "#12  Status = Ready" });
+    expect(r.gh.calls).toHaveLength(2);
+  });
 });

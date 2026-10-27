@@ -6,15 +6,19 @@
  * from this machine (#748). With the cookie, a state-changing POST also needs a passkey check within 5 minutes (the
  * Starter's sb_recent, #497); the token and loopback do not.
  * /tmp (#797) is read only on request (GET /api/tmp, not in /api/status) and its clean answers 200 at once, outside `operate`.
- * Every 30 minutes sb-rescue also cleans it by itself (#1720), with the same judgement as the button; GET /api/tmp says when it last did.
+ * Every 30 minutes sb-rescue also cleans it by itself (#1720), with the same judgement as the button, and with it local CI's leftovers
+ * under ~/.cache and, on a machine of Switchboard's own, uv's and bun's caches and docker's unused images (#2549). GET /api/tmp
+ * says how full the root disk is (`disk`) and when each kind was last cleaned (`sweeps`).
  */
 import { createPublicKey, verify } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { RescueAgent } from "./agent.ts";
 import page from "./page.html" with { type: "text" };
 import { checkDaemon, listSnapshots, promote, restoreDb, rollback, tasksThatStop, type Ctx } from "./promote.ts";
-import { cleanTmp, scanTmp, SWEEP_MS, sweepTmp, type TmpJudge, type TmpSweep } from "./tmp.ts";
+import { sweepCaches, sweepCacheWork, sweepDocker } from "./cache.ts";
+import { cleanTmp, diskUsage, scanTmp, SWEEP_MS, sweepTmp, type TmpJudge, type TmpSweep } from "./tmp.ts";
 import { appendHistory, currentOf, listReleases, previousOf, readHistory, run } from "./releases.ts";
 
 export interface RescueOptions {
@@ -54,8 +58,17 @@ export interface RescueOptions {
   exitToRestart?: () => void;
   /** The /tmp the page shows and cleans (#797); tests pass a fake. Default "/tmp" (not os.tmpdir(), which follows TMPDIR). */
   tmpDir?: string;
-  /** /tmp is Switchboard's alone (SWITCHBOARD_RESCUE_OWNS_TMP=1, the cloud host): its clean also takes any mktemp directory and cache. */
+  /**
+   * The machine is Switchboard's alone (SWITCHBOARD_RESCUE_OWNS_TMP=1, the cloud host): /tmp's clean also takes any mktemp directory
+   * and cache, and the automatic clean also takes uv's and bun's caches and the images no docker container uses (#2549).
+   */
   tmpOwned?: boolean;
+  /** Where local CI leaves its working directories and logs, swept with /tmp (#2549); tests pass a fake. Default ~/.cache. */
+  cacheDir?: string;
+  /** Whose uv and bun caches the automatic clean takes on a machine of Switchboard's own (#2549); tests pass a fake. Default homedir(). */
+  home?: string;
+  /** Runs the docker prune of the automatic clean (#2549); tests pass a fake. Default: the real docker. */
+  dockerSh?: (argv: string[]) => Promise<string>;
   /** The interval of the automatic /tmp clean (#1720); tests shorten it. Default SWEEP_MS. */
   tmpSweepMs?: number;
 }
@@ -191,12 +204,30 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
   const tmpDir = o.tmpDir ?? "/tmp";
   const tmpJudge: TmpJudge = { owned: o.tmpOwned ?? false };
   // not at start: scripts/rescue-e2e.ts starts the bundle on the host's real /tmp
-  let lastSweep: TmpSweep | null = null;
-  const sweepTimer = setInterval(() => {
+  const cacheDir = o.cacheDir ?? join(homedir(), ".cache");
+  const home = o.home ?? homedir();
+  const lastSweeps: Record<"tmp" | "work" | "cache" | "docker", TmpSweep | null> = { tmp: null, work: null, cache: null, docker: null };
+  const sweepTimer = setInterval(async () => {
     try {
-      lastSweep = sweepTmp(tmpDir, tmpJudge);
+      lastSweeps.tmp = sweepTmp(tmpDir, tmpJudge);
     } catch (e) {
       console.error("tmp sweep failed:", e);
+    }
+    try {
+      lastSweeps.work = await sweepCacheWork(cacheDir, tmpJudge);
+    } catch (e) {
+      console.error("cache sweep failed:", e);
+    }
+    if (!tmpJudge.owned) return; // the caches and docker are shared with the user's other apps
+    try {
+      lastSweeps.cache = sweepCaches(home, tmpJudge);
+    } catch (e) {
+      console.error("uv / bun cache sweep failed:", e);
+    }
+    try {
+      lastSweeps.docker = await sweepDocker(tmpJudge, o.dockerSh);
+    } catch (e) {
+      console.error("docker sweep failed:", e);
     }
   }, o.tmpSweepMs ?? SWEEP_MS);
   const authRequired = !isLoopback(host);
@@ -293,7 +324,7 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
       if (!auth) return new Response(o.sessionPublicKey ? "unauthorized: log in with the passkey at /_auth/ and open /rescue/ again" : "unauthorized: open this page with ?token=<the contents of ~/.switchboard/token>", { status: 401 });
       if (req.method === "GET" && path === "/") return new Response(page as unknown as string, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'self' 'unsafe-inline'; frame-ancestors 'none'" } });
       if (req.method === "GET" && path === "/api/status") return Response.json(await status());
-      if (req.method === "GET" && path === "/api/tmp") return Response.json({ ...scanTmp(tmpDir, tmpJudge), sweep: lastSweep });
+      if (req.method === "GET" && path === "/api/tmp") return Response.json({ ...scanTmp(tmpDir, tmpJudge), disk: diskUsage("/"), sweeps: lastSweeps });
       if (req.method !== "POST") return Response.json({ error: "not found" }, { status: 404 });
       if (auth === "cookie" && !recentCookieOk(req, o.sessionPublicKey)) return Response.json({ error: "操作の前にパスキーで確かめてください", reason: "recent" }, { status: 401 });
       // An empty body means "no arguments"; a body that does not parse is refused — a cut-off {commit} must not

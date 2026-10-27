@@ -13,7 +13,7 @@ import { main as opsKit } from "../../../ops-kit/src/cli.ts";
 import { fakeGh as fakeKitGh } from "../../../ops-kit/src/gh.ts";
 import { ghBoard, overlap, storedMaterial } from "../../../scripts/parallel-guard.ts";
 import { fmtTime } from "./ratelimit.ts";
-import { buildStartPrompt, canStartStoredBacklog, confirmationsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, replyWaitingIn, stopHeld } from "./backlog.ts";
+import { buildStartPrompt, canStartStoredBacklog, confirmationsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld } from "./backlog.ts";
 
 // the writer of the waits (#817), read at run time: scripts/ is not type-checked under core's settings
 const guard = "../../../scripts/parallel-guard.ts";
@@ -386,6 +386,12 @@ test("GET /api/backlog: an in-progress item carries its Project Status, the Issu
   expect(mine(304).stopSummary).toEqual([]);
   expect(items.find((i) => i.number === 304 && i.workspaceId === libId)!.stopSummary).toMatchObject([{ count: 1, work: { workspaceId: libId, issue: 304 } }]);
   expect(mine(307).stopSummary).toEqual([]);
+  // #1619: the row reads replyWaiting from the daemon — #305's last Task ended asking the person (needs_action, not reviewed)
+  expect(mine(305).replyWaiting).toBe(false);
+  core!.db.updateTask(done.id, { outcome: "needs_action" });
+  const asked = (await (await fetch(`${base}/api/backlog`)).json() as Backlog).items.find((i) => i.number === 305 && i.workspaceId === metaId())!;
+  expect(asked.replyWaiting).toBe(true);
+  expect(mine(307).replyWaiting).toBe(false);
 });
 
 /** A claude adapter that records its prompts and stays running (never ends the session). */
@@ -1541,7 +1547,7 @@ test("start: the prompt says to read the newest ## 回答 first", async () => {
 });
 
 const item = (over: Partial<BacklogItem>): BacklogItem => ({
-  number: 1, title: "t", url: "u", type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
+  number: 1, title: "t", url: "u", type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
 
 test("pickNext: Ready before 分解待ち before 要望, then Priority (none last), then the oldest; skips decisions and running items", () => {
@@ -3327,6 +3333,36 @@ test("prereqState: Issues, pull requests and releases by how they closed; not st
   expect(prereqState(pr("MERGED"), "release", none)).toBe("unknown");
   expect(prereqState(pr("MERGED", { mergeCommit: null }), "release", () => true)).toBe("unknown");
   expect(prereqState(undefined, "done", none)).toBe("missing");
+});
+
+test("replyWaiting: the row's waiting for a reply is backlog-next's awaitingReply, or the last stage Task's newest stop waiting for a decision (#1619)", () => {
+  const at = "2026-09-28T00:00:00Z";
+  const later = "2026-09-28T01:00:00Z";
+  const last = (over: Partial<NonNullable<BacklogItem["lastTask"]>> = {}) => ({ id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "needs_action" as const, reviewedAt: null, resumeAt: null, ...over });
+  const stopOf = (over: Partial<BacklogItem["stopSummary"][number]> = {}): BacklogItem["stopSummary"][number] => ({
+    key: "k", work: { workspaceId: "ws_meta", issue: 1, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "decision", evidence: "マージしてよいか", safety: "before-effect",
+    count: 1, state: "waiting", firstAt: 1, lastAt: 2, lastAnswer: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide", ...over,
+  });
+  const asked = item({ number: 1, stage: "in-progress", tasks: { total: 2, done: 2, doneAt: null }, updatedAt: at, lastTask: last() });
+  const stopped = { ...asked, lastTask: last({ outcome: "unknown" }), stopSummary: [stopOf()] };
+  // [name, item, replyWaiting, awaitingReply (backlog-next's skip as 返事待ち); null = not that rule — the stop is stopHeld's side]
+  const rows: [string, BacklogItem, boolean, boolean | null][] = [
+    ["(a) done, needs_action, not reviewed, the Issue older", asked, true, true],
+    ["(b) unknown with the newest stop next = decide", stopped, true, null],
+    ["(c) (a) reviewed", { ...asked, lastTask: last({ reviewedAt: Date.parse(later) }) }, false, false],
+    ["(d) (a) with the Issue newer than the Task", { ...asked, updatedAt: later }, false, false],
+    ["(e) (a) with a newer ## 回答", { ...asked, answeredAt: later }, false, false],
+    ["(f) (b) answered (next = resume)", { ...stopped, stopSummary: [stopOf({ next: "resume", changes: [{ kind: "answer", detail: "はい" }] })] }, false, null],
+  ];
+  for (const [name, i, want, skip] of rows) {
+    expect([name, isReplyWaiting(i)]).toEqual([name, want]);
+    if (skip !== null) expect([name, awaitingReply(i)]).toEqual([name, skip]);
+  }
+  // (b) is left by stopHeld, not awaitingReply; only the newest series of the last Task counts, and a running Task is not waiting
+  expect(awaitingReply(stopped)).toBe(false);
+  expect(isReplyWaiting({ ...stopped, stopSummary: [stopOf({ lastAt: 1 }), stopOf({ key: "k2", lastAt: 5, next: "wait" })] })).toBe(false);
+  expect(isReplyWaiting({ ...stopped, stopSummary: [stopOf({ work: { workspaceId: "ws_meta", issue: 1, taskId: "tsk_old" } })] })).toBe(false);
+  expect(isReplyWaiting({ ...stopped, lastTask: last({ status: "running", outcome: "unknown" }) })).toBe(false);
 });
 
 test("#950: a stop that came again with nothing changed holds the item through an unrelated Issue update; an answer, a met condition or a new cause lets it go once", () => {

@@ -66,7 +66,7 @@ gh stack submit --auto --open      # push + PR。draft なら gh pr ready <n>
 W=$(mktemp -d /tmp/<リポジトリ名>.pr<Task>.XXXXXX); echo "$W"     # 本文は "$W/pr.md" に書く（固定の /tmp/pr.md は別リポジトリの PR 本文と入れ替わりうる）
 gh pr edit <n> --title "<題>" --body-file "$W/pr.md"
 bash scripts/setup/set_project_field.sh <Task> Status "In review"
-gh issue comment <Task> --body "PR: #<n>（<1 行>）"
+gh issue comment <Task> --body "PR: #<n>（<1 行>）"   # BACKLOG_URL があれば echo "PR: #<n>（<1 行>）" | ops-kit backlog comment <Task> --body-file -
 ```
 
 PR 本文は `.github/PULL_REQUEST_TEMPLATE.md` の 4 節を埋め、**その上に「レビュアーへ」を置く**:

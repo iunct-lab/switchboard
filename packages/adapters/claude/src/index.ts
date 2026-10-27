@@ -108,10 +108,11 @@ export function buildArgs(opts: StartOptions, extra: string[] = []): string[] {
   for (const dir of opts.scope) {
     if (dir && dir !== opts.cwd) args.push("--add-dir", dir);
   }
-  // the guards (#764) as PreToolUse hooks for Bash; Claude Code adds them to the repository's own hooks
-  if (opts.guards?.length) {
-    args.push("--settings", JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Bash", hooks: opts.guards.map((command) => ({ type: "command", command })) }] } }));
-  }
+  // the guards (#764) as PreToolUse hooks for Bash and the skills' operations as allow rules (#2150), in one --settings;
+  // Claude Code adds them to the repository's own hooks and rules
+  const hooks = opts.guards?.length ? { PreToolUse: [{ matcher: "Bash", hooks: opts.guards.map((command) => ({ type: "command", command })) }] } : undefined;
+  const permissions = opts.allow?.length ? { allow: opts.allow } : undefined;
+  if (hooks || permissions) args.push("--settings", JSON.stringify({ ...(hooks ? { hooks } : {}), ...(permissions ? { permissions } : {}) }));
   // only the MCP servers Switchboard hands over: the user-wide ones would start per task, used or not (#2090)
   args.push("--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers: opts.mcpServers ?? {} }));
   args.push(...extra);

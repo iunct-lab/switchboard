@@ -153,7 +153,7 @@ describe("--resume (recorded against Claude Code 2.1.261, issue #2)", () => {
     expect(evs.filter((e) => e.t === "usage" && e.source === "reported")).toHaveLength(0); // modelUsage is empty: nothing spent
   });
 
-  test.skipIf(skipRecordings("packages/adapters/claude/fixtures/resume-cost.jsonl"))("the result's cost is the session's running total, and --resume carries it on (Claude Code 2.1.308, #2353)", () => {
+  test.skipIf(skipRecordings("packages/adapters/claude/fixtures/resume-cost.jsonl"))("the result's cost is the session's running total, and --resume carries it on (Claude Code 2.1.311, #2353)", () => {
     assertRecordings("packages/adapters/claude/fixtures/resume-cost.jsonl");
     // two processes of one session: the second was started with --resume
     const results = resumeCostFixture.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l)).filter((m) => m.type === "result");
@@ -170,7 +170,7 @@ describe("--resume (recorded against Claude Code 2.1.261, issue #2)", () => {
     expect(b!.cacheWriteTokens).toBe(a!.cacheWriteTokens + results[1].usage.cache_creation_input_tokens);
   });
 
-  test.skipIf(skipRecordings("packages/adapters/claude/fixtures/background-notification.jsonl"))("background jobs: the count goes up in the turn, back to 0 on the notification, and the process starts a turn of its own (Claude Code 2.1.308)", () => {
+  test.skipIf(skipRecordings("packages/adapters/claude/fixtures/background-notification.jsonl"))("background jobs: the count goes up in the turn, back to 0 on the notification, and the process starts a turn of its own (Claude Code 2.1.311)", () => {
     assertRecordings("packages/adapters/claude/fixtures/background-notification.jsonl");
     // one live process: a turn that starts `sleep 15` with run_in_background and ends, then the job's notification
     const p = createClaudeParser();
@@ -203,6 +203,22 @@ describe("--resume (recorded against Claude Code 2.1.261, issue #2)", () => {
     expect(args.at(-1)).toBe("--x");
     expect(buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p" })).not.toContain("--settings");
     expect(buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", guards: [] })).not.toContain("--settings");
+  });
+
+  test("task settings allow skill operations: allow goes to permissions.allow in the same --settings as the hooks (#2150)", () => {
+    const settings = (o: { guards?: string[]; allow?: string[] }) => {
+      const args = buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", ...o });
+      expect(args.filter((a) => a === "--settings").length).toBeLessThanOrEqual(1);
+      const at = args.indexOf("--settings");
+      return at < 0 ? undefined : JSON.parse(args[at + 1]!);
+    };
+    const hook = { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "/k/guard" }] }] };
+    const allow = ["Bash(bun scripts/merge-gate.ts:*)", "Edit(//w/ops-kit/skills/**)"];
+    expect(settings({ guards: ["/k/guard"], allow })).toEqual({ hooks: hook, permissions: { allow } });
+    expect(settings({ allow })).toEqual({ permissions: { allow } });
+    expect(settings({ guards: ["/k/guard"] })).toEqual({ hooks: hook });
+    expect(settings({})).toBeUndefined();
+    expect(settings({ guards: [], allow: [] })).toBeUndefined();
   });
 
   test("buildArgs: always --strict-mcp-config with only the handed MCP servers in --mcp-config (#2090)", () => {

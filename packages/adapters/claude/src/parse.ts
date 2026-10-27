@@ -4,7 +4,7 @@ import type { AgentEvent, PermissionKind } from "@switchboard/protocol";
  * Pure mapping from Claude Code `--output-format stream-json` lines to AgentEvent.
  * Wire facts (verified against Claude Code 2.1.261, see docs/design/claude-stream-json.md):
  *  - system/init            → session.start
- *  - system/background_tasks_changed → background (count of the jobs left; verified on 2.1.308)
+ *  - system/background_tasks_changed → background (count of the jobs left; verified on 2.1.311)
  *  - stream_event/*         → message.delta (text_delta), usage (message_delta.usage, source=turn)
  *  - assistant              → tool.call (tool_use blocks); text only if not already streamed
  *  - user (tool_result)     → tool.result
@@ -160,7 +160,7 @@ export function mapClaudeMessage(m: Any, s: ClaudeParserState): AgentEvent[] {
     }
     case "result": {
       // `total_cost_usd` and `modelUsage` are the session's running totals, not this turn's: they grow over the turns of
-      // one process and carry on after `--resume` (recorded with Claude Code 2.1.308, resume-cost.jsonl); `result.usage`
+      // one process and carry on after `--resume` (recorded with Claude Code 2.1.311, resume-cost.jsonl); `result.usage`
       // counts this process only and leaves out subagents. So one usage per model of `modelUsage`, marked cumulative —
       // the daemon books the difference (#2353). `modelUsage` has no 1-hour cache split; the cost is the runner's own.
       const mu = m.modelUsage && typeof m.modelUsage === "object" ? (m.modelUsage as Record<string, Any>) : {};

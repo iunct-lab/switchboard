@@ -195,6 +195,7 @@ export function toItem(raw: RawBacklogIssue, project: number, ws: Pick<BacklogWo
     activeTaskId: null,
     projectStatus: status,
     lastTask: null,
+    replyWaiting: false,
     report: null,
     answeredAt: null,
     heldAt: null,
@@ -451,6 +452,20 @@ const releasedByReview = (t: NonNullable<BacklogItem["lastTask"]>) => t.outcome 
  * holds the item), an update to the Issue — a ## 回答 too — or marking the Task reviewed lets it be picked again.
  */
 export const awaitingReply = (i: BacklogItem) => !!i.lastTask && isFinished(i.lastTask) && i.lastTask.outcome === "needs_action" && i.lastTask.reviewedAt === null && !touchedSince(i);
+
+/**
+ * Its last stage Task, finished, stopped last on a series that waits for the person's decision (`next = "decide"`, #948).
+ * backlog-next leaves such an item by `stopHeld`; the row shows it as waiting for a reply (#1619).
+ */
+const decidingStop = (i: BacklogItem) => {
+  const t = i.lastTask;
+  if (!t || !isFinished(t)) return false;
+  const s = i.stopSummary.filter((x) => x.work.taskId === t.id).sort((a, b) => b.lastAt - a.lastAt)[0];
+  return s?.next === "decide";
+};
+
+/** Its last stage Task waits for the person's reply (#1619): the item's `replyWaiting`, from the same judgment backlog-next skips by. */
+export const isReplyWaiting = (i: BacklogItem) => awaitingReply(i) || decidingStop(i);
 
 /** The stages a slot's firing picks from: its own, and for the implement slot the in-progress PBIs it resumes or closes (#578). */
 const inSlot = (i: BacklogItem, slot: Slot) => SLOT_STAGES[slot].includes(i.stage) || (slot === "implement" && i.stage === "in-progress");

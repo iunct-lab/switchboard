@@ -6,6 +6,7 @@ import { bootstrap } from "./bootstrap.ts";
 import { defaultConfig, findConfig, loadConfig, loadPublicSync, resolveProject, type OpsConfig } from "./config.ts";
 import { realGh, repoOf, type GhClient } from "./gh.ts";
 import { exportCopy } from "./export-copy.ts";
+import { resolveReviewThread } from "./forge-github.ts";
 import { formatLint, lint } from "./lint.ts";
 import { pullMain } from "./pull-main.ts";
 import { spawnRun, sync } from "./public-sync.ts";
@@ -21,6 +22,7 @@ const USAGE = `使い方: bun ops-kit/src/cli.ts <command> [--config <ops.config
   set <issue> <field> <value>
       Issue 1 件の Project フィールドを 1 つ設定する（単一選択 / 数値 / テキスト / 日付）。Project に無ければ追加する
       例: set 16 Status Ready / set 16 "Story Points" 5
+      BACKLOG_URL がある（アプリの Task の中）なら GitHub に書かずアプリに保存する（backlog set / backlog triage と同じ。triage も）
   triage <issue> <area> <kind> <priority> [<phase>] [<parent>] [<status>]
       Issue を Project に入れ、Area / Kind / Priority /（Phase）/ Status と親（Task の親 PBI）を設定する
       <phase> は設定に fields.phase があるときだけ渡す。<parent> を飛ばすなら "" を渡す。<status> の既定は Backlog
@@ -67,6 +69,9 @@ ${BACKLOG_USAGE}
       --adopted: 公開側だけの変更を Private に取り込み済みとして、置き換えて送る。--source の既定は origin/main
       exit 0 = 送った / 送るものが無い / dry-run、1 = 止まった（理由は stderr）、2 = 使い方の誤り
 
+  pr resolve-thread <thread id>...
+      PR のレビュースレッドを resolve する（GraphQL の resolveReviewThread だけ。id は PRRT_ で始まるもの）。
+      id の形が違えば何もせず exit 1。resolve にならなかったスレッドがあれば exit 1。設定ファイルは要らない
   export-copy <dest> --words-file <file>
       キットを読めないリポジトリ（公開リポジトリなど）が同梱するコピーを <dest> に作る（テストを除くコード、skills、bin、
       README。<dest>/KIT_VERSION に元のコミットと日時）。--words-file で指定した固有語のリスト（キットの外）の語が 1 件でもあればコピーを消して exit 1
@@ -104,7 +109,9 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
       return 1;
     }
   }
-  if (command === "backlog") {
+  // in the app's Task, set / triage are stored in the app like backlog set / triage (#2694): written to GitHub here, the
+  // next edit stored in the app starts from the value before it and is sent as a conflict
+  if (command === "backlog" || ((command === "set" || command === "triage") && env.BACKLOG_URL)) {
     // the configuration only tells whether triage takes a phase; none is needed to read or edit
     let phase = false;
     try {
@@ -112,7 +119,7 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
     } catch {
       /* no ops.config.json: triage takes no phase */
     }
-    return runBacklog(rest, env, { out, err }, { phase });
+    return runBacklog(command === "backlog" ? rest : args, env, { out, err }, { phase });
   }
   if (command === "pull-main") {
     if (rest.length) return usage(err, "pull-main", 2);
@@ -152,6 +159,23 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
       err((e as Error).message);
       return 1;
     }
+  }
+  if (command === "pr") {
+    const [sub, ...ids] = rest;
+    if (sub !== "resolve-thread" || ids.length === 0) return usage(err, "pr resolve-thread <thread id>...");
+    const bad = ids.filter((id) => !/^PRRT_[\w-]+$/.test(id));
+    if (bad.length) return usage(err, `レビュースレッドの id ではありません（PRRT_ で始まるもの）: ${bad.join(" ")}`);
+    let failed = 0;
+    for (const id of ids) {
+      try {
+        await resolveReviewThread(gh, id);
+        out(`${id} resolved`);
+      } catch (e) {
+        err(`${id}: ${(e as Error).message}`);
+        failed++;
+      }
+    }
+    return failed ? 1 : 0;
   }
   // The two checks read no configuration: they run in any directory, with or without an ops.config.json
   if (command === "scan-text" || command === "scan-issues") {

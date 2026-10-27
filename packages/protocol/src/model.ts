@@ -1577,6 +1577,11 @@ export const BacklogItem = z.object({
    * can leave an item whose Task ended asking the person or could not run (#1275).
    */
   lastTask: z.object({ id: z.string(), status: TaskStatus, statusAt: z.number(), createdAt: z.number(), updatedAt: z.number(), action: BacklogAction.nullable(), outcome: TaskOutcome, reviewedAt: z.number().nullable(), resumeAt: z.number().nullable() }).nullable(),
+  /**
+   * Its last stage Task waits for the person's reply (#1619): `awaitingReply` (#1275), or that Task's newest stop series
+   * is `next = "decide"`. The daemon adds it (withActive), not stored.
+   */
+  replyWaiting: z.boolean(),
   /** The newest `## 状況` comment of an in-progress item (#522); always null for the other stages. */
   report: z.object({ body: z.string(), at: z.string() }).nullable(),
   /**

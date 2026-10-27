@@ -24,6 +24,21 @@ On Codex, Auto delegates boundary approvals to the runner's risk-based reviewer,
 
 Verified 2026-09-20 on codex-cli 0.155.0-alpha.2.6: `curl -I --max-time 10 https://example.com` failed sandbox DNS, was auto-reviewed as low-risk/approved, then returned HTTP 200 without a manual request. Recorded notifications (outside Git; record your own outside Git with the `runner-adapter-recording` skill; `bun scripts/fixtures.ts fetch` works only in a clone with the private history): `packages/adapters/codex/fixtures/auto-review-0.155.0-alpha.2.6.jsonl`. Existing Auto tasks receive the reviewer on their next start/resume/turn; a turn already in flight keeps its current setting.
 
+## Allow rules a task gets (#2150)
+
+Auto mode's classifier refused operations the skills ask for — in the 7 days to 2026-10-20, 30 permission stops (merges after the merge gate said merge, posting the gate's marks, resolving review threads, editing skill files), and the user's OK in the conversation did not lift a second refusal. So the daemon passes Claude Code `permissions.allow` rules to a task, in the same `--settings` JSON as the guard hooks (`taskAllowRules` in `packages/core/src/tasks.ts`; only when the meta workspace exists, like the hooks):
+
+| rule | why |
+|---|---|
+| `Bash(bun scripts/merge-gate.ts:*)`, `Bash(bun <meta>/scripts/merge-gate.ts:*)` | the merge: `--merge` / `--merge-stack` merge only on a merge verdict (the usage line of `scripts/merge-gate.ts`). The second form is another repository's task |
+| `Bash(ops-kit pr resolve-thread:*)` | resolving a review thread: one mutation, not a general `gh api graphql` |
+| `Bash(gh pr comment:*)` | the gate's marks (`[merge-ask]` / `[merge-answer]` / `[recheck]` / `[local-ci]`). The check in front of `gh` (`docs/design/secret-guard.md`) still reads every post |
+| `Edit` / `Write` of `//<cwd>/ops-kit/skills/**`, `//<cwd>/.claude/skills/**` and the same under `//<cwd>-*/` | editing the skills in the task's folder and its worktrees (CLAUDE.md names them `<folder>-<topic>`; a worktree is made after the task starts, so it cannot be listed then). A worktree named otherwise is left to auto mode. `~/.claude/skills` is not included |
+
+Not allowed (left to auto mode): a bare `gh pr merge` / `gh stack merge` (it would merge past the gate), `gh api graphql`, deploys (`sam deploy`, CloudFormation, IAM — #2046), writing or deleting secrets, destructive host operations. Codex tasks get none (`StartOptions.allow` is read by the Claude adapter only). The permission mode itself stays `auto`.
+
+What this protects and what it does not: only the operations the skills name are allowed, the merge only through the gate, and only in tasks Switchboard starts (a terminal `claude` does not get them). A task runs as the same OS user, so it can do the same by another way (another command, the API directly) — the loopback trust model; the rules are a default so that the skills' steps do not stop, not a fence. Skill edits still reach main only through a PR, the other runner's review and the gate's responsibility recheck. A sibling folder that happens to match `<cwd>-*` gets the skill-edit rule too. Whether an allow rule takes effect before auto mode's classifier is checked on a real Claude task after the rules are running (#2160).
+
 ## Where the value comes from
 
 `TaskManager.resolvePermissionMode`: explicit `CreateTaskInput.permissionMode` → saved runner default (`settings.defaultPermissionMode[runner]`) → adapter default. The resolved value is stored on the task (`tasks.permission_mode`) so the record says what the task actually ran with; a runner without modes stores `null`. Unknown values are rejected with 400 (`RunnerAdapter.permissionModes` is the authority); a stale saved default falls back to the adapter default instead of failing the task.

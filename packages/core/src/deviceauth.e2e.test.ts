@@ -25,7 +25,7 @@ let base: string;
 /** The first entry of each runner's PATH: the kit's bin, whose gh is the check the write goes through. */
 const kits: string[] = [];
 
-/** The runner's turn: `device-auth --expires-in <n> -- bun login.ts <done>`, then `gh issue comment` with the exit code only. */
+/** The runner's turn: `device-auth --expires-in <n> -- bun login.ts <done>`, then `gh pr comment` with the exit code only (an Issue of the workspace is written through the app, #2694). */
 function runner(): RunnerAdapter {
   return {
     id: "claude",
@@ -46,7 +46,7 @@ function runner(): RunnerAdapter {
         const p = Bun.spawn([BIN, "--expires-in", expires!, "--", "bun", join(dir, "login.ts"), done!], { env, stdout: "pipe", stderr: "pipe" });
         const [code, out, err] = await Promise.all([p.exited, new Response(p.stdout).text(), new Response(p.stderr).text()]);
         emit({ t: "tool.result", id: "t1", ok: code === 0, summary: `${out}${err}` });
-        const gh = Bun.spawnSync(["gh", "issue", "comment", "1", "--body", `承認の結果: exit ${code}`], { env, stdout: "pipe", stderr: "pipe" });
+        const gh = Bun.spawnSync(["gh", "pr", "comment", "1", "--body", `承認の結果: exit ${code}`], { env, stdout: "pipe", stderr: "pipe" });
         const ev: AgentEvent = { t: "message.delta", role: "assistant", text: `gh exit ${gh.exitCode}` };
         emit(ev);
         emit({ t: "session.end", status: "ok", summary: "ok" });
@@ -118,7 +118,7 @@ describe("device auth end to end (#662)", () => {
     await until(async () => (await fetch(`${base}/api/tasks/${task.id}`).then(j)).task.status === "done");
     expect(msgs.some((m) => m.type === "task.deviceAuth" && m.taskId === task.id && m.auth === null)).toBe(true);
     expect(await fetch(`${base}/api/tasks/${task.id}/device-auth`).then(j)).toBeNull();
-    expect(readFileSync(ghLog, "utf8")).toBe("issue comment 1 --body 承認の結果: exit 0\n");
+    expect(readFileSync(ghLog, "utf8")).toBe("pr comment 1 --body 承認の結果: exit 0\n");
     // the write went through the kit's check in front of gh, as a real runner's does
     expect(kits.at(-1)).toBe(join(import.meta.dir, "../../../ops-kit/bin"));
     expect(readFileSync(join(kits.at(-1)!, "gh"), "utf8")).toContain("// gh-guard");
@@ -155,7 +155,7 @@ describe("device auth end to end (#662)", () => {
     expect(result?.ok).toBe(false);
     expect(result?.summary).toContain("期限");
     expect(result?.summary).not.toContain(CODE);
-    expect(existsSync(ghLog) && readFileSync(ghLog, "utf8")).toBe("issue comment 1 --body 承認の結果: exit 124\n");
+    expect(existsSync(ghLog) && readFileSync(ghLog, "utf8")).toBe("pr comment 1 --body 承認の結果: exit 124\n");
     ws.close();
   }, 30_000);
 });
