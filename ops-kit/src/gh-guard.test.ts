@@ -100,6 +100,89 @@ describe("ops-kit/bin/gh", () => {
     expect(run(["issue", "comment", "1", "--body-file", join(dir, "none.md")]).code).toBe(3);
   });
 
+  test("close merge release gist: the closing comment, the merge body and subject, the release title and notes stop before gh", () => {
+    const file = join(dir, "notes.md");
+    writeFileSync(file, `## 変更\n${secret}\n`);
+    const writes: [string[], string?][] = [];
+    for (const close of [["issue", "close", "1"], ["pr", "close", "1"]]) {
+      writes.push([[...close, "--comment", secret]], [[...close, `--comment=${secret}`]], [[...close, "-c", secret]], [[...close, `-c${secret}`]]);
+    }
+    writes.push(
+      [["pr", "close", "1", "-dc", secret]],
+      [["pr", "merge", "1", "-sb", secret]],
+      [["pr", "merge", "1", "-F", file]],
+      [["pr", "merge", "1", "-F", "-"], secret],
+      [["pr", "merge", "1", "-t", `コード ${code}`]],
+      [["release", "create", "v1", "-n", secret]],
+      [["release", "new", "v1", "--notes-file", file]],
+      [["release", "create", "v1", "-dp", "-F", "-"], secret],
+      [["release", "edit", "v1", "-t", `コード ${code}`]],
+      [["release", "edit", "v1", "--tag", "v2", "--notes", secret]],
+      [["issue", "--body", "close", "create", "--title", secret]],
+      [["pr", "-R", "o/r", "--body", "close", "merge", "1", "--subject", secret]],
+    );
+    for (const [argv, stdin] of writes) {
+      const r = run(argv, stdin);
+      expect({ argv, code: r.code, called: r.called }).toEqual({ argv, code: 1, called: null });
+      expect(r.err + r.out).not.toContain("QWJK");
+    }
+  });
+
+  test("close merge release gist: without a value the command reaches gh unchanged", () => {
+    const piped = "マージ: 2 件の Task\n";
+    for (const [argv, stdin] of [
+      [["pr", "close", "1", "-d", "-c", "ok"], ""],
+      [["issue", "close", "1", "-r", "not planned"], ""],
+      [["issue", "close", "1", "--duplicate-of", "2", "-c", "重複"], ""],
+      [["pr", "merge", "1", "-F", "-"], piped],
+      [["pr", "merge", "1", "--rebase", "--match-head-commit", "abc", "-t", "題"], ""],
+      [["release", "create", "v1", "--notes-start-tag", "v0", "-n", "ok"], ""],
+      [["release", "edit", "v1", "--draft=false", "-F", "-"], piped],
+    ] as [string[], string][]) {
+      expect({ argv, r: run(argv, stdin) }).toEqual({ argv, r: { code: 3, out: "from gh\n", err: "", called: { argv, stdin } } });
+    }
+  });
+
+  test("close merge release gist: gist files, a piped standard input and the description stop before gh", () => {
+    const gists = join(dir, "gists");
+    mkdirSync(gists, { recursive: true });
+    const bad = join(gists, "bad.md");
+    mkdirSync(join(dir, "hidden"), { recursive: true });
+    writeFileSync(join(dir, "hidden", ".note.md"), `${secret}\n`);
+    const ok = join(dir, "ok.txt");
+    writeFileSync(bad, `メモ\n${secret}\n`);
+    writeFileSync(ok, "hello\n");
+    for (const [argv, stdin] of [
+      [["gist", "create", bad], ""],
+      [["gist", "create", "-p", ok, bad], ""],
+      [["gist", "new", "-"], secret],
+      [["gist", "create"], secret],
+      [["gist", "create", "-f", "x.md"], secret],
+      [["gist", "create", join(gists, "*.md")], ""],
+      [["gist", "create", join(dir, "hidden", "*.md")], ""],
+      [["gist", "create", ok, "-d", secret], ""],
+      [["gist", "edit", "abc", bad], ""],
+      [["gist", "edit", "abc", "--add", bad], ""],
+      [["gist", "edit", "abc", "-d", secret], ""],
+    ] as [string[], string][]) {
+      const r = run(argv, stdin);
+      expect({ argv, code: r.code, called: r.called }).toEqual({ argv, code: 1, called: null });
+      expect(r.err + r.out).not.toContain("QWJK");
+    }
+  });
+
+  test("close merge release gist: a gist without a value reaches gh unchanged", () => {
+    const ok = join(dir, "ok.txt");
+    writeFileSync(ok, "hello\n");
+    for (const [argv, stdin] of [
+      [["gist", "create", ok, "-d", "ok"], ""],
+      [["gist", "create"], "print('hi')\n"],
+      [["gist", "edit", "abc", "-f", "hello.py", ok], ""],
+    ] as [string[], string][]) {
+      expect({ argv, r: run(argv, stdin) }).toEqual({ argv, r: { code: 3, out: "from gh\n", err: "", called: { argv, stdin } } });
+    }
+  });
+
   test("no gh behind the guard: exit 127", () => {
     const p = Bun.spawnSync([process.execPath, GUARD, "issue", "list"], { env: { PATH: dirname(GUARD) }, stdout: "pipe", stderr: "pipe" });
     expect(p.exitCode).toBe(127);
@@ -191,7 +274,28 @@ describe("bodiesOf / realCommand", () => {
     expect(texts(["api", "x", "-f", "body=a=b", "-F", "n=1", "--field", "t=@-", "-H", "Accept: x", "--jq", ".id"])).toEqual(["a=b", "1", "in"]);
     expect(bodiesOf(["api", "x", "-F", "body=@b.md"], read)).toEqual([{ text: "file:b.md", from: { index: 3, path: "b.md", prefix: "body=@" } }]);
     expect(bodiesOf(["api", "x", "-Fbody=@b.md"], read)).toEqual([{ text: "file:b.md", from: { index: 2, path: "b.md", prefix: "-Fbody=@" } }]);
-    expect(texts(["issue", "close", "1", "--comment", "x"])).toBeNull();
+    expect(texts(["issue", "close", "1", "--comment", "x"])).toEqual(["x"]);
+    // one letter means another thing in another subcommand
+    expect(texts(["pr", "review", "1", "-c", "-b", "x"])).toEqual(["x"]);
+    expect(texts(["pr", "close", "1", "-c", "x"])).toEqual(["x"]);
+    expect(texts(["pr", "merge", "1", "-t", "題", "--match-head-commit", "abc", "-A", "a@b"])).toEqual(["題"]);
+    expect(texts(["release", "create", "v1", "--notes-start-tag", "v0", "--target", "main", "--generate-notes"])).toBeNull();
+    expect(texts(["release", "view", "v1", "-t", "{{.}}"])).toBeNull();
+    // the subcommand is found as gh finds it: a name in the value of a flag before it is not the subcommand
+    expect(texts(["issue", "--body", "close", "create", "--title", "x"])).toEqual(["close", "x"]);
+    expect(texts(["pr", "--body", "close", "merge", "1", "--subject", "x"])).toEqual(["close", "x"]);
+    expect(texts(["issue", "list", "--search", "comment", "-t", "x"])).toBeNull();
+    // the files of a gist: every argument after create, the one after the id for edit; the standard input only when piped
+    expect(texts(["gist", "create", "-p", "a.md", "b.md", "-d", "説明"])).toEqual(["file:a.md", "file:b.md", "説明"]);
+    expect(texts(["gist", "edit", "abc", "-r", "x.md", "-f", "y.md", "c.md"])).toEqual(["file:c.md"]);
+    expect(texts(["gist", "edit", "abc", "-r", "x.md"])).toBeNull();
+    // after `--` an argument that starts with `-` is a file
+    expect(texts(["gist", "edit", "abc", "--", "-secret.md"])).toEqual(["file:-secret.md"]);
+    expect(texts(["gist", "create", "-d", "x", "--", "-a.md", "--b.md"])).toEqual(["x", "file:-a.md", "file:--b.md"]);
+    expect(bodiesOf(["gist", "create"], read, true)).toEqual([{ text: "in" }]);
+    expect(bodiesOf(["gist", "create"], read)).toBeNull();
+    expect(bodiesOf(["gist", "create", "a.md"], read, true)).toEqual([{ text: "file:a.md", from: { index: 2, path: "a.md", prefix: "" } }]);
+    expect(texts(["gist", "list"])).toBeNull();
     expect(texts(["issue", "list", "--search", "x", "-t", "{{.}}"])).toBeNull();
     expect(texts(["repo", "view"])).toBeNull();
     expect(texts([])).toBeNull();

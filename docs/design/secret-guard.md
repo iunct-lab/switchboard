@@ -33,9 +33,14 @@ Switchboard が起動したランナーの `gh` の前段に検査を置く（PB
 |---|---|
 | `gh issue create（new）/ comment / edit` | `--title`、`--body`、`--body-file`（`-` は標準入力） |
 | `gh pr create（new）/ comment / edit / review` | 同じ |
+| `gh issue close` / `gh pr close` | `--comment` |
+| `gh pr merge` | `--body`、`--body-file`（`-` は標準入力）、`--subject`（マージのコミットの本文と題） |
+| `gh release create（new）/ edit` | `--title`、`--notes`、`--notes-file`（`-` は標準入力）。添付ファイルは読まない |
+| `gh gist create（new）/ edit` | ファイルの引数の中身（`create` は全部、`edit` は id の次。`-` とファイルの無い `create` はパイプの標準入力）、`--add` のファイル、`--desc`。`gh` が広げるパターン（`'*.md'`）は前段も広げて読む |
 | `gh api` | `-f key=value` の value、`-F key=@file` のファイル（`@-` は標準入力）、`--input`（JSON なら中の文字列を 1 つずつ） |
 
 - フラグの書き方は `gh` が受ける形を全部読む: `--body x`、`--body=x`、`-b x`、`-b=x`、`-bx`、短いフラグをまとめた `-cb x`（まとめて読むのはサブコマンドごとの既知のスイッチの文字だけ。知らない文字があれば、表に無いフラグの値（`-Hfeat`）として読まない）。サブコマンドの前にフラグがあっても読む
+- 1 文字のフラグはサブコマンドごとに読む（`-c` は `pr close` では文、`pr review` ではスイッチ。`-t` は `pr merge` では題、`gh api` では読まないテンプレート）。前段のフラグとスイッチの表は「グループ → サブコマンド」の 1 つ
 - `gh api` はメソッドに関係なく読む。フィールドは GitHub に送る文なので、検索の `-f q=…` に値があっても止まる
 - 標準入力はバイトのまま読み、同じバイトを本物の `gh` に渡す。パイプやファイル記述子（`<(…)`）の本文は 1 回しか読めないので、読んだ内容を一時ファイル（権限 600）に置き、引数をそのパスに差し替えて渡す。`gh` が戻ったら消す
 - それ以外の引数・終了コード・出力は変えない
@@ -58,7 +63,7 @@ Switchboard が起動したランナーの `gh` の前段に検査を置く（PB
 - 本文を対話のエディタで書く `gh`（コマンドに文が無い）
 - `gh` を使わない投稿（`curl` で API を直接叩く、MCP の GitHub ツール）
 - ホストの外（ブラウザなど）で書くもの
-- `gh issue close --comment`、`gh release`、`gh gist` など、上の表に無いコマンド
+- 上の表に無いコマンド
 
 これらは `scan-issues` が後から見つける（`gh pr review --body` で書いたレビュー本文も読む）。下の定期の検査が毎日走らせる。
 

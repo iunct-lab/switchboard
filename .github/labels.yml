@@ -68,9 +68,6 @@
 - name: "area:web"
   color: bfdadc
   description: apps/web
-- name: "area:desktop"
-  color: bfdadc
-  description: apps/desktop（Tauri）
 - name: "area:knowledge"
   color: bfdadc
   description: Knowledge Store / Materializer / Inbox

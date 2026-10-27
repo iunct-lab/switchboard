@@ -68,7 +68,7 @@ describe("applying saved policies (#938)", () => {
     writePolicies(h.core!.db, [{ ...checkPolicy({ kind: "decision", op: "decide", target: "storage", answer: { kind: "choice", choice }, from: { ...from("storage"), kind: "decision", op: "decide" } }) }]);
     const s = await post("/api/schedules", { title: "バックログを進める", cron: "0 */3 * * *", workspaceId: meta.id, runner: "claude", prompt: "", action: "backlog-next" });
     const id = ((await s.json()) as { id: string }).id;
-    await h.patch("/api/settings", { backlogSweep: { implement: 0, plan: 0 } });
+    await h.patch(`/api/workspaces/${meta.id}`, { sweep: { implement: 0, plan: 0 } });
     await post(`/api/schedules/${id}/run`, {});
     const ops = h.core!.db.listPendingBacklogOperations().map((o) => o.payload as unknown);
     const comment = ops.map((o) => (o as { body?: string }).body).find((b) => b?.startsWith("## 回答"));

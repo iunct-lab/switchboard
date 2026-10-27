@@ -4,6 +4,13 @@ import { PermissionKind, RunnerId, StopCondition, StopReasonCode, StopRecord, St
 export const WorkspaceKind = z.enum(["repo", "meta"]);
 export type WorkspaceKind = z.infer<typeof WorkspaceKind>;
 
+/**
+ * backlog-next's slots of one workspace (#561, per workspace since #2656): how many stage Tasks of each kind it keeps
+ * running there. 0 = that slot is not moved automatically there.
+ */
+export const WorkspaceSweep = z.object({ implement: z.number().int().min(0).max(3), plan: z.number().int().min(0).max(3) });
+export type WorkspaceSweep = z.infer<typeof WorkspaceSweep>;
+
 export const Workspace = z.object({
   id: z.string(),
   name: z.string(),
@@ -21,6 +28,8 @@ export const Workspace = z.object({
    * repository's forge either way.
    */
   backlog: z.enum(["github", "switchboard"]).default("github"),
+  /** backlog-next's slots here (#2656); a new workspace starts with one of each. */
+  sweep: WorkspaceSweep.default({ implement: 1, plan: 1 }),
 });
 export type Workspace = z.infer<typeof Workspace>;
 
@@ -714,8 +723,6 @@ export const Settings = z.object({
   shadowRunner: RunnerId.nullable().default(null),
   /** LLM runner suggestions (#25). Off by default: switching it on spends the runner's quota on every task creation. */
   routing: RoutingSettings.default({}),
-  /** backlog-next's slots per workspace (#561): how many stage Tasks of each kind it keeps running there. 0 = that slot is not moved automatically. */
-  backlogSweep: z.object({ implement: z.number().int().min(0).max(3).default(1), plan: z.number().int().min(0).max(3).default(1) }).default({}),
   /** Judge each finished turn as done / needs action (#493). On by default: it spends the runner's quota once per turn. */
   judge: JudgeSettings.default({}),
   /** Runner and model of the Tasks that start by themselves (#832). */
@@ -751,8 +758,6 @@ export const SettingsPatch = z.object({
   shadowRunner: RunnerId.nullable().optional(),
   /** Partial: `{ routing: { llm: { enabled: true } } }` leaves the saved runner / model alone. */
   routing: z.object({ llm: z.object({ enabled: z.boolean(), runner: RunnerId, model: z.string(), timeoutMs: z.number().int().min(1000).max(60_000) }).partial().optional() }).partial().optional(),
-  /** Partial: `{ backlogSweep: { implement: 2 } }` leaves the plan slot alone. */
-  backlogSweep: z.object({ implement: z.number().int().min(0).max(3), plan: z.number().int().min(0).max(3) }).partial().optional(),
   /** Partial: `{ judge: { enabled: false } }` leaves the saved runner / model alone. */
   judge: z.object({ enabled: z.boolean(), runner: RunnerId, model: z.string() }).partial().optional(),
   /**
@@ -1614,6 +1619,10 @@ export const BacklogItem = z.object({
   prereqs: z.array(BacklogPrereq),
   /** The stops of the Issue's stage Tasks, one per series (#948); empty until the daemon adds them. */
   stopSummary: z.array(StopSummary),
+  /** The Task a PBI's body names on its `**画面イメージ**:` line outside fences, the first id in it (#2296); null for a request or no line. */
+  mockupTask: z.string().nullable(),
+  /** That Task's screen mockups (#2296): its HTML artifacts, not removed, as a question's `mockups` (#2221); empty until the daemon adds them. */
+  mockups: z.array(Artifact),
   /** How this Issue stands against GitHub (#908); what a start (#909) is judged on, not only shown. */
   sync: BacklogSyncInfo,
   /** The registered workspace whose repository the Issue is in (#294). */

@@ -15,9 +15,9 @@ import { buildWorkspacePrompt, parseWorkspaceChoice, WorkspaceSuggester, type Wo
 const fixture = recordingText("packages/core/fixtures/suggest-workspace-claude.jsonl");
 
 const WORKSPACES: Workspace[] = [
-  { id: "ws_switchboard", name: "switchboard", path: "/Users/dev/work/switchboard", kind: "meta", createdAt: 1, backlog: "github" },
-  { id: "ws_dak", name: "dak", path: "/Users/dev/work/dak", kind: "repo", createdAt: 2, backlog: "github" },
-  { id: "ws_blog", name: "blog", path: "/Users/dev/work/blog", kind: "repo", createdAt: 3, backlog: "github" },
+  { id: "ws_switchboard", name: "switchboard", path: "/Users/dev/work/switchboard", kind: "meta", createdAt: 1, backlog: "github", sweep: { implement: 1, plan: 1 } },
+  { id: "ws_dak", name: "dak", path: "/Users/dev/work/dak", kind: "repo", createdAt: 2, backlog: "github", sweep: { implement: 1, plan: 1 } },
+  { id: "ws_blog", name: "blog", path: "/Users/dev/work/blog", kind: "repo", createdAt: 3, backlog: "github", sweep: { implement: 1, plan: 1 } },
 ];
 const CTX: WorkspaceContext = { title: "dak の README の誤字を直す", prompt: "dak の README にあるインストール手順の誤字を直してください。", workspaces: WORKSPACES, runners: ["claude", "codex"] };
 

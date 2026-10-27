@@ -1,4 +1,4 @@
-import type { BacklogItem, TaskStatus } from "@switchboard/protocol";
+import type { BacklogItem, Schedule, TaskStatus, Workspace } from "@switchboard/protocol";
 import { jstClock } from "./time.ts";
 
 /** A Task's state as the backlog row names it. */
@@ -57,6 +57,15 @@ const WAIT_STATE: Record<Wait["state"], string> = { met: "完了", pending: "開
  */
 export function waitRef(w: Wait): { ref: string; state: string } {
   return { ref: `${w.kind === "pr" ? "PR " : ""}#${w.number}`, state: WAIT_STATE[w.state] };
+}
+
+/**
+ * Whether backlog-next goes on by itself in each workspace (#2656): an enabled バックログを進める and the workspace's own
+ * implement slot above 0. Workspace id → that; a workspace not listed is not.
+ */
+export function autoByWorkspace(schedules: Schedule[], workspaces: Workspace[]): Record<string, boolean> {
+  const on = schedules.some((s) => s.action === "backlog-next" && s.enabled);
+  return Object.fromEntries(workspaces.map((w) => [w.id, on && w.sweep.implement > 0]));
 }
 
 /** Where a wait is on GitHub: the row's repository, `/pull/<n>` or `/issues/<n>` (an Issue URL reaches a PR too). */

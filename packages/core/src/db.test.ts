@@ -691,6 +691,32 @@ test("statusAt migration (#2029): a tasks table without status_at gets each row'
   check.close();
 });
 
+test("migration (#2656): the global backlogSweep moves to every workspace once and leaves settings", () => {
+  const path = join(dir, "switchboard.db");
+  const pre = new Db(path);
+  pre.upsertWorkspace({ name: "sb", path: "/w/sb", kind: "meta" });
+  pre.upsertWorkspace({ name: "lib", path: "/w/lib", kind: "repo" });
+  pre.setSetting("settings", { backlogSweep: { implement: 2, plan: 0 }, titles: { auto: false } });
+  pre.close();
+  const raw = new Database(path);
+  raw.exec("ALTER TABLE workspaces DROP COLUMN sweep_implement");
+  raw.exec("ALTER TABLE workspaces DROP COLUMN sweep_plan");
+  raw.close();
+  const db = new Db(path);
+  expect(db.listWorkspaces().map((w) => [w.name, w.sweep])).toEqual([["lib", { implement: 2, plan: 0 }], ["sb", { implement: 2, plan: 0 }]]);
+  const settings = db.getSetting<Record<string, unknown>>("settings", {});
+  expect(settings).toMatchObject({ titles: { auto: false } });
+  expect("backlogSweep" in settings).toBe(false);
+  // once: a later change is not undone by the next open, and a new workspace starts with 1 / 1
+  db.setWorkspaceSweep(db.listWorkspaces().find((w) => w.name === "lib")!.id, { plan: 3 });
+  db.close();
+  const again = new Db(path);
+  expect(again.listWorkspaces().map((w) => [w.name, w.sweep])).toEqual([["lib", { implement: 2, plan: 3 }], ["sb", { implement: 2, plan: 0 }]]);
+  expect(again.upsertWorkspace({ name: "app", path: "/w/app", kind: "repo" }).sweep).toEqual({ implement: 1, plan: 1 });
+  expect(again.listWorkspaces().find((w) => w.name === "app")!.sweep).toEqual({ implement: 1, plan: 1 });
+  again.close();
+});
+
 test("api requests (#2101): saved as given, rows older than 7 days dropped on the next save", () => {
   const db = new Db(join(dir, "switchboard.db"));
   const DAY = 24 * 3600 * 1000;

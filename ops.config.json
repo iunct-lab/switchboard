@@ -2,7 +2,7 @@
   "envPrefix": "SWITCHBOARD",
   "forge": { "service": "github" },
   "fields": {
-    "area": ["protocol", "core", "adapter-claude", "adapter-codex", "adapter-dak", "web", "desktop", "knowledge", "ledger", "infra"],
+    "area": ["protocol", "core", "adapter-claude", "adapter-codex", "adapter-dak", "web", "knowledge", "ledger", "infra"],
     "kind": ["bug", "feature", "deps", "tech-watch", "eval", "chore"],
     "priority": ["P0", "P1", "P2", "P3"],
     "phase": ["Phase 0", "Phase 1", "Phase 2", "Phase 3"]

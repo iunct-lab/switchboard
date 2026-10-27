@@ -19,7 +19,7 @@ beforeAll(() => {
   store = new KnowledgeStore(join(root, "Knowledge"), db);
   mkdirSync(join(root, "repo"), { recursive: true });
   expect(spawnSync("git", ["init", "-q", join(root, "repo")]).status).toBe(0);
-  ws = { id: "ws1", name: "repo", path: join(root, "repo"), kind: "repo", createdAt: 0, backlog: "github" };
+  ws = { id: "ws1", name: "repo", path: join(root, "repo"), kind: "repo", createdAt: 0, backlog: "github", sweep: { implement: 1, plan: 1 } };
   store.write("rules/global.md", "---\ntargets: [claude, agents-md]\n---\n## 共通\n- 変更にはテストを添える\n");
   store.write("rules/repo.md", `---\ntargets: [claude]\nrepo: ${ws.path}\n---\n## このリポジトリ\n- bun test を回す\n`);
   store.write("rules/other.md", "---\ntargets: [claude]\nrepo: /elsewhere/other\n---\n## 無関係\n");
@@ -91,7 +91,7 @@ describe("managed blocks", () => {
   test("targetsOf keeps command namespaces; appliesTo matches repo paths exactly, not by basename", () => {
     const cmd = store.list().find((d) => d.path === "commands/dak/nightly.md")!;
     expect(targetsOf(cmd)).toEqual([{ target: "commands", relPath: ".claude/commands/dak/nightly.md" }]);
-    const other: Workspace = { id: "x", name: "other", path: join(root, "other"), kind: "repo", createdAt: 0, backlog: "github" };
+    const other: Workspace = { id: "x", name: "other", path: join(root, "other"), kind: "repo", createdAt: 0, backlog: "github", sweep: { implement: 1, plan: 1 } };
     const doc = store.list().find((d) => d.path === "rules/other.md")!; // repo: /elsewhere/other
     expect(appliesTo(doc, other)).toBe(false);
     expect(appliesTo(store.list().find((d) => d.path === "rules/repo.md")!, { ...ws, path: ws.path + "/" })).toBe(true);

@@ -2,7 +2,7 @@
 // gh-guard
 // The check in front of `gh` (#661, docs/design/secret-guard.md). A write whose text holds a value that signs someone
 // in stops here; everything else goes to the real gh unchanged.
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bodiesOf, GUARD_MARK, realCommand } from "../src/gh-guard.ts";
@@ -20,13 +20,19 @@ const once = new Map<string, Uint8Array>();
 const reads = bodiesOf(argv, (path) => {
   try {
     if (path === "-") return new TextDecoder().decode((stdin ??= new Uint8Array(readFileSync(0))));
+    // a pattern gh expands itself (`gh gist create '*.md'`): the files it names, joined. Go's filepath.Glob that gh
+    // uses lets `*` match a leading dot, so hidden files are read too
+    if (!existsSync(path) && /[*?[]/.test(path)) {
+      const files = [...new Bun.Glob(path).scanSync({ onlyFiles: true, absolute: true, dot: true })];
+      return files.length === 0 ? null : files.map((f) => readFileSync(f, "utf8")).join("\n");
+    }
     if (statSync(path).isFile()) return readFileSync(path, "utf8");
     if (!once.has(path)) once.set(path, new Uint8Array(readFileSync(path)));
     return new TextDecoder().decode(once.get(path)!);
   } catch {
     return null;
   }
-});
+}, !process.stdin.isTTY);
 
 const host = hostAws();
 const hits = (reads ?? []).flatMap((r) => findSecrets(r.text, host));

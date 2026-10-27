@@ -12,7 +12,6 @@
 - [ ] packages/core
 - [ ] packages/adapters/claude · codex · dak
 - [ ] apps/web
-- [ ] apps/desktop
 - [ ] docs / infra (.github, scripts)
 
 ## テスト観点 / Testing

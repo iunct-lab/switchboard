@@ -4,9 +4,9 @@ import { ACTIONS, hostEnv, parseArgs, planHostOperation, runHostOperation, type 
 const e = { stack: "switchboard-host", region: "ap-northeast-1", params: "ImageId=ami-0 VpcId=vpc-0" };
 const TOKEN = "start-token-value";
 const EDGE = "edge-header-value";
-const changeSet = "Changeset created successfully. arn:aws:cloudformation:ap-northeast-1:111111111111:changeSet/samcli-deploy1/abc";
+const changeSet = "Changeset created successfully. Run the following command to review changes:\naws cloudformation describe-change-set --change-set-name arn:aws:cloudformation:ap-northeast-1:111111111111:changeSet/awscli-cloudformation-package-deploy-1/abc";
 
-/** A fake AWS CLI / sam / bun: answers by command prefix (the first match), records every call and every log line. */
+/** A fake AWS CLI / bun: answers by command prefix (the first match), records every call and every log line. */
 function fake(answers: Array<[string, { ok?: boolean; out?: string; err?: string }]> = []) {
   const calls: string[] = [];
   const posts: Array<{ url: string; headers: Record<string, string> }> = [];
@@ -17,8 +17,8 @@ function fake(answers: Array<[string, { ok?: boolean; out?: string; err?: string
     ["aws ssm get-parameter --name /switchboard/edge-header", { out: `${EDGE}\n` }],
     ["aws cloudformation describe-stacks", { out: "https://starter.example/\n" }],
     ["aws ec2 describe-instances", { out: "running\n" }],
-    ["sam deploy", { out: `Parameter overrides: EdgeHeaderValue=${EDGE}\n${changeSet}\n` }],
-    ["aws cloudformation describe-change-set", { out: "\n" }],
+    ["aws cloudformation deploy", { out: `Waiting for changeset to be created..\nEdgeHeaderValue=${EDGE}\n${changeSet}\n` }],
+    ["aws cloudformation describe-change-set", { out: '{"Changes":[]}\n' }],
   ];
   const d: Deps = {
     run: (cmd) => {
@@ -94,23 +94,31 @@ describe("host-ops run", () => {
     expect(f.calls).toHaveLength(0);
   });
 
-  test("a failed sam deploy is a failure, not 'no changes' (#759)", async () => {
-    const f = fake([["sam deploy", { ok: false, err: "Error: is not authorized to perform: cloudformation:CreateChangeSet" }]]);
-    await expect(runHostOperation("deploy", e, f.d)).rejects.toThrow("failed: sam deploy");
+  test("a failed deploy is a failure, not 'no changes' (#759)", async () => {
+    const f = fake([["aws cloudformation deploy", { ok: false, err: "An error occurred (AccessDenied): is not authorized to perform: cloudformation:CreateChangeSet" }]]);
+    await expect(runHostOperation("deploy", e, f.d)).rejects.toThrow("failed: aws cloudformation deploy");
     expect(f.logs.join("\n")).toContain("is not authorized to perform");
     expect(f.calls.some((c) => c.includes("execute-change-set"))).toBe(false);
   });
 
   test("an empty change set ends with 'no changes' (#759)", async () => {
-    const f = fake([["sam deploy", { out: "No changes to deploy. Stack switchboard-host is up to date\n" }]]);
+    const f = fake([["aws cloudformation deploy", { out: "Waiting for changeset to be created..\n\nNo changes to deploy. Stack switchboard-host is up to date\n" }]]);
     expect(await runHostOperation("deploy", e, f.d)).toBe("no changes");
     expect(f.calls.some((c) => c.includes("describe-change-set"))).toBe(false);
   });
 
-  test("a change set that touches the Instance or the LaunchTemplate is not executed", async () => {
-    for (const touched of ["Instance", "LaunchTemplate"]) {
-      const f = fake([["aws cloudformation describe-change-set", { out: `${touched}\n` }]]);
-      await expect(runHostOperation("deploy", e, f.d)).rejects.toThrow("touches the launch template or the instance");
+  test("a change set that touches the Instance or the LaunchTemplate is not executed, and says why (#465)", async () => {
+    const vpc = (id: string, Action: string) => ({ ResourceChange: { Action, LogicalResourceId: id, ResourceType: "AWS::CloudFront::VpcOrigin" } });
+    const instance = { ResourceChange: { Action: "Modify", LogicalResourceId: "Instance", ResourceType: "AWS::EC2::Instance", Replacement: "True" } };
+    const cases = [
+      [{ Changes: [{ ResourceChange: { Action: "Modify", LogicalResourceId: "LaunchTemplate" } }] }, "replaces the instance"],
+      [{ Changes: [instance, vpc("HostVpcOrigin5", "Add"), vpc("HostVpcOrigin4", "Remove")] }, "replaces the instance"],
+      [{ Changes: [instance, vpc("HostVpcOrigin4", "Modify")] }, "LaunchGeneration="],
+    ] as const;
+    for (const [cs, reason] of cases) {
+      const f = fake([["aws cloudformation describe-change-set", { out: JSON.stringify(cs) }]]);
+      await expect(runHostOperation("deploy", e, f.d)).rejects.toThrow(reason);
+      expect(f.calls.find((c) => c.startsWith("aws cloudformation describe-change-set"))).toContain("--output json");
       expect(f.calls.some((c) => c.includes("execute-change-set"))).toBe(false);
     }
   });
@@ -124,14 +132,26 @@ describe("host-ops run", () => {
   test("a change set that leaves the instance alone runs as DeployRole and is waited for; the edge header never reaches the log", async () => {
     const f = fake([["aws cloudformation describe-stacks --stack-name switchboard-host --query Stacks[0].Outputs[?OutputKey=='DeployRoleArn']", { out: "arn:role\n" }]]);
     expect(await runHostOperation("deploy", e, f.d)).toBe(`executed ${changeSet.split(" ").at(-1)}`);
-    const sam = f.calls.find((c) => c.startsWith("sam deploy"))!;
-    expect(sam).toContain("--role-arn arn:role");
-    expect(sam).toContain("--no-execute-changeset");
-    expect(sam).toContain("--parameter-overrides ImageId=ami-0 VpcId=vpc-0 EdgeHeaderValue=");
+    const deploy = f.calls.find((c) => c.startsWith("aws cloudformation deploy"))!;
+    expect(deploy).toContain("--role-arn arn:role");
+    expect(deploy).toContain("--no-execute-changeset");
+    expect(deploy).toContain("--parameter-overrides ImageId=ami-0 VpcId=vpc-0 EdgeHeaderValue=");
     expect(f.calls.at(-2)).toStartWith("aws cloudformation execute-change-set");
     expect(f.calls.at(-1)).toStartWith("aws cloudformation wait stack-update-complete");
     expect(f.logs.join("\n")).not.toContain(EDGE);
     expect(f.logs.join("\n")).toContain("EdgeHeaderValue=***");
+  });
+
+  test("deploy packages with the AWS CLI, not sam (sam cannot read Fn::ForEach, #465), and allows the LanguageExtensions transform", async () => {
+    const f = fake();
+    await runHostOperation("deploy", e, f.d);
+    expect(f.calls.some((c) => c.startsWith("sam "))).toBe(false);
+    const pkg = f.calls.findIndex((c) => c.startsWith("aws cloudformation package --template-file aws/template.yaml"));
+    const deploy = f.calls.findIndex((c) => c.startsWith("aws cloudformation deploy --template-file dist/template.packaged.yaml"));
+    expect(pkg).toBeGreaterThan(-1);
+    expect(deploy).toBeGreaterThan(pkg);
+    expect(f.calls[pkg]).toContain("--output-template-file dist/template.packaged.yaml");
+    expect(f.calls[deploy]).toContain("CAPABILITY_AUTO_EXPAND");
   });
 });
 
