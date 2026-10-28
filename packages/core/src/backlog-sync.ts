@@ -454,6 +454,14 @@ export class BacklogSync {
         if (!superseded) this.stored.set(ws.id, since);
         // GitHub answers again: what was kept while it did not is sent (#886)
         this.send(ws);
+        // what was stored changed: a wait it closed may let a PBI go on now (#1879); one that stored nothing is followed by one that does
+        if (changed && !superseded) for (const l of this.imported) {
+          try {
+            l(ws.id);
+          } catch (e) {
+            console.error(`[backlog] after the import of ${ws.id}: ${String((e as Error)?.message ?? e)}`);
+          }
+        }
       },
       (e: unknown) => {
         const until = e instanceof BacklogError && e.response ? this.limits.failed(host, e.response)?.until : null;
@@ -473,6 +481,13 @@ export class BacklogSync {
     const run = imported.then(() => (superseded ? this.sync(this.current(ws)) : undefined));
     this.running.set(ws.id, { since, run });
     return run;
+  }
+
+  private imported = new Set<(wsId: string) => void>();
+  /** Called with the workspace's id after an import that stored a change; returns the unsubscribe. */
+  onImported(l: (wsId: string) => void): () => void {
+    this.imported.add(l);
+    return () => this.imported.delete(l);
   }
 
   /** The workspace as it is now: a `projectVar` changed since the caller read it is the one imported. */

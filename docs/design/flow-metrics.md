@@ -42,7 +42,7 @@ W=$(mktemp -d /tmp/switchboard.flow.XXXXXX); bun scripts/flow-report.ts --days 3
 
 - 期間内に閉じた PBI（`type:pbi`）を GitHub から読む。`--repo` の既定は cwd の `gh repo view`
 - 表は 2 つ。段ごとの「中央値 / p90 / 件数」（不明は件数に入らない）と、期間内に閉じた PBI の数・Story Points の合計・中央値が一番大きい段。PBI ごとの「各段 / 返事待ち / レビュー回数 / Task / 費用」。`--json` は `stages`（段ごとの p50 / p90 / count）、`pbis`、`cutPbis` ほか
-- **Switchboard の Task**: DB（`SWITCHBOARD_HOME` の `switchboard.db`、読み取り専用）から、そのリポジトリを `origin` に持つ workspace の Task のうち、工程 Task（`stage_issue` が PBI か Task の番号）または題が `#<PBI または Task の番号> ` で始まるものを数える。件数・実行時間（作成から最後のイベントまで。`routingLog` と同じ）・費用（台帳の合計）。Issue の番号はリポジトリをまたいで重なるので、workspace で絞る。DB が無い、または workspace が見つからないときは Task の列を出さない
+- **Switchboard の Task**: DB（`SWITCHBOARD_HOME` の `switchboard.db`、読み取り専用）から、そのリポジトリを `origin` に持つ workspace の Task のうち、工程 Task（`stage_issue` が PBI か Task の番号）または題が `#<PBI または Task の番号> ` で始まるものを数える。件数・実行時間（作成から最後のイベントまで。`routingLog` と同じ）・費用（台帳の合計）。Issue の番号はリポジトリをまたいで重なるので、workspace で絞る。DB が無い、または workspace が見つからないときは Task の列を出さない。PBI ごとに、その PBI 番号の工程 Task のうち実装（`stage_action` が `complete`。再開も 1 回）を起動した回数（`--json` の `pbis[].tasks.implementLaunches`）も数え、表の後に 2 行を出す: 「実装を 3 回以上起動した PBI: <n>/<Task を読めた PBI の数>（<%>）」（読めた PBI が無ければ「不明」）と「段 wait の中央値」。待ちの改善（#1866）が効いたかを見る数
 - 自分のリポジトリの表は、その clone で `bun scripts/flow-report.ts --days 30` を回すと先頭に出る
 - 読み方は下の「数の読み方」
 

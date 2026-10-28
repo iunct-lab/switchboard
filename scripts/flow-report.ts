@@ -11,7 +11,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { FlowStage } from "../packages/protocol/src/index.ts";
 import { runGh } from "../packages/core/src/backlog.ts";
-import { fetchFlow, FlowError, repoOfRemote, summarize, withSwitchboardTasks } from "../packages/core/src/flow.ts";
+import { fetchFlow, FlowError, launchShare, repoOfRemote, summarize, withSwitchboardTasks } from "../packages/core/src/flow.ts";
 
 const dur = (ms: number | null): string => {
   if (ms === null) return "不明";
@@ -69,6 +69,9 @@ async function main(): Promise<number> {
       const t = p.tasks ? `${p.tasks.count} 件 ${dur(p.tasks.runMs)}\t$${p.tasks.costUsd.toFixed(2)}` : "-\t-";
       console.log(`#${p.number}${cutPbis.includes(p.number) ? "*" : ""}\t${FlowStage.options.map((st) => dur(p.stages[st] ?? null)).join("\t")}\t${dur(p.userWaitMs)}\t${p.reviewRounds.join("/") || "-"}\t${t}`);
     }
+    const share = launchShare(pbis);
+    console.log(`\n実装を 3 回以上起動した PBI: ${share.known ? `${share.repeated}/${share.known}（${Math.round((share.repeated / share.known) * 100)}%）` : "不明"}`);
+    console.log(`段 wait の中央値: ${dur(sum.stages.wait.p50)}`);
     const json = arg("--json");
     if (json) writeFileSync(json, JSON.stringify({ repo, days, cutPbis, stages: sum.stages, bottleneck: sum.bottleneck, closed: sum.closed, storyPoints: sum.storyPoints, pbis }, null, 2));
     return 0;

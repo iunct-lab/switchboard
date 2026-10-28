@@ -58,8 +58,9 @@ ${BACKLOG_USAGE}
   scan-text <file|->
       文（ファイル、- は標準入力）に認証に使える値（device code、承認 URL、トークン、鍵、アカウント ID、ホストの AWS の設定のプロファイル名・SSO のセッション名など）が無いか検査する
       出力は <file>:<行>: <種類>。値は出さない。exit 0 = 無い、1 = ある、2 = 読めなかった。設定ファイルは要らない
-  scan-issues [<owner/name>]
+  scan-issues [<owner/name>] [--since <ISO 8601>] [--recheck <URL>]...
       リポジトリの Issue・PR の題と本文、コメント、PR のレビューコメントとレビュー本文を全部、同じ検査に通す。出力は <URL>: <種類>（<行> 行目）と、最後に hits: <当たり> / scanned: <読んだ文の数>
+      --since はその時刻より後に更新されたものだけを読む。--recheck は前回の当たりの場所（URL）を差分の外でも読み直す（何回でも）
       exit 0 = 無い、1 = ある、2 = 検査できなかった（取得の失敗）。<owner/name> を省くと GH_REPO、無ければ origin。設定ファイルは要らない
 
   public-sync [--source <ref>] [--dry-run] [--adopted] [--target-url <url>]
@@ -205,14 +206,29 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
         for (const h of hits) out(`${file}:${h.line}: ${h.kind}`);
         return hits.length > 0 ? 1 : 0;
       }
-      const [named, ...extra] = rest;
-      if (extra.length || (named !== undefined && !/^[^/\s]+\/[^/\s]+$/.test(named))) return usage(err, "scan-issues [<owner/name>]", 2);
+      const SCAN_USAGE = "scan-issues [<owner/name>] [--since <ISO 8601>] [--recheck <URL>]...";
+      const positional: string[] = [];
+      const recheck: string[] = [];
+      let since: string | undefined;
+      for (let i = 0; i < rest.length; i++) {
+        const a = rest[i]!;
+        if (a === "--since" || a === "--recheck") {
+          const v = rest[++i];
+          if (v === undefined) return usage(err, SCAN_USAGE, 2);
+          if (a === "--since") since = v;
+          else recheck.push(v);
+        } else positional.push(a);
+      }
+      const [named, ...extra] = positional;
+      if (extra.length || (named !== undefined && !/^[^/\s]+\/[^/\s]+$/.test(named))) return usage(err, SCAN_USAGE, 2);
+      if (since !== undefined && Number.isNaN(Date.parse(since))) return usage(err, SCAN_USAGE, 2);
       let repo = named;
       if (repo === undefined) {
         const r = await repoOf(gh);
         repo = `${r.owner}/${r.name}`;
       }
-      const { hits, scanned } = await scanIssues(gh, repo, sleep, hostAws());
+      if (recheck.some((u) => !u.startsWith(`https://github.com/${repo}/`))) return usage(err, SCAN_USAGE, 2);
+      const { hits, scanned } = await scanIssues(gh, repo, sleep, hostAws(), { since, recheck });
       for (const h of hits) out(`${h.url}: ${h.kind}（${h.line} 行目）`);
       out(`hits: ${hits.length} / scanned: ${scanned}`);
       return hits.length > 0 ? 1 : 0;

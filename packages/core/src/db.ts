@@ -240,18 +240,18 @@ export interface EvalRow {
  * title starts `#N `. Issue numbers repeat across repositories, so the workspaces (of the repository read) say whose they are.
  * Reads only, so the caller may open the file read-only. `durationMs` is the same creation → last event as routingLog's.
  */
-export function tasksOfIssues(sqlite: Database, issues: number[], workspaceIds: string[]): Array<{ id: string; createdAt: number; durationMs: number; costUsd: number }> {
+export function tasksOfIssues(sqlite: Database, issues: number[], workspaceIds: string[]): Array<{ id: string; createdAt: number; durationMs: number; costUsd: number; stageIssue: number | null; stageAction: string | null }> {
   if (issues.length === 0 || workspaceIds.length === 0) return [];
   const marks = issues.map(() => "?").join(",");
   const titles = issues.map(() => "t.title LIKE ?").join(" OR ");
   return sqlite
     .query(
-      `SELECT t.id AS id, t.created_at AS createdAt,
+      `SELECT t.id AS id, t.created_at AS createdAt, t.stage_issue AS stageIssue, t.stage_action AS stageAction,
               MAX(COALESCE((SELECT MAX(ts) FROM events e WHERE e.task_id = t.id), t.updated_at) - t.created_at, 0) AS durationMs,
               COALESCE((SELECT SUM(cost_usd) FROM ledger l WHERE l.task_id = t.id), 0) AS costUsd
        FROM tasks t WHERE t.workspace_id IN (${workspaceIds.map(() => "?").join(",")}) AND (t.stage_issue IN (${marks}) OR ${titles}) ORDER BY t.created_at`,
     )
-    .all(...workspaceIds, ...issues, ...issues.map((n) => `#${n} %`)) as Array<{ id: string; createdAt: number; durationMs: number; costUsd: number }>;
+    .all(...workspaceIds, ...issues, ...issues.map((n) => `#${n} %`)) as Array<{ id: string; createdAt: number; durationMs: number; costUsd: number; stageIssue: number | null; stageAction: string | null }>;
 }
 
 /** The most events one page of a Task's conversation returns (#1142): `limit` is clamped to it, and a page that reaches back to a message's start stops there. */

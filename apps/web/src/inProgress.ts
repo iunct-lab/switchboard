@@ -103,7 +103,7 @@ export function waitText(item: BacklogItem, auto: boolean): { label: string; don
         ? `定期実行が無効: ${byHand}`
         : held.length
           ? "前提が完了したら次の定期実行で再開"
-          : "次の定期実行で再開";
+          : "待ちが解けたら再開";
   return { label: done ? "待ちが解けた" : "待ち", done, cond, next };
 }
 

@@ -158,6 +158,17 @@ let buf='';for await(const chunk of Bun.stdin.stream()){buf+=new TextDecoder().d
     await terminalInput(text);
   };
   const localScreen = () => until(() => evaluate(`!!document.querySelector('.composer textarea') && document.querySelector('.main').textContent.includes('元Cloud Taskを開く')`), "Local Task conversation screen");
+  const openLocalByLink = async () => {
+    await until(() => evaluate(`!![...document.querySelectorAll('.cloud-session button')].find(e=>e.textContent.startsWith('ローカルの Task:'))`), "Local link");
+    await evaluate(`[...document.querySelectorAll('.cloud-session button')].find(e=>e.textContent.startsWith('ローカルの Task:')).click()`);
+    await localScreen();
+  };
+  const backToCloudFromHead = async () => {
+    await evaluate(`[...document.querySelectorAll('.task-head button')].find(e=>e.textContent.trim()==='元Cloud Taskを開く').click()`);
+    await until(() => evaluate(`!!document.querySelector('.cloud-session') && !document.querySelector('.composer textarea')`), "back to the Cloud Task from the head");
+  };
+  // #1634: right after the automatic switch, the head's switch line names the Cloud Task and is in the viewport without scrolling.
+  const switchedVisible = () => evaluate(`(() => { const e = document.querySelector('.task-head .switched-from-cloud'); if (!e) return false; const r = e.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight && r.right <= innerWidth && e.textContent.includes(${JSON.stringify(cloudTitle)}); })()`);
   await call("Network.enable");
   await call("Runtime.enable");
   await call("Log.enable"); await homePage();
@@ -179,6 +190,11 @@ let buf='';for await(const chunk of Bun.stdin.stream()){buf+=new TextDecoder().d
   const seen: string[] = [];
   const sample = setInterval(() => { void progressText().then(t => { if (t && seen.at(-1) !== t) seen.push(t); }).catch(() => undefined); }, 50);
   try { await localScreen(); } finally { clearInterval(sample); }
+  await until(switchedVisible, "switch line visible without scrolling"); cases++;
+  // Moving away inside the app (no reload) clears it: back to Cloud from the head, then the Local Task again by its link.
+  await backToCloudFromHead(); await clickText("Local Taskを確認"); await openLocalByLink();
+  await until(() => evaluate(`document.querySelector('.task-head').textContent.includes('Cloudから取込み')`), "the head's mark after reopening");
+  assert(!(await evaluate(`!!document.querySelector('.switched-from-cloud')`)), "switch line gone after moving away in the app"); cases++;
   assert(teleportEntries().length === okCount + 1 && JSON.stringify(teleportEntries().at(-1).args) === JSON.stringify(["--teleport", cloudId]) && teleportEntries().at(-1).cwd === wc && teleportEntries().at(-1).tty, "ID/worktree cwd/PTY exact");
   const inTeleport = seen.findIndex(t => t.includes("Teleport中")), inImport = seen.findIndex(t => t.includes("取込み中"));
   assert(inTeleport >= 0 && inImport > inTeleport, "progress moves from Teleport中 to 取込み中");
@@ -195,8 +211,11 @@ let buf='';for await(const chunk of Bun.stdin.stream()){buf+=new TextDecoder().d
   assert(await evaluate(`document.querySelector('.cloud-session').textContent.includes('自動同期しません')`), "no Cloud sync notice");
   assert(await evaluate(`document.querySelector('.cloud-session').textContent.includes(${JSON.stringify("作業コピー: " + wc)})`), "work copy path on the Cloud screen");
   assert(realpathSync(core.db.getTask(local.id)!.cwd) === wc && core.db.getTask(local.id)!.workspaceId === workspace.id, "the Local Task's cwd is the work copy, in the same Workspace"); cases++;
-  await evaluate(`[...document.querySelectorAll('.cloud-session button')].find(e=>e.textContent.startsWith('ローカルの Task:')).click()`);
-  await localScreen();
+  await openLocalByLink();
+  // Opened by hand: the head marks the import and links back, without the switch line; the link returns to the Cloud Task.
+  assert(await evaluate(`(() => { const h = document.querySelector('.task-head'); return !document.querySelector('.switched-from-cloud') && h.textContent.includes('Cloudから取込み') && [...h.querySelectorAll('button')].some(e=>e.textContent.trim()==='元Cloud Taskを開く'); })()`), "opened by hand: mark and link in the head, no switch line");
+  await backToCloudFromHead(); cases++;
+  await clickText("Local Taskを確認"); await openLocalByLink();
   assert(await evaluate(`document.querySelector('.side').textContent.includes(${JSON.stringify("作業コピー: " + wc)})`), "work copy path on the Local screen");
   await set(".composer textarea", "continue fixture"); await click(".composer button.pri");
   await until(() => entries().some(e => e.args?.includes("--resume")), "Local CLI resume");
@@ -218,7 +237,10 @@ let buf='';for await(const chunk of Bun.stdin.stream()){buf+=new TextDecoder().d
   assert(teleportEntries().length === askCount + 1 && entries().filter(e => e.args?.includes("--resume")).length === resumptionCount && core.db.listLocalTasksForCloud(cloud.id).length === 1, "cancel cannot resume/import"); cases++;
   // The same question answered in the terminal: Switchboard then ends the CLI and opens the Local Task by itself.
   await start("prompt"); await answerInTerminal("y");
-  await localScreen(); await ended(false);
+  await call("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }); // a phone's width (#1634)
+  try { await localScreen(); await until(switchedVisible, "switch line visible without scrolling at 390px"); }
+  finally { await call("Emulation.clearDeviceMetricsOverride"); }
+  cases++; await ended(false);
   assert(entries().filter(e => e.answer === "y").length === 1 && entries().filter(e => e.stdin === "/exit").length === 2, "one answer from the person, /rename and /exit from the daemon"); cases++;
   for (const [m, hint] of [["unpushed", "push済み"], ["repo", "同じリポジトリ"], ["account", "同じアカウント"], ["permission", "アクセス権"], ["provider", "サブスクリプション"], ["subscription", "サブスクリプション"]]) {
     await start(m); await ended();

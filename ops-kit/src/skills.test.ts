@@ -47,7 +47,8 @@ test("skills: scan-issues runs through the kit's command in every repository, no
   const owned = rules.slice(rules.indexOf("## 使う側のリポジトリが持つもの"), rules.indexOf("\n## ", rules.indexOf("## 使う側のリポジトリが持つもの") + 1));
   expect(owned).toContain("`ops-kit <command>`");
   expect(owned).not.toContain("scan_issues.sh");
-  for (const name of ["issue-workflow", "pbi-complete"]) expect({ name, says: read(name).includes("検査していない（キットが PATH に無い）") }).toEqual({ name, says: true });
+  // the daily scheduled scan reads the difference: closing a PBI runs no full scan (#2119)
+  for (const name of ["issue-workflow", "pbi-complete"]) expect({ name, says: read(name).includes("PBI を閉じるたびには走らせない") }).toEqual({ name, says: true });
 });
 
 test("skills: the main worktree is pulled by the kit's command in every repository, not by CLAUDE.md's steps (#1244)", () => {

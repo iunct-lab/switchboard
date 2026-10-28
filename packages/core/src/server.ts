@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
-import { AskAnswerInput, AutoStartKind, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, InboxAddInput, InboxCloseInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PermissionAnswers, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskList, type Backlog, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type Workspace, type WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
+import { AskAnswerInput, AutoStartKind, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, InboxAddInput, InboxCloseInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PermissionAnswers, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskList, type Backlog, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type ScanCursors, type Workspace, type WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
 import type { CoreConfig } from "./config.ts";
 import { abortOrphanedTasks, Db, type ApiRequestRow } from "./db.ts";
 import { opsLatency } from "./ops-latency.ts";
@@ -44,7 +44,7 @@ import { checkLocalFields, checkLocalParent } from "./backlog-local.ts";
 import { enableGithubSync, enablingOf } from "./backlog-enable.ts";
 import { CloneError, noticeUnusableWorkspaces, parseGithubRepo, registerWorkspace, WorkspaceClones } from "./workspace-clone.ts";
 import { copyDeletable, inspectRemoval } from "./workspace-remove.ts";
-import { ACTION_FOR_STAGE, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, buildStartPrompt, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionStep, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, unchangedIn, heldIn, type GhRunner, type OtherRepo } from "./backlog.ts";
+import { ACTION_FOR_STAGE, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, buildStartPrompt, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionStep, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, type GhRunner, type OtherRepo } from "./backlog.ts";
 import { issueOf, reduceStops, stopRecordsFor } from "./stops.ts";
 import { ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, policyPbi, prFacts, resumeOfTask, type PolicyEnv, type PrFacts } from "./asks.ts";
 import { checkPolicy, matchPolicies, readPolicies, recordUse, subjectChanges, writePolicies } from "./policies.ts";
@@ -1165,14 +1165,17 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
    * One backlog-next firing (#267, #561): for every registered workspace and each of its two slots (implement / plan),
    * start the slot's next item while fewer stage Tasks of that slot run there than the workspace's own slots allow
    * (`Workspace.sweep`, #2656; read per firing). While the usage of the runner it starts them on is high, one stage Task at most runs anywhere; while the newest tag waits to be
-   * promoted, nothing starts anywhere.
+   * promoted, nothing starts anywhere. `only` (#1879): one workspace's implement slot and those items only, the waits
+   * of which an import closed; the same checks hold.
    */
-  const startNext = async (scheduleId: string): Promise<BacklogNextResult> => {
+  const startNext = async (scheduleId: string, only?: { workspaceId: string; numbers: number[] }): Promise<BacklogNextResult> => {
     const started: BacklogNextResult["started"] = [];
     const skipped: string[] = [];
     const meta = metaWorkspace();
     if (!meta) return { started, skipped: ["meta workspace がありません"] };
     const held = await promotionFirst(meta);
+    // a narrow firing logs no skips, but a promotion it asked for (no hold left: it was asked) is an action, logged as a full firing's is
+    if (held && only && !promotionHold) scheduler.note(`${db.getSchedule(scheduleId)?.title ?? "バックログを進める"}: ${held} (待ちが解けた)`);
     if (held) return { started, skipped: [held] };
     // Stage Tasks running or waiting, and ones a button (or this firing) is creating right now (startingStage), per workspace and slot.
     const stageTasks = () => db.listActiveStageTasks();
@@ -1208,17 +1211,18 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     skipped.push(...lines(BacklogAction.options.map((a) => fullOf(targetOf[a]))), ...lines(BacklogAction.options.map((a) => (fullOf(targetOf[a]) ? "" : usageOf(targetOf[a])))).map((u) => `${u}: 全体で 1 件まで`));
     // a saved policy answers the decisions it matches before the next one is picked (#938)
     await applyPolicies();
-    const SLOTS: Slot[] = ["implement", "plan"];
+    const SLOTS: Slot[] = only ? ["implement"] : ["implement", "plan"];
     const SLOT_NAME: Record<Slot, string> = { implement: "実装の枠", plan: "計画の枠" };
     // read every workspace that has a free slot in parallel (#441); one GitHub cannot be read for goes on with what is stored (#2264)
-    const read = await Promise.all(db.listWorkspaces().map(async (ws) => {
+    const read = await Promise.all(db.listWorkspaces().filter((ws) => !only || ws.id === only.workspaceId).map(async (ws) => {
       if (!SLOTS.some((slot) => busy(ws.id, slot).length < ws.sweep[slot])) return { ws, items: [] as BacklogItem[], syncHeld: [] as string[], unsynced: null };
       if (!existsSync(ws.path)) return { ws, error: "workspace directory does not exist" };
       // the stored data is what is true (#2264): GitHub is brought up to date first when it can be reached, and when it
       // cannot (a limit, an outage) the workspace goes on with what is stored; only an Issue with a conflict is not picked
-      const unsynced = await backlog.settle(ws).then(() => null, (e) => notSettled(e));
+      // a narrow firing comes right after the import that cleared the waits: it is not read again here (the read right before a start still is)
+      const unsynced = only ? null : await backlog.settle(ws).then(() => null, (e) => notSettled(e));
       const all = withActive({ fetchedAt: 0, items: backlog.read(ws, { released: await releasedIn(ws) }).items, errors: [], syncs: [] }).items;
-      const judged = all.map((item) => ({ item, can: canStartStoredBacklog(item) }));
+      const judged = all.filter((i) => !only || only.numbers.includes(i.number)).map((item) => ({ item, can: canStartStoredBacklog(item) }));
       return { ws, items: judged.filter((j) => j.can.ok).map((j) => j.item), syncHeld: judged.flatMap((j) => (j.can.ok ? [] : [`#${j.item.number}（${j.can.why}）`])), unsynced };
     }));
     for (const r of read) {
@@ -1318,15 +1322,28 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     return { started, skipped };
   };
   // secret-scan (#775): every registered repository through the kit's scan-issues; hits or a failure leave one inbox note
-  const scanSecrets = async (s: { id: string; title: string }) => {
+  const scanSecrets = async (s: { id: string; title: string }, cursors: ScanCursors) => {
     const meta = metaWorkspace();
     if (!meta) return { lines: ["meta workspace がない（共通キットの scan-issues を呼べない）"], summary: { repos: 0, hits: 0, failed: 1 } };
-    const r = await scanAllRepos({ workspaces: db.listWorkspaces(), metaPath: meta.path, gh: opts.gh ?? runGh });
+    const r = await scanAllRepos({ workspaces: db.listWorkspaces(), metaPath: meta.path, gh: opts.gh ?? runGh, cursors });
     if (r.note) inbox.addNotice(r.note.body, { title: r.note.title, source: { schedule: s.id, title: s.title } });
     return r;
   };
   // Scheduler (#20): cron-fired tasks, morning queue view.
   const scheduler = new Scheduler(db, tasks, Date.now, startNext, scanSecrets, () => settings().quotaAndResume.backlogQuotaLimit, autoRunner);
+  /**
+   * After an import that stored a change (#1879): the PBIs whose waits it closed and no stage Task runs for go on now, in
+   * the implement slot of an enabled backlog-next schedule, not at its next firing. No schedule enabled, nothing starts.
+   */
+  const resumeUnblocked = async (wsId: string) => {
+    const schedule = db.listSchedules().find((s) => s.action === "backlog-next" && s.enabled);
+    const ws = schedule && db.getWorkspace(wsId);
+    if (!schedule || !ws) return;
+    const numbers = withActive({ fetchedAt: 0, items: backlog.read(ws, { released: await releasedIn(ws) }).items, errors: [], syncs: [] }).items
+      .filter((i) => isUnblocked(i) && !i.activeTaskId).map((i) => i.number);
+    if (numbers.length) await scheduler.runUnblocked(schedule.id, ws.id, numbers);
+  };
+  if (!cfg.candidate) backlog.onImported((wsId) => void resumeUnblocked(wsId).catch((e) => console.error(`[backlog] resume after the import of ${wsId}: ${String((e as Error)?.message ?? e)}`)));
   if (!cfg.candidate) {
     scheduler.start();
     // the stored backlog is brought up to date at boot (#885); reading it does not wait for this

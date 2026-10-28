@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Db } from "./db.ts";
-import { fetchFlow, FlowCache, FlowError, flowOfPbi, flowScope, flowView, repoOfRemote, requestOf, summarize, withSwitchboardTasks, type RawComment, type RawPbi, type RawPr } from "./flow.ts";
+import { fetchFlow, FlowCache, FlowError, flowOfPbi, flowScope, flowView, launchShare, repoOfRemote, requestOf, summarize, withSwitchboardTasks, type RawComment, type RawPbi, type RawPr } from "./flow.ts";
 import { loadConfig } from "./config.ts";
 import { startServer } from "./server.ts";
 import type { BacklogSource, FlowView } from "@switchboard/protocol";
@@ -187,8 +187,8 @@ describe("fetchFlow", () => {
 });
 
 describe("switchboard tasks", () => {
-  const task = (id: string, title: string, stage: number | null, workspaceId = "w"): Task =>
-    ({ id, workspaceId, title, runner: "claude", cwd: "/x", scope: { read: [], write: [] }, status: "done", runnerSessionId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "default", effort: null, origin: "user", resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, statusAt: 1000, createdAt: 1000, updatedAt: 9000, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, stage: stage === null ? null : { issue: stage, action: "implement" }, judgingAt: null }) as unknown as Task;
+  const task = (id: string, title: string, stage: number | null, workspaceId = "w", action = "implement"): Task =>
+    ({ id, workspaceId, title, runner: "claude", cwd: "/x", scope: { read: [], write: [] }, status: "done", runnerSessionId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "default", effort: null, origin: "user", resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, statusAt: 1000, createdAt: 1000, updatedAt: 9000, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, stage: stage === null ? null : { issue: stage, action }, judgingAt: null }) as unknown as Task;
 
   test("counts the PBI's and its Tasks' Switchboard Tasks, with run time and cost", () => {
     const db = new Db(join(mkdtempSync(join(tmpdir(), "switchboard.flow.")), "s.db"));
@@ -203,9 +203,21 @@ describe("switchboard tasks", () => {
     db.appendEventAt("a", { type: "log", text: "x" } as never, 5000);
     const read = { pbi: { repo: "o/r", number: 7, title: "", url: "", storyPoints: 3, closedAt: "", stages: {}, userWaitMs: 0, reviewRounds: [], tasks: null } as never, issues: [7, 8] };
     const p = withSwitchboardTasks(read, db.sqlite, ["w"]);
-    expect(p.tasks).toEqual({ count: 3, runMs: 4000 + 8000 + 8000, costUsd: 1.75 }); // a: last event 5000, b / c: updated_at 9000
+    expect(p.tasks).toEqual({ count: 3, runMs: 4000 + 8000 + 8000, costUsd: 1.75, implementLaunches: 0 }); // a: last event 5000, b / c: updated_at 9000
     expect(withSwitchboardTasks(read, null, ["w"]).tasks).toBeNull();
-    expect(withSwitchboardTasks(read, db.sqlite, []).tasks).toEqual({ count: 0, runMs: 0, costUsd: 0 }); // no workspace of the repository: nothing is anyone's
+    expect(withSwitchboardTasks(read, db.sqlite, []).tasks).toEqual({ count: 0, runMs: 0, costUsd: 0, implementLaunches: 0 }); // no workspace of the repository: nothing is anyone's
+  });
+
+  test("implement launches: the PBI's stage Tasks of 実装 (complete), not its other stages nor its Tasks'", () => {
+    const db = new Db(join(mkdtempSync(join(tmpdir(), "switchboard.flow.")), "s.db"));
+    for (const id of ["i1", "i2", "i3"]) db.insertTask(task(id, "#7 実装: PBI", 7, "w", "complete"));
+    db.insertTask(task("t1", "#7 Task に分解: PBI", 7, "w", "to-tasks"));
+    db.insertTask(task("c1", "#8 実装: Task", 8, "w", "complete")); // a Task's number, not the PBI's
+    const read = { pbi: { repo: "o/r", number: 7, title: "", url: "", storyPoints: 3, closedAt: "", stages: {}, userWaitMs: 0, reviewRounds: [], tasks: null } as never, issues: [7, 8] };
+    const p = withSwitchboardTasks(read, db.sqlite, ["w"]);
+    expect(p.tasks).toMatchObject({ count: 5, implementLaunches: 3 });
+    const once = { ...p, number: 9, tasks: { ...p.tasks!, implementLaunches: 1 } };
+    expect(launchShare([p, once, { ...p, number: 10, tasks: null }])).toEqual({ repeated: 1, known: 2 });
   });
 });
 

@@ -240,6 +240,64 @@ describe("scheduler backlog-next (#267)", () => {
     expect((await first).map((x) => x.id)).toEqual([t.id]);
   });
 
+  test("runUnblocked (#1879): one asked while another workspace's run is under way is kept and run after it; one asked during a full firing too", async () => {
+    let release!: () => void;
+    const calls: Array<{ workspaceId: string; numbers: number[] } | undefined> = [];
+    let hold = true;
+    const sc = new Scheduler(db, tasks, () => now, (_id, only) => (calls.push(only), hold ? new Promise((r) => (release = () => r({ started: [], skipped: [] }))) : Promise.resolve({ started: [], skipped: [] })));
+    const s = sc.create({ title: "b", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "", action: "backlog-next" });
+    const first = sc.runUnblocked(s.id, "ws_a", [1]);
+    expect(await sc.runUnblocked(s.id, "ws_b", [2])).toBeNull();
+    expect(await sc.runUnblocked(s.id, "ws_b", [3])).toBeNull();
+    // the firing's own read coming back with what it reads is not kept again
+    expect(await sc.runUnblocked(s.id, "ws_a", [1])).toBeNull();
+    expect(calls).toEqual([{ workspaceId: "ws_a", numbers: [1] }]);
+    hold = false;
+    release();
+    await first;
+    await Bun.sleep(0);
+    expect(calls).toEqual([{ workspaceId: "ws_a", numbers: [1] }, { workspaceId: "ws_b", numbers: [2, 3] }]);
+    // one of those kept failing does not drop the ones after it
+    calls.length = 0;
+    hold = true;
+    const sc2 = new Scheduler(db, tasks, () => now, (_id, only) => (calls.push(only), hold ? new Promise((r) => (release = () => r({ started: [], skipped: [] }))) : only?.workspaceId === "ws_b" ? Promise.reject(new Error("boom")) : Promise.resolve({ started: [], skipped: [] })));
+    const again = sc2.runUnblocked(s.id, "ws_a", [1]);
+    await sc2.runUnblocked(s.id, "ws_b", [2]);
+    await sc2.runUnblocked(s.id, "ws_c", [3]);
+    hold = false;
+    release();
+    await again;
+    await Bun.sleep(0);
+    expect(calls.map((c) => c?.workspaceId)).toEqual(["ws_a", "ws_b", "ws_c"]);
+    expect(sc2.recentLog()).toContainEqual(expect.stringContaining("始められない (待ちが解けた): boom"));
+    // a full firing read each workspace once, maybe before the wait cleared: what is asked meanwhile is run after it
+    calls.length = 0;
+    const full = sc.runNow(s.id, "manual");
+    expect(await sc.runUnblocked(s.id, "ws_b", [2])).toBeNull();
+    await full;
+    await Bun.sleep(0);
+    expect(calls).toEqual([undefined, { workspaceId: "ws_b", numbers: [2] }]);
+  });
+
+  test("runUnblocked (#1879): a due firing during a narrow one waits for it and runs, and what was kept is left to it", async () => {
+    let release!: () => void;
+    const calls: Array<{ workspaceId: string; numbers: number[] } | undefined> = [];
+    let hold = true;
+    const sc = new Scheduler(db, tasks, () => now, (_id, only) => (calls.push(only), hold ? new Promise((r) => (release = () => r({ started: [], skipped: [] }))) : Promise.resolve({ started: [], skipped: [] })));
+    const s = sc.create({ title: "b", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "", action: "backlog-next" });
+    const narrow = sc.runUnblocked(s.id, "ws_a", [1]);
+    await sc.runUnblocked(s.id, "ws_b", [2]);
+    const due = sc.runNow(s.id, "due");
+    hold = false;
+    release();
+    await narrow;
+    await due;
+    await Bun.sleep(0);
+    expect(calls).toEqual([{ workspaceId: "ws_a", numbers: [1] }, undefined]);
+    expect(sc.recentLog().some((l) => l.includes("前の発火がまだ項目を選んでいる"))).toBe(false);
+    expect(db.getSchedule(s.id)!.lastRunAt).toBe(now);
+  });
+
   test("a prompt schedule needs a prompt; a backlog-next one does not", () => {
     const sc = new Scheduler(db, tasks, () => now);
     expect(() => sc.create({ title: "x", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: " " })).toThrow(/prompt is required/);
@@ -370,6 +428,48 @@ describe("scheduler secret-scan (#775)", () => {
     expect(db.listTasksByStatus("running")).toHaveLength(0);
   });
 
+  test("secret-scan: the second firing reads from the first one's time, keeps it across a restart, and a failed repository keeps its old time", async () => {
+    setUp();
+    const sc = new Scheduler(db, tasks, () => now, undefined, (_s, cursors) => scanAllRepos({ workspaces: db.listWorkspaces(), metaPath: join(home, "meta"), gh, spawn, cursors, now: () => now }));
+    const s = sc.create({ title: "検査", cron: "0 4 * * *", workspaceId: wsId, runner: "claude", prompt: "", action: "secret-scan" });
+    now = Date.parse("2026-09-08T04:00:00Z");
+    await sc.runNow(s.id, "manual");
+    // no cursor yet: every repository read whole
+    expect(scans.every((c) => !c.includes("--since"))).toBe(true);
+    const first = new Date(now).toISOString();
+    expect(db.getSchedule(s.id)!.lastResult!.cursors).toEqual({
+      "o/clean": { since: first, hits: [] },
+      "o/leak": { since: first, hits: ["https://github.com/o/leak/issues/3", "https://github.com/o/leak/issues/3#issuecomment-9"] },
+    });
+    // a restart: a new scheduler on the same database; o/clean cannot be read this time
+    scans.length = 0;
+    const clean = answers["o/clean"]!;
+    answers["o/clean"] = { code: 2, stdout: "", stderr: "HTTP 502" };
+    now = Date.parse("2026-09-09T04:00:00Z");
+    const again = new Scheduler(db, tasks, () => now, undefined, (_s, cursors) => scanAllRepos({ workspaces: db.listWorkspaces(), metaPath: join(home, "meta"), gh, spawn, cursors, now: () => now }));
+    await again.runNow(s.id, "manual");
+    answers["o/clean"] = clean;
+    const leak = scans.find((c) => c.at(-1) === "o/leak")!;
+    expect(leak.slice(3)).toEqual(["--since", first, "--recheck", "https://github.com/o/leak/issues/3", "--recheck", "https://github.com/o/leak/issues/3#issuecomment-9", "o/leak"]);
+    expect(scans.find((c) => c.at(-1) === "o/down")!.slice(3)).toEqual(["o/down"]);
+    expect(db.getSchedule(s.id)!.lastResult!.cursors).toEqual({
+      "o/clean": { since: first, hits: [] },
+      "o/leak": { since: new Date(now).toISOString(), hits: ["https://github.com/o/leak/issues/3", "https://github.com/o/leak/issues/3#issuecomment-9"] },
+    });
+    // a workspace whose repository cannot be identified this time keeps that repository's cursor
+    const leakPath = join(home, "leak");
+    delete repoOfPath[leakPath];
+    await again.runNow(s.id, "manual");
+    repoOfPath[leakPath] = "o/leak";
+    expect(db.getSchedule(s.id)!.lastResult!.cursors!["o/leak"]!.since).toBe(new Date(now).toISOString());
+    expect(scans.filter((c) => c.at(-1) === "o/leak")).toHaveLength(1);
+    // a scan that throws keeps the cursors as they were
+    const kept = db.getSchedule(s.id)!.lastResult!.cursors;
+    const broken = new Scheduler(db, tasks, () => now, undefined, async () => { throw new Error("x"); });
+    await broken.runNow(s.id, "manual");
+    expect(db.getSchedule(s.id)!.lastResult!.cursors).toEqual(kept);
+  });
+
   test("secret-scan: a scan that throws leaves a failed result with the reason, and the schedule still moves to the next day (#1274)", async () => {
     setUp();
     const sc = new Scheduler(db, tasks, () => now, undefined, async () => { throw new Error(`gh is not logged in ${token}`); });
@@ -434,7 +534,7 @@ describe("scheduler secret-scan (#775)", () => {
     expect(r.lines.join("\n")).not.toContain(token);
     // a day with nothing found: the log only, no note
     const clean = await scanAllRepos({ workspaces: [{ name: "w", path: home }], metaPath: join(home, "meta"), gh, spawn });
-    expect(clean).toEqual({ lines: ["o/clean: 0 件（scanned 12）"], summary: { repos: 1, hits: 0, failed: 0 } });
+    expect(clean).toEqual({ lines: ["o/clean: 0 件（scanned 12）"], summary: { repos: 1, hits: 0, failed: 0 }, cursors: { "o/clean": { since: expect.any(String), hits: [] } } });
     expect(r.summary).toEqual({ repos: 4, hits: 2, failed: 3 });
   });
 

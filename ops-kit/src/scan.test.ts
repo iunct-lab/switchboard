@@ -79,3 +79,52 @@ describe("scanIssues", () => {
     await expect(scanIssues(fakeGh([() => [{ body: "x" }]]), "o/r")).rejects.toBeInstanceOf(ScanFetchError);
   });
 });
+
+describe("scanIssues since", () => {
+  const gh = "https://github.com/o/r";
+  const paths = (c: { calls: Array<{ kind: string; path?: string }> }) => c.calls.map((x) => x.path ?? "");
+
+  test("since: the three lists ask for what was updated after it, and only the pull requests listed have their reviews read", async () => {
+    const pr = { html_url: `${gh}/pull/5`, body: "PR", number: 5, pull_request: {} };
+    const c = fakeGh([() => [pr], () => [], () => [], () => []]);
+    expect(await scanIssues(c, "o/r", Bun.sleep, undefined, { since: "2026-10-20T00:00:00Z" })).toEqual({ hits: [], scanned: 1 });
+    expect(paths(c)).toEqual([
+      "repos/o/r/issues?since=2026-10-20T00%3A00%3A00Z&state=all&per_page=100&page=1",
+      "repos/o/r/issues/comments?since=2026-10-20T00%3A00%3A00Z&per_page=100&page=1",
+      "repos/o/r/pulls/comments?since=2026-10-20T00%3A00%3A00Z&per_page=100&page=1",
+      "repos/o/r/pulls/5/reviews?per_page=100&page=1",
+    ]);
+    // without since: every row, as before
+    const all = fakeGh([() => [], () => [], () => []]);
+    await scanIssues(all, "o/r");
+    expect(paths(all)).toEqual(["repos/o/r/issues?state=all&per_page=100&page=1", "repos/o/r/issues/comments?per_page=100&page=1", "repos/o/r/pulls/comments?per_page=100&page=1"]);
+  });
+
+  test("since: an earlier hit outside the difference is read again and stays a hit until its text is fixed or deleted", async () => {
+    const recheck = [`${gh}/issues/3`, `${gh}/issues/3#issuecomment-9`, `${gh}/pull/5#discussion_r7`, `${gh}/pull/5#pullrequestreview-8`, `${gh}/issues/6`];
+    const still = fakeGh([() => [], () => [], () => [], () => ({ title: "題", body: `コード ${code}` }), () => ({ body: "直した" }), () => { throw new GhError("gh: Not Found (HTTP 404)"); }, () => ({ body: `x\nコード ${code}` }), () => { throw new GhError("gh: This issue was deleted (HTTP 410)"); }]);
+    expect(await scanIssues(still, "o/r", async () => {}, undefined, { since: "2026-10-20T00:00:00Z", recheck })).toEqual({
+      hits: [
+        { url: `${gh}/issues/3`, kind: "device-code", line: 1 },
+        { url: `${gh}/pull/5#pullrequestreview-8`, kind: "device-code", line: 2 },
+      ],
+      scanned: 3,
+    });
+    // each place by its own API path; a deleted one (404, or 410 for an Issue) is asked once, not retried
+    expect(paths(still).slice(3)).toEqual(["repos/o/r/issues/3", "repos/o/r/issues/comments/9", "repos/o/r/pulls/comments/7", "repos/o/r/pulls/5/reviews/8", "repos/o/r/issues/6"]);
+  });
+
+  test("since: a place the difference already read is not asked again; another failure has no answer", async () => {
+    const c = fakeGh([() => [{ html_url: `${gh}/issues/3`, title: "題", body: "直した" }], () => [], () => []]);
+    expect(await scanIssues(c, "o/r", Bun.sleep, undefined, { since: "2026-10-20T00:00:00Z", recheck: [`${gh}/issues/3`] })).toEqual({ hits: [], scanned: 1 });
+    expect(c.calls).toHaveLength(3);
+    const down = fakeGh([() => [], () => [], () => [], () => { throw new GhError("HTTP 502"); }, () => { throw new GhError("HTTP 502"); }, () => { throw new GhError("HTTP 502"); }]);
+    await expect(scanIssues(down, "o/r", async () => {}, undefined, { recheck: [`${gh}/issues/3`] })).rejects.toBeInstanceOf(ScanFetchError);
+  });
+
+  test("since: the recheck path checks with the host's AWS config too", async () => {
+    const id = ["8642", "9753", "1086"].join("");
+    const c = fakeGh([() => [], () => [], () => [], () => ({ body: `メモ ${id}` })]);
+    expect(await scanIssues(c, "o/r", Bun.sleep, { names: [], accountIds: [id] }, { since: "2026-10-20T00:00:00Z", recheck: [`${gh}/issues/4#issuecomment-1`] })).toEqual({ hits: [{ url: `${gh}/issues/4#issuecomment-1`, kind: "account-id", line: 1 }], scanned: 1 });
+  });
+});

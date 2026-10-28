@@ -225,7 +225,14 @@ export async function fetchFlow(gh: GhRunner, cwd: string, repo: string, days: n
 export function withSwitchboardTasks(read: FlowRead, db: Database | null, workspaceIds: string[]): FlowPbi {
   if (!db) return read.pbi;
   const rows = tasksOfIssues(db, read.issues, workspaceIds);
-  return { ...read.pbi, tasks: { count: rows.length, runMs: rows.reduce((s, r) => s + r.durationMs, 0), costUsd: rows.reduce((s, r) => s + r.costUsd, 0) } };
+  const implementLaunches = rows.filter((r) => r.stageIssue === read.pbi.number && r.stageAction === "complete").length;
+  return { ...read.pbi, tasks: { count: rows.length, runMs: rows.reduce((s, r) => s + r.durationMs, 0), costUsd: rows.reduce((s, r) => s + r.costUsd, 0), implementLaunches } };
+}
+
+/** Of the PBIs whose Switchboard Tasks were read (`known`), how many had 実装 started 3 times or more (`repeated`). */
+export function launchShare(pbis: FlowPbi[]): { repeated: number; known: number } {
+  const known = pbis.filter((p) => p.tasks !== null);
+  return { repeated: known.filter((p) => p.tasks!.implementLaunches >= 3).length, known: known.length };
 }
 
 
