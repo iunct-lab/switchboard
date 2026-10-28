@@ -40,7 +40,7 @@ export class LlmSuggester implements Suggester {
     const prompt = buildPrompt(ctx, this.opts.examples().slice(0, this.opts.exampleCount ?? DEFAULT_EXAMPLE_COUNT));
     const text = await runSuggestionTurn(this.opts, prompt, signal);
     const answer = parseSuggestion(text, candidates);
-    return { runner: answer.runner, reason: answer.reason, ruleId: "llm", available: true, alternatives: [], llm: null };
+    return { runner: answer.runner, reason: answer.reason, ruleId: "llm", model: null, available: true, alternatives: [], llm: null };
   }
 }
 

@@ -1,4 +1,5 @@
 import type { AnswerPolicy, Artifact, AskAnswer, AskAnswerResult, AskList, Attachment, Backlog, BacklogAction, BacklogCreateInput, BacklogEditInput, BacklogIssueDetail, CheckRun, CloudPreparation, CreateTaskInput, DeviceAuthView, EvalsListRow, EventEnvelope, FeedbackInput, FlowView, Footprint, HistoryScanResult, HistorySession, HistoryStatus, InboxNote, InterventionView, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerSummary, LedgerTaskRow, OpsLatency, OpsLoad, OpsStops, PendingApproval, PerfSample, PerfSummaryRow, PolicyInput, PolicyList, PolicyPatch, Preset, PresetExpandInput, PresetExpansion, PresetInput, PresetList, PricingTable, Queue, ReportRow, RoutingLogRow, RoutingStats, RoutingSuggestion, RunnerId, RunnerInfo, Schedule, ScheduleInput, ServerMessage, Settings, SettingsPatch, StagedChange, StopSummary, SuggestInput, Task, TaskDiffFile, TaskEvals, TaskOutcome, TeleportProgress, Workspace, WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
+import { acrossParams, type AcrossQuery } from "./reports.ts";
 import { hasTypedText, hostStopped, LEAVE_STOPPED, loginRoute, stoppedRoute, type LoginMode } from "./login.ts";
 import type { ReleaseStatus } from "./release.ts";
 import type { EventsArchive } from "./events-archive.ts";
@@ -239,7 +240,9 @@ export const api = {
   refreshArtifact: (id: string) => req<Artifact>(`/api/artifacts/${id}/refresh`, { method: "POST" }),
   viewArtifact: (id: string) => req<{ url: string }>(`/api/artifacts/${id}/view`, { method: "POST" }),
   /** Reports across Tasks (#1835): every task's HTML artifacts, newest first. */
-  reports: (limit = 20) => req<ReportRow[]>(`/api/reports?limit=${limit}`),
+  reports: (o: AcrossQuery = {}) => req<ReportRow[]>(`/api/reports${acrossParams(o)}`),
+  /** Every artifact across Tasks (#1833), newest first; the same query as `reports`. */
+  allArtifacts: (o: AcrossQuery = {}) => req<ReportRow[]>(`/api/artifacts${acrossParams(o)}`),
   deleteAttachment: (id: string) => req<{ ok: boolean }>(`/api/attachments/${id}`, { method: "DELETE" }),
   attachmentUrl: (id: string) => `/api/attachments/${id}`,
   /** The bytes, with the token when one is set (an <img src> could not send it). */

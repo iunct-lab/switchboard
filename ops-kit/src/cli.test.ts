@@ -336,3 +336,69 @@ describe("set / triage with BACKLOG_URL (#2694)", () => {
     expect(r.gh.calls).toHaveLength(2);
   });
 });
+
+describe("request with BACKLOG_URL", () => {
+  // a fake app that numbers what it creates (a backlog kept in the app) unless told it waits to be sent (GitHub's)
+  function fakeApp(numbered: boolean) {
+    const posts: unknown[] = [];
+    const sync = { workspaceId: "ws_1", repository: "example/repo", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } };
+    const server = Bun.serve({
+      port: 0,
+      fetch: async (req) => {
+        const path = new URL(req.url).pathname.replace(/^\/api\/backlog/, "");
+        if (req.method === "POST" && path === "") {
+          posts.push(await req.json());
+          return Response.json({ localId: "loc_1", number: numbered ? 77 : null });
+        }
+        return Response.json({ syncs: [sync], items: [] });
+      },
+    });
+    const env = { ...process.env, BACKLOG_URL: `http://127.0.0.1:${server.port}/api/backlog`, BACKLOG_TOKEN_FILE: undefined, BACKLOG_WORKSPACE: undefined, GH_REPO: "example/repo" };
+    return { posts, env, stop: () => server.stop(true) };
+  }
+  let dir: string;
+  beforeEach(() => (dir = mkdtempSync(join(tmpdir(), "ops-kit.request-app."))));
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+  const body = "## 要望\n整えた文\n\n## 出典\n- 誰の言葉: 定期の検査\n- いつ: 2026-01-01\n";
+
+  test("is stored in the app as a type:request in Backlog, never created with gh, and keeps the 要望を作成 line", async () => {
+    const app = fakeApp(true);
+    try {
+      writeFileSync(join(dir, "req.md"), body);
+      const gh = fakeGh([]);
+      const out: string[] = [];
+      expect(await main(["request", "モデル一覧のズレ", join(dir, "req.md"), "--config", config], gh, (s) => out.push(s), () => {}, async () => {}, app.env)).toBe(0);
+      expect(app.posts).toEqual([{ workspaceId: "ws_1", title: "モデル一覧のズレ", body, labels: ["type:request"], milestone: null, parent: null, fields: { Status: "Backlog" } }]);
+      expect(out).toEqual([">> 要望を作成: #77（アプリに保存）"]);
+      expect(gh.calls).toHaveLength(0);
+    } finally {
+      app.stop();
+    }
+  });
+
+  test("waiting to be sent to GitHub: no number yet, so no 要望を作成 line", async () => {
+    const app = fakeApp(false);
+    try {
+      writeFileSync(join(dir, "req.md"), body);
+      const out: string[] = [];
+      expect(await main(["request", "t", join(dir, "req.md"), "--config", config], fakeGh([]), (s) => out.push(s), () => {}, async () => {}, app.env)).toBe(0);
+      expect(out.join("\n")).toContain("送信待ち");
+      expect(out.join("\n")).not.toContain("要望を作成");
+    } finally {
+      app.stop();
+    }
+  });
+
+  test("a body without the required sections is refused before the app is asked", async () => {
+    const app = fakeApp(true);
+    try {
+      writeFileSync(join(dir, "req.md"), "## 要望\n整えた文\n");
+      const err: string[] = [];
+      expect(await main(["request", "t", join(dir, "req.md"), "--config", config], fakeGh([]), () => {}, (s) => err.push(s), async () => {}, app.env)).toBe(1);
+      expect(err.join("\n")).toContain("## 出典");
+      expect(app.posts).toHaveLength(0);
+    } finally {
+      app.stop();
+    }
+  });
+});

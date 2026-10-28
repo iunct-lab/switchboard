@@ -1,7 +1,10 @@
 import type { Task } from "@switchboard/protocol";
 
-/** `task.artifact`: the 成果物 to open first (#1835 links to it from Insights); `evals.report`: the report Insights opens first (Home's line). */
-export type View = { name: "home" } | { name: "task"; id: string; artifact?: string } | { name: "knowledge" } | { name: "ledger" } | { name: "evals"; report?: string } | { name: "schedules" } | { name: "backlog" } | { name: "approvals" } | { name: "settings" };
+/**
+ * `task.artifact`: the 成果物 to open first (#1835 links to it from Insights); `evals.report`: the report Insights opens first
+ * (Home's line); `evals.artifacts`: Insights' レポート section shows every artifact instead of the HTML ones (#1833).
+ */
+export type View = { name: "home" } | { name: "task"; id: string; artifact?: string } | { name: "knowledge" } | { name: "ledger" } | { name: "evals"; report?: string; artifacts?: boolean } | { name: "schedules" } | { name: "backlog" } | { name: "approvals" } | { name: "settings" };
 
 /** Room left for a task's title inside the label; FeedbackInput.screen takes at most 200 characters. */
 const TITLE_MAX = 120;

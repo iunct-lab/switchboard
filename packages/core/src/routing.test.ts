@@ -11,7 +11,7 @@ const base: RoutingContext = { title: "", prompt: "", scope: ["/repo"], availabl
 describe("routing rule table", () => {
   test("the shipped routing.yaml parses and has the proposal's rules", () => {
     expect(source).toContain("routing.yaml");
-    expect(table.rules.map((r) => r.id)).toEqual(["multi-repo", "design-research", "self-dev", "maintenance-routine", "single-repo-long"]);
+    expect(table.rules.map((r) => r.id)).toEqual(["status-question", "multi-repo", "design-research", "self-dev", "maintenance-routine", "single-repo-long"]);
   });
 
   test("multi-repo scope → claude, first match wins even if other rules also match", () => {
@@ -41,6 +41,17 @@ describe("routing rule table", () => {
     expect(keywordHit(["fix all"], { title: "", prompt: "please fix all tests" })).toBe(true);
     expect(keywordHit(["設計"], { title: "", prompt: "この設計を比較" })).toBe(true);
     expect(suggestRunner(table, { ...base, prompt: "read the information about the platform" }).ruleId).toBe("fallback");
+  });
+
+  test("suggest model for status questions", () => {
+    for (const prompt of ["状況を教えて", "PBI の一覧", "#1874 はどうなってる"]) {
+      for (const workspaceKind of [undefined, "meta"] as const) {
+        expect(suggestRunner(table, { ...base, workspaceKind, prompt })).toMatchObject({ ruleId: "status-question", runner: "claude", model: "claude-haiku-5-5" });
+      }
+    }
+    expect(suggestRunner(table, { ...base, workspaceKind: "meta", prompt: "ボタンの色を変えて" })).toMatchObject({ ruleId: "self-dev", model: null });
+    expect(suggestRunner(table, { ...base, prompt: "fix the typo" })).toMatchObject({ ruleId: "fallback", model: null });
+    expect(suggestRunner(table, { ...base, prompt: "fix the typo", previousRunner: "codex" })).toMatchObject({ ruleId: "previous", model: null });
   });
 
   test("meta workspace → claude via self-dev", () => {

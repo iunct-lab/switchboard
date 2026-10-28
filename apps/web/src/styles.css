@@ -512,6 +512,13 @@ table.evals-table td button.open { font: inherit; color: inherit; padding: 0; te
 .reports .row.on .t { color: var(--ink); font-weight: 500; }
 .reports .art-body { margin-top: 8px; }
 .reports .art-frame { min-height: 480px; }
+/* the switch between the HTML ones and every artifact, and the filter (#1833) */
+.reports-scope { display: flex; flex-wrap: wrap; gap: 4px; }
+.reports-scope button[aria-pressed="true"] { color: var(--ink); border-color: var(--line2); }
+.reports-q { width: 100%; box-sizing: border-box; margin-bottom: 6px; }
+/* the line beside the title gives way first: a long Task title is cut, not the artifact's (phones: the title gets its own line) */
+.reports .row .m { flex: 0 1 auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 767px) { .reports .row { flex-wrap: wrap; } .reports .row .t { flex-basis: 100%; } .reports .row .m { flex: 1; max-width: none; } }
 /* Ledger's 使用量（枠） and Home's rows (#1836): a window the runner has not reported for a day is faded. */
 .stale { opacity: .6; }
 .usage .row.sub { margin-top: 8px; }

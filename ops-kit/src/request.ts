@@ -9,15 +9,7 @@ import { setField, UsageError } from "./set.ts";
  * request's required sections is refused before anything is created.
  */
 export async function createRequest(gh: GhClient, cfg: OpsConfig, input: { title: string; bodyFile: string }, log: (s: string) => void = console.log): Promise<number> {
-  let body: string;
-  try {
-    body = readFileSync(input.bodyFile, "utf8");
-  } catch (e) {
-    throw new UsageError(`本文のファイルを読めません: ${(e as Error).message}`);
-  }
-  const lacking = cfg.sections.request.filter((s) => !hasSection(body, sectionName(s))).map((s) => `## ${sectionName(s)}`);
-  if (lacking.length) throw new UsageError(`要望の本文に ${lacking.join("、")} が無いので作りません`);
-  if (hasSection(body, "出典") && !speakerOf(body)) throw new UsageError(`${SPEAKER_MISSING}ので作りません。利用者の文を引けなければ エージェント`);
+  checkRequestBody(cfg, input.bodyFile);
   const repo = await repoOf(gh);
   const url = (await gh.run(["issue", "create", "-R", `${repo.owner}/${repo.name}`, "-t", input.title, "-l", "type:request", "-F", input.bodyFile])).trim();
   const m = /\/issues\/(\d+)$/.exec(url);
@@ -31,4 +23,17 @@ export async function createRequest(gh: GhClient, cfg: OpsConfig, input: { title
     throw new Error(`${(e as Error).message}\n要望 #${num} は作成済みです。request をやり直さず、set ${num} Status Backlog で続けてください`);
   }
   return num;
+}
+
+/** Refuses (UsageError) a body file that cannot be read or lacks the request's required sections — before anything is created. */
+export function checkRequestBody(cfg: OpsConfig, bodyFile: string): void {
+  let body: string;
+  try {
+    body = readFileSync(bodyFile, "utf8");
+  } catch (e) {
+    throw new UsageError(`本文のファイルを読めません: ${(e as Error).message}`);
+  }
+  const lacking = cfg.sections.request.filter((s) => !hasSection(body, sectionName(s))).map((s) => `## ${sectionName(s)}`);
+  if (lacking.length) throw new UsageError(`要望の本文に ${lacking.join("、")} が無いので作りません`);
+  if (hasSection(body, "出典") && !speakerOf(body)) throw new UsageError(`${SPEAKER_MISSING}ので作りません。利用者の文を引けなければ エージェント`);
 }

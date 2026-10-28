@@ -944,18 +944,32 @@ export class Db {
   }
 
   /**
-   * Reports across tasks (#1835): every task's HTML artifacts (a file or a folder, not removed), newest first by
-   * `updated_at` so a refreshed one rises, with the task's title and the schedule's when a schedule started the task.
+   * Artifacts across tasks (#1835 reports, #1833 every artifact): not removed, newest first by `updated_at` so a
+   * refreshed one rises, with the task's title and the schedule's when a schedule started the task. `htmlOnly` keeps
+   * the HTML files and folders (the reports). `q` is a literal part of the title, the original path or the task's
+   * title. `before` is the id of the previous page's last row. The task's own state (archived, how old) is not read.
    */
-  listReports(limit: number): ReportRow[] {
+  listArtifactsAcross(o: { htmlOnly: boolean; q?: string; before?: string; limit: number }): ReportRow[] {
+    const where = ["a.removed_at IS NULL"];
+    const args: Array<string | number> = [];
+    if (o.htmlOnly) where.push("a.kind IN ('file', 'dir') AND a.mime IN ('text/html', 'application/xhtml+xml')");
+    if (o.q) {
+      args.push(`%${o.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+      const p = `?${args.length}`;
+      where.push(`(a.title LIKE ${p} ESCAPE '\\' OR a.source LIKE ${p} ESCAPE '\\' OR t.title LIKE ${p} ESCAPE '\\')`);
+    }
+    if (o.before) {
+      args.push(o.before);
+      where.push(`(a.updated_at, a.id) < (SELECT updated_at, id FROM artifacts WHERE id = ?${args.length})`);
+    }
     return this.sqlite
       .query(
         `SELECT a.*, t.title AS task_title, s.title AS schedule_title FROM artifacts a
          JOIN tasks t ON t.id = a.task_id LEFT JOIN schedules s ON s.id = t.schedule_id
-         WHERE a.removed_at IS NULL AND a.kind IN ('file', 'dir') AND a.mime IN ('text/html', 'application/xhtml+xml')
-         ORDER BY a.updated_at DESC, a.id DESC LIMIT ?`,
+         WHERE ${where.join(" AND ")}
+         ORDER BY a.updated_at DESC, a.id DESC LIMIT ?${args.length + 1}`,
       )
-      .all(limit)
+      .all(...args, o.limit)
       .map(rowToReport);
   }
 
@@ -1126,7 +1140,26 @@ export class Db {
     const r = rules ? RuleEval.safeParse(rules.json) : null;
     const j = judge ? JudgeEval.safeParse(judge.json) : null;
     const h = human ? HumanEval.safeParse(human.json) : null;
-    return { rules: r?.success ? r.data : null, judge: j?.success ? j.data : null, human: h?.success ? h.data : null };
+    return { rules: r?.success ? r.data : null, judge: j?.success ? j.data : null, human: h?.success ? h.data : null, models: this.taskModels([taskId]).get(taskId) ?? [] };
+  }
+
+  /**
+   * The models each task ran on (#1801): the distinct `model` of its `session.start` events, in the order first used, empty
+   * ones not counted. Read from the events rather than `tasks.model` (the last one only) or the ledger (judging, routing and
+   * a runner's background model share the task id). A task with none is absent from the map.
+   */
+  taskModels(taskIds: string[]): Map<string, string[]> {
+    const out = new Map<string, string[]>();
+    if (!taskIds.length) return out;
+    const rows = this.sqlite
+      .query(
+        `SELECT task_id AS taskId, json_extract(json, '$.model') AS model, MIN(seq) AS first FROM events
+         WHERE task_id IN (${taskIds.map(() => "?").join(", ")}) AND json_extract(json, '$.t') = 'session.start'
+         GROUP BY task_id, model HAVING COALESCE(model, '') <> '' ORDER BY task_id, first`,
+      )
+      .all(...taskIds) as Array<{ taskId: string; model: string }>;
+    for (const r of rows) out.set(r.taskId, [...(out.get(r.taskId) ?? []), r.model]);
+    return out;
   }
 
   /**
@@ -1137,7 +1170,7 @@ export class Db {
   evalsList(q: { workspaceId?: string; runner?: RunnerId; limit: number }): EvalsListRow[] {
     const rows = this.sqlite
       .query(
-        `SELECT t.id AS taskId, t.title AS title, t.runner AS runner, t.workspace_id AS workspaceId, t.status AS status, t.outcome AS outcome, t.updated_at AS updatedAt,
+        `SELECT t.id AS taskId, t.title AS title, t.runner AS runner, t.workspace_id AS workspaceId, t.status AS status, t.outcome AS outcome, t.updated_at AS updatedAt, t.effort AS effort,
                 (SELECT COALESCE(SUM(cost_usd), 0) FROM ledger WHERE task_id = t.id) AS costUsd,
                 r.json AS rulesJson, j.json AS judgeJson, h.json AS humanJson
          FROM tasks t
@@ -1147,7 +1180,7 @@ export class Db {
          WHERE (? IS NULL OR t.workspace_id = ?) AND (? IS NULL OR t.runner = ?)
          ORDER BY t.updated_at DESC LIMIT ?`,
       )
-      .all(q.workspaceId ?? null, q.workspaceId ?? null, q.runner ?? null, q.runner ?? null, q.limit) as Array<{ taskId: string; title: string; runner: RunnerId; workspaceId: string | null; status: TaskStatus; outcome: TaskOutcome; updatedAt: number; costUsd: number; rulesJson: string | null; judgeJson: string | null; humanJson: string | null }>;
+      .all(q.workspaceId ?? null, q.workspaceId ?? null, q.runner ?? null, q.runner ?? null, q.limit) as Array<{ taskId: string; title: string; runner: RunnerId; workspaceId: string | null; status: TaskStatus; outcome: TaskOutcome; updatedAt: number; effort: string | null; costUsd: number; rulesJson: string | null; judgeJson: string | null; humanJson: string | null }>;
     const parse = <T>(json: string | null, schema: { safeParse: (v: unknown) => { success: boolean; data?: T } }): T | null => {
       if (!json) return null;
       try {
@@ -1157,6 +1190,7 @@ export class Db {
         return null;
       }
     };
+    const models = this.taskModels(rows.map((r) => r.taskId));
     return rows.map((r) => {
       const rules = parse(r.rulesJson, RuleEval);
       const judge = parse(r.judgeJson, JudgeEval);
@@ -1165,6 +1199,7 @@ export class Db {
       const values = Object.values(scores);
       return {
         taskId: r.taskId, title: r.title, runner: r.runner, workspaceId: r.workspaceId, status: r.status, outcome: r.outcome, updatedAt: r.updatedAt, costUsd: r.costUsd,
+        models: models.get(r.taskId) ?? [], effort: r.effort,
         rules: rules ? { toolCalls: rules.metrics.toolCalls, toolFailures: rules.metrics.toolFailures, errors: rules.metrics.errors, userInstructions: rules.metrics.userInstructions, stops: rules.metrics.stops, lastEnd: rules.metrics.lastEnd } : null,
         judge: judge && values.length ? { average: Math.round((values.reduce((a, b) => a + b, 0) / values.length) * 10) / 10, scores, rubric: judge.rubric, by: judge.by } : null,
         human: human ? { rating: human.rating, comment: human.comment } : null,

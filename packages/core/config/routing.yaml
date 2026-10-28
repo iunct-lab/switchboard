@@ -8,9 +8,17 @@
 #   kinds               : explicit task kind passed by the UI (design | research | review | maintenance | ...)
 #   workspaceKind       : "meta" (Switchboard itself) | "repo"
 # runner  : claude | codex | dak
+# model   : model to propose (optional; a runner model id). Absent = the runner's CLI default
 # reason  : shown in the Task Brief as the recommendation's justification
 version: 1
 rules:
+  # First so it also matches in the meta workspace (before self-dev).
+  - id: status-question
+    when: { keywords: [状況, 一覧, どうなって, 進捗] }
+    runner: claude
+    model: claude-haiku-5-5
+    reason: 状況確認・一覧の問い合わせ。読むだけなので安いモデルで足りる
+
   - id: multi-repo
     when: { minRepos: 2 }
     runner: claude

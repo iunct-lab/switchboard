@@ -15,7 +15,7 @@ Exit 0 = up to date or updated and checked / 1 = rolled back, could not roll bac
 
 ## Where the result is read
 
-The schedule's Task (scheduled list in the schedules view → its conversation) keeps the printed lines. On exit 1, `--file-request` files a request Issue titled `CLI 更新の失敗: <runner> <old> → <new> / …` through `scripts/file-request.ts`; the same failure has the same title, so an open request is not filed twice.
+The schedule's Task (scheduled list in the schedules view → its conversation) keeps the printed lines. On exit 1, `--file-request` files a request Issue titled `CLI 更新の失敗: <runner> <old> → <new> / …` through `scripts/file-request.ts`, with the `## 要望` and `## 出典` sections the filing entry requires (`## 出典` starts with `- 誰の言葉: 定期の検査`); the same failure has the same title, so an open request is not filed twice.
 
 ## Decisions
 

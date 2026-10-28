@@ -304,6 +304,90 @@ describe("reports across tasks (#1835)", () => {
   });
 });
 
+describe("artifacts across tasks (#1833)", () => {
+  const across = (q = "") => fetch(`${base}/api/artifacts${q}`);
+  const addTo = (task: string, source: string) => post(`/api/tasks/${task}/artifacts`, { source }).then(j) as Promise<Artifact>;
+  type Row = Artifact & { taskTitle: string; scheduleTitle: string | null };
+  const ids = async (path: string) => ((await j(await fetch(`${base}${path}`))) as Row[]).map((r) => r.id);
+  let dir: string;
+  let html: Artifact, png: Artifact, txt: Artifact, url: Artifact;
+
+  beforeAll(async () => {
+    core.db.insertTask({ ...mkTask("tsk_all1", work), title: "週報を作る" });
+    core.db.insertTask({ ...mkTask("tsk_all2", work), title: "画面の確認" });
+    dir = join(work, "all");
+    mkdirSync(dir, { recursive: true });
+    for (const [name, body] of [["trend_100%.html", "<p>t</p>"], ["shot.png", "png"], ["notes.txt", "n"]] as const) writeFileSync(join(dir, name), body);
+    html = await addTo("tsk_all1", join(dir, "trend_100%.html"));
+    await Bun.sleep(5); // distinct updated_at, so the order is the time's and not the id's
+    png = await addTo("tsk_all2", join(dir, "shot.png"));
+    await Bun.sleep(5);
+    txt = await addTo("tsk_all1", join(dir, "notes.txt"));
+    await Bun.sleep(5);
+    url = await addTo("tsk_all2", "https://example.com/dash");
+  });
+
+  test("every kind from every task, newest first, with the task's title; a removed one drops out until restored", async () => {
+    const rows: Row[] = await j(await across("?limit=100"));
+    const mine = [url, txt, png, html].map((a) => a.id);
+    expect(rows.map((r) => r.id).filter((id) => mine.includes(id))).toEqual(mine);
+    expect(rows.find((r) => r.id === png.id)).toMatchObject({ title: "shot.png", kind: "file", mime: "image/png", taskId: "tsk_all2", taskTitle: "画面の確認" });
+    expect(rows.find((r) => r.id === url.id)).toMatchObject({ kind: "url", taskTitle: "画面の確認" });
+    expect(rows.find((r) => r.id === html.id)).toMatchObject({ createdAt: html.createdAt, updatedAt: html.updatedAt, taskTitle: "週報を作る" });
+    expect((await fetch(`${base}/api/artifacts/${txt.id}`, { method: "DELETE" })).status).toBe(200);
+    expect(await ids("/api/artifacts?limit=100")).not.toContain(txt.id);
+    await post(`/api/artifacts/${txt.id}/restore`);
+    expect(await ids("/api/artifacts?limit=100")).toContain(txt.id);
+  });
+
+  test("q matches part of the title, the original path or the task's title, with % and _ taken literally; /api/reports takes q within HTML", async () => {
+    const q = (s: string) => encodeURIComponent(s);
+    expect(await ids("/api/artifacts?limit=100&q=shot")).toEqual([png.id]);
+    expect(await ids(`/api/artifacts?limit=100&q=${q("all/notes")}`)).toEqual([txt.id]);
+    expect(await ids(`/api/artifacts?limit=100&q=${q("週報")}`)).toEqual([txt.id, html.id]);
+    expect(await ids(`/api/artifacts?limit=100&q=${q("  画面の ")}`)).toEqual([url.id, png.id]);
+    expect(await ids(`/api/artifacts?limit=100&q=${q("_100%")}`)).toEqual([html.id]);
+    expect(await ids(`/api/artifacts?limit=100&q=${q("t_")}`)).toEqual([]); // "_" is not "any one character"
+    expect(await ids(`/api/reports?limit=100&q=${q("週報")}`)).toEqual([html.id]);
+    expect((await across(`?q=${"x".repeat(201)}`)).status).toBe(400);
+    expect((await across(`?q=${"x".repeat(200)}`)).status).toBe(200);
+    expect((await across("?q=%20")).status).toBe(200); // blank = no filter
+  });
+
+  test("1000 rows: limit caps a page, before reads on without gaps or repeats; a bad limit or an unknown before is 400", async () => {
+    const at = Date.now() + 60_000; // newer than everything above, so the first pages are these
+    core.db.insertTask({ ...mkTask("tsk_many", work), title: "many" });
+    for (let i = 0; i < 1000; i++) {
+      const id = `art_many_${String(i).padStart(4, "0")}`;
+      // three rows share each updated_at, so the id breaks the ties across a page boundary
+      core.db.insertArtifact({ id, taskId: "tsk_many", title: `m${i}.txt`, kind: "file", source: `/x/m${i}.txt`, entry: `m${i}.txt`, mime: "text/plain", size: 1, removedAt: null, createdAt: at, updatedAt: at + Math.floor(i / 3) });
+    }
+    const seen: string[] = [];
+    let before = "";
+    for (;;) {
+      const page: Row[] = await j(await across(`?limit=100&q=many${before ? `&before=${before}` : ""}`));
+      expect(page.length).toBeLessThanOrEqual(100);
+      if (!page.length) break;
+      seen.push(...page.map((r) => r.id));
+      before = page[page.length - 1]!.id;
+    }
+    expect(seen.length).toBe(1000);
+    expect(new Set(seen).size).toBe(1000);
+    expect((await j(await across("?limit=100"))).length).toBe(100);
+    expect((await j(await across())).length).toBe(20); // absent = 20
+    for (const s of ["?limit=101", "?limit=0", "?limit=", "?before=art_nope"]) expect((await across(s)).status).toBe(400);
+    expect((await fetch(`${base}/api/reports?before=art_nope`)).status).toBe(400);
+  });
+
+  test("an archived task, absent from GET /api/tasks, still lists its artifacts", async () => {
+    core.db.insertTask({ ...mkTask("tsk_old", work), title: "古い Task", archivedAt: 1 });
+    writeFileSync(join(dir, "old.html"), "<p>old</p>");
+    const old = await addTo("tsk_old", join(dir, "old.html"));
+    expect(((await j(await fetch(`${base}/api/tasks`))) as Task[]).some((t) => t.id === "tsk_old")).toBe(false);
+    expect(await ids(`/api/artifacts?q=${encodeURIComponent("古い")}`)).toEqual([old.id]);
+  });
+});
+
 describe("addCopy (#1838)", () => {
   test("the daemon's own copy of a file outside every scope: the ordinary entrance refuses it, addCopy takes it, keeps the deny list and the size limit, and replaces the same path", async () => {
     const outside = mkdtempSync(join(tmpdir(), "switchboard-art-outside-"));

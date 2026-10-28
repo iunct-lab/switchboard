@@ -10,7 +10,7 @@ import { resolveReviewThread } from "./forge-github.ts";
 import { formatLint, lint } from "./lint.ts";
 import { pullMain } from "./pull-main.ts";
 import { spawnRun, sync } from "./public-sync.ts";
-import { createRequest } from "./request.ts";
+import { checkRequestBody, createRequest } from "./request.ts";
 import { scanIssues } from "./scan.ts";
 import { findSecrets, hostAws } from "./secrets.ts";
 import { setField, UsageError } from "./set.ts";
@@ -46,7 +46,7 @@ const USAGE = `使い方: bun ops-kit/src/cli.ts <command> [--config <ops.config
       Project の Status を書き換えると全 item の Status が消えるので、足りない選択肢を出すだけ）。ビューは UI で作る
   request <title> <body-file>
       要望 Issue（type:request）を本文のファイルから作り、Project に Status Backlog で入れる。設定の sections.request の
-      節が本文に無ければ作らない
+      節が本文に無ければ作らない。BACKLOG_URL がある（アプリの Task の中）なら gh で作らず backlog create でアプリに保存する
 
 ${BACKLOG_USAGE}
 
@@ -108,6 +108,24 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
       err((e as Error).message);
       return 1;
     }
+  }
+  // in the app's Task, gh-guard refuses `gh issue create`: the request is stored in the app like backlog create, and the
+  // line callers read (要望を作成: #N, scripts/file-request.ts) is kept when the app numbers it at once (a backlog kept
+  // in the app only; one sent to GitHub has no number until then)
+  if (command === "request" && env.BACKLOG_URL) {
+    const [title, bodyFile, ...extra] = rest;
+    if (!title || !bodyFile || extra.length) return usage(err, "request <title> <body-file>");
+    try {
+      checkRequestBody(loadConfig(configPath), bodyFile);
+    } catch (e) {
+      err((e as Error).message);
+      return 1;
+    }
+    const created = (s: string) => {
+      const m = /^#(\d+) を作りました/.exec(s);
+      out(m ? `>> 要望を作成: #${m[1]}（アプリに保存）` : s);
+    };
+    return runBacklog(["create", "--title", title, "--body-file", bodyFile, "--label", "type:request", "--field", "Status=Backlog"], env, { out: created, err });
   }
   // in the app's Task, set / triage are stored in the app like backlog set / triage (#2694): written to GitHub here, the
   // next edit stored in the app starts from the value before it and is sent as a conflict

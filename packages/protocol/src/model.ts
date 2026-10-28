@@ -74,6 +74,8 @@ export const RoutingSuggestion = z.object({
   reason: z.string(),
   /** Matching rule id, or "previous" / "fallback". */
   ruleId: z.string(),
+  /** Model the matching rule proposes. null = no proposal; the runner's CLI default stays. */
+  model: z.string().nullable().default(null),
   /** Whether the suggested runner is installed. The UI still shows the reason when it is not. */
   available: z.boolean(),
   alternatives: z.array(z.object({ runner: RunnerId, reason: z.string(), ruleId: z.string() })),
@@ -370,6 +372,8 @@ export const TaskEvals = z.object({
   rules: RuleEval.nullable(),
   judge: JudgeEval.nullable(),
   human: HumanEval.nullable(),
+  /** The models the task ran on: the distinct `model` of its `session.start` events, in the order first used, empty ones not counted ([] = not known). Two or more = the model was changed mid-task. */
+  models: z.array(z.string()),
 });
 export type TaskEvals = z.infer<typeof TaskEvals>;
 
@@ -387,6 +391,10 @@ export const EvalsListRow = z.object({
   outcome: TaskOutcome,
   updatedAt: z.number(),
   costUsd: z.number(),
+  /** As `TaskEvals.models`: the distinct `session.start` models in the order first used. Two or more = the model was changed mid-task. */
+  models: z.array(z.string()),
+  /** The task's thinking depth (`tasks.effort`); null = the CLI's default. */
+  effort: z.string().nullable(),
   rules: z.object({ toolCalls: z.number(), toolFailures: z.number(), errors: z.number(), userInstructions: z.number(), stops: z.number(), lastEnd: z.enum(["ok", "error", "aborted"]).nullable() }).nullable(),
   judge: z.object({ average: z.number(), scores: z.record(z.string(), z.number()), rubric: z.string(), by: z.string() }).nullable(),
   human: z.object({ rating: z.number(), comment: z.string() }).nullable(),
@@ -501,7 +509,7 @@ export const Artifact = z.object({
 });
 export type Artifact = z.infer<typeof Artifact>;
 
-/** A report across Tasks (#1835): an HTML artifact with its Task's title and, when a schedule started that Task, the schedule's. */
+/** A row across Tasks (#1835 reports, #1833 every artifact): an artifact with its Task's title and, when a schedule started that Task, the schedule's. */
 export const ReportRow = Artifact.extend({ taskTitle: z.string(), scheduleTitle: z.string().nullable() });
 export type ReportRow = z.infer<typeof ReportRow>;
 

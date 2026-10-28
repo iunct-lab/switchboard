@@ -95,11 +95,11 @@ describe("ruleMetrics (#1218)", () => {
       const second = rulesEvalOf(task, [...events, ...envelopes([user("more"), end("ok")]).map((e, i) => ({ ...e, seq: 10 + i }))], { costUsd: 0.75 }, now + 1);
       db.upsertEval({ taskId: "t1", source: "rules", by: RULES_BY, rubric: null, json: second, ts: now + 1 });
       expect((db.sqlite.query("SELECT count(*) AS n FROM task_evals WHERE task_id = 't1'").get() as { n: number }).n).toBe(1);
-      expect(db.evalsOf("t1")).toEqual({ rules: second, judge: null, human: null });
+      expect(db.evalsOf("t1")).toEqual({ rules: second, judge: null, human: null, models: [] });
       expect(db.evalsOf("t1").rules?.metrics.turns).toBe(2);
       expect(db.getEval("t1", "rules")?.ts).toBe(now + 1);
       db.deleteEval("t1", "rules");
-      expect(db.evalsOf("t1")).toEqual({ rules: null, judge: null, human: null });
+      expect(db.evalsOf("t1")).toEqual({ rules: null, judge: null, human: null, models: [] });
       // a row from a counter whose shape this version does not read: null rather than a throw
       db.upsertEval({ taskId: "t1", source: "rules", by: "rules@0", rubric: null, json: { old: true }, ts: now });
       expect(db.evalsOf("t1").rules).toBeNull();
@@ -118,6 +118,7 @@ describe("evalRequestDraft (#1221)", () => {
       rules,
       judge: { scores: { goal: { score: 4, reason: "終えた" }, efficiency: { score: 2, reason: "同じ失敗を繰り返した" }, custom: { score: 3, reason: "x" } }, summary: "総評です", rubric: "switchboard-default@1", by: "codex:gpt-6-luna", ts: 1 },
       human: { rating: 2, comment: "手戻りが多い", by: "user", ts: 1 },
+      models: [],
     });
     expect(text.split("\n")).toEqual([
       "Task「README を 直す」（task_1、claude）の評価から:",
@@ -132,7 +133,7 @@ describe("evalRequestDraft (#1221)", () => {
     ]);
   });
   test("without any eval row: the heading and the line to fill only", () => {
-    expect(evalRequestDraft(task, { rules: null, judge: null, human: null })).toBe("Task「README を 直す」（task_1、claude）の評価から:\n\n改善したいこと:\n");
-    expect(evalRequestDraft(task, { rules, judge: null, human: { rating: 5, comment: "", by: "user", ts: 1 } })).toContain("- 自分の評価: 5 / 5\n");
+    expect(evalRequestDraft(task, { rules: null, judge: null, human: null, models: [] })).toBe("Task「README を 直す」（task_1、claude）の評価から:\n\n改善したいこと:\n");
+    expect(evalRequestDraft(task, { rules, judge: null, human: { rating: 5, comment: "", by: "user", ts: 1 }, models: [] })).toContain("- 自分の評価: 5 / 5\n");
   });
 });
