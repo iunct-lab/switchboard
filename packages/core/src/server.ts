@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
-import { AskAnswerInput, AutoStartKind, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, InboxAddInput, InboxCloseInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PermissionAnswers, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskList, type Backlog, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type Workspace, type WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
+import { AskAnswerInput, AutoStartKind, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, InboxAddInput, InboxCloseInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PermissionAnswers, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskList, type Backlog, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type Workspace, type WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
 import type { CoreConfig } from "./config.ts";
 import { abortOrphanedTasks, Db, type ApiRequestRow } from "./db.ts";
 import { opsLatency } from "./ops-latency.ts";
@@ -42,9 +42,9 @@ import { FlowCache, flowScope, flowView, type FlowWorkspace } from "./flow.ts";
 import { interventionView } from "./interventions.ts";
 import { checkLocalFields, checkLocalParent } from "./backlog-local.ts";
 import { enableGithubSync, enablingOf } from "./backlog-enable.ts";
-import { CloneError, parseGithubRepo, registerWorkspace, WorkspaceClones } from "./workspace-clone.ts";
+import { CloneError, noticeUnusableWorkspaces, parseGithubRepo, registerWorkspace, WorkspaceClones } from "./workspace-clone.ts";
 import { copyDeletable, inspectRemoval } from "./workspace-remove.ts";
-import { ACTION_FOR_STAGE, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, buildStartPrompt, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionStep, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, repoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, unchangedIn, heldIn, type GhRunner, type OtherRepo } from "./backlog.ts";
+import { ACTION_FOR_STAGE, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, buildStartPrompt, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionStep, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, unchangedIn, heldIn, type GhRunner, type OtherRepo } from "./backlog.ts";
 import { issueOf, reduceStops, stopRecordsFor } from "./stops.ts";
 import { ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, policyPbi, prFacts, resumeOfTask, type PolicyEnv, type PrFacts } from "./asks.ts";
 import { checkPolicy, matchPolicies, readPolicies, recordUse, subjectChanges, writePolicies } from "./policies.ts";
@@ -116,6 +116,11 @@ export interface StartServerOptions {
   loadPty?: () => Promise<PtyManager | null>;
   /** Overrides how `gh` is run for GET /api/backlog (#264); tests and the E2E answer from a fixture. Unset = `gh` from PATH. */
   gh?: GhRunner;
+  /**
+   * Overrides how a checkout's origin URL is read before a runner starts (#2799); tests whose fake `gh` names a
+   * repository the checkout is not answer for it. Unset = git.
+   */
+  gitOrigin?: (path: string) => string | null;
   /** Overrides where a request came from (#181 edge header); a test makes real sockets on 127.0.0.1 look like another machine. */
   peerAddress?: (req: Request) => string | undefined;
   /** How long a runner login from the screen may stay open (#354); tests shorten it. */
@@ -234,6 +239,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   };
   const savedDefaultMode = (runner: RunnerId) => settings().defaultPermissionMode[runner];
   const savedAutoResume = (runner: RunnerId) => settings().autoResume[runner] === true;
+  const savedModels = (runner: RunnerId) => settings().models[runner];
   // Runner list for /api/health: detection is from boot, the effective default mode and auto-resume follow the saved
   // settings, and the models / the CLI's default model (#155) are read each time — the default is the user's own CLI
   // setting and changes there.
@@ -248,7 +254,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       // on Bedrock the runner's own login is not used: it reads as ok, with the kind that says where the bill goes
       const login = bedrock ? "ok" : info.login !== undefined && loginExpired.has(adapter.id) ? "expired" : info.login;
       const loginKind = bedrock ? "bedrock" : login === "ok" ? info.loginKind : undefined;
-      const base = { ...info, login, loginKind, bedrockAvailable: adapter.bedrockModels !== undefined, autoResume: savedAutoResume(adapter.id), models: (bedrock ? adapter.bedrockModels : adapter.models) ?? [], cliDefaultModel: adapter.cliDefaultModel?.() };
+      const base = { ...info, login, loginKind, bedrockAvailable: adapter.bedrockModels !== undefined, autoResume: savedAutoResume(adapter.id), models: (bedrock ? adapter.bedrockModels : (savedModels(adapter.id) ?? adapter.models)) ?? [], cliDefaultModel: adapter.cliDefaultModel?.() };
       if (!info.permissionModes.length) return base;
       const saved = savedDefaultMode(adapter.id);
       const valid = saved !== undefined && info.permissionModes.some((m) => m.value === saved);
@@ -270,6 +276,12 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   for (const w of materializer.scopedWarnings(knowledge)) console.warn(`knowledge: ${w.path}: ${w.message}`);
   knowledge.watch();
   const inbox = new Inbox(knowledge);
+  // A workspace a Task cannot use (#2799: a rebuild that cloned it from elsewhere, or could not): one note, not a stop
+  try {
+    noticeUnusableWorkspaces(db, inbox, opts.gitOrigin);
+  } catch (e) {
+    console.warn(`workspaces: could not check the checkouts: ${String((e as Error).message ?? e)}`);
+  }
 
   let server!: ReturnType<typeof Bun.serve>;
   const broadcast = (msg: ServerMessage) => server?.publish(TOPIC, JSON.stringify(msg));
@@ -377,6 +389,12 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const was = teleports.get(taskId);
     if (was && was.phase === p.phase && was.question === p.question && was.message === p.message) return; // the same state again (a start, then the CLI's own first report)
     teleports.set(taskId, p); broadcast({ type: "task.teleport", taskId, progress: p }); };
+  // Claude Code in a terminal tab (#1574): memory only, like teleports; a socket on /ws is sent them all after hello (task.terminals).
+  const terminals = new Map<string, TerminalStatus>();
+  const setTerminal = (taskId: string, status: TerminalStatus | null) => {
+    if (status === null) terminals.delete(taskId); else terminals.set(taskId, status);
+    broadcast({ type: "task.terminal", taskId, status });
+  };
   /** null = started; a string = why it was refused. */
   const startTeleport = (taskId: string): string | null => {
     const task = db.getTask(taskId);
@@ -435,7 +453,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const wsId = db.getTask(id)?.workspaceId;
     return wsId && db.getWorkspace(wsId)?.backlog === "switchboard" ? { BACKLOG_WORKSPACE: wsId } : {};
   };
-  const tasks = new TaskManager(db, adapterMap, broadcast, { artifacts, beforeResume: t => { if (t.runner === "claude" && teleportCwds.has(teleportCwd(t.cwd))) throw new Error("Teleport Terminalが使用中です。終了後にLocal Taskを再開してください。"); }, idleMs: cfg.runnerIdleMs, suggest: (input) => suggestFor(input), approval: (task, ask) => {
+  const tasks = new TaskManager(db, adapterMap, broadcast, { artifacts, originOf: opts.gitOrigin, beforeResume: t => { if (t.runner === "claude" && teleportCwds.has(teleportCwd(t.cwd))) throw new Error("Teleport Terminalが使用中です。終了後にLocal Taskを再開してください。"); }, idleMs: cfg.runnerIdleMs, suggest: (input) => suggestFor(input), approval: (task, ask) => {
       const v = approval.evaluate(task, ask);
       // a saved policy answered it (#938): the use is kept with the policy
       if (v.decision === "allow" && v.match.source.startsWith("policy:")) {
@@ -645,7 +663,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     startingStage.set(key, { n: item.number, action });
     try {
       const other = otherRepo(input.meta, ws);
-      return await startMetaTask({ kind: action, ws, title: startTitle(item, action), stage: { issue: item.number, action }, prompt: buildStartPrompt(item, action, { other, resume: input.resume, local: ws.backlog === "switchboard" }), ...input.extra });
+      // the person's newest answer on the screen goes in as their words (#2745)
+      const source = action === "check" ? null : db.getWorkspaceBacklogSource(ws.id);
+      const answer = source ? screenAnswer(db, source, item.number) : null;
+      return await startMetaTask({ kind: action, ws, title: startTitle(item, action), stage: { issue: item.number, action }, prompt: buildStartPrompt(item, action, { other, resume: input.resume, local: ws.backlog === "switchboard", answer }), ...input.extra });
     } finally {
       startingStage.delete(key);
     }
@@ -800,7 +821,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       return changed("回答だけでは進められない問いです", why, ask);
     }
     if (!ask.issue && ask.task && (ask.kind === "approval" || ask.kind === "check" || ask.kind === "stop")) return answerTask(id, ask, answer, pre, by);
-    if (ask.kind !== "decision" && ask.kind !== "confirmation") return { status: 422, body: { error: `${ask.kind} の問いにはここから答えられません` } };
+    // a stage Task's stop is answered on its Issue by its grant only (#2745): the ## 回答 the next stage Task gets as the person's words
+    const granted = ask.kind === "stop" && answer.kind === "grant";
+    if (ask.kind !== "decision" && ask.kind !== "confirmation" && !granted) return { status: 422, body: { error: `${ask.kind} の問いにはここから答えられません` } };
+    if (granted && !ask.grant) return { status: 409, body: { error: "許可文がありません" } };
     if (!ask.answers.includes(answer.kind) || (answer.kind === "choice" && !ask.choices.includes(answer.choice))) return changed("選択肢が変わりました", ["選択肢が変わりました"], ask);
     if (answer.kind === "confirm" && !answer.ok && !answer.text) return { status: 400, body: { error: "違うときは理由を書いてください" } };
     const ws = ask.workspace ? db.getWorkspace(ask.workspace.id) : null;
@@ -832,9 +856,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         const c = item?.confirmations.find((x) => x.n === n);
         if (!c || !answerStoredConfirmation(db, source, pbi, { ...c, ok: answer.ok, reason: answer.text ?? "" })) return changed("本文が変わりました", ["受け入れ条件の本文が変わりました"], null);
       } else {
-        const said = answer.kind === "choice" ? `${answer.choice}${answer.note ? `\n\n${answer.note}` : ""}` : answer.kind === "text" ? answer.text : "";
+        const said = answer.kind === "choice" ? `${answer.choice}${answer.note ? `\n\n${answer.note}` : ""}` : answer.kind === "text" ? answer.text : answer.kind === "grant" ? ask.grant! : "";
         const text = moved.length ? `${said}\n\n（この回答は問いの時点の PR へのものです。回答の時点で: ${moved.join(" / ")}）` : said;
-        answerStoredDecision(db, source, ask.issue!.number, by ? `${text}\n\n${basisLine(by, ask.subject)}` : text);
+        answerStoredDecision(db, source, ask.issue!.number, by ? `${text}\n\n${basisLine(by, ask.subject)}` : text, Date.now(), { screen: !by });
       }
     } catch (e) {
       if (e instanceof BacklogEditError) return { status: e.status, body: { error: e.message } };
@@ -1007,6 +1031,18 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         return result("answered", resumeOfTask({ task: t, repliedAt: at, failure: null }));
       } catch {
         return changed("承認は既に答えられたか、Task が終わりました", ["承認は既に答えられたか、Task が終わりました"]);
+      }
+    }
+    // a grant (#2745) goes as it is, once: the person's say on the refused operation, no policy basis
+    if (answer.kind === "grant") {
+      if (!ask.grant) return { status: 409, body: { error: "許可文がありません" } };
+      try {
+        const t = await tasks.send(taskId, ask.grant);
+        return result("answered", resumeOfTask({ task: t, repliedAt: at, failure: null }));
+      } catch (e) {
+        const failure = { at, reason: String((e as Error).message ?? e) };
+        db.rememberAskAnswer(id, { at, failure });
+        return result(ask.state, { state: "failed", reason: failure.reason, taskId, at });
       }
     }
     // as on the Issue side: a choice (it may approve the merge) is refused on a PR that moved; a text goes with what moved
@@ -1744,7 +1780,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         if (!auth.ok) return json({ ok: true, protocol: PROTOCOL_VERSION, authRequired, login });
         // /api/health is open to other origins (the UI learns whether a token is needed); a forced run is not.
         await refreshLogins(new URL(req.url).searchParams.has("recheck") && sameOrigin(req));
-        return json({ ok: true, protocol: PROTOCOL_VERSION, login, session: (auth.session && sessionTimes(auth.session, cfg.sessionPublicKey)) || undefined, runners: runnerInfo(), home: cfg.home, homeDisplay: cfg.homeDisplay, homeIsTemp: cfg.homeIsTemp, repoRoot: cfg.repoRoot, authRequired, features: { pty: pty !== null }, archive: archiveProblem(cfg.home), routing: { llm: { ...settings().routing.llm, available: adapterMap.has(settings().routing.llm.runner) } }, mcp: { base: `${publicUrl()}/mcp/<taskId>` } });
+        // busyTasks: the Tasks a restart would stop, so sb-rescue's status poll never reads every task (#2814).
+        return json({ ok: true, protocol: PROTOCOL_VERSION, login, session: (auth.session && sessionTimes(auth.session, cfg.sessionPublicKey)) || undefined, runners: runnerInfo(), home: cfg.home, homeDisplay: cfg.homeDisplay, homeIsTemp: cfg.homeIsTemp, repoRoot: cfg.repoRoot, authRequired, features: { pty: pty !== null }, archive: archiveProblem(cfg.home), routing: { llm: { ...settings().routing.llm, available: adapterMap.has(settings().routing.llm.runner) } }, mcp: { base: `${publicUrl()}/mcp/<taskId>` }, busyTasks: [...db.listTasksByStatus("running"), ...db.listTasksByStatus("waiting")].map(({ id, title, status }) => ({ id, title, status })) });
       },
 
       // Settings the UI can change (#58). A saved default mode must be one the runner offers and must not skip
@@ -1829,6 +1866,25 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             }
             if (!adapterMap.get(runner as RunnerId)?.bedrockModels) return bad(`runner "${runner}" cannot run on Amazon Bedrock`);
             next.bedrock[runner] = { region: v.region };
+          }
+          // The model choices (#1400): the whole list per runner, null = back to the bundled list. A runner that has no
+          // list of its own (dak: its model is set on its side) or is not detected cannot have one. The id is not checked
+          // against the CLI (`--model` takes any id); a blank or repeated one, or an empty list, is refused.
+          for (const [runner, list] of Object.entries(parsed.data.models ?? {})) {
+            if (list === null) {
+              delete next.models[runner];
+              continue;
+            }
+            const adapter = adapterMap.get(runner as RunnerId);
+            if (!adapter) return bad(`runner "${runner}" is not installed`);
+            if (!adapter.models?.length) return bad(`runner "${runner}" has no model list`);
+            // an empty list would read as a runner with no list (the screens show it like dak); null is the way back
+            if (!list.length) return bad("model list is empty; send null to go back to the bundled list");
+            const rows = list.map((m) => ({ value: m.value.trim(), label: m.label.trim() || m.value.trim() }));
+            if (rows.some((m) => !m.value)) return bad("model id is empty");
+            const dup = rows.find((m, i) => rows.findIndex((o) => o.value === m.value) !== i);
+            if (dup) return bad(`model "${dup.value}" is listed twice`);
+            next.models[runner] = rows;
           }
           // LLM routing suggestions (#25): a partial patch; the runner must be detected because the suggestion is
           // produced by that runner's own adapter. Enabling it spends that subscription's quota per task creation.
@@ -2018,7 +2074,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           if (!target) return bad(`対象の書き方が分かりません: ${raw.slice(0, 100)}（#12 / owner/name#12 / URL）`);
           let repo: string;
           try {
-            repo = (await repoOf(opts.gh ?? runGh, ws.path)).repo;
+            repo = (await backlogRepoOf(opts.gh ?? runGh, ws.path)).repo;
           } catch (e) {
             return bad(`Workspace ${ws.name} のリポジトリを読めません: ${String((e as Error).message ?? e).slice(0, 200)}`, 424);
           }
@@ -2083,6 +2139,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           const parsed = AskAnswerInput.safeParse(await req.json().catch(() => null));
           if (!parsed.success) return bad(parsed.error.message);
           const { id, answer, policy } = parsed.data;
+          // a grant allows one operation once (#2745): never saved to be used again
+          if (policy && answer.kind === "grant") return bad("許可文は方針に保存できません");
           if (policy) {
             const refusal = await humanCheck(req, srv);
             if (refusal) return refusal;
@@ -2524,7 +2582,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             // a question asked on one of an in-progress PBI's Tasks is answered on that Task (#562), the one on screen only
             const asked = item.decision?.issue ?? n;
             if (parsed.data.issue !== undefined && parsed.data.issue !== asked) return bad(`#${n} の問いは #${asked} に変わりました。読み直してから回答してください`, 409);
-            answerStoredDecision(db, source, asked, parsed.data.text);
+            answerStoredDecision(db, source, asked, parsed.data.text, Date.now(), { screen: true });
             backlog.send(ws);
           } catch (e) {
             if (e instanceof BacklogEditError) return bad(e.message, e.status);
@@ -3402,7 +3460,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           try {
             if (ws.data.shell !== undefined) { /* a reconnect starts nothing */ }
             else if (ws.data.teleport) pty!.prepareTeleport(ws.data.ptyTask);
-            else pty!.open(ws.data.ptyTask, ws.data.cwd, process.env.SHELL || "/bin/sh");
+            else { const id = ws.data.ptyTask; pty!.open(id, ws.data.cwd, process.env.SHELL || "/bin/sh", st => setTerminal(id, st)); }
           } catch (e) {
             return ws.close(1011, `shell failed to start: ${String((e as Error).message ?? e)}`.slice(0, 120));
           }
@@ -3418,6 +3476,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         hostIdle?.touch();
         ws.subscribe(TOPIC);
         ws.send(JSON.stringify({ type: "hello", version: PROTOCOL_VERSION } satisfies ServerMessage));
+        ws.send(JSON.stringify({ type: "task.terminals", terminals: Object.fromEntries(terminals) } satisfies ServerMessage));
       },
       message(ws: ServerWebSocket<WsData>, raw) {
         if (ws.data?.ptyTask !== undefined) {

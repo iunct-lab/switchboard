@@ -1,5 +1,5 @@
 /**
- * bun scripts/check-models.ts — the model lists offered in the UI (CLAUDE_MODELS / CODEX_MODELS) against the tables the
+ * bun scripts/check-models.ts — the model lists offered in the UI (the settings screen's, else CLAUDE_MODELS / CODEX_MODELS) against the tables the
  * installed CLIs carry (PBI #248). The tables are local data, never a vendor API and never an API key (PBI #155:
  * Switchboard holds no key): claude — the model table embedded in the installed executable; codex — `codex debug models
  * --bundled`, the table shipped in the binary (without `--bundled` it refreshes over the network, so the flag is always
@@ -8,8 +8,8 @@
  * Prints one line per runner and finding:
  *   <runner> stale: <ids>   — listed in the UI but not in the CLI's table (an old or mistyped id)
  *   <runner> unseen: <ids>  — in the CLI's table but not in REVIEWED (a model nobody has looked at yet)
- *   <runner> 価格表未整備: <ids> — listed in the UI but priced by no row of pricing.json (the user's ~/.switchboard/pricing.json
- *                                  first, as the daemon reads it)
+ *   <runner> 価格表未整備: <ids> — listed in the UI but priced by no row of the settings screen's prices or pricing.json (the
+ *                                  user's ~/.switchboard/pricing.json first), layered as the daemon layers them
  *   unpriced (ledger): ...       — the claude / codex model names the ledger could not price, split into new (in the CLI's
  *                                  table: the price table lags behind) and unknown (not in it: a wrong name?). Report only:
  *                                  past ledger rows cannot be fixed, so they do not change the exit code
@@ -29,6 +29,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { PricingTable } from "@switchboard/protocol";
+import { Settings, type SettingsPrice } from "../packages/protocol/src/index.ts";
 import { CLAUDE_MODELS } from "../packages/adapters/claude/src/index.ts";
 import { CODEX_MODELS } from "../packages/adapters/codex/src/index.ts";
 import { loadPricing, resolveModel } from "../packages/core/src/pricing.ts";
@@ -38,7 +39,7 @@ export type Runner = "claude" | "codex";
 
 /**
  * Ids a person has looked at and decided to list or leave out (2026-10-07, claude 2.1.293 / codex-cli 0.159.2).
- * When a new id shows up as unseen, decide whether it goes in CLAUDE_MODELS / CODEX_MODELS first, then add it here.
+ * When a new id shows up as unseen, decide whether it goes in the settings screen's list first, then add it here.
  */
 export const REVIEWED: Record<Runner, string[]> = {
   claude: [
@@ -106,6 +107,45 @@ export function unpricedLedgerNames(dbPath: string): { runner: Runner; model: st
   } finally {
     db.close();
   }
+}
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * switchboard.db's settings row, read-only and parsed the way the daemon parses it. null when there is no database,
+ * table or row, and for a broken row (the daemon's getSetting falls back to its defaults then).
+ */
+function savedSettings(dbPath: string): Settings | null {
+  if (!existsSync(dbPath)) return null;
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const hasTable = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settings'").get();
+    const row = hasTable ? (db.query("SELECT json FROM settings WHERE key = 'settings'").get() as { json: string } | null) : null;
+    const parsed = row ? Settings.safeParse(parseJson(row.json)) : null;
+    return parsed?.success ? parsed.data : null;
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * The model ids each runner offers (#1400): the list saved on the settings screen, else the bundled CLAUDE_MODELS /
+ * CODEX_MODELS — also when there is no database, table or row.
+ */
+export function listedModels(dbPath: string): Record<Runner, string[]> {
+  const saved: Partial<Record<string, { value: string }[]>> = savedSettings(dbPath)?.models ?? {};
+  return { claude: (saved.claude ?? CLAUDE_MODELS).map((m) => m.value), codex: (saved.codex ?? CODEX_MODELS).map((m) => m.value) };
+}
+
+/** The price rows saved on the settings screen's モデルの価格 (#1402); {} when there is none. */
+export function settingsPrices(dbPath: string): Record<string, SettingsPrice> {
+  return savedSettings(dbPath)?.prices ?? {};
 }
 
 /**
@@ -199,8 +239,9 @@ const HOME = process.env.SWITCHBOARD_HOME || join(homedir(), ".switchboard");
 export interface Sources {
   read: Readers;
   versions: VersionReaders;
+  /** pricing.json's table; the settings screen's price rows are laid over it from dbPath. */
   pricing: PricingTable;
-  /** switchboard.db, whose ledger is read for unpriced names. */
+  /** switchboard.db, whose settings row (model list, prices) and ledger are read. */
   dbPath: string;
 }
 
@@ -229,12 +270,15 @@ export async function checkModels(src: Sources = hostSources()): Promise<Report>
   const findings: Finding[] = [];
   const catalogs: Partial<Record<Runner, string[]>> = {};
   let code: 0 | 1 | 2 = 0;
+  const listed = listedModels(src.dbPath);
+  // the settings screen's rows over the file's, as the daemon layers them (#1402)
+  const pricing: PricingTable = { ...src.pricing, models: { ...src.pricing.models, ...settingsPrices(src.dbPath) } };
   const runners: [Runner, string[], (s: string) => string[], () => Promise<string | null>][] = [
-    ["claude", CLAUDE_MODELS.map((m) => m.value), claudeCatalog, read.claude],
-    ["codex", CODEX_MODELS.map((m) => m.value), codexCatalog, read.codex],
+    ["claude", listed.claude, claudeCatalog, read.claude],
+    ["codex", listed.codex, codexCatalog, read.codex],
   ];
   for (const [runner, listed, parse, source] of runners) {
-    const unpriced = unpricedListed(listed, src.pricing, runner);
+    const unpriced = unpricedListed(listed, pricing, runner);
     if (unpriced.length) {
       lines.push(`${runner} 価格表未整備: ${unpriced.join(", ")}`);
       findings.push({ runner, kind: "価格表未整備", ids: unpriced });
@@ -298,7 +342,7 @@ export async function checkModels(src: Sources = hostSources()): Promise<Report>
     } else lines.push(`${runner} version: ${installed}（最新）`);
   }
   // A row stays 'unpriced' after its model is priced (nothing re-prices the ledger): only names still unpriced count.
-  const stillUnpriced = unpricedLedgerNames(src.dbPath).filter((n) => !resolveModel(src.pricing, n.model, n.runner));
+  const stillUnpriced = unpricedLedgerNames(src.dbPath).filter((n) => !resolveModel(pricing, n.model, n.runner));
   const ledger = classifyUnpriced(stillUnpriced, catalogs);
   if (ledger.new.length) lines.push(`unpriced (ledger) new（価格表未整備）: ${ledger.new.join(", ")}`);
   if (ledger.unknown.length) lines.push(`unpriced (ledger) unknown（名前の誤り?）: ${ledger.unknown.join(", ")}`);
@@ -329,9 +373,9 @@ export function requestFor(report: Report, source: { date: string; versions: str
     "```",
     "",
     "直し方（docs/design/check-models.md）:",
-    "- `stale`: 一覧（`CLAUDE_MODELS` は packages/adapters/claude/src/index.ts、`CODEX_MODELS` は packages/adapters/codex/src/index.ts）の古い / 誤った ID を直す",
-    "- `unseen`: 一覧に載せるかを決めて一覧に足し（載せないなら足さない）、どちらでも scripts/check-models.ts の `REVIEWED` に足す",
-    "- `価格表未整備`: packages/core/config/pricing.json の `models` に公式の価格を足す",
+    "- `stale`: 設定画面の「モデルの選択肢」で古い / 誤った ID を外す・直す（保存していないランナーの一覧は同梱の `CLAUDE_MODELS` / `CODEX_MODELS`。設定画面で直すとその一覧が保存される）",
+    "- `unseen`: 一覧に載せるかを決めて設定画面の「モデルの選択肢」に足し（載せないなら足さない）、どちらでも scripts/check-models.ts の `REVIEWED` に足す",
+    "- `価格表未整備`: 設定画面の「モデルの価格」で公式の価格を入れる（`pricing.json` の PR は要らない。次の実行で設定の価格を読む）",
     "- `outdated`: CLI を更新する（Switchboard は更新しない。更新した次の実行で `version: …（最新）` になる）",
     "",
     "## 出典",

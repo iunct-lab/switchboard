@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -175,5 +176,41 @@ describe("daemon stop", () => {
     const t = await finishedTask();
     expect(await tasks.shutdown()).toEqual([]);
     expect(db.getTask(t.id)!.resumeAt).toBeNull();
+  });
+});
+
+describe("the checkout's origin (#2799)", () => {
+  const git = (...args: string[]) => expect(spawnSync("git", ["-C", home, ...args]).status).toBe(0);
+  const registered = { service: "github" as const, host: "github.com", repository: "acme/app-dev", project: { owner: "acme", number: 1 } };
+
+  test("a task does not start in a checkout whose origin is not the registered repository", async () => {
+    git("init", "-q");
+    git("remote", "add", "origin", "https://github.com/acme/app.git");
+    const wsId = db.upsertWorkspace({ name: "w", path: home, kind: "repo" }).id;
+    db.setWorkspaceBacklogSource(wsId, registered);
+    expect(() => tasks.create({ workspaceId: wsId, cwd: home, title: "t", prompt: "p", runner: "claude" })).toThrow("登録は acme/app-dev");
+    expect(fakes).toHaveLength(0);
+    const [t] = db.listTasks();
+    expect(t!.status).toBe("error");
+    const said = db.listEvents(t!.id).map((e) => e.ev).filter((ev) => ev.t === "status").map((ev) => (ev as { text: string }).text);
+    expect(said.some((s) => s.includes("origin は acme/app") && s.includes("git remote set-url origin https://github.com/acme/app-dev.git"))).toBe(true);
+
+    // a resume after the origin moved off the registration stops the same way
+    git("remote", "set-url", "origin", "git@github.com:acme/app-dev.git");
+    const ok = tasks.create({ workspaceId: wsId, cwd: home, title: "t2", prompt: "p", runner: "claude" });
+    await sleep(IDLE_MS * 3);
+    expect(fakes).toHaveLength(1);
+    git("remote", "set-url", "origin", "https://github.com/acme/app.git");
+    await expect(tasks.send(ok.id, "next")).rejects.toThrow("登録は acme/app-dev");
+    expect(fakes).toHaveLength(1);
+  });
+
+  test("a workspace with no GitHub registration starts as before", async () => {
+    git("init", "-q");
+    git("remote", "add", "origin", "https://github.com/acme/app.git");
+    const wsId = db.upsertWorkspace({ name: "w", path: home, kind: "repo" }).id;
+    db.setWorkspaceBacklogSource(wsId, { service: "switchboard", host: "local", repository: wsId, project: { owner: "switchboard", number: 0 } });
+    tasks.create({ workspaceId: wsId, cwd: home, title: "t", prompt: "p", runner: "claude" });
+    expect(fakes).toHaveLength(1);
   });
 });

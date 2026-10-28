@@ -3,14 +3,14 @@ import type { Artifact, Ask, AskAnswer, AskChanged, AskList, PendingApproval, Po
 import { api } from "../api.ts";
 import { ArtifactBody } from "./Artifacts.tsx";
 import { summarize } from "../approvals.ts";
-import { answerButtons, answerTarget, appliedLine, askFacts, blockerLines, groupAsks, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, resumeLabel, scopeLabel, STATE_LABEL, workspaceChips, workspaceKey, workspaceSections, type Answered, type PolicyForm } from "../asks.ts";
+import { answerButtons, answerTarget, withoutGrant, appliedLine, askFacts, blockerLines, groupAsks, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, resumeLabel, scopeLabel, STATE_LABEL, workspaceChips, workspaceKey, workspaceSections, type Answered, type PolicyForm } from "../asks.ts";
 
 /**
  * A card's answers (#936): what an answer does not take away, then one button per answer with what it sends and where,
  * and free text when the question takes it (a confirmation's 違う with its reason). Every button is off while one is
- * being sent, so a second tap sends nothing.
+ * being sent, so a second tap sends nothing. A grant (#2745) is on a line of its own. Also the Task screen's (TaskView).
  */
-function AnswerArea(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAnswer, policy?: PolicyInput) => void }) {
+export function AnswerArea(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAnswer, policy?: PolicyInput) => void }) {
   const { ask: x, busy } = props;
   const [text, setText] = useState("");
   const [form, setForm] = useState<PolicyForm | null>(() => initialPolicyForm(x));
@@ -64,7 +64,8 @@ function AnswerArea(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAnswer, p
           </div>
         </details>
       )}
-      {x.policy.note && !form && <div className="hint ask-policy-note">{x.policy.note}</div>}
+      {/* a grant's note (not saved as a policy, #2745) is the API's refusal only: the card is as its mockup */}
+      {x.policy.note && !form && !x.grant && !x.grants.some(Boolean) && <div className="hint ask-policy-note">{x.policy.note}</div>}
       {buttons.length > 0 && (
         <div className="ask-buttons">
           {buttons.map((b) => (
@@ -73,7 +74,19 @@ function AnswerArea(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAnswer, p
                 {b.label}
               </button>
               <div className="hint ask-send">
-                送る: {b.send} → {b.target}、続き: {b.next}
+                送る:{" "}
+                {b.grant === b.send ? (
+                  <span className="ask-grant">{b.grant}</span>
+                ) : b.grant ? (
+                  <>
+                    {withoutGrant(b.send)}
+                    <br />
+                    <span className="ask-grant">許可: {b.grant}</span>
+                  </>
+                ) : (
+                  b.send
+                )}{" "}
+                → {b.target}、続き: {b.next}
                 {policy && b.answer.kind !== "hold" && b.answer.kind !== "deny" && b.answer.kind !== "confirm" ? `、＋ 方針を保存（${scopeLabel(form!.scope, x)}）` : ""}
               </div>
             </div>

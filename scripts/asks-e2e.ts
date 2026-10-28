@@ -43,7 +43,7 @@ const home = mkdtempSync(join(tmpdir(), "sb-asks-e2e-"));
 const gh: GhRunner = async (args, cwd) => {
   // #1673: the second Workspace is no GitHub repository (its one question is a Task's tool approval)
   if (cwd.endsWith("/second")) return { code: 1, stdout: "", stderr: "not a git repository" };
-  if (args[0] === "repo") return { code: 0, stdout: "acme/app\n", stderr: "" };
+  if (args[0] === "repo") return { code: 0, stdout: "acme/app true\n", stderr: "" };
   if (args[0] === "variable") return { code: 0, stdout: "https://github.com/users/acme/projects/11\n", stderr: "" };
   if (args[0] === "issue") {
     // like GitHub: the answer is a comment, and once the label is off the item is no longer needs-decision

@@ -63,6 +63,7 @@ h5 { margin: 0 0 6px; font: 500 10px/1.2 var(--mono); letter-spacing: .1em; text
 .rail .it.on { background: var(--sel); color: var(--ink); }
 .rail .it .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rail .it .m { font-family: var(--mono); font-size: 10px; color: var(--ink3); }
+.rail .it .m.term-wait { color: var(--amber); }
 .tag { display: inline-block; margin-left: 6px; font: 400 9.5px/1.4 var(--mono); padding: 0 5px; border: 1px solid var(--line); border-radius: 3px; color: var(--ink3); }
 .tag.origin { border-color: var(--amber); color: var(--amber); white-space: nowrap; flex: none; }
 .tag.shadow { border-color: var(--dak); color: var(--dak); white-space: nowrap; flex: none; }
@@ -476,6 +477,10 @@ label.toggle.off { opacity: .45; cursor: default; }
 .ask-button { flex: 1 1 200px; min-width: 0; }
 .ask-button, .ask-text, .ask-resume { overflow-wrap: anywhere; }
 .ask-button button, .ask-text button { min-height: 44px; width: 100%; }
+/* a grant (#2745) on its own line, marked: the one operation the answer allows */
+.ask-grant { background: var(--acc-soft); color: var(--acc-ink); border-left: 3px solid var(--acc); padding: 0 6px; }
+/* a Task's open questions on its screen (#2745), above the composer */
+.task-asks { display: grid; gap: 8px; margin: 8px 0; max-width: 760px; }
 .ask-policy { margin: 6px 0; }
 .ask-policy summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; }
 .ask-policy-body { display: grid; gap: 6px; overflow-wrap: anywhere; }

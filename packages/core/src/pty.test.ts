@@ -1,3 +1,4 @@
+import { recordingText, skipRecordings, assertRecordings } from "../../../scripts/recordings.ts";
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -5,7 +6,7 @@ import { join } from "node:path";
 import type { RunnerAdapter, RunnerSession, StartOptions } from "@switchboard/protocol";
 import { prepareTeleportWorktree } from "./claude-cloud.ts";
 import { loadConfig } from "./config.ts";
-import { MAX_PTY_SESSIONS, PtyManager, REPLAY_CHARS, TELEPORT_SESSION_NAME } from "./pty.ts";
+import { MAX_PTY_SESSIONS, OscStatusReader, PTY_STATUS_REPLY, PtyManager, REPLAY_CHARS, TELEPORT_SESSION_NAME } from "./pty.ts";
 import { startServer } from "./server.ts";
 
 const NO_HISTORY = { SWITCHBOARD_CLAUDE_PROJECTS: join(tmpdir(), "switchboard-test-no-claude-projects"), SWITCHBOARD_HISTORY_POLL_MS: "0" };
@@ -330,38 +331,38 @@ describe("terminal tab (#16)", () => {
 });
 
 
-describe("reconnect (#1137)", () => {
-  /** A PTY whose output the test drives; what is written comes back as output, like a terminal's echo. */
-  function fakePty() {
-    const spawned: { emit: (d: string) => void; exit: () => void }[] = [];
-    const spawn = () => {
-      const data: ((d: string) => void)[] = [], exits: ((e: { exitCode: number }) => void)[] = [];
-      const emit = (d: string) => { for (const f of data) f(d); };
-      spawned.push({ emit, exit: () => { for (const f of exits) f({ exitCode: 0 }); } });
-      return { pid: 4_194_000 + spawned.length, onData: (f: (d: string) => void) => void data.push(f), onExit: (f: (e: { exitCode: number }) => void) => void exits.push(f), write: emit, resize: () => undefined, kill: () => undefined };
-    };
-    return { spawned, spawn };
-  }
-  async function daemon(run: (b: string, id: string, pty: ReturnType<typeof fakePty>) => Promise<void>) {
-    const h = mkdtempSync(join(tmpdir(), "sb-pty-reconnect-"));
-    const pty = fakePty();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [idleAdapter()], { port: 0, loadPty: () => PtyManager.load(async () => ({ spawn: pty.spawn as any })) });
-    try {
-      const b = `127.0.0.1:${c.server.port}`;
-      const id = (await fetch(`http://${b}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: h, title: "pty", prompt: "p", runner: "claude" }) }).then(j)).id;
-      pty.spawned.length = 0; // PtyManager.load spawns one throwaway to check the library
-      await run(b, id, pty);
-    } finally {
-      await c.stop().catch(() => undefined);
-      rmSync(h, { recursive: true, force: true });
-    }
-  }
-  const closedWith = async (term: Awaited<ReturnType<typeof connect>>) => {
-    for (let i = 0; i < 200 && !term.closed; i++) await Bun.sleep(10);
-    return term.code;
+/** A PTY whose output the test drives; what is written comes back as output, like a terminal's echo. */
+function fakePty() {
+  const spawned: { emit: (d: string) => void; exit: () => void }[] = [];
+  const spawn = () => {
+    const data: ((d: string) => void)[] = [], exits: ((e: { exitCode: number }) => void)[] = [];
+    const emit = (d: string) => { for (const f of data) f(d); };
+    spawned.push({ emit, exit: () => { for (const f of exits) f({ exitCode: 0 }); } });
+    return { pid: 4_194_000 + spawned.length, onData: (f: (d: string) => void) => void data.push(f), onExit: (f: (e: { exitCode: number }) => void) => void exits.push(f), write: emit, resize: () => undefined, kill: () => undefined };
   };
+  return { spawned, spawn };
+}
+async function daemon(run: (b: string, id: string, pty: ReturnType<typeof fakePty>) => Promise<void>) {
+  const h = mkdtempSync(join(tmpdir(), "sb-pty-reconnect-"));
+  const pty = fakePty();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [idleAdapter()], { port: 0, loadPty: () => PtyManager.load(async () => ({ spawn: pty.spawn as any })) });
+  try {
+    const b = `127.0.0.1:${c.server.port}`;
+    const id = (await fetch(`http://${b}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: h, title: "pty", prompt: "p", runner: "claude" }) }).then(j)).id;
+    pty.spawned.length = 0; // PtyManager.load spawns one throwaway to check the library
+    await run(b, id, pty);
+  } finally {
+    await c.stop().catch(() => undefined);
+    rmSync(h, { recursive: true, force: true });
+  }
+}
+const closedWith = async (term: Awaited<ReturnType<typeof connect>>) => {
+  for (let i = 0; i < 200 && !term.closed; i++) await Bun.sleep(10);
+  return term.code;
+};
 
+describe("reconnect (#1137)", () => {
   test("a socket that comes back with ?shell= gets the same shell: what it missed, then what follows; no second shell", () => daemon(async (b, id, pty) => {
     const a = await connect(`ws://${b}/ws/pty?task=${id}`);
     expect(a.shell).toMatch(/^[0-9a-f-]{36}$/);
@@ -841,4 +842,124 @@ case "$line" in "/rename "*) named=1; echo "Session renamed to: \${line#/rename 
       await Bun.sleep(3 * FAST.exitQuietMs);
       expect(Bun.file(join(dir, "input")).size).toBe(0);
     }));
+});
+
+describe("Claude Code's status in the terminal (#1574)", () => {
+  // The sequences Claude Code 2.1.311 printed in a PTY for one prompt that needed a permission, then /exit, each in the
+  // chunk it came in (the recording keeps them with what surrounded them).
+  const ESC = "\x1b", BEL = "\x07";
+  const CHUNKS = [
+    `${ESC}[?u${ESC}]7501;?${BEL}${ESC}[c`,
+    `${ESC}]7501;state=idle:app=claude-code${BEL}${ESC}]0;Claude Code${BEL}`,
+    `${ESC}]7501;state=working:app=claude-code${BEL}`,
+    `${ESC}]7501;state=blocked:app=claude-code:kind=permission:msg=YXBwcm92ZQ==${BEL}${ESC}]0;title${BEL}`,
+    `${ESC}]7501;state=working:app=claude-code${BEL}`,
+    `${ESC}]7501;state=done:app=claude-code${BEL}${ESC}[?25l${ESC}[H done`,
+    `${ESC}]7501;state=working:app=claude-code${BEL}`,
+    `${ESC}[?25h${ESC}7${ESC}[r${ESC}8${ESC}]7501;state=clear${BEL}${ESC}[?25h${ESC}]7501;state=clear${BEL}`,
+    `${ESC}[?1004l${ESC}]7501;state=clear${BEL}${ESC}]0;${BEL}`,
+  ];
+  const EXPECTED = ["done", "working", "waiting", "working", "done", "working", null, null, null];
+  const RECORDING = "packages/core/fixtures/osc7501-claude.jsonl";
+  const read = (pieces: string[]) => {
+    const r = new OscStatusReader();
+    const statuses: unknown[] = []; let queries = 0;
+    for (const p of pieces) { const o = r.push(p); statuses.push(...o.statuses); if (o.query) queries++; }
+    return { statuses, queries };
+  };
+  const bytes = (chunks: string[]) => [...chunks.join("")];
+
+  test("OscStatusReader: the recorded sequences yield done → working → waiting → working → done → working → ended, chunk by chunk and one byte at a time", () => {
+    expect(read(CHUNKS)).toEqual({ statuses: EXPECTED, queries: 1 });
+    expect(read(bytes(CHUNKS))).toEqual({ statuses: EXPECTED, queries: 1 });
+    expect(read([CHUNKS.join("")])).toEqual({ statuses: EXPECTED, queries: 1 });
+  });
+
+  test.skipIf(skipRecordings(RECORDING))("OscStatusReader: the recording (fixtures/osc7501-claude.jsonl) replays the same, chunk by chunk and one byte at a time", () => {
+    assertRecordings(RECORDING);
+    const chunks = recordingText(RECORDING).split("\n").filter(Boolean).map(l => JSON.parse(l) as string);
+    expect(read(chunks)).toEqual({ statuses: EXPECTED, queries: 1 });
+    expect(read(bytes(chunks))).toEqual({ statuses: EXPECTED, queries: 1 });
+  });
+
+  test("OscStatusReader: ST ends a sequence too; another program's status, other OSCs and an over-long unfinished sequence are not read", () => {
+    expect(read([`${ESC}]7501;state=blocked:app=claude-code${ESC}`, "\\"]).statuses).toEqual(["waiting"]);
+    expect(read([`${ESC}]7501;state=working:app=other${BEL}`, `${ESC}]0;state=working:app=claude-code${BEL}`]).statuses).toEqual([]);
+    expect(read([`${ESC}]7501;state=working:app=claude-code:msg=${"A".repeat(300)}`, BEL]).statuses).toEqual([]);
+    // an unfinished one cut off by another sequence is dropped, and what follows is read
+    expect(read([`${ESC}]7501;state=working`, `${ESC}[c${ESC}]7501;state=done:app=claude-code${BEL}`]).statuses).toEqual(["done"]);
+    // … and the start of the next one at the end of the chunk is kept, as when the chunks are joined
+    expect(read([`${ESC}]7501;state=working`, `${ESC}]750`, `1;state=blocked:app=claude-code${BEL}`]).statuses).toEqual(["waiting"]);
+  });
+
+  test("open: the question is answered, onStatus fires on a change only, and null on exit", async () => {
+    const pty = fakePty();
+    const written: string[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const m = (await PtyManager.load(async () => ({ spawn: ((...a: unknown[]) => { const p = (pty.spawn as any)(...a); return { ...p, write: (d: string) => void written.push(d) }; }) as any })))!;
+    pty.spawned.length = 0;
+    const seen: unknown[] = [];
+    m.open("t", "/", "/bin/sh", s => seen.push(s));
+    const client: string[] = [];
+    m.attach("t", { send: d => void client.push(d), close: () => undefined });
+    for (const c of CHUNKS.slice(0, 3)) pty.spawned[0]!.emit(c);
+    pty.spawned[0]!.emit(CHUNKS[2]!); // the same state again
+    expect(written).toEqual([PTY_STATUS_REPLY]);
+    expect(seen).toEqual(["done", "working"]);
+    expect(client.join("")).toBe(CHUNKS.slice(0, 3).join("") + CHUNKS[2]); // the output is passed on unchanged
+    pty.spawned[0]!.emit(CHUNKS[3]!);
+    pty.spawned[0]!.exit();
+    expect(seen).toEqual(["done", "working", "waiting", null]);
+  });
+
+  test("a real shell: its status is read, and ending the Task (which closes the shell) clears it", async () => {
+    const h = mkdtempSync(join(tmpdir(), "sb-pty-status-"));
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [idleAdapter()], { port: 0 });
+    try {
+      const b = `127.0.0.1:${c.server.port}`;
+      const id = (await fetch(`http://${b}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: h, title: "pty", prompt: "p", runner: "claude" }) }).then(j)).id;
+      const ws = new WebSocket(`ws://${b}/ws`);
+      const got: unknown[] = [];
+      ws.onmessage = e => { const m = JSON.parse(String(e.data)); if (m.type === "task.terminal") got.push(m.status); };
+      await new Promise<void>(r => (ws.onopen = () => r()));
+      const term = await connect(`ws://${b}/ws/pty?task=${id}`);
+      term.input("printf '\\033]7501;state=working:app=claude-code\\007'\n");
+      for (let i = 0; i < 300 && got.length < 1; i++) await Bun.sleep(10);
+      expect(got).toEqual(["working"]);
+      await fetch(`http://${b}/api/tasks/${id}/abort`, { method: "POST" });
+      for (let i = 0; i < 300 && got.length < 2; i++) await Bun.sleep(10);
+      expect(got).toEqual(["working", null]);
+      ws.close();
+    } finally {
+      await c.stop().catch(() => undefined);
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("/ws: task.terminal is broadcast on a change; a new client gets them all in task.terminals after hello; the shell's exit clears it", () => daemon(async (b, id, pty) => {
+    const listen = async () => {
+      const ws = new WebSocket(`ws://${b}/ws`);
+      const got: { type: string; version?: string; taskId?: string; status?: unknown; terminals?: unknown }[] = [];
+      ws.onmessage = e => void got.push(JSON.parse(String(e.data)));
+      await new Promise<void>(r => (ws.onopen = () => r()));
+      await until(() => got.length >= 2);
+      return { ws, got, changes: () => got.filter(m => m.type === "task.terminal").map(m => [m.taskId, m.status]) };
+    };
+    const until = async (f: () => boolean) => { for (let i = 0; i < 200 && !f(); i++) await Bun.sleep(10); expect(f()).toBe(true); };
+    const first = await listen();
+    expect(first.got.slice(0, 2)).toEqual([{ type: "hello", version: expect.any(String) }, { type: "task.terminals", terminals: {} }]);
+    const term = await connect(`ws://${b}/ws/pty?task=${id}`);
+    pty.spawned[0]!.emit(CHUNKS[3]!);
+    await until(() => first.changes().length === 1);
+    expect(first.changes()).toEqual([[id, "waiting"]]);
+    term.ws.close(); // the tab is closed; the shell and its status stay
+    const second = await listen();
+    expect(second.got.slice(0, 2)).toEqual([{ type: "hello", version: expect.any(String) }, { type: "task.terminals", terminals: { [id]: "waiting" } }]);
+    pty.spawned[0]!.exit();
+    await until(() => second.changes().length === 1);
+    expect(second.changes()).toEqual([[id, null]]);
+    const third = await listen();
+    expect(third.got[1]).toEqual({ type: "task.terminals", terminals: {} });
+    for (const l of [first, second, third]) l.ws.close();
+  }));
 });

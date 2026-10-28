@@ -1,4 +1,4 @@
-import type { Task, TaskOutcome } from "@switchboard/protocol";
+import type { Task, TaskOutcome, TerminalStatus } from "@switchboard/protocol";
 
 /**
  * 要対応 (#492): the stopped tasks the person has not reviewed yet, except those that came to 完了 — a finished task needs
@@ -37,4 +37,9 @@ export function judgementNote(t: Task): { text: string; title: string } | null {
 /** The dot of a row under 要対応: coloured by the outcome, not the runner's status. */
 export function outcomeDotClass(o: TaskOutcome): string {
   return o === "needs_action" ? "wait" : o === "failed" ? "err" : o === "done" ? "ok" : "idle";
+}
+
+/** The rail's mark for Claude Code in a Task's terminal tab (#1574). Done shows nothing: it needs nothing from the person. */
+export function terminalMark(status: TerminalStatus | undefined): { text: string; className: string } | null {
+  return status === "working" ? { text: "端末: 作業中", className: "m" } : status === "waiting" ? { text: "端末: 返事待ち", className: "m term-wait" } : null;
 }

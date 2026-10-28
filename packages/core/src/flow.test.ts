@@ -97,6 +97,21 @@ describe("flow", () => {
     raw.subIssues[0]!.comments.push(comment("10:07", "進捗\n着手（Task #11）"));
     expect(flowOfPbi(raw, null).stages.build).toBe(8 * MIN); // 10:07 → 10:15
   });
+
+  test("tasks added after the start", () => {
+    const late = { number: 14, createdAt: at("11:00"), closedAt: at("11:30"), comments: [], pullRequests: [] };
+    const raw = madeUpPbi();
+    raw.subIssues.push(late);
+    const f = flowOfPbi(raw, null);
+    expect(f.stages.split).toBe(60 * MIN); // #14 came after the first claim (10:05): the split still ends at #13 10:00
+    expect(f.stages.wait).toBe(5 * MIN);
+    const bare = madeUpPbi(false);
+    for (const t of bare.subIssues) t.pullRequests = [];
+    bare.subIssues.push(late);
+    const g = flowOfPbi(bare, null);
+    expect(g.stages.split).toBe(120 * MIN); // no claim, no PR: the last Task (#14) 11:00
+    expect(g.stages.wait).toBeNull();
+  });
 });
 
 const call = (calls: string[], reply: (q: string) => unknown): GhRunner => async (args) => {
@@ -246,13 +261,15 @@ describe("flow view", () => {
 
   test("api flow", async () => {
     const calls: string[] = [];
-    const d = await boot(fake(calls), { app: "o/r" });
+    // the daemon's clock is the real one: the same ages as PAGE, counted back from today (a fixed day ran out of the 60 days)
+    const late = (Date.now() - NOW) / DAY;
+    const d = await boot(fake(calls, [pbi(10, 3 - late, 10), pbi(20, 10 - late, 90), pbi(30, 40 - late, 5), pbi(40, 50 - late, 15)]), { app: "o/r" });
     try {
       const v = await d.get();
       expect(v.days).toBe(30);
       expect(v.errors).toEqual([]);
       expect(v.unread).toHaveLength(1); // the daemon's own checkout (meta), which has no imported repository
-      // the daemon's clock is the real one, the fixtures' ages are against NOW: only the totals are the same on any day
+      // where the 30-day window splits them moves with the hour the test runs: only the totals are the same at any time
       expect(v.current.closed + v.previous.closed).toBe(4);
       expect(v.current.storyPoints + v.previous.storyPoints).toBe(12);
       expect(v.slowest.length).toBeLessThanOrEqual(5);

@@ -511,13 +511,16 @@ function InProgressFacts(props: { item: BacklogItem; now: number; onOpenTask: (i
   );
 }
 
-/** A row's last stage Task when it is not the running one (#522; Ready rows too, #1045): opens its Task screen. */
+/**
+ * A row's last stage Task when it is not the running one (#522; Ready rows too, #1045): opens its Task screen. One
+ * waiting for the person's reply says 返事待ち, on a request / 分解待ち row too (#1619).
+ */
 function LastTask(props: { item: BacklogItem; now: number; onOpenTask: (id: string) => void }) {
   const last = props.item.lastTask;
   if (!last || last.id === props.item.activeTaskId) return null;
   return (
     <button className="ghost link" onClick={() => props.onOpenTask(last.id)}>
-      {lastTaskLine(last, props.now)}
+      {lastTaskLine(last, props.now, props.item.replyWaiting ? "返事待ち" : undefined)}
     </button>
   );
 }
@@ -873,7 +876,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
                     {[i.storyPoints !== null ? `SP ${i.storyPoints}` : null, i.priority].filter(Boolean).join(" · ")}
                   </span>
                   {i.stage === "in-progress" && <InProgressFacts item={i} now={now} onOpenTask={props.onOpenTask} />}
-                  {i.stage === "ready" && <LastTask item={i} now={now} onOpenTask={props.onOpenTask} />}
+                  {(i.stage === "ready" || (i.replyWaiting && i.stage !== "in-progress")) && <LastTask item={i} now={now} onOpenTask={props.onOpenTask} />}
                   {i.activeTaskId ? (
                     <button className="ghost link" onClick={() => props.onOpenTask(i.activeTaskId!)}>
                       {activeTaskLine(i.lastTask?.id === i.activeTaskId ? i.lastTask : null, now)}

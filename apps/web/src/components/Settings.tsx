@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { AutoStartKind, Backlog, JudgeSettings, LlmRoutingSettings, Preset, RunnerId, RunnerInfo, Settings as SettingsData, SettingsPrice, Task, Workspace } from "@switchboard/protocol";
+import type { AutoStartKind, Backlog, JudgeSettings, LlmRoutingSettings, ModelOption, Preset, RunnerId, RunnerInfo, Settings as SettingsData, SettingsPrice, Task, Workspace } from "@switchboard/protocol";
 import { api, type Health, type SettingsResponse, type WorkspaceClone } from "../api.ts";
 import { ModelSelect } from "./ModelSelect.tsx";
 import { ClaudeLoginRow } from "./ClaudeLoginRow.tsx";
@@ -8,6 +8,7 @@ import { PolicySettings } from "./PolicySettings.tsx";
 import { EffortSelect } from "./EffortSelect.tsx";
 import { notifyPermission } from "../notify.ts";
 import { EMPTY_PRICE_FORM, parsePriceForm, priceFormOf, type PriceForm } from "../priceForm.ts";
+import { addModel, moveModel, removeModel } from "../modelList.ts";
 import { countriesUrl } from "../login.ts";
 import { presetRow } from "../presets.ts";
 import { listedRunners } from "../runners.ts";
@@ -165,6 +166,15 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
         </div>
         <TextField label="定期実行の新規作成の cron" value={nd.scheduleCron} def={d.newDefaults.scheduleCron} mono disabled={saving} onSave={(v) => save({ newDefaults: { scheduleCron: v } })} />
         <ResetButton disabled={saving} onClick={() => save({ newDefaults: null })} />
+      </section>
+
+      <section className="card">
+        <h5>モデルの選択肢</h5>
+        <div className="muted">Home・Brief・自動で始まる Task のモデルの選択肢です。保存していないランナーは同梱の一覧です。</div>
+        {/* dak has no list of its own; on Bedrock the list is the adapter's Bedrock one, not the saved one (#1400) */}
+        {runners.filter((r) => r.models.length > 0 && r.loginKind !== "bedrock").map((r) => (
+          <ModelChoices key={r.id} runner={r.id} list={r.models} saved={!!s.models[r.id]} disabled={saving} save={trySave} />
+        ))}
       </section>
 
       <section className="card">
@@ -610,6 +620,58 @@ function TextField(props: { label: string; hint?: string; value: string; def: st
 }
 
 /** モデルの価格 (#1402): the saved rows with 直す / 消す, and a form under them; the daemon refuses a bad row with 400 too. */
+/** One runner's model choices (#1400): every edit saves the whole list at once; the last one cannot be removed (null goes back instead). */
+function ModelChoices(props: { runner: RunnerId; list: ModelOption[]; saved: boolean; disabled: boolean; save: (patch: { models: Record<string, ModelOption[] | null> }) => Promise<boolean> }) {
+  const [id, setId] = useState("");
+  const [label, setLabel] = useState("");
+  const [why, setWhy] = useState<string | null>(null);
+  const put = (list: ModelOption[] | null) => props.save({ models: { [props.runner]: list } });
+  const add = async () => {
+    const next = addModel(props.list, id, label);
+    if (typeof next === "string") return setWhy(next);
+    setWhy(null);
+    // a refused save (400, network) keeps what was typed
+    if (await put(next)) {
+      setId("");
+      setLabel("");
+    }
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <span className="t">{props.runner}</span>
+      {props.list.map((m, i) => (
+        <div key={m.value} className="row" style={{ alignItems: "center", justifyContent: "flex-start", gap: 6 }}>
+          <span>
+            {m.label}（<span className="mono">{m.value}</span>）
+          </span>
+          <button className="ghost" disabled={props.disabled || i === 0} onClick={() => void put(moveModel(props.list, m.value, -1))}>
+            上へ
+          </button>
+          <button className="ghost" disabled={props.disabled || i === props.list.length - 1} onClick={() => void put(moveModel(props.list, m.value, 1))}>
+            下へ
+          </button>
+          <button className="ghost" disabled={props.disabled || props.list.length === 1} onClick={() => void put(removeModel(props.list, m.value))}>
+            外す
+          </button>
+        </div>
+      ))}
+      <div className="row" style={{ alignItems: "center", justifyContent: "flex-start", gap: 6, flexWrap: "wrap" }}>
+        <input className="mono" aria-label={`${props.runner} に足すモデルの id`} placeholder="id" value={id} disabled={props.disabled} onChange={(e) => setId(e.target.value)} style={{ width: 200 }} />
+        <input aria-label={`${props.runner} に足すモデルの表示名`} placeholder="表示名" value={label} disabled={props.disabled} onChange={(e) => setLabel(e.target.value)} style={{ width: 140 }} />
+        <button className="btn" disabled={props.disabled} onClick={() => void add()}>
+          足す
+        </button>
+        {props.saved && (
+          <button className="ghost" disabled={props.disabled} onClick={() => void put(null)}>
+            同梱の一覧に戻す
+          </button>
+        )}
+      </div>
+      {why && <div className="warn">{why}</div>}
+    </div>
+  );
+}
+
 function ModelPrices(props: { prices: Record<string, SettingsPrice>; disabled: boolean; save: (patch: { prices: Record<string, SettingsPrice | null> }) => Promise<boolean> }) {
   const [form, setForm] = useState<PriceForm>(EMPTY_PRICE_FORM);
   const [why, setWhy] = useState<string | null>(null);

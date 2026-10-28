@@ -75,7 +75,7 @@ export async function restoreDb(ctx: Ctx, snapshot: string): Promise<HistoryEntr
   return appendHistory(ctx.home, { action: "restore-db", from: currentOf(ctx.home), to: currentOf(ctx.home), ok: true, reason: `database restored from ${snapshot}${kept ? `; the one before is kept as ${kept}` : ""}` });
 }
 
-/** What "it works" means: health says ok, the task list is a list, a WebSocket opens. Null = fine, else the reason. */
+/** What "it works" means: health says ok, a WebSocket opens. Null = fine, else the reason. */
 export async function checkDaemon(port: number, home: string): Promise<string | null> {
   const tokenFile = join(home, "token");
   const token = existsSync(tokenFile) ? readFileSync(tokenFile, "utf8").trim() : "";
@@ -83,8 +83,6 @@ export async function checkDaemon(port: number, home: string): Promise<string | 
   try {
     const health = await fetch(`http://127.0.0.1:${port}/api/health`, { headers, signal: AbortSignal.timeout(3000) });
     if (!health.ok || ((await health.json()) as { ok?: boolean }).ok !== true) return `/api/health answered ${health.status}`;
-    const tasks = await fetch(`http://127.0.0.1:${port}/api/tasks`, { headers, signal: AbortSignal.timeout(3000) });
-    if (!tasks.ok || !Array.isArray(await tasks.json())) return `/api/tasks answered ${tasks.status}`;
   } catch (e) {
     return `no answer on port ${port} (${String((e as Error).message ?? e)})`;
   }
@@ -102,15 +100,16 @@ export async function checkDaemon(port: number, home: string): Promise<string | 
 }
 
 /**
- * The tasks a restart or a release switch stops (#435): the daemon's running and waiting ones, read with the same token
- * as checkDaemon. [] when it does not answer or answers something else: a daemon that is down has nothing to stop.
+ * The tasks a restart or a release switch stops (#435): the daemon's running and waiting ones, from its health's
+ * `busyTasks` (#2814: not the whole task list), read with the same token as checkDaemon. [] when it does not answer or
+ * answers something else: a daemon that is down has nothing to stop.
  */
 export async function tasksThatStop(port: number, home: string): Promise<{ id: string; title: string; status: string }[]> {
   const tokenFile = join(home, "token");
   const token = existsSync(tokenFile) ? readFileSync(tokenFile, "utf8").trim() : "";
   try {
-    const r = await fetch(`http://127.0.0.1:${port}/api/tasks`, { headers: token ? { authorization: `Bearer ${token}` } : undefined, signal: AbortSignal.timeout(3000) });
-    const tasks: unknown = r.ok ? await r.json() : null;
+    const r = await fetch(`http://127.0.0.1:${port}/api/health`, { headers: token ? { authorization: `Bearer ${token}` } : undefined, signal: AbortSignal.timeout(3000) });
+    const tasks: unknown = r.ok ? ((await r.json()) as { busyTasks?: unknown } | null)?.busyTasks : null;
     if (!Array.isArray(tasks)) return [];
     return tasks
       .filter((t): t is { id: string; title: string; status: string } => typeof t?.id === "string" && typeof t?.title === "string" && (t.status === "running" || t.status === "waiting"))

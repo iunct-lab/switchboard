@@ -28,7 +28,7 @@ import { QUOTA_LIMIT } from "./backlog.ts";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
 import { MAX_STOP_RESUMES } from "./interrupted.ts";
 import { StopReport } from "./stops.ts";
-import { makePrivateTmp, privateTmpOf, sweepPrivateTmps, TaskManager } from "./tasks.ts";
+import { makePrivateTmp, privateTmpOf, sweepPrivateTmps, TaskManager, taskAllowRules } from "./tasks.ts";
 import { Scheduler } from "./scheduler.ts";
 
 /** A gh that answers nothing: the ledger summary reads GitHub's budget (#549), which a test must not ask the real GitHub for. */
@@ -215,6 +215,34 @@ describe("core daemon", () => {
     expect(h.runners[0]).toMatchObject({ id: "claude", available: true });
     const ws = await fetch(`${base}/api/workspaces`).then(j);
     expect(ws.some((w: { kind: string }) => w.kind === "meta")).toBe(true);
+  });
+
+  test("health lists the running and waiting tasks as busyTasks, and not the done ones (#2814)", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-test-busy-"));
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
+    const h2 = mkdtempSync(join(tmpdir(), "switchboard-test-busy-off-"));
+    const off = await startServer(loadConfig({ SWITCHBOARD_HOME: h2, SWITCHBOARD_PORT: "0", ...NO_HISTORY, SWITCHBOARD_HOST: "0.0.0.0" }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
+    try {
+      const now = Date.now();
+      const mk = (id: string, status: "running" | "waiting" | "done") => c.db.insertTask({ id, workspaceId: null, title: `title ${id}`, runner: "claude", cwd: h, scope: [h], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
+      mk("task_busy_run", "running");
+      mk("task_busy_wait", "waiting");
+      mk("task_busy_done", "done");
+      const busy = (await fetch(`http://127.0.0.1:${c.server.port}/api/health`).then(j)).busyTasks;
+      expect(busy.sort((a: { id: string }, b: { id: string }) => a.id.localeCompare(b.id))).toEqual([
+        { id: "task_busy_run", title: "title task_busy_run", status: "running" },
+        { id: "task_busy_wait", title: "title task_busy_wait", status: "waiting" },
+      ]);
+      // without the token, off loopback: not listed
+      const b2 = `http://127.0.0.1:${off.server.port}`;
+      expect((await fetch(`${b2}/api/health`).then(j)).busyTasks).toBeUndefined();
+      expect((await fetch(`${b2}/api/health`, { headers: { authorization: `Bearer ${off.token}` } }).then(j)).busyTasks).toEqual([]);
+    } finally {
+      await c.stop();
+      await off.stop();
+      rmSync(h, { recursive: true, force: true });
+      rmSync(h2, { recursive: true, force: true });
+    }
   });
 
   test("effort (#833): health lists each runner's efforts; a task keeps the chosen one and hands it to the adapter; unknown is 400", async () => {
@@ -1563,7 +1591,7 @@ describe("core daemon", () => {
       expect(saved.defaultPermissionMode).toEqual({ claude: "plan" });
       expect(saved.runners[0].defaultPermissionMode).toBe("plan");
       expect((await fetch(`${b8}/api/health`).then(j)).runners[0].defaultPermissionMode).toBe("plan");
-      expect(c8.db.getSetting("settings", {})).toEqual({ defaultPermissionMode: { claude: "plan" }, autoResume: {}, bedrock: {}, shadowRunner: null, routing: { llm: { enabled: false, runner: "claude", model: "", timeoutMs: 5000 } }, judge: { enabled: true, runner: "codex", model: "gpt-6-luna" }, autoStart: { runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9 }, evals: { judge: { enabled: true } }, titles: { auto: true }, quotaAndResume: { backlogQuotaLimit: 0.8, retryDelayMs: 900_000, retryMaxDelayMs: 14_400_000, maxLimitStops: 8, resumePrompt: "使用上限がリセットされました。中断した箇所から作業を続けてください。", maxStopResumes: 2, thinSample: 5 }, judgeAndChoice: { judgeFallbackRunner: "claude", judgeFallbackModel: "claude-haiku-4-5", judgeTimeoutMs: 60_000, workspaceChoiceTimeoutMs: 60_000 }, newDefaults: { taskRunner: "claude", scheduleCron: "0 3 * * *" }, prices: {} });
+      expect(c8.db.getSetting("settings", {})).toEqual({ defaultPermissionMode: { claude: "plan" }, autoResume: {}, bedrock: {}, shadowRunner: null, routing: { llm: { enabled: false, runner: "claude", model: "", timeoutMs: 5000 } }, judge: { enabled: true, runner: "codex", model: "gpt-6-luna" }, autoStart: { runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9 }, evals: { judge: { enabled: true } }, titles: { auto: true }, quotaAndResume: { backlogQuotaLimit: 0.8, retryDelayMs: 900_000, retryMaxDelayMs: 14_400_000, maxLimitStops: 8, resumePrompt: "使用上限がリセットされました。中断した箇所から作業を続けてください。", maxStopResumes: 2, thinSample: 5 }, judgeAndChoice: { judgeFallbackRunner: "claude", judgeFallbackModel: "claude-haiku-4-5", judgeTimeoutMs: 60_000, workspaceChoiceTimeoutMs: 60_000 }, newDefaults: { taskRunner: "claude", scheduleCron: "0 3 * * *" }, prices: {}, models: {} });
       const t4 = await post("/api/tasks", { cwd: h8, title: "t4", prompt: "p", runner: "claude" }).then(j);
       expect(t4.permissionMode).toBe("plan");
       expect(starts[2]?.permissionMode).toBe("plan");
@@ -1793,6 +1821,36 @@ describe("core daemon", () => {
       const saved = c.db.getSetting("settings", {}) as Record<string, unknown>;
       c.db.setSetting("settings", { ...saved, autoStart: { runner: "codex", model: "", effort: "ultra" } }); // kept from a version whose list had it
       expect((await patch({ autoStart: { model: "m3" } }).then(j)).autoStart).toEqual({ runner: "codex", model: "m3", effort: "ultra", byKind: {}, fallback: [], fallbackAt: 0.9 }); // not checked again
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("settings models (#1400): no row = the bundled list; PATCH adds, removes and reorders without a restart; null brings the bundled list back; an empty list, a blank or duplicate id, dak and an undetected runner are 400; Bedrock keeps its own list", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-test-settings-models-"));
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { models: ["big", "small"], bedrockModels: ["global.big"] }), fakeAdapter(SCRIPT, { id: "dak" })], { port: 0 });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const models = async () => ((await fetch(`${b}/api/health`).then(j)).runners as { id: string; models: { value: string; label: string }[] }[]).find((r) => r.id === "claude")!.models;
+    const opt = (value: string, label = value) => ({ value, label });
+    try {
+      expect((await fetch(`${b}/api/settings`).then(j)).models).toEqual({});
+      expect(await models()).toEqual([opt("big"), opt("small")]);
+      expect((await patch({ models: { claude: [opt("small"), opt(" new ", " "), opt("big", " Big ")] } })).status).toBe(200); // trimmed; a blank label is the id
+      expect(await models()).toEqual([opt("small"), opt("new"), opt("big", "Big")]);
+      expect((await patch({ models: { claude: [opt("big", "Big"), opt("small")] } })).status).toBe(200); // removed and reordered
+      expect(await models()).toEqual([opt("big", "Big"), opt("small")]);
+      const saved = await fetch(`${b}/api/settings`).then(j);
+      for (const body of [{ claude: [] }, { claude: [opt(" ")] }, { claude: [opt("big"), opt(" big")] }, { dak: [opt("x")] }, { codex: [opt("x")] }]) {
+        expect((await patch({ models: body })).status).toBe(400);
+        expect(await fetch(`${b}/api/settings`).then(j)).toEqual(saved); // a refused PATCH saves nothing
+      }
+      expect((await patch({ bedrock: { claude: { region: "us-east-1" } } })).status).toBe(200);
+      expect(await models()).toEqual([opt("global.big")]); // the saved ids are not Bedrock's spelling
+      expect((await patch({ bedrock: { claude: null }, models: { claude: null } })).status).toBe(200);
+      expect((await fetch(`${b}/api/settings`).then(j)).models).toEqual({});
+      expect(await models()).toEqual([opt("big"), opt("small")]);
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
@@ -3469,6 +3527,71 @@ describe("repeated stops (#948)", () => {
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("grants (#2745): a grant goes to the Task once, as the person's reply", () => {
+  const GRANT = "定期実行 sch_x を enabled: false で POST /api/schedules に登録することだけ許可します";
+  // as the screen sends it (a policy is made from the screen only)
+  const post = (b: string, path: string, body: object) => fetch(`${b}${path}`, { method: "POST", headers: { "content-type": "application/json", origin: b, "sec-fetch-site": "same-origin" }, body: JSON.stringify(body) });
+  /** A daemon whose fake runner says `text` and ends its turn; `sends` = what the Task was sent after. */
+  const boot = async (text: string) => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-grant-"));
+    const cfg = loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY });
+    const script: AgentEvent[] = [
+      { t: "session.start", runner: "claude", runnerSessionId: "sess-g", cwd: "/tmp" },
+      { t: "message.delta", role: "assistant", text, messageId: "m1" },
+      { t: "session.end", status: "ok", summary: text },
+    ];
+    const sends: string[] = [];
+    const starts: StartOptions[] = [];
+    const c = await startServer(cfg, [fakeAdapter(script, { sends, starts })], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: NO_GH });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    const t = c.tasks.create({ cwd: h, title: "grant", prompt: "p", runner: "claude" });
+    await waitFor(async () => c.db.getTask(t.id)!.status === "done");
+    // what the Task got from the person after its first prompt: a send, or the prompt of a resumed run
+    const replies = () => [...sends, ...starts.slice(1).map((x) => x.prompt)];
+    return { c, b, t, h, replies, rules: taskAllowRules(c.db.getWorkspace(c.db.listWorkspaces().find((w) => w.kind === "meta")!.id)!.path, h) };
+  };
+  const asksOf = async (b: string, taskId: string) => ((await fetch(`${b}/api/asks`).then(j)) as { asks: Array<{ id: string; kind: string; grants: Array<string | null>; grant: string | null; answers: string[]; task: { id: string } | null }> }).asks.filter((a) => a.task?.id === taskId);
+  const noneSaved = async (x: Awaited<ReturnType<typeof boot>>) => {
+    expect((await fetch(`${x.b}/api/policies`).then(j)).policies).toEqual([]);
+    expect(taskAllowRules(x.c.db.getWorkspace(x.c.db.listWorkspaces().find((w) => w.kind === "meta")!.id)!.path, x.h)).toEqual(x.rules);
+  };
+
+  test("choice grant reply: choosing a choice with a grant sends the choice's line, grant and all, as it is", async () => {
+    const choice = `B: 登録する — 許可: ${GRANT}`;
+    const x = await boot(`**確認**: 定期実行を登録してよいか\n**選択肢**:\n- A: 登録しない\n- ${choice}\n**推奨**: B — 確かめるため`);
+    try {
+      await post(x.b, `/api/tasks/${x.t.id}/outcome`, { outcome: "needs_action" });
+      const [check] = await asksOf(x.b, x.t.id);
+      expect(check).toMatchObject({ kind: "check", grants: [null, GRANT], answers: ["choice", "text"] });
+      // a grant is not saved as a policy
+      expect((await post(x.b, "/api/asks/answer", { id: check!.id, answer: { kind: "choice", choice }, policy: { scope: "once", target: "x", when: [], expiresAt: null } })).status).toBe(409);
+      expect((await post(x.b, "/api/asks/answer", { id: check!.id, answer: { kind: "choice", choice } })).status).toBe(200);
+      await waitFor(async () => x.replies().length > 0);
+      expect(x.replies()).toEqual([choice]);
+      await noneSaved(x);
+    } finally {
+      await x.c.stop();
+    }
+  });
+
+  test("permission stop grant reply: a refused Task's grant is its one reply; a grant cannot be saved as a policy", async () => {
+    const fence = "```switchboard-stop\n" + JSON.stringify({ id: "sched", op: "POST /api/schedules", target: "sch_x", reason: "permission", evidence: "auto mode denied", grant: GRANT }) + "\n```";
+    const x = await boot(`登録が拒まれました。\n${fence}\n`);
+    try {
+      const [stop] = await asksOf(x.b, x.t.id);
+      expect(stop).toMatchObject({ kind: "stop", grant: GRANT, answers: ["grant", "text"] });
+      expect((await post(x.b, "/api/asks/answer", { id: stop!.id, answer: { kind: "grant" }, policy: { scope: "once", target: "sch_x", when: [], expiresAt: null } })).status).toBe(400);
+      expect(x.replies()).toEqual([]);
+      expect((await post(x.b, "/api/asks/answer", { id: stop!.id, answer: { kind: "grant" } })).status).toBe(200);
+      await waitFor(async () => x.replies().length > 0);
+      expect(x.replies()).toEqual([GRANT]);
+      await noneSaved(x);
+    } finally {
+      await x.c.stop();
     }
   });
 });

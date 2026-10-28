@@ -1,12 +1,14 @@
 #!/usr/bin/env bun
 // gh-guard
 // The check in front of `gh` (#661, docs/design/secret-guard.md). A write whose text holds a value that signs someone
-// in stops here; everything else goes to the real gh unchanged.
+// in stops here, and so does a write from a clone of the public copy that still writes there (#2466); everything else
+// goes to the real gh unchanged.
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { repoName } from "../src/backlog-client.ts";
-import { backlogWrite, bodiesOf, GUARD_MARK, realCommand } from "../src/gh-guard.ts";
+import { publicCopyOf, publicCopyRefusal } from "../src/config.ts";
+import { backlogWrite, bodiesOf, GUARD_MARK, realCommand, writeTargetOf } from "../src/gh-guard.ts";
 import { findSecrets, hostAws } from "../src/secrets.ts";
 
 const argv = process.argv.slice(2);
@@ -52,6 +54,22 @@ if (hits.length > 0) {
   console.error(`gh-guard: 投稿を止めました。認証に使える値が本文にあります（${[...new Set(hits.map((h) => `${h.kind}、${h.line} 行目`))].join(" / ")}）`);
   console.error("値を伏せて（<profile>、<account-id>、XXXX-XXXX）書き直してください。承認が要るなら、DEVICE_AUTH_URL があれば device-auth -- <command> で動かし、無ければ値を出さずに Task の会話で聞いて止めます（issue-workflow の「Issue・PR・コメントに書かない値」）");
   process.exit(1);
+}
+// A clone of the public copy whose default still writes there (#2466). A write named elsewhere goes; one that names
+// the public copy, or nothing, stops when GH_REPO or `gh repo view` is the public copy. `gh repo view` answers from the
+// remotes, not GH_REPO, so `-R "$(gh repo view …)"` names the public copy although GH_REPO points elsewhere; it is
+// asked only for such a write, so a read and a write named elsewhere cost no call
+const write = writeTargetOf(argv, process.env);
+if (write && publicCopyOf() !== null && (write.repo === null || publicCopyRefusal(write.repo) !== null)) {
+  const view = () => {
+    const p = Bun.spawnSync([real, "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    return p.exitCode === 0 ? p.stdout.toString().trim() : "";
+  };
+  const refusal = (process.env.GH_REPO ? publicCopyRefusal(process.env.GH_REPO) : null) ?? publicCopyRefusal(view());
+  if (refusal) {
+    console.error(`gh-guard: 投稿を止めました。${refusal}`);
+    process.exit(1);
+  }
 }
 // A pipe or a file descriptor was read to the end: the real gh gets the same bytes from a file
 const pass = [...argv];

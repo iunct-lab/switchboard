@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, AnswerPolicy, ApprovalRuleMatch, Artifact, AskList, PolicySubject, Backlog, BacklogItem, PendingApproval, RunnerAdapter, RunnerId, RunnerSession, StopSummary, Task } from "@switchboard/protocol";
 import { importing } from "../fixtures/github-import.ts";
-import { answersOf, ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, parseAskBlock, resumeOfIssue, resumeOfTask } from "./asks.ts";
+import { answersOf, ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, grantOfChoice, parseAskBlock, resumeOfIssue, resumeOfTask } from "./asks.ts";
 import { heldSince, type GhRunner } from "./backlog.ts";
 import { loadConfig } from "./config.ts";
 import { startServer, type CoreServer } from "./server.ts";
@@ -18,7 +18,7 @@ const item = (over: Partial<BacklogItem>): BacklogItem => ({
 
 const stop = (over: Partial<StopSummary>): StopSummary => ({
   key: "ws_meta#5\u0000gh pr merge\u0000#7\u0000decision\u0000", work: { workspaceId: "ws_meta", issue: 5, taskId: "tk_5" }, op: "gh pr merge", target: "#7", reason: "decision", evidence: "merge-gate stop",
-  safety: "unknown", count: 1, state: "waiting", firstAt: NOW - 3_600_000, lastAt: NOW - 3_600_000, lastAnswer: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide", ...over,
+  safety: "unknown", count: 1, state: "waiting", firstAt: NOW - 3_600_000, lastAt: NOW - 3_600_000, lastAnswer: null, grant: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide", ...over,
 });
 
 const DECISION = ["## 判断待ち", "**問い**: どちらの読みで作るか", "**選択肢**:", "- A: 既存の画面を置き換える — 影響: URL はそのまま", "- B: 新しい画面 — 影響: Rail が増える", "**推奨**: A — 画面を増やさない", "**止めた場所**: Task #9"].join("\n");
@@ -28,6 +28,7 @@ describe("parseAskBlock", () => {
     expect(parseAskBlock(DECISION)).toEqual({
       question: "どちらの読みで作るか",
       choices: ["A: 既存の画面を置き換える — 影響: URL はそのまま", "B: 新しい画面 — 影響: Rail が増える"],
+      grants: [null, null],
       recommendation: { choice: "A", why: "画面を増やさない" },
       place: { text: "Task #9", pr: null },
       mockupTask: null,
@@ -40,7 +41,7 @@ describe("parseAskBlock", () => {
 
   test("text without a recommendation has recommendation null; text without the form has nothing", () => {
     expect(parseAskBlock("**問い**: 続けるか").recommendation).toBeNull();
-    expect(parseAskBlock("終わりました。")).toEqual({ question: null, choices: [], recommendation: null, place: null, mockupTask: null });
+    expect(parseAskBlock("終わりました。")).toEqual({ question: null, choices: [], grants: [], recommendation: null, place: null, mockupTask: null });
   });
 
   test("place: **止めた場所** gives its text and the first PR it names; a place without a PR has pr null", () => {
@@ -138,7 +139,7 @@ describe("answers (#936)", () => {
   });
 
   test("answers: an approval, a decision with choices, a check without, a confirmation, a refused stop and an automatic one", () => {
-    const a = (over: Partial<Parameters<typeof answersOf>[0]>) => answersOf({ kind: "decision", needs: "person", state: "open", choices: [], blockers: [], ...over });
+    const a = (over: Partial<Parameters<typeof answersOf>[0]>) => answersOf({ kind: "decision", needs: "person", state: "open", choices: [], blockers: [], grant: null, ...over });
     expect(a({ kind: "approval" })).toEqual(["allow", "deny"]);
     expect(a({ kind: "decision", choices: ["A", "B"] })).toEqual(["choice", "text", "hold"]);
     expect(a({ kind: "decision", state: "held" })).toEqual(["text", "hold"]);
@@ -153,6 +154,50 @@ describe("answers (#936)", () => {
     // built: a decision of the backlog, and a Task's approval
     const [d] = asksFromBacklog([item({ number: 3, stage: "needs-decision", decision: { body: DECIDE, at: "2026-10-07T10:00:00Z", issue: 3 } })], NOW);
     expect(d!.answers).toEqual(["choice", "text", "hold"]);
+  });
+});
+
+describe("grants (#2745)", () => {
+  const GRANT = "定期実行 sch_x を enabled: false で POST /api/schedules に登録することだけ許可します";
+  const CHECK = `**確認**: 定期実行を登録してよいか\n**選択肢**:\n- A: 登録しない\n- B: 登録する — 許可: ${GRANT}\n**推奨**: B — 確かめるため`;
+  const task = (over: Partial<Task> = {}): Task =>
+    ({ id: "tk_g", workspaceId: null, title: "t", runner: "claude", cwd: "/tmp", scope: [], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, origin: "switchboard", resumeAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: NOW - 600_000, createdAt: NOW - 600_000, updatedAt: NOW - 60_000, ...over }) as Task;
+  const fromTasks = (t: Task, stops: StopSummary[], reply: string | null) =>
+    asksFromTasks({ approvals: [], tasks: [t], lastReply: () => (reply ? { text: reply, seq: 9 } : null), permissionEvents: () => [], stops: () => stops, workspaceName: () => null, now: NOW, policy: { policies: [], pbiOpen: () => true, approval: () => ({ subject: null, confirmHit: null }), confirm: () => null } });
+  const refused = (over: Partial<StopSummary> = {}) =>
+    stop({ key: "task:tk_g\u0000POST /api/schedules\u0000\u0000permission\u0000", work: { workspaceId: null, issue: null, taskId: "tk_g" }, op: "POST /api/schedules", target: "", reason: "permission", evidence: "auto mode denied", next: "decide", ...over });
+
+  test("choice grant: a choice's ` — 許可: ` is its grant, in the order of the choices; a choice without one is null and its text stays whole", () => {
+    const b = parseAskBlock(CHECK);
+    expect(b.choices).toEqual(["A: 登録しない", `B: 登録する — 許可: ${GRANT}`]);
+    expect(b.grants).toEqual([null, GRANT]);
+    expect(grantOfChoice("A: 登録しない — 影響: なし")).toBeNull();
+    expect(grantOfChoice("A: x — 許可：全角の区切り")).toBe("全角の区切り");
+    const [check] = fromTasks(task(), [], CHECK);
+    expect(check).toMatchObject({ kind: "check", grants: [null, GRANT], grant: null, answers: ["choice", "text"] });
+    // a grant is not saved as a policy
+    expect(check!.policy).toMatchObject({ scopes: [], note: "許可文は 1 回きりで、方針には保存しません" });
+  });
+
+  test("permission stop grant: a permission stop with a grant is not in the way and is answered by it; one without stays the runner's refusal", () => {
+    const [g] = fromTasks(task({ outcome: "unknown" }), [refused({ grant: GRANT })], null);
+    expect(g).toMatchObject({ kind: "stop", needs: "person", state: "open", grant: GRANT, blockers: [], answers: ["grant", "text"] });
+    expect(g!.policy).toMatchObject({ scopes: [], note: "許可文は 1 回きりで、方針には保存しません" });
+    const [none] = fromTasks(task({ outcome: "unknown" }), [refused()], null);
+    expect(none).toMatchObject({ grant: null, answers: [] });
+    expect(none!.blockers.map((b) => b.kind)).toEqual(["runner"]);
+    // only a permission stop's grant counts: an auth refusal stays the runner's
+    expect(blockersOf({ waits: [], stops: [refused({ reason: "auth", grant: GRANT })], approvalPending: false }).map((b) => b.kind)).toEqual(["runner"]);
+    const [auth] = fromTasks(task({ outcome: "unknown" }), [refused({ reason: "auth", grant: GRANT })], null);
+    expect(auth!.grant).toBeNull();
+  });
+
+  test("permission stop grant: folded into the Task's check, the grant stays answerable and is not saved as a policy", () => {
+    const list = dedupeAsks(fromTasks(task(), [refused({ grant: GRANT })], "**確認**: 続けるか\n**選択肢**:\n- A: はい"));
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ kind: "check", grant: GRANT, answers: ["grant", "choice", "text"], policy: { scopes: [], note: "許可文は 1 回きりで、方針には保存しません" } });
+    // a stop without a grant folds as before
+    expect(dedupeAsks(fromTasks(task(), [refused({ reason: "input" })], "**確認**: 続けるか"))[0]).toMatchObject({ kind: "check", grant: null, answers: ["text"] });
   });
 });
 
@@ -364,7 +409,7 @@ describe("asksFromTasks", () => {
 const pages = (await Bun.file(new URL("../fixtures/backlog-graphql.json", import.meta.url)).json()) as unknown[];
 const decisions = (await Bun.file(new URL("../fixtures/backlog-decisions.json", import.meta.url)).json()) as unknown;
 const fakeGh: GhRunner = async (args) => {
-  if (args[0] === "repo") return { code: 0, stdout: "acme/app\n", stderr: "" };
+  if (args[0] === "repo") return { code: 0, stdout: "acme/app true\n", stderr: "" };
   if (args[0] === "variable") return { code: 0, stdout: "https://github.com/users/acme/projects/11\n", stderr: "" };
   if (args.some((a) => a.includes("comments(last:"))) return { code: 0, stdout: JSON.stringify(decisions), stderr: "" };
   return { code: 0, stdout: JSON.stringify(args.includes("after=CURSOR1") ? pages[1] : pages[0]), stderr: "" };

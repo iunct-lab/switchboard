@@ -69,7 +69,7 @@ test("BacklogSync's measures during a wait: a read costs nothing, an import is w
   const ok = (stdout: string) => ({ code: 0, stdout, stderr: "" });
   const page = { data: { repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] }, pullRequests: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } };
   const gh: GhRunner = async (args) =>
-    args[0] === "repo" ? ok("acme/app\n") : args[0] === "variable" ? ok("https://github.com/users/acme/projects/11\n")
+    args[0] === "repo" ? ok("acme/app true\n") : args[0] === "variable" ? ok("https://github.com/users/acme/projects/11\n")
       : limited ? { code: 1, stdout: "", stderr: "gh: API rate limit exceeded (HTTP 429)" } : ok(JSON.stringify(page));
   let now = 0;
   const ms: GithubCallMetric[] = [];

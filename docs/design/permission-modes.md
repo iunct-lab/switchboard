@@ -22,6 +22,8 @@ Workspace MCP `exec.run` approvals (`mcp.yaml`) are Switchboard's own and indepe
 
 On Codex, Auto delegates boundary approvals to the runner's risk-based reviewer, comparable in purpose to Claude's classifier. The sandbox and network restrictions remain active. Start, resume and each turn explicitly set `approvalsReviewer`; manual modes reset it to `user`. Rejection can stop an action or lead to a safer alternative, without necessarily opening a human approval dialog. Review notifications and rationale are retained as transcript status events. Manual approval remains a one-time accept, not a persisted command rule.
 
+Auto's workspace-write sandbox also blocks loopback connections to the daemon on this host (`BACKLOG_URL`, `DEVICE_AUTH_URL`, and an extra reviewer listening on localhost). The sandbox network stays closed: when `ops-kit backlog` is refused (`EPERM` / `EACCES`), it says the sandbox blocked the connection and to rerun the same command once as an approved run, and the reviewer decides that run. So that the reviewer finds the permission in the conversation, the implementation prompts (`/pbi-complete` start, resume and another repository, and すぐ直す) name as part of the request handing the review material (fresh clone code, PR / Task / PBI bodies, diff) to the other runner and the extra reviewer, and the Issues the skills file (review findings, request Issues and PBIs).
+
 Verified 2026-09-20 on codex-cli 0.155.0-alpha.2.6: `curl -I --max-time 10 https://example.com` failed sandbox DNS, was auto-reviewed as low-risk/approved, then returned HTTP 200 without a manual request. Recorded notifications (outside Git; record your own outside Git with the `runner-adapter-recording` skill; `bun scripts/fixtures.ts fetch` works only in a clone with the private history): `packages/adapters/codex/fixtures/auto-review-0.155.0-alpha.2.6.jsonl`. Existing Auto tasks receive the reviewer on their next start/resume/turn; a turn already in flight keeps its current setting.
 
 ## Allow rules a task gets (#2150)
@@ -38,6 +40,20 @@ Auto mode's classifier refused operations the skills ask for — in the 7 days t
 Not allowed (left to auto mode): a bare `gh pr merge` / `gh stack merge` (it would merge past the gate), `gh api graphql`, deploys (`sam deploy`, CloudFormation, IAM — #2046), writing or deleting secrets, destructive host operations. Codex tasks get none (`StartOptions.allow` is read by the Claude adapter only). The permission mode itself stays `auto`.
 
 What this protects and what it does not: only the operations the skills name are allowed, the merge only through the gate, and only in tasks Switchboard starts (a terminal `claude` does not get them). A task runs as the same OS user, so it can do the same by another way (another command, the API directly) — the loopback trust model; the rules are a default so that the skills' steps do not stop, not a fence. Skill edits still reach main only through a PR, the other runner's review and the gate's responsibility recheck. A sibling folder that happens to match `<cwd>-*` gets the skill-edit rule too. Whether an allow rule takes effect before auto mode's classifier is checked on a real Claude task after the rules are running (#2160).
+
+## Grants: the person's own words for one refused operation
+
+Auto mode's classifier counts some operations (registering a schedule, changing settings — the soft-deny rules that say the user must name the operation) as allowed only when the person's own message names that operation. Text a task reads with a tool (an Issue comment, an API response) does not count. Answering a choice by its letter (「B」) does not name the operation either.
+
+A grant (許可文 on screen) is one sentence that names the operation, its target and what it does — "allow only registering schedule X with enabled: false by POST /api/schedules". It reaches the task as the person's reply, once, by three paths:
+
+- **A choice**: an operational check or a decision may end a choice's line with ` — 許可: <grant>` (the issue-workflow skill's 「判断待ちの出し方」). `Ask.grants` carries it per choice. Choosing that choice on the 判断待ち screen or the task's screen sends the choice's line as it is, grant included.
+- **A refused stop**: a stop report with reason `permission` may carry `grant`, allowing only the refused operation (`stopRecoveryPrompt` in `packages/core/src/stops.ts` says how). Such a stop is not shown as the runner's refusal: its card has 「この操作だけ許可して続ける」, which sends the grant (`answer.kind: "grant"`). A stop without a grant stays the runner's refusal, as before.
+- **A stage task's next prompt**: an answer given on the app's screen to a backlog question is written as a `## 回答` whose operation keeps a `screen` mark. The next stage task's first prompt carries the newest such answer as the person's words (`screenAnswer` in `packages/core/src/backlog.ts`) — only if the comment is still what the screen sent. A `## 回答` written on GitHub, an edited one, or one a saved policy gave is not carried; the task still reads those with `ops-kit backlog view`.
+
+A grant does not spread: it is never saved as an answer policy (`POST /api/asks/answer` refuses a grant with a policy, and a question with a grant offers no scope), never becomes a `--settings` allow rule, and applies to no other task and to no later operation of the same task. Whether a grant lets the operation through is the runner's classifier's decision; Switchboard does not change it.
+
+What this does not protect: a task runs as the same OS user, so it can call the answer API itself and send a grant to a task (the loopback trust model). The runner's classifier then judges that call as what it is.
 
 ## Where the value comes from
 

@@ -19,6 +19,11 @@ test("inProgressState: running / all Tasks done / last failed / no stage Task / 
   expect(inProgressState(item({ lastTask: null })).label).toBe("止まっている: 工程 Task なし");
   expect(inProgressState(item({ lastTask: last("done") })).label).toBe("止まっている: 最後の工程 Task は完了");
   expect(inProgressState(item({ lastTask: last("aborted") })).label).toBe("止まっている: 最後の工程 Task は中断");
+  // #1619: waiting for the person's reply, even with every Task done; back to how it ended once it is not; running still wins
+  expect(inProgressState(item({ replyWaiting: true, tasks: { total: 2, done: 2, doneAt: null }, lastTask: last("done") }))).toEqual({ running: false, label: "止まっている: 返事待ち（Task の会話で答える）" });
+  expect(inProgressState(item({ replyWaiting: true, lastTask: last("done") })).label).toBe("止まっている: 返事待ち（Task の会話で答える）");
+  expect(inProgressState(item({ replyWaiting: false, lastTask: last("done") })).label).toBe("止まっている: 最後の工程 Task は完了");
+  expect(inProgressState(item({ replyWaiting: true, activeTaskId: "task_1", lastTask: last("running") }))).toEqual({ running: true, label: "動いている" });
   expect(inProgressState(item({ lastTask: last("idle") })).label).toBe("止まっている: 最後の工程 Task は未開始");
   expect(inProgressState(item({ lastTask: last("done") })).running).toBe(false);
 });
@@ -164,6 +169,7 @@ describe("taskTimes (#2030)", () => {
   test("the Backlog row's last Task and its running button", () => {
     const t = { status: "aborted" as const, createdAt: Date.parse("2026-10-19T07:02:00Z"), statusAt: Date.parse("2026-10-19T08:40:00Z") };
     expect(lastTaskLine(t, now)).toBe("最後の Task: 中断（17:40 から・開始 16:02）");
+    expect(lastTaskLine({ ...t, status: "done" }, now, "返事待ち")).toBe("最後の Task: 返事待ち（17:40 から・開始 16:02）");
     expect(activeTaskLine({ status: "running", statusAt: t.statusAt }, now)).toBe("実行中（17:40 から）");
     expect(activeTaskLine({ status: "waiting", statusAt: t.statusAt }, now)).toBe("承認待ち（17:40 から）");
     expect(activeTaskLine(null, now)).toBe("実行中");

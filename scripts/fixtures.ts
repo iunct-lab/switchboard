@@ -9,6 +9,7 @@ export const RECORDINGS = [
   "packages/adapters/claude/fixtures/cloud-trust-prompt.txt",
   "packages/adapters/claude/fixtures/background-notification.jsonl",
   "packages/adapters/claude/fixtures/effort-high.jsonl",
+  "packages/adapters/claude/fixtures/guard-unavailable.jsonl",
   "packages/adapters/claude/fixtures/resume-cost.jsonl",
   "packages/adapters/claude/fixtures/resume-missing.jsonl",
   "packages/adapters/claude/fixtures/resume-turn.jsonl",
@@ -25,6 +26,7 @@ export const RECORDINGS = [
   "packages/adapters/dak/fixtures/attachment-image.sse",
   "packages/adapters/dak/fixtures/text-reply.sse",
   "packages/adapters/dak/fixtures/tool-calls.sse",
+  "packages/core/fixtures/osc7501-claude.jsonl",
   "packages/core/fixtures/suggest-claude.jsonl",
   "packages/core/fixtures/suggest-workspace-claude.jsonl"
 ] as const;

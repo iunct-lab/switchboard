@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Task, TaskOutcome, TaskStatus } from "@switchboard/protocol";
-import { attentionList, judgementNote, needsAttention, outcomeDotClass, outcomeLabel } from "./attention.ts";
+import { attentionList, judgementNote, needsAttention, outcomeDotClass, outcomeLabel, terminalMark } from "./attention.ts";
 
 const task = (id: string, status: TaskStatus, outcome: TaskOutcome, reviewedAt: number | null = null, updatedAt = 1): Task => ({ id, workspaceId: null, title: id, runner: "claude", cwd: "/w", scope: ["/w"], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome, reviewedAt, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 0, createdAt: 0, updatedAt });
 
@@ -40,4 +40,11 @@ test("judgementNote (#493): the judge's reason with who judged; the judged resul
   expect(judgementNote(judged("done", "needs_action"))).toEqual({ text: "自動判定: 要対応 — A か B を聞いている", title: "自動判定（codex:gpt-6-luna）: 要対応" });
   // judged on the runner's CLI default model (model "", saved when the runner is changed): no dangling colon
   expect(judgementNote({ ...judged("done", "done"), judgedBy: "codex:" })?.title).toBe("自動判定（codex:CLI 既定）: 完了");
+});
+
+test("terminalMark: working / waiting show a mark, done and none do not", () => {
+  expect(terminalMark("working")).toEqual({ text: "端末: 作業中", className: "m" });
+  expect(terminalMark("waiting")).toEqual({ text: "端末: 返事待ち", className: "m term-wait" });
+  expect(terminalMark("done")).toBeNull();
+  expect(terminalMark(undefined)).toBeNull();
 });

@@ -23,7 +23,7 @@
 import { existsSync } from "node:fs";
 import type { BacklogCommentData, BacklogErrorKind, BacklogIssueData, BacklogPullRequestData, BacklogItem, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogSource } from "@switchboard/protocol";
 import type { BacklogSnapshotEntry, Db } from "./db.ts";
-import { BacklogError, prereqsOf, projectOf, readStoredBacklog, repoOf, syncsGithub, waitsOf, type BacklogWorkspace, type GhRunner } from "./backlog.ts";
+import { BacklogError, backlogRepoOf, prereqsOf, projectOf, readStoredBacklog, syncsGithub, waitsOf, type BacklogWorkspace, type GhRunner } from "./backlog.ts";
 import { linkedIssues } from "../../../scripts/parallel-guard.ts";
 import { Limit, sendGithubOperations } from "./backlog-send.ts";
 import { applyLocalOperations } from "./backlog-local.ts";
@@ -260,7 +260,8 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
  * `changed` = it read something other than what was stored (a value, or how a record was read). Throws BacklogError.
  */
 export async function importGithubSnapshot(gh: GhRunner, db: Db, ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">, now = Date.now(), superseded = (_key: BacklogRepositoryKey) => false, enabling = false): Promise<{ key: BacklogRepositoryKey; changed: boolean; project: BacklogSource["project"] | null }> {
-  const { repo, owner, name } = await repoOf(gh, ws.path);
+  const { repo, owner, name, private: isPrivate } = await backlogRepoOf(gh, ws.path);
+  await refuseAnotherCheckout(gh, ws, db.getWorkspaceBacklogSource(ws.id), repo);
   const key: BacklogRepositoryKey = { service: "github", host: githubHost(), repository: repo };
   let changed = false;
   let project: BacklogSource["project"] | null = null;
@@ -284,13 +285,25 @@ export async function importGithubSnapshot(gh: GhRunner, db: Db, ws: Pick<Backlo
     // not when its Project variable changed meanwhile (that forgot the source, and the next import reads the new one).
     // Turning the sync on (#2266) and the numbers it gave stay
     const kept = current?.service === key.service && current.host === key.host && current.repository === key.repository ? { ...(current.enabling ? { enabling: current.enabling } : {}), ...(current.numbers ? { numbers: current.numbers } : {}) } : {};
-    if ((db.getWorkspace(ws.id)?.projectVar ?? null) === (ws.projectVar ?? null)) db.setWorkspaceBacklogSource(ws.id, { ...key, project, ...kept });
+    if ((db.getWorkspace(ws.id)?.projectVar ?? null) === (ws.projectVar ?? null)) db.setWorkspaceBacklogSource(ws.id, { ...key, project, private: isPrivate, ...kept });
   } catch (e) {
     const at = e instanceof BacklogError && e.response ? retryAtFromResponse(e.response, now)?.at : null;
     if (at) db.setBacklogRetryAt(key, at);
     throw e;
   }
   return { key, changed, project };
+}
+
+/**
+ * Refuses an import whose checkout is not the workspace's registered GitHub repository (#2799), so a clone of another
+ * repository (a rebuild that cloned a public one of the same name) does not overwrite the registration the rebuild
+ * clones from. A registered name GitHub forwards to the checkout's (a rename) is followed. Throws BacklogError.
+ */
+async function refuseAnotherCheckout(gh: GhRunner, ws: Pick<BacklogWorkspace, "path">, source: BacklogSource | null, repo: string): Promise<void> {
+  if (source?.service !== "github" || source.repository.toLowerCase() === repo.toLowerCase()) return;
+  const r = await gh(["api", `repos/${source.repository}`, "--jq", ".full_name"], ws.path).catch(() => null);
+  if (r?.code === 0 && r.stdout.trim().toLowerCase() === repo.toLowerCase()) return;
+  throw new BacklogError(`workspace の checkout は ${repo}、登録は ${source.repository} です。違うリポジトリの clone なので取り込みません。origin を確かめてください`);
 }
 
 /**

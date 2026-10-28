@@ -80,6 +80,8 @@ export interface AnswerButton {
   answer: AskAnswer;
   /** The answer as written / sent. */
   send: string;
+  /** The grant it sends (#2745): the stop's, or the choice's ` — 許可: `; shown on a line of its own. */
+  grant: string | null;
   /** Where it goes: the Issue it is written on, or the Task it is sent to. */
   target: string;
   next: string;
@@ -90,12 +92,21 @@ export interface AnswerButton {
 export const answerTarget = (a: Pick<Ask, "kind" | "issue" | "task">) =>
   a.kind === "decision" || a.kind === "confirmation" ? (a.issue ? `Issue #${a.issue.number}` : "Issue") : a.task ? `Task「${a.task.title ?? a.task.id}」` : "Task";
 
+/** A choice's grant (#2745): what follows ` — 許可: ` in its line; null = none. The daemon's parseAskBlock reads the same. */
+export function grantOf(choice: string): string | null {
+  const m = / — 許可[:：]\s*(.+)$/.exec(choice);
+  return m ? m[1]!.trim() : null;
+}
+
+/** A choice's text before its grant: what the card shows on the 送る line, the grant going on the next. */
+export const withoutGrant = (choice: string) => choice.replace(/ — 許可[:：]\s*.+$/, "");
+
 /** `A` of `A: 置き換える — 影響: …`; the whole choice when it has no short head. */
 const choiceKey = (c: string) => /^([^:：\s]{1,12})(?::\s|：)/.exec(c)?.[1] ?? c;
 
 /**
- * The buttons of a question (#936), from what it takes (`answers`), its choices and its recommendation: an approval's
- * 承認して続行 / 拒否, one per choice (the recommended one first, as 推奨案で進める), 確認した, and 保留. None when it takes
+ * The buttons of a question (#936), from what it takes (`answers`), its choices and its recommendation: a stop's grant
+ * (#2745: この操作だけ許可して続ける, on the stop's Issue for a stage Task's), an approval's 承認して続行 / 拒否, one per choice (the recommended one first, as 推奨案で進める), 確認した, and 保留. None when it takes
  * no answer; free text (and a confirmation's 違う) is the card's text box.
  */
 export function answerButtons(a: Ask): AnswerButton[] {
@@ -103,23 +114,27 @@ export function answerButtons(a: Ask): AnswerButton[] {
   const target = answerTarget(a);
   const next = a.next ?? "不明";
   const out: AnswerButton[] = [];
+  if (takes.has("grant") && a.grant) out.push({ label: "この操作だけ許可して続ける", answer: { kind: "grant" }, send: a.grant, grant: a.grant, target: a.issue ? `Issue #${a.issue.number}` : target, next, primary: true });
   if (takes.has("allow")) {
     const tool = a.reason?.split(": ").at(-1) ?? "ツール";
-    out.push({ label: "承認して続行", answer: { kind: "allow" }, send: `${tool} を許可`, target, next, primary: true });
+    out.push({ label: "承認して続行", answer: { kind: "allow" }, send: `${tool} を許可`, grant: null, target, next, primary: true });
   }
-  if (takes.has("deny")) out.push({ label: "拒否", answer: { kind: "deny" }, send: "拒否", target, next: "Task は許可されずに続く", primary: false });
+  if (takes.has("deny")) out.push({ label: "拒否", answer: { kind: "deny" }, send: "拒否", grant: null, target, next: "Task は許可されずに続く", primary: false });
   if (takes.has("choice")) {
     const rec = a.recommendation ? choiceKey(a.recommendation.choice) : null;
     const choices = [...a.choices].sort((x, y) => Number(choiceKey(y) === rec) - Number(choiceKey(x) === rec));
     for (const c of choices) {
       const recommended = choiceKey(c) === rec;
-      out.push({ label: recommended ? `推奨案で進める（${choiceKey(c)}）` : `${choiceKey(c)} で進める`, answer: { kind: "choice", choice: c }, send: c, target, next, primary: recommended });
+      out.push({ label: recommended ? `推奨案で進める（${choiceKey(c)}）` : `${choiceKey(c)} で進める`, answer: { kind: "choice", choice: c }, send: c, grant: grantOf(c), target, next, primary: recommended && !takes.has("grant") });
     }
   }
-  if (takes.has("confirm")) out.push({ label: "確認した", answer: { kind: "confirm", ok: true }, send: `受け入れ条件「${a.question ?? ""}」を確認しました`, target, next, primary: true });
-  if (takes.has("hold")) out.push({ label: "保留", answer: { kind: "hold" }, send: "## 保留 を書く。判断待ちのまま", target, next: "続行しない", primary: false });
+  if (takes.has("confirm")) out.push({ label: "確認した", answer: { kind: "confirm", ok: true }, send: `受け入れ条件「${a.question ?? ""}」を確認しました`, grant: null, target, next, primary: true });
+  if (takes.has("hold")) out.push({ label: "保留", answer: { kind: "hold" }, send: "## 保留 を書く。判断待ちのまま", grant: null, target, next: "続行しない", primary: false });
   return out;
 }
+
+/** The questions of one Task its screen answers (#2745): its open operational checks and stops a person answers. */
+export const taskAsks = (list: Ask[], taskId: string) => list.filter((a) => a.task?.id === taskId && (a.kind === "check" || a.kind === "stop") && a.state === "open" && a.needs === "person");
 
 /** How the work goes on after the answer (#936), as the card's badge; null while nothing is answered. */
 export function resumeLabel(a: Pick<Ask, "state" | "resume">): { text: string; tone: "ok" | "wait" | "bad" } | null {

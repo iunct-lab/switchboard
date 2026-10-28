@@ -58,6 +58,7 @@ try {
   const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   const dialogs: string[] = [];
   let interceptionError: unknown;
+  let statusAsks = 0;
   const call = (method: string, params: object = {}): Promise<any> => new Promise((resolve, reject) => { const id = ++seq; pending.set(id, { resolve, reject }); ws.send(JSON.stringify({ id, method, params })); });
   ws.onmessage = (event) => {
     const m = JSON.parse(String(event.data));
@@ -71,6 +72,7 @@ try {
         await call("Fetch.fulfillRequest", { requestId, responseCode: 200, responseHeaders: [{ name: "content-type", value: "application/json" }], body: Buffer.from(JSON.stringify(body)).toString("base64") });
       })().catch((e) => { interceptionError = e; });
     }
+    if (m.method === "Network.requestWillBeSent" && new URL(m.params.request.url).pathname.endsWith("/api/status")) statusAsks++;
     if (m.method === "Page.javascriptDialogOpening") { dialogs.push(m.params.message); void call("Page.handleJavaScriptDialog", { accept: true }); }
   };
   const evaluate = async (expression: string) => (await call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true })).result.value;
@@ -128,6 +130,24 @@ try {
   assert(!interceptionError, `status interception failed: ${interceptionError}`);
   say("rebuild: true (intercepted status) shows the row and enables the button");
   await call("Fetch.disable");
+  // a hidden tab stops asking for the status; back to visible it asks at once, then every 2 s (#2814)
+  await call("Network.enable");
+  const visibility = (state: "hidden" | "visible") => evaluate(`Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "${state}" }); Object.defineProperty(document, "hidden", { configurable: true, get: () => ${state === "hidden"} }); document.dispatchEvent(new Event("visibilitychange"))`);
+  await visibility("hidden");
+  await Bun.sleep(500); // a request already on its way
+  const hiddenFrom = statusAsks;
+  await Bun.sleep(6000);
+  const hiddenAsks = statusAsks - hiddenFrom;
+  assert(hiddenAsks === 0, `the hidden tab asked for the status ${hiddenAsks} times in 6 s`);
+  const shownFrom = statusAsks;
+  await visibility("visible");
+  await Bun.sleep(1000);
+  const atOnce = statusAsks - shownFrom;
+  assert(atOnce >= 1, "coming back to visible did not ask for the status at once");
+  await Bun.sleep(4000);
+  const after = statusAsks - shownFrom - atOnce;
+  assert(after >= 1 && after <= 3, `back to visible, the status was asked ${after} times in 4 s (every 2 s expected)`);
+  say(`visibility: hidden 6 s → +${hiddenAsks} /api/status; visible → +${atOnce} within 1 s, then +${after} in 4 s`);
   ws.close();
   say("PASS");
 } finally {

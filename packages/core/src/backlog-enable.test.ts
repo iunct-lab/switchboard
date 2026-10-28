@@ -49,7 +49,7 @@ function github(numbers: number[]) {
   const page = (nodes: unknown[]) => ({ code: 0, stdout: JSON.stringify({ data: { repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes }, pullRequests: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } }), stderr: "" });
   const gh: GhRunner = async (args, cwd) => {
     if (down.on) return { code: 1, stdout: "", stderr: "gh: HTTP 503" };
-    if (args[0] === "repo") return { code: 0, stdout: "acme/app\n", stderr: "" };
+    if (args[0] === "repo") return { code: 0, stdout: "acme/app true\n", stderr: "" };
     if (args[0] === "variable") return { code: 0, stdout: "https://github.com/orgs/acme/projects/1\n", stderr: "" };
     const q = args.find((a) => a.startsWith("query=")) ?? "";
     if (q.includes("states:[OPEN,CLOSED]")) return page([...g.issues.values()].map(raw));

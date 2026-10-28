@@ -153,6 +153,35 @@ export function loadPublicSync(path?: string, cwd = process.cwd(), at?: string):
   return r.data;
 }
 
+/**
+ * The public copy this tree is published to (`publicSync.target` of the nearest `ops.config.json`), as `owner/name`;
+ * null when there is no file, it does not read, or it names none. Only that string is read (not `parseConfig`), so a
+ * mistake elsewhere in the file does not stop every write.
+ */
+export function publicCopyOf(cwd = process.cwd()): string | null {
+  try {
+    const json = JSON.parse(readFileSync(findConfig(undefined, cwd), "utf8")) as { publicSync?: { target?: unknown } } | null;
+    const target = json?.publicSync?.target;
+    return typeof target === "string" && target !== "" ? target : null;
+  } catch {
+    return null;
+  }
+}
+
+/** `owner/name` of a repository given as `owner/name`, `host/owner/name`, or a URL (with or without `.git`). */
+const ownerName = (repo: string) => repo.trim().replace(/^[a-z]+:\/\/[^/]+\//i, "").replace(/^git@[^:]+:/, "").replace(/\/+$/, "").replace(/\.git$/, "").split("/").slice(-2).join("/").toLowerCase();
+
+/**
+ * Why a write to `repo` is refused: it is this clone's public copy (`publicSync.target`), so the clone was taken from
+ * the published tree and its default write target was never pointed at the developer's own repository. Null = go.
+ * The kit holds no repository's name: the owner's development repository writes elsewhere by default and passes.
+ */
+export function publicCopyRefusal(repo: string, cwd = process.cwd()): string | null {
+  const target = publicCopyOf(cwd);
+  if (!target || ownerName(target) !== ownerName(repo)) return null;
+  return `書き込み先 ${ownerName(repo)} は、この clone の ops.config.json の publicSync.target（公開側の写し）です。自分のリポジトリに向けてから実行してください: gh repo set-default <自分の owner/name>（remote に無ければ先に git remote add）、または GH_REPO=<自分の owner/name>（gh repo view の答えは変わらないので、-R "$(gh repo view …)" で書くなら gh repo set-default）。手順は ops-kit/README.md の「fork して開発を始める」`;
+}
+
 function gitShow(file: string, at: string): string {
   const p = Bun.spawnSync(["git", "-C", dirname(file), "show", `${at}:./${basename(file)}`], { stderr: "pipe" });
   if (p.exitCode !== 0) throw new Error(`not in ${at}: ${p.stderr.toString().trim().split("\n")[0]}`);

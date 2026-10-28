@@ -35,7 +35,11 @@ export interface CoreConfig {
   webDist: string;
   /** How long a finished runner process is kept alive for follow-ups before it is released (then `--resume` is used). */
   runnerIdleMs: number;
-  /** The Markdown folder that is the source of truth for rules / commands / notes. Override with SWITCHBOARD_KNOWLEDGE. */
+  /**
+   * The Markdown folder that is the source of truth for rules / commands / notes. Override with SWITCHBOARD_KNOWLEDGE.
+   * Default ~/Knowledge, or <home>/Knowledge when the data folder is temporary (a test or a fake-runner daemon must not
+   * write into the user's Inbox, #2865).
+   */
   knowledgeDir: string;
   /** Local API token file (issue #31). Required on /api and /ws when `host` is not loopback. */
   tokenPath: string;
@@ -86,9 +90,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig {
   const codeRoot = findRepoRoot(import.meta.dir);
   const repoRoot = env.SWITCHBOARD_REPO_ROOT ? resolve(env.SWITCHBOARD_REPO_ROOT) : codeRoot;
   const dbPath = env.SWITCHBOARD_DB ?? join(home, "switchboard.db");
+  const homeIsTemp = isTempDir(home) || isTempDir(dbPath);
   return {
     home,
-    homeIsTemp: isTempDir(home) || isTempDir(dbPath),
+    homeIsTemp,
     homeDisplay: home === homedir() ? "~" : home.startsWith(`${homedir()}/`) ? `~${home.slice(homedir().length)}` : home,
     dbPath,
     port: Number(env.SWITCHBOARD_PORT ?? 47831),
@@ -107,7 +112,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig {
     starterUrl: env.SWITCHBOARD_STARTER_URL || undefined,
     webDist: join(codeRoot, "apps", "web", "dist"),
     runnerIdleMs: numberOr(env.SWITCHBOARD_RUNNER_IDLE_MS, 10 * 60 * 1000),
-    knowledgeDir: env.SWITCHBOARD_KNOWLEDGE ? resolve(expandHome(env.SWITCHBOARD_KNOWLEDGE)) : join(homedir(), "Knowledge"),
+    knowledgeDir: env.SWITCHBOARD_KNOWLEDGE ? resolve(expandHome(env.SWITCHBOARD_KNOWLEDGE)) : join(homeIsTemp ? home : homedir(), "Knowledge"),
     tokenPath: env.SWITCHBOARD_TOKEN_FILE ?? join(home, "token"),
     publicUrl: env.SWITCHBOARD_PUBLIC_URL,
     claudeProjectsDir: env.SWITCHBOARD_CLAUDE_PROJECTS ? resolve(expandHome(env.SWITCHBOARD_CLAUDE_PROJECTS)) : join(homedir(), ".claude", "projects"),

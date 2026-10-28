@@ -53,7 +53,7 @@ const adapter: RunnerAdapter = {
 };
 const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
 // the Workspace `dev` is REPO, `other` is another repository: what expanding a preset asks gh (`gh repo view`)
-const gh = async (args: string[], cwd: string) => (args[0] === "repo" ? { code: 0, stdout: `${cwd === other ? "other/repo" : REPO}\n`, stderr: "" } : { code: 1, stdout: "", stderr: "no gh in this e2e" });
+const gh = async (args: string[], cwd: string) => (args[0] === "repo" ? { code: 0, stdout: `${cwd === other ? "other/repo" : REPO} true\n`, stderr: "" } : { code: 1, stdout: "", stderr: "no gh in this e2e" });
 const core = await startServer(cfg, [adapter], { port: 0, selfdevChecks: false, dryRunRestart: true, gh, judge: () => new Promise(() => undefined) });
 const wsDev = core.db.upsertWorkspace({ path: dev, name: "dev", kind: "repo" });
 const wsOther = core.db.upsertWorkspace({ path: other, name: "other", kind: "repo" });

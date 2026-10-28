@@ -173,6 +173,7 @@ CREATE TABLE IF NOT EXISTS backlog_operations (
   status TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0, retry_at INTEGER, remote_id TEXT, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, overwritten TEXT
 );
 CREATE INDEX IF NOT EXISTS backlog_operations_issue ON backlog_operations (service, host, repository, issue);
+CREATE INDEX IF NOT EXISTS backlog_operations_target ON backlog_operations (service, host, repository, target_kind, target);
 CREATE TABLE IF NOT EXISTS task_evals (
   task_id TEXT NOT NULL, source TEXT NOT NULL, by TEXT NOT NULL, rubric TEXT, json TEXT NOT NULL, ts INTEGER NOT NULL,
   PRIMARY KEY (task_id, source)

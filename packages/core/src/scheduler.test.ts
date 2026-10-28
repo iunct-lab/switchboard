@@ -309,7 +309,7 @@ describe("scheduler secret-scan (#775)", () => {
   const token = ["ghp", "_", "Q".repeat(36)].join("");
   // Each workspace's checkout answers `gh repo view` with its repository; "gone" is a checkout gh cannot read
   const repoOfPath: Record<string, string> = {};
-  const gh = async (args: string[], cwd: string) => (repoOfPath[cwd] ? { code: 0, stdout: `${repoOfPath[cwd]}\n`, stderr: "" } : { code: 1, stdout: "", stderr: `not a git repository ${token}` });
+  const gh = async (args: string[], cwd: string) => (repoOfPath[cwd] ? { code: 0, stdout: `${repoOfPath[cwd]} true\n`, stderr: "" } : { code: 1, stdout: "", stderr: `not a git repository ${token}` });
   // scan-issues as the kit prints it, per repository: o/clean has nothing, o/leak has two hits, o/down cannot be read
   const answers: Record<string, { code: number; stdout: string; stderr: string }> = {
     "o/clean": { code: 0, stdout: "hits: 0 / scanned: 12\n", stderr: "" },
@@ -463,7 +463,7 @@ describe("scheduler secret-scan (#775)", () => {
     const meta = join(home, "meta");
     mkdirSync(join(meta, "ops-kit/src"), { recursive: true });
     writeFileSync(join(meta, "ops-kit/src/cli.ts"), `await Bun.sleep(300); console.log("https://github.com/acme/app/issues/9: device-code（1 行目）\\nhits: 1 / scanned: 7"); process.exit(1);\n`);
-    const gh = async () => ({ code: 0, stdout: "acme/app\n", stderr: "" });
+    const gh = async () => ({ code: 0, stdout: "acme/app true\n", stderr: "" });
     const cfg = loadConfig({ SWITCHBOARD_HOME: join(home, "daemon"), SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0", SWITCHBOARD_REPO_ROOT: meta });
     const core = await startServer(cfg, [], { port: 0, selfdevChecks: false, dryRunRestart: true, gh });
     try {

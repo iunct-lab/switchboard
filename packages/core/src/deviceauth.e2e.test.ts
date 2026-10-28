@@ -46,7 +46,8 @@ function runner(): RunnerAdapter {
         const p = Bun.spawn([BIN, "--expires-in", expires!, "--", "bun", join(dir, "login.ts"), done!], { env, stdout: "pipe", stderr: "pipe" });
         const [code, out, err] = await Promise.all([p.exited, new Response(p.stdout).text(), new Response(p.stderr).text()]);
         emit({ t: "tool.result", id: "t1", ok: code === 0, summary: `${out}${err}` });
-        const gh = Bun.spawnSync(["gh", "pr", "comment", "1", "--body", `承認の結果: exit ${code}`], { env, stdout: "pipe", stderr: "pipe" });
+        // cwd: outside this checkout, whose publicSync would have the guard ask gh which repository it writes to
+        const gh = Bun.spawnSync(["gh", "pr", "comment", "1", "--body", `承認の結果: exit ${code}`], { cwd: dir, env, stdout: "pipe", stderr: "pipe" });
         const ev: AgentEvent = { t: "message.delta", role: "assistant", text: `gh exit ${gh.exitCode}` };
         emit(ev);
         emit({ t: "session.end", status: "ok", summary: "ok" });

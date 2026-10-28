@@ -12,6 +12,7 @@ const resumeFixture = recordingText("packages/adapters/claude/fixtures/resume-tu
 const resumeMissingFixture = recordingText("packages/adapters/claude/fixtures/resume-missing.jsonl");
 const resumeCostFixture = recordingText("packages/adapters/claude/fixtures/resume-cost.jsonl");
 const backgroundFixture = recordingText("packages/adapters/claude/fixtures/background-notification.jsonl");
+const guardUnavailableFixture = recordingText("packages/adapters/claude/fixtures/guard-unavailable.jsonl");
 
 function replay() {
   const p = createClaudeParser();
@@ -180,6 +181,21 @@ describe("--resume (recorded against Claude Code 2.1.261, issue #2)", () => {
     expect(flow).toEqual(["session.start", "background 1", "session.end", "background 0", "session.start", "session.end"]);
   });
 
+  test.skipIf(skipRecordings("packages/adapters/claude/fixtures/guard-unavailable.jsonl"))("guard unavailable (fixtures/guard-unavailable.jsonl): the blocked Bash replays as tool.result ok:false with the hook's reason (Claude Code 2.1.311, #1573)", () => {
+    assertRecordings("packages/adapters/claude/fixtures/guard-unavailable.jsonl");
+    // the guard in --settings points at a path that does not exist, with onFailure "block"; the model runs `touch ./made` once
+    const p = createClaudeParser();
+    const events = guardUnavailableFixture.split("\n").flatMap((l) => p.feed(l));
+    for (const ev of events) expect(() => AgentEvent.parse(ev)).not.toThrow();
+    const call = events.find((e) => e.t === "tool.call" && e.name === "Bash");
+    if (call?.t !== "tool.call") throw new Error("no Bash tool.call");
+    const result = events.find((e) => e.t === "tool.result" && e.id === call.id);
+    if (result?.t !== "tool.result") throw new Error("no tool.result for the Bash call");
+    expect(result.ok).toBe(false);
+    expect(result.summary).toContain("PreToolUse:Bash hook error");
+    expect(result.summary).toContain('blocking because onFailure is "block"');
+  });
+
   test("buildArgs passes --resume and never --no-session-persistence", () => {
     const args = buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", resumeSessionId: "abc" });
     expect(args.slice(args.indexOf("--resume"), args.indexOf("--resume") + 2)).toEqual(["--resume", "abc"]);
@@ -198,7 +214,7 @@ describe("--resume (recorded against Claude Code 2.1.261, issue #2)", () => {
     const args = buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", guards: ["'/k/ops-kit/bin/deny-shared-tmp'", "/k/other"] }, ["--x"]);
     const at = args.indexOf("--settings");
     expect(JSON.parse(args[at + 1]!)).toEqual({
-      hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "'/k/ops-kit/bin/deny-shared-tmp'" }, { type: "command", command: "/k/other" }] }] },
+      hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "'/k/ops-kit/bin/deny-shared-tmp'", onFailure: "block" }, { type: "command", command: "/k/other", onFailure: "block" }] }] },
     });
     expect(args.at(-1)).toBe("--x");
     expect(buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p" })).not.toContain("--settings");
@@ -212,7 +228,7 @@ describe("--resume (recorded against Claude Code 2.1.261, issue #2)", () => {
       const at = args.indexOf("--settings");
       return at < 0 ? undefined : JSON.parse(args[at + 1]!);
     };
-    const hook = { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "/k/guard" }] }] };
+    const hook = { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "/k/guard", onFailure: "block" }] }] };
     const allow = ["Bash(bun scripts/merge-gate.ts:*)", "Edit(//w/ops-kit/skills/**)"];
     expect(settings({ guards: ["/k/guard"], allow })).toEqual({ hooks: hook, permissions: { allow } });
     expect(settings({ allow })).toEqual({ permissions: { allow } });

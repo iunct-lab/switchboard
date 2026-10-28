@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,7 +7,10 @@ import type { RunnerAdapter, Workspace } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import { startServer, type CoreServer } from "./server.ts";
 import type { GhRunner } from "./backlog.ts";
-import type { WorkspaceClone } from "./workspace-clone.ts";
+import { noticeUnusableWorkspaces, originMismatch, parseGithubRepo, type WorkspaceClone } from "./workspace-clone.ts";
+import { Db } from "./db.ts";
+import { Inbox } from "./inbox.ts";
+import { KnowledgeStore } from "./knowledge.ts";
 
 // Adding a GitHub repository by name (#2575): cloned next to the checkout, only ones the owner can push to.
 
@@ -157,3 +161,91 @@ test("workspace clone: a registered workspace at the path keeps its backlog (409
   expect(t.cloneCalls()).toBe(0);
   expect(ws.backlog).toBe("github");
 }, 30_000);
+
+test("originMismatch: a checkout whose origin is not the registered GitHub repository, in any URL form (#2799)", () => {
+  root = mkdtempSync(join(tmpdir(), "switchboard.origin."));
+  const dir = root;
+  const origin = (url: string | null) => {
+    spawnSync("git", ["-C", dir, "remote", "remove", "origin"]);
+    if (url) expect(spawnSync("git", ["-C", dir, "remote", "add", "origin", url]).status).toBe(0);
+  };
+  expect(spawnSync("git", ["init", "-q", dir]).status).toBe(0);
+  const github = { service: "github" as const, host: "github.com", repository: "Acme/App-Dev", project: { owner: "acme", number: 1 } };
+  const same = ["https://github.com/acme/app-dev.git", "https://github.com/acme/app-dev", "git@github.com:acme/app-dev.git", "ssh://git@github.com/acme/app-dev", "https://x-access-token:secret-value@github.com/acme/app-dev.git"];
+  for (const url of same) {
+    origin(url);
+    expect([url, originMismatch(dir, github)]).toEqual([url, null]);
+  }
+  origin("https://x-access-token:secret-value@github.com/acme/app.git");
+  const why = originMismatch(dir, github)!;
+  expect(why).toContain("origin は acme/app、登録は Acme/App-Dev");
+  expect(why).toContain("git remote set-url origin https://github.com/Acme/App-Dev.git");
+  expect(why).not.toContain("secret-value");
+  // a relative path that reads like the name is another repository on this machine
+  origin("acme/app-dev");
+  expect(originMismatch(dir, github)).toContain("origin は acme/app-dev、登録は Acme/App-Dev");
+  // an origin that is not on GitHub is not the registration either
+  origin("https://gitlab.com/acme/app-dev.git");
+  expect(originMismatch(dir, github)).toContain("origin は https://gitlab.com/acme/app-dev.git、登録は Acme/App-Dev");
+  // no origin, or not a git checkout: nothing to push to, nothing to check
+  origin(null);
+  expect(originMismatch(dir, github)).toBeNull();
+  expect(originMismatch(join(dir, "missing"), github)).toBeNull();
+  // no registration, or one kept here: nothing to check
+  expect(originMismatch(dir, null)).toBeNull();
+  expect(originMismatch(dir, { service: "switchboard", host: "local", repository: "ws_1", project: { owner: "switchboard", number: 0 } })).toBeNull();
+  expect(parseGithubRepo("git@github.com:acme/app.git")).toEqual({ owner: "acme", name: "app" });
+  expect(parseGithubRepo("ssh://git@github.com/acme/app")).toEqual({ owner: "acme", name: "app" });
+});
+
+test("a workspace that cannot be used is noticed in the inbox once", () => {
+  root = mkdtempSync(join(tmpdir(), "switchboard.unusable."));
+  const db = new Db(join(root, "switchboard.db"));
+  const store = new KnowledgeStore(join(root, "Knowledge"), db);
+  try {
+    const inbox = new Inbox(store);
+    const github = (repository: string) => ({ service: "github" as const, host: "github.com", repository, project: { owner: "acme", number: 1 } });
+    const at = (name: string) => {
+      const path = join(root!, name);
+      mkdirSync(path);
+      expect(spawnSync("git", ["init", "-q", path]).status).toBe(0);
+      return path;
+    };
+    // gone: registered, its folder is not there; long: the same with a name past the Inbox's 80-character title
+    const gone = db.upsertWorkspace({ name: "gone", path: join(root, "gone"), kind: "repo" });
+    const long = db.upsertWorkspace({ name: "l".repeat(90), path: join(root, "long"), kind: "repo" });
+    db.setWorkspaceBacklogSource(long.id, github("acme/long"));
+    // spaced: cut at 80 characters, the title ends in a space the Inbox drops
+    const spaced = db.upsertWorkspace({ name: `${"s".repeat(69)} x`, path: join(root, "spaced"), kind: "repo" });
+    db.setWorkspaceBacklogSource(spaced.id, github("acme/spaced"));
+    db.setWorkspaceBacklogSource(gone.id, github("acme/gone-dev"));
+    // elsewhere: a clone of the public acme/app where acme/app-dev is registered
+    const elsewhere = db.upsertWorkspace({ name: "elsewhere", path: at("elsewhere"), kind: "repo" });
+    spawnSync("git", ["-C", elsewhere.path, "remote", "add", "origin", "https://github.com/acme/app.git"]);
+    db.setWorkspaceBacklogSource(elsewhere.id, github("acme/app-dev"));
+    // fine: its own clone; plain: no registration (a folder that is not there either); local: kept here
+    const fine = db.upsertWorkspace({ name: "fine", path: at("fine"), kind: "repo" });
+    spawnSync("git", ["-C", fine.path, "remote", "add", "origin", "git@github.com:acme/fine.git"]);
+    db.setWorkspaceBacklogSource(fine.id, github("acme/fine"));
+    db.upsertWorkspace({ name: "plain", path: join(root, "plain"), kind: "repo" });
+    const local = db.upsertWorkspace({ name: "local", path: join(root, "local"), kind: "repo" });
+    db.setWorkspaceBacklogSource(local.id, { service: "switchboard", host: "local", repository: local.id, project: { owner: "switchboard", number: 0 } });
+
+    expect(noticeUnusableWorkspaces(db, inbox)).toBe(4);
+    const notes = inbox.list();
+    expect(notes.map((n) => n.title).sort()).toEqual(["workspace elsewhere を使えません", "workspace gone を使えません", `workspace ${"l".repeat(70)}`, `workspace ${"s".repeat(69)}`]);
+    const body = (name: string) => notes.find((n) => n.title === `workspace ${name} を使えません`)!.body;
+    expect(body("gone")).toContain("gh repo clone acme/gone-dev");
+    expect(body("gone")).toContain(".unverified-*");
+    expect(body("elsewhere")).toContain("origin は acme/app、登録は acme/app-dev");
+    expect(body("elsewhere")).toContain("git remote set-url origin");
+    // a restart before it is fixed adds nothing; once the note is closed, the next boot says it again
+    expect(noticeUnusableWorkspaces(db, inbox)).toBe(0);
+    expect(inbox.list()).toHaveLength(4);
+    inbox.close(notes.find((n) => n.title === "workspace gone を使えません")!.path);
+    expect(noticeUnusableWorkspaces(db, inbox)).toBe(1);
+  } finally {
+    store.close();
+    db.close();
+  }
+});

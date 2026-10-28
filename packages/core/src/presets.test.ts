@@ -64,7 +64,7 @@ afterEach(async () => {
   home = "";
 });
 
-const gh: GhRunner = async (args) => (args[0] === "repo" && !ghFails ? { code: 0, stdout: `${REPO}\n`, stderr: "" } : { code: 1, stdout: "", stderr: "boom" });
+const gh: GhRunner = async (args) => (args[0] === "repo" && !ghFails ? { code: 0, stdout: `${REPO} true\n`, stderr: "" } : { code: 1, stdout: "", stderr: "boom" });
 
 async function boot(keepHome = false) {
   if (!keepHome) home = mkdtempSync(join(tmpdir(), "sb-presets-"));

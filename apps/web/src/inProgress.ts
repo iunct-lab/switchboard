@@ -6,12 +6,14 @@ export const TASK_STATUS: Record<TaskStatus, string> = { idle: "未開始", runn
 
 /**
  * Whether an in-progress item is moving (#522), from the item's own values only: the first that holds of a running
- * stage Task, every Task done with the PBI still open, the last stage Task failed, no stage Task at all, else how the
- * last one ended. Not stored anywhere; asking why is the 状況を確認 button.
+ * stage Task, the last stage Task waiting for the person's reply (the item's `replyWaiting`, #1619), every Task done
+ * with the PBI still open, the last stage Task failed, no stage Task at all, else how the last one ended. Not stored
+ * anywhere; asking why is the 状況を確認 button.
  */
 export function inProgressState(item: BacklogItem): { running: boolean; label: string } {
   // the last Task may have started between the two lookups of one read: running / waiting is moving, not "stopped"
   if (item.activeTaskId || item.lastTask?.status === "running" || item.lastTask?.status === "waiting") return { running: true, label: "動いている" };
+  if (item.replyWaiting) return { running: false, label: "止まっている: 返事待ち（Task の会話で答える）" };
   if (item.tasks && item.tasks.total > 0 && item.tasks.done === item.tasks.total) return { running: false, label: "止まっている: Task は全部完了、PBI は開いたまま" };
   if (item.lastTask?.status === "error") return { running: false, label: "止まっている: 最後の工程 Task が失敗" };
   if (!item.lastTask) return { running: false, label: "止まっている: 工程 Task なし" };
@@ -29,9 +31,9 @@ export function taskTimes(t: { status: TaskStatus; createdAt: number; statusAt: 
   return { started: `開始 ${jstClock(t.createdAt, now)}`, since: `${jstClock(t.statusAt, now)} から${word}` };
 }
 
-/** The Backlog row's last stage Task (#2030): `最後の Task: 完了（17:40 から・開始 16:02）`, in the backlog's words. */
-export function lastTaskLine(t: { status: TaskStatus; createdAt: number; statusAt: number }, now: number): string {
-  return `最後の Task: ${TASK_STATUS[t.status]}（${jstClock(t.statusAt, now)} から・開始 ${jstClock(t.createdAt, now)}）`;
+/** The Backlog row's last stage Task (#2030): `最後の Task: 完了（17:40 から・開始 16:02）`, in the backlog's words; `返事待ち` for one waiting for the person's reply (#1619). */
+export function lastTaskLine(t: { status: TaskStatus; createdAt: number; statusAt: number }, now: number, word = TASK_STATUS[t.status]): string {
+  return `最後の Task: ${word}（${jstClock(t.statusAt, now)} から・開始 ${jstClock(t.createdAt, now)}）`;
 }
 
 /** The row's button for its running stage Task: running or waiting, and since when (`承認待ち（17:40 から）`). */

@@ -4,8 +4,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BacklogRepositoryKey } from "@switchboard/protocol";
-import type { GhRunner } from "./backlog.ts";
+import { BacklogError, type GhRunner } from "./backlog.ts";
 import { BacklogSync, HINT_BUDGET, importGithubSnapshot, noticeTargets } from "./backlog-sync.ts";
+import { scanAllRepos } from "./secretscan.ts";
 import { loadConfig } from "./config.ts";
 import { startServer } from "./server.ts";
 import { Db } from "./db.ts";
@@ -61,7 +62,7 @@ interface World {
 function fakeGh(world: World) {
   const calls: string[] = [];
   const gh: GhRunner = async (args) => {
-    if (args[0] === "repo") return { code: 0, stdout: "acme/app\n", stderr: "" };
+    if (args[0] === "repo") return { code: 0, stdout: "acme/app true\n", stderr: "" };
     if (args[0] === "variable") return { code: 0, stdout: "https://github.com/orgs/acme/projects/1\n", stderr: "" };
     const query = args.find((a) => a.startsWith("query="))!.slice(6);
     const vars = Object.fromEntries(args.flatMap((a, i) => (args[i - 1] === "-f" || args[i - 1] === "-F") && !a.startsWith("query=") ? [a.split(/=(.*)/s).slice(0, 2)] : []));
@@ -92,7 +93,7 @@ test("the first import reads every page and every comment page, then stores Issu
   db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
   await importGithubSnapshot(gh, db, WS, 1000);
   expect(calls).toEqual(["changed", "comments@cc1", "changed@p2", "open"]);
-  expect(db.getWorkspaceBacklogSource(WS.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 } });
+  expect(db.getWorkspaceBacklogSource(WS.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: true });
   const s = stored();
   expect(s["issue:I_12"]!.remote).toEqual({
     number: 12, title: "PBI 12", url: "https://github.com/acme/app/issues/12", state: "OPEN", body: "body 12", labels: ["type:pbi"], milestone: "Phase 2",
@@ -307,7 +308,7 @@ test("the prerequisites of open PBIs and Tasks are stored: a pull request with i
 test("a limit keeps GitHub's time to come back as retryAt; the cursor stays", async () => {
   const gh: GhRunner = async (args) =>
     args[0] === "repo"
-      ? { code: 0, stdout: "acme/app\n", stderr: "" }
+      ? { code: 0, stdout: "acme/app true\n", stderr: "" }
       : { code: 1, stdout: 'HTTP/2.0 403 Forbidden\nX-Ratelimit-Remaining: 0\nX-Ratelimit-Reset: 1900000000\n\n{"message":"API rate limit exceeded"}', stderr: "gh: API rate limit exceeded (HTTP 403)" };
   await expect(importGithubSnapshot(gh, db, WS, 1000)).rejects.toThrow();
   expect(db.getBacklogRepository(KEY)).toEqual({ ...KEY, cursor: null, lastSuccessfulSync: null, retryAt: 1_900_000_000_000 });
@@ -368,7 +369,7 @@ test("an import does not write back the Project of a variable changed while it r
   await importGithubSnapshot(gh, db, ws, 1000);
   expect(db.getWorkspaceBacklogSource(ws.id)).toBeNull();
   await importGithubSnapshot(gh, db, db.getWorkspace(ws.id)!, 2000);
-  expect(db.getWorkspaceBacklogSource(ws.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 } });
+  expect(db.getWorkspaceBacklogSource(ws.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: true });
 });
 
 test("BacklogSync: after a write, an import begun before it is not shared; the one after it is, once", async () => {
@@ -444,7 +445,7 @@ test("BacklogSync measures: shared and waited carry the workspace's repository �
   let limited = false;
   const { gh } = fakeGh({ changed: () => pageOf([raw(12)]), open: () => pageOf([]) });
   const two: GhRunner = async (args, cwd) => {
-    if (args[0] === "repo") return { code: 0, stdout: cwd === b.path ? "acme/lib\n" : "acme/app\n", stderr: "" };
+    if (args[0] === "repo") return { code: 0, stdout: cwd === b.path ? "acme/lib true\n" : "acme/app true\n", stderr: "" };
     if (limited && args[0] === "api") return { code: 1, stdout: "", stderr: "gh: API rate limit exceeded (HTTP 429)" };
     return gh(args, cwd);
   };
@@ -494,7 +495,7 @@ test("BacklogSync: a Project variable changed while an import runs gets an impor
   await old;
   for (let i = 0; sync.read(ws).syncing && i < 200; i++) await Bun.sleep(5); // the import the write asked for, if any
   expect(calls.filter((c) => c.startsWith("changed")).length).toBe(3); // the first, the old one, and the PATCH's own
-  expect(db.getWorkspaceBacklogSource(ws.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 } });
+  expect(db.getWorkspaceBacklogSource(ws.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: true });
 });
 
 test("BacklogSync: the first import of a checkout begun before a write through another checkout stores nothing", async () => {
@@ -1027,4 +1028,115 @@ test("an import or a send begun before the sync was turned off stores and sends 
   await sending;
   expect(asked).toEqual([]);
   expect(db.listPendingBacklogOperations(KEY).map((o) => o.status)).toEqual(["pending"]);
+});
+
+// Synthetic names only (#2467): acme/widget is published, acme/widget-dev is its development repository.
+test("public copy: a workspace that resolves to its tree's publicSync.target is neither imported nor sent; the failure says how to point it elsewhere", async () => {
+  const path = mkdtempSync(join(tmpdir(), "switchboard-public-copy-"));
+  try {
+    writeFileSync(join(path, "ops.config.json"), JSON.stringify({ envPrefix: "WIDGET", publicSync: { target: "acme/widget" } }));
+    const ws = db.upsertWorkspace({ id: "ws_widget", name: "widget", path, kind: "repo" });
+    const { gh: github } = fakeGh({ changed: () => pageOf([raw(12)]), open: () => pageOf([]) });
+    const asked: string[][] = [];
+    const gh: GhRunner = async (args, cwd) => {
+      asked.push(args);
+      return args[0] === "repo" ? { code: 0, stdout: "acme/widget true\n", stderr: "" } : github(args, cwd);
+    };
+    const error = await importGithubSnapshot(gh, db, ws, 1000).then(() => null, (e: unknown) => e as Error);
+    expect(error).toBeInstanceOf(BacklogError);
+    expect(error?.message).toContain("gh repo set-default");
+    expect(error?.message).toContain("GH_REPO");
+    expect(asked.map((a) => a.slice(0, 2))).toEqual([["repo", "view"]]);
+    expect(db.getWorkspaceBacklogSource(ws.id)).toBeNull();
+    expect(db.listBacklogRecords({ service: "github", host: githubHost(), repository: "acme/widget" })).toEqual([]);
+
+    // through BacklogSync: the failure the backlog screen reads holds the same text; a send writes nothing
+    asked.length = 0;
+    const sync = makeSync(db, gh, () => 1000);
+    await expect(sync.sync(ws)).rejects.toThrow("gh repo set-default");
+    expect(sync.read(ws)).toMatchObject({ fetchedAt: null, items: [], error: expect.stringContaining("publicSync.target") });
+    await sync.send(ws);
+    expect(asked.filter((a) => a[0] !== "repo")).toEqual([]);
+
+    // the daily secret scan only reads: it still checks the repository the clone resolves to
+    const scanned: string[][] = [];
+    const scan = await scanAllRepos({ workspaces: [{ name: "widget", path }], metaPath: path, gh, spawn: async (argv: string[]) => (scanned.push(argv.slice(-2)), { code: 0, stdout: "hits: 0 / scanned: 1\n", stderr: "" }) });
+    expect([scanned, scan.summary]).toEqual([[["scan-issues", "acme/widget"]], { repos: 1, hits: 0, failed: 0 }]);
+  } finally {
+    rmSync(path, { recursive: true, force: true });
+  }
+});
+
+test("public copy: the development repository, whose publicSync names the public copy, is imported as before", async () => {
+  const path = mkdtempSync(join(tmpdir(), "switchboard-public-copy-"));
+  try {
+    writeFileSync(join(path, "ops.config.json"), JSON.stringify({ envPrefix: "WIDGET", publicSync: { target: "acme/widget" } }));
+    const ws = db.upsertWorkspace({ id: "ws_widget_dev", name: "widget-dev", path, kind: "repo" });
+    const { gh: github, calls } = fakeGh({ changed: () => pageOf([raw(12)]), open: () => pageOf([]) });
+    const gh: GhRunner = async (args, cwd) => (args[0] === "repo" ? { code: 0, stdout: "acme/widget-dev true\n", stderr: "" } : github(args, cwd));
+    await importGithubSnapshot(gh, db, ws, 1000);
+    expect(calls).toEqual(["changed", "open"]);
+    expect(db.getWorkspaceBacklogSource(ws.id)).toMatchObject({ repository: "acme/widget-dev" });
+  } finally {
+    rmSync(path, { recursive: true, force: true });
+  }
+});
+
+// The registration a rebuild clones from (#2799): an import of another checkout leaves it; a rename is followed.
+const PRIVATE_KEY: BacklogRepositoryKey = { service: "github", host: githubHost(), repository: "acme/app-dev" };
+
+test("an import does not overwrite the registered repository with another checkout", async () => {
+  db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
+  const registered = { ...PRIVATE_KEY, project: { owner: "acme", number: 1 }, private: true };
+  db.setWorkspaceBacklogSource(WS.id, registered);
+  const { gh: github, calls } = fakeGh({ changed: () => pageOf([raw(12)]), open: () => pageOf([]) });
+  const asked: string[][] = [];
+  // the checkout is the public acme/app; GitHub says acme/app-dev is still its own repository
+  const gh: GhRunner = async (args, cwd) => {
+    asked.push(args);
+    if (args[0] === "api" && args[1] === "repos/acme/app-dev") return { code: 0, stdout: "acme/app-dev\n", stderr: "" };
+    return args[0] === "repo" ? { code: 0, stdout: "acme/app false\n", stderr: "" } : github(args, cwd);
+  };
+  const error = await importGithubSnapshot(gh, db, WS, 1000).then(() => null, (e: unknown) => e as Error);
+  expect(error).toBeInstanceOf(BacklogError);
+  expect(error?.message).toContain("acme/app-dev");
+  expect(db.getWorkspaceBacklogSource(WS.id)).toEqual(registered);
+  expect(db.listBacklogRecords(KEY)).toEqual([]);
+  expect(db.getBacklogRepository(KEY)).toBeNull();
+  expect(calls).toEqual([]);
+  // a registration GitHub cannot answer for is refused the same way
+  const gone: GhRunner = async (args, cwd) => (args[0] === "api" && args[1] === "repos/acme/app-dev" ? { code: 1, stdout: "", stderr: "HTTP 404" } : gh(args, cwd));
+  await expect(importGithubSnapshot(gone, db, WS, 2000)).rejects.toThrow("違うリポジトリの clone");
+  expect(db.getWorkspaceBacklogSource(WS.id)).toEqual(registered);
+});
+
+test("an import follows a renamed repository", async () => {
+  db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
+  // registered under the old name acme/app-dev, which GitHub forwards to acme/app (case aside)
+  db.setWorkspaceBacklogSource(WS.id, { ...PRIVATE_KEY, project: { owner: "acme", number: 1 } });
+  const { gh: github } = fakeGh({ changed: () => pageOf([raw(12)]), open: () => pageOf([]) });
+  const gh: GhRunner = async (args, cwd) => {
+    if (args[0] === "api" && args[1] === "repos/acme/app-dev") return { code: 0, stdout: "Acme/App\n", stderr: "" };
+    return args[0] === "repo" ? { code: 0, stdout: "acme/app true\n", stderr: "" } : github(args, cwd);
+  };
+  await importGithubSnapshot(gh, db, WS, 1000);
+  expect(db.getWorkspaceBacklogSource(WS.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: true });
+  expect(db.listBacklogRecords(KEY).length).toBeGreaterThan(0);
+});
+
+test("an import records the repository's visibility", async () => {
+  db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
+  const { gh: github } = fakeGh({ changed: () => pageOf([raw(12)]), open: () => pageOf([]) });
+  const asked: string[][] = [];
+  const answer = (visibility: string): GhRunner => async (args, cwd) => (args[0] === "repo" ? (asked.push(args), { code: 0, stdout: `acme/app ${visibility}\n`, stderr: "" }) : github(args, cwd));
+  await importGithubSnapshot(answer("true"), db, WS, 1000);
+  expect(db.getWorkspaceBacklogSource(WS.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: true });
+  await importGithubSnapshot(answer("false"), db, WS, 2000);
+  expect(db.getWorkspaceBacklogSource(WS.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: false });
+  // an answer without the visibility is refused and leaves the registration as it was
+  await expect(importGithubSnapshot(answer(""), db, WS, 3000)).rejects.toThrow("リポジトリを特定できません");
+  expect(db.getWorkspaceBacklogSource(WS.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: false });
+  asked.pop();
+  // one gh repo view reads both
+  expect(asked).toEqual([["repo", "view", "--json", "nameWithOwner,isPrivate", "-q", '"\\(.nameWithOwner) \\(.isPrivate)"'], ["repo", "view", "--json", "nameWithOwner,isPrivate", "-q", '"\\(.nameWithOwner) \\(.isPrivate)"']]);
 });

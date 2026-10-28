@@ -744,6 +744,11 @@ export const Settings = z.object({
   bedrock: z.record(z.object({ region: z.string() })).default({}),
   /** model → price (USD / 1M tokens) over pricing.json's row of the same model (#1402); read on every use, no restart. */
   prices: z.record(SettingsPrice).default({}),
+  /**
+   * runner → the model choices (#1400), in the order shown. Absent = the adapter's bundled list. Replaces the list of
+   * the runner's own login only: on Amazon Bedrock the ids are spelled differently and the adapter's Bedrock list stays.
+   */
+  models: z.record(z.array(ModelOption)).default({}),
 });
 export type Settings = z.infer<typeof Settings>;
 
@@ -755,6 +760,8 @@ export const SettingsPatch = z.object({
   autoResume: z.record(z.boolean().nullable()).optional(),
   /** null = back to the runner's own login (#1730). */
   bedrock: z.record(z.object({ region: z.string().regex(/^[a-z]{2}(-[a-z]+)+-\d$/) }).nullable()).optional(),
+  /** The whole list per runner (#1400); null = back to the adapter's bundled list. */
+  models: z.record(z.array(ModelOption).nullable()).optional(),
   shadowRunner: RunnerId.nullable().optional(),
   /** Partial: `{ routing: { llm: { enabled: true } } }` leaves the saved runner / model alone. */
   routing: z.object({ llm: z.object({ enabled: z.boolean(), runner: RunnerId, model: z.string(), timeoutMs: z.number().int().min(1000).max(60_000) }).partial().optional() }).partial().optional(),
@@ -1154,9 +1161,11 @@ export const AskAnswer = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("allow") }),
   z.object({ kind: z.literal("deny") }),
   z.object({ kind: z.literal("confirm"), ok: z.boolean(), text: answerText.optional() }),
+  /** Send the stop's grant (#2745) as the reply, once. */
+  z.object({ kind: z.literal("grant") }),
 ]);
 export type AskAnswer = z.infer<typeof AskAnswer>;
-export const AskAnswerKind = z.enum(["choice", "text", "hold", "allow", "deny", "confirm"]);
+export const AskAnswerKind = z.enum(["choice", "text", "hold", "allow", "deny", "confirm", "grant"]);
 export type AskAnswerKind = z.infer<typeof AskAnswerKind>;
 
 /**
@@ -1269,6 +1278,10 @@ export const Ask = z.object({
   reason: z.string().nullable(),
   question: z.string().nullable(),
   choices: z.array(z.string()),
+  /** Each choice's grant (#2745: the ` — 許可: <文>` of its line), in the order of `choices`; null = the choice has none. */
+  grants: z.array(z.string().nullable()).default([]),
+  /** A permission stop's grant (#2745), sent once by the `grant` answer. */
+  grant: z.string().nullable().default(null),
   recommendation: z.object({ choice: z.string(), why: z.string() }).nullable(),
   /** What goes on once it is answered. */
   next: z.string().nullable(),
@@ -1361,6 +1374,8 @@ export const StopSummary = z.object({
   firstAt: z.number(),
   lastAt: z.number(),
   lastAnswer: StopRecord.shape.answer,
+  /** The newest stop's grant (#2745). */
+  grant: z.string().nullable(),
   conditions: z.array(StopCondition),
   actions: StopRecord.shape.actions,
   changes: z.array(StopChange),
@@ -1463,6 +1478,13 @@ export const TeleportProgress = z.object({
   localTaskId: z.string().optional(),
 });
 export type TeleportProgress = z.infer<typeof TeleportProgress>;
+
+/**
+ * What Claude Code in a Task's terminal tab says it is doing (OSC 7501, #1574): working, waiting for the person
+ * (a permission or a dialog), or done with its turn. Memory only, never stored.
+ */
+export const TerminalStatus = z.enum(["working", "waiting", "done"]);
+export type TerminalStatus = z.infer<typeof TerminalStatus>;
 
 /**
  * A Task waiting for an approval elsewhere (#662, docs/design/device-auth.md): the URL and one-time code a command
@@ -1814,6 +1836,11 @@ export const BacklogSource = BacklogRepositoryKey.extend({
   enabling: z.object({ since: z.number(), queued: z.literal(true).optional() }).optional(),
   /** The Issues made on GitHub by turning it on (#2266): their number here (`from`) and GitHub's (`to`). */
   numbers: z.array(z.object({ from: z.number(), to: z.number() })).optional(),
+  /**
+   * Whether GitHub says the repository is private, written by each import. The host's rebuild checks a clone against it
+   * and `repository` (#2799): a renamed repository's old name may now be a public one.
+   */
+  private: z.boolean().optional(),
 });
 export type BacklogSource = z.infer<typeof BacklogSource>;
 

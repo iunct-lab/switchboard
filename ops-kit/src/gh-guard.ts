@@ -211,6 +211,78 @@ export function backlogWrite(argv: string[]): { sub: string; repo: string | null
   return { sub, repo: named !== undefined ? named.split("/").slice(-2).join("/") : (url ?? null) };
 }
 
+/** The subcommands of each group that only read; any other subcommand of these groups writes. */
+const READS: Record<string, Set<string>> = {
+  issue: new Set(["list", "view", "status"]),
+  pr: new Set(["list", "view", "status", "diff", "checks", "checkout"]),
+  label: new Set(["list"]),
+  release: new Set(["list", "view", "download"]),
+};
+
+/**
+ * Where a write goes (#2466): the repository it names (`-R` / `--repo`, else the URL given for the Issue or pull
+ * request, else `GH_REPO`), null when it names none (gh then writes to the checkout's default). Null for anything
+ * that does not write: a read of `issue` / `pr` / `label` / `release`, `gh api` with GET, any other group.
+ * `gh api` writes with a method other than GET / HEAD, or with a field and no method (gh then sends POST);
+ * `graphql` writes when a field holds a mutation (or is read from a file). Only `repos/<owner>/<name>/…` names one;
+ * `{owner}/{repo}` and `graphql` go where GH_REPO says, as gh fills them.
+ */
+export function writeTargetOf(argv: string[], env: Record<string, string | undefined>): { repo: string | null } | null {
+  let named: string | undefined;
+  let i = 0;
+  // gh takes -R before the group too
+  for (; i < argv.length && argv[i]!.startsWith("-"); i++) {
+    if (argv[i] === "-R" || argv[i] === "--repo") named = argv[++i];
+    else if (/^(?:--repo=|-R=?)./.test(argv[i]!)) named = argv[i]!.replace(/^(?:--repo=|-R=?)/, "");
+  }
+  const group = argv[i];
+  if (group === undefined) return null;
+  if (group === "api") {
+    let method: string | undefined;
+    let fields = false;
+    let mutation = false;
+    let endpoint: string | undefined;
+    for (let j = i + 1; j < argv.length; j++) {
+      const f = flagOf(argv[j]!, API_FLAGS, API_SWITCHES);
+      if (f === null) {
+        if (endpoint === undefined && !argv[j]!.startsWith("-")) endpoint = argv[j];
+        continue;
+      }
+      const value = f.value ?? argv[++j];
+      if (value === undefined) continue;
+      const kind = API_FLAGS[f.flag];
+      if (f.flag === "-X" || f.flag === "--method") method = value.toUpperCase();
+      else if (kind === "raw" || kind === "typed" || kind === "file") {
+        fields = true;
+        const v = value.slice(value.indexOf("=") + 1);
+        if (kind === "file" || (kind === "typed" && v.startsWith("@")) || /\bmutation\b/.test(v)) mutation = true;
+      }
+    }
+    if (endpoint === undefined) return null;
+    const path = endpoint.replace(/^\//, "");
+    if (path === "graphql") return mutation ? { repo: env.GH_REPO || null } : null;
+    if (method !== undefined ? method === "GET" || method === "HEAD" : !fields) return null;
+    const m = /^repos\/([^/{}]+)\/([^/{}]+)(?:\/|$)/.exec(path);
+    return { repo: m ? `${m[1]}/${m[2]}` : env.GH_REPO || null };
+  }
+  const reads = READS[group];
+  if (reads === undefined) return null;
+  const subAt = subcommandAt(argv, i);
+  const sub = argv[subAt];
+  if (sub === undefined || reads.has(sub)) return null;
+  let url: string | undefined;
+  // -R stands before the subcommand too (`issue -R x create`)
+  for (let j = i + 1; j < argv.length; j++) {
+    if (j === subAt) continue;
+    const a = argv[j]!;
+    if (a === "-R" || a === "--repo") named = argv[++j];
+    else if (/^(?:--repo=|-R=?)./.test(a)) named = a.replace(/^(?:--repo=|-R=?)/, "");
+    else if (ISSUE_VALUE_FLAGS.has(a)) j++;
+    else url ??= /^https?:\/\/[^/]+\/([^/]+\/[^/]+)\/(?:issues|pull)\/\d+/.exec(a)?.[1];
+  }
+  return { repo: named ?? url ?? (env.GH_REPO || null) };
+}
+
 /** The first `name` of the PATH that is not a guard: not this file, and not another checkout's copy of it (it holds `mark`). */
 export function realCommand(name: string, path: string, self: string, mark: string): string | null {
   for (const dir of path.split(delimiter)) {

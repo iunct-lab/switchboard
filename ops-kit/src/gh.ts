@@ -1,3 +1,5 @@
+import { publicCopyRefusal } from "./config.ts";
+
 /**
  * Every call to GitHub goes through one GhClient, so the commands can be tested with fakeGh and never touch GitHub.
  * realGh() runs the `gh` CLI (its login, its GH_HOST); nothing else is needed.
@@ -238,16 +240,31 @@ export function fakeGh(responses: Array<(call: FakeCall) => unknown>): GhClient 
 }
 
 /**
- * The repository the commands act on: `GH_REPO` (as gh reads it), else the `origin` remote, else `gh repo view`.
+ * The repository the commands act on: `GH_REPO` (as gh reads it), else the remote `gh repo set-default` chose, else
+ * the `origin` remote, else `gh repo view`. A clone whose target is its own public copy (`publicCopyRefusal`) stops.
  */
 export async function repoOf(gh: GhClient, env: Record<string, string | undefined> = process.env, cwd = process.cwd()): Promise<{ owner: string; name: string }> {
+  const r = await resolveRepo(gh, env, cwd);
+  const refusal = publicCopyRefusal(`${r.owner}/${r.name}`, cwd);
+  if (refusal) throw new GhError(refusal);
+  return r;
+}
+
+async function resolveRepo(gh: GhClient, env: Record<string, string | undefined>, cwd: string): Promise<{ owner: string; name: string }> {
   const parse = (s: string) => /github\.com[:/]([^/]+)\/([^/\s]+?)(\.git)?\/?$/.exec(s.trim());
   const fromEnv = env.GH_REPO ? /^(?:[^/]+\/)?([^/]+)\/([^/]+)$/.exec(env.GH_REPO.replace(/^https?:\/\/[^/]+\//, "")) : null;
   if (fromEnv) return { owner: fromEnv[1]!, name: fromEnv[2]! };
   // env: the current process.env (Bun's spawn otherwise passes the env from start-up; the tests isolate git's config)
-  const remote = Bun.spawnSync(["git", "remote", "get-url", "origin"], { cwd, env: { ...process.env }, stdout: "pipe", stderr: "pipe" });
-  const m = remote.exitCode === 0 ? parse(remote.stdout.toString()) : null;
-  if (m) return { owner: m[1]!, name: m[2]! };
+  const git = (args: string[]) => {
+    const p = Bun.spawnSync(["git", ...args], { cwd, env: { ...process.env }, stdout: "pipe", stderr: "pipe" });
+    return p.exitCode === 0 ? p.stdout.toString() : "";
+  };
+  // `gh repo set-default` marks its remote `remote.<name>.gh-resolved = base`
+  const chosen = /^remote\.(.+)\.gh-resolved base$/m.exec(git(["config", "--get-regexp", "^remote\\..*\\.gh-resolved$"]));
+  for (const remote of chosen ? [chosen[1]!, "origin"] : ["origin"]) {
+    const m = parse(git(["remote", "get-url", remote]));
+    if (m) return { owner: m[1]!, name: m[2]! };
+  }
   const [owner, name] = (await gh.run(["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])).trim().split("/");
   if (!owner || !name) throw new GhError("リポジトリが分かりません（GH_REPO を設定するか、origin のあるディレクトリで実行してください）");
   return { owner, name };
