@@ -1828,6 +1828,91 @@ test("backlog-next waiting: an open wait is not started and the log names it; on
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("#307 を complete で開始"));
 });
 
+describe("resume when waits clear (#1879)", () => {
+  /** #307 (in progress) waits on PR #778, open; a backlog-next schedule is saved (enabled). */
+  async function waitingOn778() {
+    const claude = holdingClaude();
+    const states: Record<string, Record<string, unknown>> = { w778: { __typename: "PullRequest", state: "OPEN" } };
+    const fake = waitsGh({ i307: [[releaseBody("後回し", [778]), STOPPED]] }, states);
+    const base = await boot(fake.gh, claude.adapter);
+    const id = await backlogNextSchedule(base);
+    return { claude, states, base, id, waitsCalls: fake.waitsCalls };
+  }
+  const implementing307 = () => core!.db.listTasks().filter((t) => t.title.startsWith("#307 実装: "));
+  /** Until `f` holds or `ms` passed: what an import sets off runs after the import's answer. */
+  const until = async (f: () => boolean, ms = 3000) => {
+    for (const end = Date.now() + ms; !f() && Date.now() < end; ) await Bun.sleep(10);
+  };
+  /** An import that reads the PR merged, and time for what it sets off. */
+  const merge778 = async (base: string, states: Record<string, Record<string, unknown>>) => {
+    states.w778 = { ...states.w778, state: "MERGED" };
+    await refreshed(base);
+    await Bun.sleep(300);
+  };
+
+  test("resume when waits clear: an import that reads the waited PR merged starts 実装 on the PBI, before the next firing", async () => {
+    const { claude, states, base, id, waitsCalls } = await waitingOn778();
+    const before = core!.db.getSchedule(id)!;
+    states.w778 = { ...states.w778, state: "MERGED" };
+    const reads = waitsCalls.length;
+    await refreshed(base);
+    await until(() => claude.starts.length > 0);
+    expect(claude.starts).toHaveLength(1);
+    // the import that cleared the waits and the read right before the start: the narrow firing does not read once more first
+    expect(waitsCalls.length - reads).toBe(2);
+    // that PBI only, in the implement slot: Ready #304 and #303 (the plan slot) wait for the firing
+    expect(core!.db.listTasks().map((t) => t.title.split(":")[0])).toEqual(["#307 実装"]);
+    expect(await scheduleLogAll(base)).toContainEqual(expect.stringMatching(/#307 を complete で開始 \S+ \(待ちが解けた\)$/));
+    // the schedule's times stay: the next firing comes when it was due
+    expect(core!.db.getSchedule(id)).toMatchObject({ lastRunAt: before.lastRunAt, nextRunAt: before.nextRunAt, lastTaskId: implementing307()[0]!.id });
+  });
+
+  test("resume when waits clear respects slots: a full implement slot, a high usage, a disabled schedule start nothing; two imports start one", async () => {
+    // the implement slot is full: the firing started Ready #304 (and #303 in the plan slot) while #778 was open
+    {
+      const { claude, states, base, id } = await waitingOn778();
+      expect((await runSchedule(base, id)).status).toBe(201);
+      const firing = claude.starts.length;
+      await merge778(base, states);
+      expect(claude.starts).toHaveLength(firing);
+      expect(implementing307()).toHaveLength(0);
+      await core!.stop(); core = undefined; rmSync(home!, { recursive: true, force: true });
+    }
+    // usage at backlogQuotaLimit or more and a stage Task running: one at a time, though the slot has room
+    {
+      const { claude, states, base, id } = await waitingOn778();
+      core!.db.upsertQuota("claude", "five_hour", 0.9, Math.floor(Date.now() / 1000) + 3600);
+      await sweepAll(base, { implement: 2, plan: 0 });
+      expect((await runSchedule(base, id)).status).toBe(201);
+      expect(claude.starts).toHaveLength(1);
+      await merge778(base, states);
+      expect(claude.starts).toHaveLength(1);
+      expect(implementing307()).toHaveLength(0);
+      await core!.stop(); core = undefined; rmSync(home!, { recursive: true, force: true });
+    }
+    // backlog-next disabled
+    {
+      const { claude, states, base, id } = await waitingOn778();
+      expect((await fetch(`${base}/api/schedules/${id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: false }) })).status).toBe(200);
+      await merge778(base, states);
+      expect(claude.starts).toHaveLength(0);
+      await core!.stop(); core = undefined; rmSync(home!, { recursive: true, force: true });
+    }
+    // two imports that each store a change: the second sees the stage Task running and starts no other
+    {
+      const { claude, states, base } = await waitingOn778();
+      await merge778(base, states);
+      // the second import stores a change too (a PR opened: what calls the resume)
+      openPulls = [{ number: 900, files: [] }];
+      await refreshed(base);
+      await Bun.sleep(300);
+      expect(core!.db.listBacklogRecords(core!.db.getWorkspaceBacklogSource(metaId())!, "pull-request").some((r) => (r.remote as { number?: number }).number === 900)).toBe(true);
+      expect(claude.starts).toHaveLength(1);
+      expect(implementing307()).toHaveLength(1);
+    }
+  });
+});
+
 test("backlog-next waiting: a wait GitHub did not find is not taken as closed, and the log says it was not read (#1046)", async () => {
   const claude = holdingClaude();
   const states = { w603: { __typename: "Issue", state: "CLOSED" }, w999: null };
@@ -2996,6 +3081,25 @@ async function releasedDaemon(history: ReleaseState["history"] = [], runningNewe
   } });
   return { repo, sha, promoted, rescue, env: { SWITCHBOARD_REPO_ROOT: repo, SWITCHBOARD_RESCUE_URL: `http://127.0.0.1:${rescue.port}` } };
 }
+
+test("promote: a firing of the items whose waits cleared (#1879) asks for the newer tag first, logs it, and starts nothing", async () => {
+  const r = await releasedDaemon();
+  try {
+    const claude = holdingClaude();
+    const states: Record<string, Record<string, unknown>> = { w778: { __typename: "PullRequest", state: "OPEN" } };
+    const base = await boot(waitsGh({ i307: [[releaseBody("後回し", [778]), STOPPED]] }, states).gh, claude.adapter, r.env);
+    await backlogNextSchedule(base);
+    states.w778 = { ...states.w778, state: "MERGED" };
+    await refreshed(base);
+    for (const end = Date.now() + 3000; r.promoted.length === 0 && Date.now() < end; ) await Bun.sleep(10);
+    expect(r.promoted).toEqual([r.sha]);
+    expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("v0.2.0 の昇格を依頼 (待ちが解けた)"));
+    expect(claude.starts).toHaveLength(0);
+  } finally {
+    r.rescue.stop(true);
+    rmSync(r.repo, { recursive: true, force: true });
+  }
+});
 
 test("promote: under sb-rescue a newer tag is promoted first, and that firing starts nothing", async () => {
   const r = await releasedDaemon();

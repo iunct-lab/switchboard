@@ -133,6 +133,7 @@ select.model-select { max-width: 100%; min-width: 0; font-size: 12px; }
    hover), and the controls keep their own width and go to the next line instead of being squeezed into a column. */
 .task .task-head { flex-wrap: wrap; }
 .task .task-head > :not(h2, .hint) { flex: none; white-space: nowrap; }
+.task .task-head .switched-from-cloud { flex-basis: 100%; min-width: 0; white-space: normal; overflow-wrap: anywhere; margin: 0; }
 .task .task-head h2 { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
 .task h2 { margin: 0; font-size: 16px; font-weight: 700; }
 .status { font: 400 10.5px/1.6 var(--mono); padding: 0 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink3); }

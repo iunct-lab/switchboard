@@ -212,6 +212,11 @@ export function App() {
   }, [passkeyUrl]);
 
   const openTask = useCallback((id: string) => setView({ name: "task", id }), []);
+  // The Local Task "ローカルで続ける" just switched to (#1634): its head says so until another screen opens. Memory only.
+  const [switchedTo, setSwitchedTo] = useState<string | null>(null);
+  useEffect(() => {
+    if (switchedTo !== null && !(view.name === "task" && view.id === switchedTo)) setSwitchedTo(null);
+  }, [view, switchedTo]);
 
   useEffect(() => {
     const onMessage = (m: ServerMessage) => {
@@ -510,6 +515,8 @@ export function App() {
               onError={setError}
               onBrief={() => setBriefOpen(true)}
               onOpenTask={openTask}
+              onContinuedLocally={(id) => { setSwitchedTo(id); openTask(id); }}
+              switchedFromCloud={switchedTo === currentTask.id}
               openArtifact={view.artifact}
               onArchive={(archived) => archiveTask(currentTask.id, archived)}
               onLoadOlder={() => loadOlder(currentTask.id)}

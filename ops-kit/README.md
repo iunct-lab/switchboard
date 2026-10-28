@@ -29,7 +29,7 @@ GitHub の Issue と Project で回す開発の流れ（要望 → PBI → Task 
 | `backlog list\|view\|create\|edit\|comment\|set\|triage …` | キットを同梱するアプリが保存したバックログを、そのアプリの API（`BACKLOG_URL`）で読み書きする。読むのは保存値と鮮度、`--fresh` で最新化を待つ（アプリが GitHub に届かなければ保存値と「GitHub 未同期」で exit 0）。アプリに届かなければ exit 2 | 要らない（`triage` の Phase だけ読む） |
 | `sync-labels [<file>] [--dry-run]` | ラベルを `.github/labels.yml` に合わせる（作る・直すだけで、消さない） | 要らない |
 | `scan-text <file\|->` | 文に認証に使える値が無いか検査する（値は出さない） | 要らない |
-| `scan-issues [<owner/name>]` | リポジトリの Issue・PR・コメントを全部、同じ検査に通す | 要らない |
+| `scan-issues [<owner/name>] [--since <ISO>] [--recheck <URL>]...` | リポジトリの Issue・PR・コメントを全部（`--since` ならその時刻より後の更新だけと、`--recheck` の前回の当たり）、同じ検査に通す | 要らない |
 | `public-sync [--source <ref>] [--dry-run] [--adopted] [--target-url <url>]` | main のツリーだけを公開リポジトリへ送る（下の「公開リポジトリへの同期」） | 要る（`publicSync` だけ） |
 | `export-copy <dest> --words-file <file>` | キットを読めないリポジトリが同梱するコピーを作る（下の「公開リポジトリ」） | 要らない |
 

@@ -5,7 +5,7 @@ import { journeyCancel, journeyEnd, journeyStart } from "../perf.ts";
 import { eventsArchiveNotice } from "../events-archive.ts";
 import { foldTranscript, itemText, spanText, toolInputText, toolResultText, transcriptMarkdown, turnReply, type Item, type PermissionAsk } from "../transcript.ts";
 import { answerOf, answersOf, questionsOf, type AskQuestion, type QuestionChoice } from "../questions.ts";
-import { CloudSessionNotice, CopyButton, OriginTag, ResumeTag, RunnerPill, ShadowTag } from "./ui.tsx";
+import { CloudSessionNotice, CloudSourceTag, CopyButton, OriginTag, ResumeTag, RunnerPill, ShadowTag } from "./ui.tsx";
 import { Terminal } from "./Terminal.tsx";
 import { DeviceAuth } from "./DeviceAuth.tsx";
 import { Stops } from "./Stops.tsx";
@@ -23,6 +23,10 @@ import { KIND_LABEL, STATE_LABEL, taskAsks } from "../asks.ts";
 export function TaskView(props: {
   task: Task;
   onOpenTask?: (id: string) => void;
+  /** "ローカルで続ける" finished and opens the imported Local Task (#1634); falls back to `onOpenTask`. */
+  onContinuedLocally?: (localTaskId: string) => void;
+  /** This Local Task was just switched to by "ローカルで続ける" (#1634): the head says so. */
+  switchedFromCloud?: boolean;
   detail?: TaskDetail;
   /** Resolves once the daemon took the turn; rejects (after showing the error) otherwise — the composer keeps its text and chips then. */
   onSend: (text: string, attachmentIds?: string[]) => Promise<void>;
@@ -212,7 +216,7 @@ export function TaskView(props: {
     if (phase === "teleporting" || phase === "needs-input" || phase === "exiting" || phase === "importing") teleportSawActive.current = true;
     else if (teleportSawActive.current && phase === "done" && teleportProgress?.localTaskId) {
       teleportPressed.current = false; teleportSawActive.current = false;
-      props.onOpenTask?.(teleportProgress.localTaskId);
+      (props.onContinuedLocally ?? props.onOpenTask)?.(teleportProgress.localTaskId);
     } else if (teleportSawActive.current && phase === "unconfirmed") { teleportPressed.current = false; teleportSawActive.current = false; }
   }, [teleportProgress]);
   const importEnded = () => { if (cloud) api.task(props.task.id).then(setImportDetail).catch(e => props.onError(e.message)); };
@@ -288,6 +292,7 @@ export function TaskView(props: {
         <OriginTag origin={props.task.origin} />
         <ResumeTag resumeAt={props.task.resumeAt} reason={props.task.resumeReason} />
         <ShadowTag task={props.task} />
+        {props.detail?.sourceCloudTask && <CloudSourceTag source={props.detail.sourceCloudTask} switched={!!props.switchedFromCloud} onOpen={() => props.onOpenTask?.(props.detail!.sourceCloudTask!.id)} />}
         <select className="outcome" value={props.task.outcome} disabled={busy} onChange={(e) => setOutcome({ outcome: e.target.value as TaskOutcome })} title="結果（要対応のまとまりの並びに使う）">
           {(["needs_action", "failed", "done", "unknown"] as const).map((o) => (
             <option key={o} value={o}>
@@ -407,7 +412,6 @@ export function TaskView(props: {
 
       {cloud && <CloudSessionNotice session={props.task.cloudSession} onTeleport={startTeleport} onRefresh={importEnded} teleportReason={teleportReason} progress={teleportProgress} onAnswerInTerminal={answerInTerminal} localTasks={(importDetail ?? props.detail)?.localContinuations} onOpenTask={props.onOpenTask} />}
       {cloud && transcript.lastStatus && <p className="hint" role="status">{transcript.lastStatus}</p>}
-      {props.detail?.sourceCloudTask && <div className="card"><p>Cloudから取り込んだLocalセッションです。このTaskへの返信で再開します。Cloudへ自動同期しません。</p><button className="btn" onClick={() => props.onOpenTask?.(props.detail!.sourceCloudTask!.id)}>元Cloud Taskを開く</button></div>}
       {props.detail?.stopSummary && props.detail.stopSummary.length > 0 && <Stops stops={props.detail.stopSummary} issue={props.task.id} />}
       {!cloud && <DeviceAuth auth={props.deviceAuth} onError={props.onError} />}
       {!cloud && <TaskAsks task={props.task} stops={props.detail?.stopSummary ?? []} onError={props.onError} />}

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import type { Queue, RunnerId, Schedule, ScheduleInput, Task } from "@switchboard/protocol";
+import type { Queue, RunnerId, ScanCursors, Schedule, ScheduleInput, Task } from "@switchboard/protocol";
 import { nextRun, parseCron } from "./cron.ts";
 import { type Db, newId } from "./db.ts";
 import type { ScanSummary } from "./secretscan.ts";
@@ -23,6 +23,13 @@ export class Scheduler {
   private log: string[] = [];
   /** backlog-next / secret-scan schedules whose firing is still in progress (both await GitHub). */
   private starting = new Set<string>();
+  /** A runUnblocked asked while a firing was in progress (#1879): per schedule, the items per workspace, run after it. */
+  private unblocked = new Map<string, Map<string, Set<number>>>();
+  /** The backlog-next firings in progress that read one workspace's items only, with what they read. */
+  private narrow = new Map<string, { workspaceId: string; numbers: number[] }>();
+  /** The backlog-next firing in progress per schedule, and the full firings (due / manual) waiting for a narrow one to end. */
+  private running = new Map<string, Promise<unknown>>();
+  private fullWaiting = new Set<string>();
   /** A tick is in progress: a backlog-next firing can await GitHub longer than the 30 s interval. */
   private ticking = false;
 
@@ -30,8 +37,8 @@ export class Scheduler {
     private db: Db,
     private tasks: TaskManager,
     private now: () => number = Date.now,
-    private startNext: (scheduleId: string) => Promise<BacklogNextResult> = async () => ({ started: [], skipped: ["backlog-next is not available"] }),
-    private scanSecrets: (schedule: { id: string; title: string }) => Promise<{ lines: string[]; summary: ScanSummary }> = async () => ({ lines: ["secret-scan is not available"], summary: { repos: 0, hits: 0, failed: 1 } }),
+    private startNext: (scheduleId: string, only?: { workspaceId: string; numbers: number[] }) => Promise<BacklogNextResult> = async () => ({ started: [], skipped: ["backlog-next is not available"] }),
+    private scanSecrets: (schedule: { id: string; title: string }, cursors: ScanCursors) => Promise<{ lines: string[]; summary: ScanSummary; cursors?: ScanCursors }> = async () => ({ lines: ["secret-scan is not available"], summary: { repos: 0, hits: 0, failed: 1 } }),
     /** Claude's 7-day utilization at or above this and an insights firing is skipped (#1838): the backlog's `backlogQuotaLimit`. */
     private quotaLimit: () => number = () => 0.8,
     /** 上限のときの代わり (#834): the runner a prompt schedule's Task starts on, and the status line when it is another. */
@@ -163,23 +170,76 @@ export class Scheduler {
     return task;
   }
 
+  /**
+   * An import closed the waits of `numbers` in a workspace (#1879): a backlog-next firing of that workspace's implement
+   * slot and those items only, not waiting for the next one. While a firing is in progress the items are kept and run
+   * after it (a full one read each workspace once, maybe before the wait cleared), but the ones a narrow firing under
+   * way reads (the import its own read sets off comes back with them). The schedule's times stay; only a start is logged — what is not started now is started by the next
+   * firing as before, and its reasons are logged there.
+   */
+  async runUnblocked(id: string, workspaceId: string, numbers: number[]): Promise<Task | null> {
+    const s = this.db.getSchedule(id);
+    if (!s || s.action !== "backlog-next" || !s.enabled) return null;
+    if (this.starting.has(id)) {
+      const under = this.narrow.get(id);
+      // what the firing under way reads is not kept (the import its own read sets off comes back with it)
+      const rest = under?.workspaceId === workspaceId ? numbers.filter((n) => !under.numbers.includes(n)) : numbers;
+      if (rest.length) {
+        const of = this.unblocked.get(id) ?? new Map<string, Set<number>>();
+        of.set(workspaceId, new Set([...(of.get(workspaceId) ?? []), ...rest]));
+        this.unblocked.set(id, of);
+      }
+      return null;
+    }
+    return this.runBacklogNext(id, s.title, s.cron, "unblocked", { workspaceId, numbers });
+  }
+
   /** backlog-next (#267, #561): the daemon picks the items and starts their stage Tasks; one firing at a time per schedule. */
-  private async runBacklogNext(id: string, title: string, cron: string, reason: "manual" | "due"): Promise<Task | null> {
+  private async runBacklogNext(id: string, title: string, cron: string, reason: "manual" | "due" | "unblocked", only?: { workspaceId: string; numbers: number[] }): Promise<Task | null> {
+    // a full firing that comes during a narrow one waits for it (a narrow one reads one workspace's items only: the
+    // firing it would take the place of is not made up until the next due time)
+    if (!only && this.narrow.has(id) && !this.fullWaiting.has(id)) {
+      this.fullWaiting.add(id);
+      try {
+        while (this.narrow.has(id)) await this.running.get(id)?.catch(() => undefined);
+      } finally {
+        this.fullWaiting.delete(id);
+      }
+    }
     if (this.starting.has(id)) {
       this.note(`${title}: 飛ばした (${reason}): 前の発火がまだ項目を選んでいる`);
       return null;
     }
     this.starting.add(id);
+    if (only) this.narrow.set(id, only);
     try {
-      const r = await this.startNext(id);
-      const next = nextRun(cron, new Date(this.now()))?.getTime() ?? null;
+      const run = this.startNext(id, only);
+      this.running.set(id, run);
+      const r = await run;
       const last = r.started.at(-1)?.task ?? null;
+      if (reason === "unblocked") {
+        if (last) this.db.updateSchedule(id, { lastTaskId: last.id });
+        for (const x of r.started) this.note(`${title}: ${x.label} で開始 ${x.task.id} (待ちが解けた)`);
+        return last;
+      }
+      const next = nextRun(cron, new Date(this.now()))?.getTime() ?? null;
       this.db.updateSchedule(id, { lastRunAt: this.now(), nextRunAt: next, ...(last ? { lastTaskId: last.id } : {}) });
       for (const x of r.started) this.note(`${title}: ${x.label} で開始 ${x.task.id} (${reason})`);
       for (const why of r.skipped) this.note(`${title}: 飛ばした (${reason}): ${why}`);
       return last;
     } finally {
       this.starting.delete(id);
+      this.narrow.delete(id);
+      this.running.delete(id);
+      const kept = this.unblocked.get(id);
+      this.unblocked.delete(id);
+      // after a narrow one, the next of what was kept (each in turn: one firing at a time); a full firing waiting reads them all
+      if (kept) void (async () => {
+        for (const [ws, n] of kept) {
+          if (this.fullWaiting.has(id)) return;
+          await this.runUnblocked(id, ws, [...n]).catch((e) => this.note(`${title}: 始められない (待ちが解けた): ${String((e as Error)?.message ?? e)}`));
+        }
+      })();
     }
   }
 
@@ -196,9 +256,11 @@ export class Scheduler {
     try {
       // The result stays on the schedule (#1274): the log is memory, gone with a restart, and the inbox note only
       // comes with hits — without this, a clean day left no trace to tell "0 hits" from "did not run".
-      let r: { lines: string[]; summary: ScanSummary };
+      // each repository is read from where the last firing left it (kept on the schedule, so a restart keeps it too)
+      const before = this.db.getSchedule(id)?.lastResult?.cursors ?? {};
+      let r: { lines: string[]; summary: ScanSummary; cursors?: ScanCursors };
       try {
-        r = await this.scanSecrets({ id, title });
+        r = await this.scanSecrets({ id, title }, before);
       } catch (e) {
         // the error's name only: what a failure prints could quote anything, a token included (docs/design/secret-guard.md), and
         // the result is kept, shown and logged — `bash scripts/setup/scan_issues.sh <owner/name>` by hand shows the reason
@@ -211,7 +273,9 @@ export class Scheduler {
       for (const l of r.lines) this.note(`${title}: ${l} (${reason})`);
       const still = this.db.getSchedule(id);
       if (!still) return null; // deleted meanwhile: logged above, nothing written back
-      const result = still.action === "secret-scan" ? { lastResult: { at, ...r.summary, lines: r.lines } } : {};
+      // a scan that threw read nothing: the cursors stay where they were
+      const cursors = r.cursors ?? before;
+      const result = still.action === "secret-scan" ? { lastResult: { at, ...r.summary, lines: r.lines, ...(Object.keys(cursors).length ? { cursors } : {}) } } : {};
       this.db.updateSchedule(id, { lastRunAt: at, nextRunAt: nextRun(cron, new Date(at))?.getTime() ?? null, ...result });
       return null;
     } finally {

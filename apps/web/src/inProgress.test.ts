@@ -46,9 +46,9 @@ const wait = (number: number, kind: "issue" | "pr", open: boolean | null, reason
 test("waitText: nothing / one open / all closed / one not read; the condition by reason; whether backlog-next goes on by itself", () => {
   expect(waitText(item({}), true)).toBeNull();
   // a record whose waits all left (deferred PRs): 待ちが解けた, as backlog-next takes it
-  expect(waitText(item({ waits: [], waitsAt: "2026-10-01T00:00:00Z" }), true)).toEqual({ label: "待ちが解けた", done: true, cond: "", next: "次の定期実行で再開" });
-  expect(waitText(item({ waitsAt: "2026-10-01T00:00:00Z", waits: [wait(778, "pr", true, "overlap"), wait(603, "issue", false, "overlap")] }), true)).toEqual({ label: "待ち", done: false, cond: "相手が閉じてファイルの重なりが解けたら", next: "次の定期実行で再開" });
-  expect(waitText(item({ waitsAt: "2026-10-01T00:00:00Z", waits: [wait(603, "issue", false)] }), true)).toEqual({ label: "待ちが解けた", done: true, cond: "前提が完了したら", next: "次の定期実行で再開" });
+  expect(waitText(item({ waits: [], waitsAt: "2026-10-01T00:00:00Z" }), true)).toEqual({ label: "待ちが解けた", done: true, cond: "", next: "待ちが解けたら再開" });
+  expect(waitText(item({ waitsAt: "2026-10-01T00:00:00Z", waits: [wait(778, "pr", true, "overlap"), wait(603, "issue", false, "overlap")] }), true)).toEqual({ label: "待ち", done: false, cond: "相手が閉じてファイルの重なりが解けたら", next: "待ちが解けたら再開" });
+  expect(waitText(item({ waitsAt: "2026-10-01T00:00:00Z", waits: [wait(603, "issue", false)] }), true)).toEqual({ label: "待ちが解けた", done: true, cond: "前提が完了したら", next: "待ちが解けたら再開" });
   // not read is not closed
   expect(waitText(item({ waitsAt: "2026-10-01T00:00:00Z", waits: [wait(603, "issue", false), wait(999, "issue", null)] }), false)).toEqual({ label: "待ち", done: false, cond: "前提が完了したら / 未取得の相手は状態が分からない", next: "定期実行は再開しない: 未取得の相手を確かめて/pbi-complete 1 を手で始める" });
   // the person's way by the row's stage: Ready has 実装する, in progress has no button that resumes it
@@ -137,7 +137,7 @@ test("waitText: a wait solved does not promise the next firing while a prerequis
   const pending = { number: 12, kind: "issue" as const, need: "done" as const, state: "pending" as const, via: null };
   expect(waitText(item({ ...solved, prereqs: [pending] }), true)!.next).toBe("前提が完了したら次の定期実行で再開");
   expect(waitText(item({ ...solved, prereqs: [{ ...pending, state: "withdrawn" }] }), true)!.next).toBe("定期実行は再開しない: 前提を確かめて「実装する」で再開");
-  expect(waitText(item({ ...solved, prereqs: [{ ...pending, state: "met" }] }), true)!.next).toBe("次の定期実行で再開");
+  expect(waitText(item({ ...solved, prereqs: [{ ...pending, state: "met" }] }), true)!.next).toBe("待ちが解けたら再開");
 });
 
 test("overlapLine: the PR / Task the row's files overlap with, each linked; why it cannot be judged; none otherwise (#1044)", () => {
@@ -186,6 +186,6 @@ test("autoByWorkspace (#2656): a workspace at implement 0 is not moved by itself
   // the row of the workspace at 0 does not say it resumes by itself; the other one does
   const auto = autoByWorkspace([schedule(true)], workspaces);
   const row = (workspaceId: string) => item({ workspaceId, stage: "ready", waitsAt: "2026-10-01T00:00:00Z", waits: [] });
-  expect(waitText(row("ws_lib"), auto.ws_lib ?? false)!.next).not.toContain("次の定期実行で再開");
-  expect(waitText(row("ws_meta"), auto.ws_meta ?? false)!.next).toBe("次の定期実行で再開");
+  expect(waitText(row("ws_lib"), auto.ws_lib ?? false)!.next).not.toContain("待ちが解けたら再開");
+  expect(waitText(row("ws_meta"), auto.ws_meta ?? false)!.next).toBe("待ちが解けたら再開");
 });

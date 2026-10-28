@@ -165,6 +165,21 @@ describe("cli", () => {
     expect((await run(["scan-issues", "not a repo"])).code).toBe(2);
   });
 
+  test("scan-issues --since reads the difference and --recheck the earlier hits; a bad time or another repository's URL is usage", async () => {
+    const code = ["QWJK", "ZRTP"].join("-");
+    const r = await run(["scan-issues", "--since", "2026-10-20T00:00:00Z", "--recheck", "https://github.com/o/r/issues/3", "o/r"], [() => [], () => [], () => [], () => ({ title: "題", body: `コード ${code}` })]);
+    expect(r).toMatchObject({ code: 1, out: "https://github.com/o/r/issues/3: device-code（1 行目）\nhits: 1 / scanned: 1" });
+    expect(r.gh.calls.map((c) => (c.kind === "api" ? c.path : ""))).toEqual([
+      "repos/o/r/issues?since=2026-10-20T00%3A00%3A00Z&state=all&per_page=100&page=1",
+      "repos/o/r/issues/comments?since=2026-10-20T00%3A00%3A00Z&per_page=100&page=1",
+      "repos/o/r/pulls/comments?since=2026-10-20T00%3A00%3A00Z&per_page=100&page=1",
+      "repos/o/r/issues/3",
+    ]);
+    expect((await run(["scan-issues", "o/r", "--since", "yesterday"])).code).toBe(2);
+    expect((await run(["scan-issues", "o/r", "--since"])).code).toBe(2);
+    expect((await run(["scan-issues", "o/r", "--recheck", "https://github.com/x/y/issues/3"])).code).toBe(2);
+  });
+
   test("ops-kit on PATH runs scan-issues from a repository without entries", () => {
     const dir = mkdtempSync(join(tmpdir(), "ops-kit-bin-"));
     try {

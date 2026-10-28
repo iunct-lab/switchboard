@@ -1073,7 +1073,10 @@ export type CheckRun = z.infer<typeof CheckRun>;
  * repository could not be identified, and its log lines (places and kinds only, never a value). A firing whose scan
  * itself threw is `repos: 0, failed: 1` with one line carrying the error's name only.
  */
-export const ScheduleResult = z.object({ at: z.number(), repos: z.number(), hits: z.number(), failed: z.number(), lines: z.array(z.string()) });
+/** Per repository (`<owner>/<name>`), where the next secret-scan starts: the time its last read began and its hits' URLs. */
+export const ScanCursors = z.record(z.string(), z.object({ since: z.string(), hits: z.array(z.string()) }));
+export type ScanCursors = z.infer<typeof ScanCursors>;
+export const ScheduleResult = z.object({ at: z.number(), repos: z.number(), hits: z.number(), failed: z.number(), lines: z.array(z.string()), cursors: ScanCursors.optional() });
 export type ScheduleResult = z.infer<typeof ScheduleResult>;
 
 /** A recurring task (#20): a cron expression that starts a task with this prompt on a workspace. */
@@ -1959,8 +1962,11 @@ export const FlowPbi = z.object({
   userWaitMs: z.number(),
   /** Per PR: how many `[codex|claude|dak] review` comments it got. */
   reviewRounds: z.array(z.number()),
-  /** The Switchboard Tasks whose title starts with `#<PBI or Task number> `; null when the DB was not read. */
-  tasks: z.object({ count: z.number(), runMs: z.number(), costUsd: z.number() }).nullable(),
+  /**
+   * The Switchboard Tasks whose title starts with `#<PBI or Task number> `; null when the DB was not read.
+   * `implementLaunches`: the PBI's stage Tasks of 実装 (`stage.action` `complete`; a resume counts as one too).
+   */
+  tasks: z.object({ count: z.number(), runMs: z.number(), costUsd: z.number(), implementLaunches: z.number() }).nullable(),
 });
 export type FlowPbi = z.infer<typeof FlowPbi>;
 

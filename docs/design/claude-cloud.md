@@ -443,8 +443,12 @@ different or ambiguous printed target is not linked.
 The original Cloud Task stays separate. After a normal Teleport exit,
 Switchboard verifies the printed Local UUID against its normal Claude log,
 imports the whole conversation through the existing history importer and
-shows **Local Task: …**. Open that Local Task and reply there to use
-ordinary `--resume`. Its view and Brief link back to the original Cloud.
+shows **Local Task: …**. When the start was pressed on that screen, the
+Local Task opens by itself. Reply there to use ordinary `--resume`. The
+Local Task's sticky head marks it as imported from Cloud and links back to
+the original Cloud Task, so both are in view without scrolling; right after
+the automatic switch, the head also names the Cloud Task it switched from,
+until another screen opens. Brief links back too.
 There is no automatic conversation synchronization back to Cloud.
 
 **Where it runs (#1395).** The continuation never runs in the clone a Local

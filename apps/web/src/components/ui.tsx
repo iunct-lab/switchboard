@@ -107,6 +107,18 @@ export function teleportView(p: TeleportProgress | null | undefined): { text: st
   }
 }
 
+/** A Local Task imported from a Cloud Task (#1634): in the sticky head, so it is seen without scrolling; `switched` adds the line
+ *  for the screen "ローカルで続ける" just switched to. */
+export function CloudSourceTag(props: { source: Task; switched: boolean; onOpen: () => void }) {
+  return (
+    <>
+      <span className="tag" title="このTaskへの返信で再開します。Cloudへ自動同期しません。">Cloudから取込み</span>
+      <button className="ghost" onClick={props.onOpen}>元Cloud Taskを開く</button>
+      {props.switched && <p className="hint switched-from-cloud" role="status">{`Cloud Task「${props.source.title}」から、取り込んだLocal Taskに切り替わりました`}</p>}
+    </>
+  );
+}
+
 /** Cloud is operated in the official UI; a launcher reference proves no workload outcome. */
 export function CloudSessionNotice(props: { session: Task["cloudSession"]; onTeleport?: () => void; onRefresh?: () => void; teleportReason?: string; progress?: TeleportProgress | null; onAnswerInTerminal?: () => void; localTasks?: Task[]; onOpenTask?: (id: string) => void }) {
   const ref = props.session;

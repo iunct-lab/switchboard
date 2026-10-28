@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { AgentEvent, EventEnvelope, Task, TeleportProgress } from "@switchboard/protocol";
-import { CloudSessionNotice, teleportView } from "./components/ui.tsx";
+import { CloudSessionNotice, CloudSourceTag, teleportView } from "./components/ui.tsx";
 import { TaskView } from "./components/TaskView.tsx";
 import { Brief } from "./components/Brief.tsx";
 import { foldTranscript, transcriptMarkdown } from "./transcript.ts";
@@ -94,4 +94,24 @@ test("Cloud Task and Local Task screens show the work copy the continuation runs
   expect(cloudBrief).toContain(`作業コピー: ${wc}`);
   const localBrief = renderToStaticMarkup(createElement(Brief, { task: local, detail: detail(local, { sourceCloudTask: task }), ledger: null, onAbort: noop, open: true, onClose: noop }));
   expect(localBrief).toContain(`作業コピー: ${wc}`);
+});
+
+// #1634: the imported Local Task says where it came from in the sticky head, and the switch line only right after the switch.
+test("an imported Local Task shows its Cloud source in the sticky head, and the switch line only when switched", () => {
+  const local: Task = { ...task, id: "task_local", executionMode: "local", cloudSession: null, sourceCloudTaskId: task.id, title: "Cloud" };
+  const detail = (sourceCloudTask: Task | null) => ({ task: local, events: [], cost: { costUsd: 0, tokens: 0 }, history: null, attachments: [], sourceCloudTask, localContinuations: [] }) as never;
+  const render = (sourceCloudTask: Task | null, switchedFromCloud?: boolean) => renderToStaticMarkup(createElement(TaskView, { task: local, detail: detail(sourceCloudTask), switchedFromCloud, onSend: async () => {}, onPermission: noop, onError: noop, onBrief: noop }));
+  const head = (html: string) => html.slice(html.indexOf('class="task-head"'), html.indexOf('class="subtabs"'));
+  const opened = render(task);
+  expect(head(opened)).toContain("Cloudから取込み"); expect(head(opened)).toContain("元Cloud Taskを開く");
+  expect(opened).not.toContain("切り替わりました"); expect(opened).not.toContain("Cloudから取り込んだLocalセッションです"); // the card after the conversation is gone
+  const switched = render(task, true);
+  expect(head(switched)).toContain('class="hint switched-from-cloud" role="status"'); expect(head(switched)).toContain("Cloud Task「Cloud」から、取り込んだLocal Taskに切り替わりました");
+  const plain = render(null, true);
+  expect(plain).not.toContain("Cloudから取込み"); expect(plain).not.toContain("元Cloud Taskを開く"); expect(plain).not.toContain("切り替わりました");
+  const opens: string[] = [];
+  const tag = CloudSourceTag({ source: task, switched: false, onOpen: () => opens.push(task.id) });
+  const button = (tag.props as { children: { type: string; props: { onClick: () => void } }[] }).children.find((c) => c?.type === "button")!;
+  button.props.onClick();
+  expect(opens).toEqual([task.id]);
 });
