@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { DeviceAuthView, EventEnvelope, Task, TaskDiffFile, TaskOutcome, TeleportProgress } from "@switchboard/protocol";
+import type { Ask, AskAnswer, DeviceAuthView, PolicyInput, StopSummary, EventEnvelope, Task, TaskDiffFile, TaskOutcome, TeleportProgress } from "@switchboard/protocol";
 import { api, OLDER_PAGE, type TaskDetail } from "../api.ts";
 import { journeyCancel, journeyEnd, journeyStart } from "../perf.ts";
 import { eventsArchiveNotice } from "../events-archive.ts";
@@ -17,6 +17,8 @@ import { AttachButton, AttachmentBar, AttachmentGallery, useAttachments, useDrop
 import { PresetPicker } from "./PresetPicker.tsx";
 import { jstDateTime, jstTime } from "../time.ts";
 import { titleToSave } from "../taskTitle.ts";
+import { AnswerArea } from "./Approvals.tsx";
+import { KIND_LABEL, STATE_LABEL, taskAsks } from "../asks.ts";
 
 export function TaskView(props: {
   task: Task;
@@ -408,6 +410,7 @@ export function TaskView(props: {
       {props.detail?.sourceCloudTask && <div className="card"><p>Cloudから取り込んだLocalセッションです。このTaskへの返信で再開します。Cloudへ自動同期しません。</p><button className="btn" onClick={() => props.onOpenTask?.(props.detail!.sourceCloudTask!.id)}>元Cloud Taskを開く</button></div>}
       {props.detail?.stopSummary && props.detail.stopSummary.length > 0 && <Stops stops={props.detail.stopSummary} issue={props.task.id} />}
       {!cloud && <DeviceAuth auth={props.deviceAuth} onError={props.onError} />}
+      {!cloud && <TaskAsks task={props.task} stops={props.detail?.stopSummary ?? []} onError={props.onError} />}
       {transcript.pending.map((p) => {
         const questions = questionsOf(p.tool, p.input);
         if (questions) return <QuestionCard key={p.id} ask={p} questions={questions} onPermission={props.onPermission} />;
@@ -615,6 +618,64 @@ function QuestionCard(props: { ask: PermissionAsk; questions: AskQuestion[]; onP
         </button>
         <button onClick={() => props.onPermission(props.ask.id, "deny")}>答えない</button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * The Task's open operational checks and the stops a person answers (#2745), with the 判断待ち screen's buttons: a choice
+ * or a grant goes as the person's reply, as it does there. Read again whenever the Task changes and after an answer —
+ * only while it can have one (stopped 要対応, or a stop a person decides), so an ordinary Task's screen asks nothing more.
+ */
+function TaskAsks(props: { task: Task; stops: StopSummary[]; onError: (msg: string) => void }) {
+  const [asks, setAsks] = useState<Ask[]>([]);
+  const [busy, setBusy] = useState(false);
+  const id = props.task.id;
+  // only the newest read is shown: an older one answering late would bring back a list from before the Task changed
+  const reads = useRef(0);
+  const load = () => {
+    const n = ++reads.current;
+    api.asks().then(
+      (l) => n === reads.current && setAsks(taskAsks(l.asks, id)),
+      () => {},
+    );
+  };
+  const t = props.task;
+  const may = (t.outcome === "needs_action" && t.status !== "running" && t.status !== "idle") || props.stops.some((s) => s.next === "decide");
+  useEffect(() => {
+    if (may) load();
+    else {
+      reads.current++;
+      setAsks([]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, t.updatedAt, t.status, may]);
+  const answer = (x: Ask, a: AskAnswer, policy?: PolicyInput) => {
+    if (busy) return;
+    setBusy(true);
+    api
+      .answerAsk(x.id, a, policy)
+      // a reply the Task refused (its budget) is a 200 whose resume failed: said, as the 判断待ち screen's badge says it
+      .then((r) => r.ask?.resume?.state === "failed" && props.onError(`再開失敗${r.ask.resume.reason ? `: ${r.ask.resume.reason}` : ""}`))
+      .catch((e) => props.onError(String((e as Error).message ?? e)))
+      .finally(() => {
+        setBusy(false);
+        load();
+      });
+  };
+  if (!asks.length) return null;
+  return (
+    <div className="task-asks">
+      {asks.map((x) => (
+        <section key={x.id} className="card ask" data-ask={x.id}>
+          <div className="ask-tags">
+            <span className={`badge ask-kind ask-kind-${x.kind}`}>{KIND_LABEL[x.kind]}</span>
+            <span className={`badge ask-state ask-state-${x.state}`}>{STATE_LABEL[x.state]}</span>
+          </div>
+          <b>{x.question ?? x.reason}</b>
+          <AnswerArea key={x.id} ask={x} busy={busy} onAnswer={(a, policy) => answer(x, a, policy)} />
+        </section>
+      ))}
     </div>
   );
 }

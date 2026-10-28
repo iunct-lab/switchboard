@@ -2,7 +2,11 @@
 
 上流 mirror は PR を受けない。独自の開発は fork 自身の Issue・Project・PR・レビュー・Release で回し、上流へは要望を送る。
 
-共通の始め方は [キットの fork 手順](../ops-kit/README.md#fork-して開発を始める) に従う。origin と `GH_REPO` を fork に向け、Project URL をリポジトリ変数に設定し、キットの開発用 Issue フォームを置き、PR 自動クローズを削除する。Project への自動追加は `ops-kit/template/.github/workflows/project-autoadd.yml` を設定して使う。
+共通の始め方は [キットの fork 手順](../ops-kit/README.md#fork-して開発を始める) に従う。origin と `GH_REPO` を fork に向け、`gh repo set-default` で `gh` の既定を fork にし、Project URL をリポジトリ変数に設定し、キットの開発用 Issue フォームを置き、PR 自動クローズを削除する。Project への自動追加は `ops-kit/template/.github/workflows/project-autoadd.yml` を設定して使う。
+
+キットの手順 2 の `bootstrap` の前に、`ops.config.json` の `fields.area`・`fields.phase`・`milestone.pattern` を自分のリポジトリの値にする（このリポジトリの値は Switchboard 自身のパッケージと Phase で、そのまま `bootstrap` すると自分の Project に入る）。
+
+`ops.config.json` の `publicSync` は残す。`target` は上流の公開リポジトリで、`gh` の前段・キットの道具・アプリのバックログは、既定の書き込み先がそこを向く clone の書き込みを止める。止まったときの直し方は [キットの手順](../ops-kit/README.md#公開側への書き込みが止まったとき)。上流の要望の受け口（Issue）はそのまま使える。
 
 Switchboard 固有の workflow は `.github/workflows/` のものをそのまま使う。
 

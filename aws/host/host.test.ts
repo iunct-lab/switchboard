@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { Database } from "bun:sqlite";
 
 /**
  * aws/host (#230): the host scripts run against fake `aws`, `sudo`, `systemctl`, `shutdown` and `curl` on PATH, so no
@@ -155,6 +156,67 @@ describe("aws/host (#230)", () => {
     expect(clone).toContain('[ -d "$ws" ] && continue'); // an existing checkout is left alone
     // best effort on every rebuild: a database it cannot read must not stop the bootstrap before the units
     expect(clone).toMatch(/done \|\| echo "bootstrap: could not list the workspaces/);
+  });
+
+  // The registered workspaces' section (#2799) run alone: as_user runs as is, the database is made here, and a fake gh
+  // records its arguments; its clone makes the folder, and its view answers for the clone what `view` says
+  function cloneWorkspaces(rows: { name: string; source?: object }[], view: string) {
+    const boot = readFileSync(join(HERE, "bootstrap.sh"), "utf8");
+    const section = boot.slice(boot.indexOf("# --- the registered workspaces"), boot.indexOf("# --- the runners' records"));
+    const root = join(dir, "ws");
+    rmSync(root, { recursive: true, force: true });
+    const home = join(root, "home");
+    const repos = join(root, "repos");
+    mkdirSync(join(home, ".switchboard"), { recursive: true });
+    mkdirSync(repos);
+    const db = new Database(join(home, ".switchboard", "switchboard.db"));
+    db.run("CREATE TABLE workspaces (path TEXT, backlog_source TEXT)");
+    for (const r of rows) db.run("INSERT INTO workspaces VALUES (?, ?)", [join(repos, r.name), r.source ? JSON.stringify(r.source) : null]);
+    db.close();
+    fake("gh", `echo "gh $*" >> "${log}"
+case "$1 $2" in "repo clone") mkdir -p "$4";; "repo view") echo "${view}";; esac`);
+    rmSync(log, { force: true });
+    writeFileSync(join(root, "section.sh"), `as_user() { "$@"; }\nSB_HOST_HOME=${home}\nSB_REPOS_DIR=${repos}\n${section}`);
+    const p = Bun.spawnSync(["bash", join(root, "section.sh")], { env: { PATH: `${join(dir, "bin")}:${dirname(process.execPath)}:/usr/bin:/bin` }, stdout: "pipe", stderr: "pipe" });
+    return { code: p.exitCode, out: p.stdout.toString() + p.stderr.toString(), repos, left: readdirSync(repos).sort() };
+  }
+  const github = (repository: string, priv?: boolean) => ({ service: "github", host: "github.com", repository, project: { owner: "acme", number: 1 }, ...(priv === undefined ? {} : { private: priv }) });
+
+  test("bootstrap clones a workspace from its registered repository", () => {
+    const r = cloneWorkspaces([{ name: "app", source: github("acme/app-dev", true) }], "acme/app-dev true");
+    expect(r.code).toBe(0);
+    expect(calls().filter((c) => c.startsWith("gh repo clone"))).toEqual([`gh repo clone acme/app-dev ${join(r.repos, "app")} -- -q`]);
+    expect(calls().join("\n")).not.toContain("acme/app ");
+    expect(r.left).toEqual(["app"]);
+    expect(r.out).toBe("");
+  });
+
+  test("bootstrap does not clone a workspace with no registered repository", () => {
+    const r = cloneWorkspaces([{ name: "notes" }, { name: "local", source: { service: "switchboard", host: "local", repository: "ws_1", project: { owner: "switchboard", number: 0 } } }], "");
+    expect(r.code).toBe(0);
+    expect(calls()).toEqual([]);
+    expect(r.left).toEqual([]);
+    expect(r.out).toContain("bootstrap: not cloning notes: no registered GitHub repository");
+    expect(r.out).toContain("bootstrap: not cloning local: no registered GitHub repository");
+  });
+
+  test("bootstrap moves aside a clone that is not the registered repository", () => {
+    const r = cloneWorkspaces([{ name: "app", source: github("acme/app-dev") }], "acme/app false");
+    expect(r.code).toBe(0);
+    expect(r.left).toHaveLength(1);
+    expect(r.left[0]).toMatch(/^app\.unverified-\d{8}T\d{6}Z$/);
+    expect(r.out).toContain("bootstrap: moved app aside: the clone is acme/app, registered acme/app-dev");
+    // GitHub's case is not a difference; no answer at all is
+    expect(cloneWorkspaces([{ name: "app", source: github("acme/app-dev") }], "Acme/App-Dev false").left).toEqual(["app"]);
+    expect(cloneWorkspaces([{ name: "app", source: github("acme/app-dev") }], "").out).toContain("bootstrap: moved app aside: GitHub did not say which repository the clone is");
+  });
+
+  test("bootstrap moves aside a public clone of a private registration", () => {
+    const r = cloneWorkspaces([{ name: "app", source: github("acme/app", true) }], "acme/app false");
+    expect(r.left[0]).toMatch(/^app\.unverified-/);
+    expect(r.out).toContain("bootstrap: moved app aside: the clone of acme/app is public, registered private");
+    // a registration with no visibility yet is checked by its name only
+    expect(cloneWorkspaces([{ name: "app", source: github("acme/app") }], "acme/app false").left).toEqual(["app"]);
   });
 
   // sb-host-update (#435): a fake git whose clone puts the given sb-env.sh into a new tree; the installed ones are in bin/

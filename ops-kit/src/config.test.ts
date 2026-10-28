@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defaultConfig, findConfig, loadConfig, parseConfig, projectOf, resolveProject, TEMPLATE_CONFIG } from "./config.ts";
+import { defaultConfig, findConfig, loadConfig, parseConfig, projectOf, publicCopyOf, publicCopyRefusal, resolveProject, TEMPLATE_CONFIG } from "./config.ts";
 
 const fixtures = join(import.meta.dir, "../fixtures");
 const withPhase = () => loadConfig(join(fixtures, "config-with-phase.json"));
@@ -90,3 +90,45 @@ for (const source of ["environment", "config", "variable"]) {
     expect(calls).toEqual(source === "variable" ? [["variable", "get", "EXAMPLE_PROJECT_URL"]] : []);
   });
 }
+
+describe("publicCopyOf", () => {
+  const tree = (config?: string) => {
+    const dir = mkdtempSync(join(tmpdir(), "ops-kit-publiccopy-"));
+    if (config !== undefined) writeFileSync(join(dir, "ops.config.json"), config);
+    mkdirSync(join(dir, "sub"));
+    return dir;
+  };
+
+  test("the nearest ops.config.json's publicSync.target, read from below", () => {
+    const dir = tree(JSON.stringify({ publicSync: { target: "acme/widget" }, fields: "not checked here" }));
+    try {
+      expect(publicCopyOf(join(dir, "sub"))).toBe("acme/widget");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("null without the key and with broken JSON", () => {
+    for (const config of [JSON.stringify({ envPrefix: "X" }), "{ not json", JSON.stringify(null)]) {
+      const dir = tree(config);
+      try {
+        expect(publicCopyOf(dir)).toBeNull();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("publicCopyRefusal matches the target in any form a repository is written, and only it", () => {
+    const dir = tree(JSON.stringify({ publicSync: { target: "acme/widget" } }));
+    try {
+      for (const repo of ["acme/widget", "Acme/Widget", "github.com/acme/widget", "https://github.com/acme/widget.git", "https://github.com/acme/widget.git/", "https://github.com/acme/widget/", "git@github.com:acme/widget.git"]) {
+        expect(publicCopyRefusal(repo, dir)).toContain("gh repo set-default");
+      }
+      for (const repo of ["acme/widget-dev", "someone/widget", "acme/widgets"]) expect(publicCopyRefusal(repo, dir)).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+

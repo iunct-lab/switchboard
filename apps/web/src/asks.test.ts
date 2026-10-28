@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import type { Ask } from "@switchboard/protocol";
-import { answerButtons, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, previousLines, scopeLabel, blockerLines, groupAsks, keptAnswers, KIND_LABEL, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, workspaceChips, workspaceSections, type Answered } from "./asks.ts";
+import { answerButtons, grantOf, taskAsks, withoutGrant, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, previousLines, scopeLabel, blockerLines, groupAsks, keptAnswers, KIND_LABEL, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, workspaceChips, workspaceSections, type Answered } from "./asks.ts";
 
 const ask = (over: Partial<Ask>): Ask => ({
-  id: "a", kind: "decision", needs: "person", state: "open", at: 1, changedAt: 1, workspace: null, pbi: null, issue: null, task: null, reason: null, question: null, choices: [], recommendation: null, next: null,
+  id: "a", kind: "decision", needs: "person", state: "open", at: 1, changedAt: 1, workspace: null, pbi: null, issue: null, task: null, reason: null, question: null, choices: [], grants: [], grant: null, recommendation: null, next: null,
   source: { label: "記録", url: null, taskId: null }, route: "none", conditions: [], answers: [], place: null, blockers: [], resume: null, subject: null, policy: { scopes: [], note: null, defaults: null, applied: null, previous: null }, ...over,
 });
 
@@ -197,4 +197,30 @@ test("policy: the expiry day is the JST date, and it ends at 23:59:59 JST whatev
   const form = initialPolicyForm(ask({ policy }))!;
   expect(form.expires).toBe("2026-10-19");
   expect(policyInput({ ...form, opened: true, scope: "repo" })!.expiresAt).toBe(Date.parse("2026-10-19T14:59:59Z"));
+});
+
+test("grant button: a stop with a grant gets この操作だけ許可して続ける first, sending the grant — to its Issue for a stage Task's (#2745)", () => {
+  const GRANT = "定期実行 sch_x を POST /api/schedules に登録することだけ許可します";
+  const stop = ask({ kind: "stop", answers: ["grant", "text"], grant: GRANT, task: { id: "tk", title: "t" }, next: "Task「t」が続く" });
+  const [b] = answerButtons(stop);
+  expect(b).toMatchObject({ label: "この操作だけ許可して続ける", answer: { kind: "grant" }, send: GRANT, grant: GRANT, target: "Task「t」", primary: true });
+  expect(answerButtons({ ...stop, issue: { number: 306, url: "u" } })[0]!.target).toBe("Issue #306");
+  // a stop without one has no such button
+  expect(answerButtons(ask({ kind: "stop", answers: ["text"] }))).toEqual([]);
+});
+
+test("choice grant line: a choice's ` — 許可: ` is its grant, sent with the choice and shown on its own line (#2745)", () => {
+  const B = "B: 登録する — 影響: 毎日 PR が出る — 許可: 定期実行 sch_x を登録することだけ許可します";
+  expect(grantOf(B)).toBe("定期実行 sch_x を登録することだけ許可します");
+  expect(withoutGrant(B)).toBe("B: 登録する — 影響: 毎日 PR が出る");
+  expect(grantOf("A: 登録しない")).toBeNull();
+  const [rec, a] = answerButtons(ask({ kind: "check", answers: ["choice", "text"], choices: ["A: 登録しない", B], recommendation: { choice: "B", why: "" } }));
+  expect(rec).toMatchObject({ label: "推奨案で進める（B）", send: B, grant: "定期実行 sch_x を登録することだけ許可します" });
+  expect(a).toMatchObject({ send: "A: 登録しない", grant: null });
+});
+
+test("taskAsks: a Task's screen takes its open checks and the stops a person answers, not another Task's or automatic ones (#2745)", () => {
+  const t = { id: "tk", title: "t" };
+  const list = [ask({ id: "c", kind: "check", task: t }), ask({ id: "s", kind: "stop", task: t }), ask({ id: "auto", kind: "stop", needs: "auto", task: t }), ask({ id: "done", kind: "check", state: "answered", task: t }), ask({ id: "other", kind: "check", task: { id: "tk2", title: "u" } }), ask({ id: "ap", kind: "approval", task: t })];
+  expect(taskAsks(list, "tk").map((a) => a.id)).toEqual(["c", "s"]);
 });

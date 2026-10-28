@@ -109,8 +109,11 @@ export function buildArgs(opts: StartOptions, extra: string[] = []): string[] {
     if (dir && dir !== opts.cwd) args.push("--add-dir", dir);
   }
   // the guards (#764) as PreToolUse hooks for Bash and the skills' operations as allow rules (#2150), in one --settings;
-  // Claude Code adds them to the repository's own hooks and rules
-  const hooks = opts.guards?.length ? { PreToolUse: [{ matcher: "Bash", hooks: opts.guards.map((command) => ({ type: "command", command })) }] } : undefined;
+  // Claude Code adds them to the repository's own hooks and rules. A guard that cannot run blocks the call
+  // (onFailure, Claude Code 2.1.295) instead of letting the Bash through unchecked (#1573)
+  const hooks = opts.guards?.length
+    ? { PreToolUse: [{ matcher: "Bash", hooks: opts.guards.map((command) => ({ type: "command", command, onFailure: "block" })) }] }
+    : undefined;
   const permissions = opts.allow?.length ? { allow: opts.allow } : undefined;
   if (hooks || permissions) args.push("--settings", JSON.stringify({ ...(hooks ? { hooks } : {}), ...(permissions ? { permissions } : {}) }));
   // only the MCP servers Switchboard hands over: the user-wide ones would start per task, used or not (#2090)

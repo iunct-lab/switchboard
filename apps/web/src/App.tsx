@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { DeviceAuthView, EventEnvelope, LedgerSummary, PendingApproval, ServerMessage, Task, TeleportProgress, Workspace } from "@switchboard/protocol";
+import type { DeviceAuthView, EventEnvelope, LedgerSummary, PendingApproval, ServerMessage, Task, TeleportProgress, TerminalStatus, Workspace } from "@switchboard/protocol";
 import { applyApprovalEvent, mergeFetched } from "./approvals.ts";
 import { mergeEvents, taskReader } from "./catchup.ts";
-import { noticeFor, showNotice } from "./notify.ts";
+import { noticesFor, showNotice } from "./notify.ts";
 import { Approvals } from "./components/Approvals.tsx";
 import { api, connectEvents, getToken, setToken, type Health, type TaskDetail, type WorkspaceClone } from "./api.ts";
 import { journeyCancel, journeyEnd, journeyStart } from "./perf.ts";
@@ -59,6 +59,8 @@ export function App() {
   const [deviceAuths, setDeviceAuths] = useState<Record<string, DeviceAuthView | null>>({});
   // "continue locally" by Cloud Task (#1306): from the WebSocket; the open Task's first load brings the current one
   const [teleports, setTeleports] = useState<Record<string, TeleportProgress | null>>({});
+  // Claude Code in each Task's terminal tab (#1574): task.terminals after hello replaces them all, task.terminal changes one
+  const [terminals, setTerminals] = useState<Record<string, TerminalStatus>>({});
   const [view, setView] = useState<View>(initialView);
   // read where it is shown (not at launch: one request more there, perf budget)
   useEffect(() => {
@@ -213,8 +215,7 @@ export function App() {
 
   useEffect(() => {
     const onMessage = (m: ServerMessage) => {
-      const notice = noticeFor(m, tasksRef.current, notified.current);
-      if (notice)
+      for (const notice of noticesFor(m, tasksRef.current, notified.current))
         showNotice(notice, typeof Notification === "undefined" ? undefined : Notification, (id) => {
           window.focus();
           openTask(id);
@@ -257,6 +258,11 @@ export function App() {
         upsertTask(m.task);
       } else if (m.type === "task.teleport") {
         setTeleports((prev) => ({ ...prev, [m.taskId]: m.progress }));
+      } else if (m.type === "task.terminal") {
+        const { taskId, status } = m;
+        setTerminals(({ [taskId]: _, ...rest }) => (status === null ? rest : { ...rest, [taskId]: status }));
+      } else if (m.type === "task.terminals") {
+        setTerminals(m.terminals);
       } else if (m.type === "task.deviceAuth") {
         setDeviceAuths((prev) => ({ ...prev, [m.taskId]: m.auth }));
       }
@@ -462,7 +468,7 @@ export function App() {
       )}
 
       <div className="body">
-        <Rail onFeedback={() => openFeedback()} workspaces={workspaces} tasks={tasks} currentTaskId={view.name === "task" ? view.id : undefined} approvals={approvals.length} approvalsOpen={view.name === "approvals"} onApprovals={() => setView({ name: "approvals" })} listOpen={railListOpen} onToggleList={() => setRailListOpen((o) => !o)} onOpenTask={openTaskFromRail} onHome={() => setView({ name: "home" })} onShowArchived={showArchived} />
+        <Rail onFeedback={() => openFeedback()} workspaces={workspaces} tasks={tasks} currentTaskId={view.name === "task" ? view.id : undefined} approvals={approvals.length} approvalsOpen={view.name === "approvals"} onApprovals={() => setView({ name: "approvals" })} listOpen={railListOpen} onToggleList={() => setRailListOpen((o) => !o)} onOpenTask={openTaskFromRail} onHome={() => setView({ name: "home" })} onShowArchived={showArchived} terminals={terminals} />
 
         {view.name === "home" && (
           <Home

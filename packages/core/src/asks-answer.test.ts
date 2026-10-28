@@ -13,6 +13,8 @@ import { startServer, type CoreServer } from "./server.ts";
 const pages = (await Bun.file(new URL("../fixtures/backlog-graphql.json", import.meta.url)).json()) as unknown[];
 const decisions = (await Bun.file(new URL("../fixtures/backlog-decisions.json", import.meta.url)).json()) as { data: { repository: Record<string, { comments: { nodes: Array<{ body: string; createdAt: string }> } }> } };
 const HEAD = "b".repeat(40);
+/** The meta workspace is this checkout, whose origin is not the fake gh's acme/app: no origin to check (#2799; tasks.test.ts checks it). */
+const FAKE_ORIGIN = () => null;
 const ASKED = "a".repeat(40);
 
 /**
@@ -28,7 +30,7 @@ function fakeGh(opts: { place?: string; pr?: { state: string; head: string; comm
   }
   const gh: GhRunner = async (args) => {
     calls.push(args);
-    if (args[0] === "repo") return { code: 0, stdout: "acme/app\n", stderr: "" };
+    if (args[0] === "repo") return { code: 0, stdout: "acme/app true\n", stderr: "" };
     if (args[0] === "variable") return { code: 0, stdout: "https://github.com/users/acme/projects/11\n", stderr: "" };
     if (args[0] === "pr" && args[1] === "view") return opts.pr ? { code: 0, stdout: JSON.stringify({ state: opts.pr.state, headRefOid: opts.pr.head, comments: opts.pr.comments, commits: opts.pr.commits }), stderr: "" } : { code: 1, stdout: "", stderr: "no pr" };
     if (args.some((a) => a.includes("comments(last:"))) return { code: 0, stdout: JSON.stringify(own), stderr: "" };
@@ -57,7 +59,7 @@ afterEach(async () => {
 async function boot(gh: GhRunner, adapter: RunnerAdapter = holding): Promise<string> {
   home = mkdtempSync(join(tmpdir(), "sb-asks-answer-"));
   const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
-  core = await startServer(cfg, [adapter], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: importing(gh), backlogAutoImport: true, judge: () => new Promise(() => undefined), rubricJudge: () => new Promise(() => undefined) });
+  core = await startServer(cfg, [adapter], { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: FAKE_ORIGIN, gh: importing(gh), backlogAutoImport: true, judge: () => new Promise(() => undefined), rubricJudge: () => new Promise(() => undefined) });
   const base = `http://127.0.0.1:${core.server.port}`;
   for (let n = 0; n < 400; n++) {
     const b = (await (await fetch(`${base}/api/backlog`)).json()) as Backlog;
@@ -93,7 +95,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     const body = (await r.json()) as AskAnswerResult;
     expect(body.already).toBe(false);
     expect(body.ask).toMatchObject({ id: ask.id, state: "answered", answers: [], resume: { state: "running" } });
-    expect(queued()).toEqual([[306, "comment", null, { body: `## 回答\n\n${B}\n\n移行はしない` }], [306, "set", "label:needs-decision", false]]);
+    expect(queued()).toEqual([[306, "comment", null, { body: `## 回答\n\n${B}\n\n移行はしない`, screen: true }], [306, "set", "label:needs-decision", false]]);
     expect(stageTasks(306).map((t) => t.title.split(":")[0])).toEqual(["#306 実装"]);
     expect(body.ask!.resume!.taskId).toBe(stageTasks(306)[0]!.id);
     // nothing was asked of GitHub to answer (the import alone reads it; there is no PR to check)
@@ -107,7 +109,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     const base = await boot(fakeGh().gh, broken);
     const ask = await decisionOf306(base);
     const body = (await (await answer(base, ask.id, { kind: "text", text: "B で" })).json()) as AskAnswerResult;
-    expect(queued()[0]).toEqual([306, "comment", null, { body: "## 回答\n\nB で" }]);
+    expect(queued()[0]).toEqual([306, "comment", null, { body: "## 回答\n\nB で", screen: true }]);
     expect(body.ask!.resume).toMatchObject({ state: "failed", reason: "ランナーが検出されていません", taskId: null });
     expect(stageTasks(306)).toHaveLength(0);
     const after = (await asks(base)).find((a) => a.kind === "decision" && a.pbi?.number === 306)!;
@@ -180,7 +182,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     expect(queued()).toEqual([]);
     // not a dead end: a text (asking to check again) is not the PR's approval and goes
     expect((await answer(base, ask.id, { kind: "text", text: "差分が変わったのでマージ判定をやり直して" })).status).toBe(200);
-    expect(queued()[0]).toEqual([306, "comment", null, { body: `## 回答\n\n差分が変わったのでマージ判定をやり直して\n\n（この回答は問いの時点の PR へのものです。回答の時点で: PR #12 の差分が変わりました（${ASKED.slice(0, 7)} → ${HEAD.slice(0, 7)}））` }]);
+    expect(queued()[0]).toEqual([306, "comment", null, { body: `## 回答\n\n差分が変わったのでマージ判定をやり直して\n\n（この回答は問いの時点の PR へのものです。回答の時点で: PR #12 の差分が変わりました（${ASKED.slice(0, 7)} → ${HEAD.slice(0, 7)}））`, screen: true }]);
   });
 
   test("unchanged PR: the head its [merge-ask] named is still the head → written and going on", async () => {
@@ -220,11 +222,29 @@ describe("POST /api/asks/answer — the Issue side", () => {
     stop("s2", "permission", []);
     const ask = await decisionOf306(base);
     const body = (await (await answer(base, ask.id, { kind: "text", text: "直してから進めて" })).json()) as AskAnswerResult;
-    expect(queued()[0]).toEqual([306, "comment", null, { body: "## 回答\n\n直してから進めて" }]);
+    expect(queued()[0]).toEqual([306, "comment", null, { body: "## 回答\n\n直してから進めて", screen: true }]);
     expect(stageTasks(306)).toHaveLength(1); // the one inserted
     expect(body.ask!.resume).toMatchObject({ state: "queued", taskId: null });
     expect(body.ask!.resume!.reason).toContain("ci: failure");
     expect(body.ask!.resume!.reason).toContain("ランナー側の拒否");
+  });
+
+  test("permission stop grant reply: a stage Task's refused stop is answered on its Issue by its grant — a ## 回答 the next stage Task gets as the person's words (#2745)", async () => {
+    const GRANT = "git push を origin の sb/x にすることだけ許可します";
+    const prompts: string[] = [];
+    const base = await boot(fakeGh().gh, { ...holding, start: (o) => (prompts.push(o.prompt), holding.start(o, () => {})) });
+    const t = insertStage("#306 実装: PBI: 判断待ちの PBI", "done", { issue: 306, action: "complete" });
+    core!.db.appendEvent(t.id, { t: "stop.record", stop: { id: "s1", work: { workspaceId: meta().id, issue: 306, taskId: t.id }, op: "git push", target: "sb/x", reason: "permission", evidence: "denied", safety: "before-effect", conditions: [], answer: null, actions: [], state: "waiting", grant: GRANT, at: Date.now() - 30_000 } });
+    const ask = (await asks(base)).find((a) => a.kind === "stop" && a.pbi?.number === 306)!;
+    expect(ask).toMatchObject({ grant: GRANT, answers: ["grant", "text"], blockers: [] });
+    // only the grant is answered here; a text to a stage Task's stop is still not
+    expect((await answer(base, ask.id, { kind: "text", text: "x" })).status).toBe(422);
+    const r = await answer(base, ask.id, { kind: "grant" });
+    expect(r.status).toBe(200);
+    expect(queued()[0]).toEqual([306, "comment", null, { body: `## 回答\n\n${GRANT}`, screen: true }]);
+    for (let n = 0; n < 200 && !prompts.length; n++) await Bun.sleep(10);
+    expect(prompts.at(-1)).toContain(`利用者が画面で答えた Issue #306 の最新の回答（利用者の言葉）:\n\n\`\`\`\`text\n${GRANT}\n\`\`\`\``);
+    expect(((await (await fetch(`${base}/api/policies`)).json()) as { policies: unknown[] }).policies).toEqual([]);
   });
 
   test("confirmation: ok checks the line and, the PBI not closable yet, starts nothing; a no without a reason is 400", async () => {

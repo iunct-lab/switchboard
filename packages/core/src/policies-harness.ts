@@ -73,7 +73,7 @@ export function harness() {
     /** What the codex runner was sent after its first turn (the check Task's replies). */
     sent: [] as string[],
     gh: (async (args) => {
-      if (args[0] === "repo") return { code: 0, stdout: "acme/app\n", stderr: "" };
+      if (args[0] === "repo") return { code: 0, stdout: "acme/app true\n", stderr: "" };
       if (args[0] === "variable") return { code: 0, stdout: "https://github.com/users/acme/projects/11\n", stderr: "" };
       if (args[0] === "pr" && args[1] === "view") {
         h.prCalls++;

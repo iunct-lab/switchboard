@@ -87,6 +87,18 @@ test("nothing is read as current when it cannot be told: no app, the app down, a
   expect((await run(["view", "3"], app((m, p) => (p === "" ? { body: LIST } : { status: 409, body: { error: "まだ GitHub から取り込んでいません" } })))).code).toBe(2);
 });
 
+test("a sandbox refusal names the approved rerun; the app down keeps its line (#2726)", async () => {
+  const refused = { fetch: async () => { throw Object.assign(new Error("EPERM: Was there a typo in the url or port?"), { code: "EPERM" }); }, calls: [] };
+  const r = await run(["view", "3"], refused as unknown as ReturnType<typeof app>);
+  expect(r.code).toBe(2);
+  expect(r.err).toContain("サンドボックスがこのホストのアプリ（BACKLOG_URL）への接続を止めています");
+  expect(r.err).toContain("承認つきの実行で同じコマンドを 1 回やり直して");
+  const down = await run(["view", "3"], app(() => "down"));
+  expect(down.code).toBe(2);
+  expect(down.err).toContain("アプリに届きません（connect ECONNREFUSED）。判定できません");
+  expect(down.err).not.toContain("承認つきの実行");
+});
+
 test("readRecords --fresh: a 424 sync answers the stored records with unsynced; the app down is unknown (#2264)", async () => {
   const records = { workspaceId: "ws1", repository: "acme/app", fetchedAt: SYNC.syncedAt, issues: [] };
   const env = { BACKLOG_URL: "http://app/api/backlog", GH_REPO: "acme/app" };

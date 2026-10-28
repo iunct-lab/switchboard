@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { AgentEvent, PendingApproval, ServerMessage, Task, TaskOutcome, TaskStatus } from "@switchboard/protocol";
 import { applyApprovalEvent } from "./approvals.ts";
-import { type NotificationCtor, noticeFor, notifyPermission, showNotice } from "./notify.ts";
+import { type NotificationCtor, noticeFor, noticesFor, notifyPermission, showNotice } from "./notify.ts";
 
 const task = (id: string, status: TaskStatus, outcome: TaskOutcome, reviewedAt: number | null = null, updatedAt = 1): Task => ({ id, workspaceId: null, title: `title of ${id}`, runner: "claude", cwd: "/w", scope: ["/w"], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome, reviewedAt, judgedResult: null, judgedReason: "secret judged reason", judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 0, createdAt: 0, updatedAt });
 const ev = (taskId: string, e: AgentEvent, ts = 1): ServerMessage => ({ type: "event", env: { taskId, seq: ts, ts, ev: e } });
@@ -107,4 +107,31 @@ test("(e) clicking the notification opens the task and closes it", () => {
 test("(f) a constructor that throws (Android Chrome) returns false", () => {
   const f = fakeNotification("granted", true);
   expect(showNotice(noticeFor(ev("t1", ask("p1")), [], new Set())!, f.N, () => {})).toBe(false);
+});
+
+test("task.terminal waiting notifies once per wait, the first status too; task.terminals after hello notifies only a wait that came while away", () => {
+  const seen = new Set<string>();
+  const tasks = [task("t1", "idle", "done"), task("t2", "idle", "done")];
+  const term = (status: "working" | "waiting" | "done" | null, taskId = "t1"): ServerMessage => ({ type: "task.terminal", taskId, status });
+  const now = (terminals: Record<string, "working" | "waiting" | "done">): ServerMessage => ({ type: "task.terminals", terminals });
+  const notice = (id: string) => ({ key: `${id}\u0000terminal`, taskId: id, title: `title of ${id}`, body: "ターミナルの Claude Code が返事を待っています" });
+  // a reload: the wait is in what is, and nothing was known on this page
+  expect(noticesFor(now({ t1: "waiting" }), tasks, seen)).toEqual([]);
+  expect(noticesFor(term("waiting"), tasks, seen)).toEqual([]); // the same wait
+  expect(noticeFor(term("working"), tasks, seen)).toBeNull();
+  expect(noticesFor(term("waiting"), tasks, seen)).toEqual([notice("t1")]);
+  // a reconnect during the same wait
+  expect(noticesFor(now({ t1: "waiting" }), tasks, seen)).toEqual([]);
+  // both working before the drop, both waiting while away: each is notified on the reconnect
+  expect(noticeFor(term("working"), tasks, seen)).toBeNull();
+  expect(noticeFor(term("working", "t2"), tasks, seen)).toBeNull();
+  expect(noticesFor(now({ t1: "waiting", t2: "waiting" }), tasks, seen)).toEqual([notice("t1"), notice("t2")]);
+  // the shell ended; a new Claude Code whose first status is a wait (a dialog at start) notifies
+  expect(noticeFor(term(null), tasks, seen)).toBeNull();
+  expect(noticeFor(term("waiting"), tasks, seen)).toEqual(notice("t1"));
+  // t1's shell ended while away (left out of what is): its next wait is a new one
+  expect(noticesFor(now({ t2: "waiting" }), tasks, seen)).toEqual([]);
+  expect(noticesFor(term("waiting"), tasks, seen)).toEqual([notice("t1")]);
+  // noticeFor leaves task.terminals to noticesFor
+  expect(noticeFor(now({ t1: "waiting" }), tasks, seen)).toBeNull();
 });

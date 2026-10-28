@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { EventEnvelope, PermissionAnswers, PermissionDecision } from "./events.ts";
-import { DeviceAuthView, Task, TeleportProgress } from "./model.ts";
+import { DeviceAuthView, Task, TeleportProgress, TerminalStatus } from "./model.ts";
 
 /** Client → daemon over WebSocket. REST covers the rest (see core/server.ts). */
 export const ClientMessage = z.discriminatedUnion("type", [
@@ -26,6 +26,10 @@ export const ServerMessage = z.discriminatedUnion("type", [
   z.object({ type: z.literal("task.deviceAuth"), taskId: z.string(), auth: DeviceAuthView.nullable() }),
   /** "Continue locally" moved on for a Cloud Task (#1306); null when it was cleared. Not an event: never stored. */
   z.object({ type: z.literal("task.teleport"), taskId: z.string(), progress: TeleportProgress.nullable() }),
+  /** Claude Code in the Task's terminal changed state (#1574); null when it or the shell ended. Not an event: never stored. */
+  z.object({ type: z.literal("task.terminal"), taskId: z.string(), status: TerminalStatus.nullable() }),
+  /** Right after hello: every Task whose terminal has a Claude Code status now (#1574). What is, not a change. */
+  z.object({ type: z.literal("task.terminals"), terminals: z.record(z.string(), TerminalStatus) }),
   /** The daemon is about to re-exec itself; clients should expect the socket to drop and reconnect. */
   z.object({ type: z.literal("daemon.restarting") }),
   z.object({ type: z.literal("error"), message: z.string() }),

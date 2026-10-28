@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import type { Task, Workspace } from "@switchboard/protocol";
+import type { Task, TerminalStatus, Workspace } from "@switchboard/protocol";
 import { OriginTag, ResumeTag, ShadowTag } from "./ui.tsx";
-import { attentionList, outcomeDotClass, outcomeLabel } from "../attention.ts";
+import { attentionList, outcomeDotClass, outcomeLabel, terminalMark } from "../attention.ts";
 import { taskTimes } from "../inProgress.ts";
 import { filterTasks, PAGE, STATUS_FILTERS, type StatusFilter } from "../taskList.ts";
 
@@ -11,9 +11,15 @@ const timesLine = (t: Task) => {
   return `${x.started} · ${x.since}`;
 };
 
+/** Claude Code in the Task's terminal tab: working / waiting for the person (#1574). */
+function TerminalMark(props: { status: TerminalStatus | undefined }) {
+  const mark = terminalMark(props.status);
+  return mark && <span className={mark.className}>{mark.text}</span>;
+}
+
 const dotClass = (s: Task["status"]) => (s === "running" ? "run" : s === "waiting" ? "wait" : s === "error" ? "err" : "idle");
 
-export function Rail(props: { workspaces: Workspace[]; tasks: Task[]; currentTaskId?: string; approvals: number; approvalsOpen: boolean; onApprovals: () => void; listOpen: boolean; onToggleList: () => void; onOpenTask: (id: string) => void; onHome: () => void; onFeedback: () => void; onShowArchived: () => void }) {
+export function Rail(props: { workspaces: Workspace[]; tasks: Task[]; currentTaskId?: string; approvals: number; approvalsOpen: boolean; onApprovals: () => void; listOpen: boolean; onToggleList: () => void; onOpenTask: (id: string) => void; onHome: () => void; onFeedback: () => void; onShowArchived: () => void; terminals: Record<string, TerminalStatus> }) {
   // the Tasks group (#1142): searched and filtered in what the page holds, drawn PAGE rows at a time
   const [q, setQ] = useState("");
   const [status, setStatus] = useState<StatusFilter>("all");
@@ -28,7 +34,7 @@ export function Rail(props: { workspaces: Workspace[]; tasks: Task[]; currentTas
     const k = t.workspaceId;
     byWs.set(k, [...(byWs.get(k) ?? []), t]);
   }
-  const active = live.filter((t) => t.status === "running" || t.status === "waiting");
+  const active = live.filter((t) => t.status === "running" || t.status === "waiting" || props.terminals[t.id] === "waiting");
   const attention = attentionList(live);
   return (
     <aside className={`rail ${props.listOpen ? "open" : ""}`}>
@@ -48,6 +54,7 @@ export function Rail(props: { workspaces: Workspace[]; tasks: Task[]; currentTas
             <button key={t.id} className={`it ${props.currentTaskId === t.id ? "on" : ""}`} onClick={() => props.onOpenTask(t.id)} title={`${t.title}\n${timesLine(t)}`}>
               <span className="t">{t.title}</span>
               <ShadowTag task={t} />
+              <TerminalMark status={props.terminals[t.id]} />
               <span className={`dot ${dotClass(t.status)}`} />
             </button>
           ))}
@@ -107,6 +114,7 @@ export function Rail(props: { workspaces: Workspace[]; tasks: Task[]; currentTas
           {t.resumeAt === null && <OriginTag origin={t.origin} />}
           <ResumeTag resumeAt={t.resumeAt} reason={t.resumeReason} compact />
           {t.resumeAt === null && <ShadowTag task={t} />}
+          <TerminalMark status={props.terminals[t.id]} />
           <span className={`dot ${dotClass(t.status)}`} />
         </button>
       ))}

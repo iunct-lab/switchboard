@@ -1,4 +1,4 @@
-import type { ServerMessage, Task } from "@switchboard/protocol";
+import type { ServerMessage, Task, TerminalStatus } from "@switchboard/protocol";
 
 /**
  * OS notifications for approval waits (#1138), shown only while the page is open (no Web Push).
@@ -12,6 +12,9 @@ export type Notice = { key: string; taskId: string; title: string; body: string 
  * The notice a /ws message calls for, or null. A permission.ask notifies once per (task, ask id); its
  * permission.resolved marks the ask seen, so a late redelivery stays quiet. A task.updated notifies when the outcome
  * turns needs_action on a task not reviewed yet and not waiting (a waiting task's ask already notified).
+ * A task.terminal waiting (Claude Code in the terminal tab, #1574) notifies once per wait. task.terminals (what is, sent
+ * after hello; noticesFor) notifies only a wait that came while away from a status this page knew: not after a reload,
+ * and not the same wait again on a reconnect.
  * `tasks` is the list before this message is applied; `seen` is kept across messages and grows here.
  */
 export function noticeFor(m: ServerMessage, tasks: Task[], seen: Set<string>): Notice | null {
@@ -35,7 +38,37 @@ export function noticeFor(m: ServerMessage, tasks: Task[], seen: Set<string>): N
     seen.add(key);
     return { key, taskId: t.id, title: t.title, body: "要対応: 回答を待っています" };
   }
+  if (m.type === "task.terminal") return terminalNotice(m.taskId, m.status, true, tasks, seen);
   return null;
+}
+
+/** noticeFor, and task.terminals: what is after hello, with a notice for each Task it calls for (see noticeFor). */
+export function noticesFor(m: ServerMessage, tasks: Task[], seen: Set<string>): Notice[] {
+  if (m.type !== "task.terminals") {
+    const n = noticeFor(m, tasks, seen);
+    return n ? [n] : [];
+  }
+  // a Task left out has no Claude Code in its terminal now: forget it, as its null would have
+  for (const k of [...seen]) {
+    const [taskId, kind] = k.split("\u0000");
+    if (kind === "terminal" && !(taskId! in m.terminals)) seen.delete(k);
+  }
+  return Object.entries(m.terminals).flatMap(([taskId, status]) => terminalNotice(taskId, status, false, tasks, seen) ?? []);
+}
+
+/** `live`: a change now, not the state resent after hello. A null status (the shell ended) forgets the Task. */
+function terminalNotice(taskId: string, status: TerminalStatus | null, live: boolean, tasks: Task[], seen: Set<string>): Notice | null {
+  const key = `${taskId}\u0000terminal`, known = `${key}\u0000known`;
+  if (status !== "waiting") {
+    seen.delete(key);
+    if (status === null) seen.delete(known);
+    else seen.add(known);
+    return null;
+  }
+  if (seen.has(key)) return null;
+  seen.add(key);
+  if (!live && !seen.has(known)) return null;
+  return { key, taskId, title: tasks.find((t) => t.id === taskId)?.title ?? taskId, body: "ターミナルの Claude Code が返事を待っています" };
 }
 
 /** The part of the browser's Notification API used here; injected so tests can pass a fake. */

@@ -58,7 +58,7 @@ const rest = (i: Issue) => ({ node_id: i.id, number: i.number, html_url: `https:
 let second = "";
 const gh: GhRunner = async (args, cwd) => {
   if (down) return { code: 1, stdout: "", stderr: "error connecting to api.github.com" };
-  if (args[0] === "repo") return { code: 0, stdout: cwd === second ? "acme/second\n" : "acme/app\n", stderr: "" };
+  if (args[0] === "repo") return { code: 0, stdout: cwd === second ? "acme/second true\n" : "acme/app true\n", stderr: "" };
   if (second && cwd === second && args[1] === "graphql") {
     const q = args.find((a) => a.startsWith("query="))?.slice(6) ?? "";
     const empty = { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] };

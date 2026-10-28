@@ -6,6 +6,7 @@ import type { AgentEvent, Backlog, BacklogAction, BacklogIssueDetail, BacklogIte
 import { loadConfig } from "./config.ts";
 import type { Suggester } from "./routing.ts";
 import { startServer, type CoreServer } from "./server.ts";
+import { taskAllowRules } from "./tasks.ts";
 import { Db } from "./db.ts";
 import { importing } from "../fixtures/github-import.ts";
 import { readRecords, runBacklog } from "../../../ops-kit/src/backlog-client.ts";
@@ -13,10 +14,12 @@ import { main as opsKit } from "../../../ops-kit/src/cli.ts";
 import { fakeGh as fakeKitGh } from "../../../ops-kit/src/gh.ts";
 import { ghBoard, overlap, storedMaterial } from "../../../scripts/parallel-guard.ts";
 import { fmtTime } from "./ratelimit.ts";
-import { buildStartPrompt, canStartStoredBacklog, confirmationsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld } from "./backlog.ts";
+import { answerStoredDecision, buildStartPrompt, canStartStoredBacklog, screenAnswer, confirmationsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld } from "./backlog.ts";
 
 // the writer of the waits (#817), read at run time: scripts/ is not type-checked under core's settings
 const guard = "../../../scripts/parallel-guard.ts";
+/** The meta workspace is this checkout, whose origin is not the fake gh's acme/app: no origin to check (#2799; tasks.test.ts checks it). */
+const FAKE_ORIGIN = () => null;
 const { releaseBody } = (await import(guard)) as { releaseBody: (reason: string, waits?: number[], overlap?: boolean) => string };
 const FIXTURE_STAGE_NAMES: Record<string, BacklogAction> = { "PBI にする": "to-pbi", "Task に分解": "to-tasks", "実装": "complete", "状況確認": "check", "閉じる": "close" };
 /** The `stage` a fixture Task gets from its title, as the button's Task would have it. */
@@ -36,7 +39,7 @@ function fakeGh(fail?: { code: number; stderr: string }, failIssueWrite = false)
     calls.push(args);
     cwds.push(cwd);
     if (fail) return { code: fail.code, stdout: "", stderr: fail.stderr };
-    if (args[0] === "repo") return { code: 0, stdout: "acme/app\n", stderr: "" };
+    if (args[0] === "repo") return { code: 0, stdout: "acme/app true\n", stderr: "" };
     if (args[0] === "variable") return { code: 0, stdout: "https://github.com/users/acme/projects/11\n", stderr: "" };
     if (args[0] === "issue") return failIssueWrite ? { code: 1, stdout: "", stderr: "HTTP 403" } : { code: 0, stdout: "", stderr: "" };
     if (args.some((a) => a.includes("comments(last:"))) return { code: 0, stdout: JSON.stringify(decisions), stderr: "" };
@@ -97,7 +100,7 @@ async function boot(gh: GhRunner, adapter: RunnerAdapter | RunnerAdapter[] = { i
   home = mkdtempSync(join(tmpdir(), "sb-backlog-"));
   const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0", ...env });
   // as the daemon starts: every workspace is imported at boot (#885); the tests begin once it is stored
-  core = await startServer(cfg, [adapter].flat(), { port: 0, selfdevChecks: false, dryRunRestart: true, gh: importing(gh, () => openPulls), llmSuggester, backlogAutoImport: true });
+  core = await startServer(cfg, [adapter].flat(), { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: FAKE_ORIGIN, gh: importing(gh, () => openPulls), llmSuggester, backlogAutoImport: true });
   const base = `http://127.0.0.1:${core.server.port}`;
   await refreshed(base, false);
   return base;
@@ -165,7 +168,7 @@ test("GET /api/backlog after a restart with GitHub failing, and from a restored 
         db.close();
       }
       const cfg = loadConfig({ SWITCHBOARD_HOME: dir, SWITCHBOARD_KNOWLEDGE: join(dir, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(dir, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
-      core = await startServer(cfg, [], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: throwing, backlogAutoImport: true }); // as the daemon starts
+      core = await startServer(cfg, [], { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: FAKE_ORIGIN, gh: throwing, backlogAutoImport: true }); // as the daemon starts
       const again = await refreshed(`http://127.0.0.1:${core.server.port}`, false);
       expect(again.items.map((i) => [i.number, i.stage, i.decision])).toEqual(before.items.map((i) => [i.number, i.stage, i.decision]));
       expect(again.fetchedAt).toBe(before.fetchedAt);
@@ -223,7 +226,7 @@ test("GET /api/backlog: fetchedAt is the GitHub workspaces' import, not a worksp
 
 test("GET /api/backlog: a malformed GraphQL answer is an error of that workspace, not zero items", async () => {
   const gh: GhRunner = async (args) =>
-    args[0] === "repo" ? { code: 0, stdout: "acme/app", stderr: "" }
+    args[0] === "repo" ? { code: 0, stdout: "acme/app true", stderr: "" }
     : args[0] === "variable" ? { code: 0, stdout: "https://github.com/users/acme/projects/11", stderr: "" }
     : { code: 0, stdout: '{"errors":[{"message":"rate limited"}]}', stderr: "" };
   const base = await boot(gh);
@@ -236,7 +239,7 @@ test("GET /api/backlog: an answer without pageInfo, or a node of an unexpected s
   const ok = fakeGh();
   const dirs = { noPage: "", badNode: "" };
   const gh: GhRunner = async (args, cwd) => {
-    if (args[0] === "repo" && (cwd === dirs.noPage || cwd === dirs.badNode)) return { code: 0, stdout: `acme/${cwd === dirs.noPage ? "nopage" : "badnode"}\n`, stderr: "" };
+    if (args[0] === "repo" && (cwd === dirs.noPage || cwd === dirs.badNode)) return { code: 0, stdout: `acme/${cwd === dirs.noPage ? "nopage" : "badnode"} true\n`, stderr: "" };
     if (args[0] === "api" && cwd === dirs.noPage) return { code: 0, stdout: '{"data":{"repository":{"issues":{"nodes":[]}}}}', stderr: "" };
     if (args[0] === "api" && cwd === dirs.badNode) return { code: 0, stdout: '{"data":{"repository":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"number":1}]}}}}', stderr: "" };
     return ok.gh(args, cwd);
@@ -266,7 +269,7 @@ test("GET /api/backlog: every registered workspace; one that fails does not hide
   const dirs = { lib: "", broken: "" };
   const gh: GhRunner = async (args, cwd) => {
     if (cwd === dirs.broken) return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
-    if (cwd === dirs.lib && args[0] === "repo") return { code: 0, stdout: "acme/lib\n", stderr: "" };
+    if (cwd === dirs.lib && args[0] === "repo") return { code: 0, stdout: "acme/lib true\n", stderr: "" };
     return ok.gh(args, cwd);
   };
   const base = await boot(gh);
@@ -309,7 +312,7 @@ test("GET /api/backlog?refresh=1: workspaces are imported in parallel; the refre
   const dirs = { lib: "" };
   // an import reads the first page twice (the changed Issues, then the open ones): 1 s per workspace
   const gh: GhRunner = async (args, cwd) => {
-    if (cwd === dirs.lib && args[0] === "repo") return { code: 0, stdout: "acme/lib\n", stderr: "" };
+    if (cwd === dirs.lib && args[0] === "repo") return { code: 0, stdout: "acme/lib true\n", stderr: "" };
     if (args[0] === "api" && !args.includes("after=CURSOR1") && !args.some((a) => a.includes("comments(last:"))) await Bun.sleep(500);
     return ok.gh(args, cwd);
   };
@@ -572,7 +575,7 @@ test("start / answer: an unknown workspace is 404; a missing one 400", async () 
 test("decision: answering another workspace's Issue is kept for that repository", async () => {
   const fake = fakeGh();
   const dir = { lib: "" };
-  const gh: GhRunner = async (args, cwd) => (cwd === dir.lib && args[0] === "repo" ? { code: 0, stdout: "acme/lib\n", stderr: "" } : fake.gh(args, cwd));
+  const gh: GhRunner = async (args, cwd) => (cwd === dir.lib && args[0] === "repo" ? { code: 0, stdout: "acme/lib true\n", stderr: "" } : fake.gh(args, cwd));
   const base = await boot(gh);
   dir.lib = mkdtempSync(join(home!, "lib-"));
   const lib = (await (await fetch(`${base}/api/workspaces`, { method: "POST", body: JSON.stringify({ path: dir.lib, name: "lib" }) })).json()) as { id: string };
@@ -580,7 +583,7 @@ test("decision: answering another workspace's Issue is kept for that repository"
   const r = await fetch(`${base}/api/backlog/306/answer`, { method: "POST", body: JSON.stringify({ workspaceId: lib.id, text: "A で" }) });
   expect(r.status).toBe(202);
   expect(core!.db.listPendingBacklogOperations().map((o) => o.repository)).toEqual(["acme/lib", "acme/lib"]);
-  expect(queued()).toEqual([[306, "comment", null, { body: "## 回答\n\nA で" }], [306, "set", "label:needs-decision", false]]);
+  expect(queued()).toEqual([[306, "comment", null, { body: "## 回答\n\nA で", screen: true }], [306, "set", "label:needs-decision", false]]);
   expect(fake.calls.filter((a) => a[0] === "issue")).toHaveLength(0);
 });
 
@@ -986,7 +989,7 @@ test("task decision: the answer is kept for the Task that asked, and its label c
   const base = await boot(fake.gh);
   const r = await fetch(`${base}/api/backlog/305/answer`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), text: "B で" }) });
   expect(r.status).toBe(202);
-  expect(queued()).toEqual([[321, "comment", null, { body: "## 回答\n\nB で" }], [321, "set", "label:needs-decision", false]]);
+  expect(queued()).toEqual([[321, "comment", null, { body: "## 回答\n\nB で", screen: true }], [321, "set", "label:needs-decision", false]]);
 });
 
 test("task decision: an answer sent for the question on screen is refused when the item now asks on another Issue", async () => {
@@ -1000,6 +1003,42 @@ test("task decision: an answer sent for the question on screen is refused when t
   expect(queued()).toEqual([]);
   expect((await post(322)).status).toBe(202);
   expect(queued().map((o) => o[0])).toEqual([322, 322]);
+});
+
+test("stage prompt carries grant: the newest ## 回答 given on the screen goes into the next stage Task's prompt; one from GitHub, from a policy or for a check does not (#2745)", async () => {
+  const GRANT = "B: 登録する — 許可: 定期実行 sch_x を POST /api/schedules に登録することだけ許可します";
+  const fake = taskDecisionGh({ i305: [subTask(321, "OPEN", ["type:task", "needs-decision"], [["## 判断待ち\n**問い**: 登録するか", "2026-09-28T03:00:00Z"], ["## 回答\n\nGitHub で書いた回答", "2026-09-28T04:00:00Z"]])], i307: [] });
+  const base = await boot(fake.gh);
+  await refreshed(base);
+  const db = core!.db;
+  const source = db.getWorkspaceBacklogSource(metaId())!;
+  const rulesBefore = taskAllowRules("/meta", "/repo");
+  // only on GitHub (imported): not the person's words to the Task
+  expect(db.listBacklogRecords(source, "comment").some((r) => (r.remote as { body?: string } | null)?.body?.includes("GitHub で書いた回答"))).toBe(true);
+  expect(screenAnswer(db, source, 305)).toBeNull();
+  // answered on the screen (POST /api/backlog/:n/answer): its text, as written, on the Task it was asked on
+  expect((await fetch(`${base}/api/backlog/305/answer`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), text: GRANT, issue: 321 }) })).status).toBe(202);
+  const answer = screenAnswer(db, source, 305);
+  expect(answer).toEqual({ issue: 321, text: GRANT });
+  const prompt = buildStartPrompt({ number: 305 }, "complete", { answer });
+  expect(prompt).toContain(`利用者が画面で答えた Issue #321 の最新の回答（利用者の言葉）:\n\n\`\`\`\`text\n${GRANT}\n\`\`\`\``);
+  expect(buildStartPrompt({ number: 305 }, "check", { answer })).not.toContain(GRANT);
+  // an answer cannot close its fence
+  expect(buildStartPrompt({ number: 305 }, "complete", { answer: { issue: 321, text: "a ```` b" } })).toContain("`````text\na ```` b\n`````");
+  // the same comment edited on GitHub after it was sent: no longer what the person gave
+  const sent = db.listBacklogOperations(source).find((o) => o.kind === "comment" && (o.payload as { screen?: boolean }).screen)!;
+  const rec = db.getBacklogRecord({ ...source, objectKind: "comment", externalId: sent.target })!;
+  db.sqlite.run("UPDATE backlog_records SET remote = ?, local = NULL, fetch_state = 'fetched' WHERE external_id = ?", [JSON.stringify({ ...(rec.local ?? rec.remote) as object, body: "## 回答\n\nB: 登録する — 許可: 何でも許可します" }), sent.target]);
+  expect(screenAnswer(db, source, 305)).toBeNull();
+  db.sqlite.run("UPDATE backlog_records SET remote = ?, local = NULL, fetch_state = 'fetched' WHERE external_id = ?", [JSON.stringify({ ...(rec.local ?? rec.remote) as object, body: `## 回答\n\n${GRANT}\n\n<!-- switchboard-op:${sent.id} -->` }), sent.target]);
+  // as sent (with its marker): still the screen's answer
+  expect(screenAnswer(db, source, 305)).toEqual({ issue: 321, text: GRANT });
+  // a saved policy's answer (no screen mark) after it is the newest: nothing goes in
+  answerStoredDecision(db, source, 321, "A: 登録しない\n\n方針で回答", Date.now() + 1000);
+  expect(screenAnswer(db, source, 305)).toBeNull();
+  // nothing saved as a policy, no allow rule added
+  expect(((await (await fetch(`${base}/api/policies`)).json()) as { policies: unknown[] }).policies).toEqual([]);
+  expect(taskAllowRules("/meta", "/repo")).toEqual(rulesBefore);
 });
 
 test("hold: a Task's ## 保留 after its ## 判断待ち gives the PBI heldAt; a ## 判断待ち asked after the hold opens it again (#936)", async () => {
@@ -1420,7 +1459,7 @@ test("send: an answer kept is sent to GitHub at once; after a restart one that w
   await core!.stop();
   fake.calls.length = 0;
   const cfg = loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_KNOWLEDGE: join(h, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(h, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
-  core = await startServer(cfg, [], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: importing(fake.gh), backlogAutoImport: true });
+  core = await startServer(cfg, [], { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: FAKE_ORIGIN, gh: importing(fake.gh), backlogAutoImport: true });
   const looked = () => fake.calls.some((a) => a[1]?.startsWith("repos/acme/app/issues/306/comments?"));
   for (let i = 0; i < 100 && !looked(); i++) await Bun.sleep(10);
   expect(looked()).toBe(true);
@@ -1473,7 +1512,7 @@ test("an answer during a limit is stored, read by the next start, and sent after
   fake.limited.on = false;
   fake.calls.length = 0;
   const cfg = loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_KNOWLEDGE: join(h, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(h, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
-  core = await startServer(cfg, [], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: importing(gh), backlogAutoImport: true });
+  core = await startServer(cfg, [], { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: FAKE_ORIGIN, gh: importing(gh), backlogAutoImport: true });
   const after = `http://127.0.0.1:${core.server.port}`;
   const writes = () => fake.calls.filter((a) => a.includes("POST") || a.includes("DELETE")).map((a) => `${a.includes("POST") ? "POST" : "DELETE"} ${a[1]}`);
   for (let i = 0; i < 200 && core.db.listPendingBacklogOperations().length > 0; i++) await Bun.sleep(10);
@@ -1530,6 +1569,8 @@ test("start: a complete prompt says the request covers merges the merge gate pas
     expect(p).toContain(scope);
     expect(p).toContain("マージ判定が `[聞く]` で止めたとき、昇格・デーモンの再起動、認証は、これまでどおり Task の会話で聞いてください");
     expect(p).toContain("「この依頼が含む範囲」");
+    expect(p).toContain("レビューの材料");
+    expect(p).toContain("要望 Issue と PBI");
     expect(p.startsWith(opts.resume ? "PBI #305 は実装中のまま" : opts.other ? ".claude/skills/pbi-complete/SKILL.md" : "/pbi-complete 305\n")).toBe(true);
   }
   // the first line stays: a slash command is expanded only at the start of a prompt
@@ -1846,7 +1887,7 @@ describe("backlog-next prerequisite (#937)", () => {
   function prereqGh(pbis: Record<number, Pbi>, others: Record<string, unknown> = {}) {
     const answer = (data: unknown) => ({ code: 0, stdout: JSON.stringify({ data }), stderr: "" });
     const gh: GhRunner = async (args) => {
-      if (args[0] === "repo") return { code: 0, stdout: "acme/app\n", stderr: "" };
+      if (args[0] === "repo") return { code: 0, stdout: "acme/app true\n", stderr: "" };
       if (args[0] === "variable") return { code: 0, stdout: "https://github.com/users/acme/projects/11\n", stderr: "" };
       if (args[0] === "issue") return { code: 0, stdout: "", stderr: "" };
       const q = args.find((a) => a.startsWith("query=")) ?? "";
@@ -1899,7 +1940,7 @@ describe("backlog-next prerequisite (#937)", () => {
     for (const t of core!.db.listTasks()) core!.db.updateTask(t.id, { status: "running" });
     await core!.stop();
     const cfg = loadConfig({ SWITCHBOARD_HOME: home!, SWITCHBOARD_KNOWLEDGE: join(home!, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home!, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
-    core = await startServer(cfg, [claude.adapter], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: importing(gh), backlogAutoImport: true });
+    core = await startServer(cfg, [claude.adapter], { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: FAKE_ORIGIN, gh: importing(gh), backlogAutoImport: true });
     const again = `http://127.0.0.1:${core.server.port}`;
     await refreshed(again, false);
     await runSchedule(again, id);
@@ -2655,7 +2696,7 @@ test("backlog-next: the unattended stage Task gets no shadow and carries the sch
   const dak: RunnerAdapter = { id: "dak", detect: async () => ({ available: true }), start(opts) { dakStarts.push(opts); return { send() {}, respondPermission() {}, async abort() {}, async close() {}, exited: new Promise(() => {}) }; } };
   home = mkdtempSync(join(tmpdir(), "sb-backlog-"));
   const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
-  core = await startServer(cfg, [holdingClaude().adapter, dak], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: importing(fakeGh().gh) });
+  core = await startServer(cfg, [holdingClaude().adapter, dak], { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: FAKE_ORIGIN, gh: importing(fakeGh().gh) });
   const base = `http://127.0.0.1:${core.server.port}`;
   // a default shadow is saved: the button path would mirror to it, the unattended sweep must not
   expect((await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ shadowRunner: "dak" }) })).status).toBe(200);
@@ -2678,7 +2719,7 @@ async function threeWorkspaces(adapter: RunnerAdapter, broken?: "lib", inner: Gh
   const gh: GhRunner = async (args, cwd) => {
     const name = Object.keys(dirs).find((k) => dirs[k] === cwd);
     if (name && name === broken) return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
-    if (name && args[0] === "repo") return { code: 0, stdout: `acme/${name}\n`, stderr: "" };
+    if (name && args[0] === "repo") return { code: 0, stdout: `acme/${name} true\n`, stderr: "" };
     return inner(args, cwd);
   };
   const base = await boot(gh, adapter);
@@ -2904,7 +2945,7 @@ function reportGh(existing: string[] = []) {
   const calls: string[][] = [];
   const gh: GhRunner = async (args) => {
     calls.push(args);
-    if (args[0] === "repo") return { code: 0, stdout: "acme/app\n", stderr: "" };
+    if (args[0] === "repo") return { code: 0, stdout: "acme/app true\n", stderr: "" };
     const path = args[1] ?? "";
     if (path === "repos/acme/app/issues/501") return { code: 0, stdout: JSON.stringify({ body: "## 概要\nCloses #500。", labels: [], pull_request: {} }), stderr: "" };
     if (path === "repos/acme/app/issues/500") return { code: 0, stdout: JSON.stringify({ body: "## 親 PBI\n#499\n\n## やること", labels: [{ name: "type:task" }] }), stderr: "" };
@@ -3288,7 +3329,7 @@ test("GET /api/backlog before the first import: no items, the workspace in error
   };
   home = mkdtempSync(join(tmpdir(), "sb-backlog-"));
   const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
-  core = await startServer(cfg, [], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: importing(gh) });
+  core = await startServer(cfg, [], { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: FAKE_ORIGIN, gh: importing(gh) });
   const base = `http://127.0.0.1:${core.server.port}`;
   const meta = core.db.listWorkspaces().find((w) => w.kind === "meta")!;
   const first = await (await fetch(`${base}/api/backlog`)).json() as Backlog;
@@ -3341,7 +3382,7 @@ test("replyWaiting: the row's waiting for a reply is backlog-next's awaitingRepl
   const last = (over: Partial<NonNullable<BacklogItem["lastTask"]>> = {}) => ({ id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "needs_action" as const, reviewedAt: null, resumeAt: null, ...over });
   const stopOf = (over: Partial<BacklogItem["stopSummary"][number]> = {}): BacklogItem["stopSummary"][number] => ({
     key: "k", work: { workspaceId: "ws_meta", issue: 1, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "decision", evidence: "マージしてよいか", safety: "before-effect",
-    count: 1, state: "waiting", firstAt: 1, lastAt: 2, lastAnswer: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide", ...over,
+    count: 1, state: "waiting", firstAt: 1, lastAt: 2, lastAnswer: null, grant: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide", ...over,
   });
   const asked = item({ number: 1, stage: "in-progress", tasks: { total: 2, done: 2, doneAt: null }, updatedAt: at, lastTask: last() });
   const stopped = { ...asked, lastTask: last({ outcome: "unknown" }), stopSummary: [stopOf()] };
@@ -3369,7 +3410,7 @@ test("#950: a stop that came again with nothing changed holds the item through a
   const last = { id: "tsk_last", status: "done" as const, statusAt: 1, createdAt: 1, updatedAt: Date.parse("2026-09-10T00:00:00Z"), action: "complete" as const, outcome: "done" as const, reviewedAt: null, resumeAt: null };
   const stopOf = (over: Partial<BacklogItem["stopSummary"][number]> = {}): BacklogItem["stopSummary"][number] => ({
     key: "k", work: { workspaceId: "ws_meta", issue: 3, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "depends", evidence: "CI", safety: "unknown",
-    count: 2, state: "waiting", firstAt: 1, lastAt: 2, lastAnswer: null, conditions: [], actions: [], changes: [], unchanged: true, next: "wait", ...over,
+    count: 2, state: "waiting", firstAt: 1, lastAt: 2, lastAnswer: null, grant: null, conditions: [], actions: [], changes: [], unchanged: true, next: "wait", ...over,
   });
   const touched = "2026-09-12T00:00:00Z"; // the Issue was updated after the Task ended
   const base = item({ number: 3, stage: "ready", lastTask: last, updatedAt: touched, stopSummary: [stopOf()] });

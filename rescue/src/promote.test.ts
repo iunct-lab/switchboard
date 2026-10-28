@@ -3,7 +3,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { commitFile, daemonSource, freePort, health, makeRepo, until } from "./fixture.ts";
-import { KEEP_SNAPSHOTS, listSnapshots, promote, restoreDb, rollback, snapshotDb, type Ctx } from "./promote.ts";
+import { checkDaemon, KEEP_SNAPSHOTS, listSnapshots, promote, restoreDb, rollback, snapshotDb, type Ctx } from "./promote.ts";
 import { appendHistory, buildRelease, currentOf, previousOf, readHistory, switchTo } from "./releases.ts";
 import { Supervisor } from "./supervisor.ts";
 
@@ -164,3 +164,33 @@ test("the candidate does not get sb-rescue's starter token (#2077)", async () =>
     delete process.env.SWITCHBOARD_STARTER_TOKEN;
   }
 }, 60_000);
+
+test("checkDaemon says why the daemon is unhealthy, in the same words (#2814)", async () => {
+  const asked: string[] = [];
+  const fake = (health: () => Response, upgrade = true) =>
+    Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: (req, srv) => {
+        const path = new URL(req.url).pathname;
+        asked.push(path);
+        if (path === "/api/health") return health();
+        if (path === "/ws" && upgrade) return srv.upgrade(req) ? undefined : new Response("upgrade failed", { status: 400 });
+        return new Response("no", { status: 404 });
+      },
+      websocket: { message() {} },
+    });
+  const down = await freePort();
+  expect(await checkDaemon(down, f.home)).toStartWith(`no answer on port ${down} (`);
+  const servers = [fake(() => new Response("boom", { status: 500 })), fake(() => Response.json({ ok: false })), fake(() => Response.json({ ok: true }), false), fake(() => Response.json({ ok: true }))];
+  try {
+    const [err, notOk, noWs, fine] = servers.map((s) => s.port as number);
+    expect(await checkDaemon(err!, f.home)).toBe("/api/health answered 500");
+    expect(await checkDaemon(notOk!, f.home)).toBe("/api/health answered 200");
+    expect(["WebSocket /ws refused", "WebSocket /ws did not open"]).toContain((await checkDaemon(noWs!, f.home))!);
+    expect(await checkDaemon(fine!, f.home)).toBeNull();
+    expect(asked).not.toContain("/api/tasks");
+  } finally {
+    for (const s of servers) await s.stop(true);
+  }
+});

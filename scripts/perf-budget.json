@@ -25,14 +25,14 @@
       }
     },
     "bundle": {
-      "js": 237494,
-      "css": 7632
+      "js": 239160,
+      "css": 7675
     }
   },
   "local": {
     "journeys": {
       "launch": {
-        "requests": 13,
+        "requests": 14,
         "layoutCount": 5,
         "recalcStyleCount": 7,
         "layoutShift": 0.1959
@@ -55,8 +55,8 @@
       }
     },
     "bundle": {
-      "js": 237485,
-      "css": 7632
+      "js": 239160,
+      "css": 7675
     }
   }
 }

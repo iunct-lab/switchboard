@@ -21,11 +21,12 @@ afterEach(() => {
     else process.env[k] = saved[k];
   }
 });
-function repoWithOrigin(url: string | null): string {
+function repoWithOrigin(url: string | null, publicTarget?: string): string {
   const dir = mkdtempSync(join(tmpdir(), "ops-kit-gh-"));
   dirs.push(dir);
   Bun.spawnSync(["git", "init", "-q"], { cwd: dir, env: { ...process.env } });
   if (url) Bun.spawnSync(["git", "remote", "add", "origin", url], { cwd: dir, env: { ...process.env } });
+  if (publicTarget) writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ publicSync: { target: publicTarget } }));
   return dir;
 }
 
@@ -46,6 +47,53 @@ describe("repoOf", () => {
     const gh = fakeGh([() => "example/repo\n"]);
     expect(await repoOf(gh, {}, repoWithOrigin(null))).toEqual({ owner: "example", name: "repo" });
     expect(gh.calls[0]).toEqual({ kind: "run", args: ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"] });
+  });
+
+  // Synthetic names only: acme/widget is published, acme/widget-dev is its development repository, someone/widget a fork.
+  describe("a clone of the public copy", () => {
+    const git = (dir: string, ...args: string[]) => Bun.spawnSync(["git", ...args], { cwd: dir, env: { ...process.env } });
+    const refused = async (p: Promise<unknown>) => {
+      const e = await p.then(() => null, (err: unknown) => err);
+      expect(e).toBeInstanceOf(GhError);
+      expect((e as Error).message).toContain("gh repo set-default");
+      expect((e as Error).message).toContain("GH_REPO");
+    };
+
+    test("as cloned (origin = the public copy) stops", async () => {
+      await refused(repoOf(fakeGh([]), {}, repoWithOrigin("https://github.com/acme/widget.git", "acme/widget")));
+    });
+
+    test("a fork's clone (origin = the fork, upstream = the public copy) goes to the fork", async () => {
+      const dir = repoWithOrigin("https://github.com/someone/widget.git", "acme/widget");
+      git(dir, "remote", "add", "upstream", "https://github.com/acme/widget.git");
+      expect(await repoOf(fakeGh([]), {}, dir)).toEqual({ owner: "someone", name: "widget" });
+    });
+
+    test("the remote gh repo set-default chose wins over origin", async () => {
+      const dir = repoWithOrigin("https://github.com/acme/widget.git", "acme/widget");
+      git(dir, "remote", "add", "mine", "git@github.com:someone/widget.git");
+      git(dir, "config", "remote.mine.gh-resolved", "base");
+      expect(await repoOf(fakeGh([]), {}, dir)).toEqual({ owner: "someone", name: "widget" });
+    });
+
+    test("GH_REPO: the public copy stops, another goes", async () => {
+      const dir = repoWithOrigin("https://github.com/acme/widget.git", "acme/widget");
+      await refused(repoOf(fakeGh([]), { GH_REPO: "acme/widget" }, dir));
+      await refused(repoOf(fakeGh([]), { GH_REPO: "https://github.com/Acme/Widget" }, dir));
+      expect(await repoOf(fakeGh([]), { GH_REPO: "someone/widget" }, dir)).toEqual({ owner: "someone", name: "widget" });
+    });
+
+    test("the development repository, whose publicSync names the public copy, goes", async () => {
+      expect(await repoOf(fakeGh([]), {}, repoWithOrigin("https://github.com/acme/widget-dev.git", "acme/widget"))).toEqual({ owner: "acme", name: "widget-dev" });
+    });
+
+    test("a tree without publicSync goes", async () => {
+      expect(await repoOf(fakeGh([]), {}, repoWithOrigin("https://github.com/acme/widget.git"))).toEqual({ owner: "acme", name: "widget" });
+    });
+
+    test("gh repo view naming the public copy stops too", async () => {
+      await refused(repoOf(fakeGh([() => "acme/widget\n"]), {}, repoWithOrigin(null, "acme/widget")));
+    });
   });
 });
 

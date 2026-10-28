@@ -15,7 +15,7 @@ import { startServer, type CoreServer } from "./server.ts";
 const pages = (await Bun.file(new URL("../fixtures/backlog-graphql.json", import.meta.url)).json()) as unknown[];
 const decisions = (await Bun.file(new URL("../fixtures/backlog-decisions.json", import.meta.url)).json()) as unknown;
 const gh: GhRunner = async (args) => {
-  if (args[0] === "repo") return { code: 0, stdout: "acme/app\n", stderr: "" };
+  if (args[0] === "repo") return { code: 0, stdout: "acme/app true\n", stderr: "" };
   if (args[0] === "variable") return { code: 0, stdout: "https://github.com/users/acme/projects/11\n", stderr: "" };
   if (args.some((a) => a.includes("comments(last:"))) return { code: 0, stdout: JSON.stringify(decisions), stderr: "" };
   return { code: 0, stdout: JSON.stringify(args.includes("after=CURSOR1") ? pages[1] : pages[0]), stderr: "" };

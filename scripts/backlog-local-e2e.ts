@@ -3,7 +3,7 @@
  * headless Chrome (CDP) against the daemon with a gh that throws (every call recorded) and a fake runner that stays
  * running. The daemon gets no test hook. Build the screen first: `bun run --cwd apps/web build`.
  *
- * (1) 設定: 「Workspace」 → ホストのパス with 「GitHub と連携しない」 checked → (2) `ops-kit backlog create` a request #1 → the
+ * (1) 設定: 「Workspace」 → ホストにあるディレクトリを追加 with 「GitHub と連携しない」 checked → (2) `ops-kit backlog create` a request #1 → the
  * Backlog screen lists it under 要望のまま → (3) 「PBI にする」 → a to-pbi Task → (4) as that Task would: PBI #2
  * (`--field Status=Backlog`) and #1's `## 派生 PBI` → #2 under 分解待ち → (5) 「Task に分解」 → a to-tasks Task →
  * (6) Task #3 under #2 and `ops-kit backlog set 2 Status Ready` → #2 under Ready → (7) 「実装する」 → a complete Task.
@@ -140,7 +140,7 @@ try {
     await until(() => evaluate(`!!document.querySelector('.rail')`), "Rail");
     await press(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Settings')`, "Settings");
     await until(() => evaluate(`!!(${addCard})`), "設定's Workspace card");
-    await press(`[...(${addCard})?.querySelectorAll('button') ?? []].find(b => b.textContent.trim() === 'ホストのパス')`, "ホストのパス");
+    await press(`[...(${addCard})?.querySelectorAll('button') ?? []].find(b => b.textContent.trim() === 'ホストにあるディレクトリを追加')`, "ホストにあるディレクトリを追加");
     await until(() => evaluate(`!!(${pathField})`), "the path field");
   };
   const openBacklog = async () => {

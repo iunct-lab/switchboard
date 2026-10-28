@@ -134,15 +134,34 @@ fi
 # --- the registered workspaces: cloned to their paths in the database (those under ReposDir), so their tasks' folders exist ---
 # On every bootstrap, not only after the import: a rebuilt machine gets its history back from Litestream but a new
 # disk, and without this the other repositories' tasks cannot start (作業フォルダ … がこの機械に無い).
+# Each from the GitHub repository it is registered to (#2799, workspaces.backlog_source), never from a name made of
+# its folder (a public repository of the same name was cloned that way); a workspace with none is not cloned. A clone
+# GitHub does not answer for as that repository — or as a public one where a private one was registered — is moved
+# aside to <path>.unverified-<time>; the daemon notes each missing workspace in the Inbox, and no Task starts there.
 if [ -f "$SB_HOST_HOME/.switchboard/switchboard.db" ]; then
   as_user bun -e '
     import { Database } from "bun:sqlite";
     const db = new Database(process.argv[1], { readonly: true });
-    for (const { path } of db.query("SELECT path FROM workspaces").all()) console.log(path);
-  ' "$SB_HOST_HOME/.switchboard/switchboard.db" | while read -r ws; do
+    // path, the GitHub repository ("-" = none), private (1 / 0, "-" = not recorded): "-" keeps read from shifting fields
+    for (const { path, backlog_source } of db.query("SELECT path, backlog_source FROM workspaces").all()) {
+      const s = backlog_source ? JSON.parse(backlog_source) : null;
+      const github = s?.service === "github" && typeof s.repository === "string";
+      console.log([path, github ? s.repository : "-", github && typeof s.private === "boolean" ? Number(s.private) : "-"].join("\t"));
+    }
+  ' "$SB_HOST_HOME/.switchboard/switchboard.db" | while IFS=$'\t' read -r ws repo private; do
     case "$ws" in "$SB_REPOS_DIR"/*) ;; *) continue ;; esac
     [ -d "$ws" ] && continue
-    as_user gh repo clone "${SB_GITHUB_REPO%%/*}/$(basename "$ws")" "$ws" -- -q || echo "bootstrap: could not clone $(basename "$ws") (not in the token's repositories?)"
+    name=$(basename "$ws")
+    if [ "$repo" = - ]; then echo "bootstrap: not cloning $name: no registered GitHub repository"; continue; fi
+    as_user gh repo clone "$repo" "$ws" -- -q || { echo "bootstrap: could not clone $name from $repo (not in the token's repositories?)"; continue; }
+    got=$(cd "$ws" && as_user gh repo view --json nameWithOwner,isPrivate -q '"\(.nameWithOwner) \(.isPrivate)"' 2>/dev/null) || got=
+    why=
+    if [ -z "$got" ]; then why="GitHub did not say which repository the clone is"
+    elif [ "$(printf %s "${got%% *}" | tr A-Z a-z)" != "$(printf %s "$repo" | tr A-Z a-z)" ]; then why="the clone is ${got%% *}, registered $repo"
+    elif [ "$private" = 1 ] && [ "${got##* }" != true ]; then why="the clone of $repo is public, registered private"
+    fi
+    [ -z "$why" ] && continue
+    mv "$ws" "$ws.unverified-$(date -u +%Y%m%dT%H%M%SZ)" && echo "bootstrap: moved $name aside: $why"
   done || echo "bootstrap: could not list the workspaces; clone them by hand (the daemon starts anyway)"
 fi
 

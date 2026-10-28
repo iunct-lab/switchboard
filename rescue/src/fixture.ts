@@ -12,8 +12,7 @@ Bun.serve({
   port, hostname: "127.0.0.1",
   fetch(req, srv) {
     const path = new URL(req.url).pathname;
-    if (path === "/api/health") return Response.json({ ok: true, version: ${JSON.stringify(version)}, repoRoot: process.env.SWITCHBOARD_REPO_ROOT, webUrl: process.env.SWITCHBOARD_WEB_URL ?? null, starterToken: process.env.SWITCHBOARD_STARTER_TOKEN ?? null });
-    if (path === "/api/tasks") return Response.json([]);
+    if (path === "/api/health") return Response.json({ ok: true, version: ${JSON.stringify(version)}, repoRoot: process.env.SWITCHBOARD_REPO_ROOT, webUrl: process.env.SWITCHBOARD_WEB_URL ?? null, starterToken: process.env.SWITCHBOARD_STARTER_TOKEN ?? null, busyTasks: [] });
     if (path === "/ws") return srv.upgrade(req) ? undefined : new Response("upgrade failed", { status: 400 });
     return new Response("not found", { status: 404 });
   },

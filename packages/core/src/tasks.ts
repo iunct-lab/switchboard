@@ -14,6 +14,7 @@ import { canTransition, IN_FLIGHT, InvalidTaskTransitionError, TERMINAL } from "
 import { setupScripts, syncSkills } from "./skillsync.ts";
 import { FenceReader, lastAttempt, openStops, reduceStops, reserveStopRetry, StopFenceReader, stopRecordsFor, stopRecoveryPrompt, stopWork, type StopReport } from "./stops.ts";
 import { oneLine } from "./suggest-llm.ts";
+import { originMismatch } from "./workspace-clone.ts";
 
 interface LiveSession {
   session: RunnerSession;
@@ -132,6 +133,8 @@ export function sweepPrivateTmps(root: string, maxAgeMs: number, removable: (tas
 }
 
 export interface TaskManagerOptions {
+  /** How a checkout's origin URL is read for the start check (#2799, originMismatch). Unset = git. */
+  originOf?: (path: string) => string | null;
   /** Where a Codex task's own temp directory is made (#787): `<daemon home>/tmp`. Unset = none is made. */
   privateTmpRoot?: string;
   /** Refuse a Local turn while an interactive Terminal owns its working directory. */
@@ -211,6 +214,7 @@ export class TaskManager {
   private closing = new Map<string, Promise<void>>();
 
   private beforeResume: TaskManagerOptions["beforeResume"];
+  private originOf: TaskManagerOptions["originOf"];
   private idleMs: number;
   private suggest: TaskManagerOptions["suggest"];
   private approval: TaskManagerOptions["approval"];
@@ -238,6 +242,7 @@ export class TaskManager {
     opts: TaskManagerOptions = {},
   ) {
     this.beforeResume = opts.beforeResume;
+    this.originOf = opts.originOf;
     this.idleMs = opts.idleMs ?? 10 * 60 * 1000;
     this.suggest = opts.suggest;
     this.approval = opts.approval;
@@ -1005,6 +1010,14 @@ export class TaskManager {
       this.record(task.id, { t: "status", text: msg });
       this.setStatus(task.id, "error");
       throw new Error(msg);
+    }
+    // A checkout that is not the workspace's registered repository (#2799: a rebuild that cloned a public one of the
+    // same name) would take the task's worktrees, pushes and PRs there: it does not start, the same way
+    const mismatch = task.workspaceId ? originMismatch(task.cwd, this.db.getWorkspaceBacklogSource(task.workspaceId), this.originOf) : null;
+    if (mismatch) {
+      this.record(task.id, { t: "status", text: mismatch });
+      this.setStatus(task.id, "error");
+      throw new Error(mismatch);
     }
     if (task.executionMode === "cloud") { this.startCloudSession(task, prompt, adapter); return; }
     // Development-standard skills where the runner reads them (#469). A skill that cannot be placed never stops the task.

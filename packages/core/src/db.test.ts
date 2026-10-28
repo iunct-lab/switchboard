@@ -110,6 +110,44 @@ test("an import does not move the base of a record with an edit waiting to be se
   db.close();
 });
 
+test("putBacklogSnapshot: a write that throws midway keeps the stored values and the next import catches up (#2815)", () => {
+  const path = join(dir, "switchboard.db");
+  let db = new Db(path);
+  db.putBacklogSnapshot(A, { records: entries(issue()), cursor: "c1", syncedAt: 1000 });
+  db.applyBacklogEdit(A, { records: [{ objectKind: "issue", externalId: "I_12", local: issue({ title: "edited here" }) }], operations: [{ issue: "I_12", targetKind: "issue", target: "I_12", kind: "set", field: "title", payload: "edited here", base: "PBI: stored" }] });
+  const before = db.listBacklogRecords(A);
+  const moved = issue({ updatedAt: "2026-10-05T00:00:00Z" });
+  // the bad record sits between good ones: what came before it in the same write must not stay either
+  const [first, ...rest] = entries(moved);
+  const broken = [first!, { objectKind: "issue", externalId: "I_13", remote: null, fetchState: "fetched" } as BacklogSnapshotEntry, ...rest];
+  expect(() => db.putBacklogSnapshot(A, { records: broken, cursor: "c2", syncedAt: 2000 })).toThrow("has no value");
+  expect(db.listBacklogRecords(A)).toEqual(before);
+  expect(db.getBacklogRepository(A)).toEqual({ ...A, cursor: "c1", lastSuccessfulSync: 1000, retryAt: null });
+  db.close();
+
+  // the daemon stopped there; the next start opens the same file and imports again
+  db = new Db(path);
+  expect(db.listBacklogRecords(A)).toEqual(before);
+  db.putBacklogSnapshot(A, { records: entries(moved), cursor: "c2", syncedAt: 2000 });
+  expect(db.getBacklogRepository(A)).toEqual({ ...A, cursor: "c2", lastSuccessfulSync: 2000, retryAt: null });
+  expect(remotes(db, A).map((r) => [r.id, r.state])).toEqual([["I_12_c1", "fetched"], ["I_12", "fetched"], ["I_12_p", "fetched"]]);
+  expect(db.getBacklogRecord({ ...A, objectKind: "issue", externalId: "I_12" })).toMatchObject({ remote: moved, base: issue(), local: issue({ title: "edited here", updatedAt: "2026-10-05T00:00:00Z" }), fetchedAt: 2000 });
+  db.close();
+});
+
+test("the backlog operations are found by their target (#2815)", () => {
+  const path = join(dir, "switchboard.db");
+  new Db(path).close();
+  const sqlite = new Database(path, { readonly: true });
+  expect(sqlite.query("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'backlog_operations_target'").get()).toEqual({ name: "backlog_operations_target" });
+  // the same SELECT an import runs for every record it read (mergeBacklogRecord)
+  const plan = sqlite
+    .query("EXPLAIN QUERY PLAN SELECT * FROM backlog_operations WHERE service = ? AND host = ? AND repository = ? AND target_kind = ? AND target = ? AND kind = 'set' AND status != 'done' ORDER BY seq")
+    .all("github", "github.com", "acme/app", "issue", "I_12") as Array<{ detail: string }>;
+  expect(plan.map((p) => p.detail).join("\n")).toContain("USING INDEX backlog_operations_target");
+  sqlite.close();
+});
+
 test("a backup (snapshotTo) restores the stored backlog and the sync state", () => {
   const db = new Db(join(dir, "switchboard.db"));
   db.putBacklogSnapshot(A, { records: entries(issue()), cursor: "c1", syncedAt: 1000 });

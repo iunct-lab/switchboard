@@ -4,6 +4,7 @@
 // The first frame to a socket is PtyAttached (the session's id); after that, output as raw strings. A socket that comes
 // back with ?shell=<id> is attached to that session only — never to a new shell (#1137).
 import { childEnv } from "@switchboard/adapter-claude";
+import type { TerminalStatus } from "@switchboard/protocol";
 import type { IPty } from "bun-pty";
 import { z } from "zod";
 
@@ -25,6 +26,53 @@ export const TELEPORT_SESSION_NAME = "continued-from-cloud";
 
 /** The first frame to a terminal socket: which session it is on, for ?shell= when it comes back (#1137). */
 export type PtyAttached = { type: "attached"; shell: string };
+
+/**
+ * Claude Code's Program Status Protocol (OSC 7501, #1574): `ESC ] 7501 ; state=<s>:app=claude-code[:…] BEL`. Claude Code
+ * sends it only when the terminal answers its `ESC ] 7501 ; ?` question before the device attributes reply, and xterm.js
+ * does not answer, so the shell's session answers it (PTY_STATUS_REPLY). The output itself goes to the clients unchanged.
+ */
+const OSC_STATUS = "\x1b]7501;";
+const OSC_STATUS_SEQ = /\x1b\]7501;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
+export const PTY_STATUS_REPLY = "\x1b]7501;?\x07";
+/** The longest unfinished sequence carried to the next chunk; past it, the sequence is dropped (it was not a status). */
+const OSC_CARRY_MAX = 256;
+
+/** Claude Code's state → the Task's terminal status; `clear` (it ended) → null. Unknown states read as done: nothing to do. */
+function terminalStatusOf(body: string): TerminalStatus | null | undefined {
+  const fields = body.split(":");
+  const state = fields[0]?.startsWith("state=") ? fields[0].slice(6) : undefined;
+  if (state === undefined) return undefined;
+  if (state === "clear") return null;
+  if (!fields.includes("app=claude-code")) return undefined; // another program's status is not Claude Code's
+  return state === "working" ? "working" : state === "blocked" ? "waiting" : "done";
+}
+
+/** Reads OSC 7501 out of a shell's output, whatever the chunk boundaries. */
+export class OscStatusReader {
+  private carry = "";
+  /** The statuses in this chunk, in order (null = Claude Code ended), and whether it asked the terminal for support. */
+  push(chunk: string): { query: boolean; statuses: (TerminalStatus | null)[] } {
+    const text = this.carry + chunk;
+    const out = { query: false, statuses: [] as (TerminalStatus | null)[] };
+    let end = 0;
+    for (const m of text.matchAll(OSC_STATUS_SEQ)) {
+      end = m.index + m[0].length;
+      if (m[1]!.startsWith("?")) { out.query = true; continue; }
+      const s = terminalStatusOf(m[1]!);
+      if (s !== undefined) out.statuses.push(s);
+    }
+    const rest = text.slice(end);
+    const open = rest.lastIndexOf(OSC_STATUS);
+    let carry = "";
+    // unfinished: no terminator yet (a lone ESC at the end may be the start of ST)
+    if (open >= 0 && !/\x07|\x1b(?!$)/.test(rest.slice(open + OSC_STATUS.length))) carry = rest.slice(open);
+    // otherwise the tail may be the start of the next one (after one cut off by another sequence too)
+    else for (let k = Math.min(OSC_STATUS.length - 1, rest.length); k > 0; k--) if (OSC_STATUS.startsWith(rest.slice(-k))) { carry = rest.slice(-k); break; }
+    this.carry = carry.length <= OSC_CARRY_MAX ? carry : "";
+    return out;
+  }
+}
 
 /** What a terminal socket (/ws/pty) may send. Output travels the other way as raw strings, after PtyAttached. */
 export const PtyClientMessage = z.discriminatedUnion("type", [
@@ -82,14 +130,24 @@ export class PtyManager {
     return [...this.sessions.values()].filter(s => s.pty !== null || s.kind === "importing").length;
   }
 
-  /** The task's shell, started on first use. */
-  open(taskId: string, cwd: string, shell: string): void {
+  /** The task's shell, started on first use. `onStatus`: Claude Code in it changed state (OSC 7501); null when it or the shell ended. */
+  open(taskId: string, cwd: string, shell: string, onStatus: (s: TerminalStatus | null) => void = () => {}): void {
     if (this.sessions.has(taskId)) return;
     if (this.size >= MAX_PTY_SESSIONS) throw new Error(`too many terminals open (max ${MAX_PTY_SESSIONS}); close one first`);
     const pty = this.spawn(shell, ["-i"], { name: "xterm-256color", cols: 80, rows: 24, cwd });
     const s: Session = { id: crypto.randomUUID(), pty, kind: "shell", recent: "", cols: 80, rows: 24, clients: new Set() };
     this.sessions.set(taskId, s);
+    const reader = new OscStatusReader();
+    let status: TerminalStatus | null = null;
+    const report = (next: TerminalStatus | null) => {
+      if (next === status) return;
+      status = next;
+      try { onStatus(next); } catch { /* A broken observer must not stop the shell's output. */ }
+    };
     pty.onData((data) => {
+      const read = reader.push(data);
+      if (read.query) pty.write(PTY_STATUS_REPLY);
+      for (const st of read.statuses) report(st);
       s.recent = (s.recent + data).slice(-REPLAY_CHARS);
       // never start the replay in the middle of a surrogate pair
       if (s.recent.length === REPLAY_CHARS && /^[\udc00-\udfff]/.test(s.recent)) s.recent = s.recent.slice(1);
@@ -97,6 +155,7 @@ export class PtyManager {
     });
     pty.onExit(() => {
       if (this.sessions.get(taskId) === s) this.sessions.delete(taskId);
+      report(null);
       for (const c of s.clients) c.close();
       s.clients.clear();
     });

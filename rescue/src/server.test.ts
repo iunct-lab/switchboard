@@ -553,15 +553,28 @@ test("with SWITCHBOARD_RESCUE_RESTART_BY_EXIT the restart ends sb-rescue, and th
   }
 }, 90_000);
 
-test("the status lists the running and waiting tasks a restart would stop, and nothing for done ones (#435)", async () => {
+test("the status lists the running and waiting tasks a restart would stop, and nothing for done ones (#435), from the health and not the task list (#2814)", async () => {
   writeFileSync(join(f.home, "token"), "sb_secret\n");
   const seen: (string | null)[] = [];
-  const tasks = [
+  const asked: string[] = [];
+  const busyTasks = [
     { id: "t1", title: "走っている <b>Task</b>", status: "running" },
     { id: "t2", title: "承認を待つ Task", status: "waiting" },
-    { id: "t3", title: "終わった Task", status: "done" },
+    { id: "t3", title: "終わった Task", status: "done" }, // a daemon's answer is not trusted as is
   ];
-  const daemon = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => (seen.push(req.headers.get("authorization")), new URL(req.url).pathname === "/api/tasks" ? Response.json(tasks) : new Response("", { status: 404 })) });
+  const daemon = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch: (req, srv) => {
+      const path = new URL(req.url).pathname;
+      seen.push(req.headers.get("authorization"));
+      asked.push(`${req.method} ${path}`);
+      if (path === "/api/health") return Response.json({ ok: true, busyTasks });
+      if (path === "/ws") return srv.upgrade(req) ? undefined : new Response("upgrade failed", { status: 400 });
+      return Response.json([]);
+    },
+    websocket: { message() {} },
+  });
   const r = startRescue({ ...ctx, port: daemon.port as number }, { port: 0 });
   try {
     const s = (await fetch(`http://127.0.0.1:${r.server.port}/api/status`).then((x) => x.json())) as { stopping: unknown };
@@ -570,6 +583,8 @@ test("the status lists the running and waiting tasks a restart would stop, and n
       { id: "t2", title: "承認を待つ Task", status: "waiting" },
     ]);
     expect(seen).toContain("Bearer sb_secret"); // the daemon's token, as checkDaemon sends it
+    expect(asked).toContain("GET /api/health");
+    expect(asked.filter((a) => a === "GET /api/tasks")).toEqual([]); // one status, not the whole task list (#2814)
   } finally {
     rmSync(join(f.home, "token"), { force: true });
     await r.stop();

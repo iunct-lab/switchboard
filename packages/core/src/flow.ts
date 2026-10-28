@@ -57,10 +57,13 @@ export function flowOfPbi(raw: RawPbi, requestCreatedAt: string | null): Omit<Fl
   const tasks = raw.subIssues;
   // A PR can close several sibling Tasks; count it once.
   const prs = [...new Map(tasks.flatMap((t) => t.pullRequests).map((p) => [p.number, p])).values()];
-  const lastTaskAt = tasks.length ? Math.max(...tasks.map((t) => ms(t.createdAt))) : null;
   const claims = tasks.flatMap((t) => t.comments.filter((c) => CLAIM.test(c.body)).map((c) => ms(c.createdAt)));
   const firstPrAt = prs.length ? Math.min(...prs.map((p) => ms(p.createdAt))) : null;
   const firstClaim = claims.length ? Math.min(...claims) : null;
+  const start = firstClaim ?? firstPrAt;
+  // A Task added after the start (a review fix, an answer's follow-up) is building, not splitting (#2684).
+  const splitTasks = tasks.map((t) => ms(t.createdAt)).filter((at) => start === null || at <= start);
+  const splitEndAt = splitTasks.length ? Math.max(...splitTasks) : null;
   const merges = prs.flatMap((p) => (p.mergedAt ? [ms(p.mergedAt)] : []));
   const lastMerge = merges.length ? Math.max(...merges) : null;
   const firstReview = (p: RawPr): number | null => {
@@ -71,8 +74,8 @@ export function flowOfPbi(raw: RawPbi, requestCreatedAt: string | null): Omit<Fl
     median(prs.flatMap((p) => { const r = firstReview(p); const v = r === null ? null : cut(p, r); return v === null ? [] : [v]; }));
   const stages: Record<FlowStage, number | null> = {
     request: requestCreatedAt === null ? null : between(ms(requestCreatedAt), ms(raw.createdAt)),
-    split: between(ms(raw.createdAt), lastTaskAt),
-    wait: between(lastTaskAt, firstClaim ?? firstPrAt),
+    split: between(ms(raw.createdAt), splitEndAt),
+    wait: between(splitEndAt, start),
     build: between(firstClaim, firstPrAt),
     "review-wait": perPr((p, r) => between(ms(p.createdAt), r)),
     review: perPr((p, r) => (p.mergedAt ? between(r, ms(p.mergedAt)) : null)),

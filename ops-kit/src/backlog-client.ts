@@ -262,6 +262,13 @@ async function findWorkspace(api: ReturnType<typeof client>, env: Record<string,
   return { ws, list };
 }
 
+/** A connection the sandbox refused (EPERM / EACCES), not an app that is down. */
+function isSandboxRefusal(e: unknown): boolean {
+  const code = (e as { code?: string }).code;
+  const message = (e as Error).message ?? "";
+  return code === "EPERM" || code === "EACCES" || /^(EPERM|EACCES)\b/.test(message);
+}
+
 /** Calls the app's backlog API: the parsed answer, or Refused (4xx) / Unknown (no app, 5xx, 424, not imported = 409 on a read). */
 function client(env: Record<string, string | undefined>, f: Fetch) {
   return async (method: string, path: string, body?: unknown): Promise<unknown> => {
@@ -277,7 +284,10 @@ function client(env: Record<string, string | undefined>, f: Fetch) {
     try {
       res = await f(`${base.replace(/\/+$/, "")}${path}`, { method, headers: { "content-type": "application/json", ...(key && { authorization: `Bearer ${key}` }) }, ...(body !== undefined && { body: JSON.stringify(body) }), signal: AbortSignal.timeout(120_000) });
     } catch (e) {
-      throw new Unknown(`backlog: アプリに届きません（${(e as Error).message}）。判定できません`);
+      const message = (e as Error).message;
+      // a sandbox closing loopback (Codex's Auto, #2725): an approved rerun reaches the app, so say so instead of asking the user
+      if (isSandboxRefusal(e)) throw new Unknown(`backlog: アプリに届きません（${message}）。サンドボックスがこのホストのアプリ（BACKLOG_URL）への接続を止めています。ランナーの承認つきの実行で同じコマンドを 1 回やり直してください（Codex は承認を求める実行。利用者に聞かない）。判定できません`);
+      throw new Unknown(`backlog: アプリに届きません（${message}）。判定できません`);
     }
     const answer = await res.json().catch(() => null);
     if (res.ok) return answer;

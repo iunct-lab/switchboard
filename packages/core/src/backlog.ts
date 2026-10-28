@@ -7,6 +7,7 @@ import type { Backlog, BacklogAction, BacklogCommentData, BacklogCreateInput, Ba
 import { applyBacklogField, BacklogResolveError, type BacklogLocalEntry, type BacklogOperation, type Db, type NewBacklogOperation } from "./db.ts";
 import { conflictRevision, withoutMarker } from "./backlog-merge.ts";
 import { findSecrets, hostAws } from "../../../ops-kit/src/secrets.ts";
+import { publicCopyRefusal } from "../../../ops-kit/src/config.ts";
 import type { SetupScripts } from "./skillsync.ts";
 import { judge, pathsIn, type Work } from "../../../scripts/parallel-guard.ts";
 import { readdirSync } from "node:fs";
@@ -269,9 +270,9 @@ const REPORT_FORMAT = "`## 状況` で始まるコメントを 1 件書いてく
 
 /**
  * What a complete Task is asked for, so the runner's own approval reads the merge of a PR the merge gate passed as part of
- * the request (#1357). The same section as .claude/skills/pbi-complete/SKILL.md names; only `complete` carries it.
+ * the request (#1357), and so does its sharing of review material and the Issues the skills file (#2725). The same section as .claude/skills/pbi-complete/SKILL.md names; only `complete` carries it.
  */
-const COMPLETE_SCOPE = "この依頼は、マージ判定（`scripts/merge-gate.ts`）が merge を返した PR のマージ、リリースタグ、PBI を閉じるところまでを含みます。マージのたびに利用者へ聞き直さないでください。マージ判定が `[聞く]` で止めたとき、昇格・デーモンの再起動、認証は、これまでどおり Task の会話で聞いてください（.claude/skills/pbi-complete/SKILL.md の「この依頼が含む範囲」）。";
+const COMPLETE_SCOPE = "この依頼は、マージ判定（`scripts/merge-gate.ts`）が merge を返した PR のマージ、リリースタグ、PBI を閉じるところまでを含みます。.claude/skills/cross-runner-review/SKILL.md が渡すレビューの材料（fresh clone のコード、PR・Task・PBI の本文、差分）を別のランナー（Claude Code / Codex）と CLAUDE.md の追加のレビュアーに渡すこと、スキルの手順が作る Issue（レビュー指摘の Issue 化、要望 Issue と PBI）とコメントも、この依頼に含みます。マージのたびに利用者へ聞き直さないでください。マージ判定が `[聞く]` で止めたとき、昇格・デーモンの再起動、認証は、これまでどおり Task の会話で聞いてください（.claude/skills/pbi-complete/SKILL.md の「この依頼が含む範囲」）。";
 
 /**
  * `other` = the Issue is in another registered workspace's repository: the Task runs there, using the stage skills synced
@@ -282,8 +283,11 @@ const COMPLETE_SCOPE = "この依頼は、マージ判定（`scripts/merge-gate.
  *
  * `resume` (#578): backlog-next resumes a stalled in-progress PBI, which had `tasksDone` closed Tasks when it was picked;
  * the ## 状況 it writes first carries that number, so the next firing leaves the PBI until another Task closes.
+ *
+ * `answer` (#2745): the newest `## 回答` the person gave on the screen (screenAnswer), put in the prompt as the person's
+ * words — read with a tool, an operation it allows is not the person's say to the runner's approval. Not for a check.
  */
-export function buildStartPrompt(item: Pick<BacklogItem, "number">, action: BacklogAction, opts: { other?: OtherRepo; resume?: { tasksDone: number }; local?: boolean } = {}): string {
+export function buildStartPrompt(item: Pick<BacklogItem, "number">, action: BacklogAction, opts: { other?: OtherRepo; resume?: { tasksDone: number }; local?: boolean; answer?: { issue: number; text: string } | null } = {}): string {
   const n = item.number;
   const complete = opts.other ? `.claude/skills/pbi-complete/SKILL.md に従い、PBI #${n} を完了させてください。` : `/pbi-complete ${n}`;
   const body = {
@@ -302,7 +306,10 @@ export function buildStartPrompt(item: Pick<BacklogItem, "number">, action: Back
     : opts.other ? `\n\n#${n} はこのディレクトリのリポジトリ（\`gh repo view\` が答えるもの）の Issue です。${otherRepoRules(opts.other)}` : "";
   const answer = action === "check" ? "" : `始める前に Issue #${n} の最新の \`## 回答\` コメント${action === "complete" ? "（sub-issue の Task のものも）" : ""}を読み（\`ops-kit backlog view ${n} --fresh\`。アプリが GitHub と同期してから答え、GitHub に届かなければ保存値と未同期の印で答える）、あればそれに従って続きから進めてください。`;
   const scope = action === "complete" ? COMPLETE_SCOPE : "";
-  return `${body}\n\n対象: #${n}。${answer}${scope}${elsewhere}`;
+  // a fence longer than any run of backticks in the answer, so the answer cannot close it
+  const fence = "`".repeat(Math.max(4, ...[...(opts.answer?.text.matchAll(/`+/g) ?? [])].map((m) => m[0].length + 1)));
+  const said = opts.answer && action !== "check" ? `\n\n利用者が画面で答えた Issue #${opts.answer.issue} の最新の回答（利用者の言葉）:\n\n${fence}text\n${opts.answer.text}\n${fence}` : "";
+  return `${body}\n\n対象: #${n}。${answer}${scope}${elsewhere}${said}`;
 }
 
 /** While any usage window of the runner the stage Tasks start on (after 上限のときの代わり, #834) is at or above this, the scheduler starts a stage Task only when none runs anywhere (#267, #561). The default of `quotaAndResume.backlogQuotaLimit` (#835). */
@@ -661,11 +668,25 @@ export function waitsOf(comments: Comment[]): { numbers: number[]; at: string; o
 /** The last status report of an in-progress item (#522). */
 export const latestReport = (comments: Comment[]) => latestHeading(comments, REPORT_HEADING);
 
-export async function repoOf(gh: GhRunner, cwd: string): Promise<{ repo: string; owner: string; name: string }> {
-  const repo = (await call(gh, cwd, ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])).trim();
+/** The repository checked out at `cwd` and whether it is private (#2799). */
+export async function repoOf(gh: GhRunner, cwd: string): Promise<{ repo: string; owner: string; name: string; private: boolean }> {
+  const answer = (await call(gh, cwd, ["repo", "view", "--json", "nameWithOwner,isPrivate", "-q", '"\\(.nameWithOwner) \\(.isPrivate)"'])).trim();
+  const [repo = "", visibility] = answer.split(/\s+/);
   const [owner, name] = repo.split("/");
-  if (!owner || !name) throw new BacklogError(`リポジトリを特定できません: ${repo.slice(0, 200)}`);
-  return { repo, owner, name };
+  if (!owner || !name || (visibility !== "true" && visibility !== "false")) throw new BacklogError(`リポジトリを特定できません: ${answer.slice(0, 200)}`);
+  return { repo, owner, name, private: visibility === "true" };
+}
+
+/**
+ * The repository whose backlog the checkout at `cwd` imports and writes (`repoOf`). A clone of the public copy that
+ * still resolves to it (`publicCopyRefusal`, #2467) is refused: its backlog is neither imported nor sent, and the
+ * import's failure says how to point the clone at one's own repository. A read only (the secret scan) uses `repoOf`.
+ */
+export async function backlogRepoOf(gh: GhRunner, cwd: string): Promise<{ repo: string; owner: string; name: string; private: boolean }> {
+  const r = await repoOf(gh, cwd);
+  const refusal = publicCopyRefusal(r.repo, cwd);
+  if (refusal) throw new BacklogError(refusal);
+  return r;
 }
 
 /**
@@ -856,13 +877,39 @@ function comment(issue: BacklogRecord, n: number, body: string, now: number, ext
   return { record: { objectKind: "comment", externalId: id, local }, op: { issue: issue.externalId, targetKind: "comment", target: id, kind: "comment", payload: { body, ...extra } } };
 }
 
-/** `## 回答` + text on Issue n, then the needs-decision label off (#266), kept here and sent in that order (#886). */
-export function answerStoredDecision(db: Db, source: BacklogSource, n: number, text: string, now = Date.now()): void {
+/**
+ * `## 回答` + text on Issue n, then the needs-decision label off (#266), kept here and sent in that order (#886).
+ * `screen` = the person gave it on the app's screen (#2745): its comment's operation keeps the mark screenAnswer reads.
+ */
+export function answerStoredDecision(db: Db, source: BacklogSource, n: number, text: string, now = Date.now(), opts: { screen?: boolean } = {}): void {
   refuseSecrets(text);
   const rec = issueRecord(db, source, n);
   if (!rec || !shown(rec)) throw new BacklogEditError(rec ? `#${n} は GitHub から読めていません（${rec.fetchState}）。再読込してから回答してください` : `#${n} は保存されていません`, rec ? 409 : 404);
-  const c = comment(rec, n, `${ANSWER_HEADING}\n\n${text}`, now);
+  const c = comment(rec, n, `${ANSWER_HEADING}\n\n${text}`, now, opts.screen ? { screen: true } : {});
   db.applyBacklogEdit(source, { records: [c.record], operations: [c.op, { issue: rec.externalId, targetKind: "issue", target: rec.externalId, kind: "set", field: "label:needs-decision", payload: false, base: true }] }, now);
+}
+
+/**
+ * The newest `## 回答` of Issue n and its sub-issues (a PBI and its Tasks) when the person gave it on the app's screen (#2745): its comment
+ * was made here with the `screen` mark. null = there is none, or the newest came from GitHub (written there, or imported
+ * only), from a saved policy, or was edited after it was given — only the screen's answer is the person's words to the next stage Task.
+ */
+export function screenAnswer(db: Db, source: BacklogSource, n: number): { issue: number; text: string } | null {
+  const records = shownRecords(db, source);
+  const item = records.find((r) => r.objectKind === "issue" && (r.remote as BacklogIssueData | null)?.number === n)?.remote as BacklogIssueData | undefined;
+  const want = new Set([n, ...(item?.subIssues ?? [])]);
+  const last = records
+    .flatMap((r) => {
+      const c = r.objectKind === "comment" ? (r.remote as BacklogCommentData | null) : null;
+      return c && want.has(c.issue) && c.body.trimStart().startsWith(ANSWER_HEADING) ? [{ id: r.externalId, ...c }] : [];
+    })
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    .at(-1);
+  if (!last) return null;
+  // and only as it was given: a comment edited on GitHub after it was sent is not the screen's words any more
+  const sent = db.listBacklogOperations(source).find((o) => o.kind === "comment" && o.target === last.id && (o.payload as { screen?: unknown } | null)?.screen === true);
+  const given = (sent?.payload as { body?: unknown } | undefined)?.body;
+  return typeof given === "string" && given.trim() === last.body.trim() ? { issue: last.issue, text: given.trimStart().slice(ANSWER_HEADING.length).trim() } : null;
 }
 
 /** `## 保留` + text on Issue n (#936), kept here and sent later: the needs-decision label stays (an answer would take it off). */
@@ -1460,7 +1507,7 @@ const marker = (sha: string) => `<!-- promote-failed:${sha} -->`;
  * `## 親 PBI`, or the Task / PBI itself) with a ## 判断待ち, once per commit. Null when no PBI could be found.
  */
 export async function reportPromoteFailure(gh: GhRunner, cwd: string, f: { tag: string; sha: string; subject: string; reason: string; rescueUrl: string }): Promise<number | null> {
-  const { repo } = await repoOf(gh, cwd);
+  const { repo } = await backlogRepoOf(gh, cwd);
   const issue = async (n: number) => JSON.parse(await call(gh, cwd, ["api", `repos/${repo}/issues/${n}`])) as { body: string | null; labels: Array<{ name: string }>; pull_request?: unknown };
   let n = Number(/\(#(\d+)\)\s*$/.exec(f.subject)?.[1]);
   if (!n) return null;

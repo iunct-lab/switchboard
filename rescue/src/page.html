@@ -289,9 +289,20 @@ $("tmp-clean").onclick = async () => {
   await act("api/tmp/clean", { names }, "次の " + names.length + " 件（合計 " + size(bytes) + "）を消します。2 時間以上更新が無く、使われていない" + (tmpOwned ? "一時ディレクトリとキャッシュ" : "レビューの clone と昇格の候補") + "だけです。\n" + names.join("\n"));
   await loadTmp();
 };
+// Every 2 s while the tab is visible; a hidden tab asks nothing, and coming back asks at once (#2814).
+let pollTimer = null;
+function poll() {
+  clearInterval(pollTimer);
+  pollTimer = null;
+  if (document.visibilityState === "visible") pollTimer = setInterval(refresh, 2000);
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") refresh();
+  poll();
+});
 refresh();
 loadTmp();
-setInterval(refresh, 2000);
+poll();
 </script>
 </body>
 </html>

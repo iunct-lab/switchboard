@@ -3,8 +3,11 @@
  * OS notices for approval waits (#1138) through a fake window.Notification: a fake runner asks once per task; the
  * notice opens its Task, a reconnect and an answer do not notify again, a needs_action does, and with the permission
  * denied nothing is shown while the 承認 list and badge still answer. The 設定 → 端末通知 card asks only from its button.
+ * Claude Code in a terminal tab (#1574): a fake shell prints the OSC 7501 sequences Claude Code prints; with the tab
+ * closed the rail shows 作業中 then 返事待ち, one notice opens the Task, a reload does not notify again, done shows no mark,
+ * and the shell's exit takes the mark away.
  */
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../packages/core/src/config.ts";
@@ -36,6 +39,22 @@ const adapter: RunnerAdapter = {
     };
   },
 };
+// The terminal tab's shell: Claude Code's sequences as it printed them (docs/design/pty-bridge.md §9), its question first
+// (the daemon's answer arrives as input), then the wait. `y` answers it: the turn is done, and a next one starts working.
+// `exit` ends the shell with Claude Code still working and no `clear`: only the shell's end can take the mark away.
+const fakeShell = join(home, "fake-shell.sh");
+writeFileSync(fakeShell, `#!/bin/sh
+printf '\\033]7501;?\\007\\033[c'
+sleep 0.3; printf '\\033]7501;state=idle:app=claude-code\\007'
+sleep 0.3; printf '\\033]7501;state=working:app=claude-code\\007'
+sleep 1; printf '\\033]7501;state=blocked:app=claude-code:kind=permission\\007'
+while read -r line; do case "$line" in
+  *exit) exit 0;;
+  *y) printf '\\033]7501;state=working:app=claude-code\\007\\033]7501;state=done:app=claude-code\\007'; sleep 1; printf '\\033]7501;state=working:app=claude-code\\007';;
+esac; done
+`);
+chmodSync(fakeShell, 0o755);
+process.env.SHELL = fakeShell;
 const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
 const core = await startServer(cfg, [adapter], { port: 0, selfdevChecks: false, dryRunRestart: true });
 const base = `http://127.0.0.1:${core.server.port}`;
@@ -165,8 +184,49 @@ try {
   await until(() => answered.includes("notify-b:allow"), "the runner got allow for notify-b");
   const denied = { notices: deniedNotices, badge, answered: true };
   assert(deniedNotices === 0 && badge === "1", `denied: ${JSON.stringify(denied)}`);
+  // (h) Claude Code in notify-a's terminal (#1574): the tab is opened and closed, the shell goes on printing
+  await evaluate(`localStorage.setItem('e2e-perm', 'granted')`);
+  await call("Page.reload");
+  await until(() => evaluate(`!!document.querySelector('.conn.ok')`), "connected for the terminal");
+  const railMark = `(() => { const row = [...document.querySelectorAll('.rail .rail-list .it')].filter(r => r.querySelector('.t')?.textContent === 'notify-a'); return row.map(r => r.querySelector('.m.term-wait, .m:not(.term-wait)')?.textContent ?? '').filter(t => t.startsWith('端末')).join('|'); })()`;
+  const inActive = `(() => { const list = document.querySelector('.rail .rail-list'); const g = [...list.children]; const i = g.findIndex(e => e.classList.contains('grp') && e.textContent.startsWith('Running')); if (i < 0) return false; for (const e of g.slice(i + 1)) { if (e.classList.contains('grp')) return false; if (e.querySelector('.t')?.textContent === 'notify-a') return true; } return false; })()`;
+  const terminalNotices = async () => (await notices()).filter((n) => n.body === "ターミナルの Claude Code が返事を待っています");
+  const tab = new WebSocket(`ws://127.0.0.1:${core.server.port}/ws/pty?task=${a}`);
+  await new Promise<void>((resolve, reject) => { tab.onopen = () => resolve(); tab.onerror = () => reject(new Error("terminal socket failed")); });
+  tab.close(); // the tab is closed: the shell and its Claude Code go on
+  const marks: string[] = [];
+  marks.push(await until(() => evaluate(`${railMark}.startsWith('端末: 作業中') && ${railMark}`), "rail: working") as string);
+  marks.push(await until(() => evaluate(`${railMark}.startsWith('端末: 返事待ち') && ${railMark}`), "rail: waiting") as string);
+  const waitingInActive = await evaluate(inActive);
+  assert(waitingInActive, "the waiting Task is under Running · Waiting");
+  await until(async () => (await terminalNotices()).length === 1, "the terminal notice");
+  const terminalNotice = (await terminalNotices())[0]!;
+  assert(terminalNotice.title === "notify-a", `terminal notice: ${JSON.stringify(terminalNotice)}`);
+  await evaluate(`window.__notices.find(n => n.body.startsWith('ターミナル')).onclick(new Event('click'))`);
+  const openedFromTerminal = await until(() => evaluate(`document.querySelector('main.task .task-head h2')?.textContent`), "task screen from the terminal notice") as string;
+  assert(openedFromTerminal === "notify-a", `opened from the terminal notice: ${openedFromTerminal}`);
+  // a reload gets the wait in task.terminals: the mark again, no notice
+  await call("Page.reload");
+  await until(() => evaluate(`!!document.querySelector('.conn.ok')`), "connected after the terminal reload");
+  marks.push(await until(() => evaluate(`${railMark}.startsWith('端末: 返事待ち') && ${railMark}`), "rail after reload: waiting") as string);
+  await Bun.sleep(500);
+  const afterTerminalReload = (await terminalNotices()).length;
+  assert(afterTerminalReload === 0, `terminal notices after reload: ${afterTerminalReload}`);
+  // answered in the terminal: the turn is done (no mark, not under Running · Waiting), then the next one works
+  const again = new WebSocket(`ws://127.0.0.1:${core.server.port}/ws/pty?task=${a}`);
+  await new Promise<void>((resolve, reject) => { again.onopen = () => resolve(); again.onerror = () => reject(new Error("terminal socket failed")); });
+  again.send(JSON.stringify({ type: "input", data: "y\n" }));
+  await until(() => evaluate(`${railMark} === '' && !${inActive}`), "rail: no mark when done");
+  marks.push("(done)");
+  marks.push(await until(() => evaluate(`${railMark}.startsWith('端末: 作業中') && ${railMark}`), "rail: working again") as string);
+  // `exit`: the shell ends with Claude Code's last status still working; the mark goes with the shell
+  again.send(JSON.stringify({ type: "input", data: "exit\n" }));
+  await until(() => evaluate(`${railMark} === ''`), "rail: no mark after the shell exits");
+  again.close();
+  const terminal = { marks, waitingInActive, notice: terminalNotice, openedFromTerminal, afterTerminalReload, afterExit: "no mark" };
+
   assert(!errors.length, `console errors: ${JSON.stringify(errors)}`);
-  console.log(JSON.stringify({ notices: afterRepeat, first, opened, afterReconnect, afterAnswer, needs, afterRepeat, settings, denied, answered, consoleErrors: errors.length }));
+  console.log(JSON.stringify({ notices: afterRepeat, first, opened, afterReconnect, afterAnswer, needs, afterRepeat, settings, denied, answered, terminal, consoleErrors: errors.length }));
 } finally {
   ws?.close();
   chrome.kill();

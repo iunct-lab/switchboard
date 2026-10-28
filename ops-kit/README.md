@@ -13,7 +13,7 @@ GitHub の Issue と Project で回す開発の流れ（要望 → PBI → Task 
 | `skills/` | どのリポジトリでも同じスキル 10 本: `issue-workflow` / `request-to-backlog` / `pbi-to-tasks` / `task-to-pr` / `cross-runner-review` / `review-with-subagent` / `review-triage-and-merge` / `stacked-pr-delivery` / `pbi-complete` / `public-release-gate` |
 | `bin/` | `PATH` に置いて使う 4 本: `ops-kit`（`src/cli.ts` と同じ。設定の要らない `scan-text` / `scan-issues` をどこからでも）/ `gh`（`gh` の前段。認証に使える値を含む書き込みを止める）/ `deny-shared-tmp`（Claude Code の PreToolUse の hook。`/tmp` 直下に固定の名前で書くコマンドを止める）/ `device-auth`（別の場所での承認を求めるコマンドを動かし、URL とコードをエージェントの読む出力から外す） |
 | `template/` | 新しいリポジトリの雛形（設定・入口・`.github/`）。下の「雛形（新しいリポジトリ）」 |
-| `public/` | 公開リポジトリに置く 1 式: README に入れる方針の節（`README.section.md`）、要望だけの Issue テンプレ（`.github/ISSUE_TEMPLATE/request.yml` と `config.yml`）、`SECURITY.md` の雛形、メンバー以外の PR を閉じる workflow（`.github/workflows/close-pull-requests.yml`）。値は公開先の `owner/name` を入れる `__PUBLIC_REPO__` だけ。`public-sync` が公開に出すツリーに入れる（下の「公開リポジトリへの同期」） |
+| `public/` | 公開リポジトリに置く 1 式: README に入れる方針の節（`README.section.md`）、要望だけの Issue テンプレ（`.github/ISSUE_TEMPLATE/request.yml` と `config.yml`）、`SECURITY.md` の雛形、メンバー以外の PR を閉じる workflow（`.github/workflows/close-pull-requests.yml`）。値は公開先の `owner/name` を入れる `__PUBLIC_REPO__` だけ。`public-sync` が公開に出すツリーに入れる（下の「公開リポジトリへの同期」）。公開に出すツリーにも入るのはキットの一部だから: fork した人が自分の公開先へ `public-sync` するときに使う。上流の公開リポジトリの運用には使わない |
 | `fixtures/` | テストが使う架空の設定と応答 |
 
 コマンド（`--help` と同じ。どれも `--config <ops.config.json>` を取れる。省くと今のディレクトリから上へ探す）:
@@ -167,14 +167,26 @@ cat <公開リポジトリ>/vendor/ops-kit/KIT_VERSION    # commit <sha> / date 
 
 上流の公開リポジトリは読み取り専用の写しで、要望を受け取り、PR は自動で閉じる。fork は自分の開発先にして、キットを持つアプリと工程（要望 → PBI → Task → PR → レビュー → マージ）を使える。上流の非公開の履歴・Project・認証情報は要らない。
 
-1. 公開リポジトリを fork して clone する。`origin` が自分の fork を指すことを `git remote -v` で確認する。`GH_REPO` を使う環境では自分の `owner/name` に設定し、上流を指す値を残さない（未設定なら origin を使う）。`bun install --frozen-lockfile` のあと、キットを持つアプリの起動は、そのリポジトリの README に従う。
+1. 公開リポジトリを fork して clone する。`origin` が自分の fork を指すことを `git remote -v` で確認する。`GH_REPO` を使う環境では自分の `owner/name` に設定し、上流を指す値を残さない（未設定なら origin を使う）。`gh repo fork --clone` の clone や、上流を `upstream` に足した clone では `gh` の既定（`gh repo view` の答え）が上流になるので、`gh repo set-default <自分の owner/name>` を実行する。`bun install --frozen-lockfile` のあと、キットを持つアプリの起動は、そのリポジトリの README に従う。
 2. 自分の Project を用意し、`ops.config.json` の `envPrefix` に合わせて `gh variable set <PREFIX>_PROJECT_URL --repo <owner/name> --body <ProjectのURL>` を設定する。同名の環境変数があればそちらが優先されるので更新する。フィールド・必須の節を `ops.config.json` で確認し、`bun ops-kit/src/cli.ts bootstrap <Projectの題>` でフィールドを揃える。所有者だけの値・記録は `private/` に置き、公開に含めない。
 3. `.github/ISSUE_TEMPLATE/` の公開用フォームを `ops-kit/template/.github/ISSUE_TEMPLATE/` の開発用フォームで置き換える。`__OWNER__`・`__REPO__`・`__AREA__`・`__TEST_ALL__` を自分の値にして、Area と必須の節を設定に合わせる。PR 本文の型も `template/.github/PULL_REQUEST_TEMPLATE.md` から置く。ラベルは `.github/labels.yml` を確認して同期する。
-4. fork の `.github/workflows/close-pull-requests.yml` を削除して PR の自動クローズを止める。fork の README の `How this repository works` と `SECURITY.md`・Issue フォームのリンクを自分の方針・報告先に直す。fork の Actions と Issues を有効にし、CI を動かす。上流への `public-sync` は不要なので、`ops.config.json` の `publicSync` は削除する（独自の公開先へ同期するときだけ自分の設定を作る）。
+4. fork の `.github/workflows/close-pull-requests.yml` を削除して PR の自動クローズを止める。fork の README の `How this repository works` と `SECURITY.md`・Issue フォームのリンクを自分の方針・報告先に直す。fork の Actions と Issues を有効にし、CI を動かす。`ops.config.json` の `publicSync` は残す。`target` は上流の公開リポジトリで、キットの道具・`gh` の前段・アプリのバックログは、既定の書き込み先がそこを向くときに書き込みを止める目印にする。消すとこの歯止めが無くなる。上流への `public-sync` は権限が無いので送れない（独自の公開先へ同期するときは `target` を自分の公開先に書き換える）。
 5. Project への自動追加が必要なら `ops-kit/template/.github/workflows/project-autoadd.yml` を `.github/workflows/` へ写す。`__PREFIX__` は `envPrefix` に置き換える。`<PREFIX>_PROJECT_URL` と、Project を書けるリポジトリ secret `<PREFIX>_PROJECT_TOKEN` を設定する（PR のコードは実行しない）。
 6. キットを持つアプリ固有のリリースやホストの設定は、そのリポジトリの開発・配置のドキュメントに従う。
 
 共通のスキルは同梱の `ops-kit/skills/`、入口は `scripts/setup/`。スキルの導入は上の節に従い、リポジトリ固有の手順は自分の `CLAUDE.md` / `AGENTS.md` に書く。fork の Issue と PR で工程を回し、上流への提案は上流の Request として送る。
+
+### 公開側への書き込みが止まったとき
+
+既定の書き込み先（`GH_REPO`、無ければ `gh repo view`）が最寄りの `ops.config.json` の `publicSync.target` と同じ clone では、書き込みが止まり、次の文が出る: 「書き込み先 <owner/name> は、この clone の ops.config.json の publicSync.target（公開側の写し）です。自分のリポジトリに向けてから実行してください: …」。判定にリポジトリの名前は使わない。上流の開発元は既定が開発元なので止まらない。
+
+直し方:
+
+1. `git remote -v` で、`origin` が自分のリポジトリか確かめる。上流を clone したままなら、自分のリポジトリを remote に足す（`git remote add <名前> <自分の URL>`）か `origin` を付け替える。
+2. `gh repo set-default <自分の owner/name>` を実行する。`gh repo view` の答えが変わり、`-R "$(gh repo view …)"` で書く工程も自分のリポジトリに向く。
+3. `GH_REPO=<自分の owner/name>` でも `gh` の書き込みは自分に向くが、`gh repo view` の答えは変わらない。`-R "$(gh repo view …)"` で上流を名指しした書き込みは止まったままなので、2 を使う。
+
+守れる範囲: キットの道具（`ops-kit` のコマンドと `scripts/setup/` の入口）、`gh` の前段（`ops-kit/bin/gh`）を通る `gh`、キットを持つアプリのバックログの取込みと送信。前段を `PATH` に置かない端末で叩く `gh` と GitHub の画面での操作は止まらない。
 
 ## 更新
 

@@ -102,7 +102,7 @@ function backlogGh(limited = () => false): GhRunner {
   const decisions = json(join(coreFixtures, "backlog-decisions.json"));
   let remaining = 5000;
   return importing(async (args) => {
-    if (args[0] === "repo") return ok("acme/app\n");
+    if (args[0] === "repo") return ok("acme/app true\n");
     if (args[0] === "variable") return ok("https://github.com/users/acme/projects/11\n");
     if (limited()) return LIMITED;
     const body = args.some((a) => a.includes("comments(last:")) ? decisions : args.includes("after=CURSOR1") ? pages[1] : pages[0];

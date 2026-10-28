@@ -99,6 +99,11 @@ test("fix: buildFixPrompt is the brief once, the text right after it, a blank li
   expect(fixTitle("あ".repeat(50))).toBe(`直す: ${"あ".repeat(40)}`);
 });
 
+test("fix scope names review sharing (#2725)", () => {
+  expect(FIX_SCOPE).toContain("レビューの材料");
+  expect(FIX_SCOPE).toContain("追加のレビュアー");
+});
+
 test("fix: without a mode the request path is unchanged", async () => {
   const base = await boot();
   const task = await (await post(base, { text: "登録して" })).json() as Task;

@@ -6,7 +6,7 @@ import { CLAUDE_MODELS } from "../packages/adapters/claude/src/index.ts";
 import { CODEX_MODELS } from "../packages/adapters/codex/src/index.ts";
 import { Database } from "bun:sqlite";
 import { loadPricing } from "../packages/core/src/pricing.ts";
-import { checkModels, claudeCatalog, claudeTableText, classifyUnpriced, codexCatalog, compareModels, compareVersions, hostReaders, hostVersions, KINDS, REVIEWED, requestFor, unpricedLedgerNames, unpricedListed, type Readers, type Report, type VersionReaders } from "./check-models";
+import { checkModels, claudeCatalog, listedModels, claudeTableText, classifyUnpriced, codexCatalog, compareModels, compareVersions, hostReaders, hostVersions, KINDS, REVIEWED, requestFor, settingsPrices, unpricedLedgerNames, unpricedListed, type Readers, type Report, type VersionReaders } from "./check-models";
 import { alreadyFiled } from "./file-request";
 
 // Excerpts of what the CLIs carry (claude 2.1.285's embedded table, codex-cli 0.159.2's `debug models --bundled`).
@@ -117,6 +117,69 @@ describe("check-models", () => {
       const head = "\0".repeat(first - 20) + a;
       writeFileSync(file, head + "\0".repeat(1_000_000) + entry("claude-haiku-4-5") + "\0".repeat(1_000_000));
       expect(claudeCatalog(await claudeTableText(file))).toEqual(["claude-opus-5-5", "claude-haiku-4-5"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("listedModels (#1400): the list saved on the settings screen per runner; the bundled list for a runner never saved, and when there is no database, settings table or row", () => {
+    const dir = mkdtempSync(join(tmpdir(), "switchboard.check-models."));
+    const bundled = { claude: CLAUDE_MODELS.map((m) => m.value), codex: CODEX_MODELS.map((m) => m.value) };
+    try {
+      expect(listedModels(join(dir, "missing.db"))).toEqual(bundled);
+      const dbPath = join(dir, "switchboard.db");
+      const db = new Database(dbPath);
+      db.exec("CREATE TABLE ledger (runner TEXT NOT NULL, model TEXT, source TEXT NOT NULL)");
+      expect(listedModels(dbPath)).toEqual(bundled); // no settings table
+      db.exec("CREATE TABLE settings (key TEXT PRIMARY KEY, json TEXT NOT NULL)");
+      expect(listedModels(dbPath)).toEqual(bundled); // no row
+      db.query("INSERT INTO settings VALUES ('settings', ?)").run(JSON.stringify({ autoResume: { claude: true } }));
+      expect(listedModels(dbPath)).toEqual(bundled); // a row that has no list
+      db.query("UPDATE settings SET json = ? WHERE key = 'settings'").run('{"models": {"claude": [');
+      expect(listedModels(dbPath)).toEqual(bundled); // a broken row, as the daemon reads it
+      db.query("UPDATE settings SET json = ? WHERE key = 'settings'").run(JSON.stringify({ models: { claude: [{ value: "claude-x", label: "X" }, { value: CLAUDE_MODELS[0]!.value, label: "Y" }] } }));
+      db.close();
+      expect(listedModels(dbPath)).toEqual({ claude: ["claude-x", CLAUDE_MODELS[0]!.value], codex: bundled.codex });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("checkModels reads the list saved on the settings screen: an id saved there that the CLI's table lacks is stale; a runner not saved is checked on the bundled list", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "switchboard.check-models."));
+    try {
+      const dbPath = join(dir, "switchboard.db");
+      const db = new Database(dbPath);
+      db.exec("CREATE TABLE settings (key TEXT PRIMARY KEY, json TEXT NOT NULL)");
+      db.query("INSERT INTO settings VALUES ('settings', ?)").run(JSON.stringify({ models: { claude: [{ value: "claude-x", label: "X" }] } }));
+      db.close();
+      const claude = async () => REVIEWED.claude.map((id) => `{id:"${id}",family:"x",display_name:"X"}`).join(",");
+      const codex = async () => JSON.stringify({ models: REVIEWED.codex.filter((id) => id !== CODEX_MODELS[0]!.value).map((slug) => ({ slug, visibility: "list" })) });
+      const r = await checkModels({ read: { claude, codex }, versions: NO_VERSIONS, pricing: PRICING, dbPath });
+      expect(r.findings).toContainEqual({ runner: "claude", kind: "stale", ids: ["claude-x"] });
+      expect(r.findings).toContainEqual({ runner: "claude", kind: "価格表未整備", ids: ["claude-x"] });
+      expect(r.findings).toContainEqual({ runner: "codex", kind: "stale", ids: [CODEX_MODELS[0]!.value] }); // the bundled list
+      expect(r.code).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("settingsPrices (#1402): a price saved on the settings screen prices a listed id, as the daemon lays it over pricing.json; a database without one still reports it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "switchboard.check-models."));
+    try {
+      const dbPath = join(dir, "switchboard.db");
+      const db = new Database(dbPath);
+      db.exec("CREATE TABLE settings (key TEXT PRIMARY KEY, json TEXT NOT NULL)");
+      db.query("INSERT INTO settings VALUES ('settings', ?)").run(JSON.stringify({ models: { claude: [{ value: "claude-x", label: "X" }] } }));
+      const run = () => checkModels({ read: CLEAN, versions: NO_VERSIONS, pricing: PRICING, dbPath });
+      expect(settingsPrices(dbPath)).toEqual({});
+      expect((await run()).findings).toContainEqual({ runner: "claude", kind: "価格表未整備", ids: ["claude-x"] });
+      db.query("UPDATE settings SET json = ? WHERE key = 'settings'").run(JSON.stringify({ models: { claude: [{ value: "claude-x", label: "X" }] }, prices: { "claude-x": { input: 1, output: 2 } } }));
+      db.close();
+      expect(settingsPrices(dbPath)["claude-x"]).toMatchObject({ input: 1, output: 2 }); // parsed by Settings, its defaults filled
+      expect((await run()).findings.filter((f) => f.kind === "価格表未整備")).toEqual([]);
+      expect(settingsPrices(join(dir, "missing.db"))).toEqual({});
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

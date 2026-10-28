@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { backlogWrite, bodiesOf, GUARD_MARK, realCommand } from "./gh-guard.ts";
+import { backlogWrite, bodiesOf, GUARD_MARK, realCommand, writeTargetOf } from "./gh-guard.ts";
 
 const GUARD = join(import.meta.dir, "../bin/gh");
 const code = ["QWJK", "ZRTP"].join("-");
@@ -26,7 +26,8 @@ afterAll(() => rmSync(dir, { recursive: true }));
 // outside the app's Task unless `env` says otherwise: a Task running these tests has BACKLOG_URL
 function run(argv: string[], stdin = "", awsConfigFile = awsConfig, env: Record<string, string | undefined> = { BACKLOG_URL: undefined }) {
   if (existsSync(log)) rmSync(log);
-  const p = Bun.spawnSync([GUARD, ...argv], { env: { ...process.env, ...env, AWS_CONFIG_FILE: awsConfigFile, PATH: `${dirname(GUARD)}:${dir}:${process.env.PATH}` }, stdin: new TextEncoder().encode(stdin), stdout: "pipe", stderr: "pipe" });
+  // cwd: a directory with no ops.config.json above it, so that this checkout's publicSync plays no part
+  const p = Bun.spawnSync([GUARD, ...argv], { cwd: dir, env: { ...process.env, ...env, AWS_CONFIG_FILE: awsConfigFile, PATH: `${dirname(GUARD)}:${dir}:${process.env.PATH}` }, stdin: new TextEncoder().encode(stdin), stdout: "pipe", stderr: "pipe" });
   return { code: p.exitCode, out: p.stdout.toString(), err: p.stderr.toString(), called: existsSync(log) ? (JSON.parse(readFileSync(log, "utf8")) as { argv: string[]; stdin: string }) : null };
 }
 
@@ -243,6 +244,108 @@ describe("backlog (#2694): in the app's Task an Issue of the workspace is not wr
 
   test("without BACKLOG_URL an Issue write reaches gh as before", () => {
     expect(run(["issue", "edit", "5", "--body", "x"], "", awsConfig, { BACKLOG_URL: undefined, GH_REPO: "acme/app" }).called?.argv).toEqual(["issue", "edit", "5", "--body", "x"]);
+  });
+});
+
+// Synthetic names only (#2466): acme/widget is published, acme/widget-dev is its development repository, someone/widget a fork.
+describe("public copy (#2466): a write from a clone that still writes to its public copy stops before gh", () => {
+  let tree: string;
+  let fake: string;
+  let calls: string;
+  beforeAll(() => {
+    tree = mkdtempSync(join(tmpdir(), "ops-kit.gh-guard.public."));
+    writeFileSync(join(tree, "ops.config.json"), JSON.stringify({ publicSync: { target: "acme/widget" } }));
+    mkdirSync(join(tree, "sub"));
+    // the gh behind the guard: records every call, answers `repo view` with FAKE_DEFAULT
+    fake = join(tree, "bin");
+    mkdirSync(fake);
+    calls = join(tree, "calls.jsonl");
+    writeFileSync(join(fake, "gh"), `#!/usr/bin/env bun\nconst fs = require("node:fs");\nconst argv = process.argv.slice(2);\nfs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(argv) + "\\n");\nif (argv[0] === "repo" && argv[1] === "view") console.log(process.env.FAKE_DEFAULT ?? "");\n`);
+    chmodSync(join(fake, "gh"), 0o755);
+  });
+  afterAll(() => rmSync(tree, { recursive: true, force: true }));
+
+  function gh(argv: string[], env: Record<string, string | undefined> = {}, cwd = join(tree, "sub")) {
+    if (existsSync(calls)) rmSync(calls);
+    const p = Bun.spawnSync([GUARD, ...argv], { cwd, env: { ...process.env, BACKLOG_URL: undefined, GH_REPO: undefined, ...env, AWS_CONFIG_FILE: awsConfig, PATH: `${dirname(GUARD)}:${fake}:${process.env.PATH}` }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const called = existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n").map((l) => JSON.parse(l) as string[]) : [];
+    return { code: p.exitCode, err: p.stderr.toString(), called };
+  }
+  const VIEW = ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"];
+  const WRITES = [
+    ["issue", "create", "-t", "x", "-b", "x"],
+    ["issue", "comment", "1", "-b", "x"],
+    ["issue", "edit", "1", "--add-label", "bug"],
+    ["issue", "close", "1"],
+    ["pr", "create", "-t", "x", "-b", "x"],
+    ["pr", "comment", "1", "-b", "x"],
+    ["label", "create", "x"],
+    ["api", "-X", "POST", "repos/{owner}/{repo}/issues", "-f", "title=x"],
+    ["api", "repos/{owner}/{repo}/issues", "-f", "title=x"],
+    ["api", "graphql", "-f", "query=mutation { addComment(input: {}) { clientMutationId } }"],
+  ];
+
+  test("the default is the public copy: every write stops, named or not; only repo view reaches gh", () => {
+    for (const argv of [...WRITES, ...WRITES.filter((a) => a[0] !== "api").map((a) => [...a, "-R", "acme/widget"]), ["api", "-X", "PATCH", "repos/acme/widget/issues/1", "-f", "state=closed"], ["issue", "close", "https://github.com/acme/widget/issues/1"]]) {
+      const r = gh(argv, { FAKE_DEFAULT: "acme/widget" });
+      expect([argv, r.code, r.called]).toEqual([argv, 1, [VIEW]]);
+      expect(r.err).toContain("gh-guard: 投稿を止めました");
+      expect(r.err).toContain("gh repo set-default");
+      expect(r.err).toContain("GH_REPO");
+    }
+  });
+
+  test("the default is the public copy: a write named elsewhere and a read reach gh; a read asks nothing", () => {
+    for (const argv of [["issue", "comment", "1", "-R", "someone/widget", "-b", "x"], ["api", "-X", "POST", "repos/someone/widget/issues", "-f", "title=x"]]) {
+      expect([argv, gh(argv, { FAKE_DEFAULT: "acme/widget" }).called]).toEqual([argv, [argv]]);
+    }
+    for (const argv of [["issue", "view", "1"], ["pr", "list"], ["api", "repos/acme/widget/issues"], ["api", "-X", "GET", "repos/acme/widget/issues", "-f", "state=open"], ["api", "graphql", "-f", "query={ viewer { login } }"], ["label", "list"]]) {
+      const r = gh(argv, { FAKE_DEFAULT: "acme/widget" });
+      expect([argv, r.code, r.called]).toEqual([argv, 0, [argv]]);
+    }
+  });
+
+  test("the development repository writes to the public copy by name: the sync PR, the reply and the close reach gh", () => {
+    for (const argv of [["pr", "create", "-R", "acme/widget", "-t", "x", "-b", "x"], ["issue", "comment", "3", "-R", "acme/widget", "-b", "受け取った"], ["issue", "close", "3", "-R", "acme/widget", "--reason", "completed"]]) {
+      expect([argv, gh(argv, { FAKE_DEFAULT: "acme/widget-dev" }).called]).toEqual([argv, [VIEW, argv]]);
+    }
+  });
+
+  test("GH_REPO: the public copy stops without asking gh; elsewhere, a write not named goes there without asking", () => {
+    const stopped = gh(["issue", "comment", "1", "-b", "x"], { GH_REPO: "acme/widget" });
+    expect([stopped.code, stopped.called]).toEqual([1, []]);
+    expect(gh(["issue", "comment", "1", "-b", "x"], { GH_REPO: "someone/widget", FAKE_DEFAULT: "acme/widget" }).called).toEqual([["issue", "comment", "1", "-b", "x"]]);
+  });
+
+  test("GH_REPO elsewhere does not change gh repo view: -R naming the public copy still asks it", () => {
+    // a clone as taken (origin = the public copy) with GH_REPO set: `-R "$(gh repo view …)"` names the public copy
+    const named = ["issue", "create", "-R", "acme/widget", "-t", "x", "-b", "x"];
+    const stopped = gh(named, { GH_REPO: "someone/widget", FAKE_DEFAULT: "acme/widget" });
+    expect([stopped.code, stopped.called]).toEqual([1, [VIEW]]);
+    const before = gh(["issue", "-R", "acme/widget", "create", "-t", "x", "-b", "x"], { GH_REPO: "someone/widget", FAKE_DEFAULT: "acme/widget" });
+    expect([before.code, before.called]).toEqual([1, [VIEW]]);
+    expect(stopped.err).toContain("git remote add");
+    expect(gh(named, { GH_REPO: "acme/widget-dev", FAKE_DEFAULT: "acme/widget-dev" }).called).toEqual([VIEW, named]);
+  });
+
+  test("a tree without publicSync: every write reaches gh without repo view", () => {
+    for (const argv of WRITES) expect([argv, gh(argv, { FAKE_DEFAULT: "acme/widget" }, dir).called]).toEqual([argv, [argv]]);
+  });
+
+  test("writeTargetOf: the named repository, GH_REPO, or null; null for a read", () => {
+    expect(writeTargetOf(["-R", "acme/widget", "issue", "comment", "1", "-b", "x"], {})).toEqual({ repo: "acme/widget" });
+    expect(writeTargetOf(["issue", "comment", "1", "--repo=acme/widget"], { GH_REPO: "x/y" })).toEqual({ repo: "acme/widget" });
+    expect(writeTargetOf(["issue", "-R", "acme/widget", "create", "-t", "x"], { GH_REPO: "x/y" })).toEqual({ repo: "acme/widget" });
+    expect(writeTargetOf(["pr", "--repo=acme/widget", "comment", "1", "-b", "x"], {})).toEqual({ repo: "acme/widget" });
+    expect(writeTargetOf(["pr", "merge", "https://github.com/acme/widget/pull/4"], {})).toEqual({ repo: "acme/widget" });
+    expect(writeTargetOf(["issue", "edit", "1", "-b", "https://github.com/acme/widget/issues/9"], {})).toEqual({ repo: null });
+    expect(writeTargetOf(["release", "create", "v1"], { GH_REPO: "acme/widget" })).toEqual({ repo: "acme/widget" });
+    expect(writeTargetOf(["api", "--method=DELETE", "/repos/acme/widget/labels/x"], {})).toEqual({ repo: "acme/widget" });
+    expect(writeTargetOf(["api", "graphql", "-F", "query=@q.graphql"], {})).toEqual({ repo: null });
+    expect(writeTargetOf(["api", "repos/{owner}/{repo}/issues", "-f", "title=x"], { GH_REPO: "someone/widget" })).toEqual({ repo: "someone/widget" });
+    for (const argv of [["issue", "list"], ["pr", "checks", "1"], ["release", "download", "v1"], ["api", "repos/acme/widget"], ["api", "-XHEAD", "repos/acme/widget"], ["repo", "view"], ["issue"], []]) {
+      expect([argv, writeTargetOf(argv, {})]).toEqual([argv, null]);
+    }
   });
 });
 

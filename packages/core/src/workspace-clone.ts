@@ -1,17 +1,72 @@
+import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { Workspace } from "@switchboard/protocol";
+import type { BacklogSource, Workspace } from "@switchboard/protocol";
 import { localBacklogSource, type GhRunner } from "./backlog.ts";
 import type { Db } from "./db.ts";
+import type { Inbox } from "./inbox.ts";
 
-/** A GitHub repository name from `owner/name` or `https://github.com/owner/name` (`.git` and a trailing `/` allowed); anything else is null. */
+/**
+ * A GitHub repository name from `owner/name`, `https://github.com/owner/name`, `git@github.com:owner/name` or
+ * `ssh://git@github.com/owner/name` (`.git` and a trailing `/` allowed); anything else is null.
+ */
 export function parseGithubRepo(input: string): { owner: string; name: string } | null {
-  const m = /^(?:https:\/\/github\.com\/)?([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/.exec(input.trim());
+  const m = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)?([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/.exec(input.trim());
   if (!m) return null;
   const [, owner, name] = m as unknown as [string, string, string];
   if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(owner)) return null;
   if (!/^[A-Za-z0-9._][A-Za-z0-9._-]{0,99}$/.test(name) || /^\.+$/.test(name) || name === ".git") return null;
   return { owner, name };
+}
+
+/**
+ * Why a runner must not start in the checkout at `path` (#2799): its origin is not the workspace's registered GitHub
+ * repository (`source`). null = it is, the workspace has no GitHub registration, or the folder has no origin (not a
+ * git checkout, or one without an origin: nothing to push to). Reads git only (no network): an origin left at a
+ * renamed repository's old name stops too, and the text says how to fix it.
+ */
+export function originMismatch(path: string, source: BacklogSource | null, originOf = gitOrigin): string | null {
+  if (source?.service !== "github") return null;
+  const raw = originOf(path);
+  if (raw === null) return null;
+  // a URL may carry credentials before the host: never repeat them
+  const url = raw.trim().replace(/^(https?:\/\/)[^@/]*@/, "$1");
+  // a URL on GitHub only: a bare `owner/name` is a path on this machine
+  const repo = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)/.test(url) ? parseGithubRepo(url) : null;
+  const origin = repo ? `${repo.owner}/${repo.name}` : url;
+  if (repo && origin.toLowerCase() === source.repository.toLowerCase()) return null;
+  return `origin は ${origin}、登録は ${source.repository} です。登録のリポジトリの clone にする（\`git remote set-url origin https://github.com/${source.repository}.git\` など）まで Task を起動しません`;
+}
+
+/** The origin URL of the checkout at `path`; null = not a git checkout, or one without an origin. */
+export function gitOrigin(path: string): string | null {
+  const r = spawnSync("git", ["-C", path, "remote", "get-url", "origin"], { encoding: "utf8" });
+  return r.status === 0 ? r.stdout : null;
+}
+
+/**
+ * Leaves one Inbox note per workspace a Task cannot use (#2799): one registered to a GitHub repository whose folder is
+ * gone (a rebuild that could not clone it, or moved a clone of another repository aside) or whose origin is not that
+ * repository (originMismatch). Called once at boot; a note of the same title still open is not added again, so a
+ * restart before it is fixed adds nothing. Returns how many were added.
+ */
+export function noticeUnusableWorkspaces(db: Db, inbox: Inbox, originOf = gitOrigin): number {
+  // as the Inbox keeps a title (at most 80 characters, trimmed), both sides alike
+  const same = (title: string) => title.slice(0, 80).trim();
+  const open = new Set(inbox.list().map((n) => same(n.title)));
+  let added = 0;
+  for (const ws of db.listWorkspaces()) {
+    const source = db.getWorkspaceBacklogSource(ws.id);
+    if (source?.service !== "github") continue;
+    const why = existsSync(ws.path)
+      ? originMismatch(ws.path, source, originOf)
+      : `フォルダ ${ws.path} がありません（作り直しで clone できなかったか、登録のリポジトリ ${source.repository} と違う clone だったので退避された。理由はシステムのログの \`bootstrap:\` の行、退避した clone は \`${ws.path}.unverified-*\`）。\`gh repo clone ${source.repository} ${ws.path}\` で置き直すまで、この workspace の Task は起動しません`;
+    const title = `workspace ${ws.name} を使えません`;
+    if (!why || open.has(same(title))) continue;
+    inbox.add(why, { title, workspaceHint: ws.name });
+    added++;
+  }
+  return added;
 }
 
 /** Registers a directory as a workspace. `switchboard` keeps its backlog here only (#2265): the source is set now and stored as an empty import. */

@@ -16,14 +16,15 @@
 | 段 | から | まで |
 |---|---|---|
 | `request` | 元要望の Issue の起票（PBI の `## 元要望` の最初の `#N`。「なし」なら不明） | PBI の起票 |
-| `split` | PBI の起票 | 最後の Task（sub-issue）の起票 |
-| `wait` | 最後の Task の起票 | 最初の着手（Task の着手コメント）。着手の印が無ければ最初の PR の作成 |
+| `split` | PBI の起票 | 最初の着手（着手の印が無ければ最初の PR の作成）以前に起票した最後の Task（sub-issue）の起票。着手の後に起票した Task は入らない。着手も PR も無ければ最後の Task |
+| `wait` | `split` の終わり | 最初の着手（Task の着手コメント）。着手の印が無ければ最初の PR の作成 |
 | `build` | 最初の着手 | 最初の PR の作成 |
 | `review-wait` | PR の作成 | その PR の最初の `[codex\|claude\|dak] review` コメント。PR ごとに出して中央値 |
 | `review` | その PR の最初のレビュー | その PR のマージ。PR ごとに出して中央値 |
 | `close` | 最後の PR のマージ | PBI を閉じた時刻 |
 
 - **印**: Issue・PR の `createdAt` / `closedAt` / `mergedAt`、Task の着手コメント（`<!-- parallel-guard:task-claim -->` か、行頭が「着手」の行）、PR の `[codex|claude|dak] review` コメント（`scripts/merge-gate.ts` と同じ形）、`## 判断待ち` / `## 回答` コメント（`issue-workflow` の「判断待ちの出し方」）。どれもスキルが必ず残す
+- 着手の後に足した Task（レビュー・ゲートの直し、回答を受けた追加）は分解の時間ではないので、段の境目に使わない（#2684）
 - マージされていない PR（閉じただけ）は数えない。1 つの PR が複数の Task を閉じるときは 1 回だけ数える
 - **返事待ち**（`userWaitMs`）: PBI と各 Task で、`## 判断待ち` から次の `## 回答` までを Issue ごとに対にして足す。回答が無い判断待ちは 0（まだ開いているか、記録が無い）。運用の確認（マージの可否など）は Task の会話で聞くので Issue に印が無く、ここには入らない
 - **レビューの回数**（`reviewRounds`）: PR ごとの `[codex|claude|dak] review` コメントの数。修正のあとの見直しも 1 回と数える

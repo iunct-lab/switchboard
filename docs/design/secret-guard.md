@@ -9,7 +9,7 @@ Switchboard が起動したランナーの `gh` の前段に検査を置く（PB
 | 部品 | 場所 | 役割 |
 |---|---|---|
 | 検査 | `ops-kit/src/secrets.ts` の `findSecrets` | 文の中の値を見つけ、種類と行番号を返す。値は返さない。ホストの AWS の設定（`AWS_CONFIG_FILE`、無ければ `~/.aws/config`）の名前とアカウント ID は `hostAws` が読み、呼ぶ側の入口（前段、`scan-text`、`scan-issues`、`ops-kit backlog` の送信前、ローカル CI の投稿）が 1 回ずつ渡す |
-| 前段 | `ops-kit/bin/gh`（`ops-kit/src/gh-guard.ts`） | 書き込みの本文を検査し、当たれば exit 1。当たらなければ本物の `gh` にそのまま渡す |
+| 前段 | `ops-kit/bin/gh`（`ops-kit/src/gh-guard.ts`） | 書き込みの本文を検査し、当たれば exit 1。続けて公開側の写しへの書き込みを検査し（下の「公開側の写しへの書き込み」）、当たれば exit 1。どちらにも当たらなければ本物の `gh` にそのまま渡す |
 | 配線 | `packages/core/src/tasks.ts` の `startSession` | ランナーに渡す `PATH` の先頭に meta workspace の `ops-kit/bin`、末尾にデーモンの `bun` のフォルダを置く（`StartOptions.env`） |
 | ホストの対話シェル | `/etc/profile.d/sb-gh-guard.sh`（`aws/host/sb-gh-guard.sh` を `bootstrap.sh` が置く） | クラウドのホストの、ホストのユーザーの端末タブ（`bash -i`）とログインシェルの `PATH` の先頭に meta のチェックアウトの `ops-kit/bin`、末尾に `bun` のフォルダを置く。Switchboard を通さずに手で動かす `claude` / `codex` の投稿も、どのリポジトリでも前段を通る（#824）。チェックアウトが無ければ `PATH` を変えない。root やほかのユーザーのシェルは変えない（チェックアウトはエージェントが書けるので、root の `PATH` の先に置かない） |
 | 定期の検査 | デーモンの予定「認証の値の検査」（`action: "secret-scan"`、`packages/core/src/secretscan.ts`） | 登録済みの全リポジトリに `scan-issues` を毎日走らせ、当たりか検査できなかったリポジトリがあれば受信箱にメモを残す |
@@ -57,6 +57,15 @@ Switchboard が起動したランナーの `gh` の前段に検査を置く（PB
 例外の一覧や設定は持たない。誤検知で投稿が止まったら、規則を直して無くす（#661 の方針）。
 
 `aws-profile` は、検査が動くホストの AWS の設定（`AWS_CONFIG_FILE`、無ければ `~/.aws/config`）の `[profile <名前>]` と `[sso-session <名前>]` の名前を、単語として含む行に当たる（SSO のセッション名も）。名前の形からは見分けられないので、規則は名前を設定から読む。`default` は名前として読まない。名前の前後が英数字・`_`・`-` のとき（`<名前>-host`）は別の語なので当たらず、大文字小文字は区別しない。英字だけの名前は普通の語（名詞）と区別できないので、`--profile <名前>`、`AWS_PROFILE=<名前>`、`[profile <名前>]`、`sso_session = <名前>` のようにプロファイル・セッションとして名指しされた位置だけで当たる（2026-10-14、実際の設定の名前が 1 つのリポジトリの散文に 245 行出て、規則を狭めた。誤検知は一覧や設定で除かず、規則を直す）。設定が読めないホスト（Actions の `secret-scan.yml`）では何にも当たらない。当たりは種類と行番号だけで、名前は出さない。切る設定は無い。
+
+## 公開側の写しへの書き込み
+
+2 つ目の検査。公開に出す木を clone して自分のリポジトリで開発する人の工程が、公開側に書かないようにする。判定はキットの `publicCopyRefusal`（`ops-kit/src/config.ts`）1 つで、リポジトリの名前を持たない: 最寄りの `ops.config.json` の `publicSync.target`（文字列だけを読む。`parseConfig` は通さない）と書き込み先が同じなら止める。
+
+- 書き込み（`writeTargetOf`）: `issue` / `pr` / `label` / `release` の読み取り以外のサブコマンド、`gh api` の GET / HEAD 以外（メソッドが無くフィールドがあれば POST）、`graphql` の mutation。先は `-R` / `--repo`（グループの前後どこでも）、Issue・PR の URL、`GH_REPO` の順。`{owner}/{repo}` と `graphql` は `GH_REPO`
+- 先がほかのリポジトリなら通す。先が公開側か未指定なら、`GH_REPO` が公開側、または本物の `gh repo view` が公開側のとき止める。`gh repo view` は `GH_REPO` を見ずに remote から答えるので、`GH_REPO` だけ直した clone の `-R "$(gh repo view …)"` も止まる。読み取りとほかを名指しした書き込みでは `gh repo view` を呼ばない
+- 開発元の clone は `gh repo view` が開発元なので、公開側を `-R` で名指しする操作（同期の PR、要望 Issue への返信とクローズ）は通る
+- キットの道具の `repoOf`（`ops-kit/src/gh.ts`）と、デーモンのバックログの `backlogRepoOf`（`packages/core/src/backlog.ts`。取込み・昇格の失敗の報告・指示のプリセットの対象）も同じ判定で止める。デーモンでは取込みの失敗としてバックログ画面に文が出て、送信元が保存されないので送信も起きない。読み取りだけの定期の秘密の検査は止めない
 
 ## アプリの Task の中の Issue への直接の書き込み（#2694）
 

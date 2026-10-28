@@ -248,6 +248,15 @@ describe("reserveStopRetry / stopRecoveryPrompt (#949)", () => {
     expect(stopRecoveryPrompt([])).not.toContain("まだ解けていない");
   });
 
+  test("stop grant: the newest stop's grant is the series' grant; the prompt says to write one for a permission stop (#2745)", () => {
+    const a = stop({ reason: "permission", grant: "PR #12 をマージすることだけ許可します" });
+    const b = stop({ reason: "permission" });
+    expect(reduceStops([a])[0]!.grant).toBe("PR #12 をマージすることだけ許可します");
+    expect(reduceStops([a, b])[0]!.grant).toBeNull();
+    expect(StopRecord.parse({ ...a, grant: "x".repeat(400) }).grant).toHaveLength(300);
+    expect(stopRecoveryPrompt([])).toContain('許可文を "grant" に 1 文で書く');
+  });
+
   test("recovery prompt forbids out-of-scope writes (#1987)", () => {
     const p = stopRecoveryPrompt([]);
     expect(p).toContain("依頼の範囲外の書き込み");

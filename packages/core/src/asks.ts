@@ -16,9 +16,10 @@ export const ASK_HISTORY_MS = 24 * 60 * 60 * 1000;
  * The question, choices, recommendation, where it stopped (`**止めた場所**:`, with the first `PR #n` it names; #936) and
  * the Task whose artifacts are its screen mockups (`**画面イメージ**:`, the first id in it; #2221) of a `## 判断待ち`
  * (`**問い**:`) or an operational check (`**確認**:`), in the form of issue-workflow's 「判断待ちの出し方」.
+ * A choice's ` — 許可: <文>` is its grant (#2745), kept in the choice's text too (the reply sends the line as it is).
  * Lines not in that form are left; what is not there is null / empty.
  */
-export function parseAskBlock(text: string): { question: string | null; choices: string[]; recommendation: Ask["recommendation"]; place: Ask["place"]; mockupTask: string | null } {
+export function parseAskBlock(text: string): { question: string | null; choices: string[]; grants: Array<string | null>; recommendation: Ask["recommendation"]; place: Ask["place"]; mockupTask: string | null } {
   let question: string | null = null;
   let mockupTask: string | null = null;
   let recommendation: Ask["recommendation"] = null;
@@ -43,7 +44,13 @@ export function parseAskBlock(text: string): { question: string | null; choices:
     if (inChoices && /^[-*] /.test(line)) choices.push(line.slice(2).trim());
     else if (line) inChoices = false;
   }
-  return { question, choices, recommendation, place, mockupTask };
+  return { question, choices, grants: choices.map(grantOfChoice), recommendation, place, mockupTask };
+}
+
+/** The grant of a choice (#2745): what follows ` — 許可: ` in its line; null = none. */
+export function grantOfChoice(choice: string): string | null {
+  const m = / — 許可[:：]\s*(.+)$/.exec(choice);
+  return m ? m[1]!.trim() : null;
 }
 
 /** The screen mockups of a Task, by its id (#2221). */
@@ -67,7 +74,8 @@ export function blockersOf(input: { waits: BacklogItem["waits"]; stops: StopSumm
   for (const s of input.stops) {
     if (s.state === "resolved") continue;
     for (const c of s.conditions) if (!c.met) out.push({ kind: "condition", detail: `${c.key}: ${c.value}` });
-    if ((s.reason === "permission" || s.reason === "auth") && !input.approvalPending)
+    // a permission stop with a grant is answered by sending the grant (#2745)
+    if ((s.reason === "permission" || s.reason === "auth") && !input.approvalPending && !(s.reason === "permission" && s.grant))
       out.push({ kind: "runner", detail: `${s.op} ${s.target}: ${s.evidence}（ランナー側の拒否。回答では解除されません）`.replace(/ {2,}/g, " ") });
   }
   return out;
@@ -116,7 +124,7 @@ export function resumeOfTask(input: { task: Task; repliedAt: number | null; fail
  * The kinds of answer a question takes on screen (#936). Only an open or held one is answered; an automatic one takes
  * none, and neither does a check or a stop with something an answer does not take away (a reply would set the Task going).
  */
-export function answersOf(a: Pick<Ask, "kind" | "needs" | "state" | "choices" | "blockers">): AskAnswerKind[] {
+export function answersOf(a: Pick<Ask, "kind" | "needs" | "state" | "choices" | "blockers" | "grant">): AskAnswerKind[] {
   if (a.state !== "open" && a.state !== "held") return [];
   if ((a.kind === "check" || a.kind === "stop") && a.blockers.length) return [];
   const choice: AskAnswerKind[] = a.choices.length ? ["choice"] : [];
@@ -130,7 +138,7 @@ export function answersOf(a: Pick<Ask, "kind" | "needs" | "state" | "choices" | 
     case "confirmation":
       return ["confirm"];
     case "stop":
-      return a.needs === "person" ? ["text"] : [];
+      return a.needs === "person" ? (a.grant ? ["grant", "text"] : ["text"]) : [];
     default:
       return [];
   }
@@ -194,15 +202,21 @@ const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 /** The PBI a question belongs to for a policy's range: its own, or the Issue its stage Task works on. */
 export const policyPbi = (a: Pick<Ask, "pbi" | "task">): number | null => a.pbi?.number ?? a.task?.stageIssue ?? null;
 
+const GRANT_NOTE = "許可文は 1 回きりで、方針には保存しません";
+
 /** What the screen shows about policies for one question (#938). */
 export function policyOf(ask: Ask, input: { policies: AnswerPolicy[]; confirmHit: ApprovalRuleMatch | null; pbiOpen: boolean; now: number }): AskPolicy {
   const { subject } = ask;
   const pbi = policyPbi(ask);
   const refused = ask.blockers.some((b) => b.kind === "runner");
+  // a grant allows one operation once (#2745): saved as a policy it would allow the same again
+  const granted = ask.grant !== null || ask.grants.some((g) => g !== null);
   const [scopes, note]: [AskPolicy["scopes"], string | null] =
     ask.answers.length === 0 || refused
       ? [[], refused ? "ランナー側の拒否は保存した方針では解除できません" : null]
-      : input.confirmHit
+      : granted
+        ? [[], GRANT_NOTE]
+        : input.confirmHit
         ? [[], `都度確認のルール ${input.confirmHit.source}: ${input.confirmHit.pattern} に当たります`]
         : !subject
           ? [["once"], "操作と対象が記録されていないため、今回のみ"]
@@ -232,14 +246,14 @@ const withPolicy = (a: Ask, subject: PolicySubject | null, confirmHit: ApprovalR
 
 /** The answer fields of a built question: what it takes, and nothing in the way or going on yet. */
 const noPolicy: AskPolicy = { scopes: [], note: null, defaults: null, applied: null, previous: null };
-const unanswered = { answers: [] as AskAnswerKind[], mockups: [] as Artifact[], place: null, blockers: [] as AskBlocker[], resume: null, subject: null, policy: noPolicy };
+const unanswered = { grants: [] as Array<string | null>, grant: null, answers: [] as AskAnswerKind[], mockups: [] as Artifact[], place: null, blockers: [] as AskBlocker[], resume: null, subject: null, policy: noPolicy };
 /** Fills `answers` once the rest is known. */
 const withAnswers = (a: Ask): Ask => ({ ...a, answers: answersOf(a) });
 
 const issueUrl = (i: BacklogItem, n: number) => i.url.replace(/\d+$/, String(n));
 
 /** The fields every question of a backlog item shares. */
-const base = (i: BacklogItem): Pick<Ask, "workspace" | "pbi" | "issue" | "task" | "choices" | "recommendation" | "conditions" | "answers" | "mockups" | "place" | "blockers" | "resume" | "subject" | "policy"> => ({
+const base = (i: BacklogItem): Pick<Ask, "workspace" | "pbi" | "issue" | "task" | "choices" | "grants" | "grant" | "recommendation" | "conditions" | "answers" | "mockups" | "place" | "blockers" | "resume" | "subject" | "policy"> => ({
   ...unanswered,
   workspace: { id: i.workspaceId, name: i.workspaceName },
   pbi: { number: i.number, title: i.title, url: i.url },
@@ -266,6 +280,7 @@ function stopAsk(s: StopSummary, shared: Omit<Ask, "id" | "kind" | "needs" | "st
     task: { id: s.work.taskId, title: null },
     reason: `${s.reason}: ${s.evidence}`,
     question: null,
+    grant: s.reason === "permission" ? s.grant : null,
     next,
     source: { label: "停止記録", url: null, taskId: s.work.taskId },
     route: "task",
@@ -583,7 +598,12 @@ export function dedupeAsks(asks: Ask[]): Ask[] {
     const had = byId.get(a.id);
     if (!had || a.changedAt > had.changedAt) byId.set(a.id, a);
   }
-  const merged = (keep: Ask, drop: Ask): Ask => ({ ...keep, conditions: [...keep.conditions, ...drop.conditions.filter((c) => !keep.conditions.some((k) => k.key === c.key))] });
+  const conditions = (keep: Ask, drop: Ask) => [...keep.conditions, ...drop.conditions.filter((c) => !keep.conditions.some((k) => k.key === c.key))];
+  // a permission stop's grant (#2745) stays answerable on the check it folds into (an approval is answered by itself)
+  const merged = (keep: Ask, drop: Ask): Ask =>
+    keep.kind !== "approval" && keep.grant === null && drop.grant !== null && drop.answers.includes("grant")
+      ? { ...keep, conditions: conditions(keep, drop), grant: drop.grant, answers: ["grant", ...keep.answers], policy: { ...keep.policy, scopes: [], note: GRANT_NOTE, defaults: null } }
+      : { ...keep, conditions: conditions(keep, drop) };
   const folded = new Map<string, Ask>();
   const rest: Ask[] = [];
   for (const a of byId.values()) {
