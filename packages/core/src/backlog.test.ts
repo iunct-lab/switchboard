@@ -703,7 +703,7 @@ test("start: a second start while the first is running is 409 with its id; GET /
 test("start: two starts while the routing turn is still thinking make one Task; the other is 409", async () => {
   const claude = holdingClaude();
   // an LLM routing suggestion takes a moment: both starts would pass the running/waiting check before either creates
-  const slow: Suggester = { suggest: async () => (await Bun.sleep(50), { runner: "claude", reason: "slow", ruleId: "llm", available: true, alternatives: [], llm: null }) };
+  const slow: Suggester = { suggest: async () => (await Bun.sleep(50), { runner: "claude", reason: "slow", ruleId: "llm", model: null, available: true, alternatives: [], llm: null }) };
   const base = await boot(fakeGh().gh, claude.adapter, {}, () => slow);
   await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ routing: { llm: { enabled: true } } }) });
   const [a, b] = await Promise.all([start(base, 304, { action: "complete" }), start(base, 304, { action: "complete" })]);
@@ -2478,7 +2478,7 @@ test("backlog-next slots: Claude usage at 0.8 or more — one start per firing, 
 });
 
 test("backlog-next slots: a button still creating its stage Task holds that slot; the other slot starts", async () => {
-  const slow: Suggester = { suggest: async () => (await Bun.sleep(50), { runner: "claude", reason: "slow", ruleId: "llm", available: true, alternatives: [], llm: null }) };
+  const slow: Suggester = { suggest: async () => (await Bun.sleep(50), { runner: "claude", reason: "slow", ruleId: "llm", model: null, available: true, alternatives: [], llm: null }) };
   const base = await boot(fakeGh().gh, holdingClaude().adapter, {}, () => slow);
   await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ routing: { llm: { enabled: true } } }) });
   const id = await backlogNextSchedule(base);
@@ -2833,7 +2833,7 @@ const runningStage = (title: string) => {
 };
 
 test("start race: a button start in progress and a backlog-next firing on the same item make one Task (#936)", async () => {
-  const slow: Suggester = { suggest: async () => (await Bun.sleep(50), { runner: "claude", reason: "slow", ruleId: "llm", available: true, alternatives: [], llm: null }) };
+  const slow: Suggester = { suggest: async () => (await Bun.sleep(50), { runner: "claude", reason: "slow", ruleId: "llm", model: null, available: true, alternatives: [], llm: null }) };
   const base = await boot(fakeGh().gh, holdingClaude().adapter, {}, () => slow);
   closeTried();
   await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ routing: { llm: { enabled: true } } }) });
@@ -2853,7 +2853,7 @@ test("start race: a firing skips an item whose stage Task started after GitHub w
   // while the firing starts #304, a stage Task of #309 starts elsewhere (a button, an answer's resume): GitHub was read before it
   const routing: Suggester = { suggest: async () => {
     if (first) { first = false; runningStage("#309 実装: Ready の写し 309"); }
-    return { runner: "claude", reason: "r", ruleId: "llm", available: true, alternatives: [], llm: null };
+    return { runner: "claude", reason: "r", ruleId: "llm", model: null, available: true, alternatives: [], llm: null };
   } };
   const base = await boot(moreReadyGh(309, 310), holdingClaude().adapter, {}, () => routing);
   closeTried();

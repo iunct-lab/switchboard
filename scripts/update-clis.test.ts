@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { loadConfig, sectionName } from "../ops-kit/src/config.ts";
+import { hasSection } from "../ops-kit/src/lint.ts";
 import type { Runner, VersionReaders } from "./check-models";
 import { hostDeps, requestFor, updateClis, type UpdateDeps } from "./update-clis";
 
@@ -162,5 +164,14 @@ describe("updateClis", () => {
     const f = { runner: "claude" as const, from: "1.0.0", to: "1.1.0", reason: "x", restored: false };
     const body = requestFor([f], "2026-10-16", [`claude 戻せなかった: ${home}/.local/bin/claude`])!.body;
     expect(body).not.toContain(home);
+  });
+
+  test("the request body has the request's sections (要望の節, #2068)", () => {
+    const f = { runner: "claude" as const, from: "1.0.0", to: "1.1.0", reason: "x", restored: true };
+    const body = requestFor([f], "2026-10-16", ["claude rolled back: 1.1.0 → 1.0.0（確認 失敗: x）"])!.body;
+    expect(body).toContain("## 要望\n");
+    expect(body).toContain("## 出典\n- 誰の言葉: 定期の検査\n`bun scripts/update-clis.ts --file-request`（定期実行） / 2026-10-16");
+    const required = loadConfig(join(import.meta.dir, "..", "ops.config.json")).sections.request.map(sectionName);
+    expect(required.filter((n) => !hasSection(body, n))).toEqual([]);
   });
 });

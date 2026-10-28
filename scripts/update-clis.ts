@@ -14,7 +14,8 @@
  * symlink to where it pointed before. Running Tasks keep the files they started with; only Tasks that start later use the new CLI.
  *
  * --file-request: on exit 1 also file a request Issue (type:request) through scripts/file-request.ts, unless an open
- * request has the same title (the same failure the next day does not file twice).
+ * request has the same title (the same failure the next day does not file twice). The body has the `## 要望` and `## 出典`
+ * sections the filing entry (scripts/setup/request_issue.sh) requires.
  */
 import { existsSync, lstatSync, mkdtempSync, readlinkSync, renameSync, rmSync, symlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -152,6 +153,7 @@ export function requestFor(failures: Failure[], date: string, lines: string[]): 
   const title = `CLI 更新の失敗: ${failures.map((f) => `${f.runner} ${f.from} → ${f.to}`).join(" / ")}`;
   const home = homedir();
   const body = [
+    "## 要望",
     `${date} の定期実行（\`bun scripts/update-clis.ts --file-request\`）で CLI の更新に失敗した。`,
     "",
     ...lines.map((l) => `- ${l}`),
@@ -159,6 +161,10 @@ export function requestFor(failures: Failure[], date: string, lines: string[]): 
     ...failures.map((f) => (f.restored ? `- ${f.runner}: 元の版 ${f.from} に戻した。次に更新するまで以後の Task は ${f.from} で動く` : `- ${f.runner}: **元の版に戻せていない**。ホストの ${LINKS[f.runner]} を確かめる`)),
     "",
     "直し方（docs/design/cli-update.md）: 新しい版でアダプタが動かない理由を直す。直るまで翌日も更新→失敗→戻すを繰り返す（同じ題の要望は増えない）。",
+    "",
+    "## 出典",
+    "- 誰の言葉: 定期の検査",
+    `\`bun scripts/update-clis.ts --file-request\`（定期実行） / ${date}`,
   ]
     .join("\n")
     .replaceAll(home, "~"); // an Issue is public text: no username from the home path

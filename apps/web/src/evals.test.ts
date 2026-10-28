@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import type { EvalsListRow, JudgeEval, RuleEval, TaskEvals } from "@switchboard/protocol";
 import type { EvalsSortKey } from "./evals.ts";
-import { endLabel, evalCells, evalRowWarn, firstSortDir, fmtDuration, humanLabel, judgeAverage, judgeRows, metricRows, sortEvalRows } from "./evals.ts";
+import { endLabel, evalCells, evalFilterOptions, evalRowWarn, filterEvalRows, firstSortDir, fmtDuration, humanLabel, judgeAverage, judgeRows, metricRows, modelsLabel, sortEvalRows } from "./evals.ts";
 
 const rules = (over: Partial<RuleEval["metrics"]> = {}): RuleEval => ({
   metrics: { turns: 2, toolCalls: 7, toolFailures: 0, errors: 0, asks: 1, denials: 0, stops: 0, stopReasons: {}, userInstructions: 1, lastEnd: "ok", durationMs: 184_000, ...over },
   status: "done", outcome: "unknown", costUsd: 0.0123, by: "rules@1", ts: 1,
 });
-const evals = (r: RuleEval | null, judge: JudgeEval | null = null): TaskEvals => ({ rules: r, judge, human: null });
+const evals = (r: RuleEval | null, judge: JudgeEval | null = null): TaskEvals => ({ rules: r, judge, human: null, models: [] });
 
 describe("evals rows (#1218)", () => {
   test("metricRows: the fixed order; a failure, error, denial or stop marks its row", () => {
@@ -60,14 +60,14 @@ describe("judge rows (#1219)", () => {
 describe("human label (#1220)", () => {
   test("humanLabel: null without a rating; the rating alone; the rating with the note", () => {
     expect(humanLabel(evals(null))).toBeNull();
-    expect(humanLabel({ rules: null, judge: null, human: { rating: 3, comment: "", by: "user", ts: 1 } })).toBe("3 / 5");
-    expect(humanLabel({ rules: null, judge: null, human: { rating: 5, comment: "早くて正確", by: "user", ts: 1 } })).toBe("5 / 5 · 早くて正確");
+    expect(humanLabel({ rules: null, judge: null, human: { rating: 3, comment: "", by: "user", ts: 1 }, models: [] })).toBe("3 / 5");
+    expect(humanLabel({ rules: null, judge: null, human: { rating: 5, comment: "早くて正確", by: "user", ts: 1 }, models: [] })).toBe("5 / 5 · 早くて正確");
   });
 });
 
 describe("evals list rows (#1221)", () => {
   const row = (taskId: string, over: Partial<EvalsListRow> = {}): EvalsListRow => ({
-    taskId, title: taskId, runner: "claude", workspaceId: null, status: "done", outcome: "done", updatedAt: 1, costUsd: 0,
+    taskId, title: taskId, runner: "claude", workspaceId: null, status: "done", outcome: "done", updatedAt: 1, costUsd: 0, models: [], effort: null,
     rules: { toolCalls: 3, toolFailures: 0, errors: 0, userInstructions: 0, stops: 0, lastEnd: "ok" }, judge: null, human: null, ...over,
   });
   const rows = [row("a", { updatedAt: 3, judge: { average: 4.2, scores: {}, rubric: "r@1", by: "x" } }), row("b", { updatedAt: 2, rules: null }), row("c", { updatedAt: 1, judge: { average: 2.0, scores: {}, rubric: "r@1", by: "x" }, rules: { toolCalls: 1, toolFailures: 2, errors: 0, userInstructions: 1, stops: 0, lastEnd: "error" } })];
@@ -86,11 +86,43 @@ describe("evals list rows (#1221)", () => {
   });
 
   test("evalCells and evalRowWarn", () => {
-    expect(evalCells(rows[0]!)).toEqual({ judge: "4.2", human: "-", end: "正常" });
-    expect(evalCells(rows[1]!)).toEqual({ judge: "-", human: "-", end: "-" });
+    expect(evalCells(rows[0]!)).toEqual({ judge: "4.2", human: "-", end: "正常", model: "-", mixed: false, effort: "CLI 既定" });
+    expect(evalCells(rows[1]!)).toEqual({ judge: "-", human: "-", end: "-", model: "-", mixed: false, effort: "CLI 既定" });
     expect(evalCells(row("h", { human: { rating: 2, comment: "" } })).human).toBe("2 / 5");
     expect(rows.map(evalRowWarn)).toEqual([false, false, true]);
     expect(evalRowWarn(row("h", { human: { rating: 2, comment: "" } }))).toBe(true);
     expect(evalRowWarn(row("j", { judge: { average: 2.5, scores: {}, rubric: "r@1", by: "x" } }))).toBe(true);
+  });
+
+  test("evalCells: every model in the order first used (混在 with two or more) and the effort by the runner's label (#1801)", () => {
+    const runner = { efforts: [{ value: "high", label: "高" }] };
+    expect(evalCells(row("one", { models: ["claude-opus-5-5"], effort: "high" }), runner)).toMatchObject({ model: "claude-opus-5-5", mixed: false, effort: "高" });
+    // opus → sonnet → opus reads ["opus", "sonnet"] (distinct): the cell names both rather than claim sonnet ran last
+    expect(evalCells(row("two", { models: ["claude-opus-5-5", "claude-sonnet-5-5"], effort: "xhigh" }), runner)).toMatchObject({ model: "claude-opus-5-5 → claude-sonnet-5-5", mixed: true, effort: "xhigh" });
+    expect(evalCells(row("none", { models: [], effort: null }))).toMatchObject({ model: "-", mixed: false, effort: "CLI 既定" });
+  });
+
+  test("modelsLabel: null when not known, the one, or every one with （混在） (#1801)", () => {
+    expect(modelsLabel({ models: [] })).toBeNull();
+    expect(modelsLabel({ models: ["claude-opus-5-5"] })).toBe("claude-opus-5-5");
+    expect(modelsLabel({ models: ["claude-opus-5-5", "claude-sonnet-5-5"] })).toBe("claude-opus-5-5 → claude-sonnet-5-5（混在）");
+  });
+
+  test("filterEvalRows and evalFilterOptions: by a model used, by the effort (- = the CLI default), both (#1801)", () => {
+    const list = [
+      row("a", { models: ["claude-opus-5-5", "claude-sonnet-5-5"], effort: "high" }),
+      row("b", { models: ["claude-sonnet-5-5"], effort: null }),
+      row("c", { models: [], effort: "low" }),
+    ];
+    const ids = (rs: EvalsListRow[]) => rs.map((r) => r.taskId);
+    expect(ids(filterEvalRows(list, { model: "", effort: "" }))).toEqual(["a", "b", "c"]);
+    expect(ids(filterEvalRows(list, { model: "claude-sonnet-5-5", effort: "" }))).toEqual(["a", "b"]);
+    expect(ids(filterEvalRows(list, { model: "claude-opus-5-5", effort: "" }))).toEqual(["a"]);
+    expect(ids(filterEvalRows(list, { model: "", effort: "-" }))).toEqual(["b"]);
+    expect(ids(filterEvalRows(list, { model: "", effort: "low" }))).toEqual(["c"]);
+    expect(ids(filterEvalRows(list, { model: "claude-sonnet-5-5", effort: "high" }))).toEqual(["a"]);
+    expect(ids(filterEvalRows(list, { model: "claude-opus-5-5", effort: "-" }))).toEqual([]);
+    expect(evalFilterOptions(list)).toEqual({ models: ["claude-opus-5-5", "claude-sonnet-5-5"], efforts: ["-", "high", "low"] });
+    expect(evalFilterOptions([])).toEqual({ models: [], efforts: [] });
   });
 });

@@ -1010,6 +1010,7 @@ describe("core daemon", () => {
     expect(multi).toMatchObject({ runner: "claude", ruleId: "multi-repo", available: true });
     const review = await post("/api/tasks/suggest", { cwd: dir, title: "PR review", prompt: "" });
     expect(review).toMatchObject({ runner: "codex", ruleId: "single-repo-long", available: false }); // only the fake claude adapter is installed
+    expect(await post("/api/tasks/suggest", { cwd: dir, title: "", prompt: "状況を教えて" })).toMatchObject({ runner: "claude", ruleId: "status-question", model: "claude-haiku-5-5" });
     expect((await fetch(`${base}/api/tasks/suggest`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: "nope", title: "", prompt: "" }) })).status).toBe(404);
     // nothing ran in this directory yet → fallback; after a task, "previous" wins for a neutral prompt
     expect((await post("/api/tasks/suggest", { cwd: dir, title: "typo", prompt: "fix the typo" })).ruleId).toBe("fallback");
@@ -1115,7 +1116,7 @@ describe("core daemon", () => {
         calls.push({ title: ctx.title, kind: "llm" });
         if (which === "throws") throw new Error("runner said no");
         if (which === "slow") await new Promise((r) => setTimeout(r, 60_000));
-        return { runner: "dak", reason: "LLM がそう言った", ruleId: "llm", available: ctx.available.has("dak"), alternatives: [], llm: null };
+        return { runner: "dak", reason: "LLM がそう言った", ruleId: "llm", model: null, available: ctx.available.has("dak"), alternatives: [], llm: null };
       },
     };
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { lingers: true })], { port: 0, llmSuggester: () => fake });
@@ -1180,7 +1181,7 @@ describe("core daemon", () => {
           onUsage({ t: "usage", source: "reported", model: "cheap-model", inputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.02 });
           // a second model of the same turn (Claude's `modelUsage`, #2353): billed too, not overwritten
           onUsage({ t: "usage", source: "reported", model: "cheaper-model", inputTokens: 10, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.001 });
-          return { runner: "dak", reason: `${cfg.runner} が答えた`, ruleId: "llm", available: ctx.available.has("dak"), alternatives: [], llm: null };
+          return { runner: "dak", reason: `${cfg.runner} が答えた`, ruleId: "llm", model: null, available: ctx.available.has("dak"), alternatives: [], llm: null };
         },
       }),
     });
@@ -3895,6 +3896,37 @@ describe("evals list (#1221)", () => {
       // a row whose json no longer reads is null, like evalsOf
       c.db.sqlite.query("UPDATE task_evals SET json = '{\"old\": true}' WHERE task_id = ? AND source = 'judge'").run(a.id);
       expect((await list()).find((r) => r.taskId === a.id)!.judge).toBeNull();
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+  test("GET /api/evals: models from session.start (distinct, in order, empty skipped) and effort (#1801)", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-evals-models-"));
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(script, { lingers: true })], { port: 0, selfdevChecks: false, gh: NO_GH });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    try {
+      const now = Date.now();
+      const task = (id: string, effort: string | null, at: number) => c.db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: h, scope: [h], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort, origin: "switchboard", resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: at, createdAt: at, updatedAt: at });
+      const start = (id: string, model?: string) => c.db.appendEvent(id, { t: "session.start", runner: "claude", cwd: h, ...(model === undefined ? {} : { model }) });
+      task("mixed", "high", now + 3);
+      task("single", null, now + 2);
+      task("none", null, now + 1);
+      start("mixed", "claude-opus-5-5");
+      start("mixed", "");
+      start("mixed");
+      start("mixed", "claude-sonnet-5-5");
+      start("mixed", "claude-opus-5-5");
+      start("single", "claude-opus-5-5");
+      const rows = (await fetch(`${b}/api/evals`).then(j)) as Array<Record<string, any>>;
+      expect(rows.map((r) => ({ taskId: r.taskId, models: r.models, effort: r.effort }))).toEqual([
+        { taskId: "mixed", models: ["claude-opus-5-5", "claude-sonnet-5-5"], effort: "high" }, // two or more = changed mid-task
+        { taskId: "single", models: ["claude-opus-5-5"], effort: null },
+        { taskId: "none", models: [], effort: null },
+      ]);
+      expect((await fetch(`${b}/api/tasks/mixed/evals`).then(j)).models).toEqual(["claude-opus-5-5", "claude-sonnet-5-5"]);
+      expect((await fetch(`${b}/api/tasks/single/evals`).then(j)).models).toEqual(["claude-opus-5-5"]);
+      expect((await fetch(`${b}/api/tasks/none/evals`).then(j)).models).toEqual([]);
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });

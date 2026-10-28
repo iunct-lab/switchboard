@@ -33,6 +33,8 @@ export function Home(props: {
   onOpenSettings: () => void;
   /** The newest report's line (#1835): opens Insights with it. */
   onOpenReport: (id: string) => void;
+  /** Insights' レポート section with every artifact (#1833) */
+  onOpenArtifacts: () => void;
 }) {
   const [wsId, setWsId] = useState<string>("");
   const [title, setTitle] = useState("");
@@ -80,6 +82,8 @@ export function Home(props: {
     void loadInbox();
   }, [props.inboxRev]);
   const [runnerTouched, setRunnerTouched] = useState(false);
+  /** The model select was changed by hand: the rule table's model proposal no longer fills it. */
+  const [modelTouched, setModelTouched] = useState(false);
   const runnerTouchedRef = useRef(false);
   /** 新規作成の既定 (#835): the runner the form starts on when the router has no reason to prefer one (its fallback); null = not changed from the default. */
   const savedRunnerRef = useRef<RunnerId | null>(null);
@@ -173,6 +177,11 @@ export function Home(props: {
     setModel(""); // a model belongs to one runner
     setEffort(""); // so does an effort
   }, [runner]);
+  // After the runner effect above (which empties the model): an untouched select takes the rule's model proposal, and
+  // goes back to the CLI default when the proposal has none or is for another runner.
+  useEffect(() => {
+    if (!modelTouched) setModel(suggestion?.model && runner === suggestion.runner ? suggestion.model : "");
+  }, [suggestion, runner, modelTouched]);
   useEffect(() => {
     if (props.health?.runners)
       api
@@ -192,11 +201,14 @@ export function Home(props: {
   // one this page has not loaded yet, or a non-DAK one set through the API); a click → explicit. A DAK primary with
   // DAK as the default says null: the daemon would only note that the shadow equals the primary.
   const shadowRunnerField: RunnerId | null | undefined = runner === "dak" ? (shadowDefault === "dak" ? null : undefined) : shadow === null ? undefined : shadow && dakOk ? "dak" : null;
-  // The newest report across Tasks (#1835), read once per visit to Home; no card at all when there is none.
+  // The newest report across Tasks (#1835), read once per visit to Home, and whether any artifact exists (#1833): the
+  // レポート heading and its link to every artifact show when either does; nothing at all when neither does.
   const [latestReport, setLatestReport] = useState<ReportRow | null>(null);
+  const [anyArtifact, setAnyArtifact] = useState(false);
   useEffect(() => {
     let alive = true;
-    api.reports(1).then((r) => alive && setLatestReport(r[0] ?? null), () => undefined);
+    api.reports({ limit: 1 }).then((r) => alive && setLatestReport(r[0] ?? null), () => undefined);
+    api.allArtifacts({ limit: 1 }).then((r) => alive && setAnyArtifact(r.length > 0), () => undefined);
     return () => {
       alive = false;
     };
@@ -279,6 +291,7 @@ export function Home(props: {
       setBrief(null);
       setDraft(null);
       setRunnerTouched(false);
+      setModelTouched(false);
       setShadow(null); // the click was for that task; the next one starts from the saved default again
     } catch (e) {
       props.onError(String((e as Error).message ?? e));
@@ -296,6 +309,7 @@ export function Home(props: {
     try {
       const n = await api.inboxAdd(prompt.trim(), { title: title.trim() || undefined, workspaceHint: wsTouched ? ws?.name : undefined });
       setSaved(n.path);
+      setModelTouched(false);
       setTitle("");
       setPrompt("");
       setBrief(null);
@@ -509,7 +523,7 @@ export function Home(props: {
               </label>
             )}
             <button className="ghost" onClick={props.onOpenSettings} title="承認モード・並走・使用上限での自動再開・LLM 提案・自動判定の既定は 設定 画面で変えます">既定は 設定 で変える</button>
-            {!cloud && <ModelSelect runner={runnerInfo} value={model} onChange={setModel} label="モデル" title="この Task を動かすモデル。「CLI 既定」はランナー自身の設定（かっこ内）で動きます。作成後も Brief から変えられます" />}
+            {!cloud && <ModelSelect runner={runnerInfo} value={model} onChange={(v) => { setModel(v); setModelTouched(true); setRunnerTouched(true); /* a model belongs to this runner: the router must not swap it away */ }} label="モデル" title="この Task を動かすモデル。「CLI 既定」はランナー自身の設定（かっこ内）で動きます。作成後も Brief から変えられます" />}
             {!cloud && <EffortSelect runner={runnerInfo} value={effort} onChange={(e) => { setEffort(e); setRunnerTouched(true); /* chosen for this runner: the router must not swap it away */ }} label="思考の深さ" title="この Task の思考の深さ。「CLI 既定」はランナー自身の設定で動きます。作成後は変えられません" />}
             {!cloud && <input className="model" value={budget} onChange={(e) => setBudget(e.target.value)} placeholder="予算 USD（API 換算・任意）" inputMode="decimal" title="超過したら確認して止まります" />}
           </div>
@@ -539,14 +553,17 @@ export function Home(props: {
           <span className="hint suggestion" title={suggestion ? `ルール: ${suggestion.ruleId}` : ""}>
             {!cloud && suggestion ? (
               <>
-                推奨: <RunnerPill runner={suggestion.runner} /> <span>{suggestion.reason}</span>
+                推奨: <RunnerPill runner={suggestion.runner} />
+                {suggestion.model && <span> / モデル: {props.health?.runners?.find((r) => r.id === suggestion.runner)?.models?.find((m) => m.value === suggestion.model)?.label ?? suggestion.model}</span>}{" "}
+                <span>{suggestion.reason}</span>
                 {!suggestion.available && <span className="warn"> — 未インストール</span>}
-                {suggestion.runner !== runner && props.runnerOk.has(suggestion.runner) && (
+                {(suggestion.runner !== runner || model !== (suggestion.model ?? "")) && props.runnerOk.has(suggestion.runner) && (
                   <button
                     className="ghost"
                     onClick={() => {
                       setRunner(suggestion.runner);
                       setRunnerTouched(false);
+                      setModelTouched(false);
                     }}
                   >
                     推奨に戻す
@@ -682,13 +699,20 @@ export function Home(props: {
               ))}
             </>
           )}
-          {latestReport && (
+          {(latestReport || anyArtifact) && (
             <>
-              <h5 style={{ marginTop: 14 }}>レポート</h5>
-              <button className="row link" onClick={() => props.onOpenReport(latestReport.id)} title="Insights で開く">
-                <span className="t">{latestReport.title}</span>
-                <span className="m">{reportMeta(latestReport)}</span>
-              </button>
+              <div className="row head" style={{ marginTop: 14 }}>
+                <h5>レポート</h5>
+                <button className="ghost" onClick={props.onOpenArtifacts}>
+                  成果物をすべて見る
+                </button>
+              </div>
+              {latestReport && (
+                <button className="row link" onClick={() => props.onOpenReport(latestReport.id)} title="Insights で開く">
+                  <span className="t">{latestReport.title}</span>
+                  <span className="m">{reportMeta(latestReport)}</span>
+                </button>
+              )}
             </>
           )}
         </section>

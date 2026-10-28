@@ -1,4 +1,5 @@
-import type { EvalsListRow, RuleMetrics, TaskEvals } from "@switchboard/protocol";
+import type { EvalsListRow, RuleMetrics, RunnerInfo, TaskEvals } from "@switchboard/protocol";
+import { effortLabel } from "./effortOptions.ts";
 
 /** The default rubric's criteria as the screen names them (#1219); an id the screen does not know is shown as is. */
 const CRITERION_TITLES: Record<string, string> = { goal: "依頼の達成", instructions: "指示の遵守", efficiency: "効率", communication: "報告", safety: "安全" };
@@ -73,6 +74,12 @@ export function humanLabel(e: TaskEvals): string | null {
   return e.human.comment ? `${e.human.rating} / 5 · ${e.human.comment}` : `${e.human.rating} / 5`;
 }
 
+/** The models the task ran on as the Brief shows them (#1801): the one, or every one in the order used with （混在） after; null when not known. */
+export function modelsLabel(e: Pick<TaskEvals, "models">): string | null {
+  if (!e.models.length) return null;
+  return e.models.length === 1 ? e.models[0]! : `${e.models.join(" → ")}（混在）`;
+}
+
 /* ---------- the Evals list (#1221) ---------- */
 
 export type EvalsSortKey = "updatedAt" | "judge" | "human" | "toolCalls" | "toolFailures" | "errors" | "userInstructions" | "stops" | "costUsd";
@@ -112,12 +119,35 @@ export function firstSortDir(key: EvalsSortKey): "asc" | "desc" {
   return key === "judge" || key === "human" ? "asc" : "desc";
 }
 
-/** The text of a row's cells that are not plain numbers; "-" where the task has no such eval. */
-export function evalCells(row: EvalsListRow): { judge: string; human: string; end: string } {
+/**
+ * The text of a row's cells that are not plain numbers; "-" where the task has no such eval. `model` is every model the
+ * task ran on in the order first used (#1801: the list is distinct, so its last entry is not always the one running at
+ * the end); `mixed` = two or more.
+ */
+export function evalCells(row: EvalsListRow, runner?: Pick<RunnerInfo, "efforts">): { judge: string; human: string; end: string; model: string; mixed: boolean; effort: string } {
   return {
     judge: row.judge ? row.judge.average.toFixed(1) : "-",
     human: row.human ? `${row.human.rating} / 5` : "-",
     end: endLabel(row.rules?.lastEnd ?? null),
+    model: row.models.length ? row.models.join(" → ") : "-",
+    mixed: row.models.length >= 2,
+    effort: effortLabel(row.effort, runner),
+  };
+}
+
+/**
+ * The rows that used `model` and ran at `effort` (#1801); an empty value does not filter, "-" is the CLI default. Done on
+ * the rows the screen read: the daemon has no index to filter its events by.
+ */
+export function filterEvalRows(rows: EvalsListRow[], f: { model: string; effort: string }): EvalsListRow[] {
+  return rows.filter((r) => (!f.model || r.models.includes(f.model)) && (!f.effort || (r.effort ?? "-") === f.effort));
+}
+
+/** The choices of the model and effort selects (#1801): the values in the rows read, distinct and sorted; "-" when a task ran at the CLI default. */
+export function evalFilterOptions(rows: EvalsListRow[]): { models: string[]; efforts: string[] } {
+  return {
+    models: [...new Set(rows.flatMap((r) => r.models))].sort(),
+    efforts: [...new Set(rows.map((r) => r.effort ?? "-"))].sort(),
   };
 }
 

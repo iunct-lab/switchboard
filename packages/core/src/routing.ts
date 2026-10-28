@@ -22,6 +22,8 @@ export const RoutingRule = z
       .strict()
       .default({}),
     runner: RunnerId,
+    /** Model the rule proposes (a runner model id). Absent = no proposal; the runner's CLI default stays. */
+    model: z.string().min(1).optional(),
     reason: z.string().min(1),
   })
   .strict();
@@ -108,12 +110,12 @@ export function suggestRunner(table: RoutingTable, ctx: RoutingContext): Routing
   const first = matched[0];
   const alternatives = matched.slice(1).map((r) => ({ runner: r.runner, reason: r.reason, ruleId: r.id }));
   if (first) {
-    return { runner: first.runner, reason: first.reason, ruleId: first.id, available: ctx.available.has(first.runner), alternatives: dedupe(alternatives, first.runner), llm: null };
+    return { runner: first.runner, reason: first.reason, ruleId: first.id, model: first.model ?? null, available: ctx.available.has(first.runner), alternatives: dedupe(alternatives, first.runner), llm: null };
   }
   if (ctx.previousRunner) {
-    return { runner: ctx.previousRunner, reason: "前回このリポジトリで使ったランナー", ruleId: "previous", available: ctx.available.has(ctx.previousRunner), alternatives: [], llm: null };
+    return { runner: ctx.previousRunner, reason: "前回このリポジトリで使ったランナー", ruleId: "previous", model: null, available: ctx.available.has(ctx.previousRunner), alternatives: [], llm: null };
   }
-  return { runner: table.fallback.runner, reason: table.fallback.reason, ruleId: "fallback", available: ctx.available.has(table.fallback.runner), alternatives: [], llm: null };
+  return { runner: table.fallback.runner, reason: table.fallback.reason, ruleId: "fallback", model: null, available: ctx.available.has(table.fallback.runner), alternatives: [], llm: null };
 }
 
 /** Longest reason a suggester may attach. It is shown in the Brief and stored in `routing_log`; a runaway answer is not advice. */

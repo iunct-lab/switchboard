@@ -10,7 +10,7 @@ import { ModelSelect } from "./ModelSelect.tsx";
 import { AttachmentGallery } from "./Attachments.tsx";
 import { firstInstruction, foldTranscript } from "../transcript.ts";
 import { effortLabel } from "../effortOptions.ts";
-import { humanLabel, judgeAverage, judgeRows, metricRows } from "../evals.ts";
+import { humanLabel, judgeAverage, judgeRows, metricRows, modelsLabel } from "../evals.ts";
 import { jstDateTime } from "../time.ts";
 
 /** How long 再評価 shows 判定中 without word from the daemon: the judge's 90 s, a fallback turn, and slack. */
@@ -402,6 +402,12 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
 
       <div className="blk evals">
         <h5>評価</h5>
+        {evals && modelsLabel(evals) && (
+          <div className="kv">
+            <span>モデル</span>
+            <span title={evals.models.length >= 2 ? evals.models.join(" → ") : undefined}>{modelsLabel(evals)}</span>
+          </div>
+        )}
         {cloud ? (
           <div className="hint">Cloud の Task はルール指標とルーブリックを出しません（イベントが手元に無いため）。自分の評価は付けられます。</div>
         ) : evals === null ? (

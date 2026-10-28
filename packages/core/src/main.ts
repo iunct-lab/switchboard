@@ -94,7 +94,7 @@ const fakeSuggester: Suggester = {
   // eslint-disable-next-line @typescript-eslint/require-await
   async suggest(ctx) {
     const runner = (["codex", "dak", "claude"] as const).find((r) => ctx.available.has(r)) ?? "claude";
-    return { runner, reason: "開発用スタブの提案（SWITCHBOARD_SUGGESTER=fake）", ruleId: "llm", available: ctx.available.has(runner), alternatives: [], llm: null };
+    return { runner, reason: "開発用スタブの提案（SWITCHBOARD_SUGGESTER=fake）", ruleId: "llm", model: null, available: ctx.available.has(runner), alternatives: [], llm: null };
   },
 };
 
