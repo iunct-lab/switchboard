@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { BacklogItem, Schedule, Workspace } from "@switchboard/protocol";
-import { activeTaskLine, ago, autoByWorkspace, inProgressState, lastTaskLine, taskTimes, overlapLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl } from "./inProgress.ts";
+import { activeTaskLine, ago, autoByWorkspace, inProgressState, lastTaskLine, readyPending, startButton, taskTimes, overlapLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl } from "./inProgress.ts";
 
 const item = (over: Partial<BacklogItem>): BacklogItem => ({
   number: 1, title: "t", url: "u", type: "pbi", stage: "in-progress", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z",
@@ -188,4 +188,19 @@ test("autoByWorkspace (#2656): a workspace at implement 0 is not moved by itself
   const row = (workspaceId: string) => item({ workspaceId, stage: "ready", waitsAt: "2026-10-01T00:00:00Z", waits: [] });
   expect(waitText(row("ws_lib"), auto.ws_lib ?? false)!.next).not.toContain("待ちが解けたら再開");
   expect(waitText(row("ws_meta"), auto.ws_meta ?? false)!.next).toBe("待ちが解けたら再開");
+});
+
+test("readyPending / startButton: a decomposed PBI in 分解待ち is marked and its button says Ready にする", () => {
+  const decomposed = item({ stage: "needs-tasks", projectStatus: "Backlog", tasks: { total: 4, done: 0, doneAt: null } });
+  expect(readyPending(decomposed)).toBe(true);
+  expect(startButton(decomposed)).toEqual(["to-tasks", "Ready にする"]);
+  const bare = item({ stage: "needs-tasks", projectStatus: "Backlog", tasks: { total: 0, done: 0, doneAt: null } });
+  expect(readyPending(bare)).toBe(false);
+  expect(startButton(bare)).toEqual(["to-tasks", "Task に分解"]);
+  const ready = item({ stage: "ready", projectStatus: "Ready", tasks: { total: 4, done: 0, doneAt: null } });
+  expect(readyPending(ready)).toBe(false);
+  expect(startButton(ready)).toEqual(["complete", "実装する"]);
+  expect(startButton(item({ stage: "needs-decision", tasks: { total: 4, done: 0, doneAt: null } }))).toBeNull();
+  // a request has no sub-issues to count
+  expect(startButton(item({ type: "request", stage: "request", tasks: null }))).toEqual(["to-pbi", "PBI にする"]);
 });

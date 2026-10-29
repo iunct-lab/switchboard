@@ -3,7 +3,7 @@ import type { Artifact, Backlog as BacklogData, BacklogAction, BacklogIssueDetai
 import type { FeedbackTarget } from "../feedbackTarget.ts";
 import { api } from "../api.ts";
 import { backlogHeading, createWord, draftKey, editOf, formAfterRead, GUARANTEE_A, githubSyncText, heldIssueText, loadDraft, loadNewIssueDraft, syncLine, textDraftKey, valueText, workspaceErrorGuide, type EditForm, type NewIssueDraft } from "../backlogSync.ts";
-import { activeTaskLine, ago, autoByWorkspace, inProgressState, lastTaskLine, overlapLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl, type PrereqPart } from "../inProgress.ts";
+import { activeTaskLine, ago, autoByWorkspace, inProgressState, readyPending, startButton, lastTaskLine, overlapLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl, type PrereqPart } from "../inProgress.ts";
 import { promotionLine } from "../release.ts";
 import { Flow } from "./Flow.tsx";
 import { Interventions } from "./Interventions.tsx";
@@ -11,14 +11,6 @@ import { Mockups } from "./Approvals.tsx";
 import { Stops } from "./Stops.tsx";
 import { jstDateTime } from "../time.ts";
 import { applyView, DEFAULT_VIEW, loadView, PRIORITIES, saveView, SORTS, STAGES, TYPES, viewSummary, type BacklogView } from "../backlogView.ts";
-
-/** The button a row shows for its stage (#265; in-progress asks for its status, #522); needs-decision rows get none. */
-const START: Partial<Record<BacklogStage, [BacklogAction, string]>> = {
-  request: ["to-pbi", "PBI にする"],
-  "needs-tasks": ["to-tasks", "Task に分解"],
-  ready: ["complete", "実装する"],
-  "in-progress": ["check", "状況を確認"],
-};
 
 /** The first lines of a ## 状況 comment shown under its row; the rest is on the Issue. */
 const REPORT_LINES = 3;
@@ -925,6 +917,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
                   </span>
                   <span className="m workspace">{i.workspaceName}</span>
                   {i.tasks && <span className="m num">Task {i.tasks.done}/{i.tasks.total}</span>}
+                  {readyPending(i) && <span className="m">分解済み・Ready 待ち</span>}
                   <span className="m">
                     {[i.storyPoints !== null ? `SP ${i.storyPoints}` : null, i.priority].filter(Boolean).join(" · ")}
                   </span>
@@ -936,9 +929,9 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
                     </button>
                   ) : (
                     <>
-                      {START[i.stage] && (
-                        <button className="ghost" disabled={starting !== null} onClick={() => start(i.workspaceId, i.number, START[i.stage]![0])}>
-                          {START[i.stage]![1]}
+                      {startButton(i) && (
+                        <button className="ghost" disabled={starting !== null} onClick={() => start(i.workspaceId, i.number, startButton(i)![0])}>
+                          {startButton(i)![1]}
                         </button>
                       )}
                       {/* #531: every Task closed and no confirmation left — pbi-complete's step 6 writes the result and closes it */}

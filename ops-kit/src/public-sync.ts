@@ -236,11 +236,12 @@ export function publicTree(src: string, opts: Pick<Options, "privateRepo" | "tar
 /**
  * What the tree to publish must not hold, the same for the sync and `check`: the private repository's name (the
  * rewrite already replaced it where readers need the public one) in the files (binary ones too: -a) and their paths, a
- * home path (CI's rule), an address of a person, a secret-shaped value by the rules that need no host. Throws on the
- * first kind found, with where.
+ * home path (CI's rule), an address of a person, a secret-shaped value by the rules (with `host`'s AWS names and accounts
+ * when given: `check` passes them where the host has them; the sync's first check does not). Throws on the first kind
+ * found, with where.
  * git grep: 0 = a match, 1 = none, anything else = it failed, which must stop too.
  */
-export function checkTree(tree: string, privateRepo: string, { raw, git }: Git): void {
+export function checkTree(tree: string, privateRepo: string, { raw, git }: Git, host: HostAws = NO_HOST): void {
   const privateName = repoPattern(privateRepo);
   const privateNames = raw(["grep", "-ainoP", "-e", privateName, tree]);
   if (privateNames.code !== 0 && privateNames.code !== 1) throw new Error("git grep for private repository failed");
@@ -257,9 +258,27 @@ export function checkTree(tree: string, privateRepo: string, { raw, git }: Git):
   if (mails.code !== 0 && mails.code !== 1) throw new Error("git grep for e-mail addresses failed");
   const found = personalEmails(mails.out);
   if (found.length) throw new Error(`a personal e-mail address in the tree (${found.length})`);
-  // every line of every file against the secret rules that need no host (CI has none), as the sync reads a first sync
-  const secrets = secretsBetween(EMPTY_TREE, tree, NO_HOST, git).map((h) => `${h.file}:${h.line} (${h.kind})`);
-  if (secrets.length) throw new Error(`a secret-shaped value in the tree:\n${[...new Set(secrets)].join("\n")}`);
+  // every line of every file against the secret rules, as the sync reads a first sync
+  const secrets = secretsBetween(EMPTY_TREE, tree, host, git).map((h) => `${h.file}:${h.line} (${h.kind})`);
+  if (secrets.length) throw new Error(`${TREE_SECRETS}\n${[...new Set(secrets)].join("\n")}`);
+}
+
+const TREE_SECRETS = "a secret-shaped value in the tree:";
+
+/**
+ * A stop on a secret-shaped value in the tree, with one more line when origin/main's tree, built by origin/main's own
+ * publicSync, passes `check`: the source is a tag from before the fix, checked by this kit's newer rules (the scheduled
+ * sync sends the running release's tag, which lags main until the next promotion). The stop reads as waiting for a newer
+ * tag rather than as a value to remove; the sync still stops. `main` loads origin/main's options (it may throw).
+ */
+export function withStaleNote(message: string, main: () => Pick<Options, "privateRepo" | "target" | "include" | "exclude" | "rewrite">, run: Run): string {
+  if (!message.startsWith(TREE_SECRETS)) return message;
+  try {
+    check({ ...main(), source: "origin/main" }, run);
+  } catch {
+    return message;
+  }
+  return `${message}\norigin/main's tree has none: the source is older than the fix. Send a tag that has it once that tag runs (promote it), with no edit`;
 }
 
 /**
@@ -292,11 +311,11 @@ function secretsBetween(from: string, to: string, host: HostAws, git: Git["git"]
  * (default HEAD) built as the sync builds it, then `checkTree`. For CI, so that a change stops before it is merged
  * rather than at the sync after its tag.
  */
-export function check(opts: Pick<Options, "privateRepo" | "target" | "include" | "exclude" | "rewrite" | "source">, run: Run): string {
+export function check(opts: Pick<Options, "host" | "privateRepo" | "target" | "include" | "exclude" | "rewrite" | "source">, run: Run): string {
   const g = gitAt(run);
   const src = g.git(["rev-parse", "--verify", `${opts.source ?? "HEAD"}^{commit}`]);
   const { tree } = publicTree(src, opts, g);
-  checkTree(tree, opts.privateRepo, g);
+  checkTree(tree, opts.privateRepo, g, opts.host);
   return `public check: ok (${g.git(["ls-tree", "-r", "--name-only", tree]).split("\n").filter(Boolean).length} files)`;
 }
 
