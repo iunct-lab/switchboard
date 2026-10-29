@@ -58,4 +58,4 @@ bun scripts/perf-ratchet.ts update <Actions の結果>.json --env github  # Acti
 
 ## 5. マージ後に実測を見る
 
-マージして動いている Switchboard に反映されたら（昇格は利用者の OK の後。CLAUDE.md）、同じ操作を実際に使って速くなったかを見る。台帳（#639）があればその数、無ければ `verify-live-ui` の手順で画面を見る。ラボで速くなったのに実測が変わらないなら、ラボの再現がずれている — 2 に戻る。
+マージして動いている Switchboard に反映されたら（いつ昇格するかは CLAUDE.md の「Switchboard の Task と動いているコード」）、同じ操作を実際に使って速くなったかを見る。台帳（#639）があればその数、無ければ `verify-live-ui` の手順で画面を見る。ラボで速くなったのに実測が変わらないなら、ラボの再現がずれている — 2 に戻る。

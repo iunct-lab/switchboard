@@ -65,11 +65,12 @@ ${BACKLOG_USAGE}
       --since はその時刻より後に更新されたものだけを読む。--recheck は前回の当たりの場所（URL）を差分の外でも読み直す（何回でも）
       exit 0 = 無い、1 = ある、2 = 検査できなかった（取得の失敗）。<owner/name> を省くと GH_REPO、無ければ origin。設定ファイルは要らない
 
-  public-sync [--source <ref>] [--dry-run] [--adopted] [--target-url <url>]
+  public-sync [--source <ref>] [--dry-run] [--adopted] [--adopt-baseline] [--target-url <url>]
       main のツリーだけを（履歴なしで）公開リポジトリへ送る。公開先・送るもの・外すファイル・書き換えるファイルは設定の publicSync だけを読む
       設定は送るツリー（--source）のものを読む。初回は main へ根のコミット、2 回目からは sync/<タグ> の PR を開いて自分でマージし、題が版なら Release を付ける。
       Private のリポジトリ名・ホームパス・個人のメールアドレス・秘密の形の値（変わる行）があれば送らない。前回より古い --source は送らない。--dry-run は送らず結果だけ出す
       --adopted: 公開側だけの変更を Private に取り込み済みとして、置き換えて送る。--source の既定は origin/main
+      --adopt-baseline: independent で、公開済みで台帳の無い公開先の今の公開 main を、変えずに v0.1.0 にする（--source は公開 main のツリーの元のタグ。設定は origin/main のものを読む）
       exit 0 = 送った / 送るものが無い / dry-run、1 = 止まった（理由は stderr）、2 = 使い方の誤り
   public-sync --check [--source <ref>]
       送らずに、公開に出すツリーを同期と同じに組み立てて、Private のリポジトリ名・ホームパス・個人のメールアドレス・秘密の形の値（全ファイル。ホストの AWS のプロファイル名・アカウントは、ホストの設定があるときだけ）を検査する（CI 用。公開側に触らない）。--source の既定は HEAD
@@ -170,7 +171,7 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
     return pullMain(process.cwd(), out, err);
   }
   if (command === "public-sync") {
-    const flags = new Set(["--dry-run", "--adopted", "--check"]);
+    const flags = new Set(["--dry-run", "--adopted", "--adopt-baseline", "--check"]);
     const valued = new Set(["--source", "--target-url"]);
     const given: Record<string, string> = {};
     const on = new Set<string>();
@@ -178,9 +179,11 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
       const a = rest[i]!;
       if (flags.has(a)) on.add(a);
       else if (valued.has(a) && rest[i + 1] !== undefined && !rest[i + 1]!.startsWith("--")) given[a] = rest[++i]!;
-      else return usage(err, "public-sync [--source <ref>] [--dry-run] [--adopted] [--target-url <url>] | public-sync --check [--source <ref>]", 2);
+      else return usage(err, "public-sync [--source <ref>] [--dry-run] [--adopted] [--adopt-baseline] [--target-url <url>] | public-sync --check [--source <ref>]", 2);
     }
     if (on.has("--check") && (on.size > 1 || given["--target-url"])) return usage(err, "public-sync --check [--source <ref>]", 2);
+    const adoptUsage = "public-sync --adopt-baseline --source <vX.Y.Z> [--dry-run] [--target-url <url>] (publicSync.versioning: independent)";
+    if (on.has("--adopt-baseline") && !given["--source"]) return usage(err, adoptUsage, 2);
     if (on.has("--check")) {
       try {
         const cfg = loadPublicSync(configPath, undefined, given["--source"] ?? "HEAD");
@@ -199,10 +202,12 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
     }
     let privateRepo = "";
     try {
-      const cfg = loadPublicSync(configPath, undefined, given["--source"] ?? "origin/main");
+      // the migration sends no tree: it reads the current setting (origin/main), as the --source tag predates versioning
+      const cfg = loadPublicSync(configPath, undefined, on.has("--adopt-baseline") ? "origin/main" : (given["--source"] ?? "origin/main"));
+      if (on.has("--adopt-baseline") && cfg.versioning !== "independent") return usage(err, adoptUsage, 2);
       const r = await repoOf(gh);
       privateRepo = `${r.owner}/${r.name}`;
-      out(sync({ host: hostAws(), privateRepo, target: cfg.target, versioning: cfg.versioning, include: cfg.include, exclude: cfg.exclude, rewrite: cfg.rewrite, serviceUsers: cfg.serviceUsers, source: given["--source"], targetUrl: given["--target-url"], dryRun: on.has("--dry-run"), adopted: on.has("--adopted") }, spawnRun));
+      out(sync({ host: hostAws(), privateRepo, target: cfg.target, versioning: cfg.versioning, include: cfg.include, exclude: cfg.exclude, rewrite: cfg.rewrite, serviceUsers: cfg.serviceUsers, source: given["--source"], targetUrl: given["--target-url"], dryRun: on.has("--dry-run"), adopted: on.has("--adopted"), adoptBaseline: on.has("--adopt-baseline") }, spawnRun));
       return 0;
     } catch (e) {
       const message = (e as Error).message;
@@ -328,8 +333,8 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
         const records = stored ? await readRecords(env, { fresh: rest.includes("--fresh") }) : undefined;
         if (records) err(`アプリの保存値を検査（${records.repository}、最終取得 ${new Date(records.fetchedAt).toISOString()}${rest.includes("--fresh") && !records.unsynced ? "、取込み済み" : ""}）`);
         if (records?.unsynced) err(records.unsynced);
-        const { violations } = await lint(gh, cfg, { withProject: !rest.includes("--no-project"), records });
-        for (const line of formatLint(violations)) out(line);
+        const { violations, warnings } = await lint(gh, cfg, { withProject: !rest.includes("--no-project"), records });
+        for (const line of formatLint(violations, warnings)) out(line);
         return violations.length > 0 ? 1 : 0;
       }
       case "bootstrap": {

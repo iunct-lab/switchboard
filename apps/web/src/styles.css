@@ -376,6 +376,21 @@ label.toggle.off { opacity: .45; cursor: default; }
   .backlog .backlog-view-body { left: 8px; right: 8px; width: auto; max-width: none; }
   .backlog :is(.backlog-view summary, .backlog-view button, .backlog-view select, .backlog-view input, .backlog-view-line button) { min-height: 44px; }
 }
+/* ボード (#2696): the stages as columns; a tile is its title (3 lines at most), SP · Priority and the row's buttons. */
+.backlog .backlog-board { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; align-items: start; }
+.backlog .backlog-tile { margin-top: 6px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px; overflow-wrap: anywhere; }
+.backlog .backlog-tile .t { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.backlog .backlog-tile .row { flex-wrap: wrap; justify-content: flex-start; gap: 2px 8px; }
+.backlog .backlog-board-tabs { display: none; }
+/* by width only (#2703): a landscape phone 768px or wider keeps the columns. The stage tabs (only the strip scrolls) show
+   one column at a time; a tile's title is 2 lines. */
+@media (max-width: 767px) {
+  .backlog .backlog-board-tabs { display: flex; flex: none; overflow-x: auto; margin: 0; }
+  .backlog .backlog-board-tabs button { flex: none; min-height: 44px; }
+  .backlog .backlog-board { display: block; }
+  .backlog .backlog-col:not([data-current="true"]) { display: none; }
+  .backlog .backlog-tile .t { -webkit-line-clamp: 2; }
+}
 .rail-approvals { margin-bottom: 8px; }
 .rail-search { width: 100%; font: inherit; padding: 4px 8px; margin-bottom: 4px; }
 .rail-filters { display: flex; gap: 4px; align-items: center; padding: 0 8px 4px; font-size: 11px; color: var(--ink3); }

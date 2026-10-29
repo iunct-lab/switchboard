@@ -33,7 +33,10 @@ description: Task を Stacked PR（GitHub public preview, gh stack）として�
 - **`gh stack rebase` が古い commit を復活させることがある**: マージ済み枝の再生で、削除したはずの調査用ファイルが
   main に戻った（追加 → 削除 → 再追加）。別の枝で消しても main には残ったままで、
   レビューで指摘されるまで気づかなかった（別の PR で再削除）。マージ後は `git ls-tree --name-only origin/main | grep -i <消したもの>` で確認。
-- **作業ファイルをリポジトリに置かない**: 調査用スクリプトはスクラッチパッドに。`git add -A` の前に `git status --short` を読む。
+- **作業ファイルをリポジトリに置かない**: 調査用スクリプトはスクラッチパッドに。
+- **コミットはパスを指定する**（`git add -A` を使わない）。コミットの前に `git diff --cached --name-only` を Task の触る場所と比べる。
+- **枝を移る前に未コミットの変更を無くす**: `git checkout` / `gh stack switch` / `gh stack add` の前に `git status --porcelain` が空であること（途中の変更はその枝にコミットしてから移る）。1 つの worktree にスタック全体があるので、未コミットの変更は黙って次の枝に持ち越され、別の Task の PR に混ざる（`-q` だと持ち越しの表示も出ない）。
+- **1 本だけ残ったスタック**: `gh stack merge` が「not a stacked pull request」になる。手で作った上の PR（`gh stack submit` を通していない）がその枝を base にしているなら、`--delete-branch` でマージしない — base の枝が消えた PR を GitHub は付け替えずに閉じる。先に上の枝を main に rebase して force push し、上の PR の base を main に替え（`gh api -X PATCH repos/<owner>/<repo>/pulls/<上> -f base=main`）、枝はその後で消す。上の PR はなるべく `gh stack submit` で作る。
 - **中身が空になった枝**は GitHub が自動で merged 扱いにする。空の PR を残さない。
 - main の作業ツリーでは利用者の開発サーバが動いていることがある（CLAUDE.md）。そこで `git checkout` で枝を変えるとそのサーバの中身も変わる。
   ファイル監視の再起動は追従するが、設定ファイル（例: `vite.config.ts`）を短時間に何度も書き換えると再起動が固まる。

@@ -216,7 +216,7 @@ if (import.meta.main) {
       const req = requestFor(failures, new Date().toISOString().slice(0, 10), lines);
       if (req) {
         const r = await fileRequest(req);
-        if ("open" in r) console.log(`要望: 既存 #${r.open}（起票しない）`);
+        if ("open" in r) console.log(`要望: 既存 ${r.open}（起票しない）`);
       }
     } catch (e) {
       console.log(`要望: 起票できなかった（${(e as Error).message}）`);

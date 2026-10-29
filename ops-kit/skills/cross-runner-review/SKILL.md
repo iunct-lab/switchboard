@@ -77,7 +77,9 @@ sed -n '/^## Design rules/,/^## License/p' "$R/README.md" > "$M/design-rules.md"
 ls "$R/docs/design" > "$M/design-docs.txt"
 ```
 
-レビュー指示（`$M/prompt.md`）。**3 節（security / license / personal data）は「none」でも必ず書かせる**:
+レビュー指示（`$M/prompt.md`）。**3 節（security / license / personal data）は「none」でも必ず書かせる**。
+
+セキュリティの頼み方: 攻撃の手順（攻撃シナリオの列・ペイロード・コマンドの全文）を書かせない。「どのルートに認証・認可・宛先の検査が無いか」「どこで何を検査すべきか」「既存の防御」の形で書かせる。所見の多いリポジトリで攻撃シナリオの列を求めると、報告全体が攻撃手順の形になり、防御の目的でもランナーの安全装置が報告を途中で止める。止まったら「続きだけ、防御側の表現で」と頼み、残りは自分で埋める。セキュリティを見るほかの指示（`public-release-gate` など）も同じ:
 
 ````bash
 cat > "$M/prompt.md" <<'PROMPT'

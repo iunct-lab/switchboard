@@ -250,3 +250,107 @@ test("independent: prepublication dry-run with an empty bare writes no refs", ()
   expect(git(pub, "for-each-ref")).toBe("");
   expect(git(origin, "show-ref")).toBe(before);
 });
+
+test("independent: missing baseline names --adopt-baseline", () => {
+  sync({ ...opts("main"), versioning: undefined }, run);
+  expect(() => sync(opts("v4.2.0"), run)).toThrow("--adopt-baseline --source");
+});
+
+// A target published by plain syncs (titled `sync`, no version tags or Releases) and no ledger, now at v4.2.1's tree.
+const published = () => {
+  const plain = { ...opts("main"), versioning: undefined };
+  sync(plain, run); commit("v4.2.1"); sync(plain, run);
+  for (const ref of git(origin, "for-each-ref", "--format=%(refname)", "refs/public-sync/versions/").split("\n").filter(Boolean)) git(origin, "update-ref", "-d", ref);
+  expect(git(pub, "log", "--format=%s", "main").split("\n")).toEqual(["sync", "sync"]);
+  return git(pub, "rev-parse", "main");
+};
+const adopt = (source: string, dryRun = false) => ({ ...opts(source, dryRun), adoptBaseline: true });
+const ledger = () => {
+  const ref = git(origin, "for-each-ref", "--format=%(refname)", "refs/public-sync/versions/").split("\n").find((r) => r && !r.endsWith("-lock"))!;
+  return JSON.parse(git(origin, "show", `${ref}:state.json`));
+};
+const refs = () => [git(pub, "for-each-ref"), git(origin, "for-each-ref")];
+
+test("adopt: baseline v0.1.0 on the existing public main, tag, Release and ledger", () => {
+  const before = published();
+  const tree = git(pub, "rev-parse", "main^{tree}");
+  expect(sync(adopt("v4.2.1"), run)).toContain("public v0.1.0");
+  expect(git(pub, "rev-parse", "main")).toBe(before);
+  expect(git(pub, "rev-parse", "v0.1.0^{commit}")).toBe(before);
+  expect([...releases]).toEqual(["v0.1.0"]);
+  expect(ledger()).toEqual({ completed: { version: "v0.1.0", source: git(priv, "rev-parse", "v4.2.1"), tag: "v4.2.1", tree, tags: { "v4.2.1": git(priv, "rev-parse", "v4.2.1") }, commit: before } });
+});
+
+test("adopt: next sync bumps from v0.1.0", () => {
+  published(); sync(adopt("v4.2.1"), run);
+  commit("v4.2.2"); sync(opts("v4.2.2"), run);
+  expect(git(pub, "log", "-1", "--format=%s", "main")).toBe("v0.1.1");
+  expect([...releases]).toEqual(["v0.1.0", "v0.1.1"]);
+  commit("v5.0.0", false);
+  expect(sync(opts("v5.0.0"), run)).toContain("nothing to sync");
+});
+
+test("adopt: keeps the old public main as an ancestor", () => {
+  const before = published();
+  sync(adopt("v4.2.1"), run); commit("v4.2.2"); sync(opts("v4.2.2"), run);
+  expect(Bun.spawnSync(["git", "-C", pub, "merge-base", "--is-ancestor", before, "main"]).exitCode).toBe(0);
+});
+
+test("adopt: refuses ledger, missing main, missing record, other source, public version tags, open sync PR without writing", () => {
+  const refuses = (source: string, message: string) => {
+    const was = refs();
+    calls = [];
+    expect(() => sync(adopt(source), run)).toThrow(message);
+    expect(refs()).toEqual(was);
+    expect(calls.some((c) => c[0] === "gh" && ["create", "merge"].includes(c[2]!))).toBe(false);
+  };
+  refuses("v4.2.0", "public main missing");
+  published();
+  refuses("v4.2.0", "was not sent from v4.2.0");
+  git(pub, "tag", "v9.9.9", "main"); refuses("v4.2.1", "public version tag already exists: v9.9.9"); git(pub, "tag", "-d", "v9.9.9");
+  releases.add("v1.0.0"); refuses("v4.2.1", "public Release already exists: v1.0.0"); releases.clear();
+  git(pub, "branch", "sync/other", "main"); openPr = true;
+  refuses("v4.2.1", "sync PR #1 is open"); openPr = false; git(pub, "branch", "-D", "sync/other");
+  const records = git(origin, "for-each-ref", "--format=%(refname)", "refs/public-sync/trees/").split("\n");
+  const kept = records.map((r) => [r, git(origin, "rev-parse", r)] as const);
+  for (const r of records) git(origin, "update-ref", "-d", r);
+  refuses("v4.2.1", "no sync record");
+  for (const [r, sha] of kept) git(origin, "update-ref", r, sha);
+  sync(adopt("v4.2.1"), run);
+  refuses("v4.2.1", "already has an independent version record");
+});
+
+test("adopt: dry-run writes no refs", () => {
+  const before = published();
+  const was = refs();
+  calls = [];
+  const out = sync(adopt("v4.2.1", true), run);
+  for (const word of ["v4.2.1", git(priv, "rev-parse", "v4.2.1"), before, git(pub, "rev-parse", "main^{tree}"), "public v0.1.0", "would release v0.1.0"]) expect(out).toContain(word);
+  expect(refs()).toEqual(was);
+  expect(calls.some((c) => c.includes("push") || c[2] === "create")).toBe(false);
+});
+
+test("adopt: resumes a release create failure with v0.1.0", () => {
+  const before = published();
+  fail = "release create";
+  expect(() => sync(adopt("v4.2.1"), run)).toThrow();
+  expect(ledger().pending.version).toBe("v0.1.0");
+  fail = "";
+  expect(() => sync(opts("v4.2.1"), run)).toThrow("resume with --adopt-baseline --source v4.2.1");
+  sync(adopt("v4.2.1"), run);
+  expect(git(pub, "rev-parse", "main")).toBe(before);
+  expect([...releases]).toEqual(["v0.1.0"]);
+  expect(ledger().completed).toMatchObject({ version: "v0.1.0", commit: before });
+  expect(ledger().pending).toBeUndefined();
+});
+
+test("adopt: public title and Release body carry only the version", () => {
+  published();
+  calls = [];
+  sync(adopt("v4.2.1"), run);
+  expect(calls.some((c) => c[0] === "gh" && c[1] === "pr" && c[2] !== "list")).toBe(false);
+  const release = calls.find((c) => c[0] === "gh" && c[1] === "release" && c[2] === "create")!;
+  expect([release[3], release[release.indexOf("--title") + 1], release[release.indexOf("--notes") + 1]]).toEqual(["v0.1.0", "v0.1.0", ""]);
+  expect(git(pub, "log", "--format=%B", "main")).not.toMatch(/v4\.|[0-9a-f]{40}/);
+  expect(git(pub, "for-each-ref", "--format=%(refname)")).not.toContain("v4.");
+});

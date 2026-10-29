@@ -81,8 +81,8 @@ export type Run = (cmd: string[], opts?: { input?: string; env?: Record<string, 
  * `adopted`: the changes merged only on the public main are already in the private main, so the sync may replace them.
  * `user`: the name of the OS user running the sync, looked for in paths (default `os.userInfo().username`);
  * `serviceUsers`: OS users that are no one's, not looked for. `host`: the host's AWS names and accounts (`hostAws()`), looked for in
- * the change. */
-export type Options = { host?: HostAws; privateRepo: string; target: string; include?: string[]; exclude?: string[]; rewrite?: string[]; versioning?: "independent"; source?: string; targetUrl?: string; dryRun?: boolean; adopted?: boolean; user?: string; serviceUsers?: string[] };
+ * the change. `adoptBaseline`: with `versioning`, give a published target without a version record its baseline (`releaseBaseline`). */
+export type Options = { host?: HostAws; privateRepo: string; target: string; include?: string[]; exclude?: string[]; rewrite?: string[]; versioning?: "independent"; source?: string; targetUrl?: string; dryRun?: boolean; adopted?: boolean; adoptBaseline?: boolean; user?: string; serviceUsers?: string[] };
 
 const ok = (r: { code: number; out: string }, cmd: string[]) => {
   if (r.code !== 0) throw new Error(`failed: ${cmd.join(" ")}`);
@@ -357,7 +357,7 @@ export function sync(opts: Options, run: Run, publication?: Publication): string
     // a sync PR a failed run left open is merged now (only on a public main this script left, so nothing there is lost)
     // only a PR of this script: from a branch of the public repository itself (a fork's `sync/…` is someone else's), whose
     // tree has a record here (the record is pushed before the PR is opened)
-    const [open, openBranch] = ok(run(["gh", "pr", "list", "-R", opts.target, "--state", "open", "--json", "number,headRefName,isCrossRepository", "-q", '.[] | select((.headRefName | startswith("sync/")) and (.isCrossRepository | not)) | "\\(.number) \\(.headRefName)"']), ["gh", "pr", "list"]).split("\n")[0]!.split(" ");
+    const [open, openBranch] = openSyncPr(opts, run);
     if (open && openBranch) {
       git(["fetch", "-q", url, `+refs/heads/${openBranch}:refs/public-sync/pr`], { env: { GIT_TERMINAL_PROMPT: "0" } });
       if (!recorded("refs/public-sync/pr")) throw new Error(`sync PR #${open} on ${opts.target} has a tree this script did not send: close it`);
@@ -442,6 +442,23 @@ export function sync(opts: Options, run: Run, publication?: Publication): string
   return log.join("\n");
 }
 
+/** The first open sync PR of this script (number, branch): from a branch of the public repository itself, not a fork's. */
+export function openSyncPr(opts: Options, run: Run): [string | undefined, string | undefined] {
+  const [open, branch] = ok(run(["gh", "pr", "list", "-R", opts.target, "--state", "open", "--json", "number,headRefName,isCrossRepository", "-q", '.[] | select((.headRefName | startswith("sync/")) and (.isCrossRepository | not)) | "\\(.number) \\(.headRefName)"']), ["gh", "pr", "list"]).split("\n")[0]!.split(" ");
+  return [open || undefined, branch || undefined];
+}
+
+/**
+ * The baseline of a published target that has no version record: `version` as the public tag and Release of the public
+ * main's current commit, which stays as it is (no commit is added: GitHub's Rebase and merge drops a commit without changes).
+ * `independentSync` checks the target and the source first.
+ */
+export function releaseBaseline(opts: Options, run: Run, commit: string, version: string): string {
+  const log: string[] = [];
+  releaseLast(commit, opts, run, gitAt(run).git, log, version);
+  return log.join("\n");
+}
+
 /** Rebase and merge (the public main takes PRs only, rebased): the head commit keeps its title, the version. */
 function merge(pr: string, opts: Options, run: Run, log: string[]): void {
   const r = run(["gh", "pr", "merge", pr, "-R", opts.target, "--rebase", "--delete-branch"]);
@@ -450,12 +467,11 @@ function merge(pr: string, opts: Options, run: Run, log: string[]): void {
 }
 
 /**
- * The version of the last sync on the public main (a commit titled `v1.2.3`) as a public tag and GitHub Release on
+ * The version of the last sync on the public main (a commit titled `v1.2.3`, or the `version` given) as a public tag and GitHub Release on
  * that commit, once: made through the API (`gh release create --target`), so nothing is pushed and no public workflow is
  * needed. A bare --target-url is not GitHub: its commits are not on the public repository.
  */
-function releaseLast(last: string, opts: Options, run: Run, git: (args: string[]) => string, log: string[]): void {
-  const version = /^v\d+\.\d+\.\d+$/.exec(git(["log", "-1", "--format=%s", last]))?.[0];
+function releaseLast(last: string, opts: Options, run: Run, git: (args: string[]) => string, log: string[], version = /^v\d+\.\d+\.\d+$/.exec(git(["log", "-1", "--format=%s", last]))?.[0]): void {
   if (!version) return;
   if (opts.targetUrl) return void log.push("release: skipped (--target-url)");
   if (opts.versioning) {

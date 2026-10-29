@@ -201,7 +201,7 @@ export function proposals(prs: PrRecord[], reverts: Revert[], window: { since: s
 /** The `要望:` line of --file-request (#1272): filed (its number), the open request with the same title, or nothing to file. */
 export function filingLine(outcome: Filed | null): string {
   if (outcome === null) return "要望: 案が無いので起票しない";
-  if ("open" in outcome) return `要望: 同じ題の開いた要望 #${outcome.open} があるので起票しない`;
+  if ("open" in outcome) return `要望: 同じ題の開いた要望 ${outcome.open} があるので起票しない`;
   return outcome.filed === null ? "要望: 起票した（番号は上の出力）" : `要望: 起票した #${outcome.filed}`;
 }
 

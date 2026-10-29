@@ -195,7 +195,8 @@ describe("readHistory + tally (fixture)", () => {
   test("要望: --file-request says what it did — filed, the same title already open, or nothing to file (#1272)", () => {
     expect(filingLine({ filed: 1300 })).toBe("要望: 起票した #1300");
     expect(filingLine({ filed: null })).toBe("要望: 起票した（番号は上の出力）");
-    expect(filingLine({ open: 1299 })).toBe("要望: 同じ題の開いた要望 #1299 があるので起票しない");
+    expect(filingLine({ open: "#1299" })).toBe("要望: 同じ題の開いた要望 #1299 があるので起票しない");
+    expect(filingLine({ open: "op_7f3a" })).toBe("要望: 同じ題の開いた要望 op_7f3a があるので起票しない");
     expect(filingLine(null)).toBe("要望: 案が無いので起票しない");
     expect(filedNumber(">> 要望を作成: #42 https://github.com/example/repo/issues/42\n>> Project に追加: #42\n")).toBe(42);
     expect(filedNumber("request_issue.sh: something else")).toBeNull();
@@ -458,7 +459,7 @@ describe("requestFor", () => {
 
   test("already filed request is detected: the same proposals' open request is not filed again", () => {
     const title = requestFor([{ to: "ask", kind: "size", evidence: [9] }], src)!.title;
-    expect(alreadyFiled(title, [{ number: 601, title: "モデル一覧の設定化" }, { number: 900, title }])).toBe(900);
-    expect(alreadyFiled(title, [{ number: 901, title: `${title} / rescue を再チェックへ` }])).toBeNull();
+    expect(alreadyFiled(title, [{ ref: "#601", title: "モデル一覧の設定化" }, { ref: "#900", title }])).toBe("#900");
+    expect(alreadyFiled(title, [{ ref: "#901", title: `${title} / rescue を再チェックへ` }])).toBeNull();
   });
 });
