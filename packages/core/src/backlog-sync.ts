@@ -28,7 +28,8 @@ import { linkedIssues } from "../../../scripts/parallel-guard.ts";
 import { Limit, sendGithubOperations } from "./backlog-send.ts";
 import { applyLocalOperations } from "./backlog-local.ts";
 import { advanceEnabling, enablingWaits } from "./backlog-enable.ts";
-import { forgeOf, ForgeUnsupported, runForgeOperation } from "../../../ops-kit/src/forge.ts";
+import { forgeTargetOf, ForgeUnsupported, originOf, runForgeOperation, type ForgeTarget } from "../../../ops-kit/src/forge.ts";
+import { GitlabError, readGitlabIssue, readGitlabIssues, readGitlabNotes, runGlab, type GitlabIssue, type Sh } from "../../../ops-kit/src/forge-gitlab.ts";
 import { callMetric, githubHost, GithubRetryState, noCall, parseIncluded, responseOf, retryAtFromResponse, waitMessage, type GithubFailure, type MetricSink } from "../../../ops-kit/src/gh.ts";
 
 const TYPES = ["type:request", "type:pbi", "type:task"];
@@ -269,11 +270,7 @@ export async function importGithubSnapshot(gh: GhRunner, db: Db, ws: Pick<Backlo
     project = await projectOf(gh, ws);
     const stored = db.listBacklogRecords(key);
     const snap = await fetchGithubSnapshot(gh, ws.path, { owner, name }, stored, db.getBacklogRepository(key)?.cursor ?? null);
-    const was = new Map(stored.map((r) => [`${r.objectKind}:${r.externalId}`, r]));
-    changed = snap.records.some((e) => {
-      const r = was.get(`${e.objectKind}:${e.externalId}`);
-      return !r || r.fetchState !== e.fetchState || (e.fetchState === "fetched" && JSON.stringify(r.remote) !== JSON.stringify(e.remote));
-    });
+    changed = changedFrom(stored, snap.records);
     // the daemon wrote to the repository while this read: what it read is older than what the read-back stores; or
     // the workspace's GitHub sync was turned off meanwhile, its first import too (#2266): nothing of GitHub is stored then
     // — unless this is the read that turns it on (enableGithubSync: it writes the source itself, after the records moved)
@@ -292,6 +289,95 @@ export async function importGithubSnapshot(gh: GhRunner, db: Db, ws: Pick<Backlo
     throw e;
   }
   return { key, changed, project };
+}
+
+/** Whether `records` read something other than what was `stored` (a value, or how a record was read). */
+function changedFrom(stored: BacklogRecord[], records: BacklogSnapshotEntry[]): boolean {
+  const was = new Map(stored.map((r) => [`${r.objectKind}:${r.externalId}`, r]));
+  return records.some((e) => {
+    const r = was.get(`${e.objectKind}:${e.externalId}`);
+    return !r || r.fetchState !== e.fetchState || (e.fetchState === "fetched" && JSON.stringify(r.remote) !== JSON.stringify(e.remote));
+  });
+}
+
+/**
+ * Reads what one import of a GitLab project (#892) stores, against what is `stored` for it; `since` = the cursor (the
+ * newest `updated_at` of the last import). Every open Issue is listed each time and the closed ones updated since the
+ * cursor (all the first time); an Issue's comments are read again when its `updated_at` moved. A stored open Issue
+ * neither list has (deleted, moved) is read by number: 404 → `unavailable`, 403 → `forbidden`. GitLab CE has no
+ * sub-issues: the parent is the body's `## 親 PBI` (no such section: the stored one), and a parent's `subIssues` are the
+ * Issues whose parent it is. No Project
+ * item is made (a board's column is its label). docs/design/forge-integration.md.
+ */
+export async function fetchGitlabSnapshot(sh: Sh, target: ForgeTarget, stored: BacklogRecord[], since: string | null): Promise<{ records: BacklogSnapshotEntry[]; cursor: string | null }> {
+  const out = new Map<string, BacklogSnapshotEntry>();
+  const put = (e: BacklogSnapshotEntry) => out.set(`${e.objectKind}:${e.externalId}`, e);
+  const was = new Map<number, { id: string; value: BacklogIssueData; fetched: boolean }>();
+  for (const r of stored) if (r.objectKind === "issue" && r.remote) was.set((r.remote as BacklogIssueData).number, { id: r.externalId, value: r.remote as BacklogIssueData, fetched: r.fetchState === "fetched" });
+  const listed = [...(await readGitlabIssues(sh, target, "opened", null)), ...(await readGitlabIssues(sh, target, "closed", since))];
+  let cursor = since;
+  const read = new Map<number, GitlabIssue>();
+  for (const i of listed) {
+    if (!cursor || i.updatedAt > cursor) cursor = i.updatedAt;
+    // the backlog's Issues, and any stored one (it may have left the labels)
+    if (TYPES.some((t) => i.labels.includes(t)) || was.has(i.number)) read.set(i.number, i);
+  }
+  for (const [n, prev] of was) {
+    if (prev.value.state !== "OPEN" || listed.some((i) => i.number === n)) continue;
+    const got = await readGitlabIssue(sh, target, n);
+    if (typeof got === "string") put({ objectKind: "issue", externalId: prev.id, remote: null, fetchState: got });
+    else read.set(n, got);
+  }
+  // the parents, over what is stored and what was read
+  const parentOf = new Map<number, number | null>([...was].map(([n, p]) => [n, p.value.parent]));
+  // a body without the section keeps the one stored (set by an edit here)
+  for (const [n, i] of read) parentOf.set(n, i.parent !== undefined ? i.parent : (was.get(n)?.value.parent ?? null));
+  const subIssues = (n: number) => [...parentOf].flatMap(([m, p]) => (p === n ? [m] : [])).sort((a, b) => a - b);
+  for (const [n, i] of read) {
+    const prev = was.get(n)?.value;
+    const { id, parent: _, ...rest } = i;
+    const value: BacklogIssueData = { ...rest, parent: parentOf.get(n) ?? null, subIssues: subIssues(n) };
+    // unchanged and read as it was: nothing to store (one stored 403 / 404 that reads again is stored again)
+    if (prev && was.get(n)!.fetched && JSON.stringify(prev) === JSON.stringify(value)) continue;
+    put({ objectKind: "issue", externalId: id, remote: value, fetchState: "fetched" });
+    if (prev && prev.updatedAt === i.updatedAt) continue;
+    const notes = await readGitlabNotes(sh, target, n);
+    notes.forEach((c) => put({ objectKind: "comment", externalId: c.id, remote: { issue: n, body: c.body, createdAt: c.createdAt }, fetchState: "fetched" }));
+    const seen = new Set(notes.map((c) => c.id));
+    for (const r of stored) if (r.objectKind === "comment" && r.remote && (r.remote as { issue: number }).issue === n && !seen.has(r.externalId)) put({ objectKind: "comment", externalId: r.externalId, remote: null, fetchState: "unavailable" });
+  }
+  // a stored parent whose children changed
+  for (const [n, p] of was) {
+    if (read.has(n) || out.has(`issue:${p.id}`)) continue;
+    const subs = subIssues(n);
+    if (JSON.stringify(subs) !== JSON.stringify(p.value.subIssues)) put({ objectKind: "issue", externalId: p.id, remote: { ...p.value, subIssues: subs }, fetchState: "fetched" });
+  }
+  return { records: [...out.values()], cursor };
+}
+
+/**
+ * Imports the GitLab project `target` names (#892) for the workspace and stores it when complete — unless `superseded`
+ * says a write came after it began, or the workspace's sync was turned off meanwhile. The workspace's source is the
+ * project (no GitHub Project: `project` is the project path with number 0). A failed GitLab call is a BacklogError
+ * with the HTTP status only. glab carries the login (`forge-gitlab.ts`).
+ */
+export async function importGitlabSnapshot(sh: Sh, db: Db, ws: Pick<BacklogWorkspace, "id">, target: ForgeTarget, now = Date.now(), superseded = (_key: BacklogRepositoryKey) => false): Promise<{ key: BacklogRepositoryKey; changed: boolean }> {
+  const key: BacklogRepositoryKey = { service: "gitlab", host: target.host, repository: target.repository! };
+  const stored = db.listBacklogRecords(key);
+  let snap;
+  try {
+    snap = await fetchGitlabSnapshot(sh, target, stored, db.getBacklogRepository(key)?.cursor ?? null);
+  } catch (e) {
+    if (e instanceof GitlabError) throw new BacklogError(`GitLab（${target.host}）: ${e.message}`);
+    throw e;
+  }
+  const changed = changedFrom(stored, snap.records);
+  const current = db.getWorkspaceBacklogSource(ws.id);
+  if (superseded(key) || (current && !syncsGithub(current))) return { key, changed };
+  db.putBacklogSnapshot(key, { ...snap, syncedAt: now });
+  const same = current?.service === key.service && current.host === key.host && current.repository === key.repository;
+  db.setWorkspaceBacklogSource(ws.id, { ...(same ? current : {}), ...key, project: { owner: key.repository, number: 0 } });
+  return { key, changed };
 }
 
 /**
@@ -371,6 +457,8 @@ export class BacklogSync {
   private failures = new Map<string, { message: string; until?: number; kind?: BacklogErrorKind }>();
   private limits: GithubRetryState;
   private gh: GhRunner;
+  /** How GitLab is asked (#892): the signed-in glab. */
+  glab: Sh = runGlab;
   /** `sink`: gets the measure of every gh call and of every sync answered without one (#895). */
   /** `sends`: false on a daemon that must not write to GitHub (sb-rescue's candidate runs on a copy of the database: what it sent, the daemon would send again). */
   constructor(private db: Db, gh: GhRunner, private clock = () => Date.now(), private sink?: MetricSink, private sends = true) {
@@ -425,7 +513,15 @@ export class BacklogSync {
       } else this.sink?.(noCall("backlog", "shared", now, null, repo));
       return next;
     }
-    const host = githubHost();
+    // the repository's service (#920, its ops.config.json `forge`); a waiting limit is its host's: GitHub's wait does not hold a GitLab import (#892)
+    let target: ForgeTarget | null = null;
+    let refused: unknown = null;
+    try {
+      target = forgeTargetOf(ws.path, originOf(ws.path));
+    } catch (e) {
+      refused = e;
+    }
+    const host = target?.host ?? githubHost();
     const stored = source ? this.db.getBacklogRepository(source)?.retryAt : null;
     const wait = this.limits.waiting(host) ?? (stored && stored > now ? { until: stored, reason: "primary" as const } : null);
     if (wait) {
@@ -442,10 +538,14 @@ export class BacklogSync {
     if (folded) this.noticed.delete(ws.id), this.noticeEcho.delete(ws.id);
     const since = this.seq;
     let superseded = false;
-    // the repository's service (#920, its ops.config.json `forge`): one not supported is the import's failure, said as it is
+    // a service not supported (or a GitLab checkout of another project) is the import's failure, said as it is
     const read = (ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">) => () => importGithubSnapshot(this.gh, this.db, ws, now, (key) => (superseded = this.writtenSince(ws, key, since)));
     // (an async body runs at once up to its first wait: the read starts now, as it did before)
-    const imported = (async () => runForgeOperation({ kind: "read", target: { service: forgeOf(ws.path), host, repository: null }, payload: null }, { github: { read: read(ws) } }))().then(
+    const readGitlab = (op: { target: ForgeTarget }) => importGitlabSnapshot(this.glab, this.db, ws, op.target, now, (key) => (superseded = this.writtenSince(ws, key, since)));
+    const imported = (async () => {
+      if (!target) throw refused;
+      return runForgeOperation({ kind: "read", target, payload: null }, { github: { read: read(ws) }, gitlab: { read: readGitlab } });
+    })().then(
       ({ changed }) => {
         this.every.set(ws.id, changed ? POLL_MIN_MS : this.longer(ws.id));
         if (reads && (changed || !echo)) this.hintEvery.set(ws.id, changed ? HINT_WINDOW_MS : Math.min(POLL_MAX_MS, 2 * this.hintWindow(ws.id)));
@@ -565,7 +665,8 @@ export class BacklogSync {
     if (!syncsGithub(this.db.getWorkspaceBacklogSource(ws.id))) return;
     const now = this.clock();
     const stored = this.db.getBacklogRepository(source)?.retryAt;
-    const until = this.limits.waiting(githubHost())?.until ?? (stored && stored > now ? stored : null);
+    // the wait is the host's: GitHub's does not hold a GitLab project's sends (#2910)
+    const until = this.limits.waiting(source.host)?.until ?? (stored && stored > now ? stored : null);
     if (until) return this.later(ws, source, until);
     // what was written is imported back, whatever came of the rest of the run (a conflict, a limit) — after a wait
     // is recorded, so the import waits with it
@@ -577,15 +678,15 @@ export class BacklogSync {
       await sendGithubOperations(this.gh, this.db, ws.path, source, this.clock, () => {
         wrote = true;
         this.written(ws);
-      }, () => syncsGithub(this.db.getWorkspaceBacklogSource(ws.id)), (op) => enablingWaits(this.db.getWorkspaceBacklogSource(ws.id), op));
+      }, () => syncsGithub(this.db.getWorkspaceBacklogSource(ws.id)), (op) => enablingWaits(this.db.getWorkspaceBacklogSource(ws.id), op), this.glab);
     } catch (e) {
       if (!(e instanceof Limit)) throw e;
       // turned off meanwhile (#2266): nothing more goes, nothing waits for a time
       if (e.kind === "off") return;
       // a login refused waits for the next send (an edit, an import), and says why where the backlog shows errors (an
       // import would only fail the same way); a limit is the host's, as the imports' are
-      if (e.kind === "auth") return void this.failures.set(ws.id, { message: e.message, kind: "gh-login" });
-      const until = (e.response && this.limits.failed(githubHost(), e.response)?.until) || e.until;
+      if (e.kind === "auth") return void this.failures.set(ws.id, { message: e.message, kind: source.service === "github" ? "gh-login" : undefined });
+      const until = (e.response && this.limits.failed(source.host, e.response)?.until) || e.until;
       this.db.setBacklogRetryAt(source, until);
       if (wrote) this.wrote(ws);
       return this.later(ws, source, until);
@@ -699,7 +800,7 @@ export class BacklogSync {
   /** The end of the host's or the workspace's repository's wait (ms); 0 = none. */
   private waitUntil(ws: Pick<BacklogWorkspace, "id">): number {
     const source = this.db.getWorkspaceBacklogSource(ws.id);
-    return Math.max(this.limits.waiting(githubHost())?.until ?? 0, (source && this.db.getBacklogRepository(source)?.retryAt) || 0);
+    return Math.max(this.limits.waiting(source?.host ?? githubHost())?.until ?? 0, (source && this.db.getBacklogRepository(source)?.retryAt) || 0);
   }
 
   /** When the workspace is read again by itself (ms); null = not planned. */

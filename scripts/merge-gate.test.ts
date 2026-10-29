@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { checksFromRuns, designRulesTouched, judge, main, MERGE_ANSWER, MERGE_ASK, PROTECTED, readPr, type PrFacts, type RecheckKind } from "./merge-gate";
+import { checksFromRuns, designRulesTouched, judge, main, MERGE_ANSWER, MERGE_ASK, PROTECTED, readGitlabPr, readPr, type PrFacts, type RecheckKind } from "./merge-gate";
 
 // The default repository (no --repo) is GH_REPO, else the origin (scripts/repo.ts): fixed here, so a leak of it shows.
 const REPO = "example/development";
@@ -318,6 +318,7 @@ describe("merge-gate readPr", () => {
       { authoredDate: "2026-09-24T09:00:00Z", committedDate: "2026-09-24T13:00:00Z" },
       { authoredDate: "2026-09-24T10:00:00Z", committedDate: "2026-09-24T13:00:00Z" },
     ],
+    headRefName: "sb/1-a",
     headRefOid: "abc123",
     mergeStateStatus: "CLEAN",
     comments: [{ body: "[codex] review", createdAt: "2026-09-24T11:00:00Z", author: { login: "x" }, authorAssociation: "MEMBER" }],
@@ -382,46 +383,59 @@ describe("merge-gate readPr", () => {
     expect(checksFromRuns([])).toEqual([]);
   });
 
-  describe("local CI in place of an Actions CI that never started or never ran (#387, #914)", () => {
+  describe("local CI in place of an Actions CI that never started or never ran (#387, #914, #2940)", () => {
     const HEAD = "0123456789abcdef0123456789abcdef01234567";
     const OTHER = "fedcba9876543210fedcba9876543210fedcba98";
     const BASE = "3333333333333333333333333333333333333333";
-    const pass = (head = HEAD, base = BASE) => `[local-ci] pass ${head} base=${base}\n\n| 手順 | 結果 |`;
+    const [A, B, C] = ["a", "b", "c"].map((x) => x.repeat(40)) as [string, string, string];
+    /** A result mark; a pass names its stack (`stack`: "#1=<id> …"; null = the older mark without the line). */
+    const pass = (stack: string | null = `#1=${A}`, head = HEAD, base = BASE) => `[local-ci] pass ${head} base=${base}\n${stack === null ? "" : `stack ${stack}`}\n\n| 手順 | 結果 |`;
     const fail = (head = HEAD, base = BASE) => `[local-ci] fail ${head} base=${base}\n\n結果: \`bun test\` が exit 1`;
-    /** `comment` / `comments`: PR comments by the owner, a minute apart in order. `runs: false` = no Actions run at all. */
-    const facts = (opts: { comment?: string; comments?: string[]; steps: number; runs?: boolean; mergeState?: string }) => {
+    const owner = (bodies: string[]) => bodies.map((body, i) => ({ body, createdAt: `2026-09-24T11:3${i}:00Z`, authorAssociation: "OWNER" }));
+    /**
+     * PR `n` (head branch `b<n>`) and its stack: `above` = the open PRs per base branch (`b1: [2]` → #2 is on #1), the top's
+     * comments `top`. `comment` / `comments`: PR n's, by the owner, a minute apart. `ids`: each PR's patch-id now.
+     * `runs: false` = no Actions run at all.
+     */
+    const facts = (opts: { n?: number; comment?: string; comments?: string[]; steps: number; runs?: boolean; mergeState?: string; above?: Record<string, number[]>; top?: string[]; ids?: Record<number, string> }) => {
+      const n = opts.n ?? 1;
       const bodies = opts.comments ?? (opts.comment ? [opts.comment] : []);
-      const v = { ...view, headRefOid: HEAD, baseRefName: "main", mergeStateStatus: opts.mergeState ?? "CLEAN", comments: [...view.comments, ...bodies.map((body, i) => ({ body, createdAt: `2026-09-24T11:3${i}:00Z`, authorAssociation: "OWNER" }))] };
+      const v = { ...view, headRefName: `b${n}`, headRefOid: HEAD, baseRefName: "main", mergeStateStatus: opts.mergeState ?? "CLEAN", comments: [...view.comments, ...owner(bodies)] };
       const r = { workflow_runs: opts.runs === false ? [] : [{ id: 7, name: "CI", status: "completed", conclusion: "failure", created_at: "2026-09-24T12:00:00Z" }] };
       const jobs = { jobs: [{ name: "test", steps: Array.from({ length: opts.steps }, () => ({ name: "x" })) }] };
       const asked: string[] = [];
+      const ids = opts.ids ?? { 1: A, 2: B, 3: C };
       return {
         asked,
-        read: (repo?: string) => readPr(1, async (args) => {
+        read: (repo?: string) => readPr(n, async (args) => {
           asked.push(args.join(" "));
+          if (args[0] === "pr" && args[1] === "list") {
+            const ref = args[args.indexOf("--base") + 1]!;
+            return JSON.stringify((opts.above?.[ref] ?? []).map((number) => ({ number, headRefName: `b${number}` })));
+          }
+          if (args[0] === "pr" && args.at(-1) === "comments") return JSON.stringify({ comments: [...owner(opts.top ?? []), { body: pass(`#${args[2]}=${C}`), createdAt: "2026-09-24T11:00:00Z", authorAssociation: "NONE" }] });
           if (args[0] === "pr") return JSON.stringify(v);
-          // the base branch's tip now, read with -q .object.sha
-          if (args[1]?.endsWith("/git/ref/heads/main")) return `${BASE}\n`;
           if (args[1]?.endsWith("/actions/runs/7/jobs")) return JSON.stringify(jobs);
           if (args[1]?.includes("/actions/runs")) return JSON.stringify(r);
           return JSON.stringify(threads([]));
-        }, repo),
+        }, repo, async (pr) => ids[pr]!),
       };
     };
     const reasons = (f: PrFacts) => judge({ ...f, unresolvedThreads: 0 }, { allowLarge: false }).reasons;
+    const SUCCESS = [{ name: "CI（Actions が始まらず、ローカルで pass）", conclusion: "SUCCESS" }];
 
-    test("never started (no steps) + the pass of the head and the base's tip now → SUCCESS", async () => {
+    test("never started (no steps) + its own pass naming its patch-id → SUCCESS; the base's tip is not read", async () => {
       const x = facts({ comment: pass(), steps: 0 });
       const f = await x.read();
-      expect(f.checks).toEqual([{ name: "CI（Actions が始まらず、ローカルで pass）", conclusion: "SUCCESS" }]);
+      expect(f.checks).toEqual(SUCCESS);
       expect(f.localCi).toBe(true);
-      expect(x.asked).toContain(`api repos/${REPO}/git/ref/heads/main -q .object.sha`);
+      expect(x.asked.some((a) => a.includes("/git/ref/"))).toBe(false);
       // GitHub calls it UNSTABLE for the failed run; that alone does not stop the merge then
       expect(reasons({ ...f, mergeState: "UNSTABLE" })).toEqual([]);
       expect(reasons({ ...f, mergeState: "UNSTABLE", localCi: undefined })).toEqual(["mergeStateStatus が CLEAN でない: UNSTABLE"]);
     });
 
-    test("no Actions run at all + the pass of the head and base → one local-ci SUCCESS check; without it, no check", async () => {
+    test("no Actions run at all + the pass → one local-ci SUCCESS check; without it, no check", async () => {
       const f = await facts({ comment: pass(), steps: 0, runs: false }).read();
       expect(f.checks).toEqual([{ name: "local-ci（Actions の run が無く、ローカルで pass）", conclusion: "SUCCESS" }]);
       expect(f.localCi).toBe(true);
@@ -430,10 +444,9 @@ describe("merge-gate readPr", () => {
     });
 
     test("--repo: another repository's pass → SUCCESS, read from that repository (#1203)", async () => {
-      const x = facts({ comment: pass(), steps: 0 });
+      const x = facts({ comment: pass(`#2=${B}`), steps: 0, above: { b1: [2] }, top: [pass(`#1=${A} #2=${B}`)] });
       const f = await x.read("o/r");
-      expect(f.checks).toEqual([{ name: "CI（Actions が始まらず、ローカルで pass）", conclusion: "SUCCESS" }]);
-      expect(f.localCi).toBe(true);
+      expect(f.checks).toEqual(SUCCESS);
       expect(x.asked.length).toBeGreaterThan(0);
       for (const a of x.asked) expect(a.includes("o/r") || a.includes("o=o")).toBe(true);
       expect(x.asked.some((a) => a.includes(REPO))).toBe(false);
@@ -445,30 +458,27 @@ describe("merge-gate readPr", () => {
       expect(f.localCi).toBeUndefined();
     });
 
-    test("another head's pass, the older head-only mark, a mark not at the start, or none: FAILURE; neither the base nor the jobs are read", async () => {
-      for (const comment of [pass(OTHER), `[local-ci] pass ${HEAD}`, `ok ${pass()}`, undefined]) {
+    test("the older head-only mark, a mark not at the start, or none: FAILURE with no note; the jobs are not read", async () => {
+      for (const comment of [`[local-ci] pass ${HEAD}`, `ok ${pass()}`, undefined]) {
         const x = facts({ comment, steps: 0 });
         const f = await x.read();
         expect(f.checks).toEqual([{ name: "CI", conclusion: "FAILURE" }]);
         expect(f.localCiNote).toBeUndefined();
-        expect(x.asked.some((a) => a.includes("/jobs") || a.includes("/git/ref/"))).toBe(false);
+        expect(x.asked.some((a) => a.includes("/jobs"))).toBe(false);
       }
     });
 
-    test("a pass of an older base: FAILURE, and the reason says the base moved", async () => {
-      const f = await facts({ comment: pass(HEAD, OTHER), steps: 0 }).read();
-      expect(f.checks).toEqual([{ name: "CI", conclusion: "FAILURE" }]);
-      expect(reasons(f)).toEqual(["CI のチェック CI が FAILURE", "local-ci の結果が今の base（main 3333333）のものでない（base が進んだ。回し直す）"]);
+    test("a pass without the stack line (before #2940) or not naming this PR: FAILURE, run it on the top", async () => {
+      for (const comment of [pass(null), pass(`#9=${A}`)]) {
+        const f = await facts({ comment, steps: 0 }).read();
+        expect(reasons(f)).toEqual(["CI のチェック CI が FAILURE", "一番上の PR #1 の pass にこの PR が入っていない（一番上で回す）"]);
+      }
     });
 
-    test("the newest result of the head and base counts: a fail after a pass is no pass; a pass after a fail is", async () => {
+    test("the newest result of the top counts: a fail after a pass is no pass; a pass after a fail is", async () => {
       const failed = await facts({ comments: [pass(), fail()], steps: 0 }).read();
-      expect(failed.checks).toEqual([{ name: "CI", conclusion: "FAILURE" }]);
-      expect(reasons(failed)).toContain("local-ci の最新の結果が fail（今の head と base で落ちた）");
-      const passed = await facts({ comments: [fail(), pass()], steps: 0 }).read();
-      expect(passed.checks).toEqual([{ name: "CI（Actions が始まらず、ローカルで pass）", conclusion: "SUCCESS" }]);
-      // a newer fail of an older base does not undo the pass of the current one
-      expect((await facts({ comments: [pass(), fail(HEAD, OTHER)], steps: 0 }).read()).localCi).toBe(true);
+      expect(reasons(failed)).toContain("一番上の PR #1 の local-ci の最新が fail");
+      expect((await facts({ comments: [fail(), pass()], steps: 0 }).read()).checks).toEqual(SUCCESS);
     });
 
     test("BLOCKED with the local pass: the base branch's protection stops it, and the reason says local-ci cannot meet it", async () => {
@@ -478,10 +488,42 @@ describe("merge-gate readPr", () => {
       expect(reasons({ ...f, localCi: undefined, checks: [{ name: "CI", conclusion: "SUCCESS" }] })).toEqual(["mergeStateStatus が CLEAN でない: BLOCKED"]);
     });
 
-    test("unknown: mergeStateStatus UNKNOWN or an unreadable base tip is no judgement (readPr throws → exit 2)", async () => {
+    test("unknown: mergeStateStatus UNKNOWN is no judgement (readPr throws → exit 2)", async () => {
       await expect(facts({ comment: pass(), steps: 0, mergeState: "UNKNOWN" }).read()).rejects.toThrow("UNKNOWN");
-      const v = { ...view, headRefOid: HEAD, baseRefName: "main", comments: [{ body: pass(), createdAt: "2026-09-24T11:30:00Z", authorAssociation: "OWNER" }] };
-      await expect(readPr(1, async (args) => (args[0] === "pr" ? JSON.stringify(v) : args[1]?.includes("/git/ref/") ? "\n" : JSON.stringify(args[1]?.includes("/actions/runs") ? runs : threads([]))))).rejects.toThrow("先端が読めない");
+    });
+
+    test("stack top: bottom counts by the top's pass", async () => {
+      // #1 ← #2 ← #3; only #3 has a result, by the owner (an outsider's pass on #3 does not count)
+      const x = facts({ steps: 0, above: { b1: [2], b2: [3] }, top: [pass(`#1=${A} #2=${B} #3=${C}`)] });
+      const f = await x.read();
+      expect(f.checks).toEqual(SUCCESS);
+      expect(reasons(f)).toEqual([]);
+      expect(x.asked).toContain(`pr view 3 -R ${REPO} --json comments`);
+      // the top's newest is a fail: no pass for the bottom either
+      expect(reasons(await facts({ steps: 0, above: { b1: [2], b2: [3] }, top: [pass(`#1=${A} #2=${B} #3=${C}`), fail()] }).read())).toContain("一番上の PR #3 の local-ci の最新が fail");
+    });
+
+    test("stack top: same patch-id after rebase", async () => {
+      // #1 merged; #2 is on main now, rebased by GitHub: its head is another sha, its own diff the same
+      const top = [pass(`#1=${A} #2=${B} #3=${C}`, OTHER)];
+      expect((await facts({ n: 2, steps: 0, above: { b2: [3] }, top }).read()).checks).toEqual(SUCCESS);
+      const changed = await facts({ n: 2, steps: 0, above: { b2: [3] }, top, ids: { 2: "d".repeat(40) } }).read();
+      expect(reasons(changed)).toEqual(["CI のチェック CI が FAILURE", "この PR の差分が #3 の pass のときから変わった（一番上で回し直す）"]);
+    });
+
+    test("stack top: base moved", async () => {
+      const x = facts({ steps: 0, above: { b1: [2] }, top: [pass(`#1=${A} #2=${B}`, HEAD, OTHER)] });
+      const f = await x.read();
+      expect(reasons(f)).toEqual([]);
+      expect(x.asked.some((a) => a.includes("/git/ref/"))).toBe(false);
+    });
+
+    test("stack top: single PR", async () => {
+      // no PR above: its own pass, of a base main has moved past since
+      const f = await facts({ comment: pass(`#1=${A}`, HEAD, OTHER), steps: 0 }).read();
+      expect(f.checks).toEqual(SUCCESS);
+      // two PRs on it (a fork): the walk ends at this one, and its own pass is what counts
+      expect((await facts({ comment: pass(`#1=${A}`), steps: 0, above: { b1: [2, 3] }, top: [pass(`#1=${A} #2=${B}`)] }).read()).checks).toEqual(SUCCESS);
     });
   });
 
@@ -533,6 +575,7 @@ describe("merge-gate readPr", () => {
         asked,
         facts: readPr(1, async (args) => {
           asked.push(args);
+          if (args[0] === "pr" && args[1] === "list") return "[]";
           if (args[0] === "pr") return JSON.stringify(v);
           if (args.some((a) => a.includes("/pulls/1/files"))) return file ? JSON.stringify(file) + "\n" : "";
           if (args.some((a) => a.includes("/compare/"))) return "merge1\n";
@@ -600,6 +643,7 @@ describe("merge command merges only on verdict merge", () => {
         return a.includes("-q") ? `${o.headNow ?? SHA}\n` : JSON.stringify(v);
       }
       if (a[0] === "repo") return "main\n";
+      if (a[0] === "pr" && a[1] === "list") return "[]";
       if (a[0] === "pr" || a[0] === "stack") return "";
       return JSON.stringify(a[1]?.includes("/actions/runs") ? runs : threads);
     }, () => {}, (e) => errs.push(e), () => o.local ?? REPO);
@@ -688,5 +732,103 @@ describe("merge-gate reads GitHub, not the stored backlog (#909)", () => {
     const imports = [...src.matchAll(/^import .* from "([^"]+)"/gm)].map((m) => m[1]!);
     expect(imports.filter((i) => /packages\/core|db|backlog|sqlite/.test(i))).toEqual([]);
     expect(src).not.toMatch(/bun:sqlite|switchboard\.db|readStoredBacklog|listBacklogRecords/);
+  });
+});
+
+describe("GitLab MR (#924)", () => {
+  const HEAD = "1".repeat(40);
+  const BASE = "2".repeat(40);
+  const lab = { service: "gitlab", host: "gitlab.example.com", repository: "group/app" };
+  const M = "projects/group%2Fapp/merge_requests/7";
+  /** A fake GitLab MR: good to merge unless `over` says otherwise. */
+  function gitlab(over: { status?: string; pipeline?: { sha: string; status: string } | null; notes?: Array<{ body: string; created_at: string; author: number }>; resolved?: boolean; files?: string[]; diffs?: unknown[]; merge?: number } = {}) {
+    const calls: string[][] = [];
+    const notes = over.notes ?? [{ body: "[codex] review\n\n### Verdict\nmergeable as is", created_at: "2026-10-28T02:00:00Z", author: 1 }];
+    const sh = async (cmd: string[]) => {
+      calls.push(cmd);
+      const p = cmd.at(-1)!.replace(/[?&]per_page=100&page=\d+$/, "");
+      const answer = ((): unknown => {
+        if (p === M) return { iid: 7, web_url: "u", state: "opened", source_branch: "sb/1-x", target_branch: "main", sha: HEAD, diff_refs: { base_sha: BASE, head_sha: HEAD, start_sha: BASE }, detailed_merge_status: over.status ?? "mergeable", head_pipeline: over.pipeline === undefined ? { sha: HEAD, status: "success" } : over.pipeline };
+        if (p === `${M}/diffs`) return over.diffs ?? (over.files ?? ["src/a.ts"]).map((f) => ({ old_path: f, new_path: f, diff: "@@ -1 +1,2 @@\n-a\n+b\n+c\n" }));
+        if (p === `${M}/commits`) return [{ authored_date: "2026-10-28T01:00:00Z" }];
+        if (p === `${M}/notes?sort=asc&order_by=created_at`) return [...notes.map((n, k) => ({ id: k, body: n.body, created_at: n.created_at, system: false, author: { id: n.author } })), { id: 99, body: "added 1 commit", created_at: "2026-10-28T03:00:00Z", system: true, author: null }];
+        if (p.startsWith("projects/group%2Fapp/members/all/")) return { access_level: p.endsWith("/1") ? 30 : 20 };
+        if (p === `${M}/discussions`) return [{ id: "a".repeat(40), notes: [{ id: 1, body: "x", resolvable: true, resolved: over.resolved ?? true, system: false }] }];
+        if (p === "projects/group%2Fapp/repository/branches/main") return { commit: { id: BASE } };
+        if (p === `${M}/merge`) {
+          if (over.merge) throw new Error(`glab: error (HTTP ${over.merge})`);
+          return { state: "merged" };
+        }
+        throw new Error(`fake GitLab: ${p}`);
+      })();
+      return JSON.stringify(answer);
+    };
+    return { sh, calls };
+  }
+
+  test("an MR whose head pipeline passed, reviewed after its last commit, with every discussion resolved, merges", async () => {
+    const f = await readGitlabPr(7, gitlab().sh, lab);
+    expect(f).toMatchObject({ files: [{ path: "src/a.ts", additions: 2, deletions: 1 }], headCommittedAt: "2026-10-28T01:00:00Z", checks: [{ name: "GitLab pipeline", conclusion: "SUCCESS" }], unresolvedThreads: 0, mergeState: "CLEAN", head: HEAD, base: "main" });
+    expect(judge(f, { allowLarge: false })).toMatchObject({ verdict: "merge", impact: "small" });
+  });
+
+  test("an old pipeline, a failed one, an open discussion, a review by someone below Developer, or a status not mergeable stop it", async () => {
+    const stop = async (over: Parameters<typeof gitlab>[0], reason: string) => {
+      const j = judge(await readGitlabPr(7, gitlab(over).sh, lab), { allowLarge: false });
+      expect({ verdict: j.verdict, reasons: j.reasons.filter((r) => r.includes(reason)).length }).toEqual({ verdict: "stop", reasons: 1 });
+    };
+    await stop({ pipeline: { sha: "3".repeat(40), status: "success" } }, "CI のチェックが 1 つも無い");
+    await stop({ pipeline: { sha: HEAD, status: "failed" } }, "GitLab pipeline が FAILED");
+    await stop({ pipeline: { sha: HEAD, status: "running" } }, "GitLab pipeline が 未完了");
+    await stop({ resolved: false }, "解決していないレビュースレッドが 1 件");
+    await stop({ notes: [{ body: "[codex] review\n\nok", created_at: "2026-10-28T02:00:00Z", author: 2 }] }, "主レビュー");
+    await stop({ notes: [{ body: "[codex] review\n\nok", created_at: "2026-10-28T00:00:00Z", author: 1 }] }, "主レビュー");
+    await stop({ status: "conflict" }, "CLEAN でない: conflict");
+    await stop({ status: "not_approved" }, "CLEAN でない: not_approved");
+    // README.md is asked on GitLab (its Design rules section is not read there)
+    await stop({ files: ["README.md"] }, "[聞く] 責務");
+    await expect(readGitlabPr(7, gitlab({ status: "checking" }).sh, lab)).rejects.toThrow("計算中");
+    // a security file renamed away is asked as on GitHub (the old path counts)
+    await stop({ diffs: [{ old_path: "src/auth.ts", new_path: "src/login.ts", diff: "" }] }, "[聞く] セキュリティ: src/auth.ts");
+    // a patch GitLab left out is no size: not judged
+    await expect(readGitlabPr(7, gitlab({ diffs: [{ old_path: "big.ts", new_path: "big.ts", diff: "", too_large: true }] }).sh, lab)).rejects.toThrow("差分を GitLab が省いた（big.ts）");
+  });
+
+  test("without a pipeline of the head, the local pass of the head and the target's tip now is the CI; one of an older base is not", async () => {
+    const review = { body: "[codex] review\n\nok", created_at: "2026-10-28T02:00:00Z", author: 1 };
+    const pass = (base: string, author = 1) => ({ body: `[local-ci] pass ${HEAD} base=${base}`, created_at: "2026-10-28T02:30:00Z", author });
+    const ok = await readGitlabPr(7, gitlab({ pipeline: null, status: "ci_must_pass", notes: [review, pass(BASE)] }).sh, lab);
+    expect(ok).toMatchObject({ checks: [{ name: expect.stringContaining("local-ci"), conclusion: "SUCCESS" }], localCi: true, mergeState: "UNSTABLE" });
+    expect(judge(ok, { allowLarge: false }).verdict).toBe("merge");
+    const old = await readGitlabPr(7, gitlab({ pipeline: null, status: "ci_must_pass", notes: [review, pass("4".repeat(40))] }).sh, lab);
+    expect(judge(old, { allowLarge: false }).reasons).toEqual(expect.arrayContaining(["CI のチェックが 1 つも無い", "mergeStateStatus が CLEAN でない: ci_must_pass"]));
+    expect(old.localCiNote).toContain("base が進んだ");
+    // a pass a Reporter wrote is no mark
+    const theirs = await readGitlabPr(7, gitlab({ pipeline: null, status: "ci_must_pass", notes: [review, pass(BASE, 2)] }).sh, lab);
+    expect(theirs.checks).toEqual([]);
+  });
+
+  test("the command judges the checkout's GitLab MR and merges it at the judged head only; --merge-stack is refused", async () => {
+    const dir = require("node:fs").mkdtempSync(require("node:path").join(require("node:os").tmpdir(), "merge-gate-lab-"));
+    try {
+      Bun.spawnSync(["git", "init", "-q", dir]);
+      Bun.spawnSync(["git", "-C", dir, "remote", "add", "origin", "https://gitlab.example.com/group/app.git"]);
+      require("node:fs").writeFileSync(`${dir}/ops.config.json`, JSON.stringify({ forge: { service: "gitlab", host: "gitlab.example.com", project: "group/app" } }));
+      const noGh = async (a: string[]) => {
+        throw new Error(`gh is not asked: ${a.join(" ")}`);
+      };
+      const quiet = () => undefined;
+      const g = gitlab();
+      expect(await main(["7", "--merge"], noGh, quiet, quiet, () => undefined, g.sh, dir)).toBe(0);
+      const merged = g.calls.find((c) => c.at(-1) === `${M}/merge`)!;
+      expect(merged.slice(4)).toEqual(["-X", "PUT", "-f", `sha=${HEAD}`, "-f", "should_remove_source_branch=true", `${M}/merge`]);
+      // the head moved after the judgement: GitLab refuses (409) and nothing is merged
+      expect(await main(["7", "--merge"], noGh, quiet, quiet, () => undefined, gitlab({ merge: 409 }).sh, dir)).toBe(1);
+      expect(await main(["7", "--merge"], noGh, quiet, quiet, () => undefined, gitlab({ resolved: false }).sh, dir)).toBe(1);
+      expect(await main(["7", "--merge-stack"], noGh, quiet, quiet, () => undefined, g.sh, dir)).toBe(2);
+      expect(await main(["7"], noGh, quiet, quiet, () => undefined, gitlab({ status: "checking" }).sh, dir)).toBe(2);
+    } finally {
+      require("node:fs").rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

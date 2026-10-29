@@ -93,6 +93,8 @@ Judge the PR on these, in this order:
 2. Design consistency: contradictions with `design-rules.md`, the relevant `docs/design/*.md`, the PBI's スコープ外 and
    決定ログ, or the existing shape of neighbouring code. Flag compatibility layers, one-use abstractions, just-in-case
    settings, per-adapter branches, new tables/endpoints where an existing one would do.
+   Flag any diff that copies a value the running app owns and can change (a registered schedule's cron/prompt/budget/runner,
+   a settings value or default, a default model name) into docs/skills/templates/CLAUDE.md; point to its source instead.
 3. Correctness: concrete bugs with a failure scenario (input/state → wrong output). Reproduce claims when you can
    (running the tests may be blocked by the sandbox — say so if it is; reason from the code then).
 4. Tests: does a test cover each changed behaviour? Would it fail without the change?

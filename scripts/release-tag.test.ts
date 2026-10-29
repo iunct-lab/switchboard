@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, utimesSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bumpType, latestSemver, nextVersion, releaseNotes, run, verifiedBy, withReleaseLock, type Sh } from "./release-tag";
+import { bumpType, latestSemver, nextVersion, releaseNotes, run, withReleaseLock, type Sh } from "./release-tag";
 
 describe("release-tag bumpType", () => {
   test("feat only → minor", () => expect(bumpType(["feat(web): a"])).toBe("minor"));
@@ -39,8 +39,8 @@ describe("release-tag releaseNotes", () => {
   });
 });
 
-/** c1 is on origin/main and the CI workflow passed on its push. */
-const onMainAndCi = { "git merge-base --is-ancestor c1 origin/main": { ok: true }, "gh api repos/": { out: "1" } };
+/** c1 is on origin/main. */
+const onMain = { "git merge-base --is-ancestor c1 origin/main": { ok: true } };
 
 describe("release-tag run", () => {
   /** A fake git / gh: answers by command prefix, records every call. */
@@ -62,8 +62,8 @@ describe("release-tag run", () => {
   });
 
   test("a new commit gets the next tag, a push and a release", () => {
-    const f = fake({ "git tag -l": { out: "v1.0\nv0.3.0" }, "git tag --points-at": { out: "" }, ...onMainAndCi, "git merge-base": { ok: false }, "git log": { out: "c1\tfeat(web): x (#9)" } });
-    expect(run("c1", f.sh)).toBe("tagged c1 as v0.4.0 (verified by CI)");
+    const f = fake({ "git tag -l": { out: "v1.0\nv0.3.0" }, "git tag --points-at": { out: "" }, ...onMain, "git merge-base": { ok: false }, "git log": { out: "c1\tfeat(web): x (#9)" } });
+    expect(run("c1", f.sh)).toBe("tagged c1 as v0.4.0");
     expect(f.calls).toContain("git tag v0.4.0 c1");
     expect(f.calls).toContain("git push origin v0.4.0");
     expect(f.calls.some((c) => c.startsWith("gh release create v0.4.0"))).toBe(true);
@@ -98,7 +98,7 @@ describe("release-tag repo", () => {
     };
     return { sh, calls, inputs };
   }
-  const newCommit = { "git tag -l": { out: "v0.2.0" }, "git tag --points-at": { out: "" }, ...onMainAndCi, "git merge-base": { ok: false }, "git log": { out: "c1\tfix: y (#4)" } };
+  const newCommit = { "git tag -l": { out: "v0.2.0" }, "git tag --points-at": { out: "" }, ...onMain, "git merge-base": { ok: false }, "git log": { out: "c1\tfix: y (#4)" } };
 
   test("the compare URL points at the given repository", () => {
     expect(releaseNotes([{ sha: "a1", subject: "fix: y" }], "v0.1.0", "v0.1.1", "x/y")).toBe("- fix: y\n\nhttps://github.com/x/y/compare/v0.1.0...v0.1.1\n");
@@ -106,7 +106,7 @@ describe("release-tag repo", () => {
 
   test("--repo fetches the tags first and creates the release in that repository", () => {
     const f = fake({ "git remote get-url": { out: "git@github.com:x/y.git" }, ...newCommit });
-    expect(run("c1", f.sh, "x/y")).toBe("tagged c1 as v0.2.1 (verified by CI)");
+    expect(run("c1", f.sh, "x/y")).toBe("tagged c1 as v0.2.1");
     expect(f.calls.indexOf("git fetch origin --tags --force +refs/heads/main:refs/remotes/origin/main")).toBeLessThan(f.calls.findIndex((c) => c.startsWith("git tag -l")));
     expect(f.calls).toContain("git push origin v0.2.1");
     const create = f.calls.findIndex((c) => c.startsWith("gh release create v0.2.1"));
@@ -152,7 +152,7 @@ describe("release-tag repo", () => {
   });
 });
 
-describe("release-tag verified main only (#915)", () => {
+describe("release-tag main only", () => {
   /** A fake whose answers may change per call (a list is used in order, the last one repeats). */
   function seq(answers: Record<string, Array<{ ok?: boolean; out?: string }>>) {
     const calls: string[] = [];
@@ -169,42 +169,19 @@ describe("release-tag verified main only (#915)", () => {
     };
     return { sh, calls };
   }
-  const H = "a".repeat(40);
-  const B = "b".repeat(40);
-  const OLD = "c".repeat(40);
-  const pr = (comments: Array<{ body: string; at?: string; who?: string }>) =>
-    JSON.stringify({ headRefOid: H, comments: comments.map((c, i) => ({ body: c.body, createdAt: c.at ?? `2026-10-23T00:0${i}:00Z`, authorAssociation: c.who ?? "OWNER" })) });
-  const local = (comments: Array<{ body: string; at?: string; who?: string }>, mergedTree = "T1") => ({
-    "gh api repos/o/r/actions/runs": [{ out: "0" }],
-    "gh api repos/o/r/commits/c1/pulls": [{ out: "12" }],
-    "git rev-parse c1^{tree}": [{ out: "T1" }],
-    "gh pr view 12": [{ out: pr(comments) }],
-    [`git merge-tree --write-tree ${B} ${H}`]: [{ out: `${mergedTree}\n` }],
+  test("a commit with no CI result still gets the next tag", () => {
+    const f = seq({ "git tag -l": [{ out: "v0.2.0" }], "git tag --points-at": [{ out: "" }], "git merge-base --is-ancestor c1 origin/main": [{ ok: true }], "git merge-base": [{ ok: false }], "git log": [{ out: "c1\tfix: y" }] });
+    expect(run("c1", f.sh)).toBe("tagged c1 as v0.2.1");
+    expect(f.calls).toContain("git tag v0.2.1 c1");
+    expect(f.calls).toContain("git push origin v0.2.1");
+    expect(f.calls.some((c) => c.startsWith("gh release create v0.2.1"))).toBe(true);
+    expect(f.calls.some((c) => c.startsWith("gh api") || c.startsWith("gh pr"))).toBe(false);
   });
 
-  test("the CI workflow's success on the push verifies it", () => {
-    expect(verifiedBy("c1", seq({ "gh api repos/o/r/actions/runs": [{ out: "1" }] }).sh, "o/r")).toBe("CI");
-  });
-
-  test("Actions not starting: the merged PR's local-ci pass whose head on that base is the commit's tree verifies it", () => {
-    expect(verifiedBy("c1", seq(local([{ body: `[local-ci] pass ${H} base=${B}` }])).sh, "o/r")).toBe("local-ci of PR #12");
-  });
-
-  test("a pass of another tree, of an older head, a later fail of the same base, or a non-member's mark does not", () => {
-    expect(verifiedBy("c1", seq(local([{ body: `[local-ci] pass ${H} base=${B}` }], "T2")).sh, "o/r")).toBeNull();
-    expect(verifiedBy("c1", seq(local([{ body: `[local-ci] pass ${OLD} base=${B}` }])).sh, "o/r")).toBeNull();
-    expect(verifiedBy("c1", seq(local([{ body: `[local-ci] pass ${H} base=${B}` }, { body: `[local-ci] fail ${H} base=${B}` }])).sh, "o/r")).toBeNull();
-    expect(verifiedBy("c1", seq(local([{ body: `[local-ci] pass ${H} base=${B}`, who: "NONE" }])).sh, "o/r")).toBeNull();
-    expect(verifiedBy("c1", seq({ "gh api repos/o/r/actions/runs": [{ out: "0" }], "gh api repos/o/r/commits/c1/pulls": [{ out: "" }] }).sh, "o/r")).toBeNull();
-  });
-
-  test("an unverified commit, or one not on origin/main, is refused before any tag", () => {
-    const base = { "git tag -l": [{ out: "v0.2.0" }], "git tag --points-at": [{ out: "" }] };
-    const unverified = seq({ ...base, "git merge-base --is-ancestor c1 origin/main": [{ ok: true }], "git merge-base": [{ ok: false }], "gh api": [{ out: "" }] });
-    expect(() => run("c1", unverified.sh)).toThrow("c1 is not verified");
-    const offMain = seq({ ...base, "git merge-base --is-ancestor c1 origin/main": [{ ok: false }], "git merge-base": [{ ok: false }], "gh api": [{ out: "1" }] });
-    expect(() => run("c1", offMain.sh)).toThrow("not on origin/main");
-    for (const f of [unverified, offMain]) expect(f.calls.some((c) => c.startsWith("git tag v") || c.startsWith("git push") || c.startsWith("gh release create"))).toBe(false);
+  test("a commit not on origin/main is refused before any tag", () => {
+    const f = seq({ "git tag -l": [{ out: "v0.2.0" }], "git tag --points-at": [{ out: "" }], "git merge-base --is-ancestor c1 origin/main": [{ ok: false }], "git merge-base": [{ ok: false }] });
+    expect(() => run("c1", f.sh)).toThrow("not on origin/main");
+    expect(f.calls.some((c) => c.startsWith("git tag v") || c.startsWith("git push") || c.startsWith("gh release create"))).toBe(false);
   });
 
   test("two clones at once: the push that loses reads the tags again and finds the winner's tag on the commit — no second tag", () => {
@@ -214,7 +191,6 @@ describe("release-tag verified main only (#915)", () => {
       "gh release view": [{ ok: true }],
       "git merge-base --is-ancestor c1 origin/main": [{ ok: true }],
       "git merge-base": [{ ok: false }],
-      "gh api": [{ out: "1" }],
       "git log": [{ out: "c1\tfix: y" }],
       "git push": [{ ok: false }],
     });
@@ -231,7 +207,6 @@ describe("release-tag verified main only (#915)", () => {
       "git merge-base --is-ancestor c1 origin/main": [{ ok: true }],
       "git merge-base --is-ancestor c1 v1.0.0": [{ ok: false }],
       "git merge-base --is-ancestor c1 v1.1.0": [{ ok: true }],
-      "gh api": [{ out: "1" }],
       "git log": [{ out: "c1\tfix: y" }],
     });
     expect(run("c1", f.sh)).toBe("c1 is already contained in v1.1.0 (tagged by another run meanwhile; v1.0.1 taken back)");
@@ -256,10 +231,9 @@ describe("release-tag verified main only (#915)", () => {
       "git tag --points-at": [{ out: "" }],
       "git merge-base --is-ancestor c1 origin/main": [{ ok: true }],
       "git merge-base": [{ ok: false }],
-      "gh api": [{ out: "1" }],
       "git log": [{ out: "c1\tfix: y" }],
     });
-    expect(run("c1", f.sh)).toBe("tagged c1 as v1.0.1 (verified by CI)");
+    expect(run("c1", f.sh)).toBe("tagged c1 as v1.0.1");
     expect(f.calls.some((c) => c.startsWith("git push origin :refs/tags"))).toBe(false);
     expect(f.calls.some((c) => c.startsWith("gh release create v1.0.1"))).toBe(true);
   });
@@ -271,7 +245,6 @@ describe("release-tag verified main only (#915)", () => {
       "git merge-base --is-ancestor c1 origin/main": [{ ok: true }],
       "git merge-base --is-ancestor c1 v0.2.0": [{ ok: false }],
       "git merge-base --is-ancestor c1 v0.3.0": [{ ok: true }],
-      "gh api": [{ out: "1" }],
       "git log": [{ out: "c1\tfix: y" }],
       "git push": [{ ok: false }],
     });

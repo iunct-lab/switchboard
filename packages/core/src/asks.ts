@@ -1,6 +1,6 @@
-import type { AnswerPolicy, Artifact, Ask, AskAnswerKind, AskBlocker, AskResume, AskPolicy, ApprovalRuleMatch, BacklogItem, EventEnvelope, PendingApproval, PolicySubject, StopSummary, Task } from "@switchboard/protocol";
+import type { AnswerPolicy, Artifact, Ask, AskAnswerKind, AskBlocker, AskResume, AskPolicy, ApprovalRuleMatch, BacklogItem, EventEnvelope, PendingApproval, PolicySubject, ScheduleResult, StopSummary, Task } from "@switchboard/protocol";
 import { MERGE_ASK } from "../../../scripts/merge-gate.ts";
-import { isAnswered, isUnblocked, type GhRunner } from "./backlog.ts";
+import { isAnswered, isUnblocked, priorityRank, type GhRunner } from "./backlog.ts";
 import { matchPolicies, POLICY_DEFAULT_DAYS, subjectChanges } from "./policies.ts";
 import { issueOf, NEEDS_PERSON } from "./stops.ts";
 
@@ -246,14 +246,14 @@ const withPolicy = (a: Ask, subject: PolicySubject | null, confirmHit: ApprovalR
 
 /** The answer fields of a built question: what it takes, and nothing in the way or going on yet. */
 const noPolicy: AskPolicy = { scopes: [], note: null, defaults: null, applied: null, previous: null };
-const unanswered = { grants: [] as Array<string | null>, grant: null, answers: [] as AskAnswerKind[], mockups: [] as Artifact[], place: null, blockers: [] as AskBlocker[], resume: null, subject: null, policy: noPolicy };
+const unanswered = { grants: [] as Array<string | null>, grant: null, answers: [] as AskAnswerKind[], mockups: [] as Artifact[], place: null, blockers: [] as AskBlocker[], resume: null, subject: null, policy: noPolicy, unblocks: [] as Ask["unblocks"], priority: null };
 /** Fills `answers` once the rest is known. */
 const withAnswers = (a: Ask): Ask => ({ ...a, answers: answersOf(a) });
 
 const issueUrl = (i: BacklogItem, n: number) => i.url.replace(/\d+$/, String(n));
 
 /** The fields every question of a backlog item shares. */
-const base = (i: BacklogItem): Pick<Ask, "workspace" | "pbi" | "issue" | "task" | "choices" | "grants" | "grant" | "recommendation" | "conditions" | "answers" | "mockups" | "place" | "blockers" | "resume" | "subject" | "policy"> => ({
+const base = (i: BacklogItem): Pick<Ask, "workspace" | "pbi" | "issue" | "task" | "choices" | "grants" | "grant" | "recommendation" | "conditions" | "answers" | "mockups" | "place" | "blockers" | "resume" | "subject" | "policy" | "unblocks" | "priority"> => ({
   ...unanswered,
   workspace: { id: i.workspaceId, name: i.workspaceName },
   pbi: { number: i.number, title: i.title, url: i.url },
@@ -585,6 +585,156 @@ function foldKey(a: Ask): string | null {
 const stageIssue = (a: Ask) => a.task?.stageIssue ?? null;
 
 /**
+ * The daemon's notices (#2866) as of now, kept between reads under one setting, by what they are about (a workspace, a
+ * schedule): the question's id and first sight, when it was first seen gone, and what the screen showed for it (a
+ * resolved one is no longer in the input to read it from). A scan's notice keeps its hits' fingerprint, and the one
+ * the person dismissed.
+ */
+export type NoticeRecord = Record<
+  string,
+  { id: string; at: number; resolvedAt: number | null; question: string; source: string; workspace: { id: string; name: string } | null; fingerprint?: string; dismissed?: string | null; /** The person closed it (dismiss): not shown, even as resolved. */ closed?: boolean }
+>;
+
+/** What a secret-scan result's notice is about: its hit lines (places and kinds, no values) and the repositories it could not check. */
+/** `fingerprint` is the hits' only: what a dismiss closes (a repository that could not be checked is not a false positive). */
+export function scanFindings(result: ScheduleResult | null): { hits: string[]; failed: string[]; fingerprint: string } {
+  const lines = result?.lines ?? [];
+  const hits = lines.filter((l) => l.startsWith("  ")).map((l) => l.trim());
+  // anything but a repository's count line: a repository it could not check, or a firing that failed as a whole
+  const failed = lines.filter((l) => !l.startsWith("  ") && !/: (0 件|当たり \d+ 件)（scanned \d+）$/.test(l));
+  return { hits, failed, fingerprint: [...hits].sort().join("\n") };
+}
+
+/** The hits a dismiss closes (#2866): those closed before and the ones the notice shows now, one line each. */
+export const closedHits = (r: NoticeRecord[string]): string =>
+  [...new Set([...(r.dismissed ?? "").split("\n"), ...(r.fingerprint ?? "").split("\n")].filter(Boolean))].sort().join("\n");
+
+const SCAN_NEXT = "内容の URL を開いて当たりが本物の値か見る。本物なら先にその値を無効にして（作り直して）からコメントを削除する（次の検査で当たりが無くなれば解消済み）。誤検知なら「誤検知として閉じる」";
+
+/**
+ * The daemon's notices as questions (#2866): built from the current state each time, never written as Inbox notes.
+ * - a workspace a Task cannot use (`unusableWorkspaces`): open until it is fixed, then resolved with no answer
+ * - a secret-scan schedule's last result with hits or a repository it could not check: open, answered by `dismiss`
+ *   (a false positive) — the same hits do not come back, new ones do; resolved once a result is clean
+ * - an approval-window schedule that fired, while SSO / deploy batches wait (`approvalWindowNote`): open with no answer
+ *   (the batches are answered on their cards), resolved once none waits
+ * A resolved one drops off a day later. Returns the record to keep (the same object when nothing changed).
+ */
+export function noticeAsks(
+  input: {
+    unusable: Array<{ workspace: { id: string; name: string }; why: string }>;
+    /** `workspace` = the schedule's (meta), shown as where the notice belongs. */
+    scans?: Array<{ schedule: { id: string; title: string }; workspace?: { id: string; name: string } | null; result: ScheduleResult | null }>;
+    windows?: Array<{ schedule: { id: string; title: string }; workspace?: { id: string; name: string } | null; note: { title: string; body: string } | null }>;
+    now: number;
+  },
+  record: NoticeRecord,
+): { asks: Ask[]; record: NoticeRecord } {
+  const { now } = input;
+  const next: NoticeRecord = {};
+  let changed = false;
+  const asks: Ask[] = [];
+  const notice = (r: NoticeRecord[string], reason: string | null, todo: string | null, answers: AskAnswerKind[]): Ask => ({
+    ...unanswered,
+    id: r.id,
+    kind: "notice",
+    needs: "person",
+    state: r.resolvedAt === null ? "open" : "resolved",
+    at: r.at,
+    changedAt: r.resolvedAt ?? r.at,
+    workspace: r.workspace,
+    pbi: null,
+    issue: null,
+    task: null,
+    reason,
+    question: r.question,
+    choices: [],
+    recommendation: null,
+    next: todo,
+    source: { label: r.source, url: null, taskId: null },
+    route: "none",
+    conditions: [],
+    answers: r.resolvedAt === null ? answers : [],
+  });
+  const same = (a: NoticeRecord[string] | undefined, b: NoticeRecord[string]) => !!a && JSON.stringify(a) === JSON.stringify(b);
+  for (const u of input.unusable) {
+    const key = `workspace:${u.workspace.id}`;
+    const had = record[key];
+    const open = had && had.resolvedAt === null;
+    const r = { id: `notice:${key}`, at: open ? had.at : now, resolvedAt: null, question: `workspace ${u.workspace.name} を使えません`, source: "workspace の検査", workspace: u.workspace };
+    if (!same(had, r)) changed = true;
+    next[key] = r;
+    // the reason's last sentence says how to fix it
+    const cut = u.why.lastIndexOf("。", u.why.length - 2);
+    asks.push(notice(r, cut < 0 ? u.why : u.why.slice(0, cut + 1), cut < 0 ? null : u.why.slice(cut + 1), []));
+  }
+  for (const scan of input.scans ?? []) {
+    const key = `scan:${scan.schedule.id}`;
+    const had = record[key];
+    const f = scanFindings(scan.result);
+    // each hit the person closed as a false positive stays closed; a failure is never closed (it resolves once a scan passes)
+    const closedSet = new Set((had?.dismissed ?? "").split("\n").filter(Boolean));
+    const hits = f.hits.filter((h) => !closedSet.has(h));
+    const dismissed = f.hits.length > 0 && hits.length === 0;
+    const fingerprint = [...hits].sort().join("\n");
+    if (!hits.length && !f.failed.length) {
+      if (dismissed) {
+        // the closed hits are remembered; what was open (a failure next to them) is resolved now, shown for a day
+        const r = had!.resolvedAt === null ? { ...had!, resolvedAt: now } : had!;
+        if (r !== had) changed = true;
+        next[key] = r;
+        if (!r.closed && now - r.resolvedAt! <= ASK_HISTORY_MS) asks.push(notice(r, null, null, []));
+      }
+      continue; // clean (or never run): an open one is resolved below
+    }
+    const question = `認証の値の検査: 当たり ${hits.length} 件 / 検査できなかった ${f.failed.length} リポジトリ`;
+    const open = had && had.resolvedAt === null && had.fingerprint === fingerprint && had.question === question;
+    const at = open ? had.at : now;
+    const r = {
+      id: `notice:${key}@${at}`,
+      at,
+      resolvedAt: null,
+      question,
+      source: `予定「${scan.schedule.title}」`,
+      workspace: scan.workspace ?? null,
+      fingerprint,
+      dismissed: had?.dismissed ?? null,
+    };
+    if (!same(had, r)) changed = true;
+    next[key] = r;
+    asks.push(notice(r, [...hits, ...f.failed].join("\n"), SCAN_NEXT, hits.length ? ["dismiss"] : []));
+  }
+  for (const w of input.windows ?? []) {
+    if (!w.note) continue; // nothing waits: an open one is resolved below
+    const key = `approval-window:${w.schedule.id}`;
+    const had = record[key];
+    const at = had && had.resolvedAt === null ? had.at : now;
+    const r = { id: `notice:${key}@${at}`, at, resolvedAt: null, question: w.note.title, source: `予定「${w.schedule.title}」`, workspace: w.workspace ?? null };
+    if (!same(had, r)) changed = true;
+    next[key] = r;
+    asks.push(notice(r, w.note.body, "判断待ちのまとまりのカードでログイン・承認する（待ちが無くなれば解消済み）", []));
+  }
+  for (const [key, had] of Object.entries(record)) {
+    if (next[key]) continue;
+    if (!had.id) {
+      changed = true; // not a record this reads
+      continue;
+    }
+    // a dismissed scan whose hits are gone has nothing left to show
+    const shown = !had.closed;
+    const r = had.resolvedAt === null ? { ...had, resolvedAt: now } : had;
+    if (r !== had) changed = true;
+    if (!shown || now - r.resolvedAt! > ASK_HISTORY_MS) {
+      changed = true;
+      continue;
+    }
+    next[key] = r;
+    asks.push(notice(r, null, null, []));
+  }
+  return { asks, record: changed ? next : record };
+}
+
+/**
  * One question once (#935): the same id is kept once (the newest change); a Task's open questions that ask the same are one
  * (a person's: approval > check > stop, each approval kept; automatic: the wait for the usage limit over its stop), the
  * kept one taking the others' conditions (its own reason stays); and a
@@ -636,4 +786,28 @@ export function dedupeAsks(asks: Ask[]): Ask[] {
     return n !== null && a.at <= (decided.get(`${a.workspace?.id}#${n}`) ?? -1);
   };
   return unique.filter((a) => !onDecided(a)).sort((a, b) => groupOf(a) - groupOf(b) || b.at - a.at);
+}
+
+/** The numbers a question is about: its PBI, the Issue it is asked on, and its stage Task's Issue. */
+const askNumbers = (a: Ask) => new Set([a.pbi?.number, a.issue?.number, stageIssue(a)].filter((n): n is number => typeof n === "number"));
+
+/**
+ * The questions with what waits on them (#1674): `unblocks` = the other PBIs of the same Workspace whose unmet prerequisite
+ * or wait names the question's numbers (directly; Issues and PRs share numbers, so only the number is compared), and
+ * `priority` = the Priority of the question's item. The person's questions (open, or held) are ordered by how many wait,
+ * then Priority (P0 first, unset last), then newest; the other groups keep `dedupeAsks`' order.
+ */
+export function rankAsks(asks: Ask[], items: BacklogItem[]): Ask[] {
+  const ranked = asks.map((a) => {
+    const ns = askNumbers(a);
+    const ws = a.workspace?.id;
+    const unblocks = items
+      .filter((i) => i.type === "pbi" && i.workspaceId === ws && !ns.has(i.number) && [...i.waits, ...i.prereqs].some((w) => w.state !== "met" && ns.has(w.number)))
+      .sort((x, y) => x.number - y.number)
+      .map((i) => ({ number: i.number, title: i.title, url: i.url }));
+    const own = [...ns].map((n) => items.find((i) => i.workspaceId === ws && i.number === n)).find((i) => i !== undefined);
+    return { ...a, unblocks, priority: own?.priority ?? null };
+  });
+  const person = ranked.filter((a) => groupOf(a) === 0).sort((a, b) => b.unblocks.length - a.unblocks.length || priorityRank(a.priority) - priorityRank(b.priority) || b.at - a.at);
+  return [...person, ...ranked.filter((a) => groupOf(a) !== 0)];
 }

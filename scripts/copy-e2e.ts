@@ -3,16 +3,35 @@
  * The task screen's copy buttons (#695) at 390 × 844: a fake runner answers in three messages split by tool rows (one
  * tool result 300 lines long) and another stays mid-reply; each button's text is read back with clipboard.readText().
  * Prints one `ok` line per check, (a) to (g) of #698. Not in CI, like approvals-e2e: it needs Chrome.
- * On Linux, Chrome's --headless=new writes to a clipboard it cannot read back; use chrome-headless-shell there
- * (CHROME_BIN=<…>/chrome-headless-shell, e.g. Playwright's chromium_headless_shell), which keeps one in memory.
+ * On Linux, Chrome's --headless=new writes to a clipboard it cannot read back; chrome-headless-shell keeps one in memory.
+ * Without CHROME_BIN, Linux uses the newest Playwright headless shell
+ * (~/.cache/ms-playwright/chromium_headless_shell-<n>/chrome-headless-shell-linux-<arch>/chrome-headless-shell, which
+ * `playwright install chromium` puts there). A CHROME_BIN on Linux has to be a chrome-headless-shell too
+ * (/usr/local/bin/chromium cannot read the clipboard back).
  */
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../packages/core/src/config.ts";
 import { startServer } from "../packages/core/src/server.ts";
 import type { AgentEvent, RunnerAdapter } from "@switchboard/protocol";
 
+const SHELLS = join(homedir(), ".cache", "ms-playwright");
+const SHELL_GLOB = `${SHELLS}/chromium_headless_shell-*/chrome-headless-shell-linux*/chrome-headless-shell`;
+/** The newest Playwright headless shell (the highest chromium_headless_shell-<n>, like aws/host/chromium.sh), or null. */
+function headlessShell(): string | null {
+  const dirs = existsSync(SHELLS) ? readdirSync(SHELLS).filter((d) => /^chromium_headless_shell-\d+$/.test(d)).sort((a, b) => Number(b.split("-")[1]) - Number(a.split("-")[1])) : [];
+  for (const d of dirs) {
+    const bin = readdirSync(join(SHELLS, d)).filter((p) => p.startsWith("chrome-headless-shell-linux")).map((p) => join(SHELLS, d, p, "chrome-headless-shell")).find(existsSync);
+    if (bin) return bin;
+  }
+  return null;
+}
+const CHROME = process.env.CHROME_BIN ?? (process.platform === "linux" ? headlessShell() : "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
+if (!CHROME) {
+  console.error(`no chrome-headless-shell at ${SHELL_GLOB}: install it with \`npx playwright install chromium-headless-shell\`, or pass CHROME_BIN=<…>/chrome-headless-shell`);
+  process.exit(1);
+}
 const home = mkdtempSync(join(tmpdir(), "sb-copy-e2e-"));
 const FIRST = "一通目\n  二行目";
 const LONG = Array.from({ length: 300 }, (_, i) => `line ${i + 1}`).join("\n");
@@ -72,7 +91,7 @@ async function connect(url: string) {
 }
 
 const profile = join(home, "chrome");
-const chrome = Bun.spawn([process.env.CHROME_BIN ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-gpu", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank"], { stdout: "ignore", stderr: "ignore" });
+const chrome = Bun.spawn([CHROME, "--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-gpu", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank"], { stdout: "ignore", stderr: "ignore" });
 const sockets: WebSocket[] = [];
 try {
   const port = await until(() => { try { return readFileSync(join(profile, "DevToolsActivePort"), "utf8").split("\n")[0]; } catch { return null; } }, "Chrome port");
@@ -116,7 +135,7 @@ try {
   };
 
   await evaluate(`navigator.clipboard.writeText("probe")`);
-  assert((await evaluate(`navigator.clipboard.readText()`)) === "probe", "this Chrome cannot read its clipboard back (Linux --headless=new): run with CHROME_BIN=<…>/chrome-headless-shell");
+  assert((await evaluate(`navigator.clipboard.readText()`)) === "probe", `this Chrome (${CHROME}) cannot read its clipboard back (Linux --headless=new): run without CHROME_BIN, or with CHROME_BIN=<…>/chrome-headless-shell (Playwright's: ${SHELL_GLOB})`);
   await open("copy-done");
   await until(() => evaluate(`document.querySelector('.end.ok') !== null && document.querySelectorAll('.msg.assistant').length === 3`), "the finished reply");
 

@@ -4,7 +4,7 @@ import { ACTIONS, hostEnv, parseArgs, planHostOperation, runHostOperation, type 
 const e = { stack: "switchboard-host", region: "ap-northeast-1", params: "ImageId=ami-0 VpcId=vpc-0" };
 const TOKEN = "start-token-value";
 const EDGE = "edge-header-value";
-const changeSet = "Changeset created successfully. Run the following command to review changes:\naws cloudformation describe-change-set --change-set-name arn:aws:cloudformation:ap-northeast-1:111111111111:changeSet/awscli-cloudformation-package-deploy-1/abc";
+const changeSet = "Changeset created successfully. Run the following command to review changes:\naws cloudformation describe-change-set --change-set-name arn:aws:cloudformation:ap-northeast-1:123456789012:changeSet/awscli-cloudformation-package-deploy-1/abc";
 
 /** A fake AWS CLI / bun: answers by command prefix (the first match), records every call and every log line. */
 function fake(answers: Array<[string, { ok?: boolean; out?: string; err?: string }]> = []) {

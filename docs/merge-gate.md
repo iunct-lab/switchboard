@@ -2,6 +2,16 @@
 
 `bun scripts/merge-gate.ts <PR> [--allow-large] [--repo <owner/name>]` が stop を返したときに回す手順と、PR に付ける印。出力は `{ verdict, impact, reasons, ask, recheck }` の JSON、exit 0 = merge、1 = stop、2 = 判定できなかった（merge にしない）。判定の規則は `scripts/merge-gate.ts`。工程の Task のプロンプトと merge-gate の理由の文がこの文書の節を指す。
 
+## ローカル CI を回す時と数え方
+
+Actions が始まらない（ジョブのステップ 0 件）か run が無いリポジトリでは、`bun scripts/local-ci.ts <PR>` を次のときだけ回す（スキルの `<ローカル CI>`。別リポジトリの Task には `otherRepoRules` がこの節を渡す）:
+
+- **いつ**: スタックの全部の PR のレビューの指摘の処理が済んでから、再チェックの前に、スタックの一番上の PR で 1 回。単発の PR は自分が一番上。レビューの途中、PR ごと、マージの合間には回さない
+- **回し直す**: どれかの PR の差分が変わったとき（修正コミット、手で rebase してコンフリクトを解いたとき）だけ、一番上でもう 1 回。下の PR のマージ後の GitHub の自動 rebase（head の sha は変わるが差分は同じ）と、base（main）の前進では回し直さない
+- **数え方**（merge-gate の `localCiOf`）: PR から、その head の枝を base にする開いた PR を上へ辿って一番上を見つける（上が 0 件か 2 件以上ならそこが一番上）。一番上の PR の `[local-ci]` の結果のうち最新が pass で、その 2 行目 `stack #<n>=<patch-id> …` にこの PR の今の patch-id（`gh pr diff <PR> | git patch-id --verbatim`）があれば、この PR の CI は済み。最新が fail、行にこの PR が無い（2 行目の無い前の形の pass も）、patch-id が違う、のどれかなら CI の理由に続けて、一番上で回す・回し直す理由が出る
+- **base を比べない理由**: ほかの PR との衝突は `mergeStateStatus` が止める。別々の PR を合わせて初めて出る不具合は、マージ後のタグの CI（`docs/design/releases-and-rescue.md` の「Tag CI」）が見つける
+- スタックの上に PR を後から積んだら、その新しい一番上で回す（前の一番上の pass はその PR を含まない）
+
 ## 再チェック
 
 merge-gate が stop し、large の理由が `[再チェック <kind>]` だけ（`[聞く]` が無い）なら、利用者に聞かずに `recheck` の種類ごとに次を回す（スキルは `pbi-complete` の 5、`review-triage-and-merge` の 5、別リポジトリの Task には `otherRepoRules` が手順の場所とリポジトリ固有の値を渡す）。他のリポジトリの PR（`--repo`）では、下の `-R <owner/name>` と `origin` はそのリポジトリ（Switchboard では `開発リポジトリ`）。CI・未解決のスレッド・見直されていないコミット・CLEAN でないことは再チェックとは別に今までどおり片づける。

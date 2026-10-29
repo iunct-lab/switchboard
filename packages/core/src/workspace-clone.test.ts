@@ -7,10 +7,8 @@ import type { RunnerAdapter, Workspace } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import { startServer, type CoreServer } from "./server.ts";
 import type { GhRunner } from "./backlog.ts";
-import { noticeUnusableWorkspaces, originMismatch, parseGithubRepo, type WorkspaceClone } from "./workspace-clone.ts";
+import { originMismatch, parseGithubRepo, type WorkspaceClone, unusableWorkspaces } from "./workspace-clone.ts";
 import { Db } from "./db.ts";
-import { Inbox } from "./inbox.ts";
-import { KnowledgeStore } from "./knowledge.ts";
 
 // Adding a GitHub repository by name (#2575): cloned next to the checkout, only ones the owner can push to.
 
@@ -60,7 +58,7 @@ async function boot(fake: { push?: boolean | "missing"; cloneFails?: string; hol
     for (let i = 0; i < 1000 && !(await f()); i++) await Bun.sleep(20);
   };
   const cloneCalls = () => calls.filter((a) => a[0] === "repo").length;
-  return { send, until, calls, cloneCalls, repoRoot };
+  return { send, until, calls, cloneCalls, repoRoot, base };
 }
 
 test("workspace clone: owner/name clones next to the checkout and registers it", async () => {
@@ -198,12 +196,10 @@ test("originMismatch: a checkout whose origin is not the registered GitHub repos
   expect(parseGithubRepo("ssh://git@github.com/acme/app")).toEqual({ owner: "acme", name: "app" });
 });
 
-test("a workspace that cannot be used is noticed in the inbox once", () => {
+test("unusableWorkspaces lists a missing folder and a wrong origin of a GitHub registration", () => {
   root = mkdtempSync(join(tmpdir(), "switchboard.unusable."));
   const db = new Db(join(root, "switchboard.db"));
-  const store = new KnowledgeStore(join(root, "Knowledge"), db);
   try {
-    const inbox = new Inbox(store);
     const github = (repository: string) => ({ service: "github" as const, host: "github.com", repository, project: { owner: "acme", number: 1 } });
     const at = (name: string) => {
       const path = join(root!, name);
@@ -211,13 +207,8 @@ test("a workspace that cannot be used is noticed in the inbox once", () => {
       expect(spawnSync("git", ["init", "-q", path]).status).toBe(0);
       return path;
     };
-    // gone: registered, its folder is not there; long: the same with a name past the Inbox's 80-character title
+    // gone: registered, its folder is not there
     const gone = db.upsertWorkspace({ name: "gone", path: join(root, "gone"), kind: "repo" });
-    const long = db.upsertWorkspace({ name: "l".repeat(90), path: join(root, "long"), kind: "repo" });
-    db.setWorkspaceBacklogSource(long.id, github("acme/long"));
-    // spaced: cut at 80 characters, the title ends in a space the Inbox drops
-    const spaced = db.upsertWorkspace({ name: `${"s".repeat(69)} x`, path: join(root, "spaced"), kind: "repo" });
-    db.setWorkspaceBacklogSource(spaced.id, github("acme/spaced"));
     db.setWorkspaceBacklogSource(gone.id, github("acme/gone-dev"));
     // elsewhere: a clone of the public acme/app where acme/app-dev is registered
     const elsewhere = db.upsertWorkspace({ name: "elsewhere", path: at("elsewhere"), kind: "repo" });
@@ -231,21 +222,39 @@ test("a workspace that cannot be used is noticed in the inbox once", () => {
     const local = db.upsertWorkspace({ name: "local", path: join(root, "local"), kind: "repo" });
     db.setWorkspaceBacklogSource(local.id, { service: "switchboard", host: "local", repository: local.id, project: { owner: "switchboard", number: 0 } });
 
-    expect(noticeUnusableWorkspaces(db, inbox)).toBe(4);
-    const notes = inbox.list();
-    expect(notes.map((n) => n.title).sort()).toEqual(["workspace elsewhere を使えません", "workspace gone を使えません", `workspace ${"l".repeat(70)}`, `workspace ${"s".repeat(69)}`]);
-    const body = (name: string) => notes.find((n) => n.title === `workspace ${name} を使えません`)!.body;
-    expect(body("gone")).toContain("gh repo clone acme/gone-dev");
-    expect(body("gone")).toContain(".unverified-*");
-    expect(body("elsewhere")).toContain("origin は acme/app、登録は acme/app-dev");
-    expect(body("elsewhere")).toContain("git remote set-url origin");
-    // a restart before it is fixed adds nothing; once the note is closed, the next boot says it again
-    expect(noticeUnusableWorkspaces(db, inbox)).toBe(0);
-    expect(inbox.list()).toHaveLength(4);
-    inbox.close(notes.find((n) => n.title === "workspace gone を使えません")!.path);
-    expect(noticeUnusableWorkspaces(db, inbox)).toBe(1);
+    const list = unusableWorkspaces(db);
+    expect(list.map((u) => u.workspace).sort((a, b) => a.name.localeCompare(b.name))).toEqual([
+      { id: elsewhere.id, name: "elsewhere" },
+      { id: gone.id, name: "gone" },
+    ]);
+    const why = (name: string) => list.find((u) => u.workspace.name === name)!.why;
+    expect(why("gone")).toContain("gh repo clone acme/gone-dev");
+    expect(why("gone")).toContain(".unverified-*");
+    expect(why("elsewhere")).toContain("origin は acme/app、登録は acme/app-dev");
+    expect(why("elsewhere")).toContain("git remote set-url origin");
+    // fixed: the folder put back as its own clone is not listed the next time
+    mkdirSync(gone.path);
+    spawnSync("git", ["init", "-q", gone.path]);
+    spawnSync("git", ["-C", gone.path, "remote", "add", "origin", "https://github.com/acme/gone-dev.git"]);
+    expect(unusableWorkspaces(db).map((u) => u.workspace.name)).toEqual(["elsewhere"]);
   } finally {
-    store.close();
     db.close();
   }
+});
+
+test("GET /api/asks: a workspace that cannot be used is a notice until it is fixed, never an Inbox note (#2866)", async () => {
+  const { base } = await boot();
+  const gone = core!.db.upsertWorkspace({ name: "gone", path: join(root!, "gone"), kind: "repo" });
+  core!.db.setWorkspaceBacklogSource(gone.id, { service: "github", host: "github.com", repository: "acme/gone", project: { owner: "acme", number: 1 } });
+  type Notice = { id: string; kind: string; state: string; question: string };
+  const notices = async () => ((await (await fetch(`${base}/api/asks`)).json()) as { asks: Notice[] }).asks.filter((a) => a.kind === "notice");
+  expect(await notices()).toMatchObject([{ id: `notice:workspace:${gone.id}`, state: "open", question: "workspace gone を使えません" }]);
+  // read again: still one, the same first sight kept in the setting
+  expect(await notices()).toHaveLength(1);
+  expect(await (await fetch(`${base}/api/inbox`)).json()).toEqual([]);
+  // put back as its own clone: resolved on the next read, no restart
+  mkdirSync(gone.path);
+  spawnSync("git", ["init", "-q", gone.path]);
+  spawnSync("git", ["-C", gone.path, "remote", "add", "origin", "https://github.com/acme/gone.git"]);
+  expect(await notices()).toMatchObject([{ id: `notice:workspace:${gone.id}`, state: "resolved" }]);
 });

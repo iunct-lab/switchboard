@@ -1591,7 +1591,7 @@ const item = (over: Partial<BacklogItem>): BacklogItem => ({
   number: 1, title: "t", url: "u", type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
 
-test("pickNext: Ready before 分解待ち before 要望, then Priority (none last), then the oldest; skips decisions and running items", () => {
+test("pickNext: Priority (none last), then Ready before 分解待ち before 要望, then the oldest; skips decisions and running items", () => {
   const items = [
     item({ number: 1, stage: "request", priority: "P0" }),
     item({ number: 2, stage: "needs-tasks", priority: "P0" }),
@@ -2109,7 +2109,7 @@ describe("backlog-next prerequisite (#937)", () => {
   });
 });
 
-test("pickNext unchanged: an item whose last stage Task of the same stage finished with no update since is left; one updated since goes after the untried", () => {
+test("pickNext unchanged: an item whose last stage Task of the same stage finished with no update since is left; one updated since goes after the untried of its Priority", () => {
   const last = (action: BacklogAction, at = "2026-09-28T00:00:00Z", status: TaskStatus = "done") => ({ id: "tsk_last", status, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action, outcome: "unknown" as const, reviewedAt: null, resumeAt: null });
   const updated = "2026-09-28T01:00:00Z"; // after the last Task finished
   const unchangedReady = item({ number: 1, stage: "ready", priority: "P0", lastTask: last("complete") });
@@ -2132,14 +2132,45 @@ test("pickNext unchanged: an item whose last stage Task of the same stage finish
   expect(pickNext([item({ number: 6, stage: "ready", lastTask: last("to-tasks") })], "implement")).toMatchObject({ item: { number: 6 } });
   // a running one is not finished: activeTaskId holds it, and it is not listed as unchanged
   expect(unchangedIn([{ ...unchangedReady, lastTask: last("complete", undefined, "running") }], "implement")).toEqual([]);
-  // 3: updated since → picked, but after the untried of its slot even at a higher Priority; alone it goes on
+  // 3: updated since → picked, before the untried of a lower Priority (#2929) and after the untried of its own; alone it goes on
   const updatedReady = { ...unchangedReady, updatedAt: updated };
-  expect(pickNext([updatedReady, freshReady], "implement")).toMatchObject({ item: { number: 2 } });
+  expect(pickNext([updatedReady, freshReady], "implement")).toMatchObject({ item: { number: 1 } });
+  expect(pickNext([updatedReady, { ...freshReady, priority: "P0" }], "implement")).toMatchObject({ item: { number: 2 } });
   expect(pickNext([updatedReady], "implement")).toMatchObject({ item: { number: 1 }, action: "complete" });
-  expect(pickNext([{ ...unchangedTasks, updatedAt: updated }, freshRequest], "plan")).toMatchObject({ item: { number: 5 } });
+  expect(pickNext([{ ...unchangedTasks, updatedAt: updated }, freshRequest], "plan")).toMatchObject({ item: { number: 3 } });
+  expect(pickNext([{ ...unchangedTasks, updatedAt: updated }, { ...freshRequest, priority: "P0" }], "plan")).toMatchObject({ item: { number: 5 } });
   // an answered in-progress PBI stays first
   const answered = item({ number: 7, stage: "in-progress", priority: "P3", answeredAt: updated, updatedAt: updated, lastTask: last("complete") });
   expect(pickNext([updatedReady, freshReady, answered], "implement")).toMatchObject({ item: { number: 7 }, action: "complete" });
+});
+
+test("pickNext priority: a Ready P0 worked on before goes before an untried Ready P3; a resume or a close of an in-progress PBI still goes first (#2929)", () => {
+  const at = "2026-09-28T00:00:00Z";
+  const done = { id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null };
+  const triedP0 = item({ number: 1, stage: "ready", priority: "P0", lastTask: done, updatedAt: "2026-09-28T01:00:00Z" });
+  const freshP3 = item({ number: 2, stage: "ready", priority: "P3" });
+  expect(pickNext([freshP3, triedP0], "implement")).toMatchObject({ item: { number: 1 }, action: "complete" });
+  // a stalled in-progress PBI (resumed) and a closable one go before the P0 Ready, whatever their Priority
+  const stalled = item({ number: 3, stage: "in-progress", priority: "P3", tasks: { total: 3, done: 1, doneAt: null }, updatedAt: at });
+  const closable = item({ number: 4, stage: "in-progress", priority: "P3", tasks: { total: 2, done: 2, doneAt: null }, closable: true, updatedAt: at });
+  expect(pickNext([freshP3, triedP0, stalled], "implement")).toMatchObject({ item: { number: 3 }, action: "complete", resume: true });
+  expect(pickNext([freshP3, triedP0, stalled, closable], "implement")).toMatchObject({ item: { number: 4 }, action: "close" });
+  // within one Priority: not yet worked on first, then the oldest
+  const triedP2 = { ...triedP0, number: 5, priority: "P2", createdAt: "2026-01-01T00:00:00Z" };
+  const freshP2New = item({ number: 6, stage: "ready", priority: "P2", createdAt: "2026-09-02T00:00:00Z" });
+  const freshP2Old = item({ number: 7, stage: "ready", priority: "P2", createdAt: "2026-09-01T00:00:00Z" });
+  expect(pickNext([triedP2, freshP2New], "implement")).toMatchObject({ item: { number: 6 } });
+  expect(pickNext([triedP2, freshP2New, freshP2Old], "implement")).toMatchObject({ item: { number: 7 } });
+});
+
+test("pickNext priority: the plan slot takes a 分解待ち PBI by Priority, before a request with none (#2929)", () => {
+  const at = "2026-09-28T00:00:00Z";
+  const done = { id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "to-tasks" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null };
+  const triedP1 = item({ number: 1, stage: "needs-tasks", priority: "P1", lastTask: done, updatedAt: "2026-09-28T01:00:00Z", createdAt: "2026-09-02T00:00:00Z" });
+  const freshRequest = item({ number: 2, stage: "request", type: "request", priority: null, createdAt: "2026-09-01T00:00:00Z" });
+  expect(pickNext([freshRequest, triedP1], "plan")).toMatchObject({ item: { number: 1 }, action: "to-tasks" });
+  // the same Priority (none): 分解待ち before 要望
+  expect(pickNext([freshRequest, { ...triedP1, lastTask: null, priority: null }], "plan")).toMatchObject({ item: { number: 1 } });
 });
 
 test("pickNext failed: an item whose last stage Task failed with no update to the Issue since is left in any stage; an update, a reply's resume or a closed wait brings it back (#1275)", () => {
@@ -3343,7 +3374,8 @@ test("a workspace names the repository variable its Project URL is under (PATCH 
 
 describe("otherRepoRules: the scripts/setup of the repository (#557)", () => {
   const rules = (setup: { config: boolean; kit: string[]; copies: string[] }) => otherRepoRules({ meta: "/work/switchboard", projectVar: "LIB_URL", setup });
-  const kept = ["--repo <このリポジトリの owner/name>", "`bun /work/switchboard/scripts/local-ci.ts <PR> --repo"];
+  // local-ci once on the top of a stack (#2940): the rule's place in the meta's docs
+  const kept = ["--repo <このリポジトリの owner/name>", "`bun /work/switchboard/scripts/local-ci.ts <PR> --repo", "回すのはスタックの一番上で 1 回", "`/work/switchboard/docs/merge-gate.md` の「ローカル CI を回す時と数え方」"];
 
   test("otherRepoRules: its own entries and ops.config.json are used, with OPS_KIT; no Project URL variable is handed over", () => {
     const r = rules({ config: true, kit: ["lint_backlog.sh"], copies: [] });

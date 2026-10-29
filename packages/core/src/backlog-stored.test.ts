@@ -38,6 +38,21 @@ function imported(records: BacklogSnapshotEntry[]) {
 
 const byNumber = (ws: { id: string; name: string; path: string }) => Object.fromEntries(readStoredBacklog(db, ws).items.map((i) => [i.number, i]));
 
+test("a GitHub #12 and a GitLab #12 are two records (#892): each workspace reads its own, with its comments", () => {
+  const LAB: BacklogSource = { service: "gitlab", host: "gitlab.example.com", repository: "acme/app", project: { owner: "acme/app", number: 0 } };
+  const hub = imported([issue(12, ["type:pbi"], { title: "GitHub の #12" }), comment(12, "IC_1", "GitHub のコメント", "2026-10-02T00:00:00Z")]);
+  const lab = db.upsertWorkspace({ name: "lab", path: "/Users/dev/lab", kind: "repo" });
+  db.putBacklogSnapshot(LAB, { records: [{ ...issue(12, ["type:pbi"], { title: "GitLab の #12", url: "https://gitlab.example.com/acme/app/-/issues/12" }), externalId: "gitlab:issue:900" }, { ...comment(12, "gitlab:note:5", "GitLab のコメント", "2026-10-02T00:00:00Z") }], cursor: null, syncedAt: 6000 });
+  db.setWorkspaceBacklogSource(lab.id, LAB);
+  expect(byNumber(hub)[12]).toMatchObject({ title: "GitHub の #12" });
+  expect(byNumber(lab)[12]).toMatchObject({ title: "GitLab の #12" });
+  expect(readStoredIssue(db, hub, 12)!.comments.map((c) => c.body)).toEqual(["GitHub のコメント"]);
+  expect(readStoredIssue(db, lab, 12)!.comments.map((c) => c.body)).toEqual(["GitLab のコメント"]);
+  // the same external id under the other key is another record too
+  expect(db.listBacklogRecords(SOURCE).map((r) => r.externalId).sort()).toEqual(["IC_1", "I_12"]);
+  expect(db.listBacklogRecords(LAB).map((r) => r.externalId).sort()).toEqual(["gitlab:issue:900", "gitlab:note:5"]);
+});
+
 test("a workspace never imported answers no items with no fetchedAt — not an empty list as if read", () => {
   const ws = db.upsertWorkspace({ name: "app", path: "/Users/dev/app", kind: "repo" });
   expect(readStoredBacklog(db, ws)).toEqual({ fetchedAt: null, items: [] });

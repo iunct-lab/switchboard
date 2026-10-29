@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CONFIG_FILE, ForgeConfig } from "./config.ts";
+import { githubHost } from "./gh.ts";
 import { findSecrets, NO_HOST, type HostAws } from "./secrets.ts";
 
 /**
@@ -24,18 +25,49 @@ export const DEFAULT_SERVICE = "github";
 
 /** The repository's service from `<dir>/ops.config.json` (only `forge` is read); none there = DEFAULT_SERVICE. Throws on a malformed `forge`. */
 export function forgeOf(dir: string): string {
+  return forgeConfigOf(dir).service;
+}
+
+/**
+ * The repository's target. GitLab's is the host and project its `forge` names, refused (ForgeUnsupported) when the
+ * checkout's `origin` is another host or project: nothing is sent to a host the checkout does not come from, and the
+ * remote is never changed here. Any other service finds its host and repository itself (`repository` null).
+ */
+export function forgeTargetOf(dir: string, origin: string | null): ForgeTarget {
+  const f = forgeConfigOf(dir);
+  if (f.service !== "gitlab") return { service: f.service, host: githubHost(), repository: null };
+  const at = origin ? remoteOf(origin) : null;
+  const named = `${f.host}/${f.project}`;
+  if (!at || at.host.toLowerCase() !== f.host!.toLowerCase() || at.path.toLowerCase() !== f.project!.toLowerCase())
+    throw new ForgeUnsupported(`origin（${origin ? (at ? `${at.host}/${at.path}` : "読めない URL") : "無し"}）が forge の ${named} と違うので GitLab に送りません（remote は変えません）`);
+  return { service: "gitlab", host: f.host!, repository: f.project! };
+}
+
+/** The checkout's `origin` URL; null = none (no remote, not a checkout). */
+export function originOf(dir: string): string | null {
+  const r = Bun.spawnSync(["git", "-C", dir, "remote", "get-url", "origin"], { stdout: "pipe", stderr: "ignore" });
+  return r.exitCode === 0 ? r.stdout.toString().trim() || null : null;
+}
+
+/** The host and path of a git remote URL (https://, ssh://, scp-like `git@host:path`), without `.git`; null = not one of these. */
+export function remoteOf(url: string): { host: string; path: string } | null {
+  const m = /^(?:https?|ssh|git):\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+?)(?:\.git)?\/?$/.exec(url) ?? /^(?:[^@/]+@)?([^/:]+):(?!\/)(.+?)(?:\.git)?\/?$/.exec(url);
+  return m ? { host: m[1]!, path: m[2]! } : null;
+}
+
+function forgeConfigOf(dir: string): ForgeConfig {
   const file = join(dir, CONFIG_FILE);
-  if (!existsSync(file)) return DEFAULT_SERVICE;
+  if (!existsSync(file)) return { service: DEFAULT_SERVICE };
   let forge: unknown;
   try {
     forge = (JSON.parse(readFileSync(file, "utf8")) as { forge?: unknown }).forge;
   } catch (e) {
     throw new ForgeUnsupported(`${file} を読めません: ${(e as Error).message}`);
   }
-  if (forge === undefined) return DEFAULT_SERVICE;
+  if (forge === undefined) return { service: DEFAULT_SERVICE };
   const r = ForgeConfig.safeParse(forge);
   if (!r.success) throw new ForgeUnsupported(`${file} の forge が不正です: ${r.error.issues.map((i) => `${i.path.join(".") || "forge"}: ${i.message}`).join(" / ")}`);
-  return r.data.service;
+  return r.data;
 }
 
 /**

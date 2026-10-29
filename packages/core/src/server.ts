@@ -6,9 +6,9 @@ import { homedir, tmpdir } from "node:os";
 import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
-import { AskAnswerInput, AutoStartKind, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, InboxAddInput, InboxCloseInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PermissionAnswers, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskList, type Backlog, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type ScanCursors, type Workspace, type WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
+import { AskAnswerInput, AutoStartKind, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, type EvalsSummary, InboxAddInput, InboxCloseInput, InboxEditInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PermissionAnswers, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskBatch, type AskList, type Backlog, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type ScanCursors, type Workspace, type WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
 import type { CoreConfig } from "./config.ts";
-import { abortOrphanedTasks, Db, type ApiRequestRow } from "./db.ts";
+import { abortOrphanedTasks, createdIssuesOf, Db, deferredOf, type ApiRequestRow } from "./db.ts";
 import { opsLatency } from "./ops-latency.ts";
 import { OpsLoadSampler, opsLoad, readCgroup } from "./ops-load.ts";
 import { type CleanExit, daemonVersion, endDaemonRun, opsStops, readBootId, readJournal, readReleaseHistory, startDaemonRun } from "./ops-stops.ts";
@@ -24,7 +24,7 @@ import { ApprovalRules, subjectsOf } from "./approval.ts";
 import { workspaceBrief } from "./brief.ts";
 import { judgeTurn } from "./judge.ts";
 import { skillCommandTitle, suggestTitle } from "./suggest-title.ts";
-import { evalRequestDraft, RULES_BY, rulesEvalOf } from "./evals.ts";
+import { evalRequestDraft, judgeHumanGap, RULES_BY, rulesEvalOf, weekStartUtc, weeklyHumanSample } from "./evals.ts";
 import { judgeRubric } from "./rubric-judge.ts";
 import { loadRubric } from "./rubric.ts";
 import { ledgerRowFor, loadPricing } from "./pricing.ts";
@@ -42,11 +42,12 @@ import { FlowCache, flowScope, flowView, type FlowWorkspace } from "./flow.ts";
 import { interventionView } from "./interventions.ts";
 import { checkLocalFields, checkLocalParent } from "./backlog-local.ts";
 import { enableGithubSync, enablingOf } from "./backlog-enable.ts";
-import { CloneError, noticeUnusableWorkspaces, parseGithubRepo, registerWorkspace, WorkspaceClones } from "./workspace-clone.ts";
+import { CloneError, parseGithubRepo, registerWorkspace, unusableWorkspaces, WorkspaceClones } from "./workspace-clone.ts";
 import { copyDeletable, inspectRemoval } from "./workspace-remove.ts";
 import { ACTION_FOR_STAGE, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, buildStartPrompt, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionStep, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, type GhRunner, type OtherRepo } from "./backlog.ts";
 import { issueOf, reduceStops, stopRecordsFor } from "./stops.ts";
-import { ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, policyPbi, prFacts, resumeOfTask, type PolicyEnv, type PrFacts } from "./asks.ts";
+import { approvalBatches, approvalWindowNote, BatchAnswers } from "./approval-batch.ts";
+import { ASK_HISTORY_MS, asksFromBacklog, closedHits, asksFromTasks, blockersOf, dedupeAsks, noticeAsks, policyPbi, rankAsks, prFacts, resumeOfTask, type NoticeRecord, type PolicyEnv, type PrFacts } from "./asks.ts";
 import { checkPolicy, matchPolicies, readPolicies, recordUse, subjectChanges, writePolicies } from "./policies.ts";
 import { checkPreset, expandPreset, needsTarget, parseTarget, readPresets, writePresets } from "./presets.ts";
 import { Inbox } from "./inbox.ts";
@@ -227,6 +228,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   };
   // Settings (#58) live in sqlite so the UI can change them; read on every use so a PATCH takes effect at once.
   const SETTINGS_KEY = "settings";
+  /** The daemon's notices' first sight and resolution (#2866, asks.ts `noticeAsks`). */
+  const NOTICES_KEY = "notices";
   const settings = (): Settings => {
     const parsed = Settings.safeParse(db.getSetting(SETTINGS_KEY, {}));
     if (!parsed.success) console.warn(`settings: stored row is malformed (${parsed.error.message}); using defaults`);
@@ -276,11 +279,15 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   for (const w of materializer.scopedWarnings(knowledge)) console.warn(`knowledge: ${w.path}: ${w.message}`);
   knowledge.watch();
   const inbox = new Inbox(knowledge);
-  // A workspace a Task cannot use (#2799: a rebuild that cloned it from elsewhere, or could not): one note, not a stop
-  try {
-    noticeUnusableWorkspaces(db, inbox, opts.gitOrigin);
-  } catch (e) {
-    console.warn(`workspaces: could not check the checkouts: ${String((e as Error).message ?? e)}`);
+  // the daemon's notes from before its notices moved to 判断待ち (#2866): closed once, the files kept
+  if (!cfg.candidate && !db.getSetting("inbox.daemonNotesClosed", false)) {
+    try {
+      const n = inbox.closeDaemonNotes();
+      db.setSetting("inbox.daemonNotesClosed", true);
+      console.log(`inbox: closed ${n} note(s) the daemon had left (their notices are in 判断待ち now)`);
+    } catch (e) {
+      console.warn(`inbox: could not close the daemon's notes: ${String((e as Error).message ?? e)}`);
+    }
   }
 
   let server!: ReturnType<typeof Bun.serve>;
@@ -764,7 +771,31 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     if (changed) writePolicies(db, list);
   };
   const headMisses = new Map<string, NonNullable<Ask["policy"]["previous"]>>();
-  const currentAsks = async (): Promise<{ backlog: Backlog; asks: Ask[] }> => {
+  /**
+   * The daemon's notices (#2866) from the current state: a workspace a Task cannot use (#2799: a rebuild that cloned it
+   * from elsewhere, or could not). Their first sight and resolution are kept in one setting, written only when they move.
+   */
+  const currentNotices = (now: number, batches: AskBatch[]): Ask[] => {
+    let unusable: ReturnType<typeof unusableWorkspaces> = [];
+    try {
+      unusable = unusableWorkspaces(db, opts.gitOrigin);
+    } catch (e) {
+      console.warn(`workspaces: could not check the checkouts: ${String((e as Error).message ?? e)}`);
+    }
+    const had = db.getSetting<NoticeRecord>(NOTICES_KEY, {});
+    const where = (id: string) => {
+      const w = db.getWorkspace(id);
+      return w ? { id: w.id, name: w.name } : null;
+    };
+    // a disabled scan's last findings are still there: only a clean result resolves them
+    const scans = db.listSchedules().filter((s) => s.action === "secret-scan").map((s) => ({ schedule: { id: s.id, title: s.title }, workspace: where(s.workspaceId), result: s.lastResult }));
+    // approval-window (#2054): once a firing ran, the batches still waiting, as of now
+    const windows = db.listSchedules().filter((s) => s.action === "approval-window" && s.enabled && s.lastResult).map((s) => ({ schedule: { id: s.id, title: s.title }, workspace: where(s.workspaceId), note: approvalWindowNote(batches) }));
+    const { asks, record } = noticeAsks({ unusable, scans, windows, now }, had);
+    if (record !== had) db.setSetting(NOTICES_KEY, record);
+    return asks;
+  };
+  const currentAsks = async (): Promise<{ backlog: Backlog; asks: Ask[]; batches: AskBatch[] }> => {
     const now = Date.now();
     const b = await readBacklog(false);
     const live = new Map([...db.listTasksUpdatedSince(now - ASK_HISTORY_MS), ...db.listTasksWithResume(), ...db.listTasksByStatus("waiting"), ...db.listTasksByStatus("running")].map((t) => [t.id, t]));
@@ -781,11 +812,24 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       policy,
       mockups: mockupsOf,
     });
-    const all = dedupeAsks([...asksFromBacklog(b.items, now, { approvalPending: approvalPendingOf(), resumeFailures: failed, policy, mockups: mockupsOf }), ...fromTasks]);
+    const all = rankAsks(dedupeAsks([...asksFromBacklog(b.items, now, { approvalPending: approvalPendingOf(), resumeFailures: failed, policy, mockups: mockupsOf }), ...fromTasks]), b.items);
     tieAnswers(all);
     for (const id of headMisses.keys()) if (!all.some((a) => a.id === id && (a.state === "open" || a.state === "held"))) headMisses.delete(id);
-    return { backlog: b, asks: all.map((a) => (headMisses.has(a.id) ? { ...a, policy: { ...a.policy, previous: headMisses.get(a.id)! } } : a)) };
+    const asks = all.map((a) => (headMisses.has(a.id) ? { ...a, policy: { ...a.policy, previous: headMisses.get(a.id)! } } : a));
+    // the same stop records as above, each Task's own (#2046)
+    const batches = batchAnswers.decorate(approvalBatches([...live.values()].map((t) => ({ task: t, records: db.listStopRecords([t.id]) })), asks));
+    // the daemon's notices (#2866) last: one of them reads the batches
+    return { backlog: b, asks: rankAsks(dedupeAsks([...asks, ...currentNotices(now, batches)]), b.items), batches };
   };
+  /** One login / one approval for the Tasks of a batch (#2046). */
+  const batchAnswers: BatchAnswers = new BatchAnswers({
+    // the person approved this Task's own operation: not copied to a shadow running alongside it
+    send: (taskId, text) => tasks.send(taskId, text, { mirror: false }),
+    task: (id) => db.getTask(id),
+    stopRecords: (id) => db.listStopRecords([id]),
+    batches: async () => (await currentAsks()).batches,
+    deviceAuth: (id) => deviceAuths.get(id),
+  });
   /** A stage Task's permission stop with a tool approval waiting is answered by that approval, not refused (#936). */
   const approvalPendingOf = () => {
     const approving = tasks.pendingApprovals().map((a) => db.getTask(a.taskId)).filter((t) => t !== null);
@@ -819,6 +863,16 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     if (!ask.answers.length) {
       const why = ask.blockers.length ? ask.blockers.map((b) => b.detail) : ["この問いには画面から答えられません"];
       return changed("回答だけでは進められない問いです", why, ask);
+    }
+    // a daemon's notice (#2866): only a scan's is answered, by closing it as a false positive — the same findings stay closed
+    if (ask.kind === "notice") {
+      if (answer.kind !== "dismiss" || !ask.answers.includes("dismiss")) return { status: 422, body: { error: "このお知らせは閉じるだけです" } };
+      const record = db.getSetting<NoticeRecord>(NOTICES_KEY, {});
+      const key = Object.keys(record).find((k) => record[k]!.id === id);
+      if (!key) return changed("お知らせが新しくなりました", ["お知らせが新しくなりました"], ask);
+      db.setSetting(NOTICES_KEY, { ...record, [key]: { ...record[key]!, dismissed: closedHits(record[key]!), closed: true, resolvedAt: Date.now() } });
+      // the question as it is after the answer: closed, so the screen keeps no button on it
+      return { status: 200, body: { ask: { ...ask, state: "resolved", changedAt: Date.now(), answers: [] }, already: false, changes: [] } satisfies AskAnswerResult };
     }
     if (!ask.issue && ask.task && (ask.kind === "approval" || ask.kind === "check" || ask.kind === "stop")) return answerTask(id, ask, answer, pre, by);
     // a stage Task's stop is answered on its Issue by its grant only (#2745): the ## 回答 the next stage Task gets as the person's words
@@ -920,7 +974,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     try {
       const r = await p;
       // only an answer closes the question: a hold leaves it open to the person, who answers it later by the same id
-      if (r.status === 200 && (r.body as AskAnswerResult).ask?.state === "answered") db.rememberAskAnswer(id, { at: Date.now(), result: r.body as AskAnswerResult });
+      // a notice closed by dismiss (#2866) is remembered the same way: it comes back resolved
+      const closed = (r.body as AskAnswerResult).ask;
+      if (r.status === 200 && (closed?.state === "answered" || (closed?.kind === "notice" && closed.state === "resolved"))) db.rememberAskAnswer(id, { at: Date.now(), result: r.body as AskAnswerResult });
       return r;
     } finally {
       answering.delete(id);
@@ -1321,16 +1377,20 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     }
     return { started, skipped };
   };
-  // secret-scan (#775): every registered repository through the kit's scan-issues; hits or a failure leave one inbox note
+  // secret-scan (#775): every registered repository through the kit's scan-issues; its result is on the schedule, 判断待ち's notice is read from it (#2866)
   const scanSecrets = async (s: { id: string; title: string }, cursors: ScanCursors) => {
     const meta = metaWorkspace();
     if (!meta) return { lines: ["meta workspace がない（共通キットの scan-issues を呼べない）"], summary: { repos: 0, hits: 0, failed: 1 } };
     const r = await scanAllRepos({ workspaces: db.listWorkspaces(), metaPath: meta.path, gh: opts.gh ?? runGh, cursors });
-    if (r.note) inbox.addNotice(r.note.body, { title: r.note.title, source: { schedule: s.id, title: s.title } });
     return r;
   };
   // Scheduler (#20): cron-fired tasks, morning queue view.
-  const scheduler = new Scheduler(db, tasks, Date.now, startNext, scanSecrets, () => settings().quotaAndResume.backlogQuotaLimit, autoRunner);
+  // approval-window (#2046): the SSO / deploy batches still waiting; 判断待ち shows them as a notice from this firing on (#2866)
+  const approvalWindow = async () => {
+    const note = approvalWindowNote((await currentAsks()).batches);
+    return note ? note.title : "待ちなし";
+  };
+  const scheduler = new Scheduler(db, tasks, Date.now, startNext, scanSecrets, () => settings().quotaAndResume.backlogQuotaLimit, autoRunner, approvalWindow);
   /**
    * After an import that stored a change (#1879): the PBIs whose waits it closed and no stage Task runs for go on now, in
    * the implement slot of an enabled backlog-next schedule, not at its next firing. No schedule enabled, nothing starts.
@@ -1505,6 +1565,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   };
   // a saved policy may answer what this Task's turn left open (#938)
   tasks.onTurnEnd(() => void applyPolicies());
+  // the Task sent on to log in for an SSO batch: once it went on, the rest go on (#2046)
+  tasks.onTurnEnd((taskId) => void batchAnswers.turnEnded(taskId).catch((e) => console.warn(`sso batch: ${String((e as Error).message ?? e)}`)));
   tasks.onTurnEnd((taskId, t, turn) => {
     const lastReply = turn.end.summary?.trim() ?? "";
     if (t.executionMode === "cloud" || !settings().judge.enabled || t.status !== "done" || t.shadowOf || t.outcome !== "unknown" || !lastReply) return;
@@ -2024,8 +2086,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           const id = String(req.params.id);
           // secret-scan reads every repository (minutes, past the request's idle timeout) and starts no Task: answered at
           // once, its lines go to the schedules log (#775)
-          if (db.getSchedule(id)?.action === "secret-scan") {
-            void scheduler.runNow(id, "manual").catch((e) => scheduler.note(`secret-scan: 始められない (manual): ${String((e as Error).message ?? e)}`));
+          // approval-window (#2046) starts no Task either: answered the same way
+          const kind = db.getSchedule(id)?.action;
+          if (kind === "secret-scan" || kind === "approval-window") {
+            void scheduler.runNow(id, "manual").catch((e) => scheduler.note(`${kind}: 始められない (manual): ${String((e as Error).message ?? e)}`));
             return json({ scanning: true }, 202);
           }
           try {
@@ -2109,8 +2173,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
        * /api/backlog reads it without refresh — no GitHub call.
        */
       "/api/asks": async () => {
-        const { backlog: b, asks } = await currentAsks();
-        return json({ fetchedAt: b.fetchedAt, asks, errors: b.errors } satisfies AskList);
+        const { backlog: b, asks, batches } = await currentAsks();
+        return json({ fetchedAt: b.fetchedAt, asks, errors: b.errors, batches } satisfies AskList);
       },
 
       /** The saved answer policies (#938), newest change first. */
@@ -2155,7 +2219,13 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         POST: async (req, srv) => {
           const parsed = AskAnswerInput.safeParse(await req.json().catch(() => null));
           if (!parsed.success) return bad(parsed.error.message);
-          const { id, answer, policy } = parsed.data;
+          const { id, answer, policy, taskIds } = parsed.data;
+          // a batch is answered by pressing its one button (#2046): never a policy, never a text of the person's own
+          if (id.startsWith("batch:")) {
+            if (policy || answer.kind !== "allow") return bad("まとまりへの回答は allow だけです（方針には保存できません）");
+            const r = await batchAnswers.answer(id, taskIds);
+            return json(r.body, r.status);
+          }
           // a grant allows one operation once (#2745): never saved to be used again
           if (policy && answer.kind === "grant") return bad("許可文は方針に保存できません");
           if (policy) {
@@ -2820,7 +2890,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         if (before !== null && !(Number.isSafeInteger(Number(before)) && Number(before) > 0)) return bad("before must be a positive integer");
         const limit = q.get("limit") === "0" ? 0 : clampLimit(q.get("limit"));
         const events = q.has("after") ? db.listEvents(t.id, afterSeq(q.get("after"))) : limit === 0 ? [] : before !== null ? db.listEventsBefore(t.id, Number(before), limit) : db.listEventsTail(t.id, limit);
-        return json({ task: t, mcpServers: t.runner === "claude" && t.executionMode !== "cloud" ? Object.keys(taskMcpServers(t)) : [], events, cost: db.taskCost(t.id), history: t.executionMode === "cloud" ? null : history.forTask(t.id), localContinuations: db.listLocalTasksForCloud(t.id), sourceCloudTask: t.sourceCloudTaskId ? db.getTask(t.sourceCloudTaskId) : null, attachments: attachments.listForTask(t.id), teleport: teleports.get(t.id) ?? null, stopSummary: reduceStops(stopRecordsFor(db, t)), eventsArchive: db.eventsArchiveOf(t.id) });
+        return json({ task: t, mcpServers: t.runner === "claude" && t.executionMode !== "cloud" ? Object.keys(taskMcpServers(t)) : [], events, cost: db.taskCost(t.id), history: t.executionMode === "cloud" ? null : history.forTask(t.id), localContinuations: db.listLocalTasksForCloud(t.id), sourceCloudTask: t.sourceCloudTaskId ? db.getTask(t.sourceCloudTaskId) : null, attachments: attachments.listForTask(t.id), teleport: teleports.get(t.id) ?? null, stopSummary: reduceStops(stopRecordsFor(db, t)), eventsArchive: db.eventsArchiveOf(t.id), createdIssues: createdIssuesOf(db.sqlite, t.id), deferred: deferredOf(db.sqlite, t.id) });
         },
         // The person renames the task (#491): it is not set again automatically.
         PATCH: async (req) => {
@@ -3228,12 +3298,22 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           if (!t || t.executionMode === "cloud") continue;
           try {
             const m = countRules(t).metrics;
-            row.rules = { toolCalls: m.toolCalls, toolFailures: m.toolFailures, errors: m.errors, userInstructions: m.userInstructions, stops: m.stops, lastEnd: m.lastEnd };
+            row.rules = { toolCalls: m.toolCalls, toolFailures: m.toolFailures, errors: m.errors, userInstructions: m.userInstructions, stops: m.stops, lastEnd: m.lastEnd, daemonStops: m.daemonStops, lastCutByDaemon: m.lastCutByDaemon };
           } catch (e) {
             console.warn(`evals: task ${row.taskId} not counted for the list (${String((e as Error).message ?? e)})`);
           }
         }
         return json(rows);
+      },
+      // The Insights summary (#1877): this week's ask-to-rate sample (from the tasks judged the week before) and the
+      // human − judge gap over every rated task. Counted on each read; the week turns over by itself.
+      "/api/evals/summary": (req) => {
+        const workspaceId = new URL(req.url).searchParams.get("workspaceId") || undefined;
+        const weekStart = weekStartUtc(Date.now());
+        const sample = weeklyHumanSample(db.evalsList({ workspaceId, judgedFrom: weekStart - 7 * 86_400_000, judgedTo: weekStart, limit: 500 }));
+        // every rated task, not the list's 500: ratings are given by hand, so they stay few, and a cut would drop the oldest
+        const gap = judgeHumanGap(db.evalsList({ workspaceId, rated: true, limit: Number.MAX_SAFE_INTEGER }));
+        return json({ weekStart, sample, gap } satisfies EvalsSummary);
       },
 
       "/api/tasks/:id/evals": (req) => {
@@ -3338,6 +3418,18 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           if (!parsed.success) return bad(parsed.error.message);
           try {
             return json(inbox.close(parsed.data.path));
+          } catch (e) {
+            return bad(knowledgeError(e), (e as { code?: string }).code === "EEXIST" ? 409 : knowledgeStatus(e));
+          }
+        },
+      },
+      "/api/inbox/edit": {
+        POST: async (req) => {
+          const parsed = InboxEditInput.safeParse(await req.json().catch(() => ({})));
+          if (!parsed.success) return bad(parsed.error.message);
+          if (parsed.data.text.length > 200_000) return bad("note too large", 413);
+          try {
+            return json(inbox.edit(parsed.data.path, { title: parsed.data.title, text: parsed.data.text }));
           } catch (e) {
             return bad(knowledgeError(e), (e as { code?: string }).code === "EEXIST" ? 409 : knowledgeStatus(e));
           }
@@ -3537,6 +3629,17 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   // then die on EADDRINUSE. Tasks still running / waiting now belong to nobody.
   const orphaned = abortOrphanedTasks(db, Date.now(), settings().quotaAndResume.maxStopResumes);
   if (orphaned.length) console.warn(`tasks: ${orphaned.length} left running/waiting by a previous daemon marked aborted (${orphaned.join(", ")})`);
+  // their rows were saved at the turn before the cut; the stop just written changes the counts (#2089)
+  for (const id of orphaned) {
+    const t = db.getTask(id);
+    if (t && t.executionMode !== "cloud") {
+      try {
+        countRules(t);
+      } catch (e) {
+        console.warn(`evals: recount after the stop failed for ${id}: ${(e as Error).message}`);
+      }
+    }
+  }
   // The host's load once a minute (#2086). A candidate on a spare port shares the unit: the live daemon samples it
   const opsLoadSampler = cfg.candidate ? null : new OpsLoadSampler(db, { home: cfg.home });
   opsLoadSampler?.start();

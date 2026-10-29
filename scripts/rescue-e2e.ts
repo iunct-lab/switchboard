@@ -1,6 +1,7 @@
 /**
  * bun scripts/rescue-e2e.ts — the rescue page in a real browser at phone width, with Switchboard down (#178).
  * Uses the installed bundle (rescue/install.ts) and a tiny fixture repository; needs Chrome (CHROME_BIN overrides).
+ * Run from a Switchboard Task or the host's shell too: the host sb-rescue's variables (SWITCHBOARD_*) are not inherited.
  */
 import { Database } from "bun:sqlite";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -16,7 +17,9 @@ const [port, rescuePort] = [await freePort(), await freePort()];
 mkdirSync(join(f.root, "bin"));
 writeFileSync(join(f.root, "bin", "claude"), '#!/bin/sh\necho "fake claude: $*"\nn=0\nwhile IFS= read -r line; do n=$((n+1)); [ $n -le 6 ] && { echo "prompt: $line"; sleep 0.3; }; done\necho "fake claude done"\n');
 chmodSync(join(f.root, "bin", "claude"), 0o755);
-const env = { ...process.env, PATH: `${join(f.root, "bin")}:${process.env.PATH}`, SWITCHBOARD_HOME: f.home, SWITCHBOARD_PORT: String(port), SWITCHBOARD_RESCUE_PORT: String(rescuePort), SWITCHBOARD_REPO_ROOT: f.repo };
+// SWITCHBOARD_RESCUE_HOST=0.0.0.0 and the like would make the fixture's rescue page ask for a token (rescue/src/main.ts)
+const inherited = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("SWITCHBOARD_")));
+const env = { ...inherited, PATH: `${join(f.root, "bin")}:${process.env.PATH}`, SWITCHBOARD_HOME: f.home, SWITCHBOARD_PORT: String(port), SWITCHBOARD_RESCUE_PORT: String(rescuePort), SWITCHBOARD_REPO_ROOT: f.repo };
 const say = (line: string) => console.log(`[e2e] ${line}`);
 const assert = (ok: unknown, message: string) => { if (!ok) throw new Error(message); };
 const rows = () => { const db = new Database(join(f.home, "switchboard.db")); try { return (db.query("select name from notes order by name").all() as Array<{ name: string }>).map((r) => r.name); } finally { db.close(); } };

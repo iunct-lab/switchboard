@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_SERVICE, forgeOf, ForgeRefused, ForgeUnsupported, runForgeOperation, textsOf, type ForgeImpl, type ForgeOperation, type ForgeTarget } from "./forge.ts";
+import { DEFAULT_SERVICE, forgeOf, forgeTargetOf, ForgeRefused, remoteOf, ForgeUnsupported, runForgeOperation, textsOf, type ForgeImpl, type ForgeOperation, type ForgeTarget } from "./forge.ts";
 import { githubForge } from "./forge-github.ts";
 
 // The forge operations (#920): the service is picked by the target, what is not supported is said, nothing that signs in goes out.
@@ -52,14 +52,38 @@ describe("forge", () => {
       expect(forgeOf(dir)).toBe(DEFAULT_SERVICE);
       writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ envPrefix: "X" }));
       expect(forgeOf(dir)).toBe("github");
-      writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ forge: { service: "gitlab" } }));
+      writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ forge: { service: "gitlab", host: "gitlab.example.com", project: "group/app" } }));
       expect(forgeOf(dir)).toBe("gitlab");
+      writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ forge: { service: "gitlab" } }));
+      expect(() => forgeOf(dir)).toThrow(/forge が不正です: host: gitlab には host が要ります/);
       writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ forge: { service: "github", host: "ghe.example.com" } }));
       expect(() => forgeOf(dir)).toThrow(/forge が不正です/);
       expect(forgeOf(join(import.meta.dir, "../.."))).toBe("github");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test("GitLab's target is the host and project its forge names, only when the checkout's origin is that project (#892)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ops-kit-forge-"));
+    try {
+      writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ forge: { service: "gitlab", host: "gitlab.example.com", project: "Group/Sub/App" } }));
+      const lab = { service: "gitlab", host: "gitlab.example.com", repository: "Group/Sub/App" };
+      for (const origin of ["https://gitlab.example.com/Group/Sub/App.git", "git@gitlab.example.com:group/sub/app.git", "ssh://git@gitlab.example.com:2222/Group/Sub/App", "https://oauth2@gitlab.example.com/Group/Sub/App/"])
+        expect(forgeTargetOf(dir, origin)).toEqual(lab);
+      // another host (GitHub's), another project, or no origin: nothing is sent, and the remote is not changed
+      expect(() => forgeTargetOf(dir, "https://github.com/Group/App.git")).toThrow("origin（github.com/Group/App）が forge の gitlab.example.com/Group/Sub/App と違うので GitLab に送りません");
+      expect(() => forgeTargetOf(dir, "git@gitlab.example.com:group/other.git")).toThrow(ForgeUnsupported);
+      expect(() => forgeTargetOf(dir, "https://gitlab.example.com.evil.test/Group/Sub/App.git")).toThrow(ForgeUnsupported);
+      expect(() => forgeTargetOf(dir, null)).toThrow("origin（無し）");
+      // GitHub's is found as before: the host gh uses, the repository from the checkout
+      writeFileSync(join(dir, "ops.config.json"), JSON.stringify({}));
+      expect(forgeTargetOf(dir, "https://gitlab.example.com/Group/Sub/App.git")).toEqual({ service: "github", host: process.env.GH_HOST || "github.com", repository: null });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    expect(remoteOf("/srv/git/app.git")).toBeNull();
+    expect(remoteOf("git@host:/abs/path")).toBeNull();
   });
 
   test("GitHub's verification posts the pass on the PR as `gh pr comment` did; another host is named in -R", async () => {

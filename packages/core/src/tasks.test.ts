@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, RunnerAdapter, RunnerSession, Task } from "@switchboard/protocol";
 import { Db } from "./db.ts";
-import { STOP_NOTE } from "./interrupted.ts";
+import { STOP_NOTE } from "./evals.ts";
 import { TaskManager, type TurnEnd } from "./tasks.ts";
 
 /**

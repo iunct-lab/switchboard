@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import type { EvalsListRow, RunnerId, RunnerInfo, Workspace } from "@switchboard/protocol";
+import type { EvalsListRow, EvalsSummary, RunnerId, RunnerInfo, Workspace } from "@switchboard/protocol";
 import { api } from "../api.ts";
-import { evalCells, evalFilterOptions, evalRowWarn, filterEvalRows, firstSortDir, sortEvalRows, type EvalsSortKey } from "../evals.ts";
+import { evalCells, evalFilterOptions, evalRowWarn, filterEvalRows, firstSortDir, gapLabel, sortEvalRows, type EvalsSortKey } from "../evals.ts";
 import { fmtClock, fmtUsd, RunnerPill } from "./ui.tsx";
 import { outcomeLabel } from "../attention.ts";
 import { Reports } from "./Reports.tsx";
@@ -18,6 +18,7 @@ const COLUMNS: Array<{ key: EvalsSortKey | null; label: string; title?: string }
   { key: "errors", label: "エラー" },
   { key: "userInstructions", label: "追加指示" },
   { key: "stops", label: "停止" },
+  { key: "daemonStops", label: "デーモン停止" },
   { key: null, label: "終わり方" },
   { key: "judge", label: "ルーブリック", title: "観点の平均（1〜5）" },
   { key: "human", label: "自分の評価" },
@@ -30,7 +31,7 @@ const COLUMNS: Array<{ key: EvalsSortKey | null; label: string; title?: string }
  * The Insights screen: the reports across Tasks on top (#1835), then every task's evaluations side by side (#1221) — the
  * daemon filters, the screen sorts; a row opens the Task.
  */
-export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; onOpenTask: (id: string) => void; onError: (msg: string) => void; /** bumped on every evals.updated: a judge or a rating that finished while the screen is open */ rev?: number; /** 改善要望にする (#1221) */ onImprove?: (taskId: string) => void; /** the report to open first (Home's line, #1835) */ openReport?: string; /** the レポート section's list: the HTML ones or every artifact (#1833) */ scope: "reports" | "all"; onScope: (scope: "reports" | "all") => void; /** a report's Task, with that artifact selected on its 成果物 tab (#1835) */ onOpenArtifact: (taskId: string, artifactId: string) => void }) {
+export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; onOpenTask: (id: string) => void; /** 評価をお願い (#1877): the Task with its Brief open at 自分の評価 */ onRateTask: (id: string) => void; onError: (msg: string) => void; /** bumped on every evals.updated: a judge or a rating that finished while the screen is open */ rev?: number; /** 改善要望にする (#1221) */ onImprove?: (taskId: string) => void; /** the report to open first (Home's line, #1835) */ openReport?: string; /** the レポート section's list: the HTML ones or every artifact (#1833) */ scope: "reports" | "all"; onScope: (scope: "reports" | "all") => void; /** a report's Task, with that artifact selected on its 成果物 tab (#1835) */ onOpenArtifact: (taskId: string, artifactId: string) => void }) {
   const [rows, setRows] = useState<EvalsListRow[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [workspaceId, setWorkspaceId] = useState("");
@@ -60,6 +61,25 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- onError is App's stable setter; rev re-reads after a judge or a rating lands
   }, [workspaceId, runner, limit, props.rev]);
+  // 評価をお願い (#1877): read with the list's workspace and again on evals.updated; a failure shows in the section only
+  const [summary, setSummary] = useState<EvalsSummary | null>(null);
+  const [summaryFailed, setSummaryFailed] = useState(false);
+  useEffect(() => {
+    let live = true;
+    api
+      .evalsSummary({ workspaceId: workspaceId || undefined })
+      .then((r) => {
+        if (!live) return;
+        setSummary(r);
+        setSummaryFailed(false);
+      })
+      .catch(() => {
+        if (live) setSummaryFailed(true);
+      });
+    return () => {
+      live = false;
+    };
+  }, [workspaceId, props.rev]);
   const sorted = useMemo(() => (rows ? sortEvalRows(filterEvalRows(rows, { model, effort }), sort.key, sort.dir) : []), [rows, sort, model, effort]);
   const options = useMemo(() => evalFilterOptions(rows ?? []), [rows]);
   const withCurrent = (values: string[], current: string) => (current && !values.includes(current) ? [...values, current] : values);
@@ -70,6 +90,40 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
     <main className="main ledger evals-screen">
       <Reports openId={props.openReport} scope={props.scope} onScope={props.onScope} onOpenTask={props.onOpenArtifact} onError={props.onError} />
       <Ops onOpenTask={props.onOpenTask} />
+      <section className="card">
+        <h5>評価をお願い（先週の判定から）</h5>
+        {summaryFailed ? (
+          <div className="muted">読み込めませんでした</div>
+        ) : summary === null ? (
+          <div className="muted">読み込み中…</div>
+        ) : (
+          <>
+            {summary.sample.length === 0 ? (
+              <div className="muted">先週に判定した Task がありません</div>
+            ) : (
+              <table className="pricing evals-table evals-ask">
+                <tbody>
+                  {summary.sample.map((r) => (
+                    <tr key={r.taskId}>
+                      <td>
+                        <button className="ghost open" onClick={() => props.onRateTask(r.taskId)} title={r.taskId}>
+                          {r.title}
+                        </button>
+                      </td>
+                      <td>
+                        <RunnerPill runner={r.runner as RunnerId} />
+                      </td>
+                      <td className="num">{r.judge ? r.judge.average.toFixed(1) : "-"}</td>
+                      <td className="num">{r.human ? `${r.human.rating} / 5` : "まだ"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <div className="hint">人の評価と判定の差: {gapLabel(summary.gap)}</div>
+          </>
+        )}
+      </section>
       <section className="card">
         <h5>Insights · Task ごとの評価</h5>
         <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -169,6 +223,7 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
                     <td className={`num${r.rules && r.rules.errors > 0 ? " warn" : ""}`}>{r.rules ? r.rules.errors : "-"}</td>
                     <td className="num">{r.rules ? r.rules.userInstructions : "-"}</td>
                     <td className={`num${r.rules && r.rules.stops > 0 ? " warn" : ""}`}>{r.rules ? r.rules.stops : "-"}</td>
+                    <td className={`num${r.rules && r.rules.daemonStops > 0 ? " warn" : ""}`}>{r.rules ? r.rules.daemonStops : "-"}</td>
                     <td>{cells.end}</td>
                     <td className={`num${r.judge && r.judge.average <= 2.5 ? " warn" : ""}`} title={r.judge ? `${r.judge.by} · ${r.judge.rubric}` : undefined}>
                       {cells.judge}

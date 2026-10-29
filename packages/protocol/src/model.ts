@@ -290,6 +290,10 @@ export const RuleMetrics = z.object({
   userInstructions: z.number(),
   /** How the last finished turn ended; null when no turn finished. */
   lastEnd: z.enum(["ok", "error", "aborted"]).nullable(),
+  /** `status` events that begin with the daemon-stop note: turns cut by the daemon stopping — an oomd kill, a host stop, a promotion — not the task's failure (#2089). */
+  daemonStops: z.number(),
+  /** Whether the last finished turn was cut by a daemon stop; its `lastEnd` is then the cut, not the task's (#2089). */
+  lastCutByDaemon: z.boolean(),
   /** From the first event to the last (ms); null without events. */
   durationMs: z.number().nullable(),
 });
@@ -302,7 +306,7 @@ export const RuleEval = z.object({
   outcome: TaskOutcome,
   /** The task's ledger total at the time (API-equivalent USD). */
   costUsd: z.number(),
-  /** The counter's version (`rules@1`): a change in what is counted bumps it, so old rows can be told apart. */
+  /** The counter's version (`rules@2`): a change in what is counted bumps it, so old rows can be told apart. */
   by: z.string(),
   ts: z.number(),
 });
@@ -395,11 +399,24 @@ export const EvalsListRow = z.object({
   models: z.array(z.string()),
   /** The task's thinking depth (`tasks.effort`); null = the CLI's default. */
   effort: z.string().nullable(),
-  rules: z.object({ toolCalls: z.number(), toolFailures: z.number(), errors: z.number(), userInstructions: z.number(), stops: z.number(), lastEnd: z.enum(["ok", "error", "aborted"]).nullable() }).nullable(),
-  judge: z.object({ average: z.number(), scores: z.record(z.string(), z.number()), rubric: z.string(), by: z.string() }).nullable(),
+  rules: z.object({ toolCalls: z.number(), toolFailures: z.number(), errors: z.number(), userInstructions: z.number(), stops: z.number(), lastEnd: z.enum(["ok", "error", "aborted"]).nullable(), daemonStops: z.number(), lastCutByDaemon: z.boolean() }).nullable(),
+  /** `ts`: when the judge row was written (`task_evals.ts`) — the weekly sample (#1877) picks by it. */
+  judge: z.object({ average: z.number(), scores: z.record(z.string(), z.number()), rubric: z.string(), by: z.string(), ts: z.number() }).nullable(),
   human: z.object({ rating: z.number(), comment: z.string() }).nullable(),
 });
 export type EvalsListRow = z.infer<typeof EvalsListRow>;
+
+/**
+ * The Insights summary (#1877): the tasks asked to be rated this week (`sample`, picked from those judged in the week
+ * before `weekStart`, the Monday 0:00 UTC of now) and how far the person's rating sits from the judge's average over
+ * every task that has both (`gap`: human − judge, mean to one decimal, null when none). Counted on every read, not stored.
+ */
+export const EvalsSummary = z.object({
+  weekStart: z.number(),
+  sample: z.array(EvalsListRow),
+  gap: z.object({ count: z.number(), mean: z.number().nullable() }),
+});
+export type EvalsSummary = z.infer<typeof EvalsSummary>;
 
 export const FeedbackInput = z.object({
   text: z.string().min(1).max(20_000),
@@ -995,8 +1012,6 @@ export const InboxNote = z.object({
   workspaceHint: z.string().optional(),
   status: z.enum(["inbox", "promoted", "closed"]),
   taskId: z.string().optional(),
-  /** Set on a notice the daemon left (which schedule put it there); a note without it is the user's own draft. */
-  source: z.object({ schedule: z.string(), title: z.string() }).optional(),
 });
 export type InboxNote = z.infer<typeof InboxNote>;
 
@@ -1008,6 +1023,9 @@ export type InboxPromoteInput = z.infer<typeof InboxPromoteInput>;
 
 export const InboxCloseInput = z.object({ path: z.string().min(1) });
 export type InboxCloseInput = z.infer<typeof InboxCloseInput>;
+
+export const InboxEditInput = z.object({ path: z.string().min(1), title: z.string().optional(), text: z.string() });
+export type InboxEditInput = z.infer<typeof InboxEditInput>;
 
 export const MaterializeApplyInput = z.object({
   workspaceId: z.string().min(1).optional(),
@@ -1095,8 +1113,9 @@ export const Schedule = z.object({
    * `prompt` = start a task with the prompt; `backlog-next` = move one backlog item to its next stage (#267);
    * `secret-scan` = check every registered repository for values written on GitHub (#775); those two use no runner.
    * `insights` = run Claude Code's /insights as a Task of its own and keep the report as its artifact (#1838; claude, no prompt).
+   * `approval-window` = the SSO / deploy batches still waiting go in one inbox note, none when there are none (#2046; no runner).
    */
-  action: z.enum(["prompt", "backlog-next", "secret-scan", "insights"]),
+  action: z.enum(["prompt", "backlog-next", "secret-scan", "insights", "approval-window"]),
   budgetUsd: z.number().nullable(),
   enabled: z.boolean(),
   lastRunAt: z.number().nullable(),
@@ -1117,7 +1136,7 @@ export const ScheduleInput = z.object({
   effort: z.string().optional(),
   /** Required (non-blank) when action is `prompt` — checked by the scheduler, since PATCH takes a partial of this; the other kinds take none (#1838). */
   prompt: z.string().optional(),
-  action: z.enum(["prompt", "backlog-next", "secret-scan", "insights"]).optional(),
+  action: z.enum(["prompt", "backlog-next", "secret-scan", "insights", "approval-window"]).optional(),
   budgetUsd: z.number().positive().nullable().optional(),
   enabled: z.boolean().optional(),
 });
@@ -1148,9 +1167,10 @@ export type PendingApproval = z.infer<typeof PendingApproval>;
 /**
  * Where an open question comes from (#935): approval = a tool approval of a Task, decision = an Issue's `## 判断待ち`,
  * check = an operational check asked in a Task's conversation, confirmation = an acceptance criterion waiting on the
- * user's own check, stop = a stop record (`stop.record`), wait = a PBI waiting for PRs / Issues to close.
+ * user's own check, stop = a stop record (`stop.record`), wait = a PBI waiting for PRs / Issues to close, notice = the
+ * daemon's notice, built from the current state each time (#2866).
  */
-export const AskKind = z.enum(["approval", "decision", "check", "confirmation", "stop", "wait"]);
+export const AskKind = z.enum(["approval", "decision", "check", "confirmation", "stop", "wait", "notice"]);
 export type AskKind = z.infer<typeof AskKind>;
 
 /**
@@ -1174,9 +1194,11 @@ export const AskAnswer = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("confirm"), ok: z.boolean(), text: answerText.optional() }),
   /** Send the stop's grant (#2745) as the reply, once. */
   z.object({ kind: z.literal("grant") }),
+  /** Close a daemon's notice as a false positive (#2866): the same findings do not come back. */
+  z.object({ kind: z.literal("dismiss") }),
 ]);
 export type AskAnswer = z.infer<typeof AskAnswer>;
-export const AskAnswerKind = z.enum(["choice", "text", "hold", "allow", "deny", "confirm", "grant"]);
+export const AskAnswerKind = z.enum(["choice", "text", "hold", "allow", "deny", "confirm", "grant", "dismiss"]);
 export type AskAnswerKind = z.infer<typeof AskAnswerKind>;
 
 /**
@@ -1256,6 +1278,7 @@ export type AskResume = z.infer<typeof AskResume>;
  * - `confirm:<workspaceId>#<PBI>:<n>` (n = the criterion's number, BacklogItem.confirmations)
  * - `wait:<workspaceId>#<PBI>@<waitsAt>`
  * - `stop:<StopSummary.key with each \0 written as |>`
+ * - `notice:workspace:<workspaceId>`, `notice:scan:<scheduleId>@<first sight>` (#2866)
  */
 /**
  * What the screen shows about saved policies for one question (#938): `scopes` = the ranges it can be saved under ([] = it
@@ -1313,11 +1336,22 @@ export const Ask = z.object({
   subject: PolicySubject.nullable(),
   /** What the screen shows about policies (#938). */
   policy: AskPolicy,
+  /** The other PBIs of the same Workspace whose unmet prerequisite or wait names this question's PBI, Issue or stage Issue (#1674). */
+  unblocks: z.array(z.object({ number: z.number(), title: z.string(), url: z.string() })),
+  /** The Project Priority of the question's PBI (#1674); null = unset or not found. */
+  priority: z.string().nullable(),
 });
 export type Ask = z.infer<typeof Ask>;
 
 /** POST /api/asks/answer (#936): the answer to the question `id` as it was on screen. */
-export const AskAnswerInput = z.object({ id: z.string().min(1), answer: AskAnswer, /** Save the answer as a policy with it (#938). */ policy: PolicyInput.optional() });
+export const AskAnswerInput = z.object({
+  id: z.string().min(1),
+  answer: AskAnswer,
+  /** Save the answer as a policy with it (#938). */
+  policy: PolicyInput.optional(),
+  /** `batch:deploy` (#2046): the Tasks of the batch the person approves; the others wait. */
+  taskIds: z.array(z.string()).max(50).optional(),
+});
 export type AskAnswerInput = z.infer<typeof AskAnswerInput>;
 /**
  * `already` = the question was answered before (a resend): nothing was written again. `ask` = the question now, null when
@@ -1740,8 +1774,27 @@ export const Backlog = z.object({
 });
 export type Backlog = z.infer<typeof Backlog>;
 
-/** GET /api/asks (#935): the open questions, and those answered / resolved within the last day. `errors` = the backlog's. */
-export const AskList = z.object({ fetchedAt: z.number(), asks: z.array(Ask), errors: Backlog.shape.errors });
+/**
+ * The Tasks stopped on the same kind of wait across workspaces (#2046): sso = an SSO login (reason `auth`), deploy = a
+ * deploy the runner refused (reason `permission` with a deploy word in its op / target). Each Task once, oldest Task
+ * first; `askId` = the question it shows as on its own (the stop, or what it folded into).
+ */
+export const AskBatch = z.object({
+  id: z.enum(["batch:sso", "batch:deploy"]),
+  kind: z.enum(["sso", "deploy"]),
+  asks: z.array(z.object({ askId: z.string(), taskId: z.string(), title: z.string(), workspaceId: z.string().nullable(), op: z.string(), at: z.number() })),
+  /** sso: the Task sent on to log in (no longer in `asks`), until its turn ends; the others are sent on after it. */
+  loggingIn: z.object({ taskId: z.string(), title: z.string() }).nullable().default(null),
+  /** sso: that Task's device code (#662), while it waits for the person's approval. */
+  deviceAuth: DeviceAuthView.nullable().default(null),
+});
+export type AskBatch = z.infer<typeof AskBatch>;
+/** POST /api/asks/answer with a batch's id (#2046): the Tasks sent on now, and the batch after it (null = gone). */
+export const AskBatchResult = z.object({ sent: z.array(z.string()), already: z.boolean(), batch: AskBatch.nullable() });
+export type AskBatchResult = z.infer<typeof AskBatchResult>;
+
+/** GET /api/asks (#935): the open questions, and those answered / resolved within the last day. `errors` = the backlog's. `batches` = #2046. */
+export const AskList = z.object({ fetchedAt: z.number(), asks: z.array(Ask), errors: Backlog.shape.errors, batches: z.array(AskBatch).default([]) });
 export type AskList = z.infer<typeof AskList>;
 
 /**
@@ -1749,8 +1802,8 @@ export type AskList = z.infer<typeof AskList>;
  * two repositories have a #12 each. `repository` is `owner/name` as GitHub spells it (`gh repo view`'s nameWithOwner):
  * GitHub ignores case there, the key does not.
  */
-/** `service`: `github`, or `switchboard` = a workspace whose backlog is kept here only (#2265; `repository` = the workspace id). */
-export const BacklogRepositoryKey = z.object({ service: z.enum(["github", "switchboard"]), host: z.string(), repository: z.string() });
+/** `service`: `github`, `gitlab` (#892: `repository` = the project's full path its `forge` names, so a GitHub #12 and a GitLab #12 are two records), or `switchboard` = a workspace whose backlog is kept here only (#2265; `repository` = the workspace id). */
+export const BacklogRepositoryKey = z.object({ service: z.enum(["github", "gitlab", "switchboard"]), host: z.string(), repository: z.string() });
 export type BacklogRepositoryKey = z.infer<typeof BacklogRepositoryKey>;
 
 /**
@@ -1941,6 +1994,10 @@ export const BacklogCreateInput = z
   .strict();
 export type BacklogCreateInput = z.infer<typeof BacklogCreateInput>;
 
+/** An Issue a Task opened (#1878): the URL in the result of its `gh issue create` / `request_issue.sh`. `repo` is `owner/name`, lower case. */
+export const CreatedIssue = z.object({ repo: z.string(), number: z.number() });
+export type CreatedIssue = z.infer<typeof CreatedIssue>;
+
 /**
  * The stages of a PBI's way from the request to its close (#650), each cut by marks the skills always leave (Issue / PR
  * times, the Task's claim comment, the `[codex|claude|dak] review` comment) — not by the Project's Status, whose changes
@@ -1984,6 +2041,23 @@ export const FlowSummary = z.object({
 export type FlowSummary = z.infer<typeof FlowSummary>;
 
 /**
+ * One week of the backlog (#1878): from `weekStart` (YYYY-MM-DD, a Monday, 00:00 UTC) for 7 days, the PBIs and requests
+ * opened and closed, `net` = opened − closed (both kinds), and the Tasks whose final report put something off that week
+ * (`deferredTasks`) with the Issues of this repository they opened (`deferredIssues`).
+ */
+export const FlowWeek = z.object({
+  weekStart: z.string(),
+  pbiOpened: z.number(),
+  pbiClosed: z.number(),
+  requestOpened: z.number(),
+  requestClosed: z.number(),
+  net: z.number(),
+  deferredTasks: z.number(),
+  deferredIssues: z.number(),
+});
+export type FlowWeek = z.infer<typeof FlowWeek>;
+
+/**
  * `GET /api/flow` (#651): the last `days` days and the `days` before, over every registered workspace's repository, and
  * the five PBIs of the period that took longest (the sum of their known stages). A workspace GitHub could not be read for
  * is in `errors`; the others are still answered. A workspace with no imported repository is named in `unread`. Held in memory for an hour (`fetchedAt`), never stored.
@@ -1997,6 +2071,8 @@ export const FlowView = z.object({
   errors: z.array(z.object({ workspace: z.string(), message: z.string() })),
   /** Workspaces with no imported repository (never imported, or no GitHub one): their PBIs are not in the numbers. */
   unread: z.array(z.string()),
+  /** The weeks of the last `days` days, every repository read summed (#1878); not shown on the screen. */
+  weeks: z.array(FlowWeek),
 });
 export type FlowView = z.infer<typeof FlowView>;
 

@@ -24,7 +24,8 @@ import type { BacklogCreatePayload, GhRunner } from "./backlog.ts";
 import { backlogFieldValue, sameBacklogValue } from "./backlog-merge.ts";
 import { parseIncluded, responseOf, retryAtFromResponse, type GithubResponse } from "../../../ops-kit/src/gh.ts";
 import { fieldValue, type Field } from "../../../ops-kit/src/set.ts";
-import { checkForgeOperation, ForgeRefused, ForgeUnsupported, textsOf, type ForgeImpl, type ForgeKind, type ForgeOperation } from "../../../ops-kit/src/forge.ts";
+import { checkForgeOperation, ForgeRefused, ForgeUnsupported, textsOf, type ForgeImpl, type ForgeKind, type ForgeOperation, type ForgeTarget } from "../../../ops-kit/src/forge.ts";
+import { createGitlabIssue, findGitlabMarked, GitlabError, gitlabId, gitlabMilestoneId, postGitlabNote, readGitlabIssue, runGlab, statusOf, updateGitlabIssue, type Sh } from "../../../ops-kit/src/forge-gitlab.ts";
 
 /** Tries of an operation whose request failed with an outage before it is `failed`. */
 const MAX_ATTEMPTS = 5;
@@ -128,6 +129,8 @@ export function theirEdit(field: string, after: AfterAnswer, since: string, proj
   if (!last) return null;
   return "value" in last && sameBacklogValue(field, last.value, sent) ? null : last;
 }
+
+const SETTLED = "後の編集の値に GitHub が既になっています";
 
 /** What one run sends with: the repository, the Issue numbers of the records, the Project (read once). */
 class Sender {
@@ -273,12 +276,25 @@ class Sender {
     return { status: "done" };
   }
 
+  /**
+   * GitHub already has what the last edit of the Project field still to send makes (#2924): an edit before it is on its
+   * way there — done, not written or held (GitHub's automation closed the Issue to Done meanwhile). A Project field
+   * only: a label put on and taken off again (a question, then its answer) is sent as it was made.
+   */
+  private settled(op: BacklogOperation, now: unknown): boolean {
+    if (!op.field!.startsWith("field:")) return false;
+    const last = this.db.lastBacklogSetValue(this.source, op.targetKind, op.target, op.field!);
+    return last !== undefined && sameBacklogValue(op.field!, now, last);
+  }
+
   /** A `set`: checked against its base, then that field only. Asks GitHub again after an unknown answer, as it does first. */
   private async set(op: BacklogOperation): Promise<Outcome> {
     const n = this.numberOf(op.issue);
     const { value: now, at: since } = await this.current(op, n);
     const same = (a: unknown, b: unknown) => sameBacklogValue(op.field!, a, b);
     if (same(now, op.payload)) return op.targetKind === "project-item" && op.field === "member" && op.payload ? this.write(op, n) : { status: "done" };
+    // GitHub already at the last value of the field still to send (#2924): nothing to write, whatever this one's base
+    if (this.settled(op, now)) return { status: "done", error: SETTLED };
     if (!same(now, op.base)) return { status: "conflict", error: `GitHub の値が編集の元から変わっています（${op.field}: GitHub は ${JSON.stringify(now)}）` };
     const out = await this.write(op, n);
     if (op.field === "member") return out;
@@ -410,6 +426,120 @@ class Sender {
   }
 }
 
+/**
+ * What a run sends to a GitLab project (#2910), by the rules of the GitHub one above: a `set` checked against its base
+ * before and read again after (方式 A; GitLab's history is not read, so an edit between the write and the read after it
+ * is a conflict only when it left another value), a `create` / `comment` with its marker and looked for after a lost
+ * answer. GitLab has no parent (the body's `## 親 PBI` is) and no Project: a set of the parent is refused (failed,
+ * nothing sent); a create's Project fields are not sent. glab carries the login.
+ */
+class GitlabSender {
+  onWrite: () => void = () => undefined;
+  private target: ForgeTarget;
+  constructor(private glab: Sh, private db: Db, source: BacklogSource, private now: () => number) {
+    this.target = { service: "gitlab", host: source.host, repository: source.repository };
+    this.source = source;
+  }
+  private source: BacklogSource;
+
+  private numberOf(issue: string): number {
+    const rec = this.db.getBacklogRecord({ ...this.source, objectKind: "issue", externalId: issue });
+    return ((rec?.local ?? rec?.remote) as BacklogIssueData | null)?.number ?? 0;
+  }
+
+  private async current(op: BacklogOperation, n: number): Promise<unknown> {
+    const i = await readGitlabIssue(this.glab, this.target, n);
+    if (typeof i === "string") throw new GitlabError(`#${n} が GitLab にありません`, i === "forbidden" ? 403 : 404);
+    return backlogFieldValue("issue", { title: i.title, body: i.body, state: i.state, milestone: i.milestone, parent: i.parent, labels: i.labels }, op.field!);
+  }
+
+  private async write(op: BacklogOperation, n: number): Promise<void> {
+    const f = op.field!;
+    const v = op.payload;
+    const fields: Record<string, string> =
+      f.startsWith("label:") ? { [v ? "add_labels" : "remove_labels"]: f.slice("label:".length) }
+      : f === "state" ? { state_event: v === "CLOSED" ? "close" : "reopen" }
+      : f === "milestone" ? { milestone_id: v === null ? "0" : String(await gitlabMilestoneId(this.glab, this.target, v as string)) }
+      : f === "body" ? { description: String(v) }
+      : { [f]: String(v) };
+    await updateGitlabIssue(this.glab, this.target, n, fields);
+    this.onWrite();
+  }
+
+  private async set(op: BacklogOperation): Promise<Outcome> {
+    if (op.targetKind !== "issue" || !["title", "body", "state", "milestone"].includes(op.field!) && !op.field!.startsWith("label:"))
+      return { status: "failed", error: `GitLab には無いフィールドです（${op.field}）。${op.field === "parent" ? "親は本文の ## 親 PBI で書きます" : "送りません"}` };
+    const n = this.numberOf(op.issue);
+    const same = (a: unknown, b: unknown) => sameBacklogValue(op.field!, a, b);
+    const now = await this.current(op, n);
+    if (same(now, op.payload)) return { status: "done" };
+    if (!same(now, op.base)) return { status: "conflict", error: `GitLab の値が編集の元から変わっています（${op.field}: GitLab は ${JSON.stringify(now)}）` };
+    await this.write(op, n);
+    const after = await this.current(op, n);
+    return same(after, op.payload) ? { status: "done" } : { status: "conflict", error: `送った直後の GitLab の値が送った値と違います（${op.field}: GitLab は ${JSON.stringify(after)}）。ほかの編集と重なりました` };
+  }
+
+  private async comment(op: BacklogOperation, posting: { on: boolean }): Promise<Outcome> {
+    const n = this.numberOf(op.issue);
+    let c: { id: string; body: string; createdAt: string } | undefined;
+    if (op.status === "unknown") {
+      const hit = await findGitlabMarked(this.glab, this.target, `/issues/${n}/notes?sort=desc&order_by=created_at`, marker(op.id), op.createdAt);
+      if (!hit) return { status: "unknown", error: hit === null ? "送ったかどうかを確かめきれません" : "GitLab にこのコメントが見つかりません。送ったかどうか分からないので、もう一度は送りません" };
+      c = { id: gitlabId("note", hit.id as number), body: String(hit.body), createdAt: String(hit.created_at) };
+    } else {
+      posting.on = true;
+      c = await postGitlabNote(this.glab, this.target, n, marked((op.payload as { body: string }).body, op.id));
+      this.onWrite();
+    }
+    return { status: "done", remoteId: c.id, record: { externalId: c.id, remote: { issue: n, body: c.body, createdAt: c.createdAt } } };
+  }
+
+  private async create(op: BacklogOperation, posting: { on: boolean }): Promise<Outcome> {
+    const p = op.payload as BacklogCreatePayload;
+    let made: { id: string; number: number; url: string; body: string; createdAt: string; updatedAt: string } | undefined;
+    if (op.remoteId || op.status === "unknown") {
+      const hit = await findGitlabMarked(this.glab, this.target, "/issues?order_by=created_at&sort=desc&scope=all", marker(op.id), op.createdAt);
+      if (!hit) return { status: "unknown", error: hit === null ? "作ったかどうかを確かめきれません" : "GitLab にこの Issue が見つかりません。作ったかどうか分からないので、もう一度は作りません" };
+      made = { id: gitlabId("issue", hit.id as number), number: hit.iid as number, url: String(hit.web_url), body: String(hit.description ?? ""), createdAt: String(hit.created_at), updatedAt: String(hit.updated_at) };
+    } else {
+      const milestone = p.milestone === null ? null : await gitlabMilestoneId(this.glab, this.target, p.milestone);
+      posting.on = true;
+      const i = await createGitlabIssue(this.glab, this.target, { title: p.title, description: marked(p.body, op.id), ...(p.labels.length ? { labels: p.labels.join(",") } : {}), ...(milestone === null ? {} : { milestone_id: String(milestone) }) });
+      this.onWrite();
+      posting.on = false;
+      made = { id: i.id, number: i.number, url: i.url, body: i.body, createdAt: i.createdAt, updatedAt: i.updatedAt };
+    }
+    const remote: BacklogIssueData = { number: made.number, title: p.title, url: made.url, state: p.state, stateReason: p.state === "CLOSED" ? "COMPLETED" : null, body: made.body, labels: p.labels, milestone: p.milestone, parent: p.parent, subIssues: [], createdAt: made.createdAt, updatedAt: made.updatedAt, closedAt: null };
+    this.db.setBacklogOperationResult(op.id, { status: "sending", remoteId: made.id, record: { externalId: made.id, remote: { ...remote, state: "OPEN", stateReason: null } } }, this.now());
+    if (p.state === "CLOSED") await updateGitlabIssue(this.glab, this.target, made.number, { state_event: "close" });
+    return { status: "done", remoteId: made.id, record: { externalId: made.id, remote } };
+  }
+
+  /** Sends one operation and says how it went; throws Limit (GitLab's 429, the login refused, GitLab not reached). */
+  async send(op: BacklogOperation): Promise<Outcome> {
+    const posting = { on: false };
+    try {
+      return op.kind === "set" ? await this.set(op) : op.kind === "comment" ? await this.comment(op, posting) : await this.create(op, posting);
+    } catch (e) {
+      if (e instanceof Limit) throw e;
+      const at = this.now();
+      const status = statusOf(e);
+      const message = String((e as Error)?.message ?? e).slice(0, 300);
+      if (status === 429) throw new Limit(at + 60_000, "limit");
+      if (status === 401) throw Object.assign(new Limit(at, "auth"), { message: `${this.target.host} の glab のログインが通らないため送りません（次の送信で確かめ直します）` });
+      // whether GitLab carried out a post is not known (its answer lost, or the look for its marker failed): looked for
+      // again, never posted again blindly
+      const unsure = posting.on || (op.kind !== "set" && op.status === "unknown");
+      if (unsure && (status === null || status >= 500 || !posting.on)) return { status: "unknown", error: message };
+      if (status === null) throw new Limit(at + 60_000, "offline");
+      if (op.kind === "set" && (status === 409 || status === 412)) return { status: "conflict", error: `GitLab が書き込みを拒みました（${status}）。照合し直してください` };
+      if (status < 500) return { status: "failed", error: message };
+      if (op.attempt + 1 >= MAX_ATTEMPTS) return { status: "failed", error: `${MAX_ATTEMPTS} 回送れませんでした: ${message}` };
+      return { status: "pending", retryAt: at + 60_000 * 2 ** op.attempt, error: message };
+    }
+  }
+}
+
 /** The forge operation a stored one is (#920): a Project item and its fields are `project`, any other field `write`. */
 export const forgeKind = (op: Pick<BacklogOperation, "kind" | "field" | "targetKind">): ForgeKind =>
   op.kind === "create" ? "create" : op.kind === "comment" ? "comment" : op.targetKind === "project-item" || op.field === "member" || op.field?.startsWith("field:") ? "project" : "write";
@@ -420,14 +550,16 @@ export const forgeKind = (op: Pick<BacklogOperation, "kind" | "field" | "targetK
  * false (the workspace's GitHub sync turned off meanwhile, #2266) stops the run there (Limit `off`), the rest waiting
  * as it is. `waits`: an operation not to send yet (it holds the ones of its Issue after it).
  */
-export async function sendGithubOperations(gh: GhRunner, db: Db, cwd: string, source: BacklogSource, now = () => Date.now(), onWrite?: () => void, on = () => true, waits = (_op: BacklogOperation) => false): Promise<number> {
+export async function sendGithubOperations(gh: GhRunner, db: Db, cwd: string, source: BacklogSource, now = () => Date.now(), onWrite?: () => void, on = () => true, waits = (_op: BacklogOperation) => false, glab: Sh = runGlab): Promise<number> {
   // a write is not made once the sync is off, inside an operation too (a set reads GitHub before it writes)
   const writes = (args: string[]) => args.some((a, i) => (args[i - 1] === "-X" && a !== "GET") || /^query=\s*mutation/.test(a));
   const sender = new Sender((args, c) => (writes(args) && !on() ? Promise.reject(new Limit(now(), "off")) : gh(args, c)), db, cwd, source, now);
-  if (onWrite) sender.onWrite = onWrite;
+  const lab = new GitlabSender((cmd) => (writes(cmd) && !on() ? Promise.reject(new Limit(now(), "off")) : glab(cmd)), db, source, now);
+  if (onWrite) sender.onWrite = lab.onWrite = onWrite;
   const send = (o: ForgeOperation<BacklogOperation>) => sender.send(o.payload);
-  // the services an operation can be sent to: a second service adds its entry here (docs/design/forge-integration.md)
-  const services: Record<string, ForgeImpl<BacklogOperation, Outcome>> = { github: { write: send, create: send, comment: send, project: send } };
+  const sendLab = (o: ForgeOperation<BacklogOperation>) => lab.send(o.payload);
+  // the services an operation can be sent to (docs/design/forge-integration.md); GitLab has no Project (`project` is not supported)
+  const services: Record<string, ForgeImpl<BacklogOperation, Outcome>> = { github: { write: send, create: send, comment: send, project: send }, gitlab: { write: sendLab, create: sendLab, comment: sendLab } };
   const held = new Set<string>();
   let done = 0;
   for (const listed of db.listPendingBacklogOperations(source)) {

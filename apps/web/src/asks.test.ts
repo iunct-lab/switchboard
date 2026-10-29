@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
-import type { Ask } from "@switchboard/protocol";
-import { answerButtons, grantOf, taskAsks, withoutGrant, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, previousLines, scopeLabel, blockerLines, groupAsks, keptAnswers, KIND_LABEL, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, workspaceChips, workspaceSections, type Answered } from "./asks.ts";
+import type { Ask, AskBatch } from "@switchboard/protocol";
+import { answerButtons, batchLines, hiddenByBatches, grantOf, taskAsks, withoutGrant, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, previousLines, scopeLabel, blockerLines, groupAsks, keptAnswers, KIND_LABEL, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, unblocksLine, workspaceChips, workspaceSections, type Answered } from "./asks.ts";
 
 const ask = (over: Partial<Ask>): Ask => ({
   id: "a", kind: "decision", needs: "person", state: "open", at: 1, changedAt: 1, workspace: null, pbi: null, issue: null, task: null, reason: null, question: null, choices: [], grants: [], grant: null, recommendation: null, next: null,
-  source: { label: "記録", url: null, taskId: null }, route: "none", conditions: [], answers: [], place: null, blockers: [], resume: null, subject: null, policy: { scopes: [], note: null, defaults: null, applied: null, previous: null }, ...over,
+  source: { label: "記録", url: null, taskId: null }, route: "none", conditions: [], answers: [], place: null, blockers: [], resume: null, subject: null, policy: { scopes: [], note: null, defaults: null, applied: null, previous: null }, unblocks: [], priority: null, ...over,
 });
 
 test("groupAsks: the six kinds open, and answered / resolved ones, fall into the four groups in order; an empty group is left out", () => {
@@ -26,7 +26,18 @@ test("groupAsks: the six kinds open, and answered / resolved ones, fall into the
     ["resolved", "解消済み", ["resolved-auto"]],
   ]);
   expect(groupAsks([ask({})]).map((g) => g.key)).toEqual(["person"]);
-  expect(Object.keys(KIND_LABEL).sort()).toEqual(["approval", "check", "confirmation", "decision", "stop", "wait"]);
+  expect(Object.keys(KIND_LABEL).sort()).toEqual(["approval", "check", "confirmation", "decision", "notice", "stop", "wait"]);
+});
+
+test("unblocksLine (#1674): none waiting is null; two say 答えると 2 件が進められる", () => {
+  const pbi = (n: number) => ({ number: n, title: `t${n}`, url: `https://github.com/o/r/issues/${n}` });
+  expect(unblocksLine(ask({}))).toBeNull();
+  expect(unblocksLine(ask({ unblocks: [pbi(20), pbi(21)] }))).toBe("答えると 2 件が進められる");
+});
+
+test("groupAsks keeps the order the API gave within a group (#1674: the person's are ranked by the API, not here)", () => {
+  const asks = [ask({ id: "few", at: 3 }), ask({ id: "auto", needs: "auto" }), ask({ id: "many", at: 1, unblocks: [{ number: 2, title: "t", url: "u" }] }), ask({ id: "held", state: "held", at: 2 })];
+  expect(groupAsks(asks)[0]!.asks.map((a) => a.id)).toEqual(["few", "many", "held"]);
 });
 
 test("workspaceSections: one heading per Workspace, the most questions first, then by name, the unknown (null) last; each keeps the order given", () => {
@@ -223,4 +234,45 @@ test("taskAsks: a Task's screen takes its open checks and the stops a person ans
   const t = { id: "tk", title: "t" };
   const list = [ask({ id: "c", kind: "check", task: t }), ask({ id: "s", kind: "stop", task: t }), ask({ id: "auto", kind: "stop", needs: "auto", task: t }), ask({ id: "done", kind: "check", state: "answered", task: t }), ask({ id: "other", kind: "check", task: { id: "tk2", title: "u" } }), ask({ id: "ap", kind: "approval", task: t })];
   expect(taskAsks(list, "tk").map((a) => a.id)).toEqual(["c", "s"]);
+});
+
+test("batch lines and hidden asks", () => {
+  const now = Date.parse("2026-10-20T03:00:00Z");
+  const batch: AskBatch = {
+    id: "batch:sso",
+    kind: "sso",
+    asks: [
+      { askId: "check:tk_a:", taskId: "tk_a", title: "A", workspaceId: "ws_1", op: "aws sso login", at: Date.parse("2026-10-20T02:30:00Z") },
+      { askId: "stop:task:tk_b|aws sso login||auth|", taskId: "tk_b", title: "B", workspaceId: "ws_2", op: "aws sso login", at: Date.parse("2026-10-19T02:30:00Z") },
+    ],
+    loggingIn: null,
+    deviceAuth: null,
+  };
+  expect(batchLines(batch, now)).toEqual([
+    { taskId: "tk_a", text: "A — aws sso login — 11:30" },
+    { taskId: "tk_b", text: "B — aws sso login — 10/19 11:30" },
+  ]);
+  const asks = [ask({ id: "check:tk_a:" }), ask({ id: "stop:task:tk_b|aws sso login||auth|" }), ask({ id: "decision:x" })];
+  expect(hiddenByBatches(asks, [batch]).map((a) => a.id)).toEqual(["decision:x"]);
+  expect(hiddenByBatches(asks, []).map((a) => a.id)).toHaveLength(3);
+  // the Task logging in: its open stop is left out too, its other questions stay
+  const mine = [ask({ id: "stop:task:tk_c|x||auth|", kind: "stop", state: "open", task: { id: "tk_c", title: "C" } }), ask({ id: "approval:tk_c:p1", kind: "approval", state: "open", task: { id: "tk_c", title: "C" } })];
+  expect(hiddenByBatches(mine, [{ ...batch, asks: [], loggingIn: { taskId: "tk_c", title: "C" } }]).map((a) => a.id)).toEqual(["approval:tk_c:p1"]);
+});
+
+test("answerButtons: a scan notice (#2866) is closed by 誤検知として閉じる only", () => {
+  const b = answerButtons(ask({ kind: "notice", answers: ["dismiss"], question: "認証の値の検査: 当たり 1 件 / 検査できなかった 0 リポジトリ" }));
+  expect(b.map((x) => [x.label, x.answer])).toEqual([["誤検知として閉じる", { kind: "dismiss" }]]);
+  expect(KIND_LABEL.notice).toBe("お知らせ");
+  expect(answerButtons(ask({ kind: "notice", answers: [] }))).toEqual([]);
+});
+
+test("askFacts: a notice (#2866) shows what it is about, why, what to do and what put it there, no PBI / Task / 不明", () => {
+  const facts = askFacts(ask({ kind: "notice", question: "workspace app を使えません", reason: "origin は x、登録は y です。", next: "登録のリポジトリの clone にする", source: { label: "workspace の検査", url: null, taskId: null } }));
+  expect(facts).toEqual([
+    { label: "お知らせ", value: "workspace app を使えません" },
+    { label: "内容", value: "origin は x、登録は y です。" },
+    { label: "すること", value: "登録のリポジトリの clone にする" },
+    { label: "出したもの", value: "workspace の検査" },
+  ]);
 });

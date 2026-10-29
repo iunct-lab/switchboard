@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BacklogIssueData, BacklogRepositoryKey } from "@switchboard/protocol";
-import { Db, EVENTS_PAGE_MAX, sizeClass, type BacklogSnapshotEntry, type NewBacklogOperation } from "./db.ts";
+import { createdIssuesOf, Db, deferredOf, DEFERRED_WORDS, EVENTS_PAGE_MAX, issuesInText, sizeClass, type BacklogSnapshotEntry, type NewBacklogOperation } from "./db.ts";
 import { backlogFieldValue, conflictRevision } from "./backlog-merge.ts";
 
 // The stored backlog (#885): records per repository, kept across a restart and a backup.
@@ -493,6 +493,74 @@ test("listEventsTail / listEventsBefore (#1165): the last `limit` events, and th
   expect(seqs(db.listEventsBefore("t_ev", 101, 200))).toEqual(range(1, 100));
   expect(db.listEventsBefore("t_ev", 1, 200)).toEqual([]);
   expect(db.listEventsTail("t_nope", 200)).toEqual([]);
+  db.close();
+});
+
+/** A done task row for the events of #1878's readers. */
+const eventsTask = (db: Db, id: string) =>
+  db.sqlite.query("INSERT INTO tasks (id, title, runner, cwd, scope, status, origin, shadow_stopped, outcome, created_at, updated_at, status_at) VALUES (?, 't', 'claude', '/work/app', '[]', 'done', 'switchboard', 0, 'done', 1, 1, 1)").run(id);
+
+test("created issues from events (#1878): the Issue URLs in the successful results of gh issue create / request_issue.sh, and the app's stored creates by localId, once each", () => {
+  const db = new Db(join(dir, "created.db"));
+  eventsTask(db, "t_c");
+  const call = (id: string, command: string) => db.appendEvent("t_c", { t: "tool.call", id, name: "Bash", input: { command }, summary: command });
+  const result = (id: string, summary: string, ok = true) => db.appendEvent("t_c", { t: "tool.result", id, ok, summary });
+  call("a", 'gh issue create -R "$REPO" --title x --body-file b.md');
+  result("a", "https://github.com/Acme/App/issues/41");
+  call("b", "bash scripts/setup/request_issue.sh --title y");
+  result("b", "created: https://github.com/acme/app/issues/42\nproject: added");
+  call("c", "gh issue view 7 --json url");
+  result("c", "https://github.com/acme/app/issues/7");
+  call("d", "gh issue create --title z");
+  result("d", "https://github.com/acme/app/issues/43", false);
+  call("e", "gh issue create --title again");
+  result("e", "https://github.com/acme/app/issues/41");
+  call("f", "gh issue create -R other/tool --title w");
+  result("f", "https://github.com/other/tool/issues/5");
+  expect(createdIssuesOf(db.sqlite, "t_c")).toEqual([
+    { repo: "acme/app", number: 41 },
+    { repo: "acme/app", number: 42 },
+    { repo: "other/tool", number: 5 },
+  ]);
+  expect(createdIssuesOf(db.sqlite, "t_none")).toEqual([]);
+
+  // in the app's Task the create is stored first and printed as its localId, whatever command ran it; read back once it has a number
+  const draft = issue({ number: 0, url: "", labels: ["type:request"], parent: null, subIssues: [] });
+  const store = (localId: string) => db.applyBacklogEdit(A, { records: [{ objectKind: "issue", externalId: `local:${localId}`, local: draft }], operations: [{ id: localId, issue: `local:${localId}`, targetKind: "issue", target: `local:${localId}`, kind: "create", payload: draft }] });
+  const sent = "11111111-1111-4111-8111-111111111111", waiting = "22222222-2222-4222-8222-222222222222";
+  eventsTask(db, "t_app");
+  db.appendEventAt("t_app", { t: "tool.call", id: "g", name: "Bash", input: { command: "bun scripts/check-models.ts" }, summary: "check-models" }, Date.now() - 1);
+  const [create] = store(sent);
+  store(waiting);
+  db.setBacklogOperationResult(create!, { status: "done", remoteId: "I_50", record: { externalId: "I_50", remote: { ...draft, number: 50, url: "https://github.com/acme/app/issues/50" } } });
+  db.appendEvent("t_app", { t: "tool.result", id: "g", ok: true, summary: `作りました（送信待ち）: localId ${sent}。番号が付く前も backlog view ${sent} で読める\n作りました（送信待ち）: localId ${waiting}。` });
+  db.appendEvent("t_app", { t: "tool.call", id: "h", name: "Bash", input: { command: "ops-kit backlog create --title x" }, summary: "create" });
+  db.appendEvent("t_app", { t: "tool.result", id: "h", ok: true, summary: `#50 を作りました（localId ${sent}）` });
+  expect(createdIssuesOf(db.sqlite, "t_app")).toEqual([{ repo: "acme/app", number: 50 }]);
+  // the same line shown again later (a log read back) is another Task's create, stored before this call ran
+  eventsTask(db, "t_reader");
+  db.appendEventAt("t_reader", { t: "tool.call", id: "r", name: "Bash", input: { command: "cat task.log" }, summary: "cat" }, Date.now() + 60_000);
+  db.appendEventAt("t_reader", { t: "tool.result", id: "r", ok: true, summary: `作りました（送信待ち）: localId ${sent}。` }, Date.now() + 61_000);
+  expect(createdIssuesOf(db.sqlite, "t_reader")).toEqual([]);
+  expect(issuesInText("https://github.com/acme/app/issues/12#issuecomment-1 https://github.com/acme/app/pull/13")).toEqual([{ repo: "acme/app", number: 12 }]);
+  db.close();
+});
+
+test("deferred from final summary (#1878): the last session.end's summary has a word that puts something off", () => {
+  const db = new Db(join(dir, "deferred.db"));
+  ["残した", "見送り", "後回し", "スコープ外", "別 Issue", "別Issue"].forEach((word, i) => {
+    eventsTask(db, `t_${i}`);
+    db.appendEvent(`t_${i}`, { t: "session.end", status: "ok", summary: `完了。${word}: #12` });
+    expect(deferredOf(db.sqlite, `t_${i}`)).toBe(true);
+  });
+  eventsTask(db, "t_earlier");
+  db.appendEvent("t_earlier", { t: "session.end", status: "ok", summary: "後回しにした" });
+  db.appendEvent("t_earlier", { t: "session.end", status: "ok", summary: "全部できた" });
+  expect(deferredOf(db.sqlite, "t_earlier")).toBe(false);
+  eventsTask(db, "t_open");
+  db.appendEvent("t_open", { t: "message.delta", role: "assistant", text: "見送り" });
+  expect(deferredOf(db.sqlite, "t_open")).toBe(false);
+  expect(DEFERRED_WORDS.test("全部できた")).toBe(false);
   db.close();
 });
 

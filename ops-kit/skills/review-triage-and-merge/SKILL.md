@@ -88,9 +88,9 @@ gh pr comment $N --body-file "$W/summary.md"      # W=$(mktemp -d /tmp/<リポ�
 - [ ] blocker が残っていない（修正済みか、誤読の根拠つき）
 - [ ] 主レビュアーの独立レビューがある（通常は別ランナー。利用上限なら `cross-runner-review` の 0 に従い、同じランナーの新しいセッションで代替する。自己レビューだけでは満たさない。代替も利用できなければ未レビューとして止める。追加のレビュアーは未着でもよく、届いたら転記して比較する）
 - [ ] security / license / personal data の 3 節が主レビューにあり、finding は処理済み
-- [ ] CI 緑: `gh run list --commit "$(gh pr view $N --json headRefOid -q .headRefOid)"`（`gh pr checks` は Checks の権限が要り、fine-grained トークンでは 403 になることがある）。**Actions が始まらない**（請求の問題。run が数秒で failure、ジョブのステップが 0 件: `gh api repos/{owner}/{repo}/actions/runs/<id>/jobs -q '.jobs[].steps|length'`）ときは待たず、ローカル CI（CLAUDE.md のコマンド）で CI の手順をローカルで回す。通ったときの印をマージ判定がその CI の成功と数える仕組みなら、それで進める（テストが実際に落ちた CI の代わりにはならない）。修正を push したら head が変わるので、もう一度回す
+- [ ] CI 緑: `gh run list --commit "$(gh pr view $N --json headRefOid -q .headRefOid)"`（`gh pr checks` は Checks の権限が要り、fine-grained トークンでは 403 になることがある）。**Actions が始まらない**（請求の問題。run が数秒で failure、ジョブのステップが 0 件: `gh api repos/{owner}/{repo}/actions/runs/<id>/jobs -q '.jobs[].steps|length'`）ときは待たず、ローカル CI（CLAUDE.md のコマンド）で CI の手順をローカルで回す。通ったときの印をマージ判定がその CI の成功と数える仕組みなら、それで進める（テストが実際に落ちた CI の代わりにはならない）。スタックなら一番上の PR で、全部の PR の指摘の処理が済んでから 1 回回す。修正で差分が変わったら一番上でもう 1 回（下の PR のマージ後の自動 rebase と base の前進では回し直さない。CLAUDE.md が名指しするマージ判定の規則の「ローカル CI を回す時と数え方」）
 - [ ] PR 本文が今の差分と一致（修正で変わったなら `gh pr edit` で直す。[x] は事実だけ）
-- [ ] Task の DoD が事実として満たされている（テスト / typecheck / 実構成 / docs）
+- [ ] Task の DoD が事実として満たされている（テスト / typecheck / 実構成、および Task が名指しした doc）
 - [ ] `git diff --stat origin/main...HEAD` に迷いファイル（作業ファイル、fixture の絶対パス）が無い
 - [ ] `gh pr view $N --json baseRefName,mergeable,mergeStateStatus` が base=main（スタックの一番下）で CLEAN
 

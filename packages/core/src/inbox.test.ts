@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Db } from "./db.ts";
@@ -90,19 +90,65 @@ describe("inbox", () => {
     expect(() => inbox.markPromoted(d.path, "t")).toThrow(/already closed/);
   });
 
-  test("addNotice marks the schedule, and closes only that schedule's earlier open notice (superseded_by)", () => {
-    const src = { schedule: "sch_a", title: "検査" };
-    const draft = inbox.add("my draft");
-    const other = inbox.addNotice("other", { title: "other notice", source: { schedule: "sch_b", title: "別" } });
-    const first = inbox.addNotice("one", { title: "notice one", source: src, now: new Date(2026, 8, 7, 4, 0, 0) });
-    const second = inbox.addNotice("two", { title: "notice two", source: src, now: new Date(2026, 8, 8, 4, 0, 0) });
-    const open = inbox.list().map((n) => n.path);
-    expect(open).toContain(second.path);
-    expect(open).not.toContain(first.path);
-    expect(open).toContain(other.path);
-    expect(open).toContain(draft.path);
-    expect(inbox.get(second.path).source).toEqual(src);
-    expect(inbox.get(draft.path).source).toBeUndefined();
-    expect(readFileSync(join(store.dir, first.path), "utf8")).toContain(`superseded_by: ${second.path}`);
+  test("edit rewrites a draft's title and body; hand-added keys, workspace, created and the path stay (#3032)", () => {
+    const d = inbox.add("最初の一行\n二行目", { title: "元の題", workspaceHint: "dak", now: new Date(2026, 8, 9, 10, 0, 0) });
+    store.write(d.path, readFileSync(join(store.dir, d.path), "utf8").replace("---\n", "---\ntags: [zenn]\n"));
+    const e = inbox.edit(d.path, { title: "直した題", text: "直した本文\r\n\r\n2 行目\n3 行目\n" });
+    expect(e).toMatchObject({ path: d.path, title: "直した題", body: "直した本文\n\n2 行目\n3 行目", workspaceHint: "dak", created: d.created, status: "inbox" });
+    expect(inbox.get(d.path)).toMatchObject({ title: "直した題", body: "直した本文\n\n2 行目\n3 行目", workspaceHint: "dak", created: d.created });
+    expect(store.read(d.path).doc.frontmatter.tags).toEqual(["zenn"]);
+    expect(inbox.list().filter((n) => n.title === "直した題").map((n) => n.path)).toEqual([d.path]);
+    // without a title the title stays; a blank one falls back to the first line, as when adding
+    expect(inbox.edit(d.path, { text: "本文だけ" }).title).toBe("直した題");
+    expect(inbox.edit(d.path, { title: "  ", text: "一行目から\nあと" }).title).toBe("一行目から");
   });
+
+  test("edit refuses promoted and closed notes (EEXIST) and an empty body, and leaves the file as it was (#3032)", () => {
+    const empty = inbox.add("keep me", { now: new Date(2026, 8, 9, 11, 0, 0) });
+    const before = readFileSync(join(store.dir, empty.path), "utf8");
+    expect(() => inbox.edit(empty.path, { title: "x", text: " \r\n " })).toThrow(/empty/);
+    expect(readFileSync(join(store.dir, empty.path), "utf8")).toBe(before);
+    const promoted = inbox.add("promote me", { now: new Date(2026, 8, 9, 12, 0, 0) });
+    inbox.markPromoted(promoted.path, "task_p");
+    const closed = inbox.add("close me too", { now: new Date(2026, 8, 9, 13, 0, 0) });
+    inbox.close(closed.path);
+    for (const p of [promoted.path, closed.path]) {
+      const raw = readFileSync(join(store.dir, p), "utf8");
+      let code: string | undefined;
+      try {
+        inbox.edit(p, { text: "new" });
+      } catch (e) {
+        code = (e as { code?: string }).code;
+      }
+      expect(code).toBe("EEXIST");
+      expect(readFileSync(join(store.dir, p), "utf8")).toBe(raw);
+    }
+  });
+
+  test("closeDaemonNotes closes the daemon's notes once and leaves the user's drafts", () => {
+    const store = new KnowledgeStore(join(root, "Knowledge-daemon-notes"), db);
+    const inbox = new Inbox(store);
+    const draft = inbox.add("my draft");
+    // what the daemon wrote before #2866: a schedule's notice (source) and a workspace's note
+    store.write("notes/2026-10-27-scan.md", "---\ntitle: 認証の値の検査\ncreated: 2026-10-27T03:00:00.000Z\nstatus: inbox\nsource:\n  schedule: sch_a\n  title: 検査\n---\nhits\n");
+    const ws = inbox.add("origin は x、登録は y です", { title: "workspace app を使えません", workspaceHint: "app" });
+    expect(inbox.list()).toHaveLength(3);
+    expect(inbox.closeDaemonNotes(new Date("2026-10-29T00:00:00Z"))).toBe(2);
+    expect(inbox.list().map((n) => n.path)).toEqual([draft.path]);
+    // the files stay, closed
+    expect(readFileSync(join(store.dir, "notes/2026-10-27-scan.md"), "utf8")).toContain("status: closed");
+    expect(readFileSync(join(store.dir, ws.path), "utf8")).toContain("status: closed");
+    expect(inbox.closeDaemonNotes()).toBe(0);
+    // a write that fails is thrown, not counted as done (the boot logs it and tries again next time)
+    const stuck = inbox.add("x", { title: "workspace other を使えません" });
+    chmodSync(join(store.dir, stuck.path), 0o444);
+    try {
+      expect(() => inbox.closeDaemonNotes()).toThrow();
+    } finally {
+      chmodSync(join(store.dir, stuck.path), 0o644);
+    }
+    expect(inbox.closeDaemonNotes()).toBe(1);
+    store.close();
+  });
+
 });

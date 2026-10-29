@@ -119,6 +119,7 @@ Task の途中で設計が変わった（Task に書いた場所では足りな�
 下の枝を直したあと上の枝のテストも走らせる（スタックの一番上で、CLAUDE.md のテストのコマンド）。
 
 全 PR の指摘が処理され、CI が緑になるまで**マージしない**（途中で下だけ入れると、上の PR の指摘対応で main を汚す）。
+Actions が始まらないリポジトリのローカル CI（CLAUDE.md のコマンド。以下 `<ローカル CI>`）は、全部の PR の指摘の処理が済んでから、スタックの一番上の PR で 1 回だけ回す。差分が変わったら（修正コミット、手で解いたコンフリクト）一番上でもう 1 回。いつ回し、マージ判定がどう数えるかは CLAUDE.md が名指しするマージ判定の規則（ローカル CI を回す時と数え方）。
 
 ## 5. マージ（main に近い方から 1 本ずつ）
 
@@ -137,12 +138,11 @@ Task の途中で設計が変わった（Task に書いた場所では足りな�
 # GitHub の Stacked PR が次の PR を main に retarget して rebase する。これを待つ:
 until gh pr view <次> --json baseRefName,mergeStateStatus -q '"\(.baseRefName) \(.mergeStateStatus)"' | grep -qE '^main (CLEAN|UNSTABLE)$'; do
   gh pr view <次> --json baseRefName,mergeable,mergeStateStatus -q '"\(.baseRefName) \(.mergeable) \(.mergeStateStatus)"'; sleep 30; done
-# Actions が始まらない間だけ: 自動 rebase で head の sha が変わり、前のローカル CI の合格はもう数えられないので回し直す
-<ローカル CI> <次>
+# 自動 rebase で head の sha が変わっても、差分が同じなら一番上のローカル CI の合格のまま数える（回し直さない）
 <マージ判定> <次> --merge-stack
 ```
 
-- **UNSTABLE** = CI が走っている（マージ判定が「未完了」で止めるので、待ってやり直す）か、CI が始まらずに失敗している（上のローカル CI。head の合格の印があればマージ判定は UNSTABLE のまま通す）
+- **UNSTABLE** = CI が走っている（マージ判定が「未完了」で止めるので、待ってやり直す）か、CI が始まらずに失敗している（4 のローカル CI。一番上の合格がこの PR の差分を含めばマージ判定は UNSTABLE のまま通す）
 - **CONFLICTING / DIRTY** = 自動 rebase が解けなかった。**このときだけ**ローカルで直す: `git fetch && git checkout <次の枝> && git rebase origin/main` → 解消 → テスト → `git push --force-with-lease`。直したら CLEAN を待って再開
 - 中身が空になった PR は GitHub が merged 扱いにする（下の PR に取り込まれたとき）。空の PR を残さない
 - スタックに属さない単発は `<マージ判定> <n> --merge`（`gh stack merge` は "not a stacked pull request" で失敗する）

@@ -1,23 +1,32 @@
 import { describe, expect, test } from "bun:test";
 import type { EvalsListRow, JudgeEval, RuleEval, TaskEvals } from "@switchboard/protocol";
 import type { EvalsSortKey } from "./evals.ts";
-import { endLabel, evalCells, evalFilterOptions, evalRowWarn, filterEvalRows, firstSortDir, fmtDuration, humanLabel, judgeAverage, judgeRows, metricRows, modelsLabel, sortEvalRows } from "./evals.ts";
+import { endLabel, evalCells, evalFilterOptions, evalRowWarn, filterEvalRows, firstSortDir, fmtDuration, gapLabel, humanLabel, judgeAverage, judgeRows, metricRows, modelsLabel, sortEvalRows } from "./evals.ts";
 
 const rules = (over: Partial<RuleEval["metrics"]> = {}): RuleEval => ({
-  metrics: { turns: 2, toolCalls: 7, toolFailures: 0, errors: 0, asks: 1, denials: 0, stops: 0, stopReasons: {}, userInstructions: 1, lastEnd: "ok", durationMs: 184_000, ...over },
-  status: "done", outcome: "unknown", costUsd: 0.0123, by: "rules@1", ts: 1,
+  metrics: { turns: 2, toolCalls: 7, toolFailures: 0, errors: 0, asks: 1, denials: 0, stops: 0, stopReasons: {}, userInstructions: 1, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false, durationMs: 184_000, ...over },
+  status: "done", outcome: "unknown", costUsd: 0.0123, by: "rules@2", ts: 1,
 });
 const evals = (r: RuleEval | null, judge: JudgeEval | null = null): TaskEvals => ({ rules: r, judge, human: null, models: [] });
 
 describe("evals rows (#1218)", () => {
   test("metricRows: the fixed order; a failure, error, denial or stop marks its row", () => {
     const rows = metricRows(evals(rules()));
-    expect(rows.map((r) => r.label)).toEqual(["ツール呼び出し", "失敗", "エラー", "追加指示", "承認 / 拒否", "停止", "ターン", "所要時間", "終わり方"]);
-    expect(rows.map((r) => r.value)).toEqual(["7", "0", "0", "1", "1 / 0", "0", "2", "3 分 4 秒", "正常"]);
+    expect(rows.map((r) => r.label)).toEqual(["ツール呼び出し", "失敗", "エラー", "追加指示", "承認 / 拒否", "停止", "デーモン停止", "ターン", "所要時間", "終わり方"]);
+    expect(rows.map((r) => r.value)).toEqual(["7", "0", "0", "1", "1 / 0", "0", "0", "2", "3 分 4 秒", "正常"]);
     expect(rows.some((r) => r.warn)).toBe(false);
     const bad = metricRows(evals(rules({ toolFailures: 2, errors: 1, denials: 1, stops: 3, stopReasons: { "usage-limit": 2, transient: 1 }, lastEnd: "error" })));
     expect(bad.filter((r) => r.warn).map((r) => r.label)).toEqual(["失敗", "エラー", "承認 / 拒否", "停止", "終わり方"]);
     expect(bad.find((r) => r.label === "停止")?.value).toBe("3（usage-limit 2, transient 1）");
+  });
+
+  test("metricRows: a turn cut by the daemon marks デーモン停止, not 終わり方 (#2089)", () => {
+    const warns = (over: Partial<RuleEval["metrics"]>) => metricRows(evals(rules(over))).filter((r) => r.warn).map((r) => r.label);
+    expect(warns({ lastEnd: "aborted", daemonStops: 1, lastCutByDaemon: true })).toEqual(["デーモン停止"]);
+    expect(warns({ lastEnd: "error", daemonStops: 1, lastCutByDaemon: true })).toEqual(["デーモン停止"]);
+    // an earlier stop, then a turn that failed by itself: both are marked
+    expect(warns({ lastEnd: "aborted", daemonStops: 1, lastCutByDaemon: false })).toEqual(["デーモン停止", "終わり方"]);
+    expect(metricRows(evals(rules({ daemonStops: 2 }))).find((r) => r.label === "デーモン停止")?.value).toBe("2");
   });
 
   test("metricRows: nothing without a rules row", () => {
@@ -68,9 +77,9 @@ describe("human label (#1220)", () => {
 describe("evals list rows (#1221)", () => {
   const row = (taskId: string, over: Partial<EvalsListRow> = {}): EvalsListRow => ({
     taskId, title: taskId, runner: "claude", workspaceId: null, status: "done", outcome: "done", updatedAt: 1, costUsd: 0, models: [], effort: null,
-    rules: { toolCalls: 3, toolFailures: 0, errors: 0, userInstructions: 0, stops: 0, lastEnd: "ok" }, judge: null, human: null, ...over,
+    rules: { toolCalls: 3, toolFailures: 0, errors: 0, userInstructions: 0, stops: 0, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false }, judge: null, human: null, ...over,
   });
-  const rows = [row("a", { updatedAt: 3, judge: { average: 4.2, scores: {}, rubric: "r@1", by: "x" } }), row("b", { updatedAt: 2, rules: null }), row("c", { updatedAt: 1, judge: { average: 2.0, scores: {}, rubric: "r@1", by: "x" }, rules: { toolCalls: 1, toolFailures: 2, errors: 0, userInstructions: 1, stops: 0, lastEnd: "error" } })];
+  const rows = [row("a", { updatedAt: 3, judge: { average: 4.2, scores: {}, rubric: "r@1", by: "x" } }), row("b", { updatedAt: 2, rules: null }), row("c", { updatedAt: 1, judge: { average: 2.0, scores: {}, rubric: "r@1", by: "x" }, rules: { toolCalls: 1, toolFailures: 2, errors: 0, userInstructions: 1, stops: 0, lastEnd: "error", daemonStops: 0, lastCutByDaemon: false } })];
 
   test("sortEvalRows: by a key both ways, rows without the value last either way, equal values keep their order", () => {
     expect(sortEvalRows(rows, "judge", "asc").map((r) => r.taskId)).toEqual(["c", "a", "b"]);
@@ -78,6 +87,13 @@ describe("evals list rows (#1221)", () => {
     expect(sortEvalRows(rows, "toolFailures", "desc").map((r) => r.taskId)).toEqual(["c", "a", "b"]);
     expect(sortEvalRows(rows, "updatedAt", "desc").map((r) => r.taskId)).toEqual(["a", "b", "c"]);
     expect(sortEvalRows(rows, "human", "asc").map((r) => r.taskId)).toEqual(["a", "b", "c"]); // nobody rated: the order stays
+  });
+
+  test("evalRowWarn: daemon stops alone do not mark the row (#2089); they sort like the other counts", () => {
+    const d = row("d", { rules: { toolCalls: 1, toolFailures: 0, errors: 0, userInstructions: 0, stops: 0, lastEnd: "aborted", daemonStops: 3, lastCutByDaemon: true } });
+    expect(evalRowWarn(d)).toBe(false);
+    expect(firstSortDir("daemonStops")).toBe("desc");
+    expect(sortEvalRows([...rows, d], "daemonStops", "desc").map((r) => r.taskId)).toEqual(["d", "a", "c", "b"]);
   });
 
   test("firstSortDir: a score column starts with the weak tasks, a count or the date with the heavy / newest", () => {
@@ -124,5 +140,15 @@ describe("evals list rows (#1221)", () => {
     expect(ids(filterEvalRows(list, { model: "claude-opus-5-5", effort: "-" }))).toEqual([]);
     expect(evalFilterOptions(list)).toEqual({ models: ["claude-opus-5-5", "claude-sonnet-5-5"], efforts: ["-", "high", "low"] });
     expect(evalFilterOptions([])).toEqual({ models: [], efforts: [] });
+  });
+});
+
+describe("gapLabel (#1877)", () => {
+  test("none rated → the line says so; otherwise the signed mean to one decimal and the count", () => {
+    expect(gapLabel({ count: 0, mean: null })).toBe("人の評価がまだありません");
+    expect(gapLabel({ count: 12, mean: 0.4 })).toBe("人 − 判定: +0.4（12 件）");
+    expect(gapLabel({ count: 2, mean: -2.1 })).toBe("人 − 判定: −2.1（2 件）");
+    expect(gapLabel({ count: 1, mean: 0 })).toBe("人 − 判定: 0.0（1 件）");
+    expect(gapLabel({ count: 3, mean: 1 })).toBe("人 − 判定: +1.0（3 件）");
   });
 });

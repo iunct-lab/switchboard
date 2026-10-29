@@ -6,6 +6,7 @@ export const SCHEDULE_ACTIONS: ReadonlyArray<{ value: Schedule["action"]; label:
   { value: "backlog-next", label: "バックログを進める" },
   { value: "secret-scan", label: "認証の値の検査" },
   { value: "insights", label: "Claude Code Insights" },
+  { value: "approval-window", label: "承認待ちのメモ" },
 ];
 
 /** A kind's name; one the screen does not know is shown as is. */

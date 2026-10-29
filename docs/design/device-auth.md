@@ -29,6 +29,12 @@
 
 承認のボタンは置かない。承認は利用者が自分のブラウザで行い、Switchboard はクラウドの資格情報を持たない（README の Design rules「No keys」）。
 
+## まとめてログインする（#2046）
+
+SSO のログイン待ちで止まった Task が複数あるとき、判断待ちの画面のまとまりのカード（[asks.md](asks.md) の「SSO・配備のまとまり」）から 1 回だけログインする。「ログインする」で一番古い Task だけに続きを送り、その Task の `device-auth` のコードを Task の画面と同じ部品（`DeviceAuth.tsx`）でまとまりのカードにも出す。その Task が進んだら、残りの Task には続きだけを送り、ログインは繰り返させない。
+
+前提: ランナーはデーモンと同じ OS ユーザー・同じ環境で動くので、1 つの Task のログインがホストの SSO のキャッシュに残り、その期限までは他の Task も同じキャッシュを使う。アダプタはデーモンの環境をそのまま子に渡し（`childEnv`、[`packages/adapters/claude/src/index.ts`](../../packages/adapters/claude/src/index.ts) と [`codex`](../../packages/adapters/codex/src/index.ts)。外すのは Claude Code の自分の印の変数だけで、`HOME` も `AWS_*` も変えない）、Task の環境に足すのは `startSession` の `StartOptions.env`（`DEVICE_AUTH_URL` など）だけ。ランナーが `HOME` や `AWS_*` を Task ごとに変える構成（別のユーザー・コンテナ）では、この前提は成り立たず、残りの Task は自分でもう一度止まる（まとまりに戻るので、もう一度押せる）。Switchboard は AWS の認証情報を持たず、代わりにログインもしない。
+
 ## 値が残らない理由
 
 - **エージェントは値を見ない**: コマンドの出力は `device-auth` が伏せてから返す。エージェントの会話・ツールの結果（DB のイベント）・Issue に書く文のどれにも、値が入る元が無い

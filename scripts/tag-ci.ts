@@ -1,0 +1,161 @@
+/**
+ * CI on the release tags (#2953): a tag is made without waiting for CI (scripts/release-tag.ts), and
+ * `bun scripts/tag-ci.ts [--repo <owner/name>]` runs the same steps as local-ci (ci.yml's `run:` steps, `bun scripts/ci.ts`
+ * as that checkout's scripts/ci.ts steps, the same environment) on the newest `vX.Y.Z` tag that has no result yet, and
+ * adds the result to the end of that tag's GitHub Release: `[tag-ci] pass|fail <sha>`. A fail walks back to the tag
+ * before it, until a pass or a tag that already has a result; the tags walked past are not run. A tag without a Release
+ * is not run and the walk stops there (release-tag.ts makes the Release). A perf-ratchet check whose only finding is
+ * `raised:` (a ceiling above main's, which an older tag has when main lowered it after) counts as a pass: `raised` is
+ * the rule for a PR before its merge, not a result of a merged tag.
+ * Output: one line of JSON, the tags looked at, newest first. Exit 0 = the newest tag passed (now or before), 1 = it
+ * failed, 2 = nothing judged (no tag, no Release, not run).
+ */
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
+import { findSecrets, hostAws, type HostAws } from "../ops-kit/src/secrets.ts";
+import { remoteRepo, runCheckout, step, stepEnv, TargetError, type Deps } from "./local-ci.ts";
+
+/** A result's line in a Release's body: pass or fail, then the tag's commit. */
+export const TAG_CI_RESULT = /^\[tag-ci\] (pass|fail) ([0-9a-f]{40})(?=\s|$)/m;
+
+/** The last result of `sha` in a Release's body, or null: a later run's line outweighs an earlier one. */
+export function tagResult(releaseBody: string, sha: string): "pass" | "fail" | null {
+  let last: "pass" | "fail" | null = null;
+  for (const m of releaseBody.matchAll(new RegExp(TAG_CI_RESULT.source, "gm"))) if (m[2] === sha) last = m[1] as "pass" | "fail";
+  return last;
+}
+
+/** A line without host paths: the given roots (the worktree, its TMPDIR) by name, then any home directory as `~`. */
+export function hidePaths(line: string, roots: Record<string, string> = {}, home = homedir()): string {
+  let out = line;
+  for (const [path, name] of Object.entries(roots)) out = out.replaceAll(path, name);
+  return out.replaceAll(home, "~").replace(/\/(?:home|Users)\/[^/\s]+|\/root(?=\/|\s|$)/g, "~");
+}
+
+/**
+ * What goes at the end of the Release's body: the mark, and for a fail (or a raised-only pass) the step and what it
+ * named, at most 20 lines, without host paths. When the step's name or its lines have a value usable for auth
+ * (`findSecrets`), none of them is written: the mark stays, a note says why the rest is missing.
+ */
+export function resultSection(r: { sha: string; ok: boolean; step?: string; fails?: string[]; raisedOnly?: boolean }, host: HostAws = hostAws()): string {
+  const out = ["", "", "## CI", `[tag-ci] ${r.ok ? "pass" : "fail"} ${r.sha}${r.raisedOnly ? " (raised only)" : ""}`, "", "`bun scripts/tag-ci.ts` がこのタグのコミットで `.github/workflows/ci.yml` の手順（local-ci と同じ）を回した。"];
+  // an unnamed step's name is its script's first line, which may hold a path or a value as much as its output
+  const step = hidePaths(r.step ?? "");
+  const detail = [
+    ...(r.raisedOnly ? [`\`${step}\` は main より上げた上限（raised）だけで落ちた。マージ済みのタグでは pass と数える:`] : r.ok ? [] : [`\`${step}\` が落ちた:`]),
+    ...(r.fails ?? []).slice(0, 20).map((l) => `    ${hidePaths(l)}`),
+  ];
+  if (detail.length === 0) return `${out.join("\n")}\n`;
+  const safe = findSecrets(detail.join("\n"), host).length === 0;
+  return `${[...out, "", ...(safe ? detail : ["（落ちた手順の名前か行に認証に使える値が含まれるので書かない。実行したホストの記録（~/.cache の下）を見る）"])].join("\n")}\n`;
+}
+
+const STRICT = /^v\d+\.\d+\.\d+$/;
+
+export interface TagCiDeps extends Omit<Deps, "sh"> {
+  /** Runs a command; throws on a non-zero exit. `input` goes to its stdin. */
+  sh: (cmd: string[], cwd?: string, input?: string) => Promise<string>;
+}
+
+export interface TagCiEntry { tag: string; sha: string; result: "pass" | "fail"; ran: boolean }
+
+/** One tag's CI in its own worktree; the result to record. */
+async function runTag(tag: string, sha: string, repo: string, root: string, d: TagCiDeps, cache: string) {
+  mkdirSync(cache, { recursive: true });
+  const dir = mkdtempSync(join(cache, `switchboard.tag-ci-${tag}.`));
+  const tmp = mkdtempSync(join(tmpdir(), `switchboard.tag-ci-${tag}-tmp.`));
+  try {
+    await d.sh(["git", "-C", root, "worktree", "add", "-q", "--detach", dir, sha]);
+    const run = await runCheckout(dir, stepEnv(tmp), `tag-ci-${repo.replaceAll("/", "_")}`, d, cache);
+    const failed = run.results.at(-1);
+    const p = run.perf;
+    // the check is the last step: a pass by raised only leaves no step unrun
+    const raisedOnly = !run.ok && !!p && !p.unknown && p.raised.length > 0 && p.over.length + p.improved.length === 0
+      && !!failed?.run.includes("perf-ratchet") && run.steps.at(-1)?.run === failed.run;
+    const fails = raisedOnly ? p!.raised : [...(failed?.fails ?? []), ...(p?.raised ?? [])];
+    return { sha, ok: run.ok || raisedOnly, step: failed?.name, fails: fails.map((l) => hidePaths(l, { [dir]: "<checkout>", [tmp]: "<tmp>" })), raisedOnly };
+  } finally {
+    await d.sh(["git", "-C", root, "worktree", "remove", "--force", dir]).catch(() => undefined);
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+/** Walks the tags of `repo` (its clone at `root`) newest first: see the file's comment. `cache`: the worktrees and failure logs (~/.cache; tests give their own). */
+export async function tagCi(d: TagCiDeps, repo: string, root: string, cache = join(homedir(), ".cache"), host: HostAws = hostAws()): Promise<TagCiEntry[]> {
+  await d.sh(["git", "-C", root, "fetch", "-q", "origin", "--tags", "--force"]);
+  const tags = (await d.sh(["git", "-C", root, "tag", "-l", "v*", "--sort=-v:refname"])).split("\n").map((t) => t.trim()).filter((t) => STRICT.test(t));
+  const out: TagCiEntry[] = [];
+  for (const tag of tags) {
+    const sha = (await d.sh(["git", "-C", root, "rev-parse", `${tag}^{commit}`])).trim();
+    const body = await d.sh(["gh", "release", "view", tag, "-R", repo, "--json", "body", "-q", ".body"]).catch(() => null);
+    if (body === null) {
+      d.log(`${tag}: release が無いか読めない（release-tag.ts で作る）。ここで止める`);
+      break;
+    }
+    const known = tagResult(body, sha);
+    if (known) {
+      d.log(`${tag}: 結果あり（${known}）`);
+      out.push({ tag, sha, result: known, ran: false });
+      break;
+    }
+    d.log(`${tag}（${sha.slice(0, 7)}）を回す`);
+    const r = await runTag(tag, sha, repo, root, d, cache);
+    await d.sh(["gh", "release", "edit", tag, "-R", repo, "--notes-file", "-"], undefined, `${body.trimEnd()}${resultSection(r, host)}`.trimStart());
+    d.log(`${tag}: ${r.ok ? "pass" : "fail"}${r.raisedOnly ? "（raised only）" : ""}`);
+    out.push({ tag, sha, result: r.ok ? "pass" : "fail", ran: true });
+    if (r.ok) break;
+  }
+  return out;
+}
+
+/** 0 = the newest tag passed, 1 = it failed, 2 = nothing judged. */
+export const tagCiExit = (entries: TagCiEntry[]): number => (entries[0] === undefined ? 2 : entries[0].result === "pass" ? 0 : 1);
+
+/** The repository and its clone from `[--repo <owner/name>]`, as local-ci's resolveTarget reads them (GitHub only: the results go on GitHub Releases). */
+export async function resolveRepo(args: string[], cwd: string, scriptRoot: string, run: Deps["sh"]): Promise<{ repo: string; root: string }> {
+  const at = args.indexOf("--repo");
+  const unknown = args.filter((_, i) => at < 0 || (i !== at && i !== at + 1));
+  if (unknown.length > 0) throw new TargetError(`知らない引数: ${unknown.join(" ")}`);
+  const originAt = async (root: string) => (await run(["git", "-C", root, "remote", "get-url", "origin"]).catch(() => "")).trim();
+  if (at < 0) {
+    const url = await originAt(scriptRoot);
+    const repo = remoteRepo(url);
+    if (!repo) throw new TargetError(`${scriptRoot} の origin（${url ? "GitHub の owner/name として読めない URL" : "無し"}）から対象が分からない（--repo <owner/name> を付ける）`);
+    return { repo, root: scriptRoot };
+  }
+  const repo = args[at + 1] ?? "";
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new TargetError(`--repo は owner/name の形で: ${repo || "（空）"}`);
+  const root = (await run(["git", "-C", cwd, "rev-parse", "--show-toplevel"]).catch(() => {
+    throw new TargetError(`${cwd} は git の作業ツリーでない（${repo} の作業ツリーから実行する）`);
+  })).trim();
+  const url = await originAt(root);
+  const origin = remoteRepo(url);
+  if (origin?.toLowerCase() !== repo.toLowerCase()) {
+    throw new TargetError(`${root} の origin（${origin ?? (url ? "GitHub の owner/name として読めない URL" : "無し")}）が --repo ${repo} と違う（${repo} の作業ツリーから実行する）`);
+  }
+  return { repo, root };
+}
+
+const sh: TagCiDeps["sh"] = async (cmd, cwd, input) => {
+  const p = Bun.spawn(cmd, { cwd, stdin: input === undefined ? "ignore" : new Blob([input]), stdout: "pipe", stderr: "pipe" });
+  const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+  if (code !== 0) throw new Error(`${cmd.slice(0, 3).join(" ")} failed: ${err.trim()}`);
+  return out;
+};
+
+if (import.meta.main) {
+  let t: { repo: string; root: string };
+  try {
+    t = await resolveRepo(process.argv.slice(2), process.cwd(), join(import.meta.dir, ".."), sh);
+  } catch (e) {
+    if (!(e instanceof TargetError)) throw e;
+    console.error(`${e.message}\nusage: bun scripts/tag-ci.ts [--repo <owner/name>]`);
+    process.exit(2);
+  }
+  // stdout is the JSON only
+  const entries = await tagCi({ sh, step, log: (l) => console.error(l) }, t.repo, t.root);
+  console.log(JSON.stringify(entries));
+  process.exit(tagCiExit(entries));
+}

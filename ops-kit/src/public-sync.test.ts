@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { personalEmails, policySectionAt, sync, spawnRun, withPolicySection, type Run } from "./public-sync.ts";
+import { check, personalEmails, policySectionAt, sync, spawnRun, withPolicySection, type Run } from "./public-sync.ts";
 import { loadPublicSync } from "./config.ts";
 import { main } from "./cli.ts";
 
@@ -221,35 +221,39 @@ describe("public-sync", () => {
     expect(pubGit("for-each-ref")).toBe(before);
   });
 
-  test("a secret-shaped value in the change stops before anything is pushed; an account number only when it is the host's", () => {
+  test("a secret-shaped value stops before anything is pushed: by the shapes in the whole tree, with the line; by the host's names and accounts in the change", () => {
     const host = { names: ["corp-admin"], accountIds: ["2109" + "87654321"] };
     write("docs/ops.md", "token: ghp_" + "a".repeat(36) + "\n");
     commit("docs: ops");
-    expect(() => sync(opts({ host }), run)).toThrow("a secret-shaped value in what would go public:\ndocs/ops.md (github-token)");
-    write("docs/ops.md", `role: arn:aws:iam::${"2109" + "87654321"}:role/x\n`);
+    expect(() => sync(opts({ host }), run)).toThrow("a secret-shaped value in the tree:\ndocs/ops.md:1 (github-token)");
+    write("docs/ops.md", `build ${"2109" + "87654321"}\n`); // no context: only the host's account makes it one
     commit("docs: ops");
-    expect(() => sync(opts({ host }), run)).toThrow("docs/ops.md (account-id)");
+    expect(() => sync(opts({ host }), run)).toThrow("a secret-shaped value in what would go public:\ndocs/ops.md (account-id)");
     write("docs/ops.md", "profile corp-admin\n");
     commit("docs: ops");
     expect(() => sync(opts({ host }), run)).toThrow("docs/ops.md (aws-profile)");
     write("docs/ops.md", "Device code:\n" + "ABCD" + "-EFGH\n"); // the label on the added line above: the added lines are read together
     commit("docs: ops");
-    expect(() => sync(opts({ host }), run)).toThrow("docs/ops.md (device-code)");
+    expect(() => sync(opts({ host }), run)).toThrow("docs/ops.md:2 (device-code)");
     write("docs/ops.md", "x\n++ token: ghp_" + "c".repeat(36) + "\n"); // an added line that begins with "++ " is content, not a header
     commit("docs: ops");
-    expect(() => sync(opts({ host }), run)).toThrow("docs/ops.md (github-token)");
+    expect(() => sync(opts({ host }), run)).toThrow("docs/ops.md:2 (github-token)");
     write("docs/ops.md", "x\n");
     writeFileSync(join(priv, "docs/blob.bin"), "\0\0token: ghp_" + "b".repeat(36) + "\n"); // a file git calls binary
     commit("docs: blob");
-    expect(() => sync(opts({ host }), run)).toThrow("docs/blob.bin (github-token)");
+    expect(() => sync(opts({ host }), run)).toThrow("docs/blob.bin:1 (github-token)");
     sh(priv, "git", "rm", "-q", "docs/blob.bin");
     expect(pubGit("for-each-ref").length).toBe(0);
     write("src/auth.test.ts", "const url = `https://d.example/?user_code=" + "WDJB" + "-MJHT`;\n"); // a test file is looked at too
     commit("test: auth");
-    expect(() => sync(opts({ host }), run)).toThrow("src/auth.test.ts (approval-url)");
-    // a template placeholder is not a value; nor is an account number that is not the host's
-    write("src/auth.test.ts", "const url = `https://d.example/?user_code=${code}`;\n");
+    expect(() => sync(opts({ host }), run)).toThrow("src/auth.test.ts:1 (approval-url)");
+    // an ARN carries an account by its shape, the host's or not
     write("docs/ops.md", `fixture: arn:aws:cloudformation:ap-northeast-1:${"1".repeat(12)}:stack/x\n`);
+    commit("docs: ops");
+    expect(() => sync(opts({ host }), run)).toThrow("docs/ops.md:1 (account-id)");
+    // a template placeholder is not a value; nor is the example account
+    write("src/auth.test.ts", "const url = `https://d.example/?user_code=${code}`;\n");
+    write("docs/ops.md", "fixture: arn:aws:cloudformation:ap-northeast-1:123456789012:stack/x\n");
     commit("docs: ops");
     expect(sync(opts({ host }), run)).toContain("no secret-shaped value in the change");
   });
@@ -660,6 +664,90 @@ describe("public-sync", () => {
 
   test("personalEmails keeps placeholders and service addresses out", () => {
     expect(personalEmails(`a@example.com b@x.example.invalid git@github.com 1+u@users.noreply.github.com ${MAIL("c")} ${MAIL("c")}`)).toEqual([MAIL("c")]);
+  });
+
+  test("check builds the tree as the sync does and stops on the same private name, home path or address, with the file and line; nothing is read from the public side", () => {
+    const checked = (extra: object = {}) => check({ ...opts(), source: "HEAD", ...extra }, run);
+    expect(checked()).toMatch(/^public check: ok \(\d+ files\)$/);
+    write("docs/a.md", `line one\nsee ${PRIVATE}\n`);
+    commit("docs: a");
+    expect(() => checked()).toThrow(/private repository name in public output:\n[0-9a-f]+:docs\/a\.md:2:/);
+    for (const [body, what] of [[`see ${HOME}\n`, "personal home path"], [`mail ${MAIL("alice")}\n`, "personal e-mail address"]] as const) {
+      write("docs/a.md", body);
+      commit("docs: b");
+      expect(() => checked()).toThrow(what);
+      expect(() => sync({ ...opts(), dryRun: true }, run)).toThrow(what); // the sync stops on the same tree, with the same words
+    }
+    expect(pubGit("for-each-ref").length).toBe(0);
+    expect(() => checked({ targetUrl: "/nonexistent" })).toThrow("personal e-mail address"); // no public side is reached for
+  });
+
+  test("check and the sync stop on a secret-shaped value anywhere in the tree with the same words, the file, the line and the kind, never the value; a placeholder passes", () => {
+    const code = "ABCD" + "-EFGH";
+    write("src/auth.test.ts", `// an old fixture\nconst auth = { code: "${code}" };\n`);
+    commit("test: auth");
+    const words = "a secret-shaped value in the tree:\nsrc/auth.test.ts:2 (device-code)";
+    expect(() => check({ ...opts(), source: "HEAD" }, run)).toThrow(words);
+    expect(() => sync({ ...opts(), dryRun: true }, run)).toThrow(words);
+    try {
+      check({ ...opts(), source: "HEAD" }, run);
+    } catch (e) {
+      expect(String(e)).not.toContain(code);
+    }
+    write("src/auth.test.ts", `// an old fixture\nconst auth = { code: "XXXX-XXXX" };\n`);
+    commit("test: auth");
+    expect(check({ ...opts(), source: "HEAD" }, run)).toContain("public check: ok");
+    expect(sync({ ...opts(), dryRun: true }, run)).toContain("dry-run:");
+  });
+
+  test("check passes a tree whose private name is only in a rewritten or an excluded file, as the sync does", () => {
+    // SECURITY.md (rewrite) names the private repository from the start; the excluded workflow does now too
+    write(".github/workflows/host.yml", `repo: ${PRIVATE}\n`);
+    commit("ci: host");
+    expect(check({ ...opts(), source: "HEAD" }, run)).toContain("public check: ok");
+    expect(sync({ ...opts(), dryRun: true }, run)).toContain("rewrote");
+    expect(() => check({ ...opts(), source: "HEAD", rewrite: [] }, run)).toThrow("SECURITY.md");
+  });
+
+  test("the command's --check: ok, a private name with 1, skipped in the public copy (GH_REPO, else origin, is publicSync.target — not gh's chosen remote), 2 with a sending flag", async () => {
+    const cfg = join(priv, "ops.config.json");
+    writeFileSync(cfg, JSON.stringify({ publicSync: { target: TARGET, versioning: "independent", exclude: [".github/workflows/host.yml"], rewrite: ["SECURITY.md"] } }));
+    commit("chore: config");
+    const lines: string[] = [];
+    const errs: string[] = [];
+    const gh = { run: async () => "" } as never;
+    const prev = process.cwd();
+    const prevRepo = process.env.GH_REPO;
+    process.chdir(priv);
+    try {
+      process.env.GH_REPO = PRIVATE;
+      expect(await main(["public-sync", "--config", cfg, "--check"], gh, (s) => lines.push(s), (s) => errs.push(s))).toBe(0); // no tag needed for a versioned config
+      expect(lines.at(-1)).toContain("public check: ok");
+      write("docs/a.md", `see ${PRIVATE}\n`);
+      commit("docs: a");
+      expect(await main(["public-sync", "--config", cfg, "--check"], gh, () => {}, (s) => errs.push(s))).toBe(1);
+      expect(errs.at(-1)).toContain("docs/a.md:1:");
+      process.env.GH_REPO = TARGET;
+      expect(await main(["public-sync", "--config", cfg, "--check"], gh, (s) => lines.push(s), () => {})).toBe(0);
+      expect(lines.at(-1)).toContain("skipped");
+      // without GH_REPO: origin decides, not gh's chosen remote (a default pointed at the public copy does not skip it)
+      delete process.env.GH_REPO;
+      const origin = sh(priv, "git", "remote", "get-url", "origin");
+      sh(priv, "git", "remote", "set-url", "origin", `https://github.com/${PRIVATE}.git`);
+      sh(priv, "git", "remote", "add", "public", `https://github.com/${TARGET}.git`);
+      sh(priv, "git", "config", "remote.public.gh-resolved", "base");
+      expect(await main(["public-sync", "--config", cfg, "--check"], gh, () => {}, (s) => errs.push(s))).toBe(1);
+      expect(errs.at(-1)).toContain("docs/a.md:1:");
+      sh(priv, "git", "remote", "set-url", "origin", `git@github.com:${TARGET}.git`);
+      expect(await main(["public-sync", "--config", cfg, "--check"], gh, (s) => lines.push(s), () => {})).toBe(0);
+      expect(lines.at(-1)).toContain("skipped");
+      sh(priv, "git", "remote", "set-url", "origin", origin);
+      for (const flag of ["--dry-run", "--adopted"]) expect(await main(["public-sync", "--config", cfg, "--check", flag], gh, () => {}, () => {})).toBe(2);
+    } finally {
+      process.chdir(prev);
+      if (prevRepo === undefined) delete process.env.GH_REPO;
+      else process.env.GH_REPO = prevRepo;
+    }
   });
 
   test("spawnRun returns stdout without the last newline", () => {

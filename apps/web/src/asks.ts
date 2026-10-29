@@ -1,5 +1,5 @@
-import type { Ask, AskAnswer, PolicyInput, PolicyScope } from "@switchboard/protocol";
-import { jstDay } from "./time.ts";
+import type { Ask, AskAnswer, AskBatch, PolicyInput, PolicyScope } from "@switchboard/protocol";
+import { jstClock, jstDay } from "./time.ts";
 
 /** 判断待ち (#935): what each kind of question is called on screen. */
 export const KIND_LABEL: Record<Ask["kind"], string> = {
@@ -9,6 +9,7 @@ export const KIND_LABEL: Record<Ask["kind"], string> = {
   confirmation: "利用者確認",
   stop: "停止",
   wait: "依存待ち",
+  notice: "お知らせ",
 };
 
 // open is 未回答: 保留 is the person's hold (#936)
@@ -60,6 +61,14 @@ const UNKNOWN = "不明";
 /** The facts of one question card, in the PBI's order; a value the records do not have says 不明. Choices and conditions only when there are some. */
 export function askFacts(a: Ask): Array<{ label: string; value: string; href?: string }> {
   const r = a.recommendation;
+  // a daemon's notice (#2866) has no PBI, Task or choice: what it is about, why, what to do, and what put it there
+  if (a.kind === "notice")
+    return [
+      { label: "お知らせ", value: a.question ?? UNKNOWN },
+      ...(a.reason ? [{ label: "内容", value: a.reason }] : []),
+      ...(a.next ? [{ label: "すること", value: a.next }] : []),
+      { label: "出したもの", value: a.source.label },
+    ];
   return [
     { label: "対象リポジトリ", value: a.workspace?.name ?? UNKNOWN },
     a.pbi ? { label: "PBI", value: `#${a.pbi.number} ${a.pbi.title}`, href: a.pbi.url } : { label: "PBI", value: UNKNOWN },
@@ -106,7 +115,7 @@ const choiceKey = (c: string) => /^([^:：\s]{1,12})(?::\s|：)/.exec(c)?.[1] ??
 
 /**
  * The buttons of a question (#936), from what it takes (`answers`), its choices and its recommendation: a stop's grant
- * (#2745: この操作だけ許可して続ける, on the stop's Issue for a stage Task's), an approval's 承認して続行 / 拒否, one per choice (the recommended one first, as 推奨案で進める), 確認した, and 保留. None when it takes
+ * (#2745: この操作だけ許可して続ける, on the stop's Issue for a stage Task's), an approval's 承認して続行 / 拒否, one per choice (the recommended one first, as 推奨案で進める), 確認した, a notice's 誤検知として閉じる (#2866), and 保留. None when it takes
  * no answer; free text (and a confirmation's 違う) is the card's text box.
  */
 export function answerButtons(a: Ask): AnswerButton[] {
@@ -129,6 +138,7 @@ export function answerButtons(a: Ask): AnswerButton[] {
     }
   }
   if (takes.has("confirm")) out.push({ label: "確認した", answer: { kind: "confirm", ok: true }, send: `受け入れ条件「${a.question ?? ""}」を確認しました`, grant: null, target, next, primary: true });
+  if (takes.has("dismiss")) out.push({ label: "誤検知として閉じる", answer: { kind: "dismiss" }, send: "誤検知として閉じる", grant: null, target, next: "同じ当たりは次の検査でも出ない", primary: false });
   if (takes.has("hold")) out.push({ label: "保留", answer: { kind: "hold" }, send: "## 保留 を書く。判断待ちのまま", grant: null, target, next: "続行しない", primary: false });
   return out;
 }
@@ -145,6 +155,9 @@ export function resumeLabel(a: Pick<Ask, "state" | "resume">): { text: string; t
   if (r.state === "failed") return { text: `再開失敗${r.reason ? `: ${r.reason}` : ""}`, tone: "bad" };
   return { text: "回答済み", tone: "ok" };
 }
+
+/** How many other PBIs wait on the question (#1674); null = none. */
+export const unblocksLine = (a: Pick<Ask, "unblocks">) => (a.unblocks.length ? `答えると ${a.unblocks.length} 件が進められる` : null);
 
 /** What an answer does not take away (#936), one line each, shown above the buttons. */
 // a runner's refusal already says it
@@ -236,4 +249,21 @@ export function policyInput(form: PolicyForm | null): PolicyInput | undefined {
   if (!form || !form.opened) return undefined;
   if (form.scope === "once") return { scope: "once", target: form.target.trim(), when: [], expiresAt: null };
   return { scope: form.scope, target: form.target.trim(), when: form.when.filter((w) => w.on).map(({ key, value }) => ({ key, value })), expiresAt: Date.parse(`${form.expires}T23:59:59+09:00`) };
+}
+
+/* ---------- batches (#2046) ---------- */
+
+export const BATCH_LABEL: Record<AskBatch["kind"], string> = { sso: "SSO のログイン待ち", deploy: "配備の承認待ち" };
+
+/** A batch's Task lines: the Task, its operation and when it stopped. */
+export const batchLines = (b: Pick<AskBatch, "asks">, now = Date.now()) => b.asks.map((a) => ({ taskId: a.taskId, text: `${a.title} — ${a.op} — ${jstClock(a.at, now)}` }));
+
+/**
+ * The questions a batch shows: their own cards are left out of the list (answered on the batch's card), and so are the
+ * open stop / check of the Task logging in for it (the card says it logs in).
+ */
+export function hiddenByBatches(asks: Ask[], batches: AskBatch[]): Ask[] {
+  const ids = new Set(batches.flatMap((b) => b.asks.map((a) => a.askId)));
+  const loggingIn = new Set(batches.flatMap((b) => (b.loggingIn ? [b.loggingIn.taskId] : [])));
+  return asks.filter((a) => !ids.has(a.id) && !(a.task && loggingIn.has(a.task.id) && a.state === "open" && (a.kind === "stop" || a.kind === "check")));
 }

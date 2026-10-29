@@ -1,0 +1,13 @@
+{
+ "repositoryOwner": {"projectV2": {"id": "P1"}},
+ "repository": { "issues": {
+  "pageInfo": {"hasNextPage": false, "endCursor": null},
+  "nodes": [
+   {"number": 10, "body": "## ユーザーストーリー\nとして…\n\n## 到達点 / 受け入れ条件\n- [ ] 条件（検証: テスト）\n\n## スコープ外\n- なし\n\n## 元要望\n#1（要望の一文）\n\n**Story Points**: 3\n", "labels": {"nodes": [{"name": "type:pbi"}]}, "parent": null, "subIssues": {"totalCount": 1}, "projectItems": {"nodes": [{"project": {"number": 1}, "fieldValues": {"nodes": [{"number": 3, "field": {"name": "Story Points"}}, {"name": "Ready", "field": {"name": "Status"}}]}}]}},
+   {"number": 12, "body": "## ユーザーストーリー\nとして…\n\n## 到達点 / 受け入れ条件\n- [ ] 条件（検証: テスト）\n\n## スコープ外\n- なし\n\n## 元要望\n#1（要望の一文）\n\n**Story Points**: 3\n", "labels": {"nodes": [{"name": "type:pbi"}]}, "parent": null, "subIssues": {"totalCount": 1}, "projectItems": {"nodes": [{"project": {"number": 1}, "fieldValues": {"nodes": [{"name": "P9", "field": {"name": "Priority"}}, {"number": 3, "field": {"name": "Story Points"}}, {"name": "Ready", "field": {"name": "Status"}}]}}]}},
+   {"number": 13, "body": "## ユーザーストーリー\nとして…\n\n## 到達点 / 受け入れ条件\n- [ ] 条件（検証: テスト）\n\n## スコープ外\n- なし\n\n## 元要望\n#1（要望の一文）\n\n**Story Points**: 3\n", "labels": {"nodes": [{"name": "type:pbi"}]}, "parent": null, "subIssues": {"totalCount": 1}, "projectItems": {"nodes": [{"project": {"number": 1}, "fieldValues": {"nodes": [{"name": "P0", "field": {"name": "Priority"}}, {"number": 3, "field": {"name": "Story Points"}}, {"name": "Ready", "field": {"name": "Status"}}]}}]}},
+   {"number": 11, "body": "## 親 PBI\n#13\n\n## やること\n…\n\n## 手順\n1. …\n\n## 検証\n- …\n\n## 完了条件\n- [ ] …\n", "labels": {"nodes": [{"name": "type:task"}]}, "parent": {"number": 13, "labels": {"nodes": [{"name": "type:pbi"}]}}, "subIssues": {"totalCount": 0}, "projectItems": {"nodes": [{"project": {"number": 1}, "fieldValues": {"nodes": [{"name": "In progress", "field": {"name": "Status"}}]}}]}},
+   {"number": 1, "body": "## 要望\n整えた文\n\n## 出典\n- 誰の言葉: 利用者\nいつ: 2026-01-01 / チャット\n", "labels": {"nodes": [{"name": "type:request"}]}, "parent": null, "subIssues": {"totalCount": 0}, "projectItems": {"nodes": [{"project": {"number": 1}, "fieldValues": {"nodes": [{"name": "Backlog", "field": {"name": "Status"}}]}}]}}
+  ]
+ } }
+}

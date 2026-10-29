@@ -16,7 +16,7 @@ import { jstDateTime } from "../time.ts";
 /** How long 再評価 shows 判定中 without word from the daemon: the judge's 90 s, a fallback turn, and slack. */
 const JUDGING_WAIT_MS = 200_000;
 
-export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSummary | null; onAbort: () => void; checksRev?: number; evalsRev?: number; /** 改善要望にする (#1221): opens the feedback dialog with a draft from this task's evaluations. */ onImprove?: (taskId: string) => void; onRestarting?: () => void; runners?: RunnerInfo[]; noTerminal?: boolean; onTask?: (t: Task) => void; tasks?: Task[]; onOpenTask?: (id: string) => void; workspaces?: Workspace[]; open: boolean; onClose: () => void }) {
+export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSummary | null; onAbort: () => void; checksRev?: number; evalsRev?: number; /** 改善要望にする (#1221): opens the feedback dialog with a draft from this task's evaluations. */ onImprove?: (taskId: string) => void; onRestarting?: () => void; runners?: RunnerInfo[]; noTerminal?: boolean; onTask?: (t: Task) => void; tasks?: Task[]; onOpenTask?: (id: string) => void; workspaces?: Workspace[]; open: boolean; onClose: () => void; /** 評価をお願い (#1877): scroll to 自分の評価 once the evals are read, then onFocused */ focus?: "human"; onFocused?: () => void }) {
   // Shadow run (#99): the linked task, whichever side this one is. Derived from the task list so no extra fetch is needed.
   const shadowTask = props.task.shadowOf ? undefined : props.tasks?.find((t) => t.shadowOf === props.task.id);
   const primaryTask = props.task.shadowOf ? props.tasks?.find((t) => t.id === props.task.shadowOf) : undefined;
@@ -142,6 +142,12 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
       setJudgeErr(String(e.message ?? e));
     });
   };
+  useEffect(() => {
+    if (props.focus !== "human" || !props.open || !evals) return;
+    document.getElementById("brief-human-eval")?.scrollIntoView({ block: "center" });
+    props.onFocused?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- onFocused is a fresh closure on every render; the scroll is for this focus request
+  }, [props.focus, props.open, evals]);
   // 自分の評価 (#1220): a rating and a note the person saves in one go; optional, nothing prompts for it
   const [rating, setRating] = useState<number | null>(null);
   const [comment, setComment] = useState("");
@@ -451,7 +457,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
         )}
         {evals && (
           <>
-            <div className="kv" style={{ marginTop: 8 }}>
+            <div className="kv" id="brief-human-eval" style={{ marginTop: 8 }}>
               <span>自分の評価</span>
               <span className="num">
                 {humanLabel(evals) ?? "なし"}{" "}

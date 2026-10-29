@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent, AnswerPolicy, ApprovalRuleMatch, Artifact, AskList, PolicySubject, Backlog, BacklogItem, PendingApproval, RunnerAdapter, RunnerId, RunnerSession, StopSummary, Task } from "@switchboard/protocol";
+import type { AgentEvent, AnswerPolicy, ApprovalRuleMatch, Artifact, AskList, PolicySubject, Backlog, BacklogItem, PendingApproval, RunnerAdapter, RunnerId, RunnerSession, StopRecord, StopSummary, Task } from "@switchboard/protocol";
 import { importing } from "../fixtures/github-import.ts";
-import { answersOf, ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, grantOfChoice, parseAskBlock, resumeOfIssue, resumeOfTask } from "./asks.ts";
+import { answersOf, ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, closedHits, grantOfChoice, noticeAsks, parseAskBlock, rankAsks, resumeOfIssue, resumeOfTask } from "./asks.ts";
+import { approvalBatches } from "./approval-batch.ts";
 import { heldSince, type GhRunner } from "./backlog.ts";
+import { reduceStops } from "./stops.ts";
 import { loadConfig } from "./config.ts";
 import { startServer, type CoreServer } from "./server.ts";
 
@@ -303,6 +305,63 @@ describe("dedupeAsks", () => {
   });
 });
 
+describe("rankAsks (#1674)", () => {
+  const decide = (n: number, at: string, over: Partial<BacklogItem> = {}) => item({ number: n, stage: "needs-decision", decision: { body: DECISION, at, issue: n }, ...over });
+  const pre = (n: number, state: "met" | "pending" = "pending") => ({ number: n, kind: "issue" as const, need: "done" as const, state, via: null });
+  const wait = (n: number) => ({ number: n, kind: "pr" as const, open: true, state: "pending" as const, reason: "overlap" as const, pbi: null });
+
+  test("unblocks: the other PBIs of the same Workspace naming the question's PBI, Issue or stage Issue with an unmet prerequisite or wait; a met one, another Workspace's same number and itself are not counted", () => {
+    const items = [
+      decide(5, "2026-10-07T10:00:00Z", { priority: "P1", prereqs: [pre(5)] }),
+      item({ number: 20, title: "waits on 5", prereqs: [pre(5)] }),
+      item({ number: 21, title: "waits on 5 by release", waits: [wait(5)] }),
+      item({ number: 22, prereqs: [pre(5, "met")] }),
+      item({ number: 23, prereqs: [pre(5)], workspaceId: "ws_other" }),
+      item({ number: 24, type: "request", prereqs: [pre(5)] }),
+      item({ number: 25, title: "waits on the stage Issue", prereqs: [pre(40)] }),
+    ];
+    const [d] = rankAsks(dedupeAsks(asksFromBacklog(items, NOW)), items).filter((a) => a.kind === "decision");
+    expect(d).toMatchObject({ unblocks: [{ number: 20, title: "waits on 5", url: `${ISSUES}/20` }, { number: 21, title: "waits on 5 by release", url: `${ISSUES}/21` }], priority: "P1" });
+    // a stage Task's question is about its Issue too
+    const [s] = rankAsks(dedupeAsks(asksFromBacklog([item({ number: 9, stopSummary: [stop({ work: { workspaceId: "ws_meta", issue: 9, taskId: "tk_9" } })] })], NOW)).map((a) => ({ ...a, task: { ...a.task!, stageIssue: 40 } })), items);
+    expect(s!.unblocks.map((u) => u.number)).toEqual([25]);
+    expect(s!.priority).toBeNull();
+  });
+
+  test("orders the person's questions by how many wait, then Priority (P0 first, unset last), then newest; automatic, answered and resolved keep their order", () => {
+    const lastTask = { id: "tk", status: "done" as const, statusAt: NOW - 7_200_000, createdAt: NOW - 7_200_000, updatedAt: NOW - 7_200_000, action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null };
+    const items = [
+      decide(1, "2026-10-07T11:00:00Z"),
+      decide(2, "2026-10-07T10:00:00Z", { priority: "P2" }),
+      decide(8, "2026-10-07T08:30:00Z", { priority: "P2" }),
+      decide(9, "2026-10-07T06:00:00Z", { heldAt: "2026-10-07T06:30:00Z" }),
+      item({ number: 10, stage: "in-progress", answeredAt: "2026-10-07T11:00:00Z", lastTask }),
+      item({ number: 11, stage: "in-progress", answeredAt: "2026-10-07T10:30:00Z", lastTask }),
+      item({ number: 12, stopSummary: [stop({ key: "ws_meta#12\u0000x\u0000\u0000decision\u0000", work: { workspaceId: "ws_meta", issue: 12, taskId: "tk_12" }, state: "resolved", next: "none", lastAt: NOW - 60_000 })] }),
+      decide(3, "2026-10-07T09:00:00Z", { priority: "P0" }),
+      decide(4, "2026-10-07T08:00:00Z"),
+      decide(5, "2026-10-07T07:00:00Z", { priority: "P3" }),
+      item({ number: 6, waits: [{ ...wait(70), reason: "prerequisite" }], waitsAt: "2026-10-07T09:30:00Z" }),
+      item({ number: 7, waits: [{ ...wait(71), reason: "prerequisite" }], waitsAt: "2026-10-07T09:40:00Z", prereqs: [pre(6)] }),
+      item({ number: 30, prereqs: [pre(4), pre(5)] }),
+      item({ number: 31, prereqs: [pre(4), pre(9)] }),
+      item({ number: 32, prereqs: [pre(10), pre(12)] }),
+    ];
+    const deduped = dedupeAsks(asksFromBacklog(items, NOW));
+    const ranked = rankAsks(deduped, items);
+    // #9 is held (the person's, one waiting); #2 and #8 tie on count and Priority, so the newer first
+    expect(ranked.map((a) => `${a.kind}/${a.state}#${a.pbi!.number}`)).toEqual([
+      "decision/open#4", "decision/open#5", "decision/held#9", "decision/open#3", "decision/open#2", "decision/open#8", "decision/open#1",
+      "wait/open#7", "wait/open#6", "decision/answered#10", "decision/answered#11", "stop/resolved#12",
+    ]);
+    // the other groups keep dedupeAsks' order even when PBIs wait on them
+    const rest = (l: typeof ranked) => l.filter((a) => a.needs === "auto" || a.state === "answered" || a.state === "resolved").map((a) => a.id);
+    expect(rest(ranked)).toEqual(rest(deduped));
+    expect(ranked.find((a) => a.pbi!.number === 10)!.unblocks.map((u) => u.number)).toEqual([32]);
+    expect(ranked.find((a) => a.pbi!.number === 6)!.unblocks.map((u) => u.number)).toEqual([7]);
+  });
+});
+
 describe("mockups (#2221)", () => {
   const art = (id: string, title: string): Artifact => ({ id, taskId: "tk_m", title, kind: "file", source: `/w/${id}.html`, entry: `${id}.html`, mime: "text/html", size: 1, removedAt: null, createdAt: NOW, updatedAt: NOW });
   const two = [art("art_a", "画面イメージ A: 上に並べる"), art("art_b", "画面イメージ B: 下に並べる")];
@@ -499,13 +558,22 @@ describe("GET /api/asks", () => {
     const a = await approvalTask("approve me", meta().id);
     const c = await checkTask("check me", meta().id);
     const list = await asks();
-    const person = list.filter((x) => x.needs === "person" && x.state === "open");
+    // the meta checkout's origin is not the faked acme/app: that workspace's notice (#2866) is not what this looks at
+    const person = list.filter((x) => x.needs === "person" && x.state === "open" && x.kind !== "notice");
     expect(person.map((x) => x.kind).sort()).toEqual(["approval", "check", "confirmation", "confirmation", "decision"]);
     expect(person.find((x) => x.kind === "approval")).toMatchObject({ id: `approval:${a}:perm1`, question: "write x", route: "approval", task: { id: a, title: "approve me" }, source: { taskId: a } });
     expect(person.find((x) => x.kind === "check")).toMatchObject({ question: "PR #12 をマージしてよいか", choices: ["A: マージする", "B: 待つ"], recommendation: { choice: "A", why: "CI が緑" }, route: "task", source: { taskId: c } });
     expect(person.find((x) => x.kind === "decision")).toMatchObject({ pbi: { number: 306 }, question: "保存先をどちらにするか", route: "backlog" });
     for (const x of person) expect(x.workspace).toEqual({ id: meta().id, name: meta().name });
     expect(person.find((x) => x.kind === "decision")!.source.url).toStartWith("https://github.com/acme/app/issues/");
+  });
+
+  test("GET /api/asks: each question carries unblocks and the Priority of its PBI (#1674)", async () => {
+    const backlog = (await fetch(`${base}/api/backlog`).then((r) => r.json())) as Backlog;
+    const d = (await asks()).find((x) => x.kind === "decision" && x.pbi?.number === 306)!;
+    expect(d.unblocks).toEqual([]);
+    expect(d.priority).toBe(backlog.items.find((i) => i.number === 306)!.priority);
+    for (const x of await asks()) expect(Array.isArray(x.unblocks)).toBe(true);
   });
 
   test("dedupe tasks: a Task's approval and its permission stop are one; a stage Task that wrote ## 判断待ち and ended 要対応 is the decision only", async () => {
@@ -611,5 +679,147 @@ describe("policy (#938)", () => {
     expect(a.policy.applied).toMatchObject({ id: "p1", scope: "repo", at: NOW - 500 });
     expect(a.policy.applied!.summary).toContain("gh pr merge PR #12");
     expect(decide([], [decisionStop()]).policy.applied).toBeNull();
+  });
+});
+
+describe("approvalBatches (#2046)", () => {
+  const task = (id: string, over: Partial<Task> = {}): Task =>
+    ({ id, workspaceId: null, title: `title ${id}`, runner: "claude", cwd: "/tmp", scope: [], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, origin: "switchboard", resumeAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: NOW - 600_000, createdAt: NOW - 600_000, updatedAt: NOW - 60_000, ...over }) as Task;
+  const rec = (t: Task, over: Partial<StopRecord>): StopRecord => ({ id: `${t.id}/x`, work: { workspaceId: t.workspaceId, issue: null, taskId: t.id }, op: "op", target: "", reason: "decision", evidence: "e", safety: "unknown", conditions: [], answer: null, actions: [], state: "waiting", grant: null, at: NOW - 60_000, ...over });
+  const sso = (t: Task, at: number, over: Partial<StopRecord> = {}) => rec(t, { id: `${t.id}/sso`, op: "aws sso login", reason: "auth", at, ...over });
+
+  test("groups sso and deploy stops across tasks", () => {
+    const a = task("tk_a", { workspaceId: "ws_1", createdAt: NOW - 900_000 });
+    const b = task("tk_b", { workspaceId: "ws_2", createdAt: NOW - 800_000 });
+    const c = task("tk_c", { workspaceId: "ws_3", createdAt: NOW - 700_000 });
+    const d = task("tk_d", { workspaceId: "ws_1", createdAt: NOW - 600_000 });
+    const [e, f, g, h] = [task("tk_e"), task("tk_f", { status: "running" }), task("tk_g"), task("tk_h")];
+    const entries = [
+      { task: c, records: [rec(c, { op: "POST /api/daemon/promote", target: "main", reason: "permission", at: NOW - 30_000 })] },
+      { task: b, records: [sso(b, NOW - 40_000)] },
+      // the newest stop counts: a's login came after its merge question
+      { task: a, records: [rec(a, { id: "tk_a/m", op: "gh pr merge", target: "PR #1", at: NOW - 90_000 }), sso(a, NOW - 50_000)] },
+      // not waiting on the person: a merge refusal (not a deploy), a login answered by a reply, a running Task, a resolved one
+      { task: d, records: [rec(d, { op: "gh pr merge", target: "PR #2", reason: "permission" })] },
+      { task: e, records: [sso(e, NOW - 9_000), sso(e, NOW - 8_000, { answer: { ref: "seq:3", at: NOW - 8_000 } })] },
+      { task: f, records: [sso(f, NOW)] },
+      { task: g, records: [sso(g, NOW - 9_000), sso(g, NOW, { state: "resolved" })] },
+      // a login stop and a newer one resolved: went on past it; a login "answered" by a runner's comment URL still waits;
+      // a Task waiting on a tool approval is sent nothing
+      { task: task("tk_i"), records: [sso(task("tk_i"), NOW - 9_000), rec(task("tk_i"), { id: "tk_i/y", op: "gh api", state: "resolved", at: NOW - 5_000 })] },
+      { task: task("tk_j", { createdAt: NOW - 650_000 }), records: [sso(task("tk_j"), NOW - 9_000, { answer: { ref: "https://github.com/o/r/issues/1#issuecomment-2", at: NOW - 9_000 } })] },
+      { task: task("tk_k", { status: "waiting" }), records: [sso(task("tk_k"), NOW)] },
+      // stopped on the login again after the answer: a new stop, carrying the earlier answer (recordStop), unanswered
+      { task: h, records: [sso(h, NOW - 9_000, { answer: { ref: "seq:3", at: NOW - 8_000 } }), sso(h, NOW - 5_000, { id: "tk_h/sso2", answer: { ref: "seq:3", at: NOW - 8_000 } })] },
+    ];
+    const asks = dedupeAsks(entries.flatMap((x) => asksFromTasks({ approvals: [], tasks: [x.task], lastReply: () => null, permissionEvents: () => [], stops: () => reduceStops(x.records), workspaceName: (id) => id, now: NOW })));
+    const batches = approvalBatches(entries, asks);
+    expect(batches.map((x) => x.id)).toEqual(["batch:sso", "batch:deploy"]);
+    // oldest Task first, across workspaces; each one's question as listed (a needs_action Task's stop folds into its check)
+    expect(batches[0]!.asks).toEqual([
+      { askId: "check:tk_a:", taskId: "tk_a", title: "title tk_a", workspaceId: "ws_1", op: "aws sso login", at: NOW - 50_000 },
+      { askId: "check:tk_b:", taskId: "tk_b", title: "title tk_b", workspaceId: "ws_2", op: "aws sso login", at: NOW - 40_000 },
+      { askId: "check:tk_j:", taskId: "tk_j", title: "title tk_j", workspaceId: null, op: "aws sso login", at: NOW - 9_000 },
+      // its stop asks nothing on its own (asked and answered before, #939), so it is not folded
+      { askId: "stop:task:tk_h|aws sso login||auth|", taskId: "tk_h", title: "title tk_h", workspaceId: null, op: "aws sso login", at: NOW - 5_000 },
+    ]);
+    expect(batches[1]!.asks.map((x) => [x.taskId, x.op, x.workspaceId])).toEqual([["tk_c", "POST /api/daemon/promote", "ws_3"]]);
+    expect(batches[0]!.asks.every((x) => asks.some((q) => q.id === x.askId))).toBe(true);
+    // a kind with no Task has no batch
+    expect(approvalBatches(entries.slice(1, 3), asks).map((x) => x.kind)).toEqual(["sso"]);
+    expect(approvalBatches([], [])).toEqual([]);
+  });
+});
+
+describe("noticeAsks (#2866)", () => {
+  const ws = { id: "ws_1", name: "app" };
+  const why = "origin は acme/app、登録は acme/app-dev です。登録のリポジトリの clone にする（`git remote set-url origin https://github.com/acme/app-dev.git` など）まで Task を起動しません";
+  test("noticeAsks: an unusable workspace is open until it is fixed, then resolved", () => {
+    const t0 = 1_000_000;
+    const first = noticeAsks({ unusable: [{ workspace: ws, why }], now: t0 }, {});
+    expect(first.asks).toHaveLength(1);
+    const a = first.asks[0]!;
+    expect(a).toMatchObject({ id: "notice:workspace:ws_1", kind: "notice", needs: "person", state: "open", at: t0, changedAt: t0, workspace: ws, question: "workspace app を使えません", route: "none", answers: [] });
+    expect(a.source.label).toBe("workspace の検査");
+    expect(a.reason).toBe("origin は acme/app、登録は acme/app-dev です。");
+    expect(a.next).toStartWith("登録のリポジトリの clone にする");
+    // read again, still broken: the first sight is kept and nothing is written
+    const again = noticeAsks({ unusable: [{ workspace: ws, why }], now: t0 + 5000 }, first.record);
+    expect(again.record).toBe(first.record);
+    expect(again.asks[0]).toMatchObject({ state: "open", at: t0 });
+    // fixed: resolved with no answer, the question still readable
+    const fixed = noticeAsks({ unusable: [], now: t0 + 9000 }, again.record);
+    expect(fixed.asks[0]).toMatchObject({ id: "notice:workspace:ws_1", state: "resolved", at: t0, changedAt: t0 + 9000, question: "workspace app を使えません", answers: [] });
+    expect(noticeAsks({ unusable: [], now: t0 + 10_000 }, fixed.record).record).toBe(fixed.record);
+    // a day after it was fixed it drops off
+    const later = noticeAsks({ unusable: [], now: t0 + 9000 + ASK_HISTORY_MS + 1 }, fixed.record);
+    expect(later.asks).toEqual([]);
+    expect(later.record).toEqual({});
+  });
+
+  test("noticeAsks: broken again after a fix is a new notice", () => {
+    const fixed = noticeAsks({ unusable: [], now: 2000 }, noticeAsks({ unusable: [{ workspace: ws, why }], now: 1000 }, {}).record);
+    const back = noticeAsks({ unusable: [{ workspace: ws, why }], now: 3000 }, fixed.record);
+    expect(back.asks[0]).toMatchObject({ state: "open", at: 3000, changedAt: 3000 });
+  });
+
+  const scan = (at: number, lines: string[]) => ({ schedule: { id: "sch_1", title: "認証の検査" }, result: { at, repos: 1, hits: lines.filter((l) => l.startsWith("  ")).length, failed: 0, lines } });
+  const hit = ["o/a: 当たり 1 件（scanned 3）", "  https://github.com/o/a/issues/1: github-token（2 行目）"];
+  test("noticeAsks: a schedule's notice belongs to the schedule's workspace (meta), a workspace's to that workspace", () => {
+    const meta = { id: "ws_meta", name: "switchboard" };
+    const r = noticeAsks(
+      {
+        unusable: [{ workspace: ws, why }],
+        scans: [{ ...scan(10, hit), workspace: meta }],
+        windows: [{ schedule: { id: "sch_w", title: "承認待ち" }, workspace: meta, note: { title: "SSO・配備の承認待ち: 1", body: "x" } }],
+        now: 100,
+      },
+      {},
+    );
+    expect(r.asks.map((a) => [a.id.split("@")[0], a.workspace])).toEqual([
+      ["notice:workspace:ws_1", ws],
+      ["notice:scan:sch_1", meta],
+      ["notice:approval-window:sch_w", meta],
+    ]);
+  });
+
+  test("noticeAsks: a scan hit is open, dismissed stays closed for the same hits, comes back for new ones, resolves when clean", () => {
+    const first = noticeAsks({ unusable: [], scans: [scan(10, hit)], now: 100 }, {});
+    expect(first.asks).toHaveLength(1);
+    expect(first.asks[0]).toMatchObject({ id: "notice:scan:sch_1@100", kind: "notice", state: "open", answers: ["dismiss"], workspace: null, question: "認証の値の検査: 当たり 1 件 / 検査できなかった 0 リポジトリ", reason: "https://github.com/o/a/issues/1: github-token（2 行目）", source: { label: "予定「認証の検査」" } });
+    // the next firing with the same hit: the same question
+    expect(noticeAsks({ unusable: [], scans: [scan(20, hit)], now: 200 }, first.record).asks[0]!.id).toBe("notice:scan:sch_1@100");
+    // dismissed (what the answer writes): the same hit does not come back
+    const key = Object.keys(first.record)[0]!;
+    const dismissed = { ...first.record, [key]: { ...first.record[key]!, dismissed: first.record[key]!.fingerprint, closed: true, resolvedAt: 150 } };
+    expect(noticeAsks({ unusable: [], scans: [scan(20, hit)], now: 200 }, dismissed).asks).toEqual([]);
+    // a new hit: a new question
+    const more = [...hit, "  https://github.com/o/a/issues/2: aws-key（1 行目）"];
+    // a new hit next to the closed one: only the new one shows
+    const back = noticeAsks({ unusable: [], scans: [scan(30, more)], now: 300 }, dismissed);
+    expect(back.asks[0]).toMatchObject({ id: "notice:scan:sch_1@300", state: "open", question: "認証の値の検査: 当たり 1 件 / 検査できなかった 0 リポジトリ", reason: "https://github.com/o/a/issues/2: aws-key（1 行目）" });
+    // clean: resolved, no answer left
+    const clean = noticeAsks({ unusable: [], scans: [scan(40, ["o/a: 0 件（scanned 3）"])], now: 400 }, back.record);
+    expect(clean.asks[0]).toMatchObject({ id: "notice:scan:sch_1@300", state: "resolved", changedAt: 400, answers: [] });
+    // a firing that failed as a whole (the scheduler's line) is a notice too
+    const failedRun = noticeAsks({ unusable: [], scans: [scan(50, ["検査が失敗した（Error。理由は scan_issues.sh を手で走らせて見る）"])], now: 500 }, {});
+    expect(failedRun.asks[0]).toMatchObject({ state: "open", question: "認証の値の検査: 当たり 0 件 / 検査できなかった 1 リポジトリ" });
+    // so is a firing with no meta workspace to run the kit from (the scheduler's own line)
+    expect(noticeAsks({ unusable: [], scans: [scan(60, ["meta workspace がない（共通キットの scan-issues を呼べない）"])], now: 600 }, {}).asks).toHaveLength(1);
+    // a dismissed hit does not come back when a repository fails alongside it; the failure alone shows, with no dismiss
+    const down = "o/x: 検査できなかった（exit 2）";
+    const withFail = noticeAsks({ unusable: [], scans: [scan(70, [...hit, down])], now: 700 }, dismissed);
+    expect(withFail.asks[0]).toMatchObject({ state: "open", question: "認証の値の検査: 当たり 0 件 / 検査できなかった 1 リポジトリ", reason: down, answers: [] });
+    // the failure gone, the closed hit still there: the failure's notice is resolved, the hit stays closed
+    const recovered = noticeAsks({ unusable: [], scans: [scan(80, hit)], now: 800 }, withFail.record);
+    expect(recovered.asks).toMatchObject([{ state: "resolved", changedAt: 800, answers: [] }]);
+    expect(noticeAsks({ unusable: [], scans: [scan(90, hit)], now: 800 + ASK_HISTORY_MS + 1 }, recovered.record).asks).toEqual([]);
+    // two hits closed together: one of them alone later stays closed (each hit is remembered)
+    const two = noticeAsks({ unusable: [], scans: [scan(10, more)], now: 1000 }, {});
+    const k2 = Object.keys(two.record)[0]!;
+    const closedTwo = { ...two.record, [k2]: { ...two.record[k2]!, dismissed: closedHits(two.record[k2]!), closed: true, resolvedAt: 1001 } };
+    expect(noticeAsks({ unusable: [], scans: [scan(20, hit)], now: 1100 }, closedTwo).asks).toEqual([]);
+    // dismissed, then clean: nothing to show, the record is dropped
+    expect(noticeAsks({ unusable: [], scans: [scan(40, ["o/a: 0 件（scanned 3）"])], now: 400 }, dismissed)).toEqual({ asks: [], record: {} });
   });
 });

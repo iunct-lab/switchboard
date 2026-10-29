@@ -1,6 +1,6 @@
 import type { AgentEvent, Task } from "@switchboard/protocol";
 import type { Db } from "./db.ts";
-import { AUTO_RESUME_HEAD, isAutomaticUserText } from "./evals.ts";
+import { AUTO_RESUME_HEAD, isAutomaticUserText, STOP_NOTE } from "./evals.ts";
 
 /**
  * Turns cut by the daemon itself stopping — the host shutting down (a Spot interruption, a stop from the console), a
@@ -10,8 +10,6 @@ import { AUTO_RESUME_HEAD, isAutomaticUserText } from "./evals.ts";
  * after the start until a person writes to it.
  */
 
-/** The transcript note a stop leaves; also how the resumer and the cap below recognise one. */
-export const STOP_NOTE = "デーモンの停止でターンが中断されました";
 /** The note a GitHub API limit stop writes (#550, ratelimit.ts): not a daemon stop. */
 export const GITHUB_NOTE = "GitHub の API 上限で待機";
 /** What the daemon sends to continue after a stop. The runner's commands in flight were killed with it. */

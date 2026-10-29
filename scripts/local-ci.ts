@@ -19,8 +19,9 @@
  */
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
-import { forgeOf, runForgeOperation } from "../ops-kit/src/forge.ts";
+import { dirname, join } from "node:path";
+import { forgeTargetOf, originOf, runForgeOperation } from "../ops-kit/src/forge.ts";
+import { gitlabForge, runGlab, viewGitlabMr, type Sh } from "../ops-kit/src/forge-gitlab.ts";
 import { githubForge } from "../ops-kit/src/forge-github.ts";
 import { hostAws } from "../ops-kit/src/secrets.ts";
 import { ciExit, runCi, type Step } from "./ci.ts";
@@ -29,6 +30,64 @@ export type { Step };
 
 /** A result's first line: pass or fail, the head, then the base it was merged into (#913). A mark without the base is none. */
 export const LOCAL_CI_RESULT = /^\[local-ci\] (pass|fail) ([0-9a-f]{40}) base=([0-9a-f]{40})(?=\s|$)/;
+
+/** A pass's second line (#2950): each PR of its stack, the bottom first up to the one run, with the patch-id of its own diff. */
+export const LOCAL_CI_STACK = /^stack((?: #\d+=[0-9a-f]{40})+)$/;
+
+/** The stack line of a result as PR number → patch-id, or null when its second line is none. */
+export function stackOf(body: string): Map<number, string> | null {
+  const m = LOCAL_CI_STACK.exec(body.split("\n")[1] ?? "");
+  if (!m) return null;
+  return new Map([...m[1]!.matchAll(/#(\d+)=([0-9a-f]{40})/g)].map((x) => [Number(x[1]), x[2]!]));
+}
+
+/**
+ * The PRs of `pr`'s stack below it and `pr` with their heads now, the bottom first: down by the open PR whose head is
+ * this one's base, until the base is the default branch. None or two below there → the stack ends there (at least `pr`).
+ */
+export async function stackBelow(pr: number, repo: string, sh: Deps["sh"]): Promise<Array<{ pr: number; head: string }>> {
+  const main = (await sh(["gh", "repo", "view", repo, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"])).trim();
+  const out: Array<{ pr: number; head: string }> = [];
+  for (let n = pr; ;) {
+    const v = JSON.parse(await sh(["gh", "pr", "view", String(n), "-R", repo, "--json", "baseRefName,headRefOid"])) as { baseRefName: string; headRefOid: string };
+    out.unshift({ pr: n, head: v.headRefOid });
+    if (v.baseRefName === main) return out;
+    const below = JSON.parse(await sh(["gh", "pr", "list", "-R", repo, "--head", v.baseRefName, "--state", "open", "--json", "number"])) as Array<{ number: number }>;
+    if (below.length !== 1 || out.some((x) => x.pr === below[0]!.number)) return out;
+    n = below[0]!.number;
+  }
+}
+
+/**
+ * The PRs a pass of `sha` covers: `pr` (its head now must be `sha`), then down its stack while each one's head now is in
+ * the tested head (a fix on a lower PR not yet rebased into this one was not tested: it and the PRs below it are left out).
+ */
+export async function stackTested(pr: number, sha: string, t: { repo: string; root: string }, sh: Deps["sh"]): Promise<Array<{ pr: number; head: string }>> {
+  const below = await stackBelow(pr, t.repo, sh);
+  if (below.at(-1)!.head !== sha) throw new Error(`PR #${pr} の head が ${below.at(-1)!.head.slice(0, 7)} で、テストした ${sha.slice(0, 7)} ではない`);
+  let from = below.length - 1;
+  while (from > 0 && await sh(["git", "-C", t.root, "merge-base", "--is-ancestor", below[from - 1]!.head, sha]).then(() => true, () => false)) from--;
+  return below.slice(from);
+}
+
+/** The stack line's PRs with their patch-ids; a head that moved while the diffs were read → an error (its diff may be untested). */
+export async function stackLine(pr: number, sha: string, t: { repo: string; root: string }, sh: Deps["sh"]): Promise<Array<{ pr: number; patchId: string }>> {
+  const tested = await stackTested(pr, sha, t, sh);
+  const ids = await Promise.all(tested.map(async (x) => ({ pr: x.pr, patchId: await patchIdOf(x.pr, t.repo, sh) })));
+  for (const x of tested) {
+    const { headRefOid } = JSON.parse(await sh(["gh", "pr", "view", String(x.pr), "-R", t.repo, "--json", "headRefOid"])) as { headRefOid: string };
+    if (headRefOid !== x.head) throw new Error(`PR #${x.pr} の head が差分を読む間に変わった（${x.head.slice(0, 7)} → ${headRefOid.slice(0, 7)}）`);
+  }
+  return ids;
+}
+
+/** The patch-id of the PR's own diff against its base branch (`gh pr diff | git patch-id --verbatim`, as a recheck's mark). */
+export async function patchIdOf(pr: number, repo: string, sh: Deps["sh"]): Promise<string> {
+  const out = await sh(["bash", "-o", "pipefail", "-c", 'gh pr diff "$1" -R "$2" | git patch-id --verbatim', "patch-id", String(pr), repo]);
+  const id = out.split(" ")[0]!.trim();
+  if (!/^[0-9a-f]{40}$/.test(id)) throw new Error(`PR #${pr} の差分の patch-id が読めない（${out.trim() ? "40 桁でない" : "差分が空"}）`);
+  return id;
+}
 
 /** `log` = where the whole output of a step that failed was kept (#1232), `fails` = its failLines; passing steps keep nothing. */
 export interface StepResult extends Step { code: number; seconds: number; tail: string; log?: string; fails?: string[] }
@@ -113,13 +172,14 @@ export function workflowSteps(yaml: string): Step[] {
   return Object.values(doc.jobs).flatMap((j) => j.steps.filter((s) => s.run).map((s) => ({ name: s.name ?? s.run!.split("\n")[0]!, run: s.run! })));
 }
 
-/** What one run tested and how it went; `conflict` = the head did not merge into the base, nothing ran. */
-export interface LocalCiResult { sha: string; base: string; results: StepResult[]; ok: boolean; conflict?: boolean; perf?: PerfVerdict; baseline?: Baseline }
+/** What one run tested and how it went; `conflict` = the head did not merge into the base, nothing ran. `stack`: the PRs a pass covers (#2950). */
+export interface LocalCiResult { sha: string; base: string; results: StepResult[]; ok: boolean; conflict?: boolean; perf?: PerfVerdict; baseline?: Baseline; stack?: Array<{ pr: number; patchId: string }> }
 
-/** The PR comment of a run, pass or not (#913): the mark, what was tested, every step that ran; a failure names its step and what failed in it. */
+/** The PR comment of a run, pass or not (#913): the mark, a pass's stack line, what was tested, every step that ran; a failure names its step and what failed in it. */
 export function resultComment(r: LocalCiResult): string {
   const head = [
     `[local-ci] ${r.ok ? "pass" : "fail"} ${r.sha} base=${r.base}`,
+    ...(r.ok && r.stack?.length ? [`stack ${r.stack.map((x) => `#${x.pr}=${x.patchId}`).join(" ")}`] : []),
     "",
     "`.github/workflows/ci.yml` の手順（`bun scripts/ci.ts` は `scripts/ci.ts` の各手順）を、PR の head を base にマージしたものでローカルで実行した（`bun scripts/local-ci.ts`）。",
     "",
@@ -149,15 +209,20 @@ export interface Deps {
  * The PR's head and its base branch's tip as they are now, both fetched into `repoRoot` (#913). The head comes by
  * refs/pull/<n>/head, which GitHub keeps for every PR (a fork's too); it must be the head the PR names.
  */
-export async function readTarget(pr: number, repoRoot: string, repo: string, d: Pick<Deps, "sh">): Promise<{ head: string; base: string }> {
-  const view = JSON.parse(await d.sh(["gh", "pr", "view", String(pr), "-R", repo, "--json", "headRefOid,baseRefName"])) as { headRefOid: string; baseRefName: string };
+export async function readTarget(pr: number, repoRoot: string, repo: string, d: Pick<Deps, "sh">, glab: Sh = runGlab): Promise<{ head: string; base: string }> {
+  // a GitLab checkout (#892): the MR `pr` of the project its forge names; GitLab keeps refs/merge-requests/<iid>/head
+  const named = forgeTargetOf(repoRoot, originOf(repoRoot));
+  const view = named.service === "gitlab"
+    ? await viewGitlabMr(glab, named, pr).then((m) => ({ headRefOid: m.head, baseRefName: m.target }))
+    : JSON.parse(await d.sh(["gh", "pr", "view", String(pr), "-R", repo, "--json", "headRefOid,baseRefName"])) as { headRefOid: string; baseRefName: string };
+  const headRef = named.service === "gitlab" ? `refs/merge-requests/${pr}/head` : `refs/pull/${pr}/head`;
   const fetched = async (ref: string) => {
     await d.sh(["git", "-C", repoRoot, "fetch", "-q", "origin", ref]);
     return (await d.sh(["git", "-C", repoRoot, "rev-parse", "FETCH_HEAD"])).trim();
   };
   const base = await fetched(`refs/heads/${view.baseRefName}`);
-  const head = await fetched(`refs/pull/${pr}/head`);
-  if (head !== view.headRefOid) throw new Error(`refs/pull/${pr}/head は ${head.slice(0, 7)} で、PR の head ${view.headRefOid.slice(0, 7)} ではない（push の直後なら少し待ってやり直す）`);
+  const head = await fetched(headRef);
+  if (head !== view.headRefOid) throw new Error(`${headRef} は ${head.slice(0, 7)} で、PR の head ${view.headRefOid.slice(0, 7)} ではない（push の直後なら少し待ってやり直す）`);
   return { head, base };
 }
 
@@ -180,48 +245,65 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
       return { sha, base, results: [], ok: false, conflict: true };
     }
     const env = stepEnv(tmp);
-    const steps = await checkoutSteps(dir, env);
-    const ran = await runCi(steps, async (s) => {
-      d.log(`▶ ${s.name}`);
-      const started = Date.now();
-      const r = await d.step(s.run, dir, env);
-      return { code: r.code, output: r.output, seconds: (Date.now() - started) / 1000, tail: r.output.split("\n").slice(-30).join("\n") };
-    });
-    const results: StepResult[] = ran.map(({ output: _, ...r }) => r);
-    const failed = ran.at(-1);
-    if (!failed || failed.code === 0) return { sha, base, results, ok: true };
+    const run = await runCheckout(dir, env, `local-ci-${repo.replaceAll("/", "_")}-${pr}`, d, cache);
+    const { results } = run;
+    if (run.ok) return { sha, base, results, ok: true };
     const result = results.at(-1)!;
-    result.fails = failLines(failed.output);
-    // the worktree and TMPDIR go in `finally`; a 1,400-test run's failures do not fit in its last 30 lines
-    // the latest failure of a PR is the one read: earlier ones of the same PR of the same repository go (the host's disk is small)
-    const prefix = `switchboard.local-ci-${repo.replace("/", "_")}-${pr}-log.`;
-    for (const old of readdirSync(cache)) if (old.startsWith(prefix)) rmSync(join(cache, old), { recursive: true, force: true });
-    const logDir = mkdtempSync(join(cache, prefix));
-    result.log = join(logDir, `${results.length}-${failed.name.replace(/[^\w.-]/g, "_")}.log`);
-    await Bun.write(result.log, failed.output);
-    if (isPerfStep(failed)) {
-      // a bench that failed judged nothing; the measured values go with the summary before the worktree goes
-      const perf = failed.run.includes("perf-ratchet") ? perfVerdict(failed.output) : { ...perfVerdict(""), unknown: true };
-      if (existsSync(join(dir, "perf-result.json"))) copyFileSync(join(dir, "perf-result.json"), join(logDir, "perf-result.json"));
+    if (run.perf) {
       // over only: main measured the same way tells an environment's (or main's) excess from the PR's own
-      const baseline = perf.over.length ? await measureBase(pr, repoRoot, base, perfSteps(steps), env, logDir, cache, d) : undefined;
-      const summary = failureSummary({ sha, base, step: result, env, output: failed.output, perf, baseline });
+      const logDir = dirname(result.log!);
+      const baseline = run.perf.over.length ? await measureBase(pr, repoRoot, base, perfSteps(run.steps), env, logDir, cache, d) : undefined;
+      const summary = failureSummary({ sha, base, step: result, env, output: run.output!, perf: run.perf, baseline });
       await Bun.write(join(logDir, "summary.md"), `${summary}\n`);
       d.log(summary);
       d.log(`記録: ${logDir}`);
-      d.log(`✗ ${failed.name}: exit ${failed.code}`);
-      return { sha, base, results, ok: false, perf, baseline };
+      d.log(`✗ ${result.name}: exit ${result.code}`);
+      return { sha, base, results, ok: false, perf: run.perf, baseline };
     }
-    for (const l of result.fails) d.log(l);
-    d.log(result.tail);
-    d.log(`全文: ${result.log}`);
-    d.log(`✗ ${failed.name}: exit ${failed.code}`);
     return { sha, base, results, ok: false };
   } finally {
     await d.sh(["git", "-C", repoRoot, "worktree", "remove", "--force", dir]).catch(() => undefined);
     rmSync(dir, { recursive: true, force: true });
     rmSync(tmp, { recursive: true, force: true });
   }
+}
+
+/**
+ * A checkout's CI in `dir` (#2953; local-ci's merge, tag-ci's tag): its steps (`checkoutSteps`) run with `env` until one
+ * fails. A failure keeps the step's whole output in a log dir `switchboard.<label>-log.*` under `cache` (the latest of a
+ * label only: earlier ones go, the host's disk is small) and, for a perf step, its verdict and perf-result.json there.
+ * A failure that is not a perf step is logged here; a perf step's is the caller's (local-ci adds main's measure to it).
+ */
+export async function runCheckout(dir: string, env: Record<string, string>, label: string, d: Deps, cache: string): Promise<{ steps: Step[]; results: StepResult[]; ok: boolean; perf?: PerfVerdict; output?: string }> {
+  const steps = await checkoutSteps(dir, env);
+  const ran = await runCi(steps, async (s) => {
+    d.log(`▶ ${s.name}`);
+    const started = Date.now();
+    const r = await d.step(s.run, dir, env);
+    return { code: r.code, output: r.output, seconds: (Date.now() - started) / 1000, tail: r.output.split("\n").slice(-30).join("\n") };
+  });
+  const results: StepResult[] = ran.map(({ output: _, ...r }) => r);
+  const failed = ran.at(-1);
+  if (!failed || failed.code === 0) return { steps, results, ok: true };
+  const result = results.at(-1)!;
+  result.fails = failLines(failed.output);
+  // a 1,400-test run's failures do not fit in its last 30 lines
+  const prefix = `switchboard.${label}-log.`;
+  for (const old of readdirSync(cache)) if (old.startsWith(prefix)) rmSync(join(cache, old), { recursive: true, force: true });
+  const logDir = mkdtempSync(join(cache, prefix));
+  result.log = join(logDir, `${results.length}-${failed.name.replace(/[^\w.-]/g, "_")}.log`);
+  await Bun.write(result.log, failed.output);
+  if (isPerfStep(failed)) {
+    // a bench that failed judged nothing; the measured values are kept before the worktree goes
+    const perf = failed.run.includes("perf-ratchet") ? perfVerdict(failed.output) : { ...perfVerdict(""), unknown: true };
+    if (existsSync(join(dir, "perf-result.json"))) copyFileSync(join(dir, "perf-result.json"), join(logDir, "perf-result.json"));
+    return { steps, results, ok: false, perf, output: failed.output };
+  }
+  for (const l of result.fails) d.log(l);
+  d.log(result.tail);
+  d.log(`全文: ${result.log}`);
+  d.log(`✗ ${failed.name}: exit ${failed.code}`);
+  return { steps, results, ok: false, output: failed.output };
 }
 
 /** Runs `steps` on `base` in its own worktree with the PR's environment; each step's output and the result JSON go to `logDir` as base-*. */
@@ -272,6 +354,14 @@ export async function resolveTarget(args: string[], cwd: string, scriptRoot: str
   if (unknown.length > 0) throw new TargetError(`知らない引数: ${unknown.join(" ")}`);
   if (at < 0) {
     // the clone this script is in and its origin: the head is read from the same repository the merge ref is fetched from
+    // a GitLab checkout (#892): the project its forge names, checked against the origin
+    let named;
+    try {
+      named = forgeTargetOf(scriptRoot, originOf(scriptRoot));
+    } catch (e) {
+      throw new TargetError((e as Error).message);
+    }
+    if (named.service === "gitlab") return { pr, repo: named.repository!, root: scriptRoot };
     const url = (await run(["git", "-C", scriptRoot, "remote", "get-url", "origin"]).catch(() => "")).trim();
     const repo = remoteRepo(url);
     if (!repo) throw new TargetError(`${scriptRoot} の origin（${url ? "GitHub の owner/name として読めない URL" : "無し"}）から対象が分からない（--repo <owner/name> を付ける）`);
@@ -290,15 +380,15 @@ export async function resolveTarget(args: string[], cwd: string, scriptRoot: str
   return { pr, repo, root };
 }
 
-const sh: Deps["sh"] = async (cmd, cwd) => {
+export const sh: Deps["sh"] = async (cmd, cwd) => {
   const p = Bun.spawn(cmd, { cwd, stdout: "pipe", stderr: "pipe" });
   const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
   if (code !== 0) throw new Error(`${cmd.slice(0, 3).join(" ")} failed: ${err.trim()}`);
   return out;
 };
 
-// GitHub runs a `run:` with `bash -e {0}`.
-const step: Deps["step"] = async (script, cwd, env) => {
+// GitHub runs a `run:` with `bash -e {0}`. tag-ci runs its steps the same way.
+export const step: Deps["step"] = async (script, cwd, env) => {
   const p = Bun.spawn(["bash", "-e", "-c", script], { cwd, stdout: "pipe", stderr: "pipe", env });
   const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
   return { code, output: out + err };
@@ -309,15 +399,19 @@ const step: Deps["step"] = async (script, cwd, env) => {
  * `forge` (none = GitHub); one without a verification is said, not posted some other way. The texts go through the
  * kit's check for values usable for auth first.
  */
-export async function reportResult(t: { pr: number; repo: string; root: string }, body: string, run: Deps["sh"]): Promise<void> {
-  // the repository is the origin's on github.com (`remoteRepo`), as the merge ref is fetched from
-  const target = { service: forgeOf(t.root), host: "github.com", repository: t.repo };
-  await runForgeOperation({ kind: "verification", target, texts: [body], payload: { pr: t.pr, body } }, { github: githubForge((cmd) => run(cmd)) }, hostAws());
+export async function reportResult(t: { pr: number; repo: string; root: string }, body: string, run: Deps["sh"], glab: Sh = runGlab): Promise<void> {
+  // the repository is the origin's on github.com (`remoteRepo`), as the merge ref is fetched from; a GitLab project is
+  // its `forge`'s, checked against the origin (#924): the note goes on the MR `pr`
+  const named = forgeTargetOf(t.root, originOf(t.root));
+  const target = named.repository ? named : { ...named, host: "github.com", repository: t.repo };
+  await runForgeOperation({ kind: "verification", target, texts: [body], payload: { pr: t.pr, body } }, { github: githubForge((cmd) => run(cmd)), gitlab: gitlabForge(glab) }, hostAws());
 }
 
 /**
  * Posts the run's result only if it still names the PR's head and base (#913): either moved since the run → nothing
- * posted (a pass for an old head or base would be taken for the new one), false.
+ * posted (a pass for an old head or base would be taken for the new one), false. A pass on GitHub gets the stack line
+ * (#2950) of the PRs it tested (`stackLine`), read just before posting; when it cannot be read the pass goes without
+ * it (merge-gate does not count it).
  */
 export async function notify(t: { pr: number; repo: string; root: string }, r: LocalCiResult, d: Pick<Deps, "sh" | "log">, post = reportResult): Promise<boolean> {
   const now = await readTarget(t.pr, t.root, t.repo, d).catch((e: unknown) => (d.log(`head / base を読み直せない: ${e instanceof Error ? e.message : String(e)}`), undefined));
@@ -326,7 +420,10 @@ export async function notify(t: { pr: number; repo: string; root: string }, r: L
     d.log(`実行中に変わった（head ${r.sha.slice(0, 7)} → ${now.head.slice(0, 7)}、base ${r.base.slice(0, 7)} → ${now.base.slice(0, 7)}）。結果を投稿しない（回し直す）`);
     return false;
   }
-  const body = resultComment(r);
+  const stack = r.ok && forgeTargetOf(t.root, originOf(t.root)).service !== "gitlab"
+    ? await stackLine(t.pr, r.sha, t, d.sh).catch((e: unknown) => (d.log(`スタックの行を書けない（merge-gate はこの pass を数えない）: ${e instanceof Error ? e.message : String(e)}`), undefined))
+    : undefined;
+  const body = resultComment({ ...r, stack });
   await post(t, body, d.sh);
   d.log(body);
   return true;

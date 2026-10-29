@@ -80,10 +80,10 @@ describe("ci", () => {
     expect(ciExit(await runCi(steps, async () => ({ code: 0 })))).toBe(0);
   });
 
-  test("the steps: home paths, install, licenses, typecheck, test, web build, then perf — in that order", () => {
+  test("the steps: home paths, install, public tree check, licenses, typecheck, test, web build, then perf — in that order", () => {
     const first = ciSteps.map((s) => s.run.split("\n")[0]!.trim());
     const at = (cmd: string) => first.findIndex((r) => r.startsWith(cmd));
-    const order = ["rc=0; git grep", "bun install --frozen-lockfile", "bun run licenses:check", "bun run typecheck", "bun test", "bun run --cwd apps/web build", "bun scripts/perf-bench.ts", "bun scripts/perf-ratchet.ts"].map(at);
+    const order = ["rc=0; git grep", "bun install --frozen-lockfile", "bun ops-kit/src/cli.ts public-sync --check", "bun run licenses:check", "bun run typecheck", "bun test", "bun run --cwd apps/web build", "bun scripts/perf-bench.ts", "bun scripts/perf-ratchet.ts"].map(at);
     expect(order.every((i) => i >= 0)).toBe(true);
     expect(order).toEqual([...order].sort((a, b) => a - b));
   });

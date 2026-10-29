@@ -40,13 +40,7 @@ export function renderNote(n: Omit<InboxNote, "path">, extraFrontmatter: Record<
   if (n.workspaceHint) fm.workspace = n.workspaceHint;
   else delete fm.workspace;
   if (n.taskId) fm.task = n.taskId;
-  if (n.source) fm.source = { schedule: n.source.schedule, title: n.source.title };
   return `---\n${stringifyYaml(fm)}---\n${n.body.trim()}\n`;
-}
-
-function toSource(v: unknown): InboxNote["source"] {
-  const s = v as { schedule?: unknown; title?: unknown } | null | undefined;
-  return s && typeof s.schedule === "string" && typeof s.title === "string" ? { schedule: s.schedule, title: s.title } : undefined;
 }
 
 export function toNote(doc: KnowledgeDoc, body: string): InboxNote {
@@ -59,7 +53,6 @@ export function toNote(doc: KnowledgeDoc, body: string): InboxNote {
     workspaceHint: typeof fm.workspace === "string" ? fm.workspace : undefined,
     status: fm.status === "promoted" ? "promoted" : fm.status === "closed" ? "closed" : "inbox",
     taskId: typeof fm.task === "string" ? fm.task : undefined,
-    source: toSource(fm.source),
   };
 }
 
@@ -81,7 +74,7 @@ export class Inbox {
     return out.sort((a, b) => (a.created === b.created ? a.path.localeCompare(b.path) : a.created < b.created ? 1 : -1));
   }
 
-  add(text: string, opts: { title?: string; workspaceHint?: string; source?: InboxNote["source"]; now?: Date } = {}): InboxNote {
+  add(text: string, opts: { title?: string; workspaceHint?: string; now?: Date } = {}): InboxNote {
     const body = text.replace(/\r\n/g, "\n").trim();
     if (!body) throw new Error("empty note");
     const now = opts.now ?? new Date();
@@ -90,27 +83,32 @@ export class Inbox {
     // Numeric suffix on collision, checked against the filesystem (not only the index, which may lag a watcher tick).
     let path = base;
     for (let i = 2; this.store.exists(path); i++) path = base.replace(/\.md$/, `-${i}.md`);
-    const note: Omit<InboxNote, "path"> = { title, body, created: now.toISOString(), workspaceHint: opts.workspaceHint?.trim() || undefined, status: "inbox", source: opts.source };
+    const note: Omit<InboxNote, "path"> = { title, body, created: now.toISOString(), workspaceHint: opts.workspaceHint?.trim() || undefined, status: "inbox" };
     this.store.write(path, renderNote(note));
     return { ...note, path };
   }
 
   /**
-   * The one way the daemon leaves a note for the user (#2401): marked with the schedule that put it there, and the previous
-   * open notice of the same schedule is closed (superseded_by) so a daily check does not pile up one note per day.
-   * Written first, closed after: a failure leaves two notices, never none.
+   * Closes, once, the notes the daemon left before its notices moved to 判断待ち (#2866): open notes with a `source` in their
+   * frontmatter (a schedule's notice, #2401) or titled `workspace … を使えません` (#2802). The user's drafts are left;
+   * the files stay in notes/. Returns how many were closed.
    */
-  addNotice(text: string, opts: { title?: string; source: { schedule: string; title: string }; now?: Date }): InboxNote {
-    const note = this.add(text, { title: opts.title, now: opts.now, source: opts.source });
-    for (const old of this.list()) {
-      if (old.path === note.path || old.source?.schedule !== opts.source.schedule) continue;
+  closeDaemonNotes(now = new Date()): number {
+    let closed = 0;
+    for (const d of this.store.list()) {
+      const fm = d.frontmatter as Record<string, unknown>;
+      if (d.kind !== "notes" || ["promoted", "closed"].includes(fm.status as string)) continue;
+      if (!fm.source && !/^workspace .+ を使えません$/.test(String(fm.title ?? d.title))) continue;
       try {
-        this.close(old.path, { supersededBy: note.path, now: opts.now });
-      } catch {
-        /* closed or gone meanwhile */
+        this.close(d.path, { now });
+        closed++;
+      } catch (e) {
+        // closed or gone meanwhile; anything else (a write that failed) is thrown, so the boot logs it and tries again
+        const code = (e as { code?: string }).code;
+        if (code !== "EEXIST" && code !== "ENOENT") throw e;
       }
     }
-    return note;
+    return closed;
   }
 
   get(path: string): InboxNote {
@@ -119,18 +117,30 @@ export class Inbox {
     return toNote(doc, body);
   }
 
-  /** Rewrite the frontmatter of a note in place: keys the user added by hand and the body are kept untouched. */
-  private patchFrontmatter(path: string, patch: Record<string, unknown>): InboxNote {
-    const { doc, content, body } = this.store.read(path);
+  /** Rewrite the frontmatter of a note in place: keys the user added by hand are kept, and the body too unless `body` is given. */
+  private patchFrontmatter(path: string, patch: Record<string, unknown>, body?: string): InboxNote {
+    const { doc, content, body: current } = this.store.read(path);
     if (doc.kind !== "notes") throw new Error("not an inbox note");
-    const n = toNote(doc, body);
+    const n = toNote(doc, current);
     if (n.status === "promoted") throw Object.assign(new Error(`note already promoted to ${n.taskId ?? "a task"}`), { code: "EEXIST" });
     if (n.status === "closed") throw Object.assign(new Error("note already closed"), { code: "EEXIST" });
     const m = content.match(/^---[ \t]*\r?\n([\s\S]*?)^---[ \t]*\r?\n?/m);
     const existing = (m && m[1]!.trim() ? (parseYaml(m[1]!) as Record<string, unknown>) : {}) ?? {};
-    const rawBody = m ? content.slice(m[0].length) : content;
+    const rawBody = body !== undefined ? `${body}\n` : m ? content.slice(m[0].length) : content;
     this.store.write(path, `---\n${stringifyYaml({ ...existing, ...patch })}---\n${rawBody}`);
     return n;
+  }
+
+  /**
+   * Rewrite a draft's title and body (#3032). The other frontmatter keys and the path stay: the file name came from the
+   * first title, and promotion and close address the note by it. Without a title the current one stays.
+   */
+  edit(path: string, input: { title?: string; text: string }): InboxNote {
+    const body = input.text.replace(/\r\n/g, "\n").trim();
+    if (!body) throw new Error("empty note");
+    const title = input.title === undefined ? this.get(path).title : cleanTitle(input.title, body);
+    const n = this.patchFrontmatter(path, { title }, body);
+    return { ...n, title, body };
   }
 
   /** Mark a note as promoted to a task. The file stays in notes/ so the idea's origin is traceable. */

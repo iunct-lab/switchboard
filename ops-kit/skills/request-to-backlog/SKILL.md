@@ -137,7 +137,7 @@ gh issue edit <num> --milestone "Phase N — …"
 bash scripts/setup/set_project_field.sh <num> "Story Points" <N>                  # 本文の N と同じ
 ```
 
-Priority の目安: 他の PBI の前提なら P0、利用者が「まずこれ」と言ったものは P1、それ以外 P2。Phase は Milestone の到達点で選ぶ（迷ったら進行中の Phase）。
+Priority の目安: 他の PBI の前提なら P0、利用者が「まずこれ」と言ったものは P1、それ以外 P2。PBI には必ず付ける（`ops-kit lint` が Priority の無い PBI を違反にする。バックログを進めるは実装中の片づけの次に Priority の高い順で取る）。要望には付けない（分割したあと PBI ごとに Priority が分かれうる）。Phase は Milestone の到達点で選ぶ（迷ったら進行中の Phase）。
 Story Points は `issue-workflow` の基準表（2 = doc 1 本 / 3 = API 1 本 + 画面 1 箇所 / 5 = 中核 + UI + 運用 / 8 = 横断 + 未知）。
 
 ### 4. 要望 Issue に戻る

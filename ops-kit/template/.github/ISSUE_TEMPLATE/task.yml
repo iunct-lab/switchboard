@@ -27,7 +27,6 @@ body:
       placeholder: |
         1. `<path>`: 〜を追加（関数名 / エンドポイント / 設定キー）
         2. `<path>.test.ts`: 〜のケース
-        3. docs: 〜
     validations:
       required: true
   - type: textarea
@@ -41,11 +40,11 @@ body:
     id: dod
     attributes:
       label: 完了条件 (DoD)
+      description: 文書更新は、Task が触る doc のファイルと書く中身を名指ししたときだけ完了条件に加える。運用だけの Task には加えない。アプリが持つ可変の値は写さない。
       options:
         - label: 回帰テストを追加した（修正なら「修正前で fail」を確認した）
         - label: "typecheck・test が green（`__TEST_ALL__`）"
         - label: 実構成で確認した（動いている実物 / 実ブラウザ。やった事実だけ書く）
-        - label: docs を必要に応じ更新した
         - label: 結果コメントを書いた（PR・変更・検証・レビュー対応・残したもの）
   - type: dropdown
     id: area

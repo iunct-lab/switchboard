@@ -1,18 +1,16 @@
 name: release-tag
 
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+  push:
     branches: [main]
 
 permissions:
   contents: write
-  actions: read   # release-tag.ts checks the CI run on the commit's push before tagging it (#915)
 
 # One tag at a time: two quick merges must not both read the same latest tag. GitHub keeps only the newest pending
 # run in the group, so merges that land together can be coalesced: the newest commit is tagged and the skipped
 # commits go into its release notes (git log <previous tag>..<sha>). Tags follow main, not every single merge.
+# The tag does not wait for CI; scripts/tag-ci.ts runs CI on the tags and records the result in their Releases.
 # Without Actions, the same command runs by hand after a merge (docs/design/releases-and-rescue.md, Tags).
 concurrency:
   group: release-tag
@@ -20,18 +18,16 @@ concurrency:
 
 jobs:
   tag:
-    if: vars.SWITCHBOARD_RELEASE_TAGS == 'on' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    if: vars.SWITCHBOARD_RELEASE_TAGS == 'on'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.sha }}
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      # release-tag.ts reads local-ci's and merge-gate's marks, which pull in the repository's dependencies
-      - run: bun install --frozen-lockfile
-      - run: bun scripts/release-tag.ts ${{ github.event.workflow_run.head_sha }}
+      - run: bun scripts/release-tag.ts ${{ github.sha }}
         env:
           GH_TOKEN: ${{ github.token }}

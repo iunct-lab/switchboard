@@ -10,7 +10,7 @@
 
 Switchboard 固有の workflow は `.github/workflows/` のものをそのまま使う。
 
-1. `release-tag.yml` を使うなら、リポジトリ変数 `SWITCHBOARD_RELEASE_TAGS=on` を設定する。main の CI 成功後に `scripts/release-tag.ts` でタグと Release を作る。CI の workflow 名が `CI` であることと Actions の書き込み権限を確認する。
+1. `release-tag.yml` を使うなら、リポジトリ変数 `SWITCHBOARD_RELEASE_TAGS=on` を設定する。main への push で（CI を待たずに）`scripts/release-tag.ts` でタグと Release を作る。Actions の書き込み権限を確認する。
 2. AWS ホストを使うなら、[AWS の手順](../aws/README.md) に従い自分の AWS に初回配置し、OIDC の対象を fork にする。`host.yml` 用のリポジトリ変数 `SWITCHBOARD_AWS_REGION`・`SWITCHBOARD_HOST_STACK`・`SWITCHBOARD_HOST_ROLE_ARN`（GitHubOidcRole 出力）・`SWITCHBOARD_HOST_PARAMS`（秘密を含まない parameter overrides）を設定する（地域とスタック名は既定と違うときだけ）。トークンの値は SSM から読む（名前 `/switchboard/start-token`・`/switchboard/edge-header` はスタックが決める）。
 
 所有者だけの値や記録は `private/` に置き、公開版に同期時の書き換えを追加しない。

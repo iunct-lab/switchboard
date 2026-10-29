@@ -48,6 +48,8 @@ const RULES: Array<{ kind: string; find: (line: string, before: string, host: Ho
   },
   { kind: "aws-key", find: (l) => /(?<![A-Z0-9])(AKIA|ASIA)[0-9A-Z]{16}(?![A-Z0-9])/.test(l) || /aws_(secret_access_key|session_token)\s*[=:]\s*["']?[A-Za-z0-9/+=]{20,}/i.test(l) },
   { kind: "github-token", find: (l) => /(?<![A-Za-z0-9_])(gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})/.test(l) },
+  // GitLab's tokens (#892): personal / OAuth / runner / pipeline-trigger / deploy / feed and the like, `gl…-` then the secret
+  { kind: "gitlab-token", find: (l) => /(?<![A-Za-z0-9_])(glpat|gloas|glrt|glptt|gldt|glsoat|glcbt|glimt|glagent|glffct|glft|glwt)-[A-Za-z0-9_.-]{20,}/.test(l) },
   { kind: "private-key", find: (l) => /-----BEGIN[A-Z0-9 ]*PRIVATE KEY-----/.test(l) },
   // 20 and more: a token is that long, and a sentence about "Bearer authentication" or "Bearer tokens" is not one
   { kind: "bearer-token", find: (l) => /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/i.test(l) },

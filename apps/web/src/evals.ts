@@ -1,4 +1,4 @@
-import type { EvalsListRow, RuleMetrics, RunnerInfo, TaskEvals } from "@switchboard/protocol";
+import type { EvalsListRow, EvalsSummary, RuleMetrics, RunnerInfo, TaskEvals } from "@switchboard/protocol";
 import { effortLabel } from "./effortOptions.ts";
 
 /** The default rubric's criteria as the screen names them (#1219); an id the screen does not know is shown as is. */
@@ -24,9 +24,11 @@ export function metricRows(e: TaskEvals): MetricRow[] {
     { label: "追加指示", value: String(m.userInstructions) },
     { label: "承認 / 拒否", value: `${m.asks} / ${m.denials}`, warn: m.denials > 0 },
     { label: "停止", value: reasons ? `${m.stops}（${reasons}）` : String(m.stops), warn: m.stops > 0 },
+    { label: "デーモン停止", value: String(m.daemonStops), warn: m.daemonStops > 0 },
     { label: "ターン", value: String(m.turns) },
     { label: "所要時間", value: fmtDuration(m.durationMs) },
-    { label: "終わり方", value: endLabel(m.lastEnd), warn: m.lastEnd === "error" || m.lastEnd === "aborted" },
+    // a last turn the daemon's stop cut ended that way by the stop, not by the task (#2089): デーモン停止 carries the mark
+    { label: "終わり方", value: endLabel(m.lastEnd), warn: (m.lastEnd === "error" || m.lastEnd === "aborted") && !m.lastCutByDaemon },
   ];
 }
 
@@ -74,6 +76,13 @@ export function humanLabel(e: TaskEvals): string | null {
   return e.human.comment ? `${e.human.rating} / 5 · ${e.human.comment}` : `${e.human.rating} / 5`;
 }
 
+/** The human − judge gap as Insights shows it (#1877): the signed mean to one decimal and the count, or that none is rated yet. */
+export function gapLabel(gap: EvalsSummary["gap"]): string {
+  if (!gap.count || gap.mean === null) return "人の評価がまだありません";
+  const sign = gap.mean > 0 ? "+" : gap.mean < 0 ? "−" : "";
+  return `人 − 判定: ${sign}${Math.abs(gap.mean).toFixed(1)}（${gap.count} 件）`;
+}
+
 /** The models the task ran on as the Brief shows them (#1801): the one, or every one in the order used with （混在） after; null when not known. */
 export function modelsLabel(e: Pick<TaskEvals, "models">): string | null {
   if (!e.models.length) return null;
@@ -82,7 +91,7 @@ export function modelsLabel(e: Pick<TaskEvals, "models">): string | null {
 
 /* ---------- the Evals list (#1221) ---------- */
 
-export type EvalsSortKey = "updatedAt" | "judge" | "human" | "toolCalls" | "toolFailures" | "errors" | "userInstructions" | "stops" | "costUsd";
+export type EvalsSortKey = "updatedAt" | "judge" | "human" | "toolCalls" | "toolFailures" | "errors" | "userInstructions" | "stops" | "daemonStops" | "costUsd";
 
 /** The number a row sorts by for a key; null = the row has no such value and goes last whichever way the sort runs. */
 export function evalSortValue(row: EvalsListRow, key: EvalsSortKey): number | null {
@@ -151,7 +160,7 @@ export function evalFilterOptions(rows: EvalsListRow[]): { models: string[]; eff
   };
 }
 
-/** Whether a row points at trouble: a failure, an error or a stop, a low rubric average, or a low rating. */
+/** Whether a row points at trouble: a failure, an error or a stop, a low rubric average, or a low rating. A daemon stop is not the task's weakness and does not count (#2089). */
 export function evalRowWarn(row: EvalsListRow): boolean {
   const r = row.rules;
   return !!((r && (r.toolFailures > 0 || r.errors > 0 || r.stops > 0)) || (row.judge && row.judge.average <= 2.5) || (row.human && row.human.rating <= 2));

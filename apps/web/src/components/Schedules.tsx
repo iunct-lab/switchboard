@@ -28,7 +28,7 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
   const [prompt, setPrompt] = useState("");
   const [action, setAction] = useState<Schedule["action"]>("prompt");
   const meta = props.workspaces.find((w) => w.kind === "meta");
-  // backlog-next, secret-scan and insights work on the meta workspace and take no prompt (#267, #775, #1838)
+  // backlog-next, secret-scan, insights and approval-window work on the meta workspace and take no prompt (#267, #775, #1838, #2046)
   const metaOnly = action !== "prompt";
   // insights runs Claude Code's own command: the runner is claude whatever the form shows elsewhere (#1838)
   const insights = action === "insights";
@@ -270,7 +270,7 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
               </div>
             ) : action === "secret-scan" ? (
               <div className="muted" style={{ gridColumn: "1 / -1" }}>
-                登録したリポジトリを全部（同じリポジトリの作業フォルダは 1 回）、Issue・PR・コメント・レビューに認証に使える値が書かれていないか検査します。ランナーは使いません（ホストの gh のログインで読む）。当たりか検査できなかったリポジトリがあれば受信箱にメモを残します（場所と種類だけ）。スケジュールは meta に置きます。
+                登録したリポジトリを全部（同じリポジトリの作業フォルダは 1 回）、Issue・PR・コメント・レビューに認証に使える値が書かれていないか検査します。ランナーは使いません（ホストの gh のログインで読む）。当たりか検査できなかったリポジトリがあれば判断待ちに出します（場所と種類だけ）。スケジュールは meta に置きます。
               </div>
             ) : action === "backlog-next" ? (
               <>
@@ -279,9 +279,9 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
                 </div>
                 <button className="ghost" onClick={props.onOpenSettings} style={{ gridColumn: "1 / -1" }}>設定 を開く</button>
               </>
-            ) : (
+            ) : action === "prompt" ? (
               <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={3} placeholder="毎回渡すプロンプト" style={{ gridColumn: "1 / -1" }} />
-            )}
+            ) : null}
             <button className="pri" disabled={busy || !defaultsReady || !title.trim() || (metaOnly ? !meta : !prompt.trim()) || (insights && !props.runnerOk.has("claude"))} title={insights && !props.runnerOk.has("claude") ? "claude がインストールされていません" : undefined} onClick={() => void create()} style={{ gridColumn: "1 / -1" }}>
               作成
             </button>

@@ -32,6 +32,17 @@ describe("config", () => {
     expect(loadConfig(join(import.meta.dir, "../../ops.config.json")).forge).toEqual({ service: "github" });
   });
 
+  test("GitLab's forge names its host and project (#892); GitHub's names neither", () => {
+    const base = JSON.parse(require("node:fs").readFileSync(join(fixtures, "config-no-phase.json"), "utf8"));
+    const lab = { service: "gitlab", host: "gitlab.example.com", project: "group/sub/app" };
+    expect(parseConfig({ ...base, forge: lab }).forge).toEqual(lab);
+    expect(() => parseConfig({ ...base, forge: { service: "gitlab" } })).toThrow(/forge\.host.*gitlab には host が要ります/s);
+    expect(() => parseConfig({ ...base, forge: { ...lab, project: "app" } })).toThrow(/forge\.project/);
+    for (const host of ["https://gitlab.example.com", "gitlab.example.com/x", "gitlab.example.com:8443", ""]) expect(() => parseConfig({ ...base, forge: { ...lab, host } })).toThrow(/forge\.host/);
+    expect(() => parseConfig({ ...base, forge: { service: "github", host: "gitlab.example.com" } })).toThrow(/github では host を書けません/);
+    expect(() => parseConfig({ ...base, forge: { ...lab, token: "x" } })).toThrow(/forge/);
+  });
+
   test("a config with publicSync parses; its keys are checked", () => {
     const base = withPhase();
     expect(parseConfig({ ...base, publicSync: { target: "example-org/app-public", exclude: ["a"] } }).publicSync).toEqual({ target: "example-org/app-public", exclude: ["a"], rewrite: [] });
