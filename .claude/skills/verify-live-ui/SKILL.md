@@ -75,3 +75,6 @@ console.log(`http://127.0.0.1:${core.server.port}`);
 ```
 
 `bun run --cwd apps/web build` のあと、`bun "$W/boot.ts"` で起動する。出力された URL を headless Chrome（`--remote-debugging-port`、CDP）で開く。確認後は自分のプロセスと `$W` だけを片付ける。
+
+- 偽アダプタで応答を合成するときは、`start()` も `send()` もイベントを `queueMicrotask` で出す。`send()` の中で同期に出すと、Task が running になる前に届き、ターンが終わらない
+- 画面に Task の URL は無い。`/` を開き、rail の `.t` の文字が Task の題の行を押す（CDP で押す型は `scripts/attention-e2e.ts`）

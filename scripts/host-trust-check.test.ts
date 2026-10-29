@@ -15,7 +15,7 @@ describe("host-trust-check (#852)", () => {
     const a = requestFor({ date: "2026-11-01", repo: "o/r" });
     const b = requestFor({ date: "2026-12-01", repo: "o/r" });
     expect(a.title).toBe(b.title);
-    expect(alreadyFiled(a.title, [{ number: 9, title: b.title }])).toBe(9);
+    expect(alreadyFiled(a.title, [{ ref: "#9", title: b.title }])).toBe("#9");
   });
 
   test("requestFor: the 出典 says 誰の言葉: 定期の検査 (#1818)", () => {

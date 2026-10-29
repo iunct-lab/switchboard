@@ -10,7 +10,7 @@ import { Interventions } from "./Interventions.tsx";
 import { Mockups } from "./Approvals.tsx";
 import { Stops } from "./Stops.tsx";
 import { jstDateTime } from "../time.ts";
-import { applyView, DEFAULT_VIEW, loadView, PRIORITIES, saveView, SORTS, STAGES, TYPES, viewSummary, type BacklogView } from "../backlogView.ts";
+import { applyView, loadView, PRIORITIES, resetView, saveView, SORTS, STAGES, TYPES, viewSummary, type BacklogView } from "../backlogView.ts";
 
 /** The first lines of a ## 状況 comment shown under its row; the rest is on the Issue. */
 const REPORT_LINES = 3;
@@ -660,6 +660,70 @@ function Overlap(props: { item: BacklogItem }) {
 }
 
 /**
+ * A row's buttons (#2696: a board tile's too): the running stage Task's link, else the stage's start button and 閉じる
+ * when the PBI can be closed.
+ */
+function RowActions(props: { item: BacklogItem; now: number; starting: number | null; onStart: (action: BacklogAction) => void; onOpenTask: (id: string) => void }) {
+  const { item: i, now, starting } = props;
+  if (i.activeTaskId)
+    return (
+      <button className="ghost link" onClick={() => props.onOpenTask(i.activeTaskId!)}>
+        {activeTaskLine(i.lastTask?.id === i.activeTaskId ? i.lastTask : null, now)}
+      </button>
+    );
+  const action = startButton(i);
+  return (
+    <>
+      {action && (
+        <button className="ghost" disabled={starting !== null} onClick={() => props.onStart(action[0])}>
+          {action[1]}
+        </button>
+      )}
+      {/* #531: every Task closed and no confirmation left — pbi-complete's step 6 writes the result and closes it */}
+      {i.closable && (
+        <>
+          <span className="m">閉じられる</span>
+          <button className="ghost" disabled={starting !== null} onClick={() => props.onStart("close")}>
+            閉じる
+          </button>
+        </>
+      )}
+    </>
+  );
+}
+
+/**
+ * A board tile (#2696): the numbered title, SP · Priority and the row's buttons; the rest of a row is on the list. A
+ * needs-decision tile is its title only and opens on the question and the answer box, which stays (with what was typed)
+ * when it is closed again.
+ */
+function Tile(props: { item: BacklogItem; now: number; starting: number | null; onStart: (action: BacklogAction) => void; onOpenTask: (id: string) => void; onAnswered: (item: BacklogItem) => void; onError: (msg: string) => void }) {
+  const { item: i } = props;
+  const [opened, setOpened] = useState(false);
+  if (i.stage === "needs-decision")
+    return (
+      <details className="backlog-tile" data-issue={i.url} onToggle={(e) => e.currentTarget.open && setOpened(true)}>
+        <summary className="t">
+          #{i.number} {i.title}
+        </summary>
+        {opened && <Decision item={i} onAnswered={props.onAnswered} onError={props.onError} />}
+      </details>
+    );
+  const facts = [i.storyPoints !== null ? `SP ${i.storyPoints}` : null, i.priority].filter(Boolean).join(" · ");
+  return (
+    <div className="backlog-tile" data-issue={i.url}>
+      <a className="t" href={i.url} target="_blank" rel="noreferrer">
+        #{i.number} {i.title}
+      </a>
+      <div className="row">
+        {facts && <span className="m">{facts}</span>}
+        <RowActions item={i} now={props.now} starting={props.starting} onStart={props.onStart} onOpenTask={props.onOpenTask} />
+      </div>
+    </div>
+  );
+}
+
+/**
  * Backlog screen (#264): the open requests and PBIs on GitHub of every registered workspace (#294), grouped by the stage
  * they are stuck at, each row naming its workspace. Read when opened and on 再読込 only (the daemon answers what it
  * imported from GitHub, #885; 再読込 imports first); the last list shows first and the new one replaces it once read (#441). GitHub stays the place to edit them. The stage buttons and answers act on the row's own workspace. The list
@@ -674,6 +738,11 @@ function toggle<T>(list: T[], v: T): T[] {
  * The 表示 button and what it opens (#2695): sort, the stage / type / Priority chips and the title or number search. The
  * one part always on the heading; the conditions it sets are kept by the caller.
  */
+const LAYOUTS: Array<[BacklogView["layout"], string]> = [
+  ["list", "一覧"],
+  ["board", "ボード"],
+];
+
 function ViewPicker(props: { view: BacklogView; onChange: (v: BacklogView) => void }) {
   const { view, onChange } = props;
   const chips = <T extends string>(list: Array<[T, string]>, on: T[], set: (next: T[]) => BacklogView) =>
@@ -686,6 +755,13 @@ function ViewPicker(props: { view: BacklogView; onChange: (v: BacklogView) => vo
     <details className="backlog-view">
       <summary>表示</summary>
       <div className="backlog-view-body">
+        <div className="chips">
+          {LAYOUTS.map(([k, label]) => (
+            <button key={k} className={`chip${view.layout === k ? " on" : ""}`} aria-pressed={view.layout === k} onClick={() => onChange({ ...view, layout: k })}>
+              {label}
+            </button>
+          ))}
+        </div>
         <label>
           並べ替え{" "}
           <select value={view.sort} onChange={(e) => onChange({ ...view, sort: e.target.value as BacklogView["sort"] })}>
@@ -701,7 +777,7 @@ function ViewPicker(props: { view: BacklogView; onChange: (v: BacklogView) => vo
         <div className="chips">{chips(PRIORITIES.map((p): [string, string] => [p, p]), view.priorities, (priorities) => ({ ...view, priorities }))}</div>
         <input type="search" placeholder="題か番号" value={view.query} onChange={(e) => onChange({ ...view, query: e.target.value })} />
         {viewSummary(view) && (
-          <button className="ghost" onClick={() => onChange(DEFAULT_VIEW)}>
+          <button className="ghost" onClick={() => onChange(resetView(view))}>
             元に戻す
           </button>
         )}
@@ -722,6 +798,8 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
   const [auto, setAuto] = useState<Record<string, boolean>>({});
   const [shown, setShown] = useState(() => localStorage.getItem(SHOWN_KEY) ?? "");
   const [view, setView] = useState(() => loadView(localStorage));
+  // the board's stage on a phone (#2703): not kept; none chosen = the first with a tile
+  const [boardStage, setBoardStage] = useState<BacklogStage | null>(null);
   const changeView = (next: BacklogView) => {
     setView(next);
     saveView(localStorage, next);
@@ -733,6 +811,11 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
   const current = workspaces && !workspaces.some((w) => w.id === shown) ? "" : shown;
   const now = Date.now();
   const inView = (workspaceId: string) => !current || workspaceId === current;
+  // the stage cards (list) or columns (board) the stage chips leave, and the rows they show in the view's order
+  const stages = STAGES.filter(([stage]) => view.stages.length === 0 || view.stages.includes(stage));
+  const shownItems = data ? applyView(data.items.filter((i) => inView(i.workspaceId)), view) : [];
+  const columns = stages.map(([stage, label]) => ({ stage, label, items: shownItems.filter((i) => i.stage === stage) }));
+  const currentStage = columns.find((c) => c.stage === boardStage)?.stage ?? columns.find((c) => c.items.length > 0)?.stage ?? columns[0]?.stage;
   // the narrowed workspace's name, also before (or without) the workspace list: the rows and errors carry it
   const currentName = workspaces?.find((w) => w.id === current)?.name ?? [...(data?.items ?? []), ...(data?.errors ?? [])].find((i) => i.workspaceId === current)?.workspaceName;
   const show = (id: string) => {
@@ -815,7 +898,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
         {summary && (
           <div className="hint backlog-view-line">
             {summary}{" "}
-            <button className="ghost link" onClick={() => changeView(DEFAULT_VIEW)}>
+            <button className="ghost link" onClick={() => changeView(resetView(view))}>
               元に戻す
             </button>
           </div>
@@ -881,9 +964,34 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
         ))}
       </section>
 
+      {data && view.layout === "board" && (
+        <>
+          {/* phones only (CSS): one stage at a time instead of the columns side by side */}
+          <nav className="subtabs backlog-board-tabs">
+            {columns.map(({ stage, label, items }) => (
+              <button key={stage} className={stage === currentStage ? "on" : ""} data-stage={stage} onClick={() => setBoardStage(stage)}>
+                {label} {items.length}
+              </button>
+            ))}
+          </nav>
+          <div className="backlog-board">
+            {columns.map(({ stage, label, items }) => (
+              <section key={stage} className="card backlog-col" data-stage={stage} data-current={stage === currentStage}>
+                <h5>
+                  {label} <span className="hint">{items.length}</span>
+                </h5>
+                {items.map((i) => (
+                  <Tile key={key(i)} item={i} now={now} starting={starting} onStart={(action) => start(i.workspaceId, i.number, action)} onOpenTask={props.onOpenTask} onAnswered={answered} onError={props.onError} />
+                ))}
+              </section>
+            ))}
+          </div>
+        </>
+      )}
       {data &&
-        STAGES.filter(([stage]) => view.stages.length === 0 || view.stages.includes(stage)).map(([stage, label]) => {
-          const items = applyView(data.items.filter((i) => inView(i.workspaceId)), view).filter((i) => i.stage === stage);
+        view.layout === "list" &&
+        stages.map(([stage, label]) => {
+          const items = shownItems.filter((i) => i.stage === stage);
           return (
             <section key={stage} className="card" data-stage={stage}>
               <div className="row head">
@@ -923,28 +1031,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
                   </span>
                   {i.stage === "in-progress" && <InProgressFacts item={i} now={now} onOpenTask={props.onOpenTask} />}
                   {(i.stage === "ready" || (i.replyWaiting && i.stage !== "in-progress")) && <LastTask item={i} now={now} onOpenTask={props.onOpenTask} />}
-                  {i.activeTaskId ? (
-                    <button className="ghost link" onClick={() => props.onOpenTask(i.activeTaskId!)}>
-                      {activeTaskLine(i.lastTask?.id === i.activeTaskId ? i.lastTask : null, now)}
-                    </button>
-                  ) : (
-                    <>
-                      {startButton(i) && (
-                        <button className="ghost" disabled={starting !== null} onClick={() => start(i.workspaceId, i.number, startButton(i)![0])}>
-                          {startButton(i)![1]}
-                        </button>
-                      )}
-                      {/* #531: every Task closed and no confirmation left — pbi-complete's step 6 writes the result and closes it */}
-                      {i.closable && (
-                        <>
-                          <span className="m">閉じられる</span>
-                          <button className="ghost" disabled={starting !== null} onClick={() => start(i.workspaceId, i.number, "close")}>
-                            閉じる
-                          </button>
-                        </>
-                      )}
-                    </>
-                  )}
+                  <RowActions item={i} now={now} starting={starting} onStart={(action) => start(i.workspaceId, i.number, action)} onOpenTask={props.onOpenTask} />
                 </div>
                 <div className="backlog-syncline">
                   <SyncLine sync={i.sync} />

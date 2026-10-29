@@ -13,15 +13,18 @@
 - 設計ルール: README の `## Design rules`（`## License` の手前まで）。ライセンスは Apache-2.0（依存を足すなら `bun pm licenses`）
 - 互換層の前提: 利用者は 1 人、外部クライアントは無い。旧形式を読む層は作らず、データは `packages/core/src/db.ts` の migration で 1 回移す
 - 並列ガード: `bun scripts/parallel-guard.ts`（`claim` / `overlap` / `release`。スキルの `<guard>`）。ほかのリポジトリの PBI では `--repo <owner/name>` と `SWITCHBOARD_PROJECT_URL`
+- 言語: 公開に出る文書（README・公開する `docs/design/`・`aws/README.md`・`SECURITY.md`）は英語で、本文に Issue 番号 `#N` を書かない（公開側では開けない。根拠は日付と中身の文で書く）。開発に入る入力（このファイル・スキル・Issue テンプレート・工程のプロンプト）と画面は日本語。共通キットの `ops-kit/public/`（英語）は変えない。言語や体裁を揃える提案は、見た目でない実益の理由があるときだけ、その理由で Issue にする
+- 決まりの置き場所: 利用者の指摘からできた決まりはメモリではなく記載に書く。どのリポジトリでも同じなら共通キットのスキル、このリポジトリだけならこのファイルか `docs/design/`。ランナーのメモリ（Claude の `~/.claude/projects/*/memory/`）にはホスト・アカウント・経緯の事実だけを置く（`issue-workflow` の「記録の義務」の 6）。`AGENTS.md` はこのファイルを指すので、ここに書けば Codex にも届く
 
 ## 前提（要望を PBI にする前に照らすもの）
 
 `request-to-backlog` の「前提と照らす」と `pbi-to-tasks` の設計チェックが、PBI のユーザーストーリーをこの各行と照らす。矛盾すれば PBI にしない（PBI が既にあれば Task にせず Ready にしない）で `## 判断待ち` で聞く。
 
 - この環境 1 つで開発と本番を兼ねる。別の開発環境・検証環境は無い（利用者は 1 人。上の「互換層の前提」）
-- Task がここで全部できる。利用者の OK の後に、Task が昇格・再起動・マージを叩く（下の「Switchboard の Task と動いているコード」）。Task から操作を取り上げる要望は運用を止める
+- Task がここで全部できる。Task が昇格・再起動・マージを叩く（昇格は、自分以外の Task が動いても待ってもいなければ聞かずに叩き、動いていれば待つ。下の「Switchboard の Task と動いているコード」）。Task から操作を取り上げる要望は運用を止める
 - loopback で待ち受けるデーモンは、localhost に届く人を持ち主として信頼する。同じ OS ユーザーの Task は DB もシェルも触れるので、localhost の 1 つの口に認証を足しても Task は回避できる（#31、`docs/design/workspace-mcp.md` の「Local API token」、#1755 の結果）
 - パスキーのログインはインターネット越しの構成（CloudFront 経由）だけ。ホストの中（loopback）では求めない（`docs/design/cloud-hosting.md` の「3. 構成」のログインの流れ、#748）
+- 頼まれていない OS や環境（Mac・launchd など）の対応・手順・検証を PBI・Task・文書に足さない（この環境 1 つが前提。上の 1 行目）
 
 ## テスト
 
@@ -54,7 +57,7 @@ env -u SWITCHBOARD_SUPERVISED bun test <file> -t "<name>"
 - `SWITCHBOARD_SUPERVISED=1` なら自分は Switchboard の Task（スキルの「エージェント管理アプリの Task」）
 - 成果物の登録は返答の中の `switchboard-artifact` のフェンス（`docs/design/artifacts.md`）。画面イメージの問いに書く Task の id は環境変数 `SWITCHBOARD_TASK_ID`（`issue-workflow` の「画面イメージ」）
 - マージ後の main の作業ツリーの更新は共通の `ops-kit pull-main`（`pbi-complete` の 6-6、`docs/design/main-pull.md`）。ただしデーモンが main の作業ツリーから `bun run dev` で動いている（`ps -eo args | grep -q '[s]cripts/dev.ts'`）なら、pull は `--watch` でデーモンを再起動するので、走らせる前に利用者の OK を取る（Task の会話で聞く。`issue-workflow` の「判断待ちの出し方」の運用の確認。Issue に書かない）。release（sb-rescue の `~/.switchboard/releases/<sha>`）で動いているなら pull では再起動しない
-- 動いている Switchboard への反映（昇格）はデーモンを再起動するので、利用者の OK を取ってから（同じく Task の会話で聞く。Issue に書かない）
+- 動いている Switchboard への反映（昇格）: マージの後、自分以外の Task が動いても待ってもいなければ、聞かずに昇格する（利用者の常時の OK、2026-10-08）。動いている・待っている Task があれば昇格しない（昇格はデーモンを再起動し、動いている Task を切る）。待つのは自分で続けなくてよい — アプリの「バックログを進める」が発火のたびに最新のリリースタグを昇格し、Task が動いていれば Task が空いたときに昇格する（`packages/core/src/backlog.ts` の `PromotionStep`、`packages/core/src/server.ts` の `promoteWhenIdle`）。始めた PBI の Task が全部止まったら、次の PBI を始める前に、main が動いている版より進んでいれば先に昇格する（2026-10-17）
 
 ## 画像（要望・PBI に貼るもの）
 

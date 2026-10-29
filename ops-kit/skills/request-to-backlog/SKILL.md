@@ -117,7 +117,7 @@ PBI を書く前に、切った価値ごとにユーザーストーリーと「�
 ### 3. PBI を書く
 
 書式は `issue-workflow` の PBI テンプレ。**必ず本文に `## 元要望`**（値は `#<要望Issue>（要望のどの部分か）`。要望 Issue が無い過去の PBI は `なし（理由）`）。
-ほかの PBI・PR が先に要るなら `**Story Points**: N` の次に `**前提**: #N, #M（リリース）`（無ければ `**前提**: なし`）。定期実行と並列ガードはこの 1 行だけを読み、自由文の「#K の後」からは推さない。
+ほかの PBI・PR が先に要るなら `**Story Points**: N` の次に `**前提**: #N, #M（リリース）`（無ければ `**前提**: なし`）。定期実行と並列ガードはこの 1 行だけを読み、自由文の「#K の後」からは推さない。決定ログや `## 回答` で決まった順、ほかの PBI の Task を待つ順もこの行に書く（自由文だけに書くと lint が warning で出す。#2149）。
 画面の見た目・操作を変える PBI は、聞くかどうかにかかわらず `issue-workflow` の「画面イメージ」の「問いの無い PBI」で決めた画面のイメージを作り、`**前提**:` の次に `**画面イメージ**:` の行を書く。複数の案で聞くなら同じ節の「問いのとき」の形（判断待ち）。
 
 背景 / 課題は**コードを読んでから**書く: 今どこで何が起きるかを `path:line` で名指しする（`grep -n` で確認した行）。読まずに書いた背景は Task 分解で崩れる。
@@ -136,6 +136,8 @@ bash scripts/setup/triage_issue.sh <num> <area> <kind> <P0-P3> "Phase N"        
 gh issue edit <num> --milestone "Phase N — …"
 bash scripts/setup/set_project_field.sh <num> "Story Points" <N>                  # 本文の N と同じ
 ```
+
+**自分で分解する PBI は、作ったその場で分解する**: Task の無い PBI を Backlog に置くと、定期実行（バックログを進める）が分解の Task を始め、Task が二重にできる。自分で分解するなら同じ作業の中で `pbi-to-tasks` に進むか、先に PBI を占有する（並列ガードの `claim`。CLAUDE.md）。分解の後に sub-issue を 1 回見直し、二重の組があれば後の組を閉じる。
 
 Priority の目安: 他の PBI の前提なら P0、利用者が「まずこれ」と言ったものは P1、それ以外 P2。PBI には必ず付ける（`ops-kit lint` が Priority の無い PBI を違反にする。バックログを進めるは実装中の片づけの次に Priority の高い順で取る）。要望には付けない（分割したあと PBI ごとに Priority が分かれうる）。Phase は Milestone の到達点で選ぶ（迷ったら進行中の Phase）。
 Story Points は `issue-workflow` の基準表（2 = doc 1 本 / 3 = API 1 本 + 画面 1 箇所 / 5 = 中核 + UI + 運用 / 8 = 横断 + 未知）。

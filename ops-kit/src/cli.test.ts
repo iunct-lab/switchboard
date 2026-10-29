@@ -84,6 +84,42 @@ describe("cli", () => {
     expect(help).toContain("request <title> <body-file>");
   });
 
+  test("public-sync: --adopt-baseline needs --source and independent versioning (exit 2)", async () => {
+    const help = (await run(["--help"])).out;
+    expect(help).toContain("public-sync [--source <ref>] [--dry-run] [--adopted] [--adopt-baseline] [--target-url <url>]");
+    expect(help).toContain("--adopt-baseline: independent");
+    const dir = mkdtempSync(join(tmpdir(), "ops-kit.adopt."));
+    const git = (...args: string[]) => Bun.spawnSync(["git", "-C", dir, "-c", "user.name=dev", "-c", "user.email=dev@example.com", ...args]);
+    const prev = process.cwd();
+    try {
+      git("init", "-q", "-b", "main");
+      Bun.spawnSync(["git", "init", "-q", "--bare", "-b", "main", join(dir, "origin.git")]);
+      git("remote", "add", "origin", join(dir, "origin.git"));
+      writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ publicSync: { target: "example/app" } }));
+      git("add", "ops.config.json"); git("commit", "-qm", "config"); git("tag", "v1.0.0"); git("push", "-q", "origin", "main", "--tags");
+      process.chdir(dir);
+      const cfg = join(dir, "ops.config.json");
+      const noSource = await run(["public-sync", "--config", cfg, "--adopt-baseline", "--dry-run"]);
+      expect(noSource).toMatchObject({ code: 2 });
+      expect(noSource.err).toContain("public-sync --adopt-baseline --source <vX.Y.Z>");
+      const plain = await run(["public-sync", "--config", cfg, "--adopt-baseline", "--source", "v1.0.0", "--dry-run"]);
+      expect(plain).toMatchObject({ code: 2 });
+      expect(plain.err).toContain("publicSync.versioning: independent");
+      expect((await run(["public-sync", "--config", cfg, "--check", "--adopt-baseline"])).code).toBe(2);
+      // the setting is read at origin/main, not at the --source tag published before independent versioning
+      writeFileSync(cfg, JSON.stringify({ publicSync: { target: "example/app", versioning: "independent" } }));
+      git("commit", "-qam", "independent"); git("push", "-q", "origin", "main");
+      // and the flag reaches the sync: an empty target stops the migration, while a plain sync would plan v0.1.0
+      Bun.spawnSync(["git", "init", "-q", "--bare", "-b", "main", join(dir, "public.git")]);
+      const adopt = await run(["public-sync", "--config", cfg, "--adopt-baseline", "--source", "v1.0.0", "--dry-run", "--target-url", join(dir, "public.git")]);
+      expect(adopt).toMatchObject({ code: 1 });
+      expect(adopt.err).toContain("public main missing");
+    } finally {
+      process.chdir(prev);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("mistakes exit 1 with a message: bad arguments, an unknown command, a missing config, a gh failure", async () => {
     expect((await run(["set", "16", "Status", "--config", config])).err).toContain("set <issue> <field> <value>");
     expect((await run(["nope", "--config", config])).err).toContain("知らないコマンドです: nope");

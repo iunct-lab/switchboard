@@ -400,7 +400,7 @@ async function fileRequestFor(report: Report): Promise<void> {
   const req = requestFor(report, { date: new Date().toISOString().slice(0, 10), versions });
   if (!req) return;
   const r = await fileRequest(req);
-  if ("open" in r) console.log(`要望: 既存 #${r.open}（起票しない）`);
+  if ("open" in r) console.log(`要望: 既存 ${r.open}（起票しない）`);
 }
 
 if (import.meta.main) {

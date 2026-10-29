@@ -291,8 +291,8 @@ describe("check-models", () => {
 
   test("already filed request is detected", () => {
     const title = requestFor(drift([{ runner: "codex", kind: "unseen", ids: ["gpt-6.1-sol"] }]), SOURCE)!.title;
-    expect(alreadyFiled(title, [{ number: 601, title: "モデル一覧の設定化" }, { number: 750, title }])).toBe(750);
-    expect(alreadyFiled(title, [{ number: 751, title: `${title} / codex unseen gpt-7` }])).toBeNull();
+    expect(alreadyFiled(title, [{ ref: "#601", title: "モデル一覧の設定化" }, { ref: "#750", title }])).toBe("#750");
+    expect(alreadyFiled(title, [{ ref: "#751", title: `${title} / codex unseen gpt-7` }])).toBeNull();
   });
 
   describe("with fake CLIs on PATH", () => {

@@ -71,6 +71,41 @@ export function bodyStoryPoints(body: string): number | null {
   return null;
 }
 
+/** Each line outside fences (``` / ~~~): the same reading as core's prereqsOf. */
+function* unfenced(body: string): Generator<string> {
+  let fence: string | null = null;
+  for (const line of body.replace(/\r\n/g, "\n").split("\n")) {
+    const before = fence;
+    const marker = /^\s*(`{3,}|~{3,})/.exec(line)?.[1];
+    fence = fence ? (marker && marker[0] === fence[0] && marker.length >= fence.length && line.trim() === marker ? null : fence) : (marker ?? null);
+    if (!before && !fence) yield line;
+  }
+}
+
+/** The numbers on the first `**前提**:` line outside fences: all the schedule and the parallel guard read. */
+export function declaredPrereqs(body: string): number[] {
+  for (const line of unfenced(body)) if (line.startsWith("**前提**:")) return [...line.matchAll(/#(\d+)/g)].map((m) => Number(m[1]));
+  return [];
+}
+
+/** The free-text phrasings after `#N` that name a predecessor (#2149), besides `前提: #N` (#1990). A fixed list, not configured. */
+export const PREREQ_PHRASES = ["の後", "のマージ後", "の完了後", "を待つ", "が先"] as const;
+const FREE_PREREQ = new RegExp(`前提[:：]\\s*#(\\d+)|#(\\d+)(?!\\d)[^#\\n]{0,12}?(?:${PREREQ_PHRASES.join("|")})`, "g");
+
+/** The numbers free text names as predecessors: outside fences, inline code and the `**前提**:` line. */
+export function freeTextPrereqs(body: string): number[] {
+  const out = new Set<number>();
+  for (const line of unfenced(body)) {
+    if (line.startsWith("**前提**:")) continue;
+    // a code span opens and closes with a whole run of the same number of backticks (``#1 の後``); a run with no
+    // closing one is text, and a span may start after it
+    for (const m of line.replace(/(?<!`)(`+)(?!`).+?(?<!`)\1(?!`)/g, "").matchAll(FREE_PREREQ)) out.add(Number(m[1] ?? m[2]));
+  }
+  return [...out];
+}
+
+export const freeTextPrereq = (named: number[]) => `本文の自由文に先行（${named.map((k) => `#${k}`).join(", ")}）があるが **前提**: 行に無い。定期実行と並列ガードは **前提**: 行だけを読む`;
+
 async function fetchAll(gh: GhClient, owner: string, name: string, project: { owner: string; number: number } | null, sleep: (ms: number) => Promise<void>): Promise<Row[]> {
   const withProject = project !== null;
   const projectVars = project === null ? {} : { ...(project.owner === "@me" ? {} : { o: project.owner }), p: project.number };
@@ -132,7 +167,7 @@ export function storedRows(r: StoredRecords, withProject: boolean): Row[] {
  * or, given `records` (#919), from what the app stored, with the Project the app reads for the workspace.
  * `withProject: false` skips what needs the Project (Story Points there, Status) — for a gh without the project scope.
  */
-export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: boolean; sleep?: (ms: number) => Promise<void>; records?: StoredRecords } = {}): Promise<{ violations: Violation[]; fetched: number }> {
+export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: boolean; sleep?: (ms: number) => Promise<void>; records?: StoredRecords } = {}): Promise<{ violations: Violation[]; warnings: Violation[]; fetched: number }> {
   const withProject = opts.withProject ?? true;
   const project = !withProject ? null : opts.records ? opts.records.project : projectOf(cfg);
   const projectNumber = project?.number ?? 0;
@@ -144,6 +179,19 @@ export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: b
   }
   const violations: Violation[] = [];
   const bad = (issue: number, message: string) => violations.push({ issue, message });
+  // shown, but not counted: the exit stays what the violations make it (#1990)
+  const warnings: Violation[] = [];
+  // a predecessor named only in free text: an open PBI or Task, not on the **前提**: line, and not the Issue's own
+  // parent, child or sibling Task (the stack's order). A closed one is met and stops nothing (#2149)
+  const open = new Set(rows.filter((r) => labelsOf(r).some((l) => l === "type:pbi" || l === "type:task")).map((r) => r.number));
+  const parentOf = new Map(rows.map((r) => [r.number, r.parent?.number ?? null]));
+  const freePrereqs = (row: Row, body: string) => {
+    const declared = declaredPrereqs(body);
+    const parent = row.parent?.number ?? null;
+    const own = (k: number) => k === row.number || k === parent || parentOf.get(k) === row.number || (parent !== null && parentOf.get(k) === parent);
+    const named = freeTextPrereqs(body).filter((k) => open.has(k) && !declared.includes(k) && !own(k));
+    if (named.length) warnings.push({ issue: row.number, message: freeTextPrereq(named) });
+  };
   const points = cfg.storyPoints.join(" / ");
   const isPoint = (n: number) => cfg.storyPoints.includes(n);
 
@@ -166,6 +214,7 @@ export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: b
     if (bodySp === null) bad(n, "PBI 本文に `**Story Points**: N` が無い");
     else if (bodySp > Math.max(...cfg.storyPoints)) bad(n, `Story Points ${bodySp} は「大きすぎる」の印。分割してから Backlog に入れる`);
     else if (!isPoint(bodySp)) bad(n, `Story Points は ${points} のどれか（本文: ${bodySp}）`);
+    freePrereqs(row, body);
     if (row.parent) bad(n, `PBI に親 Issue（#${row.parent.number}）が付いている。PBI は親なし（Backlog ビューに出すため）`);
     if (!withProject) continue;
     const item = row.projectItems!.nodes.find((i) => i.project.number === projectNumber);
@@ -192,6 +241,7 @@ export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: b
     for (const s of cfg.sections.task) if (!hasSection(body, sectionName(s))) bad(row.number, missing("Task ", s));
     if (!row.parent) bad(row.number, "Task に親 PBI（sub-issue の親）が付いていない");
     else if (!labelsOf(row.parent).includes("type:pbi")) bad(row.number, `Task の親 #${row.parent.number} が type:pbi ではない`);
+    freePrereqs(row, body);
   }
 
   for (const row of rows.filter((r) => labelsOf(r).includes("type:request"))) {
@@ -200,10 +250,14 @@ export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: b
     if (hasSection(body, "出典") && !speakerOf(body)) bad(row.number, SPEAKER_MISSING);
   }
 
-  return { violations, fetched: rows.length };
+  return { violations, warnings, fetched: rows.length };
 }
 
-/** The lines `lint_backlog.sh` printed: `#N: message` per violation, then the count. */
-export function formatLint(violations: Violation[]): string[] {
-  return [...violations.map((v) => `#${v.issue}: ${v.message}`), `violations: ${violations.length}  (api errors: 0)`];
+/** The lines `lint_backlog.sh` printed: `#N: message` per violation, `warning: #N: message` per warning, then the counts. */
+export function formatLint(violations: Violation[], warnings: Violation[] = []): string[] {
+  return [
+    ...violations.map((v) => `#${v.issue}: ${v.message}`),
+    ...warnings.map((w) => `warning: #${w.issue}: ${w.message}`),
+    `violations: ${violations.length}  warnings: ${warnings.length}  (api errors: 0)`,
+  ];
 }

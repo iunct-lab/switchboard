@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { BacklogItem } from "@switchboard/protocol";
-import { applyView, DEFAULT_VIEW, loadView, saveView, VIEW_KEY, viewSummary, type BacklogView } from "./backlogView.ts";
+import { applyView, DEFAULT_VIEW, loadView, resetView, saveView, VIEW_KEY, viewSummary, type BacklogView } from "./backlogView.ts";
 
 const item = (number: number, over: Partial<BacklogItem> = {}): BacklogItem =>
   ({ number, title: `題 ${number}`, type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z", ...over }) as BacklogItem;
@@ -95,5 +95,31 @@ describe("load", () => {
     expect(loadView(memory({ [VIEW_KEY]: JSON.stringify({ ...DEFAULT_VIEW, sort: "title" }) }))).toEqual(DEFAULT_VIEW);
     expect(loadView(memory({ [VIEW_KEY]: JSON.stringify({ ...DEFAULT_VIEW, stages: ["done"] }) }))).toEqual(DEFAULT_VIEW);
     expect(loadView(memory({ [VIEW_KEY]: JSON.stringify({ sort: "default" }) }))).toEqual(DEFAULT_VIEW);
+  });
+});
+
+describe("layout", () => {
+  test("a board view reads back as a board", () => {
+    const s = memory();
+    saveView(s, view({ layout: "board" }));
+    expect(loadView(s)).toEqual(view({ layout: "board" }));
+    saveView(s, view({ layout: "board", priorities: ["P1"] }));
+    expect(loadView(s)).toEqual(view({ layout: "board", priorities: ["P1"] }));
+  });
+  test("a kept view without a layout, or with an unknown one, reads as the list", () => {
+    const { layout: _, ...old } = view({ sort: "priority" });
+    expect(loadView(memory({ [VIEW_KEY]: JSON.stringify(old) }))).toEqual(view({ sort: "priority", layout: "list" }));
+    expect(loadView(memory({ [VIEW_KEY]: JSON.stringify({ ...view({ sort: "priority" }), layout: "grid" }) }))).toEqual(view({ sort: "priority", layout: "list" }));
+  });
+  test("the layout is not a condition: no summary line, and 元に戻す keeps it", () => {
+    expect(viewSummary(view({ layout: "board" }))).toBeNull();
+    expect(viewSummary(view({ layout: "board", sort: "points" }))).toBe("Story Points 順");
+    expect(resetView(view({ layout: "board", sort: "points", priorities: ["P1"], query: "x" }))).toEqual(view({ layout: "board" }));
+  });
+  test("going back to the list removes what was kept", () => {
+    const s = memory();
+    saveView(s, view({ layout: "board" }));
+    saveView(s, DEFAULT_VIEW);
+    expect(s.m.has(VIEW_KEY)).toBe(false);
   });
 });

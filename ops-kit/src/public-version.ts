@@ -1,6 +1,6 @@
 /** Independent public versions. All source identities, plans and the cross-clone lock stay on private origin. */
 import { createHash, randomUUID } from "node:crypto";
-import type { Options, Run } from "./public-sync.ts";
+import { openSyncPr, releaseBaseline, TREES, type Options, type Run } from "./public-sync.ts";
 
 type Release = { version: string; source: string; tag: string; tree: string; tags: Record<string, string> };
 type State = { completed?: Release & { commit: string }; pending?: Release };
@@ -80,14 +80,61 @@ export function independentSync(opts: Options, run: Run, publish: (publication: 
     const pending = state.pending;
     if (pending && (pending.source !== source || pending.tag !== opts.source)) throw new Error(`unfinished publication: resume with --source ${pending.tag}`);
     const main = remote(url, "refs/heads/main");
-    if (main && !base && !pending) throw new Error("independent version baseline missing; use a new empty public repository");
+    const save = () => {
+      const blob = git(["hash-object", "-w", "--stdin"], JSON.stringify(state));
+      const tree = git(["mktree"], `100644 blob ${blob}\tstate.json\n`);
+      const commit = git(["commit-tree", tree, "-p", source, ...(previous ? ["-p", previous] : []), "-m", "public version record"]);
+      git(["push", "-q", `--force-with-lease=${ref}:${previous}`, "origin", `${commit}:${ref}`]);
+      previous = commit;
+    };
+    if (opts.adoptBaseline) {
+      // A published target without a record: its public main's commit, unchanged, becomes v0.1.0 when its tree's record names --source.
+      if (base) throw new Error("public target already has an independent version record; sync without --adopt-baseline");
+      if (!main) throw new Error("public main missing; --adopt-baseline is for a published target (an empty one starts at v0.1.0 by a plain sync)");
+      git(["fetch", "-q", url, "+refs/heads/main:refs/public-sync/version-main"]);
+      const commit = git(["rev-parse", "refs/public-sync/version-main"]);
+      const tree = git(["rev-parse", "refs/public-sync/version-main^{tree}"]);
+      if (pending && pending.tree !== tree) throw new Error("public main differs from the pending baseline");
+      const record = remote("origin", `${TREES}/${tree}`).split(/\s/)[0];
+      if (!record) throw new Error("public main's tree has no sync record on private origin; sync it with --adopted first");
+      if (record !== source) throw new Error(`public main's tree was not sent from ${opts.source}`);
+      verifyTag(opts.source, source);
+      git(["fetch", "-q", "origin", "+refs/heads/main:refs/public-sync/version-source-main"]);
+      if (!ancestor(source, "refs/public-sync/version-source-main")) throw new Error("source tag is not on private main");
+      if (!pending) {
+        const strict = (names: string) => names.split("\n").map((n) => n.replace(/^.*refs\/tags\//, "").replace(/\^\{\}$/, "")).filter((n) => semver.test(n));
+        const tags = strict(remote(url, "refs/tags/v*"));
+        if (tags.length) throw new Error(`public version tag already exists: ${tags[0]}`);
+        if (!opts.targetUrl) {
+          const releases = run(["gh", "api", "--paginate", `repos/${opts.target}/releases`, "--jq", ".[].tag_name"]);
+          if (releases.code) throw new Error("cannot read public Releases");
+          const found = releases.out.split("\n").filter((n) => semver.test(n));
+          if (found.length) throw new Error(`public Release already exists: ${found[0]}`);
+        }
+        const [open] = openSyncPr(opts, run);
+        if (open) throw new Error(`sync PR #${open} is open on ${opts.target}: close it first`);
+      }
+      const version = pending?.version ?? "v0.1.0";
+      numbers(version);
+      const head = `version: adopt baseline: source ${opts.source} (${source}), public main ${commit} tree ${tree}, public ${version}`;
+      if (opts.dryRun) return `${head}\n${releaseBaseline(opts, run, commit, version)}`;
+      if (!pending) { state.pending = { version, source, tag: opts.source, tree, tags: { [opts.source]: source } }; save(); }
+      const out = releaseBaseline(opts, run, commit, version);
+      git(["fetch", "-q", url, "+refs/heads/main:refs/public-sync/version-main"]);
+      if (git(["rev-parse", "refs/public-sync/version-main"]) !== commit) throw new Error("public main moved while adopting the baseline");
+      state = { completed: { ...state.pending!, commit } }; save();
+      return `${head}\n${out}`;
+    }
+    if (main && !base && !pending) throw new Error("independent version baseline missing; run ops-kit public-sync --adopt-baseline --source <vX.Y.Z> (see README: 独立した公開バージョン)");
     if (!main && base) throw new Error("public main missing for recorded baseline");
     if (main) {
       git(["fetch", "-q", url, "+refs/heads/main:refs/public-sync/version-main"]);
       const title = git(["log", "-1", "--format=%s", "refs/public-sync/version-main"]);
       const tree = git(["rev-parse", "refs/public-sync/version-main^{tree}"]);
       const commit = git(["rev-parse", "refs/public-sync/version-main"]);
-      if (!(base?.version === title && base.tree === tree && base.commit === commit) && !(pending?.version === title && pending.tree === tree))
+      if (!base && pending?.tree === tree && pending.version !== title) throw new Error(`unfinished baseline adoption: resume with --adopt-baseline --source ${pending.tag}`);
+      // the completed commit is the exact identity: an adopted baseline keeps the title of the sync before it
+      if (!(base?.tree === tree && base.commit === commit) && !(pending?.version === title && pending.tree === tree))
         throw new Error("public main differs from independent version record");
     }
     if (base && !ancestor(base.source, source)) throw new Error("source is older than or diverges from published baseline");
@@ -124,13 +171,6 @@ export function independentSync(opts: Options, run: Run, publish: (publication: 
     if (base && bump >= 0) { n[bump] = n[bump]! + 1; for (let i = bump + 1; i < 3; i++) n[i] = 0; }
     const version = pending?.version ?? `v${n.join(".")}`;
     numbers(version);
-    const save = () => {
-      const blob = git(["hash-object", "-w", "--stdin"], JSON.stringify(state));
-      const tree = git(["mktree"], `100644 blob ${blob}\tstate.json\n`);
-      const commit = git(["commit-tree", tree, "-p", source, ...(previous ? ["-p", previous] : []), "-m", "public version record"]);
-      git(["push", "-q", `--force-with-lease=${ref}:${previous}`, "origin", `${commit}:${ref}`]);
-      previous = commit;
-    };
     let prepared = false;
     let preflight = !opts.dryRun;
     const publication: Publication = { version, prepare(tree) {

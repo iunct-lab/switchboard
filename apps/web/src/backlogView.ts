@@ -2,7 +2,8 @@ import type { BacklogItem, BacklogStage } from "@switchboard/protocol";
 
 /**
  * How the Backlog screen sorts and narrows its rows (#2695), kept in the browser. Empty arrays = every value; `query`
- * matches a title or a number; `sort` "default" keeps the daemon's order.
+ * matches a title or a number; `sort` "default" keeps the daemon's order. `layout` is how the rows are laid out (#2696:
+ * the stage cards, or the stages as the columns of a board), not a condition.
  */
 export interface BacklogView {
   sort: "default" | "priority" | "updated" | "created" | "points";
@@ -10,9 +11,10 @@ export interface BacklogView {
   types: Array<"request" | "pbi">;
   priorities: string[];
   query: string;
+  layout: "list" | "board";
 }
 
-export const DEFAULT_VIEW: BacklogView = { sort: "default", stages: [], types: [], priorities: [], query: "" };
+export const DEFAULT_VIEW: BacklogView = { sort: "default", stages: [], types: [], priorities: [], query: "", layout: "list" };
 
 export const VIEW_KEY = "switchboard.backlog.view";
 
@@ -99,7 +101,12 @@ export function viewSummary(view: BacklogView): string | null {
 
 const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every((s) => typeof s === "string");
 
-/** The kept view; the default when nothing is kept or what is kept is not a view. */
+/** No conditions, the layout kept (元に戻す). */
+export function resetView(view: BacklogView): BacklogView {
+  return { ...DEFAULT_VIEW, layout: view.layout };
+}
+
+/** The kept view; the default when nothing is kept or what is kept is not a view. A missing or unknown layout is the list. */
 export function loadView(store: Pick<Storage, "getItem">): BacklogView {
   try {
     const v = JSON.parse(store.getItem(VIEW_KEY) ?? "null") as Partial<BacklogView> | null;
@@ -113,7 +120,7 @@ export function loadView(store: Pick<Storage, "getItem">): BacklogView {
       v.types.every((t) => TYPES.some(([k]) => k === t)) &&
       strings(v.priorities) &&
       typeof v.query === "string";
-    return ok ? (v as BacklogView) : DEFAULT_VIEW;
+    return ok ? { ...(v as BacklogView), layout: v.layout === "board" ? "board" : "list" } : DEFAULT_VIEW;
   } catch {
     return DEFAULT_VIEW;
   }
@@ -121,6 +128,6 @@ export function loadView(store: Pick<Storage, "getItem">): BacklogView {
 
 /** Keeps `view`; the default is kept as nothing, so the next load starts from the default too. */
 export function saveView(store: Pick<Storage, "setItem" | "removeItem">, view: BacklogView): void {
-  if (viewSummary(view) === null) store.removeItem(VIEW_KEY);
+  if (viewSummary(view) === null && view.layout === "list") store.removeItem(VIEW_KEY);
   else store.setItem(VIEW_KEY, JSON.stringify(view));
 }

@@ -91,7 +91,7 @@ bash scripts/setup/set_project_field.sh <Task> Status "In progress"     # BACKLO
 
 `overlap` は Task と親 PBI の本文の `**前提**:` も判定する（`prereqs: [{ ref, state, sibling }]`。`state` はデーモンの判定と同じ: met / pending / withdrawn / missing / unknown。ただしマージ済みの PR の `（リリース）` は met。`sibling` = 同じ PBI の Task で、スタックで積むので待たない）。自由文の「前提: #K が Done」は読まれない。
 
-**前提が未完のとき**（verdict `wait`）: 下の「重なったとき」の 1〜2 と同じく後回しにして、独立した Task を積む。全部の Task が `wait` か、残りがそれを前提にしていれば `<guard> release <PBI> "後回し: #<Task>（前提 #N が未完）" --waits <N>`（`N` は `prereqs` の `state: pending` の番号）で止める。前提が閉じれば定期実行が再開する。
+**前提が未完のとき**（verdict `wait`）: 下の「重なったとき」の 1〜2 と同じく後回しにして、独立した Task を積む。全部の Task が `wait` か、残りがそれを前提にしていれば `<guard> release <PBI> "後回し: #<Task>（前提 #N が未完）" --waits <N>`（`N` は `prereqs` の `state: pending` の番号）で止める。前提が閉じれば定期実行が再開する。待つのは定期実行（backlog-next）なので、止まるときの停止の記録は `waiting` で残さず、引き渡した印（`reason` は `depends` のまま、`state` は `resolved`、`evidence` は「backlog-next の前提待ちに引き渡した: #N」）で書いてターンを終える（引き渡した待ちを Task の停止として積まない。#2149）。
 **前提を人が直すとき**（verdict `stop`: 取り下げ = 未マージで閉じた PR・not planned の Issue / missing = 見つからない / unknown = Issue に `（リリース）` を付けた）: その Task は始めない。`## 判断待ち` は出さず、理由を release の文に書いて（`<guard> release <PBI> "止めた: #<Task> の前提 #N が取り下げ"`。`--waits` は付けない）報告の「利用者へ」に書く。直すのは利用者（本文の前提を書き換える・前提を閉じ直す）。マージ済みの PR の `（リリース）` はガードでは成立として進む（動いている版に入ったかはデーモンが判定し、入るまで定期実行はその PBI を始めない）
 
 **重なったとき**（verdict `defer`）: 待たない。
@@ -99,7 +99,7 @@ bash scripts/setup/set_project_field.sh <Task> Status "In progress"     # BACKLO
 2. その Task と、それを `**前提**:` に書いている Task を順番の最後へ回し、残りから重ならない Task を次に積む（PBI の決定ログに順番の変更を 1 行）
 3. 後回しの Task は、他の Task を 5 までマージし終えてから `overlap` をやり直す。exit 0 なら `git fetch origin && git checkout --detach origin/main` から新しいスタックとして積む（相手の変更が入った main の上に作る。古いスタックの上に積まない）
 4. まだ重なっていれば PBI は閉じない。`<guard> release <PBI> "後回し: #<Task>（<相手> と重なる）" --overlap-waits <相手の番号>` で占有を外し、報告の「利用者へ」に書いて終わる。`--overlap-waits` は `overlap` の出力の `blocking[].ref` の番号（`PR #778` → `778`、`Task #603` → `603`。複数ならカンマで）。相手が全部閉じるか、待っている PR が Draft・`needs-decision`、または重複相手の Task が `needs-decision` になって占有対象から外れたら、定期実行（バックログを進める）が次の発火でこの PBI を再開する（#817）。手で再開するなら /pbi-complete <PBI>
-5. 前提（`**前提**:` の番号）がほかの PBI のもので、未完のまま進めずに止まるときも同じく `<guard> release <PBI> "後回し: #<Task>（前提 #N が未完）" --waits <N>` で止める
+5. 前提（`**前提**:` の番号）がほかの PBI のもので、未完のまま進めずに止まるときも同じく `<guard> release <PBI> "後回し: #<Task>（前提 #N が未完）" --waits <N>` で止め、停止の記録は引き渡した印（「前提が未完のとき」）
 
 `--overlap-waits` はファイル重複待ち、`--waits` は未完の前提待ちとして区別する。前提 Task が判断待ちになっても、完了するまでは進めない。古い `waits=` の Task 待ちは種類が不明なので前提として扱い、手で再開して overlap を再確認する。
 
@@ -175,3 +175,4 @@ main: <pull 済み（pulled <old>..<new>） / up to date / pull していない�
 占有を取り直す（並列ガードを使うとき）: `<guard> claim <PBI>`（前のセッションが release していれば通る。止まったセッションの占有が残っていて、利用者が再開を指示したときだけ `--takeover`）。
 スタックは PBI の worktree の中で `gh stack switch` / `git branch --list`（CLAUDE.md の枝の名前）を確認し、各 PR の状態（`gh pr view --json state,mergeStateStatus`）と Task の Status（Project）を読む。
 結果コメントの無い Task は「閉じているが未完了」。そこから 4 か 5 を再開する。前の会話の記憶ではなく Issue と PR の記録を正とする。
+PBI が（別のセッションで）既に閉じていても、6 の済んでいない項目（Milestone・元要望、worktree の片付け、main の更新）は自分で済ませてから報告する。「やっていない」と書いて止めない。
