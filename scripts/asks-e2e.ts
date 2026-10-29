@@ -10,9 +10,11 @@
  * #938: answers saved as policies — three ranges' worth read back in the settings, applied to the next approval and
  * decision with the basis on record, shown again with what differs, refused where the runner or a rule always asks, edited
  * and revoked from the settings and taking effect at once — at 1280, and the form and the list at 390.
+ * #1674: #306's decision, which the Ready #309 names as its prerequisite, is the first of the person's with 答えると 1 件が進められる.
  * #2221: a decision and an operational check that name a Task's two screen mockups — a button each on their cards, the
  * pressed one opened in the card, the same buttons over the Backlog's answer box — at 1280 and 390.
  */
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,7 +36,10 @@ issue(303).labels.nodes.push({ name: "needs-decision" });
 comments(303);
 // #308 has two acceptance criteria waiting on the user's check (the fixture); #304 (Ready) waits for the open PR #779
 comments(304).push({ body: releaseBody("後回し: 前提 PR #779", [779]), createdAt: new Date().toISOString() });
-const waitStates: Json = { w779: { __typename: "PullRequest", state: "OPEN" } };
+// #1674: #309, a Ready PBI no other check uses, names #306 as its prerequisite, so #306's question is the first of the
+// person's, unblocking one
+pages[0].data.repository.issues.nodes.push({ ...structuredClone(issue(304)), number: 309, title: "PBI: #306 を待つ PBI", url: "https://github.com/acme/app/issues/309", body: "**Story Points**: 2\n\n**前提**: #306\n", subIssuesSummary: { total: 0, completed: 0 } });
+const waitStates: Json = { w779: { __typename: "PullRequest", state: "OPEN" }, w306: { __typename: "Issue", state: "OPEN" } };
 // #936: the PRs merge checks stop at — #12's head is the one its [merge-ask] named, #13 was pushed to since
 const ASKED = "a".repeat(40);
 const heads: Record<string, string> = { "12": ASKED, "13": "d".repeat(40), "14": "e".repeat(40) };
@@ -61,6 +66,9 @@ const gh: GhRunner = async (args, cwd) => {
   return { code: 0, stdout: JSON.stringify(args.includes("after=CURSOR1") ? pages[1] : pages[0]), stderr: "" };
 };
 delete process.env.SWITCHBOARD_PROJECT_URL;
+// the checkout's origin reads as the fake registration (#2799 starts no Task in a clone of another repository)
+const origin = spawnSync("git", ["remote", "get-url", "origin"], { cwd: import.meta.dir, encoding: "utf8" });
+if (origin.status === 0) Object.assign(process.env, { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "url.https://github.com/acme/app.git.insteadOf", GIT_CONFIG_VALUE_0: origin.stdout.trim() });
 
 const checkOf = (pr: number) => `PR #${pr} を出しました。\n\n**確認**: PR #${pr} をマージしてよいか\n**選択肢**:\n- A: マージする — 影響: main に入る\n- B: 待つ — 影響: 後続が止まる\n**推奨**: A — CI が緑\n**止めた場所**: PR #${pr}`;
 const CHECK = checkOf(12);
@@ -215,6 +223,11 @@ try {
   assert(missing["問い"]!.text === "不明" && missing["推奨と根拠"]!.text === "不明" && missing["PBI"]!.text.startsWith("#303 "), `#303: ${JSON.stringify(missing)}`);
   const wait = await facts(`wait:${meta.id}#304@`);
   assert(wait["停止理由"]!.text === "PR #779 の完了待ち" && wait["条件"]!.text === "pr#779: open", `#304: ${JSON.stringify(wait)}`);
+  // #1674: the question other PBIs wait on comes first, with how many and which
+  const first = await evaluate(`(() => { const c = document.querySelector('.ask-group-person .card.ask'); return { id: c.dataset.ask, line: c.querySelector('.ask-unblocks')?.textContent ?? null, links: [...c.querySelectorAll('.ask-unblocks-list a')].map(a => a.href) }; })()`) as { id: string; line: string | null; links: string[] };
+  assert(first.id.startsWith(`decision:${meta.id}#306@`) && first.line === "答えると 1 件が進められる" && same(first.links, ["https://github.com/acme/app/issues/309"]), `first of the person's: ${JSON.stringify(first)}`);
+  assert(await evaluate(`[...document.querySelectorAll('.card.ask')].filter(c => c.querySelector('.ask-unblocks')).length`) === 1, "only #306's card says how many it unblocks");
+  report.first = first;
   report.before = before;
   await shot("asks-1280.png");
 

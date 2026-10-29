@@ -10,6 +10,7 @@ import { Interventions } from "./Interventions.tsx";
 import { Mockups } from "./Approvals.tsx";
 import { Stops } from "./Stops.tsx";
 import { jstDateTime } from "../time.ts";
+import { applyView, DEFAULT_VIEW, loadView, PRIORITIES, saveView, SORTS, STAGES, TYPES, viewSummary, type BacklogView } from "../backlogView.ts";
 
 /** The button a row shows for its stage (#265; in-progress asks for its status, #522); needs-decision rows get none. */
 const START: Partial<Record<BacklogStage, [BacklogAction, string]>> = {
@@ -27,14 +28,6 @@ const SHOWN_KEY = "switchboard.backlog.workspace";
 
 /** #441: the list last read, kept while the tab is away so that opening it shows this at once; a page reload forgets it. */
 let lastBacklog: BacklogData | null = null;
-
-const STAGES: Array<[BacklogStage, string]> = [
-  ["needs-decision", "判断待ち"],
-  ["request", "要望のまま"],
-  ["needs-tasks", "分解待ち"],
-  ["ready", "Ready"],
-  ["in-progress", "実装中"],
-];
 
 /**
  * A workspace whose backlog could not be read, with the repository variable its Project URL is under (each repository
@@ -680,6 +673,51 @@ function Overlap(props: { item: BacklogItem }) {
  * imported from GitHub, #885; 再読込 imports first); the last list shows first and the new one replaces it once read (#441). GitHub stays the place to edit them. The stage buttons and answers act on the row's own workspace. The list
  * can be narrowed to one workspace (remembered in localStorage).
  */
+/** Toggles `v` in `list`: in when absent, out when present. */
+function toggle<T>(list: T[], v: T): T[] {
+  return list.includes(v) ? list.filter((x) => x !== v) : [...list, v];
+}
+
+/**
+ * The 表示 button and what it opens (#2695): sort, the stage / type / Priority chips and the title or number search. The
+ * one part always on the heading; the conditions it sets are kept by the caller.
+ */
+function ViewPicker(props: { view: BacklogView; onChange: (v: BacklogView) => void }) {
+  const { view, onChange } = props;
+  const chips = <T extends string>(list: Array<[T, string]>, on: T[], set: (next: T[]) => BacklogView) =>
+    list.map(([k, label]) => (
+      <button key={k} className={`chip${on.includes(k) ? " on" : ""}`} aria-pressed={on.includes(k)} onClick={() => onChange(set(toggle(on, k)))}>
+        {label}
+      </button>
+    ));
+  return (
+    <details className="backlog-view">
+      <summary>表示</summary>
+      <div className="backlog-view-body">
+        <label>
+          並べ替え{" "}
+          <select value={view.sort} onChange={(e) => onChange({ ...view, sort: e.target.value as BacklogView["sort"] })}>
+            {SORTS.map(([k, label]) => (
+              <option key={k} value={k}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="chips">{chips(STAGES, view.stages, (stages) => ({ ...view, stages }))}</div>
+        <div className="chips">{chips(TYPES, view.types, (types) => ({ ...view, types }))}</div>
+        <div className="chips">{chips(PRIORITIES.map((p): [string, string] => [p, p]), view.priorities, (priorities) => ({ ...view, priorities }))}</div>
+        <input type="search" placeholder="題か番号" value={view.query} onChange={(e) => onChange({ ...view, query: e.target.value })} />
+        {viewSummary(view) && (
+          <button className="ghost" onClick={() => onChange(DEFAULT_VIEW)}>
+            元に戻す
+          </button>
+        )}
+      </div>
+    </details>
+  );
+}
+
 export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => void; onError: (msg: string) => void; onStarted: (task: Task) => void; onOpenTask: (id: string) => void; onOpenSchedules: () => void }) {
   const [data, setData] = useState<BacklogData | null>(lastBacklog);
   const [failure, setFailure] = useState<string | null>(null);
@@ -691,6 +729,12 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
   // whether backlog-next resumes a row whose waits closed (#817): an enabled バックログを進める and an implement slot
   const [auto, setAuto] = useState<Record<string, boolean>>({});
   const [shown, setShown] = useState(() => localStorage.getItem(SHOWN_KEY) ?? "");
+  const [view, setView] = useState(() => loadView(localStorage));
+  const changeView = (next: BacklogView) => {
+    setView(next);
+    saveView(localStorage, next);
+  };
+  const summary = viewSummary(view);
   const projectVars = workspaces && Object.fromEntries(workspaces.map((w) => [w.id, w.projectVar]));
   const key = (i: BacklogItem) => `${i.workspaceId}:${i.number}`;
   // a remembered workspace that is no longer registered shows everything
@@ -771,10 +815,19 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
           <button className="ghost" disabled={busy} onClick={() => load(true)}>
             再読込
           </button>
+          <ViewPicker view={view} onChange={changeView} />
           <button className="pri" onClick={() => props.onFeedback(current ? { id: current, name: currentName ?? current } : undefined)}>
             要望を登録
           </button>
         </div>
+        {summary && (
+          <div className="hint backlog-view-line">
+            {summary}{" "}
+            <button className="ghost link" onClick={() => changeView(DEFAULT_VIEW)}>
+              元に戻す
+            </button>
+          </div>
+        )}
         {promotion && (
           <div className="hint promotion">
             {promotion.text}
@@ -837,8 +890,8 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
       </section>
 
       {data &&
-        STAGES.map(([stage, label]) => {
-          const items = data.items.filter((i) => i.stage === stage && inView(i.workspaceId));
+        STAGES.filter(([stage]) => view.stages.length === 0 || view.stages.includes(stage)).map(([stage, label]) => {
+          const items = applyView(data.items.filter((i) => inView(i.workspaceId)), view).filter((i) => i.stage === stage);
           return (
             <section key={stage} className="card" data-stage={stage}>
               <div className="row head">

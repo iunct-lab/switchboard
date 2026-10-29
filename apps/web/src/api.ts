@@ -1,4 +1,4 @@
-import type { AnswerPolicy, Artifact, AskAnswer, AskAnswerResult, AskList, Attachment, Backlog, BacklogAction, BacklogCreateInput, BacklogEditInput, BacklogIssueDetail, CheckRun, CloudPreparation, CreateTaskInput, DeviceAuthView, EvalsListRow, EventEnvelope, FeedbackInput, FlowView, Footprint, HistoryScanResult, HistorySession, HistoryStatus, InboxNote, InterventionView, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerSummary, LedgerTaskRow, OpsLatency, OpsLoad, OpsStops, PendingApproval, PerfSample, PerfSummaryRow, PolicyInput, PolicyList, PolicyPatch, Preset, PresetExpandInput, PresetExpansion, PresetInput, PresetList, PricingTable, Queue, ReportRow, RoutingLogRow, RoutingStats, RoutingSuggestion, RunnerId, RunnerInfo, Schedule, ScheduleInput, ServerMessage, Settings, SettingsPatch, StagedChange, StopSummary, SuggestInput, Task, TaskDiffFile, TaskEvals, TaskOutcome, TeleportProgress, Workspace, WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
+import type { AnswerPolicy, Artifact, AskAnswer, AskAnswerResult, AskBatch, AskBatchResult, AskList, Attachment, Backlog, BacklogAction, BacklogCreateInput, BacklogEditInput, BacklogIssueDetail, CheckRun, CloudPreparation, CreatedIssue, CreateTaskInput, DeviceAuthView, EvalsListRow, EvalsSummary, EventEnvelope, FeedbackInput, FlowView, Footprint, HistoryScanResult, HistorySession, HistoryStatus, InboxNote, InterventionView, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerSummary, LedgerTaskRow, OpsLatency, OpsLoad, OpsStops, PendingApproval, PerfSample, PerfSummaryRow, PolicyInput, PolicyList, PolicyPatch, Preset, PresetExpandInput, PresetExpansion, PresetInput, PresetList, PricingTable, Queue, ReportRow, RoutingLogRow, RoutingStats, RoutingSuggestion, RunnerId, RunnerInfo, Schedule, ScheduleInput, ServerMessage, Settings, SettingsPatch, StagedChange, StopSummary, SuggestInput, Task, TaskDiffFile, TaskEvals, TaskOutcome, TeleportProgress, Workspace, WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
 import { acrossParams, type AcrossQuery } from "./reports.ts";
 import { hasTypedText, hostStopped, LEAVE_STOPPED, loginRoute, stoppedRoute, type LoginMode } from "./login.ts";
 import type { ReleaseStatus } from "./release.ts";
@@ -114,6 +114,10 @@ export interface TaskDetail {
   teleport?: TeleportProgress | null;
   /** The MCP servers this task's Claude gets (#2090, `mcp.yaml` servers); the user-wide ones are not handed over. Empty for other runners and Cloud. */
   mcpServers?: string[];
+  /** The Issues this task opened (#1878, `gh issue create` / `request_issue.sh`); not shown on any screen. */
+  createdIssues?: CreatedIssue[];
+  /** Its final report put something off (#1878, the words of DEFERRED_WORDS); not shown on any screen. */
+  deferred?: boolean;
 }
 
 /** What `/api/health` said about the login (#211); set by health() so a later 401 knows where to send the browser. */
@@ -257,6 +261,8 @@ export const api = {
   /** Every question waiting on the user, and those answered / resolved within the day (#935). */
   asks: () => req<AskList>("/api/asks"),
   /** #936: answers one question by its id; a 409 carries `body` (AskChanged: what changed, the question now). */
+  /** #2046: one press for a batch — sso logs in once, deploy approves the chosen Tasks. */
+  answerBatch: (id: AskBatch["id"], taskIds?: string[]) => req<AskBatchResult>("/api/asks/answer", { method: "POST", body: JSON.stringify({ id, answer: { kind: "allow" }, ...(taskIds ? { taskIds } : {}) }) }),
   answerAsk: (id: string, answer: AskAnswer, policy?: PolicyInput) => req<AskAnswerResult>("/api/asks/answer", { method: "POST", body: JSON.stringify({ id, answer, ...(policy ? { policy } : {}) }) }),
   /** #938: the saved answer policies, and one edited / revoked. */
   listPolicies: () => req<PolicyList>("/api/policies"),
@@ -352,12 +358,15 @@ export const api = {
     const query = qs.toString();
     return req<EvalsListRow[]>(`/api/evals${query ? `?${query}` : ""}`);
   },
+  /** The Insights summary (#1877): this week's tasks to rate and the human − judge gap. */
+  evalsSummary: (q: { workspaceId?: string } = {}) => req<EvalsSummary>(`/api/evals/summary${q.workspaceId ? `?workspaceId=${encodeURIComponent(q.workspaceId)}` : ""}`),
   setArchived: (id: string, archived: boolean) => req<Task>(`/api/tasks/${id}/archive`, { method: "POST", body: JSON.stringify({ archived }) }),
   setOutcome: (id: string, body: { outcome?: TaskOutcome; reviewed?: boolean }) => req<{ task: Task }>(`/api/tasks/${id}/outcome`, { method: "POST", body: JSON.stringify(body) }),
   setBudget: (id: string, budgetUsd: number | null) => req<{ task: Task; overBudget: boolean }>(`/api/tasks/${id}/budget`, { method: "POST", body: JSON.stringify({ budgetUsd }) }),
   inbox: () => req<InboxNote[]>("/api/inbox"),
   inboxAdd: (text: string, opts: { title?: string; workspaceHint?: string } = {}) => req<InboxNote>("/api/inbox", { method: "POST", body: JSON.stringify({ text, ...opts }) }),
   inboxClose: (path: string) => req<InboxNote>("/api/inbox/close", { method: "POST", body: JSON.stringify({ path }) }),
+  inboxEdit: (path: string, title: string, text: string) => req<InboxNote>("/api/inbox/edit", { method: "POST", body: JSON.stringify({ path, title, text }) }),
   inboxPromote: (path: string, workspaceId: string, runner?: RunnerId) => req<{ task: Task; note: InboxNote }>("/api/inbox/promote", { method: "POST", body: JSON.stringify({ path, workspaceId, runner }) }),
   knowledge: () => req<KnowledgeIndex>("/api/knowledge"),
   knowledgeSearch: (q: string) => req<KnowledgeSearchHit[]>(`/api/knowledge/search?q=${encodeURIComponent(q)}`),

@@ -22,11 +22,15 @@ Actions の run があってもなくても、結果は PR に forge の `verifi
 
 | 結果 | 1 行目 | 本文 |
 |---|---|---|
-| 全手順が合格 | `[local-ci] pass <head sha> base=<base sha>` | 手順の表 |
+| 全手順が合格 | `[local-ci] pass <head sha> base=<base sha>` | 2 行目にスタックの行 `stack #<n>=<patch-id> …`（スタックの一番下からこの PR まで、各 PR の `gh pr diff \| git patch-id --verbatim`。今の head がテストした head に入っていない下の PR（修正を上へ rebase していない）は、それより下と一緒に外す。`LOCAL_CI_STACK` / `stackOf`。GitHub の PR だけ。読めなければ行を付けずに投稿する）、手順の表 |
 | 手順が落ちた | `[local-ci] fail <head sha> base=<base sha>` | 落ちた手順と exit、その全文から拾った `(fail)` / `over:` の行（最大 20 行）、手順の表。全文は実行したホストの記録（パスは書かない） |
 | head が base にマージできない | `[local-ci] fail <head sha> base=<base sha>` | 衝突。手順は実行していない |
 
-投稿の直前に head と base を同じ方法で読み直し（`notify`）、どちらかが実行中に変わっていたら何も投稿せず exit 1（古い組合せの合格を新しい head / base の合格と読ませない。回し直す）。読み直せなかったときも投稿しない。投稿する文はキットの認証の値の検査（`runForgeOperation`）を通る。投稿が認証・権限で失敗したら、理由を出して exit 1 で止まる（別の経路で投稿しない。Task なら会話で確認する）。結果の印の読み方は `LOCAL_CI_RESULT`（pass か fail、head、続けて `base=`。マージ判定での扱いは [docs/merge-gate.md](../merge-gate.md)）。
+投稿の直前に head と base を同じ方法で読み直し（`notify`）、どちらかが実行中に変わっていたら何も投稿せず exit 1（テストしていない head や base の結果を書かない。回し直す）。投稿した後に base が進んだこと、下の PR のマージ後の自動 rebase で head が変わったことでは回し直さない（差分が同じなら 2 行目の patch-id で数えられる。いつ回し、merge-gate がどう数えるかは [docs/merge-gate.md](../merge-gate.md) の「ローカル CI を回す時と数え方」）。読み直せなかったときも投稿しない。投稿する文はキットの認証の値の検査（`runForgeOperation`）を通る。投稿が認証・権限で失敗したら、理由を出して exit 1 で止まる（別の経路で投稿しない。Task なら会話で確認する）。結果の印の読み方は `LOCAL_CI_RESULT`（pass か fail、head、続けて `base=`。マージ判定での扱いは [docs/merge-gate.md](../merge-gate.md)）。
+
+### タグの CI
+
+マージ後の main に付いたタグの CI（`bun scripts/tag-ci.ts [--repo <owner/name>]`）は、この文書の手順を同じ環境で回す（worktree で手順を回して失敗の全文を `~/.cache` に残す部分 `runCheckout` を `localCi` と共有する。対象は PR のマージではなく、タグのコミットそのもの）。印は PR の `[local-ci]` ではなく、そのタグの GitHub Release の本文の `[tag-ci] pass|fail <sha>`。最新のタグから回し、落ちたら遡る規則と読み方は [releases-and-rescue.md](releases-and-rescue.md) の「Tag CI」。
 
 ## 全文と測定値を残す実行手順
 
@@ -119,7 +123,7 @@ exit 0 は全工程合格、exit 1 は不合格である（この手順は PR �
 
 これは自動マージ判定を変更する印ではない。利用者が認めた代替の範囲で手動判断する。セキュリティ等のマージ確認、未解決レビュー、競合、実機確認は別に満たす。相当検証での代替を未確認の実機結果に広げない。
 
-修正・下位 PR のマージで head が変わったら、旧 SHA の検証を新 SHA に付け替えず、新 head の全工程を実行し直す。通信等の再試行はその作業の停止・再試行指示に従い、上記手順に自動再試行ループは設けない。
+この記録は印ではないので patch-id では数えない。修正・下位 PR のマージで head が変わったら、旧 SHA の検証を新 SHA に付け替えず、新 head の全工程を実行し直す。通信等の再試行はその作業の停止・再試行指示に従い、上記手順に自動再試行ループは設けない。
 
 ## 型検査（tsc と bun check）
 

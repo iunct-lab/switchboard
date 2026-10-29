@@ -67,6 +67,14 @@ describe("lint", () => {
     ]);
   });
 
+  test("lint: priority — a PBI without a Priority, or with one outside the config, is a violation with how to set it; a request or a Task without one is not", async () => {
+    expect(await lines("priority")).toEqual([
+      "#10: Project の Priority が未設定（backlog set 10 Priority <P0 / P1 / P2 / P3>）",
+      "#12: Project の Priority が P0 / P1 / P2 / P3 以外（P9）",
+      "violations: 2  (api errors: 0)",
+    ]);
+  });
+
   test("lint: sp-13 — too big, not in the set, missing in the body", async () => {
     expect(await lines("sp-13")).toEqual([
       "#10: Story Points 13 は「大きすぎる」の印。分割してから Backlog に入れる",
@@ -227,7 +235,7 @@ describe("lint", () => {
   };
 
   test("lint from the app's stored records (#919): the same violations as GitHub's answer, without asking GitHub", async () => {
-    for (const name of ["ok", "no-parent", "sp-mismatch", "sp-13", "ready-without-tasks", "request-missing-source", "request-speaker", "missing-section"]) {
+    for (const name of ["ok", "no-parent", "sp-mismatch", "sp-13", "ready-without-tasks", "request-missing-source", "request-speaker", "missing-section", "priority"]) {
       const gh = fakeGh([]);
       const stored = await lint(gh, cfg, { records: recordsOf(name), sleep: noSleep });
       expect(stored, name).toEqual(await lint(fakeGh([page(name)]), cfg, { sleep: noSleep }));

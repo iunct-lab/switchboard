@@ -12,7 +12,7 @@
 - [ ] packages/core
 - [ ] packages/adapters/claude · codex · dak
 - [ ] apps/web
-- [ ] docs / infra (.github, scripts)
+- [ ] 文書 / infra (.github, scripts)
 
 ## テスト観点 / Testing
 
@@ -25,4 +25,5 @@
 - [ ] 承認を迂回する既定値を足していない（System ENABLES, Agent DECIDES, User APPROVES）
 - [ ] ベンダ CLI のコード・プロトコル定義・バイナリを取り込んでいない（ライセンス境界）
 - [ ] どのランナーが無くても core が起動する
-- [ ] docs（README, docs/design）を必要に応じ更新した
+
+<!-- 文書更新の確認欄は Task が doc のファイルと書く中身を名指ししたときだけ加える。運用だけの Task には加えない。アプリが持つ可変の値は写さない。 -->

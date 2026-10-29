@@ -30,7 +30,7 @@ GitHub の Issue と Project で回す開発の流れ（要望 → PBI → Task 
 | `sync-labels [<file>] [--dry-run]` | ラベルを `.github/labels.yml` に合わせる（作る・直すだけで、消さない） | 要らない |
 | `scan-text <file\|->` | 文に認証に使える値が無いか検査する（値は出さない） | 要らない |
 | `scan-issues [<owner/name>] [--since <ISO>] [--recheck <URL>]...` | リポジトリの Issue・PR・コメントを全部（`--since` ならその時刻より後の更新だけと、`--recheck` の前回の当たり）、同じ検査に通す | 要らない |
-| `public-sync [--source <ref>] [--dry-run] [--adopted] [--target-url <url>]` | main のツリーだけを公開リポジトリへ送る（下の「公開リポジトリへの同期」） | 要る（`publicSync` だけ） |
+| `public-sync [--source <ref>] [--dry-run] [--adopted] [--target-url <url>]` / `public-sync --check [--source <ref>]` | main のツリーだけを公開リポジトリへ送る。`--check` は送らずに、公開に出すツリーの検査だけを CI で走らせる（下の「公開リポジトリへの同期」） | 要る（`publicSync` だけ） |
 | `export-copy <dest> --words-file <file>` | キットを読めないリポジトリが同梱するコピーを作る（下の「公開リポジトリ」） | 要らない |
 
 ## 使う側の設定（`ops.config.json`）
@@ -141,9 +141,10 @@ Phase は雛形に入れない（使うなら `fixtures/config-with-phase.json` 
 - 公開側の `main` が最後の同期のあとに変わっていたら、上書きしないよう止まる。その変更を Private に取り込んでから `--adopted` を付けて回す（このときは開いた同期の PR をマージせず、閉じるよう求めて止まる）
 - ツリーのうち `publicSync.include` が名指しするものだけを残し（省略はツリー全部。名指しした項目がツリーに無ければ出力に出す）、`publicSync.exclude` を外し、`publicSync.rewrite` のファイルは Private のリポジトリ名を公開側の名前に置き換える
 - そのあと公開側の 1 式（`public/`）をツリーに入れる（入れる / 入れないの設定は無い。`__PUBLIC_REPO__` は `publicSync.target`）: `.github/ISSUE_TEMPLATE/` を要望のテンプレ（`request.yml` + `config.yml`）だけに置き換える、PR を閉じる workflow（`.github/workflows/close-pull-requests.yml`）を足す、`SECURITY.md` はリポジトリに無いとき（root・`.github/`・`docs/` のどこにも）だけ雛形を入れる、`README.md` の `## How this repository works` の節を置き換える（無ければ最初の `## ` 見出しの前、見出しが無ければ末尾に差し込む。コードブロックの中の `## ` は見出しに数えない。`README.md` が無ければ止まる）。出力の `public kit:` の行がしたことを言う
-- 送る前の検査（1 件でも当たれば何も送らず exit 1）: 公開側で変わる行（初回はツリー全部）に、キットの秘密の規則（gh の前段と同じ。ホストの AWS のプロファイル名・SSO のセッション名も。アカウント ID はホストのものだけ）に当たる値（出すのは種類とファイル名だけ）。Private のリポジトリ名（名前全体の一致。ファイルの中・パス名・コミット本文）、ホームパス（macOS のホームディレクトリの形。`dev` / `example` / `me` / `x` / `<you>` の名前は通す）、個人のメールアドレス（例示用ドメイン・GitHub・Anthropic の公開アドレスは通す）。対象はツリー（バイナリも）、コミット本文、author / committer
+- 送る前の検査（1 件でも当たれば何も送らず exit 1）: 公開側で変わる行（初回はツリー全部）に、キットの秘密の規則（gh の前段と同じ。ホストの AWS のプロファイル名・SSO のセッション名・アカウント ID も）に当たる値（出すのは種類とファイル名だけ）。Private のリポジトリ名（名前全体の一致。ファイルの中・パス名・コミット本文）、ホームパス（macOS のホームディレクトリの形。`dev` / `example` / `me` / `x` / `<you>` の名前は通す）、個人のメールアドレス（例示用ドメイン・GitHub・Anthropic の公開アドレスは通す）。対象はツリー（バイナリも）、コミット本文、author / committer。ホストに依らない秘密の規則は、変わる行だけでなくツリー全部にも当てる（下の `--check` と同じ。出すのはファイルと行と種類）
 - 同期を回している OS の利用者名（`os.userInfo().username`、大文字と小文字は区別しない。空か、上の置き換え名か、`publicSync.serviceUsers` の名前なら見ない。見るのは同期を回す利用者の名前だけで、録画などを作った別の利用者の名前は見ない）がパスの形（`/home/<you>`・`/Users/<you>`・`pytest-of-<you>`・`C:\Users\<you>`。JSON や JS の文字列の `C:\\Users\\<you>` も）でファイルの中・パス名・コミット本文にあっても止まる
 - `--source <ref>`（既定 `origin/main`）はタグでも指せる。タグを指すと同期のコミットと PR の題がその名前だけになる（`v1.2.0`。タグでなければ `sync`）。題が `vX.Y.Z` の同期が公開側の main に入ると、同じ実行（マージに失敗したときは次の実行）で公開側のそのコミットに同じ名前のタグと GitHub Release が付く（`gh release create --target`、本文は無い。push しない。`--target-url` のときは付けない）。`--dry-run` は除外・書き換え・検査の結果と作るツリーの sha を出して終わる（公開側に届かなくてもよい。何も push しない。公開側に届くときは比較のために `refs/public-sync/main` へ fetch する）。`--target-url` は公開先の URL を差し替える（テストの bare リポジトリ用）
+- `--check`（`--source` の既定は `HEAD`）は、同期と同じ関数でツリーを組み立て、同じ関数でツリーの中の Private のリポジトリ名（ファイルと行、パス名）・ホームパス・個人のメールアドレスと、秘密の規則のうちホストに依らないもの（全ファイルの全行。出すのはファイルと行と種類で、値は出さない）を検査する。公開側には触らない（ネットワークも `gh` も要らない）ので、PR の CI に入れて、同期より前のマージの前に止める（例: CI の手順に `bun ops-kit/src/cli.ts public-sync --check`）。題・author に依る検査、ホストの AWS のプロファイル名・SSO のセッション名・アカウント ID の値、同期する OS の利用者名は同期のときだけ見る（CI にホストの値は無い。ARN などの形で分かるアカウント ID は `--check` でも当たり、例示は `123456789012`）。`origin`（か `GH_REPO`）が `publicSync.target` の clone（公開側の写しの CI）では検査せずに exit 0
 - exit 0 = 送った / 送るものが無い / dry-run、1 = 止まった（理由は stderr）、2 = 使い方の誤り
 
 ## 公開リポジトリ

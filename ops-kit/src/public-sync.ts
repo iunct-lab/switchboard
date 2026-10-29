@@ -145,68 +145,22 @@ export function personalEmails(text: string): string[] {
   return [...new Set((text.match(EMAIL) ?? []).filter((e) => !EMAIL_OK.test(e)))];
 }
 
-export function sync(opts: Options, run: Run, publication?: Publication): string {
-  if (opts.versioning && !publication) return independentSync(opts, run, (p, dryRun) => sync({ ...opts, dryRun: dryRun ?? opts.dryRun }, run, p));
-  if (opts.target.toLowerCase() === opts.privateRepo.toLowerCase()) throw new Error(`the public repository is the private one (${opts.target}): set publicSync.target to another repository`);
-  const source = opts.source ?? "origin/main";
-  const url = opts.targetUrl ?? `https://github.com/${opts.target}.git`;
-  const privateName = repoPattern(opts.privateRepo);
+/** git at the repository's top: `raw` gives the exit code, `git` the output (or a throw). */
+type Git = { raw: (args: string[], o?: Parameters<Run>[1]) => ReturnType<Run>; git: (args: string[], o?: Parameters<Run>[1]) => string };
+
+function gitAt(run: Run): Git {
   // Every git command runs at the repository's top: a path given to ls-files / update-index / ls-tree is relative to
   // the directory git runs in, while `<rev>:<path>` is not — and `ops-kit` may be started from a subdirectory.
   const top = ok(run(["git", "rev-parse", "--show-toplevel"]), ["git", "rev-parse", "--show-toplevel"]);
   const raw = (args: string[], o?: Parameters<Run>[1]) => run(["git", "-C", top, ...args], { ...o, env: { GIT_TERMINAL_PROMPT: "0", ...o?.env } }); // exit code wanted (`git grep` on a tree is limited to the directory git runs in, too)
-  const git = (args: string[], o?: Parameters<Run>[1]) => ok(raw(args, o), ["git", ...args]);
-  const log: string[] = [];
+  return { raw, git: (args, o) => ok(raw(args, o), ["git", ...args]) };
+}
 
-  const src = git(["rev-parse", "--verify", `${source}^{commit}`]);
-  // A --source that names a tag is a version: its name goes into the title, and later onto the public side as a release.
-  const tag = publication?.version ?? (opts.source && raw(["rev-parse", "--verify", "-q", `refs/tags/${opts.source}`]).code === 0 ? opts.source : undefined);
-  const remote = raw(["ls-remote", url, "refs/heads/main"], { env: { GIT_TERMINAL_PROMPT: "0" } });
-  if (remote.code !== 0 && !opts.dryRun) throw new Error(`cannot read ${url} (does ${opts.target} exist?)`);
-  if (remote.code !== 0) log.push(`${opts.target}: not reachable — dry-run as the first sync`);
-  const initial = remote.code !== 0 || remote.out === "";
-
-  // The public main must be exactly what the last sync left; anything merged only there would be overwritten.
-  let parent: string | undefined;
-  let lastPrivate: string | undefined;
-  const publicMain = () => {
-    git(["fetch", "-q", url, "+refs/heads/main:refs/public-sync/main"], { env: { GIT_TERMINAL_PROMPT: "0" } });
-    return git(["rev-parse", "refs/public-sync/main"]);
-  };
-  const recorded = (commit: string) => raw(["rev-parse", "--verify", "-q", `${TREES}/${git(["rev-parse", `${commit}^{tree}`])}`]).out || undefined;
-  if (!initial) {
-    parent = publicMain();
-    git(["fetch", "-q", "origin", `+${TREES}/*:${TREES}/*`], { env: { GIT_TERMINAL_PROMPT: "0" } });
-    lastPrivate = recorded(parent);
-    if (!lastPrivate) {
-      if (!opts.adopted)
-        throw new Error(`${opts.target} main changed after the last sync (its tree is not one this script sent): bring those changes into ${opts.privateRepo}, then sync with --adopted`);
-      log.push(`${opts.target} main changed after the last sync: replaced (--adopted)`);
-    }
-    // a sync PR a failed run left open is merged now (only on a public main this script left, so nothing there is lost)
-    // only a PR of this script: from a branch of the public repository itself (a fork's `sync/…` is someone else's), whose
-    // tree has a record here (the record is pushed before the PR is opened)
-    const [open, openBranch] = ok(run(["gh", "pr", "list", "-R", opts.target, "--state", "open", "--json", "number,headRefName,isCrossRepository", "-q", '.[] | select((.headRefName | startswith("sync/")) and (.isCrossRepository | not)) | "\\(.number) \\(.headRefName)"']), ["gh", "pr", "list"]).split("\n")[0]!.split(" ");
-    if (open && openBranch) {
-      git(["fetch", "-q", url, `+refs/heads/${openBranch}:refs/public-sync/pr`], { env: { GIT_TERMINAL_PROMPT: "0" } });
-      if (!recorded("refs/public-sync/pr")) throw new Error(`sync PR #${open} on ${opts.target} has a tree this script did not send: close it`);
-    }
-    if (open && (opts.dryRun || !lastPrivate)) {
-      if (!lastPrivate) throw new Error(`sync PR #${open} is still open on ${opts.target}: close it first (the public main changed after the last sync)`);
-      log.push(`dry-run: would merge sync PR #${open} on ${opts.target}`);
-    } else if (open) {
-      merge(open, opts, run, log);
-      parent = publicMain();
-      lastPrivate = recorded(parent);
-      if (!lastPrivate) throw new Error(`${opts.target} main after merging sync PR #${open} has no record of its tree in ${opts.privateRepo}`);
-    }
-    releaseLast(parent, opts, run, git, log);
-  }
-
-  // The tree to publish: the source tree, only what `include` names and without `exclude`, with `rewrite` pointing at
-  // the public repository.
+/** The tree to publish: the source tree, only what `include` names and without `exclude`, with `rewrite` pointing at the public repository. One builder for the sync and `check`. */
+export function publicTree(src: string, opts: Pick<Options, "privateRepo" | "target" | "include" | "exclude" | "rewrite">, { raw, git }: Git): { tree: string; log: string[] } {
   const dir = mkdtempSync(join(tmpdir(), "public-sync."));
-  let tree: string;
+  const log: string[] = [];
+  const privateName = repoPattern(opts.privateRepo);
   try {
     const env = { GIT_INDEX_FILE: join(dir, "index") };
     git(["read-tree", src], { env });
@@ -273,64 +227,50 @@ export function sync(opts: Options, run: Run, publication?: Publication): string
     const section = policySectionAt(next);
     const after = placed.find((l, i) => i > section && placedHeadings[i]);
     log.push(`public kit: README.md — ${policySectionAt(current) >= 0 ? `replaced ${README_SECTION}` : after ? `inserted ${README_SECTION} before ${after}` : `appended ${README_SECTION} (no ## heading)`}`);
-    tree = git(["write-tree"], { env });
+    return { tree: git(["write-tree"], { env }), log };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
 
-  if (parent && tree === git(["rev-parse", `${parent}^{tree}`])) return [...log, `nothing to sync: ${opts.target} main already has this tree`].join("\n");
-
-  // never backwards: a source older than the last sync would put an old tree on the public side (a hand run with a newer
-  // commit, then the daily run with the latest tag)
-  if (lastPrivate && src !== lastPrivate && raw(["merge-base", "--is-ancestor", src, lastPrivate]).code === 0)
-    throw new Error(`${source} is older than what ${opts.target} has: nothing is sent backwards (send a newer tag)`);
-  const title = tag ?? "sync";
-  const branch = `sync/${tag ?? tree.slice(0, 7)}`;
-  const message = `${title}\n`;
-
-  // The private repository's name does not leave either (the rewrite above already replaced it where readers need the
-  // public one): in the files (binary ones too: -a), their paths and the message.
-  // git grep: 0 = a match, 1 = none, anything else = it failed, which must stop the sync too.
-  const privateNames = raw(["grep", "-ailP", "-e", privateName, tree]);
+/**
+ * What the tree to publish must not hold, the same for the sync and `check`: the private repository's name (the
+ * rewrite already replaced it where readers need the public one) in the files (binary ones too: -a) and their paths, a
+ * home path (CI's rule), an address of a person, a secret-shaped value by the rules that need no host. Throws on the
+ * first kind found, with where.
+ * git grep: 0 = a match, 1 = none, anything else = it failed, which must stop too.
+ */
+export function checkTree(tree: string, privateRepo: string, { raw, git }: Git): void {
+  const privateName = repoPattern(privateRepo);
+  const privateNames = raw(["grep", "-ainoP", "-e", privateName, tree]);
   if (privateNames.code !== 0 && privateNames.code !== 1) throw new Error("git grep for private repository failed");
-  const inMessage = new RegExp(privateName, "i").test(message);
   // -z: the paths as they are (without it git quotes a path with a tab or a non-ASCII letter, and `\t` hides the boundary)
   const paths = git(["ls-tree", "-r", "-z", "--name-only", tree]).split("\0").filter(Boolean);
   const inPaths = paths.filter((p) => new RegExp(privateName, "i").test(p));
-  if (privateNames.code === 0 || inMessage || inPaths.length) {
-    throw new Error(`private repository name in public output:\n${privateNames.out}${inPaths.map((p) => `\n(path) ${p}`).join("")}${inMessage ? "\n(commit message)" : ""}`);
+  if (privateNames.code === 0 || inPaths.length) {
+    throw new Error(`private repository name in public output:\n${privateNames.out}${inPaths.map((p) => `\n(path) ${p}`).join("")}`);
   }
-  // Nothing personal leaves: the home-path rule of CI and no address of a person, in the tree (-a here too), the
-  // message, and the author / committer the commit will carry (env and config, as git itself resolves them).
   const home = raw(["grep", "-anP", HOME_PATH, tree, "--", ":!.github/workflows/ci.yml"]);
   if (home.code === 0) throw new Error(`a personal home path in the tree:\n${home.out}`);
   if (home.code !== 1) throw new Error("git grep for home paths failed");
-  // The name of the OS user running the sync in a path: in the files (-a), their paths (from the tree's root, so a
-  // top-level home/<you>/ counts) and the message. A placeholder name, a service user, or none, is not looked for.
-  const userPath = userPathPattern(opts.user ?? osUser(), opts.serviceUsers ?? []);
-  if (userPath) {
-    const userFiles = raw(["grep", "-ainP", userPath, tree]); // -i: a Windows path ignores case
-    if (userFiles.code !== 0 && userFiles.code !== 1) throw new Error("git grep for the OS user's name failed");
-    const re = new RegExp(userPath, "i");
-    const userPaths = paths.filter((p) => re.test(`/${p}`));
-    const userMessage = re.test(message);
-    if (userFiles.code === 0 || userPaths.length || userMessage) {
-      throw new Error(`the OS user's name in a path in public output (a user that is no one's goes in publicSync.serviceUsers):\n${userFiles.out}${userPaths.map((p) => `\n(path) ${p}`).join("")}${userMessage ? "\n(commit message)" : ""}`);
-    }
-  }
   const mails = raw(["grep", "-ahoE", EMAIL.source, tree]);
   if (mails.code !== 0 && mails.code !== 1) throw new Error("git grep for e-mail addresses failed");
-  const ident = ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"].map((v) => git(["var", v])).join("\n");
-  const found = personalEmails(`${mails.out}\n${message}\n${ident}`);
-  if (found.length) throw new Error(`a personal e-mail address in the tree, the commit message or the author / committer (${found.length}); commit as your users.noreply.github.com address`);
-  if (new RegExp(HOME_PATH).test(message)) throw new Error("a personal home path in the commit message");
-  // what changes on the public side (every file the first time), line by line, against the kit's secret rules (the same as
-  // the gh guard's), the host's AWS names and accounts included. An account number is a hit only when it is one of the
-  // host's: an ARN in a test fixture carries twelve digits too. Only the kind and the place are printed, never the value.
-  const host = opts.host ?? NO_HOST;
+  const found = personalEmails(mails.out);
+  if (found.length) throw new Error(`a personal e-mail address in the tree (${found.length})`);
+  // every line of every file against the secret rules that need no host (CI has none), as the sync reads a first sync
+  const secrets = secretsBetween(EMPTY_TREE, tree, NO_HOST, git).map((h) => `${h.file}:${h.line} (${h.kind})`);
+  if (secrets.length) throw new Error(`a secret-shaped value in the tree:\n${[...new Set(secrets)].join("\n")}`);
+}
+
+/**
+ * The lines `to` adds over `from`, by file, against the kit's secret rules (the same as the gh guard's) with `host`'s AWS
+ * names and accounts. A hit says the kind and the place, never the value; `line` counts the file's added lines, which
+ * from the empty tree are its lines.
+ */
+function secretsBetween(from: string, to: string, host: HostAws, git: Git["git"]): Array<{ file: string; line: number; kind: string }> {
   // --text: a file git calls binary is read too. The added lines of a file are read as one text (in order), so a rule that
   // looks at the label above a value sees an added label; an unchanged label line is not in the diff.
-  const diff = git(["diff", "--text", "--no-textconv", "--unified=0", "--no-color", "--no-ext-diff", parent ? `${parent}^{tree}` : EMPTY_TREE, tree]);
+  const diff = git(["diff", "--text", "--no-textconv", "--unified=0", "--no-color", "--no-ext-diff", from, to]);
   const added = new Map<string, string[]>();
   let file = "";
   let header = false; // between `diff --git` and the first hunk: an added line can begin with "++ " too
@@ -344,10 +284,117 @@ export function sync(opts: Options, run: Run, publication?: Publication): string
       added.set(file, lines);
     }
   }
-  const secrets: string[] = [];
-  for (const [f, lines] of added)
-    for (const h of findSecrets(lines.join("\n"), host))
-      if (h.kind !== "account-id" || host.accountIds.some((a) => lines[h.line - 1]!.includes(a))) secrets.push(`${f} (${h.kind})`);
+  return [...added].flatMap(([file, lines]) => findSecrets(lines.join("\n"), host).map((h) => ({ file, ...h })));
+}
+
+/**
+ * The checks of the tree to publish, without sending or reading the public side (no network): the tree of `source`
+ * (default HEAD) built as the sync builds it, then `checkTree`. For CI, so that a change stops before it is merged
+ * rather than at the sync after its tag.
+ */
+export function check(opts: Pick<Options, "privateRepo" | "target" | "include" | "exclude" | "rewrite" | "source">, run: Run): string {
+  const g = gitAt(run);
+  const src = g.git(["rev-parse", "--verify", `${opts.source ?? "HEAD"}^{commit}`]);
+  const { tree } = publicTree(src, opts, g);
+  checkTree(tree, opts.privateRepo, g);
+  return `public check: ok (${g.git(["ls-tree", "-r", "--name-only", tree]).split("\n").filter(Boolean).length} files)`;
+}
+
+export function sync(opts: Options, run: Run, publication?: Publication): string {
+  if (opts.versioning && !publication) return independentSync(opts, run, (p, dryRun) => sync({ ...opts, dryRun: dryRun ?? opts.dryRun }, run, p));
+  if (opts.target.toLowerCase() === opts.privateRepo.toLowerCase()) throw new Error(`the public repository is the private one (${opts.target}): set publicSync.target to another repository`);
+  const source = opts.source ?? "origin/main";
+  const url = opts.targetUrl ?? `https://github.com/${opts.target}.git`;
+  const privateName = repoPattern(opts.privateRepo);
+  const g = gitAt(run);
+  const { raw, git } = g;
+  const log: string[] = [];
+
+  const src = git(["rev-parse", "--verify", `${source}^{commit}`]);
+  // A --source that names a tag is a version: its name goes into the title, and later onto the public side as a release.
+  const tag = publication?.version ?? (opts.source && raw(["rev-parse", "--verify", "-q", `refs/tags/${opts.source}`]).code === 0 ? opts.source : undefined);
+  const remote = raw(["ls-remote", url, "refs/heads/main"], { env: { GIT_TERMINAL_PROMPT: "0" } });
+  if (remote.code !== 0 && !opts.dryRun) throw new Error(`cannot read ${url} (does ${opts.target} exist?)`);
+  if (remote.code !== 0) log.push(`${opts.target}: not reachable — dry-run as the first sync`);
+  const initial = remote.code !== 0 || remote.out === "";
+
+  // The public main must be exactly what the last sync left; anything merged only there would be overwritten.
+  let parent: string | undefined;
+  let lastPrivate: string | undefined;
+  const publicMain = () => {
+    git(["fetch", "-q", url, "+refs/heads/main:refs/public-sync/main"], { env: { GIT_TERMINAL_PROMPT: "0" } });
+    return git(["rev-parse", "refs/public-sync/main"]);
+  };
+  const recorded = (commit: string) => raw(["rev-parse", "--verify", "-q", `${TREES}/${git(["rev-parse", `${commit}^{tree}`])}`]).out || undefined;
+  if (!initial) {
+    parent = publicMain();
+    git(["fetch", "-q", "origin", `+${TREES}/*:${TREES}/*`], { env: { GIT_TERMINAL_PROMPT: "0" } });
+    lastPrivate = recorded(parent);
+    if (!lastPrivate) {
+      if (!opts.adopted)
+        throw new Error(`${opts.target} main changed after the last sync (its tree is not one this script sent): bring those changes into ${opts.privateRepo}, then sync with --adopted`);
+      log.push(`${opts.target} main changed after the last sync: replaced (--adopted)`);
+    }
+    // a sync PR a failed run left open is merged now (only on a public main this script left, so nothing there is lost)
+    // only a PR of this script: from a branch of the public repository itself (a fork's `sync/…` is someone else's), whose
+    // tree has a record here (the record is pushed before the PR is opened)
+    const [open, openBranch] = ok(run(["gh", "pr", "list", "-R", opts.target, "--state", "open", "--json", "number,headRefName,isCrossRepository", "-q", '.[] | select((.headRefName | startswith("sync/")) and (.isCrossRepository | not)) | "\\(.number) \\(.headRefName)"']), ["gh", "pr", "list"]).split("\n")[0]!.split(" ");
+    if (open && openBranch) {
+      git(["fetch", "-q", url, `+refs/heads/${openBranch}:refs/public-sync/pr`], { env: { GIT_TERMINAL_PROMPT: "0" } });
+      if (!recorded("refs/public-sync/pr")) throw new Error(`sync PR #${open} on ${opts.target} has a tree this script did not send: close it`);
+    }
+    if (open && (opts.dryRun || !lastPrivate)) {
+      if (!lastPrivate) throw new Error(`sync PR #${open} is still open on ${opts.target}: close it first (the public main changed after the last sync)`);
+      log.push(`dry-run: would merge sync PR #${open} on ${opts.target}`);
+    } else if (open) {
+      merge(open, opts, run, log);
+      parent = publicMain();
+      lastPrivate = recorded(parent);
+      if (!lastPrivate) throw new Error(`${opts.target} main after merging sync PR #${open} has no record of its tree in ${opts.privateRepo}`);
+    }
+    releaseLast(parent, opts, run, git, log);
+  }
+
+  const built = publicTree(src, opts, g);
+  const tree = built.tree;
+  log.push(...built.log);
+
+  if (parent && tree === git(["rev-parse", `${parent}^{tree}`])) return [...log, `nothing to sync: ${opts.target} main already has this tree`].join("\n");
+
+  // never backwards: a source older than the last sync would put an old tree on the public side (a hand run with a newer
+  // commit, then the daily run with the latest tag)
+  if (lastPrivate && src !== lastPrivate && raw(["merge-base", "--is-ancestor", src, lastPrivate]).code === 0)
+    throw new Error(`${source} is older than what ${opts.target} has: nothing is sent backwards (send a newer tag)`);
+  const title = tag ?? "sync";
+  const branch = `sync/${tag ?? tree.slice(0, 7)}`;
+  const message = `${title}\n`;
+
+  checkTree(tree, opts.privateRepo, g);
+  // The same in the message, and no address of a person in the author / committer the commit will carry (env and
+  // config, as git itself resolves them).
+  if (new RegExp(privateName, "i").test(message)) throw new Error("private repository name in public output:\n(commit message)");
+  // -z: the paths as they are (without it git quotes a path with a tab or a non-ASCII letter, and `\t` hides the boundary)
+  const paths = git(["ls-tree", "-r", "-z", "--name-only", tree]).split("\0").filter(Boolean);
+  // The name of the OS user running the sync in a path: in the files (-a), their paths (from the tree's root, so a
+  // top-level home/<you>/ counts) and the message. A placeholder name, a service user, or none, is not looked for.
+  const userPath = userPathPattern(opts.user ?? osUser(), opts.serviceUsers ?? []);
+  if (userPath) {
+    const userFiles = raw(["grep", "-ainP", userPath, tree]); // -i: a Windows path ignores case
+    if (userFiles.code !== 0 && userFiles.code !== 1) throw new Error("git grep for the OS user's name failed");
+    const re = new RegExp(userPath, "i");
+    const userPaths = paths.filter((p) => re.test(`/${p}`));
+    const userMessage = re.test(message);
+    if (userFiles.code === 0 || userPaths.length || userMessage) {
+      throw new Error(`the OS user's name in a path in public output (a user that is no one's goes in publicSync.serviceUsers):\n${userFiles.out}${userPaths.map((p) => `\n(path) ${p}`).join("")}${userMessage ? "\n(commit message)" : ""}`);
+    }
+  }
+  const ident = ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"].map((v) => git(["var", v])).join("\n");
+  const found = personalEmails(`${message}\n${ident}`);
+  if (found.length) throw new Error(`a personal e-mail address in the commit message or the author / committer (${found.length}); commit as your users.noreply.github.com address`);
+  if (new RegExp(HOME_PATH).test(message)) throw new Error("a personal home path in the commit message");
+  // what changes on the public side (every file the first time), with the host's AWS names and accounts too (the shapes
+  // alone, the tree check above already judged in every file)
+  const secrets = secretsBetween(parent ? `${parent}^{tree}` : EMPTY_TREE, tree, opts.host ?? NO_HOST, git).map((h) => `${h.file} (${h.kind})`);
   if (secrets.length) throw new Error(`a secret-shaped value in what would go public:\n${[...new Set(secrets)].join("\n")}`);
   log.push(`checks: no private repository name, no personal home path${userPath ? ", no path with the OS user's name" : ""}, no personal e-mail address, no secret-shaped value in the change`);
 

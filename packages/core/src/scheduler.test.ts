@@ -2,11 +2,13 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent, RunnerAdapter, RunnerSession, StartOptions } from "@switchboard/protocol";
+import type { AgentEvent, AskBatch, RunnerAdapter, RunnerSession, StartOptions } from "@switchboard/protocol";
+import { approvalWindowNote } from "./approval-batch.ts";
 import { loadConfig } from "./config.ts";
 import { Db } from "./db.ts";
 import { Scheduler } from "./scheduler.ts";
 import { scanAllRepos } from "./secretscan.ts";
+import { scanFindings } from "./asks.ts";
 import { startServer } from "./server.ts";
 import { TaskManager } from "./tasks.ts";
 
@@ -519,22 +521,22 @@ describe("scheduler secret-scan (#775)", () => {
     old.close();
   });
 
-  test("secret-scan: hits or a failure leave one inbox note without values", async () => {
+  test("secret-scan: hits and failures are in the lines, places and kinds only", async () => {
     setUp();
     const r = await scanAllRepos({ workspaces: db.listWorkspaces(), metaPath: join(home, "meta"), gh, spawn });
-    expect(r.note!.title).toBe("認証の値の検査: 当たり 2 件 / 検査できなかった 3 リポジトリ");
-    expect(r.note!.body).toContain("1. 下の URL を開いて、当たりが本物の値か見る");
-    expect(r.note!.body).toContain("2. 本物なら、先にその値を無効にして（作り直して）から、コメントを削除する");
-    expect(r.note!.body).toContain("3. 誤検知なら、このお知らせを閉じる");
-    expect(r.note!.body).toContain("- https://github.com/o/leak/issues/3: github-token（2 行目）");
-    expect(r.note!.body).toContain("- https://github.com/o/leak/issues/3#issuecomment-9: account-id（1 行目）");
-    expect(r.note!.body).toContain("- o/down: 検査できなかった（exit 2）");
-    // of scan-issues' output only the hit lines are kept: a stray line with a value does not reach the note or the log
-    expect(r.note!.body).not.toContain(token);
+    expect(r.lines).toContain("  https://github.com/o/leak/issues/3: github-token（2 行目）");
+    expect(r.lines).toContain("  https://github.com/o/leak/issues/3#issuecomment-9: account-id（1 行目）");
+    expect(r.lines).toContain("o/down: 検査できなかった（exit 2）");
+    // what 判断待ち's notice reads from them (#2866)
+    const f = scanFindings({ at: 0, ...r.summary, lines: r.lines });
+    expect(f.hits).toHaveLength(2);
+    expect(f.failed).toHaveLength(3);
+    // of scan-issues' output only the hit lines are kept: a stray line with a value does not reach the log
     expect(r.lines.join("\n")).not.toContain(token);
-    // a day with nothing found: the log only, no note
+    // a day with nothing found: the log only
     const clean = await scanAllRepos({ workspaces: [{ name: "w", path: home }], metaPath: join(home, "meta"), gh, spawn });
     expect(clean).toEqual({ lines: ["o/clean: 0 件（scanned 12）"], summary: { repos: 1, hits: 0, failed: 0 }, cursors: { "o/clean": { since: expect.any(String), hits: [] } } });
+    expect(scanFindings({ at: 0, ...clean.summary, lines: clean.lines }).fingerprint).toBe("");
     expect(r.summary).toEqual({ repos: 4, hits: 2, failed: 3 });
   });
 
@@ -558,7 +560,7 @@ describe("scheduler secret-scan (#775)", () => {
     expect(() => sc.update(s.id, { workspaceId: repoId })).toThrow(/meta workspace only/);
   });
 
-  test("secret-scan: POST /api/schedules/:id/run answers 202 at once; the lines reach the log and a hit leaves an inbox note", async () => {
+  test("secret-scan: POST /api/schedules/:id/run answers 202 at once; the lines reach the log and a hit is a notice in 判断待ち until dismissed", async () => {
     // the meta checkout's kit, faked: scan-issues prints one hit, after a while (a real scan takes minutes)
     const meta = join(home, "meta");
     mkdirSync(join(meta, "ops-kit/src"), { recursive: true });
@@ -576,22 +578,32 @@ describe("scheduler secret-scan (#775)", () => {
       const log = async () => (await (await fetch(`${base}/api/schedules/log`)).json()) as string[];
       for (const t0 = Date.now(); !(await log()).some((l) => l.includes("acme/app: 当たり")) && Date.now() - t0 < 20_000; ) await Bun.sleep(25);
       expect(await log()).toContainEqual(expect.stringContaining("検査: acme/app: 当たり 1 件（scanned 7） (manual)"));
-      const notes = (await (await fetch(`${base}/api/inbox`)).json()) as Array<{ title: string; body: string }>;
-      expect(notes.map((n) => n.title)).toEqual(["認証の値の検査: 当たり 1 件 / 検査できなかった 0 リポジトリ"]);
-      expect(notes[0]!.body).toContain("- https://github.com/acme/app/issues/9: device-code（1 行目）");
-      expect(notes[0]).toMatchObject({ source: { schedule: s.id, title: "検査" } });
-      // the same schedule firing again: the earlier notice is closed, one notice is left (not one per day)
+      // no Inbox note (#2866): the notice is in 判断待ち
+      expect(await (await fetch(`${base}/api/inbox`)).json()).toEqual([]);
+      const notices = async () => ((await (await fetch(`${base}/api/asks`)).json()) as { asks: Array<{ id: string; kind: string; state: string; question: string; reason: string; source: { label: string }; answers: string[] }> }).asks.filter((a) => a.kind === "notice");
+      const [n] = await notices();
+      expect(n).toMatchObject({ state: "open", question: "認証の値の検査: 当たり 1 件 / 検査できなかった 0 リポジトリ", reason: "https://github.com/acme/app/issues/9: device-code（1 行目）", source: { label: "予定「検査」" }, answers: ["dismiss"] });
+      const answer = (body: object) => fetch(`${base}/api/asks/answer`, { method: "POST", body: JSON.stringify(body) });
+      // only dismiss answers it
+      expect((await answer({ id: n!.id, answer: { kind: "text", text: "x" } })).status).toBe(422);
+      // a disabled schedule's findings stay: only a clean result resolves them
+      expect((await fetch(`${base}/api/schedules/${s.id}`, { method: "PATCH", body: JSON.stringify({ enabled: false }) })).status).toBe(200);
+      expect((await notices()).map((x) => x.state)).toEqual(["open"]);
+      expect((await fetch(`${base}/api/schedules/${s.id}`, { method: "PATCH", body: JSON.stringify({ enabled: true }) })).status).toBe(200);
+      const dismissed = await answer({ id: n!.id, answer: { kind: "dismiss" } });
+      expect(dismissed.status).toBe(200);
+      // the answer's question is closed, with no button left on it
+      expect(((await dismissed.json()) as { ask: { state: string; answers: string[] } }).ask).toMatchObject({ state: "resolved", answers: [] });
+      expect(await notices()).toEqual([]);
+      // sent again (the reply lost): already written, not a 409
+      const again = await answer({ id: n!.id, answer: { kind: "dismiss" } });
+      expect(again.status).toBe(200);
+      expect(await again.json()).toMatchObject({ ask: { state: "resolved", answers: [] }, already: true });
+      // the same hit on the next firing stays closed
       const hitLines = async () => (await log()).filter((l) => l.includes("acme/app: 当たり")).length;
       expect((await fetch(`${base}/api/schedules/${s.id}/run`, { method: "POST" })).status).toBe(202);
       for (const t0 = Date.now(); (await hitLines()) < 2 && Date.now() - t0 < 20_000; ) await Bun.sleep(25);
-      const again = (await (await fetch(`${base}/api/inbox`)).json()) as Array<{ path: string; source?: { schedule: string } }>;
-      expect(again).toHaveLength(1);
-      expect(again[0]!.path).not.toBe((notes[0] as unknown as { path: string }).path);
-      // closing it: gone from the list, closing again is a 409, an unknown path is refused
-      const close = (path: string) => fetch(`${base}/api/inbox/close`, { method: "POST", body: JSON.stringify({ path }) });
-      expect((await close(again[0]!.path)).status).toBe(200);
-      expect(await (await fetch(`${base}/api/inbox`)).json()).toEqual([]);
-      expect((await close(again[0]!.path)).status).toBe(409);
+      expect(await notices()).toEqual([]);
       // the result is on the schedule (#1274): what the API hands the Schedules screen
       const kept = (await (await fetch(`${base}/api/schedules/${s.id}`)).json()) as { lastResult: { repos: number; hits: number; failed: number; lines: string[] } | null };
       expect(kept.lastResult).toMatchObject({ repos: 1, hits: 1, failed: 0, lines: ["acme/app: 当たり 1 件（scanned 7）", "  https://github.com/acme/app/issues/9: device-code（1 行目）"] });
@@ -599,4 +611,51 @@ describe("scheduler secret-scan (#775)", () => {
       core.stop();
     }
   }, 30_000); // a bun subprocess under a loaded full suite: over the 5 s default (docs/design/perf.md "テストの揺れ")
+});
+
+describe("scheduler approval-window (#2046)", () => {
+  beforeEach(() => {
+    mkdirSync(join(home, "meta"));
+    wsId = db.upsertWorkspace({ name: "m", path: join(home, "meta"), kind: "meta" }).id;
+  });
+
+  test("approval window memo", async () => {
+    let batches: AskBatch[] = [
+      { id: "batch:sso", kind: "sso", asks: [{ askId: "s1", taskId: "tk_a", title: "A", workspaceId: "ws_1", op: "aws sso login", at: 1 }, { askId: "s2", taskId: "tk_b", title: "B", workspaceId: "ws_2", op: "aws sso login", at: 2 }], loggingIn: null, deviceAuth: null },
+      { id: "batch:deploy", kind: "deploy", asks: [{ askId: "s3", taskId: "tk_c", title: "C", workspaceId: null, op: "sam deploy", at: 3 }], loggingIn: null, deviceAuth: null },
+    ];
+    const notes: { title: string; body: string; schedule: string }[] = [];
+    const window = async (s: { id: string }) => {
+      const n = approvalWindowNote(batches);
+      if (!n) return "待ちなし（メモは書かない）";
+      notes.push({ ...n, schedule: s.id });
+      return `メモを書いた: ${n.title}`;
+    };
+    const sc = new Scheduler(db, tasks, () => now, undefined, undefined, undefined, undefined, window);
+    const s = sc.create({ title: "承認待ち", cron: "0 0 * * *", workspaceId: wsId, runner: "claude", prompt: "", action: "approval-window" });
+    // runs on the meta workspace only
+    expect(() => sc.create({ title: "x", cron: "0 0 * * *", workspaceId: db.upsertWorkspace({ name: "r", path: home, kind: "repo" }).id, runner: "claude", prompt: "", action: "approval-window" })).toThrow("meta workspace only");
+    now = s.nextRunAt!;
+    expect(await sc.tick()).toEqual([]);
+    expect(notes).toEqual([{ schedule: s.id, title: "SSO・配備の承認待ち: 3", body: "SSO のログイン待ち（2 件）\n- A — aws sso login\n- B — aws sso login\n\n配備の承認待ち（1 件）\n- C — sam deploy" }]);
+    expect(db.getSchedule(s.id)).toMatchObject({ lastRunAt: now, nextRunAt: now + 86_400_000, lastResult: { at: now, failed: 0, lines: ["メモを書いた: SSO・配備の承認待ち: 3"] } });
+    expect(sc.recentLog().join("\n")).toContain("承認待ち: メモを書いた: SSO・配備の承認待ち: 3 (due)");
+    // a firing while one is still writing is skipped
+    let release!: () => void;
+    const slow = new Scheduler(db, tasks, () => now, undefined, undefined, undefined, undefined, () => new Promise<string>((r) => (release = () => r("遅いメモ"))));
+    const first = slow.runNow(s.id, "manual");
+    expect(await slow.runNow(s.id, "manual")).toBeNull();
+    expect(slow.recentLog().join("\n")).toContain("承認待ち: 飛ばした (manual): 前の発火がまだ終わっていない");
+    release();
+    await first;
+    expect(slow.recentLog().join("\n")).toContain("承認待ち: 遅いメモ (manual)");
+    // nothing waits the next day: no note
+    batches = [];
+    now += 86_400_000;
+    expect(await sc.tick()).toEqual([]);
+    expect(notes).toHaveLength(1);
+    expect(sc.recentLog().join("\n")).toContain("承認待ち: 待ちなし（メモは書かない） (due)");
+    // no Task and no runner
+    expect(started).toHaveLength(0);
+  });
 });

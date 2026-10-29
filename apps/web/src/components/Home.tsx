@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { CloudPreparation, ExecutionMode, CreateTaskInput, HistoryStatus, LedgerSummary, ReportRow, RoutingSuggestion, RunnerId, RunnerInfo, Task, Workspace } from "@switchboard/protocol";
 import { api, type Health, type InboxNote } from "../api.ts";
 import { fmtUsd, OriginTag, pct, ResumeTag, RunnerPill, ShadowTag } from "./ui.tsx";
@@ -9,8 +9,8 @@ import { attentionList, needsAttention, outcomeDotClass, outcomeLabel } from "..
 import { reportMeta } from "../reports.ts";
 import { quotaAsOf, quotaStale, resetLabel, windowLabel } from "../quota.ts";
 import { jstTime } from "../time.ts";
-import { noticeSource, splitInbox } from "../inbox.ts";
 import { staleDraft } from "../presets.ts";
+import { editChanged, toggleDraft, type DraftEdit } from "../inbox.ts";
 import { listedRunners } from "../runners.ts";
 import { PresetPicker } from "./PresetPicker.tsx";
 import { titleToSend } from "../taskTitle.ts";
@@ -61,6 +61,9 @@ export function Home(props: {
   const [inbox, setInbox] = useState<InboxNote[]>([]);
   const [promoteWs, setPromoteWs] = useState<Record<string, string>>({});
   const [promoting, setPromoting] = useState<string | null>(null);
+  /** The draft opened under its row to read and fix (#3032). */
+  const [editing, setEditing] = useState<DraftEdit | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
   const [saved, setSaved] = useState<string | null>(null);
   const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Only a workspace the user picked by hand is worth recording as a hint on the note. */
@@ -354,7 +357,20 @@ export function Home(props: {
       props.onError(String((e as Error).message ?? e));
     }
   };
-  const { notices, drafts } = splitInbox(inbox);
+  const saveEdit = async (e: DraftEdit) => {
+    setSavingEdit(true);
+    try {
+      const n = await api.inboxEdit(e.path, e.title, e.text);
+      // only while the editor still holds what was sent: typing more, やめる or another draft meanwhile wins
+      setEditing((cur) => (cur === e ? { path: n.path, title: n.title, text: n.body } : cur));
+      await loadInbox();
+    } catch (err) {
+      props.onError(String((err as Error).message ?? err));
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+  const drafts = inbox;
 
   /**
    * "改善 →": put a workspace's brief (from the daemon) in front of the request. What the user already typed is kept:
@@ -589,46 +605,32 @@ export function Home(props: {
 
       {saved && <div className="banner ok">Inbox に保存しました: {saved}</div>}
 
-      {notices.length > 0 && (
-        <section className="card">
-          <h5>お知らせ（定期の予定から）</h5>
-          {notices.map((n) => (
-            <div key={n.path} className="row inbox-row" title={n.path}>
-              <details className="t">
-                <summary>
-                  {n.title} <span className="hint">{noticeSource(n)}</span>
-                </summary>
-                <pre className="wrap">{n.body}</pre>
-              </details>
-              <button onClick={() => void closeNote(n)}>閉じる</button>
-            </div>
-          ))}
-        </section>
-      )}
-
       {drafts.length > 0 && (
         <section className="card">
           <h5>Inbox（まだリポジトリに紐づかないメモ）</h5>
-          {drafts.map((n) => (
-            <div key={n.path} className="row inbox-row" title={n.path}>
-              <span className="t">
-                {n.title}
-                {n.body.includes("\n") && <span className="hint"> …</span>}
-              </span>
-              <select value={promoteWs[n.path] ?? props.workspaces.find((w) => w.name === n.workspaceHint)?.id ?? promoteDefault} onChange={(e) => setPromoteWs((m) => ({ ...m, [n.path]: e.target.value }))}>
-                {props.workspaces.map((w) => (
-                  <option key={w.id} value={w.id}>
-                    {w.name}
-                    {n.workspaceHint === w.name ? " ?" : ""}
-                  </option>
-                ))}
-              </select>
-              <button disabled={promoting !== null} onClick={() => void promote(n)}>
-                {promoting === n.path ? "起動中…" : "Task に昇格"}
-              </button>
-              <button onClick={() => void closeNote(n)}>閉じる</button>
-            </div>
-          ))}
+          {drafts.map((n) => {
+            const open = editing?.path === n.path ? editing : null;
+            return (
+              <Fragment key={n.path}>
+                <div className="row inbox-row" title={n.path}>
+                  <DraftTitle note={n} open={!!open} onToggle={() => setEditing((cur) => toggleDraft(cur, n))} />
+                  <select value={promoteWs[n.path] ?? props.workspaces.find((w) => w.name === n.workspaceHint)?.id ?? promoteDefault} onChange={(e) => setPromoteWs((m) => ({ ...m, [n.path]: e.target.value }))}>
+                    {props.workspaces.map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {w.name}
+                        {n.workspaceHint === w.name ? " ?" : ""}
+                      </option>
+                    ))}
+                  </select>
+                  <button disabled={promoting !== null} onClick={() => void promote(n)}>
+                    {promoting === n.path ? "起動中…" : "Task に昇格"}
+                  </button>
+                  <button onClick={() => void closeNote(n)}>閉じる</button>
+                </div>
+                {open && <DraftEditor edit={open} note={n} saving={savingEdit} onChange={setEditing} onCancel={() => setEditing(null)} onSave={() => void saveEdit(open)} />}
+              </Fragment>
+            );
+          })}
         </section>
       )}
 
@@ -765,5 +767,32 @@ function QuotaRow(props: { label: string; utilization: number; resetsAt: number;
         </span>
       </span>
     </>
+  );
+}
+
+/** An Inbox draft's title on its row (#3032): pressing it opens or closes the draft; … marks a longer body while closed. */
+export function DraftTitle(props: { note: InboxNote; open: boolean; onToggle: () => void }) {
+  return (
+    <button className="t" aria-expanded={props.open} onClick={props.onToggle}>
+      {props.note.title}
+      {!props.open && props.note.body.includes("\n") && <span className="hint"> …</span>}
+    </button>
+  );
+}
+
+/** The draft opened under its row (#3032): its title and whole body to fix, saved only by 保存 and only when changed. */
+export function DraftEditor(props: { edit: DraftEdit; note: InboxNote; saving: boolean; onChange: (e: DraftEdit) => void; onCancel: () => void; onSave: () => void }) {
+  const { edit } = props;
+  return (
+    <div className="inbox-edit">
+      <input value={edit.title} onChange={(e) => props.onChange({ ...edit, title: e.target.value })} />
+      <textarea value={edit.text} onChange={(e) => props.onChange({ ...edit, text: e.target.value })} />
+      <div className="acts">
+        <button onClick={props.onCancel}>やめる</button>
+        <button className="pri" disabled={props.saving || !editChanged(edit, props.note)} onClick={props.onSave}>
+          保存
+        </button>
+      </div>
+    </div>
   );
 }

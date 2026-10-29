@@ -21,7 +21,7 @@ export const INSIGHTS_PROMPT = "/insights";
 export class Scheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
   private log: string[] = [];
-  /** backlog-next / secret-scan schedules whose firing is still in progress (both await GitHub). */
+  /** backlog-next / secret-scan / approval-window schedules whose firing is still in progress. */
   private starting = new Set<string>();
   /** A runUnblocked asked while a firing was in progress (#1879): per schedule, the items per workspace, run after it. */
   private unblocked = new Map<string, Map<string, Set<number>>>();
@@ -43,6 +43,8 @@ export class Scheduler {
     private quotaLimit: () => number = () => 0.8,
     /** 上限のときの代わり (#834): the runner a prompt schedule's Task starts on, and the status line when it is another. */
     private autoRunner: (r: RunnerId) => { runner: RunnerId; note?: string } = (r) => ({ runner: r }),
+    /** approval-window (#2046): reads the batches still waiting (判断待ち shows them as a notice, #2866) and says so, in a line. */
+    private approvalWindow: (schedule: { id: string; title: string }) => Promise<string> = async () => "approval-window is not available",
   ) {}
 
   list(): Schedule[] {
@@ -131,6 +133,7 @@ export class Scheduler {
     }
     if (s.action === "backlog-next") return this.runBacklogNext(s.id, s.title, s.cron, reason);
     if (s.action === "secret-scan") return this.runSecretScan(s.id, s.title, s.cron, reason);
+    if (s.action === "approval-window") return this.runApprovalWindow(s.id, s.title, s.cron, reason);
     const stamp = new Date(this.now());
     const p = (n: number) => String(n).padStart(2, "0");
     const when = `${stamp.getFullYear()}-${p(stamp.getMonth() + 1)}-${p(stamp.getDate())} ${p(stamp.getHours())}:${p(stamp.getMinutes())}`;
@@ -254,8 +257,8 @@ export class Scheduler {
     }
     this.starting.add(id);
     try {
-      // The result stays on the schedule (#1274): the log is memory, gone with a restart, and the inbox note only
-      // comes with hits — without this, a clean day left no trace to tell "0 hits" from "did not run".
+      // The result stays on the schedule (#1274): the log is memory, gone with a restart — without this, a clean day left
+      // no trace to tell "0 hits" from "did not run". 判断待ち's notice is read from it too (#2866).
       // each repository is read from where the last firing left it (kept on the schedule, so a restart keeps it too)
       const before = this.db.getSchedule(id)?.lastResult?.cursors ?? {};
       let r: { lines: string[]; summary: ScanSummary; cursors?: ScanCursors };
@@ -277,6 +280,27 @@ export class Scheduler {
       const cursors = r.cursors ?? before;
       const result = still.action === "secret-scan" ? { lastResult: { at, ...r.summary, lines: r.lines, ...(Object.keys(cursors).length ? { cursors } : {}) } } : {};
       this.db.updateSchedule(id, { lastRunAt: at, nextRunAt: nextRun(cron, new Date(at))?.getTime() ?? null, ...result });
+      return null;
+    } finally {
+      this.starting.delete(id);
+    }
+  }
+
+  /** approval-window (#2046): no runner, no Task — its line in the log and on the schedule. One firing at a time, like secret-scan. */
+  private async runApprovalWindow(id: string, title: string, cron: string, reason: "manual" | "due"): Promise<null> {
+    if (this.starting.has(id)) {
+      this.note(`${title}: 飛ばした (${reason}): 前の発火がまだ終わっていない`);
+      return null;
+    }
+    this.starting.add(id);
+    try {
+      let failed = 0;
+      // the error's name only, as secret-scan's: a message could quote anything (docs/design/secret-guard.md)
+      const line = await this.approvalWindow({ id, title }).catch((e) => ((failed = 1), `待ちを読めなかった（${e instanceof Error ? e.name : typeof e}）`));
+      this.note(`${title}: ${line} (${reason})`);
+      const at = this.now();
+      // the line stays on the schedule, as secret-scan's does (a restart keeps it); the counts are not used for this kind
+      if (this.db.getSchedule(id)?.action === "approval-window") this.db.updateSchedule(id, { lastRunAt: at, nextRunAt: nextRun(cron, new Date(at))?.getTime() ?? null, lastResult: { at, repos: 0, hits: 0, failed, lines: [line] } });
       return null;
     } finally {
       this.starting.delete(id);

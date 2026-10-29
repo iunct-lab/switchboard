@@ -135,3 +135,17 @@ test("task.terminal waiting notifies once per wait, the first status too; task.t
   // noticeFor leaves task.terminals to noticesFor
   expect(noticeFor(now({ t1: "waiting" }), tasks, seen)).toBeNull();
 });
+
+test("device auth notice: a device code notifies once per code, with no URL or code; its end is quiet", () => {
+  const seen = new Set<string>();
+  const tasks = [task("t1", "running", "unknown")];
+  const auth = { url: "https://device.sso.example/start", code: "XXXX-XXXX", command: "aws sso login", expiresAt: 600_000 };
+  const da = (a: typeof auth | null): ServerMessage => ({ type: "task.deviceAuth", taskId: "t1", auth: a });
+  const n = noticeFor(da(auth), tasks, seen);
+  expect(n).toEqual({ key: "t1\u0000deviceAuth\u0000600000", taskId: "t1", title: "title of t1", body: "SSO のログイン待ち: コードを承認してください" });
+  expect(JSON.stringify(n)).not.toContain("XXXX-XXXX");
+  expect(noticeFor(da(auth), tasks, seen)).toBeNull();
+  expect(noticeFor(da(null), tasks, seen)).toBeNull();
+  // a new code (another expiry) is a new wait
+  expect(noticeFor(da({ ...auth, expiresAt: 900_000 }), tasks, seen)?.key).toBe("t1\u0000deviceAuth\u0000900000");
+});

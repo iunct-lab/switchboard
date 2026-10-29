@@ -55,7 +55,7 @@ SWITCHBOARD_HOST=100.x.y.z bun run core        # Tailscale IP だけで listen�
 ### 実行したコマンドと結果
 
 - `bun scripts/approvals-e2e.ts`（headless Chrome、390 × 844、タッチ、偽ランナー）: 承認 2 件が新しい順、横スクロールなし、ボタン 44px 以上、1 タップの「許可」がランナーに届き一覧から消える。PWA: `sw.js` は `text/javascript`、manifest は `application/manifest+json`、Chrome の installability エラー 0、再読み込み後は service worker が画面を返し、`/api/health` は service worker を通らない
-- `bun scripts/copy-e2e.ts`（headless Chrome、390 × 844、偽ランナー）: Task 画面のコピーボタン（1 行 / ターン / 会話全体 / ツールの結果、実行中は途中まで）が readText と一致、44px 以上、文の範囲選択が残る。Linux では `--headless=new` がクリップボードを読み戻せないので `CHROME_BIN` に chrome-headless-shell を渡す
+- `bun scripts/copy-e2e.ts`（headless Chrome、390 × 844、偽ランナー）: Task 画面のコピーボタン（1 行 / ターン / 会話全体 / ツールの結果、実行中は途中まで）が readText と一致、44px 以上、文の範囲選択が残る。Linux では `--headless=new` がクリップボードを読み戻せないので、`CHROME_BIN` が無ければ Playwright の headless shell（`~/.cache/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux*/chrome-headless-shell` の版の新しいもの。`playwright install chromium` が入れる）で回る。`CHROME_BIN` を渡すときも chrome-headless-shell を渡す（`/usr/local/bin/chromium` では読み戻せず exit 1）
 - `bun scripts/task-scroll-e2e.ts`（headless Chrome、1280 × 800 と 390 × 844、偽ランナー、60 ターンの会話）: 長い Task の末尾でも見出し（会話 / 差分 / ターミナル・詳細）が見えて押せる、見出しの高さはスマホ幅で画面の 1/3 以下、Task Brief の 指示 で最初の指示文を全文読める、上へ scroll すると 最新へ が出て 1 回で末尾に戻る（#1311）
 - `SWITCHBOARD_HOST=0.0.0.0` で起動した worktree のデーモン（一時の HOME、偽ランナー）に headless Chrome で `http://127.0.0.1:47911/approvals` を開いた:
   `{"healthAuthRequired":true,"noToken":401,"withToken":200,"tokenBanner":true,"listBeforeToken":0,"listAfterToken":1,"wsConnected":true,"answered":true,"afterReloadNoPrompt":true}`

@@ -213,6 +213,43 @@ describe("cli", () => {
     }
   });
 
+  test("mr uses GitLab's own MR and discussions through glab in a GitLab checkout; a GitHub one is told to use gh (#923)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ops-kit-cli-mr-"));
+    const was = process.cwd();
+    const calls: string[][] = [];
+    const glab = async (cmd: string[]) => {
+      calls.push(cmd);
+      const p = cmd.at(-1)!;
+      if (p.endsWith("/merge_requests")) return JSON.stringify({ iid: 7, web_url: "https://gitlab.example.com/group/app/-/merge_requests/7", state: "opened", source_branch: "b", target_branch: "main", sha: "1".repeat(40) });
+      if (p.includes("/discussions/")) return JSON.stringify({ id: "a".repeat(40), notes: [{ id: 1, body: "x", resolvable: true, resolved: !p.includes("b".repeat(40)) }] });
+      return "[]";
+    };
+    const mr = (...a: string[]) => {
+      const out: string[] = [];
+      const err: string[] = [];
+      return main(["mr", ...a], fakeGh([]), (s) => out.push(s), (s) => err.push(s), async () => {}, { ...process.env, BACKLOG_URL: undefined }, glab).then((code) => ({ code, out: out.join("\n"), err: err.join("\n") }));
+    };
+    try {
+      Bun.spawnSync(["git", "init", "-q", home]);
+      Bun.spawnSync(["git", "-C", home, "remote", "add", "origin", "https://gitlab.example.com/group/app.git"]);
+      writeFileSync(join(home, "ops.config.json"), JSON.stringify({ forge: { service: "gitlab", host: "gitlab.example.com", project: "group/app" } }));
+      writeFileSync(join(home, "body.md"), "Closes #13");
+      process.chdir(home);
+      expect(await mr("create", "--source", "b", "--target", "main", "--title", "t", "--body-file", "body.md")).toEqual({ code: 0, out: "!7 https://gitlab.example.com/group/app/-/merge_requests/7", err: "" });
+      expect((await mr("resolve", "7", "a".repeat(40), "b".repeat(40))).code).toBe(1);
+      expect((await mr("note", "7", "--body-file", "body.md", "--path", "a.ts")).code).toBe(2);
+      expect((await mr("view", "x")).code).toBe(2);
+      expect(calls.every((c) => c[0] === "glab" && c[3] === "gitlab.example.com")).toBe(true);
+      writeFileSync(join(home, "ops.config.json"), JSON.stringify({}));
+      calls.length = 0;
+      expect(await mr("view", "7")).toMatchObject({ code: 2, err: expect.stringContaining("PR は gh を使ってください") });
+      expect(calls).toEqual([]);
+    } finally {
+      process.chdir(was);
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("pr resolve-thread resolves each thread", async () => {
     const resolved = (call: unknown) => {
       expect(call).toMatchObject({ kind: "graphql" });

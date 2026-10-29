@@ -1,6 +1,6 @@
 /**
  * bun scripts/flow-report.ts [--days 30] [--repo <owner/name>] [--json <file>] — how long each PBI closed in the period took,
- * stage by stage (PBI #650, docs/design/flow-metrics.md). Reads GitHub (one GraphQL query per 10 PBIs, 100 points at most;
+ * stage by stage (PBI #650, docs/design/flow-metrics.md), and the backlog's growth week by week (#1878). Reads GitHub (one GraphQL query per 10 PBIs, 100 points at most;
  * it reads nothing when the budget is under 500) and the Switchboard DB (SWITCHBOARD_HOME, read-only) for each PBI's Tasks.
  * Exit 0 = printed / 1 = stopped (budget, gh) / 2 = bad arguments.
  */
@@ -11,7 +11,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { FlowStage } from "../packages/protocol/src/index.ts";
 import { runGh } from "../packages/core/src/backlog.ts";
-import { fetchFlow, FlowError, launchShare, repoOfRemote, summarize, withSwitchboardTasks } from "../packages/core/src/flow.ts";
+import { backlogGrowth, fetchFlow, FlowError, launchShare, repoOfRemote, summarize, weekStartOf, withSwitchboardTasks } from "../packages/core/src/flow.ts";
+import { deferredTasksSince } from "../packages/core/src/db.ts";
 
 const dur = (ms: number | null): string => {
   if (ms === null) return "不明";
@@ -53,7 +54,7 @@ async function main(): Promise<number> {
   const dbPath = join(process.env.SWITCHBOARD_HOME ?? join(homedir(), ".switchboard"), "switchboard.db");
   const db = existsSync(dbPath) ? new Database(dbPath, { readonly: true }) : null;
   try {
-    const { reads: read, spent, cutPbis } = await fetchFlow(runGh, cwd, repo, days);
+    const { reads: read, spent, cutPbis, growth } = await fetchFlow(runGh, cwd, repo, days);
     const workspaces = db ? workspacesOf(db, repo) : [];
     if (db && workspaces.length === 0) console.error(`${repo} の workspace が DB に無いので、Task の列は出しません`);
     const pbis = read.map((r) => withSwitchboardTasks(r, workspaces.length ? db : null, workspaces));
@@ -72,8 +73,14 @@ async function main(): Promise<number> {
     const share = launchShare(pbis);
     console.log(`\n実装を 3 回以上起動した PBI: ${share.known ? `${share.repeated}/${share.known}（${Math.round((share.repeated / share.known) * 100)}%）` : "不明"}`);
     console.log(`段 wait の中央値: ${dur(sum.stages.wait.p50)}`);
+    // the backlog's growth (#1878): without the DB or a workspace of the repository, the deferred columns are not known
+    const known = !!db && workspaces.length > 0;
+    const now = Date.now();
+    const weeks = backlogGrowth(growth, known ? deferredTasksSince(db!, workspaces, weekStartOf(now - days * 86_400_000)) : [], repo, days, now);
+    console.log("\n週\tPBI 起票\tPBI 閉鎖\t要望 起票\t要望 閉鎖\t純増\t先送り Task\tそこからの起票");
+    for (const w of weeks) console.log(`${w.weekStart}\t${w.pbiOpened}\t${w.pbiClosed}\t${w.requestOpened}\t${w.requestClosed}\t${w.net > 0 ? "+" : ""}${w.net}\t${known ? w.deferredTasks : "-"}\t${known ? w.deferredIssues : "-"}`);
     const json = arg("--json");
-    if (json) writeFileSync(json, JSON.stringify({ repo, days, cutPbis, stages: sum.stages, bottleneck: sum.bottleneck, closed: sum.closed, storyPoints: sum.storyPoints, pbis }, null, 2));
+    if (json) writeFileSync(json, JSON.stringify({ repo, days, cutPbis, stages: sum.stages, bottleneck: sum.bottleneck, closed: sum.closed, storyPoints: sum.storyPoints, pbis, weeks }, null, 2));
     return 0;
   } catch (e) {
     if (!(e instanceof FlowError)) throw e;

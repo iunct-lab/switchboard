@@ -13,6 +13,7 @@ const hit: Record<string, string> = {
   "device-code": `コード ${code} を入力してください`,
   "aws-key": `key: ${"AKIA"}${A(16)}`,
   "github-token": `token ${"ghp"}_${A(36)}`,
+  "gitlab-token": `PRIVATE-TOKEN: ${"glpat"}-${A(20)}`,
   "private-key": `-----BEGIN ${"OPENSSH"} PRIVATE KEY-----`,
   "bearer-token": `Authorization: Bearer ${A(24)}`,
   "account-id": `aws sso login --profile AdministratorAccess-${account}`,
@@ -78,6 +79,7 @@ describe("findSecrets", () => {
       // the boundaries: a key right after a lowercase letter, a token right after "=", "=" inside a bearer token
       ["aws-key", `id=x${"AKIA"}${A(16)}`],
       ["github-token", `t=${"ghp"}_${A(36)}`],
+      ["gitlab-token", `glab config set token ${"glrt"}-${A(24)}`],
       ["bearer-token", `Bearer ${A(18)}==`],
     ] as const) expect({ line, hits: findSecrets(line) }).toEqual({ line, hits: [{ kind, line: 1 }] });
   });

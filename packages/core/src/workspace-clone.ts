@@ -4,7 +4,6 @@ import { dirname, join } from "node:path";
 import type { BacklogSource, Workspace } from "@switchboard/protocol";
 import { localBacklogSource, type GhRunner } from "./backlog.ts";
 import type { Db } from "./db.ts";
-import type { Inbox } from "./inbox.ts";
 
 /**
  * A GitHub repository name from `owner/name`, `https://github.com/owner/name`, `git@github.com:owner/name` or
@@ -45,28 +44,21 @@ export function gitOrigin(path: string): string | null {
 }
 
 /**
- * Leaves one Inbox note per workspace a Task cannot use (#2799): one registered to a GitHub repository whose folder is
- * gone (a rebuild that could not clone it, or moved a clone of another repository aside) or whose origin is not that
- * repository (originMismatch). Called once at boot; a note of the same title still open is not added again, so a
- * restart before it is fixed adds nothing. Returns how many were added.
+ * The workspaces a Task cannot use (#2799): registered to a GitHub repository whose folder is gone (a rebuild that could
+ * not clone it, or moved a clone of another repository aside) or whose origin is not that repository (originMismatch).
+ * Read each time 判断待ち is (#2866): a fixed one is simply not listed any more.
  */
-export function noticeUnusableWorkspaces(db: Db, inbox: Inbox, originOf = gitOrigin): number {
-  // as the Inbox keeps a title (at most 80 characters, trimmed), both sides alike
-  const same = (title: string) => title.slice(0, 80).trim();
-  const open = new Set(inbox.list().map((n) => same(n.title)));
-  let added = 0;
+export function unusableWorkspaces(db: Db, originOf = gitOrigin): Array<{ workspace: { id: string; name: string }; why: string }> {
+  const out: Array<{ workspace: { id: string; name: string }; why: string }> = [];
   for (const ws of db.listWorkspaces()) {
     const source = db.getWorkspaceBacklogSource(ws.id);
     if (source?.service !== "github") continue;
     const why = existsSync(ws.path)
       ? originMismatch(ws.path, source, originOf)
       : `フォルダ ${ws.path} がありません（作り直しで clone できなかったか、登録のリポジトリ ${source.repository} と違う clone だったので退避された。理由はシステムのログの \`bootstrap:\` の行、退避した clone は \`${ws.path}.unverified-*\`）。\`gh repo clone ${source.repository} ${ws.path}\` で置き直すまで、この workspace の Task は起動しません`;
-    const title = `workspace ${ws.name} を使えません`;
-    if (!why || open.has(same(title))) continue;
-    inbox.add(why, { title, workspaceHint: ws.name });
-    added++;
+    if (why) out.push({ workspace: { id: ws.id, name: ws.name }, why });
   }
-  return added;
+  return out;
 }
 
 /** Registers a directory as a workspace. `switchboard` keeps its backlog here only (#2265): the source is set now and stored as an empty import. */

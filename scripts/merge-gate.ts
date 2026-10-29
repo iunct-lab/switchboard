@@ -1,5 +1,7 @@
 import { currentRepo, originRepo } from "./repo.ts";
-import { LOCAL_CI_RESULT } from "./local-ci";
+import { LOCAL_CI_RESULT, patchIdOf, sh, stackOf } from "./local-ci";
+import { forgeTargetOf, originOf, type ForgeTarget } from "../ops-kit/src/forge.ts";
+import { mergeGitlabMr, readGitlabMerge, runGlab, type Sh } from "../ops-kit/src/forge-gitlab.ts";
 
 export const LARGE_LINES = 300;
 
@@ -249,26 +251,47 @@ export function checksFromRuns(runs: WorkflowRun[]): PrFacts["checks"] {
 /**
  * When Actions does not start (billing: the job fails with no steps and no runner), or there is no run at all, the local
  * pass of `bun scripts/local-ci.ts` counts as the CI's success (#387, #914). Only for a run that never started (a CI
- * whose tests really failed still stops the merge) and only when it is of the head and the base branch's tip now.
+ * whose tests really failed still stops the merge) and only when the newest result of the stack's top is a pass that
+ * names this PR's diff as it is now (`localCiOf`, #2940).
  */
 const LOCAL_CI_SUFFIX = "（Actions が始まらず、ローカルで pass）";
 const LOCAL_CI_ONLY = "local-ci（Actions の run が無く、ローカルで pass）";
 const PROTECTION_DOC = "docs/merge-gate.md の「保護枝とローカルの結果」";
 
 /**
- * Whether the newest local-ci result of the head and the base branch's tip now is a pass; else why not (#914). Only
- * results with the base count (`LOCAL_CI_RESULT`); the base's tip is read only when there is one of the head.
+ * The top of `n`'s stack (#2940): up by the one open PR whose base is this one's head branch. None or two above → here.
+ * gh stack's state is a worktree's local file, and GitHub's API has no stack, so the PRs' branches are what is read.
  */
-export async function localCiOf(comments: { body: string; createdAt: string }[], head: string, baseRef: string, run: (args: string[]) => Promise<string>, repo: string): Promise<{ pass: boolean; note?: string }> {
-  const ofHead = comments
-    .map((c) => ({ m: LOCAL_CI_RESULT.exec(c.body), at: Date.parse(c.createdAt) }))
-    .filter((x): x is { m: RegExpExecArray; at: number } => x.m?.[2] === head);
-  if (ofHead.length === 0) return { pass: false };
-  const base = (await run(["api", `repos/${repo}/git/ref/heads/${baseRef}`, "-q", ".object.sha"])).trim();
-  if (!/^[0-9a-f]{40}$/.test(base)) throw new Error(`base の枝 ${baseRef} の先端が読めない`);
-  const newest = ofHead.filter((x) => x.m[3] === base).sort((a, b) => a.at - b.at).at(-1);
-  if (!newest) return { pass: false, note: `local-ci の結果が今の base（${baseRef} ${base.slice(0, 7)}）のものでない（base が進んだ。回し直す）` };
-  return newest.m[1] === "pass" ? { pass: true } : { pass: false, note: "local-ci の最新の結果が fail（今の head と base で落ちた）" };
+export async function stackTop(n: number, headRefName: string, run: (args: string[]) => Promise<string>, repo: string): Promise<number> {
+  const seen = new Set([n]);
+  for (let top = n, ref = headRefName; ;) {
+    const above = JSON.parse(await run(["pr", "list", "-R", repo, "--base", ref, "--state", "open", "--json", "number,headRefName"])) as Array<{ number: number; headRefName: string }>;
+    if (!Array.isArray(above) || above.length !== 1 || seen.has(above[0]!.number)) return top;
+    top = above[0]!.number;
+    ref = above[0]!.headRefName;
+    seen.add(top);
+  }
+}
+
+/**
+ * Whether the newest local-ci result of the stack's top `top` (this PR itself when alone) is a pass whose stack line
+ * (`stackOf`) has this PR's patch-id now; else why not (#2940). The base's tip is not compared: a conflict with another
+ * PR is mergeStateStatus's, a fault of two PRs together the tag CI's. A pass without the stack line is none.
+ */
+export async function localCiOf(n: number, top: number, comments: { body: string; createdAt: string }[], run: (args: string[]) => Promise<string>, repo: string, patchId: (pr: number) => Promise<string>): Promise<{ pass: boolean; note?: string }> {
+  const ofTop = top === n ? comments : (JSON.parse(await run(["pr", "view", String(top), "-R", repo, "--json", "comments"])).comments as Array<{ body: string; createdAt: string; authorAssociation?: string }>)
+    .filter((c) => MARK_AUTHORS.includes(c.authorAssociation ?? ""));
+  const newest = ofTop
+    .map((c) => ({ c, m: LOCAL_CI_RESULT.exec(c.body), at: Date.parse(c.createdAt) }))
+    .filter((x) => x.m)
+    .sort((a, b) => a.at - b.at)
+    .at(-1);
+  if (!newest) return { pass: false };
+  if (newest.m![1] !== "pass") return { pass: false, note: `一番上の PR #${top} の local-ci の最新が fail` };
+  const recorded = stackOf(newest.c.body)?.get(n);
+  if (!recorded) return { pass: false, note: `一番上の PR #${top} の pass にこの PR が入っていない（一番上で回す）` };
+  if (recorded !== await patchId(n)) return { pass: false, note: `この PR の差分が #${top} の pass のときから変わった（一番上で回し直す）` };
+  return { pass: true };
 }
 
 async function checksWithLocalCi(runs: WorkflowRun[], localPass: boolean, run: (args: string[]) => Promise<string>, repo: string): Promise<PrFacts["checks"]> {
@@ -301,11 +324,14 @@ async function readmeDesignRulesTouched(n: number, run: (args: string[]) => Prom
   return patch === undefined ? true : designRulesTouched(readme, patch);
 }
 
-/** `repo`: owner/name; another repository's backlog stage Task passes its own with --repo (the rules stay these). */
-export async function readPr(n: number, run = gh, repo = currentRepo()): Promise<PrFacts> {
+/**
+ * `repo`: owner/name; another repository's backlog stage Task passes its own with --repo (the rules stay these).
+ * `patchId`: a PR's diff's patch-id now (local-ci's `patchIdOf`; tests give their own).
+ */
+export async function readPr(n: number, run = gh, repo = currentRepo(), patchId = (pr: number) => patchIdOf(pr, repo, sh)): Promise<PrFacts> {
   const [owner, name] = repo.split("/");
   const pr = JSON.parse(
-    await run(["pr", "view", String(n), "-R", repo, "--json", "files,commits,baseRefName,baseRefOid,headRefOid,mergeStateStatus,comments"]),
+    await run(["pr", "view", String(n), "-R", repo, "--json", "files,commits,baseRefName,baseRefOid,headRefName,headRefOid,mergeStateStatus,comments"]),
   );
   // GitHub has not worked it out yet (just after a push or a base change): nothing to judge by
   if (pr.mergeStateStatus === "UNKNOWN") throw new Error("mergeStateStatus が UNKNOWN（GitHub が計算中。少し待ってやり直す）");
@@ -323,7 +349,7 @@ export async function readPr(n: number, run = gh, repo = currentRepo()): Promise
   if (threads.totalCount > threads.nodes.length) {
     throw new Error(`レビュースレッドが ${threads.totalCount} 件あり、1 ページ（${threads.nodes.length} 件）で読み切れない`);
   }
-  const local = await localCiOf(comments, pr.headRefOid, pr.baseRefName, run, repo);
+  const local = await localCiOf(n, await stackTop(n, pr.headRefName, run, repo), comments, run, repo, patchId);
   const checks = await checksWithLocalCi(runs.workflow_runs, local.pass, run, repo);
   const rechecks = RECHECK_KINDS.filter((k) =>
     comments.some((c) => {
@@ -344,6 +370,56 @@ export async function readPr(n: number, run = gh, repo = currentRepo()): Promise
     reviewComments: comments.map((c) => ({ body: c.body, createdAt: c.createdAt })),
     head: pr.headRefOid,
     base: pr.baseRefName,
+  };
+}
+
+/** GitLab's Developer: the access level whose notes count as marks (as MARK_AUTHORS on GitHub). */
+export const GITLAB_MARK_LEVEL = 30;
+/** GitLab is still working the MR's merge status out: nothing to judge by yet. */
+const GITLAB_PENDING = ["unchecked", "checking", "preparing", "approvals_syncing"];
+
+/**
+ * A GitLab MR (#924) as the facts `judge` reads; the rules stay the same. CI = the head pipeline, only when it ran on
+ * the head; none (or an older one) = the local pass of the head and the target branch's tip now. A pipeline that ran and
+ * failed stops the merge. Marks count from notes of a Developer or above. README.md's Design rules section is not read
+ * on GitLab: an MR touching README.md counts as touching it (asked). `mergeState`: GitLab's `detailed_merge_status`,
+ * `mergeable` as CLEAN; one still being worked out throws (not judged). Approvals (a paid API) are not read.
+ */
+export async function readGitlabPr(iid: number, sh: Sh, target: ForgeTarget): Promise<PrFacts> {
+  const r = await readGitlabMerge(sh, target, iid);
+  const status = r.mr.mergeStatus;
+  if (!status || GITLAB_PENDING.includes(status)) throw new Error(`detailed_merge_status が ${status ?? "無い"}（GitLab が計算中。少し待ってやり直す）`);
+  const head = r.mr.head;
+  const marks = r.notes.filter((n) => n.access >= GITLAB_MARK_LEVEL).map(({ body, createdAt }) => ({ body, createdAt }));
+  const ofHead = marks.map((c) => ({ m: LOCAL_CI_RESULT.exec(c.body), at: Date.parse(c.createdAt) })).filter((x): x is { m: RegExpExecArray; at: number } => x.m?.[2] === head);
+  const newest = ofHead.filter((x) => x.m[3] === r.baseTip).sort((a, b) => a.at - b.at).at(-1);
+  const localPass = newest?.m[1] === "pass";
+  const localCiNote = !ofHead.length ? undefined : !newest ? `local-ci の結果が今の base（${r.mr.target} ${r.baseTip.slice(0, 7)}）のものでない（base が進んだ。回し直す）` : localPass ? undefined : "local-ci の最新の結果が fail（今の head と base で落ちた）";
+  const ran = r.pipeline && r.pipeline.sha === head ? r.pipeline : null;
+  const checks: PrFacts["checks"] = ran
+    ? [{ name: "GitLab pipeline", conclusion: ran.status === "success" ? "SUCCESS" : ran.status === "skipped" ? "SKIPPED" : ["created", "pending", "running", "waiting_for_resource", "preparing", "scheduled"].includes(ran.status) ? "" : ran.status.toUpperCase() }]
+    : localPass ? [{ name: LOCAL_CI_ONLY, conclusion: "SUCCESS" }] : [];
+  const localCi = !ran && localPass;
+  const rechecks = RECHECK_KINDS.filter((k) => marks.some((c) => {
+    const m = RECHECK_PASS.exec(c.body);
+    return m?.[1] === k && m[2] === head;
+  }));
+  // GitLab says the CI must pass when it has no pipeline of the head: the local pass is that CI here, as UNSTABLE is on GitHub
+  const mergeState = status === "mergeable" ? "CLEAN" : localCi && (status === "ci_must_pass" || status === "ci_still_running") ? "UNSTABLE" : status;
+  if (!r.authored.length) throw new Error(`!${iid} のコミットが読めない`);
+  return {
+    files: r.files,
+    headCommittedAt: r.authored.reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a)),
+    checks,
+    ...(r.files.some((f) => f.path === "README.md") ? { designRulesTouched: true } : {}),
+    ...(localCi ? { localCi: true } : {}),
+    ...(localCiNote ? { localCiNote } : {}),
+    ...(rechecks.length ? { rechecks } : {}),
+    unresolvedThreads: r.unresolved,
+    mergeState,
+    reviewComments: marks,
+    head,
+    base: r.mr.target,
   };
 }
 
@@ -373,11 +449,23 @@ export async function mergePr(n: number, repo: string, mode: MergeMode, facts: P
 const USAGE = "usage: bun scripts/merge-gate.ts <PR> [--allow-large] [--merge | --merge-stack] [--repo <owner/name>]";
 
 /** The command: 0 = merge (and merged, with --merge / --merge-stack) / 1 = stop, or the merge failed / 2 = not judged. Only a merge verdict merges. */
-export async function main(args: string[], run: (args: string[]) => Promise<string> = gh, log = console.log, err = console.error, stackRepo: () => string | undefined = originRepo): Promise<number> {
+export async function main(args: string[], run: (args: string[]) => Promise<string> = gh, log = console.log, err = console.error, stackRepo: () => string | undefined = originRepo, glab: Sh = runGlab, cwd = process.cwd()): Promise<number> {
   const n = Number(args.find((a) => /^\d+$/.test(a)));
   const repoAt = args.indexOf("--repo");
-  const repo = repoAt >= 0 ? args[repoAt + 1] : currentRepo();
   const modes = (["merge", "merge-stack"] as const).filter((m) => args.includes(`--${m}`));
+  // the checkout's GitLab project (#924, its ops.config.json `forge`): the MR is judged by the same rules, merged by GitLab
+  let lab: ForgeTarget | null = null;
+  if (repoAt < 0) {
+    try {
+      const t = forgeTargetOf(cwd, originOf(cwd));
+      if (t.service === "gitlab") lab = t;
+    } catch (e) {
+      err(`判定できなかった: ${(e as Error).message}`);
+      return 2;
+    }
+  }
+  if (lab) return gitlabMain(n, lab, args, modes, glab, log, err);
+  const repo = repoAt >= 0 ? args[repoAt + 1] : currentRepo(cwd);
   if (!n || !repo || !/^[\w.-]+\/[\w.-]+$/.test(repo) || modes.length > 1) {
     err(USAGE);
     return 2;
@@ -396,6 +484,32 @@ export async function main(args: string[], run: (args: string[]) => Promise<stri
   if (!mode) return 0;
   try {
     await mergePr(n, repo, mode, facts, run, stackRepo);
+  } catch (e) {
+    err(`マージできなかった: ${(e as Error).message.split("\n")[0]}`);
+    return 1;
+  }
+  return 0;
+}
+
+/** The command on a GitLab MR: --merge merges only the judged head; there is no stack to merge (--merge-stack is refused). */
+async function gitlabMain(n: number, target: ForgeTarget, args: string[], modes: MergeMode[], glab: Sh, log: (s: string) => void, err: (s: string) => void): Promise<number> {
+  if (!n || modes.length > 1 || modes[0] === "merge-stack") {
+    err(modes[0] === "merge-stack" ? "GitLab の MR は --merge だけ（スタックのマージは無い）" : USAGE);
+    return 2;
+  }
+  let facts: PrFacts;
+  try {
+    facts = await readGitlabPr(n, glab, target);
+  } catch (e) {
+    err(`判定できなかった: ${(e as Error).message}`);
+    return 2;
+  }
+  const j = judge(facts, { allowLarge: args.includes("--allow-large"), answered: modes.length > 0 });
+  log(JSON.stringify(j, null, 2));
+  if (j.verdict !== "merge") return 1;
+  if (!modes[0]) return 0;
+  try {
+    await mergeGitlabMr(glab, target, n, facts.head!);
   } catch (e) {
     err(`マージできなかった: ${(e as Error).message.split("\n")[0]}`);
     return 1;

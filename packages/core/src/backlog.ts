@@ -255,7 +255,7 @@ export function otherRepoRules(other: OtherRepo, local = false): string {
     ? `このリポジトリの \`scripts/setup/\` の ${setup.copies.join("、")} は共通キットを呼ばない写しなので使わない。代わりに ${meta} の \`scripts/setup/\` の同じ名前の入口に \`${projectUrl}\` を付けて使う。`
     : "";
   const project = local ? LOCAL_BACKLOG_RULES : own ? "" : `Project の URL はリポジトリ変数 \`${other.projectVar ?? "SWITCHBOARD_PROJECT_URL"}\` にあり、Project を触るスクリプトには \`${projectUrl}\` を付けて渡す。`;
-  return `スキル（\`.claude/skills/…\`）は Switchboard がこのリポジトリに置いたもの（Git 管理外）を使ってください。${scripts}${copies}スキルは Switchboard 向けに書かれているので、次のように読み替えてください: スキル中の「このリポジトリ」「開発リポジトリ」はこのリポジトリ。${project}${local ? "\`scripts/merge-gate.ts\`・\`scripts/local-ci.ts\`" : "\`scripts/merge-gate.ts\`・\`scripts/parallel-guard.ts\`・\`scripts/local-ci.ts\`"} の既定の対象は実行する場所（環境変数・作業ツリー・スクリプトの clone）で変わるので、必ず \`--repo <このリポジトリの owner/name>\` を付けて実行し、その判定に従う（自分で条件を確かめて代わりにしない）。再チェックの手順は \`${meta}/docs/merge-gate.md\` の「再チェック」（その中の \`-R <owner/name>\` と \`origin\` はこのリポジトリ。印は必ずこのリポジトリの PR に付ける）。Actions が始まらない（ジョブのステップ 0 件）ときは、このリポジトリの作業ツリーから \`bun ${meta}/scripts/local-ci.ts <PR> --repo <このリポジトリの owner/name>\` で CI を回す（作業ツリーの origin が \`--repo\` と違えば何も投稿せず exit 2）。PR をマージするたびに、\`git fetch origin\` のあと \`bun ${meta}/scripts/release-tag.ts $(git rev-parse origin/main) --repo <このリポジトリの owner/name>\` でそのマージにタグと Release を付け（タグの無い前のマージもその Release に入る）、出力を PBI の結果に書く。main をタグの状態に戻すときは \`bun ${meta}/scripts/rollback-pr.ts <tag> --repo <このリポジトリの owner/name>\` で PR を作り、ふつうの PR と同じくレビューと merge-gate を通してマージする。ビルド・テスト・ブランチ・コミットの決まりは、このリポジトリの CLAUDE.md / AGENTS.md / README がスキルと食い違えばこのリポジトリの方に従う。Switchboard のリポジトリ自体は変更しない。`;
+  return `スキル（\`.claude/skills/…\`）は Switchboard がこのリポジトリに置いたもの（Git 管理外）を使ってください。${scripts}${copies}スキルは Switchboard 向けに書かれているので、次のように読み替えてください: スキル中の「このリポジトリ」「開発リポジトリ」はこのリポジトリ。${project}${local ? "\`scripts/merge-gate.ts\`・\`scripts/local-ci.ts\`" : "\`scripts/merge-gate.ts\`・\`scripts/parallel-guard.ts\`・\`scripts/local-ci.ts\`"} の既定の対象は実行する場所（環境変数・作業ツリー・スクリプトの clone）で変わるので、必ず \`--repo <このリポジトリの owner/name>\` を付けて実行し、その判定に従う（自分で条件を確かめて代わりにしない）。再チェックの手順は \`${meta}/docs/merge-gate.md\` の「再チェック」（その中の \`-R <owner/name>\` と \`origin\` はこのリポジトリ。印は必ずこのリポジトリの PR に付ける）。Actions が始まらない（ジョブのステップ 0 件）ときは、このリポジトリの作業ツリーから \`bun ${meta}/scripts/local-ci.ts <PR> --repo <このリポジトリの owner/name>\` で CI を回す（作業ツリーの origin が \`--repo\` と違えば何も投稿せず exit 2）。回すのはスタックの一番上で 1 回（全部の PR の指摘の処理が済んでから。いつ回し、どう数えるかは \`${meta}/docs/merge-gate.md\` の「ローカル CI を回す時と数え方」）。PR をマージするたびに、\`git fetch origin\` のあと \`bun ${meta}/scripts/release-tag.ts $(git rev-parse origin/main) --repo <このリポジトリの owner/name>\` でそのマージにタグと Release を付け（タグの無い前のマージもその Release に入る）、出力を PBI の結果に書く。main をタグの状態に戻すときは \`bun ${meta}/scripts/rollback-pr.ts <tag> --repo <このリポジトリの owner/name>\` で PR を作り、ふつうの PR と同じくレビューと merge-gate を通してマージする。ビルド・テスト・ブランチ・コミットの決まりは、このリポジトリの CLAUDE.md / AGENTS.md / README がスキルと食い違えばこのリポジトリの方に従う。Switchboard のリポジトリ自体は変更しない。`;
 }
 
 /**
@@ -388,7 +388,8 @@ export class GithubBudgetCache {
 
 const STAGE_ORDER: BacklogStage[] = ["ready", "needs-tasks", "request"];
 const SLOT_STAGES: Record<Slot, BacklogStage[]> = { implement: ["ready"], plan: ["needs-tasks", "request"] };
-const rank = (p: string | null) => (p && /^P[0-3]$/.test(p) ? Number(p[1]) : 4);
+/** Priority as an order: P0 first, unset last. */
+export const priorityRank = (p: string | null) => (p && /^P[0-3]$/.test(p) ? Number(p[1]) : 4);
 
 /**
  * An in-progress PBI answered since its last stage Task finished (#562): its newest ## 回答 (on it or a Task; answeredAt is
@@ -571,12 +572,13 @@ export const spinningIn = (items: BacklogItem[], slot: Slot) =>
   items.filter((i) => slot === "implement" && !i.activeTaskId && !isWaiting(i) && !isAnswered(i) && isSpinning(i));
 
 /**
- * The one item backlog-next moves on in a slot (#267, #561): nearest to done first (回答済みの実装中 → 待ちが解けた実装中 →
- * 閉じられる実装中 → 止まった実装中 → Ready → 分解待ち → 要望), then Priority (P0 first, none last), then the oldest. Items
- * waiting for a decision or with a running stage Task are left alone. An answered in-progress PBI goes on with 実装
+ * The one item backlog-next moves on in a slot (#267, #561, #2929): the in-progress PBIs to finish first (回答済みの実装中 →
+ * 待ちが解けた実装中 → 閉じられる実装中 → 止まった実装中), then Priority (P0 first, none last), then within one Priority
+ * the items not yet worked on before those worked on and updated since, then the stage (Ready → 分解待ち → 要望), then the
+ * oldest. Items waiting for a decision or with a running stage Task are left alone. An answered in-progress PBI goes on with 実装
  * (`complete`), not the in-progress button's 状況確認; so does one whose waits all closed (#817).
  * #624: an item unchanged since its last stage Task of the same stage is left too, and one updated since goes after the
- * slot's items not yet worked on (an answered in-progress PBI still first).
+ * items of the same Priority not yet worked on (an answered in-progress PBI still first).
  * #817: an item waiting for a PR / Issue still open is left, Ready or in progress.
  * #578: any other in-progress PBI is closed (`close`) when it can be, else resumed (`complete`, `resume: true`) unless it
  * did not move since its last resume (`spinningIn`).
@@ -596,11 +598,19 @@ export const overlapIn = (items: BacklogItem[], slot: Slot) => candidates(items,
 function candidates(items: BacklogItem[], slot: Slot): Array<{ item: BacklogItem; action: BacklogAction; resume?: true }> {
   const resumed = (i: BacklogItem) =>
     isAnswered(i) ? -4 : i.stage !== "in-progress" ? null : isUnblocked(i) ? -3 : isClosable(i) ? -2 : isStalled(i) && !isSpinning(i) ? -1 : null;
-  const tried = (i: BacklogItem) => resumed(i) ?? (isTriedBefore(i) ? 1 : 0);
-  const order = (i: BacklogItem) => resumed(i) ?? STAGE_ORDER.indexOf(i.stage);
+  const first = (i: BacklogItem) => resumed(i) ?? 0;
+  const tried = (i: BacklogItem) => (isTriedBefore(i) ? 1 : 0);
   // #1275: a Task that failed or stopped asking, with no update to the Issue since, holds the item in any stage (an unblocked one still goes on, #817)
   const open = items.filter((i) => !i.activeTaskId && !isWaiting(i) && (isUnblocked(i) || (!isUnchanged(i) && !failedSince(i) && !awaitingReply(i) && !stopHeld(i))) && (SLOT_STAGES[slot].includes(i.stage) || (slot === "implement" && resumed(i) !== null)));
-  open.sort((a, b) => tried(a) - tried(b) || order(a) - order(b) || rank(a.priority) - rank(b.priority) || a.createdAt.localeCompare(b.createdAt));
+  // #2929: the in-progress ones to finish first, then Priority, then not yet worked on, then the stage, then the oldest
+  open.sort(
+    (a, b) =>
+      first(a) - first(b) ||
+      priorityRank(a.priority) - priorityRank(b.priority) ||
+      tried(a) - tried(b) ||
+      STAGE_ORDER.indexOf(a.stage) - STAGE_ORDER.indexOf(b.stage) ||
+      a.createdAt.localeCompare(b.createdAt),
+  );
   return open.map((item) => {
     const r = resumed(item);
     const action: BacklogAction = r === -2 ? "close" : r !== null ? "complete" : ACTION_FOR_STAGE[item.stage]!;
@@ -698,10 +708,11 @@ export const LOCAL_BACKLOG = { service: "switchboard", host: "local" } as const;
 export const localBacklogSource = (workspaceId: string): BacklogSource => ({ ...LOCAL_BACKLOG, repository: workspaceId, project: { owner: "switchboard", number: 0 } });
 
 /**
- * Whether the workspace's backlog reads and writes GitHub's Issues and Project (#2266): not one kept here only (#2265),
- * nor one whose GitHub sync was turned off. null = a GitHub workspace not imported yet.
+ * Whether the workspace's backlog reads and writes its service's Issues — GitHub's Issues and Project (#2266), or a
+ * GitLab project's Issues (#892): not one kept here only (#2265), nor one whose sync was turned off. null = a workspace
+ * not imported yet. (The name is older than GitLab.)
  */
-export const syncsGithub = (s: BacklogSource | null | undefined) => !s || (s.service === "github" && !s.disabled);
+export const syncsGithub = (s: BacklogSource | null | undefined) => !s || (s.service !== "switchboard" && !s.disabled);
 
 /* ---------- edits kept here and sent to GitHub later (#886) ---------- */
 

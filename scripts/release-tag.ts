@@ -1,7 +1,5 @@
 import { closeSync, openSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { LOCAL_CI_RESULT } from "./local-ci.ts";
-import { MARK_AUTHORS } from "./merge-gate.ts";
 import { currentRepo } from "./repo.ts";
 export type Bump = "major" | "minor" | "patch";
 
@@ -56,39 +54,6 @@ export function checkOrigin(sh: Sh, repo: string) {
   if (here?.toLowerCase() !== repo.toLowerCase()) throw new Error(`origin of the clone in the cwd is ${url}, not ${repo}`);
 }
 
-/**
- * What makes `sha` verified (#915), or null: the CI workflow's success on a push of it (Actions ran), or — Actions not
- * starting — a `[local-ci] pass <head> base=<base>` (local-ci.ts) on the merged PR that made it, whose head merged into
- * that base is the tree of `sha`. Only marks by the repository's members count (merge-gate's MARK_AUTHORS); saying
- * "verified" on the command line does not.
- */
-export function verifiedBy(sha: string, sh: Sh, repo: string): string | null {
-  const ci = sh(["gh", "api", `repos/${repo}/actions/runs?head_sha=${sha}&event=push&per_page=100`, "-q", '[.workflow_runs[] | select(.name == "CI" and .conclusion == "success")] | length']);
-  if (ci.ok && Number(ci.out) > 0) return "CI";
-  const prs = sh(["gh", "api", `repos/${repo}/commits/${sha}/pulls`, "-q", `[.[] | select(.merged_at != null and .merge_commit_sha == "${sha}") | .number] | join(" ")`]);
-  const tree = sh(["git", "rev-parse", `${sha}^{tree}`]).out;
-  for (const n of prs.ok ? prs.out.split(/\s+/).filter(Boolean) : []) {
-    const view = sh(["gh", "pr", "view", n, "-R", repo, "--json", "headRefOid,comments"]);
-    if (!view.ok) continue;
-    const pr = JSON.parse(view.out) as { headRefOid: string; comments: Array<{ body: string; createdAt: string; authorAssociation?: string }> };
-    // the newest result of each base: a later fail of the same head and base outweighs an earlier pass
-    const newest = new Map<string, { pass: boolean; at: number }>();
-    for (const c of pr.comments) {
-      const m = LOCAL_CI_RESULT.exec(c.body);
-      if (!m || m[2] !== pr.headRefOid || !MARK_AUTHORS.includes(c.authorAssociation ?? "")) continue;
-      const at = Date.parse(c.createdAt);
-      if ((newest.get(m[3]!)?.at ?? -1) <= at) newest.set(m[3]!, { pass: m[1] === "pass", at });
-    }
-    for (const [base, r] of newest) {
-      if (!r.pass) continue;
-      sh(["git", "fetch", "-q", "origin", `refs/pull/${n}/head`]);
-      const merged = sh(["git", "merge-tree", "--write-tree", base, pr.headRefOid]);
-      if (merged.ok && tree && merged.out.split("\n")[0] === tree) return `local-ci of PR #${n}`;
-    }
-  }
-  return null;
-}
-
 const RETRY = Symbol("retry");
 
 /** Another strict `vX.Y.Z` tag on `sha` or a descendant of it, if any. */
@@ -107,11 +72,9 @@ function once(sha: string, sh: Sh, repo: string | undefined, target: string): st
     return `created the missing release for ${own}`;
   }
   const latest = latestSemver(all);
-  // A slower CI run for an older commit must not tag it after a newer one was tagged.
+  // A slower run for an older commit must not tag it after a newer one was tagged.
   if (latest && sh(["git", "merge-base", "--is-ancestor", sha, latest]).ok) return `${sha} is already contained in ${latest}`;
   if (!sh(["git", "merge-base", "--is-ancestor", sha, "origin/main"]).ok) throw new Error(`${sha} is not on origin/main`);
-  const by = verifiedBy(sha, sh, target);
-  if (!by) throw new Error(`${sha} is not verified: no CI success on its push and no local-ci pass of the PR that made it (docs/design/releases-and-rescue.md)`);
   const commits = commitsIn(sh, latest ? `${latest}..${sha}` : sha);
   const tag = nextVersion(latest, bumpType(commits.map((c) => c.subject)));
   must(sh, ["git", "tag", tag, sha]);
@@ -132,12 +95,13 @@ function once(sha: string, sh: Sh, repo: string | undefined, target: string): st
     return `${sha} is already contained in ${newer} (tagged by another run meanwhile; ${tag} taken back)`;
   }
   must(sh, ["gh", "release", "create", tag, "--title", tag, "--notes-file", "-", "--verify-tag", ...R], releaseNotes(commits, latest, tag, target));
-  return `tagged ${sha} as ${tag} (verified by ${by})`;
+  return `tagged ${sha} as ${tag}`;
 }
 
 /**
- * Tags `sha` and creates its GitHub Release, only when `sha` is on origin/main and verified (`verifiedBy`). The tags and
- * main are read from origin first, so a run never builds on a tag GitHub does not have. A merge whose run was coalesced
+ * Tags `sha` and creates its GitHub Release when `sha` is on origin/main, without waiting for CI: a tag is not a CI
+ * pass, scripts/tag-ci.ts runs CI on the tags and writes the result into their Releases. The tags and main are read from
+ * origin first, so a run never builds on a tag GitHub does not have. A merge whose run was coalesced
  * away gets no tag of its own and goes into the next tag's notes. A tag already on `sha` whose Release is missing (the
  * push worked, `gh release create` did not) gets its Release now. A push that is rejected (another clone took that
  * version) drops the local tag and starts over from the tags then on origin, at most 3 times.

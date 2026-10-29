@@ -45,7 +45,14 @@ env -u <PREFIX>_PROJECT_URL -u <PREFIX>_PROJECT_OWNER \
 jq 'del(.projectUrl)' <dir>/ops.config.json > <dir>/ops.config.tmp && mv <dir>/ops.config.tmp <dir>/ops.config.json     # Project は変数で指す。設定に URL を残さない
 ```
 
-期待: bootstrap の出力に `Project の URL: https://github.com/<orgs|users>/<owner>/projects/<n>` が出る（`<n>` は 0 でない）。`projectUrl` を消したあと `grep -c projectUrl <dir>/ops.config.json` が 0。その URL で変数を作る:
+期待: bootstrap の出力に `Project の URL: https://github.com/<orgs|users>/<owner>/projects/<n>` が出る（`<n>` は 0 でない）。`projectUrl` を消したあと `grep -c projectUrl <dir>/ops.config.json` が 0。bootstrap は Project を作るだけで、リポジトリにはひも付けない（リポジトリの Projects タブに出ない）。その `<n>` をリポジトリにひも付ける:
+
+```bash
+gh project link <n> --owner <owner> -R <owner>/<name>
+gh repo view <owner>/<name> --json projectsV2 -q '.projectsV2.Nodes[].number'   # 期待: 一覧に <n> が出る
+```
+
+その URL で変数を作る:
 
 ```bash
 gh variable set <PREFIX>_PROJECT_URL -R <owner>/<name> --body <URL>
@@ -91,15 +98,17 @@ git rev-parse HEAD                                                       # 期�
 
 ## 4. Switchboard への登録
 
-ループバックからは API トークンが要らない。
+デーモンは API に鍵を求める。Task にはデーモンが `BACKLOG_URL`（`<デーモン>/api/backlog`）と鍵のファイル `BACKLOG_TOKEN_FILE` を渡している（`docs/design/backlog-sync.md` の「経路」）ので、その鍵を Bearer で付ける。鍵の値は出力に出さない。
 
 ```bash
-B=http://127.0.0.1:${SWITCHBOARD_PORT:-47831}
-ID=$(curl -s -X POST $B/api/workspaces -H 'content-type: application/json' -d '{"path":"<dir>"}' | jq -r .id)
-curl -s -X PATCH $B/api/workspaces/$ID -H 'content-type: application/json' -d '{"projectVar":"<PREFIX>_PROJECT_URL"}' | jq -r .projectVar
+B=${BACKLOG_URL%/api/backlog}
+K=$(cat "$BACKLOG_TOKEN_FILE")
+ID=$(curl -s -X POST $B/api/workspaces -H "authorization: Bearer $K" -H 'content-type: application/json' -d '{"path":"<dir>"}' | jq -r .id)
+echo "$ID"                                                                # 期待: workspace の id（null や空でない）
+curl -s -X PATCH $B/api/workspaces/$ID -H "authorization: Bearer $K" -H 'content-type: application/json' -d '{"projectVar":"<PREFIX>_PROJECT_URL"}' | jq -r .projectVar
 ```
 
-期待: 2 行目が `<PREFIX>_PROJECT_URL`。Issue がまだ無いので項目からは探せない。`curl -s "$B/api/backlog?refresh=1" | jq --arg id "$ID" '{sync: [.syncs[]|select(.workspaceId==$id)], errors: [.errors[]|select(.workspaceId==$id)]}'` で、`sync` に 1 件あり `syncing` が false、`errors` が `[]`（取込みを待つので数十秒かかることがある。デーモンの再起動は要らない）。
+期待: 2 行目が `<PREFIX>_PROJECT_URL`。Issue がまだ無いので項目からは探せない。`curl -s -H "authorization: Bearer $K" "$B/api/backlog?refresh=1" | jq --arg id "$ID" '{sync: [.syncs[]|select(.workspaceId==$id)], errors: [.errors[]|select(.workspaceId==$id)]}'` で、`sync` に 1 件あり `syncing` が false、`errors` が `[]`（取込みを待つので数十秒かかることがある。デーモンの再起動は要らない）。
 
 ## 5. 開始してよい条件
 
@@ -113,7 +122,7 @@ curl -s -X PATCH $B/api/workspaces/$ID -H 'content-type: application/json' -d '{
 新しいリポジトリ <owner>/<name>（private）
 作ったもの: リポジトリ <URL> / Project <URL> / 変数 <PREFIX>_PROJECT_URL / ラベル <n> 件 / 初期コミット <sha> / workspace <id>（<dir>）
 | 開始してよい条件 | 結果 |
-利用者確認: Project のビュー 2 つを手で作る（Backlog = `no:parent-issue`、Task Board = `has:parent-issue`。`docs/design/new-repo.md` の「手作業で残るもの」の 1）。Actions が動かない間のラベルは 2 で作り済み。project-autoadd を置くなら PAT の登録（同 3）
+利用者確認: Project のビュー 2 つを手で作る（Backlog = `no:parent-issue`、Task Board = `has:parent-issue`。`docs/design/new-repo.md` の「手作業で残るもの」の 1）。project-autoadd を置いたときだけ PAT の登録（同 3）
 ```
 
-秘密の値は報告に書かない（`issue-workflow` の「Issue・PR・コメントに書かない値」）。期待: 作ったもの・条件の表・利用者確認の 3 つが埋まっている。
+Project のリポジトリへのひも付けとラベルは 2 で済ませているので、利用者確認に入れない。秘密の値は報告に書かない（`issue-workflow` の「Issue・PR・コメントに書かない値」）。期待: 作ったもの・条件の表・利用者確認の 3 つが埋まっている。

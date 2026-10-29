@@ -18,6 +18,9 @@ export const ciSteps: Step[] = [
 [ "$rc" -eq 1 ]`,
   },
   { name: "bun install --frozen-lockfile", run: "bun install --frozen-lockfile" },
+  // 公開に出すツリーの検査（Private のリポジトリ名・ホームパス・個人のメール）。公開の同期と同じ判定を、タグの後の同期より前（マージの前）に走らせる。
+  // 公開側の写しでは origin が publicSync.target なので飛ぶ
+  { name: "public tree check", run: "bun ops-kit/src/cli.ts public-sync --check" },
   { name: "bun run licenses:check", run: "bun run licenses:check" },
   // typecheck は先に入っている Codex から型を生成する（scripts/codex_types.ts）。CI を回す環境にも Codex CLI が要る
   { name: "bun run typecheck", run: "bun run typecheck" },

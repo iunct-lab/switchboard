@@ -2,11 +2,11 @@ import { CloudSessionRef, HumanEval, JudgeEval, RuleEval, SizeClass } from "@swi
 import { Database } from "bun:sqlite";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import type { AgentEvent, AskAnswerResult, Artifact, Attachment, BacklogAction, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogRepositorySync, BacklogSource, CheckRun, EvalSource, EvalsListRow, EventEnvelope, HistorySession, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerRow, LedgerSummary, LedgerTaskRow, LoadKind, Journey, PerfSample, PerfSummaryRow, ReportRow, RoutingLogRow, RoutingStats, RunnerId, RunnerStats, Schedule, StagedChange, StopRecord, Task, TaskEvals, TaskOrigin, TaskOutcome, TaskStatus, Workspace, WorkspaceSweep } from "@switchboard/protocol";
+import type { AgentEvent, AskAnswerResult, Artifact, Attachment, BacklogAction, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogRepositorySync, BacklogSource, CheckRun, CreatedIssue, EvalSource, EvalsListRow, EventEnvelope, HistorySession, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerRow, LedgerSummary, LedgerTaskRow, LoadKind, Journey, PerfSample, PerfSummaryRow, ReportRow, RoutingLogRow, RoutingStats, RunnerId, RunnerStats, Schedule, StagedChange, StopRecord, Task, TaskEvals, TaskOrigin, TaskOutcome, TaskStatus, Workspace, WorkspaceSweep } from "@switchboard/protocol";
 import { teleportWorktreePath } from "./config.ts";
 import { MAX_STOP_RESUMES, planResumeAfterStop } from "./interrupted.ts";
 import { canTransition, InvalidTaskTransitionError, outcomeOnStatus } from "./task-status.ts";
-import { backlogFieldValue, conflictRevision, mergeBacklogField } from "./backlog-merge.ts";
+import { backlogFieldValue, conflictRevision, mergeBacklogField, sameBacklogValue } from "./backlog-merge.ts";
 import type { ReportedTotal } from "./pricing.ts";
 
 /** One record of an import (#885): `remote` is read only when `fetchState` is `fetched`. */
@@ -252,6 +252,80 @@ export function tasksOfIssues(sqlite: Database, issues: number[], workspaceIds: 
        FROM tasks t WHERE t.workspace_id IN (${workspaceIds.map(() => "?").join(",")}) AND (t.stage_issue IN (${marks}) OR ${titles}) ORDER BY t.created_at`,
     )
     .all(...workspaceIds, ...issues, ...issues.map((n) => `#${n} %`)) as Array<{ id: string; createdAt: number; durationMs: number; costUsd: number; stageIssue: number | null; stageAction: string | null }>;
+}
+
+/** The words of a final report that put something off (#1878): matched as words, so a "スコープ外は無し" counts too. */
+export const DEFERRED_WORDS = /残した|見送り|後回し|スコープ外|別 ?Issue/;
+
+/** Every GitHub Issue URL in this text (#1878), once each, in the order they appear. */
+export function issuesInText(text: string): CreatedIssue[] {
+  const seen = new Set<string>();
+  const out: CreatedIssue[] = [];
+  for (const m of text.matchAll(/https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/issues\/(\d+)(?!\d)/g)) {
+    const issue = { repo: m[1]!.toLowerCase(), number: Number(m[2]) };
+    const key = `${issue.repo}#${issue.number}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(issue);
+  }
+  return out;
+}
+
+/**
+ * The Issues a Task opened (#1878), in the order it opened them, once each: the Issue URLs in the successful `tool.result` of
+ * each `tool.call` whose input runs `gh issue create` or `request_issue.sh` — one check of the input's JSON, whichever the
+ * runner — and the `localId` the app's backlog create prints (`ops-kit backlog create`, and `request_issue.sh` in the app's
+ * Task, whatever script ran it; only a create stored while that call ran, so a log of another Task's create shown again is not read), read back to its repository and number through the stored create and its record; one not
+ * sent yet is left out until it has a number. Counted from the events on every read (no column); nothing is asked of GitHub.
+ * Reads only, like tasksOfIssues.
+ */
+export function createdIssuesOf(sqlite: Database, taskId: string): CreatedIssue[] {
+  // the prefix compare of listStopRecords: `t` is always written first
+  const prefix = '{"t":"tool.';
+  const rows = sqlite.query("SELECT ts, json FROM events WHERE task_id = ? AND substr(json, 1, length(?)) = ? ORDER BY seq").all(taskId, prefix, prefix) as Array<{ ts: number; json: string }>;
+  const stored = sqlite.query(
+    `SELECT o.repository AS repo, COALESCE(json_extract(r.remote, '$.number'), json_extract(r.local, '$.number')) AS number FROM backlog_operations o
+     JOIN backlog_records r ON r.service = o.service AND r.host = o.host AND r.repository = o.repository AND r.object_kind = 'issue' AND r.external_id IN (o.remote_id, 'local:' || o.id)
+     WHERE o.id = ? AND o.kind = 'create' AND o.created_at BETWEEN ? AND ?`,
+  );
+  const opening = new Set<string>();
+  const calledAt = new Map<string, number>();
+  const out: CreatedIssue[] = [];
+  for (const r of rows) {
+    const ev = JSON.parse(r.json) as AgentEvent;
+    if (ev.t === "tool.call") calledAt.set(ev.id, r.ts);
+    if (ev.t === "tool.call" && /gh issue create|request_issue\.sh/.test(JSON.stringify(ev.input ?? null))) opening.add(ev.id);
+    if (ev.t !== "tool.result" || !ev.ok) continue;
+    if (opening.has(ev.id)) out.push(...issuesInText(ev.summary));
+    for (const m of ev.summary.matchAll(/^(?:#\d+ を作りました（localId ([0-9a-f-]{36})）|作りました（送信待ち）: localId ([0-9a-f-]{36})。)/gm)) {
+      const hit = stored.get((m[1] ?? m[2])!, calledAt.get(ev.id) ?? r.ts, r.ts) as { repo: string; number: number | null } | null;
+      if (hit?.number) out.push({ repo: hit.repo.toLowerCase(), number: hit.number });
+    }
+  }
+  return out.filter((x, i) => out.findIndex((y) => y.repo === x.repo && y.number === x.number) === i);
+}
+
+/** Whether a Task's final report put something off (#1878): its last `session.end`'s summary has one of DEFERRED_WORDS. */
+export function deferredOf(sqlite: Database, taskId: string): boolean {
+  const prefix = '{"t":"session.end",';
+  const r = sqlite.query("SELECT json_extract(json, '$.summary') AS text FROM events WHERE task_id = ? AND substr(json, 1, length(?)) = ? ORDER BY seq DESC LIMIT 1").get(taskId, prefix, prefix) as { text: string | null } | null;
+  return DEFERRED_WORDS.test(r?.text ?? "");
+}
+
+/**
+ * The Tasks of these workspaces whose last `session.end` is at `since` or later and whose final report put something off
+ * (#1878, deferredOf), with when that turn ended and the Issues they opened (createdIssuesOf). Reads only, like tasksOfIssues.
+ */
+export function deferredTasksSince(sqlite: Database, workspaceIds: string[], since: number): Array<{ id: string; endedAt: number; issues: CreatedIssue[] }> {
+  if (workspaceIds.length === 0) return [];
+  const prefix = '{"t":"session.end",';
+  const rows = sqlite
+    .query(
+      `SELECT t.id AS id, MAX(e.ts) AS endedAt FROM tasks t JOIN events e ON e.task_id = t.id AND substr(e.json, 1, length(?)) = ?
+       WHERE t.workspace_id IN (${workspaceIds.map(() => "?").join(",")}) GROUP BY t.id HAVING MAX(e.ts) >= ? ORDER BY endedAt`,
+    )
+    .all(prefix, prefix, ...workspaceIds, since) as Array<{ id: string; endedAt: number }>;
+  return rows.filter((r) => deferredOf(sqlite, r.id)).map((r) => ({ ...r, issues: createdIssuesOf(sqlite, r.id) }));
 }
 
 /** The most events one page of a Task's conversation returns (#1142): `limit` is clamped to it, and a page that reaches back to a message's start stops there. */
@@ -598,6 +672,14 @@ export class Db {
       if (seen.has(op.field!)) continue;
       seen.add(op.field!);
       const value = backlogFieldValue(kind, remote, op.field!);
+      // GitHub already has what the last edit of a Project field makes (#2924): the ones before it are on their way
+      // there, and nothing is left to choose — all of them are done (one the write itself held, with `overwritten`,
+      // stays). Only a Project field: a label on and off again (a question, then its answer) is not skipped
+      const field = ops.filter((o) => o.field === op.field && (o.status === "pending" || o.status === "conflict") && !o.overwritten);
+      if (op.field!.startsWith("field:") && value !== undefined && field.length > 1 && sameBacklogValue(op.field!, field[field.length - 1]!.payload, value)) {
+        for (const o of field) this.sqlite.query("UPDATE backlog_operations SET status = 'done', error = ?, retry_at = NULL, updated_at = ? WHERE seq = ?").run(o === field[field.length - 1] ? null : "後の編集の値に GitHub が既になっています", now, o.seq);
+        continue;
+      }
       if ((op.status !== "pending" && op.status !== "conflict") || value === undefined) continue;
       // a conflict the write itself found (#1329): GitHub has the value made here, so a read of it decides nothing —
       // it stays, with its reason, until chosen on
@@ -644,6 +726,14 @@ export class Db {
       else update.run("done", JSON.stringify(op.base ?? null), "GitHub の値を選んだので送りません", now, id);
       this.rebaseBacklogRecord(repo, op.targetKind, op.target);
     })();
+  }
+
+  /** The value the last `set` of a field still to send makes (#2924); undefined when there is none. */
+  lastBacklogSetValue(repo: BacklogRepositoryKey, targetKind: BacklogObjectKind, target: string, field: string): unknown {
+    const r = this.sqlite
+      .query("SELECT payload FROM backlog_operations WHERE service = ? AND host = ? AND repository = ? AND target_kind = ? AND target = ? AND kind = 'set' AND field = ? AND status IN ('pending', 'conflict', 'sending', 'unknown') ORDER BY seq DESC LIMIT 1")
+      .get(repo.service, repo.host, repo.repository, targetKind, target, field) as { payload: string } | null;
+    return r ? JSON.parse(r.payload) : undefined;
   }
 
   /** GitHub's value of a `set`'s field as last imported (#887); undefined = not read (never, or 404 / 403 on the last read). */
@@ -1165,22 +1255,24 @@ export class Db {
   /**
    * The Evals list (#1221): every task (newest first, `limit` of them), filtered by workspace / runner, with the gist of
    * its rules / judge / human rows. One query: the three eval rows are LEFT JOINed by source, the cost is the ledger's
-   * sum. A row that no longer parses reads as null, as in `evalsOf`.
+   * sum. A row that no longer parses reads as null, as in `evalsOf`. `judgedFrom` / `judgedTo` keep the tasks whose judge
+   * row was written in [from, to); `rated` the ones with a human row (the summary, #1877).
    */
-  evalsList(q: { workspaceId?: string; runner?: RunnerId; limit: number }): EvalsListRow[] {
+  evalsList(q: { workspaceId?: string; runner?: RunnerId; judgedFrom?: number; judgedTo?: number; rated?: boolean; limit: number }): EvalsListRow[] {
     const rows = this.sqlite
       .query(
         `SELECT t.id AS taskId, t.title AS title, t.runner AS runner, t.workspace_id AS workspaceId, t.status AS status, t.outcome AS outcome, t.updated_at AS updatedAt, t.effort AS effort,
                 (SELECT COALESCE(SUM(cost_usd), 0) FROM ledger WHERE task_id = t.id) AS costUsd,
-                r.json AS rulesJson, j.json AS judgeJson, h.json AS humanJson
+                r.json AS rulesJson, j.json AS judgeJson, j.ts AS judgeTs, h.json AS humanJson
          FROM tasks t
          LEFT JOIN task_evals r ON r.task_id = t.id AND r.source = 'rules'
          LEFT JOIN task_evals j ON j.task_id = t.id AND j.source = 'judge'
          LEFT JOIN task_evals h ON h.task_id = t.id AND h.source = 'human'
          WHERE (? IS NULL OR t.workspace_id = ?) AND (? IS NULL OR t.runner = ?)
+           AND (? IS NULL OR j.ts >= ?) AND (? IS NULL OR j.ts < ?) AND (? = 0 OR h.task_id IS NOT NULL)
          ORDER BY t.updated_at DESC LIMIT ?`,
       )
-      .all(q.workspaceId ?? null, q.workspaceId ?? null, q.runner ?? null, q.runner ?? null, q.limit) as Array<{ taskId: string; title: string; runner: RunnerId; workspaceId: string | null; status: TaskStatus; outcome: TaskOutcome; updatedAt: number; effort: string | null; costUsd: number; rulesJson: string | null; judgeJson: string | null; humanJson: string | null }>;
+      .all(q.workspaceId ?? null, q.workspaceId ?? null, q.runner ?? null, q.runner ?? null, q.judgedFrom ?? null, q.judgedFrom ?? null, q.judgedTo ?? null, q.judgedTo ?? null, q.rated ? 1 : 0, q.limit) as Array<{ taskId: string; title: string; runner: RunnerId; workspaceId: string | null; status: TaskStatus; outcome: TaskOutcome; updatedAt: number; effort: string | null; costUsd: number; rulesJson: string | null; judgeJson: string | null; judgeTs: number | null; humanJson: string | null }>;
     const parse = <T>(json: string | null, schema: { safeParse: (v: unknown) => { success: boolean; data?: T } }): T | null => {
       if (!json) return null;
       try {
@@ -1200,8 +1292,8 @@ export class Db {
       return {
         taskId: r.taskId, title: r.title, runner: r.runner, workspaceId: r.workspaceId, status: r.status, outcome: r.outcome, updatedAt: r.updatedAt, costUsd: r.costUsd,
         models: models.get(r.taskId) ?? [], effort: r.effort,
-        rules: rules ? { toolCalls: rules.metrics.toolCalls, toolFailures: rules.metrics.toolFailures, errors: rules.metrics.errors, userInstructions: rules.metrics.userInstructions, stops: rules.metrics.stops, lastEnd: rules.metrics.lastEnd } : null,
-        judge: judge && values.length ? { average: Math.round((values.reduce((a, b) => a + b, 0) / values.length) * 10) / 10, scores, rubric: judge.rubric, by: judge.by } : null,
+        rules: rules ? { toolCalls: rules.metrics.toolCalls, toolFailures: rules.metrics.toolFailures, errors: rules.metrics.errors, userInstructions: rules.metrics.userInstructions, stops: rules.metrics.stops, lastEnd: rules.metrics.lastEnd, daemonStops: rules.metrics.daemonStops, lastCutByDaemon: rules.metrics.lastCutByDaemon } : null,
+        judge: judge && values.length ? { average: Math.round((values.reduce((a, b) => a + b, 0) / values.length) * 10) / 10, scores, rubric: judge.rubric, by: judge.by, ts: r.judgeTs ?? 0 } : null,
         human: human ? { rating: human.rating, comment: human.comment } : null,
       };
     });

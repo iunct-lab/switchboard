@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, jest, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { BacklogRepositoryKey } from "@switchboard/protocol";
+import type { BacklogIssueData, BacklogRepositoryKey } from "@switchboard/protocol";
 import { BacklogError, type GhRunner } from "./backlog.ts";
 import { BacklogSync, HINT_BUDGET, importGithubSnapshot, noticeTargets } from "./backlog-sync.ts";
 import { scanAllRepos } from "./secretscan.ts";
@@ -927,15 +927,74 @@ test("after stop a send asks nothing of the database: one that ends after the da
 test("BacklogSync: the import is the read of the repository's forge (#920): a service ops.config.json names and none supports is the import's failure, said as it is, and GitHub is not asked", async () => {
   const dir = mkdtempSync(join(tmpdir(), "switchboard-forge-"));
   try {
-    writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ forge: { service: "gitlab" } }));
+    writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ forge: { service: "gitea" } }));
     const ws = db.upsertWorkspace({ id: "ws_lab", name: "lab", path: dir, kind: "repo" });
     const { gh, calls } = fakeGh({ changed: () => pageOf([raw(12)]), open: () => pageOf([]) });
     const sync = makeSync(db, gh, () => 1000);
-    await expect(sync.sync(ws)).rejects.toThrow("サービス gitlab には対応していません");
-    expect(sync.read(ws)).toMatchObject({ fetchedAt: null, error: "サービス gitlab には対応していません（対応: github）" });
+    await expect(sync.sync(ws)).rejects.toThrow("サービス gitea には対応していません");
+    expect(sync.read(ws)).toMatchObject({ fetchedAt: null, error: "サービス gitea には対応していません（対応: github, gitlab）" });
     expect(calls).toEqual([]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("BacklogSync: a GitLab project is imported through glab (#892): Issues, comments, labels, Milestone and parents are stored under its own key, and GitHub is not asked", async () => {
+  const home = mkdtempSync(join(tmpdir(), "switchboard-gitlab-"));
+  try {
+    const fx = JSON.parse(require("node:fs").readFileSync(join(import.meta.dir, "../../../ops-kit/fixtures/gitlab-issues.json"), "utf8"));
+    writeFileSync(join(home, "ops.config.json"), JSON.stringify({ forge: { service: "gitlab", host: "gitlab.example.com", project: "group/app" } }));
+    Bun.spawnSync(["git", "init", "-q", home]);
+    Bun.spawnSync(["git", "-C", home, "remote", "add", "origin", "git@gitlab.example.com:group/app.git"]);
+    const ws = db.upsertWorkspace({ id: "ws_lab", name: "lab", path: home, kind: "repo" });
+    let opened = fx.opened as Array<Record<string, unknown>>;
+    let closed = fx.closed as Array<Record<string, unknown>>;
+    const paths: string[] = [];
+    const glab = async (cmd: string[]) => {
+      expect(cmd.slice(0, 4)).toEqual(["glab", "api", "--hostname", "gitlab.example.com"]);
+      const p = cmd[cmd.length - 1]!;
+      paths.push(p.replace(/[?].*/, ""));
+      const notes = /issues\/(\d+)\/notes/.exec(p);
+      if (notes) return JSON.stringify(fx.notes[notes[1]!] ?? []);
+      if (/issues\/12$/.test(p)) throw new Error("glab: 404 Not Found (HTTP 404)");
+      return JSON.stringify(p.includes("state=opened") ? opened : p.includes("updated_after") ? [] : closed);
+    };
+    const { gh, calls } = fakeGh({ changed: () => pageOf([]), open: () => pageOf([]) });
+    const sync = makeSync(db, gh, () => 1000, undefined, false);
+    sync.glab = glab;
+    await sync.sync(ws);
+    const LAB = { service: "gitlab" as const, host: "gitlab.example.com", repository: "group/app" };
+    expect(db.getWorkspaceBacklogSource(ws.id)).toMatchObject({ ...LAB, project: { owner: "group/app", number: 0 } });
+    const issues = Object.fromEntries(db.listBacklogRecords(LAB, "issue").map((r) => [(r.remote as { number: number }).number, r.remote]));
+    expect(Object.keys(issues)).toEqual(["11", "12", "13"]);
+    expect(issues[12]).toMatchObject({ labels: ["type:pbi", "Ready"], milestone: "Phase 2", parent: null, subIssues: [13], state: "OPEN" });
+    expect(issues[13]).toMatchObject({ parent: 12, subIssues: [] });
+    expect(issues[11]).toMatchObject({ state: "CLOSED", stateReason: "COMPLETED" });
+    expect(db.listBacklogRecords(LAB, "comment").map((r) => [r.externalId, r.remote])).toEqual([["gitlab:note:501", { issue: 12, body: "## 回答\nA でよい", createdAt: "2026-10-02T00:00:00.000Z" }]]);
+    expect(db.getBacklogRepository(LAB)?.cursor).toBe("2026-10-03T00:00:00.000Z");
+    expect(calls).toEqual([]);
+    // the next import: #13 moved off #12 and #12 is gone (404); unchanged Issues' comments are not read again
+    opened = [{ ...(fx.opened[1] as object), description: "## 親 PBI\n- なし", updated_at: "2026-10-04T00:00:00.000Z" }];
+    closed = [];
+    paths.length = 0;
+    await sync.sync(ws);
+    expect(paths).toEqual(["projects/group%2Fapp/issues", "projects/group%2Fapp/issues", "projects/group%2Fapp/issues/12", "projects/group%2Fapp/issues/13/notes"]);
+    const rec = (n: 12 | 13) => db.listBacklogRecords(LAB, "issue").find((r) => r.externalId === `gitlab:issue:${{ 12: 9001, 13: 9002 }[n]}`)!;
+    expect(rec(12).fetchState).toBe("unavailable");
+    expect(rec(13).remote).toMatchObject({ parent: null });
+    expect(calls).toEqual([]);
+    // GitHub's wait is GitHub's host's: a GitLab import goes on through it
+    (sync as unknown as { limits: { failed: (h: string, r: unknown) => unknown } }).limits.failed(githubHost(), { status: 429, headers: { "retry-after": "3600" } });
+    // #12 reads again with the value it had (stored again as read), #13's body without the section keeps its parent
+    db.putBacklogSnapshot(LAB, { records: [{ objectKind: "issue", externalId: "gitlab:issue:9002", remote: { ...(rec(13).remote as BacklogIssueData), parent: 12 }, fetchState: "fetched" }], cursor: null, syncedAt: 2000 });
+    expect(rec(12).remote).not.toBeNull();
+    opened = [fx.opened[0], { ...(fx.opened[1] as object), description: "親の節なし", updated_at: "2026-10-05T00:00:00.000Z" }];
+    await sync.sync(ws);
+    expect(rec(12)).toMatchObject({ fetchState: "fetched", remote: { body: (fx.opened[0] as { description: string }).description, subIssues: [13] } });
+    expect(rec(13).remote).toMatchObject({ body: "親の節なし", parent: 12 });
+    expect(calls).toEqual([]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
 });
 

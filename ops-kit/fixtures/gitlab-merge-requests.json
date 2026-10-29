@@ -1,0 +1,107 @@
+{
+  "_comment": "The shape of GitLab's REST API v4 (merge_requests/:iid, /discussions), trimmed to the fields read; values are made up (#892).",
+  "mr": {
+    "id": 3001,
+    "iid": 7,
+    "state": "opened",
+    "draft": false,
+    "source_branch": "sb/13-share",
+    "target_branch": "main",
+    "sha": "1111111111111111111111111111111111111111",
+    "web_url": "https://gitlab.example.com/group/app/-/merge_requests/7",
+    "detailed_merge_status": "discussions_not_resolved",
+    "diff_refs": {
+      "base_sha": "2222222222222222222222222222222222222222",
+      "head_sha": "1111111111111111111111111111111111111111",
+      "start_sha": "2222222222222222222222222222222222222222"
+    }
+  },
+  "discussions": [
+    {
+      "id": "6a9c1750b37d513a43987b574953fceb50b03ce7",
+      "notes": [
+        {
+          "id": 801,
+          "body": "[codex] - [should-fix] `src/a.ts:3` — 境界の値",
+          "author": {
+            "username": "reviewer"
+          },
+          "resolvable": true,
+          "resolved": false,
+          "system": false,
+          "position": {
+            "new_path": "src/a.ts",
+            "new_line": 3,
+            "old_path": "src/a.ts",
+            "old_line": null
+          }
+        },
+        {
+          "id": 802,
+          "body": "修正: abc1234",
+          "author": {
+            "username": "author"
+          },
+          "resolvable": true,
+          "resolved": false,
+          "system": false,
+          "position": {
+            "new_path": "src/a.ts",
+            "new_line": 3,
+            "old_path": "src/a.ts",
+            "old_line": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "87805b7c09016a7058e91bdbe7b29d1f284a39e6",
+      "notes": [
+        {
+          "id": 803,
+          "body": "[codex] review\n\n### Verdict\nmergeable",
+          "author": {
+            "username": "reviewer"
+          },
+          "resolvable": false,
+          "resolved": false,
+          "system": false,
+          "position": null
+        }
+      ]
+    },
+    {
+      "id": "aa00aa00aa00aa00aa00aa00aa00aa00aa00aa00",
+      "notes": [
+        {
+          "id": 804,
+          "body": "added 1 commit",
+          "author": null,
+          "resolvable": false,
+          "system": true
+        }
+      ]
+    },
+    {
+      "id": "cc22cc22cc22cc22cc22cc22cc22cc22cc22cc22",
+      "notes": [
+        {
+          "id": 805,
+          "body": "[codex] - [nit] 消した行",
+          "author": {
+            "username": "reviewer"
+          },
+          "resolvable": true,
+          "resolved": false,
+          "system": false,
+          "position": {
+            "new_path": "src/b.ts",
+            "new_line": null,
+            "old_path": "src/b.ts",
+            "old_line": 9
+          }
+        }
+      ]
+    }
+  ]
+}

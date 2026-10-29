@@ -375,7 +375,7 @@ try {
   };
   const open307 = await waitsSay("待ち: PR #778（開いている） ← 不明・#30501（開いている） ← #305 PBI: 実装中の PBI の Task task_e2e305", "#307 waits");
   const links307 = await evaluate(`[...${waitsOf(307)}.children[0].querySelectorAll('a')].map(a => [a.textContent, a.href, a.target].join(' '))`) as string[];
-  assert(open307.includes("相手が閉じてファイルの重なりが解けたら") && open307.includes("次の定期実行で再開") && JSON.stringify(links307) === JSON.stringify(["PR #778 https://github.com/acme/app/pull/778 _blank", "#30501 https://github.com/acme/app/issues/30501 _blank", "#305 PBI: 実装中の PBI https://github.com/acme/app/issues/305 _blank"]), `#307 waits: ${open307} ${JSON.stringify(links307)}`);
+  assert(open307.includes("相手が閉じてファイルの重なりが解けたら") && open307.includes("待ちが解けたら再開") && JSON.stringify(links307) === JSON.stringify(["PR #778 https://github.com/acme/app/pull/778 _blank", "#30501 https://github.com/acme/app/issues/30501 _blank", "#305 PBI: 実装中の PBI https://github.com/acme/app/issues/305 _blank"]), `#307 waits: ${open307} ${JSON.stringify(links307)}`);
   await evaluate(`${waitsOf(307)}.querySelector('details').open = true`);
   const chain307 = await evaluate(`${waitsOf(307)}.querySelector('details').textContent`) as string;
   assert(chain307.includes("待ちの先（1）") && chain307.includes("#30501 の先: #305 が待つ PR #779（開いている）"), `chain: ${chain307}`);
@@ -427,7 +427,7 @@ try {
   await fetch(`${base}/api/schedules/${sweep.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: true }) });
   const done307 = await waitsSay("待ちが解けた: PR #778（完了）", "#307 waits closed");
   // a closed wait still names its PBI and Task (#1045), with no 続きを始める
-  assert(done307.includes("次の定期実行で再開") && done307.includes("PR #778（完了） ← #305 PBI: 実装中の PBI の Task") && !done307.includes("続きを始める") && (await evaluate(`${waitsOf(307)}.dataset.done`)) === "true", `done: ${done307}`);
+  assert(done307.includes("待ちが解けたら再開") && done307.includes("PR #778（完了） ← #305 PBI: 実装中の PBI の Task") && !done307.includes("続きを始める") && (await evaluate(`${waitsOf(307)}.dataset.done`)) === "true", `done: ${done307}`);
   const waits = { open307, chain: chain307.includes("#305 が待つ"), off: off307.includes("定期実行が無効"), unread: unread307.includes("未取得"), done307 };
   // (d) 状況を確認 on #307, its wait still recorded (#817: the button starts all the same) → its check Task's screen;
   // back on the backlog the row is 実行中 without the button
@@ -591,7 +591,7 @@ try {
   // #306, which goes on with pbi-complete's SKILL.md and leaves the merge procedure to the skill (#788; it names the merge gate's scope only, #1361)
   const scheduled = core.db.listTasks().find((t) => t.scheduleId && t.title.startsWith("#306 実装: ") && t.workspaceId === core.db.listWorkspaces().find((w) => w.kind === "meta")!.id);
   const scheduledPrompt = await until(() => prompts.findLast((p) => p.startsWith("PBI #306 は実装中のまま止まっています")), "the scheduled implementation's prompt");
-  assert(scheduled && scheduledPrompt.includes(".claude/skills/pbi-complete/SKILL.md") && !scheduledPrompt.includes("gh stack merge"), `scheduled: ${core.db.listTasks().filter((t) => t.scheduleId).map((t) => t.title).join(" / ")}`);
+  assert(scheduled && scheduledPrompt.includes(".claude/skills/pbi-complete/SKILL.md") && scheduledPrompt.includes("マージ判定（`scripts/merge-gate.ts`）が merge を返した PR のマージ") && !scheduledPrompt.includes("gh stack merge") && !scheduledPrompt.includes("--allow-large"), `scheduled: ${core.db.listTasks().filter((t) => t.scheduleId).map((t) => t.title).join(" / ")}`);
 
   // the slots per workspace (#561, #2656): on the 設定 screen (#839), the meta's implement 1 → 2, 保存, and a reload still shows 2
   const sweepOf = async () => ((await (await fetch(`${base}/api/workspaces`)).json()) as Array<{ id: string; sweep: unknown }>).find((w) => w.id === metaId)!.sweep;

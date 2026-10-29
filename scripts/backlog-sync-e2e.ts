@@ -142,7 +142,8 @@ const check = (name: string, ok: boolean, detail?: unknown) => {
 };
 async function boot(home: string, adapters: RunnerAdapter[] = []): Promise<{ core: CoreServer; base: string }> {
   const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
-  const core = await startServer(cfg, adapters, { port: 0, selfdevChecks: false, dryRunRestart: true, gh, backlogAutoImport: true });
+  // the meta workspace is this checkout, whose origin is not the fake gh's acme/app: no origin to check (#2799)
+  const core = await startServer(cfg, adapters, { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: () => null, gh, backlogAutoImport: true });
   return { core, base: `http://127.0.0.1:${core.server.port}` };
 }
 async function until<T>(f: () => T | Promise<T>, what: string, ms = 10_000): Promise<T> {

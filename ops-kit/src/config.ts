@@ -26,8 +26,26 @@ export const PublicSync = z
   .strict();
 export type PublicSync = z.infer<typeof PublicSync>;
 
-/** Where a repository lives (#920): read by `forgeOf` in `forge.ts`. Separate from a workspace's runner settings. */
-export const ForgeConfig = z.object({ service: z.string().min(1) }).strict();
+/**
+ * Where a repository lives (#920): read by `forgeOf` / `forgeTargetOf` in `forge.ts`. Separate from a workspace's runner
+ * settings. GitLab (#892) names its host and project (`group/name`, subgroups too): nothing finds them the way `gh`
+ * finds GitHub's. Any other service names neither (they are its implementation's to find).
+ */
+export const ForgeConfig = z
+  .object({
+    service: z.string().min(1),
+    host: z.string().regex(/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/i, "host は名前だけ（https:// やポート・パスを付けない）").optional(),
+    project: z.string().regex(/^[^/\s]+(\/[^/\s]+)+$/, "project は group/name").optional(),
+  })
+  .strict()
+  .superRefine((f, ctx) => {
+    const gitlab = f.service === "gitlab";
+    for (const k of ["host", "project"] as const) {
+      if (gitlab && !f[k]) ctx.addIssue({ code: "custom", path: [k], message: `gitlab には ${k} が要ります` });
+      if (!gitlab && f[k]) ctx.addIssue({ code: "custom", path: [k], message: `${f.service} では ${k} を書けません` });
+    }
+  });
+export type ForgeConfig = z.infer<typeof ForgeConfig>;
 
 /**
  * A repository's backlog settings (`ops.config.json`). The kit itself holds no value of any one repository: the

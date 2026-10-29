@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, truncateSync, utimesSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { AgentEvent, RunnerAdapter, RunnerDetection, RunnerId, RoutingStats, RunnerSession, StartOptions, Task } from "@switchboard/protocol";
+import type { AgentEvent, AskList, RunnerAdapter, RunnerDetection, RunnerId, RoutingStats, RunnerSession, StartOptions, Task } from "@switchboard/protocol";
 import { OpsLatency, OpsLoad, OpsStops } from "@switchboard/protocol";
 import { Database } from "bun:sqlite";
 import { isTempDir, loadConfig, teleportWorktreePath } from "./config.ts";
@@ -25,9 +25,10 @@ import { JUDGE_FALLBACK, JUDGE_TIMEOUT_MS, type judgeTurn } from "./judge.ts";
 import type { judgeRubric } from "./rubric-judge.ts";
 import { FALLBACK_DELAY_MS, fmtTime, MAX_CONSECUTIVE_STOPS, MAX_FALLBACK_DELAY_MS, RateLimitResumer, RESUME_PROMPT } from "./ratelimit.ts";
 import { QUOTA_LIMIT } from "./backlog.ts";
-import { AUTO_RESUME_HEAD } from "./evals.ts";
+import { AUTO_RESUME_HEAD, weekStartUtc } from "./evals.ts";
 import { MAX_STOP_RESUMES } from "./interrupted.ts";
 import { StopReport } from "./stops.ts";
+import { deployApprovedText, SSO_REST_TEXT, SSO_RESUME_TEXT } from "./approval-batch.ts";
 import { makePrivateTmp, privateTmpOf, sweepPrivateTmps, TaskManager, taskAllowRules } from "./tasks.ts";
 import { Scheduler } from "./scheduler.ts";
 
@@ -325,6 +326,41 @@ describe("core daemon", () => {
     }
   });
 
+  test("inbox: an edited draft keeps its edit across a restart and is promoted with the edited body; promoted, closed and empty are refused (#3032)", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-test-inbox-edit-"));
+    const cfg = loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_KNOWLEDGE: join(h, "knowledge"), SWITCHBOARD_PORT: "0", ...NO_HISTORY });
+    const starts: StartOptions[] = [];
+    let c = await startServer(cfg, [fakeAdapter(SCRIPT, { starts })], { port: 0, selfdevChecks: false, gh: NO_GH });
+    const base = () => `http://127.0.0.1:${c.server.port}`;
+    const post = (path: string, body: unknown) => fetch(`${base()}${path}`, { method: "POST", body: JSON.stringify(body) });
+    try {
+      const draft = (await (await post("/api/inbox", { text: "one\ntwo", title: "draft", workspaceHint: "w" })).json()) as { path: string; created: string };
+      const r = await post("/api/inbox/edit", { path: draft.path, title: "edited", text: "line 1\nline 2\nline 3\nline 4\nline 5" });
+      expect(r.status).toBe(200);
+      expect(await r.json()).toMatchObject({ path: draft.path, title: "edited", body: "line 1\nline 2\nline 3\nline 4\nline 5" });
+      expect((await post("/api/inbox/edit", { path: draft.path, title: "x", text: "  " })).status).toBe(400);
+      expect((await post("/api/inbox/edit", { path: draft.path, text: "x".repeat(200_001) })).status).toBe(413);
+      expect((await post("/api/inbox/edit", { path: "notes/missing.md", text: "x" })).status).toBe(404);
+      await c.stop();
+      c = await startServer(cfg, [fakeAdapter(SCRIPT, { starts })], { port: 0, selfdevChecks: false, gh: NO_GH });
+      const listed = (await (await fetch(`${base()}/api/inbox`)).json()) as Array<{ path: string; title: string; body: string; workspaceHint?: string; created: string }>;
+      expect(listed).toEqual([expect.objectContaining({ path: draft.path, title: "edited", body: "line 1\nline 2\nline 3\nline 4\nline 5", workspaceHint: "w", created: draft.created })]);
+      const ws = c.db.listWorkspaces().find((w) => w.kind === "meta") ?? c.db.upsertWorkspace({ name: "w", path: h, kind: "repo" });
+      const p = await post("/api/inbox/promote", { path: draft.path, workspaceId: ws.id, runner: "claude" });
+      expect(p.status).toBe(201);
+      expect(((await p.json()) as { task: { title: string } }).task.title).toBe("edited");
+      for (let i = 0; i < 50 && starts.length === 0; i++) await Bun.sleep(20);
+      expect(starts.at(-1)?.prompt).toBe("line 1\nline 2\nline 3\nline 4\nline 5");
+      expect((await post("/api/inbox/edit", { path: draft.path, text: "after promotion" })).status).toBe(409);
+      const other = (await (await post("/api/inbox", { text: "close me" })).json()) as { path: string };
+      await post("/api/inbox/close", { path: other.path });
+      expect((await post("/api/inbox/edit", { path: other.path, text: "after close" })).status).toBe(409);
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
   test("health reports a failed daily archive from archive.status, and null without one (#1201)", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-archive-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
@@ -543,6 +579,7 @@ describe("core daemon", () => {
       const seqs = (d: { events: Array<{ seq: number }> }) => d.events.map((e) => e.seq);
 
       const tail = await get();
+      expect({ createdIssues: tail.createdIssues, deferred: tail.deferred }).toEqual({ createdIssues: [], deferred: false }); // #1878: counted from the events, none here
       expect(seqs(tail)).toEqual(all.slice(-200).map((e) => e.seq));
       expect((await get("?limit=50")).events).toHaveLength(50);
       const meta = await get("?limit=0");
@@ -3620,7 +3657,7 @@ describe("task evals (#1218)", () => {
       const first = await evals(t.id);
       expect(first.judge).toBeNull();
       expect(first.human).toBeNull();
-      expect(first.rules).toMatchObject({ status: "done", by: "rules@1", metrics: { turns: 1, toolCalls: 1, toolFailures: 0, asks: 1, denials: 0, userInstructions: 0, lastEnd: "ok" } });
+      expect(first.rules).toMatchObject({ status: "done", by: "rules@2", metrics: { turns: 1, toolCalls: 1, toolFailures: 0, asks: 1, denials: 0, userInstructions: 0, lastEnd: "ok" } });
       expect(first.rules.costUsd).toBeGreaterThan(0);
       // a second turn: the person's follow-up counts as one instruction; still one row
       await post(`${b}/api/tasks/${t.id}/send`, { text: "続けて" });
@@ -3635,6 +3672,13 @@ describe("task evals (#1218)", () => {
       expect(rows(t.id)).toBe(0);
       expect((await evals(t.id)).rules.metrics.turns).toBe(2);
       expect(rows(t.id)).toBe(1);
+      // a row of the old counter (rules@1, no daemonStops, #2089) does not parse: it is counted again when read and replaced
+      const { daemonStops: _d, lastCutByDaemon: _l, ...oldMetrics } = (await evals(t.id)).rules.metrics;
+      c.db.upsertEval({ taskId: t.id, source: "rules", by: "rules@1", rubric: null, json: { metrics: oldMetrics, status: "done", outcome: "unknown", costUsd: 0, by: "rules@1", ts: 1 }, ts: 1 });
+      const recounted = (await evals(t.id)).rules;
+      expect(recounted.by).toBe("rules@2");
+      expect(recounted.metrics).toMatchObject({ daemonStops: 0, lastCutByDaemon: false });
+      expect(c.db.getEval(t.id, "rules")?.by).toBe("rules@2");
       // (c) the task's status / outcome / cost of the moment, not the snapshot the turn's end stored (the person or the judge sets the outcome afterwards)
       await post(`${b}/api/tasks/${t.id}/outcome`, { outcome: "done" });
       expect((await evals(t.id)).rules).toMatchObject({ status: "done", outcome: "done" });
@@ -3643,6 +3687,31 @@ describe("task evals (#1218)", () => {
       expect((await fetch(`${b}/api/tasks/nope/evals`)).status).toBe(404);
     } finally {
       await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("a turn cut by a daemon that died (no shutdown) is counted again at the next start: the saved row gets the stop (#2089)", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-evals-orphan-"));
+    const c = await daemon(h);
+    const b = `http://127.0.0.1:${c.server.port}`;
+    let c2: Awaited<ReturnType<typeof daemon>> | undefined;
+    try {
+      const t = await post(`${b}/api/tasks`, { cwd: h, title: "evals", prompt: "依頼文", runner: "claude" });
+      await waitFor(async () => (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task.status === "waiting");
+      await post(`${b}/api/tasks/${t.id}/permission`, { id: "perm1", decision: "allow" });
+      await waitFor(async () => (c.db.getEval(t.id, "rules")?.json as { metrics?: { lastEnd: string } } | undefined)?.metrics?.lastEnd === "ok");
+      await c.stop();
+      // the next turn was in flight when the process was killed (no shutdown): the row on disk is the one the last turn's end saved
+      const db = new Db(join(h, "switchboard.db"));
+      db.appendEvent(t.id, { t: "message.delta", role: "user", text: "続けて" });
+      db.updateTask(t.id, { status: "running" });
+      db.close();
+      c2 = await daemon(h);
+      const rules = (await fetch(`http://127.0.0.1:${c2.server.port}/api/tasks/${t.id}/evals`).then(j)).rules;
+      expect(rules.metrics).toMatchObject({ daemonStops: 1, lastCutByDaemon: true, lastEnd: "aborted" });
+    } finally {
+      await c2?.stop();
       rmSync(h, { recursive: true, force: true });
     }
   });
@@ -3927,6 +3996,48 @@ describe("evals list (#1221)", () => {
       expect((await fetch(`${b}/api/tasks/mixed/evals`).then(j)).models).toEqual(["claude-opus-5-5", "claude-sonnet-5-5"]);
       expect((await fetch(`${b}/api/tasks/single/evals`).then(j)).models).toEqual(["claude-opus-5-5"]);
       expect((await fetch(`${b}/api/tasks/none/evals`).then(j)).models).toEqual([]);
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+  test("GET /api/evals/summary: this week's sample from the tasks judged the week before only, and the human − judge gap over the rated ones (#1877)", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-evals-summary-"));
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(script, { lingers: true })], { port: 0, selfdevChecks: false, gh: NO_GH });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    try {
+      const now = Date.now();
+      const week = weekStartUtc(now);
+      const task = (id: string, workspaceId: string | null = null) => c.db.insertTask({ id, workspaceId, title: id, runner: "claude", cwd: h, scope: [h], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
+      const judge = (id: string, score: number, ts: number) => c.db.upsertEval({ taskId: id, source: "judge", by: "x", rubric: "r@1", json: { scores: { goal: { score, reason: "" } }, summary: "", rubric: "r@1", by: "x", ts }, ts });
+      const rate = (id: string, rating: number) => c.db.upsertEval({ taskId: id, source: "human", by: "user", rubric: null, json: { rating, comment: "", by: "user", ts: now }, ts: now });
+      task("last1"); judge("last1", 2, week - 1);
+      task("last2"); judge("last2", 4, week - 6 * 86_400_000);
+      task("thisweek"); judge("thisweek", 3, week); // judged this week: next week's candidate
+      task("older"); judge("older", 3, week - 7 * 86_400_000 - 1); // two weeks ago
+      task("other", "w2"); judge("other", 5, week - 1);
+      rate("last1", 1); // 1 − 2
+      rate("older", 5); // 5 − 3
+      task("rated-only"); rate("rated-only", 3); // no judge: not in the gap
+      const sum = (qs = "") => fetch(`${b}/api/evals/summary${qs}`).then(j) as Promise<Record<string, any>>;
+      const all = await sum();
+      expect(all.weekStart).toBe(week);
+      expect(all.sample.map((r: Record<string, any>) => r.taskId)).toEqual(["last1", "last2", "other"]);
+      expect(all.sample[0]).toMatchObject({ judge: { average: 2, ts: week - 1 }, human: { rating: 1 } });
+      expect(all.gap).toEqual({ count: 2, mean: 0.5 });
+      const w2 = await sum("?workspaceId=w2");
+      expect(w2.sample.map((r: Record<string, any>) => r.taskId)).toEqual(["other"]);
+      expect(w2.gap).toEqual({ count: 0, mean: null });
+      // the gap counts every rated task: 500 newer rated tasks without a judge do not push the judged ones out
+      c.db.sqlite.transaction(() => {
+        for (let i = 0; i < 500; i++) {
+          const id = `rated-${i}`;
+          task(id);
+          c.db.sqlite.query("UPDATE tasks SET updated_at = ? WHERE id = ?").run(now + 1000 + i, id);
+          rate(id, 3);
+        }
+      })();
+      expect((await sum()).gap).toEqual({ count: 2, mean: 0.5 });
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
@@ -4716,6 +4827,128 @@ describe("artifact fence (#1778)", () => {
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("approval batches (#2046)", () => {
+  const post = (b: string, path: string, body: object) => fetch(`${b}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  /** A daemon whose fake runner ends each turn after `slowMs`; `n` Tasks, each done after its first turn. */
+  const boot = async (n: number) => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-batch-"));
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT.filter((e) => e.t !== "permission.ask"), { lingers: true, slowMs: 150 })], { port: 0, gh: NO_GH });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    const ts: Task[] = [];
+    for (let i = 0; i < n; i++) {
+      ts.push(c.tasks.create({ cwd: h, title: `task ${i}`, prompt: "p", runner: "claude" }));
+      await Bun.sleep(2); // distinct createdAt: the oldest Task goes first
+    }
+    await waitFor(async () => ts.every((t) => c.db.getTask(t.id)!.status === "done"));
+    const said = (t: Task) => c.db.listEvents(t.id, 0).flatMap((e) => (e.ev.t === "message.delta" && e.ev.role === "user" ? [e.ev.text] : []));
+    const batches = async () => ((await fetch(`${b}/api/asks`).then(j)) as AskList).batches;
+    return { h, c, b, ts, said, batches };
+  };
+  const report = (over: object) => StopReport.parse({ id: "x", op: "aws sso login", target: "", reason: "auth", safety: "before-effect", evidence: "token expired", state: "waiting", actions: [], ...over });
+
+  test("sso batch resumes one then the rest", async () => {
+    const x = await boot(3);
+    const [a, b2, other] = x.ts as [Task, Task, Task];
+    try {
+      x.c.tasks.recordStop(a.id, report({ id: "sso" }));
+      x.c.tasks.recordStop(b2.id, report({ id: "sso" }));
+      x.c.tasks.recordStop(other.id, report({ id: "merge", op: "gh pr merge", target: "PR #1", reason: "decision" }));
+      expect((await x.batches()).map((y) => [y.id, y.asks.map((q) => q.taskId)])).toEqual([["batch:sso", [a.id, b2.id]]]);
+      // only allow, never a policy
+      expect((await post(x.b, "/api/asks/answer", { id: "batch:sso", answer: { kind: "text", text: "ok" } })).status).toBe(400);
+
+      // 1. the oldest Task is sent on; it stops on the login again → the rest wait, both are in the batch again
+      let r = await post(x.b, "/api/asks/answer", { id: "batch:sso", answer: { kind: "allow" } }).then(j);
+      expect(r).toMatchObject({ sent: [a.id], already: false, batch: { loggingIn: { taskId: a.id, title: "task 0" }, asks: [{ taskId: b2.id }] } });
+      expect(x.said(a)).toContain(SSO_RESUME_TEXT);
+      // a second press while it logs in sends nothing
+      expect(await post(x.b, "/api/asks/answer", { id: "batch:sso", answer: { kind: "allow" } }).then(j)).toMatchObject({ sent: [], already: true });
+      // the same stop reported again (its id kept, what it says moved on) is a login stop since the send too
+      x.c.tasks.recordStop(a.id, report({ id: "sso", evidence: "still expired" }));
+      await waitFor(async () => x.c.db.getTask(a.id)!.status === "done" && (await x.batches())[0]?.loggingIn === null);
+      expect(x.said(b2)).not.toContain(SSO_REST_TEXT);
+      expect((await x.batches())[0]!.asks.map((q) => q.taskId)).toEqual([a.id, b2.id]);
+
+      // 2. pressed again: it goes on with no login stop → the rest are sent on, the other Task is not
+      r = await post(x.b, "/api/asks/answer", { id: "batch:sso", answer: { kind: "allow" } }).then(j);
+      expect(r.sent).toEqual([a.id]);
+      await waitFor(async () => x.said(b2).includes(SSO_REST_TEXT));
+      expect(x.said(other)).not.toContain(SSO_REST_TEXT);
+      await waitFor(async () => (await x.batches()).length === 0);
+      expect((await post(x.b, "/api/asks/answer", { id: "batch:sso", answer: { kind: "allow" } })).status).toBe(409);
+    } finally {
+      await x.c.stop();
+      rmSync(x.h, { recursive: true, force: true });
+    }
+  });
+
+  test("approval window through the daemon: a fired approval-window schedule is one notice of the batch in 判断待ち until none waits (#2054, #2866)", async () => {
+    const x = await boot(2);
+    const [a, b2] = x.ts as [Task, Task];
+    try {
+      x.c.tasks.recordStop(a.id, report({ id: "sso" }));
+      x.c.tasks.recordStop(b2.id, report({ id: "p", op: "sam deploy", target: "stack", reason: "permission" }));
+      const meta = x.c.db.listWorkspaces().find((w) => w.kind === "meta")!;
+      const notices = async () => ((await fetch(`${x.b}/api/asks`).then(j)) as { asks: Array<{ kind: string; state: string; question: string; reason: string; answers: string[] }> }).asks.filter((n) => n.kind === "notice" && n.question.startsWith("SSO・配備の承認待ち"));
+      const s = await post(x.b, "/api/schedules", { title: "承認待ち", cron: "0 0 * * *", workspaceId: meta.id, runner: "claude", action: "approval-window" }).then(j);
+      // not fired yet: no notice
+      expect(await notices()).toEqual([]);
+      const run = await post(x.b, `/api/schedules/${s.id}/run`, {});
+      expect(run.status).toBe(202);
+      await waitFor(async () => (await notices()).length === 1);
+      expect((await notices())[0]).toMatchObject({ state: "open", question: "SSO・配備の承認待ち: 2", reason: "SSO のログイン待ち（1 件）\n- task 0 — aws sso login\n\n配備の承認待ち（1 件）\n- task 1 — sam deploy", answers: [] });
+      expect(x.c.db.getSchedule(s.id)!.lastResult?.lines).toEqual(["SSO・配備の承認待ち: 2"]);
+      expect(await fetch(`${x.b}/api/inbox`).then(j)).toEqual([]);
+      // disabled: no reminder while it is off (resolved); enabled again, it is back
+      const patch = (enabled: boolean) => fetch(`${x.b}/api/schedules/${s.id}`, { method: "PATCH", body: JSON.stringify({ enabled }) });
+      expect((await patch(false)).status).toBe(200);
+      expect((await notices()).map((n) => n.state)).toEqual(["resolved"]);
+      expect((await patch(true)).status).toBe(200);
+      expect((await notices()).map((n) => n.state)).toEqual(["open"]);
+      // both answered: resolved with no answer, no firing needed
+      await x.c.tasks.send(a.id, "ok");
+      await x.c.tasks.send(b2.id, "ok");
+      await waitFor(async () => (await x.batches()).length === 0);
+      expect((await notices()).map((n) => n.state)).toEqual(["resolved"]);
+    } finally {
+      await x.c.stop();
+      rmSync(x.h, { recursive: true, force: true });
+    }
+  });
+
+  test("deploy batch approves selected tasks", async () => {
+    const x = await boot(3);
+    const [a, b2, c2] = x.ts as [Task, Task, Task];
+    try {
+      x.c.tasks.recordStop(a.id, report({ id: "p", op: "POST /api/daemon/promote", target: "main", reason: "permission" }));
+      x.c.tasks.recordStop(b2.id, report({ id: "p", op: "sam deploy", target: "stack", reason: "permission" }));
+      x.c.tasks.recordStop(c2.id, report({ id: "p", op: "aws cloudformation deploy", target: "stack", reason: "permission" }));
+      expect((await x.batches()).map((y) => [y.id, y.asks.length])).toEqual([["batch:deploy", 3]]);
+      // none chosen, or one not in the batch → 400 and nothing sent
+      expect((await post(x.b, "/api/asks/answer", { id: "batch:deploy", answer: { kind: "allow" } })).status).toBe(400);
+      expect((await post(x.b, "/api/asks/answer", { id: "batch:deploy", answer: { kind: "allow" }, taskIds: [a.id, "tk_nope"] })).status).toBe(400);
+      expect((await post(x.b, "/api/asks/answer", { id: "batch:deploy", answer: { kind: "allow" }, taskIds: [a.id], policy: { scope: "once", target: "x", when: [], expiresAt: null } })).status).toBe(400);
+      expect(x.said(a).some((t) => t.includes("承認しました"))).toBe(false);
+
+      // two presses at once: each Task is sent once, the second finds them gone from the batch
+      const [r, again] = await Promise.all([
+        post(x.b, "/api/asks/answer", { id: "batch:deploy", answer: { kind: "allow" }, taskIds: [a.id, c2.id, a.id] }).then(j),
+        post(x.b, "/api/asks/answer", { id: "batch:deploy", answer: { kind: "allow" }, taskIds: [c2.id] }),
+      ]);
+      expect(r.sent).toEqual([a.id, c2.id]);
+      expect(again.status).toBe(400);
+      expect(x.said(a).filter((t) => t === deployApprovedText("POST /api/daemon/promote"))).toHaveLength(1);
+      expect(x.said(c2).filter((t) => t === deployApprovedText("aws cloudformation deploy"))).toHaveLength(1);
+      // the one not chosen still waits
+      expect(x.said(b2).some((t) => t.includes("承認しました"))).toBe(false);
+      expect(r.batch.asks.map((q: { taskId: string }) => q.taskId)).toEqual([b2.id]);
+    } finally {
+      await x.c.stop();
+      rmSync(x.h, { recursive: true, force: true });
     }
   });
 });

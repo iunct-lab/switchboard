@@ -212,6 +212,14 @@ export function App() {
   }, [passkeyUrl]);
 
   const openTask = useCallback((id: string) => setView({ name: "task", id }), []);
+  // 評価をお願い (#1877): the Task with its Brief open at 自分の評価. The mark is read by the view effect below, which
+  // otherwise closes the Brief on every view change.
+  const [briefFocus, setBriefFocus] = useState<"human" | null>(null);
+  const rateMark = useRef(false);
+  const rateTask = useCallback((id: string) => {
+    rateMark.current = true;
+    setView({ name: "task", id });
+  }, []);
   // The Local Task "ローカルで続ける" just switched to (#1634): its head says so until another screen opens. Memory only.
   const [switchedTo, setSwitchedTo] = useState<string | null>(null);
   useEffect(() => {
@@ -296,7 +304,9 @@ export function App() {
 
   useEffect(() => {
     setRailListOpen(false); // a task picked from the phone's list replaces the list (#359)
-    setBriefOpen(false); // and another task does not open with the last one's Brief over it (#369)
+    setBriefOpen(rateMark.current); // and another task does not open with the last one's Brief over it (#369), unless 評価をお願い opened it
+    setBriefFocus(rateMark.current ? "human" : null);
+    rateMark.current = false;
   }, [view]);
 
   useEffect(() => {
@@ -521,13 +531,13 @@ export function App() {
               onArchive={(archived) => archiveTask(currentTask.id, archived)}
               onLoadOlder={() => loadOlder(currentTask.id)}
             />
-            <Brief open={briefOpen} onClose={() => setBriefOpen(false)} task={currentTask} detail={current} ledger={ledger} onAbort={() => api.abort(currentTask.id).catch((e) => setError(e.message))} checksRev={checksRev} evalsRev={evalsRev[currentTask.id] ?? 0} onImprove={improveFromEvals} onRestarting={() => setRestarting(true)} runners={health?.runners} noTerminal={health?.features?.pty === false} onTask={upsertTask} tasks={tasks} onOpenTask={openTask} workspaces={workspaces} />
+            <Brief open={briefOpen} onClose={() => setBriefOpen(false)} focus={briefFocus ?? undefined} onFocused={() => setBriefFocus(null)} task={currentTask} detail={current} ledger={ledger} onAbort={() => api.abort(currentTask.id).catch((e) => setError(e.message))} checksRev={checksRev} evalsRev={evalsRev[currentTask.id] ?? 0} onImprove={improveFromEvals} onRestarting={() => setRestarting(true)} runners={health?.runners} noTerminal={health?.features?.pty === false} onTask={upsertTask} tasks={tasks} onOpenTask={openTask} workspaces={workspaces} />
           </>
         )}
         {view.name === "task" && !currentTask && <main className="main">読み込み中…</main>}
         {view.name === "knowledge" && <Knowledge refreshKey={knowledgeRev} workspaces={workspaces} onError={setError} />}
         {view.name === "ledger" && <Ledger ledger={ledger} runners={health?.runners ?? []} onOpenTask={openTask} onOpenInsights={() => setView({ name: "evals" })} onError={setError} />}
-        {view.name === "evals" && <Evals workspaces={workspaces} runners={health?.runners} onOpenTask={openTask} onError={setError} rev={evalsAnyRev} onImprove={improveFromEvals} openReport={view.report} scope={view.artifacts ? "all" : "reports"} onScope={(s) => setView({ name: "evals", artifacts: s === "all" })} onOpenArtifact={(taskId, artifactId) => setView({ name: "task", id: taskId, artifact: artifactId })} />}
+        {view.name === "evals" && <Evals workspaces={workspaces} runners={health?.runners} onOpenTask={openTask} onRateTask={rateTask} onError={setError} rev={evalsAnyRev} onImprove={improveFromEvals} openReport={view.report} scope={view.artifacts ? "all" : "reports"} onScope={(s) => setView({ name: "evals", artifacts: s === "all" })} onOpenArtifact={(taskId, artifactId) => setView({ name: "task", id: taskId, artifact: artifactId })} />}
         {view.name === "backlog" && <Backlog onFeedback={openFeedback} onError={setError} onStarted={(task) => { upsertTask(task); openTask(task.id); }} onOpenTask={openTask} onOpenSchedules={() => setView({ name: "schedules" })} />}
         {view.name === "approvals" && (
           <Approvals

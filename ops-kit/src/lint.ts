@@ -179,6 +179,10 @@ export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: b
     if (sp === null) bad(n, `Project の Story Points が未設定（set ${n} "Story Points" ${bodySp ?? "N"}）`);
     else if (!isPoint(sp)) bad(n, `Project の Story Points が ${points} 以外（${sp}）`);
     else if (bodySp !== null && sp !== bodySp) bad(n, `Story Points が本文（${bodySp}）と Project（${sp}）で違う`);
+    const priority = value("Priority")?.name;
+    const priorities = cfg.fields.priority.join(" / ");
+    if (!priority) bad(n, `Project の Priority が未設定（backlog set ${n} Priority <${priorities}>）`);
+    else if (!cfg.fields.priority.includes(priority)) bad(n, `Project の Priority が ${priorities} 以外（${priority}）`);
     const status = value("Status")?.name;
     if ((status === "Ready" || status === "In progress") && row.subIssues.totalCount === 0) bad(n, `Status=${status} なのに Task（sub-issue）が無い`);
   }

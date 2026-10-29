@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Artifact, Ask, AskAnswer, AskChanged, AskList, PendingApproval, PolicyInput } from "@switchboard/protocol";
+import type { Artifact, Ask, AskAnswer, AskBatch, AskChanged, AskList, PendingApproval, PolicyInput } from "@switchboard/protocol";
 import { api } from "../api.ts";
 import { ArtifactBody } from "./Artifacts.tsx";
+import { DeviceAuth } from "./DeviceAuth.tsx";
 import { summarize } from "../approvals.ts";
-import { answerButtons, answerTarget, withoutGrant, appliedLine, askFacts, blockerLines, groupAsks, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, resumeLabel, scopeLabel, STATE_LABEL, workspaceChips, workspaceKey, workspaceSections, type Answered, type PolicyForm } from "../asks.ts";
+import { answerButtons, answerTarget, withoutGrant, appliedLine, askFacts, BATCH_LABEL, batchLines, blockerLines, groupAsks, hiddenByBatches, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, resumeLabel, scopeLabel, STATE_LABEL, unblocksLine, workspaceChips, workspaceKey, workspaceSections, type Answered, type PolicyForm } from "../asks.ts";
 
 /**
  * A card's answers (#936): what an answer does not take away, then one button per answer with what it sends and where,
@@ -73,22 +74,25 @@ export function AnswerArea(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAn
               <button className={b.primary ? "pri" : undefined} disabled={busy} onClick={() => answer(b.answer)}>
                 {b.label}
               </button>
-              <div className="hint ask-send">
-                送る:{" "}
-                {b.grant === b.send ? (
-                  <span className="ask-grant">{b.grant}</span>
-                ) : b.grant ? (
-                  <>
-                    {withoutGrant(b.send)}
-                    <br />
-                    <span className="ask-grant">許可: {b.grant}</span>
-                  </>
-                ) : (
-                  b.send
-                )}{" "}
-                → {b.target}、続き: {b.next}
-                {policy && b.answer.kind !== "hold" && b.answer.kind !== "deny" && b.answer.kind !== "confirm" ? `、＋ 方針を保存（${scopeLabel(form!.scope, x)}）` : ""}
-              </div>
+              {/* closing a notice (#2866) sends nothing anywhere */}
+              {b.answer.kind !== "dismiss" && (
+                <div className="hint ask-send">
+                  送る:{" "}
+                  {b.grant === b.send ? (
+                    <span className="ask-grant">{b.grant}</span>
+                  ) : b.grant ? (
+                    <>
+                      {withoutGrant(b.send)}
+                      <br />
+                      <span className="ask-grant">許可: {b.grant}</span>
+                    </>
+                  ) : (
+                    b.send
+                  )}{" "}
+                  → {b.target}、続き: {b.next}
+                  {policy && b.answer.kind !== "hold" && b.answer.kind !== "deny" && b.answer.kind !== "confirm" ? `、＋ 方針を保存（${scopeLabel(form!.scope, x)}）` : ""}
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -143,6 +147,13 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
   // on open, and when an approval comes or goes (the live list moves first; the rest is read again with it)
   const approvalKeys = props.approvals.map((a) => `${a.taskId}/${a.id}`).join(" ");
   useEffect(load, [load, approvalKeys]);
+  // while a Task logs in for an SSO batch (#2046): its device code, and the rest going on after it, are read again
+  const loggingIn = list?.batches.some((b) => b.loggingIn) ?? false;
+  useEffect(() => {
+    if (!loggingIn) return;
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }, [loggingIn, load]);
 
   const answer = (a: PendingApproval, decision: "allow" | "deny") => {
     setBusy(`${a.taskId}/${a.id}`);
@@ -206,7 +217,9 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
   // a Workspace that left the list is no filter (all again)
   const narrowed = workspace !== null && chips.some((c) => c.key === workspace) ? workspace : null;
   const inScope = (a: Ask) => narrowed === null || workspaceKey(a) === narrowed;
-  const groups = groupAsks(all.filter(inScope));
+  const batches = list?.batches ?? [];
+  // a batch's questions are answered on its card (#2046)
+  const groups = groupAsks(hiddenByBatches(all, batches).filter(inScope));
   // the live approvals not in the list yet have no Workspace: shown (and counted) whatever the filter
   const open = (list ? list.asks.filter((a) => inScope(a) && (a.state === "open" || a.state === "held") && a.needs === "person").length : 0) + unlisted.length;
 
@@ -242,6 +255,9 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
           </div>
         ))}
       </section>
+      {batches.map((b) => (
+        <BatchCard key={b.id} batch={b} onOpenTask={props.onOpenTask} onError={props.onError} onDone={load} />
+      ))}
       {unlisted.map((a) => (
         <section key={askId(a)} className="card ask approval" data-ask={askId(a)}>
           <div className="ask-tags">
@@ -274,7 +290,17 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
                     <div className="ask-tags">
                       <span className={`badge ask-kind ask-kind-${x.kind}`}>{KIND_LABEL[x.kind]}</span>
                       <span className={`badge ask-state ask-state-${x.state}`}>{STATE_LABEL[x.state]}</span>
+                      {unblocksLine(x) && <span className="badge ask-unblocks">{unblocksLine(x)}</span>}
                     </div>
+                    {x.unblocks.length > 0 && (
+                      <div className="hint ask-unblocks-list">
+                        {x.unblocks.map((u) => (
+                          <a key={u.number} href={u.url} target="_blank" rel="noreferrer">
+                            #{u.number} {u.title}
+                          </a>
+                        ))}
+                      </div>
+                    )}
                     {a && approvalHead(a, !x.answers.length)}
                     {was?.changes && (
                       <div className={`hint ${was.changed ? "warn " : ""}ask-changes`}>
@@ -352,6 +378,60 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
         </section>
       ))}
     </main>
+  );
+}
+
+/**
+ * The Tasks stopped on the same wait, across Workspaces (#2046): sso = one 「ログインする」 sends the oldest Task on to log
+ * in (its device code shows here), the rest go on after it; deploy = the chosen Tasks (all at first) get the approval.
+ */
+export function BatchCard(props: { batch: AskBatch; onOpenTask: (id: string) => void; onError: (m: string) => void; onDone: () => void }) {
+  const { batch: b } = props;
+  const [off, setOff] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const chosen = b.asks.map((a) => a.taskId).filter((id) => !off.has(id));
+  const press = () => {
+    setBusy(true);
+    api
+      .answerBatch(b.id, b.kind === "deploy" ? chosen : undefined)
+      .catch((e) => props.onError(`${BATCH_LABEL[b.kind]}に答えられませんでした: ${String(e.message ?? e)}`))
+      // read again either way: a failure part way leaves the Tasks already sent out of the batch
+      .finally(() => {
+        setBusy(false);
+        props.onDone();
+      });
+  };
+  return (
+    <section className="card ask ask-batch" data-batch={b.id}>
+      <h5>
+        {BATCH_LABEL[b.kind]} <span className="hint">{b.asks.length + (b.loggingIn ? 1 : 0)}</span>
+      </h5>
+      {b.loggingIn && (
+        <div className="ask-batch-login">
+          <div className="hint">
+            ログイン中: <button className="ghost link" onClick={() => props.onOpenTask(b.loggingIn!.taskId)}>{b.loggingIn.title}</button>
+          </div>
+          <DeviceAuth auth={b.deviceAuth} onError={props.onError} />
+        </div>
+      )}
+      <ul className="ask-batch-tasks">
+        {batchLines(b).map((l) => (
+          <li key={l.taskId} data-task={l.taskId}>
+            {b.kind === "deploy" && (
+              <input type="checkbox" checked={!off.has(l.taskId)} disabled={busy} onChange={(e) => setOff((s) => { const n = new Set(s); if (e.target.checked) n.delete(l.taskId); else n.add(l.taskId); return n; })} />
+            )}{" "}
+            <button className="ghost link" onClick={() => props.onOpenTask(l.taskId)}>{l.text}</button>
+          </li>
+        ))}
+      </ul>
+      <div className="approval-actions">
+        {b.kind === "sso" ? (
+          <button className="pri" disabled={busy || b.loggingIn !== null || b.asks.length === 0} onClick={press}>ログインする</button>
+        ) : (
+          <button className="pri" disabled={busy || chosen.length === 0} onClick={press}>まとめて承認</button>
+        )}
+      </div>
+    </section>
   );
 }
 

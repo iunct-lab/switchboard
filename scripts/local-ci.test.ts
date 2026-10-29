@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { ciSteps } from "./ci";
-import { checkoutSteps, failLines, failureSummary, perfSteps, LOCAL_CI_RESULT, localCi, notify, perfVerdict, remoteRepo, reportResult, resultComment, resolveTarget, stepEnv, TargetError, type Deps } from "./local-ci";
+import { checkoutSteps, failLines, failureSummary, perfSteps, LOCAL_CI_RESULT, localCi, notify, patchIdOf, perfVerdict, stackBelow, stackLine, stackOf, stackTested, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, stepEnv, TargetError, type Deps, type LocalCiResult } from "./local-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
 const ciTs = await Bun.file(new URL("./ci.ts", import.meta.url)).text();
@@ -14,6 +14,7 @@ const passOf = (body: string) => {
 };
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const BASE = "3333333333333333333333333333333333333333";
+const PID = "5555555555555555555555555555555555555555";
 // local-ci's worktrees and failure logs: never the real ~/.cache (a failure removes that PR's earlier logs)
 const CACHE = mkdtempSync(join(tmpdir(), "sb-local-ci-test-"));
 afterAll(() => rmSync(CACHE, { recursive: true, force: true }));
@@ -48,6 +49,11 @@ describe("local-ci", () => {
     const d: Deps = {
       sh: async (cmd) => {
         calls.push(cmd);
+        // the stack line's reads (#2950): a PR on main alone, its diff's patch-id
+        if (cmd[0] === "gh" && cmd[1] === "repo") return "main\n";
+        if (cmd[0] === "gh" && cmd.at(-1) === "headRefOid") return JSON.stringify({ headRefOid: SHA });
+        if (cmd[0] === "gh" && cmd.at(-1) === "baseRefName,headRefOid") return JSON.stringify({ baseRefName: "main", headRefOid: SHA });
+        if (cmd[0] === "bash") return `${PID} 0000000000000000000000000000000000000000\n`;
         if (cmd[0] === "gh") return JSON.stringify({ headRefOid: (named = next(heads)), baseRefName: "main" });
         if (cmd.includes("fetch")) fetched = cmd.at(-1)!;
         if (cmd.includes("rev-parse")) return `${fetched.startsWith("refs/heads/") ? next(bases) : (pullHead ?? named)}\n`;
@@ -138,6 +144,7 @@ describe("local-ci", () => {
     expect(sent).toBe(true);
     expect(posted).toHaveLength(1);
     expect(passOf(posted[0]!)).toEqual([SHA, BASE]);
+    expect(posted[0]!.split("\n")[1]).toBe(`stack #42=${PID}`);
     expect(posted[0]).toContain(`対象: head \`${SHA}\` を base \`${BASE}\` にマージ`);
     expect(posted[0]!.split("\n").filter((l) => l.startsWith("| `")).length).toBe(ciSteps.length);
   });
@@ -161,6 +168,98 @@ describe("local-ci", () => {
       expect([sent, posted]).toEqual([false, []]);
       expect(logged.at(-1)).toContain("結果を投稿しない");
     }
+  });
+
+  /** A fake gh for a stack of three on main: #1 (b1 ← main) ← #2 (b2) ← #3 (b3); `ids` = each PR's patch-id. */
+  /** `untested`: PRs whose head now is not in the tested head (a fix on it not rebased into the ones above). */
+  const stackSh = (ids: Record<number, string>, o: { listed?: Record<string, number[]>; fail?: boolean; untested?: number[]; moved?: number } = {}) => {
+    const bases: Record<number, string> = { 1: "main", 2: "b1", 3: "b2" };
+    const heads: Record<string, number> = { b1: 1, b2: 2 };
+    const headOf = (n: number) => String(n).repeat(40);
+    const sh: Deps["sh"] = async (cmd) => {
+      if (cmd.includes("--is-ancestor")) {
+        if (cmd.at(-1) !== SHA || o.untested?.some((n) => cmd.at(-2) === headOf(n))) throw new Error("git -C merge-base failed: ");
+        return "";
+      }
+      if (cmd.includes("fetch")) return "";
+      if (cmd.includes("rev-parse")) return `${SHA}\n`;
+      if (cmd[0] === "gh" && cmd[1] === "repo") return "main\n";
+      if (cmd[0] === "gh" && cmd[2] === "list") {
+        const head = cmd[cmd.indexOf("--head") + 1]!;
+        return JSON.stringify((o.listed?.[head] ?? (heads[head] ? [heads[head]] : [])).map((number) => ({ number })));
+      }
+      if (cmd[0] === "gh" && cmd.at(-1) === "headRefOid") return JSON.stringify({ headRefOid: o.moved === Number(cmd[3]) ? "9".repeat(40) : Number(cmd[3]) === 3 ? SHA : headOf(Number(cmd[3])) });
+      if (cmd[0] === "gh" && cmd.at(-1) === "baseRefName,headRefOid") return JSON.stringify({ baseRefName: bases[Number(cmd[3])], headRefOid: Number(cmd[3]) === 3 ? SHA : headOf(Number(cmd[3])) });
+      if (cmd[0] === "gh") return JSON.stringify({ headRefOid: SHA, baseRefName: bases[Number(cmd[3])] });
+      if (cmd[0] === "bash") {
+        if (o.fail) throw new Error("bash -o pipefail failed: gh pr diff");
+        return `${ids[Number(cmd.at(-2))]} ${SHA}\n`;
+      }
+      throw new Error(`not asked: ${cmd.join(" ")}`);
+    };
+    return sh;
+  };
+  const [A, B, C] = ["a", "b", "c"].map((x) => x.repeat(40)) as [string, string, string];
+  const pass: LocalCiResult = { sha: SHA, base: SHA, results: [{ name: "bun test", run: "bun test", code: 0, seconds: 1, tail: "" }], ok: true };
+
+  test("stack line: a pass on the top of three names each PR's patch-id, the bottom first; stackOf reads it back, LOCAL_CI_RESULT its first line as before", async () => {
+    const sh = stackSh({ 1: A, 2: B, 3: C });
+    expect((await stackBelow(3, "example/development", sh)).map((x) => x.pr)).toEqual([1, 2, 3]);
+    const posted: string[] = [];
+    const logged: string[] = [];
+    expect(await notify({ pr: 3, repo: "example/development", root: "/repo" }, pass, { sh, log: (l) => void logged.push(l) }, async (_t, body) => void posted.push(body))).toBe(true);
+    const [first, second] = posted[0]!.split("\n");
+    expect(first).toBe(`[local-ci] pass ${SHA} base=${SHA}`);
+    expect(second).toBe(`stack #1=${A} #2=${B} #3=${C}`);
+    expect(passOf(posted[0]!)).toEqual([SHA, SHA]);
+    expect(stackOf(posted[0]!)).toEqual(new Map([[1, A], [2, B], [3, C]]));
+    // the middle one's run names the PRs up to it
+    expect((await stackBelow(2, "example/development", sh)).map((x) => x.pr)).toEqual([1, 2]);
+  });
+
+  test("stack line: a lower PR whose head now is not in the tested head (a fix not rebased up) is left out, with every PR below it", async () => {
+    const t = { repo: "example/development", root: "/repo" };
+    expect((await stackTested(3, SHA, t, stackSh({}, { untested: [1] }))).map((x) => x.pr)).toEqual([2, 3]);
+    expect((await stackTested(3, SHA, t, stackSh({}, { untested: [2] }))).map((x) => x.pr)).toEqual([3]);
+    const posted: string[] = [];
+    await notify({ pr: 3, ...t }, pass, { sh: stackSh({ 1: A, 2: B, 3: C }, { untested: [2] }), log: () => {} }, async (_t, body) => void posted.push(body));
+    expect(stackOf(posted[0]!)).toEqual(new Map([[3, C]]));
+    // a head moving while the diffs are read: no line (the diff read may be the new, untested one)
+    await expect(stackLine(3, SHA, t, stackSh({ 1: A, 2: B, 3: C }, { moved: 1 }))).rejects.toThrow("PR #1 の head が差分を読む間に変わった");
+    // the PR run itself pushed to after notify read its head: its head now is not the tested one
+    await expect(stackLine(3, "e".repeat(40), t, stackSh({ 1: A, 2: B, 3: C }))).rejects.toThrow("テストした eeeeeee ではない");
+  });
+
+  test("stack line: a fail and a conflict have none; a pass whose stack cannot be read goes without it, said", async () => {
+    const sh = stackSh({ 1: A, 2: B, 3: C });
+    for (const r of [{ ...pass, ok: false, results: [{ ...pass.results[0]!, code: 1 }] }, { ...pass, ok: false, results: [], conflict: true }]) {
+      const posted: string[] = [];
+      await notify({ pr: 3, repo: "example/development", root: "/repo" }, r, { sh, log: () => {} }, async (_t, body) => void posted.push(body));
+      expect(posted[0]!.split("\n")[1]).toBe("");
+      expect(stackOf(posted[0]!)).toBeNull();
+    }
+    const posted: string[] = [];
+    const logged: string[] = [];
+    await notify({ pr: 3, repo: "example/development", root: "/repo" }, pass, { sh: stackSh({}, { fail: true }), log: (l) => void logged.push(l) }, async (_t, body) => void posted.push(body));
+    expect(passOf(posted[0]!)).toEqual([SHA, SHA]);
+    expect(stackOf(posted[0]!)).toBeNull();
+    expect(logged.join("\n")).toContain("スタックの行を書けない");
+  });
+
+  test("stack line: two PRs below (a fork in the stack) or none end the walk there", async () => {
+    expect((await stackBelow(3, "example/development", stackSh({}, { listed: { b2: [2, 9] } }))).map((x) => x.pr)).toEqual([3]);
+    expect((await stackBelow(3, "example/development", stackSh({}, { listed: { b1: [] } }))).map((x) => x.pr)).toEqual([2, 3]);
+    expect(stackOf(`[local-ci] pass ${SHA} base=${SHA}\nstack #1=${A.slice(0, 7)}`)).toBeNull();
+    expect(stackOf(`[local-ci] pass ${SHA} base=${SHA}\n\nstack #1=${A}`)).toBeNull();
+  });
+
+  test("patchIdOf: gh pr diff piped to git patch-id --verbatim with the PR and repository as arguments, not in the script; an empty diff is an error", async () => {
+    const cmds: string[][] = [];
+    expect(await patchIdOf(7, "example/development", async (c) => (cmds.push(c), `${A} ${SHA}\n`))).toBe(A);
+    expect(cmds[0]!.slice(0, 4)).toEqual(["bash", "-o", "pipefail", "-c"]);
+    expect(cmds[0]!.slice(-2)).toEqual(["7", "example/development"]);
+    expect(cmds[0]![4]).not.toContain("example");
+    await expect(patchIdOf(7, "example/development", async () => "")).rejects.toThrow("差分が空");
   });
 
   test("LOCAL_CI_RESULT: pass or fail, the head, then the base; no base, a short sha or another word after it is no result", () => {
@@ -256,6 +355,18 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     expect(perfResult).toBe('{"runs":5}');
     expect(logged.join("\n")).toContain(over);
     expect(logged.some((l) => l.startsWith("記録: "))).toBe(true);
+  });
+
+  test("a GitLab project in a subgroup keeps its failure log too: every slash of its path goes (#892)", async () => {
+    const { d } = deps("bun test", SHA, "(fail) x");
+    const r = await localCi(42, "/repo", d, "group/sub/app", CACHE);
+    const log = r.results.at(-1)!.log!;
+    try {
+      expect(log).toStartWith(join(CACHE, "switchboard.local-ci-group_sub_app-42-log."));
+      expect(readFileSync(log, "utf8")).toBe("(fail) x");
+    } finally {
+      rmSync(log.replace(/\/[^/]*$/, ""), { recursive: true, force: true });
+    }
   });
 
   test("a new failure of a PR replaces its earlier failure logs; another PR's and another repository's same number stay", async () => {
@@ -440,9 +551,48 @@ test("the result is reported as the repository's forge verification (#920): GitH
     const run = async (cmd: string[]) => (calls.push(cmd), "");
     await reportResult({ pr: 7, repo: "example/app", root }, "[local-ci] pass abc", run);
     expect(calls).toEqual([["gh", "pr", "comment", "7", "-R", "example/app", "--body", "[local-ci] pass abc"]]);
-    require("node:fs").writeFileSync(join(root, "ops.config.json"), JSON.stringify({ forge: { service: "gitlab" } }));
-    await expect(reportResult({ pr: 7, repo: "group/app", root }, "[local-ci] pass abc", run)).rejects.toThrow("サービス gitlab には対応していません");
+    require("node:fs").writeFileSync(join(root, "ops.config.json"), JSON.stringify({ forge: { service: "gitea" } }));
+    await expect(reportResult({ pr: 7, repo: "group/app", root }, "[local-ci] pass abc", run)).rejects.toThrow("サービス gitea には対応していません");
     expect(calls).toHaveLength(1);
+    // GitLab's (#924): a note on the MR through glab, on the project its forge names (checked against the origin)
+    Bun.spawnSync(["git", "init", "-q", root]);
+    Bun.spawnSync(["git", "-C", root, "remote", "add", "origin", "git@gitlab.example.com:group/app.git"]);
+    require("node:fs").writeFileSync(join(root, "ops.config.json"), JSON.stringify({ forge: { service: "gitlab", host: "gitlab.example.com", project: "group/app" } }));
+    const lab: string[][] = [];
+    await reportResult({ pr: 7, repo: "ignored/here", root }, "[local-ci] pass abc", run, async (cmd) => (lab.push(cmd), "{}"));
+    expect(lab).toEqual([["glab", "api", "--hostname", "gitlab.example.com", "-X", "POST", "-f", "body=[local-ci] pass abc", "projects/group%2Fapp/merge_requests/7/notes"]]);
+    expect(calls).toHaveLength(1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a GitLab checkout runs on the MR (#892): its head from refs/merge-requests/<iid>/head, its target branch's tip, the project from the forge", async () => {
+  const root = mkdtempSync(join(tmpdir(), "local-ci-gitlab-"));
+  try {
+    Bun.spawnSync(["git", "init", "-q", root]);
+    Bun.spawnSync(["git", "-C", root, "remote", "add", "origin", "https://gitlab.example.com/group/sub/app.git"]);
+    require("node:fs").writeFileSync(join(root, "ops.config.json"), JSON.stringify({ forge: { service: "gitlab", host: "gitlab.example.com", project: "group/sub/app" } }));
+    const fail = async (c: string[]): Promise<string> => {
+      throw new Error(`not asked: ${c.join(" ")}`);
+    };
+    expect(await resolveTarget(["7"], root, root, fail)).toEqual({ pr: 7, repo: "group/sub/app", root });
+    const HEAD = "1".repeat(40);
+    const BASE = "2".repeat(40);
+    const calls: string[][] = [];
+    let last = "";
+    const sh = async (c: string[]) => {
+      calls.push(c);
+      if (c[3] === "fetch") last = c[6]!;
+      if (c[3] === "rev-parse") return `${last === "refs/heads/main" ? BASE : last === "refs/merge-requests/7/head" ? HEAD : "x"}\n`;
+      if (c[0] === "gh") throw new Error("gh is not asked for a GitLab MR");
+      return "";
+    };
+    const glab = async (c: string[]) => (calls.push(c), JSON.stringify({ iid: 7, web_url: "u", state: "opened", source_branch: "b", target_branch: "main", sha: HEAD }));
+    expect(await readTarget(7, root, "group/sub/app", { sh }, glab)).toEqual({ head: HEAD, base: BASE });
+    expect(calls.map((c) => c.at(-1))).toEqual(["projects/group%2Fsub%2Fapp/merge_requests/7", "refs/heads/main", "FETCH_HEAD", "refs/merge-requests/7/head", "FETCH_HEAD"]);
+    const moved = async (c: string[]) => JSON.stringify({ iid: 7, web_url: "u", state: "opened", source_branch: "b", target_branch: "main", sha: "3".repeat(40) });
+    await expect(readTarget(7, root, "group/sub/app", { sh }, moved)).rejects.toThrow("refs/merge-requests/7/head は 1111111 で");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

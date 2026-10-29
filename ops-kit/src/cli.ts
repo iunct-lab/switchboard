@@ -3,13 +3,15 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { BACKLOG_USAGE, readRecords, runBacklog } from "./backlog-client.ts";
 import { bootstrap } from "./bootstrap.ts";
-import { defaultConfig, findConfig, loadConfig, loadPublicSync, resolveProject, type OpsConfig } from "./config.ts";
+import { defaultConfig, findConfig, loadConfig, loadPublicSync, publicCopyRefusal, resolveProject, type OpsConfig } from "./config.ts";
 import { realGh, repoOf, type GhClient } from "./gh.ts";
 import { exportCopy } from "./export-copy.ts";
 import { resolveReviewThread } from "./forge-github.ts";
+import { forgeTargetOf, originOf } from "./forge.ts";
+import { createGitlabMr, gitlabMrDiscussions, resolveGitlabDiscussion, runGlab, startGitlabDiscussion, viewGitlabMr, type Sh } from "./forge-gitlab.ts";
 import { formatLint, lint } from "./lint.ts";
 import { pullMain } from "./pull-main.ts";
-import { spawnRun, sync } from "./public-sync.ts";
+import { check, spawnRun, sync } from "./public-sync.ts";
 import { checkRequestBody, createRequest } from "./request.ts";
 import { scanIssues } from "./scan.ts";
 import { findSecrets, hostAws } from "./secrets.ts";
@@ -69,7 +71,17 @@ ${BACKLOG_USAGE}
       Private のリポジトリ名・ホームパス・個人のメールアドレス・秘密の形の値（変わる行）があれば送らない。前回より古い --source は送らない。--dry-run は送らず結果だけ出す
       --adopted: 公開側だけの変更を Private に取り込み済みとして、置き換えて送る。--source の既定は origin/main
       exit 0 = 送った / 送るものが無い / dry-run、1 = 止まった（理由は stderr）、2 = 使い方の誤り
+  public-sync --check [--source <ref>]
+      送らずに、公開に出すツリーを同期と同じに組み立てて、Private のリポジトリ名・ホームパス・個人のメールアドレス・秘密の形の値（ホストに依らない規則、全ファイル）を検査する（CI 用。公開側に触らない）。--source の既定は HEAD
+      exit 0 = 無い（origin が publicSync.target の公開側の写しでは検査しない）、1 = ある、2 = 使い方の誤り
 
+  mr create --source <branch> --target <branch> --title <t> --body-file <f|->
+  mr view <iid> | mr discussions <iid>
+  mr note <iid> --body-file <f|-> [--path <file> --line <n>]
+  mr resolve <iid> <discussion id>...
+      ops.config.json の forge が gitlab のリポジトリで、GitLab の標準の MR・discussion を glab で使う（ブランチは git で push しておく）。
+      view / discussions は JSON を出す。note は --path / --line があれば差分のその行に discussion を始める。本文に認証に使える値があれば送らない。
+      github のリポジトリでは何もせず exit 2（PR は gh を使う）。exit 0 = できた、1 = GitLab が断った・resolve にならなかった、2 = 使い方の誤り
   pr resolve-thread <thread id>...
       PR のレビュースレッドを resolve する（GraphQL の resolveReviewThread だけ。id は PRRT_ で始まるもの）。
       id の形が違えば何もせず exit 1。resolve にならなかったスレッドがあれば exit 1。設定ファイルは要らない
@@ -84,7 +96,20 @@ Project URL は環境変数 <envPrefix>_PROJECT_URL、設定の省略可能な p
 設定ファイルの例（ops.config.json）:
 `;
 
-export async function main(argv: string[], gh: GhClient = realGh(), out: (s: string) => void = console.log, err: (s: string) => void = console.error, sleep: (ms: number) => Promise<void> = Bun.sleep, env: Record<string, string | undefined> = process.env): Promise<number> {
+/**
+ * The repository `public-sync --check` looks for: GH_REPO, else origin. Not gh's chosen remote nor gh itself (as `repoOf`
+ * reads): a default pointed at the public copy would make the check skip a private tree.
+ */
+function checkedRepo(env: Record<string, string | undefined>): string {
+  const fromEnv = env.GH_REPO?.replace(/^https?:\/\/[^/]+\//, "").replace(/\.git$/, "").split("/").slice(-2);
+  if (fromEnv?.length === 2) return fromEnv.join("/");
+  const url = Bun.spawnSync(["git", "remote", "get-url", "origin"], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" }).stdout.toString().trim();
+  const m = /github\.com[:/]([^/]+)\/([^/\s]+?)(\.git)?\/?$/.exec(url);
+  if (!m) throw new Error("リポジトリが分かりません（GH_REPO を設定するか、origin が GitHub の clone で実行してください）");
+  return `${m[1]}/${m[2]}`;
+}
+
+export async function main(argv: string[], gh: GhClient = realGh(), out: (s: string) => void = console.log, err: (s: string) => void = console.error, sleep: (ms: number) => Promise<void> = Bun.sleep, env: Record<string, string | undefined> = process.env, glab: Sh = runGlab): Promise<number> {
   const args = [...argv];
   let configPath: string | undefined;
   const at = args.indexOf("--config");
@@ -145,7 +170,7 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
     return pullMain(process.cwd(), out, err);
   }
   if (command === "public-sync") {
-    const flags = new Set(["--dry-run", "--adopted"]);
+    const flags = new Set(["--dry-run", "--adopted", "--check"]);
     const valued = new Set(["--source", "--target-url"]);
     const given: Record<string, string> = {};
     const on = new Set<string>();
@@ -153,7 +178,24 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
       const a = rest[i]!;
       if (flags.has(a)) on.add(a);
       else if (valued.has(a) && rest[i + 1] !== undefined && !rest[i + 1]!.startsWith("--")) given[a] = rest[++i]!;
-      else return usage(err, "public-sync [--source <ref>] [--dry-run] [--adopted] [--target-url <url>]", 2);
+      else return usage(err, "public-sync [--source <ref>] [--dry-run] [--adopted] [--target-url <url>] | public-sync --check [--source <ref>]", 2);
+    }
+    if (on.has("--check") && (on.size > 1 || given["--target-url"])) return usage(err, "public-sync --check [--source <ref>]", 2);
+    if (on.has("--check")) {
+      try {
+        const cfg = loadPublicSync(configPath, undefined, given["--source"] ?? "HEAD");
+        const repo = checkedRepo(env);
+        // the public copy's own CI: its origin is publicSync.target, and there is no private name to look for
+        if (publicCopyRefusal(repo)) {
+          out(`public check: skipped (${repo} is publicSync.target, the public copy)`);
+          return 0;
+        }
+        out(check({ privateRepo: repo, target: cfg.target, include: cfg.include, exclude: cfg.exclude, rewrite: cfg.rewrite, source: given["--source"] }, spawnRun));
+        return 0;
+      } catch (e) {
+        err((e as Error).message);
+        return 1;
+      }
     }
     try {
       const cfg = loadPublicSync(configPath, undefined, given["--source"] ?? "origin/main");
@@ -179,6 +221,7 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
       return 1;
     }
   }
+  if (command === "mr") return mr(rest, glab, out, err);
   if (command === "pr") {
     const [sub, ...ids] = rest;
     if (sub !== "resolve-thread" || ids.length === 0) return usage(err, "pr resolve-thread <thread id>...");
@@ -319,6 +362,60 @@ function hasConfig(): boolean {
 function issueNumber(s: string): number {
   if (!/^#?[0-9]+$/.test(s)) throw new UsageError(`Issue 番号ではありません: ${s}`);
   return Number(s.replace(/^#/, ""));
+}
+
+/** `mr …` (#923): GitLab's MR and discussions through glab, on the checkout's GitLab project. */
+async function mr(rest: string[], glab: Sh, out: (s: string) => void, err: (s: string) => void): Promise<number> {
+  const [sub, ...args] = rest;
+  const flag = (name: string) => {
+    const i = args.indexOf(`--${name}`);
+    return i >= 0 ? args.splice(i, 2)[1] : undefined;
+  };
+  const text = (f: string | undefined) => (f === "-" ? Bun.stdin.text() : f ? Bun.file(f).text() : Promise.resolve(undefined));
+  const usageMr = (m: string) => usage(err, m, 2);
+  let target;
+  try {
+    target = forgeTargetOf(process.cwd(), originOf(process.cwd()));
+  } catch (e) {
+    return usageMr((e as Error).message);
+  }
+  if (target.service !== "gitlab") return usageMr(`このリポジトリは ${target.service} です。PR は gh を使ってください`);
+  try {
+    if (sub === "create") {
+      const [source, into, title, body] = [flag("source"), flag("target"), flag("title"), await text(flag("body-file"))];
+      if (!source || !into || !title || body === undefined || args.length) return usageMr("mr create --source <branch> --target <branch> --title <t> --body-file <f|->");
+      const m = await createGitlabMr(glab, target, { source, target: into, title, description: body }, hostAws());
+      out(`!${m.iid} ${m.url}`);
+      return 0;
+    }
+    const iid = Number(args.shift());
+    if (!Number.isInteger(iid) || iid <= 0) return usageMr(`mr ${sub ?? "<create|view|discussions|note|resolve>"} <iid> …`);
+    if (sub === "view" && !args.length) return out(JSON.stringify(await viewGitlabMr(glab, target, iid), null, 2)), 0;
+    if (sub === "discussions" && !args.length) return out(JSON.stringify(await gitlabMrDiscussions(glab, target, iid), null, 2)), 0;
+    if (sub === "note") {
+      const [body, path, line] = [await text(flag("body-file")), flag("path"), flag("line")];
+      if (body === undefined || args.length || (path === undefined) !== (line === undefined) || (line !== undefined && !/^[1-9]\d*$/.test(line))) return usageMr("mr note <iid> --body-file <f|-> [--path <file> --line <n>]");
+      out(await startGitlabDiscussion(glab, target, iid, body, path ? { path, line: Number(line) } : undefined, hostAws()));
+      return 0;
+    }
+    if (sub === "resolve" && args.length) {
+      let failed = 0;
+      for (const id of args) {
+        try {
+          await resolveGitlabDiscussion(glab, target, iid, id);
+          out(`${id} resolved`);
+        } catch (e) {
+          err(`${id}: ${(e as Error).message}`);
+          failed++;
+        }
+      }
+      return failed ? 1 : 0;
+    }
+    return usageMr("mr <create|view|discussions|note|resolve> …");
+  } catch (e) {
+    err((e as Error).message);
+    return 1;
+  }
 }
 
 function usage(err: (s: string) => void, msg: string, code = 1): number {

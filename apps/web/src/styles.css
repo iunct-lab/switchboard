@@ -230,6 +230,10 @@ button.copy { font: 400 10px/1.4 var(--mono); padding: 2px 6px; }
 .inbox-row .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .inbox-row details.t { white-space: normal; }
 .inbox-row pre.wrap { white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0; }
+.inbox-row button.t { text-align: left; background: none; border: none; padding: 0; font: inherit; color: inherit; cursor: pointer; }
+.inbox-edit { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 8px; }
+.inbox-edit textarea { min-height: 160px; resize: vertical; }
+.inbox-edit .acts { display: flex; gap: 8px; justify-content: flex-end; }
 
 .staged .m.pending { color: var(--amber); }
 .staged .m.applied { color: var(--green); }
@@ -361,6 +365,17 @@ label.toggle.off { opacity: .45; cursor: default; }
 @media (max-width: 600px) { .backlog .backlog-sides { grid-template-columns: 1fr; } .backlog .backlog-editor, .backlog .backlog-new { margin-left: 0; } }
 .backlog [data-state="stopped"] { color: var(--amber); }
 .backlog .backlog-ws { margin-left: 0; flex-wrap: wrap; margin-top: 6px; }
+/* 表示 (#2695): the panel opens over the heading card (its box); on phones it spans the card. */
+.backlog > .card:first-child { position: relative; }
+.backlog .backlog-heading { flex: 1; }
+.backlog .backlog-view > summary { list-style: none; cursor: pointer; padding: 5px 12px; color: var(--ink2); }
+.backlog .backlog-view-body { position: absolute; z-index: 5; top: 44px; right: 14px; width: 330px; max-width: calc(100% - 28px); display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
+.backlog .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.backlog .chip.on { background: var(--sel); border-color: var(--acc); }
+@media (max-width: 767px) {
+  .backlog .backlog-view-body { left: 8px; right: 8px; width: auto; max-width: none; }
+  .backlog :is(.backlog-view summary, .backlog-view button, .backlog-view select, .backlog-view input, .backlog-view-line button) { min-height: 44px; }
+}
 .rail-approvals { margin-bottom: 8px; }
 .rail-search { width: 100%; font: inherit; padding: 4px 8px; margin-bottom: 4px; }
 .rail-filters { display: flex; gap: 4px; align-items: center; padding: 0 8px 4px; font-size: 11px; color: var(--ink3); }
@@ -376,10 +391,14 @@ label.toggle.off { opacity: .45; cursor: default; }
 /* #1673: under the screen's heading a button per Workspace (its own to answer), and in each group a heading per Workspace */
 .ask-workspaces { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .ask-workspaces button { min-height: 44px; max-width: 100%; overflow-wrap: anywhere; text-align: left; }
+.ask-batch-tasks { list-style: none; margin: 8px 0; padding: 0; }
 .ask-workspace-head { margin: 8px 0 4px; font-size: 13px; overflow-wrap: anywhere; }
-.ask-tags { display: flex; gap: 6px; margin-bottom: 6px; }
+.ask-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
 .ask-tags .badge { background: var(--line); color: var(--ink2); font-family: inherit; font-weight: 500; }
 .ask-tags .ask-state-open { background: var(--amber); color: #fff; }
+/* the other PBIs waiting on the question (#1674) */
+.ask-tags .ask-unblocks { background: var(--acc); color: #fff; }
+.ask-unblocks-list { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-bottom: 6px; min-width: 0; overflow-wrap: anywhere; }
 /* a question's screen mockups (#2221): the buttons wrap, never wider than the card */
 .mockups { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; min-width: 0; }
 .mockup-buttons { display: flex; flex-wrap: wrap; gap: 6px; }

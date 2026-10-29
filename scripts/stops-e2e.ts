@@ -3,7 +3,7 @@
  * (CHROME_BIN overrides; default /usr/local/bin/chromium). No GitHub, no real runner (#939, #952).
  *
  * A fake runner reports its stops the way a real one does — a `switchboard-stop` fence in its reply — and the daemon is
- * the real one (startServer). Checked: the same condition stopping again is one series with a count and no new question;
+ * the real one (startServer). The fake runner makes each run a stage Task of the same PBI (`stage`, not the title, #1170). Checked: the same condition stopping again is one series with a count and no new question;
  * a different reason code in similar words is its own series; a bounded retry that succeeds ends resolved, one that
  * keeps failing ends as one decision item with what was done; a restart forgets nothing; a tool approval of another
  * target is not suppressed; and the Task screen at 1280 and 390 px shows count / last answer / change / next / actions
@@ -43,6 +43,8 @@ const adapter: RunnerAdapter = {
     if (opts.prompt in scripts || opts.prompt === "ask-other") turns.set(opts.prompt, (turns.get(opts.prompt) ?? 0) + 1);
     let exit!: (code: number | null) => void;
     const exited = new Promise<number | null>((r) => (exit = r));
+    // a stop series is the Task's stage, not its title (#1170): the scenario's runs are complete stage Tasks of PBI #939
+    if (opts.prompt in scripts) core.db.sqlite.query("UPDATE tasks SET stage_issue = 939, stage_action = 'complete' WHERE id = ?").run(opts.env!.SWITCHBOARD_TASK_ID!);
     queueMicrotask(() => {
       emit({ t: "session.start", runner: "claude", runnerSessionId: `s-${turns.size}-${Math.random()}`, cwd: opts.cwd });
       if (opts.prompt === "ask-other") return void emit({ t: "permission.ask", id: "p-other", kind: "exec", tool: "Bash", input: { command: "rm -rf build" }, detail: "rm -rf build" });
@@ -67,7 +69,7 @@ const j = (r: Response) => r.json() as Promise<any>;
 const meta = ((await fetch(`${base}/api/workspaces`).then(j)) as Array<{ id: string; kind: string }>).find((w) => w.kind === "meta")!;
 const titles: string[] = [];
 async function run(prompt: string): Promise<string> {
-  const title = `#939 実装: PBI: ${prompt} ${titles.length}`;
+  const title = `#939 実装: PBI: ${prompt} ${titles.length}`; // the series is the `stage` the fake runner sets, not this title (#1170)
   titles.push(title);
   const t = await fetch(`${base}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: meta.id, title, prompt, runner: "claude" }) }).then(j);
   await until(async () => ["done", "waiting", "error"].includes((await fetch(`${base}/api/tasks/${t.id}`).then(j)).task.status), `${title} stopped`);

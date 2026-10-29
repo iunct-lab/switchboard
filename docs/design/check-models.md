@@ -1,6 +1,6 @@
 # check-models — noticing when the model lists fall behind the CLIs
 
-PBI #248. The model choices in the UI (the list saved on the settings screen's モデルの選択肢, PBI #1400; a runner never saved there offers the bundled `CLAUDE_MODELS` in `packages/adapters/claude/src/index.ts` / `CODEX_MODELS` in `packages/adapters/codex/src/index.ts`) and the price table (`packages/core/config/pricing.json`, with rows entered on the settings screen's モデルの価格 on top, PBI #1402) are kept by hand (PBI #155: Switchboard holds no API key, so it cannot ask the vendors for a model list). When a new model ships, the lists stay behind until someone notices — on 2026-09-23 that someone was the user (#247). `scripts/check-models.ts` notices first, and a daily schedule turns what it finds into a request Issue.
+PBI #248. The model choices in the UI (the list saved on the settings screen's モデルの選択肢, PBI #1400; a runner never saved there offers the bundled `CLAUDE_MODELS` in `packages/adapters/claude/src/index.ts` / `CODEX_MODELS` in `packages/adapters/codex/src/index.ts`) and the price table (`packages/core/config/pricing.json`, with rows entered on the settings screen's モデルの価格 on top, PBI #1402) are kept by hand (PBI #155: Switchboard holds no API key, so it cannot ask the vendors for a model list). When a new model ships, the lists stay behind until someone notices — on 2026-09-23 that someone was the user (#247). `scripts/check-models.ts` notices first, and a schedule turns what it finds into a request Issue.
 
 ## What it reads
 
@@ -29,24 +29,22 @@ unpriced (ledger) new / unknown  past unpriced names: in the CLI's table (the pr
 
 Exit 0 = no drift / 1 = drift / 2 = cannot tell (a CLI is not installed, or its table read as empty — the CLI's format changed and the script needs fixing). The same meaning as `scripts/merge-gate.ts`.
 
-## The daily schedule
+## The schedule
 
 `bun scripts/check-models.ts --file-request` does the same check and, on exit 1, files a request Issue (`type:request`, via `scripts/file-request.ts` — shared with `scripts/merge-audit.ts` — which calls `scripts/setup/request_issue.sh`; in the app's Task, where `gh issue create` is refused, that stores the request in the app as `ops-kit backlog create` does and the app sends it to GitHub) titled `モデル一覧のズレ: <runner> <kind> <ids> / …`. The title is built from the findings in a fixed order, so the same drift always has the same title; if an open request already has it (looked up over REST, `gh api repos/<owner>/<repo>/issues`, not GraphQL), nothing is filed. A different drift (another id shows up) is a new title and a new request. Exit 2 files nothing.
 
 It runs from the existing scheduler as an ordinary prompt schedule — no new schedule action. The prompt only runs the command and reports; the script decides what to file:
 
-```
-POST /api/schedules
-{ "title": "check-models（モデル一覧のズレ）", "cron": "0 7 * * *", "workspaceId": <the switchboard workspace>, "runner": "claude",
-  "prompt": "bun scripts/update-clis.ts --file-request を 1 回実行し、続けて bun scripts/check-models.ts --file-request を 1 回実行し、それぞれの終了コードと出力をそのまま報告してください。ファイルは変更しないでください。",
-  "budgetUsd": <agreed with the user> }
-```
+- the prompt runs `bun scripts/update-clis.ts --file-request` once, then `bun scripts/check-models.ts --file-request` once, and reports each exit code and output as they are
+- it changes no files
+
+The schedule's time, runner, budget and exact prompt live in the app (the Schedules screen, `GET /api/schedules`), not here.
 
 Registering it is a call to the running daemon, so it is done with the user's OK (PBI #248), not by the PR.
 
 ### Why not `bun test` / CI
 
-The CLIs are not installed in GitHub Actions, so CI cannot run the check; on the host, a failing test would stop every unrelated PR's local CI and merge whenever a CLI auto-updates. So the check runs on a schedule (PBI #248): a day late at most, and nothing else stops.
+The CLIs are not installed in GitHub Actions, so CI cannot run the check; on the host, a failing test would stop every unrelated PR's local CI and merge whenever a CLI auto-updates. So the check runs on a schedule (PBI #248): late by at most one firing, and nothing else stops.
 
 ## When a request arrives
 
@@ -54,6 +52,6 @@ The CLIs are not installed in GitHub Actions, so CI cannot run the check; on the
 - `unseen`: decide whether the model goes in the list (and add it in モデルの選択肢 on the 設定 tab if so), then add the id to `REVIEWED` either way.
 - `価格表未整備`: enter the official price in モデルの価格 on the 設定 tab (no PR: the next run reads the saved prices).
 - `outdated`: only appears when update-clis rolled back, failed, or could not tell (exit 2: the registry or the rollback link was unreadable, so it changed nothing) — look for the `CLI 更新の失敗` request first (cli-update.md); with none, read the schedule's update-clis lines. Otherwise update the CLI by hand. The request's title carries the installed version only, so one open request stands while the CLI stays, whatever npm publishes meanwhile. The next run says `version: …（最新）` and, if the new table carries a model nobody reviewed, `unseen` follows.
-- Close the request once it is fixed (a `stale`, a `価格表未整備` or the list half of `unseen` on the settings screen, the rest by a PR); the next morning's run confirms (exit 0). An `outdated` request has no PR: update the CLI, let the next run print `version: …（最新）`, then close the request by hand (the script never closes one).
+- Close the request once it is fixed (a `stale`, a `価格表未整備` or the list half of `unseen` on the settings screen, the rest by a PR); the next run confirms (exit 0). An `outdated` request has no PR: update the CLI, let the next run print `version: …（最新）`, then close the request by hand (the script never closes one).
 
 The model list is a setting since PBI #1400 (request #601); offering a model the installed CLI carries as a candidate at run time is #1401.

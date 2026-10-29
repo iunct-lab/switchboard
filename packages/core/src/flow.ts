@@ -3,9 +3,9 @@
  * `createdAt`) and cuts them at the marks the skills leave. The Project's Status history is not read — a Status changed
  * through the API leaves no timeline event. A stage whose mark is missing is null, never guessed. docs/design/flow-metrics.md.
  */
-import { FlowStage, type FlowPbi, type FlowStageSummary, type FlowSummary, type FlowView } from "@switchboard/protocol";
+import { FlowStage, type CreatedIssue, type FlowPbi, type FlowStageSummary, type FlowSummary, type FlowView, type FlowWeek } from "@switchboard/protocol";
 import type { Database } from "bun:sqlite";
-import { tasksOfIssues } from "./db.ts";
+import { deferredTasksSince, tasksOfIssues } from "./db.ts";
 import type { GhRunner } from "./backlog.ts";
 
 export type RawComment = { createdAt: string; body: string };
@@ -109,10 +109,34 @@ const pbiFields = (tasks: number, prs: number) => `number title createdAt closed
   subIssues(first: ${tasks}) { totalCount nodes { number createdAt closedAt ${comments}
     closedByPullRequestsReferences(first: ${prs}, includeClosedPrs: true) { totalCount nodes { number createdAt mergedAt ${comments} } } } }`;
 export const FLOW_QUERY = `query($q: String!, $after: String) { rateLimit { cost remaining }
-  search(query: $q, type: ISSUE, first: 25, after: $after) { pageInfo { hasNextPage endCursor } nodes { ... on Issue { ${pbiFields(10, 1)} } } } }`;
+  search(query: $q, type: ISSUE, first: 10, after: $after) { pageInfo { hasNextPage endCursor } nodes { ... on Issue { ${pbiFields(10, 1)} } } } }`;
 const WIDE = { tasks: 30, prs: 3 };
 const wideQuery = (numbers: number[], owner: string, name: string) =>
   `{ rateLimit { cost } repository(owner: "${owner}", name: "${name}") { ${numbers.map((n) => `i${n}: issue(number: ${n}) { ${pbiFields(WIDE.tasks, WIDE.prs)} }`).join(" ")} } }`;
+
+/** The PBIs and requests opened and closed in one week (#1878), as GitHub's search counts them. */
+export type GrowthCounts = { weekStart: string; pbiOpened: number; pbiClosed: number; requestOpened: number; requestClosed: number };
+
+const DAY = 86_400_000;
+/** The Monday 00:00 UTC that starts the week of `ms`. */
+export const weekStartOf = (ms: number): number => {
+  const day = Math.floor(ms / DAY) * DAY;
+  return day - ((new Date(day).getUTCDay() + 6) % 7) * DAY;
+};
+const ymd = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
+/** The Monday of every week from the one `days` days before `now` to `now`'s. */
+const weekStarts = (days: number, now: number): number[] => {
+  const out: number[] = [];
+  for (let w = weekStartOf(now - days * DAY); w <= weekStartOf(now); w += 7 * DAY) out.push(w);
+  return out;
+};
+const GROWTH_KEYS = [["pbi", "created", "pbiOpened"], ["pbi", "closed", "pbiClosed"], ["request", "created", "requestOpened"], ["request", "closed", "requestClosed"]] as const;
+/**
+ * The growth of these weeks in one query (#1878): an `issueCount` of the search per week, label and created / closed (GitHub's
+ * dates are UTC days). A count has no cap, where a list of the Issues stops at 1,000; the query costs 1 point.
+ */
+export const growthQuery = (repo: string, weeks: number[]): string =>
+  `{ rateLimit { cost } ${weeks.flatMap((w) => GROWTH_KEYS.map(([label, on, key]) => `${key}_${ymd(w).replaceAll("-", "")}: search(query: "repo:${repo} is:issue label:type:${label} ${on}:${ymd(w)}..${ymd(w + 6 * DAY)}", type: ISSUE, first: 0) { issueCount }`)).join(" ")} }`;
 
 type Nodes<T> = { nodes: T[] };
 type GqlComments = { comments: { totalCount: number } & Nodes<RawComment> };
@@ -169,12 +193,14 @@ async function graphql(gh: GhRunner, cwd: string, query: string, vars: Record<st
 }
 
 /**
- * The PBIs closed in the last `days` days, each cut into stages. Reads the remaining budget first and reads nothing when it
- * is under MIN_REMAINING; gives up when the pages spend more than MAX_COST.
+ * The PBIs closed in the last `days` days, each cut into stages, and the PBIs and requests opened and closed in each week
+ * from the one `days` days ago (`growth`, growthQuery). Reads the remaining budget first and reads nothing when it is under
+ * MIN_REMAINING; gives up when the pages spend more than MAX_COST.
  */
-export async function fetchFlow(gh: GhRunner, cwd: string, repo: string, days: number, now = Date.now(), maxCost = MAX_COST): Promise<{ reads: FlowRead[]; spent: number; cutPbis: number[] }> {
+export async function fetchFlow(gh: GhRunner, cwd: string, repo: string, days: number, now = Date.now(), maxCost = MAX_COST): Promise<{ reads: FlowRead[]; spent: number; cutPbis: number[]; growth: GrowthCounts[] }> {
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new FlowError(`リポジトリ名の形が違います: ${repo}`);
-  const first = (await graphql(gh, cwd, "{ rateLimit { remaining cost } }")).rateLimit as { remaining: number; cost?: number };
+  const first = (await graphql(gh, cwd, "{ rateLimit { remaining cost } }")).rateLimit as { remaining: number; cost?: number } | undefined;
+  if (typeof first?.remaining !== "number") throw new FlowError("GitHub の API の使用量を読めませんでした（rateLimit がありません）");
   const left = first.remaining;
   if (left < MIN_REMAINING) throw new FlowError(`GitHub の API の残りが少ない（残り ${left}）`);
   const since = new Date(now - days * 86_400_000).toISOString().slice(0, 10);
@@ -218,7 +244,40 @@ export async function fetchFlow(gh: GhRunner, cwd: string, repo: string, days: n
     const f = flowOfPbi(r, req === null ? null : (at.get(req) ?? null));
     return { pbi: { ...f, repo, url: `https://github.com/${repo}/issues/${r.number}`, tasks: null }, issues: [r.number, ...r.subIssues.map((t) => t.number)] };
   });
-  return { reads, spent, cutPbis: final.filter((g) => cutLists(g) > 0).map((g) => g.number) };
+  const weeks = weekStarts(days, now);
+  const g = await spend(1, () => graphql(gh, cwd, growthQuery(repo, weeks)));
+  const growth = weeks.map((w): GrowthCounts => {
+    const count = (key: (typeof GROWTH_KEYS)[number][2]): number => {
+      const n = g[`${key}_${ymd(w).replaceAll("-", "")}`]?.issueCount;
+      if (typeof n !== "number") throw new FlowError(`GitHub の検索の件数を読めませんでした（${key} ${ymd(w)}）`);
+      return n;
+    };
+    return { weekStart: ymd(w), pbiOpened: count("pbiOpened"), pbiClosed: count("pbiClosed"), requestOpened: count("requestOpened"), requestClosed: count("requestClosed") };
+  });
+  return { reads, spent, cutPbis: final.filter((g) => cutLists(g) > 0).map((g) => g.number), growth };
+}
+
+const WEEK_COUNTS = ["pbiOpened", "pbiClosed", "requestOpened", "requestClosed", "net", "deferredTasks", "deferredIssues"] as const;
+
+/**
+ * The weeks from the one `days` days ago to this one (#1878), an empty week as zeros: the PBIs and requests GitHub counted
+ * (`counts`, by `weekStart`), `net` = opened − closed, and the deferred Tasks by when their last turn ended, with the Issues of
+ * `repo` they opened.
+ */
+export function backlogGrowth(counts: GrowthCounts[], deferred: Array<{ endedAt: number; issues: CreatedIssue[] }>, repo: string, days: number, now: number): FlowWeek[] {
+  const starts = weekStarts(days, now);
+  const weeks = starts.map((w): FlowWeek => {
+    const c = counts.find((x) => x.weekStart === ymd(w));
+    return { weekStart: ymd(w), pbiOpened: c?.pbiOpened ?? 0, pbiClosed: c?.pbiClosed ?? 0, requestOpened: c?.requestOpened ?? 0, requestClosed: c?.requestClosed ?? 0, net: 0, deferredTasks: 0, deferredIssues: 0 };
+  });
+  for (const t of deferred) {
+    const w = t.endedAt < starts[0]! || t.endedAt > now ? undefined : weeks[(weekStartOf(t.endedAt) - starts[0]!) / (7 * DAY)];
+    if (!w) continue;
+    w.deferredTasks++;
+    w.deferredIssues += t.issues.filter((i) => i.repo === repo.toLowerCase()).length;
+  }
+  for (const w of weeks) w.net = w.pbiOpened + w.requestOpened - w.pbiClosed - w.requestClosed;
+  return weeks;
 }
 
 /** Fills `tasks` with the Switchboard Tasks of the PBI or one of its Tasks in these workspaces (stage Task or title `#N `). `db` null = not read. */
@@ -274,9 +333,13 @@ export async function flowView(gh: GhRunner, workspaces: FlowWorkspace[], db: Da
     if (w.repository) byRepo.set(w.repository.toLowerCase(), [...(byRepo.get(w.repository.toLowerCase()) ?? []), w]);
   }
   const pbis: FlowPbi[] = [];
+  let weeks = backlogGrowth([], [], "", days, now);
   for (const [repo, ws] of byRepo) {
     try {
-      const { reads } = await fetchFlow(gh, ws[0]!.path, repo, days * 2, now, FLOW_VIEW_MAX_COST);
+      const { reads, growth } = await fetchFlow(gh, ws[0]!.path, repo, days * 2, now, FLOW_VIEW_MAX_COST);
+      const deferred = db ? deferredTasksSince(db, ws.map((w) => w.id), weekStartOf(now - days * DAY)) : [];
+      const mine = backlogGrowth(growth, deferred, repo, days, now);
+      for (const [i, w] of mine.entries()) for (const k of WEEK_COUNTS) weeks[i]![k] += w[k];
       // the search cuts at the day (midnight), so the earliest PBIs read may be older than the previous period
       pbis.push(...reads.filter((r) => Date.parse(r.pbi.closedAt) >= now - days * 2 * 86_400_000).map((r) => withSwitchboardTasks(r, db, ws.map((w) => w.id))));
     } catch (e) {
@@ -288,7 +351,7 @@ export async function flowView(gh: GhRunner, workspaces: FlowWorkspace[], db: Da
   const current = pbis.filter((p) => Date.parse(p.closedAt) >= edge);
   const previous = pbis.filter((p) => Date.parse(p.closedAt) < edge);
   const slowest = [...current].sort((a, b) => total(b) - total(a)).slice(0, SLOWEST);
-  return { days, fetchedAt: now, current: summarize(current), previous: summarize(previous), slowest, errors, unread };
+  return { days, fetchedAt: now, current: summarize(current), previous: summarize(previous), slowest, errors, unread, weeks };
 }
 
 /**
