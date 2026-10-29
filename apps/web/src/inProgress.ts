@@ -1,5 +1,22 @@
-import type { BacklogItem, Schedule, TaskStatus, Workspace } from "@switchboard/protocol";
+import type { BacklogAction, BacklogItem, BacklogStage, Schedule, TaskStatus, Workspace } from "@switchboard/protocol";
 import { jstClock } from "./time.ts";
+
+/** The button a row shows for its stage (#265; in-progress asks for its status, #522); needs-decision rows get none. */
+const START: Partial<Record<BacklogStage, [BacklogAction, string]>> = {
+  request: ["to-pbi", "PBI にする"],
+  "needs-tasks": ["to-tasks", "Task に分解"],
+  ready: ["complete", "実装する"],
+  "in-progress": ["check", "状況を確認"],
+};
+
+/** A PBI waiting for Tasks that already has sub-issues (#1393): decomposed, only not Ready yet. Its sub-issues alone decide, not whether they cover it. */
+export const readyPending = (item: BacklogItem) => item.stage === "needs-tasks" && !!item.tasks && item.tasks.total > 0;
+
+/** The row's stage button: the action and its words. A decomposed PBI waiting for Tasks starts the same `to-tasks` as 「Ready にする」 (#1393). */
+export function startButton(item: BacklogItem): [BacklogAction, string] | null {
+  if (readyPending(item)) return ["to-tasks", "Ready にする"];
+  return START[item.stage] ?? null;
+}
 
 /** A Task's state as the backlog row names it. */
 export const TASK_STATUS: Record<TaskStatus, string> = { idle: "未開始", running: "実行中", waiting: "承認待ち", done: "完了", error: "失敗", aborted: "中断" };

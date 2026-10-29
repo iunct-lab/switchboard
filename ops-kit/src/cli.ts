@@ -11,7 +11,7 @@ import { forgeTargetOf, originOf } from "./forge.ts";
 import { createGitlabMr, gitlabMrDiscussions, resolveGitlabDiscussion, runGlab, startGitlabDiscussion, viewGitlabMr, type Sh } from "./forge-gitlab.ts";
 import { formatLint, lint } from "./lint.ts";
 import { pullMain } from "./pull-main.ts";
-import { check, spawnRun, sync } from "./public-sync.ts";
+import { check, spawnRun, sync, withStaleNote } from "./public-sync.ts";
 import { checkRequestBody, createRequest } from "./request.ts";
 import { scanIssues } from "./scan.ts";
 import { findSecrets, hostAws } from "./secrets.ts";
@@ -72,7 +72,7 @@ ${BACKLOG_USAGE}
       --adopted: 公開側だけの変更を Private に取り込み済みとして、置き換えて送る。--source の既定は origin/main
       exit 0 = 送った / 送るものが無い / dry-run、1 = 止まった（理由は stderr）、2 = 使い方の誤り
   public-sync --check [--source <ref>]
-      送らずに、公開に出すツリーを同期と同じに組み立てて、Private のリポジトリ名・ホームパス・個人のメールアドレス・秘密の形の値（ホストに依らない規則、全ファイル）を検査する（CI 用。公開側に触らない）。--source の既定は HEAD
+      送らずに、公開に出すツリーを同期と同じに組み立てて、Private のリポジトリ名・ホームパス・個人のメールアドレス・秘密の形の値（全ファイル。ホストの AWS のプロファイル名・アカウントは、ホストの設定があるときだけ）を検査する（CI 用。公開側に触らない）。--source の既定は HEAD
       exit 0 = 無い（origin が publicSync.target の公開側の写しでは検査しない）、1 = ある、2 = 使い方の誤り
 
   mr create --source <branch> --target <branch> --title <t> --body-file <f|->
@@ -190,20 +190,25 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
           out(`public check: skipped (${repo} is publicSync.target, the public copy)`);
           return 0;
         }
-        out(check({ privateRepo: repo, target: cfg.target, include: cfg.include, exclude: cfg.exclude, rewrite: cfg.rewrite, source: given["--source"] }, spawnRun));
+        out(check({ host: hostAws(), privateRepo: repo, target: cfg.target, include: cfg.include, exclude: cfg.exclude, rewrite: cfg.rewrite, source: given["--source"] }, spawnRun));
         return 0;
       } catch (e) {
         err((e as Error).message);
         return 1;
       }
     }
+    let privateRepo = "";
     try {
       const cfg = loadPublicSync(configPath, undefined, given["--source"] ?? "origin/main");
       const r = await repoOf(gh);
-      out(sync({ host: hostAws(), privateRepo: `${r.owner}/${r.name}`, target: cfg.target, versioning: cfg.versioning, include: cfg.include, exclude: cfg.exclude, rewrite: cfg.rewrite, serviceUsers: cfg.serviceUsers, source: given["--source"], targetUrl: given["--target-url"], dryRun: on.has("--dry-run"), adopted: on.has("--adopted") }, spawnRun));
+      privateRepo = `${r.owner}/${r.name}`;
+      out(sync({ host: hostAws(), privateRepo, target: cfg.target, versioning: cfg.versioning, include: cfg.include, exclude: cfg.exclude, rewrite: cfg.rewrite, serviceUsers: cfg.serviceUsers, source: given["--source"], targetUrl: given["--target-url"], dryRun: on.has("--dry-run"), adopted: on.has("--adopted") }, spawnRun));
       return 0;
     } catch (e) {
-      err((e as Error).message);
+      const message = (e as Error).message;
+      // a --source tag stopped by the tree check: whether origin/main, by its own publicSync, has the hits fixed
+      const main = () => ({ ...loadPublicSync(configPath, undefined, "origin/main"), privateRepo });
+      err(given["--source"] && privateRepo ? withStaleNote(message, main, spawnRun) : message);
       return 1;
     }
   }

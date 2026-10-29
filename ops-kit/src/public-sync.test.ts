@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { check, personalEmails, policySectionAt, sync, spawnRun, withPolicySection, type Run } from "./public-sync.ts";
+import { check, personalEmails, policySectionAt, sync, spawnRun, withPolicySection, withStaleNote, type Run } from "./public-sync.ts";
 import { loadPublicSync } from "./config.ts";
 import { main } from "./cli.ts";
 
@@ -682,6 +682,35 @@ describe("public-sync", () => {
     expect(() => checked({ targetUrl: "/nonexistent" })).toThrow("personal e-mail address"); // no public side is reached for
   });
 
+  test("a tree stop gets the stale-source line only when origin/main's tree, by origin/main's own options, passes check", () => {
+    const code = "ABCD" + "-EFGH";
+    const note = "origin/main's tree has none";
+    const toMain = () => {
+      sh(priv, "git", "push", "-q", "origin", "main");
+      sh(priv, "git", "fetch", "-q", "origin");
+    };
+    write("src/auth.test.ts", `const auth = { code: "${code}" };\n`);
+    commit("test: auth");
+    sh(priv, "git", "tag", "v1.0.0");
+    toMain();
+    let stop = "";
+    try {
+      sync(opts({ source: "v1.0.0", dryRun: true }), run);
+    } catch (e) {
+      stop = (e as Error).message;
+    }
+    expect(stop).toBe("a secret-shaped value in the tree:\nsrc/auth.test.ts:1 (device-code)");
+    expect(withStaleNote(stop, () => opts(), run)).toBe(stop); // origin/main still has it
+    expect(withStaleNote(stop, () => opts({ exclude: [".github/workflows/host.yml", "src/auth.test.ts"] }), run)).toStartWith(`${stop}\n${note}: `); // main's own exclude fixed it
+    expect(withStaleNote(stop, () => { throw new Error("no publicSync at origin/main"); }, run)).toBe(stop);
+    expect(withStaleNote("a personal home path in the tree:\nx", () => opts({ exclude: ["src/auth.test.ts"] }), run)).toBe("a personal home path in the tree:\nx");
+    write("src/auth.test.ts", `const auth = { code: "XXXX-XXXX" };\n`);
+    commit("test: auth placeholder");
+    toMain();
+    expect(withStaleNote(stop, () => opts(), run)).toStartWith(`${stop}\n${note}: `); // main's tree fixed it
+    expect(pubGit("for-each-ref")).toBe("");
+  });
+
   test("check and the sync stop on a secret-shaped value anywhere in the tree with the same words, the file, the line and the kind, never the value; a placeholder passes", () => {
     const code = "ABCD" + "-EFGH";
     write("src/auth.test.ts", `// an old fixture\nconst auth = { code: "${code}" };\n`);
@@ -698,6 +727,32 @@ describe("public-sync", () => {
     commit("test: auth");
     expect(check({ ...opts(), source: "HEAD" }, run)).toContain("public check: ok");
     expect(sync({ ...opts(), dryRun: true }, run)).toContain("dry-run:");
+  });
+
+  test("check counts the host's names and accounts in the whole tree, the file last published included, and only where the host has them", () => {
+    const host = { names: ["corp-admin"], accountIds: ["2109" + "87654321"] };
+    write("docs/ops.md", `profile corp-admin\nbuild ${"2109" + "87654321"}\n`);
+    commit("docs: ops");
+    expect(check({ ...opts(), source: "HEAD" }, run)).toContain("public check: ok"); // no host (CI): not counted
+    sync(opts(), run); // published without the host's values, so the sync did not see them
+    write("README.md", "hello again\n");
+    commit("docs: readme");
+    const words = "a secret-shaped value in the tree:\ndocs/ops.md:1 (aws-profile)\ndocs/ops.md:2 (account-id)";
+    expect(() => check({ ...opts(), source: "HEAD", host }, run)).toThrow(words); // unchanged since the last sync: the whole tree
+    try {
+      check({ ...opts(), source: "HEAD", host }, run);
+    } catch (e) {
+      expect(String(e)).not.toContain("corp-admin");
+      expect(String(e)).not.toContain("2109" + "87654321");
+    }
+    expect(sync({ ...opts({ host }), dryRun: true }, run)).toContain("dry-run:"); // the sync reads the change only
+  });
+
+  test("check passes a tree whose secret-shaped value is only in an excluded file", () => {
+    write(".github/workflows/host.yml", "token: ghp_" + "a".repeat(36) + "\n");
+    commit("ci: host");
+    expect(check({ ...opts(), source: "HEAD" }, run)).toContain("public check: ok");
+    expect(() => check({ ...opts(), source: "HEAD", exclude: [] }, run)).toThrow(".github/workflows/host.yml:1 (github-token)");
   });
 
   test("check passes a tree whose private name is only in a rewritten or an excluded file, as the sync does", () => {
