@@ -20,6 +20,7 @@ import { addressKey, EDGE_HEADER, edgeOk, hostAllowed, isLoopback, isLoopbackAdd
 import { buildFeedbackPrompt, buildFixPrompt, buildNewRepoPrompt, feedbackTitle, fixTitle, newRepoTitle } from "./feedback.ts";
 import { measureFootprint } from "./footprint.ts";
 import { loadMcpPolicy, mcpServersFor, WorkspaceMcp } from "./mcp.ts";
+import { decisionsFromOtlp } from "./otel.ts";
 import { ApprovalRules, subjectsOf } from "./approval.ts";
 import { workspaceBrief } from "./brief.ts";
 import { judgeTurn } from "./judge.ts";
@@ -468,7 +469,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         writePolicies(db, recordUse(readPolicies(db), id, { at: Date.now(), askId: `approval:${task.id}:${ask.id}`, taskId: task.id, issue: issueOf(task), subject: { kind: "approval", op: ask.kind, target: v.match.subject, conditions: [], head: null } }));
       }
       return v;
-    }, pricing: pricingTable, defaultPermissionMode: savedDefaultMode, defaultShadowRunner: () => settings().shadowRunner, attachments, privateTmpRoot: join(cfg.home, "tmp"), deviceAuthEnv: (id) => ({ DEVICE_AUTH_URL: `${localUrl()}/api/tasks/${id}/device-auth`, DEVICE_AUTH_TOKEN_FILE: cfg.tokenPath, SWITCHBOARD_DAEMON_HOME: cfg.home, BACKLOG_URL: `${localUrl()}/api/backlog`, BACKLOG_TOKEN_FILE: cfg.tokenPath, ...localBacklogEnv(id) }), dockerEnv: (id) => ({ DOCKER_MARK_LABEL: `${LABEL_KEY}=${id}`, DOCKER_MARK_LOG: join(dockerLogDir, `${id}.jsonl`) }), maxStopResumes: () => settings().quotaAndResume.maxStopResumes, mcpServers: taskMcpServers, bedrock: (task) => { const b = bedrockOf(task.runner); if (b) bedrockTasks.add(task.id); else bedrockTasks.delete(task.id); return b; } });
+    }, pricing: pricingTable, defaultPermissionMode: savedDefaultMode, defaultShadowRunner: () => settings().shadowRunner, attachments, privateTmpRoot: join(cfg.home, "tmp"), deviceAuthEnv: (id) => ({ DEVICE_AUTH_URL: `${localUrl()}/api/tasks/${id}/device-auth`, DEVICE_AUTH_TOKEN_FILE: cfg.tokenPath, SWITCHBOARD_DAEMON_HOME: cfg.home, BACKLOG_URL: `${localUrl()}/api/backlog`, BACKLOG_TOKEN_FILE: cfg.tokenPath, ...localBacklogEnv(id) }), otelFor: (id) => ({ endpoint: `${localUrl()}/otel/${id}/v1/logs`, token: mcp.issue(id).token }), dockerEnv: (id) => ({ DOCKER_MARK_LABEL: `${LABEL_KEY}=${id}`, DOCKER_MARK_LOG: join(dockerLogDir, `${id}.jsonl`) }), maxStopResumes: () => settings().quotaAndResume.maxStopResumes, mcpServers: taskMcpServers, bedrock: (task) => { const b = bedrockOf(task.runner); if (b) bedrockTasks.add(task.id); else bedrockTasks.delete(task.id); return b; } });
   // Terminal sessions (#91): what Claude Code wrote to ~/.claude/projects while nobody in Switchboard was watching.
   const claudeDanger = new Set((adapters.find((a) => a.id === "claude")?.permissionModes ?? []).filter((m) => m.danger).map((m) => m.value));
   const history = new HistoryImporter(db, { projectsDir: cfg.claudeProjectsDir, pollMs: cfg.historyPollMs, pricing: pricingTable, broadcast, isLive: (id) => tasks.isLive(id), dangerModes: claudeDanger, log: (m) => console.warn(m) });
@@ -2322,6 +2323,22 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       // the per-task tokens too count only from this machine on the cloud host (#748): the runners call 127.0.0.1
       "/mcp/:id": (req, srv) => (tokenCounts(req, srv) ? mcp.handle(String(req.params.id), tokenFromRequest(req, true), req) : refused(req, srv, bad("unauthorized", 401))),
 
+      // A Claude Task's OpenTelemetry logs (#2236, docs/design/claude-otel.md): its MCP token, the classifier's decisions
+      // kept as the task's events and nothing else of the body, the rules row counted again (the logs come after the turn's end)
+      "/otel/:id/v1/logs": {
+        POST: async (req, srv) => {
+          const id = String(req.params.id);
+          if (!tokenCounts(req, srv) || !mcp.verify(id, tokenFromRequest(req, false))) return refused(req, srv, bad("unauthorized", 401));
+          const t = db.getTask(id);
+          // a released runner still flushes its last batch while it closes (its grace period); the token goes when it has
+          if (!t || !tasks.holdsProcess(id)) return bad("no live task", 404);
+          const decisions = decisionsFromOtlp(await req.json().catch(() => null));
+          for (const d of decisions) tasks.record(id, d);
+          if (decisions.length) countRules(t);
+          return json({});
+        },
+      },
+
       "/api/workspaces/clones": { GET: () => json(clones.list()) },
 
       "/api/workspaces": {
@@ -3672,7 +3689,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   // The CDN's origin header (#181) and, on loopback, the Host (#1135) come before everything, the open routes included: a
   // cloud host answers nothing to a request that went around CloudFront, a Mac nothing to a page on a rebinding name.
   function guardAll<T extends Routes>(routes: T): T {
-    return Object.fromEntries(Object.entries(routes).map(([path, h]) => [path, logged(path, limitedGuard(entryGuard(path === "/api/health" || path === "/ws" || path === "/ws/pty" || path.startsWith("/mcp/") || path.startsWith("/artifacts/") || (path === "/api/backlog/webhooks/github" && webhookOpen) ? (h as AnyHandler) : guard(h as AnyHandler))))])) as T;
+    return Object.fromEntries(Object.entries(routes).map(([path, h]) => [path, logged(path, limitedGuard(entryGuard(path === "/api/health" || path === "/ws" || path === "/ws/pty" || path.startsWith("/mcp/") || path.startsWith("/otel/") || path.startsWith("/artifacts/") || (path === "/api/backlog/webhooks/github" && webhookOpen) ? (h as AnyHandler) : guard(h as AnyHandler))))])) as T;
   }
 
   const stopAll = async (cleanExit: CleanExit = "shutdown") => {

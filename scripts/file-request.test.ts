@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { type FileDeps, fileRequest, openRequests } from "./file-request";
+import { commentRequest, type FileDeps, fileRequest, openRequests, requestText } from "./file-request";
 
 const TITLE = "定期の検査: モデル一覧のズレ";
 const LIST = { creates: [{ localId: "op_7f3a", title: "アプリだけの要望" }, { localId: "op_9c1d", title: "閉じた作成" }] };
@@ -77,4 +77,36 @@ describe("fileRequest", () => {
     expect(f.calls).toHaveLength(1);
     expect(f.calls[0]).toEqual(expect.arrayContaining(["gh", "api", expect.stringMatching(/^repos\/[^/]+\/[^/]+\/issues$/), "labels=type:request"]));
   });
+});
+
+test("fileRequest: request_issue.sh's output goes to `out` when given", async () => {
+  const f = fake();
+  const out: string[] = [];
+  expect(await fileRequest({ title: "新しい要望", body: "b" }, { ...f.deps, out: (o) => void out.push(o) })).toEqual({ filed: 3000 });
+  expect(out).toEqual([">> 要望を作成: #3000\n"]);
+});
+
+describe("commentRequest", () => {
+  test("アプリの Task: ops-kit backlog comment, a localId too; outside: gh issue comment, a number only", async () => {
+    const f = fake();
+    await commentRequest("#2875", "v2 で通った", f.deps);
+    await commentRequest("op_7f3a", "v2 で通った", f.deps);
+    expect(f.calls.map((c) => c.slice(2, 4).join(" "))).toEqual(["backlog comment", "backlog comment"]);
+    expect(f.calls.map((c) => c[4])).toEqual(["2875", "op_7f3a"]);
+    const g = fake({ env: { GH_REPO: "acme/app" } });
+    await commentRequest("#12", "x", g.deps);
+    expect(g.calls[0]!.slice(0, 4)).toEqual(["gh", "issue", "comment", "12"]);
+    await expect(commentRequest("op_7f3a", "x", g.deps)).rejects.toThrow("番号が無い");
+  });
+});
+
+test("requestText: the body and comments in the app's Task; gh issue view outside", async () => {
+  const f = fake();
+  const view = { issue: { body: "本文" }, comments: [{ body: "v2 で通った" }] };
+  const text = await requestText("#2875", { ...f.deps, exec: async (cmd) => (f.calls.push(cmd), { out: JSON.stringify(view), code: 0 }) });
+  expect(text).toContain("本文\nv2 で通った");
+  expect(f.calls[0]).toEqual(expect.arrayContaining(["backlog", "view", "2875", "--json"]));
+  const g = fake({ env: { GH_REPO: "acme/app" } });
+  await requestText("#12", { ...g.deps, exec: async (cmd) => (g.calls.push(cmd), { out: "本文\nx", code: 0 }) });
+  expect(g.calls[0]!.slice(0, 4)).toEqual(["gh", "issue", "view", "12"]);
 });

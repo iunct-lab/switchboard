@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY, workspace_id TEXT, title TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL,
   scope TEXT NOT NULL, status TEXT NOT NULL, runner_session_id TEXT, model TEXT, routing TEXT, budget_usd REAL, schedule_id TEXT,
-  permission_mode TEXT, effort TEXT, origin TEXT NOT NULL DEFAULT 'switchboard', resume_at INTEGER, resume_reason TEXT, shadow_of TEXT, shadow_stopped INTEGER NOT NULL DEFAULT 0, workspace_reason TEXT,
+  permission_mode TEXT, effort TEXT, origin TEXT NOT NULL DEFAULT 'switchboard', resume_at INTEGER, resume_reason TEXT, resume_window TEXT, resume_since INTEGER, resume_planned_at INTEGER, shadow_of TEXT, shadow_stopped INTEGER NOT NULL DEFAULT 0, workspace_reason TEXT,
   outcome TEXT NOT NULL DEFAULT 'unknown', reviewed_at INTEGER, archived_at INTEGER, judged_result TEXT, judged_reason TEXT, judged_by TEXT, judging_at INTEGER, stage_issue INTEGER, stage_action TEXT,
   status_at INTEGER NOT NULL, title_pending INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
@@ -853,10 +853,10 @@ export class Db {
     this.sqlite.transaction(() => {
       this.sqlite
         .query(
-          `INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, runner_session_id, model, routing, budget_usd, schedule_id, permission_mode, effort, origin, resume_at, resume_reason, shadow_of, shadow_stopped, workspace_reason, outcome, reviewed_at, archived_at, judged_result, judged_reason, judged_by, created_at, updated_at, execution_mode, cloud_session, source_cloud_task_id, stage_issue, stage_action, judging_at, status_at, title_pending)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, runner_session_id, model, routing, budget_usd, schedule_id, permission_mode, effort, origin, resume_at, resume_reason, resume_window, resume_since, resume_planned_at, shadow_of, shadow_stopped, workspace_reason, outcome, reviewed_at, archived_at, judged_result, judged_reason, judged_by, created_at, updated_at, execution_mode, cloud_session, source_cloud_task_id, stage_issue, stage_action, judging_at, status_at, title_pending)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(t.id, t.workspaceId, t.title, t.runner, t.cwd, JSON.stringify(t.scope), t.status, t.runnerSessionId, t.model, t.routing ? JSON.stringify(t.routing) : null, t.budgetUsd, t.scheduleId, t.permissionMode, t.effort, t.origin, t.resumeAt, t.resumeReason, t.shadowOf, t.shadowStopped ? 1 : 0, t.workspaceReason, t.outcome, t.reviewedAt, t.archivedAt, t.judgedResult, t.judgedReason, t.judgedBy, t.createdAt, t.updatedAt, t.executionMode, t.cloudSession ? JSON.stringify(t.cloudSession) : null, t.sourceCloudTaskId, t.stage?.issue ?? null, t.stage?.action ?? null, t.judgingAt, t.statusAt, t.titlePending ? 1 : 0);
+        .run(t.id, t.workspaceId, t.title, t.runner, t.cwd, JSON.stringify(t.scope), t.status, t.runnerSessionId, t.model, t.routing ? JSON.stringify(t.routing) : null, t.budgetUsd, t.scheduleId, t.permissionMode, t.effort, t.origin, t.resumeAt, t.resumeReason, t.resumeWindow, t.resumeSince, t.resumePlannedAt, t.shadowOf, t.shadowStopped ? 1 : 0, t.workspaceReason, t.outcome, t.reviewedAt, t.archivedAt, t.judgedResult, t.judgedReason, t.judgedBy, t.createdAt, t.updatedAt, t.executionMode, t.cloudSession ? JSON.stringify(t.cloudSession) : null, t.sourceCloudTaskId, t.stage?.issue ?? null, t.stage?.action ?? null, t.judgingAt, t.statusAt, t.titlePending ? 1 : 0);
       if (t.routing) {
         const logRow = this.sqlite.query("INSERT INTO routing_log (task_id, workspace_id, cwd, suggested, rule_id, reason, chosen, ts, suggested_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
         logRow.run(t.id, t.workspaceId, t.cwd, t.routing.suggested, t.routing.ruleId, t.routing.reason, t.runner, t.createdAt, "rule");
@@ -994,7 +994,7 @@ export class Db {
    * an `outcome` in the patch sets the outcome by rule (#492, `outcomeOnStatus` in task-status.ts) — the one place the rule lives. A status the table (`TASK_TRANSITIONS`) does
    * does not allow is not stored: it throws `InvalidTaskTransitionError` (#1140).
    */
-  updateTask(id: string, patch: Partial<Pick<Task, "sourceCloudTaskId" | "cloudSession" | "status" | "runnerSessionId" | "model" | "title" | "titlePending" | "budgetUsd" | "permissionMode" | "resumeAt" | "resumeReason" | "shadowStopped" | "scope" | "outcome" | "reviewedAt" | "archivedAt" | "judgedResult" | "judgedReason" | "judgedBy" | "judgingAt" | "updatedAt">>): Task | null {
+  updateTask(id: string, patch: Partial<Pick<Task, "sourceCloudTaskId" | "cloudSession" | "status" | "runnerSessionId" | "model" | "title" | "titlePending" | "budgetUsd" | "permissionMode" | "resumeAt" | "resumeReason" | "resumeWindow" | "resumeSince" | "resumePlannedAt" | "shadowStopped" | "scope" | "outcome" | "reviewedAt" | "archivedAt" | "judgedResult" | "judgedReason" | "judgedBy" | "judgingAt" | "updatedAt">>): Task | null {
     if (patch.cloudSession) CloudSessionRef.parse(patch.cloudSession);
     const cur = this.getTask(id);
     if (!cur) return null;
@@ -1008,8 +1008,8 @@ export class Db {
     const next: Task = { ...cur, ...rule, ...patch, ...shown, updatedAt, statusAt: moves ? updatedAt : cur.statusAt };
     this.validateCloudSource(next, cur);
     this.sqlite
-      .query("UPDATE tasks SET status = ?, runner_session_id = ?, model = ?, title = ?, title_pending = ?, budget_usd = ?, permission_mode = ?, resume_at = ?, resume_reason = ?, shadow_stopped = ?, scope = ?, outcome = ?, reviewed_at = ?, archived_at = ?, judged_result = ?, judged_reason = ?, judged_by = ?, judging_at = ?, updated_at = ?, status_at = ?, cloud_session = ?, source_cloud_task_id = ? WHERE id = ?")
-      .run(next.status, next.runnerSessionId, next.model, next.title, next.titlePending ? 1 : 0, next.budgetUsd, next.permissionMode, next.resumeAt, next.resumeReason, next.shadowStopped ? 1 : 0, JSON.stringify(next.scope), next.outcome, next.reviewedAt, next.archivedAt, next.judgedResult, next.judgedReason, next.judgedBy, next.judgingAt, next.updatedAt, next.statusAt, next.cloudSession ? JSON.stringify(next.cloudSession) : null, next.sourceCloudTaskId, id);
+      .query("UPDATE tasks SET status = ?, runner_session_id = ?, model = ?, title = ?, title_pending = ?, budget_usd = ?, permission_mode = ?, resume_at = ?, resume_reason = ?, resume_window = ?, resume_since = ?, resume_planned_at = ?, shadow_stopped = ?, scope = ?, outcome = ?, reviewed_at = ?, archived_at = ?, judged_result = ?, judged_reason = ?, judged_by = ?, judging_at = ?, updated_at = ?, status_at = ?, cloud_session = ?, source_cloud_task_id = ? WHERE id = ?")
+      .run(next.status, next.runnerSessionId, next.model, next.title, next.titlePending ? 1 : 0, next.budgetUsd, next.permissionMode, next.resumeAt, next.resumeReason, next.resumeWindow, next.resumeSince, next.resumePlannedAt, next.shadowStopped ? 1 : 0, JSON.stringify(next.scope), next.outcome, next.reviewedAt, next.archivedAt, next.judgedResult, next.judgedReason, next.judgedBy, next.judgingAt, next.updatedAt, next.statusAt, next.cloudSession ? JSON.stringify(next.cloudSession) : null, next.sourceCloudTaskId, id);
     return next;
   }
 
@@ -1644,6 +1644,9 @@ function migrate(db: Database) {
   if (!cols.has("origin")) db.exec("ALTER TABLE tasks ADD COLUMN origin TEXT NOT NULL DEFAULT 'switchboard'");
   if (!cols.has("resume_at")) db.exec("ALTER TABLE tasks ADD COLUMN resume_at INTEGER");
   if (!cols.has("resume_reason")) db.exec("ALTER TABLE tasks ADD COLUMN resume_reason TEXT");
+  if (!cols.has("resume_window")) db.exec("ALTER TABLE tasks ADD COLUMN resume_window TEXT");
+  if (!cols.has("resume_since")) db.exec("ALTER TABLE tasks ADD COLUMN resume_since INTEGER");
+  if (!cols.has("resume_planned_at")) db.exec("ALTER TABLE tasks ADD COLUMN resume_planned_at INTEGER");
   if (!cols.has("shadow_of")) db.exec("ALTER TABLE tasks ADD COLUMN shadow_of TEXT");
   const opCols = new Set((db.query("PRAGMA table_info(backlog_operations)").all() as Array<{ name: string }>).map((c) => c.name));
   if (!opCols.has("overwritten")) db.exec("ALTER TABLE backlog_operations ADD COLUMN overwritten TEXT");
@@ -1806,7 +1809,7 @@ export function abortOrphanedTasks(db: Db, now = Date.now(), maxStopResumes = MA
     for (const status of ["running", "waiting"] as const) {
       for (const t of db.listTasksByStatus(status)) {
         if (t.executionMode === "cloud") {
-          db.updateTask(t.id, { status: t.cloudSession ? "idle" : "error", runnerSessionId: null, resumeAt: null });
+          db.updateTask(t.id, { status: t.cloudSession ? "idle" : "error", runnerSessionId: null, resumeAt: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null });
           db.appendEvent(t.id, { t: "status", text: "前回の開始プロセスは終了しました。Cloud 作業の状態は未確認です。公式 Web で操作してください。" });
           ids.push(t.id); continue;
         }
@@ -1939,6 +1942,9 @@ function rowToTask(r: any): Task {
     origin: (r.origin ?? "switchboard") as TaskOrigin,
     resumeAt: r.resume_at ?? null,
     resumeReason: r.resume_reason ?? null,
+    resumeWindow: r.resume_window ?? null,
+    resumeSince: r.resume_since ?? null,
+    resumePlannedAt: r.resume_planned_at ?? null,
     shadowOf: r.shadow_of ?? null,
     shadowStopped: !!r.shadow_stopped,
     workspaceReason: r.workspace_reason ?? null,

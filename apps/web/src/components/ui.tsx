@@ -23,15 +23,22 @@ export const githubBudgetLow = (g: GithubBudget) => g.remaining / g.limit < 0.2;
 /**
  * A task stopped on the runner's usage limit (#102), or waiting for GitHub's API limit a turn met (#550, `reason`
  * github): when it can go on. Whether it goes on by itself is the runner's setting (Home). `compact` (the Rail, where
- * a dated time would leave no room for the title) keeps the time in the tooltip.
+ * a dated time would leave no room for the title) keeps the time in the tooltip. `plannedAt` (#2237): a long wait tries
+ * once at `resumeAt` and goes back to this time when refused.
  */
-export function ResumeTag(props: { resumeAt: Task["resumeAt"]; reason: Task["resumeReason"]; compact?: boolean }) {
+export function ResumeTag(props: { resumeAt: Task["resumeAt"]; reason: Task["resumeReason"]; plannedAt?: Task["resumePlannedAt"]; compact?: boolean }) {
   if (props.resumeAt === null) return null;
   const when = fmtClock(props.resumeAt);
   if (props.reason === "github")
     return (
       <span className="tag resume" title={`GitHub の API 上限（1 時間の枠）で待機。${when} に枠が戻る見込み（自動再開はランナーごとの設定。Task の Brief から今すぐ再開・取り消しができます）`}>
         {props.compact ? "GitHub 待ち" : `GitHub の上限待ち（${when} に再開）`}
+      </span>
+    );
+  if (props.plannedAt != null)
+    return (
+      <span className="tag resume" title={`ランナーの使用上限で停止。${when} に 1 回試し、だめなら ${fmtClock(props.plannedAt)} に再開（自動再開はランナーごとの設定。Task の Brief から今すぐ再開・取り消しができます）`}>
+        {props.compact ? "再開待ち" : `再開待ち ${when} に試す`}
       </span>
     );
   return (

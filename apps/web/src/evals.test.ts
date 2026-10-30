@@ -4,16 +4,16 @@ import type { EvalsSortKey } from "./evals.ts";
 import { endLabel, evalCells, evalFilterOptions, evalRowWarn, filterEvalRows, firstSortDir, fmtDuration, gapLabel, humanLabel, judgeAverage, judgeRows, metricRows, modelsLabel, sortEvalRows } from "./evals.ts";
 
 const rules = (over: Partial<RuleEval["metrics"]> = {}): RuleEval => ({
-  metrics: { turns: 2, toolCalls: 7, toolFailures: 0, errors: 0, asks: 1, denials: 0, stops: 0, stopReasons: {}, userInstructions: 1, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false, durationMs: 184_000, ...over },
-  status: "done", outcome: "unknown", costUsd: 0.0123, by: "rules@2", ts: 1,
+  metrics: { turns: 2, toolCalls: 7, toolFailures: 0, errors: 0, asks: 1, denials: 0, stops: 0, stopReasons: {}, userInstructions: 1, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false, durationMs: 184_000, classifier: null, ...over },
+  status: "done", outcome: "unknown", costUsd: 0.0123, by: "rules@3", ts: 1,
 });
 const evals = (r: RuleEval | null, judge: JudgeEval | null = null): TaskEvals => ({ rules: r, judge, human: null, models: [] });
 
 describe("evals rows (#1218)", () => {
   test("metricRows: the fixed order; a failure, error, denial or stop marks its row", () => {
     const rows = metricRows(evals(rules()));
-    expect(rows.map((r) => r.label)).toEqual(["ツール呼び出し", "失敗", "エラー", "追加指示", "承認 / 拒否", "停止", "デーモン停止", "ターン", "所要時間", "終わり方"]);
-    expect(rows.map((r) => r.value)).toEqual(["7", "0", "0", "1", "1 / 0", "0", "0", "2", "3 分 4 秒", "正常"]);
+    expect(rows.map((r) => r.label)).toEqual(["ツール呼び出し", "失敗", "エラー", "追加指示", "承認 / 拒否", "分類器", "停止", "デーモン停止", "ターン", "所要時間", "終わり方"]);
+    expect(rows.map((r) => r.value)).toEqual(["7", "0", "0", "1", "1 / 0", "不明", "0", "0", "2", "3 分 4 秒", "正常"]);
     expect(rows.some((r) => r.warn)).toBe(false);
     const bad = metricRows(evals(rules({ toolFailures: 2, errors: 1, denials: 1, stops: 3, stopReasons: { "usage-limit": 2, transient: 1 }, lastEnd: "error" })));
     expect(bad.filter((r) => r.warn).map((r) => r.label)).toEqual(["失敗", "エラー", "承認 / 拒否", "停止", "終わり方"]);
@@ -27,6 +27,15 @@ describe("evals rows (#1218)", () => {
     // an earlier stop, then a turn that failed by itself: both are marked
     expect(warns({ lastEnd: "aborted", daemonStops: 1, lastCutByDaemon: false })).toEqual(["デーモン停止", "終わり方"]);
     expect(metricRows(evals(rules({ daemonStops: 2 }))).find((r) => r.label === "デーモン停止")?.value).toBe("2");
+  });
+
+  test("metricRows: classifier — counts with categories, unknown when none (#2236)", () => {
+    const row = (classifier: RuleEval["metrics"]["classifier"]) => metricRows(evals(rules({ classifier }))).find((r) => r.label === "分類器");
+    // nothing recorded (Codex, not Auto): unknown, not zero
+    expect(row(null)).toEqual({ label: "分類器", value: "不明" });
+    expect(row({ allowed: 12, denied: 0, byCategory: {} })).toEqual({ label: "分類器", value: "通した 12 / 止めた 0" });
+    // the stopped ones per kind, the asks to the person as 人に確認
+    expect(row({ allowed: 5, denied: 3, byCategory: { "Irreversible Local Destruction": 2, asked: 1 } })?.value).toBe("通した 5 / 止めた 3（Irreversible Local Destruction 2, 人に確認 1）");
   });
 
   test("metricRows: nothing without a rules row", () => {

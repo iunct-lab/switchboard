@@ -71,12 +71,15 @@ export interface ClaudeAdapterOptions {
   claudeHome?: string;
 }
 
-/** Environment for the child: inherit everything except the parent's own Claude Code session markers. */
+/**
+ * Environment for the child: inherit everything except the parent's own Claude Code session markers and OpenTelemetry
+ * settings (a collector the user's shell points at must not get the Task's events; `otelEnv` adds the daemon's own).
+ */
 export function childEnv(base: NodeJS.ProcessEnv = process.env, extra: Record<string, string> = {}): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(base)) {
     if (v === undefined) continue;
-    if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_") || k === "CLAUDE_PID" || k === "CLAUDE_EFFORT") continue;
+    if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_") || k === "CLAUDE_PID" || k === "CLAUDE_EFFORT" || k.startsWith("OTEL_")) continue;
     env[k] = v;
   }
   return { ...env, ...extra };
@@ -89,6 +92,25 @@ export function childEnv(base: NodeJS.ProcessEnv = process.env, extra: Record<st
  */
 export function bedrockEnv(opts: Pick<StartOptions, "bedrock">): Record<string, string> {
   return opts.bedrock ? { CLAUDE_CODE_USE_BEDROCK: "1", AWS_REGION: opts.bedrock.region } : {};
+}
+
+/**
+ * Where the child sends its OpenTelemetry logs (#2236, docs/design/claude-otel.md): only the daemon's loopback port for
+ * this Task, with the Task's token. Metrics and traces are off; `classifier_category` needs `OTEL_LOG_TOOL_DETAILS`.
+ */
+export function otelEnv(opts: Pick<StartOptions, "otel">): Record<string, string> {
+  if (!opts.otel) return {};
+  return {
+    CLAUDE_CODE_ENABLE_TELEMETRY: "1",
+    OTEL_LOGS_EXPORTER: "otlp",
+    OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: "http/json",
+    OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: opts.otel.endpoint,
+    OTEL_EXPORTER_OTLP_HEADERS: `Authorization=Bearer ${opts.otel.token}`,
+    OTEL_LOG_TOOL_DETAILS: "1",
+    OTEL_METRICS_EXPORTER: "none",
+    OTEL_TRACES_EXPORTER: "none",
+    OTEL_LOGS_EXPORT_INTERVAL: "5000",
+  };
 }
 
 export function buildArgs(opts: StartOptions, extra: string[] = []): string[] {
@@ -105,6 +127,7 @@ export function buildArgs(opts: StartOptions, extra: string[] = []): string[] {
   if (opts.model) args.push("--model", opts.model);
   if (opts.effort) args.push("--effort", opts.effort); // the flag only: the parent's CLAUDE_EFFORT stays out (childEnv)
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
+  else if (opts.persistSession === false) args.push("--no-session-persistence"); // a resume needs the session file
   for (const dir of opts.scope) {
     if (dir && dir !== opts.cwd) args.push("--add-dir", dir);
   }
@@ -242,7 +265,7 @@ class ClaudeSession implements RunnerSession {
     const args = buildArgs(opts, extraArgs);
     this.proc = Bun.spawn([bin, ...args], {
       cwd: opts.cwd,
-      env: childEnv(process.env, { ...opts.env, ...bedrockEnv(opts) }),
+      env: childEnv(process.env, { ...opts.env, ...bedrockEnv(opts), ...otelEnv(opts) }),
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",

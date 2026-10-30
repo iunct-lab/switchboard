@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { countriesUrl, hasTypedText, hostStopped, loginRoute, sessionLabel, sessionRefreshDelay, STUCK_RESCUE, stoppedRoute, withoutFromAuth } from "./login.ts";
+import { countriesUrl, hasTypedText, logoutPath, hostStopped, loginRoute, sessionLabel, sessionRefreshDelay, STUCK_RESCUE, stoppedRoute, withoutFromAuth } from "./login.ts";
 
 describe("login route (#211)", () => {
   test("the daemon's login mode decides: passkey goes to /_auth/ with the way back, token asks for the token", () => {
@@ -50,6 +50,16 @@ describe("countries entry (#1639)", () => {
     expect(countriesUrl("passkey")).toBe("/_auth/#countries");
     expect(countriesUrl("token")).toBeNull();
     expect(countriesUrl(undefined)).toBeNull();
+  });
+});
+
+describe("logout entry (#1850)", () => {
+  test("logoutPath is only for the passkey login, and the service worker leaves it to the server", async () => {
+    expect(logoutPath("passkey")).toBe("/_auth/logout");
+    expect(logoutPath("token")).toBeNull();
+    expect(logoutPath(undefined)).toBeNull();
+    const sw = await Bun.file(new URL("../public/sw.js", import.meta.url)).text();
+    expect(new RegExp(sw.match(/const LIVE = \/(.+)\/;/)![1]!).test("/_auth/logout")).toBe(true);
   });
 });
 

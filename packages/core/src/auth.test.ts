@@ -304,6 +304,23 @@ describe("sb_session cookie", () => {
     }
   });
 
+  test("after the Starter's logout (#1850): no sb_session, or an emptied one, gets 401 and health still says passkey", async () => {
+    const core = await boot(KEY);
+    const base = `http://127.0.0.1:${core.server.port}`;
+    try {
+      const good = cookieOf(SEED, "pk1", Date.now() + 60_000);
+      expect((await fetch(`${base}/api/tasks`, { headers: { cookie: good } })).status).toBe(200);
+      // the Starter's POST /_auth/logout sets both cookies to "" with Max-Age=0: the browser then sends none, or an empty one
+      for (const headers of [{}, { cookie: `${SESSION_COOKIE}=` }, { cookie: `${SESSION_COOKIE}=; ${RECENT_COOKIE}=` }] as Record<string, string>[]) {
+        expect((await fetch(`${base}/api/tasks`, { headers })).status).toBe(401);
+        expect(await wsOpens(`ws://127.0.0.1:${core.server.port}/ws`, headers)).toBe(false);
+        expect(await (await fetch(`${base}/api/health`, { headers })).json()).toMatchObject({ authRequired: true, login: "passkey" }); // the Web UI sends this to /_auth/ (loginRoute)
+      }
+    } finally {
+      await core.stop();
+    }
+  });
+
   test("the cookie also opens /ws/pty's auth like /ws, never /mcp (per-task tokens); health says the login is a passkey", async () => {
     const core = await boot(KEY);
     const base = `http://127.0.0.1:${core.server.port}`;
@@ -669,7 +686,7 @@ describe("sb_session cookie", () => {
       const base = `http://127.0.0.1:${core.server.port}`;
       try {
         const ws = core.db.listWorkspaces()[0]!;
-        const task = (id: string) => ({ id, workspaceId: ws.id, title: id, runner: "claude" as const, cwd: ws.path, scope: [ws.path], status: "idle" as const, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto" as const, effort: null, origin: "switchboard" as const, resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown" as const, reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 });
+        const task = (id: string) => ({ id, workspaceId: ws.id, title: id, runner: "claude" as const, cwd: ws.path, scope: [ws.path], status: "idle" as const, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto" as const, effort: null, origin: "switchboard" as const, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown" as const, reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 });
         core.db.insertTask(task("tsk_a"));
         core.db.insertTask(task("tsk_b"));
         core.db.insertStaged({ id: "stg_1", taskId: "tsk_b", path: join(ws.path, "x"), rel: "x", kind: "modify", before: "", after: "", status: "pending", ts: 1, decidedAt: null, diff: "", stat: "" } as never);

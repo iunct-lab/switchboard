@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, test } from "bun:test";
 import { NO_HOST } from "../ops-kit/src/secrets";
-import { hidePaths, resolveRepo, resultSection, tagCi, tagCiExit, tagResult, TAG_CI_RESULT, type TagCiDeps } from "./tag-ci";
+import type { Filed, OpenRequest } from "./file-request";
+import { failedIn, failureRequest, followUp, hidePaths, REQUEST_TITLE, resolveRepo, resultSection, tagCi, tagCiExit, tagResult, TAG_CI_RESULT, type FollowDeps, type TagCiDeps } from "./tag-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
 const ciTs = await Bun.file(new URL("./ci.ts", import.meta.url)).text();
@@ -180,5 +181,158 @@ describe("tag-ci", () => {
     expect(tagResult(`[tag-ci] pass ${A}0`, A)).toBeNull();
     expect(TAG_CI_RESULT.exec(resultSection({ sha: A, ok: true }))?.slice(1)).toEqual(["pass", A]);
     expect(resultSection({ sha: A, ok: false, step: "s", fails: Array.from({ length: 30 }, (_, i) => `(fail) t${i}`) }).split("\n").filter((l) => l.startsWith("    (fail)"))).toHaveLength(20);
+  });
+});
+
+/**
+ * The request side over the fake clone: requests filed (an open one with the same title is not filed again, as
+ * fileRequest does), comments, and what --repo printed. `git log` answers two commits.
+ */
+function requests(f: ReturnType<typeof fake>) {
+  const open: OpenRequest[] = [];
+  const comments: Array<{ ref: string; body: string }> = [];
+  const printed: string[] = [];
+  const bodies: string[] = [];
+  const d: FollowDeps = {
+    sh: async (cmd, cwd, input) => (cmd.includes("log") ? "abc1234 fix: a\ndef5678 feat: b\n" : f.d.sh(cmd, cwd, input)),
+    log: () => undefined,
+    file: async (req): Promise<Filed> => {
+      const same = open.find((o) => o.title === req.title);
+      if (same) return { open: same.ref };
+      open.push({ ref: `#${100 + open.length}`, title: req.title });
+      bodies.push(req.body);
+      return { filed: 99 + open.length };
+    },
+    comment: async (ref, body) => void comments.push({ ref, body }),
+    open: async () => [...open, { ref: "#7", title: "要望: ほかの検査" }],
+    text: async (ref) => [bodies[Number(ref.slice(1)) - 100] ?? "", ...comments.filter((c) => c.ref === ref).map((c) => c.body)].join("\n"),
+    print: (t) => void printed.push(t),
+  };
+  return { d, open, comments, printed, bodies };
+}
+
+describe("tag-ci requests", () => {
+  test("a failing newest tag files a request with the tag, step, lines, last pass and commits", async () => {
+    const f = fake([{ tag: "v2.0.0", body: "", fail: testFail }, { tag: "v1.0.0", body: "" }]);
+    const q = requests(f);
+    await followUp(await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST), "o/r", "/repo", true, q.d, "2026-10-30", NO_HOST);
+    expect(q.open).toHaveLength(1);
+    expect(q.open[0]!.title).toStartWith(`${REQUEST_TITLE}bun test で落ちる（`);
+    const body = q.bodies[0]!;
+    for (const s of ["落ちたタグ: v2.0.0（200aaaa）", "手順: bun test", "  (fail) a > b", "最後に通ったタグ: v1.0.0", "その間のコミット（v1.0.0..v2.0.0）:", "  abc1234 fix: a", "- 誰の言葉: 定期の検査", "- いつ: 2026-10-30", "## 派生 PBI"]) expect(body).toContain(s);
+    // over: / raised: lines are lines as (fail) is
+    const over = failureRequest({ tag: "v3.0.0", sha: "c".repeat(40), step: "check", fails: ["over: launch.ms = 900 > 800", "raised: x = 2 (main 1)"], lastPass: null, commits: [] }, "2026-10-30", NO_HOST);
+    expect(over.body).toContain("  over: launch.ms = 900 > 800\n  raised: x = 2 (main 1)");
+    expect(over.body).toContain("最後に通ったタグ: 不明");
+  });
+
+  test("the same failure comments on the open request instead of filing", async () => {
+    const f = fake([{ tag: "v2.0.0", body: "", fail: testFail }, { tag: "v1.0.0", body: "" }]);
+    const q = requests(f);
+    await followUp(await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST), "o/r", "/repo", true, q.d, "2026-10-30", NO_HOST);
+    const g = fake([{ tag: "v3.0.0", body: "", fail: testFail }, { tag: "v2.0.0", body: `[tag-ci] fail ${shaOf("v2.0.0")}` }]);
+    await followUp(await tagCi(g.d, "o/r", "/repo", CACHE, NO_HOST), "o/r", "/repo", true, { ...q.d, sh: g.d.sh }, "2026-10-31", NO_HOST);
+    expect(q.open).toHaveLength(1);
+    expect(q.comments).toEqual([{ ref: "#100", body: `v3.0.0（${shaOf("v3.0.0").slice(0, 7)}）でも同じ失敗` }]);
+    // another step's failure is another request
+    const h = fake([{ tag: "v4.0.0", body: "", fail: { at: "bun run typecheck", output: "error TS1" } }, { tag: "v3.0.0", body: `[tag-ci] fail ${shaOf("v3.0.0")}` }]);
+    await followUp(await tagCi(h.d, "o/r", "/repo", CACHE, NO_HOST), "o/r", "/repo", true, { ...q.d, sh: h.d.sh }, "2026-10-31", NO_HOST);
+    expect(q.open).toHaveLength(2);
+  });
+
+  test("a pass comments on the open request once and does not close it", async () => {
+    const f = fake([{ tag: "v2.0.0", body: "", fail: testFail }, { tag: "v1.0.0", body: "" }]);
+    const q = requests(f);
+    await followUp(await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST), "o/r", "/repo", true, q.d, "2026-10-30", NO_HOST);
+    const g = fake([{ tag: "v3.0.0", body: "" }, { tag: "v2.0.0", body: `[tag-ci] fail ${shaOf("v2.0.0")}` }]);
+    await followUp(await tagCi(g.d, "o/r", "/repo", CACHE, NO_HOST), "o/r", "/repo", true, q.d);
+    // a second run finds v3's result and says nothing again
+    await followUp(await tagCi(g.d, "o/r", "/repo", CACHE, NO_HOST), "o/r", "/repo", true, q.d);
+    expect(q.comments).toEqual([{ ref: "#100", body: "v3.0.0 で通った" }]);
+    expect(q.open).toHaveLength(1);
+  });
+
+  test("a comment that failed to post is posted by the next run, once", async () => {
+    const f = fake([{ tag: "v2.0.0", body: "", fail: testFail }, { tag: "v1.0.0", body: "" }]);
+    const q = requests(f);
+    await followUp(await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST), "o/r", "/repo", true, q.d, "2026-10-30", NO_HOST);
+    const down = { ...q.d, comment: async () => { throw new Error("app down"); } };
+    // the same failure on v3: its comment fails, the next run (v3 read from before) posts it
+    const g = fake([{ tag: "v3.0.0", body: "", fail: testFail }, { tag: "v2.0.0", body: `[tag-ci] fail ${shaOf("v2.0.0")}` }]);
+    await expect(followUp(await tagCi(g.d, "o/r", "/repo", CACHE, NO_HOST), "o/r", "/repo", true, { ...down, sh: g.d.sh }, "2026-10-31", NO_HOST)).rejects.toThrow("app down");
+    for (let i = 0; i < 2; i++) await followUp(await tagCi(g.d, "o/r", "/repo", CACHE, NO_HOST), "o/r", "/repo", true, { ...q.d, sh: g.d.sh }, "2026-10-31", NO_HOST);
+    expect(q.comments).toEqual([{ ref: "#100", body: `v3.0.0（${shaOf("v3.0.0").slice(0, 7)}）でも同じ失敗` }]);
+    // a pass whose comment failed: the same
+    const h = fake([{ tag: "v4.0.0", body: "" }, { tag: "v3.0.0", body: `[tag-ci] fail ${shaOf("v3.0.0")}` }]);
+    await expect(followUp(await tagCi(h.d, "o/r", "/repo", CACHE, NO_HOST), "o/r", "/repo", true, down)).rejects.toThrow("app down");
+    for (let i = 0; i < 2; i++) await followUp(await tagCi(h.d, "o/r", "/repo", CACHE, NO_HOST), "o/r", "/repo", true, q.d);
+    expect(q.comments.at(-1)).toEqual({ ref: "#100", body: "v4.0.0 で通った" });
+    expect(q.comments).toHaveLength(2);
+  });
+
+  test("the last pass is read past a recorded fail, from the Releases", async () => {
+    const f = fake([{ tag: "v3.0.0", body: "", fail: testFail }, { tag: "v2.0.0", body: `[tag-ci] fail ${shaOf("v2.0.0")}` }, { tag: "v1.0.0", body: `[tag-ci] pass ${shaOf("v1.0.0")}` }]);
+    const q = requests(f);
+    await followUp(await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST), "o/r", "/repo", true, q.d, "2026-10-30", NO_HOST);
+    expect(q.bodies[0]).toContain("最後に通ったタグ: v1.0.0\nその間のコミット（v1.0.0..v3.0.0）:");
+  });
+
+  test("a recorded fail whose request was not filed files it on the next run, once, without a comment", async () => {
+    const f = fake([{ tag: "v2.0.0", body: "", fail: testFail }, { tag: "v1.0.0", body: "" }]);
+    const q = requests(f);
+    const first = await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST);
+    // filing failed on the run that recorded v2
+    await expect(followUp(first, "o/r", "/repo", true, { ...q.d, file: async () => { throw new Error("app down"); } }, "2026-10-30", NO_HOST)).rejects.toThrow("app down");
+    const again = await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST);
+    expect(again.map((x) => `${x.tag} ${x.ran}`)).toEqual(["v2.0.0 false"]);
+    await followUp(again, "o/r", "/repo", true, q.d, "2026-10-31", NO_HOST);
+    await followUp(again, "o/r", "/repo", true, q.d, "2026-10-31", NO_HOST);
+    expect(q.open).toHaveLength(1);
+    expect(q.comments).toEqual([]);
+    // read back from the Release, the failure has the title the run would have given it
+    expect(q.open[0]!.title).toBe(failureRequest({ tag: "v2.0.0", sha: shaOf("v2.0.0"), step: "bun test", fails: ["(fail) a > b"], lastPass: null, commits: [] }, "x", NO_HOST).title);
+    expect(failedIn(f.bodies.get("v2.0.0")!)).toEqual({ step: "bun test", fails: ["(fail) a > b"] });
+  });
+
+  test("the request body has no home path", async () => {
+    const leak = { at: "bun test", output: `(fail) reads ${join(CACHE, "x")}\n(fail) under /home/someone/work/a.ts and /Users/example/b.ts\n` };
+    const f = fake([{ tag: "v1.0.0", body: "", fail: leak }]);
+    const q = requests(f);
+    await followUp(await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST), "o/r", "/repo", true, q.d, "2026-10-30", NO_HOST);
+    const body = q.bodies[0]!;
+    expect(body).toContain("  (fail) under ~/work/a.ts and ~/b.ts");
+    for (const p of ["/home/", "/Users/"]) expect(body).not.toContain(p);
+    const r = failureRequest({ tag: "v1.0.0", sha: "a".repeat(40), step: "bun /home/someone/x.ts", fails: [], lastPass: "v0.9.0", commits: ["abc fix /root/y"] }, "2026-10-30", NO_HOST);
+    expect(`${r.title}\n${r.body}`).not.toMatch(/\/home\/|\/root\//);
+    // a value usable for auth leaves the step, lines and commits out
+    const key = "-----BEGIN " + "RSA PRIVATE KEY-----";
+    const k = failureRequest({ tag: "v1.0.0", sha: "a".repeat(40), step: "bun test", fails: [`(fail) ${key}`], lastPass: null, commits: [] }, "2026-10-30", NO_HOST);
+    expect(`${k.title}\n${k.body}`).not.toContain(key);
+    expect(k.body).toContain("認証に使える値が含まれるので書かない");
+    // a value in a commit subject leaves the body's detail out but not the title: the same failure keeps its title
+    const c = (commits: string[]) => failureRequest({ tag: "v1.0.0", sha: "a".repeat(40), step: "bun test", fails: ["(fail) a"], lastPass: "v0.9.0", commits }, "2026-10-30", NO_HOST);
+    expect(c([`abc fix ${key}`]).title).toBe(c(["abc fix"]).title);
+    expect(c([`abc fix ${key}`]).body).not.toContain(key);
+    // a value after the 20 lines a Release keeps does not change the title either (read back, those lines are gone)
+    const lines = Array.from({ length: 20 }, (_, i) => `(fail) t${i}`);
+    const at = (fails: string[]) => failureRequest({ tag: "v1.0.0", sha: "a".repeat(40), step: "bun test", fails, lastPass: null, commits: [] }, "2026-10-30", NO_HOST).title;
+    expect(at([...lines, `(fail) ${key}`])).toBe(at(lines));
+  });
+
+  test("--repo files no request and prints the body", async () => {
+    const f = fake([{ tag: "v1.0.0", body: "", fail: testFail }]);
+    const q = requests(f);
+    await followUp(await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST), "o/r", "/repo", false, q.d, "2026-10-30", NO_HOST);
+    expect(q.open).toHaveLength(0);
+    expect(q.printed).toHaveLength(1);
+    expect(q.printed[0]).toContain("落ちたタグ: v1.0.0");
+    // a later run that reads the recorded fail prints it again (the scheduled Task's stop has its reason every time)
+    await followUp(await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST), "o/r", "/repo", false, q.d, "2026-10-30", NO_HOST);
+    expect(q.printed).toHaveLength(2);
+    expect(q.open).toHaveLength(0);
+    // nor comments on a pass
+    const g = fake([{ tag: "v2.0.0", body: "" }]);
+    await followUp(await tagCi(g.d, "o/r", "/repo", CACHE, NO_HOST), "o/r", "/repo", false, q.d);
+    expect(q.comments).toEqual([]);
   });
 });

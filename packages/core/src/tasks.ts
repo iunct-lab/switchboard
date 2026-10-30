@@ -165,6 +165,8 @@ export interface TaskManagerOptions {
   artifacts?: ArtifactStore;
   /** Where the kit's `device-auth` sends a Task's approval wait (#662): added to the runner's environment. */
   deviceAuthEnv?: (taskId: string) => Record<string, string>;
+  /** Where a Task's runner sends its OpenTelemetry logs (#2236, docs/design/claude-otel.md): the daemon's loopback port and the Task's token. */
+  otelFor?: (taskId: string) => { endpoint: string; token: string };
   /** What the kit's `docker` front reads (#1418): the label for the task's containers and the file its compose projects are written to. */
   dockerEnv?: (taskId: string) => Record<string, string>;
   /** How many daemon stops in a row a turn is resumed after (#835, `quotaAndResume.maxStopResumes`). Absent = `MAX_STOP_RESUMES`. */
@@ -225,6 +227,7 @@ export class TaskManager {
   private artifacts: TaskManagerOptions["artifacts"];
   private privateTmpRoot: string | undefined;
   private deviceAuthEnv: TaskManagerOptions["deviceAuthEnv"];
+  private otelFor: TaskManagerOptions["otelFor"];
   private dockerEnv: TaskManagerOptions["dockerEnv"];
   private maxStopResumes: () => number;
   private mcpServers: TaskManagerOptions["mcpServers"];
@@ -253,6 +256,7 @@ export class TaskManager {
     this.artifacts = opts.artifacts;
     this.privateTmpRoot = opts.privateTmpRoot;
     this.deviceAuthEnv = opts.deviceAuthEnv;
+    this.otelFor = opts.otelFor;
     this.dockerEnv = opts.dockerEnv;
     this.maxStopResumes = opts.maxStopResumes ?? (() => MAX_STOP_RESUMES);
     this.mcpServers = opts.mcpServers;
@@ -512,10 +516,15 @@ export class TaskManager {
     return t;
   }
 
-  /** Plan (or forget) a resume after a usage-limit stop (#102) or a GitHub limit (#550, `reason`). Any turn that starts clears it. */
-  setResumeAt(taskId: string, resumeAt: number | null, reason: "limit" | "github" = "limit"): Task {
+  /**
+   * Plan (or forget) a resume after a usage-limit stop (#102) or a GitHub limit (#550, `reason`). Any turn that starts
+   * clears it. `wait` (#2237): the quota window that stopped the turn and when, for resuming early; and, when `resumeAt`
+   * is a try before a long wait, the time the wait goes back to (`plannedAt`). Absent = none.
+   */
+  setResumeAt(taskId: string, resumeAt: number | null, reason: "limit" | "github" = "limit", wait: { window?: string | null; since?: number | null; plannedAt?: number | null } = {}): Task {
     if (resumeAt !== null) this.requireLocal(this.mustGet(taskId));
-    const t = this.db.updateTask(taskId, { resumeAt, resumeReason: resumeAt === null ? null : reason });
+    const on = resumeAt !== null;
+    const t = this.db.updateTask(taskId, { resumeAt, resumeReason: on ? reason : null, resumeWindow: on ? (wait.window ?? null) : null, resumeSince: on ? (wait.since ?? null) : null, resumePlannedAt: on ? (wait.plannedAt ?? null) : null });
     if (!t) throw new Error(`task ${taskId} not found`);
     this.broadcast({ type: "task.updated", task: t });
     if (resumeAt === null) for (const l of this.planForgottenListeners) l(taskId);
@@ -582,7 +591,7 @@ export class TaskManager {
       permissionMode,
       effort,
       origin: "switchboard",
-      resumeAt: null, resumeReason: null,
+      resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null,
       shadowOf: null,
       shadowStopped: false,
       workspaceReason: input.workspaceReason ?? null,
@@ -697,7 +706,7 @@ export class TaskManager {
       permissionMode,
       effort: null, // another runner: its own list, so the CLI default (#833)
       origin: "switchboard",
-      resumeAt: null, resumeReason: null,
+      resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null,
       shadowOf: primary.id,
       shadowStopped: false,
       workspaceReason: primary.workspaceReason,
@@ -1064,7 +1073,7 @@ export class TaskManager {
       // Not made = the task does not start (the error below), never a Codex without the stop.
       const privateTmp = meta && task.runner === "codex" && this.privateTmpRoot ? makePrivateTmp(this.privateTmpRoot, task.id) : undefined;
       live.session = adapter.start(
-        { cwd: task.cwd, scope: task.scope, prompt, model: task.model ?? undefined, permissionMode: task.permissionMode ?? undefined, effort: task.effort ?? undefined, resumeSessionId, preamble, env, guards, allow, privateTmp, bedrock: this.bedrock?.(task), attachments, attachmentDir: this.attachments?.taskDir(task.id), mcpServers: this.mcpServers?.(task) },
+        { cwd: task.cwd, scope: task.scope, prompt, model: task.model ?? undefined, permissionMode: task.permissionMode ?? undefined, effort: task.effort ?? undefined, resumeSessionId, preamble, env, guards, allow, privateTmp, bedrock: this.bedrock?.(task), attachments, attachmentDir: this.attachments?.taskDir(task.id), mcpServers: this.mcpServers?.(task), otel: this.otelFor?.(task.id) },
         (ev) => this.onEvent(task.id, live, ev),
       );
     } catch (e) {
@@ -1095,7 +1104,7 @@ export class TaskManager {
   private updateCloudState(taskId: string): Task {
     const task = this.mustGet(taskId);
     // the outcome is the rule's (task-status.ts): a Cloud Task is never judged here, so unknown
-    const updated = this.transition(taskId, task.cloudSession ? "idle" : "error", { resumeAt: null, resumeReason: null, runnerSessionId: null })!;
+    const updated = this.transition(taskId, task.cloudSession ? "idle" : "error", { resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, runnerSessionId: null })!;
     this.broadcast({ type: "task.updated", task: updated });
     return updated;
   }
@@ -1373,7 +1382,7 @@ export class TaskManager {
    * The one place a task's status is written (#1140): checked against the table (task-status.ts) first, and `null`
    * when the move is not allowed, with the row untouched. The outcome follows by rule in `Db.updateTask`.
    */
-  private transition(taskId: string, status: Task["status"], extra: Partial<Pick<Task, "runnerSessionId" | "model" | "resumeAt" | "resumeReason">> = {}): Task | null {
+  private transition(taskId: string, status: Task["status"], extra: Partial<Pick<Task, "runnerSessionId" | "model" | "resumeAt" | "resumeReason" | "resumeWindow" | "resumeSince" | "resumePlannedAt">> = {}): Task | null {
     const cur = this.db.getTask(taskId);
     if (!cur || !canTransition(cur.status, status)) return null;
     return this.db.updateTask(taskId, { status, ...extra });

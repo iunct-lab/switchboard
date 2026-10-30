@@ -111,6 +111,14 @@ test("skills: a request is checked against the repository's premises before it b
   expect(step).toContain("同じ要望のほかの価値も、回答まで PBI にしない");
 });
 
+test("cross-runner-review: an extra reviewer that can be off says its switch in CLAUDE.md and is skipped, not tried, while off (2026-10-29)", () => {
+  const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
+  expect(text).toContain("有効の条件も CLAUDE.md に書く");
+  expect(text).toContain("条件が満たされないときは呼ばず");
+  expect(text).toContain("<extra>: 無効（<条件>）");
+  expect(text).toContain("CLAUDE.md が名指しし、有効の条件を満たしていれば");
+});
+
 /** cross-runner-review's step 1 before the clone, run as written with /tmp moved under `root` and a fake gh / df first on PATH. */
 function runCloneSweep(availKb: number) {
   const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");

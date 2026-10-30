@@ -20,12 +20,23 @@ export interface StartOptions {
   model?: string;
   /** Run on Amazon Bedrock in this region (#1730). Set only when the user chose it in the settings; the adapter turns it into its CLI's own variables. */
   bedrock?: { region: string };
+  /**
+   * The daemon's loopback endpoint for this Task's OpenTelemetry logs and the token it checks (#2236,
+   * docs/design/claude-otel.md). Claude Code sends its `tool_decision` events there; other runners ignore it.
+   */
+  otel?: { endpoint: string; token: string };
   /** Runner-native permission mode (one of RunnerAdapter.permissionModes). Unset = the adapter's default. */
   permissionMode?: string;
   /** Runner-native thinking effort (one of RunnerAdapter.efforts, #833). Unset = the CLI's own default. */
   effort?: string;
   /** Resume a previous runner session (runner-native id). */
   resumeSessionId?: string;
+  /**
+   * `false` = the runner keeps no record of the session on disk (#2908): a one-off turn that is never resumed, such as
+   * the daemon's judge and suggestion turns. Claude Code gets `--no-session-persistence` (not with `resumeSessionId`,
+   * which needs the session file); other runners ignore it. Unset = saved as before.
+   */
+  persistSession?: boolean;
   /**
    * Sent to the runner ahead of the first prompt but not shown as the user's message: the daemon's recap of the
    * task when the session to resume is not on this machine (#179).

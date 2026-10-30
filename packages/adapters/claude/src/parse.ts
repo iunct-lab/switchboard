@@ -140,6 +140,7 @@ export function mapClaudeMessage(m: Any, s: ClaudeParserState): AgentEvent[] {
           input: r.input,
           detail: typeof r.description === "string" && r.description ? r.description : summarizeToolInput(tool, r.input),
           toolUseId: str(r.tool_use_id),
+          ...(r.decision_reason_type === "classifier" ? { reason: "classifier" as const } : {}),
         });
       }
       break;

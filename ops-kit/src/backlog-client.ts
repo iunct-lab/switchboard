@@ -1,5 +1,9 @@
 import { readFileSync } from "node:fs";
-import { repoOf } from "./gh.ts";
+import { commentOnGithub, createOnGithub, editOnGithub, listFromGithub, viewFromGithub, type Project } from "./backlog-github.ts";
+import { projectOf, type OpsConfig } from "./config.ts";
+import { repoOf, type GhClient } from "./gh.ts";
+import { setField, UsageError } from "./set.ts";
+import { triage } from "./triage.ts";
 import { findSecrets, hostAws } from "./secrets.ts";
 
 /**
@@ -11,8 +15,9 @@ import { findSecrets, hostAws } from "./secrets.ts";
  * answers what is stored with its last sync and 「GitHub 未同期」. The app's address comes in `BACKLOG_URL`, its key in the file `BACKLOG_TOKEN_FILE` names.
  */
 
-export const BACKLOG_USAGE = `  backlog list [--fresh] [--json]
-      保存済みのバックログ（要望と PBI）を、取得の時刻と同期の状態つきで出す。GitHub には問い合わせない
+export const BACKLOG_USAGE = `  backlog list [--search <語>] [--label <l>]... [--state open|closed|all] [--fresh] [--json]
+      保存済みの Issue を、取得の時刻と同期の状態つきで出す（行: #番号 type OPEN|CLOSED Status 題）。GitHub には問い合わせない
+      --search: 題の部分一致（大文字小文字を区別しない）/ --label: すべてを持つもの / --state: 既定 open
   backlog view <issue> [--fresh] [--json]
       Issue 1 件（本文、コメント、Project のフィールド、送信待ち、同期の状態）。<issue> は番号か、ここで作ってまだ番号の無い Issue の localId
   backlog create --title <t> [--body-file <f|->] [--label <l>]... [--milestone <m>] [--parent <n>] [--field <name>=<value>]...
@@ -21,11 +26,14 @@ export const BACKLOG_USAGE = `  backlog list [--fresh] [--json]
   backlog comment <issue> --body-file <f|->
   backlog set <issue> <field> <value>
   backlog triage <issue> <area> <kind> <priority> [<phase>] [<parent>] [<status>]
-      編集はアプリに保存して返り、アプリが後で GitHub に送る（GitHub 連携の無い workspace ではその場で確定し、作成で番号が付く）。認証に使える値を含む文は送らない
+      編集はアプリに保存して返り、アプリが後で GitHub に送る（GitHub 連携の無い workspace ではその場で確定し、作成で番号が付く。
+      BACKLOG_URL が無ければ GitHub にその場で書く）。認証に使える値を含む文は送らない
       --fresh: アプリに送信と取込みを済ませてから答えさせる（着手・マージの判断の前、最新の回答を読むとき）。
       GitHub に届かなければ保存値と未同期の印（最終同期の時刻と「GitHub 未同期」、stderr）で答える（exit 0）
       exit 0 = できた、1 = 断られた（使い方の誤り・保存していない Issue・秘密の検出など）、2 = 判定できない（アプリに届かない、
-      まだ取り込んでいない）。BACKLOG_URL が無い環境（アプリの Task の外）は 2
+      まだ取り込んでいない）。BACKLOG_URL が無い環境（アプリの Task の外）では GitHub に直接つないで同じ形で出す・書く
+      （--fresh は何もしない、--workspace は 1、set / triage / --field は ops.config.json の Project）。
+      BACKLOG_URL があってアプリに届かなければ GitHub に切り替えず 2
       リポジトリは --workspace <id>、無ければ GH_REPO、無ければ BACKLOG_WORKSPACE（GitHub 連携の無い workspace の Task にアプリが渡す）、無ければ origin`;
 
 export interface BacklogIo {
@@ -47,6 +55,27 @@ const Unknown = BacklogUnknown;
 
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 
+/** One line of `backlog list`: `#<number>\t<type>\t<OPEN|CLOSED>\t<Status|->\t<title>` (type = the x of a `type:x` label, else `-`). */
+export function listRow(i: { number: number; title: string; state: string; labels: string[]; status: string | null }): string {
+  return `#${i.number}\t${typeOf(i.labels)}\t${i.state}\t${i.status ?? "-"}\t${i.title}`;
+}
+
+const typeOf = (labels: string[]) => labels.find((l) => l.startsWith("type:"))?.slice("type:".length) || "-";
+
+export interface ListFilter {
+  /** A part of the title, case-insensitive. */
+  search?: string;
+  /** Every one of these labels. */
+  labels: string[];
+  state: "open" | "closed" | "all";
+}
+
+/** The issues `backlog list` shows for `f`, by number (the app's stored order and GitHub's search order differ). */
+export function filterIssues<T extends { number: number; title: string; state: string; labels: string[] }>(issues: T[], f: ListFilter): T[] {
+  const word = f.search?.toLowerCase();
+  return issues.filter((i) => (f.state === "all" || i.state.toLowerCase() === f.state) && f.labels.every((l) => i.labels.includes(l)) && (!word || i.title.toLowerCase().includes(word))).sort((a, b) => a.number - b.number);
+}
+
 interface List {
   syncs: Sync[];
   items: Array<{ number: number; workspaceId: string; type: string; stage: string; projectStatus?: string | null; title: string }>;
@@ -60,7 +89,12 @@ interface Sync {
   sync: { state: string; reason: string | null; pendingCount: number };
 }
 
-export async function runBacklog(argv: string[], env: Record<string, string | undefined>, io: BacklogIo, opts: { fetch?: Fetch; cwd?: string; phase?: boolean } = {}): Promise<number> {
+/**
+ * `gh` / `project` / `config`: without BACKLOG_URL (outside the app's Task), the commands read and write GitHub itself
+ * through `gh`, with the Status of `project` (null = none: Status `-`) and the Project of `config` for set / triage /
+ * `--field` (it throws when there is none). With BACKLOG_URL, gh is never used, even when the app cannot be reached.
+ */
+export async function runBacklog(argv: string[], env: Record<string, string | undefined>, io: BacklogIo, opts: { fetch?: Fetch; cwd?: string; phase?: boolean; gh?: GhClient; project?: () => Promise<Project>; config?: () => Promise<OpsConfig> } = {}): Promise<number> {
   const args = [...argv];
   const take = (flag: string): string | undefined => {
     const at = args.indexOf(flag);
@@ -86,6 +120,27 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
     const fresh = has("--fresh");
     const asJson = has("--json");
     const api = client(env, opts.fetch ?? fetch);
+    // outside the app's Task: GitHub itself, in the same shape (#3071). Never when BACKLOG_URL is set and the app is down
+    const direct = !env.BACKLOG_URL && opts.gh ? { gh: opts.gh, project: opts.project ?? (async () => null) } : null;
+    // the Project's fields on GitHub need the repository's ops.config.json (its Project)
+    const config = async () => {
+      try {
+        if (!opts.config) throw new Error("設定がありません");
+        const c = await opts.config();
+        // a Project URL that cannot be read is refused here, before anything is written (create writes the Issue first)
+        projectOf(c, env);
+        return c;
+      } catch (e) {
+        throw new Refused(`GitHub の Project のフィールドを書くには ops.config.json（Project の URL）が要ります: ${(e as Error).message}`);
+      }
+    };
+    // what the Project's commands say on GitHub goes to stderr: stdout keeps the lines the app's answers give
+    const note = (s: string) => io.err(s);
+    if (direct && explicit !== undefined) throw new Refused("--workspace はアプリの Task の中だけ（BACKLOG_URL が無いので GitHub に直接つなぐ）");
+    const githubRepo = async () => {
+      const [owner, name] = (await repoName(env, opts.cwd)).split("/") as [string, string];
+      return { owner, name };
+    };
     const load = (imported = true) => findWorkspace(api, env, { workspace: explicit, cwd: opts.cwd, imported });
     const workspace = async (imported = true) => (await load(imported)).ws;
     const settle = async (ws: Sync) => {
@@ -108,20 +163,44 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
     };
     switch (sub) {
       case "list": {
-        if (args.length) throw new Refused("backlog list [--fresh] [--json]");
-        let { ws, list } = await load(!fresh);
-        if (fresh) await settle(ws), ({ ws, list } = await load());
-        const items = list.items.filter((i) => i.workspaceId === ws.workspaceId);
-        if (asJson) io.out(JSON.stringify({ ...ws, items }));
+        const search = take("--search");
+        const labels = takeAll("--label");
+        const state = take("--state") ?? "open";
+        if (args.length || !/^(open|closed|all)$/.test(state)) throw new Refused("backlog list [--search <語>] [--label <l>]... [--state open|closed|all] [--fresh] [--json]");
+        const filter: ListFilter = { search, labels, state: state as ListFilter["state"] };
+        if (direct) {
+          // GitHub's word search is wider than a part of the title: filtered again as the stored values are
+          const repo = await githubRepo();
+          const items = filterIssues(await listFromGithub(direct.gh, repo, await direct.project(), filter), filter).map((i) => ({ number: i.number, type: typeOf(i.labels), state: i.state, status: i.status, title: i.title, labels: i.labels }));
+          if (asJson) io.out(JSON.stringify({ repository: `${repo.owner}/${repo.name}`, source: "github", items }));
+          else {
+            io.out(`# ${repo.owner}/${repo.name}  GitHub から直接（アプリの保存値ではない）`);
+            for (const i of items) io.out(listRow(i));
+          }
+          return 0;
+        }
+        let ws = await workspace(!fresh);
+        if (fresh) await settle(ws), (ws = await workspace());
+        const records = (await api("GET", `/records?workspaceId=${encodeURIComponent(ws.workspaceId)}`)) as StoredRecords;
+        const items = filterIssues(records.issues, filter).map((i) => ({ number: i.number, type: typeOf(i.labels), state: i.state, status: (i.fields?.Status as string | null | undefined) ?? null, title: i.title, labels: i.labels }));
+        // what the last import could not read is kept as it was stored: shown, and said to be not current
+        const unread = items.filter((i) => records.unread.includes(i.number)).map((i) => i.number);
+        if (unread.length) io.err(`最後の取込みで読めていない Issue（保存値のまま。今の値ではない）: ${unread.map((n) => `#${n}`).join(", ")}（--fresh で取り込み直す）`);
+        if (asJson) io.out(JSON.stringify({ ...ws, items, unread }));
         else {
           io.out(freshness(ws));
-          for (const i of items) io.out(`#${i.number}\t${i.type}\t${i.stage}\t${i.projectStatus ?? "-"}\t${i.title}`);
+          for (const i of items) io.out(listRow(i));
         }
         return 0;
       }
       case "view": {
         const [ref, ...extra] = args;
         if (!ref || extra.length) throw new Refused("backlog view <issue> [--fresh] [--json]");
+        if (direct) {
+          const d = await viewFromGithub(direct.gh, await githubRepo(), await direct.project(), number(ref));
+          io.out(asJson ? JSON.stringify(d) : formatDetail(d));
+          return 0;
+        }
         let ws = await workspace(!fresh);
         if (fresh) await settle(ws), (ws = await workspace());
         const d = (await api("GET", `/${encodeURIComponent(issueRef(ref))}?workspaceId=${encodeURIComponent(ws.workspaceId)}`)) as Detail;
@@ -137,6 +216,12 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         const fields = Object.fromEntries(takeAll("--field").map(fieldPair));
         if (!title || args.length) throw new Refused("backlog create --title <t> [--body-file <f|->] [--label <l>]... [--milestone <m>] [--parent <n>] [--field <name>=<value>]...");
         noSecrets(title, body, milestone, ...labels, ...Object.values(fields).map(String));
+        if (direct) {
+          if (Object.keys(fields).length) await config();
+          const n = await createOnGithub(direct.gh, config, await githubRepo(), { title, body, labels, milestone, parent: parent ? number(parent) : null, fields }, note);
+          io.out(`#${n} を作りました（GitHub）`);
+          return 0;
+        }
         const ws = await workspace();
         const r = (await api("POST", "", { workspaceId: ws.workspaceId, title, body: body ?? "", labels, milestone: milestone ?? null, parent: parent ? number(parent) : null, fields: Object.keys(fields).length ? fields : null })) as { localId: string; number?: number | null };
         // a backlog kept in the app numbers it at once (#2265); GitHub's once it is sent
@@ -163,6 +248,11 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
           ...(parent !== undefined && { parent: parent === null ? null : number(parent) }),
         };
         if (!Object.keys(input).length) throw new Refused("変えるものを 1 つ以上渡してください");
+        if (direct) {
+          await editOnGithub(direct.gh, await githubRepo(), number(ref), { title, body, add, remove, ...(state !== undefined && { state: state.toUpperCase() as "OPEN" | "CLOSED" }), ...(milestone !== undefined && { milestone }), ...(parent !== undefined && { parent: parent === null ? null : number(parent) }) });
+          io.out(`#${number(ref)} を保存しました`);
+          return 0;
+        }
         return await edit(ref, input);
       }
       case "comment": {
@@ -170,6 +260,11 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         const body = await text(take("--body-file"));
         if (!ref || !body?.trim() || args.length) throw new Refused("backlog comment <issue> --body-file <f|->");
         noSecrets(body);
+        if (direct) {
+          await commentOnGithub(direct.gh, await githubRepo(), number(ref), body);
+          io.out(`#${number(ref)} にコメントを保存しました`);
+          return 0;
+        }
         const ws = await workspace();
         await api("POST", `/${number(ref)}/comment`, { workspaceId: ws.workspaceId, text: body });
         io.out(`#${number(ref)} にコメントを保存しました`);
@@ -179,6 +274,11 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         const [ref, field, value, ...extra] = args;
         if (!ref || !field || value === undefined || extra.length) throw new Refused("backlog set <issue> <field> <value>");
         noSecrets(value);
+        if (direct) {
+          await setField(direct.gh, await config(), number(ref), field, value, note);
+          io.out(`#${number(ref)} を保存しました`);
+          return 0;
+        }
         // GitHub's field type decides when it is sent (backlog-send.ts): a number only where the stored value is one
         const ws = await workspace();
         const d = (await api("GET", `/${encodeURIComponent(issueRef(ref))}?workspaceId=${encodeURIComponent(ws.workspaceId)}`)) as Detail;
@@ -190,6 +290,12 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         const phase = opts.phase ? tail.shift() : undefined;
         const [parent, status, ...extra] = tail;
         if (!ref || !area || !kind || !priority || (opts.phase && !phase) || extra.length) throw new Refused(`backlog triage <issue> <area> <kind> <priority> ${opts.phase ? "<phase> " : ""}[<parent>] [<status>]`);
+        noSecrets(area, kind, priority, phase, status);
+        if (direct) {
+          await triage(direct.gh, await config(), number(ref), { area, kind, priority, ...(phase !== undefined && { phase }), ...(parent ? { parent: number(parent) } : {}), status: status || "Backlog" }, note);
+          io.out(`#${number(ref)} を保存しました`);
+          return 0;
+        }
         const fields: Record<string, string> = { Area: area, Kind: kind, Priority: priority, ...(phase !== undefined && { Phase: phase }), Status: status || "Backlog" };
         return await edit(ref, { project: true, fields, ...(parent ? { parent: number(parent) } : {}) });
       }
@@ -198,7 +304,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
     }
   } catch (e) {
     io.err((e as Error).message);
-    return e instanceof Refused ? 1 : 2;
+    return e instanceof Refused || e instanceof UsageError ? 1 : 2;
   }
 }
 
@@ -311,7 +417,8 @@ function freshness(ws: Sync): string {
   return `# ${ws.repository ?? "?"}  最終取得 ${jst(ws.syncedAt)}  同期 ${ws.sync.state}${ws.sync.reason ? `（${ws.sync.reason}）` : ""}  送信待ち ${ws.sync.pendingCount}${ws.syncing ? "  取込み中" : ""}`;
 }
 
-interface Detail {
+/** One Issue as `backlog view` shows it: the app's stored one, or GitHub's own without BACKLOG_URL (`sync.state` "github"). */
+export interface Detail {
   issue: { number: number; title: string; state: string; labels: string[]; milestone: string | null; parent: number | null; body: string; url: string };
   comments: Array<{ id: string; body: string; createdAt: string }>;
   fields: Record<string, string | number | null> | null;
@@ -321,7 +428,7 @@ interface Detail {
   sync: { state: string; reason: string | null; lastSuccessfulSync: number | null };
 }
 
-function formatDetail(d: Detail): string {
+export function formatDetail(d: Detail): string {
   const i = d.issue;
   const at = d.sync.lastSuccessfulSync === null ? "未取得" : new Date(d.sync.lastSuccessfulSync).toLocaleString("sv-SE", { timeZone: "Asia/Tokyo" }) + " JST";
   return [

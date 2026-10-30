@@ -49,6 +49,16 @@ export const MAX_FALLBACK_DELAY_MS = 4 * 3600_000;
 export const PAST_GRACE_MS = 6 * 3600_000;
 /** A task that hits the limit this many turns in a row *after the daemon resumed it* stops being resumed (a misread time must not loop). */
 export const MAX_CONSECUTIVE_STOPS = 8;
+/**
+ * Runners whose limit may be ended before its time — an early report, a try (#2237): Claude only. Codex's limit detection is not verified yet
+ * (its wording is a guess), so its waits keep the planned time.
+ */
+const EARLY_RUNNERS: ReadonlySet<RunnerId> = new Set(["claude"]);
+/**
+ * A wait longer than this tries once at this point (#2237): a limit can lift before its reset (the 7-day window waits
+ * days), and a refused turn costs nothing (docs/design/rate-limit-resume.md, 早く解けた上限).
+ */
+export const PROBE_AFTER_MS = 6 * 3600_000;
 /** A window at this utilization is the one that stopped the turn (Claude reports > 1 while blocked). */
 const SATURATED = 0.999;
 
@@ -140,16 +150,17 @@ export interface QuotaWindow {
  * The reset of the window that stopped the turn: the one the runner names (`limitType`) when it is used up, else the
  * earliest used-up window (waiting for the later one would idle through the earlier one's reset; a second stop simply
  * plans again). Seconds or milliseconds accepted. A reset up to `PAST_GRACE_MS` in the past still counts (lifted late).
+ * With the reset, the window's name (#2237: a later report of it under 100 % resumes early).
  */
-export function resetFromQuota(windows: QuotaWindow[], now: number, limitType?: string): number | undefined {
+export function resetFromQuota(windows: QuotaWindow[], now: number, limitType?: string): { at: number; window: string } | undefined {
   const used = windows
     .filter((w) => w.utilization >= SATURATED)
     .map((w) => ({ window: w.window, at: w.resetsAt > 1e12 ? w.resetsAt : w.resetsAt * 1000 })) // Claude reports seconds
     .filter((w) => w.at > now - PAST_GRACE_MS);
   const named = limitType ? used.find((w) => w.window === limitType) : undefined;
-  if (named) return named.at;
-  let best: number | undefined;
-  for (const w of used) if (best === undefined || w.at < best) best = w.at;
+  if (named) return named;
+  let best: { at: number; window: string } | undefined;
+  for (const w of used) if (best === undefined || w.at < best.at) best = w;
   return best;
 }
 
@@ -193,6 +204,8 @@ export interface LimitStop {
   /** When the limit lifts (ms), if known; may be slightly in the past (lifted late). */
   resetsAt?: number;
   source: "quota" | "banner" | "none";
+  /** The quota window that stopped the turn (source "quota" only). */
+  window?: string;
 }
 
 /**
@@ -203,7 +216,7 @@ export function detectLimitStop(runner: RunnerId, texts: Array<string | undefine
   const text = texts.find((t) => isLimitText(runner, t));
   if (!text) return undefined;
   const fromQuota = resetFromQuota(quota, now, limitType);
-  if (fromQuota !== undefined) return { text, resetsAt: fromQuota, source: "quota" };
+  if (fromQuota !== undefined) return { text, resetsAt: fromQuota.at, source: "quota", window: fromQuota.window };
   const fromBanner = texts.map((t) => (t ? parseResetBanner(t, now) : undefined)).find((t) => t !== undefined);
   if (fromBanner !== undefined) return { text, resetsAt: fromBanner, source: "banner" };
   return { text, source: "none" };
@@ -260,6 +273,11 @@ export class RateLimitResumer {
   private stops = new Map<string, number>();
   /** Tasks whose current turn was started by the resumer (so its end can be told from a person's turn). */
   private resumedByUs = new Set<string>();
+  /**
+   * Tasks whose current turn is the one try before a long wait (#2237), with the time the wait goes back to when it is
+   * refused. In memory like `stops`: after a restart a refused try plans afresh.
+   */
+  private probing = new Map<string, number>();
   /** Tasks whose follow-up is being sent, so a tick during the await cannot send twice. */
   private sending = new Set<string>();
   /**
@@ -326,6 +344,8 @@ export class RateLimitResumer {
   /** Called on every turn end: records the stop (with the time) or forgets a task that got past it. */
   onTurnEnd(taskId: string, task: Task, turn: TurnEnd): void {
     const ours = this.resumedByUs.delete(taskId);
+    const probe = this.probing.get(taskId);
+    this.probing.delete(taskId);
     const now = this.now();
     // The turn's own quota report is the runner's view at the moment it stopped; the table (last report per runner,
     // any task) only when the turn had none. Read for a turn that ended on an error only.
@@ -342,6 +362,15 @@ export class RateLimitResumer {
       this.stops.delete(taskId);
       return;
     }
+    const wait = stop.window ? { window: stop.window, since: now } : {};
+    if (ours && probe !== undefined) {
+      // the one try before a long wait was refused: back to the planned time, no second try, not counted as a stop
+      const at = probe > now ? probe : planResumeAt(stop, now, 1, this.tunables());
+      this.tasks.setResumeAt(taskId, at, "limit", wait);
+      this.tasks.record(taskId, { t: "status", text: `使用上限で停止: ${stop.text}。試しは使用上限で断られました。元の予定の ${fmtTime(at, now)} に自動再開します` });
+      this.log(`ratelimit: ${taskId} probe refused; back to ${new Date(at).toISOString()}`);
+      return;
+    }
     const count = ours ? (this.stops.get(taskId) ?? 0) + 1 : 1;
     this.stops.set(taskId, count);
     const tunables = this.tunables();
@@ -351,7 +380,10 @@ export class RateLimitResumer {
       return;
     }
     const at = planResumeAt(stop, now, count, tunables);
-    this.tasks.setResumeAt(taskId, at);
+    // a long wait tries once first (#2237); with auto-resume off nothing would be sent, so it is planned as before
+    const enabled = this.opts.enabled(task.runner);
+    const tryAt = enabled && EARLY_RUNNERS.has(task.runner) && at - now > PROBE_AFTER_MS ? now + PROBE_AFTER_MS : undefined;
+    this.tasks.setResumeAt(taskId, tryAt ?? at, "limit", { ...wait, plannedAt: tryAt === undefined ? null : at });
     const when = fmtTime(at, now);
     const basis =
       stop.source === "quota"
@@ -363,9 +395,9 @@ export class RateLimitResumer {
             ? "リセット時刻は過ぎているのに止まったので少し待って再試行"
             : "リセット時刻は停止メッセージから"
           : `リセット時刻が分からないので ${Math.round((at - now) / 60_000)} 分後に試します`;
-    const action = this.opts.enabled(task.runner) ? `${when} に自動再開します` : `${when} に再開できます（自動再開は OFF — Home のランナー設定で ON にするか、返信で再開）`;
+    const action = tryAt !== undefined ? `${fmtTime(tryAt, now)} に 1 回試し、だめなら ${when} に自動再開します` : enabled ? `${when} に自動再開します` : `${when} に再開できます（自動再開は OFF — Home のランナー設定で ON にするか、返信で再開）`;
     this.tasks.record(taskId, { t: "status", text: `使用上限で停止: ${stop.text}。${action}。${basis}` });
-    this.log(`ratelimit: ${taskId} hit the ${task.runner} limit; resume at ${new Date(at).toISOString()} (${stop.source})`);
+    this.log(`ratelimit: ${taskId} hit the ${task.runner} limit; resume at ${new Date(tryAt ?? at).toISOString()} (${stop.source})`);
   }
 
   /**
@@ -407,12 +439,25 @@ export class RateLimitResumer {
     const now = this.now();
     const resumed: string[] = [];
     for (const t of this.db.listTasksWithResume()) {
-      if (t.resumeAt === null || t.resumeAt > now) continue;
+      if (t.resumeAt === null) continue;
+      const early = t.resumeAt > now && this.liftedEarly(t);
+      if (t.resumeAt > now && !early) continue;
       if (!this.opts.enabled(t.runner)) continue;
       if (t.status === "running" || t.status === "waiting" || this.sending.has(t.id)) continue;
+      if (early) this.tasks.record(t.id, { t: "status", text: `使用上限が予定（${fmtTime(t.resumePlannedAt ?? t.resumeAt, now)}）より早く戻ったと報告があったので再開します` });
       if (await this.resume(t)) resumed.push(t.id);
     }
     return resumed;
+  }
+
+  /**
+   * Lifted before its reset (#2237): the window that stopped the task was reported under 100 % after the stop (the
+   * `quota` table; any task of the runner reports it). A report from before the stop, or of another window, is not it.
+   */
+  private liftedEarly(t: Task): boolean {
+    if (!EARLY_RUNNERS.has(t.runner) || t.resumeReason === "github" || t.resumeWindow === null || t.resumeSince === null) return false;
+    const w = this.db.quotaFor(t.runner).find((q) => q.window === t.resumeWindow);
+    return w !== undefined && w.ts > t.resumeSince && w.utilization < SATURATED;
   }
 
   /** The person's "今すぐ再開": same follow-up, regardless of the time and the setting. */
@@ -439,6 +484,7 @@ export class RateLimitResumer {
     if (!t) throw new Error(`task ${taskId} not found`);
     this.stops.delete(taskId);
     this.resumedByUs.delete(taskId);
+    this.probing.delete(taskId);
     // a GitHub plan still waiting for its budget read is cancelled with it (#550)
     const pending = this.dropPending(taskId);
     if (t.resumeAt === null) {
@@ -465,6 +511,7 @@ export class RateLimitResumer {
     // Marked before the send: a runner may end the turn before send() returns (the fakes do), and the end must be
     // told from a person's turn.
     this.resumedByUs.add(t.id);
+    if (t.resumePlannedAt !== null) this.probing.set(t.id, t.resumePlannedAt);
     try {
       // The turn itself is the record ("[Switchboard 自動再開] …" as the user message). `asResume` makes send() give
       // up if a reply, 中断 or a cancel landed while a release was awaited.
@@ -478,6 +525,7 @@ export class RateLimitResumer {
       return true;
     } catch (e) {
       this.resumedByUs.delete(t.id);
+      this.probing.delete(t.id);
       if (e instanceof ResumeSupersededError) {
         this.log(`ratelimit: ${t.id} ${e.message}`);
         return false;
@@ -496,7 +544,9 @@ export class RateLimitResumer {
         this.tasks.recordStop(t.id, resumeStop({ evidence: msg, state: "exhausted", actions: tried }));
       } else {
         const at = this.now() + LATE_RETRY_MS;
-        this.tasks.setResumeAt(t.id, at, t.resumeReason ?? "limit"); // the same wait as before: a GitHub one stays one
+        // the same wait as before (a GitHub one stays one); only a report after this failure resumes it early, so the
+        // report that was just used does not cut the retry's delay short
+        this.tasks.setResumeAt(t.id, at, t.resumeReason ?? "limit", { window: t.resumeWindow, since: t.resumeWindow !== null ? this.now() : null, plannedAt: t.resumePlannedAt });
         this.tasks.record(t.id, { t: "status", text: `自動再開できませんでした（${msg}）。${fmtTime(at, this.now())} に再試行します` });
         this.tasks.recordStop(t.id, resumeStop({ evidence: msg, state: "waiting", conditions: [{ key: "resumeAt", value: new Date(at).toISOString(), met: false }], actions: tried }));
       }

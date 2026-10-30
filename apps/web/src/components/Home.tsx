@@ -666,7 +666,7 @@ export function Home(props: {
               <span className="t">{t.title}</span>
               <RunnerPill runner={t.runner} />
               <OriginTag origin={t.origin} />
-              <ResumeTag resumeAt={t.resumeAt} reason={t.resumeReason} />
+              <ResumeTag resumeAt={t.resumeAt} reason={t.resumeReason} plannedAt={t.resumePlannedAt} />
               <ShadowTag task={t} />
               <span className="m">{t.executionMode === "cloud" ? "Cloud・状態未確認" : t.status}</span>
             </button>

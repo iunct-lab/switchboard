@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { main } from "./cli.ts";
-import { fakeGh } from "./gh.ts";
+import { fakeGh, type FakeCall } from "./gh.ts";
 
 const config = join(import.meta.dir, "../fixtures/config-with-phase.json");
 let saved: string | undefined;
@@ -487,6 +487,231 @@ describe("request with BACKLOG_URL", () => {
       expect(app.posts).toHaveLength(0);
     } finally {
       app.stop();
+    }
+  });
+});
+
+describe("backlog without BACKLOG_URL (#3071)", () => {
+  // the same two Issues, stored in a fake app and answered by a fake GitHub
+  const pbi = { number: 12, title: "PBI: 題", state: "OPEN", labels: ["type:pbi", "area:one"], body: "本文の行", url: "https://github.com/example/repo/issues/12", milestone: "Phase 0 — 始まり", parent: null };
+  const task = { number: 13, title: "Task: 実装", state: "OPEN", labels: ["type:task"], body: "", url: "", milestone: null, parent: 12 };
+  const comment = { id: "IC_1", body: "## 回答\nはい", createdAt: "2026-10-29T00:00:00Z" };
+  const later = { id: "IC_101", body: "## 回答\n最新", createdAt: "2026-10-30T00:00:00Z" };
+  const fields = { Status: "Ready", "Story Points": 5, Notes: "メモ", Due: "2026-11-01" };
+  function fakeApp() {
+    const sync = { workspaceId: "ws_1", repository: "example/repo", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } };
+    const stored = (i: typeof pbi | typeof task, f: Record<string, string | number> | null) => ({ number: i.number, title: i.title, state: i.state, stateReason: null, body: i.body, labels: i.labels, parent: i.parent, subIssues: [], updatedAt: "", fields: f });
+    const server = Bun.serve({
+      port: 0,
+      fetch: (req) => {
+        const path = new URL(req.url).pathname.replace(/^\/api\/backlog/, "");
+        if (path === "") return Response.json({ syncs: [sync], items: [] });
+        if (path === "/records") return Response.json({ workspaceId: "ws_1", service: "github", repository: "example/repo", project: { owner: "example", number: 1 }, fetchedAt: 1, top: [], unread: [], pulls: [], issues: [stored(task, null), stored(pbi, fields)] });
+        return Response.json({ issue: { ...pbi, milestone: pbi.milestone }, comments: [comment, later], fields, fetchedAt: 1, localId: null, pending: 0, sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } });
+      },
+    });
+    return { url: `http://127.0.0.1:${server.port}/api/backlog`, stop: () => server.stop(true) };
+  }
+  // another Project, and another owner's Project of the same number, come first: only example/1 is read
+  const items = (f: Record<string, string | number> | null) => ({
+    nodes: [
+      { project: { number: 7, owner: { login: "example" } }, fieldValues: { nodes: [{ name: "Done", field: { name: "Status" } }] } },
+      { project: { number: 1, owner: { login: "other" } }, fieldValues: { nodes: [{ name: "Done", field: { name: "Status" } }] } },
+      ...(f ? [{ project: { number: 1, owner: { login: "Example" } }, fieldValues: { nodes: [{ name: f.Status, field: { name: "Status" } }, { number: f["Story Points"], field: { name: "Story Points" } }, { text: f.Notes, field: { name: "Notes" } }, { date: f.Due, field: { name: "Due" } }, {}] } }] : []),
+    ],
+  });
+  const ghIssue = (i: typeof pbi | typeof task, f: Record<string, string | number> | null) => ({ number: i.number, title: i.title, state: i.state, labels: { nodes: i.labels.map((name) => ({ name })) }, projectItems: items(f) });
+  const graphql = (c: FakeCall | undefined) => (c?.kind === "graphql" ? c : null);
+  const cli = async (argv: string[], env: Record<string, string | undefined>, responses: Parameters<typeof fakeGh>[0]) => {
+    const out: string[] = [];
+    const err: string[] = [];
+    const gh = fakeGh(responses);
+    const code = await main([...argv, "--config", config], gh, (s) => out.push(s), (s) => err.push(s), async () => {}, { ...process.env, BACKLOG_TOKEN_FILE: undefined, BACKLOG_WORKSPACE: undefined, GH_REPO: "example/repo", EXAMPLE_PROJECT_URL: undefined, ...env });
+    return { code, lines: out.join("\n").split("\n"), err: err.join("\n"), gh };
+  };
+
+  test("list and view read GitHub itself and show what the app shows for the same Issues", async () => {
+    const app = fakeApp();
+    try {
+      // GitHub's word search is wider than a part of the title: #13 comes back and is filtered out as in the app
+      const search = () => ({ search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [ghIssue(task, null), ghIssue(pbi, fields), {}] } });
+      const direct = await cli(["backlog", "list", "--label", "type:pbi"], { BACKLOG_URL: undefined }, [search]);
+      const stored = await cli(["backlog", "list", "--label", "type:pbi"], { BACKLOG_URL: app.url }, []);
+      expect([direct.code, stored.code]).toEqual([0, 0]);
+      expect(direct.lines[0]).toBe("# example/repo  GitHub から直接（アプリの保存値ではない）");
+      expect(direct.lines.slice(1)).toEqual(["#12\tpbi\tOPEN\tReady\tPBI: 題"]);
+      expect(direct.lines.slice(1)).toEqual(stored.lines.slice(1));
+      // by number on both: GitHub's search order and the app's stored order are not
+      const both = () => ({ search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [ghIssue(pbi, fields), ghIssue(task, null)] } });
+      expect((await cli(["backlog", "list"], { BACKLOG_URL: undefined }, [both])).lines.slice(1)).toEqual((await cli(["backlog", "list"], { BACKLOG_URL: app.url }, [])).lines.slice(1));
+      expect(graphql(direct.gh.calls[0])?.vars.q).toBe('repo:example/repo is:issue is:open label:"type:pbi"');
+      expect(stored.gh.calls).toHaveLength(0);
+      // --json: the same items, said to be GitHub's
+      const json = await cli(["backlog", "list", "--state", "all", "--search", "題", "--json"], { BACKLOG_URL: undefined }, [search]);
+      expect(JSON.parse(json.lines.join("\n"))).toEqual({ repository: "example/repo", source: "github", items: [{ number: 12, type: "pbi", state: "OPEN", status: "Ready", title: "PBI: 題", labels: ["type:pbi", "area:one"] }] });
+      expect(graphql(json.gh.calls[0])?.vars.q).toBe('repo:example/repo is:issue "題" in:title');
+
+      // the comments past the first page are read too
+      const issue = () => ({ repository: { issue: { ...ghIssue(pbi, fields), body: pbi.body, url: pbi.url, milestone: { title: pbi.milestone }, parent: null, comments: { pageInfo: { hasNextPage: true, endCursor: "c100" }, nodes: [comment] } } } });
+      const page2 = () => ({ repository: { issue: { comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [later] } } } });
+      const view = await cli(["backlog", "view", "12"], { BACKLOG_URL: undefined }, [issue, page2]);
+      const viewStored = await cli(["backlog", "view", "12"], { BACKLOG_URL: app.url }, []);
+      expect([view.code, viewStored.code]).toEqual([0, 0]);
+      // the title, labels and fields lines, the body and the comments: the same; only the freshness line differs
+      expect(view.lines.slice(0, 3)).toEqual(viewStored.lines.slice(0, 3));
+      expect(view.lines.slice(4)).toEqual(viewStored.lines.slice(4));
+      expect(view.lines[2]).toBe("fields: Status=Ready, Story Points=5, Notes=メモ, Due=2026-11-01");
+      expect(view.lines.slice(-2)).toEqual(["## 回答", "最新"]);
+      expect(graphql(view.gh.calls[1])?.vars).toEqual({ o: "example", n: "repo", num: 12, after: "c100" });
+      expect(view.lines[3]).toContain("同期 github  送信待ち 0");
+      expect(graphql(view.gh.calls[0])?.vars).toEqual({ o: "example", n: "repo", num: 12, after: null });
+    } finally {
+      app.stop();
+    }
+  });
+
+  test("without a Project, Status is -; --workspace is refused", async () => {
+    const noProject = join(mkdtempSync(join(tmpdir(), "ops-kit.no-project.")), "ops.config.json");
+    try {
+      const cfg = JSON.parse(readFileSync(config, "utf8"));
+      delete cfg.projectUrl;
+      writeFileSync(noProject, JSON.stringify(cfg));
+      const out: string[] = [];
+      // the variable that names the Project is not there: no Project, and the search asks for no Project fields
+      const gh = fakeGh([() => { throw new Error("variable not found"); }, () => ({ search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [ghIssue(pbi, null)] } })]);
+      expect(await main(["backlog", "list", "--config", noProject], gh, (s) => out.push(s), () => {}, async () => {}, { ...process.env, BACKLOG_URL: undefined, GH_REPO: "example/repo", EXAMPLE_PROJECT_URL: undefined })).toBe(0);
+      expect(out.slice(1)).toEqual(["#12\tpbi\tOPEN\t-\tPBI: 題"]);
+      expect(graphql(gh.calls[1])?.query).toContain("search(");
+      expect(graphql(gh.calls[1])?.query).not.toContain("projectItems");
+    } finally {
+      rmSync(dirname(noProject), { recursive: true, force: true });
+    }
+    const ws = await cli(["backlog", "list", "--workspace", "ws_1"], { BACKLOG_URL: undefined }, []);
+    expect([ws.code, ws.gh.calls.length]).toEqual([1, 0]);
+
+  });
+
+  test("a Project of @me is the signed-in user's: another owner's Project of the same number is not read", async () => {
+    const mine = join(mkdtempSync(join(tmpdir(), "ops-kit.me-project.")), "ops.config.json");
+    try {
+      writeFileSync(mine, JSON.stringify({ ...JSON.parse(readFileSync(config, "utf8")), owner: "@me" }));
+      const project = (owner: string, status: string) => ({ project: { number: 1, owner: { login: owner } }, fieldValues: { nodes: [{ name: status, field: { name: "Status" } }] } });
+      const gh = fakeGh([() => ({ viewer: { login: "Me" }, search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ ...ghIssue(pbi, null), projectItems: { nodes: [project("other", "Done"), project("me", "Ready")] } }] } })]);
+      const out: string[] = [];
+      expect(await main(["backlog", "list", "--config", mine], gh, (s) => out.push(s), () => {}, async () => {}, { ...process.env, BACKLOG_URL: undefined, GH_REPO: "example/repo", EXAMPLE_PROJECT_URL: undefined, EXAMPLE_PROJECT_OWNER: undefined })).toBe(0);
+      expect(out.slice(1)).toEqual(["#12\tpbi\tOPEN\tReady\tPBI: 題"]);
+      expect(graphql(gh.calls[0])?.query).toContain("viewer{ login }");
+    } finally {
+      rmSync(dirname(mine), { recursive: true, force: true });
+    }
+  });
+
+  test("create / edit / comment / set / triage write GitHub with gh and answer the lines the app's answers give", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ops-kit.backlog-write."));
+    try {
+      writeFileSync(join(dir, "body.md"), "作る本文");
+      const runOf = (c: FakeCall) => (c.kind === "run" ? c.args : []);
+      // the body goes in a file gh reads while it runs: read it there
+      const bodies: string[] = [];
+      const readBody = (c: FakeCall) => {
+        const args = runOf(c);
+        const at = args.indexOf("--body-file");
+        if (at >= 0) bodies.push(readFileSync(args[at + 1]!, "utf8"));
+      };
+      const projectAndIssue = (id: string) => ({ repositoryOwner: { projectV2: { id: "P1", field: { id: "F1", dataType: "SINGLE_SELECT", options: [{ id: "O2", name: "Ready" }] } } }, repository: { issue: { id, projectItems: { nodes: [{ id: "IT1", project: { number: 1 } }] } } } });
+
+      const create = await cli(["backlog", "create", "--title", "PBI: 新しい", "--body-file", join(dir, "body.md"), "--label", "type:pbi", "--milestone", "Phase 0 — 始まり", "--parent", "3", "--field", "Status=Ready"], { BACKLOG_URL: undefined }, [
+        (c) => (readBody(c), "https://github.com/example/repo/issues/21\n"),
+        () => ({ repository: { child: { id: "I21", parent: null }, parent: { id: "I3" } } }),
+        () => ({}),
+        () => projectAndIssue("I21"),
+        () => ({}),
+      ]);
+      expect([create.code, create.lines]).toEqual([0, ["#21 を作りました（GitHub）"]]);
+      // the line `request` and scripts/file-request.ts read
+      expect(create.lines[0]).toMatch(/^#(\d+) を作りました/);
+      expect(runOf(create.gh.calls[0]!).filter((a) => !a.includes("ops-kit.backlog-body."))).toEqual(["issue", "create", "-R", "example/repo", "--title", "PBI: 新しい", "--body-file", "--label", "type:pbi", "--milestone", "Phase 0 — 始まり"]);
+      expect(graphql(create.gh.calls[2])?.query).toContain("addSubIssue");
+      expect(graphql(create.gh.calls[2])?.vars).toEqual({ p: "I3", c: "I21", r: true });
+      expect(graphql(create.gh.calls[4])?.query).toContain("updateProjectV2ItemFieldValue");
+      expect(create.err).toContain("#21  Status = Ready");
+
+      const edit = await cli(["backlog", "edit", "12", "--title", "新しい題", "--add-label", "area:two", "--remove-label", "area:one", "--state", "closed", "--no-milestone"], { BACKLOG_URL: undefined }, [() => "", () => ""]);
+      expect([edit.code, edit.lines]).toEqual([0, ["#12 を保存しました"]]);
+      expect(edit.gh.calls.map(runOf)).toEqual([
+        ["issue", "edit", "12", "-R", "example/repo", "--title", "新しい題", "--add-label", "area:two", "--remove-label", "area:one", "--remove-milestone"],
+        ["issue", "close", "12", "-R", "example/repo"],
+      ]);
+      const parentless = await cli(["backlog", "edit", "13", "--body-file", join(dir, "body.md"), "--state", "open", "--no-parent"], { BACKLOG_URL: undefined }, [readBody, () => "", () => ({ repository: { child: { id: "I13", parent: { id: "I12" } } } }), () => ({})]);
+      expect(parentless.code).toBe(0);
+      expect(runOf(parentless.gh.calls[1]!)).toEqual(["issue", "reopen", "13", "-R", "example/repo"]);
+      expect(graphql(parentless.gh.calls[3])?.query).toContain("removeSubIssue");
+      expect(graphql(parentless.gh.calls[3])?.vars).toEqual({ p: "I12", c: "I13" });
+
+      const comment = await cli(["backlog", "comment", "12", "--body-file", join(dir, "body.md")], { BACKLOG_URL: undefined }, [(c) => (readBody(c), "")]);
+      expect([comment.code, comment.lines]).toEqual([0, ["#12 にコメントを保存しました"]]);
+      expect(runOf(comment.gh.calls[0]!).slice(0, 5)).toEqual(["issue", "comment", "12", "-R", "example/repo"]);
+      expect(bodies).toEqual(["作る本文", "作る本文", "作る本文"]);
+
+      const set = await cli(["backlog", "set", "12", "Status", "Ready"], { BACKLOG_URL: undefined }, [() => projectAndIssue("I12"), () => ({})]);
+      expect([set.code, set.lines]).toEqual([0, ["#12 を保存しました"]]);
+      expect(graphql(set.gh.calls[1])?.vars).toMatchObject({ p: "P1", i: "IT1", f: "F1", value: "O2" });
+
+      const select = (name: string, value: string) => ({ id: `F_${name}`, name, options: [{ id: `O_${value}`, name: value }] });
+      const triage = await cli(["backlog", "triage", "12", "one", "bug", "P1", "Phase 0", "", "Ready"], { BACKLOG_URL: undefined }, [
+        () => ({ repositoryOwner: { projectV2: { id: "P1", fields: { nodes: [select("Area", "one"), select("Kind", "bug"), select("Priority", "P1"), select("Phase", "Phase 0"), select("Status", "Ready")] } } }, repository: { issue: { id: "I12", projectItems: { nodes: [{ id: "IT1", project: { number: 1 } }] } } } }),
+        () => ({}),
+      ]);
+      expect([triage.code, triage.lines]).toEqual([0, ["#12 を保存しました"]]);
+      expect(graphql(triage.gh.calls[1])?.vars).toMatchObject({ o0: "O_one", o1: "O_bug", o2: "O_P1", o3: "O_Phase 0", o4: "O_Ready" });
+
+      // a value that signs in is refused before gh is asked
+      writeFileSync(join(dir, "secret.md"), "ghp_" + "a".repeat(36));
+      for (const argv of [["backlog", "create", "--title", "t", "--body-file", join(dir, "secret.md")], ["backlog", "comment", "12", "--body-file", join(dir, "secret.md")], ["backlog", "edit", "12", "--body-file", join(dir, "secret.md")]]) {
+        const r = await cli(argv, { BACKLOG_URL: undefined }, []);
+        expect([r.code, r.gh.calls.length]).toEqual([1, 0]);
+      }
+      // triage's values too: one that signs in never reaches gh, nor the lines it prints
+      const token = "ghp_" + "a".repeat(36);
+      const secret = await cli(["backlog", "triage", "12", token, "bug", "P1", "Phase 0"], { BACKLOG_URL: undefined }, []);
+      expect([secret.code, secret.gh.calls.length, secret.err.includes(token)]).toEqual([1, 0, false]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("set / triage / --field without a Project in ops.config.json are refused, and nothing is written", async () => {
+    const noProject = join(mkdtempSync(join(tmpdir(), "ops-kit.no-project.")), "ops.config.json");
+    try {
+      const cfg = JSON.parse(readFileSync(config, "utf8"));
+      delete cfg.projectUrl;
+      writeFileSync(noProject, JSON.stringify(cfg));
+      const novar = () => {
+        throw new Error("variable not found");
+      };
+      for (const argv of [["backlog", "set", "12", "Status", "Ready"], ["backlog", "triage", "12", "one", "bug", "P1", "Phase 0"], ["backlog", "create", "--title", "t", "--field", "Status=Ready"]]) {
+        const gh = fakeGh([novar]);
+        const err: string[] = [];
+        expect(await main([...argv, "--config", noProject], gh, () => {}, (s) => err.push(s), async () => {}, { ...process.env, BACKLOG_URL: undefined, GH_REPO: "example/repo", EXAMPLE_PROJECT_URL: undefined })).toBe(1);
+        expect(err.join("\n")).toContain("ops.config.json");
+        // only the read of the variable that would name the Project
+        expect(gh.calls.map((c) => c.kind === "run" && c.args[0])).toEqual(["variable"]);
+      }
+    } finally {
+      rmSync(dirname(noProject), { recursive: true, force: true });
+    }
+    // a Project URL that cannot be read is refused before the Issue is created
+    const bad = await cli(["backlog", "create", "--title", "t", "--field", "Status=Ready"], { BACKLOG_URL: undefined, EXAMPLE_PROJECT_URL: "https://example.com/not-a-project" }, []);
+    expect([bad.code, bad.gh.calls.length]).toEqual([1, 0]);
+    expect(bad.err).toContain("Project の URL が読めません");
+  });
+
+  test("an app that cannot be reached is not replaced by GitHub (exit 2, no gh call)", async () => {
+    for (const argv of [["backlog", "list"], ["backlog", "view", "12"], ["backlog", "comment", "12", "--body-file", config], ["backlog", "set", "12", "Status", "Ready"], ["backlog", "triage", "12", "one", "bug", "P1", "Phase 0"]]) {
+      const r = await cli(argv, { BACKLOG_URL: "http://127.0.0.1:1/api/backlog" }, []);
+      expect(r.code).toBe(2);
+      expect(r.err).toContain("アプリに届きません");
+      expect(r.gh.calls).toHaveLength(0);
     }
   });
 });

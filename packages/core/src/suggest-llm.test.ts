@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { AgentEvent, RoutingLogRow, RunnerAdapter, RunnerId, RunnerSession, StartOptions } from "@switchboard/protocol";
 import { createClaudeParser } from "@switchboard/adapter-claude";
 import type { RoutingContext } from "./routing.ts";
-import { buildPrompt, LlmSuggester, parseSuggestion } from "./suggest-llm.ts";
+import { buildPrompt, LlmSuggester, parseSuggestion, runSuggestionTurn } from "./suggest-llm.ts";
 
 // Recorded 2026-09-13 with Claude Code 2.1.269, `--model claude-haiku-4-5 --permission-mode plan`, fed the prompt
 // buildPrompt() produces for the context below. Washed: the `control_response` init line is dropped and `system/init`
@@ -99,6 +99,13 @@ describe("LlmSuggester (recorded Claude replay)", () => {
     expect(await run(text('{"thinking": "まよった", "answer": {"runner": "dak", "reason": "ローカル"}}'))).toMatchObject({ runner: "dak", reason: "ローカル" });
     // an answer that already arrived is not voided by a later ask or error (plan mode makes Claude reach for ExitPlanMode)
     expect(await run([{ t: "message.delta", role: "assistant", text: '{"runner": "codex", "reason": "済んだ"}' }, { t: "permission.ask", id: "p1", kind: "other", tool: "ExitPlanMode", detail: "計画を承認" }])).toMatchObject({ runner: "codex" });
+  });
+
+  test("runSuggestionTurn starts the runner with persistSession false (#2908)", async () => {
+    const starts: StartOptions[] = [];
+    const events: AgentEvent[] = [{ t: "message.delta", role: "assistant", text: "答え" }, { t: "session.end", status: "ok" }];
+    expect(await runSuggestionTurn({ adapter: replayAdapter(events, { starts }), cwd: "/tmp/h" }, "p", new AbortController().signal)).toBe("答え");
+    expect(starts[0]!.persistSession).toBe(false);
   });
 
   test("a runner that never answers is given up on when the caller aborts", async () => {

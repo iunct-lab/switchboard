@@ -53,7 +53,9 @@ export async function runSuggestionTurn(opts: SuggestionTurnOptions, prompt: str
   let failure: string | null = null;
   let done!: () => void;
   const finished = new Promise<void>((r) => (done = r));
-  const session = opts.adapter.start({ cwd: opts.cwd, scope: [opts.cwd], prompt, model: opts.model || undefined, permissionMode: opts.permissionMode, env: { [DAEMON_JOB_MARK]: "judge" } }, (ev) => {
+  // not saved (#2908): these turns run hundreds of times a day and would fill the 200 sessions `/insights` reads and
+  // ~/.claude/projects; nothing resumes them
+  const session = opts.adapter.start({ cwd: opts.cwd, scope: [opts.cwd], prompt, model: opts.model || undefined, permissionMode: opts.permissionMode, persistSession: false, env: { [DAEMON_JOB_MARK]: "judge" } }, (ev) => {
     if (ev.t === "message.delta" && ev.role === "assistant") out += ev.text;
     else if (ev.t === "usage" && ev.source === "reported") opts.onUsage?.(ev);
     // A suggestion turn must not ask for anything: it has no tools and nothing to approve. If the runner asks

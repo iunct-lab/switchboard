@@ -9,7 +9,7 @@ import { EffortSelect } from "./EffortSelect.tsx";
 import { notifyPermission } from "../notify.ts";
 import { EMPTY_PRICE_FORM, parsePriceForm, priceFormOf, type PriceForm } from "../priceForm.ts";
 import { addModel, moveModel, removeModel } from "../modelList.ts";
-import { countriesUrl } from "../login.ts";
+import { countriesUrl, logoutPath } from "../login.ts";
 import { presetRow } from "../presets.ts";
 import { listedRunners } from "../runners.ts";
 import { githubSyncText } from "../backlogSync.ts";
@@ -339,6 +339,12 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
           <a href={countriesUrl(props.health?.login)!}>国の一時許可を設定する</a>
         </section>
       )}
+      {logoutPath(props.health?.login) && (
+        <section className="card">
+          <h5>ログイン</h5>
+          <button onClick={() => void logout(logoutPath(props.health?.login)!, props.onError)}>ログアウト</button>
+        </section>
+      )}
     </main>
   );
 }
@@ -409,6 +415,16 @@ export function GithubSync() {
       <div className="hint">無効の間の編集は、有効にしたときに GitHub へ送ります。</div>
     </>
   );
+}
+
+async function logout(path: string, onError: (msg: string) => void) {
+  try {
+    const r = await fetch(path, { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: "{}" });
+    if (r.ok) location.assign("/_auth/");
+    else onError(`ログアウトできませんでした (${r.status})`);
+  } catch (e) {
+    onError(`ログアウトできませんでした (${(e as Error).message ?? e})`);
+  }
 }
 
 /** backlog-next's slots of each workspace (#561, #2656): what each firing reads, so a save applies from the next one. */

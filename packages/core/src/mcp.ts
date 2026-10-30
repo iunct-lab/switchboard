@@ -516,6 +516,12 @@ export class WorkspaceMcp {
     return { url: `${this.baseUrl()}/mcp/${taskId}`, token: ep.token };
   }
 
+  /** Whether `token` is the task's current endpoint token (the same check as `handle`): the OpenTelemetry route's (#2236). */
+  verify(taskId: string, token: string | null): boolean {
+    const ep = this.endpoints.get(taskId);
+    return !!ep && tokenEquals(token, ep.token);
+  }
+
   has(taskId: string): boolean {
     return this.endpoints.has(taskId);
   }
