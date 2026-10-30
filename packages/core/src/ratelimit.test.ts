@@ -6,7 +6,7 @@ import type { AgentEvent, RunnerAdapter, RunnerId, RunnerSession, StartOptions, 
 import { abortOrphanedTasks, Db } from "./db.ts";
 import { STOP_NOTE } from "./evals.ts";
 import { consecutiveStops, lastStopWasDaemon, MAX_STOP_RESUMES, STOP_RESUME_PROMPT } from "./interrupted.ts";
-import { FALLBACK_DELAY_MS, GITHUB_NOTE, GITHUB_RESUME_PROMPT, LATE_RETRY_MS, MAX_CONSECUTIVE_STOPS, MAX_FALLBACK_DELAY_MS, PAST_GRACE_MS, RESUME_MARGIN_MS, RESUME_PROMPT, RateLimitResumer, type ResumeTunables, detectLimitStop, fallbackNote, fallbackRunner, fmtTime, githubLimitHit, isLimitText, parseResetBanner, planResumeAt, resetFromQuota } from "./ratelimit.ts";
+import { FALLBACK_DELAY_MS, GITHUB_NOTE, GITHUB_RESUME_PROMPT, LATE_RETRY_MS, MAX_CONSECUTIVE_STOPS, MAX_FALLBACK_DELAY_MS, PAST_GRACE_MS, PROBE_AFTER_MS, RESUME_MARGIN_MS, RESUME_PROMPT, RateLimitResumer, type ResumeTunables, detectLimitStop, fallbackNote, fallbackRunner, fmtTime, githubLimitHit, isLimitText, parseResetBanner, planResumeAt, resetFromQuota } from "./ratelimit.ts";
 import { ResumeSupersededError, TaskManager } from "./tasks.ts";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
 
@@ -70,21 +70,22 @@ describe("rate limit: recognising the stop and its reset time (#102)", () => {
     const now = STOP_TS;
     const five = { window: "five_hour", utilization: 1.02, resetsAt: RESETS_AT };
     const week = { window: "seven_day", utilization: 1.0, resetsAt: WEEK_RESET };
-    expect(resetFromQuota([five, { window: "seven_day", utilization: 0.3, resetsAt: WEEK_RESET }], now)).toBe(RESETS_AT * 1000);
-    expect(resetFromQuota([{ window: "five_hour", utilization: 0.78, resetsAt: RESETS_AT }], now)).toBeUndefined();
-    expect(resetFromQuota([five, { window: "seven_day", utilization: 0.995, resetsAt: WEEK_RESET }], now)).toBe(RESETS_AT * 1000); // 99.5 % is not used up
-    expect(resetFromQuota([five, week], now)).toBe(RESETS_AT * 1000); // both used up, none named → the earlier reset
-    expect(resetFromQuota([five, week], now, "seven_day")).toBe(WEEK_RESET * 1000); // the runner says the weekly one binds
-    expect(resetFromQuota([five, week], now, "five_hour")).toBe(RESETS_AT * 1000);
-    expect(resetFromQuota([{ ...five, utilization: 0.5 }, week], now, "five_hour")).toBe(WEEK_RESET * 1000); // named but not used up → the other
-    expect(resetFromQuota([{ window: "five_hour", utilization: 1, resetsAt: Math.floor(now / 1000) - 60 }], now)).toBe((Math.floor(now / 1000) - 60) * 1000); // a minute ago: lifted late
-    expect(resetFromQuota([{ window: "five_hour", utilization: 1, resetsAt: Math.floor((now - PAST_GRACE_MS) / 1000) - 60 }], now)).toBeUndefined(); // stale
-    expect(resetFromQuota([{ window: "five_hour", utilization: 1, resetsAt: RESETS_AT * 1000 }], now)).toBe(RESETS_AT * 1000); // ms accepted too
+    expect(resetFromQuota([five, { window: "seven_day", utilization: 0.3, resetsAt: WEEK_RESET }], now)?.at).toBe(RESETS_AT * 1000);
+    expect(resetFromQuota([{ window: "five_hour", utilization: 0.78, resetsAt: RESETS_AT }], now)?.at).toBeUndefined();
+    expect(resetFromQuota([five, { window: "seven_day", utilization: 0.995, resetsAt: WEEK_RESET }], now)?.at).toBe(RESETS_AT * 1000); // 99.5 % is not used up
+    expect(resetFromQuota([five, week], now)?.at).toBe(RESETS_AT * 1000); // both used up, none named → the earlier reset
+    expect(resetFromQuota([five, week], now, "seven_day")?.at).toBe(WEEK_RESET * 1000); // the runner says the weekly one binds
+    expect(resetFromQuota([five, week], now, "seven_day")?.window).toBe("seven_day"); // with the window's name (#2237)
+    expect(resetFromQuota([five, week], now, "five_hour")?.at).toBe(RESETS_AT * 1000);
+    expect(resetFromQuota([{ ...five, utilization: 0.5 }, week], now, "five_hour")?.at).toBe(WEEK_RESET * 1000); // named but not used up → the other
+    expect(resetFromQuota([{ window: "five_hour", utilization: 1, resetsAt: Math.floor(now / 1000) - 60 }], now)?.at).toBe((Math.floor(now / 1000) - 60) * 1000); // a minute ago: lifted late
+    expect(resetFromQuota([{ window: "five_hour", utilization: 1, resetsAt: Math.floor((now - PAST_GRACE_MS) / 1000) - 60 }], now)?.at).toBeUndefined(); // stale
+    expect(resetFromQuota([{ window: "five_hour", utilization: 1, resetsAt: RESETS_AT * 1000 }], now)?.at).toBe(RESETS_AT * 1000); // ms accepted too
   });
 
   test("detection prefers the quota's time over the banner's, then the banner, then none; the plan: margin after a future reset, short retry after a passed one, doubling fallback when unknown", () => {
     const q = [{ window: "five_hour", utilization: 1.02, resetsAt: RESETS_AT + 300 }];
-    expect(detectLimitStop("claude", [BANNER], q, STOP_TS)).toEqual({ text: BANNER, resetsAt: (RESETS_AT + 300) * 1000, source: "quota" });
+    expect(detectLimitStop("claude", [BANNER], q, STOP_TS)).toEqual({ text: BANNER, resetsAt: (RESETS_AT + 300) * 1000, source: "quota", window: "five_hour" });
     expect(detectLimitStop("claude", [BANNER], [], STOP_TS)).toEqual({ text: BANNER, resetsAt: RESETS_AT * 1000, source: "banner" });
     expect(detectLimitStop("claude", ["runner exited (1)", "API Error: 429 rate_limit_error"], [], STOP_TS)).toEqual({ text: "API Error: 429 rate_limit_error", source: "none" });
     expect(detectLimitStop("claude", ["runner exited (1)"], q, STOP_TS)).toBeUndefined(); // a used-up quota alone is not a stop
@@ -201,12 +202,132 @@ describe("rate limit: RateLimitResumer (#102)", () => {
     expect(await resumer.tick()).toEqual([]); // nothing left
   });
 
+  test("lifted early: a report under 100% after the stop resumes on the next tick; a report from before the stop does not", async () => {
+    boot([LIMIT_TURN, OK_TURN]);
+    const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
+    await settle();
+    let cur = db.getTask(t.id)!;
+    expect(cur.resumeAt).toBe(RESETS_AT * 1000 + RESUME_MARGIN_MS);
+    expect(cur.resumeWindow).toBe("five_hour"); // the window that stopped it, and when
+    expect(cur.resumeSince).toBe(STOP_TS);
+    // a report from before the stop, and another window under 100 % after it: not the signal
+    db.upsertQuota("claude", "five_hour", 0.4, RESETS_AT, STOP_TS - 1000);
+    db.upsertQuota("claude", "seven_day", 0.3, WEEK_RESET, STOP_TS + 1000);
+    now = STOP_TS + 60_000;
+    expect(await resumer.tick()).toEqual([]);
+    // the same window at 100 % after the stop: still used up
+    db.upsertQuota("claude", "five_hour", 1, RESETS_AT, STOP_TS + 2000);
+    expect(await resumer.tick()).toEqual([]);
+    // under 100 % after the stop, but the setting is off: nothing is sent
+    db.upsertQuota("claude", "five_hour", 0.4, RESETS_AT, STOP_TS + 3000);
+    enabled = false;
+    expect(await resumer.tick()).toEqual([]);
+    // on, but the send fails for a passing reason: the 5-minute retry is not cut short by the same report
+    enabled = true;
+    ctl.failSend = true;
+    expect(await resumer.tick()).toEqual([]);
+    expect(db.getTask(t.id)!.resumeAt).toBe(now + LATE_RETRY_MS);
+    now += 30_000;
+    expect(await resumer.tick()).toEqual([]);
+    // a report after the failed send: the next tick sends once, before the planned time, and says why
+    db.upsertQuota("claude", "five_hour", 0.4, RESETS_AT, now + 1);
+    now += 30_000;
+    expect(await resumer.tick()).toEqual([t.id]);
+    await settle();
+    expect(sends).toEqual([RESUME_PROMPT]);
+    expect(statuses(t.id).filter((x) => x.includes("より早く戻った"))).toHaveLength(2); // the failed try and the sent one
+    expect(statuses(t.id).at(-1)).toBe(`使用上限が予定（${fmtTime(now - 30_000 + LATE_RETRY_MS, now)}）より早く戻ったと報告があったので再開します`);
+    cur = db.getTask(t.id)!;
+    expect([cur.resumeAt, cur.resumeWindow, cur.resumeSince]).toEqual([null, null, null]);
+    expect(await resumer.tick()).toEqual([]);
+    // Codex's limit is out of scope (its detection is unverified): the same report leaves its wait alone
+    db.insertTask({ ...db.getTask(t.id)!, id: "t_codex", runner: "codex", status: "error", resumeAt: now + 3_600_000, resumeReason: "limit", resumeWindow: "five_hour", resumeSince: now - 1 });
+    db.upsertQuota("codex", "five_hour", 0.4, RESETS_AT, now);
+    expect(await resumer.tick()).toEqual([]);
+    expect(db.getTask("t_codex")!.resumeAt).toBe(now + 3_600_000); // not tried (a try would fail here and move it)
+    expect(statuses("t_codex")).toEqual([]);
+  });
+
+  test("probe: a wait over 6 h tries once at 6 h; refused, it goes back to the reset + 60 s and does not count toward maxLimitStops", async () => {
+    const weekReset = Math.floor(STOP_TS / 1000) + 5 * 24 * 3600; // the 7-day window, 5 days away
+    const weekly: AgentEvent = { t: "quota", runner: "claude", windows: { five_hour: { utilization: 0.1, resetsAt: RESETS_AT }, seven_day: { utilization: 1.01, resetsAt: weekReset } }, status: "rejected", limitType: "seven_day" };
+    const weekTurn: AgentEvent[] = [LIMIT_TURN[0]!, weekly, LIMIT_TURN[2]!, LIMIT_TURN[3]!];
+    boot([weekTurn, weekTurn, OK_TURN]);
+    // one stop in a row is the cap: a counted refusal of the probe would give up
+    resumer.stop();
+    resumer = new RateLimitResumer(db, tasks, { enabled: () => enabled, now: () => now, tunables: () => ({ retryDelayMs: FALLBACK_DELAY_MS, retryMaxDelayMs: MAX_FALLBACK_DELAY_MS, maxLimitStops: 1, resumePrompt: "続けて" }) });
+    resumer.start(3_600_000);
+    const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
+    await settle();
+    const planned = weekReset * 1000 + RESUME_MARGIN_MS;
+    let cur = db.getTask(t.id)!;
+    expect([cur.resumeAt, cur.resumePlannedAt]).toEqual([STOP_TS + PROBE_AFTER_MS, planned]);
+    expect(statuses(t.id).at(-1)).toContain(`${fmtTime(STOP_TS + PROBE_AFTER_MS, now)} に 1 回試し、だめなら ${fmtTime(planned, now)} に自動再開します`);
+    now = STOP_TS + PROBE_AFTER_MS - 1;
+    expect(await resumer.tick()).toEqual([]);
+    // at 6 h: one try; the runner refuses again
+    now = STOP_TS + PROBE_AFTER_MS;
+    expect(await resumer.tick()).toEqual([t.id]);
+    await settle();
+    expect(sends).toEqual([`${AUTO_RESUME_HEAD} 続けて`]);
+    cur = db.getTask(t.id)!;
+    expect([cur.resumeAt, cur.resumePlannedAt]).toEqual([planned, null]); // back to the reset + 60 s, no second try
+    expect(statuses(t.id).at(-1)).toContain(`試しは使用上限で断られました。元の予定の ${fmtTime(planned, now)} に自動再開します`);
+    expect(statuses(t.id).join("\n")).not.toContain("これ以上は再開しません"); // the probe did not use up maxLimitStops
+    // the planned time: sent, and the turn goes on
+    now = planned;
+    expect(await resumer.tick()).toEqual([t.id]);
+    await settle();
+    expect(sends).toHaveLength(2);
+    expect(db.getTask(t.id)!.status).toBe("done");
+  });
+
+  test("probe: an early report during a wait with a try names the reset, and a refusal goes back to it", async () => {
+    const weekReset = Math.floor(STOP_TS / 1000) + 5 * 24 * 3600;
+    const weekly: AgentEvent = { t: "quota", runner: "claude", windows: { seven_day: { utilization: 1.01, resetsAt: weekReset } }, status: "rejected", limitType: "seven_day" };
+    const weekTurn: AgentEvent[] = [LIMIT_TURN[0]!, weekly, LIMIT_TURN[2]!, LIMIT_TURN[3]!];
+    boot([weekTurn, weekTurn]);
+    const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
+    await settle();
+    const planned = weekReset * 1000 + RESUME_MARGIN_MS;
+    db.upsertQuota("claude", "seven_day", 0.4, weekReset, STOP_TS + 1000);
+    now = STOP_TS + 60_000;
+    expect(await resumer.tick()).toEqual([t.id]);
+    await settle();
+    expect(statuses(t.id)).toContain(`使用上限が予定（${fmtTime(planned, now)}）より早く戻ったと報告があったので再開します`);
+    expect(db.getTask(t.id)!).toMatchObject({ resumeAt: planned, resumePlannedAt: null });
+  });
+
+  test("probe: a wait of 6 h or less, with auto-resume off, or on Codex, plans the reset as before", async () => {
+    const weekReset = Math.floor(STOP_TS / 1000) + 5 * 24 * 3600;
+    const weekly: AgentEvent = { t: "quota", runner: "claude", windows: { seven_day: { utilization: 1.01, resetsAt: weekReset } }, status: "rejected", limitType: "seven_day" };
+    boot([LIMIT_TURN, [LIMIT_TURN[0]!, weekly, LIMIT_TURN[2]!, LIMIT_TURN[3]!]]);
+    const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" }); // the 5-hour window: 4 h 40 min away
+    await settle();
+    expect(db.getTask(t.id)!).toMatchObject({ resumeAt: RESETS_AT * 1000 + RESUME_MARGIN_MS, resumePlannedAt: null });
+    enabled = false; // nothing would be sent at 6 h
+    const t2 = tasks.create({ cwd: home, title: "t2", prompt: "go", runner: "claude" });
+    await settle();
+    expect(db.getTask(t2.id)!).toMatchObject({ resumeAt: weekReset * 1000 + RESUME_MARGIN_MS, resumePlannedAt: null });
+    // Codex: out of scope (its limit detection is unverified) — no try even with auto-resume on
+    enabled = true;
+    const codexTurn: AgentEvent[] = [{ t: "session.start", runner: "codex", runnerSessionId: "c-1", cwd: "/tmp" }, { t: "quota", runner: "codex", windows: { weekly: { utilization: 1.01, resetsAt: weekReset } }, status: "rejected", limitType: "weekly" }, { t: "session.end", status: "error", summary: "You've reached your usage limit. Try again later." }];
+    const codex = new TaskManager(db, new Map([["codex", { ...fakeAdapter([codexTurn], [], []), id: "codex" }]]), () => undefined, { idleMs: -1 });
+    const r2 = new RateLimitResumer(db, codex, { enabled: () => enabled, now: () => now });
+    r2.start(3_600_000);
+    const c = codex.create({ cwd: home, title: "c", prompt: "go", runner: "codex" });
+    await settle();
+    expect(db.getTask(c.id)!).toMatchObject({ resumeAt: weekReset * 1000 + RESUME_MARGIN_MS, resumePlannedAt: null });
+    r2.stop();
+    await codex.shutdown();
+  });
+
   test("the window the runner names decides the wait; without a turn quota the runner's last report is used", async () => {
     const both: AgentEvent = { t: "quota", runner: "claude", windows: { five_hour: { utilization: 1.02, resetsAt: RESETS_AT }, seven_day: { utilization: 1.01, resetsAt: WEEK_RESET } }, limitType: "seven_day" };
     boot([[LIMIT_TURN[0]!, both, LIMIT_TURN[3]!], [LIMIT_TURN[0]!, LIMIT_TURN[3]!]]);
     const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
     await settle();
-    expect(db.getTask(t.id)!.resumeAt).toBe(WEEK_RESET * 1000 + RESUME_MARGIN_MS);
+    expect(db.getTask(t.id)!.resumePlannedAt).toBe(WEEK_RESET * 1000 + RESUME_MARGIN_MS); // days away: tried once at 6 h first (#2237)
     // a second task stops without a quota report of its own → the table's five_hour (fresh from task 1) applies
     db.upsertQuota("claude", "five_hour", 1.02, RESETS_AT, now);
     db.upsertQuota("claude", "seven_day", 0.3, WEEK_RESET, now);
@@ -454,7 +575,7 @@ describe("a turn the daemon's stop cut continues on the next start (interrupted.
 
   test("a daemon that died without its shutdown: the next start closes the orphan and plans it the same way; no session, no plan", () => {
     const now = Date.now();
-    const mk = (id: string, sess: string | null) => db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: home, scope: [home], status: "running", runnerSessionId: sess, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
+    const mk = (id: string, sess: string | null) => db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: home, scope: [home], status: "running", runnerSessionId: sess, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
     mk("task_a", "sess-a");
     mk("task_b", null);
     expect(abortOrphanedTasks(db, now)).toEqual(["task_a", "task_b"]);

@@ -29,11 +29,13 @@ export interface FileDeps {
   exec: Exec;
   /** The app's stored records (`GET /api/backlog/records`), read after `backlog list --fresh` has synced. */
   records: (env: Record<string, string | undefined>) => Promise<{ issues: Array<{ number: number; title: string; state: string; labels: string[] }> }>;
+  /** Where request_issue.sh's output goes (stdout when not given). */
+  out?: (text: string) => void;
 }
 
 const CLI = join(import.meta.dir, "..", "ops-kit", "src", "cli.ts");
 
-const DEPS: FileDeps = { env: process.env, exec: run, records: (env) => readRecords(env, { fresh: false }) };
+export const FILE_DEPS: FileDeps = { env: process.env, exec: run, records: (env) => readRecords(env, { fresh: false }) };
 
 /**
  * The open requests. In the app's Task (BACKLOG_URL) they are what the app stores — an Issue `ops-kit request` made is
@@ -41,7 +43,7 @@ const DEPS: FileDeps = { env: process.env, exec: run, records: (env) => readReco
  * and the open creates GitHub has not numbered yet (they carry no labels: any type, compared by title). When the app does
  * not answer nothing is filed: falling back to GitHub would make two sources for one judgement. Outside, GitHub's REST.
  */
-export async function openRequests(deps: FileDeps = DEPS): Promise<OpenRequest[]> {
+export async function openRequests(deps: FileDeps = FILE_DEPS): Promise<OpenRequest[]> {
   if (deps.env.BACKLOG_URL) {
     const listed = await deps.exec(["bun", CLI, "backlog", "list", "--fresh", "--json"]);
     if (listed.code !== 0) throw new Error(`アプリから開いている要望を読めなかった（ops-kit backlog list exit ${listed.code}）。判定できないので起票しない`);
@@ -76,18 +78,51 @@ export function filedNumber(out: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
-export async function fileRequest(req: { title: string; body: string }, deps: FileDeps = DEPS): Promise<Filed> {
+export async function fileRequest(req: { title: string; body: string }, deps: FileDeps = FILE_DEPS): Promise<Filed> {
   const existing = alreadyFiled(req.title, await openRequests(deps));
   if (existing !== null) return { open: existing }; // the caller says so (its own wording; #1272)
   const dir = mkdtempSync(join(tmpdir(), "switchboard.file-request."));
   try {
     writeFileSync(join(dir, "body.md"), req.body);
     const filed = await deps.exec(["bash", join(import.meta.dir, "setup", "request_issue.sh"), req.title, join(dir, "body.md")]);
-    process.stdout.write(filed.out);
+    (deps.out ?? ((o: string) => process.stdout.write(o)))(filed.out);
     // It can fail after the Issue exists (setting the Project Status): its output above then names the Issue.
     if (filed.code !== 0) throw new Error(`request_issue.sh exit ${filed.code}。上に「要望を作成: #N」があれば Issue はできている`);
     return { filed: filedNumber(filed.out) };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+/**
+ * A comment on an open request (`#N`, or in the app's Task a localId too). In the app's Task through `ops-kit backlog
+ * comment` (the app sends it to GitHub later), outside through `gh issue comment`.
+ */
+export async function commentRequest(ref: string, body: string, deps: FileDeps = FILE_DEPS): Promise<void> {
+  const issue = ref.replace(/^#/, "");
+  if (!deps.env.BACKLOG_URL && !/^\d+$/.test(issue)) throw new Error(`${ref} は番号が無いのでアプリの外からコメントできない`);
+  const dir = mkdtempSync(join(tmpdir(), "switchboard.comment-request."));
+  try {
+    writeFileSync(join(dir, "body.md"), body);
+    const f = join(dir, "body.md");
+    const r = await deps.exec(deps.env.BACKLOG_URL ? ["bun", CLI, "backlog", "comment", issue, "--body-file", f] : ["gh", "issue", "comment", issue, "-R", currentRepo(), "--body-file", f]);
+    if (r.code !== 0) throw new Error(`${ref} にコメントできなかった（exit ${r.code}）`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** The text of an open request, its body and comments (in the app's Task, a comment not sent yet is among them): to tell what was already said. */
+export async function requestText(ref: string, deps: FileDeps = FILE_DEPS): Promise<string> {
+  const issue = ref.replace(/^#/, "");
+  if (deps.env.BACKLOG_URL) {
+    const r = await deps.exec(["bun", CLI, "backlog", "view", issue, "--json"]);
+    if (r.code !== 0) throw new Error(`アプリから ${ref} を読めなかった（ops-kit backlog view exit ${r.code}）`);
+    const v = JSON.parse(r.out) as { issue: { body: string }; comments?: Array<{ body: string }> };
+    return [v.issue.body, ...(v.comments ?? []).map((c) => c.body)].join("\n");
+  }
+  if (!/^\d+$/.test(issue)) throw new Error(`${ref} は番号が無いのでアプリの外から読めない`);
+  const r = await deps.exec(["gh", "issue", "view", issue, "-R", currentRepo(), "--json", "body,comments", "-q", '[.body, .comments[].body] | join("\\n")']);
+  if (r.code !== 0) throw new Error(`${ref} を読めなかった（gh issue view exit ${r.code}）`);
+  return r.out;
 }

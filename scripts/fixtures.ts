@@ -27,6 +27,7 @@ export const RECORDINGS = [
   "packages/adapters/dak/fixtures/text-reply.sse",
   "packages/adapters/dak/fixtures/tool-calls.sse",
   "packages/core/fixtures/osc7501-claude.jsonl",
+  "packages/core/fixtures/otel-tool-decision.jsonl",
   "packages/core/fixtures/suggest-claude.jsonl",
   "packages/core/fixtures/suggest-workspace-claude.jsonl"
 ] as const;

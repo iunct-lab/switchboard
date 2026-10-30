@@ -112,7 +112,7 @@ export function Rail(props: { workspaces: Workspace[]; tasks: Task[]; currentTas
           <span className="t">{t.title}</span>
           {/* Two tags leave the title no room in this width; while a resume is planned that tag matters more (the tooltip still says Terminal). */}
           {t.resumeAt === null && <OriginTag origin={t.origin} />}
-          <ResumeTag resumeAt={t.resumeAt} reason={t.resumeReason} compact />
+          <ResumeTag resumeAt={t.resumeAt} reason={t.resumeReason} plannedAt={t.resumePlannedAt} compact />
           {t.resumeAt === null && <ShadowTag task={t} />}
           <TerminalMark status={props.terminals[t.id]} />
           <span className={`dot ${dotClass(t.status)}`} />

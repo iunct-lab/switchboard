@@ -540,6 +540,10 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
               <>
                 <b>{fmtClock(props.task.resumeAt)}</b> に枠が戻る見込みですが、再開できるセッションがありません。返信すると新しいセッションで始まります。
               </>
+            ) : autoResumeOn === true && props.task.resumePlannedAt !== null ? (
+              <>
+                <b>{fmtClock(props.task.resumeAt)}</b> に 1 回試します（だめなら <b>{fmtClock(props.task.resumePlannedAt)}</b>）。
+              </>
             ) : autoResumeOn === true ? (
               <>
                 <b>{fmtClock(props.task.resumeAt)}</b> に同じセッションで自動再開します。

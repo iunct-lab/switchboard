@@ -49,7 +49,7 @@ function task(workspaceId: string, over: { title?: string; stage?: number; sched
   const id = `t${++n}`;
   db.insertTask({
     id, workspaceId, title: over.title ?? "work", runner: "claude", cwd: "/x", scope: { read: [], write: [] }, status: "done", runnerSessionId: null, model: null, routing: null, budgetUsd: null, scheduleId: over.scheduleId ?? null,
-    permissionMode: "default", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null,
+    permissionMode: "default", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null,
     judgedResult: null, judgedReason: null, judgedBy: null, statusAt: over.createdAt ?? T0, createdAt: over.createdAt ?? T0, updatedAt: over.createdAt ?? T0, executionMode: "local", cloudSession: null, sourceCloudTaskId: null,
     stage: over.stage ? { issue: over.stage, action: "implement" } : null, judgingAt: null,
   } as unknown as Task);

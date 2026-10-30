@@ -22,7 +22,7 @@ approves safe actions and only the uncertain ones reach the host as `can_use_too
 
 - `-p` with `--input-format stream-json` keeps the process alive for multiple user turns until stdin closes.
 - The child must **not** inherit the parent's `CLAUDECODE` / `CLAUDE_CODE_*` variables when launched from inside another Claude Code session.
-- Do **not** pass `--no-session-persistence` — sessions must persist for `--resume`.
+- Do **not** pass `--no-session-persistence` for a Task — its session must persist for `--resume`. The one exception is the daemon's one-off judge and suggestion turns (`runSuggestionTurn` in `packages/core/src/suggest-llm.ts` passes `StartOptions.persistSession: false`): they are never resumed, and saving them would fill `~/.claude/projects` and the recent sessions Claude Code's `/insights` reads.
 
 ## Handshake
 

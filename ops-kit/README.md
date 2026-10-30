@@ -26,7 +26,7 @@ GitHub の Issue と Project で回す開発の流れ（要望 → PBI → Task 
 | `lint [--no-project] [--fresh]` | open の PBI / Task / 要望が設定の必須の節と Story Points を満たすか、1 つのクエリ（ページ送り）で検査する。`BACKLOG_URL` があればアプリの保存値を読む（`--fresh` で先に取込み。GitHub に届かなければ保存値のまま） | 要る |
 | `bootstrap <title> [--dry-run]` | Project と、設定にあって Project に無いフィールドを作る | 要る |
 | `request <title> <body-file>` | 要望 Issue を作り、Project に Backlog で入れる | 要る |
-| `backlog list\|view\|create\|edit\|comment\|set\|triage …` | キットを同梱するアプリが保存したバックログを、そのアプリの API（`BACKLOG_URL`）で読み書きする。読むのは保存値と鮮度、`--fresh` で最新化を待つ（アプリが GitHub に届かなければ保存値と「GitHub 未同期」で exit 0）。アプリに届かなければ exit 2 | 要らない（`triage` の Phase だけ読む） |
+| `backlog list\|view\|create\|edit\|comment\|set\|triage …` | キットを同梱するアプリが保存したバックログを、そのアプリの API（`BACKLOG_URL`）で読み書きする。読むのは保存値と鮮度、`--fresh` で最新化を待つ（アプリが GitHub に届かなければ保存値と「GitHub 未同期」で exit 0）。`BACKLOG_URL` が無い環境では GitHub に直接つないで同じ形で出す・書く（`gh` のログインで。`--fresh` は何もしない）。`BACKLOG_URL` があってアプリに届かなければ exit 2（GitHub に切り替えない） | `BACKLOG_URL` があれば要らない（`triage` の Phase だけ読む）。無ければ list / view の Status と set / triage / `--field` に Project を読む（無ければ Status は `-`、書き込みは断る） |
 | `sync-labels [<file>] [--dry-run]` | ラベルを `.github/labels.yml` に合わせる（作る・直すだけで、消さない） | 要らない |
 | `scan-text <file\|->` | 文に認証に使える値が無いか検査する（値は出さない） | 要らない |
 | `scan-issues [<owner/name>] [--since <ISO>] [--recheck <URL>]...` | リポジトリの Issue・PR・コメントを全部（`--since` ならその時刻より後の更新だけと、`--recheck` の前回の当たり）、同じ検査に通す | 要らない |

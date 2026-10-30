@@ -228,6 +228,18 @@ export const Task = z.object({
    */
   resumeReason: z.enum(["limit", "github"]).nullable(),
   /**
+   * A usage-limit wait (#2237): the window that stopped the turn (`five_hour`, `seven_day`, …; from the quota report) and
+   * when it stopped (ms). A report of that window under 100 % after `resumeSince` resumes the task before `resumeAt`.
+   * null = no plan, a GitHub wait, or a stop whose window is not known (the banner's time only).
+   */
+  resumeWindow: z.string().nullable(),
+  resumeSince: z.number().nullable(),
+  /**
+   * A long usage-limit wait with one try before it (#2237): `resumeAt` is the try, this is the reset (+ margin) the wait
+   * goes back to when the try is refused. null = no try planned.
+   */
+  resumePlannedAt: z.number().nullable(),
+  /**
    * Shadow run (#99): id of the primary task this one mirrors. A shadow task is a normal task (own transcript, diff,
    * ledger, approvals) created with the primary's cwd / scope / title / prompt on another runner; follow-up turns
    * sent to the primary are copied to it. Set at creation, never changed; null = not a shadow.
@@ -296,6 +308,12 @@ export const RuleMetrics = z.object({
   lastCutByDaemon: z.boolean(),
   /** From the first event to the last (ms); null without events. */
   durationMs: z.number().nullable(),
+  /**
+   * Claude Code's auto-mode classifier (#2236): calls it let through (`classifier.decision` allow) and stopped (block, and
+   * the asks it sent to the person, `permission.ask` reason classifier), the stopped ones per kind (a block's category,
+   * `asked` for the asks). null = nothing recorded: not Claude, not Auto, or a runner that reports no such thing.
+   */
+  classifier: z.object({ allowed: z.number(), denied: z.number(), byCategory: z.record(z.string(), z.number()) }).nullable(),
 });
 export type RuleMetrics = z.infer<typeof RuleMetrics>;
 

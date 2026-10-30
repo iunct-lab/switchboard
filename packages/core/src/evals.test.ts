@@ -39,7 +39,7 @@ describe("ruleMetrics (#1218)", () => {
         end("ok"),
       ]),
     );
-    expect(m).toEqual({ turns: 2, toolCalls: 2, toolFailures: 1, errors: 1, asks: 2, denials: 1, stops: 0, stopReasons: {}, userInstructions: 1, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false, durationMs: 14_000 });
+    expect(m).toEqual({ turns: 2, toolCalls: 2, toolFailures: 1, errors: 1, asks: 2, denials: 1, stops: 0, stopReasons: {}, userInstructions: 1, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false, durationMs: 14_000, classifier: null });
   });
 
   test("user instructions: the first message is the request; the daemon's resume messages do not count; a streamed message counts once; different messageIds split", () => {
@@ -77,8 +77,18 @@ describe("ruleMetrics (#1218)", () => {
     expect(m.stopReasons).toEqual({ "usage-limit": 2, "github-limit": 1 });
   });
 
+  test("classifier (#2236): allowed and stopped calls, the stopped ones per kind; null when nothing was recorded", () => {
+    const d = (verdict: "allow" | "block", category: string | null = null): AgentEvent => ({ t: "classifier.decision", verdict, category, mode: "auto", tool: "Bash", callId: null });
+    const ask = (reason?: "classifier"): AgentEvent => ({ t: "permission.ask", id: "p", kind: "exec", tool: "Bash", input: {}, detail: "x", ...(reason ? { reason } : {}) });
+    const m = ruleMetrics(envelopes([user("x"), d("allow"), d("allow"), d("block", "Irreversible Local Destruction"), d("block"), ask("classifier"), ask(), end("ok")]));
+    expect(m.classifier).toEqual({ allowed: 2, denied: 3, byCategory: { "Irreversible Local Destruction": 1, asked: 1 } });
+    expect(m.asks).toBe(2);
+    // a plain ask is not the classifier's; no record at all (Codex, not Auto) is null, not zero
+    expect(ruleMetrics(envelopes([user("x"), ask(), end("ok")])).classifier).toBeNull();
+  });
+
   test("no events: zeros, no last end, no duration", () => {
-    expect(ruleMetrics([])).toEqual({ turns: 0, toolCalls: 0, toolFailures: 0, errors: 0, asks: 0, denials: 0, stops: 0, stopReasons: {}, userInstructions: 0, lastEnd: null, daemonStops: 0, lastCutByDaemon: false, durationMs: null });
+    expect(ruleMetrics([])).toEqual({ turns: 0, toolCalls: 0, toolFailures: 0, errors: 0, asks: 0, denials: 0, stops: 0, stopReasons: {}, userInstructions: 0, lastEnd: null, daemonStops: 0, lastCutByDaemon: false, durationMs: null, classifier: null });
   });
 
   test("daemon stops: STOP_NOTE status lines are counted; the last turn cut by one is marked", () => {
@@ -104,7 +114,7 @@ describe("ruleMetrics (#1218)", () => {
       const { daemonStops: _d, lastCutByDaemon: _l, ...old } = ruleMetrics(envelopes([user("x"), end("ok")]));
       db.upsertEval({ taskId: "t1", source: "rules", by: "rules@1", rubric: null, json: { metrics: old, status: "done", outcome: "unknown", costUsd: 0, by: "rules@1", ts: 1 }, ts: 1 });
       expect(db.evalsOf("t1").rules).toBeNull();
-      expect(RULES_BY).toBe("rules@2");
+      expect(RULES_BY).toBe("rules@3");
       db.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -116,7 +126,7 @@ describe("ruleMetrics (#1218)", () => {
     try {
       const db = new Db(join(dir, "switchboard.db"));
       const now = 1_700_000_000_000;
-      const task: Task = { id: "t1", workspaceId: null, title: "t1", runner: "claude", cwd: dir, scope: [dir], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now };
+      const task: Task = { id: "t1", workspaceId: null, title: "t1", runner: "claude", cwd: dir, scope: [dir], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now };
       db.insertTask(task);
       const events = envelopes([user("go"), { t: "tool.call", id: "a", name: "Read", input: {}, summary: "f" }, { t: "tool.result", id: "a", ok: true, summary: "" }, end("ok")]);
       const first = rulesEvalOf(task, events, { costUsd: 0.5 }, now);
@@ -142,7 +152,7 @@ describe("ruleMetrics (#1218)", () => {
 
 describe("evalRequestDraft (#1221)", () => {
   const task = { id: "task_1", title: "README を\n直す", runner: "claude" as const };
-  const rules = { metrics: { turns: 2, toolCalls: 7, toolFailures: 2, errors: 1, asks: 0, denials: 0, stops: 1, stopReasons: { "usage-limit": 1 }, userInstructions: 3, lastEnd: "ok" as const, daemonStops: 0, lastCutByDaemon: false, durationMs: 1000 }, status: "done" as const, outcome: "done" as const, costUsd: 0.1, by: RULES_BY, ts: 1 };
+  const rules = { metrics: { turns: 2, toolCalls: 7, toolFailures: 2, errors: 1, asks: 0, denials: 0, stops: 1, stopReasons: { "usage-limit": 1 }, userInstructions: 3, lastEnd: "ok" as const, daemonStops: 0, lastCutByDaemon: false, durationMs: 1000, classifier: null }, status: "done" as const, outcome: "done" as const, costUsd: 0.1, by: RULES_BY, ts: 1 };
   test("the task, the counts, the criteria at 3 or below with their reasons, the summary, the rating, then the line to fill", () => {
     const text = evalRequestDraft(task, {
       rules,

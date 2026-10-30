@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { BACKLOG_USAGE, readRecords, runBacklog } from "./backlog-client.ts";
 import { bootstrap } from "./bootstrap.ts";
-import { defaultConfig, findConfig, loadConfig, loadPublicSync, publicCopyRefusal, resolveProject, type OpsConfig } from "./config.ts";
+import { defaultConfig, findConfig, loadConfig, loadPublicSync, projectOf, publicCopyRefusal, resolveProject, type OpsConfig } from "./config.ts";
 import { realGh, repoOf, type GhClient } from "./gh.ts";
 import { exportCopy } from "./export-copy.ts";
 import { resolveReviewThread } from "./forge-github.ts";
@@ -164,7 +164,17 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
     } catch {
       /* no ops.config.json: triage takes no phase */
     }
-    return runBacklog(command === "backlog" ? rest : args, env, { out, err }, { phase });
+    // without BACKLOG_URL, the commands go to GitHub: the configured Project gives list / view their Status (none
+    // configured: Status `-`) and set / triage / --field their fields (none: refused)
+    const config = async () => resolveProject(loadConfig(configPath), gh, env);
+    const project = async () => {
+      try {
+        return projectOf(await config(), env);
+      } catch {
+        return null;
+      }
+    };
+    return runBacklog(command === "backlog" ? rest : args, env, { out, err }, { phase, gh, project, config });
   }
   if (command === "pull-main") {
     if (rest.length) return usage(err, "pull-main", 2);

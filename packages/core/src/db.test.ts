@@ -462,14 +462,14 @@ test("resumeReason (#550): a database made before the column gets it on open, an
   raw.exec("INSERT INTO tasks (id, title, runner, cwd, scope, status, created_at, updated_at, resume_at) VALUES ('t_old', 'old', 'claude', '/work/app', '[]', 'done', 1, 1, 1000)");
   raw.close();
   const db = new Db(path);
-  expect((db.sqlite.query("PRAGMA table_info(tasks)").all() as Array<{ name: string }>).map((c) => c.name)).toContain("resume_reason");
-  expect(db.getTask("t_old")).toMatchObject({ resumeAt: 1000, resumeReason: null });
+  expect((db.sqlite.query("PRAGMA table_info(tasks)").all() as Array<{ name: string }>).map((c) => c.name)).toEqual(expect.arrayContaining(["resume_reason", "resume_window", "resume_since", "resume_planned_at"])); // #2237 too
+  expect(db.getTask("t_old")).toMatchObject({ resumeAt: 1000, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null });
   db.close();
 });
 
 test("archivedAt (#1164): listTasks() leaves archived Tasks out, listTasks(true) lists only them, and null brings one back", () => {
   const db = new Db(join(dir, "archive.db"));
-  const mk = (id: string, updatedAt: number) => db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "done", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: updatedAt, createdAt: updatedAt, updatedAt });
+  const mk = (id: string, updatedAt: number) => db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "done", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: updatedAt, createdAt: updatedAt, updatedAt });
   mk("t_a", 1);
   mk("t_b", 2);
   expect(db.updateTask("t_a", { archivedAt: 5, updatedAt: 1 })).toMatchObject({ archivedAt: 5, updatedAt: 1 });
@@ -761,7 +761,7 @@ test("ledger day is the JST date (#2028): a row at 15:30 UTC falls on the next d
 
 test("statusAt moves only on a status change (#2029): title, outcome, 確認済み and a patch to the same status leave it", () => {
   const db = new Db(join(dir, "switchboard.db"));
-  const base = { id: "t1", workspaceId: null, title: "t", runner: "claude" as const, cwd: "/w", scope: ["/w"], status: "running" as const, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard" as const, resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown" as const, reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1_000, createdAt: 1_000, updatedAt: 1_000 };
+  const base = { id: "t1", workspaceId: null, title: "t", runner: "claude" as const, cwd: "/w", scope: ["/w"], status: "running" as const, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard" as const, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown" as const, reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1_000, createdAt: 1_000, updatedAt: 1_000 };
   db.insertTask(base);
   expect(db.getTask("t1")!.statusAt).toBe(1_000);
   db.updateTask("t1", { title: "renamed", updatedAt: 2_000 });

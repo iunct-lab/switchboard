@@ -290,7 +290,7 @@ export function TaskView(props: {
         <span className={`status ${props.task.status}`}>{headStatus}</span>
         <span className="hint task-times">{`${times.started} · ${times.since}`}</span>
         <OriginTag origin={props.task.origin} />
-        <ResumeTag resumeAt={props.task.resumeAt} reason={props.task.resumeReason} />
+        <ResumeTag resumeAt={props.task.resumeAt} reason={props.task.resumeReason} plannedAt={props.task.resumePlannedAt} />
         <ShadowTag task={props.task} />
         {props.detail?.sourceCloudTask && <CloudSourceTag source={props.detail.sourceCloudTask} switched={!!props.switchedFromCloud} onOpen={() => props.onOpenTask?.(props.detail!.sourceCloudTask!.id)} />}
         <select className="outcome" value={props.task.outcome} disabled={busy} onChange={(e) => setOutcome({ outcome: e.target.value as TaskOutcome })} title="結果（要対応のまとまりの並びに使う）">

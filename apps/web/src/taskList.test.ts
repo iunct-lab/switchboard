@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import type { Task, TaskStatus } from "@switchboard/protocol";
 import { filterTasks } from "./taskList.ts";
 
-const task = (id: string, title: string, cwd: string, status: TaskStatus = "done", archivedAt: number | null = null): Task => ({ id, workspaceId: null, title, runner: "claude", cwd, scope: [cwd], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 0, createdAt: 0, updatedAt: 0 });
+const task = (id: string, title: string, cwd: string, status: TaskStatus = "done", archivedAt: number | null = null): Task => ({ id, workspaceId: null, title, runner: "claude", cwd, scope: [cwd], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 0, createdAt: 0, updatedAt: 0 });
 const ids = (ts: Task[]) => ts.map((t) => t.id);
 const all = { q: "", status: "all" as const, archived: false };
 

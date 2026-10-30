@@ -7,7 +7,7 @@ import { DEFAULT_RUBRIC } from "./rubric.ts";
  * (`Db.upsertEval`) under `source: rules`, one row per task; `RULES_BY` names the counter so a change in what is
  * counted tells old rows apart.
  */
-export const RULES_BY = "rules@2";
+export const RULES_BY = "rules@3";
 
 /** How every message the daemon sends by itself begins (`RESUME_PROMPT`, `STOP_RESUME_PROMPT`): not the person's instruction. */
 export const AUTO_RESUME_HEAD = "[Switchboard 自動再開]";
@@ -28,7 +28,7 @@ export const STOP_NOTE = "デーモンの停止でターンが中断されまし
  * writes the note before that turn's `session.end`, `abortOrphanedTasks` after it, so the turn's end is not the boundary.
  */
 export function ruleMetrics(events: EventEnvelope[]): RuleMetrics {
-  const m: RuleMetrics = { turns: 0, toolCalls: 0, toolFailures: 0, errors: 0, asks: 0, denials: 0, stops: 0, stopReasons: {}, userInstructions: 0, lastEnd: null, daemonStops: 0, lastCutByDaemon: false, durationMs: null };
+  const m: RuleMetrics = { turns: 0, toolCalls: 0, toolFailures: 0, errors: 0, asks: 0, denials: 0, stops: 0, stopReasons: {}, userInstructions: 0, lastEnd: null, daemonStops: 0, lastCutByDaemon: false, durationMs: null, classifier: null };
   let userMessages = 0;
   let userText: string | null = null; // the user message being assembled; null = not in one
   let userId: string | undefined; // its messageId, when the adapter gave one
@@ -63,6 +63,11 @@ export function ruleMetrics(events: EventEnvelope[]): RuleMetrics {
         break;
       case "permission.ask":
         m.asks++;
+        if (ev.reason === "classifier") stopped(m, "asked");
+        break;
+      case "classifier.decision":
+        if (ev.verdict === "allow") (m.classifier ??= { allowed: 0, denied: 0, byCategory: {} }).allowed++;
+        else stopped(m, ev.category);
         break;
       case "permission.resolved":
         if (ev.decision === "deny") m.denials++;
@@ -84,6 +89,13 @@ export function ruleMetrics(events: EventEnvelope[]): RuleMetrics {
   m.lastCutByDaemon = m.lastEnd !== null && cut;
   if (events.length) m.durationMs = events[events.length - 1]!.ts - events[0]!.ts;
   return m;
+}
+
+/** One call the classifier stopped, under its kind when there is one. */
+function stopped(m: RuleMetrics, kind: string | null) {
+  const c = (m.classifier ??= { allowed: 0, denied: 0, byCategory: {} });
+  c.denied++;
+  if (kind) c.byCategory[kind] = (c.byCategory[kind] ?? 0) + 1;
 }
 
 /** The rules row for a task as it stands: its metrics with the status, outcome and ledger total of the moment. */

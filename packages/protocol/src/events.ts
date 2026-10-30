@@ -117,6 +117,8 @@ export const AgentEvent = z.discriminatedUnion("t", [
     input: z.unknown(),
     detail: z.string(),
     toolUseId: z.string().optional(),
+    /** Claude Code's auto-mode classifier stopped the call and the user may let it run (#2236, docs/design/claude-otel.md). */
+    reason: z.literal("classifier").optional(),
     /** Set by the daemon when a Knowledge approval rule matched (confirm → still asked, with the reason shown). */
     rule: ApprovalRuleMatch.optional(),
   }),
@@ -183,6 +185,21 @@ export const AgentEvent = z.discriminatedUnion("t", [
    * Monitors). A job's notification starts a turn on the runner's own, so the process is not released while any is left.
    */
   z.object({ t: z.literal("background"), count: z.number().int().nonnegative() }),
+  /**
+   * Claude Code's auto-mode classifier decided a tool call without asking (#2236): its OpenTelemetry `tool_decision`,
+   * received on the daemon's loopback `/otel/:id/v1/logs` (docs/design/claude-otel.md). Recorded by the daemon, never
+   * emitted by an adapter. Only these values are kept; the account, the tool's parameters and every other event are dropped.
+   */
+  z.object({
+    t: z.literal("classifier.decision"),
+    verdict: z.enum(["allow", "block"]),
+    /** The built-in rule a block matched (`classifier_category`); null on allow or when Claude Code left it out. */
+    category: z.string().nullable(),
+    mode: z.string().nullable(),
+    tool: z.string(),
+    /** The tool call's id (`tool_use_id`), the same as `tool.call.id`. */
+    callId: z.string().nullable(),
+  }),
   z.object({
     t: z.literal("session.end"),
     status: z.enum(["ok", "error", "aborted"]),

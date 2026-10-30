@@ -9,8 +9,26 @@ import { readRecords, runBacklog } from "./backlog-client.ts";
 
 const SYNC = { workspaceId: "ws1", repository: "acme/app", syncedAt: 1_760_000_000_000, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } };
 const LIST = { syncs: [SYNC, { ...SYNC, workspaceId: "ws2", repository: "acme/other" }], items: [{ number: 3, workspaceId: "ws1", type: "pbi", stage: "ready", projectStatus: "Ready", title: "PBI 3" }, { number: 9, workspaceId: "ws2", type: "pbi", stage: "ready", projectStatus: "Ready", title: "other" }] };
+const issue = (number: number, title: string, state: "OPEN" | "CLOSED", labels: string[], status: string | null) => ({ number, title, state, stateReason: null, body: "", labels, parent: null, subIssues: [], updatedAt: "", fields: status === null ? null : { Status: status } });
+/** `GET /records` of a workspace: what `backlog list` reads (#3071). */
+const RECORDS = (workspaceId: string) => ({
+  workspaceId,
+  service: "github",
+  repository: "acme/app",
+  project: { owner: "acme", number: 1 },
+  fetchedAt: 1,
+  top: [],
+  unread: [],
+  pulls: [],
+  issues: workspaceId === "ws2" ? [issue(9, "other", "OPEN", ["type:pbi"], "Ready")] : [issue(3, "PBI 3", "OPEN", ["type:pbi", "area:web"], "Ready"), issue(4, "要望: Closed Request", "CLOSED", ["type:request"], "Done"), issue(5, "Task: 実装", "OPEN", ["type:task", "area:web"], null), issue(6, "PBI: closed", "CLOSED", ["type:pbi"], "Done")],
+});
+/** The app's answer by route: the workspace list, a workspace's records, else `other`. */
+const routes = (other: (method: string, path: string, body: unknown) => { status?: number; body?: unknown } = () => ({ body: {} })) => (method: string, path: string, body: unknown) => {
+  const records = /^\/records\?workspaceId=(.+)$/.exec(path);
+  return path === "" ? { body: LIST } : records ? { body: RECORDS(decodeURIComponent(records[1]!)) } : other(method, path, body);
+};
 
-function app(answer: (method: string, path: string, body: unknown) => { status?: number; body?: unknown } | "down" = () => ({ body: LIST })) {
+function app(answer: (method: string, path: string, body: unknown) => { status?: number; body?: unknown } | "down" = routes()) {
   const calls: Array<{ method: string; path: string; body: unknown; auth: string | null }> = [];
   const fetch = async (url: string, init: RequestInit = {}) => {
     const path = url.replace("http://app/api/backlog", "");
@@ -33,14 +51,41 @@ async function run(argv: string[], fake = app(), env: Record<string, string | un
 test("list: the stored items of the repository's workspace and how fresh they are, one read and no sync unless --fresh", async () => {
   const r = await run(["list"]);
   expect(r.code).toBe(0);
-  expect(r.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET "]);
+  expect(r.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET ", "GET /records?workspaceId=ws1"]);
   expect(r.out).toContain("# acme/app  最終取得 2025-10-09");
   expect(r.out).toContain("同期 synced");
-  expect(r.out).toContain("#3\tpbi\tready\tReady\tPBI 3");
+  expect(r.out).toContain("#3\tpbi\tOPEN\tReady\tPBI 3");
+  expect(r.out).toContain("#5\ttask\tOPEN\t-\tTask: 実装");
   expect(r.out).not.toContain("other");
   const fresh = await run(["list", "--fresh"]);
-  expect(fresh.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET ", "POST /sync", "GET "]);
+  expect(fresh.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET ", "POST /sync", "GET ", "GET /records?workspaceId=ws1"]);
   expect(fresh.calls[1]!.body).toEqual({ workspaceId: "ws1" });
+});
+
+test("list --search / --label / --state (#3071): filtered from the stored records, open by default; a wrong --state is refused", async () => {
+  const numbers = async (...argv: string[]) => {
+    const r = await run(["list", ...argv]);
+    expect(r.code).toBe(0);
+    return r.out.split("\n").slice(1).map((l) => l.split("\t")[0]);
+  };
+  expect(await numbers()).toEqual(["#3", "#5"]);
+  expect(await numbers("--state", "closed")).toEqual(["#4", "#6"]);
+  expect(await numbers("--state", "all")).toEqual(["#3", "#4", "#5", "#6"]);
+  expect(await numbers("--label", "type:request", "--state", "closed")).toEqual(["#4"]);
+  // every label given: both type:task and area:web
+  expect(await numbers("--label", "area:web", "--label", "type:task")).toEqual(["#5"]);
+  // a part of the title, case-insensitive
+  expect(await numbers("--search", "closed", "--state", "all")).toEqual(["#4", "#6"]);
+  expect(await numbers("--search", "pbi")).toEqual(["#3"]);
+  const json = JSON.parse((await run(["list", "--label", "type:request", "--state", "closed", "--json"])).out);
+  expect(json.items).toEqual([{ number: 4, type: "request", state: "CLOSED", status: "Done", title: "要望: Closed Request", labels: ["type:request"] }]);
+  // what the last import could not read is listed as stored, and said so on stderr
+  const stale = await run(["list"]);
+  expect(stale.err).toBe("");
+  const unread = await run(["list", "--json"], app((m, p) => (p.startsWith("/records") ? { body: { ...RECORDS("ws1"), unread: [5, 6] } } : routes()(m, p, undefined))));
+  expect([JSON.parse(unread.out).unread, unread.err]).toEqual([[5], "最後の取込みで読めていない Issue（保存値のまま。今の値ではない）: #5（--fresh で取り込み直す）"]);
+  const wrong = await run(["list", "--state", "merged"]);
+  expect([wrong.code, wrong.calls.length]).toEqual([1, 0]);
 });
 
 test("the key in BACKLOG_TOKEN_FILE goes as the bearer; --workspace picks a workspace without a repository", async () => {
@@ -50,7 +95,7 @@ test("the key in BACKLOG_TOKEN_FILE goes as the bearer; --workspace picks a work
     const r = await run(["list", "--workspace", "ws2"], app(), { BACKLOG_TOKEN_FILE: join(dir, "token"), GH_REPO: undefined });
     expect(r.code).toBe(0);
     expect(r.calls[0]!.auth).toBe("Bearer k123");
-    expect(r.out).toContain("#9\tpbi\tready\tReady\tother");
+    expect(r.out).toContain("#9\tpbi\tOPEN\tReady\tother");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -69,7 +114,7 @@ test("nothing is read as current when it cannot be told: no app, the app down, a
   expect(unsynced.out).toContain("保存した本文");
   expect(unsynced.calls.map((c) => c.path)).toEqual(["", "/sync", "", "/3?workspaceId=ws1"]);
   // the same with --json: stdout keeps its shape, the line goes to stderr
-  const json = await run(["list", "--fresh", "--json"], app((m, p) => (p === "/sync" ? { status: 424, body: { error: "GitHub の上限" } } : { body: LIST })));
+  const json = await run(["list", "--fresh", "--json"], app(routes((m, p) => (p === "/sync" ? { status: 424, body: { error: "GitHub の上限" } } : {}))));
   expect([json.code, JSON.parse(json.out).workspaceId, json.err.includes("GitHub 未同期")]).toEqual([0, "ws1", true]);
   // the app failing itself, or answering the sync with 5xx, is not GitHub out of reach
   for (const status of [500, 502, 401]) expect((await run(["view", "3", "--fresh"], app((m, p) => (p === "/sync" ? { status } : { body: LIST })))).code).toBe(2);

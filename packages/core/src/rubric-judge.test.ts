@@ -5,7 +5,7 @@ import { transcriptLines } from "./recap.ts";
 import { DEFAULT_RUBRIC } from "./rubric.ts";
 import { buildRubricPrompt, judgeRubric, parseRubricJudgement, RECAP_CHARS, type RubricJudgeInput } from "./rubric-judge.ts";
 
-const METRICS: RuleMetrics = { turns: 1, toolCalls: 3, toolFailures: 1, errors: 0, asks: 0, denials: 0, stops: 0, stopReasons: {}, userInstructions: 0, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false, durationMs: 5000 };
+const METRICS: RuleMetrics = { turns: 1, toolCalls: 3, toolFailures: 1, errors: 0, asks: 0, denials: 0, stops: 0, stopReasons: {}, userInstructions: 0, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false, durationMs: 5000, classifier: null };
 const EVENTS: AgentEvent[] = [
   { t: "message.delta", role: "user", text: "README の誤字を直して" },
   { t: "tool.call", id: "a", name: "Edit", input: {}, summary: "README.md" },

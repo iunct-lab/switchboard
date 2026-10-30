@@ -4,7 +4,7 @@ import { AgentEvent } from "@switchboard/protocol";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildArgs, childEnv, CLAUDE_EFFORTS, CLAUDE_LOGIN_HINT, CLAUDE_MODELS, CLAUDE_PERMISSION_MODES, cliDefaultModelFromSettings, createClaudeAdapter, loginStatus } from "./index.ts";
+import { buildArgs, childEnv, otelEnv, CLAUDE_EFFORTS, CLAUDE_LOGIN_HINT, CLAUDE_MODELS, CLAUDE_PERMISSION_MODES, cliDefaultModelFromSettings, createClaudeAdapter, loginStatus } from "./index.ts";
 import { createClaudeParser, permissionResponseLine, setPermissionModeLine, summarizeToolInput } from "./parse.ts";
 
 const fixture = recordingText("packages/adapters/claude/fixtures/write-with-permission.jsonl");
@@ -202,6 +202,15 @@ describe("--resume (recorded against Claude Code 2.1.261, issue #2)", () => {
     expect(args).not.toContain("--no-session-persistence");
   });
 
+  test("buildArgs: persistSession false adds --no-session-persistence; unset, true or a resume does not", () => {
+    expect(buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", persistSession: false })).toContain("--no-session-persistence");
+    expect(buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p" })).not.toContain("--no-session-persistence");
+    expect(buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", persistSession: true })).not.toContain("--no-session-persistence");
+    const resumed = buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", persistSession: false, resumeSessionId: "abc" });
+    expect(resumed).toContain("--resume");
+    expect(resumed).not.toContain("--no-session-persistence");
+  });
+
   test("buildArgs: effort becomes --effort, also on a resume; none when unset or empty (#833)", () => {
     const flag = (args: string[]) => (args.includes("--effort") ? args[args.indexOf("--effort") + 1] : undefined);
     expect(flag(buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", effort: "high" }))).toBe("high");
@@ -317,6 +326,37 @@ describe("spawn plumbing", () => {
     expect(env).toEqual({ PATH: "/bin", HOME: "/h" });
     // what the daemon adds (StartOptions.env) goes over what is inherited
     expect(childEnv({ PATH: "/bin", HOME: "/h" }, { PATH: "/kit/bin:/bin" })).toEqual({ PATH: "/kit/bin:/bin", HOME: "/h" });
+  });
+
+  test("otel: logs go to the loopback endpoint only, metrics and traces none, the parent's OTEL_* dropped", () => {
+    const parent = { PATH: "/bin", OTEL_EXPORTER_OTLP_ENDPOINT: "https://collector.example.com", OTEL_RESOURCE_ATTRIBUTES: "team=x", OTEL_METRICS_EXPORTER: "otlp" };
+    expect(childEnv(parent)).toEqual({ PATH: "/bin" });
+    const env = childEnv(parent, otelEnv({ otel: { endpoint: "http://127.0.0.1:4791/otel/t1/v1/logs", token: "mcp_t1" } }));
+    expect(env).toEqual({
+      PATH: "/bin",
+      CLAUDE_CODE_ENABLE_TELEMETRY: "1",
+      OTEL_LOGS_EXPORTER: "otlp",
+      OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: "http/json",
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "http://127.0.0.1:4791/otel/t1/v1/logs",
+      OTEL_EXPORTER_OTLP_HEADERS: "Authorization=Bearer mcp_t1",
+      OTEL_LOG_TOOL_DETAILS: "1",
+      OTEL_METRICS_EXPORTER: "none",
+      OTEL_TRACES_EXPORTER: "none",
+      OTEL_LOGS_EXPORT_INTERVAL: "5000",
+    });
+    // without an endpoint (cloud, tests) nothing is turned on
+    expect(otelEnv({})).toEqual({});
+  });
+
+  test("permission.ask: a classifier-reasoned can_use_tool carries reason classifier (docs/design/claude-otel.md)", () => {
+    // the shape read from claude 2.1.312 (not recorded: the classifier stopped nothing in the Spike, #2240)
+    const line = (type?: string) => JSON.stringify({ type: "control_request", request_id: "r1", request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "x" }, tool_use_id: "toolu_1", ...(type ? { decision_reason_type: type } : {}) } });
+    const [ask] = createClaudeParser().feed(line("classifier"));
+    expect(AgentEvent.parse(ask)).toMatchObject({ t: "permission.ask", toolUseId: "toolu_1", reason: "classifier" });
+    for (const other of [undefined, "rule", "mode"]) {
+      const [plain] = createClaudeParser().feed(line(other));
+      expect(plain).not.toHaveProperty("reason");
+    }
   });
 
   test("args enable bidirectional stream-json with host-answered permissions and --add-dir for extra scope", () => {

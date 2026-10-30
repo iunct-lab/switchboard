@@ -40,6 +40,11 @@ export function countriesUrl(mode: LoginMode | undefined): string | null {
   return mode === "passkey" ? "/_auth/#countries" : null;
 }
 
+/** The Starter's logout (#1850), which only the `/_auth/` page linked before: only with the passkey login; null elsewhere. */
+export function logoutPath(mode: LoginMode | undefined): string | null {
+  return mode === "passkey" ? "/_auth/logout" : null;
+}
+
 /** Stuck happens with a passkey, so on the cloud host only: the rescue page is the same origin's /rescue/, which CloudFront hands to sb-rescue (#399). */
 export const STUCK_RESCUE = "/rescue/";
 

@@ -23,6 +23,7 @@ export function metricRows(e: TaskEvals): MetricRow[] {
     { label: "エラー", value: String(m.errors), warn: m.errors > 0 },
     { label: "追加指示", value: String(m.userInstructions) },
     { label: "承認 / 拒否", value: `${m.asks} / ${m.denials}`, warn: m.denials > 0 },
+    { label: "分類器", value: classifierValue(m.classifier) },
     { label: "停止", value: reasons ? `${m.stops}（${reasons}）` : String(m.stops), warn: m.stops > 0 },
     { label: "デーモン停止", value: String(m.daemonStops), warn: m.daemonStops > 0 },
     { label: "ターン", value: String(m.turns) },
@@ -30,6 +31,13 @@ export function metricRows(e: TaskEvals): MetricRow[] {
     // a last turn the daemon's stop cut ended that way by the stop, not by the task (#2089): デーモン停止 carries the mark
     { label: "終わり方", value: endLabel(m.lastEnd), warn: (m.lastEnd === "error" || m.lastEnd === "aborted") && !m.lastCutByDaemon },
   ];
+}
+
+/** Claude Code's auto-mode classifier (#2236): what it let through and stopped, the stopped ones per kind; 不明 when nothing was recorded (Codex, not Auto). */
+function classifierValue(c: RuleMetrics["classifier"]): string {
+  if (!c) return "不明";
+  const kinds = Object.entries(c.byCategory).map(([k, n]) => `${k === "asked" ? "人に確認" : k} ${n}`).join(", ");
+  return `通した ${c.allowed} / 止めた ${c.denied}${kinds ? `（${kinds}）` : ""}`;
 }
 
 export function fmtDuration(ms: number | null): string {

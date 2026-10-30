@@ -287,12 +287,16 @@ const COMPLETE_SCOPE = "この依頼は、マージ判定（`scripts/merge-gate.
  * `answer` (#2745): the newest `## 回答` the person gave on the screen (screenAnswer), put in the prompt as the person's
  * words — read with a tool, an operation it allows is not the person's say to the runner's approval. Not for a check.
  */
-export function buildStartPrompt(item: Pick<BacklogItem, "number">, action: BacklogAction, opts: { other?: OtherRepo; resume?: { tasksDone: number }; local?: boolean; answer?: { issue: number; text: string } | null } = {}): string {
+export function buildStartPrompt(item: Pick<BacklogItem, "number"> & Partial<Pick<BacklogItem, "tasks">>, action: BacklogAction, opts: { other?: OtherRepo; resume?: { tasksDone: number }; local?: boolean; answer?: { issue: number; text: string } | null } = {}): string {
   const n = item.number;
+  const subIssues = item.tasks?.total ?? 0;
   const complete = opts.other ? `.claude/skills/pbi-complete/SKILL.md に従い、PBI #${n} を完了させてください。` : `/pbi-complete ${n}`;
   const body = {
     "to-pbi": `.claude/skills/request-to-backlog/SKILL.md に従い、既存の要望 Issue #${n} から PBI を作ってください（要望 Issue は新しく作らない。#${n} の原文を正本にする）。続けて .claude/skills/pbi-to-tasks/SKILL.md で、作った PBI を Ready にしてください。`,
-    "to-tasks": `.claude/skills/pbi-to-tasks/SKILL.md に従い、PBI #${n} を Task に分解して Ready にしてください。`,
+    // a PBI in 分解待ち that already has sub-issues is waiting to be made Ready, not to be decomposed again (#1393)
+    "to-tasks": subIssues > 0
+      ? `PBI #${n} は Task（sub-issue ${subIssues} 件）に分解済みですが、Project の Status が Ready になっていません。.claude/skills/pbi-to-tasks/SKILL.md に従い、既にある Task を作り直さずに、最新の \`## 回答\` を PBI と Task に反映し、受け入れ条件の被覆と Task の粒度を確かめ、足りなければ Task を足して、PBI #${n} を Ready にしてください。`
+      : `.claude/skills/pbi-to-tasks/SKILL.md に従い、PBI #${n} を Task に分解して Ready にしてください。`,
     // every complete, from Ready too: backlog-next also uses it to resume an in-progress PBI whose Task was answered (#562)
     // a resume names the skill's file: a slash command is expanded only at the start of a prompt
     complete: opts.resume
