@@ -103,7 +103,7 @@ EventBridge Scheduler（resume_at / 定期実行の時刻に起こす）──�
 無料枠の機械（Oracle Always Free など）は採らない: 枠が予告なく変わり、使われていない機械は 7 日で回収されるので、正本の置き場所にならない。
 
 毎時の定期実行は、停止したホストを毎時起こす。次の予定が 30 分以内なら止まらない。稼働時間を journal から集計し、見積もりと比べる。
-予算アラートは `<stack>-1000jpy`（$7）と `<stack>-3000jpy`（$20）。`Project` の cost allocation tag を有効にする。実費は Cost Explorer で確認する。インスタンスロールにはその読み取り権限を付けない。
+予算アラートは `<stack>-1000jpy`（$7）と `<stack>-3000jpy`（$20）。`Project` の cost allocation tag を有効にする。実費は Cost Explorer で確認する。インスタンスロールは `ce:GetCostAndUsage` / `ce:GetCostForecast` と `budgets:ViewBudget` だけを読める（2026-10 に追加。書き込みは無い。定期タスク「AWS の費用の週報」が使う）。
 
 ### 3.3 権限の分離
 

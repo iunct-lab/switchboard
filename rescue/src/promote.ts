@@ -5,9 +5,11 @@
  * taken before each promotion is for the case where going back is not enough.
  */
 import { Database } from "bun:sqlite";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { pipeline } from "node:stream/promises";
+import { createGunzip, createGzip, constants } from "node:zlib";
 import { appendHistory, buildRelease, currentOf, previousOf, pruneReleases, releasesDir, restoreLinks, switchTo, type HistoryEntry } from "./releases.ts";
 import type { Supervisor } from "./supervisor.ts";
 
@@ -32,25 +34,62 @@ export const KEEP_SNAPSHOTS = 3;
 const dbPath = (home: string) => process.env.SWITCHBOARD_DB ?? join(home, "switchboard.db");
 const snapshotsDir = (home: string) => join(home, "snapshots");
 
-/** A consistent copy of the live database (VACUUM INTO reads through the WAL). Null when there is no database yet. */
-export function snapshotDb(home: string, label: string, protect?: string): string | null {
+/** Stream, not in memory: a database is hundreds of MB on a small host. The output appears under its name only when it is whole. */
+async function transform(from: string, to: string, step: NodeJS.ReadWriteStream): Promise<void> {
+  const part = `${to}.part`;
+  try {
+    await pipeline(createReadStream(from), step, createWriteStream(part));
+    renameSync(part, to);
+  } catch (e) {
+    rmSync(part, { force: true });
+    throw e;
+  }
+}
+
+/** Every finished `.db` in the folder goes to `.db.gz`: the one just taken, and any a killed run left (a copy from before this format too). */
+async function compressSnapshots(home: string): Promise<void> {
+  for (const f of readdirSync(snapshotsDir(home)).filter((n) => n.endsWith(".db")).sort()) {
+    const db = join(snapshotsDir(home), f);
+    await transform(db, `${db}.gz`, createGzip({ level: constants.Z_BEST_SPEED }));
+    rmSync(db, { force: true });
+  }
+}
+
+/**
+ * A consistent copy of the live database (VACUUM INTO reads through the WAL), gzipped: a database compresses to about a
+ * quarter, and three of them were most of what grew on the disk. Null when there is no database yet.
+ */
+export async function snapshotDb(home: string, label: string, protect?: string): Promise<string | null> {
   if (!existsSync(dbPath(home))) return null;
   mkdirSync(snapshotsDir(home), { recursive: true });
+  // what a run killed halfway left: never finished, nothing reads it
+  for (const f of readdirSync(snapshotsDir(home)).filter((n) => n.endsWith(".tmp") || n.endsWith(".part"))) rmSync(join(snapshotsDir(home), f), { force: true });
   const name = `${new Date().toISOString().replace(/[:.]/g, "-")}-${label.replace(/[^\w-]/g, "")}.db`;
+  const copy = join(snapshotsDir(home), `${name}.tmp`); // not `.db` until it is whole
   const db = new Database(dbPath(home));
   try {
-    db.exec(`VACUUM INTO '${join(snapshotsDir(home), name).replace(/'/g, "''")}'`);
+    db.exec(`VACUUM INTO '${copy.replace(/'/g, "''")}'`);
+    renameSync(copy, join(snapshotsDir(home), name));
+  } catch (e) {
+    rmSync(copy, { force: true });
+    throw e;
   } finally {
     db.close();
   }
+  try {
+    await compressSnapshots(home);
+  } catch (e) {
+    rmSync(join(snapshotsDir(home), name), { force: true }); // a whole copy of the database must not stay on a disk that may be why this failed
+    throw e;
+  }
   for (const old of listSnapshots(home).slice(KEEP_SNAPSHOTS)) if (old !== protect) rmSync(join(snapshotsDir(home), old), { force: true });
-  return name;
+  return `${name}.gz`;
 }
 
 /** Newest first (the names start with an ISO timestamp). */
 export function listSnapshots(home: string): string[] {
   if (!existsSync(snapshotsDir(home))) return [];
-  return readdirSync(snapshotsDir(home)).filter((f) => f.endsWith(".db")).sort().reverse();
+  return readdirSync(snapshotsDir(home)).filter((f) => f.endsWith(".db.gz")).sort().reverse();
 }
 
 /** Replace the database with a snapshot. What is there now is kept as a `pre-restore` snapshot first. */
@@ -62,8 +101,8 @@ export async function restoreDb(ctx: Ctx, snapshot: string): Promise<HistoryEntr
   const staged = `${dbPath(ctx.home)}.restore`;
   let kept: string | null;
   try {
-    copyFileSync(join(snapshotsDir(ctx.home), snapshot), staged);
-    kept = snapshotDb(ctx.home, "pre-restore", snapshot);
+    await transform(join(snapshotsDir(ctx.home), snapshot), staged, createGunzip());
+    kept = await snapshotDb(ctx.home, "pre-restore", snapshot);
   } catch (e) {
     rmSync(staged, { force: true });
     await ctx.sup.restart(); // the database was not touched
@@ -129,7 +168,7 @@ async function freePort(): Promise<number> {
 /** Boot the release on a spare port, a throwaway home and a copy of the snapshot. Null = it works. */
 async function tryCandidate(ctx: Ctx, sha: string, snapshot: string | null, candidateMs: number): Promise<string | null> {
   const home = mkdtempSync(join(tmpdir(), "sb-candidate-"));
-  if (snapshot) copyFileSync(join(snapshotsDir(ctx.home), snapshot), dbPath(home));
+  if (snapshot) await transform(join(snapshotsDir(ctx.home), snapshot), dbPath(home), createGunzip());
   const port = await freePort();
   const dir = join(releasesDir(ctx.home), sha);
   const env: Record<string, string> = {};
@@ -191,7 +230,7 @@ export async function promote(ctx: Ctx, rev: string, times: PromoteTimes = {}): 
     return appendHistory(ctx.home, { action: "rejected", from, to: rev, ok: false, reason: `could not build the release: ${String((e as Error).message ?? e)}` });
   }
   if (sha === from) return appendHistory(ctx.home, { action: "rejected", from, to: sha, ok: false, reason: "this release is already current" });
-  const snapshot = snapshotDb(ctx.home, `before-${sha.slice(0, 7)}`);
+  const snapshot = await snapshotDb(ctx.home, `before-${sha.slice(0, 7)}`);
   const refused = await tryCandidate(ctx, sha, snapshot, candidateMs);
   if (refused) return appendHistory(ctx.home, { action: "rejected", from, to: sha, ok: false, reason: refused });
   switchTo(ctx.home, sha);

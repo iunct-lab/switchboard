@@ -2,6 +2,7 @@ import { currentRepo, originRepo } from "./repo.ts";
 import { LOCAL_CI_RESULT, patchIdOf, sh, stackOf } from "./local-ci";
 import { forgeTargetOf, originOf, type ForgeTarget } from "../ops-kit/src/forge.ts";
 import { mergeGitlabMr, readGitlabMerge, runGlab, type Sh } from "../ops-kit/src/forge-gitlab.ts";
+import { linkedIssues, overlaps, scopeIn } from "./task-paths.ts";
 
 export const LARGE_LINES = 300;
 
@@ -104,6 +105,8 @@ export interface PrFacts {
   head?: string;
   /** The base branch (--merge-stack merges only a PR on the default branch: the bottom of its stack); absent = not read. */
   base?: string;
+  /** The Tasks the PR closes: the paths their bodies name, and what the other Tasks of their PBIs name; absent = the PR closes no Task. */
+  task?: { numbers: number[]; named: string[]; siblings: { number: number; paths: string[] }[] };
 }
 
 export interface Judgement {
@@ -114,6 +117,8 @@ export interface Judgement {
   ask: AskKind[];
   /** The recheck kinds among the large reasons that have no mark of the head yet. */
   recheck: RecheckKind[];
+  /** What was not checked: it does not stop the merge. Absent = nothing. */
+  notes?: string[];
 }
 
 const matches = (globs: Bun.Glob[], path: string) => globs.some((g) => g.match(path));
@@ -158,6 +163,22 @@ function countsTowardSize(path: string): boolean {
   return !matches(DOCS, path);
 }
 
+/** The Task-scope reason, or the note that it could not be checked (#2498). The files of the PR no path of its Tasks covers, in the PR's order. */
+function taskScope(f: PrFacts): { reason?: string; note?: string } {
+  if (!f.task) return {};
+  const { numbers, named, siblings } = f.task;
+  const tasks = numbers.map((n) => `#${n}`).join(", ");
+  if (named.length === 0) return { note: `Task ${tasks} の本文からパスが読めない（範囲の検査をしていない）` };
+  const outside = f.files.map((x) => x.path).filter((p) => !named.some((q) => overlaps(p, q)));
+  if (outside.length === 0) return {};
+  const owners = (p: string) => siblings.filter((s) => s.paths.some((q) => overlaps(p, q))).map((s) => s.number).sort((a, b) => a - b);
+  const listed = outside.map((p) => {
+    const by = owners(p);
+    return by.length > 0 ? `${p}（${by.map((n) => `Task #${n}`).join("、")} が名指し）` : p;
+  });
+  return { reason: `Task ${tasks} の本文に名指しの無いファイル: ${listed.join(", ")}` };
+}
+
 /** `answered`: with --merge / --merge-stack, --allow-large lifts the large reasons only after a `[merge-answer] yes` of the head. */
 export function judge(f: PrFacts, opts: { allowLarge: boolean; answered?: boolean }): Judgement {
   const large: { kind: RecheckKind | AskKind; text: string }[] = [];
@@ -198,6 +219,8 @@ export function judge(f: PrFacts, opts: { allowLarge: boolean; answered?: boolea
     const kinds = m?.[2]?.split(",") ?? [];
     return m?.[1] === "yes" && m[3] === f.head && ask.every((k) => kinds.includes(k));
   })) reasons.push(`[merge-answer] yes の印が無い（head ${f.head ?? "不明"}、kinds ${ask.join(",") || "なし"}）`);
+  const scope = taskScope(f);
+  if (scope.reason) reasons.push(scope.reason);
   if (f.checks.length === 0) reasons.push("CI のチェックが 1 つも無い");
   for (const c of f.checks) {
     if (c.conclusion !== "SUCCESS" && c.conclusion !== "SKIPPED") {
@@ -216,7 +239,7 @@ export function judge(f: PrFacts, opts: { allowLarge: boolean; answered?: boolea
     reasons.push(`mergeStateStatus が BLOCKED: base の枝の保護（必須のチェックか承認）がマージを止めている。local-ci の結果は PR コメントで、GitHub の必須チェックにはならない（${PROTECTION_DOC}）`);
   } else if (f.mergeState !== "CLEAN" && !unstableForLocalCi) reasons.push(`mergeStateStatus が CLEAN でない: ${f.mergeState}`);
 
-  return { verdict: reasons.length === 0 ? "merge" : "stop", impact, reasons, ask, recheck };
+  return { verdict: reasons.length === 0 ? "merge" : "stop", impact, reasons, ask, recheck, ...(scope.note ? { notes: [scope.note] } : {}) };
 }
 
 async function gh(args: string[]): Promise<string> {
@@ -324,6 +347,42 @@ async function readmeDesignRulesTouched(n: number, run: (args: string[]) => Prom
   return patch === undefined ? true : designRulesTouched(readme, patch);
 }
 
+const TASK_LABEL = "type:task";
+const BACKLOG_TASK = /^Backlog-Task: \d+\s*$/im;
+const ISSUE_QUERY = "query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number:$n){ number body labels(first:20){nodes{name}} parent{ subIssues(first:100){ nodes{ number body labels(first:20){nodes{name}} } } } } } }";
+
+interface TaskIssue { number: number; body: string; labels: { nodes: { name: string }[] } }
+const isTask = (i: TaskIssue) => i.labels.nodes.some((l) => l.name === TASK_LABEL);
+
+/**
+ * The Tasks a PR closes, read from GitHub's Issues (#2498; not the stored backlog, #909). `Backlog-Task:` names an Issue of
+ * the app only, which GitHub does not have. `files`: a path a PR adds at the top of the tree still starts a path (as readOthers).
+ */
+async function readTask(pr: { body: string | null; headRefName: string | null }, files: string[], run: (args: string[]) => Promise<string>, repo: string): Promise<PrFacts["task"]> {
+  if (BACKLOG_TASK.test(pr.body ?? "")) return undefined;
+  const [owner, name] = repo.split("/");
+  const issues: (TaskIssue & { parent: { subIssues: { nodes: TaskIssue[] } } | null })[] = [];
+  for (const n of new Set(linkedIssues(pr))) {
+    const out = await run(["api", "graphql", "-f", `query=${ISSUE_QUERY}`, "-f", `o=${owner}`, "-f", `r=${name}`, "-F", `n=${n}`]);
+    issues.push(JSON.parse(out).data.repository.issue);
+  }
+  const tasks = issues.filter(isTask);
+  if (tasks.length === 0) return undefined;
+  const top: { name: string; dir: boolean }[] = (JSON.parse(await run(["api", `repos/${repo}/contents`])) as { name: string; type: string }[])
+    .map((e) => ({ name: e.name, dir: e.type === "dir" }));
+  for (const f of files) {
+    const [head, ...more] = f.split("/");
+    if (!top.some((t) => t.name === head)) top.push({ name: head!, dir: more.length > 0 });
+  }
+  const numbers = tasks.map((t) => t.number);
+  const others = new Map(tasks.flatMap((t) => t.parent?.subIssues.nodes ?? []).filter((s) => isTask(s) && !numbers.includes(s.number)).map((s) => [s.number, s]));
+  return {
+    numbers,
+    named: [...new Set(tasks.flatMap((t) => scopeIn(t.body, top)))],
+    siblings: [...others.values()].map((s) => ({ number: s.number, paths: scopeIn(s.body, top) })),
+  };
+}
+
 /**
  * `repo`: owner/name; another repository's backlog stage Task passes its own with --repo (the rules stay these).
  * `patchId`: a PR's diff's patch-id now (local-ci's `patchIdOf`; tests give their own).
@@ -331,7 +390,7 @@ async function readmeDesignRulesTouched(n: number, run: (args: string[]) => Prom
 export async function readPr(n: number, run = gh, repo = currentRepo(), patchId = (pr: number) => patchIdOf(pr, repo, sh)): Promise<PrFacts> {
   const [owner, name] = repo.split("/");
   const pr = JSON.parse(
-    await run(["pr", "view", String(n), "-R", repo, "--json", "files,commits,baseRefName,baseRefOid,headRefName,headRefOid,mergeStateStatus,comments"]),
+    await run(["pr", "view", String(n), "-R", repo, "--json", "body,files,commits,baseRefName,baseRefOid,headRefName,headRefOid,mergeStateStatus,comments"]),
   );
   // GitHub has not worked it out yet (just after a push or a base change): nothing to judge by
   if (pr.mergeStateStatus === "UNKNOWN") throw new Error("mergeStateStatus が UNKNOWN（GitHub が計算中。少し待ってやり直す）");
@@ -357,6 +416,7 @@ export async function readPr(n: number, run = gh, repo = currentRepo(), patchId 
       return m?.[1] === k && m[2] === pr.headRefOid;
     }));
   const authored: string[] = pr.commits.map((c: { authoredDate: string }) => c.authoredDate);
+  const task = await readTask(pr, pr.files.map((x: { path: string }) => x.path), run, repo);
   return {
     files: pr.files.map((x: PrFacts["files"][number]) => ({ path: x.path, additions: x.additions, deletions: x.deletions })),
     headCommittedAt: authored.reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a)),
@@ -370,6 +430,7 @@ export async function readPr(n: number, run = gh, repo = currentRepo(), patchId 
     reviewComments: comments.map((c) => ({ body: c.body, createdAt: c.createdAt })),
     head: pr.headRefOid,
     base: pr.baseRefName,
+    ...(task ? { task } : {}),
   };
 }
 

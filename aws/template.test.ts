@@ -163,7 +163,7 @@ describe("aws/template.yaml (#229)", () => {
     for (const st of boundary.split("- Sid: ").slice(1)) {
       if (!st.includes("Resource: '*'")) continue;
       const sid = st.split("\n")[0];
-      expect(["Describe", "ManagedKeysThroughServices", "AgentMetrics"]).toContain(sid);
+      expect(["Describe", "ManagedKeysThroughServices", "AgentMetrics", "CostRead"]).toContain(sid);
       if (sid === "ManagedKeysThroughServices") expect(st).toContain("kms:ViaService");
       if (sid === "AgentMetrics") expect(st).toContain("'cloudwatch:namespace': CWAgent");
     }
@@ -408,6 +408,14 @@ describe("aws/template.yaml memory alarms (#540)", () => {
     expect(resource("Instance")).not.toMatch(/cloudwatch|CWAgent|alarm/i);
   });
 
+  test("host bedrock-mantle (#1731): InstanceRole and Boundary have only CreateInference, on the account's projects", () => {
+    for (const name of ["InstanceRole", "Boundary"]) {
+      const body = resource(name);
+      expect([...body.matchAll(/bedrock-mantle:[A-Za-z*]+/g)].map((m) => m[0])).toEqual(["bedrock-mantle:CreateInference"]);
+      expect(body).toContain("Resource: !Sub 'arn:aws:bedrock-mantle:${AWS::Region}:${AWS::AccountId}:project/*'");
+    }
+  });
+
   test("host bedrock (#1730): InstanceRole and Boundary invoke any model but have no other bedrock action", () => {
     const resources = [
       "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*",
@@ -428,6 +436,16 @@ describe("aws/template.yaml memory alarms (#540)", () => {
     expect(text).not.toMatch(/iam:CreateAccessKey|bedrock:CreateApiKey|AWS::IAM::AccessKey|AWS::IAM::User\b/);
   });
 
+  test("the instance role reads cost and budgets, and changes neither (#2278)", () => {
+    for (const name of ["InstanceRole", "Boundary"]) {
+      const body = resource(name);
+      expect([...body.matchAll(/(?<![\w:])(ce|budgets):[A-Za-z*]+/g)].map((m) => m[0])).toEqual(["ce:GetCostAndUsage", "ce:GetCostForecast", "budgets:ViewBudget"]);
+      expect(body).toMatch(/Action: \[ce:GetCostAndUsage, ce:GetCostForecast\]\n +Resource: '\*'\n/);
+      expect(body).toMatch(/Action: budgets:ViewBudget\n +Resource: !Sub 'arn:aws:budgets::\$\{AWS::AccountId\}:budget\/\*'\n/);
+      expect(body).not.toMatch(/budgets:(Modify|Create|Delete|Update|\*)|ce:(Update|Create|Delete|Put|Tag|Untag|\*)/);
+    }
+  });
+
   test("cloudwatch permissions: PutMetricData for CWAgent only (host and boundary), and the deploy role names this stack's alarms", () => {
     const put = "Action: cloudwatch:PutMetricData";
     for (const name of ["InstanceRole", "Boundary"]) {
@@ -445,9 +463,9 @@ describe("aws/template.yaml memory alarms (#540)", () => {
     expect(deploy).toContain("Action: [cloudwatch:PutMetricAlarm, cloudwatch:DeleteAlarms, cloudwatch:TagResource, cloudwatch:UntagResource, cloudwatch:ListTagsForResource]\n                Resource: !Sub 'arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${AWS::StackName}-*'");
     expect(deploy).toContain("Action: cloudwatch:DescribeAlarms\n                Resource: '*'");
     expect(deploy).not.toMatch(/cloudwatch:\*|sns:\*|PutMetricData/);
-    // nothing else in the boundary changed: its statements are the ones before plus Countries (#1639), AgentMetrics and HostLogs (#1490)
+    // nothing else in the boundary changed: its statements are the ones before plus Countries (#1639), AgentMetrics and HostLogs (#1490), CostRead and BudgetRead (#2278), BedrockMantle (#1731)
     const sids = resource("Boundary").split("- Sid: ").slice(1).map((x) => x.split("\n")[0]);
-    expect(sids).toEqual(["Parameters", "RegisterCode", "Buckets", "Wake", "ThisInstance", "RootReplacement", "Describe", "Stack", "Bedrock", "OwnRoles", "Countries", "AgentMetrics", "OwnLogs", "HostLogs", "Offload", "HostAssumeRoles", "ManagedKeysThroughServices"]);
+    expect(sids).toEqual(["Parameters", "RegisterCode", "Buckets", "Wake", "ThisInstance", "RootReplacement", "Describe", "Stack", "Bedrock", "BedrockMantle", "CostRead", "BudgetRead", "OwnRoles", "Countries", "AgentMetrics", "OwnLogs", "HostLogs", "Offload", "HostAssumeRoles", "ManagedKeysThroughServices"]);
   });
 });
 

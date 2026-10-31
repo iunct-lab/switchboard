@@ -285,14 +285,14 @@ describe("lint", () => {
   /** The page GitHub answered, as the app would have stored it (#919): parents not in the page are stored with their labels. */
   const recordsOf = (name: string): StoredRecords => {
     const nodes = page(name)().repository.issues.nodes as any[];
-    const issue = (n: number, labels: string[], over: Partial<StoredRecords["issues"][number]> = {}): StoredRecords["issues"][number] => ({ number: n, title: "", state: "OPEN", stateReason: null, body: "", labels, parent: null, subIssues: [], updatedAt: "", fields: null, ...over });
+    const issue = (n: number, labels: string[], over: Partial<StoredRecords["issues"][number]> = {}): StoredRecords["issues"][number] => ({ number: n, title: "", url: "", state: "OPEN", stateReason: null, body: "", labels, parent: null, subIssues: [], createdAt: "", updatedAt: "", closedAt: null, fields: null, ...over });
     const issues = nodes.map((r) => {
       const item = r.projectItems.nodes.find((i: any) => i.project.number === 1);
       const fields = item ? Object.fromEntries(item.fieldValues.nodes.filter((v: any) => v.field).map((v: any) => [v.field.name, v.number ?? v.name])) : null;
       return issue(r.number, r.labels.nodes.map((l: any) => l.name), { body: r.body, parent: r.parent?.number ?? null, subIssues: Array.from({ length: r.subIssues.totalCount }, (_, k) => 1000 + k), fields });
     });
     const parents = nodes.flatMap((r) => (r.parent && !nodes.some((o) => o.number === r.parent.number) ? [issue(r.parent.number, r.parent.labels.nodes.map((l: any) => l.name), { state: "CLOSED" })] : []));
-    return { workspaceId: "w", service: "github", repository: "example/repo", project: { owner: "example", number: 1 }, fetchedAt: 1, top: [], issues: [...issues, ...parents, issue(99, ["type:pbi"], { state: "CLOSED" })], unread: [], pulls: [] };
+    return { workspaceId: "w", service: "github", repository: "example/repo", project: { owner: "example", number: 1 }, fetchedAt: 1, top: [], issues: [...issues, ...parents, issue(99, ["type:pbi"], { state: "CLOSED" })], unread: [], pulls: [], comments: [] };
   };
 
   test("lint from the app's stored records (#919): the same violations as GitHub's answer, without asking GitHub", async () => {

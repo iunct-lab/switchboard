@@ -408,6 +408,10 @@ stageOf(ci, 304);
   await cardOf(`approval:${p1}:`);
   await openForm(`approval:${p1}:`);
   await pickScope(`approval:${p1}:`, "このリポジトリ");
+  // a broad target (#1765) is warned about in the lines to confirm, then narrowed again
+  await typeInto(`.card.ask[data-ask^='approval:${p1}:'] .ask-policy-field input`, "bun *");
+  const broad = await evaluate(`[...${card(`approval:${p1}:`)}.querySelectorAll('.ask-policy-summary li')].map(l => l.textContent)`) as string[];
+  assert(broad[2] === "広い指定: bun のどのサブコマンドにも当たります", `broad summary: ${JSON.stringify(broad)}`);
   await typeInto(`.card.ask[data-ask^='approval:${p1}:'] .ask-policy-field input`, "bun test*");
   const lines = await evaluate(`[...${card(`approval:${p1}:`)}.querySelectorAll('.ask-policy-summary li')].map(l => l.textContent)`) as string[];
   assert(lines[0] === "操作: exec" && lines[1] === "対象: bun test*" && lines[2] === "条件: なし" && lines[3]!.startsWith("期限: ") && lines[4] === "回答: Bash を許可", `summary: ${JSON.stringify(lines)}`);
@@ -499,6 +503,9 @@ stageOf(ci, 304);
   await settings();
   const rowOf = (id: string) => `document.querySelector('.policy-row[data-policy=${JSON.stringify(id)}]')`;
   await evaluate(`[...${rowOf(repo.id)}.querySelectorAll('button')].find(b => b.textContent.trim() === '編集').click()`);
+  await typeInto(`.policy-row[data-policy='${repo.id}'] .policy-edit input:not([type])`, "bun *");
+  const editHint = await evaluate(`[...${rowOf(repo.id)}.querySelectorAll('.policy-edit .hint')].map(h => h.textContent)`) as string[];
+  assert(editHint.includes("広い指定: bun のどのサブコマンドにも当たります"), `edit warning: ${JSON.stringify(editHint)}`);
   await typeInto(`.policy-row[data-policy='${repo.id}'] .policy-edit input:not([type])`, "bun test packages/*");
   await evaluate(`[...${rowOf(repo.id)}.querySelectorAll('button')].find(b => b.textContent.trim() === '保存').click()`);
   await until(async () => (await policies()).find((p) => p.id === repo.id)?.target === "bun test packages/*", "the edited target is saved");
@@ -564,7 +571,7 @@ stageOf(ci, 304);
   assert(moved.includes("前回と違うので確認します") && moved.includes("適用しなかった理由: PR の差分が変わった") && moved.includes("PR の差分が変わりました（eeeeeee → fffffff）"), `moved: ${moved}`);
   assert(replies.filter((r) => r.prompt === "check14").length === repliesBefore14, "the changed PR was answered by the old policy");
   await shot("asks-policy-head-1280.png");
-  report.policies = { saved: 2, applied: ["decision", "approval"], again: prev, edited: "bun test packages/*" };
+  report.policies = { saved: 2, applied: ["decision", "approval"], again: prev, edited: "bun test packages/*", broadWarned: [broad[2], editHint[0]] };
 
   // 8. 390 × 844: the form on a card, and the list in the settings, nothing sideways
   await call("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });

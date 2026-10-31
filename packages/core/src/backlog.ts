@@ -3,13 +3,15 @@
  * source of truth; the DB keeps a copy of it (#885, backlog-sync.ts) that `readStoredBacklog` reads. One GraphQL query (100 Issues a page, the same shape as
  * scripts/setup/lint_backlog.sh) instead of one call per Issue, which is slow and runs into the secondary rate limit (#201).
  */
-import type { Backlog, BacklogAction, BacklogCommentData, BacklogCreateInput, BacklogEditInput, BacklogFetchState, BacklogHeldEdit, BacklogIssueData, BacklogIssueDetail, BacklogItem, BacklogPrereq, BacklogProjectItemData, BacklogRecord, BacklogSource, BacklogStage, BacklogSyncInfo, BacklogSyncState, GithubBudget } from "@switchboard/protocol";
+import type { Backlog, BacklogAction, BacklogCommentData, BacklogCreateInput, BacklogEditInput, BacklogFetchState, BacklogHeldEdit, BacklogIssueData, BacklogIssueDetail, BacklogItem, BacklogPrereq, BacklogProjectItemData, BacklogPullRequestData, BacklogRecord, BacklogSource, BacklogStage, BacklogSyncInfo, BacklogSyncState, GithubBudget } from "@switchboard/protocol";
 import { applyBacklogField, BacklogResolveError, type BacklogLocalEntry, type BacklogOperation, type Db, type NewBacklogOperation } from "./db.ts";
 import { conflictRevision, withoutMarker } from "./backlog-merge.ts";
+import { closesOf } from "./backlog-sync.ts";
 import { findSecrets, hostAws } from "../../../ops-kit/src/secrets.ts";
 import { publicCopyRefusal } from "../../../ops-kit/src/config.ts";
 import type { SetupScripts } from "./skillsync.ts";
-import { judge, pathsIn, type Work } from "../../../scripts/parallel-guard.ts";
+import { judge, type Work } from "../../../scripts/parallel-guard.ts";
+import { pathsIn } from "../../../scripts/task-paths.ts";
 import { readdirSync } from "node:fs";
 import type { StoredRecords } from "../../../ops-kit/src/backlog-client.ts";
 import { parseIncluded, responseOf, retryAtFromResponse, type GithubFailure, type GithubResponse } from "../../../ops-kit/src/gh.ts";
@@ -852,7 +854,7 @@ export function editStoredIssue(db: Db, source: BacklogSource, ref: number | str
     }
     if (item && input.project !== false) {
       const fields = (shown(item) as BacklogProjectItemData).fields ?? {};
-      for (const [name, v] of Object.entries(input.fields ?? {})) if (made || fields[name] !== v) ops.push({ issue, targetKind: "project-item", target: item.externalId, kind: "set", field: `field:${name}`, payload: v, base: item.remote ? (fields[name] ?? null) : null });
+      for (const [name, v] of Object.entries(input.fields ?? {})) if (made || fields[name] !== v) ops.push({ issue, targetKind: "project-item", target: item.externalId, kind: "set", field: `field:${name}`, payload: v, base: made ? null : (fields[name] ?? null) });
       // an item GitHub does not have yet shows its fields here
       if (!made && !item.remote && input.fields) records.push({ objectKind: "project-item", externalId: item.externalId, local: { ...(shown(item) as BacklogProjectItemData), fields: { ...fields, ...input.fields } } });
     }
@@ -883,7 +885,7 @@ export function resolveStoredConflict(db: Db, source: BacklogSource, ref: number
 
 /** What the check before a send, and the read with the history after it, keep and what they cannot (#887 方式 A, #1329 方式 1′): told with every stored Issue. */
 export const SYNC_LIMITS =
-  "GitHub に送る編集は、送る直前に GitHub の値を確かめ、編集の元から変わっていれば止めて競合として残します。本文・題・状態・ラベル・Milestone・親・Project の Status は、書いた直後に GitHub の編集履歴も読み、確かめてから書くまでの間にほかの人が書いていれば、その値を添えて競合として残します（版の内容が履歴に残っていれば、上書きした値を選んで戻せます。消されていれば編集者と時刻だけが残ります）。Status 以外の Project フィールド（Priority・Story Points・Phase など）には履歴が無く、本文・コメントは 100 版を超えて押し出された版が残らないので、そこは確かめてから書くまでの間の編集を上書きしうる（気づけない）ことがあります。履歴を読めなかったときは、書いた編集を未確認の競合として残します。同じ GitHub アカウントで GitHub の画面から書いた編集は、ほかの人の編集と区別しません（Switchboard の開発リポジトリの Issue #1329）。";
+  "GitHub に送る編集は、送る直前に GitHub の値を確かめ、編集の元から変わっていれば止めて競合として残します。本文・題・状態・ラベル・Milestone・親・Project の Status は、書いた直後に GitHub の編集履歴も読み、確かめてから書くまでの間にほかの人が書いていれば、その値を添えて競合として残します（版の内容が履歴に残っていれば、上書きした値を選んで戻せます。消されていれば編集者と時刻だけが残ります）。Status 以外の Project フィールド（Priority・Story Points・Phase など）には履歴が無く、本文・コメントは 100 版を超えて押し出された版が残らないので、そこは確かめてから書くまでの間の編集を上書きしうる（気づけない）ことがあります。履歴を読めなかったときは、書いた編集を未確認の競合として残します。同じ GitHub アカウントで GitHub の画面から書いた編集は、ほかの人の編集と区別しません（Switchboard の開発リポジトリの Issue #1329）。GitHub Project の自動化が動かした Status は編集として数えず競合にしません（手元の値を送ります。Issue が閉じたことで動いた Status は GitHub の値のままにします）。";
 
 /** A comment kept here until it is sent: its record and its operation. `extra` goes with the operation (what an answer answers). */
 function comment(issue: BacklogRecord, n: number, body: string, now: number, extra: object = {}): { record: BacklogLocalEntry; op: NewBacklogOperation } {
@@ -934,6 +936,15 @@ export function holdStoredDecision(db: Db, source: BacklogSource, n: number, tex
   if (!rec || !shown(rec)) throw new BacklogEditError(rec ? `#${n} は GitHub から読めていません（${rec.fetchState}）。再読込してから保留してください` : `#${n} は保存されていません`, rec ? 409 : 404);
   const c = comment(rec, n, text ? `${HOLD_HEADING}\n\n${text}` : HOLD_HEADING, now);
   db.applyBacklogEdit(source, { records: [c.record], operations: [c.op] }, now);
+}
+
+/** `## 判断待ち` + text on Issue n, then the needs-decision label on, kept here and sent in that order: answerStoredDecision turned round. */
+export function askStoredDecision(db: Db, source: BacklogSource, n: number, text: string, now = Date.now()): void {
+  refuseSecrets(text);
+  const rec = issueRecord(db, source, n);
+  if (!rec || !shown(rec)) throw new BacklogEditError(rec ? `#${n} は GitHub から読めていません（${rec.fetchState}）。再読込してから書いてください` : `#${n} は保存されていません`, rec ? 409 : 404);
+  const c = comment(rec, n, `${DECISION_HEADING}\n${text}`, now);
+  db.applyBacklogEdit(source, { records: [c.record], operations: [c.op, { issue: rec.externalId, targetKind: "issue", target: rec.externalId, kind: "set", field: "label:needs-decision", payload: true, base: false }] }, now);
 }
 
 /** A plain comment (text as written, no heading) on Issue n (#910), kept here and sent later; no label changes. */
@@ -1169,7 +1180,7 @@ function withPrereqs(items: BacklogItem[], issues: Map<number, BacklogIssueData>
 
 /**
  * Gives each Ready / in-progress PBI the files its open Tasks name that other work touches too (#1044), by the rule of
- * scripts/parallel-guard.ts (`pathsIn`, `judge`; its STALE_HOURS too) read from the stored records, so that backlog-next
+ * scripts/task-paths.ts (`pathsIn`) and scripts/parallel-guard.ts (`judge`, STALE_HOURS) read from the stored records, so that backlog-next
  * does not start a session that would only find the overlap itself. The other work: an open PR that is not a Draft, not
  * `needs-decision` and not the PBI's own (it closes neither the PBI nor one of its Tasks), and an In progress Task of
  * another PBI that is not `needs-decision`. A PR whose files are not all stored cannot be judged (`unknown`). `root` =
@@ -1324,7 +1335,10 @@ export function readStoredIssue(db: Db, ws: Pick<BacklogWorkspace, "id">, ref: n
   if (!source || !rec || !value) return null;
   const issue = { ...value, body: withoutMarker(value.body) };
   const records = shownRecords(db, source);
-  const comments = issue.number ? records.flatMap((r) => (r.objectKind === "comment" && r.remote?.issue === issue.number ? [{ ...r.remote, id: r.externalId }] : [])) : [];
+  // a comment made here is named by its `local:` id before it is sent and by the service's after: both find its operation.
+  // Oldest last: one sent again when GitHub is turned on (backlog-enable.ts) keeps the seq it was written with
+  const written = new Map(db.listBacklogOperations(source).reverse().flatMap((o) => (o.kind === "comment" ? [[o.target, o.seq] as const, ...(o.remoteId ? [[o.remoteId, o.seq] as const] : [])] : [])));
+  const comments = issue.number ? records.flatMap((r) => (r.objectKind === "comment" && r.remote?.issue === issue.number ? [{ ...r.remote, id: r.externalId, seq: written.get(r.externalId) ?? null }] : [])) : [];
   const item = issue.number ? projectItemOf(records, source, issue.number) : undefined;
   const all = db.listPendingBacklogOperations(source);
   const pending = all.filter((o) => o.issue === rec.externalId);
@@ -1374,6 +1388,7 @@ export function readStoredRecords(db: Db, ws: Pick<BacklogWorkspace, "id" | "pat
     issues: [...issues, ...unread.filter((u) => !issues.some((i) => i.number === u.number))].map((i) => ({ ...i, fields: fields.get(i.number) ?? null })),
     unread: unread.map((i) => i.number),
     pulls: records.flatMap((r) => (r.objectKind === "pull-request" && r.remote ? [r.remote] : [])),
+    comments: records.flatMap((r) => (r.objectKind === "comment" && r.remote ? [{ issue: r.remote.issue, body: r.remote.body, createdAt: r.remote.createdAt }] : [])).sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
   };
 }
 
@@ -1518,28 +1533,33 @@ export function promotionStep(s: { status: ReleaseState; latest: { tag: string; 
 const marker = (sha: string) => `<!-- promote-failed:${sha} -->`;
 
 /**
- * Tells the PBI behind a failed version (the `(#n)` of its commit subject: a PR's `Closes #Task` → the Task's
- * `## 親 PBI`, or the Task / PBI itself) with a ## 判断待ち, once per commit. Null when no PBI could be found.
+ * Tells the PBI behind a failed version (the `(#n)` of its commit subject: a PR's first closed Task → the Task's parent
+ * PBI, or the Task / PBI itself) with a ## 判断待ち, once per commit, through the workspace's stored backlog: kept here
+ * and sent by the app (a backlog kept here only too). Only the PR is read from the code host when it is not stored
+ * (the PR's `closes` are the parallel guard's rule, closesOf). Null when no stored PBI could be found.
  */
-export async function reportPromoteFailure(gh: GhRunner, cwd: string, f: { tag: string; sha: string; subject: string; reason: string; rescueUrl: string }): Promise<number | null> {
-  const { repo } = await backlogRepoOf(gh, cwd);
-  const issue = async (n: number) => JSON.parse(await call(gh, cwd, ["api", `repos/${repo}/issues/${n}`])) as { body: string | null; labels: Array<{ name: string }>; pull_request?: unknown };
+export async function reportPromoteFailure(db: Db, source: BacklogSource, gh: GhRunner, cwd: string, f: { tag: string; sha: string; subject: string; reason: string; rescueUrl: string }): Promise<number | null> {
   let n = Number(/\(#(\d+)\)\s*$/.exec(f.subject)?.[1]);
   if (!n) return null;
-  let it = await issue(n);
-  if (it.pull_request) {
-    n = Number(/Closes #(\d+)/i.exec(it.body ?? "")?.[1]);
-    if (!n) return null;
-    it = await issue(n);
+  const records = shownRecords(db, source);
+  const issue = (k: number) => records.find((r) => r.objectKind === "issue" && (r.remote as BacklogIssueData).number === k)?.remote as BacklogIssueData | undefined;
+  const pr = records.find((r) => r.objectKind === "pull-request" && (r.remote as BacklogPullRequestData).number === n)?.remote as BacklogPullRequestData | undefined;
+  const closes = pr
+    ? pr.closes
+    : await call(gh, cwd, ["pr", "view", String(n), "--json", "body,headRefName"]).then((out) => {
+        const v = JSON.parse(out) as { body: string | null; headRefName: string | null };
+        return closesOf(v.body, v.headRefName);
+      }, () => null);
+  if (closes) n = closes[0] ?? 0;
+  let it = n ? issue(n) : undefined;
+  if (!it) return null;
+  if (!it.labels.includes("type:pbi")) {
+    n = it.parent ?? Number(/## 親 PBI\s*\n+\s*#(\d+)/.exec(it.body ?? "")?.[1]);
+    it = n ? issue(n) : undefined;
+    if (!it) return null;
   }
-  if (!it.labels.some((l) => l.name === "type:pbi")) {
-    n = Number(/## 親 PBI\s*\n+\s*#(\d+)/.exec(it.body ?? "")?.[1]);
-    if (!n) return null;
-  }
-  const comments = await call(gh, cwd, ["api", `repos/${repo}/issues/${n}/comments`, "--paginate", "-q", ".[].body"]);
-  if (comments.includes(marker(f.sha))) return n;
-  const body = [
-    DECISION_HEADING,
+  if (records.some((r) => r.objectKind === "comment" && (r.remote as BacklogCommentData).issue === n && (r.remote as BacklogCommentData).body.includes(marker(f.sha)))) return n;
+  askStoredDecision(db, source, n, [
     `**問い**: 動いているアプリに入らなかった版 ${f.tag}（${f.sha.slice(0, 7)} ${f.subject}）をどうするか`,
     "**選択肢**:",
     `- A: 直す — 影響: 直した PR がマージされて新しいタグが付くまで、定期実行は新しい項目を始めない`,
@@ -1548,8 +1568,6 @@ export async function reportPromoteFailure(gh: GhRunner, cwd: string, f: { tag: 
     `**止めた場所**: 定期実行（backlog-next）。救援画面: ${f.rescueUrl}`,
     "",
     marker(f.sha),
-  ].join("\n");
-  await call(gh, cwd, ["issue", "comment", String(n), "-R", repo, "--body", body]);
-  await call(gh, cwd, ["issue", "edit", String(n), "-R", repo, "--add-label", "needs-decision"]);
+  ].join("\n"));
   return n;
 }

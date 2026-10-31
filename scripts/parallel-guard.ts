@@ -7,18 +7,21 @@ import { currentRepo } from "./repo.ts";
  *   overlap — two sessions editing the same file. A Task's named paths are compared with the files of open PRs and the
  *             paths named by other In progress Tasks. Work left untouched for STALE_HOURS is reported but does not block.
  *             After setting In progress, `--claimed` leaves a claim comment on the Task; of two In progress Tasks on the
- *             same file the one whose claim came first (smaller comment id) goes on. It also judges the
+ *             same file the one whose claim came first (smaller comment order) goes on. It also judges the
  *             prerequisites the Task and its PBI name (`**前提**:`, #937) as the daemon does (prereqState): one of
  *             another PBI not done yet waits (`wait`), one withdrawn / not found / not judged stops (`stop`). A merged
  *             （リリース） one goes: whether it runs is the daemon's to judge before it starts the PBI.
- * Comment ids only grow, across a repository's issues too, so they order claims without trusting clocks.
- * On a backlog kept in the app (#2265: BACKLOG_URL, and the records' service is `switchboard`) the comments are the
- * app's stored ones (`appBoard`, the same API as `ops-kit backlog`): ids `sb:<seq>`, in the order they were made, and
- * gh is never called. They cannot be deleted, so a session takes its claim back with a withdraw mark naming its token.
+ * Claims are ordered by a number that only grows, so they need no trusted clock.
+ * With BACKLOG_URL, on a repository the app syncs, GitHub-synced or kept in the app only (#3069), the comments are the
+ * app's stored ones (`appBoard`, the same API as `ops-kit backlog`), in the order the app stored them (`comments[].seq`),
+ * and gh is never called. They cannot be deleted, so a session takes its claim back with a withdraw mark naming its token.
+ * On a repository the app does not know, and without BACKLOG_URL, they are GitHub's (`ghBoard`), ordered by comment id,
+ * which grows across a repository's issues.
  */
 
 import { prereqsOf, prereqState, type WaitTarget } from "../packages/core/src/backlog.ts";
-import { readRecords, type StoredRecords } from "../ops-kit/src/backlog-client.ts";
+import { appSync, BacklogUnknown, readRecords, type StoredRecords } from "../ops-kit/src/backlog-client.ts";
+import { linkedIssues, overlaps, pathsIn } from "./task-paths.ts";
 
 export const STALE_HOURS = 72;
 const MARKER = /<!-- pbi-complete:(claim|takeover|release)(?: (\S+))? -->/;
@@ -26,16 +29,6 @@ const TASK_CLAIM = /^<!-- parallel-guard:task-claim(?: (\S+))? -->/;
 const WITHDRAW = /<!-- parallel-guard:withdraw (\S+) -->/;
 /** The tokens taken back (#2265): a claim with one of them does not count. */
 const withdrawn = (comments: Comment[]) => new Set(comments.flatMap((c) => WITHDRAW.exec(c.body)?.[1] ?? []));
-const CLOSES = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?) #(\d+)|^Backlog-Task: (\d+)\s*$/gim;
-
-/** The Issues a PR is linked to (#1059): its body's `Closes #n` (close / fix / resolve and their -s / -d forms) or the line `Backlog-Task: n` of a backlog kept in Switchboard (#2344: no `#n`, it would be a GitHub Issue), and its branch `sb/<n>-`. */
-export function linkedIssues(pr: { body: string | null; headRefName: string | null }): number[] {
-  const linked = [...(pr.body ?? "").matchAll(CLOSES)].map((m) => Number(m[1] ?? m[2]));
-  const branch = /^sb\/(\d+)-/.exec(pr.headRefName ?? "");
-  if (branch) linked.push(Number(branch[1]));
-  return linked;
-}
-
 export interface Comment { id: number; body: string }
 export interface Holder { id: number; token: string }
 
@@ -62,35 +55,6 @@ export const lastClaim = (comments: Comment[]) => {
     })
     .reduce<number | undefined>((a, c) => (a === undefined || c.id > a ? c.id : a), undefined);
 };
-
-/** A stored comment's id as a number to order by (#2265): the app's `sb:<seq>`, or GitHub's. Compared within one backlog only. */
-export const commentId = (id: string | number): number => (typeof id === "number" ? id : Number(id.replace(/^sb:/, "")));
-
-const FILE_EXT = /\.(?:tsx?|[cm]?js|json|md|ya?ml|toml|lock|sh|css|html|sql|txt)$/;
-const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-/**
- * Repository paths named in an Issue body. `top` is the repository's root (plus what open PRs add to it): its
- * directories start a path, its files are paths by themselves (`package.json`). A backticked word that looks like a
- * file (it ends in a file extension) counts too, so a file no branch has yet (`new-config.json`) is still seen.
- * `path:line` loses the line; a directory keeps its trailing slash.
- */
-export function pathsIn(text: string, top: { name: string; dir: boolean }[]): string[] {
-  const dirs = top.filter((t) => t.dir).map((t) => esc(t.name));
-  const files = top.filter((t) => !t.dir).map((t) => esc(t.name));
-  const alts = [...(dirs.length ? [`(?:${dirs.join("|")})\\/[\\w.@\\/-]*[\\w\\/]`] : []), ...(files.length ? [`(?:${files.join("|")})`] : [])];
-  const found = alts.length
-    ? [...text.matchAll(new RegExp(`(?<![\\w./-])(?:${alts.join("|")})(?![\\w-])`, "g"))].map((m) => m[0])
-    : [];
-  // Only a file name counts here: `turn/completed`, `origin/main` and `@switchboard/protocol` have a / but are not paths
-  for (const m of text.matchAll(/`([\w.-]+(?:\/[\w.-]+)*)(?::\d+(?:-\d+)?)?`/g)) {
-    if (m[1] && FILE_EXT.test(m[1]) && !m[1].startsWith(".")) found.push(m[1]);
-  }
-  return [...new Set(found)];
-}
-
-export const overlaps = (a: string, b: string) =>
-  a === b || (a.endsWith("/") && b.startsWith(a)) || (b.endsWith("/") && a.startsWith(b));
 
 export interface Work { ref: string; task?: number; paths: string[]; updatedAt: string; claimId?: number }
 export interface Hit { ref: string; path: string; updatedAt: string }
@@ -162,12 +126,14 @@ export const ghBoard = (repo: string, run: Run = gh): Board => ({
 });
 
 /**
- * The app's stored comments (#2265), through the API `ops-kit backlog` uses (BACKLOG_URL / BACKLOG_TOKEN_FILE /
- * BACKLOG_WORKSPACE): read from GET /api/backlog/:n, written with POST /api/backlog/:n/comment. A stored comment cannot be
+ * The app's stored comments (#2265, #3069), through the API `ops-kit backlog` uses (BACKLOG_URL / BACKLOG_TOKEN_FILE /
+ * BACKLOG_WORKSPACE, or `repo`): read from GET /api/backlog/:n, written with POST /api/backlog/:n/comment. A stored comment cannot be
  * deleted: one taken back gets a withdraw mark. What a post made is found again by its token, as the newest comment
- * carrying it. The material is the stored records, read as they are (nothing is sent elsewhere).
+ * carrying it. Comments are ordered by `seq`, which sending to GitHub does not change (the id and the time do); one only
+ * imported has none and comes by its time before every one written here. The material is the stored records: of a
+ * GitHub-synced repository brought up to date first, of a backlog kept in the app read as they are.
  */
-export function appBoard(env: Record<string, string | undefined>, f: typeof fetch = fetch): Board {
+export function appBoard(env: Record<string, string | undefined>, f: typeof fetch = fetch, repo?: string): Board {
   const api = async (method: string, path: string, body?: unknown) => {
     const key = env.BACKLOG_TOKEN_FILE ? (await Bun.file(env.BACKLOG_TOKEN_FILE).text()).trim() : "";
     const res = await f(`${env.BACKLOG_URL!.replace(/\/+$/, "")}${path}`, { method, headers: { "content-type": "application/json", ...(key && { authorization: `Bearer ${key}` }) }, ...(body !== undefined && { body: JSON.stringify(body) }) });
@@ -177,14 +143,14 @@ export function appBoard(env: Record<string, string | undefined>, f: typeof fetc
   };
   let workspace: string | undefined;
   const records = async () => {
-    const r = await readRecords(env, { fresh: false, fetch: f });
+    const r = await readRecords(env, { fresh: false, repo, fetch: f });
     workspace = r.workspaceId;
     return r;
   };
   const ws = async () => workspace ?? (await records()).workspaceId;
   const read = async (n: number): Promise<Comment[]> => {
-    const d = (await api("GET", `/${n}?workspaceId=${encodeURIComponent(await ws())}`)) as { comments: Array<{ id: string; body: string }> };
-    return d.comments.map((c) => ({ id: commentId(c.id), body: c.body }));
+    const d = (await api("GET", `/${n}?workspaceId=${encodeURIComponent(await ws())}`)) as { comments: Array<{ seq: number | null; body: string; createdAt: string }> };
+    return d.comments.map((c) => ({ id: c.seq ?? Date.parse(c.createdAt) - 1e13, body: c.body }));
   };
   const write = async (n: number, text: string) => void (await api("POST", `/${n}/comment`, { workspaceId: await ws(), text }));
   return {
@@ -196,7 +162,13 @@ export function appBoard(env: Record<string, string | undefined>, f: typeof fetc
       return Math.max(...mine.map((c) => c.id));
     },
     remove: (n, _id, token) => write(n, `<!-- parallel-guard:withdraw ${token} -->\n取り下げ（parallel-guard）`),
-    material: async (task) => storedMaterial(await records(), task),
+    material: async (task) => {
+      const r = await records();
+      if (r.service === "switchboard") return storedMaterial(r, task);
+      const fresh = await readRecords(env, { fresh: true, repo, fetch: f });
+      if (fresh.unsynced) console.error(fresh.unsynced);
+      return storedMaterial(fresh, task);
+    },
   };
 }
 
@@ -437,42 +409,32 @@ if (import.meta.main) {
     );
     process.exit(2);
   };
-  // a backlog kept in the app (#2265): the claims and the records are the app's, gh is not called and no repository is
-  // named. A Task the app gave its workspace (BACKLOG_WORKSPACE, only for such a backlog) that cannot read it cannot
-  // judge — it never falls back to GitHub; another goes on with GitHub's comments as before
-  let local = false;
-  if (env.BACKLOG_URL && repoAt < 0) {
-    const records = await readRecords(env, { fresh: false }).catch((e: Error) => {
-      if (env.BACKLOG_WORKSPACE && !env.GH_REPO) {
-        console.error(`判定できなかった: ${e.message}`);
-        process.exit(2);
-      }
-      return null;
-    });
-    local = records?.service === "switchboard";
+  const named = repoAt >= 0 ? args[repoAt + 1] : undefined;
+  const repoName = /^[\w.-]+\/[\w.-]+$/;
+  if (!/^\d+$/.test(num ?? "") || (repoAt >= 0 && !repoName.test(named ?? ""))) usage();
+  // with BACKLOG_URL, a repository the app syncs has its claims and records there (#3069), whether or not GitHub is
+  // behind it, and gh is not called. An app that cannot be asked cannot judge: it never falls back to GitHub (exit 2).
+  // Only a repository it does not know goes on with GitHub's comments, as without BACKLOG_URL
+  let board: Board | undefined;
+  if (env.BACKLOG_URL) {
+    try {
+      if (await appSync(env, { repo: named })) board = appBoard(env, fetch, named);
+    } catch (e) {
+      if (!(e instanceof BacklogUnknown)) throw e;
+      console.error(`判定できなかった: ${e.message}`);
+      process.exit(2);
+    }
   }
-  let repo: string | undefined;
-  try {
-    repo = local ? undefined : repoAt >= 0 ? args[repoAt + 1] : currentRepo();
-  } catch {
-    usage();
+  if (!board) {
+    let repo = named;
+    try {
+      repo ??= currentRepo();
+    } catch {
+      usage();
+    }
+    if (!repo || !repoName.test(repo)) usage();
+    board = ghBoard(repo!);
   }
-  if (!/^\d+$/.test(num ?? "") || (!local && (!repo || !/^[\w.-]+\/[\w.-]+$/.test(repo)))) usage();
-  // in the app's Task (BACKLOG_URL), the overlap check's candidates are its stored records, brought up to date first
-  // (#919); when the app cannot reach GitHub they are judged as stored, and said so (#2264). The claims of a GitHub
-  // backlog stay on GitHub: their order is the comments' ids
-  const board: Board = local
-    ? appBoard(env)
-    : {
-        ...ghBoard(repo!),
-        ...(env.BACKLOG_URL && {
-          material: async (task: number) => {
-            const records = await readRecords(env, { fresh: true, repo: repo! });
-            if (records.unsynced) console.error(records.unsynced);
-            return storedMaterial(records, task);
-          },
-        }),
-      };
   try {
     if (cmd === "claim") {
       const r = await claim(board, n!, more.includes("--takeover"));

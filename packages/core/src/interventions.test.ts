@@ -1,8 +1,10 @@
+import { recordingText, skipRecordings } from "../../../scripts/recordings.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, BacklogIssueData, BacklogPullRequestData, BacklogSource, Intervention, InterventionView, InterventionWindow, StopRecord, Task } from "@switchboard/protocol";
+import { createClaudeParser } from "@switchboard/adapter-claude";
 import { Db, type BacklogSnapshotEntry } from "./db.ts";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
 import { collectInterventions, interventionView, summarizeInterventions, type InterventionLookup } from "./interventions.ts";
@@ -87,6 +89,39 @@ describe("collect", () => {
     say(t, "one ", T0 + MIN);
     say(t, "message", T0 + MIN);
     expect(collectInterventions(db, db.listWorkspaces()).items.filter((i) => i.kind === "decision")).toHaveLength(1);
+  });
+});
+
+describe("classifier", () => {
+  test.skipIf(skipRecordings("packages/adapters/claude/fixtures/classifier-stop.jsonl"))("classifier (recorded on 2.1.312): a stop nobody was asked about is no intervention", () => {
+    const ws = workspace([issue(3, ["type:pbi"])]);
+    const t = task(ws.id, { title: "#3 x" });
+    const p = createClaudeParser();
+    const events = recordingText("packages/adapters/claude/fixtures/classifier-stop.jsonl").split("\n").flatMap((l) => p.feed(l));
+    expect(events).toContainEqual({ t: "status", text: "permission denied by runner: Bash" });
+    expect(events.filter((e) => e.t === "permission.ask")).toEqual([]);
+    for (const ev of events) db.appendEventAt(t, ev, T0);
+    expect(collectInterventions(db, db.listWorkspaces()).items).toEqual([]);
+  });
+
+  test("classifier: an approval of a classifier-reasoned ask is its own kind, not counted twice", () => {
+    const ws = workspace([issue(3, ["type:pbi"])]);
+    const t = task(ws.id, { title: "#3 x" });
+    const ask = (id: string, reason?: "classifier") => db.appendEventAt(t, { t: "permission.ask", id, kind: "exec", tool: "Bash", input: {}, detail: "x", ...(reason ? { reason } : {}) } as AgentEvent, T0);
+    ask("c1", "classifier");
+    ask("c2", "classifier");
+    ask("p1");
+    resolved(t, "c1", "user", T0 + MIN); // allowed after the classifier stopped it
+    resolved(t, "c1", "user", T0 + MIN + 1); // the same answer twice is one
+    db.appendEventAt(t, { t: "permission.resolved", id: "c2", decision: "deny", by: "user" } as AgentEvent, T0 + 2 * MIN); // denied: still an approval
+    resolved(t, "p1", "user", T0 + 3 * MIN); // a plain ask
+    const other = task(ws.id, { title: "#3 y" });
+    resolved(other, "c1", "user", T0 + 4 * MIN); // the same ask id on another task was not stopped by the classifier
+    const r = collectInterventions(db, db.listWorkspaces());
+    expect(r.items.map((i) => `${i.kind}:${i.taskId}`)).toEqual([`classifier:${t}`, `approval:${t}`, `approval:${t}`, `approval:${other}`]);
+    const w = sevenDays(summarizeInterventions(r.items, r.unknown, [], r.lookup, T0 + DAY)).current;
+    expect(w.byKind).toEqual({ approval: 3, decision: 0, resume: 0, classifier: 1 });
+    expect(w.total).toBe(4);
   });
 });
 
@@ -229,7 +264,7 @@ describe("window boundaries", () => {
     const w = sevenDays(summarizeInterventions(items, [], [], lookupOf([pbiRec(3)]), NOW));
     expect(total(w.current)).toBe(2); // NOW - 7d, NOW - 1 (NOW itself is not yet)
     expect(total(w.previous)).toBe(2); // NOW - 7d - 1, NOW - 14d
-    expect(w.current.byKind).toEqual({ approval: 1, decision: 1, resume: 0 });
+    expect(w.current.byKind).toEqual({ approval: 1, decision: 1, resume: 0, classifier: 0 });
     expect(w.current).toMatchObject({ days: 7, from: NOW - 7 * DAY, to: NOW });
     expect(w.previous).toMatchObject({ from: NOW - 14 * DAY, to: NOW - 7 * DAY });
     const m = thirtyDays(summarizeInterventions(items, [], [], lookupOf([pbiRec(3)]), NOW));
@@ -349,7 +384,7 @@ describe("api interventions", () => {
       const v = (await (await fetch(`http://127.0.0.1:${core.server.port}/api/interventions`)).json()) as InterventionView;
       const w = sevenDays(v).current;
       expect(w.total).toBe(2); // the answer and the approval
-      expect(w.byKind).toEqual({ approval: 1, decision: 1, resume: 0 });
+      expect(w.byKind).toEqual({ approval: 1, decision: 1, resume: 0, classifier: 0 });
       expect(w.completed).toEqual({ pbis: 1, perPbi: 2, unknownPbis: 0 });
       expect(w.reasons).toEqual([expect.objectContaining({ reason: "decision", count: 1, evidence: [expect.objectContaining({ issue: 30, pbi: 3, url: "https://github.com/acme/app/issues/30" })] })]);
       expect(v.windows).toHaveLength(2);

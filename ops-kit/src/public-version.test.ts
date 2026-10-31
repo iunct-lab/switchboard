@@ -31,7 +31,8 @@ const run: Run = (cmd, options) => {
     if (cmd[1] === "pr" && cmd[2] === "create") openPr = true;
     if (cmd[1] === "pr" && cmd[2] === "merge") {
       openPr = false;
-      const branch = git(pub, "for-each-ref", "--format=%(refname:short)", "refs/heads/sync/");
+      // by branch name, or by the number of the open PR (the one sync branch then; a replaced plan's branch is left behind)
+      const branch = cmd[3]!.startsWith("sync/") ? cmd[3]! : git(pub, "for-each-ref", "--format=%(refname:short)", "refs/heads/sync/");
       git(pub, "update-ref", "refs/heads/main", git(pub, "rev-parse", branch));
       git(pub, "update-ref", "-d", `refs/heads/${branch}`);
     }
@@ -139,11 +140,71 @@ test("independent: missing private baseline stops instead of reinitializing", ()
   expect(() => sync(opts("v4.2.0"), run)).toThrow("baseline missing");
 });
 
+const thrown = (f: () => unknown) => { try { f(); } catch (e) { return (e as Error).message; } return ""; };
+
+test("independent: a pending plan that reached nothing is replaced by another source, its version from that source", () => {
+  sync(opts("v4.2.0"), run); commit("v4.2.1");
+  fail = "pr create"; // the sync branch is pushed, no PR opens: nothing public moved
+  expect(() => sync(opts("v4.2.1"), run)).toThrow("failed: gh pr create");
+  expect(ledger().pending.version).toBe("v0.1.1");
+  fail = ""; commit("v4.3.0");
+  const before = refs();
+  expect(sync(opts("v4.3.0", true), run)).toStartWith("version: would replace unfinished plan v0.1.1 (--source v4.2.1): nothing reached example/app\n");
+  expect(refs()).toEqual(before); // dry-run writes no record
+  const out = sync(opts("v4.3.0"), run);
+  expect(out).toStartWith("version: replaced unfinished plan v0.1.1 (--source v4.2.1): nothing reached example/app\n");
+  expect(git(pub, "log", "-1", "--format=%s", "main")).toBe("v0.2.0");
+  const state = ledger();
+  expect(state.pending).toBeUndefined();
+  expect(state.completed).toMatchObject({ tag: "v4.3.0", version: "v0.2.0" });
+  expect([...releases]).toEqual(["v0.1.0", "v0.2.0"]);
+});
+
+test("independent: the tags of a replaced plan are not verified; the completed ones still are", () => {
+  sync(opts("v4.2.0"), run); commit("v4.2.1");
+  fail = "pr create";
+  expect(() => sync(opts("v4.2.1"), run)).toThrow("failed: gh pr create");
+  fail = "";
+  git(priv, "tag", "-d", "v4.2.1"); git(priv, "push", "-q", "origin", ":refs/tags/v4.2.1"); // the given-up plan's tag is gone
+  commit("v4.3.0");
+  expect(() => sync(opts("v4.2.1"), run)).toThrow(); // resuming it needs the tag
+  git(origin, "update-ref", "refs/tags/v4.2.0", git(priv, "rev-parse", "v4.3.0")); // a moved completed tag still stops
+  expect(() => sync(opts("v4.3.0"), run)).toThrow("source tag missing or changed");
+  git(origin, "update-ref", "refs/tags/v4.2.0", git(priv, "rev-parse", "v4.2.0"));
+  expect(sync(opts("v4.3.0"), run)).toStartWith("version: replaced unfinished plan v0.1.1 (--source v4.2.1)");
+  expect(ledger().completed).toMatchObject({ tag: "v4.3.0", version: "v0.2.0" });
+});
+
+test("independent: a pending plan with an open sync PR stops another source, naming the PR", () => {
+  sync(opts("v4.2.0"), run); commit("v4.2.1");
+  fail = "pr merge";
+  expect(() => sync(opts("v4.2.1"), run)).toThrow("could not merge sync PR");
+  fail = ""; commit("v4.3.0");
+  const before = refs();
+  const first = thrown(() => sync(opts("v4.3.0"), run)).split("\n")[0]!;
+  expect(first).toContain("unfinished publication: resume with --source v4.2.1");
+  expect(first).toContain("sync PR #1");
+  expect(refs()).toEqual(before);
+  expect(sync(opts("v4.2.1"), run)).toContain("public v0.1.1");
+});
+
+test("independent: a pending plan whose public main moved stops another source, naming the move and the tag", () => {
+  sync(opts("v4.2.0"), run); commit("v4.2.1");
+  fail = "release create";
+  expect(() => sync(opts("v4.2.1"), run)).toThrow("failed: gh release create");
+  git(pub, "tag", "v0.1.1", "main"); // a tag made before the Release failed
+  fail = ""; commit("v4.3.0");
+  const first = thrown(() => sync(opts("v4.3.0"), run)).split("\n")[0]!;
+  expect(first).toContain("resume with --source v4.2.1");
+  expect(first).toContain("public main moved");
+  expect(first).toContain("tag v0.1.1");
+});
+
 test("independent: a pending version refuses a newer source and a changed output tree", () => {
   fail = "release create";
   expect(() => sync(opts("v4.2.0"), run)).toThrow();
   fail = ""; commit("v4.2.1");
-  expect(() => sync(opts("v4.2.1"), run)).toThrow("resume with --source v4.2.0");
+  expect(() => sync(opts("v4.2.1"), run)).toThrow("resume with --source v4.2.0 (reached example/app: public main moved)");
   expect(() => sync({ ...opts("v4.2.0"), exclude: ["README.md"] }, run)).toThrow();
   sync(opts("v4.2.0"), run);
   expect(releases.has("v0.1.0")).toBe(true);

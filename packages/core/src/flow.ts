@@ -1,12 +1,14 @@
 /**
- * How long a closed PBI took, stage by stage (#650). Pure: it takes the times GitHub holds (Issue / PR / comment
- * `createdAt`) and cuts them at the marks the skills leave. The Project's Status history is not read — a Status changed
+ * How long a closed PBI took, stage by stage (#650). Pure: it takes the times of the Issues and comments the app stores
+ * (#3070) and of the merged PRs GitHub holds (`createdAt`), and cuts them at the marks the skills leave. The Project's Status history is not read — a Status changed
  * through the API leaves no timeline event. A stage whose mark is missing is null, never guessed. docs/design/flow-metrics.md.
  */
 import { FlowStage, type CreatedIssue, type FlowPbi, type FlowStageSummary, type FlowSummary, type FlowView, type FlowWeek } from "@switchboard/protocol";
 import type { Database } from "bun:sqlite";
-import { deferredTasksSince, tasksOfIssues } from "./db.ts";
-import type { GhRunner } from "./backlog.ts";
+import { deferredTasksSince, tasksOfIssues, type Db } from "./db.ts";
+import { readStoredRecords, type GhRunner } from "./backlog.ts";
+import { closesOf } from "./backlog-sync.ts";
+import type { StoredRecords } from "../../../ops-kit/src/backlog-client.ts";
 
 export type RawComment = { createdAt: string; body: string };
 export type RawPr = { number: number; createdAt: string; mergedAt: string | null; comments: RawComment[] };
@@ -25,6 +27,8 @@ export type RawPbi = {
 /** The same shape as merge-gate's review mark, plus DAK (the extra reviewer). */
 const REVIEW = /^\[(codex|claude|dak)\] review/;
 const CLAIM = /^(<!-- parallel-guard:task-claim -->|着手)/m; // a line of its own, not only the comment's first
+const CLAIM_TOKEN = /^<!-- parallel-guard:task-claim (\S+) -->/m;
+const WITHDRAW = /<!-- parallel-guard:withdraw (\S+) -->/; // a Task that yielded takes its claim back: it had not started
 const ASK = /^## 判断待ち/;
 const ANSWER = /^## 回答/;
 
@@ -57,7 +61,10 @@ export function flowOfPbi(raw: RawPbi, requestCreatedAt: string | null): Omit<Fl
   const tasks = raw.subIssues;
   // A PR can close several sibling Tasks; count it once.
   const prs = [...new Map(tasks.flatMap((t) => t.pullRequests).map((p) => [p.number, p])).values()];
-  const claims = tasks.flatMap((t) => t.comments.filter((c) => CLAIM.test(c.body)).map((c) => ms(c.createdAt)));
+  const claims = tasks.flatMap((t) => {
+    const back = new Set(t.comments.flatMap((c) => WITHDRAW.exec(c.body)?.[1] ?? []));
+    return t.comments.filter((c) => CLAIM.test(c.body) && !back.has(CLAIM_TOKEN.exec(c.body)?.[1] ?? "")).map((c) => ms(c.createdAt));
+  });
   const firstPrAt = prs.length ? Math.min(...prs.map((p) => ms(p.createdAt))) : null;
   const firstClaim = claims.length ? Math.min(...claims) : null;
   const start = firstClaim ?? firstPrAt;
@@ -102,19 +109,8 @@ export class FlowError extends Error {}
 // A comment list costs nothing by its size (only its parents' count multiplies), so every one is read at the most a page holds.
 const COMMENTS_MAX = 100;
 const comments = `comments(first: ${COMMENTS_MAX}) { totalCount nodes { createdAt body } }`;
-// The cost of a query is its count of connection requests, parents multiplied in: a PBI costs 3 + tasks × (2 + PRs). A page is
-// read with few Tasks and PRs (about 0.3 point a PBI); a PBI that has more is read again alone, wider (see `fetchFlow`).
-const pbiFields = (tasks: number, prs: number) => `number title createdAt closedAt body ${comments}
-  projectItems(first: 5) { nodes { fieldValueByName(name: "Story Points") { ... on ProjectV2ItemFieldNumberValue { number } } } }
-  subIssues(first: ${tasks}) { totalCount nodes { number createdAt closedAt ${comments}
-    closedByPullRequestsReferences(first: ${prs}, includeClosedPrs: true) { totalCount nodes { number createdAt mergedAt ${comments} } } } }`;
-export const FLOW_QUERY = `query($q: String!, $after: String) { rateLimit { cost remaining }
-  search(query: $q, type: ISSUE, first: 10, after: $after) { pageInfo { hasNextPage endCursor } nodes { ... on Issue { ${pbiFields(10, 1)} } } } }`;
-const WIDE = { tasks: 30, prs: 3 };
-const wideQuery = (numbers: number[], owner: string, name: string) =>
-  `{ rateLimit { cost } repository(owner: "${owner}", name: "${name}") { ${numbers.map((n) => `i${n}: issue(number: ${n}) { ${pbiFields(WIDE.tasks, WIDE.prs)} }`).join(" ")} } }`;
 
-/** The PBIs and requests opened and closed in one week (#1878), as GitHub's search counts them. */
+/** The PBIs and requests opened and closed in one week (#1878), from the stored times. */
 export type GrowthCounts = { weekStart: string; pbiOpened: number; pbiClosed: number; requestOpened: number; requestClosed: number };
 
 const DAY = 86_400_000;
@@ -130,48 +126,13 @@ const weekStarts = (days: number, now: number): number[] => {
   for (let w = weekStartOf(now - days * DAY); w <= weekStartOf(now); w += 7 * DAY) out.push(w);
   return out;
 };
-const GROWTH_KEYS = [["pbi", "created", "pbiOpened"], ["pbi", "closed", "pbiClosed"], ["request", "created", "requestOpened"], ["request", "closed", "requestClosed"]] as const;
-/**
- * The growth of these weeks in one query (#1878): an `issueCount` of the search per week, label and created / closed (GitHub's
- * dates are UTC days). A count has no cap, where a list of the Issues stops at 1,000; the query costs 1 point.
- */
-export const growthQuery = (repo: string, weeks: number[]): string =>
-  `{ rateLimit { cost } ${weeks.flatMap((w) => GROWTH_KEYS.map(([label, on, key]) => `${key}_${ymd(w).replaceAll("-", "")}: search(query: "repo:${repo} is:issue label:type:${label} ${on}:${ymd(w)}..${ymd(w + 6 * DAY)}", type: ISSUE, first: 0) { issueCount }`)).join(" ")} }`;
-
-type Nodes<T> = { nodes: T[] };
-type GqlComments = { comments: { totalCount: number } & Nodes<RawComment> };
-type GqlPbi = GqlComments & Omit<RawPbi, "comments" | "subIssues" | "storyPoints"> & {
-  projectItems: Nodes<{ fieldValueByName: { number?: number } | null }>;
-  subIssues: { totalCount: number } & Nodes<GqlComments & Omit<RawTask, "comments" | "pullRequests"> & { closedByPullRequestsReferences: { totalCount: number } & Nodes<GqlComments & Omit<RawPr, "comments">> }>;
-};
+type GqlComments = { comments: { totalCount: number; nodes: RawComment[] } };
 
 /** The Issue a PBI came from: the first `#N` in its `## 元要望` section (null when it says "なし"). */
 export function requestOf(body: string): number | null {
   const section = /^## 元要望\s*\n([\s\S]*?)(?=^## |$(?![\s\S]))/m.exec(body)?.[1] ?? "";
   const n = /#(\d+)/.exec(section)?.[1];
   return n ? Number(n) : null;
-}
-
-/** Did the page cut off Tasks or PRs of this PBI? */
-const cutOff = (g: GqlPbi): boolean => g.subIssues.totalCount > g.subIssues.nodes.length || g.subIssues.nodes.some((t) => t.closedByPullRequestsReferences.totalCount > t.closedByPullRequestsReferences.nodes.length);
-
-/** How many of its lists (comments, Tasks, PRs) hold fewer than GitHub has: the numbers cut from them come out low. */
-function cutLists(g: GqlPbi): number {
-  const short = (c: { totalCount: number; nodes: unknown[] }): number => (c.totalCount > c.nodes.length ? 1 : 0);
-  return short(g.comments) + short(g.subIssues) + g.subIssues.nodes.reduce((n, t) => n + short(t.comments) + short(t.closedByPullRequestsReferences) + t.closedByPullRequestsReferences.nodes.reduce((m, p) => m + short(p.comments), 0), 0);
-}
-
-/** A PBI as GitHub answers it → the plain shape `flowOfPbi` reads. Only merged PRs stay (a closed-unmerged PR is not a way the PBI got built). */
-export function rawOfGql(g: GqlPbi): RawPbi {
-  return {
-    number: g.number, title: g.title, createdAt: g.createdAt, closedAt: g.closedAt, body: g.body,
-    storyPoints: g.projectItems.nodes.map((i) => i.fieldValueByName?.number).find((n) => typeof n === "number") ?? null,
-    comments: g.comments.nodes,
-    subIssues: g.subIssues.nodes.map((t) => ({
-      number: t.number, createdAt: t.createdAt, closedAt: t.closedAt, comments: t.comments.nodes,
-      pullRequests: t.closedByPullRequestsReferences.nodes.filter((p) => p.mergedAt).map((p) => ({ number: p.number, createdAt: p.createdAt, mergedAt: p.mergedAt, comments: p.comments.nodes })),
-    })),
-  };
 }
 
 /** `o/r` of a GitHub remote URL (https, ssh, scp-like; with or without `.git`), lower-cased; null for another host. */
@@ -192,75 +153,125 @@ async function graphql(gh: GhRunner, cwd: string, query: string, vars: Record<st
   return j.data;
 }
 
+/** A merged PR with the Tasks it closes (closesOf: the parallel guard's rule, from its body and branch). */
+export type StoredFlowPr = RawPr & { closes: number[] };
+
+const PR_QUERY = `query($q: String!, $after: String) { rateLimit { cost remaining }
+  search(query: $q, type: ISSUE, first: 50, after: $after) { issueCount pageInfo { hasNextPage endCursor } nodes { ... on PullRequest { number createdAt mergedAt body headRefName ${comments} } } } }`;
+
+/** GitHub's search answers this many results at the most, however many pages are read. */
+const SEARCH_MAX = 1000;
+
 /**
- * The PBIs closed in the last `days` days, each cut into stages, and the PBIs and requests opened and closed in each week
- * from the one `days` days ago (`growth`, growthQuery). Reads the remaining budget first and reads nothing when it is under
- * MIN_REMAINING; gives up when the pages spend more than MAX_COST.
+ * The PRs of `repo` merged on or after `since` (a UTC day), with their comments: the only thing the flow reads from GitHub
+ * (#3070; the Issues come from the app's stored values). Each 7 days from `since` is one search (`merged:<day>..<day + 6>`),
+ * so the search's 1,000-result cap is per 7 days; a week over it stops the read (FlowError), never a count
+ * cut silently. Reads the remaining budget first and nothing under MIN_REMAINING; stops before a page that would take the
+ * run over `maxCost`. `cutPrs`: PRs with more comments than one read holds.
  */
-export async function fetchFlow(gh: GhRunner, cwd: string, repo: string, days: number, now = Date.now(), maxCost = MAX_COST): Promise<{ reads: FlowRead[]; spent: number; cutPbis: number[]; growth: GrowthCounts[] }> {
+export async function fetchMergedPrs(gh: GhRunner, cwd: string, repo: string, since: string, maxCost = MAX_COST, now = Date.now()): Promise<{ prs: StoredFlowPr[]; spent: number; cutPrs: number[] }> {
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new FlowError(`リポジトリ名の形が違います: ${repo}`);
   const first = (await graphql(gh, cwd, "{ rateLimit { remaining cost } }")).rateLimit as { remaining: number; cost?: number } | undefined;
   if (typeof first?.remaining !== "number") throw new FlowError("GitHub の API の使用量を読めませんでした（rateLimit がありません）");
-  const left = first.remaining;
-  if (left < MIN_REMAINING) throw new FlowError(`GitHub の API の残りが少ない（残り ${left}）`);
-  const since = new Date(now - days * 86_400_000).toISOString().slice(0, 10);
-  const q = `repo:${repo} is:issue label:type:pbi is:closed closed:>=${since} sort:closed-asc`;
-  const gqls: GqlPbi[] = [];
+  if (first.remaining < MIN_REMAINING) throw new FlowError(`GitHub の API の残りが少ない（残り ${first.remaining}）`);
   let spent = first.cost ?? 1;
-  // Stops before a call that would take the run over MAX_COST (`estimate`: what the call is expected to cost), not after.
-  const spend = async <T extends { rateLimit: { cost: number } }>(estimate: number, call: () => Promise<T>): Promise<T> => {
-    if (spent + estimate > maxCost) throw new FlowError(`読むのに ${maxCost} ポイントを超えそうです（ここまで ${spent}、次は約 ${estimate}）。--days を減らしてください`);
-    const d = await call();
-    spent += d.rateLimit.cost;
-    return d;
-  };
   let pageCost = 10;
-  for (let after = ""; ; ) {
-    const before = spent;
-    const d = await spend(pageCost, () => graphql(gh, cwd, FLOW_QUERY, after ? { q, after } : { q }));
-    pageCost = spent - before;
-    gqls.push(...(d.search.nodes as GqlPbi[]).filter((n) => n?.closedAt));
-    if (!d.search.pageInfo.hasNextPage) break;
-    after = d.search.pageInfo.endCursor;
+  const prs = new Map<number, StoredFlowPr>();
+  const cutPrs = new Set<number>();
+  for (let w = Date.parse(`${since}T00:00:00Z`); w <= now; w += 7 * DAY) {
+    const q = `repo:${repo} is:pr is:merged merged:${ymd(w)}..${ymd(w + 6 * DAY)}`;
+    for (let after = ""; ; ) {
+      if (spent + pageCost > maxCost) throw new FlowError(`読むのに ${maxCost} ポイントを超えそうです（ここまで ${spent}、次は約 ${pageCost}）。--days を減らしてください`);
+      const d = await graphql(gh, cwd, PR_QUERY, after ? { q, after } : { q });
+      pageCost = d.rateLimit.cost;
+      spent += pageCost;
+      if (d.search.issueCount > SEARCH_MAX) throw new FlowError(`${ymd(w)} からの 1 週間にマージされた PR が ${d.search.issueCount} 件あり、GitHub の検索の上限 ${SEARCH_MAX} 件を超えます`);
+      type Node = { number: number; createdAt: string; mergedAt: string | null; body: string | null; headRefName: string | null } & GqlComments;
+      for (const n of d.search.nodes as Node[]) {
+        if (!n?.mergedAt) continue;
+        if (n.comments.totalCount > n.comments.nodes.length) cutPrs.add(n.number);
+        prs.set(n.number, { number: n.number, createdAt: n.createdAt, mergedAt: n.mergedAt, comments: n.comments.nodes, closes: closesOf(n.body, n.headRefName) });
+      }
+      if (!d.search.pageInfo.hasNextPage) break;
+      after = d.search.pageInfo.endCursor;
+    }
   }
-  const [owner, name] = repo.split("/");
-  const wide = new Map<number, GqlPbi>();
-  const cut = gqls.filter(cutOff).map((g) => g.number);
-  for (let i = 0; i < cut.length; i += 5) {
-    const d = await spend(10, () => graphql(gh, cwd, wideQuery(cut.slice(i, i + 5), owner!, name!)));
-    for (const n of cut.slice(i, i + 5)) if (d.repository[`i${n}`]) wide.set(n, d.repository[`i${n}`]);
-  }
-  const final = gqls.map((g) => wide.get(g.number) ?? g);
-  const raws = final.map(rawOfGql);
-  // The request Issues' times, one query with an alias each.
-  const requests = [...new Set(raws.flatMap((r) => requestOf(r.body) ?? []))];
-  const at = new Map<number, string>();
-  if (requests.length) {
-    const d = await spend(1, () => graphql(gh, cwd, `{ rateLimit { cost } repository(owner: "${owner}", name: "${name}") { ${requests.map((n) => `r${n}: issue(number: ${n}) { createdAt }`).join(" ")} } }`));
-    for (const n of requests) if (d.repository[`r${n}`]?.createdAt) at.set(n, d.repository[`r${n}`].createdAt);
-  }
-  const reads = raws.map((r) => {
-    const req = requestOf(r.body);
-    const f = flowOfPbi(r, req === null ? null : (at.get(req) ?? null));
-    return { pbi: { ...f, repo, url: `https://github.com/${repo}/issues/${r.number}`, tasks: null }, issues: [r.number, ...r.subIssues.map((t) => t.number)] };
+  return { prs: [...prs.values()], spent, cutPrs: [...cutPrs] };
+}
+
+type StoredIssue = StoredRecords["issues"][number];
+const isType = (i: StoredIssue, type: string) => i.labels.includes(`type:${type}`);
+
+/** The stored PBIs closed in the last `days` days. */
+export const closedPbis = (records: StoredRecords, days: number, now: number): StoredIssue[] =>
+  records.issues.filter((i) => isType(i, "pbi") && i.state === "CLOSED" && i.closedAt !== null && ms(i.closedAt) >= now - days * DAY && ms(i.closedAt) <= now);
+
+/**
+ * The PBIs closed in the last `days` days, each cut into stages, from the app's stored Issues, comments and Story Points
+ * (#3070: a PBI kept in the app only counts too), with the merged PRs read from the code host (`prs`: their Tasks by
+ * `closes`); and each week's PBIs and requests opened and closed, from the stored times.
+ */
+export function flowOfStored(records: StoredRecords, prs: StoredFlowPr[], days: number, now: number): { reads: FlowRead[]; growth: GrowthCounts[] } {
+  const byNumber = new Map(records.issues.map((i) => [i.number, i]));
+  const said = new Map<number, RawComment[]>();
+  for (const c of records.comments) said.set(c.issue, [...(said.get(c.issue) ?? []), { createdAt: c.createdAt, body: c.body }]);
+  const commentsOf = (n: number) => said.get(n) ?? [];
+  const reads = closedPbis(records, days, now).map((p): FlowRead => {
+    const points = p.fields?.["Story Points"];
+    const raw: RawPbi = {
+      number: p.number, title: p.title, createdAt: p.createdAt, closedAt: p.closedAt!, body: p.body,
+      storyPoints: typeof points === "number" ? points : null,
+      comments: commentsOf(p.number),
+      subIssues: p.subIssues.flatMap((n) => {
+        const t = byNumber.get(n);
+        // only merged PRs: a closed-unmerged one is not a way the PBI got built
+        return t ? [{ number: n, createdAt: t.createdAt, closedAt: t.closedAt, comments: commentsOf(n), pullRequests: prs.filter((pr) => pr.mergedAt && pr.closes.includes(n)).map(({ closes: _, ...pr }) => pr) }] : [];
+      }),
+    };
+    const req = requestOf(p.body);
+    const f = flowOfPbi(raw, req === null ? null : (byNumber.get(req)?.createdAt ?? null));
+    const url = records.service === "github" ? `https://github.com/${records.repository}/issues/${p.number}` : p.url;
+    return { pbi: { ...f, repo: records.repository, url, tasks: null }, issues: [p.number, ...p.subIssues] };
   });
   const weeks = weekStarts(days, now);
-  const g = await spend(1, () => graphql(gh, cwd, growthQuery(repo, weeks)));
-  const growth = weeks.map((w): GrowthCounts => {
-    const count = (key: (typeof GROWTH_KEYS)[number][2]): number => {
-      const n = g[`${key}_${ymd(w).replaceAll("-", "")}`]?.issueCount;
-      if (typeof n !== "number") throw new FlowError(`GitHub の検索の件数を読めませんでした（${key} ${ymd(w)}）`);
-      return n;
-    };
-    return { weekStart: ymd(w), pbiOpened: count("pbiOpened"), pbiClosed: count("pbiClosed"), requestOpened: count("requestOpened"), requestClosed: count("requestClosed") };
-  });
-  return { reads, spent, cutPbis: final.filter((g) => cutLists(g) > 0).map((g) => g.number), growth };
+  const growth = weeks.map((w): GrowthCounts => ({ weekStart: ymd(w), pbiOpened: 0, pbiClosed: 0, requestOpened: 0, requestClosed: 0 }));
+  const bump = (at: string | null, key: keyof Omit<GrowthCounts, "weekStart">) => {
+    const g = at === null ? undefined : growth[(weekStartOf(ms(at)) - weeks[0]!) / (7 * DAY)];
+    if (g) g[key]++;
+  };
+  for (const i of records.issues) {
+    if (isType(i, "pbi")) bump(i.createdAt, "pbiOpened"), bump(i.state === "CLOSED" ? i.closedAt : null, "pbiClosed");
+    else if (isType(i, "request")) bump(i.createdAt, "requestOpened"), bump(i.state === "CLOSED" ? i.closedAt : null, "requestClosed");
+  }
+  return { reads, growth };
+}
+
+/** The GitHub repository whose PRs a workspace's flow reads: its backlog's own (GitHub), else its checkout's `origin` (a backlog kept in the app only); null = none to read. */
+export function prRepoOf(records: StoredRecords, path: string): string | null {
+  if (records.service === "github") return records.repository;
+  if (records.service !== "switchboard") return null;
+  const r = Bun.spawnSync(["git", "-C", path, "remote", "get-url", "origin"], { stdout: "pipe", stderr: "pipe" });
+  return r.exitCode === 0 ? repoOfRemote(r.stdout.toString()) : null;
+}
+
+/**
+ * The PBIs closed in the last `days` days, each cut into stages, and each week's PBIs and requests opened and closed, for
+ * the command (scripts/flow-report.ts): the Issues from the app's stored values (`records`), the merged PRs of `repo` from
+ * GitHub (fetchMergedPrs, under `maxCost`; null = none read, the PR stages unknown). `cutPbis`: PBIs with a PR whose comments were cut (their numbers come out low).
+ */
+export async function fetchFlow(gh: GhRunner, cwd: string, repo: string | null, days: number, records: StoredRecords, now = Date.now(), maxCost = MAX_COST): Promise<{ reads: FlowRead[]; spent: number; cutPbis: number[]; growth: GrowthCounts[] }> {
+  const read = closedPbis(records, days, now);
+  const since = read.length ? ymd(Math.min(...read.map((p) => ms(p.createdAt)))) : null;
+  const { prs, spent, cutPrs } = repo && since ? await fetchMergedPrs(gh, cwd, repo, since, maxCost, now) : { prs: [], spent: 0, cutPrs: [] };
+  const { reads, growth } = flowOfStored(records, prs, days, now);
+  const cut = new Set(prs.filter((p) => cutPrs.includes(p.number)).flatMap((p) => p.closes));
+  return { reads, spent, cutPbis: reads.filter((r) => r.issues.some((n) => cut.has(n))).map((r) => r.pbi.number), growth };
 }
 
 const WEEK_COUNTS = ["pbiOpened", "pbiClosed", "requestOpened", "requestClosed", "net", "deferredTasks", "deferredIssues"] as const;
 
 /**
- * The weeks from the one `days` days ago to this one (#1878), an empty week as zeros: the PBIs and requests GitHub counted
+ * The weeks from the one `days` days ago to this one (#1878), an empty week as zeros: the PBIs and requests of the stored values
  * (`counts`, by `weekStart`), `net` = opened − closed, and the deferred Tasks by when their last turn ended, with the Issues of
  * `repo` they opened.
  */
@@ -312,36 +323,46 @@ export function summarize(pbis: FlowPbi[]): FlowSummary {
 /** What `flowView` reads and leaves out for these workspaces — the cache's scope: an import that finishes later (a repository, or another workspace of one already read) is not left out for the hour. */
 export const flowScope = (workspaces: FlowWorkspace[]): string => workspaces.map((w) => `${w.id}=${w.repository?.toLowerCase() ?? ""}`).sort().join(",");
 
-/** The API reads two periods at once (60 days: about 120 points at the rate measured in docs/design/flow-metrics.md), so it is allowed more than the command. */
+/** The API reads two periods at once, so it is allowed more than the command. */
 export const FLOW_VIEW_MAX_COST = 200;
 const SLOWEST = 5;
 const total = (p: FlowPbi): number => FlowStage.options.reduce((s, st) => s + (p.stages[st] ?? 0), 0);
 
-/** A workspace's repository as the import stored it (`owner/name`); null when it was never imported — the Backlog screen says so, and there is no repository to read. */
+/** A workspace's repository as the import stored it (`owner/name`; a backlog kept in the app only: its id); null when it was never imported — the Backlog screen says so, and there is nothing to read. */
 export type FlowWorkspace = { id: string; name: string; path: string; repository: string | null };
 
 /**
- * The last `days` days and the `days` before, over the repositories of these workspaces (one read per repository; Switchboard
- * Tasks count from the workspaces of that repository). A repository that cannot be read is in `errors` (once per workspace),
- * the rest are answered.
+ * The last `days` days and the `days` before, over the stored backlogs of these workspaces (one read per backlog; Switchboard
+ * Tasks count from the workspaces of that backlog). The PRs come from the code host: a backlog whose PRs cannot be read is
+ * in `errors` (once per workspace), the rest are answered. One with no GitHub repository to read PRs from is answered
+ * without them (the PR stages unknown).
  */
-export async function flowView(gh: GhRunner, workspaces: FlowWorkspace[], db: Database | null, days = 30, now = Date.now()): Promise<FlowView> {
+export async function flowView(gh: GhRunner, workspaces: FlowWorkspace[], db: Db | null, days = 30, now = Date.now()): Promise<FlowView> {
   const errors: FlowView["errors"] = [];
-  const unread = workspaces.filter((w) => !w.repository).map((w) => w.name);
+  const unread: string[] = [];
   const byRepo = new Map<string, FlowWorkspace[]>();
   for (const w of workspaces) {
     if (w.repository) byRepo.set(w.repository.toLowerCase(), [...(byRepo.get(w.repository.toLowerCase()) ?? []), w]);
   }
   const pbis: FlowPbi[] = [];
   let weeks = backlogGrowth([], [], "", days, now);
-  for (const [repo, ws] of byRepo) {
+  for (const w of workspaces) if (!w.repository) unread.push(w.name);
+  for (const [, ws] of byRepo) {
+    const records = db ? readStoredRecords(db, ws[0]!) : null;
+    if (!records) {
+      unread.push(...ws.map((w) => w.name));
+      continue;
+    }
     try {
-      const { reads, growth } = await fetchFlow(gh, ws[0]!.path, repo, days * 2, now, FLOW_VIEW_MAX_COST);
-      const deferred = db ? deferredTasksSince(db, ws.map((w) => w.id), weekStartOf(now - days * DAY)) : [];
-      const mine = backlogGrowth(growth, deferred, repo, days, now);
+      const prRepo = prRepoOf(records, ws[0]!.path);
+      const read = closedPbis(records, days * 2, now);
+      const since = read.length ? ymd(Math.min(...read.map((p) => ms(p.createdAt)))) : null;
+      const prs = prRepo && since ? (await fetchMergedPrs(gh, ws[0]!.path, prRepo, since, FLOW_VIEW_MAX_COST, now)).prs : [];
+      const { reads, growth } = flowOfStored(records, prs, days * 2, now);
+      const deferred = db ? deferredTasksSince(db.sqlite, ws.map((w) => w.id), weekStartOf(now - days * DAY)) : [];
+      const mine = backlogGrowth(growth, deferred, records.repository, days, now);
       for (const [i, w] of mine.entries()) for (const k of WEEK_COUNTS) weeks[i]![k] += w[k];
-      // the search cuts at the day (midnight), so the earliest PBIs read may be older than the previous period
-      pbis.push(...reads.filter((r) => Date.parse(r.pbi.closedAt) >= now - days * 2 * 86_400_000).map((r) => withSwitchboardTasks(r, db, ws.map((w) => w.id))));
+      pbis.push(...reads.map((r) => withSwitchboardTasks(r, db?.sqlite ?? null, ws.map((w) => w.id))));
     } catch (e) {
       if (!(e instanceof FlowError)) throw e;
       for (const w of ws) errors.push({ workspace: w.name, message: e.message });

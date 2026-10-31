@@ -41,7 +41,7 @@ env -u SWITCHBOARD_SUPERVISED bun test <file> -t "<name>"
 | core の関数 / API | `packages/core/src/<name>.test.ts`。API は `startServer` を偽アダプタで起動して `fetch`（`core.test.ts` の型） |
 | アダプタ | Git の外の録画 fixture の再生（`runner-adapter-recording` スキル）。自分のランナーで録画して Git の外に保存し、`bun scripts/fixtures.ts list` で配置を確認する |
 | web の描画ロジック | `apps/web/src/*.test.ts`（DOM の型は `transcript.test.ts`。`bun:test` ファイルは web の typecheck から除外） |
-| 単体で書けない UI / 経路 | 偽ランナーのデーモン（`startServer` を `mktemp -d /tmp/switchboard.e2e.XXXXXX` の `boot.ts` から、`SWITCHBOARD_HOME` は DB のコピー、ポートは `lsof` で空きを見て 47911 以上）+ `bun run --cwd apps/web build` + headless Chrome（`--remote-debugging-port`、CDP）。起動例は `.claude/skills/verify-live-ui/SKILL.md`。偽ランナーは `packages/core/src/devproxy.test.ts` の型 |
+| 単体で書けない UI / 経路 | 偽ランナーのデーモン（`startServer` を `mktemp -d /tmp/switchboard.e2e.XXXXXX` の `boot.ts` から、`SWITCHBOARD_HOME` は DB のコピー（このとき `SWITCHBOARD_CANDIDATE=1` を必ず渡す。無いとコピーの中の Task が使用上限の自動再開で本物のセッション id のまま動き、GitHub への未送信の書き込みも送る）、ポートは `lsof` で空きを見て 47911 以上）+ `bun run --cwd apps/web build` + headless Chrome（`--remote-debugging-port`、CDP）。boot.ts は自分で書かず `.claude/skills/verify-live-ui/SKILL.md` の boot.ts を写して使う。偽ランナーは `packages/core/src/devproxy.test.ts` の型 |
 | 境界（プロキシ・認証・CORS） | 実構成の E2E（`devproxy.test.ts` の型） |
 
 動いている Switchboard での確認（live check）は `verify-live-ui` スキル（デーモンと Web UI `localhost:5173`）。

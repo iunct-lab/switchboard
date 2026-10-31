@@ -396,6 +396,40 @@ ${clone}`);
     expect(readFileSync(join(HERE, "archive.sh"), "utf8")).toContain('CODE="$HOME/.switchboard/releases/current"');
   });
 
+  test("the daily archive adds one line of disk usage, and a failure to write it does not stop the archive", () => {
+    const home = join(dir, "home-disk");
+    const sb = join(home, ".switchboard");
+    mkdirSync(join(sb, "snapshots"), { recursive: true });
+    writeFileSync(join(sb, "snapshots", "a.db"), "x".repeat(2 * 1024 * 1024));
+    writeFileSync(join(sb, "switchboard.db"), "x");
+    fake("aws", `[ "$1" = ssm ] && echo age1recipient; exit 0`);
+    fake("bun", `echo pkg > "$3"`);
+    for (const [d, mb] of [[".switchboard/releases", 1], [".claude/projects", 2], [".codex/sessions", 3], [".cache", 7]] as const) {
+      mkdirSync(join(home, d), { recursive: true });
+      writeFileSync(join(home, d, "f"), "x".repeat(mb * 1024 * 1024));
+    }
+    const file = join(sb, "disk-history.tsv");
+
+    expect(run("archive.sh", [], { HOME: home }).code).toBe(0);
+    expect(run("archive.sh", [], { HOME: home }).code).toBe(0);
+    const lines = readFileSync(file, "utf8").trim().split("\n");
+    expect(lines).toHaveLength(1); // the second run of the day adds nothing
+    const [date, used, free, db, snapshots, releases, runner, cache] = lines[0]!.split("\t");
+    expect(date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(Number(used)).toBeGreaterThan(0);
+    expect(Number(free)).toBeGreaterThan(0);
+    expect(Number(db)).toBeGreaterThan(0);
+    expect(Number(snapshots)).toBeGreaterThanOrEqual(2);
+    expect(Number(releases)).toBeLessThan(Number(runner));
+    expect(Number(runner)).toBeGreaterThanOrEqual(5); // both folders
+    expect(Number(cache)).toBeGreaterThan(Number(runner));
+
+    rmSync(file);
+    mkdirSync(file); // cannot be appended to
+    expect(run("archive.sh", [], { HOME: home }).code).toBe(0);
+    expect(readFileSync(join(sb, "archive.status"), "utf8")).toMatch(/^ok /);
+  });
+
   test("the daily archive works on the disk, not /tmp, and records ok / failed in archive.status (#1201)", () => {
     const home = join(dir, "home-archive");
     const sb = join(home, ".switchboard");

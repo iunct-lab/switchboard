@@ -223,10 +223,10 @@ export const Task = z.object({
    */
   resumeAt: z.number().nullable(),
   /**
-   * What `resumeAt` waits for (#550): the runner's usage limit, or GitHub's API limit a turn met in its commands. null =
+   * What `resumeAt` waits for (#550): the runner's usage limit, GitHub's API limit a turn met in its commands, or space on a full disk (#2234). null =
    * no plan, or a plan made before #550 (treated as the runner's limit).
    */
-  resumeReason: z.enum(["limit", "github"]).nullable(),
+  resumeReason: z.enum(["limit", "github", "disk"]).nullable(),
   /**
    * A usage-limit wait (#2237): the window that stopped the turn (`five_hour`, `seven_day`, …; from the quota report) and
    * when it stopped (ms). A report of that window under 100 % after `resumeSince` resumes the task before `resumeAt`.
@@ -1951,8 +1951,12 @@ export type BacklogHeldEdit = z.infer<typeof BacklogHeldEdit>;
 export const BacklogIssueDetail = z.object({
   workspaceId: z.string(),
   issue: BacklogIssueData,
-  /** `id`: the stored record's id (#2265; GitHub's comment id, or `sb:<seq>` on a backlog kept here) — the order the parallel guard decides who came first by. */
-  comments: z.array(BacklogCommentData.extend({ id: z.string() })),
+  /**
+   * `id`: the stored record's id (#2265; GitHub's comment id, or `sb:<seq>` on a backlog kept here).
+   * `seq`: the sequence number of the operation that wrote a comment here, the same before and after it is sent; null for
+   * one only imported from GitHub. The order the parallel guard decides who came first by.
+   */
+  comments: z.array(BacklogCommentData.extend({ id: z.string(), seq: z.number().nullable().default(null) })),
   fields: z.record(z.string(), z.union([z.string(), z.number(), z.null()])).nullable(),
   fetchedAt: z.number().nullable(),
   fetchState: BacklogFetchState,
@@ -2097,12 +2101,13 @@ export type FlowView = z.infer<typeof FlowView>;
 /**
  * A person's intervention (#651), counted from Switchboard's records and the stored copy of the Issues — not kept as a table:
  * `approval` (a tool or question the person allowed / denied), `decision` (a `## 回答` on an Issue, a later message to a Task),
- * `resume` (a stage Task started by the button). `ref` points at the record: `comment:<node id>` / `task:<id>#seq:<n>` /
+ * `resume` (a stage Task started by the button), `classifier` (an allow the person gave to an ask Claude Code's auto-mode
+ * classifier stopped — `permission.ask` reason classifier, #2236 — counted here instead of as an approval). `ref` points at the record: `comment:<node id>` / `task:<id>#seq:<n>` /
  * `task:<id>`. `afterWaits` is for a resume only: true = the PBI waited for something (a /pbi-complete release with `waits=`)
  * and all of it was closed before this start, false = it did not or something was still open, null = not known (a record missing).
  */
 export const Intervention = z.object({
-  kind: z.enum(["approval", "decision", "resume"]),
+  kind: z.enum(["approval", "decision", "resume", "classifier"]),
   at: z.number(),
   workspaceId: z.string(),
   issue: z.number().nullable(),
@@ -2139,7 +2144,7 @@ export const InterventionWindow = z.object({
   from: z.number(),
   to: z.number(),
   total: z.number(),
-  byKind: z.object({ approval: z.number(), decision: z.number(), resume: z.number() }),
+  byKind: z.object({ approval: z.number(), decision: z.number(), resume: z.number(), classifier: z.number() }),
   unknown: z.number(),
   /** Stops that needed a person and stopped again after the person had answered the same one. */
   reAsks: z.number(),

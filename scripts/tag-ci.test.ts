@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterAll, describe, expect, test } from "bun:test";
 import { NO_HOST } from "../ops-kit/src/secrets";
 import type { Filed, OpenRequest } from "./file-request";
-import { failedIn, failureRequest, followUp, hidePaths, REQUEST_TITLE, resolveRepo, resultSection, tagCi, tagCiExit, tagResult, TAG_CI_RESULT, type FollowDeps, type TagCiDeps } from "./tag-ci";
+import { failedIn, failureRequest, followUp, hidePaths, latestPass, latestPassTag, parseArgs, REQUEST_TITLE, resolveRepo, resultSection, tagCi, tagCiExit, tagResult, TAG_CI_RESULT, type FollowDeps, type TagCiDeps } from "./tag-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
 const ciTs = await Bun.file(new URL("./ci.ts", import.meta.url)).text();
@@ -19,7 +19,7 @@ const CHECK = "bun scripts/perf-ratchet.ts check perf-result.json || { cat perf-
  * A fake clone of o/r: `tags` newest first, each with its Release body (null = no Release) and how its CI goes
  * (`fail`: the step's script that fails and its output; none = every step passes). Edits of a Release change its body.
  */
-function fake(tags: Array<{ tag: string; body: string | null; fail?: { at: string; output: string } }>, yml = ciYml) {
+function fake(tags: Array<{ tag: string; body: string | null; fail?: { at: string; output: string }; merged?: false }>, yml = ciYml) {
   const bodies = new Map(tags.map((t) => [t.tag, t.body]));
   const ran: Array<{ tag: string; script: string }> = [];
   const viewed: string[] = [];
@@ -29,7 +29,8 @@ function fake(tags: Array<{ tag: string; body: string | null; fail?: { at: strin
   const d: TagCiDeps = {
     sh: async (cmd, _cwd, input) => {
       const c = cmd.join(" ");
-      if (c.includes(" tag -l ")) return `${tags.map((t) => t.tag).join("\n")}\nv1.0\n`;
+      // `merged: false` = a tag after the commit given to --merged
+      if (c.includes(" tag -l ")) return `${tags.filter((t) => !cmd.includes("--merged") || t.merged !== false).map((t) => t.tag).join("\n")}\nv1.0\n`;
       if (c.includes(" rev-parse ")) return `${shaOf(cmd.at(-1)!.replace("^{commit}", ""))}\n`;
       if (c.startsWith("gh release view")) {
         viewed.push(cmd[3]!);
@@ -210,6 +211,44 @@ function requests(f: ReturnType<typeof fake>) {
   };
   return { d, open, comments, printed, bodies };
 }
+
+describe("tag-ci --latest-pass", () => {
+  const mark = (tag: string, r: "pass" | "fail") => `notes\n\n## CI\n[tag-ci] ${r} ${shaOf(tag)}\n`;
+
+  test("latest pass skips fail and unrecorded tags", async () => {
+    const f = fake([{ tag: "v3.0.0", body: mark("v3.0.0", "fail") }, { tag: "v2.0.0", body: "" }, { tag: "v1.5.0", body: null }, { tag: "v1.0.0", body: mark("v1.0.0", "pass") }, { tag: "v0.9.0", body: mark("v0.9.0", "pass") }]);
+    expect(await latestPassTag(f.d.sh, "o/r", "/repo")).toBe("v1.0.0");
+    // read only, newest first, and nothing older than the pass; no CI run, no Release edited
+    expect(f.viewed).toEqual(["v3.0.0", "v2.0.0", "v1.5.0", "v1.0.0"]);
+    expect(f.ran).toEqual([]);
+    expect(f.edits).toEqual([]);
+    expect(await latestPass(["v3.0.0", "v2.0.0", "v1.0.0"], async (t) => ({ "v3.0.0": "fail", "v1.0.0": "pass" } as const)[t as "v3.0.0"] ?? null)).toBe("v1.0.0");
+  });
+
+  test("latest pass with no pass exits 1", async () => {
+    const f = fake([{ tag: "v2.0.0", body: mark("v2.0.0", "fail") }, { tag: "v1.0.0", body: mark("v1.0.0", "fail") }]);
+    expect(await latestPassTag(f.d.sh, "o/r", "/repo")).toBeNull();
+    expect(await latestPass([], async () => "pass")).toBeNull();
+    // a pass mark of another commit (the tag was moved) is not this tag's pass
+    const moved = fake([{ tag: "v1.0.0", body: `[tag-ci] pass ${"b".repeat(40)}` }]);
+    expect(await latestPassTag(moved.d.sh, "o/r", "/repo")).toBeNull();
+  });
+
+  test("contained-in drops tags after the commit", async () => {
+    const f = fake([{ tag: "v3.0.0", body: mark("v3.0.0", "pass"), merged: false }, { tag: "v2.0.0", body: mark("v2.0.0", "fail") }, { tag: "v1.0.0", body: mark("v1.0.0", "pass") }]);
+    expect(await latestPassTag(f.d.sh, "o/r", "/repo")).toBe("v3.0.0");
+    f.viewed.length = 0;
+    expect(await latestPassTag(f.d.sh, "o/r", "/repo", "c0ffee")).toBe("v1.0.0");
+    expect(f.viewed).toEqual(["v2.0.0", "v1.0.0"]);
+  });
+
+  test("the arguments: --latest-pass and --contained-in come off before --repo is read", () => {
+    expect(parseArgs(["--latest-pass", "--contained-in", "abc", "--repo", "o/r"])).toEqual({ latestPass: true, containedIn: "abc", rest: ["--repo", "o/r"] });
+    expect(parseArgs(["--repo", "o/r"])).toEqual({ latestPass: false, containedIn: undefined, rest: ["--repo", "o/r"] });
+    expect(() => parseArgs(["--contained-in", "abc"])).toThrow("--latest-pass");
+    expect(() => parseArgs(["--latest-pass", "--contained-in"])).toThrow("コミット");
+  });
+});
 
 describe("tag-ci requests", () => {
   test("a failing newest tag files a request with the tag, step, lines, last pass and commits", async () => {

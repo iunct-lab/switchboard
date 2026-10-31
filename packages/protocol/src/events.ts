@@ -32,9 +32,9 @@ export type ApprovalRuleMatch = z.infer<typeof ApprovalRuleMatch>;
 /**
  * Why work stopped (#939), as a code — never read from free text. `transient` = a network drop / timeout / HTTP 502·503·504;
  * `auth` / `permission` / `input` are never retried; `decision` = waiting on the person's answer; `depends` = waiting on
- * another Issue / PR; `unknown` = nothing said why (never joined with a stop whose evidence differs).
+ * another Issue / PR; `disk-full` = waiting for space (#2234), never retried; `unknown` = nothing said why (never joined with a stop whose evidence differs).
  */
-export const StopReasonCode = z.enum(["usage-limit", "github-limit", "transient", "auth", "permission", "input", "decision", "depends", "unknown"]);
+export const StopReasonCode = z.enum(["usage-limit", "github-limit", "transient", "auth", "permission", "input", "decision", "depends", "disk-full", "unknown"]);
 export type StopReasonCode = z.infer<typeof StopReasonCode>;
 
 /** waiting = for a condition to change; retrying = a bounded retry is planned / running; exhausted = retries used up; resolved = went on. */
@@ -117,7 +117,7 @@ export const AgentEvent = z.discriminatedUnion("t", [
     input: z.unknown(),
     detail: z.string(),
     toolUseId: z.string().optional(),
-    /** Claude Code's auto-mode classifier stopped the call and the user may let it run (#2236, docs/design/claude-otel.md). */
+    /** Claude Code's auto-mode classifier stopped the call and asks the user, as at its denial limit; an ordinary block does not ask (#2236, #3214, docs/design/claude-otel.md). */
     reason: z.literal("classifier").optional(),
     /** Set by the daemon when a Knowledge approval rule matched (confirm → still asked, with the reason shown). */
     rule: ApprovalRuleMatch.optional(),

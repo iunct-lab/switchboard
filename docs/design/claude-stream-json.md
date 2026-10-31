@@ -32,6 +32,8 @@ approves safe actions and only the uncertain ones reach the host as `can_use_too
 
 Without step 1 (or without `--permission-prompt-tool stdio`) any tool that needs permission is **auto-denied** with `system/permission_denied`.
 
+`system/permission_denied` also comes with the handshake: an Auto classifier `block` is `permission_denied` (`decision_reason_type: "classifier"`) and a failed `tool_result`, and no `can_use_tool` comes (2.1.312 and 2.1.314, recorded). From the third block in a row the call becomes a `can_use_tool` instead, with `decision_reason_type: "classifier"` and a `decision_reason` such as `3 consecutive actions were blocked. …`, the number counting up (2.1.314, recorded; [claude-otel.md](claude-otel.md)).
+
 ## Inbound messages (stdout, one JSON per line)
 
 | type | notes | AgentEvent |

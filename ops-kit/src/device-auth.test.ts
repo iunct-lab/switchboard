@@ -124,6 +124,17 @@ describe("ops-kit/bin/device-auth", () => {
     expect(r.out).toContain("Successfully logged in.");
   });
 
+  test("a command over 200 characters is shown as its first 199 characters and …", async () => {
+    const long = "x".repeat(220);
+    const r = await run(["--", "bun", login, "$DONE", long], { DEVICE_AUTH_URL: `http://127.0.0.1:${server.port}/api/tasks/t1/device-auth` });
+    expect(r.code).toBe(0);
+    const shown = (calls.find((c) => c.method === "POST")?.body as { command: string }).command;
+    expect(shown).toHaveLength(200);
+    expect(shown.at(-1)).toBe("…");
+    expect(shown.slice(0, 199)).toBe(`bun ${login} ${r.done} ${long}`.slice(0, 199));
+    expect(shown).not.toContain(long);
+  });
+
   test("a code after the URL was sent alone: still withheld, and sent again with the code", async () => {
     const r = await run(["--", "bun", join(dir, "late.ts"), "$DONE"], { DEVICE_AUTH_URL: `http://127.0.0.1:${server.port}/x` }, 2);
     expect(r.code).toBe(0);

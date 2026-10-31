@@ -4,14 +4,17 @@ import { api } from "../api.ts";
 import { loginRowView } from "../loginRow.ts";
 import { RunnerLogin } from "./RunnerLogin.tsx";
 
-/** The claude login on its row (#2528): the kind in use and the logout button; once logged out, the two login buttons. */
+/**
+ * The claude login on its row (#2528): the kind in use and the logout button; once logged out, the two login buttons.
+ * Any runner that can run on Amazon Bedrock (claude #1730, codex #1731) gets the switch to it and back.
+ */
 export function ClaudeLoginRow(props: { runner: RunnerInfo; region?: string; onBedrock?: (next: { region: string } | null) => void; onChanged: () => Promise<unknown>; onError: (msg: string) => void }) {
   const [busy, setBusy] = useState(false);
   const [region, setRegion] = useState(props.region ?? "");
   const v = loginRowView(props.runner);
   // Amazon Bedrock (#1730) is only ever switched on by this button: a lapsed Claude login never turns into it. It is
   // offered also while the login status is unknown (no row of the login then), and the saved region stays editable.
-  const onBedrock = props.runner.id === "claude" && props.runner.bedrockAvailable ? props.onBedrock : undefined;
+  const onBedrock = props.runner.bedrockAvailable ? props.onBedrock : undefined;
   if (!v && !onBedrock) return null;
   const saved = props.region ?? "";
   const bedrockControl = onBedrock ? (
@@ -23,7 +26,7 @@ export function ClaudeLoginRow(props: { runner: RunnerInfo; region?: string; onB
             リージョンを保存
           </button>
           <button className="ghost" disabled={busy} onClick={() => onBedrock(null)}>
-            Claude アカウントに戻す
+            {props.runner.id === "claude" ? "Claude アカウントに戻す" : "定額の契約に戻す"}
           </button>
         </>
       ) : (

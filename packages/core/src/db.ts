@@ -558,7 +558,11 @@ export class Db {
         return id;
       });
       // a record the service has shows its operations on top of it, whatever `local` the caller wrote
-      for (const op of edit.operations) if (op.kind === "set") this.rebaseBacklogRecord(repo, op.targetKind, op.target);
+      for (const op of edit.operations)
+        if (op.kind === "set") {
+          this.settleHeldBacklogField(repo, op.targetKind, op.target, op.field!, now);
+          this.rebaseBacklogRecord(repo, op.targetKind, op.target);
+        }
       return ids;
     })();
   }
@@ -660,32 +664,24 @@ export class Db {
    * first `pending` set of it (one after it was made on the value the first one sends, not on GitHub's) against
    * GitHub's value — already that value, or the edit changed nothing GitHub did not → done; GitHub moved it off the
    * value the edit was made on to another one → `conflict`, held with its base, its value and GitHub's (nothing is
-   * written to GitHub); a conflict whose value GitHub came to → done. The rest still go, checked again just before they are written (backlog-send.ts).
+   * written to GitHub; a Status is left to the send, which reads who moved it); a conflict whose value GitHub came to → done. The rest still go, checked again just before they are written (backlog-send.ts).
    */
   private mergeBacklogRecord(repo: BacklogRepositoryKey, kind: BacklogObjectKind, externalId: string, remote: unknown, now: number): void {
-    const ops = this.sqlite
-      .query("SELECT * FROM backlog_operations WHERE service = ? AND host = ? AND repository = ? AND target_kind = ? AND target = ? AND kind = 'set' AND status != 'done' ORDER BY seq")
-      .all(repo.service, repo.host, repo.repository, kind, externalId)
-      .map(rowToBacklogOperation);
+    const ops = this.backlogSetsOf(repo, kind, externalId);
     const seen = new Set<string>();
     for (const op of ops) {
       if (seen.has(op.field!)) continue;
       seen.add(op.field!);
       const value = backlogFieldValue(kind, remote, op.field!);
-      // GitHub already has what the last edit of a Project field makes (#2924): the ones before it are on their way
-      // there, and nothing is left to choose — all of them are done (one the write itself held, with `overwritten`,
-      // stays). Only a Project field: a label on and off again (a question, then its answer) is not skipped
-      const field = ops.filter((o) => o.field === op.field && (o.status === "pending" || o.status === "conflict") && !o.overwritten);
-      if (op.field!.startsWith("field:") && value !== undefined && field.length > 1 && sameBacklogValue(op.field!, field[field.length - 1]!.payload, value)) {
-        for (const o of field) this.sqlite.query("UPDATE backlog_operations SET status = 'done', error = ?, retry_at = NULL, updated_at = ? WHERE seq = ?").run(o === field[field.length - 1] ? null : "後の編集の値に GitHub が既になっています", now, o.seq);
-        continue;
-      }
+      if (this.settleBacklogField(ops, op.field!, value, now)) continue;
       if ((op.status !== "pending" && op.status !== "conflict") || value === undefined) continue;
       // a conflict the write itself found (#1329): GitHub has the value made here, so a read of it decides nothing —
       // it stays, with its reason, until chosen on
       if (op.status === "conflict" && op.overwritten) continue;
       const m = mergeBacklogField(op.field!, op.base, op.payload, value);
       if (m === "local" && op.status === "pending") continue;
+      // a Status moved on GitHub: only the send reads who moved it (its Project automation is not a conflict), so it decides
+      if (m === "conflict" && op.status === "pending" && op.field === "field:Status") continue;
       // a conflict stays one until it is chosen on, or GitHub comes to the value made here; its reason names GitHub's
       // value now, whatever it moved to (back to the base too)
       const conflict = m === "conflict" || (op.status === "conflict" && m !== "synced");
@@ -693,6 +689,40 @@ export class Db {
       if (conflict && op.status === "conflict" && op.error === error) continue;
       this.sqlite.query("UPDATE backlog_operations SET status = ?, error = ?, retry_at = NULL, updated_at = ? WHERE seq = ?").run(conflict ? "conflict" : "done", error, now, op.seq);
     }
+  }
+
+  /** The `set` operations of a record not done yet, oldest first. */
+  private backlogSetsOf(repo: BacklogRepositoryKey, kind: BacklogObjectKind, externalId: string): BacklogOperation[] {
+    return this.sqlite
+      .query("SELECT * FROM backlog_operations WHERE service = ? AND host = ? AND repository = ? AND target_kind = ? AND target = ? AND kind = 'set' AND status != 'done' ORDER BY seq")
+      .all(repo.service, repo.host, repo.repository, kind, externalId)
+      .map(rowToBacklogOperation);
+  }
+
+  /**
+   * GitHub already has what the last edit of a Project field makes (#2924): the ones before it are on their way there,
+   * and nothing is left to choose — all of them are done (one the write itself held, with `overwritten`, stays;
+   * `keepLast`: the last one stays to be sent). Only a Project field: a label on and off again (a question, then its
+   * answer) is not skipped.
+   */
+  private settleBacklogField(ops: BacklogOperation[], name: string, value: unknown, now: number, keepLast = false): boolean {
+    const field = ops.filter((o) => o.field === name && (o.status === "pending" || o.status === "conflict") && !o.overwritten);
+    const last = field.at(-1);
+    if (!name.startsWith("field:") || value === undefined || field.length < 2 || !sameBacklogValue(name, last!.payload, value)) return false;
+    for (const o of keepLast ? field.slice(0, -1) : field) this.sqlite.query("UPDATE backlog_operations SET status = 'done', error = ?, retry_at = NULL, updated_at = ? WHERE seq = ?").run(o === last ? null : "後の編集の値に GitHub が既になっています", now, o.seq);
+    return true;
+  }
+
+  /**
+   * A new edit of a field held as a conflict, against GitHub's value as stored: the import that would settle it may
+   * never come (the Project item of a closed Issue is not read again), and the conflict holds the Issue's comments too.
+   * The new edit stays to be sent: the stored value may be old, and the check before the write reads GitHub's.
+   */
+  private settleHeldBacklogField(repo: BacklogRepositoryKey, kind: BacklogObjectKind, externalId: string, field: string, now: number): void {
+    const ops = this.backlogSetsOf(repo, kind, externalId);
+    if (!ops.some((o) => o.field === field && o.status === "conflict")) return;
+    const r = this.getBacklogRecord({ ...repo, objectKind: kind, externalId });
+    if (r?.fetchState === "fetched") this.settleBacklogField(ops, field, backlogFieldValue(kind, r.remote, field), now, true);
   }
 
   /**
@@ -1650,6 +1680,12 @@ function migrate(db: Database) {
   if (!cols.has("shadow_of")) db.exec("ALTER TABLE tasks ADD COLUMN shadow_of TEXT");
   const opCols = new Set((db.query("PRAGMA table_info(backlog_operations)").all() as Array<{ name: string }>).map((c) => c.name));
   if (!opCols.has("overwritten")) db.exec("ALTER TABLE backlog_operations ADD COLUMN overwritten TEXT");
+  // Status conflicts held before the send told GitHub's Project automation from a person: the send looks at each again.
+  // Once: one held after this stays a conflict until it is chosen on
+  if ((db.query("PRAGMA user_version").get() as { user_version: number }).user_version < 1) {
+    db.exec("UPDATE backlog_operations SET status = 'pending', retry_at = NULL, error = NULL WHERE status = 'conflict' AND field = 'field:Status' AND overwritten IS NULL");
+    db.exec("PRAGMA user_version = 1");
+  }
   if (!cols.has("shadow_stopped")) db.exec("ALTER TABLE tasks ADD COLUMN shadow_stopped INTEGER NOT NULL DEFAULT 0");
   if (!cols.has("workspace_reason")) db.exec("ALTER TABLE tasks ADD COLUMN workspace_reason TEXT");
   if (!cols.has("outcome")) db.exec("ALTER TABLE tasks ADD COLUMN outcome TEXT NOT NULL DEFAULT 'unknown'");

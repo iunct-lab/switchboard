@@ -43,9 +43,9 @@ export function resolveModel(table: PricingTable, model: string | null | undefin
   if (model) {
     const tagless = model.replace(/\[[^\]]*\]$/, "");
     const lookup = (n: string) => hit(n) ?? hit(table.aliases[n]) ?? hit(n.replace(/-\d{8}(-v\d+:\d+)?$/, ""));
-    // Amazon Bedrock's form (global.anthropic.claude-haiku-5-5, #1730) is the same model: after the id as written (a row or an
-    // alias of the user's own wins), the Anthropic row prices it
-    const name = tagless.replace(/^([a-z]+\.)?anthropic\./, "");
+    // Amazon Bedrock's form (global.anthropic.claude-haiku-5-5 #1730, openai.gpt-6-luna #1731) is the same model: after the
+    // id as written (a row or an alias of the user's own wins), the Anthropic or OpenAI row prices it
+    const name = tagless.replace(/^([a-z]+\.)?(anthropic|openai)\./, "");
     const direct = lookup(tagless) ?? lookup(name);
     if (direct) return direct;
     const prefix = Object.keys(table.models)
@@ -88,7 +88,8 @@ export function billedUsd(table: PricingTable, runner: RunnerId, apiCostUsd: num
 }
 
 /**
- * A model id in Amazon Bedrock's form (`global.anthropic.claude-haiku-5-5`, `us.anthropic.…`, `anthropic.…`) (#1730).
+ * A model id in Amazon Bedrock's form (`global.anthropic.claude-haiku-5-5`, `us.anthropic.…`, `anthropic.…` #1730,
+ * `openai.gpt-6-luna` #1731).
  * Bedrock is metered by AWS whatever the runner's own plan says, so such a row is billed at the API price.
  */
 export function isBedrockModel(model: string): boolean {

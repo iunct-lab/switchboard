@@ -311,6 +311,46 @@ describe("recheck", () => {
   });
 });
 
+describe("task scope", () => {
+  const file = (path: string) => ({ path, additions: 1, deletions: 0 });
+  const task = (named: string[], siblings: { number: number; paths: string[] }[] = []) => ({ numbers: [2346], named, siblings });
+
+  test("outside the task: stops and lists every outside path in the PR's order; a directory covers what is under it", () => {
+    const files = ["z.ts", "ops-kit/src/x.ts", "scripts/a.ts", "b.ts", "scripts/a.test.ts"].map(file);
+    const j = judge(base({ files, task: task(["ops-kit/", "scripts/a.ts"]) }), off);
+    expect(j.verdict).toBe("stop");
+    expect(j.impact).toBe("small");
+    expect(j.reasons).toEqual(["Task #2346 の本文に名指しの無いファイル: z.ts, b.ts, scripts/a.test.ts"]);
+  });
+
+  test("outside the task: nothing outside adds no reason; two Tasks are both named", () => {
+    expect(judge(base({ files: [file("a.ts")], task: task(["a.ts"]) }), off)).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [] });
+    expect(judge(base({ files: [file("b.ts")], task: { numbers: [1, 2], named: ["a.ts"], siblings: [] } }), off).reasons)
+      .toEqual(["Task #1, #2 の本文に名指しの無いファイル: b.ts"]);
+  });
+
+  test("named by a sibling: the Tasks that name it follow the path, the smaller number first", () => {
+    const j = judge(base({
+      files: ["packages/core/src/policies.ts", "b.ts"].map(file),
+      task: task(["a.ts"], [{ number: 2352, paths: ["packages/"] }, { number: 2351, paths: ["packages/core/src/policies.ts"] }, { number: 2353, paths: ["c.ts"] }]),
+    }), off);
+    expect(j.reasons).toEqual(["Task #2346 の本文に名指しの無いファイル: packages/core/src/policies.ts（Task #2351、Task #2352 が名指し）, b.ts"]);
+  });
+
+  test("allow-large keeps the reason, as an unresolved thread; naming the path in the Task lifts it", () => {
+    const files = [file("rescue/x.ts")];
+    const kept = judge(base({ files, task: task(["a.ts"]) }), { allowLarge: true });
+    expect(kept).toMatchObject({ verdict: "stop", impact: "large" });
+    expect(kept.reasons).toEqual(["Task #2346 の本文に名指しの無いファイル: rescue/x.ts"]);
+    expect(judge(base({ files, task: task(["a.ts", "rescue/x.ts"]) }), { allowLarge: true })).toMatchObject({ verdict: "merge", reasons: [] });
+  });
+
+  test("no task: a PR without one judges as before; a Task with no path does not stop and says so in notes", () => {
+    expect(judge(base(), off)).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [] });
+    expect(judge(base({ task: task([]) }), off)).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [], notes: ["Task #2346 の本文からパスが読めない（範囲の検査をしていない）"] });
+  });
+});
+
 describe("merge-gate readPr", () => {
   const view = {
     files: [{ path: "a.ts", additions: 1, deletions: 2, changeType: "MODIFIED" }],
@@ -318,7 +358,7 @@ describe("merge-gate readPr", () => {
       { authoredDate: "2026-09-24T09:00:00Z", committedDate: "2026-09-24T13:00:00Z" },
       { authoredDate: "2026-09-24T10:00:00Z", committedDate: "2026-09-24T13:00:00Z" },
     ],
-    headRefName: "sb/1-a",
+    headRefName: "work-a",
     headRefOid: "abc123",
     mergeStateStatus: "CLEAN",
     comments: [{ body: "[codex] review", createdAt: "2026-09-24T11:00:00Z", author: { login: "x" }, authorAssociation: "MEMBER" }],
@@ -370,6 +410,58 @@ describe("merge-gate readPr", () => {
     expect(q[q.indexOf("o=acme") - 1]).toBe("-f"); // a string even for a name like "123" or "true"
     expect(q[q.indexOf("r=lib") - 1]).toBe("-f");
     expect(calls.flat().join(" ")).not.toContain("switchboard");
+  });
+
+  describe("the Tasks a PR closes (#2498)", () => {
+    const labels = (...names: string[]) => ({ nodes: names.map((name) => ({ name })) });
+    const issues: Record<number, unknown> = {
+      5: {
+        number: 5, body: "`scripts/a.ts:3`、`ops-kit/` と new/x.ts", labels: labels("type:task"),
+        parent: { subIssues: { nodes: [
+          { number: 5, body: "`scripts/a.ts`", labels: labels("type:task") },
+          { number: 6, body: "`scripts/b.ts`", labels: labels("type:task") },
+          { number: 7, body: "`scripts/c.ts`", labels: labels("type:pbi") },
+        ] } },
+      },
+      9: { number: 9, body: "`scripts/a.ts`", labels: labels("type:pbi"), parent: null },
+    };
+    const gate = (pr: { body: string; headRefName: string }, seen: string[][] = []) => async (args: string[]) => {
+      seen.push(args);
+      if (args[0] === "pr" && args[1] === "view") return JSON.stringify({ ...view, ...pr, files: [{ path: "new/x.ts", additions: 1, deletions: 0 }] });
+      if (args[0] === "pr") return "[]";
+      if (args[1]?.includes("/actions/runs")) return JSON.stringify(runs);
+      if (args[1]?.endsWith("/contents")) return JSON.stringify([{ name: "scripts", type: "dir" }, { name: "ops-kit", type: "dir" }]);
+      const n = args.find((a) => a.startsWith("n="));
+      if (args[1] === "graphql" && args.some((a) => a.includes("issue(number"))) return JSON.stringify({ data: { repository: { issue: issues[Number(n!.slice(2))] } } });
+      return JSON.stringify(threads([]));
+    };
+
+    test("Closes #N and the branch sb/<n>- name the same Task once; the PR's new top directory starts a path", async () => {
+      const seen: string[][] = [];
+      const f = await readPr(1, gate({ body: "Closes #5。", headRefName: "sb/5-a" }, seen));
+      expect(f.task).toEqual({ numbers: [5], named: ["scripts/a.ts", "new/x.ts", "ops-kit/"], siblings: [{ number: 6, paths: ["scripts/b.ts"] }] });
+      expect(seen.filter((a) => a.some((x) => x.includes("issue(number")))).toHaveLength(1);
+      expect(seen[0]!.join(" ")).toContain("body,");
+    });
+
+    test("the branch alone links a Task", async () => {
+      expect((await readPr(1, gate({ body: "", headRefName: "sb/5-a" }))).task?.numbers).toEqual([5]);
+    });
+
+    test("an Issue that is not type:task, or a `Backlog-Task:` line, gives no task", async () => {
+      expect(await readPr(1, gate({ body: "Closes #9", headRefName: "work-a" }))).not.toHaveProperty("task");
+      const seen: string[][] = [];
+      expect(await readPr(1, gate({ body: "Backlog-Task: 5\n", headRefName: "sb/5-a" }, seen))).not.toHaveProperty("task");
+      expect(seen.some((a) => a.some((x) => x.includes("issue(number")))).toBe(false);
+    });
+
+    test("an Issue that cannot be read throws (not judged)", async () => {
+      const run = gate({ body: "Closes #5", headRefName: "work-a" });
+      await expect(readPr(1, async (a) => {
+        if (a.some((x) => x.includes("issue(number"))) throw new Error("gh api graphql failed");
+        return run(a);
+      })).rejects.toThrow("gh api graphql failed");
+    });
   });
 
   test("checksFromRuns: the newest run per workflow; not completed is 未完了; the conclusion upper-cased", () => {
@@ -730,7 +822,7 @@ describe("merge-gate reads GitHub, not the stored backlog (#909)", () => {
   test("it does not import the daemon's database or the stored backlog: a PR's head, reviews, checks and protection are read from gh each time", async () => {
     const src = await Bun.file(new URL("./merge-gate.ts", import.meta.url)).text();
     const imports = [...src.matchAll(/^import .* from "([^"]+)"/gm)].map((m) => m[1]!);
-    expect(imports.filter((i) => /packages\/core|db|backlog|sqlite/.test(i))).toEqual([]);
+    expect(imports.filter((i) => /packages\/core|db|backlog|sqlite|parallel-guard/.test(i))).toEqual([]);
     expect(src).not.toMatch(/bun:sqlite|switchboard\.db|readStoredBacklog|listBacklogRecords/);
   });
 });

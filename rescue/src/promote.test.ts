@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { commitFile, daemonSource, freePort, health, makeRepo, until } from "./fixture.ts";
 import { checkDaemon, KEEP_SNAPSHOTS, listSnapshots, promote, restoreDb, rollback, snapshotDb, type Ctx } from "./promote.ts";
@@ -88,7 +88,7 @@ test("a release that first answers late in the window still gets its full settle
 
 test("restoring the oldest snapshot at the retention limit keeps that snapshot and brings its rows back", async () => {
   while (listSnapshots(f.home).length < KEEP_SNAPSHOTS) {
-    snapshotDb(f.home, `filler${listSnapshots(f.home).length}`);
+    await snapshotDb(f.home, `filler${listSnapshots(f.home).length}`);
     await Bun.sleep(5);
   }
   const oldest = listSnapshots(f.home).at(-1)!;
@@ -102,7 +102,7 @@ test("restoring the oldest snapshot at the retention limit keeps that snapshot a
 test("snapshots keep only the newest KEEP_SNAPSHOTS and the one being restored", async () => {
   expect(KEEP_SNAPSHOTS).toBe(3); // the decided value (#1429)
   for (let i = 0; i < KEEP_SNAPSHOTS + 1; i++) {
-    snapshotDb(f.home, `n${i}`);
+    await snapshotDb(f.home, `n${i}`);
     await Bun.sleep(5);
   }
   const all = listSnapshots(f.home);
@@ -117,15 +117,74 @@ test("snapshots keep only the newest KEEP_SNAPSHOTS and the one being restored",
   expect(after.length).toBe(KEEP_SNAPSHOTS + 1); // the newest KEEP_SNAPSHOTS plus the protected one
 }, 30_000);
 
-test("SWITCHBOARD_DB moves the database sb-rescue snapshots, like it does for the daemon", () => {
+const unzipped = (name: string) => Bun.gunzipSync(readFileSync(join(f.home, "snapshots", name)));
+
+test("a snapshot is gzipped and smaller than the database; it opens once unpacked", async () => {
+  const db = new Database(join(f.home, "switchboard.db"));
+  db.exec("create table bulk (x); insert into bulk select hex(zeroblob(2000)) from (with recursive c(n) as (select 1 union all select n + 1 from c where n < 500) select n from c)");
+  db.close();
+  const name = (await snapshotDb(f.home, "gz"))!;
+  expect(name).toEndWith(".db.gz");
+  expect(statSync(join(f.home, "snapshots", name)).size).toBeLessThan(statSync(join(f.home, "switchboard.db")).size / 4);
+  expect(readdirSync(join(f.home, "snapshots")).filter((n) => !n.endsWith(".db.gz"))).toEqual([]);
+  const copy = Database.deserialize(unzipped(name));
+  expect(copy.query("select count(*) n from bulk").get()).toEqual({ n: 500 });
+  copy.close();
+});
+
+test("a .db already in the folder is compressed with the next snapshot: one a killed run left, one from before gzip", async () => {
+  const dir = join(f.home, "snapshots");
+  mkdirSync(dir, { recursive: true });
+  const old = new Database(join(dir, "2026-01-01T00-00-00-000Z-old.db"));
+  old.exec("create table marker (x)");
+  old.close();
+  await snapshotDb(f.home, "new");
+  expect(readdirSync(dir).filter((n) => !n.endsWith(".db.gz"))).toEqual([]);
+});
+
+test("a failed compression stops the snapshot and leaves no half-written file", async () => {
+  const dir = join(f.home, "snapshots");
+  mkdirSync(dir, { recursive: true });
+  const stuck = join(dir, "2026-01-01T00-00-00-000Z-stuck.db");
+  writeFileSync(stuck, "x");
+  chmodSync(stuck, 0o000);
+  try {
+    await expect(snapshotDb(f.home, "failed")).rejects.toThrow();
+    expect(readdirSync(dir).filter((n) => n.endsWith(".part") || n.endsWith(".tmp") || n.endsWith("-failed.db"))).toEqual([]);
+  } finally {
+    rmSync(stuck, { force: true });
+  }
+});
+
+test("what a killed run left is gone with the next snapshot", async () => {
+  const dir = join(f.home, "snapshots");
+  mkdirSync(dir, { recursive: true });
+  for (const n of ["2026-01-01T00-00-00-000Z-a.db.tmp", "2026-01-01T00-00-00-000Z-b.db.gz.part"]) writeFileSync(join(dir, n), "x");
+  await snapshotDb(f.home, "after-kill");
+  expect(readdirSync(dir).filter((n) => n.endsWith(".part") || n.endsWith(".tmp"))).toEqual([]);
+});
+
+test("a snapshot that does not unpack leaves the database alone and the daemon running", async () => {
+  const name = (await snapshotDb(f.home, "broken"))!;
+  const file = join(f.home, "snapshots", name);
+  writeFileSync(file, readFileSync(file).subarray(0, 40));
+  const before = rows();
+  await expect(restoreDb(ctx, name)).rejects.toThrow();
+  expect(existsSync(join(f.home, "switchboard.db.restore"))).toBe(false);
+  expect(existsSync(join(f.home, "switchboard.db.restore.part"))).toBe(false);
+  expect(rows()).toEqual(before);
+  expect((await until(() => health(ctx.port), "daemon up after the failed restore")).ok).toBe(true);
+}, 30_000);
+
+test("SWITCHBOARD_DB moves the database sb-rescue snapshots, like it does for the daemon", async () => {
   const elsewhere = join(f.root, "elsewhere.db");
   const db = new Database(elsewhere);
   db.exec("create table marker (x)");
   db.close();
   process.env.SWITCHBOARD_DB = elsewhere;
   try {
-    const name = snapshotDb(f.home, "elsewhere")!;
-    const copy = new Database(join(f.home, "snapshots", name), { readonly: true });
+    const name = (await snapshotDb(f.home, "elsewhere"))!;
+    const copy = Database.deserialize(unzipped(name));
     expect((copy.query("select name from sqlite_master where name = 'marker'").all() as unknown[]).length).toBe(1);
     copy.close();
   } finally {
@@ -194,3 +253,9 @@ test("checkDaemon says why the daemon is unhealthy, in the same words (#2814)", 
     for (const s of servers) await s.stop(true);
   }
 });
+
+test("the candidate boots on the unpacked database, not on the gzip", async () => {
+  const opens = `const { Database } = require("bun:sqlite"); new Database(process.env.SWITCHBOARD_DB ?? process.env.SWITCHBOARD_HOME + "/switchboard.db").query("select name from notes").all();`;
+  const next = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource("reads-db", opens), "reads the database");
+  expect(await promote(ctx, next, FAST)).toMatchObject({ action: "promote", ok: true, to: next });
+}, 30_000);

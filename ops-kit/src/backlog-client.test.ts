@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readRecords, runBacklog } from "./backlog-client.ts";
+import { appSync, BacklogUnknown, readRecords, runBacklog } from "./backlog-client.ts";
 
 // `ops-kit backlog` (#918) against a fake app: what it sends, and the exit it gives for each answer. The real app's
 // routes are checked in packages/core/src/backlog.test.ts ("ops-kit backlog …").
@@ -231,4 +231,17 @@ test("create prints the number a local backlog gives (#2265)", async () => {
   expect([local.code, local.out]).toEqual([0, "#1 を作りました（localId u1）"]);
   const github = await run(["create", "--title", "PBI: x"], app((m) => ({ body: m === "GET" ? LIST : { localId: "u2", number: null } })));
   expect(github.out).toContain("作りました（送信待ち）: localId u2");
+});
+
+test("appSync: the repository's workspace, null when the list does not have it; what cannot be told throws (#3069)", async () => {
+  const answering = (status: number, body: unknown) => (async () => new Response(JSON.stringify(body), { status })) as unknown as typeof fetch;
+  const env = { BACKLOG_URL: "http://app/api/backlog" };
+  expect(await appSync(env, { repo: "ACME/other", fetch: answering(200, LIST) })).toEqual({ workspaceId: "ws2" });
+  expect(await appSync(env, { repo: "acme/unknown", fetch: answering(200, LIST) })).toBeNull();
+  expect(await appSync({ ...env, BACKLOG_WORKSPACE: "ws1" }, { fetch: answering(200, LIST) })).toEqual({ workspaceId: "ws1" });
+  // a workspace the app gave, not in its list, is not a repository it does not know
+  await expect(appSync({ ...env, BACKLOG_WORKSPACE: "ws_gone" }, { fetch: answering(200, LIST) })).rejects.toBeInstanceOf(BacklogUnknown);
+  for (const status of [401, 404, 500]) await expect(appSync(env, { repo: "acme/app", fetch: answering(status, {}) })).rejects.toBeInstanceOf(BacklogUnknown);
+  const down = (async () => { throw new Error("ECONNREFUSED"); }) as unknown as typeof fetch;
+  await expect(appSync(env, { repo: "acme/app", fetch: down })).rejects.toBeInstanceOf(BacklogUnknown);
 });

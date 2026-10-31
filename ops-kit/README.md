@@ -22,12 +22,12 @@ GitHub の Issue と Project で回す開発の流れ（要望 → PBI → Task 
 |---|---|---|
 | `set <issue> <field> <value>` | Issue 1 件の Project のフィールドを 1 つ設定する | 要る |
 | `triage <issue> <area> <kind> <priority> [<phase>] [<parent>] [<status>]` | Issue を Project に入れ、Area / Kind / Priority /（Phase）/ Status と親を設定する | 要る |
-| `reconcile-project [--dry-run]` | open の Issue / PR のうち Project に無いものだけを入れる（フィールドは付けない。Actions の autoadd の代わり） | 要る |
+| `reconcile-project [--dry-run]` | open の Issue / PR のうち Project に無いものだけを入れる（フィールドは付けない。Actions の autoadd の代わり）。`BACKLOG_URL` があると（アプリの Task の中）止まる（exit 1）。代わり: 取り込み済みの要望・PBI・Task 1 件なら `backlog triage`、ほかは Task の外で回す | 要る |
 | `lint [--no-project] [--fresh]` | open の PBI / Task / 要望が設定の必須の節と Story Points を満たすか、1 つのクエリ（ページ送り）で検査する。`BACKLOG_URL` があればアプリの保存値を読む（`--fresh` で先に取込み。GitHub に届かなければ保存値のまま） | 要る |
-| `bootstrap <title> [--dry-run]` | Project と、設定にあって Project に無いフィールドを作る | 要る |
+| `bootstrap <title> [--dry-run]` | Project と、設定にあって Project に無いフィールドを作る。`BACKLOG_URL` があると（アプリの Task の中）止まる（exit 1）。代わり: Task の外で回す（新しいリポジトリは `new-repo` スキルの手順） | 要る |
 | `request <title> <body-file>` | 要望 Issue を作り、Project に Backlog で入れる | 要る |
 | `backlog list\|view\|create\|edit\|comment\|set\|triage …` | キットを同梱するアプリが保存したバックログを、そのアプリの API（`BACKLOG_URL`）で読み書きする。読むのは保存値と鮮度、`--fresh` で最新化を待つ（アプリが GitHub に届かなければ保存値と「GitHub 未同期」で exit 0）。`BACKLOG_URL` が無い環境では GitHub に直接つないで同じ形で出す・書く（`gh` のログインで。`--fresh` は何もしない）。`BACKLOG_URL` があってアプリに届かなければ exit 2（GitHub に切り替えない） | `BACKLOG_URL` があれば要らない（`triage` の Phase だけ読む）。無ければ list / view の Status と set / triage / `--field` に Project を読む（無ければ Status は `-`、書き込みは断る） |
-| `sync-labels [<file>] [--dry-run]` | ラベルを `.github/labels.yml` に合わせる（作る・直すだけで、消さない） | 要らない |
+| `sync-labels [<file>] [--dry-run]` | ラベルを `.github/labels.yml` に合わせる（作る・直すだけで、消さない）。`BACKLOG_URL` があると（アプリの Task の中）止まる（exit 1）。代わり: `env -u BACKLOG_URL ops-kit sync-labels` | 要らない |
 | `scan-text <file\|->` | 文に認証に使える値が無いか検査する（値は出さない） | 要らない |
 | `scan-issues [<owner/name>] [--since <ISO>] [--recheck <URL>]...` | リポジトリの Issue・PR・コメントを全部（`--since` ならその時刻より後の更新だけと、`--recheck` の前回の当たり）、同じ検査に通す | 要らない |
 | `public-sync [--source <ref>] [--dry-run] [--adopted] [--target-url <url>]` / `public-sync --check [--source <ref>]` | main のツリーだけを公開リポジトリへ送る。`--check` は送らずに、公開に出すツリーの検査だけを CI で走らせる（下の「公開リポジトリへの同期」） | 要る（`publicSync` だけ） |
@@ -207,6 +207,6 @@ cat <公開リポジトリ>/vendor/ops-kit/KIT_VERSION    # commit <sha> / date 
 
 `--dry-run` は source、前回の基準、区分、予定公開版、検査済み tree を示し、公開側・private origin へ書かない。独立採番では基準の取り違えを避けるため、公開先の読み取りに失敗した場合は初回と推測せず停止する。初回は空のPrivateリポジトリを作成してから実行する。作成前の検査は空のローカルbareを `--target-url` に渡して行える（GitHub Releaseは作らない）。公開側の題・枝・タグは公開版のみ。公開 Release の本文は空で、開発側の件名・Issue・sha を転記しない。package.json の版は書き換えない。
 
-source・公開 tree・公開版・開発タグの対応と未完了計画は、private origin の `refs/public-sync/versions/<公開先URLのSHA-256>` に保存する。同じ prefix に `-lock` を付けた ref を、期待値付き push で実行ごとに取得・解放する。別 clone の同時実行は停止する。処理が失敗しても未完了計画は残り、**失敗した操作をむやみに再実行せず、公開側と台帳を確認してから**同じ `--source` で再開する。対象が変わると停止する。タグ・Release が既にあれば、その公開コミットとの一致を確認して不足した処理だけを補う。
+source・公開 tree・公開版・開発タグの対応と未完了計画は、private origin の `refs/public-sync/versions/<公開先URLのSHA-256>` に保存する。同じ prefix に `-lock` を付けた ref を、期待値付き push で実行ごとに取得・解放する。別 clone の同時実行は停止する。処理が失敗しても未完了計画は残る。公開側に届いていない計画（公開 main が前の完了のコミットのまま、計画の版のタグ・Release・開いた同期 PR が無い）は、次の同期が渡された `--source` で置き換え（出力の 1 行目が `version: replaced unfinished plan …`、`--dry-run` は `would replace`）、版はその source から決まる。届きかけている計画は**失敗した操作をむやみに再実行せず、公開側と台帳を確認してから**同じ `--source` で再開する。違う `--source` は、再開に使うタグと届いているもの（公開 main の移動・同期 PR の番号・タグ・Release）を 1 行目に出して停止する。同じ `--source` でも対象が変わると停止する。タグ・Release が既にあれば、その公開コミットとの一致を確認して不足した処理だけを補う。
 
 プロセスが強制終了した場合、lock は自動で奪わない。復旧では元の実行が終了したことを確認し、`git ls-remote origin 'refs/public-sync/versions/*'` で該当の lock と状態を読む。公開 main・sync 枝・PR・タグ・Release と未完了計画を照合し、lock の観測した object ID を期待値にした `git push --force-with-lease=<lock-ref>:<観測したID> origin :<lock-ref>` でその lock だけを解除してから再開する。途中の実行が残る間や、書き込み結果が不明なまま解除しない。台帳や公開タグを消して採番をやり直さない。

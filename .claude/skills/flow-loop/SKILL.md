@@ -13,7 +13,7 @@ REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 W=$(mktemp -d "${TMPDIR:-/tmp}/switchboard.flow-loop.XXXXXX")   # 表示されたパスを控える。Codex の Task は /tmp を閉じたサンドボックスなので $TMPDIR の下（CLAUDE.md の「作業の場所」）
 ```
 
-Issue の照会と書き込みは、スケジュールから走る Task の中（`BACKLOG_URL` がある）では `ops-kit backlog view` / `ops-kit backlog comment <n> --body-file <f>`（`issue-workflow` の「操作」。アプリの保存値に書き、アプリが GitHub に送る）。`BACKLOG_URL` が無い（人が手で回す）ときは `gh issue view` / `gh issue comment -R "$REPO"`。閉じたものを含む `flow` の要望の一覧だけは、`ops-kit backlog list` にラベルと閉じた Issue の絞り込みが無いので、どちらでも `gh issue list` で読む。
+Issue の照会と書き込みは、スケジュールから走る Task の中（`BACKLOG_URL` がある）では `ops-kit backlog view` / `ops-kit backlog comment <n> --body-file <f>`（`issue-workflow` の「操作」。アプリの保存値に書き、アプリが GitHub に送る）。`BACKLOG_URL` が無い（人が手で回す）ときは `gh issue view` / `gh issue comment -R "$REPO"`（`flow-report` は保存値を読むので、`BACKLOG_URL` が無いと exit 2 で止まる）。閉じたものを含む `flow` の要望の一覧だけは、`ops-kit backlog list` にラベルと閉じた Issue の絞り込みが無いので、どちらでも `gh issue list` で読む。
 
 ## 要望の本文に書く印
 
@@ -78,7 +78,9 @@ jq '{bottleneck, closed, stages}' "$W/flow.json"
 
 一番時間を食った段は表の「一番時間を食った段（中央値）」（`bottleneck`）。選んだ段を `ST=<選んだ段>` にする（1 で入れた値を 3 で使わない）。ただし同じ段に**終わっていない** `flow` の要望（開いている、または派生 PBI が閉じて要望も閉じたが 1 でまだ判断済みになっていない）があれば（1 の一覧の「対象の段」）、中央値が次に大きい段にする（改善の前のデータが大半の中央値で、同じ段の要望を重ねない）。件数が 3 未満の段は選ばない。選べる段が無ければ 4 の「起こさないとき」へ。
 
-GitHub の API の残りが少なくて `flow-report` が止まった（exit 1）ときは、何も起こさずに理由を 4 の「起こさないとき」に書いて終わる。
+`flow-report` が止まった（exit 1 = GitHub の API の残りが少ない・読むのに 100 ポイントを超えそう・`gh` の失敗など、exit 2 = アプリの保存値を読めない: `BACKLOG_URL` が無い・アプリに届かない・取り込む前・`--repo` の workspace が無い）ときは、何も起こさずに理由を 4 の「起こさないとき」に書いて終わる。
+
+`--repo <owner/name>` は保存値を読む workspace と PR を読むリポジトリを選ぶ。アプリに取り込まれていないリポジトリは exit 2 になる。アプリだけのバックログには指せるリポジトリが無いので付けない。
 
 ## 3. 原因を 1 つに絞る
 

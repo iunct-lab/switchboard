@@ -31,6 +31,7 @@ const USAGE = `使い方: bun ops-kit/src/cli.ts <command> [--config <ops.config
   reconcile-project [--dry-run]
       open の Issue / PR のうち Project に無いものだけを追加する（フィールドは付けない。既にある item は触らない）。
       Actions の project-autoadd が動かないときの代わり。--dry-run は追加するものを出すだけ
+      BACKLOG_URL がある（アプリの Task の中）なら GitHub を読み書きせず exit 1（--dry-run も）。取り込み済みの要望・PBI・Task 1 件なら backlog triage、ほかは Task の外で回す
 
   lint [--no-project] [--fresh]
       open の PBI / Task / 要望が記載規約（設定の sections と storyPoints）を満たすか検査する。1 つのクエリ（100 件ずつ）で読む
@@ -46,6 +47,7 @@ const USAGE = `使い方: bun ops-kit/src/cli.ts <command> [--config <ops.config
       （Phase）の単一選択と数値の Story Points のうち、無いフィールドを作る。何度実行してもよい
       Status の選択肢は、この実行で作った Project にだけ Backlog / Ready / In progress / In review / Done を入れる（既存の
       Project の Status を書き換えると全 item の Status が消えるので、足りない選択肢を出すだけ）。ビューは UI で作る
+      BACKLOG_URL がある（アプリの Task の中）なら GitHub を読み書きせず exit 1（--dry-run も）。Task の外で回す（新しいリポジトリは new-repo スキルの手順）
   request <title> <body-file>
       要望 Issue（type:request）を本文のファイルから作り、Project に Status Backlog で入れる。設定の sections.request の
       節が本文に無ければ作らない。BACKLOG_URL がある（アプリの Task の中）なら gh で作らず backlog create でアプリに保存する
@@ -57,6 +59,7 @@ ${BACKLOG_USAGE}
   sync-labels [<file>] [--dry-run]
       リポジトリのラベルを <file>（既定 .github/labels.yml）に合わせる。無いものを作り、色・説明が違うものを直す。
       <file> に無いラベルは消さない。--dry-run は変えるものを出すだけ。設定ファイルは要らない
+      BACKLOG_URL がある（アプリの Task の中）なら GitHub を読み書きせず exit 1（--dry-run も）。Task の中で反映するなら env -u BACKLOG_URL ops-kit sync-labels
   scan-text <file|->
       文（ファイル、- は標準入力）に認証に使える値（device code、承認 URL、トークン、鍵、アカウント ID、ホストの AWS の設定のプロファイル名・SSO のセッション名など）が無いか検査する
       出力は <file>:<行>: <種類>。値は出さない。exit 0 = 無い、1 = ある、2 = 読めなかった。設定ファイルは要らない
@@ -97,6 +100,13 @@ Project URL は環境変数 <envPrefix>_PROJECT_URL、設定の省略可能な p
 設定ファイルの例（ops.config.json）:
 `;
 
+const IN_TASK_WAY = {
+  "reconcile-project": "Project への追加はアプリの送信（addProjectV2ItemById）が行います。取り込み済みの要望・PBI・Task なら 1 件ずつ ops-kit backlog triage で入れられます。type ラベルの無い Issue（取り込まれない）と open の全部は Task の外で reconcile-project を回してください",
+  bootstrap: "Project の用意は Task の外で実行してください（まだ workspace の無い新しいリポジトリは new-repo スキルの手順で BACKLOG_URL を外して回します）",
+  "sync-labels": "ラベルはアプリの保存値と関係なくリポジトリを直接直すものなので、BACKLOG_URL を外して回してください: env -u BACKLOG_URL ops-kit sync-labels",
+};
+const IN_TASK_REFUSED = (cmd: keyof typeof IN_TASK_WAY) => `${cmd}: アプリの Task の中（BACKLOG_URL あり）では GitHub に直接書きません。${IN_TASK_WAY[cmd]}`;
+
 /**
  * The repository `public-sync --check` looks for: GH_REPO, else origin. Not gh's chosen remote nor gh itself (as `repoOf`
  * reads): a default pointed at the public copy would make the check skip a private tree.
@@ -135,6 +145,12 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
       err((e as Error).message);
       return 1;
     }
+  }
+  // in the app's Task, the backlog is read and written through the app: these three would go to GitHub's Project and
+  // labels directly, so they stop before any gh call (--dry-run too: GitHub is not the backlog read there)
+  if ((command === "reconcile-project" || command === "bootstrap" || command === "sync-labels") && env.BACKLOG_URL) {
+    err(IN_TASK_REFUSED(command));
+    return 1;
   }
   // in the app's Task, gh-guard refuses `gh issue create`: the request is stored in the app like backlog create, and the
   // line callers read (要望を作成: #N, scripts/file-request.ts) is kept when the app numbers it at once (a backlog kept

@@ -15,6 +15,18 @@ STATUS="$HOME/.switchboard/archive.status"
 trap 'code=$?; [ $code -eq 0 ] || echo "failed $(date +%s) $code" > "$STATUS"; rm -rf "$OUT" || true' EXIT
 rm -rf "$OUT"; mkdir -p "$OUT"
 echo "running $(date +%s)" > "$STATUS"
+# One line a day: how full the root disk is and what fills it (docs/design/host-disk.md). A failure here never stops the archive.
+disk_record() {
+  local file="$HOME/.switchboard/disk-history.tsv" today df_line
+  today="$(date -u +%F)"
+  grep -q "^$today" "$file" 2>/dev/null && return 0   # a rerun of the same day
+  mb() { du -xsm "$@" 2>/dev/null | awk '{ s += $1 } END { print s + 0 }'; }
+  df_line="$(df -Pm / | awk 'NR==2 { print $3 "\t" $4 }')" && [ -n "$df_line" ] || return 1
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$today" "$df_line" \
+    "$(mb "$HOME"/.switchboard/switchboard.db*)" "$(mb "$HOME/.switchboard/snapshots")" "$(mb "$HOME/.switchboard/releases")" \
+    "$(mb "$HOME/.claude/projects" "$HOME/.codex/sessions")" "$(mb "$HOME/.cache")" >> "$file"
+}
+disk_record || echo "archive: disk usage not recorded" >&2
 KEY="$(aws ssm get-parameter --name /switchboard/archive-age-pubkey --query Parameter.Value --output text)"
 NAME="switchboard-$(date -u +%Y%m%dT%H%M%SZ).tar.zst.age"
 # from the release sb-rescue runs (#178), not the working tree agents edit; the checkout only before the first release

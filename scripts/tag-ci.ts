@@ -14,6 +14,10 @@
  * on the open tag-CI requests (they stay open: the PBI that fixed it closes them). What an open request already says is
  * not said again. With --repo no request is filed: a fail prints the request's text to stderr on every run (the
  * scheduled Task reports it as its stop).
+ * `--latest-pass [--contained-in <commit>]` (#2962) runs nothing: it prints the newest tag whose last result is pass
+ * (a fail, no result and no Release are passed over), only from the tags in `<commit>`'s history when given (the
+ * public sync gives the running release's commit). Exit 0 = printed, 1 = no tag passed (prints nothing), 2 = bad
+ * arguments or an unknown commit.
  */
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
@@ -60,9 +64,10 @@ export function resultSection(r: { sha: string; ok: boolean; step?: string; fail
 
 const STRICT = /^v\d+\.\d+\.\d+$/;
 
-/** The `vX.Y.Z` tags of the clone at `root`, newest first. */
-async function listTags(root: string, sh: (cmd: string[]) => Promise<string>): Promise<string[]> {
-  return (await sh(["git", "-C", root, "tag", "-l", "v*", "--sort=-v:refname"])).split("\n").map((t) => t.trim()).filter((t) => STRICT.test(t));
+/** The `vX.Y.Z` tags of the clone at `root`, newest first; with `merged`, only those in that commit's history. */
+async function listTags(root: string, sh: (cmd: string[]) => Promise<string>, merged?: string): Promise<string[]> {
+  const cmd = ["git", "-C", root, "tag", "-l", "v*", "--sort=-v:refname", ...(merged ? ["--merged", merged] : [])];
+  return (await sh(cmd)).split("\n").map((t) => t.trim()).filter((t) => STRICT.test(t));
 }
 
 export interface TagCiDeps extends Omit<Deps, "sh"> {
@@ -121,6 +126,32 @@ export async function tagCi(d: TagCiDeps, repo: string, root: string, cache = jo
     if (r.ok) break;
   }
   return out;
+}
+
+/** The first tag of `tags` (newest first) whose result is pass, or null. Stops reading at it. */
+export async function latestPass(tags: string[], resultOf: (tag: string) => Promise<"pass" | "fail" | null>): Promise<string | null> {
+  for (const tag of tags) if ((await resultOf(tag)) === "pass") return tag;
+  return null;
+}
+
+/** `--latest-pass`: see the file's comment. Reads the Releases of `repo`; runs and edits nothing. */
+export async function latestPassTag(sh: TagCiDeps["sh"], repo: string, root: string, containedIn?: string): Promise<string | null> {
+  await sh(["git", "-C", root, "fetch", "-q", "origin", "--tags", "--force"]);
+  return latestPass(await listTags(root, sh, containedIn), async (tag) => {
+    const sha = (await sh(["git", "-C", root, "rev-parse", `${tag}^{commit}`])).trim();
+    const body = await sh(["gh", "release", "view", tag, "-R", repo, "--json", "body", "-q", ".body"]).catch(() => null);
+    return body === null ? null : tagResult(body, sha);
+  });
+}
+
+/** `--latest-pass` and `--contained-in <commit>` taken off the arguments; the rest is for resolveRepo. */
+export function parseArgs(args: string[]): { latestPass: boolean; containedIn: string | undefined; rest: string[] } {
+  const at = args.indexOf("--contained-in");
+  const containedIn = at < 0 ? undefined : args[at + 1];
+  if (at >= 0 && (!containedIn || containedIn.startsWith("--"))) throw new TargetError("--contained-in の後にコミットを書く");
+  const latestPass = args.includes("--latest-pass");
+  if (at >= 0 && !latestPass) throw new TargetError("--contained-in は --latest-pass と一緒に使う");
+  return { latestPass, containedIn, rest: args.filter((a, i) => a !== "--latest-pass" && (at < 0 || (i !== at && i !== at + 1))) };
 }
 
 /** 0 = the newest tag passed, 1 = it failed, 2 = nothing judged. */
@@ -294,12 +325,22 @@ const sh: TagCiDeps["sh"] = async (cmd, cwd, input) => {
 
 if (import.meta.main) {
   let t: { repo: string; root: string };
+  let a: ReturnType<typeof parseArgs>;
   try {
-    t = await resolveRepo(process.argv.slice(2), process.cwd(), join(import.meta.dir, ".."), sh);
+    a = parseArgs(process.argv.slice(2));
+    t = await resolveRepo(a.rest, process.cwd(), join(import.meta.dir, ".."), sh);
   } catch (e) {
     if (!(e instanceof TargetError)) throw e;
-    console.error(`${e.message}\nusage: bun scripts/tag-ci.ts [--repo <owner/name>]`);
+    console.error(`${e.message}\nusage: bun scripts/tag-ci.ts [--repo <owner/name>]\n       bun scripts/tag-ci.ts --latest-pass [--contained-in <commit>] [--repo <owner/name>]`);
     process.exit(2);
+  }
+  if (a.latestPass) {
+    const tag = await latestPassTag(sh, t.repo, t.root, a.containedIn).catch((e: Error) => {
+      console.error(e.message);
+      process.exit(2);
+    });
+    if (tag) console.log(tag);
+    process.exit(tag ? 0 : 1);
   }
   // stdout is the JSON only
   const entries = await tagCi({ sh, step, log: (l) => console.error(l) }, t.repo, t.root);

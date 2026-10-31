@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { Db } from "./db.ts";
-import { backlogGrowth, fetchFlow, FlowCache, FlowError, flowOfPbi, flowScope, flowView, launchShare, weekStartOf, repoOfRemote, requestOf, summarize, withSwitchboardTasks, type RawComment, type RawPbi, type RawPr } from "./flow.ts";
+import { backlogGrowth, fetchFlow, fetchMergedPrs, FlowCache, FlowError, flowOfPbi, flowOfStored, flowScope, flowView, launchShare, weekStartOf, repoOfRemote, requestOf, summarize, withSwitchboardTasks, type RawComment, type RawPbi, type RawPr } from "./flow.ts";
+import type { StoredRecords } from "../../../ops-kit/src/backlog-client.ts";
 import { loadConfig } from "./config.ts";
 import { startServer } from "./server.ts";
 import type { BacklogSource, FlowView } from "@switchboard/protocol";
-import type { GhRunner } from "./backlog.ts";
-import { mkdtempSync, rmSync } from "node:fs";
+import { createStoredIssue, type GhRunner } from "./backlog.ts";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Task } from "@switchboard/protocol";
@@ -114,21 +115,32 @@ describe("flow", () => {
   });
 });
 
-/** GitHub's answer to growthQuery (#1878): every alias of the query, its count from `count` (0 by default). */
-const growthAnswer = (q: string, count: (alias: string) => number = () => 0) =>
-  Object.fromEntries([["rateLimit", { cost: 1 }], ...[...q.matchAll(/(\w+): search\(/g)].map((m) => [m[1]!, { issueCount: count(m[1]!) }])]);
+test("a claim taken back by a Task that yielded is not the start (#3069)", () => {
+  const raw = madeUpPbi();
+  const first = flowOfPbi(raw, null);
+  raw.subIssues[0]!.comments.push(comment("09:59", "<!-- parallel-guard:task-claim t1 -->\n着手（parallel-guard）"), comment("10:00", "<!-- parallel-guard:withdraw t1 -->\n取り下げ（parallel-guard）"));
+  expect(flowOfPbi(raw, null)).toEqual(first);
+  raw.subIssues[0]!.comments.pop();
+  expect(flowOfPbi(raw, null)).not.toEqual(first); // a claim that stands counts
+});
 
 const call = (calls: string[], reply: (q: string) => unknown): GhRunner => async (args) => {
   const q = args.find((a) => a.startsWith("query="))!;
-  calls.push(q);
-  return { code: 0, stdout: JSON.stringify({ data: q.includes("issueCount") ? growthAnswer(q) : reply(q) }), stderr: "" };
+  calls.push(`${q} ${args.filter((a) => a.startsWith("q=")).join(" ")}`);
+  return { code: 0, stdout: JSON.stringify({ data: reply(q) }), stderr: "" };
 };
+
+/** Stored records (StoredRecords) of made-up Issues and comments: the shape GET /api/backlog/records answers. */
+const storedOf = (issues: Array<Partial<StoredRecords["issues"][number]> & { number: number }>, comments: StoredRecords["comments"] = []): StoredRecords => ({
+  workspaceId: "w", service: "github", repository: "o/r", project: { owner: "o", number: 1 }, fetchedAt: 1, top: [], unread: [], pulls: [], comments,
+  issues: issues.map((i) => ({ title: `#${i.number}`, url: "", state: "OPEN", stateReason: null, body: "", labels: [], parent: null, subIssues: [], createdAt: "", updatedAt: "", closedAt: null, fields: null, ...i })),
+});
 
 describe("budget guard", () => {
   test("reads nothing when the remaining budget is under 500", async () => {
     const calls: string[] = [];
     const gh = call(calls, () => ({ rateLimit: { remaining: 100 } }));
-    await expect(fetchFlow(gh, ".", "o/r", 30)).rejects.toThrow(FlowError);
+    await expect(fetchMergedPrs(gh, ".", "o/r", "2026-10-01")).rejects.toThrow(FlowError);
     expect(calls).toHaveLength(1); // only the rateLimit check, no search
     expect(calls[0]).not.toContain("search");
   });
@@ -136,55 +148,55 @@ describe("budget guard", () => {
   test("stops when the pages spend more than 100 points", async () => {
     const calls: string[] = [];
     const gh = call(calls, (q) => (q.includes("search") ? { rateLimit: { cost: 60 }, search: { pageInfo: { hasNextPage: true, endCursor: "c" }, nodes: [] } } : { rateLimit: { remaining: 4000 } }));
-    await expect(fetchFlow(gh, ".", "o/r", 30)).rejects.toThrow("100 ポイント");
+    await expect(fetchMergedPrs(gh, ".", "o/r", "2026-10-01")).rejects.toThrow("100 ポイント");
     expect(calls.filter((q) => q.includes("search"))).toHaveLength(1); // the second page would have taken it to 121: not read
   });
 
   test("an answer without rateLimit is a FlowError, not a TypeError", async () => {
     const calls: string[] = [];
     const gh = call(calls, () => ({ search: {} }));
-    await expect(fetchFlow(gh, ".", "o/r", 30)).rejects.toThrow(FlowError);
+    await expect(fetchMergedPrs(gh, ".", "o/r", "2026-10-01")).rejects.toThrow(FlowError);
     expect(calls).toHaveLength(1);
     expect(calls[0]).not.toContain("search");
   });
 });
 
 describe("fetchFlow", () => {
-  test("maps a page: merged PRs only, Story Points, the request's time", async () => {
-    const c = (createdAt: string, body: string) => ({ createdAt, body });
-    const list = (nodes: unknown[]) => ({ totalCount: nodes.length, nodes });
-    const node = {
-      number: 7, title: "PBI: x", createdAt: "2026-10-01T00:10:00Z", closedAt: "2026-10-01T05:00:00Z", body: "## 元要望\n#3（意図）\n**Story Points**: 3",
-      comments: { totalCount: 0, nodes: [] }, projectItems: { nodes: [{ fieldValueByName: { number: 3 } }] },
-      subIssues: list([{ number: 8, createdAt: "2026-10-01T00:20:00Z", closedAt: "2026-10-01T04:00:00Z", comments: list([c("2026-10-01T01:00:00Z", "着手")]),
-        closedByPullRequestsReferences: list([
-          { number: 9, createdAt: "2026-10-01T02:00:00Z", mergedAt: "2026-10-01T04:00:00Z", comments: list([c("2026-10-01T02:30:00Z", "[codex] review 1")]) },
-          { number: 10, createdAt: "2026-10-01T02:00:00Z", mergedAt: null, comments: list([]) },
-        ]) }]),
-    };
-    const gh = call([], (q) => q.includes("search") ? { rateLimit: { cost: 3 }, search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [node] } }
-      : q.includes("r3:") ? { rateLimit: { cost: 1 }, repository: { r3: { createdAt: "2026-10-01T00:00:00Z" } } } : { rateLimit: { remaining: 4000 } });
-    const { reads: [r], spent, cutPbis } = await fetchFlow(gh, ".", "o/r", 30);
-    expect(spent).toBe(6); // the budget check 1 + the page 3 + the request Issues 1 + the growth 1
+  const NOW = Date.parse("2026-10-17T12:00:00Z");
+  test("the Issues from the stored values, merged PRs only from GitHub, Story Points, the request's time", async () => {
+    const c = (issue: number, createdAt: string, body: string) => ({ issue, createdAt, body });
+    const records = storedOf([
+      { number: 7, labels: ["type:pbi"], state: "CLOSED", createdAt: "2026-10-01T00:10:00Z", closedAt: "2026-10-01T05:00:00Z", body: "## 元要望\n#3（意図）\n**Story Points**: 3", subIssues: [8], fields: { "Story Points": 3 } },
+      { number: 8, labels: ["type:task"], state: "CLOSED", createdAt: "2026-10-01T00:20:00Z", closedAt: "2026-10-01T04:00:00Z", parent: 7 },
+      { number: 3, labels: ["type:request"], createdAt: "2026-10-01T00:00:00Z" },
+    ], [c(8, "2026-10-01T01:00:00Z", "着手")]);
+    const calls: string[] = [];
+    const pr = (number: number, mergedAt: string | null, comments: unknown[], totalCount = comments.length) => ({ number, createdAt: "2026-10-01T02:00:00Z", mergedAt, body: "Closes #8", headRefName: `sb/8-x`, comments: { totalCount, nodes: comments } });
+    const gh = call(calls, (q) => (q.includes("search") ? { rateLimit: { cost: 1 }, search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [pr(9, "2026-10-01T04:00:00Z", [{ createdAt: "2026-10-01T02:30:00Z", body: "[codex] review 1" }], 101), pr(10, null, [])] } } : { rateLimit: { remaining: 4000, cost: 1 } }));
+    const { reads: [r], spent, cutPbis } = await fetchFlow(gh, ".", "o/r", 30, records, NOW);
+    expect(spent).toBe(4); // the budget check 1 + one page for each 7 days from the PBI's creation (10-01, 10-08, 10-15)
+    expect(calls.find((q) => q.includes("search"))).toContain("q=repo:o/r is:pr is:merged merged:2026-10-01..2026-10-07"); // from the PBI's creation
+    expect(calls.some((q) => /label:type:|is:issue/.test(q))).toBe(false); // no Issue is read from GitHub
     expect(r!.issues).toEqual([7, 8]);
     expect(r!.pbi.storyPoints).toBe(3);
     expect(r!.pbi.url).toBe("https://github.com/o/r/issues/7");
     expect(r!.pbi.stages.request).toBe(10 * MIN);
+    expect(r!.pbi.stages.build).toBe(60 * MIN); // the stored claim 01:00 → the PR 02:00
     expect(r!.pbi.reviewRounds).toEqual([1]); // PR 10 was not merged
-    expect(cutPbis).toEqual([]);
+    expect(cutPbis).toEqual([7]); // PR 9 had more comments than one read holds
   });
 
-  test("a PBI the page cut off is read again wider; one still cut is counted", async () => {
-    const list = (nodes: unknown[], totalCount = nodes.length) => ({ totalCount, nodes });
-    const mk = (tasks: number) => ({ number: 7, title: "PBI", createdAt: "2026-10-01T00:10:00Z", closedAt: "2026-10-01T05:00:00Z", body: "## 元要望\nなし", comments: list([]), projectItems: { nodes: [] },
-      subIssues: list([{ number: 8, createdAt: "2026-10-01T00:20:00Z", closedAt: null, comments: list([]), closedByPullRequestsReferences: list([]) }], tasks) });
+  test("no GitHub repository known (a backlog kept in the app only): the PBI is answered with no PR read", async () => {
     const calls: string[] = [];
-    const gh = call(calls, (q) => q.includes("search") ? { rateLimit: { cost: 3 }, search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [mk(12)] } }
-      : q.includes("i7:") ? { rateLimit: { cost: 2 }, repository: { i7: mk(12) } } : { rateLimit: { remaining: 4000 } });
-    const { cutPbis } = await fetchFlow(gh, ".", "o/r", 30);
-    expect(calls.some((q) => q.includes("i7:"))).toBe(true); // 12 Tasks, the page held 1
-    expect(calls.find((q) => q.includes("i7:"))).toContain("subIssues(first: 30)");
-    expect(cutPbis).toEqual([7]); // the wide read held 1 of 12 in this fake: still cut
+    const records = storedOf([{ number: 7, labels: ["type:pbi"], state: "CLOSED", createdAt: "2026-10-01T00:10:00Z", closedAt: "2026-10-01T05:00:00Z" }]);
+    const { reads, spent } = await fetchFlow(call(calls, () => ({})), ".", null, 30, records, NOW);
+    expect([reads.map((r) => r.pbi.number), spent, calls]).toEqual([[7], 0, []]);
+  });
+
+  test("no PBI closed in the period: GitHub is not read", async () => {
+    const calls: string[] = [];
+    const { reads, spent } = await fetchFlow(call(calls, () => ({})), ".", "o/r", 30, storedOf([{ number: 7, labels: ["type:pbi"] }]), NOW);
+    expect([reads, spent, calls]).toEqual([[], 0, []]);
   });
 
   test("repoOfRemote reads GitHub remotes of every form and no other host", () => {
@@ -250,33 +262,71 @@ describe("summarize", () => {
 describe("flow view", () => {
   const DAY = 86_400_000;
   const NOW = Date.parse("2026-10-17T12:00:00Z");
-  const iso = (ago: number) => new Date(NOW - ago).toISOString();
-  const list = (nodes: unknown[]) => ({ totalCount: nodes.length, nodes });
-  /** A PBI closed `agoDays` days ago whose only measurable stage is `close` (last PR merged `closeMin` before the close). */
-  const pbi = (number: number, agoDays: number, closeMin: number) => {
-    const closed = NOW - agoDays * DAY;
-    return { number, title: `PBI ${number}`, createdAt: new Date(closed - 5 * 3600_000).toISOString(), closedAt: new Date(closed).toISOString(), body: "## 元要望\nなし", comments: list([]), projectItems: { nodes: [{ fieldValueByName: { number: 3 } }] },
-      subIssues: list([{ number: number + 1, createdAt: new Date(closed - 4 * 3600_000).toISOString(), closedAt: new Date(closed).toISOString(), comments: list([]),
-        closedByPullRequestsReferences: list([{ number: number + 2, createdAt: new Date(closed - 3 * 3600_000).toISOString(), mergedAt: new Date(closed - closeMin * MIN).toISOString(), comments: list([]) }]) }]) };
-  };
-  const PAGE = [pbi(10, 3, 10), pbi(20, 10, 90), pbi(30, 40, 5), pbi(40, 50, 15)];
-  /** A fake GitHub: the budget, and one page of the repositories' PBIs (`fail` answers every call with a refusal). */
-  const fake = (calls: string[], page: unknown[] = PAGE, fail: (cwd: string) => boolean = () => false, growth: (alias: string) => number = () => 0): GhRunner => async (args, cwd) => {
+  const iso = (t: number) => new Date(t).toISOString();
+  /** A PBI #n closed `agoDays` days before `now`, its Task #n+1, and its PR #n+2 (merged `closeMin` before the close): the only measurable stage is `close`. */
+  type Spec = { n: number; agoDays: number; closeMin: number; request?: { n: number; hoursBefore: number } };
+  const spec = (n: number, agoDays: number, closeMin: number): Spec => ({ n, agoDays, closeMin });
+  const at = (s: Spec, now: number) => now - s.agoDays * DAY;
+  /** The fake code host's merged PR of a spec (the body names its Task). */
+  const prOf = (s: Spec, now: number) => ({ number: s.n + 2, createdAt: iso(at(s, now) - 3 * 3600_000), mergedAt: iso(at(s, now) - s.closeMin * MIN), body: `Closes #${s.n + 1}`, headRefName: `sb/${s.n + 1}-x`, comments: { totalCount: 0, nodes: [] } });
+  /** The stored records of the specs, as an import (or the app, for a backlog kept here) leaves them. */
+  function store(db: Db, source: BacklogSource, specs: Spec[], now: number) {
+    const issue = (number: number, labels: string[], created: number, closed: number | null, extra: object = {}) =>
+      ({ objectKind: "issue", externalId: `I${number}`, fetchState: "fetched", remote: { number, title: `#${number}`, url: "", state: closed === null ? "OPEN" : "CLOSED", stateReason: null, body: "", labels, milestone: null, parent: null, subIssues: [], createdAt: iso(created), updatedAt: iso(created), closedAt: closed === null ? null : iso(closed), ...extra } });
+    const records = specs.flatMap((s) => {
+      const closed = at(s, now);
+      return [
+        issue(s.n, ["type:pbi"], closed - 5 * 3600_000, closed, { subIssues: [s.n + 1], body: s.request ? `## 元要望\n#${s.request.n}` : "## 元要望\nなし" }),
+        issue(s.n + 1, ["type:task"], closed - 4 * 3600_000, closed, { parent: s.n }),
+        { objectKind: "project-item", externalId: `P${s.n}`, fetchState: "fetched", remote: { issue: s.n, owner: source.project.owner, project: source.project.number, fields: { "Story Points": 3 } } },
+        ...(s.request ? [issue(s.request.n, ["type:request"], closed - (5 + s.request.hoursBefore) * 3600_000, null)] : []),
+      ];
+    });
+    db.putBacklogSnapshot(source, { records: records as never, cursor: null, syncedAt: now });
+  }
+  /**
+   * A fake GitHub: the budget, and the merged PRs of `specs` (`fail` answers every call with a refusal). An Issue search
+   * (`label:type:pbi` / `type:request`) is recorded in `issueSearches`: the flow must not make one.
+   */
+  const fake = (calls: string[], specs: Spec[], now: number, fail: (cwd: string) => boolean = () => false): GhRunner => async (args, cwd) => {
     const q = args.find((a) => a.startsWith("query="))!;
-    calls.push(q);
+    const vars = args.filter((a) => a.startsWith("q=")).join(" ");
+    calls.push(`${q} ${vars}`);
     if (fail(cwd)) return { code: 1, stdout: "", stderr: "HTTP 502" };
-    if (q.includes("issueCount")) return { code: 0, stdout: JSON.stringify({ data: growthAnswer(q, growth) }), stderr: "" };
-    return { code: 0, stdout: JSON.stringify({ data: q.includes("search") ? { rateLimit: { cost: 3 }, search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: page } } : { rateLimit: { remaining: 4000, cost: 1 } } }), stderr: "" };
+    return { code: 0, stdout: JSON.stringify({ data: q.includes("search") ? { rateLimit: { cost: 1 }, search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: specs.map((s) => prOf(s, now)) } } : { rateLimit: { remaining: 4000, cost: 1 } } }), stderr: "" };
   };
+  const issueSearches = (calls: string[]) => calls.filter((c) => /label:type:|is:issue/.test(c));
   const SRC = (repository: string): BacklogSource => ({ service: "github", host: "github.com", repository, project: { owner: "o", number: 1 } });
+  const SPECS = [spec(10, 3, 10), spec(20, 10, 90), spec(30, 40, 5), spec(40, 50, 15)];
 
-  /** A daemon whose database has these workspaces (name → repository) and the fake GitHub. */
-  async function boot(gh: GhRunner, repos: Record<string, string | null>) {
+  /** A database with these workspaces (name → stored backlog and its specs; null = never imported), and their FlowWorkspace rows. */
+  function stored(backlogs: Record<string, { source: BacklogSource; specs: Spec[] } | null>, now = NOW) {
+    const dir = mkdtempSync(join(tmpdir(), "switchboard.flow."));
+    const db = new Db(join(dir, "s.db"));
+    const list = Object.entries(backlogs).map(([name, b]) => {
+      // a checkout of its own (a workspace is one per path), with no origin
+      const path = join(dir, name);
+      mkdirSync(path);
+      const ws = db.upsertWorkspace({ name, path, kind: "repo" });
+      if (b) {
+        db.setWorkspaceBacklogSource(ws.id, b.source);
+        store(db, b.source, b.specs, now);
+      }
+      return { id: ws.id, name, path, repository: b?.source.repository ?? null };
+    });
+    return { db, list, done: () => (db.close(), rmSync(dir, { recursive: true, force: true })) };
+  }
+
+  /** A daemon whose database has these workspaces (name → stored backlog) and the fake GitHub. */
+  async function boot(gh: GhRunner, backlogs: Record<string, { source: BacklogSource; specs: Spec[] } | null>) {
     const home = mkdtempSync(join(tmpdir(), "switchboard.flow."));
     const seed = new Db(join(home, "switchboard.db"));
-    for (const [name, repo] of Object.entries(repos)) {
+    for (const [name, b] of Object.entries(backlogs)) {
       const ws = seed.upsertWorkspace({ name, path: home, kind: "repo" });
-      if (repo) seed.setWorkspaceBacklogSource(ws.id, SRC(repo));
+      if (b) {
+        seed.setWorkspaceBacklogSource(ws.id, b.source);
+        store(seed, b.source, b.specs, Date.now());
+      }
     }
     seed.close();
     const core = await startServer(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_PORT: "0", SWITCHBOARD_CLAUDE_PROJECTS: join(home, "none"), SWITCHBOARD_HISTORY_POLL_MS: "0" }), [], { port: 0, selfdevChecks: false, dryRunRestart: true, gh });
@@ -286,25 +336,101 @@ describe("flow view", () => {
 
   test("api flow", async () => {
     const calls: string[] = [];
-    // the daemon's clock is the real one: the same ages as PAGE, counted back from today (a fixed day ran out of the 60 days)
-    const late = (Date.now() - NOW) / DAY;
-    const thisWeek = `requestOpened_${new Date(weekStartOf(Date.now())).toISOString().slice(0, 10).replaceAll("-", "")}`;
-    const d = await boot(fake(calls, [pbi(10, 3 - late, 10), pbi(20, 10 - late, 90), pbi(30, 40 - late, 5), pbi(40, 50 - late, 15)], () => false, (a) => (a === thisWeek ? 1 : 0)), { app: "o/r" });
+    // the daemon's clock is the real one: the specs' ages count back from now
+    const now = Date.now();
+    const specs = [...SPECS, { ...spec(50, 1, 10), request: { n: 60, hoursBefore: 2 } }];
+    const d = await boot(fake(calls, specs, now), { app: { source: SRC("o/r"), specs } });
     try {
       const v = await d.get();
       expect(v.days).toBe(30);
       expect(v.errors).toEqual([]);
       expect(v.unread).toHaveLength(1); // the daemon's own checkout (meta), which has no imported repository
       // where the 30-day window splits them moves with the hour the test runs: only the totals are the same at any time
-      expect(v.current.closed + v.previous.closed).toBe(4);
-      expect(v.current.storyPoints + v.previous.storyPoints).toBe(12);
+      expect(v.current.closed + v.previous.closed).toBe(5);
+      expect(v.current.storyPoints + v.previous.storyPoints).toBe(15);
       expect(v.slowest.length).toBeLessThanOrEqual(5);
-      // #1878: the weeks of the 30 days (5 or 6, by the weekday), the request opened this week in the last
+      // #1878: the weeks of the 30 days (5 or 6, by the weekday), the request opened this week (or last) counted from the stored values
       expect(v.weeks.length).toBeGreaterThanOrEqual(5);
-      expect(v.weeks.map((w) => w.requestOpened).slice(-2)).toEqual([0, 1]);
+      expect(v.weeks.reduce((n, w) => n + w.requestOpened, 0)).toBe(1);
+      expect(issueSearches(calls)).toEqual([]);
+      expect(calls.some((c) => c.includes("is:pr is:merged"))).toBe(true);
     } finally {
       await d.done();
     }
+  });
+
+  test("a PBI stored only in the app is counted", async () => {
+    // #900 is in the app's stored values only: GitHub's Issue search would never answer it, and it is not asked
+    const calls: string[] = [];
+    const only = spec(900, 2, 30);
+    const s = stored({ app: { source: SRC("o/r"), specs: [...SPECS, only] } });
+    try {
+      const v = await flowView(fake(calls, [...SPECS, only], NOW), s.list, s.db, 30, NOW);
+      expect(issueSearches(calls)).toEqual([]);
+      expect(v.current.closed).toBe(3); // 2, 3 and 10 days ago
+      expect(v.slowest.map((p) => p.number)).toContain(900);
+      expect(v.slowest.find((p) => p.number === 900)!.stages.close).toBe(30 * MIN);
+      const week = v.weeks.find((w) => w.weekStart === new Date(weekStartOf(NOW - 2 * DAY)).toISOString().slice(0, 10))!;
+      expect(week.pbiClosed).toBeGreaterThanOrEqual(1);
+    } finally {
+      s.done();
+    }
+  });
+
+  test("a backlog kept in the app only, with no GitHub checkout, is read without PRs: request, split and wait are there", async () => {
+    const calls: string[] = [];
+    const local: Spec = { ...spec(5, 2, 10), request: { n: 4, hoursBefore: 1 } };
+    const s = stored({ mine: { source: { service: "switchboard", host: "local", repository: "ws_local", project: { owner: "switchboard", number: 0 } }, specs: [local] } });
+    try {
+      s.db.putBacklogSnapshot(s.db.getWorkspaceBacklogSource(s.list[0]!.id)!, { records: [{ objectKind: "comment", externalId: "C1", fetchState: "fetched", remote: { issue: 6, body: "<!-- parallel-guard:task-claim -->", createdAt: iso(NOW - 2 * DAY - 3.5 * 3600_000) } }] as never, cursor: null, syncedAt: NOW });
+      const v = await flowView(fake(calls, [], NOW), s.list, s.db, 30, NOW);
+      expect(calls).toEqual([]); // no repository to read PRs from
+      expect(v.errors).toEqual([]);
+      const [p] = v.slowest;
+      expect(p!.number).toBe(5);
+      expect(p!.stages.request).toBe(3600_000);
+      expect(p!.stages.split).toBe(3600_000);
+      expect(p!.stages.wait).toBe(30 * MIN);
+      expect(p!.stages["review-wait"]).toBeNull();
+    } finally {
+      s.done();
+    }
+  });
+
+  test("a backlog kept in the app only counts its deferred Tasks' Issues by the backlog, not by the checkout's GitHub repository", async () => {
+    const source: BacklogSource = { service: "switchboard", host: "local", repository: "ws_local", project: { owner: "switchboard", number: 0 } };
+    const s = stored({ mine: { source, specs: [] } });
+    try {
+      const [w] = s.list;
+      // its checkout's origin is a GitHub repository (whose PRs would be read)
+      Bun.spawnSync(["git", "init", "-q", w!.path]);
+      Bun.spawnSync(["git", "-C", w!.path, "remote", "add", "origin", "https://github.com/o/r.git"]);
+      const ended = NOW - 2 * DAY;
+      const { localId } = createStoredIssue(s.db, source, { title: "残した", body: "", labels: ["type:request"], milestone: null, parent: null, fields: null } as never, ended - 5);
+      s.db.sqlite.run("UPDATE backlog_records SET local = json_set(local, '$.number', 7) WHERE external_id = ?", [`local:${localId}`]);
+      s.db.sqlite.query("INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, origin, shadow_stopped, outcome, created_at, updated_at, status_at) VALUES ('t', ?, 't', 'claude', '/x', '[]', 'done', 'user', 0, 'done', 1, 1, 1)").run(w!.id);
+      s.db.appendEventAt("t", { t: "tool.call", id: "c", name: "Bash", input: { command: "ops-kit backlog create --title 残した" }, summary: "ops-kit" }, ended - 10);
+      s.db.appendEventAt("t", { t: "tool.result", id: "c", ok: true, summary: `#7 を作りました（localId ${localId}）` }, ended - 1);
+      s.db.appendEventAt("t", { t: "session.end", status: "ok", summary: "完了。別 Issue に残した: #7" }, ended);
+      const v = await flowView(fake([], [], NOW), s.list, s.db, 30, NOW);
+      expect(v.weeks.reduce((n, x) => n + x.deferredTasks, 0)).toBe(1);
+      expect(v.weeks.reduce((n, x) => n + x.deferredIssues, 0)).toBe(1);
+    } finally {
+      s.done();
+    }
+  });
+
+  test("the merged PRs are searched 7 days at a time, and 7 days over the search's 1,000-result cap stop the read", async () => {
+    const calls: string[] = [];
+    const gh = (count: number): GhRunner => async (args) => {
+      const q = args.find((a) => a.startsWith("query="))!;
+      calls.push(args.filter((a) => a.startsWith("q=")).join(" "));
+      return { code: 0, stdout: JSON.stringify({ data: q.includes("search") ? { rateLimit: { cost: 1 }, search: { issueCount: count, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } : { rateLimit: { remaining: 4000, cost: 1 } } }), stderr: "" };
+    };
+    const { spent } = await fetchMergedPrs(gh(3), ".", "o/r", "2026-10-01", 100, NOW);
+    expect(calls.filter((c) => c)).toEqual(["q=repo:o/r is:pr is:merged merged:2026-10-01..2026-10-07", "q=repo:o/r is:pr is:merged merged:2026-10-08..2026-10-14", "q=repo:o/r is:pr is:merged merged:2026-10-15..2026-10-21"]);
+    expect(spent).toBe(4);
+    await expect(fetchMergedPrs(gh(1001), ".", "o/r", "2026-10-01", 100, NOW)).rejects.toThrow("上限 1000 件");
   });
 
   test("api flow: a GitHub answer without rateLimit is the repository's error, not a 500", async () => {
@@ -313,7 +439,7 @@ describe("flow view", () => {
       calls.push(args.find((a) => a.startsWith("query="))!);
       return { code: 0, stdout: JSON.stringify({ data: { search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } }), stderr: "" };
     };
-    const d = await boot(gh, { app: "o/r" });
+    const d = await boot(gh, { app: { source: SRC("o/r"), specs: [spec(10, 3, 10)] } });
     try {
       const res = await fetch(`http://127.0.0.1:${d.port}/api/flow`);
       expect(res.status).toBe(200);
@@ -327,17 +453,23 @@ describe("flow view", () => {
   });
 
   test("periods and slowest", async () => {
-    const v = await flowView(fake([]), [{ id: "w", name: "app", path: ".", repository: "o/r" }], null, 30, NOW);
-    expect(v.current.closed).toBe(2); // 3 and 10 days ago
-    expect(v.previous.closed).toBe(2); // 40 and 50 days ago
-    expect(v.current.stages.close).toEqual({ p50: 50 * MIN, p90: 90 * MIN, count: 2 });
-    expect(v.previous.stages.close.p50).toBe(10 * MIN);
-    expect(v.slowest.map((p) => p.number)).toEqual([20, 10]); // longest first, current period only
+    const s = stored({ app: { source: SRC("o/r"), specs: SPECS } });
+    try {
+      const v = await flowView(fake([], SPECS, NOW), s.list, s.db, 30, NOW);
+      expect(v.current.closed).toBe(2); // 3 and 10 days ago
+      expect(v.previous.closed).toBe(2); // 40 and 50 days ago
+      expect(v.current.stages.close).toEqual({ p50: 50 * MIN, p90: 90 * MIN, count: 2 });
+      expect(v.previous.stages.close.p50).toBe(10 * MIN);
+      expect(v.slowest.map((p) => p.number)).toEqual([20, 10]); // longest first, current period only
+      expect(v.slowest[0]!.url).toBe("https://github.com/o/r/issues/20");
+    } finally {
+      s.done();
+    }
   });
 
   test("flow cache", async () => {
     const calls: string[] = [];
-    const d = await boot(fake(calls), { app: "o/r" });
+    const d = await boot(fake(calls, SPECS, Date.now()), { app: { source: SRC("o/r"), specs: SPECS } });
     try {
       await d.get();
       const first = calls.length;
@@ -372,49 +504,72 @@ describe("flow view", () => {
     expect(reads).toBe(4);
   });
 
-  test("the previous period starts at 60 days exactly, not at the midnight the search rounds to", async () => {
-    // 59.9 days ago is in; 60.1 days ago is what the day-rounded search also returns, and is out
-    const v = await flowView(fake([], [pbi(10, 59.9, 10), pbi(11, 60.1, 10)]), [{ id: "w", name: "app", path: ".", repository: "o/r" }], null, 30, NOW);
-    expect(v.previous.closed).toBe(1);
-    expect(v.current.closed).toBe(0);
+  test("the previous period starts at 60 days exactly", async () => {
+    // 59.9 days ago is in; 60.1 days ago is out
+    const specs = [spec(10, 59.9, 10), spec(11 + 10, 60.1, 10)];
+    const s = stored({ app: { source: SRC("o/r"), specs } });
+    try {
+      const v = await flowView(fake([], specs, NOW), s.list, s.db, 30, NOW);
+      expect(v.previous.closed).toBe(1);
+      expect(v.current.closed).toBe(0);
+    } finally {
+      s.done();
+    }
   });
 
   test("a second workspace of a repository already read is told at the next look, not after the hour", async () => {
     const calls: string[] = [];
-    const src = new Map<string, string | null>([["a", "o/a"], ["b", null]]);
-    const list = () => [...src].map(([id, repository]) => ({ id, name: id, path: ".", repository }));
-    const cache = new FlowCache((now) => flowView(fake(calls), list(), null, 30, now), () => flowScope(list()));
-    expect((await cache.get()).unread).toEqual(["b"]);
-    src.set("b", "o/a"); // its import finished: the same repository, so its Tasks now count
-    expect((await cache.get()).unread).toEqual([]);
+    const s = stored({ a: { source: SRC("o/a"), specs: SPECS }, b: null });
+    try {
+      const src = new Map(s.list.map((w) => [w.id, w.repository]));
+      const list = () => s.list.map((w) => ({ ...w, repository: src.get(w.id) ?? null }));
+      const cache = new FlowCache((now) => flowView(fake(calls, SPECS, NOW), list(), s.db, 30, now), () => flowScope(list()));
+      expect((await cache.get()).unread).toEqual(["b"]);
+      const b = s.list.find((w) => w.name === "b")!;
+      s.db.setWorkspaceBacklogSource(b.id, SRC("o/a")); // its import finished: the same repository, so its Tasks now count
+      src.set(b.id, "o/a");
+      expect((await cache.get()).unread).toEqual([]);
+    } finally {
+      s.done();
+    }
   });
 
   test("a workspace imported after the first look is read at the next, not after the hour", async () => {
     const calls: string[] = [];
-    const src = new Map<string, string | null>([["a", "o/a"], ["b", null]]);
-    const list = () => [...src].map(([id, repository]) => ({ id, name: id, path: ".", repository }));
-    const cache = new FlowCache((now) => flowView(fake(calls), list(), null, 30, now), () => flowScope(list()));
-    await cache.get();
-    const first = calls.length;
-    await cache.get();
-    expect(calls.length).toBe(first); // held
-    src.set("b", "o/b"); // its import finished
-    await cache.get();
-    expect(calls.length).toBeGreaterThan(first);
+    const s = stored({ a: { source: SRC("o/a"), specs: SPECS }, b: null });
+    try {
+      const src = new Map(s.list.map((w) => [w.id, w.repository]));
+      const list = () => s.list.map((w) => ({ ...w, repository: src.get(w.id) ?? null }));
+      const cache = new FlowCache((now) => flowView(fake(calls, SPECS, NOW), list(), s.db, 30, now), () => flowScope(list()));
+      await cache.get();
+      const first = calls.length;
+      await cache.get();
+      expect(calls.length).toBe(first); // held
+      const b = s.list.find((w) => w.name === "b")!;
+      s.db.setWorkspaceBacklogSource(b.id, SRC("o/b")); // its import finished
+      store(s.db, SRC("o/b"), SPECS, NOW);
+      src.set(b.id, "o/b");
+      await cache.get();
+      expect(calls.length).toBeGreaterThan(first);
+    } finally {
+      s.done();
+    }
   });
 
   test("flow error", async () => {
-    // a repository that cannot be read is in `errors`, the other answers; a workspace never imported has none to read
+    // a repository whose PRs cannot be read is in `errors`, the other answers; a workspace never imported has none to read
     const calls: string[] = [];
-    const v = await flowView(fake(calls, PAGE, (cwd) => cwd === "/bad"), [
-      { id: "a", name: "good", path: "/good", repository: "o/good" },
-      { id: "b", name: "bad", path: "/bad", repository: "o/bad" },
-      { id: "c", name: "fresh", path: "/fresh", repository: null },
-    ], null, 30, NOW);
-    expect(v.current.closed).toBe(2); // the good repository's
-    expect(v.errors.map((e) => e.workspace)).toEqual(["bad"]);
-    expect(v.unread).toEqual(["fresh"]); // named, not silently left out
-    expect(v.errors.find((e) => e.workspace === "bad")!.message).toContain("失敗");
+    const s = stored({ good: { source: SRC("o/good"), specs: SPECS }, bad: { source: SRC("o/bad"), specs: SPECS }, fresh: null });
+    try {
+      const list = s.list.map((w) => ({ ...w, path: `/${w.name}` }));
+      const v = await flowView(fake(calls, SPECS, NOW, (cwd) => cwd === "/bad"), list, s.db, 30, NOW);
+      expect(v.current.closed).toBe(2); // the good repository's
+      expect(v.errors.map((e) => e.workspace)).toEqual(["bad"]);
+      expect(v.unread).toEqual(["fresh"]); // named, not silently left out
+      expect(v.errors.find((e) => e.workspace === "bad")!.message).toContain("失敗");
+    } finally {
+      s.done();
+    }
   });
 });
 
@@ -457,44 +612,39 @@ describe("backlog net growth", () => {
     ]);
   });
 
-  test("fetchFlow counts each week's PBIs and requests opened and closed in one query, by UTC days from Monday to Sunday", async () => {
-    const calls: string[] = [];
-    const gh: GhRunner = async (args) => {
-      const q = args.find((a) => a.startsWith("query="))!;
-      calls.push(q);
-      const data = q.includes("issueCount") ? growthAnswer(q, (a) => (a === "pbiOpened_20261012" ? 3 : a === "requestClosed_20260928" ? 2 : 0))
-        : q.includes("search") ? { rateLimit: { cost: 1 }, search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } : { rateLimit: { remaining: 4000, cost: 1 } };
-      return { code: 0, stdout: JSON.stringify({ data }), stderr: "" };
-    };
-    const { growth, spent } = await fetchFlow(gh, ".", "o/r", 14, NOW);
-    const q = calls.find((c) => c.includes("issueCount"))!;
-    expect(q).toContain('pbiOpened_20260928: search(query: "repo:o/r is:issue label:type:pbi created:2026-09-28..2026-10-04"');
-    expect(q).toContain('requestClosed_20261012: search(query: "repo:o/r is:issue label:type:request closed:2026-10-12..2026-10-18"');
-    expect(growth.map((w) => [w.weekStart, w.pbiOpened, w.requestClosed])).toEqual([["2026-09-28", 0, 2], ["2026-10-05", 0, 0], ["2026-10-12", 3, 0]]);
-    expect(spent).toBe(3); // the budget check, the empty page, the growth
-    // a count GitHub did not answer is an error, not a 0
-    const short: GhRunner = async (args) => { const r = await gh(args, "."); const d = JSON.parse(r.stdout).data; delete d.pbiOpened_20261012; return { ...r, stdout: JSON.stringify({ data: d }) }; };
-    await expect(fetchFlow(short, ".", "o/r", 14, NOW)).rejects.toThrow(FlowError);
+  test("each week's PBIs and requests opened and closed are counted from the stored times, by UTC days from Monday to Sunday", () => {
+    const records = storedOf([
+      { number: 1, labels: ["type:pbi"], createdAt: "2026-10-12T00:00:00Z" },
+      { number: 2, labels: ["type:pbi"], createdAt: "2026-10-18T23:59:59Z" }, // Sunday: still the week of 10-12
+      { number: 3, labels: ["type:pbi"], createdAt: "2026-10-11T23:59:59Z" }, // the week before
+      { number: 4, labels: ["type:request"], state: "CLOSED", createdAt: "2026-09-01T00:00:00Z", closedAt: "2026-09-30T00:00:00Z" },
+      { number: 5, labels: ["type:request"], state: "CLOSED", createdAt: "2026-09-01T00:00:00Z", closedAt: "2026-10-01T00:00:00Z" },
+      { number: 6, labels: ["type:task"], createdAt: "2026-10-13T00:00:00Z" }, // a Task is neither
+    ]);
+    const { growth } = flowOfStored(records, [], 14, NOW);
+    expect(growth.map((w) => [w.weekStart, w.pbiOpened, w.requestClosed])).toEqual([["2026-09-28", 0, 2], ["2026-10-05", 1, 0], ["2026-10-12", 2, 0]]);
   });
 
   test("flowView counts the deferred Tasks of the repository's workspaces from the database", async () => {
-    const db = new Db(join(mkdtempSync(join(tmpdir(), "switchboard.flow.")), "s.db"));
+    const dir = mkdtempSync(join(tmpdir(), "switchboard.flow."));
+    const db = new Db(join(dir, "s.db"));
+    const w = db.upsertWorkspace({ name: "app", path: ".", kind: "repo" });
+    const src: BacklogSource = { service: "github", host: "github.com", repository: "o/r", project: { owner: "o", number: 1 } };
+    db.setWorkspaceBacklogSource(w.id, src);
+    db.putBacklogSnapshot(src, { records: [], cursor: null, syncedAt: NOW });
     const task = (id: string, workspace: string, summary: string, endedAt: number) => {
       db.sqlite.query("INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, origin, shadow_stopped, outcome, created_at, updated_at, status_at) VALUES (?, ?, 't', 'claude', '/x', '[]', 'done', 'user', 0, 'done', 1, 1, 1)").run(id, workspace);
       db.appendEventAt(id, { t: "tool.call", id: "c", name: "Bash", input: { command: "gh issue create --title x" }, summary: "gh" }, endedAt - 2);
       db.appendEventAt(id, { t: "tool.result", id: "c", ok: true, summary: "https://github.com/o/r/issues/9" }, endedAt - 1);
       db.appendEventAt(id, { t: "session.end", status: "ok", summary }, endedAt);
     };
-    task("a", "w", "完了。別 Issue に残した: #9", NOW - 2 * DAY);
-    task("b", "w", "全部できた", NOW - 2 * DAY);
+    task("a", w.id, "完了。別 Issue に残した: #9", NOW - 2 * DAY);
+    task("b", w.id, "全部できた", NOW - 2 * DAY);
     task("c", "other", "後回し", NOW - 2 * DAY); // another repository's workspace
-    const gh: GhRunner = async (args) => {
-      const q = args.find((a) => a.startsWith("query="))!;
-      const data = q.includes("issueCount") ? growthAnswer(q) : q.includes("search") ? { rateLimit: { cost: 1 }, search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } : { rateLimit: { remaining: 4000, cost: 1 } };
-      return { code: 0, stdout: JSON.stringify({ data }), stderr: "" };
-    };
-    const v = await flowView(gh, [{ id: "w", name: "app", path: ".", repository: "o/r" }], db.sqlite, 14, NOW);
-    expect(v.weeks.map((w) => [w.weekStart, w.deferredTasks, w.deferredIssues])).toEqual([["2026-09-28", 0, 0], ["2026-10-05", 0, 0], ["2026-10-12", 1, 1]]);
+    const gh: GhRunner = async () => ({ code: 1, stdout: "", stderr: "no PBI closed: nothing is read" });
+    const v = await flowView(gh, [{ id: w.id, name: "app", path: ".", repository: "o/r" }], db, 14, NOW);
+    expect(v.weeks.map((x) => [x.weekStart, x.deferredTasks, x.deferredIssues])).toEqual([["2026-09-28", 0, 0], ["2026-10-05", 0, 0], ["2026-10-12", 1, 1]]);
     db.close();
+    rmSync(dir, { recursive: true, force: true });
   });
 });

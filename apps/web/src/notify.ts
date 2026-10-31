@@ -12,6 +12,7 @@ export type Notice = { key: string; taskId: string; title: string; body: string 
  * The notice a /ws message calls for, or null. A permission.ask notifies once per (task, ask id); its
  * permission.resolved marks the ask seen, so a late redelivery stays quiet. A task.updated notifies when the outcome
  * turns needs_action on a task not reviewed yet and not waiting (a waiting task's ask already notified).
+ * A task.updated into a disk wait (#2234) notifies once per wait; leaving it re-arms.
  * A task.terminal waiting (Claude Code in the terminal tab, #1574) notifies once per wait; a task.deviceAuth with a code
  * (#2046) once per code. task.terminals (what is, sent
  * after hello; noticesFor) notifies only a wait that came while away from a status this page knew: not after a reload,
@@ -31,6 +32,12 @@ export function noticeFor(m: ServerMessage, tasks: Task[], seen: Set<string>): N
   if (m.type === "task.updated") {
     const t = m.task;
     const prev = tasks.find((x) => x.id === t.id);
+    const diskKey = `${t.id}\u0000disk`;
+    if (t.resumeReason !== "disk") seen.delete(diskKey);
+    else if (!seen.has(diskKey)) {
+      seen.add(diskKey);
+      if (prev?.resumeReason !== "disk") return { key: diskKey, taskId: t.id, title: t.title, body: "ディスクの空き切れで停止しました" };
+    }
     // One notice per turn into needs_action: leaving it re-arms (a hand-set outcome keeps updatedAt, so no timestamp)
     const key = `${t.id}\u0000needs_action`;
     if (t.outcome !== "needs_action") seen.delete(key);

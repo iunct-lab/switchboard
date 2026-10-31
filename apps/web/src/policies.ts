@@ -1,4 +1,5 @@
 import type { AnswerPolicy } from "@switchboard/protocol";
+import { broadLines } from "./asks.ts";
 import { jstDay, jstStamp } from "./time.ts";
 
 /* The settings screen's list of saved answer policies (#938). */
@@ -34,3 +35,6 @@ export function useLines(p: AnswerPolicy, taskTitle: (id: string) => string | un
     .sort((a, b) => b.at - a.at)
     .map((u) => `${stamp(u.at)} ${u.issue !== null ? `Issue #${u.issue}` : u.taskId ? `Task ${taskTitle(u.taskId) ?? u.taskId}` : "不明"} ${u.subject.op} ${u.subject.target}`);
 }
+
+/** Warnings shown above the edit's save button: the same broad-target line as the card's confirmation. */
+export const editWarnings = (p: Pick<AnswerPolicy, "op">, target: string): string[] => broadLines(p.op, target);

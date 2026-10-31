@@ -715,3 +715,33 @@ describe("backlog without BACKLOG_URL (#3071)", () => {
     }
   });
 });
+
+describe("in the app's Task (BACKLOG_URL), reconcile-project / bootstrap / sync-labels stop", () => {
+  const inTask = (argv: string[], responses: Parameters<typeof fakeGh>[0] = [], backlogUrl: string | null = "http://127.0.0.1:1/api/backlog") => {
+    const err: string[] = [];
+    const gh = fakeGh(responses);
+    return main(argv, gh, () => {}, (s) => err.push(s), async () => {}, { ...process.env, BACKLOG_URL: backlogUrl ?? undefined }).then((code) => ({ code, err: err.join("\n"), gh }));
+  };
+
+  test("each, with and without --dry-run, exits 1 with the reason and the way around, and calls no gh", async () => {
+    const ways: Record<string, string[]> = {
+      "reconcile-project": ["アプリの送信（addProjectV2ItemById）", "取り込み済みの要望・PBI・Task なら 1 件ずつ ops-kit backlog triage", "type ラベルの無い Issue（取り込まれない）", "Task の外で reconcile-project を回してください"],
+      bootstrap: ["Task の外で実行してください", "new-repo スキルの手順"],
+      "sync-labels": ["env -u BACKLOG_URL ops-kit sync-labels"],
+    };
+    for (const argv of [["reconcile-project"], ["reconcile-project", "--dry-run"], ["bootstrap", "Backlog"], ["bootstrap", "Backlog", "--dry-run"], ["sync-labels"], ["sync-labels", "--dry-run"]]) {
+      const r = await inTask(["--config", config, ...argv]);
+      expect(r.code).toBe(1);
+      expect(r.err).toContain(`${argv[0]}: アプリの Task の中（BACKLOG_URL あり）では GitHub に直接書きません`);
+      for (const way of ways[argv[0]!]!) expect(r.err).toContain(way);
+      expect(r.err).not.toContain("取込み");
+      expect(r.gh.calls).toHaveLength(0);
+    }
+  });
+
+  test("without BACKLOG_URL, they still call gh", async () => {
+    const r = await inTask(["sync-labels", join(import.meta.dir, "../../.github/labels.yml"), "--dry-run"], [() => []], null);
+    expect(r.code).toBe(0);
+    expect(r.gh.calls.length).toBeGreaterThan(0);
+  });
+});

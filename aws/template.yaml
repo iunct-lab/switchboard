@@ -224,6 +224,21 @@ Resources:
               - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*'
               - 'arn:aws:bedrock:*::foundation-model/*'
               - 'arn:aws:bedrock:::foundation-model/*'
+          # Codex reaches the OpenAI models on Bedrock through Bedrock Mantle, not InvokeModel (#1731). This one action, no key.
+          - Sid: BedrockMantle
+            Effect: Allow
+            Action: bedrock-mantle:CreateInference
+            Resource: !Sub 'arn:aws:bedrock-mantle:${AWS::Region}:${AWS::AccountId}:project/*'
+          # the weekly cost report (#2278): reads only. Cost Explorer has no resource-level permissions;
+          # the numbers are the whole account's, and the same OS user's Tasks can read them. Nothing here changes a budget
+          - Sid: CostRead
+            Effect: Allow
+            Action: [ce:GetCostAndUsage, ce:GetCostForecast]
+            Resource: '*'
+          - Sid: BudgetRead
+            Effect: Allow
+            Action: budgets:ViewBudget
+            Resource: !Sub 'arn:aws:budgets::${AWS::AccountId}:budget/*'
           - Sid: OwnRoles
             Effect: Allow
             Action: iam:PassRole
@@ -338,6 +353,19 @@ Resources:
                   - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*'
                   - 'arn:aws:bedrock:*::foundation-model/*'
                   - 'arn:aws:bedrock:::foundation-model/*'
+              # Codex's OpenAI models go through Bedrock Mantle (#1731). This one action, no key.
+              - Effect: Allow
+                Action: bedrock-mantle:CreateInference
+                Resource: !Sub 'arn:aws:bedrock-mantle:${AWS::Region}:${AWS::AccountId}:project/*'
+              # the weekly cost report (#2278): read the account's cost, forecast and budgets.
+              # Reads only: no budget is created, changed or deleted, and no Cost Explorer setting. Cost Explorer has no
+              # resource-level permissions; each call costs USD 0.01
+              - Effect: Allow
+                Action: [ce:GetCostAndUsage, ce:GetCostForecast]
+                Resource: '*'
+              - Effect: Allow
+                Action: budgets:ViewBudget
+                Resource: !Sub 'arn:aws:budgets::${AWS::AccountId}:budget/*'
               # Agents run as the same OS user and can reach these credentials (#181 判断待ち 2, option B): a delete may
               # add a marker but never removes a version, and the bucket's own safety settings stay as they are.
               - Effect: Deny

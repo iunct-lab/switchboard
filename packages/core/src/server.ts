@@ -169,7 +169,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     if (d.available) adapterMap.set(a.id, a);
   }
   // Login (#180): the runner's own status command runs again when /api/health is read and its last answer is over a
-  // minute old (only the login is taken from it; which runners are available stays as detected at boot). A turn that
+  // minute old (the login and the note are taken from it; which runners are available stays as detected at boot). A turn that
   // ended on an auth error marks the runner expired until a later check or a turn that went through says otherwise.
   let loginCheckedAt = Date.now();
   let loginCheck: Promise<void> | null = null;
@@ -185,7 +185,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         .map(async (d) => {
           const r = await d.adapter.detect().catch(() => null);
           if (!r?.available || r.login === undefined) return;
-          d.info = { ...d.info, login: r.login, loginKind: r.loginKind, loginHint: r.loginHint };
+          d.info = { ...d.info, login: r.login, loginKind: r.loginKind, loginHint: r.loginHint, note: r.note };
           if (r.login === "ok") loginExpired.delete(d.adapter.id);
         }),
     ).then(() => {
@@ -244,7 +244,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   const savedDefaultMode = (runner: RunnerId) => settings().defaultPermissionMode[runner];
   const savedAutoResume = (runner: RunnerId) => settings().autoResume[runner] === true;
   const savedModels = (runner: RunnerId) => settings().models[runner];
-  // Runner list for /api/health: detection is from boot, the effective default mode and auto-resume follow the saved
+  // Runner list for /api/health: detection is from boot (the login and the note from the last recheck), the effective default mode and auto-resume follow the saved
   // settings, and the models / the CLI's default model (#155) are read each time — the default is the user's own CLI
   // setting and changes there.
   // Amazon Bedrock (#1730) only when the user chose it for the runner and the adapter has Bedrock models. Nothing
@@ -546,9 +546,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   const clones = new WorkspaceClones(db, opts.gh ?? runGh, cfg.repoRoot, () => broadcast({ type: "workspaces.updated" }));
   // GitHub's GraphQL budget (#549): read at most once a minute, for backlog-next, the stage buttons and the ledger
   const githubBudget = new GithubBudgetCache(opts.gh ?? runGh, undefined, undefined, undefined, () => backlog.hostWait());
-  // the flow of the closed PBIs (#651): GitHub is read for it, so an hour is held; the repository is the import's, as for the backlog
+  // the flow of the closed PBIs (#651): the stored backlog, and GitHub for the merged PRs, so an hour is held; the repository is the import's, as for the backlog
   const flowWorkspaces = (): FlowWorkspace[] => db.listWorkspaces().map((w) => ({ id: w.id, name: w.name, path: w.path, repository: db.getWorkspaceBacklogSource(w.id)?.repository ?? null }));
-  const flow = new FlowCache((now) => flowView(opts.gh ?? runGh, flowWorkspaces(), db.sqlite, 30, now), () => flowScope(flowWorkspaces()));
+  const flow = new FlowCache((now) => flowView(opts.gh ?? runGh, flowWorkspaces(), db, 30, now), () => flowScope(flowWorkspaces()));
   // a request that was out when the daemon stopped is looked for before it is sent again (#886)
   db.recoverBacklogOperations();
   /**
@@ -1178,7 +1178,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     }
     if (step.failed) {
       const subject = await git(["log", "-1", "--format=%s", step.failed.sha]).catch(() => "");
-      const pbi = await reportPromoteFailure(opts.gh ?? runGh, meta.path, { ...step.failed, subject, rescueUrl: cfg.rescuePageUrl! }).catch(() => null);
+      const source = db.getWorkspaceBacklogSource(meta.id);
+      const pbi = source ? await reportPromoteFailure(db, source, opts.gh ?? runGh, meta.path, { ...step.failed, subject, rescueUrl: cfg.rescuePageUrl! }).catch(() => null) : null;
+      if (pbi) backlog.send(meta);
       return `${step.reason}${pbi ? `（判断待ち: #${pbi}）` : ""}`;
     }
     return step.reason;

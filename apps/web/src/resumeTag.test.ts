@@ -54,3 +54,20 @@ test("probe: a wait with a planned time shows when it tries and the fallback (#2
   // no try planned: as before
   expect(renderToStaticMarkup(createElement(Brief, { task: { ...limited, resumePlannedAt: null }, ledger: null, onAbort: noop, open: true, onClose: noop, runners: [{ id: "claude", autoResume: true, models: [] }] as never }))).toContain("に同じセッションで自動再開します");
 });
+
+test("ResumeTag: a disk wait says so, with the threshold in its title (the Rail's compact form too); the Brief names it", () => {
+  const disk = renderToStaticMarkup(createElement(ResumeTag, { resumeAt: at, reason: "disk" }));
+  expect(disk).toContain(`空き待ち（${fmtClock(at)} に確認）`);
+  expect(disk).toContain("ディスクの空き切れで停止。空きが 1 GiB に戻るまで待ちます");
+  expect(disk).toContain("自動再開はランナーごとの設定");
+  expect(renderToStaticMarkup(createElement(ResumeTag, { resumeAt: at, reason: "disk", compact: true }))).toContain(">空き待ち<");
+  const brief = (over: object, autoResume?: boolean) => renderToStaticMarkup(createElement(Brief, { task: { ...task, resumeReason: "disk", ...over }, ledger: null, onAbort: noop, open: true, onClose: noop, ...(autoResume === undefined ? {} : { runners: [{ id: "claude", autoResume, models: [] }] as never }) }));
+  const on = brief({}, true);
+  expect(on).toContain("ディスクの空き切れで止まりました。");
+  expect(on).toContain("空きが 1 GiB に戻ったら同じセッションで自動再開します");
+  expect(on).toContain("空きが戻っていなければまた止まり");
+  expect(on).not.toContain("使用上限");
+  expect(brief({}, false)).toContain("自動再開は OFF");
+  expect(brief({})).toContain("自動再開の設定はデーモンに接続すると表示されます");
+  expect(brief({ runnerSessionId: null }, true)).toContain("再開できるセッションがありません");
+});

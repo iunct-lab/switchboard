@@ -3,7 +3,7 @@ import type { InterventionReason, InterventionWindow } from "@switchboard/protoc
 import { interventionRows, populationLine, reasonRows, unknownLine } from "./interventions.ts";
 
 const window = (over: Partial<InterventionWindow> = {}): InterventionWindow => ({
-  days: 7, from: 0, to: 1, total: 10, byKind: { approval: 2, decision: 5, resume: 3 }, unknown: 0, reAsks: 4,
+  days: 7, from: 0, to: 1, total: 10, byKind: { approval: 2, decision: 5, resume: 3, classifier: 1 }, unknown: 0, reAsks: 4,
   resumesAfterWaits: { count: 1, unknown: 0 }, open: { pbis: 2, interventions: 6 }, done: { pbis: 3, interventions: 4 },
   completed: { pbis: 3, perPbi: 2.5, unknownPbis: 0 }, reasons: [], ...over,
 });
@@ -11,14 +11,15 @@ const byKey = (rows: ReturnType<typeof interventionRows>) => Object.fromEntries(
 
 describe("interventions screen", () => {
   test("rows and unknown", () => {
-    const rows = byKey(interventionRows(window(), window({ total: 7, byKind: { approval: 3, decision: 2, resume: 2 }, reAsks: 4, completed: { pbis: 2, perPbi: 3, unknownPbis: 1 } })));
+    const rows = byKey(interventionRows(window(), window({ total: 7, byKind: { approval: 3, decision: 2, resume: 2, classifier: 0 }, reAsks: 4, completed: { pbis: 2, perPbi: 3, unknownPbis: 1 } })));
     expect(rows.approval).toMatchObject({ now: "2", before: "3", change: "-1" });
+    expect(rows.classifier).toMatchObject({ label: "分類器の後", now: "1", before: "0", change: "+1" });
     expect(rows.decision).toMatchObject({ change: "+3" });
     expect(rows.total).toMatchObject({ now: "10", before: "7", change: "+3" });
     expect(rows.reAsks.change).toBe("±0");
     expect(rows.perPbi).toMatchObject({ now: "2.5", before: "3", change: "-0.5" });
     // places that could not be counted: the counts are "at least" and no difference is told
-    const partial = byKey(interventionRows(window({ unknown: 1 }), window({ unknown: 1, total: 5, byKind: { approval: 0, decision: 0, resume: 0 } })));
+    const partial = byKey(interventionRows(window({ unknown: 1 }), window({ unknown: 1, total: 5, byKind: { approval: 0, decision: 0, resume: 0, classifier: 0 } })));
     expect(partial.total).toMatchObject({ now: "10 以上", before: "5 以上", change: "—" });
     expect(partial.approval).toMatchObject({ now: "2 以上", before: "0 以上", change: "—" }); // 0 is not shown as 0
     expect(partial.perPbi.change).toBe("—");

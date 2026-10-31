@@ -203,12 +203,34 @@ export function scopeLabel(scope: PolicyScope, ask: Pick<Ask, "pbi" | "workspace
   return `このリポジトリ（${ask.workspace?.name ?? "不明"}）`;
 }
 
-/** What the person confirms before a policy is saved: operation, target, conditions, expiry and what is answered. */
+/** `{a,b}` alternatives spelled out (`npm{,x}` → npm, npmx). */
+function expandBraces(word: string): string[] {
+  const m = /\{([^{}]*)\}/.exec(word);
+  if (!m) return [word];
+  return m[1]!.split(",").flatMap((alt) => expandBraces(word.slice(0, m.index) + alt + word.slice(m.index + m[0].length)));
+}
+
+/** An exec target that fixes only the program and wildcards the rest (`bun *`, `cmd:git *`): the program names, else null. */
+export function broadTarget(op: string, target: string): string[] | null {
+  if (op !== "exec") return null;
+  const [program, ...rest] = target.trim().replace(/^cmd:/, "").split(/\s+/);
+  if (!program || /[*?[]/.test(program) || rest.length === 0 || !rest.every((w) => /^[*?]+$/.test(w))) return null;
+  return expandBraces(program);
+}
+
+/** The warning line for a broad target, or none. */
+export const broadLines = (op: string, target: string): string[] => {
+  const names = broadTarget(op, target);
+  return names ? [`広い指定: ${names.join(" / ")} のどのサブコマンドにも当たります`] : [];
+};
+
+/** What the person confirms before a policy is saved: operation, target (and a broad target's warning), conditions, expiry and what is answered. */
 export function policySummary(ask: Pick<Ask, "subject">, input: PolicyInput, answerText = "許可", now = Date.now()): string[] {
   const left = input.expiresAt === null ? null : Math.max(0, Math.ceil((input.expiresAt - now) / DAY_MS));
   return [
     `操作: ${ask.subject?.op ?? "不明"}`,
     `対象: ${input.target}`,
+    ...broadLines(ask.subject?.op ?? "", input.target),
     `条件: ${input.when.length ? input.when.map((w) => `${w.key}=${w.value}`).join(" ") : "なし"}`,
     `期限: ${input.expiresAt === null ? "なし" : `${dayOf(input.expiresAt)}（あと ${left} 日）`}`,
     `回答: ${answerText}`,
