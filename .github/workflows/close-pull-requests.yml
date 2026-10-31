@@ -14,7 +14,8 @@ permissions:
 jobs:
   close:
     if: >-
-      ${{ !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)
+      ${{ vars.PUBLIC_ACTIONS == 'on'
+          && !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)
           && github.event.pull_request.user.login != 'dependabot[bot]'
           && !(github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.head.ref, 'sync/')) }}
     runs-on: ubuntu-latest

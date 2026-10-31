@@ -91,6 +91,12 @@ const AFTER_ISSUE_Q = `query($o:String!,$r:String!,$n:Int!,$s:DateTime!){ viewer
 const AFTER_BODY_Q = AFTER_ISSUE_Q.replace(`${HISTORY_F} }`, `${HISTORY_F} ${EDITS_F} }`);
 const AFTER_ITEM_Q = `query($o:String!,$r:String!,$n:Int!,$s:DateTime!,$i:ID!,$f:String!){ viewer{ login } node(id:$i){ ... on ProjectV2Item{ fieldValueByName(name:$f){ ... on ProjectV2ItemFieldSingleSelectValue{ name } ... on ProjectV2ItemFieldNumberValue{ number } ... on ProjectV2ItemFieldTextValue{ text } ... on ProjectV2ItemFieldDateValue{ date } } } } repository(owner:$o,name:$r){ issue(number:$n){ ${HISTORY_F} } } }`;
 
+/** The Status events of an Issue, and when it closed: read only when a Status moved off an edit's base (a conflict's question). */
+const STATUS_EVENTS_Q = "query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number:$n){ state closedAt timelineItems(last:20, itemTypes:[PROJECT_V2_ITEM_STATUS_CHANGED_EVENT]){ nodes{ ... on ProjectV2ItemStatusChangedEvent{ actor{ login } createdAt status project{ id } } } } } } }";
+
+/** The login GitHub's Project workflows act under: they move a Status on their own (item added, PR linked, item closed). */
+const projectAutomation = (login: string | null | undefined) => /^github-project-automation(\[bot\])?$/.test(login ?? "");
+
 type HistoryEvent = { __typename: string; actor: { login: string } | null; createdAt: string; currentTitle?: string; label?: { name: string }; milestoneTitle?: string; parent?: { number: number } | null; status?: string; project?: { id: string } };
 type ContentEdit = { editedAt: string; editor: { login: string } | null; diff: string | null; deletedAt: string | null };
 export interface AfterAnswer { events: HistoryEvent[]; edits: ContentEdit[]; viewer: string }
@@ -98,14 +104,15 @@ export interface AfterAnswer { events: HistoryEvent[]; edits: ContentEdit[]; vie
 /**
  * Another login's edit of the field since the check read, as the history tells it (#1329): the latest one, as the
  * value the field would read (a body's `diff` is the version's text; one deleted from the history has no value). Null
- * when there is none, or it made the field the value sent (nothing was lost).
+ * when there is none, or it made the field the value sent (nothing was lost). GitHub's Project automation moving a
+ * Status is nobody's edit: Switchboard's value stands over it.
  */
 export function theirEdit(field: string, after: AfterAnswer, since: string, project: string, sent: unknown): BacklogOverwritten | null {
   const theirs = (login: { login: string } | null | undefined, at: string) => at >= since && (login?.login ?? "") !== after.viewer;
   const label = field.startsWith("label:") ? field.slice("label:".length).toLowerCase() : null;
   const found: Array<BacklogOverwritten & { at: string }> = [];
   for (const e of after.events) {
-    if (!theirs(e.actor, e.createdAt)) continue;
+    if (!theirs(e.actor, e.createdAt) || (field === "field:Status" && projectAutomation(e.actor?.login))) continue;
     const hit = (value: unknown) => found.push({ value, editor: e.actor?.login ?? null, at: e.createdAt });
     if (field === "title" && e.__typename === "RenamedTitleEvent") hit(e.currentTitle);
     else if (field === "state" && e.__typename === "ClosedEvent") hit("CLOSED");
@@ -131,6 +138,7 @@ export function theirEdit(field: string, after: AfterAnswer, since: string, proj
 }
 
 const SETTLED = "後の編集の値に GitHub が既になっています";
+const CLOSED_BY_GITHUB = "Issue が GitHub で閉じ、Project の自動化が Status を動かしたので送りません";
 
 /** What one run sends with: the repository, the Issue numbers of the records, the Project (read once). */
 class Sender {
@@ -287,6 +295,20 @@ class Sender {
     return last !== undefined && sameBacklogValue(op.field!, now, last);
   }
 
+  /**
+   * Whether GitHub's Project automation made the Status what it is now, and did so on the Issue's closing (null =
+   * someone else did, or the history does not tell). The workflows follow GitHub's events (item added → Backlog, a PR linked →
+   * In progress, closed → Done) and no one chose those values, so an edit made here is not in conflict with them.
+   */
+  private async automated(n: number, now: unknown): Promise<{ onClose: boolean } | null> {
+    const d = await graphql(this.gh, this.cwd, STATUS_EVENTS_Q, { o: this.o, r: this.r, n });
+    const i = d.repository?.issue;
+    const project = (await this.projectOf()).id;
+    const last = (i?.timelineItems?.nodes as HistoryEvent[] | undefined)?.filter((e) => e.project?.id === project).at(-1);
+    if (!last || !projectAutomation(last.actor?.login) || !sameBacklogValue("field:Status", last.status || null, now)) return null;
+    return { onClose: i.state === "CLOSED" && !!i.closedAt && last.createdAt >= i.closedAt };
+  }
+
   /** A `set`: checked against its base, then that field only. Asks GitHub again after an unknown answer, as it does first. */
   private async set(op: BacklogOperation): Promise<Outcome> {
     const n = this.numberOf(op.issue);
@@ -295,7 +317,13 @@ class Sender {
     if (same(now, op.payload)) return op.targetKind === "project-item" && op.field === "member" && op.payload ? this.write(op, n) : { status: "done" };
     // GitHub already at the last value of the field still to send (#2924): nothing to write, whatever this one's base
     if (this.settled(op, now)) return { status: "done", error: SETTLED };
-    if (!same(now, op.base)) return { status: "conflict", error: `GitHub の値が編集の元から変わっています（${op.field}: GitHub は ${JSON.stringify(now)}）` };
+    if (!same(now, op.base)) {
+      const moved = op.field === "field:Status" ? await this.automated(n, now) : null;
+      if (!moved) return { status: "conflict", error: `GitHub の値が編集の元から変わっています（${op.field}: GitHub は ${JSON.stringify(now)}）` };
+      // the closing's own move (a merged PR → Done): an edit that was waiting no longer applies. Any other move, a
+      // closed Issue's too (a Project without the close workflow): the value made here goes over the automation's
+      if (moved.onClose) return { status: "done", error: CLOSED_BY_GITHUB };
+    }
     const out = await this.write(op, n);
     if (op.field === "member") return out;
     // read again right after (方式 A): another value there now was written by someone between the read and the write

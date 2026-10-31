@@ -149,3 +149,19 @@ test("device auth notice: a device code notifies once per code, with no URL or c
   // a new code (another expiry) is a new wait
   expect(noticeFor(da({ ...auth, expiresAt: 900_000 }), tasks, seen)?.key).toBe("t1\u0000deviceAuth\u0000900000");
 });
+
+test("a task entering a disk wait notifies once; the same wait stays quiet; a new wait after leaving it notifies again", () => {
+  const seen = new Set<string>();
+  const before = task("t1", "running", "unknown");
+  const waiting = { ...before, status: "done" as const, resumeAt: 5, resumeReason: "disk" as const };
+  expect(noticeFor(updated(waiting), [before], seen)).toEqual({ key: "t1\u0000disk", taskId: "t1", title: "title of t1", body: "ディスクの空き切れで停止しました" });
+  expect(noticeFor(updated({ ...waiting, resumeAt: 6 }), [waiting], seen)).toBeNull(); // the next check moves resumeAt
+  expect(noticeFor(updated(before), [waiting], seen)).toBeNull();
+  expect(noticeFor(updated(waiting), [before], seen)?.body).toBe("ディスクの空き切れで停止しました");
+});
+
+test("a disk wait that was there before this page opened does not notify", () => {
+  const seen = new Set<string>();
+  const waiting = { ...task("t1", "done", "unknown"), resumeAt: 5, resumeReason: "disk" as const };
+  expect(noticeFor(updated({ ...waiting, resumeAt: 6 }), [waiting], seen)).toBeNull();
+});

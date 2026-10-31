@@ -1,5 +1,6 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, rmSync, utimesSync } from "node:fs";
 import { basename, delimiter, dirname, join } from "node:path";
+import { diskFullHit, diskFullText } from "./diskfull.ts";
 import { githubLimitHit } from "./ratelimit.ts";
 import type { AgentEvent, ApprovalRuleMatch, McpServerConfig, StopRecord, Attachment, CreateTaskInput, PendingApproval, PermissionDecision, PricingTable, RoutingSuggestion, RunnerAdapter, RunnerId, RunnerSession, ServerMessage, SetOutcomeInput, Task } from "@switchboard/protocol";
 import { CloudSessionRef } from "@switchboard/protocol";
@@ -48,6 +49,8 @@ interface LiveSession {
   turnCalls: Map<string, { name: string; key: string }>;
   /** The GitHub limit lines the turn's commands met, per command key; a later success of the same command takes it out (#550). */
   turnGithub: Map<string, string>;
+  /** The disk-full words a failed command of the turn met (#2234); the resumer looks at the disk itself before it waits. */
+  turnDisk?: string;
   /** The last quota report of the turn in flight — the runner's own view of the window that stopped it (#102). */
   turnQuota?: Extract<AgentEvent, { t: "quota" }>;
   /** `switchboard-stop` reports in the runner's reply as it streams (#948). */
@@ -61,6 +64,8 @@ export interface TurnEnd {
   quota?: Extract<AgentEvent, { t: "quota" }>;
   /** The last GitHub limit line a command of the turn met and never got past (#550). */
   githubLimit?: string;
+  /** The disk-full words a command or an error of the turn carried (#2234). */
+  diskFull?: string;
 }
 
 /** `send(…, { asResume: true })` found the task moved on meanwhile (a reply, 中断, a cancel): nothing was sent. */
@@ -516,12 +521,18 @@ export class TaskManager {
     return t;
   }
 
+  /** Moves a wait's next look without counting as a change of the task: `updatedAt` stays, a `## 回答` during the wait stays newer. */
+  deferResume(taskId: string, resumeAt: number): void {
+    const t = this.db.updateTask(taskId, { resumeAt, updatedAt: this.mustGet(taskId).updatedAt });
+    if (t) this.broadcast({ type: "task.updated", task: t });
+  }
+
   /**
-   * Plan (or forget) a resume after a usage-limit stop (#102) or a GitHub limit (#550, `reason`). Any turn that starts
+   * Plan (or forget) a resume after a usage-limit stop (#102) a GitHub limit (#550) or a full disk (#2234, `reason`). Any turn that starts
    * clears it. `wait` (#2237): the quota window that stopped the turn and when, for resuming early; and, when `resumeAt`
    * is a try before a long wait, the time the wait goes back to (`plannedAt`). Absent = none.
    */
-  setResumeAt(taskId: string, resumeAt: number | null, reason: "limit" | "github" = "limit", wait: { window?: string | null; since?: number | null; plannedAt?: number | null } = {}): Task {
+  setResumeAt(taskId: string, resumeAt: number | null, reason: NonNullable<Task["resumeReason"]> = "limit", wait: { window?: string | null; since?: number | null; plannedAt?: number | null } = {}): Task {
     if (resumeAt !== null) this.requireLocal(this.mustGet(taskId));
     const on = resumeAt !== null;
     const t = this.db.updateTask(taskId, { resumeAt, resumeReason: on ? reason : null, resumeWindow: on ? (wait.window ?? null) : null, resumeSince: on ? (wait.since ?? null) : null, resumePlannedAt: on ? (wait.plannedAt ?? null) : null });
@@ -1272,6 +1283,7 @@ export class TaskManager {
           const hit = githubLimitHit(call.name, ev.summary ?? "");
           if (hit) live.turnGithub.set(call.key, hit);
           else if (ev.ok) live.turnGithub.delete(call.key);
+          if (!ev.ok) live.turnDisk = diskFullHit(call.name, ev.summary ?? "") ?? live.turnDisk;
         }
         break;
       }
@@ -1289,9 +1301,10 @@ export class TaskManager {
         // A turn ended only if one was in flight; the session.end that closing an idle process emits is not a turn.
         if (task.status === "running" || task.status === "waiting") {
           const after = this.db.getTask(taskId);
-          const turn: TurnEnd = { end: ev, errors: live.turnErrors, quota: live.turnQuota, githubLimit: [...live.turnGithub.values()].at(-1) };
+          const turn: TurnEnd = { end: ev, errors: live.turnErrors, quota: live.turnQuota, githubLimit: [...live.turnGithub.values()].at(-1), diskFull: live.turnDisk ?? [ev.status === "error" ? ev.summary : undefined, ...live.turnErrors].map(diskFullText).find(Boolean) };
           live.turnCalls.clear();
           live.turnGithub.clear();
+          live.turnDisk = undefined;
           live.turnErrors = [];
           live.turnQuota = undefined;
           if (after) for (const l of this.turnEndListeners) l(taskId, after, turn);

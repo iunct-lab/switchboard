@@ -41,6 +41,28 @@ beforeEach(async () => {
 });
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 
+test("sweepCacheWork: a check's old working directories go; a new one, an unlike name and another application's stay", async () => {
+  for (const name of ["switchboard.e2e.x0QgO6", "switchboard.e2e-12.Ab12Cd", "switchboard.duration.Ab12Cd", "switchboard.duration-1887.OsTTGB", "switchboard.tag-ci.Ab12Cd", "switchboard.tag-ci-v1.73.0.5aVZBi", "switchboard.tag-ci-iunct-lab_switchboard-dev-log.NBOx7r", "capsule-host.e2e.a1b2c3"]) dir(name);
+  dir("switchboard.e2e.Fresh1", { fresh: true });
+  dir("switchboard.e2e.toolong1");
+  dir("switchboard.e2e.Busy01");
+  dir("switchboard.other.Ab12Cd");
+  dir("switchboard.pbi2587-ci.1XMbla"); // made by hand, nothing says what it is
+  dir("myapp.e2e.report"); // not mktemp's suffix
+  dir("myapp.e2e-results.Run123"); // e2e and duration take a number only
+  dir("e2e.Ab12Cd");
+  dir("gh");
+  const child = Bun.spawn(["sleep", "30"], { cwd: join(cache, "switchboard.e2e.Busy01") });
+  try {
+    const r = await sweepCacheWork(cache, { owned: false });
+    expect(readdirSync(cache).sort()).toEqual(["e2e.Ab12Cd", "gh", "myapp.e2e-results.Run123", "myapp.e2e.report", "switchboard.e2e.Busy01", "switchboard.e2e.Fresh1", "switchboard.e2e.toolong1", "switchboard.other.Ab12Cd", "switchboard.pbi2587-ci.1XMbla"]);
+    expect(r.removed).toBe(8);
+  } finally {
+    child.kill();
+    await child.exited;
+  }
+});
+
 test("sweepCacheWork: old local-CI worktrees, base worktrees and any PR's old logs go, and the repository forgets the worktrees; new, in-use and other names stay (#2549)", async () => {
   for (const name of ["switchboard.local-ci-2518.Ab12Cd", "switchboard.local-ci-2518-base.Zz98Yy"]) {
     await run(["git", "-C", repo, "worktree", "add", "-q", "--detach", join(cache, name)], repo);

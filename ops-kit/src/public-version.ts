@@ -1,6 +1,6 @@
 /** Independent public versions. All source identities, plans and the cross-clone lock stay on private origin. */
 import { createHash, randomUUID } from "node:crypto";
-import { openSyncPr, releaseBaseline, TREES, type Options, type Run } from "./public-sync.ts";
+import { ok, openSyncPr, releaseBaseline, TREES, type Options, type Run } from "./public-sync.ts";
 
 type Release = { version: string; source: string; tag: string; tree: string; tags: Record<string, string> };
 type State = { completed?: Release & { commit: string }; pending?: Release };
@@ -19,9 +19,11 @@ export function independentSync(opts: Options, run: Run, publish: (publication: 
   if (top.code) throw new Error("cannot locate repository");
   const raw = (args: string[], input?: string) => run(["git", "-C", top.out, ...args], { input, env: { GIT_TERMINAL_PROMPT: "0" } });
   const git = (args: string[], input?: string) => {
-    const r = raw(args, input);
-    if (r.code) throw new Error(`independent version: failed git ${args[0]}`);
-    return r.out;
+    try {
+      return ok(raw(args, input), ["git", ...args]);
+    } catch (e) {
+      throw new Error(`independent version: ${(e as Error).message}`);
+    }
   };
   if (!opts.source || !semver.test(opts.source)) throw new Error("independent version requires --source <vX.Y.Z tag>");
   const source = git(["rev-parse", "--verify", `refs/tags/${opts.source}^{commit}`]);
@@ -37,6 +39,21 @@ export function independentSync(opts: Options, run: Run, publish: (publication: 
     const r = raw(["merge-base", "--is-ancestor", a, b]);
     if (r.code > 1) throw new Error("cannot judge source ancestry");
     return r.code === 0;
+  };
+  /** A plan of another --source; a plain sync may replace it, an --adopt-baseline run only resumes its own. */
+  const other = (pending: Release) => pending.source !== source || pending.tag !== opts.source;
+  const replaces = (pending: Release) => !opts.adoptBaseline && other(pending);
+  /** What of an unfinished plan is on the target: its public main moved past the completed commit, its tag, an open sync PR, its Release. */
+  const reached = (pending: Release, base: State["completed"], main: string): string[] => {
+    const got: string[] = [];
+    const head = main.split(/\s/)[0] || "";
+    if (base ? head !== base.commit : head) got.push("public main moved");
+    if (remote(url, `refs/tags/${pending.version}`)) got.push(`tag ${pending.version}`);
+    const [open] = openSyncPr(opts, run); // any open sync PR: with the public main unmoved, it can only be this plan's
+    if (open) got.push(`sync PR #${open}`);
+    if (!opts.targetUrl && ok(run(["gh", "api", "--paginate", `repos/${opts.target}/releases`, "--jq", ".[].tag_name"]), ["gh", "api", "releases"]).split("\n").includes(pending.version))
+      got.push(`Release ${pending.version}`);
+    return got;
   };
   let token: string | undefined;
   if (opts.dryRun) {
@@ -69,7 +86,7 @@ export function independentSync(opts: Options, run: Run, publish: (publication: 
       git(["fetch", "-q", "origin", `+${ref}:${ref}`]);
       state = JSON.parse(git(["show", `${previous}:state.json`]));
       for (const entry of [state.completed, state.pending]) {
-        if (!entry) continue;
+        if (!entry || (entry === state.pending && replaces(entry))) continue; // the tags of a plan given up are not read
         numbers(entry.version);
         for (const [tag, sha] of Object.entries(entry.tags)) {
           verifyTag(tag, sha);
@@ -77,8 +94,7 @@ export function independentSync(opts: Options, run: Run, publish: (publication: 
       }
     }
     const base = state.completed;
-    const pending = state.pending;
-    if (pending && (pending.source !== source || pending.tag !== opts.source)) throw new Error(`unfinished publication: resume with --source ${pending.tag}`);
+    let pending = state.pending;
     const main = remote(url, "refs/heads/main");
     const save = () => {
       const blob = git(["hash-object", "-w", "--stdin"], JSON.stringify(state));
@@ -87,6 +103,17 @@ export function independentSync(opts: Options, run: Run, publish: (publication: 
       git(["push", "-q", `--force-with-lease=${ref}:${previous}`, "origin", `${commit}:${ref}`]);
       previous = commit;
     };
+    // An unfinished plan of another --source: given up for this one while nothing of it reached the target, else resumed with its own.
+    let replaced = "";
+    if (pending && opts.adoptBaseline && other(pending)) throw new Error(`unfinished publication: resume with --source ${pending.tag}`);
+    if (pending && replaces(pending)) {
+      const got = reached(pending, base, main);
+      if (got.length) throw new Error(`unfinished publication: resume with --source ${pending.tag} (reached ${opts.target}: ${got.join(", ")})`);
+      replaced = `version: ${opts.dryRun ? "would replace" : "replaced"} unfinished plan ${pending.version} (--source ${pending.tag}): nothing reached ${opts.target}\n`;
+      state = base ? { completed: base } : {};
+      pending = undefined;
+      if (!opts.dryRun) save();
+    }
     if (opts.adoptBaseline) {
       // A published target without a record: its public main's commit, unchanged, becomes v0.1.0 when its tree's record names --source.
       if (base) throw new Error("public target already has an independent version record; sync without --adopt-baseline");
@@ -191,7 +218,7 @@ export function independentSync(opts: Options, run: Run, publish: (publication: 
         throw new Error("publication did not land on the planned public version/tree");
       state = { completed: { ...expected, commit: git(["rev-parse", "refs/public-sync/version-main"]) } }; save();
     }
-    return `version: source ${opts.source} (${source}), baseline ${base?.tag ?? "initial"}, bump ${["major", "minor", "patch"][bump] ?? "initial/unchanged"}, public ${version}\n${out}`;
+    return `${replaced}version: source ${opts.source} (${source}), baseline ${base?.tag ?? "initial"}, bump ${["major", "minor", "patch"][bump] ?? "initial/unchanged"}, public ${version}\n${out}`;
   } catch (e) {
     failure = e;
     throw e;

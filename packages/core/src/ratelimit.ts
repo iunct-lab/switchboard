@@ -1,7 +1,9 @@
+import { homedir } from "node:os";
 import type { AgentEvent, RunnerId, Task } from "@switchboard/protocol";
 import type { Db } from "./db.ts";
+import { DISK_CHECK_MS, DISK_FREE_MIN_BYTES, diskFreeBytes } from "./diskfull.ts";
 import { ResumeSupersededError, type TaskManager, type TurnEnd } from "./tasks.ts";
-import { GITHUB_NOTE, lastStopWasDaemon, STOP_RESUME_PROMPT } from "./interrupted.ts";
+import { DISK_NOTE, GITHUB_NOTE, lastStopWasDaemon, STOP_RESUME_PROMPT } from "./interrupted.ts";
 import { GITHUB_REMAINING_MIN } from "./backlog.ts";
 import type { GithubBudget } from "@switchboard/protocol";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
@@ -28,9 +30,10 @@ export const RESUME_PROMPT = `${AUTO_RESUME_HEAD} ${RESUME_TEXT}`;
  */
 export const GITHUB_LIMIT_LINE = /^(?:(?:gh|GraphQL): )?API rate limit (?:already )?exceeded for [^\n]*/m;
 export const GITHUB_RESUME_PROMPT = `${AUTO_RESUME_HEAD} GitHub の API 上限が戻りました。中断した箇所から作業を続けてください。`;
+export const DISK_RESUME_PROMPT = `${AUTO_RESUME_HEAD} ディスクの空きが戻りました。中断した箇所から作業を続けてください。`;
 export { GITHUB_NOTE };
 /** Tools whose result is what they read, not what they ran: a limit line in them is a quote. */
-const READ_TOOLS = new Set(["Read", "Grep", "Glob"]);
+export const READ_TOOLS = new Set(["Read", "Grep", "Glob"]);
 
 /** The GitHub limit line a command's result carries, if any; undefined for a read tool, or none. */
 export function githubLimitHit(tool: string, summary: string): string | undefined {
@@ -255,6 +258,8 @@ export interface ResumerOptions {
   log?: (message: string) => void;
   /** GitHub's GraphQL budget for a checkout (#550, `GithubBudgetCache`): when a turn met the GitHub limit, the time it comes back. Absent = a fallback delay. */
   githubBudget?: (cwd: string) => Promise<GithubBudget | null>;
+  /** Free bytes on the disk (#2234); `diskFreeBytes` of the home by default. */
+  diskFree?: () => number;
 }
 
 /**
@@ -291,6 +296,7 @@ export class RateLimitResumer {
   private now: () => number;
   private prompt: string;
   private log: (m: string) => void;
+  private diskFree: () => number;
 
   constructor(
     private db: Db,
@@ -300,6 +306,7 @@ export class RateLimitResumer {
     this.now = opts.now ?? Date.now;
     this.prompt = opts.prompt ?? RESUME_PROMPT;
     this.log = opts.log ?? (() => undefined);
+    this.diskFree = opts.diskFree ?? (() => diskFreeBytes(homedir()));
   }
 
   private tunables(): ResumeTunables {
@@ -311,10 +318,15 @@ export class RateLimitResumer {
     return this.opts.tunables ? `${AUTO_RESUME_HEAD} ${this.tunables().resumePrompt}` : this.prompt;
   }
 
+  /** The follow-up of the wait the task is in. */
+  private followUp(t: Task): string {
+    return t.resumeReason === "github" ? GITHUB_RESUME_PROMPT : t.resumeReason === "disk" ? DISK_RESUME_PROMPT : this.resumePrompt();
+  }
+
   /** Subscribe to turn ends and start the ticker. */
   start(intervalMs = 30_000) {
     if (!this.unsubscribe) this.unsubscribe = this.tasks.onTurnEnd((taskId, task, turn) => this.onTurnEnd(taskId, task, turn));
-    if (!this.unsubscribeForget) this.unsubscribeForget = this.tasks.onPlanForgotten((taskId) => this.dropPending(taskId));
+    if (!this.unsubscribeForget) this.unsubscribeForget = this.tasks.onPlanForgotten((taskId) => this.forgetPlan(taskId));
     if (this.timer) return;
     this.timer = setInterval(() => void this.tick(), intervalMs);
     this.timer.unref?.();
@@ -353,6 +365,7 @@ export class RateLimitResumer {
     const windows = (): QuotaWindow[] => (q ? Object.entries(q.windows).map(([window, v]) => ({ window, ...v })) : this.db.quotaFor(task.runner));
     const stop = turn.end.status === "error" ? detectLimitStop(task.runner, [turn.end.summary, ...turn.errors], windows(), now, q?.limitType) : undefined;
     if (!stop) {
+      if (turn.end.status !== "aborted" && turn.diskFull && this.planDisk(taskId, task, turn.diskFull, ours)) return;
       // a turn the runner's limit did not stop (it ended by itself, or on another error) but whose commands met
       // GitHub's limit waits for GitHub's time (#550); a cut turn (aborted) is the person's, left alone
       if (turn.end.status !== "aborted" && turn.githubLimit) {
@@ -434,6 +447,41 @@ export class RateLimitResumer {
     this.log(`ratelimit: ${taskId} met the GitHub API limit; resume at ${new Date(at).toISOString()}`);
   }
 
+  /**
+   * A turn that said the disk is full (#2234) waits for space. The words alone do not stop it: a command that printed
+   * them from a log or a source file, or a full `/tmp` on a healthy disk, is not a wait space on this disk would end.
+   */
+  private planDisk(taskId: string, task: Task, words: string, ours: boolean): boolean {
+    const free = this.diskFree();
+    if (free >= DISK_FREE_MIN_BYTES) return false;
+    const count = ours ? (this.stops.get(taskId) ?? 0) + 1 : 1;
+    this.stops.set(taskId, count);
+    if (count > this.tunables().maxLimitStops) {
+      this.tasks.recordStop(taskId, diskStop({ evidence: words, state: "exhausted", conditions: [{ key: "diskFree", value: fmtFree(free), met: false }] }));
+      this.tasks.record(taskId, { t: "status", text: `${DISK_NOTE}: ${words}。自動再開の後 ${count - 1} 回続けて止まったので、これ以上は再開しません。返信すると再開します` });
+      return true;
+    }
+    this.tasks.setResumeAt(taskId, this.now() + DISK_CHECK_MS, "disk");
+    this.tasks.recordStop(taskId, diskStop({ evidence: words, conditions: [{ key: "diskFree", value: fmtFree(free), met: false }] }));
+    const action = this.opts.enabled(task.runner) ? "空きが 1 GiB に戻ったら自動で再開します" : "空きが 1 GiB に戻ったら再開できます（自動再開は OFF — Home のランナー設定で ON にするか、返信で再開）";
+    this.tasks.record(taskId, { t: "status", text: `${DISK_NOTE}: ${words}。${action}` });
+    this.log(`ratelimit: ${taskId} met a full disk; ${free} bytes free`);
+    return true;
+  }
+
+  /** A reply, 中断, 今すぐ再開 or a cancel ended the wait: a plan on the old turn goes, and the disk stop with it. */
+  private forgetPlan(taskId: string): void {
+    this.dropPending(taskId);
+    this.resolveDiskStop(taskId, this.diskFree(), "待ちを打ち切った");
+  }
+
+  /** Closes the task's open disk-full stop; before the send, so a turn that fills the disk again opens a new one after it. */
+  private resolveDiskStop(taskId: string, free: number, what: string): void {
+    const prev = this.tasks.stopOf(taskId, DISK_STOP);
+    if (!prev || prev.state === "resolved") return;
+    this.tasks.recordStop(taskId, diskStop({ evidence: prev.evidence, state: "resolved", conditions: [{ key: "diskFree", value: fmtFree(free), met: free >= DISK_FREE_MIN_BYTES }], actions: [...prev.actions, { attempt: prev.actions.length + 1, at: this.now(), what, ok: true }].slice(-20) }));
+  }
+
   /** Send the follow-up to every due task whose runner has auto-resume on. Returns the ids it resumed. */
   async tick(): Promise<string[]> {
     const now = this.now();
@@ -442,8 +490,17 @@ export class RateLimitResumer {
       if (t.resumeAt === null) continue;
       const early = t.resumeAt > now && this.liftedEarly(t);
       if (t.resumeAt > now && !early) continue;
-      if (!this.opts.enabled(t.runner)) continue;
       if (t.status === "running" || t.status === "waiting" || this.sending.has(t.id)) continue;
+      // before the auto-resume setting: with it off nothing is sent, but the stop still ends when the space is back
+      if (t.resumeReason === "disk") {
+        const free = this.diskFree();
+        if (free < DISK_FREE_MIN_BYTES) {
+          this.tasks.deferResume(t.id, now + DISK_CHECK_MS);
+          continue;
+        }
+        this.resolveDiskStop(t.id, free, "空きが戻った");
+      }
+      if (!this.opts.enabled(t.runner)) continue;
       if (early) this.tasks.record(t.id, { t: "status", text: `使用上限が予定（${fmtTime(t.resumePlannedAt ?? t.resumeAt, now)}）より早く戻ったと報告があったので再開します` });
       if (await this.resume(t)) resumed.push(t.id);
     }
@@ -471,8 +528,9 @@ export class RateLimitResumer {
     try {
       const stopped = lastStopWasDaemon(this.db.listEvents(taskId).map((e) => e.ev));
       const github = t.resumeReason === "github";
-      this.tasks.record(taskId, { t: "status", text: stopped ? "中断されたターンを今すぐ再開します" : github ? "GitHub の上限の待ちを打ち切って今すぐ再開します" : "使用上限の待ちを打ち切って今すぐ再開します" });
-      return await this.tasks.send(taskId, stopped ? STOP_RESUME_PROMPT : github ? GITHUB_RESUME_PROMPT : this.resumePrompt(), { mirror: false }); // the shadow's runner (#99) hit no limit
+      const disk = t.resumeReason === "disk";
+      this.tasks.record(taskId, { t: "status", text: stopped ? "中断されたターンを今すぐ再開します" : github ? "GitHub の上限の待ちを打ち切って今すぐ再開します" : disk ? "空き待ちを打ち切って今すぐ再開します" : "使用上限の待ちを打ち切って今すぐ再開します" });
+      return await this.tasks.send(taskId, stopped ? STOP_RESUME_PROMPT : this.followUp(t), { mirror: false }); // the shadow's runner (#99) hit no limit
     } finally {
       this.sending.delete(taskId);
     }
@@ -516,7 +574,7 @@ export class RateLimitResumer {
       // The turn itself is the record ("[Switchboard 自動再開] …" as the user message). `asResume` makes send() give
       // up if a reply, 中断 or a cancel landed while a release was awaited.
       // A turn the daemon's own stop cut (interrupted.ts) shares the plan column; its follow-up says what happened.
-      const prompt = lastStopWasDaemon(this.db.listEvents(t.id).map((e) => e.ev)) ? STOP_RESUME_PROMPT : t.resumeReason === "github" ? GITHUB_RESUME_PROMPT : this.resumePrompt();
+      const prompt = lastStopWasDaemon(this.db.listEvents(t.id).map((e) => e.ev)) ? STOP_RESUME_PROMPT : this.followUp(t);
       await this.tasks.send(t.id, prompt, { asResume: true });
       this.log(`ratelimit: resumed ${t.id}`);
       // the failures before this one were the same stop; it is over (#949)
@@ -560,6 +618,9 @@ export class RateLimitResumer {
 
 /** The stop a failed resume send is recorded as (#949): one per task, waiting on its own timer (`resumeAt`), not on a retry. */
 const RESUME_STOP = "resume-send";
+const DISK_STOP = "disk-full";
+const diskStop = (r: Partial<StopReport>): StopReport => ({ id: DISK_STOP, op: "disk.write", target: "", reason: "disk-full", evidence: "", safety: "unknown", conditions: [], actions: [], state: "waiting", ...r });
+const fmtFree = (bytes: number) => `${(bytes / DISK_FREE_MIN_BYTES).toFixed(1)} GiB`;
 const resumeStop = (r: Partial<StopReport>): StopReport => ({ id: RESUME_STOP, op: "resume.send", target: "", reason: "transient", evidence: "", safety: "before-effect", conditions: [], actions: [], state: "waiting", ...r, ...(r.evidence !== undefined ? { evidence: r.evidence.slice(0, 300) } : {}) });
 
 /* ---------- time helpers ---------- */

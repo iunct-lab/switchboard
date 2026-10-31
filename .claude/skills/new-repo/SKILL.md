@@ -40,7 +40,8 @@ Project は `bootstrap` が作る（番号が無ければ題で探し、無け�
 ```bash
 # bootstrap とラベルは <dir> の ops.config.json と labels.yml を読むので、先に 3 の「写して値を置換する」までを済ませておく
 jq '. + {projectUrl: "https://github.com/<orgs|users>/<owner>/projects/0"}' <dir>/ops.config.json > <dir>/ops.config.tmp && mv <dir>/ops.config.tmp <dir>/ops.config.json
-env -u <PREFIX>_PROJECT_URL -u <PREFIX>_PROJECT_OWNER \
+# BACKLOG_URL も外す: アプリの Task の中では bootstrap は止まる（まだ workspace の無い新しいリポジトリの Project はここで GitHub に作る）
+env -u <PREFIX>_PROJECT_URL -u <PREFIX>_PROJECT_OWNER -u BACKLOG_URL \
   bun "$SWITCHBOARD_REPO_ROOT/ops-kit/src/cli.ts" bootstrap "<name>" --config <dir>/ops.config.json
 jq 'del(.projectUrl)' <dir>/ops.config.json > <dir>/ops.config.tmp && mv <dir>/ops.config.tmp <dir>/ops.config.json     # Project は変数で指す。設定に URL を残さない
 ```

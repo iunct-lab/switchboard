@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BacklogIssueData, BacklogSource } from "@switchboard/protocol";
-import { isUnblocked, overlapIn, pickNext, readStoredBacklog, readStoredIssue, heldIn, workspaceSyncOf } from "./backlog.ts";
+import { commentStoredIssue, isUnblocked, overlapIn, pickNext, readStoredBacklog, readStoredIssue, heldIn, workspaceSyncOf } from "./backlog.ts";
 import { Db, type BacklogSnapshotEntry } from "./db.ts";
 
 // The backlog read from what the last import stored (#885): no GitHub involved — readStoredBacklog takes no gh at all.
@@ -51,6 +51,25 @@ test("a GitHub #12 and a GitLab #12 are two records (#892): each workspace reads
   // the same external id under the other key is another record too
   expect(db.listBacklogRecords(SOURCE).map((r) => r.externalId).sort()).toEqual(["IC_1", "I_12"]);
   expect(db.listBacklogRecords(LAB).map((r) => r.externalId).sort()).toEqual(["gitlab:issue:900", "gitlab:note:5"]);
+});
+
+test("a comment made here keeps its seq across the send (#3069)", () => {
+  const ws = imported([issue(12, ["type:pbi"]), comment(12, "IC_old", "取り込んだだけ", "2026-10-01T00:00:00Z")]);
+  const first = commentStoredIssue(db, SOURCE, 12, "1 件目", Date.parse("2026-10-03T00:00:00Z")).operation;
+  commentStoredIssue(db, SOURCE, 12, "2 件目", Date.parse("2026-10-03T00:00:01Z"));
+  const seqs = () => Object.fromEntries(readStoredIssue(db, ws, 12)!.comments.map((c) => [c.body, c.seq]));
+  const before = seqs();
+  expect(before["1 件目"]!).toBeLessThan(before["2 件目"]!);
+  expect(before["取り込んだだけ"]).toBeNull();
+
+  // GitHub's node id, and a time after the second comment's local one
+  db.setBacklogOperationResult(first, { status: "done", remoteId: "IC_sent", record: { externalId: "IC_sent", remote: { issue: 12, body: "1 件目", createdAt: "2026-10-03T00:05:00Z" } } });
+  expect(readStoredIssue(db, ws, 12)!.comments.find((c) => c.body === "1 件目")).toMatchObject({ id: "IC_sent", createdAt: "2026-10-03T00:05:00Z" });
+  expect(seqs()).toEqual(before);
+
+  // sent again when GitHub is turned on on a backlog kept here: a comment made in between does not come before it
+  db.applyBacklogEdit(SOURCE, { records: [], operations: [{ issue: "I_12", targetKind: "comment", target: "IC_sent", kind: "comment", payload: { body: "1 件目" } }] });
+  expect(seqs()).toEqual(before);
 });
 
 test("a workspace never imported answers no items with no fetchedAt — not an empty list as if read", () => {

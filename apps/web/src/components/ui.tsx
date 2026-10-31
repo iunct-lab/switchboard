@@ -35,6 +35,12 @@ export function ResumeTag(props: { resumeAt: Task["resumeAt"]; reason: Task["res
         {props.compact ? "GitHub 待ち" : `GitHub の上限待ち（${when} に再開）`}
       </span>
     );
+  if (props.reason === "disk")
+    return (
+      <span className="tag resume" title="ディスクの空き切れで停止。空きが 1 GiB に戻るまで待ちます（5 分ごとに確認。自動再開はランナーごとの設定。Task の Brief から今すぐ再開・取り消しができます）">
+        {props.compact ? "空き待ち" : `空き待ち（${when} に確認）`}
+      </span>
+    );
   if (props.plannedAt != null)
     return (
       <span className="tag resume" title={`ランナーの使用上限で停止。${when} に 1 回試し、だめなら ${fmtClock(props.plannedAt)} に再開（自動再開はランナーごとの設定。Task の Brief から今すぐ再開・取り消しができます）`}>

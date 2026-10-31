@@ -163,6 +163,7 @@ test("a local comment, label, state and parent change are applied at once (#2265
   expect(t).toMatchObject({ pending: 0, sync: { state: "synced" }, issue: { labels: ["type:task", "needs-decision"], parent: 2 } });
   // the comments in the order they were made, each with the id the parallel guard orders by
   expect(t.comments.map((c) => c.body)).toEqual(["first", "second"]);
+  expect(t.comments[0]!.seq!).toBeLessThan(t.comments[1]!.seq!);
   const ids = core!.db.listBacklogRecords(core!.db.getWorkspaceBacklogSource(ws.id)!, "comment").map((r) => r.externalId);
   expect(ids).toHaveLength(2);
   expect(ids.every((id) => /^sb:\d{12}$/.test(id))).toBe(true);

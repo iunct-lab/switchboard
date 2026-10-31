@@ -12,6 +12,8 @@ import { AUTO_RESUME_HEAD, isAutomaticUserText, STOP_NOTE } from "./evals.ts";
 
 /** The note a GitHub API limit stop writes (#550, ratelimit.ts): not a daemon stop. */
 export const GITHUB_NOTE = "GitHub の API 上限で待機";
+/** The note a full disk writes (#2234, ratelimit.ts): not a daemon stop. */
+export const DISK_NOTE = "ディスクの空き切れで停止";
 /** What the daemon sends to continue after a stop. The runner's commands in flight were killed with it. */
 export const STOP_RESUME_PROMPT = `${AUTO_RESUME_HEAD} デーモン（ホスト）の停止でターンが中断されました。実行中だったコマンドやバックグラウンドの処理は終了しています。状態を確かめてから、中断した箇所から作業を続けてください。`;
 /** A turn cut this many times in a row is not continued again: a task whose own work takes the host down must not loop. */
@@ -39,7 +41,7 @@ export function lastStopWasDaemon(events: AgentEvent[]): boolean {
   for (let i = events.length - 1; i >= 0; i--) {
     const ev = events[i]!;
     if (ev.t === "status" && ev.text.startsWith(STOP_NOTE)) return true;
-    if (ev.t === "status" && (ev.text.startsWith("使用上限で停止") || ev.text.startsWith(GITHUB_NOTE))) return false;
+    if (ev.t === "status" && (ev.text.startsWith("使用上限で停止") || ev.text.startsWith(GITHUB_NOTE) || ev.text.startsWith(DISK_NOTE))) return false;
     if (ev.t === "message.delta" && ev.role === "user" && !isAutoResume(ev.text)) return false;
   }
   return false;

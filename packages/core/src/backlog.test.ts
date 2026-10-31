@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent, Backlog, BacklogAction, BacklogIssueDetail, BacklogItem, RunnerAdapter, StartOptions, Task, TaskStatus } from "@switchboard/protocol";
+import type { AgentEvent, Backlog, BacklogAction, BacklogIssueDetail, BacklogSource, BacklogItem, RunnerAdapter, StartOptions, Task, TaskStatus } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import type { Suggester } from "./routing.ts";
 import { startServer, type CoreServer } from "./server.ts";
@@ -14,7 +14,7 @@ import { main as opsKit } from "../../../ops-kit/src/cli.ts";
 import { fakeGh as fakeKitGh } from "../../../ops-kit/src/gh.ts";
 import { ghBoard, overlap, storedMaterial } from "../../../scripts/parallel-guard.ts";
 import { fmtTime } from "./ratelimit.ts";
-import { answerStoredDecision, buildStartPrompt, canStartStoredBacklog, screenAnswer, confirmationsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld } from "./backlog.ts";
+import { answerStoredDecision, buildStartPrompt, localBacklogSource, canStartStoredBacklog, screenAnswer, confirmationsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld } from "./backlog.ts";
 
 // the writer of the waits (#817), read at run time: scripts/ is not type-checked under core's settings
 const guard = "../../../scripts/parallel-guard.ts";
@@ -3109,42 +3109,76 @@ test("promote: promotionStep — only under sb-rescue, only a newer tag, never w
   expect(promotionStep({ status: released({ history: [{ action: "rejected", from: "aaa", to: "ccc", ok: false, reason: "x" }] }), latest: v2, busyTasks: 0 }).action).toBe("promote");
 });
 
-/** A fake gh for the failure report: #501 is a PR closing Task #500 whose parent is PBI #499. */
-function reportGh(existing: string[] = []) {
+/**
+ * The failure report's stored backlog: PBI #499, its Task #500 and (when `pr`) PR #501 closing #500, in a Db under `source`.
+ * Its gh answers `gh pr view` only (`prView`: the PR's body and branch, else "not a PR") and counts every call.
+ */
+function reportStore(source: BacklogSource, opts: { pr?: boolean; prView?: { body: string; headRefName: string } } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "sb-promote-"));
+  const db = new Db(join(dir, "x.db"));
+  const at = "2030-01-01T00:00:00Z";
+  const issue = (number: number, labels: string[], parent: number | null, body: string) =>
+    ({ objectKind: "issue" as const, externalId: `I${number}`, fetchState: "fetched" as const, remote: { number, title: `#${number}`, url: "", state: "OPEN", stateReason: null, body, labels, milestone: null, parent, subIssues: number === 499 ? [500] : [], createdAt: at, updatedAt: at, closedAt: null } });
+  const pr = { objectKind: "pull-request" as const, externalId: "PR501", fetchState: "fetched" as const, remote: { number: 501, state: "MERGED", isDraft: false, labels: [], closes: [500], mergeCommit: "bbbbbbbbbb", updatedAt: at, files: [], closedAt: at, mergedAt: at } };
+  db.putBacklogSnapshot(source, { records: [issue(499, ["type:pbi"], null, "## ユーザーストーリー"), issue(500, ["type:task"], 499, "## 親 PBI\n#499"), ...(opts.pr ? [pr] : [])] as never, cursor: null, syncedAt: Date.now() });
   const calls: string[][] = [];
   const gh: GhRunner = async (args) => {
     calls.push(args);
-    if (args[0] === "repo") return { code: 0, stdout: "acme/app true\n", stderr: "" };
-    const path = args[1] ?? "";
-    if (path === "repos/acme/app/issues/501") return { code: 0, stdout: JSON.stringify({ body: "## 概要\nCloses #500。", labels: [], pull_request: {} }), stderr: "" };
-    if (path === "repos/acme/app/issues/500") return { code: 0, stdout: JSON.stringify({ body: "## 親 PBI\n#499\n\n## やること", labels: [{ name: "type:task" }] }), stderr: "" };
-    if (path === "repos/acme/app/issues/499/comments") return { code: 0, stdout: existing.join("\n"), stderr: "" };
-    if (args[0] === "issue") return { code: 0, stdout: "", stderr: "" };
+    if (args[0] === "pr" && args[1] === "view" && opts.prView) return { code: 0, stdout: JSON.stringify(opts.prView), stderr: "" };
     return { code: 1, stdout: "", stderr: `unexpected: ${args.join(" ")}` };
   };
-  return { gh, calls };
+  const comments = () => db.listBacklogRecords(source, "comment").map((r) => (r.local ?? r.remote) as { issue: number; body: string });
+  const labelOps = () => db.listPendingBacklogOperations(source).filter((o) => o.kind === "set" && o.field === "label:needs-decision").map((o) => [o.target, o.payload]);
+  return { db, gh, calls, comments, labelOps, done: () => (db.close(), rmSync(dir, { recursive: true, force: true })) };
 }
 const failure = { tag: "v0.2.0", sha: "bbbbbbbbbb", subject: "feat(core): x (#501)", reason: "went back by itself: health", rescueUrl: "https://d1.example.net/rescue/" };
+const githubSource: BacklogSource = { service: "github", host: "github.com", repository: "acme/app", project: { owner: "acme", number: 1 } };
 
-test("promote: a failed version is reported once on the PBI behind its PR, as ## 判断待ち with the reason and the rescue page", async () => {
-  const f = reportGh();
-  expect(await reportPromoteFailure(f.gh, "/repo", failure)).toBe(499);
-  const comment = f.calls.find((a) => a[0] === "issue" && a[1] === "comment")!;
-  expect(comment.slice(0, 5)).toEqual(["issue", "comment", "499", "-R", "acme/app"]);
-  const body = comment[6]!;
-  expect(body.startsWith("## 判断待ち\n**問い**: 動いているアプリに入らなかった版 v0.2.0（bbbbbbb feat(core): x (#501)）")).toBe(true);
-  expect(body).toContain("went back by itself: health");
-  expect(body).toContain("救援画面: https://d1.example.net/rescue/");
-  expect(f.calls.find((a) => a[0] === "issue" && a[1] === "edit")).toEqual(["issue", "edit", "499", "-R", "acme/app", "--add-label", "needs-decision"]);
-  const again = reportGh([body]);
-  expect(await reportPromoteFailure(again.gh, "/repo", failure)).toBe(499);
-  expect(again.calls.filter((a) => a[0] === "issue")).toHaveLength(0);
+test("promote: a failed version is reported once on the stored PBI behind its PR, as ## 判断待ち with the reason and the rescue page, kept to be sent", async () => {
+  const f = reportStore(githubSource, { pr: true });
+  try {
+    expect(await reportPromoteFailure(f.db, githubSource, f.gh, "/repo", failure)).toBe(499);
+    // nothing written to GitHub here, and no Issue read from it: the stored PR names its Task
+    expect(f.calls).toEqual([]);
+    const [c] = f.comments();
+    expect(c!.issue).toBe(499);
+    expect(c!.body.startsWith("## 判断待ち\n**問い**: 動いているアプリに入らなかった版 v0.2.0（bbbbbbb feat(core): x (#501)）")).toBe(true);
+    expect(c!.body).toContain("went back by itself: health");
+    expect(c!.body).toContain("救援画面: https://d1.example.net/rescue/");
+    expect(f.labelOps()).toEqual([["I499", true]]);
+    // the same commit again: one comment
+    expect(await reportPromoteFailure(f.db, githubSource, f.gh, "/repo", failure)).toBe(499);
+    expect(f.comments()).toHaveLength(1);
+    expect(f.labelOps()).toHaveLength(1);
+  } finally {
+    f.done();
+  }
 });
 
-test("promote: a subject without (#n) reports nothing", async () => {
-  const f = reportGh();
-  expect(await reportPromoteFailure(f.gh, "/repo", { ...failure, subject: "fix: no number" })).toBeNull();
-  expect(f.calls.filter((a) => a[0] === "issue")).toHaveLength(0);
+test("promote: a backlog kept in the app only gets the report on its own PBI; a PR not stored is read with gh pr view (closesOf)", async () => {
+  const source = localBacklogSource("ws_local");
+  const f = reportStore(source, { prView: { body: "## 概要\nBacklog-Task: 500", headRefName: "sb/500-x" } });
+  try {
+    expect(await reportPromoteFailure(f.db, source, f.gh, "/repo", failure)).toBe(499);
+    expect(f.calls.map((a) => a.slice(0, 3))).toEqual([["pr", "view", "501"]]);
+    expect(f.comments().map((c) => [c.issue, c.body.split("\n")[0]])).toEqual([[499, "## 判断待ち"]]);
+    expect(f.labelOps()).toEqual([["I499", true]]);
+  } finally {
+    f.done();
+  }
+});
+
+test("promote: a subject without (#n), or a number that is no stored Issue, reports nothing", async () => {
+  const f = reportStore(githubSource);
+  try {
+    expect(await reportPromoteFailure(f.db, githubSource, f.gh, "/repo", { ...failure, subject: "fix: no number" })).toBeNull();
+    expect(await reportPromoteFailure(f.db, githubSource, f.gh, "/repo", { ...failure, subject: "fix: y (#777)" })).toBeNull();
+    // a Task's own number (not a PR: gh pr view fails) reaches its PBI
+    expect(await reportPromoteFailure(f.db, githubSource, f.gh, "/repo", { ...failure, subject: "fix: z (#500)" })).toBe(499);
+    expect(f.comments()).toHaveLength(1);
+  } finally {
+    f.done();
+  }
 });
 
 /** A checkout with one commit tagged v0.2.0, and a fake sb-rescue whose current release is another commit. */
@@ -3214,20 +3248,29 @@ test("promote: a release newer than the tag, promoted by hand, is not taken back
   }
 });
 
-test("promote: while the newest tag is one that failed, nothing is promoted or started, and its PBI gets one ## 判断待ち", async () => {
+test("promote: while the newest tag is one that failed, nothing is promoted or started, and its stored PBI gets one ## 判断待ち", async () => {
   const r = await releasedDaemon([{ action: "auto-rollback", from: "SHA", to: "old", ok: false, reason: "went back by itself: health" }]);
-  const f = reportGh();
-  const gh: GhRunner = (args, cwd) => (args[0] === "api" && args[1]?.startsWith("repos/") ? f.gh(args, cwd) : args[0] === "issue" ? f.gh(args, cwd) : fakeGh().gh(args, cwd));
+  const fake = fakeGh();
   try {
     // the PBI is read on a phone: the rescue page it names is the host's outside URL, not sb-rescue's own address (#399)
-    const base = await boot(gh, holdingClaude().adapter, { ...r.env, SWITCHBOARD_WEB_URL: "https://d1.example.net" });
+    const base = await boot(fake.gh, holdingClaude().adapter, { ...r.env, SWITCHBOARD_WEB_URL: "https://d1.example.net" });
+    await refreshed(base);
+    const source = core!.db.getWorkspaceBacklogSource(metaId())!;
+    const at = "2030-01-01T00:00:00Z";
+    const issue = (number: number, labels: string[], parent: number | null) =>
+      ({ objectKind: "issue", externalId: `I${number}`, fetchState: "fetched", remote: { number, title: `#${number}`, url: "", state: "OPEN", stateReason: null, body: "", labels, milestone: null, parent, subIssues: [], createdAt: at, updatedAt: at, closedAt: null } });
+    const pr = { objectKind: "pull-request", externalId: "PR501", fetchState: "fetched", remote: { number: 501, state: "MERGED", isDraft: false, labels: [], closes: [500], mergeCommit: r.sha, updatedAt: at, files: [], closedAt: at, mergedAt: at } };
+    core!.db.putBacklogSnapshot(source, { records: [issue(499, ["type:pbi"], null), issue(500, ["type:task"], 499), pr] as never, cursor: core!.db.getBacklogRepository(source)!.cursor, syncedAt: Date.now() });
     const id = await backlogNextSchedule(base);
     expect((await runSchedule(base, id)).status).toBe(409);
     expect(await scheduleLog(base)).toContain("昇格に失敗した版のまま: v0.2.0（判断待ち: #499）");
     expect(r.promoted).toEqual([]);
     expect(core!.db.listTasks()).toHaveLength(0);
-    expect(f.calls.filter((a) => a[0] === "issue" && a[1] === "comment")).toHaveLength(1);
-    expect(f.calls.find((a) => a[0] === "issue" && a[1] === "comment")![6]).toContain("救援画面: https://d1.example.net/rescue/");
+    // kept in the app and sent from there: comment then label, on #499
+    const ops = core!.db.listBacklogOperations(source).filter((o) => o.kind === "comment" || o.field === "label:needs-decision");
+    expect(ops.map((o) => [o.kind, o.field ?? null])).toEqual([["comment", null], ["set", "label:needs-decision"]]);
+    expect((ops[0]!.payload as { body: string }).body).toContain("救援画面: https://d1.example.net/rescue/");
+    expect(fake.calls.filter((a) => a[0] === "issue" && (a[1] === "comment" || a[1] === "edit"))).toHaveLength(0);
   } finally {
     r.rescue.stop(true);
     rmSync(r.repo, { recursive: true, force: true });

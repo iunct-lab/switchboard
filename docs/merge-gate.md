@@ -1,6 +1,6 @@
 # merge-gate の手順（再チェック・記録の印・保護枝）
 
-`bun scripts/merge-gate.ts <PR> [--allow-large] [--repo <owner/name>]` が stop を返したときに回す手順と、PR に付ける印。出力は `{ verdict, impact, reasons, ask, recheck }` の JSON、exit 0 = merge、1 = stop、2 = 判定できなかった（merge にしない）。判定の規則は `scripts/merge-gate.ts`。工程の Task のプロンプトと merge-gate の理由の文がこの文書の節を指す。
+`bun scripts/merge-gate.ts <PR> [--allow-large] [--repo <owner/name>]` が stop を返したときに回す手順と、PR に付ける印。出力は `{ verdict, impact, reasons, ask, recheck, notes? }` の JSON、exit 0 = merge、1 = stop、2 = 判定できなかった（merge にしない）。判定の規則は `scripts/merge-gate.ts`。工程の Task のプロンプトと merge-gate の理由の文がこの文書の節を指す。
 
 ## ローカル CI を回す時と数え方
 
@@ -34,7 +34,7 @@ patch-id $(gh pr diff <PR> -R <owner/name> | git patch-id --verbatim | cut -d' '
 
 印を付けたらマージ判定をもう一度通す。head が変わったら（修正コミット、下の PR のマージ後の自動 rebase）印は数えられなくなるので回し直す（`migration` はいつもテストを回し直す。`size` / `responsibility` は、今の `gh pr diff <PR> | git patch-id --verbatim` が前の印の 2 行目の patch-id と同じときだけ — 下の PR のマージ後の自動 rebase のように差分が変わっていないとき — 前のレビューのコメント URL を根拠に印だけ出し直してよい。違えば、手で rebase してコンフリクトを解いたときも含めて回し直す。`--verbatim` は空白の違いも別の id にするので、インデントだけを変えた解き方も見分ける）。通らなければ指摘を直して（`review-triage-and-merge`）回し直す。直せなければ運用の確認として Task の会話で聞く。
 
-再チェックでマージしたら、PBI の決定ログに 1 行「YYYY-MM-DD: 自動マージ: PR #n（<種類>、再チェック合格）、戻すなら <tag>」。`<tag>` はマージの直前の main に入っている最新のリリースタグ（`vX.Y.Z` だけ。`release-tag.ts` の `latestSemver` と同じ。マージの前に `git fetch -q --tags origin && git tag -l 'v*' --merged origin/main --sort=-v:refname | grep -m1 -E '^v[0-9]+\.[0-9]+\.[0-9]+$'`）。そこへ戻すのは [`docs/design/releases-and-rescue.md`](design/releases-and-rescue.md) の Going back（`scripts/rollback-pr.ts <tag>`）。
+再チェックでマージしたら、PBI の決定ログに 1 行「YYYY-MM-DD: 自動マージ: PR #n（<種類>、再チェック合格）、戻すなら <tag>」。`<tag>` は CI を通ったタグの中の最新（マージの前に `bun scripts/tag-ci.ts --latest-pass`。タグはこのコマンドが取り直す。他のリポジトリの PR では、そのリポジトリの作業ツリーから Switchboard の clone の `scripts/tag-ci.ts` を `--latest-pass --repo <owner/name>` で。`--repo` が無いとスクリプトの clone、つまり Switchboard のタグを選ぶ。タグは CI を待たずに付くので、最新のタグは落ちていることがある）。コマンドが exit 1（CI を通ったタグが無い。タグの CI がまだ結果を書いていないリポジトリなど）なら、`<tag>` の代わりに「戻すなら: CI を通ったタグなし」と書く（最新のタグを代わりに書かない）。そこへ戻すのは [`docs/design/releases-and-rescue.md`](design/releases-and-rescue.md) の Going back（`scripts/rollback-pr.ts <tag>`）。
 
 ## 記録の印
 

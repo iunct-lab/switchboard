@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLAUDE_BEDROCK_MODELS, createClaudeHistoryParser } from "@switchboard/adapter-claude";
+import { CODEX_BEDROCK_MODELS } from "@switchboard/adapter-codex";
 import type { AgentEvent } from "@switchboard/protocol";
 import { billedUsd, isBedrockModel, ledgerRowFor, loadPricing, priceUsage, resolveModel, usageSince } from "./pricing.ts";
 
@@ -87,6 +88,21 @@ describe("pricing (#14)", () => {
     const aliased = { ...table, aliases: { ...table.aliases, "us.anthropic.claude-haiku-5-5": "claude-haiku-4-5" } };
     expect(priceUsage(aliased, "us.anthropic.claude-haiku-5-5", "claude", u).model).toBe("claude-haiku-4-5");
     expect(priceUsage(table, "us.anthropic.claude-haiku-5-5", "claude", u).costUsd).toBe(priceUsage(table, "claude-haiku-5-5", "claude", u).costUsd);
+  });
+
+  test("every Bedrock id of the codex adapter is priced and billed at the API price (#1731)", () => {
+    const u = { inputTokens: 1000, outputTokens: 1000, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    for (const m of CODEX_BEDROCK_MODELS) {
+      const p = priceUsage(table, m.value, "codex", u);
+      expect(p).toMatchObject({ priced: true, model: m.value.replace(/^openai\./, "") });
+      expect(p.costUsd).toBeGreaterThan(0);
+      expect(billedUsd(table, "codex", p.costUsd, m.value)).toBe(p.costUsd);
+    }
+    // the ledger row of a Bedrock codex task: actual cost = API cost, not unpriced
+    const row = ledgerRowFor(table, { id: "t", runner: "codex", model: "openai.gpt-6-luna" }, { t: "usage", source: "turn", model: "openai.gpt-6-luna", ...u }, Date.now());
+    expect(row.source).not.toBe("unpriced");
+    expect(row.billedUsd).toBe(row.costUsd);
+    expect(row.billedUsd).toBeGreaterThan(0);
   });
 
   test("an invalid user file is skipped with the problem reported", () => {

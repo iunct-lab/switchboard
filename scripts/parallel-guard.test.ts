@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appBoard, claim, commentId, ghBoard, ghMaterial, holder, judge, lastClaim, linkedIssues, overlap, pathsIn, readOthers, release, releaseArgs, releaseBody, STALE_HOURS, storedMaterial, type Work } from "./parallel-guard";
+import { appBoard, claim, ghBoard, ghMaterial, holder, judge, lastClaim, overlap, readOthers, release, releaseArgs, releaseBody, STALE_HOURS, storedMaterial, type Work } from "./parallel-guard";
+import { linkedIssues, pathsIn, scopeIn } from "./task-paths";
 import type { StoredRecords } from "../ops-kit/src/backlog-client";
 
 const REPO = "example/development";
@@ -46,6 +47,13 @@ describe("parallel-guard pathsIn", () => {
   test("a root file name inside another path or word is not the root file", () => {
     expect(pathsIn("docs/README.md と apps/web/package.json、mypackage.json、package.json5", top)).toEqual(["docs/README.md", "apps/web/package.json"]);
   });
+});
+
+test("scopeIn: a top directory alone in backticks counts for merge-gate, pathsIn and a glob do not make it one", () => {
+  const body = "`docs/` と packages/core/ を触る。`scripts/*.ts`、`apps/<name>/x`、`docs/… の下`、`packages/{a,b}.ts`、`nothere/`";
+  expect(pathsIn("`docs/` だけ", top)).toEqual([]);
+  expect(scopeIn(body, top)).toEqual(["packages/core/", "docs/"]);
+  expect(scopeIn("`apps/` は触らない文でも名指し。`docs/a.md`", top)).toEqual(["docs/a.md", "apps/"]);
 });
 
 test("parallel-guard pathsIn: a backticked path counts even when no branch has it yet", () => {
@@ -407,9 +415,9 @@ describe("parallel-guard prereqs (#937)", () => {
 
 describe("parallel-guard from the app's stored records (#919)", () => {
   const db = "`packages/core/src/db.ts`";
-  const issue = (n: number, over: Partial<StoredRecords["issues"][number]> = {}): StoredRecords["issues"][number] => ({ number: n, title: "", state: "OPEN", stateReason: null, body: "", labels: ["type:task"], parent: null, subIssues: [], updatedAt: fresh, fields: null, ...over });
+  const issue = (n: number, over: Partial<StoredRecords["issues"][number]> = {}): StoredRecords["issues"][number] => ({ number: n, title: "", url: "", state: "OPEN", stateReason: null, body: "", labels: ["type:task"], parent: null, subIssues: [], createdAt: fresh, updatedAt: fresh, closedAt: null, fields: null, ...over });
   const pull = (n: number, closes: number[], files: string[] | null, over: Partial<StoredRecords["pulls"][number]> = {}): StoredRecords["pulls"][number] => ({ number: n, state: "OPEN", isDraft: false, labels: [], closes, mergeCommit: null, updatedAt: fresh, files, ...over });
-  const records = (issues: StoredRecords["issues"], pulls: StoredRecords["pulls"] = [], unread: number[] = []): StoredRecords => ({ workspaceId: "w", service: "github", repository: REPO, project: { owner: "example", number: 8 }, fetchedAt: 1, top: [{ name: "packages", dir: true }, { name: "scripts", dir: true }], issues, unread, pulls });
+  const records = (issues: StoredRecords["issues"], pulls: StoredRecords["pulls"] = [], unread: number[] = []): StoredRecords => ({ workspaceId: "w", service: "github", repository: REPO, project: { owner: "example", number: 8 }, fetchedAt: 1, top: [{ name: "packages", dir: true }, { name: "scripts", dir: true }], issues, unread, pulls, comments: [] });
   const inProgress = { Status: "In progress" };
 
   test("the same verdicts as GitHub's answer, and GitHub is asked only for the claim", async () => {
@@ -473,15 +481,13 @@ describe("parallel-guard on a backlog kept in the app (#2265)", () => {
     expect(holder([claimOf(1, "A"), claimOf(2, "B"), withdraw(3, "A")])).toEqual({ id: 2, token: "B" });
     const task = (id: number, token: string) => ({ id, body: `<!-- parallel-guard:task-claim ${token} -->\n着手` });
     expect(lastClaim([task(3, "x"), task(9, "y"), withdraw(10, "y")])).toBe(3);
-    expect(commentId("sb:000000000042")).toBe(42);
-    expect(commentId(1234)).toBe(1234);
   });
 
   /** The app's backlog API over stored comments `sb:<seq>`; `beforePost` runs before a comment is stored (a rival's write). */
   function app(issues: StoredRecords["issues"], beforePost?: (n: number) => void) {
     let seq = 0;
-    const comments: Record<number, Array<{ id: string; body: string }>> = {};
-    const add = (n: number, body: string) => (comments[n] ??= []).push({ id: `sb:${String(++seq).padStart(12, "0")}`, body });
+    const comments: Record<number, Array<{ id: string; seq: number; body: string; createdAt: string }>> = {};
+    const add = (n: number, body: string) => (comments[n] ??= []).push({ id: `sb:${String(++seq).padStart(12, "0")}`, seq, body, createdAt: fresh });
     const records: StoredRecords = { workspaceId: "ws_l", service: "switchboard", repository: "ws_l", project: { owner: "switchboard", number: 0 }, fetchedAt: 1, top: [{ name: "packages", dir: true }], issues, unread: [], pulls: [] };
     const calls: string[] = [];
     const fetch = (async (url: string, init: RequestInit = {}) => {
@@ -511,7 +517,7 @@ describe("parallel-guard on a backlog kept in the app (#2265)", () => {
     const b = app([], (n) => { if (!raced) { raced = true; b.add(n, "<!-- pbi-complete:claim rival -->"); } });
     expect(await claim(b.board, 1, false)).toEqual({ held: false, holder: { id: 1, token: "rival" } });
     expect(b.comments[1]!.filter((c) => c.body.startsWith("<!-- parallel-guard:withdraw "))).toHaveLength(1);
-    expect(holder((b.comments[1] ?? []).map((c) => ({ id: commentId(c.id), body: c.body })))).toEqual({ id: 1, token: "rival" });
+    expect(holder((b.comments[1] ?? []).map((c) => ({ id: c.seq, body: c.body })))).toEqual({ id: 1, token: "rival" });
     await release(b.board, 1, "終了");
     expect((await claim(b.board, 1, false)).held).toBe(true);
     // two In progress Tasks on one file: the one that marked first goes on, the later one yields and withdraws its mark
@@ -519,7 +525,7 @@ describe("parallel-guard on a backlog kept in the app (#2265)", () => {
     const late = await overlap(a.board, 40, true, now);
     expect(late).toMatchObject({ verdict: "defer", blocking: [{ ref: "Task #60" }] });
     expect(a.comments[40]!.map((c) => c.body.split("\n")[0]!.replace(/ [0-9a-f-]{36} /, " <token> "))).toEqual(["<!-- parallel-guard:task-claim <token> -->", "<!-- parallel-guard:withdraw <token> -->"]);
-    expect(lastClaim(a.comments[40]!.map((c) => ({ id: commentId(c.id), body: c.body })))).toBeUndefined();
+    expect(lastClaim(a.comments[40]!.map((c) => ({ id: c.seq, body: c.body })))).toBeUndefined();
     // #60 still goes when it marks again (#40's mark is taken back); only the app was asked
     expect((await overlap(a.board, 60, true, now)).verdict).toBe("go");
     expect([...a.calls, ...b.calls].every((c) => /^(GET|POST) (|\/records\?.*|\/\d+(\?.*|\/comment))$/.test(c))).toBe(true);
@@ -543,6 +549,138 @@ test("a local backlog's Task that cannot reach the app stops (exit 2), never fal
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+describe("parallel-guard on a GitHub-synced backlog through the app (#3069)", () => {
+  const stamp = "2026-09-28T11:00:00.000Z";
+  const task = { number: 40, title: "", url: "", state: "OPEN", stateReason: null, body: "`packages/core/src/db.ts`", labels: ["type:task"], parent: null, subIssues: [], createdAt: stamp, updatedAt: stamp, closedAt: null, fields: { Status: "In progress" } };
+
+  /** The app's API over stored comments of `acme/lib`, and a gh that records its calls. */
+  function fakes(syncStatus = 200) {
+    let imports = 0;
+    const dir = mkdtempSync(join(tmpdir(), "guard-synced-"));
+    const log = `${dir}/gh-calls`;
+    writeFileSync(log, "");
+    writeFileSync(`${dir}/gh`, `#!/bin/sh\necho "$*" >> ${log}\necho '{"id":1}'\n`, { mode: 0o755 });
+    let seq = 0;
+    const comments: Record<number, Array<{ id: string; seq: number | null; body: string; createdAt: string }>> = {};
+    const synced = async (req: Request) => {
+      const url = new URL(req.url);
+      const path = url.pathname.replace("/api/backlog", "");
+      const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+      if (path === "") return json({ syncs: [{ workspaceId: "ws_g", repository: "acme/lib", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] });
+      if (path === "/records") return json({ workspaceId: "ws_g", service: "github", repository: "acme/lib", project: { owner: "acme", number: 1 }, fetchedAt: 1, top: [{ name: "packages", dir: true }], issues: [task], unread: [], pulls: [], comments: [] });
+      if (path === "/sync") {
+        imports += 1;
+        return json(syncStatus === 200 ? {} : { error: "GitHub に届かない" }, syncStatus);
+      }
+      const m = /^\/(\d+)(\/comment)?$/.exec(path)!;
+      const n = Number(m[1]);
+      if (req.method === "GET") return json({ comments: comments[n] ?? [] });
+      seq += 1;
+      (comments[n] ??= []).push({ id: `local:${seq}`, seq, body: ((await req.json()) as { text: string }).text, createdAt: stamp });
+      return json({ operation: "op" }, 202);
+    };
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: synced });
+    let stderr = "";
+    const guard = async (...args: string[]) => {
+      const p = Bun.spawn([process.execPath, `${import.meta.dir}/parallel-guard.ts`, ...args], {
+        cwd: import.meta.dir,
+        env: { PATH: `${dir}:${process.env.PATH}`, BACKLOG_URL: `http://127.0.0.1:${server.port}/api/backlog`, GH_REPO: "acme/lib", HOME: process.env.HOME ?? dir },
+        stdout: "pipe", stderr: "pipe",
+      });
+      stderr = await new Response(p.stderr).text();
+      await p.exited;
+      return p.exitCode;
+    };
+    const ghCalls = () => Bun.file(log).text().then((t) => t.split("\n").filter(Boolean));
+    const done = () => { server.stop(true); rmSync(dir, { recursive: true, force: true }); };
+    return { comments, guard, ghCalls, done, synced: () => imports, stderr: () => stderr };
+  }
+
+  test("claim / release / task-claim go to the app; gh never writes issue comments", async () => {
+    const f = fakes();
+    try {
+      expect(await f.guard("claim", "7")).toBe(0);
+      expect(await f.guard("release", "7", "完了")).toBe(0);
+      expect(await f.guard("overlap", "40", "--claimed")).toBe(0);
+      expect(f.comments[7]!.map((c) => /<!-- pbi-complete:(\w+)/.exec(c.body)?.[1])).toEqual(["claim", "release"]);
+      expect(f.comments[40]![0]!.body).toStartWith("<!-- parallel-guard:task-claim ");
+      expect(await f.ghCalls()).toEqual([]);
+    } finally { f.done(); }
+  });
+
+  test("--repo the app syncs goes through the app; --repo it does not know goes to GitHub", async () => {
+    const f = fakes();
+    try {
+      expect(await f.guard("claim", "7", "--repo", "ACME/lib")).toBe(0); // the list is read as the app reads it, any case
+      expect(f.comments[7]).toHaveLength(1);
+      expect(await f.ghCalls()).toEqual([]);
+      await f.guard("release", "9", "完了", "--repo", "acme/other");
+      expect(f.comments[9]).toBeUndefined();
+      expect((await f.ghCalls()).some((c) => c.includes("-X POST repos/acme/other/issues/9/comments"))).toBe(true);
+    } finally { f.done(); }
+  });
+
+  test("overlap has the app import first, and says so when GitHub cannot be reached", async () => {
+    const f = fakes();
+    try {
+      expect(await f.guard("overlap", "40")).toBe(0);
+      expect(f.synced()).toBe(1);
+      expect(f.stderr()).toBe("");
+    } finally { f.done(); }
+    const off = fakes(424);
+    try {
+      expect(await off.guard("overlap", "40")).toBe(0);
+      expect(off.stderr()).toContain("GitHub 未同期");
+    } finally { off.done(); }
+  });
+
+  test("the holder stays the same after the app sends the comments", async () => {
+    let seq = 0;
+    const comments: Array<{ id: string; seq: number | null; body: string; createdAt: string }> = [];
+    const fetch = (async (url: string, init: RequestInit = {}) => {
+      const path = url.replace("http://app/api/backlog", "");
+      const json = (body: unknown) => new Response(JSON.stringify(body));
+      if (path === "") return json({ syncs: [{ workspaceId: "ws_g", repository: "acme/lib", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] });
+      if (path.startsWith("/records")) return json({ workspaceId: "ws_g", service: "github" });
+      if ((init.method ?? "GET") === "GET") return json({ comments });
+      seq += 1;
+      comments.push({ id: `local:${seq}`, seq, body: (JSON.parse(String(init.body)) as { text: string }).text, createdAt: `2026-09-28T11:00:0${seq}.000Z` });
+      return json({ operation: "op" });
+    }) as unknown as typeof globalThis.fetch;
+    const board = appBoard({ BACKLOG_URL: "http://app/api/backlog" }, fetch, "acme/lib");
+    const first = await claim(board, 7, false);
+    expect(first.held).toBe(true);
+    comments.push({ id: "local:rival", seq: ++seq, body: "<!-- pbi-complete:claim rival -->", createdAt: "2026-09-28T11:00:09.000Z" }); // a claim that lost the race
+    const before = holder(await board.comments(7));
+    expect(before).toEqual(first.holder);
+    // the first one sent later than the second: GitHub's node id and a later time; the seq stays
+    comments[0] = { ...comments[0]!, id: "IC_kwDO", createdAt: "2026-09-28T12:00:00Z" };
+    comments[1] = { ...comments[1]!, id: "IC_kwDN", createdAt: "2026-09-28T11:59:00Z" };
+    expect(holder(await board.comments(7))).toEqual(before);
+    // a mark only imported has no seq and comes before those written here
+    comments.push({ id: "IC_old", seq: null, body: "<!-- pbi-complete:claim imported -->", createdAt: "2026-09-28T12:30:00Z" });
+    expect(holder(await board.comments(7))?.token).toBe("imported");
+  });
+
+  test("an app that cannot be reached stops with exit 2 and gh writes nothing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "guard-synced-"));
+    try {
+      const called = `${dir}/gh-called`;
+      writeFileSync(`${dir}/gh`, `#!/bin/sh\ntouch ${called}\nexit 1\n`, { mode: 0o755 });
+      const r = Bun.spawnSync([process.execPath, `${import.meta.dir}/parallel-guard.ts`, "claim", "1", "--repo", "acme/lib"], {
+        cwd: import.meta.dir,
+        env: { PATH: `${dir}:${process.env.PATH}`, BACKLOG_URL: "http://127.0.0.1:9/api/backlog", HOME: process.env.HOME ?? dir },
+        stderr: "pipe",
+      });
+      expect(r.exitCode).toBe(2);
+      expect(r.stderr.toString()).toContain("判定できなかった");
+      expect(existsSync(called)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 test("a local Task's PR links by Backlog-Task without a closing keyword (#2344)", () => {

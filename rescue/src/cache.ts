@@ -1,5 +1,5 @@
 /**
- * What else fills the host's disk besides /tmp (#2549): the working directories local CI leaves under ~/.cache when it is killed
+ * What else fills the host's disk besides /tmp (#2549): the working directories local CI and hand-run checks leave under ~/.cache when they are killed
  * before its `finally`, and its failure logs, one per PR. Judged like /tmp (`inspect` / `inUse` in tmp.ts) and swept on the same timer.
  * Only `node:` here: sb-rescue shares no code with Switchboard (#178).
  */
@@ -13,13 +13,14 @@ import { inspect, inUse, type TmpEntry, type TmpJudge, type TmpSweep } from "./t
 export const CACHE_WORK_STALE_MS = 24 * 60 * 60 * 1000;
 
 /**
- * The names under ~/.cache that can go, matched against the whole name: what scripts/local-ci.ts and the kit's local CI make,
+ * The names under ~/.cache that can go, matched against the whole name: what scripts/local-ci.ts and the kit's local CI make, and a check run by hand or by tag-ci,
  * for any repository (`<repo>.` is switchboard, capsule-host, …). On any machine: only Switchboard and its kit make these.
  */
 export const CACHE_WORK: RegExp[] = [
   /^[\w.-]+\.local-ci-\d+\.[A-Za-z0-9]{6}$/, // the worktree: <repo>.local-ci-<PR>.XXXXXX
   /^[\w.-]+\.local-ci-\d+-base\.[A-Za-z0-9]{6}$/, // main's worktree a perf failure measures: <repo>.local-ci-<PR>-base.XXXXXX
   /^[\w.-]+\.local-ci-[\w.-]+-\d+-log\.[A-Za-z0-9]{6}$/, // a failure's log: <repo>.local-ci-<owner_repo>-<PR>-log.XXXXXX
+  /^[\w.-]+\.(?:e2e(?:-\d+)?|duration(?:-\d+)?|tag-ci(?:-[\w.-]+)?)\.(?=[A-Za-z0-9]*[A-Z0-9])[A-Za-z0-9]{6}$/, // a check's copy of the database or the tree, tag-ci's log too: <repo>.e2e.XXXXXX, <repo>.duration-<n>.XXXXXX; mktemp's suffix, so not myapp.e2e.report
 ];
 
 /** The repository's git directory a worktree belongs to (`gitdir: <repo>/.git/worktrees/<name>` in its .git file), or null. */

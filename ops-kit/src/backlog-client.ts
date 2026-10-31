@@ -319,7 +319,9 @@ export interface StoredRecords {
   /** The checkout's top level, against which a Task body's paths are read. */
   top: Array<{ name: string; dir: boolean }>;
   /** Every stored Issue (open and closed) as shown, with its fields in the workspace's Project (null = not in it). */
-  issues: Array<{ number: number; title: string; state: "OPEN" | "CLOSED"; stateReason: string | null; body: string; labels: string[]; parent: number | null; subIssues: number[]; updatedAt: string; fields: Record<string, string | number | null> | null }>;
+  issues: Array<{ number: number; title: string; url: string; state: "OPEN" | "CLOSED"; stateReason: string | null; body: string; labels: string[]; parent: number | null; subIssues: number[]; createdAt: string; updatedAt: string; closedAt: string | null; fields: Record<string, string | number | null> | null }>;
+  /** The stored Issues' comments as shown (with those not sent yet), oldest first. */
+  comments: Array<{ issue: number; body: string; createdAt: string }>;
   /** Issues whose last read was not complete (404 / 403 / not read yet): what is stored of them is not current. */
   unread: number[];
   pulls: Array<{ number: number; state: "OPEN" | "CLOSED" | "MERGED"; isDraft: boolean; labels: string[]; closes: number[]; mergeCommit: string | null; updatedAt: string; files: string[] | null }>;
@@ -356,14 +358,35 @@ async function syncOrStored(api: ReturnType<typeof client>, ws: Sync): Promise<s
   }
 }
 
-/** The workspace of the repository in the app's list. `imported`: one never imported is unknown (exit 2), never "no items" or "not stored". */
-async function findWorkspace(api: ReturnType<typeof client>, env: Record<string, string | undefined>, opts: { workspace?: string; cwd?: string; imported: boolean }): Promise<{ ws: Sync; list: List }> {
+/**
+ * Whether the app syncs the repository (`repo`, else as `readRecords`) (#3069): its workspace, or null when the list does
+ * not have it. A workspace the app gave (BACKLOG_WORKSPACE) that is not listed, and an app that cannot be asked, throw
+ * BacklogUnknown: neither means the app does not know the repository.
+ */
+export async function appSync(env: Record<string, string | undefined>, opts: { repo?: string; fetch?: Fetch } = {}): Promise<{ workspaceId: string } | null> {
+  try {
+    const { ws, wanted, explicit } = await lookWorkspace(client(env, opts.fetch ?? fetch), opts.repo ? { ...env, GH_REPO: opts.repo } : env, {});
+    if (!ws && explicit) throw new Unknown(wanted);
+    return ws ? { workspaceId: ws.workspaceId } : null;
+  } catch (e) {
+    throw e instanceof Unknown ? e : new Unknown((e as Error).message);
+  }
+}
+
+/** The repository's row of the app's list, if it has one; `wanted`: the line that says it has not. */
+async function lookWorkspace(api: ReturnType<typeof client>, env: Record<string, string | undefined>, opts: { workspace?: string; cwd?: string }) {
   // a Task on a workspace whose backlog is kept in the app (#2265) is given its id: no repository to read it by
   const explicit = opts.workspace ?? (env.GH_REPO ? undefined : env.BACKLOG_WORKSPACE || undefined);
   const list = (await api("GET", "")) as List;
   const repo = explicit ? null : await repoName(env, opts.cwd);
   const ws = list.syncs.find((s) => (explicit ? s.workspaceId === explicit : s.repository?.toLowerCase() === repo!.toLowerCase()));
-  if (!ws) throw new Unknown(explicit ? `workspace ${explicit} がアプリにありません` : `${repo} のバックログはアプリに取り込まれていません（workspace の登録か --workspace <id>）`);
+  return { ws, list, explicit, wanted: explicit ? `workspace ${explicit} がアプリにありません` : `${repo} のバックログはアプリに取り込まれていません（workspace の登録か --workspace <id>）` };
+}
+
+/** The workspace of the repository in the app's list. `imported`: one never imported is unknown (exit 2), never "no items" or "not stored". */
+async function findWorkspace(api: ReturnType<typeof client>, env: Record<string, string | undefined>, opts: { workspace?: string; cwd?: string; imported: boolean }): Promise<{ ws: Sync; list: List }> {
+  const { ws, list, wanted } = await lookWorkspace(api, env, opts);
+  if (!ws) throw new Unknown(wanted);
   if (opts.imported && ws.syncedAt === null) throw new Unknown(`${ws.repository ?? ws.workspaceId} はまだ取り込まれていません（同期 ${ws.sync.state}${ws.sync.reason ? `、${ws.sync.reason}` : ""}）。空の一覧や「保存されていない」として扱わない`);
   return { ws, list };
 }

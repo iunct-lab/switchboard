@@ -5,12 +5,22 @@ Verified 2026-09-05 against **codex-cli 0.148.0-alpha.9** (driven from Bun). Rec
 ## Invocation
 
 ```
-codex app-server --listen stdio://        # cwd = task cwd
+codex app-server --listen stdio:// -c features.memories=false        # cwd = task cwd
 ```
 
 One JSON-RPC 2.0 message per line on stdin/stdout. Protocol types come from `codex app-server generate-ts`; the subset the adapter uses is generated into `packages/adapters/codex/src/generated/` from the installed Codex on every typecheck (`bun run codex:types`) and is not kept in Git.
 
 Detection order: `codex` on `PATH` → unavailable with the official installer hint `curl -fsSL https://chatgpt.com/codex/install.sh | sh`. Nothing is bundled; login (`~/.codex/auth.json`) is the user's own.
+
+## Memory is off
+
+The daemon starts app-server as `codex app-server --listen stdio:// -c features.memories=false`, before any `CodexAdapterOptions.config` entry. It does so regardless of `~/.codex/config.toml`, which it never writes, and of the default of a fresh profile (memory v2 is on by default for fresh profiles since 0.165.0).
+
+Why: README's "Text stays text" keeps knowledge as Markdown in a git repo you own. Codex memory is an sqlite under `~/.codex` that a Claude task cannot read, so rules collected there would diverge from the written ones. Rules go into the written docs on both runners. There is no setting for this, and a Codex started outside Switchboard is not touched.
+
+Verified 2026-10-29 on codex-cli 0.165.0: `codex -c features.memories=false features list` shows `memories` as false. Verified 2026-10-30 on 0.166.0 with `[features] memories = true` in a temporary `CODEX_HOME`: the same command shows false and true without the override, and `config/read` from an app-server started with the daemon's arguments returns `memories: false` (true without them).
+
+If a later version stops honouring the override, the runner's option on Home says so in its tooltip, which is where the web UI shows `note` (while the login is expired, that tooltip shows the login hint instead): `detect()`, at daemon start and on each login recheck, runs `codex -c features.memories=false features list` and, when the command fails, the `memories` row is missing or not false, or there is no answer in 5 seconds, adds a `note` naming `features.memories`. When memory is off it adds nothing.
 
 ## Handshake
 

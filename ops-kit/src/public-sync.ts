@@ -69,7 +69,7 @@ function osUser(): string {
   }
 }
 
-/** `err`: the first line of stderr, kept for the commands whose reason the operator needs (a refused merge). */
+/** `err`: the first line of stderr: a failed command's error carries it (`ok`, `stderrLine`), the rate-limit retry reads it. */
 export type Run = (cmd: string[], opts?: { input?: string; env?: Record<string, string> }) => { code: number; out: string; err?: string };
 
 /**
@@ -84,10 +84,31 @@ export type Run = (cmd: string[], opts?: { input?: string; env?: Record<string, 
  * the change. `adoptBaseline`: with `versioning`, give a published target without a version record its baseline (`releaseBaseline`). */
 export type Options = { host?: HostAws; privateRepo: string; target: string; include?: string[]; exclude?: string[]; rewrite?: string[]; versioning?: "independent"; source?: string; targetUrl?: string; dryRun?: boolean; adopted?: boolean; adoptBaseline?: boolean; user?: string; serviceUsers?: string[] };
 
-const ok = (r: { code: number; out: string }, cmd: string[]) => {
-  if (r.code !== 0) throw new Error(`failed: ${cmd.join(" ")}`);
+/** The first line of a failed command's stderr for its error, withheld when it has a secret's shape; the exit code when it is empty. */
+export function stderrLine(r: { code: number; err?: string }): string {
+  const line = r.err?.trim().split("\n")[0] ?? "";
+  if (!line) return `(exit ${r.code})`;
+  const kinds = [...new Set(findSecrets(line).map((h) => h.kind))];
+  return kinds.length ? `(stderr withheld: ${kinds.join(",")})` : line;
+}
+
+/** `failed: <cmd>: <the first line of its stderr>`: the reason (an expired login, GitHub's rate limit) is in the error itself. */
+export const ok = (r: { code: number; out: string; err?: string }, cmd: string[]) => {
+  if (r.code !== 0) throw new Error(`failed: ${cmd.join(" ")}${r.err?.trim() ? ": " : " "}${stderrLine(r)}`);
   return r.out;
 };
+
+/**
+ * `cmd` once more after 60 seconds when GitHub's rate limit refused it (GitHub asks to wait at least a minute before a retry
+ * after a secondary rate limit): `gh pr create` and `gh pr merge` share the user's GraphQL budget with the other work on the host.
+ * Any other failure (a login, an input) is returned as it is. The wait goes through `run`, so a test's run takes it without waiting.
+ */
+function retryOnRateLimit(run: Run, cmd: string[], o?: Parameters<Run>[1]): ReturnType<Run> {
+  const r = run(cmd, o);
+  if (r.code === 0 || !/rate limit/i.test(r.err ?? "")) return r;
+  run(["sleep", "60"]);
+  return run(cmd, o);
+}
 
 /**
  * Which lines are `## ` headings: not the ones inside a fenced code block (CommonMark: a fence of 3+ backticks or
@@ -433,7 +454,7 @@ export function sync(opts: Options, run: Run, publication?: Publication): string
   } else {
     // Forced: a closed sync PR of the same tag leaves its branch behind, and no open sync PR uses it (checked above).
     git(["push", "-q", url, `+${commit}:refs/heads/${branch}`]);
-    const pr = ok(run(["gh", "pr", "create", "-R", opts.target, "--base", "main", "--head", branch, "--title", title, "--body-file", "-"], { input: "" }), ["gh", "pr", "create"]);
+    const pr = ok(retryOnRateLimit(run, ["gh", "pr", "create", "-R", opts.target, "--base", "main", "--head", branch, "--title", title, "--body-file", "-"], { input: "" }), ["gh", "pr", "create"]);
     log.push(`opened ${pr}`);
     // a failed merge leaves the PR open with the reason; the next run merges it
     merge(branch, opts, run, log);
@@ -461,8 +482,8 @@ export function releaseBaseline(opts: Options, run: Run, commit: string, version
 
 /** Rebase and merge (the public main takes PRs only, rebased): the head commit keeps its title, the version. */
 function merge(pr: string, opts: Options, run: Run, log: string[]): void {
-  const r = run(["gh", "pr", "merge", pr, "-R", opts.target, "--rebase", "--delete-branch"]);
-  if (r.code !== 0) throw new Error(`could not merge sync PR ${pr} on ${opts.target} (it stays open; the next run merges it): ${r.err || `gh pr merge exited ${r.code}`}`);
+  const r = retryOnRateLimit(run, ["gh", "pr", "merge", pr, "-R", opts.target, "--rebase", "--delete-branch"]);
+  if (r.code !== 0) throw new Error(`could not merge sync PR ${pr} on ${opts.target} (it stays open; the next run merges it): ${r.err?.trim() ? stderrLine(r) : `gh pr merge exited ${r.code}`}`);
   log.push(`merged sync PR ${pr} on ${opts.target}`);
 }
 

@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent } from "@switchboard/protocol";
-import { codexSessionExists, createCodexAdapter } from "./index.ts";
+import { bedrockModelName, CODEX_BEDROCK_MODELS, codexSessionExists, createCodexAdapter, memoryOffNote } from "./index.ts";
 
 const FAKE = new URL("../fixtures/fake-app-server.ts", import.meta.url).pathname;
 
@@ -109,6 +109,111 @@ describe("effort (#833)", () => {
       expect(wire().find((m) => m.method === "turn/start").params).not.toHaveProperty("effort");
     } finally {
       rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("bedrock (#1731)", () => {
+  test("app-server gets the amazon-bedrock provider and region only when StartOptions.bedrock is set", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sb-codex-bedrock-"));
+    const bin = join(dir, "codex");
+    writeFileSync(bin, `#!/bin/sh\nprintf '%s\\n' "$@" > "$OUT"\nenv > "$OUT.env"\n`, { mode: 0o755 });
+    const run = async (name: string, bedrock?: { region: string }) => {
+      const out = join(dir, name);
+      const s = createCodexAdapter({ bin, codexHome: dir, config: ["x=1"] }).start({ cwd: dir, scope: [dir], prompt: "p", env: { OUT: out }, bedrock }, () => undefined);
+      await s.exited;
+      return { argv: readFileSync(out, "utf8").trim().split("\n"), env: readFileSync(`${out}.env`, "utf8") };
+    };
+    try {
+      const plain = await run("plain");
+      expect(plain.argv).toEqual(["app-server", "--listen", "stdio://", "-c", "features.memories=false", "-c", "x=1"]);
+      const bedrock = await run("bedrock", { region: "ap-northeast-1" });
+      expect(bedrock.argv).toEqual(["app-server", "--listen", "stdio://", "-c", "features.memories=false", "-c", "x=1", "-c", 'model_provider="amazon-bedrock"', "-c", 'model_providers.amazon-bedrock.aws.region="ap-northeast-1"']);
+      // the environment is the same either way: no key or variable is added for Bedrock
+      const names = (env: string) => env.split("\n").map((l) => l.split("=")[0]).filter((n) => n && n !== "OUT").sort();
+      expect(names(bedrock.env)).toEqual(names(plain.env));
+      expect(CODEX_BEDROCK_MODELS.map((m) => m.value)).toEqual(["openai.gpt-6.1-sol", "openai.gpt-6-astra", "openai.gpt-6-luna"]);
+      expect(createCodexAdapter().bedrockModels).toBe(CODEX_BEDROCK_MODELS);
+      // the model the usage is reported under: the Bedrock id on Bedrock (also for the config.toml default), as is otherwise
+      expect(bedrockModelName({ bedrock: { region: "ap-northeast-1" } }, "gpt-6-luna")).toBe("openai.gpt-6-luna");
+      expect(bedrockModelName({ bedrock: { region: "ap-northeast-1" } }, "openai.gpt-6.1-sol")).toBe("openai.gpt-6.1-sol");
+      expect(bedrockModelName({}, "gpt-6-luna")).toBe("gpt-6-luna");
+      expect(bedrockModelName({ bedrock: { region: "ap-northeast-1" } }, undefined)).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("on Bedrock a task with no model and no config.toml model reports usage under the model app-server runs, as a Bedrock id", async () => {
+    const home = mkdtempSync(join(tmpdir(), "sb-codex-bedrock-default-"));
+    const events: AgentEvent[] = [];
+    const s = createCodexAdapter({ bin: FAKE, codexHome: home }).start({ cwd: home, scope: [home], prompt: "p", permissionMode: "auto", bedrock: { region: "ap-northeast-1" } }, (e) => events.push(e));
+    try {
+      const deadline = Date.now() + 5000;
+      while (!events.some((e) => e.t === "permission.ask") && Date.now() < deadline) await Bun.sleep(20);
+      const ask = events.find((e) => e.t === "permission.ask");
+      if (ask?.t === "permission.ask") s.respondPermission(ask.id, "allow");
+      while (!events.some((e) => e.t === "usage") && Date.now() < deadline) await Bun.sleep(20);
+      expect(events.filter((e) => e.t === "usage").map((e) => (e.t === "usage" ? e.model : ""))).toContain("openai.gpt-6-luna");
+    } finally {
+      await s.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("memories", () => {
+  test("memories: app-server is started with features.memories=false", async () => {
+    const home = mkdtempSync(join(tmpdir(), "sb-codex-memories-"));
+    const log = join(home, "wire.jsonl");
+    const s = createCodexAdapter({ bin: FAKE, codexHome: home, config: [`test_wire_log=${log}`] }).start({ cwd: home, scope: [home], prompt: "p", permissionMode: "auto" }, () => {});
+    try {
+      const argv = () => {
+        try {
+          return (JSON.parse(readFileSync(log, "utf8").split("\n")[0]!) as { argv: string[] }).argv;
+        } catch {
+          return undefined;
+        }
+      };
+      const deadline = Date.now() + 5000;
+      while (!argv() && Date.now() < deadline) await Bun.sleep(20);
+      const got = argv() ?? [];
+      expect(got[got.indexOf("features.memories=false") - 1]).toBe("-c");
+    } finally {
+      await s.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("memories note: detect warns only when memories stays on", async () => {
+    const before = process.env.FAKE_CODEX_MEMORIES;
+    try {
+      process.env.FAKE_CODEX_MEMORIES = "true";
+      expect((await createCodexAdapter({ bin: FAKE }).detect()).note).toContain("features.memories");
+      process.env.FAKE_CODEX_MEMORIES = "false";
+      expect((await createCodexAdapter({ bin: FAKE }).detect()).note).toBeUndefined();
+    } finally {
+      if (before === undefined) delete process.env.FAKE_CODEX_MEMORIES;
+      else process.env.FAKE_CODEX_MEMORIES = before;
+    }
+  });
+
+  test("memories note: a two-word stage is read as off, a CLI without the row warns", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sb-codex-memories-note-"));
+    const bin = join(dir, "codex");
+    const script = (row: string) => {
+      writeFileSync(bin, `#!/bin/sh\necho '${row}'\n`);
+      chmodSync(bin, 0o755);
+      return bin;
+    };
+    try {
+      expect(await memoryOffNote(script("memories   under development   false"))).toBeUndefined();
+      expect(await memoryOffNote(script("other_feature   stable   false"))).toContain("features.memories");
+      // a false row does not count when the command failed or was cut off after printing it
+      expect(await memoryOffNote(script("memories   stable   false'; exit 1; echo '"))).toContain("features.memories");
+      expect(await memoryOffNote(script("memories   stable   false'; sleep 5; echo '"), 100)).toContain("features.memories");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

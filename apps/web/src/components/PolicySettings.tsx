@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { AnswerPolicy } from "@switchboard/protocol";
 import { api } from "../api.ts";
-import { policyRow, policyState, useLines } from "../policies.ts";
+import { editWarnings, policyRow, policyState, useLines } from "../policies.ts";
 import { jstDay } from "../time.ts";
 
 /** 回答の方針 (#938): the saved policies with their range, expiry and uses; edited or revoked here, never deleted. */
@@ -81,6 +81,11 @@ export function PolicySettings(props: { onError: (msg: string) => void }) {
                   期限
                   <input type="date" value={editing.expires} onChange={(e) => setEdit({ ...editing, expires: e.target.value })} />
                 </label>
+                {editWarnings(p, editing.target).map((w) => (
+                  <div key={w} className="hint">
+                    {w}
+                  </div>
+                ))}
                 {editing.error && <div className="hint warn">{editing.error}</div>}
                 <div className="policy-actions">
                   <button className="pri" onClick={save}>

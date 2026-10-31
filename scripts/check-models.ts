@@ -38,7 +38,7 @@ import { fileRequest } from "./file-request";
 export type Runner = "claude" | "codex";
 
 /**
- * Ids a person has looked at and decided to list or leave out (2026-10-07, claude 2.1.293 / codex-cli 0.159.2).
+ * Ids a person has looked at and decided to list or leave out (2026-10-30, claude 2.1.312 / codex-cli 0.166.0).
  * When a new id shows up as unseen, decide whether it goes in the settings screen's list first, then add it here.
  */
 export const REVIEWED: Record<Runner, string[]> = {
@@ -50,7 +50,7 @@ export const REVIEWED: Record<Runner, string[]> = {
     "claude-opus-4-0", "claude-opus-4-1", "claude-opus-4-5", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5",
     "claude-sonnet-4-0", "claude-sonnet-4-5", "claude-sonnet-4-6", "claude-sonnet-5", "claude-sonnet-5-5",
   ],
-  codex: ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
+  codex: ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
 };
 
 const CLAUDE_ENTRY = /\{id:"(claude-[a-z0-9-]+)",family:"([a-z]+)",display_name:"([^"]+)"/g;

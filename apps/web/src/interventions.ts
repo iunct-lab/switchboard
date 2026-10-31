@@ -28,6 +28,7 @@ export function interventionRows(now: InterventionWindow, before: InterventionWi
     partial ? { key, label, now: `${a} 以上`, before: `${b} 以上`, change: "—" } : { key, label, now: String(a), before: String(b), change: diff(a, b) };
   return [
     plain("approval", "承認", now.byKind.approval, before.byKind.approval),
+    plain("classifier", "分類器の後", now.byKind.classifier, before.byKind.classifier),
     plain("decision", "判断", now.byKind.decision, before.byKind.decision),
     plain("resume", "再開", now.byKind.resume, before.byKind.resume),
     plain("total", "合計", now.total, before.total),
@@ -48,6 +49,7 @@ export const unknownLine = (w: InterventionWindow): string | null => (w.unknown 
 export const REASON_LABEL: Record<InterventionReason["reason"], string> = {
   "usage-limit": "使用上限",
   "github-limit": "GitHub の上限",
+  "disk-full": "ディスクの空き切れ",
   transient: "一時障害",
   auth: "認証",
   permission: "承認待ち",

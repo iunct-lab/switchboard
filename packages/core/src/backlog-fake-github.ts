@@ -4,7 +4,7 @@
  */
 import type { GhRunner } from "./backlog.ts";
 
-export type Issue = { node_id: string; number: number; title: string; body: string; state: string; labels: string[]; parent: number | null; milestone?: number | null; comments: Array<{ node_id: string; body: string; created_at: string }> };
+export type Issue = { node_id: string; number: number; title: string; body: string; state: string; labels: string[]; parent: number | null; milestone?: number | null; closedAt?: string | null; comments: Array<{ node_id: string; body: string; created_at: string }> };
 
 /** The Project's Status options; option `o<n>` is the n-th. */
 const STATUS = ["Backlog", "Ready", "In progress", "In review", "Done"];
@@ -47,7 +47,7 @@ export function fakeGithub(now: () => number) {
       if (q.includes("timelineItems")) {
         // the read after a write: the Issue's fields (or the item's field), the history since $s, the viewer
         const i = issues.get(v.n);
-        const since = String(v.s);
+        const since = String(v.s ?? "");
         const ev = (e: (typeof history)[number], node: Record<string, unknown>) => ({ actor: { login: e.by }, createdAt: e.at, ...node });
         const events = history.filter((e) => e.issue === v.n && e.at >= since && e.field !== "body").map((e) =>
           e.field === "title" ? ev(e, { __typename: "RenamedTitleEvent", currentTitle: e.value })
@@ -60,7 +60,7 @@ export function fakeGithub(now: () => number) {
         const edits = history.filter((e) => e.issue === v.n && e.field === "body").reverse().map((e) => ({ editedAt: e.at, editor: { login: e.by }, diff: e.deleted ? null : e.value, deletedAt: e.deleted ? e.at : null }));
         // the body's content edits are asked for a body write only (#1384 review)
         if (q.includes("userContentEdits") && state.lastWrite !== "body") throw new Error(`the body's edits were asked after a write of ${state.lastWrite || "nothing"}`);
-        const issue = i && { id: i.node_id, title: i.title, body: i.body, state: i.state, milestone: milestones.find((m) => m.number === i.milestone) ?? null, parent: i.parent && { id: issues.get(i.parent)!.node_id, number: i.parent }, labels: { nodes: i.labels.map((name) => ({ name })) },
+        const issue = i && { id: i.node_id, title: i.title, body: i.body, state: i.state, closedAt: i.closedAt ?? null, milestone: milestones.find((m) => m.number === i.milestone) ?? null, parent: i.parent && { id: issues.get(i.parent)!.node_id, number: i.parent }, labels: { nodes: i.labels.map((name) => ({ name })) },
           timelineItems: { pageInfo: { hasNextPage: state.historyNext }, nodes: events }, userContentEdits: { pageInfo: { hasNextPage: state.editsNext }, nodes: edits } };
         return answer({ data: { viewer: { login: state.viewer }, repository: { issue }, node: v.i ? { fieldValueByName: items.get(v.i)?.fields[v.f] != null ? { name: items.get(v.i)!.fields[v.f] } : null } : null } });
       }

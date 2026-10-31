@@ -319,7 +319,7 @@ describe("check-models", () => {
       }, real) as typeof fetch;
       try {
         install(REVIEWED.claude, REVIEWED.codex);
-        expect(await checkModels(sources(hostReaders(dir)))).toEqual({ lines: ["claude: ズレなし（22 件）", "codex: ズレなし（8 件）", "unpriced (ledger): なし"], code: 0, findings: [] });
+        expect(await checkModels(sources(hostReaders(dir)))).toEqual({ lines: ["claude: ズレなし（22 件）", "codex: ズレなし（9 件）", "unpriced (ledger): なし"], code: 0, findings: [] });
         expect(called).toBe(0); // the table comparison alone never touches the network
         install(REVIEWED.claude.filter((id) => id !== "claude-opus-5-5"), [...REVIEWED.codex, "gpt-7"]);
         expect(await checkModels(sources(hostReaders(dir), PRICING, hostVersions(dir)))).toEqual({

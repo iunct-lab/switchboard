@@ -533,10 +533,22 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
 
       {!cloud && props.task.resumeAt !== null && (
         <div className="blk">
-          <h5>{props.task.resumeReason === "github" ? "GitHub の API 上限" : "使用上限"}</h5>
+          <h5>{props.task.resumeReason === "disk" ? "ディスクの空き切れ" : props.task.resumeReason === "github" ? "GitHub の API 上限" : "使用上限"}</h5>
           <div className="hint">
-            {props.task.resumeReason === "github" ? "GitHub の API 上限で待っています。" : "ランナーの使用上限で止まりました。"}
-            {!props.task.runnerSessionId ? (
+            {props.task.resumeReason === "disk" ? "ディスクの空き切れで止まりました。" : props.task.resumeReason === "github" ? "GitHub の API 上限で待っています。" : "ランナーの使用上限で止まりました。"}
+            {props.task.resumeReason === "disk" ? (
+              !props.task.runnerSessionId ? (
+                "再開できるセッションがありません。返信すると新しいセッションで始まります。"
+              ) : autoResumeOn === false ? (
+                "空きが 1 GiB に戻ったら再開できます。自動再開は OFF（Home のランナー設定で ON にできます）。"
+              ) : autoResumeOn === true ? (
+                <>
+                  空きが 1 GiB に戻ったら同じセッションで自動再開します（次の確認は <b>{fmtClock(props.task.resumeAt)}</b>）。
+                </>
+              ) : (
+                "空きが 1 GiB に戻るのを待っています。自動再開の設定はデーモンに接続すると表示されます。"
+              )
+            ) : !props.task.runnerSessionId ? (
               <>
                 <b>{fmtClock(props.task.resumeAt)}</b> に枠が戻る見込みですが、再開できるセッションがありません。返信すると新しいセッションで始まります。
               </>
@@ -559,7 +571,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
             )}
           </div>
           <div className="actions" style={{ marginTop: 6 }}>
-            <button className="pri" disabled={resumeBusy || busy || !props.task.runnerSessionId} onClick={() => resumeCall(() => api.resumeNow(props.task.id))} title={props.task.resumeReason === "github" ? "待たずに今すぐ「続きを」と送る。GitHub の枠がまだ戻っていなければコマンドがまた上限に当たり、次の時刻で待ち直します" : "待たずに今すぐ「続きを」と送る。枠がまだ戻っていなければまた止まり、次の時刻で待ち直します"}>
+            <button className="pri" disabled={resumeBusy || busy || !props.task.runnerSessionId} onClick={() => resumeCall(() => api.resumeNow(props.task.id))} title={props.task.resumeReason === "disk" ? "待たずに今すぐ「続きを」と送る。空きが戻っていなければまた止まり、空き待ちに戻ります" : props.task.resumeReason === "github" ? "待たずに今すぐ「続きを」と送る。GitHub の枠がまだ戻っていなければコマンドがまた上限に当たり、次の時刻で待ち直します" : "待たずに今すぐ「続きを」と送る。枠がまだ戻っていなければまた止まり、次の時刻で待ち直します"}>
               今すぐ再開
             </button>
             <button disabled={resumeBusy} onClick={() => resumeCall(() => api.cancelResume(props.task.id))} title="自動再開をやめる。返信すればいつでも再開できます">

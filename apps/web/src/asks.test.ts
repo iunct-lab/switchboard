@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Ask, AskBatch } from "@switchboard/protocol";
-import { answerButtons, batchLines, hiddenByBatches, grantOf, taskAsks, withoutGrant, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, previousLines, scopeLabel, blockerLines, groupAsks, keptAnswers, KIND_LABEL, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, unblocksLine, workspaceChips, workspaceSections, type Answered } from "./asks.ts";
+import { answerButtons, batchLines, hiddenByBatches, grantOf, taskAsks, withoutGrant, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, broadTarget, previousLines, scopeLabel, blockerLines, groupAsks, keptAnswers, KIND_LABEL, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, unblocksLine, workspaceChips, workspaceSections, type Answered } from "./asks.ts";
 
 const ask = (over: Partial<Ask>): Ask => ({
   id: "a", kind: "decision", needs: "person", state: "open", at: 1, changedAt: 1, workspace: null, pbi: null, issue: null, task: null, reason: null, question: null, choices: [], grants: [], grant: null, recommendation: null, next: null,
@@ -175,6 +175,20 @@ test("policy: summary — an exec approval with two conditions and a 30-day expi
   const input = { scope: "repo" as const, target: "bun test*", when: [{ key: "area", value: "web" }, { key: "ci", value: "green" }], expiresAt: NOW + 30 * 86_400_000 };
   expect(policySummary(a, input, "bun test を許可", NOW)).toEqual(["操作: exec", "対象: bun test*", "条件: area=web ci=green", "期限: 2026-11-16（あと 30 日）", "回答: bun test を許可"]);
   expect(policySummary(a, { ...input, when: [] }, "許可", NOW)[2]).toBe("条件: なし");
+});
+
+test("policySummary warns on a target that matches every subcommand", () => {
+  const a = ask({ subject });
+  const input = { scope: "repo" as const, target: "bun *", when: [], expiresAt: NOW + 30 * 86_400_000 };
+  const warn = (target: string, x = a) => policySummary(x, { ...input, target }, "許可", NOW).filter((l) => l.startsWith("広い指定"));
+  expect(policySummary(a, input, "許可", NOW).slice(0, 3)).toEqual(["操作: exec", "対象: bun *", "広い指定: bun のどのサブコマンドにも当たります"]);
+  expect(warn("cmd:git *")).toEqual(["広い指定: git のどのサブコマンドにも当たります"]);
+  expect(warn("npm{,x} *")).toEqual(["広い指定: npm / npmx のどのサブコマンドにも当たります"]);
+  expect(warn("bun test *")).toEqual([]);
+  expect(warn("git status")).toEqual([]);
+  expect(warn("src/*", ask({ subject: { ...subject, op: "write" } }))).toEqual([]);
+  expect(broadTarget("exec", "bun * ?")).toEqual(["bun"]);
+  expect([broadTarget("exec", "bun"), broadTarget("exec", "b* test"), broadTarget("write", "src *")]).toEqual([null, null, null]);
 });
 
 test("policy: scope labels — the three ranges name the PBI number and the workspace", () => {

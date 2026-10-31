@@ -1,3 +1,4 @@
+import { recordingText, skipRecordings } from "../../../scripts/recordings.ts";
 import { describe, expect, test } from "bun:test";
 import { decisionsFromOtlp } from "./otel.ts";
 
@@ -13,6 +14,24 @@ describe("decisionsFromOtlp (#2236)", () => {
     expect(out).toEqual([
       { t: "classifier.decision", verdict: "block", category: "Irreversible Local Destruction", mode: "auto", tool: "Bash", callId: "toolu_b" },
       { t: "classifier.decision", verdict: "allow", category: null, mode: "auto", tool: "Read", callId: "toolu_a" },
+    ]);
+  });
+
+  test.skipIf(skipRecordings("packages/core/fixtures/otel-classifier-stop.jsonl"))("decisionsFromOtlp: a recorded block keeps its category (classifier, 2.1.312)", () => {
+    const out = recordingText("packages/core/fixtures/otel-classifier-stop.jsonl").split("\n").filter(Boolean).flatMap((l) => decisionsFromOtlp(JSON.parse(l)));
+    expect(out.map(({ verdict, category, mode, tool }) => ({ verdict, category, mode, tool }))).toEqual([
+      { verdict: "allow", category: null, mode: "auto", tool: "Bash" },
+      { verdict: "block", category: "interfere_with_workloads", mode: "auto", tool: "Bash" },
+    ]);
+    expect(JSON.stringify(out)).not.toContain("example.invalid");
+  });
+
+  test.skipIf(skipRecordings("packages/core/fixtures/otel-classifier-ask.jsonl"))("decisionsFromOtlp: a recorded ask answered by the person is no verdict, only the stops before it count (classifier, 2.1.314)", () => {
+    const out = recordingText("packages/core/fixtures/otel-classifier-ask.jsonl").split("\n").filter(Boolean).flatMap((l) => decisionsFromOtlp(JSON.parse(l)));
+    expect(out.map(({ verdict, category }) => ({ verdict, category }))).toEqual([
+      { verdict: "allow", category: null },
+      { verdict: "block", category: "interfere_with_workloads" },
+      { verdict: "block", category: "interfere_with_workloads" },
     ]);
   });
 

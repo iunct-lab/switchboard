@@ -44,7 +44,7 @@ export function stopDisplay(s: StopSummary): StopDisplay {
   const answer = s.lastAnswer ? (s.lastAnswer.ref.startsWith("seq:") ? "あなたの回答あり" : clip(s.lastAnswer.ref)) : "なし";
   return {
     key: s.key,
-    title: `${clip(s.op)}${s.target ? ` ${clip(s.target)}` : ""}: ${s.reason}`,
+    title: `${clip(s.op)}${s.target ? ` ${clip(s.target)}` : ""}: ${s.reason === "disk-full" ? "ディスクの空き切れ" : s.reason}`,
     count: s.count > 1 ? `${s.count} 回目` : "初回",
     answer,
     changes: s.changes.length ? s.changes.map((c) => `${CHANGE_LABEL[c.kind] ?? UNKNOWN}（${clip(c.detail)}）`).join("、") : s.count <= 1 ? "なし" : "なし（同じ条件）",

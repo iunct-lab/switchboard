@@ -70,6 +70,32 @@ export const CODEX_MODELS: ModelOption[] = [
   { value: "gpt-6-luna", label: "GPT-6 Luna" },
 ];
 
+/**
+ * The same models by Codex's own Amazon Bedrock ids (#1731): `openai.<id>`, as the CLI's Bedrock table spells them
+ * (codex 0.165.0). GPT-6 Sol has no Bedrock id there, so it is not offered. Offered only while the runner is switched
+ * to Bedrock; which of them the account can call is decided by IAM.
+ */
+const NO_BEDROCK = new Set(["gpt-6-sol"]);
+export const CODEX_BEDROCK_MODELS: ModelOption[] = CODEX_MODELS.filter((m) => !NO_BEDROCK.has(m.value)).map((m) => ({ value: `openai.${m.value}`, label: m.label }));
+
+/**
+ * The model name the session reports (#1731). On Bedrock a plain id (the config.toml default, or the model app-server
+ * says it runs, when the task named none) is what Codex calls as `openai.<id>`, and is reported so: the ledger bills a
+ * Bedrock id at the API price.
+ */
+export function bedrockModelName(opts: Pick<StartOptions, "bedrock">, model: string | undefined): string | undefined {
+  return opts.bedrock && model && !/^([a-z]+\.)?openai\./.test(model) ? `openai.${model}` : model;
+}
+
+/**
+ * What makes app-server run on Amazon Bedrock (#1731): only when the user chose it (`opts.bedrock`), two config
+ * overrides; without it nothing is added. `~/.codex/config.toml` is not written and no Bedrock API key is used: the CLI
+ * takes AWS credentials from the usual AWS places.
+ */
+export function bedrockConfigArgs(opts: Pick<StartOptions, "bedrock">): string[] {
+  return opts.bedrock ? ["-c", 'model_provider="amazon-bedrock"', "-c", `model_providers.amazon-bedrock.aws.region=${JSON.stringify(opts.bedrock.region)}`] : [];
+}
+
 /** Thinking efforts offered in the UI (#833): the reasoning efforts every model above takes (`codex debug models`, 0.162.1). */
 export const CODEX_EFFORTS: ModelOption[] = ["low", "medium", "high", "xhigh", "max"].map((value) => ({ value, label: value }));
 
@@ -196,6 +222,36 @@ export async function loginStatus(exe: string, timeoutMs = 10_000): Promise<Runn
 }
 
 /**
+ * Codex's own memory stays off for every app-server the daemon starts, whatever config.toml or a fresh profile's default
+ * says: an sqlite under ~/.codex is not Markdown in a repo, and a Claude task cannot read it (docs/design/codex-app-server.md).
+ */
+const MEMORY_OFF = "features.memories=false";
+
+/**
+ * A warning when this Codex does not turn memory off under the override: no `memories` row, still on, a failed
+ * command, or no answer within `timeoutMs`. Nothing when it is off.
+ */
+export async function memoryOffNote(exe: string, timeoutMs = 5_000): Promise<string | undefined> {
+  const warning = "Codex の memory を切れません（features.memories）。この版では Task の記憶が ~/.codex に溜まります";
+  try {
+    const proc = Bun.spawn([exe, "-c", MEMORY_OFF, "features", "list"], { stdin: "ignore", stdout: "pipe", stderr: "ignore", env: childEnv() });
+    let stdout = "";
+    const decoder = new TextDecoder();
+    const drained = (async () => {
+      for await (const chunk of proc.stdout) stdout += decoder.decode(chunk, { stream: true });
+    })().catch(() => undefined);
+    const timer = setTimeout(() => proc.kill("SIGKILL"), timeoutMs);
+    const code = await proc.exited;
+    clearTimeout(timer);
+    await Promise.race([drained, Bun.sleep(500)]);
+    // The stage column can be two words ("under development"), so only the first and last columns are read.
+    return code === 0 && /^memories\s.*\sfalse\s*$/m.test(stdout) ? undefined : warning;
+  } catch {
+    return warning;
+  }
+}
+
+/**
  * Whether a rollout of the thread (`<codexHome>/sessions/YYYY/MM/DD/rollout-…-<id>.jsonl`) is on this machine. The
  * default home is the spawned codex's: CODEX_HOME (inherited by the child), else ~/.codex.
  */
@@ -213,6 +269,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): RunnerAda
     permissionModes: CODEX_PERMISSION_MODES,
     defaultPermissionMode: CODEX_DEFAULT_PERMISSION_MODE,
     models: CODEX_MODELS,
+    bedrockModels: CODEX_BEDROCK_MODELS,
     efforts: CODEX_EFFORTS,
     loginArgs: ["login", "--device-auth"],
     loginHosts: ["auth.openai.com"],
@@ -227,11 +284,13 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): RunnerAda
         await proc.exited;
         const version = text.match(/\d+\.\d+\.\d+(?:-[\w.]+)?/)?.[0] ?? text;
         const available = proc.exitCode === 0;
+        const fallbackNote = fallback ? `using the codex bundled with ChatGPT.app (fallback). Prefer the official installer: ${CODEX_INSTALL_HINT}` : undefined;
+        const notes = [fallbackNote, available ? await memoryOffNote(exe) : undefined].filter(Boolean);
         return {
           available,
           version,
           path: exe,
-          note: fallback ? `using the codex bundled with ChatGPT.app (fallback). Prefer the official installer: ${CODEX_INSTALL_HINT}` : undefined,
+          note: notes.length ? notes.join(" / ") : undefined,
           ...(available ? { login: await loginStatus(exe), loginHint: CODEX_LOGIN_HINT } : {}),
         };
       } catch (e) {
@@ -282,8 +341,9 @@ class CodexSession implements RunnerSession {
     private emit: (ev: AgentEvent) => void,
     private o: CodexAdapterOptions,
   ) {
-    const args = ["app-server", "--listen", "stdio://"];
+    const args = ["app-server", "--listen", "stdio://", "-c", MEMORY_OFF];
     for (const c of o.config ?? []) args.push("-c", c);
+    args.push(...bedrockConfigArgs(opts));
     this.proc = Bun.spawn([bin, ...args], { cwd: opts.cwd, env: childEnv(process.env, appServerEnv(opts)), stdin: "pipe", stdout: "pipe", stderr: "pipe", detached: true });
     const stderrDone = this.pumpStderr();
     const stdoutDone = this.pumpStdout();
@@ -317,10 +377,13 @@ class CodexSession implements RunnerSession {
       ? await this.request("thread/resume", buildThreadResumeParams(this.opts, resume, this.o))
       : await this.request("thread/start", buildThreadStartParams(this.opts, this.o));
     if (res.error) throw new Error(res.error.message ?? "thread/start failed");
-    const thread = (res.result as { thread?: Thread } | undefined)?.thread;
+    const started = res.result as { thread?: Thread; model?: string } | undefined;
+    const thread = started?.thread;
     if (!thread) throw new Error("thread/start returned no thread");
     this.threadId = thread.id;
-    this.parser.state.model = this.opts.model ?? defaultModelFromConfig(this.o.codexHome);
+    // on Bedrock a usage without a model would be billed as the subscription: fall back to the model app-server runs (#1731)
+    const model = this.opts.model ?? defaultModelFromConfig(this.o.codexHome);
+    this.parser.state.model = bedrockModelName(this.opts, model ?? (this.opts.bedrock ? started?.model : undefined));
     for (const ev of this.parser.threadStarted(thread)) this.emit(ev);
     this.enqueueTurn(this.opts.preamble ? `${this.opts.preamble}\n\n${this.opts.prompt}` : this.opts.prompt);
     for (const text of this.queue.splice(0)) this.enqueueTurn(text);

@@ -55,6 +55,8 @@ describe("answer policies", () => {
 
   test("check", () => {
     for (const target of ["*", "**", "**/*", "cmd:*", "cmd:{*,x}", "{a,{*,b}}"]) refused(input({ target }), ctx());
+    // a broad target is warned about on screen, not refused (#1765)
+    expect(checkPolicy(input({ target: "bun *" }), ctx()).ok).toBe(true);
     refused(input({ target: "git push*" }), ctx());
     refused(input({ expiresAt: null }), ctx());
     refused(input({ expiresAt: NOW + 91 * DAY }), ctx());

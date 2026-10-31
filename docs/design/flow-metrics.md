@@ -23,7 +23,8 @@
 | `review` | その PR の最初のレビュー | その PR のマージ。PR ごとに出して中央値 |
 | `close` | 最後の PR のマージ | PBI を閉じた時刻 |
 
-- **印**: Issue・PR の `createdAt` / `closedAt` / `mergedAt`、Task の着手コメント（`<!-- parallel-guard:task-claim -->` か、行頭が「着手」の行）、PR の `[codex|claude|dak] review` コメント（`scripts/merge-gate.ts` と同じ形）、`## 判断待ち` / `## 回答` コメント（`issue-workflow` の「判断待ちの出し方」）。どれもスキルが必ず残す
+- **どこから読むか**（2026-10-30）: Issue（PBI・Task・要望）の `createdAt` / `closedAt`、Issue のコメント、Story Points、sub-issue は**アプリの保存値**から読む（`readStoredRecords` が返す `GET /api/backlog/records`。送信待ちの編集を含む。アプリだけにある PBI も数える）。GitHub から読むのはマージ済みの PR（作成・マージの時刻と、レビューの印のコメント）だけ。PR と Task の対応は並列ガードと同じ `closesOf` の規則（本文の `Closes #N` / `Backlog-Task: N` と枝の名前 `sb/<N>-`）で読む。アプリだけのバックログの番号は GitHub の Issue と対応しないので、GitHub の `closedByPullRequestsReferences` は使わない
+- **印**: Issue・PR の `createdAt` / `closedAt` / `mergedAt`、Task の着手コメント（`<!-- parallel-guard:task-claim <token> -->` か、行頭が「着手」の行。譲って `parallel-guard:withdraw` で取り下げた token は数えない）、PR の `[codex|claude|dak] review` コメント（`scripts/merge-gate.ts` と同じ形）、`## 判断待ち` / `## 回答` コメント（`issue-workflow` の「判断待ちの出し方」）。どれもスキルが必ず残す
 - 着手の後に足した Task（レビュー・ゲートの直し、回答を受けた追加）は分解の時間ではないので、段の境目に使わない（#2684）
 - マージされていない PR（閉じただけ）は数えない。1 つの PR が複数の Task を閉じるときは 1 回だけ数える
 - **返事待ち**（`userWaitMs`）: PBI と各 Task で、`## 判断待ち` から次の `## 回答` までを Issue ごとに対にして足す。回答が無い判断待ちは 0（まだ開いているか、記録が無い）。運用の確認（マージの可否など）は Task の会話で聞くので Issue に印が無く、ここには入らない
@@ -34,7 +35,7 @@
 閉じる速さだけでは、バックログが自分で増えていないかは見えない。Task の 3 分の 1 が何かを先送りして終わり、定期実行も要望を自動で起票するので、週ごとの起票と閉鎖の差と、先送りした Task とそこから起票された Issue を並べて数える（数えるだけで、先送りを止める規則は作らない）。
 
 - **週**: UTC の月曜 0 時から 7 日（`weekStartOf`）。期間の最初の週（`days` 日前を含む週）から今の週まで、空の週も 0 で出す
-- **起票・閉鎖・純増**: 週ごとに `type:pbi` と `type:request` の Issue を、GitHub の検索の件数（`issueCount`）で数える。週 × 種類 × `created:<月曜>..<日曜>` / `closed:<月曜>..<日曜>` を別名で 1 回のクエリに読む（`growthQuery`。GitHub の日付は UTC の日）。一覧は 1,000 件で切れるが、件数には上限が無い。純増 = (PBI の起票 + 要望の起票) − (PBI の閉鎖 + 要望の閉鎖)（`backlogGrowth`）
+- **起票・閉鎖・純増**: 週ごとに `type:pbi` と `type:request` の Issue を、アプリの保存値の `createdAt` / `closedAt` で数える（`flowOfStored`。週は UTC）。保存値に無い Issue（取り込む前に閉じたものなど）は数に入らない。純増 = (PBI の起票 + 要望の起票) − (PBI の閉鎖 + 要望の閉鎖)（`backlogGrowth`）
 - **`deferred`（先送りの印）**: Task の最後の `session.end` の `summary` に「残した」「見送り」「後回し」「スコープ外」「別 Issue」のどれかがあれば付く（`DEFERRED_WORDS` / `deferredOf`、`packages/core/src/db.ts`）。週は、その最後の `session.end` の時刻で決める（`deferredTasksSince`）
 - **`createdIssues`（その Task が起票した Issue）**: Task のイベントから 2 通りで読む（`createdIssuesOf`）。(1) 入力に `gh issue create` か `request_issue.sh` を含む `tool.call` に対応する、成功した `tool.result` の中の Issue の URL。(2) アプリの Task の中の起票（gh-guard が `gh issue create` を止めるので `ops-kit backlog create` に保存され、`作りました（送信待ち）: localId <uuid>` か `#N を作りました（localId <uuid>）` の行だけが出る。それを呼ぶスクリプトでも同じ）の localId を、その呼び出しの間に保存された create（`backlog_operations`）とその記録（`backlog_records`）から repo と番号に読み戻す。列は足さず、読むたびにイベントから数える。GitHub には問い合わせない。`GET /api/tasks/:id` の `createdIssues` / `deferred`
 - **そこからの起票**: 先送りの印の付いた Task の `createdIssues` のうち、そのリポジトリの Issue の数
@@ -58,11 +59,11 @@ bun scripts/flow-report.ts [--days 30] [--repo <owner/name>] [--json <file>]   #
 W=$(mktemp -d /tmp/switchboard.flow.XXXXXX); bun scripts/flow-report.ts --days 30 --json "$W/flow.json"   # そのまま回せる例
 ```
 
-- 期間内に閉じた PBI（`type:pbi`）を GitHub から読む。`--repo` の既定は cwd の `gh repo view`
+- 期間内に閉じた PBI（`type:pbi`）をアプリの保存値から読む（`ops-kit lint` と同じ `readRecords`。アプリの Task の中で、`BACKLOG_URL` があるときだけ動く。無い・アプリに届かない・取り込む前は理由を出して exit 2）。マージ済みの PR は GitHub から読む。PR を読むリポジトリは `--repo`、無ければバックログのリポジトリ、アプリだけのバックログは cwd の `origin`（画面と同じ `prRepoOf`。どれも無ければ PR を読まず、PR の段は不明）。保存値を読む workspace は `ops-kit lint` と同じ選び方（`--repo` を付けたらそれ、無ければ `GH_REPO`、`BACKLOG_WORKSPACE`（アプリだけのバックログ）、`origin` の順）
 - 表は 2 つ。段ごとの「中央値 / p90 / 件数」（不明は件数に入らない）と、期間内に閉じた PBI の数・Story Points の合計・中央値が一番大きい段。PBI ごとの「各段 / 返事待ち / レビュー回数 / Task / 費用」。`--json` は `stages`（段ごとの p50 / p90 / count）、`pbis`、`cutPbis` ほか
-- **Switchboard の Task**: DB（`SWITCHBOARD_HOME` の `switchboard.db`、読み取り専用）から、そのリポジトリを `origin` に持つ workspace の Task のうち、工程 Task（`stage_issue` が PBI か Task の番号）または題が `#<PBI または Task の番号> ` で始まるものを数える。件数・実行時間（作成から最後のイベントまで。`routingLog` と同じ）・費用（台帳の合計）。Issue の番号はリポジトリをまたいで重なるので、workspace で絞る。DB が無い、または workspace が見つからないときは Task の列を出さない。PBI ごとに、その PBI 番号の工程 Task のうち実装（`stage_action` が `complete`。再開も 1 回）を起動した回数（`--json` の `pbis[].tasks.implementLaunches`）も数え、表の後に 2 行を出す: 「実装を 3 回以上起動した PBI: <n>/<Task を読めた PBI の数>（<%>）」（読めた PBI が無ければ「不明」）と「段 wait の中央値」。待ちの改善（#1866）が効いたかを見る数
-- 3 つ目の表は週ごとの「PBI 起票 / PBI 閉鎖 / 要望 起票 / 要望 閉鎖 / 純増 / 先送り Task / そこからの起票」（上の「バックログの純増と先送り」）。DB が無い、または workspace が見つからないときは先送りの 2 列を `-` にする。`--json` の `weeks`
-- 自分のリポジトリの表は、その clone で `bun scripts/flow-report.ts --days 30` を回すと先頭に出る
+- **Switchboard の Task**: DB（`SWITCHBOARD_HOME` の `switchboard.db`、読み取り専用）から、保存値を読んだ workspace の Task のうち、工程 Task（`stage_issue` が PBI か Task の番号）または題が `#<PBI または Task の番号> ` で始まるものを数える。件数・実行時間（作成から最後のイベントまで。`routingLog` と同じ）・費用（台帳の合計）。Issue の番号はリポジトリをまたいで重なるので、workspace で絞る。DB が無いときは Task の列を出さない。PBI ごとに、その PBI 番号の工程 Task のうち実装（`stage_action` が `complete`。再開も 1 回）を起動した回数（`--json` の `pbis[].tasks.implementLaunches`）も数え、表の後に 2 行を出す: 「実装を 3 回以上起動した PBI: <n>/<Task を読めた PBI の数>（<%>）」（読めた PBI が無ければ「不明」）と「段 wait の中央値」。待ちの改善（#1866）が効いたかを見る数
+- 3 つ目の表は週ごとの「PBI 起票 / PBI 閉鎖 / 要望 起票 / 要望 閉鎖 / 純増 / 先送り Task / そこからの起票」（上の「バックログの純増と先送り」）。DB が無いときは先送りの 2 列を `-` にする。`--json` の `weeks`
+- 自分のリポジトリの表は、その clone を見るアプリの Task の中で `bun scripts/flow-report.ts --days 30` を回すと先頭に出る
 - 読み方は下の「数の読み方」
 
 ### GraphQL の消費と止まる条件
@@ -70,10 +71,8 @@ W=$(mktemp -d /tmp/switchboard.flow.XXXXXX); bun scripts/flow-report.ts --days 3
 GitHub の GraphQL は 1 時間 5,000 ポイントをホストの全 Task が共有する。
 
 - 実行の最初に残りを読み、**500 未満なら何も読まずに理由を出して止まる**（exit 1）
-- 1 ページ（10 件。25 件では 150 件目あたりのページを GitHub が 502 / 504 で返せなかった）は Task 10 件・PR 1 件までで読む。費用は「接続の数 × 親の数」で決まるので、足りない PBI だけを 1 件ずつ広く（Task 30 件・PR 3 件）読み直す。コメントの一覧は大きさが費用に効かないので 100 件まで読む。1 回の実行が **100 ポイントを超えそうなら呼ぶ前に止まる**
-- 週の起票・閉鎖の件数は全部で 1 回の問い合わせで、実測 1 ポイント（5 週 20 件の別名で 1）。2026-10-29 の `--days 28` は全体で 81 ポイント
-- 実測では 1 PBI あたり約 0.35 ポイント。最初の形（Task 15 件・PR 2 件）はその約 2 倍かかった
-- 限界: コメントが 100 件を超える Issue・PR、広く読み直しても 30 件を超える Task や 3 件を超える PR を持つ PBI は、一覧が切れて数が少なく出る。切れた PBI は表で `*` を付け、`cutPbis` に番号を出す
+- GitHub から読むのはマージ済みの PR だけ（`fetchMergedPrs`）。期間内に閉じた PBI のうち一番古い PBI の起票の日から後にマージされた PR を、検索 1 ページ 50 件ずつ、コメント 100 件まで読む。期間内に閉じた PBI が無ければ GitHub を読まない。1 回の実行が **100 ポイントを超えそうなら呼ぶ前に止まる**
+- 限界: コメントが 100 件を超える PR を持つ PBI は、レビューの数が少なく出る。表で `*` を付け、`cutPbis` に番号を出す。Issue のコメントは保存値なので、取込みが読んだ分だけ
 - GitHub が HTTP 504 を返すことがある（読み取りだけなので、数秒おいて再実行してよい）
 
 ## Backlog の画面と `/api/flow`（#651）
@@ -81,9 +80,9 @@ GitHub の GraphQL は 1 時間 5,000 ポイントをホストの全 Task が共
 Backlog の画面の一番下に「流れ（直近 30 日）」の節がある（新しい画面・タブ・グラフは足さない）。コマンドを打てない環境でも、詰まっている段に気づいて手を打つ段を決められるようにするため。
 
 - **何を出すか**: 段ごとの中央値・p90・前の 30 日の中央値・変化（7 行）、期間内に閉じた PBI の数と Story Points、中央値が一番大きい段、段の合計が長い順の PBI 5 件（押すと GitHub の Issue が開く）。20% 以上遅くなった段は赤、20% 以上速くなった段は緑。どちらかの期間で不明の段は「—」で、変化を出さない（0 とも書かない）
-- **`GET /api/flow`**: 登録した全ワークスペースのリポジトリの、直近 30 日と前の 30 日に閉じた PBI を `summarize` して返す（読み方は上の `fetchFlow`）。何も保存しない。取り込んだことのない workspace は読む先が無いので、数に入れず `unread` に名前を出す（節に「取り込み前で、数に入っていません」と出る）
-- **`weeks`**（#1878）: 直近 30 日の週ごとの起票・閉鎖・純増と先送りの数（全リポジトリの合計）。flow-report の週の表と同じ値で、画面には出さない
-- **1 時間のキャッシュ**: 結果はデーモンのメモリに 1 時間持ち、その間は GitHub を読まない。読めなかったリポジトリがある結果（`errors` が空でない）は持たず、次に開いたときに読み直す。`?refresh=1`（画面の「読み直す」）で読み直す
+- **`GET /api/flow`**: 登録した全ワークスペースの保存値の、直近 30 日と前の 30 日に閉じた PBI を `summarize` して返す（`flowView`。Issue は保存値、PR は GitHub。アプリだけのバックログは checkout の `origin` の GitHub リポジトリの PR を読み、無ければ PR を読まずに PR の段を不明にする）。Task の外でも見られる。何も保存しない。取り込んだことのない workspace は読む先が無いので、数に入れず `unread` に名前を出す（節に「取り込み前で、数に入っていません」と出る）
+- **`weeks`**（#1878）: 直近 30 日の週ごとの起票・閉鎖・純増と先送りの数（全リポジトリの合計）。flow-report の週の表と同じ数え方で（Task の数は flow-report が保存値を読んだ workspace の分だけ）、画面には出さない
+- **1 時間のキャッシュ**: 結果はデーモンのメモリに 1 時間持ち、その間は GitHub の PR を読まない。読めなかったリポジトリがある結果（`errors` が空でない）は持たず、次に開いたときに読み直す。`?refresh=1`（画面の「読み直す」）で読み直す
 - **読めないとき**: GitHub の API の残りが少ない（500 未満）・上限を超えそう・`gh` の失敗は、そのワークスペースの `errors` に理由が入り、ほかのリポジトリは返る。節には理由の行が出て、Backlog の一覧は流れとは別に読むので今までどおり出る
 
 ## 数の読み方

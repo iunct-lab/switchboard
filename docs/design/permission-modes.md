@@ -6,6 +6,20 @@ Issue #58. Before this, every Claude task from Switchboard asked for every tool:
 
 Switchboard delegates risk decisions to the runner (Knowledge `approval:` rules excepted, #13): Claude Code's `auto` classifier and Codex's sandbox + approval policy + reviewer. Switchboard selects Auto as its default; on Codex, its Auto uses automatic risk review rather than human review at sandbox boundaries. Human approval requests emitted by the runner reach the UI as `permission.ask`. Defaults retain risk review, but can execute approved actions without a human prompt. Unconditional full-access modes are flagged `danger` and must be picked explicitly.
 
+### Counting what the classifier decided
+
+The classifier's decisions are counted per Task, not reported anywhere else. A local Claude Task sends its OpenTelemetry
+logs to the daemon's loopback receiver only (metrics and traces off, the parent's `OTEL_*` dropped); the daemon keeps
+the `tool_decision` records with an `allow` / `block` verdict as the Task's `classifier.decision` events (verdict, mode,
+category, tool and call id — no tool input, no reason text) and shows "allowed M / stopped N" on the Task's Brief. A
+`block` does not ask the person: it is `permission_denied` and a failed `tool.result` (Claude Code 2.1.312 and 2.1.314,
+recorded). What was recorded asking is the denial limit: the third block in a row and each one after it (2.1.314). The
+CLI also asks at the twentieth in a session and on a Chrome floor block (read, not observed). The recorded ask carries
+no verdict in OpenTelemetry; it is the `permission.ask` with `reason: "classifier"`, and an allow to it counts as the intervention
+kind "after the classifier" rather than as an approval. No such allow has been observed (the recording answers deny, and
+no Task has recorded such an ask as of 2026-10-30), so that count is 0 so far. Codex's automatic review and cloud Tasks
+are not counted (shown as unknown, not 0). The values are in [claude-otel.md](claude-otel.md).
+
 ## Modes per runner
 
 | runner | modes (`permissionMode`) | default | live switch |

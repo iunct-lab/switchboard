@@ -24,7 +24,7 @@ import { existsSync } from "node:fs";
 import type { BacklogCommentData, BacklogErrorKind, BacklogIssueData, BacklogPullRequestData, BacklogItem, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogSource } from "@switchboard/protocol";
 import type { BacklogSnapshotEntry, Db } from "./db.ts";
 import { BacklogError, backlogRepoOf, prereqsOf, projectOf, readStoredBacklog, syncsGithub, waitsOf, type BacklogWorkspace, type GhRunner } from "./backlog.ts";
-import { linkedIssues } from "../../../scripts/parallel-guard.ts";
+import { linkedIssues } from "../../../scripts/task-paths.ts";
 import { Limit, sendGithubOperations } from "./backlog-send.ts";
 import { applyLocalOperations } from "./backlog-local.ts";
 import { advanceEnabling, enablingWaits } from "./backlog-enable.ts";
@@ -50,7 +50,7 @@ const OPEN_PULLS = `query($o:String!,$r:String!,$after:String){ repository(owner
 const MORE_COMMENTS = `query($o:String!,$r:String!,$n:Int!,$after:String!){ repository(owner:$o,name:$r){ issue(number:$n){ comments(first:100, after:$after){ ${COMMENTS} } } } }`;
 const recheckQuery = (numbers: number[]) =>
   `query($o:String!,$r:String!){ repository(owner:$o,name:$r){ ${numbers.map((n) => `w${n}: issueOrPullRequest(number:${n}){ __typename ... on Issue{ ${ISSUE} } ... on PullRequest{ ${PR_FIELDS} mergeCommit{ oid } } }`).join(" ")} } }`;
-/** The Issues a PR closes (#1183): the rule of `scripts/parallel-guard.ts` (`linkedIssues`). No duplicates, ascending. */
+/** The Issues a PR closes (#1183): the rule of `scripts/task-paths.ts` (`linkedIssues`). No duplicates, ascending. */
 export const closesOf = (body: string | null, headRefName: string | null): number[] => [...new Set(linkedIssues({ body, headRefName }))].sort((a, b) => a - b);
 /** A PR as stored (#1059): `files` null = more than the 100 read, so what it touches is not fully known. */
 function pullEntry(raw: RawPull): BacklogSnapshotEntry {

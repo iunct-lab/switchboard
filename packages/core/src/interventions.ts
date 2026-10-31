@@ -6,7 +6,7 @@ import { AUTO_RESUME_HEAD } from "./evals.ts";
 import { NEEDS_PERSON, placeKey, stopKey } from "./stops.ts";
 
 /**
- * A person's interventions (#651): approvals, decisions and resumes, counted at each look from Switchboard's records (the
+ * A person's interventions (#651): approvals, decisions, resumes and allows after the classifier (#2236, not observed yet), counted at each look from Switchboard's records (the
  * tasks and their events) and the stored copy of the Issues (#885). No table of their own and no call to GitHub; what the
  * records cannot tell is `unknown`, not 0 and not guessed.
  */
@@ -17,6 +17,7 @@ export const ANSWER_DUPLICATE_MS = 10 * 60_000;
 export const SEND_DUPLICATE_MS = 60_000;
 
 const PREFIX_RESOLVED = '{"t":"permission.resolved",';
+const PREFIX_ASK = '{"t":"permission.ask",';
 const PREFIX_STOP = '{"t":"stop.record",';
 const PREFIX_USER_SAY = '{"t":"message.delta","role":"user"';
 
@@ -52,7 +53,7 @@ const issueOfTask = (t: { title: string; stageIssue: number | null }): number | 
  * Every intervention, oldest first, and what could not be counted. An intervention on an Issue needs the stored Issue (to name
  * its PBI): without it — the workspace never imported, or the Issue not stored in full — it is `unknown`.
  */
-export function collectInterventions(db: Db, workspaces: Workspace[], read: EventEnvelope[] = db.listEventsByPrefix([PREFIX_RESOLVED, PREFIX_USER_SAY])): { items: Intervention[]; unknown: InterventionUnknown[]; lookup: InterventionLookup } {
+export function collectInterventions(db: Db, workspaces: Workspace[], read: EventEnvelope[] = db.listEventsByPrefix([PREFIX_ASK, PREFIX_RESOLVED, PREFIX_USER_SAY])): { items: Intervention[]; unknown: InterventionUnknown[]; lookup: InterventionLookup } {
   const items: Intervention[] = [];
   const unknown: InterventionUnknown[] = [];
   const repos = new Map<string, Repository | null>();
@@ -91,15 +92,21 @@ export function collectInterventions(db: Db, workspaces: Workspace[], read: Even
   const tasks = db.listTaskRefs();
   const taskById = new Map(tasks.map((t) => [t.id, t]));
 
-  // approvals: the person's answer to an ask, once per ask (a second answer is refused with 409, and an adapter's close is by "timeout")
+  // approvals: the person's answer to an ask, once per ask (a second answer is refused with 409, and an adapter's close is by "timeout").
+  // An allow to an ask the auto-mode classifier stopped is its own kind (#2236), not also an approval. An ordinary block does not ask;
+  // the recorded ask is the classifier's denial limit, answered deny (#3214, docs/design/claude-otel.md)
   const seenAsk = new Set<string>();
   const events = read;
+  const byClassifier = new Set<string>();
+  for (const e of events) if (e.ev.t === "permission.ask" && e.ev.reason === "classifier") byClassifier.add(`${e.taskId}:${e.ev.id}`);
   for (const e of events) {
     const t = taskById.get(e.taskId);
     if (!t?.workspaceId || e.ev.t !== "permission.resolved" || e.ev.by !== "user") continue;
-    if (seenAsk.has(`${t.id}:${e.ev.id}`)) continue;
-    seenAsk.add(`${t.id}:${e.ev.id}`);
-    add({ kind: "approval", at: e.ts, workspaceId: t.workspaceId, issue: issueOfTask(t), taskId: t.id, ref: `task:${t.id}#seq:${e.seq}`, afterWaits: null });
+    const key = `${t.id}:${e.ev.id}`;
+    if (seenAsk.has(key)) continue;
+    seenAsk.add(key);
+    const kind = e.ev.decision === "allow" && byClassifier.has(key) ? "classifier" : "approval";
+    add({ kind, at: e.ts, workspaceId: t.workspaceId, issue: issueOfTask(t), taskId: t.id, ref: `task:${t.id}#seq:${e.seq}`, afterWaits: null });
   }
 
   // decisions in a conversation: the person's second and later messages (chunks of one message are adjacent seqs), not the daemon's own
@@ -247,7 +254,7 @@ export function summarizeInterventions(items: Intervention[], unknown: Intervent
   const window = (days: 7 | 30, from: number, to: number): InterventionWindow => {
     const inside = (t: number) => t >= from && t < to;
     const mine = items.filter((i) => inside(i.at));
-    const byKind = { approval: 0, decision: 0, resume: 0 };
+    const byKind = { approval: 0, decision: 0, resume: 0, classifier: 0 };
     for (const i of mine) byKind[i.kind]++;
     const resumes = mine.filter((i) => i.kind === "resume");
     const sections = { open: new Map<string, number>(), done: new Map<string, number>() };
@@ -294,7 +301,7 @@ export function summarizeInterventions(items: Intervention[], unknown: Intervent
 /** The view at `now`: the interventions and stops of every task, summarized. */
 export function interventionView(db: Db, workspaces: Workspace[], now = Date.now()): InterventionView {
   // one pass over the events for everything this reads
-  const events = db.listEventsByPrefix([PREFIX_RESOLVED, PREFIX_USER_SAY, PREFIX_STOP]);
+  const events = db.listEventsByPrefix([PREFIX_ASK, PREFIX_RESOLVED, PREFIX_USER_SAY, PREFIX_STOP]);
   const { items, unknown, lookup } = collectInterventions(db, workspaces, events);
   const stops = events.flatMap((e) => (e.ev.t === "stop.record" ? [e.ev.stop] : []));
   return summarizeInterventions(items, unknown, stops, lookup, now);

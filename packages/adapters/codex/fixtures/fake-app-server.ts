@@ -7,10 +7,16 @@
  *                (answered by the client), commandExecution completed, tokenUsage, turn/completed
  *   turn/steer (while active) → {} and the text is echoed as another agentMessage
  *   turn/interrupt → {} then turn/completed(status: interrupted)
+ * `features list` prints the memories row with the value of FAKE_CODEX_MEMORIES (default false) and exits.
  * Prompts containing "crash" make the process exit 3 without a result; "sleep" keeps the turn open until interrupted.
  */
 import { appendFileSync } from "node:fs";
 const wireLog = process.argv.find((arg) => arg.startsWith("test_wire_log="))?.slice("test_wire_log=".length);
+if (process.argv.includes("features") && process.argv.includes("list")) {
+  console.log(`memories  stable  ${process.env.FAKE_CODEX_MEMORIES ?? "false"}`);
+  process.exit(0);
+}
+if (wireLog) appendFileSync(wireLog, `${JSON.stringify({ argv: process.argv.slice(2) })}\n`);
 const enc = (o: unknown) => process.stdout.write(JSON.stringify(o) + "\n");
 let turnSeq = 0;
 let active: { id: string; threadId: string; sleeping: boolean } | null = null;
@@ -72,7 +78,7 @@ for await (const chunk of Bun.stdin.stream()) {
       case "initialized":
         break;
       case "thread/start":
-        enc({ id: m.id, result: { thread: thread("thread-new", m.params.cwd) } });
+        enc({ id: m.id, result: { thread: thread("thread-new", m.params.cwd), model: m.params.model ?? "gpt-6-luna", modelProvider: "openai" } });
         break;
       case "thread/resume":
         enc({ id: m.id, result: { thread: thread(m.params.threadId, m.params.cwd) } });

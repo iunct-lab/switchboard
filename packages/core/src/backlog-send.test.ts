@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BacklogIssueData, BacklogSource } from "@switchboard/protocol";
 import { Db } from "./db.ts";
 import { answerStoredDecision, commentStoredIssue, createStoredIssue, editStoredIssue, readStoredIssue, type GhRunner } from "./backlog.ts";
-import { forgeKind, Limit, sendGithubOperations } from "./backlog-send.ts";
+import { forgeKind, Limit, sendGithubOperations, theirEdit } from "./backlog-send.ts";
 import { backlogFieldValue, conflictRevision } from "./backlog-merge.ts";
 import { BacklogSync } from "./backlog-sync.ts";
 import { fakeGithub as makeFakeGithub, type Issue } from "./backlog-fake-github.ts";
@@ -255,6 +256,122 @@ test("後の編集が GitHub と同じなら競合にしない (#2924): GitHub a
   expect(d3.listPendingBacklogOperations(S).map((o) => [o.field, o.status])).toEqual([["field:Status", "conflict"], [null, "pending"], ["field:Status", "pending"]]);
   expect(writes(g3)).toEqual([]);
   d3.close();
+});
+
+test("GitHub の Project の自動化が動かした Status は競合にしない: open → the edit goes over it; closed → it stays; a person's move is still held", async () => {
+  const statusWrites = (g: ReturnType<typeof fakeGithub>) => g.writes.filter((w) => w.includes("updateProjectV2ItemFieldValue"));
+  const automation = "github-project-automation";
+
+  // a PR linked with Closes moved it to In progress seconds before the Task's In review, on a base of Backlog
+  const g = fakeGithub();
+  editStoredIssue(db, S, 12, { fields: { Status: "In review" } });
+  g.items.get("PVTI_I_12")!.fields.Status = "In progress";
+  g.history.push({ issue: 12, by: automation, at: "2026-10-30T13:32:13Z", field: "field:Status", value: "In progress" });
+  // the import reads it first: it leaves the choice to the send, which reads who moved it
+  db.putBacklogSnapshot(S, { records: [{ objectKind: "project-item", externalId: "PVTI_I_12", remote: { issue: 12, owner: "acme", project: 1, fields: { Status: "In progress" } }, fetchState: "fetched" }], cursor: null, syncedAt: 2 });
+  expect(db.listPendingBacklogOperations(S).map((o) => o.status)).toEqual(["pending"]);
+  await send(g.gh);
+  expect(db.listPendingBacklogOperations(S)).toEqual([]);
+  expect(g.items.get("PVTI_I_12")!.fields.Status).toBe("In review");
+
+  // merged meanwhile: the Issue is closed and the automation has Done; the waiting In review is not sent over it
+  const d2 = new Db(join(dir, "b.db"));
+  seed(d2);
+  const g2 = fakeGithub();
+  editStoredIssue(d2, S, 12, { fields: { Status: "In review" } });
+  g2.issues.get(12)!.state = "CLOSED";
+  g2.issues.get(12)!.closedAt = "2026-10-30T18:18:23Z";
+  g2.items.get("PVTI_I_12")!.fields.Status = "Done";
+  g2.history.push({ issue: 12, by: automation, at: "2026-10-30T18:18:26Z", field: "field:Status", value: "Done" });
+  await sendGithubOperations(g2.gh, d2, dir, S, clock);
+  expect(d2.listPendingBacklogOperations(S)).toEqual([]);
+  expect(d2.listBacklogOperations(S).at(-1)).toMatchObject({ status: "done", error: expect.stringContaining("Project の自動化") });
+  expect(statusWrites(g2)).toEqual([]);
+  d2.close();
+
+  // a person's move, in the same place: held, nothing written
+  const d3 = new Db(join(dir, "c.db"));
+  seed(d3);
+  const g3 = fakeGithub();
+  editStoredIssue(d3, S, 12, { fields: { Status: "In review" } });
+  g3.items.get("PVTI_I_12")!.fields.Status = "In progress";
+  g3.history.push({ issue: 12, by: "someone", at: "2026-10-30T13:32:13Z", field: "field:Status", value: "In progress" });
+  await sendGithubOperations(g3.gh, d3, dir, S, clock);
+  expect(d3.listPendingBacklogOperations(S).map((o) => o.status)).toEqual(["conflict"]);
+  expect(statusWrites(g3)).toEqual([]);
+  d3.close();
+});
+
+test("closed, on a Project without the close workflow: the automation's value is older than the close, so the edit is sent", async () => {
+  const g = fakeGithub();
+  editStoredIssue(db, S, 12, { fields: { Status: "Done" } });
+  g.issues.get(12)!.state = "CLOSED";
+  g.issues.get(12)!.closedAt = "2026-10-30T18:18:00Z";
+  g.items.get("PVTI_I_12")!.fields.Status = "In progress";
+  g.history.push({ issue: 12, by: "github-project-automation", at: "2026-10-30T13:32:13Z", field: "field:Status", value: "In progress" });
+  await send(g.gh);
+  expect(db.listPendingBacklogOperations(S)).toEqual([]);
+  expect(g.items.get("PVTI_I_12")!.fields.Status).toBe("Done");
+});
+
+test("the automation moving the Status between the check and the write is not another person's edit", () => {
+  const after = { events: [{ __typename: "ProjectV2ItemStatusChangedEvent", actor: { login: "github-project-automation" }, createdAt: "2026-10-30T00:00:02Z", status: "Done", project: { id: "P_1" } }], edits: [], viewer: "me" };
+  expect(theirEdit("field:Status", after, "2026-10-30T00:00:00Z", "P_1", "In review")).toBeNull();
+  const person = { ...after, events: [{ ...after.events[0]!, actor: { login: "someone" } }] };
+  expect(theirEdit("field:Status", person, "2026-10-30T00:00:00Z", "P_1", "In review")).toMatchObject({ value: "Done", editor: "someone" });
+});
+
+test("an edit after an item's first one is made on that edit's value, before GitHub has the item", () => {
+  editStoredIssue(db, S, 3, { fields: { Status: "In progress" } });
+  commentStoredIssue(db, S, 3, "PR: #1");
+  editStoredIssue(db, S, 3, { fields: { Status: "In review" } });
+  const status = db.listPendingBacklogOperations(S).filter((o) => o.field === "field:Status");
+  expect(status.map((o) => [o.payload, o.base])).toEqual([["In progress", null], ["In review", "In progress"]]);
+});
+
+test("a later edit that reaches GitHub's stored value lets a held Status go, with the comments behind it, though no import comes", async () => {
+  const g = fakeGithub();
+  editStoredIssue(db, S, 12, { fields: { Status: "In review" } });
+  g.items.get("PVTI_I_12")!.fields.Status = "Done";
+  await send(g.gh);
+  expect(db.listPendingBacklogOperations(S).map((o) => o.status)).toEqual(["conflict"]);
+  db.putBacklogSnapshot(S, { records: [{ objectKind: "project-item", externalId: "PVTI_I_12", remote: { issue: 12, owner: "acme", project: 1, fields: { Status: "Done" } }, fetchState: "fetched" }], cursor: null, syncedAt: 2 });
+  commentStoredIssue(db, S, 12, "## 結果");
+  editStoredIssue(db, S, 12, { fields: { Status: "Done" } });
+  // the conflict is gone; the new edit still goes through the check, as the stored value may be old
+  expect(db.listPendingBacklogOperations(S).map((o) => o.status)).toEqual(["pending", "pending"]);
+  await send(g.gh);
+  expect(db.listPendingBacklogOperations(S)).toEqual([]);
+  expect(g.issues.get(12)!.comments).toHaveLength(1);
+});
+
+test("a Status conflict held before the send could tell the automation is looked at again; one found by the write stays", () => {
+  const path = join(dir, "m.db");
+  const d = new Db(path);
+  seed(d);
+  editStoredIssue(d, S, 12, { fields: { Status: "In review" } });
+  editStoredIssue(d, S, 12, { title: "新しい題" });
+  const [title, status] = [...d.listPendingBacklogOperations(S)].sort((a, b) => (a.field === "title" ? -1 : b.field === "title" ? 1 : 0));
+  d.setBacklogOperationResult(status!.id, { status: "conflict", error: "競合" });
+  d.setBacklogOperationResult(title!.id, { status: "conflict", error: "競合" });
+  editStoredIssue(d, S, 3, { fields: { Status: "Ready" } });
+  const written = d.listPendingBacklogOperations(S).at(-1)!;
+  d.setBacklogOperationResult(written.id, { status: "conflict", overwritten: { editor: "someone", at: null }, error: "書いた後" });
+  // from before this migration: the mark of an opened database is taken off
+  d.close();
+  const old = new Database(path);
+  old.exec("PRAGMA user_version = 0");
+  old.close();
+  const again = new Db(path);
+  expect(again.getBacklogOperation(status!.id)).toMatchObject({ status: "pending", error: null });
+  expect(again.getBacklogOperation(title!.id)).toMatchObject({ status: "conflict" });
+  expect(again.getBacklogOperation(written.id)).toMatchObject({ status: "conflict" });
+  // once: a conflict held after it stays one through a restart, until it is chosen on
+  again.setBacklogOperationResult(status!.id, { status: "conflict", error: "本当の競合" });
+  again.close();
+  const third = new Db(path);
+  expect(third.getBacklogOperation(status!.id)).toMatchObject({ status: "conflict" });
+  third.close();
 });
 
 test("a label added, a milestone, a parent and leaving the Project are each sent", async () => {

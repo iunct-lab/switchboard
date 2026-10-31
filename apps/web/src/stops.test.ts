@@ -8,6 +8,10 @@ const s = (over: Partial<StopSummary> = {}): StopSummary => ({
 });
 
 describe("stopDisplay", () => {
+  test("a disk-full stop reads in words", () => {
+    expect(stopDisplay(s({ reason: "disk-full" })).title).toContain("ディスクの空き切れ");
+  });
+
   test("first stop: no previous answer, no change, waiting needs no action", () => {
     expect(stopDisplay(s())).toMatchObject({ count: "初回", answer: "なし", changes: "なし", next: "条件の変化待ち・操作不要", needsPerson: false });
   });

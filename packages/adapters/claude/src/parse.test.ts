@@ -348,8 +348,29 @@ describe("spawn plumbing", () => {
     expect(otelEnv({})).toEqual({});
   });
 
+  test.skipIf(skipRecordings("packages/adapters/claude/fixtures/classifier-stop.jsonl"))("classifier (recorded on 2.1.312): a stop is a failed tool.result and a status, no permission.ask", () => {
+    const p = createClaudeParser();
+    const events = recordingText("packages/adapters/claude/fixtures/classifier-stop.jsonl").split("\n").flatMap((l) => p.feed(l));
+    for (const ev of events) AgentEvent.parse(ev);
+    expect(events.filter((e) => e.t === "permission.ask")).toEqual([]);
+    expect(events).toContainEqual({ t: "status", text: "permission denied by runner: Bash" });
+    const failed = events.filter((e) => e.t === "tool.result" && !e.ok);
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({ summary: expect.stringContaining("denied by the Claude Code auto mode classifier") });
+  });
+
+  test.skipIf(skipRecordings("packages/adapters/claude/fixtures/classifier-ask.jsonl"))("classifier (recorded on 2.1.314): the first two blocks are stops, the third and later ask the person", () => {
+    const p = createClaudeParser();
+    const events = recordingText("packages/adapters/claude/fixtures/classifier-ask.jsonl").split("\n").flatMap((l) => p.feed(l));
+    for (const ev of events) AgentEvent.parse(ev);
+    const stopsAndAsks = events.filter((e) => e.t === "permission.ask" || (e.t === "status" && e.text === "permission denied by runner: Bash"));
+    expect(stopsAndAsks.map((e) => e.t)).toEqual(["status", "status", "permission.ask", "permission.ask", "permission.ask"]);
+    const asks = stopsAndAsks.filter((e) => e.t === "permission.ask");
+    for (const ask of asks) expect(ask).toMatchObject({ reason: "classifier", toolUseId: expect.stringMatching(/^toolu_/) });
+  });
+
   test("permission.ask: a classifier-reasoned can_use_tool carries reason classifier (docs/design/claude-otel.md)", () => {
-    // the shape read from claude 2.1.312 (not recorded: the classifier stopped nothing in the Spike, #2240)
+    // hand-written lines to compare the reasons; the recording above is the real shape of the classifier's ask
     const line = (type?: string) => JSON.stringify({ type: "control_request", request_id: "r1", request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "x" }, tool_use_id: "toolu_1", ...(type ? { decision_reason_type: type } : {}) } });
     const [ask] = createClaudeParser().feed(line("classifier"));
     expect(AgentEvent.parse(ask)).toMatchObject({ t: "permission.ask", toolUseId: "toolu_1", reason: "classifier" });

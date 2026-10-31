@@ -317,6 +317,78 @@ describe("public-sync", () => {
     expect(sync(opts({ source: "v1.1.0" }), run)).toContain("nothing to sync");
   });
 
+  describe("gh failures: the stderr line and GitHub's rate limit", () => {
+    const LIMIT = "GraphQL: API rate limit already exceeded for user ID 1.";
+    let sleeps: number;
+    /** `failing(step, answers)`: `gh pr <step>` fails with the next answer as its stderr while answers are left, else the fake gh above. `sleep 60` is counted, not waited. */
+    const failing = (step: string, answers: string[]): Run => (cmd, o) => {
+      if (cmd[0] === "sleep") return (sleeps++, { code: 0, out: "" });
+      if (cmd[0] === "gh" && cmd[1] === "pr" && cmd[2] === step && answers.length) return (ghCalls.push(cmd), { code: 1, out: "", err: answers.shift()! });
+      return run(cmd, o);
+    };
+    const toSecondSync = () => {
+      sync(opts(), run); // the first sync pushes to the empty main; the next one opens a PR
+      write("README.md", "v2\n");
+      commit("feat: two (#3)");
+      ghCalls = [];
+      sleeps = 0;
+    };
+    const steps = () => ghCalls.map((c) => c.slice(0, 3).join(" "));
+
+    test("rate limit twice on pr create: the sync stops with the command and the stderr line, after one wait", () => {
+      toSecondSync();
+      expect(() => sync(opts(), failing("create", [LIMIT, LIMIT]))).toThrow(`failed: gh pr create: ${LIMIT}`);
+      expect(sleeps).toBe(1);
+      expect(steps()).toEqual(["gh pr list", "gh pr create", "gh pr create"]);
+    });
+
+    test("rate limit once on pr create: the second try opens the PR and the sync merges it", () => {
+      toSecondSync();
+      expect(sync(opts(), failing("create", [LIMIT]))).toContain("merged sync PR");
+      expect(sleeps).toBe(1);
+      expect(steps()).toEqual(["gh pr list", "gh pr create", "gh pr create", "gh pr merge"]);
+      expect(pubGit("show", "main:README.md")).toStartWith("v2\n");
+    });
+
+    test("rate limit once on pr merge: the second try merges; twice stops with the rate limit line", () => {
+      toSecondSync();
+      expect(sync(opts(), failing("merge", [LIMIT]))).toContain("merged sync PR");
+      expect(sleeps).toBe(1);
+      expect(steps()).toEqual(["gh pr list", "gh pr create", "gh pr merge", "gh pr merge"]);
+      write("README.md", "v3\n");
+      commit("feat: three (#4)");
+      sleeps = 0;
+      expect(() => sync(opts(), failing("merge", [LIMIT, LIMIT]))).toThrow(`could not merge sync PR`);
+      expect(() => sync(opts(), failing("merge", [LIMIT, LIMIT]))).toThrow(LIMIT);
+      expect(sleeps).toBe(2);
+    });
+
+    test("a failure that is not the rate limit is not tried again", () => {
+      toSecondSync();
+      expect(() => sync(opts(), failing("create", ["HTTP 401: Bad credentials (https://api.github.com/graphql)"]))).toThrow("failed: gh pr create: HTTP 401: Bad credentials");
+      expect(sleeps).toBe(0);
+      expect(steps()).toEqual(["gh pr list", "gh pr create"]);
+    });
+
+    test("a stderr line with a secret's shape is withheld from the error", () => {
+      toSecondSync();
+      const token = "ghp_" + "a".repeat(36);
+      let message = "";
+      try {
+        sync(opts(), failing("create", [`could not use ${token}`]));
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      expect(message).toStartWith("failed: gh pr create: (stderr withheld: ");
+      expect(message).not.toContain(token);
+    });
+
+    test("an empty stderr gives the exit code", () => {
+      toSecondSync();
+      expect(() => sync(opts(), failing("create", [""]))).toThrow("failed: gh pr create (exit 1)");
+    });
+  });
+
   test("dry-run reports and pushes nothing", () => {
     const out = sync(opts({ dryRun: true }), run);
     expect(out).toContain("excluded .github/workflows/host.yml");

@@ -1,10 +1,13 @@
+import { recordingText, skipRecordings } from "../../../scripts/recordings.ts";
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createClaudeParser } from "@switchboard/adapter-claude";
 import type { AgentEvent, EvalsListRow, EventEnvelope, StopRecord, Task } from "@switchboard/protocol";
 import { Db } from "./db.ts";
 import { AUTO_RESUME_HEAD, evalRequestDraft, isAutomaticUserText, judgeHumanGap, RULES_BY, ruleMetrics, rulesEvalOf, STOP_NOTE, weekStartUtc, weeklyHumanSample } from "./evals.ts";
+import { decisionsFromOtlp } from "./otel.ts";
 import { RESUME_PROMPT } from "./ratelimit.ts";
 import { STOP_RESUME_PROMPT } from "./interrupted.ts";
 
@@ -75,6 +78,14 @@ describe("ruleMetrics (#1218)", () => {
     const m = ruleMetrics(envelopes([user("x"), stop("s1", "usage-limit"), stop("s2", "github-limit"), stop("s1", "usage-limit"), end("ok")]));
     expect(m.stops).toBe(3);
     expect(m.stopReasons).toEqual({ "usage-limit": 2, "github-limit": 1 });
+  });
+
+  test.skipIf(skipRecordings("packages/adapters/claude/fixtures/classifier-stop.jsonl", "packages/core/fixtures/otel-classifier-stop.jsonl"))("classifier (recorded): the recorded stop counts as stopped", () => {
+    const p = createClaudeParser();
+    const stream = recordingText("packages/adapters/claude/fixtures/classifier-stop.jsonl").split("\n").flatMap((l) => p.feed(l));
+    const otel = recordingText("packages/core/fixtures/otel-classifier-stop.jsonl").split("\n").filter(Boolean).flatMap((l) => decisionsFromOtlp(JSON.parse(l)));
+    const m = ruleMetrics(envelopes([...stream, ...otel]));
+    expect(m.classifier).toEqual({ allowed: 1, denied: 1, byCategory: { interfere_with_workloads: 1 } });
   });
 
   test("classifier (#2236): allowed and stopped calls, the stopped ones per kind; null when nothing was recorded", () => {

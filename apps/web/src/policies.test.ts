@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { AnswerPolicy } from "@switchboard/protocol";
-import { policyRow, policyState, useLines } from "./policies.ts";
+import { editWarnings, policyRow, policyState, useLines } from "./policies.ts";
 
 const NOW = Date.parse("2026-10-17T12:00:00Z");
 const subject = { kind: "approval" as const, op: "exec", target: "bun test packages/core", conditions: [], head: null };
@@ -33,4 +33,10 @@ test("useLines: newest first, a Task by its title or id and an Issue by its numb
   expect(lines).toHaveLength(2);
   expect(lines[0]).toEndWith("Issue #306 decide storage");
   expect(lines[1]).toEndWith("Task approve me exec bun test packages/core");
+});
+
+test("editWarnings: a broad target", () => {
+  expect(editWarnings(policy(), "bun *")).toEqual(["広い指定: bun のどのサブコマンドにも当たります"]);
+  expect(editWarnings(policy(), "bun test*")).toEqual([]);
+  expect(editWarnings(policy({ op: "write" }), "src *")).toEqual([]);
 });

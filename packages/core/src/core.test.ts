@@ -19,6 +19,7 @@ import type { suggestTitle } from "./suggest-title.ts";
 const startServer: typeof startDaemon = (cfg, adapters, opts = {}) => startDaemon(cfg, adapters, { judge: () => new Promise(() => undefined), rubricJudge: () => new Promise(() => undefined), titleSuggester: () => new Promise(() => undefined), ...opts });
 import type { Suggester } from "./routing.ts";
 import { claudeProjectDirName } from "@switchboard/adapter-claude";
+import { CODEX_BEDROCK_MODELS } from "@switchboard/adapter-codex";
 import { HistoryImporter } from "./history.ts";
 import { isAuthText } from "./login.ts";
 import { JUDGE_FALLBACK, JUDGE_TIMEOUT_MS, type judgeTurn } from "./judge.ts";
@@ -389,6 +390,29 @@ describe("core daemon", () => {
       cliDefault = "big"; // changed in the CLI while the daemon runs: read again, not cached at boot
       expect((await runners())[0].cliDefaultModel).toBe("big");
     } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("health follows the runner's note on the login recheck: a Codex updated while the daemon runs is warned about without a restart", async () => {
+    let note: string | undefined;
+    const h = mkdtempSync(join(tmpdir(), "switchboard-test-note-"));
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { detect: () => ({ login: "ok" as const, note }) })], { port: 0 });
+    const runners = () => fetch(`http://127.0.0.1:${c.server.port}/api/health`).then(j).then((x) => x.runners);
+    const realNow = Date.now.bind(Date);
+    let offset = 0;
+    const clock = spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+    try {
+      expect((await runners())[0].note).toBeUndefined();
+      note = "warned";
+      offset += 61_000;
+      expect((await runners())[0].note).toBe("warned");
+      note = undefined;
+      offset += 61_000;
+      expect((await runners())[0].note).toBeUndefined();
+    } finally {
+      clock.mockRestore();
       await c.stop();
       rmSync(h, { recursive: true, force: true });
     }
@@ -1659,6 +1683,47 @@ describe("core daemon", () => {
       await cx.stop();
       rmSync(h, { recursive: true, force: true });
       rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("bedrock (#1731): codex with bedrockModels can be switched, lists the Bedrock models, shows no expired login and bills at the API price", async () => {
+    const starts: StartOptions[] = [];
+    const h = mkdtempSync(join(tmpdir(), "switchboard-bedrock-codex-"));
+    // a codex-like runner: tokens only, the model it was started with
+    const script: AgentEvent[] = [
+      { t: "session.start", runner: "codex", runnerSessionId: "c1", cwd: "/tmp", model: "openai.gpt-6-luna" },
+      { t: "usage", source: "reported", model: "openai.gpt-6-luna", inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      { t: "session.end", status: "ok" },
+    ];
+    // the OpenAI login is expired: on Bedrock that must not show
+    const codex = fakeAdapter(script, { id: "codex", starts, models: ["gpt-6-luna"], bedrockModels: CODEX_BEDROCK_MODELS.map((m) => m.value), detect: () => ({ login: "expired" }) });
+    const cx = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [codex], { port: 0, gh: NO_GH });
+    const b = `http://127.0.0.1:${cx.server.port}`;
+    const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const run = () => fetch(`${b}/api/health`).then(j).then((x) => x.runners.find((r: { id: string }) => r.id === "codex"));
+    try {
+      expect(await run()).toMatchObject({ login: "expired", bedrockAvailable: true });
+      expect((await run()).models.map((x: { value: string }) => x.value)).toEqual(["gpt-6-luna"]);
+      expect((await patch({ bedrock: { codex: { region: "ap-northeast-1", apiKey: "x" } } }).then(j)).bedrock).toEqual({ codex: { region: "ap-northeast-1" } });
+      expect((await fetch(`${b}/api/settings`).then(j)).bedrock).toEqual({ codex: { region: "ap-northeast-1" } });
+      expect(await run()).toMatchObject({ login: "ok", loginKind: "bedrock" });
+      expect((await run()).models.map((x: { value: string }) => x.value)).toEqual(["openai.gpt-6.1-sol", "openai.gpt-6-astra", "openai.gpt-6-luna"]);
+      const t = await fetch(`${b}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: h, title: "t", prompt: "p", runner: "codex", model: "openai.gpt-6-luna" }) }).then(j);
+      await waitFor(async () => (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task.status === "done");
+      expect(starts[0]?.bedrock).toEqual({ region: "ap-northeast-1" });
+      // AWS bills Bedrock: actual cost = the API price of GPT-6 Luna ($0.1 / 1M input), not 0, not unpriced
+      const rows = await fetch(`${b}/api/ledger/tasks`).then(j);
+      expect(rows[0]).toMatchObject({ taskId: t.id, model: "openai.gpt-6-luna", unpriced: false });
+      const s = await fetch(`${b}/api/ledger/summary`).then(j);
+      expect(s.todayUsd).toBeCloseTo(0.1, 6);
+      expect(s.billedTodayUsd).toBeCloseTo(0.1, 6);
+      // back to the subscription: its own models and its own (expired) login again
+      expect((await patch({ bedrock: { codex: null } })).status).toBe(200);
+      expect(await run()).toMatchObject({ login: "expired" });
+      expect((await run()).models.map((x: { value: string }) => x.value)).toEqual(["gpt-6-luna"]);
+    } finally {
+      await cx.stop();
+      rmSync(h, { recursive: true, force: true });
     }
   });
 

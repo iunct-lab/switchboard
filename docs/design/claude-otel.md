@@ -9,7 +9,17 @@ loopback OTLP receiver). Recording: `packages/core/fixtures/otel-tool-decision.j
 request body per line; identifiers replaced; record your own with the `runner-adapter-recording` skill). The recording
 holds three `tool_decision` events, all `allow`: in three runs the classifier stopped nothing (a force-push to a scratch
 remote and `rm -rf` of a missing path were allowed; an exfiltration attempt was refused by the model before any tool
-call). The `block` and "stopped, then asked" paths below are read from the 2.1.312 CLI, not recorded.
+call).
+
+A stop was recorded on 2026-10-30, also on **2.1.312** (Auto, `--model sonnet`, `--permission-prompts host`, a scratch
+repository, a fake `ops-kit` on `PATH`): `packages/adapters/claude/fixtures/classifier-stop.jsonl` (stream-json) and
+`packages/core/fixtures/otel-classifier-stop.jsonl` (OTLP), outside Git, identifiers replaced. The stopped call was
+`ops-kit pull-main 2>&1 | tail -2`, in a repository whose `CLAUDE.md` said a pull restarts a daemon running other Tasks,
+with the user saying they could not answer. An earlier check in the same run had printed `no-dev`. The call gave a
+`block` `tool_decision` with `classifier_category: "interfere_with_workloads"`. It was the tenth try. The nine before it
+stopped nothing: every call the classifier judged was allowed, among them `curl | bash` and `git push --force` to names
+that do not resolve and a `kill` of a missing PID, and on four tries the model refused or asked before the risky call.
+The recording shows the category only, not why the classifier decided.
 
 ## Environment
 
@@ -59,14 +69,32 @@ outright = `classifier_verdict: "block"` (`decision: "reject"`). Everything else
 classifier decision. The record's other attributes are the account ones above and, with `OTEL_LOG_TOOL_DETAILS=1`,
 `tool_parameters`.
 
+## Stopped outright, on stream-json
+
+In the recording, with `--permission-prompts host`, the classifier's stop did not reach the host as a question. No
+`can_use_tool` came. Stream-json carried `system` / `permission_denied` with `decision_reason_type: "classifier"`,
+`decision_reason: "[Interfere With Workloads]"`, `tool_name` and `tool_use_id`, then the tool's `tool_result` with
+`is_error` and the message `Permission for this action was denied by the Claude Code auto mode classifier.`, and the
+turn went on. The `tool_decision` had `decision: "reject"`, `source: "config"`, `classifier_verdict: "block"`. The
+`tool_use_id` is the same on all of these.
+
 ## Stopped, then asked
 
-With `--permission-prompts host`, a classifier block that the user may override does not become a `block`
-`tool_decision`: Claude Code asks the host instead (`can_use_tool`, with `decision_reason_type: "classifier"` and
-`tool_use_id`), and the `tool_decision` that follows the answer has `source: "user_*"` and no `classifier_verdict`.
-So a stop that reached the user is seen on stream-json (`decision_reason_type: "classifier"` on the ask), not on
-OpenTelemetry. The key between a decision and the person's answer is `tool_use_id`: the same value on the
-`tool_decision`, on stream-json's `tool_use.id` and on `can_use_tool.tool_use_id`; no turn-and-tool-name guess is needed.
+Recorded on 2026-10-30 on **2.1.314** (the same setup as the stop, a scratch repository, a fake `ops-kit` on `PATH`):
+`packages/adapters/claude/fixtures/classifier-ask.jsonl` (stream-json) and
+`packages/core/fixtures/otel-classifier-ask.jsonl` (OTLP), outside Git, identifiers replaced. It was the fourth try: one
+call allowed, one run where the model never made the call, one run where the model gave up after a single stop.
+
+A `block` does not ask. In the recording the denial limit did: the first two blocks in a row were `permission_denied`; the third,
+fourth and fifth reached the host as `can_use_tool` with `decision_reason_type: "classifier"`, `tool_use_id`, and a
+`decision_reason` such as `3 consecutive actions were blocked. Please review the transcript before continuing.` The
+CLI sets the limits at three in a row and twenty in a session, and aborts instead of asking when the session must not
+prompt (`shouldAvoidPermissionPrompts`; a host that answers, as here, is not that case); it also asks on a Chrome floor
+block. The limit of twenty, the abort and the Chrome ask are read from the CLI, not observed.
+
+Answered deny, the `tool_decision` had `decision: "reject"`, `source: "user_reject"` and no `classifier_verdict`, so the
+stop shows on stream-json only. The key between a decision and the person's answer is `tool_use_id`, as in the recorded
+stop; no turn-and-tool-name guess is needed. An allow to such an ask has not been observed.
 
 ## In Switchboard
 
@@ -77,8 +105,10 @@ OpenTelemetry. The key between a decision and the person's answer is `tool_use_i
   Tasks and other runners get none of it.
 - The adapter copies `decision_reason_type: "classifier"` of a `can_use_tool` to the `permission.ask` it emits
   (`reason: "classifier"`).
-- The daemon's receiver `POST /otel/:id/v1/logs` takes the Task's token from loopback only (401 otherwise) while the
-  Task's runner process is attached or still closing (404 otherwise), and answers `{}`. Of a body it keeps only the
+- The daemon's receiver `POST /otel/:id/v1/logs` takes the Task's token (401 otherwise; on the cloud host, where the
+  passkey login is on, only from loopback, as for `/mcp/`) while the Task's runner process is attached or still closing
+  (404 for a valid token with no such process), and answers `{}`. Once the Task has closed, its token is revoked and a
+  send is 401. Of a body it keeps only the
   `tool_decision` records with `classifier_verdict` `allow` / `block`, as the Task's `classifier.decision` events with
   `verdict`, `category`, `mode`, `tool` and `callId` (`tool_use_id`); the account attributes, the tool's parameters
   and every other event are dropped.

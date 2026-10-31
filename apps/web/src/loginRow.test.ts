@@ -23,3 +23,8 @@ test("other runners and an unknown login have no row", () => {
 test("on Amazon Bedrock (#1730) the row says so, with neither logout nor login", () => {
   expect(loginRowView({ id: "claude", login: "ok", loginKind: "bedrock" })).toEqual({ text: "使用中: サードパーティのプラットフォーム（Amazon Bedrock）", logout: false, bedrock: true });
 });
+
+test("codex on Amazon Bedrock (#1731) gets the same row; on its own login it still has none", () => {
+  expect(loginRowView({ id: "codex", login: "ok", loginKind: "bedrock" })).toEqual({ text: "使用中: サードパーティのプラットフォーム（Amazon Bedrock）", logout: false, bedrock: true });
+  expect(loginRowView({ id: "codex", login: "expired" })).toBeNull();
+});

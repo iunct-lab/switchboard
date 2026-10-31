@@ -5,6 +5,8 @@ import { recording, recordingsDir } from "./recordings.ts";
 export const RECORDINGS_COMMIT = "fcfbb6918f3ca4443a5d6b366c6fabd5a60303ec";
 export const RECORDINGS = [
   "packages/adapters/claude/fixtures/ask-user-question.jsonl",
+  "packages/adapters/claude/fixtures/classifier-ask.jsonl",
+  "packages/adapters/claude/fixtures/classifier-stop.jsonl",
   "packages/adapters/claude/fixtures/cloud-start.txt",
   "packages/adapters/claude/fixtures/cloud-trust-prompt.txt",
   "packages/adapters/claude/fixtures/background-notification.jsonl",
@@ -27,6 +29,8 @@ export const RECORDINGS = [
   "packages/adapters/dak/fixtures/text-reply.sse",
   "packages/adapters/dak/fixtures/tool-calls.sse",
   "packages/core/fixtures/osc7501-claude.jsonl",
+  "packages/core/fixtures/otel-classifier-ask.jsonl",
+  "packages/core/fixtures/otel-classifier-stop.jsonl",
   "packages/core/fixtures/otel-tool-decision.jsonl",
   "packages/core/fixtures/suggest-claude.jsonl",
   "packages/core/fixtures/suggest-workspace-claude.jsonl"
