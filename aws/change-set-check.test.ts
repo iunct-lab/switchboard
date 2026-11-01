@@ -1,3 +1,4 @@
+// test-reads: aws/change-set-check.ts
 import { describe, expect, test } from "bun:test";
 import { checkChangeSet, type ChangeSet } from "./change-set-check";
 

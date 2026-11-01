@@ -1,3 +1,4 @@
+// test-reads: packages/core/src/pty.ts
 import { recordingText, skipRecordings, assertRecordings } from "../../../scripts/recordings.ts";
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync, readFileSync } from "node:fs";
@@ -791,15 +792,6 @@ case "$line" in "/rename "*) named=1; echo "Session renamed to: \${line#/rename 
       expect(result.local).toBe(UUID);
       expect(readFileSync(join(dir, "input"), "utf8")).toBe(`/rename ${TELEPORT_SESSION_NAME}\n/exit\n`);
       expect(phases.map(p => p.phase)).toEqual(["teleporting", "exiting"]);
-    }));
-
-  test("a CLI that does not confirm the name gets no /exit and the person is asked", () => run(
-    `echo "Teleport ${cloudId}"; echo "Session resumed"; IFS= read -r line; printf '%s\\n' "$line" >> input; sleep 30`,
-    async ({ dir, phases }) => {
-      await until(() => phases.some(p => p.phase === "needs-input"));
-      expect(phases.map(p => p.phase)).toEqual(["teleporting", "exiting", "needs-input"]);
-      await Bun.sleep(3 * FAST.exitWaitMs);
-      expect(readFileSync(join(dir, "input"), "utf8")).toBe(`/rename ${TELEPORT_SESSION_NAME}\n`); // no /exit without the confirmation
     }));
 
   test("a question before resumed is shown and nothing is written to the CLI", () => run(

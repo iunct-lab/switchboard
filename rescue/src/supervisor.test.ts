@@ -1,3 +1,4 @@
+// test-reads: none
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

@@ -200,6 +200,36 @@ export function publicCopyRefusal(repo: string, cwd = process.cwd()): string | n
   return `書き込み先 ${ownerName(repo)} は、この clone の ops.config.json の publicSync.target（公開側の写し）です。自分のリポジトリに向けてから実行してください: gh repo set-default <自分の owner/name>（remote に無ければ先に git remote add）、または GH_REPO=<自分の owner/name>（gh repo view の答えは変わらないので、-R "$(gh repo view …)" で書くなら gh repo set-default）。手順は ops-kit/README.md の「fork して開発を始める」`;
 }
 
+/** The repositories this clone marked as never written to (`git config ops-kit.noWrite`), as lower-case `owner/name`. */
+export function noWriteMarks(cwd = process.cwd()): string[] {
+  try {
+    const p = Bun.spawnSync(["git", "-C", cwd, "config", "--get-all", "ops-kit.noWrite"], { env: { ...process.env }, stdout: "pipe", stderr: "pipe" });
+    return p.exitCode === 0 ? p.stdout.toString().split("\n").map((l) => l.trim()).filter(Boolean).map(ownerName) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Everywhere a write from this clone may be refused: its public copy and its `ops-kit.noWrite` marks. Throws nothing. */
+export function noWriteTargets(cwd = process.cwd()): string[] {
+  const copy = publicCopyOf(cwd);
+  return [...new Set([...(copy ? [ownerName(copy)] : []), ...noWriteMarks(cwd)])];
+}
+
+/**
+ * Why a write to `repo` is refused by the clone's mark (#2576). Unlike the public copy, which its development
+ * repository writes to by name, a marked repository is refused however the write names it.
+ */
+export function noWriteMarkRefusal(repo: string, cwd = process.cwd()): string | null {
+  if (!noWriteMarks(cwd).includes(ownerName(repo))) return null;
+  return `書き込み先 ${ownerName(repo)} は、この clone が書かないと決めた元のリポジトリです（他者のリポジトリから追加した workspace。git config ops-kit.noWrite）。Issue・PR はアプリのバックログか自分のリポジトリに書いてください`;
+}
+
+/** Why a write to `repo` stops: the clone's mark, or its public copy. Null = go. */
+export function noWriteRefusal(repo: string, cwd = process.cwd()): string | null {
+  return noWriteMarkRefusal(repo, cwd) ?? publicCopyRefusal(repo, cwd);
+}
+
 function gitShow(file: string, at: string): string {
   const p = Bun.spawnSync(["git", "-C", dirname(file), "show", `${at}:./${basename(file)}`], { stderr: "pipe" });
   if (p.exitCode !== 0) throw new Error(`not in ${at}: ${p.stderr.toString().trim().split("\n")[0]}`);

@@ -9,6 +9,7 @@ import { exportCopy } from "./export-copy.ts";
 import { resolveReviewThread } from "./forge-github.ts";
 import { forgeTargetOf, originOf } from "./forge.ts";
 import { createGitlabMr, gitlabMrDiscussions, resolveGitlabDiscussion, runGlab, startGitlabDiscussion, viewGitlabMr, type Sh } from "./forge-gitlab.ts";
+import { IDLE_KILLED_LINE, IDLE_SECONDS_MAX, runIdle } from "./idle-run.ts";
 import { formatLint, lint } from "./lint.ts";
 import { pullMain } from "./pull-main.ts";
 import { check, spawnRun, sync, withStaleNote } from "./public-sync.ts";
@@ -89,6 +90,9 @@ ${BACKLOG_USAGE}
   pr resolve-thread <thread id>...
       PR のレビュースレッドを resolve する（GraphQL の resolveReviewThread だけ。id は PRRT_ で始まるもの）。
       id の形が違えば何もせず exit 1。resolve にならなかったスレッドがあれば exit 1。設定ファイルは要らない
+  idle-run --idle <秒> [--] <コマンド…>
+      コマンドを自分のプロセスグループで動かし、stdout / stderr のどちらにも <秒> 出力が無ければグループごと切る。総時間の上限は無い。
+      出力はそのまま流す。設定ファイルは要らない。exit = コマンドの exit、124 = 切った（理由を stderr に出す）、127 = 起動できない、2 = 使い方の誤り
   export-copy <dest> --words-file <file>
       キットを読めないリポジトリ（公開リポジトリなど）が同梱するコピーを <dest> に作る（テストを除くコード、skills、bin、
       README。<dest>/KIT_VERSION に元のコミットと日時）。--words-file で指定した固有語のリスト（キットの外）の語が 1 件でもあればコピーを消して exit 1
@@ -195,6 +199,21 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
   if (command === "pull-main") {
     if (rest.length) return usage(err, "pull-main", 2);
     return pullMain(process.cwd(), out, err);
+  }
+  if (command === "idle-run") {
+    const IDLE_USAGE = "idle-run --idle <秒> [--] <コマンド…>";
+    const [flag, seconds, ...tail] = rest;
+    const cmd = tail[0] === "--" ? tail.slice(1) : tail;
+    const idleSeconds = Number(seconds);
+    if (flag !== "--idle" || !/^[1-9]\d*$/.test(seconds ?? "") || idleSeconds > IDLE_SECONDS_MAX || !cmd.length) return usage(err, IDLE_USAGE, 2);
+    try {
+      const r = await runIdle(cmd, { idleSeconds, stdin: "inherit", onData: (chunk, stream) => process[stream].write(chunk) });
+      if (r.idleKilled) err(IDLE_KILLED_LINE(idleSeconds));
+      return r.code;
+    } catch (e) {
+      err(`${cmd[0]} を起動できません: ${(e as Error).message}`);
+      return 127;
+    }
   }
   if (command === "public-sync") {
     const flags = new Set(["--dry-run", "--adopted", "--adopt-baseline", "--check"]);

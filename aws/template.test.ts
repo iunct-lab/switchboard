@@ -1,3 +1,4 @@
+// test-reads: aws/template.yaml aws/waf.yaml aws/host/
 import { describe, expect, test } from "bun:test";
 import { fileURLToPath } from "node:url";
 
@@ -76,7 +77,7 @@ describe("aws/template.yaml (#229)", () => {
     expect(amounts.sort((a, b) => a - b)).toEqual([7, 20]);
     expect(resource("BudgetLow")).toContain("Address: !Ref BudgetEmail");
     // only this project's resources: another project may share the account (review #338)
-    for (const b of ["BudgetLow", "BudgetHigh"]) expect(resource(b)).toContain("CostFilters: { TagKeyValue: [!Sub 'user:Project$${CostTag}'] }");
+    for (const b of ["BudgetLow", "BudgetHigh"]) expect(resource(b)).toContain("CostFilters: { TagKeyValue: [!Join ['', ['user:Project$', !Ref CostTag]]] }");
   });
 
   test("backups survive the instance role: versioning on, and the role cannot remove a version or loosen the bucket", () => {
@@ -408,11 +409,11 @@ describe("aws/template.yaml memory alarms (#540)", () => {
     expect(resource("Instance")).not.toMatch(/cloudwatch|CWAgent|alarm/i);
   });
 
-  test("host bedrock-mantle (#1731): InstanceRole and Boundary have only CreateInference, on the account's projects", () => {
+  test("host bedrock-mantle (#1731): InstanceRole and Boundary have only CreateInference, on the account's projects in any region", () => {
     for (const name of ["InstanceRole", "Boundary"]) {
       const body = resource(name);
-      expect([...body.matchAll(/bedrock-mantle:[A-Za-z*]+/g)].map((m) => m[0])).toEqual(["bedrock-mantle:CreateInference"]);
-      expect(body).toContain("Resource: !Sub 'arn:aws:bedrock-mantle:${AWS::Region}:${AWS::AccountId}:project/*'");
+      expect([...body.matchAll(/(?<!aws:)bedrock-mantle:[A-Za-z*]+/g)].map((m) => m[0])).toEqual(["bedrock-mantle:CreateInference"]);
+      expect(body).toContain("Resource: !Sub 'arn:aws:bedrock-mantle:*:${AWS::AccountId}:project/*'");
     }
   });
 

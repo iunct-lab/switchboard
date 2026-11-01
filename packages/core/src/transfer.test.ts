@@ -1,3 +1,4 @@
+// test-reads: packages/core/src/main.ts
 import { Database } from "bun:sqlite";
 import { afterAll, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
@@ -402,12 +403,12 @@ describe("import", () => {
     const { env } = fakeHistory(join(tmp, "cli"));
     const main = join(import.meta.dir, "main.ts");
     const out = join(tmp, "cli.tar.zst");
-    for (const argv of [["export", out, "--encrypt"], ["export", out, "--encrypt", "--x"], ["import", out, "--identity"]]) {
+    for (const argv of [["export", out, "--encrypt", "--x"], ["import", out, "--identity"]]) {
       const r = Bun.spawnSync([process.execPath, main, ...argv], { env: { ...process.env, ...env } });
       expect(r.exitCode).toBe(2);
     }
     expect(existsSync(out)).toBe(false);
-  }, 30_000); // three `bun main.ts` processes: over the 5 s default on a loaded machine
+  }, 30_000); // two `bun main.ts` processes: over the 5 s default on a loaded machine
 });
 
 /** A runner that records how it was started and finishes each turn at once. */

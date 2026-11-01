@@ -1,8 +1,9 @@
+// test-reads: ops-kit/bin/ ops-kit/skills/ ops-kit/template/ ops-kit/src/cli.ts ops-kit/src/idle-run.ts
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { type Dirent, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 
 /**
  * The shared skills name no command, path or tool of one repository: those come from the working repository's
@@ -157,6 +158,88 @@ test("cross-runner-review: step 1 stops before cloning when /tmp has less than M
   expect(out).toMatch(/^\d+\t.*other\.review1\.Abc123$/m); // du's top entries are reported
 });
 
+/** Runs the skill's own review command, with the threshold down to 1 second and fake reviewers in place of the real ones. */
+function runReviewCommand(marker: RegExp, fake: string) {
+  const dir = mkdtempSync(join(tmpdir(), "review-idle-"));
+  try {
+    const bin = join(dir, "bin");
+    const R = join(dir, "clone");
+    const M = join(R, "_review");
+    mkdirSync(bin);
+    mkdirSync(M, { recursive: true });
+    writeFileSync(join(M, "prompt.md"), "review this\n");
+    for (const name of ["claude", "codex"]) writeFileSync(join(bin, name), `#!/bin/bash\n${fake}\n`, { mode: 0o755 });
+    const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
+    const line = text.split("\n").find((l) => l.startsWith("( ") && marker.test(l))!.replace("--idle 900", "--idle 1");
+    const script = `R=${R} M=${M} CODEX=${join(bin, "codex")}\n${line}\necho "exit=$?"\n`;
+    const env = { ...process.env, PATH: `${bin}:${join(import.meta.dir, "../bin")}:${process.env.PATH}` };
+    const out = spawnSync("bash", ["-c", script], { encoding: "utf8", env });
+    const files: Record<string, string> = Object.fromEntries(readdirSync(M).map((name) => [name, readFileSync(join(M, name), "utf8")]));
+    return { exit: /exit=(\d+)/.exec(out.stdout)?.[1], files };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const CODEX_LINE = /"\$M\/codex\.md"/;
+const CLAUDE_LINE = /"\$M\/claude\.md"/;
+const CODEX_TALKS = 'while [ $# -gt 0 ]; do [ "$1" = -o ] && o=$2; shift; done; for i in 1 2 3 4 5 6 7 8; do echo step $i; sleep 0.2; done; echo "### Findings" > "$o"';
+const CLAUDE_TALKS = `for i in 1 2 3 4 5 6 7 8; do echo '{"type":"assistant"}'; sleep 0.2; done; echo '{"type":"result","result":"### Findings"}'`;
+
+test("cross-runner-review: a stuck reviewer is cut by the skill's own command, with the reason in the log (#3310)", () => {
+  const stuck = 'echo \'{"type":"system"}\'; sleep 600';
+  const codex = runReviewCommand(CODEX_LINE, stuck);
+  expect(codex.exit).toBe("124");
+  expect(codex.files["codex.log"]).toContain("無進捗で打ち切り");
+  const claude = runReviewCommand(CLAUDE_LINE, stuck);
+  expect(claude.exit).toBe("124");
+  expect(claude.files["claude.log"]).toContain("無進捗で打ち切り");
+  expect(claude.files["claude.md"]?.trim()).toBe("");
+}, 15_000);
+
+test("cross-runner-review: a reviewer that keeps talking past the threshold finishes, and its result is the file (#3310)", () => {
+  const codex = runReviewCommand(CODEX_LINE, CODEX_TALKS);
+  expect(codex.exit).toBe("0");
+  expect(codex.files["codex.md"]).toContain("### Findings");
+  const claude = runReviewCommand(CLAUDE_LINE, CLAUDE_TALKS);
+  expect(claude.exit).toBe("0");
+  expect(claude.files["claude.md"]?.trim()).toBe("### Findings");
+}, 15_000);
+
+test("cross-runner-review: a cut follow-up review posts nothing, not even the previous output (#3310)", () => {
+  const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8").split("\n");
+  const from = text.findIndex((l) => l.startsWith('rm -f "$M/fix-review.md"'));
+  const check = text.findIndex((l) => l.startsWith('[ "$RC" = 0 ]'));
+  const block = [text[from], text.find((l, i) => i > from && l.startsWith("( cd")), text[check], text[check + 1]].join("\n").replace("--idle 900", "--idle 1");
+  const run = (fake: string) => {
+    const dir = mkdtempSync(join(tmpdir(), "review-fix-idle-"));
+    try {
+      const M = join(dir, "_review");
+      mkdirSync(M);
+      writeFileSync(join(M, "prompt-fix.md"), "review this\n");
+      writeFileSync(join(M, "fix-review.md"), "### Findings\n- none\n");
+      writeFileSync(join(dir, "codex"), `#!/bin/bash\n${fake}\n`, { mode: 0o755 });
+      const script = `post_review() { echo POSTED; }\nN=1 R=${dir} M=${M} CODEX=${join(dir, "codex")}\n${block}\n`;
+      return spawnSync("bash", ["-c", script], { encoding: "utf8", env: { ...process.env, PATH: `${join(import.meta.dir, "../bin")}:${process.env.PATH}` } }).stdout;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const cut = run("sleep 600");
+  expect(cut).not.toContain("POSTED");
+  expect(cut).toContain("exit 124");
+  expect(run(CODEX_TALKS)).toContain("POSTED");
+}, 15_000);
+
+test("cross-runner-review: every review command goes through idle-run, and the skill says what to do with 124 (#3310)", () => {
+  const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
+  const commands = text.split("\n").filter((l) => /^(# )?\( .*(exec --sandbox|claude -p)/.test(l));
+  expect(commands.length).toBe(4);
+  for (const line of commands) expect(line).toContain("ops-kit idle-run --idle 900 --");
+  expect(text).not.toContain("--output-format text");
+  for (const word of ["exit 124", "無進捗で打ち切り（900 秒出力なし）", "一度だけやり直す", "止まって報告する"]) expect({ word, says: text.includes(word) }).toEqual({ word, says: true });
+});
+
 test("skills: the review clones are removed by their own path, and a cut session's leftovers only after gh says MERGED / CLOSED (#796)", () => {
   for (const name of ["cross-runner-review", "review-triage-and-merge"]) {
     const text = readFileSync(join(skills, name, "SKILL.md"), "utf8");
@@ -173,4 +256,57 @@ test("skills: public-release-gate runs both runners apart with the seeds, the mo
   for (const word of ["claude -p --model claude-fable-5-1", "codex exec -m gpt-6-astra", "片方の出力をもう片方の材料に入れない", "もう片方で代替せず止まる", ".message.model", "^model: ", "wait $P1; C1=$?; wait $P2; C2=$?", "grep -q '^nothing to sync'", "git log -1 --format=%B refs/public-sync/main", ".parent_tool_use_id==null", "初回の push の前"]) expect({ word, says: text.includes(word) }).toEqual({ word, says: true });
   // the report, the triage and the pass mark
   for (const word of ["[public-release-gate] <runner> <model>", "種の外は無し", "### 種の外の観点", "verdict: pass", "verdict: fail", "**直す**", "**公開側から外す**", "**受け入れる**", "**Issue（公開を止めない）**", "ランナーが付けた重さによらず", "ブロッカーが 0 件", "--resume", "順に回してよい", "## 判断待ち", "public-release-gate: pass <tree sha>", "## 観点の追記"]) expect({ word, says: text.includes(word) }).toEqual({ word, says: true });
+});
+
+const BACKLOG_BY_GH = /gh issue (create|edit|comment|close|reopen|view|list|delete|transfer)|gh api [^\n]*\/issues|addSubIssue|removeSubIssue|updateProjectV2|gh project (item-|field-)|scripts\/setup\/(triage_issue|set_project_field|lint_backlog)/;
+
+test("skills: the backlog is read and written only through ops-kit backlog (#3072)", () => {
+  /** The lines that stay: not the backlog of a repository the app syncs, or a read before going public. */
+  const ALLOWED: { file: string; has: string }[] = [
+    { file: "skills/issue-workflow/SKILL.md", has: "Project 全件を読み" }, // the warning itself
+    { file: "skills/issue-workflow/SKILL.md", has: "gh api user --silent" }, // telling a network limit from an expired login
+    { file: "skills/public-release-gate/SKILL.md", has: "gh issue list --state all --limit 1000" }, // the check before going public
+    { file: "skills/pbi-complete/SKILL.md", has: "gh issue close <URL>" }, // an Issue on the public copy, which the app does not sync
+  ];
+  const kit = join(import.meta.dir, "..");
+  const files = [
+    ...readdirSync(skills).map((name) => `skills/${name}/SKILL.md`),
+    ...(readdirSync(join(kit, "template"), { recursive: true, withFileTypes: true }) as Dirent[])
+      .filter((entry) => entry.isFile())
+      .map((entry) => relative(kit, join(entry.parentPath, entry.name))),
+  ];
+  expect(files.some((file) => file.startsWith("template/.github/"))).toBe(true);
+  const hits = files.flatMap((file) =>
+    readFileSync(join(kit, file), "utf8")
+      .split("\n")
+      .flatMap((line, i) => (BACKLOG_BY_GH.test(line) && !ALLOWED.some((allowed) => allowed.file === file && line.includes(allowed.has)) ? [`${file}:${i + 1}: ${line.trim().slice(0, 100)}`] : [])),
+  );
+  expect(hits).toEqual([]);
+
+  // an instruction to comment, close or record names the command, so the runner does not reach for gh
+  const lines = (name: string) => readFileSync(join(skills, name, "SKILL.md"), "utf8").split("\n");
+  const INSTRUCTIONS: [string, string][] = [
+    ["task-to-pr", "着手コメント（3 行"],
+    ["task-to-pr", 'Status "In review"'],
+    ["task-to-pr", "PR: #<n>"],
+    ["pbi-complete", "どちらも無く Task も全部閉じていれば"],
+    ["pbi-complete", "PBI の Status が Ready でなければ"],
+    ["cross-runner-review", "転記したら Task の Issue に 1 行"],
+    ["pbi-complete", "後回し: <PR #n / Task #n> と <path> が重なる」とコメント"],
+    ["pbi-complete", "`## 派生 PBI` の行に Done"],
+    ["review-triage-and-merge", "Issue を作り"],
+    ["review-triage-and-merge", "Task に結果コメント"],
+    ["review-with-subagent", "Issue の結果コメント"],
+    ["stacked-pr-delivery", "Issue にも結果を記録"],
+  ];
+  for (const [name, words] of INSTRUCTIONS) {
+    const found = lines(name).filter((line) => line.includes(words));
+    expect({ name, words, found: found.length > 0 }).toEqual({ name, words, found: true });
+    expect({ name, words, commands: found.every((line) => line.includes("ops-kit backlog")) }).toEqual({ name, words, commands: true });
+  }
+
+  const review = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
+  expect(review).toContain('ops-kit backlog view "$TASK" --fresh');
+  expect(review).toContain('ops-kit backlog view "$PBI" --fresh');
+  expect(review).not.toContain("BACKLOG_WORKSPACE");
 });

@@ -630,6 +630,110 @@ test("chosen (#1329): remote on a conflict found after the write sends the other
   expect(db.listPendingBacklogOperations(S)).toEqual([]);
 });
 
+test("BacklogSync: the Project item the daemon wrote is read by number by the next light import, and no more after it stored", async () => {
+  const g = fakeGithub();
+  const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
+  db.setWorkspaceBacklogSource(ws.id, S);
+  db.putBacklogSnapshot(S, { records: [], cursor: "2026-10-01T00:00:00Z", syncedAt: 1 });
+  const reads = importsToo(g);
+  const numbered: string[] = [];
+  const answer = (data: unknown) => ({ code: 0, stdout: JSON.stringify({ data }), stderr: "" });
+  const open12 = () => ({ number: 12, projectItems: { totalCount: 1, nodes: [{ id: "PVTI_I_12", project: { number: 1, owner: { login: "acme" } }, fieldValues: { totalCount: 1, nodes: [{ name: g.items.get("PVTI_I_12")!.fields.Status, field: { name: "Status" } }] } }] } });
+  const gh: GhRunner = async (args, cwd) => {
+    const q = args.find((a) => a.startsWith("query=")) ?? "";
+    if (/w\d+: issue\(number:/.test(q)) {
+      numbered.push(q.match(/w(\d+): /)![1]!);
+      return answer({ repository: { w12: open12() } });
+    }
+    if (q.includes("issues(first:100")) return answer({ repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [open12()] } } });
+    if (q.includes("states:[OPEN,CLOSED]")) return answer({ repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } });
+    return reads(args, cwd);
+  };
+  const sync = makeSync(db, gh, () => Date.parse("2026-10-20T00:00:00Z"));
+  await sync.sync(ws); // the first is full
+  editStoredIssue(db, S, 12, { title: "本文の変更は項目を読まない" });
+  await sync.send(ws);
+  await sync.sync(ws);
+  expect(numbered).toEqual([]);
+  editStoredIssue(db, S, 12, { fields: { Status: "Done" } });
+  await sync.send(ws);
+  await sync.sync(ws);
+  expect(g.items.get("PVTI_I_12")!.fields.Status).toBe("Done");
+  expect(numbered).toEqual(["12"]);
+  await sync.sync(ws);
+  expect(numbered).toEqual(["12"]);
+});
+
+test("BacklogSync: a Project field sent without a write, or held as a conflict, is read by number too; what an import did not store is read again", async () => {
+  const g = fakeGithub();
+  const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
+  db.setWorkspaceBacklogSource(ws.id, S);
+  db.putBacklogSnapshot(S, { records: [], cursor: "2026-10-01T00:00:00Z", syncedAt: 1 });
+  const reads = importsToo(g);
+  const numbered: string[] = [];
+  let failing = false;
+  let hold = false;
+  let release = () => {};
+  const answer = (data: unknown) => ({ code: 0, stdout: JSON.stringify({ data }), stderr: "" });
+  const open12 = () => ({ number: 12, projectItems: { totalCount: 1, nodes: [{ id: "PVTI_I_12", project: { number: 1, owner: { login: "acme" } }, fieldValues: { totalCount: 1, nodes: [{ name: g.items.get("PVTI_I_12")!.fields.Status, field: { name: "Status" } }] } }] } });
+  const gh: GhRunner = async (args, cwd) => {
+    const q = args.find((a) => a.startsWith("query=")) ?? "";
+    if (/w\d+: issue\(number:/.test(q)) return numbered.push("12"), answer({ repository: { w12: open12() } });
+    if (q.includes("issues(first:100")) return answer({ repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [open12()] } } });
+    if (q.includes("states:[OPEN,CLOSED]")) return answer({ repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } });
+    if (q.includes("pullRequests(") && failing) return answer({ repository: {} });
+    if (q.includes("pullRequests(") && hold) await new Promise<void>((r) => (hold = false, release = r));
+    return reads(args, cwd);
+  };
+  const sync = makeSync(db, gh, () => Date.parse("2026-10-20T00:00:00Z"));
+  await sync.sync(ws);
+  const look = async () => {
+    await sync.sync(ws).catch(() => undefined);
+    await sync.sync(ws).catch(() => undefined);
+  };
+
+  // GitHub already has the value: nothing is written, the item is read all the same
+  editStoredIssue(db, S, 12, { fields: { Status: "In progress" } });
+  g.items.get("PVTI_I_12")!.fields.Status = "In progress";
+  await sync.send(ws);
+  await look();
+  expect(numbered).toEqual(["12"]);
+
+  // held as a conflict: GitHub's value is what the choice is offered on
+  numbered.length = 0;
+  editStoredIssue(db, S, 12, { fields: { Status: "In review" } });
+  g.items.get("PVTI_I_12")!.fields.Status = "Done";
+  await sync.send(ws);
+  await look();
+  expect(numbered).toEqual(["12"]);
+  expect(db.listPendingBacklogOperations(S).filter((o) => o.field === "field:Status").map((o) => o.status)).toEqual(["conflict"]);
+  db.listPendingBacklogOperations(S).forEach((o) => db.resolveBacklogConflict(S, o.id, "remote", conflictRevision(db.getBacklogOperation(o.id)!, "Done")));
+  await sync.send(ws);
+  await look();
+
+  // an import that failed stored nothing: the next one reads it again
+  numbered.length = 0;
+  failing = true;
+  editStoredIssue(db, S, 12, { fields: { Status: "Ready" } });
+  await sync.send(ws);
+  await sync.sync(ws).catch(() => undefined);
+  failing = false;
+  await look();
+  expect(numbered.length).toBeGreaterThanOrEqual(2);
+
+  // one a write superseded stored nothing either
+  numbered.length = 0;
+  hold = true;
+  editStoredIssue(db, S, 12, { fields: { Status: "Backlog" } });
+  await sync.send(ws);
+  await Bun.sleep(10);
+  editStoredIssue(db, S, 12, { title: "読む間の書き込み" });
+  await sync.send(ws);
+  release();
+  await look();
+  expect(numbered.length).toBeGreaterThanOrEqual(2);
+});
+
 test("BacklogSync: a limit is kept for the repository and the host and nothing is asked before it; the login refused is shown; what was written is imported back", async () => {
   const g = fakeGithub();
   const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });

@@ -239,7 +239,7 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
             {runnerOptions(llm.runner, "提案 / 自動選択")}
           </select>
           <ModelSelect runner={info(llm.runner)} value={llm.model} onChange={(m) => void save({ routing: { llm: { model: m } } })} label="提案のモデル" disabled={saving} title="提案と Workspace の自動選択の 1 ターンだけに使うモデルです（安いモデルで足ります）" />
-          <select className="mode" value={llm.timeoutMs} disabled={saving} aria-label="LLM 提案の待ち時間" title="Task 作成がこの時間だけ提案を待ちます。間に合わなければルール表の推奨だけで作ります（claude の 1 ターンは実測 10 秒前後）" onChange={(e) => void save({ routing: { llm: { timeoutMs: Number(e.target.value) } } })}>
+          <select className="mode" value={llm.timeoutMs} disabled={saving} aria-label="LLM 提案の待ち時間" title="提案の締め切りです。Task は待ちません（claude の 1 ターンは実測 10 秒前後）" onChange={(e) => void save({ routing: { llm: { timeoutMs: Number(e.target.value) } } })}>
             {[5000, 10000, 15000, 30000].map((ms) => (
               <option key={ms} value={ms}>
                 待ち時間: {ms / 1000} 秒

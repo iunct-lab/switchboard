@@ -23,8 +23,8 @@ gh pr view $N --comments --json comments -q '.comments[] | "---- \(.author.login
 
 | 振り分け | いつ | やること |
 |---|---|---|
-| **修正** | blocker。should-fix で Task の範囲内。nit は同じ修正コミットに入る 1 行程度のものだけ（ほかの nit は対処不要か Issue 化） | この枝で直す。回帰テストを先に書き、修正前に fail することを見る |
-| **Issue 化** | 正しいが Task の範囲外（別の受け入れ条件、別の場所、リファクタ、将来の改善）。同じ PBI なら Task、別の価値なら PBI（`request-to-backlog` の粒度で。元要望は「なし（PR #N のレビュー）」） | Issue を作り、返信に番号。PBI の決定ログにも 1 行 |
+| **修正** | blocker。should-fix で Task の範囲内。nit は同じ修正コミットに入る 1 行程度のものだけ（ほかの nit は対処不要か Issue 化） | この枝で直す。回帰テストを先に書き、修正前に fail することを見る。書く前に `task-to-pr` の「足す前に」を通す（既存のテストに条件を足す・軽い階層を先に。回帰テストは要る） |
+| **Issue 化** | 正しいが Task の範囲外（別の受け入れ条件、別の場所、リファクタ、将来の改善）。同じ PBI なら Task、別の価値なら PBI（`request-to-backlog` の粒度で。元要望は「なし（PR #N のレビュー）」） | Issue を作り（`ops-kit backlog create`。Task なら `--parent <PBI>`）、返信に番号。PBI の決定ログにも 1 行（`ops-kit backlog edit <PBI> --body-file …`） |
 | **対処不要** | 観点がずれている: 設計原則（設計ルール。場所は CLAUDE.md）や PBI の決定ログ・スコープ外に反する提案、互換層・一度しか使わない抽象・念のための設定の追加、レビュアーの誤読、この環境で検証できない懸念 | 返信に**根拠**（ファイル・Issue・doc の名指し）。「意図的です」だけは不可 |
 
 question は事実で答える（「分からない」なら調べてから）。**レビュアーが正しくて自分の修正が間違いのこともある**（最初の修正を却下するのが正解だったことがある）。自分の変更を守らず、より小さく安全な直し方があればそちらに切り替える。
@@ -35,7 +35,7 @@ question は事実で答える（「分からない」なら調べてから）�
 
 ```bash
 cd <その Task の worktree>; git checkout <その Task の枝>        # 場所と名前は CLAUDE.md の worktree と枝の規則
-# 回帰テスト → fail を確認 → 修正 → pass。テストのコマンド（1 件 / 型検査 / 全体）は CLAUDE.md
+# 回帰テスト（task-to-pr の「足す前に」を通す）→ fail を確認 → 修正 → pass。テストのコマンド（1 件 / 型検査 / 全体）は CLAUDE.md
 git commit -am "fix(<area>): review follow-ups for #<PR> — <何を>"     # amend・fixup/autosquash・squash で既存のコミットに混ぜない（どれも author date を保つのでマージ判定が見直しの要否を判定できない）
 gh stack rebase && gh stack push        # 下の枝を直したら上に cascade（stacked-pr-delivery）。単発なら git push
 ```
@@ -51,7 +51,7 @@ gh stack rebase && gh stack push        # 下の枝を直したら上に cascade
 **1 コメント 1 返信**。返信の型:
 
 ```
-修正: <何をどう直したか> — <commit sha 短縮>、テスト <name>
+修正: <何をどう直したか> — <commit sha 短縮>、テスト <name>（追加先: 既存 / 単体 / 新規）
 Issue 化: #<n>（<なぜこの PR の外か>）
 対処不要: <根拠>。<ファイル / Issue / doc>
 回答: <事実>
@@ -76,7 +76,7 @@ gh pr comment $N --body-file "$W/summary.md"      # W=$(mktemp -d /tmp/<リポ�
 | codex | .. | .. | .. | .. | .. |
 | <extra> | .. | .. | .. | .. | .. |
 主な修正: <1〜3 行>  Issue 化: #.., #..  対処不要の根拠: <1〜2 行>
-テスト: <全体の件数 / 追加した回帰テスト名>
+テスト: <全体の件数 / 追加した回帰テスト名（追加先: 既存 / 単体 / 新規）>
 ## マージ判断
 <可 / 不可 と理由（下のチェックリストの結果）>
 ```
@@ -106,7 +106,7 @@ gh pr view <next> --json baseRefName,mergeable,mergeStateStatus   # base=main �
 ```
 
 マージ直後:
-1. Task に結果コメント（`issue-workflow` のテンプレ: PR / 変更 / 検証 / レビュー指摘と対応 / 残したもの）、`set_project_field.sh <Task> Status Done`。GitHub 連携の無い workspace（`BACKLOG_WORKSPACE` がある）の Task は自動で閉じないので、続けて `ops-kit backlog edit <Task> --state closed`
+1. Task に結果コメント（`issue-workflow` のテンプレ: PR / 変更 / 検証 / レビュー指摘と対応 / 残したもの。`ops-kit backlog comment <Task> --body-file "$W/result.md"`）、`ops-kit backlog set <Task> Status Done`。Task は PR の `Closes` で自動では閉じないことがあるので、open のままなら続けて `ops-kit backlog edit <Task> --state closed`
 2. `git fetch -q origin && git ls-tree -r --name-only origin/main | grep -i <消したもの>` で復活ファイルが無いか（fetch しないと古い origin/main を見る。`-r` が無いと直下しか出ない）
 3. `cross-runner-review` で作ったレビュー用ディレクトリ（`/tmp/<リポジトリ名>.review<PR番号>.XXXXXX` の実際のパス）を消す。glob で消さない。切れたセッションの残りは、次のレビューの前（`cross-runner-review` の 1）に同じリポジトリ名 + `gh` で MERGED / CLOSED と確かめたものだけ消える。worktree はスタックが全部入ってから `git worktree remove`
 4. PBI の全 Task が Done なら PBI の結果節（`pbi-complete`）

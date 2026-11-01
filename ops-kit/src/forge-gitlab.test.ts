@@ -1,3 +1,4 @@
+// test-reads: none
 import { describe, expect, test } from "bun:test";
 import { createGitlabMr, gitlabAuth, GitlabError, gitlabMrDiscussions, resolveGitlabDiscussion, startGitlabDiscussion, viewGitlabMr, gitlabId, glabApi, parentIn, projectPath, readGitlabIssue, readGitlabIssues, readGitlabNotes, statusOf } from "./forge-gitlab.ts";
 import { ForgeRefused, type ForgeTarget } from "./forge.ts";

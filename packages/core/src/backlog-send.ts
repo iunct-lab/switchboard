@@ -152,7 +152,7 @@ class Sender {
   private get r() { return this.source.repository.split("/")[1]!; }
   private repo = (path: string) => `repos/${this.source.repository}${path}`;
 
-  private numberOf(issue: string): number {
+  numberOf(issue: string): number {
     const rec = this.db.getBacklogRecord({ ...this.source, objectKind: "issue", externalId: issue });
     return ((rec?.local ?? rec?.remote) as BacklogIssueData | null)?.number ?? 0;
   }
@@ -576,9 +576,11 @@ export const forgeKind = (op: Pick<BacklogOperation, "kind" | "field" | "targetK
  * Sends what is waiting for one repository (`source`, gh run in `cwd`), oldest first; resolves to how many were done.
  * Throws Limit when GitHub said to wait (the rest waits too). `on` is asked before each operation and each write:
  * false (the workspace's GitHub sync turned off meanwhile, #2266) stops the run there (Limit `off`), the rest waiting
- * as it is. `waits`: an operation not to send yet (it holds the ones of its Issue after it).
+ * as it is. `waits`: an operation not to send yet (it holds the ones of its Issue after it). `onItem` gets the number of
+ * the Issue of every Project item operation sent, written or not (GitHub had the value, or it was held as a conflict):
+ * what is stored of the item has to be read again.
  */
-export async function sendGithubOperations(gh: GhRunner, db: Db, cwd: string, source: BacklogSource, now = () => Date.now(), onWrite?: () => void, on = () => true, waits = (_op: BacklogOperation) => false, glab: Sh = runGlab): Promise<number> {
+export async function sendGithubOperations(gh: GhRunner, db: Db, cwd: string, source: BacklogSource, now = () => Date.now(), onWrite?: () => void, on = () => true, waits = (_op: BacklogOperation) => false, glab: Sh = runGlab, onItem = (_issue: number) => {}): Promise<number> {
   // a write is not made once the sync is off, inside an operation too (a set reads GitHub before it writes)
   const writes = (args: string[]) => args.some((a, i) => (args[i - 1] === "-X" && a !== "GET") || /^query=\s*mutation/.test(a));
   const sender = new Sender((args, c) => (writes(args) && !on() ? Promise.reject(new Limit(now(), "off")) : gh(args, c)), db, cwd, source, now);
@@ -636,6 +638,8 @@ export async function sendGithubOperations(gh: GhRunner, db: Db, cwd: string, so
       throw e;
     }
     db.setBacklogOperationResult(op.id, { retryAt: null, error: null, ...out }, now());
+    const item = op.targetKind === "project-item" ? sender.numberOf(db.getBacklogOperation(op.id)!.issue) : 0;
+    if (item) onItem(item);
     // the read after a write met a limit: its outcome is kept, the rest waits as after any limit
     if (sender.stopAfter) throw sender.stopAfter;
     if (out.status === "done") done++;

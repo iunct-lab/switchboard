@@ -1,3 +1,4 @@
+// test-reads: aws/auth-page.html
 import { describe, expect, test } from "bun:test";
 
 /** The start page's recovery paths (aws/auth-page.html, #1394), run with a fake clock, api, sleep and elements. */

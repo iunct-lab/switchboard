@@ -10,7 +10,7 @@ description: PBI 1 件を一気通貫で終わらせるコマンド。/pbi-compl
 
 ## 0. 前提
 
-- 作業ファイルは `/tmp` 直下に固定の名前で置かない（別のリポジトリのセッションも `/tmp` を使うので、上書き・削除され、別リポジトリの PR 本文やスクリプトが混ざる）。作業ごとに `W=$(mktemp -d /tmp/<リポジトリ名>.<用途>.XXXXXX)` で自分だけのディレクトリを作り、表示されたパスをそのまま使う（Bash の呼び出しをまたぐとシェル変数は消えるので、パスは文字で控える）。消すときもそのパスだけ（glob で消さない）。CLAUDE.md が求めるなら、`gh` の書き込み（issue / pr の作成・コメント・編集・マージ・クローズ）には `-R <owner/name>` を付ける。`-R` を取れない `gh stack` は、作業しているリポジトリの worktree の中でだけ実行する（レビュー用の clone や別リポジトリのディレクトリから実行しない）
+- 作業ファイルは `/tmp` 直下に固定の名前で置かない（別のリポジトリのセッションも `/tmp` を使うので、上書き・削除され、別リポジトリの PR 本文やスクリプトが混ざる）。作業ごとに `W=$(mktemp -d /tmp/<リポジトリ名>.<用途>.XXXXXX)` で自分だけのディレクトリを作り、表示されたパスをそのまま使う（Bash の呼び出しをまたぐとシェル変数は消えるので、パスは文字で控える）。消すときもそのパスだけ（glob で消さない）。CLAUDE.md が求めるなら、`gh` の PR の書き込み（作成・コメント・編集・マージ・クローズ）には `-R <owner/name>` を付ける。`-R` を取れない `gh stack` は、作業しているリポジトリの worktree の中でだけ実行する（レビュー用の clone や別リポジトリのディレクトリから実行しない）
 
 - エージェント管理アプリの Task として起動されたなら（見分け方は CLAUDE.md）、main の作業ツリーには触らない（worktree で全部やる）。例外は 6-6 の main の更新だけ
 - `gh extension list` に `gh-stack`、GitHub の既存認証で対象 Issue が読める。`gh auth status` が失敗したら、認証切れと決めず `issue-workflow` の「GitHub の接続・認証の切り分け」に従う（接続制限なら許可されたネットワーク実行で再検証し、成功したら続行）
@@ -48,17 +48,13 @@ description: PBI 1 件を一気通貫で終わらせるコマンド。/pbi-compl
 
 ```bash
 <guard> claim <PBI>     # exit 1 = 別のセッションが実行中。何も触らずに止め、報告する
-gh issue view <PBI> --json title,body,labels
-gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number:$n){ subIssues(first:50){ nodes{ number title state } } } } }' -F o=<owner> -F r=<repo> -F n=<PBI> \
-  -q '.data.repository.issue.subIssues.nodes[] | "\(.number)\t\(.state)\t\(.title)"'
-bash scripts/setup/lint_backlog.sh
-# BACKLOG_URL があれば（issue-workflow の「操作」）: gh と scripts/setup/ の代わりに
-#   ops-kit backlog view <PBI> --fresh    # 本文。sub-issue は --json の .issue.subIssues
-#   ops-kit lint --fresh
+ops-kit backlog view <PBI> --fresh
+ops-kit backlog view <PBI> --json | jq -r '.issue.subIssues[]'    # sub-issue の番号。題と状態は 1 件ずつ ops-kit backlog view <Task>
+ops-kit lint --fresh
 ```
 
-`<owner>` / `<repo>` は `gh repo view --json owner,name -q '"\(.owner.login) \(.name)"'` で見る。claim が exit 1 なら、占有コメントの日時と worktree を報告して終わる（同じ PBI を二重に進めない）。利用者が「再開」と言ったとき（前のセッションが止まった）だけ `claim <PBI> --takeover`。
-Task が無い・受け入れ条件が覆われていない・lint 違反 → `pbi-to-tasks` を先にやる。PBI の Status が Ready でなければ Ready にしてから。
+claim が exit 1 なら、占有コメントの日時と worktree を報告して終わる（同じ PBI を二重に進めない）。利用者が「再開」と言ったとき（前のセッションが止まった）だけ `claim <PBI> --takeover`。
+Task が無い・受け入れ条件が覆われていない・lint 違反 → `pbi-to-tasks` を先にやる。PBI の Status が Ready でなければ Ready にしてから（`ops-kit backlog set <PBI> Status Ready`）。
 PBI の `## 元要望` の原文を読み、PBI の解釈が原文からずれていないか一度確かめる。
 
 ## 2. 順番を決める
@@ -67,7 +63,7 @@ PBI の `## 元要望` の原文を読み、PBI の解釈が原文からずれ�
 2. 同順位は Project の Priority（P0 → P3）、次に PBI の `## Tasks` に書いた着手順
 3. 「利用者に確認して止める」がある Task は、その工程が最後になるように後ろへ（他を止めない）
 
-PBI の決定ログに「YYYY-MM-DD: /pbi-complete 開始。順番: #a → #b → #c。枠: …」。PBI の Status を In progress。
+PBI の決定ログに「YYYY-MM-DD: /pbi-complete 開始。順番: #a → #b → #c。枠: …」（`ops-kit backlog edit <PBI> --body-file "$W/body.md"`）。PBI の Status を In progress（`ops-kit backlog set <PBI> Status "In progress"`）。
 
 ## 3. 積む（Task ごと）
 
@@ -84,8 +80,8 @@ Task ごとに、着手の前に重なりを確かめる:
 
 ```bash
 <guard> overlap <Task>            # exit 0 = 進める / 1 = 進めない（verdict: defer = 重なった / wait = 前提が未完 / stop = 前提を人が直す）/ 2 = 判定できなかった（重なりとみなす）
-bash scripts/setup/set_project_field.sh <Task> Status "In progress"     # BACKLOG_URL があれば ops-kit backlog set <Task> Status "In progress"
-<guard> overlap <Task> --claimed  # 着手の印を書いて相手の印と比べる。後から書いた方が譲る（譲るときは印を消す。GitHub 連携の無い workspace では取り下げの印を書く）
+ops-kit backlog set <Task> Status "In progress"
+<guard> overlap <Task> --claimed  # 着手の印を書いて相手の印と比べる。後から書いた方が譲る（印の取り下げはガードがする）
 <guard> release <PBI> <理由> [--waits n,n | --overlap-waits n,n]   # 占有を外す。--waits は待っている相手（PR / Issue の番号）。後回しで止まるときだけ
 ```
 
@@ -95,7 +91,7 @@ bash scripts/setup/set_project_field.sh <Task> Status "In progress"     # BACKLO
 **前提を人が直すとき**（verdict `stop`: 取り下げ = 未マージで閉じた PR・not planned の Issue / missing = 見つからない / unknown = Issue に `（リリース）` を付けた）: その Task は始めない。`## 判断待ち` は出さず、理由を release の文に書いて（`<guard> release <PBI> "止めた: #<Task> の前提 #N が取り下げ"`。`--waits` は付けない）報告の「利用者へ」に書く。直すのは利用者（本文の前提を書き換える・前提を閉じ直す）。マージ済みの PR の `（リリース）` はガードでは成立として進む（動いている版に入ったかはデーモンが判定し、入るまで定期実行はその PBI を始めない）
 
 **重なったとき**（verdict `defer`）: 待たない。
-1. In progress にしていたら Backlog に戻し、Task に「後回し: <PR #n / Task #n> と <path> が重なる」とコメントする
+1. In progress にしていたら Backlog に戻し（`ops-kit backlog set <Task> Status Backlog`）、Task に「後回し: <PR #n / Task #n> と <path> が重なる」とコメントする（`ops-kit backlog comment <Task> --body-file -`）
 2. その Task と、それを `**前提**:` に書いている Task を順番の最後へ回し、残りから重ならない Task を次に積む（PBI の決定ログに順番の変更を 1 行）
 3. 後回しの Task は、他の Task を 5 までマージし終えてから `overlap` をやり直す。exit 0 なら `git fetch origin && git checkout --detach origin/main` から新しいスタックとして積む（相手の変更が入った main の上に作る。古いスタックの上に積まない）
 4. まだ重なっていれば PBI は閉じない。`<guard> release <PBI> "後回し: #<Task>（<相手> と重なる）" --overlap-waits <相手の番号>` で占有を外し、報告の「利用者へ」に書いて終わる。`--overlap-waits` は `overlap` の出力の `blocking[].ref` の番号（`PR #778` → `778`、`Task #603` → `603`。複数ならカンマで）。相手が全部閉じるか、待っている PR が Draft・`needs-decision`、または重複相手の Task が `needs-decision` になって占有対象から外れたら、定期実行（バックログを進める）が次の発火でこの PBI を再開する（#817）。手で再開するなら /pbi-complete <PBI>
@@ -152,10 +148,10 @@ until gh pr view <次> --json baseRefName,mergeStateStatus -q '"\(.baseRefName) 
 ## 6. PBI を閉じる
 
 1. 受け入れ条件の各行を `- [x]` にし、行末に検証結果（テスト名 / コマンドと出力 / 画面で見た事実）。満たせなかった行は `- [ ]` のまま理由。`（利用者確認: …）` の行は除く（自分でチェックしない。4 を見る）
-2. `## 結果`: 受け入れ条件ごとの検証、レビュー件数、Story Points の妥当性、残したもの（Issue 番号）
+2. `## 結果`（1 と一緒に `ops-kit backlog edit <PBI> --body-file "$W/body.md"`）: 受け入れ条件ごとの検証、レビュー件数、Story Points の妥当性、残したもの（Issue 番号）
 3. 認証の値の後からの検査（`ops-kit scan-issues`）は PBI を閉じるたびには走らせない（エージェント管理アプリの毎日の予定が前回からの差分を読む。`issue-workflow` の「Issue・PR・コメントに書かない値」の「後からの検査」）
-4. 利用者の確認待ちの項目があれば Status は In review のまま open。確認待ちは `gh issue list --label needs-decision --state open` で PBI と その Task を探す（`## 判断待ち` を出したのに回答が無いもの。数えるのは実装の判断だけ。運用の確認は Issue に無く、Task の会話で聞いて返事を受けてから進んでいる）と、PBI の受け入れ条件に `- [ ]` のまま残っている `（利用者確認: …）` の行（`issue-workflow` の「利用者確認の項目」。この行は自分でチェックしない。利用者が「確認した」と答えると付く）。どちらも無く Task も全部閉じていれば `gh issue close <PBI>`、Status Done（`BACKLOG_URL` がある（アプリの Task の中）なら `ops-kit backlog edit <PBI> --state closed`。GitHub 連携の無い workspace（`BACKLOG_WORKSPACE` がある）では `ops-kit backlog edit <PBI> --state closed`。Task は PR の `Closes` で自動では閉じないので、マージした PR の Task が open のままなら先に `ops-kit backlog edit <Task> --state closed` で閉じる（`review-triage-and-merge` の 6）。閉じ忘れた Task で止まらない）。`## 回答` に「違う」の理由があれば、それを直す Task を切る（`pbi-to-tasks`）
-5. Milestone の説明を更新（残り / やらない）。元要望 Issue の `## 派生 PBI` の行に Done と書き、派生が全部 Done ならその Issue も閉じる。要望の `## 出典` の経路が「公開側 Issue <URL>」なら、派生が全部 Done（か「やらない」）になったとき、公開側の Issue に結果を 3 行（何が変わったか / それを含む公開側の同期の PR か「まだ同期されていない」/ やらないならその理由）書いて閉じる（`gh issue close <URL> --reason completed`。やらないなら `--reason "not planned"`）。Private の Issue の番号・URL・内部の情報は書かない（`request-to-backlog` の「公開側の Issue から」）
+4. 利用者の確認待ちの項目があれば Status は In review のまま open。確認待ちは `ops-kit backlog list --label needs-decision --fresh` で PBI と その Task を探す（`## 判断待ち` を出したのに回答が無いもの。数えるのは実装の判断だけ。運用の確認は Issue に無く、Task の会話で聞いて返事を受けてから進んでいる）と、PBI の受け入れ条件に `- [ ]` のまま残っている `（利用者確認: …）` の行（`issue-workflow` の「利用者確認の項目」。この行は自分でチェックしない。利用者が「確認した」と答えると付く）。どちらも無く Task も全部閉じていれば `ops-kit backlog edit <PBI> --state closed`、`ops-kit backlog set <PBI> Status Done`（Task は PR の `Closes` で自動では閉じないことがあるので、マージした PR の Task が open のままなら先に `ops-kit backlog edit <Task> --state closed` で閉じる。`review-triage-and-merge` の 6。閉じ忘れた Task で止まらない）。`## 回答` に「違う」の理由があれば、それを直す Task を切る（`pbi-to-tasks`）
+5. Milestone の説明を更新（残り / やらない）。元要望 Issue の `## 派生 PBI` の行に Done と書き、派生が全部 Done ならその Issue も閉じる（`ops-kit backlog edit <req> --body-file "$W/req.md" [--state closed]`）。要望の `## 出典` の経路が「公開側 Issue <URL>」なら、派生が全部 Done（か「やらない」）になったとき、公開側の Issue に結果を 3 行（何が変わったか / それを含む公開側の同期の PR か「まだ同期されていない」/ やらないならその理由）書いて閉じる（`gh issue close <URL> --reason completed`。やらないなら `--reason "not planned"`）。Private の Issue の番号・URL・内部の情報は書かない（`request-to-backlog` の「公開側の Issue から」）
 6. `<guard> release <PBI> "完了"`（並列ガードを使ったとき。閉じないで終わるときも理由を書いて release する。外さないと次の /pbi-complete が止まる）。PBI の worktree を `git worktree remove`、この PBI で作ったスクラッチ（`mktemp -d` が返した実際のパス）だけを `rm -rf`（`/tmp/review*` や `/tmp/<リポジトリ名>.*` の glob は並行している別のセッションのものも消す）。**main の作業ツリーの更新は `ops-kit pull-main`**（CLAUDE.md の有無によらず、どのリポジトリでも同じ既定。fast-forward でき、未コミットの変更が取り込むファイルと重ならなければ pull し、でなければ何も変えずに理由を 1 行出して exit 1。fetch できない・Git でないは exit 2）。CLAUDE.md が既定を変えている（pull が動いているサービスを再起動するので利用者の OK を取る、など）ならそれに従い、OK 待ちなら走らせない。exit 1 / 2 なら出力の 1 行を報告の `main:` に書く。`ops-kit` が PATH に無い（`command -v ops-kit` が空）ときだけ走らせず「pull していない（キットが PATH に無い）」と書く。動いているコードの更新（昇格・再起動）は CLAUDE.md が書く手順に従い、再起動するなら利用者の OK を取ってから
 
 ## 報告（利用者への返事の型）
@@ -173,6 +169,6 @@ main: <pull 済み（pulled <old>..<new>） / up to date / pull していない�
 ## 途中で止まったとき（再開）
 
 占有を取り直す（並列ガードを使うとき）: `<guard> claim <PBI>`（前のセッションが release していれば通る。止まったセッションの占有が残っていて、利用者が再開を指示したときだけ `--takeover`）。
-スタックは PBI の worktree の中で `gh stack switch` / `git branch --list`（CLAUDE.md の枝の名前）を確認し、各 PR の状態（`gh pr view --json state,mergeStateStatus`）と Task の Status（Project）を読む。
+スタックは PBI の worktree の中で `gh stack switch` / `git branch --list`（CLAUDE.md の枝の名前）を確認し、各 PR の状態（`gh pr view --json state,mergeStateStatus`）と Task の Status（`ops-kit backlog view <Task> --fresh`）を読む。
 結果コメントの無い Task は「閉じているが未完了」。そこから 4 か 5 を再開する。前の会話の記憶ではなく Issue と PR の記録を正とする。
 PBI が（別のセッションで）既に閉じていても、6 の済んでいない項目（Milestone・元要望、worktree の片付け、main の更新）は自分で済ませてから報告する。「やっていない」と書いて止めない。

@@ -90,7 +90,7 @@ export const TaskRouting = z.object({
   ruleId: z.string(),
   reason: z.string(),
   overridden: z.boolean(),
-  /** What the LLM suggested at creation (#25), if it was on and answered in time. The task's runner never follows it. */
+  /** What the LLM suggested (#25), if it was on and answered in time. It may arrive after the task was created, or after it ended (#1143). The task's runner never follows it. */
   llm: LlmSuggestion.nullable().default(null),
 });
 export type TaskRouting = z.infer<typeof TaskRouting>;
@@ -221,6 +221,11 @@ export const Task = z.object({
    * for the runner the daemon sends a follow-up turn then; off, it is only shown. null = no resume planned. Cleared
    * by any turn the person sends and by 中断.
    */
+  /**
+   * Jobs the runner still has in the background and since when (the last `background` event). Set on a task that is `done`
+   * too: its turn ended waiting for them, so the status alone says nothing is happening. Cleared when they end or are lost.
+   */
+  background: z.object({ jobs: z.array(z.string()), since: z.number() }).nullable().optional(),
   resumeAt: z.number().nullable(),
   /**
    * What `resumeAt` waits for (#550): the runner's usage limit, GitHub's API limit a turn met in its commands, or space on a full disk (#2234). null =
@@ -1677,6 +1682,8 @@ export const BacklogItem = z.object({
   confirmations: z.array(z.object({ n: z.number(), text: z.string() })),
   /** An in-progress PBI whose Tasks are all closed and with no confirmation left (#523): its row offers 閉じる. */
   closable: z.boolean(),
+  /** Labelled `on-hold` (#2930): backlog-next leaves it in every slot and stage; only that firing looks at this, its row's buttons do not. */
+  onHold: z.boolean(),
   /**
    * What a Ready / in-progress PBI stopped to wait for (#817): the PRs / Issues of the same repository named by its newest
    * /pbi-complete release, with whether each is still open. Deferred PRs and explicitly recorded overlap waits on decision Tasks are excluded. Empty when there is no such record, a later one cleared it,

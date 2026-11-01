@@ -26,6 +26,20 @@ export const githubBudgetLow = (g: GithubBudget) => g.remaining / g.limit < 0.2;
  * a dated time would leave no room for the title) keeps the time in the tooltip. `plannedAt` (#2237): a long wait tries
  * once at `resumeAt` and goes back to this time when refused.
  */
+/** The turn ended waiting for background jobs: the task is `done`, but work is still going on. */
+export function BackgroundTag(props: { background: Task["background"]; compact?: boolean }) {
+  const b = props.background;
+  if (!b) return null;
+  const n = b.jobs.length || 1;
+  const min = Math.max(0, Math.floor((Date.now() - b.since) / 60_000));
+  const text = `裏で実行中 ${n} 件 ${min} 分`;
+  return (
+    <span className="tag" title={b.jobs.join("\n") || "内容不明"}>
+      {props.compact || !b.jobs.length ? text : `${text}: ${b.jobs.join(" / ")}`}
+    </span>
+  );
+}
+
 export function ResumeTag(props: { resumeAt: Task["resumeAt"]; reason: Task["resumeReason"]; plannedAt?: Task["resumePlannedAt"]; compact?: boolean }) {
   if (props.resumeAt === null) return null;
   const when = fmtClock(props.resumeAt);

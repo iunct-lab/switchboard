@@ -1,3 +1,4 @@
+// test-reads: packages/core/src/db.ts
 import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";

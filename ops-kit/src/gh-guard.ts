@@ -259,10 +259,10 @@ export function writeTargetOf(argv: string[], env: Record<string, string | undef
       }
     }
     if (endpoint === undefined) return null;
-    const path = endpoint.replace(/^\//, "");
+    const path = endpoint.replace(/^https?:\/\/[^/]+/i, "").replace(/^\//, "");
     if (path === "graphql") return mutation ? { repo: env.GH_REPO || null } : null;
     if (method !== undefined ? method === "GET" || method === "HEAD" : !fields) return null;
-    const m = /^repos\/([^/{}]+)\/([^/{}]+)(?:\/|$)/.exec(path);
+    const m = /^repos\/([^/{}?]+)\/([^/{}?]+)(?:[/?]|$)/.exec(path);
     return { repo: m ? `${m[1]}/${m[2]}` : env.GH_REPO || null };
   }
   const reads = READS[group];

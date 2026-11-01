@@ -1,6 +1,6 @@
 ---
 name: issue-workflow
-description: Issue 運用ルール。要望（type:request、要望の正本）→ PBI → Task の階層（Phase は Milestone、Epic は置かない）、PBI の書き方（ユーザーストーリー・検証つき受け入れ条件・Story Points）、Task の書き方（実装者が迷わない粒度）、PBI が Ready になる条件、着手・逸脱・完了時に Issue へ何を記録するか、gh / Project の操作コマンドと lint。Issue を作る・着手する・閉じる・Project を触るときに必ず読む。
+description: Issue 運用ルール。要望（type:request、要望の正本）→ PBI → Task の階層（Phase は Milestone、Epic は置かない）、PBI の書き方（ユーザーストーリー・検証つき受け入れ条件・Story Points）、Task の書き方（実装者が迷わない粒度）、PBI が Ready になる条件、着手・逸脱・完了時に Issue へ何を記録するか、`ops-kit backlog` の操作コマンドと lint。Issue を作る・着手する・閉じる・Project を触るときに必ず読む。
 ---
 
 # Issue workflow（PBI → Task、Phase は Milestone）
@@ -18,11 +18,11 @@ Product Backlog を Priority 順に上から取るだけ）。
 - `ops.config.json`（root）: Project の URL（`projectUrl`）、フィールドの選択肢（Area / Kind / Priority / Phase）、Milestone の名前の形、
   種類ごとの必須の節（PBI / Task / 要望）、元要望の節の名前と形、Story Points の値、環境変数の接頭辞（`envPrefix`）。バックログの道具はここを読む
 - `scripts/setup/` の入口: `lint_backlog.sh` / `set_project_field.sh` / `triage_issue.sh` / `bootstrap_project.sh` / `request_issue.sh`。
-  中身は共有のキットで、入口はそのリポジトリの `ops.config.json` を渡して呼ぶだけの薄いもの
+  中身は共有のキットで、入口はそのリポジトリの `ops.config.json` を渡して呼ぶだけの薄いもの。バックログの読み書きと検査は入口ではなく `ops-kit backlog` / `ops-kit lint --fresh`（「操作」）
 - 設定を読まないもの（`scan-issues` / `scan-text` / `pull-main`）の入口は求めない（あっても使わない）。キットの `bin` の `ops-kit <command>` で呼ぶ（Task とホストのシェルでは PATH にある）
 - `CLAUDE.md` / `AGENTS.md` が書く値（チェックリスト。無い項目は、その工程を使わないという意味）:
-  - [ ] リポジトリの `owner/name`。`gh` の書き込み（issue / pr の作成・コメント・編集・マージ・クローズ）に `-R <owner/name>` が要るか。
-        要るなら、このスキル群の `gh` の書き込みには全部 `-R <owner/name>` を付ける（スキルの例では省いている）
+  - [ ] リポジトリの `owner/name`。`gh` の PR の書き込み（作成・コメント・編集・マージ・クローズ）に `-R <owner/name>` が要るか。
+        要るなら、このスキル群の `gh` の書き込みには全部 `-R <owner/name>` を付ける（スキルの例では省いている）。Issue・Project は `ops-kit backlog` なので要らない
   - [ ] 共通キットを持つリポジトリの `owner/name`（そのリポジトリ自身なら不要。`request-to-backlog` の「どのリポジトリにも要る仕組み」の起票先）
   - [ ] テストのコマンド（型検査、全体、1 件だけ）。変更の種類ごとのテストの型（単体 / E2E）
   - [ ] worktree と枝の規則（worktree の場所、枝の名前）、作業ファイルの置き場
@@ -143,7 +143,7 @@ Task の完了条件に文書更新を加えるのは、触る doc のファイ�
 ## やること              1 段落。触るパッケージ / ファイル。満たす受け入れ条件: 親 PBI の n, m
 ## 手順                  1. ファイル: やること（名前を決めて書く） 2. … 3. …
 ## 検証                  何を実行して何が出れば良いか（テスト名、curl、画面操作）
-## 完了条件 (DoD)         - [ ] テスト追加 - [ ] typecheck/test green - [ ] 実構成で確認 - [ ] 結果コメント
+## 完了条件 (DoD)         - [ ] テスト追加（既存への追加・軽い階層を先に検討） - [ ] typecheck/test green - [ ] 実構成で確認 - [ ] 結果コメント
 ```
 
 ## Ready の判定（PBI）
@@ -155,9 +155,9 @@ Task の完了条件に文書更新を加えるのは、触る doc のファイ�
 3. 各 Task が上の「Task 粒度チェック」6 項目を通る
 4. この環境で検証できないものは Task にせず、PBI の「スコープ外」に理由つきで書くか、受け入れ条件の行に `（利用者確認: …）` が付いている
 
-`scripts/setup/lint_backlog.sh` が機械的に見られる分（節の有無、`## 元要望`、Story Points の値と本文 / Project の一致、親、Ready なのに Task なし、要望 Issue の `## 要望` / `## 出典`、要望の `## 出典` の `- 誰の言葉:` が 3 つの値のどれか（`request-to-backlog` の「誰の言葉」。`request_issue.sh` もこの行の無い本文では要望を作らない））を検査する。
+`ops-kit lint --fresh` が機械的に見られる分（節の有無、`## 元要望`、Story Points の値と本文 / Project の一致、親、Ready なのに Task なし、要望 Issue の `## 要望` / `## 出典`、要望の `## 出典` の `- 誰の言葉:` が 3 つの値のどれか（`request-to-backlog` の「誰の言葉」。`request_issue.sh` もこの行の無い本文では要望を作らない））を検査する。
 自由文の前提（フェンスの外の `前提: #n`）があって `**前提**:` 行が無い PBI は `warning: #N: …` の行で出す（定期実行と並列ガードは `**前提**:` 行だけを読む。警告は violations に数えず、exit は変えない）。
-exit 0 = 合格、1 = 違反あり、2 = 検査できなかった（gh や Project の取得失敗。0 件で合格にはしない）。
+exit 0 = 合格、1 = 違反あり、2 = 検査できなかった（アプリや GitHub・Project の取得失敗。0 件で合格にはしない）。
 **PBI や Task を作った・書き直したら必ず走らせ、`violations: 0` と exit 0 を確認する**（2 と 3 は目視）。
 
 ## PBI と Task の境界（過去の失敗）
@@ -199,13 +199,13 @@ Issue と PR は、リポジトリを読める全員が読む。公開リポジ�
 
 Issue は「何をやったか」の正本。PR の説明は補助。**本文 1 行のまま閉じない**。
 
-1. **着手時**: Status を In progress にし、コメントで「ブランチ名 / 進め方 / 想定する検証」を 3 行以内で書く。
-2. **逸脱時**: スコープを削る・増やす・別案にする、検証できないと分かった、依存が壊れていた — その都度コメント。
+1. **着手時**: Status を In progress にし（`ops-kit backlog set <Task> Status "In progress"`）、コメントで「ブランチ名 / 進め方 / 想定する検証」を 3 行以内で書く（`ops-kit backlog comment <Task> --body-file "$W/start.md"`）。
+2. **逸脱時**: スコープを削る・増やす・別案にする、検証できないと分かった、依存が壊れていた — その都度コメント（`ops-kit backlog comment`）。
    「なぜ」を必ず書く。判断が利用者に属する（お金・他 OS・破壊的変更・要件の解釈）なら、**止めて聞く**。マージ判定が merge を返した PR のマージは依頼の範囲なので聞かない（`pbi-complete` の「この依頼が含む範囲」）。聞く場所は問いの種類で分ける（「判断待ちの出し方」。実装の判断は Issue、運用の確認は Task の会話）。
 
-3. **完了時（Task）**: PR の `Closes #N` でマージ時に自動 close される（それで良い）。GitHub 連携の無い workspace（`BACKLOG_WORKSPACE` がある）の Task は GitHub に無く自動では閉じないので、マージの後に `ops-kit backlog edit <Task> --state closed` で閉じる（PR は `Backlog-Task: <Task>`。`pbi-complete` はこの Task も閉じてから PBI を閉じる）。**マージ直後に結果コメント**（下のテンプレ、マージ日入り）
-   を書き、Project の Status を Done にする。結果コメントの無い Task は「閉じているが未完了」として扱う。
-4. **完了時（PBI）**: 受け入れ条件のチェックボックスを検証結果つきで埋め、「結果」節を書いてから**手動で** close（PR から Closes しない）。
+3. **完了時（Task）**: PR の `Closes #N` でマージ時に自動 close される（それで良い）。GitHub 連携の無い workspace（`BACKLOG_WORKSPACE` がある）の Task は GitHub に無く自動では閉じないので、マージの後に `ops-kit backlog edit <Task> --state closed` で閉じる（PR は `Backlog-Task: <Task>`。`pbi-complete` はこの Task も閉じてから PBI を閉じる）。**マージ直後に結果コメント**（下のテンプレ、マージ日入り。`ops-kit backlog comment <Task> --body-file "$W/result.md"`）
+   を書き、Project の Status を Done にする（`ops-kit backlog set <Task> Status Done`）。結果コメントの無い Task は「閉じているが未完了」として扱う。
+4. **完了時（PBI）**: 受け入れ条件のチェックボックスを検証結果つきで埋め、「結果」節を書いてから**手動で** close（`ops-kit backlog edit <PBI> --state closed`。PR から Closes しない）。
 5. **Milestone**: PBI が閉じるたびに Milestone の説明を更新する（残り / やらないと決めたもの）。全 PBI が Done か「やらない」なら Milestone を close。
 6. **決まりはメモリではなく記載に**: 利用者の指摘から決まり（どう振る舞うか）ができたら、記載（スキル・テンプレート・CLAUDE.md・docs）に書く。どのリポジトリでも同じなら共通キットのスキル、そのリポジトリだけなら CLAUDE.md か docs。ランナーのメモリ（Claude Code の auto memory など）には、ホスト・アカウント・経緯の事実だけを置く。メモリは書いたランナーにしか届かず（Codex は Claude のメモリを読まない）、記載と食い違っても誰も気づかない。記載と食い違うメモリを見つけたら、記載に揃えて直すか消す
 
@@ -234,7 +234,8 @@ Issue は「何をやったか」の正本。PR の説明は補助。**本文 1 
 ```
 
 ```bash
-gh issue edit <n> --add-label needs-decision      # BACKLOG_URL があれば ops-kit backlog edit <n> --add-label needs-decision
+ops-kit backlog comment <n> --body-file "$W/ask.md"     # 上の `## 判断待ち` の本文
+ops-kit backlog edit <n> --add-label needs-decision
 ```
 
 ランナーの自動承認に拒まれうる操作（定期実行の登録、設定の変更など）を含む選択肢にだけ、行の末尾に ` — 許可: <操作・対象・内容を名指しした 1 文>` を書ける（許可文。例 `- B: 登録する — 影響: 毎日 PR が出る — 許可: 定期実行 <名前> を enabled: false で POST /api/schedules に登録することだけ許可します`）。選ぶと選択肢の行が許可文ごと利用者の返信として 1 回だけ届き、自動承認が利用者の名指しした同意として数える。ほかの操作にも次回にも広がらない。許可文に値（秘密・アカウント ID）を書かない。自分が拒まれて止まったとき（reason `permission`）は、停止の報告の `grant` に同じ形の許可文を書く。設定の許可ルールを足す案は、利用者に頼まれたときだけ出す（以後の同じ操作が全部通る）。
@@ -267,6 +268,14 @@ gh issue edit <n> --add-label needs-decision      # BACKLOG_URL があれば ops
 マージ判定で止めたときは、`reasons` の行と PR の `+add/-del` を **止めた場所** の下にそのまま貼る。値を出す案を選択肢に書かないのは実装の判断と同じ。許可文（` — 許可: <文>`）の書き方も実装の判断と同じ。
 
 返事は同じ会話で来る。続けるときは、止めた工程の前提をやり直してから進める（マージならマージ判定をもう一度通す。止めている間に CI・レビュー・main が変わりうる）。
+
+#### 保留（ラベル `on-hold`）
+
+問いの無い「考え中」の要望・PBI には、ラベル `on-hold` を付ける。定期実行の「バックログを進める」はどの枠・どの段でも取らず、枠に空きがあって使用量で止めていない発火のログに「保留: #N」と出す。行のボタンは押せる（効くのは定期実行の判断だけ）。外せば次の発火から対象に戻る。GitHub はリポジトリに無いラベルを付けられないので、無ければ先に `env -u BACKLOG_URL ops-kit sync-labels` で作る。判断待ち（`needs-decision`）や、問いを保留にする `## 保留` のコメントとは別物。
+
+```bash
+ops-kit backlog edit <n> --add-label on-hold      # 外す: --remove-label on-hold
+```
 
 #### 画面イメージ（画面の見た目・操作に関わる問いと PBI）
 
@@ -307,51 +316,32 @@ Status 遷移（Project の Status。設定するのは作業者 = このワー�
 手順そのものはスキルにある: 要望 → PBI は `request-to-backlog`、PBI → Task と Ready 化は `pbi-to-tasks`、Task → PR は `task-to-pr`、
 レビューは `cross-runner-review` → `review-triage-and-merge`、PBI 単位の一気通貫は `pbi-complete`。ここはコマンドの控え。
 
-**エージェント管理アプリの Task の中**（環境に `BACKLOG_URL` がある）では、Issue・Project の照会と編集は、アプリの保存値を使う `ops-kit backlog`（`--help`）と `ops-kit lint --fresh` で完結する: 作成・編集・コメント・判断待ちと回答（`--add-label needs-decision` とコメント、回答は `## 回答` のコメントと `--remove-label needs-decision`）・閉じる（`--state closed`）・sub-issue の付け替え（`edit --parent <PBI>` / `--no-parent`）・Project のフィールド（`set` / `triage`）・Milestone。照会のたびに GitHub へは行かず、編集はアプリに保存されてアプリが GitHub に送る（画面と同じ経路。認証に使える値は送らない）。GitHub 連携の無い workspace（アプリが `BACKLOG_WORKSPACE` を渡す。Issue と Project はアプリの中だけ）では、作成で番号が付き、編集はその場で確定する。GitHub 同期を無効にした workspace も同じ（`gh issue` / `scripts/setup/*` を使わない）。GitHub の Issue・Project を直接触る操作（下の「`BACKLOG_URL` の無い環境だけ」のブロック）はこの Task では使わない。PR・レビュー・マージ判定は workspace によらず GitHub（リポジトリの forge）のまま。
+Issue・Project の照会と編集は、どの環境でも `ops-kit backlog`（`--help`）と `ops-kit lint --fresh` で完結する: 作成・編集・コメント・判断待ちと回答（`--add-label needs-decision` とコメント、回答は `## 回答` のコメントと `--remove-label needs-decision`）・閉じる（`--state closed`）・sub-issue の付け替え（`edit --parent <PBI>` / `--no-parent`）・Project のフィールド（`set` / `triage`）・Milestone。`BACKLOG_URL` があれば（エージェント管理アプリの Task の中）アプリの保存値を読み書きし、照会のたびに GitHub へは行かず、編集はアプリに保存されてアプリが GitHub に送る（画面と同じ経路。認証に使える値は送らない）。`BACKLOG_URL` が無ければ（手元の端末、キットだけを使うリポジトリ）同じコマンドが GitHub に直接つなぎ、同じ形で出す・書く。`BACKLOG_URL` があるのにアプリに届かなければ exit 2 で止まり、GitHub に切り替えない。GitHub 連携の無い workspace（アプリが `BACKLOG_WORKSPACE` を渡す。Issue と Project はアプリの中だけ）では、作成で番号が付き、編集はその場で確定する。GitHub 同期を無効にした workspace も同じ。PR・レビュー・マージ判定は workspace によらず GitHub（リポジトリの forge）のまま。
 
 ```bash
 ops-kit backlog view <num> [--fresh]          # 本文・コメント・Project のフィールドと「最終取得 … 同期 …」
-ops-kit backlog list [--fresh]
+ops-kit backlog list [--search <語>] [--label <l>]... [--state open|closed|all] [--fresh]
+ops-kit backlog create --title "要望: <題>" --body-file "$W/request.md" --label type:request --field Status=Backlog   # 要望は 4 バッククォートの text フェンスに。--field が無いと Project に入らない
+ops-kit backlog create --title "PBI: <題>" --body-file "$W/pbi.md" --label type:pbi --milestone "Phase N — …" --field Status=Backlog
 ops-kit backlog create --title "Task: <題>" --body-file "$W/task.md" --label type:task --parent <PBI> --milestone "Phase N — …" --field Status=Backlog
 ops-kit backlog edit <num> --body-file "$W/body.md" | --add-label needs-decision | --state closed
+ops-kit backlog edit <num> --add-label on-hold | --remove-label on-hold   # 保留の付け外し（「保留」の小節）
 ops-kit backlog edit <num> --parent <PBI> | --no-parent   # sub-issue の付け替え
+ops-kit backlog edit <num> --milestone "Phase N — …"      # PBI と Task の両方に Phase の Milestone
 ops-kit backlog comment <num> --body-file "$W/comment.md"
-ops-kit backlog set <num> Status Ready         # フィールドを 1 つ。5 フィールドをまとめて: backlog triage <num> <area> <kind> <P0-P3> …
+ops-kit backlog set <num> Status Ready         # フィールドを 1 つだけ（Story Points / Status など）
+ops-kit backlog triage <num> <area> <kind> <P0-P3> "Phase N" [<parent>] [<Status>]   # Project のフィールド + 親。親は Task のときだけ（PBI に親を付けない）。"Phase N" は ops.config.json に fields.phase があるリポジトリだけ
+#   注意: triage は毎回 5 フィールド全部を上書きする（Status を省くと Backlog）。Status だけ変えたいときは set を使う
+#   （未知の選択肢は、BACKLOG_URL が無ければ stderr に出すだけで exit 0 で進み、GitHub 連携の無い workspace では断られ、GitHub 同期の workspace では送信で失敗する）。親を飛ばすなら "" を渡す。例: ops-kit backlog triage 56 infra chore P1 "Phase 2" "" "In review"
 ops-kit lint --fresh                           # 規約の検査（作った・書き直したら必ず。violations: 0 かつ exit 0 で合格）
 ```
 
 - **本文を書き換える前に、読んだ本文を確かめる**: 読み取りが（アプリの再起動などで）空で返っても、空の本文の `edit --body-file` は受け付けられ、そのまま GitHub に送られる。読む → 直す → 送るは `&&` でつなぎ、送る前に `[ -s "$W/body.md" ] && head -1 "$W/body.md" | grep -q '^## '` を挟む。元の本文は、書き換えが GitHub に届いたのを見るまで `$W` に残す
 
 - **`--fresh` が要るとき**: 最新の `## 回答` を読むとき（工程の開始・再開）、着手・マージ・閉じるの判断の前。アプリに送信と取込みを済ませてから答える。正本はアプリの保存データで、GitHub は同期先: アプリが GitHub に届かない（上限・障害）ときは保存値と「GitHub 未同期」（最終同期の時刻つき、stderr）で答えて exit 0 なので、その値でそのまま進める。exit 2 はアプリに届かない・未取得だけで「判定できない」（下の「GitHub の接続・認証の切り分け」をしてから止める）。PR・レビュー・マージ判定は GitHub が正のまま（`merge-gate` は毎回 GitHub を読む）
-- lint と並列ガードの `overlap` は、`BACKLOG_URL` があれば自分でアプリの保存値を読む（`overlap` はいつも先に取込み、lint は `--fresh` で。GitHub に届かなければ保存値で判定し「GitHub 未同期」を出す）。占有（claim / release）と着手の印の先着はコメントの順で決める: GitHub の workspace は GitHub に書いて GitHub のコメント id で、GitHub 連携の無い workspace はアプリの保存データのコメントの順で（並列ガードは `--repo` を付けずに実行する。譲るときは取り下げの印を書く）
+- lint は `BACKLOG_URL` があればアプリの保存値を読む（`--fresh` で取込みをさせる。アプリが知らないリポジトリでは exit 2）。並列ガードの `overlap` はアプリが同期しているリポジトリならアプリの保存値を読み、GitHub 同期の workspace では先に取込みをさせる。どちらも GitHub に届かなければ保存値で判定し「GitHub 未同期」を出す。占有（claim / release）と着手の印は、アプリが同期しているリポジトリではアプリの保存のコメントに書き、先着は書いた順（`comments[].seq`）で決める（消せないので、譲るときは取り下げの印を書く）。`--repo` は付けなくてよい（付けてもアプリの保存に書く）。アプリが知らないリポジトリと `BACKLOG_URL` の無い環境だけが GitHub に書いて読み、先着はコメントの id で決める（譲るときは印を消す）
 
 ```bash
-# BACKLOG_URL の無い環境だけ（アプリの Task の外）。gh の書き込みに -R <owner/name> が要るリポジトリでは付ける（CLAUDE.md。「使う側のリポジトリが持つもの」）
-# 作成。非対話（LLM はこちら）: テンプレの見出し構成で本文ファイルを書き、ラベルを明示する
-gh issue create -t "要望: <題>" -l type:request -F body.md   # 要望は 4 バッククォートの text フェンスに
-gh issue create -t "PBI: <題>"  -l type:pbi  -F body.md
-gh issue create -t "Task: <題>" -l type:task -F body.md
-#   対話で issue form を使うなら --template はファイル名ではなく form の name: で指定し、--body とは併用できない
-#   gh issue create --template "PBI (Product Backlog Item)"   /   --template "Task"
-# Project フィールド + 親の紐づけ（Area/Kind/Priority/Phase/Status/親）。親は Task のときだけ（PBI に親を付けない）
-bash scripts/setup/triage_issue.sh <num> <area> <kind> <P0-P3> "Phase N" [parent-PBI] [Status]
-gh issue edit <num> --milestone "Phase N — …"      # PBI と Task の両方に Phase の Milestone
-#   注意: このスクリプトは毎回 5 フィールド全部を上書きする。Status だけ変えたいときは下の set_project_field.sh を使う
-#   （未知の選択肢は黙ってスキップされる）。例: bash scripts/setup/triage_issue.sh 56 infra chore P1 "Phase 2" "" "In review"
-# フィールドを 1 つだけ（Story Points / Status など）
-bash scripts/setup/set_project_field.sh <num> "Story Points" 5
-bash scripts/setup/set_project_field.sh <num> Status Ready
-# 規約の検査（作った・書き直したら必ず）
-bash scripts/setup/lint_backlog.sh            # violations: 0 かつ exit 0 で合格（exit 2 は取得失敗）
-# 親子だけ付け替える（親が既にあるとエラー: 先に removeSubIssue）
-gh api graphql -f query='mutation($p:ID!,$c:ID!){ addSubIssue(input:{issueId:$p, subIssueId:$c}){ issue{number} } }' \
-  -F p="$(gh issue view <parent> --json id -q .id)" -F c="$(gh issue view <child> --json id -q .id)"
-# 記録
-gh issue comment <num> --body-file /path/to/comment.md
-```
-
-```bash
-# どの環境でも
 ops-kit pull-main                             # マージ後の main の作業ツリーを fast-forward（pulled / up to date / not pulled: <理由>。「pbi-complete」の 6）
 ops-kit scan-issues                           # Issue・コメントに認証の値が無いか（hits: 0 かつ exit 0。Public にする前の 1 回だけ。「Issue・PR・コメントに書かない値」）
 # マージ前の判定（CLAUDE.md のコマンド。exit 0 = merge / 1 = stop / 2 = 判定不能）。[再チェック] の理由は再チェックの印で外れ、--allow-large は利用者が認めたときだけ（pbi-complete の 5）

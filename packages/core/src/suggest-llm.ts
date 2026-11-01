@@ -167,7 +167,7 @@ const MAX_CANDIDATES = 200;
  * answer, or an object nested inside another (`{"thinking": …, "answer": {"runner": …}}`) — the scan does not skip
  * past a span it already yielded, because the answer is not always the outermost object.
  *
- * Bounded on purpose: this runs synchronously on the `POST /api/tasks` path, and an answer full of unmatched `{`
+ * Bounded on purpose: this runs synchronously on the daemon's one thread, and an answer full of unmatched `{`
  * would otherwise be quadratic.
  */
 export function* jsonCandidates(text: string): Generator<string> {

@@ -225,10 +225,11 @@ Resources:
               - 'arn:aws:bedrock:*::foundation-model/*'
               - 'arn:aws:bedrock:::foundation-model/*'
           # Codex reaches the OpenAI models on Bedrock through Bedrock Mantle, not InvokeModel (#1731). This one action, no key.
+          # Any region: a model is offered in its own regions, not the stack's, and the region is chosen in the settings.
           - Sid: BedrockMantle
             Effect: Allow
             Action: bedrock-mantle:CreateInference
-            Resource: !Sub 'arn:aws:bedrock-mantle:${AWS::Region}:${AWS::AccountId}:project/*'
+            Resource: !Sub 'arn:aws:bedrock-mantle:*:${AWS::AccountId}:project/*'
           # the weekly cost report (#2278): reads only. Cost Explorer has no resource-level permissions;
           # the numbers are the whole account's, and the same OS user's Tasks can read them. Nothing here changes a budget
           - Sid: CostRead
@@ -356,7 +357,7 @@ Resources:
               # Codex's OpenAI models go through Bedrock Mantle (#1731). This one action, no key.
               - Effect: Allow
                 Action: bedrock-mantle:CreateInference
-                Resource: !Sub 'arn:aws:bedrock-mantle:${AWS::Region}:${AWS::AccountId}:project/*'
+                Resource: !Sub 'arn:aws:bedrock-mantle:*:${AWS::AccountId}:project/*'
               # the weekly cost report (#2278): read the account's cost, forecast and budgets.
               # Reads only: no budget is created, changed or deleted, and no Cost Explorer setting. Cost Explorer has no
               # resource-level permissions; each call costs USD 0.01
@@ -949,14 +950,14 @@ Resources:
   BudgetLow:
     Type: AWS::Budgets::Budget
     Properties:
-      Budget: { BudgetName: !Sub '${AWS::StackName}-1000jpy', BudgetType: COST, TimeUnit: MONTHLY, CostFilters: { TagKeyValue: [!Sub 'user:Project$${CostTag}'] }, BudgetLimit: { Amount: 7, Unit: USD } }
+      Budget: { BudgetName: !Sub '${AWS::StackName}-1000jpy', BudgetType: COST, TimeUnit: MONTHLY, CostFilters: { TagKeyValue: [!Join ['', ['user:Project$', !Ref CostTag]]] }, BudgetLimit: { Amount: 7, Unit: USD } }
       NotificationsWithSubscribers:
         - Notification: { NotificationType: ACTUAL, ComparisonOperator: GREATER_THAN, Threshold: 100 }
           Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref BudgetEmail }]
   BudgetHigh:
     Type: AWS::Budgets::Budget
     Properties:
-      Budget: { BudgetName: !Sub '${AWS::StackName}-3000jpy', BudgetType: COST, TimeUnit: MONTHLY, CostFilters: { TagKeyValue: [!Sub 'user:Project$${CostTag}'] }, BudgetLimit: { Amount: 20, Unit: USD } }
+      Budget: { BudgetName: !Sub '${AWS::StackName}-3000jpy', BudgetType: COST, TimeUnit: MONTHLY, CostFilters: { TagKeyValue: [!Join ['', ['user:Project$', !Ref CostTag]]] }, BudgetLimit: { Amount: 20, Unit: USD } }
       NotificationsWithSubscribers:
         - Notification: { NotificationType: ACTUAL, ComparisonOperator: GREATER_THAN, Threshold: 100 }
           Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref BudgetEmail }]

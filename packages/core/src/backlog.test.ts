@@ -1,3 +1,4 @@
+// test-reads: packages/core/fixtures/ ops.config.json scripts/parallel-guard.ts
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,7 +15,7 @@ import { main as opsKit } from "../../../ops-kit/src/cli.ts";
 import { fakeGh as fakeKitGh } from "../../../ops-kit/src/gh.ts";
 import { ghBoard, overlap, storedMaterial } from "../../../scripts/parallel-guard.ts";
 import { fmtTime } from "./ratelimit.ts";
-import { answerStoredDecision, buildStartPrompt, localBacklogSource, canStartStoredBacklog, screenAnswer, confirmationsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld } from "./backlog.ts";
+import { answerStoredDecision, buildStartPrompt, localBacklogSource, canStartStoredBacklog, screenAnswer, confirmationsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, onHoldIn, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld } from "./backlog.ts";
 
 // the writer of the waits (#817), read at run time: scripts/ is not type-checked under core's settings
 const guard = "../../../scripts/parallel-guard.ts";
@@ -58,6 +59,18 @@ function decomposedGh() {
     if (!r.stdout.includes('"subIssuesSummary"')) return r;
     const page = JSON.parse(r.stdout) as { data?: { repository?: { issues?: { nodes: { number: number; subIssuesSummary: unknown }[] } } } };
     for (const node of page.data?.repository?.issues?.nodes ?? []) if (node.number === 303) node.subIssuesSummary = { total: 2, completed: 0 };
+    return { ...r, stdout: JSON.stringify(page) };
+  };
+  return { ...fake, gh };
+}
+/** fakeGh with `numbers` labelled on-hold (#2930). */
+function onHoldGh(...numbers: number[]) {
+  const fake = fakeGh();
+  const gh: GhRunner = async (args, cwd) => {
+    const r = await fake.gh(args, cwd);
+    if (!r.stdout.includes('"subIssuesSummary"')) return r;
+    const page = JSON.parse(r.stdout) as { data?: { repository?: { issues?: { nodes: { number: number; labels: { nodes: { name: string }[] } }[] } } } };
+    for (const node of page.data?.repository?.issues?.nodes ?? []) if (numbers.includes(node.number)) node.labels.nodes.push({ name: "on-hold" });
     return { ...r, stdout: JSON.stringify(page) };
   };
   return { ...fake, gh };
@@ -1616,7 +1629,7 @@ test("start: the prompt says to read the newest ## 回答 first", async () => {
 });
 
 const item = (over: Partial<BacklogItem>): BacklogItem => ({
-  number: 1, title: "t", url: "u", type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
+  number: 1, title: "t", url: "u", type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
 
 test("pickNext: Priority (none last), then Ready before 分解待ち before 要望, then the oldest; skips decisions and running items", () => {
@@ -1723,6 +1736,25 @@ test("pickNext waiting: an in-progress PBI whose waits all closed goes on with c
   const unread = { ...unblocked, number: 7, waits: [...closed, wait(999, "issue", null)] };
   expect(pickNext([unread, ready], "implement")).toMatchObject({ item: { number: 1 } });
   expect(heldIn([unread], "implement").map((h) => h.item).map((i) => i.number)).toEqual([7]);
+});
+
+test("pickNext waiting: a Ready PBI whose waits closed goes before untried Ready, reviewed or not", () => {
+  const at = Date.parse("2026-09-28T00:00:00Z");
+  const finished = { id: "tsk_last", status: "done" as const, statusAt: at, createdAt: at, updatedAt: at, action: "complete" as const, outcome: "needs_action" as const, reviewedAt: null, resumeAt: null };
+  const closed = [wait(778, "pr", false)];
+  const untried = item({ number: 1, stage: "ready", priority: "P0" });
+  const lastUpdated = "2026-09-28T01:00:00Z";
+  const unreviewed = item({ number: 2, stage: "ready", priority: "P3", waits: closed, waitsAt: STOPPED, lastTask: finished, updatedAt: lastUpdated });
+  const reviewed = { ...unreviewed, number: 3, lastTask: { ...finished, reviewedAt: at + 1 } };
+  const answered = item({ number: 4, stage: "in-progress", priority: "P3", answeredAt: lastUpdated, lastTask: finished });
+  const closable = item({ number: 5, stage: "in-progress", priority: "P3", tasks: { total: 1, done: 1, doneAt: null }, closable: true });
+  // no update since the stopped Task: it awaits a reply, and is taken all the same
+  const quiet = { ...unreviewed, number: 6, updatedAt: "2026-09-01T00:00:00Z" };
+  for (const unblocked of [unreviewed, reviewed, quiet]) {
+    expect(pickNext([untried, unblocked], "implement")).toEqual({ item: unblocked, action: "complete" });
+    expect(pickNext([closable, untried, unblocked], "implement")).toEqual({ item: unblocked, action: "complete" });
+    expect(pickNext([unblocked, answered], "implement")).toMatchObject({ item: { number: 4 }, action: "complete" });
+  }
 });
 
 test("pickNext stalled: an in-progress PBI with every Task closed is closed; one with Tasks left is resumed unless it did not move since its last resume", () => {
@@ -1963,6 +1995,26 @@ test("backlog-next waiting: a wait GitHub did not find is not taken as closed, a
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: 進められない: #307（#999 見つからない）`));
 });
 
+test("backlog-next waiting: resumes a Ready PBI with a free Task", async () => {
+  const claude = holdingClaude();
+  const fake = waitsGh({ i304: [[releaseBody("後回し", [778]), STOPPED]] }, { w778: { __typename: "PullRequest", state: "MERGED" } });
+  const task = (number: number, file: string) => ({ number, state: "OPEN", labels: { nodes: [{ name: "type:task" }] }, body: `触る場所: \`${file}\``, comments: { nodes: [] } });
+  const gh: GhRunner = async (args, cwd) => {
+    const r = await fake.gh(args, cwd);
+    if (!args.find((a) => a.startsWith("query="))?.includes("comments(last:")) return r;
+    const body = JSON.parse(r.stdout);
+    body.data.repository.i304 = { ...body.data.repository.i304, subIssues: { nodes: [task(3041, "src/a.ts"), task(3042, "src/b.ts")] } };
+    return { ...r, stdout: JSON.stringify(body) };
+  };
+  openPulls = [{ number: 900, files: ["src/a.ts"], headRefName: "sb/999-x" }];
+  const base = await boot(gh, claude.adapter);
+  expect(await waitsOfItem(base, 304)).toMatchObject({ stage: "ready", overlap: null, waits: [{ number: 778, state: "met" }] });
+  const id = await backlogNextSchedule(base);
+  expect((await runSchedule(base, id)).status).toBe(201);
+  expect(core!.db.listTasks().map((t) => t.title.split(":")[0])).toContain("#304 実装");
+  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("#304 を complete で開始"));
+});
+
 test("backlog-next waiting: a 状況確認 started after the waits were written leaves them; once they closed the next firing starts 実装", async () => {
   const fake = waitsGh({ i307: [[releaseBody("後回し", [778]), STOPPED]] }, { w778: { __typename: "PullRequest", state: "MERGED" } });
   const base = await boot(fake.gh, holdingClaude().adapter);
@@ -2043,6 +2095,7 @@ describe("backlog-next prerequisite (#937)", () => {
     // B is closed as completed: the next import reads it again, and A goes
     delete pbis[402];
     others.w402 = closedIssue("COMPLETED");
+    await fetch(`${base}/api/backlog?refresh=1`); // this GitHub lists open Issues only: a light import would not see it close
     await slots(base, 3);
     expect((await runSchedule(base, id)).status).toBe(201);
     expect(implementing(401)).toHaveLength(1);
@@ -2286,6 +2339,46 @@ test("pickNext awaiting reply: an item whose last stage Task ended asking the pe
   expect(pickNext([{ ...ready, lastTask: asked({ outcome: "done", reviewedAt: Date.parse("2026-09-28T02:00:00Z") }) }], "implement")).toBeNull();
 });
 
+describe("on-hold (#2930)", () => {
+  const at = "2026-09-20T00:00:00Z";
+  const answered = { answeredAt: at, tasks: { total: 3, done: 1, doneAt: null } };
+  const held: Array<[string, "implement" | "plan", Partial<BacklogItem>]> = [
+    ["Ready", "implement", { stage: "ready" }],
+    ["閉じられる実装中", "implement", { stage: "in-progress", tasks: { total: 2, done: 2, doneAt: null }, closable: true }],
+    ["止まった実装中", "implement", { stage: "in-progress", tasks: { total: 3, done: 1, doneAt: null } }],
+    ["回答済みの実装中", "implement", { stage: "in-progress", ...answered }],
+    ["分解待ち", "plan", { stage: "needs-tasks" }],
+    ["要望", "plan", { stage: "request", type: "request" }],
+  ];
+
+  test.each(held)("%s: pickNext takes the one without the label; on-hold alone is null; off the label it is taken again", (_, slot, over) => {
+    const onHold = item({ number: 1, priority: "P0", onHold: true, ...over });
+    const plain = item({ number: 2, priority: "P3", stage: slot === "implement" ? "ready" : "needs-tasks" });
+    expect(pickNext([onHold, plain], slot)).toMatchObject({ item: { number: 2 } });
+    expect(pickNext([onHold], slot)).toBeNull();
+    expect(onHoldIn([onHold, plain], slot).map((i) => i.number)).toEqual([1]);
+    expect(pickNext([{ ...onHold, onHold: false }, plain], slot)).toMatchObject({ item: { number: 1 } });
+  });
+
+  test("a firing logs 保留: #N on that line only, starts the next item, and the row's button still starts it", async () => {
+    // #304 (Ready) also had an 実装 finish with no update since, which alone would log it as 前回から更新が無い
+    const base = await boot(onHoldGh(304, 303).gh, holdingClaude().adapter);
+    const now = Date.now();
+    core!.db.insertTask({ id: "tsk_last304", workspaceId: metaId(), title: "#304 実装: PBI: Ready の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#304 実装: PBI: Ready の PBI"), statusAt: now, createdAt: now, updatedAt: now });
+    const id = await backlogNextSchedule(base);
+    expect((await runSchedule(base, id)).status).toBe(201);
+    const titles = startedTasks().map((t) => t.title);
+    expect(titles.filter((t) => t.startsWith("#304 ") || t.startsWith("#303 "))).toEqual(["#304 実装: PBI: Ready の PBI"]); // only the inserted one
+    const log = await scheduleLogAll(base);
+    expect(log).toContainEqual(expect.stringContaining(`飛ばした (manual): ${metaName()}: 実装の枠: 保留: #304`));
+    expect(log).toContainEqual(expect.stringContaining(`飛ばした (manual): ${metaName()}: 計画の枠: 保留: #303`));
+    expect(log.filter((l) => l.includes("#304"))).toHaveLength(1);
+    const r = await start(base, 304, { action: "complete" });
+    expect(r.status).toBe(201);
+    expect(startedTasks().filter((t) => t.title.startsWith("#304 実装: "))).toHaveLength(2);
+  });
+});
+
 test("backlog-next failed / awaiting reply: a firing leaves a PBI whose last Task failed on the usage limit or stopped asking, and the log names each with the resume time (#1275)", async () => {
   const base = await boot(fakeGh().gh, holdingClaude().adapter);
   const now = Date.now();
@@ -2337,7 +2430,7 @@ test("backlog-next overlap: a Ready PBI whose Task names a file an open PR chang
     const q = args.find((a) => a.startsWith("query="));
     if (!q?.includes("comments(last:")) return r;
     const body = JSON.parse(r.stdout);
-    body.data.repository.i304 = { ...body.data.repository.i304, subIssues: { nodes: [{ number: 3041, state: "OPEN", labels: { nodes: [{ name: "type:task" }] }, body: "触る場所: `src/a.ts`", comments: { nodes: [] } }] } };
+    body.data.repository.i304 = { ...body.data.repository.i304, subIssues: { nodes: [3041, 3042].map((number) => ({ number, state: "OPEN", labels: { nodes: [{ name: "type:task" }] }, body: "触る場所: `src/a.ts`", comments: { nodes: [] } })) } };
     return { ...r, stdout: JSON.stringify(body) };
   };
   const writes: string[][] = [];
@@ -2632,19 +2725,21 @@ test("backlog-next slots: Claude usage at 0.8 or more — one start per firing, 
   expect(core!.db.listTasks()).toHaveLength(1);
 });
 
-test("backlog-next slots: a button still creating its stage Task holds that slot; the other slot starts", async () => {
-  const slow: Suggester = { suggest: async () => (await Bun.sleep(50), { runner: "claude", reason: "slow", ruleId: "llm", model: null, available: true, alternatives: [], llm: null }) };
-  const base = await boot(fakeGh().gh, holdingClaude().adapter, {}, () => slow);
+test("backlog-next slots: a button's Task holds that slot while its routing turn is still thinking; the other slot starts (#1143)", async () => {
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  const slow: Suggester = { suggest: async () => (await held, { runner: "claude", reason: "slow", ruleId: "llm", model: null, available: true, alternatives: [], llm: null }) };
+  const claude = holdingClaude();
+  const base = await boot(fakeGh().gh, claude.adapter, {}, () => slow);
   await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ routing: { llm: { enabled: true } } }) });
   const id = await backlogNextSchedule(base);
-  const button = start(base, 304, { action: "complete" });
-  await Bun.sleep(20); // the button's routing turn is still thinking: no Task row yet
-  expect(core!.db.listTasks()).toHaveLength(0);
+  const button = await start(base, 304, { action: "complete" }); // answered with the suggester still held
+  expect(button.status).toBe(201);
+  expect(core!.db.listTasks().map((t) => [t.title.split(":")[0], t.status, t.routing?.llm])).toEqual([["#304 実装", "running", null]]);
   // the button holds the implement slot; the plan slot still starts #303
   expect((await runSchedule(base, id)).status).toBe(201);
-  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠が埋まっている: #304 の工程 Task を開始しているところ`));
-  expect((await button).status).toBe(201);
   expect(core!.db.listTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#303 Task に分解", "#304 実装"]);
+  release();
 });
 
 test("backlog-next slots: Claude usage at 100% — the firing starts nothing and names the window and when it is back; a reset row does not count (#1275)", async () => {
@@ -3001,20 +3096,16 @@ const runningStage = (title: string) => {
   core!.db.insertTask({ id: `task_${title.split(" ")[0]!.slice(1)}`, workspaceId: meta.id, title, runner: "claude", cwd: meta.path, scope: [meta.path], status: "running", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage(title), statusAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now() });
 };
 
-test("start race: a button start in progress and a backlog-next firing on the same item make one Task (#936)", async () => {
-  const slow: Suggester = { suggest: async () => (await Bun.sleep(50), { runner: "claude", reason: "slow", ruleId: "llm", model: null, available: true, alternatives: [], llm: null }) };
-  const base = await boot(fakeGh().gh, holdingClaude().adapter, {}, () => slow);
+test("start race: a button start and a backlog-next firing on the same item make one Task (#936)", async () => {
+  const base = await boot(fakeGh().gh, holdingClaude().adapter);
   closeTried();
-  await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ routing: { llm: { enabled: true } } }) });
   await sweepAll(base, { implement: 2, plan: 1 });
   const id = await backlogNextSchedule(base);
   const button = start(base, 304, { action: "complete" });
-  await Bun.sleep(20); // the button's routing turn is still thinking: no Task row yet
   // implement 2: the slot has room, the firing picks #304 too — and leaves it to the button
   expect((await runSchedule(base, id)).status).toBe(201);
   expect((await button).status).toBe(201);
   expect(startedTasks().filter((t) => t.title.startsWith("#304 ")).length).toBe(1);
-  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`飛ばした (manual): ${metaName()}: #304 は工程 Task が開始中`));
 });
 
 test("start race: a firing skips an item whose stage Task started after GitHub was read, and starts the next one (#936)", async () => {

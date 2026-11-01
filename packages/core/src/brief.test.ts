@@ -1,3 +1,4 @@
+// test-reads: CLAUDE.md AGENTS.md README.md packages/adapters/ ops.config.json
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

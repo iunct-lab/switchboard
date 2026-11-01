@@ -57,6 +57,7 @@ gh repo view <owner>/<name> --json projectsV2 -q '.projectsV2.Nodes[].number'   
 
 ```bash
 gh variable set <PREFIX>_PROJECT_URL -R <owner>/<name> --body <URL>
+gh variable set <PREFIX>_ACTIONS -R <owner>/<name> --body on            # ci.yml と labels.yml はこの変数が on のリポジトリでだけ動く
 gh variable get <PREFIX>_PROJECT_URL -R <owner>/<name>                  # 期待: <URL>
 ```
 

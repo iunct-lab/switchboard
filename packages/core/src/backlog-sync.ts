@@ -4,11 +4,12 @@
  * read (Db.putBacklogSnapshot): a failed import stores nothing, and the cursor and lastSuccessfulSync stay where the
  * last complete one left them.
  *
- * One import is three reads. 1. The Issues updated since the cursor (all of them the first time), in full. 2. The
- * open Issues with their Project items only: a Project field change does not touch the Issue's updatedAt. The first page
- * of this read also lists the open pull requests with their changed files (#1059; the pages after it only when there are
- * more than 50), so what the other work touches is stored without another call. 3. Per number,
- * the stored open Issues and open PRs the two lists no longer have (closed into another label, moved, deleted, hidden), the
+ * One import is up to four reads. 1. The Issues updated since the cursor (all of them the first time), in full. 2. The
+ * open Issues with their Project items only: a Project field change does not touch the Issue's updatedAt. This one is
+ * read only by a full import (`full`): it costs what the open Issues number. 3. The open pull requests with their
+ * changed files (#1059; the pages after the first only when there are more than 50), by every import. In place of
+ * 2, the Project items of the Issues named only (`items`). 4. Per number,
+ * the stored open Issues (full imports only) and open PRs the lists no longer have (closed into another label, moved, deleted, hidden), the
  * targets of the PBIs' waits and the prerequisites open PBIs and Tasks name (#937, `**前提**:`; a pull request with its
  * merge commit, an Issue with how it was closed): an Issue comes back in full, a 404 marks the record `unavailable` and a 403 `forbidden`,
  * neither erases what was stored. A comment or Project item that a complete read of its Issue no longer lists is
@@ -18,7 +19,7 @@
  * update; a closed Issue that left the labels is not asked again (closed records stay as they were), except as a
  * wait or a prerequisite: one on a closed request / PBI / Task is answered by what is stored, on any other closed Issue
  * it is asked again by every import. A record marked
- * `unavailable` / `forbidden` that was open is asked again by every import, so one that comes back is seen.
+ * `unavailable` / `forbidden` that was open is asked again by every full import, so one that comes back is seen.
  */
 import { existsSync } from "node:fs";
 import type { BacklogCommentData, BacklogErrorKind, BacklogIssueData, BacklogPullRequestData, BacklogItem, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogSource } from "@switchboard/protocol";
@@ -43,13 +44,15 @@ const changedQuery = (since: boolean) =>
   `query($o:String!,$r:String!,$after:String${since ? ",$since:DateTime!" : ""}){ repository(owner:$o,name:$r){ issues(first:50, after:$after, states:[OPEN,CLOSED], ${LABELS}${since ? ", filterBy:{since:$since}" : ""}, orderBy:{field:UPDATED_AT, direction:ASC}){ pageInfo{ hasNextPage endCursor } nodes{ ${ISSUE} } } } }`;
 const PR_FILES = "files(first:100){ totalCount nodes{ path } }";
 const PR_FIELDS = `id number state isDraft updatedAt closedAt mergedAt headRefName body labels(first:100){ totalCount nodes{ name } } ${PR_FILES}`;
-/** The open Issues with their Project items; the first page (no `after`) also lists the open PRs with their files (#1059). */
-const openQuery = (withPulls: boolean) =>
-  `query($o:String!,$r:String!,$after:String){ repository(owner:$o,name:$r){ issues(first:100, after:$after, states:OPEN, ${LABELS}){ pageInfo{ hasNextPage endCursor } nodes{ number ${PROJECT_ITEMS} } }${withPulls ? ` pullRequests(first:50, states:OPEN, orderBy:{field:UPDATED_AT, direction:DESC}){ pageInfo{ hasNextPage endCursor } nodes{ ${PR_FIELDS} } }` : ""} } }`;
+/** The open Issues with their Project items. */
+const OPEN_ISSUES = `query($o:String!,$r:String!,$after:String){ repository(owner:$o,name:$r){ issues(first:100, after:$after, states:OPEN, ${LABELS}){ pageInfo{ hasNextPage endCursor } nodes{ number ${PROJECT_ITEMS} } } } }`;
 const OPEN_PULLS = `query($o:String!,$r:String!,$after:String){ repository(owner:$o,name:$r){ pullRequests(first:50, after:$after, states:OPEN, orderBy:{field:UPDATED_AT, direction:DESC}){ pageInfo{ hasNextPage endCursor } nodes{ ${PR_FIELDS} } } } }`;
 const MORE_COMMENTS = `query($o:String!,$r:String!,$n:Int!,$after:String!){ repository(owner:$o,name:$r){ issue(number:$n){ comments(first:100, after:$after){ ${COMMENTS} } } } }`;
 const recheckQuery = (numbers: number[]) =>
   `query($o:String!,$r:String!){ repository(owner:$o,name:$r){ ${numbers.map((n) => `w${n}: issueOrPullRequest(number:${n}){ __typename ... on Issue{ ${ISSUE} } ... on PullRequest{ ${PR_FIELDS} mergeCommit{ oid } } }`).join(" ")} } }`;
+/** The Project items of the Issues named: what a light import reads of those it has to (`items`). */
+const itemsQuery = (numbers: number[]) =>
+  `query($o:String!,$r:String!){ repository(owner:$o,name:$r){ ${numbers.map((n) => `w${n}: issue(number:${n}){ number ${PROJECT_ITEMS} }`).join(" ")} } }`;
 /** The Issues a PR closes (#1183): the rule of `scripts/task-paths.ts` (`linkedIssues`). No duplicates, ascending. */
 export const closesOf = (body: string | null, headRefName: string | null): number[] => [...new Set(linkedIssues({ body, headRefName }))].sort((a, b) => a - b);
 /** A PR as stored (#1059): `files` null = more than the 100 read, so what it touches is not fully known. */
@@ -65,6 +68,8 @@ function pullEntry(raw: RawPull): BacklogSnapshotEntry {
 }
 /** Numbers per recheck query: each alias is a whole Issue. */
 const RECHECK_BATCH = 20;
+/** How long after its creation an Issue's Project items are read by every light import. */
+const NEW_ISSUE_ITEMS_MS = 60 * 60_000;
 
 type Page<T> = { pageInfo: { hasNextPage: boolean; endCursor: string | null }; nodes: T[] };
 type Counted<T> = { totalCount: number; nodes: T[] };
@@ -144,9 +149,12 @@ const issueNumber = (r: BacklogRecord) => (r.remote ? ("issue" in r.remote ? r.r
 
 /**
  * Reads what one import stores, against what is `stored` for the repository. `since` = the cursor: the newest
- * `updatedAt` of the last import (null = read every Issue). Throws BacklogError on any failure.
+ * `updatedAt` of the last import (null = read every Issue). `full` = false leaves out what costs as much as there are
+ * open Issues: their Project items, and asking again by number the stored ones that list no longer has (a first import
+ * is full all the same). `items` names the Issues whose Project items are read all the same, unless a list has them.
+ * Throws BacklogError on any failure.
  */
-export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { owner: string; name: string }, stored: BacklogRecord[], since: string | null): Promise<{ records: BacklogSnapshotEntry[]; cursor: string | null }> {
+export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { owner: string; name: string }, stored: BacklogRecord[], since: string | null, full = true, items: number[] = []): Promise<{ records: BacklogSnapshotEntry[]; cursor: string | null }> {
   const vars: Vars = { o: repo.owner, r: repo.name };
   const out = new Map<string, BacklogSnapshotEntry>();
   const put = (e: BacklogSnapshotEntry) => out.set(`${e.objectKind}:${e.externalId}`, e);
@@ -178,20 +186,9 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
   }
 
   const open = new Set<number>();
-  const openPulls = new Set<number>();
-  const putPulls = (p: Page<RawPull>) =>
-    p.nodes.forEach((raw) => {
-      put(pullEntry(raw));
-      openPulls.add(raw.number);
-    });
-  let morePulls: string | null = null;
-  for (let after: string | null = null; ; ) {
-    const { data } = await graphql(gh, cwd, openQuery(!after), { ...vars, ...(after ? { after } : {}) });
-    if (!after) {
-      const pulls = page<RawPull>(data?.repository?.pullRequests, "開いた PR");
-      putPulls(pulls);
-      if (pulls.pageInfo.hasNextPage) morePulls = pulls.pageInfo.endCursor;
-    }
+  const listsOpen = full || !since;
+  for (let after: string | null = null; listsOpen; ) {
+    const { data } = await graphql(gh, cwd, OPEN_ISSUES, { ...vars, ...(after ? { after } : {}) });
     const issues = page<{ number: number; projectItems: Counted<RawItem> }>(data?.repository?.issues, "開いた Issue");
     for (const raw of issues.nodes) {
       open.add(raw.number);
@@ -200,13 +197,33 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
     if (!issues.pageInfo.hasNextPage) break;
     after = issues.pageInfo.endCursor;
   }
+  // without the list, an open Issue is one stored as read and open with the list's labels: closing it moved its
+  // updatedAt, so the first read has it. Any other (a wait on an Issue of no type) is asked by number, as it was
+  const listed = new Set(open);
+  if (!listsOpen) for (const r of stored) {
+    const issue = r.objectKind === "issue" && r.fetchState === "fetched" && !r.externalId.startsWith("sb:") ? (r.remote as BacklogIssueData | null) : null;
+    if (issue?.state === "OPEN" && issue.labels.some((l) => TYPES.includes(l))) open.add(issue.number);
+  }
 
-  // an open PR the first page did not hold: the pages after it, only when there are more than 50
-  while (morePulls) {
-    const { data } = await graphql(gh, cwd, OPEN_PULLS, { ...vars, after: morePulls });
+  // a closed Issue is on no list: a full import asks it too
+  const asked = [...new Set(items)].filter((n) => !read.has(n) && !listed.has(n)).sort((a, b) => a - b);
+  for (let i = 0; i < asked.length; i += RECHECK_BATCH) {
+    const batch = asked.slice(i, i + RECHECK_BATCH);
+    const { data } = await graphql(gh, cwd, itemsQuery(batch), vars, true);
+    // one gone or hidden is seen by a full import
+    for (const n of batch) if (data?.repository?.[`w${n}`]) replace(n, ["project-item"], itemEntries(n, data.repository[`w${n}`].projectItems));
+  }
+
+  const openPulls = new Set<number>();
+  for (let after: string | null = null; ; ) {
+    const { data } = await graphql(gh, cwd, OPEN_PULLS, { ...vars, ...(after ? { after } : {}) });
     const pulls = page<RawPull>(data?.repository?.pullRequests, "開いた PR");
-    putPulls(pulls);
-    morePulls = pulls.pageInfo.hasNextPage ? pulls.pageInfo.endCursor : null;
+    pulls.nodes.forEach((raw) => {
+      put(pullEntry(raw));
+      openPulls.add(raw.number);
+    });
+    if (!pulls.pageInfo.hasNextPage) break;
+    after = pulls.pageInfo.endCursor;
   }
 
   // what is known after the two lists: the stored records with this import's on top
@@ -214,7 +231,7 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
   for (const [k, e] of out) known.set(k, { kind: e.objectKind, id: e.externalId, remote: e.fetchState === "fetched" ? e.remote : (known.get(k)?.remote ?? null), state: e.fetchState });
   // an Issue made here and not on GitHub yet (#2266, turning the sync on) is no Issue of GitHub's to ask for
   const issues = [...known.values()].filter((r) => r.kind === "issue" && r.remote && !r.id.startsWith("sb:")) as Array<{ id: string; remote: BacklogIssueData }>;
-  const stale = issues.filter((r) => r.remote.state === "OPEN" && !open.has(r.remote.number) && !read.has(r.remote.number)).map((r) => r.remote.number);
+  const stale = !listsOpen ? [] : issues.filter((r) => r.remote.state === "OPEN" && !open.has(r.remote.number) && !read.has(r.remote.number)).map((r) => r.remote.number);
   const waits = issues
     .filter((r) => r.remote.state === "OPEN" && r.remote.labels.includes("type:pbi"))
     .flatMap((pbi) => {
@@ -258,9 +275,11 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
  * `superseded` says a write to the repository came after it began (nothing is stored then) — with the
  * repository and the Project the workspace reads (`projectOf`). On a failure
  * nothing is stored; when GitHub said when to come back (a limit), that time is kept as the repository's `retryAt`.
- * `changed` = it read something other than what was stored (a value, or how a record was read). Throws BacklogError.
+ * `changed` = it read something other than what was stored (a value, or how a record was read). It reads the Project
+ * items of `items` and of the open Issues made in the last NEW_ISSUE_ITEMS_MS: the
+ * Project's auto-add comes after the Issue, without moving its updatedAt. Throws BacklogError.
  */
-export async function importGithubSnapshot(gh: GhRunner, db: Db, ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">, now = Date.now(), superseded = (_key: BacklogRepositoryKey) => false, enabling = false): Promise<{ key: BacklogRepositoryKey; changed: boolean; project: BacklogSource["project"] | null }> {
+export async function importGithubSnapshot(gh: GhRunner, db: Db, ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">, now = Date.now(), superseded = (_key: BacklogRepositoryKey) => false, enabling = false, full = true, items: number[] = []): Promise<{ key: BacklogRepositoryKey; changed: boolean; project: BacklogSource["project"] | null }> {
   const { repo, owner, name, private: isPrivate } = await backlogRepoOf(gh, ws.path);
   await refuseAnotherCheckout(gh, ws, db.getWorkspaceBacklogSource(ws.id), repo);
   const key: BacklogRepositoryKey = { service: "github", host: githubHost(), repository: repo };
@@ -269,7 +288,11 @@ export async function importGithubSnapshot(gh: GhRunner, db: Db, ws: Pick<Backlo
   try {
     project = await projectOf(gh, ws);
     const stored = db.listBacklogRecords(key);
-    const snap = await fetchGithubSnapshot(gh, ws.path, { owner, name }, stored, db.getBacklogRepository(key)?.cursor ?? null);
+    const recent = stored.flatMap((r) => {
+      const issue = r.objectKind === "issue" && r.fetchState === "fetched" && !r.externalId.startsWith("sb:") ? (r.remote as BacklogIssueData | null) : null;
+      return issue?.state === "OPEN" && Date.parse(issue.createdAt) >= now - NEW_ISSUE_ITEMS_MS ? [issue.number] : [];
+    });
+    const snap = await fetchGithubSnapshot(gh, ws.path, { owner, name }, stored, db.getBacklogRepository(key)?.cursor ?? null, full, [...items, ...recent]);
     changed = changedFrom(stored, snap.records);
     // the daemon wrote to the repository while this read: what it read is older than what the read-back stores; or
     // the workspace's GitHub sync was turned off meanwhile, its first import too (#2266): nothing of GitHub is stored then
@@ -398,6 +421,8 @@ async function refuseAnotherCheckout(gh: GhRunner, ws: Pick<BacklogWorkspace, "p
  */
 export const POLL_MIN_MS = 60_000;
 export const POLL_MAX_MS = 15 * 60_000;
+/** How long a workspace goes without a full import (`importGithubSnapshot`'s `full`) once the daemon made one. */
+export const FULL_READ_MS = 6 * 3600_000;
 /** A notice (#887, a Webhook) starts at most one import per workspace in this time, and at most HINT_BUDGET in all. */
 export const HINT_WINDOW_MS = 60_000;
 export const HINT_BUDGET = 10;
@@ -441,7 +466,7 @@ export interface StoredBacklog {
  */
 export class BacklogSync {
   /** `since` = the last write (`seq`) when the import began. */
-  private running = new Map<string, { since: number; run: Promise<void> }>();
+  private running = new Map<string, { since: number; run: Promise<void>; full: boolean }>();
   /** The import that follows one begun before a write (#441 review: an answer must not come back with an older copy). */
   private next = new Map<string, Promise<void>>();
   /**
@@ -453,6 +478,12 @@ export class BacklogSync {
   private lastWrite = new Map<string, number>();
   /** Per workspace, the `since` of its last import that stored: what it stored is newer than every write up to it. */
   private stored = new Map<string, number>();
+  /** When each workspace's last full import that stored began. In memory only: the first import after a start is full. */
+  private fullAt = new Map<string, number>();
+  /** Workspaces a full import was asked for (`opts.full`), until one has stored. */
+  private fullAsked = new Set<string>();
+  /** Per workspace, the Issues whose Project item the daemon sent, until an import has stored what they are now. */
+  private touched = new Map<string, Set<number>>();
   /** The last import's failure per workspace; `until` = a refusal during a wait, which is over at that time. */
   private failures = new Map<string, { message: string; until?: number; kind?: BacklogErrorKind }>();
   private limits: GithubRetryState;
@@ -478,8 +509,11 @@ export class BacklogSync {
    * Imports the workspace's backlog; one under way is shared, unless it began before the last write to the repository —
    * then the import after it is. Rejects with BacklogError (the reason is kept for `read`). `notice`: a Webhook's
    * notice asked for it (`hint`); `echo` = it came within a minute of the daemon's own write to the repository.
+   * `opts.full` (再読込): a full import, which a light one under way does not answer. Otherwise it is full only as the
+   * first after a start or FULL_READ_MS after the last one. `opts.readBack`: it reads back the daemon's own write, so
+   * what it finds is no reason to read again within a minute (one shared with an import under way goes by that import's).
    */
-  sync(ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">, notice?: { echo: boolean }): Promise<void> {
+  sync(ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">, notice?: { echo: boolean }, opts?: { full?: boolean; readBack?: boolean }): Promise<void> {
     const now = this.clock();
     // the repository the workspace reads, for the measures of what asks nothing (null before its first import)
     const source = this.db.getWorkspaceBacklogSource(ws.id);
@@ -494,10 +528,12 @@ export class BacklogSync {
       return Promise.resolve();
     }
     const repo = source?.repository ?? null;
+    if (opts?.full) this.fullAsked.add(ws.id);
     const under = this.running.get(ws.id);
     if (under) {
+      const lighter = this.fullAsked.has(ws.id) && !under.full;
       // joining the import under way asks nothing; the one queued after a write will ask
-      if (!this.writtenSince(ws, null, under.since)) {
+      if (!lighter && !this.writtenSince(ws, null, under.since)) {
         this.sink?.(noCall("backlog", "shared", now, null, repo));
         return under.run;
       }
@@ -506,8 +542,9 @@ export class BacklogSync {
         next = under.run.catch(() => undefined).then(() => {
           this.next.delete(ws.id);
           // the import before it may have stored what came after the write already (it followed a superseded one)
-          if (!this.writtenSince(ws, null, this.stored.get(ws.id) ?? -1)) return;
-          return this.sync(this.current(ws));
+          const readBack = this.writtenSince(ws, null, this.stored.get(ws.id) ?? -1);
+          if (!this.fullAsked.has(ws.id) && !readBack) return;
+          return this.sync(this.current(ws), undefined, { readBack });
         });
         this.next.set(ws.id, next);
       } else this.sink?.(noCall("backlog", "shared", now, null, repo));
@@ -538,8 +575,11 @@ export class BacklogSync {
     if (folded) this.noticed.delete(ws.id), this.noticeEcho.delete(ws.id);
     const since = this.seq;
     let superseded = false;
+    const lastFull = this.fullAt.get(ws.id);
+    const full = this.fullAsked.has(ws.id) || lastFull === undefined || now - lastFull >= FULL_READ_MS;
+    const items = [...(this.touched.get(ws.id) ?? [])];
     // a service not supported (or a GitLab checkout of another project) is the import's failure, said as it is
-    const read = (ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">) => () => importGithubSnapshot(this.gh, this.db, ws, now, (key) => (superseded = this.writtenSince(ws, key, since)));
+    const read = (ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">) => () => importGithubSnapshot(this.gh, this.db, ws, now, (key) => (superseded = this.writtenSince(ws, key, since)), false, full, items);
     // (an async body runs at once up to its first wait: the read starts now, as it did before)
     const readGitlab = (op: { target: ForgeTarget }) => importGitlabSnapshot(this.glab, this.db, ws, op.target, now, (key) => (superseded = this.writtenSince(ws, key, since)));
     const imported = (async () => {
@@ -547,11 +587,14 @@ export class BacklogSync {
       return runForgeOperation({ kind: "read", target, payload: null }, { github: { read: read(ws) }, gitlab: { read: readGitlab } });
     })().then(
       ({ changed }) => {
-        this.every.set(ws.id, changed ? POLL_MIN_MS : this.longer(ws.id));
+        // what one a write superseded read was not stored: the import after it reads it
+        this.every.set(ws.id, changed && !opts?.readBack && !superseded ? POLL_MIN_MS : this.longer(ws.id));
         if (reads && (changed || !echo)) this.hintEvery.set(ws.id, changed ? HINT_WINDOW_MS : Math.min(POLL_MAX_MS, 2 * this.hintWindow(ws.id)));
         this.failures.delete(ws.id);
         this.limits.succeeded(host, now);
         if (!superseded) this.stored.set(ws.id, since);
+        if (!superseded && full) this.fullAt.set(ws.id, now), this.fullAsked.delete(ws.id);
+        if (!superseded) for (const n of items) this.touched.get(ws.id)?.delete(n);
         // GitHub answers again: what was kept while it did not is sent (#886)
         this.send(ws);
         // what was stored changed: a wait it closed may let a PBI go on now (#1879); one that stored nothing is followed by one that does
@@ -578,8 +621,8 @@ export class BacklogSync {
     });
     // one that stored nothing (a write came while it read) is followed by one that reads the write, and its callers
     // (the sweep, 再読込) wait for that: they decide on what is stored after it, not on the copy from before
-    const run = imported.then(() => (superseded ? this.sync(this.current(ws)) : undefined));
-    this.running.set(ws.id, { since, run });
+    const run = imported.then(() => (superseded ? this.sync(this.current(ws), undefined, { readBack: true }) : undefined));
+    this.running.set(ws.id, { since, run, full });
     return run;
   }
 
@@ -608,7 +651,7 @@ export class BacklogSync {
   /** After the daemon wrote to the workspace's repository: an import that reads it back is asked for. */
   wrote(ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">): void {
     this.written(ws);
-    this.request(ws);
+    this.request(ws, true);
   }
 
   /** Numbers a write: an import begun before it stores nothing (what it read may be older than the write). */
@@ -678,7 +721,7 @@ export class BacklogSync {
       await sendGithubOperations(this.gh, this.db, ws.path, source, this.clock, () => {
         wrote = true;
         this.written(ws);
-      }, () => syncsGithub(this.db.getWorkspaceBacklogSource(ws.id)), (op) => enablingWaits(this.db.getWorkspaceBacklogSource(ws.id), op), this.glab);
+      }, () => syncsGithub(this.db.getWorkspaceBacklogSource(ws.id)), (op) => enablingWaits(this.db.getWorkspaceBacklogSource(ws.id), op), this.glab, (issue) => this.touched.set(ws.id, (this.touched.get(ws.id) ?? new Set()).add(issue)));
     } catch (e) {
       if (!(e instanceof Limit)) throw e;
       // turned off meanwhile (#2266): nothing more goes, nothing waits for a time
@@ -852,8 +895,8 @@ export class BacklogSync {
   }
 
   /** Asks for an import without waiting for it; its failure is kept for `read`. */
-  request(ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">): void {
-    this.sync(ws).catch(() => undefined);
+  request(ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">, readBack = false): void {
+    this.sync(ws, undefined, { readBack }).catch(() => undefined);
   }
 
   /** Why the workspace's last import failed (or is held back); null = it did not. Cheap: reads no records. */

@@ -1,3 +1,4 @@
+// test-reads: none
 import { recordingText, skipRecordings, assertRecordings } from "../../../../scripts/recordings.ts";
 import { describe, expect, spyOn, test } from "bun:test";
 import { AgentEvent, type RunnerSession } from "@switchboard/protocol";

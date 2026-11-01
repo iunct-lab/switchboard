@@ -1,8 +1,8 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { createContext, Fragment, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import type { Artifact, Backlog as BacklogData, BacklogAction, BacklogIssueDetail, BacklogItem, BacklogStage, BacklogSyncInfo, Task, Workspace } from "@switchboard/protocol";
 import type { FeedbackTarget } from "../feedbackTarget.ts";
 import { api } from "../api.ts";
-import { backlogHeading, createWord, draftKey, editOf, formAfterRead, GUARANTEE_A, githubSyncText, heldIssueText, loadDraft, loadNewIssueDraft, syncLine, textDraftKey, valueText, workspaceErrorGuide, type EditForm, type NewIssueDraft } from "../backlogSync.ts";
+import { backlogHeading, createWord, draftKey, editOf, formAfterRead, GUARANTEE_A, githubSyncText, heldIssueText, issueHref, loadDraft, loadNewIssueDraft, savedWords, syncLine, textDraftKey, valueText, workspaceErrorGuide, type EditForm, type NewIssueDraft } from "../backlogSync.ts";
 import { activeTaskLine, ago, autoByWorkspace, inProgressState, readyPending, startButton, lastTaskLine, overlapLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl, type PrereqPart } from "../inProgress.ts";
 import { promotionLine } from "../release.ts";
 import { Flow } from "./Flow.tsx";
@@ -102,6 +102,20 @@ function SyncLine(props: { sync: BacklogSyncInfo; scope?: string; line?: ReturnT
   );
 }
 
+/** Whether a workspace's backlog is kept here, with no GitHub to send it to (#2343): the words of what is saved depend on it. */
+const KeptHere = createContext<(workspaceId: string) => boolean>(() => false);
+
+/** An Issue's number or title: a link to GitHub, the plain text for an Issue with no page there (#2343; the list opens it by 編集). */
+function IssueLink(props: { url: string; className?: string; children: ReactNode }) {
+  const href = issueHref(props.url);
+  if (!href) return <span className={props.className}>{props.children}</span>;
+  return (
+    <a className={props.className} href={href} target="_blank" rel="noreferrer">
+      {props.children}
+    </a>
+  );
+}
+
 /**
  * An Issue's edit form under its row (#910): the values as the daemon shows them (stored edits over GitHub's), saved
  * here at once and sent later — the two are told apart. What was typed is kept while the save fails (and across a reload,
@@ -109,6 +123,7 @@ function SyncLine(props: { sync: BacklogSyncInfo; scope?: string; line?: ReturnT
  */
 function Editor(props: { target: EditTarget; onChanged: () => void; onError: (msg: string) => void }) {
   const item = props.target;
+  const words = savedWords(useContext(KeptHere)(item.workspaceId));
   const [detail, setDetail] = useState<BacklogIssueDetail | null>(null);
   const [form, setForm] = useState<EditForm | null>(null);
   const key = draftKey(item.workspaceId, item.number);
@@ -156,7 +171,7 @@ function Editor(props: { target: EditTarget; onChanged: () => void; onError: (ms
       .then(async () => {
         // only the draft that was saved: one typed since (in an editor opened again while this save was under way) stays
         if (JSON.stringify(loadDraft(localStorage, key)?.form) === JSON.stringify(form)) localStorage.removeItem(key);
-        setNote("手元に保存しました。GitHub への反映は送信待ちです（下の同期の表示で確かめてください）");
+        setNote(words.edit);
         // the form stays while it is read again (a failed read leaves it, not an empty editor)
         await read();
         props.onChanged();
@@ -176,7 +191,7 @@ function Editor(props: { target: EditTarget; onChanged: () => void; onError: (ms
       .then(async () => {
         setComment("");
         localStorage.removeItem(commentKey);
-        setNote("コメントを手元に保存しました。GitHub への反映は送信待ちです");
+        setNote(words.comment);
         await read();
         props.onChanged();
       })
@@ -280,7 +295,7 @@ function Editor(props: { target: EditTarget; onChanged: () => void; onError: (ms
         保存
       </button>
       <label className="hint">コメント</label>
-      <textarea rows={3} value={comment} disabled={saving} onChange={(e) => (localStorage.setItem(commentKey, e.target.value), setComment(e.target.value))} placeholder="コメント（手元に保存され、GitHub へは後で送られます）" />
+      <textarea rows={3} value={comment} disabled={saving} onChange={(e) => (localStorage.setItem(commentKey, e.target.value), setComment(e.target.value))} placeholder={words.commentHint} />
       <button className="ghost" disabled={saving || !comment.trim()} onClick={() => send(comment)}>
         コメントを保存
       </button>
@@ -308,6 +323,7 @@ function EditToggle(props: { target: EditTarget; summary?: string; held?: boolea
 
 /** One Issue made here, followed from its localId to the number GitHub gives it (and the row it then is). */
 function Made(props: { workspaceId: string; localId: string; title: string }) {
+  const words = savedWords(useContext(KeptHere)(props.workspaceId));
   const [detail, setDetail] = useState<BacklogIssueDetail | null>(null);
   const read = () => api.backlogIssue(props.workspaceId, props.localId).then(setDetail).catch(() => undefined);
   useEffect(() => {
@@ -318,13 +334,13 @@ function Made(props: { workspaceId: string; localId: string; title: string }) {
   return (
     <div className="hint backlog-made" data-local={props.localId}>
       {n > 0 ? (
-        <a href={detail!.issue.url} target="_blank" rel="noreferrer">
+        <IssueLink url={detail!.issue.url}>
           #{n}
-        </a>
+        </IssueLink>
       ) : (
         "番号なし"
       )}{" "}
-      {props.title}（{detail ? (n > 0 ? "GitHub に作成済み" : createWord(detail.sync.state)) : "確認中"}）{" "}
+      {props.title}（{detail ? (n > 0 ? words.made : createWord(detail.sync.state)) : "確認中"}）{" "}
       <button className="ghost link" onClick={() => void read()}>
         更新
       </button>
@@ -337,6 +353,7 @@ function Made(props: { workspaceId: string; localId: string; title: string }) {
  * by), its localId is followed to the number; what is typed stays until it is kept.
  */
 function NewIssue(props: { workspaces: Workspace[]; current: string; onCreated: () => void }) {
+  const keptHere = useContext(KeptHere);
   const [ws, setWs] = useState(props.current || props.workspaces[0]?.id || "");
   const draftOf = (w: string) => textDraftKey(`new:${w}`);
   const [saved] = useState(() => loadNewIssueDraft(localStorage, draftOf(ws)));
@@ -373,7 +390,7 @@ function NewIssue(props: { workspaces: Workspace[]; current: string; onCreated: 
         localStorage.removeItem(draftOf(ws));
         setTitle("");
         setBody("");
-        setNote("手元に保存しました。GitHub での作成は送信待ちで、番号は作られた後に下に出ます");
+        setNote(savedWords(keptHere(ws)).created);
         props.onCreated();
       })
       .catch((e) => setNote(`作れませんでした（入力は残しています）: ${String(e.message ?? e)}`))
@@ -446,9 +463,9 @@ function Decision(props: { item: BacklogItem; onAnswered: (item: BacklogItem) =>
           {d.issue !== props.item.number && (
             // asked on one of the in-progress PBI's Tasks (#562); the answer goes there
             <div className="task-decision">
-              <a href={props.item.url.replace(/\/issues\/\d+$/, `/issues/${d.issue}`)} target="_blank" rel="noreferrer">
+              <IssueLink url={props.item.url.replace(/\/issues\/\d+$/, `/issues/${d.issue}`)}>
                 Task #{d.issue}
-              </a>{" "}
+              </IssueLink>{" "}
               の判断待ち
             </div>
           )}
@@ -528,9 +545,9 @@ function Waits(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; 
     return (
       <>
         {" ← "}
-        <a href={o.pbi.url} target="_blank" rel="noreferrer">
+        <IssueLink url={o.pbi.url}>
           #{o.pbi.number} {o.pbi.title}
-        </a>
+        </IssueLink>
         {" の "}
         {t === "unknown" ? (
           "Task 不明"
@@ -558,9 +575,9 @@ function Waits(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; 
       return (
         <Fragment key={w.number}>
           {n > 0 && "・"}
-          <a href={waitUrl(row, w)} target="_blank" rel="noreferrer">
+          <IssueLink url={waitUrl(row, w)}>
             {r.ref}
-          </a>
+          </IssueLink>
           （{r.state}）{owners && owner(w)}
         </Fragment>
       );
@@ -582,9 +599,9 @@ function Waits(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; 
               #{s.via.number} の先:{" "}
               {s.parent ? (
                 <>
-                  <a href={s.parent.url} target="_blank" rel="noreferrer">
+                  <IssueLink url={s.parent.url}>
                     #{s.parent.number}
-                  </a>{" "}
+                  </IssueLink>{" "}
                   が待つ {refs(s.parent.waits, s.parent)}
                 </>
               ) : (
@@ -611,15 +628,15 @@ function Prereqs(props: { item: BacklogItem }) {
         {n > 0 && "・"}
         {p.via !== null && (
           <>
-            <a href={p.viaUrl!} target="_blank" rel="noreferrer">
+            <IssueLink url={p.viaUrl!}>
               Task #{p.via}
-            </a>
+            </IssueLink>
             {" の前提 "}
           </>
         )}
-        <a href={p.url} target="_blank" rel="noreferrer">
+        <IssueLink url={p.url}>
           {p.ref}
-        </a>
+        </IssueLink>
         {p.after}
       </Fragment>
     ));
@@ -646,9 +663,9 @@ function Overlap(props: { item: BacklogItem }) {
           {line.hits.map((h, n) => (
             <Fragment key={`${h.ref}:${h.path}`}>
               {n > 0 && "・"}
-              <a href={h.url} target="_blank" rel="noreferrer">
+              <IssueLink url={h.url}>
                 {h.ref}
-              </a>
+              </IssueLink>
               （{h.path}）
             </Fragment>
           ))}
@@ -712,9 +729,9 @@ function Tile(props: { item: BacklogItem; now: number; starting: number | null; 
   const facts = [i.storyPoints !== null ? `SP ${i.storyPoints}` : null, i.priority].filter(Boolean).join(" · ");
   return (
     <div className="backlog-tile" data-issue={i.url}>
-      <a className="t" href={i.url} target="_blank" rel="noreferrer">
+      <IssueLink className="t" url={i.url}>
         #{i.number} {i.title}
-      </a>
+      </IssueLink>
       <div className="row">
         {facts && <span className="m">{facts}</span>}
         <RowActions item={i} now={props.now} starting={props.starting} onStart={props.onStart} onOpenTask={props.onOpenTask} />
@@ -881,12 +898,14 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const keptHere = (workspaceId: string) => workspaces?.find((w) => w.id === workspaceId)?.backlog === "switchboard";
   return (
+    <KeptHere.Provider value={keptHere}>
     <main className="main backlog">
       <section className="card">
         <div className="row head">
           <h5>Backlog</h5>
-          <span className="hint backlog-heading">{backlogHeading(data?.fetchedAt ?? null, busy, workspaces ? workspaces.some((w) => inView(w.id) && w.backlog === "github") : null)}</span>
+          <span className="hint backlog-heading">{backlogHeading(data?.fetchedAt ?? null, busy, workspaces ? workspaces.filter((w) => inView(w.id)).map((w) => w.backlog) : null)}</span>
           <button className="ghost" disabled={busy} onClick={() => load(true)}>
             再読込
           </button>
@@ -1005,9 +1024,9 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
                   // a card, not a row: the whole title is the link, then the question and the answer box
                   <div key={key(i)} className="decision-card">
                     <h5 className="backlog-item">
-                      <a href={i.url} target="_blank" rel="noreferrer">
+                      <IssueLink url={i.url}>
                         #{i.number} {i.title}
-                      </a>{" "}
+                      </IssueLink>{" "}
                       <span className="m workspace">{i.workspaceName}</span>
                     </h5>
                     <SyncLine sync={i.sync} />
@@ -1018,9 +1037,9 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
                 <Fragment key={key(i)}>
                 <div className={`row backlog-item${i.stage === "in-progress" ? " in-progress" : ""}`}>
                   <span className="t">
-                    <a href={i.url} target="_blank" rel="noreferrer">
+                    <IssueLink url={i.url}>
                       #{i.number}
-                    </a>{" "}
+                    </IssueLink>{" "}
                     {i.title}
                   </span>
                   <span className="m workspace">{i.workspaceName}</span>
@@ -1058,5 +1077,6 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
       <Flow />
       <Interventions inView={(workspaceId) => workspaceId === null || inView(workspaceId)} onOpenTask={props.onOpenTask} />
     </main>
+    </KeptHere.Provider>
   );
 }

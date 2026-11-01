@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Task, TerminalStatus, Workspace } from "@switchboard/protocol";
-import { OriginTag, ResumeTag, ShadowTag } from "./ui.tsx";
+import { OriginTag, BackgroundTag, ResumeTag, ShadowTag } from "./ui.tsx";
 import { attentionList, outcomeDotClass, outcomeLabel, terminalMark } from "../attention.ts";
 import { taskTimes } from "../inProgress.ts";
 import { filterTasks, PAGE, STATUS_FILTERS, type StatusFilter } from "../taskList.ts";
@@ -34,7 +34,7 @@ export function Rail(props: { workspaces: Workspace[]; tasks: Task[]; currentTas
     const k = t.workspaceId;
     byWs.set(k, [...(byWs.get(k) ?? []), t]);
   }
-  const active = live.filter((t) => t.status === "running" || t.status === "waiting" || props.terminals[t.id] === "waiting");
+  const active = live.filter((t) => t.status === "running" || t.status === "waiting" || t.background || props.terminals[t.id] === "waiting");
   const attention = attentionList(live);
   return (
     <aside className={`rail ${props.listOpen ? "open" : ""}`}>
@@ -113,6 +113,7 @@ export function Rail(props: { workspaces: Workspace[]; tasks: Task[]; currentTas
           {/* Two tags leave the title no room in this width; while a resume is planned that tag matters more (the tooltip still says Terminal). */}
           {t.resumeAt === null && <OriginTag origin={t.origin} />}
           <ResumeTag resumeAt={t.resumeAt} reason={t.resumeReason} plannedAt={t.resumePlannedAt} compact />
+          <BackgroundTag background={t.background} compact />
           {t.resumeAt === null && <ShadowTag task={t} />}
           <TerminalMark status={props.terminals[t.id]} />
           <span className={`dot ${dotClass(t.status)}`} />

@@ -1,3 +1,4 @@
+// test-reads: packages/core/config/pricing.json
 import { afterAll, describe, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

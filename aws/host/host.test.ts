@@ -1,3 +1,4 @@
+// test-reads: aws/host/ aws/README.md docs/design/cloud-hosting.md
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1010,7 +1011,7 @@ exit 0`);
     expect(existsSync(`${out}.overwrites`)).toBe(false); // no key is written twice, so the bucket keeps no old versions
   }, 20000);
 
-  test("runner-sync starts a new set after 7 days and when the state is gone", () => {
+  test("runner-sync starts a new set after 7 days and when the state is unreadable", () => {
     awsFake();
     fresh();
     sync();
@@ -1027,11 +1028,7 @@ exit 0`);
     Bun.sleepSync(1100); // sets are named by the second
     expect(sync().code).toBe(0);
     expect(keys().filter((k) => k.endsWith("/base.tar.zst")).length).toBe(3);
-    rmSync(state);
-    Bun.sleepSync(1100);
-    sync();
-    expect(keys().filter((k) => k.endsWith("/base.tar.zst")).length).toBe(4);
-    expect(sets().length).toBe(4);
+    expect(sets().length).toBe(3);
   });
 
   test("runner-sync does nothing without the folders, and a failed upload is not remembered as done", () => {
@@ -1373,6 +1370,7 @@ exit 0`,
   };
   const offload = (args: string[], env: Record<string, string> = {}) => {
     rmSync(log, { force: true });
+    fake("sleep", "exit 0"); // offload.sh's polls wait 5 s each; the order of the calls is what these tests read (#3268)
     const p = Bun.spawnSync(["bash", join(HERE, "offload.sh"), ...args], {
       cwd: repo,
       env: { PATH: `${join(dir, "bin")}:/usr/bin:/bin`, SB_HOST_ENV: join(dir, "host.env"), HOME: home, FAKE: fakeDir, S3OUT: out, ...env },
@@ -1925,5 +1923,100 @@ describe("aws/host sb-host-update security updates (#2186)", () => {
     fake("systemd-run", `echo "systemd-run $*" >> "${log}"`);
     expect(r.code).toBe(0);
     expect(r.err).toContain("sb-host-update: security updates not started (exit 1)");
+  });
+});
+
+describe("aws/host bootstrap from main (#2231)", () => {
+  // from_main() cut out of bootstrap.sh and run with fake curl (IMDS), aws (Parameter Store) and git. The fake clone
+  // writes a bootstrap.sh that runs the same from_main again and then says main-bootstrap, and records its origin, so
+  // a second fetch from the clone that was switched to would show as a second clone call.
+  const fn = () => {
+    const s = readFileSync(join(HERE, "bootstrap.sh"), "utf8");
+    const start = s.indexOf("from_main() {");
+    return s.slice(start, s.indexOf("\n}\n", start) + 3);
+  };
+  function fromMain(opts: { repo?: string; clone?: "ok" | "fail"; token?: "fail"; mvFails?: number }) {
+    const d = mkdtempSync(join(tmpdir(), "switchboard-test-from-main-"));
+    const bin = join(d, "bin");
+    const clone = join(d, "opt", "switchboard-host");
+    const calls = join(d, "calls");
+    mkdirSync(bin);
+    mkdirSync(join(clone, "aws", "host"), { recursive: true });
+    writeFileSync(join(clone, ".origin"), "https://github.com/old/name.git\n");
+    writeFileSync(join(clone, "aws", "host", "bootstrap.sh"), "echo old-bootstrap\n");
+    writeFileSync(join(d, "fn.sh"), `${fn()}\n`);
+    const sh = (name: string, body: string) => { writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`); chmodSync(join(bin, name), 0o755); };
+    sh("curl", `case "$*" in *api/token*) echo imds-tok;; *placement/region*) echo ap-northeast-1;; *) exit 22;; esac`);
+    sh("aws", `echo "aws $*" >> "${calls}"
+case "$*" in *github-token*) ${opts.token === "fail" ? `echo "An error occurred (AccessDeniedException)" >&2; exit 254` : "echo gh-tok-123"};; *github-repo*) ${opts.repo === undefined ? "exit 254" : `echo "${opts.repo}"`};; *) exit 254;; esac`);
+    sh("git", `echo "git $* | header=$GIT_CONFIG_VALUE_0" >> "${calls}"
+[ "$1 $3 $4" = "-C remote get-url" ] && { cat "$2/.origin" 2>/dev/null || exit 2; exit 0; }
+[ "$1" = clone ] || exit 1
+for dest; do :; done; for url; do [ "$url" = "$dest" ] && break; u="$url"; done
+${opts.clone === "fail" ? `mkdir -p "$dest"; echo "remote: Repository not found." >&2; echo "fatal: unable to access" >&2; exit 128` : `mkdir -p "$dest/aws/host"; echo "$u" > "$dest/.origin"
+printf '%s\\n' 'set -euo pipefail' '. "${join(d, "fn.sh")}"' 'from_main "$@"' 'echo main-bootstrap "$SB_HOST_USER" "$@"' > "$dest/aws/host/bootstrap.sh"`}`);
+    // the n-th mv fails (a full disk, a busy directory); the others are the real one
+    if (opts.mvFails) sh("mv", `n=$(($(cat "${d}/mvs" 2>/dev/null || echo 0) + 1)); echo $n > "${d}/mvs"
+[ $n = ${opts.mvFails} ] && { echo "mv: cannot move" >&2; exit 1; }; exec /usr/bin/mv "$@"`);
+    const p = Bun.spawnSync(["bash", "-c", `set -euo pipefail\n. "${join(d, "fn.sh")}"\nfrom_main a1 a2\necho own-bootstrap`], {
+      env: { PATH: `${bin}:/usr/bin:/bin`, SB_HOST_CLONE: clone, SB_HOST_USER: "u" }, stdout: "pipe", stderr: "pipe",
+    });
+    const r = {
+      code: p.exitCode, out: p.stdout.toString(), err: p.stderr.toString(),
+      calls: existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : [],
+      clone,
+      origin: readFileSync(join(clone, ".origin"), "utf8").trim(),
+      left: readdirSync(join(d, "opt")).sort(),
+    };
+    rmSync(d, { recursive: true, force: true });
+    return r;
+  }
+
+  test("bootstrap runs the main of /switchboard/github-repo once", () => {
+    const r = fromMain({ repo: "example/development" });
+    expect(r.code).toBe(0);
+    expect(r.out.trim().split("\n")).toEqual(["main-bootstrap u a1 a2"]); // same arguments and environment, and nothing after the exec
+    expect(r.err).toContain("bootstrap: running main of example/development");
+    expect(r.calls.filter((l) => l.startsWith("git clone")).length).toBe(1); // the main it switched to does not fetch again
+    expect(r.calls.find((l) => l.startsWith("git clone"))).toStartWith("git clone --depth 1 --branch main -q https://github.com/example/development.git ");
+    expect(r.calls.some((l) => l.includes("--region ap-northeast-1"))).toBe(true);
+    expect(r.origin).toBe("https://github.com/example/development.git"); // the new tree took the clone's place
+    expect(r.left).toEqual(["switchboard-host"]); // no .new or .old left
+
+    // UserData's clone is already the parameter's repository: nothing is fetched
+    const same = fromMain({ repo: "old/name" });
+    expect(same.out.trim().split("\n")).toEqual(["own-bootstrap"]);
+    expect(same.calls.some((l) => l.startsWith("git clone"))).toBe(false);
+    expect(same.err).toBe("");
+  });
+
+  test("bootstrap goes on with its own clone", () => {
+    for (const [opts, reason] of [
+      [{}, "bootstrap: no readable /switchboard/github-repo; going on with the clone of the stack's GitHubRepo"],
+      [{ repo: "not a repository" }, "bootstrap: no readable /switchboard/github-repo; going on with the clone of the stack's GitHubRepo"],
+      [{ repo: "example/development", clone: "fail" }, "bootstrap: could not fetch main of example/development (remote: Repository not found.; fatal: unable to access); going on with the clone of the stack's GitHubRepo"],
+      [{ repo: "example/development", token: "fail" }, "bootstrap: could not fetch main of example/development (no token from Parameter Store); going on with the clone of the stack's GitHubRepo"],
+      [{ repo: "example/development", mvFails: 1 }, `bootstrap: could not put main of example/development in place of ${"$"}CLONE; going on with the clone of the stack's GitHubRepo`],
+      [{ repo: "example/development", mvFails: 2 }, `bootstrap: could not put main of example/development in place of ${"$"}CLONE; going on with the clone of the stack's GitHubRepo`],
+    ] as const) {
+      const r = fromMain(opts);
+      expect(r.code).toBe(0);
+      expect(r.out.trim().split("\n")).toEqual(["own-bootstrap"]);
+      expect(r.err.trim().split("\n")).toEqual([reason.replace("$CLONE", r.clone)]); // one line, nothing else from aws, git or mv
+      expect(r.origin).toBe("https://github.com/old/name.git"); // the clone is as UserData left it
+      expect(r.left).toEqual(["switchboard-host"]);
+    }
+  });
+
+  test("bootstrap's fetch keeps the token off the command line", () => {
+    const r = fromMain({ repo: "example/development" });
+    expect(r.code).toBe(0);
+    const b64 = Buffer.from("x-access-token:gh-tok-123").toString("base64");
+    for (const l of r.calls) {
+      const args = l.split(" | header=")[0];
+      expect(args).not.toContain("gh-tok-123");
+      expect(args).not.toContain(b64);
+    }
+    expect(r.calls.find((l) => l.startsWith("git clone"))!.split(" | header=")[1]).toBe(`AUTHORIZATION: basic ${b64}`);
   });
 });

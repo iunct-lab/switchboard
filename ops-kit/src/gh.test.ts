@@ -1,7 +1,9 @@
+// test-reads: ops-kit/src/gh.ts
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { noWriteTargets } from "./config.ts";
 import { fakeGh, GhError, GithubRetryState, parseIncluded, realGh, repoOf, responseOf, retryAtFromResponse, type GithubCallMetric } from "./gh.ts";
 
 const dirs: string[] = [];
@@ -94,6 +96,34 @@ describe("repoOf", () => {
     test("gh repo view naming the public copy stops too", async () => {
       await refused(repoOf(fakeGh([() => "acme/widget\n"]), {}, repoWithOrigin(null, "acme/widget")));
     });
+  });
+});
+
+describe("noWrite: a clone marked ops-kit.noWrite (#2576)", () => {
+  const foreign = () => {
+    const dir = repoWithOrigin(null);
+    Bun.spawnSync(["git", "remote", "add", "upstream", "https://github.com/someone/widget.git"], { cwd: dir, env: { ...process.env } });
+    Bun.spawnSync(["git", "config", "--add", "ops-kit.noWrite", "Someone/Widget"], { cwd: dir, env: { ...process.env } });
+    return dir;
+  };
+
+  test("noWrite: the default (upstream only) stops, with the reason", async () => {
+    const e = await repoOf(fakeGh([() => "someone/widget\n"]), {}, foreign()).then(() => null, (err: unknown) => err);
+    expect(e).toBeInstanceOf(GhError);
+    expect((e as Error).message).toContain("ops-kit.noWrite");
+    expect((e as Error).message).toContain("someone/widget");
+  });
+
+  test("noWrite: GH_REPO elsewhere goes, an unmarked clone goes", async () => {
+    expect(await repoOf(fakeGh([]), { GH_REPO: "me/widget" }, foreign())).toEqual({ owner: "me", name: "widget" });
+    expect(await repoOf(fakeGh([]), {}, repoWithOrigin("https://github.com/someone/widget.git"))).toEqual({ owner: "someone", name: "widget" });
+  });
+
+  test("noWrite: noWriteTargets lists the public copy and every mark once, lower-cased; outside git it is empty", () => {
+    const dir = repoWithOrigin(null, "Acme/Widget");
+    for (const v of ["someone/widget", "https://github.com/Someone/Widget.git", "other/thing"]) Bun.spawnSync(["git", "config", "--add", "ops-kit.noWrite", v], { cwd: dir, env: { ...process.env } });
+    expect(noWriteTargets(dir)).toEqual(["acme/widget", "someone/widget", "other/thing"]);
+    expect(noWriteTargets("/nonexistent")).toEqual([]);
   });
 });
 

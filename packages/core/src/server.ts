@@ -45,10 +45,10 @@ import { checkLocalFields, checkLocalParent } from "./backlog-local.ts";
 import { enableGithubSync, enablingOf } from "./backlog-enable.ts";
 import { CloneError, parseGithubRepo, registerWorkspace, unusableWorkspaces, WorkspaceClones } from "./workspace-clone.ts";
 import { copyDeletable, inspectRemoval } from "./workspace-remove.ts";
-import { ACTION_FOR_STAGE, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, buildStartPrompt, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionStep, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, type GhRunner, type OtherRepo } from "./backlog.ts";
+import { ACTION_FOR_STAGE, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, buildStartPrompt, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionStep, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, type GhRunner, type OtherRepo } from "./backlog.ts";
 import { issueOf, reduceStops, stopRecordsFor } from "./stops.ts";
 import { approvalBatches, approvalWindowNote, BatchAnswers } from "./approval-batch.ts";
-import { ASK_HISTORY_MS, asksFromBacklog, closedHits, asksFromTasks, blockersOf, dedupeAsks, noticeAsks, policyPbi, rankAsks, prFacts, resumeOfTask, type NoticeRecord, type PolicyEnv, type PrFacts } from "./asks.ts";
+import { ASK_HISTORY_MS, ON_HOLD_RESUME, asksFromBacklog, closedHits, asksFromTasks, blockersOf, dedupeAsks, noticeAsks, policyPbi, rankAsks, prFacts, resumeOfTask, type NoticeRecord, type PolicyEnv, type PrFacts } from "./asks.ts";
 import { checkPolicy, matchPolicies, readPolicies, recordUse, subjectChanges, writePolicies } from "./policies.ts";
 import { checkPreset, expandPreset, needsTarget, parseTarget, readPresets, writePresets } from "./presets.ts";
 import { Inbox } from "./inbox.ts";
@@ -57,7 +57,7 @@ import * as materializer from "./materializer.ts";
 import { CompositeSuggester, loadRoutingTable, RuleSuggester, suggestRunner, type RoutingContext, type Suggester } from "./routing.ts";
 import { DEFAULT_EXAMPLE_COUNT, LlmSuggester, readOnlyMode } from "./suggest-llm.ts";
 import { WorkspaceSuggester } from "./suggest-workspace.ts";
-import { privateTmpOf, provisionalTitle, sweepPrivateTmps, TaskManager } from "./tasks.ts";
+import { type NewTaskInput, privateTmpOf, provisionalTitle, sweepPrivateTmps, TaskManager } from "./tasks.ts";
 import { HistoryImporter } from "./history.ts";
 import { HostIdle, nextWakeFrom } from "./hostidle.ts";
 import { RunnerLogins } from "./runnerlogin.ts";
@@ -113,7 +113,7 @@ export interface StartServerOptions {
    * suggestion (the rule table alone). Unset = the real one, asking the configured runner through its adapter.
    * `onUsage` reports what the turn cost so it can go in the ledger.
    */
-  llmSuggester?: (cfg: LlmRoutingSettings, onUsage: (ev: Extract<AgentEvent, { t: "usage" }>) => void) => Suggester | null;
+  llmSuggester?: (cfg: LlmRoutingSettings, onUsage: (ev: Extract<AgentEvent, { t: "usage" }>) => void, taskId: string) => Suggester | null;
   /** Overrides how the terminal tab's PTY library is loaded (#16); a test passes one that throws to get features.pty = false. */
   loadPty?: () => Promise<PtyManager | null>;
   /** Overrides how `gh` is run for GET /api/backlog (#264); tests and the E2E answer from a fixture. Unset = `gh` from PATH. */
@@ -315,7 +315,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
    * (never a repository), the last decisions as training data. A runner that is not detected means no suggestion —
    * the rule table then stands, and the settings PATCH already refuses to enable an uninstalled one.
    */
-  const defaultLlmSuggester = (llmCfg: LlmRoutingSettings, onUsage: (ev: Extract<AgentEvent, { t: "usage" }>) => void): Suggester | null => {
+  const defaultLlmSuggester = (llmCfg: LlmRoutingSettings, onUsage: (ev: Extract<AgentEvent, { t: "usage" }>) => void, taskId: string): Suggester | null => {
     const adapter = adapterMap.get(llmCfg.runner);
     if (!adapter) {
       console.warn(`routing: LLM suggestions are on but runner "${llmCfg.runner}" is not installed; using the rule table`);
@@ -328,26 +328,49 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       console.warn(`routing: ${adapter.id} has no read-only permission mode; not asking it for suggestions`);
       return null;
     }
-    return new LlmSuggester({ adapter, cwd: suggestDir, model: llmCfg.model, permissionMode: ro.mode, examples: () => db.routingLog(DEFAULT_EXAMPLE_COUNT), onUsage, log: (m) => console.warn(m) });
+    // the task is already in the log by the time it is asked about: it is no example of itself
+    return new LlmSuggester({ adapter, cwd: suggestDir, model: llmCfg.model, permissionMode: ro.mode, examples: () => db.routingLog(DEFAULT_EXAMPLE_COUNT + 1).filter((r) => r.taskId !== taskId), onUsage, log: (m) => console.warn(m) });
+  };
+  /** Stopped with the daemon (#1143): a suggestion turn still running ends, and nothing is written past the database's close. */
+  const adviceStop = new AbortController();
+  const adviceRunning = new Set<Promise<void>>();
+  /**
+   * The LLM's proposal for a task that exists (#25, #1143): nothing waits for it. The rule table has already decided, and
+   * the task runs on without it; the answer is kept on the task when it comes in time, also after the task ended. `ctx`
+   * was taken before the task was created, so the task is not its own history. Only task creation pays for it:
+   * `POST /api/tasks/suggest` (typed into on every keystroke) stays rule-table-only.
+   */
+  const runRoutingAdvice = (taskId: string, ctx: RoutingContext): void => {
+    const llmCfg = settings().routing.llm;
+    if (!llmCfg.enabled || adviceStop.signal.aborted) return;
+    const run = (async () => {
+      // billed as reported, under the runner that answered (not the task's own): a turn that then fails or misses the deadline spent it too
+      const onUsage = (u: Extract<AgentEvent, { t: "usage" }>) => {
+        if (!adviceStop.signal.aborted) db.insertLedger(ledgerRowFor(pricingTable(), { id: taskId, runner: llmCfg.runner, model: u.model ?? null }, u, Date.now()));
+      };
+      const primary = (opts.llmSuggester ?? defaultLlmSuggester)(llmCfg, onUsage, taskId);
+      if (!primary) return;
+      const { llm } = await new CompositeSuggester(primary, ruleSuggester, llmCfg.timeoutMs, (m) => console.warn(m)).suggest(ctx, adviceStop.signal);
+      if (llm && !adviceStop.signal.aborted) tasks.attachLlmSuggestion(taskId, llm);
+    })().catch((e) => console.warn(`routing: the LLM suggestion for ${taskId} failed (${String((e as Error).message ?? e)})`));
+    adviceRunning.add(run);
+    void run.finally(() => adviceRunning.delete(run));
   };
   /**
-   * The suggestion recorded for a new task (#25). With LLM suggestions off — the default — this is exactly the rule
-   * table; with them on, the rule table still decides and the LLM's proposal rides along in `llm`, or is dropped if
-   * it fails or misses the deadline. Only task creation pays for it: `POST /api/tasks/suggest` (typed into on every
-   * keystroke) stays rule-table-only.
+   * Creates a routed task on the rule table's suggestion and asks the LLM afterwards. A task whose runner failed to start
+   * is saved as an error before `tasks.create` throws, so the advice follows the row rather than the return.
    */
-  const suggestForCreate = async (input: SuggestCtxInput): Promise<{ suggestion: RoutingSuggestion; usage: Extract<AgentEvent, { t: "usage" }>[]; runner: RunnerId }> => {
+  const createRouted = (input: NewTaskInput & SuggestCtxInput, afterInsert?: (task: Task) => void): Task => {
     const ctx = routingContext(input);
-    const llmCfg = settings().routing.llm;
-    // one usage per model the turn used (Claude's `modelUsage`, #2353)
-    const usage: Extract<AgentEvent, { t: "usage" }>[] = [];
-    const factory = opts.llmSuggester ?? defaultLlmSuggester;
-    const primary = llmCfg.enabled ? factory(llmCfg, (u) => usage.push(u)) : null;
-    if (!primary) return { suggestion: suggestRunner(routing.table, ctx), usage, runner: llmCfg.runner };
-    // The deadline is the composite's own; nothing above it gives up early (the task is created either way), so the
-    // outer signal is a controller that is never aborted.
-    const suggestion = await new CompositeSuggester(primary, ruleSuggester, llmCfg.timeoutMs, (m) => console.warn(m)).suggest(ctx, new AbortController().signal);
-    return { suggestion, usage, runner: llmCfg.runner };
+    const saved: string[] = [];
+    try {
+      return tasks.create(input, suggestRunner(routing.table, ctx), (t) => {
+        saved.push(t.id);
+        afterInsert?.(t);
+      });
+    } finally {
+      for (const id of saved) runRoutingAdvice(id, ctx);
+    }
   };
   /** Thrown by `chooseWorkspace`: the 409 body. Never a silent default — that would read as "the daemon chose this". */
   const pickYourself = (why: string) => new Error(`Workspace を選んでください（${why}）`);
@@ -635,9 +658,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       ...(req.stage ? { stage: req.stage } : {}),
     };
     try {
-      const routed = await suggestForCreate(input);
-      const task = tasks.create(input, routed.suggestion, (t) => {
-        for (const u of routed.usage) db.insertLedger(ledgerRowFor(pricingTable(), { id: t.id, runner: routed.runner, model: u.model ?? null }, u, Date.now()));
+      const task = createRouted(input, (t) => {
         if (note) tasks.record(t.id, { t: "status", text: note });
       });
       return { task };
@@ -647,8 +668,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   };
   /** A stage Task runs on the workspace whose repository the Issue is in, so another repository's #n is not the meta's #n. */
   const activeStageTask = (workspaceId: string, n: number) => db.activeStageTask(workspaceId, n);
-  // Issues whose stage Task is being created right now (`<workspaceId>:<n>` → n): startMetaTask awaits (routing, the
-  // runner's start), and a second start in that gap must not pass the running/waiting check too.
+  // Issues whose stage Task is being created right now (`<workspaceId>:<n>` → n): nothing awaits in startMetaTask since the routing turn moved
+  // after creation (#1143), but the running/waiting check must not depend on that staying so.
   const startingStage = new Map<string, { n: number; action: BacklogAction }>();
   /**
    * Starts one stage Task of an Issue (#936): the button, backlog-next and the resume after an answer all come here, so
@@ -706,7 +727,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   const readBacklog = async (refresh: boolean): Promise<Backlog> => {
     const read = await Promise.all(db.listWorkspaces().map(async (ws) => {
       if (!existsSync(ws.path)) return { ws, stored: null };
-      if (refresh) await backlog.sync(ws).catch(() => undefined);
+      if (refresh) await backlog.sync(ws, undefined, { full: true }).catch(() => undefined);
       // the prerequisites judged as backlog-next judges them (#937)
       return { ws, stored: storedBacklog(ws, await releasedIn(ws)) };
     }));
@@ -928,6 +949,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     if (!item) return done(null);
     const blockers = blockersOf({ waits: item.waits, stops: item.stopSummary, approvalPending: approvalPendingOf()(item) });
     if (blockers.length) return done({ state: "queued", reason: blockers.map((b) => b.detail).join("・"), taskId: null, at });
+    // a saved policy's answer is backlog-next's, not the person's: an item on hold does not go on from it (#2930)
+    if (by && item.onHold) return done({ state: "queued", reason: ON_HOLD_RESUME, taskId: null, at });
     const action = ask.kind === "confirmation" ? (item.closable ? "close" : null) : item.stage === "in-progress" ? "complete" : (ACTION_FOR_STAGE[item.stage] ?? null);
     if (!action) return done(null);
     const r = await startStage({ ws, meta: meta ?? ws, item, action });
@@ -1307,15 +1330,19 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             break;
           }
           const next = pickNext(r.items.filter((i) => !picked.has(i.number)), slot);
+          // on hold (#2930): named on this line only, whatever else would also leave it
+          const onHold = n === 0 ? onHoldIn(r.items, slot) : [];
+          if (onHold.length) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 保留: ${onHold.map((i) => `#${i.number}`).join(" ")}`);
+          const unheld = r.items.filter((i) => !i.onHold);
           // a Task that ended asking the person, or failed, with no update to the Issue since (#1275); named under that, not as unchanged
-          const replyWaiting = n === 0 ? replyWaitingIn(r.items, slot) : [];
+          const replyWaiting = n === 0 ? replyWaitingIn(unheld, slot) : [];
           if (replyWaiting.length) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 返事待ち: ${replyWaiting.map((i) => `#${i.number}`).join(" ")}`);
-          const failed = n === 0 ? failedIn(r.items, slot) : [];
+          const failed = n === 0 ? failedIn(unheld, slot) : [];
           if (failed.length) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 前回の Task が失敗したまま更新が無い: ${failed.map((i) => `#${i.number}${i.lastTask!.resumeAt ? `（使用上限、${fmtTime(i.lastTask!.resumeAt, Date.now())} に戻る）` : ""}`).join(" ")}`);
-          const unchanged = n === 0 ? unchangedIn(r.items, slot).filter((i) => !failedSince(i) && !awaitingReply(i)) : [];
+          const unchanged = n === 0 ? unchangedIn(unheld, slot).filter((i) => !failedSince(i) && !awaitingReply(i)) : [];
           if (unchanged.length) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 前回から更新が無い: ${unchanged.map((i) => `#${i.number}`).join(" ")}`);
           // what holds them (#817, #937): an overlap still open, a prerequisite not done yet, one a person has to look at
-          const held = n === 0 ? heldIn(r.items, slot) : [];
+          const held = n === 0 ? heldIn(unheld, slot) : [];
           for (const [label, of] of HELD_LINES) {
             const rows = held.flatMap(({ item, pending, stuck }) => {
               const named = of(pending, stuck);
@@ -1324,13 +1351,13 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             if (rows.length) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: ${label}: ${rows.join(" ")}`);
           }
           // PBIs whose Tasks' files other work touches (#1044): left before a session starts only to find that out
-          const overlapped = n === 0 ? overlapIn(r.items, slot) : [];
+          const overlapped = n === 0 ? overlapIn(unheld, slot) : [];
           const touching = overlapped.filter((i) => i.overlap!.hits.length > 0);
           if (touching.length) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 重なり: ${touching.map((i) => `#${i.number}（${i.overlap!.hits.map((h) => `${h.ref}: ${h.path}`).join("・")}）`).join(" ")}`);
           const undecided = overlapped.filter((i) => i.overlap!.unknown !== null);
           if (undecided.length) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 重なりを判定できない: ${undecided.map((i) => `#${i.number}（${i.overlap!.unknown}）`).join(" ")}`);
           // stalled PBIs whose newest ## 状況 counts as many closed Tasks as now (#578)
-          const spinning = n === 0 ? spinningIn(r.items, slot) : [];
+          const spinning = n === 0 ? spinningIn(unheld, slot) : [];
           if (spinning.length) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 前回の再開から進んでいない: ${spinning.map((i) => `#${i.number}`).join(" ")}`);
           if (!next) {
             if (n === 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 進められる項目が無い`);
@@ -2838,13 +2865,13 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             // A skill command on an Issue (`/pbi-complete 123`) is named by the Issue's title at once (#491); a local backlog's numbers are not GitHub's
             const issueTitle = settled.title === undefined && (chosen?.workspace ?? named)?.backlog !== "switchboard" ? await skillCommandTitle(settled.prompt, settled.cwd, opts.gh ?? runGh) : null;
             const input = issueTitle ? { ...settled, title: issueTitle } : settled;
-            const routed = input.executionMode === "cloud" ? null : await suggestForCreate(input);
-            // What the suggestion turns spent belongs to the task they were asked about, under the runner that answered
-            // (not the task's own runner): asking costs quota, and the Ledger is where that has to show up — also when
-            // the task's own runner then fails to start, so it is billed as soon as the row exists.
-            const task = tasks.create(input, routed?.suggestion, (t) => {
-              for (const turn of [chosen, routed]) if (turn) for (const u of turn.usage) db.insertLedger(ledgerRowFor(pricingTable(), { id: t.id, runner: turn.runner, model: u.model ?? null }, u, Date.now()));
-            });
+            // What the Workspace choice spent belongs to the task it was asked about, under the runner that answered (not
+            // the task's own runner): asking costs quota, and the Ledger is where that has to show up — also when the
+            // task's own runner then fails to start, so it is billed as soon as the row exists.
+            const bill = (t: Task) => {
+              if (chosen) for (const u of chosen.usage) db.insertLedger(ledgerRowFor(pricingTable(), { id: t.id, runner: chosen.runner, model: u.model ?? null }, u, Date.now()));
+            };
+            const task = input.executionMode === "cloud" ? tasks.create(input, undefined, bill) : createRouted(input, bill);
             if (task.permissionMode && adapterMap.get(task.runner)?.permissionModes?.find((m) => m.value === task.permissionMode)?.danger) {
               logOp(req, srv, "task.create.danger", { task: task.id, detail: { runner: task.runner, mode: task.permissionMode } });
             }
@@ -3695,6 +3722,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   }
 
   const stopAll = async (cleanExit: CleanExit = "shutdown") => {
+    adviceStop.abort(new Error("the daemon is stopping"));
+    await Promise.all(adviceRunning);
     clearInterval(recheckTimer);
     history.stop();
     knowledge.close();

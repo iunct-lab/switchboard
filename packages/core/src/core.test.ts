@@ -1,3 +1,4 @@
+// test-reads: packages/core/src/config.ts packages/core/src/server.ts
 import { recordingText, skipRecordings, assertRecordings } from "../../../scripts/recordings.ts";
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, truncateSync, utimesSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
@@ -350,7 +351,7 @@ describe("core daemon", () => {
       const p = await post("/api/inbox/promote", { path: draft.path, workspaceId: ws.id, runner: "claude" });
       expect(p.status).toBe(201);
       expect(((await p.json()) as { task: { title: string } }).task.title).toBe("edited");
-      for (let i = 0; i < 50 && starts.length === 0; i++) await Bun.sleep(20);
+      for (const t0 = Date.now(); Date.now() - t0 < 20_000 && starts.length === 0; ) await Bun.sleep(20);
       expect(starts.at(-1)?.prompt).toBe("line 1\nline 2\nline 3\nline 4\nline 5");
       expect((await post("/api/inbox/edit", { path: draft.path, text: "after promotion" })).status).toBe(409);
       const other = (await (await post("/api/inbox", { text: "close me" })).json()) as { path: string };
@@ -360,7 +361,7 @@ describe("core daemon", () => {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
     }
-  });
+  }, 30_000); // startServer twice and a promoted Task's start: over the 5 s default on a loaded host (docs/design/perf.md "テストの揺れ")
 
   test("health reports a failed daily archive from archive.status, and null without one (#1201)", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-archive-"));
@@ -1236,18 +1237,14 @@ describe("core daemon", () => {
     for (const q of ["?limit=nonsense", "?limit=", "?limit=0", "?limit=-5"]) expect(await logRows(q)).toHaveLength(all.length);
   });
 
-  test("suggester: the LLM proposal rides along, and a slow, broken or disabled one leaves the rule table in charge (#25)", async () => {
+  test("suggester: the LLM proposal rides along, and a disabled one leaves the rule table in charge (#25)", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-suggester-"));
     const dir = join(h, "repo");
     mkdirSync(dir, { recursive: true });
-    // One fake per case; `which` picks the one the next creation gets, so all four run against one daemon.
-    let which: "ok" | "slow" | "throws" = "ok";
     const calls: Array<{ title: string; kind: string }> = [];
     const fake: Suggester = {
       async suggest(ctx, signal) {
         calls.push({ title: ctx.title, kind: "llm" });
-        if (which === "throws") throw new Error("runner said no");
-        if (which === "slow") await new Promise((r) => setTimeout(r, 60_000));
         return { runner: "dak", reason: "LLM がそう言った", ruleId: "llm", model: null, available: ctx.available.has("dak"), alternatives: [], llm: null };
       },
     };
@@ -1266,30 +1263,14 @@ describe("core daemon", () => {
       // a partial patch keeps the saved runner / model
       expect((await fetch(`${b}/api/settings`).then(j)).routing.llm).toEqual({ enabled: true, runner: "claude", model: "", timeoutMs: 5000 });
 
-      // (a) on: the LLM proposal is attached to the task and logged as its own row, without changing the runner
+      // (a) on: the LLM proposal arrives on the task and is logged as its own row, without changing the runner
       const on = await post("/api/tasks", { cwd: dir, title: "t-on", prompt: "p", runner: "claude" });
-      expect(on.routing).toMatchObject({ suggested: "claude", overridden: false, llm: { runner: "dak", reason: "LLM がそう言った" } });
-      expect(on.runner).toBe("claude");
+      expect(on.routing).toMatchObject({ suggested: "claude", overridden: false, llm: null });
+      await waitFor(async () => c.db.getTask(on.id)?.routing?.llm != null);
+      expect(c.db.getTask(on.id)).toMatchObject({ runner: "claude", routing: { llm: { runner: "dak", reason: "LLM がそう言った" } } });
       const rows = c.db.routingLog().filter((r) => r.taskId === on.id);
       expect(rows.map((r) => r.suggestedBy).sort()).toEqual(["llm", "rule"]);
       expect(rows.find((r) => r.suggestedBy === "llm")).toMatchObject({ suggested: "dak", chosen: "claude", ruleId: "llm" });
-
-      // (b) a suggester that takes far longer than the deadline: the task is created with the rule table alone, and
-      // the route comes back on the deadline rather than on the suggester (the exact timing is pinned in
-      // routing.test.ts at 30 ms; here the slack is wide so a loaded machine cannot make it flaky)
-      which = "slow";
-      const started = Date.now();
-      const slow = await post("/api/tasks", { cwd: dir, title: "t-slow", prompt: "p", runner: "claude" });
-      expect(slow.routing.llm).toBeNull();
-      expect(Date.now() - started).toBeLessThan(20_000);
-      expect(c.db.routingLog().filter((r) => r.taskId === slow.id).map((r) => r.suggestedBy)).toEqual(["rule"]);
-
-      // (c) a suggester that throws: still 201, still the rule table
-      which = "throws";
-      const res = await fetch(`${b}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: dir, title: "t-throws", prompt: "p", runner: "claude" }) });
-      expect(res.status).toBe(201);
-      expect(((await res.json()) as { routing: { llm: unknown } }).routing.llm).toBeNull();
-      expect(calls.map((x) => x.title)).toEqual(["t-on", "t-slow", "t-throws"]);
 
       // a runner that is not installed cannot be the suggester (its adapter would have to produce the answer)
       expect((await patch({ routing: { llm: { runner: "codex" } } })).status).toBe(400);
@@ -1299,6 +1280,217 @@ describe("core daemon", () => {
       rmSync(h, { recursive: true, force: true });
     }
   }, 20000);
+
+  describe("routing advice (#1143)", () => {
+    const script = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");
+    const ANSWER = { runner: "dak" as const, reason: "後から届いた", ruleId: "llm", model: null, available: true, alternatives: [], llm: null };
+    const deferred = () => {
+      let release!: () => void;
+      const held = new Promise<void>((r) => (release = r));
+      return { held, release };
+    };
+    const usage = (model: string): Extract<AgentEvent, { t: "usage" }> => ({ t: "usage", source: "reported", model, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.01 });
+    const boot = async (llmSuggester: NonNullable<Parameters<typeof startServer>[2]>["llmSuggester"], timeoutMs = 5000, adapter = fakeAdapter(script)) => {
+      const h = mkdtempSync(join(tmpdir(), "switchboard-test-advice-"));
+      const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [adapter], { port: 0, selfdevChecks: false, gh: NO_GH, llmSuggester });
+      const b = `http://127.0.0.1:${c.server.port}`;
+      await fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ routing: { llm: { enabled: true, timeoutMs } } }) });
+      const post = (title: string) => fetch(`${b}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: h, title, prompt: "p", runner: "claude" }) });
+      return { c, h, b, post };
+    };
+
+    test("routing advice never blocks creation", async () => {
+      const gate = deferred();
+      const starts: StartOptions[] = [];
+      const { c, h, post } = await boot(() => ({ kind: "llm", suggest: async () => (await gate.held, ANSWER) }), 60_000, fakeAdapter(script, { starts }));
+      try {
+        const res = await post("held");
+        expect(res.status).toBe(201);
+        const t = (await res.json()) as { id: string; routing: { llm: unknown } };
+        expect(t.routing.llm).toBeNull(); // the suggester is still held
+        expect(starts).toHaveLength(1); // and the real runner started
+        gate.release();
+        await waitFor(async () => c.db.getTask(t.id)?.routing?.llm != null);
+      } finally {
+        gate.release();
+        await c.stop();
+        rmSync(h, { recursive: true, force: true });
+      }
+    });
+
+    test("routing advice arrives after task completion", async () => {
+      const gate = deferred();
+      const { c, h, b, post } = await boot(() => ({ kind: "llm", suggest: async () => (await gate.held, ANSWER) }), 60_000);
+      try {
+        const t = (await (await post("late")).json()) as { id: string };
+        const get = async () => (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task;
+        await waitFor(async () => (await get()).status === "done");
+        const finished = await get();
+        expect(finished.routing.llm).toBeNull();
+        gate.release();
+        await waitFor(async () => (await get()).routing.llm !== null);
+        const after = await get();
+        expect(after).toEqual({ ...finished, routing: { ...finished.routing, llm: { runner: "dak", reason: "後から届いた" } } });
+        expect(c.db.routingLog().filter((r) => r.taskId === t.id).map((r) => [r.suggestedBy, r.chosen, r.status])).toEqual([["llm", "claude", "done"], ["rule", "claude", "done"]]);
+      } finally {
+        gate.release();
+        await c.stop();
+        rmSync(h, { recursive: true, force: true });
+      }
+    });
+
+    test("routing advice timeout and failure preserve task", async () => {
+      let which: "throws" | "throws-at-once" | "never" = "throws";
+      const warn = spyOn(console, "warn").mockImplementation(() => undefined);
+      const { c, h, b, post } = await boot((_, onUsage) => {
+        if (which === "throws-at-once") throw new Error("no suggester today");
+        return { kind: "llm", suggest: async (_ctx, signal) => {
+          onUsage(usage(`spent-${which}`));
+          if (which === "throws") throw new Error("runner said no");
+          await new Promise((r) => signal.addEventListener("abort", r));
+          return ANSWER; // past the deadline: dropped
+        } };
+      }, 1000);
+      try {
+        for (const w of ["throws", "throws-at-once", "never"] as const) {
+          which = w;
+          const res = await post(w);
+          expect(res.status).toBe(201);
+          const t = (await res.json()) as { id: string };
+          await waitFor(async () => c.db.getTask(t.id)?.status === "done");
+          await waitFor(async () => warn.mock.calls.some((a) => String(a[0]).includes("routing:") && (w !== "never" || String(a[0]).includes("no answer in"))));
+          await Bun.sleep(20);
+          expect(c.db.getTask(t.id)?.routing?.llm).toBeNull();
+          expect(c.db.getTask(t.id)?.runner).toBe("claude");
+          expect(c.db.routingLog().filter((r) => r.taskId === t.id).map((r) => r.suggestedBy)).toEqual(["rule"]);
+          warn.mockClear();
+        }
+        // what a turn reported before it failed or missed the deadline is billed
+        expect(c.db.sqlite.query("SELECT model FROM ledger WHERE model LIKE 'spent-%' ORDER BY model").all()).toEqual([{ model: "spent-never" }, { model: "spent-throws" }]);
+        expect((await fetch(`${b}/api/routing/stats`).then(j)).llm.total).toBe(0);
+      } finally {
+        warn.mockRestore();
+        await c.stop();
+        rmSync(h, { recursive: true, force: true });
+      }
+    }, 20000);
+
+    test("routing advice shutdown cancels pending work", async () => {
+      let saw: AbortSignal | null = null;
+      let turnEnded = false;
+      const { c, h, post } = await boot((_, onUsage) => ({ kind: "llm", suggest: async (_ctx, signal) => {
+        saw = signal;
+        await new Promise((r) => signal.addEventListener("abort", r));
+        turnEnded = true; // where the real suggester closes its session
+        onUsage(usage("after-stop"));
+        return ANSWER;
+      } }), 60_000);
+      const attach = spyOn(c.tasks, "attachLlmSuggestion");
+      const insert = spyOn(c.db, "insertLedger");
+      try {
+        expect((await post("stopping")).status).toBe(201);
+        await waitFor(async () => saw !== null);
+        await c.stop(); // a held turn does not hold the stop, and nothing is written past the close
+        expect(saw!.aborted).toBe(true);
+        expect(turnEnded).toBe(true);
+        expect(attach).not.toHaveBeenCalled();
+        expect(insert.mock.calls.filter((a) => a[0].model === "after-stop")).toHaveLength(0);
+      } finally {
+        rmSync(h, { recursive: true, force: true });
+      }
+    });
+
+    test("routing advice shutdown closes the suggestion turn's session", async () => {
+      const real = fakeAdapter(script);
+      let closed = false;
+      let asked = false;
+      const adapter: RunnerAdapter = {
+        ...real,
+        start(o, emit) {
+          if (!o.prompt.startsWith("あなたはタスクをどのエージェント")) return real.start(o, emit); // the Task's own turn, the judges'
+          asked = true;
+          let exit!: (code: number | null) => void;
+          const exited = new Promise<number | null>((r) => (exit = r));
+          return { send() {}, respondPermission() {}, async abort() { exit(null); }, async close() { closed = true; exit(0); }, exited };
+        },
+      };
+      const { c, h, post } = await boot(undefined, 60_000, adapter);
+      try {
+        expect((await post("stopping")).status).toBe(201);
+        await waitFor(async () => asked);
+        await c.stop();
+        expect(closed).toBe(true);
+      } finally {
+        rmSync(h, { recursive: true, force: true });
+      }
+    });
+
+    test("routing advice is not asked for a Cloud task", async () => {
+      let asked = 0;
+      const cloudId = "session_0123456789abcdef";
+      const cloudAdapter = fakeAdapter([{ t: "cloud.session.created", id: cloudId, url: `https://claude.ai/code/${cloudId}` }], { detect: () => ({ path: process.execPath }) });
+      const { c, h, post } = await boot(() => ({ kind: "llm", suggest: async () => (asked++, ANSWER) }), 5000, cloudAdapter);
+      try {
+        const res = await fetch(`http://127.0.0.1:${c.server.port}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: h, title: "cloud", prompt: "p", runner: "claude", executionMode: "cloud" }) });
+        expect(res.status).toBe(201);
+        expect((await post("local")).status).toBe(201);
+        await waitFor(async () => asked >= 1); // the local one is
+        await Bun.sleep(20);
+        expect(asked).toBe(1);
+      } finally {
+        await c.stop();
+        rmSync(h, { recursive: true, force: true });
+      }
+    });
+
+    test("routing advice usage is billed once", async () => {
+      const { c, h, post } = await boot((cfg, onUsage) => ({ kind: "llm", suggest: async () => {
+        onUsage(usage("advice-model"));
+        return { ...ANSWER, reason: cfg.runner };
+      } }));
+      try {
+        const t = (await (await post("billed")).json()) as { id: string };
+        await waitFor(async () => c.db.getTask(t.id)?.routing?.llm != null);
+        const rows = c.db.sqlite.query("SELECT runner FROM ledger WHERE task_id = ? AND model = 'advice-model'").all(t.id);
+        expect(rows).toEqual([{ runner: "claude" }]);
+      } finally {
+        await c.stop();
+        rmSync(h, { recursive: true, force: true });
+      }
+    });
+
+    test("routing advice: the suggestion turn gets no example of the task itself", async () => {
+      const starts: StartOptions[] = [];
+      const answer = [{ t: "message.delta", role: "assistant", text: '{"runner":"claude","reason":"r"}', messageId: "m" }, { t: "session.end", status: "ok" }] as AgentEvent[];
+      const { c, h, post } = await boot(undefined, 5000, fakeAdapter(answer, { starts }));
+      try {
+        const t = (await (await post("task-title-once")).json()) as { id: string };
+        await waitFor(async () => c.db.getTask(t.id)?.routing?.llm != null);
+        expect(starts).toHaveLength(2);
+        const asked = starts[1]!.prompt;
+        expect(asked).toContain("title: task-title-once");
+        expect(asked).toContain("（まだ記録がありません）");
+      } finally {
+        await c.stop();
+        rmSync(h, { recursive: true, force: true });
+      }
+    });
+
+    test("routing advice follows a task whose runner failed to start", async () => {
+      const failing = { ...fakeAdapter(script), start() { throw new Error("cannot start"); } };
+      const { c, h, post } = await boot(() => ({ kind: "llm", suggest: async () => ANSWER }), 5000, failing);
+      try {
+        expect((await post("broken")).status).toBe(409);
+        const t = c.db.listTasks()[0]!;
+        expect(t.status).toBe("error");
+        await waitFor(async () => c.db.getTask(t.id)?.routing?.llm != null);
+        expect(c.db.getTask(t.id)).toMatchObject({ status: "error", runner: "claude" });
+      } finally {
+        await c.stop();
+        rmSync(h, { recursive: true, force: true });
+      }
+    });
+  });
 
   test("what the LLM suggestion turn spent is billed to the task under the runner that answered (#25)", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-llmcost-"));
@@ -1321,7 +1513,8 @@ describe("core daemon", () => {
     try {
       await fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ routing: { llm: { enabled: true } } }) });
       const t = await fetch(`${b}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: dir, title: "t", prompt: "p", runner: "claude" }) }).then(j);
-      expect(t.routing.llm).toMatchObject({ runner: "dak", reason: "claude が答えた" });
+      await waitFor(async () => c.db.getTask(t.id)?.routing?.llm != null);
+      expect(c.db.getTask(t.id)?.routing?.llm).toMatchObject({ runner: "dak", reason: "claude が答えた" });
       const row = c.db.ledgerTasks(1, Date.now()).find((r) => r.taskId === t.id);
       expect(row).toBeDefined();
       const suggestionRow = c.db.sqlite.query("SELECT runner, model, cost_usd AS costUsd FROM ledger WHERE task_id = ? AND model = 'cheap-model'").all(t.id) as Array<{ runner: string; costUsd: number }>;
@@ -1329,6 +1522,96 @@ describe("core daemon", () => {
       expect(suggestionRow[0]).toMatchObject({ runner: "claude", costUsd: 0.02 });
       expect(c.db.sqlite.query("SELECT cost_usd AS costUsd FROM ledger WHERE task_id = ? AND model = 'cheaper-model'").all(t.id)).toEqual([{ costUsd: 0.001 }]);
     } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("late LLM suggestion preserves task outcome and rule log (#1143)", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-test-late-llm-"));
+    const env = { SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY };
+    const script = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");
+    let c = await startServer(loadConfig(env), [fakeAdapter(script)], { port: 0, selfdevChecks: false, gh: NO_GH });
+    try {
+      const b = `http://127.0.0.1:${c.server.port}`;
+      const t = await fetch(`${b}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: h, title: "late", prompt: "p", runner: "claude" }) }).then(j);
+      await waitFor(async () => (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task.status === "done");
+      const before = (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task;
+      const statsBefore = c.db.routingStats();
+      const wsMsgs: Array<{ type: string; task?: { id: string; routing: { llm: unknown } | null } }> = [];
+      const ws = new WebSocket(`ws://127.0.0.1:${c.server.port}/ws`);
+      ws.onmessage = (e) => wsMsgs.push(JSON.parse(String(e.data)));
+      await new Promise((r) => (ws.onopen = r));
+
+      const updated = c.tasks.attachLlmSuggestion(t.id, { runner: "codex", reason: "長い調査に向く" });
+      expect(updated?.routing?.llm).toEqual({ runner: "codex", reason: "長い調査に向く" });
+      await waitFor(async () => wsMsgs.some((m) => m.type === "task.updated" && m.task?.id === t.id && m.task?.routing?.llm != null));
+      ws.close();
+
+      const after = (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task;
+      expect(after).toEqual({ ...before, routing: { ...before.routing, llm: { runner: "codex", reason: "長い調査に向く" } } });
+
+      const rows = c.db.routingLog().filter((r) => r.taskId === t.id);
+      expect(rows.map((r) => [r.suggestedBy, r.suggested, r.chosen])).toEqual([["llm", "codex", "claude"], ["rule", before.routing.suggested, "claude"]]);
+      expect(rows[1]!.ts).toBe(before.createdAt);
+      expect(rows[0]!.ts).toBeGreaterThanOrEqual(rows[1]!.ts);
+      expect(rows[0]!.status).toBe("done");
+      const jsonl = (await fetch(`${b}/api/routing/log?format=jsonl`).then((r) => r.text())).trim().split("\n").map((l) => JSON.parse(l));
+      expect(jsonl.filter((r) => r.taskId === t.id).map((r) => [r.suggestedBy, r.status])).toEqual([["llm", "done"], ["rule", "done"]]);
+
+      const stats = c.db.routingStats();
+      expect(stats.rule).toEqual(statsBefore.rule);
+      expect(stats.byRunner).toEqual(statsBefore.byRunner); // a runner's population is the rule rows
+      expect(stats.llm).toEqual({ total: statsBefore.llm.total + 1, agreed: statsBefore.llm.agreed });
+
+      await c.stop();
+      c = await startServer(loadConfig(env), [fakeAdapter(script)], { port: 0, selfdevChecks: false, gh: NO_GH });
+      expect(c.db.getTask(t.id)?.routing?.llm).toEqual({ runner: "codex", reason: "長い調査に向く" });
+      expect(c.db.routingLog().filter((r) => r.taskId === t.id)).toHaveLength(2);
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("late LLM suggestion is idempotent and ignores missing task (#1143)", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-test-late-llm-once-"));
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result"))], { port: 0, selfdevChecks: false, gh: NO_GH });
+    const broadcasts = spyOn(c.tasks as unknown as { broadcast: (m: unknown) => void }, "broadcast");
+    try {
+      const b = `http://127.0.0.1:${c.server.port}`;
+      const t = await fetch(`${b}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: h, title: "once", prompt: "p", runner: "claude" }) }).then(j);
+      await waitFor(async () => (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task.status === "done");
+
+      expect(c.tasks.attachLlmSuggestion(t.id, { runner: "codex", reason: "1 回目" })).not.toBeNull();
+      broadcasts.mockClear();
+      expect(c.tasks.attachLlmSuggestion(t.id, { runner: "dak", reason: "2 回目" })).toBeNull();
+      expect(c.db.getTask(t.id)?.routing?.llm).toEqual({ runner: "codex", reason: "1 回目" });
+      expect(c.db.routingLog().filter((r) => r.taskId === t.id).map((r) => r.suggestedBy).sort()).toEqual(["llm", "rule"]);
+
+      // a log row already there is not added to, whatever the task's own field says
+      const seen = c.db.getTask(t.id)!;
+      c.db.sqlite.query("UPDATE tasks SET routing = ? WHERE id = ?").run(JSON.stringify({ ...seen.routing, llm: null }), t.id);
+      expect(c.tasks.attachLlmSuggestion(t.id, { runner: "dak", reason: "3 回目" })).toBeNull();
+      expect(c.db.routingLog().filter((r) => r.taskId === t.id)).toHaveLength(2);
+
+      expect(c.tasks.attachLlmSuggestion("task_missing", { runner: "codex", reason: "無い" })).toBeNull();
+      c.db.sqlite.query("UPDATE tasks SET routing = NULL WHERE id = ?").run(t.id); // no routing (a Cloud Task, a shadow): nothing to attach to
+      const logged = c.db.routingLog().length;
+      expect(c.tasks.attachLlmSuggestion(t.id, { runner: "codex", reason: "無い" })).toBeNull();
+      expect(c.db.routingLog()).toHaveLength(logged);
+      expect(c.db.getTask(t.id)?.routing).toBeNull();
+      expect(broadcasts).not.toHaveBeenCalled();
+
+      // a task that errored or was aborted keeps the advice like a finished one
+      for (const status of ["error", "aborted"] as const) {
+        const other = await fetch(`${b}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: h, title: status, prompt: "p", runner: "claude" }) }).then(j);
+        await waitFor(async () => (await fetch(`${b}/api/tasks/${other.id}`).then(j)).task.status === "done");
+        c.db.sqlite.query("UPDATE tasks SET status = ? WHERE id = ?").run(status, other.id);
+        expect(c.tasks.attachLlmSuggestion(other.id, { runner: "codex", reason: status })).toMatchObject({ status, routing: { llm: { reason: status } } });
+      }
+    } finally {
+      broadcasts.mockRestore();
       await c.stop();
       rmSync(h, { recursive: true, force: true });
     }
@@ -4656,12 +4939,13 @@ describe("ops latency (#2102)", () => {
         { day: day(yesterday), method: "GET", route: "/api/tasks", count: 1, p50: 5, p90: 5, bytesP50: null },
       ]);
       // one day: only today's
-      expect(OpsLatency.parse(await fetch(`${b}/api/ops/latency?days=1`).then(j)).byDay.map((r) => r.day)).toEqual([day(today), day(today)]);
+      // the daemon's own api_requests flush (every 10 s) may add this test's own request
+      expect([...new Set(OpsLatency.parse(await fetch(`${b}/api/ops/latency?days=1`).then(j)).byDay.map((r) => r.day))]).toEqual([day(today)]);
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
     }
-  });
+  }, 30_000); // startServer and the API round trips: over the 5 s default on a loaded host (docs/design/perf.md "テストの揺れ")
 });
 
 describe("ops load (#2086)", () => {
@@ -4737,18 +5021,18 @@ describe("insights schedule (#1838)", () => {
       const t = await send(`${b}/api/schedules/${s.id}/run`, "POST").then(j);
       await Bun.sleep(20);
       writeFileSync(report, "<!doctype html><title>Claude Code Insights</title><h1>Insights</h1>");
-      await waitFor(async () => (await get(t.id)).task.status === "done");
+      await waitFor(async () => (await get(t.id)).task.status === "done", 20_000);
       const d = await get(t.id);
       const started = d.events.find((e) => e.ev.t === "session.start")!.ts;
       expect(statSync(report).mtimeMs).toBeLessThan(started); // written before the runner reported its session
-      await waitFor(async () => (await fetch(`${b}/api/tasks/${t.id}/artifacts`).then(j)).length === 1);
+      await waitFor(async () => (await fetch(`${b}/api/tasks/${t.id}/artifacts`).then(j)).length === 1, 20_000);
       const lines = (await get(t.id)).events.map((e) => e.ev).filter((e): e is Extract<AgentEvent, { t: "status" }> => e.t === "status").map((e) => e.text);
       expect(lines.some((l) => l.startsWith("レポートを成果物に写しました: Claude Code Insights "))).toBe(true);
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
     }
-  });
+  }, 30_000); // the runner's start and the report as an artifact: over the 5 s default on a loaded host (docs/design/perf.md "テストの揺れ")
 
   test("action insights: claude only and no prompt; a firing's Task sends /insights alone, no preamble; the report newer than the Task is its artifact, an old or missing one is a line on the Task; a hot 7-day window skips; no overlap; the usage is in the ledger", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-insights-"));
@@ -4761,10 +5045,10 @@ describe("insights schedule (#1838)", () => {
     const get = async (id: string) => (await fetch(`${b}/api/tasks/${id}`).then(j)) as { task: Task; events: Array<{ ev: AgentEvent }> };
     const finish = async (id: string) => {
       // the fixture pauses on its permission.ask; allow it and the turn ends
-      await waitFor(async () => (await get(id)).task.status === "waiting");
+      await waitFor(async () => (await get(id)).task.status === "waiting", 20_000);
       const ask = (await get(id)).events.map((e) => e.ev).find((e) => e.t === "permission.ask") as Extract<AgentEvent, { t: "permission.ask" }>;
       await send(`${b}/api/tasks/${id}/permission`, "POST", { id: ask.id, decision: "allow" });
-      await waitFor(async () => (await get(id)).task.status === "done");
+      await waitFor(async () => (await get(id)).task.status === "done", 20_000);
     };
     const statusLines = async (id: string) => (await get(id)).events.map((e) => e.ev).filter((e): e is Extract<AgentEvent, { t: "status" }> => e.t === "status").map((e) => e.text);
     try {
@@ -4786,7 +5070,7 @@ describe("insights schedule (#1838)", () => {
       expect(st.prompt).toBe("/insights");
       expect(st.preamble).toBeUndefined();
       // while it runs (waiting on the fixture's ask) a second firing is refused
-      await waitFor(async () => (await get(t1.id)).task.status === "waiting");
+      await waitFor(async () => (await get(t1.id)).task.status === "waiting", 20_000);
       expect((await send(`${b}/api/schedules/${s.id}/run`, "POST")).status).toBe(409);
       await finish(t1.id);
       const arts = await fetch(`${b}/api/tasks/${t1.id}/artifacts`).then(j);
@@ -4820,7 +5104,7 @@ describe("insights schedule (#1838)", () => {
       // a follow-up sent to the Task later is an ordinary turn: a report another run makes meanwhile (a terminal's
       // /insights, say — here one newer than anything) is not swept in
       await send(`${b}/api/tasks/${t4.id}/send`, "POST", { text: "続けて" });
-      await waitFor(async () => (await get(t4.id)).task.status === "waiting");
+      await waitFor(async () => (await get(t4.id)).task.status === "waiting", 20_000);
       writeFileSync(report, "<h1>another run</h1>");
       utimesSync(report, ahead + 600, ahead + 600);
       await finish(t4.id);
@@ -4839,7 +5123,7 @@ describe("insights schedule (#1838)", () => {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
     }
-  });
+  }, 30_000); // several runner starts and the reports as artifacts: over the 5 s default on a loaded host (docs/design/perf.md "テストの揺れ")
 });
 
 describe("artifact fence (#1778)", () => {

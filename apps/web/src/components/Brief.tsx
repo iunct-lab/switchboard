@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { CheckRun, Footprint, LedgerSummary, OpsLoad, RunnerInfo, StagedChange, Task, TaskEvals, Workspace } from "@switchboard/protocol";
+import { outcomeLabel } from "../attention.ts";
 import { taskLoadLine } from "../ops.ts";
 import { api, type TaskDetail } from "../api.ts";
 import type { ReleaseStatus } from "../release.ts";
@@ -282,10 +283,10 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
             ) : (
               <span className="hint">手動選択</span>
             )}
-            {/* LLM の提案（#25）は助言で、ランナーは決めない。ルール表の理由の隣に並べる */}
+            {/* LLM の提案（#25）は作成後に届く助言で、ランナーは決めない。提案と実際を並べるだけで、どちらが良かったかは言わない */}
             {props.task.routing?.llm && (
-              <span className="hint llm-suggest" title="このタスクを作ったときの LLM の提案です。ランナーはルール表と利用者が決めています">
-                {" · "}LLM の提案: {props.task.routing.llm.runner} — {props.task.routing.llm.reason}
+              <span className="hint llm-suggest" title="作成後に届いた LLM の助言です。ランナーは変えません">
+                {" · "}LLM の提案: {props.task.routing.llm.runner} — {props.task.routing.llm.reason} · 実際: {props.task.runner}（{outcomeLabel(props.task.outcome)}）
               </span>
             )}
           </span>
@@ -600,7 +601,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
       {!cloud && checks?.meta && (
         <div className="blk">
           <h5>Self-dev · このアプリ自身</h5>
-          {!checks.run && !checks.running && <div className="hint">ターン完了後に bun run typecheck / bun test を自動実行します。</div>}
+          {!checks.run && !checks.running && <div className="hint">ターン完了後に bun run typecheck を自動実行します。</div>}
           {checks.running && <div className="hint">チェック実行中…</div>}
           {checks.run && !checks.current && !checks.running && <div className="hint warn">このチェック以降にツリーが変わっています。再実行してください。</div>}
           {checks.run && (

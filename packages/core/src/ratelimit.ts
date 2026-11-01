@@ -41,6 +41,30 @@ export function githubLimitHit(tool: string, summary: string): string | undefine
   const m = GITHUB_LIMIT_LINE.exec(summary);
   return m ? m[0] : undefined;
 }
+/** The tools that run a shell command: Claude's and Codex's. */
+const SHELL_TOOLS = new Set(["Bash", "exec"]);
+/** gh commands that spend the GraphQL budget, in command position; `gh api repos/…` is REST, which stays open while GraphQL is limited. */
+const GRAPHQL_COMMAND = /(?:^|[;&|(\n])\s*gh\s+(?:api\s+graphql|pr|issue|project)\b/;
+/** Commands whose result would not show a limit line (output sent elsewhere, started in the background), or that print help without calling the API. */
+const NO_PROOF_COMMAND = />(?!&)|&\s*$|\s(?:--help|-h)\b/;
+
+/** What the shell runs: Codex's wrapper (`/bin/bash -lc "…"`) taken off, heredoc bodies and quoted strings blanked. A `gh` in `"$(…)"` is lost with its string, which leaves the limit in place. */
+function shellCode(command: string): string {
+  const wrapped = /^\S*sh\s+-l?c\s+(["'])([\s\S]*)\1\s*$/.exec(command.trim());
+  const inner = !wrapped ? command : wrapped[1] === '"' ? wrapped[2]!.replace(/\\(["\\$`])/g, "$1") : wrapped[2]!;
+  return inner.replace(/<<-?\s*["']?(\w+)["']?[\s\S]*?^\s*\1\s*$/gm, "<<").replace(/"(?:\\[\s\S]|[^"\\])*"|'[^']*'/g, '""');
+}
+
+/** Whether a tool call runs a command whose success is proof that GraphQL answers, so the limit a turn met has lifted (#3302). */
+export function usesGraphql(tool: string, input: unknown): boolean {
+  if (!SHELL_TOOLS.has(tool)) return false;
+  const { command, run_in_background } = (input ?? {}) as { command?: unknown; run_in_background?: unknown };
+  if (typeof command !== "string" || run_in_background) return false;
+  const code = shellCode(command);
+  return GRAPHQL_COMMAND.test(code) && !NO_PROOF_COMMAND.test(code);
+}
+/** GitHub's GraphQL window: a limit met this long ago has had its window end. */
+export const GITHUB_WINDOW_MS = 3600_000;
 /** The banner's time has minute resolution and the window may lift a little late: wait this much past it. */
 export const RESUME_MARGIN_MS = 60_000;
 /** The reset time has passed but the runner still refuses (lifted late), or the send failed for a passing reason: try again after this. */
@@ -369,7 +393,7 @@ export class RateLimitResumer {
       // a turn the runner's limit did not stop (it ended by itself, or on another error) but whose commands met
       // GitHub's limit waits for GitHub's time (#550); a cut turn (aborted) is the person's, left alone
       if (turn.end.status !== "aborted" && turn.githubLimit) {
-        void this.planGithub(taskId, task, turn.githubLimit, ours);
+        void this.planGithub(taskId, task, turn.githubLimit, ours, turn.githubLimitAt);
         return;
       }
       this.stops.delete(taskId);
@@ -416,9 +440,10 @@ export class RateLimitResumer {
   /**
    * A turn whose commands met GitHub's API limit and ended by itself (#550): planned at GitHub's reset (+ margin) when
    * the budget says the limit is still on; a short retry when it is back already; a fallback delay when it cannot be
-   * read. The budget is read after the turn, so a turn the person started meanwhile is left alone.
+   * read. The budget is read after the turn, so a turn the person started meanwhile is left alone. A limit met a whole
+   * window ago with the budget back is not what the turn ended on (#3302): nothing is planned or noted.
    */
-  private async planGithub(taskId: string, task: Task, line: string, ours: boolean): Promise<void> {
+  private async planGithub(taskId: string, task: Task, line: string, ours: boolean, limitAt?: number): Promise<void> {
     const n = (this.turnEnds.get(taskId) ?? 0) + 1;
     this.turnEnds.set(taskId, n);
     const marker = `${taskId}#${n}`;
@@ -430,6 +455,11 @@ export class RateLimitResumer {
     const cur = this.db.getTask(taskId);
     if (!cur || cur.status === "running" || cur.status === "waiting") return;
     const now = this.now();
+    const limited = budget !== null && budget.remaining < GITHUB_REMAINING_MIN;
+    if (budget !== null && !limited && limitAt !== undefined && now - limitAt >= GITHUB_WINDOW_MS) {
+      this.stops.delete(taskId);
+      return;
+    }
     const count = ours ? (this.stops.get(taskId) ?? 0) + 1 : 1;
     this.stops.set(taskId, count);
     const tunables = this.tunables();
@@ -437,7 +467,6 @@ export class RateLimitResumer {
       this.tasks.record(taskId, { t: "status", text: `${GITHUB_NOTE}: ${line}。自動再開の後 ${count - 1} 回続けて止まったので、これ以上は再開しません。返信すると再開します` });
       return;
     }
-    const limited = budget !== null && budget.remaining < GITHUB_REMAINING_MIN;
     const at = budget === null ? planResumeAt({ resetsAt: undefined, source: "none", text: line }, now, count, tunables) : limited ? planResumeAt({ resetsAt: budget.resetsAt * 1000, source: "quota", text: line }, now, 1, tunables) : now + LATE_RETRY_MS;
     this.tasks.setResumeAt(taskId, at, "github");
     const when = fmtTime(at, now);

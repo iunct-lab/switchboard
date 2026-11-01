@@ -1,3 +1,4 @@
+// test-reads: scripts/merge-gate.ts
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { checksFromRuns, designRulesTouched, judge, main, MERGE_ANSWER, MERGE_ASK, PROTECTED, readGitlabPr, readPr, type PrFacts, type RecheckKind } from "./merge-gate";
 
@@ -17,6 +18,13 @@ const base = (over: Partial<PrFacts> = {}): PrFacts => ({
   ...over,
 });
 const off = { allowLarge: false };
+const HEAD = "a".repeat(40);
+/** The facts with the user's yes of the head (--allow-large lifts nothing without it). */
+const yes = (kinds: string, over: Partial<PrFacts> = {}) => base({
+  ...over,
+  head: HEAD,
+  reviewComments: [...base().reviewComments, { body: `[merge-answer] yes ${kinds} ${HEAD}`, createdAt: "2026-09-24T12:00:00Z" }],
+});
 
 describe("merge-gate judge", () => {
   test("a small reviewed PR with green CI merges", () => {
@@ -124,17 +132,51 @@ describe("merge-gate judge", () => {
       { path: "docs/design/x.md", additions: 1, deletions: 0 },
     ];
     expect(judge(base({ files }), off).reasons).toEqual(["[聞く] セキュリティ: src/auth/session.ts", "[再チェック responsibility] 責務: docs/design/x.md"]);
-    expect(judge(base({ files, designRulesTouched: true }), { allowLarge: true })).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: ["security", "design-rules"], recheck: ["responsibility"] });
+    expect(judge(yes("security,design-rules,responsibility", { files, designRulesTouched: true }), { allowLarge: true })).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: ["security", "design-rules"], recheck: ["responsibility"] });
   });
 
   test("--allow-large lifts every large reason, not the others", () => {
     const files = [{ path: "rescue/src/server.ts", additions: 400, deletions: 0 }];
-    expect(judge(base({ files }), { allowLarge: true })).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: ["rescue"], recheck: ["size"] });
-    const j = judge(base({ files, headCommittedAt: "2026-09-24T12:00:00Z" }), { allowLarge: true });
+    expect(judge(yes("rescue,size", { files }), { allowLarge: true })).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: ["rescue"], recheck: ["size"] });
+    const j = judge(yes("rescue,size", { files, headCommittedAt: "2026-09-24T12:30:00Z" }), { allowLarge: true });
     expect(j.verdict).toBe("stop");
     expect(j.impact).toBe("large");
     expect(j.reasons).toHaveLength(1);
     expect(j.reasons[0]).toStartWith("最後のコミット");
+  });
+
+  test("allow-large needs merge-answer", () => {
+    const files = [{ path: "src/auth/session.ts", additions: 1, deletions: 0 }, { path: "docs/design/x.md", additions: 1, deletions: 0 }];
+    const large = ["[聞く] セキュリティ: src/auth/session.ts", "[再チェック responsibility] 責務: docs/design/x.md"];
+    const missing = expect.stringContaining("[merge-answer] yes が無い: security,responsibility");
+    const allow = { allowLarge: true };
+    // no mark: the reasons of a judgement without the flag, and the missing mark
+    const none = judge(base({ files, head: HEAD }), allow);
+    expect(none).toMatchObject({ verdict: "stop", impact: "large" });
+    expect(none.reasons).toEqual([...large, missing]);
+    // a kind is missing from the mark, the ask side or the recheck side
+    expect(judge(yes("security", { files }), allow).reasons).toEqual([...large, missing]);
+    expect(judge(yes("responsibility", { files }), allow).reasons).toEqual([...large, missing]);
+    // every kind
+    expect(judge(yes("security,responsibility", { files }), allow)).toMatchObject({ verdict: "merge", reasons: [] });
+    // another head, a no
+    const other = base({ files, head: "b".repeat(40), reviewComments: yes("security,responsibility").reviewComments });
+    expect(judge(other, allow).verdict).toBe("stop");
+    const no = base({ files, head: HEAD, reviewComments: [...base().reviewComments, { body: `[merge-answer] no security,responsibility ${HEAD}`, createdAt: "2026-09-24T12:00:00Z" }] });
+    expect(judge(no, allow).verdict).toBe("stop");
+    // a no after the yes takes it back; a yes after the no counts
+    const said = (...answers: string[]) => base({ files, head: HEAD, reviewComments: [...base().reviewComments, ...answers.map((a) => ({ body: `[merge-answer] ${a} security,responsibility ${HEAD}`, createdAt: "2026-09-24T12:00:00Z" }))] });
+    expect(judge(said("yes", "no"), allow).verdict).toBe("stop");
+    expect(judge(said("no", "yes"), allow).verdict).toBe("merge");
+    // by time, not by the order of the list
+    const newestFirst = said("no", "yes");
+    newestFirst.reviewComments[1]!.createdAt = "2026-09-24T13:00:00Z";
+    expect(judge(newestFirst, allow).verdict).toBe("stop");
+    // a recheck kind already marked is not asked of the yes
+    expect(judge(yes("security", { files, rechecks: ["responsibility"] }), allow)).toMatchObject({ verdict: "merge", reasons: [] });
+    // nothing large: the flag does nothing and asks for no mark
+    expect(judge(base(), allow)).toMatchObject({ verdict: "merge", impact: "small", reasons: [] });
+    expect(judge(base({ files: [files[1]!], rechecks: ["responsibility"] }), allow)).toMatchObject({ verdict: "merge", impact: "large", reasons: [] });
   });
 });
 
@@ -261,7 +303,7 @@ describe("recheck", () => {
   test("ask: each kind once, in the order security, rescue, design-rules; kept with --allow-large", () => {
     const files = [...one("README.md"), ...one("rescue/src/server.ts"), ...one("src/auth.ts"), ...one("go.sum")];
     expect(judge(base({ files, designRulesTouched: true }), off).ask).toEqual(["security", "rescue", "design-rules"]);
-    expect(judge(base({ files, designRulesTouched: true }), { allowLarge: true })).toMatchObject({ verdict: "merge", ask: ["security", "rescue", "design-rules"] });
+    expect(judge(yes("security,rescue,design-rules", { files, designRulesTouched: true }), { allowLarge: true })).toMatchObject({ verdict: "merge", ask: ["security", "rescue", "design-rules"] });
   });
 
   test("the kinds come once each, in the order size, responsibility, migration", () => {
@@ -339,10 +381,10 @@ describe("task scope", () => {
 
   test("allow-large keeps the reason, as an unresolved thread; naming the path in the Task lifts it", () => {
     const files = [file("rescue/x.ts")];
-    const kept = judge(base({ files, task: task(["a.ts"]) }), { allowLarge: true });
+    const kept = judge(yes("rescue", { files, task: task(["a.ts"]) }), { allowLarge: true });
     expect(kept).toMatchObject({ verdict: "stop", impact: "large" });
     expect(kept.reasons).toEqual(["Task #2346 の本文に名指しの無いファイル: rescue/x.ts"]);
-    expect(judge(base({ files, task: task(["a.ts", "rescue/x.ts"]) }), { allowLarge: true })).toMatchObject({ verdict: "merge", reasons: [] });
+    expect(judge(yes("rescue", { files, task: task(["a.ts", "rescue/x.ts"]) }), { allowLarge: true })).toMatchObject({ verdict: "merge", reasons: [] });
   });
 
   test("no task: a PR without one judges as before; a Task with no path does not stop and says so in notes", () => {
@@ -487,13 +529,13 @@ describe("merge-gate readPr", () => {
     /**
      * PR `n` (head branch `b<n>`) and its stack: `above` = the open PRs per base branch (`b1: [2]` → #2 is on #1), the top's
      * comments `top`. `comment` / `comments`: PR n's, by the owner, a minute apart. `ids`: each PR's patch-id now.
-     * `runs: false` = no Actions run at all.
+     * `runs: false` = no Actions run at all; `conclusion`: the one run's (default failure).
      */
-    const facts = (opts: { n?: number; comment?: string; comments?: string[]; steps: number; runs?: boolean; mergeState?: string; above?: Record<string, number[]>; top?: string[]; ids?: Record<number, string> }) => {
+    const facts = (opts: { n?: number; comment?: string; comments?: string[]; steps: number; runs?: boolean; conclusion?: string; mergeState?: string; above?: Record<string, number[]>; top?: string[]; ids?: Record<number, string> }) => {
       const n = opts.n ?? 1;
       const bodies = opts.comments ?? (opts.comment ? [opts.comment] : []);
       const v = { ...view, headRefName: `b${n}`, headRefOid: HEAD, baseRefName: "main", mergeStateStatus: opts.mergeState ?? "CLEAN", comments: [...view.comments, ...owner(bodies)] };
-      const r = { workflow_runs: opts.runs === false ? [] : [{ id: 7, name: "CI", status: "completed", conclusion: "failure", created_at: "2026-09-24T12:00:00Z" }] };
+      const r = { workflow_runs: opts.runs === false ? [] : [{ id: 7, name: "CI", status: "completed", conclusion: opts.conclusion ?? "failure", created_at: "2026-09-24T12:00:00Z" }] };
       const jobs = { jobs: [{ name: "test", steps: Array.from({ length: opts.steps }, () => ({ name: "x" })) }] };
       const asked: string[] = [];
       const ids = opts.ids ?? { 1: A, 2: B, 3: C };
@@ -533,6 +575,13 @@ describe("merge-gate readPr", () => {
       expect(f.localCi).toBe(true);
       expect(reasons(f)).toEqual([]);
       expect(reasons(await facts({ steps: 0, runs: false }).read())).toEqual(["CI のチェックが 1 つも無い"]);
+    });
+
+    test("every run skipped (the job's repository variable is not on) counts as no run: it passes only with a local pass", async () => {
+      expect(reasons(await facts({ steps: 0, conclusion: "skipped" }).read())).toEqual(["CI のチェックが 1 つも無い"]);
+      const f = await facts({ comment: pass(), steps: 0, conclusion: "skipped" }).read();
+      expect(f.checks).toEqual([{ name: "local-ci（Actions の run が無く、ローカルで pass）", conclusion: "SUCCESS" }]);
+      expect(reasons(f)).toEqual([]);
     });
 
     test("--repo: another repository's pass → SUCCESS, read from that repository (#1203)", async () => {
@@ -778,8 +827,9 @@ describe("merge command merges only on verdict merge", () => {
     // a yes about another kind does not lift this one
     const security = { files: [{ path: "packages/core/src/auth.ts", additions: 1, deletions: 0, changeType: "MODIFIED" }] };
     expect(await gate(["7", "--merge", "--allow-large"], view({ ...security, comments: [review, answer(SHA)] }))).toMatchObject({ code: 1, merges: [] });
-    // without --merge the judgement alone keeps its old meaning (the caller merges after the mark)
-    expect(await gate(["7", "--allow-large"], view(large))).toMatchObject({ code: 0, merges: [] });
+    // the marks of an author who is not a member do not count, and the judgement alone asks for the mark too
+    expect(await gate(["7", "--allow-large"], view({ ...large, comments: [review, { ...answer(SHA), authorAssociation: "NONE" }] }))).toMatchObject({ code: 1, merges: [] });
+    expect(await gate(["7", "--allow-large"], view({ ...large, comments: [review, answer(SHA)] }))).toMatchObject({ code: 0, merges: [] });
   });
 
   test("a failed merge is exit 1 with gh's first line", async () => {

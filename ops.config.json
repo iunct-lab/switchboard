@@ -19,7 +19,7 @@
   "storyPoints": [1, 2, 3, 5, 8],
   "publicSync": {
     "target": "iunct-lab/switchboard",
-    "include": [".claude/", ".github/", ".gitignore", "AGENTS.md", "CLAUDE.md", "LICENSE", "NOTICE", "README.md", "SECURITY.md", "apps/", "aws/", "bun.lock", "bunfig.toml", "docs/", "ops-kit/", "ops.config.json", "package.json", "packages/", "rescue/", "scripts/", "tsconfig.base.json"],
+    "include": [".claude/", ".gitattributes", ".github/", ".gitignore", "AGENTS.md", "CLAUDE.md", "LICENSE", "NOTICE", "README.md", "SECURITY.md", "apps/", "aws/", "bun.lock", "bunfig.toml", "docs/", "ops-kit/", "ops.config.json", "package.json", "packages/", "rescue/", "scripts/", "tsconfig.base.json"],
     "exclude": [
       ".github/workflows/project-autoadd.yml",
       "docs/design/asks.md",
@@ -28,6 +28,7 @@
       "docs/design/backlog-sync.md",
       "docs/design/backlog.md",
       "docs/design/claude-history-import.md",
+      "docs/design/codex-stage-check.md",
       "docs/design/evals.md",
       "docs/design/feedback.md",
       "docs/design/github-api-budget.md",
@@ -52,6 +53,7 @@
       "docs/design/spike-bun-compat.md",
       "docs/design/task-cleanup.md",
       "docs/design/task-outcome.md",
+      "docs/design/test-audit.md",
       "docs/design/web-csp.md",
       "private/"
     ],

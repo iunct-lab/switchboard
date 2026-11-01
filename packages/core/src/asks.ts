@@ -81,16 +81,20 @@ export function blockersOf(input: { waits: BacklogItem["waits"]; stops: StopSumm
   return out;
 }
 
+/** Why an answer on an item on hold does not go on by itself (#2930). */
+export const ON_HOLD_RESUME = "保留中（on-hold を外すと次の定期実行で再開）";
+
 /**
  * How an Issue's answer goes on (#936): through the stage Task created after it — running, or failed when it ended in error
  * (done = the work went on: null, resolved). Before one is: a start that failed after the answer, else queued with what still
- * stands in the way, else queued for the next firing. null = not answered.
+ * stands in the way, else queued for the next firing (on hold: until the label comes off, #2930). null = not answered.
  */
 export function resumeOfIssue(input: {
   answeredAt: number | null;
   stageTasks: Array<{ id: string; status: Task["status"]; createdAt: number; updatedAt: number }>;
   failure: { at: number; reason: string } | null;
   blockers: AskBlocker[];
+  onHold?: boolean;
 }): AskResume | null {
   const { answeredAt, failure, blockers } = input;
   if (answeredAt === null) return null;
@@ -102,7 +106,7 @@ export function resumeOfIssue(input: {
   }
   if (failure && failure.at >= answeredAt) return { state: "failed", reason: failure.reason, taskId: null, at: failure.at };
   if (blockers.length) return { state: "queued", reason: blockers.map((b) => b.detail).join("・"), taskId: null, at: answeredAt };
-  return { state: "queued", reason: "次の定期実行で再開", taskId: null, at: answeredAt };
+  return { state: "queued", reason: input.onHold ? ON_HOLD_RESUME : "次の定期実行で再開", taskId: null, at: answeredAt };
 }
 
 /**
@@ -299,7 +303,7 @@ export function asksFromBacklog(items: BacklogItem[], now: number, opts: { resum
     const blockers = blockersOf({ waits: i.waits, stops: i.stopSummary, approvalPending: opts.approvalPending?.(i) ?? false });
     const shared = { ...base(i), blockers };
     const resume = (id: string, answeredAt: number | null) =>
-      resumeOfIssue({ answeredAt, stageTasks: i.lastTask ? [i.lastTask] : [], failure: opts.resumeFailures?.(id) ?? null, blockers });
+      resumeOfIssue({ answeredAt, stageTasks: i.lastTask ? [i.lastTask] : [], failure: opts.resumeFailures?.(id) ?? null, blockers, onHold: i.onHold });
     const from = asks.length;
     if (i.stage === "needs-decision") {
       const d = i.decision;

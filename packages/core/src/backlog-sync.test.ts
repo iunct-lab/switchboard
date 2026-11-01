@@ -1,3 +1,4 @@
+// test-reads: ops-kit/fixtures/gitlab-issues.json
 import { createHmac } from "node:crypto";
 import { afterEach, beforeEach, expect, jest, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -5,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BacklogIssueData, BacklogRepositoryKey } from "@switchboard/protocol";
 import { BacklogError, type GhRunner } from "./backlog.ts";
-import { BacklogSync, HINT_BUDGET, importGithubSnapshot, noticeTargets } from "./backlog-sync.ts";
+import { BacklogSync, FULL_READ_MS, HINT_BUDGET, importGithubSnapshot, noticeTargets, POLL_MIN_MS } from "./backlog-sync.ts";
 import { scanAllRepos } from "./secretscan.ts";
 import { loadConfig } from "./config.ts";
 import { startServer } from "./server.ts";
@@ -55,7 +56,11 @@ const pageOf = (nodes: unknown[], next: string | null = null, pulls: unknown[] =
 interface World {
   changed: (v: Record<string, string>) => unknown;
   open: (v: Record<string, string>) => unknown;
+  /** The open PRs' own read; without it, the same answer as `open` (`pageOf` carries both). */
+  pulls?: (v: Record<string, string>) => unknown;
   comments?: (v: Record<string, string>) => unknown;
+  /** The Project items of the Issues named: per number, its `projectItems`, or none. */
+  items?: (n: number) => unknown;
   recheck?: (numbers: number[]) => { body: unknown; code?: number };
 }
 
@@ -66,14 +71,19 @@ function fakeGh(world: World) {
     if (args[0] === "variable") return { code: 0, stdout: "https://github.com/orgs/acme/projects/1\n", stderr: "" };
     const query = args.find((a) => a.startsWith("query="))!.slice(6);
     const vars = Object.fromEntries(args.flatMap((a, i) => (args[i - 1] === "-f" || args[i - 1] === "-F") && !a.startsWith("query=") ? [a.split(/=(.*)/s).slice(0, 2)] : []));
-    const kind = query.includes("issueOrPullRequest") ? "recheck" : query.includes("issue(number:$n)") ? "comments" : query.includes("states:[OPEN,CLOSED]") ? "changed" : "open";
+    if (/w\d+: issue\(number:/.test(query)) {
+      const numbers = [...query.matchAll(/w(\d+): /g)].map((m) => Number(m[1]));
+      calls.push(`items ${numbers.join(",")}`);
+      return { code: 0, stdout: JSON.stringify({ data: { repository: Object.fromEntries(numbers.map((n) => [`w${n}`, world.items?.(n) ? { number: n, projectItems: world.items(n) } : null])) } }), stderr: "" };
+    }
+    const kind = query.includes("issueOrPullRequest") ? "recheck" : query.includes("issue(number:$n)") ? "comments" : query.includes("states:[OPEN,CLOSED]") ? "changed" : query.includes("pullRequests(") ? "pulls" : "open";
     calls.push(`${kind}${vars.after ? `@${vars.after}` : ""}${vars.since ? ` since ${vars.since}` : ""}`);
     try {
       if (kind === "recheck") {
         const r = world.recheck!([...query.matchAll(/w(\d+): /g)].map((m) => Number(m[1])));
         return { code: r.code ?? 0, stdout: JSON.stringify(r.body), stderr: r.code ? "gh: GraphQL error" : "" };
       }
-      return { code: 0, stdout: JSON.stringify(world[kind]!(vars)), stderr: "" };
+      return { code: 0, stdout: JSON.stringify((kind === "pulls" ? (world.pulls ?? world.open) : world[kind]!)(vars)), stderr: "" };
     } catch (e) {
       return { code: 1, stdout: "", stderr: (e as Error).message };
     }
@@ -81,6 +91,8 @@ function fakeGh(world: World) {
   return { gh, calls };
 }
 
+/** Well past what `raw` Issues were made at: they are not new any more. */
+const LATER = Date.parse("2026-10-20T00:00:00Z");
 const stored = () => Object.fromEntries(db.listBacklogRecords(KEY).map((r) => [`${r.objectKind}:${r.externalId}`, { state: r.fetchState, remote: r.remote }]));
 
 test("the first import reads every page and every comment page, then stores Issues, comments and Project fields", async () => {
@@ -92,7 +104,7 @@ test("the first import reads every page and every comment page, then stores Issu
   });
   db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
   await importGithubSnapshot(gh, db, WS, 1000);
-  expect(calls).toEqual(["changed", "comments@cc1", "changed@p2", "open"]);
+  expect(calls).toEqual(["changed", "comments@cc1", "changed@p2", "open", "pulls"]);
   expect(db.getWorkspaceBacklogSource(WS.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: true });
   const s = stored();
   expect(s["issue:I_12"]!.remote).toEqual({
@@ -138,7 +150,7 @@ test("the next import asks since the cursor; a close, a Project field change and
     open: () => pageOf([{ number: 14, projectItems: { totalCount: 0, nodes: [] } }]),
   });
   await importGithubSnapshot(next.gh, db, WS, 2000);
-  expect(next.calls).toEqual(["changed since 2026-10-05T00:00:00Z", "open"]);
+  expect(next.calls).toEqual(["changed since 2026-10-05T00:00:00Z", "open", "pulls"]);
   const s = stored();
   expect(s["issue:I_12"]).toMatchObject({ state: "fetched", remote: { state: "CLOSED" } });
   expect(s["comment:C_b"]).toEqual({ state: "unavailable", remote: { issue: 12, body: "b", createdAt: "2026-10-02T01:00:00Z" } });
@@ -189,7 +201,7 @@ const openPr = (n: number, over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-test("open pull requests are stored with their files on the open read: no call is added, a cut list is null, one gone is asked again", async () => {
+test("open pull requests are stored with their files by their own read: a cut list is null, one gone is asked again", async () => {
   let pulls: unknown[] = [openPr(50, { isDraft: true }), openPr(51, { files: { totalCount: 120, nodes: [{ path: "b.ts" }] } })];
   const { gh, calls } = fakeGh({
     changed: () => pageOf([raw(12)]),
@@ -197,12 +209,12 @@ test("open pull requests are stored with their files on the open read: no call i
     recheck: () => ({ body: { data: { repository: { w51: openPr(51, { __typename: "PullRequest", state: "CLOSED" }) } } } }),
   });
   await importGithubSnapshot(gh, db, WS, 1000);
-  expect(calls).toEqual(["changed", "open"]);
+  expect(calls).toEqual(["changed", "open", "pulls"]);
   expect(stored()["pull-request:PR_50"]?.remote).toEqual({ number: 50, state: "OPEN", isDraft: true, labels: ["needs-decision"], closes: [50], mergeCommit: null, updatedAt: "2026-10-05T00:00:00Z", files: ["a.ts"], closedAt: null, mergedAt: null });
   expect(stored()["pull-request:PR_51"]?.remote).toMatchObject({ files: null });
   pulls = [openPr(50, { isDraft: true })];
   await importGithubSnapshot(gh, db, WS, 2000);
-  expect(calls.slice(2)).toEqual(["changed since 2026-10-03T00:00:00Z", "open", "recheck"]);
+  expect(calls.slice(3)).toEqual(["changed since 2026-10-03T00:00:00Z", "open", "pulls", "recheck"]);
   expect(stored()["pull-request:PR_51"]?.remote).toMatchObject({ state: "CLOSED" });
 });
 
@@ -210,12 +222,107 @@ test("more than 50 open pull requests: the pages after the first are read by cur
   const first = Array.from({ length: 50 }, (_, i) => openPr(200 + i));
   const { gh, calls } = fakeGh({
     changed: () => pageOf([raw(12)]),
-    open: (v) => (v.after ? pageOf([], null, [openPr(250)]) : pageOf([{ number: 12, projectItems: { totalCount: 1, nodes: [item(12, "Ready")] } }], null, first, "p1")),
+    open: () => pageOf([{ number: 12, projectItems: { totalCount: 1, nodes: [item(12, "Ready")] } }]),
+    pulls: (v) => (v.after ? pageOf([], null, [openPr(250)]) : pageOf([], null, first, "p1")),
   });
   await importGithubSnapshot(gh, db, WS, 1000);
-  expect(calls.filter((c) => c.startsWith("open"))).toEqual(["open", "open@p1"]);
+  expect(calls.filter((c) => c.startsWith("pulls"))).toEqual(["pulls", "pulls@p1"]);
   expect(Object.keys(stored()).filter((k) => k.startsWith("pull-request:"))).toHaveLength(51);
   expect(stored()["pull-request:PR_250"]?.remote).toMatchObject({ number: 250, state: "OPEN" });
+});
+
+test("a light import reads no list of open Issues: 500 and 1,000 open cost the same calls, a full one more with each page", async () => {
+  const openOf = (count: number) => (v: Record<string, string>) => {
+    const from = Number(v.after ?? 0);
+    const nodes = Array.from({ length: Math.min(100, count - from) }, (_, i) => ({ number: 1000 + from + i, projectItems: { totalCount: 0, nodes: [] } }));
+    return pageOf(nodes, from + 100 < count ? String(from + 100) : null);
+  };
+  const callsOf = async (count: number, full: boolean) => {
+    const own = new Db(join(dir, `${count}-${full}.db`));
+    const issues = Array.from({ length: count }, (_, i) => raw(1000 + i, { projectItems: { totalCount: 0, nodes: [] } }));
+    await importGithubSnapshot(fakeGh({ changed: () => pageOf(issues), open: openOf(count) }).gh, own, WS, 1000);
+    const { gh, calls } = fakeGh({ changed: () => pageOf([]), open: openOf(count) });
+    await importGithubSnapshot(gh, own, WS, LATER, undefined, false, full);
+    own.close();
+    return calls;
+  };
+  const light500 = await callsOf(500, false);
+  expect(light500).toEqual(await callsOf(1000, false));
+  expect(light500.filter((c) => c.startsWith("open"))).toEqual([]);
+  expect(light500.filter((c) => c === "pulls")).toEqual(["pulls"]);
+  expect((await callsOf(500, true)).filter((c) => c.startsWith("open"))).toHaveLength(5);
+  expect((await callsOf(1000, true)).filter((c) => c.startsWith("open"))).toHaveLength(10);
+});
+
+test("a full import asks by number the named Issues the lists do not have (closed), not the ones they have", async () => {
+  const closed = raw(13, { state: "CLOSED", stateReason: "COMPLETED" });
+  await importGithubSnapshot(fakeGh({ changed: () => pageOf([raw(12), closed]), open: () => pageOf([{ number: 12, projectItems: { totalCount: 0, nodes: [] } }]) }).gh, db, WS, LATER);
+  const { gh, calls } = fakeGh({ changed: () => pageOf([]), open: () => pageOf([{ number: 12, projectItems: { totalCount: 0, nodes: [] } }]), items: () => ({ totalCount: 1, nodes: [item(13, "Done")] }) });
+  await importGithubSnapshot(gh, db, WS, LATER, undefined, false, true, [12, 13]);
+  expect(calls.filter((c) => c.startsWith("items"))).toEqual(["items 13"]);
+  expect((stored()["project-item:PVTI_13"]?.remote as { fields: Record<string, unknown> }).fields.Status).toBe("Done");
+});
+
+test("a light import stores an Issue closed since the last one: its updatedAt moved", async () => {
+  await importGithubSnapshot(fakeGh({ changed: () => pageOf([raw(12)]), open: () => pageOf([]) }).gh, db, WS, 1000);
+  const closed = raw(12, { state: "CLOSED", stateReason: "COMPLETED", updatedAt: "2026-10-20T00:00:00Z" });
+  const { gh, calls } = fakeGh({ changed: () => pageOf([closed]), open: () => pageOf([]) });
+  await importGithubSnapshot(gh, db, WS, 2000, undefined, false, false);
+  expect(calls).toEqual(["changed since 2026-10-03T00:00:00Z", "pulls"]);
+  expect((stored()["issue:I_12"]?.remote as BacklogIssueData).state).toBe("CLOSED");
+});
+
+test("a light import does not ask again the stored open Issues, nor a wait on one; a first import stays full", async () => {
+  const pbi = raw(12, { comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ id: "C_r", body: "後回し\n<!-- pbi-complete:release waits=13 -->", createdAt: "2026-10-02T00:00:00Z" }] } });
+  const first = fakeGh({ changed: () => pageOf([pbi, raw(13)]), open: () => pageOf([{ number: 12, projectItems: { totalCount: 0, nodes: [] } }, { number: 13, projectItems: { totalCount: 0, nodes: [] } }]) });
+  await importGithubSnapshot(first.gh, db, WS, 1000, undefined, false, false);
+  expect(first.calls).toEqual(["changed", "open", "pulls"]);
+  const light = fakeGh({ changed: () => pageOf([]), open: () => pageOf([]) });
+  await importGithubSnapshot(light.gh, db, WS, LATER, undefined, false, false);
+  expect(light.calls).toEqual(["changed since 2026-10-04T00:00:00Z", "pulls"]);
+  expect(stored()["issue:I_13"]?.state).toBe("fetched");
+});
+
+test("a light import still asks a wait on an Issue no list shows: one of no type, one made here, one that did not answer", async () => {
+  const pbi = raw(12, { comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ id: "C_r", body: "後回し\n<!-- pbi-complete:release waits=13,14,15 -->", createdAt: "2026-10-02T00:00:00Z" }] } });
+  await importGithubSnapshot(fakeGh({ changed: () => pageOf([pbi]), open: () => pageOf([]), recheck: (ns) => ({ code: 1, body: { data: { repository: Object.fromEntries(ns.map((n) => [`w${n}`, null])) }, errors: ns.map((n) => ({ type: "NOT_FOUND", path: ["repository", `w${n}`] })) } }) }).gh, db, WS, 1000);
+  const issue = (n: number, labels: string[]): BacklogIssueData => ({ number: n, title: `#${n}`, url: "", state: "OPEN", stateReason: null, body: "", labels, milestone: null, parent: null, subIssues: [], createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z", closedAt: null });
+  db.putBacklogSnapshot(KEY, { cursor: "2026-10-04T00:00:00Z", syncedAt: 1500, records: [
+    { objectKind: "issue", externalId: "I_13", remote: issue(13, []), fetchState: "fetched" },
+    { objectKind: "issue", externalId: "sb:14", remote: issue(14, ["type:task"]), fetchState: "fetched" },
+    { objectKind: "issue", externalId: "I_15", remote: issue(15, ["type:task"]), fetchState: "fetched" },
+  ] });
+  db.putBacklogSnapshot(KEY, { cursor: "2026-10-04T00:00:00Z", syncedAt: 1600, records: [{ objectKind: "issue", externalId: "I_15", remote: null, fetchState: "unavailable" }] });
+  const asked: number[] = [];
+  const { gh } = fakeGh({ changed: () => pageOf([]), open: () => pageOf([]), recheck: (ns) => (asked.push(...ns), { code: 1, body: { data: { repository: Object.fromEntries(ns.map((n) => [`w${n}`, null])) }, errors: ns.map((n) => ({ type: "NOT_FOUND", path: ["repository", `w${n}`] })) } }) });
+  await importGithubSnapshot(gh, db, WS, 2000, undefined, false, false);
+  expect(asked).toEqual([13, 14, 15]);
+});
+
+test("a light import reads the Project items of an Issue made in the last hour, and of no older one: the auto-add moves no updatedAt", async () => {
+  const made = Date.parse("2026-10-01T00:00:00Z");
+  await importGithubSnapshot(fakeGh({ changed: () => pageOf([raw(12, { projectItems: { totalCount: 0, nodes: [] } })]), open: () => pageOf([]) }).gh, db, WS, made);
+  expect(stored()["project-item:PVTI_12"]).toBeUndefined();
+  const { gh, calls } = fakeGh({ changed: () => pageOf([]), open: () => pageOf([]), items: (n) => (n === 12 ? { totalCount: 1, nodes: [item(12, "Backlog")] } : null) });
+  await importGithubSnapshot(gh, db, WS, made + 60 * 60_000, undefined, false, false);
+  expect(calls.filter((c) => c.startsWith("items"))).toEqual(["items 12"]);
+  expect((stored()["project-item:PVTI_12"]?.remote as { fields: Record<string, unknown> }).fields.Status).toBe("Backlog");
+  const old = calls.length;
+  await importGithubSnapshot(gh, db, WS, made + 60 * 60_000 + 1, undefined, false, false);
+  expect(calls.slice(old).filter((c) => c.startsWith("items"))).toEqual([]);
+});
+
+test("an Issue made and closed between two imports ends as GitHub has it; its items come with it, none is asked by number", async () => {
+  const made = Date.parse("2026-10-01T00:00:00Z");
+  await importGithubSnapshot(fakeGh({ changed: () => pageOf([raw(12, { projectItems: { totalCount: 0, nodes: [] } })]), open: () => pageOf([]) }).gh, db, WS, made);
+  const closed = raw(12, { state: "CLOSED", stateReason: "COMPLETED", updatedAt: "2026-10-01T00:10:00Z" });
+  const { gh, calls } = fakeGh({ changed: () => pageOf([closed]), open: () => pageOf([]), items: () => null });
+  await importGithubSnapshot(gh, db, WS, made + 600_000, undefined, false, false);
+  expect(calls.filter((c) => c.startsWith("items"))).toEqual([]);
+  expect((stored()["issue:I_12"]?.remote as BacklogIssueData).state).toBe("CLOSED");
+  expect((stored()["project-item:PVTI_12"]?.remote as { fields: Record<string, unknown> }).fields.Status).toBe("Ready");
+  await importGithubSnapshot(gh, db, WS, made + 700_000, undefined, false, false);
+  expect(calls.filter((c) => c.startsWith("items"))).toEqual([]);
 });
 
 test("a pull request gone from the open list is asked again until it answers: a refused read (403) is asked again too", async () => {
@@ -243,7 +350,7 @@ test("the pull requests an open PBI waits for are stored with their state", asyn
     recheck: () => ({ body: { data: { repository: { w40: { __typename: "PullRequest", id: "PR_40", number: 40, state: "MERGED", isDraft: false, updatedAt: "2026-10-01T00:00:00Z", files: { totalCount: 0, nodes: [] }, body: "Fixes #13, closes #13", headRefName: "sb/12-x", labels: { totalCount: 1, nodes: [{ name: "x" }] } } } } } }),
   });
   await importGithubSnapshot(gh, db, WS, 1000);
-  expect(calls).toEqual(["changed", "open", "recheck"]); // #13 is open: its state is known without asking
+  expect(calls).toEqual(["changed", "open", "pulls", "recheck"]); // #13 is open: its state is known without asking
   expect(stored()["pull-request:PR_40"]).toEqual({ state: "fetched", remote: { number: 40, state: "MERGED", isDraft: false, labels: ["x"], closes: [12, 13], mergeCommit: null, updatedAt: expect.any(String), files: [], closedAt: null, mergedAt: null } });
 });
 
@@ -530,7 +637,7 @@ test("BacklogSync: a caller waiting on an import that a write made store nothing
   const { gh } = fakeGh({ changed: () => pageOf([raw(12, { title })]), open: () => pageOf([]) });
   const slow: GhRunner = async (args, cwd) => {
     const r = await gh(args, cwd);
-    if (held && args.some((x) => x.includes("states:OPEN, labels"))) await held;
+    if (held && args.some((x) => x.includes("pullRequests("))) await held;
     return r;
   };
   const sync = makeSync(db, slow, () => 1000);
@@ -547,6 +654,118 @@ test("BacklogSync: a caller waiting on an import that a write made store nothing
 });
 
 // Read again by itself (#887): how long until the next read, from what the reads found.
+
+test("BacklogSync reads the open Issues on the first import, on 再読込 and FULL_READ_MS after the last full one, and on no other", async () => {
+  let at = 1_000;
+  const { gh, calls } = fakeGh({ changed: () => pageOf([raw(12)]), open: () => pageOf([{ number: 12, projectItems: { totalCount: 1, nodes: [item(12, "Ready")] } }]) });
+  const sync = makeSync(db, gh, () => at);
+  const opens = async (run: () => Promise<void>) => {
+    const before = calls.length;
+    await run();
+    return calls.slice(before).filter((c) => c === "open").length;
+  };
+  expect(await opens(() => sync.sync(WS))).toBe(1);
+  at += 60_000;
+  expect(await opens(() => sync.sync(WS))).toBe(0);
+  at += 60_000;
+  expect(await opens(() => sync.sync(WS, undefined, { full: true }))).toBe(1);
+  at += FULL_READ_MS - 1;
+  expect(await opens(() => sync.sync(WS))).toBe(0);
+  at += 1;
+  expect(await opens(() => sync.sync(WS))).toBe(1);
+  at += 60_000;
+  expect(await opens(() => sync.sync(WS))).toBe(0);
+  // a daemon that starts again knows no full import
+  expect(await opens(() => makeSync(db, gh, () => at).sync(WS))).toBe(1);
+});
+
+test("BacklogSync: a Project field changed by hand stays as stored through light imports and comes in with 再読込", async () => {
+  let status = "Ready";
+  const { gh } = fakeGh({ changed: (v) => pageOf(v.since ? [] : [raw(12)]), open: () => pageOf([{ number: 12, projectItems: { totalCount: 1, nodes: [item(12, status)] } }]) });
+  const sync = makeSync(db, gh, () => 1_000);
+  await sync.sync(WS);
+  const fields = () => (stored()["project-item:PVTI_12"]?.remote as { fields: Record<string, unknown> }).fields.Status;
+  expect(fields()).toBe("Ready");
+  status = "Done";
+  await sync.sync(WS);
+  expect(fields()).toBe("Ready");
+  await sync.sync(WS, undefined, { full: true });
+  expect(fields()).toBe("Done");
+});
+
+test("BacklogSync: 再読込 during a light import is not answered by it: the full one runs after it; during a full one it shares that", async () => {
+  let release = () => {};
+  let hold = false;
+  const { gh, calls } = fakeGh({ changed: () => pageOf([raw(12)]), open: () => pageOf([{ number: 12, projectItems: { totalCount: 1, nodes: [item(12, "Ready")] } }]) });
+  const held: GhRunner = async (args, cwd) => {
+    if (hold && args.some((a) => a.includes("states:[OPEN,CLOSED]"))) {
+      hold = false;
+      await new Promise<void>((r) => (release = r));
+    }
+    return gh(args, cwd);
+  };
+  const sync = makeSync(db, held, () => 1_000);
+  await sync.sync(WS);
+  const after = calls.length;
+  hold = true;
+  const light = sync.sync(WS);
+  await Bun.sleep(5);
+  const asked = [sync.sync(WS, undefined, { full: true }), sync.sync(WS, undefined, { full: true })];
+  release();
+  await Promise.all([light, ...asked]);
+  expect(calls.slice(after).filter((c) => c === "open")).toEqual(["open"]);
+  // the full one under way answers it
+  hold = true;
+  const before = calls.length;
+  const full = sync.sync(WS, undefined, { full: true });
+  await Bun.sleep(5);
+  const shared = sync.sync(WS, undefined, { full: true });
+  release();
+  await Promise.all([full, shared]);
+  expect(calls.slice(before).filter((c) => c === "open")).toEqual(["open"]);
+});
+
+test("BacklogSync: a 再読込 whose full import failed is not lost: the next import is full", async () => {
+  let failing = false;
+  const { gh, calls } = fakeGh({ changed: () => pageOf([raw(12)]), open: () => (failing ? { data: { repository: {} } } : pageOf([])) }); // a malformed answer: no wait of the host's follows
+  const sync = makeSync(db, gh, () => 1_000);
+  await sync.sync(WS);
+  failing = true;
+  await sync.sync(WS, undefined, { full: true }).catch(() => undefined);
+  failing = false;
+  const before = calls.length;
+  await sync.sync(WS);
+  expect(calls.slice(before)).toContain("open");
+  const after = calls.length;
+  await sync.sync(WS);
+  expect(calls.slice(after)).not.toContain("open");
+});
+
+test("BacklogSync: a full import a write superseded stored nothing, so the one after it is full too", async () => {
+  let at = 1_000;
+  let release: (() => void) | null = null;
+  let hold = false;
+  const { gh, calls } = fakeGh({ changed: () => pageOf([raw(12)]), open: () => pageOf([]) });
+  const held: GhRunner = async (args, cwd) => {
+    if (hold && args.some((a) => a.includes("pullRequests("))) {
+      hold = false;
+      await new Promise<void>((r) => (release = r));
+    }
+    return gh(args, cwd);
+  };
+  const ws = db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
+  const sync = makeSync(db, held, () => at);
+  await sync.sync(ws);
+  at += FULL_READ_MS;
+  hold = true;
+  const before = calls.length;
+  const full = sync.sync(ws);
+  await Bun.sleep(10);
+  sync.wrote(ws);
+  release!();
+  await full;
+  expect(calls.slice(before).filter((c) => c === "open")).toEqual(["open", "open"]);
+});
 
 test("BacklogSync polls every minute while the backlog changes, twice as long each time it does not (up to 15 minutes), after a limit at its time", async () => {
   const ws = db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
@@ -578,6 +797,80 @@ test("BacklogSync polls every minute while the backlog changes, twice as long ea
   expect(sync.nextPoll(ws.id)).toBe(now - 60_000 + 3_600_000);
   sync.stop();
   expect(sync.nextPoll(ws.id)).toBeNull();
+});
+
+test("BacklogSync polls: what reads back the daemon's own write does not bring the next read back to a minute; a change of anyone else does", async () => {
+  const ws = db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
+  let title = "one";
+  const { gh } = fakeGh({ changed: () => pageOf([raw(12, { title })]), open: () => pageOf([]) });
+  const now = 1_000_000;
+  const sync = makeSync(db, gh, () => now);
+  sync.startPolling();
+  await sync.sync(ws);
+  await sync.sync(ws); // nothing new: two minutes
+  expect(sync.nextPoll(ws.id)).toBe(now + 2 * POLL_MIN_MS);
+  title = "two";
+  sync.wrote(ws);
+  while (sync.read(ws).syncing) await Bun.sleep(1);
+  await sync.sync(ws);
+  expect(stored()["issue:I_12"]?.remote).toMatchObject({ title: "two" });
+  expect(sync.nextPoll(ws.id)).toBe(now + 8 * POLL_MIN_MS); // the read-back: 4; the look after it found nothing: 8
+  title = "three";
+  await sync.sync(ws);
+  expect(sync.nextPoll(ws.id)).toBe(now + POLL_MIN_MS);
+});
+
+test("BacklogSync polls: a write that comes while a poll reads does not bring the next read back to a minute", async () => {
+  const ws = db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
+  let title = "one";
+  let hold = false;
+  let release = () => {};
+  const { gh } = fakeGh({ changed: () => pageOf([raw(12, { title })]), open: () => pageOf([]) });
+  const held: GhRunner = async (args, cwd) => {
+    if (hold && args.some((a) => a.includes("pullRequests("))) await new Promise<void>((r) => (hold = false, release = r));
+    return gh(args, cwd);
+  };
+  const now = 1_000_000;
+  const sync = makeSync(db, held, () => now);
+  sync.startPolling();
+  await sync.sync(ws);
+  await sync.sync(ws);
+  await sync.sync(ws); // nothing new twice: four minutes
+  expect(sync.nextPoll(ws.id)).toBe(now + 4 * POLL_MIN_MS);
+  title = "two";
+  hold = true;
+  const poll = sync.sync(ws);
+  await Bun.sleep(10);
+  sync.wrote(ws);
+  release();
+  await poll;
+  while (sync.read(ws).syncing) await Bun.sleep(1);
+  expect(stored()["issue:I_12"]?.remote).toMatchObject({ title: "two" });
+  expect(sync.nextPoll(ws.id)! - now).toBeGreaterThan(4 * POLL_MIN_MS);
+});
+
+test("BacklogSync polls: another's change a 再読込 reads after a light import brings the next read back to a minute", async () => {
+  const ws = db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
+  let title = "one";
+  let hold = false;
+  let release = () => {};
+  const { gh } = fakeGh({ changed: () => pageOf([raw(12, { title })]), open: () => pageOf([]) });
+  const held: GhRunner = async (args, cwd) => {
+    if (hold && args.some((a) => a.includes("pullRequests("))) await new Promise<void>((r) => (hold = false, release = r));
+    return gh(args, cwd);
+  };
+  const now = 1_000_000;
+  const sync = makeSync(db, held, () => now);
+  sync.startPolling();
+  await sync.sync(ws);
+  hold = true;
+  const light = sync.sync(ws);
+  await Bun.sleep(10);
+  const full = sync.sync(ws, undefined, { full: true });
+  title = "two";
+  release();
+  await Promise.all([light, full]);
+  expect(sync.nextPoll(ws.id)).toBe(now + POLL_MIN_MS);
 });
 
 test("BacklogSync polls: the same answers again store nothing new and queue nothing; a page that failed is read whole by the next poll", async () => {
@@ -1134,8 +1427,28 @@ test("public copy: the development repository, whose publicSync names the public
     const { gh: github, calls } = fakeGh({ changed: () => pageOf([raw(12)]), open: () => pageOf([]) });
     const gh: GhRunner = async (args, cwd) => (args[0] === "repo" ? { code: 0, stdout: "acme/widget-dev true\n", stderr: "" } : github(args, cwd));
     await importGithubSnapshot(gh, db, ws, 1000);
-    expect(calls).toEqual(["changed", "open"]);
+    expect(calls).toEqual(["changed", "open", "pulls"]);
     expect(db.getWorkspaceBacklogSource(ws.id)).toMatchObject({ repository: "acme/widget-dev" });
+  } finally {
+    rmSync(path, { recursive: true, force: true });
+  }
+});
+
+test("noWrite: a workspace that resolves to a repository its clone marked ops-kit.noWrite is not imported", async () => {
+  const path = mkdtempSync(join(tmpdir(), "no-write-"));
+  try {
+    Bun.spawnSync(["git", "init", "-q"], { cwd: path });
+    Bun.spawnSync(["git", "config", "--add", "ops-kit.noWrite", "someone/widget"], { cwd: path });
+    const ws = db.upsertWorkspace({ id: "ws_no_write", name: "widget", path, kind: "repo" });
+    const { gh: github } = fakeGh({ changed: () => pageOf([raw(12)]), open: () => pageOf([]) });
+    const asked: string[][] = [];
+    const gh: GhRunner = async (args, cwd) => {
+      asked.push(args);
+      return args[0] === "repo" ? { code: 0, stdout: "someone/widget false\n", stderr: "" } : github(args, cwd);
+    };
+    await expect(importGithubSnapshot(gh, db, ws, 1000)).rejects.toThrow("ops-kit.noWrite");
+    expect(asked.map((a) => a.slice(0, 2))).toEqual([["repo", "view"]]);
+    expect(db.getWorkspaceBacklogSource(ws.id)).toBeNull();
   } finally {
     rmSync(path, { recursive: true, force: true });
   }

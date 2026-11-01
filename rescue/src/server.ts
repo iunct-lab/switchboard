@@ -307,6 +307,8 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
       log: ctx.sup.logTail(200),
       agent: agent.status(),
       rebuild: !!o.starter,
+      /** 停止する posts the Starter's own /_auth/stop from the page: nothing goes through this service. */
+      stop: !!o.starter,
       /** 再起動 reads the environment and the host scripts again (#435). */
       restartReloads: !!o.exitToRestart,
     };

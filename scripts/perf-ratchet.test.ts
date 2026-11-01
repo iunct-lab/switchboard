@@ -1,3 +1,4 @@
+// test-reads: none
 import { describe, expect, test } from "bun:test";
 import { BUDGET_PATH, ENVS, envOf, judge, lowered, raisedAgainst, type Budget, type Budgets } from "./perf-ratchet";
 
@@ -13,6 +14,22 @@ const result = (send: Partial<Budget["journeys"][string]>, bundle: Partial<Budge
 });
 
 describe("perf-ratchet judge", () => {
+  const withLoaded: Budget = { ...budget, loaded: { healthMaxMs: 5000 } };
+  const loaded = (healthMaxMs: number) => ({ ...result({}), loaded: { healthMaxMs, healthMaxMsP90: 99999 } });
+  test("judge: loaded.healthMaxMs over its ceiling is over (#2822)", () => {
+    expect(judge(loaded(5001), withLoaded)).toEqual({ over: [{ key: "loaded.healthMaxMs", value: 5001, ceiling: 5000 }], improved: [] });
+  });
+  test("lowered: loaded.healthMaxMs goes down, never up (#2822)", () => {
+    const low = loaded(1000);
+    const { improved } = judge(low, withLoaded);
+    expect(improved.map((i) => i.key)).toEqual(["loaded.healthMaxMs"]);
+    expect(lowered(improved, withLoaded).loaded!.healthMaxMs).toBeGreaterThan(1000);
+    expect(lowered(improved, withLoaded).loaded!.healthMaxMs).toBeLessThan(5000);
+    expect(lowered(judge(loaded(5001), withLoaded).improved, withLoaded).loaded).toEqual({ healthMaxMs: 5000 });
+  });
+  test("judge: a budget without loaded does not need it in the result (#2822)", () => {
+    expect(judge(result({}), budget)).toEqual({ over: [], improved: [] });
+  });
   test("over: a count above its ceiling, with its name, value and ceiling", () => {
     expect(judge(result({ layoutCount: 5 }, { js: 185096 }), budget)).toEqual({
       over: [{ key: "journeys.send.layoutCount", value: 5, ceiling: 4 }, { key: "bundle.js", value: 185096, ceiling: 185095 }],

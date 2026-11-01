@@ -1,3 +1,4 @@
+// test-reads: scripts/parallel-guard.ts
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

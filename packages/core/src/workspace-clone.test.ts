@@ -1,3 +1,4 @@
+// test-reads: none
 import { afterEach, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";

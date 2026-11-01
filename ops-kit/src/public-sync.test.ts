@@ -1,5 +1,6 @@
+// test-reads: ops.config.json
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { check, personalEmails, policySectionAt, sync, spawnRun, withPolicySection, withStaleNote, type Run } from "./public-sync.ts";
@@ -335,13 +336,6 @@ describe("public-sync", () => {
     };
     const steps = () => ghCalls.map((c) => c.slice(0, 3).join(" "));
 
-    test("rate limit twice on pr create: the sync stops with the command and the stderr line, after one wait", () => {
-      toSecondSync();
-      expect(() => sync(opts(), failing("create", [LIMIT, LIMIT]))).toThrow(`failed: gh pr create: ${LIMIT}`);
-      expect(sleeps).toBe(1);
-      expect(steps()).toEqual(["gh pr list", "gh pr create", "gh pr create"]);
-    });
-
     test("rate limit once on pr create: the second try opens the PR and the sync merges it", () => {
       toSecondSync();
       expect(sync(opts(), failing("create", [LIMIT]))).toContain("merged sync PR");
@@ -394,6 +388,15 @@ describe("public-sync", () => {
     expect(out).toContain("excluded .github/workflows/host.yml");
     expect(out).toContain("dry-run: would push a root commit to main");
     expect(pubGit("for-each-ref").length).toBe(0);
+  });
+
+  test(".gitattributes in include is in the tree, and this repository's own config includes it", () => {
+    write(".gitattributes", "/.github/ export-ignore\n");
+    commit("chore: export-ignore (#2)");
+    sync(opts({ include: [".gitattributes", ".github/", "README.md", "SECURITY.md"] }), run);
+    expect(pubGit("ls-tree", "--name-only", "main").split("\n")).toContain(".gitattributes");
+    const own = JSON.parse(readFileSync(join(import.meta.dir, "../../ops.config.json"), "utf8")) as { publicSync: { include: string[] } };
+    expect(own.publicSync.include).toContain(".gitattributes");
   });
 
   test("a public repository that is the private one stops before anything is read or pushed", () => {

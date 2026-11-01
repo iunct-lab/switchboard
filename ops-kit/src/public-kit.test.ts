@@ -1,3 +1,4 @@
+// test-reads: ops-kit/public/ ops-kit/README.md
 import { expect, test } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -42,6 +43,7 @@ test("public kit: the workflow answers and closes an outside pull request withou
   expect(permissions).toEqual(["permissions:", "pull-requests: write"]);
   // the three exclusions: maintainers, dependabot, this repository's own sync branches (a fork's sync/* is closed)
   const condition = wf.slice(wf.indexOf("if:"), wf.indexOf("runs-on:"));
+  expect(condition).toContain("vars.PUBLIC_ACTIONS == 'on'"); // a copy without the variable closes nothing
   for (const w of ["github.event.pull_request.author_association", '"OWNER"', '"MEMBER"', '"COLLABORATOR"', "github.event.pull_request.user.login != 'dependabot[bot]'", "github.event.pull_request.head.repo.full_name == github.repository", "startsWith(github.event.pull_request.head.ref, 'sync/')"]) {
     expect({ w, excluded: condition.includes(w) }).toEqual({ w, excluded: true });
   }

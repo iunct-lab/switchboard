@@ -1,3 +1,4 @@
+// test-reads: none
 import { recordingText, skipRecordings, assertRecordings } from "../../../scripts/recordings.ts";
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";

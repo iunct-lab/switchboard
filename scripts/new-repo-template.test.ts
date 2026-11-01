@@ -1,3 +1,4 @@
+// test-reads: .claude/skills/ ops-kit/template/ scripts/setup/
 import { afterAll, describe, expect, test } from "bun:test";
 import { cpSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -155,7 +156,7 @@ describe("new-repo template", () => {
     }
     expect(log.join("\n")).toContain("Project の URL: https://github.com/orgs/example/projects/7");
     const order = gh.calls.flatMap((c) => (c.kind === "graphql" && c.query.includes("createProjectV2(") ? ["create"] : c.kind === "run" ? [c.args.slice(0, 2).join(" ")] : []));
-    expect(order).toEqual(["repo create", "repo view", "create", "project link", "repo view", "variable set", "variable get"]);
+    expect(order).toEqual(["repo create", "repo view", "create", "project link", "repo view", "variable set", "variable set", "variable get"]);
     expect(gh.calls.find((c) => c.kind === "run" && c.args[1] === "link")).toEqual({ kind: "run", args: ["project", "link", "7", "--owner", "example", "-R", "example/sample-app"] });
   });
 

@@ -99,12 +99,12 @@ const GH_TIMEOUT_MS = 5000;
  * The title of a task started with a skill command (#491): `/<command> #<n> <the Issue's title>`, so nothing waits on a
  * model. null when the prompt is no such command or `gh` cannot say (no answer in 5 s, a failure, an empty title).
  */
-export async function skillCommandTitle(prompt: string, cwd: string, gh: GhRunner): Promise<string | null> {
+export async function skillCommandTitle(prompt: string, cwd: string, gh: GhRunner, timeoutMs = GH_TIMEOUT_MS): Promise<string | null> {
   const cmd = parseSkillCommand(prompt);
   if (!cmd) return null;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const r = await Promise.race([gh(["issue", "view", String(cmd.issue), "--json", "title", "--jq", ".title"], cwd), new Promise<null>((res) => (timer = setTimeout(() => res(null), GH_TIMEOUT_MS)))]);
+    const r = await Promise.race([gh(["issue", "view", String(cmd.issue), "--json", "title", "--jq", ".title"], cwd), new Promise<null>((res) => (timer = setTimeout(() => res(null), timeoutMs)))]);
     const title = r && r.code === 0 ? oneLine(r.stdout) : "";
     return title ? `/${cmd.command} #${cmd.issue} ${title}`.slice(0, SKILL_TITLE_CHARS) : null;
   } catch {

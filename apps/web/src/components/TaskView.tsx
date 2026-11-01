@@ -5,7 +5,7 @@ import { journeyCancel, journeyEnd, journeyStart } from "../perf.ts";
 import { eventsArchiveNotice } from "../events-archive.ts";
 import { foldTranscript, itemText, spanText, toolInputText, toolResultText, transcriptMarkdown, turnReply, type Item, type PermissionAsk } from "../transcript.ts";
 import { answerOf, answersOf, questionsOf, type AskQuestion, type QuestionChoice } from "../questions.ts";
-import { CloudSessionNotice, CloudSourceTag, CopyButton, OriginTag, ResumeTag, RunnerPill, ShadowTag } from "./ui.tsx";
+import { CloudSessionNotice, CloudSourceTag, CopyButton, OriginTag, BackgroundTag, ResumeTag, RunnerPill, ShadowTag } from "./ui.tsx";
 import { Terminal } from "./Terminal.tsx";
 import { DeviceAuth } from "./DeviceAuth.tsx";
 import { Stops } from "./Stops.tsx";
@@ -291,6 +291,7 @@ export function TaskView(props: {
         <span className="hint task-times">{`${times.started} · ${times.since}`}</span>
         <OriginTag origin={props.task.origin} />
         <ResumeTag resumeAt={props.task.resumeAt} reason={props.task.resumeReason} plannedAt={props.task.resumePlannedAt} />
+        <BackgroundTag background={props.task.background} />
         <ShadowTag task={props.task} />
         {props.detail?.sourceCloudTask && <CloudSourceTag source={props.detail.sourceCloudTask} switched={!!props.switchedFromCloud} onOpen={() => props.onOpenTask?.(props.detail!.sourceCloudTask!.id)} />}
         <select className="outcome" value={props.task.outcome} disabled={busy} onChange={(e) => setOutcome({ outcome: e.target.value as TaskOutcome })} title="結果（要対応のまとまりの並びに使う）">

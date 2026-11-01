@@ -4,7 +4,7 @@
 
 ## ローカル CI を回す時と数え方
 
-Actions が始まらない（ジョブのステップ 0 件）か run が無いリポジトリでは、`bun scripts/local-ci.ts <PR>` を次のときだけ回す（スキルの `<ローカル CI>`。別リポジトリの Task には `otherRepoRules` がこの節を渡す）:
+Actions が始まらない（ジョブのステップ 0 件）か run が無い（全部の run が skip された、も同じ）リポジトリでは、`bun scripts/local-ci.ts <PR>` を次のときだけ回す（スキルの `<ローカル CI>`。別リポジトリの Task には `otherRepoRules` がこの節を渡す）:
 
 - **いつ**: スタックの全部の PR のレビューの指摘の処理が済んでから、再チェックの前に、スタックの一番上の PR で 1 回。単発の PR は自分が一番上。レビューの途中、PR ごと、マージの合間には回さない
 - **回し直す**: どれかの PR の差分が変わったとき（修正コミット、手で rebase してコンフリクトを解いたとき）だけ、一番上でもう 1 回。下の PR のマージ後の GitHub の自動 rebase（head の sha は変わるが差分は同じ）と、base（main）の前進では回し直さない
@@ -46,7 +46,7 @@ large の PR で、どの種類を誰が外したかを PR コメントの印で
 | `[merge-ask] <kinds> <head sha>`（`MERGE_ASK`） | 利用者に「マージしてよいか」を Task の会話で聞く直前 | `<kinds>` は merge-gate の出力の `ask` と、まだ印の無い `recheck` を `,` でつないだもの（上の `MERGE_KINDS` の順） |
 | `[merge-answer] <yes\|no> <kinds> <head sha>`（`MERGE_ANSWER`） | `[merge-ask]` を付けて聞いた PR への返事を受けて再開したとき（`yes` なら続けて `--allow-large` でマージ判定。CI など large 以外の理由で聞いたときはどちらの印も付けない）。`[merge-ask]` が無ければ先に `[merge-ask]` を付けてから（時刻はどちらも付けた時刻） | `yes` = 利用者が認めた。`<kinds>` は聞いたときと同じ |
 
-投稿は `gh pr comment <PR> -R <owner/name> --body "[merge-ask] <kinds> $(gh pr view <PR> -R <owner/name> --json headRefOid -q .headRefOid)"`（`[merge-answer]` も同じ）。`--allow-large` は `[merge-answer] yes` を投稿した後（印を付けずに `--allow-large` でマージしない。`[merge-ask]` を付けずに聞いていた PR は、`[merge-ask]` → `[merge-answer]` の順に付けてから）。merge-gate の判定はこの 2 つを読まない（判定を外すのは `--allow-large` のまま）。ただし `--merge` / `--merge-stack` と `--allow-large` を一緒に付けたときは、head と同じ sha で、`<kinds>` が判定の出力の `ask` を全部含む `[merge-answer] yes` が無ければマージしない（`docs/design/merge-gate.md`）。前のマージには印を遡って付けない。
+投稿は `gh pr comment <PR> -R <owner/name> --body "[merge-ask] <kinds> $(gh pr view <PR> -R <owner/name> --json headRefOid -q .headRefOid)"`（`[merge-answer]` も同じ）。`--allow-large` は、head と同じ sha の最後の `[merge-answer]` が `yes` で、`<kinds>` が判定の出力の `ask` と `recheck` を全部含まなければ効かない（`yes` の後の `no` は取り消し。`[merge-ask]` を付けずに聞いていた PR は、`[merge-ask]` → `[merge-answer]` の順に付けてから）。前のマージには印を遡って付けない。
 
 ## 保護枝とローカルの結果
 

@@ -1,3 +1,4 @@
+// test-reads: none
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -880,4 +881,88 @@ test("ledger migration (#2353): a Task's Claude rows become the difference of th
   const again = new Database(path);
   expect((again.query("SELECT SUM(cost_usd) AS s FROM ledger WHERE task_id = 't1'").get() as { s: number }).s).toBeCloseTo(2.67, 10);
   again.close();
+});
+
+test("listStopRecords uses the events_stop index (#3080)", () => {
+  const db = new Db(join(dir, "switchboard.db"));
+  const stop = (id: string, taskId: string, at: number) => ({ id, work: { workspaceId: null, issue: 7, taskId }, op: "git push", target: "", reason: "permission" as const, evidence: "", safety: "before-effect" as const, conditions: [], answer: null, actions: [], state: "waiting" as const, at });
+  db.appendEventAt("t1", { t: "message.delta", role: "assistant", text: "a" }, 1000);
+  db.appendEventAt("t1", { t: "stop.record", stop: stop("s1", "t1", 1001) }, 1001);
+  db.appendEventAt("t2", { t: "stop.record", stop: stop("s2", "t2", 1002) }, 1002);
+  db.appendEventAt("t1", { t: "message.delta", role: "user", text: '{"t":"stop.record",' }, 1003);
+  db.appendEventAt("t1", { t: "stop.record", stop: stop("s3", "t1", 1004) }, 1004);
+  db.appendEventAt("t3", { t: "stop.record", stop: stop("s4", "t3", 1005) }, 1005);
+  expect(db.listStopRecords(["t2", "t1"]).map((s) => s.id)).toEqual(["s1", "s2", "s3"]);
+  const plan = db.sqlite.query(`EXPLAIN QUERY PLAN SELECT ts, seq, json FROM events WHERE task_id = ? AND substr(json, 1, 19) = '{"t":"stop.record",'`).all("t1") as Array<{ detail: string }>;
+  expect(plan.map((p) => p.detail).join("\n")).toContain("USING INDEX events_stop");
+});
+
+test("listBacklogRecords keeps a copy until the repository's records change (#3080)", () => {
+  const db = new Db(join(dir, "switchboard.db"));
+  db.putBacklogSnapshot(A, { records: entries(issue()), cursor: "c1", syncedAt: 1000 });
+  db.putBacklogSnapshot(B, { records: entries(issue({ title: "other" }), "I_other"), cursor: "c2", syncedAt: 2000 });
+  const title = () => (db.listBacklogRecords(A, "issue")[0]!.remote as BacklogIssueData).title;
+  const key = { ...A, objectKind: "issue" as const, externalId: "I_12" };
+
+  const first = db.listBacklogRecords(A);
+  expect(db.listBacklogRecords(A)).toBe(first);
+  expect(Object.isFrozen(first)).toBe(true);
+  expect(Object.isFrozen((first.find((r) => r.objectKind === "issue")!.remote as BacklogIssueData).labels)).toBe(true);
+  expect(db.listBacklogRecords(A, "comment").map((r) => r.externalId)).toEqual(["I_12_c1"]);
+
+  // another repository's write keeps the copy
+  db.setBacklogRecordRemote({ ...B, objectKind: "issue", externalId: "I_other" }, issue({ title: "b2" }));
+  expect(db.listBacklogRecords(A)).toBe(first);
+
+  // every kind of write is seen: an import, a stored remote, an edit, a delete, an UPDATE no method wraps
+  db.putBacklogSnapshot(A, { records: entries(issue({ title: "imported" })), cursor: "c3", syncedAt: 3000 });
+  expect(title()).toBe("imported");
+  db.setBacklogRecordRemote(key, issue({ title: "remote" }));
+  expect(title()).toBe("remote");
+  const before = db.listBacklogRecords(A);
+  expect(before.find((r) => r.objectKind === "comment")).toBe(db.listBacklogRecords(A).find((r) => r.objectKind === "comment")!);
+  db.setBacklogRecordRemote(key, issue({ title: "one row" }));
+  expect(db.listBacklogRecords(A).find((r) => r.objectKind === "comment")).toBe(before.find((r) => r.objectKind === "comment")!); // only the written row is read again
+  expect(title()).toBe("one row");
+  db.sqlite.query("INSERT INTO backlog_records (service, host, repository, object_kind, external_id, fetch_state) VALUES (?, ?, ?, 'issue', 'I_11', 'unfetched')").run(A.service, A.host, A.repository);
+  expect(db.listBacklogRecords(A, "issue").map((r) => r.externalId)).toEqual(["I_11", "I_12"]); // the order of the table
+  db.sqlite.query("DELETE FROM backlog_records WHERE external_id = 'I_11'").run();
+  db.sqlite.query("UPDATE backlog_records SET fetch_state = 'forbidden' WHERE external_id = 'I_12'").run();
+  expect(db.listBacklogRecords(A, "issue")[0]!.fetchState).toBe("forbidden");
+  db.deleteBacklogRecord(key);
+  expect(db.listBacklogRecords(A, "issue")).toEqual([]);
+
+  // an edit (only `local` changes), the result of a send under a new id (the old id goes), a move to another repository
+  db.applyBacklogEdit(A, { records: [{ objectKind: "issue", externalId: "local:1", local: issue({ title: "made here" }) }], operations: [] });
+  expect(db.listBacklogRecords(A, "issue").map((r) => (r.local as BacklogIssueData).title)).toEqual(["made here"]);
+  db.applyBacklogEdit(A, { records: [{ objectKind: "issue", externalId: "local:1", local: issue({ title: "edited again" }) }], operations: [] });
+  expect(db.listBacklogRecords(A, "issue").map((r) => (r.local as BacklogIssueData).title)).toEqual(["edited again"]);
+  const [create] = db.applyBacklogEdit(A, { records: [], operations: [{ issue: "local:1", targetKind: "issue", target: "local:1", kind: "create", payload: { title: "made here" } }] });
+  db.setBacklogOperationResult(create!, { status: "done", remoteId: "I_99", record: { externalId: "I_99", remote: issue({ number: 99, title: "sent" }) } });
+  expect(db.listBacklogRecords(A, "issue").map((r) => [r.externalId, (r.remote as BacklogIssueData).title])).toEqual([["I_99", "sent"]]);
+  const C = { ...A, repository: "acme/moved" };
+  db.listBacklogRecords(C);
+  db.moveBacklogRecords(A, C);
+  expect(db.listBacklogRecords(A)).toEqual([]);
+  expect(db.listBacklogRecords(C, "issue").map((r) => r.externalId)).toEqual(["I_99"]);
+  db.moveBacklogRecords(C, A);
+
+  // read inside a transaction that is rolled back: the rows of that transaction are not kept
+  db.setBacklogRecordRemote({ ...key, objectKind: "comment", externalId: "I_12_c1" }, { issue: 12, body: "before", createdAt: "2026-10-02T01:00:00Z" });
+  const comment = () => (db.listBacklogRecords(A, "comment")[0]!.remote as { body: string }).body;
+  expect(comment()).toBe("before");
+  expect(() => db.sqlite.transaction(() => {
+    db.setBacklogRecordRemote({ ...key, objectKind: "comment", externalId: "I_12_c1" }, { issue: 12, body: "rolled back", createdAt: "2026-10-02T01:00:00Z" });
+    expect(comment()).toBe("rolled back");
+    throw new Error("rollback");
+  })()).toThrow("rollback");
+  expect(comment()).toBe("before");
+  db.close();
+});
+
+test("listPendingBacklogOperations uses the backlog_operations_open index (#3080)", () => {
+  const db = new Db(join(dir, "switchboard.db"));
+  const plan = db.sqlite.query("EXPLAIN QUERY PLAN SELECT * FROM backlog_operations WHERE status != 'done' AND (?1 IS NULL OR (service = ?1 AND host = ?2 AND repository = ?3)) ORDER BY seq").all(null, null, null) as Array<{ detail: string }>;
+  expect(plan.map((p) => p.detail).join("\n")).toContain("USING INDEX backlog_operations_open");
+  db.close();
 });

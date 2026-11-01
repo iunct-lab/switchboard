@@ -6,7 +6,7 @@ import type { AgentEvent, PermissionKind } from "@switchboard/protocol";
  *  - system/init            → session.start
  *  - system/background_tasks_changed → background (count of the jobs left; verified on 2.1.311)
  *  - stream_event/*         → message.delta (text_delta), usage (message_delta.usage, source=turn)
- *  - assistant              → tool.call (tool_use blocks); text only if not already streamed
+ *  - assistant              → tool.call (tool_use blocks); text only if not already streamed; uuid → session.end.turn
  *  - user (tool_result)     → tool.result
  *  - control_request        → permission.ask (subtype can_use_tool)
  *  - rate_limit_event       → quota
@@ -18,6 +18,8 @@ export interface ClaudeParserState {
   seenToolCalls: Set<string>;
   /** tool_use id → {name, path} for write-class tools, so a successful tool_result can become artifact(diff). */
   writes: Map<string, { name: string; path: string }>;
+  /** The turn's latest top-level `assistant` line: the uuid `--resume-session-at` takes (#2999). */
+  lastAssistantUuid?: string;
 }
 
 export function createClaudeParserState(): ClaudeParserState {
@@ -66,7 +68,7 @@ export function mapClaudeMessage(m: Any, s: ClaudeParserState): AgentEvent[] {
         // Emitted after set_permission_mode: `{type:"system", subtype:"status", status:null, permissionMode}`.
         out.push({ t: "status", text: `permission mode: ${m.permissionMode}` });
       } else if (m.subtype === "background_tasks_changed" && Array.isArray(m.tasks)) {
-        out.push({ t: "background", count: m.tasks.length });
+        out.push({ t: "background", count: m.tasks.length, jobs: m.tasks.map((j: { description?: unknown }) => String(j?.description ?? "")).filter(Boolean) });
       } else if (m.subtype === "permission_denied") {
         out.push({ t: "status", text: `permission denied by runner: ${m.tool_name ?? "tool"}` });
       }
@@ -99,6 +101,7 @@ export function mapClaudeMessage(m: Any, s: ClaudeParserState): AgentEvent[] {
     case "assistant": {
       const msg = m.message;
       const id = str(msg?.id);
+      if (!m.parent_tool_use_id) s.lastAssistantUuid = str(m.uuid) ?? s.lastAssistantUuid; // a subagent's line is in its own transcript
       for (const c of Array.isArray(msg?.content) ? msg.content : []) {
         if (c?.type === "tool_use" && typeof c.id === "string") {
           if (s.seenToolCalls.has(c.id)) continue;
@@ -184,7 +187,9 @@ export function mapClaudeMessage(m: Any, s: ClaudeParserState): AgentEvent[] {
         status: isError ? "error" : "ok",
         summary: typeof m.result === "string" ? truncate(m.result, 2000) : str(m.subtype),
         durationMs: typeof m.duration_ms === "number" ? m.duration_ms : undefined,
+        turn: s.lastAssistantUuid,
       });
+      s.lastAssistantUuid = undefined;
       break;
     }
     default:

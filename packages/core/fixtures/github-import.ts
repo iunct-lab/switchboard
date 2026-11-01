@@ -68,15 +68,21 @@ export function importing(legacy: GhRunner, pulls: () => Json[] = () => []): GhR
   };
   return async (args, cwd) => {
     const q = args.find((a) => a.startsWith("query="))?.slice(6) ?? "";
-    const page = (nodes: Json[], head: string, withPulls = false) => ({ code: 0, stdout: head + JSON.stringify({ data: { repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes }, ...(withPulls ? { pullRequests: pullPage(q.includes("after:$after") && args.some((a) => a.startsWith("after="))) } : {}) } } }), stderr: "" });
+    const page = (nodes: Json[], head: string) => ({ code: 0, stdout: head + JSON.stringify({ data: { repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } } } }), stderr: "" });
     if (q.includes("pullRequests(first:50, after:$after")) {
       const r = await ask(cwd, "issues(states:OPEN)");
-      return { code: 0, stdout: headOf(r.stdout) + JSON.stringify({ data: { repository: { pullRequests: pullPage(true) } } }), stderr: "" };
+      return { code: 0, stdout: headOf(r.stdout) + JSON.stringify({ data: { repository: { pullRequests: pullPage(args.some((a) => a.startsWith("after="))) } } }), stderr: "" };
     }
     if (q.includes("states:[OPEN,CLOSED]") || q.includes("states:OPEN, labels")) {
       const all = await issues(cwd);
       if ("failed" in all) return all.failed;
-      return page(q.includes("states:OPEN, labels") ? all.nodes.filter((n) => n.state === "OPEN") : all.nodes, all.head, q.includes("pullRequests(first:50"));
+      return page(q.includes("states:OPEN, labels") ? all.nodes.filter((n) => n.state === "OPEN") : all.nodes, all.head);
+    }
+    if (/w\d+: issue\(number:/.test(q)) {
+      const all = await issues(cwd);
+      if ("failed" in all) return all.failed;
+      const repository = Object.fromEntries([...q.matchAll(/w(\d+): /g)].map((m) => [`w${m[1]}`, all.nodes.find((n) => n.number === Number(m[1])) ?? null]));
+      return { code: 0, stdout: all.head + JSON.stringify({ data: { repository } }), stderr: "" };
     }
     if (q.includes("issueOrPullRequest")) {
       const numbers = [...q.matchAll(/w(\d+): /g)].map((m) => Number(m[1]));

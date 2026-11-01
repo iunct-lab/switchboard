@@ -1,9 +1,10 @@
+// test-reads: .github/workflows/ci.yml scripts/ci.ts scripts/recordings.ts
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { ciSteps } from "./ci";
-import { checkoutSteps, failLines, failureSummary, perfSteps, LOCAL_CI_RESULT, localCi, notify, patchIdOf, perfVerdict, stackBelow, stackLine, stackOf, stackTested, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, stepEnv, TargetError, type Deps, type LocalCiResult } from "./local-ci";
+import { checkoutSteps, failLines, failureSummary, perfSteps, LOCAL_CI_RESULT, localCi, markerSeconds, notify, patchIdOf, perfVerdict, stackBelow, stackLine, stackOf, stackTested, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, SHARED_ENTRY, stepEnv, stepSeconds, stepWithIdle, TargetError, type Deps, type LocalCiResult } from "./local-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
 const ciTs = await Bun.file(new URL("./ci.ts", import.meta.url)).text();
@@ -36,7 +37,7 @@ describe("local-ci", () => {
    * `pullHead`: what refs/pull/<n>/head holds (none = the head the PR named last). `o.heads` / `o.bases`: what the PR names as its head and what the base
    * branch's tip is, one per read (the last repeats). `o.conflict`: the merge stops on a conflict; `o.mergeError`: it fails otherwise.
    */
-  const deps = (failAt?: string, pullHead?: string, failOutput = "1 fail", base: Record<string, { code: number; output: string }> = {}, throwOnBase = false, o: { heads?: string[]; bases?: string[]; conflict?: boolean; mergeError?: boolean } = {}) => {
+  const deps = (failAt?: string, pullHead?: string, failOutput = "1 fail", base: Record<string, { code: number; output: string }> = {}, throwOnBase = false, o: { heads?: string[]; bases?: string[]; conflict?: boolean; mergeError?: boolean; noCiTs?: boolean } = {}) => {
     const next = (xs: string[]) => (xs.length > 1 ? xs.shift()! : xs[0]!);
     const heads = [...(o.heads ?? [SHA])];
     const bases = [...(o.bases ?? [BASE])];
@@ -63,8 +64,8 @@ describe("local-ci", () => {
           if (throwOnBase && cmd[cmd.indexOf("--detach") + 1]!.includes("-base.")) throw new Error("git worktree add failed: fatal: bad object");
           // the worktree gets the real ci.yml and scripts/ci.ts
           const dir = cmd[cmd.indexOf("--detach") + 1]!;
-          await Bun.write(`${dir}/.github/workflows/ci.yml`, ciYml);
-          await Bun.write(`${dir}/scripts/ci.ts`, ciTs);
+          await Bun.write(`${dir}/.github/workflows/ci.yml`, o.noCiTs ? ciYml.replace(SHARED_ENTRY, "make check") : ciYml);
+          if (!o.noCiTs) await Bun.write(`${dir}/scripts/ci.ts`, ciTs);
         }
         return "";
       },
@@ -102,6 +103,35 @@ describe("local-ci", () => {
     expect(calls.some((c) => c.includes("worktree") && c.includes("remove"))).toBe(true);
     const body = resultComment(r);
     expect(passOf(body)).toEqual([SHA, BASE]);
+  });
+
+  test("step seconds in pass marker: a checkout without scripts/ci.ts (--repo) passes without the seconds, not with an error (#1886)", async () => {
+    const { d } = deps(undefined, undefined, "1 fail", {}, false, { noCiTs: true });
+    const r = await localCi(42, "/repo", d, "example/other", CACHE);
+    expect(r.ok).toBe(true);
+    expect(r.seconds).toBeUndefined();
+    expect(markerSeconds(resultComment(r))).toBeUndefined();
+  });
+
+  test("step seconds in pass marker: the type check's and bun test's seconds on the line after the stack line, read back by markerSeconds (#1886)", async () => {
+    const { d } = deps();
+    const r = await localCi(42, "/repo", d, "example/development", CACHE);
+    // the checkout has scripts/ci.ts: a pass carries the seconds of both steps
+    expect(Object.keys(r.seconds!).sort()).toEqual(["test", "typecheck"]);
+    const results = r.results.map((x) => (x.run.trim() === "bun run typecheck" ? { ...x, seconds: 51.23 } : x.run.trim() === "bun test" ? { ...x, seconds: 42.96 } : x));
+    const timed = { ...r, results, seconds: stepSeconds(results) };
+    expect(timed.seconds).toEqual({ typecheck: 51.2, test: 43 });
+    const body = resultComment({ ...timed, stack: [{ pr: 42, patchId: PID }] });
+    expect(passOf(body)).toEqual([SHA, BASE]);
+    expect(stackOf(body)).toEqual(new Map([[42, PID]]));
+    expect(body.split("\n")[2]).toBe('<!-- local-ci-seconds {"typecheck":51.2,"test":43} -->');
+    expect(markerSeconds(body)).toEqual({ typecheck: 51.2, test: 43 });
+    // without a stack line the seconds come second; a fail has none; a pass without seconds (--repo) has none
+    expect(markerSeconds(resultComment(timed).split("\n")[1]!)).toEqual({ typecheck: 51.2, test: 43 });
+    expect(markerSeconds(resultComment({ ...timed, ok: false }))).toBeUndefined();
+    expect(markerSeconds(resultComment({ ...timed, seconds: undefined }))).toBeUndefined();
+    // this repository's CI without bun test: an error, not a pass without the seconds
+    expect(() => stepSeconds(results.filter((x) => x.run.trim() !== "bun test"))).toThrow("`bun test`");
   });
 
   test("refs/pull/<n>/head that is not the PR's head yet is an error, and nothing runs", async () => {
@@ -302,6 +332,34 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     expect(ran).not.toContain("bun run --cwd apps/web build");
     expect(calls.some((c) => c.includes("worktree") && c.includes("remove"))).toBe(true);
     rmSync(r.results.at(-1)!.log!.replace(/\/[^/]*$/, ""), { recursive: true, force: true });
+  });
+
+  test("a step with no output is cut, and the reason reaches fails and the comment", async () => {
+    const { d } = deps();
+    const r = await localCi(42, "/repo", { ...d, step: (script, cwd, env) => (script.trim() === "bun test" ? stepWithIdle(1)("sleep 600", tmpdir(), env) : d.step(script, cwd, env)) }, "example/development", CACHE);
+    expect(r.ok).toBe(false);
+    const failed = r.results.find((x) => x.code !== 0)!;
+    expect(failed.code).toBe(124);
+    expect(failed.fails).toEqual(["無進捗で打ち切り: 1 秒出力がなかった"]);
+    const comment = resultComment(r);
+    expect(comment.split("\n")[0]).toStartWith("[local-ci] fail ");
+    expect(comment).toContain("    無進捗で打ち切り: 1 秒出力がなかった");
+    rmSync(failed.log!.slice(0, failed.log!.lastIndexOf("/")), { recursive: true, force: true });
+  });
+
+  test("a step that keeps printing past the threshold passes", async () => {
+    const r = await stepWithIdle(2)("for i in 1 2 3 4 5; do echo $i; sleep 1; done", tmpdir(), stepEnv(tmpdir()));
+    expect(r.code).toBe(0);
+    expect(r.output.trim().split("\n")).toEqual(["1", "2", "3", "4", "5"]);
+  }, 10_000);
+
+  test("a step's output is stdout then stderr, so a stderr line is not caught inside a partial stdout line", async () => {
+    const r = await stepWithIdle(5)("printf partial; echo '(fail) a' >&2; sleep 0.1; echo done", tmpdir(), stepEnv(tmpdir()));
+    expect(failLines(r.output)).toEqual(["(fail) a"]);
+  });
+
+  test("a step still stops at its first failure (bash -e)", async () => {
+    expect(await stepWithIdle(5)("false\necho after", tmpdir(), stepEnv(tmpdir()))).toEqual({ code: 1, output: "" });
   });
 
   test("a failing step: its full output is kept in a log under the cache dir, and the (fail) and over: lines are printed even when they are not in the last 30 lines", async () => {

@@ -1,3 +1,4 @@
+// test-reads: .github/workflows/host.yml
 import { describe, expect, test } from "bun:test";
 import { ACTIONS, hostEnv, parseArgs, planHostOperation, runHostOperation, type Deps } from "./host-ops";
 

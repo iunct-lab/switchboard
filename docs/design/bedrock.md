@@ -47,8 +47,8 @@ affected: it runs on Anthropic's side.
 The host's instance role, and the boundary that caps every role of the stack, allow `bedrock:InvokeModel` and
 `bedrock:InvokeModelWithResponseStream` on any model and inference profile; the versions are not pinned, so a new
 model needs no deploy. Codex reaches the OpenAI models through Bedrock Mantle rather than `InvokeModel`, so they also
-allow `bedrock-mantle:CreateInference` on the projects of the stack's own region only: a Codex region set to another
-region is refused. Key creation and any other Bedrock action are not allowed. The model list on the settings screen shows
+allow `bedrock-mantle:CreateInference` on the account's projects in any region: an OpenAI model is offered in its own
+regions, which need not include the stack's, so the region set for Codex must be one that offers the model. Key creation and any other Bedrock action are not allowed. The model list on the settings screen shows
 every Bedrock model of the adapter; what the account can call is decided by IAM.
 
 ## Showing it

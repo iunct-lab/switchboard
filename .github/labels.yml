@@ -31,6 +31,9 @@
 - name: "type:task"
   color: 91a7ff
   description: 実装可能な単位（触る場所・検証・完了条件が書ける）。1 Task = 1 PR
+- name: on-hold
+  color: "d4c5f9"
+  description: 保留。バックログを進めるが取りかからない。行のボタンは押せる
 
 # --- 自動化ドメイン / Automation domains ---
 - name: deps

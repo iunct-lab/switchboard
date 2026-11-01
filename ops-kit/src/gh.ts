@@ -1,4 +1,4 @@
-import { publicCopyRefusal } from "./config.ts";
+import { noWriteRefusal } from "./config.ts";
 
 /**
  * Every call to GitHub goes through one GhClient, so the commands can be tested with fakeGh and never touch GitHub.
@@ -241,11 +241,11 @@ export function fakeGh(responses: Array<(call: FakeCall) => unknown>): GhClient 
 
 /**
  * The repository the commands act on: `GH_REPO` (as gh reads it), else the remote `gh repo set-default` chose, else
- * the `origin` remote, else `gh repo view`. A clone whose target is its own public copy (`publicCopyRefusal`) stops.
+ * the `origin` remote, else `gh repo view`. A clone whose target it must not write to (`noWriteRefusal`) stops.
  */
 export async function repoOf(gh: GhClient, env: Record<string, string | undefined> = process.env, cwd = process.cwd()): Promise<{ owner: string; name: string }> {
   const r = await resolveRepo(gh, env, cwd);
-  const refusal = publicCopyRefusal(`${r.owner}/${r.name}`, cwd);
+  const refusal = noWriteRefusal(`${r.owner}/${r.name}`, cwd);
   if (refusal) throw new GhError(refusal);
   return r;
 }

@@ -46,7 +46,7 @@ body:
     id: story_points
     attributes:
       label: Story Points
-      description: 相対見積り（フィボナッチ）。基準にする閉じた PBI は root の CLAUDE.md の「Story Points の基準」。13 は「大きすぎる」の印で、lint が弾くので分割してから入れる。作成後に `bash scripts/setup/set_project_field.sh <num> "Story Points" <N>`（数字だけ）で Project にも入れる。
+      description: 相対見積り（フィボナッチ）。基準にする閉じた PBI は root の CLAUDE.md の「Story Points の基準」。13 は「大きすぎる」の印で、lint が弾くので分割してから入れる。作成後に `ops-kit backlog set <num> "Story Points" <N>`（数字だけ）で Project にも入れる。
       options: ["1", "2", "3", "5", "8", "13"]
     validations:
       required: true
@@ -63,8 +63,8 @@ body:
       value: |
         **作成したあとにやること**（この Issue には書かない）
 
-        - `bash scripts/setup/triage_issue.sh <num> <area> <kind> <prio>` で Project のフィールドを付ける
-        - 今のゴールに効く PBI なら `gh issue edit <num> --milestone "<今のゴール>"`。効かないなら Milestone は付けない（着手順は Priority が決める）
+        - `ops-kit backlog triage <num> <area> <kind> <prio>` で Project のフィールドを付ける
+        - 今のゴールに効く PBI なら `ops-kit backlog edit <num> --milestone "<今のゴール>"`。効かないなら Milestone は付けない（着手順は Priority が決める）
         - **PBI に親 Issue は付けない**（付けると Project の Backlog ビューから消える）
         - triage は Status も毎回上書きする。最後の引数を省くと `Backlog` になるので、着手済みの Issue には `… <prio> "" "In progress"` のように今の Status を渡す
   - type: textarea

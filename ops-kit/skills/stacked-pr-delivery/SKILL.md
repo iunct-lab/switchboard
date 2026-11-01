@@ -18,7 +18,7 @@ description: Task を Stacked PR（GitHub public preview, gh stack）として�
    `gh pr edit <n> --title ... --body ...`（PULL_REQUEST_TEMPLATE.md の項目を埋める）。draft のままなら `gh pr ready <n>`。
 4. レビュー: `review-with-subagent` スキルの手順で、PR ごとにサブエージェントを起動しコメントさせる。
 5. 指摘対応: **指摘のある枝で**修正 → commit → `gh stack rebase`（スタック全体を下から rebase）→ `gh stack push`。
-   各指摘コメントに個別返信（`gh api .../comments/<id>/replies`）し、最後に要約コメント。Issue にも結果を記録する。
+   各指摘コメントに個別返信（`gh api .../comments/<id>/replies`）し、最後に要約コメント。Issue にも結果を記録する（`ops-kit backlog comment <Task> --body-file …`）。
 6. CI 緑・返信済みを確認して `<マージ判定> <PR番号> --merge-stack`（判定が merge のときだけ `gh stack merge <PR番号> --rebase -y` を呼ぶ。最下段だけ。`gh stack merge` はその PR と下の PR をまとめて atomic に merge する）。
    スタックに属さない単発 PR は `<マージ判定> <n> --merge`（`gh stack merge` は「not a stacked pull request」で失敗する）。
    マージ判定のコマンド（CLAUDE.md）にその引数が無いリポジトリでは、`gh stack merge <PR番号> --rebase -y` / 単発は `gh pr merge <n> --rebase --delete-branch`。

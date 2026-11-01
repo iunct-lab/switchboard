@@ -11,6 +11,7 @@
 - `localCi` は使い捨て worktree を `~/.cache` に、TMPDIR を OS の一時ディレクトリ（`tmpdir()`。このホストでは RAM の `/tmp`）に作り、PATH / HOME / CI=true / TMPDIR だけの環境で実行する。デーモンの SWITCHBOARD_*、実認証の値、実 Cloud セッションを持ち込まない。例外は呼び出し元が明示した録画の置き場所 `SWITCHBOARD_FIXTURES` で、その値だけを引き継ぎ、不足していれば再生のテストが落ちる。未指定なら渡さず、録画が無いテストは skip として数える。Actions・公開 clone / fork でも同じで、録画を必須にはしない。既存の録画は配布しないため、再生を検証するときは [.claude/skills/runner-adapter-recording/SKILL.md](../../.claude/skills/runner-adapter-recording/SKILL.md) に従って自分のランナーで Git の外に録画し、`SWITCHBOARD_FIXTURES=<録画のディレクトリ> bun scripts/local-ci.ts <PR>` と実行する。
 - Chrome と Noto フォントを使用する。性能測定は5回で、他の性能測定と並行しない。
 - CI の全工程を実行する。パス検査、frozen install、ライセンス、型検査、全体テスト、Web build、main fetch、フォント、性能測定、性能判定を省略しない。工程の一覧は固定で複製せず、worktree の中のものを読む（下の「手順」）。
+- pass の印は、スタックの行の次（スタックの行が無ければ 2 行目）に型検査と bun test の所要秒を `<!-- local-ci-seconds {"typecheck":51.2,"test":43} -->` の 1 行で持つ（#1886。`LOCAL_CI_SECONDS` / `markerSeconds`。GitHub の表示には出ない。秒は手順の表と同じ計測で、`run` が `bun run typecheck` / `bun test` の手順のもの。`scripts/ci.ts` を持つ checkout（このリポジトリ）でどちらかの手順が無ければエラーで止まり、`scripts/ci.ts` の無いリポジトリ（`--repo`）では行を付けない）。比べるのは perf-ratchet（[perf.md](perf.md)）。
 
 ## 手順（Actions と同じもの、#912）
 
@@ -23,7 +24,7 @@ Actions の run があってもなくても、結果は PR に forge の `verifi
 | 結果 | 1 行目 | 本文 |
 |---|---|---|
 | 全手順が合格 | `[local-ci] pass <head sha> base=<base sha>` | 2 行目にスタックの行 `stack #<n>=<patch-id> …`（スタックの一番下からこの PR まで、各 PR の `gh pr diff \| git patch-id --verbatim`。今の head がテストした head に入っていない下の PR（修正を上へ rebase していない）は、それより下と一緒に外す。`LOCAL_CI_STACK` / `stackOf`。GitHub の PR だけ。読めなければ行を付けずに投稿する）、手順の表 |
-| 手順が落ちた | `[local-ci] fail <head sha> base=<base sha>` | 落ちた手順と exit、その全文から拾った `(fail)` / `over:` の行（最大 20 行）、手順の表。全文は実行したホストの記録（パスは書かない） |
+| 手順が落ちた | `[local-ci] fail <head sha> base=<base sha>` | 落ちた手順と exit、その全文から拾った `(fail)` / `over:` / `無進捗で打ち切り` の行（最大 20 行）、手順の表。全文は実行したホストの記録（パスは書かない） |
 | head が base にマージできない | `[local-ci] fail <head sha> base=<base sha>` | 衝突。手順は実行していない |
 
 投稿の直前に head と base を同じ方法で読み直し（`notify`）、どちらかが実行中に変わっていたら何も投稿せず exit 1（テストしていない head や base の結果を書かない。回し直す）。投稿した後に base が進んだこと、下の PR のマージ後の自動 rebase で head が変わったことでは回し直さない（差分が同じなら 2 行目の patch-id で数えられる。いつ回し、merge-gate がどう数えるかは [docs/merge-gate.md](../merge-gate.md) の「ローカル CI を回す時と数え方」）。読み直せなかったときも投稿しない。投稿する文はキットの認証の値の検査（`runForgeOperation`）を通る。投稿が認証・権限で失敗したら、理由を出して exit 1 で止まる（別の経路で投稿しない。Task なら会話で確認する）。結果の印の読み方は `LOCAL_CI_RESULT`（pass か fail、head、続けて `base=`。マージ判定での扱いは [docs/merge-gate.md](../merge-gate.md)）。
@@ -34,7 +35,9 @@ Actions の run があってもなくても、結果は PR に forge の `verifi
 
 ## 全文と測定値を残す実行手順
 
-落ちた工程は `local-ci.ts` が全文を `~/.cache/switchboard.local-ci-<owner>_<name>-<PR>-log.*` に残し、`(fail)` と `over:` の行・最後の 30 行・そのパスを出す（#1232。通った工程は残さない。同じ PR の前の失敗のディレクトリは次の失敗で消え、PR ごとに最新 1 件）。
+手順は `ops-kit/src/idle-run.ts` の `runIdle` で回す。15 分（`scripts/ci.ts` の `STEP_IDLE_SECONDS`）出力が無い手順はプロセスグループごと切り、exit 124 と理由の行 `無進捗で打ち切り: 900 秒出力がなかった` で落ちた手順として扱う。総時間の上限は無い。手順が背景で起動したプロセスはその手順の終わりに消える（Actions と違い、次の手順まで残らない）。local-ci 自身がシグナルで止められたら手順の失敗にせず、何も投稿しないで終わる。
+
+落ちた工程は `local-ci.ts` が全文を `~/.cache/switchboard.local-ci-<owner>_<name>-<PR>-log.*` に残し、`(fail)`・`over:`・`無進捗で打ち切り` の行、最後の 30 行・そのパスを出す（#1232。通った工程は残さない。同じ PR の前の失敗のディレクトリは次の失敗で消え、PR ごとに最新 1 件）。
 
 性能の工程（`perf-bench.ts` / `perf-ratchet.ts check`）が落ちたときは、同じディレクトリに `perf-result.json`（あれば）と `summary.md` も残し、`summary.md` と同じ文を出す（#1056、#1184）。`summary.md` の形:
 
@@ -52,7 +55,7 @@ main の計測に失敗（原因不明）                 ← main の install /
 main の over:                               ← main の over の行をそのまま
 ```
 
-check が `over` を出したときだけ、base（実行を始めたときの base の枝の先端 = その時点の main）を別の worktree に出し、同じ環境（`TMPDIR` も同じ）で PR の手順の `bun install --frozen-lockfile` と `bun run --cwd apps/web build` から check までの手順（`perfSteps`）を回して比べる（#1191）。記録は同じディレクトリの `perf-result.base.json` と `base-<n>-<手順>.log`。`improved` / `raised` / 原因不明だけなら main は測らない。`over` のときはローカル CI が 3〜5 分伸びる。
+check が `over` を出したときだけ、base（実行を始めたときの base の枝の先端 = その時点の main）を別の worktree に出し、同じ環境（`TMPDIR` も同じ）で PR の手順の `bun install --frozen-lockfile` と `bun run --cwd apps/web build` から check までの手順（`perfSteps`）を回して比べる（#1191）。記録は同じディレクトリの `perf-result.base.json` と `base-<n>-<手順>.log`。`improved` / `raised` / 原因不明だけなら main は測らない。`over` のときはローカル CI が 10 分ほど伸びる。
 
 どの判定でも失敗のままで、PR には合格印の無い失敗の結果を投稿する（下の「結果の通知」）。長い JSON（check の後の `cat perf-result.json`）で判定の行が押し出されることはない。
 

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { BacklogIssueDetail, BacklogSyncInfo } from "@switchboard/protocol";
-import { backlogHeading, createWord, draftKey, heldIssueText, editOf, formAfterRead, formOf, githubSyncText, labelList, loadDraft, loadNewIssueDraft, PROJECT_SETUP_DOC, rebaseForm, syncLine, valueText, workspaceErrorGuide } from "./backlogSync.ts";
+import { backlogHeading, createWord, draftKey, heldIssueText, issueHref, savedWords, editOf, formAfterRead, formOf, githubSyncText, labelList, loadDraft, loadNewIssueDraft, PROJECT_SETUP_DOC, rebaseForm, syncLine, valueText, workspaceErrorGuide } from "./backlogSync.ts";
 
 const fmt = (ms: number) => `t${ms}`;
 const info = (over: Partial<BacklogSyncInfo>): BacklogSyncInfo => ({ state: "synced", reason: null, lastSuccessfulSync: 1000, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A", ...over });
@@ -158,18 +158,31 @@ describe("workspaceErrorGuide (#2362)", () => {
   });
 });
 
+test("issueHref is null for an Issue kept in Switchboard", () => {
+  expect(issueHref("")).toBeNull();
+  expect(issueHref("https://github.com/acme/app/issues/1")).toBe("https://github.com/acme/app/issues/1");
+});
+
+test("savedWords names GitHub only for a workspace that sends to it", () => {
+  expect(Object.values(savedWords(true)).filter((w) => w.includes("GitHub"))).toEqual([]);
+  expect(Object.values(savedWords(false)).every((w) => w.includes("GitHub"))).toBe(true);
+});
+
 describe("backlogHeading (#2362)", () => {
+  test("names GitHub only for GitHub workspaces", () => {
+    expect(backlogHeading(1000, false, ["github", "switchboard"], fmt)).toBe("t1000 に読み込み（GitHub の workspace は GitHub から取得）");
+  });
   test("GitHub in view (or not known yet): the import's time", () => {
-    expect(backlogHeading(1000, false, true, fmt)).toBe("t1000 に GitHub から取得");
+    expect(backlogHeading(1000, false, ["github"], fmt)).toBe("t1000 に GitHub から取得");
     expect(backlogHeading(1000, true, null, fmt)).toBe("t1000 に GitHub から取得 · 読み込み中…");
   });
   test("only workspaces kept here: not \"from GitHub\"", () => {
-    expect(backlogHeading(1000, false, false, fmt)).toBe("Switchboard に保存（GitHub と連携しない）");
-    expect(backlogHeading(1000, true, false, fmt)).toBe("Switchboard に保存（GitHub と連携しない） · 読み込み中…");
+    expect(backlogHeading(1000, false, ["switchboard"], fmt)).toBe("Switchboard に保存");
+    expect(backlogHeading(1000, true, ["switchboard"], fmt)).toBe("Switchboard に保存 · 読み込み中…");
   });
   test("nothing read yet", () => {
-    expect(backlogHeading(null, true, true, fmt)).toBe("読み込み中…");
-    expect(backlogHeading(null, false, false, fmt)).toBe("");
+    expect(backlogHeading(null, true, ["github"], fmt)).toBe("読み込み中…");
+    expect(backlogHeading(null, false, ["switchboard"], fmt)).toBe("");
   });
 });
 

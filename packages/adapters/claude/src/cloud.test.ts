@@ -1,3 +1,4 @@
+// test-reads: packages/adapters/claude/src/cloud.ts
 import { recordingText, skipRecordings, assertRecordings } from "../../../../scripts/recordings.ts";
 import { afterEach, beforeAll, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";

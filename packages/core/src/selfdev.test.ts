@@ -1,3 +1,4 @@
+// test-reads: packages/core/src/main.ts
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -79,6 +80,20 @@ describe("self-dev checks (#18)", () => {
       expect((await p3).ok).toBe(false);
     } finally {
       CHECKS.splice(0, CHECKS.length, ...saved);
+    }
+  });
+
+  test("the checks are typecheck only: the full test suite stays with local-ci, a run still gives its result (#3266)", async () => {
+    const { CHECKS } = await import("./selfdev.ts");
+    expect(CHECKS.map((c) => c.kind)).toEqual(["typecheck"]);
+    const dir = mkdtempSync(join(tmpdir(), "sb-selfdev-checks-"));
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { typecheck: "echo typed" } }));
+    try {
+      const run = await new SelfDev(db, dir, () => undefined).run("manual");
+      expect(run.results.map((r) => [r.kind, r.ok, r.summary])).toEqual([["typecheck", true, "typecheck ok"]]);
+      expect(db.getCheckRun("manual")?.ok).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

@@ -1,3 +1,4 @@
+// test-reads: packages/core/src/config.ts packages/core/src/server.ts
 import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

@@ -6,7 +6,7 @@ import type { AgentEvent, RunnerAdapter, RunnerId, RunnerSession, StartOptions, 
 import { abortOrphanedTasks, Db } from "./db.ts";
 import { STOP_NOTE } from "./evals.ts";
 import { consecutiveStops, lastStopWasDaemon, MAX_STOP_RESUMES, STOP_RESUME_PROMPT } from "./interrupted.ts";
-import { FALLBACK_DELAY_MS, GITHUB_NOTE, GITHUB_RESUME_PROMPT, LATE_RETRY_MS, MAX_CONSECUTIVE_STOPS, MAX_FALLBACK_DELAY_MS, PAST_GRACE_MS, PROBE_AFTER_MS, RESUME_MARGIN_MS, RESUME_PROMPT, RateLimitResumer, type ResumeTunables, detectLimitStop, fallbackNote, fallbackRunner, fmtTime, githubLimitHit, isLimitText, parseResetBanner, planResumeAt, resetFromQuota } from "./ratelimit.ts";
+import { FALLBACK_DELAY_MS, GITHUB_NOTE, GITHUB_RESUME_PROMPT, GITHUB_WINDOW_MS, LATE_RETRY_MS, MAX_CONSECUTIVE_STOPS, MAX_FALLBACK_DELAY_MS, PAST_GRACE_MS, PROBE_AFTER_MS, RESUME_MARGIN_MS, RESUME_PROMPT, RateLimitResumer, type ResumeTunables, detectLimitStop, fallbackNote, fallbackRunner, fmtTime, githubLimitHit, isLimitText, parseResetBanner, planResumeAt, resetFromQuota, usesGraphql } from "./ratelimit.ts";
 import { ResumeSupersededError, TaskManager } from "./tasks.ts";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
 
@@ -838,6 +838,80 @@ describe("GitHub API limit met by a turn's commands (#550)", () => {
       resumer.stop();
       await tasks.shutdown();
     }
+  });
+
+  test("usesGraphql: gh commands on GraphQL count, REST and other tools do not", () => {
+    boot([OK_TURN]); // nothing runs; the hooks expect a resumer
+    for (const command of ["gh pr view 2", "gh issue list", "gh project item-list 1", "gh api graphql -f query=x", "cd x && gh  pr view 2"]) expect([command, usesGraphql("Bash", { command })]).toEqual([command, true]);
+    for (const command of ['/bin/bash -lc "gh pr view 2"', "/bin/zsh -lc 'gh issue list'", 'bash -c "cd x && gh pr view \\"a b\\""']) expect([command, usesGraphql("exec", { command, cwd: "/tmp" })]).toEqual([command, true]);
+    for (const command of ['/bin/bash -lc "grep \'gh pr\' x"', '/bin/bash -lc "grep -nE \\"gh api|gh pr\\" x"', '/bin/bash -lc "echo \\"run: a && gh pr view\\""']) expect([command, usesGraphql("exec", { command, cwd: "/tmp" })]).toEqual([command, false]);
+    for (const command of ["gh api repos/x/y", "gh run list", "bun test", "highlight pr"]) expect([command, usesGraphql("Bash", { command })]).toEqual([command, false]);
+    expect(usesGraphql("Read", { command: "gh pr view 2" })).toBe(false);
+    expect(usesGraphql("Monitor", { command: "gh pr checks 2" })).toBe(false);
+    expect(usesGraphql("Bash", null)).toBe(false);
+    // the words without gh running, or a run whose failure could not show: no proof
+    for (const command of ['grep -n "gh pr" docs/merge-gate.md', "echo waiting for gh pr view", 'git commit -m "fix gh pr view retry"', "gh pr view --help", "gh pr view 1 2>/dev/null || true", "gh pr view 1 >/dev/null 2>&1", "gh pr view 1 &>/dev/null", 'grep -nE "gh api|gh pr" docs/merge-gate.md', 'echo "run: a && gh pr view"', 'git commit -m "$(cat <<EOF\nfix\ngh pr view 1\nEOF\n)"', "cat <<EOF\ngh pr view 1\nEOF", "gh pr view 1 > out.txt 2>&1; echo done", "gh pr view 1 &", "gh pr view 1 -h"]) expect([command, usesGraphql("Bash", { command })]).toEqual([command, false]);
+    expect(usesGraphql("Bash", { command: "gh pr view 1", run_in_background: true })).toBe(false);
+    for (const command of ["gh pr view 1 2>&1 | head", "(gh pr view 1)", "git fetch; gh issue list", "git fetch\ngh pr view 1", "x | gh project list"]) expect([command, usesGraphql("Bash", { command })]).toEqual([command, true]);
+  });
+
+  test("a command hitting the limit again is the turn's latest hit, whatever hit in between", async () => {
+    const other = "gh: API rate limit exceeded for user ID 1.";
+    const turn = [start, ...call("c1", "Bash", { command: "gh pr view 1" }, `Exit code 1\n${LINE}`, false), ...call("c2", "Bash", { command: "gh issue view 3" }, `Exit code 1\n${other}`, false), ...call("c3", "Bash", { command: "gh pr view 1" }, `Exit code 1\n${LINE}`, false), ...end()];
+    boot([turn, OK_TURN]);
+    const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
+    await settle();
+    expect(statuses(t.id).at(-1)).toContain(LINE);
+  });
+
+  test("a stale limit with the budget back after the most auto-resumes in a row gets no give-up note: nothing is left of the run", async () => {
+    boot([...Array(MAX_CONSECUTIVE_STOPS + 1).fill(GH_TURN), OK_TURN]);
+    const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
+    await settle();
+    for (let i = 1; i <= MAX_CONSECUTIVE_STOPS; i++) {
+      now = db.getTask(t.id)!.resumeAt! + 1;
+      if (i === MAX_CONSECUTIVE_STOPS) {
+        now = Date.now() + GITHUB_WINDOW_MS + 60_000;
+        budget = { remaining: 5000, limit: 5000, resetsAt: Math.floor(now / 1000) + 600 };
+      }
+      expect(await resumer.tick()).toEqual([t.id]);
+      await settle();
+    }
+    expect(db.getTask(t.id)).toMatchObject({ status: "done", resumeAt: null, resumeReason: null });
+    expect(statuses(t.id).filter((s) => s.includes("これ以上は再開しません"))).toEqual([]);
+  });
+
+  test("another GraphQL command succeeding after the limit: the turn ends done with no plan and no note, though the budget reads low", async () => {
+    const turn = [start, ...call("c1", "Bash", { command: "gh pr view 1" }, `Exit code 1\n${LINE}`, false), ...call("c2", "Bash", { command: "gh issue view 3" }, `Exit code 1\n${LINE}`, false), ...call("c3", "Bash", { command: "gh pr view 2" }, "ok", true), ...end("done")];
+    boot([turn, OK_TURN]);
+    const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
+    await settle();
+    expect(db.getTask(t.id)).toMatchObject({ status: "done", resumeAt: null, resumeReason: null });
+    expect(statuses(t.id).filter((s) => s.includes(GITHUB_NOTE))).toEqual([]);
+  });
+
+  test("a limit met a whole window ago with the budget back plans nothing; with the budget still out, or within the window, it plans", async () => {
+    for (const [ago, remaining, planned] of [[GITHUB_WINDOW_MS + 60_000, 5000, false], [GITHUB_WINDOW_MS + 60_000, 0, true], [GITHUB_WINDOW_MS - 60_000, 5000, true]] as const) {
+      now = Date.now() + ago; // the hit is stamped by the real clock; the resumer's clock is this one
+      budget = { remaining, limit: 5000, resetsAt: Math.floor(now / 1000) + 600 };
+      boot([GH_TURN, OK_TURN]);
+      const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
+      await settle();
+      const cur = db.getTask(t.id)!;
+      expect([ago, remaining, cur.status, cur.resumeAt !== null, statuses(t.id).some((s) => s.includes(GITHUB_NOTE))]).toEqual([ago, remaining, "done", planned, planned]);
+      resumer.cancel(t.id);
+      resumer.stop();
+      await tasks.shutdown();
+    }
+  });
+
+  test("only REST succeeding after the limit, within the window: planned as before", async () => {
+    const turn = [start, ...call("c1", "Bash", { command: "gh pr view 1" }, `Exit code 1\n${LINE}`, false), ...call("c2", "Bash", { command: "gh api repos/x/y" }, "{}", true), ...end("done")];
+    boot([turn, OK_TURN]);
+    const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
+    await settle();
+    expect(db.getTask(t.id)).toMatchObject({ status: "done", resumeAt: GH_RESET * 1000 + RESUME_MARGIN_MS, resumeReason: "github" });
+    expect(statuses(t.id).at(-1)).toContain(GITHUB_NOTE);
   });
 
   test("a turn that ended on another error after meeting the limit is planned too; a cancel while the budget is read leaves no plan; a failed GitHub follow-up keeps its reason", async () => {

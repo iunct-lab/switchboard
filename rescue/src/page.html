@@ -51,6 +51,11 @@
 <div class="row" id="rebuild-row" hidden>
   <button id="rebuild">作り直す（ディスクを初期状態に戻す）</button>
 </div>
+<div class="row" id="stop-row" hidden>
+  <button id="stop">停止する（機械の電源を切る）</button>
+  <div class="dim">押すと確認が出ます。止めたあとは /_auth/ の 起動する で戻せます。</div>
+</div>
+<div id="stop-sent" hidden>停止しています。止まったら <a href="/_auth/">/_auth/</a> の 起動する で戻せます</div>
 
 <h2>ディスク</h2>
 <div class="card">
@@ -121,13 +126,14 @@ function render(s) {
   $("busy").textContent = s.busy ? "実行中: " + s.busy + "…" : "";
   $("error").textContent = refused || s.lastError || "";
   $("rebuild-row").hidden = !s.rebuild;
+  $("stop-row").hidden = !s.stop;
   restartReloads = !!s.restartReloads;
   stopping = s.stopping || [];
   // textContent: the titles are what people typed
   $("stopping").textContent = stopping.length ? "再起動・版の切り替えで止まる Task（自動再開が有効なら起動後に続きから）: " + stopping.map(taskName).join("、") : "止まる Task はありません";
   options($("release"), s.releases.map((r) => r.sha).filter((sha) => sha !== s.current), name);
   options($("snapshot"), s.snapshots, (f) => f);
-  for (const id of ["restart", "rollback", "choose", "restore", "rebuild"]) $(id).disabled = !!s.busy || (id === "rebuild" && rebuilding);
+  for (const id of ["restart", "rollback", "choose", "restore", "rebuild", "stop"]) $(id).disabled = !!s.busy || (id === "rebuild" && rebuilding) || (id === "stop" && stopPressed);
   $("rollback").disabled ||= !s.previous;
   $("choose").disabled ||= !$("release").value;
   $("restore").disabled ||= !$("snapshot").value;
@@ -235,6 +241,17 @@ $("rebuild").onclick = async () => {
   const sent = await act("api/rebuild", {}, "機械のディスクを初期状態に戻して作り直します。機械は再起動し、DB は Litestream の複製から戻ります（数分かかります）。この画面もいったん切れます。");
   // cancelled, or refused (the reason stays on the page through the status' lastError): the button is usable again
   if (sent !== true) { rebuilding = false; $("rebuild").disabled = false; }
+};
+// the Starter's own stop (#1394) on this origin; act's Bearer token, if any, means nothing there. Once it went through the machine is going down: a second answers 409
+var stopPressed = false; // var: render() reads it before this line runs
+$("stop").onclick = async () => {
+  if (stopPressed) return;
+  stopPressed = true;
+  $("stop").disabled = true;
+  $("error").textContent = "";
+  const sent = await act("/_auth/stop", {}, "機械を停止します。Switchboard も救援画面も、起動するまで開けません。動いている Task は止まります。進めますか？" + stopsText());
+  if (sent === true) $("stop-sent").hidden = false;
+  else { stopPressed = false; $("stop").disabled = false; }
 };
 $("agent-start").onclick = () => act("api/agent/start", {}, "救援エージェントを起動します。Claude の定額枠を使います。");
 $("agent-stop").onclick = () => act("api/agent/stop", {}, "救援エージェントを止めます。");

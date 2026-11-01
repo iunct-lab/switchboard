@@ -1,3 +1,4 @@
+// test-reads: packages/adapters/codex/fixtures/fake-app-server.ts
 import { recordingText, skipRecordings, assertRecordings } from "../../../../scripts/recordings.ts";
 import { describe, expect, test } from "bun:test";
 import { AgentEvent, type StartOptions } from "@switchboard/protocol";
