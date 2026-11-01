@@ -1,9 +1,11 @@
+// test-reads: .github/workflows/ci.yml scripts/ci.ts
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, test } from "bun:test";
 import { NO_HOST } from "../ops-kit/src/secrets";
 import type { Filed, OpenRequest } from "./file-request";
+import { stepWithIdle } from "./local-ci";
 import { failedIn, failureRequest, followUp, hidePaths, latestPass, latestPassTag, parseArgs, REQUEST_TITLE, resolveRepo, resultSection, tagCi, tagCiExit, tagResult, TAG_CI_RESULT, type FollowDeps, type TagCiDeps } from "./tag-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
@@ -97,6 +99,16 @@ describe("tag-ci", () => {
     expect(r.map((x) => `${x.tag} ${x.result} ${x.ran}`)).toEqual(["v2.0.0 fail true", "v1.0.0 fail false"]);
     expect(f.worktrees).toEqual(["v2.0.0"]);
     expect(f.edits.map((e) => e.tag)).toEqual(["v2.0.0"]);
+  });
+
+  test("--repo: a step with no output is cut, and the Release's section has the fail and the reason", async () => {
+    const f = fake([{ tag: "v1.0.0", body: "- #1 x" }]);
+    const r = await tagCi({ ...f.d, step: (script, _cwd, env) => (script.trim() === "bun test" ? stepWithIdle(1)("sleep 600", tmpdir(), env) : Promise.resolve({ code: 0, output: "ok" })) }, "o/r", "/repo", CACHE, NO_HOST);
+    expect(r).toMatchObject([{ tag: "v1.0.0", result: "fail", fails: ["無進捗で打ち切り: 1 秒出力がなかった"] }]);
+    const section = resultSection({ sha: shaOf("v1.0.0"), ok: false, step: r[0]!.step, fails: r[0]!.fails }, NO_HOST);
+    expect(section).toContain(`[tag-ci] fail ${shaOf("v1.0.0")}`);
+    expect(section).toContain("無進捗で打ち切り");
+    expect(f.edits.at(-1)!.body).toContain("無進捗で打ち切り");
   });
 
   test("second run calls no step", async () => {

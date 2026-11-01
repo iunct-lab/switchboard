@@ -12,8 +12,8 @@ Task の親は必ずその PBI（sub-issue）。Task は 1 PR で終わる大き
 
 ### 1. PBI を確かめる
 
-`gh issue view <num>` で本文を読む（エージェント管理アプリの Task の中では `ops-kit backlog view <num> --fresh`。Task の作成・Project・Milestone も `ops-kit backlog create --parent <PBI> --milestone … --field …` / `set`。`issue-workflow` の「操作」）。無ければ**先に直す**（`request-to-backlog` の書式。決定ログに日付つきで「書き直し」）:
-ユーザーストーリー / 検証つき受け入れ条件 / スコープ外 / `**Story Points**: N` / `## 元要望`。`scripts/setup/lint_backlog.sh`（`BACKLOG_URL` があれば `ops-kit lint --fresh`）が exit 0。
+`ops-kit backlog view <num> --fresh` で本文を読む（Task の作成・Project・Milestone も `ops-kit backlog`。`issue-workflow` の「操作」）。無ければ**先に直す**（`request-to-backlog` の書式。決定ログに日付つきで「書き直し」）:
+ユーザーストーリー / 検証つき受け入れ条件 / スコープ外 / `**Story Points**: N` / `## 元要望`。`ops-kit lint --fresh` が exit 0。
 
 元要望（`## 元要望` の Issue）の原文も読む。PBI の解釈が原文からずれていたら PBI を直してから分解する。
 
@@ -68,12 +68,8 @@ Spike が要るなら timebox と成果物（`docs/design/<name>.md`）を書い
 覆われない条件があれば Task を足す。**条件をスコープ外に移すのは利用者の判断**（要件の変更）: PBI の決定ログに理由を書き、`## 判断待ち`（ラベル `needs-decision`。`issue-workflow` の「判断待ちの出し方」）で利用者に聞き、返事があるまで Ready にしない（headless でも同じ。勝手に条件を削って Ready にしない）。画面に関わる問いは `issue-workflow` の「判断待ちの出し方」の画面イメージを添える。
 
 ```bash
-gh issue create -t "Task: <触る場所 — 何をするか>" -l type:task -F "$W/task.md"     # W=$(mktemp -d /tmp/<リポジトリ名>.tasks<PBI>.XXXXXX)。固定の /tmp/task.md にしない
-bash scripts/setup/triage_issue.sh <num> <area> <kind> <P0-P3> "Phase N" <PBI番号> Backlog     # 親 = PBI
-gh issue edit <num> --milestone "<PBI と同じ Milestone>"
-# BACKLOG_URL があれば（issue-workflow の「操作」）: 作成と親とフィールドと Milestone を ops-kit backlog で
-#   ops-kit backlog create --title "Task: …" --label type:task --body-file "$W/task.md" --parent <PBI番号> --milestone "<PBI と同じ Milestone>"
-#   ops-kit backlog triage <num> <area> <kind> <P0-P3> "Phase N" <PBI番号> Backlog
+ops-kit backlog create --title "Task: <触る場所 — 何をするか>" --label type:task --body-file "$W/task.md" --parent <PBI番号> --milestone "<PBI と同じ Milestone>"     # W=$(mktemp -d /tmp/<リポジトリ名>.tasks<PBI>.XXXXXX)。固定の /tmp/task.md にしない
+ops-kit backlog triage <num> <area> <kind> <P0-P3> "Phase N" <PBI番号> Backlog     # 親 = PBI
 ```
 
 Task 本文（`.github/ISSUE_TEMPLATE/task.yml` の見出し。「やること」の末尾に設計チェックの 1 行）:
@@ -86,15 +82,15 @@ Task 本文（`.github/ISSUE_TEMPLATE/task.yml` の見出し。「やること�
                      負荷: <頻度> × <大きさ>（今 / 3 か月後）。繰り返し呼ぶものが無ければ「負荷: なし」
 ## 手順              1. path: 何を（関数名・型名・エンドポイント・設定キーを決めて書く） 2. … （3〜6 ステップ）
 ## 検証              テストのコマンド（CLAUDE.md）で <file> の "<name>" が pass / curl … | jq .<key> / Chrome で <操作> → <結果>
-## 完了条件 (DoD)     - [ ] テスト追加 - [ ] typecheck / test green - [ ] 実構成で確認 - [ ] 結果コメント
+## 完了条件 (DoD)     - [ ] テスト追加（既存への追加・軽い階層を先に検討） - [ ] typecheck / test green - [ ] 実構成で確認 - [ ] 結果コメント
 ```
 
 ### 5. PBI を Ready にする
 
 1. PBI の `## Tasks` に着手順を 1 行（`sub-issue 参照。順番: core → web`）
 2. 決定ログに「YYYY-MM-DD: Task 分解（#a, #b, #c）。被覆: …。Story Points N → M（理由）」
-3. `bash scripts/setup/set_project_field.sh <PBI> Status Ready`（`BACKLOG_URL` があれば `ops-kit backlog set <PBI> Status Ready`）
-4. `bash scripts/setup/lint_backlog.sh`（`BACKLOG_URL` があれば `ops-kit lint --fresh`）→ exit 0
+3. `ops-kit backlog set <PBI> Status Ready`
+4. `ops-kit lint --fresh` → exit 0
 
 ## 報告（利用者への返事の型）
 

@@ -53,7 +53,8 @@ describe("applying saved policies (#938)", () => {
     expect((await policies())[0]!.uses).toMatchObject([{ taskId: second, subject: { target: "PR #12", head: expect.any(String) } }]);
   });
 
-  test("decision applies: backlog-next's firing writes the policy's choice as ## 回答 with the basis line, and the label comes off", async () => {
+  /** #306 waiting on a decision a saved policy answers, and backlog-next's firing; returns the choice. */
+  const fireDecision = async (onHold = false) => {
     await h.boot();
     const meta = h.meta();
     const stage = { issue: 306, action: "plan" } as never;
@@ -69,13 +70,27 @@ describe("applying saved policies (#938)", () => {
     const s = await post("/api/schedules", { title: "バックログを進める", cron: "0 */3 * * *", workspaceId: meta.id, runner: "claude", prompt: "", action: "backlog-next" });
     const id = ((await s.json()) as { id: string }).id;
     await h.patch(`/api/workspaces/${meta.id}`, { sweep: { implement: 0, plan: 0 } });
+    if (onHold) expect((await h.patch("/api/backlog/306", { workspaceId: meta.id, labels: { add: ["on-hold"], remove: [] } })).status).toBe(202);
     await post(`/api/schedules/${id}/run`, {});
+    return choice;
+  };
+  const stageTasks = () => h.core!.db.listTasks().filter((t) => t.title.startsWith("#306 ") && t.id !== "tsk_stage306");
+
+  test("decision applies: backlog-next's firing writes the policy's choice as ## 回答 with the basis line, and the label comes off", async () => {
+    const choice = await fireDecision();
     const ops = h.core!.db.listPendingBacklogOperations().map((o) => o.payload as unknown);
     const comment = ops.map((o) => (o as { body?: string }).body).find((b) => b?.startsWith("## 回答"));
     expect(comment).toContain(choice);
     expect(comment).toContain("（方針 pol_t を適用: このリポジトリ / decide storage / 条件 なし / 期限 ");
     expect(ops).toContain(false);
     expect((await policies())[0]!.uses).toMatchObject([{ issue: 306 }]);
+    expect(stageTasks()).toHaveLength(1); // the answer goes on with a stage Task
+  });
+
+  test("decision on hold: the policy answers, and the work does not go on until the label comes off (#2930)", async () => {
+    await fireDecision(true);
+    expect((await policies())[0]!.uses).toMatchObject([{ issue: 306 }]);
+    expect(stageTasks()).toEqual([]);
   });
 
   test("not applied: expired, revoked, other repository, other PBI, other target, other condition, other choice, a security merge check and a refused permission all leave the question open", async () => {

@@ -1,3 +1,4 @@
+// test-reads: .gitattributes
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -60,4 +61,16 @@ test("pruneReleases keeps current, previous and the newest KEEP_RELEASES by hist
   expect(left).toEqual([ids[0]!, ids[1]!, ...ids.slice(4)].sort());
   expect(removed.sort()).toEqual([ids[2]!, ids[3]!]);
   expect([currentOf(f2.home), previousOf(f2.home)]).toEqual([ids[1]!, ids[0]!]);
+});
+
+test("the repository's .gitattributes leaves the root .github out of a release, and keeps the kit's", async () => {
+  await commitFile(f.repo, ".github/workflows/x.yml", "on: push\n", "a workflow");
+  await commitFile(f.repo, "ops-kit/public/.github/workflows/y.yml", "on: push\n", "the kit's workflow");
+  const own = readFileSync(join(import.meta.dir, "../../.gitattributes"), "utf8");
+  const sha = await buildRelease(f.repo, await commitFile(f.repo, ".gitattributes", own, "no .github in a release"), f.home);
+  const dir = join(releasesDir(f.home), sha);
+  expect(existsSync(join(dir, ".github"))).toBe(false);
+  expect(existsSync(join(dir, "ops-kit/public/.github/workflows/y.yml"))).toBe(true); // ops-kit/ runs from the release: public-sync reads it
+  expect(existsSync(join(dir, "packages/core/src/main.ts"))).toBe(true);
+  expect(existsSync(join(dir, ".gitattributes"))).toBe(true);
 });

@@ -1,3 +1,4 @@
+// test-reads: ops-kit/bin/gh
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -330,6 +331,60 @@ describe("public copy (#2466): a write from a clone that still writes to its pub
 
   test("a tree without publicSync: every write reaches gh without repo view", () => {
     for (const argv of WRITES) expect([argv, gh(argv, { FAKE_DEFAULT: "acme/widget" }, dir).called]).toEqual([argv, [argv]]);
+  });
+
+  describe("noWrite: a clone marked ops-kit.noWrite (#2576)", () => {
+    let foreign: string;
+    const git = (...args: string[]) => Bun.spawnSync(["git", ...args], { cwd: foreign, env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+    beforeAll(() => {
+      foreign = mkdtempSync(join(tmpdir(), "ops-kit.gh-guard.foreign."));
+      git("init", "-q");
+      git("remote", "add", "upstream", "https://github.com/someone/widget.git");
+      git("config", "--add", "ops-kit.noWrite", "someone/widget");
+    });
+    afterAll(() => rmSync(foreign, { recursive: true, force: true }));
+    const stops = (argv: string[], env: Record<string, string> = {}) => {
+      const r = gh(argv, env, foreign);
+      expect([argv, r.code, r.called.filter((c) => c[0] !== "repo")]).toEqual([argv, 1, []]);
+      expect(r.err).toContain("gh-guard: 投稿を止めました");
+      expect(r.err).toContain("ops-kit.noWrite");
+    };
+
+    test("noWrite: every write to the default stops", () => {
+      for (const argv of WRITES) stops(argv, { FAKE_DEFAULT: "someone/widget" });
+    });
+
+    test("noWrite: a write naming nothing stops when gh cannot say the default", () => {
+      for (const argv of WRITES) stops(argv, { FAKE_DEFAULT: "" });
+    });
+
+    test("noWrite: a write naming the mark stops, even when the default is elsewhere or gh repo view answers nothing", () => {
+      for (const argv of [["issue", "create", "-R", "someone/widget", "-t", "x", "-b", "x"], ["issue", "comment", "https://github.com/someone/widget/issues/1", "-b", "x"], ["api", "-X", "POST", "repos/Someone/Widget/issues", "-f", "title=x"]]) {
+        stops(argv, { FAKE_DEFAULT: "me/widget" });
+        stops(argv, { FAKE_DEFAULT: "" });
+      }
+      stops(["issue", "comment", "1", "-b", "x"], { GH_REPO: "someone/widget" });
+    });
+
+    test("noWrite: a write naming nothing reaches gh when the default is elsewhere", () => {
+      for (const argv of WRITES) expect([argv, gh(argv, { FAKE_DEFAULT: "me/widget" }, foreign).called]).toEqual([argv, [VIEW, argv]]);
+    });
+
+    test("noWrite: gh api with a full URL names the mark too", () => {
+      stops(["api", "https://api.github.com/repos/someone/widget/issues/1/comments", "-f", "body=x"], { FAKE_DEFAULT: "me/widget" });
+      stops(["api", "-X", "PATCH", "repos/someone/widget?x=1", "-f", "description=x"], { FAKE_DEFAULT: "me/widget" });
+    });
+
+    test("noWrite: a write named elsewhere and a read reach gh", () => {
+      const own = ["issue", "create", "-R", "me/widget", "-t", "x", "-b", "x"];
+      expect(gh(own, { FAKE_DEFAULT: "someone/widget" }, foreign).called).toEqual([own]);
+      for (const argv of [["issue", "view", "1"], ["pr", "list"], ["api", "repos/someone/widget/issues"]]) expect(gh(argv, { FAKE_DEFAULT: "someone/widget" }, foreign).called).toEqual([argv]);
+    });
+
+    test("noWrite: the mark is on the clone; the same write from an unmarked tree reaches gh", () => {
+      const argv = ["issue", "create", "-R", "someone/widget", "-t", "x", "-b", "x"];
+      expect(gh(argv, { FAKE_DEFAULT: "someone/widget" }, dir).called).toEqual([argv]);
+    });
   });
 
   test("writeTargetOf: the named repository, GH_REPO, or null; null for a read", () => {

@@ -1,3 +1,4 @@
+// test-reads: ops-kit/bin/deny-shared-tmp
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { segments, sharedTmpWrites } from "./shared-tmp.ts";

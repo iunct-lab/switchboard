@@ -1,3 +1,4 @@
+// test-reads: aws/auth-page.html
 import { GetDistributionConfigCommand, UpdateDistributionCommand } from "@aws-sdk/client-cloudfront";
 import { describe, expect, spyOn, test } from "bun:test";
 import { createHash, createHmac, createPrivateKey, generateKeyPairSync, randomBytes, sign } from "node:crypto";

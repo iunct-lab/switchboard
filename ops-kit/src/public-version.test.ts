@@ -1,3 +1,4 @@
+// test-reads: none
 import { afterEach, beforeEach, expect, setDefaultTimeout, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -332,29 +333,26 @@ const ledger = () => {
 };
 const refs = () => [git(pub, "for-each-ref"), git(origin, "for-each-ref")];
 
-test("adopt: baseline v0.1.0 on the existing public main, tag, Release and ledger", () => {
+test("adopt: baseline v0.1.0 on the existing public main, tag, Release and ledger, carrying only the version; the next sync bumps from it and keeps the old main as an ancestor", () => {
   const before = published();
   const tree = git(pub, "rev-parse", "main^{tree}");
+  calls = [];
   expect(sync(adopt("v4.2.1"), run)).toContain("public v0.1.0");
+  expect(calls.some((c) => c[0] === "gh" && c[1] === "pr" && c[2] !== "list")).toBe(false);
+  const release = calls.find((c) => c[0] === "gh" && c[1] === "release" && c[2] === "create")!;
+  expect([release[3], release[release.indexOf("--title") + 1], release[release.indexOf("--notes") + 1]]).toEqual(["v0.1.0", "v0.1.0", ""]);
+  expect(git(pub, "log", "--format=%B", "main")).not.toMatch(/v4\.|[0-9a-f]{40}/);
+  expect(git(pub, "for-each-ref", "--format=%(refname)")).not.toContain("v4.");
   expect(git(pub, "rev-parse", "main")).toBe(before);
   expect(git(pub, "rev-parse", "v0.1.0^{commit}")).toBe(before);
   expect([...releases]).toEqual(["v0.1.0"]);
   expect(ledger()).toEqual({ completed: { version: "v0.1.0", source: git(priv, "rev-parse", "v4.2.1"), tag: "v4.2.1", tree, tags: { "v4.2.1": git(priv, "rev-parse", "v4.2.1") }, commit: before } });
-});
-
-test("adopt: next sync bumps from v0.1.0", () => {
-  published(); sync(adopt("v4.2.1"), run);
   commit("v4.2.2"); sync(opts("v4.2.2"), run);
   expect(git(pub, "log", "-1", "--format=%s", "main")).toBe("v0.1.1");
   expect([...releases]).toEqual(["v0.1.0", "v0.1.1"]);
+  expect(Bun.spawnSync(["git", "-C", pub, "merge-base", "--is-ancestor", before, "main"]).exitCode).toBe(0);
   commit("v5.0.0", false);
   expect(sync(opts("v5.0.0"), run)).toContain("nothing to sync");
-});
-
-test("adopt: keeps the old public main as an ancestor", () => {
-  const before = published();
-  sync(adopt("v4.2.1"), run); commit("v4.2.2"); sync(opts("v4.2.2"), run);
-  expect(Bun.spawnSync(["git", "-C", pub, "merge-base", "--is-ancestor", before, "main"]).exitCode).toBe(0);
 });
 
 test("adopt: refuses ledger, missing main, missing record, other source, public version tags, open sync PR without writing", () => {
@@ -403,15 +401,4 @@ test("adopt: resumes a release create failure with v0.1.0", () => {
   expect([...releases]).toEqual(["v0.1.0"]);
   expect(ledger().completed).toMatchObject({ version: "v0.1.0", commit: before });
   expect(ledger().pending).toBeUndefined();
-});
-
-test("adopt: public title and Release body carry only the version", () => {
-  published();
-  calls = [];
-  sync(adopt("v4.2.1"), run);
-  expect(calls.some((c) => c[0] === "gh" && c[1] === "pr" && c[2] !== "list")).toBe(false);
-  const release = calls.find((c) => c[0] === "gh" && c[1] === "release" && c[2] === "create")!;
-  expect([release[3], release[release.indexOf("--title") + 1], release[release.indexOf("--notes") + 1]]).toEqual(["v0.1.0", "v0.1.0", ""]);
-  expect(git(pub, "log", "--format=%B", "main")).not.toMatch(/v4\.|[0-9a-f]{40}/);
-  expect(git(pub, "for-each-ref", "--format=%(refname)")).not.toContain("v4.");
 });

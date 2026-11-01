@@ -55,6 +55,26 @@ bun scripts/perf-bench.ts [--runs N] [--json <file>]      # N の既定は 5。C
 - ブラウザ: headless Chrome、1280×800、`prefers-reduced-motion: reduce`（実行中の点の pulse がフレームごとにスタイルを再計算し、時間に比例して `RecalcStyleCount` が揺れるため）。フォント（`fonts.googleapis.com` / `fonts.gstatic.com`）は `Network.setBlockedURLs` で止める
 - Home の Workspace は「自動」にしない（ランナーに選ばせる 1 ターンが挟まる）
 
+## Load and overlap
+
+The four journeys run on a nearly empty home, so they show neither what grows with the data nor the delay when background work overlaps. After them `perf-bench` always measures `launch` and `send` once more on another daemon (no flag; `--runs` applies).
+
+- **Size**: `LOAD` in `scripts/perf-load.ts`: 1,500 Tasks, 30,000 backlog records, 4,000 `backlog_operations`, from the real home on 2026-10-27 (1,403 / 28,224 / 3,897). `seedLoad` makes them through `Db` and the real import; nothing is read or copied from a real home. The database is about 80 MB, the real size. It is generated once before the runs, and each run starts a daemon on a copy.
+- **What overlaps**: (a) one `POST /api/backlog/sync`. The fake GitHub (`loadGh`) raises its `generation`, so the import rewrites every Issue: heavier than a usual import, on the side of not missing a stall. (b) The rescue page's status check: `checkDaemon` and `tasksThatStop` from `rescue/src/promote.ts`, called as they are every 2 s.
+- **Window**: from the start of the import until both the journey has gone quiet and the import has answered. The wait for quiet before the action is outside it. `launch` and `send` have a window each; opening `long` before `send` is outside and not counted. A failed import fails the run. A loaded journey waits up to 5 minutes, so a daemon stuck for longer than the journeys' usual 30 s reads as a high value rather than a timeout.
+- **Daemon delay**: `/api/health` every 50 ms inside the window, keeping the longest. The value of a run is the larger of its two windows. The daemon shares this process with the measuring code, so a stall stops the timer too: the time counts from when the call was due. Counted from the start of the call, a stall would read as the fast answer after it.
+- **Duration**: `--runs 5` takes about 9 minutes in all (measured on 2026-11-01), nearly all of it the two imports of each loaded run.
+
+`loaded` in the result JSON:
+
+```json
+{ "tasks": 1500, "backlogRecords": 30000, "operations": 4000, "overlap": ["backlog-sync", "rescue-status"],
+  "journeys": { "launch": { "msMedian": 0, "msP90": 0 }, "send": { "msMedian": 0, "msP90": 0 } },
+  "healthMaxMs": 0, "healthMaxMsP90": 0 }
+```
+
+`healthMaxMs` is the median over the runs and `healthMaxMsP90` their p90. The `launch` / `send` times are for reading in the table, like every time in this document; they are no ceiling.
+
 ## 数の意味
 
 ジャーニーの数は、操作の直前から「measure が出て、`/api/` の通信が 500ms 静かになるまで」の差（ストリームの残りとそれが呼ぶ再取得も、そのジャーニーに入れる）。操作の前にも同じだけ静かになるのを待つ（画面が自分で始める読み込み — Home の候補の問い合わせは 250ms の debounce — を前のジャーニーにも次のジャーニーにも入れない）。表と JSON の値は N 回の中央値。
@@ -75,7 +95,7 @@ bun scripts/perf-bench.ts [--runs N] [--json <file>]      # N の既定は 5。C
 
 改善の回し方（遅いジャーニーを選ぶ → ラボで再現 → 1 PR 1 改善で前後の表 → 同じ PR で上限を下げる → マージ後の実測）はスキル `.claude/skills/perf-loop/SKILL.md`。
 
-確かめた数を上限にし、上限は下がる一方にする（#638）。上限は `scripts/perf-budget.json`（ジャーニーごとの `requests` / `layoutCount` / `recalcStyleCount` / `layoutShift` と `bundle` の `js` / `css`）。所要時間は比べない。
+確かめた数を上限にし、上限は下がる一方にする（#638）。上限は `scripts/perf-budget.json`（ジャーニーごとの `requests` / `layoutCount` / `recalcStyleCount` / `layoutShift` と `bundle` の `js` / `css`、`local` の `loaded.healthMaxMs`）。`loaded.healthMaxMs` のほかの所要時間は比べない。
 
 `open-task` の `layoutShift` と `send` の `layoutCount` は両環境の上限から外し、計測の表でだけ見る（#644 の最新の回答 A）。同じコード・同じ Actions 環境の中でも、入力欄が消えて戻る描画のまとまり方で幅を超えて動いたため。残りの項目と bundle は判定を続ける。
 
@@ -93,6 +113,7 @@ bun scripts/perf-ratchet.ts update perf-result.json --env github   # github の�
 - **CI**: `scripts/ci.ts` の手順（Actions の `ci.yml` が走らせる）で、web の build の後に、`origin/main` の fetch → `perf-bench.ts --runs 5` → `perf-ratchet.ts check`（Actions が始まらないときは `scripts/local-ci.ts` が同じ手順を回す）
 - **上げる**: `check` は `origin/main` の `scripts/perf-budget.json` より上げた項目があれば exit 1（測った環境だけでなく `github` / `local` の両方。Actions で `local` を上げた PR も落ちる）。上げるのは利用者が CI の赤を見て手でマージする判断。ただし 1 PR での bundle（js / css）の gzip の増加が 1% 未満なら、理由と増分を PR 本文に書いて同じ PR で上限を上げてよい（`check` は `raised` で赤のまま。利用者に聞かずにマージしてよい。利用者の決まり、2026-10-07、#1056）。1% 以上の増加と、ほかの項目を上げるのは利用者に聞く
 - **`layoutShift` の揺れ**: `launch.layoutShift` の赤は利用者に聞く。ただし web に触れない PR で、ローカル CI を 2 回回して値が上限の上下に揺れる（超える回と下回る回がある）なら、マージを推奨して聞く。聞くのはスタックに 1 回で、どの PR が web に触れるかを添える（利用者の回答、2026-10-22・2026-10-23）
+- **`loaded.healthMaxMs`** (the daemon's delay under load and overlap): a ceiling in `local` only: no Actions run measured a `github` value, and a ceiling nobody measured is a guess. The band is 1,750 ms: twice the spread of three `--runs 5` sets, rounded up to 50 ms, with 100 ms as its floor. The first ceiling, 5,440 ms, is the lowest set plus the band: 4,545 / 3,690 / 4,005 ms on main 2615a86c, 2026-11-01. The `launch` / `send` times under load stay out of the ratchet.
 - 初期値: `local` は 2026-10-02、main（462c6d4）、AWS ホスト（`/usr/local/bin/chromium`）、`--runs 5` を 7 回の最小 + 幅（new-task の `layoutCount` 7〜8、`layoutShift` 0.012〜0.0198 は 7 回目で初めて下側が出た）。`github` は同じコードの Actions の `--runs 5` 5 回の最小 + 幅。2026-10-14: `local` の `new-task` / `open-task` / `send` の `requests`（14 / 6 / 6 → 16 / 8 / 8）と両環境の `bundle`（js 195128 → 206877、css 6336 → 6574）を main（ad4f9cc）で測り直した（`--runs 5` 3 回の最小 + 幅、bundle は実測値。#1368）。リクエストの増えは Brief の `/evals`（#1224 / #1236 / #1253）と `/device-auth`（#676）の読み込み。2026-10-16: `local` の `launch` の `recalcStyleCount`（6 → 7）と `layoutShift`（0.1614 → 0.2371）、両環境の `bundle`（js 206877 → 211466、css 6574 → 6687）を main（792b146）で測り直した（同じ測り方。main だけで超え、Web に触れない PR のローカル CI がすべて赤になっていたため、利用者の判断で上げた。#1282。`launch.layoutShift` の原因は #1056）。2026-10-20: `local` の `new-task` の `requests`（16 → 18）と `layoutCount`（8 → 9）、両環境の `bundle`（js 220782 → 225121、css 7230 → 7364）を main（bfa143fa）で測り直した（同じ測り方。#1999）。`requests` を超えさせたのは #1810（Task 画面の成果物タブの `/artifacts` の読み込み。中央値 16 → 17。7eaf49ce より前に入った。7eaf49ce でも 17 で、#1826 は `bundle` の上限だけを直した）。#1846 も Home の最新レポートの行の `/api/reports` を 1 つ足した（中央値は 17 のまま。`/api/history` の回数が揺れる）。`layoutCount` は 3 回のうち 1 回だけ 9 で、幅の揺れ。`bundle` を超えさせたのは #1846（Insights のレポートの節）で、そのあとの #1912 / #1925 / #1926 / #1932 / #1974 / #2010 / #2018 / #2034 / #2044 も足した（#2039 は減らした）。sweep のテストの赤（#1998）で 2026-10-18 からローカル CI の性能の判定が走らず、気づかれなかった。2026-10-22: 両環境の `bundle.js`（225121 → 230322、+2.3%）を main（d97fa952）の実測値に合わせた（#1188。#1056 の回答で「main の値に上げる」。#1182 の計測の時点では +0.44% で、その後の main の PR で増えた。#2001 以降、上限を上げずに入った増加の積み重ね）
 
 ## テストの揺れ

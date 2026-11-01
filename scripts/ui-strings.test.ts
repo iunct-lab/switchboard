@@ -1,3 +1,4 @@
+// test-reads: scripts/ui-strings.ts
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

@@ -4,14 +4,17 @@
  * a fresh daemon with a fake runner (a long task of 2,000 events; every other turn a reply of 200 deltas) and a fresh
  * headless Chrome tab at 1280 × 800. Prints, per journey, the median and p90 of `sb:<journey>` in ms and the counts that
  * do not wobble (API requests, Chrome's LayoutCount / RecalcStyleCount, the layout shift) as the median of the runs.
+ * Then launch and send again on a daemon holding as much as the real home (scripts/perf-load.ts) under a backlog import
+ * and the rescue page's status checks, and the longest the daemon took to answer /api/health meanwhile (`loaded`, #2822).
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { parseArgs } from "node:util";
 import { loadConfig } from "../packages/core/src/config.ts";
 import { startServer } from "../packages/core/src/server.ts";
-import type { AgentEvent, Journey, RunnerAdapter } from "@switchboard/protocol";
+import { LOAD, LONG_EVENTS, loadGh, longEvents, overlap, seedLoad } from "./perf-load.ts";
+import type { Journey, RunnerAdapter } from "@switchboard/protocol";
 
 const { values: args } = parseArgs({ options: { runs: { type: "string", default: "5" }, json: { type: "string" } } });
 const runs = Number(args.runs);
@@ -19,20 +22,9 @@ if (!Number.isInteger(runs) || runs < 1) throw new Error(`--runs must be a posit
 const dist = join(import.meta.dir, "../apps/web/dist");
 if (!existsSync(join(dist, "index.html"))) throw new Error("apps/web/dist is missing: run `bun run --cwd apps/web build` first");
 
-const LONG_EVENTS = 2_000;
 const REPLY_DELTAS = 200;
-
-/** The long task's history: tool calls, their results and assistant text, in a fixed order. */
-function longEvents(): AgentEvent[] {
-  const out: AgentEvent[] = [];
-  for (let i = 0; out.length < LONG_EVENTS; i++) {
-    out.push({ t: "tool.call", id: `c${i}`, name: "Read", input: { file_path: `src/file${i}.ts` }, summary: `Read src/file${i}.ts` });
-    out.push({ t: "tool.result", id: `c${i}`, ok: true, summary: `${40 + (i % 7)} lines` });
-    out.push({ t: "message.delta", role: "assistant", text: `Step ${i}: the file reads as expected. `, messageId: `m${i}` });
-    out.push({ t: "message.delta", role: "assistant", text: "Moving on to the next one.\n", messageId: `m${i}` });
-  }
-  return out.slice(0, LONG_EVENTS);
-}
+/** A loaded journey waits this long, not `until`'s 30 s: a daemon stuck for longer must read as over its ceiling, not as a timeout. */
+const LOADED_WAIT_MS = 300_000;
 
 const benchAdapter: RunnerAdapter = {
   id: "claude",
@@ -97,8 +89,28 @@ async function daemon() {
 
 type Sample = { ms: number; requests: number; layoutCount: number; recalcStyleCount: number; layoutShift: number };
 
-/** One tab of its own: connect, time the four journeys in order, close. */
-async function runOnce(chromePort: string, base: string): Promise<Record<Journey, Sample>> {
+/** The daemon of a loaded run: a copy of the seeded home; `generation` is its GitHub, raised to make an import rewrite everything. */
+async function loadedDaemon(template: string) {
+  const home = mkdtempSync(join(tmpdir(), "sb-perf-bench-loaded-"));
+  cpSync(template, home, { recursive: true });
+  const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
+  const github = { generation: 0 };
+  const core = await startServer(cfg, [benchAdapter], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: loadGh(LOAD.backlogRecords / 10, github) });
+  return {
+    home, github, port: core.server.port!, base: `http://127.0.0.1:${core.server.port}`,
+    stop: async () => {
+      await core.stop();
+      rmSync(home, { recursive: true, force: true });
+    },
+  };
+}
+
+type Loaded = Awaited<ReturnType<typeof loadedDaemon>>;
+
+type Around = (act: () => Promise<void>) => Promise<unknown>;
+
+/** One tab of its own: connect, `play` it, close. */
+async function withTab<T>(chromePort: string, play: (tab: Tab) => Promise<T>): Promise<T> {
   const target = (await (await fetch(`http://127.0.0.1:${chromePort}/json/new?about:blank`, { method: "PUT" })).json()) as { id: string; webSocketDebuggerUrl: string };
   const ws = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise<void>((resolve, reject) => {
@@ -145,9 +157,9 @@ async function runOnce(chromePort: string, base: string): Promise<Record<Journey
   // what is still loading after a journey (the rest of a streamed reply, the refreshes it causes) belongs to that journey
   // 500ms: longer than Home's debounced suggestion (250ms), so the work a screen starts on its own is over
   // counted from the call too, not only from the last request: work the screen scheduled just now has not asked yet
-  const settle = () => {
+  const settle = (wait?: number) => {
     lastNetwork = Math.max(lastNetwork, Date.now());
-    return until(() => inflight.size === 0 && Date.now() - lastNetwork > 500, "the network goes quiet");
+    return until(() => inflight.size === 0 && Date.now() - lastNetwork > 500, "the network goes quiet", wait);
   };
   const shift = () => evaluate("window.__sbShift ?? 0") as Promise<number>;
 
@@ -160,17 +172,19 @@ async function runOnce(chromePort: string, base: string): Promise<Record<Journey
     await call("Page.addScriptToEvaluateOnNewDocument", {
       source: "window.__sbShift = 0; new PerformanceObserver((l) => { for (const e of l.getEntries()) if (!e.hadRecentInput) window.__sbShift += e.value; }).observe({ type: 'layout-shift', buffered: true });",
     });
-    const out = {} as Record<Journey, Sample>;
-    const journey = async (name: Journey, act: () => Promise<unknown>) => {
-      if (name !== "launch") await settle(); // what the screen loads before the action is not the journey's
+    const journey = async (name: Journey, act: () => Promise<unknown>, around: Around = (run) => run(), wait?: number): Promise<Sample> => {
+      if (name !== "launch") await settle(wait); // what the screen loads before the action is not the journey's
       const m0 = await metrics();
       const r0 = requests;
       const s0 = name === "launch" ? 0 : await shift();
-      await act();
-      const ms = await until(() => evaluate(`performance.getEntriesByName("sb:${name}", "measure")[0]?.duration`) as Promise<number | undefined>, `sb:${name}`);
-      await settle();
+      let ms = 0;
+      await around(async () => {
+        await act();
+        ms = await until(() => evaluate(`performance.getEntriesByName("sb:${name}", "measure")[0]?.duration`) as Promise<number | undefined>, `sb:${name}`, wait);
+        await settle(wait);
+      });
       const m1 = await metrics();
-      out[name] = { ms, requests: requests - r0, layoutCount: m1.layoutCount - m0.layoutCount, recalcStyleCount: m1.recalcStyleCount - m0.recalcStyleCount, layoutShift: (await shift()) - s0 };
+      return { ms, requests: requests - r0, layoutCount: m1.layoutCount - m0.layoutCount, recalcStyleCount: m1.recalcStyleCount - m0.recalcStyleCount, layoutShift: (await shift()) - s0 };
     };
     const click = (selector: string, text?: string) =>
       evaluate(`(() => { const b = [...document.querySelectorAll(${JSON.stringify(selector)})].find((e) => ${text ? `e.textContent.trim() === ${JSON.stringify(text)}` : "true"}); if (!b || b.disabled) return false; b.click(); return true; })()`);
@@ -179,22 +193,50 @@ async function runOnce(chromePort: string, base: string): Promise<Record<Journey
       await call("Input.insertText", { text });
     };
 
-    await journey("launch", () => call("Page.navigate", { url: `${base}/` }));
-    // the Workspace is picked, not left to 自動 (that asks the runner which one, a turn of its own)
-    await until(() => evaluate(`(() => { const s = document.querySelector("main.home select"); const o = s && [...s.options].find((o) => o.value); if (!o) return false; Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(s, o.value); s.dispatchEvent(new Event("change", { bubbles: true })); return true; })()`), "a workspace to pick");
-    await type("main.home textarea", "bench");
-    await until(() => evaluate(`!![...document.querySelectorAll("main .pri")].find((b) => b.textContent.trim() === "開始" && !b.disabled)`), "the start button");
-    await journey("new-task", () => click("main .pri", "開始"));
-    await until(() => click("header .tabs button", "Home"), "Home");
-    await journey("open-task", () => until(() => click(".rail .it", "long"), "the long task in the rail"));
-    await type(".composer textarea", "reply");
-    await journey("send", () => until(() => click(".composer .pri"), "the send button"));
-    return out;
+    return await play({ call, evaluate, journey, click, type, settle });
   } finally {
     ws.close();
     await fetch(`http://127.0.0.1:${chromePort}/json/close/${target.id}`).catch(() => undefined);
   }
 }
+
+interface Tab {
+  evaluate: (expression: string) => Promise<any>;
+  call: (method: string, params?: object) => Promise<any>;
+  journey: (name: Journey, act: () => Promise<unknown>, around?: Around, wait?: number) => Promise<Sample>;
+  click: (selector: string, text?: string) => Promise<unknown>;
+  type: (selector: string, text: string) => Promise<void>;
+  settle: (wait?: number) => Promise<unknown>;
+}
+
+/** The four journeys in order. */
+const runOnce = (chromePort: string, base: string) => withTab(chromePort, async ({ call, journey, click, type, evaluate }) => {
+  const out = {} as Record<Journey, Sample>;
+  out.launch = await journey("launch", () => call("Page.navigate", { url: `${base}/` }));
+  // the Workspace is picked, not left to 自動 (that asks the runner which one, a turn of its own)
+  await until(() => evaluate(`(() => { const s = document.querySelector("main.home select"); const o = s && [...s.options].find((o) => o.value); if (!o) return false; Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(s, o.value); s.dispatchEvent(new Event("change", { bubbles: true })); return true; })()`), "a workspace to pick");
+  await type("main.home textarea", "bench");
+  await until(() => evaluate(`!![...document.querySelectorAll("main .pri")].find((b) => b.textContent.trim() === "開始" && !b.disabled)`), "the start button");
+  out["new-task"] = await journey("new-task", () => click("main .pri", "開始"));
+  await until(() => click("header .tabs button", "Home"), "Home");
+  out["open-task"] = await journey("open-task", () => until(() => click(".rail .it", "long"), "the long task in the rail"));
+  await type(".composer textarea", "reply");
+  out.send = await journey("send", () => until(() => click(".composer .pri"), "the send button"));
+  return out;
+});
+
+/** launch and send under `overlap`; opening the long task in between is neither timed nor overlapped. */
+const runLoaded = (chromePort: string, d: Loaded, workspaceId: string) => withTab(chromePort, async ({ call, journey, click, type, settle }) => {
+  const windows: number[] = [];
+  const around: Around = async (run) => windows.push(await overlap({ ...d, workspaceId }, run));
+  const launch = await journey("launch", () => call("Page.navigate", { url: `${d.base}/` }), around, LOADED_WAIT_MS);
+  await settle(LOADED_WAIT_MS);
+  await until(() => click(".rail .it", "long"), "the long task in the rail", LOADED_WAIT_MS);
+  await settle(LOADED_WAIT_MS);
+  await type(".composer textarea", "reply");
+  const send = await journey("send", () => until(() => click(".composer .pri"), "the send button", LOADED_WAIT_MS), around, LOADED_WAIT_MS);
+  return { launchMs: launch.ms, sendMs: send.ms, healthMaxMs: Math.max(...windows) };
+});
 
 const median = (xs: number[]) => {
   const s = [...xs].sort((a, b) => a - b);
@@ -231,6 +273,7 @@ function pinnedFonts(dir: string): string | undefined {
 const profile = mkdtempSync(join(tmpdir(), "sb-perf-bench-chrome-"));
 const fontsDir = mkdtempSync(join(tmpdir(), "sb-perf-bench-fonts-"));
 const fontconfig = pinnedFonts(fontsDir);
+const template = mkdtempSync(join(tmpdir(), "sb-perf-bench-template-")); // generated once: a copy per run costs a fraction of it
 const chrome = Bun.spawn([findChrome(), "--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-gpu", "--window-size=1280,800", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank"], {
   stdout: "ignore",
   stderr: "ignore",
@@ -243,6 +286,19 @@ try {
     const d = await daemon();
     try {
       samples.push(await runOnce(chromePort, d.base));
+      console.log(`journeys: run ${i + 1} of ${runs} done`);
+    } finally {
+      await d.stop();
+    }
+  }
+  const { workspaceId } = await seedLoad(template);
+  const loadedRuns: Array<{ launchMs: number; sendMs: number; healthMaxMs: number }> = [];
+  for (let i = 0; i < runs; i++) {
+    const d = await loadedDaemon(template);
+    try {
+      loadedRuns.push(await runLoaded(chromePort, d, workspaceId));
+      // a line per run: CI cuts a step that prints nothing for 15 minutes, and a slow run must end as a number over its ceiling
+      console.log(`loaded: run ${i + 1} of ${runs}: /api/health max ${loadedRuns.at(-1)!.healthMaxMs} ms`);
     } finally {
       await d.stop();
     }
@@ -253,16 +309,25 @@ try {
       return [name, { msMedian: round(median(of("ms"))), msP90: round(p90(of("ms"))), requests: median(of("requests")), layoutCount: median(of("layoutCount")), recalcStyleCount: median(of("recalcStyleCount")), layoutShift: round(median(of("layoutShift")), 4) }];
     }),
   );
-  const result = { runs, journeys, bundle: bundle() };
+  const loadedMs = (xs: number[]) => ({ msMedian: round(median(xs)), msP90: round(p90(xs)) });
+  const healthMs = loadedRuns.map((r) => r.healthMaxMs);
+  const loaded = { ...LOAD, overlap: ["backlog-sync", "rescue-status"], journeys: { launch: loadedMs(loadedRuns.map((r) => r.launchMs)), send: loadedMs(loadedRuns.map((r) => r.sendMs)) }, healthMaxMs: round(median(healthMs)), healthMaxMsP90: round(p90(healthMs)) };
+  const result = { runs, journeys, bundle: bundle(), loaded };
   console.log(`runs: ${runs} (1280×800, headless Chrome, fonts: ${fontconfig ? "Noto Sans + Noto Sans CJK only" : "the OS's"}, fake runner: long task ${LONG_EVENTS} events, reply ${REPLY_DELTAS} deltas)`);
   console.log("| journey | ms median | ms p90 | requests | LayoutCount | RecalcStyleCount | layoutShift |");
   console.log("|---|---:|---:|---:|---:|---:|---:|");
   for (const [name, j] of Object.entries(journeys)) console.log(`| ${name} | ${j.msMedian} | ${j.msP90} | ${j.requests} | ${j.layoutCount} | ${j.recalcStyleCount} | ${j.layoutShift} |`);
   console.log(`bundle (gzip): js ${result.bundle.js} B, css ${result.bundle.css} B`);
+  console.log(`\nloaded: ${loaded.tasks} Tasks, ${loaded.backlogRecords} backlog records, ${loaded.operations} operations, under ${loaded.overlap.join(" + ")}`);
+  console.log("| measure | median | p90 |\n|---|---:|---:|");
+  console.log(`| launch ms | ${loaded.journeys.launch.msMedian} | ${loaded.journeys.launch.msP90} |`);
+  console.log(`| send ms | ${loaded.journeys.send.msMedian} | ${loaded.journeys.send.msP90} |`);
+  console.log(`| /api/health max ms | ${loaded.healthMaxMs} | ${loaded.healthMaxMsP90} |`);
   if (args.json) await Bun.write(args.json, JSON.stringify(result, null, 2) + "\n");
 } finally {
   chrome.kill();
   await chrome.exited;
   rmSync(profile, { recursive: true, force: true });
   rmSync(fontsDir, { recursive: true, force: true });
+  rmSync(template, { recursive: true, force: true });
 }

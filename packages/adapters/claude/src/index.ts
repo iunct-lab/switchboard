@@ -126,8 +126,10 @@ export function buildArgs(opts: StartOptions, extra: string[] = []): string[] {
   ];
   if (opts.model) args.push("--model", opts.model);
   if (opts.effort) args.push("--effort", opts.effort); // the flag only: the parent's CLAUDE_EFFORT stays out (childEnv)
-  if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
-  else if (opts.persistSession === false) args.push("--no-session-persistence"); // a resume needs the session file
+  if (opts.resumeSessionId) {
+    args.push("--resume", opts.resumeSessionId);
+    if (opts.fork) args.push("--fork-session", "--resume-session-at", opts.fork.turn);
+  } else if (opts.persistSession === false) args.push("--no-session-persistence"); // a resume needs the session file
   for (const dir of opts.scope) {
     if (dir && dir !== opts.cwd) args.push("--add-dir", dir);
   }
@@ -210,6 +212,8 @@ export function createClaudeAdapter(options: ClaudeAdapterOptions = {}): RunnerA
   const bin = options.bin ?? "claude";
   return {
     id: "claude",
+    forks: true,
+    forkMinVersion: "2.1.314",
     permissionModes: CLAUDE_PERMISSION_MODES,
     defaultPermissionMode: CLAUDE_DEFAULT_PERMISSION_MODE,
     models: CLAUDE_MODELS,

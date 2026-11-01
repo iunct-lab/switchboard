@@ -1,8 +1,8 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, rmSync, utimesSync } from "node:fs";
 import { basename, delimiter, dirname, join } from "node:path";
 import { diskFullHit, diskFullText } from "./diskfull.ts";
-import { githubLimitHit } from "./ratelimit.ts";
-import type { AgentEvent, ApprovalRuleMatch, McpServerConfig, StopRecord, Attachment, CreateTaskInput, PendingApproval, PermissionDecision, PricingTable, RoutingSuggestion, RunnerAdapter, RunnerId, RunnerSession, ServerMessage, SetOutcomeInput, Task } from "@switchboard/protocol";
+import { githubLimitHit, usesGraphql } from "./ratelimit.ts";
+import type { AgentEvent, ApprovalRuleMatch, McpServerConfig, StopRecord, Attachment, CreateTaskInput, LlmSuggestion, PendingApproval, PermissionDecision, PricingTable, RoutingSuggestion, RunnerAdapter, RunnerId, RunnerSession, ServerMessage, SetOutcomeInput, Task } from "@switchboard/protocol";
 import { CloudSessionRef } from "@switchboard/protocol";
 import { readCloudPreparation } from "./claude-cloud.ts";
 import { ledgerRowFor, usageSince } from "./pricing.ts";
@@ -17,8 +17,17 @@ import { FenceReader, lastAttempt, openStops, reduceStops, reserveStopRetry, Sto
 import { oneLine } from "./suggest-llm.ts";
 import { originMismatch } from "./workspace-clone.ts";
 
+/** How soon a runner's event held back by a locked database is tried again. Each try can itself wait out busy_timeout. */
+const HELD_RETRY_MS = 1000;
+
+const isDbBusy = (e: unknown) => String((e as { code?: unknown } | null)?.code ?? "").startsWith("SQLITE_BUSY");
+
 interface LiveSession {
   session: RunnerSession;
+  /** The runner's events not yet taken in, oldest first: more than the one in hand only while the database is locked (fromRunner). */
+  held: AgentEvent[];
+  /** What the runner's exit still has to do once the held events are in. */
+  afterHeld?: () => void;
   /** The agent's `switchboard-artifact` fences in its replies (#1778), read like the stop reports. */
   artifactReader: FenceReader<ArtifactFence>;
   /** Unanswered permission.ask by id, with when it was asked (kept in memory: an ask lives only as long as its runner). */
@@ -46,9 +55,9 @@ interface LiveSession {
   /** `error` messages of the turn in flight (bounded), handed to turn-end listeners with the session.end (#102). */
   turnErrors: string[];
   /** The turn's tool calls not yet answered: id → the tool and its input as one key (#550). */
-  turnCalls: Map<string, { name: string; key: string }>;
-  /** The GitHub limit lines the turn's commands met, per command key; a later success of the same command takes it out (#550). */
-  turnGithub: Map<string, string>;
+  turnCalls: Map<string, { name: string; key: string; graphql: boolean }>;
+  /** The GitHub limit lines the turn's commands met and when, per command key, oldest first; a later success of the same command takes its line out (#550), of a command using GraphQL all of them (#3302). */
+  turnGithub: Map<string, { line: string; at: number }>;
   /** The disk-full words a failed command of the turn met (#2234); the resumer looks at the disk itself before it waits. */
   turnDisk?: string;
   /** The last quota report of the turn in flight — the runner's own view of the window that stopped it (#102). */
@@ -64,6 +73,8 @@ export interface TurnEnd {
   quota?: Extract<AgentEvent, { t: "quota" }>;
   /** The last GitHub limit line a command of the turn met and never got past (#550). */
   githubLimit?: string;
+  /** When the command met `githubLimit`; a limit a whole window old has no claim on the turn's end (#3302). */
+  githubLimitAt?: number;
   /** The disk-full words a command or an error of the turn carried (#2234). */
   diskFull?: string;
 }
@@ -344,6 +355,13 @@ export class TaskManager {
     // flight finishes as it is and the next turn restarts the runner (send() checks the flag).
     live.restartNext = true;
     if (updated.status !== "running" && updated.status !== "waiting") await this.release(taskId);
+    return updated;
+  }
+
+  /** The LLM's proposal, arrived after the task was created (#1143). Advice: the status, the outcome and the runner stay. */
+  attachLlmSuggestion(taskId: string, suggestion: LlmSuggestion): Task | null {
+    const updated = this.db.attachLlmSuggestion(taskId, suggestion);
+    if (updated) this.broadcast({ type: "task.updated", task: updated });
     return updated;
   }
 
@@ -1077,7 +1095,7 @@ export class TaskManager {
     preamble = bare ? undefined : [preamble, recovery, artifactPrompt()].filter((p): p is string => !!p).join("\n\n");
     // in flight before the adapter can emit anything: its events only move a running / waiting task (onEvent)
     this.setStatus(task.id, "running");
-    const live: LiveSession = { session: undefined as unknown as RunnerSession, pendingPermissions: new Map(), hostAsks: new Map(), ruleMatches: new Map(), turnErrors: [], turnCalls: new Map(), turnGithub: new Map(), stopReader: new StopFenceReader(), artifactReader: new FenceReader("switchboard-artifact", parseArtifactFence) };
+    const live: LiveSession = { session: undefined as unknown as RunnerSession, held: [], pendingPermissions: new Map(), hostAsks: new Map(), ruleMatches: new Map(), turnErrors: [], turnCalls: new Map(), turnGithub: new Map(), stopReader: new StopFenceReader(), artifactReader: new FenceReader("switchboard-artifact", parseArtifactFence) };
     this.live.set(task.id, live);
     try {
       // For the runner that cannot run the hook (Codex, #787): a temp directory of the task's own, removed when it ends.
@@ -1085,7 +1103,7 @@ export class TaskManager {
       const privateTmp = meta && task.runner === "codex" && this.privateTmpRoot ? makePrivateTmp(this.privateTmpRoot, task.id) : undefined;
       live.session = adapter.start(
         { cwd: task.cwd, scope: task.scope, prompt, model: task.model ?? undefined, permissionMode: task.permissionMode ?? undefined, effort: task.effort ?? undefined, resumeSessionId, preamble, env, guards, allow, privateTmp, bedrock: this.bedrock?.(task), attachments, attachmentDir: this.attachments?.taskDir(task.id), mcpServers: this.mcpServers?.(task), otel: this.otelFor?.(task.id) },
-        (ev) => this.onEvent(task.id, live, ev),
+        (ev) => this.fromRunner(task.id, live, ev),
       );
     } catch (e) {
       // An adapter that throws from start() must not leave a session-less entry behind (shutdown would trip on it).
@@ -1099,11 +1117,41 @@ export class TaskManager {
       if (this.live.get(task.id) === live) {
         this.disarmIdle(live);
         this.live.delete(task.id);
-        const cur = this.db.getTask(task.id);
-        if (cur && (cur.status === "running" || cur.status === "waiting")) {
-          this.onEvent(task.id, live, { t: "session.end", status: code === 0 ? "ok" : "error", summary: `runner exited (${code})` });
+        const afterExit = () => {
+          const cur = this.db.getTask(task.id);
+          // the runner gone took its background jobs with it, and no notification will start the next turn
+          if (cur?.background) {
+            const jobs = cur.background.jobs.join(" / ") || "内容不明";
+            try {
+              this.db.sqlite
+                .transaction(() => {
+                  this.db.setTaskBackground(task.id, null);
+                  if (cur.status !== "done" && cur.status !== "error") return;
+                  this.record(task.id, { t: "status", text: `裏で実行中の処理がランナーの終了で失われました: ${jobs}` });
+                  if (cur.resumeAt === null) planResumeAfterStop(this.db, cur, Date.now(), (ev) => this.record(task.id, ev), this.maxStopResumes());
+                })
+                .immediate();
+              this.broadcast({ type: "task.updated", task: this.db.getTask(task.id)! });
+            } catch (e) {
+              console.error(`task ${task.id}: the lost background jobs were not recorded:`, e); // the mark stays: the next start reports them
+            }
+          }
+          live.afterHeld = () => this.maybeEnded(task.id);
+          if (cur && (cur.status === "running" || cur.status === "waiting")) {
+            this.fromRunner(task.id, live, { t: "session.end", status: code === 0 ? "ok" : "error", summary: `runner exited (${code})` });
+          } else this.takeHeld(task.id, live);
+        };
+        if (live.held.length) live.afterHeld = afterExit;
+        else afterExit();
+      } else if (live.background && !this.live.has(task.id)) {
+        // closed on purpose (released, aborted): nothing will report these jobs ending. Not when a new process took over the task.
+        try {
+          this.db.setTaskBackground(task.id, null);
+          const cur = this.db.getTask(task.id);
+          if (cur) this.broadcast({ type: "task.updated", task: cur });
+        } catch (e) {
+          console.error(`task ${task.id}: background mark not cleared:`, e); // the next start clears it
         }
-        this.maybeEnded(task.id);
       }
     });
   }
@@ -1123,11 +1171,11 @@ export class TaskManager {
   private startCloudSession(task: Task, prompt: string, adapter: RunnerAdapter) {
     const preparation = readCloudPreparation(task.cwd);
     this.record(task.id, { t: "status", text: `Cloud 明示選択による転送範囲の了承。起動直前の Git 状態: ${JSON.stringify(preparation)}` });
-    const live: LiveSession = { session: undefined as unknown as RunnerSession, pendingPermissions: new Map(), hostAsks: new Map(), ruleMatches: new Map(), turnErrors: [], turnCalls: new Map(), turnGithub: new Map(), stopReader: new StopFenceReader(), artifactReader: new FenceReader("switchboard-artifact", parseArtifactFence) };
+    const live: LiveSession = { session: undefined as unknown as RunnerSession, held: [], pendingPermissions: new Map(), hostAsks: new Map(), ruleMatches: new Map(), turnErrors: [], turnCalls: new Map(), turnGithub: new Map(), stopReader: new StopFenceReader(), artifactReader: new FenceReader("switchboard-artifact", parseArtifactFence) };
     this.live.set(task.id, live);
     this.setStatus(task.id, "running");
     try {
-      live.session = adapter.start({ executionMode: "cloud", cwd: task.cwd, scope: [task.cwd], prompt }, (ev) => this.onEvent(task.id, live, ev));
+      live.session = adapter.start({ executionMode: "cloud", cwd: task.cwd, scope: [task.cwd], prompt }, (ev) => this.fromRunner(task.id, live, ev));
     } catch (e) {
       this.live.delete(task.id); this.updateCloudState(task.id); throw e;
     }
@@ -1163,6 +1211,46 @@ export class TaskManager {
   private disarmIdle(live: LiveSession) {
     if (live.idleTimer) clearTimeout(live.idleTimer);
     live.idleTimer = undefined;
+  }
+
+  /**
+   * Every runner's events come in here. A throw must not reach the adapter: it reads stdout in the same call, so one failed
+   * write ended the reading and the turn never ended on the screen (the nightly events-archive holding the write lock past
+   * busy_timeout, 2026-10-31). A lock holds this event and the ones after it, in order, until the database answers.
+   */
+  private fromRunner(taskId: string, live: LiveSession, ev: AgentEvent) {
+    live.held.push(ev);
+    if (live.held.length === 1) this.takeHeld(taskId, live);
+  }
+
+  private takeHeld(taskId: string, live: LiveSession) {
+    for (let ev = live.held[0]; ev; ev = live.held[0]) {
+      try {
+        // IMMEDIATE: onEvent has side effects outside the database (the fence readers, the runner's answer, the turn-end
+        // listeners), so the lock is met here, before any of them, and a try again starts from the beginning.
+        this.db.sqlite
+          .transaction(() => {
+            // caught inside: a failure past appendEvent (a ledger or quota write) must not roll the event back. What was done stays.
+            try {
+              this.onEvent(taskId, live, ev!);
+            } catch (e) {
+              console.error(`task ${taskId}: runner event ${ev!.t} not fully taken in:`, e);
+              if (ev!.t !== "error") live.held.push({ t: "error", message: `イベントの処理に失敗しました（${ev!.t}）: ${String(e)}` });
+            }
+          })
+          .immediate();
+      } catch (e) {
+        if (isDbBusy(e)) {
+          setTimeout(() => this.takeHeld(taskId, live), HELD_RETRY_MS).unref();
+          return;
+        }
+        console.error(`task ${taskId}: runner event ${ev.t} dropped:`, e); // the database itself failed (closed): nothing to show it on
+      }
+      live.held.shift();
+    }
+    const after = live.afterHeld;
+    live.afterHeld = undefined;
+    after?.();
   }
 
   private onEvent(taskId: string, live: LiveSession, ev: AgentEvent) {
@@ -1273,16 +1361,22 @@ export class TaskManager {
         live.turnQuota = ev;
         break;
       case "tool.call":
-        live.turnCalls.set(ev.id, { name: ev.name, key: `${ev.name}:${JSON.stringify(ev.input ?? null)}` });
+        live.turnCalls.set(ev.id, { name: ev.name, key: `${ev.name}:${JSON.stringify(ev.input ?? null)}`, graphql: usesGraphql(ev.name, ev.input) });
         break;
       case "tool.result": {
-        // a GitHub limit line at the head of a command's result (#550); the same command succeeding later takes it out
+        // a GitHub limit line at the head of a command's result (#550); the same command succeeding later takes it out,
+        // and any command using GraphQL succeeding takes all of them out (#3302)
         const call = live.turnCalls.get(ev.id);
         live.turnCalls.delete(ev.id);
         if (call) {
           const hit = githubLimitHit(call.name, ev.summary ?? "");
-          if (hit) live.turnGithub.set(call.key, hit);
-          else if (ev.ok) live.turnGithub.delete(call.key);
+          if (hit) {
+            live.turnGithub.delete(call.key); // to the end of the order: the last entry is the latest hit
+            live.turnGithub.set(call.key, { line: hit, at: env.ts });
+          } else if (ev.ok) {
+            if (call.graphql) live.turnGithub.clear();
+            else live.turnGithub.delete(call.key);
+          }
           if (!ev.ok) live.turnDisk = diskFullHit(call.name, ev.summary ?? "") ?? live.turnDisk;
         }
         break;
@@ -1301,17 +1395,30 @@ export class TaskManager {
         // A turn ended only if one was in flight; the session.end that closing an idle process emits is not a turn.
         if (task.status === "running" || task.status === "waiting") {
           const after = this.db.getTask(taskId);
-          const turn: TurnEnd = { end: ev, errors: live.turnErrors, quota: live.turnQuota, githubLimit: [...live.turnGithub.values()].at(-1), diskFull: live.turnDisk ?? [ev.status === "error" ? ev.summary : undefined, ...live.turnErrors].map(diskFullText).find(Boolean) };
+          const github = [...live.turnGithub.values()].at(-1);
+          const turn: TurnEnd = { end: ev, errors: live.turnErrors, quota: live.turnQuota, githubLimit: github?.line, githubLimitAt: github?.at, diskFull: live.turnDisk ?? [ev.status === "error" ? ev.summary : undefined, ...live.turnErrors].map(diskFullText).find(Boolean) };
           live.turnCalls.clear();
           live.turnGithub.clear();
           live.turnDisk = undefined;
           live.turnErrors = [];
           live.turnQuota = undefined;
-          if (after) for (const l of this.turnEndListeners) l(taskId, after, turn);
+          if (after) {
+            for (const l of this.turnEndListeners) {
+              // one listener's failure must not skip the others, nor the broadcast of the end below
+              try {
+                l(taskId, after, turn);
+              } catch (e) {
+                console.error(`task ${taskId}: turn-end listener failed:`, e);
+                this.record(taskId, { t: "error", message: `ターン終了の処理に失敗しました: ${String(e)}` });
+              }
+            }
+          }
         }
         break;
       case "background":
         live.background = ev.count;
+        this.db.setTaskBackground(taskId, ev.count > 0 ? { jobs: ev.jobs ?? [], since: task.background?.since ?? env.ts } : null);
+        this.broadcast({ type: "task.updated", task: this.db.getTask(taskId)! });
         // a job left keeps the process (its notification starts the next turn); the last one gone starts the idle clock
         if (ev.count > 0) this.disarmIdle(live);
         else if (!IN_FLIGHT.has(task.status) && live.pendingPermissions.size === 0 && this.live.get(taskId) === live) this.armIdle(taskId, live);

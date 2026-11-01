@@ -9,7 +9,8 @@
  * host's Chromium, which local-ci uses). The same code draws a frame differently on a faster machine, so the counts differ
  * between the two by more than the bands. The environment is `github` when GITHUB_ACTIONS=true (local-ci sets CI=true but
  * not that), else `local`; --env picks it, e.g. to lower `github` from a result taken from Actions.
- * Times (msMedian / msP90) are never compared: they wobble on a shared machine (docs/design/perf.md).
+ * Times (msMedian / msP90) are never compared: they wobble on a shared machine (docs/design/perf.md). The one time with a
+ * ceiling is `loaded.healthMaxMs`, the daemon's delay under load, in `local` only, with a band measured for it.
  * The counts that wobble (requests / layoutCount / recalcStyleCount ±1, layoutShift in its low digits — as medians of
  * `--runs 5`; a single run moves more) carry a fixed band: a ceiling is a measured value + the band, a count is over above
  * the ceiling and better below ceiling − 2 × band (more than a band below the measured value: a new low of the same code's
@@ -21,6 +22,8 @@ import { join } from "node:path";
 export interface Budget {
   journeys: Record<string, { requests: number; layoutCount?: number; recalcStyleCount: number; layoutShift?: number }>;
   bundle: { js: number; css: number };
+  /** The daemon's delay under load and overlap (perf-bench's `loaded`); `local` only: a ceiling nobody measured would be a guess. */
+  loaded?: { healthMaxMs: number };
 }
 export interface Item { key: string; value: number; ceiling: number }
 export const ENVS = ["github", "local"] as const;
@@ -36,14 +39,15 @@ export function envOf(flag: string | undefined, env: Record<string, string | und
 
 export const BUDGET_PATH = join(import.meta.dir, "perf-budget.json");
 /** How much the same code moves from run to run (docs/design/perf.md の「数の意味」). */
-const BAND: Record<string, number> = { requests: 1, layoutCount: 1, recalcStyleCount: 1, layoutShift: 0.03, js: 0, css: 0 };
+const BAND: Record<string, number> = { requests: 1, layoutCount: 1, recalcStyleCount: 1, layoutShift: 0.03, js: 0, css: 0, healthMaxMs: 1750 };
 const round4 = (n: number) => Math.round(n * 1e4) / 1e4;
 
-/** Every ceiling as `journeys.<name>.<count>` / `bundle.<js|css>` → value. */
+/** Every ceiling as `journeys.<name>.<count>` / `bundle.<js|css>` / `loaded.healthMaxMs` → value. */
 function flat(b: Budget): Map<string, number> {
   const out = new Map<string, number>();
   for (const [name, counts] of Object.entries(b.journeys)) for (const [k, v] of Object.entries(counts)) out.set(`journeys.${name}.${k}`, v);
   for (const [k, v] of Object.entries(b.bundle)) out.set(`bundle.${k}`, v);
+  if (b.loaded) out.set("loaded.healthMaxMs", b.loaded.healthMaxMs);
   return out;
 }
 const band = (key: string) => {
@@ -84,7 +88,8 @@ export function lowered(improved: Item[], budget: Budget): Budget {
   for (const { key, value } of improved) {
     const [group, name, count] = key.split(".") as [string, string, string?];
     const v = round4(value + band(key));
-    if (group === "journeys") next.journeys[name]![count as keyof Budget["journeys"][string]] = v;
+    if (group === "loaded") next.loaded = { healthMaxMs: v };
+    else if (group === "journeys") next.journeys[name]![count as keyof Budget["journeys"][string]] = v;
     else next.bundle[name as keyof Budget["bundle"]] = v;
   }
   return next;

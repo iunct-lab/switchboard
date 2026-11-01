@@ -9,7 +9,7 @@ Switchboard が起動したランナーの `gh` の前段に検査を置く（PB
 | 部品 | 場所 | 役割 |
 |---|---|---|
 | 検査 | `ops-kit/src/secrets.ts` の `findSecrets` | 文の中の値を見つけ、種類と行番号を返す。値は返さない。ホストの AWS の設定（`AWS_CONFIG_FILE`、無ければ `~/.aws/config`）の名前とアカウント ID は `hostAws` が読み、呼ぶ側の入口（前段、`scan-text`、`scan-issues`、`ops-kit backlog` の送信前、ローカル CI の投稿）が 1 回ずつ渡す |
-| 前段 | `ops-kit/bin/gh`（`ops-kit/src/gh-guard.ts`） | 書き込みの本文を検査し、当たれば exit 1。続けて公開側の写しへの書き込みを検査し（下の「公開側の写しへの書き込み」）、当たれば exit 1。どちらにも当たらなければ本物の `gh` にそのまま渡す |
+| 前段 | `ops-kit/bin/gh`（`ops-kit/src/gh-guard.ts`） | 書き込みの本文を検査し、当たれば exit 1。続けて公開側の写しと `ops-kit.noWrite` の先への書き込みを検査し（下の「公開側の写しへの書き込み」）、当たれば exit 1。どちらにも当たらなければ本物の `gh` にそのまま渡す |
 | 配線 | `packages/core/src/tasks.ts` の `startSession` | ランナーに渡す `PATH` の先頭に meta workspace の `ops-kit/bin`、末尾にデーモンの `bun` のフォルダを置く（`StartOptions.env`） |
 | ホストの対話シェル | `/etc/profile.d/sb-gh-guard.sh`（`aws/host/sb-gh-guard.sh` を `bootstrap.sh` が置く） | クラウドのホストの、ホストのユーザーの端末タブ（`bash -i`）とログインシェルの `PATH` の先頭に meta のチェックアウトの `ops-kit/bin`、末尾に `bun` のフォルダを置く。Switchboard を通さずに手で動かす `claude` / `codex` の投稿も、どのリポジトリでも前段を通る（#824）。チェックアウトが無ければ `PATH` を変えない。root やほかのユーザーのシェルは変えない（チェックアウトはエージェントが書けるので、root の `PATH` の先に置かない） |
 | 定期の検査 | デーモンの予定「認証の値の検査」（`action: "secret-scan"`、`packages/core/src/secretscan.ts`） | 登録済みの全リポジトリに `scan-issues` を発火ごとに、前回からの差分で走らせ、当たりか検査できなかったリポジトリがあれば判断待ちにお知らせを出す（#2866） |
@@ -60,11 +60,12 @@ Switchboard が起動したランナーの `gh` の前段に検査を置く（PB
 
 ## 公開側の写しへの書き込み
 
-2 つ目の検査。公開に出す木を clone して自分のリポジトリで開発する人の工程が、公開側に書かないようにする。判定はキットの `publicCopyRefusal`（`ops-kit/src/config.ts`）1 つで、リポジトリの名前を持たない: 最寄りの `ops.config.json` の `publicSync.target`（文字列だけを読む。`parseConfig` は通さない）と書き込み先が同じなら止める。
+2 つ目の検査。公開に出す木を clone して自分のリポジトリで開発する人の工程が、公開側に書かないようにする。公開側の判定はキットの `publicCopyRefusal`（`ops-kit/src/config.ts`）で、リポジトリの名前を持たない: 最寄りの `ops.config.json` の `publicSync.target`（文字列だけを読む。`parseConfig` は通さない）と書き込み先が同じなら止める。
 
 - 書き込み（`writeTargetOf`）: `issue` / `pr` / `label` / `release` の読み取り以外のサブコマンド、`gh api` の GET / HEAD 以外（メソッドが無くフィールドがあれば POST）、`graphql` の mutation。先は `-R` / `--repo`（グループの前後どこでも）、Issue・PR の URL、`GH_REPO` の順。`{owner}/{repo}` と `graphql` は `GH_REPO`
 - 先がほかのリポジトリなら通す。先が公開側か未指定なら、`GH_REPO` が公開側、または本物の `gh repo view` が公開側のとき止める。`gh repo view` は `GH_REPO` を見ずに remote から答えるので、`GH_REPO` だけ直した clone の `-R "$(gh repo view …)"` も止まる。読み取りとほかを名指しした書き込みでは `gh repo view` を呼ばない
 - 開発元の clone は `gh repo view` が開発元なので、公開側を `-R` で名指しする操作（同期の PR、要望 Issue への返信とクローズ）は通る
+- clone の git の設定 `ops-kit.noWrite`（`owner/name`、複数可。他者のリポジトリから追加した workspace の印）の先は、`noWriteMarkRefusal` が名指しでも既定でも止める。公開側と違い、そこへ書いてよい clone は無いので `gh repo view` の答えを待たず、先を指定しない書き込みは `gh repo view` が答えないときも止める。印の判定は `noWriteMarkRefusal`、公開側は `publicCopyRefusal`、`repoOf` と `backlogRepoOf` は両方をまとめた `noWriteRefusal` を通す。印の無い clone は今どおり
 - キットの道具の `repoOf`（`ops-kit/src/gh.ts`）と、デーモンのバックログの `backlogRepoOf`（`packages/core/src/backlog.ts`。取込み・昇格の失敗の報告・指示のプリセットの対象）も同じ判定で止める。デーモンでは取込みの失敗としてバックログ画面に文が出て、送信元が保存されないので送信も起きない。読み取りだけの定期の秘密の検査は止めない
 
 ## アプリの Task の中の Issue への直接の書き込み（#2694）

@@ -6,11 +6,13 @@ import type { Db } from "./db.ts";
 /**
  * Self-dev (proposal §5 "Self-dev を成立させる構造", issue #18). When a task on the meta workspace (Switchboard's own
  * repository) finishes a turn, the daemon runs the repository's checks and shows them in the Brief next to the diff.
+ * Only typecheck, about 9 s: like it, the full `bun test` ran on the main working tree and not on the Task's diff, but it
+ * took 5–7 h of the host a day, and the failed tests of 2026-10-27..30 also passed on the same commit. local-ci runs the
+ * tests on the PR (#3266).
  * "適用してデーモン再起動" restarts the daemon on the new code; the UI survives on WebSocket reconnect.
  */
 export const CHECKS: Array<{ kind: CheckResult["kind"]; argv: string[] }> = [
   { kind: "typecheck", argv: ["bun", "run", "typecheck"] },
-  { kind: "test", argv: ["bun", "test"] },
 ];
 const MAX_OUTPUT = 20_000;
 const TIMEOUT_MS = 10 * 60_000;

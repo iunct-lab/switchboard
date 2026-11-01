@@ -203,6 +203,17 @@ try {
   await until(() => listed("needs-tasks", 2), "#2 under 分解待ち");
   check("#2 is listed under 分解待ち and #1 left 要望のまま", !(await listed("request", 1)));
   await shot("4-needs-tasks");
+  // (#2343) the numbers are not links to nowhere, and with only this workspace in view the heading has no GitHub in it
+  check("no link with an empty href on the backlog screen", (await evaluate(`document.querySelectorAll('.backlog a[href=""]').length`)) === 0);
+  const onlyLocal = `[...document.querySelectorAll('.backlog-ws button')].find(b => b.textContent.trim().startsWith('repo'))`;
+  if (await evaluate(`!!(${onlyLocal})`)) await press(onlyLocal, "the local workspace's tab");
+  await until(() => evaluate(`document.querySelector('.backlog-heading')?.textContent.startsWith('Switchboard に保存') === true`), "the local heading");
+  const heading = (await evaluate(`document.querySelector('.backlog-heading').textContent`)) as string;
+  check("the heading of the local workspace has no GitHub", !heading.includes("GitHub"), heading);
+  await press(`document.querySelector('.backlog details.backlog-editor summary')`, "編集");
+  await until(() => evaluate(`!!document.querySelector('.backlog details.backlog-editor textarea[placeholder^="コメント"]')`), "the comment box");
+  const hint = (await evaluate(`document.querySelector('.backlog details.backlog-editor textarea[placeholder^="コメント"]').placeholder`)) as string;
+  check("the comment box of the local workspace has no GitHub", !hint.includes("GitHub"), hint);
 
   // (5) 「Task に分解」 → a to-tasks Task
   const toTasks = await startPressed("needs-tasks", 2, "Task に分解", "to-tasks");

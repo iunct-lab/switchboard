@@ -1,3 +1,4 @@
+// test-reads: .github/labels.yml
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -26,6 +27,10 @@ describe("parseLabels", () => {
   });
   test("the repository's .github/labels.yml parses", () => {
     expect(parseLabels(readFileSync(join(import.meta.dir, "../../.github/labels.yml"), "utf8")).length).toBeGreaterThan(5);
+  });
+  test("both labels.yml list on-hold", () => {
+    for (const file of ["../../.github/labels.yml", "../template/.github/labels.yml"])
+      expect(parseLabels(readFileSync(join(import.meta.dir, file), "utf8")).map((l) => l.name)).toContain("on-hold");
   });
   test("a color that is not 6 hex digits or that YAML reads as a number, or no list, is refused", () => {
     expect(() => parseLabels("- name: x\n  color: red\n")).toThrow(/1 件目/);

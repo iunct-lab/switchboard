@@ -1,3 +1,4 @@
+// test-reads: none
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -169,8 +170,10 @@ test("two workspaces of one repository share the stored backlog: it stays until 
   for (const w of [a, b]) probe.setWorkspaceBacklogSource(w.id, source as any);
   probe.putBacklogSnapshot(source, { records: [{ objectKind: "issue", externalId: "I_1", remote: { number: 1 }, fetchState: "fetched" }] as any, cursor: null, syncedAt: 1 });
   expect((await t.send("DELETE", `/api/workspaces/${a.id}`)).status).toBe(200);
-  expect(probe.listBacklogRecords(source)).toHaveLength(1);
+  // straight from the table: the daemon wrote it, and a Db's list keeps its own copy (#3080)
+  const stored = () => (probe.sqlite.query("SELECT COUNT(*) AS n FROM backlog_records WHERE repository = ?").get(source.repository) as { n: number }).n;
+  expect(stored()).toBe(1);
   expect((await t.send("DELETE", `/api/workspaces/${b.id}`)).status).toBe(200);
-  expect(probe.listBacklogRecords(source)).toHaveLength(0);
+  expect(stored()).toBe(0);
   probe.close();
 }, 30_000);

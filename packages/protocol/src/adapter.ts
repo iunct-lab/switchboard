@@ -32,6 +32,11 @@ export interface StartOptions {
   /** Resume a previous runner session (runner-native id). */
   resumeSessionId?: string;
   /**
+   * Fork instead of continuing (#2999): start a new session holding `resumeSessionId`'s conversation up to and including
+   * `turn` (`session.end.turn`). The source session is left as it is. Only on adapters with `forks`.
+   */
+  fork?: { turn: string };
+  /**
    * `false` = the runner keeps no record of the session on disk (#2908): a one-off turn that is never resumed, such as
    * the daemon's judge and suggestion turns. Claude Code gets `--no-session-persistence` (not with `resumeSessionId`,
    * which needs the session file); other runners ignore it. Unset = saved as before.
@@ -144,6 +149,10 @@ export interface RunnerAdapter {
   readonly bedrockModels?: ModelOption[];
   /** Thinking efforts this runner offers, in display order (#833). Omit / empty when the runner decides itself (DAK). */
   readonly efforts?: ModelOption[];
+  /** The runner can start from a past turn (`StartOptions.fork`, #2999). Omit when it cannot (DAK). */
+  readonly forks?: boolean;
+  /** The oldest CLI version `forks` was recorded on: compare with `RunnerDetection.version`. */
+  readonly forkMinVersion?: string;
   /**
    * The model the CLI uses when StartOptions.model is unset — the user's own CLI setting, read on every call so a
    * change there shows up without a restart. Undefined = not set / not readable.

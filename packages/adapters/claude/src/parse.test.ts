@@ -1,3 +1,4 @@
+// test-reads: none
 import { recordingText, skipRecordings, assertRecordings } from "../../../../scripts/recordings.ts";
 import { describe, expect, test } from "bun:test";
 import { AgentEvent } from "@switchboard/protocol";
@@ -9,6 +10,8 @@ import { createClaudeParser, permissionResponseLine, setPermissionModeLine, summ
 
 const fixture = recordingText("packages/adapters/claude/fixtures/write-with-permission.jsonl");
 const resumeFixture = recordingText("packages/adapters/claude/fixtures/resume-turn.jsonl");
+const forkFixture = recordingText("packages/adapters/claude/fixtures/fork-turn.jsonl");
+const forkToolFixture = recordingText("packages/adapters/claude/fixtures/fork-turn-tool.jsonl");
 const resumeMissingFixture = recordingText("packages/adapters/claude/fixtures/resume-missing.jsonl");
 const resumeCostFixture = recordingText("packages/adapters/claude/fixtures/resume-cost.jsonl");
 const backgroundFixture = recordingText("packages/adapters/claude/fixtures/background-notification.jsonl");
@@ -143,6 +146,51 @@ describe("--resume (recorded against Claude Code 2.1.261, issue #2)", () => {
     expect(usage.map((e) => (e.t === "usage" ? [e.source, e.cacheWriteTokens, e.cacheWrite1hTokens] : []))).toEqual([["turn", 585, 585], ["reported", 585, undefined]]);
   });
 
+  test.skipIf(skipRecordings("packages/adapters/claude/fixtures/fork-turn.jsonl"))("fork: new session id, answers pelican not heron (Claude Code 2.1.314, #2999)", () => {
+    assertRecordings("packages/adapters/claude/fixtures/fork-turn.jsonl");
+    // one process of two turns (pelican, then heron), a process forked at the first turn's session.end.turn, and the parent resumed after it
+    const p = createClaudeParser();
+    const events = forkFixture.split("\n").flatMap((l) => p.feed(l));
+    for (const ev of events) expect(() => AgentEvent.parse(ev)).not.toThrow();
+    const ends = events.filter((e) => e.t === "session.end");
+    const lines = forkFixture.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
+    const assistants = lines.filter((m) => m.type === "assistant").map((m) => m.uuid);
+    expect(ends.map((e) => (e.t === "session.end" ? e.turn : undefined))).toEqual(assistants); // each turn here is one assistant line
+    const sessions = [...new Set(lines.filter((m) => m.subtype === "init").map((m) => m.session_id))];
+    expect(sessions).toHaveLength(2);
+    expect(lines.filter((m) => m.subtype === "init").at(-1).session_id).toBe(sessions[0]); // the parent keeps its id
+    const [fork, parent] = lines.filter((m) => m.type === "result").slice(-2).map((m) => (m.result as string).toLowerCase());
+    expect(fork).toContain("pelican");
+    expect(fork).not.toContain("heron");
+    expect(parent).toContain("heron");
+  });
+
+  test.skipIf(skipRecordings("packages/adapters/claude/fixtures/fork-turn-tool.jsonl"))("fork from a turn with a tool call: turn is its last assistant line, the fork still knows the result (Claude Code 2.1.314)", () => {
+    assertRecordings("packages/adapters/claude/fixtures/fork-turn-tool.jsonl");
+    // a turn that reads pelican from a file (tool_use line, then text line), a turn that changes it, a fork at the first turn, the parent resumed
+    const p = createClaudeParser();
+    const ends = forkToolFixture.split("\n").flatMap((l) => p.feed(l)).filter((e) => e.t === "session.end");
+    const lines = forkToolFixture.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
+    const firstTurn = lines.slice(0, lines.findIndex((m) => m.type === "result")).filter((m) => m.type === "assistant");
+    expect(firstTurn.map((m) => m.message.content[0].type)).toEqual(["tool_use", "text"]);
+    expect(ends[0]?.t === "session.end" && ends[0].turn).toBe(firstTurn[1].uuid);
+    const [fork, parent] = lines.filter((m) => m.type === "result").slice(-2).map((m) => (m.result as string).toLowerCase());
+    expect(fork).toContain("pelican");
+    expect(parent).toContain("heron");
+  });
+
+  test("session.end carries the last assistant uuid as turn; a subagent's line and an earlier turn's do not count", () => {
+    const p = createClaudeParser();
+    const feed = (m: object) => p.feed(JSON.stringify(m));
+    const result = { type: "result", subtype: "success", result: "x" };
+    feed({ type: "assistant", uuid: "u1", message: { content: [] } });
+    feed({ type: "assistant", uuid: "sub", parent_tool_use_id: "toolu_1", message: { content: [] } });
+    const end = feed(result).find((e) => e.t === "session.end");
+    expect(end?.t === "session.end" && end.turn).toBe("u1");
+    const next = feed(result).find((e) => e.t === "session.end");
+    expect(next?.t === "session.end" && next.turn).toBeUndefined();
+  });
+
   test.skipIf(skipRecordings("packages/adapters/claude/fixtures/resume-missing.jsonl"))("resuming a session that no longer exists yields session.end(error) from the result line", () => {
     assertRecordings("packages/adapters/claude/fixtures/resume-missing.jsonl");
     const p = createClaudeParser();
@@ -200,6 +248,12 @@ describe("--resume (recorded against Claude Code 2.1.261, issue #2)", () => {
     const args = buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", resumeSessionId: "abc" });
     expect(args.slice(args.indexOf("--resume"), args.indexOf("--resume") + 2)).toEqual(["--resume", "abc"]);
     expect(args).not.toContain("--no-session-persistence");
+  });
+
+  test("buildArgs: fork passes --fork-session and --resume-session-at; a plain resume does not", () => {
+    const args = buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", resumeSessionId: "abc", fork: { turn: "u1" } });
+    expect(args.slice(args.indexOf("--resume"), args.indexOf("--resume") + 5)).toEqual(["--resume", "abc", "--fork-session", "--resume-session-at", "u1"]);
+    expect(buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", resumeSessionId: "abc" })).not.toContain("--fork-session");
   });
 
   test("buildArgs: persistSession false adds --no-session-persistence; unset, true or a resume does not", () => {

@@ -1,3 +1,4 @@
+// test-reads: ops-kit/bin/
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { dirname, join } from "node:path";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";

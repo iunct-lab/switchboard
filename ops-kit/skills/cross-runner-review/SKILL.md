@@ -69,11 +69,9 @@ gh pr diff $N > "$M/diff.patch"
 TASK=$(tr -d '\r' < "$M/pr.md" | grep -oE 'Closes #[0-9]+|^Backlog-Task: [0-9]+$' | sed -n '/^Closes/{p;q}')   # Closes #N（GitHub の workspace）→
 [ -n "$TASK" ] || TASK=$(tr -d '\r' < "$M/pr.md" | grep -oE '^Backlog-Task: [0-9]+$' | head -1)   # 単独行の Backlog-Task: N（ローカルのバックログ。task-to-pr のひな形が必ず置く）
 TASK=$(echo "$TASK" | grep -oE '[0-9]+' | head -1)
-if [ -n "$BACKLOG_WORKSPACE" ]; then ops-kit backlog view "$TASK" --fresh > "$M/task.md"   # GitHub に無いので gh issue view では読めない。PBI も同じく ops-kit backlog view
-else gh issue view "$TASK" --json title,body -q '"# Task #'"$TASK"' \(.title)\n\n\(.body)"' > "$M/task.md"; fi
+ops-kit backlog view "$TASK" --fresh > "$M/task.md"
 PBI=$(awk '/^## 親 PBI/{f=1;next} f && match($0,/#[0-9]+/){print substr($0,RSTART+1,RLENGTH-1); exit}' "$M/task.md")
-if [ -n "$BACKLOG_WORKSPACE" ]; then ops-kit backlog view "$PBI" --fresh > "$M/pbi.md"
-else gh issue view "$PBI" --json title,body -q '"# PBI #'"$PBI"' \(.title)\n\n\(.body)"' > "$M/pbi.md"; fi
+ops-kit backlog view "$PBI" --fresh > "$M/pbi.md"
 sed -n '/^## Design rules/,/^## License/p' "$R/README.md" > "$M/design-rules.md"   # 設計ルールの場所が CLAUDE.md にあればそれに合わせる
 ls "$R/docs/design" > "$M/design-docs.txt"
 ```
@@ -131,22 +129,28 @@ PROMPT
 
 ```bash
 CODEX=$(command -v codex)
-( cd "$R" && "$CODEX" exec --sandbox read-only --skip-git-repo-check --ephemeral -o "$M/codex.md" - < "$M/prompt.md" ) > "$M/codex.log" 2>&1
+( cd "$R" && ops-kit idle-run --idle 900 -- "$CODEX" exec --sandbox read-only --skip-git-repo-check --ephemeral -o "$M/codex.md" - < "$M/prompt.md" ) > "$M/codex.log" 2>&1
 ```
 
 **Claude Code**（Codex が実装したとき）。plan モード（読み取り専用）:
 
 ```bash
-( cd "$R" && claude -p --permission-mode plan --output-format text "$(cat "$M/prompt.md")" ) > "$M/claude.md" 2> "$M/claude.log"
+( set -o pipefail; cd "$R" && ops-kit idle-run --idle 900 -- claude -p --permission-mode plan --output-format stream-json --verbose "$(cat "$M/prompt.md")" | tee "$M/claude.jsonl" | jq -r 'select(.type=="result").result' ) > "$M/claude.md" 2> "$M/claude.log"
+```
+
+**固まったとき**: `ops-kit idle-run --idle 900` は、レビュアーが 900 秒何も出さないとプロセスごと切り、exit 124 で返す（理由の行は log に残る。総時間の上限は無い。text 出力の `claude -p` は最後まで何も出さないので、stream-json で動いていることを見る）。exit 124 なら `$M/<runner>.md` を転記せず、理由を PR コメントに残して一度だけやり直す。やり直しでも切れたら止まって報告する:
+
+```bash
+gh pr comment $N --body "[<runner>] 無進捗で打ち切り（900 秒出力なし）。レビューは付いていない"
 ```
 
 **追加のレビュアー**（CLAUDE.md が名指しし、有効の条件を満たしていれば、どちらのランナーが実装したときも）。呼び方・材料の上限は CLAUDE.md。
 この clone を読めないレビュアー（コンテナの中のローカルモデルなど）には、材料を prompt に埋める。diff のほかに **Task / PBI が名指しする `docs/design/*.md` と、diff が触るファイルの全文**（変更後）を入れる（設計との矛盾は diff だけでは見えない）。
 上限を超えるぶんは「[truncated: <file> …]」と書き、切ったファイルを要約コメントに列挙する — そのレビュアーのレビューはその範囲について、と読む。全部を見るのは主レビュアー。出力は `$M/<extra>.md` に書く。
 
-全部同時に走らせてよい（Bash の `run_in_background`。`curl -m` と Bash の timeout で切る）。
+全部同時に走らせてよい（Bash の `run_in_background`。Bash の timeout はレビューが終わるまで切らない長さ（上限いっぱい）にする。切るのは `idle-run`。外から切られると理由が残らない。追加のレビュアーは `curl -m` で切る）。
 **マージを止めるのは主レビュアー（別ランナー）だけ。** 追加のレビュアー（ローカルモデルなら 50KB の材料で 10 分以上かかることがある）は終わっていなくても先に進み、
-後から届いたら転記して主レビュアーとの比較に使う（利用者の指示 2026-09-18）。終わったら各出力に `### Findings` があるか見る。無ければ（枠切れ、sandbox で止まった、モデルが形式を守らなかった）ログを読んで一度だけやり直す。
+後から届いたら転記して主レビュアーとの比較に使う（利用者の指示 2026-09-18）。終わったら各出力に `### Findings` があるか見る。無ければ（枠切れ、sandbox で止まった、モデルが形式を守らなかった）ログ（Claude Code は `$M/claude.jsonl` も）を読んで一度だけやり直す。
 
 ## 3. PR に転記する
 
@@ -166,7 +170,7 @@ post_review() { # <pr> <who> <file>   ※ /tmp にスクリプトとして保存
 post_review $N codex "$M/codex.md"; post_review $N <extra> "$M/<extra>.md"     # 追加のレビュアーが無ければ後ろは省く
 ```
 
-転記したら Task の Issue に 1 行（「レビュー: codex n 件 / <extra> m 件、要約は PR」）。`$R` は**まだ消さない**（4 の見直しで clone・`prompt.md`・前回のレビューを使う）。
+転記したら Task の Issue に 1 行（「レビュー: codex n 件 / <extra> m 件、要約は PR」。`ops-kit backlog comment <Task> --body-file -`）。`$R` は**まだ消さない**（4 の見直しで clone・`prompt.md`・前回のレビューを使う）。
 転記した時点の head を `OLD` として控える: `git -C "$R" rev-parse HEAD`（表示された値を文字で控える。Bash の呼び出しをまたぐと変数は消える）。
 
 ## 4. 修正後の見直し
@@ -185,15 +189,16 @@ PREV=_review/codex.md                        # Claude が主レビュアーな�
 { cat "$M/prompt.md"; echo; echo "This is a follow-up review. The PR was already reviewed at $OLD; your previous review is $PREV."; \
   echo "Review only _review/fix.range-diff (this PR's commits since then): do the fixes address the findings, and do they introduce new problems?"; \
   echo "Use the same output format."; } > "$M/prompt-fix.md"
+rm -f "$M/fix-review.md"                     # 切れたときに前回の出力を転記しない
 # Codex が主レビュアー（Claude Code が実装したとき）
-( cd "$R" && "$CODEX" exec --sandbox read-only --skip-git-repo-check --ephemeral -o "$M/fix-review.md" - < "$M/prompt-fix.md" ) > "$M/fix-review.log" 2>&1; WHO=codex
+( cd "$R" && ops-kit idle-run --idle 900 -- "$CODEX" exec --sandbox read-only --skip-git-repo-check --ephemeral -o "$M/fix-review.md" - < "$M/prompt-fix.md" ) > "$M/fix-review.log" 2>&1; RC=$?; WHO=codex
 # Claude Code が主レビュアー（Codex が実装したとき）は上の代わりに:
-# ( cd "$R" && claude -p --permission-mode plan --output-format text "$(cat "$M/prompt-fix.md")" ) > "$M/fix-review.md" 2> "$M/fix-review.log"; WHO=claude
-grep -q '^### Findings' "$M/fix-review.md" && post_review $N $WHO "$M/fix-review.md" \
-  || echo "見直しの出力に ### Findings が無い（枠切れ・sandbox）。ログを読んで一度だけやり直す。空のまま転記しない"
+# ( set -o pipefail; cd "$R" && ops-kit idle-run --idle 900 -- claude -p --permission-mode plan --output-format stream-json --verbose "$(cat "$M/prompt-fix.md")" | tee "$M/fix-review.jsonl" | jq -r 'select(.type=="result").result' ) > "$M/fix-review.md" 2> "$M/fix-review.log"; RC=$?; WHO=claude
+[ "$RC" = 0 ] && grep -q '^### Findings' "$M/fix-review.md" && post_review $N $WHO "$M/fix-review.md" \
+  || echo "見直しが exit $RC か、出力に ### Findings が無い（打ち切り・枠切れ・sandbox）。ログを読んで一度だけやり直す。空のまま転記しない"
 ```
 
-**`### Findings` の無い出力は転記しない**（`post_review` は中身が空でも `[codex] review` で始まる要約を書くので、マージ判定が「見直し済み」と数えてしまう）。
+走らせ方（Bash の timeout）と exit 124 の扱いは 2 と同じ。**`### Findings` の無い出力は転記しない**（`post_review` は中身が空でも `[codex] review` で始まる要約を書くので、マージ判定が「見直し済み」と数えてしまう）。
 rebase だけ（`gh stack rebase`、下のマージ後の GitHub の自動 rebase）なら見直しは要らない（マージ判定はコミットの author date を見るので止めない）。見直しで新しい指摘が出たら `review-triage-and-merge` の 2 から。
 見直しが済んで採否が終わったら `rm -rf <1 で作った $R のパス>`（`/tmp/review*` のような glob で消さない）。切れたセッションの残りは、次のレビューの 1 で同じリポジトリ名 + `gh` で MERGED / CLOSED と確かめたものだけ消える。
 

@@ -1,3 +1,4 @@
+// test-reads: none
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";

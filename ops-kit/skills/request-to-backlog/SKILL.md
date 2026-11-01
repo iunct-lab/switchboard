@@ -18,15 +18,14 @@ description: 利用者の要望（チャットの一文、フィードバック�
 
 ## 手順
 
-エージェント管理アプリの Task の中（`BACKLOG_URL` がある）では、下の `gh issue create` / `gh issue edit` / `gh issue view` / `triage_issue.sh` / `set_project_field.sh` の代わりに `ops-kit backlog create / edit / view / triage / set` を、`lint_backlog.sh` の代わりに `ops-kit lint --fresh` を使う（`issue-workflow` の「操作」。作った Issue は番号が付くまで `localId` で読む。GitHub 連携の無い workspace では作成で番号が付く。既存 PBI を探す・原文を読むときは `view --fresh`）。
+作った Issue は番号が付くまで `localId` で読む。GitHub 連携の無い workspace では作成で番号が付く。既存 PBI を探す・原文を読むときは `ops-kit backlog view <num> --fresh`（`issue-workflow` の「操作」）。
 
 ### 1. 要望 Issue を作る（要望の正本）
 
 ```bash
 W=$(mktemp -d /tmp/<リポジトリ名>.request.XXXXXX); echo "$W"     # 本文・画像の一時ファイルはここ。固定の /tmp/req.md などにしない（別リポジトリのセッションとぶつかる）
-gh issue create -t "要望: <20 字以内の要約>" -l type:request -F "$W/req.md"
-#   BACKLOG_URL があれば: ops-kit backlog create --title "要望: …" --label type:request --body-file "$W/req.md" と ops-kit backlog set <num> Status Backlog
-bash scripts/setup/set_project_field.sh <num> Status Backlog     # 新しい Issue が Project に自動で入るなら Status だけ付ける（入らないなら triage_issue.sh。CLAUDE.md）
+ops-kit backlog create --title "要望: <20 字以内の要約>" --label type:request --body-file "$W/req.md"
+ops-kit backlog set <num> Status Backlog
 ```
 
 本文（`.github/ISSUE_TEMPLATE/feature_request.yml` と同じ見出し。lint は `## 要望` と `## 出典` を見る）:
@@ -57,7 +56,7 @@ bash scripts/setup/set_project_field.sh <num> Status Backlog     # 新しい Iss
 - 意味が変わりうる読み替えは「解釈メモ」に書く。**headless（エージェント管理アプリの Task など）で利用者に聞けないときも、解釈メモに前提を書いて進む**（`AskUserQuestion` は届かない）。判断が利用者に属するもの（お金 / 他 OS / 破壊的 / 要件の読み）は PBI の決定ログにも「利用者の確認待ち」と書き、`## 判断待ち`（ラベル `needs-decision`。`issue-workflow` の「判断待ちの出し方」）を出す。画面に関わる問いは `issue-workflow` の「判断待ちの出し方」の画面イメージを添える。ここは要望を PBI にする作業なので、出したうえで解釈メモの前提で PBI 化は続ける（止めるのは、その前提に依存する **実装**。回答が前提と違えば PBI を直す）。ただし、前提と矛盾する価値（下の 2.5）があれば除く — その要望は（ほかの価値も）PBI を作らずに止める
 - **自動か手動かが書かれていない要望は、自動の側に読む**（利用者の方針: 開発を自動化できるところは自動化する）。手動だけに狭める読み（「起票は利用者が押して始める」「定期の自動化はスコープ外」のような）は要件の読みなので、解釈メモに書くだけで決めず `## 判断待ち` を出す。PBI の「スコープ外」はその PBI の範囲で、リポジトリの方針ではない — 設計文書に「〜はしない（要望 #N の解釈）」と写さない
 - 要望 Issue には**親を付けない**（Project の Backlog ビューは `no:parent-issue`。要望を Backlog から隠したいなら、ビューの filter に `-label:type:request` を足す。ビューは API で変えられないので利用者の手作業）
-- 閉じるのは派生 PBI が全部 Done か「やらない」になったとき。閉じるときに結果を 3 行書く。経路が「公開側 Issue <URL>」なら公開側の Issue にも結果を書いて閉じる（`pbi-complete` の 6-5）
+- 閉じるのは派生 PBI が全部 Done か「やらない」になったとき。閉じるときに結果を 3 行書く（`ops-kit backlog edit <req> --body-file … --state closed`）。経路が「公開側 Issue <URL>」なら公開側の Issue にも結果を書いて閉じる（`pbi-complete` の 6-5）
 
 #### 整える範囲
 
@@ -92,7 +91,7 @@ bash scripts/setup/set_project_field.sh <num> Status Backlog     # 新しい Iss
 GitHub の API では Issue に画像を添付できない（user-content のアップロードは Web UI だけ）。画像をどこに置き、どの URL を本文に埋めるかは CLAUDE.md にある。
 CLAUDE.md が何も書いていなければ、画像は上げずに `## 添付` に「添付: 保留」と書く。作業ツリーは触らない（置くなら API で）。
 
-要望 Issue 番号が先に要るなら、Issue を作ってから画像を上げて本文を `gh issue edit <num> -F` で更新する。個人情報（メール・トークン・他人の名前）が
+要望 Issue 番号が先に要るなら、Issue を作ってから画像を上げて本文を `ops-kit backlog edit <num> --body-file "$W/req.md"` で更新する。個人情報（メール・トークン・他人の名前）が
 写っていたら**上げない**で「添付: 個人情報のため保留」と書く。
 
 ### 2. 価値ごとに切る（PBI の粒度）
@@ -102,7 +101,7 @@ CLAUDE.md が何も書いていなければ、画像は上げずに `## 添付` 
 - 1 通に複数の価値 → 複数 PBI（例: 1 通の要望から「開発スキル」「自動選択」「フィードバックボタン」の 3 件を切った）
 - 小さな要望が同じ画面・同じ仕組みの話 → 1 PBI にまとめる（受け入れ条件の行で分ける）
 - 1 つの価値でも Story Points が 13 になる → 前後に割る（「まず〜できる」「次に〜も」）。lint が 13 を弾く
-- 既存 PBI と重なる → 新規に作らず、既存 PBI の受け入れ条件 / 決定ログに足し、要望 Issue の派生一覧にその番号を書く。`gh issue list -l type:pbi --state all -S "<語>"` で探す
+- 既存 PBI と重なる → 新規に作らず、既存 PBI の受け入れ条件 / 決定ログに足し、要望 Issue の派生一覧にその番号を書く。`ops-kit backlog list --label type:pbi --state all --search "<語>"` で探す
 - **どのリポジトリにも要る仕組み**（投稿前の検査、危ないコマンドの歯止め、定期の検査など）→ 作業中のリポジトリの PBI にしない。見分け方: そのリポジトリの値・手順を使わない / ほかのリポジトリでも同じ事故が起きうる。共通キットを持つリポジトリ（エージェント管理アプリのリポジトリ。`owner/name` は CLAUDE.md。書いていなければ決定ログに書いて `## 判断待ち`）に要望 Issue を起票し、作業中のリポジトリには「そのリポジトリの移行・片づけ」だけを PBI にする。作業中のリポジトリが共通キットを持つなら、その PBI の受け入れ条件に「どのリポジトリでも効く」ことを入れる。迷ったら決定ログに書いて `## 判断待ち`
 - バグ報告も PBI（`type:pbi` + `bug`）。「直る」ではなく「〜のとき〜になる」を受け入れ条件に
 
@@ -129,27 +128,24 @@ PBI を書く前に、切った価値ごとにユーザーストーリーと「�
 実装方法は書かない（Task の仕事）。
 
 ```bash
-gh issue create -t "PBI: <利用者から見た成果を 1 文で>" -l type:pbi -F "$W/pbi.md"
-#   BACKLOG_URL があれば: ops-kit backlog create --title "PBI: …" --label type:pbi --body-file "$W/pbi.md" --milestone "Phase N — …"
-#   → ops-kit backlog triage <num> <area> <kind> <P0-P3> "Phase N" → ops-kit backlog set <num> "Story Points" <N>
-bash scripts/setup/triage_issue.sh <num> <area> <kind> <P0-P3> "Phase N"          # 親は渡さない
-gh issue edit <num> --milestone "Phase N — …"
-bash scripts/setup/set_project_field.sh <num> "Story Points" <N>                  # 本文の N と同じ
+ops-kit backlog create --title "PBI: <利用者から見た成果を 1 文で>" --label type:pbi --body-file "$W/pbi.md" --milestone "Phase N — …"
+ops-kit backlog triage <num> <area> <kind> <P0-P3> "Phase N"          # 親は渡さない
+ops-kit backlog set <num> "Story Points" <N>                          # 本文の N と同じ
 ```
 
-**自分で分解する PBI は、作ったその場で分解する**: Task の無い PBI を Backlog に置くと、定期実行（バックログを進める）が分解の Task を始め、Task が二重にできる。自分で分解するなら同じ作業の中で `pbi-to-tasks` に進むか、先に PBI を占有する（並列ガードの `claim`。CLAUDE.md）。分解の後に sub-issue を 1 回見直し、二重の組があれば後の組を閉じる。
+**自分で分解する PBI は、作ったその場で分解する**: Task の無い PBI を Backlog に置くと、定期実行（バックログを進める）が分解の Task を始め、Task が二重にできる。自分で分解するなら同じ作業の中で `pbi-to-tasks` に進むか、先に PBI を占有する（並列ガードの `claim`。CLAUDE.md）。分解の後に sub-issue を 1 回見直し、二重の組があれば後の組を閉じる（`ops-kit backlog edit <Task> --state closed`）。
 
 Priority の目安: 他の PBI の前提なら P0、利用者が「まずこれ」と言ったものは P1、それ以外 P2。PBI には必ず付ける（`ops-kit lint` が Priority の無い PBI を違反にする。バックログを進めるは実装中の片づけの次に Priority の高い順で取る）。要望には付けない（分割したあと PBI ごとに Priority が分かれうる）。Phase は Milestone の到達点で選ぶ（迷ったら進行中の Phase）。
 Story Points は `issue-workflow` の基準表（2 = doc 1 本 / 3 = API 1 本 + 画面 1 箇所 / 5 = 中核 + UI + 運用 / 8 = 横断 + 未知）。
 
 ### 4. 要望 Issue に戻る
 
-`## 派生 PBI` に `- #N <題>（要望のどの部分か）— Priority` を並べ、`gh issue edit <req> -F` で更新。全部 Done で閉じる、と 1 行添える。
+`## 派生 PBI` に `- #N <題>（要望のどの部分か）— Priority` を並べ、`ops-kit backlog edit <req> --body-file "$W/req.md"` で更新。全部 Done で閉じる、と 1 行添える。
 
 ### 5. lint
 
 ```bash
-bash scripts/setup/lint_backlog.sh     # violations: 0 かつ exit 0。BACKLOG_URL があれば ops-kit lint --fresh
+ops-kit lint --fresh     # violations: 0 かつ exit 0
 ```
 
 違反が出たら本文を直す（「あとで」は書かれない）。exit 2 は読めなかった（アプリの Task の中ではアプリに届かない・未取得だけ。GitHub に届かないときは保存値を検査する）ので、数分待って再実行。

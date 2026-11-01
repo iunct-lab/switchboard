@@ -37,13 +37,26 @@ export function workspaceErrorGuide(e: Backlog["errors"][number], projectVar: st
 }
 
 /**
- * The backlog's heading (#2362): when it was imported from GitHub, or — with only workspaces kept here in view — that
- * it is stored here. `github` = a workspace in view syncs with GitHub; null = the workspaces have not arrived yet.
+ * The backlog's heading (#2362, #2343): when it was imported from GitHub; with only workspaces kept here in view, that it
+ * is stored here, with no GitHub in it; with both, that only the GitHub ones were imported. `kinds` = where the workspaces in
+ * view keep their backlogs; null = the workspaces have not arrived yet.
  */
-export function backlogHeading(fetchedAt: number | null, busy: boolean, github: boolean | null, fmt: (ms: number) => string = jstTime): string {
+export function backlogHeading(fetchedAt: number | null, busy: boolean, kinds: Array<"github" | "switchboard"> | null, fmt: (ms: number) => string = jstTime): string {
   if (fetchedAt === null) return busy ? "読み込み中…" : "";
-  return `${github === false ? "Switchboard に保存（GitHub と連携しない）" : `${fmt(fetchedAt)} に GitHub から取得`}${busy ? " · 読み込み中…" : ""}`;
+  const github = kinds?.includes("github") ?? true;
+  const here = kinds?.includes("switchboard") ?? false;
+  const line = !github ? "Switchboard に保存" : here ? `${fmt(fetchedAt)} に読み込み（GitHub の workspace は GitHub から取得）` : `${fmt(fetchedAt)} に GitHub から取得`;
+  return `${line}${busy ? " · 読み込み中…" : ""}`;
 }
+
+/** What the backlog screen says of what was saved (#2343): nothing of GitHub for a workspace kept here. */
+export const savedWords = (keptHere: boolean) =>
+  keptHere
+    ? { edit: "保存しました", comment: "コメントを保存しました", commentHint: "コメント（Switchboard に保存されます）", created: "保存しました。番号は下に出ます", made: "作成済み" }
+    : { edit: "手元に保存しました。GitHub への反映は送信待ちです（下の同期の表示で確かめてください）", comment: "コメントを手元に保存しました。GitHub への反映は送信待ちです", commentHint: "コメント（手元に保存され、GitHub へは後で送られます）", created: "手元に保存しました。GitHub での作成は送信待ちで、番号は作られた後に下に出ます", made: "GitHub に作成済み" };
+
+/** An Issue's link, or null for one with no page on GitHub (#2343): kept in Switchboard, or not created there yet. */
+export const issueHref = (url: string): string | null => url || null;
 
 /**
  * A workspace's GitHub sync (#2266), for the settings and the backlog's sync line: off (with what waits to go when it is

@@ -82,6 +82,12 @@ Recorded fixtures (outside Git; record your own outside Git with the `runner-ada
 
 Eval log (real Claude Code 2.1.261, model `claude-haiku-4-5-20251001`): task "Remember the secret word: pelican" → daemon stopped → new daemon, `POST /api/tasks/:id/send` "What was the secret word?" → `--resume` process answered `pelican`; ledger recorded both turns under the same task.
 
+### Fork from a past turn (recorded on 2.1.314, 2026-10-31)
+
+`--resume <session_id> --fork-session --resume-session-at <uuid>` starts a new session holding the conversation up to and including that message; the source session is unchanged. `--resume-session-at` is not listed in `--help`, so the behaviour is pinned by a recording, `fixtures/fork-turn.jsonl`: two Haiku turns (a password, then a changed password), then a process forked at the first turn, then the source resumed. The fork gets a new `session_id` in `system/init` and answers the first password; the source keeps its id and still answers the second. `fixtures/fork-turn-tool.jsonl` is the same with a first turn that calls a tool: forking at its last `assistant` line keeps the tool's result. `forkMinVersion` on the adapter is the version recorded.
+
+`<uuid>` is the `uuid` of the turn's last top-level `assistant` line, the same value as the line's `uuid` in the transcript. The parser carries it as `session.end.turn`. Lines with `parent_tool_use_id` are a subagent's and live in a transcript of their own, so they do not count. A turn with no `assistant` line has no `turn`.
+
 ## Session log (`~/.claude/projects`) — reading terminal sessions (issue #91)
 
 Verified 2026-09-09 against logs written by Claude Code **2.1.263** (interactive terminal and `claude -p` alike). Mapping in

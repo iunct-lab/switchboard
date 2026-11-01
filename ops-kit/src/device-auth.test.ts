@@ -1,3 +1,4 @@
+// test-reads: ops-kit/bin/device-auth
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -145,22 +146,22 @@ describe("ops-kit/bin/device-auth", () => {
     expect(posts[0]?.url).toBe(URL_);
   }, 10_000);
 
-  test("a process the command left behind does not hold device-auth past the expiry", async () => {
-    const started = Date.now();
-    const r = await run(["--expires-in", "1", "--", "sh", "-c", `sleep 6 & echo ${URL_}; echo ${CODE}; wait`], { DEVICE_AUTH_URL: `http://127.0.0.1:${server.port}/x` }, 0);
-    expect(r.code).toBe(124);
-    expect(Date.now() - started).toBeLessThan(4000);
-    expect(calls.at(-1)?.method).toBe("DELETE");
-  }, 10_000);
-
   test.each([
     ["on expiry", ["--expires-in", "1"], 200, 124],
     ["when the hand-over is refused", [], 500, 2],
   ])("%s what the command started is stopped too (#992)", async (_name, opts, status, exit) => {
     const pidFile = join(dir, "left.pid");
     answer = status;
+    const started = Date.now();
     const r = await run([...opts, "--", "sh", "-c", `sleep 30 & echo $! > ${pidFile}; echo ${URL_}; echo ${CODE}; wait`], { DEVICE_AUTH_URL: `http://127.0.0.1:${server.port}/x` }, 0).finally(() => (answer = 200));
     expect(r.code).toBe(exit);
+    if (exit === 124) {
+      expect(Date.now() - started).toBeLessThan(4000); // what the command left behind does not hold device-auth
+      expect((calls.find((c) => c.method === "POST")?.body as { expiresInSec: number }).expiresInSec).toBe(1);
+      expect(calls.at(-1)?.method).toBe("DELETE");
+      expect(r.err).toContain("期限");
+      expect(r.out + r.err).not.toContain(CODE);
+    }
     const pid = Number(await Bun.file(pidFile).text());
     const alive = () => {
       try {
@@ -194,15 +195,6 @@ describe("ops-kit/bin/device-auth", () => {
     expect(alive()).toBe(false);
     expect(calls.at(-1)?.method).toBe("DELETE");
   }, 10_000);
-
-  test("--expires-in 1: the command is stopped, a DELETE comes, exit 124", async () => {
-    const r = await run(["--expires-in", "1", "--", "bun", login, "$DONE"], { DEVICE_AUTH_URL: `http://127.0.0.1:${server.port}/x` }, 0);
-    expect(r.code).toBe(124);
-    expect((calls.find((c) => c.method === "POST")?.body as { expiresInSec: number }).expiresInSec).toBe(1);
-    expect(calls.at(-1)?.method).toBe("DELETE");
-    expect(r.err).toContain("期限");
-    expect(r.out + r.err).not.toContain(CODE);
-  });
 
   test("no DEVICE_AUTH_URL: exit 2 and the command never runs", async () => {
     const marker = join(dir, "ran");

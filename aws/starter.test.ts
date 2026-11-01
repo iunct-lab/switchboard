@@ -1,3 +1,4 @@
+// test-reads: aws/auth-page.html
 import { describe, expect, test } from "bun:test";
 import { CreateReplaceRootVolumeTaskCommand, DescribeInstancesCommand, DescribeReplaceRootVolumeTasksCommand, StartInstancesCommand } from "@aws-sdk/client-ec2";
 import { GetParameterCommand } from "@aws-sdk/client-ssm";

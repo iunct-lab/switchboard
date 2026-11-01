@@ -1,3 +1,4 @@
+// test-reads: none
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

@@ -23,8 +23,9 @@ import { dirname, join } from "node:path";
 import { forgeTargetOf, originOf, runForgeOperation } from "../ops-kit/src/forge.ts";
 import { gitlabForge, runGlab, viewGitlabMr, type Sh } from "../ops-kit/src/forge-gitlab.ts";
 import { githubForge } from "../ops-kit/src/forge-github.ts";
+import { IDLE_KILLED_LINE, runIdle } from "../ops-kit/src/idle-run.ts";
 import { hostAws } from "../ops-kit/src/secrets.ts";
-import { ciExit, runCi, type Step } from "./ci.ts";
+import { ciExit, runCi, STEP_IDLE_SECONDS, type Step } from "./ci.ts";
 
 export type { Step };
 
@@ -39,6 +40,33 @@ export function stackOf(body: string): Map<number, string> | null {
   const m = LOCAL_CI_STACK.exec(body.split("\n")[1] ?? "");
   if (!m) return null;
   return new Map([...m[1]!.matchAll(/#(\d+)=([0-9a-f]{40})/g)].map((x) => [Number(x[1]), x[2]!]));
+}
+
+/** A pass's line after the stack line (#1886): the type check's and bun test's seconds as JSON, hidden in GitHub's view. */
+export const LOCAL_CI_SECONDS = /^<!-- local-ci-seconds (\{.*\}) -->$/m;
+
+/** The type check's and bun test's seconds of a run. */
+export interface StepSeconds { typecheck: number; test: number }
+
+/** The steps whose seconds a pass carries, by their `run` (scripts/ci.ts's `bun run typecheck` / `bun test`). */
+const SECONDS_STEPS: Record<keyof StepSeconds, string> = { typecheck: "bun run typecheck", test: "bun test" };
+
+/** The seconds of the two steps, to one decimal; either missing throws (the CI changed them: the seconds would silently go). */
+export function stepSeconds(results: StepResult[]): StepSeconds {
+  const of = (run: string) => {
+    const r = results.find((x) => x.run.trim() === run);
+    if (!r) throw new Error(`CI の手順に \`${run}\` が無い（stepSeconds）`);
+    return Math.round(r.seconds * 10) / 10;
+  };
+  return { typecheck: of(SECONDS_STEPS.typecheck), test: of(SECONDS_STEPS.test) };
+}
+
+/** The seconds a result's body carries, or undefined when it has none. */
+export function markerSeconds(body: string): StepSeconds | undefined {
+  const m = LOCAL_CI_SECONDS.exec(body);
+  if (!m) return undefined;
+  const v = JSON.parse(m[1]!) as Partial<StepSeconds>;
+  return typeof v.typecheck === "number" && typeof v.test === "number" ? { typecheck: v.typecheck, test: v.test } : undefined;
 }
 
 /**
@@ -92,9 +120,9 @@ export async function patchIdOf(pr: number, repo: string, sh: Deps["sh"]): Promi
 /** `log` = where the whole output of a step that failed was kept (#1232), `fails` = its failLines; passing steps keep nothing. */
 export interface StepResult extends Step { code: number; seconds: number; tail: string; log?: string; fails?: string[] }
 
-/** The lines of a step's output that name what failed: bun test's `(fail)` lines and perf-ratchet's `over:` lines, once each, in order. */
+/** The lines of a step's output that name what failed: bun test's `(fail)` lines, perf-ratchet's `over:` lines and idle-run's reason, once each, in order. */
 export function failLines(output: string): string[] {
-  return [...new Set(output.split("\n").filter((l) => l.startsWith("(fail)") || l.includes("over:")))];
+  return [...new Set(output.split("\n").filter((l) => l.startsWith("(fail)") || l.includes("over:") || l.startsWith("無進捗で打ち切り")))];
 }
 
 /** What perf-ratchet's check said: its `ceilings:` environment and its over / improved / raised lines as printed. `unknown` = none of the three (the bench failed, or the check stopped before judging). */
@@ -173,13 +201,15 @@ export function workflowSteps(yaml: string): Step[] {
 }
 
 /** What one run tested and how it went; `conflict` = the head did not merge into the base, nothing ran. `stack`: the PRs a pass covers (#2950). */
-export interface LocalCiResult { sha: string; base: string; results: StepResult[]; ok: boolean; conflict?: boolean; perf?: PerfVerdict; baseline?: Baseline; stack?: Array<{ pr: number; patchId: string }> }
+/** `seconds`: a pass's type check and bun test seconds (#1886), for a checkout with scripts/ci.ts. */
+export interface LocalCiResult { sha: string; base: string; results: StepResult[]; ok: boolean; seconds?: StepSeconds; conflict?: boolean; perf?: PerfVerdict; baseline?: Baseline; stack?: Array<{ pr: number; patchId: string }> }
 
-/** The PR comment of a run, pass or not (#913): the mark, a pass's stack line, what was tested, every step that ran; a failure names its step and what failed in it. */
+/** The PR comment of a run, pass or not (#913): the mark, a pass's stack line and seconds line, what was tested, every step that ran; a failure names its step and what failed in it. */
 export function resultComment(r: LocalCiResult): string {
   const head = [
     `[local-ci] ${r.ok ? "pass" : "fail"} ${r.sha} base=${r.base}`,
     ...(r.ok && r.stack?.length ? [`stack ${r.stack.map((x) => `#${x.pr}=${x.patchId}`).join(" ")}`] : []),
+    ...(r.ok && r.seconds ? [`<!-- local-ci-seconds ${JSON.stringify(r.seconds)} -->`] : []),
     "",
     "`.github/workflows/ci.yml` の手順（`bun scripts/ci.ts` は `scripts/ci.ts` の各手順）を、PR の head を base にマージしたものでローカルで実行した（`bun scripts/local-ci.ts`）。",
     "",
@@ -247,7 +277,8 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
     const env = stepEnv(tmp);
     const run = await runCheckout(dir, env, `local-ci-${repo.replaceAll("/", "_")}-${pr}`, d, cache);
     const { results } = run;
-    if (run.ok) return { sha, base, results, ok: true };
+    // a checkout with scripts/ci.ts (this repository's CI) must have both steps; another repository's (--repo) need not
+    if (run.ok) return { sha, base, results, ok: true, ...(existsSync(join(dir, "scripts/ci.ts")) ? { seconds: stepSeconds(results) } : {}) };
     const result = results.at(-1)!;
     if (run.perf) {
       // over only: main measured the same way tells an environment's (or main's) excess from the PR's own
@@ -388,11 +419,13 @@ export const sh: Deps["sh"] = async (cmd, cwd) => {
 };
 
 // GitHub runs a `run:` with `bash -e {0}`. tag-ci runs its steps the same way.
-export const step: Deps["step"] = async (script, cwd, env) => {
-  const p = Bun.spawn(["bash", "-e", "-c", script], { cwd, stdout: "pipe", stderr: "pipe", env });
-  const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
-  return { code, output: out + err };
+export const stepWithIdle = (idleSeconds: number): Deps["step"] => async (script, cwd, env) => {
+  // stdout then stderr, not as they came: a stderr line landing inside a stdout line would hide a (fail) or over: from failLines
+  const out = { stdout: "", stderr: "" };
+  const { code, idleKilled } = await runIdle(["bash", "-e", "-c", script], { cwd, env, idleSeconds, onData: (chunk, stream) => { out[stream] += chunk; } });
+  return { code, output: `${out.stdout}${out.stderr}${idleKilled ? `\n${IDLE_KILLED_LINE(idleSeconds)}\n` : ""}` };
 };
+export const step = stepWithIdle(STEP_IDLE_SECONDS);
 
 /**
  * Posts a result on the PR as a forge `verification` (#920): the service is the target repository's `ops.config.json`

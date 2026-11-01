@@ -503,11 +503,11 @@ try {
   await click("再読込");
   await until(() => evaluate(`${read} && (${readyRow(304)}?.textContent ?? "").includes("最後の Task: 中断")`), "Ready #304 back to 中断 once reviewed");
   replyWaiting.ready = true;
-  // 重なり (#1044): #304's Task names `src/overlap.ts` and an open PR (#950, not its own) changes it → under the row
+  // 重なり (#1044): #304's two Tasks name `src/overlap.ts` and an open PR (#950, not its own) changes it → under the row
   // 「重なり: PR #950（src/overlap.ts）」 with the PR linked; the row's 実装する still starts it, with pbi-complete as before
   // (the session's own `overlap` judges); the scheduled firing below leaves it and logs why
   const dec304 = decisions.data.repository.i304 as { subIssues?: unknown };
-  dec304.subIssues = { nodes: [{ number: 3041, state: "OPEN", labels: { nodes: [{ name: "type:task" }] }, body: "触る場所: `src/overlap.ts`", comments: { nodes: [] } }] };
+  dec304.subIssues = { nodes: [3041, 3042].map((number) => ({ number, state: "OPEN", labels: { nodes: [{ name: "type:task" }] }, body: "触る場所: `src/overlap.ts`", comments: { nodes: [] } })) };
   openPulls = [{ number: 950, files: ["src/overlap.ts"], headRefName: "sb/999-x" }];
   const overlapOf = (repo: string) => `document.querySelector('.backlog-overlap[data-issue="https://github.com/acme/${repo}/issues/304"]')`;
   await click("再読込");

@@ -1,3 +1,4 @@
+// test-reads: ops-kit/fixtures/ ops-kit/bin/ .github/labels.yml
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -552,7 +553,7 @@ describe("backlog without BACKLOG_URL (#3071)", () => {
       expect(graphql(json.gh.calls[0])?.vars.q).toBe('repo:example/repo is:issue "題" in:title');
 
       // the comments past the first page are read too
-      const issue = () => ({ repository: { issue: { ...ghIssue(pbi, fields), body: pbi.body, url: pbi.url, milestone: { title: pbi.milestone }, parent: null, comments: { pageInfo: { hasNextPage: true, endCursor: "c100" }, nodes: [comment] } } } });
+      const issue = () => ({ repository: { issue: { ...ghIssue(pbi, fields), body: pbi.body, url: pbi.url, milestone: { title: pbi.milestone }, parent: null, subIssues: { nodes: [{ number: 13 }] }, comments: { pageInfo: { hasNextPage: true, endCursor: "c100" }, nodes: [comment] } } } });
       const page2 = () => ({ repository: { issue: { comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [later] } } } });
       const view = await cli(["backlog", "view", "12"], { BACKLOG_URL: undefined }, [issue, page2]);
       const viewStored = await cli(["backlog", "view", "12"], { BACKLOG_URL: app.url }, []);
@@ -565,6 +566,10 @@ describe("backlog without BACKLOG_URL (#3071)", () => {
       expect(graphql(view.gh.calls[1])?.vars).toEqual({ o: "example", n: "repo", num: 12, after: "c100" });
       expect(view.lines[3]).toContain("同期 github  送信待ち 0");
       expect(graphql(view.gh.calls[0])?.vars).toEqual({ o: "example", n: "repo", num: 12, after: null });
+      // pbi-complete reads the Tasks of a PBI this way wherever it runs (#3072)
+      const viewJson = await cli(["backlog", "view", "12", "--json"], { BACKLOG_URL: undefined }, [issue, page2]);
+      expect(JSON.parse(viewJson.lines.join("\n")).issue.subIssues).toEqual([13]);
+      expect(graphql(viewJson.gh.calls[0])?.query).toContain("subIssues");
     } finally {
       app.stop();
     }

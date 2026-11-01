@@ -9,6 +9,47 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DONE=/var/lib/switchboard-host/bootstrapped
 [ -f "$DONE" ] && { echo "bootstrap: already done"; exit 0; }
 
+# --- main of /switchboard/github-repo (#2231): UserData clones the stack's GitHubRepo, which keeps its old name until an
+# instance-replacing deploy (#465); run the administrator's repository's main instead, fetched the way sb-host-update
+# does. Anything unreadable is said and this clone goes on. Its own clone (origin = the parameter) does not fetch again.
+# SB_HOST_CLONE is for the tests.
+from_main() {
+  local clone="${SB_HOST_CLONE:-/opt/switchboard-host}" imds=http://169.254.169.254 t region repo url token out
+  t="$(curl -fsS -X PUT "$imds/latest/api/token" -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' || true)"
+  region="$(curl -fsS -H "X-aws-ec2-metadata-token: $t" "$imds/latest/meta-data/placement/region" || true)"
+  repo="$(timeout 15 aws ssm get-parameter --name /switchboard/github-repo --query Parameter.Value --output text --region "$region" 2>/dev/null || true)"
+  [[ "$repo" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]] || { echo "bootstrap: no readable /switchboard/github-repo; going on with the clone of the stack's GitHubRepo" >&2; return 0; }
+  url="https://github.com/$repo.git"
+  [ "$(git -C "$clone" remote get-url origin 2>/dev/null || true)" != "$url" ] || return 0
+  if ! token="$(timeout 15 aws ssm get-parameter --name /switchboard/github-token --with-decryption --query Parameter.Value --output text --region "$region" 2>/dev/null)"; then
+    echo "bootstrap: could not fetch main of $repo (no token from Parameter Store); going on with the clone of the stack's GitHubRepo" >&2
+    return 0
+  fi
+  rm -rf "$clone.new"
+  # the header goes through git's environment, not its arguments: root's command line is readable by every user
+  if ! out="$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+      GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$token" | base64 -w0)" \
+      timeout 30 git clone --depth 1 --branch main -q "$url" "$clone.new" 2>&1)"; then
+    rm -rf "$clone.new"
+    # one line in the journal: git's remote: and fatal: lines joined
+    echo "bootstrap: could not fetch main of $repo (${out//$'\n'/; }); going on with the clone of the stack's GitHubRepo" >&2
+    return 0
+  fi
+  rm -rf "$clone.old"
+  if ! { mv "$clone" "$clone.old" && mv "$clone.new" "$clone"; } 2>/dev/null; then
+    # HERE points into $clone: put this clone back rather than exec into a half-renamed one again and again
+    [ -d "$clone" ] || mv "$clone.old" "$clone" 2>/dev/null || true
+    rm -rf "$clone.new"
+    echo "bootstrap: could not put main of $repo in place of $clone; going on with the clone of the stack's GitHubRepo" >&2
+    return 0
+  fi
+  rm -rf "$clone.old"
+  echo "bootstrap: running main of $repo" >&2
+  # exec inside the function, like sb-host-update's main: this file is gone, and bash reads nothing more of it
+  exec bash "$clone/aws/host/bootstrap.sh" "$@"
+}
+from_main "$@"
+
 LITESTREAM_VERSION=0.3.13
 # neither project publishes checksums for these assets: pinned here from the downloads (2026-09-25)
 LITESTREAM_SHA256=9585f5a508516bd66af2b2376bab4de256a5ef8e2b73ec760559e679628f2d59

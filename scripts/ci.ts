@@ -1,11 +1,14 @@
 /**
  * The CI's steps, one list for both runs (#912): Actions runs `bun scripts/ci.ts` after checkout and setup-bun, and
  * local-ci expands that step of ci.yml into `ciSteps` of the PR's own checkout, so the two run the same commands in the
- * same order and stop at the same failing step. Only node builtins here: it runs before `bun install`.
+ * same order and stop at the same failing step. Only node builtins at the top (the kit's idle-run, which imports nothing, in Actions' branch): it runs before `bun install`.
  * Each step is a `bash -e -c` script, as Actions runs a `run:`. Exit: 1 when a step failed (its own code is in the
  * `✗ <step>: exit <code>` line), else 0 — local-ci's too, whose 2 means it ran nothing.
  * `bun scripts/ci.ts --list` prints the steps as JSON and runs nothing.
  */
+
+/** A step that prints nothing for this long is taken as stuck. No limit on a step's total time. */
+export const STEP_IDLE_SECONDS = 900;
 
 export interface Step { name: string; run: string }
 
@@ -67,9 +70,13 @@ if (import.meta.main && process.argv[2] === "--list") {
   console.log(JSON.stringify(ciSteps));
 } else if (import.meta.main) {
   // Actions: this environment as the runner gives it (GITHUB_ACTIONS picks perf-ratchet's ceilings), the output as it comes
+  // imported here: --list reads this file alone from a checkout, and the kit's idle-run itself imports nothing, so this still runs before `bun install`
+  const { IDLE_KILLED_LINE, runIdle } = await import("../ops-kit/src/idle-run.ts");
   const results = await runCi(ciSteps, async (s) => {
     console.log(`▶ ${s.name}`);
-    return { code: await Bun.spawn(["bash", "-e", "-c", s.run], { stdout: "inherit", stderr: "inherit" }).exited };
+    const r = await runIdle(["bash", "-e", "-c", s.run], { idleSeconds: STEP_IDLE_SECONDS, onData: (chunk) => process.stdout.write(chunk) });
+    if (r.idleKilled) console.log(IDLE_KILLED_LINE(STEP_IDLE_SECONDS));
+    return { code: r.code };
   });
   const failed = results.find((r) => r.code !== 0);
   if (failed) console.log(`✗ ${failed.name}: exit ${failed.code}`);

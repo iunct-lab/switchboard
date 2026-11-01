@@ -1,3 +1,4 @@
+// test-reads: apps/web/public/sw.js
 import { describe, expect, test } from "bun:test";
 import { countriesUrl, hasTypedText, logoutPath, hostStopped, loginRoute, sessionLabel, sessionRefreshDelay, STUCK_RESCUE, stoppedRoute, withoutFromAuth } from "./login.ts";
 

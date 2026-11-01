@@ -1,3 +1,4 @@
+// test-reads: none
 import { currentRepo } from "./repo.ts";
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, utimesSync, writeFileSync, existsSync } from "node:fs";

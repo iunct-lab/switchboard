@@ -1,3 +1,4 @@
+// test-reads: none
 import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -192,7 +193,7 @@ test("SWITCHBOARD_DB moves the database sb-rescue snapshots, like it does for th
   }
 });
 
-test("a promotion removes releases beyond KEEP_RELEASES; a rejected one removes nothing", async () => {
+test("a promotion removes releases beyond KEEP_RELEASES; a rejected one removes nothing; the candidate boots on the unpacked database, without sb-rescue's starter token (#2077)", async () => {
   const fakes = Array.from({ length: 8 }, (_, i) => (i + 1).toString(16).repeat(40));
   for (const sha of fakes) {
     mkdirSync(join(f.home, "releases", sha), { recursive: true });
@@ -202,26 +203,23 @@ test("a promotion removes releases beyond KEEP_RELEASES; a rejected one removes 
   expect((await promote(ctx, bad, FAST)).action).toBe("rejected");
   for (const sha of fakes) expect(existsSync(join(f.home, "releases", sha))).toBe(true);
   const cur = currentOf(f.home)!;
-  const good = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource("v-keep"), "good again");
-  const r = await promote(ctx, good, FAST);
+  const opens = `const { Database } = require("bun:sqlite"); new Database(process.env.SWITCHBOARD_DB ?? process.env.SWITCHBOARD_HOME + "/switchboard.db").query("select name from notes").all();`;
+  const refuses = `if (process.env.SWITCHBOARD_STARTER_TOKEN) throw new Error("the candidate got the starter token");`;
+  const good = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource("v-keep", opens + refuses), "good again");
+  // sb-rescue's own secret for 作り直す: the daemon never gets it (supervisor.ts), and neither does a candidate
+  process.env.SWITCHBOARD_STARTER_TOKEN = "tok";
+  let r: Awaited<ReturnType<typeof promote>>;
+  try {
+    r = await promote(ctx, good, FAST);
+  } finally {
+    delete process.env.SWITCHBOARD_STARTER_TOKEN;
+  }
+  expect(((await health(ctx.port)) as { starterToken?: string | null } | null)?.starterToken ?? null).toBeNull();
   expect(r).toMatchObject({ action: "promote", ok: true, to: good });
   expect(r.reason).toMatch(/removed \d+ old releases/);
   expect(fakes.slice(0, 3).some((sha) => existsSync(join(f.home, "releases", sha)))).toBe(false);
   expect(fakes.slice(3).every((sha) => existsSync(join(f.home, "releases", sha)))).toBe(true);
   expect([currentOf(f.home), previousOf(f.home)]).toEqual([good, cur]);
-}, 60_000);
-
-test("the candidate does not get sb-rescue's starter token (#2077)", async () => {
-  // sb-rescue's own secret for 作り直す: the daemon never gets it (supervisor.ts), and neither does a candidate
-  process.env.SWITCHBOARD_STARTER_TOKEN = "tok";
-  try {
-    const clean = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource("clean", `if (process.env.SWITCHBOARD_STARTER_TOKEN) throw new Error("the candidate got the starter token");`), "refuses the token");
-    const r = await promote(ctx, clean, FAST);
-    expect(r).toMatchObject({ action: "promote", ok: true, to: clean });
-    expect(((await health(ctx.port)) as { starterToken?: string | null } | null)?.starterToken ?? null).toBeNull();
-  } finally {
-    delete process.env.SWITCHBOARD_STARTER_TOKEN;
-  }
 }, 60_000);
 
 test("checkDaemon says why the daemon is unhealthy, in the same words (#2814)", async () => {
@@ -253,9 +251,3 @@ test("checkDaemon says why the daemon is unhealthy, in the same words (#2814)", 
     for (const s of servers) await s.stop(true);
   }
 });
-
-test("the candidate boots on the unpacked database, not on the gzip", async () => {
-  const opens = `const { Database } = require("bun:sqlite"); new Database(process.env.SWITCHBOARD_DB ?? process.env.SWITCHBOARD_HOME + "/switchboard.db").query("select name from notes").all();`;
-  const next = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource("reads-db", opens), "reads the database");
-  expect(await promote(ctx, next, FAST)).toMatchObject({ action: "promote", ok: true, to: next });
-}, 30_000);

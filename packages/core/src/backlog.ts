@@ -8,7 +8,7 @@ import { applyBacklogField, BacklogResolveError, type BacklogLocalEntry, type Ba
 import { conflictRevision, withoutMarker } from "./backlog-merge.ts";
 import { closesOf } from "./backlog-sync.ts";
 import { findSecrets, hostAws } from "../../../ops-kit/src/secrets.ts";
-import { publicCopyRefusal } from "../../../ops-kit/src/config.ts";
+import { noWriteRefusal } from "../../../ops-kit/src/config.ts";
 import type { SetupScripts } from "./skillsync.ts";
 import { judge, type Work } from "../../../scripts/parallel-guard.ts";
 import { pathsIn } from "../../../scripts/task-paths.ts";
@@ -165,6 +165,9 @@ function field(raw: RawBacklogIssue, project: number, name: string) {
   return item?.fieldValues.nodes.find((v) => v.field?.name === name);
 }
 
+/** The label that keeps backlog-next off a request or PBI still being thought about (#2930). */
+export const ON_HOLD_LABEL = "on-hold";
+
 /**
  * The stage of one open Issue; null = not shown (a request that already has a PBI in its `## 派生 PBI`).
  * `needs-decision` (label) wins over the rest; a PBI's stage comes from the Project's Status.
@@ -204,6 +207,7 @@ export function toItem(raw: RawBacklogIssue, project: number, ws: Pick<BacklogWo
     heldAt: null,
     confirmations,
     closable: stage === "in-progress" && !!tasks && tasks.total > 0 && tasks.done === tasks.total && confirmations.length === 0,
+    onHold: raw.labels.nodes.some((l) => l.name === ON_HOLD_LABEL),
     waits: [],
     waitsAt: null,
     overlap: null,
@@ -484,6 +488,9 @@ export const isReplyWaiting = (i: BacklogItem) => awaitingReply(i) || decidingSt
 /** The stages a slot's firing picks from: its own, and for the implement slot the in-progress PBIs it resumes or closes (#578). */
 const inSlot = (i: BacklogItem, slot: Slot) => SLOT_STAGES[slot].includes(i.stage) || (slot === "implement" && i.stage === "in-progress");
 
+/** The items of a slot backlog-next leaves because they are on hold (#2930); a running stage Task's is not left for that. */
+export const onHoldIn = (items: BacklogItem[], slot: Slot) => items.filter((i) => i.onHold && inSlot(i, slot) && !i.activeTaskId);
+
 /** The items of a slot backlog-next leaves because their last stage Task ended asking the person (#1275). */
 export const replyWaitingIn = (items: BacklogItem[], slot: Slot) =>
   items.filter((i) => inSlot(i, slot) && !i.activeTaskId && !isWaiting(i) && !isUnblocked(i) && awaitingReply(i));
@@ -578,19 +585,21 @@ export const spinningIn = (items: BacklogItem[], slot: Slot) =>
   items.filter((i) => slot === "implement" && !i.activeTaskId && !isWaiting(i) && !isAnswered(i) && isSpinning(i));
 
 /**
- * The one item backlog-next moves on in a slot (#267, #561, #2929): the in-progress PBIs to finish first (回答済みの実装中 →
- * 待ちが解けた実装中 → 閉じられる実装中 → 止まった実装中), then Priority (P0 first, none last), then within one Priority
+ * The one item backlog-next moves on in a slot (#267, #561, #2929): the PBIs to finish first (回答済みの実装中 →
+ * 待ちが解けた Ready・実装中 → 閉じられる実装中 → 止まった実装中), then Priority (P0 first, none last), then within one Priority
  * the items not yet worked on before those worked on and updated since, then the stage (Ready → 分解待ち → 要望), then the
  * oldest. Items waiting for a decision or with a running stage Task are left alone. An answered in-progress PBI goes on with 実装
  * (`complete`), not the in-progress button's 状況確認; so does one whose waits all closed (#817).
  * #624: an item unchanged since its last stage Task of the same stage is left too, and one updated since goes after the
  * items of the same Priority not yet worked on (an answered in-progress PBI still first).
  * #817: an item waiting for a PR / Issue still open is left, Ready or in progress.
+ * #2753: a Ready PBI whose waits all closed takes the same place as such an in-progress one, its stopped Task reviewed or not.
  * #578: any other in-progress PBI is closed (`close`) when it can be, else resumed (`complete`, `resume: true`) unless it
  * did not move since its last resume (`spinningIn`).
  * #1051: a resume that ended before writing its mark is left too, until the Issue, a Task or an answer moves.
  * #1275: an item whose last stage Task failed, or ended asking the person, with no update to the Issue since is left in
  * any stage (`failedIn`, `replyWaitingIn`).
+ * #2930: an item labelled `on-hold` is left in every slot and stage (`onHoldIn`), and in no other reason's list.
  */
 export function pickNext(items: BacklogItem[], slot: Slot): { item: BacklogItem; action: BacklogAction; resume?: true } | null {
   // #1044: an 実装 (`complete`) that would touch what other work touches is not started; the next candidate goes instead
@@ -603,12 +612,12 @@ export const overlapIn = (items: BacklogItem[], slot: Slot) => candidates(items,
 /** The items a slot may move on, in the order backlog-next takes them, each with what it would do. */
 function candidates(items: BacklogItem[], slot: Slot): Array<{ item: BacklogItem; action: BacklogAction; resume?: true }> {
   const resumed = (i: BacklogItem) =>
-    isAnswered(i) ? -4 : i.stage !== "in-progress" ? null : isUnblocked(i) ? -3 : isClosable(i) ? -2 : isStalled(i) && !isSpinning(i) ? -1 : null;
+    isAnswered(i) ? -4 : isUnblocked(i) ? -3 : i.stage !== "in-progress" ? null : isClosable(i) ? -2 : isStalled(i) && !isSpinning(i) ? -1 : null;
   const first = (i: BacklogItem) => resumed(i) ?? 0;
   const tried = (i: BacklogItem) => (isTriedBefore(i) ? 1 : 0);
   // #1275: a Task that failed or stopped asking, with no update to the Issue since, holds the item in any stage (an unblocked one still goes on, #817)
-  const open = items.filter((i) => !i.activeTaskId && !isWaiting(i) && (isUnblocked(i) || (!isUnchanged(i) && !failedSince(i) && !awaitingReply(i) && !stopHeld(i))) && (SLOT_STAGES[slot].includes(i.stage) || (slot === "implement" && resumed(i) !== null)));
-  // #2929: the in-progress ones to finish first, then Priority, then not yet worked on, then the stage, then the oldest
+  const open = items.filter((i) => !i.onHold && !i.activeTaskId && !isWaiting(i) && (isUnblocked(i) || (!isUnchanged(i) && !failedSince(i) && !awaitingReply(i) && !stopHeld(i))) && (SLOT_STAGES[slot].includes(i.stage) || (slot === "implement" && resumed(i) !== null)));
+  // #2929: the ones to finish first (`resumed`), then Priority, then not yet worked on, then the stage, then the oldest
   open.sort(
     (a, b) =>
       first(a) - first(b) ||
@@ -695,12 +704,12 @@ export async function repoOf(gh: GhRunner, cwd: string): Promise<{ repo: string;
 
 /**
  * The repository whose backlog the checkout at `cwd` imports and writes (`repoOf`). A clone of the public copy that
- * still resolves to it (`publicCopyRefusal`, #2467) is refused: its backlog is neither imported nor sent, and the
+ * still resolves to it, or one marked `ops-kit.noWrite` (`noWriteRefusal`, #2467, #2576), is refused: its backlog is neither imported nor sent, and the
  * import's failure says how to point the clone at one's own repository. A read only (the secret scan) uses `repoOf`.
  */
 export async function backlogRepoOf(gh: GhRunner, cwd: string): Promise<{ repo: string; owner: string; name: string; private: boolean }> {
   const r = await repoOf(gh, cwd);
-  const refusal = publicCopyRefusal(r.repo, cwd);
+  const refusal = noWriteRefusal(r.repo, cwd);
   if (refusal) throw new BacklogError(refusal);
   return r;
 }
@@ -1143,9 +1152,10 @@ function withWaits(waiting: Map<BacklogItem, { numbers: number[]; at: string; ov
  * Gives each Ready / in-progress PBI its prerequisites (#937) with their states: those its body names (`via` null), and
  * those its open Tasks name, other than the PBI's own open Tasks (their order is the PBI's own business), when every
  * open Task has one not met. One that is still pending and leads back to the PBI (or to the Task naming it) along the
- * open Issues' prerequisites — a PBI leading on to its open Tasks' — is a `cycle`.
+ * open Issues' prerequisites — a PBI leading on to its open Tasks' — is a `cycle`. Answers each PBI's open Tasks that can
+ * start now (#2754): every prerequisite in another PBI or PR met, and none naming one of the PBI's own open Tasks.
  */
-function withPrereqs(items: BacklogItem[], issues: Map<number, BacklogIssueData>, targets: Map<number, WaitTarget>, released: (oid: string) => boolean | null): void {
+function withPrereqs(items: BacklogItem[], issues: Map<number, BacklogIssueData>, targets: Map<number, WaitTarget>, released: (oid: string) => boolean | null): Map<number, number[]> {
   const named = (n: number) => {
     const i = issues.get(n);
     return i?.state === "OPEN" ? prereqsOf(i.body) : [];
@@ -1162,6 +1172,7 @@ function withPrereqs(items: BacklogItem[], issues: Map<number, BacklogIssueData>
     }
     return false;
   };
+  const startable = new Map<number, number[]>();
   for (const i of items) {
     if (i.type !== "pbi" || (i.stage !== "ready" && i.stage !== "in-progress")) continue;
     const judge = (p: { number: number; release: boolean }, via: number | null): BacklogPrereq => {
@@ -1175,18 +1186,21 @@ function withPrereqs(items: BacklogItem[], issues: Map<number, BacklogIssueData>
     const ofTasks = tasks.map((t) => named(t).filter((p) => !tasks.includes(p.number)).map((p) => judge(p, t)));
     const blocked = tasks.length > 0 && ofTasks.every((ps) => ps.some((p) => p.state !== "met"));
     i.prereqs = [...named(i.number).map((p) => judge(p, null)), ...(blocked ? ofTasks.flat() : [])];
+    startable.set(i.number, tasks.filter((t, n) => ofTasks[n]!.every((p) => p.state === "met") && !named(t).some((p) => tasks.includes(p.number))));
   }
+  return startable;
 }
 
 /**
- * Gives each Ready / in-progress PBI the files its open Tasks name that other work touches too (#1044), by the rule of
+ * Gives each Ready / in-progress PBI the files its Tasks name that other work touches too (#1044), by the rule of
  * scripts/task-paths.ts (`pathsIn`) and scripts/parallel-guard.ts (`judge`, STALE_HOURS) read from the stored records, so that backlog-next
  * does not start a session that would only find the overlap itself. The other work: an open PR that is not a Draft, not
  * `needs-decision` and not the PBI's own (it closes neither the PBI nor one of its Tasks), and an In progress Task of
  * another PBI that is not `needs-decision`. A PR whose files are not all stored cannot be judged (`unknown`). `root` =
  * the checkout, whose top level the paths in a Task's body are read against (what `readOthers` asks GitHub for).
+ * #2754: judged per Task that can start (`startable`), so one free Task lets the PBI go; with none, all its open Tasks as one.
  */
-function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIssueData>, pulls: Array<{ number: number; isDraft: boolean; labels: string[]; closes: number[]; updatedAt: string; files: string[] | null; state: string }>, statuses: Map<number, string | number | null>, root: string): void {
+function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIssueData>, startable: Map<number, number[]>, pulls: Array<{ number: number; isDraft: boolean; labels: string[]; closes: number[]; updatedAt: string; files: string[] | null; state: string }>, statuses: Map<number, string | number | null>, root: string): void {
   const mine = items.filter((i) => i.type === "pbi" && (i.stage === "ready" || i.stage === "in-progress"));
   if (!mine.length) return;
   const top = new Map<string, boolean>();
@@ -1208,8 +1222,10 @@ function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIssueData>
   const now = new Date();
   for (const i of mine) {
     const own = new Set<number>([i.number, ...(issues.get(i.number)?.subIssues ?? [])]);
-    const paths = [...new Set((issues.get(i.number)?.subIssues ?? []).filter((n) => issues.get(n)?.state === "OPEN").flatMap(taskPaths))];
-    if (!paths.length) continue;
+    const free = startable.get(i.number) ?? [];
+    const all = (issues.get(i.number)?.subIssues ?? []).filter((n) => issues.get(n)?.state === "OPEN").flatMap(taskPaths);
+    if (!all.length) continue;
+    const judged = free.length ? free.map(taskPaths) : [all];
     const others: Work[] = [];
     const unknown: string[] = [];
     for (const p of open) {
@@ -1222,7 +1238,8 @@ function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIssueData>
       others.push({ ref: `Task #${t.number}`, task: t.number, paths: taskPaths(t.number), updatedAt: t.updatedAt });
     }
     const seen = new Set<string>();
-    const hits = judge({ paths }, others, now).blocking.filter((h) => !seen.has(`${h.ref} ${h.path}`) && !!seen.add(`${h.ref} ${h.path}`)).map((h) => ({ ref: h.ref, path: h.path }));
+    const blocking = judged.map((paths) => judge({ paths }, others, now).blocking);
+    const hits = (blocking.some((b) => !b.length) ? [] : blocking.flat()).filter((h) => !seen.has(`${h.ref} ${h.path}`) && !!seen.add(`${h.ref} ${h.path}`)).map((h) => ({ ref: h.ref, path: h.path }));
     i.overlap = hits.length || unknown.length ? { hits, unknown: unknown.length ? unknown.join("・") : null } : null;
   }
 }
@@ -1304,8 +1321,8 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
       return t ? [{ number: m, state: t.state, labels: { nodes: t.labels.map((name) => ({ name })) }, comments: { nodes: commentsOf(m) } }] : [];
     });
   withWaits(withComments(asked, buildingOf(asked), commentsOf, tasksOf), targets, issues);
-  withPrereqs(items, issues, targets, opts.released ?? (() => null));
-  withOverlap(items, issues, pulls, statuses, ws.path);
+  const startable = withPrereqs(items, issues, targets, opts.released ?? (() => null));
+  withOverlap(items, issues, startable, pulls, statuses, ws.path);
   return { fetchedAt, items };
 }
 

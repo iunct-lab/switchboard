@@ -282,6 +282,57 @@ describe("pickNext overlap (#1044)", () => {
     expect(pick(ws)).toBe(1);
   });
 
+  test("pickNext overlap: a free Task lets the PBI go while another of its Tasks overlaps; a Task waiting on its sibling does not count", () => {
+    const task = (n: number, parent: number, file: string, prereq = "") => issue(n, ["type:task"], { body: `触る場所: \`${file}\`${prereq}`, parent });
+    const two = (a: BacklogSnapshotEntry, b: BacklogSnapshotEntry) => [issue(1, ["type:pbi"], { subIssues: [10, 11] }), item(1, { Status: "Ready" }), a, b];
+    const busy = pr(50, ["src/a.ts", "src/c.ts"]);
+    // one of the two overlaps: the PBI goes
+    {
+      const ws = imported([...two(task(10, 1, "src/a.ts"), task(11, 1, "src/b.ts")), busy]);
+      expect(byNumber(ws)[1]!.overlap).toBeNull();
+      expect(pick(ws)).toBe(1);
+    }
+    // both overlap: skipped, the hits of both
+    {
+      const ws = imported([...two(task(10, 1, "src/a.ts"), task(11, 1, "src/c.ts")), busy]);
+      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts" }, { ref: "PR #50", path: "src/c.ts" }], unknown: null });
+      expect(pick(ws)).toBeNull();
+    }
+    // the free one names the overlapping one: only that one can start, and the hit is its alone
+    {
+      const ws = imported([...two(task(10, 1, "src/a.ts"), task(11, 1, "src/b.ts", "\n\n**前提**: #10")), busy]);
+      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts" }], unknown: null });
+      expect(pick(ws)).toBeNull();
+    }
+    // the free one waits on another PBI: only the overlapping one can start
+    {
+      const ws = imported([...two(task(10, 1, "src/a.ts"), task(11, 1, "src/b.ts", "\n\n**前提**: #70")), issue(70, ["type:pbi"]), busy]);
+      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts" }], unknown: null });
+      expect(pick(ws)).toBeNull();
+    }
+    // none can start: all the open Tasks as one, as before
+    {
+      const ws = imported([...two(task(10, 1, "src/a.ts", "\n\n**前提**: #70"), task(11, 1, "src/b.ts", "\n\n**前提**: #70")), issue(70, ["type:pbi"]), busy]);
+      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts" }], unknown: null });
+    }
+    // a Task naming no path is not judged, so it counts as free
+    {
+      const ws = imported([...two(task(10, 1, "src/a.ts"), issue(11, ["type:task"], { body: "パスの名指し無し", parent: 1 })), busy]);
+      expect(byNumber(ws)[1]!.overlap).toBeNull();
+    }
+    // a PR not judged stays on the whole PBI, a free Task or not
+    {
+      const ws = imported([...two(task(10, 1, "src/a.ts"), task(11, 1, "src/b.ts")), busy, pr(51, null)]);
+      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [], unknown: "PR #51 の変更ファイルが記録に無い" });
+      expect(pick(ws)).toBeNull();
+    }
+    // so it does when the only Task that can start names no path, as long as an open Task names one
+    {
+      const ws = imported([...two(issue(10, ["type:task"], { body: "パスの名指し無し", parent: 1 }), task(11, 1, "src/b.ts", "\n\n**前提**: #10")), pr(51, null)]);
+      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [], unknown: "PR #51 の変更ファイルが記録に無い" });
+    }
+  });
+
   test("a PR whose files are not all stored cannot be judged: it is not started and says why", () => {
     const ws = imported([...pbi(1, "P0", "src/a.ts"), pr(50, null)]);
     expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [], unknown: "PR #50 の変更ファイルが記録に無い" });

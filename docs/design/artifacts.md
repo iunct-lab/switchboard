@@ -43,7 +43,8 @@ file, 50 MB and 1000 files per folder; over is 413 and nothing is kept.
 | `POST /api/artifacts/:id/refresh` | copy the original again (410 if gone, 400 for a URL) |
 | `POST /api/artifacts/:id/view` | `{url: "/artifacts/<key>/<entry>"}` (400 for a URL) |
 | `GET /artifacts/:key/*` | the copy's files, outside `/api` (below) |
-| `GET /api/reports?limit=` | every task's HTML artifacts, newest first (Across Tasks, below) |
+| `GET /api/reports?q=&before=&limit=` | every task's HTML artifacts, newest first (Across Tasks, below) |
+| `GET /api/artifacts?q=&before=&limit=` | every task's artifacts of every kind, newest first (Across Tasks, below) |
 
 ## How it opens (`viewOf` in `apps/web/src/artifacts.ts`)
 
@@ -74,12 +75,25 @@ The daemon's UI origin can call the whole local API (loopback asks no token), so
 - Files are confined to the artifact's folder: the path is decoded once and then `..` (also as `%2e%2e`), a backslash, NUL, an absolute path and a symlink out are 404; an encoded `/` is just a `/` inside the folder.
 - A script inside the page that calls `/api` or `/ws` sends `Origin: null`; `sameOrigin` (`auth.ts`) refuses it (403).
 
-## Across Tasks: reports (#1835)
+## Across Tasks: reports and every artifact
 
 In this section a report is narrower than at the top of this file: an HTML artifact of any Task — `kind` file or dir,
-`mime` `text/html` (or XHTML), not removed (an image or a text file stays on its Task's tab). No flag, column or table marks one. `GET /api/reports?limit=` lists them newest first by `updated_at` (a report taken again rises); `limit`
-is an integer 1..100, default 20 when absent, and a blank or non-digit value is 400. Each row is the `Artifact` plus
-`taskTitle` and `scheduleTitle` (the schedule's title when one started the Task, else null), so a screen can say who made it.
+`mime` `text/html` (or XHTML), not removed. No flag, column or table marks one. Two lists read the same query
+(`listArtifactsAcross` in `packages/core/src/db.ts`, the parameters read by `acrossQuery` in `server.ts`):
+
+- `GET /api/reports?q=&before=&limit=` — the reports.
+- `GET /api/artifacts?q=&before=&limit=` — every artifact of every kind (file, folder, URL) that is not removed, so a
+  report made by a Task nobody remembers is found without finding the Task first.
+
+Both are newest first by `updated_at` (one taken again rises), then by id. `limit` is an integer 1..100, default 20 when
+absent, and a blank or non-digit value is 400. `q` (trimmed, blank = none, at most 200 characters) keeps the rows whose
+title, original path (`source`) or Task's title contains it, `%` and `_` taken literally. The daemon filters, not the
+screen: the screen reads a page at a time, and a filter applied to the rows already read would miss the older ones.
+`before` is the id of the previous page's last row; the next page is the rows after it in the same order, so rows with
+the same time on a page boundary are neither repeated nor skipped. An id that names no artifact is 400. Each row is the
+`Artifact` plus `taskTitle` and `scheduleTitle` (the schedule's title when one started the Task, else null), so a screen
+can say who made it. Neither list reads the Task's own state: an archived Task, hidden from the Task list, still has its
+artifacts listed.
 
 Where they show:
 
@@ -90,8 +104,18 @@ Where they show:
   (`ArtifactBody`, exported from `Artifacts.tsx`); × removes through `DELETE /api/artifacts/:id`
   with the same 元に戻す; Task を開く opens that Task on its 成果物 tab with that report selected (`View`
   `{ name: "task", artifact }`). With no report the section is one hint line — no list, no table.
-- **Home** — one row under 今日のコスト: the newest report (`GET /api/reports?limit=1`, read once per visit), opening
-  Insights with it (`View` `{ name: "evals", report }`). No report, no row and no heading.
+  The section switches between レポート（HTML） and すべての成果物 (two buttons with `aria-pressed`; the switch is the view's
+  `{ name: "evals", artifacts: true }`, and the header's Insights tab opens the reports). Under the switch, one filter
+  input (題・パス・Task の題) sends `q` once typing pauses for 250 ms and reads from the top again; nothing matching is one line
+  `「<words>」に合う成果物はありません`. Fifty rows are read at a time and a full page offers さらに表示, which reads the page
+  after the last row (`before`). In すべての成果物 a row also names its kind — HTML, 画像, テキスト, PDF (the MIME's second
+  half for anything opened in a new tab), フォルダ or URL (`kindLabel` in `apps/web/src/reports.ts`). Opening, 全画面 with
+  ← 戻る, × and Task を開く are the same as for a report. A read that a newer one replaced is dropped, failed or not, and
+  さらに表示 reads one page at a time.
+- **Home** — under 今日のコスト, the heading レポート with 成果物をすべて見る beside it (Insights in すべての成果物), and one row:
+  the newest report (`GET /api/reports?limit=1`, read once per visit), opening Insights with it (`View`
+  `{ name: "evals", report }`). With artifacts but no report, the heading and its link without the row; with neither,
+  nothing.
 
 Retention is the artifact's own (removed = 24 h of undo, then swept); nothing is kept per report.
 
@@ -139,8 +163,10 @@ or MCP endpoint:
 
 ## Not done, by decision
 
-Watching the original, embedding a URL, DAK's own `artifact(file)` events (still attachments), reading old formats, a list of
-non-HTML artifacts across Tasks (reports are HTML), a Workspace MCP tool for the registration (the fence reaches every runner).
+Watching the original, embedding a URL, DAK's own `artifact(file)` events (still attachments), reading old formats, a
+Workspace MCP tool for the registration (the fence reaches every runner). Across Tasks: searching inside the artifacts'
+contents (the title, the path and the Task's title come first), folders or tags to arrange them, a header tab of its own
+(the header tabs stay as they are), finding files that were never registered.
 
 ## Verified
 
@@ -173,4 +199,16 @@ non-HTML artifacts across Tasks (reports are HTML), a Workspace MCP tool for the
   closing line, with no newline after it, records `artifact.saved` before `session.end`; the conversation shows the reply,
   the row `成果物: 週報　開く`, then 完了; no console errors. `core.test.ts` pins the same order for a tool call and for a
   `switchboard-stop` fence.
-- Not verified: the 利用者確認 row of #1777 (use on the running Switchboard).
+- Tests for the lists across Tasks: `packages/core/src/artifacts.test.ts` `artifacts across tasks` (every kind from two
+  Tasks newest first with the Task's title, removed until restored; `q` on the title, the path and the Task's title with
+  `%` and `_` literal, also on `/api/reports`, 201 characters → 400; 1000 rows read 100 at a time through `before` with no
+  repeat or gap, `limit` 101 / 0 / blank and an unknown `before` → 400; an archived Task's artifact, absent from
+  `GET /api/tasks`); `apps/web/src/reports.test.ts` (`kindLabel`, `artifactMeta`, `acrossParams`).
+- 2026-10-28, fake-runner daemon + headless Chromium at 1280×900, 1440×900 and 390×844, with a real report copied from the
+  running Switchboard (a 12 KB HTML page another Task made), an image and a text file of other Tasks, an archived Task's
+  page and 60 more rows: header tabs stay 8; Home's 成果物をすべて見る → Insights with すべての成果物 pressed, the rows newest
+  first with their kind and Task's title, the archived Task's page among them; 50 rows, さらに表示 pressed twice in one tick
+  → 65 rows and no さらに表示; a part of the title or the Task's title in the filter → that one row; the row → its page →
+  全画面 → ← 戻る → the list; Task を開く → that Task's 成果物 tab with it selected; no page errors. On a phone the title gets
+  its own line; on a PC the line beside it is cut first.
+- Not verified: the 利用者確認 row of #1777 (use on the running Switchboard), and the same for the list of every artifact.

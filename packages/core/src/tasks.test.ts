@@ -1,10 +1,12 @@
+// test-reads: none
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, RunnerAdapter, RunnerSession, Task } from "@switchboard/protocol";
-import { Db } from "./db.ts";
+import { abortOrphanedTasks, Db } from "./db.ts";
 import { STOP_NOTE } from "./evals.ts";
 import { TaskManager, type TurnEnd } from "./tasks.ts";
 
@@ -212,5 +214,129 @@ describe("the checkout's origin (#2799)", () => {
     db.setWorkspaceBacklogSource(wsId, { service: "switchboard", host: "local", repository: wsId, project: { owner: "switchboard", number: 0 } });
     tasks.create({ workspaceId: wsId, cwd: home, title: "t", prompt: "p", runner: "claude" });
     expect(fakes).toHaveLength(1);
+  });
+});
+
+describe("a locked database under a runner's events", () => {
+  const started = async () => {
+    const wsId = db.upsertWorkspace({ name: "w", path: home, kind: "repo" }).id;
+    const t = tasks.create({ workspaceId: wsId, cwd: home, title: "t", prompt: "p", runner: "claude" });
+    await sleep(5);
+    return t;
+  };
+  const lock = () => {
+    db.sqlite.exec("PRAGMA busy_timeout = 0"); // the real SQLITE_BUSY at once, without the daemon's 5 s wait in the test
+    const other = new Database(join(home, "db.sqlite"));
+    other.exec("BEGIN IMMEDIATE");
+    return other;
+  };
+
+  test("the events wait for the lock in order, the turn still ends, and a stop fence closing a reply is still read when the lock met its session.end", async () => {
+    const t = await started();
+    const other = lock();
+    fakes[0]!.emit({ t: "session.start", runner: "claude", runnerSessionId: "s", cwd: "/" });
+    fakes[0]!.emit({ t: "message.delta", role: "assistant", text: "一" } as never);
+    fakes[0]!.emit({ t: "message.delta", role: "assistant", text: "二\n" } as never);
+    const stop = { id: "x", op: "o", target: "t", reason: "transient", safety: "read-only", evidence: "e", state: "waiting", actions: [] };
+    fakes[0]!.emit({ t: "message.delta", role: "assistant", text: `\`\`\`switchboard-stop\n${JSON.stringify(stop)}\n\`\`\`` } as never);
+    fakes[0]!.emit({ t: "session.end", status: "ok", summary: "完了" });
+    other.exec("COMMIT");
+    other.close();
+    await sleep(1200);
+    expect(db.listEvents(t.id).filter((e) => e.ev.t === "message.delta" && e.ev.role === "assistant").map((e) => (e.ev as { text: string }).text).slice(0, 2)).toEqual(["一", "二\n"]);
+    expect(db.listEvents(t.id).filter((e) => e.ev.t === "stop.record").length).toBe(1);
+    expect(db.getTask(t.id)?.status).toBe("done");
+  });
+
+  test("a runner that exits under the lock ends after its held events, without throwing", async () => {
+    const t = await started();
+    fakes[0]!.emit({ t: "session.start", runner: "claude", runnerSessionId: "s", cwd: "/" });
+    const other = lock();
+    fakes[0]!.emit({ t: "message.delta", role: "assistant", text: "遺言" } as never);
+    fakes[0]!.exit(1);
+    await sleep(5);
+    other.exec("COMMIT");
+    other.close();
+    await sleep(1200);
+    const evs = db.listEvents(t.id).map((e) => e.ev);
+    const reply = evs.findIndex((ev) => ev.t === "message.delta" && ev.role === "assistant" && ev.text === "遺言");
+    const end = evs.findIndex((ev) => ev.t === "session.end" && ev.summary === "runner exited (1)");
+    expect(reply).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(reply);
+    expect(db.getTask(t.id)?.status).toBe("error");
+  });
+});
+
+test("a turn-end listener that throws does not take the end of the turn back", async () => {
+  const t = await finishedTask();
+  const seen: unknown[] = [];
+  (tasks as unknown as { broadcast: (m: unknown) => void }).broadcast = (m) => seen.push(m);
+  let after = 0;
+  tasks.onTurnEnd(() => {
+    throw new Error("broken");
+  });
+  tasks.onTurnEnd(() => after++);
+  fakes[0]!.emit({ t: "session.start", runner: "claude", runnerSessionId: "s", cwd: "/" });
+  const error = console.error;
+  console.error = () => undefined;
+  fakes[0]!.emit({ t: "session.end", status: "ok", summary: "終わり" });
+  console.error = error;
+  const evs = db.listEvents(t.id).map((e) => e.ev);
+  expect(db.getTask(t.id)?.status).toBe("done");
+  expect(evs.some((ev) => ev.t === "session.end" && ev.summary === "終わり")).toBe(true);
+  expect(evs.some((ev) => ev.t === "error" && ev.message.includes("broken"))).toBe(true);
+  expect(after).toBe(1);
+  expect(seen.some((m) => (m as { type: string; task?: Task }).type === "task.updated" && (m as { task: Task }).task.status === "done")).toBe(true);
+});
+
+test("an event that fails for any other reason shows in the transcript and the next one still comes in", async () => {
+  const t = await finishedTask();
+  const append = db.appendEvent.bind(db);
+  db.appendEvent = ((id: string, ev: AgentEvent) => {
+    if (ev.t === "tool.result") throw new Error("broken");
+    return append(id, ev);
+  }) as typeof db.appendEvent;
+  const error = console.error;
+  console.error = () => undefined;
+  fakes[0]!.emit({ t: "tool.result", id: "x" } as never);
+  fakes[0]!.emit({ t: "status", text: "次" });
+  console.error = error;
+  db.appendEvent = append;
+  const evs = db.listEvents(t.id).map((e) => e.ev);
+  expect(evs.some((ev) => ev.t === "error" && ev.message.includes("tool.result"))).toBe(true);
+  expect(evs.some((ev) => ev.t === "status" && ev.text === "次")).toBe(true);
+});
+
+describe("background jobs of a task whose turn ended", () => {
+  test("the task says what is running and since when, until the job ends", async () => {
+    const t = await finishedTask();
+    fakes[0]!.emit({ t: "background", count: 1, jobs: ["local CI"] });
+    expect(db.getTask(t.id)?.status).toBe("done");
+    expect(db.getTask(t.id)?.background?.jobs).toEqual(["local CI"]);
+    const since = db.getTask(t.id)!.background!.since;
+    fakes[0]!.emit({ t: "background", count: 2, jobs: ["local CI", "review"] });
+    expect(db.getTask(t.id)?.background).toEqual({ jobs: ["local CI", "review"], since });
+    fakes[0]!.emit({ t: "background", count: 0, jobs: [] });
+    expect(db.getTask(t.id)?.background).toBeNull();
+  });
+
+  test("a runner that dies with a job says so and plans a resume", async () => {
+    const t = await finishedTask();
+    fakes[0]!.emit({ t: "background", count: 1, jobs: ["local CI"] });
+    fakes[0]!.exit(137);
+    await sleep(5);
+    expect(db.getTask(t.id)?.background).toBeNull();
+    expect(db.getTask(t.id)?.resumeAt).not.toBeNull();
+    expect(db.listEvents(t.id).some((e) => e.ev.t === "status" && e.ev.text.includes("local CI"))).toBe(true);
+  });
+
+  test("a daemon killed without its shutdown: the next start finds the done task, tells and plans a resume", async () => {
+    const t = await finishedTask();
+    fakes[0]!.emit({ t: "background", count: 1, jobs: ["local CI"] });
+    const ids = abortOrphanedTasks(db);
+    expect(ids).toContain(t.id);
+    expect(db.getTask(t.id)?.background).toBeNull();
+    expect(db.getTask(t.id)?.resumeAt).not.toBeNull();
+    expect(db.listEvents(t.id).some((e) => e.ev.t === "status" && e.ev.text.includes("local CI"))).toBe(true);
   });
 });

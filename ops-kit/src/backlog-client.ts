@@ -29,6 +29,7 @@ export const BACKLOG_USAGE = `  backlog list [--search <語>] [--label <l>]... [
       編集はアプリに保存して返り、アプリが後で GitHub に送る（GitHub 連携の無い workspace ではその場で確定し、作成で番号が付く。
       BACKLOG_URL が無ければ GitHub にその場で書く）。認証に使える値を含む文は送らない
       --fresh: アプリに送信と取込みを済ませてから答えさせる（着手・マージの判断の前、最新の回答を読むとき）。
+      取込みは軽い読みなので、GitHub のボードを手で変えた Project のフィールドは画面の再読込か次の全件読みまで入らない。
       GitHub に届かなければ保存値と未同期の印（最終同期の時刻と「GitHub 未同期」、stderr）で答える（exit 0）
       exit 0 = できた、1 = 断られた（使い方の誤り・保存していない Issue・秘密の検出など）、2 = 判定できない（アプリに届かない、
       まだ取り込んでいない）。BACKLOG_URL が無い環境（アプリの Task の外）では GitHub に直接つないで同じ形で出す・書く
@@ -442,7 +443,7 @@ function freshness(ws: Sync): string {
 
 /** One Issue as `backlog view` shows it: the app's stored one, or GitHub's own without BACKLOG_URL (`sync.state` "github"). */
 export interface Detail {
-  issue: { number: number; title: string; state: string; labels: string[]; milestone: string | null; parent: number | null; body: string; url: string };
+  issue: { number: number; title: string; state: string; labels: string[]; milestone: string | null; parent: number | null; subIssues: number[]; body: string; url: string };
   comments: Array<{ id: string; body: string; createdAt: string }>;
   fields: Record<string, string | number | null> | null;
   fetchedAt: number | null;

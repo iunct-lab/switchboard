@@ -1,3 +1,4 @@
+// test-reads: packages/adapters/codex/fixtures/fake-app-server.ts
 import { describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

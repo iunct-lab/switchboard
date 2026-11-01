@@ -42,9 +42,9 @@ gh pr comment <N> --body "..."   # 要約: 何件を何にどう対応したか�
 コメント ID 一覧: `gh api repos/{owner}/{repo}/pulls/<N>/comments --paginate | jq '.[] | {id, path, body: .body[0:80]}'`。
 review 本文（インラインでない指摘）も `gh api .../pulls/<N>/reviews` で読む。見落としやすい。
 
-対応内容は PR 返信だけでなく **Issue の結果コメント**にも要約を残す（`issue-workflow`）。
+対応内容は PR 返信だけでなく **Issue の結果コメント**にも要約を残す（`ops-kit backlog comment <Task> --body-file …`。`issue-workflow`）。
 
 ## 修正後
 
 修正は指摘のある枝に commit → `gh stack rebase` → `gh stack push`（`stacked-pr-delivery`）。
-新しい回帰テストは「修正前で fail することを一度確認」する（`git stash push <file>` → test → `git stash pop`）。
+新しい回帰テストは `task-to-pr` の「足す前に」を通し（既存のテストに条件を足す・軽い階層を先に。回帰テストは要る）、「修正前で fail することを一度確認」する（`git stash push <file>` → test → `git stash pop`）。

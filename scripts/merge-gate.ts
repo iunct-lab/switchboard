@@ -71,7 +71,7 @@ export type MergeKind = (typeof MERGE_KINDS)[number];
 /**
  * Record marks for the user's side (#761; the recheck side is RECHECK_PASS): asked with `[merge-ask] <kinds> <head sha>`,
  * answered with `[merge-answer] <yes|no> <kinds> <head sha>` (kinds comma-separated; the comment's createdAt is the time).
- * merge-audit reads them; merge-gate's judgement does not.
+ * merge-audit reads them; `[merge-answer] yes` is what --allow-large needs to take effect (judge).
  */
 export const MERGE_ASK = /^\[merge-ask\] ([a-z-]+(?:,[a-z-]+)*) ([0-9a-f]{40})\b/;
 export const MERGE_ANSWER = /^\[merge-answer\] (yes|no) ([a-z-]+(?:,[a-z-]+)*) ([0-9a-f]{40})\b/;
@@ -101,7 +101,7 @@ export interface PrFacts {
   unresolvedThreads: number;
   mergeState: string;
   reviewComments: { body: string; createdAt: string }[];
-  /** The head's sha (a `[merge-answer] yes` must name it for --allow-large with --merge; --merge merges only this head); absent = not read. */
+  /** The head's sha (a `[merge-answer] yes` must name it for --allow-large; --merge merges only this head); absent = not read. */
   head?: string;
   /** The base branch (--merge-stack merges only a PR on the default branch: the bottom of its stack); absent = not read. */
   base?: string;
@@ -179,8 +179,8 @@ function taskScope(f: PrFacts): { reason?: string; note?: string } {
   return { reason: `Task ${tasks} の本文に名指しの無いファイル: ${listed.join(", ")}` };
 }
 
-/** `answered`: with --merge / --merge-stack, --allow-large lifts the large reasons only after a `[merge-answer] yes` of the head. */
-export function judge(f: PrFacts, opts: { allowLarge: boolean; answered?: boolean }): Judgement {
+/** --allow-large lifts the large reasons only with a `[merge-answer] yes` of the head that names every kind left. */
+export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
   const large: { kind: RecheckKind | AskKind; text: string }[] = [];
   const add = (kind: RecheckKind | AskKind, head: string, paths: string[], note = "") => {
     if (paths.length > 0) large.push({ kind, text: `${head}: ${paths.join(", ")}${note}` });
@@ -208,17 +208,17 @@ export function judge(f: PrFacts, opts: { allowLarge: boolean; answered?: boolea
   const ask = ASK_KINDS.filter((k) => large.some((l) => l.kind === k));
   const isAsk = (k: RecheckKind | AskKind): k is AskKind => (ASK_KINDS as string[]).includes(k);
 
-  const reasons = opts.allowLarge
+  // the last answer of this head decides (a later no takes the yes back); a yes must name every kind left (a yes about
+  // rescue does not lift a security reason)
+  const left = [...ask, ...recheck];
+  const answer = f.reviewComments.map((c) => ({ at: Date.parse(c.createdAt), m: MERGE_ANSWER.exec(c.body) })).filter((a) => a.m?.[3] === f.head).sort((a, b) => a.at - b.at).at(-1)?.m;
+  const lifted = opts.allowLarge && (left.length === 0 || (answer?.[1] === "yes" && left.every((k) => answer[2]!.split(",").includes(k))));
+  const reasons = lifted
     ? []
     : large
       .filter((l) => isAsk(l.kind) || !marked.has(l.kind))
       .map((l) => `${isAsk(l.kind) ? "[聞く]" : `[再チェック ${l.kind}]`} ${l.text}`);
-  // the yes must be for this head and for every ask kind (a yes about rescue does not lift a security reason)
-  if (opts.allowLarge && opts.answered && !f.reviewComments.some((c) => {
-    const m = MERGE_ANSWER.exec(c.body);
-    const kinds = m?.[2]?.split(",") ?? [];
-    return m?.[1] === "yes" && m[3] === f.head && ask.every((k) => kinds.includes(k));
-  })) reasons.push(`[merge-answer] yes の印が無い（head ${f.head ?? "不明"}、kinds ${ask.join(",") || "なし"}）`);
+  if (opts.allowLarge && !lifted) reasons.push(`[merge-answer] yes が無い: ${left.join(",")}（--allow-large は head の最後の印が yes で ask と recheck を全部含むときだけ効く）`);
   const scope = taskScope(f);
   if (scope.reason) reasons.push(scope.reason);
   if (f.checks.length === 0) reasons.push("CI のチェックが 1 つも無い");
@@ -318,7 +318,9 @@ export async function localCiOf(n: number, top: number, comments: { body: string
 }
 
 async function checksWithLocalCi(runs: WorkflowRun[], localPass: boolean, run: (args: string[]) => Promise<string>, repo: string): Promise<PrFacts["checks"]> {
-  if (localPass && runs.length === 0) return [{ name: LOCAL_CI_ONLY, conclusion: "SUCCESS" }];
+  // every run skipped = CI ran nowhere (a job behind <PREFIX>_ACTIONS without the variable): the same as no run, not a pass
+  const ran = newestRuns(runs).some((r) => toCheck(r).conclusion !== "SKIPPED");
+  if (!ran) return localPass ? [{ name: LOCAL_CI_ONLY, conclusion: "SUCCESS" }] : [];
   const checks: PrFacts["checks"] = [];
   for (const r of newestRuns(runs)) {
     const c = toCheck(r);
@@ -538,7 +540,7 @@ export async function main(args: string[], run: (args: string[]) => Promise<stri
     err(`判定できなかった: ${(e as Error).message}`);
     return 2;
   }
-  const j = judge(facts, { allowLarge: args.includes("--allow-large"), answered: modes.length > 0 });
+  const j = judge(facts, { allowLarge: args.includes("--allow-large") });
   log(JSON.stringify(j, null, 2));
   if (j.verdict !== "merge") return 1;
   const mode = modes[0];
@@ -565,7 +567,7 @@ async function gitlabMain(n: number, target: ForgeTarget, args: string[], modes:
     err(`判定できなかった: ${(e as Error).message}`);
     return 2;
   }
-  const j = judge(facts, { allowLarge: args.includes("--allow-large"), answered: modes.length > 0 });
+  const j = judge(facts, { allowLarge: args.includes("--allow-large") });
   log(JSON.stringify(j, null, 2));
   if (j.verdict !== "merge") return 1;
   if (!modes[0]) return 0;

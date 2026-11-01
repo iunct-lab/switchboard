@@ -1,3 +1,4 @@
+// test-reads: packages/ apps/web/src/
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

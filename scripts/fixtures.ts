@@ -11,6 +11,8 @@ export const RECORDINGS = [
   "packages/adapters/claude/fixtures/cloud-trust-prompt.txt",
   "packages/adapters/claude/fixtures/background-notification.jsonl",
   "packages/adapters/claude/fixtures/effort-high.jsonl",
+  "packages/adapters/claude/fixtures/fork-turn-tool.jsonl",
+  "packages/adapters/claude/fixtures/fork-turn.jsonl",
   "packages/adapters/claude/fixtures/guard-unavailable.jsonl",
   "packages/adapters/claude/fixtures/resume-cost.jsonl",
   "packages/adapters/claude/fixtures/resume-missing.jsonl",

@@ -180,11 +180,11 @@ grep -m1 -E '^model: ' "$W/codex.log"              # Codex が実行したモデ
 
 ## 報告と振り分け
 
-1. 報告は公開の PBI へのコメント 2 件（ランナーごと）。1 行目 `[public-release-gate] <runner> <model>`（`<runner>` は `claude` / `codex`、`<model>` は CLI の記録から確かめたモデル id）、2 行目に tree の sha、本文は出力のまま。投稿の前に `ops-kit scan-text` に通す（`gh` の前段があればそれも止める。値が出ていたらその行を場所と種類だけに直す）:
+1. 報告は公開の PBI へのコメント 2 件（ランナーごと）。1 行目 `[public-release-gate] <runner> <model>`（`<runner>` は `claude` / `codex`、`<model>` は CLI の記録から確かめたモデル id）、2 行目に tree の sha、本文は出力のまま。投稿の前に `ops-kit scan-text` に通す（`ops-kit backlog comment` も認証に使える値を含む文は送らない。値が出ていたらその行を場所と種類だけに直す）:
 
    ```bash
    { echo "[public-release-gate] claude claude-fable-5-1"; echo "tree: <tree sha>"; echo; cat "$W/claude.md"; } > "$W/claude.post.md"   # <tree sha> は「入力」で控えた T（Bash の呼び出しをまたぐと変数は消える）
-   ops-kit scan-text "$W/claude.post.md" && gh issue comment <公開の PBI> -R <owner/name> --body-file "$W/claude.post.md"
+   ops-kit scan-text "$W/claude.post.md" && ops-kit backlog comment <公開の PBI> --body-file "$W/claude.post.md"   # 別のリポジトリの PBI なら前に GH_REPO=<PBI のリポジトリ>
    ```
 
    Codex も同じ（`codex.md` → `codex.post.md`）。

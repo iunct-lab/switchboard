@@ -1,10 +1,11 @@
+// test-reads: packages/core/fixtures/
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, AnswerPolicy, ApprovalRuleMatch, Artifact, AskList, PolicySubject, Backlog, BacklogItem, PendingApproval, RunnerAdapter, RunnerId, RunnerSession, StopRecord, StopSummary, Task } from "@switchboard/protocol";
 import { importing } from "../fixtures/github-import.ts";
-import { answersOf, ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, closedHits, grantOfChoice, noticeAsks, parseAskBlock, rankAsks, resumeOfIssue, resumeOfTask } from "./asks.ts";
+import { answersOf, ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, closedHits, grantOfChoice, noticeAsks, ON_HOLD_RESUME, parseAskBlock, rankAsks, resumeOfIssue, resumeOfTask } from "./asks.ts";
 import { approvalBatches } from "./approval-batch.ts";
 import { heldSince, type GhRunner } from "./backlog.ts";
 import { reduceStops } from "./stops.ts";
@@ -15,7 +16,7 @@ const NOW = Date.parse("2026-10-07T12:00:00Z");
 const ISSUES = "https://github.com/o/r/issues";
 
 const item = (over: Partial<BacklogItem>): BacklogItem => ({
-  number: 1, title: "t", url: `${ISSUES}/${over.number ?? 1}`, type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-10-07T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
+  number: 1, title: "t", url: `${ISSUES}/${over.number ?? 1}`, type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-10-07T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
 
 const stop = (over: Partial<StopSummary>): StopSummary => ({
@@ -98,6 +99,7 @@ describe("answers (#936)", () => {
     const task = (status: Task["status"], createdAt = NOW) => ({ id: "tk_s", status, createdAt, updatedAt: NOW });
     expect(resumeOfIssue({ answeredAt: null, stageTasks: [], failure: null, blockers: [] })).toBeNull();
     expect(resumeOfIssue({ answeredAt: at, stageTasks: [], failure: null, blockers: [] })).toEqual({ state: "queued", reason: "次の定期実行で再開", taskId: null, at });
+    expect(resumeOfIssue({ answeredAt: at, stageTasks: [], failure: null, blockers: [], onHold: true })).toMatchObject({ state: "queued", reason: ON_HOLD_RESUME }); // #2930
     // a stage Task created before the answer is not its resume
     expect(resumeOfIssue({ answeredAt: at, stageTasks: [task("running", at - 1)], failure: null, blockers: [] })!.state).toBe("queued");
     expect(resumeOfIssue({ answeredAt: at, stageTasks: [task("running")], failure: null, blockers: [] })).toEqual({ state: "running", reason: null, taskId: "tk_s", at: NOW });

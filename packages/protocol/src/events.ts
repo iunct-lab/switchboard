@@ -184,7 +184,7 @@ export const AgentEvent = z.discriminatedUnion("t", [
    * How many background jobs the runner still has (Claude `system/background_tasks_changed`: run_in_background shells,
    * Monitors). A job's notification starts a turn on the runner's own, so the process is not released while any is left.
    */
-  z.object({ t: z.literal("background"), count: z.number().int().nonnegative() }),
+  z.object({ t: z.literal("background"), count: z.number().int().nonnegative(), jobs: z.array(z.string()).optional() }),
   /**
    * Claude Code's auto-mode classifier decided a tool call without asking (#2236): its OpenTelemetry `tool_decision`,
    * received on the daemon's loopback `/otel/:id/v1/logs` (docs/design/claude-otel.md). Recorded by the daemon, never
@@ -205,6 +205,8 @@ export const AgentEvent = z.discriminatedUnion("t", [
     status: z.enum(["ok", "error", "aborted"]),
     summary: z.string().optional(),
     durationMs: z.number().optional(),
+    /** The runner's own pointer to this turn, where a fork can start (#2999): Claude's transcript uuid, Codex's turn id. */
+    turn: z.string().optional(),
   }),
   z.object({ t: z.literal("error"), message: z.string() }),
 ]);

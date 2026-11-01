@@ -1,3 +1,4 @@
+// test-reads: ops-kit/fixtures/
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { bootstrap, STATUS_OPTIONS } from "./bootstrap.ts";

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import type { AgentEvent, RunnerAdapter, RunnerId, RunnerSession, StartOptions } from "@switchboard/protocol";
 import { buildTitlePrompt, parseSkillCommand, parseTitle, skillCommandTitle, suggestTitle } from "./suggest-title.ts";
 
@@ -87,9 +87,11 @@ describe("skill command title", () => {
     expect(await skillCommandTitle("直して", "/repo", ok)).toBeNull();
     expect((await skillCommandTitle("/x 1", "/repo", async () => ({ code: 0, stdout: "あ".repeat(300), stderr: "" })))!).toHaveLength(120);
   });
-  test("a gh that never answers gives up after 5 seconds", async () => {
-    const t0 = Date.now();
-    expect(await skillCommandTitle("/x 1", "/repo", () => new Promise(() => undefined))).toBeNull();
-    expect(Date.now() - t0).toBeLessThan(7000);
-  }, 10_000);
+  test("a gh that never answers gives up after the time limit, 5 seconds unless told otherwise", async () => {
+    expect(await skillCommandTitle("/x 1", "/repo", () => new Promise(() => undefined), 50)).toBeNull();
+    const timer = spyOn(globalThis, "setTimeout");
+    await skillCommandTitle("/x 1", "/repo", async () => ({ code: 0, stdout: "t\n", stderr: "" }));
+    expect(timer.mock.calls.map((c) => c[1])).toContain(5000);
+    timer.mockRestore();
+  });
 });

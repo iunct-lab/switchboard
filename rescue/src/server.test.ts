@@ -1,3 +1,4 @@
+// test-reads: rescue/src/ rescue/install.ts rescue/package.json
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash, createHmac, createPrivateKey, createPublicKey, sign } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
@@ -336,14 +337,14 @@ test("a recent cookie that is expired, signed with another key, is a session val
  * The page's script from its helpers to act() (render, refresh, confirmPasskey) runs against fakes: what was sent, in
  * order, and what the error line shows after the next 2 s refresh, with the service's status saying `lastError`.
  */
-async function runAct(answers: Record<string, Array<{ status: number; body?: unknown }>>, o: { credential?: unknown; lastError?: string | null; hostname?: string } = {}) {
+function loadPage(answers: Record<string, Array<{ status: number; body?: unknown }>>, o: { credential?: unknown; lastError?: string | null; hostname?: string; stop?: boolean } = {}) {
   const html = readFileSync(new URL("./page.html", import.meta.url), "utf8");
-  const src = html.slice(html.indexOf("const short ="), html.indexOf('$("restart").onclick'));
+  const src = html.slice(html.indexOf("const short ="), html.indexOf('$("restart").onclick')) + html.slice(html.indexOf("var stopPressed"), html.indexOf('$("agent-start").onclick'));
   const sent: string[] = [];
-  const el = () => ({ textContent: "", value: "", replaceChildren() {}, append() {} });
+  const el = () => ({ textContent: "", value: "", hidden: true, disabled: false, onclick: null as null | (() => Promise<void>), replaceChildren() {}, append() {} });
   const els = new Map<string, ReturnType<typeof el>>();
   const $ = (id: string) => els.get(id) ?? (els.set(id, el()), els.get(id)!);
-  const status = { current: null, previous: null, releases: [], snapshots: [], history: [], log: [], busy: null, lastError: o.lastError ?? null, unhealthy: null, port: 1, state: "running", rebuild: false, agent: { running: false, exitCode: null, output: "" } };
+  const status = { current: null, previous: null, releases: [], snapshots: [], history: [], log: [], busy: null, lastError: o.lastError ?? null, unhealthy: null, port: 1, state: "running", rebuild: false, stop: o.stop ?? false, agent: { running: false, exitCode: null, output: "" } };
   const fetch = async (path: string) => {
     if (path === "api/status") return Response.json(status);
     sent.push(path);
@@ -354,6 +355,10 @@ async function runAct(answers: Record<string, Array<{ status: number; body?: unk
   const page = new Function("fetch", "confirm", "navigator", "$", "document", "headers", "rebuilding", "location", `${src}\nreturn { act, refresh };`)(
     fetch, () => true, { credentials: { get: async () => (credential instanceof Error ? Promise.reject(credential) : credential) } }, $, { createElement: el }, {}, false, { hostname: o.hostname ?? "d111.cloudfront.net" },
   ) as { act: (path: string, body: unknown, question: string) => Promise<boolean | null>; refresh: () => Promise<void> };
+  return { page, $, sent };
+}
+async function runAct(answers: Parameters<typeof loadPage>[0], o: Parameters<typeof loadPage>[1] = {}) {
+  const { page, $, sent } = loadPage(answers, o);
   const ok = await page.act("api/restart", {}, "?");
   await page.refresh(); // the next 2 s refresh
   return { ok, sent, error: $("error").textContent };
@@ -386,6 +391,42 @@ test("the page checks the passkey on 401 recent and sends the same request once 
   // the token's answers never ask for a check
   expect(await runAct({ "api/restart": [{ status: 202 }], "/_auth/renew": [{ status: 200 }] })).toMatchObject({ ok: true, sent: ["api/restart", "/_auth/renew"], error: "" });
   expect((await runAct({ "api/restart": [{ status: 202 }] }, { lastError: "restart: failed later" })).error).toBe("restart: failed later"); // the service's own failure still shows
+});
+
+test("停止する shows only with a Starter: the status says so and the page hides the row without it", async () => {
+  const off = loadPage({}, { stop: false });
+  await off.page.refresh();
+  expect(off.$("stop-row").hidden).toBe(true);
+  const on = loadPage({}, { stop: true });
+  await on.page.refresh();
+  expect(on.$("stop-row").hidden).toBe(false);
+});
+
+test("停止する posts /_auth/stop after a passkey check when asked for one, then says how to come back and stays pressed", async () => {
+  const { $, page, sent } = loadPage({ "/_auth/stop": [needsCheck, { status: 202 }], "/_auth/challenge": [challengeOk], "/_auth/login": [{ status: 200 }] }, { stop: true });
+  await page.refresh();
+  expect($("stop-sent").hidden).toBe(true);
+  await $("stop").onclick!();
+  expect(sent).toEqual(["/_auth/stop", "/_auth/challenge", "/_auth/login", "/_auth/stop"]); // no renew: the login was just signed
+  expect($("stop-sent").hidden).toBe(false);
+  await page.refresh(); // the machine is going down: a second press would only answer 409
+  expect($("stop").disabled).toBe(true);
+  await $("stop").onclick!();
+  expect(sent.filter((p) => p === "/_auth/stop")).toHaveLength(2);
+  const html = readFileSync(new URL("./page.html", import.meta.url), "utf8");
+  expect(html.slice(html.indexOf('id="stop-sent"'))).toContain('停止しています。止まったら <a href="/_auth/">/_auth/</a> の 起動する で戻せます');
+});
+
+test("停止する refused: the answer's error shows and the button is pressable again", async () => {
+  const { $, page, sent } = loadPage({ "/_auth/stop": [{ status: 409, body: { error: "the machine is stopping", reason: "stopping" } }] }, { stop: true });
+  await page.refresh();
+  await $("stop").onclick!();
+  expect(sent).toEqual(["/_auth/stop"]);
+  expect($("error").textContent).toBe("the machine is stopping");
+  expect($("stop-sent").hidden).toBe(true);
+  await page.refresh();
+  expect($("error").textContent).toBe("the machine is stopping");
+  expect($("stop").disabled).toBe(false);
 });
 
 test("the token and loopback need no passkey check (#497)", async () => {
@@ -490,7 +531,7 @@ test("作り直す answers at the limit even when the save's own children keep i
 });
 
 test("作り直す (#181): off without a Starter; with one, the rescue page asks it to rebuild with the start token", async () => {
-  expect((await fetch(`${base}/api/status`).then((r) => r.json()) as { rebuild: boolean }).rebuild).toBe(false);
+  expect(await fetch(`${base}/api/status`).then((r) => r.json())).toMatchObject({ rebuild: false, stop: false });
   expect((await post("/api/rebuild")).status).toBe(404);
 
   const seen: Array<{ path: string; token: string | null }> = [];
@@ -499,7 +540,7 @@ test("作り直す (#181): off without a Starter; with one, the rescue page asks
   const cloud = startRescue(ctx, { port: 0, starter: { url: `http://127.0.0.1:${starter.port}/`, token: "start-tok" } });
   const cb = `http://127.0.0.1:${cloud.server.port}`;
   try {
-    expect((await fetch(`${cb}/api/status`).then((r) => r.json()) as { rebuild: boolean }).rebuild).toBe(true);
+    expect(await fetch(`${cb}/api/status`).then((r) => r.json())).toMatchObject({ rebuild: true, stop: true });
     const r = await fetch(`${cb}/api/rebuild`, { method: "POST" });
     expect(r.status).toBe(202);
     expect(seen).toEqual([{ path: "/rebuild", token: "start-tok" }]);

@@ -167,8 +167,8 @@ export class RuleSuggester implements Suggester {
 /**
  * Rule table + an optional second opinion (#25). The fallback (the rule table) always decides what is suggested;
  * the primary's answer is attached as `llm` and shown next to it — an LLM proposes, it never routes. A primary that
- * throws, returns something unusable, or takes longer than `timeoutMs` is dropped with a log line and the task is
- * created with the rule table's suggestion alone: a creation must never fail or hang because a runner misbehaved.
+ * throws, returns something unusable, or takes longer than `timeoutMs` is dropped with a log line and the rule table's
+ * suggestion stands. The daemon asks after the task exists (#1143); a misbehaving runner costs a log line, not a task.
  */
 export class CompositeSuggester implements Suggester {
   constructor(
@@ -187,7 +187,7 @@ export class CompositeSuggester implements Suggester {
     signal.addEventListener("abort", onOuterAbort, { once: true });
     const timer = setTimeout(() => abort(`no answer in ${this.timeoutMs}ms`), this.timeoutMs);
     // The deadline is enforced by the race, not by the signal alone: a primary that ignores its AbortSignal (or
-    // cannot interrupt the process it started) must not hold the task creation open past `timeoutMs`.
+    // cannot interrupt the process it started) must not keep the caller waiting past `timeoutMs`.
     const giveUp = new Promise<never>((_, reject) => {
       ac.signal.addEventListener("abort", () => reject(ac.signal.reason instanceof Error ? ac.signal.reason : new Error(String(ac.signal.reason))), { once: true });
     });

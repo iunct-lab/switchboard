@@ -1,3 +1,4 @@
+// test-reads: ops.config.json
 import { afterEach, expect, test } from "bun:test";
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -148,6 +149,18 @@ test("two local workspaces both have a #1 and keep them apart (#2265)", async ()
   expect((await view(b, 1)).issue.title).toBe("B の PBI");
   const items = ((await (await fetch(`${base}/api/backlog`)).json()) as Backlog).items;
   expect(items.filter((i) => i.number === 1 && (i.workspaceId === a.id || i.workspaceId === b.id)).map((i) => i.title).sort()).toEqual(["A の PBI", "B の PBI"]);
+});
+
+test("on-hold: a local label is added and removed the same way, and the list reads it (#2930)", async () => {
+  const { base, local, create, send } = await boot();
+  const ws = await local();
+  await create(ws, { title: "PBI: a", labels: ["type:pbi"] });
+  const onHold = async () => ((await (await fetch(`${base}/api/backlog`)).json()) as Backlog).items.find((i) => i.workspaceId === ws.id && i.number === 1)!.onHold;
+  expect(await onHold()).toBe(false);
+  expect((await send("PATCH", "/api/backlog/1", { workspaceId: ws.id, labels: { add: ["on-hold"], remove: [] } })).status).toBe(202);
+  expect(await onHold()).toBe(true);
+  expect((await send("PATCH", "/api/backlog/1", { workspaceId: ws.id, labels: { add: [], remove: ["on-hold"] } })).status).toBe(202);
+  expect(await onHold()).toBe(false);
 });
 
 test("a local comment, label, state and parent change are applied at once (#2265)", async () => {

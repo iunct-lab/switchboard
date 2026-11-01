@@ -212,7 +212,7 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
         )}
         <div className="hint">
           提案は助言です。一致率が低いこと自体は問題ではなく、ルール表を直す手がかりになります。
-          <strong>2 つの割合は分母が違うので優劣の比較には使えません</strong>: ルール表は全 Task に提案を出しますが、LLM は設定（Home）で ON にしていて、かつ待ち時間内に答えられた Task だけです（間に合わなかった提案は「外れ」ではなく記録なしになります）。スケジュールと Inbox からの Task は LLM に聞きません。
+          <strong>2 つの割合は分母が違うので優劣の比較には使えません</strong>: ルール表は全 Task に提案を出しますが、LLM は設定（Home）で ON にしていて、かつ待ち時間内に答えられた Task だけです（間に合わなかった提案は「外れ」ではなく記録なしになります）。工程以外の定期実行と Inbox からの Task は LLM に聞きません。
         </div>
         {routing && (
           <>

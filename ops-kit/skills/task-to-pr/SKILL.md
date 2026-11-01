@@ -11,12 +11,12 @@ description: Task Issue 1 件を最小の実装で 1 本の PR にする型。�
 
 ### 1. 読む・記録する
 
-1. `gh issue view <Task>` と親 PBI（`## 親 PBI`）、PBI の `## 元要望`、Task が指す `docs/design/*.md`。「満たす受け入れ条件」を控える
+1. `ops-kit backlog view <Task> --fresh` と親 PBI（`## 親 PBI`）、PBI の `## 元要望`、Task が指す `docs/design/*.md`。「満たす受け入れ条件」を控える
 2. Task の手順に「利用者に確認して止める」があるか。あるなら、その工程の直前で `issue-workflow` の「判断待ちの出し方」で問いの種類を分けて**止める**: 実装の判断（要件の読み・設計の選択）は `## 判断待ち`（ラベル `needs-decision`）、運用の確認（マージ・昇格・デプロイ・認証など利用者がその場でする操作、実行のタイミング）は Issue に書かず、Task の会話に問い・選択肢・推奨を書いてターンを終える（返事は同じ会話で来る）。実装の判断に headless（エージェント管理アプリの Task など）で返事が来ないときの扱いは種類で分ける:
    - **要件の解釈**（どちらの読みで作るか）: 実装しない。その Task を In progress のまま止め、他の Task に進む。勝手に一方の解釈で作らない
    - **お金 / 他 OS / 破壊的操作**: 安全側（何も消費しない、既定 off、消さない）だけ実装して進む。問いの `## 判断待ち`（ラベル `needs-decision`）は出したまま残す（利用者が判断待ちの一覧で見つけられるように）
-3. 着手コメント（3 行: ブランチ / 進め方 / 想定する検証）→ `bash scripts/setup/set_project_field.sh <Task> Status "In progress"`
-4. 他のセッションと同じファイルを触らないか（並列ガードのコマンドが CLAUDE.md にあるとき。以下 `<guard>`）: 着手コメントの前に `<guard> overlap <Task>`、In progress にした後に `--claimed` を付けてもう一度。exit 1 / 2 なら着手せず（In progress にしていたら Backlog に戻し）、重なった相手とパスを Task にコメントして別の Task に進む（`pbi-complete` の「並列で動かす」）
+3. 着手コメント（3 行: ブランチ / 進め方 / 想定する検証。`ops-kit backlog comment <Task> --body-file -`）→ `ops-kit backlog set <Task> Status "In progress"`
+4. 他のセッションと同じファイルを触らないか（並列ガードのコマンドが CLAUDE.md にあるとき。以下 `<guard>`）: 着手コメントの前に `<guard> overlap <Task>`、In progress にした後に `--claimed` を付けてもう一度。exit 1 / 2 なら着手せず（In progress にしていたら `ops-kit backlog set <Task> Status Backlog` で戻し）、重なった相手とパスを Task にコメントして（`ops-kit backlog comment <Task> --body-file -`）別の Task に進む（`pbi-complete` の「並列で動かす」）
 
 ### 2. 場所を作る
 
@@ -34,8 +34,8 @@ git checkout -b <枝> && gh stack init <枝>     # 最初の枝（単発でも i
 
 文書を書くときは `issue-workflow` の「アプリが持つ可変の値を写さない」に従う。
 
-- **Task の手順に書いたファイルと名前で作る。** 増やす必要が出たら、まず Issue にコメント（なぜ）してから増やす
-- **ついでの整形・改名・リファクタをしない。** 気づいたことは Issue コメントか新しい Task に
+- **Task の手順に書いたファイルと名前で作る。** 増やす必要が出たら、まず Issue にコメント（なぜ。`ops-kit backlog comment <Task> --body-file …`）してから増やす
+- **ついでの整形・改名・リファクタをしない。** 気づいたことは Issue コメント（`ops-kit backlog comment`）か新しい Task に
 - **互換層・フラグ・一度しか使わない抽象を足さない**（`pbi-to-tasks` の設計チェック。実装中に必要に見えたら、たいてい設計に戻る印）
 - **既存の型を守る**: 部品のあいだで共有する型を変えるなら、それを読む全員を同じ PR で直す。互換のための optional は足さない
 - 差分の目安 500 行（テスト込み）。超えるなら Task を割って Issue に書く
@@ -47,18 +47,29 @@ git checkout -b <枝> && gh stack init <枝>     # 最初の枝（単発でも i
 
 テストのコマンド（型検査 / 全体 / 追加した 1 件）は CLAUDE.md。全部通ることを見る。
 
-何をどう試すか（変更の種類ごとのテストの型は CLAUDE.md。無ければ既存の同型のテストに合わせる）:
+**足す前に**、順に検討し、足りたところで止める。テストを省く検討ではない（変更を確かめるテストは要る）。場所を選ぶ検討:
+
+1. 既存のテストに条件・ケースを足せるか（新しい起動が増えるなら、先に 2 を見る）
+2. 関数の単体テスト（デーモンや DB を起動しない）で書けるか
+3. 足りないときだけ、新しいテスト・起動を伴うテストを書く
+
+選んだ階層と理由を PR 本文の「テスト観点」に 1〜2 行書く。
+
+何をどう試すか（軽い順。変更の種類ごとのテストの型は CLAUDE.md。無ければ既存の同型のテストに合わせる）:
 
 | 変更 | テスト |
 |---|---|
-| 関数 / API | 単体テスト。API は偽の依存でサーバーを起動して `fetch` する型 |
-| 外部のランナーや CLI をつなぐ部分 | 録画した出力（fixture）の再生。実物は fixture を録るときだけ |
+| 関数 | 単体テスト |
 | 画面の描画ロジック | 描画ロジックの単体テスト |
+| 外部のランナーや CLI をつなぐ部分 | 録画した出力（fixture）の再生。実物は fixture を録るときだけ |
+| API | 偽の依存でサーバーを起動して `fetch` する型。HTTP の経路そのものを見るときだけ。関数で書けるものは関数で |
 | **単体で書けない UI / 経路** | **E2E**: 偽の依存でサーバーを起動し（作業ディレクトリは `mktemp -d`、データはコピー、ポートは空きを確かめる）、headless ブラウザで操作する。**操作と期待結果と実際の出力**を PR 本文と結果コメントに貼る |
 | 境界（プロキシ・認証・CORS） | 実構成の E2E を足す |
 
 「テストを書けない」は PR を出さない理由であって、テスト無しで出す理由ではない。E2E も無理なら Task を止めて Issue に書く。
 動いている実物での確認（DoD の「実構成で確認」）は CLAUDE.md の live check の方法で行い、見た事実を PR 本文に書く。
+
+**テストを消す・統合するとき**: 消すテストが検出していた不具合（そのテストが赤にする実装の壊し方）を 1 つ以上挙げ、実装を壊して残るテストが赤になることを実行して見る。壊し方と赤になったテスト名を PR 本文に書く。残るテストが赤にならないなら、そのテストは消さない。代わりのテストが見つからなければ Issue にする。
 
 ### 5. commit と PR
 
@@ -67,8 +78,8 @@ git add <files> && git commit      # 題: feat(core): … (#Task。ローカル�
 gh stack submit --auto --open      # push + PR。draft なら gh pr ready <n>
 W=$(mktemp -d /tmp/<リポジトリ名>.pr<Task>.XXXXXX); echo "$W"     # 本文は "$W/pr.md" に書く（固定の /tmp/pr.md は別リポジトリの PR 本文と入れ替わりうる）
 gh pr edit <n> --title "<題>" --body-file "$W/pr.md"
-bash scripts/setup/set_project_field.sh <Task> Status "In review"
-gh issue comment <Task> --body "PR: #<n>（<1 行>）"   # BACKLOG_URL があれば echo "PR: #<n>（<1 行>）" | ops-kit backlog comment <Task> --body-file -
+ops-kit backlog set <Task> Status "In review"
+echo "PR: #<n>（<1 行>）" | ops-kit backlog comment <Task> --body-file -
 ```
 
 PR 本文は `.github/PULL_REQUEST_TEMPLATE.md` の 4 節を埋め、**その上に「レビュアーへ」を置く**:
