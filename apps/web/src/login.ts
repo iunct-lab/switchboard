@@ -47,6 +47,8 @@ export function logoutPath(mode: LoginMode | undefined): string | null {
 
 /** Stuck happens with a passkey, so on the cloud host only: the rescue page is the same origin's /rescue/, which CloudFront hands to sb-rescue (#399). */
 export const STUCK_RESCUE = "/rescue/";
+/** Settings is not drawn while the daemon refuses (#1851), so the way to log out from here: `#devices` keeps the login page from moving on. */
+export const STUCK_LOGIN = "/_auth/#devices";
 
 export const STUCK_MESSAGE = "パスキーのログインは通りましたが、デーモンがその Cookie を受け付けません。デーモンの再起動が要ります（救援画面の「再起動」、または作り直す）。";
 

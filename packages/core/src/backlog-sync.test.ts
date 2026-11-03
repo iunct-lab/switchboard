@@ -70,6 +70,7 @@ function fakeGh(world: World) {
     if (args[0] === "repo") return { code: 0, stdout: "acme/app true\n", stderr: "" };
     if (args[0] === "variable") return { code: 0, stdout: "https://github.com/orgs/acme/projects/1\n", stderr: "" };
     const query = args.find((a) => a.startsWith("query="))!.slice(6);
+    if (query.includes("projectV2(number:$p){ id }")) return { code: 0, stdout: JSON.stringify({ data: { repositoryOwner: { projectV2: { id: "PVT_1" } } } }), stderr: "" };
     const vars = Object.fromEntries(args.flatMap((a, i) => (args[i - 1] === "-f" || args[i - 1] === "-F") && !a.startsWith("query=") ? [a.split(/=(.*)/s).slice(0, 2)] : []));
     if (/w\d+: issue\(number:/.test(query)) {
       const numbers = [...query.matchAll(/w(\d+): /g)].map((m) => Number(m[1]));

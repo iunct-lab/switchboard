@@ -11,7 +11,7 @@ import type { GhRunner } from "./backlog.ts";
 import { originMismatch, parseGithubRepo, type WorkspaceClone, unusableWorkspaces } from "./workspace-clone.ts";
 import { Db } from "./db.ts";
 
-// Adding a GitHub repository by name (#2575): cloned next to the checkout, only ones the owner can push to.
+// Adding a GitHub repository by name (#2575): cloned next to the checkout; one the owner cannot push to writes nothing back (#2576).
 
 let core: CoreServer | undefined;
 let root: string | undefined;
@@ -29,7 +29,7 @@ const ending: RunnerAdapter = {
   },
 };
 
-async function boot(fake: { push?: boolean | "missing"; cloneFails?: string; hold?: Promise<void> } = {}) {
+async function boot(fake: { push?: boolean | "missing"; cloneFails?: string; hold?: Promise<void>; git?: "clone" | "fork"; renamedTo?: string } = {}) {
   root = mkdtempSync(join(tmpdir(), "switchboard.clone."));
   const home = join(root, "home");
   const repoRoot = join(root, "switchboard");
@@ -38,12 +38,17 @@ async function boot(fake: { push?: boolean | "missing"; cloneFails?: string; hol
   const calls: string[][] = [];
   const gh: GhRunner = async (args, cwd) => {
     calls.push(args);
-    if (args[0] === "api") return fake.push === "missing" ? { code: 1, stdout: "", stderr: "HTTP 404" } : { code: 0, stdout: `${fake.push ?? true}\n`, stderr: "" };
+    if (args[0] === "api") return fake.push === "missing" ? { code: 1, stdout: "", stderr: "HTTP 404" } : { code: 0, stdout: `${fake.push ?? true} ${fake.renamedTo ?? args[1]!.replace("repos/", "")}\n`, stderr: "" };
     if (args[0] === "repo" && args[1] === "clone") {
       await fake.hold;
       if (fake.cloneFails) return { code: 1, stdout: "", stderr: `Cloning...\n${fake.cloneFails}\n` };
       mkdirSync(args[3]!);
       expect(cwd).toBe(root!);
+      if (fake.git) {
+        spawnSync("git", ["-C", args[3]!, "init", "-q"]);
+        spawnSync("git", ["-C", args[3]!, "remote", "add", "origin", `https://github.com/${args[2]}.git`]);
+        if (fake.git === "fork") spawnSync("git", ["-C", args[3]!, "remote", "add", "upstream", "https://github.com/parent/lib.git"]);
+      }
       return { code: 0, stdout: "", stderr: "" };
     }
     return { code: 1, stdout: "", stderr: "unexpected" };
@@ -59,7 +64,7 @@ async function boot(fake: { push?: boolean | "missing"; cloneFails?: string; hol
     for (let i = 0; i < 1000 && !(await f()); i++) await Bun.sleep(20);
   };
   const cloneCalls = () => calls.filter((a) => a[0] === "repo").length;
-  return { send, until, calls, cloneCalls, repoRoot, base };
+  return { send, until, calls, cloneCalls, repoRoot, base, setPush: (push: boolean) => { fake.push = push; } };
 }
 
 test("workspace clone: owner/name clones next to the checkout and registers it", async () => {
@@ -92,13 +97,79 @@ test("workspace clone: an existing directory is 409 and nothing runs", async () 
   expect(t.calls).toEqual([]);
 }, 30_000);
 
-test("workspace clone: push false is 403 and clone runs 0 times", async () => {
-  const t = await boot({ push: false });
-  const r = await t.send("POST", "/api/workspaces", { repo: "other/lib" });
-  expect(r.status).toBe(403);
-  expect((r.body as { error: string }).error).toContain("他者のリポジトリ");
+const gitOut = (path: string, ...args: string[]) => spawnSync("git", ["-C", path, ...args], { encoding: "utf8" }).stdout.trim();
+
+test("workspace clone: a repository you cannot push to is added as a foreign workspace", async () => {
+  const t = await boot({ push: false, git: "clone" });
+  // the backlog stays here whatever was asked
+  expect((await t.send("POST", "/api/workspaces", { repo: "other/lib", backlog: "github" })).status).toBe(202);
+  await t.until(async () => ((await t.send("GET", "/api/workspaces")).body as Workspace[]).some((w) => w.name === "lib"));
+  const path = join(root!, "lib");
+  expect(gitOut(path, "remote")).toBe("upstream");
+  expect(gitOut(path, "remote", "get-url", "upstream")).toBe("https://github.com/other/lib.git");
+  expect(gitOut(path, "config", "--get-all", "ops-kit.noWrite")).toBe("other/lib");
+  const ws = ((await t.send("GET", "/api/workspaces")).body as Workspace[]).find((w) => w.name === "lib")!;
+  expect([ws.backlog, ws.upstream]).toEqual(["switchboard", "other/lib"]);
+  expect((await t.send("GET", "/api/workspaces/clones")).body).toEqual([]);
+}, 30_000);
+
+test("workspace clone: a renamed repository is marked with its name now, the one gh repo view answers", async () => {
+  const t = await boot({ push: false, git: "clone", renamedTo: "other/new" });
+  await t.send("POST", "/api/workspaces", { repo: "other/old" });
+  await t.until(async () => ((await t.send("GET", "/api/workspaces")).body as Workspace[]).some((w) => w.name === "old"));
+  expect(gitOut(join(root!, "old"), "config", "--get-all", "ops-kit.noWrite")).toBe("other/new");
+  expect(((await t.send("GET", "/api/workspaces")).body as Workspace[]).find((w) => w.name === "old")?.upstream).toBe("other/new");
+}, 30_000);
+
+test("workspace clone: upstream survives registering the path again, and your own repository cannot take a foreign one's path", async () => {
+  const t = await boot({ push: false, git: "clone" });
+  await t.send("POST", "/api/workspaces", { repo: "other/lib" });
+  await t.until(async () => ((await t.send("GET", "/api/workspaces")).body as Workspace[]).some((w) => w.name === "lib"));
+  const path = join(root!, "lib");
+  expect(((await t.send("POST", "/api/workspaces", { path })).body as Workspace).upstream).toBe("other/lib");
+  rmSync(path, { recursive: true });
+  t.setPush(true);
+  expect((await t.send("POST", "/api/workspaces", { repo: "me/lib" })).status).toBe(409);
+  t.setPush(false);
+  expect((await t.send("POST", "/api/workspaces", { repo: "other/lib" })).status).toBe(202);
+  await t.until(async () => existsSync(path) && ((await t.send("GET", "/api/workspaces/clones")).body as WorkspaceClone[]).length === 0);
+  expect(((await t.send("GET", "/api/workspaces")).body as Workspace[]).find((w) => w.path === path)?.upstream).toBe("other/lib");
+}, 30_000);
+
+test("workspace clone: your own repository has no upstream", async () => {
+  const t = await boot({ git: "clone" });
+  await t.send("POST", "/api/workspaces", { repo: "acme/app" });
+  await t.until(async () => ((await t.send("GET", "/api/workspaces")).body as Workspace[]).some((w) => w.name === "app"));
+  expect(gitOut(join(root!, "app"), "remote")).toBe("origin");
+  expect(gitOut(join(root!, "app"), "config", "--get-all", "ops-kit.noWrite")).toBe("");
+  expect(((await t.send("GET", "/api/workspaces")).body as Workspace[]).find((w) => w.name === "app")?.upstream).toBeUndefined();
+}, 30_000);
+
+test("workspace clone: someone's fork leaves one upstream, the repository that was added", async () => {
+  const t = await boot({ push: false, git: "fork" });
+  await t.send("POST", "/api/workspaces", { repo: "other/lib" });
+  await t.until(async () => ((await t.send("GET", "/api/workspaces")).body as Workspace[]).some((w) => w.name === "lib"));
+  const path = join(root!, "lib");
+  expect(gitOut(path, "remote")).toBe("upstream");
+  expect(gitOut(path, "remote", "get-url", "upstream")).toBe("https://github.com/other/lib.git");
+}, 30_000);
+
+test("workspace clone: a foreign clone git cannot detach is failed with the reason and not registered", async () => {
+  const t = await boot({ push: false }); // the fake's clone is not a git repository
+  expect((await t.send("POST", "/api/workspaces", { repo: "other/lib" })).status).toBe(202);
+  await t.until(async () => ((await t.send("GET", "/api/workspaces/clones")).body as WorkspaceClone[]).some((c) => c.state === "failed"));
+  expect(((await t.send("GET", "/api/workspaces/clones")).body as WorkspaceClone[])[0]?.error).toBeTruthy();
+  expect(((await t.send("GET", "/api/workspaces")).body as Workspace[]).some((w) => w.name === "lib")).toBe(false);
+}, 30_000);
+
+test("workspace clone: a foreign repository cannot take over a workspace that syncs with GitHub", async () => {
+  const t = await boot({ push: false, git: "clone" });
+  mkdirSync(join(root!, "lib"));
+  await t.send("POST", "/api/workspaces", { path: join(root!, "lib") });
+  rmSync(join(root!, "lib"), { recursive: true });
+  expect((await t.send("POST", "/api/workspaces", { repo: "other/lib" })).status).toBe(409);
   expect(t.cloneCalls()).toBe(0);
-  expect(existsSync(join(root!, "lib"))).toBe(false);
+  expect((await t.send("GET", "/api/workspaces/clones")).body).toEqual([]);
 }, 30_000);
 
 test("workspace clone: a missing repository is 404", async () => {

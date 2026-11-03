@@ -2,12 +2,12 @@
 import { recordingText, skipRecordings, assertRecordings } from "../../../../scripts/recordings.ts";
 import { describe, expect, spyOn, test } from "bun:test";
 import { AgentEvent, type RunnerSession } from "@switchboard/protocol";
-import { confirmationMessage, createDakParserState, createSseParser, endOfStream, kindOf, mapAdkEvent } from "./parse.ts";
+import { confirmationMessage, createAdkParserState, createSseParser, endOfStream, kindOf, mapAdkEvent } from "./parse.ts";
 
 async function replay(name: string) {
   const raw = recordingText(`packages/adapters/dak/fixtures/${name}.sse`);
   const sse = createSseParser();
-  const state = createDakParserState();
+  const state = createAdkParserState();
   const events: AgentEvent[] = [];
   for (const data of [...sse.feed(raw), ...sse.flush()]) events.push(...mapAdkEvent(JSON.parse(data), state));
   events.push(...endOfStream(state));
@@ -86,11 +86,11 @@ describe("ADK /run_sse → AgentEvent (recorded against DAK @ e966c05, google-ad
     const named = [...sse.feed(raw), ...sse.flush()].map((d) => JSON.parse(d)).filter((ev) => Object.keys(ev.actions?.artifactDelta ?? {}).length > 0);
     expect(named).toHaveLength(1);
     expect(Object.keys(named[0].actions.artifactDelta)[0]).toStartWith("tool_output_");
-    expect(await collectArtifacts(named[0], { sessionUrl: "http://127.0.0.1:9/apps/dak_agent/users/switchboard/sessions/x", attachmentDir: "/nonexistent-dir-for-the-test", timeoutMs: 500 })).toEqual([]);
+    expect(await collectArtifacts(named[0], { sessionUrl: "http://127.0.0.1:9/apps/dak_agent/users/switchboard/sessions/x", attachmentDir: "/nonexistent-dir-for-the-test", timeoutMs: 500, skipPrefix: "tool_output_" })).toEqual([]);
   });
 
   test("confirmations: DAK's adk_request_confirmation and ADK-native requestedToolConfirmations both become permission.ask, never tool.call", () => {
-    const s = createDakParserState();
+    const s = createAdkParserState();
     const dak = mapAdkEvent({ invocationId: "inv1", content: { parts: [{ functionCall: { id: "fc_1", name: "adk_request_confirmation", args: { originalFunctionCall: { id: "orig_1", name: "send_sol_payment", args: { to: "addr", amount: 0.01 } } } } }] }, partial: false }, s);
     expect(dak).toEqual([{ t: "permission.ask", id: "fc_1", kind: "write", tool: "send_sol_payment", input: { to: "addr", amount: 0.01 }, detail: "send_sol_payment(to=addr, …)", toolUseId: "orig_1" }]);
     const native = mapAdkEvent({ invocationId: "inv2", content: { parts: [{ functionCall: { id: "fc_2", name: "run_shell", args: { cmd: "ls" } } }] }, actions: { requestedToolConfirmations: { fc_2: { hint: "Run ls?", confirmed: null, payload: {} } } }, partial: false }, s);
@@ -122,7 +122,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FAKE_PNG, FAKE_REPORT, startFakeAdk } from "../fixtures/fake-adk.ts";
 import { collectArtifacts } from "./artifacts.ts";
-import { createDakAdapter } from "./index.ts";
+import { createAdkAdapter } from "./index.ts";
+
+const DAK = { id: "dak", label: "DAK", app: "dak_agent", artifactSkipPrefix: "tool_output_" } as const;
 
 function collect() {
   const events: AgentEvent[] = [];
@@ -142,26 +144,19 @@ function collect() {
   return { events, waitFor, ends: () => events.filter((e) => e.t === "session.end") };
 }
 
-describe("DakSession over HTTP/SSE (fake ADK server)", () => {
+describe("AdkSession over HTTP/SSE (fake ADK server)", () => {
   const fake = startFakeAdk();
-  const adapter = () => createDakAdapter({ baseUrl: fake.url });
+  const adapter = () => createAdkAdapter({ ...DAK, baseUrl: fake.url });
   const opts = (prompt: string): StartOptions => ({ cwd: "/tmp", scope: ["/tmp"], prompt });
 
-  test("detect: reachable server with the app → available; unreachable → note with the compose hint", async () => {
+  test("detect: reachable server with the app → available; unreachable → note names the runner", async () => {
     expect(await adapter().detect()).toMatchObject({ available: true, path: fake.url });
-    expect((await createDakAdapter({ baseUrl: "http://127.0.0.1:9", timeoutMs: 500 }).detect()).note).toContain("docker compose up");
+    expect((await createAdkAdapter({ ...DAK, baseUrl: "http://127.0.0.1:9", timeoutMs: 500 }).detect()).note).toContain("DAK agent not reachable at http://127.0.0.1:9");
   });
 
   test("an explicitly undefined option (e.g. an unset env var passed straight through) does not shadow the default", async () => {
-    // createDakAdapter({ baseUrl: process.env.SWITCHBOARD_DAK_URL }) with the var unset must still hit 127.0.0.1:8000,
-    // not `${undefined}/list-apps`. Regression: plain object spread keeps a key whose value is `undefined`.
-    // `app` is set to a name nothing serves so the assertion holds even if something real happens to be listening
-    // on the default port in this environment.
-    const d = createDakAdapter({ baseUrl: undefined, app: "definitely-not-a-real-app-xyz", timeoutMs: 500 });
-    const r = await d.detect();
-    expect(r.available).toBe(false);
-    expect(r.note).not.toContain("undefined");
-    expect(r.note).toContain("127.0.0.1:8000");
+    // Plain object spread keeps a key whose value is `undefined`, and AbortSignal.timeout(undefined) throws.
+    expect(await createAdkAdapter({ ...DAK, baseUrl: fake.url, timeoutMs: undefined }).detect()).toMatchObject({ available: true });
   });
 
   test("a turn: session created, session.start, streamed text, usage reported, session.end; a follow-up is a second turn on the same session", async () => {
@@ -251,7 +246,7 @@ describe("DakSession over HTTP/SSE (fake ADK server)", () => {
     );
     expect(out).toEqual([{ error: "missing.txt: HTTP 404" }, { path: join(dir, "escape.txt") }, { path: join(dir, "notes.md") }]);
     // DAK's own spill of a long tool output is not a file for the person: not fetched, not an error, the others still come
-    expect(await collectArtifacts({ actions: { artifactDelta: { "tool_output_fs.read_call_1.txt": 0, "report.txt": 1 } } }, { sessionUrl: `${fake.url}/apps/dak_agent/users/switchboard/sessions/${sid}`, attachmentDir: dir, timeoutMs: 2000 })).toEqual([{ path: join(dir, "report.txt") }]);
+    expect(await collectArtifacts({ actions: { artifactDelta: { "tool_output_fs.read_call_1.txt": 0, "report.txt": 1 } } }, { sessionUrl: `${fake.url}/apps/dak_agent/users/switchboard/sessions/${sid}`, attachmentDir: dir, timeoutMs: 2000, skipPrefix: "tool_output_" })).toEqual([{ path: join(dir, "report.txt") }]);
     // a directory that cannot be written: each file is an error entry, inline parts and fetched artifacts alike
     const notADir = join(dir, "a-file");
     writeFileSync(notADir, "");
@@ -356,7 +351,7 @@ describe("DakSession over HTTP/SSE (fake ADK server)", () => {
       for (const [options, expected] of [[{}, 2 * 60 * 60_000], [{ streamIdleTimeoutMs: 1234 }, 1234]] as const) {
         seen.length = 0;
         const c = collect();
-        const s = createDakAdapter({ baseUrl: fake.url, ...options }).start(opts("hi"), (e) => c.events.push(e));
+        const s = createAdkAdapter({ ...DAK, baseUrl: fake.url, ...options }).start(opts("hi"), (e) => c.events.push(e));
         await c.waitFor(() => c.ends().length === 1);
         const run = seen.find((x) => x.url.endsWith("/run_sse"));
         expect(run?.init?.timeout).toBe(expected);
@@ -394,7 +389,7 @@ describe("DakSession over HTTP/SSE (fake ADK server)", () => {
       const base = `http://127.0.0.1:${silent.port}`;
       const c = collect();
       const t0 = Date.now();
-      const s = createDakAdapter({ baseUrl: base, streamIdleTimeoutMs: 300 }).start(opts("hi"), (e) => c.events.push(e));
+      const s = createAdkAdapter({ ...DAK, baseUrl: base, streamIdleTimeoutMs: 300 }).start(opts("hi"), (e) => c.events.push(e));
       await c.waitFor(() => c.ends().length === 1, 20_000);
       expect(c.ends()[0]).toMatchObject({ status: "error" });
       expect(c.events.find((e) => e.t === "error")).toMatchObject({ message: expect.stringContaining("/run_sse failed") });
@@ -402,7 +397,7 @@ describe("DakSession over HTTP/SSE (fake ADK server)", () => {
       await s.close();
 
       const c2 = collect();
-      const s2 = createDakAdapter({ baseUrl: base, user: "hang", timeoutMs: 300 }).start(opts("hi"), (e) => c2.events.push(e));
+      const s2 = createAdkAdapter({ ...DAK, baseUrl: base, user: "hang", timeoutMs: 300 }).start(opts("hi"), (e) => c2.events.push(e));
       await c2.waitFor(() => c2.events.some((e) => e.t === "error"), 5_000);
       expect(c2.events.find((e) => e.t === "error")).toMatchObject({ message: expect.stringContaining("DAK session failed") });
       await s2.close();

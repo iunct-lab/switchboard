@@ -669,17 +669,21 @@ describe("core daemon", () => {
   });
 
   test("a finished task keeps its runner alive briefly, then releases it and resumes with --resume on the next turn", async () => {
+    // the idle window (the flake of #2939): at 60 ms a loaded host left it between "done" and the next request, so the
+    // window is long enough for those steps and the release is waited for by its state, not a fixed sleep
+    const released = async (id: string) => { for (const t0 = Date.now(); c2.tasks.isLive(id) && Date.now() - t0 < 20_000; ) await Bun.sleep(10); };
     const starts: StartOptions[] = [];
     const script = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");
     const h2 = mkdtempSync(join(tmpdir(), "switchboard-test2-"));
-    const c2 = await startServer(loadConfig({ SWITCHBOARD_HOME: h2, SWITCHBOARD_PORT: "0", ...NO_HISTORY, SWITCHBOARD_RUNNER_IDLE_MS: "60" }), [fakeAdapter(script, { lingers: true, starts })], { port: 0 });
+    const c2 = await startServer(loadConfig({ SWITCHBOARD_HOME: h2, SWITCHBOARD_PORT: "0", ...NO_HISTORY, SWITCHBOARD_RUNNER_IDLE_MS: "2000" }), [fakeAdapter(script, { lingers: true, starts })], { port: 0 });
     const b2 = `http://127.0.0.1:${c2.server.port}`;
     try {
       const t = await fetch(`${b2}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: h2, title: "t", prompt: "p", runner: "claude" }) }).then(j);
       await waitFor(async () => (await fetch(`${b2}/api/tasks/${t.id}`).then(j)).task.status === "done");
       expect(starts.length).toBe(1);
       // idle timer fires → process released; status must stay "done"
-      await new Promise((r) => setTimeout(r, 150));
+      await released(t.id);
+      expect(c2.tasks.isLive(t.id)).toBe(false);
       expect((await fetch(`${b2}/api/tasks/${t.id}`).then(j)).task.status).toBe("done");
       const sent = await fetch(`${b2}/api/tasks/${t.id}/send`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "again" }) }).then(j);
       expect(sent.status).toBe("running");
@@ -691,7 +695,7 @@ describe("core daemon", () => {
       await fetch(`${b2}/api/tasks/${t.id}/send`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "quick" }) });
       expect(starts.length).toBe(2);
       await waitFor(async () => (await fetch(`${b2}/api/tasks/${t.id}`).then(j)).task.status === "done");
-      await new Promise((r) => setTimeout(r, 150));
+      await released(t.id);
       expect(c2.tasks.isLive(t.id)).toBe(false); // released again after the idle window
       // abort on a finished task whose process is still alive keeps "done"
       const t2 = await fetch(`${b2}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: h2, title: "t2", prompt: "p", runner: "claude" }) }).then(j);
@@ -707,9 +711,10 @@ describe("core daemon", () => {
       await c2.stop();
       rmSync(h2, { recursive: true, force: true });
     }
-  });
+  }, 30_000); // two idle windows of 2 s and HTTP turns under a loaded full suite: over the 5 s default (docs/design/perf.md "テストの揺れ")
 
   test.skipIf(skipRecordings("packages/core/fixtures/otel-tool-decision.jsonl"))("otel: a recorded tool_decision is kept on its task; another task's token or none is refused (#2236)", async () => {
+    assertRecordings("packages/core/fixtures/otel-tool-decision.jsonl");
     const starts: StartOptions[] = [];
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-otel-"));
     // waits on its permission: the runner stays live, as a Claude Task's does while it sends its logs
@@ -826,6 +831,45 @@ describe("core daemon", () => {
       }).toThrow();
     } finally {
       await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("heavy slots: a Codex task's sandbox can write the heavy slots' directory; a Claude task's scope is unchanged (#2213)", async () => {
+    const starts: StartOptions[] = [];
+    const h = mkdtempSync(join(tmpdir(), "switchboard-test-heavyslots-"));
+    const checkout = join(h, "checkout");
+    mkdirSync(checkout);
+    const slots = join(h, "user", ".local", "state", "ops-kit", "heavy"); // not made yet
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY, SWITCHBOARD_REPO_ROOT: checkout }), [fakeAdapter(SCRIPT.filter((e) => e.t !== "permission.ask"), { id: "codex", starts }), fakeAdapter(SCRIPT.filter((e) => e.t !== "permission.ask"), { starts })], { port: 0, selfdevChecks: false, heavyStateDir: slots });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    try {
+      const ids: string[] = [];
+      for (const runner of ["codex", "claude"]) {
+        const t = await fetch(`${b}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: checkout, title: "t", prompt: "p", runner }) }).then(j);
+        await waitFor(async () => (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task.status === "done");
+        ids.push(t.id);
+      }
+      expect(starts.map((s) => s.scope)).toEqual([[checkout, slots], [checkout]]);
+      expect(existsSync(slots)).toBe(true); // made before the start, so the sandbox has a directory to open
+      expect(ids.map((id) => c.db.getTask(id)?.scope)).toEqual([[checkout], [checkout]]); // only the start's scope, never the saved one
+    } finally {
+      await c.stop();
+    }
+    // cannot be made (a file in the way): not added, one line on the task, and the task still runs
+    writeFileSync(join(h, "file"), "");
+    const blocked = join(h, "file", "heavy");
+    const more: StartOptions[] = [];
+    const h2 = join(h, "second");
+    const c2 = await startServer(loadConfig({ SWITCHBOARD_HOME: h2, SWITCHBOARD_PORT: "0", ...NO_HISTORY, SWITCHBOARD_REPO_ROOT: checkout }), [fakeAdapter(SCRIPT.filter((e) => e.t !== "permission.ask"), { id: "codex", starts: more })], { port: 0, selfdevChecks: false, heavyStateDir: blocked });
+    const b2 = `http://127.0.0.1:${c2.server.port}`;
+    try {
+      const t = await fetch(`${b2}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: checkout, title: "t", prompt: "p", runner: "codex" }) }).then(j);
+      await waitFor(async () => (await fetch(`${b2}/api/tasks/${t.id}`).then(j)).task.status === "done");
+      expect(more.map((s) => s.scope)).toEqual([[checkout]]);
+      expect(c2.db.listEvents(t.id).some((e) => e.ev.t === "status" && e.ev.text.startsWith(`重い処理の枠の置き場をサンドボックスで書ける場所に足せませんでした: ${blocked}`))).toBe(true);
+    } finally {
+      await c2.stop();
       rmSync(h, { recursive: true, force: true });
     }
   });

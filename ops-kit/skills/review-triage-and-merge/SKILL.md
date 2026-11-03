@@ -35,7 +35,7 @@ question は事実で答える（「分からない」なら調べてから）�
 
 ```bash
 cd <その Task の worktree>; git checkout <その Task の枝>        # 場所と名前は CLAUDE.md の worktree と枝の規則
-# 回帰テスト（task-to-pr の「足す前に」を通す）→ fail を確認 → 修正 → pass。テストのコマンド（1 件 / 型検査 / 全体）は CLAUDE.md
+# 回帰テスト（task-to-pr の「足す前に」を通す）→ fail を確認 → 修正 → pass。テストのコマンド（1 件 / 型検査 / `<関係するテスト>`。`task-to-pr` の 4）は CLAUDE.md
 git commit -am "fix(<area>): review follow-ups for #<PR> — <何を>"     # amend・fixup/autosquash・squash で既存のコミットに混ぜない（どれも author date を保つのでマージ判定が見直しの要否を判定できない）
 gh stack rebase && gh stack push        # 下の枝を直したら上に cascade（stacked-pr-delivery）。単発なら git push
 ```
@@ -76,7 +76,7 @@ gh pr comment $N --body-file "$W/summary.md"      # W=$(mktemp -d /tmp/<リポ�
 | codex | .. | .. | .. | .. | .. |
 | <extra> | .. | .. | .. | .. | .. |
 主な修正: <1〜3 行>  Issue 化: #.., #..  対処不要の根拠: <1〜2 行>
-テスト: <全体の件数 / 追加した回帰テスト名（追加先: 既存 / 単体 / 新規）>
+テスト: <回したテストの件数 / 追加した回帰テスト名（追加先: 既存 / 単体 / 新規）>
 ## マージ判断
 <可 / 不可 と理由（下のチェックリストの結果）>
 ```
@@ -85,7 +85,7 @@ gh pr comment $N --body-file "$W/summary.md"      # W=$(mktemp -d /tmp/<リポ�
 
 全部 yes ならそのままマージする（`/pbi-complete` などの依頼の範囲。聞き直さない。`pbi-complete` の「この依頼が含む範囲」）。1 つでも no なら理由を要約に書いて止める（利用者に聞くものは `issue-workflow` の「判断待ちの出し方」で種類を分ける: チェックリストが no で止めたときだけ、マージしてよいかを運用の確認として Task の会話で聞いてターンを終え、Issue に書かない。実装の判断は Issue の `## 判断待ち`。PR は open のまま）:
 
-- [ ] マージ判定（CLAUDE.md のコマンド。無ければこのチェックリストを自分で確かめる）が exit 0（stop の `reasons` は要約の「マージ判断」に貼る。impact が large のとき、`[聞く]` の理由（セキュリティ・`rescue/**`・README の Design rules）は利用者が Task の会話でマージを認めるまで（`--allow-large`）マージしない。`[再チェック <kind>]` の理由は利用者に聞かず、再チェック（CLAUDE.md が名指しする手順）を回して印で外す — どちらも `pbi-complete` の 5。小さな差分でも `[聞く]` の stop は、利用者が認めたときでしか外さない。聞く前と返事の後に記録の印 `[merge-ask]` / `[merge-answer]` を PR に投稿する。`[merge-ask]` の無い PR への返事は先に `[merge-ask]` を付ける。`--allow-large` は `[merge-answer] yes` の後 — `pbi-complete` の 5）
+- [ ] マージ判定（CLAUDE.md のコマンド。無ければこのチェックリストを自分で確かめる）が exit 0（stop の `reasons` は要約の「マージ判断」に貼る。impact が large のとき、`[聞く]` の理由（セキュリティ）は利用者が Task の会話でマージを認めるまで（`--allow-large`）マージしない。`[再チェック <kind>]` の理由は利用者に聞かず、再チェック（CLAUDE.md が名指しする手順）を回して印で外す — どちらも `pbi-complete` の 5。小さな差分でも `[聞く]` の stop は、利用者が認めたときでしか外さない。聞く前と返事の後に記録の印 `[merge-ask]` / `[merge-answer]` を PR に投稿する。`[merge-ask]` の無い PR への返事は先に `[merge-ask]` を付ける — `pbi-complete` の 5）
 - [ ] 全指摘が 修正 / Issue 化 / 対処不要 / 回答 のどれかで、返信済み
 - [ ] blocker が残っていない（修正済みか、誤読の根拠つき）
 - [ ] 主レビュアーの独立レビューがある（通常は別ランナー。利用上限なら `cross-runner-review` の 0 に従い、同じランナーの新しいセッションで代替する。自己レビューだけでは満たさない。代替も利用できなければ未レビューとして止める。追加のレビュアーは未着でもよく、届いたら転記して比較する）
@@ -98,7 +98,7 @@ gh pr comment $N --body-file "$W/summary.md"      # W=$(mktemp -d /tmp/<リポ�
 
 ## 6. マージと記録
 
-スタックは **main に近い方から 1 本ずつ**（`pbi-complete`）。マージ判定のコマンド（CLAUDE.md）に `--merge` / `--merge-stack` があれば、判定とマージを 1 つのコマンドで（判定が merge のときだけマージする。Task の許可に入る）。単発は `<マージ判定> $N --merge`。その引数が無いリポジトリでは、単発は `gh pr merge $N --rebase --delete-branch`、スタックは `gh stack merge $N --rebase -y`。
+スタックは **main に近い方から 1 本ずつ**（`pbi-complete`）。マージ判定のコマンド（CLAUDE.md）に `--merge` / `--merge-stack` があれば、判定とマージを 1 つのコマンドで（判定が merge のときだけマージする。Task の許可に入る）。単発は `<マージ判定> $N --merge`。その引数が無いリポジトリでは、単発は `gh pr merge $N --rebase --delete-branch`、スタックは `gh stack merge $N --rebase -y`。利用者が判定の外のマージを認めたときも同じコマンド（`pbi-complete` の 5）。
 
 ```bash
 <マージ判定> $N --merge-stack                      # スタックの最下段だけ。上は GitHub が retarget + rebase する

@@ -6,7 +6,7 @@ import { noticesFor, showNotice } from "./notify.ts";
 import { Approvals } from "./components/Approvals.tsx";
 import { api, connectEvents, getToken, setToken, type Health, type TaskDetail, type WorkspaceClone } from "./api.ts";
 import { journeyCancel, journeyEnd, journeyStart } from "./perf.ts";
-import { loginRoute, sessionLabel, sessionRefreshDelay, STUCK_MESSAGE, STUCK_RESCUE, withoutFromAuth } from "./login.ts";
+import { loginRoute, sessionLabel, sessionRefreshDelay, STUCK_MESSAGE, STUCK_LOGIN, STUCK_RESCUE, withoutFromAuth } from "./login.ts";
 import { newVersionLink, rescueLink, type ReleaseStatus } from "./release.ts";
 import { archiveBanner } from "./archive.ts";
 import { watchHealth } from "./healthWatch.ts";
@@ -32,6 +32,7 @@ const initialView = (): View => (location.pathname === "/approvals" ? { name: "a
 
 /** How often an open page reads /api/health again (#1600). */
 const HEALTH_REFRESH_MS = 5 * 60_000;
+const HEALTH_RETRY_MS = 3_000;
 
 export function App() {
   usePageDropGuard(); // a file dropped outside a dropzone must not navigate the tab away (#125)
@@ -62,10 +63,6 @@ export function App() {
   // Claude Code in each Task's terminal tab (#1574): task.terminals after hello replaces them all, task.terminal changes one
   const [terminals, setTerminals] = useState<Record<string, TerminalStatus>>({});
   const [view, setView] = useState<View>(initialView);
-  // read where it is shown (not at launch: one request more there, perf budget)
-  useEffect(() => {
-    if (view.name === "settings") void refreshClones();
-  }, [view.name, refreshClones]);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [railListOpen, setRailListOpen] = useState(false);
   const [briefOpen, setBriefOpen] = useState(false);
@@ -153,8 +150,47 @@ export function App() {
     [],
   );
 
+  const readHealth = useCallback(() => void api.health().then(setHealth).catch(() => undefined), []);
   useEffect(() => {
     api.health().then(setHealth).catch((e) => setError(`core に接続できません: ${e.message}`));
+  }, [authRev]);
+  // No answer yet (the daemon restarting under the page): nothing else is sent until it says who we are, so it is asked
+  // again here; health through the edge is the one read the failure limit does not count
+  useEffect(() => {
+    if (health) return;
+    const t = setInterval(() => void api.health().then((h) => { setHealth(h); setError(null); }).catch(() => undefined), HEALTH_RETRY_MS);
+    return () => clearInterval(t);
+  }, [health]);
+  // the banners (a failed archive, a runner's login) follow the daemon while the page stays open (#1600); a failed read keeps the last
+  useEffect(() => watchHealth(document, readHealth, HEALTH_REFRESH_MS), [readHealth]);
+
+  // The cloud login's end (#498): read again when it is reached: it shows the renewed cookie's later time, or the refusal, which sends the page to the passkey login below
+  const sessionEnd = health?.session ? Math.min(health.session.idleUntil, health.session.expiresAt) : undefined;
+  useEffect(() => {
+    if (sessionEnd === undefined) return;
+    const t = setTimeout(readHealth, sessionRefreshDelay(sessionEnd, Date.now()));
+    return () => clearTimeout(t);
+  }, [sessionEnd, readHealth]);
+
+  // The daemon answers health with the runner list only to an authorized caller (a token, or the cloud login cookie).
+  const login = health?.authRequired ? loginRoute({ authorized: health.runners !== undefined, hasToken: !!getToken(), mode: health.login, path: location.pathname + location.search }) : { kind: "none" as const };
+  const needsToken = login.kind === "token";
+  // The rescue page's link (#399) and the new-version mark (#1660) come from one read, asked once the daemon lets us in and
+  // again each time the connection changes (a promotion ends in a restart), but for the first connection, which follows the login's read (#1851). A failed ask keeps the last one: the link is for when the
+  // daemon is in trouble, so "daemon offline" must not take it away.
+  const authorized = health?.runners !== undefined;
+  const firstUp = useRef(true);
+  useEffect(() => {
+    if (!authorized) return;
+    if (connected && firstUp.current) {
+      firstUp.current = false;
+      return;
+    }
+    api.release().then((r) => { setRelease(r); setRescueHref(rescueLink(r)); }).catch(() => undefined);
+  }, [authorized, connected]);
+  // Nothing but health before the daemon says we are in: each refused read counts toward the failure limit (#1851, #1492)
+  useEffect(() => {
+    if (!authorized) return;
     api.workspaces().then(setWorkspaces).catch(() => undefined);
     api
       .tasks()
@@ -165,28 +201,11 @@ export function App() {
       .catch(() => undefined);
     refreshApprovals();
     void refreshLedger();
-  }, [refreshLedger, refreshApprovals, authRev]);
-  // the banners (a failed archive, a runner's login) follow the daemon while the page stays open (#1600); a failed read keeps the last
-  useEffect(() => watchHealth(document, () => void api.health().then(setHealth).catch(() => undefined), HEALTH_REFRESH_MS), []);
-
-  // The cloud login's end (#498): read again when it is reached: it shows the renewed cookie's later time, or the refusal, which sends the page to the passkey login below
-  const sessionEnd = health?.session ? Math.min(health.session.idleUntil, health.session.expiresAt) : undefined;
+  }, [authorized, refreshLedger, refreshApprovals, authRev]);
+  // read where it is shown (not at launch: one request more there, perf budget)
   useEffect(() => {
-    if (sessionEnd === undefined) return;
-    const t = setTimeout(() => void api.health().then(setHealth).catch(() => undefined), sessionRefreshDelay(sessionEnd, Date.now()));
-    return () => clearTimeout(t);
-  }, [sessionEnd]);
-
-  // The daemon answers health with the runner list only to an authorized caller (a token, or the cloud login cookie).
-  const login = health?.authRequired ? loginRoute({ authorized: health.runners !== undefined, hasToken: !!getToken(), mode: health.login, path: location.pathname + location.search }) : { kind: "none" as const };
-  const needsToken = login.kind === "token";
-  // The rescue page's link (#399) and the new-version mark (#1660) come from one read, asked once the daemon lets us in and
-  // again each time the connection changes (a promotion ends in a restart). A failed ask keeps the last one: the link is for when the
-  // daemon is in trouble, so "daemon offline" must not take it away.
-  const authorized = health?.runners !== undefined;
-  useEffect(() => {
-    if (authorized) api.release().then((r) => { setRelease(r); setRescueHref(rescueLink(r)); }).catch(() => undefined);
-  }, [authorized, connected]);
+    if (authorized && view.name === "settings") void refreshClones();
+  }, [authorized, view.name, refreshClones]);
   // Settings scrolls to its release section once it has loaded (the section is not drawn before that)
   const [releaseFocus, setReleaseFocus] = useState(0);
   useEffect(() => {
@@ -227,6 +246,7 @@ export function App() {
   }, [view, switchedTo]);
 
   useEffect(() => {
+    if (!authorized) return;
     const onMessage = (m: ServerMessage) => {
       for (const notice of noticesFor(m, tasksRef.current, notified.current))
         showNotice(notice, typeof Notification === "undefined" ? undefined : Notification, (id) => {
@@ -295,7 +315,7 @@ export function App() {
         catchUp();
       }
     });
-  }, [refreshTaskMeta, refreshLedger, refreshApprovals, openTask, catchUp, reader]);
+  }, [authorized, refreshTaskMeta, refreshLedger, refreshApprovals, openTask, catchUp, reader]);
 
   useEffect(() => {
     const path = view.name === "approvals" ? "/approvals" : "/";
@@ -419,7 +439,7 @@ export function App() {
 
       {login.kind === "stuck" && (
         <div className="banner error" role="alert">
-          {STUCK_MESSAGE} <a href={STUCK_RESCUE}>救援画面を開く</a>
+          {STUCK_MESSAGE} <a href={STUCK_RESCUE}>救援画面を開く</a> <a href={STUCK_LOGIN}>ログアウト</a>
         </div>
       )}
 
@@ -482,7 +502,10 @@ export function App() {
         </div>
       )}
 
+      {/* the screens read on mount: they wait with the rest (#1851) */}
       <div className="body">
+        {authorized && (
+          <>
         <Rail onFeedback={() => openFeedback()} workspaces={workspaces} tasks={tasks} currentTaskId={view.name === "task" ? view.id : undefined} approvals={approvals.length} approvalsOpen={view.name === "approvals"} onApprovals={() => setView({ name: "approvals" })} listOpen={railListOpen} onToggleList={() => setRailListOpen((o) => !o)} onOpenTask={openTaskFromRail} onHome={() => setView({ name: "home" })} onShowArchived={showArchived} terminals={terminals} />
 
         {view.name === "home" && (
@@ -566,6 +589,8 @@ export function App() {
               upsertTask(task);
               openTask(task.id);
             }} runnerOk={runnerOk} onRunners={(runners) => setHealth((h) => (h ? { ...h, runners } : h))} onError={setError} />}
+          </>
+        )}
       </div>
 
       <FeedbackDialog open={feedbackOpen} screen={screenLabel(view, currentTask)} workspaces={workspaces} workspace={feedbackWorkspace} prefill={feedbackPrefill} onClose={() => setFeedbackOpen(false)} onSent={(task) => { upsertTask(task); openTask(task.id); }} onError={setError} />

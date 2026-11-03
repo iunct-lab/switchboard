@@ -47,6 +47,7 @@ const PR_FIELDS = `id number state isDraft updatedAt closedAt mergedAt headRefNa
 /** The open Issues with their Project items. */
 const OPEN_ISSUES = `query($o:String!,$r:String!,$after:String){ repository(owner:$o,name:$r){ issues(first:100, after:$after, states:OPEN, ${LABELS}){ pageInfo{ hasNextPage endCursor } nodes{ number ${PROJECT_ITEMS} } } } }`;
 const OPEN_PULLS = `query($o:String!,$r:String!,$after:String){ repository(owner:$o,name:$r){ pullRequests(first:50, after:$after, states:OPEN, orderBy:{field:UPDATED_AT, direction:DESC}){ pageInfo{ hasNextPage endCursor } nodes{ ${PR_FIELDS} } } } }`;
+const PROJECT_ID = "query($o:String!,$p:Int!){ repositoryOwner(login:$o){ ... on ProjectV2Owner{ projectV2(number:$p){ id } } } }";
 const MORE_COMMENTS = `query($o:String!,$r:String!,$n:Int!,$after:String!){ repository(owner:$o,name:$r){ issue(number:$n){ comments(first:100, after:$after){ ${COMMENTS} } } } }`;
 const recheckQuery = (numbers: number[]) =>
   `query($o:String!,$r:String!){ repository(owner:$o,name:$r){ ${numbers.map((n) => `w${n}: issueOrPullRequest(number:${n}){ __typename ... on Issue{ ${ISSUE} } ... on PullRequest{ ${PR_FIELDS} mergeCommit{ oid } } }`).join(" ")} } }`;
@@ -287,6 +288,7 @@ export async function importGithubSnapshot(gh: GhRunner, db: Db, ws: Pick<Backlo
   let project: BacklogSource["project"] | null = null;
   try {
     project = await projectOf(gh, ws);
+    await requireReadableProject(gh, ws.path, project);
     const stored = db.listBacklogRecords(key);
     const recent = stored.flatMap((r) => {
       const issue = r.objectKind === "issue" && r.fetchState === "fetched" && !r.externalId.startsWith("sb:") ? (r.remote as BacklogIssueData | null) : null;
@@ -312,6 +314,16 @@ export async function importGithubSnapshot(gh: GhRunner, db: Db, ws: Pick<Backlo
     throw e;
   }
   return { key, changed, project };
+}
+
+/**
+ * Refuses an import whose token cannot read the Project (#468): GitHub then leaves the Project's items out of every
+ * Issue without an error, which reads as "not in the Project" and would mark every stored item gone. It answers such a
+ * Project as null, with no error or with NOT_FOUND / FORBIDDEN. A limit or a refused login still fails as itself. Throws BacklogError.
+ */
+async function requireReadableProject(gh: GhRunner, cwd: string, project: BacklogSource["project"]): Promise<void> {
+  const { data } = await graphql(gh, cwd, PROJECT_ID, { o: project.owner, p: project.number }, true);
+  if (!data?.repositoryOwner?.projectV2?.id) throw new BacklogError(`Project ${project.owner}/${project.number} を読めない（トークンの権限）`);
 }
 
 /** Whether `records` read something other than what was `stored` (a value, or how a record was read). */

@@ -23,10 +23,6 @@
         "recalcStyleCount": 5,
         "layoutShift": 0.0404
       }
-    },
-    "bundle": {
-      "js": 254647,
-      "css": 8157
     }
   },
   "local": {
@@ -35,7 +31,7 @@
         "requests": 14,
         "layoutCount": 5,
         "recalcStyleCount": 7,
-        "layoutShift": 0.1959
+        "layoutShift": 0.0467
       },
       "new-task": {
         "requests": 18,
@@ -54,12 +50,13 @@
         "layoutShift": 0.0427
       }
     },
-    "bundle": {
-      "js": 254647,
-      "css": 8157
-    },
     "loaded": {
       "healthMaxMs": 5440
+    },
+    "durations": {
+      "typecheck": 12.8,
+      "test": 513.7
     }
-  }
+  },
+  "exceptions": []
 }

@@ -1,6 +1,6 @@
 import { createClaudeAdapter } from "@switchboard/adapter-claude";
 import { createCodexAdapter } from "@switchboard/adapter-codex";
-import { createDakAdapter } from "@switchboard/adapter-dak";
+import { createAdkAdapter } from "@switchboard/adapter-adk";
 import { loadConfig } from "./config.ts";
 import { startServer } from "./server.ts";
 import type { Suggester } from "./routing.ts";
@@ -84,7 +84,7 @@ if (cmd === "relocate") {
 
 // Adapters are plugins: any subset may be missing. Missing binaries / unreachable servers are reported, not fatal.
 // DAK is registered only when SWITCHBOARD_DAK_URL is set (off by default).
-const adapters = [createClaudeAdapter(), createCodexAdapter(), ...(process.env.SWITCHBOARD_DAK_URL ? [createDakAdapter({ baseUrl: process.env.SWITCHBOARD_DAK_URL })] : [])];
+const adapters = [createClaudeAdapter(), createCodexAdapter(), ...(process.env.SWITCHBOARD_DAK_URL ? [createAdkAdapter({ id: "dak", label: "DAK", baseUrl: process.env.SWITCHBOARD_DAK_URL, app: "dak_agent", artifactSkipPrefix: "tool_output_" })] : [])];
 
 /**
  * LLM routing suggestions (#25). Off unless the settings say otherwise; `SWITCHBOARD_SUGGESTER=fake` swaps in a

@@ -105,7 +105,7 @@ const settle = async (id: string) => {
 beforeAll(async () => {
   home = mkdtempSync(join(tmpdir(), "switchboard-att-"));
   const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_PORT: "0", ...NO_HISTORY });
-  core = await startServer(cfg, [fakeAdapter("claude", claudeStarts, claudeSends, { costUsd: 1 }), fakeAdapter("codex", codexStarts, codexSends, { lingers: true })], { port: 0, selfdevChecks: false, dryRunRestart: true });
+  core = await startServer(cfg, [fakeAdapter("claude", claudeStarts, claudeSends, { costUsd: 1 }), fakeAdapter("codex", codexStarts, codexSends, { lingers: true })], { port: 0, selfdevChecks: false, dryRunRestart: true, heavyStateDir: join(home, "heavy") });
   base = `http://127.0.0.1:${core.server.port}`;
 });
 
@@ -214,7 +214,7 @@ describe("attachments (#125)", () => {
     expect(codexSends).not.toContain(expect.stringContaining(dir)); // not handed to the old process
     const restarted = codexStarts[before + 1]!;
     expect(restarted.resumeSessionId).toBe(`codex-sess-${before + 1}`);
-    expect(restarted.scope).toEqual([home, dir]);
+    expect(restarted.scope).toEqual([home, dir, join(home, "heavy")]); // a Codex start also gets the heavy slots (#2213)
     expect(restarted.prompt).toContain(join(dir, "shot.png"));
     expect(names(restarted.attachments)).toEqual(["shot.png"]);
     const d = await detail(task.id);
@@ -346,7 +346,7 @@ describe("attachments (#125)", () => {
     const dir = join(home, "attachments", task.id);
     const shadowStart = codexStarts[before]!;
     expect(shadowStart.prompt).toContain(join(dir, "shot.png"));
-    expect(shadowStart.scope).toEqual([home, dir]);
+    expect(shadowStart.scope).toEqual([home, dir, join(home, "heavy")]); // a Codex start also gets the heavy slots (#2213)
     expect(names(shadowStart.attachments)).toEqual(["shot.png"]);
     const shadow = core.db.shadowTaskOf(task.id)!;
     await settle(shadow.id);

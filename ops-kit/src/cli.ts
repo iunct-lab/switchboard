@@ -9,6 +9,7 @@ import { exportCopy } from "./export-copy.ts";
 import { resolveReviewThread } from "./forge-github.ts";
 import { forgeTargetOf, originOf } from "./forge.ts";
 import { createGitlabMr, gitlabMrDiscussions, resolveGitlabDiscussion, runGlab, startGitlabDiscussion, viewGitlabMr, type Sh } from "./forge-gitlab.ts";
+import { withHeavySlot } from "./heavy.ts";
 import { IDLE_KILLED_LINE, IDLE_SECONDS_MAX, runIdle } from "./idle-run.ts";
 import { formatLint, lint } from "./lint.ts";
 import { pullMain } from "./pull-main.ts";
@@ -90,6 +91,12 @@ ${BACKLOG_USAGE}
   pr resolve-thread <thread id>...
       PR のレビュースレッドを resolve する（GraphQL の resolveReviewThread だけ。id は PRRT_ で始まるもの）。
       id の形が違えば何もせず exit 1。resolve にならなかったスレッドがあれば exit 1。設定ファイルは要らない
+  heavy [--name <名前>] -- <コマンド…>
+      重い処理（ローカル CI、全テスト、偽のデーモン + headless Chrome、レビューのセッションなど）の枠をマシンで 1 つ取ってから
+      コマンドを動かす。枠が全部埋まっている間と、空きメモリ（MemAvailable）が下限を下回る間は待ち、理由（枠を持つ処理の名前・cwd・
+      開始時刻、空きメモリ）を 1 行出す。上限は ~/.config/ops-kit/heavy.json（{ "max": 1, "minFreeMb": 1536 }。無ければこの既定値）、
+      枠は ~/.local/state/ops-kit/heavy/ で、どのリポジトリから呼んでも同じ枠を取り合う。--name の既定はコマンドの先頭 3 語。
+      設定ファイル（ops.config.json）は要らない。exit = コマンドの exit、127 = 起動できない、2 = 使い方の誤りか heavy.json の誤り
   idle-run --idle <秒> [--] <コマンド…>
       コマンドを自分のプロセスグループで動かし、stdout / stderr のどちらにも <秒> 出力が無ければグループごと切る。総時間の上限は無い。
       出力はそのまま流す。設定ファイルは要らない。exit = コマンドの exit、124 = 切った（理由を stderr に出す）、127 = 起動できない、2 = 使い方の誤り
@@ -199,6 +206,51 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
   if (command === "pull-main") {
     if (rest.length) return usage(err, "pull-main", 2);
     return pullMain(process.cwd(), out, err);
+  }
+  if (command === "heavy") {
+    const HEAVY_USAGE = "heavy [--name <名前>] -- <コマンド…>";
+    let name: string | undefined;
+    let i = 0;
+    if (rest[0] === "--name") {
+      name = rest[1];
+      if (!name) return usage(err, HEAVY_USAGE, 2);
+      i = 2;
+    }
+    const cmd = rest[i] === "--" ? rest.slice(i + 1) : rest.slice(i);
+    if (!cmd.length) return usage(err, HEAVY_USAGE, 2);
+    let interrupted: NodeJS.Signals | undefined;
+    let code: number;
+    try {
+      code = await withHeavySlot(name ?? cmd.slice(0, 3).join(" "), async () => {
+        let proc: ReturnType<typeof Bun.spawn>;
+        try {
+          proc = Bun.spawn(cmd, { stdio: ["inherit", "inherit", "inherit"] });
+        } catch (e) {
+          err(`${cmd[0]} を起動できません: ${(e as Error).message}`);
+          return 127;
+        }
+        // a stopped wrapper passes the signal on and gives the slot back when the command has ended
+        const forward = (signal: NodeJS.Signals) => {
+          interrupted = signal;
+          proc.kill(signal);
+        };
+        const signals = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+        for (const s of signals) process.on(s, forward);
+        try {
+          return await proc.exited;
+        } finally {
+          for (const s of signals) process.off(s, forward);
+        }
+      }, { log: err });
+    } catch (e) {
+      err((e as Error).message);
+      return 2;
+    }
+    if (interrupted) {
+      process.kill(process.pid, interrupted);
+      await new Promise(() => {}); // the signal's default action ends this process
+    }
+    return code;
   }
   if (command === "idle-run") {
     const IDLE_USAGE = "idle-run --idle <秒> [--] <コマンド…>";

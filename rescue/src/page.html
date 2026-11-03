@@ -64,8 +64,17 @@
   <div id="tmp-usage"></div>
   <ul id="tmp-list"></ul>
   <div class="row">
+    <select id="tmp-age" aria-label="消すものの経過時間">
+      <option value="1800000">30 分</option>
+      <option value="7200000" selected>2 時間</option>
+      <option value="21600000">6 時間</option>
+      <option value="86400000">24 時間</option>
+    </select>
     <button id="tmp-reload">再読込</button>
-    <button id="tmp-clean" disabled>古い作業ディレクトリを消す</button>
+  </div>
+  <div class="row">
+    <button id="tmp-clean" disabled>古いものを消す</button>
+    <button id="tmp-force" disabled>強制クリア</button>
   </div>
 </div>
 
@@ -260,20 +269,29 @@ $("agent-stop").onclick = () => act("api/agent/stop", {}, "救援エージェン
 const size = (n) => { const u = ["B", "KB", "MB", "GB"]; let i = 0; while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; } return (i ? n.toFixed(1) : n) + " " + u[i]; };
 // the host's clock, not the browser's: never "-3 分前"
 const ago = (ms) => { const m = Math.max(0, Math.floor((Date.now() - ms) / 60000)); return m < 60 ? m + " 分前" : Math.floor(m / 60) + " 時間前"; };
-const KEEP = { pattern: "型に合わない", recent: "2 時間以内に更新", owner: "持ち主が違う", "not-a-directory": "ディレクトリでない", "in-use": "使用中", "use-unknown": "使用中か確かめられない" };
+const KEEP = { pattern: "型に合わない", owner: "持ち主が違う", "not-a-directory": "ディレクトリでない", "in-use": "使用中", "use-unknown": "使用中か確かめられない" };
+// the ages the owner picks (#tmp-age's options, rescue/src/tmp.ts STALE_CHOICES_MS); the list and the button follow the one sb-rescue answered with
+const AGES = { 1800000: "30 分", 7200000: "2 時間", 21600000: "6 時間", 86400000: "24 時間" };
 let cleanable = { names: [], bytes: 0 };
-let tmpOwned = false;
+let forcible = { count: 0, bytes: 0 };
+let staleMs = 7200000;
+let tmpRead = 0; // the latest read: an older answer that comes back after it (the age changed twice quickly) is dropped
 // the kinds sb-rescue cleans by itself; キャッシュ and docker only on a machine of Switchboard's own (owned)
 const SWEEPS = [["tmp", "/tmp"], ["work", "作業の残り"], ["cache", "キャッシュ"], ["docker", "docker"]];
 const usageText = (u) => "使用 " + size(u.used) + " / " + size(u.total) + "（" + u.percent + "%）";
 async function loadTmp() {
-  const r = await fetch("api/tmp", { headers }).catch(() => null);
+  const read = ++tmpRead;
+  const r = await fetch("api/tmp?staleMs=" + $("tmp-age").value, { headers }).catch(() => null);
   const t = r && r.ok ? await r.json().catch(() => null) : null;
+  if (read !== tmpRead) return;
   if (!t) {
     // what the last read listed may be gone: no button for it
     cleanable = { names: [], bytes: 0 };
-    $("tmp-clean").textContent = "古い作業ディレクトリを消す";
+    forcible = { count: 0, bytes: 0 };
+    $("tmp-clean").textContent = "古いものを消す";
     $("tmp-clean").disabled = true;
+    $("tmp-force").textContent = "強制クリア";
+    $("tmp-force").disabled = true;
     $("disk-usage").textContent = "ディスクを読めませんでした (" + (r ? r.status : "届きません") + ")";
     $("disk-usage").className = "";
     $("sweeps").replaceChildren();
@@ -288,22 +306,33 @@ async function loadTmp() {
   }));
   $("tmp-usage").textContent = "/tmp " + usageText(t.usage);
   $("tmp-usage").className = t.usage.percent >= 80 ? "bad" : "";
+  staleMs = t.staleMs;
   $("tmp-list").replaceChildren(...t.entries.map((e) => {
     const li = document.createElement("li");
     const name = Object.assign(document.createElement("code"), { textContent: e.name });
-    const info = Object.assign(document.createElement("div"), { className: "dim", textContent: (e.removable ? "消せる · " : KEEP[e.keep] + " · ") + size(e.bytes) + " · " + ago(e.newestMs) });
+    const info = Object.assign(document.createElement("div"), { className: "dim", textContent: (e.removable ? "消せる · " : (e.keep === "recent" ? AGES[staleMs] + "以内に更新" : KEEP[e.keep]) + " · ") + size(e.bytes) + " · " + ago(e.newestMs) });
     li.append(name, info);
     return li;
   }));
   cleanable = t.cleanable;
-  tmpOwned = t.owned;
-  $("tmp-clean").textContent = "古い作業ディレクトリを消す（" + cleanable.names.length + " 件、合計 " + size(cleanable.bytes) + "）";
+  forcible = t.forcible;
+  $("tmp-clean").textContent = AGES[staleMs] + "以上更新の無いものを消す（" + cleanable.names.length + " 件、合計 " + size(cleanable.bytes) + "）";
   $("tmp-clean").disabled = !cleanable.names.length;
+  $("tmp-force").textContent = "強制クリア（" + forcible.count + " 件、合計 " + size(forcible.bytes) + "）";
+  $("tmp-force").disabled = !forcible.count;
 }
 $("tmp-reload").onclick = loadTmp;
+$("tmp-age").onchange = loadTmp;
+// the owner's call (docs/design/releases-and-rescue.md): any name of this user's, files too, past the picked age and not in use
 $("tmp-clean").onclick = async () => {
   const { names, bytes } = cleanable;
-  await act("api/tmp/clean", { names }, "次の " + names.length + " 件（合計 " + size(bytes) + "）を消します。2 時間以上更新が無く、使われていない" + (tmpOwned ? "一時ディレクトリとキャッシュ" : "レビューの clone と昇格の候補") + "だけです。\n" + names.join("\n"));
+  await act("api/tmp/clean", { names, staleMs }, "次の " + names.length + " 件（合計 " + size(bytes) + "）を消します。" + AGES[staleMs] + "以上更新が無く、使われていない、この機械のユーザーのものです（名前は問いません。ファイルも消えます）。\n" + names.join("\n"));
+  await loadTmp();
+};
+// the last resort: everything of this user's under /tmp, in use or new; sb-rescue reads the names itself
+$("tmp-force").onclick = async () => {
+  const tasks = stopping.length ? "動いている Task（作業ファイルが消え、失敗することがあります）:\n" + stopping.map(taskName).join("\n") : "動いている Task はありません";
+  await act("api/tmp/clean", { force: true }, "強制クリア: /tmp にあるこの機械のユーザーのもの " + forcible.count + " 件（合計 " + size(forcible.bytes) + "）を、経過時間も使用中かも見ずに全部消します。\n\n" + tasks);
   await loadTmp();
 };
 // Every 2 s while the tab is visible; a hidden tab asks nothing, and coming back asks at once (#2814).

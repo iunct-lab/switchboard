@@ -11,14 +11,14 @@
  * says how full the root disk is (`disk`) and when each kind was last cleaned (`sweeps`).
  */
 import { createPublicKey, verify } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { RescueAgent } from "./agent.ts";
 import page from "./page.html" with { type: "text" };
 import { checkDaemon, listSnapshots, promote, restoreDb, rollback, tasksThatStop, type Ctx } from "./promote.ts";
 import { sweepCaches, sweepCacheWork, sweepDocker } from "./cache.ts";
-import { cleanTmp, diskUsage, scanTmp, SWEEP_MS, sweepTmp, type TmpJudge, type TmpSweep } from "./tmp.ts";
+import { cleanTmp, diskUsage, scanTmp, STALE_CHOICES_MS, STALE_MS, SWEEP_MS, sweepTmp, type TmpJudge, type TmpSweep } from "./tmp.ts";
 import { appendHistory, currentOf, listReleases, previousOf, readHistory, run } from "./releases.ts";
 
 export interface RescueOptions {
@@ -326,13 +326,18 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
       if (!auth) return new Response(o.sessionPublicKey ? "unauthorized: log in with the passkey at /_auth/ and open /rescue/ again" : "unauthorized: open this page with ?token=<the contents of ~/.switchboard/token>", { status: 401 });
       if (req.method === "GET" && path === "/") return new Response(page as unknown as string, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'self' 'unsafe-inline'; frame-ancestors 'none'" } });
       if (req.method === "GET" && path === "/api/status") return Response.json(await status());
-      if (req.method === "GET" && path === "/api/tmp") return Response.json({ ...scanTmp(tmpDir, tmpJudge), disk: diskUsage("/"), sweeps: lastSweeps });
+      if (req.method === "GET" && path === "/api/tmp") {
+        // what a press of 消す takes: the owner's age (one of STALE_CHOICES_MS; any other value is the default), not the sweep's kinds
+        const asked = Number(url.searchParams.get("staleMs"));
+        const staleMs = STALE_CHOICES_MS.includes(asked) ? asked : STALE_MS;
+        return Response.json({ ...scanTmp(tmpDir, tmpJudge, Date.now(), { kind: "manual", staleMs }), staleMs, disk: diskUsage("/"), sweeps: lastSweeps });
+      }
       if (req.method !== "POST") return Response.json({ error: "not found" }, { status: 404 });
       if (auth === "cookie" && !recentCookieOk(req, o.sessionPublicKey)) return Response.json({ error: "操作の前にパスキーで確かめてください", reason: "recent" }, { status: 401 });
       // An empty body means "no arguments"; a body that does not parse is refused — a cut-off {commit} must not
       // turn "go back to this release" into "go back to the previous one".
       const text = await req.text();
-      let body: { commit?: unknown; snapshot?: unknown; names?: unknown };
+      let body: { commit?: unknown; snapshot?: unknown; names?: unknown; staleMs?: unknown; force?: unknown };
       try {
         body = text.trim() ? JSON.parse(text) : {};
         if (body === null || typeof body !== "object" || Array.isArray(body)) throw new Error("not an object");
@@ -415,9 +420,15 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
           return Response.json({ started: "rebuild" }, { status: 202 });
         }
         // Not under `operate`: unrelated to the releases, and removing a few directories takes seconds.
-        case "/api/tmp/clean":
+        // The owner's press, judged apart from the sweep: {names, staleMs} takes any name of this user's left alone that long
+        // and not in use; {force: true} takes everything of this user's under /tmp, read here (no names from the request).
+        case "/api/tmp/clean": {
+          if (body.force === true) return Response.json(cleanTmp(tmpDir, readdirSync(tmpDir), tmpJudge, Date.now(), { kind: "force" }));
           if (!Array.isArray(body.names) || !body.names.every((n) => typeof n === "string")) return Response.json({ error: "names required" }, { status: 400 });
-          return Response.json(cleanTmp(tmpDir, body.names as string[], tmpJudge));
+          if (body.staleMs !== undefined && !STALE_CHOICES_MS.includes(body.staleMs as number)) return Response.json({ error: `staleMs must be one of ${STALE_CHOICES_MS.join(", ")}` }, { status: 400 });
+          const staleMs = (body.staleMs as number | undefined) ?? STALE_MS;
+          return Response.json(cleanTmp(tmpDir, body.names as string[], tmpJudge, Date.now(), { kind: "manual", staleMs }));
+        }
         case "/api/agent/stop":
           await agent.stop();
           return Response.json({ stopped: true });

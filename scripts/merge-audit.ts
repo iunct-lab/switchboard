@@ -4,7 +4,8 @@ import { currentRepo } from "./repo.ts";
  * (PBI #752). Reads the record marks on the PRs (docs/merge-gate.md の「記録の印」: `[merge-ask]`, `[merge-answer]`,
  * `[recheck]`) and main's commits; keeps nothing (the marks are the record). REST only (the GraphQL budget is shared).
  *
- * One line per kind with anything to count (the default period is the last 7 days, until inclusive):
+ * One line per kind with anything to count (the default period is the last 7 days, until inclusive); security is one line
+ * per group (`security:<group>`, PBI #1873), and the single `security` of older marks is not counted:
  *   <kind> 聞いた N / 認めた N / 認めなかった N / 返事まで 中央値 Nh / 再チェックで自動マージ N / 戻された N（#a, #b）
  * After the table, one line `印の欠け: 聞かずに返事 #a / 返事なしでマージ #b` when a PR in the period was answered with no
  * recorded `[merge-ask]`, or merged with an ask and no recorded answer (#1069); nothing when there are none.
@@ -17,7 +18,7 @@ import { currentRepo } from "./repo.ts";
  * unless an open request has the same title (the same proposals). The exit code is the same with or without it.
  */
 import { type Filed, fileRequest } from "./file-request";
-import { ASK_KINDS, MARK_AUTHORS, MERGE_ANSWER, MERGE_ASK, MERGE_KINDS, RECHECK_KINDS, RECHECK_PASS, type MergeKind } from "./merge-gate";
+import { MARK_AUTHORS, MERGE_ANSWER, MERGE_ASK, MERGE_KINDS, RECHECK_KINDS, RECHECK_PASS, type MergeKind } from "./merge-gate";
 
 export type Mark = { kind: "ask" | "yes" | "no" | "recheck"; kinds: MergeKind[]; sha: string; at: string };
 export interface PrRecord { number: number; mergedAt: string | null; headSha: string; marks: Mark[] }
@@ -161,19 +162,16 @@ export function formatGaps(g: Gaps): string[] {
   return parts.length ? [`印の欠け: ${parts.join(" / ")}`] : [];
 }
 
-/** In a row this many of the latest answers for an asked kind are yes → propose moving it to the recheck side. */
-export const STREAK = 5;
-/** How far back the proposals look (the asked kinds are rare: a week is too few answers). */
+/** How far back the proposals look (a recheck merge taken back is rare: a week is too few). */
 export const LOOKBACK_DAYS = 90;
 
-/** evidence: the PRs behind the proposal; reverts: for "ask", the commits that took them back. */
-export type Proposal = { to: "ask" | "recheck"; kind: MergeKind; evidence: number[]; reverts?: string[] };
+/** evidence: the PRs behind the proposal; reverts: the commits that took them back. */
+export type Proposal = { kind: MergeKind; evidence: number[]; reverts: string[] };
 
 /**
  * Against merge-gate's split now: a recheck kind with a recheck merge that was taken back → back to asking (one is
- * enough); an asked kind other than security whose latest STREAK answers are all yes → to the recheck side. Only what
- * happened in `window` (LOOKBACK_DAYS up to the table's --until) counts. Security is never proposed (PBI #752: the user
- * always answers it).
+ * enough). Only what happened in `window` (LOOKBACK_DAYS up to the table's --until) counts. Security, the asked kinds
+ * (`security:<group>`), is never proposed (PBI #752: the user always answers it; PBI #1873: moving a group is the user's call).
  */
 export function proposals(prs: PrRecord[], reverts: Revert[], window: { since: string; until: string }): Proposal[] {
   // by time, not by string: git's %cI carries the committer's offset (+09:00, -07:00), GitHub's times are UTC
@@ -185,15 +183,7 @@ export function proposals(prs: PrRecord[], reverts: Revert[], window: { since: s
   for (const kind of RECHECK_KINDS) {
     const back = prs.filter((p) => p.mergedAt !== null && inWindow(p.mergedAt) && recheckMerged(p, kind) && takenBack.has(p.number)).map((p) => p.number);
     const by = inTime.filter((r) => r.reverted.some((n) => back.includes(n))).map((r) => r.sha);
-    if (back.length > 0) out.push({ to: "ask", kind, evidence: back, reverts: by });
-  }
-  for (const kind of ASK_KINDS.filter((k) => k !== "security")) {
-    // STREAK counts PRs: a PR asked again after each new head is one decision, its latest answer
-    const answers = prs
-      .flatMap((p) => p.marks.filter((m) => (m.kind === "yes" || m.kind === "no") && m.kinds.includes(kind) && inWindow(m.at)).map((m) => ({ ...m, pr: p.number })).slice(-1))
-      .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
-      .slice(0, STREAK);
-    if (answers.length === STREAK && answers.every((a) => a.kind === "yes")) out.push({ to: "recheck", kind, evidence: answers.map((a) => a.pr).sort((a, b) => a - b) });
+    if (back.length > 0) out.push({ kind, evidence: back, reverts: by });
   }
   return out.sort((a, b) => MERGE_KINDS.indexOf(a.kind) - MERGE_KINDS.indexOf(b.kind));
 }
@@ -211,15 +201,13 @@ export function formatProposals(ps: Proposal[]): string[] {
 }
 
 const proposalText = (p: Proposal) =>
-  p.to === "ask"
-    ? `${p.kind} を聞くへ（再チェックで自動マージして戻された: ${p.evidence.map((n) => `#${n}`).join(", ")}。戻したコミット: ${(p.reverts ?? []).map((x) => x.slice(0, 7)).join(", ")}）`
-    : `${p.kind} を再チェックへ（直近 ${STREAK} 件の返事がすべて認めた: ${p.evidence.map((n) => `#${n}`).join(", ")}）`;
+  `${p.kind} を聞くへ（再チェックで自動マージして戻された: ${p.evidence.map((n) => `#${n}`).join(", ")}。戻したコミット: ${p.reverts.map((x) => x.slice(0, 7)).join(", ")}）`;
 
 /** The request Issue for the proposals, or null. The same proposals always get the same title (alreadyFiled compares it). */
 export function requestFor(ps: Proposal[], source: { date: string }): { title: string; body: string } | null {
   if (ps.length === 0) return null;
   const sorted = [...ps].sort((a, b) => MERGE_KINDS.indexOf(a.kind) - MERGE_KINDS.indexOf(b.kind));
-  const title = `マージ規則の見直し: ${sorted.map((p) => `${p.kind} を${p.to === "ask" ? "聞く" : "再チェック"}へ`).join(" / ")}`;
+  const title = `マージ規則の見直し: ${sorted.map((p) => `${p.kind} を聞くへ`).join(" / ")}`;
   const body = [
     "## 要望",
     "マージの記録の印（docs/merge-gate.md の「記録の印」）の集計から、merge-gate の分け（利用者に聞く / 再チェックで外せる）を変える案が出ました。見直してください。",
@@ -265,6 +253,40 @@ async function spawnRun(cmd: string[]): Promise<string> {
 const ANY_MARK = [MERGE_ASK, MERGE_ANSWER, RECHECK_PASS];
 
 /**
+ * The PRs merged on or after `from` (a UTC day). Search answers 1,000 results at most and may say a page is incomplete. So
+ * each range is first counted with a one-item page, and only a range that fits is read in full; one over it is counted again
+ * as its two halves (`merged:<a>..<b>`, both days included) until each fits (#3595: 90 days held 1,137). Counting first keeps
+ * the search calls under the search limit (30 a minute), which reading every page of a range over 1,000 would use up. A
+ * single day over it, or an incomplete page, would leave the counts short, so it is an error.
+ */
+export async function mergedSince(from: string, run: Run, repo: string, now = Date.now()): Promise<number[]> {
+  const FORMAT = '"page \\(.incomplete_results) \\(.total_count)", (.items[].number)';
+  const search = (q: string, paginate: boolean) =>
+    run(["gh", "api", "-X", "GET", "search/issues", "-f", `q=repo:${repo} is:pr is:merged ${q}`, "-f", `per_page=${paginate ? 100 : 1}`,
+      ...(paginate ? ["--paginate"] : []), "-q", FORMAT]);
+  const pages = (out: string) => out.split("\n").filter(Boolean).map((l) => ({ l, page: /^page (true|false) (\d+)$/.exec(l) }));
+  const over = (out: string) => pages(out).find(({ page }) => page && Number(page[2]) > 1000)?.page?.[2] ?? null;
+  const read = async (q: string) => {
+    const numbers: number[] = [];
+    for (const { l, page } of pages(await search(q, true))) {
+      if (page && (page[1] === "true" || Number(page[2]) > 1000)) throw new Error(`マージされた PR の検索が不完全（${q}: incomplete_results ${page[1]}、${page[2]} 件）`);
+      if (!page) numbers.push(Number(l));
+    }
+    return numbers;
+  };
+  const range = async (a: string, b: string): Promise<number[]> => {
+    const q = `merged:${a}..${b}`;
+    const count = over(await search(q, false));
+    if (count === null) return read(q);
+    if (a === b) throw new Error(`マージされた PR の検索が不完全（${a} の 1 日で ${count} 件）`);
+    const mid = day(Date.parse(a) + Math.floor((Date.parse(b) - Date.parse(a)) / DAY / 2) * DAY);
+    return [...(await range(a, mid)), ...(await range(day(Date.parse(mid) + DAY), b))];
+  };
+  if (over(await search(`merged:>=${from}`, false)) === null) return read(`merged:>=${from}`);
+  return range(from, day(now));
+}
+
+/**
  * The PRs with something to count since `since`, with all their marks, and main's commits since then. A PR counts when a
  * mark was posted on it since then (the repository's comment stream, one paginated call: `issues/comments?since=` — PR
  * comments are issue comments; `since` is by update, so older ones are dropped here) or it was merged since then (search).
@@ -283,14 +305,7 @@ export async function readHistory(since: string, run: Run = spawnRun, repo = cur
   for (const c of jsonLines<Comment & { issue_url: string }>(stream)) {
     if (c.created_at >= since && isMark(c)) candidates.add(Number(c.issue_url.split("/").at(-1)));
   }
-  // search answers 1,000 results at most and may say a page is incomplete: then the counts would be short, so it is an error
-  const merged = await run(["gh", "api", "-X", "GET", "search/issues", "-f", `q=repo:${repo} is:pr is:merged merged:>=${since.slice(0, 10)}`,
-    "-f", "per_page=100", "--paginate", "-q", '"page \\(.incomplete_results) \\(.total_count)", (.items[].number)']);
-  for (const l of merged.split("\n").filter(Boolean)) {
-    const page = /^page (true|false) (\d+)$/.exec(l);
-    if (page && (page[1] === "true" || Number(page[2]) > 1000)) throw new Error(`マージされた PR の検索が不完全（incomplete_results ${page[1]}、${page[2]} 件）`);
-    if (!page) candidates.add(Number(l));
-  }
+  for (const n of await mergedSince(since.slice(0, 10), run, repo)) candidates.add(n);
   const prs: PrRecord[] = [];
   for (const n of [...candidates].sort((a, b) => a - b)) {
     const comments = jsonLines<Comment>(await run(["gh", "api", `repos/${repo}/issues/${n}/comments`, "--paginate", "-q", ".[] | {body, created_at, author_association}"]));

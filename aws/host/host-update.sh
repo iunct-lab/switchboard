@@ -15,8 +15,12 @@ CLONE="${SB_HOST_CLONE:-/opt/switchboard-host}"
 # own packages back. So every start also applies AL2023's latest security updates, in a unit of its own: the start does
 # not wait for it (systemd gives the whole start 90 s), and a run still going is left alone. A new kernel is used from
 # the next boot: /_auth/'s 停止する → 起動する (aws/README.md, the CVE section).
+# --refresh: fetch the metadata again even inside the cache's expiry, or a stale cache reads as no updates (#3344).
+# skip_if_unavailable off for the AL2023 repository only: dnf's default skips it and exits 0 when its metadata cannot be
+# fetched, the same silent pass; another repository being down does not hold the security updates back.
 security_updates() {
-  systemd-run --unit=sb-security-update --no-block --collect --quiet -- dnf --releasever=latest upgrade -y -q --security \
+  systemd-run --unit=sb-security-update --no-block --collect --quiet -- \
+    dnf --releasever=latest upgrade -y -q --security --refresh --setopt=amazonlinux.skip_if_unavailable=False \
     || echo "sb-host-update: security updates not started (exit $?)" >&2
 }
 

@@ -403,6 +403,7 @@ describe("spawn plumbing", () => {
   });
 
   test.skipIf(skipRecordings("packages/adapters/claude/fixtures/classifier-stop.jsonl"))("classifier (recorded on 2.1.312): a stop is a failed tool.result and a status, no permission.ask", () => {
+    assertRecordings("packages/adapters/claude/fixtures/classifier-stop.jsonl");
     const p = createClaudeParser();
     const events = recordingText("packages/adapters/claude/fixtures/classifier-stop.jsonl").split("\n").flatMap((l) => p.feed(l));
     for (const ev of events) AgentEvent.parse(ev);
@@ -414,6 +415,7 @@ describe("spawn plumbing", () => {
   });
 
   test.skipIf(skipRecordings("packages/adapters/claude/fixtures/classifier-ask.jsonl"))("classifier (recorded on 2.1.314): the first two blocks are stops, the third and later ask the person", () => {
+    assertRecordings("packages/adapters/claude/fixtures/classifier-ask.jsonl");
     const p = createClaudeParser();
     const events = recordingText("packages/adapters/claude/fixtures/classifier-ask.jsonl").split("\n").flatMap((l) => p.feed(l));
     for (const ev of events) AgentEvent.parse(ev);

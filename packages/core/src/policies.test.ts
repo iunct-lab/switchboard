@@ -66,6 +66,8 @@ describe("answer policies", () => {
     expect(refused(input(), ctx({ confirmHit: { source: "rules/a.md", pattern: "bun*", mode: "confirm", subject: "bun test" } }))).toContain("rules/a.md");
     expect(refused(input(), ctx({ runnerRefusal: true }))).toContain("ランナー");
     refused(input({ target: "pr:10" }), ctx({ subject: { ...decision, conditions: [{ key: "merge-ask", value: "security,large" }] }, answer: { kind: "choice", choice: "yes" } }));
+    // merge-gate's security groups (security:<group>, PBI #1873) are security too
+    refused(input({ target: "pr:10" }), ctx({ subject: { ...decision, conditions: [{ key: "merge-ask", value: "size,security:lockfile" }] }, answer: { kind: "choice", choice: "yes" } }));
     refused(input({ target: "bun test*" }), ctx({ subject: { ...exec, target: "bun test --token ghp_" + "a".repeat(36) } }));
     refused(input({ scope: "pbi" }), ctx({ subject: null }));
     refused(input({ scope: "pbi" }), ctx({ pbi: null }));

@@ -892,6 +892,25 @@ export function resolveStoredConflict(db: Db, source: BacklogSource, ref: number
   return { operation: op.id };
 }
 
+/**
+ * A `failed` operation of a stored Issue sent again (#2885): `operation` as the held edit names it. 404 = no such
+ * Issue; 409 = no such operation still to send on this Issue (another Issue's, another repository's, or one sent),
+ * or it is not failed. Returns the operation.
+ */
+export function retryStoredOperation(db: Db, source: BacklogSource, ref: number | string, operation: string, now = Date.now()): { operation: string } {
+  const rec = issueRecord(db, source, ref);
+  if (!rec) throw new BacklogEditError(`#${ref} は保存されていません`, 404);
+  const op = db.listPendingBacklogOperations(source).find((o) => o.issue === rec.externalId && o.id === operation);
+  if (!op) throw new BacklogEditError(`#${ref} に送り直せる操作 ${operation} はありません`, 409);
+  try {
+    db.retryBacklogOperation(source, op.id, now);
+  } catch (e) {
+    if (e instanceof BacklogResolveError) throw new BacklogEditError(e.message, e.status);
+    throw e;
+  }
+  return { operation: op.id };
+}
+
 /** What the check before a send, and the read with the history after it, keep and what they cannot (#887 方式 A, #1329 方式 1′): told with every stored Issue. */
 export const SYNC_LIMITS =
   "GitHub に送る編集は、送る直前に GitHub の値を確かめ、編集の元から変わっていれば止めて競合として残します。本文・題・状態・ラベル・Milestone・親・Project の Status は、書いた直後に GitHub の編集履歴も読み、確かめてから書くまでの間にほかの人が書いていれば、その値を添えて競合として残します（版の内容が履歴に残っていれば、上書きした値を選んで戻せます。消されていれば編集者と時刻だけが残ります）。Status 以外の Project フィールド（Priority・Story Points・Phase など）には履歴が無く、本文・コメントは 100 版を超えて押し出された版が残らないので、そこは確かめてから書くまでの間の編集を上書きしうる（気づけない）ことがあります。履歴を読めなかったときは、書いた編集を未確認の競合として残します。同じ GitHub アカウントで GitHub の画面から書いた編集は、ほかの人の編集と区別しません（Switchboard の開発リポジトリの Issue #1329）。GitHub Project の自動化が動かした Status は編集として数えず競合にしません（手元の値を送ります。Issue が閉じたことで動いた Status は GitHub の値のままにします）。";

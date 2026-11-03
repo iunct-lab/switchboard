@@ -108,6 +108,7 @@ install -m 755 "$HERE/sb-stop.sh" /usr/local/bin/sb-stop
 install -m 755 "$HERE/sb-env.sh" /usr/local/bin/sb-env
 install -m 755 "$HERE/archive.sh" /usr/local/bin/sb-archive
 install -m 755 "$HERE/runner-sync.sh" /usr/local/bin/sb-runner-sync
+install -m 755 "$HERE/pre-rebuild.sh" /usr/local/bin/sb-pre-rebuild
 install -m 755 "$HERE/offload.sh" /usr/local/bin/sb-offload
 # the kit's gh first in the host user's interactive shells (#824): a runner started by hand posts through the same check
 sed -e "s|@REPO@|$REPO_DIR|g" -e "s|@HOME@|$SB_HOST_HOME|g" -e "s|@USER@|$SB_HOST_USER|g" "$HERE/sb-gh-guard.sh" > /etc/profile.d/sb-gh-guard.sh
@@ -206,12 +207,15 @@ if [ -f "$SB_HOST_HOME/.switchboard/switchboard.db" ]; then
   done || echo "bootstrap: could not list the workspaces; clone them by hand (the daemon starts anyway)"
 fi
 
-# --- the runners' records (#401): Claude's sessions and memory, Codex's sessions, as sb-runner-sync last saved them ---
+# --- the runners' records (#401): Claude's sessions and memory, Codex's sessions, and the Tasks' artifact copies
+# (~/.switchboard/artifacts), as sb-runner-sync last saved them ---
 # (every hour, before an idle stop, before the rescue page's 作り直す). `sb-runner-sync restore` unpacks the newest set
 # as the host user; files already here (the one-time import above) are kept.
 # Only "nothing saved" (a first machine) skips it; any other failure stops the bootstrap, as the Litestream restore
 # does — otherwise the first sync would put a near-empty base over the good one.
 as_user env SB_HOST_ENV=/etc/switchboard-host.env /usr/local/bin/sb-runner-sync restore || { echo "bootstrap: could not bring back the runners' records" >&2; exit 1; }
+# The work not pushed, and the repositories no workspace row can clone, kept with those records (a failure is logged: the daemon starts anyway)
+as_user env SB_HOST_ENV=/etc/switchboard-host.env /usr/local/bin/sb-pre-rebuild restore-work || echo "bootstrap: could not bring back the work trees (exit $?)" >&2
 
 # --- units ---
 for u in switchboard.service sb-dockerd.service litestream.service sb-archive.service sb-archive.timer sb-runner-sync.service sb-runner-sync.timer; do

@@ -59,16 +59,26 @@ Switchboard の道具では置けず、人が 1 回やるもの。
 
 ## 既存のリポジトリを追加する
 
-GitHub にある**自分のリポジトリ**を、名前だけで Workspace に追加する入口（PBI #2575）。ホストのシェルに入れない利用者のための経路で、パスは打たない。
+GitHub にあるリポジトリを、名前だけで Workspace に追加する入口（PBI #2575）。push できないリポジトリは下の「他者のリポジトリ」になる。ホストのシェルに入れない利用者のための経路で、パスは打たない。
 
 - 入口: 設定の先頭の「Workspace」カードの「GitHub から」。`owner/name` か `https://github.com/owner/name`（末尾の `.git` と `/` は可）を入れて「追加」。API は `POST /api/workspaces` の `repo`（`path` とはどちらか一方）
 - 置き場所: Switchboard のチェックアウトの隣（`<repoRoot の親>/<name>`）。置き場所の設定は無い（新しく作る場合と同じ）
 - 断る入力（400）: `-` で始まる名前、`.` / `..`、github.com 以外の URL、余分な `/`。clone の引数は配列で渡り、シェルを通らない。同じ名前のディレクトリが既にあれば 409（上書きしない）
-- 他者のリポジトリは追加しない: clone の前に `gh api repos/<owner>/<name>` の `permissions.push` を確かめ、読めなければ 404、push できなければ 403（「他者のリポジトリはこの欄では追加しません」）で、clone も登録もしない。工程の Task が他者のリポジトリに Issue・PR を書かないため。他者のリポジトリを自分の側で開発できる形で追加する経路は別の PBI（#2576）
+- clone の前に `gh api repos/<owner>/<name>` の `permissions.push` を確かめる。読めなければ 404 で、clone も登録もしない。push できなければ「他者のリポジトリ」として追加する
 - 進み具合: 要求は 202 ですぐ返り、clone は裏で進む。進行中と失敗（gh の最後の行）は `GET /api/workspaces/clones` に出て、状態が変わるたびに `workspaces.updated` で画面が読み直す。成功すると Workspace の一覧に出る。進み具合は保存しないので、デーモンの再起動で消える
 - 途中で落ちたとき: clone の途中のディレクトリは残る。次の追加は 409 になるので、人が消す（登録を外すときに「ローカルのコピーも消す」を選べば消せる。下の「登録を外す」）
 - 「GitHub と連携しない」の印は「GitHub から」にも効き、その workspace のバックログは Switchboard に置かれる
 - ホストにあるディレクトリを追加する欄（`path`）は今までどおり
+
+### 他者のリポジトリ
+
+push できないリポジトリは、GitHub に何も作らず書かない workspace として追加する（正本は `packages/core/src/workspace-clone.ts` と `packages/core/src/runner-config.ts`）。
+
+- 形: clone の `origin` を `upstream` に改名し（`origin` は無い）、バックログは Switchboard に置く。元の `owner/name` は workspace の `upstream` に持つ。PR〜マージは `origin` の無い workspace のローカルの「変更」
+- 書き込みの止め: clone に `git config ops-kit.noWrite <owner/name>` の印を付ける。キットの道具と gh の前段が、その先への Issue・PR・コメント・ラベル・編集を投稿の前に止める。止まらないもの: 利用者がホストの端末や GitHub の画面で行う操作、同じ OS ユーザーで動くものが git の設定や DB を直接変えること。`git push upstream` は GitHub が断る
+- ランナーの設定の確認: 対象は `RUNNER_CONFIG_PATHS`。設定の「Workspace」の行に一覧と中身が出て、「確認した」を押すまで、その workspace の Task は手動・定期・工程のどの経路でも始まらない。中身が変わると確認し直す（確認は中身の hash で持つ）。確認の対象は clone の根で、サブディレクトリの設定と別の worktree は対象外。確認した後のリポジトリのコード（ビルド・テストのスクリプト）が何をするかは利用者が読んで判断する
+- 元の更新の取り込み: 確認の後に行に出る「元の更新を取り込む」が、`upstream` を fetch して取り込む Task を 1 件始める。手順は Task の指示文だけにあり、デーモンは git を触らない。取り込みで設定が変われば、Task はそこで止めて報告し、次の Task の前に確認し直す
+- 自分の非公開リポジトリへの写しは、この形の後に別に作る
 
 ## 登録を外す（ローカルのコピーも消す）
 

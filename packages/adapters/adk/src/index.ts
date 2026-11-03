@@ -1,20 +1,31 @@
-import type { AgentEvent, Attachment, PermissionDecision, RunnerAdapter, RunnerDetection, RunnerSession, StartOptions } from "@switchboard/protocol";
+import type { AgentEvent, Attachment, PermissionDecision, RunnerAdapter, RunnerDetection, RunnerId, RunnerSession, StartOptions } from "@switchboard/protocol";
 import { collectArtifacts } from "./artifacts.ts";
-import { attachmentParts, confirmationMessage, createDakParserState, createSseParser, endOfStream, mapAdkEvent, userMessage } from "./parse.ts";
+import { attachmentParts, confirmationMessage, createAdkParserState, createSseParser, endOfStream, mapAdkEvent, userMessage } from "./parse.ts";
 
 export * from "./parse.ts";
 
 /**
- * DAK runner (issue #19): Decentralized-Agent-Kit's agent container speaks Google ADK's REST API.
+ * A runner for one ADK server (`adk api_server`, or DAK's agent container): one adapter per configured endpoint.
  * Switchboard talks to `POST /run_sse` over SSE and to the session endpoints; it never runs the agent itself.
- * DAK has no file tools of its own — it reaches the local repository through Switchboard's Workspace MCP
- * (docs/design/dak-adapter.md). No A2A.
+ * Nothing here is any one agent's: its id, name, app and artifact filter come from the endpoint
+ * (docs/design/custom-adapter.md). No A2A.
  */
-export interface DakAdapterOptions {
-  /** Base URL of the ADK server. Default http://127.0.0.1:8000 (DAK's docker compose maps agent:8000 there). */
-  baseUrl?: string;
-  /** ADK app name. Default dak_agent. */
-  app?: string;
+export interface AdkAdapterOptions {
+  /** The runner's id: `RunnerAdapter.id` and `session.start.runner`. */
+  id: RunnerId;
+  /** The name the person knows this runner by, used in what the adapter says. */
+  label: string;
+  /** Base URL of the ADK server. */
+  baseUrl: string;
+  /** ADK app name. */
+  app: string;
+  /**
+   * Name of the environment variable holding a bearer token. Read on every request, so the value is never kept or
+   * logged here; unset or empty sends no `authorization` header.
+   */
+  tokenEnv?: string;
+  /** Artifacts whose name starts with this are the agent's own and are not fetched. Unset: every artifact is fetched. */
+  artifactSkipPrefix?: string;
   /** ADK user id used for sessions. Default "switchboard". */
   user?: string;
   /** Request timeout for the session endpoints. */
@@ -22,38 +33,45 @@ export interface DakAdapterOptions {
   /**
    * Idle timeout for the `/run_sse` stream: how long it may go without a single byte before the turn is treated as
    * dead (Bun's fetch `timeout` resets on every byte). Default 2 h. A healthy turn can be silent for many minutes, so
-   * this must not be short (#121); it stays finite so a DAK side that died without closing the connection (paused
+   * this must not be short (#121); it stays finite so a server that died without closing the connection (paused
    * container, sleeping host, half-open TCP) still ends the turn. Above DAK's own LiteLLM `request_timeout` (6000 s),
-   * so a stalled model call surfaces as DAK's error first.
+   * so a stalled model call surfaces as the server's error first.
    */
   streamIdleTimeoutMs?: number;
 }
 
-const DEFAULTS = { baseUrl: "http://127.0.0.1:8000", app: "dak_agent", user: "switchboard", timeoutMs: 10_000, streamIdleTimeoutMs: 2 * 60 * 60_000 };
+const DEFAULTS = { user: "switchboard", timeoutMs: 10_000, streamIdleTimeoutMs: 2 * 60 * 60_000 };
+type ResolvedOptions = AdkAdapterOptions & typeof DEFAULTS;
 
-export function createDakAdapter(options: DakAdapterOptions = {}): RunnerAdapter {
-  // Undefined-safe merge: a caller passing `{ baseUrl: process.env.X }` with X unset must not override the
-  // default with `undefined` (plain object spread keeps the key, and `${undefined}/list-apps` is a broken URL).
+/** The bearer header of one request, from the environment each time: a rotated token needs no restart, and the value stays out of the options. */
+function authHeaders(o: { tokenEnv?: string }): Record<string, string> {
+  const token = o.tokenEnv ? process.env[o.tokenEnv] : undefined;
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
+
+export function createAdkAdapter(options: AdkAdapterOptions): RunnerAdapter {
+  // Undefined-safe merge: a caller passing `{ timeoutMs: undefined }` must not override the default with `undefined`
+  // (plain object spread keeps the key).
   const defined = Object.fromEntries(Object.entries(options).filter(([, v]) => v !== undefined));
-  const o = { ...DEFAULTS, ...defined };
+  const o = { ...DEFAULTS, ...defined } as ResolvedOptions;
   return {
-    id: "dak",
-    // No permission knob (#58): DAK's agent decides what to confirm (`require_confirmation` / adk_request_confirmation),
+    id: o.id,
+    // No permission knob (#58): the agent decides what to confirm (`require_confirmation` / adk_request_confirmation),
     // and exec.run approvals come from Switchboard's own Workspace MCP policy. Every confirmation still reaches the UI.
     permissionModes: [],
     async detect(): Promise<RunnerDetection> {
       try {
-        const r = await fetch(`${o.baseUrl}/list-apps`, { signal: AbortSignal.timeout(o.timeoutMs) });
+        const r = await fetch(`${o.baseUrl}/list-apps`, { headers: authHeaders(o), signal: AbortSignal.timeout(o.timeoutMs) });
         if (!r.ok) return { available: false, note: `${o.baseUrl}/list-apps → HTTP ${r.status}` };
         const apps = (await r.json()) as unknown;
         if (!Array.isArray(apps) || !apps.includes(o.app)) return { available: false, note: `ADK server at ${o.baseUrl} does not serve app "${o.app}" (has: ${JSON.stringify(apps)})` };
         return { available: true, version: "adk", path: o.baseUrl, note: `app ${o.app} at ${o.baseUrl}` };
       } catch (e) {
-        return { available: false, note: `DAK agent not reachable at ${o.baseUrl} (${String((e as Error).message ?? e)}). Start it with \`docker compose up\` in the DAK repository.` };
+        return { available: false, note: `${o.label} agent not reachable at ${o.baseUrl} (${String((e as Error).message ?? e)})` };
       }
     },
     start(opts, emit) {
-      return new DakSession(o, opts, emit);
+      return new AdkSession(o, opts, emit);
     },
   };
 }
@@ -71,10 +89,10 @@ type QueuedTurn = { kind: "text"; text: string; parts: unknown[] } | { kind: "co
  * SSE stream is mapped to AgentEvent; the stream closing ends the turn. Confirmations (`adk_request_confirmation`)
  * leave the turn open: the stream ends, the ask stays pending, and the answer starts the next stream.
  */
-class DakSession implements RunnerSession {
+class AdkSession implements RunnerSession {
   readonly exited: Promise<number | null>;
   private resolveExit!: (c: number | null) => void;
-  private state = createDakParserState();
+  private state = createAdkParserState();
   private sessionId?: string;
   private controller: AbortController | null = null;
   private queue: QueuedTurn[] = [];
@@ -91,14 +109,14 @@ class DakSession implements RunnerSession {
   private ready: Promise<void>;
 
   constructor(
-    private o: typeof DEFAULTS,
+    private o: ResolvedOptions,
     private opts: StartOptions,
     private emit: (ev: AgentEvent) => void,
   ) {
     this.exited = new Promise((r) => (this.resolveExit = r));
     this.emit({ t: "message.delta", role: "user", text: opts.prompt });
     this.ready = this.open().catch((e) => {
-      this.emit({ t: "error", message: `DAK session failed: ${String((e as Error).message ?? e)}` });
+      this.emit({ t: "error", message: `${this.o.label} session failed: ${String((e as Error).message ?? e)}` });
       this.finish(1);
     });
   }
@@ -108,7 +126,7 @@ class DakSession implements RunnerSession {
     const base = `${baseUrl}/apps/${encodeURIComponent(app)}/users/${encodeURIComponent(user)}/sessions`;
     let id = this.opts.resumeSessionId;
     if (id) {
-      const r = await fetch(`${base}/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(timeoutMs) });
+      const r = await fetch(`${base}/${encodeURIComponent(id)}`, { headers: authHeaders(this.o), signal: AbortSignal.timeout(timeoutMs) });
       if (r.status === 404) {
         // The agent no longer has the session (ADK keeps them in memory; a container restart drops them). A task that
         // could never be continued again is worse than one that continues without its context — say so and go on.
@@ -117,12 +135,12 @@ class DakSession implements RunnerSession {
       } else if (!r.ok) throw new Error(`session ${id} could not be checked (HTTP ${r.status})`);
     }
     if (!id) {
-      const r = await fetch(base, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ state: { switchboard: { cwd: this.opts.cwd, scope: this.opts.scope } } }), signal: AbortSignal.timeout(timeoutMs) });
+      const r = await fetch(base, { method: "POST", headers: { "content-type": "application/json", ...authHeaders(this.o) }, body: JSON.stringify({ state: { switchboard: { cwd: this.opts.cwd, scope: this.opts.scope } } }), signal: AbortSignal.timeout(timeoutMs) });
       if (!r.ok) throw new Error(`could not create an ADK session (HTTP ${r.status})`);
       id = ((await r.json()) as { id: string }).id;
     }
     this.sessionId = id;
-    this.emit({ t: "session.start", runner: "dak", runnerSessionId: id, cwd: this.opts.cwd, model: this.opts.model, runnerVersion: "adk" });
+    this.emit({ t: "session.start", runner: this.o.id, runnerSessionId: id, cwd: this.opts.cwd, model: this.opts.model, runnerVersion: "adk" });
     await this.turn(userMessage(app, user, id, this.opts.prompt, attachmentParts(this.opts.attachments)));
   }
 
@@ -142,7 +160,7 @@ class DakSession implements RunnerSession {
       // nothing, because ADK emits no partial events for function-call arguments. Bun's default (360 s) cut such
       // turns ("The operation timed out."), ADK cancelled the turn and dropped its output, so every retry replayed
       // the same prompt into the same cut (#121). See `streamIdleTimeoutMs`; the user's abort still stops it at once.
-      const r = await fetch(`${this.o.baseUrl}/run_sse`, { method: "POST", headers: { "content-type": "application/json", accept: "text/event-stream" }, body: JSON.stringify(body), signal: this.controller.signal, timeout: this.o.streamIdleTimeoutMs });
+      const r = await fetch(`${this.o.baseUrl}/run_sse`, { method: "POST", headers: { "content-type": "application/json", accept: "text/event-stream", ...authHeaders(this.o) }, body: JSON.stringify(body), signal: this.controller.signal, timeout: this.o.streamIdleTimeoutMs });
       if (!r.ok || !r.body) {
         const text = await r.text().catch(() => "");
         this.emit({ t: "error", message: `/run_sse → HTTP ${r.status} ${text.slice(0, 300)}` });
@@ -210,9 +228,9 @@ class DakSession implements RunnerSession {
     const { baseUrl, app, user, timeoutMs } = this.o;
     const sessionUrl = `${baseUrl}/apps/${encodeURIComponent(app)}/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(this.sessionId ?? "")}`;
     const signal = this.controller?.signal;
-    for (const f of await collectArtifacts(ev, { sessionUrl, attachmentDir: this.opts.attachmentDir, timeoutMs, signal })) {
+    for (const f of await collectArtifacts(ev, { sessionUrl, attachmentDir: this.opts.attachmentDir, timeoutMs, signal, skipPrefix: this.o.artifactSkipPrefix, headers: authHeaders(this.o) })) {
       if ("path" in f) this.emit({ t: "artifact", kind: "file", path: f.path });
-      else if (!signal?.aborted) this.emit({ t: "status", text: `DAK が作ったファイルを取得・保存できませんでした（${f.error}）` }); // an abort is not a failure to report
+      else if (!signal?.aborted) this.emit({ t: "status", text: `${this.o.label} が作ったファイルを取得・保存できませんでした（${f.error}）` }); // an abort is not a failure to report
     }
     for (const out of mapAdkEvent(ev, this.state)) {
       if (out.t === "permission.ask") {
@@ -224,7 +242,7 @@ class DakSession implements RunnerSession {
   }
 
   send(text: string, attachments?: Attachment[]): void {
-    if (this.closed) throw new Error("DAK session is closed; resume the task instead");
+    if (this.closed) throw new Error(`${this.o.label} session is closed; resume the task instead`);
     const parts = attachmentParts(attachments);
     this.emit({ t: "message.delta", role: "user", text });
     if (this.controller || !this.sessionId) {
@@ -267,7 +285,7 @@ class DakSession implements RunnerSession {
   async close(opts: { graceMs?: number } = {}): Promise<void> {
     if (this.closed) return;
     const grace = opts.graceMs ?? 3000;
-    // No lingering subprocess to release (DAK's state lives on the ADK server, not here): a session with no turn in
+    // No lingering subprocess to release (the state lives on the ADK server, not here): a session with no turn in
     // flight closes at once. One that is mid-stream gets the grace period to finish naturally before being cut off.
     if (this.controller && grace > 0) await Promise.race([this.exited, new Promise<void>((r) => setTimeout(r, grace))]);
     if (!this.closed) {

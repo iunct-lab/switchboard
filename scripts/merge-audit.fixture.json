@@ -62,13 +62,13 @@
    "author_association": "MEMBER"
   },
   {
-   "body": "[merge-ask] security 1111111111111111111111111111111111111111",
+   "body": "[merge-ask] security:words 1111111111111111111111111111111111111111",
    "created_at": "2026-10-02T02:00:00Z",
    "issue_url": "https://api.github.com/repos/example/development/issues/907",
    "author_association": "MEMBER"
   },
   {
-   "body": "[merge-answer] yes security ffffffffffffffffffffffffffffffffffffffff",
+   "body": "[merge-answer] yes security:words ffffffffffffffffffffffffffffffffffffffff",
    "created_at": "2026-10-02T02:00:00Z",
    "issue_url": "https://api.github.com/repos/example/development/issues/908",
    "author_association": "CONTRIBUTOR"
@@ -86,31 +86,31 @@
    "author_association": "MEMBER"
   },
   {
-   "body": "[merge-answer] yes security eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+   "body": "[merge-answer] yes security:words eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
    "created_at": "2026-10-02T04:00:00Z",
    "issue_url": "https://api.github.com/repos/example/development/issues/912",
    "author_association": "MEMBER"
   },
   {
-   "body": "[merge-ask] security ffffffffffffffffffffffffffffffffffffffff\n\nPR #913 をマージしてよいか",
+   "body": "[merge-ask] security:words ffffffffffffffffffffffffffffffffffffffff\n\nPR #913 をマージしてよいか",
    "created_at": "2026-10-02T04:00:00Z",
    "issue_url": "https://api.github.com/repos/example/development/issues/913",
    "author_association": "MEMBER"
   },
   {
-   "body": "[merge-ask] security cccccccccccccccccccccccccccccccccccccccc\n\nPR #914 をマージしてよいか",
+   "body": "[merge-ask] security:words cccccccccccccccccccccccccccccccccccccccc\n\nPR #914 をマージしてよいか",
    "created_at": "2026-10-02T01:00:00Z",
    "issue_url": "https://api.github.com/repos/example/development/issues/914",
    "author_association": "MEMBER"
   },
   {
-   "body": "[merge-answer] yes security cccccccccccccccccccccccccccccccccccccccc",
+   "body": "[merge-answer] yes security:words cccccccccccccccccccccccccccccccccccccccc",
    "created_at": "2026-10-02T03:00:00Z",
    "issue_url": "https://api.github.com/repos/example/development/issues/914",
    "author_association": "MEMBER"
   },
   {
-   "body": "[merge-answer] yes security dddddddddddddddddddddddddddddddddddddddd",
+   "body": "[merge-answer] yes security:words dddddddddddddddddddddddddddddddddddddddd",
    "created_at": "2026-10-02T05:00:00Z",
    "issue_url": "https://api.github.com/repos/example/development/issues/914",
    "author_association": "MEMBER"

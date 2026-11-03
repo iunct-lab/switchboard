@@ -215,6 +215,22 @@ function Editor(props: { target: EditTarget; onChanged: () => void; onError: (ms
       })
       .finally(() => setSaving(false));
   };
+  // a refused send, its cause put right (#2885): back in the queue, sent with the next run
+  const retry = (operation: string) => {
+    setSaving(true);
+    return api
+      .editBacklog(item.workspaceId, item.number, { retry: { operation } })
+      .then(async () => {
+        setNote("送り直します");
+        await read();
+        props.onChanged();
+      })
+      .catch(async (e) => {
+        setNote(e.status === 409 ? "状態が変わっています。読み直しました" : `送り直せませんでした: ${String(e.message ?? e)}`);
+        await read();
+      })
+      .finally(() => setSaving(false));
+  };
   if (!detail || !form)
     return readFailed ? (
       <div className="hint">
@@ -239,6 +255,11 @@ function Editor(props: { target: EditTarget; onChanged: () => void; onError: (ms
             {h.field ?? "新規作成"}: {h.status === "conflict" ? "競合" : h.status === "failed" ? "GitHub が受け付けませんでした" : "送信の結果が分かりません"}
             {h.reason ? `（${h.reason}）` : ""}
           </div>
+          {h.status === "failed" && (
+            <button className="ghost" disabled={saving} onClick={() => retry(h.operation)}>
+              送り直す
+            </button>
+          )}
           {h.conflict && (
             <>
               <div className="backlog-sides">

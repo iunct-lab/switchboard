@@ -10,7 +10,7 @@
     "typecheck": "bun check -p tsconfig.json"
   },
   "dependencies": {
-    "zod": "^3.25.0"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "typescript": "^5.9.0"

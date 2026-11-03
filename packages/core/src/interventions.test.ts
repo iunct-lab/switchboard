@@ -1,4 +1,4 @@
-import { recordingText, skipRecordings } from "../../../scripts/recordings.ts";
+import { assertRecordings, recordingText, skipRecordings } from "../../../scripts/recordings.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -94,6 +94,7 @@ describe("collect", () => {
 
 describe("classifier", () => {
   test.skipIf(skipRecordings("packages/adapters/claude/fixtures/classifier-stop.jsonl"))("classifier (recorded on 2.1.312): a stop nobody was asked about is no intervention", () => {
+    assertRecordings("packages/adapters/claude/fixtures/classifier-stop.jsonl");
     const ws = workspace([issue(3, ["type:pbi"])]);
     const t = task(ws.id, { title: "#3 x" });
     const p = createClaudeParser();

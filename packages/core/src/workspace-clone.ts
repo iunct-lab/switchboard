@@ -62,8 +62,8 @@ export function unusableWorkspaces(db: Db, originOf = gitOrigin): Array<{ worksp
 }
 
 /** Registers a directory as a workspace. `switchboard` keeps its backlog here only (#2265): the source is set now and stored as an empty import. */
-export function registerWorkspace(db: Db, input: { path: string; name: string; backlog: "github" | "switchboard"; had?: Workspace }): Workspace {
-  let ws = db.upsertWorkspace({ path: input.path, name: input.name, kind: "repo" });
+export function registerWorkspace(db: Db, input: { path: string; name: string; backlog: "github" | "switchboard"; had?: Workspace; upstream?: string }): Workspace {
+  let ws = db.upsertWorkspace({ path: input.path, name: input.name, kind: "repo", ...(input.upstream ? { upstream: input.upstream } : {}) });
   if (input.backlog === "switchboard" && !input.had) {
     const source = localBacklogSource(ws.id);
     db.setWorkspaceBacklogSource(ws.id, source);
@@ -87,6 +87,20 @@ export interface WorkspaceClone {
   startedAt: number;
 }
 
+/**
+ * Makes a fresh clone of someone else's repository write nothing back (#2576): its `origin` becomes `upstream`, the only
+ * remote (`gh repo clone` of a fork has already added the parent as `upstream`), and the clone is marked for the kit's
+ * refusal (`noWriteRefusal`). Throws what git said.
+ */
+function detachFromOrigin(path: string, repo: string): void {
+  const git = (...args: string[]) => spawnSync("git", ["-C", path, ...args], { encoding: "utf8" });
+  git("remote", "remove", "upstream");
+  for (const args of [["remote", "rename", "origin", "upstream"], ["config", "--add", "ops-kit.noWrite", repo]]) {
+    const r = git(...args);
+    if (r.status !== 0) throw new Error(r.stderr.trim().split("\n").pop() || `git ${args[0]} が失敗しました`);
+  }
+}
+
 /** Clones of GitHub repositories next to the checkout, in memory only: a restart forgets them (#2575). */
 export class WorkspaceClones {
   private readonly rows = new Map<string, WorkspaceClone>();
@@ -97,7 +111,11 @@ export class WorkspaceClones {
     return [...this.rows.values()];
   }
 
-  /** Checks the target and that the caller can push, then clones in the background. Throws CloneError for what the request got wrong. */
+  /**
+   * Checks the target, then clones in the background; a repository the caller cannot push to is added as someone else's
+   * (#2576): its backlog is here, and it writes nothing back to `full_name`, the name it has now (a renamed one answers
+   * under the old name too). A path that a workspace keeps stays as it is. Throws CloneError for what the request got wrong.
+   */
   async start(repo: { owner: string; name: string }, opts: { backlog?: "github" | "switchboard" }): Promise<WorkspaceClone> {
     const full = `${repo.owner}/${repo.name}`;
     const cwd = dirname(this.repoRoot);
@@ -110,23 +128,27 @@ export class WorkspaceClones {
     const row: WorkspaceClone = { repo: full, path, state: "cloning", startedAt: Date.now() };
     this.rows.set(path, row);
     this.onChange();
-    const perm = await this.gh(["api", `repos/${full}`, "--jq", ".permissions.push"], cwd);
-    if (perm.code !== 0 || perm.stdout.trim() !== "true") {
+    const perm = await this.gh(["api", `repos/${full}`, "--jq", '"\\(.permissions.push) \\(.full_name)"'], cwd);
+    const [push, canonical] = perm.stdout.trim().split(" ");
+    const foreign = perm.code === 0 && push !== "true";
+    // a path keeps what it was: someone else's repository does not take over a workspace that syncs with GitHub, nor your own a foreign one
+    if (perm.code !== 0 || (foreign ? had && had.backlog !== "switchboard" : had?.upstream)) {
       this.rows.delete(path);
       this.onChange();
       if (perm.code !== 0) throw new CloneError(`見つからないか読めません: ${perm.stderr.trim().split("\n").pop() ?? ""}`, 404);
-      throw new CloneError("他者のリポジトリはこの欄では追加しません（#2576）", 403);
+      throw new CloneError(foreign ? `この workspace のバックログは ${had!.backlog} に置いています。他者のリポジトリは ${path} に追加できません` : `${path} の workspace は他者のリポジトリ ${had!.upstream} です。自分のリポジトリは追加できません`, 409);
     }
     const started = { ...row };
-    void this.run(row, repo, cwd, opts);
+    void this.run(row, repo, cwd, opts, foreign ? (canonical ?? full) : null);
     return started;
   }
 
-  private async run(row: WorkspaceClone, repo: { name: string }, cwd: string, opts: { backlog?: "github" | "switchboard" }): Promise<void> {
+  private async run(row: WorkspaceClone, repo: { name: string }, cwd: string, opts: { backlog?: "github" | "switchboard" }, upstream: string | null): Promise<void> {
     try {
       const r = await this.gh(["repo", "clone", row.repo, row.path], cwd);
       if (r.code !== 0) throw new Error(r.stderr.trim().split("\n").pop() || `gh repo clone が ${r.code} で終わりました`);
-      registerWorkspace(this.db, { path: row.path, name: repo.name, backlog: opts.backlog ?? "github", had: this.db.listWorkspaces().find((w) => w.path === row.path) });
+      if (upstream) detachFromOrigin(row.path, upstream);
+      registerWorkspace(this.db, { path: row.path, name: repo.name, backlog: upstream ? "switchboard" : (opts.backlog ?? "github"), had: this.db.listWorkspaces().find((w) => w.path === row.path), ...(upstream ? { upstream } : {}) });
       this.rows.delete(row.path);
     } catch (e) {
       row.state = "failed";

@@ -158,13 +158,15 @@ PROMPT
 
 モデルは利用者の指定（2026-10-17、公開の整理の要望: Claude Code は Fable 5.1、Codex は Astra 6）。CLI の名前は `claude-fable-5-1` と `gpt-6-astra`。変えるのは利用者の指定でこのファイルを直す（設定は足さない）。
 
-2 つは別のディレクトリで同時に回し、片方の出力をもう片方の材料に入れない。ランナーごとの違いはこの 2 行だけ（材料と指示は同じ `_gate/`）:
+2 つは別のディレクトリで回し、重い処理の枠が許せば同時に走る（`ops-kit heavy`。マシンの上限で、枠が 1 なら順に。キットの README の「重い処理の枠」）。このブロックは 1 回の Bash の呼び出しで、バックグラウンド（`run_in_background`、timeout は上限いっぱい）で回す（枠が 1 なら 2 本が順に走り、`wait` まで長くかかる。途中で切られると `$O` の出力が戻らない）。片方の出力をもう片方の材料に入れないため、出力は 2 本とも終わるまで `$W` の外（`$O`）に置く（順に走ると、先に終えた方の出力が後の方の走る間に残る。Codex の sandbox は `$W` を読める）。ランナーごとの違いはこの 2 行だけ（材料と指示は同じ `_gate/`）:
 
 ```bash
 rm -f "$W/claude.jsonl" "$W/claude.md" "$W/claude.log" "$W/codex.md" "$W/codex.log" "$W"/*.post.md   # 前の回の出力を残さない（古い報告が形の確認を通る。Codex の sandbox は $W を読めるので、相手の報告も残さない）
-( cd "$W/claude" && claude -p --model claude-fable-5-1 --permission-mode plan --output-format stream-json --verbose "$(cat _gate/prompt.md)" ) > "$W/claude.jsonl" 2> "$W/claude.log" & P1=$!
-( cd "$W/codex" && codex exec -m gpt-6-astra --sandbox read-only --skip-git-repo-check --ephemeral -o "$W/codex.md" - < _gate/prompt.md ) > "$W/codex.log" 2>&1 & P2=$!
+O=$(mktemp -d /tmp/<リポジトリ名>.gate-out.XXXXXX)   # 2 本が終わるまでの出力の置き場（$W の外）。変数をまたがないよう名前は文字で書く
+( cd "$W/claude" && ops-kit heavy --name "gate claude" -- claude -p --model claude-fable-5-1 --permission-mode plan --output-format stream-json --verbose "$(cat _gate/prompt.md)" ) > "$O/claude.jsonl" 2> "$O/claude.log" & P1=$!
+( cd "$W/codex" && ops-kit heavy --name "gate codex" -- codex exec -m gpt-6-astra --sandbox read-only --skip-git-repo-check --ephemeral -o "$O/codex.md" - < _gate/prompt.md ) > "$O/codex.log" 2>&1 & P2=$!
 wait $P1; C1=$?; wait $P2; C2=$?; echo "claude exit=$C1 codex exit=$C2"   # 0 でないランナーの出力は使わない（下の利用上限・やり直し）
+mv "$O"/* "$W"/ && rmdir "$O"
 jq -r 'select(.type=="result") | .result' "$W/claude.jsonl" > "$W/claude.md"
 jq -r 'select(.type=="assistant" and .parent_tool_use_id==null) | .message.model' "$W/claude.jsonl" | sort -u   # Claude Code が実行したモデル（本文を書いたターンの model。サブエージェント（parent_tool_use_id あり）は別のモデルで動くので除く。指定の 1 つだけであること）
 grep -m1 -E '^model: ' "$W/codex.log"              # Codex が実行したモデル（ログの冒頭の model: の行）
@@ -175,8 +177,8 @@ grep -m1 -E '^model: ' "$W/codex.log"              # Codex が実行したモデ
 - CLI が名前を受け付けない（`-m` / `--model` がエラー）、または実行したモデルが指定と違うときは、**そのランナーの報告を使わずに止め**、公開の PBI に `## 判断待ち`（`issue-workflow` の「判断待ちの出し方」。ラベル `needs-decision`。選択肢は「そのランナーで選べる別のモデルの名前」と「待つ」、推奨は「待つ」）
 - 利用上限で止まったら（出力に上限の文、終了コードが 0 でない）、もう片方で代替せず止まる（停止の報告 `usage-limit`。枠が戻ってから同じ材料で回す）。もう片方の結果は捨てず `$W` に置いたまま
 - `### Findings` か `verdict:` が無い出力は、ログ（`claude.log` / `codex.log`）を読んで一度だけやり直す（sandbox で止まった、形式を守らなかった）。それでも無ければ止めて報告する
-- **Claude Code の `-p` はバックグラウンドのサブエージェントの戻りを待たずに終わることがある**（初回のリポジトリで 6 回のうち 2 回）。`claude.md`（最後の `result`）が `verdict:` の行で終わっているかを見る。途中で終わっていたら、やり直す前に同じセッションを再開して前景で続けさせる: `S=$(jq -r 'select(.type=="result") | .session_id' "$W/claude.jsonl")`、`( cd "$W/claude" && claude -p --resume "$S" --model claude-fable-5-1 --permission-mode plan --output-format stream-json --verbose "Finish the audits that did not return, in the foreground (no background agents), then output the full report in the format of the original instructions." ) > "$W/claude.jsonl"`。終わったら上の `jq` の 2 行（`claude.md` の作り直しと実行したモデル）と終了コード・形の確認をやり直してから転記する（前の `claude.md` は途中までの報告のまま）。報告の `note:` の行に再開したことを書く
-- **ホストのメモリが小さいとき**（4 GB 程度）は 2 ランナーを同時でなく順に回してよい（同時に回すとメモリ不足でサービスごと止まった）。順に回すときは、後の方が走っている間、先に終えた方の出力（`$W/<runner>.*`）を `$W` の外の `mktemp -d` に移しておく（Codex の sandbox は `$W` を読める）。後の方が終わってから戻す
+- **Claude Code の `-p` はバックグラウンドのサブエージェントの戻りを待たずに終わることがある**（初回のリポジトリで 6 回のうち 2 回）。`claude.md`（最後の `result`）が `verdict:` の行で終わっているかを見る。途中で終わっていたら、やり直す前に同じセッションを再開して前景で続けさせる: `S=$(jq -r 'select(.type=="result") | .session_id' "$W/claude.jsonl")`、`( cd "$W/claude" && ops-kit heavy --name "gate claude" -- claude -p --resume "$S" --model claude-fable-5-1 --permission-mode plan --output-format stream-json --verbose "Finish the audits that did not return, in the foreground (no background agents), then output the full report in the format of the original instructions." ) > "$W/claude.jsonl"`。終わったら上の `jq` の 2 行（`claude.md` の作り直しと実行したモデル）と終了コード・形の確認をやり直してから転記する（前の `claude.md` は途中までの報告のまま）。報告の `note:` の行に再開したことを書く
+- **ホストのメモリが小さいとき**（4 GB 程度）は 2 ランナーを同時に回さない（同時に回すとメモリ不足でサービスごと止まった）。マシンの枠を 1（既定）にしておけば `ops-kit heavy` が順に回す
 
 ## 報告と振り分け
 

@@ -1,6 +1,6 @@
 # Actions が始まらないときの local-ci 相当検証
 
-通常は `bun scripts/local-ci.ts <PR>` を実行する。Actions がステップ0件で失敗した場合に、CI の全工程をローカルで実行する入口である。マージ判定の手順と印は [docs/merge-gate.md](../merge-gate.md)、性能検査は [perf.md](perf.md) を参照する。
+通常は `bun scripts/local-ci.ts <PR>` を実行する（`--all` runs every test）。Actions がステップ0件で失敗した場合に、CI の全工程をローカルで実行する入口である。マージ判定の手順と印は [docs/merge-gate.md](../merge-gate.md)、性能検査は [perf.md](perf.md) を参照する。
 
 別のリポジトリの PR は `bun <Switchboard の clone>/scripts/local-ci.ts <PR> --repo <owner/name>` を、そのリポジトリの作業ツリーから実行する（#1203）。head と base の読み取り・取得・worktree・結果の投稿はすべてそのリポジトリ（実行した作業ツリーの root の clone と、その PR）に対して行い、手順はその clone の `.github/workflows/ci.yml` の `run:` から読む（そのリポジトリに `scripts/ci.ts` は無いので、`run:` がそのまま手順。下の「手順」）。`--repo` が `owner/name` の形でない、実行した場所が git の作業ツリーでない、作業ツリーの `origin` が `--repo` と違うときは、何も投稿せず理由を出して exit 2。`--repo` を付けなければ、スクリプトのある clone とその origin のリポジトリを使う（`GH_REPO` は見ない。origin が無い・GitHub の owner/name として読めなければ何も投稿せず exit 2）。印は `bun scripts/merge-gate.ts <PR> --repo <owner/name>` が数える。
 
@@ -9,13 +9,28 @@
 - main の作業ツリーでは実行しない。対象リポジトリの専用 worktree から実行する。
 - 検証対象は、PR の最新の head を base の枝の最新の先端にマージした内容である（#913）。`gh pr view` の `headRefOid` と `baseRefName` を読み、`refs/heads/<base>` と `refs/pull/<PR>/head`（GitHub がすべての PR に置く。fork の PR も）を fetch し、後者が `headRefOid` と一致することを確かめる（push の直後で違えば、何も実行せず少し待ってやり直す）。worktree を base で作り、その中で head を `--no-ff` でマージする。GitHub の `pull/<PR>/merge` は使わない（無い・古いときも検証できる）。マージの名前と署名は local-ci が固定する（`-c user.name/user.email`、`commit.gpgSign=false`。clone の設定に左右されない）。マージが衝突した（未解決のパスが残った）ら手順は実行せず、失敗の結果として通知する。衝突以外のマージの失敗はエラーで、何も投稿しない。
 - `localCi` は使い捨て worktree を `~/.cache` に、TMPDIR を OS の一時ディレクトリ（`tmpdir()`。このホストでは RAM の `/tmp`）に作り、PATH / HOME / CI=true / TMPDIR だけの環境で実行する。デーモンの SWITCHBOARD_*、実認証の値、実 Cloud セッションを持ち込まない。例外は呼び出し元が明示した録画の置き場所 `SWITCHBOARD_FIXTURES` で、その値だけを引き継ぎ、不足していれば再生のテストが落ちる。未指定なら渡さず、録画が無いテストは skip として数える。Actions・公開 clone / fork でも同じで、録画を必須にはしない。既存の録画は配布しないため、再生を検証するときは [.claude/skills/runner-adapter-recording/SKILL.md](../../.claude/skills/runner-adapter-recording/SKILL.md) に従って自分のランナーで Git の外に録画し、`SWITCHBOARD_FIXTURES=<録画のディレクトリ> bun scripts/local-ci.ts <PR>` と実行する。
+- 1 回の実行全体（head と base の読み取りから、性能の上限を超えたときの base の計測、worktree の片づけまで）で、重い処理の枠（`ops-kit heavy` と同じ `withHeavySlot`。上限と空きメモリの下限はマシンの設定 `~/.config/ops-kit/heavy.json`。`ops-kit --help` の heavy）を 1 つ取ってから始める。枠が空くまで待つあいだは、待っている理由の行を出す。`--repo` で別のリポジトリの PR を回すときも同じマシンの枠を取る。
 - Chrome と Noto フォントを使用する。性能測定は5回で、他の性能測定と並行しない。
-- CI の全工程を実行する。パス検査、frozen install、ライセンス、型検査、全体テスト、Web build、main fetch、フォント、性能測定、性能判定を省略しない。工程の一覧は固定で複製せず、worktree の中のものを読む（下の「手順」）。
-- pass の印は、スタックの行の次（スタックの行が無ければ 2 行目）に型検査と bun test の所要秒を `<!-- local-ci-seconds {"typecheck":51.2,"test":43} -->` の 1 行で持つ（#1886。`LOCAL_CI_SECONDS` / `markerSeconds`。GitHub の表示には出ない。秒は手順の表と同じ計測で、`run` が `bun run typecheck` / `bun test` の手順のもの。`scripts/ci.ts` を持つ checkout（このリポジトリ）でどちらかの手順が無ければエラーで止まり、`scripts/ci.ts` の無いリポジトリ（`--repo`）では行を付けない）。比べるのは perf-ratchet（[perf.md](perf.md)）。
+- CI の全工程を実行する。パス検査、frozen install、ライセンス、型検査、Web build、main fetch、フォント、性能測定、性能判定、テストを省略しない。By default `bun test` runs the affected tests only (see "Narrowing `bun test`" below).工程の一覧は固定で複製せず、worktree の中のものを読む（下の「手順」）。
+- pass の印は、2 行目に型検査と bun test の所要秒を `<!-- local-ci-seconds {"typecheck":51.2,"test":43} -->` の 1 行で持つ（#1886。`LOCAL_CI_SECONDS` / `markerSeconds`。GitHub の表示には出ない。秒は手順の表と同じ計測で、名前が `bun run typecheck` / `bun test` の手順のもの（絞った `bun test` は `run` が変わるので名前で引く）。`scripts/ci.ts` を持つ checkout（このリポジトリ）でどちらかの手順が無ければエラーで止まり、`scripts/ci.ts` の無いリポジトリ（`--repo`）では行を付けない）。比べるのは perf-ratchet（[perf.md](perf.md)）。
+- A result says what ran in its `テスト:` line and carries a machine line, `<!-- local-ci-tests {"ran":<number or null>,"total":<number>} -->` (`LOCAL_CI_TESTS` / `testsOf`). `ran` other than null means a narrowed run: do not read that run's `local-ci-seconds` `test` as the seconds of all tests, and it is not compared with the `test` ceiling below. A `--all` run has no total, so it has no such line.
+- After every step passed, those two seconds are compared with the `local.durations` ceilings of the worktree's `scripts/perf-budget.json` (`judgeDurations` in `scripts/perf-ratchet.ts`, see [perf.md](perf.md)). A value over its ceiling fails the run: the comment names the check as a step of its own, with its `over:` line, and there is no pass mark. A checkout without that file or those ceilings is not compared.
+
+## Reusing a pass
+
+Before anything else, a run reads this PR's own comments. When the newest result there is a pass of the current head and `localCiOf`, with this PR as its own top, counts it (the pass is of this head, so its commits are the PR's as they are), the run prints `既に pass（<URL>）` and exits 0: no worktree, no fetch, no post. Anything else runs as usual. This check does not look at PRs above this one; which result merge-gate takes in a stack is in [docs/merge-gate.md](../merge-gate.md). `--force` runs regardless, and so does `--all`, because a narrowed pass is not what it asks for. An unreadable comment list means a normal run, and GitLab MRs always run.
+
+## Narrowing `bun test`
+
+- What changed since HEAD's fork from the default branch (a rename counts as both paths) goes to the worktree's `scripts/test-select.ts`, and only the files it selects run, as `bun test ./<path>`. A stacked PR's base is the branch below it, so a diff from that base would leave out the PRs below; from the fork it is the sum of every PR in the stack.
+- A change it cannot judge, a selection that does not run or cannot be read, and `--all` run every test. Only local-ci narrows: the tag CI runs every test.
+- Why a selection failed goes to local-ci's log, not to the result comment: the text holds host paths.
 
 ## 手順（Actions と同じもの、#912）
 
-手順の正本は `scripts/ci.ts` の `ciSteps`（名前と `bash -e -c` で走らせるスクリプトの列）。Actions の `ci.yml` は checkout と setup-bun の後に `run: bun scripts/ci.ts` を 1 つだけ持ち、`scripts/ci.ts` が `ciSteps` を順に走らせて、最初に落ちた手順の exit で終わる（環境は runner のまま。`GITHUB_ACTIONS` が perf-ratchet の上限 `github` を選ぶ）。local-ci は worktree の `ci.yml` の `run:` を読み（`workflowSteps`）、`bun scripts/ci.ts` の手順をその worktree の `scripts/ci.ts` の `ciSteps` に展開して（`checkoutSteps`。PR のコードなので local-ci のプロセスには import せず、worktree で `bun scripts/ci.ts --list` を手順と同じ環境で走らせて JSON で受け取る）1 つずつ上の環境で走らせる。手順を回して最初の失敗で止める部分（`runCi`）と exit（`ciExit`: どれかが落ちたら 1、全部通れば 0。落ちた手順自身の code は `✗ <手順>: exit <code>` の行。tsc の 2 が local-ci の「何も実行しなかった」の 2 と紛れないよう、手順の code をそのまま exit にしない）は両方で同じ。PR が手順を変えれば、その PR の手順が回る。`scripts/ci.ts` の無いリポジトリ（`--repo`）は `ci.yml` の `run:` がそのまま手順。
+手順の正本は `scripts/ci.ts` の `ciSteps`（名前と `bash -e -c` で走らせるスクリプトの列）。Actions の `ci.yml` は checkout と setup-bun の後に `run: bun scripts/ci.ts` を 1 つだけ持ち、`scripts/ci.ts` が `ciSteps` を順に走らせて、最初に落ちた手順（`keepGoing` の手順を除く。下）で止まる（環境は runner のまま。`GITHUB_ACTIONS` が perf-ratchet の上限 `github` を選ぶ）。local-ci は worktree の `ci.yml` の `run:` を読み（`workflowSteps`）、`bun scripts/ci.ts` の手順をその worktree の `scripts/ci.ts` の `ciSteps` に展開して（`checkoutSteps`。PR のコードなので local-ci のプロセスには import せず、worktree で `bun scripts/ci.ts --list` を手順と同じ環境で走らせて JSON で受け取る）1 つずつ上の環境で走らせる。手順を回して最初の失敗（`keepGoing` の手順を除く）で止める部分（`runCi`）と exit（`ciExit`: どれかが落ちたら 1、全部通れば 0。落ちた手順自身の code は `✗ <手順>: exit <code>` の行。tsc の 2 が local-ci の「何も実行しなかった」の 2 と紛れないよう、手順の code をそのまま exit にしない）は両方で同じ。PR が手順を変えれば、その PR の手順が回る。`scripts/ci.ts` の無いリポジトリ（`--repo`）は `ci.yml` の `run:` がそのまま手順。
+
+The perf steps (`perf-bench.ts` and `perf-ratchet.ts check`) run before `bun test`, so a perf result does not wait for the whole test run (about five minutes). They carry `keepGoing: true` in `ciSteps`: when one of them fails, `runCi` does not stop there, `bun test` still runs, and the run fails at the end (`ciExit`). One run therefore reports both the perf result and the test result, and a fix for one does not reveal a red in the other on the next run. Every other step still stops the run at its first failure. Actions prints one `✗ <step>: exit <code>` line per failed step. The steps stay one list for Actions and local-ci, and they never run in parallel: perf-bench is not measured next to another load. A repository without `scripts/ci.ts` (`--repo`) has no `keepGoing` and stops at the first failing `run:` as before.
 
 ## 結果の通知（#913）
 
@@ -23,21 +38,23 @@ Actions の run があってもなくても、結果は PR に forge の `verifi
 
 | 結果 | 1 行目 | 本文 |
 |---|---|---|
-| 全手順が合格 | `[local-ci] pass <head sha> base=<base sha>` | 2 行目にスタックの行 `stack #<n>=<patch-id> …`（スタックの一番下からこの PR まで、各 PR の `gh pr diff \| git patch-id --verbatim`。今の head がテストした head に入っていない下の PR（修正を上へ rebase していない）は、それより下と一緒に外す。`LOCAL_CI_STACK` / `stackOf`。GitHub の PR だけ。読めなければ行を付けずに投稿する）、手順の表 |
-| 手順が落ちた | `[local-ci] fail <head sha> base=<base sha>` | 落ちた手順と exit、その全文から拾った `(fail)` / `over:` / `無進捗で打ち切り` の行（最大 20 行）、手順の表。全文は実行したホストの記録（パスは書かない） |
+| 全手順が合格 | `[local-ci] pass <head sha> base=<base sha>` | 手順の表。スタックのどの PR をこの pass が含むかは書かない（merge-gate が git で判定する） |
+| 手順が落ちた | `[local-ci] fail <head sha> base=<base sha>` | Every failed step (the perf check and `bun test` can both fail in one run), each with its exit and the lines picked from its whole output: `(fail)` / `over:` / `raised:` / `improved:` / `grew:` / `無進捗で打ち切り` (up to 20 lines per step), then the table of steps. 全文は実行したホストの記録（パスは書かない） |
 | head が base にマージできない | `[local-ci] fail <head sha> base=<base sha>` | 衝突。手順は実行していない |
 
-投稿の直前に head と base を同じ方法で読み直し（`notify`）、どちらかが実行中に変わっていたら何も投稿せず exit 1（テストしていない head や base の結果を書かない。回し直す）。投稿した後に base が進んだこと、下の PR のマージ後の自動 rebase で head が変わったことでは回し直さない（差分が同じなら 2 行目の patch-id で数えられる。いつ回し、merge-gate がどう数えるかは [docs/merge-gate.md](../merge-gate.md) の「ローカル CI を回す時と数え方」）。読み直せなかったときも投稿しない。投稿する文はキットの認証の値の検査（`runForgeOperation`）を通る。投稿が認証・権限で失敗したら、理由を出して exit 1 で止まる（別の経路で投稿しない。Task なら会話で確認する）。結果の印の読み方は `LOCAL_CI_RESULT`（pass か fail、head、続けて `base=`。マージ判定での扱いは [docs/merge-gate.md](../merge-gate.md)）。
+When the perf check ran and printed a `bundle:` line, pass or fail, the comment has a part `bundle（gzip、マージ後と main の先端の差）:` after the lines of what was tested: the check's `bundle:` line (js / css, the merged size, main's tip, the difference in B and %) and its `grew:` lines when one of them grew 1% or more. A conflict has none (nothing ran).
+
+投稿の直前に head と base を同じ方法で読み直し（`notify`）、どちらかが実行中に変わっていたら何も投稿せず exit 1（テストしていない head や base の結果を書かない。回し直す）。投稿した後に base が進んだこと、下の PR のマージ後の自動 rebase で head が変わったことでは回し直さない（コミットごとの差分が同じなら、merge-gate が `git cherry` で pass の head に入っていると数える。印は 1 行目だけで、ほかのリポジトリの local-ci の写しに書式を求めないため（2026-10-29 の決定。前は 2 行目に各 PR の patch-id を書いていた）。いつ回し、merge-gate がどう数えるかは [docs/merge-gate.md](../merge-gate.md) の「ローカル CI を回す時と数え方」）。読み直せなかったときも投稿しない。投稿する文はキットの認証の値の検査（`runForgeOperation`）を通る。投稿が認証・権限で失敗したら、理由を出して exit 1 で止まる（別の経路で投稿しない。Task なら会話で確認する）。結果の印の読み方は `LOCAL_CI_RESULT`（pass か fail、head、続けて `base=`。マージ判定での扱いは [docs/merge-gate.md](../merge-gate.md)）。
 
 ### タグの CI
 
-マージ後の main に付いたタグの CI（`bun scripts/tag-ci.ts [--repo <owner/name>]`）は、この文書の手順を同じ環境で回す（worktree で手順を回して失敗の全文を `~/.cache` に残す部分 `runCheckout` を `localCi` と共有する。対象は PR のマージではなく、タグのコミットそのもの）。印は PR の `[local-ci]` ではなく、そのタグの GitHub Release の本文の `[tag-ci] pass|fail <sha>`。最新のタグから回し、落ちたら遡る規則と読み方は [releases-and-rescue.md](releases-and-rescue.md) の「Tag CI」。
+マージ後の main に付いたタグの CI（`bun scripts/tag-ci.ts [--repo <owner/name>]`）は、この文書の手順を同じ環境で回す（worktree で手順を回して失敗の全文を `~/.cache` に残す部分 `runCheckout` を `localCi` と共有する。対象は PR のマージではなく、タグのコミットそのもの）。印は PR の `[local-ci]` ではなく、そのタグの GitHub Release の本文の `[tag-ci] pass|fail <sha>`。`SWITCHBOARD_FIXTURES` を付けて録画が足りないと、タグの CI は手順を回さず印も書かずに exit 2 で止まる（ホストの不足で、タグの結果ではない）。最新のタグから回し、落ちたら遡る規則と読み方は [releases-and-rescue.md](releases-and-rescue.md) の「Tag CI」。
 
 ## 全文と測定値を残す実行手順
 
 手順は `ops-kit/src/idle-run.ts` の `runIdle` で回す。15 分（`scripts/ci.ts` の `STEP_IDLE_SECONDS`）出力が無い手順はプロセスグループごと切り、exit 124 と理由の行 `無進捗で打ち切り: 900 秒出力がなかった` で落ちた手順として扱う。総時間の上限は無い。手順が背景で起動したプロセスはその手順の終わりに消える（Actions と違い、次の手順まで残らない）。local-ci 自身がシグナルで止められたら手順の失敗にせず、何も投稿しないで終わる。
 
-落ちた工程は `local-ci.ts` が全文を `~/.cache/switchboard.local-ci-<owner>_<name>-<PR>-log.*` に残し、`(fail)`・`over:`・`無進捗で打ち切り` の行、最後の 30 行・そのパスを出す（#1232。通った工程は残さない。同じ PR の前の失敗のディレクトリは次の失敗で消え、PR ごとに最新 1 件）。
+落ちた工程は `local-ci.ts` が全文を `~/.cache/switchboard.local-ci-<owner>_<name>-<PR>-log.*` に残し、`(fail)`・`over:`・`raised:`・`improved:`・`grew:`・`無進捗で打ち切り` の行、最後の 30 行・そのパスを出す（#1232。通った工程は残さない。同じ PR の前の失敗のディレクトリは次の失敗で消え、PR ごとに最新 1 件）。When more than one step failed in a run (a perf step and `bun test`), each one's whole output is a file `<n>-<step>.log` in that same directory, `<n>` being the step's place in the run.
 
 性能の工程（`perf-bench.ts` / `perf-ratchet.ts check`）が落ちたときは、同じディレクトリに `perf-result.json`（あれば）と `summary.md` も残し、`summary.md` と同じ文を出す（#1056、#1184）。`summary.md` の形:
 
@@ -48,14 +65,15 @@ head <head sha> / base <base sha>          ← base = 実行を始めたとき�
 超過（over）:                               ← check が出した行をそのまま。種類ごとに、ある種類だけ
 改善による予算更新要求（improved）:
 main より予算引上げ（raised）:
-原因不明（判定の行が無い）:                  ← 3 種類のどれも無いとき（perf-bench の失敗を含む）。出力の最後の 10 行が続く
+1% 以上の増加（grew）:                       ← bundle が main の先端より 1% 以上大きい
+原因不明（判定の行が無い）:                  ← 4 種類のどれも無いとき（perf-bench の失敗を含む）。出力の最後の 10 行が続く
 main（<base7>）との比較:                    ← over があるときだけ（下）
 <key>: main でも超過（PR の変更によらない） | <key>: PR 固有の悪化   ← PR の over のキーごと
 main の計測に失敗（原因不明）                 ← main の install / build / bench が落ちたとき（キーごとの行の代わり）
 main の over:                               ← main の over の行をそのまま
 ```
 
-check が `over` を出したときだけ、base（実行を始めたときの base の枝の先端 = その時点の main）を別の worktree に出し、同じ環境（`TMPDIR` も同じ）で PR の手順の `bun install --frozen-lockfile` と `bun run --cwd apps/web build` から check までの手順（`perfSteps`）を回して比べる（#1191）。記録は同じディレクトリの `perf-result.base.json` と `base-<n>-<手順>.log`。`improved` / `raised` / 原因不明だけなら main は測らない。`over` のときはローカル CI が 10 分ほど伸びる。
+check が `over` を出したときだけ、base（実行を始めたときの base の枝の先端 = その時点の main）を別の worktree に出し、同じ環境（`TMPDIR` も同じ）で PR の手順の `bun install --frozen-lockfile` と `bun run --cwd apps/web build` から check までの手順（`perfSteps`）を回して比べる（#1191）。記録は同じディレクトリの `perf-result.base.json` と `base-<n>-<手順>.log`。`improved` / `raised` / `grew` / 原因不明だけなら main はここでは測らない（`grew` は check が main の先端と比べた結果）。`over` のときはローカル CI が 10 分ほど伸びる。
 
 どの判定でも失敗のままで、PR には合格印の無い失敗の結果を投稿する（下の「結果の通知」）。長い JSON（check の後の `cat perf-result.json`）で判定の行が押し出されることはない。
 
@@ -109,24 +127,13 @@ bun "$CI_EVIDENCE/run.ts" "$PR" "$PWD" "$CI_EVIDENCE"
 
 exit 0 は全工程合格、exit 1 は不合格である（この手順は PR に投稿しない）。失敗した実行に `[local-ci] pass` を付けない。ログを公開する前に読み、認証値・実 Cloud セッション参照・個人情報を含む生の出力を貼らない。
 
-## 性能検査だけが不合格の場合の代替記録
+## 性能検査だけが不合格の場合
 
-同じ失敗の再実行を繰り返さず、記録のディレクトリの `summary.md` と `perf-result.json`（上の「全文と測定値を残す実行手順」）を読む。通常工程が1件でも不合格、性能測定そのものが失敗、結果や対象 SHA が不明なら、相当検証済みにはしない。
+A count the user accepted goes in `exceptions` of `scripts/perf-budget.json`: it holds only while its Issue is open, and adding one is merged by hand ([perf.md](perf.md)). An exception is not the answer to anything else:
 
-`over` のときは `summary.md` の「main との比較」がキーごとに「main でも超過」「PR 固有の悪化」「main の計測に失敗（原因不明）」を言う（local-ci が同じ環境で main を測る。上）。main でも超えるなら main の SHA と外れた指標を既存 Issue に記録する。main が赤であるだけで、PR の新しい悪化を認めることにはならない（「PR 固有の悪化」のキーは個別に調べる）。
-
-上限を上げた PR は、測定値が新上限内でも `raisedAgainst` により意図的に exit 1 になる。利用者の上限調整の許可と、変更項目・実測値・main の上限を記録する。上限を上げただけで CI 合格と記載しない。
-
-利用者が相当検証での代替を指示した場合、PR に次を記録する。
-
-- 対象 head SHA、実行した全工程と成否。
-- 不合格の指標・値・上限、`summary.md` の判定（main でも超過 / PR 固有の悪化 / 原因不明）、既知 Issue。
-- 代替を認めた利用者指示と、その対象範囲。
-- 「local-ci 相当検証済み（性能例外あり）」という事実。通常の `[local-ci] pass` と区別する。
-
-これは自動マージ判定を変更する印ではない。利用者が認めた代替の範囲で手動判断する。セキュリティ等のマージ確認、未解決レビュー、競合、実機確認は別に満たす。相当検証での代替を未確認の実機結果に広げない。
-
-この記録は印ではないので patch-id では数えない。修正・下位 PR のマージで head が変わったら、旧 SHA の検証を新 SHA に付け替えず、新 head の全工程を実行し直す。通信等の再試行はその作業の停止・再試行指示に従い、上記手順に自動再試行ループは設けない。
+- `over`: `summary.md` says per key whether main is over too, the PR made it worse, or main could not be measured. When main is over too, record main's SHA and the count in the existing Issue. main being red does not accept a new regression in the PR: look at each key marked as the PR's own.
+- `raised`: `raisedAgainst` exits 1 on purpose, even when the measured value is within the new ceiling. Record the user's permission, the item, the measured value and main's ceiling, and do not call it a CI pass. The bundle has no ceiling, so it is never `raised`.
+- `grew`: the check found the bundle (js or css, gzip) 1% or more above main's tip, measured in the same run (`perf-ratchet.ts base`). Under 1% the check passes, and only the `bundle:` line shows the growth in the comment. At 1% or more, merging is the user's call ([perf.md](perf.md)); record the user's permission and the `grew:` line, and do not call it a CI pass.
 
 ## 型検査（tsc と bun check）
 

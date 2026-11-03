@@ -4,15 +4,15 @@
 
 ## リポジトリと Project
 
-- リポジトリ: このリポジトリ（`gh repo view --json nameWithOwner -q .nameWithOwner`）。`gh` の書き込み（issue / pr の作成・コメント・編集・マージ・クローズ）には `-R "$(gh repo view --json nameWithOwner -q .nameWithOwner)"` を付ける
-- Project の URL: リポジトリ変数 `SWITCHBOARD_PROJECT_URL`（同名の環境変数を優先）。選択肢（Area / Kind / Priority / Phase）・必須の節・Story Points: root の `ops.config.json`。Milestone は Phase ごと（`Phase N — …`）。自分の Project URL を登録する。Project 自動追加は `ops-kit/template/.github/workflows/project-autoadd.yml` の任意導入。未導入なら `scripts/setup/triage_issue.sh` で登録する（Status は自分で付ける）
-- バックログの道具: `scripts/setup/` の入口（`lint_backlog.sh` / `set_project_field.sh` / `triage_issue.sh` / `bootstrap_project.sh` / `request_issue.sh` / `scan_issues.sh`）。中身は `ops-kit/`（`bun ops-kit/src/cli.ts --help`）。ほかのリポジトリの Project を触るときは `SWITCHBOARD_PROJECT_URL=<URL>` を付ける
+- リポジトリ: このリポジトリ（`gh repo view --json nameWithOwner -q .nameWithOwner`）。`gh` の PR の書き込み（作成・コメント・編集・マージ・クローズ）には `-R "$(gh repo view --json nameWithOwner -q .nameWithOwner)"` を付ける。Issue・コメント・ラベル・Project・Milestone は `ops-kit backlog`（Task の中でも外でも同じ）
+- Project の URL: リポジトリ変数 `SWITCHBOARD_PROJECT_URL`（同名の環境変数を優先）。選択肢（Area / Kind / Priority / Phase）・必須の節・Story Points: root の `ops.config.json`。Milestone は Phase ごと（`Phase N — …`）。自分の Project URL を登録する。新しい Issue は `ops-kit backlog create` で作ると Task の中ではアプリが Project に入れる。フィールドは `ops-kit backlog triage` / `set`（Status は自分で付ける）
+- バックログの道具: `ops-kit backlog`（`--help`）と `ops-kit lint --fresh`。ほかのリポジトリのバックログは、Task の中では `--workspace <id>`、Task の外では `GH_REPO=<owner/name> SWITCHBOARD_PROJECT_URL=<URL>`。`scripts/setup/` の入口はブートストラップと検査（`bootstrap_project.sh` / `request_issue.sh` / `scan_issues.sh`）の用で、中身は `ops-kit/`（`bun ops-kit/src/cli.ts --help`）
 - 公開リポジトリへの同期: `ops-kit public-sync`（共通キットの `bin/ops-kit`。`--dry-run` は送らずに結果だけ出す）。公開先・外すファイル・書き換えるファイルは root の `ops.config.json` の `publicSync`。仕組みはキットの README の「公開リポジトリへの同期」
 - 認証に使える値（ホストの AWS のプロファイル名・SSO のセッション名も）を Issue・PR に書かない（`issue-workflow` の「Issue・PR・コメントに書かない値」）。Switchboard が起動したランナーでは `gh` の前段（`ops-kit/bin/gh`、`docs/design/secret-guard.md`）が投稿の前に止める。既に書かれたものは `bash scripts/setup/scan_issues.sh`（`SWITCHBOARD_ACTIONS` が `on` のリポジトリでは週に 1 回 `.github/workflows/secret-scan.yml` も走る）
 - Story Points の目安: 2 = 文書や局所的な修正、3 = 単一 API の変更、5 = 複数モジュールの変更、8 = API・UI・保存をまたぐ変更。自分の完了した PBI と比べて調整する
 - 設計ルール: README の `## Design rules`（`## License` の手前まで）。ライセンスは Apache-2.0（依存を足すなら `bun pm licenses`）
 - 互換層の前提: 利用者は 1 人、外部クライアントは無い。旧形式を読む層は作らず、データは `packages/core/src/db.ts` の migration で 1 回移す
-- 並列ガード: `bun scripts/parallel-guard.ts`（`claim` / `overlap` / `release`。スキルの `<guard>`）。ほかのリポジトリの PBI では `--repo <owner/name>` と `SWITCHBOARD_PROJECT_URL`
+- 並列ガード: `bun scripts/parallel-guard.ts`（`claim` / `overlap` / `release`。スキルの `<guard>`）。アプリが同期しているリポジトリでは `--repo` を付けなくてよい（付けてもアプリの保存に書く）。Task の外でほかのリポジトリの PBI を扱うときだけ `--repo` で名指しする
 - 言語: 公開に出る文書（README・公開する `docs/design/`・`aws/README.md`・`SECURITY.md`）は英語で、本文に Issue 番号 `#N` を書かない（公開側では開けない。根拠は日付と中身の文で書く）。開発に入る入力（このファイル・スキル・Issue テンプレート・工程のプロンプト）と画面は日本語。共通キットの `ops-kit/public/`（英語）は変えない。言語や体裁を揃える提案は、見た目でない実益の理由があるときだけ、その理由で Issue にする
 - 決まりの置き場所: 利用者の指摘からできた決まりはメモリではなく記載に書く。どのリポジトリでも同じなら共通キットのスキル、このリポジトリだけならこのファイルか `docs/design/`。ランナーのメモリ（Claude の `~/.claude/projects/*/memory/`）にはホスト・アカウント・経緯の事実だけを置く（`issue-workflow` の「記録の義務」の 6）。`AGENTS.md` はこのファイルを指すので、ここに書けば Codex にも届く
 
@@ -25,14 +25,17 @@
 - loopback で待ち受けるデーモンは、localhost に届く人を持ち主として信頼する。同じ OS ユーザーの Task は DB もシェルも触れるので、localhost の 1 つの口に認証を足しても Task は回避できる（#31、`docs/design/workspace-mcp.md` の「Local API token」、#1755 の結果）
 - パスキーのログインはインターネット越しの構成（CloudFront 経由）だけ。ホストの中（loopback）では求めない（`docs/design/cloud-hosting.md` の「3. 構成」のログインの流れ、#748）
 - 頼まれていない OS や環境（Mac・launchd など）の対応・手順・検証を PBI・Task・文書に足さない（この環境 1 つが前提。上の 1 行目）
+- 画面の見た目・操作を変える PBI は `**置き場所**: 床|天井|壁 — 理由` を書く。毎回は触らない値を床（Home など最初の画面）に並べる案は、天井（Settings・畳んだ節）へ置くか、床に置く理由を書く。安全に関わる確認は畳まず、機能は消さない（原則は `docs/design/ui-layers.md`）
 
 ## テスト
 
 ```bash
-bun run typecheck
-env -u SWITCHBOARD_SUPERVISED bun test packages apps ops-kit     # 変数を継承すると selfdev の dry-run テストが落ちる
-env -u SWITCHBOARD_SUPERVISED bun test <file> -t "<name>"
+ops-kit heavy -- bun run typecheck
+ops-kit heavy -- bun scripts/test-changed.ts     # <関係するテスト>。Task の中はこれ（SWITCHBOARD_SUPERVISED はスクリプトが抜く）
+env -u SWITCHBOARD_SUPERVISED bun test <file> -t "<name>"     # 変数を継承すると selfdev の dry-run テストが落ちる
 ```
+
+型検査と `test-changed`（一式に広がることがある）は、マシンの重い処理の枠を取ってから始める（`ops-kit heavy`。上限・置き場・足し方はキットの README の「重い処理の枠」）。1 ファイルの `bun test` は包まない。一式（`ops-kit heavy -- env -u SWITCHBOARD_SUPERVISED bun test`）は Task の中で手では回さない（`bun scripts/test-changed.ts` が判定できない変更は、スクリプトが自分で一式に広げる）。PR の CI は差分の決まった head で 1 回回り（Actions は全テスト、`bun scripts/local-ci.ts` は影響範囲に絞る）、全テストの安全網はタグの CI。
 
 変更ごとのテストの型（軽い順。上の行で足りるなら下の行へ行かない。足す前の検討は `task-to-pr` の「足す前に」）:
 
@@ -42,7 +45,7 @@ env -u SWITCHBOARD_SUPERVISED bun test <file> -t "<name>"
 | web の描画ロジック | `apps/web/src/*.test.ts`（DOM の型は `transcript.test.ts`。`bun:test` ファイルは web の typecheck から除外）。描画だけならここで止める |
 | アダプタ | Git の外の録画 fixture の再生（`runner-adapter-recording` スキル）。自分のランナーで録画して Git の外に保存し、`bun scripts/fixtures.ts list` で配置を確認する。変換はここで止める |
 | API | `startServer` を偽アダプタで起動して `fetch`（`core.test.ts` の型）。起動を要るのは HTTP の経路そのものを見るときだけ。関数で書けるものは関数で |
-| 単体で書けない UI / 経路 | 上のどれでも確かめられないときだけ。偽ランナーのデーモン（`startServer` を `mktemp -d /tmp/switchboard.e2e.XXXXXX` の `boot.ts` から、`SWITCHBOARD_HOME` は DB のコピー（このとき `SWITCHBOARD_CANDIDATE=1` を必ず渡す。無いとコピーの中の Task が使用上限の自動再開で本物のセッション id のまま動き、GitHub への未送信の書き込みも送る）、ポートは `lsof` で空きを見て 47911 以上）+ `bun run --cwd apps/web build` + headless Chrome（`--remote-debugging-port`、CDP）。boot.ts は自分で書かず `.claude/skills/verify-live-ui/SKILL.md` の boot.ts を写して使う。偽ランナーは `packages/core/src/devproxy.test.ts` の型 |
+| 単体で書けない UI / 経路 | 上のどれでも確かめられないときだけ。偽ランナーのデーモン（`startServer` を `mktemp -d /tmp/switchboard.e2e.XXXXXX` の `boot.ts` から、`SWITCHBOARD_HOME` は DB のコピー（このとき `SWITCHBOARD_CANDIDATE=1` を必ず渡す。無いとコピーの中の Task が使用上限の自動再開で本物のセッション id のまま動き、GitHub への未送信の書き込みも送る）、ポートは `lsof` で空きを見て 47911 以上。`ops-kit heavy -- bun "$W/boot.ts"` で起動（キットの README の「重い処理の枠」））+ `bun run --cwd apps/web build` + headless Chrome（`--remote-debugging-port`、CDP）。boot.ts は自分で書かず `.claude/skills/verify-live-ui/SKILL.md` の boot.ts を写して使う。偽ランナーは `packages/core/src/devproxy.test.ts` の型 |
 | 境界（プロキシ・認証・CORS） | 実構成の E2E（`devproxy.test.ts` の型）。境界そのものを見るときだけ |
 
 動いている Switchboard での確認（live check）は `verify-live-ui` スキル（デーモンと Web UI `localhost:5173`）。
@@ -91,8 +94,8 @@ Codex の `five_hour` が 0.9 以上、または `codex exec` が使用上限で
 
 ## マージ判定とローカル CI
 
-- マージ判定: `bun scripts/merge-gate.ts <PR> [--allow-large] [--merge|--merge-stack]`（exit 0 = merge / 1 = stop / 2 = 判定不能。`--merge`（単発）/ `--merge-stack`（スタックの最下段）は判定が merge のときだけマージまで進む。Task の許可に入るマージはこれだけ。規則は `scripts/merge-gate.ts`、手順と印は `docs/merge-gate.md`）。スキルの `<マージ判定>`。large の理由のうち `[再チェック <kind>]` は、`docs/merge-gate.md` の「## 再チェック」（スキルの `<再チェック>`）を回して付ける印 `[recheck] <kind> pass <head sha>` で外れる。`[聞く]` は利用者が認めたとき（`--allow-large`）だけ
-- ローカル CI: Actions が始まらない（ジョブのステップ 0 件）か run が無い（全部の run が skip された、も同じ）ときは `bun scripts/local-ci.ts <PR>` で Actions と同じ手順（`scripts/ci.ts`）を、最新の head を最新の base にマージして回す。結果は PR に付き（`[local-ci] pass|fail <head sha> base=<base sha>`）、スタックでは全部の PR の指摘の処理が済んでから一番上で 1 回回し、merge-gate は一番上の最新の結果が pass で、その pass がその PR の今の差分（patch-id）を含めば CI の成功と数える（いつ回し、どう数えるかは `docs/merge-gate.md` の「ローカル CI を回す時と数え方」。自動 rebase と base の前進では回し直さない）。base の枝の保護が必須チェックを求めると BLOCKED で止まる（ローカルの結果では満たせない。確かめ方は `docs/merge-gate.md` の「保護枝とローカルの結果」）。スキルの `<ローカル CI>`
+- マージ判定: `bun scripts/merge-gate.ts <PR> [--allow-large] [--merge|--merge-stack]`（exit 0 = merge / 1 = stop / 2 = 判定不能。`--merge`（単発）/ `--merge-stack`（スタックの最下段）は判定が merge のときだけマージまで進む。Task の許可に入る既定のマージはこれ。利用者が Task の会話で判定の外のマージを認めたときは `gh pr merge` / `gh stack merge`（`pbi-complete` の 5）。規則は `scripts/merge-gate.ts`、手順と印は `docs/merge-gate.md`）。スキルの `<マージ判定>`。large の理由のうち `[再チェック <kind>]` は、`docs/merge-gate.md` の「## 再チェック」（スキルの `<再チェック>`）を回して付ける印 `[recheck] <kind> pass <head sha>` で外れる。`[聞く]` は利用者が認めたとき（`--allow-large`）だけ
+- ローカル CI: Actions が始まらない（ジョブのステップ 0 件）か run が無い（全部の run が skip された、も同じ）ときは `bun scripts/local-ci.ts <PR>` で Actions と同じ手順（`scripts/ci.ts`）を、最新の head を最新の base にマージして回す。結果は PR に付き（`[local-ci] pass|fail <head sha> base=<base sha>`）、スタックでは全部の PR の指摘の処理が済んでから一番上で 1 回回し、merge-gate は一番上の最新の結果が pass で、その PR の今のコミットがその pass の head に同じ差分で入っていれば（`git cherry`）CI の成功と数える（いつ回し、どう数えるかは `docs/merge-gate.md` の「ローカル CI を回す時と数え方」。自動 rebase と base の前進では回し直さない）。base の枝の保護が必須チェックを求めると BLOCKED で止まる（ローカルの結果では満たせない。確かめ方は `docs/merge-gate.md` の「保護枝とローカルの結果」）。スキルの `<ローカル CI>`。`bun test` は影響範囲だけを回す（`--all` で全部、全テストの安全網はタグの CI）。同じ head の最新の結果が merge-gate の数える pass なら回さず exit 0（`--force` か `--all` で回す）。詳細は `docs/merge-gate.md`
 - `gh pr checks` が権限不足で 403 になるときは、`gh run list -R "$(gh repo view --json nameWithOwner -q .nameWithOwner)" --commit <sha>` で見る
 
 ## 追加のレビュアー

@@ -838,7 +838,7 @@ case "$line" in "/rename "*) named=1; echo "Session renamed to: \${line#/rename 
 
 describe("Claude Code's status in the terminal (#1574)", () => {
   // The sequences Claude Code 2.1.311 printed in a PTY for one prompt that needed a permission, then /exit, each in the
-  // chunk it came in (the recording keeps them with what surrounded them).
+  // chunk it came in. The recording replayed below is a later version's (RECORDED).
   const ESC = "\x1b", BEL = "\x07";
   const CHUNKS = [
     `${ESC}[?u${ESC}]7501;?${BEL}${ESC}[c`,
@@ -853,6 +853,9 @@ describe("Claude Code's status in the terminal (#1574)", () => {
   ];
   const EXPECTED = ["done", "working", "waiting", "working", "done", "working", null, null, null];
   const RECORDING = "packages/core/fixtures/osc7501-claude.jsonl";
+  // The recording was taken again on Claude Code 2.1.316 (2026-11-03): the same prompt, permission and /exit, but /exit no
+  // longer prints state=working after done, so its replay has one status fewer than the 2.1.311 sequences above.
+  const RECORDED = ["done", "working", "waiting", "working", "done", null, null, null];
   const read = (pieces: string[]) => {
     const r = new OscStatusReader();
     const statuses: unknown[] = []; let queries = 0;
@@ -867,11 +870,11 @@ describe("Claude Code's status in the terminal (#1574)", () => {
     expect(read([CHUNKS.join("")])).toEqual({ statuses: EXPECTED, queries: 1 });
   });
 
-  test.skipIf(skipRecordings(RECORDING))("OscStatusReader: the recording (fixtures/osc7501-claude.jsonl) replays the same, chunk by chunk and one byte at a time", () => {
+  test.skipIf(skipRecordings(RECORDING))("OscStatusReader: the recording (fixtures/osc7501-claude.jsonl, Claude Code 2.1.316) replays done → working → waiting → working → done → ended, chunk by chunk and one byte at a time", () => {
     assertRecordings(RECORDING);
     const chunks = recordingText(RECORDING).split("\n").filter(Boolean).map(l => JSON.parse(l) as string);
-    expect(read(chunks)).toEqual({ statuses: EXPECTED, queries: 1 });
-    expect(read(bytes(chunks))).toEqual({ statuses: EXPECTED, queries: 1 });
+    expect(read(chunks)).toEqual({ statuses: RECORDED, queries: 1 });
+    expect(read(bytes(chunks))).toEqual({ statuses: RECORDED, queries: 1 });
   });
 
   test("OscStatusReader: ST ends a sequence too; another program's status, other OSCs and an over-long unfinished sequence are not read", () => {

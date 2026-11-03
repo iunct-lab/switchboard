@@ -60,14 +60,14 @@ export const StopRecord = z.object({
   work: z.object({ workspaceId: z.string().nullable(), issue: z.number().int().positive().nullable(), taskId: z.string() }),
   op: clip(100),
   target: clip(200).default(""),
-  reason: StopReasonCode.catch("unknown"),
+  reason: StopReasonCode.catch("unknown").default("unknown"),
   evidence: clip(300).default(""),
   /** Whether running it again is known to be harmless (#949): read-only, or it failed before it did anything. unknown = never retried by itself. */
-  safety: z.enum(["read-only", "before-effect", "unknown"]).catch("unknown"),
+  safety: z.enum(["read-only", "before-effect", "unknown"]).catch("unknown").default("unknown"),
   conditions: z.array(StopCondition).transform((a) => a.slice(-20)).default([]),
   answer: z.object({ ref: clip(300), at: z.number() }).nullable().default(null),
   actions: z.array(z.object({ attempt: z.number().int(), at: z.number().default(0), what: clip(200), ok: z.boolean().nullable() })).transform((a) => a.slice(-20)).default([]),
-  state: StopState.catch("waiting"),
+  state: StopState.catch("waiting").default("waiting"),
   /** A permission stop's grant (#2745): one sentence that allows only the refused operation, sent as the person's reply when they choose to. Never a secret. */
   grant: clip(300).nullable().optional(),
   at: z.number(),
@@ -100,7 +100,7 @@ export const AgentEvent = z.discriminatedUnion("t", [
     t: z.literal("tool.call"),
     id: z.string(),
     name: z.string(),
-    input: z.unknown(),
+    input: z.unknown().optional(),
     summary: z.string(),
   }),
   z.object({
@@ -114,7 +114,7 @@ export const AgentEvent = z.discriminatedUnion("t", [
     id: z.string(),
     kind: PermissionKind,
     tool: z.string(),
-    input: z.unknown(),
+    input: z.unknown().optional(),
     detail: z.string(),
     toolUseId: z.string().optional(),
     /** Claude Code's auto-mode classifier stopped the call and asks the user, as at its denial limit; an ordinary block does not ask (#2236, #3214, docs/design/claude-otel.md). */
@@ -152,7 +152,7 @@ export const AgentEvent = z.discriminatedUnion("t", [
     t: z.literal("quota"),
     runner: RunnerId,
     /** e.g. { five_hour: {utilization: 0.16, resetsAt: 1788624600}, seven_day: {...} } */
-    windows: z.record(z.object({ utilization: z.number(), resetsAt: z.number() })),
+    windows: z.record(z.string(), z.object({ utilization: z.number(), resetsAt: z.number() })),
     /** The runner's own verdict, as reported (Claude `rate_limit_info.status`: allowed | allowed_warning | rejected …). */
     status: z.string().optional(),
     /** The window the runner names as the binding one (Claude `rateLimitType`, e.g. five_hour) — which reset to wait for (#102). */

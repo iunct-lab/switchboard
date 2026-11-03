@@ -1,10 +1,12 @@
 /**
- * A tiny stand-in for DAK's ADK server (`adk web`) used by the session tests. Serves /list-apps, the session
+ * A tiny stand-in for an ADK server used by the session tests. Serves /list-apps, the session
  * endpoints and /run_sse with the event shapes of the recorded fixtures. Behaviour by prompt:
  *   "confirm …"       → a functionCall to adk_request_confirmation (stream ends with the ask open); the answer's
  *                       functionResponse continues with a tool.result and a final text
  *   "confirm-fail …"  → the same ask, but the stream then errors instead of closing cleanly (the ask never gets
  *                       an answer on this stream — simulates the server hitting an error while a confirmation is open)
+ *   "confirm-native …" → a tool's functionCall named in actions.requestedToolConfirmations (ADK's native form);
+ *                       the answer continues as for "confirm"
  *   "sleep …"         → streams slowly until the client disconnects (abort)
  *   "fail …"          → an ADK error event
  *   "multi …"         → a streamed reply, then a tool call, then a SECOND streamed reply — all under one
@@ -12,22 +14,26 @@
  *   "artifact …"      → a final event with an inlineData part (a PNG) and artifactDelta { "report.txt": 1 }; the
  *                       artifacts are served at GET …/sessions/<id>/artifacts/<name>?version=1 (any name but
  *                       "missing.txt", always FAKE_REPORT)
+ *   "artifact-spill …" → a final event with artifactDelta { "spill_1.txt": 1, "report.txt": 1 }
  *   anything          → thought + streamed text "echo:<prompt>" + usage
- * Every /run_sse body is kept in `received` (session id and the message parts) for tests that check what was sent.
+ * Every /run_sse body is kept in `received` (session id and the message parts) for tests that check what was sent,
+ * and every request in `requests` (path and authorization header). `app` is the name /list-apps serves.
  */
 export const FAKE_PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
 export const FAKE_REPORT = "# report\nall good\n";
 
-export function startFakeAdk(port = 0) {
+export function startFakeAdk(port = 0, app = "dak_agent") {
   const sessions = new Map<string, unknown[]>();
   const received: Array<{ session_id: string; parts: unknown[] }> = [];
+  const requests: Array<{ path: string; authorization: string | null }> = [];
   let inv = 0;
   const server = Bun.serve({
     port,
     hostname: "127.0.0.1",
     async fetch(req) {
       const url = new URL(req.url);
-      if (url.pathname === "/list-apps") return Response.json(["dak_agent"]);
+      requests.push({ path: url.pathname, authorization: req.headers.get("authorization") });
+      if (url.pathname === "/list-apps") return Response.json([app]);
       const a = url.pathname.match(/^\/apps\/[^/]+\/users\/[^/]+\/sessions\/([^/]+)\/artifacts\/([^/]+)$/);
       if (a && req.method === "GET") {
         if (!sessions.has(a[1]!) || decodeURIComponent(a[2]!) === "missing.txt" || url.searchParams.get("version") !== "1") return new Response("not found", { status: 404 });
@@ -82,8 +88,18 @@ export function startFakeAdk(port = 0) {
               c.close();
               return;
             }
+            if (text.startsWith("confirm-native")) {
+              c.enqueue(ev({ content: { parts: [{ functionCall: { id: "fc-4", name: "delete_file", args: { path: "z.txt" } } }] }, partial: false, actions: { ...base.actions, requestedToolConfirmations: { "fc-4": { hint: "delete z.txt?" } } } }));
+              c.close();
+              return;
+            }
             if (text.startsWith("confirm")) {
               c.enqueue(ev({ content: { parts: [{ functionCall: { id: "fc-1", name: "adk_request_confirmation", args: { originalFunctionCall: { id: "orig-1", name: "delete_file", args: { path: "x.txt" } } } } }] }, partial: false, usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5, cachedContentTokenCount: 0, thoughtsTokenCount: 0, totalTokenCount: 15 } }));
+              c.close();
+              return;
+            }
+            if (text.startsWith("artifact-spill")) {
+              c.enqueue(ev({ content: { parts: [{ text: "made files" }] }, partial: false, finishReason: "STOP", actions: { ...base.actions, artifactDelta: { "spill_1.txt": 1, "report.txt": 1 } } }));
               c.close();
               return;
             }
@@ -114,5 +130,5 @@ export function startFakeAdk(port = 0) {
       return new Response("not found", { status: 404 });
     },
   });
-  return { url: `http://127.0.0.1:${server.port}`, received, stop: () => server.stop(true) };
+  return { url: `http://127.0.0.1:${server.port}`, received, requests, stop: () => server.stop(true) };
 }

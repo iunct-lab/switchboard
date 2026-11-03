@@ -272,8 +272,7 @@ images. No automatic authentication repair is part of the product.
 runs on official cloud infrastructure. Teleport/local continuation is PBI
 #1107 and is not an additional creation mode in this PBI.
 
-CI の実行と、性能判定の既知不合格を区別した代替記録は
-[local-ci 相当検証の手順](local-ci.md) を参照する。
+CI の実行は [local-ci 相当検証の手順](local-ci.md) を参照する。
 
 
 ## Teleport contract (Task #1127)

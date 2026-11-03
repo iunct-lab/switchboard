@@ -1,6 +1,6 @@
-// test-reads: scripts/recordings.ts
+// test-reads: scripts/recordings.ts apps/ packages/ scripts/
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { assertRecordings, recordingText, recordingsDir, requireRecordings, skipRecordings } from "./recordings.ts";
@@ -64,4 +64,15 @@ test("recordings: an empty SWITCHBOARD_FIXTURES counts as unset (not the working
   process.env.SWITCHBOARD_FIXTURES = "";
   expect(requireRecordings()).toBe(false);
   expect(recordingsDir()).toBe(join(homedir(), ".switchboard", "fixtures"));
+});
+
+// a test skipped without its recording, run without it when one is required, should say so, not fail on the empty text
+test("recordings: every test guarded by skipRecordings asserts its recordings first", () => {
+  const root = join(import.meta.dir, "..");
+  const files = [...new Bun.Glob("{packages,apps,scripts}/**/*.test.ts").scanSync({ root })].filter((f) => !f.includes("node_modules"));
+  const bad = files.flatMap((f) => {
+    const lines = readFileSync(join(root, f), "utf8").split("\n");
+    return lines.flatMap((l, i) => (/\bskipIf\(skipRecordings\(/.test(l) && !lines.slice(i, i + 4).some((n) => n.includes("assertRecordings(")) ? [`${f}:${i + 1}`] : []));
+  });
+  expect(bad).toEqual([]);
 });

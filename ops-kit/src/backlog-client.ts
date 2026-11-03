@@ -19,7 +19,9 @@ export const BACKLOG_USAGE = `  backlog list [--search <語>] [--label <l>]... [
       保存済みの Issue を、取得の時刻と同期の状態つきで出す（行: #番号 type OPEN|CLOSED Status 題）。GitHub には問い合わせない
       --search: 題の部分一致（大文字小文字を区別しない）/ --label: すべてを持つもの / --state: 既定 open
   backlog view <issue> [--fresh] [--json]
-      Issue 1 件（本文、コメント、Project のフィールド、送信待ち、同期の状態）。<issue> は番号か、ここで作ってまだ番号の無い Issue の localId
+      Issue 1 件（本文、コメント、Project のフィールド、送信待ち、同期の状態）。<issue> は番号か、ここで作ってまだ番号の無い Issue の localId。保留中の編集（競合・失敗・結果不明）は「保留:」の行に理由つき
+  backlog retry <issue>
+      GitHub が受け付けなかった（失敗で保留中の）編集を、原因を直した後に全部送り直す（アプリの Task の中だけ）。無ければ 1
   backlog create --title <t> [--body-file <f|->] [--label <l>]... [--milestone <m>] [--parent <n>] [--field <name>=<value>]...
   backlog edit <issue> [--title <t>] [--body-file <f|->] [--add-label <l>]... [--remove-label <l>]... [--state open|closed]
                [--milestone <m> | --no-milestone] [--parent <n> | --no-parent]
@@ -84,6 +86,8 @@ interface List {
 
 interface Sync {
   workspaceId: string;
+  /** Where the workspace's backlog is kept: `github` (synced with GitHub), or another value for one kept only in the app. */
+  backlog: string;
   repository: string | null;
   syncedAt: number | null;
   syncing: boolean;
@@ -300,6 +304,29 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         const fields: Record<string, string> = { Area: area, Kind: kind, Priority: priority, ...(phase !== undefined && { Phase: phase }), Status: status || "Backlog" };
         return await edit(ref, { project: true, fields, ...(parent ? { parent: number(parent) } : {}) });
       }
+      case "retry": {
+        // a send GitHub refused waits held, and the Issue's edits after it with it (#2885): each failed one goes back
+        const [ref, ...extra] = args;
+        if (!ref || extra.length) throw new Refused("backlog retry <issue>");
+        if (direct) throw new Refused("retry はアプリの Task の中だけ（BACKLOG_URL が無いので送り直すものがありません）");
+        const ws = await workspace();
+        const d = (await api("GET", `/${encodeURIComponent(issueRef(ref))}?workspaceId=${encodeURIComponent(ws.workspaceId)}`)) as Detail;
+        const failed = (d.held ?? []).filter((h) => h.status === "failed");
+        if (!failed.length) throw new Refused(`#${issueRef(ref)} に失敗で保留中の編集はありません`);
+        let sent = 0;
+        for (const h of failed) {
+          try {
+            await api("PATCH", `/${encodeURIComponent(issueRef(ref))}`, { workspaceId: ws.workspaceId, retry: { operation: h.operation } });
+          } catch (e) {
+            // the ones put back before stay put back: say so with why the rest stopped
+            if (sent) io.out(`#${issueRef(ref)} の失敗した編集 ${failed.length} 件のうち ${sent} 件を送り直します。残りは止まりました`);
+            throw e;
+          }
+          sent++;
+        }
+        io.out(`#${issueRef(ref)} の失敗した編集 ${failed.length} 件を送り直します`);
+        return 0;
+      }
       default:
         throw new Refused(`backlog のコマンドではありません: ${sub ?? "(なし)"}\n${BACKLOG_USAGE}`);
     }
@@ -428,6 +455,21 @@ function client(env: Record<string, string | undefined>, f: Fetch) {
   };
 }
 
+/**
+ * The GitHub repositories the app syncs, with their workspace (the `syncs` of GET /api/backlog, #3073): what the gh
+ * guard stops a direct backlog write to, besides the Task's own. Null when the app cannot be asked (no BACKLOG_URL,
+ * not reached, 4xx / 5xx, no answer in 5 seconds): the guard then judges the workspace only, and does not hold gh up
+ * for as long as an `ops-kit backlog` command waits.
+ */
+export async function syncedRepositories(env: Record<string, string | undefined>, f: Fetch = fetch): Promise<Array<{ repository: string; workspaceId: string }> | null> {
+  try {
+    const list = (await client(env, (url, init) => f(url, { ...init, signal: AbortSignal.timeout(5_000) }))("GET", "")) as List;
+    return list.syncs.flatMap((s) => (s.backlog === "github" && s.repository !== null ? [{ repository: s.repository, workspaceId: s.workspaceId }] : []));
+  } catch {
+    return null;
+  }
+}
+
 /** The repository the backlog commands act on: GH_REPO, else origin; GitHub is never asked for it. */
 export async function repoName(env: Record<string, string | undefined>, cwd?: string): Promise<string> {
   const noGh = { run: async () => { throw new Unknown("リポジトリが分かりません（GH_REPO を設定するか、origin のあるディレクトリで実行するか、--workspace <id>）"); } } as unknown as Parameters<typeof repoOf>[0];
@@ -449,8 +491,13 @@ export interface Detail {
   fetchedAt: number | null;
   localId: string | null;
   pending: number;
+  /** The edits held, not sent (#887, #2885); none in GitHub's own (without BACKLOG_URL). */
+  held?: Array<{ operation: string; kind: "create" | "set" | "comment"; field: string | null; status: "conflict" | "failed" | "unknown"; reason: string | null }>;
   sync: { state: string; reason: string | null; lastSuccessfulSync: number | null };
 }
+
+const HELD = { conflict: "競合", failed: "失敗", unknown: "結果不明" } as const;
+const HELD_KIND = { create: "新規作成", comment: "コメント" } as const;
 
 export function formatDetail(d: Detail): string {
   const i = d.issue;
@@ -460,6 +507,7 @@ export function formatDetail(d: Detail): string {
     `labels: ${i.labels.join(", ") || "-"}  milestone: ${i.milestone ?? "-"}  parent: ${i.parent ? `#${i.parent}` : "-"}`,
     `fields: ${d.fields ? Object.entries(d.fields).map(([k, v]) => `${k}=${v ?? "-"}`).join(", ") : "-"}`,
     `最終取得 ${at}  同期 ${d.sync.state}${d.sync.reason ? `（${d.sync.reason}）` : ""}  送信待ち ${d.pending}`,
+    ...(d.held ?? []).map((h) => `保留: ${h.kind === "set" ? h.field : HELD_KIND[h.kind]} ${HELD[h.status]}${h.reason ? `（${h.reason}）` : ""}`),
     "",
     i.body,
     ...d.comments.flatMap((c) => ["", `----- ${c.createdAt}`, c.body]),

@@ -399,12 +399,22 @@ export class Db {
   upsertWorkspace(ws: Omit<Workspace, "id" | "createdAt" | "backlog" | "sweep"> & { id?: string }): Workspace {
     const existing = this.sqlite.query("SELECT * FROM workspaces WHERE path = ?").get(ws.path);
     if (existing) {
-      this.sqlite.query("UPDATE workspaces SET name = ?, kind = ? WHERE path = ?").run(ws.name, ws.kind, ws.path);
+      this.sqlite.query("UPDATE workspaces SET name = ?, kind = ?, upstream = COALESCE(?, upstream) WHERE path = ?").run(ws.name, ws.kind, ws.upstream ?? null, ws.path);
       return rowToWorkspace(this.sqlite.query("SELECT * FROM workspaces WHERE path = ?").get(ws.path));
     }
-    const row: Workspace = { id: ws.id ?? newId("ws"), name: ws.name, path: ws.path, kind: ws.kind, createdAt: Date.now(), backlog: "github", sweep: { implement: 1, plan: 1 } };
-    this.sqlite.query("INSERT INTO workspaces (id, name, path, kind, created_at) VALUES (?, ?, ?, ?, ?)").run(row.id, row.name, row.path, row.kind, row.createdAt);
+    const row: Workspace = { id: ws.id ?? newId("ws"), name: ws.name, path: ws.path, kind: ws.kind, createdAt: Date.now(), backlog: "github", sweep: { implement: 1, plan: 1 }, ...(ws.upstream ? { upstream: ws.upstream } : {}) };
+    this.sqlite.query("INSERT INTO workspaces (id, name, path, kind, created_at, upstream) VALUES (?, ?, ?, ?, ?, ?)").run(row.id, row.name, row.path, row.kind, row.createdAt, ws.upstream ?? null);
     return row;
+  }
+
+  /** The hash of the runner config the person confirmed for a foreign repository (#2576). */
+  setRunnerConfigOk(id: string, hash: string): void {
+    this.sqlite.query("UPDATE workspaces SET runner_config_ok = ? WHERE id = ?").run(hash, id);
+  }
+
+  getRunnerConfigOk(id: string): string | null {
+    const r = this.sqlite.query("SELECT runner_config_ok FROM workspaces WHERE id = ?").get(id) as { runner_config_ok: string | null } | null;
+    return r?.runner_config_ok ?? null;
   }
 
   /**
@@ -811,6 +821,20 @@ export class Db {
       if (choice === "local") update.run("pending", JSON.stringify(value), null, now, id);
       else update.run("done", JSON.stringify(op.base ?? null), "GitHub の値を選んだので送りません", now, id);
       this.rebaseBacklogRecord(repo, op.targetKind, op.target);
+    })();
+  }
+
+  /**
+   * A `failed` operation sent again (#2885), its cause put right: back to `pending` as at first (the value the
+   * enabling's second press sets). A create that made its Issue keeps `remoteId`, so it goes on from the steps after
+   * it. Throws BacklogResolveError: 404 = no such operation of the repository, 409 = not failed (nothing changed).
+   */
+  retryBacklogOperation(repo: BacklogRepositoryKey, id: string, now = Date.now()): void {
+    this.sqlite.transaction(() => {
+      const op = this.getBacklogOperation(id);
+      if (!op || op.service !== repo.service || op.host !== repo.host || op.repository !== repo.repository) throw new BacklogResolveError(`操作 ${id} はありません`, 404);
+      if (op.status !== "failed") throw new BacklogResolveError("この操作は失敗で保留されていません", 409);
+      this.sqlite.query("UPDATE backlog_operations SET status = 'pending', attempt = 0, retry_at = NULL, error = NULL, updated_at = ? WHERE id = ?").run(now, id);
     })();
   }
 
@@ -1743,6 +1767,9 @@ export class Db {
 
 /* ---------- helpers ---------- */
 
+/** The status a runner sends while it thinks, as stored (#2738): the one form in the events. */
+const THINKING_JSON = JSON.stringify({ t: "status", text: "thinking" });
+
 /** Additive schema changes for databases created by earlier versions. Each step is idempotent. */
 function migrate(db: Database) {
   const cols = new Set((db.query("PRAGMA table_info(tasks)").all() as Array<{ name: string }>).map((c) => c.name));
@@ -1769,6 +1796,20 @@ function migrate(db: Database) {
   if ((db.query("PRAGMA user_version").get() as { user_version: number }).user_version < 1) {
     db.exec("UPDATE backlog_operations SET status = 'pending', retry_at = NULL, error = NULL WHERE status = 'conflict' AND field = 'field:Status' AND overwritten IS NULL");
     db.exec("PRAGMA user_version = 1");
+  }
+  // #2738: a run of status `thinking` (a DAK turn writes thousands) buried the reply under the transcript's tail; once, keep
+  // each run's last row only — the task's last seq and ts do not move, and nothing reads the others (TaskManager now records one)
+  if ((db.query("PRAGMA user_version").get() as { user_version: number }).user_version < 2) {
+    db.transaction(() => {
+      db.query(
+        `DELETE FROM events WHERE (task_id, seq) IN (
+           SELECT task_id, seq FROM (
+             SELECT task_id, seq, json, LEAD(json) OVER (PARTITION BY task_id ORDER BY seq) AS next FROM events
+             WHERE task_id IN (SELECT DISTINCT task_id FROM events WHERE json = ?1))
+           WHERE json = ?1 AND next = ?1)`,
+      ).run(THINKING_JSON);
+      db.exec("PRAGMA user_version = 2");
+    })();
   }
   if (!cols.has("shadow_stopped")) db.exec("ALTER TABLE tasks ADD COLUMN shadow_stopped INTEGER NOT NULL DEFAULT 0");
   if (!cols.has("workspace_reason")) db.exec("ALTER TABLE tasks ADD COLUMN workspace_reason TEXT");
@@ -1815,6 +1856,8 @@ function migrate(db: Database) {
   const wsCols = new Set((db.query("PRAGMA table_info(workspaces)").all() as Array<{ name: string }>).map((c) => c.name));
   if (!wsCols.has("project_var")) db.exec("ALTER TABLE workspaces ADD COLUMN project_var TEXT");
   if (!wsCols.has("backlog_source")) db.exec("ALTER TABLE workspaces ADD COLUMN backlog_source TEXT");
+  if (!wsCols.has("upstream")) db.exec("ALTER TABLE workspaces ADD COLUMN upstream TEXT");
+  if (!wsCols.has("runner_config_ok")) db.exec("ALTER TABLE workspaces ADD COLUMN runner_config_ok TEXT");
   // #2656: backlog-next's slots move from the one setting backlogSweep to every workspace, once
   if (!wsCols.has("sweep_implement")) {
     db.transaction(() => {
@@ -2000,7 +2043,7 @@ function rowToWorkspace(r: any): Workspace {
   // (backlog.ts syncsGithub); none, or a GitHub one = github
   const source = r.backlog_source ? (JSON.parse(r.backlog_source) as BacklogSource) : null;
   const backlog = source && (source.service === "switchboard" || source.disabled) ? "switchboard" : "github";
-  return { id: r.id, name: r.name, path: r.path, kind: r.kind, createdAt: r.created_at, backlog, sweep: { implement: r.sweep_implement, plan: r.sweep_plan }, ...(r.project_var ? { projectVar: r.project_var } : {}) };
+  return { id: r.id, name: r.name, path: r.path, kind: r.kind, createdAt: r.created_at, backlog, sweep: { implement: r.sweep_implement, plan: r.sweep_plan }, ...(r.project_var ? { projectVar: r.project_var } : {}), ...(r.upstream ? { upstream: r.upstream } : {}) };
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

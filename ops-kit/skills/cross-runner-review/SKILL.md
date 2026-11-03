@@ -129,13 +129,13 @@ PROMPT
 
 ```bash
 CODEX=$(command -v codex)
-( cd "$R" && ops-kit idle-run --idle 900 -- "$CODEX" exec --sandbox read-only --skip-git-repo-check --ephemeral -o "$M/codex.md" - < "$M/prompt.md" ) > "$M/codex.log" 2>&1
+( cd "$R" && ops-kit heavy --name "review codex" -- ops-kit idle-run --idle 900 -- "$CODEX" exec --sandbox read-only --skip-git-repo-check --ephemeral -o "$M/codex.md" - < "$M/prompt.md" ) > "$M/codex.log" 2>&1
 ```
 
 **Claude Code**（Codex が実装したとき）。plan モード（読み取り専用）:
 
 ```bash
-( set -o pipefail; cd "$R" && ops-kit idle-run --idle 900 -- claude -p --permission-mode plan --output-format stream-json --verbose "$(cat "$M/prompt.md")" | tee "$M/claude.jsonl" | jq -r 'select(.type=="result").result' ) > "$M/claude.md" 2> "$M/claude.log"
+( set -o pipefail; cd "$R" && ops-kit heavy --name "review claude" -- ops-kit idle-run --idle 900 -- claude -p --permission-mode plan --output-format stream-json --verbose "$(cat "$M/prompt.md")" | tee "$M/claude.jsonl" | jq -r 'select(.type=="result").result' ) > "$M/claude.md" 2> "$M/claude.log"
 ```
 
 **固まったとき**: `ops-kit idle-run --idle 900` は、レビュアーが 900 秒何も出さないとプロセスごと切り、exit 124 で返す（理由の行は log に残る。総時間の上限は無い。text 出力の `claude -p` は最後まで何も出さないので、stream-json で動いていることを見る）。exit 124 なら `$M/<runner>.md` を転記せず、理由を PR コメントに残して一度だけやり直す。やり直しでも切れたら止まって報告する:
@@ -148,7 +148,7 @@ gh pr comment $N --body "[<runner>] 無進捗で打ち切り（900 秒出力な�
 この clone を読めないレビュアー（コンテナの中のローカルモデルなど）には、材料を prompt に埋める。diff のほかに **Task / PBI が名指しする `docs/design/*.md` と、diff が触るファイルの全文**（変更後）を入れる（設計との矛盾は diff だけでは見えない）。
 上限を超えるぶんは「[truncated: <file> …]」と書き、切ったファイルを要約コメントに列挙する — そのレビュアーのレビューはその範囲について、と読む。全部を見るのは主レビュアー。出力は `$M/<extra>.md` に書く。
 
-全部同時に走らせてよい（Bash の `run_in_background`。Bash の timeout はレビューが終わるまで切らない長さ（上限いっぱい）にする。切るのは `idle-run`。外から切られると理由が残らない。追加のレビュアーは `curl -m` で切る）。
+バックグラウンドで始めてよい（Bash の `run_in_background`）。重い処理の枠が空くまで順に待つ（マシンの上限。キットの README の「重い処理の枠」）。`ops-kit heavy` は `idle-run` の外側に置く（枠を待つ間は無進捗に数えない）。Bash の timeout は枠の待ちとレビューが終わるまで切らない長さ（上限いっぱい）にする。切るのは `idle-run`。外から切られると理由が残らない。追加のレビュアー（`curl`）は枠を通さない（重い処理は別のコンテナで動く）。`curl -m` で切る。
 **マージを止めるのは主レビュアー（別ランナー）だけ。** 追加のレビュアー（ローカルモデルなら 50KB の材料で 10 分以上かかることがある）は終わっていなくても先に進み、
 後から届いたら転記して主レビュアーとの比較に使う（利用者の指示 2026-09-18）。終わったら各出力に `### Findings` があるか見る。無ければ（枠切れ、sandbox で止まった、モデルが形式を守らなかった）ログ（Claude Code は `$M/claude.jsonl` も）を読んで一度だけやり直す。
 
@@ -191,9 +191,9 @@ PREV=_review/codex.md                        # Claude が主レビュアーな�
   echo "Use the same output format."; } > "$M/prompt-fix.md"
 rm -f "$M/fix-review.md"                     # 切れたときに前回の出力を転記しない
 # Codex が主レビュアー（Claude Code が実装したとき）
-( cd "$R" && ops-kit idle-run --idle 900 -- "$CODEX" exec --sandbox read-only --skip-git-repo-check --ephemeral -o "$M/fix-review.md" - < "$M/prompt-fix.md" ) > "$M/fix-review.log" 2>&1; RC=$?; WHO=codex
+( cd "$R" && ops-kit heavy --name "review codex" -- ops-kit idle-run --idle 900 -- "$CODEX" exec --sandbox read-only --skip-git-repo-check --ephemeral -o "$M/fix-review.md" - < "$M/prompt-fix.md" ) > "$M/fix-review.log" 2>&1; RC=$?; WHO=codex
 # Claude Code が主レビュアー（Codex が実装したとき）は上の代わりに:
-# ( set -o pipefail; cd "$R" && ops-kit idle-run --idle 900 -- claude -p --permission-mode plan --output-format stream-json --verbose "$(cat "$M/prompt-fix.md")" | tee "$M/fix-review.jsonl" | jq -r 'select(.type=="result").result' ) > "$M/fix-review.md" 2> "$M/fix-review.log"; RC=$?; WHO=claude
+# ( set -o pipefail; cd "$R" && ops-kit heavy --name "review claude" -- ops-kit idle-run --idle 900 -- claude -p --permission-mode plan --output-format stream-json --verbose "$(cat "$M/prompt-fix.md")" | tee "$M/fix-review.jsonl" | jq -r 'select(.type=="result").result' ) > "$M/fix-review.md" 2> "$M/fix-review.log"; RC=$?; WHO=claude
 [ "$RC" = 0 ] && grep -q '^### Findings' "$M/fix-review.md" && post_review $N $WHO "$M/fix-review.md" \
   || echo "見直しが exit $RC か、出力に ### Findings が無い（打ち切り・枠切れ・sandbox）。ログを読んで一度だけやり直す。空のまま転記しない"
 ```

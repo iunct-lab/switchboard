@@ -184,6 +184,8 @@ export const OLDER_PAGE = 200;
 /** A clone going on or failed (#2575); a finished one is a workspace and no longer listed. */
 export type WorkspaceClone = { repo: string; path: string; state: "cloning" | "failed"; error?: string };
 
+export type RunnerConfigView = { upstream: string; files: { path: string; content: string }[]; hash: string; confirmed: boolean };
+
 export const api = {
   feedback: (text: string, attachmentIds?: string[], screen?: string, mode: "request" | "fix" = "request", workspaceId?: string, source?: FeedbackSource) => req<Task>("/api/feedback", { method: "POST", body: JSON.stringify({ text, attachmentIds, screen, mode, workspaceId, source }) }),
   /** 改善要望にする (#1221): the draft the feedback dialog opens with for a task's evaluations. */
@@ -205,6 +207,10 @@ export const api = {
   workspaceRemoval: (id: string) => req<WorkspaceRemoval>(`/api/workspaces/${id}/removal`),
   removeWorkspace: (id: string, deleteCopy: boolean) => req<{ ok: true }>(`/api/workspaces/${id}`, { method: "DELETE", body: JSON.stringify({ deleteCopy }) }),
   workspaceClones: () => req<WorkspaceClone[]>("/api/workspaces/clones"),
+  /** A foreign repository's runner config (#2576): `confirmed` = Tasks may start; a stale `hash` is refused (409). */
+  runnerConfig: (id: string) => req<RunnerConfigView>(`/api/workspaces/${id}/runner-config`),
+  confirmRunnerConfig: (id: string, hash: string) => req<{ ok: true }>(`/api/workspaces/${id}/runner-config`, { method: "POST", body: JSON.stringify({ hash }) }),
+  syncUpstream: (id: string) => req<Task>(`/api/workspaces/${id}/upstream-sync`, { method: "POST" }),
   /**
    * Turns the workspace's GitHub sync off (`switchboard`) or on (`github`, #2266): on answers how far it is (202), or
    * rejects with why GitHub could not be read (424, nothing changed). `projectVar` = the Project of one kept here only.

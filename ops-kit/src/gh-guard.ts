@@ -183,13 +183,45 @@ export function bodiesOf(argv: string[], read: (path: string) => string | null, 
 const BACKLOG_WRITES = new Set(["create", "new", "comment", "edit", "close", "reopen"]);
 /** The flags of `gh issue create / comment / edit / close / reopen` that take a value: the value is not the Issue argument. */
 const ISSUE_VALUE_FLAGS = new Set(["--title", "-t", "--body", "-b", "--body-file", "-F", "--comment", "-c", "--reason", "-r", "--duplicate-of", "--assignee", "-a", "--label", "-l", "--milestone", "-m", "--project", "-p", "--template", "-T", "--recover", "--add-assignee", "--remove-assignee", "--add-label", "--remove-label", "--add-project", "--remove-project"]);
+const NO_EQUIVALENT = "Task の外の gh（この操作は ops-kit backlog に無い）";
+const ISSUE_INSTEAD: Record<string, string> = { create: "create", new: "create", comment: "comment", edit: "edit", close: "edit --state closed", reopen: "edit --state open" };
+const LABEL_DEF_INSTEAD = "ops-kit sync-labels（ラベルの定義。Task の中では env -u BACKLOG_URL ops-kit sync-labels）";
+const PROJECT_INSTEAD = "ops-kit backlog set / triage";
+const LABEL_INSTEAD = "ops-kit backlog edit --add-label / --remove-label";
+const PARENT_INSTEAD = "ops-kit backlog edit --parent / --no-parent";
+/**
+ * The mutations of graphql that write an Issue, its comments, labels, sub-issues or Project item, and the command to
+ * use instead. Creating a Project or a field (`createProjectV2*`) is not among them: `ops-kit backlog` writes neither.
+ */
+const BACKLOG_MUTATIONS: Array<[string[], string]> = [
+  [["addProjectV2ItemById", "addProjectV2DraftIssue", "updateProjectV2ItemFieldValue", "clearProjectV2ItemFieldValue", "deleteProjectV2Item", "archiveProjectV2Item", "updateProjectV2ItemPosition"], PROJECT_INSTEAD],
+  [["addSubIssue", "removeSubIssue", "reprioritizeSubIssue"], PARENT_INSTEAD],
+  [["createIssue"], "ops-kit backlog create"],
+  [["addComment", "updateIssueComment", "deleteIssueComment"], "ops-kit backlog comment"],
+  [["addLabelsToLabelable", "removeLabelsFromLabelable"], LABEL_INSTEAD],
+  [["closeIssue", "reopenIssue"], "ops-kit backlog edit --state closed / open"],
+  [["updateIssue"], "ops-kit backlog edit"],
+  [["deleteIssue", "transferIssue"], NO_EQUIVALENT],
+];
+const PROJECT_ITEM_WRITES = new Set(["item-add", "item-edit", "item-delete", "item-archive"]);
+
+/** A write to the backlog the app's Task makes in place of `ops-kit backlog`: the command to use instead, and the repository written to (null: none named). */
+export interface BacklogWrite {
+  instead: string;
+  repo: string | null;
+}
 
 /**
- * An Issue write the app's Task makes in place of `ops-kit backlog` (#2694): its subcommand, and the repository it
- * names (`-R` / `--repo`, before the group too, or the URL given for the Issue), null when it names none — gh then
- * writes to GH_REPO or the checkout's. Null for anything else: a read, a pull request, `gh api`.
+ * A write to the backlog (Issues, their comments and labels, the Project's items) the app's Task makes in place of
+ * `ops-kit backlog` (#2694, #3073), whatever form it takes: `gh issue create / comment / edit / close / reopen`, `gh api`
+ * with a method other than GET / HEAD (or a field and no method) on `repos/<o>/<r>/issues…` or `…/labels…`, a graphql
+ * mutation that names one of BACKLOG_MUTATIONS in `texts` (the fields and the `--input` bodiesOf read), and
+ * `gh project item-add / item-edit / item-delete / item-archive`. `repo` is the repository it names (`-R` / `--repo`,
+ * before the group too, the URL given for the Issue, or the path of `gh api`), null when it names none — gh then writes
+ * to GH_REPO or the checkout's; graphql and `gh project` are read as naming none (their node id or Project is not asked
+ * of GitHub). Null for anything else: a read, a pull request, Actions, git, contents, a release.
  */
-export function backlogWrite(argv: string[]): { sub: string; repo: string | null } | null {
+export function backlogWrite(argv: string[], texts: string[] = []): BacklogWrite | null {
   let named: string | undefined;
   const words: number[] = [];
   for (let i = 0; i < argv.length; i++) {
@@ -205,10 +237,40 @@ export function backlogWrite(argv: string[]): { sub: string; repo: string | null
     else if (ISSUE_VALUE_FLAGS.has(a)) i++;
     else if (!a.startsWith("-")) words.push(i);
   }
+  if (words.length === 0) return null;
+  const at = words[0]!;
+  if (argv[at] === "api") return apiBacklogWrite(argv, at, texts);
+  if (argv[at] === "project") return PROJECT_ITEM_WRITES.has(argv[subcommandAt(argv, at)] ?? "") ? { instead: PROJECT_INSTEAD, repo: null } : null;
   const [group, sub, ...refs] = words.map((i) => argv[i]!);
   if (group !== "issue" || sub === undefined || !BACKLOG_WRITES.has(sub)) return null;
   const url = refs.map((r) => /^https?:\/\/[^/]+\/([^/]+\/[^/]+)\/issues\/\d+/.exec(r)?.[1]).find((r) => r !== undefined);
-  return { sub, repo: named !== undefined ? named.split("/").slice(-2).join("/") : (url ?? null) };
+  return { instead: `ops-kit backlog ${ISSUE_INSTEAD[sub]}`, repo: named !== undefined ? named.split("/").slice(-2).join("/") : (url ?? null) };
+}
+
+function apiBacklogWrite(argv: string[], at: number, texts: string[]): BacklogWrite | null {
+  const call = apiCallOf(argv, at);
+  if (call === null) return null;
+  if (call.path === "graphql") {
+    if (!texts.some((t) => /\bmutation\b/.test(t))) return null;
+    const hit = BACKLOG_MUTATIONS.find(([names]) => names.some((n) => texts.some((t) => new RegExp(`\\b${n}\\b`).test(t))));
+    return hit ? { instead: hit[1], repo: null } : null;
+  }
+  if (!call.writes) return null;
+  const m = /^repos\/([^/?]+)\/([^/?]+)\/((?:issues|labels)(?:\/[^?]*)?)(?:\?|$)/.exec(call.path);
+  if (!m) return null;
+  // `{owner}/{repo}` and the older `:owner/:repo` are filled by gh from GH_REPO or the checkout: none named
+  const repo = /^[{:]/.test(m[1]!) || /^[{:]/.test(m[2]!) ? null : `${m[1]}/${m[2]}`;
+  const rest = m[3]!.replace(/\/$/, "");
+  const instead =
+    rest === "labels" || rest.startsWith("labels/") ? LABEL_DEF_INSTEAD
+    : rest === "issues" ? "ops-kit backlog create"
+    : /^issues\/comments\/[^/]+$/.test(rest) ? "ops-kit backlog comment（コメントの編集・削除は無いので、新しいコメントで書く）"
+    : /^issues\/[^/]+\/comments$/.test(rest) ? "ops-kit backlog comment"
+    : /^issues\/[^/]+\/labels(\/|$)/.test(rest) ? LABEL_INSTEAD
+    : /^issues\/[^/]+\/(sub_issues?|parent)(\/|$)/.test(rest) ? PARENT_INSTEAD
+    : /^issues\/[^/]+\/lock$/.test(rest) ? NO_EQUIVALENT
+    : "ops-kit backlog edit";
+  return { instead, repo };
 }
 
 /** The subcommands of each group that only read; any other subcommand of these groups writes. */
@@ -238,31 +300,11 @@ export function writeTargetOf(argv: string[], env: Record<string, string | undef
   const group = argv[i];
   if (group === undefined) return null;
   if (group === "api") {
-    let method: string | undefined;
-    let fields = false;
-    let mutation = false;
-    let endpoint: string | undefined;
-    for (let j = i + 1; j < argv.length; j++) {
-      const f = flagOf(argv[j]!, API_FLAGS, API_SWITCHES);
-      if (f === null) {
-        if (endpoint === undefined && !argv[j]!.startsWith("-")) endpoint = argv[j];
-        continue;
-      }
-      const value = f.value ?? argv[++j];
-      if (value === undefined) continue;
-      const kind = API_FLAGS[f.flag];
-      if (f.flag === "-X" || f.flag === "--method") method = value.toUpperCase();
-      else if (kind === "raw" || kind === "typed" || kind === "file") {
-        fields = true;
-        const v = value.slice(value.indexOf("=") + 1);
-        if (kind === "file" || (kind === "typed" && v.startsWith("@")) || /\bmutation\b/.test(v)) mutation = true;
-      }
-    }
-    if (endpoint === undefined) return null;
-    const path = endpoint.replace(/^https?:\/\/[^/]+/i, "").replace(/^\//, "");
-    if (path === "graphql") return mutation ? { repo: env.GH_REPO || null } : null;
-    if (method !== undefined ? method === "GET" || method === "HEAD" : !fields) return null;
-    const m = /^repos\/([^/{}?]+)\/([^/{}?]+)(?:[/?]|$)/.exec(path);
+    const call = apiCallOf(argv, i);
+    if (call === null) return null;
+    if (call.path === "graphql") return call.mutation ? { repo: env.GH_REPO || null } : null;
+    if (!call.writes) return null;
+    const m = /^repos\/([^/{}?]+)\/([^/{}?]+)(?:[/?]|$)/.exec(call.path);
     return { repo: m ? `${m[1]}/${m[2]}` : env.GH_REPO || null };
   }
   const reads = READS[group];
@@ -281,6 +323,37 @@ export function writeTargetOf(argv: string[], env: Record<string, string | undef
     else url ??= /^https?:\/\/[^/]+\/([^/]+\/[^/]+)\/(?:issues|pull)\/\d+/.exec(a)?.[1];
   }
   return { repo: named ?? url ?? (env.GH_REPO || null) };
+}
+
+/**
+ * A `gh api` call whose group stands at `at`: its endpoint as a path (`repos/…`, `graphql`; a full URL loses its host),
+ * whether it writes (a method other than GET / HEAD, or a field and no method: gh then sends POST), and whether a field
+ * may hold a mutation (one says `mutation`, or is read from a file). Null when it names no endpoint.
+ */
+function apiCallOf(argv: string[], at: number): { path: string; writes: boolean; mutation: boolean } | null {
+  let method: string | undefined;
+  let fields = false;
+  let mutation = false;
+  let endpoint: string | undefined;
+  for (let j = at + 1; j < argv.length; j++) {
+    const f = flagOf(argv[j]!, API_FLAGS, API_SWITCHES);
+    if (f === null) {
+      if (endpoint === undefined && !argv[j]!.startsWith("-")) endpoint = argv[j];
+      continue;
+    }
+    const value = f.value ?? argv[++j];
+    if (value === undefined) continue;
+    const kind = API_FLAGS[f.flag];
+    if (f.flag === "-X" || f.flag === "--method") method = value.toUpperCase();
+    else if (kind === "raw" || kind === "typed" || kind === "file") {
+      fields = true;
+      const v = value.slice(value.indexOf("=") + 1);
+      if (kind === "file" || (kind === "typed" && v.startsWith("@")) || /\bmutation\b/.test(v)) mutation = true;
+    }
+  }
+  if (endpoint === undefined) return null;
+  const path = endpoint.replace(/^https?:\/\/[^/]+/i, "").replace(/^\//, "");
+  return { path, writes: method !== undefined ? method !== "GET" && method !== "HEAD" : fields, mutation };
 }
 
 /** The first `name` of the PATH that is not a guard: not this file, and not another checkout's copy of it (it holds `mark`). */

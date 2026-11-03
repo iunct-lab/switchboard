@@ -9,11 +9,10 @@ description: 開発の流れの数字から一番時間を食う段を選び、�
 起こすのは要望まで。PBI にして実装するかは今の Backlog の流れ（定期実行）に任せる。数字を目標にしてエージェントの動きを縛らない（段の時間の上限で止める、など）。1 回の実行で起こす要望は**最大 1 件**。
 
 ```bash
-REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 W=$(mktemp -d "${TMPDIR:-/tmp}/switchboard.flow-loop.XXXXXX")   # 表示されたパスを控える。Codex の Task は /tmp を閉じたサンドボックスなので $TMPDIR の下（CLAUDE.md の「作業の場所」）
 ```
 
-Issue の照会と書き込みは、スケジュールから走る Task の中（`BACKLOG_URL` がある）では `ops-kit backlog view` / `ops-kit backlog comment <n> --body-file <f>`（`issue-workflow` の「操作」。アプリの保存値に書き、アプリが GitHub に送る）。`BACKLOG_URL` が無い（人が手で回す）ときは `gh issue view` / `gh issue comment -R "$REPO"`（`flow-report` は保存値を読むので、`BACKLOG_URL` が無いと exit 2 で止まる）。閉じたものを含む `flow` の要望の一覧だけは、`ops-kit backlog list` にラベルと閉じた Issue の絞り込みが無いので、どちらでも `gh issue list` で読む。
+Issue の照会と書き込みは `ops-kit backlog view` / `ops-kit backlog comment <n> --body-file <f>` の 1 通り（`issue-workflow` の「操作」）。`flow-report` は保存値を読むので、`BACKLOG_URL` が無い（人が手で回す）と exit 2 で止まる。
 
 ## 要望の本文に書く印
 
@@ -30,7 +29,7 @@ Issue の照会と書き込みは、スケジュールから走る Task の中�
 ## 1. 効いたかを確かめる
 
 ```bash
-gh issue list -R "$REPO" -l flow --state all --limit 1000 --json number,state,title,body   # 全部読む（古い要望を見落とすと 2 で同じ段の要望が重なる）
+ops-kit backlog list --label flow --state all --fresh --json   # 全部読む（古い要望を見落とすと 2 で同じ段の要望が重なる）。本文は 1 件ずつ ops-kit backlog view <n>
 ```
 
 前に起こした `flow` の要望ごとに、コメントと `## 派生 PBI` の番号の Issue を読む（`ops-kit backlog view <n>`。閉じた時刻は `--json` の `.issue.closedAt`）。次の要望は飛ばす:

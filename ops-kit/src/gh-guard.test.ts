@@ -206,7 +206,7 @@ describe("backlog (#2694): in the app's Task an Issue of the workspace is not wr
     ] as const) {
       const r = run([...argv], "", awsConfig, task);
       expect([argv, r.code, r.called]).toEqual([argv, 1, null]);
-      expect(r.err).toContain(`acme/app の Issue に直接書きません。ops-kit backlog ${instead} を使ってください`);
+      expect(r.err).toContain(`acme/app のバックログ（Issue・コメント・ラベル・Project）に直接書きません。ops-kit backlog ${instead} を使ってください`);
     }
   });
 
@@ -219,14 +219,13 @@ describe("backlog (#2694): in the app's Task an Issue of the workspace is not wr
       ["-R", "acme/public", "issue", "comment", "5", "--body", "x"],
       ["pr", "comment", "5", "--body", "x"],
       ["issue", "view", "5"],
-      ["api", "repos/acme/app/issues/5/comments", "-f", "body=x"],
     ]) expect([argv, run(argv, "", awsConfig, task).called?.argv]).toEqual([argv, argv]);
   });
 
   test("a body that is the URL of another repository's Issue does not name the repository written to", () => {
     expect(run(["issue", "comment", "5", "--body", "https://github.com/acme/public/issues/9"], "", awsConfig, task)).toMatchObject({ code: 1, called: null });
-    expect(backlogWrite(["issue", "comment", "5", "-b", "-Racme/public"])).toEqual({ sub: "comment", repo: null });
-    expect(backlogWrite(["issue", "edit", "5", "--add-label", "https://github.com/acme/public/issues/9"])).toEqual({ sub: "edit", repo: null });
+    expect(backlogWrite(["issue", "comment", "5", "-b", "-Racme/public"])).toEqual({ instead: "ops-kit backlog comment", repo: null });
+    expect(backlogWrite(["issue", "edit", "5", "--add-label", "https://github.com/acme/public/issues/9"])).toEqual({ instead: "ops-kit backlog edit", repo: null });
   });
 
   test("without GH_REPO the workspace is the checkout's origin, as ops-kit backlog reads it", () => {
@@ -236,7 +235,7 @@ describe("backlog (#2694): in the app's Task an Issue of the workspace is not wr
       Bun.spawnSync(["git", "-C", repo, "remote", "add", "origin", "https://github.com/acme/app.git"]);
       const at = (argv: string[]) => Bun.spawnSync([GUARD, ...argv], { cwd: repo, env: { ...process.env, BACKLOG_URL: task.BACKLOG_URL, GH_REPO: undefined, AWS_CONFIG_FILE: awsConfig, PATH: `${dirname(GUARD)}:${dir}:${process.env.PATH}` }, stdout: "pipe", stderr: "pipe" });
       const stopped = at(["issue", "comment", "5", "--body", "x"]);
-      expect([stopped.exitCode, stopped.stderr.toString()]).toEqual([1, expect.stringContaining("acme/app の Issue に直接書きません")]);
+      expect([stopped.exitCode, stopped.stderr.toString()]).toEqual([1, expect.stringContaining("acme/app のバックログ（Issue・コメント・ラベル・Project）に直接書きません")]);
       expect(at(["issue", "comment", "5", "-R", "acme/public", "--body", "x"]).exitCode).toBe(3);
     } finally {
       rmSync(repo, { recursive: true, force: true });
@@ -245,6 +244,141 @@ describe("backlog (#2694): in the app's Task an Issue of the workspace is not wr
 
   test("without BACKLOG_URL an Issue write reaches gh as before", () => {
     expect(run(["issue", "edit", "5", "--body", "x"], "", awsConfig, { BACKLOG_URL: undefined, GH_REPO: "acme/app" }).called?.argv).toEqual(["issue", "edit", "5", "--body", "x"]);
+  });
+
+  describe("#3073: whatever form the write takes", () => {
+    const file = (name: string, text: string) => {
+      const path = join(dir, name);
+      writeFileSync(path, text);
+      return path;
+    };
+    // each write of the backlog, and the ops-kit command the stop names
+    const stops = (): Array<[string[], string]> => [
+      [["api", "repos/acme/app/issues", "-f", "title=t"], "ops-kit backlog create"],
+      [["api", "-X", "PATCH", "repos/acme/app/issues/5", "-f", "state=closed"], "ops-kit backlog edit"],
+      [["api", "repos/acme/app/issues/5/comments", "-f", "body=x"], "ops-kit backlog comment"],
+      [["api", "-X", "DELETE", "repos/acme/app/issues/comments/9"], "ops-kit backlog comment（コメントの編集・削除は無いので"],
+      [["api", "-X", "POST", "repos/acme/app/issues/5/labels", "-f", "labels[]=bug"], "ops-kit backlog edit --add-label / --remove-label"],
+      [["api", "-X", "DELETE", "repos/acme/app/issues/5/labels/bug"], "ops-kit backlog edit --add-label / --remove-label"],
+      [["api", "repos/acme/app/labels", "-f", "name=x"], "ops-kit sync-labels"],
+      [["api", "--method=patch", "/repos/acme/app/issues/5", "--input", file("patch.json", '{"body":"x"}')], "ops-kit backlog edit"],
+      [["api", "-X", "POST", "repos/{owner}/{repo}/issues/5/comments", "-f", "body=x"], "ops-kit backlog comment"],
+      [["api", "graphql", "-f", 'query=mutation{addProjectV2ItemById(input:{projectId:"P",contentId:"I"}){item{id}}}'], "ops-kit backlog set / triage"],
+      [["api", "graphql", "-f", "query=mutation($p:ID!){updateProjectV2ItemFieldValue(input:{projectId:$p}){clientMutationId}}", "-f", "p=P"], "ops-kit backlog set / triage"],
+      [["api", "graphql", "-f", 'query=mutation { addSubIssue(input:{issueId:"A",subIssueId:"B"}) { issue { id } } }'], "ops-kit backlog edit --parent / --no-parent"],
+      [["api", "graphql", "--input", file("mutation.json", JSON.stringify({ query: 'mutation { addComment(input:{subjectId:"I",body:"x"}) { clientMutationId } }' }))], "ops-kit backlog comment"],
+      [["project", "item-edit", "--id", "x", "--project-id", "y", "--field-id", "z", "--text", "v"], "ops-kit backlog set / triage"],
+      [["project", "item-add", "1", "--owner", "acme", "--url", "https://github.com/acme/app/issues/5"], "ops-kit backlog set / triage"],
+      [["project", "item-delete", "1", "--owner", "acme", "--id", "x"], "ops-kit backlog set / triage"],
+      [["api", "-X", "POST", "repos/acme/app/issues/5/sub_issues", "-F", "sub_issue_id=1"], "ops-kit backlog edit --parent / --no-parent"],
+      [["api", "-X", "POST", "repos/:owner/:repo/issues/5/comments", "-f", "body=x"], "ops-kit backlog comment"],
+      [["api", "-X", "PUT", "repos/acme/app/issues/5/lock"], "Task の外の gh（この操作は ops-kit backlog に無い）"],
+      [["api", "graphql", "-f", 'query=mutation{transferIssue(input:{issueId:"I",repositoryId:"R"}){issue{id}}}'], "Task の外の gh（この操作は ops-kit backlog に無い）"],
+    ];
+
+    test("gh api's REST, a graphql mutation and gh project item-* on the workspace stop before gh, with the command to use and the one-time way out", () => {
+      for (const [argv, instead] of stops()) {
+        const r = run(argv, "", awsConfig, task);
+        expect([argv, r.code, r.called]).toEqual([argv, 1, null]);
+        expect(r.err).toContain("acme/app のバックログ（Issue・コメント・ラベル・Project）に直接書きません。");
+        expect(r.err).toContain(instead);
+        expect(r.err).toContain("その 1 回だけ env -u BACKLOG_URL gh … で書けます");
+      }
+    });
+
+    test("a query, a read, a pull request, git, contents, a release, creating a Project and another repository's Issue reach gh", () => {
+      for (const argv of [
+        ["api", "graphql", "-f", "query=query{viewer{login}}"],
+        ["api", "repos/acme/app/issues/5"],
+        ["api", "-X", "GET", "repos/acme/app/issues/comments", "-f", "since=x"],
+        ["pr", "comment", "5", "--body", "x"],
+        ["api", "-X", "POST", "repos/acme/app/git/refs", "-f", "ref=x", "-f", "sha=y"],
+        ["api", "-X", "PUT", "repos/acme/app/contents/a.png", "--input", file("upload.json", '{"content":"eA=="}')],
+        ["api", "-X", "POST", "repos/acme/app/releases", "-f", "tag_name=v1"],
+        ["api", "-X", "POST", "repos/acme/app/pulls/5/comments", "-f", "body=x"],
+        ["api", "graphql", "-f", 'query=mutation{createProjectV2(input:{ownerId:"O",title:"t"}){projectV2{id}}}'],
+        ["api", "repos/acme/public/issues/5/comments", "-f", "body=x"],
+        ["project", "field-list", "1", "--owner", "acme"],
+        ["label", "list"],
+      ]) expect([argv, run(argv, "", awsConfig, task).called?.argv]).toEqual([argv, argv]);
+    });
+
+    test("without BACKLOG_URL every one of them reaches gh", () => {
+      for (const [argv] of stops()) expect([argv, run(argv, "", awsConfig, { BACKLOG_URL: undefined, GH_REPO: "acme/app" }).called?.argv]).toEqual([argv, argv]);
+    });
+
+    test("the way out: with BACKLOG_URL taken away the write reaches gh, and a secret in it still stops", () => {
+      const argv = ["api", "repos/acme/app/issues/5/comments", "-f", "body=x"];
+      expect(run(argv, "", awsConfig, { BACKLOG_URL: undefined, GH_REPO: "acme/app" }).called?.argv).toEqual(argv);
+      const secretWrite = run(["api", "repos/acme/app/issues/5/comments", "-f", `body=${secret}`], "", awsConfig, { BACKLOG_URL: undefined, GH_REPO: "acme/app" });
+      expect([secretWrite.code, secretWrite.called]).toEqual([1, null]);
+      expect(secretWrite.err).toContain("投稿を止めました");
+    });
+
+    test("backlogWrite names the repository of a REST path, none for {owner}/{repo}, graphql and gh project", () => {
+      expect(backlogWrite(["api", "-X", "PATCH", "repos/Acme/App/issues/5", "-f", "state=closed"])?.repo).toBe("Acme/App");
+      expect(backlogWrite(["api", "repos/{owner}/{repo}/issues", "-f", "title=t"])?.repo).toBeNull();
+      expect(backlogWrite(["api", "graphql", "-f", "query=mutation{closeIssue(input:{issueId:\"I\"}){clientMutationId}}"], ["mutation{closeIssue(input:{issueId:\"I\"}){clientMutationId}}"])).toEqual({ instead: "ops-kit backlog edit --state closed / open", repo: null });
+      // the mutation is read from the texts gh-guard read, not from argv: an unread file says nothing
+      expect(backlogWrite(["api", "graphql", "--input", "unread.json"], [])).toBeNull();
+      expect(backlogWrite(["api", "repos/acme/app/issues/5/comments"])).toBeNull();
+    });
+  });
+});
+
+describe("backlog (#3073): the repositories the app syncs", () => {
+  // the fake app runs in its own process: the guard is run with spawnSync, which holds this one's event loop
+  let server: ReturnType<typeof Bun.spawn>;
+  let port = 0;
+  let askedLog: string;
+  const asked = () => (existsSync(askedLog) ? readFileSync(askedLog, "utf8").length : 0);
+  beforeAll(async () => {
+    askedLog = join(dir, "asked.log");
+    const syncs = [{ workspaceId: "ws_a", backlog: "github", repository: "acme/app" }, { workspaceId: "ws_o", backlog: "github", repository: "acme/other" }, { workspaceId: "ws_l", backlog: "local", repository: null }];
+    const code = `const { appendFileSync } = require("node:fs"); const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => { appendFileSync(${JSON.stringify(askedLog)}, "."); return Response.json({ syncs: ${JSON.stringify(syncs)}, items: [] }); } }); console.log(s.port);`;
+    server = Bun.spawn([process.execPath, "-e", code], { stdout: "pipe", stderr: "inherit" });
+    const reader = (server.stdout as ReadableStream<Uint8Array>).getReader();
+    port = Number(new TextDecoder().decode((await reader.read()).value).trim());
+    reader.releaseLock();
+  });
+  afterAll(() => server.kill());
+  const task = () => ({ BACKLOG_URL: `http://127.0.0.1:${port}/api/backlog`, BACKLOG_TOKEN_FILE: undefined, GH_REPO: "acme/app" });
+
+  test("a backlog write to another repository the app syncs stops, naming it and its workspace", () => {
+    for (const argv of [
+      ["issue", "comment", "5", "-R", "acme/other", "--body", "x"],
+      ["api", "repos/ACME/Other/issues/5/comments", "-f", "body=x"],
+    ]) {
+      const r = run(argv, "", awsConfig, task());
+      expect([argv, r.code, r.called]).toEqual([argv, 1, null]);
+      expect(r.err).toContain(`${argv[0] === "api" ? "ACME/Other" : "acme/other"} のバックログ（Issue・コメント・ラベル・Project）に直接書きません`);
+      expect(r.err).toContain("--workspace ws_o");
+    }
+    // a write ops-kit backlog has no command for names no --workspace
+    const labels = run(["api", "repos/acme/other/labels", "-f", "name=x"], "", awsConfig, task());
+    expect([labels.code, labels.err.includes("ops-kit sync-labels"), labels.err.includes("--workspace")]).toEqual([1, true, false]);
+  });
+
+  test("a repository the app does not know reaches gh; a read and a pull request do not ask the app", () => {
+    for (const argv of [
+      ["issue", "comment", "5", "-R", "acme/unknown", "--body", "x"],
+      ["api", "repos/acme/unknown/issues/5/comments", "-f", "body=x"],
+    ]) expect([argv, run(argv, "", awsConfig, task()).called?.argv]).toEqual([argv, argv]);
+    const before = asked();
+    for (const argv of [["issue", "view", "5", "-R", "acme/other"], ["pr", "comment", "5", "-R", "acme/other", "--body", "x"], ["issue", "edit", "5", "--body", "x"]]) run(argv, "", awsConfig, task());
+    expect(asked()).toBe(before);
+  });
+
+  test("the app out of reach: the workspace still stops, another repository goes on with one line saying it was not judged", () => {
+    const down = { BACKLOG_URL: "http://127.0.0.1:1/api/backlog", BACKLOG_TOKEN_FILE: undefined, GH_REPO: "acme/app" };
+    const other = run(["issue", "comment", "5", "-R", "acme/other", "--body", "x"], "", awsConfig, down);
+    expect(other.called?.argv).toEqual(["issue", "comment", "5", "-R", "acme/other", "--body", "x"]);
+    expect(other.err).toContain("gh-guard: アプリに届かない（か 5 秒で答えない）ので、同期しているほかのリポジトリは判定していません");
+    expect(run(["issue", "comment", "5", "--body", "x"], "", awsConfig, down)).toMatchObject({ code: 1, called: null });
+  });
+
+  test("without BACKLOG_URL another synced repository and the workspace reach gh", () => {
+    for (const argv of [["issue", "comment", "5", "-R", "acme/other", "--body", "x"], ["issue", "comment", "5", "--body", "x"]]) expect(run(argv, "", awsConfig, { ...task(), BACKLOG_URL: undefined }).called?.argv).toEqual(argv);
   });
 });
 
@@ -404,6 +538,29 @@ describe("public copy (#2466): a write from a clone that still writes to its pub
   });
 });
 
+describe("merge: no judgement in front of gh (2026-11-02, the user allows a merge outside merge-gate)", () => {
+  test("gh pr merge and gh stack merge reach gh unchanged, with or without mergeGate in ops.config.json", () => {
+    const tree = mkdtempSync(join(tmpdir(), "ops-kit.gh-guard.merge."));
+    try {
+      const fake = join(tree, "bin");
+      mkdirSync(fake);
+      const calls = join(tree, "calls.jsonl");
+      writeFileSync(join(fake, "gh"), `#!/usr/bin/env bun\nrequire("node:fs").appendFileSync(${JSON.stringify(calls)}, JSON.stringify(process.argv.slice(2)) + "\\n");\n`);
+      chmodSync(join(fake, "gh"), 0o755);
+      // the guard no longer reads mergeGate
+      writeFileSync(join(tree, "ops.config.json"), JSON.stringify({ mergeGate: { command: ["false"] } }));
+      const argvs = [["pr", "merge", "12", "--rebase"], ["stack", "merge", "12", "--rebase", "-y"]];
+      for (const argv of argvs) {
+        const p = Bun.spawnSync([GUARD, ...argv], { cwd: tree, env: { ...process.env, BACKLOG_URL: undefined, GH_REPO: undefined, AWS_CONFIG_FILE: awsConfig, PATH: `${dirname(GUARD)}:${fake}:${process.env.PATH}` }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+        expect(p.exitCode).toBe(0);
+      }
+      expect(readFileSync(calls, "utf8").trim().split("\n").map((l) => JSON.parse(l))).toEqual(argvs);
+    } finally {
+      rmSync(tree, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("the forms gh accepts", () => {
   test("the alias new, a flag before the subcommand, a value attached to its flag, a body that starts like a flag", () => {
     for (const argv of [
@@ -427,7 +584,7 @@ describe("the forms gh accepts", () => {
     ]) {
       expect({ argv, r: run(argv) }).toMatchObject({ argv, r: { code: 1, called: null } });
     }
-  });
+  }, 30_000); // time assumption (the flake of #2939): a bun process per form, over the 5 s default under load (5039 ms failed; docs/design/perf.md "テストの揺れ")
 
   test("a body sent as JSON is read string by string, with its own line breaks", () => {
     const file = join(dir, "input.json");

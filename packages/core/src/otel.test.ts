@@ -1,4 +1,4 @@
-import { recordingText, skipRecordings } from "../../../scripts/recordings.ts";
+import { assertRecordings, recordingText, skipRecordings } from "../../../scripts/recordings.ts";
 import { describe, expect, test } from "bun:test";
 import { decisionsFromOtlp } from "./otel.ts";
 
@@ -18,6 +18,7 @@ describe("decisionsFromOtlp (#2236)", () => {
   });
 
   test.skipIf(skipRecordings("packages/core/fixtures/otel-classifier-stop.jsonl"))("decisionsFromOtlp: a recorded block keeps its category (classifier, 2.1.312)", () => {
+    assertRecordings("packages/core/fixtures/otel-classifier-stop.jsonl");
     const out = recordingText("packages/core/fixtures/otel-classifier-stop.jsonl").split("\n").filter(Boolean).flatMap((l) => decisionsFromOtlp(JSON.parse(l)));
     expect(out.map(({ verdict, category, mode, tool }) => ({ verdict, category, mode, tool }))).toEqual([
       { verdict: "allow", category: null, mode: "auto", tool: "Bash" },
@@ -27,6 +28,7 @@ describe("decisionsFromOtlp (#2236)", () => {
   });
 
   test.skipIf(skipRecordings("packages/core/fixtures/otel-classifier-ask.jsonl"))("decisionsFromOtlp: a recorded ask answered by the person is no verdict, only the stops before it count (classifier, 2.1.314)", () => {
+    assertRecordings("packages/core/fixtures/otel-classifier-ask.jsonl");
     const out = recordingText("packages/core/fixtures/otel-classifier-ask.jsonl").split("\n").filter(Boolean).flatMap((l) => decisionsFromOtlp(JSON.parse(l)));
     expect(out.map(({ verdict, category }) => ({ verdict, category }))).toEqual([
       { verdict: "allow", category: null },

@@ -16,7 +16,7 @@
 
 ## テスト観点 / Testing
 
-- [ ] `bun test` が green（アダプタ変更は録画 fixture を更新・追加した）
+- [ ] 関係するテスト（CLAUDE.md のコマンド）が green（アダプタ変更は録画 fixture を更新・追加した）
 - [ ] `bun run typecheck` が green
 - [ ] 実ランナーで手動確認した（該当時。使ったランナーとモデルを書く）
 

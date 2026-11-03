@@ -1,0 +1,8 @@
+ALAS2023-2026-3149 Critical/Sec.  amazon-ssm-agent-3.3.5226.0-1.amzn2023.aarch64
+ALAS2023-2023-058  Critical/Sec.  expat-2.5.0-1.amzn2023.0.2.aarch64
+ALAS2023-2026-1986 Important/Sec. acl-2.4.0-1.amzn2023.0.1.aarch64
+ALAS2023-2024-498  Important/Sec. amazon-cloudwatch-agent-1.300032.3-1.amzn2023.aarch64
+ALAS2023-2026-1426 Medium/Sec.    alsa-lib-1.2.7.2-1.amzn2023.0.3.aarch64
+ALAS2023-2026-2082 Medium/Sec.    alsa-lib-1.2.7.2-1.amzn2023.0.4.aarch64
+ALAS2023-2026-1442 Low/Sec.       amazon-cloudwatch-agent-1.300064.1-1.amzn2023.aarch64
+ALAS2023-2023-339  Low/Sec.       amazon-ssm-agent-3.2.1377.0-1.amzn2023.aarch64

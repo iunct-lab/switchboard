@@ -43,6 +43,8 @@ bun run --cwd apps/web build && bun scripts/perf-bench.ts --json perf-result.jso
 | bundle (gzip) | js 186608 → 186650 B、css 6031 → 6031 B | | | | | |
 ```
 
+bundle には上限が無い（`scripts/perf-budget.json` に無い）。CI の `perf-ratchet.ts check` が main の先端との差を `bundle:` の行に出し（local-ci のコメントにも出る）、js か css が 1% 以上増えたら `grew:` で赤にする（`docs/design/perf.md` の「ラチェット」の Bundle）。表の bundle の行は前後の比較のために書く。
+
 ## 4. 上限を下げる（マージの前に、同じ PR で）
 
 改善の PR では CI のラチェットが「良くなった」で落ちる（両側のゲート）ので、マージの前に同じ PR で上限を下げる。`perf-result.json` は 3 の「後」の結果（1 の前の結果を渡すと何も下がらない）:
@@ -52,9 +54,9 @@ bun scripts/perf-ratchet.ts update perf-result.json                  # このホ
 bun scripts/perf-ratchet.ts update <Actions の結果>.json --env github  # Actions の上限。check が落ちた run の log の最後に出る JSON をファイルにして渡す
 ```
 
-`update` は下げる方向にしか書き換えない。上限は環境ごとに 2 組（`github` / `local`）あり、片方だけ下げると、もう片方は次の CI で「良くなった」と出る — 両方下げる。
+`update` は下げる方向にしか書き換えない。bundle は上限が無いので下げるものも無い。上限は環境ごとに 2 組（`github` / `local`）あり、片方だけ下げると、もう片方は次の CI で「良くなった」と出る — 両方下げる。
 
-**上限を上げたい**（機能を足して数が増えるなど）ときは、`scripts/perf-budget.json` を手で上げる。`check` が main より上げた項目で exit 1 になるので CI は落ち、マージするかは利用者の判断（運用の確認として聞く。理由と前後の表を添える）。
+**上限を上げたい**（機能を足して数が増えるなど）ときは、`scripts/perf-budget.json` を手で上げる（bundle は上限が無いので書き換えない。1% 以上増えたら `grew:` で赤になり、マージするかは利用者の判断）。`check` が main より上げた項目で exit 1 になるので CI は落ち、マージするかは利用者の判断（運用の確認として聞く。理由と前後の表を添える）。
 
 ## 5. マージ後に実測を見る
 
