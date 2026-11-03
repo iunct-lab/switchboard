@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { buildImportGraph, classify, findStaleReads, findUndeclared, formatSelection, parseReads, select, selectFrom } from "./test-select";
+import { buildImportGraph, classify, findStaleReads, findUndeclared, formatSelection, parseReads, select, selectFrom, selectLoaded } from "./test-select";
 
 /** 偽のツリー。パス → 中身。 */
 function tree(src: Record<string, string>) {
@@ -264,6 +264,32 @@ describe("selectFrom / formatSelection", () => {
   });
 });
 
+describe("selectLoaded", () => {
+  const src: Record<string, string> = {
+    "scripts/perf-bench.ts": `import "../packages/core/src/server.ts";`,
+    "packages/core/src/server.ts": "",
+    "packages/core/src/server.test.ts": `import "./server.ts";`,
+    "apps/web/src/App.tsx": "",
+    "docs/design/perf.md": "",
+  };
+  const loaded = (...changed: string[]) => selectLoaded(changed, Object.keys(src), (p) => src[p]!);
+
+  test("perf-bench に届かない変更（文書・テストだけ）は回さない", () => {
+    expect(loaded("docs/design/perf.md")).toEqual({ run: false, reason: "変更 1 ファイルのどれも scripts/perf-bench.ts に届かない" });
+    expect(loaded("docs/design/perf.md", "packages/core/src/server.test.ts").run).toBe(false);
+  });
+
+  test("import で届く変更と、宣言した画面は回す", () => {
+    expect(loaded("docs/design/perf.md", "packages/core/src/server.ts")).toEqual({ run: true, reason: "packages/core/src/server.ts → scripts/perf-bench.ts" });
+    expect(loaded("apps/web/src/App.tsx")).toEqual({ run: true, reason: "apps/web/src/App.tsx ← scripts/perf-bench.ts（test-reads）" });
+  });
+
+  test("判定できない変更と、読めない依存は回す", () => {
+    expect(loaded("bun.lock")).toEqual({ run: true, reason: "bun.lock: 依存の定義や設定" });
+    expect(selectLoaded(["docs/design/perf.md"], ["bad.ts", "scripts/perf-bench.ts"], (p) => (p === "bad.ts" ? "import {" : "")).run).toBe(true);
+  });
+});
+
 describe("実行例（このリポジトリの実物）", () => {
   const run = (...args: string[]) => Bun.spawnSync(["bun", "scripts/test-select.ts", ...args], { cwd: `${import.meta.dir}/..` }).stdout.toString();
 
@@ -283,6 +309,17 @@ describe("実行例（このリポジトリの実物）", () => {
 
   test("シェルは宣言したテストを理由つきで選ぶ", () => {
     expect(run("aws/host/bootstrap.sh")).toContain("aws/host/host.test.ts  aws/host/bootstrap.sh ← aws/host/host.test.ts（test-reads）");
+  });
+
+  test.each([
+    ["docs/design/perf.md", "loaded: skip  変更 1 ファイルのどれも scripts/perf-bench.ts に届かない"],
+    ["packages/core/src/server.ts", "loaded: run  packages/core/src/server.ts → scripts/perf-bench.ts"],
+    ["rescue/src/promote.ts", "loaded: run  rescue/src/promote.ts → scripts/perf-load.ts → scripts/perf-bench.ts"],
+    ["apps/web/src/App.tsx", "loaded: run  apps/web/src/App.tsx ← scripts/perf-bench.ts（test-reads）"],
+    ["scripts/perf-budget.json", "loaded: run  scripts/perf-budget.json ← scripts/perf-bench.ts（test-reads）"],
+    ["packages/core/config/routing.yaml", "loaded: run  packages/core/config/routing.yaml ← scripts/perf-bench.ts（test-reads）"],
+  ])("--loaded %s", (path, line) => {
+    expect(run("--loaded", path).trimEnd()).toBe(line);
   });
 
   test("db.ts は依存するテストを選ぶ", () => {

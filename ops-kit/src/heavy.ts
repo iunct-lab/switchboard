@@ -48,7 +48,15 @@ export function memAvailableMb(): number | undefined {
   }
 }
 
-type Holder = { pid: number; name: string; cwd: string; startedAt: string; procStart?: string; token: string };
+type Holder = { pid: number; name: string; cwd: string; taskId: string | null; queuedAt: string; startedAt: string; procStart?: string; token: string };
+
+/** A job holding a slot, as `readHeavyState` gives it. `taskId` is the Task that started it (`OPS_KIT_TASK_ID`, which the app running the Task sets; null outside a Task). */
+export type HeavyRun = { pid: number; name: string; cwd: string; taskId: string | null; queuedAt: string; startedAt: string };
+/** A job waiting for a slot (`slot`) or for the free memory to rise above the floor (`memory`). */
+export type HeavyWait = { pid: number; name: string; cwd: string; taskId: string | null; queuedAt: string; reason: "slot" | "memory" };
+type Waiter = HeavyWait & { procStart?: string };
+// a waiter's file: wait-<pid>-<token>.json (the token is its holder's token once it takes a slot)
+const WAIT_FILE = /^wait-\d+-([\w-]+)\.json$/;
 
 // the process's start time (field 22 of /proc/<pid>/stat): a pid reused by another process, or one from before a reboot,
 // does not keep a slot. Undefined where /proc is not there (the pid alone decides)
@@ -61,7 +69,7 @@ function procStart(pid: number): string | undefined {
   }
 }
 
-function alive(h: Holder): boolean {
+function alive(h: { pid: number; procStart?: string }): boolean {
   try {
     process.kill(h.pid, 0);
   } catch (e) {
@@ -118,10 +126,21 @@ function reap(dir: string, file: string, dead: { token: string | undefined; text
   }
 }
 
-// the live holders, the dead ones reaped on the way
+// the live holders, the dead ones reaped on the way (and the files of waiters killed while waiting: the name is theirs
+// alone, so removing it races no one)
 function holders(dir: string): Holder[] {
   const live: Holder[] = [];
   for (const file of readdirSync(dir)) {
+    if (WAIT_FILE.test(file)) {
+      let w: Waiter | undefined;
+      try {
+        w = JSON.parse(readFileSync(join(dir, file), "utf8")) as Waiter;
+      } catch {
+        continue; // gone meanwhile; a file is written whole, so one that does not read is not left half
+      }
+      if (w && typeof w.pid === "number" && !alive(w)) removeFile(join(dir, file));
+      continue;
+    }
     if (!/^slot-\d+\.json$/.test(file)) continue;
     const path = join(dir, file);
     let text: string;
@@ -161,7 +180,66 @@ function take(dir: string, max: number, me: Holder): string | undefined {
   }
 }
 
-export type HeavyOptions = { home?: string; mem?: () => number | undefined; pollMs?: number; log?: (line: string) => void };
+// the waiter's file, written whole (a rename) so a reader never sees half of it. The name carries the token as well as the
+// pid: one process may wait for two slots at once
+const waitPath = (dir: string, me: Holder) => join(dir, `wait-${me.pid}-${me.token}.json`);
+function writeWait(dir: string, w: Waiter, token: string): void {
+  const draft = join(dir, `.draft-wait-${process.pid}-${token}`);
+  writeFileSync(draft, JSON.stringify(w));
+  renameSync(draft, join(dir, `wait-${w.pid}-${token}.json`));
+}
+function removeFile(path: string): void {
+  try {
+    unlinkSync(path);
+  } catch {
+    /* already gone */
+  }
+}
+
+/**
+ * The machine's slots as another process sees them: the limits, the jobs holding a slot and the jobs waiting, oldest first.
+ * Files of processes that are gone are left out but not removed (the next waiter reaps a slot; a reader changes nothing).
+ * No directory gives none.
+ */
+export function readHeavyState(home: string): { config: HeavyConfig; running: HeavyRun[]; waiting: HeavyWait[] } {
+  const config = heavyConfig(home);
+  const dir = heavyStateDir(home);
+  let files: string[];
+  try {
+    files = readdirSync(dir);
+  } catch {
+    return { config, running: [], waiting: [] };
+  }
+  const running: HeavyRun[] = [];
+  const waiting: HeavyWait[] = [];
+  const tokens = new Set<string>();
+  const read = (file: string): Record<string, unknown> | undefined => {
+    try {
+      const v = JSON.parse(readFileSync(join(dir, file), "utf8"));
+      return v && typeof v === "object" && typeof v.pid === "number" ? v : undefined;
+    } catch {
+      return undefined; // gone between the listing and the read, or cut short
+    }
+  };
+  for (const file of [...files].sort((a, b) => Number(b.startsWith("slot-")) - Number(a.startsWith("slot-")))) {
+    if (/^slot-\d+\.json$/.test(file)) {
+      const h = read(file) as Holder | undefined;
+      if (h && alive(h)) {
+        tokens.add(h.token);
+        running.push({ pid: h.pid, name: h.name, cwd: h.cwd, taskId: h.taskId ?? null, queuedAt: h.queuedAt ?? h.startedAt, startedAt: h.startedAt });
+      }
+    } else if (WAIT_FILE.test(file)) {
+      const w = read(file) as Waiter | undefined;
+      // one that has just taken its slot is running: its file goes right after the take
+      if (w && alive(w) && !tokens.has(WAIT_FILE.exec(file)![1]!)) waiting.push({ pid: w.pid, name: w.name, cwd: w.cwd, taskId: w.taskId ?? null, queuedAt: w.queuedAt, reason: w.reason });
+    }
+  }
+  running.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+  waiting.sort((a, b) => a.queuedAt.localeCompare(b.queuedAt));
+  return { config, running, waiting };
+}
+
+export type HeavyOptions = { home?: string; mem?: () => number | undefined; pollMs?: number; log?: (line: string) => void; taskId?: string | null };
 
 /**
  * Runs `fn` holding one of the machine's slots. Waits, polling every `pollMs`, while every slot is held or the free memory
@@ -176,39 +254,54 @@ export async function withHeavySlot<T>(name: string, fn: () => Promise<T>, o: He
   const log = o.log ?? ((line: string) => console.error(line));
   const cfg = heavyConfig(home);
   const dir = heavyStateDir(home);
-  const me: Holder = { pid: process.pid, name, cwd: process.cwd(), startedAt: "", procStart: procStart(process.pid), token: crypto.randomUUID() };
+  const taskId = o.taskId !== undefined ? o.taskId : (process.env.OPS_KIT_TASK_ID || null);
+  const me: Holder = { pid: process.pid, name, cwd: process.cwd(), taskId, queuedAt: new Date().toISOString(), startedAt: "", procStart: procStart(process.pid), token: crypto.randomUUID() };
   let slot: string | undefined;
   let said = "";
   let waited = false;
-  // `kind` is the reason without its numbers: free memory moves on every read, and a line per poll says nothing new
-  const say = (kind: string, reason: string) => {
+  let wrote: HeavyWait["reason"] | undefined;
+  // `kind` is the reason without its numbers: free memory moves on every read, and a line per poll says nothing new.
+  // The waiter's file is written again only when the reason itself (slot / memory) changes: no writes per poll
+  const say = (kind: string, reason: string, why: HeavyWait["reason"]) => {
     if (kind !== said) log(`heavy: 待っています（${reason}）`);
     said = kind;
     waited = true;
+    if (why !== wrote) {
+      // a place that cannot be written (a sandboxed Task) only leaves this waiter out of the list: it still waits
+      try {
+        writeWait(dir, { pid: me.pid, name, cwd: me.cwd, taskId, queuedAt: me.queuedAt, reason: why, procStart: me.procStart }, me.token);
+      } catch {
+        /* not listed */
+      }
+      wrote = why;
+    }
   };
   try {
     mkdirSync(dir, { recursive: true });
     for (;;) {
       const free = mem();
       if (free !== undefined && free < cfg.minFreeMb) {
-        say("memory", `空きメモリ ${free} MB < 下限 ${cfg.minFreeMb} MB`);
+        say("memory", `空きメモリ ${free} MB < 下限 ${cfg.minFreeMb} MB`, "memory");
       } else {
         const held = holders(dir);
         if (held.length < cfg.max) {
           me.startedAt = new Date().toISOString();
+          if (!waited) me.queuedAt = me.startedAt;
           slot = take(dir, cfg.max, me);
           if (slot) break;
         }
         const now = held.length ? held : holders(dir);
         const slots = `枠 ${now.length}/${cfg.max}: ${now.map((h) => `${h.name} ${h.cwd} ${h.startedAt} から`).join("、")}`;
-        say(`slots ${now.map((h) => h.token).join(" ")}`, slots);
+        say(`slots ${now.map((h) => h.token).join(" ")}`, slots, "slot");
       }
       await Bun.sleep(pollMs);
     }
   } catch (e) {
+    if (wrote) removeFile(waitPath(dir, me));
     log(`heavy: 枠の置き場に書けないので、枠を取らずに動かします（${dir}: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}）`);
     return fn();
   }
+  if (wrote) removeFile(waitPath(dir, me));
   if (waited) log(`heavy: 始めます（${name}）`);
   try {
     return await fn();

@@ -43,7 +43,7 @@
 1. `ops.config.json` の `forge.service` にその名前（例 `gitlab`）を書く（host やリポジトリを設定から読むなら、そのとき `ForgeConfig` に足して実装が読む）
 2. 取込み: `backlog-sync.ts` の `BacklogSync` の取込み（`runForgeOperation({ kind: "read" … }, { github: …, gitlab: … })`）の表に、そのサービスの `read`（保存の形は `putBacklogSnapshot` の記録。キーの `service` / `host` はそのサービスのもの）
 3. 送信: `backlog-send.ts` の `sendGithubOperations` の `services` の表に `write` / `create` / `comment` / `project`。足さない種類は対応していないと言って `failed` になる（GitLab は `project` を足していない）
-4. ローカル CI の報告: `scripts/local-ci.ts` の `reportPass` の表に `verification`（キットの側は `forge-github.ts` の隣に `forge-<service>.ts`）
+4. ローカル CI の報告: `scripts/local-ci.ts` の `reportResult` の表に `verification`（キットの側は `forge-github.ts` の隣に `forge-<service>.ts`）
 5. 保存の型: `BacklogRepositoryKey.service`（[`model.ts`](../../packages/protocol/src/model.ts)）にその値を足す（DB の列は既に `service` を持つ。`gitlab` は足した）
 
 ## GitLab（#892）

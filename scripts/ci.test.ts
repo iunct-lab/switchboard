@@ -50,7 +50,7 @@ async function local(fail: string, code: number): Promise<{ results: Array<{ cod
     sh: async (cmd) => {
       if (cmd[0] === "gh") return JSON.stringify({ headRefOid: "0123456789abcdef0123456789abcdef01234567", baseRefName: "main" });
       if (cmd.includes("fetch")) fetched = cmd.at(-1)!;
-      if (cmd.includes("rev-parse")) return fetched.startsWith("refs/pull/") ? "0123456789abcdef0123456789abcdef01234567\n" : "1111111111111111111111111111111111111111\n";
+      if (cmd.includes("rev-parse")) return fetched.startsWith("+refs/pull/") ? "0123456789abcdef0123456789abcdef01234567\n" : "1111111111111111111111111111111111111111\n";
       if (cmd.includes("worktree") && cmd.includes("add")) {
         const dir = cmd[cmd.indexOf("--detach") + 1]!;
         mkdirSync(join(dir, ".github/workflows"), { recursive: true });

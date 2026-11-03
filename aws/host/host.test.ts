@@ -829,7 +829,7 @@ exit 1
     mkdirSync(bin, { recursive: true });
     writeFileSync(join(bin, "docker"), `#!/bin/sh\necho "docker $*" >> "${log}"\n`);
     chmodSync(join(bin, "docker"), 0o755);
-    const hint = "docker: heavy builds and compose stacks can run off the host: sb-offload [--size large] <command> — small unless asked; a compose stack's checks can need large (開発リポジトリ aws/README.md, Offload)\n";
+    const hint = "docker: heavy builds and compose stacks can run off the host: sb-offload <command> — small by default; if it dies out of memory, retry with --size medium or large (開発リポジトリ aws/README.md, Offload)\n";
     // another DOCKER_HOST: dockerd-up is not asked, only the wrapper's own lines run
     const docker = (...a: string[]) => run("docker.sh", a, { HOME: join(dir, "home-hint"), SB_DOCKER_BIN: bin, DOCKER_HOST: "tcp://127.0.0.1:1" });
     for (const a of [["build", "-t", "x", "."], ["buildx", "build", "."], ["image", "build", "."], ["compose", "up", "--build"], ["compose", "-f", "c.yaml", "up", "-d"], ["compose", "--project-name=x", "-p", "y", "build"], ["compose", "build"]]) {
@@ -1634,6 +1634,28 @@ exit 0`,
     expect(t.err).toContain("ended TIMED_OUT without the command's exit code");
     setLog("FAILED", ["tar: unexpected end of file"]);
     expect(offload(["docker", "build", "."]).code).toBe(1);
+  });
+
+  test("sb-offload points a command killed with 137 on small or medium at the next size, keeping the exit code (#3245)", () => {
+    awsFake();
+    setLog("FAILED", ["Killed", "sb-offload: exit 137"]);
+    for (const [args, size, next] of [[[], "small", "medium"], [["--size", "medium"], "medium", "large"]] as const) {
+      const r = offload([...args, "docker", "compose", "up"]);
+      expect(r.code).toBe(137);
+      expect(r.err.trimEnd().split("\n").at(-1)).toBe(`sb-offload: exit 137 usually means out of memory on ${size}; retry with --size ${next}`);
+    }
+  });
+
+  test("sb-offload says nothing about a size for 137 on large, or for any other exit code (#3245)", () => {
+    awsFake();
+    setLog("FAILED", ["Killed", "sb-offload: exit 137"]);
+    const large = offload(["--size", "large", "docker", "compose", "up"]);
+    expect(large.code).toBe(137);
+    expect(large.err).not.toContain("retry with --size");
+    setLog("FAILED", ["3 passed, 1 failed", "sb-offload: exit 1"]);
+    const other = offload(["pytest"]);
+    expect(other.code).toBe(1);
+    expect(other.err).not.toContain("retry with --size");
   });
 
   test("sb-offload stops the build and exits 130 when it is interrupted, and removes the upload in every case", async () => {

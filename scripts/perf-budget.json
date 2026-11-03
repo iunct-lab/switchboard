@@ -29,12 +29,12 @@
     "journeys": {
       "launch": {
         "requests": 14,
-        "layoutCount": 5,
-        "recalcStyleCount": 7,
+        "layoutCount": 6,
+        "recalcStyleCount": 8,
         "layoutShift": 0.0467
       },
       "new-task": {
-        "requests": 18,
+        "requests": 16,
         "layoutCount": 9,
         "recalcStyleCount": 9,
         "layoutShift": 0.042
@@ -51,7 +51,7 @@
       }
     },
     "loaded": {
-      "healthMaxMs": 5440
+      "healthMaxMs": 11950
     },
     "durations": {
       "typecheck": 12.8,

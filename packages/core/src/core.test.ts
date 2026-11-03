@@ -5,10 +5,12 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rm
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentEvent, AskList, RunnerAdapter, RunnerDetection, RunnerId, RoutingStats, RunnerSession, StartOptions, Task } from "@switchboard/protocol";
-import { OpsLatency, OpsLoad, OpsStops } from "@switchboard/protocol";
+import { OpsLatency, OpsLoad, OpsResources, OpsStops } from "@switchboard/protocol";
 import { Database } from "bun:sqlite";
 import { isTempDir, loadConfig, teleportWorktreePath } from "./config.ts";
 import { abortOrphanedTasks, Db } from "./db.ts";
+import * as opsLoadModule from "./ops-load.ts";
+import { opsResources, readMemInfo } from "./ops-resources.ts";
 import { measureFootprint } from "./footprint.ts";
 import { startServer as startDaemon } from "./server.ts";
 import type { suggestTitle } from "./suggest-title.ts";
@@ -4992,6 +4994,63 @@ describe("ops latency (#2102)", () => {
   }, 30_000); // startServer and the API round trips: over the 5 s default on a loaded host (docs/design/perf.md "テストの揺れ")
 });
 
+describe("ops resources", () => {
+  test("now: free memory and the floor, the slots with their Tasks, who waits (outside a Task too), the latest minute's RSS — without walking /proc's processes", () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-ops-resources-"));
+    const db = new Db(join(h, "x.db"));
+    const procs = spyOn(opsLoadModule, "readProcs");
+    try {
+      const now = Date.now();
+      db.insertTask({ id: "t_ci", workspaceId: null, title: "PBI の local-ci", runner: "claude", cwd: h, scope: [h], status: "running", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
+      // ops-kit heavy's files: one holding the slot in Task t_ci, one waiting outside a Task, one of a process that is gone
+      const state = join(h, ".local", "state", "ops-kit", "heavy");
+      mkdirSync(state, { recursive: true });
+      mkdirSync(join(h, ".config", "ops-kit"), { recursive: true });
+      writeFileSync(join(h, ".config", "ops-kit", "heavy.json"), JSON.stringify({ max: 1, minFreeMb: 1536 }));
+      const live = process.pid;
+      writeFileSync(join(state, "slot-0.json"), JSON.stringify({ pid: live, name: "local-ci 3639", cwd: "/w", taskId: "t_ci", queuedAt: "2026-11-03T10:00:00.000Z", startedAt: "2026-11-03T10:00:05.000Z", token: "a" }));
+      writeFileSync(join(state, `wait-${live}-b.json`), JSON.stringify({ pid: live, name: "bun test", cwd: "/w", taskId: null, queuedAt: "2026-11-03T10:01:00.000Z", reason: "slot" }));
+      writeFileSync(join(state, "wait-999999999-c.json"), JSON.stringify({ pid: 999_999_999, name: "gone", cwd: "/w", taskId: null, queuedAt: "2026-11-03T09:00:00.000Z", reason: "memory" }));
+      const proc = join(h, "proc");
+      mkdirSync(proc);
+      writeFileSync(join(proc, "meminfo"), "MemTotal:        3921000 kB\nMemFree:          100000 kB\nMemAvailable:    1000000 kB\nSwapTotal:       2097148 kB\nSwapFree:        1997148 kB\n");
+      // nothing sampled yet: no consumers
+      expect(opsResources(db, { home: h, procRoot: proc }).consumers).toBeNull();
+      const group = (ts: number, task: string | null, owner: string, kind: string, rss: number, n: number) =>
+        db.sqlite.query("INSERT INTO ops_load_groups (ts, task_id, owner, kind, rss, cpu_ms, procs) VALUES (?, ?, ?, ?, ?, 0, ?)").run(ts, task, owner, kind, rss, n);
+      group(now - 120_000, "t_ci", "task", "test", 9_000_000_000, 1); // an older minute: not now
+      group(now - 60_000, "t_ci", "task", "browser", 300_000_000, 3);
+      group(now - 60_000, "t_ci", "task", "test", 700_000_000, 4);
+      group(now - 60_000, null, "daemon", "judge", 50_000_000, 1);
+      group(now - 60_000, "t_unknown", "task", "runner", 100_000_000, 1);
+      const r = OpsResources.parse(opsResources(db, { home: h, procRoot: proc }));
+      expect(r.memory).toEqual({ availableBytes: 1_000_000 * 1024, totalBytes: 3_921_000 * 1024, swapUsedBytes: 100_000 * 1024, floorBytes: 1536 * 1024 * 1024 });
+      expect(r.slots.max).toBe(1);
+      expect(r.slots.running).toEqual([{ pid: live, name: "local-ci 3639", cwd: "/w", taskId: "t_ci", taskTitle: "PBI の local-ci", queuedAt: "2026-11-03T10:00:00.000Z", startedAt: "2026-11-03T10:00:05.000Z" }]);
+      expect(r.slots.waiting).toEqual([{ pid: live, name: "bun test", cwd: "/w", taskId: null, taskTitle: null, queuedAt: "2026-11-03T10:01:00.000Z", reason: "slot" }]);
+      expect(r.consumers!.at).toBe(now - 60_000);
+      expect(r.consumers!.groups.map((g) => `${g.taskId}/${g.taskTitle}/${g.kind}/${g.rssBytes}/${g.procs}`)).toEqual([
+        "t_ci/PBI の local-ci/test/700000000/4",
+        "t_ci/PBI の local-ci/browser/300000000/3",
+        "t_unknown/null/runner/100000000/1",
+        "null/null/judge/50000000/1",
+      ]);
+      expect(procs).not.toHaveBeenCalled();
+      // no meminfo (macOS): no memory, the rest as before
+      expect(readMemInfo(join(h, "none"))).toBeNull();
+      expect(opsResources(db, { home: h, procRoot: join(h, "none") }).memory).toBeNull();
+      // no ops-kit heavy on this machine yet: the defaults and no jobs
+      const empty = mkdtempSync(join(tmpdir(), "switchboard-ops-resources-empty-"));
+      expect(opsResources(db, { home: empty, procRoot: proc }).slots).toEqual({ max: 1, running: [], waiting: [] });
+      rmSync(empty, { recursive: true, force: true });
+    } finally {
+      procs.mockRestore();
+      db.sqlite.close();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("ops load (#2086)", () => {
   test("GET /api/ops/load: JST hours with peaks and limit hits (a unit created again restarts the count), task × kind largest first, ?task= narrows; days is an integer 1..90", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-ops-load-"));
@@ -5034,6 +5093,8 @@ describe("ops load (#2086)", () => {
       expect(one.groups.map((g) => `${g.taskId}/${g.kind}`)).toEqual(["t1/browser", "t1/runner"]);
       for (const q of ["?days=0", "?days=91", "?days=abc", "?days=1.5"]) expect((await fetch(`${b}/api/ops/load${q}`)).status).toBe(400);
       expect((await fetch(`${b}/api/ops/load`)).status).toBe(200); // absent = 7
+      // the resources screen's route answers in its shape (what it reads is "ops resources" below)
+      OpsResources.parse(await fetch(`${b}/api/ops/resources`).then(j));
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });

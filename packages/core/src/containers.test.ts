@@ -166,6 +166,7 @@ describe("containers of an ended task (#1418)", () => {
       expect(seen[0]!.DOCKER_MARK_LABEL).toBe(`switchboard.task=${a.id}`);
       expect(seen[0]!.DOCKER_MARK_LOG).toMatch(new RegExp(`/docker/${a.id}\\.jsonl$`));
       expect(seen[0]!.SWITCHBOARD_TASK_ID).toBe(a.id);
+      expect(seen[0]!.OPS_KIT_TASK_ID).toBe(a.id);
     } finally { await c.stop(); }
   });
 });

@@ -83,7 +83,7 @@ export function WorkspaceCard(props: { workspaces: Workspace[]; clones: Workspac
     </label>
   );
   return (
-    <section className="card">
+    <section className="card" id="workspace">
       <h5>Workspace</h5>
       {props.workspaces.filter((w) => w.kind === "repo").map((w) => (
         <div key={w.id}>

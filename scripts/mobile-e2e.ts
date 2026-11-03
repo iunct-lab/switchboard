@@ -168,7 +168,7 @@ try {
       assert(!(await evaluate(`!!document.querySelector('a.rescue-link')`)), `${label}: the link came before its answer`);
       // A tap before the answer lands on the tab, and the row has the width it will have after.
       await tap(`[...document.querySelectorAll('header.chrome nav button')].find((b) => b.textContent === 'Ledger')`, true);
-      await until(() => evaluate(`!!document.querySelector('.main.ledger') && location.pathname === '/'`), `${label}: Ledger opens, not /rescue/`);
+      await until(() => evaluate(`!!document.querySelector('.main.ledger') && location.pathname === '/ledger'`), `${label}: Ledger opens, not /rescue/`);
       release();
       await until(() => evaluate(`!!document.querySelector('a.rescue-link')`), `${label}: the link arrives`);
       await tap(`[...document.querySelectorAll('header.chrome nav button')].find((b) => b.textContent === 'Home')`, true);

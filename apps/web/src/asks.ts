@@ -143,6 +143,17 @@ export function answerButtons(a: Ask): AnswerButton[] {
   return out;
 }
 
+/**
+ * 「すぐ答えられる」 (#1675): the person's to answer (open or held), nothing an answer does not take away, and a button
+ * that answers it with one press (answerButtons' primary: 承認して続行, 推奨案で進める, 確認した). One that sends a
+ * grant (a stop's この操作だけ許可して続ける, a recommended choice's ` — 許可: `) is not: it widens what the Task may do.
+ */
+export const isQuick = (a: Ask) => groupKeyOf(a) === "person" && a.blockers.length === 0 && answerButtons(a).some((b) => b.primary && b.grant === null);
+
+/** The groups with the person's narrowed to the quick ones (#1675): the other groups as they are, the order kept, an emptied group left out. */
+export const quickGroups = <G extends { key: GroupKey; asks: Ask[] }>(groups: G[]): G[] =>
+  groups.map((g) => (g.key === "person" ? { ...g, asks: g.asks.filter(isQuick) } : g)).filter((g) => g.asks.length > 0);
+
 /** The questions of one Task its screen answers (#2745): its open operational checks and stops a person answers. */
 export const taskAsks = (list: Ask[], taskId: string) => list.filter((a) => a.task?.id === taskId && (a.kind === "check" || a.kind === "stop") && a.state === "open" && a.needs === "person");
 

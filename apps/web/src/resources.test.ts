@@ -1,0 +1,90 @@
+import { expect, test } from "bun:test";
+import type { OpsResources, ResourceRun, ResourceWait } from "@switchboard/protocol";
+import { atLabel, consumerRows, latestAnswer, memoryLine, runOwner, since, waitLine, watchResources } from "./resources.ts";
+
+const MB = 1024 * 1024;
+const GB = 1024 * MB;
+const memory: NonNullable<OpsResources["memory"]> = { availableBytes: 1 * GB, totalBytes: 3.7 * GB, swapUsedBytes: 1.1 * GB, floorBytes: 1.5 * GB };
+const run = (o: Partial<ResourceRun>): ResourceRun => ({ pid: 1, name: "local-ci 3320", cwd: "/w", taskId: "t1", taskTitle: "キャッシュの読みを直す", queuedAt: "2026-11-03T10:00:00Z", startedAt: "2026-11-03T10:00:00Z", ...o });
+const wait = (o: Partial<ResourceWait>): ResourceWait => ({ pid: 2, name: "review codex", cwd: "/w", taskId: "t2", taskTitle: "リソース画面の実装", queuedAt: "2026-11-03T10:05:00Z", reason: "slot", ...o });
+
+test("resources: a slot wait names the holder's Task and run, a memory wait the free memory and the floor", () => {
+  expect(waitLine(wait({}), [run({})], memory)).toBe("枠: キャッシュの読みを直す の local-ci 3320");
+  expect(waitLine(wait({}), [run({}), run({ taskId: null, taskTitle: null, name: "bun test" })], memory)).toBe("枠: キャッシュの読みを直す の local-ci 3320、Task の外 の bun test");
+  expect(waitLine(wait({}), [run({ taskId: "t_gone", taskTitle: null })], memory)).toBe("枠: Task t_gone の local-ci 3320"); // a Task this daemon does not know
+  expect(waitLine(wait({}), [], memory)).toBe("枠（持ち主は終わったところ）");
+  expect(waitLine(wait({ reason: "memory" }), [], memory)).toBe("空きメモリ 1.0 GB < 下限 1.5 GB");
+  expect(waitLine(wait({ reason: "memory" }), [], null)).toBe("空きメモリ（下限未満）");
+  expect(waitLine(wait({ reason: "memory" }), [], { ...memory, availableBytes: 2 * GB })).toBe("空きメモリ 2.0 GB（下限 1.5 GB を超えた。次の見回りで枠を見る）"); // read after the free memory rose, before the kit looks again
+  expect(runOwner({ taskId: null, taskTitle: null })).toBe("Task の外");
+});
+
+test("resources: the free-memory line, below the floor or not, and none where the host cannot say", () => {
+  expect(memoryLine(memory)).toEqual({ free: "1.0 GB", floor: "1.5 GB", below: true, usedRatio: 1 - 1 / 3.7, detail: "全体 3.7 GB · スワップ 1.1 GB 使用" });
+  expect(memoryLine({ ...memory, availableBytes: 2 * GB })!.below).toBe(false);
+  expect(memoryLine(null)).toBeNull();
+});
+
+test("resources: how long, and the minute the memory rows are from", () => {
+  const t0 = Date.parse("2026-11-03T10:00:00Z");
+  expect(since("2026-11-03T10:00:00Z", t0 + 45_000)).toBe("45 秒");
+  expect(since("2026-11-03T10:00:00Z", t0 + 12 * 60_000 + 5_000)).toBe("12 分");
+  expect(since("2026-11-03T10:00:00Z", t0 + 65 * 60_000)).toBe("1 時間 5 分");
+  expect(since("2026-11-03T10:00:00Z", t0 - 1000)).toBe("0 秒"); // a clock a little behind the daemon's
+  const at = new Date(2026, 10, 3, 15, 31).getTime();
+  expect(atLabel(at)).toBe("15:31 時点");
+});
+
+test("resources: the memory rows link a Task and name the daemon and the rest", () => {
+  const rows = consumerRows({
+    at: 0,
+    groups: [
+      { taskId: "t1", taskTitle: "キャッシュの読みを直す", owner: "task", kind: "test", rssBytes: 1.2 * GB, procs: 4 },
+      { taskId: null, taskTitle: null, owner: "daemon", kind: "other", rssBytes: 120 * MB, procs: 1 },
+      { taskId: null, taskTitle: null, owner: "other", kind: "browser", rssBytes: 50 * MB, procs: 2 },
+    ],
+  });
+  expect(rows.map((r) => [r.taskId, r.label, r.kind, r.rss, r.procs])).toEqual([
+    ["t1", "キャッシュの読みを直す", "テスト / ローカル CI", "1.2 GB", 4],
+    [null, "デーモン", "その他", "120 MB", 1],
+    [null, "その他", "headless Chrome", "50 MB", 2],
+  ]);
+});
+
+test("resources: polls only while visible", async () => {
+  const doc = Object.assign(new EventTarget(), { visibilityState: "hidden" as DocumentVisibilityState });
+  let reads = 0;
+  const stop = watchResources(doc, () => reads++, 20);
+  await Bun.sleep(60);
+  expect(reads).toBe(0); // opened behind another tab: nothing
+  doc.visibilityState = "visible";
+  doc.dispatchEvent(new Event("visibilitychange"));
+  expect(reads).toBe(1); // at once when it comes to the front
+  for (const t0 = Date.now(); reads < 3 && Date.now() - t0 < 2000; ) await Bun.sleep(5);
+  expect(reads).toBeGreaterThanOrEqual(3); // every interval while in front
+  doc.visibilityState = "hidden";
+  doc.dispatchEvent(new Event("visibilitychange"));
+  const hidden = reads;
+  await Bun.sleep(60);
+  expect(reads).toBe(hidden);
+  doc.visibilityState = "visible";
+  stop(); // the screen closed
+  const closed = reads;
+  await Bun.sleep(60);
+  doc.dispatchEvent(new Event("visibilitychange"));
+  expect(reads).toBe(closed);
+  // opened in front: read at once, before the first interval
+  let first = 0;
+  watchResources(doc, () => first++, 10_000)();
+  expect(first).toBe(1);
+});
+
+test("resources: an answer older than the one shown is dropped; slow answers that are each newer are all shown", () => {
+  const o = latestAnswer();
+  const [a, b, c] = [o.ask(), o.ask(), o.ask()]; // three reads out before any answer (each slower than 5 s)
+  expect(o.take(a)).toBe(true); // the first answer is shown although newer reads are out
+  expect(o.take(c)).toBe(true);
+  expect(o.take(b)).toBe(false); // came after a newer one
+  const d = o.ask();
+  expect(o.take(d)).toBe(true);
+});

@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { BacklogIssueData, BacklogSource } from "@switchboard/protocol";
-import { commentStoredIssue, isUnblocked, overlapIn, pickNext, readStoredBacklog, readStoredIssue, heldIn, workspaceSyncOf } from "./backlog.ts";
+import { BacklogEditInput, type BacklogIssueData, type BacklogSource } from "@switchboard/protocol";
+import { BacklogEditError, createStoredIssue, editStoredIssue, commentStoredIssue, isUnblocked, overlapIn, pickNext, readStoredBacklog, readStoredIssue, heldIn, workspaceSyncOf } from "./backlog.ts";
 import { Db, type BacklogSnapshotEntry } from "./db.ts";
 
 // The backlog read from what the last import stored (#885): no GitHub involved — readStoredBacklog takes no gh at all.
@@ -489,5 +489,133 @@ describe("sync of each item and of the workspace (#908)", () => {
     const ws = imported([issue(1, ["type:request"])]);
     expect(readStoredIssue(db, ws, 1, { now: NOW, importFailed: true })!.sync).toMatchObject({ state: "error", reason: "import" });
     expect(readStoredIssue(db, ws, 1, { now: NOW })!.sync.state).toBe("synced");
+  });
+});
+
+describe("close with a reason (#3146)", () => {
+  const reasonOf = (ws: { id: string }, ref: number | string) => {
+    const i = readStoredIssue(db, ws, ref)!.issue;
+    return { state: i.state, stateReason: i.stateReason };
+  };
+  const ops = () => db.listPendingBacklogOperations(SOURCE).map((o) => ({ field: o.field, payload: o.payload, base: o.base, status: o.status }));
+
+  test("an open Issue closed NOT_PLANNED shows it while the edit waits: the close, then the reason changed from completed", () => {
+    const ws = imported([issue(1, ["type:task"])]);
+    editStoredIssue(db, SOURCE, 1, { state: "CLOSED", stateReason: "NOT_PLANNED" });
+    expect(reasonOf(ws, 1)).toEqual({ state: "CLOSED", stateReason: "NOT_PLANNED" });
+    expect(ops()).toEqual([
+      { field: "state", payload: "CLOSED", base: "OPEN", status: "pending" },
+      { field: "stateReason", payload: "NOT_PLANNED", base: "COMPLETED", status: "pending" },
+    ]);
+    // an import before the close is sent: GitHub's open Issue is not in conflict with the reason waiting on the close
+    db.putBacklogSnapshot(SOURCE, { records: [issue(1, ["type:task"])], cursor: null, syncedAt: 6000 });
+    expect(ops().map((o) => o.status)).toEqual(["pending", "pending"]);
+    expect(reasonOf(ws, 1)).toEqual({ state: "CLOSED", stateReason: "NOT_PLANNED" });
+  });
+
+  test("a reason change of one closed, reopened on GitHub before it is sent, is held as a conflict", () => {
+    imported([issue(1, ["type:task"], { state: "CLOSED", stateReason: "COMPLETED" })]);
+    editStoredIssue(db, SOURCE, 1, { state: "CLOSED", stateReason: "NOT_PLANNED" });
+    db.putBacklogSnapshot(SOURCE, { records: [issue(1, ["type:task"], { stateReason: "REOPENED" })], cursor: null, syncedAt: 6000 });
+    expect(ops()).toEqual([{ field: "stateReason", payload: "NOT_PLANNED", base: "COMPLETED", status: "conflict" }]);
+  });
+
+  test("a completed Issue gets its reason changed alone; COMPLETED on an open one is the close alone", () => {
+    const ws = imported([issue(1, ["type:task"], { state: "CLOSED", stateReason: "COMPLETED" }), issue(2, ["type:task"])]);
+    editStoredIssue(db, SOURCE, 1, { state: "CLOSED", stateReason: "NOT_PLANNED" });
+    editStoredIssue(db, SOURCE, 2, { state: "CLOSED", stateReason: "COMPLETED" });
+    expect(ops()).toEqual([
+      { field: "stateReason", payload: "NOT_PLANNED", base: "COMPLETED", status: "pending" },
+      { field: "state", payload: "CLOSED", base: "OPEN", status: "pending" },
+    ]);
+    expect(reasonOf(ws, 1)).toEqual({ state: "CLOSED", stateReason: "NOT_PLANNED" });
+    // the same reason again changes nothing
+    expect(editStoredIssue(db, SOURCE, 1, { state: "CLOSED", stateReason: "NOT_PLANNED" }).operations).toEqual([]);
+  });
+
+  test("a reason added while a close without one waits is changed from completed, what GitHub has once the close is sent", () => {
+    const ws = imported([issue(1, ["type:task"])]);
+    editStoredIssue(db, SOURCE, 1, { state: "CLOSED" });
+    editStoredIssue(db, SOURCE, 1, { state: "CLOSED", stateReason: "NOT_PLANNED" });
+    expect(ops()).toEqual([
+      { field: "state", payload: "CLOSED", base: "OPEN", status: "pending" },
+      { field: "stateReason", payload: "NOT_PLANNED", base: "COMPLETED", status: "pending" },
+    ]);
+    expect(reasonOf(ws, 1)).toEqual({ state: "CLOSED", stateReason: "NOT_PLANNED" });
+  });
+
+  test("a reopened Issue (REOPENED) closed and then given a reason: changed from completed; GitHub's null reason is the base as it is", () => {
+    const ws = imported([issue(1, ["type:task"], { stateReason: "REOPENED" }), issue(2, ["type:task"], { state: "CLOSED", stateReason: null })]);
+    editStoredIssue(db, SOURCE, 1, { state: "CLOSED" });
+    expect(reasonOf(ws, 1)).toEqual({ state: "CLOSED", stateReason: "COMPLETED" });
+    editStoredIssue(db, SOURCE, 1, { state: "CLOSED", stateReason: "NOT_PLANNED" });
+    editStoredIssue(db, SOURCE, 2, { state: "CLOSED", stateReason: "NOT_PLANNED" });
+    expect(ops()).toEqual([
+      { field: "state", payload: "CLOSED", base: "OPEN", status: "pending" },
+      { field: "stateReason", payload: "NOT_PLANNED", base: "COMPLETED", status: "pending" },
+      { field: "stateReason", payload: "NOT_PLANNED", base: null, status: "pending" },
+    ]);
+  });
+
+  test("a reopen, a comment, then a close NOT_PLANNED of one closed NOT_PLANNED: an import before the send leaves the reason to the send", () => {
+    const ws = imported([issue(1, ["type:task"], { state: "CLOSED", stateReason: "NOT_PLANNED" })]);
+    editStoredIssue(db, SOURCE, 1, { state: "OPEN" });
+    expect(reasonOf(ws, 1)).toEqual({ state: "OPEN", stateReason: null });
+    // the comment keeps the reopen apart from the close: both are sent, and GitHub's reason after them is completed
+    commentStoredIssue(db, SOURCE, 1, "重複でした");
+    editStoredIssue(db, SOURCE, 1, { state: "CLOSED", stateReason: "NOT_PLANNED" });
+    db.putBacklogSnapshot(SOURCE, { records: [issue(1, ["type:task"], { state: "CLOSED", stateReason: "NOT_PLANNED" })], cursor: null, syncedAt: 6000 });
+    expect(ops().filter((o) => o.field === "stateReason")).toEqual([{ field: "stateReason", payload: "NOT_PLANNED", base: "COMPLETED", status: "pending" }]);
+    expect(reasonOf(ws, 1)).toEqual({ state: "CLOSED", stateReason: "NOT_PLANNED" });
+  });
+
+  test("a reopen still waiting taken back by a close COMPLETED of one closed NOT_PLANNED: the reason is changed from GitHub's", () => {
+    const ws = imported([issue(1, ["type:task"], { state: "CLOSED", stateReason: "NOT_PLANNED" })]);
+    editStoredIssue(db, SOURCE, 1, { state: "OPEN" });
+    editStoredIssue(db, SOURCE, 1, { state: "CLOSED", stateReason: "COMPLETED" });
+    // the two state edits are one that writes nothing; the reason is what changes GitHub
+    expect(ops()).toEqual([
+      { field: "state", payload: "CLOSED", base: "CLOSED", status: "pending" },
+      { field: "stateReason", payload: "COMPLETED", base: "NOT_PLANNED", status: "pending" },
+    ]);
+    expect(reasonOf(ws, 1)).toEqual({ state: "CLOSED", stateReason: "COMPLETED" });
+  });
+
+  test("a reason still waiting from before the reopen: closing back to GitHub's reason takes it back", () => {
+    const ws = imported([issue(1, ["type:task"], { state: "CLOSED", stateReason: "NOT_PLANNED" })]);
+    editStoredIssue(db, SOURCE, 1, { state: "CLOSED", stateReason: "COMPLETED" });
+    editStoredIssue(db, SOURCE, 1, { state: "OPEN" });
+    editStoredIssue(db, SOURCE, 1, { state: "CLOSED", stateReason: "NOT_PLANNED" });
+    // the reason waiting is one with the new one: GitHub already has it, so the send writes nothing
+    expect(ops()).toEqual([
+      { field: "stateReason", payload: "NOT_PLANNED", base: "NOT_PLANNED", status: "pending" },
+      { field: "state", payload: "CLOSED", base: "CLOSED", status: "pending" },
+    ]);
+    expect(reasonOf(ws, 1)).toEqual({ state: "CLOSED", stateReason: "NOT_PLANNED" });
+  });
+
+  test("an Issue whose create is not sent is refused with 409 and nothing kept", () => {
+    const ws = imported([]);
+    const { localId } = createStoredIssue(db, SOURCE, { title: "new", body: "", labels: [], milestone: null, parent: null, fields: null });
+    const before = ops();
+    let err: unknown;
+    try {
+      editStoredIssue(db, SOURCE, localId, { state: "CLOSED", stateReason: "NOT_PLANNED" });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(BacklogEditError);
+    expect((err as BacklogEditError).status).toBe(409);
+    expect(ops()).toEqual(before);
+    expect(reasonOf(ws, localId)).toEqual({ state: "OPEN", stateReason: null });
+  });
+
+  test("the API input takes a reason only with state CLOSED (400 otherwise), and no DUPLICATE", () => {
+    const ok = (e: object) => BacklogEditInput.safeParse({ workspaceId: "ws", ...e }).success;
+    expect(ok({ state: "CLOSED", stateReason: "NOT_PLANNED" })).toBe(true);
+    expect(ok({ state: "CLOSED", stateReason: "COMPLETED" })).toBe(true);
+    expect(ok({ stateReason: "NOT_PLANNED" })).toBe(false);
+    expect(ok({ state: "OPEN", stateReason: "NOT_PLANNED" })).toBe(false);
+    expect(ok({ state: "CLOSED", stateReason: "DUPLICATE" })).toBe(false);
   });
 });

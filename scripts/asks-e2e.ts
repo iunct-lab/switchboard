@@ -10,6 +10,8 @@
  * #938: answers saved as policies — three ranges' worth read back in the settings, applied to the next approval and
  * decision with the basis on record, shown again with what differs, refused where the runner or a rule always asks, edited
  * and revoked from the settings and taking effect at once — at 1280, and the form and the list at 390.
+ * #1675: the すぐ答えられる badge (the tool approval and #306, not #303) and its toggle — the person's narrowed to them in
+ * their order, together with the second Workspace, and back — at 1280; the toggle a 44px target at 390.
  * #1674: #306's decision, which the Ready #309 names as its prerequisite, is the first of the person's with 答えると 1 件が進められる.
  * #2221: a decision and an operational check that name a Task's two screen mockups — a button each on their cards, the
  * pressed one opened in the card, the same buttons over the Backlog's answer box — at 1280 and 390.
@@ -249,6 +251,34 @@ try {
   await until(async () => (await groups()).person?.length === 7 && (await headCount()) === "7", "すべて shows every Workspace again");
   report.workspaces = { buttons: all, narrowed: narrowed.length };
 
+  // #1675: すぐ答えられる — the tool approval and #306 (recommended) have the badge, #303 (its question 不明) not; the toggle
+  // counts the person's badged cards, narrows the person's to them (#303 goes), stacks with the Workspace filter, and goes back
+  const quickButton = `document.querySelector('.ask-quick-row button')`;
+  const quickOf = (prefix: string) => evaluate(`!!${card(prefix)}?.querySelector('.ask-tags .ask-quick')`) as Promise<boolean>;
+  const personIds = () => evaluate(`[...document.querySelectorAll('.ask-group-person .card.ask')].map(c => c.dataset.ask)`) as Promise<string[]>;
+  const personQuick = () => evaluate(`[...document.querySelectorAll('.ask-group-person .card.ask')].filter(c => c.querySelector('.ask-tags .ask-quick')).length`) as Promise<number>;
+  const quick303 = `decision:${meta.id}#303@`;
+  assert((await quickOf(`approval:${a}:`)) && (await quickOf(`decision:${meta.id}#306@`)) && !(await quickOf(quick303)), "the approval and #306 are すぐ答えられる, #303 is not");
+  const quickCount = await personQuick();
+  const quickLabel = await evaluate(`${quickButton}.textContent.trim()`) as string;
+  assert(quickLabel === `すぐ答えられる ${quickCount}` && quickCount < 7, `the toggle: ${quickLabel}, badged ${quickCount}`);
+  // the screen's half: the fixture has one card without the badge (#303), so this shows the toggle, the count and the
+  // stacking work; which questions are quick (and the order kept) is asks.test.ts' -t "quick"
+  const order = await personIds();
+  await evaluate(`${quickButton}.click()`);
+  const quickOnly = await until(async () => { const s = await personIds(); return s.length === quickCount ? s : null; }, "only the すぐ答えられる cards");
+  assert(!quickOnly.some((id) => id.startsWith(quick303)) && (await personQuick()) === quickCount, `narrowed to the quick ones: ${JSON.stringify(quickOnly)}`);
+  assert(same(quickOnly, order.filter((id) => quickOnly.includes(id))), `the order is kept: ${JSON.stringify(quickOnly)}`);
+  await shot("asks-quick-1280.png");
+  await evaluate(`[...document.querySelectorAll('.ask-workspaces button')].find(b => b.textContent.trim() === 'second 1').click()`);
+  const both = await until(async () => { const s = await personIds(); return s.length === 1 ? s : null; }, "quick and the second Workspace");
+  assert(both[0]!.startsWith(`approval:${s2}:`) && (await evaluate(`${quickButton}.textContent.trim()`)) === "すぐ答えられる 1", `quick + second: ${JSON.stringify(both)}`);
+  await evaluate(`[...document.querySelectorAll('.ask-workspaces button')].find(b => b.textContent.trim() === 'すべて').click()`);
+  await until(async () => (await personIds()).length === quickCount, "すべて keeps the quick filter");
+  await evaluate(`${quickButton}.click()`);
+  await until(async () => same(await personIds(), order), "pressed again, every card of the person's is back in its order");
+  report.quick = { count: quickCount, shown: quickOnly.length, withSecond: both.length };
+
   // 3. answer (#936): the approval with 承認して続行, tapped twice at once → the runner hears once, the card says 実行中;
   // #306 with 推奨案で進める (B), whose line says what is written where → ## 回答 and the label off, one 実装 starts, 実行中.
   // The stop that went on is 解消済み
@@ -294,7 +324,8 @@ try {
   const wide = width > 390 ? await evaluate(`[...document.querySelectorAll('body *')].filter(e => e.getBoundingClientRect().right > 391).slice(0, 6).map(e => e.tagName + '.' + e.className)`) : [];
   assert(width <= 390, `scrolls sideways at 390px (${width}): ${JSON.stringify(wide)}`);
   assert(await evaluate(`!!document.querySelector('.ask-workspaces')`), "the Workspace buttons at 390");
-  const small = await evaluate(`[...document.querySelectorAll('.ask .approval-actions button, .ask-workspaces button')].filter(b => b.getBoundingClientRect().height < 44).length`);
+  assert(await evaluate(`!!document.querySelector('.ask-quick-row button')`), "the すぐ答えられる toggle at 390");
+  const small = await evaluate(`[...document.querySelectorAll('.ask .approval-actions button, .ask-workspaces button, .ask-quick-row button')].filter(b => b.getBoundingClientRect().height < 44).length`);
   assert(small === 0, `${small} button(s) shorter than 44px`);
   await shot("asks-390.png");
   await press(`decision:${meta.id}#303@`, "Backlog で答える");

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Ask, AskBatch } from "@switchboard/protocol";
-import { answerButtons, batchLines, hiddenByBatches, grantOf, taskAsks, withoutGrant, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, broadTarget, previousLines, scopeLabel, blockerLines, groupAsks, keptAnswers, KIND_LABEL, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, unblocksLine, workspaceChips, workspaceSections, type Answered } from "./asks.ts";
+import { answerButtons, batchLines, hiddenByBatches, grantOf, taskAsks, withoutGrant, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, broadTarget, previousLines, scopeLabel, blockerLines, groupAsks, isQuick, keptAnswers, KIND_LABEL, quickGroups, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, unblocksLine, workspaceChips, workspaceSections, type Answered } from "./asks.ts";
 
 const ask = (over: Partial<Ask>): Ask => ({
   id: "a", kind: "decision", needs: "person", state: "open", at: 1, changedAt: 1, workspace: null, pbi: null, issue: null, task: null, reason: null, question: null, choices: [], grants: [], grant: null, recommendation: null, next: null,
@@ -289,4 +289,46 @@ test("askFacts: a notice (#2866) shows what it is about, why, what to do and wha
     { label: "すること", value: "登録のリポジトリの clone にする" },
     { label: "出したもの", value: "workspace の検査" },
   ]);
+});
+
+test("quick: isQuick (#1675) — an approval, a choice with a recommendation and a confirmation are; none without a recommendation, free text only, a grant (a stop's or a recommended choice's), a blocker, an automatic or answered one; a held one with a recommendation is", () => {
+  const rec = { choices: ["A: 置き換える", "B: 残す"], recommendation: { choice: "A", why: "小さい" } };
+  const yes = [
+    ask({ kind: "approval", answers: ["allow", "deny"] }),
+    ask({ kind: "decision", answers: ["choice", "text", "hold"], ...rec }),
+    ask({ kind: "confirmation", answers: ["confirm"], question: "スマホで読める" }),
+    ask({ kind: "decision", state: "held", answers: ["choice", "text"], ...rec }),
+  ];
+  const no = [
+    ask({ kind: "decision", answers: ["choice", "text", "hold"], choices: rec.choices }),
+    ask({ kind: "check", answers: ["text"] }),
+    // a grant widens what the Task may do: looked at, not one of the quick ones
+    ask({ kind: "stop", answers: ["grant", "text"], grant: "この操作だけ許可します" }),
+    ask({ kind: "decision", answers: ["choice", "text"], choices: ["A: 押す — 許可: git push を許可します", "B: 待つ"], recommendation: { choice: "A", why: "早い" } }),
+    ask({ kind: "approval", answers: ["allow", "deny"], blockers: [{ kind: "runner", detail: "ランナーが拒んだ" }] }),
+    ask({ kind: "decision", answers: ["choice"], ...rec, blockers: [{ kind: "depends", detail: "#12 が未完" }] }),
+    ask({ kind: "stop", needs: "auto", answers: ["grant"], grant: "g" }),
+    ask({ kind: "approval", state: "answered", answers: ["allow"] }),
+    ask({ kind: "approval", state: "resolved", answers: ["allow"] }),
+  ];
+  expect(yes.map(isQuick)).toEqual(yes.map(() => true));
+  expect(no.map(isQuick)).toEqual(no.map(() => false));
+});
+
+test("quick: filtering keeps the order — the person's narrowed to the quick ones in the order given, the other groups as they are, an emptied group left out", () => {
+  const q = (id: string) => ask({ id, kind: "approval", answers: ["allow", "deny"] });
+  const slow = (id: string) => ask({ id, kind: "check", answers: ["text"] });
+  const asks = [q("q1"), slow("s1"), q("q2"), ask({ id: "auto", kind: "wait", needs: "auto" }), slow("s2"), q("q3"), ask({ id: "done", state: "answered" })];
+  const before = groupAsks(asks);
+  const after = quickGroups(before);
+  expect(after.map((g) => [g.key, g.asks.map((a) => a.id)])).toEqual([
+    ["person", ["q1", "q2", "q3"]],
+    ["auto", ["auto"]],
+    ["answered", ["done"]],
+  ]);
+  // what stays keeps its relative order from before
+  const order = before[0]!.asks.map((a) => a.id);
+  const kept = after[0]!.asks.map((a) => order.indexOf(a.id));
+  expect(kept).toEqual([...kept].sort((x, y) => x - y));
+  expect(quickGroups(groupAsks([slow("s"), ask({ id: "w", kind: "wait", needs: "auto" })])).map((g) => g.key)).toEqual(["auto"]);
 });

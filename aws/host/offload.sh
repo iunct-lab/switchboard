@@ -13,7 +13,7 @@
 # Explicit only: `docker` itself stays on the host (bind mounts and localhost ports are there). Only the work tree goes:
 # no credentials, no token, no other host file. What the command starts is not reachable from here — only the log is.
 set -euo pipefail
-USAGE="usage: sb-offload [--size small|medium|large] <command…>   e.g. sb-offload --size large docker compose up --build --abort-on-container-exit"
+USAGE="usage: sb-offload [--size small|medium|large] <command…>   e.g. sb-offload docker compose up --build --abort-on-container-exit (small; --size medium or large only when small runs out of memory)"
 SIZE_NAME=small
 case "${1:-}" in
   --size) SIZE_NAME="${2:-}"; shift $(($# < 2 ? $# : 2)) ;;
@@ -107,5 +107,10 @@ CODE="$(grep -oE '^sb-offload: exit [0-9]+$' "$TMP/log" | tail -1 | grep -oE '[0
 if [ -z "$CODE" ]; then
   case "$STATUS" in TIMED_OUT) CODE=124 ;; STOPPED) CODE=130 ;; *) CODE=1 ;; esac
   echo "sb-offload: $BUILD ended $STATUS without the command's exit code" >&2
+fi
+# 137 is a SIGKILL, on these machines almost always the kernel's OOM killer: point at the next size, not at large (#3245)
+if [ "$CODE" = 137 ]; then
+  case "$SIZE_NAME" in small) NEXT=medium ;; medium) NEXT=large ;; *) NEXT= ;; esac
+  [ -z "$NEXT" ] || echo "sb-offload: exit 137 usually means out of memory on $SIZE_NAME; retry with --size $NEXT" >&2
 fi
 exit "$CODE"

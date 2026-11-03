@@ -261,6 +261,8 @@ describe("reserveStopRetry / stopRecoveryPrompt (#949)", () => {
     const p = stopRecoveryPrompt([]);
     expect(p).toContain("依頼の範囲外の書き込み");
     expect(p).toContain("計画モードでの commit・push・マージ");
+    expect(p).toContain("リポジトリの CLAUDE.md が認めていない昇格");
+    expect(p).not.toContain("聞かずに昇格");
   });
 });
 

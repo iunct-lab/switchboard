@@ -15,4 +15,5 @@ test("a task's label is one line and fits the 200 characters /api/feedback takes
   expect(screenLabel({ name: "evals", report: "art_1" })).toBe("Insights"); // the tab's name since #1835; the view's name stays evals
   expect(screenLabel({ name: "settings" })).toBe("Settings");
   expect(screenLabel({ name: "schedules" })).toBe("Schedules");
+  expect(screenLabel({ name: "resources" })).toBe("Resources");
 });

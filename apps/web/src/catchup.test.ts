@@ -115,3 +115,15 @@ test("an older page (#1142) goes in front of what the page holds; a row both hav
   expect(merged.map((e) => e.seq)).toEqual([1, 2, 201, 202, 203]);
   expect(mergeEvents(merged, [])).toBe(merged);
 });
+
+test("a failed whole read names its Task, so the page can tell a Task that is not there (404) from the one it is reading (#3427)", async () => {
+  const seen: [string, string][] = [];
+  const reader = taskReader({
+    read: () => Promise.reject(Object.assign(new Error("not found"), { status: 404 })),
+    held: () => ({}),
+    update: () => undefined,
+    failed: (e, id) => void seen.push([id, e.message]),
+  });
+  await reader.load("task_gone");
+  expect(seen).toEqual([["task_gone", "not found"]]);
+});

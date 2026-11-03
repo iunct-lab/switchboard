@@ -1,9 +1,9 @@
 // test-reads: ops-kit/bin/ ops-kit/src/cli.ts
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { heavyConfig, heavyConfigPath, heavyStateDir, withHeavySlot } from "./heavy.ts";
+import { heavyConfig, heavyConfigPath, heavyStateDir, readHeavyState, withHeavySlot } from "./heavy.ts";
 
 const OPS_KIT = join(import.meta.dir, "..", "bin", "ops-kit");
 
@@ -204,5 +204,109 @@ test("heavy: a stopped wrapper stops its command, gives the slot back and ends b
     expect(holder.signalCode).toBe("SIGTERM");
     expect(performance.now() - t0).toBeLessThan(5000); // the sleep was stopped, not waited for
     expect(readdirSync(heavyStateDir(home))).toEqual([]);
+  });
+});
+
+const until = async (what: string, ok: () => boolean) => {
+  for (let i = 0; i < 250; i++) {
+    if (ok()) return;
+    await Bun.sleep(20);
+  }
+  throw new Error(`timed out: ${what}`);
+};
+const heavyCli = (home: string, taskId: string, name: string) =>
+  Bun.spawn([OPS_KIT, "heavy", "--name", name, "--", "sleep", "30"], { env: { ...process.env, HOME: home, OPS_KIT_TASK_ID: taskId }, detached: true, stdio: ["ignore", "ignore", "ignore"] });
+
+test("heavy: a waiter is readable with its task and reason", async () => {
+  await scratch(async (home) => {
+    configure(home, { minFreeMb: 0 });
+    expect(readHeavyState(home)).toEqual({ config: { max: 1, minFreeMb: 0 }, running: [], waiting: [] }); // no directory yet
+    const holder = heavyCli(home, "task_a", "local-ci 1");
+    await slotHeld(home);
+    const waiter = heavyCli(home, "task_b", "bun test");
+    try {
+      await until("one running, one waiting", () => readHeavyState(home).waiting.length === 1 && readHeavyState(home).running.length === 1);
+      const { running, waiting } = readHeavyState(home);
+      expect(running[0]).toMatchObject({ name: "local-ci 1", taskId: "task_a" });
+      expect(running[0]!.queuedAt).toBe(running[0]!.startedAt); // it did not wait
+      expect(waiting[0]).toMatchObject({ name: "bun test", taskId: "task_b", reason: "slot" });
+
+      // in this process, outside a Task: waits for memory first, then for the slot the CLI holds — the reason is rewritten.
+      // The floor is raised now: the two CLIs read theirs (0, so the host's memory does not hold them) when they started
+      configure(home, { minFreeMb: 1536 });
+      let free = 100;
+      const third = withHeavySlot("e2e", async () => {}, { home, mem: () => free, pollMs: 10, log: () => {}, taskId: null });
+      await until("third waits for memory", () => readHeavyState(home).waiting.some((w) => w.name === "e2e" && w.reason === "memory"));
+      const mine = readHeavyState(home).waiting.find((w) => w.name === "e2e")!;
+      expect(mine.taskId).toBeNull();
+      expect(readHeavyState(home).waiting.map((w) => w.name)).toEqual(["bun test", "e2e"]); // oldest first
+      free = 100_000;
+      await until("third waits for the slot", () => readHeavyState(home).waiting.some((w) => w.name === "e2e" && w.reason === "slot"));
+      expect(readHeavyState(home).waiting.find((w) => w.name === "e2e")!.queuedAt).toBe(mine.queuedAt);
+      process.kill(-holder.pid, "SIGKILL");
+      process.kill(-waiter.pid, "SIGKILL");
+      await third;
+      expect(readdirSync(heavyStateDir(home)).filter((f) => f.startsWith(`wait-${process.pid}-`))).toEqual([]); // removed once it took the slot
+    } finally {
+      for (const p of [holder, waiter]) {
+        try {
+          process.kill(-p.pid, "SIGKILL");
+        } catch {
+          /* already gone */
+        }
+      }
+    }
+  });
+});
+
+test("heavy: a killed waiter is not listed", async () => {
+  await scratch(async (home) => {
+    configure(home, { minFreeMb: 0 });
+    const holder = heavyCli(home, "task_a", "holder");
+    await slotHeld(home);
+    const waiter = heavyCli(home, "task_b", "waiter");
+    try {
+      await until("the waiter is listed", () => readHeavyState(home).waiting.length === 1);
+      process.kill(-waiter.pid, "SIGKILL");
+      await waiter.exited;
+      expect(readHeavyState(home).waiting).toEqual([]);
+      expect(readHeavyState(home).running.map((r) => r.name)).toEqual(["holder"]);
+      expect(readdirSync(heavyStateDir(home)).some((f) => f.startsWith("wait-"))).toBe(true); // a reader removes nothing
+      process.kill(-holder.pid, "SIGKILL");
+      await holder.exited;
+      await withHeavySlot("next", async () => {}, { home, mem: () => undefined, pollMs: 10, log: () => {} });
+      expect(readdirSync(heavyStateDir(home))).toEqual([]); // the next waiter cleans the dead waiter's file up
+    } finally {
+      for (const p of [holder, waiter]) {
+        try {
+          process.kill(-p.pid, "SIGKILL");
+        } catch {
+          /* already gone */
+        }
+      }
+    }
+  });
+});
+
+// root ignores the mode bits: the place cannot be made unwritable there
+test.skipIf(process.getuid?.() === 0)("heavy: where a waiter's file cannot be written it still waits, only unlisted", async () => {
+  await scratch(async (home) => {
+    mkdirSync(heavyStateDir(home), { recursive: true });
+    chmodSync(heavyStateDir(home), 0o555); // there, but not writable (a sandboxed Task)
+    try {
+      const lines: string[] = [];
+      let free = 1000;
+      setTimeout(() => (free = 2000), 80);
+      const t0 = performance.now();
+      let started = 0;
+      await withHeavySlot("low", async () => {
+        started = performance.now() - t0;
+      }, { home, mem: () => free, pollMs: 10, log: (l) => lines.push(l) });
+      expect(started).toBeGreaterThanOrEqual(70); // the memory wait was kept
+      expect(lines[0]).toBe("heavy: 待っています（空きメモリ 1000 MB < 下限 1536 MB）");
+      expect(lines.at(-1)).toContain("枠を取らずに動かします"); // the slot itself cannot be taken there, as before
+    } finally {
+      chmodSync(heavyStateDir(home), 0o755);
+    }
   });
 });

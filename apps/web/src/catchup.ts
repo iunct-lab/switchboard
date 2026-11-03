@@ -46,7 +46,7 @@ export function taskReader(deps: {
   read: (id: string, after?: number) => Promise<TaskDetail>;
   held: () => Record<string, TaskDetail>;
   update: (f: (prev: Record<string, TaskDetail>) => Record<string, TaskDetail>) => void;
-  failed: (e: Error) => void;
+  failed: (e: Error, id: string) => void;
 }) {
   let connects = 0;
   /** Tasks with a whole read on its way, and whether a live event of theirs was dropped meanwhile. */
@@ -73,7 +73,7 @@ export function taskReader(deps: {
         },
         (e: Error) => {
           loading.delete(id);
-          deps.failed(e);
+          deps.failed(e, id);
         },
       );
     },

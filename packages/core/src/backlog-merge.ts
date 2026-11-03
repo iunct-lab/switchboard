@@ -12,7 +12,7 @@ export const withoutMarker = (body: string) => body.replace(/\r?\n\r?\n<!-- swit
 
 /**
  * One field of a record's data, as an operation's `field` names it (db.ts applyBacklogField): an Issue's `title` /
- * `body` (without the marker) / `state` / `milestone` / `parent`, `label:<name>` (on or not; GitHub matches label
+ * `body` (without the marker) / `state` / `stateReason` / `milestone` / `parent`, `label:<name>` (on or not; GitHub matches label
  * names without case); a Project item's `field:<name>` (a field with no value is null). `member` and a field the
  * record does not have are undefined: not compared.
  */
@@ -23,6 +23,7 @@ export function backlogFieldValue(kind: BacklogObjectKind, data: unknown, field:
   if (kind !== "issue") return undefined;
   if (field.startsWith("label:")) return (d.labels as string[]).some((l) => l.toLowerCase() === field.slice("label:".length).toLowerCase());
   if (field === "body") return withoutMarker(d.body);
+  if (field === "stateReason") return d.stateReason ?? null;
   return ["title", "state", "milestone", "parent"].includes(field) ? d[field] : undefined;
 }
 

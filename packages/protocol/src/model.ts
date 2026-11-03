@@ -968,6 +968,27 @@ export type OpsLoadGroup = z.infer<typeof OpsLoadGroup>;
 /** `GET /api/ops/load?days=&task=`. `available` false: this host has no cgroup v2 / /proc to read (macOS). */
 export const OpsLoad = z.object({ available: z.boolean(), days: z.number(), hours: z.array(OpsLoadHour), groups: z.array(OpsLoadGroup) });
 export type OpsLoad = z.infer<typeof OpsLoad>;
+/** A job holding one of the machine's heavy-process slots (`ops-kit heavy`, #3332). `taskTitle` null: outside a Task, or a Task this daemon does not know. */
+export const ResourceRun = z.object({ pid: z.number(), name: z.string(), cwd: z.string(), taskId: z.string().nullable(), taskTitle: z.string().nullable(), queuedAt: z.string(), startedAt: z.string() });
+export type ResourceRun = z.infer<typeof ResourceRun>;
+/** A job waiting for a slot (`slot`) or for the free memory to rise above the floor (`memory`). */
+export const ResourceWait = z.object({ pid: z.number(), name: z.string(), cwd: z.string(), taskId: z.string().nullable(), taskTitle: z.string().nullable(), queuedAt: z.string(), reason: z.enum(["slot", "memory"]) });
+export type ResourceWait = z.infer<typeof ResourceWait>;
+/**
+ * `GET /api/ops/resources` (#3332): now. `memory` null: no /proc/meminfo (macOS). `consumers` is the latest minute of
+ * ops_load_groups (null: none in the last 7 days), largest RSS first.
+ */
+export const OpsResources = z.object({
+  memory: z.object({ availableBytes: z.number(), totalBytes: z.number(), swapUsedBytes: z.number(), floorBytes: z.number() }).nullable(),
+  slots: z.object({ max: z.number(), running: z.array(ResourceRun), waiting: z.array(ResourceWait) }),
+  consumers: z
+    .object({
+      at: z.number(),
+      groups: z.array(z.object({ taskId: z.string().nullable(), taskTitle: z.string().nullable(), owner: z.enum(["task", "daemon", "other"]), kind: LoadKind, rssBytes: z.number(), procs: z.number() })),
+    })
+    .nullable(),
+});
+export type OpsResources = z.infer<typeof OpsResources>;
 /** One method × route of api_requests (#2102): request count, nearest-rank p50 / p90 of ms, the p50 of the known bytes (null: none known). */
 export const OpsLatencyStat = z.object({ method: z.string(), route: z.string(), count: z.number(), p50: z.number(), p90: z.number(), bytesP50: z.number().nullable() });
 export type OpsLatencyStat = z.infer<typeof OpsLatencyStat>;
@@ -1999,6 +2020,8 @@ export const BacklogEditInput = z
     body: issueText.body.optional(),
     labels: z.object({ add: z.array(z.string().min(1)).default([]), remove: z.array(z.string().min(1)).default([]) }).strict().optional(),
     state: z.enum(["OPEN", "CLOSED"]).optional(),
+    /** Why it is closed (#3146): only with `state: "CLOSED"` — closing it, or changing the reason of one closed. */
+    stateReason: z.enum(["COMPLETED", "NOT_PLANNED"]).optional(),
     milestone: z.string().min(1).nullable().optional(),
     parent: z.number().int().positive().nullable().optional(),
     project: z.boolean().optional(),
@@ -2013,7 +2036,8 @@ export const BacklogEditInput = z
   })
   .strict()
   .refine((e) => !e.resolve || Object.keys(e).every((k) => k === "workspaceId" || k === "resolve"), { message: "resolve は編集と一緒には送れません" })
-  .refine((e) => !e.retry || Object.keys(e).every((k) => k === "workspaceId" || k === "retry"), { message: "retry は編集と一緒には送れません" });
+  .refine((e) => !e.retry || Object.keys(e).every((k) => k === "workspaceId" || k === "retry"), { message: "retry は編集と一緒には送れません" })
+  .refine((e) => !e.stateReason || e.state === "CLOSED", { message: "閉じた理由は state CLOSED と一緒に送ります" });
 export type BacklogEditInput = z.infer<typeof BacklogEditInput>;
 
 /** A new Issue (`POST /api/backlog`, #886), kept here and created on GitHub later; `fields` puts it in the workspace's Project. */

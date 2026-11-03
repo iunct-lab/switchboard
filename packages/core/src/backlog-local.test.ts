@@ -224,6 +224,34 @@ test("a parent gone by the time it is applied drops that edit only; the old pare
   }
 });
 
+test("close reason: closed with a reason is that reason, without one COMPLETED, opened again null (#3146)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sb-local-reason-"));
+  const db = new Db(join(dir, "switchboard.db"));
+  try {
+    const source = localBacklogSource("ws_x");
+    db.putBacklogSnapshot(source, { records: [], cursor: null, syncedAt: 1 });
+    for (const title of ["dup", "done"]) createStoredIssue(db, source, { title, body: "", labels: [], milestone: null, parent: null, fields: null });
+    applyLocalOperations(db, source);
+    const reason = (n: number) => db.listBacklogRecords(source, "issue").map((r) => r.remote as { number: number; state: string; stateReason: string | null }).find((i) => i.number === n);
+    editStoredIssue(db, source, 1, { state: "CLOSED", stateReason: "NOT_PLANNED" });
+    editStoredIssue(db, source, 2, { state: "CLOSED" });
+    applyLocalOperations(db, source);
+    expect(reason(1)).toMatchObject({ state: "CLOSED", stateReason: "NOT_PLANNED" });
+    expect(reason(2)).toMatchObject({ state: "CLOSED", stateReason: "COMPLETED" });
+    // a closed one's reason changed: the state stays
+    editStoredIssue(db, source, 2, { state: "CLOSED", stateReason: "NOT_PLANNED" });
+    applyLocalOperations(db, source);
+    expect(reason(2)).toMatchObject({ state: "CLOSED", stateReason: "NOT_PLANNED" });
+    editStoredIssue(db, source, 1, { state: "OPEN" });
+    applyLocalOperations(db, source);
+    expect(reason(1)).toMatchObject({ state: "OPEN", stateReason: null });
+    expect(db.listPendingBacklogOperations(source)).toEqual([]);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 /** A local workspace with this repository's ops.config.json (its choices: Area / Kind / Priority / Phase, Story Points 1 2 3 5 8, Milestone `^Phase \\d+ — `). */
 async function configured(t: Awaited<ReturnType<typeof boot>>, name = "configured") {
   const ws = await t.local(name);

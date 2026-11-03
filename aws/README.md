@@ -155,12 +155,12 @@ The rootless dockerd runs in `sb-dockerd.service` with `MemoryMax=1536M`. Checks
 
 ¹ The price list's build row says 3 GB; the machine has 4 GiB. vCPU and memory checked on the host with `nproc; free -m` at each size (2026-10-22).
 
-Start with small. A type check or a test run usually fits there; a compose stack's checks (an image build plus the stack's services) can need `large`.
+Start with small and leave `--size` out. A type check or a test run usually fits there. Only when a check dies out of memory there, run it again one size up (`medium`, then `large`); a compose stack's checks (an image build plus the stack's services) can end up needing `large`. When the command itself exits 137 (a SIGKILL, which usually means out of memory), sb-offload prints the size to try next on stderr (`sb-offload: exit 137 usually means out of memory on small; retry with --size medium`); on `large` there is no next size, so it prints nothing. It reads only the command's own exit code: a step killed inside `docker build` or `docker compose up --build` usually makes the command exit 1, which prints no hint, so look for `exit code: 137` in the log too.
 
 ```sh
 sb-offload docker compose up --build --abort-on-container-exit       # in the repository's work tree; small
 sb-offload 'docker compose up -d --build --wait && uv run pytest tests/integration; docker compose down'
-sb-offload --size large docker compose up --build --abort-on-container-exit   # a stack that needs 8 vCPU / 16 GiB
+sb-offload --size large docker compose up --build --abort-on-container-exit   # the retry after it ran out of memory on small and medium
 sb-offload 'nproc; free -m'                                                   # small: 2 vCPU
 ```
 

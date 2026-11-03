@@ -278,7 +278,7 @@ const REPORT_FORMAT = "`## 状況` で始まるコメントを 1 件書いてく
  * What a complete Task is asked for, so the runner's own approval reads the merge of a PR the merge gate passed as part of
  * the request (#1357), and so does its sharing of review material and the Issues the skills file (#2725). The same section as .claude/skills/pbi-complete/SKILL.md names; only `complete` carries it.
  */
-const COMPLETE_SCOPE = "この依頼は、マージ判定（`scripts/merge-gate.ts`）が merge を返した PR のマージ、リリースタグ、PBI を閉じるところまでを含みます。.claude/skills/cross-runner-review/SKILL.md が渡すレビューの材料（fresh clone のコード、PR・Task・PBI の本文、差分）を別のランナー（Claude Code / Codex）と CLAUDE.md の追加のレビュアーに渡すこと、スキルの手順が作る Issue（レビュー指摘の Issue 化、要望 Issue と PBI）とコメントも、この依頼に含みます。マージのたびに利用者へ聞き直さないでください。マージ判定が `[聞く]` で止めたとき、昇格・デーモンの再起動、認証は、これまでどおり Task の会話で聞いてください（.claude/skills/pbi-complete/SKILL.md の「この依頼が含む範囲」）。";
+const COMPLETE_SCOPE = "この依頼は、マージ判定（`scripts/merge-gate.ts`）が merge を返した PR のマージ、リリースタグ、PBI を閉じるところまでを含みます。.claude/skills/cross-runner-review/SKILL.md が渡すレビューの材料（fresh clone のコード、PR・Task・PBI の本文、差分）を別のランナー（Claude Code / Codex）と CLAUDE.md の追加のレビュアーに渡すこと、スキルの手順が作る Issue（レビュー指摘の Issue 化、要望 Issue と PBI）とコメントも、この依頼に含みます。マージのたびに利用者へ聞き直さないでください。マージ判定が `[聞く]` で止めたとき、デーモンを再起動する pull、認証は、これまでどおり Task の会話で聞いてください（.claude/skills/pbi-complete/SKILL.md の「この依頼が含む範囲」）。昇格はリポジトリの CLAUDE.md の決まりに従い、CLAUDE.md が聞かずに昇格してよいと書いていなければ Task の会話で聞いてください。";
 
 /**
  * `other` = the Issue is in another registered workspace's repository: the Task runs there, using the stage skills synced
@@ -825,6 +825,8 @@ export function editStoredIssue(db: Db, source: BacklogSource, ref: number | str
   const added = (input.labels?.add ?? []).filter((l) => !input.labels?.remove.includes(l));
   const labels = (l: string[]) => [...new Set([...l, ...added])].filter((x) => !input.labels?.remove.includes(x));
   const create = pendingCreate(db, source, rec.externalId);
+  // a create sends no reason: closing one with a reason waits for it to be made (#3146)
+  if (create && input.stateReason) throw new BacklogEditError("作成を GitHub に送っている間は閉じた理由を付けられません。送り終えてから編集してください", 409);
   if (create) {
     const p = create.payload as BacklogCreatePayload;
     const project = input.project === false ? null : input.project || someFields(input.fields) || p.project ? { ...source.project, fields: { ...p.project?.fields, ...input.fields } } : null;
@@ -839,6 +841,17 @@ export function editStoredIssue(db: Db, source: BacklogSource, ref: number | str
   // the body as shown: without the marker a post sent from here left on it
   const was = { ...cur, body: withoutMarker(cur.body) };
   for (const f of ["title", "body", "state", "milestone", "parent"] as const) if (input[f] !== undefined && input[f] !== was[f]) set(f, input[f], was[f]);
+  // after the close (#3146): an Issue closed just now is completed until its reason is changed, as GitHub answers it
+  // (one closed by a close still waiting to be sent shows that: applyBacklogField). A close that only takes back a
+  // reopen still waiting is one with it (Db.applyBacklogEdit) and writes nothing: GitHub keeps its reason, or the one a
+  // reason still waiting from before the reopen makes it
+  if (input.stateReason) {
+    const pending = db.listPendingBacklogOperations(source).filter((o) => o.issue === issue);
+    const reopen = [...pending].reverse().find((o) => o.kind === "set" && o.field === "state" && o.status === "pending");
+    const undone = !!reopen && reopen.base === "CLOSED" && !pending.some((o) => o.seq > reopen.seq && o.kind !== "set");
+    const base = was.state === "CLOSED" ? was.stateReason : undone && input.state === "CLOSED" ? ([...pending].reverse().find((o) => o.kind === "set" && o.field === "stateReason" && o.status === "pending")?.payload ?? (rec.remote as BacklogIssueData | null)?.stateReason ?? null) : "COMPLETED";
+    if (input.stateReason !== base) set("stateReason", input.stateReason, base);
+  }
   for (const l of added) if (!cur.labels.includes(l)) set(`label:${l}`, true, false);
   for (const l of input.labels?.remove ?? []) if (cur.labels.includes(l)) set(`label:${l}`, false, true);
   const records: BacklogLocalEntry[] = [];
@@ -1564,6 +1577,26 @@ export function promotionStep(s: { status: ReleaseState; latest: { tag: string; 
   if (failure) return { action: "wait", reason: `昇格に失敗した版のまま: ${latest.tag}`, failed: { tag: latest.tag, sha: latest.sha, reason: failure.reason } };
   if (s.busyTasks > 0) return { action: "wait", reason: `${s.busyTasks} 件の Task が動いているので ${latest.tag} の昇格を待つ` };
   return { action: "promote", tag: latest.tag, sha: latest.sha };
+}
+
+/** Why a promotionFirst held the newest tag (#626), and since when it has held that tag (#2148). */
+export type PromotionHold = { tag: string; failed: boolean; reason: string; since: number };
+
+/**
+ * The once-a-day notice of a promotion held for running Tasks (#2148): only a hold that began before the approval-window
+ * schedule's last firing (`firedAt`, 00:00 UTC), so a hold is told at the next firing after it began and a new tag
+ * waits for the next day. A failed tag is told by its own ## 判断待ち; no Task running = promoteWhenIdle promotes it.
+ * `at` = the hold's `since`: the notice's id, so the same hold back after a moment without it (promoteWhenIdle clears it
+ * before asking again) is the same notice, not a second one that day. null = no notice.
+ */
+export function promotionNote(hold: PromotionHold | null, busyTasks: number, firedAt: number | null, now: number): { title: string; body: string; at: number } | null {
+  if (!hold || hold.failed || busyTasks <= 0 || firedAt === null || firedAt < hold.since) return null;
+  const hours = Math.max(0, Math.floor((now - hold.since) / 3_600_000));
+  return {
+    title: `昇格待ち: ${hold.tag}（${hours} 時間、動いている Task ${busyTasks} 件）— ヘッダーの「新しい版 →」から昇格できる`,
+    body: `${hold.reason}。Task が全部止まれば自動で昇格する。待たないなら、ヘッダーの「新しい版 →」から設定の「動いている版」を開き「待たずに昇格する」を押す（動いている Task は切れる）`,
+    at: hold.since,
+  };
 }
 
 const marker = (sha: string) => `<!-- promote-failed:${sha} -->`;

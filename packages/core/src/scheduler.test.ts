@@ -9,7 +9,8 @@ import { loadConfig } from "./config.ts";
 import { Db } from "./db.ts";
 import { Scheduler } from "./scheduler.ts";
 import { scanAllRepos } from "./secretscan.ts";
-import { scanFindings } from "./asks.ts";
+import { noticeAsks, scanFindings } from "./asks.ts";
+import { promotionNote, type PromotionHold } from "./backlog.ts";
 import { startServer } from "./server.ts";
 import { TaskManager } from "./tasks.ts";
 
@@ -658,5 +659,53 @@ describe("scheduler approval-window (#2046)", () => {
     expect(sc.recentLog().join("\n")).toContain("承認待ち: 待ちなし（メモは書かない） (due)");
     // no Task and no runner
     expect(started).toHaveLength(0);
+  });
+
+  test("daily promotion memo", async () => {
+    // the approval-window firing at 00:00 UTC is what a held promotion waits for (#2148)
+    const sc = new Scheduler(db, tasks, () => now, undefined, undefined, undefined, undefined, async () => "待ちなし");
+    const s = sc.create({ title: "承認待ち", cron: "0 0 * * *", workspaceId: wsId, runner: "claude", prompt: "", action: "approval-window" });
+    const hour = 3_600_000;
+    const hold: PromotionHold = { tag: "v0.9.0", failed: false, reason: "2 件の Task が動いているので v0.9.0 の昇格を待つ", since: s.nextRunAt! - 5 * hour };
+    const shown = (h: PromotionHold | null, busy: number, at: number, record = {}) => {
+      const sch = db.getSchedule(s.id)!;
+      return noticeAsks({ unusable: [], promotions: [{ schedule: { id: s.id, title: sch.title }, workspace: null, note: promotionNote(h, busy, sch.lastRunAt, at) }], now: at }, record);
+    };
+    // held before the schedule ever fired: nothing yet
+    expect(shown(hold, 2, s.nextRunAt!).asks).toEqual([]);
+    now = s.nextRunAt!;
+    await sc.tick();
+    const fired = db.getSchedule(s.id)!;
+    expect(fired.lastRunAt).toBe(now);
+    // one firing a day: the next one is the next day's 00:00
+    expect(fired.nextRunAt).toBe(now + 86_400_000);
+    const first = shown(hold, 2, now + hour);
+    expect(first.asks).toHaveLength(1);
+    expect(first.asks[0]).toMatchObject({
+      id: `notice:promotion:${s.id}@${hold.since}`,
+      kind: "notice",
+      state: "open",
+      question: "昇格待ち: v0.9.0（6 時間、動いている Task 2 件）— ヘッダーの「新しい版 →」から昇格できる",
+      source: { label: "予定「承認待ち」" },
+    });
+    expect(first.asks[0]!.reason).toContain("待たずに昇格する");
+    // the same notice later that day: one notice, its first sight kept
+    const later = shown(hold, 1, now + 3 * hour, first.record);
+    expect(later.asks.map((a) => a.id)).toEqual([`notice:promotion:${s.id}@${hold.since}`]);
+    // no hold, a failed tag, no Task running: no notice (the open one is resolved)
+    for (const [h, busy] of [[null, 2], [{ ...hold, failed: true }, 2], [hold, 0]] as const) {
+      const r = shown(h, busy, now + 4 * hour, later.record);
+      expect(r.asks.map((a) => [a.id, a.state])).toEqual([[`notice:promotion:${s.id}@${hold.since}`, "resolved"]]);
+    }
+    // the same hold back after a moment without it (promoteWhenIdle clears it before asking again): still one notice
+    const gone = shown(null, 2, now + 4 * hour, later.record);
+    const back = shown(hold, 1, now + 4 * hour + 1, gone.record);
+    expect(back.asks.map((a) => [a.id, a.state])).toEqual([[`notice:promotion:${s.id}@${hold.since}`, "open"]]);
+    // a hold that began after the firing (a new tag) waits for the next day's firing
+    const newer: PromotionHold = { ...hold, tag: "v0.9.1", since: now + 6 * hour };
+    expect(shown(newer, 2, now + 7 * hour).asks).toEqual([]);
+    now += 86_400_000;
+    await sc.tick();
+    expect(shown(newer, 2, now + 1).asks.map((a) => a.question)).toEqual(["昇格待ち: v0.9.1（18 時間、動いている Task 2 件）— ヘッダーの「新しい版 →」から昇格できる"]);
   });
 });

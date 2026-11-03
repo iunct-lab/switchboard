@@ -2,7 +2,10 @@
  * Run after `bun run --cwd apps/web build`: bun scripts/release-e2e.ts. Requires Chrome (CHROME_BIN overrides).
  * Promoting from the settings screen (#1660): a fake sb-rescue runs the commit before HEAD, a fake runner keeps a Task
  * running, and the header's 「新しい版 →」, the 「動いている版」 section, the two-step confirmation and the Brief are
- * driven in headless Chrome. SCREENSHOT=<file.png> also saves what the settings screen looked like.
+ * driven in headless Chrome. The daily promotion notice (#2148): with the Task running, a tag on HEAD is held by a
+ * backlog-next firing, and an approval-window firing shows 「昇格待ち: <tag>」 in 判断待ち, from where 「新しい版 →」 and
+ * 「待たずに昇格する」 promote HEAD. SCREENSHOT=<file.png> also saves what the settings screen looked like, and
+ * <file>-asks.png the 判断待ち with the notice.
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -118,6 +121,29 @@ try {
   const task = await (await fetch(`${base}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: meta.path, workspaceId: meta.id, title: "busy task", prompt: "p", runner: "claude" }) })).json() as { id: string };
   await until(() => core.db.listTasksByStatus("waiting").length + core.db.listTasksByStatus("running").length > 0, "the Task runs");
   await until(async () => (await panelText()).includes("動いている Task 1 件: 昇格するとデーモンが再起動します"), "the busy-task line");
+
+  // (c') the newest tag waits for the running Task; the daily firing (approval-window) tells it in 判断待ち (#2148)
+  git("tag", "v0.0.1", head);
+  const post = (path: string, body: object) => fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const fire = async (title: string, action: string) => {
+    const s = await (await post("/api/schedules", { title, cron: "0 0 * * *", workspaceId: meta.id, runner: "claude", prompt: "", action })).json() as { id?: string; error?: string };
+    assert(s.id, `schedule ${action}: ${JSON.stringify(s)}`);
+    const r = await post(`/api/schedules/${s.id}/run`, {});
+    // backlog-next answers 409 when it started nothing (here: it held the tag for the running Task)
+    assert(r.ok || (action === "backlog-next" && r.status === 409), `run ${action}: ${r.status} ${await r.text()}`);
+  };
+  await fire("バックログを進める", "backlog-next");
+  const hold = await until(async () => ((await (await fetch(`${base}/api/daemon/release`)).json()) as { hold: { tag: string; failed: boolean; since: number } | null }).hold, "the promotion hold");
+  assert(hold.tag === "v0.0.1" && !hold.failed && hold.since > 0, `hold: ${JSON.stringify(hold)}`);
+  assert(promoted.length === 1, "a held promotion must not send");
+  await fire("承認待ち", "approval-window");
+  await press(`document.querySelector('.rail-approvals')`, "判断待ち");
+  const notice = await until(() => evaluate(`document.querySelector('[data-ask^="notice:promotion:"]')?.textContent ?? null`), "the promotion notice in 判断待ち") as string;
+  assert(notice.includes("昇格待ち: v0.0.1（0 時間、動いている Task 1 件）— ヘッダーの「新しい版 →」から昇格できる") && notice.includes("待たずに昇格する"), `notice: ${notice}`);
+  if (process.env.SCREENSHOT) writeFileSync(process.env.SCREENSHOT.replace(/\.png$/, "") + "-asks.png", Buffer.from((await call("Page.captureScreenshot", { format: "png" })).data, "base64"));
+  await press(`document.querySelector('.new-version')`, "新しい版 → (from 判断待ち)");
+  await until(async () => (await panelText()).includes("動いている Task 1 件"), "the 動いている版 section again");
+
   await press(byText("この版を昇格", "#release button"), "この版を昇格 (busy)");
   await until(() => evaluate(`!!(${byText("待たずに昇格する")})`), "the confirmation");
   await Bun.sleep(300);
@@ -127,8 +153,10 @@ try {
   assert(promoted[1] === head, `forced promotion sent ${promoted[1]}`);
 
   // (d) the Task's own screen shows the same section
-  if (!(await evaluate(`!!document.querySelector('.rail .it[title="busy task"]')`))) await press(`document.querySelector('.rail-tasks')`, "the Task list");
-  await press(`document.querySelector('.rail .it[title="busy task"]')`, "the Task in the rail");
+  // a rail row's title is the Task's title, then its times on the next lines
+  const railTask = `[...document.querySelectorAll('.rail .it')].find((b) => b.title.split('\\n')[0] === 'busy task')`;
+  if (!(await evaluate(`!!${railTask}`))) await press(`document.querySelector('.rail-tasks')`, "the Task list");
+  await press(railTask, "the Task in the rail");
   await until(() => evaluate(`!!document.querySelector('#release-panel') && document.querySelector('#release') === null`), "ReleasePanel in the Brief (the side panel at 1200px)");
   const brief = await evaluate(`document.querySelector('#release-panel').textContent`) as string;
   assert(brief.includes("1 コミット先") && brief.includes("この版を昇格"), `Brief: ${brief}`);
@@ -144,7 +172,7 @@ try {
   assert(await evaluate(`${byText("この版を昇格", "#release button")}.disabled`), "ahead 0 must disable the button");
 
   assert(!errors.length, `console errors: ${JSON.stringify(errors)}`);
-  console.log(JSON.stringify({ mark, section: ahead.slice(0, 80), promoted: promoted.length, brief: brief.slice(0, 60) }));
+  console.log(JSON.stringify({ mark, section: ahead.slice(0, 80), notice: notice.slice(0, 80), promoted: promoted.length, brief: brief.slice(0, 60) }));
 } finally {
   ws?.close();
   chrome.kill();

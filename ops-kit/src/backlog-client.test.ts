@@ -184,6 +184,31 @@ test("edits go to the app's routes as its screen sends them; a refusal is exit 1
   expect((await run(["nope"])).code).toBe(1);
 });
 
+test("edit --reason (#3146): not-planned / completed go as stateReason with the close; none sends no reason; one without a close or another value is refused, nothing sent", async () => {
+  const ok = () => app((m, p) => (m === "GET" ? { body: p === "" ? LIST : { issue: { number: 3 } } } : { status: 202, body: { localId: null, operations: ["o"] } }));
+  const sent = async (argv: string[]) => {
+    const r = await run(argv, ok());
+    return [r.code, r.calls.filter((c) => c.method !== "GET").map((c) => c.body)];
+  };
+  expect(await sent(["edit", "3", "--state", "closed", "--reason", "not-planned"])).toEqual([0, [{ workspaceId: "ws1", state: "CLOSED", stateReason: "NOT_PLANNED" }]]);
+  expect(await sent(["edit", "3", "--state", "closed", "--reason", "completed"])).toEqual([0, [{ workspaceId: "ws1", state: "CLOSED", stateReason: "COMPLETED" }]]);
+  expect(await sent(["edit", "3", "--state", "closed"])).toEqual([0, [{ workspaceId: "ws1", state: "CLOSED" }]]);
+  for (const argv of [["edit", "3", "--reason", "not-planned"], ["edit", "3", "--state", "open", "--reason", "not-planned"], ["edit", "3", "--state", "closed", "--reason", "duplicate"], ["edit", "3", "--state", "closed", "--reason", "toString"]]) {
+    const r = await run(argv, ok());
+    expect([argv.join(" "), r.code, r.calls.filter((c) => c.method !== "GET")]).toEqual([argv.join(" "), 1, []]);
+    expect(r.err).toContain("--reason completed|not-planned");
+  }
+});
+
+test("view shows the close reason (#3146): [CLOSED not planned] / [CLOSED duplicate]; completed and none as before", async () => {
+  const detail = (state: string, stateReason: string | null) => ({ issue: { number: 3, title: "T", state, stateReason, labels: [], milestone: null, parent: null, subIssues: [], body: "", url: "" }, comments: [], fields: null, fetchedAt: 1, localId: null, pending: 0, held: [], sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } });
+  const first = async (state: string, reason: string | null) => (await run(["view", "3"], app(routes((m, p) => (p.startsWith("/3?") ? { body: detail(state, reason) } : { status: 404, body: {} }))))).out.split("\n")[0];
+  expect(await first("CLOSED", "NOT_PLANNED")).toBe("#3 T [CLOSED not planned]");
+  expect(await first("CLOSED", "DUPLICATE")).toBe("#3 T [CLOSED duplicate]");
+  expect(await first("CLOSED", "COMPLETED")).toBe("#3 T [CLOSED]");
+  expect(await first("OPEN", null)).toBe("#3 T [OPEN]");
+});
+
 test("a text holding a value usable to authenticate is not sent at all", async () => {
   const leaked = app();
   const out: string[] = [];

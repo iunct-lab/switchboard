@@ -16,6 +16,7 @@ import { Home } from "./components/Home.tsx";
 import { Knowledge } from "./components/Knowledge.tsx";
 import { Ledger } from "./components/Ledger.tsx";
 import { Evals } from "./components/Evals.tsx";
+import { Resources } from "./components/Resources.tsx";
 import { Schedules } from "./components/Schedules.tsx";
 import { FeedbackDialog, type FeedbackPrefill } from "./components/Feedback.tsx";
 import { Rail } from "./components/Rail.tsx";
@@ -25,10 +26,11 @@ import { TaskView } from "./components/TaskView.tsx";
 import { RecentCheck } from "./components/RecentCheck.tsx";
 import { usePageDropGuard } from "./components/Attachments.tsx";
 import { screenLabel, type View } from "./screen.ts";
+import { pathToWrite, viewFromPath } from "./route.ts";
 import type { FeedbackTarget } from "./feedbackTarget.ts";
 
-/** /approvals is the one screen with its own URL: the phone app (PWA) starts there (#26). */
-const initialView = (): View => (location.pathname === "/approvals" ? { name: "approvals" } : { name: "home" });
+/** The screen the URL names (#3355; /approvals is the phone app's start, #26), else Home. */
+const screenAt = (): View => viewFromPath(location.pathname) ?? { name: "home" };
 
 /** How often an open page reads /api/health again (#1600). */
 const HEALTH_REFRESH_MS = 5 * 60_000;
@@ -62,7 +64,7 @@ export function App() {
   const [teleports, setTeleports] = useState<Record<string, TeleportProgress | null>>({});
   // Claude Code in each Task's terminal tab (#1574): task.terminals after hello replaces them all, task.terminal changes one
   const [terminals, setTerminals] = useState<Record<string, TerminalStatus>>({});
-  const [view, setView] = useState<View>(initialView);
+  const [view, setView] = useState<View>(screenAt);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [railListOpen, setRailListOpen] = useState(false);
   const [briefOpen, setBriefOpen] = useState(false);
@@ -109,7 +111,21 @@ export function App() {
   // Task details read whole on open and caught up through ?after= on each connect (#1137, taskReader in catchup.ts)
   const detailsRef = useRef(details);
   detailsRef.current = details;
-  const reader = useMemo(() => taskReader({ read: api.task, held: () => detailsRef.current, update: setDetails, failed: (e) => setError(String(e.message ?? e)) }), []);
+  // Tasks whose read answered 404 (#3427): a Task URL with no Task shows so, instead of 読み込み中… for good
+  const [missing, setMissing] = useState<ReadonlySet<string>>(new Set());
+  const reader = useMemo(
+    () =>
+      taskReader({
+        read: api.task,
+        held: () => detailsRef.current,
+        update: setDetails,
+        failed: (e, id) => {
+          if ((e as Error & { status?: number }).status === 404) setMissing((m) => new Set(m).add(id));
+          else setError(String(e.message ?? e));
+        },
+      }),
+    [],
+  );
   const loadTask = reader.load;
   // After a turn (usage / session.end / a stop record): the rest of the detail only (?limit=0, #1142). The events came
   // over the WebSocket already; reading them again would read the whole conversation each turn.
@@ -206,15 +222,17 @@ export function App() {
   useEffect(() => {
     if (authorized && view.name === "settings") void refreshClones();
   }, [authorized, view.name, refreshClones]);
-  // Settings scrolls to its release section once it has loaded (the section is not drawn before that)
-  const [releaseFocus, setReleaseFocus] = useState(0);
+  // Settings scrolls to one section once it has loaded (the section is not drawn before that): the release one from the
+  // header, the Workspace one from Home (it is no longer the first card, #3356). n tells a second press from the first.
+  const [settingsFocus, setSettingsFocus] = useState<{ id: string; n: number } | null>(null);
   useEffect(() => {
-    if (view.name !== "settings") setReleaseFocus(0); // the next visit by the tab does not scroll
+    if (view.name !== "settings") setSettingsFocus(null); // the next visit by the tab does not scroll
   }, [view.name]);
-  const openRelease = () => {
+  const openSettingsAt = (id: string) => {
     setView({ name: "settings" });
-    setReleaseFocus((n) => n + 1);
+    setSettingsFocus((f) => ({ id, n: (f?.n ?? 0) + 1 }));
   };
+  const openRelease = () => openSettingsAt("release");
   const newVersion = newVersionLink(release);
   // in: the passkey page's mark has done its job; a later refusal must go back to the passkey page, not read as stuck (#709)
   useEffect(() => {
@@ -317,10 +335,29 @@ export function App() {
     });
   }, [authorized, refreshTaskMeta, refreshLedger, refreshApprovals, openTask, catchUp, reader]);
 
+  // Each screen has its URL (#3355): a new screen is a history entry, so back / forward walk the screens. The first
+  // screen and one popstate brought back only correct the address (a path that is no screen), never add an entry.
+  const replaceNext = useRef(true);
+  const viewRef = useRef(view);
+  viewRef.current = view;
   useEffect(() => {
-    const path = view.name === "approvals" ? "/approvals" : "/";
-    if (location.pathname !== path) history.replaceState(null, "", path);
+    const path = pathToWrite(view, location.pathname);
+    const replace = replaceNext.current;
+    replaceNext.current = false;
+    if (path === null) return;
+    if (replace) history.replaceState(history.state, "", path + location.search + location.hash);
+    else history.pushState(null, "", path);
   }, [view]);
+  useEffect(() => {
+    // the same screen keeps its state (全画面's own entry, an open artifact): only another path changes the view
+    const onPop = () => {
+      if (pathToWrite(viewRef.current, location.pathname) === null) return;
+      replaceNext.current = true;
+      setView(screenAt());
+    };
+    addEventListener("popstate", onPop);
+    return () => removeEventListener("popstate", onPop);
+  }, []);
 
   useEffect(() => {
     setRailListOpen(false); // a task picked from the phone's list replaces the list (#359)
@@ -330,8 +367,9 @@ export function App() {
   }, [view]);
 
   useEffect(() => {
-    if (view.name === "task" && !details[view.id]) void loadTask(view.id);
-  }, [view, details, loadTask]);
+    // not before the page is let in (#3427): a Task URL opened logged out reads it after the login, not into a 401 banner
+    if (authorized && view.name === "task" && !details[view.id] && !missing.has(view.id)) void loadTask(view.id);
+  }, [authorized, view, details, missing, loadTask]);
   // A wait exists only while a command of a turn runs: asked once for a running Task (the WebSocket brings the rest),
   // never for a finished one (opening it costs no extra request).
   const openStatus = view.name === "task" ? tasks.find((t) => t.id === view.id)?.status : undefined;
@@ -384,7 +422,8 @@ export function App() {
   );
 
   const current = view.name === "task" ? details[view.id] : undefined;
-  const currentTask = view.name === "task" ? tasks.find((t) => t.id === view.id) ?? current?.task : undefined;
+  // a Task the daemon answered 404 for is gone even while the list still has it (removed from the database meanwhile)
+  const currentTask = view.name === "task" && !missing.has(view.id) ? tasks.find((t) => t.id === view.id) ?? current?.task : undefined;
   const runnerOk = useMemo(() => new Set((health?.runners ?? []).filter((r) => r.available).map((r) => r.id)), [health]);
 
   return (
@@ -410,6 +449,9 @@ export function App() {
           </button>
           <button className={view.name === "backlog" ? "on" : ""} onClick={() => setView({ name: "backlog" })}>
             Backlog
+          </button>
+          <button className={view.name === "resources" ? "on" : ""} onClick={() => setView({ name: "resources" })}>
+            Resources
           </button>
           <button className={view.name === "schedules" ? "on" : ""} onClick={() => setView({ name: "schedules" })}>
             Schedules
@@ -520,6 +562,7 @@ export function App() {
             onError={setError}
             inboxRev={knowledgeRev}
             onOpenSettings={() => setView({ name: "settings" })}
+            onOpenWorkspaces={() => openSettingsAt("workspace")}
             onOpenReport={(id) => setView({ name: "evals", report: id })}
             onOpenArtifacts={() => setView({ name: "evals", artifacts: true })}
           />
@@ -557,7 +600,18 @@ export function App() {
             <Brief open={briefOpen} onClose={() => setBriefOpen(false)} focus={briefFocus ?? undefined} onFocused={() => setBriefFocus(null)} task={currentTask} detail={current} ledger={ledger} onAbort={() => api.abort(currentTask.id).catch((e) => setError(e.message))} checksRev={checksRev} evalsRev={evalsRev[currentTask.id] ?? 0} onImprove={improveFromEvals} onRestarting={() => setRestarting(true)} runners={health?.runners} noTerminal={health?.features?.pty === false} onTask={upsertTask} tasks={tasks} onOpenTask={openTask} workspaces={workspaces} />
           </>
         )}
-        {view.name === "task" && !currentTask && <main className="main">読み込み中…</main>}
+        {view.name === "task" && !currentTask && (
+          <main className="main">
+            {missing.has(view.id) ? (
+              <div className="task-missing" role="alert">
+                <p>この Task は見つかりません（{view.id}）。</p>
+                <button onClick={() => setView({ name: "home" })}>Home へ戻る</button>
+              </div>
+            ) : (
+              "読み込み中…"
+            )}
+          </main>
+        )}
         {view.name === "knowledge" && <Knowledge refreshKey={knowledgeRev} workspaces={workspaces} onError={setError} />}
         {view.name === "ledger" && <Ledger ledger={ledger} runners={health?.runners ?? []} onOpenTask={openTask} onOpenInsights={() => setView({ name: "evals" })} onError={setError} />}
         {view.name === "evals" && <Evals workspaces={workspaces} runners={health?.runners} onOpenTask={openTask} onRateTask={rateTask} onError={setError} rev={evalsAnyRev} onImprove={improveFromEvals} openReport={view.report} scope={view.artifacts ? "all" : "reports"} onScope={(s) => setView({ name: "evals", artifacts: s === "all" })} onOpenArtifact={(taskId, artifactId) => setView({ name: "task", id: taskId, artifact: artifactId })} />}
@@ -571,9 +625,10 @@ export function App() {
             onError={setError}
           />
         )}
+        {view.name === "resources" && <Resources onOpenTask={openTask} />}
         {view.name === "schedules" && <Schedules workspaces={workspaces} runners={health?.runners ?? []} runnerOk={runnerOk} onOpenTask={openTask} onOpenSettings={() => setView({ name: "settings" })} onError={setError} />}
         {view.name === "settings" && <Settings
-            focusRelease={releaseFocus}
+            focus={settingsFocus}
             health={health}
             workspaces={workspaces}
             clones={clones}

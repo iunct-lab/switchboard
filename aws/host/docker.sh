@@ -23,6 +23,6 @@ case "$1" in
     done
     set -- compose "$@" ;;
 esac
-[ -z "$heavy" ] || echo "docker: heavy builds and compose stacks can run off the host: sb-offload [--size large] <command> — small unless asked; a compose stack's checks can need large (開発リポジトリ aws/README.md, Offload)" >&2
+[ -z "$heavy" ] || echo "docker: heavy builds and compose stacks can run off the host: sb-offload <command> — small by default; if it dies out of memory, retry with --size medium or large (開発リポジトリ aws/README.md, Offload)" >&2
 if [ "$DOCKER_HOST" = "unix://$HOME/.docker/run/docker.sock" ]; then "${SB_DOCKERD_UP:-/usr/local/bin/dockerd-up}" || exit 1; fi
 exec "$D/docker" "$@"

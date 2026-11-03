@@ -75,7 +75,7 @@ export const FIX_SCOPE = `## 進め方
 - PR の本文に上の利用者の言葉を引用し、.claude/skills/cross-runner-review/SKILL.md で別のランナーにレビューさせ、.claude/skills/review-triage-and-merge/SKILL.md で指摘を処理してマージする。スキルが Issue から作る材料（Task・PBI・再チェックの元要望）は、その引用で代える。スキルが Issue に書く記録は PR に書く
 - cross-runner-review が渡すレビューの材料（fresh clone のコード、PR の本文、差分）を別のランナーと CLAUDE.md の追加のレビュアーに渡すことも、この依頼に含む
 - CI とマージ判定は CLAUDE.md の「マージ判定とローカル CI」。マージ判定（\`scripts/merge-gate.ts\`）が merge を返したらマージし、利用者へ聞き直さない。\`[再チェック <kind>]\` は docs/merge-gate.md の「再チェック」を回す
-- マージ判定が \`[聞く]\` で止めたとき、昇格・デーモンの再起動、認証は Task の会話で聞く
+- マージ判定が \`[聞く]\` で止めたとき、デーモンを再起動する pull、認証は Task の会話で聞く。昇格はリポジトリの CLAUDE.md の決まりに従い、聞かずに昇格してよいと書いていなければ Task の会話で聞く
 - 終わったら最後の行に PR の番号とマージの結果を書く`;
 
 /** すぐ直す (#263): the meta workspace's brief, then the user's words as they are, where they came from, then how to carry the fix to main. No request is filed. */
