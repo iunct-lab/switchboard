@@ -14,6 +14,7 @@ import { parseArgs } from "node:util";
 import { loadConfig } from "../packages/core/src/config.ts";
 import { startServer } from "../packages/core/src/server.ts";
 import { LOAD, LONG_EVENTS, loadGh, longEvents, overlap, seedLoad } from "./perf-load.ts";
+import { bundleOf } from "./perf-ratchet.ts";
 import type { Journey, RunnerAdapter } from "@switchboard/protocol";
 
 const { values: args } = parseArgs({ options: { runs: { type: "string", default: "5" }, json: { type: "string" } } });
@@ -245,11 +246,6 @@ const median = (xs: number[]) => {
 const p90 = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.ceil(xs.length * 0.9) - 1]!;
 const round = (n: number, d = 1) => Math.round(n * 10 ** d) / 10 ** d;
 
-function bundle() {
-  const assets = join(dist, "assets");
-  const size = (ext: string) => readdirSync(assets).filter((f) => f.endsWith(ext)).reduce((n, f) => n + Bun.gzipSync(readFileSync(join(assets, f))).length, 0);
-  return { js: size(".js"), css: size(".css") };
-}
 
 /**
  * A fontconfig that shows Chrome only Noto Sans and Noto Sans CJK, so the text has the same size on every Linux machine:
@@ -312,7 +308,7 @@ try {
   const loadedMs = (xs: number[]) => ({ msMedian: round(median(xs)), msP90: round(p90(xs)) });
   const healthMs = loadedRuns.map((r) => r.healthMaxMs);
   const loaded = { ...LOAD, overlap: ["backlog-sync", "rescue-status"], journeys: { launch: loadedMs(loadedRuns.map((r) => r.launchMs)), send: loadedMs(loadedRuns.map((r) => r.sendMs)) }, healthMaxMs: round(median(healthMs)), healthMaxMsP90: round(p90(healthMs)) };
-  const result = { runs, journeys, bundle: bundle(), loaded };
+  const result = { runs, journeys, bundle: bundleOf(dist), loaded };
   console.log(`runs: ${runs} (1280×800, headless Chrome, fonts: ${fontconfig ? "Noto Sans + Noto Sans CJK only" : "the OS's"}, fake runner: long task ${LONG_EVENTS} events, reply ${REPLY_DELTAS} deltas)`);
   console.log("| journey | ms median | ms p90 | requests | LayoutCount | RecalcStyleCount | layoutShift |");
   console.log("|---|---:|---:|---:|---:|---:|---:|");

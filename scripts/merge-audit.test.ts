@@ -1,7 +1,7 @@
 import { currentRepo } from "./repo.ts";
 import { describe, expect, test } from "bun:test";
 import { alreadyFiled, filedNumber } from "./file-request";
-import { filingLine, main, formatProposals, gaps, formatGaps, format, parseMarks, parseReverts, period, proposals, readHistory, requestFor, revertedShas, RunError, STREAK, tally, type PrRecord, type Run } from "./merge-audit";
+import { filingLine, main, formatProposals, gaps, formatGaps, format, mergedSince, parseMarks, parseReverts, period, proposals, readHistory, requestFor, revertedShas, RunError, tally, type PrRecord, type Run } from "./merge-audit";
 import fx from "./merge-audit.fixture.json";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -52,11 +52,11 @@ const replay = (opts: { offMain?: string[]; onMain?: string[]; ambiguous?: Recor
 describe("parseMarks", () => {
   test("reads the three marks on the first line, with the comment's time", () => {
     expect(parseMarks([
-      c(`[merge-ask] security,size ${SHA}\n\nPR #1 をマージしてよいか`, "2026-10-02T01:00:00Z"),
+      c(`[merge-ask] security:words,size ${SHA}\n\nPR #1 をマージしてよいか`, "2026-10-02T01:00:00Z"),
       c(`[merge-answer] no rescue ${SHA}`, "2026-10-02T02:00:00Z"),
       c(`[recheck] migration pass ${SHA}\npatch-id x`, "2026-10-02T03:00:00Z"),
     ])).toEqual([
-      { kind: "ask", kinds: ["security", "size"], sha: SHA, at: "2026-10-02T01:00:00Z" },
+      { kind: "ask", kinds: ["security:words", "size"], sha: SHA, at: "2026-10-02T01:00:00Z" },
       { kind: "no", kinds: ["rescue"], sha: SHA, at: "2026-10-02T02:00:00Z" },
       { kind: "recheck", kinds: ["migration"], sha: SHA, at: "2026-10-02T03:00:00Z" },
     ]);
@@ -68,6 +68,8 @@ describe("parseMarks", () => {
       c(`see\n[merge-answer] yes security ${SHA}`),
       c(`[merge-ask] everything ${SHA}`),
       c(`[recheck] security pass ${SHA}`),
+      // the single security kind before PBI #1873: not read (no layer for the old marks)
+      c(`[merge-ask] security ${SHA}`),
     ])).toEqual([]);
     // the kinds keep MERGE_KINDS' order and drop the unknown ones
     expect(parseMarks([c(`[merge-ask] size,bogus,rescue ${SHA}`)])[0]!.kinds).toEqual(["rescue", "size"]);
@@ -133,7 +135,7 @@ describe("readHistory + tally (fixture)", () => {
     expect(rows.responsibility).toMatchObject({ recheckMerged: [904], reverted: [904] });
     expect(rows.migration).toMatchObject({ recheckMerged: [905], reverted: [905] });
     // #913 asked (no answer), #914 asked once and answered yes twice (one PR); #912 answered with no ask: asked 2, yes 2, waits 2h and 4h
-    expect(rows.security).toMatchObject({ asked: 2, yes: 2, no: 0, waitHours: 3, recheckMerged: [] });
+    expect(rows["security:words"]).toMatchObject({ asked: 2, yes: 2, no: 0, waitHours: 3, recheckMerged: [] });
   });
 
   test("an old head's recheck mark is not a recheck merge (PR #906)", async () => {
@@ -182,14 +184,14 @@ describe("readHistory + tally (fixture)", () => {
   test("合計: the waits of a kind are summed next to the median; no wait → no sum (#1272)", async () => {
     const { prs, reverts } = await readHistory(P.since, replay().run);
     const rows = Object.fromEntries(tally(prs, reverts, P).map((r) => [r.kind, r]));
-    expect(rows.security).toMatchObject({ waitHours: 3, waitTotalHours: 6 }); // #914: 2h and 4h
+    expect(rows["security:words"]).toMatchObject({ waitHours: 3, waitTotalHours: 6 }); // #914: 2h and 4h
     expect(rows.responsibility).toMatchObject({ waitHours: null, waitTotalHours: 0 });
     expect(format(tally(prs, reverts, P)).find((l) => l.startsWith("responsibility"))).toContain("返事まで 中央値 - / ");
   });
 
   test("案なし: the lines after the table name each proposal, or say there is none (#1272)", () => {
     expect(formatProposals([])).toEqual(["案なし"]);
-    expect(formatProposals([{ to: "recheck", kind: "rescue", evidence: [1, 2, 3, 4, 5] }])[0]).toMatch(/^案: /);
+    expect(formatProposals([{ kind: "size", evidence: [1], reverts: ["abcdef0"] }])[0]).toMatch(/^案: /);
   });
 
   test("要望: --file-request says what it did — filed, the same title already open, or nothing to file (#1272)", () => {
@@ -210,7 +212,7 @@ describe("readHistory + tally (fixture)", () => {
   test("format: one line per kind with something to count, in MERGE_KINDS' order", async () => {
     const { prs, reverts } = await readHistory(P.since, replay().run);
     expect(format(tally(prs, reverts, P))).toEqual([
-      "security 聞いた 2 / 認めた 2 / 認めなかった 0 / 返事まで 中央値 3h（合計 6h） / 再チェックで自動マージ 0 / 戻された 0",
+      "security:words 聞いた 2 / 認めた 2 / 認めなかった 0 / 返事まで 中央値 3h（合計 6h） / 再チェックで自動マージ 0 / 戻された 0",
       "rescue 聞いた 1 / 認めた 1 / 認めなかった 0 / 返事まで 中央値 2h（合計 2h） / 再チェックで自動マージ 0 / 戻された 0",
       "design-rules 聞いた 1 / 認めた 0 / 認めなかった 1 / 返事まで 中央値 8h（合計 8h） / 再チェックで自動マージ 0 / 戻された 0",
       "size 聞いた 1 / 認めた 1 / 認めなかった 0 / 返事まで 中央値 2h（合計 2h） / 再チェックで自動マージ 2 / 戻された 0",
@@ -270,17 +272,97 @@ describe("readHistory + tally (fixture)", () => {
 
 describe("tally", () => {
   const P = { since: "2026-10-01T00:00:00.000Z", until: "2026-10-02T00:00:00.000Z" };
-  const at = (h: number, kind: "ask" | "yes", kinds = ["security"]) => ({ at: `2026-10-01T${String(h).padStart(2, "0")}:00:00Z`, kind, kinds, sha: SHA });
+  const at = (h: number, kind: "ask" | "yes", kinds = ["security:words"]) => ({ at: `2026-10-01T${String(h).padStart(2, "0")}:00:00Z`, kind, kinds, sha: SHA });
 
   test("median of an even count is the mean of the middle two", () => {
     const waits = [1, 2, 4, 10];
     const prs = waits.map((w, i) => ({ number: 1 + i, mergedAt: null, headSha: SHA, marks: [at(0, "ask"), at(w, "yes")] }));
-    expect(tally(prs as PrRecord[], [], P).find((r) => r.kind === "security")?.waitHours).toBe(3);
+    expect(tally(prs as PrRecord[], [], P).find((r) => r.kind === "security:words")?.waitHours).toBe(3);
   });
 
   test("a PR asked twice waits from the latest ask before the answer", () => {
     const pr = { number: 1, mergedAt: null, headSha: SHA, marks: [at(0, "ask"), at(5, "ask"), at(6, "yes")] };
-    expect(tally([pr] as PrRecord[], [], P).find((r) => r.kind === "security")?.waitHours).toBe(1);
+    expect(tally([pr] as PrRecord[], [], P).find((r) => r.kind === "security:words")?.waitHours).toBe(1);
+  });
+});
+
+describe("security sub-kinds", () => {
+  const P = { since: "2026-10-01T00:00:00.000Z", until: "2026-10-02T00:00:00.000Z" };
+  const t = (h: number) => `2026-10-01T${String(h).padStart(2, "0")}:00:00Z`;
+  const pr = (number: number, mergedAt: string | null, ...comments: [string, number][]): PrRecord =>
+    ({ number, mergedAt, headSha: SHA, marks: parseMarks(comments.map(([body, h]) => c(body, t(h)))) });
+  const prs = [
+    pr(1, t(4), [`[merge-ask] security:lockfile,security:github ${SHA}`, 1], [`[merge-answer] yes security:lockfile,security:github ${SHA}`, 3]),
+    pr(2, null, [`[merge-ask] security:words ${SHA}`, 1], [`[merge-answer] no security:words ${SHA}`, 5]),
+    // the single security kind before PBI #1873 is not read
+    pr(3, t(6), [`[merge-ask] security ${SHA}`, 1], [`[merge-answer] yes security ${SHA}`, 2]),
+  ];
+
+  test("tally: one row per group, with asked, yes, no and the wait", () => {
+    const rows = tally(prs, [], P).filter((r) => r.asked + r.yes + r.no > 0);
+    expect(rows.map((r) => r.kind)).toEqual(["security:words", "security:lockfile", "security:github"]);
+    const by = Object.fromEntries(rows.map((r) => [r.kind, r]));
+    expect(by["security:lockfile"]).toMatchObject({ asked: 1, yes: 1, no: 0, waitHours: 2, waitTotalHours: 2, recheckMerged: [] });
+    expect(by["security:github"]).toMatchObject({ asked: 1, yes: 1, no: 0, waitHours: 2 });
+    expect(by["security:words"]).toMatchObject({ asked: 1, yes: 0, no: 1, waitHours: 4 });
+  });
+
+  test("format: each line starts with the group's word", () => {
+    expect(format(tally(prs, [], P)).map((l) => l.split(" ")[0])).toEqual(["security:words", "security:lockfile", "security:github"]);
+    expect(format(tally(prs, [], P))[1]).toBe("security:lockfile 聞いた 1 / 認めた 1 / 認めなかった 0 / 返事まで 中央値 2h（合計 2h） / 再チェックで自動マージ 0 / 戻された 0");
+  });
+
+  test("proposals: no security group is proposed (moving one is the user's call), even a recheck merge taken back", () => {
+    // RECHECK_PASS cannot read a security group; a hand-built mark checks that proposals looks at RECHECK_KINDS only
+    const rechecked: PrRecord = { number: 4, mergedAt: t(4), headSha: SHA, marks: [{ kind: "recheck", kinds: ["security:lockfile"], sha: SHA, at: t(3) }] };
+    expect(tally([rechecked], [], P).find((r) => r.kind === "security:lockfile")).toMatchObject({ recheckMerged: [4] });
+    expect(proposals([...prs, rechecked], [{ sha: "7".repeat(40), at: t(8), reverted: [1, 3, 4] }], P)).toEqual([]);
+  });
+});
+
+describe("mergedSince (#3595)", () => {
+  const NOW = Date.parse("2026-10-08T12:00:00Z");
+  /** A search that holds `perDay` merged PRs on each day from 2026-10-01 to 2026-10-08 (PR number = day * 10000 + i). */
+  const searchOf = (perDay: Record<string, number>) => {
+    const qs: string[] = [];
+    const run: Run = async (cmd) => {
+      const q = cmd[cmd.indexOf("-f") + 1]!.replace("q=repo:example/development is:pr is:merged ", "");
+      const paginate = cmd.includes("--paginate");
+      qs.push(`${q}${paginate ? "" : " (count)"}`);
+      const days = Object.keys(perDay).filter((d) => {
+        const r = /^merged:(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$/.exec(q);
+        return r ? d >= r[1]! && d <= r[2]! : d >= q.replace("merged:>=", "");
+      });
+      const numbers = days.flatMap((d) => Array.from({ length: perDay[d]! }, (_, i) => Number(d.slice(8)) * 10000 + i));
+      const total = numbers.length;
+      // search answers at most 1,000 items, whatever total_count says
+      const items = (paginate ? numbers : numbers.slice(0, 1)).slice(0, 1000);
+      return `page false ${total}\n${items.join("\n")}\n`;
+    };
+    return { run, qs };
+  };
+
+  test("a period that fits is counted once and read once", async () => {
+    const { run, qs } = searchOf({ "2026-10-01": 3, "2026-10-02": 2 });
+    expect(await mergedSince("2026-10-01", run, "example/development", NOW)).toHaveLength(5);
+    expect(qs).toEqual(["merged:>=2026-10-01 (count)", "merged:>=2026-10-01"]);
+  });
+
+  test("a period over 1,000 is read as halves until each fits, without reading the pages of a range over it", async () => {
+    const perDay = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`2026-10-0${i + 1}`, 300]));
+    const { run, qs } = searchOf(perDay);
+    const got = await mergedSince("2026-10-01", run, "example/development", NOW);
+    expect(got).toHaveLength(2400);
+    expect(new Set(got).size).toBe(2400);
+    // the full pages are read only for ranges that fit
+    expect(qs.filter((q) => !q.endsWith("(count)"))).toEqual([
+      "merged:2026-10-01..2026-10-02", "merged:2026-10-03..2026-10-04", "merged:2026-10-05..2026-10-06", "merged:2026-10-07..2026-10-08",
+    ]);
+  });
+
+  test("a single day over 1,000 is an error (the counts would be short)", async () => {
+    const { run } = searchOf({ "2026-10-01": 1, "2026-10-02": 1200 });
+    await expect(mergedSince("2026-10-01", run, "example/development", NOW)).rejects.toThrow("2026-10-02 の 1 日で 1200 件");
   });
 });
 
@@ -313,46 +395,10 @@ describe("proposals", () => {
     const prs = [rechecked(1, "responsibility"), rechecked(2, "responsibility"), rechecked(3, "size")];
     const R = "7".repeat(40);
     expect(proposals(prs, [{ sha: R, at: at(5), reverted: [2] }, { sha: "8".repeat(40), at: at(6), reverted: [9] }], W))
-      .toEqual([{ to: "ask", kind: "responsibility", evidence: [2], reverts: [R] }]);
+      .toEqual([{ kind: "responsibility", evidence: [2], reverts: [R] }]);
     // not taken back, or merged before the look-back: nothing
     expect(proposals(prs, [], W)).toEqual([]);
     expect(proposals([rechecked(2, "responsibility", "2026-06-01T00:00:00Z")], [{ sha: "r", at: at(5), reverted: [2] }], W)).toEqual([]);
-  });
-
-  test(`the latest ${STREAK} answers on an asked kind all yes → to the recheck side`, () => {
-    expect(STREAK).toBe(5);
-    expect(proposals(answered("rescue", ["no", "yes", "yes", "yes", "yes", "yes"]), [], W))
-      .toEqual([{ to: "recheck", kind: "rescue", evidence: [101, 102, 103, 104, 105] }]);
-  });
-
-  test("4 answers only, or a no among the latest 5 → nothing", () => {
-    expect(proposals(answered("design-rules", ["yes", "yes", "yes", "yes"]), [], W)).toEqual([]);
-    expect(proposals(answered("design-rules", ["yes", "yes", "no", "yes", "yes"]), [], W)).toEqual([]);
-    // answers before the look-back do not count
-    expect(proposals(answered("design-rules", ["yes", "yes", "yes", "yes", "yes"]), [], { ...W, since: "2026-09-12T00:00:00Z" })).toEqual([]);
-    // nor answers after the window's end (a past --until)
-    expect(proposals(answered("design-rules", ["yes", "yes", "yes", "yes", "yes"]), [], { ...W, until: "2026-09-12T00:00:00Z" })).toEqual([]);
-  });
-
-  test("the streak counts PRs: 5 yes on one PR (asked again after each new head) are one", () => {
-    const one: PrRecord = {
-      number: 7, mergedAt: at(9), headSha: SHA,
-      marks: parseMarks([0, 1, 2, 3, 4].flatMap((i) => [c(`[merge-ask] rescue ${SHA}`, at(i)), c(`[merge-answer] yes rescue ${SHA}`, at(i))])),
-    };
-    expect(proposals([one], [], W)).toEqual([]);
-    // its latest answer is what counts: 4 other PRs' yes + this one's yes make 5
-    expect(proposals([one, ...answered("rescue", ["yes", "yes", "yes", "yes"], 200)], [], W)).toEqual([{ to: "recheck", kind: "rescue", evidence: [7, 200, 201, 202, 203] }]);
-  });
-
-  test("the latest answers are ordered by time, not by string", () => {
-    // the same instant written with +09:00 sorts before every Z string of that day, as text
-    const jp = (n: number, iso: string, offset: string): PrRecord => ({
-      number: n, mergedAt: null, headSha: SHA,
-      marks: parseMarks([c(`[merge-ask] rescue ${SHA}`, "2026-09-01T00:00:00Z"), { ...c(`[merge-answer] yes rescue ${SHA}`), created_at: iso.replace("Z", offset) }]),
-    });
-    // 1: 2026-09-20T09:00+09:00 = 00:00Z (the oldest). 2–6: 2026-09-20T02:00Z..06:00Z. As strings "…T09:00+09:00" > "…T06:00Z".
-    const prs = [jp(1, "2026-09-20T09:00:00Z", "+09:00"), ...[2, 3, 4, 5, 6].map((n) => jp(n, `2026-09-20T0${n}:00:00Z`, "Z"))];
-    expect(proposals(prs, [], W)).toEqual([{ to: "recheck", kind: "rescue", evidence: [2, 3, 4, 5, 6] }]);
   });
 
   test("a revert after the window's end (a past --until) proposes nothing, whatever git's offset", () => {
@@ -361,27 +407,25 @@ describe("proposals", () => {
     // 2026-09-30T23:30-07:00 is 2026-10-01T06:30Z: after the window that ends at 2026-10-01T00:00Z
     expect(proposals(prs, [{ sha: "r", at: "2026-09-30T23:30:00-07:00", reverted: [2] }], W)).toEqual([]);
     // 2026-10-01T08:00+09:00 is 2026-09-30T23:00Z: inside it
-    expect(proposals(prs, [{ sha: "r", at: "2026-10-01T08:00:00+09:00", reverted: [2] }], W)).toEqual([{ to: "ask", kind: "responsibility", evidence: [2], reverts: ["r"] }]);
+    expect(proposals(prs, [{ sha: "r", at: "2026-10-01T08:00:00+09:00", reverted: [2] }], W)).toEqual([{ kind: "responsibility", evidence: [2], reverts: ["r"] }]);
   });
 
-  test("a PR's latest answer is the one that counts: a no then a yes is a yes, a yes then a no is a no", () => {
-    const twice = (n: number, first: "yes" | "no", last: "yes" | "no"): PrRecord => ({
-      number: n, mergedAt: null, headSha: SHA,
-      marks: parseMarks([c(`[merge-answer] ${first} rescue ${SHA}`, at(1)), c(`[merge-answer] ${last} rescue ${SHA}`, at(2))]),
-    });
-    const four = answered("rescue", ["yes", "yes", "yes", "yes"], 200);
-    expect(proposals([twice(7, "no", "yes"), ...four], [], W).map((p) => p.kind)).toEqual(["rescue"]);
-    expect(proposals([twice(7, "yes", "no"), ...four], [], W)).toEqual([]);
+  test("rescue and design-rules as recheck kinds: a recheck merge counts in their rows, a taken-back one proposes asking, 5 yes propose nothing", () => {
+    const prs = [rechecked(2, "rescue"), rechecked(3, "design-rules")];
+    const rows = tally(prs, [], W);
+    expect(rows.find((r) => r.kind === "rescue")).toMatchObject({ asked: 0, recheckMerged: [2] });
+    expect(rows.find((r) => r.kind === "design-rules")).toMatchObject({ asked: 0, recheckMerged: [3] });
+    expect(proposals(prs, [{ sha: "r", at: at(5), reverted: [2, 3] }], W)).toEqual([
+      { kind: "rescue", evidence: [2], reverts: ["r"] },
+      { kind: "design-rules", evidence: [3], reverts: ["r"] },
+    ]);
+    expect(proposals([...answered("rescue", ["yes", "yes", "yes", "yes", "yes"]), ...answered("design-rules", ["yes", "yes", "yes", "yes", "yes"], 200)], [], W)).toEqual([]);
   });
 
   test("security is never proposed, even after 5 yes", () => {
-    expect(proposals(answered("security", ["yes", "yes", "yes", "yes", "yes"]), [], W)).toEqual([]);
+    expect(proposals(answered("security:words", ["yes", "yes", "yes", "yes", "yes"]), [], W)).toEqual([]);
   });
 
-  test("a kind already on that side is not proposed (asked kinds are not taken back to asking; recheck kinds not moved to recheck)", () => {
-    // a size question answered yes 5 times (asked together with rescue) is not a proposal for size
-    expect(proposals(answered("rescue,size", ["yes", "yes", "yes", "yes", "yes"]), [], W).map((p) => p.kind)).toEqual(["rescue"]);
-  });
 });
 
 describe("main", () => {
@@ -442,24 +486,24 @@ describe("main", () => {
 describe("requestFor", () => {
   const src = { date: "2026-10-05" };
   test("the 出典 says 誰の言葉: 定期の検査 (#1818)", () => {
-    expect(requestFor([{ to: "ask", kind: "size", evidence: [9] }], src)!.body).toContain("## 出典\n- 誰の言葉: 定期の検査\n");
+    expect(requestFor([{ kind: "size", evidence: [9], reverts: [] }], src)!.body).toContain("## 出典\n- 誰の言葉: 定期の検査\n");
   });
   test("none → null; the title is the same whatever the proposals' order", () => {
     expect(requestFor([], src)).toBeNull();
-    const back = { to: "ask", kind: "migration", evidence: [3], reverts: ["abcdef0123456789abcdef0123456789abcdef01"] } as const;
-    const a = requestFor([back, { to: "recheck", kind: "rescue", evidence: [1, 2] }], src)!;
-    const b = requestFor([{ to: "recheck", kind: "rescue", evidence: [1, 2] }, back], src)!;
-    expect(a.title).toBe("マージ規則の見直し: rescue を再チェックへ / migration を聞くへ");
+    const back = { kind: "migration", evidence: [3], reverts: ["abcdef0123456789abcdef0123456789abcdef01"] };
+    const a = requestFor([back, { kind: "rescue", evidence: [1, 2], reverts: ["1234567890"] }], src)!;
+    const b = requestFor([{ kind: "rescue", evidence: [1, 2], reverts: ["1234567890"] }, back], src)!;
+    expect(a.title).toBe("マージ規則の見直し: rescue を聞くへ / migration を聞くへ");
     expect(b.title).toBe(a.title);
-    expect(a.body).toContain("- rescue を再チェックへ（直近 5 件の返事がすべて認めた: #1, #2）");
+    expect(a.body).toContain("- rescue を聞くへ（再チェックで自動マージして戻された: #1, #2。戻したコミット: 1234567）");
     // the commit that took it back is named, to read why it was undone
     expect(a.body).toContain("- migration を聞くへ（再チェックで自動マージして戻された: #3。戻したコミット: abcdef0）");
     expect(a.body).toMatch(/^## 出典\n- 誰の言葉: 定期の検査\n`bun scripts\/merge-audit.ts --file-request`（定期実行） \/ 2026-10-05$/m);
   });
 
   test("already filed request is detected: the same proposals' open request is not filed again", () => {
-    const title = requestFor([{ to: "ask", kind: "size", evidence: [9] }], src)!.title;
+    const title = requestFor([{ kind: "size", evidence: [9], reverts: [] }], src)!.title;
     expect(alreadyFiled(title, [{ ref: "#601", title: "モデル一覧の設定化" }, { ref: "#900", title }])).toBe("#900");
-    expect(alreadyFiled(title, [{ ref: "#901", title: `${title} / rescue を再チェックへ` }])).toBeNull();
+    expect(alreadyFiled(title, [{ ref: "#901", title: `${title} / rescue を聞くへ` }])).toBeNull();
   });
 });

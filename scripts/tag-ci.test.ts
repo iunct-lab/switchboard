@@ -2,11 +2,12 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { withHeavySlot } from "../ops-kit/src/heavy";
 import { NO_HOST } from "../ops-kit/src/secrets";
 import type { Filed, OpenRequest } from "./file-request";
 import { stepWithIdle } from "./local-ci";
-import { failedIn, failureRequest, followUp, hidePaths, latestPass, latestPassTag, parseArgs, REQUEST_TITLE, resolveRepo, resultSection, tagCi, tagCiExit, tagResult, TAG_CI_RESULT, type FollowDeps, type TagCiDeps } from "./tag-ci";
+import { classifyMiss, failedIn, failedTestFiles, failureRequest, followUp, hidePaths, latestPass, latestPassTag, MAX_TAG_RUNS, parseArgs, REQUEST_TITLE, resolveRepo, resultSection, tagCi, tagCiExit, tagResult, TAG_CI_RESULT, type FollowDeps, type TagCiDeps, type TagCiEntry } from "./tag-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
 const ciTs = await Bun.file(new URL("./ci.ts", import.meta.url)).text();
@@ -15,22 +16,28 @@ const CACHE = mkdtempSync(join(tmpdir(), "sb-tag-ci-test-"));
 afterAll(() => rmSync(CACHE, { recursive: true, force: true }));
 
 const shaOf = (tag: string) => tag.replace(/\D/g, "").padEnd(40, "a").slice(0, 40);
-const CHECK = "bun scripts/perf-ratchet.ts check perf-result.json || { cat perf-result.json; exit 1; }";
+const CHECK = "bun scripts/perf-ratchet.ts check perf-result.json --base perf-base.json || { cat perf-result.json; exit 1; }";
 
 /**
  * A fake clone of o/r: `tags` newest first, each with its Release body (null = no Release) and how its CI goes
  * (`fail`: the step's script that fails and its output; none = every step passes). Edits of a Release change its body.
  */
-function fake(tags: Array<{ tag: string; body: string | null; fail?: { at: string; output: string }; merged?: false }>, yml = ciYml) {
+function fake(tags: Array<{ tag: string; body: string | null; fail?: { at: string; output: string }; merged?: false }>, yml = ciYml, select?: string | Error) {
   const bodies = new Map(tags.map((t) => [t.tag, t.body]));
   const ran: Array<{ tag: string; script: string }> = [];
   const viewed: string[] = [];
   const worktrees: string[] = [];
   const edits: Array<{ tag: string; body: string }> = [];
+  const diffs: string[] = [];
   const tagOfDir = (dir: string) => /switchboard\.tag-ci-(v\d+\.\d+\.\d+)\./.exec(dir)?.[1] ?? "?";
   const d: TagCiDeps = {
     sh: async (cmd, _cwd, input) => {
       const c = cmd.join(" ");
+      diffs.push(...(cmd.includes("diff") ? [cmd.at(-1)!] : []));
+      if (cmd[0] === "env") {
+        if (select instanceof Error) throw select;
+        return select ?? "";
+      }
       // `merged: false` = a tag after the commit given to --merged
       if (c.includes(" tag -l ")) return `${tags.filter((t) => !cmd.includes("--merged") || t.merged !== false).map((t) => t.tag).join("\n")}\nv1.0\n`;
       if (c.includes(" rev-parse ")) return `${shaOf(cmd.at(-1)!.replace("^{commit}", ""))}\n`;
@@ -50,6 +57,7 @@ function fake(tags: Array<{ tag: string; body: string | null; fail?: { at: strin
         worktrees.push(tagOfDir(dir));
         await Bun.write(`${dir}/.github/workflows/ci.yml`, yml);
         await Bun.write(`${dir}/scripts/ci.ts`, ciTs);
+        if (select !== undefined) await Bun.write(`${dir}/scripts/test-select.ts`, "");
       }
       return "";
     },
@@ -60,8 +68,9 @@ function fake(tags: Array<{ tag: string; body: string | null; fail?: { at: strin
       return f && script.trim() === f.at ? { code: 1, output: f.output } : { code: 0, output: "ok" };
     },
     log: () => undefined,
+    slot: (_name, fn) => fn(),
   };
-  return { d, ran, viewed, worktrees, edits, bodies };
+  return { d, ran, viewed, worktrees, edits, bodies, diffs };
 }
 
 const testFail = { at: "bun test", output: "(fail) a > b\n1 fail" };
@@ -78,6 +87,53 @@ describe("tag-ci", () => {
     expect(tagResult(f.bodies.get("v1.0.0")!, shaOf("v1.0.0"))).toBe("pass");
     expect(f.worktrees).toEqual(["v1.0.0"]);
     expect(f.ran.some((x) => x.script === "bun test")).toBe(true);
+  });
+
+  test("every test runs: the tag's bun test is never narrowed, even with the selection in the checkout (#3297)", async () => {
+    const f = fake([{ tag: "v1.0.0", body: "- #1 x" }]);
+    const sh = f.d.sh;
+    const d: TagCiDeps = {
+      ...f.d,
+      sh: async (cmd, cwd, input) => {
+        const out = await sh(cmd, cwd, input);
+        if (cmd.includes("worktree") && cmd.includes("add")) await Bun.write(`${cmd[cmd.indexOf("--detach") + 1]!}/scripts/test-select.ts`, "");
+        return out;
+      },
+    };
+    await tagCi(d, "o/r", "/repo", CACHE);
+    expect(f.ran.map((x) => x.script).filter((s) => s.startsWith("bun test"))).toEqual(["bun test"]);
+  });
+
+  test("one heavy slot for the whole run: no step starts while another heavy job holds the machine's slot", async () => {
+    const home = mkdtempSync(join(CACHE, "home-"));
+    const o = { home, mem: () => undefined, pollMs: 10, log: () => undefined };
+    const f = fake([{ tag: "v1.0.0", body: "- #1 x" }]);
+    let released = 0;
+    let firstStep = 0;
+    let names: string[] = [];
+    let holding!: () => void;
+    const held = new Promise<void>((r) => (holding = r));
+    const other = withHeavySlot("local-ci o/r#1", async () => {
+      holding();
+      await Bun.sleep(100);
+      released = performance.now();
+    }, o);
+    await held;
+    const d: TagCiDeps = {
+      ...f.d,
+      step: async (script, cwd, env) => {
+        firstStep ||= performance.now();
+        return f.d.step(script, cwd, env);
+      },
+      slot: (name, fn) => {
+        names = [...names, name];
+        return withHeavySlot(name, fn, o);
+      },
+    };
+    const [r] = await Promise.all([tagCi(d, "o/r", "/repo", CACHE, NO_HOST), other]);
+    expect(names).toEqual(["tag-ci o/r"]);
+    expect(r.map((x) => `${x.tag} ${x.result}`)).toEqual(["v1.0.0 pass"]);
+    expect(firstStep).toBeGreaterThanOrEqual(released);
   });
 
   test("walks back v3 fail, v2 fail, v1 pass and stops at v1", async () => {
@@ -127,13 +183,43 @@ describe("tag-ci", () => {
     const f = fake([{ tag: "v2.0.0", body: "", fail: raised }, { tag: "v1.0.0", body: "" }]);
     const r = await tagCi(f.d, "o/r", "/repo", CACHE);
     expect(r.map((x) => `${x.tag} ${x.result}`)).toEqual(["v2.0.0 pass"]);
-    expect(f.bodies.get("v2.0.0")).toContain(`[tag-ci] pass ${shaOf("v2.0.0")} (raised only)`);
+    expect(f.bodies.get("v2.0.0")).toContain(`[tag-ci] pass ${shaOf("v2.0.0")} (raised/grew only)`);
     expect(f.bodies.get("v2.0.0")).toContain("    raised: launch.ms = 900 (main 800)");
     expect(tagResult(f.bodies.get("v2.0.0")!, shaOf("v2.0.0"))).toBe("pass");
     // over next to raised is a fail, and the walk goes on
     const over = { at: CHECK, output: "ceilings: local\nover: launch.ms = 900 > 800\nraised: launch.ms = 900 (main 800)\n" };
     const g = fake([{ tag: "v2.0.0", body: "", fail: over }, { tag: "v1.0.0", body: "" }]);
     expect((await tagCi(g.d, "o/r", "/repo", CACHE)).map((x) => `${x.tag} ${x.result}`)).toEqual(["v2.0.0 fail", "v1.0.0 pass"]);
+  });
+
+  test("grew only (and grew next to raised) counts as pass", async () => {
+    const grew = "grew: bundle.js +1.10% (1000 → 1011 B) ≥ 1%: merging is the user's call (docs/design/perf.md)";
+    const f = fake([{ tag: "v2.0.0", body: "", fail: { at: CHECK, output: `ceilings: local\nbundle: js 1011 B (main 1000 B, +11 B, +1.10%) / css 50 B (main 50 B, +0 B, +0.00%)\n${grew}\n` } }, { tag: "v1.0.0", body: "" }]);
+    const r = await tagCi(f.d, "o/r", "/repo", CACHE);
+    expect(r.map((x) => `${x.tag} ${x.result}`)).toEqual(["v2.0.0 pass"]);
+    expect(f.bodies.get("v2.0.0")).toContain(`[tag-ci] pass ${shaOf("v2.0.0")} (raised/grew only)`);
+    expect(f.bodies.get("v2.0.0")).toContain(`    ${grew}`);
+    const both = { at: CHECK, output: `ceilings: local\nraised: launch.ms = 900 (main 800)\n${grew}\n` };
+    const g = fake([{ tag: "v2.0.0", body: "", fail: both }, { tag: "v1.0.0", body: "" }]);
+    expect((await tagCi(g.d, "o/r", "/repo", CACHE)).map((x) => `${x.tag} ${x.result}`)).toEqual(["v2.0.0 pass"]);
+    expect(g.bodies.get("v2.0.0")).toContain(`    raised: launch.ms = 900 (main 800)\n    ${grew}`);
+  });
+
+  test("raised next to a failed bun test is a fail naming both steps and their lines (the check keeps going, #2945)", async () => {
+    const f = fake([{ tag: "v1.0.0", body: "", fail: { at: CHECK, output: "ceilings: local\nraised: launch.ms = 900 (main 800)\n" } }]);
+    const test = { code: 1, output: "(fail) a > b\n1 fail" };
+    const d: TagCiDeps = { ...f.d, step: async (script, cwd, env) => (script.trim() === "bun test" ? (f.ran.push({ tag: "v1.0.0", script: "bun test" }), test) : f.d.step(script, cwd, env)) };
+    const r = await tagCi(d, "o/r", "/repo", CACHE, NO_HOST);
+    expect(r.map((x) => `${x.tag} ${x.result}`)).toEqual(["v1.0.0 fail"]);
+    expect(r[0]!.step).toBe("bun scripts/perf-ratchet.ts check perf-result.json / bun test");
+    expect(r[0]!.fails).toEqual(["raised: launch.ms = 900 (main 800)", "(fail) a > b"]);
+    expect(f.ran.at(-1)!.script).toBe("bun test");
+    // a check with more lines than the Release keeps does not push bun test's lines out: each step gets its share
+    const many = Array.from({ length: 25 }, (_, i) => `over: k${i} = 2 > ceiling 1`).join("\n");
+    const g = fake([{ tag: "v1.0.0", body: "", fail: { at: CHECK, output: `ceilings: local\n${many}\n` } }]);
+    const r2 = await tagCi({ ...g.d, step: async (script, cwd, env) => (script.trim() === "bun test" ? test : g.d.step(script, cwd, env)) }, "o/r", "/repo", CACHE, NO_HOST);
+    expect(r2[0]!.fails).toHaveLength(11);
+    expect(r2[0]!.fails!.at(-1)).toBe("(fail) a > b");
   });
 
   test("raised only is a fail when steps come after the check (they did not run)", async () => {
@@ -224,6 +310,155 @@ function requests(f: ReturnType<typeof fake>) {
   return { d, open, comments, printed, bodies };
 }
 
+describe("tag-ci: recordings and the walk (#3534)", () => {
+  const saved = process.env.SWITCHBOARD_FIXTURES;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.SWITCHBOARD_FIXTURES;
+    else process.env.SWITCHBOARD_FIXTURES = saved;
+  });
+  const listing = (f: ReturnType<typeof fake>, out: string | Error, withList = true) => {
+    const lists: string[] = [];
+    const d: TagCiDeps = {
+      ...f.d,
+      log: (l) => void lists.push(l),
+      sh: async (cmd, cwd, input) => {
+        if (cmd.at(-1) === "list") {
+          lists.push("listed");
+          expect(cmd.slice(0, 2)).toEqual(["env", "-i"]); // the checkout's code runs in the steps' clean environment
+          if (out instanceof Error) throw out;
+          return out;
+        }
+        const r = await f.d.sh(cmd, cwd, input);
+        if (withList && cmd.includes("worktree") && cmd.includes("add")) await Bun.write(`${cmd[cmd.indexOf("--detach") + 1]!}/scripts/fixtures.ts`, "");
+        return r;
+      },
+    };
+    return { d, lists };
+  };
+
+  test("recordings asked for and missing: nothing runs, no mark, no walk, the names are logged, exit 2", async () => {
+    process.env.SWITCHBOARD_FIXTURES = "/vault";
+    const f = fake([{ tag: "v2.0.0", body: "- b" }, { tag: "v1.0.0", body: "- a" }]);
+    const { d, lists } = listing(f, "present packages/a.jsonl\nmissing packages/b.jsonl\n");
+    const r = await tagCi(d, "o/r", "/repo", CACHE, NO_HOST);
+    expect(r).toEqual([]);
+    expect(tagCiExit(r)).toBe(2);
+    expect(f.ran).toEqual([]);
+    expect(f.edits).toEqual([]);
+    expect(f.worktrees).toEqual(["v2.0.0"]);
+    expect(lists.some((l) => l.includes("packages/b.jsonl"))).toBe(true);
+  });
+
+  test("recordings asked for and all there: the tag runs", async () => {
+    process.env.SWITCHBOARD_FIXTURES = "/vault";
+    const f = fake([{ tag: "v1.0.0", body: "- a" }]);
+    const r = await tagCi(listing(f, "present packages/a.jsonl\n").d, "o/r", "/repo", CACHE, NO_HOST);
+    expect(r.map((e) => e.result)).toEqual(["pass"]);
+  });
+
+  test("a checkout without the list (another repository) runs as before", async () => {
+    process.env.SWITCHBOARD_FIXTURES = "/vault";
+    const f = fake([{ tag: "v1.0.0", body: "- a" }]);
+    const { d, lists } = listing(f, new Error("no such file"), false);
+    expect((await tagCi(d, "o/r", "/repo", CACHE, NO_HOST)).map((e) => e.result)).toEqual(["pass"]);
+    expect(lists).not.toContain("listed");
+  });
+
+  test("a list that cannot be read: not judged, no mark", async () => {
+    process.env.SWITCHBOARD_FIXTURES = "/vault";
+    const f = fake([{ tag: "v1.0.0", body: "- a" }]);
+    expect(await tagCi(listing(f, new Error("broken")).d, "o/r", "/repo", CACHE, NO_HOST)).toEqual([]);
+    expect(f.ran).toEqual([]);
+    expect(f.edits).toEqual([]);
+  });
+
+  test("recordings not asked for: the list is not read", async () => {
+    delete process.env.SWITCHBOARD_FIXTURES;
+    const f = fake([{ tag: "v1.0.0", body: "- a" }]);
+    const { d, lists } = listing(f, "missing packages/b.jsonl\n");
+    expect((await tagCi(d, "o/r", "/repo", CACHE, NO_HOST)).map((e) => e.result)).toEqual(["pass"]);
+    expect(lists).not.toContain("listed");
+  });
+
+  test("the walk stops after MAX_TAG_RUNS tags, and says so", async () => {
+    delete process.env.SWITCHBOARD_FIXTURES;
+    const f = fake(["v5.0.0", "v4.0.0", "v3.0.0", "v2.0.0", "v1.0.0"].map((tag) => ({ tag, body: "- x", fail: testFail })));
+    const { d, lists } = listing(f, "");
+    const r = await tagCi(d, "o/r", "/repo", CACHE, NO_HOST);
+    expect(r.map((e) => e.tag)).toEqual(["v5.0.0", "v4.0.0", "v3.0.0"].slice(0, MAX_TAG_RUNS));
+    expect(lists.some((l) => l.includes("遡りをここで止める"))).toBe(true);
+  });
+
+  test("the newest tag's fail is reported before the walk: a cut walk loses no report", async () => {
+    delete process.env.SWITCHBOARD_FIXTURES;
+    const f = fake([{ tag: "v2.0.0", body: "- b", fail: testFail }, { tag: "v1.0.0", body: "- a" }]);
+    const at: string[] = [];
+    const onNewest = async (e: TagCiEntry[]) => { at.push(`${e.map((x) => x.tag)} ran=${f.worktrees.length}`); };
+    await tagCi({ ...f.d, onNewest }, "o/r", "/repo", CACHE, NO_HOST);
+    expect(at).toEqual(["v2.0.0 ran=1"]);
+    expect(f.worktrees).toEqual(["v2.0.0", "v1.0.0"]);
+  });
+
+  test("a pass reports nothing before the end", async () => {
+    delete process.env.SWITCHBOARD_FIXTURES;
+    const f = fake([{ tag: "v1.0.0", body: "- a" }]);
+    let called = 0;
+    await tagCi({ ...f.d, onNewest: async () => void called++ }, "o/r", "/repo", CACHE, NO_HOST);
+    expect(called).toBe(0);
+  });
+});
+
+describe("tag-ci: a miss of the narrowed tests (#3297)", () => {
+  // as bun prints it: the heading, the test's error, the (fail) line
+  const red = { at: "bun test", output: "bun test v1.4.4\na.test.ts:\nerror: x\n(fail) one [1ms]\nb.test.ts:\n(pass) two\n(fail) three [1ms]\n\n 1 pass\n 2 fail\n" };
+  const sectionOf = async (select: string | Error | undefined, tags = [{ tag: "v2.0.0", body: "x", fail: red }, { tag: "v1.0.0", body: "- #1 x\n\n## CI\n[tag-ci] pass " + shaOf("v1.0.0") }]) => {
+    const f = fake(tags, ciYml, select);
+    await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST);
+    return { body: f.edits[0]!.body, diffs: f.diffs };
+  };
+
+  test("failedTestFiles: by the heading, an error outside a test too, not the closing list", () => {
+    expect(failedTestFiles(red.output)).toEqual(["a.test.ts", "b.test.ts"]);
+    expect(failedTestFiles("c.test.ts:\n# Unhandled error between tests\n---\nd.test.tsx:\n(pass) x\n")).toEqual(["c.test.ts"]);
+    expect(failedTestFiles("a.test.ts:\n(fail) x\nb.test.ts:\n(pass) y\n\n2 tests failed:\n(fail) x\n(fail) z\n")).toEqual(["a.test.ts"]);
+    expect(failedTestFiles("(fail) no heading\n")).toEqual([]);
+  });
+
+  test("classifyMiss: a selection of every test misses nothing", () => {
+    expect(classifyMiss(["a", "b"], ["a"])).toEqual({ missed: ["b"], selected: ["a"] });
+    expect(classifyMiss(["a"], null)).toEqual({ missed: [], selected: ["a"] });
+  });
+
+  test("a red bun test: the line in the Release, from the change since the tag before; failedIn still reads the failure", async () => {
+    const { body, diffs } = await sectionOf("selected: 1\na.test.ts  x");
+    expect(body).toContain("\nselection: missed 1 / selected 1（落ちたテストファイル 2 件）\n");
+    expect(diffs).toEqual(["v1.0.0"]);
+    expect(failedIn(body)).toEqual({ step: "bun test", fails: ["(fail) one [1ms]", "(fail) three [1ms]"] });
+    expect(tagResult(body, shaOf("v2.0.0"))).toBe("fail");
+  });
+
+  test("a change it cannot judge chose every test: nothing missed", async () => {
+    expect((await sectionOf("full: bun.lock: 依存の定義や設定")).body).toContain("selection: missed 0 / selected 2（");
+  });
+
+  test("unclassified: no tag before, no selection, a failed selection, no file in the output", async () => {
+    expect((await sectionOf("selected: 0", [{ tag: "v1.0.0", body: "x", fail: red }])).body).toContain("selection: unclassified（前のタグが無い）");
+    expect((await sectionOf(undefined)).body).toContain("selection: unclassified（前のタグとの差分か選択を読めない）");
+    expect((await sectionOf(new Error("exit 1"))).body).toContain("selection: unclassified（前のタグとの差分か選択を読めない）");
+    const f = fake([{ tag: "v2.0.0", body: "x", fail: red }, { tag: "v1.0.0", body: `[tag-ci] pass ${shaOf("v1.0.0")}` }], ciYml, "selected: 0");
+    const sh = f.d.sh;
+    await tagCi({ ...f.d, sh: async (cmd, cwd, input) => { if (cmd.includes("ls-files")) throw new Error("git failed"); return sh(cmd, cwd, input); } }, "o/r", "/repo", CACHE, NO_HOST);
+    expect(f.edits[0]!.body).toContain("selection: unclassified（前のタグとの差分か選択を読めない）");
+    const tags = [{ tag: "v2.0.0", body: "x", fail: testFail }, { tag: "v1.0.0", body: `[tag-ci] pass ${shaOf("v1.0.0")}` }];
+    expect((await sectionOf("selected: 0", tags)).body).toContain("selection: unclassified（落ちたテストファイルを読めない）");
+  });
+
+  test("another step's red has no line", async () => {
+    const tags = [{ tag: "v2.0.0", body: "x", fail: { at: "bun run typecheck", output: "a.test.ts:\n(fail) x\n" } }, { tag: "v1.0.0", body: `[tag-ci] pass ${shaOf("v1.0.0")}` }];
+    expect((await sectionOf("selected: 0", tags)).body).not.toContain("selection:");
+  });
+});
+
 describe("tag-ci --latest-pass", () => {
   const mark = (tag: string, r: "pass" | "fail") => `notes\n\n## CI\n[tag-ci] ${r} ${shaOf(tag)}\n`;
 
@@ -263,6 +498,25 @@ describe("tag-ci --latest-pass", () => {
 });
 
 describe("tag-ci requests", () => {
+  test("a run cut after the walk wrote the pass: the next run tells the open request (#3534)", async () => {
+    const f = fake([{ tag: "v3.0.0", body: "- c\n\n## CI\n[tag-ci] fail " + shaOf("v3.0.0") + "\n\n`bun test` が落ちた:\n    (fail) a > b\n" }, { tag: "v2.0.0", body: "- b\n\n[tag-ci] pass " + shaOf("v2.0.0") }]);
+    const q = requests(f);
+    q.open.push({ ref: "#100", title: failureRequest({ tag: "v3.0.0", sha: shaOf("v3.0.0"), step: "bun test", fails: ["(fail) a > b"], lastPass: "v1.0.0", commits: [] }, "2026-10-30", NO_HOST).title });
+    q.bodies[0] = `v3.0.0（${shaOf("v3.0.0").slice(0, 7)}）\n最後に通ったタグ: v1.0.0`;
+    await followUp(await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST), "o/r", "/repo", true, q.d, "2026-10-30", NO_HOST);
+    expect(q.comments.map((c) => c.body)).toEqual([expect.stringContaining("最後に通ったタグ: v2.0.0")]);
+  });
+
+  test("filed before the walk, then the walk finds a pass: the open request is told once (#3534)", async () => {
+    const f = fake([{ tag: "v3.0.0", body: "- c", fail: testFail }, { tag: "v2.0.0", body: "- b" }, { tag: "v1.0.0", body: "- a\n\n[tag-ci] pass " + shaOf("v1.0.0") }]);
+    const q = requests(f);
+    const entries = await tagCi({ ...f.d, onNewest: (e) => followUp(e, "o/r", "/repo", true, q.d, "2026-10-30", NO_HOST) }, "o/r", "/repo", CACHE, NO_HOST);
+    await followUp(entries, "o/r", "/repo", true, q.d, "2026-10-30", NO_HOST);
+    await followUp(entries, "o/r", "/repo", true, q.d, "2026-10-30", NO_HOST);
+    expect(q.open.length).toBe(1);
+    expect(q.comments.map((c) => c.body)).toEqual([expect.stringContaining("最後に通ったタグ: v2.0.0")]);
+  });
+
   test("a failing newest tag files a request with the tag, step, lines, last pass and commits", async () => {
     const f = fake([{ tag: "v2.0.0", body: "", fail: testFail }, { tag: "v1.0.0", body: "" }]);
     const q = requests(f);

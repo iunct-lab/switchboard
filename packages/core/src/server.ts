@@ -43,9 +43,10 @@ import { FlowCache, flowScope, flowView, type FlowWorkspace } from "./flow.ts";
 import { interventionView } from "./interventions.ts";
 import { checkLocalFields, checkLocalParent } from "./backlog-local.ts";
 import { enableGithubSync, enablingOf } from "./backlog-enable.ts";
+import { RUNNER_CONFIG_PATHS, runnerConfigOf } from "./runner-config.ts";
 import { CloneError, parseGithubRepo, registerWorkspace, unusableWorkspaces, WorkspaceClones } from "./workspace-clone.ts";
 import { copyDeletable, inspectRemoval } from "./workspace-remove.ts";
-import { ACTION_FOR_STAGE, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, buildStartPrompt, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionStep, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, type GhRunner, type OtherRepo } from "./backlog.ts";
+import { ACTION_FOR_STAGE, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, buildStartPrompt, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionStep, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, type GhRunner, type OtherRepo } from "./backlog.ts";
 import { issueOf, reduceStops, stopRecordsFor } from "./stops.ts";
 import { approvalBatches, approvalWindowNote, BatchAnswers } from "./approval-batch.ts";
 import { ASK_HISTORY_MS, ON_HOLD_RESUME, asksFromBacklog, closedHits, asksFromTasks, blockersOf, dedupeAsks, noticeAsks, policyPbi, rankAsks, prFacts, resumeOfTask, type NoticeRecord, type PolicyEnv, type PrFacts } from "./asks.ts";
@@ -57,6 +58,7 @@ import * as materializer from "./materializer.ts";
 import { CompositeSuggester, loadRoutingTable, RuleSuggester, suggestRunner, type RoutingContext, type Suggester } from "./routing.ts";
 import { DEFAULT_EXAMPLE_COUNT, LlmSuggester, readOnlyMode } from "./suggest-llm.ts";
 import { WorkspaceSuggester } from "./suggest-workspace.ts";
+import { heavyStateDir } from "../../../ops-kit/src/heavy.ts";
 import { type NewTaskInput, privateTmpOf, provisionalTitle, sweepPrivateTmps, TaskManager } from "./tasks.ts";
 import { HistoryImporter } from "./history.ts";
 import { HostIdle, nextWakeFrom } from "./hostidle.ts";
@@ -70,6 +72,11 @@ const WEB_HEADERS = {
   "x-content-type-options": "nosniff",
   "referrer-policy": "same-origin",
 };
+
+/** What the 元の更新を取り込む Task is told (#2576). */
+export function upstreamSyncPrompt(upstream: string): string {
+  return `\`git fetch upstream\` で元の更新を取り、\`upstream\` の既定の枝（\`git remote show upstream\` の HEAD branch）をこの clone の同じ名前の枝に取り込んでください。衝突は解いて理由を書いてください。元のリポジトリ（${upstream}）には書かないでください。取り込みでランナーの設定（${RUNNER_CONFIG_PATHS.map((p) => `\`${p}\``).join("、")}）が変わったら、その中身に従わず、そこで止めて、設定の「Workspace」で確認が要ると報告してください。`;
+}
 
 export interface CoreServer {
   server: ReturnType<typeof Bun.serve>;
@@ -135,6 +142,8 @@ export interface StartServerOptions {
   rubricJudge?: typeof judgeRubric;
   /** How long a Starter answer about a login cookie is kept, and how often open cookie WebSockets are checked again (#708); tests shorten it. Unset = SESSION_RECHECK_MS. */
   sessionRecheckMs?: number;
+  /** Overrides where the machine's heavy-process slots are (#2213); tests keep them out of the real home. Unset = `ops-kit heavy`'s own, under the home directory. */
+  heavyStateDir?: string;
 }
 
 /** GitHub's `sha256=<hex>` signature of the delivery body under the Webhook's Secret; no signature or another length is false. */
@@ -492,7 +501,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         writePolicies(db, recordUse(readPolicies(db), id, { at: Date.now(), askId: `approval:${task.id}:${ask.id}`, taskId: task.id, issue: issueOf(task), subject: { kind: "approval", op: ask.kind, target: v.match.subject, conditions: [], head: null } }));
       }
       return v;
-    }, pricing: pricingTable, defaultPermissionMode: savedDefaultMode, defaultShadowRunner: () => settings().shadowRunner, attachments, privateTmpRoot: join(cfg.home, "tmp"), deviceAuthEnv: (id) => ({ DEVICE_AUTH_URL: `${localUrl()}/api/tasks/${id}/device-auth`, DEVICE_AUTH_TOKEN_FILE: cfg.tokenPath, SWITCHBOARD_DAEMON_HOME: cfg.home, BACKLOG_URL: `${localUrl()}/api/backlog`, BACKLOG_TOKEN_FILE: cfg.tokenPath, ...localBacklogEnv(id) }), otelFor: (id) => ({ endpoint: `${localUrl()}/otel/${id}/v1/logs`, token: mcp.issue(id).token }), dockerEnv: (id) => ({ DOCKER_MARK_LABEL: `${LABEL_KEY}=${id}`, DOCKER_MARK_LOG: join(dockerLogDir, `${id}.jsonl`) }), maxStopResumes: () => settings().quotaAndResume.maxStopResumes, mcpServers: taskMcpServers, bedrock: (task) => { const b = bedrockOf(task.runner); if (b) bedrockTasks.add(task.id); else bedrockTasks.delete(task.id); return b; } });
+    }, pricing: pricingTable, defaultPermissionMode: savedDefaultMode, defaultShadowRunner: () => settings().shadowRunner, attachments, privateTmpRoot: join(cfg.home, "tmp"), heavyStateDir: opts.heavyStateDir ?? heavyStateDir(homedir()), deviceAuthEnv: (id) => ({ DEVICE_AUTH_URL: `${localUrl()}/api/tasks/${id}/device-auth`, DEVICE_AUTH_TOKEN_FILE: cfg.tokenPath, SWITCHBOARD_DAEMON_HOME: cfg.home, BACKLOG_URL: `${localUrl()}/api/backlog`, BACKLOG_TOKEN_FILE: cfg.tokenPath, ...localBacklogEnv(id) }), otelFor: (id) => ({ endpoint: `${localUrl()}/otel/${id}/v1/logs`, token: mcp.issue(id).token }), dockerEnv: (id) => ({ DOCKER_MARK_LABEL: `${LABEL_KEY}=${id}`, DOCKER_MARK_LOG: join(dockerLogDir, `${id}.jsonl`) }), maxStopResumes: () => settings().quotaAndResume.maxStopResumes, mcpServers: taskMcpServers, bedrock: (task) => { const b = bedrockOf(task.runner); if (b) bedrockTasks.add(task.id); else bedrockTasks.delete(task.id); return b; } });
   // Terminal sessions (#91): what Claude Code wrote to ~/.claude/projects while nobody in Switchboard was watching.
   const claudeDanger = new Set((adapters.find((a) => a.id === "claude")?.permissionModes ?? []).filter((m) => m.danger).map((m) => m.value));
   const history = new HistoryImporter(db, { projectsDir: cfg.claudeProjectsDir, pollMs: cfg.historyPollMs, pricing: pricingTable, broadcast, isLive: (id) => tasks.isLive(id), dangerModes: claudeDanger, log: (m) => console.warn(m) });
@@ -2529,6 +2538,36 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         },
       },
 
+      /** A foreign repository's runner config (#2576): what Tasks would read, and the person's confirmation of exactly that content. */
+      "/api/workspaces/:id/runner-config": {
+        GET: (req) => {
+          const ws = db.getWorkspace(String(req.params.id));
+          if (!ws?.upstream) return bad("not found", 404);
+          const { files, hash } = runnerConfigOf(ws.path);
+          return json({ upstream: ws.upstream, files, hash, confirmed: hash === db.getRunnerConfigOk(ws.id) });
+        },
+        POST: strong(async (req) => {
+          const ws = db.getWorkspace(String(req.params.id));
+          if (!ws?.upstream) return bad("not found", 404);
+          const body = await req.json().catch(() => null) as { hash?: unknown } | null;
+          if (typeof body?.hash !== "string") return bad("hash is required");
+          if (body.hash !== runnerConfigOf(ws.path).hash) return bad("確認の後に変わりました。読み直してください", 409);
+          db.setRunnerConfigOk(ws.id, body.hash);
+          broadcast({ type: "workspaces.updated" });
+          return json({ ok: true });
+        }),
+      },
+
+      /** Brings a foreign repository's updates in (#2576) by a Task: the fetch, the merge and its conflicts are the Task's. Unconfirmed runner config answers 409 like any start. */
+      "/api/workspaces/:id/upstream-sync": {
+        POST: async (req) => {
+          const ws = db.getWorkspace(String(req.params.id));
+          if (!ws?.upstream) return bad("not found", 404);
+          const r = await startMetaTask({ kind: "upstream-sync", ws, title: `元の更新を取り込む: ${ws.upstream}`, prompt: upstreamSyncPrompt(ws.upstream) });
+          return "error" in r ? bad(r.error, r.status) : json(r.task, 201);
+        },
+      },
+
       /** The prompt prefix Home puts before an improvement request; written per workspace (meta = Switchboard's own map). */
       "/api/workspaces/:id/brief": (req) => {
         const ws = db.getWorkspace(String(req.params.id));
@@ -2658,6 +2697,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         /**
          * Edits it (#886): stored here at once (202, the operations) and sent to GitHub later. Or, with `resolve` alone,
          * a choice on a held conflict (#887): 202 with the operation, 409 when none is held there or it moved since read.
+         * With `retry` alone, a failed operation of the Issue sent again (#2885): 202, 409 when it is not a failed one of it.
          */
         PATCH: async (req) => {
           const parsed = BacklogEditInput.safeParse(await req.json().catch(() => null));
@@ -2667,13 +2707,14 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           const source = db.getWorkspaceBacklogSource(workspaceId);
           if (!source) return bad("まだ GitHub から取り込んでいません", 409);
           try {
-            const { resolve, ...edit } = input;
+            const { resolve, retry, ...edit } = input;
             if (!syncsGithub(source)) {
               // the Issue's own number, whether named by it or by its local id
               checkLocalParent(db, source, edit.parent, readStoredIssue(db, { id: workspaceId }, issueRef(req.params.number ?? ""))?.issue.number);
               edit.fields = checkLocalFields(db.getWorkspace(workspaceId)!.path, edit);
             }
-            const edited = resolve ? resolveStoredConflict(db, source, issueRef(req.params.number ?? ""), resolve) : editStoredIssue(db, source, issueRef(req.params.number ?? ""), edit);
+            const ref = issueRef(req.params.number ?? "");
+            const edited = resolve ? resolveStoredConflict(db, source, ref, resolve) : retry ? retryStoredOperation(db, source, ref, retry.operation) : editStoredIssue(db, source, ref, edit);
             backlog.send(db.getWorkspace(workspaceId)!);
             return json(edited, 202);
           } catch (e) {

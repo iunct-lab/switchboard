@@ -954,11 +954,11 @@ case "$1 $2" in
 esac
 exit 0`);
   let home: string, out: string;
-  const sync = (env: Record<string, string> = {}) => run("runner-sync.sh", [], { HOME: home, S3OUT: out, ...env });
+  const sync = (env: Record<string, string> = {}) => run("runner-sync.sh", [], { HOME: home, S3OUT: out, SB_PRE_REBUILD: "/bin/true", ...env });
   const keys = () => (existsSync(out) ? Bun.spawnSync(["find", out, "-type", "f"]).stdout.toString().split("\n").filter(Boolean).map((f) => f.slice(out.length + 1)).sort() : []);
   const tarList = (key: string) => Bun.spawnSync(["tar", "--zstd", "-tf", join(out, key)]).stdout.toString().split("\n").filter((f) => f && !f.endsWith("/"));
   const uploads = () => calls().filter((l) => l.startsWith("aws s3 cp"));
-  const fresh = () => { rmSync(out, { recursive: true, force: true }); rmSync(`${out}.overwrites`, { force: true }); rmSync(join(home, ".switchboard", "runner-sync.state"), { force: true }); };
+  const fresh = () => { rmSync(out, { recursive: true, force: true }); rmSync(`${out}.overwrites`, { force: true }); rmSync(join(home, ".switchboard", "runner-sync.state"), { force: true }); rmSync(join(home, ".switchboard", "runner-sync.dirs"), { force: true }); };
   const touchAfter = (f: string, text: string) => { Bun.sleepSync(20); writeFileSync(f, text); };
 
   beforeAll(() => {
@@ -987,6 +987,8 @@ exit 0`);
     expect(readdirSync(join(home, ".cache")).filter((f) => f.startsWith("sb-runner-sync."))).toEqual([]); // cleaned up
   });
 
+  // this test failed at 4-5 s (under its limit) and the 20 ms is not the cause: the marker's mtime is the run's start, so
+  // the write is always newer. Not reproduced in the flake work of #2939; the open question is on #3525
   test("runner-sync uploads a base first, then only the files that changed into the same set, and nothing on an unchanged day", () => {
     awsFake();
     fresh();
@@ -1029,6 +1031,149 @@ exit 0`);
     expect(sync().code).toBe(0);
     expect(keys().filter((k) => k.endsWith("/base.tar.zst")).length).toBe(3);
     expect(sets().length).toBe(3);
+  }, 30_000); // time assumption (the flake of #2939): 2.2 s of sleeps and three bash runs under load, over the 5 s default
+
+  test("runner-sync uploads the artifacts' copies with the runners' records", () => {
+    awsFake();
+    fresh();
+    const artifact = join(home, ".switchboard", "artifacts", "task_a", "art_a");
+    mkdirSync(artifact, { recursive: true });
+    writeFileSync(join(artifact, "report.html"), "<p>report</p>\n");
+    expect(sync().code).toBe(0);
+    expect(tarList(keys()[0]!)).toContain(".switchboard/artifacts/task_a/art_a/report.html");
+    touchAfter(join(artifact, "report.html"), "<p>refreshed</p>\n"); // a refresh goes up as a difference
+    expect(sync().code).toBe(0);
+    const diff = keys().filter((k) => !k.endsWith("/base.tar.zst"));
+    expect(tarList(diff[0]!)).toEqual([".switchboard/artifacts/task_a/art_a/report.html"]);
+    rmSync(join(home, ".switchboard", "artifacts"), { recursive: true });
+  }, 20000);
+
+  test("runner-sync takes a new base when the saved folders change", () => {
+    awsFake();
+    fresh();
+    sync(); // the set of a host before the artifacts: their folder comes later, with a copy older than the last run
+    const artifact = join(home, ".switchboard", "artifacts", "task_b", "art_b");
+    mkdirSync(artifact, { recursive: true });
+    writeFileSync(join(artifact, "report.html"), "<p>old</p>\n");
+    Bun.sleepSync(20);
+    const since = join(home, ".switchboard", "runner-sync.since");
+    writeFileSync(since, "");
+    rmSync(join(home, ".switchboard", "runner-sync.dirs")); // as an sb-runner-sync before this one leaves it
+    Bun.sleepSync(1100); // sets are named by the second
+    expect(sync({ AWS_FAIL: "1" }).code).not.toBe(0);
+    expect(existsSync(join(home, ".switchboard", "runner-sync.dirs"))).toBe(false); // a failed upload is not remembered
+    expect(sync().code).toBe(0);
+    const bases = keys().filter((k) => k.endsWith("/base.tar.zst"));
+    expect(bases.length).toBe(2);
+    expect(keys().length).toBe(2); // no difference: the new base holds it
+    expect(tarList(bases[1]!)).toContain(".switchboard/artifacts/task_b/art_b/report.html");
+    expect(readFileSync(join(home, ".switchboard", "runner-sync.dirs"), "utf8")).toContain(".switchboard/artifacts");
+    expect(sync().out).toContain("unchanged"); // and the next run is an ordinary one
+    writeFileSync(join(home, ".switchboard", "runner-sync.dirs"), ".claude/projects\n"); // a list that differs, not only a missing one
+    Bun.sleepSync(1100); // sets are named by the second
+    expect(sync().code).toBe(0);
+    expect(keys().filter((k) => k.endsWith("/base.tar.zst")).length).toBe(3);
+    rmSync(join(home, ".switchboard", "artifacts"), { recursive: true });
+  }, 20000);
+
+  const userData: Record<string, string> = {
+    ".switchboard/attachments/task_u/a.png": "png", ".switchboard/fixtures/packages/core/fixtures/r.jsonl": "{}\n", "Knowledge/notes/n.md": "note\n",
+    ".claude/CLAUDE.md": "# mine\n", ".claude/agents/a.md": "a\n", ".claude/commands/c.md": "c\n", ".codex/AGENTS.md": "# codex\n", ".codex/config.toml": "x = 1\n", ".aws/config": "[default]\n",
+    ".switchboard/routing.yaml": "r: 1\n", ".switchboard/pricing.json": "{}\n", ".switchboard/mcp.yaml": "m: 1\n", ".switchboard/evals/rubric.json": "{}\n",
+    ".switchboard/runner-archive.tsv": "p\ts\tk\td\n", ".switchboard/disk-history.tsv": "2026-11-01\t1\n", ".switchboard/releases/history.jsonl": "{}\n",
+  };
+  const logins = [".claude/.credentials.json", ".codex/auth.json", ".config/gh/hosts.yml", ".aws/sso/cache/x.json", ".aws/cli/cache/y.json", ".switchboard/token"];
+  const writeAll = (root: string, paths: string[], text = (p: string) => userData[p] ?? "secret") => { for (const p of paths) { mkdirSync(dirname(join(root, p)), { recursive: true }); writeFileSync(join(root, p), text(p)); } };
+
+  test("the user's data goes up with no login among it, and restore alone brings it back to an empty HOME (#3467)", () => {
+    awsFake();
+    fresh();
+    home = join(dir, "home-user-data");
+    mkdirSync(join(home, ".claude", "projects"), { recursive: true });
+    writeFileSync(join(home, ".claude", "projects", "s.jsonl"), "{}\n");
+    writeAll(home, [...Object.keys(userData), ...logins]);
+    symlinkSync("n.md", join(home, "Knowledge", "notes", "link.md"));
+    expect(sync().code).toBe(0);
+    const list = tarList(keys()[0]!);
+    for (const p of Object.keys(userData)) expect(list).toContain(p);
+    expect(list).toContain("Knowledge/notes/link.md");
+    for (const p of logins) expect(list).not.toContain(p);
+    const target = join(dir, "home-user-data-restored");
+    mkdirSync(target);
+    expect(run("runner-sync.sh", ["restore"], { HOME: target, S3OUT: out }).code).toBe(0);
+    for (const [p, text] of Object.entries(userData)) expect(readFileSync(join(target, p), "utf8")).toBe(text);
+    for (const p of logins) expect(existsSync(join(target, p))).toBe(false);
+    // a later note and a later symlink go up as a difference
+    touchAfter(join(home, "Knowledge", "notes", "later.md"), "later\n");
+    symlinkSync("later.md", join(home, "Knowledge", "notes", "later-link.md"));
+    expect(sync().code).toBe(0);
+    expect(tarList(keys().find((k) => !k.endsWith("/base.tar.zst"))!).sort()).toEqual(["Knowledge/notes/later-link.md", "Knowledge/notes/later.md"]);
+    home = join(dir, "home-runner");
+  }, 20000);
+
+  test("only the first-run setup and the trust of .claude.json go up, and restore lays the file devtools wrote over them (#3467)", () => {
+    awsFake();
+    fresh();
+    home = join(dir, "home-claude-json");
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, ".claude.json"), JSON.stringify({ hasCompletedOnboarding: true, primaryApiKey: "a-key", oauthAccount: { emailAddress: "a@b" }, projects: { "/w": { hasTrustDialogAccepted: true, mcpServers: { x: { env: { T: "a-key" } } } } }, mcpServers: { old: {} } }));
+    expect(sync().code).toBe(0);
+    const saved = readFileSync(join(home, ".switchboard", "claude-state.json"), "utf8");
+    expect(JSON.parse(saved)).toEqual({ hasCompletedOnboarding: true, projects: { "/w": { hasTrustDialogAccepted: true } } }); // no key, no account
+    expect(tarList(keys()[0]!)).not.toContain(".claude.json");
+    expect(sync().out).toContain("unchanged"); // the file is not rewritten each hour
+    const target = join(dir, "home-claude-json-restored");
+    const fromDevtools = () => { rmSync(target, { recursive: true, force: true }); mkdirSync(target); writeFileSync(join(target, ".claude.json"), JSON.stringify({ mcpServers: { playwright: { command: "npx" } } })); };
+    fromDevtools();
+    expect(run("runner-sync.sh", ["restore"], { HOME: target, S3OUT: out }).code).toBe(0);
+    const merged = JSON.parse(readFileSync(join(target, ".claude.json"), "utf8"));
+    expect(merged.hasCompletedOnboarding).toBe(true);
+    expect(merged.projects["/w"].hasTrustDialogAccepted).toBe(true);
+    expect(merged.mcpServers.playwright).toEqual({ command: "npx" });
+    // nothing was ever saved of it: the new file stands
+    fresh();
+    home = join(dir, "home-runner");
+    expect(sync().code).toBe(0);
+    fromDevtools();
+    expect(run("runner-sync.sh", ["restore"], { HOME: target, S3OUT: out }).code).toBe(0);
+    expect(JSON.parse(readFileSync(join(target, ".claude.json"), "utf8"))).toEqual({ mcpServers: { playwright: { command: "npx" } } });
+  }, 20000);
+
+  test("the work trees are kept before the run, a slow keep gives way on the rescue page, and a failure does not stop the rest (#3467)", () => {
+    awsFake();
+    fresh();
+    const slow = join(dir, "slow-keep");
+    writeFileSync(slow, `#!/bin/bash\necho "$1" >> "${log}"; sleep 30\n`);
+    chmodSync(slow, 0o755);
+    const t0 = Date.now();
+    const r = sync({ SB_PRE_REBUILD: slow, SWITCHBOARD_REBUILD_SAVE_CMD: "/usr/local/bin/sb-runner-sync" });
+    expect(Date.now() - t0).toBeLessThan(10_000);
+    expect(r.code).toBe(0);
+    expect(r.err).toContain("the work trees were not kept this time");
+    expect(calls()).toContain("keep-work");
+    expect(keys().length).toBe(1); // the rest went up
+  }, 20000);
+
+  test("the table of HOME in the design doc names every path runner-sync saves (#3467)", () => {
+    const list = read("runner-sync.sh").match(/^SAVE=\(([\s\S]*?)\)$/m)![1]!.split(/\s+/).filter(Boolean);
+    expect(list.length).toBeGreaterThan(15);
+    const row = readFileSync(join(HERE, "..", "..", "docs", "design", "cloud-hosting.md"), "utf8").split("\n").find((l) => l.includes("Saved by `sb-runner-sync`"))!;
+    for (const p of list) expect(row).toContain(`\`${p}\``);
+  });
+
+  test("restore brings back the artifacts' copies", () => {
+    awsFake();
+    fresh();
+    const artifact = join(home, ".switchboard", "artifacts", "task_c", "art_c");
+    mkdirSync(artifact, { recursive: true });
+    writeFileSync(join(artifact, "report.html"), "<p>report</p>\n");
+    expect(sync().code).toBe(0);
+    const target = join(dir, "home-restored-artifacts");
+    rmSync(target, { recursive: true, force: true });
+    mkdirSync(target, { recursive: true });
+    expect(run("runner-sync.sh", ["restore"], { HOME: target, S3OUT: out }).code).toBe(0);
+    expect(readFileSync(join(target, ".switchboard", "artifacts", "task_c", "art_c", "report.html"), "utf8")).toBe("<p>report</p>\n");
+    rmSync(join(home, ".switchboard", "artifacts"), { recursive: true });
   });
 
   test("runner-sync does nothing without the folders, and a failed upload is not remembered as done", () => {
@@ -1036,7 +1181,7 @@ exit 0`);
     fresh();
     const empty = join(dir, "home-runner-empty");
     mkdirSync(empty, { recursive: true });
-    expect(run("runner-sync.sh", [], { HOME: empty, S3OUT: out }).out).toContain("nothing to save");
+    expect(run("runner-sync.sh", [], { HOME: empty, S3OUT: out, SB_PRE_REBUILD: "/bin/true" }).out).toContain("nothing to save");
     expect(calls()).toEqual([]);
     writeFileSync(join(home, ".claude", "projects", "-work", "s2.jsonl"), "{}\n");
     expect(sync({ AWS_FAIL: "1" }).code).not.toBe(0);
@@ -1106,13 +1251,13 @@ exit 0`);
     writeFileSync(join(bin, "tar"), `#!/bin/sh\n/usr/bin/tar "$@" || exit $?\necho "tar: file changed as we read it" >&2\nexit 1\n`);
     chmodSync(join(bin, "tar"), 0o755);
     fresh();
-    const r = run("runner-sync.sh", [], { HOME: home, S3OUT: out, PATH: `${bin}:${join(dir, "bin")}:/usr/bin:/bin` });
+    const r = run("runner-sync.sh", [], { HOME: home, S3OUT: out, SB_PRE_REBUILD: "/bin/true", PATH: `${bin}:${join(dir, "bin")}:/usr/bin:/bin` });
     expect(r.code).toBe(0);
     expect(uploads().length).toBe(1);
     // anything worse than exit 1 still stops it
     writeFileSync(join(bin, "tar"), `#!/bin/sh\nexit 2\n`);
     fresh();
-    expect(run("runner-sync.sh", [], { HOME: home, S3OUT: out, PATH: `${bin}:${join(dir, "bin")}:/usr/bin:/bin` }).code).toBe(2);
+    expect(run("runner-sync.sh", [], { HOME: home, S3OUT: out, SB_PRE_REBUILD: "/bin/true", PATH: `${bin}:${join(dir, "bin")}:/usr/bin:/bin` }).code).toBe(2);
     expect(read("runner-sync.sh")).toContain("flock -w 60 9"); // a stuck run does not hold up sb-stop or 作り直す forever
     // a run killed by 作り直す's time limit leaves its scratch behind (bash's EXIT trap does not run on TERM): the next
     // run clears what is over an hour old (review #405)
@@ -1167,6 +1312,9 @@ exit 0`);
     expect(block).toMatch(/could not bring back .*exit 1/s);
     expect(read("runner-sync.sh")).toContain('mktemp -d "$HOME/.cache/sb-runner-restore.XXXXXX"'); // not /tmp (RAM)
     expect(boot).toContain('install -m 755 "$HERE/runner-sync.sh" /usr/local/bin/sb-runner-sync');
+    expect(boot).toContain('install -m 755 "$HERE/pre-rebuild.sh" /usr/local/bin/sb-pre-rebuild');
+    expect(boot.indexOf("sb-pre-rebuild restore-work")).toBeGreaterThan(boot.indexOf("/usr/local/bin/sb-runner-sync restore")); // after the tar it reads is back
+    expect(boot).toContain('sb-pre-rebuild restore-work || echo "bootstrap: could not bring back the work trees'); // does not stop the daemon
     expect(boot).toContain("systemctl enable $NOW litestream.service sb-archive.timer sb-runner-sync.timer switchboard.service"); // --now unless a reboot is due (#2186)
     expect(read("switchboard.service").split("\n")).toContain("Environment=SWITCHBOARD_REBUILD_SAVE_CMD=/usr/local/bin/sb-runner-sync"); // #403
     const timer = read("sb-runner-sync.timer").split("\n");
@@ -1507,7 +1655,8 @@ exit 0`,
       stdout: "pipe",
       stderr: "pipe",
     });
-    for (let i = 0; i < 100 && !calls().some((l) => l.startsWith("aws codebuild batch-get-builds")); i++) await Bun.sleep(50);
+    // load (the flake of #2939): a deadline, not a count of sleeps — the TERM must come after the script's first poll
+    for (const t0 = Date.now(); !calls().some((l) => l.startsWith("aws codebuild batch-get-builds")) && Date.now() - t0 < 20_000; ) await Bun.sleep(50);
     // TERM, as a stopped Task sends; INT takes the same trap (bun's test runner hands its children an ignored INT)
     p.kill("SIGTERM");
     expect(await p.exited).toBe(130);
@@ -1516,7 +1665,7 @@ exit 0`,
     expect(rm(c)).toHaveLength(1);
     expect(await new Response(p.stderr).text()).toContain("stopped sb-host-offload:build-1");
     expect(readdirSync(join(home, ".cache")).filter((f) => f.startsWith("sb-offload."))).toEqual([]);
-  }, 15_000);
+  }, 30_000);
 
   test("sb-offload waits for a free build when the project already runs 2, and stops on any other start failure", () => {
     awsFake();
@@ -1815,6 +1964,129 @@ exit 254`);
     expect(readFileSync(join(d, "home/Knowledge/README.md"), "utf8")).toBe("fresh readme");
     expect(sh(["nonsense"]).code).toBe(2);
   });
+
+  test("keep-work holds what is not pushed and the origins, rewrites nothing unchanged, and restore-work brings it all back (#3467)", () => {
+    setup();
+    const out = (cwd: string, ...a: string[]) => git(cwd, ...a).stdout.toString().trim();
+    const clone = (to: string) => Bun.spawnSync(["git", "clone", "-q", origin, to], { env: { PATH: "/usr/bin:/bin", GIT_CONFIG_GLOBAL: "/dev/null" } });
+    const origin = join(d, "keep-origin.git");
+    Bun.spawnSync(["git", "init", "-q", "--bare", "-b", "main", origin]);
+    const main = join(d, "repos/switchboard");
+    clone(main);
+    git(main, "checkout", "-q", "-b", "main");
+    writeFileSync(join(main, "a.txt"), "tracked\n");
+    git(main, "add", "a.txt");
+    git(main, "commit", "-q", "-m", "a");
+    git(main, "push", "-q", "origin", "main");
+    const wt = join(d, "repos/switchboard-wt");
+    git(main, "worktree", "add", "-q", "-b", "sb/1-x", wt);
+    writeFileSync(join(wt, "c.txt"), "committed here\n");
+    git(wt, "add", "c.txt");
+    git(wt, "commit", "-q", "-m", "not pushed");
+    writeFileSync(join(wt, "a.txt"), "changed\n");
+    writeFileSync(join(wt, "new.txt"), "untracked\n");
+    writeFileSync(join(wt, "big.bin"), Buffer.alloc(21 * 1024 * 1024));
+    const plain = join(d, "repos/plain"); // a repository nothing is registered for, with nothing to keep
+    clone(plain);
+    const local = join(d, "repos/local"); // a repository no remote has
+    mkdirSync(local);
+    git(local, "init", "-q", "-b", "main");
+    git(local, "commit", "-q", "--allow-empty", "-m", "only here");
+
+    expect(sh(["keep-work"]).code).toBe(0);
+    const keep = join(d, "home/.switchboard/work-keep.tar");
+    const stamp = statSync(keep).ctimeMs;
+    Bun.sleepSync(20);
+    expect(sh(["keep-work"]).out).toContain("work unchanged");
+    expect(statSync(keep).ctimeMs).toBe(stamp); // no change, no upload
+
+    // the new disk: only the bootstrap's clone of the registered repository
+    for (const p of [wt, plain, local, main]) rmSync(p, { recursive: true, force: true });
+    clone(main);
+    writeFileSync(join(main, "mine.txt"), "made on the new disk\n");
+    const r = sh(["restore-work"]);
+    expect(r.err).toBe("");
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("failed 0");
+    expect(existsSync(join(plain, "a.txt"))).toBe(true); // cloned from the origin kept
+    expect(out(local, "log", "--format=%s")).toBe("only here");
+    expect(out(wt, "symbolic-ref", "--short", "HEAD")).toBe("sb/1-x");
+    expect(out(wt, "log", "-1", "--format=%s")).toBe("not pushed");
+    expect(readFileSync(join(wt, "a.txt"), "utf8")).toBe("changed\n");
+    expect(readFileSync(join(wt, "new.txt"), "utf8")).toBe("untracked\n");
+    expect(existsSync(join(wt, "big.bin"))).toBe(false); // over the limit: named, not kept
+    expect(readFileSync(join(main, "mine.txt"), "utf8")).toBe("made on the new disk\n"); // a folder already there stays
+    const twice = sh(["restore-work"]);
+    expect(twice.code).toBe(0);
+    expect(twice.out).toContain("restored 0");
+    expect(readFileSync(join(wt, "a.txt"), "utf8")).toBe("changed\n");
+    const copies = readdirSync(join(d, "home/.switchboard")).filter((f) => f.startsWith("work-keep.tar."));
+    expect(copies.length).toBeGreaterThan(0); // the main checkout was left: what it had outlives the next keep-work
+  }, 30000);
+
+  test("keep-work survives an unreadable file and a dropped branch, is stable with many commits, and restore-work respects a moved-aside repository (#3467)", () => {
+    setup();
+    const out = (cwd: string, ...a: string[]) => git(cwd, ...a).stdout.toString().trim();
+    const origin = join(d, "origin2.git");
+    const clone = (to: string) => Bun.spawnSync(["git", "clone", "-q", `file://${origin}`, to], { env: { PATH: "/usr/bin:/bin", GIT_CONFIG_GLOBAL: "/dev/null" } });
+    Bun.spawnSync(["git", "init", "-q", "--bare", "-b", "main", origin]);
+    const main = join(d, "repos/switchboard");
+    clone(main);
+    git(main, "checkout", "-q", "-b", "main");
+    git(main, "commit", "-q", "--allow-empty", "-m", "first");
+    git(main, "push", "-q", "origin", "main");
+    git(main, "remote", "set-head", "origin", "main");
+    // a branch pushed, then dropped on the remote; the local tracking ref stays
+    const wt = join(d, "repos/switchboard-wt");
+    git(main, "worktree", "add", "-q", "-b", "sb/2-gone", wt);
+    for (let i = 0; i < 60; i++) { writeFileSync(join(wt, `f${i % 7}.txt`), `${"line\n".repeat(2000)}${i}\n`); git(wt, "add", "."); git(wt, "commit", "-q", "-m", `c${i}`); }
+    git(wt, "push", "-q", "origin", "sb/2-gone");
+    Bun.spawnSync(["git", "--git-dir", origin, "branch", "-D", "sb/2-gone"], { env: { PATH: "/usr/bin:/bin", GIT_CONFIG_GLOBAL: "/dev/null" } });
+    writeFileSync(join(wt, "dirty.txt"), "dirty\n");
+    const locked = join(wt, "locked.txt");
+    writeFileSync(locked, "x");
+    chmodSync(locked, 0o000);
+    writeFileSync(join(wt, "f0.txt"), "tracked and changed\n");
+    const lockedTracked = join(wt, "f1.txt");
+    chmodSync(lockedTracked, 0o000); // git diff cannot read it: that tree's changes go, not everyone's save
+    const unindexed = join(wt, "f2.txt");
+    git(wt, "rm", "-q", "--cached", "f2.txt"); // in the patch as a deletion, in the tar as a file
+    const cleanTree = join(d, "repos/switchboard-clean"); // nothing uncommitted, on a branch dropped on the remote and never merged
+    git(main, "worktree", "add", "-q", "-b", "sb/3-clean", cleanTree);
+    writeFileSync(join(cleanTree, "only.txt"), "only here\n");
+    git(cleanTree, "add", "only.txt");
+    git(cleanTree, "commit", "-q", "-m", "only here");
+    git(cleanTree, "push", "-q", "origin", "sb/3-clean");
+    Bun.spawnSync(["git", "--git-dir", origin, "branch", "-D", "sb/3-clean"], { env: { PATH: "/usr/bin:/bin", GIT_CONFIG_GLOBAL: "/dev/null" } });
+    const moved = join(d, "repos/moved"); // a repository bootstrap will move aside
+    clone(moved);
+
+    const first = sh(["keep-work"]);
+    expect(first.code).toBe(0);
+    const keep = join(d, "home/.switchboard/work-keep.tar");
+    const stamp = statSync(keep).ctimeMs;
+    Bun.sleepSync(20);
+    expect(sh(["keep-work"]).out).toContain("work unchanged"); // the bundle's bytes hold still
+    expect(statSync(keep).ctimeMs).toBe(stamp);
+    chmodSync(locked, 0o644);
+    chmodSync(lockedTracked, 0o644);
+    expect(sh(["keep-work"]).code).toBe(0); // readable again: the save has its changes
+    git(wt, "status");
+
+    for (const p of [wt, cleanTree, main, moved]) rmSync(p, { recursive: true, force: true });
+    clone(main);
+    mkdirSync(`${moved}.unverified-20261101T000000Z`);
+    const r = sh(["restore-work"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("was moved aside by bootstrap");
+    expect(existsSync(moved)).toBe(false);
+    expect(out(wt, "log", "-1", "--format=%s")).toBe("c59");
+    expect(out(cleanTree, "log", "-1", "--format=%s")).toBe("only here");
+    expect(readFileSync(join(wt, "dirty.txt"), "utf8")).toBe("dirty\n");
+    expect(readFileSync(join(wt, "f0.txt"), "utf8")).toBe("tracked and changed\n");
+    expect(existsSync(unindexed)).toBe(true); // the patch's deletion does not take it
+    rmSync(`${moved}.unverified-20261101T000000Z`, { recursive: true });
+  }, 60000);
 });
 
 describe("aws/host sb-node: the pinned Node.js reaches a running host", () => {
@@ -1913,8 +2185,27 @@ describe("aws/host sb-host-update security updates (#2186)", () => {
   test("every start hands AL2023's latest security updates to a unit of their own, without waiting", () => {
     const r = run("host-update.sh", [], { SB_BIN_DIR: join(dir, "nobin"), SB_HOST_CLONE: join(dir, "noclone") }); // no clone: the fetch is skipped
     expect(r.code).toBe(0);
-    expect(calls()).toContain("systemd-run --unit=sb-security-update --no-block --collect --quiet -- dnf --releasever=latest upgrade -y -q --security");
+    expect(calls()).toContain("systemd-run --unit=sb-security-update --no-block --collect --quiet -- dnf --releasever=latest upgrade -y -q --security --refresh --setopt=amazonlinux.skip_if_unavailable=False");
     expect(r.err).toContain("skipped"); // the updates are started before the fetch's early returns
+  });
+
+  test("the start does not wait for dnf, whose failure stays in its own unit, and goes on (#3344)", () => {
+    fake("dnf", `echo "dnf $*" >> "${log}"; echo "Failed to download metadata" >&2; exit 1`);
+    const bin = join(dir, "hubin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "sb-node"), "#!/bin/sh\n");
+    chmodSync(join(bin, "sb-node"), 0o755);
+    const r = run("host-update.sh", [], { SB_BIN_DIR: bin, SB_HOST_CLONE: join(dir, "noclone") });
+    rmSync(join(dir, "bin", "dnf"));
+    expect(r.code).toBe(0);
+    const line = calls().find((l) => l.includes("--unit=sb-security-update"));
+    expect(line).toContain("--no-block");
+    expect(line).toContain("--refresh");
+    expect(line).toContain("--setopt=amazonlinux.skip_if_unavailable=False"); // or dnf skips the repository and exits 0
+    expect(calls().some((l) => l.startsWith("dnf "))).toBe(false); // handed to the unit, not run in the start
+    expect(r.err).toContain("skipped"); // update_scripts was reached
+    expect(calls().some((l) => l.includes("--unit=sb-node-update"))).toBe(true); // and node_update
+    expect(r.err).not.toContain("security updates not started");
   });
 
   test("a failure to start them (a run still going) does not stop the start", () => {

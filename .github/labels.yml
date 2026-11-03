@@ -67,7 +67,7 @@
   description: packages/adapters/codex
 - name: "area:adapter-dak"
   color: bfdadc
-  description: packages/adapters/dak
+  description: packages/adapters/adk
 - name: "area:web"
   color: bfdadc
   description: apps/web

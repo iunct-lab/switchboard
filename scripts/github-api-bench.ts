@@ -101,13 +101,14 @@ function backlogGh(limited = () => false): GhRunner {
   const pages = json(join(coreFixtures, "backlog-graphql.json")) as unknown[];
   const decisions = json(join(coreFixtures, "backlog-decisions.json"));
   let remaining = 5000;
-  return importing(async (args) => {
+  const imports = importing(async (args) => {
     if (args[0] === "repo") return ok("acme/app true\n");
     if (args[0] === "variable") return ok("https://github.com/users/acme/projects/11\n");
     if (limited()) return LIMITED;
     const body = args.some((a) => a.includes("comments(last:")) ? decisions : args.includes("after=CURSOR1") ? pages[1] : pages[0];
     return ok(`HTTP/2.0 200 OK\nX-Ratelimit-Remaining: ${--remaining}\nX-Ratelimit-Resource: graphql\nX-Ratelimit-Reset: 1790000000\n\n${JSON.stringify(body)}`);
   });
+  return async (args, cwd) => (limited() && args[0] === "api" ? LIMITED : imports(args, cwd));
 }
 
 /** A GhClient measured call by call (the fakes print no headers: no remaining, no cost); a throw is a failed call. */

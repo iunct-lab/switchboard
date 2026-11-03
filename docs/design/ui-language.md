@@ -28,6 +28,7 @@ The owner's rules (2026-10-24, 2026-10-25):
 
 - Claude Code's login choices use Anthropic's own names: Claude アカウント (subscription), Anthropic Console アカウント (API usage fees), and a third-party platform such as Amazon Bedrock. Do not write 「サブスク」, 「API 課金」 or 「定額」 for them. The internal values (`billing: subscription|api`) stay as they are.
 - Do not add explanatory text to a screen, on any screen (Home included); one extra line is the most a change adds. Rarely used operations (adding a repository, for example) go to Settings, not Home. Login state and logout live in Settings; cost and its filters live in the Ledger.
+- Where a feature is placed (the floor, the ceiling or the walls) is decided by `ui-layers.md`; this section only limits how much text a screen carries.
 
 ## Listing
 

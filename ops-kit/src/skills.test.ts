@@ -158,6 +158,12 @@ test("cross-runner-review: step 1 stops before cloning when /tmp has less than M
   expect(out).toMatch(/^\d+\t.*other\.review1\.Abc123$/m); // du's top entries are reported
 });
 
+/** A home whose `ops-kit heavy` has its own slots and no memory floor. */
+function noFloor(home: string) {
+  mkdirSync(join(home, ".config", "ops-kit"), { recursive: true });
+  writeFileSync(join(home, ".config", "ops-kit", "heavy.json"), '{ "minFreeMb": 0 }\n');
+}
+
 /** Runs the skill's own review command, with the threshold down to 1 second and fake reviewers in place of the real ones. */
 function runReviewCommand(marker: RegExp, fake: string) {
   const dir = mkdtempSync(join(tmpdir(), "review-idle-"));
@@ -172,7 +178,10 @@ function runReviewCommand(marker: RegExp, fake: string) {
     const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
     const line = text.split("\n").find((l) => l.startsWith("( ") && marker.test(l))!.replace("--idle 900", "--idle 1");
     const script = `R=${R} M=${M} CODEX=${join(bin, "codex")}\n${line}\necho "exit=$?"\n`;
-    const env = { ...process.env, PATH: `${bin}:${join(import.meta.dir, "../bin")}:${process.env.PATH}` };
+    // HOME is the test's own: `ops-kit heavy` takes its slot there, not one of the machine's (a local CI holding the machine's slot would wait on itself),
+    // and its heavy.json has no memory floor (the host's free memory must not decide a test)
+    noFloor(dir);
+    const env = { ...process.env, HOME: dir, PATH: `${bin}:${join(import.meta.dir, "../bin")}:${process.env.PATH}` };
     const out = spawnSync("bash", ["-c", script], { encoding: "utf8", env });
     const files: Record<string, string> = Object.fromEntries(readdirSync(M).map((name) => [name, readFileSync(join(M, name), "utf8")]));
     return { exit: /exit=(\d+)/.exec(out.stdout)?.[1], files };
@@ -219,8 +228,9 @@ test("cross-runner-review: a cut follow-up review posts nothing, not even the pr
       writeFileSync(join(M, "prompt-fix.md"), "review this\n");
       writeFileSync(join(M, "fix-review.md"), "### Findings\n- none\n");
       writeFileSync(join(dir, "codex"), `#!/bin/bash\n${fake}\n`, { mode: 0o755 });
+      noFloor(dir);
       const script = `post_review() { echo POSTED; }\nN=1 R=${dir} M=${M} CODEX=${join(dir, "codex")}\n${block}\n`;
-      return spawnSync("bash", ["-c", script], { encoding: "utf8", env: { ...process.env, PATH: `${join(import.meta.dir, "../bin")}:${process.env.PATH}` } }).stdout;
+      return spawnSync("bash", ["-c", script], { encoding: "utf8", env: { ...process.env, HOME: dir, PATH: `${join(import.meta.dir, "../bin")}:${process.env.PATH}` } }).stdout;
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -236,6 +246,7 @@ test("cross-runner-review: every review command goes through idle-run, and the s
   const commands = text.split("\n").filter((l) => /^(# )?\( .*(exec --sandbox|claude -p)/.test(l));
   expect(commands.length).toBe(4);
   for (const line of commands) expect(line).toContain("ops-kit idle-run --idle 900 --");
+  for (const line of commands) expect(line).toMatch(/ops-kit heavy --name "review (codex|claude)" -- ops-kit idle-run /); // the slot is outside idle-run: waiting for it is not 'no progress'
   expect(text).not.toContain("--output-format text");
   for (const word of ["exit 124", "無進捗で打ち切り（900 秒出力なし）", "一度だけやり直す", "止まって報告する"]) expect({ word, says: text.includes(word) }).toEqual({ word, says: true });
 });
@@ -255,7 +266,7 @@ test("skills: public-release-gate runs both runners apart with the seeds, the mo
   // the two runners, their models, apart and without a fallback on usage limits
   for (const word of ["claude -p --model claude-fable-5-1", "codex exec -m gpt-6-astra", "片方の出力をもう片方の材料に入れない", "もう片方で代替せず止まる", ".message.model", "^model: ", "wait $P1; C1=$?; wait $P2; C2=$?", "grep -q '^nothing to sync'", "git log -1 --format=%B refs/public-sync/main", ".parent_tool_use_id==null", "初回の push の前"]) expect({ word, says: text.includes(word) }).toEqual({ word, says: true });
   // the report, the triage and the pass mark
-  for (const word of ["[public-release-gate] <runner> <model>", "種の外は無し", "### 種の外の観点", "verdict: pass", "verdict: fail", "**直す**", "**公開側から外す**", "**受け入れる**", "**Issue（公開を止めない）**", "ランナーが付けた重さによらず", "ブロッカーが 0 件", "--resume", "順に回してよい", "## 判断待ち", "public-release-gate: pass <tree sha>", "## 観点の追記"]) expect({ word, says: text.includes(word) }).toEqual({ word, says: true });
+  for (const word of ["[public-release-gate] <runner> <model>", "種の外は無し", "### 種の外の観点", "verdict: pass", "verdict: fail", "**直す**", "**公開側から外す**", "**受け入れる**", "**Issue（公開を止めない）**", "ランナーが付けた重さによらず", "ブロッカーが 0 件", "--resume", "`ops-kit heavy` が順に回す", "## 判断待ち", "public-release-gate: pass <tree sha>", "## 観点の追記"]) expect({ word, says: text.includes(word) }).toEqual({ word, says: true });
 });
 
 const BACKLOG_BY_GH = /gh issue (create|edit|comment|close|reopen|view|list|delete|transfer)|gh api [^\n]*\/issues|addSubIssue|removeSubIssue|updateProjectV2|gh project (item-|field-)|scripts\/setup\/(triage_issue|set_project_field|lint_backlog)/;

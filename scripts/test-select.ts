@@ -3,7 +3,7 @@
 //   bun scripts/test-select.ts <path>...        （引数が無ければ stdin から 1 行 1 パス）
 // 1 行目は `full: <理由>`（全テストに倒した）か `selected: <件数>`、続けて `<テスト>  <理由>`。
 // 依存は import と、テストの先頭の宣言 `// test-reads: <パスかディレクトリ（末尾 /）> …` を見る（一時ディレクトリだけなら `none`）。
-// 判定できないものは全テストに倒す（classify）。local-ci と merge-gate にはまだ繋がない。
+// 判定できないものは全テストに倒す（classify）。local-ci がこの出力で bun test を絞る（scripts/local-ci.ts の selectTests）。
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";
 
@@ -179,10 +179,14 @@ export function formatSelection(s: Selection): string {
   return [head, ...s.tests.map((t) => `${t}  ${s.reasons[t]}`)].join("\n");
 }
 
+/** 今のツリーのファイル（追跡と未追跡。消したものは除く）。 */
+export function repoFiles(root: string): string[] {
+  const listed = Bun.spawnSync(["git", "ls-files", "--cached", "--others", "--exclude-standard"], { cwd: root }).stdout.toString();
+  return listed.split("\n").filter((f) => f && existsSync(join(root, f)) && statSync(join(root, f)).isFile());
+}
+
 if (import.meta.main) {
   const args = process.argv.slice(2);
   const changed = (args.length ? args : (await Bun.stdin.text()).split("\n")).map((l) => l.trim().replace(/^\.\//, "")).filter(Boolean);
-  const listed = Bun.spawnSync(["git", "ls-files", "--cached", "--others", "--exclude-standard"], { cwd: ROOT }).stdout.toString();
-  const files = listed.split("\n").filter((f) => f && existsSync(join(ROOT, f)) && statSync(join(ROOT, f)).isFile());
-  console.log(formatSelection(selectFrom(changed, files, (p) => readFileSync(join(ROOT, p), "utf8"))));
+  console.log(formatSelection(selectFrom(changed, repoFiles(ROOT), (p) => readFileSync(join(ROOT, p), "utf8"))));
 }

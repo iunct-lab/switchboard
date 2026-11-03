@@ -124,11 +124,11 @@ afterEach(async () => {
   openPulls = [];
   if (savedProjectUrl !== undefined) process.env.SWITCHBOARD_PROJECT_URL = savedProjectUrl;
 });
-async function boot(gh: GhRunner, adapter: RunnerAdapter | RunnerAdapter[] = { id: "claude", detect: async () => ({ available: false }), start() { throw new Error("no runs"); } }, env: Record<string, string> = {}, llmSuggester?: () => Suggester) {
+async function boot(gh: GhRunner, adapter: RunnerAdapter | RunnerAdapter[] = { id: "claude", detect: async () => ({ available: false }), start() { throw new Error("no runs"); } }, env: Record<string, string> = {}, llmSuggester?: () => Suggester, outer: (gh: GhRunner) => GhRunner = (g) => g) {
   home = mkdtempSync(join(tmpdir(), "sb-backlog-"));
   const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0", ...env });
   // as the daemon starts: every workspace is imported at boot (#885); the tests begin once it is stored
-  core = await startServer(cfg, [adapter].flat(), { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: FAKE_ORIGIN, gh: importing(gh, () => openPulls), llmSuggester, backlogAutoImport: true });
+  core = await startServer(cfg, [adapter].flat(), { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: FAKE_ORIGIN, gh: outer(importing(gh, () => openPulls)), llmSuggester, backlogAutoImport: true });
   const base = `http://127.0.0.1:${core.server.port}`;
   await refreshed(base, false);
   return base;
@@ -235,6 +235,33 @@ test("GET /api/backlog: gh failing → the workspace and the reason in errors, n
   expect(body.errors[0]!.message).toContain("gh auth login");
   expect(body.errors[0]!.message.length).toBeLessThan(260);
   expect(body.errors[0]!.kind).toBe("gh-login");
+});
+
+test("GET /api/backlog: a Project the token cannot read is an error of that workspace, and what was stored stays, not every PBI as 分解待ち", async () => {
+  let project: { code: number; stdout: string; stderr: string } | null = null;
+  let broken = "";
+  const base = await boot(fakeGh().gh, undefined, {}, undefined, (gh) => async (args, cwd) => (project && cwd === broken && args.some((a) => a.includes("projectV2(number:$p){ id }")) ? project : gh(args, cwd)));
+  const stored = await refreshed(base);
+  const meta = core!.db.listWorkspaces().find((w) => w.kind === "meta")!;
+  const lib = mkdtempSync(join(home!, "lib-"));
+  const other = (await (await fetch(`${base}/api/workspaces`, { method: "POST", body: JSON.stringify({ path: lib, name: "lib" }) })).json()) as { id: string };
+  broken = meta.path;
+  const message = "Project acme/11 を読めない（トークンの権限）";
+  // the ways GitHub says so: a null Project and no error, a NOT_FOUND and exit 1 (both measured 2026-09-28), a FORBIDDEN
+  for (const answer of [
+    { code: 0, stdout: JSON.stringify({ data: { repositoryOwner: { projectV2: null } } }), stderr: "" },
+    { code: 1, stdout: JSON.stringify({ data: { repositoryOwner: { projectV2: null } }, errors: [{ type: "FORBIDDEN", path: ["repositoryOwner", "projectV2"], message: "Resource not accessible by integration" }] }), stderr: "gh: Resource not accessible by integration" },
+    { code: 1, stdout: JSON.stringify({ data: { repositoryOwner: { projectV2: null } }, errors: [{ type: "NOT_FOUND", path: ["repositoryOwner", "projectV2"], message: "Could not resolve to a ProjectV2 with the number 11." }] }), stderr: "gh: Could not resolve to a ProjectV2 with the number 11." },
+  ]) {
+    project = answer;
+    const body = await refreshed(base);
+    expect(body.errors).toEqual([{ workspaceId: meta.id, workspaceName: meta.name, message, kind: "other" }]);
+    expect(body.items.filter((i) => i.workspaceId === meta.id).map((i) => [i.number, i.stage])).toEqual(stored.items.map((i) => [i.number, i.stage]));
+    expect(body.items.filter((i) => i.workspaceId === other.id).length).toBeGreaterThan(0);
+  }
+  // a limit is not "the token cannot read it": it stays the limit it is
+  project = { code: 1, stdout: JSON.stringify({ errors: [{ type: "RATE_LIMITED", message: "API rate limit exceeded" }] }), stderr: "" };
+  expect((await refreshed(base)).errors[0]!.message).toContain("API rate limit exceeded");
 });
 
 test("GET /api/backlog: fetchedAt is the GitHub workspaces' import, not a workspace kept only here (#2362)", async () => {
@@ -1462,6 +1489,69 @@ test("resolve: a conflict GitHub cannot be read on keeps GitHub's only; a refuse
   const op = core!.db.listPendingBacklogOperations()[0]!;
   core!.db.setBacklogOperationResult(op.id, { status: "failed", error: "gh api repos/acme/app/issues/304: HTTP 403" });
   expect((await detailOf(base, 304)).held).toEqual([expect.objectContaining({ operation: op.id, status: "failed", reason: expect.stringContaining("403"), conflict: null })]);
+});
+
+/* ---------- a failed operation sent again (#2885) ---------- */
+
+test("retry: a failed set / comment / create goes back to pending; one not failed, of another Issue or another repository is 409 and nothing changes; with an edit 400", async () => {
+  const base = await boot(fakeGh().gh);
+  const db = core!.db;
+  const source = db.getWorkspaceBacklogSource(metaId())!;
+  // during a limit: nothing is sent, the operations stay as this test sets them
+  db.setBacklogRetryAt(source, Date.now() + 3_600_000);
+  expect((await patch(base, 304, { title: "送れなかった題", body: "まだ送る本文", fields: { Priority: "P1" } })).status).toBe(202);
+  expect((await fetch(`${base}/api/backlog/304/comment`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), text: "送れなかったコメント" }) })).status).toBe(202);
+  expect((await patch(base, 305, { title: "別の Issue の題" })).status).toBe(202);
+  const created = await fetch(`${base}/api/backlog`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), title: "作れなかった Issue", body: "", labels: [], fields: { Status: "Backlog" } }) });
+  const { localId } = (await created.json()) as { localId: string };
+  const ops = db.listPendingBacklogOperations(source);
+  const of = (pred: (o: (typeof ops)[number]) => boolean) => ops.find(pred)!;
+  const title = of((o) => o.field === "title" && o.payload === "送れなかった題");
+  const comment = of((o) => o.kind === "comment");
+  const other = of((o) => o.field === "title" && o.payload === "別の Issue の題");
+  const body = of((o) => o.field === "body");
+  const priority = of((o) => o.field?.includes("Priority") ?? false);
+  for (const o of [title, comment, other]) db.setBacklogOperationResult(o.id, { status: "failed", attempt: 3, retryAt: 1, error: "HTTP 403: Resource not accessible" });
+  db.setBacklogOperationResult(localId, { status: "failed", attempt: 1, error: "HTTP 403: read:project" });
+  db.setBacklogOperationResult(priority.id, { status: "unknown", error: "送ったかどうか分からない" });
+  const retry = (ref: number | string, operation: string, extra = {}) => patch(base, ref, { retry: { operation }, ...extra });
+  const snapshot = () => JSON.stringify(db.listBacklogOperations(source));
+
+  // refused, nothing changed: with an edit, not failed (pending, unknown, sending, conflict, done), another Issue's, no such one
+  const before = snapshot();
+  expect((await retry(304, title.id, { title: "ついで" })).status).toBe(400);
+  expect((await retry(304, body.id)).status).toBe(409);
+  expect((await retry(304, priority.id)).status).toBe(409);
+  db.setBacklogOperationResult(body.id, { status: "sending" });
+  expect((await retry(304, body.id)).status).toBe(409);
+  db.setBacklogOperationResult(body.id, { status: "conflict", error: "重なった" });
+  expect((await retry(304, body.id)).status).toBe(409);
+  expect((await retry(304, other.id)).status).toBe(409);
+  expect((await retry(304, "no-such-operation")).status).toBe(409);
+  db.setBacklogOperationResult(body.id, { status: "done" });
+  expect((await retry(304, body.id)).status).toBe(409);
+  db.setBacklogOperationResult(body.id, { status: "pending", error: null });
+  expect(JSON.parse(snapshot()).map((o: { id: string; status: string }) => [o.id, o.status])).toEqual(JSON.parse(before).map((o: { id: string; status: string }) => [o.id, o.id === body.id ? "pending" : o.status]));
+  // the same number in another repository: another Issue, its failed edit is not this one's
+  const ws = db.upsertWorkspace({ id: "ws_tool", name: "tool", path: join(home!, "tool"), kind: "repo" });
+  db.setWorkspaceBacklogSource(ws.id, { ...source, repository: "acme/tool" });
+  const rec = db.listBacklogRecords(source, "issue").find((r) => (r.remote as { number: number } | null)?.number === 304)!;
+  db.putBacklogSnapshot({ ...source, repository: "acme/tool" }, { records: [{ objectKind: "issue", externalId: rec.externalId, remote: rec.remote as never, fetchState: "fetched" }], cursor: null, syncedAt: Date.now() });
+  expect((await fetch(`${base}/api/backlog/304`, { method: "PATCH", body: JSON.stringify({ workspaceId: ws.id, retry: { operation: title.id } }) })).status).toBe(409);
+  expect(db.getBacklogOperation(title.id)).toMatchObject({ status: "failed", attempt: 3 });
+
+  // the failed ones of the Issue go back to pending as at first; the held list no longer has them
+  for (const [ref, id] of [[304, title.id], [304, comment.id], [localId, localId]] as const) {
+    const r = await retry(ref, id);
+    expect(r.status).toBe(202);
+    expect(await r.json()).toEqual({ operation: id });
+    expect(db.getBacklogOperation(id)).toMatchObject({ status: "pending", attempt: 0, retryAt: null, error: null });
+  }
+  expect((await detailOf(base, 304)).held.map((h) => [h.operation, h.status])).toEqual([[priority.id, "unknown"]]);
+  expect((await detailOf(base, localId)).held).toEqual([]);
+  // sent again already: nothing to retry
+  expect((await retry(304, title.id)).status).toBe(409);
+  expect(db.getBacklogOperation(other.id)).toMatchObject({ status: "failed", attempt: 3 });
 });
 
 test("create: a new Issue is kept with a local id, read and edited by it before it has a number; it is not in the list yet", async () => {
@@ -3399,7 +3489,10 @@ test("promote: when idle — a promotion held by a running Task is asked for as 
     claude.end(0);
     await settle(() => r.promoted.length > 0);
     expect(r.promoted).toEqual([r.sha]);
-    expect(await scheduleLog(base)).toContain("バックログを進める: Task が空いたので v0.2.0 の昇格を依頼");
+    // ordering (the flake of #2939): the line is written after sb-rescue answers, later than `promoted` grows
+    const text = "バックログを進める: Task が空いたので v0.2.0 の昇格を依頼";
+    for (const t0 = Date.now(); !(await scheduleLog(base)).includes(text) && Date.now() - t0 < 20_000; ) await Bun.sleep(10);
+    expect(await scheduleLog(base)).toContain(text);
     expect(await releaseHold(base)).toBeNull();
   } finally {
     r.rescue.stop(true);

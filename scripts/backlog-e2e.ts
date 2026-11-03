@@ -98,7 +98,10 @@ const rescue = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
 } });
 const rescueUrl = `http://127.0.0.1:${rescue.port}`;
 const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0", SWITCHBOARD_REPO_ROOT: repo, SWITCHBOARD_RESCUE_URL: rescueUrl });
-const core = await startServer(cfg, [adapter, { ...adapter, id: "codex" }], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: importing(sending(gh), () => openPulls) });
+let projectUnreadable = false;
+const imports = importing(sending(gh), () => openPulls);
+const gated: GhRunner = async (args, cwd) => (projectUnreadable && cwd === libDir && args.some((a) => a.includes("projectV2(number:$p){ id }")) ? { code: 0, stdout: '{"data":{"repositoryOwner":{"projectV2":null}}}', stderr: "" } : imports(args, cwd));
+const core = await startServer(cfg, [adapter, { ...adapter, id: "codex" }], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: gated });
 const base = `http://127.0.0.1:${core.server.port}`;
 await fetch(`${base}/api/workspaces`, { method: "POST", body: JSON.stringify({ path: libDir, name: "lib" }) });
 await fetch(`${base}/api/backlog?refresh=1`); // both workspaces imported before the screen first reads what is stored (#885)
@@ -686,6 +689,16 @@ try {
   await until(() => evaluate(`!document.querySelector('.backlog button.ghost')?.disabled`), "再読込 enabled");
   await click("再読込");
   await until(() => evaluate(`document.querySelectorAll('.backlog .backlog-item').length > 0 && !document.querySelector('.backlog-error-msg')`), "the list again");
+
+  // the token cannot read lib's Project (#468): its row says so, instead of every PBI as 分解待ち
+  projectUnreadable = true;
+  await click("再読込");
+  const unreadable = await until(async () => ((await evaluate(`[...document.querySelectorAll('.backlog .backlog-error-msg')].map(e => e.textContent).join("\\n")`)) as string) || null, "the unreadable Project's reason");
+  assert(/^lib を読めませんでした: Project .+\/\d+ を読めない（トークンの権限）$/.test(unreadable), `unreadable Project: ${unreadable}`);
+  projectUnreadable = false;
+  await until(() => evaluate(`!document.querySelector('.backlog button.ghost')?.disabled`), "再読込 enabled");
+  await click("再読込");
+  await until(() => evaluate(`!document.querySelector('.backlog-error-msg')`), "the unreadable Project's reason gone");
   const hintNow = () => evaluate(`document.querySelector('.backlog .head .hint')?.textContent ?? ""`) as Promise<string>;
   const readAt = (await hintNow()).replace(/ に GitHub から取得.*/, "");
   // GitHub slow (#441): 再読込 imports first (#885), six calls here at 2.5 s — longer than Bun's default idle timeout

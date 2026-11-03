@@ -27,6 +27,12 @@ Switchboard が起動したランナーの `gh` の前段に検査を置く（PB
 - `ops-kit/bin/docker`（#1417）も同じ探し方（`realCommand`）で本物の `docker` を呼ぶ。ファイルの 2 行目は `// docker-mark`。呼び出し側が `DOCKER_MARK_LABEL`（`key=value`）を渡したときだけ `run` / `create` にその label を足し、`DOCKER_MARK_LOG` があれば compose のプロジェクト名を記録する（共通キットに固有語を置かないので、Task の印は core が渡す）。片付けは #1419
 - 前段は `bun` で動く。デーモンはフルパスの `bun` で起動されることがあるので（`scripts/setup.sh`、再起動の `process.execPath`）、配線がデーモンの `bun` のフォルダ（`dirname(process.execPath)`）も `PATH` の末尾に足す（末尾なので、利用者の `PATH` にある道具より前に来ない）
 
+## Merges
+
+The guard does not judge `gh pr merge` or `gh stack merge`: they reach the real `gh` like any other command, and only their body and subject are checked (below). Running the repository's merge judgement before a merge is the default procedure the skills describe, not a gate in front of `gh`. When the user allows a merge outside that judgement in the Task's conversation, the Task merges with `gh pr merge` / `gh stack merge`.
+
+A gate that stopped every merge the judgement did not pass was in place from 2026-11-01 and was taken out on 2026-11-02 at the user's direction: a rule fixed in code left no room for a merge the user had allowed, and the user then had to merge by hand.
+
 ## 検査する書き込み
 
 | コマンド | 読む文 |
@@ -70,8 +76,9 @@ Switchboard が起動したランナーの `gh` の前段に検査を置く（PB
 
 ## アプリの Task の中の Issue への直接の書き込み（#2694）
 
-- `BACKLOG_URL` がある（アプリの Task の中）とき、その workspace のリポジトリ（`GH_REPO`、無ければ origin。`ops-kit backlog` と同じ決め方）の Issue に `gh issue create（new）/ comment / edit / close / reopen` で書くと、秘密の検査の前に書かずに exit 1 で止め、`ops-kit backlog` の同じ操作を案内する（`backlogWrite`。直接書くと、アプリの次の編集の元が古くなり送るときに競合する。`backlog-sync.md` の「アプリの Task の中の書く経路」）
-- 通すもの: `-R` / `--repo` か Issue の URL がほかのリポジトリ（公開側の Issue への返信など）、PR、読み取り、`gh api`（mutation は解析しない）。強制ではなく歯止め（同じ OS ユーザーの Task は本物の `gh` を呼べる）
+- `BACKLOG_URL` がある（アプリの Task の中）とき、その workspace のリポジトリ（`GH_REPO`、無ければ origin。`ops-kit backlog` と同じ決め方）と、アプリが同期しているほかの GitHub のリポジトリ（`GET /api/backlog` の `syncs`。問い合わせるのは workspace 以外を名指ししたバックログへの書き込みのときだけ。アプリに届かない・5 秒で答えなければ workspace だけで判定し、stderr に 1 行）のバックログ（Issue・コメント・ラベル・Project の item）への書き込みは、書き方によらず秘密の検査の前に書かずに exit 1 で止め、代わりの `ops-kit backlog` のコマンドを案内する（`backlogWrite`。直接書くと、アプリの次の編集の元が古くなり送るときに競合する。`backlog-sync.md` の「アプリの Task の中の書く経路」）。止めるもの: `gh issue create（new）/ comment / edit / close / reopen`、`gh api` の `repos/<o>/<r>/issues…` と `repos/<o>/<r>/labels…` への GET / HEAD 以外（メソッド無しでフィールドありは POST。`labels` はラベルの定義で、案内は `ops-kit sync-labels`）、`gh api graphql` の Issue・コメント・ラベル・sub-issue・Project の item の mutation（名前の一覧は `BACKLOG_MUTATIONS`。フィールドと `--input` の中身から読む）、`gh project item-add / item-edit / item-delete / item-archive`。graphql と `gh project` は node id や Project を GitHub に引き直さず、名指しの無い `gh issue` と同じく workspace への書き込みとみなす
+- 通すもの: `-R` / `--repo`・Issue の URL・`gh api` のパスがアプリの知らないリポジトリ（公開側の Issue への返信など）、PR（`gh pr comment` と `pulls/…`。REST では PR も Issue なので `issues/<PR番号>/comments` は止まり、graphql の `addComment` も node id を引き直さないので止まる）、Actions、git の参照、contents、Release、読み取り、graphql の query と Project・フィールドの作成（`createProjectV2*`）。強制ではなく歯止め（同じ OS ユーザーの Task は本物の `gh` を呼べる）
+- 一時の抜け道: `ops-kit backlog` が壊れている・アプリに届かないときだけ、その 1 回だけ `env -u BACKLOG_URL gh …` で書く（止めたときの案内の 2 行目）。秘密の検査と公開側の検査は残る。直接書いた値はアプリの次の取込みで入り、その Issue に送信待ちがあれば競合する
 
 ## 止めないもの
 

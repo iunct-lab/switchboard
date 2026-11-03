@@ -15,6 +15,7 @@ import { canTransition, IN_FLIGHT, InvalidTaskTransitionError, TERMINAL } from "
 import { setupScripts, syncSkills } from "./skillsync.ts";
 import { FenceReader, lastAttempt, openStops, reduceStops, reserveStopRetry, StopFenceReader, stopRecordsFor, stopRecoveryPrompt, stopWork, type StopReport } from "./stops.ts";
 import { oneLine } from "./suggest-llm.ts";
+import { foreignWorkspaceOf, RunnerConfigUnconfirmed, runnerConfigOf } from "./runner-config.ts";
 import { originMismatch } from "./workspace-clone.ts";
 
 /** How soon a runner's event held back by a locked database is tried again. Each try can itself wait out busy_timeout. */
@@ -36,6 +37,8 @@ interface LiveSession {
   hostAsks: Map<string, (d: PermissionDecision) => void>;
   /** ask id → rule that auto-allowed it, so the adapter's permission.resolved can carry the rule. */
   ruleMatches: Map<string, ApprovalRuleMatch>;
+  /** The last event recorded for this task is the status `thinking`: a runner's next one adds nothing, so it is not recorded (#2738). */
+  thinkingRecorded?: boolean;
   /** The budget value whose crossing was already noted in the transcript (avoids a note per usage event). */
   budgetNoted?: number;
   /** Armed after session.end: releases the idle runner process so later turns go through --resume. */
@@ -153,6 +156,11 @@ export interface TaskManagerOptions {
   originOf?: (path: string) => string | null;
   /** Where a Codex task's own temp directory is made (#787): `<daemon home>/tmp`. Unset = none is made. */
   privateTmpRoot?: string;
+  /**
+   * The machine's heavy-process slots (`ops-kit heavy`, the kit's README "重い処理の枠"): added to a Codex task's scope
+   * at start so that its sandbox can take a slot like every other process. Unset = not added.
+   */
+  heavyStateDir?: string;
   /** Refuse a Local turn while an interactive Terminal owns its working directory. */
   beforeResume?: (task: Task) => void;
   /** Keep a finished runner process around this long for quick follow-ups. 0 releases immediately. */
@@ -242,6 +250,7 @@ export class TaskManager {
   private attachments: TaskManagerOptions["attachments"];
   private artifacts: TaskManagerOptions["artifacts"];
   private privateTmpRoot: string | undefined;
+  private heavyStateDir: string | undefined;
   private deviceAuthEnv: TaskManagerOptions["deviceAuthEnv"];
   private otelFor: TaskManagerOptions["otelFor"];
   private dockerEnv: TaskManagerOptions["dockerEnv"];
@@ -271,6 +280,7 @@ export class TaskManager {
     this.attachments = opts.attachments;
     this.artifacts = opts.artifacts;
     this.privateTmpRoot = opts.privateTmpRoot;
+    this.heavyStateDir = opts.heavyStateDir;
     this.deviceAuthEnv = opts.deviceAuthEnv;
     this.otelFor = opts.otelFor;
     this.dockerEnv = opts.dockerEnv;
@@ -408,6 +418,18 @@ export class TaskManager {
   onTaskEnd(l: (taskId: string, task: Task) => void): () => void {
     this.endListeners.add(l);
     return () => this.endListeners.delete(l);
+  }
+
+  /** The heavy slots' directory, made if missing. Not made = not added: one line on the task, which still starts (`ops-kit heavy` then runs without a slot). */
+  private heavySlotsDir(taskId: string): string | undefined {
+    if (!this.heavyStateDir) return undefined;
+    try {
+      mkdirSync(this.heavyStateDir, { recursive: true });
+      return this.heavyStateDir;
+    } catch (e) {
+      this.record(taskId, { t: "status", text: `重い処理の枠の置き場をサンドボックスで書ける場所に足せませんでした: ${this.heavyStateDir} (${e instanceof Error ? e.message : String(e)})` });
+      return undefined;
+    }
   }
 
   /** Append an event that did not come from the runner (Workspace MCP tool calls, host notes). */
@@ -587,12 +609,21 @@ export class TaskManager {
     if (input.model !== undefined || input.permissionMode !== undefined || input.effort !== undefined || input.budgetUsd !== undefined || input.scheduleId !== undefined || input.shadowRunner || input.attachmentIds?.length || input.scope?.some((p) => p !== input.cwd)) return "Cloud はモデル・権限・予算・スケジュール・並走・添付・追加scopeを指定できません。公式 Web で操作してください。";
   }
 
+  /** A foreign repository's runner config nobody confirmed (#2576), for a Task that would read it; null = none. */
+  private unconfirmedRunnerConfig(at: { workspaceId?: string | null; cwd: string }): RunnerConfigUnconfirmed | null {
+    const ws = foreignWorkspaceOf(this.db.listWorkspaces(), at).find((w) => runnerConfigOf(w.path).hash !== this.db.getRunnerConfigOk(w.id));
+    return ws ? new RunnerConfigUnconfirmed(ws.name) : null;
+  }
+
   create(input: NewTaskInput, precomputed?: RoutingSuggestion, afterInsert?: (task: Task) => void): Task {
     const why = this.checkCloudInput(input);
     if (why) throw new Error(why);
     const cloud = input.executionMode === "cloud";
     const adapter = this.adapters.get(input.runner);
     if (!adapter) throw new Error(`runner "${input.runner}" is not installed`);
+    // no row for a refused start; a schedule and a stage Task come through here too
+    const unconfirmed = this.unconfirmedRunnerConfig(input);
+    if (unconfirmed) throw unconfirmed;
     const now = Date.now();
     const id = newId("task");
     // Attachments (#125): their directory (deterministic from the id) is in the scope from the start so the first
@@ -1057,6 +1088,13 @@ export class TaskManager {
       this.setStatus(task.id, "error");
       throw new Error(mismatch);
     }
+    // A new process reads the config again: a Task continued after it changed is refused as a new one is (#2576)
+    const unconfirmed = this.unconfirmedRunnerConfig(task);
+    if (unconfirmed) {
+      this.record(task.id, { t: "status", text: unconfirmed.message });
+      this.setStatus(task.id, "error");
+      throw unconfirmed;
+    }
     if (task.executionMode === "cloud") { this.startCloudSession(task, prompt, adapter); return; }
     // Development-standard skills where the runner reads them (#469). A skill that cannot be placed never stops the task.
     const meta = this.db.listWorkspaces().find((w) => w.kind === "meta");
@@ -1101,8 +1139,10 @@ export class TaskManager {
       // For the runner that cannot run the hook (Codex, #787): a temp directory of the task's own, removed when it ends.
       // Not made = the task does not start (the error below), never a Codex without the stop.
       const privateTmp = meta && task.runner === "codex" && this.privateTmpRoot ? makePrivateTmp(this.privateTmpRoot, task.id) : undefined;
+      // The heavy slots are writable to the sandbox too (#2213): only for this start, never into the saved scope
+      const heavy = meta && task.runner === "codex" ? this.heavySlotsDir(task.id) : undefined;
       live.session = adapter.start(
-        { cwd: task.cwd, scope: task.scope, prompt, model: task.model ?? undefined, permissionMode: task.permissionMode ?? undefined, effort: task.effort ?? undefined, resumeSessionId, preamble, env, guards, allow, privateTmp, bedrock: this.bedrock?.(task), attachments, attachmentDir: this.attachments?.taskDir(task.id), mcpServers: this.mcpServers?.(task), otel: this.otelFor?.(task.id) },
+        { cwd: task.cwd, scope: heavy && !task.scope.includes(heavy) ? [...task.scope, heavy] : task.scope, prompt, model: task.model ?? undefined, permissionMode: task.permissionMode ?? undefined, effort: task.effort ?? undefined, resumeSessionId, preamble, env, guards, allow, privateTmp, bedrock: this.bedrock?.(task), attachments, attachmentDir: this.attachments?.taskDir(task.id), mcpServers: this.mcpServers?.(task), otel: this.otelFor?.(task.id) },
         (ev) => this.fromRunner(task.id, live, ev),
       );
     } catch (e) {
@@ -1268,6 +1308,9 @@ export class TaskManager {
       return;
     }
     if (ev.t === "cloud.session.created") return;
+    // a DAK turn sends thousands of them in a row and buries the reply under the transcript's tail (#2738)
+    const thinking = ev.t === "status" && ev.text === "thinking";
+    if (thinking && live.thinkingRecorded) return;
     // Approval rules run before the ask is persisted so the recorded event carries the matched rule.
     let autoAllow: ApprovalRuleMatch | undefined;
     if (ev.t === "permission.ask" && this.approval) {
@@ -1285,6 +1328,7 @@ export class TaskManager {
     // event that ends the reply is recorded, so its stop / artifact row comes before the tool row or 完了 (#1936)
     if (endsReply(ev)) this.readFences(taskId, live, ev);
     const env = this.db.appendEvent(taskId, ev);
+    live.thinkingRecorded = thinking;
     const task = this.db.getTask(taskId);
     if (!task) return;
     this.readStops(taskId, live, ev, env.seq, env.ts);

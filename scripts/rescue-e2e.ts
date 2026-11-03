@@ -93,12 +93,15 @@ try {
   assert(small === 0, `${small} button(s) are shorter than 44px`);
   say(`scrollWidth=${width}, every button is at least 44px tall, log lines=${await evaluate(`document.getElementById("log").textContent.split("\\n").length`)}`);
   await until(() => evaluate(`document.getElementById("disk-usage").textContent.includes("ルートディスク") && document.querySelectorAll("#sweeps li").length > 0 && [...document.querySelectorAll("#sweeps li")].every((li) => li.textContent.includes("自動の片付け")) && document.getElementById("tmp-usage").textContent.includes("使用") && document.querySelectorAll("#tmp-list li").length > 0`), "the disk section shows the root disk, the automatic cleans, /tmp's usage and the entries");
+  // the age picker and the force clean (shown, inside the 390 px) count in the width check below
+  const tmpControls = await evaluate(`["tmp-age", "tmp-reload", "tmp-clean", "tmp-force"].map((id) => { const r = document.getElementById(id).getBoundingClientRect(); return r.width > 0 && r.left >= 0 && r.right <= 390; }).join(",")`);
+  assert(tmpControls === "true,true,true,true", `the disk section's controls are not all shown inside 390px (${tmpControls})`);
   const tmpWidth = await evaluate("document.documentElement.scrollWidth");
   assert(tmpWidth <= 390, `the page scrolls sideways at 390px with the disk section listed (scrollWidth ${tmpWidth})`);
   const tmpSmall = await evaluate(`[...document.querySelectorAll("button")].filter((b) => b.getClientRects().length > 0 && b.getBoundingClientRect().height < 44).length`);
   assert(tmpSmall === 0, `${tmpSmall} button(s) are shorter than 44px with the disk section listed`);
-  // tmp-clean is not pressed: the bundle reads this host's real /tmp; bun test rescue removes on a fake one
-  say(`disk at 390px: "${await evaluate(`document.getElementById("disk-usage").textContent`)}", sweeps: "${await evaluate(`[...document.querySelectorAll("#sweeps li")].map((li) => li.textContent).join(" / ")`)}", "${await evaluate(`document.getElementById("tmp-usage").textContent`)}", first: "${await evaluate(`document.querySelector("#tmp-list li").textContent`)}", button: "${await evaluate(`document.getElementById("tmp-clean").textContent`)}"`);
+  // tmp-clean and tmp-force are not pressed: the bundle reads this host's real /tmp; bun test rescue removes on a fake one
+  say(`disk at 390px: "${await evaluate(`document.getElementById("disk-usage").textContent`)}", sweeps: "${await evaluate(`[...document.querySelectorAll("#sweeps li")].map((li) => li.textContent).join(" / ")`)}", "${await evaluate(`document.getElementById("tmp-usage").textContent`)}", first: "${await evaluate(`document.querySelector("#tmp-list li").textContent`)}", button: "${await evaluate(`document.getElementById("tmp-clean").textContent`)}", force: "${await evaluate(`document.getElementById("tmp-force").textContent`)}"`);
 
   await evaluate(`document.getElementById("rollback").click()`);
   assert((await until(() => health(port), "v1 back", 30_000)).version === "v1", "rollback did not bring v1 up");

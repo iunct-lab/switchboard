@@ -44,7 +44,18 @@
       "name": "ops-kit",
       "version": "0.0.1",
       "dependencies": {
-        "zod": "^3.25.0",
+        "zod": "^4.6.6",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.4.3",
+        "typescript": "^5.9.0",
+      },
+    },
+    "packages/adapters/adk": {
+      "name": "@switchboard/adapter-adk",
+      "version": "0.0.1",
+      "dependencies": {
+        "@switchboard/protocol": "workspace:*",
       },
       "devDependencies": {
         "@types/bun": "^1.4.3",
@@ -73,29 +84,18 @@
         "typescript": "^5.9.0",
       },
     },
-    "packages/adapters/dak": {
-      "name": "@switchboard/adapter-dak",
-      "version": "0.0.1",
-      "dependencies": {
-        "@switchboard/protocol": "workspace:*",
-      },
-      "devDependencies": {
-        "@types/bun": "^1.4.3",
-        "typescript": "^5.9.0",
-      },
-    },
     "packages/core": {
       "name": "@switchboard/core",
       "version": "0.0.1",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.32.1",
+        "@switchboard/adapter-adk": "workspace:*",
         "@switchboard/adapter-claude": "workspace:*",
         "@switchboard/adapter-codex": "workspace:*",
-        "@switchboard/adapter-dak": "workspace:*",
         "@switchboard/protocol": "workspace:*",
         "bun-pty": "0.4.10",
         "yaml": "^2.9.1",
-        "zod": "^3.25.0",
+        "zod": "^4.6.6",
       },
       "devDependencies": {
         "@types/bun": "^1.4.3",
@@ -106,7 +106,7 @@
       "name": "@switchboard/protocol",
       "version": "0.0.1",
       "dependencies": {
-        "zod": "^3.25.0",
+        "zod": "^4.6.6",
       },
       "devDependencies": {
         "typescript": "^5.9.0",
@@ -336,11 +336,11 @@
 
     "@smithy/types": ["@smithy/types@4.19.0", "", { "dependencies": { "tslib": "^2.6.2" } }, "sha512-r7jh49VJxGerfAcTQA6gXcKc+98zOp/tqRwzYjgOE+iSQsP6cEU1hq2QzbuipmP68QtYdY9wKEhiCQZIzHgZ4Q=="],
 
+    "@switchboard/adapter-adk": ["@switchboard/adapter-adk@workspace:packages/adapters/adk"],
+
     "@switchboard/adapter-claude": ["@switchboard/adapter-claude@workspace:packages/adapters/claude"],
 
     "@switchboard/adapter-codex": ["@switchboard/adapter-codex@workspace:packages/adapters/codex"],
-
-    "@switchboard/adapter-dak": ["@switchboard/adapter-dak@workspace:packages/adapters/dak"],
 
     "@switchboard/aws": ["@switchboard/aws@workspace:aws"],
 
@@ -628,7 +628,7 @@
 
     "yaml": ["yaml@2.9.1", "", { "bin": { "yaml": "bin.mjs" } }, "sha512-3NxN8+78OdzbT7C/WjGsyfPAtJaN3FNDsWxv7Y7mcDsT/oOmgW8BpyQQFFBnvZE3j9Y2Sdz1ULFLezL7Eb2yFw=="],
 
-    "zod": ["zod@3.25.76", "", {}, "sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ=="],
+    "zod": ["zod@4.6.7", "", {}, "sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg=="],
 
     "zod-to-json-schema": ["zod-to-json-schema@3.25.2", "", { "peerDependencies": { "zod": "^3.25.28 || ^4" } }, "sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA=="],
 

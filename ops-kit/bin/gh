@@ -6,7 +6,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { repoName } from "../src/backlog-client.ts";
+import { repoName, syncedRepositories } from "../src/backlog-client.ts";
 import { noWriteMarkRefusal, noWriteMarks, noWriteRefusal, noWriteTargets } from "../src/config.ts";
 import { backlogWrite, bodiesOf, GUARD_MARK, realCommand, writeTargetOf } from "../src/gh-guard.ts";
 import { findSecrets, hostAws } from "../src/secrets.ts";
@@ -16,17 +16,6 @@ const real = realCommand("gh", process.env.PATH ?? "", import.meta.path, GUARD_M
 if (real === null) {
   console.error("gh-guard: gh が PATH にありません");
   process.exit(127);
-}
-// In the app's Task, an Issue of its workspace is written through the app (#2694): written here, the app's next edit
-// starts from the value before it and is sent as a conflict. Another repository's Issue goes on
-const issueWrite = process.env.BACKLOG_URL ? backlogWrite(argv) : null;
-if (issueWrite) {
-  const workspace = await repoName(process.env).catch(() => null);
-  if (workspace !== null && (issueWrite.repo === null || issueWrite.repo.toLowerCase() === workspace.toLowerCase())) {
-    const instead = { create: "create", new: "create", comment: "comment" }[issueWrite.sub] ?? `edit${issueWrite.sub === "close" ? " --state closed" : issueWrite.sub === "reopen" ? " --state open" : ""}`;
-    console.error(`gh-guard: アプリの Task の中では ${workspace} の Issue に直接書きません。ops-kit backlog ${instead} を使ってください（issue-workflow の「操作」）`);
-    process.exit(1);
-  }
 }
 // What can be read only once (the standard input, a pipe, a file descriptor) is kept as bytes and handed on
 let stdin: Uint8Array | undefined;
@@ -48,6 +37,30 @@ const reads = bodiesOf(argv, (path) => {
   }
 }, !process.stdin.isTTY);
 
+// In the app's Task, the backlog of its workspace, and of the other repositories the app syncs (#3073), is written
+// through the app (#2694), whatever form the write takes: written here, the app's next edit starts from the value
+// before it and is sent as a conflict. A repository the app does not know goes on. Before the secret check: nothing
+// is sent either way. The app is asked only for a backlog write named elsewhere than the workspace
+const backlog = process.env.BACKLOG_URL ? backlogWrite(argv, (reads ?? []).map((r) => r.text)) : null;
+if (backlog) {
+  const workspace = await repoName(process.env).catch(() => null);
+  // a write that names no repository goes to the workspace
+  let target = backlog.repo ?? workspace;
+  let other: string | undefined;
+  let stop = target !== null && workspace !== null && target.toLowerCase() === workspace.toLowerCase();
+  if (stop) target = workspace;
+  if (!stop && target !== null) {
+    const synced = await syncedRepositories(process.env);
+    if (synced === null) console.error("gh-guard: アプリに届かない（か 5 秒で答えない）ので、同期しているほかのリポジトリは判定していません");
+    other = synced?.find((s) => s.repository.toLowerCase() === target.toLowerCase())?.workspaceId;
+    stop = other !== undefined;
+  }
+  if (stop) {
+    console.error(`gh-guard: アプリの Task の中では ${target} のバックログ（Issue・コメント・ラベル・Project）に直接書きません。${backlog.instead} を使ってください${other && backlog.instead.startsWith("ops-kit backlog") ? `（${target} は ops-kit backlog … --workspace ${other}）` : ""}（issue-workflow の「操作」）`);
+    console.error("ops-kit backlog が壊れている・アプリに届かないときは、その 1 回だけ env -u BACKLOG_URL gh … で書けます（秘密の検査は残る。直接書いた値はアプリの次の取込みで入り、その Issue に送信待ちがあれば競合する）");
+    process.exit(1);
+  }
+}
 const host = hostAws();
 const hits = (reads ?? []).flatMap((r) => findSecrets(r.text, host));
 if (hits.length > 0) {

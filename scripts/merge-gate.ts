@@ -1,5 +1,5 @@
 import { currentRepo, originRepo } from "./repo.ts";
-import { LOCAL_CI_RESULT, patchIdOf, sh, stackOf } from "./local-ci";
+import { LOCAL_CI_RESULT, sh } from "./local-ci";
 import { forgeTargetOf, originOf, type ForgeTarget } from "../ops-kit/src/forge.ts";
 import { mergeGitlabMr, readGitlabMerge, runGlab, type Sh } from "../ops-kit/src/forge-gitlab.ts";
 import { linkedIssues, overlaps, scopeIn } from "./task-paths.ts";
@@ -24,26 +24,36 @@ export const PROTECTED = [
 
 /**
  * Rules for any repository (--repo too): a PR touching one of these is large whatever its size, with the class as the reason (#563).
- * Security: a path word (split at / . _ -, lower-cased) in SECURITY_WORDS, or SECURITY_FILES (CI and repository settings,
- * secrets files, lock files — adding a dependency changes the lock). Responsibility: design rules, design docs, agent
- * instructions and operating settings; README.md's `## Design rules` section is judged per line (designRulesTouched).
+ * Security: a path word (split at / . _ -, lower-cased) in SECURITY_WORDS, or a path of SECURITY_GROUPS (CI and repository
+ * settings, lock files — adding a dependency changes the lock —, the gates, the host scripts) or SECURITY_WORD_FILES (secrets
+ * files). Responsibility: design rules, design docs, agent instructions and operating settings; README.md's
+ * `## Design rules` section is judged per line (designRulesTouched).
  */
 export const SECURITY_WORDS = ["auth", "approval", "permission", "permissions", "secret", "secrets", "credential", "credentials", "token", "tokens", "crypto", "sandbox"];
-export const SECURITY_FILES = [
-  ".github/**",
-  "**/.env*",
-  "**/.gitleaks.toml",
-  "**/{bun.lock,package-lock.json,pnpm-lock.yaml,yarn.lock,uv.lock,poetry.lock,go.sum,Cargo.lock}",
-  "**/requirements*.txt",
+/**
+ * The security reason split by the group of paths it met (PBI #1873), so the asks and answers count per group and a group
+ * the user approves can move to a recheck later. docs: a document only (decided before the others, alone); words: a path
+ * word or a secrets file; the rest: SECURITY_GROUPS. A path in two groups is in both (a yes for one does not lift the other).
+ */
+export const SECURITY_KINDS = ["security:docs", "security:words", "security:lockfile", "security:github", "security:gates", "security:host"] as const;
+export type SecurityKind = (typeof SECURITY_KINDS)[number];
+const glob = (ps: string[]) => ps.map((p) => new Bun.Glob(p));
+/** Secrets files: in the words group (they hold the secrets the words name). */
+const SECURITY_WORD_FILES = glob(["**/.env*", "**/.gitleaks.toml"]);
+export const SECURITY_GROUPS: Record<Exclude<SecurityKind, "security:docs" | "security:words">, Bun.Glob[]> = {
+  "security:lockfile": glob(["**/{bun.lock,package-lock.json,pnpm-lock.yaml,yarn.lock,uv.lock,poetry.lock,go.sum,Cargo.lock}", "**/requirements*.txt"]),
+  "security:github": glob([".github/**"]),
   // the gate and local CI decide merges like CI does: a small change to them is still the user's to approve (#751)
-  "scripts/merge-gate.ts",
-  "scripts/local-ci.ts",
+  "security:gates": glob(["scripts/merge-gate.ts", "scripts/local-ci.ts"]),
   // Switchboard's own (a --repo without aws/host never meets it): the cloud host runs main's host scripts as root at
   // every start (sb-host-update, #435)
-  "aws/host/**",
-].map((p) => new Bun.Glob(p));
-// aws/host/** says more than the path: root runs it from main, which is #852's concern (docs/design/cloud-hosting.md §6.5)
-const HOST_ROOT = new Bun.Glob("aws/host/**");
+  "security:host": glob(["aws/host/**"]),
+};
+/**
+ * Documents that instruct the Task (skills, CLAUDE.md, AGENTS.md) are not security:docs: they decide what a Task does. Nor is
+ * a .md under .github (the PR and Issue templates are inputs of the development, and GitHub reads them as settings).
+ */
+const INSTRUCTIONS = glob([".claude/skills/**", "ops-kit/skills/**", "**/CLAUDE.md", "**/AGENTS.md", ".github/**"]);
 const HOST_ROOT_NOTE = "（aws/host は起動のたびに root が main から入れて走らせる。root で走る範囲が増えるなら #852 の見直しの契機: docs/design/cloud-hosting.md §6.5）";
 export const RESPONSIBILITY = [
   "docs/design/**",
@@ -56,26 +66,27 @@ export const RESPONSIBILITY = [
 const DESIGN_RULES = "README.md の ## Design rules";
 
 /**
- * Two kinds of large reason (#751). Ask: only the user lifts it (--allow-large) — security, rescue (the rollback itself)
- * and README.md's Design rules. Recheck: a `[recheck] <kind> pass <head sha>` PR comment lifts it, per kind (size: line
- * count and the other protected paths; responsibility: the other responsibility files; migration: MIGRATION).
+ * Two kinds of large reason (#751). Ask: only the user lifts it (--allow-large) — security. Recheck: a
+ * `[recheck] <kind> pass <head sha>` PR comment lifts it, per kind (size: line count and the other protected paths;
+ * responsibility: the other responsibility files; migration: MIGRATION; rescue: RESCUE, the rollback itself;
+ * design-rules: README.md's Design rules).
  */
-export type RecheckKind = "size" | "responsibility" | "migration";
-export const RECHECK_KINDS: RecheckKind[] = ["size", "responsibility", "migration"];
-export const RECHECK_PASS = /^\[recheck\] (size|responsibility|migration) pass ([0-9a-f]{40})\b/;
-export type AskKind = "security" | "rescue" | "design-rules";
-export const ASK_KINDS: AskKind[] = ["security", "rescue", "design-rules"];
+export type RecheckKind = "size" | "responsibility" | "migration" | "rescue" | "design-rules";
+export const RECHECK_KINDS: RecheckKind[] = ["size", "responsibility", "migration", "rescue", "design-rules"];
+export const RECHECK_PASS = /^\[recheck\] (size|responsibility|migration|rescue|design-rules) pass ([0-9a-f]{40})\b/;
+export type AskKind = SecurityKind;
+export const ASK_KINDS: AskKind[] = [...SECURITY_KINDS];
 /** The words of the record marks (#752), in this order: who lifted which kind of a large PR. */
-export const MERGE_KINDS = ["security", "rescue", "design-rules", "size", "responsibility", "migration"] as const;
+export const MERGE_KINDS = [...SECURITY_KINDS, "rescue", "design-rules", "size", "responsibility", "migration"] as const;
 export type MergeKind = (typeof MERGE_KINDS)[number];
 /**
  * Record marks for the user's side (#761; the recheck side is RECHECK_PASS): asked with `[merge-ask] <kinds> <head sha>`,
  * answered with `[merge-answer] <yes|no> <kinds> <head sha>` (kinds comma-separated; the comment's createdAt is the time).
  * merge-audit reads them; `[merge-answer] yes` is what --allow-large needs to take effect (judge).
  */
-export const MERGE_ASK = /^\[merge-ask\] ([a-z-]+(?:,[a-z-]+)*) ([0-9a-f]{40})\b/;
-export const MERGE_ANSWER = /^\[merge-answer\] (yes|no) ([a-z-]+(?:,[a-z-]+)*) ([0-9a-f]{40})\b/;
-export const ASK_PROTECTED = ["rescue/**"].map((p) => new Bun.Glob(p));
+export const MERGE_ASK = /^\[merge-ask\] ([a-z:-]+(?:,[a-z:-]+)*) ([0-9a-f]{40})\b/;
+export const MERGE_ANSWER = /^\[merge-answer\] (yes|no) ([a-z:-]+(?:,[a-z:-]+)*) ([0-9a-f]{40})\b/;
+export const RESCUE = ["rescue/**"].map((p) => new Bun.Glob(p));
 export const MIGRATION = ["packages/core/src/db.ts", "packages/core/src/schema-baseline.json"].map((p) => new Bun.Glob(p));
 const DESIGN_RULES_HEADING = /^## Design rules[ \t]*$/m;
 
@@ -123,8 +134,17 @@ export interface Judgement {
 
 const matches = (globs: Bun.Glob[], path: string) => globs.some((g) => g.match(path));
 
+/** The security groups of a path (PBI #1873); empty = not security. A document that is not an instruction is security:docs alone. */
+export function securityKinds(path: string): SecurityKind[] {
+  const words = matches(SECURITY_WORD_FILES, path) || path.toLowerCase().split(/[\/._-]/).some((w) => SECURITY_WORDS.includes(w));
+  const groups = (Object.keys(SECURITY_GROUPS) as (keyof typeof SECURITY_GROUPS)[]).filter((k) => matches(SECURITY_GROUPS[k], path));
+  if (!words && groups.length === 0) return [];
+  if (matches(DOCS, path) && !matches(INSTRUCTIONS, path)) return ["security:docs"];
+  return [...(words ? ["security:words" as const] : []), ...groups];
+}
+
 export function classify(path: string): "security" | "responsibility" | null {
-  if (matches(SECURITY_FILES, path) || path.toLowerCase().split(/[\/._-]/).some((w) => SECURITY_WORDS.includes(w))) return "security";
+  if (securityKinds(path).length > 0) return "security";
   if (matches(RESPONSIBILITY, path)) return "responsibility";
   return null;
 }
@@ -192,11 +212,12 @@ export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
     large.push({ kind: "size", text: `テストと docs を除いた変更が ${lines} 行で、${LARGE_LINES} 行を超えている` });
   }
   const paths = f.files.map((x) => x.path);
-  // rescue is asked whatever else its file is (rescue/CLAUDE.md too); a security file there says セキュリティ instead
-  const rescue = (p: string) => classify(p) !== "security" && matches(ASK_PROTECTED, p);
+  // rescue is its own kind whatever else its file is (rescue/CLAUDE.md too); a security file there says セキュリティ instead
+  const rescue = (p: string) => classify(p) !== "security" && matches(RESCUE, p);
   const touched = paths.filter((p) => classify(p) === null && matches(PROTECTED, p) && !rescue(p));
-  const security = paths.filter((p) => classify(p) === "security");
-  add("security", "セキュリティ", security, security.some((p) => HOST_ROOT.match(p)) ? HOST_ROOT_NOTE : "");
+  for (const kind of SECURITY_KINDS) {
+    add(kind, `セキュリティ（${kind}）`, paths.filter((p) => securityKinds(p).includes(kind)), kind === "security:host" ? HOST_ROOT_NOTE : "");
+  }
   add("rescue", "rescue", paths.filter(rescue));
   add("design-rules", "責務", f.designRulesTouched ? [DESIGN_RULES] : []);
   add("responsibility", "責務", paths.filter((p) => classify(p) === "responsibility" && !rescue(p)));
@@ -209,7 +230,7 @@ export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
   const isAsk = (k: RecheckKind | AskKind): k is AskKind => (ASK_KINDS as string[]).includes(k);
 
   // the last answer of this head decides (a later no takes the yes back); a yes must name every kind left (a yes about
-  // rescue does not lift a security reason)
+  // size does not lift a security reason)
   const left = [...ask, ...recheck];
   const answer = f.reviewComments.map((c) => ({ at: Date.parse(c.createdAt), m: MERGE_ANSWER.exec(c.body) })).filter((a) => a.m?.[3] === f.head).sort((a, b) => a.at - b.at).at(-1)?.m;
   const lifted = opts.allowLarge && (left.length === 0 || (answer?.[1] === "yes" && left.every((k) => answer[2]!.split(",").includes(k))));
@@ -274,8 +295,8 @@ export function checksFromRuns(runs: WorkflowRun[]): PrFacts["checks"] {
 /**
  * When Actions does not start (billing: the job fails with no steps and no runner), or there is no run at all, the local
  * pass of `bun scripts/local-ci.ts` counts as the CI's success (#387, #914). Only for a run that never started (a CI
- * whose tests really failed still stops the merge) and only when the newest result of the stack's top is a pass that
- * names this PR's diff as it is now (`localCiOf`, #2940).
+ * whose tests really failed still stops the merge) and only when the newest result of the stack's top is a pass whose
+ * head has this PR's commits as they are now, by `git cherry` (`localCiOf`, #2940, #3118).
  */
 const LOCAL_CI_SUFFIX = "（Actions が始まらず、ローカルで pass）";
 const LOCAL_CI_ONLY = "local-ci（Actions の run が無く、ローカルで pass）";
@@ -296,25 +317,51 @@ export async function stackTop(n: number, headRefName: string, run: (args: strin
   }
 }
 
-/**
- * Whether the newest local-ci result of the stack's top `top` (this PR itself when alone) is a pass whose stack line
- * (`stackOf`) has this PR's patch-id now; else why not (#2940). The base's tip is not compared: a conflict with another
- * PR is mergeStateStatus's, a fault of two PRs together the tag CI's. A pass without the stack line is none.
- */
-export async function localCiOf(n: number, top: number, comments: { body: string; createdAt: string }[], run: (args: string[]) => Promise<string>, repo: string, patchId: (pr: number) => Promise<string>): Promise<{ pass: boolean; note?: string }> {
-  const ofTop = top === n ? comments : (JSON.parse(await run(["pr", "view", String(top), "-R", repo, "--json", "comments"])).comments as Array<{ body: string; createdAt: string; authorAssociation?: string }>)
-    .filter((c) => MARK_AUTHORS.includes(c.authorAssociation ?? ""));
-  const newest = ofTop
+/** The newest `[local-ci]` result among comments already filtered to MARK_AUTHORS. local-ci's reuse reads the same one (#1882). */
+export function newestLocalCi<C extends { body: string; createdAt: string }>(comments: C[]): { c: C; m: RegExpExecArray } | undefined {
+  return comments
     .map((c) => ({ c, m: LOCAL_CI_RESULT.exec(c.body), at: Date.parse(c.createdAt) }))
-    .filter((x) => x.m)
+    .filter((x): x is { c: C; m: RegExpExecArray; at: number } => x.m !== null)
     .sort((a, b) => a.at - b.at)
     .at(-1);
+}
+
+/**
+ * Whether the newest local-ci result of the stack's top `top` (this PR itself when alone) is a pass whose head has this
+ * PR's commits as they are now (`covered`, by `git cherry`: `inPass`); else why not (#2940, #3118). Only the first line
+ * (`LOCAL_CI_RESULT`) is read, so another repository's copy of local-ci counts as it writes it. The base's tip is not
+ * compared: a conflict with another PR is mergeStateStatus's, a fault of two PRs together the tag CI's.
+ */
+export async function localCiOf(n: number, top: number, comments: { body: string; createdAt: string }[], run: (args: string[]) => Promise<string>, repo: string, covered: (passHead: string) => Promise<boolean>): Promise<{ pass: boolean; note?: string }> {
+  const ofTop = top === n ? comments : (JSON.parse(await run(["pr", "view", String(top), "-R", repo, "--json", "comments"])).comments as Array<{ body: string; createdAt: string; authorAssociation?: string }>)
+    .filter((c) => MARK_AUTHORS.includes(c.authorAssociation ?? ""));
+  const newest = newestLocalCi(ofTop);
   if (!newest) return { pass: false };
   if (newest.m![1] !== "pass") return { pass: false, note: `一番上の PR #${top} の local-ci の最新が fail` };
-  const recorded = stackOf(newest.c.body)?.get(n);
-  if (!recorded) return { pass: false, note: `一番上の PR #${top} の pass にこの PR が入っていない（一番上で回す）` };
-  if (recorded !== await patchId(n)) return { pass: false, note: `この PR の差分が #${top} の pass のときから変わった（一番上で回し直す）` };
+  const passHead = newest.m![2]!;
+  if (!await covered(passHead)) return { pass: false, note: `この PR のコミットが #${top} の pass（${passHead.slice(0, 7)}）に同じ差分で入っていない（一番上で回し直す）` };
   return { pass: true };
+}
+
+/**
+ * Whether every commit of the PR now (from its merge-base with the base's tip to its head) is in the pass's head's history
+ * with the same diff: `git cherry` prints no `+` line (#3118), and every merge commit among them (which git cherry skips) is
+ * in that history as is. GitHub's rebase after a merge below keeps each commit's diff; a fix commit or a conflict
+ * resolution that changes one does not. The three commits are fetched from `url` into `root`
+ * without writing a ref. Not a worktree or a failed fetch throws: no judgement (exit 2).
+ */
+export async function inPass(git: { root: string; url: string }, passHead: string, prHead: string, baseTip: string): Promise<boolean> {
+  const at = ["git", "-C", git.root];
+  await sh([...at, "rev-parse", "--git-dir"]).catch(() => { throw new Error("git の作業ツリーでない（判定に要るコミットを取れない）"); });
+  await sh([...at, "fetch", "-q", "--no-tags", "--no-write-fetch-head", git.url, passHead, prHead, baseTip])
+    .catch(() => { throw new Error(`${[passHead, prHead, baseTip].map((x) => x.slice(0, 7)).join(" / ")} を fetch できない（通信か、一番上で回し直す）`); });
+  const mergeBase = (await sh([...at, "merge-base", baseTip, prHead])).trim();
+  if ((await sh([...at, "cherry", passHead, prHead, mergeBase])).split("\n").some((l) => l.startsWith("+ "))) return false;
+  // git cherry skips merge commits: one in the PR (a conflict resolved in it) counts only when the pass's head has it as is
+  for (const m of (await sh([...at, "rev-list", "--merges", `${mergeBase}..${prHead}`])).split("\n").filter(Boolean)) {
+    if (!await sh([...at, "merge-base", "--is-ancestor", m, passHead]).then(() => true, () => false)) return false;
+  }
+  return true;
 }
 
 async function checksWithLocalCi(runs: WorkflowRun[], localPass: boolean, run: (args: string[]) => Promise<string>, repo: string): Promise<PrFacts["checks"]> {
@@ -387,9 +434,10 @@ async function readTask(pr: { body: string | null; headRefName: string | null },
 
 /**
  * `repo`: owner/name; another repository's backlog stage Task passes its own with --repo (the rules stay these).
- * `patchId`: a PR's diff's patch-id now (local-ci's `patchIdOf`; tests give their own).
+ * `git`: where `inPass` fetches the commits to (`root`, a git worktree) and from (`url`, the repository's own, even when
+ * the worktree's origin is another: --repo).
  */
-export async function readPr(n: number, run = gh, repo = currentRepo(), patchId = (pr: number) => patchIdOf(pr, repo, sh)): Promise<PrFacts> {
+export async function readPr(n: number, run = gh, repo = currentRepo(), git = { root: process.cwd(), url: `https://github.com/${repo}.git` }): Promise<PrFacts> {
   const [owner, name] = repo.split("/");
   const pr = JSON.parse(
     await run(["pr", "view", String(n), "-R", repo, "--json", "body,files,commits,baseRefName,baseRefOid,headRefName,headRefOid,mergeStateStatus,comments"]),
@@ -410,7 +458,7 @@ export async function readPr(n: number, run = gh, repo = currentRepo(), patchId 
   if (threads.totalCount > threads.nodes.length) {
     throw new Error(`レビュースレッドが ${threads.totalCount} 件あり、1 ページ（${threads.nodes.length} 件）で読み切れない`);
   }
-  const local = await localCiOf(n, await stackTop(n, pr.headRefName, run, repo), comments, run, repo, patchId);
+  const local = await localCiOf(n, await stackTop(n, pr.headRefName, run, repo), comments, run, repo, (passHead) => inPass(git, passHead, pr.headRefOid, pr.baseRefOid));
   const checks = await checksWithLocalCi(runs.workflow_runs, local.pass, run, repo);
   const rechecks = RECHECK_KINDS.filter((k) =>
     comments.some((c) => {
@@ -535,7 +583,7 @@ export async function main(args: string[], run: (args: string[]) => Promise<stri
   }
   let facts: PrFacts;
   try {
-    facts = await readPr(n, run, repo);
+    facts = await readPr(n, run, repo, { root: cwd, url: `https://github.com/${repo}.git` });
   } catch (e) {
     err(`判定できなかった: ${(e as Error).message}`);
     return 2;

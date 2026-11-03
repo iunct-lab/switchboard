@@ -109,7 +109,7 @@ PR とレビューは各サービスの標準のものを使う（自前の MR�
 | `unresolvedThreads` | resolvable で resolved でない discussion |
 | `mergeState` | `detailed_merge_status`。`mergeable` = CLEAN、ローカル CI で数えたときの `ci_must_pass` / `ci_still_running` = UNSTABLE、計算中（`checking` など）は判定しない（exit 2） |
 | 印（`[codex] review`・`[local-ci]`・`[recheck]`・`[merge-ask]` / `[merge-answer]`） | MR の notes のうち、書いた人の project の access level が Developer（30）以上のもの |
-| `designRulesTouched` | README.md を触った MR は触ったとみなす（GitLab では節を読まない。`[聞く]`） |
+| `designRulesTouched` | README.md を触った MR は触ったとみなす（GitLab では節を読まない。`[再チェック design-rules]`） |
 
 - `--merge` は `PUT merge_requests/:iid/merge` に判定した head の `sha` を付けて GitLab にマージさせる（head が動いていれば GitLab が 409 で断る）。`--merge-stack` は無い（exit 2）
 - ローカル CI（`bun scripts/local-ci.ts <iid>`）は GitLab の checkout では MR を回す: head は `refs/merge-requests/<iid>/head`（MR の sha と違えば止まる）、base は target の枝の先端。結果の報告（`verification`）は MR の note（`reportResult` の表の `gitlab`）

@@ -85,6 +85,8 @@ const gh: GhRunner = async (args, cwd) => {
     // the import's reads (#885)
     if (q.includes("issues(first:50")) return answer({ data: { repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [...github.values()].map(raw) } } } });
     if (q.includes("issues(first:100")) return answer({ data: { repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [...github.values()].filter((i) => i.state === "OPEN").map((i) => ({ number: i.number, projectItems: raw(i).projectItems })) }, pullRequests: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } });
+    // the open pull requests the import reads too: none
+    if (q.includes("pullRequests(first:50")) return answer({ data: { repository: { pullRequests: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } });
     // the sends' (#886)
     if (q.includes("issue(number:$n){ id title")) {
       const i = github.get(v.n)!;
@@ -688,6 +690,32 @@ if (MODE_BROWSER) {
     await press(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === '読み直す')`, "読み直す");
     await until(() => evaluate(`!!${editor(21)}`), "the editor opens after reading again");
     check("after a failed first read the editor can be read again without closing it", (await valueOf(`${editor(21)}.querySelector('input')`)).length > 0);
+
+    // 4l. an edit GitHub refused (failed, #2885): only its row offers 送り直す — not one whose result is unknown;
+    // pressed, the row goes and it waits to be sent
+    writesFail = "403";
+    check("the edit to be refused is kept", (await api("PATCH", "/api/backlog/21", { title: "要望: 断られた題" })).status === 202);
+    const refused = await until(() => core!.db.listPendingBacklogOperations().find((o) => o.field === "title" && o.payload === "要望: 断られた題" && o.status === "failed"), "GitHub refuses the edit", 45_000);
+    writesFail = null;
+    down = true;
+    check("a comment to be left unknown is kept", (await api("POST", "/api/backlog/21/comment", { text: "結果の分からないコメント" })).status === 202);
+    const unsure = await until(() => core!.db.listPendingBacklogOperations().find((o) => o.kind === "comment" && o.status === "pending" && JSON.stringify(o.payload).includes("結果の分からないコメント")), "the comment queued");
+    core!.db.setBacklogOperationResult(unsure.id, { status: "unknown", error: "送ったかどうか分からない" });
+    await open();
+    await openEditor(21);
+    const heldRows = `${editor(21)}.querySelectorAll('.backlog-held')`;
+    const retries = `[...${heldRows}].map(r => [r.dataset.field, [...r.querySelectorAll('button')].filter(b => b.textContent.trim() === '送り直す').length])`;
+    await until(async () => (await evaluate(`${heldRows}.length`)) === 2, "the failed and the unknown edits are held");
+    check("only the failed edit's row offers 送り直す, once; the unknown one none", JSON.stringify(await evaluate(retries)) === JSON.stringify([["title", 1], ["", 0]]), await evaluate(retries));
+    await shot("4l-failed");
+    await press(button(editor(21), "送り直す"), "送り直す #21");
+    await until(async () => (await evaluate(`${heldRows}.length`)) === 1, "the failed row is gone");
+    check("pressed: the note says it is sent again and the row is gone", (await text(editor(21))).includes("送り直します"), await text(editor(21)));
+    check("pressed: the edit is no longer held and waits to be sent", (await detail(21)).held.map((h) => h.operation).join() === unsure.id && core!.db.getBacklogOperation(refused.id)!.status === "pending", core!.db.getBacklogOperation(refused.id));
+    await until(async () => (await text(lineOf(21))).includes("送信待ち"), "the row says 送信待ち");
+    await shot("4l-retried");
+    core!.db.setBacklogOperationResult(unsure.id, { status: "done" });
+    down = false;
 
     // 5. a phone's width: the sync line, the open editor and the new Issue form (with two workspaces) do not run off the screen
     await call("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });

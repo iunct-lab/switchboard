@@ -24,7 +24,7 @@ Product Backlog を Priority 順に上から取るだけ）。
   - [ ] リポジトリの `owner/name`。`gh` の PR の書き込み（作成・コメント・編集・マージ・クローズ）に `-R <owner/name>` が要るか。
         要るなら、このスキル群の `gh` の書き込みには全部 `-R <owner/name>` を付ける（スキルの例では省いている）。Issue・Project は `ops-kit backlog` なので要らない
   - [ ] 共通キットを持つリポジトリの `owner/name`（そのリポジトリ自身なら不要。`request-to-backlog` の「どのリポジトリにも要る仕組み」の起票先）
-  - [ ] テストのコマンド（型検査、全体、1 件だけ）。変更の種類ごとのテストの型（単体 / E2E）
+  - [ ] テストのコマンド（型検査、関係するテスト（あれば）、全体、1 件だけ）。変更の種類ごとのテストの型（単体 / E2E）
   - [ ] worktree と枝の規則（worktree の場所、枝の名前）、作業ファイルの置き場
   - [ ] 画像の置き場（要望・PBI に貼るもの）
   - [ ] ランナーの利用上限の見方
@@ -333,6 +333,7 @@ ops-kit backlog set <num> Status Ready         # フィールドを 1 つだけ�
 ops-kit backlog triage <num> <area> <kind> <P0-P3> "Phase N" [<parent>] [<Status>]   # Project のフィールド + 親。親は Task のときだけ（PBI に親を付けない）。"Phase N" は ops.config.json に fields.phase があるリポジトリだけ
 #   注意: triage は毎回 5 フィールド全部を上書きする（Status を省くと Backlog）。Status だけ変えたいときは set を使う
 #   （未知の選択肢は、BACKLOG_URL が無ければ stderr に出すだけで exit 0 で進み、GitHub 連携の無い workspace では断られ、GitHub 同期の workspace では送信で失敗する）。親を飛ばすなら "" を渡す。例: ops-kit backlog triage 56 infra chore P1 "Phase 2" "" "In review"
+ops-kit backlog retry <num>   # GitHub が断った（failed）編集を、原因を直した後に送り直す
 ops-kit lint --fresh                           # 規約の検査（作った・書き直したら必ず。violations: 0 かつ exit 0 で合格）
 ```
 
@@ -344,7 +345,7 @@ ops-kit lint --fresh                           # 規約の検査（作った・�
 ```bash
 ops-kit pull-main                             # マージ後の main の作業ツリーを fast-forward（pulled / up to date / not pulled: <理由>。「pbi-complete」の 6）
 ops-kit scan-issues                           # Issue・コメントに認証の値が無いか（hits: 0 かつ exit 0。Public にする前の 1 回だけ。「Issue・PR・コメントに書かない値」）
-# マージ前の判定（CLAUDE.md のコマンド。exit 0 = merge / 1 = stop / 2 = 判定不能）。[再チェック] の理由は再チェックの印で外れ、--allow-large は利用者が認めたときだけ（pbi-complete の 5）
+# マージ前の判定（CLAUDE.md のコマンド。exit 0 = merge / 1 = stop / 2 = 判定不能）。[再チェック] の理由は再チェックの印で外れ、--allow-large は [merge-answer] yes の印が要る（pbi-complete の 5）
 <マージ判定> <PR> [--allow-large]
 ```
 

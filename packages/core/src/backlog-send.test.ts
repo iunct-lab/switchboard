@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BacklogIssueData, BacklogSource } from "@switchboard/protocol";
 import { Db } from "./db.ts";
-import { answerStoredDecision, commentStoredIssue, createStoredIssue, editStoredIssue, readStoredIssue, type GhRunner } from "./backlog.ts";
+import { answerStoredDecision, commentStoredIssue, createStoredIssue, editStoredIssue, readStoredIssue, retryStoredOperation, type GhRunner } from "./backlog.ts";
 import { forgeKind, Limit, sendGithubOperations, theirEdit } from "./backlog-send.ts";
 import { backlogFieldValue, conflictRevision } from "./backlog-merge.ts";
 import { BacklogSync } from "./backlog-sync.ts";
@@ -421,6 +421,49 @@ test("a create whose later step fails for good keeps the Issue it made: the reco
   expect(db.getBacklogRecord({ ...S, objectKind: "issue", externalId: made.node_id })?.remote).toMatchObject({ number: made.number });
   await send(g.gh);
   expect([...g.issues.values()].filter((i) => i.title === "選択肢の無い Status")).toHaveLength(1);
+});
+
+test("a failed create retried after its cause is put right (#2885): the Issue is not made twice, its Project item and fields are set and the edits after it are sent", async () => {
+  const g = fakeGithub();
+  const { localId } = createStoredIssue(db, S, { title: "Project に入れない PBI", body: "", labels: [], milestone: null, parent: null, fields: { Status: "Ready" } });
+  // the token cannot write the Project: the Issue is made, its Project item refused
+  g.fail.push({ match: (a) => a.some((x) => x.includes("addProjectV2ItemById")), status: 403 });
+  expect(await send(g.gh)).toBe(0);
+  const made = [...g.issues.values()].find((i) => i.title === "Project に入れない PBI")!;
+  expect(db.getBacklogOperation(localId)).toMatchObject({ status: "failed", remoteId: made.node_id });
+  // an edit after it waits behind the failed create
+  editStoredIssue(db, S, made.number, { title: "直した題" });
+  expect(await send(g.gh)).toBe(0);
+  expect(statuses()).toEqual([["create", null, "failed"], ["set", "title", "pending"]]);
+  expect(made.title).toBe("Project に入れない PBI");
+
+  // the cause put right, sent again
+  const issues = g.issues.size;
+  expect(retryStoredOperation(db, S, made.number, localId)).toEqual({ operation: localId });
+  expect(await send(g.gh)).toBe(2);
+  expect(g.issues.size).toBe(issues);
+  expect([...g.items.values()].filter((i) => i.issue === made.node_id)).toEqual([{ issue: made.node_id, fields: { Status: "Ready" } }]);
+  expect(made.title).toBe("直した題");
+  expect(statuses()).toEqual([]);
+});
+
+test("a retried operation refused again is failed with the new reason and not tried again by itself (#2885)", async () => {
+  const g = fakeGithub();
+  editStoredIssue(db, S, 12, { title: "書けない題" });
+  g.fail.push({ match: (a) => a.includes("PATCH"), status: 403, stderr: "HTTP 403: 最初の理由" });
+  expect(await send(g.gh)).toBe(0);
+  const id = db.listPendingBacklogOperations(S)[0]!.id;
+  expect(db.getBacklogOperation(id)).toMatchObject({ status: "failed", error: expect.stringContaining("最初の理由") });
+  retryStoredOperation(db, S, 12, id, t);
+  g.fail.push({ match: (a) => a.includes("PATCH"), status: 422, stderr: "HTTP 422: 次の理由" });
+  expect(await send(g.gh)).toBe(0);
+  expect(db.getBacklogOperation(id)).toMatchObject({ status: "failed", error: expect.stringContaining("次の理由") });
+  // not sent again without being asked to
+  g.writes.length = 0;
+  t += 24 * 3_600_000;
+  expect(await send(g.gh)).toBe(0);
+  expect(g.writes).toEqual([]);
+  expect(g.issues.get(12)!.title).toBe("PBI");
 });
 
 test("a permission refused on one thing fails that operation only; the login refused stops the run and says why", async () => {

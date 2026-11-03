@@ -125,7 +125,7 @@ describe("classify", () => {
     ["scripts/test-select.test.ts", "判定の道具自体"],
     ["rescue/src/fixture.ts", "テストの共通部品"],
     ["packages/core/fixtures/github-import.ts", "テストの共通部品"],
-    ["packages/adapters/dak/fixtures/fake-adk.ts", "テストの共通部品"],
+    ["packages/adapters/adk/fixtures/fake-adk.ts", "テストの共通部品"],
     ["packages/core/src/backlog-fake-github.ts", "テストの共通部品"],
     ["packages/core/src/policies-harness.ts", "テストの共通部品"],
     ["LICENSE", "分類できないファイル"],

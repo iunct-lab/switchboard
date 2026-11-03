@@ -68,6 +68,7 @@ export function importing(legacy: GhRunner, pulls: () => Json[] = () => []): GhR
   };
   return async (args, cwd) => {
     const q = args.find((a) => a.startsWith("query="))?.slice(6) ?? "";
+    if (q.includes("projectV2(number:$p){ id }")) return { code: 0, stdout: JSON.stringify({ data: { repositoryOwner: { projectV2: { id: "PVT_1" } } } }), stderr: "" };
     const page = (nodes: Json[], head: string) => ({ code: 0, stdout: head + JSON.stringify({ data: { repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } } } }), stderr: "" });
     if (q.includes("pullRequests(first:50, after:$after")) {
       const r = await ask(cwd, "issues(states:OPEN)");

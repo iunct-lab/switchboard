@@ -1,4 +1,4 @@
-import { recordingText, skipRecordings } from "../../../scripts/recordings.ts";
+import { assertRecordings, recordingText, skipRecordings } from "../../../scripts/recordings.ts";
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -81,6 +81,7 @@ describe("ruleMetrics (#1218)", () => {
   });
 
   test.skipIf(skipRecordings("packages/adapters/claude/fixtures/classifier-stop.jsonl", "packages/core/fixtures/otel-classifier-stop.jsonl"))("classifier (recorded): the recorded stop counts as stopped", () => {
+    assertRecordings("packages/adapters/claude/fixtures/classifier-stop.jsonl", "packages/core/fixtures/otel-classifier-stop.jsonl");
     const p = createClaudeParser();
     const stream = recordingText("packages/adapters/claude/fixtures/classifier-stop.jsonl").split("\n").flatMap((l) => p.feed(l));
     const otel = recordingText("packages/core/fixtures/otel-classifier-stop.jsonl").split("\n").filter(Boolean).flatMap((l) => decisionsFromOtlp(JSON.parse(l)));

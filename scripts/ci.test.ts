@@ -65,6 +65,7 @@ async function local(fail: string, code: number): Promise<{ results: Array<{ cod
       return { code: await p.exited, output: "" };
     },
     log: () => undefined,
+    slot: (_name, fn) => fn(),
   };
   const r = await localCi(42, "/repo", d, "example/development", join(ROOT, "cache"));
   return { results: r.results, ran: commands(log) };
@@ -79,14 +80,20 @@ describe("ci", () => {
     expect(results.map((r) => [r.name, r.code])).toEqual([["a", 0], ["b", 3]]);
     expect(ciExit(results)).toBe(1);
     expect(ciExit(await runCi(steps, async () => ({ code: 0 })))).toBe(0);
+    // a keepGoing step's failure does not stop the run, which still fails
+    const going = [{ name: "a", run: "a" }, { name: "b", run: "b", keepGoing: true }, { name: "c", run: "c" }];
+    const kept = await runCi(going, async (s) => ({ code: s.name === "b" ? 3 : 0 }));
+    expect(kept.map((r) => [r.name, r.code])).toEqual([["a", 0], ["b", 3], ["c", 0]]);
+    expect(ciExit(kept)).toBe(1);
   });
 
-  test("the steps: home paths, install, public tree check, licenses, typecheck, test, web build, then perf — in that order", () => {
+  test("the steps: home paths, install, public tree check, licenses, typecheck, web build, perf, then test — in that order; only the perf steps keep going", () => {
     const first = ciSteps.map((s) => s.run.split("\n")[0]!.trim());
-    const at = (cmd: string) => first.findIndex((r) => r.startsWith(cmd));
-    const order = ["rc=0; git grep", "bun install --frozen-lockfile", "bun ops-kit/src/cli.ts public-sync --check", "bun run licenses:check", "bun run typecheck", "bun test", "bun run --cwd apps/web build", "bun scripts/perf-bench.ts", "bun scripts/perf-ratchet.ts"].map(at);
+    const at = (cmd: string) => first.findIndex((r) => r === cmd || r.startsWith(`${cmd} `) || (cmd.endsWith(" ") && r.startsWith(cmd)));
+    const order = ["rc=0; git grep ", "bun install --frozen-lockfile", "bun ops-kit/src/cli.ts public-sync --check", "bun run licenses:check", "bun run typecheck", "bun run --cwd apps/web build", "bun scripts/perf-ratchet.ts base ", "bun scripts/perf-bench.ts", "bun scripts/perf-ratchet.ts check ", "bun test"].map(at);
     expect(order.every((i) => i >= 0)).toBe(true);
     expect(order).toEqual([...order].sort((a, b) => a - b));
+    expect(ciSteps.filter((s) => s.keepGoing).map((s) => s.run.split(" ").slice(1, 3).join(" "))).toEqual(["scripts/perf-ratchet.ts base", "scripts/perf-bench.ts --runs", "scripts/perf-ratchet.ts check"]);
   });
 
   test("the home-path step does not find itself in this file", async () => {
@@ -121,9 +128,23 @@ describe("ci", () => {
       // local-ci's process exits ciExit(results), as its CLI does
       expect(ciExit(l.results)).toBe(a.exit);
       expect(a.exit).toBe(code ? 1 : 0);
-      if (code) expect([a.ran.at(-1), l.results.at(-1)!.code]).toEqual([fail, code]);
+      // a step that does not keep going is the last that ran; the failed step's code is kept
+      if (code) expect(l.results.find((r) => r.code !== 0)!.code).toBe(code);
+      if (code && !fail.includes("perf-")) expect(a.ran.at(-1)).toBe(fail);
     }
     // every step ran when none failed
     expect((await local("bun none", 0)).results.length).toBe(ciSteps.length);
+  }, 60_000);
+
+  test("a failing perf step does not stop bun test: both run, both are in the results, exit 1 (Actions and local-ci alike)", async () => {
+    const check = "bun scripts/perf-ratchet.ts check perf-result.json --base perf-base.json";
+    const a = await actions(check, 1);
+    const l = await local(check, 1);
+    expect(l.ran).toEqual(a.ran);
+    expect(a.ran.indexOf(check)).toBeLessThan(a.ran.indexOf("bun test"));
+    expect(a.ran.at(-1)).toBe("bun test");
+    expect(l.results.length).toBe(ciSteps.length);
+    expect(l.results.filter((r) => r.code !== 0).map((r) => r.code)).toEqual([1]);
+    expect([a.exit, ciExit(l.results)]).toEqual([1, 1]);
   }, 60_000);
 });

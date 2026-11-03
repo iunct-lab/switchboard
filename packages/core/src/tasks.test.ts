@@ -123,6 +123,34 @@ describe("a turn the runner starts on its own", () => {
   });
 });
 
+describe("repeated thinking status", () => {
+  const statuses = (id: string) => db.listEvents(id).map((e) => e.ev).filter((ev) => ev.t === "status");
+
+  test("consecutive thinking status is recorded once", async () => {
+    const t = await finishedTask();
+    const fake = fakes[0]!;
+    fake.emit({ t: "session.start", runner: "claude", runnerSessionId: "s", cwd: "/" });
+    fake.emit({ t: "status", text: "permission mode → plan" });
+    for (let i = 0; i < 100; i++) fake.emit({ t: "status", text: "thinking" });
+    expect(statuses(t.id).filter((ev) => ev.text === "thinking")).toHaveLength(1);
+    const before = db.listEvents(t.id).map((e) => e.ev);
+    expect(before.filter((ev) => ev.t === "status").at(-1)).toEqual({ t: "status", text: "thinking" });
+    fake.emit({ t: "message.delta", role: "assistant", text: "答え" });
+    for (let i = 0; i < 3; i++) fake.emit({ t: "status", text: "thinking" });
+    fake.emit({ t: "session.end", status: "ok" });
+    expect(statuses(t.id).filter((ev) => ev.text === "thinking")).toHaveLength(2);
+  });
+
+  test("other repeated status texts are all recorded", async () => {
+    const t = await finishedTask();
+    const fake = fakes[0]!;
+    fake.emit({ t: "session.start", runner: "claude", runnerSessionId: "s", cwd: "/" });
+    fake.emit({ t: "status", text: "使用上限で止まりました" });
+    fake.emit({ t: "status", text: "使用上限で止まりました" });
+    expect(statuses(t.id).filter((ev) => ev.text === "使用上限で止まりました")).toHaveLength(2);
+  });
+});
+
 describe("background work", () => {
   test("background work left after the turn keeps the process; the last job gone starts the idle clock", async () => {
     const t = await finishedTask();

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appSync, BacklogUnknown, readRecords, runBacklog } from "./backlog-client.ts";
+import { appSync, BacklogUnknown, readRecords, runBacklog, syncedRepositories } from "./backlog-client.ts";
 
 // `ops-kit backlog` (#918) against a fake app: what it sends, and the exit it gives for each answer. The real app's
 // routes are checked in packages/core/src/backlog.test.ts ("ops-kit backlog …").
@@ -244,4 +244,59 @@ test("appSync: the repository's workspace, null when the list does not have it; 
   for (const status of [401, 404, 500]) await expect(appSync(env, { repo: "acme/app", fetch: answering(status, {}) })).rejects.toBeInstanceOf(BacklogUnknown);
   const down = (async () => { throw new Error("ECONNREFUSED"); }) as unknown as typeof fetch;
   await expect(appSync(env, { repo: "acme/app", fetch: down })).rejects.toBeInstanceOf(BacklogUnknown);
+});
+
+test("syncedRepositories: the GitHub repositories the app syncs, with their workspace; null when the app cannot be asked (#3073)", async () => {
+  const list = { syncs: [{ ...SYNC, backlog: "github" }, { ...SYNC, workspaceId: "ws2", backlog: "github", repository: "acme/other" }, { ...SYNC, workspaceId: "ws3", backlog: "local", repository: null }, { ...SYNC, workspaceId: "ws4", backlog: "github", repository: null }], items: [] };
+  const env = { BACKLOG_URL: "http://app/api/backlog" };
+  expect(await syncedRepositories(env, app(() => ({ body: list })).fetch)).toEqual([{ repository: "acme/app", workspaceId: "ws1" }, { repository: "acme/other", workspaceId: "ws2" }]);
+  expect(await syncedRepositories(env, app(() => "down").fetch)).toBeNull();
+  expect(await syncedRepositories(env, app(() => ({ status: 500, body: { error: "x" } })).fetch)).toBeNull();
+  expect(await syncedRepositories({}, app(() => ({ body: list })).fetch)).toBeNull();
+  // the guard does not wait for an app that holds the answer: its own short limit, not the 120 s of a backlog command
+  const hang = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Promise<Response>(() => {}) });
+  try {
+    const started = Date.now();
+    expect(await syncedRepositories({ BACKLOG_URL: `http://127.0.0.1:${hang.port}/api/backlog` })).toBeNull();
+    expect(Date.now() - started).toBeLessThan(10_000);
+  } finally {
+    hang.stop(true);
+  }
+}, 15_000);
+
+test("view shows held edits with why; retry sends every failed one of the Issue and refuses when none is failed (#2885)", async () => {
+  const held = [
+    { operation: "op-create", kind: "create", field: null, status: "failed", reason: "HTTP 403: read:project" },
+    { operation: "op-title", kind: "set", field: "title", status: "conflict", reason: "GitHub で変わった" },
+    { operation: "op-note", kind: "comment", field: null, status: "unknown", reason: null },
+    { operation: "op-status", kind: "set", field: "field:Status", status: "failed", reason: "HTTP 403" },
+  ];
+  const detail = (h: unknown[]) => ({ issue: { number: 3, title: "PBI 3", state: "OPEN", labels: [], milestone: null, parent: null, subIssues: [], body: "本文", url: "" }, comments: [], fields: null, fetchedAt: 1, localId: null, pending: 4, held: h, sync: { state: "failed", reason: null, lastSuccessfulSync: 1 } });
+  const fake = (h: unknown[]) => app(routes((m, p) => (m === "GET" && p.startsWith("/3?") ? { body: detail(h) } : m === "PATCH" ? { status: 202, body: { operation: "x" } } : { status: 404, body: { error: "no" } })));
+
+  const view = await run(["view", "3"], fake(held));
+  expect(view.code).toBe(0);
+  expect(view.out.split("\n").filter((l) => l.startsWith("保留: "))).toEqual(["保留: 新規作成 失敗（HTTP 403: read:project）", "保留: title 競合（GitHub で変わった）", "保留: コメント 結果不明", "保留: field:Status 失敗（HTTP 403）"]);
+
+  const retried = await run(["retry", "#3"], fake(held));
+  expect(retried).toMatchObject({ code: 0, out: "#3 の失敗した編集 2 件を送り直します" });
+  expect(retried.calls.filter((c) => c.method === "PATCH").map((c) => [c.path, c.body])).toEqual([
+    ["/3", { workspaceId: "ws1", retry: { operation: "op-create" } }],
+    ["/3", { workspaceId: "ws1", retry: { operation: "op-status" } }],
+  ]);
+
+  // the second refused: the first stays put back, and that is said with the refusal
+  let n = 0;
+  const half = app(routes((m, p) => (m === "GET" && p.startsWith("/3?") ? { body: detail(held) } : m === "PATCH" ? (n++ ? { status: 409, body: { error: "この操作は失敗で保留されていません" } } : { status: 202, body: {} }) : { status: 404, body: {} })));
+  expect(await run(["retry", "3"], half)).toMatchObject({ code: 1, out: "#3 の失敗した編集 2 件のうち 1 件を送り直します。残りは止まりました", err: "backlog: 409 この操作は失敗で保留されていません" });
+
+  // nothing failed (a conflict and an unknown are not sent again): refused, nothing sent
+  const none = await run(["retry", "3"], fake(held.filter((h) => h.status !== "failed")));
+  expect(none).toMatchObject({ code: 1, err: "#3 に失敗で保留中の編集はありません" });
+  expect(none.calls.filter((c) => c.method === "PATCH")).toEqual([]);
+  expect((await run(["retry"], fake(held))).code).toBe(1);
+  // outside the app's Task there is nothing kept to send again
+  const err: string[] = [];
+  const direct = await runBacklog(["retry", "3"], { GH_REPO: "acme/app" }, { out: () => {}, err: (s) => err.push(s) }, { gh: {} as never });
+  expect([direct, err]).toEqual([1, ["retry はアプリの Task の中だけ（BACKLOG_URL が無いので送り直すものがありません）"]]);
 });

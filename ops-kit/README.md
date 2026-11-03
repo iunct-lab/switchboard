@@ -32,6 +32,7 @@ GitHub の Issue と Project で回す開発の流れ（要望 → PBI → Task 
 | `scan-issues [<owner/name>] [--since <ISO>] [--recheck <URL>]...` | リポジトリの Issue・PR・コメントを全部（`--since` ならその時刻より後の更新だけと、`--recheck` の前回の当たり）、同じ検査に通す | 要らない |
 | `public-sync [--source <ref>] [--dry-run] [--adopted] [--target-url <url>]` / `public-sync --check [--source <ref>]` | main のツリーだけを公開リポジトリへ送る。`--check` は送らずに、公開に出すツリーの検査だけを CI で走らせる（下の「公開リポジトリへの同期」） | 要る（`publicSync` だけ） |
 | `export-copy <dest> --words-file <file>` | キットを読めないリポジトリが同梱するコピーを作る（下の「公開リポジトリ」） | 要らない |
+| `heavy [--name <名前>] -- <コマンド…>` | 重い処理の枠をマシンで 1 つ取ってからコマンドを動かす。枠が埋まっている・空きメモリが下限未満の間は待ち、理由を 1 行出す。上限は `~/.config/ops-kit/heavy.json`（既定 `max` 1・`minFreeMb` 1536） | 要らない |
 
 ## 使う側の設定（`ops.config.json`）
 
@@ -91,6 +92,19 @@ exec bun "${OPS_KIT:-$R/ops-kit}/src/cli.ts" lint --config "$R/ops.config.json" 
 ```
 
 `OPS_KIT` はキットの場所（既定はリポジトリの中の `ops-kit/`。キットを持つリポジトリの外から使うならそのチェックアウトの `ops-kit`、公開リポジトリなら同梱したコピー）。`set` / `triage` / `bootstrap` / `request` も同じ形。
+
+## 重い処理の枠
+
+重い処理（ローカル CI、全テスト・型検査、偽ランナーのデーモン + headless Chrome、レビューのセッション）は、`ops-kit heavy [--name <名前>] -- <コマンド…>` で包んで始める。マシンの枠が空いていて空きメモリが下限以上のときだけコマンドを動かし、そうでなければ待つ。待つ間は理由（枠を持っているコマンド・作業フォルダ・開始時刻、または空きメモリと下限）を stderr に 1 行出し（理由が変わるたびに 1 行）、待ったあとで始めるときは「始めます」を出す。エラーにはしない。exit はコマンドの exit。
+
+- **上限はマシンの値**: `~/.config/ops-kit/heavy.json` の `{ "max": 1, "minFreeMb": 1536 }`（どちらも省略でき、ファイルが無ければこの既定）。`max` は同時に走る重い処理の数、`minFreeMb` は始める前に要る空きメモリ（Linux の MemAvailable、MB。読めない OS では数だけで決める）。リポジトリ（`ops.config.json`）にも環境変数にも置かない。リポジトリごとに書くと、マシン 1 つの数にならない
+- **枠はマシンで 1 つ**: `~/.local/state/ops-kit/heavy/` の `slot-<i>.json`。どのリポジトリ・作業ツリー・Task から呼んでも同じ枠を取り合う。持ち主が死んだ枠（`kill -9`、Task の中断、デーモンの停止）は次に待つ処理が取り直す
+- **大きいマシンでの上げ方**: 設定ファイルを書くだけ（コードもリポジトリも変えない）。例: 16 GB のマシンで `{ "max": 3 }`。4 GB 程度なら既定の 1 のまま
+- **置き場に書けないとき**: サンドボックスで書けない Task（Codex の Task など）では「枠を取らずに動かします」を 1 行出して、待たずに動く（作業を止めない）。Task を動かすアプリが置き場をその Task の書ける場所に足していれば、ほかと同じ数に入る
+
+**足し方**: 手で打つ重い処理のコマンドを `ops-kit heavy --name "<何か>" -- …` で包む（スキル・`CLAUDE.md` のコマンドの行）。ほかの包み（`ops-kit idle-run` など）があれば `ops-kit heavy` をいちばん外にする（枠を待つ間を無進捗と数えない）。1 回の実行全体で枠を持つスクリプト（ローカル CI・タグの CI）が回す手順（CI の手順・`package.json` の scripts）の中には入れない（自分の枠を待ち続ける）。
+
+**通さないもの**: Task そのものの数（Task を動かすアプリの上限）、ホストの外で動く処理（別のコンテナのレビュアーへの `curl`、ホストの外の docker の build）。
 
 ## スキルの導入
 

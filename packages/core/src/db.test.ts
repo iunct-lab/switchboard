@@ -966,3 +966,34 @@ test("listPendingBacklogOperations uses the backlog_operations_open index (#3080
   expect(plan.map((p) => p.detail).join("\n")).toContain("USING INDEX backlog_operations_open");
   db.close();
 });
+
+test("repeated thinking status is folded once at open (#2738)", () => {
+  const path = join(dir, "db.sqlite");
+  const thinking = { t: "status", text: "thinking" } as const;
+  const d = new Db(path);
+  for (let i = 0; i < 5; i++) d.appendEvent("a", thinking);
+  d.appendEvent("a", { t: "message.delta", role: "assistant", text: "答え" });
+  for (let i = 0; i < 3; i++) d.appendEvent("a", thinking);
+  d.appendEvent("b", thinking);
+  d.appendEvent("b", thinking);
+  d.appendEvent("b", { t: "status", text: "使用上限で止まりました" });
+  d.appendEvent("b", { t: "status", text: "使用上限で止まりました" });
+  d.close();
+  // from before this migration
+  const old = new Database(path);
+  old.exec("PRAGMA user_version = 1");
+  old.close();
+  const kinds = (db: Db, id: string) => db.listEvents(id).map((e) => (e.ev.t === "status" ? e.ev.text : e.ev.t));
+  const again = new Db(path);
+  expect(kinds(again, "a")).toEqual(["thinking", "message.delta", "thinking"]);
+  expect(kinds(again, "b")).toEqual(["thinking", "使用上限で止まりました", "使用上限で止まりました"]);
+  // the task's last row stays: its last seq and ts do not move
+  expect(again.listEvents("a").at(-1)!.seq).toBe(9);
+  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2);
+  // once: a run written after it (an old daemon's copy restored, say) is not read again at the next open
+  again.appendEvent("a", thinking);
+  again.close();
+  const third = new Db(path);
+  expect(kinds(third, "a")).toEqual(["thinking", "message.delta", "thinking", "thinking"]);
+  third.close();
+});

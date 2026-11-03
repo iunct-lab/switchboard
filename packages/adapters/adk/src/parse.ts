@@ -2,8 +2,10 @@ import { readFileSync } from "node:fs";
 import type { AgentEvent, Attachment } from "@switchboard/protocol";
 
 /**
- * Pure mapping from Google ADK `POST /run_sse` events (as served by DAK's agent container, `adk web --a2a`) to
- * AgentEvent. Recorded against google-adk 2.x behind DAK @ e966c05 (fixtures in ../fixtures):
+ * Pure mapping from Google ADK `POST /run_sse` events (`adk api_server`, or DAK's agent container, `adk web --a2a`) to
+ * AgentEvent. Recorded against google-adk 2.x behind DAK @ e966c05: text, tool calls, usage and attachments. Those
+ * recordings hold no confirmation and no artifact handed to the person, so those two branches are tested only against
+ * ../fixtures/fake-adk.ts:
  *  - event.content.parts[].text (partial, not thought)   → message.delta (assistant), messageId = invocationId:segment
  *  - parts[].text with thought: true                      → status "thinking" (content not shown)
  *  - final (partial: false) event                         → text only if nothing streamed for the current segment
@@ -15,7 +17,7 @@ import type { AgentEvent, Attachment } from "@switchboard/protocol";
  *  - usageMetadata on final events                        → usage(turn) per model call; summed into usage(reported) at end
  *  - errorCode / errorMessage                             → error
  */
-export interface DakParserState {
+export interface AdkParserState {
   invocationId?: string;
   /**
    * ADK keeps one invocationId for a whole turn even across several tool calls, so "did this invocation already
@@ -36,7 +38,7 @@ export interface DakParserState {
   errored?: string;
 }
 
-export function createDakParserState(): DakParserState {
+export function createAdkParserState(): AdkParserState {
   return { segment: 0, segmentStreamed: false, turnUsage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, confirmations: new Map() };
 }
 
@@ -44,7 +46,7 @@ export function createDakParserState(): DakParserState {
 type Any = any;
 
 /** Feed one SSE `data:` payload (already JSON-decoded). */
-export function mapAdkEvent(ev: Any, s: DakParserState): AgentEvent[] {
+export function mapAdkEvent(ev: Any, s: AdkParserState): AgentEvent[] {
   const out: AgentEvent[] = [];
   if (!ev || typeof ev !== "object") return out;
   if (typeof ev.invocationId === "string") s.invocationId = ev.invocationId;
@@ -78,7 +80,7 @@ export function mapAdkEvent(ev: Any, s: DakParserState): AgentEvent[] {
       const fc = p.functionCall;
       const id = String(fc.id ?? `${inv}:${fc.name}`);
       if (fc.name === "adk_request_confirmation") {
-        // DAK's explicit confirmation tool: the agent asks before running `originalFunctionCall`.
+        // ADK's explicit confirmation tool: the agent asks before running `originalFunctionCall`.
         const orig = fc.args?.originalFunctionCall ?? {};
         const name = String(orig.name ?? "tool");
         s.confirmations.set(id, { name, args: orig.args });
@@ -103,8 +105,8 @@ export function mapAdkEvent(ev: Any, s: DakParserState): AgentEvent[] {
   }
   // ADK-native confirmations that were not matched to a functionCall in this event still need an ask. The
   // confirmation payload itself has not been observed to carry a tool name in any recording; best-effort probe a
-  // few likely keys before giving up (this branch has no real fixture — only DAK's own adk_request_confirmation
-  // wrapper has been recorded — so treat the exact shape as unconfirmed).
+  // few likely keys before giving up (no recording holds a confirmation of either form, so treat the exact shape as
+  // unconfirmed).
   for (const [id, c] of Object.entries(confirmations)) {
     if (s.confirmations.has(id)) continue;
     const name = str(c?.toolName) ?? str(c?.tool) ?? str(c?.name) ?? str(c?.payload?.name) ?? "tool";
@@ -126,7 +128,7 @@ export function mapAdkEvent(ev: Any, s: DakParserState): AgentEvent[] {
 }
 
 /** The stream closed: report the turn's usage and end the session (unless a confirmation is still open — then the turn waits). */
-export function endOfStream(s: DakParserState, status: "ok" | "error" | "aborted" = s.errored ? "error" : "ok"): AgentEvent[] {
+export function endOfStream(s: AdkParserState, status: "ok" | "error" | "aborted" = s.errored ? "error" : "ok"): AgentEvent[] {
   const out: AgentEvent[] = [];
   const u = s.turnUsage;
   if (u.inputTokens || u.outputTokens || u.cacheReadTokens) out.push({ t: "usage", source: "reported", model: s.model, ...u, costUsd: undefined });
@@ -216,7 +218,7 @@ export function userMessage(app: string, user: string, session: string, text: st
 
 /**
  * Attachments (#124) as message parts, one each: text files (text/*, JSON, YAML, SVG) as a text part headed by the
- * file name, everything else (images, PDF, …) as `inline_data` — DAK runs in a container and cannot open the paths in
+ * file name, everything else (images, PDF, …) as `inline_data` — the agent may run elsewhere and cannot open the paths in
  * the prompt. Reads the files now: a file that cannot be read throws here, before the turn is said or sent.
  */
 export function attachmentParts(attachments: Attachment[] = []): unknown[] {
@@ -227,7 +229,7 @@ export function attachmentParts(attachments: Attachment[] = []): unknown[] {
   });
 }
 
-/** Answer a confirmation the way DAK's CLI does: a functionResponse for `adk_request_confirmation` with `confirmed`. */
+/** Answer a confirmation the way ADK expects (and DAK's CLI does): a functionResponse for `adk_request_confirmation` with `confirmed`. */
 export function confirmationMessage(app: string, user: string, session: string, callId: string, confirmed: boolean, invocationId?: string): unknown {
   return {
     app_name: app,

@@ -9,6 +9,7 @@ apps/web/dist/
 packages/core/data/
 *.tsbuildinfo
 perf-result.json
+perf-base.json
 
 # Execution recordings and copies of real data live outside Git.
 packages/adapters/*/fixtures/*.jsonl

@@ -2,9 +2,11 @@
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { ciSteps } from "./ci";
-import { checkoutSteps, failLines, failureSummary, perfSteps, LOCAL_CI_RESULT, localCi, markerSeconds, notify, patchIdOf, perfVerdict, stackBelow, stackLine, stackOf, stackTested, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, SHARED_ENTRY, stepEnv, stepSeconds, stepWithIdle, TargetError, type Deps, type LocalCiResult } from "./local-ci";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { ciExit, ciSteps } from "./ci";
+import { withHeavySlot } from "../ops-kit/src/heavy";
+import { RECORDS_HEADER } from "./perf-ratchet";
+import { checkoutSteps, DURATION_STEP, recordBundle, existingPass, failLines, failureSummary, perfSteps, LOCAL_CI_RESULT, localCi, mainFork, markerSeconds, narrowTestStep, notify, perfVerdict, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepSeconds, stepWithIdle, TargetError, testsOf, type Deps, type LocalCiResult } from "./local-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
 const ciTs = await Bun.file(new URL("./ci.ts", import.meta.url)).text();
@@ -15,7 +17,6 @@ const passOf = (body: string) => {
 };
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const BASE = "3333333333333333333333333333333333333333";
-const PID = "5555555555555555555555555555555555555555";
 // local-ci's worktrees and failure logs: never the real ~/.cache (a failure removes that PR's earlier logs)
 const CACHE = mkdtempSync(join(tmpdir(), "sb-local-ci-test-"));
 afterAll(() => rmSync(CACHE, { recursive: true, force: true }));
@@ -28,8 +29,8 @@ describe("local-ci", () => {
     expect(runs).toContain("bun test");
     expect(runs).toContain("bun run typecheck");
     expect(runs).toContain("bun run --cwd apps/web build");
-    // the perf ratchet (#638) runs on the build, last
-    expect(runs.slice(-2)).toEqual(["bun scripts/perf-bench.ts --runs 5 --json perf-result.json", "bun scripts/perf-ratchet.ts check perf-result.json || { cat perf-result.json; exit 1; }"]);
+    // the perf ratchet (#638) runs on the build, then bun test last (#2945)
+    expect(runs.slice(-3)).toEqual(["bun scripts/perf-bench.ts --runs 5 --json perf-result.json", "bun scripts/perf-ratchet.ts check perf-result.json --base perf-base.json || { cat perf-result.json; exit 1; }", "bun test"]);
   });
 
   /**
@@ -37,7 +38,7 @@ describe("local-ci", () => {
    * `pullHead`: what refs/pull/<n>/head holds (none = the head the PR named last). `o.heads` / `o.bases`: what the PR names as its head and what the base
    * branch's tip is, one per read (the last repeats). `o.conflict`: the merge stops on a conflict; `o.mergeError`: it fails otherwise.
    */
-  const deps = (failAt?: string, pullHead?: string, failOutput = "1 fail", base: Record<string, { code: number; output: string }> = {}, throwOnBase = false, o: { heads?: string[]; bases?: string[]; conflict?: boolean; mergeError?: boolean; noCiTs?: boolean } = {}) => {
+  const deps = (failAt?: string, pullHead?: string, failOutput = "1 fail", base: Record<string, { code: number; output: string }> = {}, throwOnBase = false, o: { heads?: string[]; bases?: string[]; conflict?: boolean; mergeError?: boolean; noCiTs?: boolean; budget?: unknown; select?: string } = {}) => {
     const next = (xs: string[]) => (xs.length > 1 ? xs.shift()! : xs[0]!);
     const heads = [...(o.heads ?? [SHA])];
     const bases = [...(o.bases ?? [BASE])];
@@ -50,11 +51,8 @@ describe("local-ci", () => {
     const d: Deps = {
       sh: async (cmd) => {
         calls.push(cmd);
-        // the stack line's reads (#2950): a PR on main alone, its diff's patch-id
-        if (cmd[0] === "gh" && cmd[1] === "repo") return "main\n";
-        if (cmd[0] === "gh" && cmd.at(-1) === "headRefOid") return JSON.stringify({ headRefOid: SHA });
-        if (cmd[0] === "gh" && cmd.at(-1) === "baseRefName,headRefOid") return JSON.stringify({ baseRefName: "main", headRefOid: SHA });
-        if (cmd[0] === "bash") return `${PID} 0000000000000000000000000000000000000000\n`;
+        if (cmd[0] === "env") return o.select ?? "";
+        if (cmd.includes("merge-base")) return "f".repeat(40) + "\n";
         if (cmd[0] === "gh") return JSON.stringify({ headRefOid: (named = next(heads)), baseRefName: "main" });
         if (cmd.includes("fetch")) fetched = cmd.at(-1)!;
         if (cmd.includes("rev-parse")) return `${fetched.startsWith("refs/heads/") ? next(bases) : (pullHead ?? named)}\n`;
@@ -66,6 +64,8 @@ describe("local-ci", () => {
           const dir = cmd[cmd.indexOf("--detach") + 1]!;
           await Bun.write(`${dir}/.github/workflows/ci.yml`, o.noCiTs ? ciYml.replace(SHARED_ENTRY, "make check") : ciYml);
           if (!o.noCiTs) await Bun.write(`${dir}/scripts/ci.ts`, ciTs);
+          if (o.budget) await Bun.write(`${dir}/scripts/perf-budget.json`, JSON.stringify(o.budget));
+          if (o.select !== undefined) await Bun.write(`${dir}/scripts/test-select.ts`, "");
         }
         return "";
       },
@@ -79,12 +79,109 @@ describe("local-ci", () => {
           return b;
         }
         if (script.includes("perf-bench.ts") && script.trim() !== failAt) await Bun.write(join(cwd, "perf-result.json"), '{"runs":5}');
-        return failAt && script.trim() === failAt ? { code: 1, output: failOutput } : { code: 0, output: "ok" };
+        if (failAt && script.trim() === failAt) return { code: 1, output: failOutput };
+        // the check reads the bench's result, as the real one does: none after a failed bench
+        if (script.includes("perf-ratchet.ts check") && !existsSync(join(cwd, "perf-result.json"))) return { code: 1, output: "ENOENT: no such file or directory, open 'perf-result.json'" };
+        return { code: 0, output: "ok" };
       },
       log: (l) => void logged.push(l),
+      slot: (_name, fn) => fn(),
     };
     return { d, calls, ran, envs, logged };
   };
+
+  describe("the narrowed bun test (#3297)", () => {
+    const opts = (select: string) => [undefined, undefined, "1 fail", {}, false, { select }] as const;
+    const tests = (ran: string[]) => ran.filter((r) => r.startsWith("bun test") || r.startsWith('echo "no test'));
+
+    test("a selection runs those files as exact paths; the step keeps its name and the seconds line", async () => {
+      const { d, ran, calls } = deps(...opts("selected: 2\na.test.ts  a.ts → a.test.ts\nscripts/it's.test.ts  x"));
+      const r = await localCi(42, "/repo", d, "example/development", CACHE);
+      // the change since the fork from the default branch, not since the base branch: a stacked PR's base is the PR below
+      expect(calls.find((c) => c.includes("diff") && c.includes("--no-renames"))!.at(-1)).toBe("f".repeat(40));
+      expect(tests(ran)).toEqual(["bun test './a.test.ts' './scripts/it'\\''s.test.ts'"]);
+      expect(r.selection).toMatchObject({ files: ["a.test.ts", "scripts/it's.test.ts"] });
+      expect(r.seconds?.test).toBeNumber();
+      expect(r.results.find((x) => x.run.startsWith("bun test"))!.name).toBe("bun test");
+    });
+
+    test("no test selected: an echo in its place, the step stays", async () => {
+      const { d, ran } = deps(...opts("selected: 0"));
+      await localCi(42, "/repo", d, "example/development", CACHE);
+      expect(tests(ran)).toEqual(['echo "no test files selected"']);
+    });
+
+    test("a `full:` selection runs every test and keeps why", async () => {
+      const { d, ran } = deps(...opts("full: bun.lock: 依存の定義や設定\na.test.ts  全テスト"));
+      const r = await localCi(42, "/repo", d, "example/development", CACHE);
+      expect(tests(ran)).toEqual(["bun test"]);
+      expect(r.selection).toMatchObject({ files: null, reason: "bun.lock: 依存の定義や設定" });
+    });
+
+    test("`all` never asks the selection and runs every test", async () => {
+      const { d, ran, calls } = deps(...opts("selected: 0"));
+      const r = await localCi(42, "/repo", d, "example/development", CACHE, { all: true });
+      expect(tests(ran)).toEqual(["bun test"]);
+      expect(r.selection).toBeUndefined();
+      expect(calls.some((c) => c[0] === "env")).toBe(false);
+    });
+
+    test("an output it cannot read, a failing tool or no tool: every test, with the reason", async () => {
+      const dir = mkdtempSync(join(CACHE, "select-"));
+      const ls = "a.test.ts\nb.ts\nweb/c.test.tsx\n";
+      const logged: string[] = [];
+      const fake = (tool: () => string): Pick<Deps, "sh" | "log"> => ({ sh: async (c) => (c[0] === "env" ? tool() : c.includes("ls-files") ? ls : "a.ts\0"), log: (l) => void logged.push(l) });
+      const failed = { files: null, reason: "選択を実行できなかった（実行したホストのログを見る）" };
+      const base = async () => BASE;
+      expect(await selectTests(dir, base, {}, fake(() => ""))).toEqual({ files: null, total: 2, reason: "scripts/test-select.ts が無い", unjudged: true });
+      mkdirSync(join(dir, "scripts"));
+      writeFileSync(join(dir, "scripts/test-select.ts"), "");
+      expect(await selectTests(dir, base, {}, fake(() => "selected: 3\na.test.ts  x"))).toMatchObject(failed);
+      expect(await selectTests(dir, base, {}, fake(() => { throw new Error("env -i PATH=/home/u/bin failed: x\ny"); }))).toMatchObject(failed);
+      expect(await selectTests(dir, () => Promise.reject(new Error("no main")), {}, fake(() => "selected: 0"))).toMatchObject(failed);
+      expect(logged).toEqual(["テストの選択に失敗: 出力を読めない: selected: 3", "テストの選択に失敗: env -i PATH=/home/u/bin failed: x\ny", "テストの選択に失敗: no main"]);
+      expect(await selectTests(dir, base, {}, fake(() => `full: 依存を読めない: ${dir}/a.ts: x`))).toMatchObject({ reason: "依存を読めない: <checkout>/a.ts: x" });
+      expect(await selectTests(dir, base, {}, fake(() => "selected: 1\na.test.ts  x"))).toEqual({ files: ["a.test.ts"], total: 2, reason: "変更 1 ファイルから選んだ" });
+    });
+
+    test("a stack: a file only the PR below touched reaches the selection, with a rename's both paths", async () => {
+      const dir = mkdtempSync(join(CACHE, "stack-"));
+      const git = (...a: string[]) => realSh(["git", "-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", ...a]);
+      await git("init", "-q", "-b", "main");
+      await git("remote", "add", "origin", dir);
+      writeFileSync(join(dir, "old.ts"), "0\n".repeat(40));
+      await git("add", ".");
+      await git("commit", "-qm", "main");
+      await git("checkout", "-qb", "lower");
+      writeFileSync(join(dir, "lower.ts"), "1\n");
+      await git("mv", "old.ts", "new.ts");
+      await git("add", ".");
+      await git("commit", "-qm", "lower");
+      await git("checkout", "-qb", "top");
+      writeFileSync(join(dir, "top.ts"), "2\n");
+      await git("add", ".");
+      await git("commit", "-qm", "top");
+      // what localCi does: the head merged into its base, here the branch below
+      await git("checkout", "-q", "lower");
+      await git("merge", "-q", "--no-ff", "--no-edit", "top");
+      mkdirSync(join(dir, "scripts"));
+      writeFileSync(join(dir, "scripts/test-select.ts"), "");
+      let args: string[] = [];
+      const sh: Deps["sh"] = async (c, cwd) => {
+        if (c[0] === "gh") return "main\n";
+        if (c[0] !== "env") return realSh(c, cwd);
+        args = c.slice(c.indexOf("scripts/test-select.ts") + 1);
+        expect(cwd).toBe(dir);
+        return "selected: 0";
+      };
+      await selectTests(dir, () => mainFork(dir, "o/r", sh), { PATH: "/p" }, { sh, log: () => undefined });
+      expect(args.sort()).toEqual(["lower.ts", "new.ts", "old.ts", "top.ts"]);
+    });
+
+    test("narrowTestStep: another CI without bun test is an error, not a silent full run", () => {
+      expect(() => narrowTestStep([{ name: "x", run: "make" }], ["a.test.ts"])).toThrow("`bun test`");
+    });
+  });
 
   test("every step green → ok with the head sha; the worktree is removed", async () => {
     const { d, calls, ran, envs } = deps();
@@ -113,7 +210,7 @@ describe("local-ci", () => {
     expect(markerSeconds(resultComment(r))).toBeUndefined();
   });
 
-  test("step seconds in pass marker: the type check's and bun test's seconds on the line after the stack line, read back by markerSeconds (#1886)", async () => {
+  test("step seconds in pass marker: the type check's and bun test's seconds on the line after the first, read back by markerSeconds (#1886)", async () => {
     const { d } = deps();
     const r = await localCi(42, "/repo", d, "example/development", CACHE);
     // the checkout has scripts/ci.ts: a pass carries the seconds of both steps
@@ -121,17 +218,74 @@ describe("local-ci", () => {
     const results = r.results.map((x) => (x.run.trim() === "bun run typecheck" ? { ...x, seconds: 51.23 } : x.run.trim() === "bun test" ? { ...x, seconds: 42.96 } : x));
     const timed = { ...r, results, seconds: stepSeconds(results) };
     expect(timed.seconds).toEqual({ typecheck: 51.2, test: 43 });
-    const body = resultComment({ ...timed, stack: [{ pr: 42, patchId: PID }] });
+    const body = resultComment(timed);
     expect(passOf(body)).toEqual([SHA, BASE]);
-    expect(stackOf(body)).toEqual(new Map([[42, PID]]));
-    expect(body.split("\n")[2]).toBe('<!-- local-ci-seconds {"typecheck":51.2,"test":43} -->');
+    expect(body.split("\n")[1]).toBe('<!-- local-ci-seconds {"typecheck":51.2,"test":43} -->');
     expect(markerSeconds(body)).toEqual({ typecheck: 51.2, test: 43 });
-    // without a stack line the seconds come second; a fail has none; a pass without seconds (--repo) has none
-    expect(markerSeconds(resultComment(timed).split("\n")[1]!)).toEqual({ typecheck: 51.2, test: 43 });
+    // a fail has none; a pass without seconds (--repo) has none
     expect(markerSeconds(resultComment({ ...timed, ok: false }))).toBeUndefined();
     expect(markerSeconds(resultComment({ ...timed, seconds: undefined }))).toBeUndefined();
     // this repository's CI without bun test: an error, not a pass without the seconds
-    expect(() => stepSeconds(results.filter((x) => x.run.trim() !== "bun test"))).toThrow("`bun test`");
+    expect(() => stepSeconds(results.filter((x) => x.name !== "bun test"))).toThrow("`bun test`");
+  });
+
+  test("test duration ceiling: seconds over the checkout's `local` ceiling fail the run with an over: line, and it exits like a failed step (#1887)", async () => {
+    const { d, logged } = deps(undefined, undefined, "1 fail", {}, false, { budget: { local: { durations: { typecheck: 60, test: -1 } } } });
+    const r = await localCi(42, "/repo", d, "example/development", CACHE);
+    expect(r.ok).toBe(false);
+    expect(r.seconds).toBeUndefined();
+    expect(ciExit(r.results)).toBe(1);
+    const failed = r.results.at(-1)!;
+    expect(failed.name).toBe(DURATION_STEP);
+    expect(failed.fails![0]).toStartWith("over: durations.test = ");
+    expect(failLines(failed.tail)).toEqual(failed.fails!);
+    expect(logged).toContain(failed.fails![0]!);
+    const body = resultComment(r);
+    expect(passOf(body)).toBeUndefined();
+    expect(body).toContain(`結果: \`${DURATION_STEP}\` が exit 1。\n`); // no log of its own to point to
+    expect(body).toContain(`    ${failed.fails![0]}`);
+  });
+
+  test("test duration ceiling: within the ceilings, or a budget without them, passes with the seconds (#1887)", async () => {
+    for (const budget of [{ local: { durations: { typecheck: 60, test: 50 } } }, { local: {} }, { github: {} }]) {
+      const r = await localCi(42, "/repo", deps(undefined, undefined, "1 fail", {}, false, { budget }).d, "example/development", CACHE);
+      expect(r.ok).toBe(true);
+      expect(r.seconds).toBeDefined();
+    }
+  });
+
+  test("test duration ceiling: a narrowed run is not compared on bun test, a full fall-back and the type check are (#3297)", async () => {
+    const run = (select: string, durations: object) => {
+      const { d } = deps(undefined, undefined, "1 fail", {}, false, { budget: { local: { durations } }, select });
+      const step: Deps["step"] = async (script, cwd, env) => {
+        if (script.startsWith("bun test")) await Bun.sleep(300);
+        return d.step(script, cwd, env);
+      };
+      return localCi(42, "/repo", { ...d, step }, "example/development", CACHE);
+    };
+    const narrowed = "selected: 1\na.test.ts  x";
+    expect((await run(narrowed, { typecheck: 60, test: 0.1 })).ok).toBe(true);
+    expect(await run(narrowed, { typecheck: -1, test: 50 })).toMatchObject({ ok: false, selection: { files: ["a.test.ts"] } });
+    expect((await run("full: x", { typecheck: 60, test: 0.1 })).ok).toBe(false);
+  });
+
+  test("the comment says what bun test covered; the mark stays (#3297)", () => {
+    const r: LocalCiResult = { sha: SHA, base: BASE, ok: true, seconds: { typecheck: 1, test: 2 }, results: [{ name: "bun test", run: "bun test", code: 0, seconds: 2, tail: "" }] };
+    const narrowed = resultComment({ ...r, selection: { files: ["a.test.ts", "b.test.ts"], total: 200, reason: "x" } });
+    const full = resultComment({ ...r, selection: { files: null, total: 200, reason: "bun.lock: 依存の定義や設定" } });
+    const all = resultComment(r);
+    expect(narrowed).toContain("テスト: 2 / 200 ファイル（影響範囲の選択）");
+    expect(full).toContain("テスト: 全 200 ファイル（全テストに倒した: bun.lock: 依存の定義や設定）");
+    expect(all).toContain("テスト: 全ファイル（--all）");
+    expect(testsOf(narrowed)).toEqual({ ran: 2, total: 200 });
+    expect(testsOf(full)).toEqual({ ran: null, total: 200 });
+    expect(testsOf(all)).toBeUndefined();
+    for (const body of [narrowed, full, all]) {
+      expect(passOf(body)).toEqual([SHA, BASE]);
+      expect(markerSeconds(body)).toEqual({ typecheck: 1, test: 2 });
+    }
+    expect(resultComment({ ...r, ok: false, conflict: true, results: [] })).not.toContain("テスト:");
+    expect(resultComment({ ...r, selection: { files: null, total: 1, reason: "長".repeat(1000) } })).toContain(`${"長".repeat(300)}…）`);
   });
 
   test("refs/pull/<n>/head that is not the PR's head yet is an error, and nothing runs", async () => {
@@ -174,7 +328,8 @@ describe("local-ci", () => {
     expect(sent).toBe(true);
     expect(posted).toHaveLength(1);
     expect(passOf(posted[0]!)).toEqual([SHA, BASE]);
-    expect(posted[0]!.split("\n")[1]).toBe(`stack #42=${PID}`);
+    // the first line only (#3118): what merge-gate reads; the seconds line is hidden in GitHub's view
+    expect(posted[0]!.split("\n")[1]).toStartWith("<!-- local-ci-seconds ");
     expect(posted[0]).toContain(`対象: head \`${SHA}\` を base \`${BASE}\` にマージ`);
     expect(posted[0]!.split("\n").filter((l) => l.startsWith("| `")).length).toBe(ciSteps.length);
   });
@@ -198,98 +353,6 @@ describe("local-ci", () => {
       expect([sent, posted]).toEqual([false, []]);
       expect(logged.at(-1)).toContain("結果を投稿しない");
     }
-  });
-
-  /** A fake gh for a stack of three on main: #1 (b1 ← main) ← #2 (b2) ← #3 (b3); `ids` = each PR's patch-id. */
-  /** `untested`: PRs whose head now is not in the tested head (a fix on it not rebased into the ones above). */
-  const stackSh = (ids: Record<number, string>, o: { listed?: Record<string, number[]>; fail?: boolean; untested?: number[]; moved?: number } = {}) => {
-    const bases: Record<number, string> = { 1: "main", 2: "b1", 3: "b2" };
-    const heads: Record<string, number> = { b1: 1, b2: 2 };
-    const headOf = (n: number) => String(n).repeat(40);
-    const sh: Deps["sh"] = async (cmd) => {
-      if (cmd.includes("--is-ancestor")) {
-        if (cmd.at(-1) !== SHA || o.untested?.some((n) => cmd.at(-2) === headOf(n))) throw new Error("git -C merge-base failed: ");
-        return "";
-      }
-      if (cmd.includes("fetch")) return "";
-      if (cmd.includes("rev-parse")) return `${SHA}\n`;
-      if (cmd[0] === "gh" && cmd[1] === "repo") return "main\n";
-      if (cmd[0] === "gh" && cmd[2] === "list") {
-        const head = cmd[cmd.indexOf("--head") + 1]!;
-        return JSON.stringify((o.listed?.[head] ?? (heads[head] ? [heads[head]] : [])).map((number) => ({ number })));
-      }
-      if (cmd[0] === "gh" && cmd.at(-1) === "headRefOid") return JSON.stringify({ headRefOid: o.moved === Number(cmd[3]) ? "9".repeat(40) : Number(cmd[3]) === 3 ? SHA : headOf(Number(cmd[3])) });
-      if (cmd[0] === "gh" && cmd.at(-1) === "baseRefName,headRefOid") return JSON.stringify({ baseRefName: bases[Number(cmd[3])], headRefOid: Number(cmd[3]) === 3 ? SHA : headOf(Number(cmd[3])) });
-      if (cmd[0] === "gh") return JSON.stringify({ headRefOid: SHA, baseRefName: bases[Number(cmd[3])] });
-      if (cmd[0] === "bash") {
-        if (o.fail) throw new Error("bash -o pipefail failed: gh pr diff");
-        return `${ids[Number(cmd.at(-2))]} ${SHA}\n`;
-      }
-      throw new Error(`not asked: ${cmd.join(" ")}`);
-    };
-    return sh;
-  };
-  const [A, B, C] = ["a", "b", "c"].map((x) => x.repeat(40)) as [string, string, string];
-  const pass: LocalCiResult = { sha: SHA, base: SHA, results: [{ name: "bun test", run: "bun test", code: 0, seconds: 1, tail: "" }], ok: true };
-
-  test("stack line: a pass on the top of three names each PR's patch-id, the bottom first; stackOf reads it back, LOCAL_CI_RESULT its first line as before", async () => {
-    const sh = stackSh({ 1: A, 2: B, 3: C });
-    expect((await stackBelow(3, "example/development", sh)).map((x) => x.pr)).toEqual([1, 2, 3]);
-    const posted: string[] = [];
-    const logged: string[] = [];
-    expect(await notify({ pr: 3, repo: "example/development", root: "/repo" }, pass, { sh, log: (l) => void logged.push(l) }, async (_t, body) => void posted.push(body))).toBe(true);
-    const [first, second] = posted[0]!.split("\n");
-    expect(first).toBe(`[local-ci] pass ${SHA} base=${SHA}`);
-    expect(second).toBe(`stack #1=${A} #2=${B} #3=${C}`);
-    expect(passOf(posted[0]!)).toEqual([SHA, SHA]);
-    expect(stackOf(posted[0]!)).toEqual(new Map([[1, A], [2, B], [3, C]]));
-    // the middle one's run names the PRs up to it
-    expect((await stackBelow(2, "example/development", sh)).map((x) => x.pr)).toEqual([1, 2]);
-  });
-
-  test("stack line: a lower PR whose head now is not in the tested head (a fix not rebased up) is left out, with every PR below it", async () => {
-    const t = { repo: "example/development", root: "/repo" };
-    expect((await stackTested(3, SHA, t, stackSh({}, { untested: [1] }))).map((x) => x.pr)).toEqual([2, 3]);
-    expect((await stackTested(3, SHA, t, stackSh({}, { untested: [2] }))).map((x) => x.pr)).toEqual([3]);
-    const posted: string[] = [];
-    await notify({ pr: 3, ...t }, pass, { sh: stackSh({ 1: A, 2: B, 3: C }, { untested: [2] }), log: () => {} }, async (_t, body) => void posted.push(body));
-    expect(stackOf(posted[0]!)).toEqual(new Map([[3, C]]));
-    // a head moving while the diffs are read: no line (the diff read may be the new, untested one)
-    await expect(stackLine(3, SHA, t, stackSh({ 1: A, 2: B, 3: C }, { moved: 1 }))).rejects.toThrow("PR #1 の head が差分を読む間に変わった");
-    // the PR run itself pushed to after notify read its head: its head now is not the tested one
-    await expect(stackLine(3, "e".repeat(40), t, stackSh({ 1: A, 2: B, 3: C }))).rejects.toThrow("テストした eeeeeee ではない");
-  });
-
-  test("stack line: a fail and a conflict have none; a pass whose stack cannot be read goes without it, said", async () => {
-    const sh = stackSh({ 1: A, 2: B, 3: C });
-    for (const r of [{ ...pass, ok: false, results: [{ ...pass.results[0]!, code: 1 }] }, { ...pass, ok: false, results: [], conflict: true }]) {
-      const posted: string[] = [];
-      await notify({ pr: 3, repo: "example/development", root: "/repo" }, r, { sh, log: () => {} }, async (_t, body) => void posted.push(body));
-      expect(posted[0]!.split("\n")[1]).toBe("");
-      expect(stackOf(posted[0]!)).toBeNull();
-    }
-    const posted: string[] = [];
-    const logged: string[] = [];
-    await notify({ pr: 3, repo: "example/development", root: "/repo" }, pass, { sh: stackSh({}, { fail: true }), log: (l) => void logged.push(l) }, async (_t, body) => void posted.push(body));
-    expect(passOf(posted[0]!)).toEqual([SHA, SHA]);
-    expect(stackOf(posted[0]!)).toBeNull();
-    expect(logged.join("\n")).toContain("スタックの行を書けない");
-  });
-
-  test("stack line: two PRs below (a fork in the stack) or none end the walk there", async () => {
-    expect((await stackBelow(3, "example/development", stackSh({}, { listed: { b2: [2, 9] } }))).map((x) => x.pr)).toEqual([3]);
-    expect((await stackBelow(3, "example/development", stackSh({}, { listed: { b1: [] } }))).map((x) => x.pr)).toEqual([2, 3]);
-    expect(stackOf(`[local-ci] pass ${SHA} base=${SHA}\nstack #1=${A.slice(0, 7)}`)).toBeNull();
-    expect(stackOf(`[local-ci] pass ${SHA} base=${SHA}\n\nstack #1=${A}`)).toBeNull();
-  });
-
-  test("patchIdOf: gh pr diff piped to git patch-id --verbatim with the PR and repository as arguments, not in the script; an empty diff is an error", async () => {
-    const cmds: string[][] = [];
-    expect(await patchIdOf(7, "example/development", async (c) => (cmds.push(c), `${A} ${SHA}\n`))).toBe(A);
-    expect(cmds[0]!.slice(0, 4)).toEqual(["bash", "-o", "pipefail", "-c"]);
-    expect(cmds[0]!.slice(-2)).toEqual(["7", "example/development"]);
-    expect(cmds[0]![4]).not.toContain("example");
-    await expect(patchIdOf(7, "example/development", async () => "")).rejects.toThrow("差分が空");
   });
 
   test("LOCAL_CI_RESULT: pass or fail, the head, then the base; no base, a short sha or another word after it is no result", () => {
@@ -325,10 +388,10 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
   }, 60_000);
 
   test("a failing step stops there and is not ok (nothing to post)", async () => {
-    const { d, ran, calls } = deps("bun test");
+    const { d, ran, calls } = deps("bun run typecheck");
     const r = await localCi(42, "/repo", d, "example/development", CACHE);
     expect(r.ok).toBe(false);
-    expect(ran.at(-1)).toBe("bun test");
+    expect(ran.at(-1)).toBe("bun run typecheck");
     expect(ran).not.toContain("bun run --cwd apps/web build");
     expect(calls.some((c) => c.includes("worktree") && c.includes("remove"))).toBe(true);
     rmSync(r.results.at(-1)!.log!.replace(/\/[^/]*$/, ""), { recursive: true, force: true });
@@ -382,13 +445,13 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     expect(existsSync(log)).toBe(false);
   });
 
-  const CHECK = "bun scripts/perf-ratchet.ts check perf-result.json || { cat perf-result.json; exit 1; }";
+  const CHECK = "bun scripts/perf-ratchet.ts check perf-result.json --base perf-base.json || { cat perf-result.json; exit 1; }";
   const BENCH = "bun scripts/perf-bench.ts --runs 5 --json perf-result.json";
   const JSON_DUMP = Array.from({ length: 60 }, (_, i) => `  "line${i}": ${i},`).join("\n");
   const perfRun = async (failAt: string, output: string, base: Record<string, { code: number; output: string }> = {}, throwOnBase = false) => {
     const { d, calls, logged, envs } = deps(failAt, SHA, output, base, throwOnBase);
     const r = await localCi(42, "/repo", d, "example/development", CACHE);
-    const log = r.results.at(-1)!.log!;
+    const log = r.results.find((x) => x.code !== 0)!.log!;
     const dir = log.slice(0, log.lastIndexOf("/"));
     const summary = existsSync(join(dir, "summary.md")) ? readFileSync(join(dir, "summary.md"), "utf8") : "";
     const perfResult = existsSync(join(dir, "perf-result.json")) ? readFileSync(join(dir, "perf-result.json"), "utf8") : undefined;
@@ -405,7 +468,7 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
   test("perf over: the over line, head / base and the environment are in summary.md and on the console, even under a long JSON dump; perf-result.json is kept", async () => {
     const over = "over: journeys.launch.layoutShift = 0.3015 > ceiling 0.2371";
     const { r, summary, logged, perfResult } = await perfRun(CHECK, `ceilings: local\n${over}\n{\n${JSON_DUMP}\n}`);
-    expect(r.perf).toEqual({ env: "local", over: [over], improved: [], raised: [], unknown: false });
+    expect(r.perf).toEqual({ env: "local", over: [over], improved: [], raised: [], grew: [], unknown: false });
     expect(summary).toContain(`head ${SHA} / base ${BASE}`);
     expect(summary).toContain(`環境: ceilings local, TMPDIR ${join(tmpdir(), "switchboard.local-ci-42-tmp.")}`);
     expect(summary).toContain(", CI=true");
@@ -463,19 +526,24 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     expect(summary).toContain("原因不明（判定の行が無い）:\nceilings: local\nerror: the result has no journeys.launch.layoutShift");
   });
 
-  test("perf 原因不明: the bench failing is a failure with no verdict", async () => {
+  test("perf 原因不明: the bench failing is a failure with no verdict, named by the bench's error (not the check failing after it)", async () => {
     const { r, summary } = await perfRun(BENCH, "Error: Chrome not found");
-    expect(r.perf).toEqual({ env: null, over: [], improved: [], raised: [], unknown: true });
+    // the check keeps going after the bench and fails on the missing result: both fail, the bench is the cause
+    expect(r.results.filter((x) => x.code !== 0).map((x) => x.run)).toEqual([BENCH, CHECK]);
+    expect(summary).toContain(`手順 ${BENCH}: exit 1`);
+    expect(summary).not.toContain("ENOENT");
+    expect(r.perf).toEqual({ env: null, over: [], improved: [], raised: [], grew: [], unknown: true });
     expect(summary).toContain("環境: ceilings ?, TMPDIR ");
     expect(summary).toContain("原因不明（判定の行が無い）:\nError: Chrome not found");
   });
 
-  test("perfSteps: the install, then the web build and every step after it", () => {
+  test("perfSteps: the install, then the web build up to the perf check (not bun test after it)", () => {
     expect(perfSteps(ciSteps).map((s) => s.run.trim().split("\n")[0])).toEqual([
       "bun install --frozen-lockfile",
       "bun run --cwd apps/web build",
       'if [ "$(git rev-parse --is-shallow-repository)" = true ]; then depth=--depth=1; else depth=; fi',
       "if fc-list ':family=Noto Sans' | grep -q . && fc-list ':family=Noto Sans CJK JP' | grep -q .; then exit 0; fi",
+      "bun scripts/perf-ratchet.ts base origin/main perf-base.json",
       BENCH,
       CHECK,
     ]);
@@ -489,7 +557,7 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     // main is checked out at the merge's first parent and measured in the PR's environment (TMPDIR too)
     expect(calls.filter((c) => c.includes("worktree") && c.includes("add")).at(-1)!.at(-1)).toBe(BASE);
     expect(new Set(envs.map((e) => JSON.stringify(e))).size).toBe(1);
-    expect(r.baseline).toEqual({ sha: BASE, verdict: { env: "local", over: [mainOver], improved: [], raised: [], unknown: false } });
+    expect(r.baseline).toEqual({ sha: BASE, verdict: { env: "local", over: [mainOver], improved: [], raised: [], grew: [], unknown: false } });
     expect(summary).toContain(`main（${BASE.slice(0, 7)}）との比較:\njourneys.launch.layoutShift: main でも超過（PR の変更によらない）\nmain の over:\n${mainOver}`);
     expect(baseResult).toBe('{"runs":5,"base":true}');
     expect(files.filter((f) => f.startsWith("base-")).length).toBe(perfSteps(ciSteps).length);
@@ -524,15 +592,111 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     expect(adds).toBe(1);
   });
 
+  test("perf and bun test both failing: the comment names both steps with their raised: and (fail) lines (#2945)", async () => {
+    const raised = "raised: local.journeys.launch.requests ceiling 14 > main's 13 (raising a ceiling is merged by hand)";
+    const { d, ran, logged } = deps(CHECK, SHA, `ceilings: local\n${raised}\n{\n${JSON_DUMP}\n}`);
+    const failing: Deps = { ...d, step: async (script, cwd, env) => (script.trim() === "bun test" ? (ran.push("bun test"), { code: 1, output: "(fail) a > b\n1 fail" }) : d.step(script, cwd, env)) };
+    const r = await localCi(42, "/repo", failing, "example/development", CACHE);
+    const failed = r.results.filter((x) => x.code !== 0);
+    try {
+      // the perf check failed before bun test, and bun test still ran
+      expect(ran.indexOf(CHECK)).toBeLessThan(ran.indexOf("bun test"));
+      expect(failed.map((x) => x.name)).toEqual(["bun scripts/perf-ratchet.ts check perf-result.json", "bun test"]);
+      expect(r.ok).toBe(false);
+      expect(ciExit(r.results)).toBe(1);
+      expect(r.perf).toMatchObject({ raised: [raised], unknown: false });
+      // one log dir with both steps' whole output and the perf summary
+      expect(new Set(failed.map((x) => x.log!.slice(0, x.log!.lastIndexOf("/")))).size).toBe(1);
+      expect(readFileSync(failed[1]!.log!, "utf8")).toBe("(fail) a > b\n1 fail");
+      expect(logged).toContain("✗ bun test: exit 1");
+      expect(logged).toContain("✗ bun scripts/perf-ratchet.ts check perf-result.json: exit 1");
+      const body = resultComment(r);
+      expect(body).toContain(`結果: \`bun scripts/perf-ratchet.ts check perf-result.json\` が exit 1。全文は実行したホストの記録（~/.cache の下）。\n    ${raised}`);
+      expect(body).toContain("結果: `bun test` が exit 1。全文は実行したホストの記録（~/.cache の下）。\n    (fail) a > b");
+      expect(body).toContain("| `bun scripts/perf-ratchet.ts check perf-result.json` | exit 1 |");
+      expect(body).toContain("| `bun test` | exit 1 |");
+    } finally {
+      rmSync(failed[0]!.log!.replace(/\/[^/]*$/, ""), { recursive: true, force: true });
+    }
+  });
+
+  test("bundle lines: a pass's comment has the bundle line; a grew fail's comment has the bundle line and the grew: line under its result", async () => {
+    const small = "bundle: js 1005 B (main 1000 B, +5 B, +0.50%) / css 50 B (main 50 B, +0 B, +0.00%)";
+    const header = "bundle（gzip、マージ後と main の先端の差）:";
+    // a pass: the check's output is not kept as a failure, its bundle line still reaches the comment
+    const { d } = deps();
+    const passing: Deps = { ...d, step: async (script, cwd, env) => (script.trim() === CHECK ? { code: 0, output: `ceilings: local\n${small}\nperf ratchet: ok` } : d.step(script, cwd, env)) };
+    const ok = await localCi(42, "/repo", passing, "example/development", CACHE);
+    expect(ok.ok).toBe(true);
+    expect(ok.bundle).toEqual([small]);
+    expect(resultComment(ok)).toContain(`${header}\n    ${small}`);
+    // a grew fail: the bundle line, and the grew: line under the check's result
+    const big = "bundle: js 1011 B (main 1000 B, +11 B, +1.10%) / css 50 B (main 50 B, +0 B, +0.00%)";
+    const grew = "grew: bundle.js +1.10% (1000 → 1011 B) ≥ 1%: merging is the user's call (docs/design/perf.md)";
+    const { r, adds } = await perfRun(CHECK, `ceilings: local\n${big}\n${grew}\n{\n${JSON_DUMP}\n}`);
+    expect(r.perf).toMatchObject({ grew: [grew], unknown: false });
+    expect(r.bundle).toEqual([big, grew]);
+    // grew alone does not measure main (it is measured by the check's own base already)
+    expect(adds).toBe(1);
+    const body = resultComment(r);
+    expect(body).toContain(`${header}\n    ${big}\n    ${grew}`);
+    expect(body).toContain(`結果: \`bun scripts/perf-ratchet.ts check perf-result.json\` が exit 1。全文は実行したホストの記録（~/.cache の下）。\n    ${grew}`);
+    // no check output, no bundle part; a conflict has none either
+    expect(resultComment({ ...r, bundle: undefined })).not.toContain(header);
+    expect(resultComment({ ...r, conflict: true })).not.toContain(header);
+  });
+
   test("perfVerdict and failureSummary: kinds as printed; a step that is not perf keeps its tail", () => {
-    expect(perfVerdict("ceilings: github\nover: a = 2 > ceiling 1\nperf ratchet: ok")).toEqual({ env: "github", over: ["over: a = 2 > ceiling 1"], improved: [], raised: [], unknown: false });
+    expect(perfVerdict("ceilings: github\nover: a = 2 > ceiling 1\nperf ratchet: ok")).toEqual({ env: "github", over: ["over: a = 2 > ceiling 1"], improved: [], raised: [], grew: [], unknown: false });
+    const grew = "grew: bundle.js +1.10% (1000 → 1011 B) ≥ 1%: merging is the user's call (docs/design/perf.md)";
+    const p = perfVerdict(`ceilings: local\nbundle: js 1011 B (main 1000 B, +11 B, +1.10%) / css 50 B (main 50 B, +0 B, +0.00%)\n${grew}`);
+    expect(p).toMatchObject({ grew: [grew], over: [], unknown: false });
+    const check = { name: "check", run: "bun scripts/perf-ratchet.ts check perf-result.json", code: 1, seconds: 1, tail: grew };
+    expect(failureSummary({ sha: "h", base: "b", step: check, env: {}, output: grew, perf: p })).toContain(`1% 以上の増加（grew）:\n${grew}`);
     const step = { name: "bun test", run: "bun test", code: 1, seconds: 1, tail: "(fail) x" };
     expect(failureSummary({ sha: "h", base: "b", step, env: {}, output: "(fail) x" })).toBe("head h / base b\n手順 bun test: exit 1\n(fail) x");
   });
 
-  test("failLines: bun test's (fail) lines and perf-ratchet's over: lines, once each, in order", () => {
+  test("failLines: bun test's (fail) lines and perf-ratchet's over: / raised: / improved: lines, once each, in order", () => {
     expect(failLines("ok\n(fail) x > y\nnoise\n  over: launch.layoutShift 1 > 0\n(fail) x > y\n(pass) z")).toEqual(["(fail) x > y", "  over: launch.layoutShift 1 > 0"]);
+    const raised = "raised: local.journeys.launch.requests ceiling 14 > main's 13 (raising a ceiling is merged by hand)";
+    const improved = "improved: journeys.launch.layoutShift = 0.1 < ceiling 0.2 − 2 × 0.03: lower it";
+    expect(failLines(`ceilings: local\n${raised}\n${improved}\n  "raised": 1,\nperf ratchet: x`)).toEqual([raised, improved]);
+    const grew = "grew: bundle.css +2.00% (100 → 102 B) ≥ 1%: merging is the user's call (docs/design/perf.md)";
+    expect(failLines(`bundle: js 1 B (main 1 B, +0 B, +0.00%) / css 102 B (main 100 B, +2 B, +2.00%)\n${grew}`)).toEqual([grew]);
     expect(failLines("all good")).toEqual([]);
+  });
+
+  test("localCi records main's bundle once, from its finally, pass or fail; a failed record changes nothing and the worktree still goes", async () => {
+    for (const [failAt, recordFails] of [[undefined, false], ["bun test", false], [undefined, true]] as const) {
+      const { d } = deps(failAt);
+      const order: string[] = [];
+      const logged: string[] = [];
+      const recording: Deps = {
+        ...d,
+        log: (l) => void logged.push(l),
+        // the CI's base step leaves perf-base.json in the PR's worktree
+        step: async (script, cwd, env) => {
+          if (!cwd.includes("-base.")) writeFileSync(join(cwd, "perf-base.json"), JSON.stringify({ sha: BASE, bundle: { js: 1000, css: 100 } }));
+          return d.step(script, cwd, env);
+        },
+        sh: async (c, cwd) => {
+          if (c[0] !== "gh" || c[1] !== "api") {
+            if (c.includes("worktree") && c.includes("remove")) order.push("remove");
+            return d.sh(c, cwd);
+          }
+          if (recordFails) throw new Error("gh api failed: gh: Server Error (HTTP 502)");
+          if (c.includes("PUT")) return order.push("put"), "{}";
+          if (c.some((a) => a.includes("/contents/"))) throw new Error("gh api failed: gh: Not Found (HTTP 404)");
+          return "{}";
+        },
+      };
+      const r = await localCi(42, "/repo", recording, "example/development", CACHE);
+      expect(r.ok).toBe(failAt === undefined);
+      expect(order).toEqual(recordFails ? ["remove"] : ["put", "remove"]);
+      expect(logged.filter((l) => l.startsWith("bundle の記録"))).toEqual([recordFails ? "bundle の記録に失敗（結果は変えない）: gh api failed: gh: Server Error (HTTP 502)" : "bundle の記録: perf-records/bundle.tsv に 1 行足した"]);
+      if (failAt) rmSync(r.results.find((x) => x.code !== 0)!.log!.replace(/\/[^/]*$/, ""), { recursive: true, force: true });
+    }
   });
 
   test("--repo: gh -R, git -C and the clone are the given repository's", async () => {
@@ -546,6 +710,33 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     expect(git.some((c) => c.join(" ") === "git -C /other fetch -q origin refs/pull/42/head")).toBe(true);
     // the clone, or the worktree local-ci added from it (the merge)
     for (const c of git) expect(c[2] === "/other" || c[2]!.startsWith(CACHE)).toBe(true);
+  });
+
+  test("reuse pass for same head", async () => {
+    const OTHER = "9999999999999999999999999999999999999999";
+    const pass = (sha: string) => `[local-ci] pass ${sha} base=${BASE}\n`;
+    const c = (body: string, createdAt: string, url = "https://x/7#issuecomment-1", authorAssociation = "MEMBER") => ({ body, createdAt, url, authorAssociation });
+    const fake = (comments: unknown[]) => async (cmd: string[]) => JSON.stringify({ headRefOid: SHA, comments });
+    const found = (comments: unknown[]) => {
+      return existingPass(7, "o/r", fake(comments));
+    };
+    expect(await found([c(pass(SHA), "2026-11-01T00:00:00Z")])).toBe("https://x/7#issuecomment-1");
+    // a run is due: another head, not the first line, no authority, none at all
+    expect(await found([c(pass(OTHER), "2026-11-01T00:00:00Z")])).toBeUndefined();
+    expect(await found([c(`note\n${pass(SHA)}`, "2026-11-01T00:00:00Z")])).toBeUndefined();
+    expect(await found([c(pass(SHA), "2026-11-01T00:00:00Z", "u", "NONE")])).toBeUndefined();
+    expect(await found([])).toBeUndefined();
+    // as merge-gate counts it: the newest result rules; the first line alone is a pass (#3118)
+    expect(await found([c(pass(SHA), "2026-11-01T00:00:00Z"), c(`[local-ci] fail ${SHA} base=${BASE}\n`, "2026-11-01T01:00:00Z")])).toBeUndefined();
+    expect(await found([c(`[local-ci] fail ${SHA} base=${BASE}\n`, "2026-11-01T00:00:00Z"), c(pass(SHA), "2026-11-01T01:00:00Z", "new")])).toBe("new");
+    expect(await found([c(`[local-ci] pass ${SHA} base=${BASE}\n`, "2026-11-01T00:00:00Z")])).toBe("https://x/7#issuecomment-1");
+    // --force and --all run past a pass that would be reused; what cannot be read is a normal run
+    const repo = { pr: 7, repo: "o/r", root: join(import.meta.dir, "..") };
+    const reusable = fake([c(pass(SHA), "2026-11-01T00:00:00Z")]);
+    expect(await reusablePass(repo, reusable)).toBe("https://x/7#issuecomment-1");
+    expect(await reusablePass({ ...repo, force: true }, reusable)).toBeUndefined();
+    expect(await reusablePass({ ...repo, all: true }, reusable)).toBeUndefined();
+    expect(await reusablePass(repo, async () => { throw new Error("read"); })).toBeUndefined();
   });
 
   test("resolveTarget: default, --repo, and the TargetError cases", async () => {
@@ -569,6 +760,8 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     const none = run("git@github.com:example/development.git");
     expect(await resolveTarget(["7"], "/w/other", "/meta", none.sh)).toEqual({ pr: 7, repo: "example/development", root: "/meta" });
     expect(none.calls).toEqual([["git", "-C", "/meta", "remote", "get-url", "origin"]]);
+    expect(await resolveTarget(["--all", "7"], "/w/other", "/meta", none.sh)).toEqual({ pr: 7, repo: "example/development", root: "/meta", all: true });
+    expect(await resolveTarget(["7", "--force"], "/w/other", "/meta", none.sh)).toEqual({ pr: 7, repo: "example/development", root: "/meta", force: true });
     // --repo: the working tree it runs in, whose origin is that repository (https or ssh, with or without .git)
     for (const url of ["https://github.com/o/r.git", "https://github.com/o/r", "git@github.com:o/r.git", "ssh://git@github.com/o/r.git"]) {
       const x = run(url);
@@ -600,6 +793,72 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     expect(e.message).not.toContain("SECRET");
     expect(remoteRepo("https://gitlab.com/o/r.git")).toBeUndefined();
   });
+});
+
+test("recordBundle: appends one row per run to perf-records/bundle.tsv, creating the branch once; no perf-base.json writes nothing", async () => {
+  const dir = mkdtempSync(join(CACHE, "record-"));
+  // a fake GitHub: the branch, bundle.tsv with its blob sha, and every gh api call
+  let branch = false;
+  let file: { text: string; sha: string } | undefined;
+  let conflictOnce = false;
+  let tooBig = false;
+  const calls: string[][] = [];
+  const puts: Array<{ branch: string; sha?: string; text: string }> = [];
+  const sh: Deps["sh"] = async (c) => {
+    calls.push(c);
+    const path = c.find((a) => a.startsWith("repos/"))!;
+    if (path.endsWith("/git/ref/heads/perf-records")) {
+      if (!branch) throw new Error("gh api repos/o/r/git/ref/heads/perf-records failed: gh: Not Found (HTTP 404)");
+      return "{}";
+    }
+    if (path.endsWith("/git/blobs") || path.endsWith("/git/trees") || path.endsWith("/git/commits")) return "f".repeat(40);
+    if (path.endsWith("/git/refs")) return void (branch = true), "{}";
+    if (path.includes("/contents/bundle.tsv?ref=perf-records")) {
+      if (!file) throw new Error("gh api repos/o/r/contents failed: gh: Not Found (HTTP 404)");
+      return JSON.stringify({ sha: file.sha, encoding: tooBig ? "none" : "base64", content: tooBig ? "" : Buffer.from(file.text).toString("base64").replace(/(.{60})/g, "$1\n") });
+    }
+    if (c.includes("PUT")) {
+      const body = JSON.parse(readFileSync(c[c.indexOf("--input") + 1]!, "utf8")) as { branch: string; sha?: string; content: string };
+      const text = Buffer.from(body.content, "base64").toString("utf8");
+      puts.push({ branch: body.branch, sha: body.sha, text });
+      if (conflictOnce) {
+        conflictOnce = false;
+        file = { text: `${file!.text}2026-11-02T10:00:00.000Z\t1\t1\t${"c".repeat(40)}\n`, sha: "moved" };
+        throw new Error("gh api -X PUT failed: gh: bundle.tsv does not match moved (HTTP 409)");
+      }
+      file = { text, sha: `sha${puts.length}` };
+      return "{}";
+    }
+    throw new Error(`unexpected ${c.join(" ")}`);
+  };
+  try {
+    expect(await recordBundle("o/r", dir, "2026-11-02T00:00:00.000Z", sh)).toBe("none");
+    expect(calls).toEqual([]);
+    const A = "a".repeat(40);
+    writeFileSync(join(dir, "perf-base.json"), JSON.stringify({ sha: A, bundle: { js: 1000, css: 100 } }));
+    expect(await recordBundle("o/r", dir, "2026-11-02T01:00:00.000Z", sh)).toBe("recorded");
+    expect(calls.filter((c) => c.some((a) => a.endsWith("/git/refs"))).map((c) => c.slice(c.indexOf("-f"))).flat()).toEqual(["-f", "ref=refs/heads/perf-records", "-f", `sha=${"f".repeat(40)}`]);
+    expect(puts[0]).toEqual({ branch: "perf-records", sha: undefined, text: `${RECORDS_HEADER}\n2026-11-02T01:00:00.000Z\t1000\t100\t${A}\n` });
+    // the same main again: one more row, the branch is not made again, the PUT names the file's sha
+    expect(await recordBundle("o/r", dir, "2026-11-02T02:00:00.000Z", sh)).toBe("recorded");
+    expect(calls.filter((c) => c.some((a) => a.endsWith("/git/refs")))).toHaveLength(1);
+    expect(puts[1]!.sha).toBe("sha1");
+    expect(puts[1]!.text.split("\n").filter(Boolean)).toHaveLength(3);
+    // a 409 (another run wrote first): read again and put once more on top of it
+    conflictOnce = true;
+    expect(await recordBundle("o/r", dir, "2026-11-02T03:00:00.000Z", sh)).toBe("recorded");
+    expect(puts.at(-1)!.sha).toBe("moved");
+    expect(file!.text.split("\n").filter(Boolean).map((l) => l.split("\t")[0])).toEqual(["measured_at", "2026-11-02T01:00:00.000Z", "2026-11-02T02:00:00.000Z", "2026-11-02T10:00:00.000Z", "2026-11-02T03:00:00.000Z"]);
+    // the body goes by a file, not in the arguments
+    expect(calls.filter((c) => c.includes("PUT")).every((c) => !c.some((a) => a.startsWith("content=")))).toBe(true);
+    // over 1 MB the API leaves the content out: an error, and nothing is put (a put would replace every row)
+    tooBig = true;
+    const before = puts.length;
+    await expect(recordBundle("o/r", dir, "2026-11-02T04:00:00.000Z", sh)).rejects.toThrow("1 MB");
+    expect(puts.length).toBe(before);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("the result is reported as the repository's forge verification (#920): GitHub's is the PR comment; another service is said, nothing posted", async () => {
@@ -674,4 +933,43 @@ test("a result holding an account id of the host's AWS config, written bare, is 
     else process.env.AWS_CONFIG_FILE = saved;
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("two local-ci runs do not overlap: each takes one heavy slot for its whole run", async () => {
+  const home = mkdtempSync(join(CACHE, "home-"));
+  type Span = { run: string; start: number; end: number };
+  const spans: Span[] = [];
+  const names: string[] = [];
+  const run = (label: string): Deps => ({
+    sh: async (cmd) => {
+      if (cmd[0] === "gh" && cmd.at(-1) === "headRefOid") return JSON.stringify({ headRefOid: SHA });
+      if (cmd[0] === "gh") return JSON.stringify({ headRefOid: SHA, baseRefName: "main" });
+      if (cmd.includes("rev-parse")) return `${cmd.some((c) => c.startsWith("refs/heads/")) ? BASE : SHA}\n`;
+      if (cmd.includes("worktree") && cmd.includes("add")) {
+        const dir = cmd[cmd.indexOf("--detach") + 1]!;
+        await Bun.write(`${dir}/.github/workflows/ci.yml`, ciYml.replace(SHARED_ENTRY, "make check")); // one step, no scripts/ci.ts
+      }
+      return "";
+    },
+    step: async () => {
+      const span = { run: label, start: performance.now(), end: 0 };
+      await Bun.sleep(50);
+      span.end = performance.now();
+      spans.push(span);
+      return { code: 0, output: "ok" };
+    },
+    log: () => undefined,
+    slot: (name, fn) => {
+      names.push(name);
+      return withHeavySlot(name, fn, { home, mem: () => undefined, pollMs: 10, log: () => undefined });
+    },
+  });
+  const [a, b] = await Promise.all([localCi(42, "/repo", run("a"), "example/development", CACHE, { all: true }), localCi(43, "/repo", run("b"), "example/other", CACHE, { all: true })]);
+  expect(a.ok && b.ok).toBe(true);
+  expect(names.sort()).toEqual(["local-ci example/development#42", "local-ci example/other#43"]);
+  const of = (r: string) => spans.filter((s) => s.run === r);
+  expect(of("a").length).toBeGreaterThan(0);
+  expect(of("b").length).toBeGreaterThan(0);
+  const [first, second] = of("a")[0]!.start < of("b")[0]!.start ? [of("a"), of("b")] : [of("b"), of("a")];
+  expect(Math.max(...first.map((s) => s.end))).toBeLessThanOrEqual(Math.min(...second.map((s) => s.start)));
 });

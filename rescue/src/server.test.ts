@@ -8,6 +8,7 @@ import { commitFile, daemonSource, freePort, health, makeRepo, until } from "./f
 import type { Ctx } from "./promote.ts";
 import { buildRelease, currentOf, switchTo } from "./releases.ts";
 import { startRescue } from "./server.ts";
+import { sweepTmp } from "./tmp.ts";
 import { Supervisor } from "./supervisor.ts";
 
 let f: Awaited<ReturnType<typeof makeRepo>>;
@@ -71,7 +72,7 @@ test("status shows version, state, history and the log; the page is one self-con
   expect(page.headers.get("content-type")).toContain("text/html");
   const html = await page.text();
   expect(html).toContain("前の版に戻す");
-  expect(html).toContain("古い作業ディレクトリを消す"); // the /tmp section (#797)
+  expect(html).toContain("強制クリア"); // the /tmp section (#797)
   expect(html).toContain("api/tmp/clean");
   expect(() => new Function(html.slice(html.indexOf("<script>") + 8, html.lastIndexOf("</script>")))).not.toThrow(); // the script parses
   expect(html).not.toMatch(/<script[^>]+src=|<link[^>]+href=/); // nothing to fetch from a daemon that may be down
@@ -280,6 +281,8 @@ test("sb-rescue on the cloud host refuses the token from off the machine, keeps 
 });
 
 const CHANGES = ["/api/restart", "/api/rollback", "/api/promote", "/api/restore-db", "/api/rebuild", "/api/agent/start", "/api/agent/stop", "/api/tmp/clean"];
+/** The bodies each POST is tried with: /tmp's clean in all three of its forms. */
+const BODIES: Record<string, unknown[]> = { "/api/tmp/clean": [{ names: [OLD_DIR] }, { names: [OLD_DIR], staleMs: 30 * 60 * 1000 }, { force: true }] };
 const onCloud = async (run: (url: string) => Promise<void>) => {
   writeFileSync(join(f.home, "token"), "sb_secret\n");
   authStarter.answer = true;
@@ -297,9 +300,11 @@ test("with the login cookie, every state-changing POST needs a passkey check wit
   await onCloud(async (url) => {
     const cookie = session(key);
     for (const path of CHANGES) {
-      const r = await fetch(`${url}${path}`, { method: "POST", headers: { cookie }, body: path === "/api/tmp/clean" ? JSON.stringify({ names: [OLD_DIR] }) : "{}" });
-      expect(r.status).toBe(401);
-      expect(await r.json()).toMatchObject({ reason: "recent" });
+      for (const body of BODIES[path] ?? [{}]) {
+        const r = await fetch(`${url}${path}`, { method: "POST", headers: { cookie }, body: JSON.stringify(body) });
+        expect(r.status).toBe(401);
+        expect(await r.json()).toMatchObject({ reason: "recent" });
+      }
     }
     const seen = await fetch(`${url}/api/status`, { headers: { cookie } });
     expect(seen.status).toBe(200);
@@ -673,15 +678,16 @@ test("tmp: sweep — without a press, the old working directory goes on the inte
   const sweepOnce = async (tmpOwned: boolean) => {
     // one sweep walks /proc and blocks the loop: 100+ ms on a busy host, over 1 s under a full local CI (#2200). With an
     // interval well over that (and over the 50 ms polling) the first sweep's answer is read before a later, empty one
-    // replaces it (#1939)
+    // replaces it (#1939). 4 s was too close (ordering, the flake of #2939): with /proc walks of 0.8 s a sweep outlasted it and the
+    // second sweep's empty answer was read
     const dockerSh = async (argv: string[]) => (docker.push(argv), "Deleted Images:\ndeleted: sha256:aaa\n\nTotal reclaimed space: 2kB\n");
-    const fast = startRescue(ctx, { port: 0, tmpDir: root, cacheDir: join(home, ".cache"), home, dockerSh, tmpSweepMs: 4000, tmpOwned });
+    const fast = startRescue(ctx, { port: 0, tmpDir: root, cacheDir: join(home, ".cache"), home, dockerSh, tmpSweepMs: 8000, tmpOwned });
     try {
       const get = () => fetch(`http://127.0.0.1:${fast.server.port}/api/tmp`).then((r) => r.json()) as Promise<Answer>;
       return await until(async () => {
         const r = await get();
         return r.sweeps.work && (!tmpOwned || r.sweeps.docker) ? r : null; // the kinds are filled in turn
-      }, "the sweep ran");
+      }, "the sweep ran", 20_000);
     } finally {
       await fast.stop();
     }
@@ -716,7 +722,7 @@ test("tmp: sweep — without a press, the old working directory goes on the inte
     rmSync(root, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   }
-}, 20_000); // two sweeps in turn, each after a 4 s interval: over bun's 5 s (#2200)
+}, 50_000); // load (the flake of #2939): two sweeps in turn, each allowed its 20 s wait; 21 s failed on the old 20 s limit (docs/design/perf.md "テストの揺れ")
 
 test("tmp: GET /api/tmp shows the usage and the entries; POST /api/tmp/clean removes only the old working directory (#797)", async () => {
   const r = (await fetch(`${base}/api/tmp`).then((r) => r.json())) as { usage: { total: number; percent: number }; entries: Array<{ name: string; removable: boolean }>; cleanable: { names: string[]; bytes: number } };
@@ -732,4 +738,111 @@ test("tmp: GET /api/tmp shows the usage and the entries; POST /api/tmp/clean rem
   expect(await cleaned.json()).toMatchObject({ removed: [OLD_DIR], skipped: [{ name: NEW_DIR, keep: "recent" }, { name: "../etc", keep: "name" }] });
   expect(readdirSync(tmpRoot)).toEqual([NEW_DIR]);
   oldDir(); // back for the tests that follow
+}, 30_000); // time assumption (the flake of #2939): inUse walks the host's /proc on each read, over the 5 s default under load (6 s failed; docs/design/perf.md "テストの揺れ")
+
+test("tmp: the owner's press takes the age they pick and any name; force takes everything of theirs; the sweep's judgment stays its own", async () => {
+  const at = (name: string, hoursAgo: number) => {
+    mkdirSync(join(tmpRoot, name), { recursive: true });
+    const t = (Date.now() - hoursAgo * 60 * 60 * 1000) / 1000;
+    utimesSync(join(tmpRoot, name), t, t);
+  };
+  at("notes", 3); // no known kind
+  at("hour", 1);
+  type Answer = { staleMs: number; cleanable: { names: string[] }; forcible: { count: number; bytes: number } };
+  const get = (q = "") => fetch(`${base}/api/tmp${q}`).then((r) => r.json()) as Promise<Answer>;
+  try {
+    const two = await get();
+    expect(two.staleMs).toBe(2 * 60 * 60 * 1000);
+    expect(two.cleanable.names.sort()).toEqual(["notes", OLD_DIR]);
+    expect(two.forcible.count).toBe(4);
+    expect((await get("?staleMs=1800000")).cleanable.names.sort()).toEqual(["hour", "notes", OLD_DIR]);
+    expect((await get("?staleMs=1")).staleMs).toBe(2 * 60 * 60 * 1000); // not a choice: the default
+    expect((await post("/api/tmp/clean", { names: ["hour"], staleMs: 1 })).status).toBe(400);
+    expect(await post("/api/tmp/clean", { names: ["hour"] }).then((r) => r.json())).toMatchObject({ removed: [], skipped: [{ name: "hour", keep: "recent" }] });
+    expect(await post("/api/tmp/clean", { names: ["hour"], staleMs: 30 * 60 * 1000 }).then((r) => r.json())).toMatchObject({ removed: ["hour"] });
+    // after the presses, the sweep still takes only the old directory of a known kind
+    expect(sweepTmp(tmpRoot, { owned: false }).removed).toBe(1);
+    expect(readdirSync(tmpRoot).sort()).toEqual(["notes", NEW_DIR]);
+    const forced = await post("/api/tmp/clean", { force: true, names: ["../etc"] }).then((r) => r.json());
+    expect(forced).toMatchObject({ skipped: [] });
+    expect((forced as { removed: string[] }).removed.sort()).toEqual(["notes", NEW_DIR]);
+    expect(readdirSync(tmpRoot)).toEqual([]);
+  } finally {
+    for (const n of readdirSync(tmpRoot)) rmSync(join(tmpRoot, n), { recursive: true, force: true });
+    oldDir(); // back for the tests that follow
+    mkdirSync(join(tmpRoot, NEW_DIR));
+  }
+}, 30_000); // inUse walks the host's /proc on each read (see above)
+
+/**
+ * The page's disk section (loadTmp and its buttons) against fakes: GET /api/tmp answers per age, the status names the
+ * running tasks, and confirm answers `yes`. What was posted, and what the confirm asked, are kept.
+ */
+async function loadTmpPage(o: { yes: boolean; stopping?: Array<{ title: string; status: string }> }) {
+  const html = readFileSync(new URL("./page.html", import.meta.url), "utf8");
+  const src = html.slice(html.indexOf("const short ="), html.indexOf('$("restart").onclick')) + html.slice(html.indexOf("// the disk and /tmp"), html.indexOf("// Every 2 s while"));
+  type El = { textContent: string; value: string; className: string; hidden: boolean; disabled: boolean; onclick: null | (() => Promise<void>); onchange: null | (() => Promise<void>); children: El[]; replaceChildren(...c: El[]): void; append(...c: El[]): void };
+  const el = (): El => ({ textContent: "", value: "", className: "", hidden: true, disabled: false, onclick: null, onchange: null, children: [], replaceChildren(...c) { this.children = c; }, append(...c) { this.children.push(...c); } });
+  const els = new Map<string, ReturnType<typeof el>>();
+  const $ = (id: string) => els.get(id) ?? (els.set(id, el()), els.get(id)!);
+  $("tmp-age").value = "7200000";
+  const status = { current: null, previous: null, releases: [], snapshots: [], history: [], log: [], busy: null, lastError: null, unhealthy: null, port: 1, state: "running", rebuild: false, stop: false, stopping: o.stopping ?? [], agent: { running: false, exitCode: null, output: "" } };
+  const tmp = (age: number) => ({
+    usage: { used: 1, total: 2, percent: 50 },
+    disk: { used: 1, total: 2, percent: 50 },
+    sweeps: { tmp: null, work: null, cache: null, docker: null },
+    owned: true,
+    staleMs: age,
+    entries: [{ name: "new", bytes: 1024, newestMs: Date.now(), removable: false, keep: "recent" }],
+    cleanable: age === 1800000 ? { names: ["a", "b", "c"], bytes: 3072 } : { names: ["a"], bytes: 1024 },
+    forcible: { count: 5, bytes: 5 * 1024 * 1024 },
+  });
+  const posts: Array<{ path: string; body: unknown }> = [];
+  const asked: string[] = [];
+  const slow: Record<string, number> = { "1800000": 50 }; // the 30-minute read answers late
+  const fetch = async (path: string, init?: { method?: string; body?: string }) => {
+    if (path === "api/status") return Response.json(status);
+    if (path.startsWith("api/tmp?staleMs=")) {
+      const age = path.split("=")[1]!;
+      await Bun.sleep(slow[age] ?? 0);
+      return Response.json(tmp(Number(age)));
+    }
+    posts.push({ path, body: JSON.parse(init!.body!) });
+    return Response.json({ removed: [], freedBytes: 0, skipped: [] });
+  };
+  const confirm = (q: string) => (asked.push(q), o.yes);
+  const page = new Function("fetch", "confirm", "navigator", "$", "document", "headers", "rebuilding", "location", `${src}\nreturn { refresh, loadTmp };`)(fetch, confirm, {}, $, { createElement: el }, {}, false, { hostname: "127.0.0.1" }) as { refresh: () => Promise<void>; loadTmp: () => Promise<void> };
+  await page.refresh();
+  await page.loadTmp();
+  return { $, posts, asked };
+}
+
+test("tmp page: the picked age changes the clean button's count and what it sends; the force clean's confirm names the running tasks, and a cancel posts nothing", async () => {
+  const { $, posts, asked } = await loadTmpPage({ yes: true, stopping: [{ title: "PBI を進める", status: "running" }, { title: "レビュー", status: "waiting" }] });
+  expect($("tmp-clean").textContent).toBe("2 時間以上更新の無いものを消す（1 件、合計 1.0 KB）");
+  expect($("tmp-force").textContent).toBe("強制クリア（5 件、合計 5.0 MB）");
+  expect($("tmp-list").children[0]!.children[1]!.textContent).toStartWith("2 時間以内に更新 · ");
+  // changed twice quickly: the late 30-minute answer does not overwrite the 6-hour one
+  $("tmp-age").value = "1800000";
+  const late = $("tmp-age").onchange!();
+  $("tmp-age").value = "21600000";
+  await $("tmp-age").onchange!();
+  await late;
+  expect($("tmp-clean").textContent).toStartWith("6 時間以上更新の無いものを消す");
+  expect($("tmp-list").children[0]!.children[1]!.textContent).toStartWith("6 時間以内に更新 · ");
+  $("tmp-age").value = "1800000";
+  await $("tmp-age").onchange!();
+  expect($("tmp-clean").textContent).toBe("30 分以上更新の無いものを消す（3 件、合計 3.0 KB）");
+  await $("tmp-clean").onclick!();
+  expect(posts[0]).toEqual({ path: "api/tmp/clean", body: { names: ["a", "b", "c"], staleMs: 1800000 } });
+  await $("tmp-force").onclick!();
+  expect(posts[1]).toEqual({ path: "api/tmp/clean", body: { force: true } });
+  expect(asked[1]).toContain("5 件（合計 5.0 MB）");
+  expect(asked[1]).toContain("\nPBI を進める（実行中）\nレビュー（承認待ち）");
+
+  const none = await loadTmpPage({ yes: false });
+  await none.$("tmp-force").onclick!();
+  await none.$("tmp-clean").onclick!();
+  expect(none.posts).toEqual([]);
+  expect(none.asked[0]).toContain("動いている Task はありません");
 });

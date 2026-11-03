@@ -1,7 +1,8 @@
 /**
  * The CI's steps, one list for both runs (#912): Actions runs `bun scripts/ci.ts` after checkout and setup-bun, and
  * local-ci expands that step of ci.yml into `ciSteps` of the PR's own checkout, so the two run the same commands in the
- * same order and stop at the same failing step. Only node builtins at the top (the kit's idle-run, which imports nothing, in Actions' branch): it runs before `bun install`.
+ * same order and stop at the same failing step (a `keepGoing` step's failure does not stop them: the perf steps, so that
+ * `bun test` still runs and both results are known in one run). Only node builtins at the top (the kit's idle-run, which imports nothing, in Actions' branch): it runs before `bun install`.
  * Each step is a `bash -e -c` script, as Actions runs a `run:`. Exit: 1 when a step failed (its own code is in the
  * `✗ <step>: exit <code>` line), else 0 — local-ci's too, whose 2 means it ran nothing.
  * `bun scripts/ci.ts --list` prints the steps as JSON and runs nothing.
@@ -10,7 +11,8 @@
 /** A step that prints nothing for this long is taken as stuck. No limit on a step's total time. */
 export const STEP_IDLE_SECONDS = 900;
 
-export interface Step { name: string; run: string }
+/** `keepGoing`: a failure of this step does not stop the run (the run still fails). */
+export interface Step { name: string; run: string; keepGoing?: boolean }
 
 export const ciSteps: Step[] = [
   // Personal data (#24): a home path other than the placeholders fixtures and docs use (/Users/dev, /Users/example, …) fails.
@@ -27,12 +29,10 @@ export const ciSteps: Step[] = [
   { name: "bun run licenses:check", run: "bun run licenses:check" },
   // typecheck は先に入っている Codex から型を生成する（scripts/codex_types.ts）。CI を回す環境にも Codex CLI が要る
   { name: "bun run typecheck", run: "bun run typecheck" },
-  // 実ランナー（claude/codex）は CI に無い。アダプタの再生テストは Git の外の録画を読み、無ければ理由を出して飛ぶ
-  // （README の Development）。録画を置いた所有者のローカル CI だけが再生まで確かめる。
-  { name: "bun test", run: "bun test" },
+  // perf-bench measures this build; bun test does not depend on it
   { name: "bun run --cwd apps/web build", run: "bun run --cwd apps/web build" },
-  // perf ratchet (#638): the counts of the four journeys and the bundle against scripts/perf-budget.json. check also
-  // compares the ceilings with main's, so main is fetched. 5 runs: the medians move by the bands perf-ratchet allows, a single
+  // perf ratchet (#638): the counts of the four journeys against scripts/perf-budget.json, and the bundle against main's
+  // tip built in a worktree next to the checkout (#3167). check also compares the ceilings with main's, so main is fetched. 5 runs: the medians move by the bands perf-ratchet allows, a single
   // run by more. Chrome is on ubuntu-latest; perf-bench finds it.
   // --depth=1 only in Actions' shallow checkout: in local-ci's worktree it would make the developer's clone shallow
   {
@@ -46,18 +46,26 @@ git fetch $depth origin +refs/heads/main:refs/remotes/origin/main`,
     run: `if fc-list ':family=Noto Sans' | grep -q . && fc-list ':family=Noto Sans CJK JP' | grep -q .; then exit 0; fi
 sudo apt-get update -qq && sudo apt-get install -y -qq fonts-noto-core fonts-noto-cjk`,
   },
-  { name: "bun scripts/perf-bench.ts --runs 5 --json perf-result.json", run: "bun scripts/perf-bench.ts --runs 5 --json perf-result.json" },
+  // main's tip, built and measured for the bundle check: compared with origin/main's tip, not the PR's base branch, so a
+  // stack's top compares the whole stack. local-ci records it (perf-records/bundle.tsv)
+  { name: "bun scripts/perf-ratchet.ts base origin/main perf-base.json", run: "bun scripts/perf-ratchet.ts base origin/main perf-base.json", keepGoing: true },
+  // the perf steps run before bun test (their result does not wait 5 minutes for it) and keep going: a perf red still
+  // runs bun test, so a run says both (#2945). Not in parallel: perf-bench is not measured next to another load.
+  { name: "bun scripts/perf-bench.ts --runs 5 --json perf-result.json", run: "bun scripts/perf-bench.ts --runs 5 --json perf-result.json", keepGoing: true },
   // the ceilings for Actions are `github` (GITHUB_ACTIONS=true); on a red the result JSON is printed for `update --env github`
-  { name: "bun scripts/perf-ratchet.ts check perf-result.json", run: "bun scripts/perf-ratchet.ts check perf-result.json || { cat perf-result.json; exit 1; }" },
+  { name: "bun scripts/perf-ratchet.ts check perf-result.json", run: "bun scripts/perf-ratchet.ts check perf-result.json --base perf-base.json || { cat perf-result.json; exit 1; }", keepGoing: true },
+  // 実ランナー（claude/codex）は CI に無い。アダプタの再生テストは Git の外の録画を読み、無ければ理由を出して飛ぶ
+  // （README の Development）。録画を置いた所有者のローカル CI だけが再生まで確かめる。
+  { name: "bun test", run: "bun test" },
 ];
 
-/** Runs `steps` in order with `run` and stops after the first non-zero code; the results are the steps that ran. */
+/** Runs `steps` in order with `run` and stops after the first non-zero code of a step without `keepGoing`; the results are the steps that ran. */
 export async function runCi<R extends { code: number }>(steps: Step[], run: (s: Step) => Promise<R>): Promise<Array<Step & R>> {
   const results: Array<Step & R> = [];
   for (const s of steps) {
     const r = await run(s);
     results.push({ ...s, ...r });
-    if (r.code !== 0) break;
+    if (r.code !== 0 && !s.keepGoing) break;
   }
   return results;
 }
@@ -78,7 +86,6 @@ if (import.meta.main && process.argv[2] === "--list") {
     if (r.idleKilled) console.log(IDLE_KILLED_LINE(STEP_IDLE_SECONDS));
     return { code: r.code };
   });
-  const failed = results.find((r) => r.code !== 0);
-  if (failed) console.log(`✗ ${failed.name}: exit ${failed.code}`);
+  for (const failed of results.filter((r) => r.code !== 0)) console.log(`✗ ${failed.name}: exit ${failed.code}`);
   process.exit(ciExit(results));
 }

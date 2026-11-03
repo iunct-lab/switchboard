@@ -28,6 +28,8 @@ export const Workspace = z.object({
    * repository's forge either way.
    */
   backlog: z.enum(["github", "switchboard"]).default("github"),
+  /** The repository's `owner/name` when it was added from someone else's repository (#2576). This workspace never writes there. */
+  upstream: z.string().optional(),
   /** backlog-next's slots here (#2656); a new workspace starts with one of each. */
   sweep: WorkspaceSweep.default({ implement: 1, plan: 1 }),
 });
@@ -582,10 +584,10 @@ export const LlmRoutingSettings = z
      */
     timeoutMs: z.number().int().min(1000).max(60_000).default(5000),
   })
-  .default({});
+  .prefault({});
 export type LlmRoutingSettings = z.infer<typeof LlmRoutingSettings>;
 
-export const RoutingSettings = z.object({ llm: LlmRoutingSettings }).default({});
+export const RoutingSettings = z.object({ llm: LlmRoutingSettings }).prefault({});
 export type RoutingSettings = z.infer<typeof RoutingSettings>;
 
 /**
@@ -599,18 +601,18 @@ export const JudgeSettings = z
     runner: RunnerId.default("codex"),
     model: z.string().default("gpt-6-luna"),
   })
-  .default({});
+  .prefault({});
 export type JudgeSettings = z.infer<typeof JudgeSettings>;
 
 /**
  * Evals (#1219): the rubric judge at the end of a `done` turn. On by default, like the two-way judge; the runner and
  * model are the `judge` setting's (one setting, one subscription), so this only switches it off.
  */
-export const EvalsSettings = z.object({ judge: z.object({ enabled: z.boolean().default(true) }).default({}) }).default({});
+export const EvalsSettings = z.object({ judge: z.object({ enabled: z.boolean().default(true) }).prefault({}) }).prefault({});
 export type EvalsSettings = z.infer<typeof EvalsSettings>;
 
 /** Naming a task after its first turn (#491). On by default: it spends a runner's quota once per task. Runner and model are not settings (`TITLE_RUNNERS`). */
-export const TitlesSettings = z.object({ auto: z.boolean().default(true) }).default({});
+export const TitlesSettings = z.object({ auto: z.boolean().default(true) }).prefault({});
 export type TitlesSettings = z.infer<typeof TitlesSettings>;
 
 /** One answer of the judge: `done` = the work asked for is finished and reported, `needs_action` = it stopped for the person. */
@@ -621,7 +623,7 @@ export type TaskJudgement = z.infer<typeof TaskJudgement>;
  * The kinds of Task that start by themselves (#1337): the feedback modes (`FeedbackInput.mode`) and the backlog stages
  * (`BacklogAction`), under their own names.
  */
-export const AutoStartKind = z.enum(["fix", "request", "to-pbi", "to-tasks", "complete", "check", "close", "new-repo"]);
+export const AutoStartKind = z.enum(["fix", "request", "to-pbi", "to-tasks", "complete", "check", "close", "new-repo", "upstream-sync"]);
 export type AutoStartKind = z.infer<typeof AutoStartKind>;
 
 /** One kind's own runner / model / effort (#1337); `model` / `effort` empty = that runner's CLI default. */
@@ -648,8 +650,9 @@ export const AutoStartSettings = z
         check: AutoStartChoice.optional(),
         close: AutoStartChoice.optional(),
         "new-repo": AutoStartChoice.optional(),
+        "upstream-sync": AutoStartChoice.optional(),
       })
-      .default({}),
+      .prefault({}),
     /**
      * 上限のときの代わり (#834): while the decided runner has a usage window at `fallbackAt` or more that has not reset,
      * the next usable runner of this order starts the Task instead, on its CLI default model. Empty = no switch.
@@ -657,7 +660,7 @@ export const AutoStartSettings = z
     fallback: z.array(RunnerId).default([]),
     fallbackAt: z.number().min(0.5).max(1).default(0.9),
   })
-  .default({});
+  .prefault({});
 export type AutoStartSettings = z.infer<typeof AutoStartSettings>;
 
 /**
@@ -710,7 +713,7 @@ export const QuotaAndResumeSettings = z
     maxStopResumes: quotaAndResumeFields.maxStopResumes.default(2),
     thinSample: quotaAndResumeFields.thinSample.default(5),
   })
-  .default({});
+  .prefault({});
 export type QuotaAndResumeSettings = z.infer<typeof QuotaAndResumeSettings>;
 
 export const JudgeAndChoiceSettings = z
@@ -720,7 +723,7 @@ export const JudgeAndChoiceSettings = z
     judgeTimeoutMs: judgeAndChoiceFields.judgeTimeoutMs.default(60_000),
     workspaceChoiceTimeoutMs: judgeAndChoiceFields.workspaceChoiceTimeoutMs.default(60_000),
   })
-  .default({});
+  .prefault({});
 export type JudgeAndChoiceSettings = z.infer<typeof JudgeAndChoiceSettings>;
 
 export const NewDefaultsSettings = z
@@ -728,7 +731,7 @@ export const NewDefaultsSettings = z
     taskRunner: newDefaultsFields.taskRunner.default("claude"),
     scheduleCron: newDefaultsFields.scheduleCron.default("0 3 * * *"),
   })
-  .default({});
+  .prefault({});
 export type NewDefaultsSettings = z.infer<typeof NewDefaultsSettings>;
 
 /** A dated price change (#115): valid from 00:00 UTC of `from`; a field left out keeps the row's value. */
@@ -764,39 +767,39 @@ export type SettingsPrice = z.infer<typeof SettingsPrice>;
 /** Daemon settings the UI can change (#58). Stored in sqlite; `~/.switchboard` files stay for the other knobs. */
 export const Settings = z.object({
   /** runner → permission mode used when a task is created without one. Absent = the adapter's own default. */
-  defaultPermissionMode: z.record(z.string()).default({}),
+  defaultPermissionMode: z.record(z.string(), z.string()).default({}),
   /** runner → resume a task stopped on the usage limit once it lifts (#102). Absent = off. */
-  autoResume: z.record(z.boolean()).default({}),
+  autoResume: z.record(z.string(), z.boolean()).default({}),
   /** Shadow run (#99): runner every new task is mirrored to unless the creation says otherwise; null = off. */
   shadowRunner: RunnerId.nullable().default(null),
   /** LLM runner suggestions (#25). Off by default: switching it on spends the runner's quota on every task creation. */
-  routing: RoutingSettings.default({}),
+  routing: RoutingSettings.prefault({}),
   /** Judge each finished turn as done / needs action (#493). On by default: it spends the runner's quota once per turn. */
-  judge: JudgeSettings.default({}),
+  judge: JudgeSettings.prefault({}),
   /** Runner and model of the Tasks that start by themselves (#832). */
-  autoStart: AutoStartSettings.default({}),
+  autoStart: AutoStartSettings.prefault({}),
   /** The rubric judge (#1219). */
-  evals: EvalsSettings.default({}),
+  evals: EvalsSettings.prefault({}),
   /** Name a task after its first turn (#491). */
-  titles: TitlesSettings.default({}),
+  titles: TitlesSettings.prefault({}),
   /** Usage threshold and automatic resume (#835). */
-  quotaAndResume: QuotaAndResumeSettings.default({}),
+  quotaAndResume: QuotaAndResumeSettings.prefault({}),
   /** The judge's fallback and timeouts, the Workspace choice's timeout (#835). */
-  judgeAndChoice: JudgeAndChoiceSettings.default({}),
+  judgeAndChoice: JudgeAndChoiceSettings.prefault({}),
   /** What the creation forms start with (#835). */
-  newDefaults: NewDefaultsSettings.default({}),
+  newDefaults: NewDefaultsSettings.prefault({}),
   /**
    * runner → region of Amazon Bedrock (#1730). Absent = the runner runs on its own login (the Claude account). Only
    * what the user chose is saved: no key, no profile; the CLI reads AWS credentials its own way (docs/design/bedrock.md).
    */
-  bedrock: z.record(z.object({ region: z.string() })).default({}),
+  bedrock: z.record(z.string(), z.object({ region: z.string() })).default({}),
   /** model → price (USD / 1M tokens) over pricing.json's row of the same model (#1402); read on every use, no restart. */
-  prices: z.record(SettingsPrice).default({}),
+  prices: z.record(z.string(), SettingsPrice).default({}),
   /**
    * runner → the model choices (#1400), in the order shown. Absent = the adapter's bundled list. Replaces the list of
    * the runner's own login only: on Amazon Bedrock the ids are spelled differently and the adapter's Bedrock list stays.
    */
-  models: z.record(z.array(ModelOption)).default({}),
+  models: z.record(z.string(), z.array(ModelOption)).default({}),
 });
 export type Settings = z.infer<typeof Settings>;
 
@@ -804,12 +807,12 @@ const autoStartChoicePatch = z.object({ runner: RunnerId, model: z.string(), eff
 
 /** PATCH body: null removes the override (back to the adapter default / off). */
 export const SettingsPatch = z.object({
-  defaultPermissionMode: z.record(z.string().nullable()).optional(),
-  autoResume: z.record(z.boolean().nullable()).optional(),
+  defaultPermissionMode: z.record(z.string(), z.string().nullable()).optional(),
+  autoResume: z.record(z.string(), z.boolean().nullable()).optional(),
   /** null = back to the runner's own login (#1730). */
-  bedrock: z.record(z.object({ region: z.string().regex(/^[a-z]{2}(-[a-z]+)+-\d$/) }).nullable()).optional(),
+  bedrock: z.record(z.string(), z.object({ region: z.string().regex(/^[a-z]{2}(-[a-z]+)+-\d$/) }).nullable()).optional(),
   /** The whole list per runner (#1400); null = back to the adapter's bundled list. */
-  models: z.record(z.array(ModelOption).nullable()).optional(),
+  models: z.record(z.string(), z.array(ModelOption).nullable()).optional(),
   shadowRunner: RunnerId.nullable().optional(),
   /** Partial: `{ routing: { llm: { enabled: true } } }` leaves the saved runner / model alone. */
   routing: z.object({ llm: z.object({ enabled: z.boolean(), runner: RunnerId, model: z.string(), timeoutMs: z.number().int().min(1000).max(60_000) }).partial().optional() }).partial().optional(),
@@ -834,6 +837,7 @@ export const SettingsPatch = z.object({
           check: autoStartChoicePatch,
           close: autoStartChoicePatch,
           "new-repo": autoStartChoicePatch,
+          "upstream-sync": autoStartChoicePatch,
         })
         .partial(),
       /** Replaces the whole order (#834). */
@@ -850,7 +854,7 @@ export const SettingsPatch = z.object({
   judgeAndChoice: z.object(judgeAndChoiceFields).partial().nullable().optional(),
   newDefaults: z.object(newDefaultsFields).partial().nullable().optional(),
   /** model → price row; null removes the row (back to pricing.json's row, if any) (#1402). */
-  prices: z.record(SettingsPrice.nullable()).optional(),
+  prices: z.record(z.string(), SettingsPrice.nullable()).optional(),
 });
 export type SettingsPatch = z.infer<typeof SettingsPatch>;
 
@@ -885,7 +889,7 @@ export const LedgerSummary = z.object({
   /** What is actually charged (subscription runners count 0). */
   billedTodayUsd: z.number(),
   billedWeekUsd: z.number(),
-  byRunnerToday: z.record(z.number()),
+  byRunnerToday: z.record(z.string(), z.number()),
   quota: z.array(z.object({ runner: RunnerId, window: z.string(), utilization: z.number(), resetsAt: z.number(), ts: z.number() })),
   topTasks: z.array(z.object({ taskId: z.string(), title: z.string(), runner: RunnerId, costUsd: z.number(), tokens: z.number() })),
   /** null while it cannot be read (#549). */
@@ -974,11 +978,11 @@ export type OpsLatency = z.infer<typeof OpsLatency>;
 export const PricingTable = z.object({
   version: z.literal(1),
   /** api = pay-as-you-go (実課金 = API 換算) · subscription = covered by a plan (実課金 0) */
-  billing: z.record(z.enum(["api", "subscription"])).default({}),
+  billing: z.record(z.string(), z.enum(["api", "subscription"])).default({}),
   /** USD per 1M tokens */
-  models: z.record(ModelPrice).default({}),
+  models: z.record(z.string(), ModelPrice).default({}),
   /** model or runner name → model name in `models` */
-  aliases: z.record(z.string()).default({}),
+  aliases: z.record(z.string(), z.string()).default({}),
 });
 export type PricingTable = z.infer<typeof PricingTable>;
 
@@ -1054,7 +1058,7 @@ export const MaterializeApplyInput = z.object({
   workspaceId: z.string().min(1).optional(),
   paths: z.array(z.string()).optional(),
   /** relPath → hash of the previewed content; the daemon refuses to write a file whose plan moved since the preview. */
-  expected: z.record(z.string()).optional(),
+  expected: z.record(z.string(), z.string()).optional(),
   /** Overwrite managed blocks that were edited by hand in the repository file. */
   force: z.boolean().optional(),
 });
@@ -1181,7 +1185,7 @@ export const PendingApproval = z.object({
   id: z.string(),
   kind: PermissionKind,
   tool: z.string(),
-  input: z.unknown(),
+  input: z.unknown().optional(),
   detail: z.string(),
   askedAt: z.number(),
 });
@@ -1603,7 +1607,7 @@ export const BacklogSyncReason = z.enum(["failed", "unknown", "unavailable", "fo
 export type BacklogSyncReason = z.infer<typeof BacklogSyncReason>;
 
 /** A held conflict as the list shows it: the three values of `BacklogHeldEdit.conflict`, with the field and the revision a choice names. */
-export const BacklogSyncConflict = z.object({ field: z.string().nullable(), base: z.unknown(), local: z.unknown(), remote: z.unknown(), remoteRead: z.boolean(), revision: z.string() });
+export const BacklogSyncConflict = z.object({ field: z.string().nullable(), base: z.unknown().optional(), local: z.unknown().optional(), remote: z.unknown().optional(), remoteRead: z.boolean(), revision: z.string() });
 export type BacklogSyncConflict = z.infer<typeof BacklogSyncConflict>;
 
 /**
@@ -1947,7 +1951,7 @@ export const BacklogHeldEdit = z.object({
   status: z.enum(["conflict", "failed", "unknown"]),
   reason: z.string().nullable(),
   updatedAt: z.number(),
-  conflict: z.object({ base: z.unknown(), local: z.unknown(), remote: z.unknown(), remoteRead: z.boolean(), revision: z.string() }).nullable(),
+  conflict: z.object({ base: z.unknown().optional(), local: z.unknown().optional(), remote: z.unknown().optional(), remoteRead: z.boolean(), revision: z.string() }).nullable(),
 });
 export type BacklogHeldEdit = z.infer<typeof BacklogHeldEdit>;
 
@@ -2004,9 +2008,12 @@ export const BacklogEditInput = z
      * made here (on GitHub's), `remote` = keep GitHub's; `expectedRevision` = the conflict's `revision` as read.
      */
     resolve: z.object({ field: z.string().min(1), choice: z.enum(["local", "remote"]), expectedRevision: z.string().min(1) }).strict().optional(),
+    /** Sends a `failed` operation of the Issue again (#2885), its cause put right: `operation` = the held edit's id. */
+    retry: z.object({ operation: z.string().min(1) }).strict().optional(),
   })
   .strict()
-  .refine((e) => !e.resolve || Object.keys(e).every((k) => k === "workspaceId" || k === "resolve"), { message: "resolve は編集と一緒には送れません" });
+  .refine((e) => !e.resolve || Object.keys(e).every((k) => k === "workspaceId" || k === "resolve"), { message: "resolve は編集と一緒には送れません" })
+  .refine((e) => !e.retry || Object.keys(e).every((k) => k === "workspaceId" || k === "retry"), { message: "retry は編集と一緒には送れません" });
 export type BacklogEditInput = z.infer<typeof BacklogEditInput>;
 
 /** A new Issue (`POST /api/backlog`, #886), kept here and created on GitHub later; `fields` puts it in the workspace's Project. */
@@ -2043,7 +2050,7 @@ export const FlowPbi = z.object({
   url: z.string(),
   storyPoints: z.number().nullable(),
   closedAt: z.string(),
-  stages: z.record(FlowStage, z.number().nullable()),
+  stages: z.partialRecord(FlowStage, z.number().nullable()),
   /** Sum of `## 判断待ち` → the next `## 回答` on the PBI and its Tasks (ms). */
   userWaitMs: z.number(),
   /** Per PR: how many `[codex|claude|dak] review` comments it got. */

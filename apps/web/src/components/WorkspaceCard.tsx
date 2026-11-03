@@ -1,7 +1,64 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { Task, Workspace, WorkspaceRemoval } from "@switchboard/protocol";
-import { api, type WorkspaceClone } from "../api.ts";
+import { api, type RunnerConfigView, type WorkspaceClone } from "../api.ts";
+import { runnerConfigSummary } from "../foreignWorkspace.ts";
 import { canRemove, cloneRowText, removalWarning } from "../workspaceAdd.ts";
+
+/** A foreign repository (#2576): its runner config shown as text until confirmed, then 元の更新を取り込む. */
+function ForeignRow(props: { workspace: Workspace; onTaskStarted: (task: Task) => void; onError: (msg: string) => void }) {
+  const { workspace: w, onError } = props;
+  const [config, setConfig] = useState<RunnerConfigView | null>(null);
+  const [busy, setBusy] = useState(false);
+  const fail = (e: unknown) => onError(String((e as Error).message ?? e));
+  const read = useCallback(() => api.runnerConfig(w.id).then(setConfig).catch((e: unknown) => onError(String((e as Error).message ?? e))), [w.id, onError]);
+  useEffect(() => {
+    void read();
+  }, [read]);
+  if (!config) return null;
+  if (config.confirmed) {
+    return (
+      <div className="row">
+        <button
+          disabled={busy}
+          onClick={() => {
+            setBusy(true);
+            api.syncUpstream(w.id).then(props.onTaskStarted).catch((e: unknown) => {
+              fail(e);
+              void read(); // refused because the config changed since: back to the list
+            }).finally(() => setBusy(false));
+          }}
+        >
+          元の更新を取り込む
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="row" style={{ flexDirection: "column", alignItems: "stretch" }}>
+      <div className="hint">{runnerConfigSummary(config.files)}</div>
+      {config.files.map((f) => (
+        <details key={f.path}>
+          <summary className="mono">{f.path}</summary>
+          <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{f.content}</pre>
+        </details>
+      ))}
+      <div className="row">
+        <button
+          disabled={busy}
+          onClick={() => {
+            setBusy(true);
+            api.confirmRunnerConfig(w.id, config.hash).then(read).catch((e: unknown) => {
+              fail(e);
+              void read();
+            }).finally(() => setBusy(false));
+          }}
+        >
+          確認した
+        </button>
+      </div>
+    </div>
+  );
+}
 
 /**
  * Workspace (#1447): the registered repositories and the ways to add one, in one place. 新しく作る asks a Task to create
@@ -31,10 +88,11 @@ export function WorkspaceCard(props: { workspaces: Workspace[]; clones: Workspac
       {props.workspaces.filter((w) => w.kind === "repo").map((w) => (
         <div key={w.id}>
           <div className="row">
-            <span>{w.name}</span>
+            <span>{w.upstream ? `${w.name}（元: ${w.upstream}）` : w.name}</span>
             <span className="mono hint" style={{ flex: 1 }}>{w.path}</span>
             <button className="ghost" onClick={() => api.workspaceRemoval(w.id).then((info) => setRemoving({ id: w.id, info, typed: "", deleteCopy: false })).catch(fail)}>登録を外す</button>
           </div>
+          {w.upstream ? <ForeignRow workspace={w} onTaskStarted={props.onTaskStarted} onError={props.onError} /> : null}
           {removing?.id === w.id ? (
             <div className="row" style={{ flexDirection: "column", alignItems: "stretch" }}>
               {removalWarning(removing.info, removing.deleteCopy) ? <div className="hint">{removalWarning(removing.info, removing.deleteCopy)}</div> : null}
