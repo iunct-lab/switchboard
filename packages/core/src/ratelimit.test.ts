@@ -180,7 +180,7 @@ describe("rate limit: RateLimitResumer (#102)", () => {
     let cur = db.getTask(t.id)!;
     expect(cur.status).toBe("error");
     expect(cur.resumeAt).toBe(RESETS_AT * 1000 + RESUME_MARGIN_MS);
-    expect(statuses(t.id).at(-1)).toContain(`${fmtTime(cur.resumeAt!, now)} に自動再開します`); // 04:11 JST, in the daemon's zone
+    expect(statuses(t.id).at(-1)).toContain(`${fmtTime(cur.resumeAt!, now)} に自動再開します`); // 04:11 JST
     expect(statuses(t.id).at(-1)).toContain("quota");
     expect(broadcasts.some((m) => (m as { type: string; task?: { resumeAt: number | null } }).type === "task.updated" && (m as { task: { resumeAt: number | null } }).task.resumeAt === cur.resumeAt)).toBe(true);
     // not due yet
@@ -1052,5 +1052,13 @@ describe("fallbackRunner (#834)", () => {
     const r = fallbackRunner("claude", cfg(["codex"], 0.8), rows({ claude: [["five_hour", 0.5, later], ["seven_day", 0.85, later]] }), () => true, now);
     expect(r).toEqual({ runner: "codex", from: { runner: "claude", window: "seven_day", utilization: 0.85, resetsAt: later * 1000 } });
     expect(fallbackNote(r.runner, r.from!, now)).toBe(`claude が上限（0.85、${fmtTime(later * 1000, now)} に戻る）のため codex で開始`);
+  });
+});
+
+describe("fmtTime (#2040): JST whatever the daemon's time zone", () => {
+  test("fmtTime: the same JST day → HH:MM; another JST day → M/D HH:MM", () => {
+    const now = Date.parse("2026-10-19T08:03:00Z");
+    expect(fmtTime(now, now)).toBe("17:03");
+    expect(fmtTime(Date.parse("2026-10-19T15:30:00Z"), now)).toBe("10/20 00:30");
   });
 });

@@ -1,11 +1,14 @@
 /**
- * Run after `bun run --cwd apps/web build`: bun scripts/perf-bench.ts [--runs N] [--json <file>]. Requires Chrome
+ * Run after `bun run --cwd apps/web build`: bun scripts/perf-bench.ts [--runs N] [--json <file>] [--skip-loaded <reason>]. Requires Chrome
  * (CHROME_BIN overrides). Times the four journeys of #637 (launch / new-task / open-task / send) the same way each run:
  * a fresh daemon with a fake runner (a long task of 2,000 events; every other turn a reply of 200 deltas) and a fresh
  * headless Chrome tab at 1280 × 800. Prints, per journey, the median and p90 of `sb:<journey>` in ms and the counts that
  * do not wobble (API requests, Chrome's LayoutCount / RecalcStyleCount, the layout shift) as the median of the runs.
- * Then launch and send again on a daemon holding as much as the real home (scripts/perf-load.ts) under a backlog import
- * and the rescue page's status checks, and the longest the daemon took to answer /api/health meanwhile (`loaded`, #2822).
+ * Then, once (LOADED_RUNS, not --runs), launch and send again on a daemon holding as much as the real home
+ * (scripts/perf-load.ts): launch under a backlog import and the rescue page's status checks, send without them, and the
+ * longest the daemon took to answer /api/health during the import (`loaded`, #2822, #3634). `--skip-loaded <reason>`:
+ * local-ci gives it when the change does not reach this script (scripts/test-select.ts --loaded, #3635); the result then
+ * holds `loadedSkipped` instead of `loaded`, and perf-ratchet leaves the `loaded` ceiling out.
  */
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,7 +20,7 @@ import { LOAD, LONG_EVENTS, loadGh, longEvents, overlap, seedLoad } from "./perf
 import { bundleOf } from "./perf-ratchet.ts";
 import type { Journey, RunnerAdapter } from "@switchboard/protocol";
 
-const { values: args } = parseArgs({ options: { runs: { type: "string", default: "5" }, json: { type: "string" } } });
+const { values: args } = parseArgs({ options: { runs: { type: "string", default: "5" }, json: { type: "string" }, "skip-loaded": { type: "string" } } });
 const runs = Number(args.runs);
 if (!Number.isInteger(runs) || runs < 1) throw new Error(`--runs must be a positive integer: ${args.runs}`);
 const dist = join(import.meta.dir, "../apps/web/dist");
@@ -26,6 +29,9 @@ if (!existsSync(join(dist, "index.html"))) throw new Error("apps/web/dist is mis
 const REPLY_DELTAS = 200;
 /** A loaded journey waits this long, not `until`'s 30 s: a daemon stuck for longer must read as over its ceiling, not as a timeout. */
 const LOADED_WAIT_MS = 300_000;
+/** `loaded` runs once, whatever --runs is (#3634): it tells a daemon stuck for minutes (the ceiling's ~90 times) from a
+ * working one, and finer than that the host's load moves it more than more runs would settle; 5 runs took ~8 minutes. */
+const LOADED_RUNS = 1;
 
 const benchAdapter: RunnerAdapter = {
   id: "claude",
@@ -226,7 +232,7 @@ const runOnce = (chromePort: string, base: string) => withTab(chromePort, async 
   return out;
 });
 
-/** launch and send under `overlap`; opening the long task in between is neither timed nor overlapped. */
+/** launch under `overlap` (one import a run, #3634); send on the same loaded daemon without one; opening the long task in between is not timed. */
 const runLoaded = (chromePort: string, d: Loaded, workspaceId: string) => withTab(chromePort, async ({ call, journey, click, type, settle }) => {
   const windows: number[] = [];
   const around: Around = async (run) => windows.push(await overlap({ ...d, workspaceId }, run));
@@ -235,7 +241,7 @@ const runLoaded = (chromePort: string, d: Loaded, workspaceId: string) => withTa
   await until(() => click(".rail .it", "long"), "the long task in the rail", LOADED_WAIT_MS);
   await settle(LOADED_WAIT_MS);
   await type(".composer textarea", "reply");
-  const send = await journey("send", () => until(() => click(".composer .pri"), "the send button", LOADED_WAIT_MS), around, LOADED_WAIT_MS);
+  const send = await journey("send", () => until(() => click(".composer .pri"), "the send button", LOADED_WAIT_MS), undefined, LOADED_WAIT_MS);
   return { launchMs: launch.ms, sendMs: send.ms, healthMaxMs: Math.max(...windows) };
 });
 
@@ -287,16 +293,19 @@ try {
       await d.stop();
     }
   }
-  const { workspaceId } = await seedLoad(template);
+  const skipLoaded = args["skip-loaded"];
   const loadedRuns: Array<{ launchMs: number; sendMs: number; healthMaxMs: number }> = [];
-  for (let i = 0; i < runs; i++) {
-    const d = await loadedDaemon(template);
-    try {
-      loadedRuns.push(await runLoaded(chromePort, d, workspaceId));
-      // a line per run: CI cuts a step that prints nothing for 15 minutes, and a slow run must end as a number over its ceiling
-      console.log(`loaded: run ${i + 1} of ${runs}: /api/health max ${loadedRuns.at(-1)!.healthMaxMs} ms`);
-    } finally {
-      await d.stop();
+  if (skipLoaded === undefined) {
+    const { workspaceId } = await seedLoad(template);
+    for (let i = 0; i < LOADED_RUNS; i++) {
+      const d = await loadedDaemon(template);
+      try {
+        loadedRuns.push(await runLoaded(chromePort, d, workspaceId));
+        // a line per run: CI cuts a step that prints nothing for 15 minutes, and a slow run must end as a number over its ceiling
+        console.log(`loaded: run ${i + 1} of ${LOADED_RUNS}: /api/health max ${loadedRuns.at(-1)!.healthMaxMs} ms`);
+      } finally {
+        await d.stop();
+      }
     }
   }
   const journeys = Object.fromEntries(
@@ -307,18 +316,21 @@ try {
   );
   const loadedMs = (xs: number[]) => ({ msMedian: round(median(xs)), msP90: round(p90(xs)) });
   const healthMs = loadedRuns.map((r) => r.healthMaxMs);
-  const loaded = { ...LOAD, overlap: ["backlog-sync", "rescue-status"], journeys: { launch: loadedMs(loadedRuns.map((r) => r.launchMs)), send: loadedMs(loadedRuns.map((r) => r.sendMs)) }, healthMaxMs: round(median(healthMs)), healthMaxMsP90: round(p90(healthMs)) };
-  const result = { runs, journeys, bundle: bundleOf(dist), loaded };
+  const loaded = skipLoaded === undefined ? { ...LOAD, overlap: ["backlog-sync", "rescue-status"], journeys: { launch: loadedMs(loadedRuns.map((r) => r.launchMs)), send: loadedMs(loadedRuns.map((r) => r.sendMs)) }, healthMaxMs: round(median(healthMs)), healthMaxMsP90: round(p90(healthMs)) } : undefined;
+  const result = { runs, journeys, bundle: bundleOf(dist), ...(loaded ? { loaded } : { loadedSkipped: skipLoaded }) };
   console.log(`runs: ${runs} (1280×800, headless Chrome, fonts: ${fontconfig ? "Noto Sans + Noto Sans CJK only" : "the OS's"}, fake runner: long task ${LONG_EVENTS} events, reply ${REPLY_DELTAS} deltas)`);
   console.log("| journey | ms median | ms p90 | requests | LayoutCount | RecalcStyleCount | layoutShift |");
   console.log("|---|---:|---:|---:|---:|---:|---:|");
   for (const [name, j] of Object.entries(journeys)) console.log(`| ${name} | ${j.msMedian} | ${j.msP90} | ${j.requests} | ${j.layoutCount} | ${j.recalcStyleCount} | ${j.layoutShift} |`);
   console.log(`bundle (gzip): js ${result.bundle.js} B, css ${result.bundle.css} B`);
-  console.log(`\nloaded: ${loaded.tasks} Tasks, ${loaded.backlogRecords} backlog records, ${loaded.operations} operations, under ${loaded.overlap.join(" + ")}`);
-  console.log("| measure | median | p90 |\n|---|---:|---:|");
-  console.log(`| launch ms | ${loaded.journeys.launch.msMedian} | ${loaded.journeys.launch.msP90} |`);
-  console.log(`| send ms | ${loaded.journeys.send.msMedian} | ${loaded.journeys.send.msP90} |`);
-  console.log(`| /api/health max ms | ${loaded.healthMaxMs} | ${loaded.healthMaxMsP90} |`);
+  if (!loaded) console.log(`\nloaded: 測らなかった（${skipLoaded}）`);
+  else {
+    console.log(`\nloaded: ${loaded.tasks} Tasks, ${loaded.backlogRecords} backlog records, ${loaded.operations} operations, under ${loaded.overlap.join(" + ")}`);
+    console.log("| measure | median | p90 |\n|---|---:|---:|");
+    console.log(`| launch ms | ${loaded.journeys.launch.msMedian} | ${loaded.journeys.launch.msP90} |`);
+    console.log(`| send ms | ${loaded.journeys.send.msMedian} | ${loaded.journeys.send.msP90} |`);
+    console.log(`| /api/health max ms | ${loaded.healthMaxMs} | ${loaded.healthMaxMsP90} |`);
+  }
   if (args.json) await Bun.write(args.json, JSON.stringify(result, null, 2) + "\n");
 } finally {
   chrome.kill();

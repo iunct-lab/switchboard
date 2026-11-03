@@ -23,13 +23,18 @@ describe("perf-ratchet judge", () => {
   });
   test("judge: loaded.healthMaxMs far below its ceiling is not improved, so update keeps it (#3574)", () => {
     const b: Budgets = { github: budget, local: { ...budget, loaded: { healthMaxMs: 5440 } } };
-    // a quiet host: 1714 < 5440 − 2 × 1750 = 1940, yet not improved
+    // a quiet host: 1714 far below the ceiling (5440 − 2 × 1750 = 1940 with the band then), yet not improved
     const { over, improved } = judge(loaded(1714), b.local);
     expect([over, improved]).toEqual([[], []]);
     expect(loweredBudgets(b, "local", improved).local.loaded).toEqual({ healthMaxMs: 5440 });
     expect(judge(loaded(5441), b.local)).toEqual({ over: [{ key: "loaded.healthMaxMs", value: 5441, ceiling: 5440 }], improved: [] });
     // a journey count below ceiling − 2 × band is still improved
     expect(judge({ ...result({ requests: 3 }), loaded: { healthMaxMs: 1714, healthMaxMsP90: 1901 } }, b.local).improved.map((i) => i.key)).toEqual(["journeys.send.requests"]);
+  });
+  test("judge: a result that skipped loaded leaves its ceiling out; one without loaded and no reason still throws (#3635)", () => {
+    expect(judge({ ...result({}), loadedSkipped: "変更 1 ファイルのどれも scripts/perf-bench.ts に届かない" }, withLoaded)).toEqual({ over: [], improved: [] });
+    expect(judge({ ...result({ requests: 9 }), loadedSkipped: "docs only" }, withLoaded).over.map((i) => i.key)).toEqual(["journeys.send.requests"]);
+    expect(() => judge(result({}), withLoaded)).toThrow("the result has no loaded.healthMaxMs");
   });
   test("judge: a budget without loaded does not need it in the result (#2822)", () => {
     expect(judge(result({}), budget)).toEqual({ over: [], improved: [] });

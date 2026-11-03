@@ -4,7 +4,7 @@ import { api } from "../api.ts";
 import { ArtifactBody } from "./Artifacts.tsx";
 import { DeviceAuth } from "./DeviceAuth.tsx";
 import { summarize } from "../approvals.ts";
-import { answerButtons, answerTarget, withoutGrant, appliedLine, askFacts, BATCH_LABEL, batchLines, blockerLines, groupAsks, hiddenByBatches, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, resumeLabel, scopeLabel, STATE_LABEL, unblocksLine, workspaceChips, workspaceKey, workspaceSections, type Answered, type PolicyForm } from "../asks.ts";
+import { answerButtons, answerTarget, withoutGrant, appliedLine, askFacts, BATCH_LABEL, batchLines, blockerLines, groupAsks, hiddenByBatches, isQuick, quickGroups, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, resumeLabel, scopeLabel, STATE_LABEL, unblocksLine, workspaceChips, workspaceKey, workspaceSections, type Answered, type PolicyForm } from "../asks.ts";
 
 /**
  * A card's answers (#936): what an answer does not take away, then one button per answer with what it sends and where,
@@ -126,6 +126,8 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
   const [sending, setSending] = useState<string | null>(null);
   // #1673: the Workspace the cards are narrowed to (its id, "" = not known), null = all; only while the screen is open
   const [workspace, setWorkspace] = useState<string | null>(null);
+  // #1675: the person's narrowed to the ones answered with one press; only while the screen is open
+  const [quickOnly, setQuickOnly] = useState(false);
   const { onError } = props;
   const seq = useRef(0);
   const load = useCallback(() => {
@@ -219,7 +221,12 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
   const inScope = (a: Ask) => narrowed === null || workspaceKey(a) === narrowed;
   const batches = list?.batches ?? [];
   // a batch's questions are answered on its card (#2046)
-  const groups = groupAsks(hiddenByBatches(all, batches).filter(inScope));
+  const scoped = groupAsks(hiddenByBatches(all, batches).filter(inScope));
+  // the cards' badge is on the question as answered here (a kept answer is not the person's any more)
+  const cardOf = (shown: Ask) => { const was = answered.get(shown.id); return was && !was.changed ? was.ask : shown; };
+  const quick = (scoped.find((g) => g.key === "person")?.asks.filter((a) => isQuick(cardOf(a))).length ?? 0) + unlisted.length;
+  // narrowed by the list's question: a card answered here stays where it was, with what the answer did, until the list is read again
+  const groups = quickOnly ? quickGroups(scoped) : scoped;
   // the live approvals not in the list yet have no Workspace: shown (and counted) whatever the filter
   const open = (list ? list.asks.filter((a) => inScope(a) && (a.state === "open" || a.state === "held") && a.needs === "person").length : 0) + unlisted.length;
 
@@ -246,6 +253,15 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
             ))}
           </div>
         )}
+        {/* a toggle of its own (#1675), not one of the Workspace's choices: it narrows on top of them */}
+        {(chips.length > 0 || unlisted.length > 0) && (
+          <div className="ask-quick-row">
+            <button className={quickOnly ? "pri" : undefined} aria-pressed={quickOnly} onClick={() => setQuickOnly((q) => !q)}>
+              すぐ答えられる {quick}
+            </button>
+          </div>
+        )}
+        {quickOnly && unlisted.length === 0 && !groups.some((g) => g.key === "person") && <div className="hint ask-quick-none">すぐ答えられる問いはありません（もう一度押すと全部に戻ります）</div>}
         {failed && <div className="hint warn ask-failed">{list ? "最新の判断待ちを読めませんでした。前に読んだ一覧と、今の承認を出しています" : "判断待ちを読めませんでした。承認だけを出しています"}（再読込で読み直します）</div>}
         {!list && !failed && <div className="muted">読み込み中…</div>}
         {list && list.asks.length === 0 && <div className="muted">判断待ちはありません</div>}
@@ -263,6 +279,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
           <div className="ask-tags">
             <span className="badge ask-kind ask-kind-approval">{KIND_LABEL.approval}</span>
             <span className="badge ask-state ask-state-open">{STATE_LABEL.open}</span>
+            <span className="badge ask-quick">すぐ答えられる</span>
           </div>
           {approvalHead(a)}
         </section>
@@ -290,6 +307,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
                     <div className="ask-tags">
                       <span className={`badge ask-kind ask-kind-${x.kind}`}>{KIND_LABEL[x.kind]}</span>
                       <span className={`badge ask-state ask-state-${x.state}`}>{STATE_LABEL[x.state]}</span>
+                      {isQuick(x) && <span className="badge ask-quick">すぐ答えられる</span>}
                       {unblocksLine(x) && <span className="badge ask-unblocks">{unblocksLine(x)}</span>}
                     </div>
                     {x.unblocks.length > 0 && (

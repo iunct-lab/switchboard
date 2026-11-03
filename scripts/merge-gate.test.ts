@@ -839,24 +839,44 @@ describe("merge-gate readPr", () => {
   });
 
   test("marks by an author outside the repository (a public --repo) do not count: review, [local-ci], [recheck]", async () => {
-    const HEAD = "0123456789abcdef0123456789abcdef01234567";
-    const OTHER = "fedcba9876543210fedcba9876543210fedcba98";
-    const outsider = (body: string, authorAssociation?: string) => ({ body, createdAt: "2026-09-24T11:30:00Z", ...(authorAssociation ? { authorAssociation } : {}) });
-    const v = {
-      ...view,
-      headRefOid: HEAD,
-      comments: [
-        outsider("[claude] review"),
-        outsider(`[recheck] migration pass ${HEAD}`, "CONTRIBUTOR"),
-        outsider(`[local-ci] pass ${HEAD} base=${OTHER}`, "NONE"),
-        { ...view.comments[0]!, authorAssociation: "FIRST_TIME_CONTRIBUTOR" },
-      ],
-    };
-    const r = { workflow_runs: [{ id: 7, name: "CI", status: "completed", conclusion: "failure", created_at: "2026-09-24T12:00:00Z" }] };
-    const f = await readPr(1, async (args) => JSON.stringify(args[0] === "pr" ? v : args[1]?.endsWith("/jobs") ? { jobs: [{ steps: [] }] } : args[1]?.includes("/actions/runs") ? r : threads([])));
-    expect(f.reviewComments).toEqual([]);
-    expect(f.rechecks).toBeUndefined();
-    expect(f.checks).toEqual([{ name: "CI", conclusion: "FAILURE" }]);
+    // a pass that would count but for its author: the PR's head on the PR's base, both in a real repository (inPass reads them)
+    const dir = mkdtempSync(join(tmpdir(), "merge-gate-outsider."));
+    try {
+      const url = join(dir, "gh.git");
+      const a = join(dir, "author");
+      const clone = join(dir, "clone");
+      const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
+      for (const x of [["--bare", url], ["-b", "main", a], [clone]]) execFileSync("git", ["init", "-q", ...x]);
+      for (const [k, val] of [["user.name", "t"], ["user.email", "t@example.com"], ["commit.gpgsign", "false"]]) git(a, "config", k!, val!);
+      const commit = (file: string) => (writeFileSync(join(a, file), `${file}\n`), git(a, "add", file), git(a, "commit", "-q", "-m", file), git(a, "rev-parse", "HEAD"));
+      const BASE = commit("README");
+      const HEAD = commit("one");
+      git(a, "push", "-q", url, `${HEAD}:refs/heads/pr`);
+      const outsider = (body: string, authorAssociation?: string) => ({ body, createdAt: "2026-09-24T11:30:00Z", ...(authorAssociation ? { authorAssociation } : {}) });
+      const facts = (localCiAuthor: string) => {
+        const v = {
+          ...view,
+          headRefOid: HEAD,
+          baseRefOid: BASE,
+          comments: [
+            outsider("[claude] review"),
+            outsider(`[recheck] migration pass ${HEAD}`, "CONTRIBUTOR"),
+            outsider(`[local-ci] pass ${HEAD} base=${BASE}`, localCiAuthor),
+            { ...view.comments[0]!, authorAssociation: "FIRST_TIME_CONTRIBUTOR" },
+          ],
+        };
+        const r = { workflow_runs: [{ id: 7, name: "CI", status: "completed", conclusion: "failure", created_at: "2026-09-24T12:00:00Z" }] };
+        return readPr(1, async (args) => JSON.stringify(args[0] === "pr" ? v : args[1]?.endsWith("/jobs") ? { jobs: [{ steps: [] }] } : args[1]?.includes("/actions/runs") ? r : threads([])), REPO, { root: clone, url });
+      };
+      const f = await facts("NONE");
+      expect(f.reviewComments).toEqual([]);
+      expect(f.rechecks).toBeUndefined();
+      expect(f.checks).toEqual([{ name: "CI", conclusion: "FAILURE" }]);
+      // the same mark by the owner counts: only the author rule kept it out above
+      expect((await facts("OWNER")).checks).toEqual([{ name: "CI（Actions が始まらず、ローカルで pass）", conclusion: "SUCCESS" }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   describe("README.md's Design rules", () => {

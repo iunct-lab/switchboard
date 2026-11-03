@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import type { CloudPreparation, ExecutionMode, CreateTaskInput, HistoryStatus, LedgerSummary, ReportRow, RoutingSuggestion, RunnerId, RunnerInfo, Task, Workspace } from "@switchboard/protocol";
+import type { CloudPreparation, ExecutionMode, CreateTaskInput, LedgerSummary, ReportRow, RoutingSuggestion, RunnerId, RunnerInfo, Task, Workspace } from "@switchboard/protocol";
 import { api, type Health, type InboxNote } from "../api.ts";
 import { fmtUsd, OriginTag, pct, ResumeTag, RunnerPill, ShadowTag } from "./ui.tsx";
 import { AttachButton, AttachmentBar, useAttachments, useDropZone } from "./Attachments.tsx";
@@ -8,12 +8,13 @@ import { EffortSelect } from "./EffortSelect.tsx";
 import { attentionList, needsAttention, outcomeDotClass, outcomeLabel } from "../attention.ts";
 import { reportMeta } from "../reports.ts";
 import { quotaAsOf, quotaStale, resetLabel, windowLabel } from "../quota.ts";
-import { jstTime } from "../time.ts";
 import { staleDraft } from "../presets.ts";
 import { editChanged, toggleDraft, type DraftEdit } from "../inbox.ts";
 import { listedRunners } from "../runners.ts";
 import { PresetPicker } from "./PresetPicker.tsx";
 import { titleToSend } from "../taskTitle.ts";
+import { detailsSummary, loadDetailsOpen, saveDetailsOpen } from "../composeDetails.ts";
+import { startBlockedReason, unavailableNotice, unavailableNotices } from "../runnerNotice.ts";
 
 /** The prefix "改善 →" inserted: remembered so a Workspace switch can swap it for the new workspace's brief (and only it). */
 type Brief = { wsId: string; text: string; title: string };
@@ -31,6 +32,8 @@ export function Home(props: {
   /** Bumped when the knowledge folder changes (inbox notes live there). */
   inboxRev: number;
   onOpenSettings: () => void;
+  /** Settings scrolled to its Workspace card (the 「設定で追加 →」 when there is none yet). */
+  onOpenWorkspaces: () => void;
   /** The newest report's line (#1835): opens Insights with it. */
   onOpenReport: (id: string) => void;
   /** Insights' レポート section with every artifact (#1833) */
@@ -56,6 +59,8 @@ export function Home(props: {
   const [shadow, setShadow] = useState<boolean | null>(null);
   /** undefined = not loaded yet (the toggle waits; an untouched creation leaves the choice to the daemon). */
   const [shadowDefault, setShadowDefault] = useState<RunnerId | null | undefined>(undefined);
+  /** 詳細 (#3354): the rarely set values, folded; open or closed as the person left it in this browser. */
+  const [detailsOpen, setDetailsOpen] = useState(() => loadDetailsOpen(localStorage));
   const [busy, setBusy] = useState(false);
   const [suggestion, setSuggestion] = useState<RoutingSuggestion | null>(null);
   const [inbox, setInbox] = useState<InboxNote[]>([]);
@@ -200,6 +205,15 @@ export function Home(props: {
   }, [props.health]);
   const dakOk = props.runnerOk.has("dak");
   const shadowOn = runner !== "dak" && dakOk && (shadow ?? shadowDefault === "dak");
+  // What 詳細 says while closed: what differs from an untouched form (the rule's model, the saved shadow). Cloud sends
+  // none of model / effort / budget / shadow, so they are not shown as changed there. An untouched model is the rule's
+  // (the effect below fills the select a render later): read so, the line does not flash 「モデル: CLI 既定」 meanwhile.
+  const defaultModel = suggestion?.model && runner === suggestion.runner ? suggestion.model : "";
+  const defaultShadow = runner !== "dak" && dakOk && shadowDefault === "dak";
+  const summary = detailsSummary(
+    cloud ? { title, executionMode: "cloud", model: defaultModel, effort: "", budget: "", shadow: defaultShadow } : { title, executionMode: "local", model: modelTouched ? model : defaultModel, effort, budget, shadow: shadowOn },
+    { model: defaultModel, shadow: defaultShadow, briefTitle: brief?.title },
+  );
   // What the request says about the shadow. Untouched → omitted, so the daemon applies its saved default itself (also
   // one this page has not loaded yet, or a non-DAK one set through the API); a click → explicit. A DAK primary with
   // DAK as the default says null: the daemon would only note that the shadow equals the primary.
@@ -216,51 +230,14 @@ export function Home(props: {
       alive = false;
     };
   }, []);
-  // Terminal history (#91): what the daemon imported from ~/.claude/projects; refreshed when the task list changes.
-  const [history, setHistory] = useState<HistoryStatus | null>(null);
-  const [historyErr, setHistoryErr] = useState<string | null>(null);
-  const [importing, setImporting] = useState(false);
-  const [importMsg, setImportMsg] = useState<string | null>(null);
-  // The daemon's passes are silent when they only append or find nothing: poll while Home is open (and on any task
-  // change), and keep retrying after a failed fetch.
-  useEffect(() => {
-    let alive = true;
-    const load = () =>
-      api
-        .history()
-        .then((h) => {
-          if (!alive) return;
-          setHistory(h);
-          setHistoryErr(null);
-        })
-        .catch((e) => alive && setHistoryErr(String((e as Error).message ?? e)));
-    void load();
-    const timer = setInterval(() => {
-      setImportMsg(null); // the card's own figures are current again
-      void load();
-    }, 15_000);
-    return () => {
-      alive = false;
-      clearInterval(timer);
-    };
-  }, [props.tasks]);
-  const importNow = async () => {
-    setImporting(true);
-    try {
-      const r = await api.historyImport();
-      setImportMsg(`走査 ${r.files} ファイル: 新規 ${r.created} · 追記 ${r.appended}${r.skippedForeign ? ` · Workspace 外 ${r.skippedForeign}` : ""}${r.errors.length ? ` · エラー ${r.errors.length}（${r.errors[0]}）` : ""}`);
-      setHistory(await api.history());
-    } catch (e) {
-      props.onError(String((e as Error).message ?? e));
-    } finally {
-      setImporting(false);
-    }
-  };
-  const terminalSessions = history?.sessions.filter((s) => s.origin === "terminal").length ?? 0;
   const active = useMemo(() => props.tasks.filter((t) => t.status === "running" || t.status === "waiting"), [props.tasks]);
   const attention = useMemo(() => attentionList(props.tasks), [props.tasks]);
   const recent = useMemo(() => props.tasks.filter((t) => t.status !== "running" && t.status !== "waiting" && !needsAttention(t)).slice(0, 6), [props.tasks]);
 
+  // runners not listed yet (loading, unreachable, no token): no runner reason is given, the button stays disabled as before
+  const offRunners = unavailableNotices(props.health?.runners);
+  const runnersKnown = !!props.health?.runners;
+  const blocked = startBlockedReason({ prompt, stale, attachBusy: attach.busy, runnerOk: !runnersKnown || props.runnerOk.has(runner), cloud, ws: !!ws, anyRunnerOk: !runnersKnown || props.runnerOk.size > 0 });
   const submit = async () => {
     if (!prompt.trim() || (!cloud && attach.busy) || stale) return;
     if (cloud && !ws) { props.onError("Cloud は Workspace を明示選択してください"); wsSelect.current?.focus(); return; }
@@ -404,7 +381,7 @@ export function Home(props: {
         <section className="card">
           <div className="row">
             <span>Workspace がまだありません</span>
-            <button onClick={props.onOpenSettings}>設定で追加 →</button>
+            <button onClick={props.onOpenWorkspaces}>設定で追加 →</button>
           </div>
         </section>
       )}
@@ -432,10 +409,6 @@ export function Home(props: {
                 </option>
               ))}
             </select>
-          </label>
-          <label>
-            <span>タイトル</span>
-            <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="空なら本文の先頭から生成" />
           </label>
         </div>
         <PresetPicker
@@ -473,7 +446,7 @@ export function Home(props: {
               const ok = props.runnerOk.has(r);
               const info = props.health?.runners?.find((x) => x.id === r);
               const expired = ok && info?.login === "expired";
-              const offTitle = info?.note ?? (r === "claude" ? "claude が PATH にありません" : r === "codex" ? "codex が PATH にありません（公式インストーラ: curl -fsSL https://chatgpt.com/codex/install.sh | sh）" : "DAK の agent（http://127.0.0.1:8000、SWITCHBOARD_DAK_URL で変更）に到達できません。DAK リポジトリで docker compose up");
+              const offTitle = unavailableNotice(info, r) ?? "";
               return (
                 <label key={r} className={`runner-opt ${!ok ? "off" : ""} ${runner === r ? "sel" : ""}`} title={!ok ? offTitle : expired ? `ログインが切れています。Task の「ターミナル」tab で ${info.loginHint ?? r} を実行` : (info?.note ?? "")}>
                   <input
@@ -493,7 +466,6 @@ export function Home(props: {
                 </label>
               );
             })}
-            {runner === "claude" && <label>実行場所 <select aria-label="実行場所" value={executionMode} onChange={e => { setExecutionMode(e.target.value as ExecutionMode); setRunnerTouched(true); }}><option value="local">ローカル</option><option value="cloud">クラウド</option></select></label>}
             {!cloud && runnerInfo && modes.length > 0 && (
               <select
                 className="mode"
@@ -518,6 +490,41 @@ export function Home(props: {
                 承認: DAK 側の設定で決まる
               </span>
             )}
+          </div>
+          <AttachButton onFiles={(files) => void attach.add(files)} disabled={busy || cloud} />
+          <button disabled={busy || stale || !prompt.trim() || attach.items.length > 0} onClick={() => void saveToInbox()} title={attach.items.length ? "添付つきの依頼は Inbox に保存できません（メモは文章だけ）。「開始」で動かすか、添付を外してください" : "Knowledge の notes/ に保存"}>
+            Inbox に保存
+          </button>
+          <button className="pri" disabled={busy || stale || (!cloud && attach.busy) || !prompt.trim() || !props.runnerOk.has(runner) || (cloud && !ws)} onClick={() => void submit()} title={!cloud && attach.busy ? "添付のアップロードが終わるまで待ってください" : ""}>
+            {choosing ? "Workspace を選択中…" : busy ? "起動中…" : !cloud && attach.busy ? "アップロード中…" : "開始"}
+          </button>
+        </div>
+        {/* why a runner or 開始 cannot be used, read without hovering (#3354); an empty prompt needs no words, a stale one is said above */}
+        {offRunners.length > 0 && (
+          <div className="hint">
+            {offRunners.map((n, i) => (
+              <Fragment key={n.id}>
+                {i > 0 && " · "}
+                <RunnerPill runner={n.id} /> {n.text}
+              </Fragment>
+            ))}
+          </div>
+        )}
+        {blocked && prompt.trim() && !stale && <div className="hint warn">開始できません: {blocked}</div>}
+        {!cloud && selectedOpt?.danger && <div className="hint warn">「{selectedOpt.label}」は確認なしで実行します — {selectedOpt.description}。このタスクだけに適用され、既定にはできません</div>}
+        <details className="compose-details" open={detailsOpen} onToggle={(e) => { const open = e.currentTarget.open; setDetailsOpen(open); saveDetailsOpen(localStorage, open); }}>
+          <summary>
+            詳細{!detailsOpen && summary && <span className="hint"> · {summary}</span>}
+          </summary>
+          <div className="runners">
+            <label>
+              <span>タイトル</span>
+              <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="空なら本文の先頭から生成" />
+            </label>
+            {runner === "claude" && <label>実行場所 <select aria-label="実行場所" value={executionMode} onChange={e => { setExecutionMode(e.target.value as ExecutionMode); setRunnerTouched(true); }}><option value="local">ローカル</option><option value="cloud">クラウド</option></select></label>}
+            {!cloud && <ModelSelect runner={runnerInfo} value={model} onChange={(v) => { setModel(v); setModelTouched(true); setRunnerTouched(true); /* a model belongs to this runner: the router must not swap it away */ }} label="モデル" title="この Task を動かすモデル。「CLI 既定」はランナー自身の設定（かっこ内）で動きます。作成後も Brief から変えられます" />}
+            {!cloud && <EffortSelect runner={runnerInfo} value={effort} onChange={(e) => { setEffort(e); setRunnerTouched(true); /* chosen for this runner: the router must not swap it away */ }} label="思考の深さ" title="この Task の思考の深さ。「CLI 既定」はランナー自身の設定で動きます。作成後は変えられません" />}
+            {!cloud && <input className="model" value={budget} onChange={(e) => setBudget(e.target.value)} placeholder="予算 USD（API 換算・任意）" inputMode="decimal" title="超過したら確認して止まります" />}
             {!cloud && runner !== "dak" && listedRunners(props.health?.runners).includes("dak") && (
               <label
                 className={`hint toggle shadow ${!dakOk || shadowDefault === undefined ? "off" : ""}`}
@@ -539,19 +546,8 @@ export function Home(props: {
               </label>
             )}
             <button className="ghost" onClick={props.onOpenSettings} title="承認モード・並走・使用上限での自動再開・LLM 提案・自動判定の既定は 設定 画面で変えます">既定は 設定 で変える</button>
-            {!cloud && <ModelSelect runner={runnerInfo} value={model} onChange={(v) => { setModel(v); setModelTouched(true); setRunnerTouched(true); /* a model belongs to this runner: the router must not swap it away */ }} label="モデル" title="この Task を動かすモデル。「CLI 既定」はランナー自身の設定（かっこ内）で動きます。作成後も Brief から変えられます" />}
-            {!cloud && <EffortSelect runner={runnerInfo} value={effort} onChange={(e) => { setEffort(e); setRunnerTouched(true); /* chosen for this runner: the router must not swap it away */ }} label="思考の深さ" title="この Task の思考の深さ。「CLI 既定」はランナー自身の設定で動きます。作成後は変えられません" />}
-            {!cloud && <input className="model" value={budget} onChange={(e) => setBudget(e.target.value)} placeholder="予算 USD（API 換算・任意）" inputMode="decimal" title="超過したら確認して止まります" />}
           </div>
-          <AttachButton onFiles={(files) => void attach.add(files)} disabled={busy || cloud} />
-          <button disabled={busy || stale || !prompt.trim() || attach.items.length > 0} onClick={() => void saveToInbox()} title={attach.items.length ? "添付つきの依頼は Inbox に保存できません（メモは文章だけ）。「開始」で動かすか、添付を外してください" : "Knowledge の notes/ に保存"}>
-            Inbox に保存
-          </button>
-          <button className="pri" disabled={busy || stale || (!cloud && attach.busy) || !prompt.trim() || !props.runnerOk.has(runner) || (cloud && !ws)} onClick={() => void submit()} title={!cloud && attach.busy ? "添付のアップロードが終わるまで待ってください" : ""}>
-            {choosing ? "Workspace を選択中…" : busy ? "起動中…" : !cloud && attach.busy ? "アップロード中…" : "開始"}
-          </button>
-        </div>
-        {!cloud && selectedOpt?.danger && <div className="hint warn">「{selectedOpt.label}」は確認なしで実行します — {selectedOpt.description}。このタスクだけに適用され、既定にはできません</div>}
+        </details>
         {cloud && <div className="cloud-preparation card" role="note">
           <p>Cloud を選んで開始すると、公式 CLI の自動 Bundle 転送を了承します。GitHub clone では未pushコミット・未コミット変更が反映されない場合があります。自動 Bundle では全ブランチの履歴・追跡ファイルの変更が送られ得ます。未追跡ファイルは含まれず、秘密情報が必ず除外される保証はありません。Switchboard は commit/push や強制 Bundle を行いません。</p>
           <p className="hint">モデル・承認・添付・予算・並走はここでは指定できません。Cloud側の操作は公式 Web で行ってください。</p>
@@ -719,37 +715,6 @@ export function Home(props: {
           )}
         </section>
       </div>
-
-      <section className="card">
-        <div className="row head">
-          <h5>Terminal の履歴（Claude Code）</h5>
-          {history?.enabled && (
-            <button className="ghost" disabled={importing} onClick={() => void importNow()} title={history.pollMs > 0 ? `~/.claude/projects を今すぐ走査する（普段は起動時と ${Math.round(history.pollMs / 1000)} 秒ごとに走る）` : "~/.claude/projects を今すぐ走査する（定期走査は無効: 起動時とこのボタンだけ）"}>
-              {importing ? "取り込み中…" : "今すぐ取り込む"}
-            </button>
-          )}
-        </div>
-        {!history && !historyErr && <div className="muted">取り込み状況を読み込み中…</div>}
-        {historyErr && <div className="hint warn">取り込み状況を取得できません: {historyErr}（15 秒ごとに再試行）</div>}
-        {history && !history.enabled && (
-          <div className="muted">
-            <span className="mono">{history.dir}</span> がありません。Terminal で claude を使ったセッションがここに並びます。
-          </div>
-        )}
-        {history?.enabled && (
-          <div className="hint">
-            Terminal で実行したセッション <b>{terminalSessions}</b> 件を Task として取り込み済み
-            {history.lastScanAt ? ` · 最終走査 ${jstTime(history.lastScanAt)}` : ""}
-            {history.pollMs > 0 ? ` · ${Math.round(history.pollMs / 1000)} 秒ごと` : " · 起動時と手動のみ"}
-            {history.lastResult && history.lastResult.skippedForeign > 0 && <> · Workspace 外のセッション {history.lastResult.skippedForeign} 件は取り込まない（Workspace を追加すると次の走査で入る）</>}
-            {history.lastResult && history.lastResult.errors.length > 0 && <span className="warn"> · エラー {history.lastResult.errors.length} 件（{history.lastResult.errors[0]}）</span>}
-          </div>
-        )}
-        {importMsg && <div className="hint">{importMsg}</div>}
-        <div className="hint">
-          読み込み元: <span className="mono">{history?.dir ?? "~/.claude/projects"}</span>。取り込んだ Task には「Terminal」タグが付き、会話・差分・台帳は Switchboard から始めた Task と同じ見え方。Switchboard 自身が動かしたセッションは二重に入りません。
-        </div>
-      </section>
     </main>
   );
 }

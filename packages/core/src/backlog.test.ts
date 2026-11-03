@@ -1698,7 +1698,9 @@ test("start: a complete prompt says the request covers merges the merge gate pas
   for (const opts of [{}, { resume: { tasksDone: 1 } }, { other }, { other, resume: { tasksDone: 1 } }]) {
     const p = buildStartPrompt({ number: 305 }, "complete", opts);
     expect(p).toContain(scope);
-    expect(p).toContain("マージ判定が `[聞く]` で止めたとき、昇格・デーモンの再起動、認証は、これまでどおり Task の会話で聞いてください");
+    expect(p).toContain("マージ判定が `[聞く]` で止めたとき、デーモンを再起動する pull、認証は、これまでどおり Task の会話で聞いてください（.claude/skills/pbi-complete/SKILL.md の「この依頼が含む範囲」）。昇格は");
+    expect(p).toContain("昇格はリポジトリの CLAUDE.md の決まりに従い、CLAUDE.md が聞かずに昇格してよいと書いていなければ Task の会話で聞いてください");
+    expect(p).not.toContain("昇格・デーモンの再起動");
     expect(p).toContain("「この依頼が含む範囲」");
     expect(p).toContain("レビューの材料");
     expect(p).toContain("要望 Issue と PBI");
@@ -3486,9 +3488,23 @@ test("promote: when idle — a promotion held by a running Task is asked for as 
     expect(r.promoted).toEqual([]);
     expect(await scheduleLog(base)).toContain("1 件の Task が動いているので v0.2.0 の昇格を待つ");
     expect(await releaseHold(base)).toMatchObject({ tag: "v0.2.0", failed: false, busyTasks: 1 });
+    // the same tag held again keeps when it began (#2148)
+    const since = ((await releaseHold(base)) as { since: number }).since;
+    expect((await runSchedule(base, id)).status).toBe(409);
+    expect(((await releaseHold(base)) as { since: number }).since).toBe(since);
+    // the daily approval-window firing tells the hold in 判断待ち, with the Task count
+    const meta = core!.db.listWorkspaces().find((w) => w.kind === "meta")!;
+    const w = (await (await fetch(`${base}/api/schedules`, { method: "POST", body: JSON.stringify({ title: "承認待ち", cron: "0 0 * * *", workspaceId: meta.id, runner: "claude", prompt: "", action: "approval-window" }) })).json()) as { id: string };
+    const notices = async () => ((await (await fetch(`${base}/api/asks`)).json()) as { asks: Array<{ id: string; state: string; question: string }> }).asks.filter((a) => a.id.startsWith("notice:promotion:"));
+    expect(await notices()).toEqual([]);
+    expect((await runSchedule(base, w.id)).status).toBe(202);
+    await settle(() => core!.db.getSchedule(w.id)!.lastRunAt !== null);
+    expect((await notices()).map((a) => [a.id, a.state, a.question])).toEqual([[`notice:promotion:${w.id}@${since}`, "open", "昇格待ち: v0.2.0（0 時間、動いている Task 1 件）— ヘッダーの「新しい版 →」から昇格できる"]]);
     claude.end(0);
     await settle(() => r.promoted.length > 0);
     expect(r.promoted).toEqual([r.sha]);
+    // promoted: the notice is resolved
+    expect((await notices()).map((a) => a.state)).toEqual(["resolved"]);
     // ordering (the flake of #2939): the line is written after sb-rescue answers, later than `promoted` grows
     const text = "バックログを進める: Task が空いたので v0.2.0 の昇格を依頼";
     for (const t0 = Date.now(); !(await scheduleLog(base)).includes(text) && Date.now() - t0 < 20_000; ) await Bun.sleep(10);

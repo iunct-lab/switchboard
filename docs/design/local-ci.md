@@ -7,7 +7,7 @@
 ## 対象と環境
 
 - main の作業ツリーでは実行しない。対象リポジトリの専用 worktree から実行する。
-- 検証対象は、PR の最新の head を base の枝の最新の先端にマージした内容である（#913）。`gh pr view` の `headRefOid` と `baseRefName` を読み、`refs/heads/<base>` と `refs/pull/<PR>/head`（GitHub がすべての PR に置く。fork の PR も）を fetch し、後者が `headRefOid` と一致することを確かめる（push の直後で違えば、何も実行せず少し待ってやり直す）。worktree を base で作り、その中で head を `--no-ff` でマージする。GitHub の `pull/<PR>/merge` は使わない（無い・古いときも検証できる）。マージの名前と署名は local-ci が固定する（`-c user.name/user.email`、`commit.gpgSign=false`。clone の設定に左右されない）。マージが衝突した（未解決のパスが残った）ら手順は実行せず、失敗の結果として通知する。衝突以外のマージの失敗はエラーで、何も投稿しない。
+- 検証対象は、PR の最新の head を base の枝の最新の先端にマージした内容である（#913）。`gh pr view` の `headRefOid` と `baseRefName` を読み、`refs/heads/<base>` と `refs/pull/<PR>/head`（GitHub がすべての PR に置く。fork の PR も）をそれぞれ専用の ref（`refs/local-ci/<PR>/base` / `refs/local-ci/<PR>/head`）へ fetch してその ref を読み（`FETCH_HEAD` は同じ clone の別の fetch に書き換えられるので読まない。この 2 本の ref は次の実行で上書きし、消さない。閉じた PR の分は clone に残るので、要らなければ `git for-each-ref --format="delete %(refname)" refs/local-ci | git update-ref --stdin` で消す）、後者が `headRefOid` と一致することを確かめる（push の直後で違えば、何も実行せずエラーで終わる。自分では再試行しないので、少し待ってから回し直す）。worktree を base で作り、その中で head を `--no-ff` でマージする。GitHub の `pull/<PR>/merge` は使わない（無い・古いときも検証できる）。マージの名前と署名は local-ci が固定する（`-c user.name/user.email`、`commit.gpgSign=false`。clone の設定に左右されない）。マージが衝突した（未解決のパスが残った）ら手順は実行せず、失敗の結果として通知する。衝突以外のマージの失敗はエラーで、何も投稿しない。
 - `localCi` は使い捨て worktree を `~/.cache` に、TMPDIR を OS の一時ディレクトリ（`tmpdir()`。このホストでは RAM の `/tmp`）に作り、PATH / HOME / CI=true / TMPDIR だけの環境で実行する。デーモンの SWITCHBOARD_*、実認証の値、実 Cloud セッションを持ち込まない。例外は呼び出し元が明示した録画の置き場所 `SWITCHBOARD_FIXTURES` で、その値だけを引き継ぎ、不足していれば再生のテストが落ちる。未指定なら渡さず、録画が無いテストは skip として数える。Actions・公開 clone / fork でも同じで、録画を必須にはしない。既存の録画は配布しないため、再生を検証するときは [.claude/skills/runner-adapter-recording/SKILL.md](../../.claude/skills/runner-adapter-recording/SKILL.md) に従って自分のランナーで Git の外に録画し、`SWITCHBOARD_FIXTURES=<録画のディレクトリ> bun scripts/local-ci.ts <PR>` と実行する。
 - 1 回の実行全体（head と base の読み取りから、性能の上限を超えたときの base の計測、worktree の片づけまで）で、重い処理の枠（`ops-kit heavy` と同じ `withHeavySlot`。上限と空きメモリの下限はマシンの設定 `~/.config/ops-kit/heavy.json`。`ops-kit --help` の heavy）を 1 つ取ってから始める。枠が空くまで待つあいだは、待っている理由の行を出す。`--repo` で別のリポジトリの PR を回すときも同じマシンの枠を取る。
 - Chrome と Noto フォントを使用する。性能測定は5回で、他の性能測定と並行しない。
@@ -25,6 +25,11 @@ Before anything else, a run reads this PR's own comments. When the newest result
 - What changed since HEAD's fork from the default branch (a rename counts as both paths) goes to the worktree's `scripts/test-select.ts`, and only the files it selects run, as `bun test ./<path>`. A stacked PR's base is the branch below it, so a diff from that base would leave out the PRs below; from the fork it is the sum of every PR in the stack.
 - A change it cannot judge, a selection that does not run or cannot be read, and `--all` run every test. Only local-ci narrows: the tag CI runs every test.
 - Why a selection failed goes to local-ci's log, not to the result comment: the text holds host paths.
+
+## Skipping perf-bench's `loaded`
+
+- The same change list also goes to `scripts/test-select.ts --loaded`, which takes `scripts/perf-bench.ts` as one test: the change reaches it through the imports, through what it reads without importing (`apps/web/`, the daemon's start-up config in `packages/core/config/`, and `scripts/perf-budget.json`), or as a change the selection cannot judge. When nothing reaches it, local-ci adds `--skip-loaded '<reason>'` to the perf-bench step (the step keeps its name). perf-bench then leaves out the load-and-overlap measure (`loaded`, about 30 s of the step) and writes `loadedSkipped` instead, `perf-ratchet.ts check` leaves the `loaded.healthMaxMs` ceiling out, and the result comment has a `loaded（量と重なりの計測）: 測らなかった（<reason>）` line. A perf red measures main again with the same steps, so main's measure skips it too.
+- An answer it cannot read (a checkout from before this), a failed selection and `--all` measure `loaded`. Only local-ci skips it: the tag CI and Actions run `scripts/ci.ts` as it is and always measure it, so a change whose effect the selection missed is still caught on the next tag.
 
 ## 手順（Actions と同じもの、#912）
 

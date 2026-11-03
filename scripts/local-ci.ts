@@ -179,7 +179,8 @@ export interface LocalCiResult { sha: string; base: string; results: StepResult[
 function testsLines(s: TestSelection | undefined): string[] {
   if (!s) return ["テスト: 全ファイル（--all）"];
   const seen = s.files ? `テスト: ${s.files.length} / ${s.total} ファイル（影響範囲の選択）` : `テスト: 全 ${s.total} ファイル（全テストに倒した: ${s.reason.length > 300 ? `${s.reason.slice(0, 300)}…` : s.reason}）`;
-  return [seen, `<!-- local-ci-tests ${JSON.stringify({ ran: s.files?.length ?? null, total: s.total })} -->`];
+  const loaded = s.loaded && !s.loaded.run ? [`loaded（量と重なりの計測）: 測らなかった（${s.loaded.reason}）`] : [];
+  return [seen, ...loaded, `<!-- local-ci-tests ${JSON.stringify({ ran: s.files?.length ?? null, total: s.total })} -->`];
 }
 
 /** The PR comment of a run, pass or not (#913): the mark (the first line only: merge-gate reads no more, #3118), a pass's seconds line, what was tested, the bundle against main's tip, every step that ran; a failure names its step and what failed in it. */
@@ -199,7 +200,13 @@ export function resultComment(r: LocalCiResult): string {
     ...head,
     ...testsLines(r.selection),
     ...(r.bundle?.length ? ["", "bundle（gzip、マージ後と main の先端の差）:", ...r.bundle.map((l) => `    ${l}`)] : []),
-    ...failed.flatMap((f) => ["", `結果: \`${f.name}\` が exit ${f.code}。${f.log ? "全文は実行したホストの記録（~/.cache の下）。" : ""}`, ...(f.fails ?? []).slice(0, 20).map((l) => `    ${l}`)]),
+    // a fenced block: 4 spaces right after a paragraph line are no code block in CommonMark (they join the paragraph)
+    ...failed.flatMap((f) => {
+      const fails = (f.fails ?? []).slice(0, 20);
+      // one backtick longer than the longest run in the lines: a line holding ``` does not close it
+      const fence = "`".repeat(Math.max(3, ...fails.map((l) => Math.max(0, ...(l.match(/`+/g) ?? []).map((x) => x.length)) + 1)));
+      return ["", `結果: \`${f.name}\` が exit ${f.code}。${f.log ? "全文は実行したホストの記録（~/.cache の下）。" : ""}`, ...(fails.length ? [fence, ...fails, fence] : [])];
+    }),
     "",
     "| 手順 | 結果 | 秒 |",
     "|---|---|---|",
@@ -220,6 +227,8 @@ export interface Deps {
 /**
  * The PR's head and its base branch's tip as they are now, both fetched into `repoRoot` (#913). The head comes by
  * refs/pull/<n>/head, which GitHub keeps for every PR (a fork's too); it must be the head the PR names.
+ * Each is fetched into a ref of its own, refs/local-ci/<n>/base and refs/local-ci/<n>/head, and read from there: another
+ * fetch in the same clone (a local-ci of another PR alongside) rewrites FETCH_HEAD in between.
  */
 export async function readTarget(pr: number, repoRoot: string, repo: string, d: Pick<Deps, "sh">, glab: Sh = runGlab): Promise<{ head: string; base: string }> {
   // a GitLab checkout (#892): the MR `pr` of the project its forge names; GitLab keeps refs/merge-requests/<iid>/head
@@ -228,18 +237,19 @@ export async function readTarget(pr: number, repoRoot: string, repo: string, d: 
     ? await viewGitlabMr(glab, named, pr).then((m) => ({ headRefOid: m.head, baseRefName: m.target }))
     : JSON.parse(await d.sh(["gh", "pr", "view", String(pr), "-R", repo, "--json", "headRefOid,baseRefName"])) as { headRefOid: string; baseRefName: string };
   const headRef = named.service === "gitlab" ? `refs/merge-requests/${pr}/head` : `refs/pull/${pr}/head`;
-  const fetched = async (ref: string) => {
-    await d.sh(["git", "-C", repoRoot, "fetch", "-q", "origin", ref]);
-    return (await d.sh(["git", "-C", repoRoot, "rev-parse", "FETCH_HEAD"])).trim();
+  const fetched = async (ref: string, into: string) => {
+    await d.sh(["git", "-C", repoRoot, "fetch", "-q", "origin", `+${ref}:${into}`]);
+    return (await d.sh(["git", "-C", repoRoot, "rev-parse", into])).trim();
   };
-  const base = await fetched(`refs/heads/${view.baseRefName}`);
-  const head = await fetched(headRef);
+  const base = await fetched(`refs/heads/${view.baseRefName}`, `refs/local-ci/${pr}/base`);
+  const head = await fetched(headRef, `refs/local-ci/${pr}/head`);
   if (head !== view.headRefOid) throw new Error(`${headRef} は ${head.slice(0, 7)} で、PR の head ${view.headRefOid.slice(0, 7)} ではない（push の直後なら少し待ってやり直す）`);
   return { head, base };
 }
 
 /** `files: null` = every test; `total` = the checkout's test files; `reason` = why these tests, or why all of them; `unjudged`: the selection itself did not run or could not be read. */
-export interface TestSelection { files: string[] | null; total: number; reason: string; unjudged?: true }
+/** `loaded`: whether the change reaches perf-bench's `loaded` (#3635); none = not judged, and it runs. */
+export interface TestSelection { files: string[] | null; total: number; reason: string; unjudged?: true; loaded?: { run: boolean; reason: string } }
 
 /**
  * The tests for what changed since the commit `base` gives, by the checkout's scripts/test-select.ts: its code, run in
@@ -256,12 +266,28 @@ export async function selectTests(dir: string, base: () => Promise<string>, env:
     const vars = Object.entries(env).map(([k, v]) => `${k}=${v}`);
     const [head = "", ...rows] = (await d.sh(["env", "-i", ...vars, process.execPath, "scripts/test-select.ts", ...changed], dir)).trimEnd().split("\n");
     const full = /^full: (.*)$/.exec(head);
-    if (full) return { files: null, total, reason: full[1]!.replaceAll(dir, "<checkout>") };
-    if (head !== `selected: ${rows.length}`) throw new Error(`出力を読めない: ${head.slice(0, 80)}`);
-    return { files: rows.map((r) => r.split("  ")[0]!), total, reason: `変更 ${changed.length} ファイルから選んだ` };
+    if (!full && head !== `selected: ${rows.length}`) throw new Error(`出力を読めない: ${head.slice(0, 80)}`);
+    const tests = full ? { files: null, total, reason: full[1]!.replaceAll(dir, "<checkout>") } : { files: rows.map((r) => r.split("  ")[0]!), total, reason: `変更 ${changed.length} ファイルから選んだ` };
+    return { ...tests, ...(await loadedOf(dir, vars, changed, d)) };
   } catch (e) {
     d.log(`テストの選択に失敗: ${e instanceof Error ? e.message : String(e)}`);
     return { files: null, total, reason: "選択を実行できなかった（実行したホストのログを見る）", unjudged: true };
+  }
+}
+
+/**
+ * Whether the change reaches perf-bench's `loaded`, by the checkout's `scripts/test-select.ts --loaded` (#3635). A
+ * failure or an output it cannot read (a checkout from before it) → nothing, and `loaded` runs.
+ */
+async function loadedOf(dir: string, vars: string[], changed: string[], d: Pick<Deps, "sh" | "log">): Promise<{ loaded?: { run: boolean; reason: string } }> {
+  try {
+    const out = (await d.sh(["env", "-i", ...vars, process.execPath, "scripts/test-select.ts", "--loaded", ...changed], dir)).trim();
+    const m = /^loaded: (run|skip) {2}(.*)$/.exec(out);
+    if (!m) throw new Error(`出力を読めない: ${out.slice(0, 80)}`);
+    return { loaded: { run: m[1] === "run", reason: m[2]!.replaceAll(dir, "<checkout>") } };
+  } catch (e) {
+    d.log(`loaded の判定に失敗（測る）: ${e instanceof Error ? e.message : String(e)}`);
+    return {};
   }
 }
 
@@ -280,6 +306,12 @@ export function narrowTestStep(steps: Step[], files: string[]): Step[] {
   if (!steps.some((s) => s.run.trim() === "bun test")) throw new Error("CI の手順に `bun test` が無い（narrowTestStep）");
   const run = files.length ? `bun test ${files.map((f) => `'./${f.replaceAll("'", `'\\''`)}'`).join(" ")}` : 'echo "no test files selected"';
   return steps.map((s) => (s.run.trim() === "bun test" ? { ...s, run } : s));
+}
+
+/** The steps with perf-bench told to skip `loaded` and why (#3635); a checkout without that step keeps its steps. */
+export function narrowPerfStep(steps: Step[], reason: string): Step[] {
+  const arg = `'${reason.replaceAll("'", `'\\''`)}'`;
+  return steps.map((s) => (s.run.trim().startsWith("bun scripts/perf-bench.ts") ? { ...s, run: `${s.run.trim()} --skip-loaded ${arg}` } : s));
 }
 
 /** What the result's table calls the comparison of the seconds, which no step of the CI runs. */
@@ -318,7 +350,8 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
       const env = stepEnv(tmp);
       const selection = opts.all ? undefined : await selectTests(dir, () => mainFork(dir, repo, d.sh), env, d);
       const narrowed = selection ? { selection } : {};
-      const run = await runCheckout(dir, env, `local-ci-${repo.replaceAll("/", "_")}-${pr}`, d, cache, selection?.files);
+      const skipLoaded = selection?.loaded?.run === false ? selection.loaded.reason : undefined;
+      const run = await runCheckout(dir, env, `local-ci-${repo.replaceAll("/", "_")}-${pr}`, d, cache, selection?.files, skipLoaded);
       const { results } = run;
       const bundle = run.bundle.length ? { bundle: run.bundle } : {};
       // a checkout with scripts/ci.ts (this repository's CI) must have both steps; another repository's (--repo) need not
@@ -416,12 +449,14 @@ export async function recordBundle(repo: string, dir: string, measuredAt: string
  * under `cache` (the latest of a label only: earlier ones go, the host's disk is small) and, for a perf step, its verdict
  * and perf-result.json there. A failure that is not a perf step is logged here; a perf step's is the caller's (local-ci
  * adds main's measure to it). `outputs`: each failed step's whole output by its name.
- * `tests`: only those test files for `bun test` (local-ci); none, or null = every test.
+ * `tests`: only those test files for `bun test` (local-ci); none, or null = every test. `skipLoaded`: perf-bench skips
+ * `loaded` for this reason (local-ci, #3635); none = it measures it.
  * `bundle`: the perf check's `bundle:` and `grew:` lines, whether it passed or not (none without that check).
  */
-export async function runCheckout(dir: string, env: Record<string, string>, label: string, d: Omit<Deps, "slot">, cache: string, tests?: string[] | null): Promise<{ steps: Step[]; results: StepResult[]; ok: boolean; perf?: PerfVerdict; outputs: Record<string, string>; bundle: string[] }> {
+export async function runCheckout(dir: string, env: Record<string, string>, label: string, d: Omit<Deps, "slot">, cache: string, tests?: string[] | null, skipLoaded?: string): Promise<{ steps: Step[]; results: StepResult[]; ok: boolean; perf?: PerfVerdict; outputs: Record<string, string>; bundle: string[] }> {
   const listed = await checkoutSteps(dir, env);
-  const steps = tests ? narrowTestStep(listed, tests) : listed;
+  const narrowed = tests ? narrowTestStep(listed, tests) : listed;
+  const steps = skipLoaded === undefined ? narrowed : narrowPerfStep(narrowed, skipLoaded);
   const ran = await runCi(steps, async (s) => {
     d.log(`▶ ${s.name}`);
     const started = Date.now();
@@ -536,7 +571,8 @@ export async function resolveTarget(argv: string[], cwd: string, scriptRoot: str
   const unknown = args.filter((a, i) => a !== String(pr) && (at < 0 || (i !== at && i !== at + 1)));
   if (unknown.length > 0) throw new TargetError(`知らない引数: ${unknown.join(" ")}`);
   if (at < 0) {
-    // the clone this script is in and its origin: the head is read from the same repository the merge ref is fetched from
+    // the clone this script is in and its origin: the PR's head (refs/pull/<n>/head) and its base (refs/heads/<base>) are
+    // fetched from that origin, and the result goes on its PR
     // a GitLab checkout (#892): the project its forge names, checked against the origin
     let named;
     try {
@@ -585,8 +621,8 @@ export const step = stepWithIdle(STEP_IDLE_SECONDS);
  * kit's check for values usable for auth first.
  */
 export async function reportResult(t: { pr: number; repo: string; root: string }, body: string, run: Deps["sh"], glab: Sh = runGlab): Promise<void> {
-  // the repository is the origin's on github.com (`remoteRepo`), as the merge ref is fetched from; a GitLab project is
-  // its `forge`'s, checked against the origin (#924): the note goes on the MR `pr`
+  // the repository is the origin's on github.com (`remoteRepo`), the one refs/heads/<base> and refs/pull/<n>/head are
+  // fetched from; a GitLab project is its `forge`'s, checked against the origin (#924): the note goes on the MR `pr`
   const named = forgeTargetOf(t.root, originOf(t.root));
   const target = named.repository ? named : { ...named, host: "github.com", repository: t.repo };
   await runForgeOperation({ kind: "verification", target, texts: [body], payload: { pr: t.pr, body } }, { github: githubForge((cmd) => run(cmd)), gitlab: gitlabForge(glab) }, hostAws());
@@ -610,29 +646,37 @@ export async function notify(t: { pr: number; repo: string; root: string }, r: L
   return true;
 }
 
-if (import.meta.main) {
+/**
+ * The command: its exit code. 2 = the target cannot be run (nothing posted), 1 = a failure, a conflict, a result not
+ * posted (moved, or the post failed), 0 = a pass posted or one already there. `scriptRoot`: the clone without --repo.
+ * `cache`: where the run's worktrees and logs go (~/.cache; tests give their own).
+ */
+export async function main(args: string[], cwd: string, d: Deps, post = reportResult, scriptRoot = join(import.meta.dir, ".."), cache?: string): Promise<number> {
   let t: Awaited<ReturnType<typeof resolveTarget>>;
   try {
-    t = await resolveTarget(process.argv.slice(2), process.cwd(), join(import.meta.dir, ".."), sh);
+    t = await resolveTarget(args, cwd, scriptRoot, d.sh);
   } catch (e) {
     if (!(e instanceof TargetError)) throw e;
     console.error(`${e.message}\nusage: bun scripts/local-ci.ts <PR> [--repo <owner/name>] [--all] [--force]`);
-    process.exit(2);
+    return 2;
   }
-  const log = (l: string) => console.log(l);
-  const url = await reusablePass(t, sh);
+  const url = await reusablePass(t, d.sh);
   if (url) {
-    log(`既に pass（${url}）。回し直すなら --force`);
-    process.exit(0);
+    d.log(`既に pass（${url}）。回し直すなら --force`);
+    return 0;
   }
-  const r = await localCi(t.pr, t.root, { sh, step, log, slot: (name, fn) => withHeavySlot(name, fn) }, t.repo, undefined, { all: t.all });
+  const r = await localCi(t.pr, t.root, d, t.repo, cache, { all: t.all });
   try {
-    if (!(await notify(t, r, { sh, log }))) process.exit(1);
+    if (!(await notify(t, r, d, post))) return 1;
   } catch (e) {
     // authentication or permission: said and stopped, not tried another way
     console.error(`結果を PR に投稿できなかった（認証・権限を確かめる）: ${e instanceof Error ? e.message : String(e)}`);
-    process.exit(1);
+    return 1;
   }
   // the same exit as Actions' entry (#912); a conflict ran nothing and is a failure
-  process.exit(r.conflict ? 1 : ciExit(r.results));
+  return r.conflict ? 1 : ciExit(r.results);
+}
+
+if (import.meta.main) {
+  process.exit(await main(process.argv.slice(2), process.cwd(), { sh, step, log: (l) => console.log(l), slot: (name, fn) => withHeavySlot(name, fn) }));
 }

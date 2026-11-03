@@ -105,6 +105,12 @@ test("fix scope names review sharing (#2725)", () => {
   expect(FIX_SCOPE).toContain("追加のレビュアー");
 });
 
+test("fix scope leaves promotion to the repository's CLAUDE.md (#3152)", () => {
+  expect(FIX_SCOPE).toContain("昇格はリポジトリの CLAUDE.md の決まりに従い");
+  expect(FIX_SCOPE).toContain("デーモンを再起動する pull、認証は Task の会話で聞く");
+  expect(FIX_SCOPE).not.toContain("昇格・デーモンの再起動");
+});
+
 test("fix: without a mode the request path is unchanged", async () => {
   const base = await boot();
   const task = await (await post(base, { text: "登録して" })).json() as Task;

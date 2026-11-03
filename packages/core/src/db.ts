@@ -68,7 +68,7 @@ export type BacklogLocalEntry = { objectKind: BacklogObjectKind; externalId: str
 
 /**
  * Applies a `set` operation's `value` to a copy of a record's data (#886): an Issue's `title` / `body` / `state` /
- * `milestone` / `parent`, or `label:<name>` (true = on, false = off); a Project item's `field:<name>`. `member` (a
+ * `stateReason` / `milestone` / `parent`, or `label:<name>` (true = on, false = off); a Project item's `field:<name>`. `member` (a
  * Project item in the Project or not) changes no value. Anything else is refused.
  */
 export function applyBacklogField(kind: BacklogObjectKind, data: unknown, field: string, value: unknown): unknown {
@@ -78,12 +78,17 @@ export function applyBacklogField(kind: BacklogObjectKind, data: unknown, field:
     const name = field.slice("label:".length);
     d.labels = value ? [...new Set([...(d.labels ?? []), name])] : (d.labels ?? []).filter((l: string) => l !== name);
   } else if (field.startsWith("field:")) d.fields = { ...d.fields, [field.slice("field:".length)]: value };
-  else if (field !== "member") d[field] = value;
+  else {
+    // a close is completed until a `stateReason` operation after it says otherwise, as GitHub answers it; an open Issue
+    // has no reason. A state it already has changes nothing (#3146)
+    if (kind === "issue" && field === "state" && d.state !== value) d.stateReason = value === "CLOSED" ? "COMPLETED" : null;
+    if (field !== "member") d[field] = value;
+  }
   return d;
 }
 
 const isBacklogField = (kind: BacklogObjectKind, field: string | undefined): field is string =>
-  !!field && (kind === "issue" ? /^label:./.test(field) || ["title", "body", "state", "milestone", "parent"].includes(field) : kind === "project-item" && (/^field:./.test(field) || field === "member"));
+  !!field && (kind === "issue" ? /^label:./.test(field) || ["title", "body", "state", "stateReason", "milestone", "parent"].includes(field) : kind === "project-item" && (/^field:./.test(field) || field === "member"));
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -738,6 +743,8 @@ export class Db {
     for (const op of ops) {
       if (seen.has(op.field!)) continue;
       seen.add(op.field!);
+      // the reason of a close still waiting to be sent before it is not GitHub's yet (#3146): its send decides
+      if (op.field === "stateReason" && ops.some((o) => o.field === "state" && o.seq < op.seq)) continue;
       const value = backlogFieldValue(kind, remote, op.field!);
       if (this.settleBacklogField(ops, op.field!, value, now)) continue;
       if ((op.status !== "pending" && op.status !== "conflict") || value === undefined) continue;

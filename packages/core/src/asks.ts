@@ -622,6 +622,8 @@ const SCAN_NEXT = "内容の URL を開いて当たりが本物の値か見る�
  *   (a false positive) — the same hits do not come back, new ones do; resolved once a result is clean
  * - an approval-window schedule that fired, while SSO / deploy batches wait (`approvalWindowNote`): open with no answer
  *   (the batches are answered on their cards), resolved once none waits
+ * - the same firing, while the newest tag waits for running Tasks (`promotionNote`, #2148): open with no answer (promoted
+ *   from the header's 「新しい版 →」), resolved once the hold is gone
  * A resolved one drops off a day later. Returns the record to keep (the same object when nothing changed).
  */
 export function noticeAsks(
@@ -630,6 +632,8 @@ export function noticeAsks(
     /** `workspace` = the schedule's (meta), shown as where the notice belongs. */
     scans?: Array<{ schedule: { id: string; title: string }; workspace?: { id: string; name: string } | null; result: ScheduleResult | null }>;
     windows?: Array<{ schedule: { id: string; title: string }; workspace?: { id: string; name: string } | null; note: { title: string; body: string } | null }>;
+    /** approval-window schedules again, with the promotion held for running Tasks (`promotionNote`); a notice of its own. */
+    promotions?: Array<{ schedule: { id: string; title: string }; workspace?: { id: string; name: string } | null; note: { title: string; body: string; at: number } | null }>;
     now: number;
   },
   record: NoticeRecord,
@@ -708,15 +712,19 @@ export function noticeAsks(
     next[key] = r;
     asks.push(notice(r, [...hits, ...f.failed].join("\n"), SCAN_NEXT, hits.length ? ["dismiss"] : []));
   }
-  for (const w of input.windows ?? []) {
+  const daily = [
+    ...(input.windows ?? []).map((w) => ({ ...w, key: `approval-window:${w.schedule.id}`, first: null, todo: "判断待ちのまとまりのカードでログイン・承認する（待ちが無くなれば解消済み）" })),
+    ...(input.promotions ?? []).map((w) => ({ ...w, key: `promotion:${w.schedule.id}`, first: w.note?.at ?? null, todo: "ヘッダーの「新しい版 →」から「待たずに昇格する」を押す（昇格するか Task が空いて自動で昇格すれば解消済み）" })),
+  ];
+  for (const w of daily) {
     if (!w.note) continue; // nothing waits: an open one is resolved below
-    const key = `approval-window:${w.schedule.id}`;
-    const had = record[key];
-    const at = had && had.resolvedAt === null ? had.at : now;
-    const r = { id: `notice:${key}@${at}`, at, resolvedAt: null, question: w.note.title, source: `予定「${w.schedule.title}」`, workspace: w.workspace ?? null };
+    const had = record[w.key];
+    // a promotion's first sight is its hold's: the same hold is one notice
+    const at = had && had.resolvedAt === null ? had.at : (w.first ?? now);
+    const r = { id: `notice:${w.key}@${at}`, at, resolvedAt: null, question: w.note.title, source: `予定「${w.schedule.title}」`, workspace: w.workspace ?? null };
     if (!same(had, r)) changed = true;
-    next[key] = r;
-    asks.push(notice(r, w.note.body, "判断待ちのまとまりのカードでログイン・承認する（待ちが無くなれば解消済み）", []));
+    next[w.key] = r;
+    asks.push(notice(r, w.note.body, w.todo, []));
   }
   for (const [key, had] of Object.entries(record)) {
     if (next[key]) continue;

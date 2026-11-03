@@ -4,7 +4,7 @@
  */
 import type { GhRunner } from "./backlog.ts";
 
-export type Issue = { node_id: string; number: number; title: string; body: string; state: string; labels: string[]; parent: number | null; milestone?: number | null; closedAt?: string | null; comments: Array<{ node_id: string; body: string; created_at: string }> };
+export type Issue = { node_id: string; number: number; title: string; body: string; state: string; stateReason?: string | null; labels: string[]; parent: number | null; milestone?: number | null; closedAt?: string | null; comments: Array<{ node_id: string; body: string; created_at: string }> };
 
 /** The Project's Status options; option `o<n>` is the n-th. */
 const STATUS = ["Backlog", "Ready", "In progress", "In review", "Done"];
@@ -52,6 +52,7 @@ export function fakeGithub(now: () => number) {
         const events = history.filter((e) => e.issue === v.n && e.at >= since && e.field !== "body").map((e) =>
           e.field === "title" ? ev(e, { __typename: "RenamedTitleEvent", currentTitle: e.value })
           : e.field === "state" ? ev(e, { __typename: e.value === "CLOSED" ? "ClosedEvent" : "ReopenedEvent" })
+          : e.field === "stateReason" ? ev(e, { __typename: "ClosedEvent", stateReason: e.value })
           : e.field.startsWith("label:") ? ev(e, { __typename: e.value ? "LabeledEvent" : "UnlabeledEvent", label: { name: e.field.slice("label:".length) } })
           : e.field === "milestone" ? ev(e, e.value === null ? { __typename: "DemilestonedEvent" } : { __typename: "MilestonedEvent", milestoneTitle: e.value })
           : e.field === "parent" ? ev(e, e.value === null ? { __typename: "ParentIssueRemovedEvent" } : { __typename: "ParentIssueAddedEvent", parent: { number: e.value } })
@@ -60,13 +61,13 @@ export function fakeGithub(now: () => number) {
         const edits = history.filter((e) => e.issue === v.n && e.field === "body").reverse().map((e) => ({ editedAt: e.at, editor: { login: e.by }, diff: e.deleted ? null : e.value, deletedAt: e.deleted ? e.at : null }));
         // the body's content edits are asked for a body write only (#1384 review)
         if (q.includes("userContentEdits") && state.lastWrite !== "body") throw new Error(`the body's edits were asked after a write of ${state.lastWrite || "nothing"}`);
-        const issue = i && { id: i.node_id, title: i.title, body: i.body, state: i.state, closedAt: i.closedAt ?? null, milestone: milestones.find((m) => m.number === i.milestone) ?? null, parent: i.parent && { id: issues.get(i.parent)!.node_id, number: i.parent }, labels: { nodes: i.labels.map((name) => ({ name })) },
+        const issue = i && { id: i.node_id, title: i.title, body: i.body, state: i.state, stateReason: i.stateReason ?? null, closedAt: i.closedAt ?? null, milestone: milestones.find((m) => m.number === i.milestone) ?? null, parent: i.parent && { id: issues.get(i.parent)!.node_id, number: i.parent }, labels: { nodes: i.labels.map((name) => ({ name })) },
           timelineItems: { pageInfo: { hasNextPage: state.historyNext }, nodes: events }, userContentEdits: { pageInfo: { hasNextPage: state.editsNext }, nodes: edits } };
         return answer({ data: { viewer: { login: state.viewer }, repository: { issue }, node: v.i ? { fieldValueByName: items.get(v.i)?.fields[v.f] != null ? { name: items.get(v.i)!.fields[v.f] } : null } : null } });
       }
       if (q.includes("issue(number:$n)")) {
         const i = issues.get(v.n);
-        return answer({ data: { repository: { issue: i && { id: i.node_id, title: i.title, body: i.body, state: i.state, milestone: milestones.find((m) => m.number === i.milestone) ?? null, parent: i.parent && { id: issues.get(i.parent)!.node_id, number: i.parent }, labels: { nodes: i.labels.map((name) => ({ name })) } } } } });
+        return answer({ data: { repository: { issue: i && { id: i.node_id, title: i.title, body: i.body, state: i.state, stateReason: i.stateReason ?? null, milestone: milestones.find((m) => m.number === i.milestone) ?? null, parent: i.parent && { id: issues.get(i.parent)!.node_id, number: i.parent }, labels: { nodes: i.labels.map((name) => ({ name })) } } } } });
       }
       if (q.includes("projectV2(number:$p)")) return answer({ data: { repositoryOwner: { projectV2: { id: "P_1", fields: { nodes: [{ id: "F_s", name: "Status", dataType: "SINGLE_SELECT", options: STATUS.map((name, n) => ({ id: `o${n + 1}`, name })) }] } } } } });
       if (q.includes("addProjectV2ItemById")) {
@@ -108,7 +109,8 @@ export function fakeGithub(now: () => number) {
       i.labels = method === "POST" ? [...i.labels, ...v.labels] : i.labels.filter((l) => l !== decodeURIComponent(m[3]!));
       return answer([]);
     }
-    if (method === "PATCH") Object.assign(issues.get(n)!, v.state ? { state: v.state.toUpperCase() } : "milestone" in v ? { milestone: v.milestone === "null" ? null : v.milestone } : v);
+    // a close is completed unless its state_reason says otherwise; one opened again is REOPENED (as GitHub answers it)
+    if (method === "PATCH") Object.assign(issues.get(n)!, v.state ? { state: v.state.toUpperCase(), stateReason: v.state === "closed" ? String(v.state_reason ?? "completed").toUpperCase() : "REOPENED" } : "milestone" in v ? { milestone: v.milestone === "null" ? null : v.milestone } : v);
     return answer({});
   };
   return { gh, issues, items, writes, fail, history, state };

@@ -11,6 +11,7 @@ import type { CoreConfig } from "./config.ts";
 import { abortOrphanedTasks, createdIssuesOf, Db, deferredOf, type ApiRequestRow } from "./db.ts";
 import { opsLatency } from "./ops-latency.ts";
 import { OpsLoadSampler, opsLoad, readCgroup } from "./ops-load.ts";
+import { opsResources } from "./ops-resources.ts";
 import { type CleanExit, daemonVersion, endDaemonRun, opsStops, readBootId, readJournal, readReleaseHistory, startDaemonRun } from "./ops-stops.ts";
 import { ArtifactError, ArtifactStore, artifactMime, checkViewKey, withCharset, VIEW_KEY_MS, viewKey } from "./artifacts.ts";
 import { AttachmentError, AttachmentStore, extValue, formatBytes, isActiveContent, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_REQUEST } from "./attachments.ts";
@@ -46,7 +47,7 @@ import { enableGithubSync, enablingOf } from "./backlog-enable.ts";
 import { RUNNER_CONFIG_PATHS, runnerConfigOf } from "./runner-config.ts";
 import { CloneError, parseGithubRepo, registerWorkspace, unusableWorkspaces, WorkspaceClones } from "./workspace-clone.ts";
 import { copyDeletable, inspectRemoval } from "./workspace-remove.ts";
-import { ACTION_FOR_STAGE, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, buildStartPrompt, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionStep, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, type GhRunner, type OtherRepo } from "./backlog.ts";
+import { ACTION_FOR_STAGE, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, buildStartPrompt, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionNote, promotionStep, type PromotionHold, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, type GhRunner, type OtherRepo } from "./backlog.ts";
 import { issueOf, reduceStops, stopRecordsFor } from "./stops.ts";
 import { approvalBatches, approvalWindowNote, BatchAnswers } from "./approval-batch.ts";
 import { ASK_HISTORY_MS, ON_HOLD_RESUME, asksFromBacklog, closedHits, asksFromTasks, blockersOf, dedupeAsks, noticeAsks, policyPbi, rankAsks, prFacts, resumeOfTask, type NoticeRecord, type PolicyEnv, type PrFacts } from "./asks.ts";
@@ -822,7 +823,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const scans = db.listSchedules().filter((s) => s.action === "secret-scan").map((s) => ({ schedule: { id: s.id, title: s.title }, workspace: where(s.workspaceId), result: s.lastResult }));
     // approval-window (#2054): once a firing ran, the batches still waiting, as of now
     const windows = db.listSchedules().filter((s) => s.action === "approval-window" && s.enabled && s.lastResult).map((s) => ({ schedule: { id: s.id, title: s.title }, workspace: where(s.workspaceId), note: approvalWindowNote(batches) }));
-    const { asks, record } = noticeAsks({ unusable, scans, windows, now }, had);
+    // the same firing (#2148): the newest tag held for running Tasks since before it fired
+    const promotions = db.listSchedules().filter((s) => s.action === "approval-window" && s.enabled && s.lastRunAt).map((s) => ({ schedule: { id: s.id, title: s.title }, workspace: where(s.workspaceId), note: promotionNote(promotionHold, busyTasks(), s.lastRunAt, now) }));
+    const { asks, record } = noticeAsks({ unusable, scans, windows, promotions, now }, had);
     if (record !== had) db.setSetting(NOTICES_KEY, record);
     return asks;
   };
@@ -1186,8 +1189,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   /**
    * Why the last promotionFirst held the newest tag (#626): Tasks running (asked again once they end) or a tag that
    * failed. Memory only: a restart forgets it and the next firing makes it again. `GET /api/daemon/release` shows it.
+   * `since` (#2148): when it began to hold that tag, kept while the same tag is held (promoteWhenIdle clears the hold
+   * before it asks again, so the first sight is kept apart in `heldSince`).
    */
-  let promotionHold: { tag: string; failed: boolean; reason: string } | null = null;
+  let promotionHold: PromotionHold | null = null;
+  let heldSince: { tag: string; at: number } | null = null;
   /** Before picking (#282): bring the app up to the newest tag, or hold everything while that tag failed to start. */
   const promotionFirst = async (meta: Workspace): Promise<string | null> => {
     const status = await releaseStatus();
@@ -1198,7 +1204,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const latestInCurrent = !!latest && !!current && latest.sha !== current && (await git(["merge-base", "--is-ancestor", latest.sha, current]).then(() => true, () => false));
     // counted after the last await: a Task that ends while git runs either counts as ended here or finds the hold set
     const step = promotionStep({ status: status as ReleaseState, latest, busyTasks: busyTasks(), latestInCurrent });
-    promotionHold = step.action === "wait" ? { tag: step.failed?.tag ?? latest!.tag, failed: !!step.failed, reason: step.reason } : null;
+    const heldTag = step.action === "wait" ? (step.failed?.tag ?? latest!.tag) : null;
+    if (heldTag === null) heldSince = null;
+    else if (heldSince?.tag !== heldTag) heldSince = { tag: heldTag, at: Date.now() };
+    promotionHold = step.action === "wait" ? { tag: heldTag!, failed: !!step.failed, reason: step.reason, since: heldSince!.at } : null;
     if (step.action === "pick") return null;
     if (step.action === "promote") {
       try {
@@ -3358,6 +3367,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         if (!Number.isInteger(days) || days < 1 || days > 90) return bad("days must be an integer 1..90");
         return json(opsLoad(db, days, { taskId: sp.get("task") ?? undefined, available: readCgroup() !== null }));
       },
+      // now, for the resources screen (#3332): read when asked; the screen asks every 5 s only while it is shown
+      "/api/ops/resources": () => json(opsResources(db, { home: homedir() })),
       "/api/ledger/pricing": () => json({ ...pricingTable(), fromSettings: Object.keys(settings().prices), source: pricing.source.replace(cfg.home, "~/.switchboard").replace(cfg.codeRoot, "<repo>"), problems: pricing.problems }),
       "/api/tasks/:id/budget": {
         POST: async (req) => {

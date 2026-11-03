@@ -1120,8 +1120,9 @@ export class TaskManager {
     // none in its PATH; last, so that it does not come before the user's own tools)
     const path = meta ? { PATH: [join(meta.path, "ops-kit/bin"), process.env.PATH ?? "", dirname(process.execPath)].join(delimiter) } : undefined;
     const deviceAuth = this.deviceAuthEnv?.(task.id);
-    // #1397: everything the task starts, detached or not, carries this; onTaskEnd stops what still does
-    const env = { ...path, ...deviceAuth, ...this.dockerEnv?.(task.id), SWITCHBOARD_TASK_ID: task.id };
+    // #1397: everything the task starts, detached or not, carries this; onTaskEnd stops what still does. The kit's
+    // `ops-kit heavy` names the Task of a job holding or waiting for a slot by OPS_KIT_TASK_ID (the kit names no app)
+    const env = { ...path, ...deviceAuth, ...this.dockerEnv?.(task.id), SWITCHBOARD_TASK_ID: task.id, OPS_KIT_TASK_ID: task.id };
     // The stop for writes to fixed names right under /tmp (#764, docs/design/shared-tmp-guard.md): the kit's hook
     const guards = meta ? [shellQuote(join(meta.path, "ops-kit/bin/deny-shared-tmp"))] : undefined;
     const allow = meta ? taskAllowRules(meta.path, task.cwd) : undefined;

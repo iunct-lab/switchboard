@@ -76,7 +76,7 @@ const vars = (v: Record<string, string | number>) => Object.entries(v).flatMap((
 const graphqlWith = (gh: GhRunner, cwd: string, query: string, v: Record<string, string | number> = {}) => callWith(gh, cwd, ["graphql", "-f", `query=${query}`, ...vars(v)]);
 const graphql = async (gh: GhRunner, cwd: string, query: string, v: Record<string, string | number> = {}) => (await graphqlWith(gh, cwd, query, v)).data;
 
-const ISSUE_Q = "query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number:$n){ id title body state milestone{ title } parent{ id number } labels(first:100){ nodes{ name } } } } }";
+const ISSUE_Q = "query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number:$n){ id title body state stateReason milestone{ title } parent{ id number } labels(first:100){ nodes{ name } } } } }";
 const PROJECT_Q = "query($o:String!,$p:Int!){ repositoryOwner(login:$o){ ... on ProjectV2Owner{ projectV2(number:$p){ id fields(first:50){ nodes{ ... on ProjectV2FieldCommon{ id name dataType } ... on ProjectV2SingleSelectField{ options{ id name } } } } } } } }";
 const ITEM_Q = "query($i:ID!,$f:String!){ node(id:$i){ ... on ProjectV2Item{ fieldValueByName(name:$f){ ... on ProjectV2ItemFieldSingleSelectValue{ name } ... on ProjectV2ItemFieldNumberValue{ number } ... on ProjectV2ItemFieldTextValue{ text } ... on ProjectV2ItemFieldDateValue{ date } } } } }";
 /**
@@ -85,9 +85,9 @@ const ITEM_Q = "query($i:ID!,$f:String!){ node(id:$i){ ... on ProjectV2Item{ fie
  * made under, so another login's edit the write replaced can be told from one's own. One call, as the read after the
  * write was before.
  */
-const HISTORY_F = "timelineItems(since:$s, first:100, itemTypes:[RENAMED_TITLE_EVENT, CLOSED_EVENT, REOPENED_EVENT, LABELED_EVENT, UNLABELED_EVENT, MILESTONED_EVENT, DEMILESTONED_EVENT, PARENT_ISSUE_ADDED_EVENT, PARENT_ISSUE_REMOVED_EVENT, PROJECT_V2_ITEM_STATUS_CHANGED_EVENT]){ pageInfo{ hasNextPage } nodes{ __typename ... on RenamedTitleEvent{ actor{ login } createdAt currentTitle } ... on ClosedEvent{ actor{ login } createdAt } ... on ReopenedEvent{ actor{ login } createdAt } ... on LabeledEvent{ actor{ login } createdAt label{ name } } ... on UnlabeledEvent{ actor{ login } createdAt label{ name } } ... on MilestonedEvent{ actor{ login } createdAt milestoneTitle } ... on DemilestonedEvent{ actor{ login } createdAt } ... on ParentIssueAddedEvent{ actor{ login } createdAt parent{ number } } ... on ParentIssueRemovedEvent{ actor{ login } createdAt } ... on ProjectV2ItemStatusChangedEvent{ actor{ login } createdAt status project{ id } } } }";
+const HISTORY_F = "timelineItems(since:$s, first:100, itemTypes:[RENAMED_TITLE_EVENT, CLOSED_EVENT, REOPENED_EVENT, LABELED_EVENT, UNLABELED_EVENT, MILESTONED_EVENT, DEMILESTONED_EVENT, PARENT_ISSUE_ADDED_EVENT, PARENT_ISSUE_REMOVED_EVENT, PROJECT_V2_ITEM_STATUS_CHANGED_EVENT]){ pageInfo{ hasNextPage } nodes{ __typename ... on RenamedTitleEvent{ actor{ login } createdAt currentTitle } ... on ClosedEvent{ actor{ login } createdAt stateReason } ... on ReopenedEvent{ actor{ login } createdAt } ... on LabeledEvent{ actor{ login } createdAt label{ name } } ... on UnlabeledEvent{ actor{ login } createdAt label{ name } } ... on MilestonedEvent{ actor{ login } createdAt milestoneTitle } ... on DemilestonedEvent{ actor{ login } createdAt } ... on ParentIssueAddedEvent{ actor{ login } createdAt parent{ number } } ... on ParentIssueRemovedEvent{ actor{ login } createdAt } ... on ProjectV2ItemStatusChangedEvent{ actor{ login } createdAt status project{ id } } } }";
 const EDITS_F = "userContentEdits(first:50){ pageInfo{ hasNextPage } nodes{ editedAt editor{ login } diff deletedAt } }";
-const AFTER_ISSUE_Q = `query($o:String!,$r:String!,$n:Int!,$s:DateTime!){ viewer{ login } repository(owner:$o,name:$r){ issue(number:$n){ id title body state milestone{ title } parent{ id number } labels(first:100){ nodes{ name } } ${HISTORY_F} } } }`;
+const AFTER_ISSUE_Q = `query($o:String!,$r:String!,$n:Int!,$s:DateTime!){ viewer{ login } repository(owner:$o,name:$r){ issue(number:$n){ id title body state stateReason milestone{ title } parent{ id number } labels(first:100){ nodes{ name } } ${HISTORY_F} } } }`;
 const AFTER_BODY_Q = AFTER_ISSUE_Q.replace(`${HISTORY_F} }`, `${HISTORY_F} ${EDITS_F} }`);
 const AFTER_ITEM_Q = `query($o:String!,$r:String!,$n:Int!,$s:DateTime!,$i:ID!,$f:String!){ viewer{ login } node(id:$i){ ... on ProjectV2Item{ fieldValueByName(name:$f){ ... on ProjectV2ItemFieldSingleSelectValue{ name } ... on ProjectV2ItemFieldNumberValue{ number } ... on ProjectV2ItemFieldTextValue{ text } ... on ProjectV2ItemFieldDateValue{ date } } } } repository(owner:$o,name:$r){ issue(number:$n){ ${HISTORY_F} } } }`;
 
@@ -97,7 +97,7 @@ const STATUS_EVENTS_Q = "query($o:String!,$r:String!,$n:Int!){ repository(owner:
 /** The login GitHub's Project workflows act under: they move a Status on their own (item added, PR linked, item closed). */
 const projectAutomation = (login: string | null | undefined) => /^github-project-automation(\[bot\])?$/.test(login ?? "");
 
-type HistoryEvent = { __typename: string; actor: { login: string } | null; createdAt: string; currentTitle?: string; label?: { name: string }; milestoneTitle?: string; parent?: { number: number } | null; status?: string; project?: { id: string } };
+type HistoryEvent = { __typename: string; actor: { login: string } | null; createdAt: string; currentTitle?: string; stateReason?: string | null; label?: { name: string }; milestoneTitle?: string; parent?: { number: number } | null; status?: string; project?: { id: string } };
 type ContentEdit = { editedAt: string; editor: { login: string } | null; diff: string | null; deletedAt: string | null };
 export interface AfterAnswer { events: HistoryEvent[]; edits: ContentEdit[]; viewer: string }
 
@@ -117,6 +117,7 @@ export function theirEdit(field: string, after: AfterAnswer, since: string, proj
     if (field === "title" && e.__typename === "RenamedTitleEvent") hit(e.currentTitle);
     else if (field === "state" && e.__typename === "ClosedEvent") hit("CLOSED");
     else if (field === "state" && e.__typename === "ReopenedEvent") hit("OPEN");
+    else if (field === "stateReason" && e.__typename === "ClosedEvent") hit(e.stateReason ?? null);
     else if (label && e.__typename === "LabeledEvent" && e.label?.name.toLowerCase() === label) hit(true);
     else if (label && e.__typename === "UnlabeledEvent" && e.label?.name.toLowerCase() === label) hit(false);
     else if (field === "milestone" && e.__typename === "MilestonedEvent") hit(e.milestoneTitle ?? null);
@@ -209,8 +210,8 @@ class Sender {
     }
   }
 
-  private static issueField(op: BacklogOperation, i: { title: string; body: string; state: string; milestone: { title: string } | null; parent: { id: string; number: number } | null; labels: { nodes: Array<{ name: string }> } }): unknown {
-    return backlogFieldValue("issue", { title: i.title, body: i.body, state: i.state, milestone: i.milestone?.title ?? null, parent: i.parent?.number ?? null, labels: i.labels.nodes.map((l) => l.name) }, op.field!);
+  private static issueField(op: BacklogOperation, i: { title: string; body: string; state: string; stateReason?: string | null; milestone: { title: string } | null; parent: { id: string; number: number } | null; labels: { nodes: Array<{ name: string }> } }): unknown {
+    return backlogFieldValue("issue", { title: i.title, body: i.body, state: i.state, stateReason: i.stateReason ?? null, milestone: i.milestone?.title ?? null, parent: i.parent?.number ?? null, labels: i.labels.nodes.map((l) => l.name) }, op.field!);
   }
   private static itemField(v: any): unknown {
     return v ? (v.name ?? v.number ?? v.text ?? v.date ?? null) : null;
@@ -280,6 +281,8 @@ class Sender {
       else await call(this.gh, this.cwd, [this.repo(`/issues/${n}/labels/${encodeURIComponent(name)}`), "-X", "DELETE"]);
     } else if (f === "parent") await this.setParent(await this.issue(n), v as number | null);
     else if (f === "milestone") await call(this.gh, this.cwd, [this.repo(`/issues/${n}`), "-X", "PATCH", "-F", `milestone=${(await this.milestone(v as string | null)) ?? "null"}`]);
+    // the reason of a close (#3146): GitHub takes it with the state, closed / not_planned
+    else if (f === "stateReason") await call(this.gh, this.cwd, [this.repo(`/issues/${n}`), "-X", "PATCH", "-f", "state=closed", "-f", `state_reason=${String(v).toLowerCase()}`]);
     else await call(this.gh, this.cwd, [this.repo(`/issues/${n}`), "-X", "PATCH", "-f", `${f}=${f === "state" ? String(v).toLowerCase() : v}`]);
     return { status: "done" };
   }

@@ -570,6 +570,11 @@ describe("backlog without BACKLOG_URL (#3071)", () => {
       const viewJson = await cli(["backlog", "view", "12", "--json"], { BACKLOG_URL: undefined }, [issue, page2]);
       expect(JSON.parse(viewJson.lines.join("\n")).issue.subIssues).toEqual([13]);
       expect(graphql(viewJson.gh.calls[0])?.query).toContain("subIssues");
+      // the reason of a close is read from GitHub too (#3146)
+      const closed = () => ({ repository: { issue: { ...issue().repository.issue, state: "CLOSED", stateReason: "NOT_PLANNED", comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } });
+      const viewClosed = await cli(["backlog", "view", "12"], { BACKLOG_URL: undefined }, [closed]);
+      expect(viewClosed.lines[0]).toEndWith("[CLOSED not planned]");
+      expect(graphql(viewClosed.gh.calls[0])?.query).toContain("stateReason");
     } finally {
       app.stop();
     }
@@ -647,6 +652,9 @@ describe("backlog without BACKLOG_URL (#3071)", () => {
         ["issue", "edit", "12", "-R", "example/repo", "--title", "新しい題", "--add-label", "area:two", "--remove-label", "area:one", "--remove-milestone"],
         ["issue", "close", "12", "-R", "example/repo"],
       ]);
+      // a reason goes with the close in one PATCH (#3146): an Issue closed already gets its reason changed too
+      const reasoned = await cli(["backlog", "edit", "12", "--state", "closed", "--reason", "not-planned"], { BACKLOG_URL: undefined }, [() => ""]);
+      expect([reasoned.code, reasoned.gh.calls.map(runOf)]).toEqual([0, [["api", "-X", "PATCH", "repos/example/repo/issues/12", "-f", "state=closed", "-f", "state_reason=not_planned"]]]);
       const parentless = await cli(["backlog", "edit", "13", "--body-file", join(dir, "body.md"), "--state", "open", "--no-parent"], { BACKLOG_URL: undefined }, [readBody, () => "", () => ({ repository: { child: { id: "I13", parent: { id: "I12" } } } }), () => ({})]);
       expect(parentless.code).toBe(0);
       expect(runOf(parentless.gh.calls[1]!)).toEqual(["issue", "reopen", "13", "-R", "example/repo"]);

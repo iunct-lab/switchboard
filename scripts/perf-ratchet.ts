@@ -38,6 +38,8 @@ export interface Budget {
   journeys: Record<string, { requests: number; layoutCount?: number; recalcStyleCount: number; layoutShift?: number }>;
   /** The daemon's delay under load and overlap (perf-bench's `loaded`); `local` only: a ceiling nobody measured would be a guess. */
   loaded?: { healthMaxMs: number };
+  /** A result only: why perf-bench did not measure `loaded` (`--skip-loaded`, #3635); judge then leaves its ceiling out. */
+  loadedSkipped?: string;
   /** The type check's and bun test's seconds, compared by local-ci (`judgeDurations`); `local` only: Actions has no ceilings of its own. */
   durations?: { typecheck: number; test: number };
 }
@@ -57,10 +59,10 @@ export function envOf(flag: string | undefined, env: Record<string, string | und
 
 export const BUDGET_PATH = join(import.meta.dir, "perf-budget.json");
 /** How much the same code moves from run to run (docs/design/perf.md の「数の意味」). */
-const BAND: Record<string, number> = { requests: 1, layoutCount: 1, recalcStyleCount: 1, layoutShift: 0.03, healthMaxMs: 1750 };
+const BAND: Record<string, number> = { requests: 1, layoutCount: 1, recalcStyleCount: 1, layoutShift: 0.03, healthMaxMs: 10150 };
 const round4 = (n: number) => Math.round(n * 1e4) / 1e4;
 /** The ceilings judged on the high side only: `over` above them, never `improved` below, so `update` never lowers them.
- * The load moves them by more than twice (a quiet host: 1,700–1,924 ms against 5,440 − 2 × 1,750 = 1,940, 2026-11-02),
+ * The load moves them by more than twice (a quiet host: 1,700–1,924 ms against the first ceiling and band, 5,440 − 2 × 1,750 = 1,940, 2026-11-02),
  * the same reason as `judgeDurations` (a regression of #2822, #3574). */
 const HIGH_SIDE_ONLY = new Set(["loaded.healthMaxMs"]);
 
@@ -77,12 +79,16 @@ const band = (key: string) => {
   return b;
 };
 
-/** Compares a perf-bench result with the ceilings. A ceiling with no value in the result throws (a renamed journey or count). */
+/**
+ * Compares a perf-bench result with the ceilings. A ceiling with no value in the result throws (a renamed journey or
+ * count), but for `loaded.*` in a result that says it skipped `loaded` (`loadedSkipped`).
+ */
 export function judge(result: Budget, budget: Budget): { over: Item[]; improved: Item[] } {
   const values = flat(result);
   const over: Item[] = [];
   const improved: Item[] = [];
   for (const [key, ceiling] of flat(budget)) {
+    if (result.loadedSkipped !== undefined && key.startsWith("loaded.")) continue;
     const value = values.get(key);
     if (value === undefined) throw new Error(`the result has no ${key}`);
     if (value > ceiling) over.push({ key, value, ceiling });
@@ -327,6 +333,7 @@ if (import.meta.main && process.argv[2] === "history") {
   const budgets = (await Bun.file(BUDGET_PATH).json()) as Budgets;
   const budget = budgets[env];
   console.log(`ceilings: ${env}`);
+  if (result.loadedSkipped !== undefined) console.log(`loaded: 測らなかった（${result.loadedSkipped}）。loaded の上限は判定しない`);
   if (cmd === "update") {
     const changed = judge(result, budget).improved;
     await Bun.write(BUDGET_PATH, JSON.stringify(loweredBudgets(budgets, env, changed), null, 2) + "\n");

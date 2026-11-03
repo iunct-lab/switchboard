@@ -188,6 +188,70 @@ test("the state and a Project field of an Issue are written, each checked first"
   expect(g.writes.map((w) => (w.includes("updateProjectV2ItemFieldValue") ? "updateProjectV2ItemFieldValue" : w))).toEqual(["PATCH repos/acme/app/issues/12", "updateProjectV2ItemFieldValue"]);
 });
 
+test("close with a reason (#3146): the close, then state_reason=not_planned; a completed one changed alone; a close without a reason sends none", async () => {
+  const g = fakeGithub();
+  const patches: string[][] = [];
+  const gh: GhRunner = async (args, cwd) => {
+    if (args.includes("PATCH")) patches.push(args.filter((a, k) => args[k - 1] === "-f"));
+    return g.gh(args, cwd);
+  };
+  editStoredIssue(db, S, 12, { state: "CLOSED", stateReason: "NOT_PLANNED" });
+  expect(await send(gh)).toBe(2);
+  expect(patches).toEqual([["state=closed"], ["state=closed", "state_reason=not_planned"]]);
+  expect(g.issues.get(12)).toMatchObject({ state: "CLOSED", stateReason: "NOT_PLANNED" });
+  expect(statuses()).toEqual([]);
+  const shown = () => {
+    const r = db.listBacklogRecords(S, "issue").find((x) => x.externalId === "I_12")!;
+    const v = (r.local ?? r.remote) as BacklogIssueData;
+    return { state: v.state, stateReason: v.stateReason };
+  };
+  expect(shown()).toEqual({ state: "CLOSED", stateReason: "NOT_PLANNED" });
+
+  // one closed completed on GitHub: only its reason is changed
+  g.issues.get(3)!.state = "CLOSED";
+  g.issues.get(3)!.stateReason = "COMPLETED";
+  db.putBacklogSnapshot(S, { records: [{ objectKind: "issue", externalId: "I_3", remote: { number: 3, title: "親", url: "", state: "CLOSED", stateReason: "COMPLETED", body: "", labels: ["type:pbi"], milestone: null, parent: null, subIssues: [], createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z", closedAt: "2026-10-02T00:00:00Z" }, fetchState: "fetched" }], cursor: null, syncedAt: 2 });
+  patches.length = 0;
+  editStoredIssue(db, S, 3, { state: "CLOSED", stateReason: "NOT_PLANNED" });
+  expect(await send(gh)).toBe(1);
+  expect(patches).toEqual([["state=closed", "state_reason=not_planned"]]);
+  expect(g.issues.get(3)).toMatchObject({ state: "CLOSED", stateReason: "NOT_PLANNED" });
+
+  // another login's reason in the window, read through the history after the write: held with its value
+  g.history.push({ issue: 3, by: "them", at: later(), field: "stateReason", value: "DUPLICATE" });
+  editStoredIssue(db, S, 3, { state: "CLOSED", stateReason: "COMPLETED" }, t);
+  expect(await send(gh)).toBe(0);
+  expect(db.listPendingBacklogOperations(S).find((o) => o.field === "stateReason")).toMatchObject({ status: "conflict", overwritten: { value: "DUPLICATE", editor: "them" } });
+
+  // a reopen still waiting taken back by a close COMPLETED: nothing is reopened, the reason alone is changed
+  g.issues.get(3)!.stateReason = "NOT_PLANNED";
+  db.putBacklogSnapshot(S, { records: [{ objectKind: "issue", externalId: "I_3", remote: { number: 3, title: "親", url: "", state: "CLOSED", stateReason: "NOT_PLANNED", body: "", labels: ["type:pbi"], milestone: null, parent: null, subIssues: [], createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z", closedAt: "2026-10-02T00:00:00Z" }, fetchState: "fetched" }], cursor: null, syncedAt: 3 });
+  for (const o of db.listPendingBacklogOperations(S)) db.setBacklogOperationResult(o.id, { status: "done" });
+  patches.length = 0;
+  editStoredIssue(db, S, 3, { state: "OPEN" });
+  editStoredIssue(db, S, 3, { state: "CLOSED", stateReason: "COMPLETED" });
+  await send(gh);
+  expect(patches).toEqual([["state=closed", "state_reason=completed"]]);
+  expect(g.issues.get(3)).toMatchObject({ state: "CLOSED", stateReason: "COMPLETED" });
+
+  // without a reason: the close alone, completed as before
+  const d2 = new Db(join(dir, "plain.db"));
+  seed(d2);
+  const g2 = fakeGithub();
+  const plain: string[][] = [];
+  editStoredIssue(d2, S, 12, { state: "CLOSED" });
+  await sendGithubOperations(async (args, cwd) => (args.includes("PATCH") && plain.push(args.filter((a, k) => args[k - 1] === "-f")), g2.gh(args, cwd)), d2, dir, S, clock);
+  expect(plain).toEqual([["state=closed"]]);
+  expect(g2.issues.get(12)).toMatchObject({ state: "CLOSED", stateReason: "COMPLETED" });
+  d2.close();
+});
+
+test("close with a reason (#3146): another login's reason in the window is held", () => {
+  const after = (stateReason: string) => ({ events: [{ __typename: "ClosedEvent", actor: { login: "them" }, createdAt: "2026-10-02T00:00:00Z", stateReason }], edits: [], viewer: "me" });
+  expect(theirEdit("stateReason", after("DUPLICATE"), "2026-10-01T00:00:00Z", "", "NOT_PLANNED")).toMatchObject({ value: "DUPLICATE", editor: "them" });
+  expect(theirEdit("stateReason", after("NOT_PLANNED"), "2026-10-01T00:00:00Z", "", "NOT_PLANNED")).toBeNull();
+});
+
 test("Status の順の変更が競合しない (#2694): two Status edits stored one after the other are sent as the later; one written to GitHub around the store is held", async () => {
   // a Task's order: In progress, then In review, both stored here; the second is made on the first
   const g = fakeGithub();

@@ -325,6 +325,7 @@ ops-kit backlog create --title "要望: <題>" --body-file "$W/request.md" --lab
 ops-kit backlog create --title "PBI: <題>" --body-file "$W/pbi.md" --label type:pbi --milestone "Phase N — …" --field Status=Backlog
 ops-kit backlog create --title "Task: <題>" --body-file "$W/task.md" --label type:task --parent <PBI> --milestone "Phase N — …" --field Status=Backlog
 ops-kit backlog edit <num> --body-file "$W/body.md" | --add-label needs-decision | --state closed
+ops-kit backlog edit <num> --state closed --reason not-planned   # 重複・やらないと決めた Issue（--reason completed|not-planned。閉じている Issue の理由の付け替えも同じ）
 ops-kit backlog edit <num> --add-label on-hold | --remove-label on-hold   # 保留の付け外し（「保留」の小節）
 ops-kit backlog edit <num> --parent <PBI> | --no-parent   # sub-issue の付け替え
 ops-kit backlog edit <num> --milestone "Phase N — …"      # PBI と Task の両方に Phase の Milestone

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { AutoStartKind, Backlog, JudgeSettings, LlmRoutingSettings, ModelOption, Preset, RunnerId, RunnerInfo, Settings as SettingsData, SettingsPrice, Task, Workspace } from "@switchboard/protocol";
+import type { AutoStartKind, Backlog, HistoryStatus, JudgeSettings, LlmRoutingSettings, ModelOption, Preset, RunnerId, RunnerInfo, Settings as SettingsData, SettingsPrice, Task, Workspace } from "@switchboard/protocol";
 import { api, type Health, type SettingsResponse, type WorkspaceClone } from "../api.ts";
 import { ModelSelect } from "./ModelSelect.tsx";
 import { ClaudeLoginRow } from "./ClaudeLoginRow.tsx";
@@ -14,6 +14,8 @@ import { presetRow } from "../presets.ts";
 import { listedRunners } from "../runners.ts";
 import { githubSyncText } from "../backlogSync.ts";
 import { WorkspaceCard } from "./WorkspaceCard.tsx";
+import { jstTime } from "../time.ts";
+import { SETTINGS_GROUPS, settingsGroup } from "../settingsGroups.ts";
 
 /** The kinds of Task that start by themselves (#1337), in the order of the 既定 card: the feedback modes, then the backlog stages. */
 const AUTO_START_KINDS: Array<[AutoStartKind, string]> = [["fix", "すぐ直す"], ["request", "要望として登録"], ["to-pbi", "PBI にする"], ["to-tasks", "Task に分解"], ["complete", "実装"], ["check", "状況確認"], ["close", "閉じる"], ["new-repo", "新しいリポジトリ"]];
@@ -23,7 +25,7 @@ const AUTO_START_KINDS: Array<[AutoStartKind, string]> = [["fix", "すぐ直す"
  * changes (a partial PATCH /api/settings), so a value takes effect on the next use. The per-Task choices (mode, model,
  * budget, shadow for one Task) stay on the Home form; what is saved here is only what they start from.
  */
-export function Settings(props: { focusRelease?: number; health: Health | null; workspaces: Workspace[]; clones: WorkspaceClone[]; onAddWorkspaceFromGithub: (repo: string, backlog: "github" | "switchboard") => Promise<void>; onAddWorkspace: (path: string, backlog: "github" | "switchboard") => Promise<void>; onTaskStarted: (task: Task) => void; runnerOk: Set<RunnerId>; onRunners: (runners: RunnerInfo[]) => void; onError: (msg: string) => void }) {
+export function Settings(props: { focus?: { id: string; n: number } | null; health: Health | null; workspaces: Workspace[]; clones: WorkspaceClone[]; onAddWorkspaceFromGithub: (repo: string, backlog: "github" | "switchboard") => Promise<void>; onAddWorkspace: (path: string, backlog: "github" | "switchboard") => Promise<void>; onTaskStarted: (task: Task) => void; runnerOk: Set<RunnerId>; onRunners: (runners: RunnerInfo[]) => void; onError: (msg: string) => void }) {
   const [s, setS] = useState<SettingsResponse | null>(null);
   const [saving, setSaving] = useState(false);
   // 端末通知 (#1138): the browser's permission is the only switch; asked for only from the button
@@ -54,11 +56,11 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
   };
   // after a login or logout: the runners' status commands are asked again now (#2528)
   const refresh = () => api.health({ recheck: true }).then((h) => h.runners && props.onRunners(h.runners)).catch(() => undefined);
-  // the header's 「新しい版 →」: the section exists only once the settings have loaded
+  // the header's 「新しい版 →」 and Home's 「設定で追加 →」: the section exists only once the settings have loaded
   const loaded = s !== null;
   useEffect(() => {
-    if (loaded && props.focusRelease) document.getElementById("release")?.scrollIntoView();
-  }, [loaded, props.focusRelease]);
+    if (loaded && props.focus) document.getElementById(props.focus.id)?.scrollIntoView();
+  }, [loaded, props.focus]);
   if (!s) return <main className="main settings"><section className="card"><div className="muted">読み込み中…</div></section></main>;
   const dakOk = props.runnerOk.has("dak");
   const listed = listedRunners(props.health?.runners, s.shadowRunner === "dak" ? "dak" : undefined);
@@ -74,7 +76,43 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
   const d = s.defaults;
   return (
     <main className="main settings">
-      <WorkspaceCard workspaces={props.workspaces} clones={props.clones} onAddWorkspaceFromGithub={props.onAddWorkspaceFromGithub} onAddWorkspace={props.onAddWorkspace} onTaskStarted={props.onTaskStarted} onError={props.onError} />
+      <SettingsToc />
+      <SettingsGroupHeading id="settings-task-start" />
+      <section className="card tunables">
+        <h5>新規作成の既定</h5>
+        <div className="row" style={{ alignItems: "center", gap: 6 }}>
+          <span className="hint">Home の新規作成のランナー</span>
+          <select className="mode" value={nd.taskRunner} disabled={saving} aria-label="Home の新規作成のランナー" onChange={(e) => void save({ newDefaults: { taskRunner: e.target.value as RunnerId } })}>
+            {runnerOptions(nd.taskRunner, "ランナー")}
+          </select>
+          <span className="muted">既定 {d.newDefaults.taskRunner}</span>
+        </div>
+        <TextField label="定期実行の新規作成の cron" value={nd.scheduleCron} def={d.newDefaults.scheduleCron} mono disabled={saving} onSave={(v) => save({ newDefaults: { scheduleCron: v } })} />
+        <ResetButton disabled={saving} onClick={() => save({ newDefaults: null })} />
+      </section>
+
+      <section className="card">
+        <h5>承認モードの既定</h5>
+        <div className="muted">新しい Task が承認モードを選ばずに作られたときのモード（Home で Task ごとに変えられます）。「確認を飛ばす」モードは既定にできません。</div>
+        {runners.filter((r) => r.permissionModes.length > 0).map((r) => (
+          <div key={r.id} className="row" style={{ alignItems: "center", gap: 6 }}>
+            <span className="t">{r.id}</span>
+            <select className="mode" value={r.defaultPermissionMode ?? ""} disabled={saving} aria-label={`${r.id} の承認モードの既定`} onChange={(e) => void save({ defaultPermissionMode: { [r.id]: e.target.value } })}>
+              {r.permissionModes.filter((m) => !m.danger || m.value === r.defaultPermissionMode).map((m) => (
+                <option key={m.value} value={m.value} title={m.description}>
+                  承認: {m.label}
+                </option>
+              ))}
+            </select>
+            {s.defaultPermissionMode[r.id] && (
+              <button className="ghost" disabled={saving} onClick={() => void save({ defaultPermissionMode: { [r.id]: null } })} title="保存した既定を消し、ランナー本来の既定（Terminal と同じ）に戻します">
+                保存した既定を解除
+              </button>
+            )}
+          </div>
+        ))}
+      </section>
+
       <section className="card">
         <h5>自動で始まる Task の既定</h5>
         <div className="muted">バックログの工程ボタン・フィードバックボタンで始まる Task と、定期実行の新規作成フォームの初期値のランナー・モデル・思考の深さです。モデル・思考の深さが「CLI 既定」ならランナー自身の設定で動きます。種類ごとに変えられます。変えていない種類は共通の値で始まります（バックログを進めるはスケジュールの値）。</div>
@@ -124,6 +162,24 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
         </div>
       </section>
 
+      <section className="card presets">
+        <h5>定型の指示</h5>
+        <div className="muted">新規依頼と返信で選べる指示です。本文の {"{{target}}"} に選んだ Issue / PR が入ります。承認モードは含みません</div>
+        <PresetSettings onError={props.onError} />
+      </section>
+
+      {(listed.includes("dak") || s.shadowRunner === "dak") && (
+      <section className="card">
+        <h5>並走（DAK）の既定</h5>
+        <label className={`hint toggle ${!dakOk && s.shadowRunner !== "dak" ? "off" : ""}`} title={dakOk ? "同じ依頼を DAK（DAK に設定したモデル。ローカルモデルなら API 料金なし）でも同時に実行し、並走 Task として並べます" : "DAK の agent（http://127.0.0.1:8000、SWITCHBOARD_DAK_URL で変更）に到達できません"}>
+          <input type="checkbox" checked={s.shadowRunner === "dak"} disabled={saving || (!dakOk && s.shadowRunner !== "dak")} onChange={(e) => void save({ shadowRunner: e.target.checked ? "dak" : null })} />
+          新しい Task を DAK にも同時に流す
+          {!dakOk && s.shadowRunner === "dak" && <span className="hint">（DAK 未検出のため今は並走しません）</span>}
+        </label>
+      </section>
+      )}
+
+      <SettingsGroupHeading id="settings-resume" />
       {/* The tunables (#835): one card per group, saved on blur / Enter; 既定に戻す puts the whole group back (PATCH null) */}
       <section className="card tunables">
         <h5>使用量と自動再開</h5>
@@ -138,6 +194,23 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
         <ResetButton disabled={saving} onClick={() => save({ quotaAndResume: null })} />
       </section>
 
+      <section className="card">
+        <h5>使用上限での自動再開</h5>
+        <div className="muted">ランナーが 5 時間 / 7 日の使用上限で止まったとき、枠が戻った時点で同じセッションに「続きを」と送ります（Task ごとに Brief から取り消せます）。</div>
+        {runners.filter((r) => r.id !== "dak").map((r) => (
+          <div key={r.id} className="row" style={{ alignItems: "center", gap: 6 }}>
+            <label className="hint toggle">
+              <input type="checkbox" checked={!!r.autoResume} disabled={saving} onChange={(e) => void save({ autoResume: { [r.id]: e.target.checked } })} />
+              {r.id}: 使用上限で止まったら自動再開
+            </label>
+            <ClaudeLoginRow runner={r} region={s.bedrock?.[r.id]?.region} onBedrock={(next) => void save({ bedrock: { [r.id]: next } })} onChanged={refresh} onError={props.onError} />
+          </div>
+        ))}
+      </section>
+
+      <PolicySettings onError={props.onError} />
+
+      <SettingsGroupHeading id="settings-judge" />
       <section className="card tunables">
         <h5>判定と自動選択</h5>
         <div className="muted">判定のランナーが動かないときの代わりは、2 つの判定（ターン終了時の自動判定とルーブリック判定）の両方に使います。</div>
@@ -155,76 +228,35 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
         <ResetButton disabled={saving} onClick={() => save({ judgeAndChoice: null })} />
       </section>
 
-      <section className="card tunables">
-        <h5>新規作成の既定</h5>
+      <section className="card">
+        <h5>ターン終了時の自動判定</h5>
+        <div className="muted">終わったターンの最後の返答を 1 ターンで読み、完了 / 要対応を付けます。ターンごとにそのランナーの使用枠を 1 回使います。動かないときは Claude Haiku で判定します。</div>
         <div className="row" style={{ alignItems: "center", gap: 6 }}>
-          <span className="hint">Home の新規作成のランナー</span>
-          <select className="mode" value={nd.taskRunner} disabled={saving} aria-label="Home の新規作成のランナー" onChange={(e) => void save({ newDefaults: { taskRunner: e.target.value as RunnerId } })}>
-            {runnerOptions(nd.taskRunner, "ランナー")}
-          </select>
-          <span className="muted">既定 {d.newDefaults.taskRunner}</span>
+          <label className="hint toggle">
+            <input type="checkbox" checked={judge.enabled} disabled={saving} onChange={(e) => void save({ judge: { enabled: e.target.checked } })} />
+            ターン終了時の自動判定
+          </label>
+          {(judge.enabled || s.evals.judge.enabled) && (
+            <>
+              {!judge.enabled && <span className="hint">（下のルーブリック判定が使う）</span>}
+              {/* a model belongs to one runner: the old one would make every judgement fail on the new runner first and fall back to Haiku. Shown while either judge (#493 / #1219) uses them */}
+              <select className="mode" value={judge.runner} disabled={saving} aria-label="自動判定のランナー" onChange={(e) => void save({ judge: { runner: e.target.value as RunnerId, model: "" } })}>
+                {runnerOptions(judge.runner, "判定")}
+              </select>
+              <ModelSelect runner={info(judge.runner)} value={judge.model} onChange={(m) => void save({ judge: { model: m } })} label="判定のモデル" disabled={saving} title="判定の 1 ターンだけに使うモデルです" />
+            </>
+          )}
         </div>
-        <TextField label="定期実行の新規作成の cron" value={nd.scheduleCron} def={d.newDefaults.scheduleCron} mono disabled={saving} onSave={(v) => save({ newDefaults: { scheduleCron: v } })} />
-        <ResetButton disabled={saving} onClick={() => save({ newDefaults: null })} />
       </section>
 
       <section className="card">
-        <h5>モデルの選択肢</h5>
-        <div className="muted">Home・Brief・自動で始まる Task のモデルの選択肢です。保存していないランナーは同梱の一覧です。</div>
-        {/* dak has no list of its own; on Bedrock the list is the adapter's Bedrock one, not the saved one (#1400) */}
-        {runners.filter((r) => r.models.length > 0 && r.loginKind !== "bedrock").map((r) => (
-          <ModelChoices key={r.id} runner={r.id} list={r.models} saved={!!s.models[r.id]} disabled={saving} save={trySave} />
-        ))}
-      </section>
-
-      <section className="card">
-        <h5>承認モードの既定</h5>
-        <div className="muted">新しい Task が承認モードを選ばずに作られたときのモード（Home で Task ごとに変えられます）。「確認を飛ばす」モードは既定にできません。</div>
-        {runners.filter((r) => r.permissionModes.length > 0).map((r) => (
-          <div key={r.id} className="row" style={{ alignItems: "center", gap: 6 }}>
-            <span className="t">{r.id}</span>
-            <select className="mode" value={r.defaultPermissionMode ?? ""} disabled={saving} aria-label={`${r.id} の承認モードの既定`} onChange={(e) => void save({ defaultPermissionMode: { [r.id]: e.target.value } })}>
-              {r.permissionModes.filter((m) => !m.danger || m.value === r.defaultPermissionMode).map((m) => (
-                <option key={m.value} value={m.value} title={m.description}>
-                  承認: {m.label}
-                </option>
-              ))}
-            </select>
-            {s.defaultPermissionMode[r.id] && (
-              <button className="ghost" disabled={saving} onClick={() => void save({ defaultPermissionMode: { [r.id]: null } })} title="保存した既定を消し、ランナー本来の既定（Terminal と同じ）に戻します">
-                保存した既定を解除
-              </button>
-            )}
-          </div>
-        ))}
-      </section>
-
-      <PolicySettings onError={props.onError} />
-
-      <section className="card">
-        <h5>使用上限での自動再開</h5>
-        <div className="muted">ランナーが 5 時間 / 7 日の使用上限で止まったとき、枠が戻った時点で同じセッションに「続きを」と送ります（Task ごとに Brief から取り消せます）。</div>
-        {runners.filter((r) => r.id !== "dak").map((r) => (
-          <div key={r.id} className="row" style={{ alignItems: "center", gap: 6 }}>
-            <label className="hint toggle">
-              <input type="checkbox" checked={!!r.autoResume} disabled={saving} onChange={(e) => void save({ autoResume: { [r.id]: e.target.checked } })} />
-              {r.id}: 使用上限で止まったら自動再開
-            </label>
-            <ClaudeLoginRow runner={r} region={s.bedrock?.[r.id]?.region} onBedrock={(next) => void save({ bedrock: { [r.id]: next } })} onChanged={refresh} onError={props.onError} />
-          </div>
-        ))}
-      </section>
-
-      {(listed.includes("dak") || s.shadowRunner === "dak") && (
-      <section className="card">
-        <h5>並走（DAK）の既定</h5>
-        <label className={`hint toggle ${!dakOk && s.shadowRunner !== "dak" ? "off" : ""}`} title={dakOk ? "同じ依頼を DAK（DAK に設定したモデル。ローカルモデルなら API 料金なし）でも同時に実行し、並走 Task として並べます" : "DAK の agent（http://127.0.0.1:8000、SWITCHBOARD_DAK_URL で変更）に到達できません"}>
-          <input type="checkbox" checked={s.shadowRunner === "dak"} disabled={saving || (!dakOk && s.shadowRunner !== "dak")} onChange={(e) => void save({ shadowRunner: e.target.checked ? "dak" : null })} />
-          新しい Task を DAK にも同時に流す
-          {!dakOk && s.shadowRunner === "dak" && <span className="hint">（DAK 未検出のため今は並走しません）</span>}
+        <h5>ルーブリック判定</h5>
+        <div className="muted">done で終わったターンのあと、会話の要約とルール指標をルーブリック（5 観点、1〜5 点）で採点します。ランナーとモデルは上の自動判定と同じで、ターンごとにその使用枠を 1 回使います（上の自動判定を切っていても、これが入っていれば動きます）。ルーブリックは SWITCHBOARD_HOME/evals/rubric.json で上書きできます（デーモンの起動時に 1 回読むので、直したら再起動）。</div>
+        <label className="hint toggle">
+          <input type="checkbox" checked={s.evals.judge.enabled} disabled={saving} onChange={(e) => void save({ evals: { judge: { enabled: e.target.checked } } })} />
+          ターンの終わりにルーブリックで採点する（ランナー・モデルは自動判定と同じ）
         </label>
       </section>
-      )}
 
       <section className="card">
         <h5>LLM 提案</h5>
@@ -250,27 +282,6 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
       </section>
 
       <section className="card">
-        <h5>ターン終了時の自動判定</h5>
-        <div className="muted">終わったターンの最後の返答を 1 ターンで読み、完了 / 要対応を付けます。ターンごとにそのランナーの使用枠を 1 回使います。動かないときは Claude Haiku で判定します。</div>
-        <div className="row" style={{ alignItems: "center", gap: 6 }}>
-          <label className="hint toggle">
-            <input type="checkbox" checked={judge.enabled} disabled={saving} onChange={(e) => void save({ judge: { enabled: e.target.checked } })} />
-            ターン終了時の自動判定
-          </label>
-          {(judge.enabled || s.evals.judge.enabled) && (
-            <>
-              {!judge.enabled && <span className="hint">（下のルーブリック判定が使う）</span>}
-              {/* a model belongs to one runner: the old one would make every judgement fail on the new runner first and fall back to Haiku. Shown while either judge (#493 / #1219) uses them */}
-              <select className="mode" value={judge.runner} disabled={saving} aria-label="自動判定のランナー" onChange={(e) => void save({ judge: { runner: e.target.value as RunnerId, model: "" } })}>
-                {runnerOptions(judge.runner, "判定")}
-              </select>
-              <ModelSelect runner={info(judge.runner)} value={judge.model} onChange={(m) => void save({ judge: { model: m } })} label="判定のモデル" disabled={saving} title="判定の 1 ターンだけに使うモデルです" />
-            </>
-          )}
-        </div>
-      </section>
-
-      <section className="card">
         <h5>タスク名の自動付与</h5>
         <div className="muted">最初のターンの後に 1 回、短い名前を付けます。使用枠を 1 回使います。</div>
         <label className="hint toggle">
@@ -279,14 +290,24 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
         </label>
       </section>
 
+      <SettingsGroupHeading id="settings-model" />
       <section className="card">
-        <h5>ルーブリック判定</h5>
-        <div className="muted">done で終わったターンのあと、会話の要約とルール指標をルーブリック（5 観点、1〜5 点）で採点します。ランナーとモデルは上の自動判定と同じで、ターンごとにその使用枠を 1 回使います（上の自動判定を切っていても、これが入っていれば動きます）。ルーブリックは SWITCHBOARD_HOME/evals/rubric.json で上書きできます（デーモンの起動時に 1 回読むので、直したら再起動）。</div>
-        <label className="hint toggle">
-          <input type="checkbox" checked={s.evals.judge.enabled} disabled={saving} onChange={(e) => void save({ evals: { judge: { enabled: e.target.checked } } })} />
-          ターンの終わりにルーブリックで採点する（ランナー・モデルは自動判定と同じ）
-        </label>
+        <h5>モデルの選択肢</h5>
+        <div className="muted">Home・Brief・自動で始まる Task のモデルの選択肢です。保存していないランナーは同梱の一覧です。</div>
+        {/* dak has no list of its own; on Bedrock the list is the adapter's Bedrock one, not the saved one (#1400) */}
+        {runners.filter((r) => r.models.length > 0 && r.loginKind !== "bedrock").map((r) => (
+          <ModelChoices key={r.id} runner={r.id} list={r.models} saved={!!s.models[r.id]} disabled={saving} save={trySave} />
+        ))}
       </section>
+
+      <section className="card">
+        <h5>モデルの価格</h5>
+        <div className="muted">USD / 1M tokens。公式の価格ページの値を入れます。同梱の価格表の同じモデルより優先され、次の使用から台帳の換算に使われます（過去の行は変わりません）。</div>
+        <ModelPrices prices={s.prices} disabled={saving} save={trySave} />
+      </section>
+
+      <SettingsGroupHeading id="settings-connect" />
+      <WorkspaceCard workspaces={props.workspaces} clones={props.clones} onAddWorkspaceFromGithub={props.onAddWorkspaceFromGithub} onAddWorkspace={props.onAddWorkspace} onTaskStarted={props.onTaskStarted} onError={props.onError} />
 
       <section className="card">
         <h5>端末通知</h5>
@@ -305,12 +326,6 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
         {perm === "unsupported" && <div className="muted">このブラウザでは端末通知を使えません（一覧とバッジで確認できます）</div>}
       </section>
 
-      <section className="card">
-        <h5>モデルの価格</h5>
-        <div className="muted">USD / 1M tokens。公式の価格ページの値を入れます。同梱の価格表の同じモデルより優先され、次の使用から台帳の換算に使われます（過去の行は変わりません）。</div>
-        <ModelPrices prices={s.prices} disabled={saving} save={trySave} />
-      </section>
-
       <section className="card" id="release">
         <h5>動いている版</h5>
         <ReleasePanel />
@@ -326,10 +341,9 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
         <GithubSync />
       </section>
 
-      <section className="card presets">
-        <h5>定型の指示</h5>
-        <div className="muted">新規依頼と返信で選べる指示です。本文の {"{{target}}"} に選んだ Issue / PR が入ります。承認モードは含みません</div>
-        <PresetSettings onError={props.onError} />
+      <section className="card">
+        <h5>Terminal の履歴（Claude Code）</h5>
+        <TerminalHistory onError={props.onError} />
       </section>
 
       {countriesUrl(props.health?.login) && (
@@ -339,6 +353,7 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
           <a href={countriesUrl(props.health?.login)!}>国の一時許可を設定する</a>
         </section>
       )}
+
       {logoutPath(props.health?.login) && (
         <section className="card">
           <h5>ログイン</h5>
@@ -346,6 +361,37 @@ export function Settings(props: { focusRelease?: number; health: Health | null; 
         </section>
       )}
     </main>
+  );
+}
+
+/** The table of contents (#3356): one link per group; a press scrolls to the group's heading and leaves the URL as it is. */
+export function SettingsToc() {
+  return (
+    <nav className="settings-toc" aria-label="Settings の目次">
+      {SETTINGS_GROUPS.map((g) => (
+        <a
+          key={g.id}
+          href={`#${g.id}`}
+          onClick={(e) => {
+            e.preventDefault();
+            const heading = document.getElementById(g.id);
+            heading?.scrollIntoView();
+            heading?.focus({ preventScroll: true }); // the next Tab goes on inside the group, as a fragment link would
+          }}
+        >
+          {g.title}
+        </a>
+      ))}
+    </nav>
+  );
+}
+
+/** A group's title above its cards (#3356); the id is where the table of contents moves to. */
+export function SettingsGroupHeading(props: { id: string }) {
+  return (
+    <h4 className="settings-group" id={props.id} tabIndex={-1}>
+      {settingsGroup(props.id).title}
+    </h4>
   );
 }
 
@@ -802,5 +848,81 @@ function ResetButton(props: { disabled: boolean; onClick: () => Promise<void> })
         既定に戻す
       </button>
     </div>
+  );
+}
+
+/** Terminal の履歴 (#91, moved from Home in #3354): what the daemon imported from Claude Code's sessions, and a manual import. */
+export function TerminalHistory(props: { onError: (msg: string) => void }) {
+  // what the daemon imported from ~/.claude/projects
+  const [history, setHistory] = useState<HistoryStatus | null>(null);
+  const [historyErr, setHistoryErr] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importMsg, setImportMsg] = useState<string | null>(null);
+  // The daemon's passes are silent when they only append or find nothing: poll while this section is open, and keep
+  // retrying after a failed fetch.
+  useEffect(() => {
+    let alive = true;
+    const load = () =>
+      api
+        .history()
+        .then((h) => {
+          if (!alive) return;
+          setHistory(h);
+          setHistoryErr(null);
+        })
+        .catch((e) => alive && setHistoryErr(String((e as Error).message ?? e)));
+    void load();
+    const timer = setInterval(() => {
+      setImportMsg(null); // the card's own figures are current again
+      void load();
+    }, 15_000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, []);
+  const importNow = async () => {
+    setImporting(true);
+    try {
+      const r = await api.historyImport();
+      setImportMsg(`走査 ${r.files} ファイル: 新規 ${r.created} · 追記 ${r.appended}${r.skippedForeign ? ` · Workspace 外 ${r.skippedForeign}` : ""}${r.errors.length ? ` · エラー ${r.errors.length}（${r.errors[0]}）` : ""}`);
+      setHistory(await api.history());
+    } catch (e) {
+      props.onError(String((e as Error).message ?? e));
+    } finally {
+      setImporting(false);
+    }
+  };
+  const terminalSessions = history?.sessions.filter((s) => s.origin === "terminal").length ?? 0;
+  return (
+    <>
+      {history?.enabled && (
+        <div className="row head">
+          <button className="ghost" disabled={importing} onClick={() => void importNow()} title={history.pollMs > 0 ? `~/.claude/projects を今すぐ走査する（普段は起動時と ${Math.round(history.pollMs / 1000)} 秒ごとに走る）` : "~/.claude/projects を今すぐ走査する（定期走査は無効: 起動時とこのボタンだけ）"}>
+            {importing ? "取り込み中…" : "今すぐ取り込む"}
+          </button>
+        </div>
+      )}
+      {!history && !historyErr && <div className="muted">取り込み状況を読み込み中…</div>}
+      {historyErr && <div className="hint warn">取り込み状況を取得できません: {historyErr}（15 秒ごとに再試行）</div>}
+      {history && !history.enabled && (
+        <div className="muted">
+          <span className="mono">{history.dir}</span> がありません。Terminal で claude を使ったセッションがここに並びます。
+        </div>
+      )}
+      {history?.enabled && (
+        <div className="hint">
+          Terminal で実行したセッション <b>{terminalSessions}</b> 件を Task として取り込み済み
+          {history.lastScanAt ? ` · 最終走査 ${jstTime(history.lastScanAt)}` : ""}
+          {history.pollMs > 0 ? ` · ${Math.round(history.pollMs / 1000)} 秒ごと` : " · 起動時と手動のみ"}
+          {history.lastResult && history.lastResult.skippedForeign > 0 && <> · Workspace 外のセッション {history.lastResult.skippedForeign} 件は取り込まない（Workspace を追加すると次の走査で入る）</>}
+          {history.lastResult && history.lastResult.errors.length > 0 && <span className="warn"> · エラー {history.lastResult.errors.length} 件（{history.lastResult.errors[0]}）</span>}
+        </div>
+      )}
+      {importMsg && <div className="hint">{importMsg}</div>}
+      <div className="hint">
+        読み込み元: <span className="mono">{history?.dir ?? "~/.claude/projects"}</span>。取り込んだ Task には「Terminal」タグが付き、会話・差分・台帳は Switchboard から始めた Task と同じ見え方。Switchboard 自身が動かしたセッションは二重に入りません。
+      </div>
+    </>
   );
 }

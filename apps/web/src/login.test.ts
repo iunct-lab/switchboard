@@ -26,6 +26,11 @@ describe("login route (#211)", () => {
     expect(loginRoute({ authorized: false, hasToken: false, mode: "passkey", path: withoutFromAuth("/?from=auth")! })).toEqual({ kind: "passkey", url: "/_auth/?next=%2F" });
   });
 
+  test("a Task's URL comes back after the login (#3355)", () => {
+    expect(loginRoute({ authorized: false, hasToken: false, mode: "passkey", path: "/task/abc?x=1" })).toEqual({ kind: "passkey", url: "/_auth/?next=%2Ftask%2Fabc%3Fx%3D1" });
+    expect(withoutFromAuth("/task/abc?from=auth")).toBe("/task/abc");
+  });
+
   test("next never points off the origin", () => {
     expect(loginRoute({ authorized: false, hasToken: false, mode: "passkey", path: "//evil.example/" })).toEqual({ kind: "passkey", url: "/_auth/?next=%2F" });
   });

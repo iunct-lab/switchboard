@@ -104,7 +104,7 @@ h5 { margin: 0 0 6px; font: 500 10px/1.2 var(--mono); letter-spacing: .1em; text
 .meter i { display: block; height: 100%; background: var(--acc); }
 .meter.warn i { background: var(--amber); }
 
-.compose .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 8px; }
+.compose .fields { display: grid; grid-template-columns: 1fr; gap: 10px; margin-bottom: 8px; } /* only the Workspace since 詳細 took the title (#3354) */
 .compose label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--ink3); }
 .compose .runners { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .runner-opt { display: inline-flex; align-items: center; gap: 4px; padding: 3px 6px; border: 1px solid transparent; border-radius: 4px; }
@@ -118,6 +118,10 @@ select.model-select { max-width: 100%; min-width: 0; font-size: 12px; }
 .compose select.model-select { max-width: 340px; }
 .hint.warn { color: var(--amber); }
 .compose .hint.warn { margin-top: 6px; }
+/* 詳細 (#3354): the rarely set values under the buttons; the summary of what was changed wraps rather than widens the card. */
+.compose-details { margin-top: 8px; }
+.compose-details > summary { cursor: pointer; font-size: 12px; color: var(--ink2); overflow-wrap: anywhere; }
+.compose-details > .runners { margin-top: 8px; }
 
 .pill { display: inline-block; font: 400 10px/1.5 var(--mono); padding: 0 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink2); white-space: nowrap; }
 .pill.claude { border-color: var(--claude); color: var(--claude); }
@@ -406,6 +410,9 @@ label.toggle.off { opacity: .45; cursor: default; }
 /* #1673: under the screen's heading a button per Workspace (its own to answer), and in each group a heading per Workspace */
 .ask-workspaces { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .ask-workspaces button { min-height: 44px; max-width: 100%; overflow-wrap: anywhere; text-align: left; }
+/* #1675: the 「すぐ答えられる」 toggle under them */
+.ask-quick-row { display: flex; margin-top: 6px; }
+.ask-quick-row button { min-height: 44px; max-width: 100%; }
 .ask-batch-tasks { list-style: none; margin: 8px 0; padding: 0; }
 .ask-workspace-head { margin: 8px 0 4px; font-size: 13px; overflow-wrap: anywhere; }
 .ask-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
@@ -413,6 +420,8 @@ label.toggle.off { opacity: .45; cursor: default; }
 .ask-tags .ask-state-open { background: var(--amber); color: #fff; }
 /* the other PBIs waiting on the question (#1674) */
 .ask-tags .ask-unblocks { background: var(--acc); color: #fff; }
+/* answered with one press (#1675): green, apart from 未回答's amber */
+.ask-tags .ask-quick { background: var(--green); color: #fff; }
 .ask-unblocks-list { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-bottom: 6px; min-width: 0; overflow-wrap: anywhere; }
 /* a question's screen mockups (#2221): the buttons wrap, never wider than the card */
 .mockups { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; min-width: 0; }
@@ -478,6 +487,9 @@ label.toggle.off { opacity: .45; cursor: default; }
   .compose .fields select, .compose .fields input { width: 100%; min-width: 0; }
   .compose .model, .compose .mode, .compose select.model-select { width: 100%; max-width: 100%; }
   .compose > .row > .runners { flex: 1 1 100%; min-width: 0; }
+  .compose-details > summary { padding: 12px 0; }
+  .compose-details > .runners > label:not(.toggle) { min-width: 0; flex: 1 1 100%; }
+  .compose-details > .runners > label:not(.toggle) > input { width: 100%; min-width: 0; }
   .compose label.toggle { white-space: normal; }
   .compose > .row > button { flex: 1; min-height: 44px; white-space: nowrap; }
   /* Knowledge (#392): the list, the note and its details one under another, with the page as the one scroll (a scroll
@@ -566,3 +578,18 @@ table.evals-table td button.open { font: inherit; color: inherit; padding: 0; te
 .preset-picker-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .preset-picker-row select, .preset-picker-row input { min-width: 0; }
 @media (max-width: 767px) { .preset-picker-row { display: grid; } .preset-picker-row button { min-height: 44px; } }
+/* Settings の目的別のまとまり (#3356): the group's title above its cards */
+.settings-group { margin: 12px 0 -4px; font-size: 13px; font-weight: 600; color: var(--ink2); }
+/* its table of contents: wraps on a narrow screen instead of scrolling sideways */
+.settings-toc { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; }
+.settings-toc a { white-space: nowrap; }
+.settings-toc + .settings-group { margin-top: 0; }
+.settings-group:focus { outline: none; } /* focused only to carry Tab on from the table of contents */
+@media (max-width: 767px) { .settings-toc a { padding: 8px 0; } }
+/* Resources (#3333): the free memory and the slots side by side above the tables */
+.resources-stats { display: flex; gap: 12px; flex-wrap: wrap; margin: 8px 0 12px; }
+.resources-stat { flex: 1 1 200px; padding: 10px 12px; border: 1px solid var(--line2); border-radius: 6px; }
+.resources-stat .label { font-size: 11px; color: var(--ink3); }
+.resources-stat .value { font: 500 22px var(--mono); }
+.resources-stat .value.warn { color: var(--amber); }
+.resources td button.link { text-align: left; padding: 0; }

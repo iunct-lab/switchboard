@@ -690,14 +690,14 @@ function wallClockToEpoch(y: number, m: number, d: number, h: number, min: numbe
   return second;
 }
 
-/** "04:10", or "9/12 04:10" when not today (daemon local time — the same clock the transcript timestamps use). */
+/** "04:10", or "9/12 04:10" when not today — JST (Asia/Tokyo) whatever the daemon's time zone, the same clock as the Web UI's `fmtClock` (#2028). */
 export function fmtTime(at: number, now: number): string {
-  const a = new Date(at);
-  const n = new Date(now);
+  const a = wallClock(at, "Asia/Tokyo");
+  const n = wallClock(now, "Asia/Tokyo");
   const p = (x: number) => String(x).padStart(2, "0");
-  const hm = `${p(a.getHours())}:${p(a.getMinutes())}`;
-  const sameDay = a.getFullYear() === n.getFullYear() && a.getMonth() === n.getMonth() && a.getDate() === n.getDate();
-  return sameDay ? hm : `${a.getMonth() + 1}/${a.getDate()} ${hm}`;
+  const hm = `${p(a.h)}:${p(a.min)}`;
+  const sameDay = a.y === n.y && a.m === n.m && a.d === n.d;
+  return sameDay ? hm : `${a.m}/${a.d} ${hm}`;
 }
 
 /** The events of one turn that matter here, for tests and the design doc. */

@@ -24,7 +24,8 @@ export const BACKLOG_USAGE = `  backlog list [--search <語>] [--label <l>]... [
       GitHub が受け付けなかった（失敗で保留中の）編集を、原因を直した後に全部送り直す（アプリの Task の中だけ）。無ければ 1
   backlog create --title <t> [--body-file <f|->] [--label <l>]... [--milestone <m>] [--parent <n>] [--field <name>=<value>]...
   backlog edit <issue> [--title <t>] [--body-file <f|->] [--add-label <l>]... [--remove-label <l>]... [--state open|closed]
-               [--milestone <m> | --no-milestone] [--parent <n> | --no-parent]
+               [--reason completed|not-planned] [--milestone <m> | --no-milestone] [--parent <n> | --no-parent]
+      --reason: 閉じた理由（--state closed と一緒だけ。重複・やらないと決めた Issue は not-planned。閉じている Issue の理由の付け替えも同じ形）
   backlog comment <issue> --body-file <f|->
   backlog set <issue> <field> <value>
   backlog triage <issue> <area> <kind> <priority> [<phase>] [<parent>] [<status>]
@@ -240,21 +241,27 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         const add = takeAll("--add-label");
         const remove = takeAll("--remove-label");
         const state = take("--state");
+        const reasonArg = take("--reason");
+        // the CLI's spelling → the API's value (#3146); only with a close
+        const REASONS = { completed: "COMPLETED", "not-planned": "NOT_PLANNED" } as const;
+        const reason = reasonArg !== undefined && Object.hasOwn(REASONS, reasonArg) ? REASONS[reasonArg as keyof typeof REASONS] : undefined;
         const milestone = has("--no-milestone") ? null : take("--milestone");
         const parent = has("--no-parent") ? null : take("--parent");
-        if (!ref || args.length || (state !== undefined && !/^(open|closed)$/i.test(state))) throw new Refused("backlog edit <issue> [--title <t>] [--body-file <f|->] [--add-label <l>]... [--remove-label <l>]... [--state open|closed] [--milestone <m> | --no-milestone] [--parent <n> | --no-parent]");
+        if (!ref || args.length || (state !== undefined && !/^(open|closed)$/i.test(state)) || (reasonArg !== undefined && (!reason || state?.toLowerCase() !== "closed")))
+          throw new Refused("backlog edit <issue> [--title <t>] [--body-file <f|->] [--add-label <l>]... [--remove-label <l>]... [--state open|closed] [--reason completed|not-planned（--state closed と一緒だけ）] [--milestone <m> | --no-milestone] [--parent <n> | --no-parent]");
         noSecrets(title, body, milestone ?? undefined, ...add);
         const input: Record<string, unknown> = {
           ...(title !== undefined && { title }),
           ...(body !== undefined && { body }),
           ...((add.length || remove.length) && { labels: { add, remove } }),
           ...(state !== undefined && { state: state.toUpperCase() }),
+          ...(reason && { stateReason: reason }),
           ...(milestone !== undefined && { milestone }),
           ...(parent !== undefined && { parent: parent === null ? null : number(parent) }),
         };
         if (!Object.keys(input).length) throw new Refused("変えるものを 1 つ以上渡してください");
         if (direct) {
-          await editOnGithub(direct.gh, await githubRepo(), number(ref), { title, body, add, remove, ...(state !== undefined && { state: state.toUpperCase() as "OPEN" | "CLOSED" }), ...(milestone !== undefined && { milestone }), ...(parent !== undefined && { parent: parent === null ? null : number(parent) }) });
+          await editOnGithub(direct.gh, await githubRepo(), number(ref), { title, body, add, remove, ...(state !== undefined && { state: state.toUpperCase() as "OPEN" | "CLOSED" }), ...(reason && { stateReason: reason }), ...(milestone !== undefined && { milestone }), ...(parent !== undefined && { parent: parent === null ? null : number(parent) }) });
           io.out(`#${number(ref)} を保存しました`);
           return 0;
         }
@@ -485,7 +492,7 @@ function freshness(ws: Sync): string {
 
 /** One Issue as `backlog view` shows it: the app's stored one, or GitHub's own without BACKLOG_URL (`sync.state` "github"). */
 export interface Detail {
-  issue: { number: number; title: string; state: string; labels: string[]; milestone: string | null; parent: number | null; subIssues: number[]; body: string; url: string };
+  issue: { number: number; title: string; state: string; stateReason?: string | null; labels: string[]; milestone: string | null; parent: number | null; subIssues: number[]; body: string; url: string };
   comments: Array<{ id: string; body: string; createdAt: string }>;
   fields: Record<string, string | number | null> | null;
   fetchedAt: number | null;
@@ -496,6 +503,8 @@ export interface Detail {
   sync: { state: string; reason: string | null; lastSuccessfulSync: number | null };
 }
 
+/** A close that was not a completion (#3146); completed and none read as before. */
+const REASON = { NOT_PLANNED: " not planned", DUPLICATE: " duplicate" } as const;
 const HELD = { conflict: "競合", failed: "失敗", unknown: "結果不明" } as const;
 const HELD_KIND = { create: "新規作成", comment: "コメント" } as const;
 
@@ -503,7 +512,7 @@ export function formatDetail(d: Detail): string {
   const i = d.issue;
   const at = d.sync.lastSuccessfulSync === null ? "未取得" : new Date(d.sync.lastSuccessfulSync).toLocaleString("sv-SE", { timeZone: "Asia/Tokyo" }) + " JST";
   return [
-    `#${i.number || d.localId} ${i.title} [${i.state}]`,
+    `#${i.number || d.localId} ${i.title} [${i.state}${REASON[i.stateReason as keyof typeof REASON] ?? ""}]`,
     `labels: ${i.labels.join(", ") || "-"}  milestone: ${i.milestone ?? "-"}  parent: ${i.parent ? `#${i.parent}` : "-"}`,
     `fields: ${d.fields ? Object.entries(d.fields).map(([k, v]) => `${k}=${v ?? "-"}`).join(", ") : "-"}`,
     `最終取得 ${at}  同期 ${d.sync.state}${d.sync.reason ? `（${d.sync.reason}）` : ""}  送信待ち ${d.pending}`,

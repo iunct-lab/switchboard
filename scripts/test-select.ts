@@ -4,6 +4,7 @@
 // 1 行目は `full: <理由>`（全テストに倒した）か `selected: <件数>`、続けて `<テスト>  <理由>`。
 // 依存は import と、テストの先頭の宣言 `// test-reads: <パスかディレクトリ（末尾 /）> …` を見る（一時ディレクトリだけなら `none`）。
 // 判定できないものは全テストに倒す（classify）。local-ci がこの出力で bun test を絞る（scripts/local-ci.ts の selectTests）。
+//   bun scripts/test-select.ts --loaded <path>...   perf-bench の loaded を回すか（`loaded: run|skip  <理由>`）
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";
 
@@ -174,6 +175,23 @@ export function selectFrom(changed: string[], files: string[], read: (p: string)
   }
 }
 
+/** 変更が perf-bench の `loaded`（量と重なりの計測）に届くかを見るとき、テスト 1 本と見なすファイル（#3635）。 */
+export const PERF_BENCH = "scripts/perf-bench.ts";
+/** perf-bench が import せずに測る・判定に使うもの。ビルドして測る画面、デーモンが起動時に読む設定（server.ts の routing / pricing / mcp）、上限。 */
+const LOADED_READS = ["apps/web/", "packages/core/config/", "scripts/perf-budget.json"];
+
+/** 変更が perf-bench の `loaded` に届くか（#3635）。テストと同じ決まり（import と上の宣言）で、判定できない変更・読めない依存は回す側に倒す。 */
+export function selectLoaded(changed: string[], files: string[], read: (p: string) => string): { run: boolean; reason: string } {
+  try {
+    const s = select(changed, buildImportGraph(files, read), [PERF_BENCH], new Map([[PERF_BENCH, LOADED_READS]]));
+    if (s.full) return { run: true, reason: s.full };
+    const why = s.reasons[PERF_BENCH];
+    return why ? { run: true, reason: why } : { run: false, reason: `変更 ${changed.length} ファイルのどれも ${PERF_BENCH} に届かない` };
+  } catch (e) {
+    return { run: true, reason: `依存を読めない: ${e instanceof Error ? e.message : e}` };
+  }
+}
+
 export function formatSelection(s: Selection): string {
   const head = s.full ? `full: ${s.full}` : `selected: ${s.tests.length}`;
   return [head, ...s.tests.map((t) => `${t}  ${s.reasons[t]}`)].join("\n");
@@ -186,7 +204,13 @@ export function repoFiles(root: string): string[] {
 }
 
 if (import.meta.main) {
-  const args = process.argv.slice(2);
+  // --loaded: テストの一覧の代わりに `loaded: run|skip  <理由>` の 1 行（selectLoaded）
+  const loaded = process.argv[2] === "--loaded";
+  const args = process.argv.slice(loaded ? 3 : 2);
   const changed = (args.length ? args : (await Bun.stdin.text()).split("\n")).map((l) => l.trim().replace(/^\.\//, "")).filter(Boolean);
-  console.log(formatSelection(selectFrom(changed, repoFiles(ROOT), (p) => readFileSync(join(ROOT, p), "utf8"))));
+  const read = (p: string) => readFileSync(join(ROOT, p), "utf8");
+  if (loaded) {
+    const l = selectLoaded(changed, repoFiles(ROOT), read);
+    console.log(`loaded: ${l.run ? "run" : "skip"}  ${l.reason}`);
+  } else console.log(formatSelection(selectFrom(changed, repoFiles(ROOT), read)));
 }

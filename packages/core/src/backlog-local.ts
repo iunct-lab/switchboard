@@ -70,7 +70,8 @@ export function applyLocalOperations(db: Db, source: BacklogSource, now = Date.n
         let next = op.field === "member" && op.payload === false ? null : cur && applyBacklogField(op.targetKind, cur, op.field!, op.payload);
         if (op.targetKind === "issue" && next) {
           const issue = next as BacklogIssueData;
-          if (op.field === "state") next = { ...issue, closedAt: issue.state === "CLOSED" ? at : null, stateReason: null };
+          // its reason: applyBacklogField (#3146)
+          if (op.field === "state") next = { ...issue, closedAt: issue.state === "CLOSED" ? at : null };
           if (op.field === "parent") {
             // the relationship stays whole: a parent not there is dropped with its reason (as a send would be refused;
             // the API refuses it first, checkLocalParent), and the old one keeps it. Done, so it is not shown or tried again

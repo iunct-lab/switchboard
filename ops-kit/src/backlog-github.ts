@@ -67,8 +67,8 @@ type Comments = { pageInfo: { hasNextPage: boolean; endCursor: string | null }; 
 
 /** One Issue of `repo` as `backlog view` shows the app's stored one; `sync.state` "github" = read from GitHub just now. */
 export async function viewFromGithub(gh: GhClient, repo: Repo, project: Project, num: number, now = Date.now()): Promise<Detail> {
-  const query = `query($o:String!,$n:String!,$num:Int!,$after:String){ ${viewerOf(project)}repository(owner:$o,name:$n){ issue(number:$num){ number title state body url labels(first:50){ nodes{ name } } milestone{ title } parent{ number } subIssues(first:100){ nodes{ number } } ${COMMENTS} ${project ? PROJECT_ITEMS : ""} } } }`;
-  const r = (await gh.graphql(query, { o: repo.owner, n: repo.name, num, after: null })) as { viewer?: { login: string }; repository: { issue: { number: number; title: string; state: string; body: string; url: string; labels: { nodes: Array<{ name: string }> }; milestone: { title: string } | null; parent: { number: number } | null; subIssues: { nodes: Array<{ number: number }> }; comments: Comments; projectItems?: ProjectItems } | null } };
+  const query = `query($o:String!,$n:String!,$num:Int!,$after:String){ ${viewerOf(project)}repository(owner:$o,name:$n){ issue(number:$num){ number title state stateReason body url labels(first:50){ nodes{ name } } milestone{ title } parent{ number } subIssues(first:100){ nodes{ number } } ${COMMENTS} ${project ? PROJECT_ITEMS : ""} } } }`;
+  const r = (await gh.graphql(query, { o: repo.owner, n: repo.name, num, after: null })) as { viewer?: { login: string }; repository: { issue: { number: number; title: string; state: string; stateReason?: string | null; body: string; url: string; labels: { nodes: Array<{ name: string }> }; milestone: { title: string } | null; parent: { number: number } | null; subIssues: { nodes: Array<{ number: number }> }; comments: Comments; projectItems?: ProjectItems } | null } };
   const i = r.repository.issue;
   if (!i) throw new Error(`#${num} は ${repo.owner}/${repo.name} にありません`);
   // every comment, as the app stores them: the latest answer may be past the first page
@@ -79,7 +79,7 @@ export async function viewFromGithub(gh: GhClient, repo: Repo, project: Project,
     page = more.repository.issue.comments.pageInfo;
   }
   return {
-    issue: { number: i.number, title: i.title, state: i.state, labels: i.labels.nodes.map((l) => l.name), milestone: i.milestone?.title ?? null, parent: i.parent?.number ?? null, subIssues: i.subIssues.nodes.map((n) => n.number), body: i.body, url: i.url },
+    issue: { number: i.number, title: i.title, state: i.state, stateReason: i.stateReason ?? null, labels: i.labels.nodes.map((l) => l.name), milestone: i.milestone?.title ?? null, parent: i.parent?.number ?? null, subIssues: i.subIssues.nodes.map((n) => n.number), body: i.body, url: i.url },
     comments,
     fields: fieldsOf(i.projectItems, project, r.viewer?.login),
     fetchedAt: now,
@@ -147,6 +147,8 @@ export interface EditInput {
   add: string[];
   remove: string[];
   state?: "OPEN" | "CLOSED";
+  /** Why it is closed (#3146), only with `state: "CLOSED"`: closing it, or changing the reason of one closed. */
+  stateReason?: "COMPLETED" | "NOT_PLANNED";
   /** null: remove it. */
   milestone?: string | null;
   /** null: remove it. */
@@ -157,7 +159,9 @@ export interface EditInput {
 export async function editOnGithub(gh: GhClient, repo: Repo, num: number, input: EditInput): Promise<void> {
   const edits = [...(input.title !== undefined ? ["--title", input.title] : []), ...input.add.flatMap((l) => ["--add-label", l]), ...input.remove.flatMap((l) => ["--remove-label", l]), ...(input.milestone === null ? ["--remove-milestone"] : input.milestone !== undefined ? ["--milestone", input.milestone] : [])];
   if (edits.length || input.body !== undefined) await withBody(input.body, (file) => gh.run(["issue", "edit", String(num), "-R", slug(repo), ...edits, ...(file ? ["--body-file", file] : [])]));
-  if (input.state) await gh.run(["issue", input.state === "CLOSED" ? "close" : "reopen", String(num), "-R", slug(repo)]);
+  // a reason goes with the state in one PATCH: `gh issue close --reason` leaves an Issue closed already as it is
+  if (input.stateReason) await gh.run(["api", "-X", "PATCH", `repos/${slug(repo)}/issues/${num}`, "-f", "state=closed", "-f", `state_reason=${input.stateReason.toLowerCase()}`]);
+  else if (input.state) await gh.run(["issue", input.state === "CLOSED" ? "close" : "reopen", String(num), "-R", slug(repo)]);
   if (input.parent !== undefined) await setParent(gh, repo, num, input.parent);
 }
 

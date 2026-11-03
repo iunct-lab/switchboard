@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { ciExit, ciSteps } from "./ci";
 import { withHeavySlot } from "../ops-kit/src/heavy";
 import { RECORDS_HEADER } from "./perf-ratchet";
-import { checkoutSteps, DURATION_STEP, recordBundle, existingPass, failLines, failureSummary, perfSteps, LOCAL_CI_RESULT, localCi, mainFork, markerSeconds, narrowTestStep, notify, perfVerdict, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepSeconds, stepWithIdle, TargetError, testsOf, type Deps, type LocalCiResult } from "./local-ci";
+import { checkoutSteps, DURATION_STEP, recordBundle, existingPass, failLines, failureSummary, perfSteps, LOCAL_CI_RESULT, localCi, main, mainFork, markerSeconds, narrowPerfStep, narrowTestStep, notify, perfVerdict, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepSeconds, stepWithIdle, TargetError, testsOf, type Deps, type LocalCiResult } from "./local-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
 const ciTs = await Bun.file(new URL("./ci.ts", import.meta.url)).text();
@@ -38,7 +38,7 @@ describe("local-ci", () => {
    * `pullHead`: what refs/pull/<n>/head holds (none = the head the PR named last). `o.heads` / `o.bases`: what the PR names as its head and what the base
    * branch's tip is, one per read (the last repeats). `o.conflict`: the merge stops on a conflict; `o.mergeError`: it fails otherwise.
    */
-  const deps = (failAt?: string, pullHead?: string, failOutput = "1 fail", base: Record<string, { code: number; output: string }> = {}, throwOnBase = false, o: { heads?: string[]; bases?: string[]; conflict?: boolean; mergeError?: boolean; noCiTs?: boolean; budget?: unknown; select?: string } = {}) => {
+  const deps = (failAt?: string, pullHead?: string, failOutput = "1 fail", base: Record<string, { code: number; output: string }> = {}, throwOnBase = false, o: { heads?: string[]; bases?: string[]; conflict?: boolean; mergeError?: boolean; noCiTs?: boolean; budget?: unknown; select?: string; loaded?: string } = {}) => {
     const next = (xs: string[]) => (xs.length > 1 ? xs.shift()! : xs[0]!);
     const heads = [...(o.heads ?? [SHA])];
     const bases = [...(o.bases ?? [BASE])];
@@ -51,11 +51,11 @@ describe("local-ci", () => {
     const d: Deps = {
       sh: async (cmd) => {
         calls.push(cmd);
-        if (cmd[0] === "env") return o.select ?? "";
+        if (cmd[0] === "env") return (cmd.includes("--loaded") ? o.loaded : o.select) ?? "";
         if (cmd.includes("merge-base")) return "f".repeat(40) + "\n";
         if (cmd[0] === "gh") return JSON.stringify({ headRefOid: (named = next(heads)), baseRefName: "main" });
         if (cmd.includes("fetch")) fetched = cmd.at(-1)!;
-        if (cmd.includes("rev-parse")) return `${fetched.startsWith("refs/heads/") ? next(bases) : (pullHead ?? named)}\n`;
+        if (cmd.includes("rev-parse")) return `${fetched.startsWith("+refs/heads/") ? next(bases) : (pullHead ?? named)}\n`;
         if (cmd.includes("merge") && (o.conflict || o.mergeError)) throw new Error(o.conflict ? "git -C merge failed: CONFLICT (content)" : "git -C merge failed: gpg failed to sign the data");
         if (cmd.includes("--diff-filter=U")) return o.conflict ? "a.ts\n" : "";
         if (cmd.includes("worktree") && cmd.includes("add")) {
@@ -170,6 +170,7 @@ describe("local-ci", () => {
       const sh: Deps["sh"] = async (c, cwd) => {
         if (c[0] === "gh") return "main\n";
         if (c[0] !== "env") return realSh(c, cwd);
+        if (c.includes("--loaded")) return "loaded: run  x";
         args = c.slice(c.indexOf("scripts/test-select.ts") + 1);
         expect(cwd).toBe(dir);
         return "selected: 0";
@@ -183,13 +184,44 @@ describe("local-ci", () => {
     });
   });
 
+  describe("perf-bench's loaded only for a change that reaches it (#3635)", () => {
+    const SKIP = "変更 1 ファイルのどれも scripts/perf-bench.ts に届かない";
+    const opts = (loaded: string) => [undefined, undefined, "1 fail", {}, false, { select: "selected: 0", loaded }] as const;
+    const bench = (ran: string[]) => ran.filter((r) => r.startsWith("bun scripts/perf-bench.ts"));
+
+    test("skip: perf-bench gets --skip-loaded and the reason, and the comment says it was not measured", async () => {
+      const { d, ran, calls } = deps(...opts(`loaded: skip  ${SKIP}`));
+      const r = await localCi(42, "/repo", d, "example/development", CACHE);
+      expect(calls.some((c) => c[0] === "env" && c.includes("scripts/test-select.ts") && c.includes("--loaded"))).toBe(true);
+      expect(bench(ran)).toEqual([`bun scripts/perf-bench.ts --runs 5 --json perf-result.json --skip-loaded '${SKIP}'`]);
+      expect(r.selection?.loaded).toEqual({ run: false, reason: SKIP });
+      expect(r.results.find((x) => x.run.startsWith("bun scripts/perf-bench.ts"))!.name).toBe("bun scripts/perf-bench.ts --runs 5 --json perf-result.json");
+      expect(resultComment(r)).toContain(`loaded（量と重なりの計測）: 測らなかった（${SKIP}）`);
+    });
+
+    test("run, `all`, or an answer it cannot read: perf-bench measures loaded as it is", async () => {
+      for (const [o, all] of [[opts("loaded: run  packages/core/src/server.ts → scripts/perf-bench.ts"), false], [opts(`loaded: skip  ${SKIP}`), true], [opts("selected: 0"), false]] as const) {
+        const { d, ran, logged } = deps(...o);
+        const r = await localCi(42, "/repo", d, "example/development", CACHE, all ? { all: true } : undefined);
+        expect(bench(ran)).toEqual(["bun scripts/perf-bench.ts --runs 5 --json perf-result.json"]);
+        expect(resultComment(r)).not.toContain("測らなかった");
+        if (o[5].loaded === "selected: 0") expect(logged).toContain("loaded の判定に失敗（測る）: 出力を読めない: selected: 0");
+      }
+    });
+
+    test("narrowPerfStep quotes the reason and leaves a CI without perf-bench as it is", () => {
+      expect(narrowPerfStep([{ name: "b", run: "bun scripts/perf-bench.ts --runs 5" }], "it's")).toEqual([{ name: "b", run: "bun scripts/perf-bench.ts --runs 5 --skip-loaded 'it'\\''s'" }]);
+      expect(narrowPerfStep([{ name: "x", run: "make" }], "r")).toEqual([{ name: "x", run: "make" }]);
+    });
+  });
+
   test("every step green → ok with the head sha; the worktree is removed", async () => {
     const { d, calls, ran, envs } = deps();
     const r = await localCi(42, "/repo", d, "example/development", CACHE);
     expect(r).toMatchObject({ ok: true, sha: SHA });
     expect(ran).toEqual(ciSteps.map((s) => s.run.trim()));
     // what Actions' pull_request run tests: the latest head merged here into the base branch's latest tip (#913)
-    expect(calls.filter((c) => c.includes("fetch")).map((c) => c.slice(1).join(" "))).toEqual(["-C /repo fetch -q origin refs/heads/main", "-C /repo fetch -q origin refs/pull/42/head"]);
+    expect(calls.filter((c) => c.includes("fetch")).map((c) => c.slice(1).join(" "))).toEqual(["-C /repo fetch -q origin +refs/heads/main:refs/local-ci/42/base", "-C /repo fetch -q origin +refs/pull/42/head:refs/local-ci/42/head"]);
     const add = calls.find((c) => c.includes("worktree") && c.includes("add"))!;
     expect(add.at(-1)).toBe(BASE);
     expect(calls.find((c) => c.includes("merge"))!.slice(-4)).toEqual(["-q", "--no-ff", "--no-edit", SHA]);
@@ -243,7 +275,7 @@ describe("local-ci", () => {
     const body = resultComment(r);
     expect(passOf(body)).toBeUndefined();
     expect(body).toContain(`結果: \`${DURATION_STEP}\` が exit 1。\n`); // no log of its own to point to
-    expect(body).toContain(`    ${failed.fails![0]}`);
+    expect(body).toContain(`\n\`\`\`\n${failed.fails![0]}\n\`\`\``);
   });
 
   test("test duration ceiling: within the ceilings, or a budget without them, passes with the seconds (#1887)", async () => {
@@ -341,9 +373,70 @@ describe("local-ci", () => {
     expect(posted[0]!.split("\n")[0]).toBe(`[local-ci] fail ${SHA} base=${BASE}`);
     expect(passOf(posted[0]!)).toBeUndefined();
     expect(posted[0]).toContain("結果: `bun test` が exit 1");
-    expect(posted[0]).toContain("(fail) a > b");
+    // in a fenced block: 4 spaces after the paragraph line would join it (CommonMark)
+    expect(posted[0]).toContain("が exit 1。全文は実行したホストの記録（~/.cache の下）。\n```\n(fail) a > b [1ms]\n```");
     // the log's path on this host stays off the PR
     expect(posted[0]).not.toContain(CACHE);
+  });
+
+  describe("main: the command's exit", () => {
+    /** A clone of example/development (forgeTargetOf reads its origin), the fake deps answering the origin's URL. */
+    const command = async (o: { conflict?: boolean }, post: (body: string) => Promise<void>) => {
+      const root = mkdtempSync(join(CACHE, "main-root-"));
+      Bun.spawnSync(["git", "init", "-q", root]);
+      Bun.spawnSync(["git", "-C", root, "remote", "add", "origin", "https://github.com/example/development.git"]);
+      const x = deps(undefined, SHA, "", {}, false, o);
+      const fake = x.d.sh;
+      x.d.sh = async (cmd, cwd) => (cmd.includes("get-url") ? "https://github.com/example/development.git\n" : fake(cmd, cwd));
+      try {
+        return await main(["42"], root, x.d, async (_t, body) => post(body), root, CACHE);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    };
+
+    test("main: posting fails → 1", async () => {
+      expect(await command({}, () => Promise.reject(new Error("HTTP 403")))).toBe(1);
+    });
+
+    test("main: a conflict → 1 after posting the fail result", async () => {
+      const posted: string[] = [];
+      expect(await command({ conflict: true }, async (b) => void posted.push(b))).toBe(1);
+      expect(posted).toHaveLength(1);
+      expect(posted[0]!.split("\n")[0]).toBe(`[local-ci] fail ${SHA} base=${BASE}`);
+      expect(posted[0]).toContain("衝突");
+    });
+
+    test("main: all green, posted → 0", async () => {
+      expect(await command({}, async () => undefined)).toBe(0);
+    });
+  });
+
+  test("resultComment: a fail line starting with a fence (failLines keeps any line with over:) gets a longer fence around it", () => {
+    const line = "```ts over: x = 2 > ceiling 1";
+    expect(failLines(`a\n${line}\nb`)).toEqual([line]);
+    const r: LocalCiResult = { sha: SHA, base: BASE, ok: false, results: [{ name: "perf", run: "perf", code: 1, seconds: 1, tail: "", fails: [line] }] };
+    expect(resultComment(r)).toContain(`\n\`\`\`\`\n${line}\n\`\`\`\`\n`);
+  });
+
+  test("readTarget reads the refs it fetched into, not FETCH_HEAD", async () => {
+    const OTHER = "9".repeat(40);
+    const refs: Record<string, string> = {};
+    const calls: string[][] = [];
+    const sh = async (c: string[]) => {
+      calls.push(c);
+      if (c[0] === "gh") return JSON.stringify({ headRefOid: SHA, baseRefName: "main" });
+      if (c[3] === "fetch") {
+        const [src, dst] = c.at(-1)!.replace(/^\+/, "").split(":");
+        refs[dst!] = src === "refs/heads/main" ? BASE : SHA;
+        // another local-ci in the same clone fetched in between
+        refs.FETCH_HEAD = OTHER;
+      }
+      if (c[3] === "rev-parse") return `${refs[c[4]!] ?? "missing"}\n`;
+      return "";
+    };
+    expect(await readTarget(42, CACHE, "example/development", { sh })).toEqual({ head: SHA, base: BASE });
+    expect(calls.filter((c) => c[3] === "rev-parse").map((c) => c[4])).toEqual(["refs/local-ci/42/base", "refs/local-ci/42/head"]);
   });
 
   test("notify: the head or the base moved during the run → nothing posted (a pass for the old pair is not one for the new)", async () => {
@@ -406,7 +499,7 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     expect(failed.fails).toEqual(["無進捗で打ち切り: 1 秒出力がなかった"]);
     const comment = resultComment(r);
     expect(comment.split("\n")[0]).toStartWith("[local-ci] fail ");
-    expect(comment).toContain("    無進捗で打ち切り: 1 秒出力がなかった");
+    expect(comment).toContain("\n```\n無進捗で打ち切り: 1 秒出力がなかった\n```");
     rmSync(failed.log!.slice(0, failed.log!.lastIndexOf("/")), { recursive: true, force: true });
   });
 
@@ -611,8 +704,8 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
       expect(logged).toContain("✗ bun test: exit 1");
       expect(logged).toContain("✗ bun scripts/perf-ratchet.ts check perf-result.json: exit 1");
       const body = resultComment(r);
-      expect(body).toContain(`結果: \`bun scripts/perf-ratchet.ts check perf-result.json\` が exit 1。全文は実行したホストの記録（~/.cache の下）。\n    ${raised}`);
-      expect(body).toContain("結果: `bun test` が exit 1。全文は実行したホストの記録（~/.cache の下）。\n    (fail) a > b");
+      expect(body).toContain(`結果: \`bun scripts/perf-ratchet.ts check perf-result.json\` が exit 1。全文は実行したホストの記録（~/.cache の下）。\n\`\`\`\n${raised}\n\`\`\``);
+      expect(body).toContain("結果: `bun test` が exit 1。全文は実行したホストの記録（~/.cache の下）。\n```\n(fail) a > b\n```");
       expect(body).toContain("| `bun scripts/perf-ratchet.ts check perf-result.json` | exit 1 |");
       expect(body).toContain("| `bun test` | exit 1 |");
     } finally {
@@ -640,7 +733,7 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     expect(adds).toBe(1);
     const body = resultComment(r);
     expect(body).toContain(`${header}\n    ${big}\n    ${grew}`);
-    expect(body).toContain(`結果: \`bun scripts/perf-ratchet.ts check perf-result.json\` が exit 1。全文は実行したホストの記録（~/.cache の下）。\n    ${grew}`);
+    expect(body).toContain(`結果: \`bun scripts/perf-ratchet.ts check perf-result.json\` が exit 1。全文は実行したホストの記録（~/.cache の下）。\n\`\`\`\n${grew}\n\`\`\``);
     // no check output, no bundle part; a conflict has none either
     expect(resultComment({ ...r, bundle: undefined })).not.toContain(header);
     expect(resultComment({ ...r, conflict: true })).not.toContain(header);
@@ -707,7 +800,7 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     expect(gh.length).toBeGreaterThan(0);
     for (const c of gh) expect(c[c.indexOf("-R") + 1]).toBe("o/r");
     const git = calls.filter((c) => c[0] === "git");
-    expect(git.some((c) => c.join(" ") === "git -C /other fetch -q origin refs/pull/42/head")).toBe(true);
+    expect(git.some((c) => c.join(" ") === "git -C /other fetch -q origin +refs/pull/42/head:refs/local-ci/42/head")).toBe(true);
     // the clone, or the worktree local-ci added from it (the merge)
     for (const c of git) expect(c[2] === "/other" || c[2]!.startsWith(CACHE)).toBe(true);
   });
@@ -901,13 +994,13 @@ test("a GitLab checkout runs on the MR (#892): its head from refs/merge-requests
     const sh = async (c: string[]) => {
       calls.push(c);
       if (c[3] === "fetch") last = c[6]!;
-      if (c[3] === "rev-parse") return `${last === "refs/heads/main" ? BASE : last === "refs/merge-requests/7/head" ? HEAD : "x"}\n`;
+      if (c[3] === "rev-parse") return `${last === "+refs/heads/main:refs/local-ci/7/base" ? BASE : last === "+refs/merge-requests/7/head:refs/local-ci/7/head" ? HEAD : "x"}\n`;
       if (c[0] === "gh") throw new Error("gh is not asked for a GitLab MR");
       return "";
     };
     const glab = async (c: string[]) => (calls.push(c), JSON.stringify({ iid: 7, web_url: "u", state: "opened", source_branch: "b", target_branch: "main", sha: HEAD }));
     expect(await readTarget(7, root, "group/sub/app", { sh }, glab)).toEqual({ head: HEAD, base: BASE });
-    expect(calls.map((c) => c.at(-1))).toEqual(["projects/group%2Fsub%2Fapp/merge_requests/7", "refs/heads/main", "FETCH_HEAD", "refs/merge-requests/7/head", "FETCH_HEAD"]);
+    expect(calls.map((c) => c.at(-1))).toEqual(["projects/group%2Fsub%2Fapp/merge_requests/7", "+refs/heads/main:refs/local-ci/7/base", "refs/local-ci/7/base", "+refs/merge-requests/7/head:refs/local-ci/7/head", "refs/local-ci/7/head"]);
     const moved = async (c: string[]) => JSON.stringify({ iid: 7, web_url: "u", state: "opened", source_branch: "b", target_branch: "main", sha: "3".repeat(40) });
     await expect(readTarget(7, root, "group/sub/app", { sh }, moved)).rejects.toThrow("refs/merge-requests/7/head は 1111111 で");
   } finally {
@@ -944,7 +1037,7 @@ test("two local-ci runs do not overlap: each takes one heavy slot for its whole 
     sh: async (cmd) => {
       if (cmd[0] === "gh" && cmd.at(-1) === "headRefOid") return JSON.stringify({ headRefOid: SHA });
       if (cmd[0] === "gh") return JSON.stringify({ headRefOid: SHA, baseRefName: "main" });
-      if (cmd.includes("rev-parse")) return `${cmd.some((c) => c.startsWith("refs/heads/")) ? BASE : SHA}\n`;
+      if (cmd.includes("rev-parse")) return `${cmd.at(-1)!.endsWith("/base") ? BASE : SHA}\n`;
       if (cmd.includes("worktree") && cmd.includes("add")) {
         const dir = cmd[cmd.indexOf("--detach") + 1]!;
         await Bun.write(`${dir}/.github/workflows/ci.yml`, ciYml.replace(SHARED_ENTRY, "make check")); // one step, no scripts/ci.ts
