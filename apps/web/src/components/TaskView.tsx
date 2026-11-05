@@ -21,6 +21,8 @@ import { AnswerArea } from "./Approvals.tsx";
 import { Markdown, MdViewToggle } from "./Markdown.tsx";
 import { useMdView } from "../mdView.ts";
 import { KIND_LABEL, STATE_LABEL, taskAsks } from "../asks.ts";
+import { t } from "../i18n.ts";
+import { task as m } from "../i18n/task.ts";
 
 export function TaskView(props: {
   task: Task;
@@ -136,13 +138,13 @@ export function TaskView(props: {
 
   const send = async () => {
     if (cloud) return;
-    const t = text.trim();
-    if ((!t && !attach.items.length) || attach.busy || sending) return; // ⌘↵ and the button share this guard
+    const body = text.trim();
+    if ((!body && !attach.items.length) || attach.busy || sending) return; // ⌘↵ and the button share this guard
     journeyStart("send");
     sentAfter.current = Math.max(0, ...(props.detail?.events ?? []).map((e) => e.seq));
     setSending(true);
     try {
-      await props.onSend(t, attach.ids.length ? attach.ids : undefined);
+      await props.onSend(body, attach.ids.length ? attach.ids : undefined);
       setText("");
       attach.clear();
     } catch (e) {
@@ -189,7 +191,7 @@ export function TaskView(props: {
   const [terminalEpoch, setTerminalEpoch] = useState(0);
   const lastPhase = useRef<string | undefined>(undefined);
   const [importDetail, setImportDetail] = useState<TaskDetail | null>(null);
-  const teleportReason = (!props.task.cloudSession || !/^session_[A-Za-z0-9_-]+$/.test(props.task.cloudSession.id) || props.task.cloudSession.url !== `https://claude.ai/code/${props.task.cloudSession.id}`) ? "Cloud IDが未確認です。公式Webで確認してください。" : (props.task.status === "running" || props.task.status === "waiting") ? "Cloud開始プロセスの終了後に操作できます。" : !props.pty ? "この環境ではPTYを利用できません。対応環境の公式CLIを使ってください。" : undefined;
+  const teleportReason = (!props.task.cloudSession || !/^session_[A-Za-z0-9_-]+$/.test(props.task.cloudSession.id) || props.task.cloudSession.url !== `https://claude.ai/code/${props.task.cloudSession.id}`) ? t(m.teleportNoId) : (props.task.status === "running" || props.task.status === "waiting") ? t(m.teleportRunning) : !props.pty ? t(m.teleportNoPty) : undefined;
   // The terminal is only for the CLI's own questions (#1306); starting does not leave the screen.
   // The title is edited in place (#491): Enter / blur saves, Esc drops, an empty or unchanged one is not sent
   const [editingTitle, setEditingTitle] = useState(false);
@@ -204,6 +206,7 @@ export function TaskView(props: {
     if (next === null) return;
     api.renameTask(props.task.id, next).catch((e) => props.onError(String((e as Error).message ?? e)));
   };
+  // "使用中" is compared with the daemon's error text
   const startTeleport = () => { teleportPressed.current = true; api.startTeleport(props.task.id).catch(e => { const m = String((e as Error).message ?? e); if (!m.includes("使用中")) teleportPressed.current = false; props.onError(m); }); }; // a press refused because one already runs (a double press) keeps the mark
   const answerInTerminal = () => { setTerminalOpened(true); setTab("terminal"); };
   const teleportProgress = props.teleport !== undefined ? props.teleport : props.detail?.teleport ?? null;
@@ -262,9 +265,9 @@ export function TaskView(props: {
       });
   }, [props.task.id, diffKey, tab, cloud]);
   const judgement = judgementNote(props.task);
-  const headStatus = cloud ? (props.task.status === "running" ? "Cloud 開始中" : "Cloud・状態未確認") : SINCE[props.task.status];
+  const headStatus = cloud ? (props.task.status === "running" ? t(m.cloudStarting) : t(m.cloudStatusUnchecked)) : SINCE[props.task.status];
   // a Cloud Task's times line does not name a state its head says is not known (#2030)
-  const times = taskTimes(props.task, Date.now(), cloud ? (props.task.status === "running" ? "開始中" : "状態未確認") : undefined);
+  const times = taskTimes(props.task, Date.now(), cloud ? (props.task.status === "running" ? t(m.startingWord) : t(m.statusUncheckedWord)) : undefined);
   const diffCount = diff ? new Set(diff.filter((f) => f.stat !== "").map((f) => f.path)).size : 0;
 
   return (
@@ -275,7 +278,7 @@ export function TaskView(props: {
             className="task-title-edit"
             autoFocus
             defaultValue={props.task.title}
-            aria-label="タイトル"
+            aria-label={t(m.titleLabel)}
             maxLength={200}
             onBlur={(e) => saveTitle(e.currentTarget.value)}
             onKeyDown={(e) => {
@@ -287,7 +290,7 @@ export function TaskView(props: {
             }}
           />
         ) : (
-          <h2 title="クリックで変更" style={{ cursor: "text" }} onClick={() => setEditingTitle(true)}>{props.task.title}</h2>
+          <h2 title={t(m.clickToEdit)} style={{ cursor: "text" }} onClick={() => setEditingTitle(true)}>{props.task.title}</h2>
         )}
         <span className={`status ${props.task.status}`}>{headStatus}</span>
         <span className="hint task-times">{`${times.started} · ${times.since}`}</span>
@@ -296,7 +299,7 @@ export function TaskView(props: {
         <BackgroundTag background={props.task.background} />
         <ShadowTag task={props.task} />
         {props.detail?.sourceCloudTask && <CloudSourceTag source={props.detail.sourceCloudTask} switched={!!props.switchedFromCloud} onOpen={() => props.onOpenTask?.(props.detail!.sourceCloudTask!.id)} />}
-        <select className="outcome" value={props.task.outcome} disabled={busy} onChange={(e) => setOutcome({ outcome: e.target.value as TaskOutcome })} title="結果（要対応のまとまりの並びに使う）">
+        <select className="outcome" value={props.task.outcome} disabled={busy} onChange={(e) => setOutcome({ outcome: e.target.value as TaskOutcome })} title={t(m.outcomeTitle)}>
           {(["needs_action", "failed", "done", "unknown"] as const).map((o) => (
             <option key={o} value={o}>
               {outcomeLabel(o)}
@@ -304,11 +307,11 @@ export function TaskView(props: {
           ))}
         </select>
         <button className="ghost review-toggle" disabled={busy} onClick={() => setOutcome({ reviewed: props.task.reviewedAt === null })}>
-          {props.task.reviewedAt === null ? "確認済みにする" : "確認済みを取り消す"}
+          {props.task.reviewedAt === null ? t(m.markReviewed) : t(m.unmarkReviewed)}
         </button>
         {(props.task.status === "done" || props.task.status === "error" || props.task.status === "aborted") && (
           <button className="ghost archive-toggle" onClick={() => props.onArchive(props.task.archivedAt === null)}>
-            {props.task.archivedAt === null ? "アーカイブ" : "アーカイブを戻す"}
+            {props.task.archivedAt === null ? t(m.archive) : t(m.unarchive)}
           </button>
         )}
         {judgement && (
@@ -318,9 +321,9 @@ export function TaskView(props: {
         )}
         {outcomeErr && <span className="hint" role="alert">{outcomeErr}</span>}
         {transcript.lastStatus && busy && <span className="hint">{transcript.lastStatus}</span>}
-        {tab === "chat" && <CopyButton label="会話をコピー" text={() => transcriptMarkdown(transcript.items, props.task.runner)} partial={busy} onError={props.onError} />}
+        {tab === "chat" && <CopyButton label={t(m.copyConversation)} text={() => transcriptMarkdown(transcript.items, props.task.runner)} partial={busy} onError={props.onError} />}
         <button className="ghost brief-toggle" onClick={props.onBrief}>
-          詳細
+          {t(m.details)}
         </button>
         {/* the switch rides with the tabs (#3677): one item of the wrapping head, so a run's status line and the 完了-only
             buttons coming and going break the head's first line as before and do not push the switch to a line of its own */}
@@ -328,10 +331,10 @@ export function TaskView(props: {
           {tab === "chat" && <MdViewToggle />}
           <nav className="subtabs">
             <button className={tab === "chat" ? "on" : ""} onClick={() => setTab("chat")}>
-              会話
+              {t(m.tabChat)}
             </button>
             {!cloud && <button className={tab === "diff" ? "on" : ""} onClick={() => setTab("diff")}>
-              差分{diffCount > 0 ? `（${diffCount} ファイル）` : ""}
+              {t(m.tabDiff)}{diffCount > 0 ? t(m.diffFiles, { count: diffCount }) : ""}
             </button>}
             <button className={tab === "artifacts" ? "on" : ""} onClick={() => { setArtifactsOpened(true); setTab("artifacts"); }}>
               {artifactsLabel(artifactCount)}
@@ -344,7 +347,7 @@ export function TaskView(props: {
                   setTab("terminal");
                 }}
               >
-                ターミナル
+                {t(m.tabTerminal)}
               </button>
             )}
           </nav>
@@ -354,28 +357,28 @@ export function TaskView(props: {
       {tab === "diff" && (
         <div className="diffs">
           {diffErr && <div className="warn">{diffErr}</div>}
-          {diff === null && !diffErr && <div className="muted">集計中…</div>}
-          {diff && diff.length === 0 && <div className="muted">このタスクによる変更はまだありません（スコープ内の git 作業ツリーとステージングを見ています）。</div>}
+          {diff === null && !diffErr && <div className="muted">{t(m.counting)}</div>}
+          {diff && diff.length === 0 && <div className="muted">{t(m.noChanges)}</div>}
           {(diff ?? []).map((f) => (
             <div key={`${f.source}:${f.path}`} className="diff-file">
               <button className="row link" onClick={() => setOpenFile(openFile === f.path ? null : f.path)} title={f.path}>
                 <span className="t mono">{f.rel}</span>
-                <span className="tag">{f.source === "staging" ? "ステージング" : "作業ツリー"}</span>
+                <span className="tag">{f.source === "staging" ? t(m.staging) : t(m.worktree)}</span>
                 <span className="m num">{f.stat}</span>
               </button>
               <span className="editor-links">
                 {f.source === "worktree" && (
                   <>
-                    <a className="btn ghost" href={`vscode://file${encodeURI(f.path)}`} title="VS Code で開く">
+                    <a className="btn ghost" href={`vscode://file${encodeURI(f.path)}`} title={t(m.openInVscode)}>
                       VS Code
                     </a>
-                    <a className="btn ghost" href={`cursor://file${encodeURI(f.path)}`} title="Cursor で開く">
+                    <a className="btn ghost" href={`cursor://file${encodeURI(f.path)}`} title={t(m.openInCursor)}>
                       Cursor
                     </a>
                   </>
                 )}
               </span>
-              {openFile === f.path && <pre className="diff">{f.diff || "(差分なし)"}</pre>}
+              {openFile === f.path && <pre className="diff">{f.diff || t(m.noDiff)}</pre>}
             </div>
           ))}
         </div>
@@ -393,7 +396,7 @@ export function TaskView(props: {
         {archiveNotice && <div className="hint" data-testid="events-archive-notice">{archiveNotice}</div>}
         {props.detail && firstSeq > 1 && firstSeq !== olderEndAt && (
           <button className="ghost older" disabled={loadingOlder} onClick={loadOlder}>
-            以前の会話を読む
+            {t(m.loadOlder)}
           </button>
         )}
         {transcript.items.map((it) => (
@@ -409,10 +412,10 @@ export function TaskView(props: {
             onOpenArtifact={openArtifact}
           />
         ))}
-        {props.detail === undefined && <div className="muted">読み込み中…</div>}
+        {props.detail === undefined && <div className="muted">{t(m.loading)}</div>}
         {!atEnd && tab === "chat" && (
           <button className="ghost jump-latest" onClick={() => endRef.current?.scrollIntoView({ block: "end" })}>
-            最新へ ↓
+            {t(m.jumpLatest)}
           </button>
         )}
         <div ref={endRef} />
@@ -434,21 +437,21 @@ export function TaskView(props: {
               <code>{p.detail}</code>
               {p.rule && (
                 <div className="hint">
-                  {p.rule.source.startsWith("policy:") ? "方針" : "ルール"} <span className="mono">{p.rule.source.replace(/^policy:/, "")}</span>「{p.rule.pattern}」に一致（{p.rule.mode === "confirm" ? "都度確認" : "許可"}）
+                  {p.rule.source.startsWith("policy:") ? t(m.rulePolicy) : t(m.ruleRule)} <span className="mono">{p.rule.source.replace(/^policy:/, "")}</span>{t(m.ruleMatched, { pattern: p.rule.pattern, mode: p.rule.mode === "confirm" ? t(m.modeConfirm) : t(m.modeAllow) })}
                 </div>
               )}
             </div>
             <div className="actions">
               <button className="pri" onClick={() => props.onPermission(p.id, "allow")}>
-                許可
+                {t(m.allow)}
               </button>
-              <button onClick={() => props.onPermission(p.id, "deny")}>拒否</button>
+              <button onClick={() => props.onPermission(p.id, "deny")}>{t(m.deny)}</button>
             </div>
           </div>
         );
       })}
 
-      {!cloud && <PresetPicker workspaceId={props.task.workspaceId} onText={(t) => setText(t)} onError={props.onError} />}
+      {!cloud && <PresetPicker workspaceId={props.task.workspaceId} onText={(s) => setText(s)} onError={props.onError} />}
       {!cloud && <div className="composer">
         <div className={`dropzone ${drop.dropping ? "dropping" : ""}`} {...drop.handlers}>
           <textarea
@@ -459,18 +462,18 @@ export function TaskView(props: {
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void send();
             }}
             rows={2}
-            placeholder={busy ? "実行中でも追加指示を送れます（⌘↵）。画像やファイルはドロップ / 貼り付け" : props.task.origin === "terminal" ? "返信すると Switchboard 側で同じセッションを再開します（⌘↵）。Terminal で開いたままなら先に閉じてください" : "返信を書く（⌘↵）。プロセスが終了していれば同じセッションを再開します。画像やファイルはドロップ / 貼り付け"}
+            placeholder={busy ? t(m.placeholderBusy) : props.task.origin === "terminal" ? t(m.placeholderTerminal) : t(m.placeholderReply)}
           />
           <AttachmentBar items={attach.items} onRemove={attach.remove} busy={attach.busy} />
         </div>
         <AttachButton onFiles={(files) => void attach.add(files)} />
-        <button className="pri" disabled={(!text.trim() && !attach.items.length) || attach.busy || sending} onClick={() => void send()} title={attach.busy ? "添付のアップロードが終わるまで待ってください" : ""}>
-          {attach.busy ? "アップロード中…" : "送信"}
+        <button className="pri" disabled={(!text.trim() && !attach.items.length) || attach.busy || sending} onClick={() => void send()} title={attach.busy ? t(m.waitUpload) : ""}>
+          {attach.busy ? t(m.uploading) : t(m.send)}
         </button>
       </div>}
       {props.shadowTask && !props.shadowTask.shadowStopped && (
         <div className="hint composer-hint">
-          {props.shadowTask.status === "waiting" ? `並走 Task（${props.shadowTask.runner}）は承認待ちのため、この返信は写されません（答えたあと並走に直接送れます）` : `並走 Task（${props.shadowTask.runner}）にも同じ返信を送ります`}
+          {props.shadowTask.status === "waiting" ? t(m.shadowWaiting, { runner: props.shadowTask.runner }) : t(m.shadowCopies, { runner: props.shadowTask.runner })}
         </div>
       )}
     </main>
@@ -504,7 +507,7 @@ function TranscriptItem(props: {
       return (
         <div className="msg user">
           <div className="who">
-            あなた
+            {t(m.you)}
             {it.at !== undefined && <span className="at" title={jstDateTime(it.at)}>{jstTime(it.at)}</span>}
             {it.text && copy(undefined, () => itemText(it))}
           </div>
@@ -519,7 +522,7 @@ function TranscriptItem(props: {
             <RunnerPill runner={props.runner} />
             {it.at !== undefined && <span className="at" title={jstDateTime(it.at)}>{jstTime(it.at)}</span>}
             {it.text && copy(undefined, () => itemText(it))}
-            {props.turn && copy("ターンの返答をコピー", props.turn)}
+            {props.turn && copy(t(m.copyTurn), props.turn)}
           </div>
           {it.text && <ReplyText text={it.text} />}
           {it.attachments && <AttachmentGallery items={it.attachments} />}
@@ -532,26 +535,26 @@ function TranscriptItem(props: {
       const byRule = it.decidedBy === "rule";
       return (
         <div className={`tool ${state}`}>
-          <button className="tool-row" onClick={props.onToggle} title="入力と結果を表示">
+          <button className="tool-row" onClick={props.onToggle} title={t(m.showIO)}>
             <span className="n">{name}</span>
             <span className="s">{summary}</span>
             {byRule && (
               <span className="tag" title={it.ask?.rule ? `${it.ask.rule.source}: ${it.ask.rule.pattern}` : ""}>
-                {it.ask?.rule?.source.startsWith("policy:") ? "方針で許可" : "ルールで許可"}
+                {it.ask?.rule?.source.startsWith("policy:") ? t(m.allowedByPolicy) : t(m.allowedByRule)}
               </span>
             )}
             {it.call && it.at !== undefined && it.endAt !== undefined && (
-              <span className="dur" title={`開始 ${jstTime(it.at)} → 終了 ${jstTime(it.endAt)}`}>
+              <span className="dur" title={t(m.toolSpan, { start: jstTime(it.at), end: jstTime(it.endAt) })}>
                 {spanText(it.endAt - it.at)}
               </span>
             )}
-            <span className="st">{state === "ok" ? "✓" : state === "fail" ? "✕" : state === "asking" ? "承認待ち" : state === "denied" ? "拒否" : "…"}</span>
+            <span className="st">{state === "ok" ? "✓" : state === "fail" ? "✕" : state === "asking" ? t(m.statusWaiting) : state === "denied" ? t(m.denied) : "…"}</span>
           </button>
           {props.showInput && (
             <div className="tool-detail">
-              {it.call && copy("入力をコピー", () => toolInputText(it))}
+              {it.call && copy(t(m.copyInput), () => toolInputText(it))}
               {it.call && <pre>{JSON.stringify(it.call.input, null, 2)}</pre>}
-              {it.result && copy("結果をコピー", () => toolResultText(it))}
+              {it.result && copy(t(m.copyResult), () => toolResultText(it))}
               {it.result && <pre className={it.result.ok ? "" : "err"}>{it.result.summary}</pre>}
             </div>
           )}
@@ -561,8 +564,8 @@ function TranscriptItem(props: {
     case "end":
       return (
         <div className={`end ${it.status}`}>
-          {it.status === "ok" ? "完了" : it.status === "aborted" ? "中断" : "エラー"}
-          {it.at !== undefined && ` ${jstTime(it.at)} · 所要 ${spanText(it.durationMs)}`}
+          {it.status === "ok" ? t(m.statusDone) : it.status === "aborted" ? t(m.statusAborted) : t(m.sinceError)}
+          {it.at !== undefined && t(m.endTime, { time: jstTime(it.at), span: spanText(it.durationMs) })}
           {it.summary && it.status !== "ok" && <span> — {it.summary}</span>}
         </div>
       );
@@ -571,9 +574,9 @@ function TranscriptItem(props: {
     case "artifact":
       return (
         <div className="hint artifact-row" data-artifact={it.id}>
-          成果物: {it.title}
-          <button className="ghost" aria-label={`${it.title} を開く`} onClick={() => props.onOpenArtifact(it.id)}>
-            開く
+          {t(m.artifactLine, { title: it.title })}
+          <button className="ghost" aria-label={t(m.openNamed, { title: it.title })} onClick={() => props.onOpenArtifact(it.id)}>
+            {t(m.open)}
           </button>
         </div>
       );
@@ -581,7 +584,7 @@ function TranscriptItem(props: {
 }
 
 function permLabel(k: "exec" | "write" | "network" | "other") {
-  return { exec: "コマンド実行の許可", write: "書き込みの許可", network: "ネットワークアクセスの許可", other: "ツール実行の許可" }[k];
+  return { exec: t(m.permExec), write: t(m.permWrite), network: t(m.permNetwork), other: t(m.permOther) }[k];
 }
 
 /**
@@ -594,15 +597,15 @@ function QuestionCard(props: { ask: PermissionAsk; questions: AskQuestion[]; onP
   const answers = answersOf(props.questions, choices);
   const update = (i: number, fn: (c: QuestionChoice) => QuestionChoice) => setChoices((s) => Object.assign([...s], { [i]: fn(s[i] ?? { labels: [], other: "" }) }));
   return (
-    <div className="perm question" role="alertdialog" aria-label="エージェントからの質問">
+    <div className="perm question" role="alertdialog" aria-label={t(m.questionAria)}>
       <div className="questions">
-        <b>質問</b>
+        <b>{t(m.question)}</b>
         {props.questions.map((q, i) => (
           <fieldset key={i}>
             <legend>
               {q.header && <span className="tag">{q.header}</span>}
               {q.question}
-              {q.multiSelect && <span className="hint">（複数選択可）</span>}
+              {q.multiSelect && <span className="hint">{t(m.multiSelect)}</span>}
             </legend>
             {q.options.map((o) => (
               <label key={o.label} className="opt">
@@ -623,19 +626,19 @@ function QuestionCard(props: { ask: PermissionAsk; questions: AskQuestion[]; onP
             <input
               type="text"
               className="other"
-              placeholder={q.options.length ? "その他（自由記述）" : "回答を書く"}
+              placeholder={q.options.length ? t(m.otherPlaceholder) : t(m.writeAnswer)}
               value={choices[i]?.other ?? ""}
               onChange={(e) => update(i, (c) => (q.multiSelect ? { ...c, other: e.target.value } : { labels: e.target.value ? [] : c.labels, other: e.target.value }))}
             />
-            {answerOf(q, choices[i]) && <div className="hint">回答: {answerOf(q, choices[i])}</div>}
+            {answerOf(q, choices[i]) && <div className="hint">{t(m.answerLine, { answer: answerOf(q, choices[i]) })}</div>}
           </fieldset>
         ))}
       </div>
       <div className="actions">
-        <button className="pri" disabled={!answers} title={answers ? "" : "すべての質問に答えると送れます"} onClick={() => answers && props.onPermission(props.ask.id, "allow", answers)}>
-          回答する
+        <button className="pri" disabled={!answers} title={answers ? "" : t(m.answerAllTitle)} onClick={() => answers && props.onPermission(props.ask.id, "allow", answers)}>
+          {t(m.answer)}
         </button>
-        <button onClick={() => props.onPermission(props.ask.id, "deny")}>答えない</button>
+        <button onClick={() => props.onPermission(props.ask.id, "deny")}>{t(m.noAnswer)}</button>
       </div>
     </div>
   );
@@ -659,8 +662,8 @@ function TaskAsks(props: { task: Task; stops: StopSummary[]; onError: (msg: stri
       () => {},
     );
   };
-  const t = props.task;
-  const may = (t.outcome === "needs_action" && t.status !== "running" && t.status !== "idle") || props.stops.some((s) => s.next === "decide");
+  const cur = props.task;
+  const may = (cur.outcome === "needs_action" && cur.status !== "running" && cur.status !== "idle") || props.stops.some((s) => s.next === "decide");
   useEffect(() => {
     if (may) load();
     else {
@@ -668,14 +671,14 @@ function TaskAsks(props: { task: Task; stops: StopSummary[]; onError: (msg: stri
       setAsks([]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, t.updatedAt, t.status, may]);
+  }, [id, cur.updatedAt, cur.status, may]);
   const answer = (x: Ask, a: AskAnswer, policy?: PolicyInput) => {
     if (busy) return;
     setBusy(true);
     api
       .answerAsk(x.id, a, policy)
       // a reply the Task refused (its budget) is a 200 whose resume failed: said, as the 判断待ち screen's badge says it
-      .then((r) => r.ask?.resume?.state === "failed" && props.onError(`再開失敗${r.ask.resume.reason ? `: ${r.ask.resume.reason}` : ""}`))
+      .then((r) => r.ask?.resume?.state === "failed" && props.onError(r.ask.resume.reason ? t(m.resumeFailedWhy, { reason: r.ask.resume.reason }) : t(m.resumeFailed)))
       .catch((e) => props.onError(String((e as Error).message ?? e)))
       .finally(() => {
         setBusy(false);

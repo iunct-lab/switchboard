@@ -1,6 +1,7 @@
 // test-reads: apps/web/src/components/Settings.tsx
 import { describe, expect, test } from "bun:test";
 import { SETTINGS_GROUPS, settingsGroup } from "./settingsGroups.ts";
+import { settings } from "./i18n/settings.ts";
 
 const source = await Bun.file(new URL("./components/Settings.tsx", import.meta.url)).text();
 /** The Settings screen's own body: from its <main> to the end of it. */
@@ -11,7 +12,7 @@ function screenOrder(): string[] {
   const out: string[] = [];
   for (const m of body.matchAll(/<SettingsGroupHeading id="([\w-]+)"|<h5>(.*?)<\/h5>|<(WorkspaceCard|PolicySettings)\b/g)) {
     if (m[1]) out.push(`group:${m[1]}`);
-    else if (m[2]) out.push(m[2]);
+    else if (m[2]) out.push(m[2].replace(/^\{t\(settings\.(\w+)\)\}$/, (_, k: keyof typeof settings) => settings[k].ja)); // a heading from the dictionary reads as its Japanese
     else out.push(m[3] === "WorkspaceCard" ? "Workspace" : "回答の方針");
   }
   return out;
@@ -38,7 +39,7 @@ describe("SETTINGS_GROUPS", () => {
   });
 
   test("an unknown group id throws", () => {
-    expect(settingsGroup("settings-resume").title).toBe("止まったときと再開");
+    expect(settingsGroup("settings-resume").title.ja).toBe("止まったときと再開");
     expect(() => settingsGroup("settings-nope")).toThrow();
   });
 });

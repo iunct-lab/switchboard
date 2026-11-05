@@ -1,4 +1,6 @@
 import type { BacklogItem, BacklogStage } from "@switchboard/protocol";
+import { t } from "./i18n.ts";
+import { common } from "./i18n/common.ts";
 
 /**
  * How the Backlog screen sorts and narrows its rows (#2695), kept in the browser. Empty arrays = every value; `query`
@@ -20,23 +22,23 @@ export const VIEW_KEY = "switchboard.backlog.view";
 
 /** The stage cards in screen order with their headings. */
 export const STAGES: Array<[BacklogStage, string]> = [
-  ["needs-decision", "判断待ち"],
-  ["request", "要望のまま"],
-  ["needs-tasks", "分解待ち"],
+  ["needs-decision", t(common.stageNeedsDecision)],
+  ["request", t(common.stageRequest)],
+  ["needs-tasks", t(common.stageNeedsTasks)],
   ["ready", "Ready"],
-  ["in-progress", "実装中"],
+  ["in-progress", t(common.stageInProgress)],
 ];
 
 export const SORTS: Array<[BacklogView["sort"], string]> = [
-  ["default", "既定"],
-  ["priority", "Priority 順"],
-  ["updated", "更新順"],
-  ["created", "作成順"],
-  ["points", "Story Points 順"],
+  ["default", t(common.sortDefault)],
+  ["priority", t(common.sortPriority)],
+  ["updated", t(common.sortUpdated)],
+  ["created", t(common.sortCreated)],
+  ["points", t(common.sortPoints)],
 ];
 
 export const TYPES: Array<["request" | "pbi", string]> = [
-  ["request", "要望"],
+  ["request", t(common.typeRequest)],
   ["pbi", "PBI"],
 ];
 
@@ -93,8 +95,8 @@ export function viewSummary(view: BacklogView): string | null {
   const parts: string[] = [];
   if (view.stages.length) parts.push(view.stages.map((s) => name(STAGES, s)).join(", "));
   if (view.priorities.length) parts.push(view.priorities.join(", "));
-  if (view.types.length) parts.push(view.types.map((t) => name(TYPES, t)).join(", "));
-  if (view.query.trim()) parts.push(`「${view.query.trim()}」`);
+  if (view.types.length) parts.push(view.types.map((k) => name(TYPES, k)).join(", "));
+  if (view.query.trim()) parts.push(t(common.quoted, { text: view.query.trim() }));
   if (view.sort !== "default") parts.push(name(SORTS, view.sort));
   return parts.length ? parts.join(" · ") : null;
 }

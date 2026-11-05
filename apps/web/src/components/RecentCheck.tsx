@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { RECENT_MESSAGE, confirmPasskey, onRecentCheck } from "../recent.ts";
+import { t } from "../i18n.ts";
+import { home } from "../i18n/home.ts";
 
 /** The question behind a 401 `recent` (#1491): the button is the click Safari needs to open the passkey sheet. */
 export function RecentCheck() {
@@ -18,8 +20,8 @@ export function RecentCheck() {
       <div className="recent-check-box">
         <p>{RECENT_MESSAGE}</p>
         {error && <p className="error">{error}</p>}
-        <button className="btn" disabled={busy} onClick={check}>パスキーで確かめる</button>{" "}
-        <button className="btn" disabled={busy} onClick={() => finish(false)}>やめる</button>
+        <button className="btn" disabled={busy} onClick={check}>{t(home.checkPasskey)}</button>{" "}
+        <button className="btn" disabled={busy} onClick={() => finish(false)}>{t(home.cancel)}</button>
       </div>
     </div>
   );

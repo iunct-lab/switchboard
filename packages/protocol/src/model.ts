@@ -186,8 +186,9 @@ export type RoutingStats = z.infer<typeof RoutingStats>;
 /**
  * The stage a row's button starts (#265): request → PBI, PBI → Tasks (Ready), Ready → merged (/pbi-complete), in-progress → 状況確認 (#522).
  * `close` (#523): a `closable` in-progress PBI → its results written and closed (pbi-complete step 6); not tied to a stage.
+ * `direct` (#3690): a request → one Task of the `p1-direct` candidate, no PBI or Task Issue; only the person's button starts it.
  */
-export const BacklogAction = z.enum(["to-pbi", "to-tasks", "complete", "check", "close"]);
+export const BacklogAction = z.enum(["to-pbi", "to-tasks", "complete", "check", "close", "direct"]);
 export type BacklogAction = z.infer<typeof BacklogAction>;
 
 export const Task = z.object({
@@ -651,7 +652,7 @@ export type TaskJudgement = z.infer<typeof TaskJudgement>;
  * The kinds of Task that start by themselves (#1337): the feedback modes (`FeedbackInput.mode`) and the backlog stages
  * (`BacklogAction`), under their own names.
  */
-export const AutoStartKind = z.enum(["fix", "request", "to-pbi", "to-tasks", "complete", "check", "close", "new-repo", "upstream-sync"]);
+export const AutoStartKind = z.enum(["fix", "request", "to-pbi", "to-tasks", "complete", "check", "close", "direct", "new-repo", "upstream-sync"]);
 export type AutoStartKind = z.infer<typeof AutoStartKind>;
 
 /** One kind's own runner / model / effort (#1337); `model` / `effort` empty = that runner's CLI default. */
@@ -677,6 +678,7 @@ export const AutoStartSettings = z
         complete: AutoStartChoice.optional(),
         check: AutoStartChoice.optional(),
         close: AutoStartChoice.optional(),
+        direct: AutoStartChoice.optional(),
         "new-repo": AutoStartChoice.optional(),
         "upstream-sync": AutoStartChoice.optional(),
       })
@@ -884,6 +886,7 @@ export const SettingsPatch = z.object({
           complete: autoStartChoicePatch,
           check: autoStartChoicePatch,
           close: autoStartChoicePatch,
+          direct: autoStartChoicePatch,
           "new-repo": autoStartChoicePatch,
           "upstream-sync": autoStartChoicePatch,
         })

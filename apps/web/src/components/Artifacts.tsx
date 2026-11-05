@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import type { Artifact } from "@switchboard/protocol";
 import { api, apiRaw } from "../api.ts";
 import { isMarkdown, pickArtifact, viewOf } from "../artifacts.ts";
+import { t } from "../i18n.ts";
+import { panels as m } from "../i18n/panels.ts";
 import { Markdown, MdViewToggle } from "./Markdown.tsx";
 import { useMdView } from "../mdView.ts";
-import { createBridge } from "../scratchBridge.ts";
+import { type BridgeRequest, createBridge } from "../scratchBridge.ts";
 
 export const UNDO_MS = 5000;
 /** A fetched view url is used again for this long (the daemon's key lasts an hour). */
@@ -46,7 +48,7 @@ export function Artifacts(props: { taskId: string; openId?: string; /** bumped b
         if (!live) return;
         const pick = pickArtifact(list, want, selRef.current);
         setSel(pick.id);
-        if (want) setErr(pick.gone ? "その成果物は消されています" : null);
+        if (want) setErr(pick.gone ? t(m.artifactGone) : null);
       },
       (e) => live && setErr(String((e as Error).message ?? e)),
     );
@@ -104,7 +106,7 @@ export function Artifacts(props: { taskId: string; openId?: string; /** bumped b
   const current = items.find((a) => a.id === sel) ?? null;
   return (
     <div className="artifacts" hidden={props.hidden}>
-      <div className="art-strip" role="tablist" aria-label="成果物">
+      <div className="art-strip" role="tablist" aria-label={t(m.artifacts)}>
         {items.map((a) => (
           <span key={a.id} className={`art-tab${a.id === sel ? " on" : ""}`}>
             <button
@@ -118,7 +120,7 @@ export function Artifacts(props: { taskId: string; openId?: string; /** bumped b
             >
               {a.title}
             </button>
-            <button className="art-x" aria-label={`${a.title} を消す`} title="消す" onClick={() => remove(a)}>
+            <button className="art-x" aria-label={t(m.removeNamed, { title: a.title })} title={t(m.remove)} onClick={() => remove(a)}>
               ×
             </button>
           </span>
@@ -130,9 +132,9 @@ export function Artifacts(props: { taskId: string; openId?: string; /** bumped b
             add();
           }}
         >
-          <input value={source} onChange={(e) => setSource(e.target.value)} placeholder="パスか URL（作業ディレクトリからの相対も可）" aria-label="成果物のパスか URL" />
+          <input value={source} onChange={(e) => setSource(e.target.value)} placeholder={t(m.sourcePlaceholder)} aria-label={t(m.sourceLabel)} />
           <button type="submit" disabled={busy || !source.trim()}>
-            追加
+            {t(m.add)}
           </button>
         </form>
       </div>
@@ -143,13 +145,13 @@ export function Artifacts(props: { taskId: string; openId?: string; /** bumped b
       )}
       {undo && (
         <div className="hint art-undo" role="status">
-          「{undo.title}」を消しました
+          {t(m.removed, { title: undo.title })}
           <button className="ghost" onClick={restore}>
-            元に戻す
+            {t(m.undo)}
           </button>
         </div>
       )}
-      {current ? <ArtifactBody key={`${current.id}:${current.updatedAt}`} a={current} shown={!props.hidden} onRefreshed={() => load().catch((e) => setErr(`一覧を読み直せません: ${String((e as Error).message ?? e)}`))} /> : <div className="muted art-empty">Task が作ったレポートのパス（HTML・画像・テキストなど）か URL を入れると、ここで開けます。登録するとコピーを残すので、元のファイルが消えても見られます。</div>}
+      {current ? <ArtifactBody key={`${current.id}:${current.updatedAt}`} a={current} shown={!props.hidden} onRefreshed={() => load().catch((e) => setErr(t(m.reloadListFailed, { error: String((e as Error).message ?? e) })))} /> : <div className="muted art-empty">{t(m.artifactsEmpty)}</div>}
     </div>
   );
 }
@@ -184,7 +186,7 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
     if (!full) return;
     const onPop = () => setFull(false);
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") closeFull();
+      if (e.key === "Escape" && !askRef.current) closeFull(); // an open write confirm takes Esc for itself
     };
     addEventListener("popstate", onPop);
     addEventListener("keydown", onKey);
@@ -195,17 +197,44 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
   }, [full]);
   // The artifact bridge (docs/design/scratch-apps.md): the frame stays opaque; a GET /api it posts is read here and
   // answered to that frame only — a message from any other window or another artifact's frame is ignored.
+  // A write waits for the person in ScratchConfirm, one at a time (the bridge queues the next until this one closes).
   const inlineFrame = useRef<HTMLIFrameElement>(null);
   const fullFrame = useRef<HTMLIFrameElement>(null);
+  const [ask, setAsk] = useState<{ req: BridgeRequest; answer: (yes: boolean) => void } | null>(null);
+  const askRef = useRef(ask);
+  askRef.current = ask;
+  // Leaving the artifact (another tab hides it, or it unmounts) declines what is asked and what waits behind it (#3880)
+  const shownRef = useRef(props.shown);
   useEffect(() => {
+    shownRef.current = props.shown;
+    if (!props.shown) askRef.current?.answer(false);
+  }, [props.shown]);
+  useEffect(() => {
+    let closed = false;
     const bridge = createBridge({
       frames: () => [inlineFrame.current?.contentWindow, fullFrame.current?.contentWindow].filter(Boolean),
-      read: (path) => apiRaw(path),
+      call: (r) => apiRaw(r.path, r.method === "GET" ? undefined : { method: r.method, ...(r.body !== undefined ? { body: JSON.stringify(r.body) } : {}) }),
+      confirm: (req) =>
+        closed || !shownRef.current
+          ? Promise.resolve(false)
+          : new Promise<boolean>((resolve) =>
+          setAsk({
+            req,
+            answer: (yes) => {
+              setAsk(null);
+              resolve(yes);
+            },
+          }),
+        ),
       reply: (to, result) => (to as Window).postMessage(result, "*"), // an opaque origin can only be named as "*"; the window is fixed to the asker
     });
     const onMessage = (e: MessageEvent) => void bridge({ source: e.source, data: e.data });
     addEventListener("message", onMessage);
-    return () => removeEventListener("message", onMessage);
+    return () => {
+      closed = true;
+      removeEventListener("message", onMessage);
+      askRef.current?.answer(false);
+    };
   }, []);
   // A view key lasts an hour (#1782): the tab stays mounted, so ask again when it is shown after a long time away.
   const keyAt = useRef(0);
@@ -221,7 +250,7 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
         if (how === "text") {
           const r = await fetch(u);
           const body = await r.text();
-          if (live) setText(r.ok ? body : `読み込めません（${r.status}）`);
+          if (live) setText(r.ok ? body : t(m.cannotRead, { status: r.status }));
         }
       })
       .catch((e) => live && setErr(String((e as Error).message ?? e)));
@@ -256,7 +285,7 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
       await api.refreshArtifact(a.id);
       props.onRefreshed();
     } catch (e) {
-      setErr(`取り直せません: ${String((e as Error).message ?? e)}（前の内容のまま開けます）`);
+      setErr(t(m.refreshFailed, { error: String((e as Error).message ?? e) }));
     } finally {
       setRefreshing(false);
     }
@@ -265,7 +294,7 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
   // A .md in the preview (#3677) once its text is read; everything else (and the switch on テキスト) as it was.
   const textBody = md && mdView === "preview" && text !== null
     ? <div className="art-text"><Markdown text={text} /></div>
-    : <pre className="art-text">{text ?? "読み込み中…"}</pre>;
+    : <pre className="art-text">{text ?? t(m.loading)}</pre>;
 
   return (
     <div className="art-body">
@@ -274,12 +303,12 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
         {md && <MdViewToggle />}
         {a.kind !== "url" && how !== "external" && url && (
           <button className="art-full-open" onClick={openFull}>
-            全画面
+            {t(m.fullScreen)}
           </button>
         )}
         {a.kind !== "url" && (
           <button className="ghost" onClick={refresh} disabled={refreshing}>
-            {refreshing ? "取り直し中…" : "取り直す"}
+            {refreshing ? t(m.refreshing) : t(m.refresh)}
           </button>
         )}
       </div>
@@ -291,26 +320,26 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
       {a.kind === "url" && (
         <div className="art-open">
           <a className="btn" href={a.source} target="_blank" rel="noopener noreferrer">
-            新しいタブで開く
+            {t(m.openNewTab)}
           </a>
-          <p className="muted">外部のリンクは切れることがあります。</p>
+          <p className="muted">{t(m.externalNote)}</p>
         </div>
       )}
       {a.kind !== "url" && how === "frame" && url && !full && <iframe ref={inlineFrame} className="art-frame" title={a.title} sandbox="allow-scripts" src={url} />}
       {a.kind !== "url" && how === "image" && url && <img className="art-image" alt={a.title} src={url} />}
       {a.kind !== "url" && how === "text" && textBody}
       {full && url && (
-        <div className="art-full" role="dialog" aria-modal="true" aria-label={`${a.title}（全画面）`}>
+        <div className="art-full" role="dialog" aria-modal="true" aria-label={t(m.fullLabel, { title: a.title })}>
           <div className="art-full-bar">
             <button onClick={closeFull} autoFocus>
-              ← 戻る
+              {t(m.back)}
             </button>
             <span className="art-full-title" title={a.source}>
               {a.title}
             </span>
             {md && <MdViewToggle />}
             <button className="ghost" onClick={() => openFresh(false)}>
-              新しいタブ
+              {t(m.newTab)}
             </button>
           </div>
           {how === "frame" && <iframe ref={fullFrame} className="art-frame" title={a.title} sandbox="allow-scripts" src={url} />}
@@ -322,16 +351,61 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
           {how === "text" && textBody}
         </div>
       )}
+      {ask && <ScratchConfirm title={a.title} req={ask.req} answer={ask.answer} />}
       {a.kind !== "url" && how === "external" && url && (
         <div className="art-open">
           <button className="btn" onClick={() => openFresh(false)}>
-            新しいタブで開く
+            {t(m.openNewTab)}
           </button>
           <button className="btn ghost" onClick={() => openFresh(true)}>
-            ダウンロード
+            {t(m.download)}
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+/** The longest body shown in the confirm; the rest is cut (the request still sends all of it). */
+export const CONFIRM_BODY_MAX = 2_000;
+/** 実行する takes a press only after this long. */
+const CONFIRM_ARM_MS = 500;
+
+/**
+ * The confirm before an artifact's write goes to the API (docs/design/scratch-apps.md): what it would do, once. The
+ * focus starts on やめる; Esc and a press outside the box are やめる too. No "don't ask again" (ui-layers.md).
+ */
+function ScratchConfirm(props: { title: string; req: BridgeRequest; answer: (yes: boolean) => void }) {
+  const { req, answer } = props;
+  // a click meant for the page under the dialog (a double click on its button) must not land on 実行する
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setArmed(true), CONFIRM_ARM_MS);
+    return () => clearTimeout(t);
+  }, []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") answer(false);
+    };
+    addEventListener("keydown", onKey);
+    return () => removeEventListener("keydown", onKey);
+  }, [answer]);
+  const body = req.body === undefined ? "" : JSON.stringify(req.body, null, 2) ?? "";
+  const shown = body.length > CONFIRM_BODY_MAX ? `${body.slice(0, CONFIRM_BODY_MAX)}\n${t(m.bodyCut, { n: CONFIRM_BODY_MAX.toLocaleString() })}` : body;
+  return (
+    <div className="recent-check scratch-confirm" role="alertdialog" aria-modal="true" aria-label={t(m.confirmLabel)} onClick={(e) => e.target === e.currentTarget && answer(false)}>
+      <div className="recent-check-box">
+        <p>{t(m.confirmText, { title: props.title })}</p>
+        <pre className="scratch-confirm-req">{`${req.method} ${req.path}${shown ? `\n\n${shown}` : ""}`}</pre>
+        <div className="scratch-confirm-actions">
+          <button autoFocus onClick={() => answer(false)}>
+            {t(m.cancel)}
+          </button>
+          <button disabled={!armed} onClick={() => answer(true)}>
+            {t(m.run)}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

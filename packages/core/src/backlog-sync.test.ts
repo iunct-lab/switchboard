@@ -355,6 +355,27 @@ test("the pull requests an open PBI waits for are stored with their state", asyn
   expect(stored()["pull-request:PR_40"]).toEqual({ state: "fetched", remote: { number: 40, state: "MERGED", isDraft: false, labels: ["x"], closes: [12, 13], mergeCommit: null, updatedAt: expect.any(String), files: [], closedAt: null, mergedAt: null } });
 });
 
+test("stop waits are rechecked: a pull request a Task's depends stop waits for is asked by number and stored (#2045)", async () => {
+  const at = Date.now();
+  const task = (id: string, workspaceId: string) => db.insertTask({ id, workspaceId, title: id, runner: "claude", cwd: dir, scope: [dir], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: at, createdAt: at, updatedAt: at });
+  const stopOn = (taskId: string, workspaceId: string, key: string) => db.appendEvent(taskId, { t: "stop.record", stop: { id: `${taskId}/overlap`, work: { workspaceId, issue: null, taskId }, op: "overlap", target: "", reason: "depends", evidence: "", safety: "unknown", conditions: [{ key, value: "open", met: false }], answer: null, actions: [], state: "waiting", at } });
+  task("t_app", WS.id);
+  stopOn("t_app", WS.id, "pr#40");
+  task("t_other", "ws_other"); // another workspace's stop is that workspace's import's
+  stopOn("t_other", "ws_other", "pr#41");
+  const { gh, calls } = fakeGh({
+    changed: () => pageOf([raw(12)]),
+    open: () => pageOf([{ number: 12, projectItems: { totalCount: 1, nodes: [item(12, "Ready")] } }]),
+    recheck: (numbers) => {
+      expect(numbers).toEqual([40]);
+      return { body: { data: { repository: { w40: { __typename: "PullRequest", id: "PR_40", number: 40, state: "MERGED", isDraft: false, updatedAt: "2026-10-01T00:00:00Z", files: { totalCount: 0, nodes: [] }, body: "", headRefName: "sb/9-x", labels: { totalCount: 0, nodes: [] } } } } } };
+    },
+  });
+  await importGithubSnapshot(gh, db, WS, at);
+  expect(calls).toEqual(["changed", "open", "pulls", "recheck"]);
+  expect((stored()["pull-request:PR_40"]?.remote as { state: string }).state).toBe("MERGED");
+});
+
 test("a wait on a closed Issue is answered by what is stored; a pull request whose labels were cut fails the import", async () => {
   const release = { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ id: "C_r", body: "<!-- pbi-complete:release waits=13,40 -->", createdAt: "2026-10-02T00:00:00Z" }] };
   const asked: number[][] = [];
@@ -443,6 +464,23 @@ test("BacklogSync: imports at once share one; a read asks nothing and says one i
   now += 60_000;
   await sync.sync(ws);
   expect(sync.read(ws)).toMatchObject({ error: null, fetchedAt: now });
+});
+
+test("BacklogSync.onImported: after an import that stored a change; with every, after each one that stored, changed or not (#2045)", async () => {
+  const ws = db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
+  const { gh } = fakeGh({ changed: () => pageOf([raw(12)]), open: () => pageOf([]) });
+  const sync = makeSync(db, gh, () => 1000);
+  const changed: string[] = [];
+  const every: string[] = [];
+  sync.onImported((id) => changed.push(id));
+  const off = sync.onImported((id) => every.push(id), { every: true });
+  await sync.sync(ws);
+  expect([changed, every]).toEqual([[WS.id], [WS.id]]);
+  await sync.sync(ws, undefined, { full: true }); // the same answers: nothing changed
+  expect([changed, every]).toEqual([[WS.id], [WS.id, WS.id]]);
+  off();
+  await sync.sync(ws, undefined, { full: true });
+  expect(every).toHaveLength(2);
 });
 
 test("BacklogSync: after a limit GitHub is not asked until its time, by a new daemon too (the stored retryAt)", async () => {

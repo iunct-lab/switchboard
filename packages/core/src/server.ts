@@ -36,6 +36,7 @@ import { isAuthText, LOGIN_FORCED_RECHECK_MS, LOGIN_RECHECK_MS } from "./login.t
 import { fallbackNote, fallbackRunner, fmtTime, RateLimitResumer } from "./ratelimit.ts";
 import { type BacklogNextResult, Scheduler } from "./scheduler.ts";
 import { BacklogSync, noticeTargets, type StoredBacklog } from "./backlog-sync.ts";
+import { resumeDepends } from "./depends-resume.ts";
 import { scanAllRepos } from "./secretscan.ts";
 import { setupScripts } from "./skillsync.ts";
 import { listProcesses, loadProcess } from "./process-defs.ts";
@@ -50,7 +51,7 @@ import { enableGithubSync, enablingOf } from "./backlog-enable.ts";
 import { RUNNER_CONFIG_PATHS, runnerConfigOf } from "./runner-config.ts";
 import { CloneError, parseGithubRepo, registerWorkspace, unusableWorkspaces, WorkspaceClones } from "./workspace-clone.ts";
 import { copyDeletable, inspectRemoval } from "./workspace-remove.ts";
-import { ACTION_FOR_STAGE, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, buildStartPrompt, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionNote, promotionStep, type PromotionHold, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, type GhRunner, type OtherRepo } from "./backlog.ts";
+import { ACTION_FOR_STAGE, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, buildDirectPrompt, buildStartPrompt, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionNote, promotionStep, type PromotionHold, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, type GhRunner, type OtherRepo } from "./backlog.ts";
 import { issueOf, reduceStops, stopRecordsFor } from "./stops.ts";
 import { approvalBatches, approvalWindowNote, BatchAnswers } from "./approval-batch.ts";
 import { ASK_HISTORY_MS, ON_HOLD_RESUME, asksFromBacklog, closedHits, asksFromTasks, blockersOf, dedupeAsks, noticeAsks, policyPbi, rankAsks, prFacts, resumeOfTask, type NoticeRecord, type PolicyEnv, type PrFacts } from "./asks.ts";
@@ -732,12 +733,14 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       const answer = source ? screenAnswer(db, source, item.number) : null;
       // the stage runs under the pipeline candidate (docs/design/process-kernel.md, K4); its definition is the meta checkout's, like the skills, not the running release's.
       // A checkout without it (behind, or mid-edit) answers like any other reason a stage cannot start, so a button gets its 409 and a sweep skips the item
+      // 直行で直す (#3690) runs under the direct candidate, the stages under the pipeline
       let def;
       try {
-        def = loadProcess("p0-pipeline", input.meta.path);
+        def = loadProcess(action === "direct" ? "p1-direct" : "p0-pipeline", input.meta.path);
       } catch (e) {
         return { error: `候補の定義を読めません: ${(e as Error).message ?? e}`, status: 409 };
       }
+      if (action === "direct") return await startMetaTask({ kind: action, ws, title: startTitle(item, action), stage: { issue: item.number, action }, prompt: buildDirectPrompt(item, { local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path), answer }, def), process: def.id, processReason: "direct button", ...input.extra });
       return await startMetaTask({ kind: action, ws, title: startTitle(item, action), stage: { issue: item.number, action }, prompt: buildStartPrompt(item, action, { other, resume: input.resume, local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path), answer }, def), process: def.id, processReason: `backlog stage ${action}`, ...input.extra });
     } finally {
       startingStage.delete(key);
@@ -1321,7 +1324,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     // The usage that counts is the one of the runner each stage Task starts on (#834): its kind's as startMetaTask decides
     // it (the kind's own, else the schedule's), after 上限のときの代わり; read once per firing.
     const schedule = db.getSchedule(scheduleId);
-    const targetOf = Object.fromEntries(BacklogAction.options.map((a) => [a, ((d) => (d ? autoRunner(d).runner : null))(decidedRunner(a, schedule?.runner))])) as Record<BacklogAction, RunnerId | null>;
+    // the actions backlog-next may start: 直行で直す (#3690) is the person's button only
+    const sweepActions = BacklogAction.options.filter((a) => a !== "direct");
+    const targetOf = Object.fromEntries(sweepActions.map((a) => [a, ((d) => (d ? autoRunner(d).runner : null))(decidedRunner(a, schedule?.runner))])) as Record<BacklogAction, RunnerId | null>;
     // Only a window that has not reset yet counts: a row from before the reset would otherwise hold the sweep for good,
     // since only a turn of that runner writes a new one (resetsAt is in seconds).
     const limit = settings().quotaAndResume.backlogQuotaLimit;
@@ -1341,8 +1346,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const quotaHeld = (a: BacklogAction) => fullOf(targetOf[a]) || (usageOf(targetOf[a]) && (started.length > 0 || stageTasks().length + startingStage.size > 0) ? usageOf(targetOf[a]) : "");
     const lines = (xs: string[]) => [...new Set(xs.filter(Boolean))];
     // nothing could start: GitHub is not read
-    if (BacklogAction.options.every(quotaHeld)) return { started, skipped: lines(BacklogAction.options.map((a) => fullOf(targetOf[a]) || `${usageOf(targetOf[a])}: 工程 Task が動いているので始めない`)) };
-    skipped.push(...lines(BacklogAction.options.map((a) => fullOf(targetOf[a]))), ...lines(BacklogAction.options.map((a) => (fullOf(targetOf[a]) ? "" : usageOf(targetOf[a])))).map((u) => `${u}: 全体で 1 件まで`));
+    if (sweepActions.every(quotaHeld)) return { started, skipped: lines(sweepActions.map((a) => fullOf(targetOf[a]) || `${usageOf(targetOf[a])}: 工程 Task が動いているので始めない`)) };
+    skipped.push(...lines(sweepActions.map((a) => fullOf(targetOf[a]))), ...lines(sweepActions.map((a) => (fullOf(targetOf[a]) ? "" : usageOf(targetOf[a])))).map((u) => `${u}: 全体で 1 件まで`));
     // a saved policy answers the decisions it matches before the next one is picked (#938)
     await applyPolicies();
     const SLOTS: Slot[] = only ? ["implement"] : ["implement", "plan"];
@@ -1376,7 +1381,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             if (ws.sweep[slot] > 0 && n === 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}が埋まっている: ${running.join(" / ")}`);
             break;
           }
-          const slotHeld = BacklogAction.options.filter((a) => SLOT_OF_ACTION[a] === slot).map(quotaHeld);
+          const slotHeld = sweepActions.filter((a) => SLOT_OF_ACTION[a] === slot).map(quotaHeld);
           if (slotHeld.every(Boolean)) {
             if (n === 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: ${lines(slotHeld).join(" / ")}`);
             break;
@@ -1497,6 +1502,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     if (numbers.length) await scheduler.runUnblocked(schedule.id, ws.id, numbers);
   };
   if (!cfg.candidate) backlog.onImported((wsId) => void resumeUnblocked(wsId).catch((e) => console.error(`[backlog] resume after the import of ${wsId}: ${String((e as Error)?.message ?? e)}`)));
+  // a Task started by hand that stopped on other work (its depends stop's pr#N / issue#N) goes on once that closed (#2045);
+  // after every import, so a wait already closed when the stop came, or a turn that could not be sent, is tried again
+  if (!cfg.candidate) backlog.onImported((wsId) => void resumeDepends({ db, tasks, workspaceId: wsId, now: Date.now() }).catch((e) => console.error(`[backlog] depends resume after the import of ${wsId}: ${String((e as Error)?.message ?? e)}`)), { every: true });
   if (!cfg.candidate) {
     scheduler.start();
     // the stored backlog is brought up to date at boot (#885); reading it does not wait for this
@@ -2932,7 +2940,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           // 閉じる (#523) goes with closable, not with a stage; complete on an in-progress item is backlog-next's resume
           // of a stalled one (#578), started from a waiting row's 続きを始める (#1045)
           const resume = action === "complete" && item.stage === "in-progress";
-          if (action === "close" ? !item.closable : !(ACTION_FOR_STAGE[item.stage] === action || resume)) return bad(`#${n} は ${item.stage}${action === "close" ? "（閉じられない）" : ""} なので ${action} は始められません`, 409);
+          // 直行で直す (#3690) only from a request with no PBI yet, like PBI にする; it is not a stage, so backlog-next never picks it
+          if (action === "direct" && item.stage !== "request") return bad(`直行で始められるのは派生 PBI の無い要望だけです（#${n} は ${item.stage}）`, 409);
+          // another repository's worktree and branch rules are its own (the PBI's scope: the meta workspace first)
+          if (action === "direct" && ws.kind !== "meta") return bad("直行で始められるのは meta workspace の要望だけです", 409);
+          if (action !== "direct" && (action === "close" ? !item.closable : !(ACTION_FOR_STAGE[item.stage] === action || resume))) return bad(`#${n} は ${item.stage}${action === "close" ? "（閉じられない）" : ""} なので ${action} は始められません`, 409);
           const r = await startStage({ ws, meta: meta!, item, action, resume: resume ? { tasksDone: item.tasks?.done ?? 0 } : undefined });
           if ("active" in r) return json({ error: `#${n} の工程 Task が実行中です`, taskId: r.active.id }, 409);
           if ("starting" in r) return json({ error: `#${n} の工程 Task を開始しているところです`, taskId: null }, 409);

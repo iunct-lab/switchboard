@@ -61,6 +61,17 @@ If a later version stops honouring the override, the runner's option on Home say
 
 Reasoning items (`reasoning`) carry no text in these recordings and map to `status: thinking`.
 
+## Subagent threads
+
+Codex runs a subagent as its own thread (`Thread.parentThreadId` is the main thread) and sends that thread's `turn/started`, `turn/completed`, `thread/status/changed`, `item/*`, `thread/tokenUsage/updated` and approval requests on the same stdio. Every one of them carries its `threadId`. Recorded 2026-11-05 on codex-cli 0.166.0 (`subagent-0.166.0.jsonl`): the subagent's thread sends no `thread/started`, and its `turn/completed` arrives while the main turn is still running. The main thread shows the spawn and the wait as `subAgentActivity` and `collabAgentToolCall` items, which the adapter ignores.
+
+Only the main thread (the one without `parentThreadId`) decides the turn state and `session.end`:
+
+- The main thread is the one from the `thread/start` / `thread/resume` result. A `thread/started` with `parentThreadId` (if a version sends one) does not change it, and `turn/started`, `turn/completed` and `thread/status/changed` from a subagent do not touch the active turn. Steering and `turn/interrupt` therefore always name the main turn, and `session.end` comes only from the main turn.
+- The agent text of a subagent is shown as before but is never the `session.end` summary.
+- Usage is kept per thread: a subagent's `thread/tokenUsage/updated` is `usage(turn)`, and its `turn/completed` gives one `usage(reported)` for that thread's sum. A subagent with usage not yet reported when the main turn completes (an interrupt cuts it off without its own `turn/completed`) is reported at that point.
+- Approval requests from a subagent are `permission.ask` like any other; the answer goes back by the JSON-RPC id, so it reaches the subagent.
+
 ## Client → server answers
 
 - Approve: `{"jsonrpc":"2.0","id":<request id>,"result":{"decision":"accept"}}`; deny: `"decline"` (turn continues; the agent sees a declined exec) or `"cancel"` (turn interrupted). Switchboard uses accept / decline.

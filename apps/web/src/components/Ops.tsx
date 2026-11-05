@@ -4,6 +4,8 @@ import { api } from "../api.ts";
 import { fmtBytes, latencyRows, loadDays, reasonLabel, stopsTable, topGroups, type StopsDay } from "../ops.ts";
 import { perfRows, type PerfRow } from "../perf.ts";
 import { fmtClock } from "./ui.tsx";
+import { t } from "../i18n.ts";
+import { insights as m } from "../i18n/insights.ts";
 
 /**
  * 運用 (#2085): the host's own numbers, apart from the per-Task evaluations. デーモンの停止 = how often the daemon
@@ -82,34 +84,34 @@ export function Ops(props: { onOpenTask: (id: string) => void }) {
     );
   return (
     <section className="card ops" data-ops>
-      <h5>運用</h5>
+      <h5>{t(m.opsHeading)}</h5>
       <div className="row head">
-        <h5>デーモンの停止</h5>
+        <h5>{t(m.daemonStops)}</h5>
         <nav className="subtabs">
           {([7, 30] as const).map((d) => (
             <button key={d} className={days === d ? "on" : ""} data-days={d} onClick={() => setDays(d)}>
-              {d} 日
+              {t(m.days, { n: d })}
             </button>
           ))}
         </nav>
       </div>
-      {failure && <div className="muted" data-ops-error>停止の記録を読めませんでした: {failure}</div>}
+      {failure && <div className="muted" data-ops-error>{t(m.stopsFailed, { error: failure })}</div>}
       {stops?.running && (
         <div className="hint" data-ops-running>
-          いまの起動: {fmtClock(stops.running.startedAt)}
-          {stops.running.version ? `（${stops.running.version}）` : ""}
+          {t(m.runningSince, { time: fmtClock(stops.running.startedAt) })}
+          {stops.running.version ? t(m.paren, { text: stops.running.version }) : ""}
         </div>
       )}
-      {table && table.days.length === 0 && <div className="muted">この期間の停止はありません</div>}
+      {table && table.days.length === 0 && <div className="muted">{t(m.noStops)}</div>}
       {table && table.days.length > 0 && (
         <table className="pricing ops-stops-table">
           <thead>
             <tr>
-              <th>日</th>
+              <th>{t(m.day)}</th>
               {table.reasons.map((r) => (
                 <th key={r}>{reasonLabel[r]}</th>
               ))}
-              <th>中断ターン</th>
+              <th>{t(m.cutTurns)}</th>
               <th>Task</th>
             </tr>
           </thead>
@@ -129,18 +131,18 @@ export function Ops(props: { onOpenTask: (id: string) => void }) {
           </tbody>
         </table>
       )}
-      <h5>ホストの負荷</h5>
-      {loadFailure && <div className="muted" data-ops-load-error>負荷の記録を読めませんでした: {loadFailure}</div>}
-      {load && !load.available && <div className="muted" data-ops-load-unavailable>この環境では測れません（cgroup と /proc が読めない環境）</div>}
-      {load?.available && load.hours.length === 0 && load.groups.length === 0 && <div className="muted">この期間の記録はありません</div>}
+      <h5>{t(m.hostLoad)}</h5>
+      {loadFailure && <div className="muted" data-ops-load-error>{t(m.loadFailed, { error: loadFailure })}</div>}
+      {load && !load.available && <div className="muted" data-ops-load-unavailable>{t(m.loadUnavailable)}</div>}
+      {load?.available && load.hours.length === 0 && load.groups.length === 0 && <div className="muted">{t(m.noRecords)}</div>}
       {load?.available && load.hours.length > 0 && (
         <table className="pricing ops-load-days">
           <thead>
             <tr>
-              <th>日</th>
-              <th>最大メモリ</th>
-              <th>上限到達</th>
-              <th>最大スワップ</th>
+              <th>{t(m.day)}</th>
+              <th>{t(m.peakMemory)}</th>
+              <th>{t(m.limitHits)}</th>
+              <th>{t(m.peakSwap)}</th>
             </tr>
           </thead>
           <tbody>
@@ -149,7 +151,7 @@ export function Ops(props: { onOpenTask: (id: string) => void }) {
                 <td>{d.day}</td>
                 <td className="num">
                   {fmtBytes(d.maxMem)}
-                  {d.ratio !== null ? `（${Math.round(d.ratio * 100)}%）` : ""}
+                  {d.ratio !== null ? t(m.percentParen, { pct: Math.round(d.ratio * 100) }) : ""}
                 </td>
                 <td className="num">{d.limitHits}</td>
                 <td className="num">{fmtBytes(d.maxSwap)}</td>
@@ -162,9 +164,9 @@ export function Ops(props: { onOpenTask: (id: string) => void }) {
         <table className="pricing ops-load-top">
           <thead>
             <tr>
-              <th>負荷を上げたもの</th>
-              <th>最大 RSS</th>
-              <th>CPU 時間</th>
+              <th>{t(m.heaviest)}</th>
+              <th>{t(m.peakRss)}</th>
+              <th>{t(m.cpuTime)}</th>
             </tr>
           </thead>
           <tbody>
@@ -180,28 +182,28 @@ export function Ops(props: { onOpenTask: (id: string) => void }) {
                   )}
                 </td>
                 <td className="num">{fmtBytes(g.maxRss)}</td>
-                <td className="num">{Math.round(g.cpuMs / 1000)} 秒</td>
+                <td className="num">{t(m.seconds, { n: Math.round(g.cpuMs / 1000) })}</td>
               </tr>
             ))}
           </tbody>
         </table>
       )}
       <div className="row head">
-        <h5>速さ</h5>
-        <span className="hint">直近 7 日 vs その前の 7 日。中央値が 20% 以上遅いと赤</span>
+        <h5>{t(m.speed)}</h5>
+        <span className="hint">{t(m.speedHint)}</span>
       </div>
-      {perfFailure && <div className="muted" data-ops-perf-error>速さの記録を読めませんでした: {perfFailure}</div>}
-      {perf && perf.length === 0 && <div className="muted">この期間の記録はありません</div>}
+      {perfFailure && <div className="muted" data-ops-perf-error>{t(m.speedFailed, { error: perfFailure })}</div>}
+      {perf && perf.length === 0 && <div className="muted">{t(m.noRecords)}</div>}
       {perf && perf.length > 0 && (
         <table className="pricing perf" data-ops-perf>
           <thead>
             <tr>
-              <th>ジャーニー</th>
-              <th>端末</th>
-              <th>大きさ</th>
-              <th>直近 7 日（中央値 / p90）</th>
-              <th>その前の 7 日</th>
-              <th>変化</th>
+              <th>{t(m.journey)}</th>
+              <th>{t(m.device)}</th>
+              <th>{t(m.size)}</th>
+              <th>{t(m.last7)}</th>
+              <th>{t(m.prev7)}</th>
+              <th>{t(m.change)}</th>
             </tr>
           </thead>
           <tbody>
@@ -219,21 +221,21 @@ export function Ops(props: { onOpenTask: (id: string) => void }) {
         </table>
       )}
       <div className="row head">
-        <h5>API の所要時間</h5>
-        <span className="hint">p90 の遅い順に 10 件。記録は 7 日分まで。route を開くと日ごと</span>
+        <h5>{t(m.apiTimes)}</h5>
+        <span className="hint">{t(m.apiTimesHint)}</span>
       </div>
-      {latencyFailure && <div className="muted" data-ops-latency-error>API の所要時間を読めませんでした: {latencyFailure}</div>}
-      {latency && latency.total.length === 0 && <div className="muted">この期間の記録はありません</div>}
+      {latencyFailure && <div className="muted" data-ops-latency-error>{t(m.apiTimesFailed, { error: latencyFailure })}</div>}
+      {latency && latency.total.length === 0 && <div className="muted">{t(m.noRecords)}</div>}
       {latency && latency.total.length > 0 && (
         <table className="pricing ops-latency" data-ops-latency>
           <thead>
             <tr>
-              <th>メソッド</th>
-              <th>経路</th>
-              <th>件数</th>
-              <th>中央値</th>
+              <th>{t(m.method)}</th>
+              <th>{t(m.route)}</th>
+              <th>{t(m.count)}</th>
+              <th>{t(m.median)}</th>
               <th>p90</th>
-              <th>バイト（中央値）</th>
+              <th>{t(m.bytesMedian)}</th>
             </tr>
           </thead>
           <tbody>
@@ -245,7 +247,7 @@ export function Ops(props: { onOpenTask: (id: string) => void }) {
                     <summary>{r.route}</summary>
                     {r.days.map((d) => (
                       <div key={d.day} className="hint" data-ops-latency-day={d.day}>
-                        {d.day}: {d.p50} / {d.p90}（{d.count} 件）
+                        {t(m.latencyDay, { day: d.day, p50: d.p50, p90: d.p90, count: d.count })}
                       </div>
                     ))}
                   </details>
@@ -259,7 +261,7 @@ export function Ops(props: { onOpenTask: (id: string) => void }) {
           </tbody>
         </table>
       )}
-      <div className="hint">記録はこのデーモンの DB にだけあり（速さは 30 日、API は 7 日）、外には送りません。</div>
+      <div className="hint">{t(m.opsFooter)}</div>
     </section>
   );
 }

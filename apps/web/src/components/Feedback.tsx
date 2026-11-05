@@ -3,6 +3,19 @@ import type { Task, Workspace } from "@switchboard/protocol";
 import { api, type FeedbackSource } from "../api.ts";
 import { feedbackTargets, type FeedbackTarget } from "../feedbackTarget.ts";
 import { AttachButton, AttachmentBar, useAttachments, useDropZone } from "./Attachments.tsx";
+import { t } from "../i18n.ts";
+import { feedbackScreens, panels as m } from "../i18n/panels.ts";
+
+/**
+ * The screen's name as the dialog shows it: the name sent (`screenLabel`, which goes into the Task's prompt as it is) read in
+ * the screen's language. A tab's name is shown as sent; a Task's line (`Task「title」(id)`) keeps its title and id, with the
+ * language's quotes.
+ */
+export function shownScreen(screen: string): string {
+  const task = /^Task「(.*)」\((.+)\)$/s.exec(screen);
+  if (task) return t(m.sentFromTask, { title: task[1]!, id: task[2]! });
+  return Object.hasOwn(feedbackScreens, screen) ? t(feedbackScreens[screen as keyof typeof feedbackScreens]) : screen;
+}
 
 async function captureTab(): Promise<File> {
   if (!navigator.mediaDevices?.getDisplayMedia) throw new Error("Screen capture unavailable");
@@ -97,7 +110,7 @@ export function FeedbackDialog({ open, screen, workspaces, workspace, prefill, o
       for (let i = 0; i < 2; i++) await new Promise(requestAnimationFrame);
       await attach.add([await captureTab()]);
     }
-    catch { setMessage("画面を撮れませんでした。貼り付けかドロップで添付してください"); }
+    catch { setMessage(t(m.captureFailed)); }
     finally {
       if (isOpen.current && !dialog.current?.open) dialog.current?.showModal();
       setCapturing(false);
@@ -128,15 +141,15 @@ export function FeedbackDialog({ open, screen, workspaces, workspace, prefill, o
   return (
     <dialog ref={dialog} className="feedback-dialog" aria-labelledby="feedback-title" onCancel={(e) => { e.preventDefault(); if (!locked) onClose(); }}>
       <form onSubmit={submit}>
-        <h2 id="feedback-title">フィードバック</h2>
+        <h2 id="feedback-title">{t(m.feedback)}</h2>
         <fieldset disabled={locked} className="row feedback-mode">
-          <legend className="hint">送り方</legend>
-          <label><input type="radio" name="feedback-mode" value="request" checked={mode === "request"} onChange={() => setMode("request")} /> 要望として登録</label>
-          <label><input type="radio" name="feedback-mode" value="fix" checked={mode === "fix"} onChange={() => setMode("fix")} /> すぐ直す</label>
+          <legend className="hint">{t(m.sendHow)}</legend>
+          <label><input type="radio" name="feedback-mode" value="request" checked={mode === "request"} onChange={() => setMode("request")} /> {t(m.modeRequest)}</label>
+          <label><input type="radio" name="feedback-mode" value="fix" checked={mode === "fix"} onChange={() => setMode("fix")} /> {t(m.modeFix)}</label>
         </fieldset>
         {mode === "request" && targets.list.length > 1 && (
           <fieldset disabled={locked} className="row feedback-target">
-            <label htmlFor="feedback-workspace">登録先</label>
+            <label htmlFor="feedback-workspace">{t(m.fileTo)}</label>
             <select id="feedback-workspace" value={shown} onChange={(e) => setTarget(e.target.value)}>
               {targets.list.map((w) => (
                 <option key={w.id} value={w.id}>{w.name}</option>
@@ -144,23 +157,23 @@ export function FeedbackDialog({ open, screen, workspaces, workspace, prefill, o
             </select>
           </fieldset>
         )}
-        <p className="hint">{mode === "fix" ? "Switchboard を直す Task をすぐ始めます（要望 Issue は作りません）。" : `要望や不具合を送ると、${targets.list.find((w) => w.id === shown)?.name ?? "登録先"} のリポジトリに要望 Issue と PBI・Task が作られます。`}</p>
-        <p className="hint feedback-screen">送信元: {screen}</p>
+        <p className="hint">{mode === "fix" ? t(m.fixHint) : t(m.requestHint, { target: targets.list.find((w) => w.id === shown)?.name ?? t(m.targetFallback) })}</p>
+        <p className="hint feedback-screen">{t(m.sentFrom, { screen: shownScreen(screen) })}</p>
         <fieldset disabled={locked} className={`dropzone ${drop.dropping ? "dropping" : ""}`} {...(!locked ? drop.handlers : {})}>
-          <label htmlFor="feedback-text">本文（必須）</label>
-          <textarea ref={textarea} id="feedback-text" rows={7} required maxLength={20_000} value={text} onChange={(e) => setText(e.target.value)} onPaste={drop.onPaste} placeholder="気づいたこと、できるようにしたいこと" />
+          <label htmlFor="feedback-text">{t(m.bodyLabel)}</label>
+          <textarea ref={textarea} id="feedback-text" rows={7} required maxLength={20_000} value={text} onChange={(e) => setText(e.target.value)} onPaste={drop.onPaste} placeholder={t(m.bodyPlaceholder)} />
           <div className="row">
-            <button type="button" onClick={capture}>画面を撮る</button>
+            <button type="button" onClick={capture}>{t(m.capture)}</button>
             <AttachButton onFiles={attach.add} />
-            <span className="hint">画像は貼り付け・ドロップもできます</span>
+            <span className="hint">{t(m.pasteHint)}</span>
           </div>
           <AttachmentBar items={attach.items} onRemove={attach.remove} busy={attach.busy} />
         </fieldset>
-        {capturing && <p role="status">画面を撮っています…</p>}
+        {capturing && <p role="status">{t(m.capturing)}</p>}
         {message && <p className="error" role="alert">{message}</p>}
         <div className="feedback-actions">
-          <button type="button" className="ghost" disabled={locked} onClick={onClose}>閉じる</button>
-          <button type="submit" className="pri" disabled={!text.trim() || attach.busy || locked}>{sending ? "送信中…" : mode === "fix" ? "直す" : "登録"}</button>
+          <button type="button" className="ghost" disabled={locked} onClick={onClose}>{t(m.close)}</button>
+          <button type="submit" className="pri" disabled={!text.trim() || attach.busy || locked}>{sending ? t(m.sending) : mode === "fix" ? t(m.fix) : t(m.file)}</button>
         </div>
       </form>
     </dialog>

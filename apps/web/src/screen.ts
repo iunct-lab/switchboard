@@ -14,7 +14,9 @@ export function screenLabel(view: View, task?: Task): string {
   if (view.name === "task") {
     if (!task) return `Task (${view.id})`;
     const title = task.title.replace(/\s+/g, " ").trim();
+    // sent to the daemon (the request's 出典); the dialog shows it through `shownScreen`
     return `Task「${title.length > TITLE_MAX ? `${title.slice(0, TITLE_MAX)}…` : title}」(${task.id})`;
   }
+  // ui-strings: value "判断待ち" — sent to the daemon; the dialog shows 判断待ち through `shownScreen`
   return { home: "Home", knowledge: "Knowledge", ledger: "Ledger", evals: "Insights", schedules: "Schedules", backlog: "Backlog", resources: "Resources", approvals: "判断待ち", settings: "Settings" }[view.name];
 }

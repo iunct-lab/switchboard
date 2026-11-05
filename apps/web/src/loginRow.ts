@@ -1,4 +1,6 @@
 import type { RunnerInfo } from "@switchboard/protocol";
+import { t } from "./i18n.ts";
+import { common } from "./i18n/common.ts";
 
 /**
  * What the settings row of a runner's own login shows (#2528): the kind while logged in, with the logout button;
@@ -8,12 +10,12 @@ import type { RunnerInfo } from "@switchboard/protocol";
  */
 export function loginRowView(r: Pick<RunnerInfo, "id" | "login" | "loginKind">): { text: string; logout: boolean; bedrock?: true } | null {
   // chosen in the settings (#1730): always shown, with neither login nor logout (the runner's own login is not in use)
-  if (r.loginKind === "bedrock") return { text: "使用中: サードパーティのプラットフォーム（Amazon Bedrock）", logout: false, bedrock: true };
+  if (r.loginKind === "bedrock") return { text: t(common.loginBedrock), logout: false, bedrock: true };
   if (r.id !== "claude") return null;
   if (r.login === "ok") {
-    const kind = r.loginKind === "claude.ai" ? ": Claude アカウント" : r.loginKind === "console" ? ": Anthropic Console" : "";
-    return { text: `ログイン中${kind}`, logout: true };
+    const kind = r.loginKind === "claude.ai" ? t(common.loginClaudeAccount) : r.loginKind === "console" ? ": Anthropic Console" : "";
+    return { text: t(common.loggedIn, { kind }), logout: true };
   }
-  if (r.login === "expired") return { text: "ログアウト中", logout: false };
+  if (r.login === "expired") return { text: t(common.loggedOut), logout: false };
   return null;
 }

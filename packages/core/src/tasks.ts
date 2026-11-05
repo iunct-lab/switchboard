@@ -811,9 +811,12 @@ export class TaskManager {
    * fails (a budget the user put on the shadow, a runner that will not resume) is noted on both transcripts, since
    * the person is looking at the primary; it is never raised here. `mirror: false` (the resumer's 今すぐ再開) and
    * `asResume` turns (#102: the daemon continuing this task after its own runner's limit lifted) are not copied —
-   * the shadow's runner was not stopped by that.
+   * the shadow's runner was not stopped by that. `daemon` (#2045: the daemon continuing a task whose waits closed) is
+   * the daemon's own turn with no plan behind it: it is not copied, answers no stop, clears no planned resume, and is
+   * refused (ResumeSupersededError) while the task runs, waits or has a resume planned, or when 中断 or a reply came
+   * while it waited for the runner's process to close.
    */
-  async send(taskId: string, text: string, opts: { asResume?: boolean; mirror?: boolean; attachmentIds?: string[] } = {}): Promise<Task> {
+  async send(taskId: string, text: string, opts: { asResume?: boolean; daemon?: boolean; mirror?: boolean; attachmentIds?: string[] } = {}): Promise<Task> {
     // Everything that can refuse the turn (unknown task, a superseded resume, the budget) runs before any file moves:
     // a refused turn leaves the uploads in the inbox, reusable. Attachments (#125) are taken once, by the primary;
     // the shadow reads the same files (its scope is widened to them).
@@ -824,11 +827,11 @@ export class TaskManager {
     const before = this.db.nextSeq(taskId);
     const task = await this.dispatch(taskId, text, atts);
     // The person's turn answers the task's open stops (#948), by its user message (none echoed = nothing recorded).
-    if (!opts.asResume) {
+    if (!opts.asResume && !opts.daemon) {
       const said = this.db.listEvents(taskId, before - 1).find((e) => e.ev.t === "message.delta" && e.ev.role === "user");
       if (said) this.moveOpenStops(taskId, (s) => ({ ...s, answer: { ref: `seq:${said.seq}`, at: said.ts } }));
     }
-    const shadow = opts.asResume || opts.mirror === false ? null : this.db.shadowTaskOf(taskId);
+    const shadow = opts.asResume || opts.daemon || opts.mirror === false ? null : this.db.shadowTaskOf(taskId);
     if (shadow && !shadow.shadowStopped) {
       if (shadow.status === "waiting") {
         this.record(shadow.id, { t: "status", text: "並走元への返信は写しませんでした: この Task は承認待ちです。答えたあと、必要なら同じ文面をここに直接送ってください" });
@@ -857,21 +860,34 @@ export class TaskManager {
   }
 
   /** The checks that can refuse a turn, before anything is moved or recorded. Throws; returns the task as it stands. */
-  private async preflight(taskId: string, opts: { asResume?: boolean }): Promise<Task> {
+  private async preflight(taskId: string, opts: { asResume?: boolean; daemon?: boolean }): Promise<Task> {
     let task = this.mustGet(taskId);
     this.requireLocal(task);
     this.beforeResume?.(task);
-    if (!opts.asResume) {
+    if (!opts.asResume && !opts.daemon) {
       if (task.resumeAt !== null) task = this.setResumeAt(taskId, null);
       else for (const l of this.planForgottenListeners) l(taskId);
     }
-    await this.closing.get(taskId);
+    // a daemon turn has no plan for 中断 or a reply to clear: while it waits here, either one forgets "the plan"
+    // (both call the plan-forgotten listeners), and the turn gives up
+    let moved = false;
+    const off = opts.daemon ? this.onPlanForgotten((id) => void (id === taskId && (moved = true))) : null;
+    try {
+      await this.closing.get(taskId);
+    } finally {
+      off?.();
+    }
     task = this.mustGet(taskId);
+    if (moved) throw new ResumeSupersededError("中断 or a reply came meanwhile");
     this.beforeResume?.(task);
     if (opts.asResume) {
       if (task.resumeAt === null) throw new ResumeSupersededError("the plan was cleared meanwhile");
       if (task.status === "running" || task.status === "waiting") throw new ResumeSupersededError(`the task is ${task.status}`);
       task = this.setResumeAt(taskId, null);
+    }
+    if (opts.daemon) {
+      if (task.resumeAt !== null) throw new ResumeSupersededError("a resume is planned");
+      if (task.status === "running" || task.status === "waiting") throw new ResumeSupersededError(`the task is ${task.status}`);
     }
     if (this.isOverBudget(taskId)) throw new Error(`budget exceeded ($${task.budgetUsd}); raise the budget to continue`);
     return task;

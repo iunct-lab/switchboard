@@ -1,3 +1,4 @@
+// test-reads: apps/web/src/ops.ts apps/web/src/perf.ts apps/web/src/quota.ts apps/web/src/runnerStats.ts apps/web/src/reports.ts apps/web/src/i18n.ts apps/web/src/i18n/insights.ts
 import { describe, expect, test } from "bun:test";
 import type { EvalsListRow, JudgeEval, RuleEval, TaskEvals } from "@switchboard/protocol";
 import type { EvalsSortKey } from "./evals.ts";
@@ -159,5 +160,55 @@ describe("gapLabel (#1877)", () => {
     expect(gapLabel({ count: 2, mean: -2.1 })).toBe("人 − 判定: −2.1（2 件）");
     expect(gapLabel({ count: 1, mean: 0 })).toBe("人 − 判定: 0.0（1 件）");
     expect(gapLabel({ count: 3, mean: 1 })).toBe("人 − 判定: +1.0（3 件）");
+  });
+});
+
+describe("in English (#2449)", () => {
+  // the language is read once when i18n.ts loads: a fresh process with the browser's choice set to en
+  test("the Brief's eval rows, the ledger's and Insights' helpers read in English", () => {
+    const at = (f: string) => JSON.stringify(new URL(f, import.meta.url).pathname);
+    const code = `globalThis.localStorage = { getItem: (k) => (k === "switchboard.lang" ? "en" : null) };
+const { metricRows, fmtDuration, gapLabel, modelsLabel, endLabel } = await import(${at("./evals.ts")});
+const { reasonLabel, stopsTable, taskLoadLine, topGroups } = await import(${at("./ops.ts")});
+const { windowLabel, quotaAsOf } = await import(${at("./quota.ts")});
+const { countLabel, fmtMedianDuration } = await import(${at("./runnerStats.ts")});
+const { kindLabel } = await import(${at("./reports.ts")});
+const rows = metricRows(${JSON.stringify(evals(rules({ stops: 2, stopReasons: { limit: 2 } })))});
+console.log(JSON.stringify([
+  rows.find((r) => r.label === "Stops")?.value,
+  rows.map((r) => r.label).slice(0, 3),
+  fmtDuration(3_725_000),
+  gapLabel({ count: 1, mean: 0.5 }),
+  modelsLabel({ models: ["a", "b"] }),
+  endLabel("aborted"),
+  reasonLabel.promote,
+  stopsTable([]).total.day,
+  taskLoadLine([{ owner: "task", taskId: "t1", kind: "test", maxRss: 1024 ** 3, cpuMs: 0 }]),
+  topGroups([{ owner: "daemon", taskId: null, kind: "build", maxRss: 1, cpuMs: 0 }])[0].label,
+  windowLabel("five_hour"),
+  quotaAsOf(0).startsWith("as of "),
+  countLabel({ thin: true, total: 1 }),
+  fmtMedianDuration(120_000),
+  kindLabel({ kind: "dir", mime: "" }),
+]));`;
+    const r = Bun.spawnSync([process.execPath, "-e", code]);
+    expect(r.stderr.toString()).toBe("");
+    expect(JSON.parse(r.stdout.toString())).toEqual([
+      "2 (limit 2)",
+      ["Tool calls", "Failures", "Errors"],
+      "1 h 2 min",
+      "Person − judge: +0.5 (count: 1)",
+      "a → b (mixed)",
+      "Aborted",
+      "Promotion",
+      "Total",
+      "Peak 1.0 GB (Tests / local CI 1.0 GB)",
+      "Daemon · Promotion build",
+      "5-hour",
+      true,
+      "Too few records to compare (count: 1)",
+      "2 min",
+      "Folder",
+    ]);
   });
 });

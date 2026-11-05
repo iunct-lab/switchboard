@@ -1,4 +1,6 @@
 import type { Artifact } from "@switchboard/protocol";
+import { t } from "./i18n.ts";
+import { panels as m } from "./i18n/panels.ts";
 
 /** How the 成果物 tab shows one: in a sandboxed frame, as an image, as text, or by handing it to the browser. */
 export type ArtifactView = "frame" | "image" | "text" | "external";
@@ -19,7 +21,7 @@ export function isMarkdown(a: Pick<Artifact, "kind" | "mime">): boolean {
 
 /** The tab's name: the count shows once there is something. */
 export function artifactsLabel(n: number): string {
-  return n > 0 ? `成果物（${n}）` : "成果物";
+  return n > 0 ? t(m.artifactsCount, { n }) : t(m.artifacts);
 }
 
 /**

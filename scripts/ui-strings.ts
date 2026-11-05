@@ -18,13 +18,15 @@ export type UiString = {
 };
 
 /** The header's words: the tabs, the rescue entry and the brand. A screen named after a tab uses the same word. */
-export const NAV_EN = ["Switchboard", "Home", "Task", "Knowledge", "Ledger", "Insights", "Backlog", "Schedules", "Settings", "Rescue", "daemon connected", "daemon offline"];
+export const NAV_EN = ["Switchboard", "Home", "Task", "Knowledge", "Ledger", "Insights", "Backlog", "Resources", "Schedules", "Settings", "Rescue", "daemon connected", "daemon offline"];
 
 /** Names kept as they are inside any string: products, runners, external services, protocols and units. Longest first when matched. */
 export const PROPER_NOUNS = [
   "Switchboard", "Claude Code", "Claude", "Codex", "DAK", "GitHub", "GitHub Actions", "Actions", "Project", "Issue", "PR", "Milestone",
   "MCP", "Workspace MCP", "CLI", "API", "URL", "JSON", "SSE", "CDP", "SQLite", "Bun", "AWS", "EC2", "S3", "CloudFront", "SSO",
-  "LLM", "VS Code", "Cursor", "FTS5", "Git", "git", "CPU", "PNG", "HTML", "CSS", "Markdown",
+  "LLM", "VS Code", "Cursor", "FTS5", "Git", "git", "CPU", "RSS", "PNG", "HTML", "CSS", "Markdown",
+  // git's names for a PR's two refs
+  "head", "base",
   // the app's own concepts and units, kept in English by the owner's answer (2026-10-23)
   "Workspace", "Inbox", "Terminal", "Task", "SP", "PBI", "worktree", "main", "OK", "ID", "id", "ms", "KB", "MB", "GB", "JST", "UTC",
 ];
@@ -51,9 +53,22 @@ export function langOf(text: string): UiString["lang"] {
   return ja && en ? "mixed" : ja ? "ja" : en ? "en" : "symbol";
 }
 
+/**
+ * `ui-strings: value "<text>" ["<text>"…] — <why>`: a comment naming strings that look like wording but are values (sent to the
+ * daemon, compared, keys, sample data). It covers the node after it: the statement it leads, or the next JSX child when it is
+ * written `{/* … *\/}`. Only the named texts are exempt, and only there.
+ */
+const VALUE_MARK = /ui-strings: value((?:\s*"[^"]*")+)/;
+export function markedValues(comment: string): string[] {
+  const m = VALUE_MARK.exec(comment);
+  return m ? [...m[1].matchAll(/"([^"]*)"/g)].map((x) => x[1]) : [];
+}
+
 export function judge(s: Pick<UiString, "kind" | "text" | "lang">): Pick<UiString, "verdict" | "reason"> {
   if (s.kind === "nav") return s.lang === "en" || s.lang === "symbol" ? { verdict: "ok", reason: "nav is English" } : { verdict: "violation", reason: "nav must be English words" };
-  if (s.lang !== "en") return { verdict: "ok", reason: s.lang === "symbol" ? "no words" : "Japanese (names may be mixed in)" };
+  // the screens' Japanese lives in the dictionaries (apps/web/src/i18n/) and reaches JSX through t(); written directly it cannot switch
+  if (s.lang === "ja" || s.lang === "mixed") return { verdict: "violation", reason: "untranslated" };
+  if (s.lang === "symbol") return { verdict: "ok", reason: "no words" };
   if (s.kind === "heading" && NAV_EN.includes(s.text)) return { verdict: "ok", reason: "screen named after its tab" };
   if (s.kind === "rail" && RAIL_HEADINGS.includes(s.text)) return { verdict: "ok", reason: "the rail's heading, kept as it is" };
   // a single letter next to a number is a unit or a metric (`3 s`, `12 k`, `p90`); a letter alone follows a `{number}`
@@ -92,7 +107,7 @@ function literalText(n: ts.Node): string | undefined {
 /** A literal compared with ===, used as a key or as an argument of a non-display call is a value, not wording. */
 function isValueUse(n: ts.Node): boolean {
   const p = n.parent;
-  if (ts.isBinaryExpression(p) && [ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsToken].includes(p.operatorToken.kind)) return true;
+  if (ts.isBinaryExpression(p) && [ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsToken, ts.SyntaxKind.InKeyword].includes(p.operatorToken.kind)) return true;
   if (ts.isElementAccessExpression(p) && p.argumentExpression === n) return true;
   if (ts.isCaseClause(p) || ts.isImportDeclaration(p) || ts.isExportDeclaration(p)) return true;
   if (ts.isPropertyAssignment(p)) return p.name === n || !LABEL_KEYS.has(p.name.getText());
@@ -109,45 +124,64 @@ export function collectFile(path: string, root = process.cwd()): UiString[] {
   const src = ts.createSourceFile(path, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true, path.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
   const file = relative(root, path);
   const out: UiString[] = [];
-  const add = (node: ts.Node, kind: UiString["kind"], raw: string) => {
+  const add = (node: ts.Node, kind: UiString["kind"], raw: string, values: ReadonlySet<string>) => {
     const text = raw.replace(/\s+/g, " ").trim();
     if (!text) return;
     const lang = langOf(text);
-    out.push({ file, line: src.getLineAndCharacterOfPosition(node.getStart(src)).line + 1, kind, text, lang, ...judge({ kind, text, lang }) });
+    const verdict = values.has(text) ? { verdict: "ok" as const, reason: "marked as a value" } : judge({ kind, text, lang });
+    out.push({ file, line: src.getLineAndCharacterOfPosition(node.getStart(src)).line + 1, kind, text, lang, ...verdict });
+  };
+  /** `values` with the texts a `ui-strings: value` comment leading `n` names. */
+  const withMarks = (values: ReadonlySet<string>, n: ts.Node, comment?: string): ReadonlySet<string> => {
+    const texts = comment !== undefined ? markedValues(comment) : (ts.getLeadingCommentRanges(src.text, n.getFullStart()) ?? []).flatMap((r) => markedValues(src.text.slice(r.pos, r.end)));
+    return texts.length ? new Set([...values, ...texts]) : values;
   };
 
   // screen.ts: the names the feedback dialog gives each screen. A screen with a tab is named like the tab;
   // approvals has no tab (the rail's 判断待ち opens it) and keeps that name.
   if (path.endsWith("screen.ts")) {
-    const visit = (n: ts.Node, inLabel: boolean): void => {
+    const visit = (n: ts.Node, inLabel: boolean, values: ReadonlySet<string>): void => {
       const here = inLabel || (ts.isFunctionDeclaration(n) && n.name?.text === "screenLabel");
+      const marked = withMarks(values, n);
       if (here && ts.isPropertyAssignment(n)) {
         const t = literalText(n.initializer);
-        if (t !== undefined) add(n.initializer, n.name.getText() === "approvals" ? "literal" : "nav", t);
+        if (t !== undefined) add(n.initializer, n.name.getText() === "approvals" ? "literal" : "nav", t, marked);
         return;
       }
-      ts.forEachChild(n, (c) => visit(c, here));
+      ts.forEachChild(n, (c) => visit(c, here, marked));
     };
-    visit(src, false);
+    visit(src, false, new Set());
     return out;
   }
 
-  type Ctx = { nav: boolean; heading: boolean; rail: boolean; verbatim: boolean; inJsx: boolean };
-  const visit = (n: ts.Node, ctx: Ctx): void => {
+  type Ctx = { nav: boolean; heading: boolean; rail: boolean; verbatim: boolean; inJsx: boolean; values: ReadonlySet<string> };
+  const visit = (n: ts.Node, outer: Ctx): void => {
+    const ctx = { ...outer, values: withMarks(outer.values, n) };
     const tag = tagOf(n);
     if (tag) {
-      const next = { nav: ctx.nav || isChrome(n), heading: HEADINGS.has(tag), rail: hasClass(n, "grp"), verbatim: ctx.verbatim || VERBATIM.has(tag), inJsx: true };
+      const next = { nav: ctx.nav || isChrome(n), heading: HEADINGS.has(tag), rail: hasClass(n, "grp"), verbatim: ctx.verbatim || VERBATIM.has(tag), inJsx: true, values: ctx.values };
       for (const p of attrsOf(n)!.properties) {
         if (!ts.isJsxAttribute(p) || !p.initializer || !ATTRS.has(p.name.getText())) continue;
         const init = p.initializer;
-        if (ts.isStringLiteral(init)) add(init, "attr", init.text);
+        if (ts.isStringLiteral(init)) add(init, "attr", init.text, ctx.values);
         else if (ts.isJsxExpression(init) && init.expression) visit(init.expression, { ...next, nav: false, heading: false, rail: false });
       }
-      if (ts.isJsxElement(n)) for (const c of n.children) visit(c, next);
+      if (ts.isJsxElement(n)) {
+        // a `{/* ui-strings: value … */}` child marks the next non-blank child
+        let mark: string | undefined;
+        for (const c of n.children) {
+          if (ts.isJsxExpression(c) && !c.expression) mark = c.getText(src);
+          else if (ts.isJsxText(c) && c.containsOnlyTriviaWhiteSpaces) continue;
+          else {
+            visit(c, mark === undefined ? next : { ...next, values: withMarks(next.values, c, mark) });
+            mark = undefined;
+          }
+        }
+      }
       return;
     }
     if (ts.isJsxText(n)) {
-      if (!ctx.verbatim) add(n, ctx.nav ? "nav" : ctx.heading ? "heading" : ctx.rail ? "rail" : "text", n.text);
+      if (!ctx.verbatim) add(n, ctx.nav ? "nav" : ctx.heading ? "heading" : ctx.rail ? "rail" : "text", n.text, ctx.values);
       return;
     }
     if (ts.isJsxExpression(n)) {
@@ -158,7 +192,7 @@ export function collectFile(path: string, root = process.cwd()): UiString[] {
     if (ctx.inJsx && !ctx.verbatim) {
       const t = literalText(n);
       if (t !== undefined) {
-        if (!isValueUse(n)) add(n, ctx.nav ? "nav" : ctx.heading ? "heading" : ctx.rail ? "rail" : "literal", t);
+        if (!isValueUse(n)) add(n, ctx.nav ? "nav" : ctx.heading ? "heading" : ctx.rail ? "rail" : "literal", t, ctx.values);
         // the interpolations may hold wording of their own (`${t.cwd}${local ? "\nTerminal で実行" : ""}`)
         if (ts.isTemplateExpression(n)) for (const span of n.templateSpans) visit(span.expression, ctx);
         return;
@@ -166,7 +200,7 @@ export function collectFile(path: string, root = process.cwd()): UiString[] {
     }
     ts.forEachChild(n, (c) => visit(c, ctx));
   };
-  visit(src, { nav: false, heading: false, rail: false, verbatim: false, inJsx: false });
+  visit(src, { nav: false, heading: false, rail: false, verbatim: false, inJsx: false, values: new Set() });
   return out;
 }
 
@@ -180,7 +214,7 @@ if (import.meta.main) {
   const dirs = args.filter((a) => a !== "--check");
   const all = collectUiStrings(dirs.length ? dirs : ["apps/web/src"]);
   const shown = check ? all.filter((s) => s.verdict === "violation") : all;
-  for (const s of shown) console.log(`${s.file}:${s.line}\t${s.kind}\t${s.lang}\t${s.verdict}\t${s.text}`);
+  for (const s of shown) console.log(`${s.file}:${s.line}\t${s.kind}\t${s.lang}\t${s.verdict}\t${s.reason}\t${s.text}`);
   const bad = all.filter((s) => s.verdict === "violation").length;
   console.error(`${all.length} strings, ${bad} violation(s) — docs/design/ui-language.md`);
   if (check && bad) process.exit(1);

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { BacklogItem, Schedule, Workspace } from "@switchboard/protocol";
-import { activeTaskLine, ago, autoByWorkspace, inProgressState, lastTaskLine, readyPending, startButton, taskTimes, overlapLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl } from "./inProgress.ts";
+import { activeTaskLine, ago, autoByWorkspace, inProgressState, lastTaskLine, readyPending, startButton, directButton, taskTimes, overlapLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl } from "./inProgress.ts";
 
 const item = (over: Partial<BacklogItem>): BacklogItem => ({
   number: 1, title: "t", url: "u", type: "pbi", stage: "in-progress", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z",
@@ -203,4 +203,15 @@ test("readyPending / startButton: a decomposed PBI in 分解待ち is marked and
   expect(startButton(item({ stage: "needs-decision", tasks: { total: 4, done: 0, doneAt: null } }))).toBeNull();
   // a request has no sub-issues to count
   expect(startButton(item({ type: "request", stage: "request", tasks: null }))).toEqual(["to-pbi", "PBI にする"]);
+});
+
+test("directButton: 直行で直す on the meta workspace's requests with no PBI only, the same rows as PBI にする (#3691)", () => {
+  const request = item({ type: "request", stage: "request", tasks: null });
+  expect(directButton(request, "ws_meta")).toEqual(["direct", "直行で直す"]);
+  expect(startButton(request)).toEqual(["to-pbi", "PBI にする"]);
+  for (const stage of ["needs-tasks", "ready", "in-progress", "needs-decision"] as const) expect(directButton(item({ stage }), "ws_meta")).toBeNull();
+  expect(directButton(item({ type: "request", stage: "needs-decision", tasks: null }), "ws_meta")).toBeNull();
+  // another repository's request, or the workspaces not read yet
+  expect(directButton(request, "ws_other")).toBeNull();
+  expect(directButton(request, null)).toBeNull();
 });

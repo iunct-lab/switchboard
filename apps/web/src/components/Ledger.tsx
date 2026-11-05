@@ -6,6 +6,8 @@ import { countLabel, fmtMedianDuration, runnerRows } from "../runnerStats.ts";
 import { fmtUsd, OriginTag, pct, RunnerPill } from "./ui.tsx";
 import { jstDay } from "../time.ts";
 import { ledgerRunners, listedRunners } from "../runners.ts";
+import { t } from "../i18n.ts";
+import { insights as m } from "../i18n/insights.ts";
 
 /** Screen D: the cost ledger. API-equivalent and actually-billed figures side by side; the price table is data. */
 export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInfo[]; onOpenTask: (id: string) => void; onOpenInsights: () => void; onError: (msg: string) => void }) {
@@ -40,7 +42,7 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
     setModels(null); // the heading names the new period at once: no old rows under it while the read is in flight
     api
       .ledgerModels(days)
-      .then((m) => alive && setModels(m))
+      .then((r) => alive && setModels(r))
       .catch((e) => {
         if (!alive) return;
         setModels([]);
@@ -66,26 +68,26 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
     <main className="main ledger">
       <section className="card">
         <div className="row head">
-          <h5>期間合計</h5>
+          <h5>{t(m.periodTotal)}</h5>
           <select value={days} onChange={(e) => setDays(Number(e.target.value))}>
             {[7, 14, 30].map((d) => (
               <option key={d} value={d}>
-                {d} 日
+                {t(m.days, { n: d })}
               </option>
             ))}
           </select>
         </div>
         <div className="ledger-head">
           <div>
-            <div className="hint">API 換算（{days} 日）</div>
+            <div className="hint">{t(m.apiDays, { days })}</div>
             <div className="bigno">{fmtUsd(periodApi)}</div>
           </div>
           <div>
-            <div className="hint">実課金（{days} 日）</div>
+            <div className="hint">{t(m.billedDays, { days })}</div>
             <div className="bigno">{fmtUsd(periodBilled)}</div>
           </div>
           <div>
-            <div className="hint">今日</div>
+            <div className="hint">{t(m.today)}</div>
             <div className="bigno">{fmtUsd(props.ledger?.todayUsd ?? 0)}</div>
           </div>
         </div>
@@ -93,10 +95,10 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
 
       <section className="card usage">
         <div className="row head">
-          <h5>使用量（枠）</h5>
-          <span className="hint">ランナーが最後に報告した値。24 時間より前のものは薄く出ます</span>
+          <h5>{t(m.usageHeading)}</h5>
+          <span className="hint">{t(m.usageHint)}</span>
         </div>
-        {(props.ledger?.quota ?? []).length === 0 && <div className="muted">枠の消費は最初のタスク実行後に表示されます</div>}
+        {(props.ledger?.quota ?? []).length === 0 && <div className="muted">{t(m.quotaEmpty)}</div>}
         {quotaByRunner(props.ledger?.quota ?? []).map((g) => (
           <div key={g.runner}>
             <div className="row sub">
@@ -124,34 +126,34 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
           </div>
         ))}
         <div className="row head" style={{ marginTop: 14 }}>
-          <h5>モデル別（{days} 日）</h5>
-          <span className="hint">件数はそのモデルを使った Task の数</span>
+          <h5>{t(m.byModel, { days })}</h5>
+          <span className="hint">{t(m.byModelHint)}</span>
         </div>
-        {models === null && <div className="muted">読み込み中…</div>}
-        {models && models.length === 0 && <div className="muted">この期間の記録はありません</div>}
+        {models === null && <div className="muted">{t(m.loading)}</div>}
+        {models && models.length === 0 && <div className="muted">{t(m.noRecords)}</div>}
         {models && models.length > 0 && (
           <table className="pricing">
             <thead>
               <tr>
-                <th>ランナー</th>
-                <th>モデル</th>
-                <th>件数</th>
-                <th>トークン</th>
-                <th>API 換算</th>
-                <th>実課金</th>
+                <th>{t(m.runner)}</th>
+                <th>{t(m.model)}</th>
+                <th>{t(m.count)}</th>
+                <th>{t(m.tokens)}</th>
+                <th>{t(m.apiEquivalent)}</th>
+                <th>{t(m.billed)}</th>
               </tr>
             </thead>
             <tbody>
-              {models.map((m) => (
-                <tr key={`${m.runner}-${m.model ?? ""}`}>
+              {models.map((row) => (
+                <tr key={`${row.runner}-${row.model ?? ""}`}>
                   <td>
-                    <RunnerPill runner={m.runner} />
+                    <RunnerPill runner={row.runner} />
                   </td>
-                  <td className="mono">{m.model ?? "（不明）"}</td>
-                  <td className="num">{m.tasks}</td>
-                  <td className="num">{Math.round(m.tokens / 1000)}k</td>
-                  <td className="num">{m.unpriced ? <span className="warn">価格表に無い</span> : fmtUsd(m.costUsd)}</td>
-                  <td className="num">{fmtUsd(m.billedUsd)}</td>
+                  <td className="mono">{row.model ?? t(m.unknownModel)}</td>
+                  <td className="num">{row.tasks}</td>
+                  <td className="num">{Math.round(row.tokens / 1000)}k</td>
+                  <td className="num">{row.unpriced ? <span className="warn">{t(m.notInPriceTable)}</span> : fmtUsd(row.costUsd)}</td>
+                  <td className="num">{fmtUsd(row.billedUsd)}</td>
                 </tr>
               ))}
             </tbody>
@@ -160,7 +162,7 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
       </section>
 
       <section className="card">
-        <h5>日別 · ランナー別（API 換算 USD）</h5>
+        <h5>{t(m.byDayRunner)}</h5>
         <div className="bars">
           {dayList.map((day) => {
             const total = RUNNERS.reduce((a, r) => a + (cell(day, r)?.costUsd ?? 0), 0);
@@ -188,49 +190,48 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
 
       <section className="card">
         <div className="row head">
-          <h5>ルーティング一致率</h5>
+          <h5>{t(m.routingHeading)}</h5>
           {/* The window comes from the payload, not the local selector: a failed refetch must not relabel old numbers. */}
-          <span className="hint">提案どおりのランナーで動いた割合（{routing ? `${routing.days} 日` : "読み込み中"}）</span>
+          <span className="hint">{t(m.routingHint, { period: routing ? t(m.days, { n: routing.days }) : t(m.loadingShort) })}</span>
         </div>
-        {routing && routing.rule.total + routing.llm.total === 0 && <div className="muted">まだ提案の記録がありません{routing.otherTotal > 0 && `（ほかの提案元の記録が ${routing.otherTotal} 件あります）`}</div>}
+        {routing && routing.rule.total + routing.llm.total === 0 && <div className="muted">{t(m.noSuggestions)}{routing.otherTotal > 0 && t(m.otherSuggesters, { n: routing.otherTotal })}</div>}
         {routing && routing.rule.total + routing.llm.total > 0 && (
           <div className="ledger-head">
             {([
-              ["ルール表", routing.rule],
+              [t(m.ruleTable), routing.rule],
               ["LLM", routing.llm],
             ] as const).map(([label, v]) => (
               <div key={label}>
                 <div className="hint">{label}</div>
                 {/* The counts are shown next to the percentage: 1/1 and 180/200 are both "100%" and mean very different things. */}
                 <div className="bigno">{v.total === 0 ? "—" : pct(v.agreed / v.total)}</div>
-                <div className="hint">
-                  {v.agreed} / {v.total} 件
-                </div>
+                <div className="hint">{t(m.agreedOf, { agreed: v.agreed, total: v.total })}</div>
               </div>
             ))}
           </div>
         )}
         <div className="hint">
-          提案は助言です。一致率が低いこと自体は問題ではなく、ルール表を直す手がかりになります。
-          <strong>2 つの割合は分母が違うので優劣の比較には使えません</strong>: ルール表は全 Task に提案を出しますが、LLM は設定（Home）で ON にしていて、かつ待ち時間内に答えられた Task だけです（間に合わなかった提案は「外れ」ではなく記録なしになります）。工程以外の定期実行と Inbox からの Task は LLM に聞きません。
+          {t(m.routingNoteBefore)}
+          <strong>{t(m.routingNoteStrong)}</strong>
+          {t(m.routingNoteAfter)}
         </div>
         {routing && (
           <>
             <div className="row head">
-              <h5>ランナーごとの結末（{routing.days} 日）</h5>
-              <span className="hint">1 Task 1 件。件数の少ないランナーは薄く出します</span>
+              <h5>{t(m.outcomesByRunner, { days: routing.days })}</h5>
+              <span className="hint">{t(m.outcomesHint)}</span>
             </div>
             <table className="pricing runner-stats">
               <thead>
                 <tr>
-                  <th>ランナー</th>
-                  <th>件数</th>
-                  <th>完了</th>
-                  <th>要対応</th>
-                  <th>失敗</th>
-                  <th>未判定</th>
-                  <th>費用の中央値</th>
-                  <th>所要の中央値</th>
+                  <th>{t(m.runner)}</th>
+                  <th>{t(m.count)}</th>
+                  <th>{t(m.done)}</th>
+                  <th>{t(m.needsAction)}</th>
+                  <th>{t(m.failed)}</th>
+                  <th>{t(m.notJudged)}</th>
+                  <th>{t(m.medianCost)}</th>
+                  <th>{t(m.medianDuration)}</th>
                 </tr>
               </thead>
               <tbody>
@@ -255,25 +256,26 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
       </section>
 
       <div className="hint" data-ledger-speed>
-        速さ（ふだんの操作と API の所要時間）は{" "}
+        {t(m.speedBefore)}{" "}
         <button className="ghost link" onClick={props.onOpenInsights}>
-          Insights の「運用」
+          {t(m.speedLink)}
         </button>
-        へ
+        {t(m.speedAfter)}
       </div>
 
       <section className="card">
-        <h5>タスク別 · 上位</h5>
-        {tasks.length === 0 && <div className="muted">この期間の記録はありません</div>}
-        {tasks.map((t) => (
-          <button key={t.taskId} className="row link" onClick={() => props.onOpenTask(t.taskId)}>
-            <span className="t">{t.title}</span>
-            <RunnerPill runner={t.runner} />
-            <OriginTag origin={t.origin} />
-            <span className="hint mono">{t.model ?? "—"}</span>
+        <h5>{t(m.topTasks)}</h5>
+        {tasks.length === 0 && <div className="muted">{t(m.noRecords)}</div>}
+        {tasks.map((row) => (
+          <button key={row.taskId} className="row link" onClick={() => props.onOpenTask(row.taskId)}>
+            <span className="t">{row.title}</span>
+            <RunnerPill runner={row.runner} />
+            <OriginTag origin={row.origin} />
+            <span className="hint mono">{row.model ?? "—"}</span>
             <span className="m num">
-              {fmtUsd(t.costUsd)}
-              {t.billedUsd > 0 && ` (実 ${fmtUsd(t.billedUsd)})`} · {Math.round(t.tokens / 1000)}k トークン{t.unpriced && <span className="warn"> · 価格不明</span>}
+              {fmtUsd(row.costUsd)}
+              {row.billedUsd > 0 && t(m.billedShort, { usd: fmtUsd(row.billedUsd) })} · {t(m.kTokens, { n: Math.round(row.tokens / 1000) })}
+              {row.unpriced && <span className="warn">{t(m.priceUnknown)}</span>}
             </span>
           </button>
         ))}
@@ -281,7 +283,7 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
 
       <section className="card">
         <div className="row head">
-          <h5>価格表（データ）</h5>
+          <h5>{t(m.priceTable)}</h5>
           <span className="hint mono">{pricing?.source.replace(/^\/Users\/[^/]+/, "~") ?? ""}</span>
         </div>
         {pricing?.problems.map((p) => (
@@ -292,11 +294,11 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
         <table className="pricing">
           <thead>
             <tr>
-              <th>モデル</th>
-              <th>入力</th>
-              <th>出力</th>
-              <th>キャッシュ読み込み</th>
-              <th>キャッシュ書き込み</th>
+              <th>{t(m.model)}</th>
+              <th>{t(m.input)}</th>
+              <th>{t(m.output)}</th>
+              <th>{t(m.cacheRead)}</th>
+              <th>{t(m.cacheWrite)}</th>
             </tr>
           </thead>
           <tbody>
@@ -304,7 +306,7 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
           </tbody>
         </table>
         <div className="hint">
-          USD / 1M tokens。実課金は billing（{Object.entries(pricing?.billing ?? {}).map(([r, b]) => `${r}: ${b}`).join(" · ")}、未記載のランナーは api 扱い）で判定。日付はデーモンのローカル暦。~/.switchboard/pricing.json で上書きできます（ファイル全体を置き換えるので billing も書くこと）。新しいモデルの価格は設定画面の「モデルの価格」で入れられます（再起動は要りません。「設定」の印の行）。
+          {t(m.priceNote, { billing: Object.entries(pricing?.billing ?? {}).map(([r, b]) => `${r}: ${b}`).join(" · ") })}
         </div>
       </section>
     </main>
@@ -315,11 +317,11 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
 export function PriceRows(props: { models: PricingTable["models"]; fromSettings: string[] }) {
   return (
     <>
-      {Object.entries(props.models).map(([m, p]) => (
-        <tr key={m}>
+      {Object.entries(props.models).map(([model, p]) => (
+        <tr key={model}>
           <td className="mono">
-            {m}
-            {props.fromSettings.includes(m) && <span className="tag">設定</span>}
+            {model}
+            {props.fromSettings.includes(model) && <span className="tag">{t(m.fromSettings)}</span>}
           </td>
           <td className="num">${p.input}</td>
           <td className="num">${p.output}</td>

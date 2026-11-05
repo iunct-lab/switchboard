@@ -87,10 +87,10 @@ export function testsOf(body: string): { ran: number | null; total: number } | u
 /** `log` = where the whole output of a step that failed was kept (#1232), `fails` = its failLines; passing steps keep nothing. */
 export interface StepResult extends Step { code: number; seconds: number; tail: string; log?: string; fails?: string[] }
 
-/** The lines of a step's output that name what failed: bun test's `(fail)` lines, perf-ratchet's `over:` / `raised:` / `improved:` / `grew:` lines and idle-run's reason, once each, in order. */
+/** The lines of a step's output that name what failed: bun test's `(fail)` lines, perf-ratchet's `over:` / `raised:` / `improved:` / `grew:` lines, idle-run's reason and an off-host build's end (`sb-offload: exit`), once each, in order. */
 export function failLines(output: string): string[] {
   const perf = (l: string) => l.includes("over:") || l.startsWith("raised: ") || l.startsWith("improved: ") || l.startsWith("grew: ");
-  return [...new Set(output.split("\n").filter((l) => l.startsWith("(fail)") || perf(l) || l.startsWith("無進捗で打ち切り")))];
+  return [...new Set(output.split("\n").filter((l) => l.startsWith("(fail)") || perf(l) || l.startsWith("無進捗で打ち切り") || l.startsWith("sb-offload: exit ")))];
 }
 
 /** What perf-ratchet's check said: its `ceilings:` environment and its over / improved / raised / grew lines as printed (grew = the bundle 1% or more above main's tip). `unknown` = none of the four (the bench failed, or the check stopped before judging). */
@@ -223,6 +223,158 @@ export interface Deps {
   log: (line: string) => void;
   /** Runs `fn` holding one of the machine's heavy-job slots (ops-kit heavy: waits while they are all held). */
   slot: <T>(name: string, fn: () => Promise<T>) => Promise<T>;
+  /** The builds off the host (`sb-offload`, docs/design/local-ci-offload.md); none = every step runs here. */
+  offload?: Offload;
+}
+
+/** The size of an off-host build, `sb-offload --size`. */
+export type OffloadSize = "small" | "medium" | "large";
+
+/** `run`: one build of `script` with `cwd`'s work tree; its code is sb-offload's (the script's, or 124 timed out / 130 stopped / 1 failed before it). `bun` / `codex`: the versions the build installs, this host's. */
+export interface Offload { run: (script: string, cwd: string, size: OffloadSize) => Promise<{ code: number; output: string }>; bun: string; codex?: string }
+
+/**
+ * The steps that run off the host on the cloud host, by name, in groups of one build each run at the same time (the
+ * project runs two builds at a time). Sizes measured in docs/design/local-ci-offload.md. Every other step stays here:
+ * git over the checkout, the web build the perf steps measure, the perf steps, `fetch main`. `bun test` goes without
+ * the files that read recordings (`HOST_TESTS`).
+ */
+export const OFFLOAD_GROUPS: Array<{ size: OffloadSize; steps: string[] }> = [
+  { size: "small", steps: ["bun run licenses:check", "bun run typecheck"] },
+  { size: "small", steps: ["bun test"] },
+];
+
+/** The step that runs here the test files that read recordings (they are not sent), right after `bun test`. */
+export const HOST_TESTS = "bun test (host)";
+
+/** The test files that read recordings (scripts/recordings.ts): they run on the host, recordings or not. */
+export async function recordingTestFiles(dir: string, sh: Deps["sh"]): Promise<string[]> {
+  const out = await sh(["git", "-C", dir, "grep", "-l", "-E", 'scripts/recordings(\\.ts)?"', "--", "*.test.ts", "*.test.tsx"]).catch(() => "");
+  return out.split("\n").filter(Boolean);
+}
+
+const quote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
+const testRun = (files: string[]) => (files.length ? `bun test ${files.map((f) => quote(`./${f}`)).join(" ")}` : 'echo "no test files selected"');
+
+/**
+ * Where each step runs: `host` in order (with `HOST_TESTS` after `bun test`), and `groups` off the host; `order` is
+ * every step's name as the results are listed. `tests`: the narrowed selection, null / undefined = every test. A group
+ * none of whose steps the CI has is left out.
+ */
+export function placeSteps(steps: Step[], tests: string[] | null | undefined, recordings: string[]): { host: Step[]; groups: Array<{ size: OffloadSize; steps: Step[] }>; order: string[] } {
+  const off = new Set(OFFLOAD_GROUPS.flatMap((g) => g.steps));
+  const rec = new Set(recordings);
+  const moved = (s: Step): Step => {
+    if (s.name !== "bun test") return s;
+    if (tests) return { ...s, run: testRun(tests.filter((f) => !rec.has(f))) };
+    return { ...s, run: ["bun test", ...recordings.map((f) => `--path-ignore-patterns=${quote(f)}`)].join(" ") };
+  };
+  const host: Step[] = [];
+  const order: string[] = [];
+  for (const s of steps) {
+    order.push(s.name);
+    if (!off.has(s.name)) host.push(s);
+    if (s.name === "bun test") {
+      host.push({ name: HOST_TESTS, run: testRun(tests ? tests.filter((f) => rec.has(f)) : recordings) });
+      order.push(HOST_TESTS);
+    }
+  }
+  const groups = OFFLOAD_GROUPS.map((g) => ({ size: g.size, steps: g.steps.flatMap((n) => steps.filter((s) => s.name === n).map(moved)) })).filter((g) => g.steps.length > 0);
+  return { host, groups, order };
+}
+
+/** A step's marks in a group's log: `sb-step: <i> begin <epoch s>` and `sb-step: <i> exit <code> <epoch s>`. */
+const MARK = /^sb-step: (\d+) (begin|exit) (?:(\d+) )?([\d.]+)$/;
+
+/**
+ * One build's script: as root, a git with PCRE (the image's has none), a tmpfs TMPDIR, a user other than root and the
+ * Codex CLI; then as that user Bun of this host's version, the work tree as one commit with `origin` (a URL, no
+ * credentials), the install, and each step in `bash -e -c` between its marks, stopping at the first that fails.
+ * Nothing of this host's environment goes in (no token, no recordings). docs/design/local-ci-offload.md.
+ */
+export function groupScript(steps: Step[], o: { bun: string; codex?: string; repo?: string }): string {
+  const origin = o.repo && /^[\w.-]+\/[\w.-]+$/.test(o.repo) ? ` && git remote add origin ${quote(`https://github.com/${o.repo}.git`)}` : "";
+  const user = [
+    "set -u",
+    "cd /sb/work",
+    `curl -fsSL https://bun.sh/install | bash -s ${quote(`bun-v${o.bun}`)} >/tmp/bun-install.log 2>&1 || { cat /tmp/bun-install.log; echo "sb-setup: bun ${o.bun} を入れられない"; exit 1; }`,
+    'export PATH="$HOME/.bun/bin:$PATH" CI=true TMPDIR="$(mktemp -d /sb/tmp/t.XXXXXX)"',
+    "git config --global user.name local-ci && git config --global user.email local-ci@localhost && git config --global init.defaultBranch main",
+    `{ git init -q${origin} && git add -A && git commit -qm local-ci; } || { echo "sb-setup: git の作業ツリーを作れない"; exit 1; }`,
+    'bun install --frozen-lockfile >/tmp/install.log 2>&1 || { cat /tmp/install.log; echo "sb-setup: bun install が失敗"; exit 1; }',
+    ...steps.flatMap((s, i) => [
+      `echo "sb-step: ${i} begin $(date +%s.%N)"`,
+      `bash -e -c ${quote(s.run)}; c=$?; echo; echo "sb-step: ${i} exit $c $(date +%s.%N)"; [ "$c" -eq 0 ] || exit "$c"`,
+    ]),
+  ].join("\n");
+  return [
+    "set -u",
+    "cat > /tmp/sb-local-ci.sh <<'SB_LOCAL_CI_EOF'",
+    user,
+    "SB_LOCAL_CI_EOF",
+    'dnf install -y -q shadow-utils >/dev/null 2>&1; dnf reinstall -y -q git-core >/dev/null 2>&1 || { echo "sb-setup: git-core を入れ直せない"; exit 1; }',
+    'mkdir -p /sb/tmp && mount -t tmpfs -o size=2g,mode=1777 tmpfs /sb/tmp || { echo "sb-setup: tmpfs を作れない"; exit 1; }',
+    ...(o.codex ? [`npm i -g ${quote(`@openai/codex@${o.codex}`)} >/dev/null 2>&1 || { echo "sb-setup: Codex CLI ${o.codex} を入れられない"; exit 1; }`] : []),
+    'useradd -m sb && chown -R sb /sb/work && chmod 644 /tmp/sb-local-ci.sh || { echo "sb-setup: ユーザーを作れない"; exit 1; }',
+    "su - sb -c 'bash /tmp/sb-local-ci.sh'",
+  ].join("\n");
+}
+
+/** What sb-offload's own exit means when a step has no exit mark. */
+const offloadReason = (code: number) => `sb-offload: exit ${code}（${code === 124 ? "時間切れ" : code === 130 ? "中断" : "ビルドの失敗"}）`;
+
+/**
+ * The steps of one build from its log, by their marks: each one's output, code and seconds. A step that began without
+ * an exit mark, or the first step when none began (the setup failed), gets sb-offload's code (1 when that is 0) and
+ * its reason; the steps after it did not run and are left out. A build that ends non-zero after every step passed
+ * fails its last step with that code and reason.
+ */
+export function parseGroup(output: string, steps: Step[], code: number): Array<Step & { code: number; output: string; seconds: number; tail: string }> {
+  const lines = output.split("\n");
+  const marks = new Map<string, { line: number; at: number; code?: number }>();
+  lines.forEach((l, line) => {
+    const m = MARK.exec(l.trim());
+    if (m) marks.set(`${m[1]} ${m[2]}`, { line, at: Number(m[4]), ...(m[3] === undefined ? {} : { code: Number(m[3]) }) });
+  });
+  const out: Array<Step & { code: number; output: string; seconds: number; tail: string }> = [];
+  for (const [i, s] of steps.entries()) {
+    const begin = marks.get(`${i} begin`);
+    const exit = marks.get(`${i} exit`);
+    if (begin && exit) {
+      const text = lines.slice(begin.line + 1, exit.line).join("\n");
+      out.push({ ...s, code: exit.code!, output: text, seconds: exit.at - begin.at, tail: text.split("\n").slice(-30).join("\n") });
+      if (exit.code !== 0) break;
+      continue;
+    }
+    // cut off in this step, or before any step (the setup's lines are its output)
+    const text = `${(begin ? lines.slice(begin.line + 1) : lines).join("\n").trimEnd()}\n${offloadReason(code)}`;
+    out.push({ ...s, code: code === 0 ? 1 : code, output: text, seconds: 0, tail: text.split("\n").slice(-30).join("\n") });
+    return out;
+  }
+  // every step passed but the build did not (stopped or timed out after the last mark): the last step carries it
+  const last = out.at(-1);
+  if (code !== 0 && last && last.code === 0) {
+    const text = `${last.output.trimEnd()}\n${offloadReason(code)}`;
+    out[out.length - 1] = { ...last, code, output: text, tail: text.split("\n").slice(-30).join("\n") };
+  }
+  return out;
+}
+
+/** The real builds when `sb-offload` is on PATH (the cloud host), else none. Its environment has no GitHub token and no recordings' place. */
+export function hostOffload(): Offload | undefined {
+  const bin = Bun.which("sb-offload", { PATH: process.env.PATH ?? "" });
+  if (!bin) return undefined;
+  const codex = Bun.which("codex", { PATH: process.env.PATH ?? "" }) ? /(\d+\.\d+\.\d+\S*)/.exec(Bun.spawnSync(["codex", "--version"]).stdout.toString())?.[1] : undefined;
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k, v]) => v !== undefined && !["GH_TOKEN", "GITHUB_TOKEN", "SWITCHBOARD_FIXTURES"].includes(k))) as Record<string, string>;
+  return {
+    bun: Bun.version,
+    ...(codex ? { codex } : {}),
+    run: async (script, cwd, size) => {
+      const p = Bun.spawn([bin, "--size", size, script], { cwd, env, stdout: "pipe", stderr: "pipe" });
+      const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+      return { code, output: `${out}${err}` };
+    },
+  };
 }
 
 /**
@@ -360,14 +512,16 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
       const selection = opts.all ? undefined : await selectTests(dir, () => (change ? Promise.resolve(base) : mainFork(dir, repo, d.sh)), env, d);
       const narrowed = selection ? { selection } : {};
       const skipLoaded = selection?.loaded?.run === false ? selection.loaded.reason : undefined;
-      const run = await runCheckout(dir, env, change ? change.label : `local-ci-${repo.replaceAll("/", "_")}-${pr}`, d, cache, selection?.files, skipLoaded);
+      const run = await runCheckout(dir, env, change ? change.label : `local-ci-${repo.replaceAll("/", "_")}-${pr}`, d, cache, selection?.files, skipLoaded, change ? undefined : repo);
       const { results } = run;
       const bundle = run.bundle.length ? { bundle: run.bundle } : {};
       // a checkout with scripts/ci.ts (this repository's CI) must have both steps; another repository's (--repo) need not
       if (run.ok) {
         const seconds = existsSync(join(dir, "scripts/ci.ts")) ? stepSeconds(results) : undefined;
-        // a narrowed bun test's seconds say nothing against the ceiling of all of them; the ceilings are on the high side only
-        const over = seconds ? await durationOver(dir, selection?.files ? { ...seconds, test: 0 } : seconds) : [];
+        // a narrowed bun test's seconds say nothing against the ceiling of all of them, nor a step's off the host against
+        // the host's `local` ceilings (docs/design/local-ci-offload.md); the ceilings are on the high side only
+        const off = (s: string) => run.offloaded.includes(s);
+        const over = seconds ? await durationOver(dir, { typecheck: off(SECONDS_STEPS.typecheck) ? 0 : seconds.typecheck, test: selection?.files || off(SECONDS_STEPS.test) ? 0 : seconds.test }) : [];
         if (over.length === 0) return { sha, base, results, ok: true, ...(seconds ? { seconds } : {}), ...narrowed, ...bundle };
         for (const l of over) d.log(l);
         d.log(`✗ ${DURATION_STEP}`);
@@ -462,21 +616,43 @@ export async function recordBundle(repo: string, dir: string, measuredAt: string
  * `loaded` for this reason (local-ci, #3635); none = it measures it.
  * `bundle`: the perf check's `bundle:` and `grew:` lines, whether it passed or not (none without that check).
  */
-export async function runCheckout(dir: string, env: Record<string, string>, label: string, d: Omit<Deps, "slot">, cache: string, tests?: string[] | null, skipLoaded?: string): Promise<{ steps: Step[]; results: StepResult[]; ok: boolean; perf?: PerfVerdict; outputs: Record<string, string>; bundle: string[] }> {
+export async function runCheckout(dir: string, env: Record<string, string>, label: string, d: Omit<Deps, "slot">, cache: string, tests?: string[] | null, skipLoaded?: string, repo?: string): Promise<{ steps: Step[]; results: StepResult[]; ok: boolean; perf?: PerfVerdict; outputs: Record<string, string>; bundle: string[]; offloaded: string[] }> {
   const listed = await checkoutSteps(dir, env);
   const narrowed = tests ? narrowTestStep(listed, tests) : listed;
   const steps = skipLoaded === undefined ? narrowed : narrowPerfStep(narrowed, skipLoaded);
-  const ran = await runCi(steps, async (s) => {
+  const runHere = async (s: Step) => {
     d.log(`▶ ${s.name}`);
     const started = Date.now();
     const r = await d.step(s.run, dir, env);
     return { code: r.code, output: r.output, seconds: (Date.now() - started) / 1000, tail: r.output.split("\n").slice(-30).join("\n") };
-  });
+  };
+  const offload = d.offload;
+  const plan = offload ? placeSteps(steps, tests, await recordingTestFiles(dir, d.sh)) : undefined;
+  let ran: Array<Step & { code: number; output: string; seconds: number; tail: string }>;
+  if (!offload || !plan || plan.groups.length === 0) ran = await runCi(steps, runHere);
+  else {
+    // the builds start first: sb-offload sends the work tree as it is, before the steps here write in it
+    const off = plan.groups.map((g) => {
+      d.log(`▶ 外（${g.size}）: ${g.steps.map((s) => s.name).join(" → ")}`);
+      return offload.run(groupScript(g.steps, { bun: offload.bun, ...(offload.codex ? { codex: offload.codex } : {}), ...(repo ? { repo } : {}) }), dir, g.size).then((r) => parseGroup(r.output, g.steps, r.code));
+    });
+    const here = await runCi(plan.host, runHere);
+    const byName = new Map([...here, ...(await Promise.all(off)).flat()].map((r) => [r.name, r]));
+    // in the CI's order, up to the first failure that stops it, as one run here would have stopped (runCi)
+    ran = [];
+    for (const name of plan.order) {
+      const r = byName.get(name);
+      if (!r) continue;
+      ran.push(r);
+      if (r.code !== 0 && !r.keepGoing) break;
+    }
+  }
+  const offloaded = plan ? plan.groups.flatMap((g) => g.steps.map((s) => s.name)) : [];
   const results: StepResult[] = ran.map(({ output: _, ...r }) => r);
   const check = ran.find(isPerfCheck);
   const bundle = check ? check.output.split("\n").filter((l) => l.startsWith("bundle: ") || l.startsWith("grew: ")) : [];
   const failedAt = ran.flatMap((x, i) => (x.code === 0 ? [] : [i]));
-  if (failedAt.length === 0) return { steps, results, ok: true, outputs: {}, bundle };
+  if (failedAt.length === 0) return { steps, results, ok: true, outputs: {}, bundle, offloaded };
   // a 1,400-test run's failures do not fit in its last 30 lines
   const prefix = `switchboard.${label}-log.`;
   for (const old of readdirSync(cache)) if (old.startsWith(prefix)) rmSync(join(cache, old), { recursive: true, force: true });
@@ -502,7 +678,7 @@ export async function runCheckout(dir: string, env: Record<string, string>, labe
   }
   // the measured values are kept before the worktree goes
   if (perf && existsSync(join(dir, "perf-result.json"))) copyFileSync(join(dir, "perf-result.json"), join(logDir, "perf-result.json"));
-  return { steps, results, ok: false, ...(perf ? { perf } : {}), outputs, bundle };
+  return { steps, results, ok: false, ...(perf ? { perf } : {}), outputs, bundle, offloaded };
 }
 
 /** Runs `steps` on `base` in its own worktree with the PR's environment; each step's output and the result JSON go to `logDir` as base-*. */
@@ -530,7 +706,7 @@ async function measureBase(pr: number, repoRoot: string, base: string, steps: St
   }
 }
 
-/** The whole environment of a step: PATH and HOME from here, external recordings only when supplied, CI=true as on the runner, TMPDIR its own dir. */
+/** The whole environment of a step here: PATH and HOME from here, external recordings only when supplied, CI=true as on the runner, TMPDIR its own dir. A build off the host gets none of it (`groupScript`): the recordings stay here, read by `HOST_TESTS`. */
 export function stepEnv(tmp: string, from: Record<string, string | undefined> = process.env): Record<string, string> {
   return { PATH: from.PATH ?? "", HOME: homedir(), ...(from.SWITCHBOARD_FIXTURES === undefined ? {} : { SWITCHBOARD_FIXTURES: from.SWITCHBOARD_FIXTURES }), CI: "true", TMPDIR: tmp };
 }
@@ -751,5 +927,6 @@ export async function main(args: string[], cwd: string, d: Deps, post = reportRe
 }
 
 if (import.meta.main) {
-  process.exit(await main(process.argv.slice(2), process.cwd(), { sh, step, log: (l) => console.log(l), slot: (name, fn) => withHeavySlot(name, fn) }));
+  const offload = hostOffload();
+  process.exit(await main(process.argv.slice(2), process.cwd(), { sh, step, log: (l) => console.log(l), slot: (name, fn) => withHeavySlot(name, fn), ...(offload ? { offload } : {}) }));
 }

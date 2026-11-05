@@ -573,6 +573,10 @@ table.evals-table th button.sort { font: inherit; letter-spacing: inherit; text-
 table.evals-table td button.open { font: inherit; color: inherit; padding: 0; text-align: left; }
 .recent-check { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; background: #0006; }
 .recent-check-box { padding: 20px 24px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); }
+/* an artifact's write waits here (scratch-apps.md): the request as sent, scrolled when long */
+.scratch-confirm .recent-check-box { max-width: min(640px, calc(100vw - 32px)); }
+.scratch-confirm-req { max-height: 40vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.scratch-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
 
 .policy-row { display: grid; gap: 4px; padding: 8px 0; border-top: 1px solid var(--line, #3333); }
 .policy-main { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; overflow-wrap: anywhere; }

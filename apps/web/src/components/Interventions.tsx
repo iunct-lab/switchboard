@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import type { InterventionView } from "@switchboard/protocol";
 import { api } from "../api.ts";
 import { interventionRows, populationLine, reasonRows, unknownLine } from "../interventions.ts";
+import { t } from "../i18n.ts";
+import { panels as m } from "../i18n/panels.ts";
 
 /**
  * 介入（直近 7 日 / 30 日）(#651): how often a person had to step in (approve, decide, restart), against the period before, and
@@ -30,35 +32,35 @@ export function Interventions(props: { inView: (workspaceId: string | null) => b
   return (
     <section className="card interventions" data-interventions>
       <div className="row head">
-        <h5>介入（直近 7 日 / 30 日）</h5>
+        <h5>{t(m.interventionsHeading)}</h5>
         <nav className="subtabs">
           {([7, 30] as const).map((d) => (
             <button key={d} className={days === d ? "on" : ""} data-days={d} onClick={() => setDays(d)}>
-              {d} 日
+              {t(m.days, { n: d })}
             </button>
           ))}
         </nav>
         <button className="ghost" disabled={busy} onClick={load}>
-          読み直す
+          {t(m.reread)}
         </button>
       </div>
-      {failure && <div className="muted" data-interventions-error>介入を読めませんでした: {failure}</div>}
+      {failure && <div className="muted" data-interventions-error>{t(m.interventionsFailed, { error: failure })}</div>}
       {pair && (
         <>
           <div className="hint" data-population>
-            直近: {populationLine(pair.current)}
+            {t(m.recentLine, { line: populationLine(pair.current) })}
           </div>
           <div className="hint" data-population-before>
-            その前: {populationLine(pair.previous)}
+            {t(m.beforeLine, { line: populationLine(pair.previous) })}
           </div>
           {unknown && <div className="muted" data-unknown>{unknown}</div>}
           <table className="pricing intervention-table">
             <thead>
               <tr>
-                <th>{days} 日</th>
-                <th>直近</th>
-                <th>その前</th>
-                <th>差</th>
+                <th>{t(m.days, { n: days })}</th>
+                <th>{t(m.recent)}</th>
+                <th>{t(m.before)}</th>
+                <th>{t(m.difference)}</th>
               </tr>
             </thead>
             <tbody>
@@ -72,20 +74,20 @@ export function Interventions(props: { inView: (workspaceId: string | null) => b
               ))}
             </tbody>
           </table>
-          <div className="hint">止まった理由（直近の多い順、その前との比較）</div>
-          {reasonRows(pair.current, pair.previous, props.inView).length === 0 && <div className="muted">この 2 つの期間に止まった記録はありません</div>}
+          <div className="hint">{t(m.reasonsHint)}</div>
+          {reasonRows(pair.current, pair.previous, props.inView).length === 0 && <div className="muted">{t(m.noStops)}</div>}
           {reasonRows(pair.current, pair.previous, props.inView).map((r) => (
             <div key={r.reason} className="row" data-reason={r.reason}>
               <span className="t">{r.label}</span>
               <span className="m num">
-                {r.count} 回（その前 {r.before} 回、{r.change}）
+                {t(m.reasonCount, { count: r.count, before: r.before, change: r.change })}
               </span>
               <span className="m">
-                自動再開できなかった {r.notAutoResumed}（その前 {r.notAutoResumedBefore}）
+                {t(m.notAutoResumed, { n: r.notAutoResumed, before: r.notAutoResumedBefore })}
               </span>
               {[...r.links.map((l) => ({ l, period: "now" })), ...r.linksBefore.map((l) => ({ l, period: "before" }))].map(({ l, period }) => (
                 <span key={`${period}:${l.taskId}:${l.at}`} className="m" data-evidence={period}>
-                  {period === "before" ? "前: " : ""}
+                  {period === "before" ? t(m.evidenceBefore) : ""}
                   {l.url && l.issue !== null && (
                     <a href={l.url} target="_blank" rel="noreferrer">
                       #{l.issue}

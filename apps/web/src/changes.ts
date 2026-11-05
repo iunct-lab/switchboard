@@ -1,4 +1,6 @@
 import type { Backlog, BacklogIssueDetail } from "@switchboard/protocol";
+import { t } from "./i18n.ts";
+import { common } from "./i18n/common.ts";
 
 /**
  * What the screen shows of a local change (#2486): the marks of its comments, read with the patterns merge-gate reads
@@ -33,8 +35,8 @@ export function changeMarks(comments: Array<{ body: string; createdAt: string }>
 
 /** 開いている / マージ済み / 閉じた (closed without a merge). */
 export function changeStateLabel(change: Pick<Backlog["changes"][number], "state" | "mergeCommit">): string {
-  return change.state === "OPEN" ? "開いている" : change.mergeCommit ? "マージ済み" : "閉じた";
+  return change.state === "OPEN" ? t(common.changeOpen) : change.mergeCommit ? t(common.changeMerged) : t(common.changeClosed);
 }
 
 /** A sha's first 7, or なし. */
-export const short = (sha: string | null | undefined) => (sha ? sha.slice(0, 7) : "なし");
+export const short = (sha: string | null | undefined) => (sha ? sha.slice(0, 7) : t(common.shaNone));

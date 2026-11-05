@@ -1,17 +1,19 @@
 import type { RunnerId, RunnerInfo } from "@switchboard/protocol";
+import { t } from "./i18n.ts";
+import { home } from "./i18n/home.ts";
 
 /** What is missing when the daemon gave no note (or no runner list): the words Home showed on hover before #3354. */
 const MISSING: Record<"claude" | "codex" | "dak", string> = {
-  claude: "claude が PATH にありません。Claude Code をインストールしてください（https://claude.com/claude-code）",
-  codex: "codex が PATH にありません（公式インストーラ: curl -fsSL https://chatgpt.com/codex/install.sh | sh）",
-  dak: "DAK の agent（http://127.0.0.1:8000、SWITCHBOARD_DAK_URL で変更）に到達できません。DAK リポジトリで docker compose up",
+  claude: t(home.missingClaude),
+  codex: t(home.missingCodex),
+  dak: t(home.dakUnreachable),
 };
 
 /** Why runner `id` cannot be picked and what to do, as text read without hovering (#3354); null when it can be picked. */
 export function unavailableNotice(info: RunnerInfo | undefined, id: RunnerId): string | null {
   if (info?.available) return null;
   // an ADK server added in Settings (`custom:<name>`) has no fixed install advice: its own detect() note says what failed
-  return info?.note ?? (id in MISSING ? MISSING[id as keyof typeof MISSING] : `${info?.label ?? id} に到達できません`);
+  return info?.note ?? (id in MISSING ? MISSING[id as keyof typeof MISSING] : t(home.unreachable, { name: info?.label ?? id }));
 }
 
 /**
@@ -27,11 +29,11 @@ export function unavailableNotices(runners: RunnerInfo[] | undefined): Array<{ i
  * selected runner, `anyRunnerOk` any runner. `ws` false = 自動, which only Cloud refuses.
  */
 export function startBlockedReason(s: { prompt: string; stale: boolean; attachBusy: boolean; runnerOk: boolean; cloud: boolean; ws: boolean; anyRunnerOk: boolean }): string | null {
-  if (!s.prompt.trim()) return "本文を書いてください";
-  if (s.stale) return "Workspace を変えたので、本文に入れ直してください";
-  if (!s.cloud && s.attachBusy) return "添付のアップロードが終わるまで待ってください";
-  if (!s.anyRunnerOk) return "使えるランナーがありません。ランナーの下の行の理由を直してください";
-  if (!s.runnerOk) return "選んだランナーは使えません。使えるランナーを選んでください";
-  if (s.cloud && !s.ws) return "Cloud は Workspace を選んでください";
+  if (!s.prompt.trim()) return t(home.blockedPrompt);
+  if (s.stale) return t(home.staleDraft);
+  if (!s.cloud && s.attachBusy) return t(home.blockedAttach);
+  if (!s.anyRunnerOk) return t(home.blockedNoRunner);
+  if (!s.runnerOk) return t(home.blockedRunner);
+  if (s.cloud && !s.ws) return t(home.blockedCloudWs);
   return null;
 }

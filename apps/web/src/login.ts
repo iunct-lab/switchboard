@@ -1,3 +1,6 @@
+import { t } from "./i18n.ts";
+import { settings } from "./i18n/settings.ts";
+
 /**
  * Where an unauthorized browser goes (#211). The daemon says how a person gets in (`/api/health` → `login`): on the
  * cloud host it is a passkey on `/_auth/` (the starter Lambda behind the same CloudFront origin), which sets the
@@ -50,7 +53,7 @@ export const STUCK_RESCUE = "/rescue/";
 /** Settings is not drawn while the daemon refuses (#1851), so the way to log out from here: `#devices` keeps the login page from moving on. */
 export const STUCK_LOGIN = "/_auth/#devices";
 
-export const STUCK_MESSAGE = "パスキーのログインは通りましたが、デーモンがその Cookie を受け付けません。デーモンの再起動が要ります（救援画面の「再起動」、または作り直す）。";
+export const STUCK_MESSAGE = t(settings.stuck);
 
 /**
  * CloudFront's "stopped" page (#211): while the cloud host is stopped, every path — /api/health too — answers with
@@ -89,7 +92,7 @@ export function hostStopped(
   return checking;
 }
 
-export const LEAVE_STOPPED = "ホストが止まっているようです。ログインページへ移ると、入力中の文は消えます。移りますか？";
+export const LEAVE_STOPPED = t(settings.leaveStopped);
 
 /** Text typed into a field of the page (a textarea, or a text-like input) that leaving it would lose. */
 export function hasTypedText(doc: { querySelectorAll(sel: string): ArrayLike<{ value: string }> }): boolean {
@@ -103,8 +106,8 @@ export function sessionLabel(s: { idleUntil: number; expiresAt: number }, now: n
     return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
   };
   return {
-    text: `ログイン ${at(Math.min(s.idleUntil, s.expiresAt))} まで`,
-    title: `操作するたびに 24 時間延びます（最長 ${at(s.expiresAt)}）`,
+    text: t(settings.sessionUntil, { at: at(Math.min(s.idleUntil, s.expiresAt)) }),
+    title: t(settings.sessionTitle, { at: at(s.expiresAt) }),
     expired: now >= s.idleUntil || now >= s.expiresAt,
   };
 }

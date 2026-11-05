@@ -4,6 +4,8 @@ import { OriginTag, BackgroundTag, ResumeTag, ShadowTag } from "./ui.tsx";
 import { attentionList, outcomeDotClass, outcomeLabel, terminalMark } from "../attention.ts";
 import { taskTimes } from "../inProgress.ts";
 import { filterTasks, PAGE, STATUS_FILTERS, type StatusFilter } from "../taskList.ts";
+import { t } from "../i18n.ts";
+import { home } from "../i18n/home.ts";
 
 /** The tooltip's line of when a Task started and since when it is in its status, JST (#2030); the row itself has no room. */
 const timesLine = (t: Task) => {
@@ -38,13 +40,13 @@ export function Rail(props: { workspaces: Workspace[]; tasks: Task[]; currentTas
   const attention = attentionList(live);
   return (
     <aside className={`rail ${props.listOpen ? "open" : ""}`}>
-      <button className={`it rail-approvals ${props.approvalsOpen ? "on" : ""}`} onClick={props.onApprovals} title="承認・判断・確認の待ち">
-        <span className="t">判断待ち</span>
+      <button className={`it rail-approvals ${props.approvalsOpen ? "on" : ""}`} onClick={props.onApprovals} title={t(home.approvalsTitle)}>
+        <span className="t">{t(home.approvals)}</span>
         {props.approvals > 0 && <span className="badge">{props.approvals}</span>}
       </button>
       {/* Phones only (#359): the list below is hidden there until this opens it. */}
       <button className={`it rail-tasks ${props.listOpen ? "on" : ""}`} onClick={props.onToggleList}>
-        <span className="t">一覧</span>
+        <span className="t">{t(home.list)}</span>
       </button>
       <div className="rail-list">
       {active.length > 0 && (
@@ -62,7 +64,7 @@ export function Rail(props: { workspaces: Workspace[]; tasks: Task[]; currentTas
       )}
       {attention.length > 0 && (
         <>
-          <div className="grp">要対応 · {attention.length}</div>
+          <div className="grp">{t(home.railAttention, { count: attention.length })}</div>
           {attention.map((t) => (
             <button key={t.id} className={`it ${props.currentTaskId === t.id ? "on" : ""}`} onClick={() => props.onOpenTask(t.id)} title={`${t.title}\n${outcomeLabel(t.outcome)}\n${timesLine(t)}`}>
               <span className="t">{t.title}</span>
@@ -77,15 +79,15 @@ export function Rail(props: { workspaces: Workspace[]; tasks: Task[]; currentTas
         <div key={w.id} className="it" title={w.path}>
           <span className="t">
             {w.name}
-            {w.kind === "meta" && <span className="tag">自分自身</span>}
+            {w.kind === "meta" && <span className="tag">{t(home.selfTag)}</span>}
           </span>
           <span className="m">{byWs.get(w.id)?.length ?? 0}</span>
         </div>
       ))}
       <div className="grp">Tasks</div>
-      <input className="rail-search" aria-label="Task を検索" placeholder="検索" value={q} onChange={(e) => setQ(e.target.value)} />
+      <input className="rail-search" aria-label={t(home.searchLabel)} placeholder={t(home.search)} value={q} onChange={(e) => setQ(e.target.value)} />
       <div className="rail-filters">
-        <select aria-label="状態" value={status} onChange={(e) => setStatus(e.target.value as StatusFilter)}>
+        <select aria-label={t(home.status)} value={status} onChange={(e) => setStatus(e.target.value as StatusFilter)}>
           {STATUS_FILTERS.map((f) => (
             <option key={f.value} value={f.value}>
               {f.label}
@@ -95,37 +97,37 @@ export function Rail(props: { workspaces: Workspace[]; tasks: Task[]; currentTas
         <label>
           <input
             type="checkbox"
-            aria-label="アーカイブ済みを表示"
+            aria-label={t(home.showArchived)}
             checked={archived}
             onChange={(e) => {
               setArchived(e.target.checked);
               if (e.target.checked) props.onShowArchived();
             }}
           />{" "}
-          アーカイブ済み
+          {t(home.archived)}
         </label>
       </div>
-      {props.tasks.length === 0 && <div className="it muted">まだタスクがありません</div>}
-      {props.tasks.length > 0 && rows.length === 0 && <div className="it muted">当てはまる Task がありません</div>}
-      {rows.slice(0, shown).map((t) => (
-        <button key={t.id} className={`it ${props.currentTaskId === t.id ? "on" : ""}`} onClick={() => props.onOpenTask(t.id)} title={`${t.title}\n${timesLine(t)}\n${t.cwd}${t.origin === "terminal" ? "\nTerminal で実行（取り込み）" : ""}`}>
-          <span className="t">{t.title}</span>
+      {props.tasks.length === 0 && <div className="it muted">{t(home.noTasks)}</div>}
+      {props.tasks.length > 0 && rows.length === 0 && <div className="it muted">{t(home.noMatch)}</div>}
+      {rows.slice(0, shown).map((x) => (
+        <button key={x.id} className={`it ${props.currentTaskId === x.id ? "on" : ""}`} onClick={() => props.onOpenTask(x.id)} title={`${x.title}\n${timesLine(x)}\n${x.cwd}${x.origin === "terminal" ? `\n${t(home.terminalImported)}` : ""}`}>
+          <span className="t">{x.title}</span>
           {/* Two tags leave the title no room in this width; while a resume is planned that tag matters more (the tooltip still says Terminal). */}
-          {t.resumeAt === null && <OriginTag origin={t.origin} />}
-          <ResumeTag resumeAt={t.resumeAt} reason={t.resumeReason} plannedAt={t.resumePlannedAt} compact />
-          <BackgroundTag background={t.background} compact />
-          {t.resumeAt === null && <ShadowTag task={t} />}
-          <TerminalMark status={props.terminals[t.id]} />
-          <span className={`dot ${dotClass(t.status)}`} />
+          {x.resumeAt === null && <OriginTag origin={x.origin} />}
+          <ResumeTag resumeAt={x.resumeAt} reason={x.resumeReason} plannedAt={x.resumePlannedAt} compact />
+          <BackgroundTag background={x.background} compact />
+          {x.resumeAt === null && <ShadowTag task={x} />}
+          <TerminalMark status={props.terminals[x.id]} />
+          <span className={`dot ${dotClass(x.status)}`} />
         </button>
       ))}
       {rows.length > shown && (
         <button className="ghost rail-more" onClick={() => setShown((n) => n + PAGE)}>
-          さらに表示（残り {rows.length - shown} 件）
+          {t(home.more, { count: rows.length - shown })}
         </button>
       )}
       </div>
-      <button className="ghost rail-feedback" onClick={props.onFeedback} title="画面のスクショつきで要望を送る。要望 Issue と PBI / Task が作られる">フィードバック</button>
+      <button className="ghost rail-feedback" onClick={props.onFeedback} title={t(home.feedbackTitle)}>{t(home.feedback)}</button>
     </aside>
   );
 }

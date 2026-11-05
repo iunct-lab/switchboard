@@ -4,6 +4,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { Task } from "@switchboard/protocol";
 import type { TaskDetail } from "./api.ts";
 import { Brief } from "./components/Brief.tsx";
+import { t } from "./i18n.ts";
+import { brief as m } from "./i18n/brief.ts";
 
 // The Brief names the MCP servers handed to the task's Claude (#2090): the user-wide ones are not.
 
@@ -22,4 +24,11 @@ test("Brief: 操作 の欄は差分タブを指すだけで、Phase の予告を
   const html = brief(task, []);
   expect(html).toContain("変更したファイルは「差分」タブに。</div>");
   expect(html).not.toMatch(/Phase ?\d/);
+});
+
+test("Brief: the MCP row's words in English join the servers with a comma and keep the placeholders", () => {
+  expect(t(m.mcpServers, undefined, "en")).toBe("MCP handed over");
+  expect(["playwright", "docs"].join(t(m.mcpSeparator, undefined, "en"))).toBe("playwright, docs");
+  expect(t(m.footprint, { files: "1,234", k: 56, more: "+" }, "en")).toBe("Files: 1,234 · about 56k tokens+");
+  expect(t(m.footprint, { files: "1,234", k: 56, more: "+" })).toBe("1,234 ファイル · 約 56k トークン+");
 });

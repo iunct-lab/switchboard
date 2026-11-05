@@ -78,7 +78,7 @@
 
 - set: 題・本文・状態（`state_event` close / reopen）・ラベル（`add_labels` / `remove_labels`）・Milestone（題から id、無しは `0`）。送る前に読んで元の値と比べ（違えば `conflict`、何も書かない）、書いた直後にもう一度読む（違えば `conflict`）。初期方式 A のうち、GitHub の編集履歴の照合（#1329）は GitLab では読まないので、書く直前の他人の編集は、値が送った値と違うときだけ分かる
 - 親の set は `failed`（「GitLab には無いフィールドです（parent）。親は本文の ## 親 PBI で書きます」）、Project の項目とフィールドは `project` の操作で GitLab に無いので `failed`（「サービス gitlab の project には対応していません」）。どちらも何も送らない。作成の Project のフィールドは送らない（作成は通る）
-- create / comment は本文に印 `<!-- switchboard-op:<id> -->`。答えを失ったら（送った後の 5xx・接続できない）`unknown` にし、次の送りで一覧（Issue は `created_after`、note は新しい順）から印を探す。見つからなければ `unknown` のまま、自分では送り直さない
+- create / comment は本文に印 `<!-- switchboard-op:<id> -->`。答えを失ったら（送った後の 5xx・接続できない）`unknown` にし、次の送りで一覧（Issue は `created_after`、note は新しい順）から印を探す。全ページを読みきって見つからなければ同じ印で送り直し、照合でも送り直した直後でも印つきが 2 件以上あれば先に作った方を残して後の Issue は close、後の note は消す（GitHub と同じ。[backlog-sync.md](backlog-sync.md) の「二重投稿を避ける」）。作った Issue の id（`remoteId`）があるのに一覧に無いときは送り直さない
 - 401 はログインの待ち（`Limit auth`）、429 は 1 分の待ち（`Limit`）、送る前に接続できない（HTTP の状態が無い）は 1 分の待ち、409 / 412 は `conflict`、ほかの 4xx は `failed`、5xx は `pending`（GitHub と同じ回数まで）。答えを失った作成・コメントは、印を探す読みが失敗しても `unknown` のまま
 - 待ちは host ごと（`source.host`）。GitHub の待ちは GitLab の送りを止めない
 

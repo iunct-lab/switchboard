@@ -1,4 +1,6 @@
 import type { CustomRunner, RunnerId, RunnerInfo } from "@switchboard/protocol";
+import { t } from "./i18n.ts";
+import { common } from "./i18n/common.ts";
 
 /** The runners the daemon registered, in the order it lists them. DAK is absent unless SWITCHBOARD_DAK_URL is set (#2558). */
 /** `keep` is a value already saved (a schedule's runner): it stays selectable even when the daemon no longer lists it. */
@@ -43,12 +45,12 @@ export function customRunnerFromDraft(d: CustomRunnerDraft, saved: CustomRunner[
   const url = d.url.trim();
   const app = d.app.trim();
   const tokenEnv = d.tokenEnv.trim();
-  if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(name)) return { error: "名前は英小文字・数字・- で 32 文字まで（先頭は英小文字か数字）" };
-  if (name === "dak") return { error: "dak は SWITCHBOARD_DAK_URL の DAK の名前です（別の名前に）" };
-  if (saved.some((r) => r.name === name)) return { error: `custom:${name} は既にあります（変えるなら削除して足し直す）` };
-  if (!/^https?:\/\/[^/]/.test(url) || !URL.canParse(url)) return { error: "URL は http:// か https:// で始まる形で" };
-  if (!app) return { error: "アプリ名を入れてください" };
-  if (tokenEnv && !/^[A-Z_][A-Z0-9_]*$/.test(tokenEnv)) return { error: "トークンの環境変数名は英大文字・数字・_ で（値ではなく名前）" };
+  if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(name)) return { error: t(common.runnerNameRule) };
+  if (name === "dak") return { error: t(common.runnerNameDak) };
+  if (saved.some((r) => r.name === name)) return { error: t(common.runnerExists, { name }) };
+  if (!/^https?:\/\/[^/]/.test(url) || !URL.canParse(url)) return { error: t(common.runnerUrlRule) };
+  if (!app) return { error: t(common.runnerAppMissing) };
+  if (tokenEnv && !/^[A-Z_][A-Z0-9_]*$/.test(tokenEnv)) return { error: t(common.runnerTokenEnvRule) };
   return { entry: { name, label, url: url.replace(/\/+$/, ""), app, ...(tokenEnv ? { tokenEnv } : {}) } };
 }
 

@@ -1,3 +1,4 @@
+// test-reads: apps/web/src/interventions.ts apps/web/src/flow.ts apps/web/src/artifacts.ts apps/web/src/i18n.ts apps/web/src/i18n/panels.ts
 import { describe, expect, test } from "bun:test";
 import type { InterventionReason, InterventionWindow } from "@switchboard/protocol";
 import { interventionRows, populationLine, reasonRows, unknownLine } from "./interventions.ts";
@@ -54,5 +55,33 @@ describe("interventions screen", () => {
     const narrowed = reasonRows(w, prev, (id) => id === null || id === "a");
     expect(narrowed[0]!.count).toBe(3);
     expect(narrowed[0]!.links.map((l) => l.taskId)).toEqual(["t0", "t2"]);
+  });
+});
+
+describe("in English (#2445)", () => {
+  // the language is read once when i18n.ts loads: a fresh process with the browser's choice set to en
+  test("the interventions' rows and lines, the flow's times and the artifacts tab read in English", () => {
+    const at = (f: string) => JSON.stringify(new URL(f, import.meta.url).pathname);
+    const code = `globalThis.localStorage = { getItem: (k) => (k === "switchboard.lang" ? "en" : null) };
+const { interventionRows, populationLine, unknownLine, REASON_LABEL } = await import(${at("./interventions.ts")});
+const { span, slowRow } = await import(${at("./flow.ts")});
+const { artifactsLabel } = await import(${at("./artifacts.ts")});
+const w = ${JSON.stringify(window({ unknown: 2, completed: { pbis: 3, perPbi: null, unknownPbis: 1 } }))};
+const rows = Object.fromEntries(interventionRows(w, w).map((r) => [r.key, r]));
+console.log(JSON.stringify([rows.total.label, rows.total.now, rows.perPbi.now, populationLine(w), unknownLine(w).split(" (")[0], REASON_LABEL.decision, span(30_000), span(90 * 60_000), slowRow({ number: 7, title: "x", url: "u", stages: { wait: 3 * 3_600_000 } }).longest, artifactsLabel(2)]));`;
+    const r = Bun.spawnSync([process.execPath, "-e", code]);
+    expect(r.stderr.toString()).toBe("");
+    expect(JSON.parse(r.stdout.toString())).toEqual([
+      "Total",
+      "10 or more",
+      "Unknown",
+      "PBIs done: 3 (1 unknown) · interventions on open PBIs: 6 (PBIs: 2) · interventions on done PBIs: 4",
+      "Places that could not be counted: 2",
+      "Awaiting you",
+      "under 1 min",
+      "1.5 h",
+      "Waiting to start 3 h",
+      "Artifacts (2)",
+    ]);
   });
 });

@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appBoard, claim, ghBoard, ghMaterial, holder, judge, lastClaim, overlap, readOthers, release, releaseArgs, releaseBody, STALE_HOURS, storedMaterial, type Work } from "./parallel-guard";
+import { appBoard, claim, ghBoard, ghMaterial, holder, judge, lastClaim, overlap, readOthers, release, releaseArgs, releaseBody, STALE_HOURS, storedMaterial, waitConditions, type Work } from "./parallel-guard";
 import { linkedIssues, pathsIn, scopeIn } from "./task-paths";
 import type { StoredRecords } from "../ops-kit/src/backlog-client";
 
@@ -367,6 +367,32 @@ describe("parallel-guard overlap", () => {
     expect((await overlap(ghBoard(REPO, g.run), 40, false, now)).blocking.map((h) => h.ref)).toEqual(["Task #60"]);
     const g2 = github({ bodies: { 40: db, 60: db }, projects: { 60: elsewhere("In progress") } });
     expect((await overlap(ghBoard(REPO, g2.run), 40, false, now)).verdict).toBe("go");
+  });
+});
+
+describe("parallel-guard overlap conditions (#2045)", () => {
+  const hit = (ref: string) => ({ ref, path: "packages/a.ts", updatedAt: fresh });
+
+  test("a blocking PR and Task become pr# / issue# wait keys, once each; another PBI's prerequisite waits by its state", () => {
+    expect(waitConditions({ verdict: "defer", blocking: [hit("PR #12"), hit("PR #12"), hit("Task #34")] })).toEqual([
+      { key: "pr#12", value: "open", met: false },
+      { key: "issue#34", value: "open", met: false },
+    ]);
+    expect(waitConditions({ verdict: "wait", blocking: [], prereqs: [
+      { ref: "#61", state: "pending", sibling: false },
+      { ref: "PR #62", state: "pending", sibling: false },
+      { ref: "#53", state: "pending", sibling: true },
+      { ref: "#64", state: "met", sibling: false },
+    ] })).toEqual([{ key: "issue#61", value: "pending", met: false }, { key: "pr#62", value: "pending", met: false }]);
+  });
+
+  test("a go waits for nothing", () => {
+    expect(waitConditions({ verdict: "go", blocking: [], prereqs: [{ ref: "#53", state: "pending", sibling: true }] })).toEqual([]);
+  });
+
+  test("overlap prints the conditions when it cannot go", async () => {
+    const g = github({ bodies: { 60: "packages/shared.ts" }, prs: [{ number: 140, headRefName: "sb/40-x", body: "Closes #40", files: ["packages/shared.ts"] }] });
+    expect(await overlap(ghBoard(REPO, g.run), 60, false, now)).toMatchObject({ verdict: "defer", conditions: [{ key: "pr#140", value: "open", met: false }] });
   });
 });
 

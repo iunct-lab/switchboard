@@ -1,3 +1,4 @@
+// test-reads: apps/web/src/policies.ts apps/web/src/priceForm.ts apps/web/src/login.ts apps/web/src/i18n.ts apps/web/src/i18n/settings.ts
 import { expect, test } from "bun:test";
 import { describeRelease, rescueLink, shortSha } from "./release.ts";
 
@@ -97,4 +98,35 @@ test("newVersionLink shows only when HEAD is ahead of what runs under sb-rescue"
   expect(newVersionLink({ ...managed, ahead: 0 })).toBeNull();
   expect(newVersionLink({ ...managed, ahead: null })).toBeNull();
   expect(newVersionLink({ ...managed, ahead: 1 })).toBe("新しい版 bbbbbbb →");
+});
+
+test("in English (#2448): the release lines, a policy row, a price form error and the login's end read in English", () => {
+  // the language is read once when i18n.ts loads: a fresh process with the browser's choice set to en
+  const at = (f: string) => JSON.stringify(new URL(f, import.meta.url).pathname);
+  const code = `globalThis.localStorage = { getItem: (k) => (k === "switchboard.lang" ? "en" : null) };
+const { describeRelease, releasePanel, shortSha } = await import(${at("./release.ts")});
+const { policyRow, policyState } = await import(${at("./policies.ts")});
+const { parsePriceForm, EMPTY_PRICE_FORM } = await import(${at("./priceForm.ts")});
+const { sessionLabel } = await import(${at("./login.ts")});
+const policy = { id: "p", op: "merge", target: "PR #1", when: [], scope: "pbi", pbi: 7, workspaceId: "w", expiresAt: null, revokedAt: null, uses: [] };
+console.log(JSON.stringify([
+  describeRelease({ ts: 0, action: "rejected", from: null, to: "b".repeat(40), ok: false, reason: "boom" }).text,
+  shortSha(null),
+  releasePanel({ managed: true, current: "a".repeat(40), head: "b".repeat(40), ahead: 2, dirty: true }).lines.map((l) => l.text),
+  policyState(policy, 0).text,
+  policyRow(policy, (id) => id, 0),
+  parsePriceForm({ ...EMPTY_PRICE_FORM, model: "m", input: "x" }),
+  sessionLabel({ idleUntil: 0, expiresAt: 0 }, 1).text.replace(/\\d+\\/\\d+ \\d+:\\d+/, "D"),
+]));`;
+  const r = Bun.spawnSync([process.execPath, "-e", code]);
+  expect(r.stderr.toString()).toBe("");
+  expect(JSON.parse(r.stdout.toString())).toEqual([
+    "Rejected promoting bbbbbbb (still on the current version) — boom",
+    "none",
+    ["Running version: aaaaaaa", "HEAD: bbbbbbb — commits ahead: 2", "Uncommitted changes are not included"],
+    "Active",
+    { scope: "Within this PBI (#7)", subject: "merge: PR #1", when: "No conditions", expires: "No expiry (once only)", uses: "Unused" },
+    "input is not a number: x",
+    "Logged in until D",
+  ]);
 });

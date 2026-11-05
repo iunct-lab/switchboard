@@ -1,3 +1,6 @@
+import { t } from "./i18n.ts";
+import { task as m } from "./i18n/task.ts";
+
 /**
  * Copy text for the copy buttons (#695). `navigator.clipboard` exists only on HTTPS and localhost; opened over plain
  * HTTP (a phone on the LAN, docs/design/mobile-approval.md) the old `execCommand("copy")` still works. When neither
@@ -20,7 +23,7 @@ export async function copyText(text: string, env: CopyEnv = browserEnv()): Promi
   } catch {
     copied = false;
   }
-  if (!copied) throw new Error("クリップボードにコピーできませんでした");
+  if (!copied) throw new Error(t(m.copyFailed));
 }
 
 function browserEnv(): CopyEnv {

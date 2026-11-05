@@ -114,6 +114,61 @@ describe("effort (#833)", () => {
   });
 });
 
+describe("subagent threads", () => {
+  const start = (prompt: string) => {
+    const home = mkdtempSync(join(tmpdir(), "sb-codex-subagent-"));
+    const log = join(home, "wire.jsonl");
+    const events: AgentEvent[] = [];
+    const session = createCodexAdapter({ bin: FAKE, codexHome: home, config: [`test_wire_log=${log}`] }).start({ cwd: home, scope: [home], prompt, permissionMode: "auto" }, (e) => events.push(e));
+    const wire = (method: string) => readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((m) => m.method === method);
+    const until = async (pred: () => boolean) => {
+      for (const deadline = Date.now() + 5000; !pred() && Date.now() < deadline; ) await Bun.sleep(20);
+      expect(pred()).toBe(true);
+    };
+    return { home, events, session, wire, until, ends: () => events.filter((e) => e.t === "session.end") };
+  };
+
+  test("subagent: its approval is asked and answered, input steers the main turn, and only the main turn ends the session", async () => {
+    const { home, events, session, wire, until, ends } = start("subagent: go");
+    try {
+      await until(() => events.some((e) => e.t === "permission.ask"));
+      const ask = events.find((e) => e.t === "permission.ask")!;
+      expect(ask).toMatchObject({ kind: "exec", toolUseId: "exec-sub" });
+      session.send("more");
+      await until(() => wire("turn/steer").length === 1);
+      expect(wire("turn/steer")[0].params).toMatchObject({ threadId: "thread-new", expectedTurnId: "turn-1" });
+      expect(wire("turn/start")).toHaveLength(1);
+      if (ask.t === "permission.ask") session.respondPermission(ask.id, "allow");
+      await until(() => ends().length === 1);
+      await Bun.sleep(100);
+      expect(ends()).toHaveLength(1);
+      expect(ends()[0]).toMatchObject({ status: "ok", summary: "main-done" });
+      expect(events.filter((e) => e.t === "tool.result")).toMatchObject([{ id: "exec-sub", ok: true }]);
+      expect(events.filter((e) => e.t === "usage" && e.source === "reported").map((e) => (e.t === "usage" ? e.inputTokens : 0))).toEqual([7, 12]);
+      expect(events.filter((e) => e.t === "session.start")).toMatchObject([{ runnerSessionId: "thread-new" }]);
+      expect(events.filter((e) => e.t === "status" && e.text.startsWith("thread "))).toEqual([]);
+    } finally {
+      await session.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("subagent: abort during its turn interrupts the main turn, and the subagent's usage so far is still reported", async () => {
+    const { home, events, session, wire, until, ends } = start("subagent: go");
+    try {
+      await until(() => events.some((e) => e.t === "permission.ask"));
+      await session.abort();
+      expect(wire("turn/interrupt").map((m) => m.params)).toEqual([{ threadId: "thread-new", turnId: "turn-1" }]);
+      await until(() => ends().length === 1);
+      expect(ends()[0]).toMatchObject({ status: "aborted" });
+      expect(events.filter((e) => e.t === "usage" && e.source === "reported").map((e) => (e.t === "usage" ? e.inputTokens : 0))).toEqual([7]);
+    } finally {
+      await session.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("bedrock (#1731)", () => {
   test("app-server gets the amazon-bedrock provider and region only when StartOptions.bedrock is set", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sb-codex-bedrock-"));

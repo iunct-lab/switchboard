@@ -1,8 +1,10 @@
 import type { EvalsListRow, EvalsSummary, RuleMetrics, RunnerInfo, TaskEvals } from "@switchboard/protocol";
 import { effortLabel } from "./effortOptions.ts";
+import { t } from "./i18n.ts";
+import { insights as m } from "./i18n/insights.ts";
 
 /** The default rubric's criteria as the screen names them (#1219); an id the screen does not know is shown as is. */
-const CRITERION_TITLES: Record<string, string> = { goal: "依頼の達成", instructions: "指示の遵守", efficiency: "効率", communication: "報告", safety: "安全" };
+const CRITERION_TITLES: Record<string, string> = { goal: t(m.critGoal), instructions: t(m.critInstructions), efficiency: t(m.critEfficiency), communication: t(m.critCommunication), safety: t(m.critSafety) };
 
 /** One line of the 評価 section of the Brief (#1218). `warn` = a count that points at trouble (a failure, an error, a denial, a stop, a bad end). */
 export interface MetricRow {
@@ -15,42 +17,42 @@ export interface MetricRow {
 export function metricRows(e: TaskEvals): MetricRow[] {
   const r = e.rules;
   if (!r) return [];
-  const m = r.metrics;
-  const reasons = Object.entries(m.stopReasons).map(([k, n]) => `${k} ${n}`).join(", ");
+  const x = r.metrics;
+  const reasons = Object.entries(x.stopReasons).map(([k, n]) => `${k} ${n}`).join(", ");
   return [
-    { label: "ツール呼び出し", value: String(m.toolCalls) },
-    { label: "失敗", value: String(m.toolFailures), warn: m.toolFailures > 0 },
-    { label: "エラー", value: String(m.errors), warn: m.errors > 0 },
-    { label: "追加指示", value: String(m.userInstructions) },
-    { label: "承認 / 拒否", value: `${m.asks} / ${m.denials}`, warn: m.denials > 0 },
-    { label: "分類器", value: classifierValue(m.classifier) },
-    { label: "停止", value: reasons ? `${m.stops}（${reasons}）` : String(m.stops), warn: m.stops > 0 },
-    { label: "デーモン停止", value: String(m.daemonStops), warn: m.daemonStops > 0 },
-    { label: "ターン", value: String(m.turns) },
-    { label: "所要時間", value: fmtDuration(m.durationMs) },
+    { label: t(m.toolCalls), value: String(x.toolCalls) },
+    { label: t(m.failures), value: String(x.toolFailures), warn: x.toolFailures > 0 },
+    { label: t(m.errors), value: String(x.errors), warn: x.errors > 0 },
+    { label: t(m.userInstructions), value: String(x.userInstructions) },
+    { label: t(m.asksDenials), value: `${x.asks} / ${x.denials}`, warn: x.denials > 0 },
+    { label: t(m.classifier), value: classifierValue(x.classifier) },
+    { label: t(m.stops), value: reasons ? `${x.stops}${t(m.paren, { text: reasons })}` : String(x.stops), warn: x.stops > 0 },
+    { label: t(m.daemonStopsShort), value: String(x.daemonStops), warn: x.daemonStops > 0 },
+    { label: t(m.turns), value: String(x.turns) },
+    { label: t(m.duration), value: fmtDuration(x.durationMs) },
     // a last turn the daemon's stop cut ended that way by the stop, not by the task (#2089): デーモン停止 carries the mark
-    { label: "終わり方", value: endLabel(m.lastEnd), warn: (m.lastEnd === "error" || m.lastEnd === "aborted") && !m.lastCutByDaemon },
+    { label: t(m.ending), value: endLabel(x.lastEnd), warn: (x.lastEnd === "error" || x.lastEnd === "aborted") && !x.lastCutByDaemon },
   ];
 }
 
 /** Claude Code's auto-mode classifier (#2236): what it let through and stopped, the stopped ones per kind; 不明 when nothing was recorded (Codex, not Auto). */
 function classifierValue(c: RuleMetrics["classifier"]): string {
-  if (!c) return "不明";
-  const kinds = Object.entries(c.byCategory).map(([k, n]) => `${k === "asked" ? "人に確認" : k} ${n}`).join(", ");
-  return `通した ${c.allowed} / 止めた ${c.denied}${kinds ? `（${kinds}）` : ""}`;
+  if (!c) return t(m.unknown);
+  const kinds = Object.entries(c.byCategory).map(([k, n]) => `${k === "asked" ? t(m.askedPerson) : k} ${n}`).join(", ");
+  return `${t(m.classifierValue, { allowed: c.allowed, denied: c.denied })}${kinds ? t(m.paren, { text: kinds }) : ""}`;
 }
 
 export function fmtDuration(ms: number | null): string {
   if (ms === null) return "-";
   const s = Math.round(ms / 1000);
-  if (s < 60) return `${s} 秒`;
+  if (s < 60) return t(m.seconds, { n: s });
   const min = Math.floor(s / 60);
-  if (min < 60) return `${min} 分 ${s % 60} 秒`;
-  return `${Math.floor(min / 60)} 時間 ${min % 60} 分`;
+  if (min < 60) return t(m.durMinSec, { m: min, s: s % 60 });
+  return t(m.durHourMin, { h: Math.floor(min / 60), m: min % 60 });
 }
 
 export function endLabel(end: RuleMetrics["lastEnd"]): string {
-  return end === "ok" ? "正常" : end === "error" ? "エラー" : end === "aborted" ? "中断" : "-";
+  return end === "ok" ? t(m.endOk) : end === "error" ? t(m.endError) : end === "aborted" ? t(m.endAborted) : "-";
 }
 
 /** One criterion's line of the rubric judge's row (#1219). `warn` = 2 or below. */
@@ -86,15 +88,15 @@ export function humanLabel(e: TaskEvals): string | null {
 
 /** The human − judge gap as Insights shows it (#1877): the signed mean to one decimal and the count, or that none is rated yet. */
 export function gapLabel(gap: EvalsSummary["gap"]): string {
-  if (!gap.count || gap.mean === null) return "人の評価がまだありません";
+  if (!gap.count || gap.mean === null) return t(m.noHumanRating);
   const sign = gap.mean > 0 ? "+" : gap.mean < 0 ? "−" : "";
-  return `人 − 判定: ${sign}${Math.abs(gap.mean).toFixed(1)}（${gap.count} 件）`;
+  return t(m.gap, { gap: `${sign}${Math.abs(gap.mean).toFixed(1)}`, count: gap.count });
 }
 
 /** The models the task ran on as the Brief shows them (#1801): the one, or every one in the order used with （混在） after; null when not known. */
 export function modelsLabel(e: Pick<TaskEvals, "models">): string | null {
   if (!e.models.length) return null;
-  return e.models.length === 1 ? e.models[0]! : `${e.models.join(" → ")}（混在）`;
+  return e.models.length === 1 ? e.models[0]! : t(m.mixedModels, { models: e.models.join(" → ") });
 }
 
 /* ---------- the Evals list (#1221) ---------- */

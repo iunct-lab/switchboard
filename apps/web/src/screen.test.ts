@@ -1,3 +1,4 @@
+// test-reads: apps/web/src/screen.ts apps/web/src/components/Feedback.tsx apps/web/src/i18n.ts apps/web/src/i18n/panels.ts
 import { expect, test } from "bun:test";
 import type { Task } from "@switchboard/protocol";
 import { screenLabel } from "./screen.ts";
@@ -16,4 +17,20 @@ test("a task's label is one line and fits the 200 characters /api/feedback takes
   expect(screenLabel({ name: "settings" })).toBe("Settings");
   expect(screenLabel({ name: "schedules" })).toBe("Schedules");
   expect(screenLabel({ name: "resources" })).toBe("Resources");
+});
+
+test("in English the name sent stays as it is; only the feedback dialog shows it in English, a Task's line with English quotes (#2445, #2450)", () => {
+  // the language is read once when i18n.ts loads: a fresh process with the browser's choice set to en
+  const at = (f: string) => JSON.stringify(new URL(f, import.meta.url).pathname);
+  const code = `globalThis.localStorage = { getItem: (k) => (k === "switchboard.lang" ? "en" : null) };
+const { screenLabel } = await import(${at("./screen.ts")});
+const { shownScreen } = await import(${at("./components/Feedback.tsx")});
+const sent = [screenLabel({ name: "approvals" }), screenLabel({ name: "backlog" }), screenLabel({ name: "task", id: "task_1" }, { id: "task_1", title: "要望: a" })];
+console.log(JSON.stringify({ sent, shown: sent.map(shownScreen) }));`;
+  const r = Bun.spawnSync([process.execPath, "-e", code]);
+  expect(r.stderr.toString()).toBe("");
+  expect(JSON.parse(r.stdout.toString())).toEqual({
+    sent: ["判断待ち", "Backlog", "Task「要望: a」(task_1)"],
+    shown: ["Awaiting you", "Backlog", 'Task "要望: a" (task_1)'],
+  });
 });

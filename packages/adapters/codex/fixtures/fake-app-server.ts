@@ -8,6 +8,8 @@
  *   turn/steer (while active) → {} and the text is echoed as another agentMessage
  *   turn/interrupt → {} then turn/completed(status: interrupted)
  * `features list` prints the memories row with the value of FAKE_CODEX_MEMORIES (default false) and exits.
+ * A prompt starting with "subagent:" runs a subagent thread inside the main turn: thread/started (parentThreadId),
+ * its turn/started, answer, a commandExecution approval request, usage, turn/completed; then the main turn finishes.
  * Prompts containing "crash" make the process exit 3 without a result; "sleep" keeps the turn open until interrupted.
  */
 import { appendFileSync } from "node:fs";
@@ -24,6 +26,28 @@ let approvalSeq = 0;
 const waiting = new Map<number, (d: string) => void>();
 const thread = (id: string, cwd: string) => ({ id, cwd, cliVersion: "fake-0.1", sessionId: id, createdAt: 0, updatedAt: 0, status: { type: "idle" } });
 
+const usage = (n: number) => ({ last: { totalTokens: n, inputTokens: n, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 }, total: { totalTokens: n, inputTokens: n, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 } });
+
+/** Resolves once the subagent's turn is over, whether or not the main turn was interrupted meanwhile. */
+async function runSubagent(parent: string) {
+  const threadId = "thread-sub";
+  const id = "turn-sub";
+  enc({ method: "thread/started", params: { thread: { ...thread(threadId, "/tmp"), parentThreadId: parent } } });
+  enc({ method: "thread/status/changed", params: { threadId, status: { type: "active", activeFlags: [] } } });
+  enc({ method: "turn/started", params: { threadId, turn: { id, items: [], status: "inProgress" } } });
+  enc({ method: "item/completed", params: { threadId, turnId: id, item: { type: "agentMessage", id: "msg-sub", text: "sub-report", phase: "final_answer" } } });
+  enc({ method: "thread/tokenUsage/updated", params: { threadId, turnId: id, tokenUsage: usage(7) } });
+  const itemId = "exec-sub";
+  const reqId = approvalSeq++;
+  const decision = await new Promise<string>((r) => {
+    waiting.set(reqId, r);
+    enc({ method: "item/commandExecution/requestApproval", id: reqId, params: { threadId, turnId: id, itemId, command: "/bin/sh -c 'ls'", cwd: "/tmp", commandActions: [{ type: "unknown", command: "ls" }], startedAtMs: 0 } });
+  });
+  enc({ method: "item/completed", params: { threadId, turnId: id, item: { type: "commandExecution", id: itemId, command: "/bin/sh -c 'ls'", cwd: "/tmp", commandActions: [], status: decision === "accept" ? "completed" : "declined", exitCode: decision === "accept" ? 0 : null, aggregatedOutput: decision === "accept" ? "ok\n" : null } } });
+  enc({ method: "turn/completed", params: { threadId, turn: { id, items: [], status: "completed", error: null, durationMs: 3 } } });
+  enc({ method: "thread/status/changed", params: { threadId, status: { type: "idle" } } });
+}
+
 async function runTurn(threadId: string, text: string) {
   const id = `turn-${++turnSeq}`;
   active = { id, threadId, sleeping: /sleep/.test(text) };
@@ -31,6 +55,15 @@ async function runTurn(threadId: string, text: string) {
   if (/crash/.test(text)) {
     process.stderr.write("fake app-server: simulated crash\n");
     process.exit(3);
+  }
+  if (text.startsWith("subagent:")) {
+    await runSubagent(threadId);
+    if (active?.id !== id) return; // interrupted meanwhile
+    enc({ method: "item/completed", params: { threadId, turnId: id, item: { type: "agentMessage", id: `msg-${id}`, text: "main-done", phase: "final_answer" } } });
+    enc({ method: "thread/tokenUsage/updated", params: { threadId, turnId: id, tokenUsage: usage(12) } });
+    active = null;
+    enc({ method: "turn/completed", params: { threadId, turn: { id, items: [], status: "completed", error: null, durationMs: 5 } } });
+    return;
   }
   enc({ method: "item/started", params: { threadId, turnId: id, item: { type: "agentMessage", id: `msg-${id}`, text: "", phase: "commentary" } } });
   enc({ method: "item/agentMessage/delta", params: { threadId, turnId: id, itemId: `msg-${id}`, delta: `echo:${text}` } });

@@ -1,3 +1,4 @@
+// test-reads: apps/web/src/scheduleActions.ts apps/web/src/scheduleResult.ts apps/web/src/scheduleEdit.ts apps/web/src/i18n.ts apps/web/src/i18n/backlog.ts
 import { describe, expect, test } from "bun:test";
 import type { BacklogIssueDetail, BacklogSyncInfo } from "@switchboard/protocol";
 import { backlogHeading, createWord, draftKey, heldIssueText, issueHref, savedWords, editOf, formAfterRead, formOf, githubSyncText, labelList, loadDraft, loadNewIssueDraft, PROJECT_SETUP_DOC, rebaseForm, syncLine, valueText, workspaceErrorGuide } from "./backlogSync.ts";
@@ -194,4 +195,39 @@ test("githubSyncText says off, moving and on (#2266)", () => {
   expect(githubSyncText(row({ enabling: { total: 3, done: 3 }, sync: info({ state: "conflict", pendingCount: 1, conflicts: [{ operation: "o", field: "body", reason: null }] as never }) }), fmt)).toEqual({ state: "conflict", label: "GitHub に移しています", parts: ["3 / 3", "競合 1 件"] });
   expect(githubSyncText(row({ enabling: { total: 3, done: 2 }, sync: info({ state: "error", reason: "failed" }) }), fmt).parts).toEqual(["2 / 3", "GitHub が編集を受け付けませんでした"]);
   expect(githubSyncText(row({ sync: info({ state: "conflict", pendingCount: 1, conflicts: [{ operation: "o", field: "title", reason: null }] as never }) }), fmt)).toEqual({ state: "conflict", label: "競合", parts: ["最終成功: t1000", "未送信 1 件", "競合 1 件"] });
+});
+
+describe("in English (#2447)", () => {
+  // the language is read once when i18n.ts loads: a fresh process with the browser's choice set to en
+  test("the sync line, a held Issue, the heading, a schedule's kind, its scan result and a budget typo read in English", () => {
+    const at = (f: string) => JSON.stringify(new URL(f, import.meta.url).pathname);
+    const code = `globalThis.localStorage = { getItem: (k) => (k === "switchboard.lang" ? "en" : null) };
+const { syncLine, heldIssueText, backlogHeading, createWord } = await import(${at("./backlogSync.ts")});
+const { scheduleActionLabel } = await import(${at("./scheduleActions.ts")});
+const { scheduleResultLine } = await import(${at("./scheduleResult.ts")});
+const { scheduleEditPatch } = await import(${at("./scheduleEdit.ts")});
+const fmt = (ms) => "t" + ms;
+const l = syncLine({ state: "pending", reason: "unfetched", lastSuccessfulSync: null, retryAt: 5000, pendingCount: 2, conflicts: [], guarantee: "A" }, fmt);
+const s = { id: "s", title: "x", cron: "0 3 * * *", workspaceId: "w", runner: "claude", model: "", effort: "", prompt: "p", action: "prompt", budgetUsd: null };
+console.log(JSON.stringify([
+  [l.label, ...l.parts],
+  heldIssueText({ number: 354, title: "T", url: "u", closed: true, state: "conflict", pendingCount: 3, conflictCount: 1 }),
+  backlogHeading(1000, true, ["github"], fmt),
+  createWord("pending"),
+  scheduleActionLabel("backlog-next"),
+  scheduleResultLine({ action: "secret-scan", lastResult: { at: 0, repos: 4, hits: 2, failed: 3, lines: [] } }).replace(/\\d+\\/\\d+ \\d+:\\d+/, "D"),
+  scheduleEditPatch(s, { title: "x", cron: "0 3 * * *", workspaceId: "w", runner: "claude", model: "", effort: "", budget: "abc", prompt: "p" }).error,
+]));`;
+    const r = Bun.spawnSync([process.execPath, "-e", code]);
+    expect(r.stderr.toString()).toBe("");
+    expect(JSON.parse(r.stdout.toString())).toEqual([
+      ["Waiting to send", "Last success: none (not read)", "Not sent: 2", "Not read yet", "Waiting until t5000"],
+      "#354 T (Conflicts: 1 · Not sent: 2 · Closed)",
+      "Fetched from GitHub at t1000 · Loading…",
+      "Creation waiting to send",
+      "Advance the backlog",
+      "Last scan D: repositories 4 / hits 2 / could not scan 3",
+      'Enter the budget as a number greater than 0: "abc"',
+    ]);
+  });
 });

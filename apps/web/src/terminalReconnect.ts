@@ -1,3 +1,6 @@
+import { t } from "./i18n.ts";
+import { task as m } from "./i18n/task.ts";
+
 /**
  * What the Terminal tab does when its socket closes (#1137). The daemon names the session in the socket's first frame;
  * with that id a dropped connection is tried again (500 ms doubling up to 8 s, like the event socket) and comes back to the
@@ -7,10 +10,10 @@
 export type AfterClose = { kind: "retry"; delayMs: number } | { kind: "ended"; message: string; reopen: boolean };
 
 export function afterClose(code: number, shell: string | null, attempt: number): AfterClose {
-  if (code === 1000) return { kind: "ended", message: "Terminalは終了しました。", reopen: true };
-  if (code === 4404) return { kind: "ended", message: "Terminalは終了していました。", reopen: true };
+  if (code === 1000) return { kind: "ended", message: t(m.termExited), reopen: true };
+  if (code === 4404) return { kind: "ended", message: t(m.termGone), reopen: true };
   if (shell) return { kind: "retry", delayMs: Math.min(500 * 2 ** attempt, 8000) };
-  return { kind: "ended", message: "ターミナルとの接続が切れました。", reopen: true };
+  return { kind: "ended", message: t(m.termLost), reopen: true };
 }
 
 /** The query of /ws/pty: the task, the Teleport view, and the session to come back to. */

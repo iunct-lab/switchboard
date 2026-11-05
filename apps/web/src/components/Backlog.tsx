@@ -3,7 +3,7 @@ import type { Artifact, Backlog as BacklogData, BacklogAction, BacklogIssueDetai
 import type { FeedbackTarget } from "../feedbackTarget.ts";
 import { api } from "../api.ts";
 import { backlogHeading, createWord, draftKey, editOf, formAfterRead, GUARANTEE_A, githubSyncText, heldIssueText, issueHref, loadDraft, loadNewIssueDraft, savedWords, syncLine, textDraftKey, valueText, workspaceErrorGuide, type EditForm, type NewIssueDraft } from "../backlogSync.ts";
-import { activeTaskLine, ago, autoByWorkspace, inProgressState, readyPending, startButton, lastTaskLine, overlapLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl, type PrereqPart } from "../inProgress.ts";
+import { activeTaskLine, ago, autoByWorkspace, inProgressState, readyPending, startButton, directButton, lastTaskLine, overlapLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl, type PrereqPart } from "../inProgress.ts";
 import { promotionLine } from "../release.ts";
 import { changeMarks, changeStateLabel, short } from "../changes.ts";
 import { Flow } from "./Flow.tsx";
@@ -11,6 +11,8 @@ import { Interventions } from "./Interventions.tsx";
 import { Mockups } from "./Approvals.tsx";
 import { Stops } from "./Stops.tsx";
 import { jstDateTime } from "../time.ts";
+import { t } from "../i18n.ts";
+import { backlog as m } from "../i18n/backlog.ts";
 import { applyView, loadView, PRIORITIES, resetView, saveView, SORTS, STAGES, TYPES, viewSummary, type BacklogView } from "../backlogView.ts";
 
 /** The first lines of a ## 状況 comment shown under its row; the rest is on the Issue. */
@@ -43,7 +45,7 @@ function WorkspaceError(props: { error: BacklogData["errors"][number]; loaded: b
         setEdited(false);
         props.onSaved();
       })
-      .catch((e) => props.onError(`${props.error.workspaceName} の設定を保存できませんでした: ${String(e.message ?? e)}`))
+      .catch((e) => props.onError(t(m.saveVarFailed, { name: props.error.workspaceName, error: String(e.message ?? e) })))
       .finally(() => setSaving(false));
   };
   const guide = workspaceErrorGuide(props.error, props.projectVar);
@@ -59,7 +61,7 @@ function WorkspaceError(props: { error: BacklogData["errors"][number]; loaded: b
                 <>
                   {" "}
                   <a href={s.link} target="_blank" rel="noreferrer">
-                    手順 →
+                    {t(m.steps)}
                   </a>
                 </>
               )}
@@ -67,11 +69,11 @@ function WorkspaceError(props: { error: BacklogData["errors"][number]; loaded: b
           ))}
         </ol>
       )}
-      {props.error.kind !== "other" && <span className="hint backlog-error-detail">詳細: {props.error.message}</span>}
+      {props.error.kind !== "other" && <span className="hint backlog-error-detail">{t(m.errorDetail, { message: props.error.message })}</span>}
       {props.error.kind !== "gh-login" && (
         <div className="row">
           <label className="hint" htmlFor={`pv-${props.error.workspaceId}`}>
-            Project の URL を持つリポジトリ変数
+            {t(m.projectVarLabel)}
           </label>
           <input
             id={`pv-${props.error.workspaceId}`}
@@ -83,7 +85,7 @@ function WorkspaceError(props: { error: BacklogData["errors"][number]; loaded: b
             }}
           />
           <button className="ghost" disabled={!props.loaded || saving || name.trim() === (props.projectVar ?? "")} onClick={save}>
-            保存
+            {t(m.save)}
           </button>
         </div>
       )}
@@ -150,7 +152,7 @@ function Editor(props: { target: EditTarget; onChanged: () => void; onError: (ms
           return next;
         });
       })
-      .catch((e) => (setReadFailed(true), props.onError(`#${item.number} を読めませんでした: ${String(e.message ?? e)}`)));
+      .catch((e) => (setReadFailed(true), props.onError(t(m.readIssueFailed, { n: item.number, error: String(e.message ?? e) }))));
   useEffect(() => {
     void read();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -165,7 +167,7 @@ function Editor(props: { target: EditTarget; onChanged: () => void; onError: (ms
     if (!detail || !form) return;
     const { edit, error } = editOf(detail, form);
     if (error) return setNote(error);
-    if (!edit) return setNote("変更がありません");
+    if (!edit) return setNote(t(m.noChanges));
     setSaving(true);
     api
       .editBacklog(item.workspaceId, item.number, edit)
@@ -180,7 +182,7 @@ function Editor(props: { target: EditTarget; onChanged: () => void; onError: (ms
       // refused (409) or unreachable: the form keeps what was typed and is rebased on the Issue read again, so a retry
       // sends what changed against the newest value
       .catch((e) => {
-        setNote(`保存できませんでした（入力は残しています）: ${String(e.message ?? e)}`);
+        setNote(t(m.saveFailed, { error: String(e.message ?? e) }));
         void read();
       })
       .finally(() => setSaving(false));
@@ -196,7 +198,7 @@ function Editor(props: { target: EditTarget; onChanged: () => void; onError: (ms
         await read();
         props.onChanged();
       })
-      .catch((e) => setNote(`コメントを保存できませんでした（入力は残しています）: ${String(e.message ?? e)}`))
+      .catch((e) => setNote(t(m.commentFailed, { error: String(e.message ?? e) })))
       .finally(() => setSaving(false));
   };
   // one choice at a time: a second click would carry the same revision and be told to choose again
@@ -205,13 +207,13 @@ function Editor(props: { target: EditTarget; onChanged: () => void; onError: (ms
     return api
       .editBacklog(item.workspaceId, item.number, { resolve: { field, choice, expectedRevision } })
       .then(async () => {
-        setNote(choice === "local" ? "手元の値を送ります" : "GitHub の値を使います");
+        setNote(choice === "local" ? t(m.sendingLocal) : t(m.usingRemote));
         await read();
         props.onChanged();
       })
       .catch(async (e) => {
         // an old choice (409): GitHub or the edit moved since it was read — read again, choose again
-        setNote(e.status === 409 ? "競合の状態が変わっています。最新の値を読み直しました。選び直してください" : `選べませんでした: ${String(e.message ?? e)}`);
+        setNote(e.status === 409 ? t(m.conflictMoved) : t(m.chooseFailed, { error: String(e.message ?? e) }));
         await read();
       })
       .finally(() => setSaving(false));
@@ -222,12 +224,12 @@ function Editor(props: { target: EditTarget; onChanged: () => void; onError: (ms
     return api
       .editBacklog(item.workspaceId, item.number, { retry: { operation } })
       .then(async () => {
-        setNote("送り直します");
+        setNote(t(m.retrying));
         await read();
         props.onChanged();
       })
       .catch(async (e) => {
-        setNote(e.status === 409 ? "状態が変わっています。読み直しました" : `送り直せませんでした: ${String(e.message ?? e)}`);
+        setNote(e.status === 409 ? t(m.stateMoved) : t(m.retryFailed, { error: String(e.message ?? e) }));
         await read();
       })
       .finally(() => setSaving(false));
@@ -235,13 +237,13 @@ function Editor(props: { target: EditTarget; onChanged: () => void; onError: (ms
   if (!detail || !form)
     return readFailed ? (
       <div className="hint">
-        読めませんでした{" "}
+        {t(m.readFailed)}{" "}
         <button className="ghost link" onClick={() => void read()}>
-          読み直す
+          {t(m.reread)}
         </button>
       </div>
     ) : (
-      <div className="hint">読み込み中…</div>
+      <div className="hint">{t(m.loading)}</div>
     );
   const writable = detail.fetchState === "fetched";
   const set = (k: keyof EditForm) => (e: { target: { value: string } }) => change({ [k]: e.target.value } as Partial<EditForm>);
@@ -253,58 +255,58 @@ function Editor(props: { target: EditTarget; onChanged: () => void; onError: (ms
       {detail.held.map((h) => (
         <div key={h.operation} className="backlog-held warn" data-field={h.field ?? ""}>
           <div>
-            {h.field ?? "新規作成"}: {h.status === "conflict" ? "競合" : h.status === "failed" ? "GitHub が受け付けませんでした" : "送信の結果が分かりません"}
-            {h.reason ? `（${h.reason}）` : ""}
+            {h.field ?? t(m.heldNew)}: {h.status === "conflict" ? t(m.heldConflict) : h.status === "failed" ? t(m.heldFailed) : t(m.heldUnknown)}
+            {h.reason ? t(m.paren, { text: h.reason }) : ""}
           </div>
           {h.status === "failed" && (
             <button className="ghost" disabled={saving} onClick={() => retry(h.operation)}>
-              送り直す
+              {t(m.sendAgain)}
             </button>
           )}
           {h.conflict && (
             <>
               <div className="backlog-sides">
                 <div>
-                  <div className="hint">手元（local）</div>
+                  <div className="hint">{t(m.sideLocal)}</div>
                   <pre className="wrap">{valueText(h.conflict.local)}</pre>
                 </div>
                 <div>
-                  <div className="hint">GitHub 側</div>
+                  <div className="hint">{t(m.sideRemote)}</div>
                   <pre className="wrap">{valueText(h.conflict.remote, h.conflict.remoteRead)}</pre>
                 </div>
               </div>
               <button className="ghost" disabled={saving || h.field === null} onClick={() => resolve(h.field!, "local", h.conflict!.revision)}>
-                手元の値を送る
+                {t(m.sendLocal)}
               </button>{" "}
               <button className="ghost" disabled={saving || h.field === null} onClick={() => resolve(h.field!, "remote", h.conflict!.revision)}>
-                GitHub の値を使う
+                {t(m.useRemote)}
               </button>
             </>
           )}
         </div>
       ))}
-      {!writable && <div className="muted">GitHub から読めていない（{detail.fetchState}）ので編集できません。再読込してください</div>}
-      <label className="hint">題</label>
+      {!writable && <div className="muted">{t(m.notWritable, { state: detail.fetchState })}</div>}
+      <label className="hint">{t(m.fieldTitle)}</label>
       <input value={form.title} disabled={!writable || saving} onChange={set("title")} />
-      <label className="hint">本文</label>
+      <label className="hint">{t(m.fieldBody)}</label>
       <textarea rows={6} value={form.body} disabled={!writable || saving} onChange={set("body")} />
       <div className="row">
-        <label className="hint" title=", 区切り">ラベル</label>
+        <label className="hint" title={t(m.labelsTitle)}>{t(m.fieldLabels)}</label>
         <input value={form.labels} disabled={!writable || saving} onChange={set("labels")} />
-        <label className="hint">状態</label>
+        <label className="hint">{t(m.fieldState)}</label>
         <select value={form.state} disabled={!writable || saving} onChange={set("state")}>
-          <option value="OPEN">開いている</option>
-          <option value="CLOSED">閉じた</option>
+          <option value="OPEN">{t(m.stateOpen)}</option>
+          <option value="CLOSED">{t(m.stateClosed)}</option>
         </select>
       </div>
       <div className="row">
         <label className="hint">Milestone</label>
         <input value={form.milestone} disabled={!writable || saving} onChange={set("milestone")} />
-        <label className="hint">親 Issue</label>
+        <label className="hint">{t(m.fieldParent)}</label>
         <input value={form.parent} disabled={!writable || saving} inputMode="numeric" onChange={set("parent")} />
       </div>
       {detail.fields === null ? (
-        <div className="hint">Project に入っていないので Project のフィールドはありません</div>
+        <div className="hint">{t(m.noProjectFields)}</div>
       ) : (
         Object.keys(form.fields).map((k) => (
           <div className="row" key={k}>
@@ -314,12 +316,12 @@ function Editor(props: { target: EditTarget; onChanged: () => void; onError: (ms
         ))
       )}
       <button className="pri" disabled={saving || !writable} onClick={save}>
-        保存
+        {t(m.save)}
       </button>
-      <label className="hint">コメント</label>
+      <label className="hint">{t(m.comment)}</label>
       <textarea rows={3} value={comment} disabled={saving} onChange={(e) => (localStorage.setItem(commentKey, e.target.value), setComment(e.target.value))} placeholder={words.commentHint} />
       <button className="ghost" disabled={saving || !comment.trim()} onClick={() => send(comment)}>
-        コメントを保存
+        {t(m.saveComment)}
       </button>
       {note && <div className="hint backlog-note">{note}</div>}
     </div>
@@ -337,7 +339,7 @@ function EditToggle(props: { target: EditTarget; summary?: string; held?: boolea
   const [open, setOpen] = useState(false);
   return (
     <details className="backlog-editor" data-issue={props.target.url} data-held={props.held ? "" : undefined} onToggle={(e) => setOpen(e.currentTarget.open)}>
-      <summary>{props.summary ?? "編集"}</summary>
+      <summary>{props.summary ?? t(m.edit)}</summary>
       {open && <Editor target={props.target} onChanged={props.onChanged} onError={props.onError} />}
     </details>
   );
@@ -360,11 +362,12 @@ function Made(props: { workspaceId: string; localId: string; title: string }) {
           #{n}
         </IssueLink>
       ) : (
-        "番号なし"
+        t(m.noNumber)
       )}{" "}
-      {props.title}（{detail ? (n > 0 ? words.made : createWord(detail.sync.state)) : "確認中"}）{" "}
+      {props.title}
+      {t(m.paren, { text: detail ? (n > 0 ? words.made : createWord(detail.sync.state)) : t(m.checking) })}{" "}
       <button className="ghost link" onClick={() => void read()}>
-        更新
+        {t(m.refresh)}
       </button>
     </div>
   );
@@ -380,21 +383,21 @@ function ChangeDetail(props: { workspaceId: string; number: number }) {
   useEffect(() => {
     api.backlogIssue(props.workspaceId, props.number).then(setDetail, (e: unknown) => setFailed(e instanceof Error ? e.message : String(e)));
   }, [props.workspaceId, props.number]);
-  if (failed) return <div className="muted">読めませんでした: {failed}</div>;
-  if (!detail) return <div className="hint">読み込み中…</div>;
+  if (failed) return <div className="muted">{t(m.readFailedWith, { error: failed })}</div>;
+  if (!detail) return <div className="hint">{t(m.loading)}</div>;
   const marks = changeMarks(detail.comments, detail.changeRefs);
-  const ci = { pass: "local-ci 合格", fail: "local-ci 不合格", stale: "local-ci は前の head / base のもの" } as const;
+  const ci = { pass: t(m.ciPass), fail: t(m.ciFail), stale: t(m.ciStale) } as const;
   return (
     <div className="change-detail" data-change={props.number}>
       <div className="hint change-marks">
         head {short(detail.changeRefs?.head)} · base {short(detail.changeRefs?.base)}
         {" · "}
-        {marks.review ? `最新のレビュー: ${marks.review.runner}（${jstDateTime(Date.parse(marks.review.at))}）` : "レビューなし"}
+        {marks.review ? t(m.latestReview, { runner: marks.review.runner, at: jstDateTime(Date.parse(marks.review.at)) }) : t(m.noReview)}
         {" · "}
-        {marks.localCi ? ci[marks.localCi] : "local-ci なし"}
-        {marks.rechecks.length > 0 && ` · 再チェック ${marks.rechecks.join(", ")}`}
+        {marks.localCi ? ci[marks.localCi] : t(m.noCi)}
+        {marks.rechecks.length > 0 && t(m.rechecks, { list: marks.rechecks.join(", ") })}
       </div>
-      <pre className="wrap">{detail.issue.body || "（本文なし）"}</pre>
+      <pre className="wrap">{detail.issue.body || t(m.noBody)}</pre>
       {detail.comments.map((c) => (
         <div key={c.id} className="change-comment">
           <div className="hint">{jstDateTime(Date.parse(c.createdAt))}</div>
@@ -436,13 +439,13 @@ function Changes(props: { changes: BacklogData["changes"] }) {
     <section className="card backlog-changes">
       <div className="row head">
         <h5>
-          変更 <span className="hint">{opened.length}</span>
+          {t(m.changes)} <span className="hint">{opened.length}</span>
         </h5>
       </div>
       {opened.map(row)}
       {closed.length > 0 && (
         <details>
-          <summary className="hint">閉じた変更 {closed.length}</summary>
+          <summary className="hint">{t(m.closedChanges, { n: closed.length })}</summary>
           {closed.map(row)}
         </details>
       )}
@@ -495,12 +498,12 @@ function NewIssue(props: { workspaces: Workspace[]; current: string; onCreated: 
         setNote(savedWords(keptHere(ws)).created);
         props.onCreated();
       })
-      .catch((e) => setNote(`作れませんでした（入力は残しています）: ${String(e.message ?? e)}`))
+      .catch((e) => setNote(t(m.createFailed, { error: String(e.message ?? e) })))
       .finally(() => setSaving(false));
   };
   return (
     <details className="backlog-new" open={saved !== null || undefined}>
-      <summary>新しい Issue</summary>
+      <summary>{t(m.newIssue)}</summary>
       {props.workspaces.length > 1 && (
         <select value={ws} disabled={saving} onChange={(e) => switchTo(e.target.value)}>
           {props.workspaces.map((w) => (
@@ -511,13 +514,13 @@ function NewIssue(props: { workspaces: Workspace[]; current: string; onCreated: 
         </select>
       )}
       <select value={kind} disabled={saving} onChange={(e) => (keep({ title, body, kind: e.target.value as typeof kind }), setKind(e.target.value as typeof kind))}>
-        <option value="type:request">要望（type:request）</option>
-        <option value="type:pbi">PBI（type:pbi）</option>
+        <option value="type:request">{t(m.kindRequest)}</option>
+        <option value="type:pbi">{t(m.kindPbi)}</option>
       </select>
-      <input value={title} placeholder="題" disabled={saving} onChange={(e) => (keep({ title: e.target.value, body, kind }), setTitle(e.target.value))} />
-      <textarea rows={4} value={body} placeholder="本文" disabled={saving} onChange={(e) => (keep({ title, body: e.target.value, kind }), setBody(e.target.value))} />
+      <input value={title} placeholder={t(m.fieldTitle)} disabled={saving} onChange={(e) => (keep({ title: e.target.value, body, kind }), setTitle(e.target.value))} />
+      <textarea rows={4} value={body} placeholder={t(m.fieldBody)} disabled={saving} onChange={(e) => (keep({ title, body: e.target.value, kind }), setBody(e.target.value))} />
       <button className="pri" disabled={saving || !title.trim() || !ws} onClick={create}>
-        手元に保存
+        {t(m.saveLocally)}
       </button>
       {note && <div className="hint backlog-note">{note}</div>}
       {made.map((m) => (
@@ -555,7 +558,7 @@ function Decision(props: { item: BacklogItem; onAnswered: (item: BacklogItem) =>
     api
       .answerBacklog(props.item.workspaceId, props.item.number, text, d?.issue)
       .then(() => props.onAnswered(props.item))
-      .catch((e) => props.onError(`#${props.item.number} に回答できませんでした: ${String(e.message ?? e)}`))
+      .catch((e) => props.onError(t(m.answerFailed, { n: props.item.number, error: String(e.message ?? e) })))
       .finally(() => setSending(false));
   };
   return (
@@ -568,19 +571,19 @@ function Decision(props: { item: BacklogItem; onAnswered: (item: BacklogItem) =>
               <IssueLink url={props.item.url.replace(/\/issues\/\d+$/, `/issues/${d.issue}`)}>
                 Task #{d.issue}
               </IssueLink>{" "}
-              の判断待ち
+              {t(m.taskDecision)}
             </div>
           )}
-          <div className="hint">{jstDateTime(Date.parse(d.at))} の問い</div>
+          <div className="hint">{t(m.askedAt, { at: jstDateTime(Date.parse(d.at)) })}</div>
           <pre className="wrap">{d.body}</pre>
           <Mockups list={mockups} />
         </>
       ) : (
-        <div className="muted">「## 判断待ち」のコメントが見つかりません（Issue を開いて確かめてください）</div>
+        <div className="muted">{t(m.noDecision)}</div>
       )}
-      <textarea rows={3} value={text} placeholder="回答（Issue に「## 回答」として書かれ、判断待ちのラベルが外れます）" onChange={(e) => setText(e.target.value)} />
+      <textarea rows={3} value={text} placeholder={t(m.answerPlaceholder)} onChange={(e) => setText(e.target.value)} />
       <button className="pri" disabled={sending || !text.trim()} onClick={send}>
-        回答する
+        {t(m.answer)}
       </button>
     </div>
   );
@@ -591,7 +594,7 @@ function Decision(props: { item: BacklogItem; onAnswered: (item: BacklogItem) =>
  * there is more (plain text, like the ## 判断待ち).
  */
 function reportHead(body: string): string {
-  const lines = body.trim().replace(/^## 状況[^\n]*/, "").trim().split("\n");
+  const lines = body.trim().replace(/^## 状況[^\n]*/, "").trim().split("\n"); // compared with the report's heading in the Issue body
   return lines.length > REPORT_LINES ? `${lines.slice(0, REPORT_LINES).join("\n")}\n…` : lines.join("\n");
 }
 
@@ -609,7 +612,7 @@ function InProgressFacts(props: { item: BacklogItem; now: number; onOpenTask: (i
       <span className="m state" data-state={state.running ? "running" : "stopped"}>
         {state.label}
       </span>
-      <span className="m">更新 {ago(item.updatedAt, now)}</span>
+      <span className="m">{t(m.updated, { ago: ago(item.updatedAt, now) })}</span>
       <LastTask {...props} />
     </>
   );
@@ -624,7 +627,7 @@ function LastTask(props: { item: BacklogItem; now: number; onOpenTask: (id: stri
   if (!last || last.id === props.item.activeTaskId) return null;
   return (
     <button className="ghost link" onClick={() => props.onOpenTask(last.id)}>
-      {lastTaskLine(last, props.now, props.item.replyWaiting ? "返事待ち" : undefined)}
+      {lastTaskLine(last, props.now, props.item.replyWaiting ? t(m.replyWaiting) : undefined)}
     </button>
   );
 }
@@ -642,29 +645,29 @@ function Waits(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; 
   const chain = waitChain(item, props.items);
   const owner = (w: BacklogItem["waits"][number]) => {
     const o = waitOwner(w, item, props.items);
-    if (!o) return <> ← 不明</>;
-    const t = o.task;
+    if (!o) return <>{t(m.ownerUnknown)}</>;
+    const task = o.task;
     return (
       <>
         {" ← "}
         <IssueLink url={o.pbi.url}>
           #{o.pbi.number} {o.pbi.title}
         </IssueLink>
-        {" の "}
-        {t === "unknown" ? (
-          "Task 不明"
-        ) : t === null ? (
-          "工程 Task なし"
+        {t(m.ownerOf)}
+        {task === "unknown" ? (
+          t(m.taskUnknown)
+        ) : task === null ? (
+          t(m.noStageTask)
         ) : (
-          <button className="ghost link" onClick={() => props.onOpenTask(t.id)}>
-            Task {t.id}（{t.label}）
+          <button className="ghost link" onClick={() => props.onOpenTask(task.id)}>
+            {t(m.ownerTask, { id: task.id, label: task.label })}
           </button>
         )}
         {o.startable && (
           <>
             {" "}
             <button className="ghost" disabled={props.starting !== null} onClick={() => props.onStart(o.pbi.number)}>
-              続きを始める
+              {t(m.continue)}
             </button>
           </>
         )}
@@ -676,11 +679,12 @@ function Waits(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; 
       const r = waitRef(w);
       return (
         <Fragment key={w.number}>
-          {n > 0 && "・"}
+          {n > 0 && t(m.listSep)}
           <IssueLink url={waitUrl(row, w)}>
             {r.ref}
           </IssueLink>
-          （{r.state}）{owners && owner(w)}
+          {t(m.paren, { text: r.state })}
+          {owners && owner(w)}
         </Fragment>
       );
     });
@@ -695,19 +699,20 @@ function Waits(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; 
       </div>
       {chain.length > 0 && (
         <details>
-          <summary>待ちの先（{chain.length}）</summary>
+          <summary>{t(m.chain, { n: chain.length })}</summary>
           {chain.map((s, n) => (
             <div key={n} style={{ paddingLeft: `${s.depth + 1}em` }}>
-              #{s.via.number} の先:{" "}
+              {t(m.chainVia, { n: s.via.number })}{" "}
               {s.parent ? (
                 <>
                   <IssueLink url={s.parent.url}>
                     #{s.parent.number}
                   </IssueLink>{" "}
-                  が待つ {refs(s.parent.waits, s.parent)}
+                  {t(m.chainWaits)}
+                  {refs(s.parent.waits, s.parent)}
                 </>
               ) : (
-                "未取得"
+                t(m.notRead)
               )}
             </div>
           ))}
@@ -727,13 +732,13 @@ function Prereqs(props: { item: BacklogItem }) {
   const parts = (ps: PrereqPart[]) =>
     ps.map((p, n) => (
       <Fragment key={`${p.via}:${p.ref}`}>
-        {n > 0 && "・"}
+        {n > 0 && t(m.listSep)}
         {p.via !== null && (
           <>
             <IssueLink url={p.viaUrl!}>
               Task #{p.via}
             </IssueLink>
-            {" の前提 "}
+            {t(m.prereqOf)}
           </>
         )}
         <IssueLink url={p.url}>
@@ -744,8 +749,8 @@ function Prereqs(props: { item: BacklogItem }) {
     ));
   return (
     <div className="backlog-prereqs hint" data-issue={props.item.url}>
-      {waiting.length > 0 && <div>前提: {parts(waiting)}</div>}
-      {stuck.length > 0 && <div className="warn">進められない: {parts(stuck)}</div>}
+      {waiting.length > 0 && <div>{t(m.prereqs)}{parts(waiting)}</div>}
+      {stuck.length > 0 && <div className="warn">{t(m.stuck)}{parts(stuck)}</div>}
     </div>
   );
 }
@@ -761,19 +766,19 @@ function Overlap(props: { item: BacklogItem }) {
     <div className="backlog-overlap hint warn" data-issue={props.item.url}>
       {line.hits.length > 0 && (
         <div>
-          重なり:{" "}
+          {t(m.overlap)}{" "}
           {line.hits.map((h, n) => (
             <Fragment key={`${h.ref}:${h.path}`}>
-              {n > 0 && "・"}
+              {n > 0 && t(m.listSep)}
               <IssueLink url={h.url}>
                 {h.ref}
               </IssueLink>
-              （{h.path}）
+              {t(m.paren, { text: h.path })}
             </Fragment>
           ))}
         </div>
       )}
-      {line.unknown !== null && <div>重なりを判定できない: {line.unknown}</div>}
+      {line.unknown !== null && <div>{t(m.overlapUnknown, { reason: line.unknown })}</div>}
     </div>
   );
 }
@@ -782,7 +787,7 @@ function Overlap(props: { item: BacklogItem }) {
  * A row's buttons (#2696: a board tile's too): the running stage Task's link, else the stage's start button and 閉じる
  * when the PBI can be closed.
  */
-function RowActions(props: { item: BacklogItem; now: number; starting: number | null; onStart: (action: BacklogAction) => void; onOpenTask: (id: string) => void }) {
+function RowActions(props: { item: BacklogItem; now: number; starting: number | null; metaId: string | null; onStart: (action: BacklogAction) => void; onOpenTask: (id: string) => void }) {
   const { item: i, now, starting } = props;
   if (i.activeTaskId)
     return (
@@ -791,6 +796,7 @@ function RowActions(props: { item: BacklogItem; now: number; starting: number | 
       </button>
     );
   const action = startButton(i);
+  const direct = directButton(i, props.metaId);
   return (
     <>
       {action && (
@@ -798,12 +804,17 @@ function RowActions(props: { item: BacklogItem; now: number; starting: number | 
           {action[1]}
         </button>
       )}
+      {direct && (
+        <button className="ghost" disabled={starting !== null} onClick={() => props.onStart(direct[0])}>
+          {direct[1]}
+        </button>
+      )}
       {/* #531: every Task closed and no confirmation left — pbi-complete's step 6 writes the result and closes it */}
       {i.closable && (
         <>
-          <span className="m">閉じられる</span>
+          <span className="m">{t(m.closable)}</span>
           <button className="ghost" disabled={starting !== null} onClick={() => props.onStart("close")}>
-            閉じる
+            {t(m.close)}
           </button>
         </>
       )}
@@ -816,7 +827,7 @@ function RowActions(props: { item: BacklogItem; now: number; starting: number | 
  * needs-decision tile is its title only and opens on the question and the answer box, which stays (with what was typed)
  * when it is closed again.
  */
-function Tile(props: { item: BacklogItem; now: number; starting: number | null; onStart: (action: BacklogAction) => void; onOpenTask: (id: string) => void; onAnswered: (item: BacklogItem) => void; onError: (msg: string) => void }) {
+function Tile(props: { item: BacklogItem; now: number; starting: number | null; metaId: string | null; onStart: (action: BacklogAction) => void; onOpenTask: (id: string) => void; onAnswered: (item: BacklogItem) => void; onError: (msg: string) => void }) {
   const { item: i } = props;
   const [opened, setOpened] = useState(false);
   if (i.stage === "needs-decision")
@@ -836,7 +847,7 @@ function Tile(props: { item: BacklogItem; now: number; starting: number | null; 
       </IssueLink>
       <div className="row">
         {facts && <span className="m">{facts}</span>}
-        <RowActions item={i} now={props.now} starting={props.starting} onStart={props.onStart} onOpenTask={props.onOpenTask} />
+        <RowActions item={i} now={props.now} starting={props.starting} metaId={props.metaId} onStart={props.onStart} onOpenTask={props.onOpenTask} />
       </div>
     </div>
   );
@@ -858,8 +869,8 @@ function toggle<T>(list: T[], v: T): T[] {
  * one part always on the heading; the conditions it sets are kept by the caller.
  */
 const LAYOUTS: Array<[BacklogView["layout"], string]> = [
-  ["list", "一覧"],
-  ["board", "ボード"],
+  ["list", t(m.layoutList)],
+  ["board", t(m.layoutBoard)],
 ];
 
 function ViewPicker(props: { view: BacklogView; onChange: (v: BacklogView) => void }) {
@@ -872,7 +883,7 @@ function ViewPicker(props: { view: BacklogView; onChange: (v: BacklogView) => vo
     ));
   return (
     <details className="backlog-view">
-      <summary>表示</summary>
+      <summary>{t(m.view)}</summary>
       <div className="backlog-view-body">
         <div className="chips">
           {LAYOUTS.map(([k, label]) => (
@@ -882,7 +893,7 @@ function ViewPicker(props: { view: BacklogView; onChange: (v: BacklogView) => vo
           ))}
         </div>
         <label>
-          並べ替え{" "}
+          {t(m.sort)}{" "}
           <select value={view.sort} onChange={(e) => onChange({ ...view, sort: e.target.value as BacklogView["sort"] })}>
             {SORTS.map(([k, label]) => (
               <option key={k} value={k}>
@@ -894,10 +905,10 @@ function ViewPicker(props: { view: BacklogView; onChange: (v: BacklogView) => vo
         <div className="chips">{chips(STAGES, view.stages, (stages) => ({ ...view, stages }))}</div>
         <div className="chips">{chips(TYPES, view.types, (types) => ({ ...view, types }))}</div>
         <div className="chips">{chips(PRIORITIES.map((p): [string, string] => [p, p]), view.priorities, (priorities) => ({ ...view, priorities }))}</div>
-        <input type="search" placeholder="題か番号" value={view.query} onChange={(e) => onChange({ ...view, query: e.target.value })} />
+        <input type="search" placeholder={t(m.searchPlaceholder)} value={view.query} onChange={(e) => onChange({ ...view, query: e.target.value })} />
         {viewSummary(view) && (
           <button className="ghost" onClick={() => onChange(resetView(view))}>
-            元に戻す
+            {t(m.resetView)}
           </button>
         )}
       </div>
@@ -924,6 +935,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
     saveView(localStorage, next);
   };
   const summary = viewSummary(view);
+  const metaId = workspaces?.find((w) => w.kind === "meta")?.id ?? null;
   const projectVars = workspaces && Object.fromEntries(workspaces.map((w) => [w.id, w.projectVar]));
   const key = (i: BacklogItem) => `${i.workspaceId}:${i.number}`;
   // a remembered workspace that is no longer registered shows everything
@@ -958,7 +970,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
       .catch((e) => {
         const running = (e.body as { taskId?: string } | undefined)?.taskId;
         if (e.status === 409 && running) props.onOpenTask(running);
-        else props.onError(`#${number} を始められませんでした: ${String(e.message ?? e)}`);
+        else props.onError(t(m.startFailed, { n: number, error: String(e.message ?? e) }));
       })
       .finally(() => setStarting(null));
   };
@@ -983,7 +995,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
       .catch((e) => {
         const message = String(e.message ?? e);
         setFailure(message);
-        props.onError(`GitHub を読めませんでした: ${message}`);
+        props.onError(t(m.githubReadFailed, { error: message }));
       })
       .finally(() => setBusy(false));
   };
@@ -1009,18 +1021,18 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
           <h5>Backlog</h5>
           <span className="hint backlog-heading">{backlogHeading(data?.fetchedAt ?? null, busy, workspaces ? workspaces.filter((w) => inView(w.id)).map((w) => w.backlog) : null)}</span>
           <button className="ghost" disabled={busy} onClick={() => load(true)}>
-            再読込
+            {t(m.reload)}
           </button>
           <ViewPicker view={view} onChange={changeView} />
           <button className="pri" onClick={() => props.onFeedback(current ? { id: current, name: currentName ?? current } : undefined)}>
-            要望を登録
+            {t(m.fileRequest)}
           </button>
         </div>
         {summary && (
           <div className="hint backlog-view-line">
             {summary}{" "}
             <button className="ghost link" onClick={() => changeView(resetView(view))}>
-              元に戻す
+              {t(m.resetView)}
             </button>
           </div>
         )}
@@ -1031,7 +1043,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
               <>
                 {" "}
                 <a href={promotion.link} target="_blank" rel="noreferrer">
-                  救援画面 →
+                  {t(m.rescuePage)}
                 </a>
               </>
             )}
@@ -1039,13 +1051,14 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
         )}
         {approvals > 0 && (
           <button className="ghost link" onClick={props.onOpenSchedules}>
-            承認待ち {approvals} 件 →
+            {t(m.approvalsWaiting, { n: approvals })}
           </button>
         )}
         {workspaces && workspaces.length > 1 && (
           <nav className="subtabs backlog-ws">
             <button className={current === "" ? "on" : ""} onClick={() => show("")}>
-              すべて{data ? ` ${data.items.length}` : ""}
+              {t(m.all)}
+              {data ? ` ${data.items.length}` : ""}
             </button>
             {workspaces.map((w) => (
               <button key={w.id} className={current === w.id ? "on" : ""} onClick={() => show(w.id)}>
@@ -1055,13 +1068,13 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
             ))}
           </nav>
         )}
-        {failure && <div className="muted">GitHub を読めませんでした: {failure}</div>}
+        {failure && <div className="muted">{t(m.githubReadFailed, { error: failure })}</div>}
         {data?.syncs.filter((x) => inView(x.workspaceId)).map((x) => (
           <div key={x.workspaceId} className="hint backlog-sync" data-workspace={x.workspaceId}>
             <SyncLine sync={x.sync} line={githubSyncText(x)} scope={data.syncs.length > 1 ? (workspaces?.find((w) => w.id === x.workspaceId)?.name ?? x.workspaceId) : undefined} />
             {x.creates.map((c) => (
               <div key={c.localId} className="m" data-sync={c.state}>
-                番号なし（{createWord(c.state)}）: {c.title}
+                {t(m.createNoNumber, { word: createWord(c.state), title: c.title })}
               </div>
             ))}
             {x.issues.map((h) => (
@@ -1103,7 +1116,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
                   {label} <span className="hint">{items.length}</span>
                 </h5>
                 {items.map((i) => (
-                  <Tile key={key(i)} item={i} now={now} starting={starting} onStart={(action) => start(i.workspaceId, i.number, action)} onOpenTask={props.onOpenTask} onAnswered={answered} onError={props.onError} />
+                  <Tile key={key(i)} item={i} now={now} starting={starting} metaId={metaId} onStart={(action) => start(i.workspaceId, i.number, action)} onOpenTask={props.onOpenTask} onAnswered={answered} onError={props.onError} />
                 ))}
               </section>
             ))}
@@ -1121,7 +1134,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
                   {label} <span className="hint">{items.length}</span>
                 </h5>
               </div>
-              {items.length === 0 && <div className="muted">なし</div>}
+              {items.length === 0 && <div className="muted">{t(m.none)}</div>}
               {items.map((i) =>
                 i.stage === "needs-decision" ? (
                   // a card, not a row: the whole title is the link, then the question and the answer box
@@ -1147,13 +1160,13 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
                   </span>
                   <span className="m workspace">{i.workspaceName}</span>
                   {i.tasks && <span className="m num">Task {i.tasks.done}/{i.tasks.total}</span>}
-                  {readyPending(i) && <span className="m">分解済み・Ready 待ち</span>}
+                  {readyPending(i) && <span className="m">{t(m.readyPending)}</span>}
                   <span className="m">
                     {[i.storyPoints !== null ? `SP ${i.storyPoints}` : null, i.priority].filter(Boolean).join(" · ")}
                   </span>
                   {i.stage === "in-progress" && <InProgressFacts item={i} now={now} onOpenTask={props.onOpenTask} />}
                   {(i.stage === "ready" || (i.replyWaiting && i.stage !== "in-progress")) && <LastTask item={i} now={now} onOpenTask={props.onOpenTask} />}
-                  <RowActions item={i} now={now} starting={starting} onStart={(action) => start(i.workspaceId, i.number, action)} onOpenTask={props.onOpenTask} />
+                  <RowActions item={i} now={now} starting={starting} metaId={metaId} onStart={(action) => start(i.workspaceId, i.number, action)} onOpenTask={props.onOpenTask} />
                 </div>
                 <div className="backlog-syncline">
                   <SyncLine sync={i.sync} />
@@ -1162,7 +1175,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
                 <Mockups list={i.mockups} />
                 {i.stage === "in-progress" && i.report && (
                   <div className="backlog-report">
-                    <div className="hint">{jstDateTime(Date.parse(i.report.at))} の状況</div>
+                    <div className="hint">{t(m.reportAt, { at: jstDateTime(Date.parse(i.report.at)) })}</div>
                     <pre className="wrap">{reportHead(i.report.body)}</pre>
                   </div>
                 )}

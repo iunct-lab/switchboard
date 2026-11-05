@@ -10,7 +10,9 @@
  * - A `create` / `comment` carries an invisible marker with the operation's id (not a secret: it signs nothing in).
  *   Its answer lost (an outage after the request went out, a restart while `sending`) → `unknown`: before anything is
  *   posted again, every Issue / comment written since the operation was made is read for the marker. Found → done with
- *   its id; not found, or not all read → still `unknown`, never posted again by itself.
+ *   its id; every page read and not found → posted again with the same marker (#3804), and the marked ones read again:
+ *   two found (the first one was made after all), the later one is closed / deleted; not all read → still `unknown`,
+ *   looked for again by the next send. The error that made it `unknown` is kept in front of the later looks' (`firstError`).
  * - A limit (429, a secondary limit) stops the run until GitHub's time (`Limit`), and so does GitHub not reached at all
  *   (no connection: nothing left, so a post waits as it is, not unknown) and the login refused (401: asked again by the
  *   next send, nothing failed for it); a permission refused on one thing (403) or a refused input (4xx) → `failed`,
@@ -25,12 +27,47 @@ import { backlogFieldValue, sameBacklogValue } from "./backlog-merge.ts";
 import { parseIncluded, responseOf, retryAtFromResponse, type GithubResponse } from "../../../ops-kit/src/gh.ts";
 import { fieldValue, type Field } from "../../../ops-kit/src/set.ts";
 import { checkForgeOperation, ForgeRefused, ForgeUnsupported, textsOf, type ForgeImpl, type ForgeKind, type ForgeOperation, type ForgeTarget } from "../../../ops-kit/src/forge.ts";
-import { createGitlabIssue, findGitlabMarked, GitlabError, gitlabId, gitlabMilestoneId, postGitlabNote, readGitlabIssue, runGlab, statusOf, updateGitlabIssue, type Sh } from "../../../ops-kit/src/forge-gitlab.ts";
+import { createGitlabIssue, findGitlabMarked, GitlabError, gitlabId, gitlabMilestoneId, glabApi, postGitlabNote, projectPath, readGitlabIssue, runGlab, statusOf, updateGitlabIssue, type Sh } from "../../../ops-kit/src/forge-gitlab.ts";
 
 /** Tries of an operation whose request failed with an outage before it is `failed`. */
 const MAX_ATTEMPTS = 5;
 const marker = (id: string) => `<!-- switchboard-op:${id} -->`;
 const marked = (body: string, id: string) => `${body}\n\n${marker(id)}`;
+
+const FIRST = "最初の失敗: ";
+const LOOK = " / 照合: ";
+/**
+ * The error an operation still `unknown` is held with (#3804): the one that first made it `unknown` stays in front, the
+ * look that left it so (`now`) after it — a later look does not write over why it was held. Any other op: `now`.
+ */
+export function firstError(op: Pick<BacklogOperation, "status" | "error">, now: string): string {
+  if (op.status !== "unknown" || !op.error) return now;
+  const first = op.error.startsWith(FIRST) ? op.error.slice(FIRST.length).split(LOOK)[0]! : op.error;
+  return `${FIRST}${first.slice(0, 200)}${LOOK}${now}`.slice(0, 300);
+}
+
+/**
+ * Of the posts carrying an operation's marker (#3804), the first made (by `order`) is kept and the rest dropped (an
+ * Issue closed, a comment deleted): a post made again while the first one was carried out and showed late, or both
+ * answers lost. Resolves to the one kept. A drop that fails goes to `failed` (a limit is kept for the run) and the rest
+ * are left: the one kept is the operation's either way.
+ */
+async function keepFirst<T>(hits: T[], order: (a: T, b: T) => number, drop: (x: T) => Promise<unknown>, onWrite: () => void, failed: (e: unknown) => void): Promise<T> {
+  const [kept, ...rest] = [...hits].sort(order);
+  try {
+    for (const x of rest) {
+      await drop(x);
+      onWrite();
+    }
+  } catch (e) {
+    failed(e);
+  }
+  return kept!;
+}
+const byCreated = (a: { created_at?: string }, b: { created_at?: string }) => String(a.created_at).localeCompare(String(b.created_at));
+const byNumber = (a: { number: number }, b: { number: number }) => a.number - b.number;
+const byId = (a: Record<string, unknown>, b: Record<string, unknown>) => (a.id as number) - (b.id as number);
+const byIid = (a: Record<string, unknown>, b: Record<string, unknown>) => (a.iid as number) - (b.iid as number);
 
 /**
  * The run stops and the operation waits as it was (not a try): `limit` = GitHub said to wait until `until` (its answer
@@ -408,26 +445,51 @@ class Sender {
     }
   }
 
-  /** Pages of a list since the operation was made, for its marker; null = not every page could be read. */
-  private async findMarked(path: string, id: string, since: number): Promise<any | null> {
+  /**
+   * Pages of a list since the operation was made, for its marker: every one marked, in the list's order ([] = every page
+   * read, none marked); null = not every page could be read.
+   */
+  private async findMarked(path: string, id: string, since: number): Promise<any[] | null> {
+    const hits: any[] = [];
     for (let page = 1; page <= 10; page++) {
       const list = (await call(this.gh, this.cwd, [this.repo(`${path}${path.includes("?") ? "&" : "?"}since=${new Date(since - 60_000).toISOString()}&per_page=100&page=${page}`)])) as Array<{ body?: string | null }>;
-      const hit = list.find((x) => x.body?.includes(marker(id)));
-      if (hit || list.length < 100) return hit ?? undefined;
+      hits.push(...list.filter((x) => x.body?.includes(marker(id))));
+      if (list.length < 100) return hits;
     }
     return null;
+  }
+
+  /** A read or write after the post failed (#3804): its outcome stands, and a limit / GitHub not reached / the login refused stops the run after it. */
+  private held = (e: unknown) => {
+    const wait = e instanceof CallError ? waitOf(e, this.now()) : null;
+    if (wait) this.stopAfter = wait;
+  };
+
+  /**
+   * The marked ones of an operation (#3804), the first made kept: `hits` as read, or read once more after a post made
+   * again (`made` then, when they cannot be read — the second one, if any, is not looked for again).
+   */
+  private async keep(path: string, op: BacklogOperation, hits: any[] | null, made: any, order: (a: any, b: any) => number, drop: (x: any) => Promise<unknown>): Promise<any> {
+    if (hits === null) hits = await this.findMarked(path, op.id, op.createdAt).catch((e) => (this.held(e), null));
+    return hits?.length ? keepFirst(hits, order, drop, this.onWrite, this.held) : made;
   }
 
   private async comment(op: BacklogOperation, posting: { on: boolean }): Promise<Outcome> {
     const n = this.numberOf(op.issue);
     const body = (op.payload as { body: string }).body;
-    let c = op.status === "unknown" ? await this.findMarked(`/issues/${n}/comments`, op.id, op.createdAt) : undefined;
-    if (op.status === "unknown" && !c) return { status: "unknown", error: c === null ? "送ったかどうかを確かめきれません" : "GitHub にこのコメントが見つかりません。送ったかどうか分からないので、もう一度は送りません" };
+    const path = `/issues/${n}/comments`;
+    const hits = op.status === "unknown" ? await this.findMarked(path, op.id, op.createdAt) : [];
+    if (!hits) return { status: "unknown", error: firstError(op, "送ったかどうかを確かめきれません") };
+    const drop = (x: any) => graphql(this.gh, this.cwd, "mutation($i:ID!){ deleteIssueComment(input:{id:$i}){ clientMutationId } }", { i: x.node_id });
+    // found (more than one when a post made again had its answer lost too): the first one stays
+    let c = await this.keep(path, op, hits, undefined, byCreated, drop);
     if (!c) {
       posting.on = true;
-      c = await call(this.gh, this.cwd, [this.repo(`/issues/${n}/comments`), "-X", "POST", "-f", `body=${marked(body, op.id)}`]);
+      c = await call(this.gh, this.cwd, [this.repo(path), "-X", "POST", "-f", `body=${marked(body, op.id)}`]);
       this.onWrite();
       if (typeof c?.node_id !== "string") throw new Error("GitHub の答えにコメントの id がありません");
+      // made again after every page was read without it (#3804): the first one, shown late, stays (the list is oldest first)
+      if (op.status === "unknown") c = await this.keep(path, op, null, c, byCreated, drop);
     }
     return { status: "done", remoteId: c.node_id, record: { externalId: c.node_id, remote: { issue: n, body: c.body, createdAt: c.created_at } } };
   }
@@ -435,9 +497,13 @@ class Sender {
   private async create(op: BacklogOperation, posting: { on: boolean }): Promise<Outcome> {
     const p = op.payload as BacklogCreatePayload;
     let made: any = op.remoteId ? (await graphql(this.gh, this.cwd, "query($i:ID!){ node(id:$i){ ... on Issue{ node_id: id number html_url: url title body state created_at: createdAt updated_at: updatedAt } } }", { i: op.remoteId })).node : undefined;
+    const path = "/issues?state=all&sort=created&direction=desc";
+    const drop = (x: any) => call(this.gh, this.cwd, [this.repo(`/issues/${x.number}`), "-X", "PATCH", "-f", "state=closed", "-f", "state_reason=not_planned"]);
     if (!made && op.status === "unknown") {
-      made = await this.findMarked("/issues?state=all&sort=created&direction=desc", op.id, op.createdAt);
-      if (!made) return { status: "unknown", error: made === null ? "作ったかどうかを確かめきれません" : "GitHub にこの Issue が見つかりません。作ったかどうか分からないので、もう一度は作りません" };
+      const hits = await this.findMarked(path, op.id, op.createdAt);
+      if (!hits) return { status: "unknown", error: firstError(op, "作ったかどうかを確かめきれません") };
+      // found: the first made stays (the list is newest first). None, every page read: made again below with the same marker (#3804)
+      made = await this.keep(path, op, hits, undefined, byNumber, drop);
     }
     if (!made) {
       const milestone = await this.milestone(p.milestone);
@@ -446,6 +512,8 @@ class Sender {
       this.onWrite();
       if (typeof made?.node_id !== "string" || typeof made?.number !== "number") throw new Error("GitHub の答えに Issue の id がありません");
       posting.on = false;
+      // the first one made, shown late, stays: the later ones are closed as not planned
+      if (op.status === "unknown") made = await this.keep(path, op, null, made, byNumber, drop);
     }
     const n = made.number as number;
     const remote: BacklogIssueData = {
@@ -455,6 +523,8 @@ class Sender {
     // the Issue exists: kept at once with its id (what the create itself made: open, no parent), so a failure in the
     // steps after it neither makes it again nor leaves the record apart from it
     this.db.setBacklogOperationResult(op.id, { status: "sending", remoteId: made.node_id, record: { externalId: made.node_id, remote: { ...remote, state: "OPEN", stateReason: null, parent: null } } }, this.now());
+    // a duplicate's cleanup met a limit (#3804): the steps after it wait for GitHub's time, from the Issue kept
+    if (this.stopAfter && (p.state === "CLOSED" || p.parent !== null || p.project)) throw this.stopAfter;
     if (p.state === "CLOSED") await call(this.gh, this.cwd, [this.repo(`/issues/${n}`), "-X", "PATCH", "-f", "state=closed"]);
     if (p.parent !== null) await this.setParent(await this.issue(n), p.parent);
     if (p.project) {
@@ -471,13 +541,13 @@ class Sender {
       return op.kind === "set" ? await this.set(op) : op.kind === "comment" ? await this.comment(op, posting) : await this.create(op, posting);
     } catch (e) {
       // the sync turned off before a write went out: the operation waits as it was
-      if (e instanceof Limit && e.kind === "off") throw e;
+      if (e instanceof Limit && (e.kind === "off" || e === this.stopAfter)) throw e;
       const at = this.now();
       const message = String((e as Error)?.message ?? e).slice(0, 300);
       // whether GitHub carried out a post is not known (its answer lost or unreadable, or the look for it failed):
       // looked for again, never posted again blindly
       const unsure = posting.on || (op.kind !== "set" && op.status === "unknown" && !op.remoteId);
-      if (!(e instanceof CallError)) return { status: unsure ? "unknown" : "failed", error: message };
+      if (!(e instanceof CallError)) return { status: unsure ? "unknown" : "failed", error: unsure ? firstError(op, message) : message };
       const wait = waitOf(e, at);
       if (wait) throw wait;
       const c = retryAtFromResponse(e.response, at);
@@ -503,7 +573,7 @@ class Sender {
         if (now !== undefined && sameBacklogValue(op.field!, now, op.payload)) return { status: "done", error: ALREADY };
       }
       if (refused && (posting.on || !unsure)) return { status: "failed", error: e.message };
-      if (unsure) return { status: "unknown", error: e.message };
+      if (unsure) return { status: "unknown", error: firstError(op, e.message) };
       if (op.attempt + 1 >= MAX_ATTEMPTS) return { status: "failed", error: `${MAX_ATTEMPTS} 回送れませんでした: ${e.message}` };
       return { status: "pending", retryAt: at + 60_000 * 2 ** op.attempt, error: e.message };
     }
@@ -519,6 +589,8 @@ class Sender {
  */
 class GitlabSender {
   onWrite: () => void = () => undefined;
+  /** A limit or the login refused met after a post was done (its duplicates' cleanup, #3804): the run stops after its outcome is stored. */
+  stopAfter: Limit | null = null;
   private target: ForgeTarget;
   constructor(private glab: Sh, private db: Db, source: BacklogSource, private now: () => number) {
     this.target = { service: "gitlab", host: source.host, repository: source.repository };
@@ -563,17 +635,47 @@ class GitlabSender {
     return same(after, op.payload) ? { status: "done" } : { status: "conflict", error: `送った直後の GitLab の値が送った値と違います（${op.field}: GitLab は ${JSON.stringify(after)}）。ほかの編集と重なりました` };
   }
 
+  private find(path: string, op: BacklogOperation) {
+    return findGitlabMarked(this.glab, this.target, path, marker(op.id), op.createdAt);
+  }
+
+  /**
+   * A read or write after the post failed (#3804): its outcome stands, and GitLab's 429, the login refused or GitLab not
+   * reached (no HTTP status, as `send` reads it) stops the run after it. The sync turned off stops the run by itself.
+   */
+  private held = (e: unknown) => {
+    if (e instanceof Limit) return;
+    const status = statusOf(e);
+    if (status === null) this.stopAfter = new Limit(this.now() + 60_000, "offline");
+    else if (status === 429) this.stopAfter = new Limit(this.now() + 60_000, "limit");
+    else if (status === 401) this.stopAfter = Object.assign(new Limit(this.now(), "auth"), { message: `${this.target.host} の glab のログインが通らないため送りません（次の送信で確かめ直します）` });
+  };
+
+  /** As the GitHub sender's `keep`: of `hits` (or read once more after a post made again), the first made stays; undefined = none. */
+  private async keep(path: string, op: BacklogOperation, hits: Array<Record<string, unknown>> | null, order: (a: Record<string, unknown>, b: Record<string, unknown>) => number, drop: (x: Record<string, unknown>) => Promise<unknown>): Promise<Record<string, unknown> | undefined> {
+    if (hits === null) hits = await this.find(path, op).catch((e) => (this.held(e), null));
+    return hits?.length ? keepFirst(hits, order, drop, this.onWrite, this.held) : undefined;
+  }
+
   private async comment(op: BacklogOperation, posting: { on: boolean }): Promise<Outcome> {
     const n = this.numberOf(op.issue);
-    let c: { id: string; body: string; createdAt: string } | undefined;
-    if (op.status === "unknown") {
-      const hit = await findGitlabMarked(this.glab, this.target, `/issues/${n}/notes?sort=desc&order_by=created_at`, marker(op.id), op.createdAt);
-      if (!hit) return { status: "unknown", error: hit === null ? "送ったかどうかを確かめきれません" : "GitLab にこのコメントが見つかりません。送ったかどうか分からないので、もう一度は送りません" };
-      c = { id: gitlabId("note", hit.id as number), body: String(hit.body), createdAt: String(hit.created_at) };
-    } else {
+    const path = `/issues/${n}/notes?sort=desc&order_by=created_at`;
+    const hits = op.status === "unknown" ? await this.find(path, op) : [];
+    if (!hits) return { status: "unknown", error: firstError(op, "送ったかどうかを確かめきれません") };
+    const note = (x: Record<string, unknown>) => ({ id: gitlabId("note", x.id as number), body: String(x.body), createdAt: String(x.created_at) });
+    const drop = (x: Record<string, unknown>) => glabApi(this.glab, this.target, `${projectPath(this.target)}/issues/${n}/notes/${x.id}`, { method: "DELETE" });
+    // found (more than one when a post made again had its answer lost too): the first note stays, the later ones are deleted
+    const found = await this.keep(path, op, hits, byId, drop);
+    let c = found && note(found);
+    if (!c) {
       posting.on = true;
       c = await postGitlabNote(this.glab, this.target, n, marked((op.payload as { body: string }).body, op.id));
       this.onWrite();
+      // made again after every page was read without it (#3804): the first one, shown late, stays
+      if (op.status === "unknown") {
+        const kept = await this.keep(path, op, null, byId, drop);
+        if (kept) c = note(kept);
+      }
     }
     return { status: "done", remoteId: c.id, record: { externalId: c.id, remote: { issue: n, body: c.body, createdAt: c.createdAt } } };
   }
@@ -581,20 +683,35 @@ class GitlabSender {
   private async create(op: BacklogOperation, posting: { on: boolean }): Promise<Outcome> {
     const p = op.payload as BacklogCreatePayload;
     let made: { id: string; number: number; url: string; body: string; createdAt: string; updatedAt: string } | undefined;
+    const path = "/issues?order_by=created_at&sort=desc&scope=all";
+    const issue = (x: Record<string, unknown>) => ({ id: gitlabId("issue", x.id as number), number: x.iid as number, url: String(x.web_url), body: String(x.description ?? ""), createdAt: String(x.created_at), updatedAt: String(x.updated_at) });
+    const drop = (x: Record<string, unknown>) => updateGitlabIssue(this.glab, this.target, x.iid as number, { state_event: "close" });
     if (op.remoteId || op.status === "unknown") {
-      const hit = await findGitlabMarked(this.glab, this.target, "/issues?order_by=created_at&sort=desc&scope=all", marker(op.id), op.createdAt);
-      if (!hit) return { status: "unknown", error: hit === null ? "作ったかどうかを確かめきれません" : "GitLab にこの Issue が見つかりません。作ったかどうか分からないので、もう一度は作りません" };
-      made = { id: gitlabId("issue", hit.id as number), number: hit.iid as number, url: String(hit.web_url), body: String(hit.description ?? ""), createdAt: String(hit.created_at), updatedAt: String(hit.updated_at) };
-    } else {
+      const hits = await this.find(path, op);
+      if (!hits) return { status: "unknown", error: firstError(op, "作ったかどうかを確かめきれません") };
+      // the Issue made already (its id kept) and not in the list: its steps go on from it, it is never made again
+      if (!hits.length && op.remoteId) return { status: "unknown", error: firstError(op, "GitLab にこの Issue が見つかりません。作った Issue の続きなので、もう一度は作りません") };
+      // found: the first made stays (the list is newest first), the later ones are closed
+      const found = await this.keep(path, op, hits, byIid, drop);
+      if (found) made = issue(found);
+    }
+    if (!made) {
       const milestone = p.milestone === null ? null : await gitlabMilestoneId(this.glab, this.target, p.milestone);
       posting.on = true;
       const i = await createGitlabIssue(this.glab, this.target, { title: p.title, description: marked(p.body, op.id), ...(p.labels.length ? { labels: p.labels.join(",") } : {}), ...(milestone === null ? {} : { milestone_id: String(milestone) }) });
       this.onWrite();
       posting.on = false;
       made = { id: i.id, number: i.number, url: i.url, body: i.body, createdAt: i.createdAt, updatedAt: i.updatedAt };
+      // made again after every page was read without it (#3804): the first one, shown late, stays
+      if (op.status === "unknown") {
+        const kept = await this.keep(path, op, null, byIid, drop);
+        if (kept) made = issue(kept);
+      }
     }
     const remote: BacklogIssueData = { number: made.number, title: p.title, url: made.url, state: p.state, stateReason: p.state === "CLOSED" ? "COMPLETED" : null, body: made.body, labels: p.labels, milestone: p.milestone, parent: p.parent, subIssues: [], createdAt: made.createdAt, updatedAt: made.updatedAt, closedAt: null };
     this.db.setBacklogOperationResult(op.id, { status: "sending", remoteId: made.id, record: { externalId: made.id, remote: { ...remote, state: "OPEN", stateReason: null } } }, this.now());
+    // a duplicate's cleanup met a limit (#3804): the close after it waits too, from the Issue kept
+    if (this.stopAfter && p.state === "CLOSED") throw this.stopAfter;
     if (p.state === "CLOSED") await updateGitlabIssue(this.glab, this.target, made.number, { state_event: "close" });
     return { status: "done", remoteId: made.id, record: { externalId: made.id, remote } };
   }
@@ -614,7 +731,7 @@ class GitlabSender {
       // whether GitLab carried out a post is not known (its answer lost, or the look for its marker failed): looked for
       // again, never posted again blindly
       const unsure = posting.on || (op.kind !== "set" && op.status === "unknown");
-      if (unsure && (status === null || status >= 500 || !posting.on)) return { status: "unknown", error: message };
+      if (unsure && (status === null || status >= 500 || !posting.on)) return { status: "unknown", error: firstError(op, message) };
       if (status === null) throw new Limit(at + 60_000, "offline");
       if (op.kind === "set" && (status === 409 || status === 412)) return { status: "conflict", error: `GitLab が書き込みを拒みました（${status}）。照合し直してください` };
       if (status < 500) return { status: "failed", error: message };
@@ -700,14 +817,16 @@ export async function sendGithubOperations(gh: GhRunner, db: Db, cwd: string, so
       out = await run(forged);
     } catch (e) {
       // refused or never sent: not a try
-      if (e instanceof Limit) db.setBacklogOperationResult(op.id, { status: op.status === "unknown" && op.kind !== "set" ? "unknown" : "pending", attempt: op.attempt, retryAt: e.kind === "limit" ? e.until : null, error: e.message }, now());
+      if (e instanceof Limit) db.setBacklogOperationResult(op.id, { status: op.status === "unknown" && op.kind !== "set" ? "unknown" : "pending", attempt: op.attempt, retryAt: e.kind === "limit" ? e.until : null, error: firstError(op, e.message) }, now());
       throw e;
     }
     db.setBacklogOperationResult(op.id, { retryAt: null, error: null, ...out }, now());
+    // why a post was first left unknown, for the daemon's log too (#3804): later looks keep it in front of theirs
+    if (out.status === "unknown" && op.status !== "unknown") console.error(`[backlog] ${source.repository}: ${op.kind} ${op.id} の結果が分かりません: ${out.error ?? ""}`);
     const item = op.targetKind === "project-item" ? sender.numberOf(db.getBacklogOperation(op.id)!.issue) : 0;
     if (item) onItem(item);
     // the read after a write met a limit: its outcome is kept, the rest waits as after any limit
-    if (sender.stopAfter) throw sender.stopAfter;
+    if (sender.stopAfter ?? lab.stopAfter) throw sender.stopAfter ?? lab.stopAfter;
     if (out.status === "done") done++;
     // under the id it had and the one it has now (a create gives its Issue GitHub's id before its steps)
     else held.add(op.issue).add(db.getBacklogOperation(op.id)!.issue);

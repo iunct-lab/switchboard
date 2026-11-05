@@ -1,4 +1,6 @@
 import type { ModelOption } from "@switchboard/protocol";
+import { t } from "./i18n.ts";
+import { common } from "./i18n/common.ts";
 
 /**
  * Editing a runner's model choices on the settings screen (#1400). Each edit returns the whole new list, which the
@@ -8,8 +10,8 @@ import type { ModelOption } from "@switchboard/protocol";
 /** The list with one model added at the end, the id and label trimmed (an empty label is the id); why it cannot be added otherwise. */
 export function addModel(list: ModelOption[], value: string, label: string): ModelOption[] | string {
   const id = value.trim();
-  if (!id) return "モデルの id を入れてください";
-  if (list.some((m) => m.value === id)) return `${id} は一覧にあります`;
+  if (!id) return t(common.modelIdMissing);
+  if (list.some((m) => m.value === id)) return t(common.modelListed, { id });
   return [...list, { value: id, label: label.trim() || id }];
 }
 

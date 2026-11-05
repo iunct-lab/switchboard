@@ -1,14 +1,16 @@
 import type { LoadKind, OpsLatency, OpsLoadGroup, OpsLoadHour, OpsStopsRow, StopReason } from "@switchboard/protocol";
 import { fmtMs } from "./perf.ts";
+import { t } from "./i18n.ts";
+import { insights as m } from "./i18n/insights.ts";
 
 /** What a daemon stop's cause is called on screen (#2093). */
 export const reasonLabel: Record<StopReason, string> = {
-  oomd: "oomd の kill",
-  restart: "再起動",
-  "host-stop": "ホストの停止",
-  promote: "昇格",
-  crash: "クラッシュ",
-  unknown: "不明",
+  oomd: t(m.reasonOomd),
+  restart: t(m.reasonRestart),
+  "host-stop": t(m.reasonHostStop),
+  promote: t(m.reasonPromote),
+  crash: t(m.reasonCrash),
+  unknown: t(m.reasonUnknown),
 };
 
 const ORDER: StopReason[] = ["oomd", "crash", "host-stop", "restart", "promote", "unknown"];
@@ -25,7 +27,7 @@ const zero = (): Record<StopReason, number> => Object.fromEntries(ORDER.map((r) 
 /** The stops table: a row per day, the newest first; a column per cause that occurred; a total row. */
 export function stopsTable(rows: OpsStopsRow[]): { reasons: StopReason[]; days: StopsDay[]; total: StopsDay } {
   const byDay = new Map<string, StopsDay>();
-  const total: StopsDay = { day: "合計", counts: zero(), turns: 0, taskIds: [] };
+  const total: StopsDay = { day: t(m.total), counts: zero(), turns: 0, taskIds: [] };
   for (const r of rows) {
     const d = byDay.get(r.day) ?? { day: r.day, counts: zero(), turns: 0, taskIds: [] };
     for (const t of [d, total]) {
@@ -40,16 +42,16 @@ export function stopsTable(rows: OpsStopsRow[]): { reasons: StopReason[]; days: 
 
 /** What a kind of load is called on screen (#2086). */
 export const kindLabel: Record<LoadKind, string> = {
-  runner: "ランナー本体",
-  subagent: "サブエージェント",
-  test: "テスト / ローカル CI",
+  runner: t(m.kindRunner),
+  subagent: t(m.kindSubagent),
+  test: t(m.kindTest),
   browser: "headless Chrome",
   docker: "docker",
-  build: "昇格のビルド",
-  judge: "採点",
-  archive: "アーカイブ",
-  backlog: "バックログの取得",
-  other: "その他",
+  build: t(m.kindBuild),
+  judge: t(m.kindJudge),
+  archive: t(m.kindArchive),
+  backlog: t(m.kindBacklog),
+  other: t(m.kindOther),
 };
 
 const GB = 1024 ** 3;
@@ -92,7 +94,7 @@ export function topGroups(groups: OpsLoadGroup[], n = 10): Array<{ key: string; 
     .map((g) => ({
       taskId: g.owner === "task" ? g.taskId : null,
       key: `${g.owner}/${g.taskId ?? ""}/${g.kind}`,
-      label: g.owner === "daemon" ? `デーモンの${kindLabel[g.kind]}` : g.owner === "task" ? `Task ${g.taskId} の ${kindLabel[g.kind]}` : g.kind === "other" ? "その他" : `その他の ${kindLabel[g.kind]}`,
+      label: g.owner === "daemon" ? t(m.groupDaemon, { kind: kindLabel[g.kind] }) : g.owner === "task" ? t(m.groupTask, { id: g.taskId ?? "", kind: kindLabel[g.kind] }) : g.kind === "other" ? t(m.kindOther) : t(m.groupOther, { kind: kindLabel[g.kind] }),
       maxRss: g.maxRss,
       cpuMs: g.cpuMs,
     }));
@@ -106,7 +108,7 @@ export function taskLoadLine(groups: OpsLoadGroup[]): string | null {
   if (groups.length === 0) return null;
   const sorted = [...groups].sort((a, b) => b.maxRss - a.maxRss);
   const total = sorted.reduce((a, g) => a + g.maxRss, 0);
-  return `最大 ${fmtBytes(total)}（${sorted.map((g) => `${kindLabel[g.kind]} ${fmtBytes(g.maxRss)}`).join(" / ")}）`;
+  return t(m.taskLoad, { total: fmtBytes(total), kinds: sorted.map((g) => `${kindLabel[g.kind]} ${fmtBytes(g.maxRss)}`).join(" / ") });
 }
 
 /** A response's size (#2104): `850 B`, `12.3 KB`, `3.3 MB`. */

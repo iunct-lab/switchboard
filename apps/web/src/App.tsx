@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { t } from "./i18n.ts";
+import { app } from "./i18n/app.ts";
+import { home } from "./i18n/home.ts";
 import type { DeviceAuthView, EventEnvelope, LedgerSummary, PendingApproval, ServerMessage, Task, TeleportProgress, TerminalStatus, Workspace } from "@switchboard/protocol";
 import { applyApprovalEvent, mergeFetched } from "./approvals.ts";
 import { mergeEvents, taskReader } from "./catchup.ts";
@@ -171,7 +174,7 @@ export function App() {
 
   const readHealth = useCallback(() => void api.health().then(setHealth).catch(() => undefined), []);
   useEffect(() => {
-    api.health().then(setHealth).catch((e) => setError(`core に接続できません: ${e.message}`));
+    api.health().then(setHealth).catch((e) => setError(t(home.coreUnreachable, { error: e.message })));
   }, [authRev]);
   // No answer yet (the daemon restarting under the page): nothing else is sent until it says who we are, so it is asked
   // again here; health through the edge is the one read the failure limit does not count
@@ -436,38 +439,38 @@ export function App() {
         <span className="brand">Switchboard</span>
         <nav className="tabs">
           <button className={view.name === "home" ? "on" : ""} onClick={() => setView({ name: "home" })}>
-            Home
+            {t(app.home)}
           </button>
           <button className={view.name === "task" ? "on" : ""} disabled={view.name !== "task"}>
-            Task
+            {t(app.task)}
           </button>
           <button className={view.name === "knowledge" ? "on" : ""} onClick={() => setView({ name: "knowledge" })}>
-            Knowledge
+            {t(app.knowledge)}
           </button>
           <button className={view.name === "ledger" ? "on" : ""} onClick={() => setView({ name: "ledger" })}>
-            Ledger
+            {t(app.ledger)}
           </button>
           <button className={view.name === "evals" ? "on" : ""} onClick={() => setView({ name: "evals" })}>
-            Insights
+            {t(app.insights)}
           </button>
           <button className={view.name === "backlog" ? "on" : ""} onClick={() => setView({ name: "backlog" })}>
-            Backlog
+            {t(app.backlog)}
           </button>
           <button className={view.name === "resources" ? "on" : ""} onClick={() => setView({ name: "resources" })}>
-            Resources
+            {t(app.resources)}
           </button>
           <button className={view.name === "schedules" ? "on" : ""} onClick={() => setView({ name: "schedules" })}>
-            Schedules
+            {t(app.schedules)}
           </button>
           <button className={view.name === "settings" ? "on" : ""} onClick={() => setView({ name: "settings" })}>
-            Settings
+            {t(app.settings)}
           </button>
         </nav>
-        <span className={`conn ${connected ? "ok" : "off"}`}>{connected ? "daemon connected" : "daemon offline"}</span>
+        <span className={`conn ${connected ? "ok" : "off"}`}>{connected ? t(app.connected) : t(app.offline)}</span>
         {/* Until the answer comes the slot is held by an invisible copy, so the tabs do not shrink under a tap (#1485). */}
         {rescueHref === undefined && (
           <span className="rescue-link" aria-hidden="true" style={{ visibility: "hidden" }}>
-            Rescue
+            {t(app.rescue)}
           </span>
         )}
         {newVersion && (
@@ -477,21 +480,21 @@ export function App() {
         )}
         {rescueHref && (
           <a className="rescue-link" href={rescueHref}>
-            Rescue
+            {t(app.rescue)}
           </a>
         )}
       </header>
 
       {login.kind === "stuck" && (
         <div className="banner error" role="alert">
-          {STUCK_MESSAGE} <a href={STUCK_RESCUE}>救援画面を開く</a> <a href={STUCK_LOGIN}>ログアウト</a>
+          {STUCK_MESSAGE} <a href={STUCK_RESCUE}>{t(home.openRescue)}</a> <a href={STUCK_LOGIN}>{t(home.logout)}</a>
         </div>
       )}
 
       {needsToken && (
         <div className="banner" role="alert">
           <span>
-            このデーモンは loopback 以外で listen しているためトークンが必要です。<code>~/.switchboard/token</code> の内容を貼り付けてください。
+            {t(home.tokenNeeded)}<code>~/.switchboard/token</code>{t(home.tokenPaste)}
           </span>
           <span className="row">
             <input value={tokenDraft} onChange={(e) => setTokenDraft(e.target.value)} placeholder="sb_…" className="mono" />
@@ -505,18 +508,18 @@ export function App() {
                 location.reload();
               }}
             >
-              保存
+              {t(home.save)}
             </button>
           </span>
         </div>
       )}
 
-      {restarting && <div className="banner">デーモンを再起動しています… 再接続するまでお待ちください（45 秒経っても戻らなければ ~/.switchboard/daemon.log を確認）。</div>}
+      {restarting && <div className="banner">{t(home.restarting)}</div>}
 
       {health?.homeIsTemp && (
         <div className="banner error" role="alert">
           <span>
-            保存先が一時ディレクトリです: <code>{health.home}</code> — ここに記録した Task・台帳は OS に消され、<code>SWITCHBOARD_HOME</code> を付けずに起動し直すと見えなくなります。変数を外す（既定 <code>~/.switchboard</code>）か、恒久的な場所にしてください。
+            {t(home.tempHomeBefore)}<code>{health.home}</code>{t(home.tempHomeLost)}<code>SWITCHBOARD_HOME</code>{t(home.tempHomeHidden)}<code>~/.switchboard</code>{t(home.tempHomeAfter)}
           </span>
         </div>
       )}
@@ -530,10 +533,10 @@ export function App() {
         ?.filter((r) => r.login === "expired")
         .map((r) => (
           <div key={r.id} className="banner error login-expired" role="alert">
-            <span>{r.id} のログインが切れています。</span>
+            <span>{t(home.loginExpired, { runner: r.id })}</span>
             <RunnerLogin runner={r.id} onDone={() => api.health({ recheck: true }).then(setHealth).catch(() => undefined)} onError={setError} />
-            <button className="ghost" onClick={() => api.health({ recheck: true }).then(setHealth).catch((e) => setError(`core に接続できません: ${e.message}`))}>
-              再確認
+            <button className="ghost" onClick={() => api.health({ recheck: true }).then(setHealth).catch((e) => setError(t(home.coreUnreachable, { error: e.message })))}>
+              {t(home.recheck)}
             </button>
           </div>
         ))}
@@ -542,7 +545,7 @@ export function App() {
         <div className="banner error" role="alert">
           {error}
           <button className="ghost" onClick={() => setError(null)}>
-            閉じる
+            {t(home.close)}
           </button>
         </div>
       )}
@@ -607,11 +610,11 @@ export function App() {
           <main className="main">
             {missing.has(view.id) ? (
               <div className="task-missing" role="alert">
-                <p>この Task は見つかりません（{view.id}）。</p>
-                <button onClick={() => setView({ name: "home" })}>Home へ戻る</button>
+                <p>{t(home.taskMissing, { id: view.id })}</p>
+                <button onClick={() => setView({ name: "home" })}>{t(home.backHome)}</button>
               </div>
             ) : (
-              "読み込み中…"
+              t(home.loading)
             )}
           </main>
         )}
@@ -660,17 +663,17 @@ export function App() {
           </span>
         )}
         <span>
-          デーモン <b>{health ? "OK" : "…"}</b>
-          {health && ` · プロトコル ${health.protocol}`}
+          {t(home.daemon)} <b>{health ? "OK" : "…"}</b>
+          {health && t(home.protocol, { version: health.protocol })}
         </span>
         {(health?.runners ?? []).map((r) => (
           <span key={r.id}>
-            {r.id} <b>{r.available ? r.version ?? "OK" : "使えません"}</b>
+            {r.id} <b>{r.available ? r.version ?? "OK" : t(home.unavailable)}</b>
           </span>
         ))}
         {health && (
           <span title={health.home}>
-            データ <b className={health.homeIsTemp ? "warn" : ""}>{health.homeDisplay ?? health.home}</b>
+            {t(home.data)} <b className={health.homeIsTemp ? "warn" : ""}>{health.homeDisplay ?? health.home}</b>
           </span>
         )}
       </footer>

@@ -1,28 +1,30 @@
 // types only: a value import would pull the whole protocol (zod schemas) into the page's bundle
 import type { FlowPbi, FlowStage, FlowView } from "@switchboard/protocol";
+import { t } from "./i18n.ts";
+import { panels as m } from "./i18n/panels.ts";
 
 /** The stages in the order of the way, request to close. */
 const STAGES: readonly FlowStage[] = ["request", "split", "wait", "build", "review-wait", "review", "close"];
 
 /** The stages of a PBI's way from the request to its close (#650), as the 流れ section names them. */
 export const STAGE_LABEL: Record<FlowStage, string> = {
-  request: "起票",
-  split: "分解",
-  wait: "着手待ち",
-  build: "実装",
-  "review-wait": "レビュー待ち",
-  review: "レビュー対応",
-  close: "締め",
+  request: t(m.stageRequest),
+  split: t(m.stageSplit),
+  wait: t(m.stageWait),
+  build: t(m.stageBuild),
+  "review-wait": t(m.stageReviewWait),
+  review: t(m.stageReview),
+  close: t(m.stageClose),
 };
 
 /** A length of time in the unit `ago` uses (分 / 時間 / 日); null is not known and shows a dash, never 0. */
 export function span(ms: number | null): string {
   if (ms === null) return "—";
   const min = ms / 60_000;
-  if (min < 1) return "1 分未満";
-  if (min < 60) return `${Math.round(min)} 分`;
-  if (min < 24 * 60) return `${+(min / 60).toFixed(1)} 時間`;
-  return `${+(min / (24 * 60)).toFixed(1)} 日`;
+  if (min < 1) return t(m.underMinute);
+  if (min < 60) return t(m.spanMin, { n: Math.round(min) });
+  if (min < 24 * 60) return t(m.spanHour, { n: +(min / 60).toFixed(1) });
+  return t(m.spanDay, { n: +(min / (24 * 60)).toFixed(1) });
 }
 
 /** At least this much slower (or faster) than the 30 days before is coloured. */
@@ -52,7 +54,7 @@ export function flowRows(view: FlowView): FlowRow[] {
 /** The stage the median is largest at, with its time; null when no stage is known. */
 export function bottleneckLine(view: FlowView): string | null {
   const st = view.current.bottleneck;
-  return st ? `${STAGE_LABEL[st]}（中央値 ${span(view.current.stages[st].p50)}）` : null;
+  return st ? t(m.bottleneckLine, { stage: STAGE_LABEL[st], time: span(view.current.stages[st].p50) }) : null;
 }
 
 /** A PBI of the slowest list: the sum of its known stages and the stage that took longest. */

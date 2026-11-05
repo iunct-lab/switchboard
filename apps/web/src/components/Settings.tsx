@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { lang, setLang, t, type Lang, type Msg } from "../i18n.ts";
+import { settings } from "../i18n/settings.ts";
 import type { CustomRunner, AutoStartKind, Backlog, HistoryStatus, JudgeSettings, LlmRoutingSettings, ModelCandidates, ModelOption, Preset, RunnerId, RunnerInfo, Settings as SettingsData, SettingsPrice, Task, Workspace } from "@switchboard/protocol";
 import { api, type Health, type SettingsResponse, type WorkspaceClone } from "../api.ts";
 import { ModelSelect } from "./ModelSelect.tsx";
@@ -18,7 +20,9 @@ import { jstTime } from "../time.ts";
 import { SETTINGS_GROUPS, settingsGroup } from "../settingsGroups.ts";
 
 /** The kinds of Task that start by themselves (#1337), in the order of the 既定 card: the feedback modes, then the backlog stages. */
-const AUTO_START_KINDS: Array<[AutoStartKind, string]> = [["fix", "すぐ直す"], ["request", "要望として登録"], ["to-pbi", "PBI にする"], ["to-tasks", "Task に分解"], ["complete", "実装"], ["check", "状況確認"], ["close", "閉じる"], ["new-repo", "新しいリポジトリ"]];
+const AUTO_START_KINDS: Array<[AutoStartKind, Msg]> = [["fix", settings.kindFix], ["request", settings.kindRequest], ["to-pbi", settings.kindToPbi], ["to-tasks", settings.kindToTasks], ["complete", settings.kindComplete], ["check", settings.kindCheck], ["close", settings.kindClose], ["new-repo", settings.kindNewRepo]];
+
+const groupTitle = (id: string) => t(settingsGroup(id).title);
 
 /**
  * 設定 (#832): every default the daemon keeps in its settings, in one screen. Each control saves as soon as it
@@ -61,7 +65,7 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
   useEffect(() => {
     if (loaded && props.focus) document.getElementById(props.focus.id)?.scrollIntoView();
   }, [loaded, props.focus]);
-  if (!s) return <main className="main settings"><section className="card"><div className="muted">読み込み中…</div></section></main>;
+  if (!s) return <main className="main settings"><section className="card"><div className="muted">{t(settings.loading)}</div></section></main>;
   const dakOk = props.runnerOk.has("dak");
   const listed = listedRunners(props.health?.runners, s.shadowRunner === "dak" ? "dak" : undefined);
   const runnerOptions = (current: RunnerId, label: string) =>
@@ -79,34 +83,34 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
       <SettingsToc />
       <SettingsGroupHeading id="settings-task-start" />
       <section className="card tunables">
-        <h5>新規作成の既定</h5>
+        <h5>{t(settings.newDefaults)}</h5>
         <div className="row" style={{ alignItems: "center", gap: 6 }}>
-          <span className="hint">Home の新規作成のランナー</span>
-          <select className="mode" value={nd.taskRunner} disabled={saving} aria-label="Home の新規作成のランナー" onChange={(e) => void save({ newDefaults: { taskRunner: e.target.value as RunnerId } })}>
-            {runnerOptions(nd.taskRunner, "ランナー")}
+          <span className="hint">{t(settings.newTaskRunner)}</span>
+          <select className="mode" value={nd.taskRunner} disabled={saving} aria-label={t(settings.newTaskRunner)} onChange={(e) => void save({ newDefaults: { taskRunner: e.target.value as RunnerId } })}>
+            {runnerOptions(nd.taskRunner, t(settings.runner))}
           </select>
-          <span className="muted">既定 {d.newDefaults.taskRunner}</span>
+          <span className="muted">{t(settings.defaultValue, { value: d.newDefaults.taskRunner })}</span>
         </div>
-        <TextField label="定期実行の新規作成の cron" value={nd.scheduleCron} def={d.newDefaults.scheduleCron} mono disabled={saving} onSave={(v) => save({ newDefaults: { scheduleCron: v } })} />
+        <TextField label={t(settings.scheduleCron)} value={nd.scheduleCron} def={d.newDefaults.scheduleCron} mono disabled={saving} onSave={(v) => save({ newDefaults: { scheduleCron: v } })} />
         <ResetButton disabled={saving} onClick={() => save({ newDefaults: null })} />
       </section>
 
       <section className="card">
-        <h5>承認モードの既定</h5>
-        <div className="muted">新しい Task が承認モードを選ばずに作られたときのモード（Home で Task ごとに変えられます）。「確認を飛ばす」モードは既定にできません。</div>
+        <h5>{t(settings.approvalDefaults)}</h5>
+        <div className="muted">{t(settings.approvalDefaultsHint)}</div>
         {runners.filter((r) => r.permissionModes.length > 0).map((r) => (
           <div key={r.id} className="row" style={{ alignItems: "center", gap: 6 }}>
             <span className="t">{r.id}</span>
-            <select className="mode" value={r.defaultPermissionMode ?? ""} disabled={saving} aria-label={`${r.id} の承認モードの既定`} onChange={(e) => void save({ defaultPermissionMode: { [r.id]: e.target.value } })}>
+            <select className="mode" value={r.defaultPermissionMode ?? ""} disabled={saving} aria-label={t(settings.approvalDefaultLabel, { runner: r.id })} onChange={(e) => void save({ defaultPermissionMode: { [r.id]: e.target.value } })}>
               {r.permissionModes.filter((m) => !m.danger || m.value === r.defaultPermissionMode).map((m) => (
                 <option key={m.value} value={m.value} title={m.description}>
-                  承認: {m.label}
+                  {t(settings.approvalOption, { label: m.label })}
                 </option>
               ))}
             </select>
             {s.defaultPermissionMode[r.id] && (
-              <button className="ghost" disabled={saving} onClick={() => void save({ defaultPermissionMode: { [r.id]: null } })} title="保存した既定を消し、ランナー本来の既定（Terminal と同じ）に戻します">
-                保存した既定を解除
+              <button className="ghost" disabled={saving} onClick={() => void save({ defaultPermissionMode: { [r.id]: null } })} title={t(settings.clearSavedDefaultTitle)}>
+                {t(settings.clearSavedDefault)}
               </button>
             )}
           </div>
@@ -114,42 +118,42 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
       </section>
 
       <section className="card">
-        <h5>自動で始まる Task の既定</h5>
-        <div className="muted">バックログの工程ボタン・フィードバックボタンで始まる Task と、定期実行の新規作成フォームの初期値のランナー・モデル・思考の深さです。モデル・思考の深さが「CLI 既定」ならランナー自身の設定で動きます。種類ごとに変えられます。変えていない種類は共通の値で始まります（バックログを進めるはスケジュールの値）。</div>
+        <h5>{t(settings.autoStart)}</h5>
+        <div className="muted">{t(settings.autoStartHint)}</div>
         <div className="row" style={{ alignItems: "center", gap: 6 }}>
           {/* a runner change goes back to that runner's CLI default: a model and an effort belong to one runner (the daemon does the same) */}
-          <select className="mode" value={s.autoStart.runner} disabled={saving} aria-label="自動で始まる Task のランナー" onChange={(e) => void save({ autoStart: { runner: e.target.value as RunnerId } })}>
-            {runnerOptions(s.autoStart.runner, "ランナー")}
+          <select className="mode" value={s.autoStart.runner} disabled={saving} aria-label={t(settings.autoStartRunner)} onChange={(e) => void save({ autoStart: { runner: e.target.value as RunnerId } })}>
+            {runnerOptions(s.autoStart.runner, t(settings.runner))}
           </select>
-          <ModelSelect runner={info(s.autoStart.runner)} value={s.autoStart.model} onChange={(m) => void save({ autoStart: { model: m } })} label="モデル" disabled={saving} title="自動で始まる Task を動かすモデル。「CLI 既定」はランナー自身の設定（かっこ内）で動きます" />
-          <EffortSelect runner={info(s.autoStart.runner)} value={s.autoStart.effort} onChange={(effort) => void save({ autoStart: { effort } })} label="思考の深さ" disabled={saving} title="自動で始まる Task の思考の深さ。「CLI 既定」はランナー自身の設定で動きます" />
+          <ModelSelect runner={info(s.autoStart.runner)} value={s.autoStart.model} onChange={(m) => void save({ autoStart: { model: m } })} label={t(settings.model)} disabled={saving} title={t(settings.autoStartModelTitle)} />
+          <EffortSelect runner={info(s.autoStart.runner)} value={s.autoStart.effort} onChange={(effort) => void save({ autoStart: { effort } })} label={t(settings.effort)} disabled={saving} title={t(settings.autoStartEffortTitle)} />
         </div>
         {/* one line per kind (#1337): a kind on 共通 is one word, so the card stays short; only a changed kind shows its selects */}
-        {([["フィードバック", AUTO_START_KINDS.slice(0, 2)], ["バックログの工程", AUTO_START_KINDS.slice(2)]] as const).map(([heading, kinds]) => (
+        {([[t(settings.feedback), AUTO_START_KINDS.slice(0, 2)], [t(settings.backlogStages), AUTO_START_KINDS.slice(2)]] as const).map(([heading, kinds]) => (
           <div key={heading} className="auto-start-kinds">
             <div className="hint">{heading}</div>
             {kinds.map(([kind, label]) => (
-              <KindRow key={kind} kind={kind} label={label} auto={s.autoStart} info={info} runnerOptions={runnerOptions} disabled={saving} save={save} />
+              <KindRow key={kind} kind={kind} label={t(label)} auto={s.autoStart} info={info} runnerOptions={runnerOptions} disabled={saving} save={save} />
             ))}
           </div>
         ))}
         {/* 上限のときの代わり (#834): the order is replaced whole; × removes one, the select appends a detected one not in it yet */}
         <div className="auto-start-kinds">
-          <div className="hint">上限のときの代わり</div>
-          <div className="muted">既定のランナーが上限（使用率がこの値以上で、まだ戻っていない）のとき、工程ボタン・フィードバック・定期実行で始まる Task は順の次の使えるランナーで、CLI 既定のモデルで始まります。どれも上限なら既定のランナーで始めます。手で作る Task と実行中の Task は切り替えません。</div>
+          <div className="hint">{t(settings.fallback)}</div>
+          <div className="muted">{t(settings.fallbackHint)}</div>
           <div className="row" style={{ alignItems: "center", gap: 6, justifyContent: "flex-start" }}>
-            {s.autoStart.fallback.length === 0 && <span className="muted">なし（切り替えない）</span>}
+            {s.autoStart.fallback.length === 0 && <span className="muted">{t(settings.fallbackNone)}</span>}
             {s.autoStart.fallback.map((r, i) => (
               <span key={r}>
                 {i + 1}. {r}{" "}
-                <button className="ghost" disabled={saving} aria-label={`上限のときの代わりから ${r} を外す`} onClick={() => void save({ autoStart: { fallback: s.autoStart.fallback.filter((x) => x !== r) } })}>
+                <button className="ghost" disabled={saving} aria-label={t(settings.fallbackRemove, { runner: r })} onClick={() => void save({ autoStart: { fallback: s.autoStart.fallback.filter((x) => x !== r) } })}>
                   ×
                 </button>
               </span>
             ))}
             {listed.some((r) => props.runnerOk.has(r) && !s.autoStart.fallback.includes(r)) && (
-              <select className="mode" value="" disabled={saving} aria-label="上限のときの代わりを追加" onChange={(e) => e.target.value && void save({ autoStart: { fallback: [...s.autoStart.fallback, e.target.value as RunnerId] } })}>
-                <option value="">追加…</option>
+              <select className="mode" value="" disabled={saving} aria-label={t(settings.fallbackAdd)} onChange={(e) => e.target.value && void save({ autoStart: { fallback: [...s.autoStart.fallback, e.target.value as RunnerId] } })}>
+                <option value="">{t(settings.addOption)}</option>
                 {listed.filter((r) => props.runnerOk.has(r) && !s.autoStart.fallback.includes(r)).map((r) => (
                   <option key={r} value={r}>
                     {r}
@@ -158,23 +162,23 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
               </select>
             )}
           </div>
-          <NumberField label="切り替える使用率" hint="既定のランナーの使用量のどれかの窓がこれ以上なら切り替えます（0.5〜1）" value={s.autoStart.fallbackAt} def={0.9} step={0.05} min={0.5} max={1} disabled={saving} onSave={(v) => save({ autoStart: { fallbackAt: v } })} />
+          <NumberField label={t(settings.fallbackAt)} hint={t(settings.fallbackAtHint)} value={s.autoStart.fallbackAt} def={0.9} step={0.05} min={0.5} max={1} disabled={saving} onSave={(v) => save({ autoStart: { fallbackAt: v } })} />
         </div>
       </section>
 
       <section className="card presets">
-        <h5>定型の指示</h5>
-        <div className="muted">新規依頼と返信で選べる指示です。本文の {"{{target}}"} に選んだ Issue / PR が入ります。承認モードは含みません</div>
+        <h5>{t(settings.presets)}</h5>
+        <div className="muted">{t(settings.presetsHint)}</div>
         <PresetSettings onError={props.onError} />
       </section>
 
       {(listed.includes("dak") || s.shadowRunner === "dak") && (
       <section className="card">
-        <h5>並走（DAK）の既定</h5>
-        <label className={`hint toggle ${!dakOk && s.shadowRunner !== "dak" ? "off" : ""}`} title={dakOk ? "同じ依頼を DAK（DAK に設定したモデル。ローカルモデルなら API 料金なし）でも同時に実行し、並走 Task として並べます" : "DAK の agent（http://127.0.0.1:8000、SWITCHBOARD_DAK_URL で変更）に到達できません"}>
+        <h5>{t(settings.dakDefault)}</h5>
+        <label className={`hint toggle ${!dakOk && s.shadowRunner !== "dak" ? "off" : ""}`} title={dakOk ? t(settings.dakTitle) : t(settings.dakUnreachable)}>
           <input type="checkbox" checked={s.shadowRunner === "dak"} disabled={saving || (!dakOk && s.shadowRunner !== "dak")} onChange={(e) => void save({ shadowRunner: e.target.checked ? "dak" : null })} />
-          新しい Task を DAK にも同時に流す
-          {!dakOk && s.shadowRunner === "dak" && <span className="hint">（DAK 未検出のため今は並走しません）</span>}
+          {t(settings.dakToggle)}
+          {!dakOk && s.shadowRunner === "dak" && <span className="hint">{t(settings.dakMissing)}</span>}
         </label>
       </section>
       )}
@@ -182,26 +186,26 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
       <SettingsGroupHeading id="settings-resume" />
       {/* The tunables (#835): one card per group, saved on blur / Enter; 既定に戻す puts the whole group back (PATCH null) */}
       <section className="card tunables">
-        <h5>使用量と自動再開</h5>
-        <div className="muted">運用中に変えたくなる値です。変えると次に使うときから効きます（デーモンの再起動は要りません）。</div>
-        <NumberField label="バックログを進めるときの使用量の閾値" hint="工程 Task を始めるランナー（上限のときの代わりを通した後）の使用量がこれ以上なら、工程 Task は全体で 1 件まで（0〜1）" value={qr.backlogQuotaLimit} def={d.quotaAndResume.backlogQuotaLimit} step={0.05} disabled={saving} onSave={(v) => save({ quotaAndResume: { backlogQuotaLimit: v } })} />
-        <NumberField label="自動再開: 再開時刻が分からないときの待ち" unit="分" scale={60_000} hint="止まるたびに倍になります" value={qr.retryDelayMs} def={d.quotaAndResume.retryDelayMs} disabled={saving} onSave={(v) => save({ quotaAndResume: { retryDelayMs: v } })} />
-        <NumberField label="自動再開: 待ちの上限" unit="分" scale={60_000} value={qr.retryMaxDelayMs} def={d.quotaAndResume.retryMaxDelayMs} disabled={saving} onSave={(v) => save({ quotaAndResume: { retryMaxDelayMs: v } })} />
-        <NumberField label="自動再開: 続けて止まったら諦める回数" unit="回" value={qr.maxLimitStops} def={d.quotaAndResume.maxLimitStops} disabled={saving} onSave={(v) => save({ quotaAndResume: { maxLimitStops: v } })} />
-        <TextField label="自動再開: 再開するときに送る文" hint="頭に [Switchboard 自動再開] が付きます（自動再開の見分けに使うので外せません）" value={qr.resumePrompt} def={d.quotaAndResume.resumePrompt} multiline disabled={saving} onSave={(v) => save({ quotaAndResume: { resumePrompt: v } })} />
-        <NumberField label="デーモン停止で止まった Task を再開する回数" unit="回" value={qr.maxStopResumes} def={d.quotaAndResume.maxStopResumes} disabled={saving} onSave={(v) => save({ quotaAndResume: { maxStopResumes: v } })} />
-        <NumberField label="ランナー比較で記録が少ないとみなす件数" unit="件" hint="Ledger のランナーごとの表で、これ未満の行は比べない" value={qr.thinSample} def={d.quotaAndResume.thinSample} disabled={saving} onSave={(v) => save({ quotaAndResume: { thinSample: v } })} />
+        <h5>{t(settings.usage)}</h5>
+        <div className="muted">{t(settings.usageHint)}</div>
+        <NumberField label={t(settings.backlogQuotaLimit)} hint={t(settings.backlogQuotaLimitHint)} value={qr.backlogQuotaLimit} def={d.quotaAndResume.backlogQuotaLimit} step={0.05} disabled={saving} onSave={(v) => save({ quotaAndResume: { backlogQuotaLimit: v } })} />
+        <NumberField label={t(settings.retryDelay)} unit={t(settings.unitMinutes)} scale={60_000} hint={t(settings.retryDelayHint)} value={qr.retryDelayMs} def={d.quotaAndResume.retryDelayMs} disabled={saving} onSave={(v) => save({ quotaAndResume: { retryDelayMs: v } })} />
+        <NumberField label={t(settings.retryMaxDelay)} unit={t(settings.unitMinutes)} scale={60_000} value={qr.retryMaxDelayMs} def={d.quotaAndResume.retryMaxDelayMs} disabled={saving} onSave={(v) => save({ quotaAndResume: { retryMaxDelayMs: v } })} />
+        <NumberField label={t(settings.maxLimitStops)} unit={t(settings.unitTimes)} value={qr.maxLimitStops} def={d.quotaAndResume.maxLimitStops} disabled={saving} onSave={(v) => save({ quotaAndResume: { maxLimitStops: v } })} />
+        <TextField label={t(settings.resumePrompt)} hint={t(settings.resumePromptHint)} value={qr.resumePrompt} def={d.quotaAndResume.resumePrompt} multiline disabled={saving} onSave={(v) => save({ quotaAndResume: { resumePrompt: v } })} />
+        <NumberField label={t(settings.maxStopResumes)} unit={t(settings.unitTimes)} value={qr.maxStopResumes} def={d.quotaAndResume.maxStopResumes} disabled={saving} onSave={(v) => save({ quotaAndResume: { maxStopResumes: v } })} />
+        <NumberField label={t(settings.thinSample)} unit={t(settings.unitItems)} hint={t(settings.thinSampleHint)} value={qr.thinSample} def={d.quotaAndResume.thinSample} disabled={saving} onSave={(v) => save({ quotaAndResume: { thinSample: v } })} />
         <ResetButton disabled={saving} onClick={() => save({ quotaAndResume: null })} />
       </section>
 
       <section className="card">
-        <h5>使用上限での自動再開</h5>
-        <div className="muted">ランナーが 5 時間 / 7 日の使用上限で止まったとき、枠が戻った時点で同じセッションに「続きを」と送ります（Task ごとに Brief から取り消せます）。</div>
+        <h5>{t(settings.autoResume)}</h5>
+        <div className="muted">{t(settings.autoResumeHint)}</div>
         {runners.filter((r) => !isAdkRunner(r.id)).map((r) => (
           <div key={r.id} className="row" style={{ alignItems: "center", gap: 6 }}>
             <label className="hint toggle">
               <input type="checkbox" checked={!!r.autoResume} disabled={saving} onChange={(e) => void save({ autoResume: { [r.id]: e.target.checked } })} />
-              {r.id}: 使用上限で止まったら自動再開
+              {t(settings.autoResumeToggle, { runner: r.id })}
             </label>
             <ClaudeLoginRow runner={r} region={s.bedrock?.[r.id]?.region} onBedrock={(next) => void save({ bedrock: { [r.id]: next } })} onChanged={refresh} onError={props.onError} />
           </div>
@@ -214,69 +218,69 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
 
       <SettingsGroupHeading id="settings-judge" />
       <section className="card tunables">
-        <h5>判定と自動選択</h5>
-        <div className="muted">判定のランナーが動かないときの代わりは、2 つの判定（ターン終了時の自動判定とルーブリック判定）の両方に使います。</div>
+        <h5>{t(settings.judgeAndChoice)}</h5>
+        <div className="muted">{t(settings.judgeAndChoiceHint)}</div>
         <div className="row" style={{ alignItems: "center", gap: 6 }}>
-          <span className="hint">判定の代わり</span>
+          <span className="hint">{t(settings.judgeFallback)}</span>
           {/* a model belongs to one runner: a runner change goes back to that runner's CLI default */}
-          <select className="mode" value={jc.judgeFallbackRunner} disabled={saving} aria-label="判定の代わりのランナー" onChange={(e) => void save({ judgeAndChoice: { judgeFallbackRunner: e.target.value as RunnerId, judgeFallbackModel: "" } })}>
-            {runnerOptions(jc.judgeFallbackRunner, "代わり")}
+          <select className="mode" value={jc.judgeFallbackRunner} disabled={saving} aria-label={t(settings.judgeFallbackRunner)} onChange={(e) => void save({ judgeAndChoice: { judgeFallbackRunner: e.target.value as RunnerId, judgeFallbackModel: "" } })}>
+            {runnerOptions(jc.judgeFallbackRunner, t(settings.judgeFallbackOption))}
           </select>
-          <ModelSelect runner={info(jc.judgeFallbackRunner)} value={jc.judgeFallbackModel} onChange={(m) => void save({ judgeAndChoice: { judgeFallbackModel: m } })} label="代わりのモデル" disabled={saving} title="判定の代わりの 1 ターンだけに使うモデルです" />
-          <span className="muted">既定 {d.judgeAndChoice.judgeFallbackRunner} / {d.judgeAndChoice.judgeFallbackModel}</span>
+          <ModelSelect runner={info(jc.judgeFallbackRunner)} value={jc.judgeFallbackModel} onChange={(m) => void save({ judgeAndChoice: { judgeFallbackModel: m } })} label={t(settings.judgeFallbackModel)} disabled={saving} title={t(settings.judgeFallbackModelTitle)} />
+          <span className="muted">{t(settings.defaultValue, { value: `${d.judgeAndChoice.judgeFallbackRunner} / ${d.judgeAndChoice.judgeFallbackModel}` })}</span>
         </div>
-        <NumberField label="判定のタイムアウト" unit="秒" scale={1000} hint="ターン終了時の自動判定の 1 ターン" value={jc.judgeTimeoutMs} def={d.judgeAndChoice.judgeTimeoutMs} disabled={saving} onSave={(v) => save({ judgeAndChoice: { judgeTimeoutMs: v } })} />
-        <NumberField label="Workspace の自動選択のタイムアウト" unit="秒" scale={1000} hint="Workspace を「自動」で作るとき、これを過ぎたら作らずに選び直してもらいます" value={jc.workspaceChoiceTimeoutMs} def={d.judgeAndChoice.workspaceChoiceTimeoutMs} disabled={saving} onSave={(v) => save({ judgeAndChoice: { workspaceChoiceTimeoutMs: v } })} />
+        <NumberField label={t(settings.judgeTimeout)} unit={t(settings.unitSeconds)} scale={1000} hint={t(settings.judgeTimeoutHint)} value={jc.judgeTimeoutMs} def={d.judgeAndChoice.judgeTimeoutMs} disabled={saving} onSave={(v) => save({ judgeAndChoice: { judgeTimeoutMs: v } })} />
+        <NumberField label={t(settings.workspaceChoiceTimeout)} unit={t(settings.unitSeconds)} scale={1000} hint={t(settings.workspaceChoiceTimeoutHint)} value={jc.workspaceChoiceTimeoutMs} def={d.judgeAndChoice.workspaceChoiceTimeoutMs} disabled={saving} onSave={(v) => save({ judgeAndChoice: { workspaceChoiceTimeoutMs: v } })} />
         <ResetButton disabled={saving} onClick={() => save({ judgeAndChoice: null })} />
       </section>
 
       <section className="card">
-        <h5>ターン終了時の自動判定</h5>
-        <div className="muted">終わったターンの最後の返答を 1 ターンで読み、完了 / 要対応を付けます。ターンごとにそのランナーの使用枠を 1 回使います。動かないときは Claude Haiku で判定します。</div>
+        <h5>{t(settings.turnJudge)}</h5>
+        <div className="muted">{t(settings.turnJudgeHint)}</div>
         <div className="row" style={{ alignItems: "center", gap: 6 }}>
           <label className="hint toggle">
             <input type="checkbox" checked={judge.enabled} disabled={saving} onChange={(e) => void save({ judge: { enabled: e.target.checked } })} />
-            ターン終了時の自動判定
+            {t(settings.turnJudge)}
           </label>
           {(judge.enabled || s.evals.judge.enabled) && (
             <>
-              {!judge.enabled && <span className="hint">（下のルーブリック判定が使う）</span>}
+              {!judge.enabled && <span className="hint">{t(settings.usedByRubric)}</span>}
               {/* a model belongs to one runner: the old one would make every judgement fail on the new runner first and fall back to Haiku. Shown while either judge (#493 / #1219) uses them */}
-              <select className="mode" value={judge.runner} disabled={saving} aria-label="自動判定のランナー" onChange={(e) => void save({ judge: { runner: e.target.value as RunnerId, model: "" } })}>
-                {runnerOptions(judge.runner, "判定")}
+              <select className="mode" value={judge.runner} disabled={saving} aria-label={t(settings.judgeRunner)} onChange={(e) => void save({ judge: { runner: e.target.value as RunnerId, model: "" } })}>
+                {runnerOptions(judge.runner, t(settings.judgeOption))}
               </select>
-              <ModelSelect runner={info(judge.runner)} value={judge.model} onChange={(m) => void save({ judge: { model: m } })} label="判定のモデル" disabled={saving} title="判定の 1 ターンだけに使うモデルです" />
+              <ModelSelect runner={info(judge.runner)} value={judge.model} onChange={(m) => void save({ judge: { model: m } })} label={t(settings.judgeModel)} disabled={saving} title={t(settings.judgeModelTitle)} />
             </>
           )}
         </div>
       </section>
 
       <section className="card">
-        <h5>ルーブリック判定</h5>
-        <div className="muted">done で終わったターンのあと、会話の要約とルール指標をルーブリック（5 観点、1〜5 点）で採点します。ランナーとモデルは上の自動判定と同じで、ターンごとにその使用枠を 1 回使います（上の自動判定を切っていても、これが入っていれば動きます）。ルーブリックは SWITCHBOARD_HOME/evals/rubric.json で上書きできます（デーモンの起動時に 1 回読むので、直したら再起動）。</div>
+        <h5>{t(settings.rubric)}</h5>
+        <div className="muted">{t(settings.rubricHint)}</div>
         <label className="hint toggle">
           <input type="checkbox" checked={s.evals.judge.enabled} disabled={saving} onChange={(e) => void save({ evals: { judge: { enabled: e.target.checked } } })} />
-          ターンの終わりにルーブリックで採点する（ランナー・モデルは自動判定と同じ）
+          {t(settings.rubricToggle)}
         </label>
       </section>
 
       <section className="card">
-        <h5>LLM 提案</h5>
-        <div className="muted">Task を作るときに「どのランナー向きか」を 1 ターンだけ聞き、ルール表の推奨の横に並べます（提案のみ）。Workspace を「自動」にしたときに、どの Workspace かを選ぶのも同じランナー・モデルです。そのランナーの使用枠を使います。</div>
+        <h5>{t(settings.llm)}</h5>
+        <div className="muted">{t(settings.llmHint)}</div>
         <div className="row" style={{ alignItems: "center", gap: 6 }}>
           <label className="hint toggle">
             <input type="checkbox" checked={llm.enabled} disabled={saving} onChange={(e) => void save({ routing: { llm: { enabled: e.target.checked } } })} />
-            LLM にも提案させる
-            {llm.enabled && props.health?.routing?.llm.available === false && <span className="warn">（{llm.runner} が未検出のため提案は出ません）</span>}
+            {t(settings.llmToggle)}
+            {llm.enabled && props.health?.routing?.llm.available === false && <span className="warn">{t(settings.llmUnavailable, { runner: llm.runner })}</span>}
           </label>
-          <select className="mode" value={llm.runner} disabled={saving} aria-label="LLM 提案のランナー" onChange={(e) => void save({ routing: { llm: { runner: e.target.value as RunnerId } } })}>
-            {runnerOptions(llm.runner, "提案 / 自動選択")}
+          <select className="mode" value={llm.runner} disabled={saving} aria-label={t(settings.llmRunner)} onChange={(e) => void save({ routing: { llm: { runner: e.target.value as RunnerId } } })}>
+            {runnerOptions(llm.runner, t(settings.llmOption))}
           </select>
-          <ModelSelect runner={info(llm.runner)} value={llm.model} onChange={(m) => void save({ routing: { llm: { model: m } } })} label="提案のモデル" disabled={saving} title="提案と Workspace の自動選択の 1 ターンだけに使うモデルです（安いモデルで足ります）" />
-          <select className="mode" value={llm.timeoutMs} disabled={saving} aria-label="LLM 提案の待ち時間" title="提案の締め切りです。Task は待ちません（claude の 1 ターンは実測 10 秒前後）" onChange={(e) => void save({ routing: { llm: { timeoutMs: Number(e.target.value) } } })}>
+          <ModelSelect runner={info(llm.runner)} value={llm.model} onChange={(m) => void save({ routing: { llm: { model: m } } })} label={t(settings.llmModel)} disabled={saving} title={t(settings.llmModelTitle)} />
+          <select className="mode" value={llm.timeoutMs} disabled={saving} aria-label={t(settings.llmWait)} title={t(settings.llmWaitTitle)} onChange={(e) => void save({ routing: { llm: { timeoutMs: Number(e.target.value) } } })}>
             {[5000, 10000, 15000, 30000].map((ms) => (
               <option key={ms} value={ms}>
-                待ち時間: {ms / 1000} 秒
+                {t(settings.llmWaitOption, { seconds: ms / 1000 })}
               </option>
             ))}
           </select>
@@ -284,18 +288,18 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
       </section>
 
       <section className="card">
-        <h5>タスク名の自動付与</h5>
-        <div className="muted">最初のターンの後に 1 回、短い名前を付けます。使用枠を 1 回使います。</div>
+        <h5>{t(settings.titles)}</h5>
+        <div className="muted">{t(settings.titlesHint)}</div>
         <label className="hint toggle">
           <input type="checkbox" checked={s.titles.auto} disabled={saving} onChange={(e) => void save({ titles: { auto: e.target.checked } })} />
-          最初のターンの後に名前を付ける
+          {t(settings.titlesToggle)}
         </label>
       </section>
 
       <SettingsGroupHeading id="settings-model" />
       <section className="card">
-        <h5>モデルの選択肢</h5>
-        <div className="muted">Home・Brief・自動で始まる Task のモデルの選択肢です。保存していないランナーは同梱の一覧です。</div>
+        <h5>{t(settings.models)}</h5>
+        <div className="muted">{t(settings.modelsHint)}</div>
         {/* dak has no list of its own; on Bedrock the list is the adapter's Bedrock one, not the saved one (#1400) */}
         {runners.filter((r) => r.models.length > 0 && r.loginKind !== "bedrock").map((r) => (
           <ModelChoices key={r.id} runner={r.id} list={r.models} saved={!!s.models[r.id]} disabled={saving} save={trySave} />
@@ -304,8 +308,8 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
       </section>
 
       <section className="card">
-        <h5>モデルの価格</h5>
-        <div className="muted">USD / 1M tokens。公式の価格ページの値を入れます。同梱の価格表の同じモデルより優先され、次の使用から台帳の換算に使われます（過去の行は変わりません）。</div>
+        <h5>{t(settings.prices)}</h5>
+        <div className="muted">{t(settings.pricesHint)}</div>
         <ModelPrices prices={s.prices} disabled={saving} save={trySave} />
       </section>
 
@@ -313,54 +317,65 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
       <WorkspaceCard workspaces={props.workspaces} clones={props.clones} onAddWorkspaceFromGithub={props.onAddWorkspaceFromGithub} onAddWorkspace={props.onAddWorkspace} onTaskStarted={props.onTaskStarted} onError={props.onError} />
 
       <section className="card">
-        <h5>端末通知</h5>
+        <h5>{t(settings.notifications)}</h5>
         {perm === "default" && (
           <>
-            <div className="muted">承認待ち（ツール承認・要対応）を OS の通知で知らせます。この画面を開いているときだけ届きます</div>
+            <div className="muted">{t(settings.notifyAsk)}</div>
             <div className="row">
               <button className="pri" onClick={() => void Notification.requestPermission().then(setPerm)}>
-                通知を許可する
+                {t(settings.notifyAllow)}
               </button>
             </div>
           </>
         )}
-        {perm === "granted" && <div className="muted">許可済み。承認待ちが来ると通知します</div>}
-        {perm === "denied" && <div className="muted">ブラウザが拒否しています。サイトの設定で許可に変えると次の承認待ちから通知します。一覧とバッジはそのまま使えます</div>}
-        {perm === "unsupported" && <div className="muted">このブラウザでは端末通知を使えません（一覧とバッジで確認できます）</div>}
+        {perm === "granted" && <div className="muted">{t(settings.notifyGranted)}</div>}
+        {perm === "denied" && <div className="muted">{t(settings.notifyDenied)}</div>}
+        {perm === "unsupported" && <div className="muted">{t(settings.notifyUnsupported)}</div>}
+      </section>
+
+      <section className="card">
+        <h5>{t(settings.language)}</h5>
+        <div className="row" style={{ alignItems: "center", gap: 6 }}>
+          <select className="mode" value={lang} aria-label={t(settings.language)} onChange={(e) => setLang(e.target.value as Lang)}>
+            <option value="ja">{t(settings.japanese)}</option>
+            <option value="en">{t(settings.english)}</option>
+          </select>
+          <span className="hint">{t(settings.languageHint)}</span>
+        </div>
       </section>
 
       <section className="card" id="release">
-        <h5>動いている版</h5>
+        <h5>{t(settings.release)}</h5>
         <ReleasePanel />
       </section>
 
       <section className="card">
-        <h5>バックログを進める</h5>
+        <h5>{t(settings.sweep)}</h5>
         <SweepSlots onError={props.onError} />
       </section>
 
       <section className="card">
-        <h5>GitHub 同期</h5>
+        <h5>{t(settings.githubSync)}</h5>
         <GithubSync />
       </section>
 
       <section className="card">
-        <h5>Terminal の履歴（Claude Code）</h5>
+        <h5>{t(settings.terminalHistory)}</h5>
         <TerminalHistory onError={props.onError} />
       </section>
 
       {countriesUrl(props.health?.login) && (
         <section className="card">
-          <h5>海外から使う</h5>
-          <div className="muted">出発前に、許可する国と期間を設定します。期間が過ぎると自動で元の国の制限に戻ります。保存にはパスキーの確認が要ります。</div>
-          <a href={countriesUrl(props.health?.login)!}>国の一時許可を設定する</a>
+          <h5>{t(settings.abroad)}</h5>
+          <div className="muted">{t(settings.abroadHint)}</div>
+          <a href={countriesUrl(props.health?.login)!}>{t(settings.abroadLink)}</a>
         </section>
       )}
 
       {logoutPath(props.health?.login) && (
         <section className="card">
-          <h5>ログイン</h5>
-          <button onClick={() => void logout(logoutPath(props.health?.login)!, props.onError)}>ログアウト</button>
+          <h5>{t(settings.login)}</h5>
+          <button onClick={() => void logout(logoutPath(props.health?.login)!, props.onError)}>{t(settings.logout)}</button>
         </section>
       )}
     </main>
@@ -370,7 +385,7 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
 /** The table of contents (#3356): one link per group; a press scrolls to the group's heading and leaves the URL as it is. */
 export function SettingsToc() {
   return (
-    <nav className="settings-toc" aria-label="Settings の目次">
+    <nav className="settings-toc" aria-label={t(settings.tocLabel)}>
       {SETTINGS_GROUPS.map((g) => (
         <a
           key={g.id}
@@ -382,7 +397,7 @@ export function SettingsToc() {
             heading?.focus({ preventScroll: true }); // the next Tab goes on inside the group, as a fragment link would
           }}
         >
-          {g.title}
+          {groupTitle(g.id)}
         </a>
       ))}
     </nav>
@@ -393,7 +408,7 @@ export function SettingsToc() {
 export function SettingsGroupHeading(props: { id: string }) {
   return (
     <h4 className="settings-group" id={props.id} tabIndex={-1}>
-      {settingsGroup(props.id).title}
+      {groupTitle(props.id)}
     </h4>
   );
 }
@@ -422,8 +437,8 @@ export function GithubSync() {
   const moving = syncs.some((x) => x.enabling);
   useEffect(() => {
     if (!moving) return;
-    const t = setInterval(() => void load(), 3000);
-    return () => clearInterval(t);
+    const timer = setInterval(() => void load(), 3000);
+    return () => clearInterval(timer);
   }, [moving]);
   const press = async (w: Workspace, to: "github" | "switchboard", local: boolean) => {
     setBusy(w.id);
@@ -443,25 +458,25 @@ export function GithubSync() {
       {workspaces.map((w) => {
         const s = syncs.find((x) => x.workspaceId === w.id);
         if (!s) return null;
-        const t = githubSyncText(s);
+        const text = githubSyncText(s);
         // kept here only (#2265): its stored backlog is under its own id, and it reads no Project yet
         const local = s.backlog === "switchboard" && s.repository === w.id;
         const to = s.enabling || s.backlog === "switchboard" ? "github" : "switchboard";
         return (
           <div key={w.id} className="row github-sync" data-workspace={w.id} style={{ alignItems: "center", gap: 6 }}>
             <span>{w.name}</span>
-            <span className="hint" data-sync={t.state}>
-              {[t.label, ...t.parts].join(" · ")}
+            <span className="hint" data-sync={text.state}>
+              {[text.label, ...text.parts].join(" · ")}
             </span>
-            {local && <input aria-label={`${w.name} の Project の URL を持つリポジトリ変数`} placeholder="SWITCHBOARD_PROJECT_URL" value={vars[w.id] ?? w.projectVar ?? ""} onChange={(e) => setVars((v) => ({ ...v, [w.id]: e.target.value }))} />}
+            {local && <input aria-label={t(settings.projectVar, { name: w.name })} placeholder="SWITCHBOARD_PROJECT_URL" value={vars[w.id] ?? w.projectVar ?? ""} onChange={(e) => setVars((v) => ({ ...v, [w.id]: e.target.value }))} />}
             <button className={to === "github" ? "pri" : "ghost"} disabled={busy !== null} onClick={() => void press(w, to, local)}>
-              {s.enabling ? "続ける" : to === "github" ? "有効にする" : "無効にする"}
+              {s.enabling ? t(settings.syncContinue) : to === "github" ? t(settings.turnOn) : t(settings.turnOff)}
             </button>
             {errors[w.id] && <span className="warn">{errors[w.id]}</span>}
           </div>
         );
       })}
-      <div className="hint">無効の間の編集は、有効にしたときに GitHub へ送ります。</div>
+      <div className="hint">{t(settings.syncHint)}</div>
     </>
   );
 }
@@ -470,9 +485,9 @@ async function logout(path: string, onError: (msg: string) => void) {
   try {
     const r = await fetch(path, { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: "{}" });
     if (r.ok) location.assign("/_auth/");
-    else onError(`ログアウトできませんでした (${r.status})`);
+    else onError(t(settings.logoutFailed, { detail: r.status }));
   } catch (e) {
-    onError(`ログアウトできませんでした (${(e as Error).message ?? e})`);
+    onError(t(settings.logoutFailed, { detail: String((e as Error).message ?? e) }));
   }
 }
 
@@ -494,7 +509,7 @@ export function SweepSlots(props: { onError: (msg: string) => void }) {
     // an emptied box would be Number("") = 0, which switches the slot off: only a typed digit counts
     const bad = saved.find((w) => ![draft[w.id]!.implement, draft[w.id]!.plan].every((x) => /^\s*[0-3]\s*$/.test(x)));
     if (bad) {
-      props.onError(`枠の数は 0〜3 の整数で入力してください: ${bad.name} 実装 "${draft[bad.id]!.implement}" / 計画 "${draft[bad.id]!.plan}"`);
+      props.onError(t(settings.slotsInvalid, { name: bad.name, implement: draft[bad.id]!.implement, plan: draft[bad.id]!.plan }));
       return;
     }
     setBusy(true);
@@ -519,7 +534,7 @@ export function SweepSlots(props: { onError: (msg: string) => void }) {
         min={0}
         max={3}
         step={1}
-        aria-label={`${w.name} の${label}の枠`}
+        aria-label={t(settings.slotLabel, { name: w.name, slot: label })}
         value={draft[w.id]?.[slot] ?? ""}
         onChange={(e) => setDraft((d) => ({ ...d, [w.id]: { ...d[w.id]!, [slot]: e.target.value } }))}
         style={{ width: 56 }}
@@ -528,18 +543,19 @@ export function SweepSlots(props: { onError: (msg: string) => void }) {
   );
   return (
     <div className="backlog-sweep" style={{ gridColumn: "1 / -1" }}>
+      {/* ui-strings: value "implement" "plan" — the slot's key */}
       {saved?.map((w) => (
         <div key={w.id} className="row" data-workspace={w.id} style={{ alignItems: "center", gap: 6 }}>
           <span className="t">{w.name}</span>
-          {box(w, "implement", "実装")}
-          {box(w, "plan", "計画")}
+          {box(w, "implement", t(settings.slotImplement))}
+          {box(w, "plan", t(settings.slotPlan))}
         </div>
       ))}
       <div className="row" style={{ alignItems: "center", gap: 6 }}>
         <button className="ghost" disabled={busy || !saved} onClick={() => void save()}>
-          保存
+          {t(settings.save)}
         </button>
-        <span className="hint">0 = 自動で進めない</span>
+        <span className="hint">{t(settings.slotsHint)}</span>
       </div>
     </div>
   );
@@ -555,7 +571,7 @@ export function PresetSettings(props: { onError: (msg: string) => void }) {
   const [draft, setDraft] = useState({ name: "", text: "", error: null as string | null });
   const [busy, setBusy] = useState(false);
   const { onError } = props;
-  const load = () => api.presets().then((r) => setList(r.presets)).catch((e) => onError(`定型の指示を読めませんでした: ${String(e.message ?? e)}`));
+  const load = () => api.presets().then((r) => setList(r.presets)).catch((e) => onError(t(settings.presetsUnreadable, { error: String(e.message ?? e) })));
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -577,12 +593,12 @@ export function PresetSettings(props: { onError: (msg: string) => void }) {
     const id = edit.id;
     void run(async () => { await api.updatePreset(id, { name: edit.name, text: edit.text }); setEdit((cur) => (cur?.id === id ? null : cur)); }, (error) => setEdit((cur) => (cur?.id === id ? { ...cur, error } : cur)));
   };
-  const remove = (p: Preset) => confirm(`「${p.name}」を削除しますか`) && void run(() => api.deletePreset(p.id), (msg) => onError(`削除できませんでした: ${msg}`));
+  const remove = (p: Preset) => confirm(t(settings.presetDeleteConfirm, { name: p.name })) && void run(() => api.deletePreset(p.id), (msg) => onError(t(settings.deleteFailed, { error: msg })));
   // the form is read-only while it saves (below), so what is cleared is what was saved
   const add = () => void run(async () => { await api.createPreset({ name: draft.name, text: draft.text }); setDraft({ name: "", text: "", error: null }); }, (error) => setDraft((cur) => ({ ...cur, error })));
   return (
     <>
-      {list && list.length === 0 && <div className="muted">保存した指示はありません</div>}
+      {list && list.length === 0 && <div className="muted">{t(settings.noPresets)}</div>}
       {list?.map((p) => {
         const row = presetRow(p);
         const editing = edit?.id === p.id ? edit : null;
@@ -595,25 +611,25 @@ export function PresetSettings(props: { onError: (msg: string) => void }) {
             </div>
             {editing ? (
               <div className="policy-edit">
-                <input aria-label="名前" readOnly={busy} value={editing.name} onChange={(e) => setEdit({ ...editing, name: e.target.value })} />
-                <textarea aria-label="本文" rows={4} readOnly={busy} value={editing.text} onChange={(e) => setEdit({ ...editing, text: e.target.value })} />
+                <input aria-label={t(settings.name)} readOnly={busy} value={editing.name} onChange={(e) => setEdit({ ...editing, name: e.target.value })} />
+                <textarea aria-label={t(settings.presetText)} rows={4} readOnly={busy} value={editing.text} onChange={(e) => setEdit({ ...editing, text: e.target.value })} />
                 {editing.error && <div className="hint warn">{editing.error}</div>}
                 <div className="policy-actions">
                   <button className="pri" disabled={busy} onClick={saveEdit}>
-                    保存
+                    {t(settings.save)}
                   </button>
                   <button className="ghost" onClick={() => setEdit(null)}>
-                    やめる
+                    {t(settings.cancel)}
                   </button>
                 </div>
               </div>
             ) : (
               <div className="policy-actions">
                 <button className="ghost" onClick={() => setEdit({ id: p.id, name: p.name, text: p.text, error: null })}>
-                  編集
+                  {t(settings.edit)}
                 </button>
                 <button className="ghost" disabled={busy} onClick={() => remove(p)}>
-                  削除
+                  {t(settings.delete)}
                 </button>
               </div>
             )}
@@ -621,12 +637,12 @@ export function PresetSettings(props: { onError: (msg: string) => void }) {
         );
       })}
       <div className="policy-edit preset-new">
-        <input aria-label="新しい指示の名前" readOnly={busy} placeholder="名前（例: レビュー対応からマージまで）" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
-        <textarea aria-label="新しい指示の本文" rows={4} readOnly={busy} placeholder="本文（例: PR {{target}} のレビュー指摘に対応してマージまで進めてください）" value={draft.text} onChange={(e) => setDraft({ ...draft, text: e.target.value })} />
+        <input aria-label={t(settings.newPresetName)} readOnly={busy} placeholder={t(settings.newPresetNamePlaceholder)} value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+        <textarea aria-label={t(settings.newPresetText)} rows={4} readOnly={busy} placeholder={t(settings.newPresetTextPlaceholder)} value={draft.text} onChange={(e) => setDraft({ ...draft, text: e.target.value })} />
         {draft.error && <div className="hint warn">{draft.error}</div>}
         <div className="policy-actions">
           <button className="pri" disabled={busy || !draft.name.trim() || !draft.text.trim()} onClick={add}>
-            保存
+            {t(settings.save)}
           </button>
         </div>
       </div>
@@ -656,7 +672,7 @@ function NumberField(props: { label: string; unit?: string; scale?: number; step
       <span className="hint">{props.label}</span>
       <input type="number" step={props.step ?? 1} min={props.min} max={props.max} aria-label={props.label} value={text ?? shown(props.value)} disabled={props.disabled} onChange={(e) => setText(e.target.value)} onBlur={(e) => commit(e.currentTarget.value)} onKeyDown={(e) => e.key === "Enter" && commit(e.currentTarget.value)} style={{ width: 88 }} />
       {props.unit && <span className="hint">{props.unit}</span>}
-      <span className="muted">既定 {shown(props.def)}{props.unit ? ` ${props.unit}` : ""}</span>
+      <span className="muted">{t(settings.defaultValue, { value: `${shown(props.def)}${props.unit ? ` ${props.unit}` : ""}` })}</span>
     </label>
   );
 }
@@ -678,7 +694,7 @@ function TextField(props: { label: string; hint?: string; value: string; def: st
       ) : (
         <input {...common} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === "Enter" && commit(e.currentTarget.value)} style={{ width: 140 }} />
       )}
-      <span className="muted">既定 {props.def}</span>
+      <span className="muted">{t(settings.defaultValue, { value: props.def })}</span>
       {props.hint && <span className="hint">{props.hint}</span>}
     </div>
   );
@@ -707,28 +723,31 @@ function ModelChoices(props: { runner: RunnerId; list: ModelOption[]; saved: boo
       {props.list.map((m, i) => (
         <div key={m.value} className="row" style={{ alignItems: "center", justifyContent: "flex-start", gap: 6 }}>
           <span>
-            {m.label}（<span className="mono">{m.value}</span>）
+            {m.label}
+            {t(settings.parenOpen)}
+            <span className="mono">{m.value}</span>
+            {t(settings.parenClose)}
           </span>
           <button className="ghost" disabled={props.disabled || i === 0} onClick={() => void put(moveModel(props.list, m.value, -1))}>
-            上へ
+            {t(settings.moveUp)}
           </button>
           <button className="ghost" disabled={props.disabled || i === props.list.length - 1} onClick={() => void put(moveModel(props.list, m.value, 1))}>
-            下へ
+            {t(settings.moveDown)}
           </button>
           <button className="ghost" disabled={props.disabled || props.list.length === 1} onClick={() => void put(removeModel(props.list, m.value))}>
-            外す
+            {t(settings.remove)}
           </button>
         </div>
       ))}
       <div className="row" style={{ alignItems: "center", justifyContent: "flex-start", gap: 6, flexWrap: "wrap" }}>
-        <input className="mono" aria-label={`${props.runner} に足すモデルの id`} placeholder="id" value={id} disabled={props.disabled} onChange={(e) => setId(e.target.value)} style={{ width: 200 }} />
-        <input aria-label={`${props.runner} に足すモデルの表示名`} placeholder="表示名" value={label} disabled={props.disabled} onChange={(e) => setLabel(e.target.value)} style={{ width: 140 }} />
+        <input className="mono" aria-label={t(settings.addModelId, { runner: props.runner })} placeholder="id" value={id} disabled={props.disabled} onChange={(e) => setId(e.target.value)} style={{ width: 200 }} />
+        <input aria-label={t(settings.addModelLabel, { runner: props.runner })} placeholder={t(settings.displayName)} value={label} disabled={props.disabled} onChange={(e) => setLabel(e.target.value)} style={{ width: 140 }} />
         <button className="btn" disabled={props.disabled} onClick={() => void add()}>
-          足す
+          {t(settings.add)}
         </button>
         {props.saved && (
           <button className="ghost" disabled={props.disabled} onClick={() => void put(null)}>
-            同梱の一覧に戻す
+            {t(settings.bundledList)}
           </button>
         )}
       </div>
@@ -772,28 +791,31 @@ function CliModelCandidates(props: { runners: RunnerInfo[]; hidden: (runner: Run
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <div className="row" style={{ alignItems: "center", justifyContent: "flex-start", gap: 6 }}>
-        <button className="btn" disabled={props.disabled || loading} onClick={() => void read()} title="インストール済みの CLI が持つモデル表を読み、一覧にも「載せない」にも無いモデルを出します（ネットワークには出ません）">
-          {loading ? "読み込み中…" : "CLI の表を読む"}
+        <button className="btn" disabled={props.disabled || loading} onClick={() => void read()} title={t(settings.readCliTitle)}>
+          {loading ? t(settings.loading) : t(settings.readCli)}
         </button>
       </div>
       {found?.map((r) => (
         <div key={r.runner} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <span className="t">{r.runner} の候補</span>
+          <span className="t">{t(settings.candidates, { runner: r.runner })}</span>
           {"error" in r ? (
             <div className="muted">{r.error}</div>
           ) : r.candidates.length === 0 ? (
-            <div className="muted">候補なし</div>
+            <div className="muted">{t(settings.noCandidates)}</div>
           ) : (
             r.candidates.map((m) => (
               <div key={m.value} className="row" style={{ alignItems: "center", justifyContent: "flex-start", gap: 6 }}>
                 <span>
-                  {m.label}（<span className="mono">{m.value}</span>）
+                  {m.label}
+                  {t(settings.parenOpen)}
+                  <span className="mono">{m.value}</span>
+                  {t(settings.parenClose)}
                 </span>
-                <button className="ghost" disabled={props.disabled || !listOf(r.runner)} aria-label={`${r.runner} の候補 ${m.value} を足す`} title={listOf(r.runner) ? "一覧の末尾に足します" : "Amazon Bedrock で動いている間は足せません"} onClick={() => void add(r.runner, m)}>
-                  足す
+                <button className="ghost" disabled={props.disabled || !listOf(r.runner)} aria-label={t(settings.addCandidate, { runner: r.runner, model: m.value })} title={listOf(r.runner) ? t(settings.addCandidateTitle) : t(settings.bedrockNoAdd)} onClick={() => void add(r.runner, m)}>
+                  {t(settings.add)}
                 </button>
-                <button className="ghost" disabled={props.disabled} aria-label={`${r.runner} の候補 ${m.value} を載せない`} title="次に読んでも候補に出しません（下の「載せないにしたモデル」で取り消せます）" onClick={() => void hide(r.runner, m.value)}>
-                  載せない
+                <button className="ghost" disabled={props.disabled} aria-label={t(settings.hideCandidate, { runner: r.runner, model: m.value })} title={t(settings.hideTitle)} onClick={() => void hide(r.runner, m.value)}>
+                  {t(settings.hide)}
                 </button>
               </div>
             ))
@@ -801,16 +823,16 @@ function CliModelCandidates(props: { runners: RunnerInfo[]; hidden: (runner: Run
         </div>
       ))}
       <details>
-        <summary>載せないにしたモデル</summary>
+        <summary>{t(settings.hiddenModels)}</summary>
         {catalogRunners.map((r) => (
           <div key={r.id} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <span className="t">{r.id}</span>
-            {props.hidden(r.id).length === 0 && <div className="muted">なし</div>}
+            {props.hidden(r.id).length === 0 && <div className="muted">{t(settings.none)}</div>}
             {props.hidden(r.id).map((id) => (
               <div key={id} className="row" style={{ alignItems: "center", justifyContent: "flex-start", gap: 6 }}>
                 <span className="mono">{id}</span>
-                <button className="ghost" disabled={props.disabled} aria-label={`${r.id} の ${id} の載せないを取り消す`} onClick={() => void props.save({ hiddenModels: { [r.id]: unhideModel(props.hidden(r.id), id) } })}>
-                  取り消し
+                <button className="ghost" disabled={props.disabled} aria-label={t(settings.unhide, { runner: r.id, model: id })} onClick={() => void props.save({ hiddenModels: { [r.id]: unhideModel(props.hidden(r.id), id) } })}>
+                  {t(settings.undo)}
                 </button>
               </div>
             ))}
@@ -839,7 +861,7 @@ function ModelPrices(props: { prices: Record<string, SettingsPrice>; disabled: b
         <table className="pricing">
           <thead>
             <tr>
-              <th>モデル</th>
+              <th>{t(settings.model)}</th>
               {boxes.map(([k, label]) => (
                 <th key={k}>{label}</th>
               ))}
@@ -857,10 +879,10 @@ function ModelPrices(props: { prices: Record<string, SettingsPrice>; disabled: b
                 <td className="num">{p.cacheWrite1h === undefined ? "—" : `$${p.cacheWrite1h}`}</td>
                 <td>
                   <button className="ghost" disabled={props.disabled} onClick={() => setForm(priceFormOf(m, p))}>
-                    直す
+                    {t(settings.fixPrice)}
                   </button>
                   <button className="ghost" disabled={props.disabled} onClick={() => void props.save({ prices: { [m]: null } })}>
-                    消す
+                    {t(settings.erasePrice)}
                   </button>
                 </td>
               </tr>
@@ -869,16 +891,16 @@ function ModelPrices(props: { prices: Record<string, SettingsPrice>; disabled: b
         </table>
       )}
       <div className="row" style={{ alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-        <input className="mono" aria-label="モデル名" placeholder="モデル名" value={form.model} disabled={props.disabled} onChange={(e) => setForm({ ...form, model: e.target.value })} style={{ width: 200 }} />
+        <input className="mono" aria-label={t(settings.modelName)} placeholder={t(settings.modelName)} value={form.model} disabled={props.disabled} onChange={(e) => setForm({ ...form, model: e.target.value })} style={{ width: 200 }} />
         {boxes.map(([k, label]) => (
           <input key={k} type="number" min={0} step="any" aria-label={label} placeholder={label} value={form[k]} disabled={props.disabled} onChange={(e) => setForm({ ...form, [k]: e.target.value })} style={{ width: 112 }} />
         ))}
         <button className="btn" disabled={props.disabled} onClick={() => void submit()}>
-          保存
+          {t(settings.save)}
         </button>
       </div>
       {why && <div className="warn">{why}</div>}
-      <div className="hint">cache read / cache write は空なら 0、cache write 1h は空なら cache write の値で換算します。</div>
+      <div className="hint">{t(settings.priceFormHint)}</div>
     </>
   );
 }
@@ -904,9 +926,9 @@ function KindRow(props: {
     return (
       <div className="row" style={{ alignItems: "center", gap: 6, justifyContent: "flex-start" }}>
         {name}
-        <span className="muted">共通</span>
-        <button className="ghost" disabled={props.disabled} onClick={() => setOpen(true)} title="この種類だけ別のランナー・モデル・思考の深さにします">
-          変える
+        <span className="muted">{t(settings.common)}</span>
+        <button className="ghost" disabled={props.disabled} onClick={() => setOpen(true)} title={t(settings.changeTitle)}>
+          {t(settings.change)}
         </button>
       </div>
     );
@@ -916,13 +938,13 @@ function KindRow(props: {
     <div className="row" style={{ alignItems: "center", gap: 6, justifyContent: "flex-start" }}>
       {name}
       {/* a runner change goes back to that runner's CLI default, as for the common values */}
-      <select className="mode" value={c.runner} disabled={props.disabled} aria-label={`${props.label} のランナー`} onChange={(e) => void pick({ runner: e.target.value as RunnerId })}>
-        {props.runnerOptions(c.runner, "ランナー")}
+      <select className="mode" value={c.runner} disabled={props.disabled} aria-label={t(settings.kindRunner, { label: props.label })} onChange={(e) => void pick({ runner: e.target.value as RunnerId })}>
+        {props.runnerOptions(c.runner, t(settings.runner))}
       </select>
-      <ModelSelect runner={props.info(c.runner)} value={c.model} onChange={(model) => void pick({ model })} label="モデル" disabled={props.disabled} title={`${props.label}の Task を動かすモデル`} />
-      <EffortSelect runner={props.info(c.runner)} value={c.effort} onChange={(effort) => void pick({ effort })} label="思考の深さ" disabled={props.disabled} title={`${props.label}の Task の思考の深さ`} />
-      <button className="ghost" disabled={props.disabled} onClick={() => void pick(null).then(() => setOpen(false))} title="この種類の値を消し、共通の値で始まるようにします">
-        共通に戻す
+      <ModelSelect runner={props.info(c.runner)} value={c.model} onChange={(model) => void pick({ model })} label={t(settings.model)} disabled={props.disabled} title={t(settings.kindModelTitle, { label: props.label })} />
+      <EffortSelect runner={props.info(c.runner)} value={c.effort} onChange={(effort) => void pick({ effort })} label={t(settings.effort)} disabled={props.disabled} title={t(settings.kindEffortTitle, { label: props.label })} />
+      <button className="ghost" disabled={props.disabled} onClick={() => void pick(null).then(() => setOpen(false))} title={t(settings.backToCommonTitle)}>
+        {t(settings.backToCommon)}
       </button>
     </div>
   );
@@ -931,8 +953,8 @@ function KindRow(props: {
 function ResetButton(props: { disabled: boolean; onClick: () => Promise<void> }) {
   return (
     <div className="row">
-      <button className="ghost" disabled={props.disabled} onClick={() => void props.onClick()} title="この節の値をすべて既定に戻します">
-        既定に戻す
+      <button className="ghost" disabled={props.disabled} onClick={() => void props.onClick()} title={t(settings.resetTitle)}>
+        {t(settings.reset)}
       </button>
     </div>
   );
@@ -972,7 +994,7 @@ export function TerminalHistory(props: { onError: (msg: string) => void }) {
     setImporting(true);
     try {
       const r = await api.historyImport();
-      setImportMsg(`走査 ${r.files} ファイル: 新規 ${r.created} · 追記 ${r.appended}${r.skippedForeign ? ` · Workspace 外 ${r.skippedForeign}` : ""}${r.errors.length ? ` · エラー ${r.errors.length}（${r.errors[0]}）` : ""}`);
+      setImportMsg(`${t(settings.importScanned, { files: r.files, created: r.created, appended: r.appended })}${r.skippedForeign ? t(settings.importForeign, { n: r.skippedForeign }) : ""}${r.errors.length ? t(settings.importErrors, { n: r.errors.length, first: r.errors[0]! }) : ""}`);
       setHistory(await api.history());
     } catch (e) {
       props.onError(String((e as Error).message ?? e));
@@ -985,30 +1007,35 @@ export function TerminalHistory(props: { onError: (msg: string) => void }) {
     <>
       {history?.enabled && (
         <div className="row head">
-          <button className="ghost" disabled={importing} onClick={() => void importNow()} title={history.pollMs > 0 ? `~/.claude/projects を今すぐ走査する（普段は起動時と ${Math.round(history.pollMs / 1000)} 秒ごとに走る）` : "~/.claude/projects を今すぐ走査する（定期走査は無効: 起動時とこのボタンだけ）"}>
-            {importing ? "取り込み中…" : "今すぐ取り込む"}
+          <button className="ghost" disabled={importing} onClick={() => void importNow()} title={history.pollMs > 0 ? t(settings.importTitlePoll, { seconds: Math.round(history.pollMs / 1000) }) : t(settings.importTitleNoPoll)}>
+            {importing ? t(settings.importing) : t(settings.importNow)}
           </button>
         </div>
       )}
-      {!history && !historyErr && <div className="muted">取り込み状況を読み込み中…</div>}
-      {historyErr && <div className="hint warn">取り込み状況を取得できません: {historyErr}（15 秒ごとに再試行）</div>}
+      {!history && !historyErr && <div className="muted">{t(settings.historyLoading)}</div>}
+      {historyErr && <div className="hint warn">{t(settings.historyError, { error: historyErr })}</div>}
       {history && !history.enabled && (
         <div className="muted">
-          <span className="mono">{history.dir}</span> がありません。Terminal で claude を使ったセッションがここに並びます。
+          <span className="mono">{history.dir}</span>
+          {t(settings.historyNoDir)}
         </div>
       )}
       {history?.enabled && (
         <div className="hint">
-          Terminal で実行したセッション <b>{terminalSessions}</b> 件を Task として取り込み済み
-          {history.lastScanAt ? ` · 最終走査 ${jstTime(history.lastScanAt)}` : ""}
-          {history.pollMs > 0 ? ` · ${Math.round(history.pollMs / 1000)} 秒ごと` : " · 起動時と手動のみ"}
-          {history.lastResult && history.lastResult.skippedForeign > 0 && <> · Workspace 外のセッション {history.lastResult.skippedForeign} 件は取り込まない（Workspace を追加すると次の走査で入る）</>}
-          {history.lastResult && history.lastResult.errors.length > 0 && <span className="warn"> · エラー {history.lastResult.errors.length} 件（{history.lastResult.errors[0]}）</span>}
+          {t(settings.historyImportedBefore)}
+          <b>{terminalSessions}</b>
+          {t(settings.historyImportedAfter)}
+          {history.lastScanAt ? t(settings.historyLastScan, { at: jstTime(history.lastScanAt) }) : ""}
+          {history.pollMs > 0 ? t(settings.historyEvery, { seconds: Math.round(history.pollMs / 1000) }) : t(settings.historyStartupOnly)}
+          {history.lastResult && history.lastResult.skippedForeign > 0 && t(settings.historyForeign, { n: history.lastResult.skippedForeign })}
+          {history.lastResult && history.lastResult.errors.length > 0 && <span className="warn">{t(settings.historyErrors, { n: history.lastResult.errors.length, first: history.lastResult.errors[0]! })}</span>}
         </div>
       )}
       {importMsg && <div className="hint">{importMsg}</div>}
       <div className="hint">
-        読み込み元: <span className="mono">{history?.dir ?? "~/.claude/projects"}</span>。取り込んだ Task には「Terminal」タグが付き、会話・差分・台帳は Switchboard から始めた Task と同じ見え方。Switchboard 自身が動かしたセッションは二重に入りません。
+        {t(settings.historySourceBefore)}
+        <span className="mono">{history?.dir ?? "~/.claude/projects"}</span>
+        {t(settings.historySourceAfter)}
       </div>
     </>
   );
@@ -1025,7 +1052,7 @@ function CustomRunnersSection(props: { onError: (msg: string) => void }) {
   const [changed, setChanged] = useState(false);
   const { onError } = props;
   useEffect(() => {
-    api.customRunners().then(setList).catch((e) => onError(`ADK の接続先を読めませんでした: ${String(e.message ?? e)}`));
+    api.customRunners().then(setList).catch((e) => onError(t(settings.adkUnreadable, { error: String(e.message ?? e) })));
   }, [onError]);
   const put = (next: CustomRunner[]) => {
     setSaving(true);
@@ -1057,10 +1084,11 @@ function CustomRunnersSection(props: { onError: (msg: string) => void }) {
   const offHost = draft.url.trim() !== "" && sendsOffHost(draft.url.trim());
   return (
     <section className="card">
-      <h5>ADK のエージェント（カスタムランナー）</h5>
-      <div className="muted">ADK で作ったエージェントの接続先を足すと、再起動の後に Home のランナーに並びます。トークンの値は保存せず、環境変数の名前だけを保存します。DAK は SWITCHBOARD_DAK_URL で有効にし、ここには出ません。</div>
+      <h5>{t(settings.adk)}</h5>
+      <div className="muted">{t(settings.adkHint)}</div>
       {list?.length ? (
         <table>
+          {/* ui-strings: value "custom:" "/ app" — the runner id's prefix and ADK's word for the app */}
           <tbody>
             {list.map((r) => (
               <tr key={r.name}>
@@ -1070,12 +1098,12 @@ function CustomRunnersSection(props: { onError: (msg: string) => void }) {
                 <td>{r.label}</td>
                 <td>
                   {r.url} / app {r.app}
-                  {sendsOffHost(r.url) && <span className="hint">（依頼の文と添付がこのサーバへ送られます）</span>}
+                  {sendsOffHost(r.url) && <span className="hint">{t(settings.adkSentHere)}</span>}
                 </td>
-                <td>{r.tokenEnv ? `トークン: $${r.tokenEnv}` : "トークンなし"}</td>
+                <td>{r.tokenEnv ? t(settings.adkToken, { name: r.tokenEnv }) : t(settings.adkNoToken)}</td>
                 <td>
                   <button className="ghost" disabled={saving} onClick={() => void put(list.filter((x) => x.name !== r.name))}>
-                    削除
+                    {t(settings.delete)}
                   </button>
                 </td>
               </tr>
@@ -1083,21 +1111,22 @@ function CustomRunnersSection(props: { onError: (msg: string) => void }) {
           </tbody>
         </table>
       ) : (
-        list && <div className="hint">まだありません</div>
+        list && <div className="hint">{t(settings.nothingYet)}</div>
       )}
+      {/* ui-strings: value "name" "label" "url" "app" "tokenEnv" "research" "Research agent" — the fields' keys and a sample runner */}
       <div className="row" style={{ flexWrap: "wrap", gap: 6, marginTop: 8 }}>
-        {field("name", "名前", "research", 10)}
-        {field("label", "表示名", "Research agent", 14)}
+        {field("name", t(settings.name), "research", 10)}
+        {field("label", t(settings.displayName), "Research agent", 14)}
         {field("url", "URL", "http://127.0.0.1:8001", 24)}
-        {field("app", "アプリ名", "research_agent", 14)}
-        {field("tokenEnv", "トークンの環境変数名（任意）", "RESEARCH_TOKEN", 16)}
+        {field("app", t(settings.adkApp), "research_agent", 14)}
+        {field("tokenEnv", t(settings.adkTokenEnv), "RESEARCH_TOKEN", 16)}
         <button disabled={saving || !list} onClick={add}>
-          足す
+          {t(settings.add)}
         </button>
       </div>
-      {offHost && <div className="hint">この URL はローカルではありません。依頼の文と添付がこのサーバへ送られます。</div>}
+      {offHost && <div className="hint">{t(settings.adkOffHost)}</div>}
       {error && <div className="error">{error}</div>}
-      {changed && <div className="hint">保存しました。反映にはデーモンの再起動が要ります。</div>}
+      {changed && <div className="hint">{t(settings.adkSaved)}</div>}
     </section>
   );
 }

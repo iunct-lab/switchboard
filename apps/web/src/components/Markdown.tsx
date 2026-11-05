@@ -1,6 +1,8 @@
 import { createElement, Fragment, useMemo, type ReactNode } from "react";
 import { parseMarkdown, safeHref, type MdBlock, type MdInline } from "../markdown.ts";
 import { useMdView } from "../mdView.ts";
+import { t } from "../i18n.ts";
+import { common as m } from "../i18n/common.ts";
 
 // Renders Markdown as React elements (never as an HTML string): text goes in as text, so raw HTML in a runner's reply stays
 // visible characters. Links open in a new tab; a link whose URL is not http(s) or mailto is shown as plain text.
@@ -61,12 +63,12 @@ export function Markdown(props: { text: string }) {
 export function MdViewToggle() {
   const [view, setView] = useMdView();
   return (
-    <span className="md-view" role="group" aria-label="Markdown の表示">
+    <span className="md-view" role="group" aria-label={t(m.mdViewLabel)}>
       <button className={view === "preview" ? "ghost on" : "ghost"} aria-pressed={view === "preview"} onClick={() => setView("preview")}>
-        プレビュー
+        {t(m.mdPreview)}
       </button>
       <button className={view === "text" ? "ghost on" : "ghost"} aria-pressed={view === "text"} onClick={() => setView("text")}>
-        テキスト
+        {t(m.mdText)}
       </button>
     </span>
   );

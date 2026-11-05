@@ -10,7 +10,7 @@
  * changed files (#1059; the pages after the first only when there are more than 50), by every import. In place of
  * 2, the Project items of the Issues named only (`items`). 4. Per number,
  * the stored open Issues (full imports only) and open PRs the lists no longer have (closed into another label, moved, deleted, hidden), the
- * targets of the PBIs' waits and the prerequisites open PBIs and Tasks name (#937, `**前提**:`; a pull request with its
+ * targets of the PBIs' waits, of the Tasks' depends stops (#2045) and the prerequisites open PBIs and Tasks name (#937, `**前提**:`; a pull request with its
  * merge commit, an Issue with how it was closed): an Issue comes back in full, a 404 marks the record `unavailable` and a 403 `forbidden`,
  * neither erases what was stored. A comment or Project item that a complete read of its Issue no longer lists is
  * marked `unavailable`.
@@ -29,6 +29,7 @@ import { linkedIssues } from "../../../scripts/task-paths.ts";
 import { Limit, sendGithubOperations } from "./backlog-send.ts";
 import { applyLocalOperations } from "./backlog-local.ts";
 import { advanceEnabling, enablingWaits } from "./backlog-enable.ts";
+import { stopWaitNumbers } from "./depends-resume.ts";
 import { forgeTargetOf, ForgeUnsupported, originOf, runForgeOperation, type ForgeTarget } from "../../../ops-kit/src/forge.ts";
 import { GitlabError, readGitlabIssue, readGitlabIssues, readGitlabNotes, runGlab, type GitlabIssue, type Sh } from "../../../ops-kit/src/forge-gitlab.ts";
 import { callMetric, githubHost, GithubRetryState, noCall, parseIncluded, responseOf, retryAtFromResponse, waitMessage, type GithubFailure, type MetricSink } from "../../../ops-kit/src/gh.ts";
@@ -155,7 +156,7 @@ const issueNumber = (r: BacklogRecord) => (r.remote ? ("issue" in r.remote ? r.r
  * is full all the same). `items` names the Issues whose Project items are read all the same, unless a list has them.
  * Throws BacklogError on any failure.
  */
-export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { owner: string; name: string }, stored: BacklogRecord[], since: string | null, full = true, items: number[] = []): Promise<{ records: BacklogSnapshotEntry[]; cursor: string | null }> {
+export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { owner: string; name: string }, stored: BacklogRecord[], since: string | null, full = true, items: number[] = [], stopWaits: number[] = []): Promise<{ records: BacklogSnapshotEntry[]; cursor: string | null }> {
   const vars: Vars = { o: repo.owner, r: repo.name };
   const out = new Map<string, BacklogSnapshotEntry>();
   const put = (e: BacklogSnapshotEntry) => out.set(`${e.objectKind}:${e.externalId}`, e);
@@ -251,7 +252,8 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
   };
   // a stored open PR the full list no longer has was closed or merged: asked again by its number (#1059)
   const gone = [...known.values()].filter((r) => r.kind === "pull-request" && (r.remote as BacklogPullRequestData | null)?.state === "OPEN").map((r) => (r.remote as BacklogPullRequestData).number).filter((n) => !openPulls.has(n));
-  const numbers = [...new Set([...stale, ...gone, ...[...waits, ...prereqs].filter((n) => !closed(n))])].filter((n) => !read.has(n) && !open.has(n) && !openPulls.has(n)).sort((a, b) => a - b);
+  // and what the Tasks' depends stops wait for (#2045), asked like the waits
+  const numbers = [...new Set([...stale, ...gone, ...[...waits, ...prereqs, ...stopWaits].filter((n) => !closed(n))])].filter((n) => !read.has(n) && !open.has(n) && !openPulls.has(n)).sort((a, b) => a - b);
   for (let i = 0; i < numbers.length; i += RECHECK_BATCH) {
     const batch = numbers.slice(i, i + RECHECK_BATCH);
     const { data, errors } = await graphql(gh, cwd, recheckQuery(batch), vars, true);
@@ -294,7 +296,7 @@ export async function importGithubSnapshot(gh: GhRunner, db: Db, ws: Pick<Backlo
       const issue = r.objectKind === "issue" && r.fetchState === "fetched" && !r.externalId.startsWith("sb:") ? (r.remote as BacklogIssueData | null) : null;
       return issue?.state === "OPEN" && Date.parse(issue.createdAt) >= now - NEW_ISSUE_ITEMS_MS ? [issue.number] : [];
     });
-    const snap = await fetchGithubSnapshot(gh, ws.path, { owner, name }, stored, db.getBacklogRepository(key)?.cursor ?? null, full, [...items, ...recent]);
+    const snap = await fetchGithubSnapshot(gh, ws.path, { owner, name }, stored, db.getBacklogRepository(key)?.cursor ?? null, full, [...items, ...recent], stopWaitNumbers(db, ws.id, now));
     changed = changedFrom(stored, snap.records);
     // the daemon wrote to the repository while this read: what it read is older than what the read-back stores; or
     // the workspace's GitHub sync was turned off meanwhile, its first import too (#2266): nothing of GitHub is stored then
@@ -612,7 +614,9 @@ export class BacklogSync {
         // GitHub answers again: what was kept while it did not is sent (#886)
         this.send(ws);
         // what was stored changed: a wait it closed may let a PBI go on now (#1879); one that stored nothing is followed by one that does
-        if (changed && !superseded) for (const l of this.imported) {
+        // and every one that stored, changed or not, to whatever waits on what is stored (#2045)
+        const listeners = superseded ? [] : [...(changed ? this.imported : []), ...this.everyImport];
+        for (const l of listeners) {
           try {
             l(ws.id);
           } catch (e) {
@@ -641,10 +645,15 @@ export class BacklogSync {
   }
 
   private imported = new Set<(wsId: string) => void>();
-  /** Called with the workspace's id after an import that stored a change; returns the unsubscribe. */
-  onImported(l: (wsId: string) => void): () => void {
-    this.imported.add(l);
-    return () => this.imported.delete(l);
+  private everyImport = new Set<(wsId: string) => void>();
+  /**
+   * Called with the workspace's id after an import that stored a change; returns the unsubscribe. `every`: after every
+   * import that stored, changed or not (#2045: a wait closed before the stop was reported is in no change).
+   */
+  onImported(l: (wsId: string) => void, opts: { every?: boolean } = {}): () => void {
+    const set = opts.every ? this.everyImport : this.imported;
+    set.add(l);
+    return () => set.delete(l);
   }
 
   /** The workspace as it is now: a `projectVar` changed since the caller read it is the one imported. */

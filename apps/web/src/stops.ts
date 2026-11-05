@@ -1,4 +1,6 @@
 import type { StopSummary } from "@switchboard/protocol";
+import { t } from "./i18n.ts";
+import { task as m } from "./i18n/task.ts";
 
 /** 停止の系列 (#939) を画面に出す文言: 何回目か、前回の回答、前回からの変化、次に必要な対処。記録に無いものは「不明」。 */
 export interface StopDisplay {
@@ -21,35 +23,35 @@ export interface StopDisplay {
   evidence: string;
 }
 
-const UNKNOWN = "不明";
+const UNKNOWN = t(m.unknown);
 const MAX = 120;
 const clip = (s: string) => (s.length > MAX ? `${s.slice(0, MAX)}…` : s);
 
 const CHANGE_LABEL: Record<StopSummary["changes"][number]["kind"], string> = {
-  cause: "別の原因",
-  answer: "新しい回答",
-  "condition-met": "条件が成立",
-  condition: "条件が変化",
+  cause: t(m.changeCause),
+  answer: t(m.changeAnswer),
+  "condition-met": t(m.changeConditionMet),
+  condition: t(m.changeCondition),
 };
 
 const NEXT_TEXT: Record<StopSummary["next"], string> = {
-  none: "解消済み・操作不要",
-  resume: "回答または条件の成立を受けて再開します・操作不要",
-  wait: "条件の変化待ち・操作不要",
-  retry: "上限つきの再試行中・操作不要",
-  decide: "あなたの判断が必要です",
+  none: t(m.stopNextNone),
+  resume: t(m.stopNextResume),
+  wait: t(m.stopNextWait),
+  retry: t(m.stopNextRetry),
+  decide: t(m.stopNextDecide),
 };
 
 export function stopDisplay(s: StopSummary): StopDisplay {
-  const answer = s.lastAnswer ? (s.lastAnswer.ref.startsWith("seq:") ? "あなたの回答あり" : clip(s.lastAnswer.ref)) : "なし";
+  const answer = s.lastAnswer ? (s.lastAnswer.ref.startsWith("seq:") ? t(m.answeredByYou) : clip(s.lastAnswer.ref)) : t(m.none);
   return {
     key: s.key,
-    title: `${clip(s.op)}${s.target ? ` ${clip(s.target)}` : ""}: ${s.reason === "disk-full" ? "ディスクの空き切れ" : s.reason}`,
-    count: s.count > 1 ? `${s.count} 回目` : "初回",
+    title: `${clip(s.op)}${s.target ? ` ${clip(s.target)}` : ""}: ${s.reason === "disk-full" ? t(m.diskFull) : s.reason}`,
+    count: s.count > 1 ? t(m.countNth, { n: s.count }) : t(m.countFirst),
     answer,
-    changes: s.changes.length ? s.changes.map((c) => `${CHANGE_LABEL[c.kind] ?? UNKNOWN}（${clip(c.detail)}）`).join("、") : s.count <= 1 ? "なし" : "なし（同じ条件）",
+    changes: s.changes.length ? s.changes.map((c) => t(m.changeItem, { label: CHANGE_LABEL[c.kind] ?? UNKNOWN, detail: clip(c.detail) })).join(t(m.changeSep)) : s.count <= 1 ? t(m.none) : t(m.noneSame),
     next: NEXT_TEXT[s.next] ?? UNKNOWN,
-    actions: s.actions.map((a) => `${a.attempt} 回目: ${clip(a.what)}${a.ok === true ? "（成功）" : a.ok === false ? "（失敗）" : ""}`),
+    actions: s.actions.map((a) => `${t(m.action, { n: a.attempt, what: clip(a.what) })}${a.ok === true ? t(m.actionOk) : a.ok === false ? t(m.actionFailed) : ""}`),
     needsPerson: s.next === "decide",
     evidence: s.evidence ? clip(s.evidence) : UNKNOWN,
   };

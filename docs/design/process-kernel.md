@@ -69,7 +69,7 @@ Each element below says what it is for, what exists today, and how it is itself 
 
 **Shape.** `ops-kit/processes/<id>.md`: YAML frontmatter with `id` (equal to the file name), integer `version`, `title`, `fits` (free-text lines naming the work it is meant for), then the text a Task is given at each entry as `## entry <name>` sections with `{{key}}` holes. `packages/core/src/process-defs.ts` reads them (`listProcesses`, `loadProcess`) and fills an entry (`renderEntry`); a hole the caller does not fill, or an entry the definition lacks, is an error, so a Task never starts on a literal `{{…}}`. The daemon passes the meta workspace's checkout as the place to read them from, where the shared skills are read from too — not the running release — so editing a candidate reaches the next Task without a promotion. The first implementation of the kernel (one stack of changes, of which this document is the first) exposes the list at `GET /api/processes`, lets a Task be created with `process` and `processReason`, and puts both into the provenance.
 
-**The test that K4 is real.** The current pipeline is `p0-pipeline`. Its eight entries are the exact texts the daemon built into the stage prompts; the same stack of changes makes the daemon render the stage prompt from the file, removes the strings from core, and checks that the rendered prompts are byte-identical to the former ones. A second candidate, `p1-direct` (one agent from signal to PR, no planning artefacts), is defined but not yet wired to a start path: the chooser is not decided.
+**The test that K4 is real.** The current pipeline is `p0-pipeline`. Its eight entries are the exact texts the daemon built into the stage prompts; the same stack of changes makes the daemon render the stage prompt from the file, removes the strings from core, and checks that the rendered prompts are byte-identical to the former ones. A second candidate, `p1-direct` (one agent from signal to PR, no planning artefacts), starts from a request's row on the Backlog screen ("直行で直す", the action `direct` of the same start as the stage buttons), recorded as `p1-direct` with the reason `direct button`; the sweep never picks it.
 
 **Revised by.** Counting how often changing a candidate still needed a change to core; the aim is zero.
 
@@ -98,9 +98,23 @@ Each element below says what it is for, what exists today, and how it is itself 
 
 A candidate that is retired keeps its file and its record and can be chosen again; retirement is shelving, not deletion.
 
+## Major
+
+A major step of the process is the point where all three of these hold:
+
+1. Two or more candidates run, and there is a period in which the choice between them was recorded for each piece of work.
+2. A reversible change has a path to ship that does not go through the fixed review stages.
+3. At least one of P0's rules of care has been dropped, with the record as the reason.
+
+One or two of them is progress inside the current step, not a new one.
+
+## Decided
+
+- **The first chooser is the owner's button, per request.** A request with no PBI yet offers both "PBI にする" (`p0-pipeline`) and "直行で直す" (`p1-direct`) on its row; the owner picks one, and the Task records which (`processReason` `direct button` for the direct one). Only one of them runs on a request at a time, and the sweep only ever starts `p0-pipeline`. Agents or rules choosing come after there is a record to choose from (decided 2026-11-03).
+
 ## Not decided
 
-- **The chooser.** Who picks a candidate for a piece of work, from what signals, and how a weak candidate still gets chosen often enough to learn from. The first implementation records the choice (`process`, `processReason`) and makes none itself: the backlog's stage buttons and sweep name `p0-pipeline`, a Task typed on Home names nothing.
+- **The chooser beyond the button.** Whether an agent or a rule picks a candidate for a piece of work, from what signals, and how a weak candidate still gets chosen often enough to learn from. Today the choice is recorded (`process`, `processReason`) and made by the owner or by the stage: the backlog's stage buttons and sweep name `p0-pipeline`, a Task typed on Home names nothing.
 - **The candidate list and each candidate's inside** — stages, artefacts, number of agents, cadence. `p1-direct` is a sketch, not a commitment.
 - **Which experiment forms** (replay on recorded inputs, parallel runs on a database copy, canary with rollback) are built; each waits for a decision that needs it.
 - **Thresholds** for continuing, improving or retiring a candidate: recorded when first used, then changed from the record; a new candidate gets a learning allowance and is judged on its trend, not its first level.

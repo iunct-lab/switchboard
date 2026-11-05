@@ -1,4 +1,6 @@
 import type { SettingsPrice } from "@switchboard/protocol";
+import { t } from "./i18n.ts";
+import { settings } from "./i18n/settings.ts";
 
 /** The settings screen's price form (#1402): every box is text, USD / 1M tokens. */
 export interface PriceForm {
@@ -18,13 +20,13 @@ export const EMPTY_PRICE_FORM: PriceForm = { model: "", input: "", output: "", c
  */
 export function parsePriceForm(f: PriceForm): { model: string; price: SettingsPrice } | string {
   const model = f.model.trim();
-  if (!model) return "モデル名を入れてください";
+  if (!model) return t(settings.needModelName);
   // `empty`: what an empty box means — a value, required (an error), or left out (undefined)
   const num = (label: string, text: string, empty: number | "required" | "omit"): number | string | undefined => {
-    if (text.trim() === "") return empty === "required" ? `${label} を入れてください` : empty === "omit" ? undefined : empty;
+    if (text.trim() === "") return empty === "required" ? t(settings.needValue, { label }) : empty === "omit" ? undefined : empty;
     const n = Number(text);
-    if (!Number.isFinite(n)) return `${label} が数ではありません: ${text}`;
-    if (n < 0) return `${label} は 0 以上にしてください: ${text}`;
+    if (!Number.isFinite(n)) return t(settings.notNumber, { label, text });
+    if (n < 0) return t(settings.negative, { label, text });
     return n;
   };
   const input = num("input", f.input, "required");

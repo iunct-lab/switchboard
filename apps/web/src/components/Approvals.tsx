@@ -4,7 +4,9 @@ import { api } from "../api.ts";
 import { ArtifactBody } from "./Artifacts.tsx";
 import { DeviceAuth } from "./DeviceAuth.tsx";
 import { summarize } from "../approvals.ts";
-import { answerButtons, answerTarget, withoutGrant, appliedLine, askFacts, BATCH_LABEL, batchLines, blockerLines, groupAsks, hiddenByBatches, isQuick, quickGroups, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, resumeLabel, scopeLabel, STATE_LABEL, unblocksLine, workspaceChips, workspaceKey, workspaceSections, type Answered, type PolicyForm } from "../asks.ts";
+import { t } from "../i18n.ts";
+import { panels as m } from "../i18n/panels.ts";
+import { answerButtons, answerTarget, withoutGrant, appliedLine, askFacts, BATCH_LABEL, batchLines, blockerLines, groupAsks, hiddenByBatches, isQuick, quickGroups, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, resumeLabel, scopeLabel, STATE_LABEL, unblocksLine, UNKNOWN, workspaceChips, workspaceKey, workspaceSections, type Answered, type PolicyForm } from "../asks.ts";
 
 /**
  * A card's answers (#936): what an answer does not take away, then one button per answer with what it sends and where,
@@ -31,7 +33,7 @@ export function AnswerArea(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAn
       ))}
       {(buttons.length > 0 || takesText) && form && (
         <details className="ask-policy" onToggle={(e) => { const open = e.currentTarget.open; setForm((f) => (f && f.opened !== open ? { ...f, opened: open } : f)); }}>
-          <summary>次回も使う（{scopeLabel(form.scope, x)}）</summary>
+          <summary>{t(m.policyReuse, { scope: scopeLabel(form.scope, x) })}</summary>
           <div className="ask-policy-body">
             {x.policy.scopes.map((s) => (
               <label key={s} className="ask-policy-scope">
@@ -41,21 +43,21 @@ export function AnswerArea(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAn
             {form.scope !== "once" && (
               <>
                 <label className="ask-policy-field">
-                  対象（* で広げられます）
+                  {t(m.policyTarget)}
                   <input value={form.target} disabled={busy} onChange={(e) => setForm({ ...form, target: e.target.value })} />
                 </label>
                 {form.when.map((w, i) => (
                   <label key={w.key} className="ask-policy-scope">
-                    <input type="checkbox" checked={w.on} disabled={busy} onChange={(e) => setForm({ ...form, when: form.when.map((y, j) => (j === i ? { ...y, on: e.target.checked } : y)) })} /> 条件 {w.key}={w.value}
+                    <input type="checkbox" checked={w.on} disabled={busy} onChange={(e) => setForm({ ...form, when: form.when.map((y, j) => (j === i ? { ...y, on: e.target.checked } : y)) })} /> {t(m.policyCondition, { key: w.key, value: w.value })}
                   </label>
                 ))}
                 <label className="ask-policy-field">
-                  期限
+                  {t(m.policyExpires)}
                   <input type="date" value={form.expires} disabled={busy} onChange={(e) => setForm({ ...form, expires: e.target.value })} />
                 </label>
                 {policy && (
                   <ul className="hint ask-policy-summary">
-                    {policySummary(x, policy, buttons[0]?.send ?? "入力した文").map((l) => (
+                    {policySummary(x, policy, buttons[0]?.send ?? t(m.typedText)).map((l) => (
                       <li key={l}>{l}</li>
                     ))}
                   </ul>
@@ -77,20 +79,20 @@ export function AnswerArea(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAn
               {/* closing a notice (#2866) sends nothing anywhere */}
               {b.answer.kind !== "dismiss" && (
                 <div className="hint ask-send">
-                  送る:{" "}
+                  {t(m.sends)}
                   {b.grant === b.send ? (
                     <span className="ask-grant">{b.grant}</span>
                   ) : b.grant ? (
                     <>
                       {withoutGrant(b.send)}
                       <br />
-                      <span className="ask-grant">許可: {b.grant}</span>
+                      <span className="ask-grant">{t(m.grant, { grant: b.grant })}</span>
                     </>
                   ) : (
                     b.send
                   )}{" "}
-                  → {b.target}、続き: {b.next}
-                  {policy && b.answer.kind !== "hold" && b.answer.kind !== "deny" && b.answer.kind !== "confirm" ? `、＋ 方針を保存（${scopeLabel(form!.scope, x)}）` : ""}
+                  {t(m.sendTarget, { target: b.target, next: b.next })}
+                  {policy && b.answer.kind !== "hold" && b.answer.kind !== "deny" && b.answer.kind !== "confirm" ? t(m.savePolicy, { scope: scopeLabel(form!.scope, x) }) : ""}
                 </div>
               )}
             </div>
@@ -99,12 +101,12 @@ export function AnswerArea(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAn
       )}
       {(takesText || confirm) && (
         <div className="ask-text">
-          <textarea value={text} placeholder={confirm ? "違うときの理由" : "自由文で答える"} onChange={(e) => setText(e.target.value)} disabled={busy} />
+          <textarea value={text} placeholder={confirm ? t(m.reasonPlaceholder) : t(m.textPlaceholder)} onChange={(e) => setText(e.target.value)} disabled={busy} />
           <button disabled={busy || !text.trim()} onClick={() => answer(confirm ? { kind: "confirm", ok: false, text: text.trim() } : { kind: "text", text: text.trim() })}>
-            {confirm ? "違うと送る" : "回答を送る"}
+            {confirm ? t(m.sendWrong) : t(m.sendAnswer)}
           </button>
           <div className="hint ask-send">
-            送る: 入力した文 → {answerTarget(x)}、続き: {x.next ?? "不明"}
+            {t(m.sendTyped, { target: answerTarget(x), next: x.next ?? t(m.unknown) })}
           </div>
         </div>
       )}
@@ -143,7 +145,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
       .catch((e) => {
         if (mine !== seq.current) return;
         setFailed(true);
-        onError(`判断待ちを読めませんでした: ${String(e.message ?? e)}`);
+        onError(t(m.loadAsksFailed, { error: String(e.message ?? e) }));
       });
   }, [onError]);
   // on open, and when an approval comes or goes (the live list moves first; the rest is read again with it)
@@ -162,7 +164,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
     api
       .permission(a.taskId, a.id, decision)
       .then(() => props.onAnswered(a))
-      .catch((e) => props.onError(`${a.taskTitle} に答えられませんでした: ${String(e.message ?? e)}`))
+      .catch((e) => props.onError(t(m.answerFailedFor, { title: a.taskTitle, error: String(e.message ?? e) })))
       .finally(() => setBusy(null));
   };
   const askId = (a: PendingApproval) => `approval:${a.taskId}:${a.id}`;
@@ -184,9 +186,9 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
           // with no question now (answered elsewhere, gone) the reason is said at once
           const current = e.body.current;
           if (current) setAnswered((m) => new Map(m).set(current.id, { ask: current, changes: e.body!.changes, changed: true }));
-          else props.onError(`答えられませんでした: ${e.body.error}（${e.body.changes.join(" / ")}）`);
+          else props.onError(t(m.answerChanged, { error: e.body.error, changes: e.body.changes.join(" / ") }));
           load();
-        } else props.onError(`答えられませんでした: ${String(e.message ?? e)}`);
+        } else props.onError(t(m.answerFailed, { error: String(e.message ?? e) }));
       })
       .finally(() => setSending(null));
   };
@@ -203,10 +205,10 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
       {/* one tap, before the facts: on a phone the buttons stay in the first screenful */}
       {buttons && <div className="approval-actions">
         <button className="pri" disabled={busy !== null} onClick={() => answer(a, "allow")}>
-          許可
+          {t(m.allow)}
         </button>
         <button disabled={busy !== null} onClick={() => answer(a, "deny")}>
-          拒否
+          {t(m.deny)}
         </button>
       </div>}
     </>
@@ -235,16 +237,16 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
       <section className="card">
         <div className="row head">
           <h5>
-            判断待ち <span className="hint">{open}</span>
+            {t(m.approvalsHeading)} <span className="hint">{open}</span>
           </h5>
           <button className="ghost" onClick={load}>
-            再読込
+            {t(m.reload)}
           </button>
         </div>
         {chips.length > 0 && (
           <div className="ask-workspaces">
             <button className={narrowed === null ? "pri" : undefined} onClick={() => setWorkspace(null)}>
-              すべて
+              {t(m.all)}
             </button>
             {chips.map((c) => (
               <button key={c.key} className={narrowed === c.key ? "pri" : undefined} data-workspace={c.key} onClick={() => setWorkspace(c.key)}>
@@ -257,14 +259,14 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
         {(chips.length > 0 || unlisted.length > 0) && (
           <div className="ask-quick-row">
             <button className={quickOnly ? "pri" : undefined} aria-pressed={quickOnly} onClick={() => setQuickOnly((q) => !q)}>
-              すぐ答えられる {quick}
+              {t(m.quick)} {quick}
             </button>
           </div>
         )}
-        {quickOnly && unlisted.length === 0 && !groups.some((g) => g.key === "person") && <div className="hint ask-quick-none">すぐ答えられる問いはありません（もう一度押すと全部に戻ります）</div>}
-        {failed && <div className="hint warn ask-failed">{list ? "最新の判断待ちを読めませんでした。前に読んだ一覧と、今の承認を出しています" : "判断待ちを読めませんでした。承認だけを出しています"}（再読込で読み直します）</div>}
-        {!list && !failed && <div className="muted">読み込み中…</div>}
-        {list && list.asks.length === 0 && <div className="muted">判断待ちはありません</div>}
+        {quickOnly && unlisted.length === 0 && !groups.some((g) => g.key === "person") && <div className="hint ask-quick-none">{t(m.quickNone)}</div>}
+        {failed && <div className="hint warn ask-failed">{list ? t(m.failedStale) : t(m.failedNone)}{t(m.failedRetry)}</div>}
+        {!list && !failed && <div className="muted">{t(m.loading)}</div>}
+        {list && list.asks.length === 0 && <div className="muted">{t(m.noAsks)}</div>}
         {list?.errors.map((e) => (
           <div key={e.workspaceId} className="hint">
             {e.workspaceName}: {e.message}
@@ -279,7 +281,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
           <div className="ask-tags">
             <span className="badge ask-kind ask-kind-approval">{KIND_LABEL.approval}</span>
             <span className="badge ask-state ask-state-open">{STATE_LABEL.open}</span>
-            <span className="badge ask-quick">すぐ答えられる</span>
+            <span className="badge ask-quick">{t(m.quick)}</span>
           </div>
           {approvalHead(a)}
         </section>
@@ -289,7 +291,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
           <h5 className="ask-group-head">
             {g.label} <span className="hint">{g.asks.length}</span>
           </h5>
-          {g.key === "auto" && <div className="hint">操作は要りません。条件が満たされると自動で進みます</div>}
+          {g.key === "auto" && <div className="hint">{t(m.autoHint)}</div>}
           {workspaceSections(g.asks).map((ws) => (
             <div key={ws.key} className="ask-workspace" data-workspace={ws.key}>
               <h6 className="ask-workspace-head">
@@ -307,7 +309,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
                     <div className="ask-tags">
                       <span className={`badge ask-kind ask-kind-${x.kind}`}>{KIND_LABEL[x.kind]}</span>
                       <span className={`badge ask-state ask-state-${x.state}`}>{STATE_LABEL[x.state]}</span>
-                      {isQuick(x) && <span className="badge ask-quick">すぐ答えられる</span>}
+                      {isQuick(x) && <span className="badge ask-quick">{t(m.quick)}</span>}
                       {unblocksLine(x) && <span className="badge ask-unblocks">{unblocksLine(x)}</span>}
                     </div>
                     {x.unblocks.length > 0 && (
@@ -322,7 +324,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
                     {a && approvalHead(a, !x.answers.length)}
                     {was?.changes && (
                       <div className={`hint ${was.changed ? "warn " : ""}ask-changes`}>
-                        {was.changed ? "問いが変わったので、もう一度確かめてから答えてください" : "回答の時点で変わっていたもの（回答と一緒に書きました）"}
+                        {was.changed ? t(m.askChanged) : t(m.changedAtAnswer)}
                         <ul>
                           {was.changes.map((c) => (
                             <li key={c}>{c}</li>
@@ -332,7 +334,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
                     )}
                     {previousLines(x).length > 0 && (x.state === "open" || x.state === "held") && (
                       <div className="hint warn ask-previous">
-                        前回と違うので確認します
+                        {t(m.previousDiffers)}
                         <ul>
                           {previousLines(x).map((l) => (
                             <li key={l}>{l}</li>
@@ -346,7 +348,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
                         {resume.text}
                         {x.resume?.state === "running" && x.resume.taskId && (
                           <button className="ghost link" onClick={() => props.onOpenTask(x.resume!.taskId!)}>
-                            Task を開く
+                            {t(m.openTask)}
                           </button>
                         )}
                       </div>
@@ -359,7 +361,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
                       {askFacts(x).map((f) => (
                         <div key={f.label} className="ask-fact">
                           <dt>{f.label}</dt>
-                          <dd className={f.value === "不明" ? "muted" : undefined}>
+                          <dd className={f.value === UNKNOWN ? "muted" : undefined}>
                             {f.href ? (
                               <a href={f.href} target="_blank" rel="noreferrer">
                                 {f.value}
@@ -374,17 +376,17 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
                     <div className="approval-actions">
                       {x.route === "backlog" && (x.state === "open" || x.state === "held") && (
                         <button className="pri ask-route" onClick={props.onOpenBacklog}>
-                          Backlog で答える
+                          {t(m.answerInBacklog)}
                         </button>
                       )}
                       {!a && taskId && (
                         <button className="ask-route" onClick={() => props.onOpenTask(taskId)}>
-                          Task を開く
+                          {t(m.openTask)}
                         </button>
                       )}
                       {x.route === "issue" && x.issue && (
                         <a className="button ask-route" href={x.issue.url} target="_blank" rel="noreferrer">
-                          Issue を開く
+                          {t(m.openIssue)}
                         </a>
                       )}
                     </div>
@@ -412,7 +414,7 @@ export function BatchCard(props: { batch: AskBatch; onOpenTask: (id: string) => 
     setBusy(true);
     api
       .answerBatch(b.id, b.kind === "deploy" ? chosen : undefined)
-      .catch((e) => props.onError(`${BATCH_LABEL[b.kind]}に答えられませんでした: ${String(e.message ?? e)}`))
+      .catch((e) => props.onError(t(m.batchFailed, { batch: BATCH_LABEL[b.kind], error: String(e.message ?? e) })))
       // read again either way: a failure part way leaves the Tasks already sent out of the batch
       .finally(() => {
         setBusy(false);
@@ -427,7 +429,7 @@ export function BatchCard(props: { batch: AskBatch; onOpenTask: (id: string) => 
       {b.loggingIn && (
         <div className="ask-batch-login">
           <div className="hint">
-            ログイン中: <button className="ghost link" onClick={() => props.onOpenTask(b.loggingIn!.taskId)}>{b.loggingIn.title}</button>
+            {t(m.loggingIn)}<button className="ghost link" onClick={() => props.onOpenTask(b.loggingIn!.taskId)}>{b.loggingIn.title}</button>
           </div>
           <DeviceAuth auth={b.deviceAuth} onError={props.onError} />
         </div>
@@ -444,9 +446,9 @@ export function BatchCard(props: { batch: AskBatch; onOpenTask: (id: string) => 
       </ul>
       <div className="approval-actions">
         {b.kind === "sso" ? (
-          <button className="pri" disabled={busy || b.loggingIn !== null || b.asks.length === 0} onClick={press}>ログインする</button>
+          <button className="pri" disabled={busy || b.loggingIn !== null || b.asks.length === 0} onClick={press}>{t(m.logIn)}</button>
         ) : (
-          <button className="pri" disabled={busy || chosen.length === 0} onClick={press}>まとめて承認</button>
+          <button className="pri" disabled={busy || chosen.length === 0} onClick={press}>{t(m.approveAll)}</button>
         )}
       </div>
     </section>
@@ -463,7 +465,7 @@ export function Mockups(props: { list: Artifact[] }) {
   const shown = props.list.find((a) => a.id === open) ?? null;
   return (
     <div className="mockups">
-      <div className="hint">画面イメージ</div>
+      <div className="hint">{t(m.mockups)}</div>
       <div className="mockup-buttons">
         {props.list.map((a) => (
           <button key={a.id} className="ghost mockup" aria-pressed={a.id === open} onClick={() => setOpen(a.id === open ? null : a.id)}>

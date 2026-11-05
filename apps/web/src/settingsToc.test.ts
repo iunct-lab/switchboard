@@ -10,7 +10,7 @@ test("SettingsToc: one link per group, each to the id of that group's heading (#
   const hrefs = [...toc.matchAll(/href="#([\w-]+)"/g)].map((m) => m[1]);
   expect(hrefs).toEqual(SETTINGS_GROUPS.map((g) => g.id));
   for (const g of SETTINGS_GROUPS) {
-    expect(toc).toContain(`>${g.title}</a>`);
-    expect(html).toContain(`<h4 class="settings-group" id="${g.id}" tabindex="-1">${g.title}</h4>`);
+    expect(toc).toContain(`>${g.title.ja}</a>`);
+    expect(html).toContain(`<h4 class="settings-group" id="${g.id}" tabindex="-1">${g.title.ja}</h4>`);
   }
 });
