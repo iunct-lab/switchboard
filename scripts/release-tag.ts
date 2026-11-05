@@ -68,7 +68,8 @@ function once(sha: string, sh: Sh, repo: string | undefined, target: string): st
   if (own) {
     if (sh(["gh", "release", "view", own, ...R]).ok) return `${sha} already has ${own} and its release`;
     const prev = latestSemver(all.slice(all.indexOf(own) + 1));
-    must(sh, ["gh", "release", "create", own, "--title", own, "--notes-file", "-", "--verify-tag", ...R], releaseNotes(commitsIn(sh, prev ? `${prev}..${sha}` : sha), prev, own, target));
+    // an older tag's Release must not take "Latest" from a newer one
+    must(sh, ["gh", "release", "create", own, "--title", own, "--notes-file", "-", "--verify-tag", `--latest=${own === latestSemver(all)}`, ...R], releaseNotes(commitsIn(sh, prev ? `${prev}..${sha}` : sha), prev, own, target));
     return `created the missing release for ${own}`;
   }
   const latest = latestSemver(all);
@@ -103,7 +104,8 @@ function once(sha: string, sh: Sh, repo: string | undefined, target: string): st
  * pass, scripts/tag-ci.ts runs CI on the tags and writes the result into their Releases. The tags and main are read from
  * origin first, so a run never builds on a tag GitHub does not have. A merge whose run was coalesced
  * away gets no tag of its own and goes into the next tag's notes. A tag already on `sha` whose Release is missing (the
- * push worked, `gh release create` did not) gets its Release now. A push that is rejected (another clone took that
+ * push worked, `gh release create` did not) gets its Release now; the CLI also runs `repairReleases` after every run, so
+ * a tag left without a Release by an earlier run (another commit) gets it at the next merge. A push that is rejected (another clone took that
  * version) drops the local tag and starts over from the tags then on origin, at most 3 times.
  * `repo`: another repository's backlog stage Task tags its merge from that repository's clone (the cwd) with --repo.
  */
@@ -116,6 +118,35 @@ export function run(sha: string, sh: Sh, repo?: string): string {
     if (r !== RETRY) return r;
   }
   throw new Error("failed: git push of the tag was rejected 3 times (other clones tagging at the same time)");
+}
+
+/** How many of origin's newest tags `repairReleases` looks at: a gap older than this has been reported by tag-ci long since. */
+export const REPAIR_DEPTH = 30;
+
+/**
+ * Creates the Releases missing from origin's newest `depth` strict tags and returns their names. A tag is pushed before
+ * its Release is created, so a `gh release create` that fails (GitHub's HTTP 500/502 on 2026-11-03 and 2026-11-04) leaves
+ * a tag without a Release, which `run` repairs only for the same commit and tag-ci stops at. Every release-tag run and
+ * every tag-ci run calls this. Only the newest tag may be made "Latest". Tags only in this clone are left alone
+ * (`--verify-tag` needs the tag on GitHub).
+ */
+export function repairReleases(sh: Sh, repo?: string, depth = REPAIR_DEPTH): string[] {
+  // checked here too: the CLI calls this after a `run` that may have thrown at the same check
+  if (repo) checkOrigin(sh, repo);
+  const R = repo ? ["-R", repo] : [];
+  const target = repo ?? currentRepo();
+  const remote = new Set(lines(must(sh, ["git", "ls-remote", "--tags", "--refs", "origin", "v*"])).map((l) => l.split("\t")[1]?.replace(/^refs\/tags\//, "")));
+  const tags = lines(must(sh, ["git", "tag", "-l", "v*", "--sort=-v:refname"])).filter((t) => /^v\d+\.\d+\.\d+$/.test(t) && remote.has(t));
+  const have = new Set(lines(must(sh, ["gh", "release", "list", "-L", String(depth * 2), "--json", "tagName", "-q", ".[].tagName", ...R])));
+  const made: string[] = [];
+  for (const [i, tag] of tags.slice(0, depth).entries()) {
+    // the list is ordered by date, so a tag missing from it is looked up once more before creating
+    if (have.has(tag) || sh(["gh", "release", "view", tag, ...R]).ok) continue;
+    const prev = tags[i + 1] ?? null;
+    must(sh, ["gh", "release", "create", tag, "--title", tag, "--notes-file", "-", "--verify-tag", `--latest=${i === 0}`, ...R], releaseNotes(commitsIn(sh, prev ? `${prev}..${tag}` : tag), prev, tag, target));
+    made.push(tag);
+  }
+  return made;
 }
 
 const STALE_LOCK_MS = 30 * 60_000;
@@ -163,7 +194,18 @@ if (import.meta.main) {
     process.exit(2);
   }
   try {
-    console.log(withReleaseLock(must(spawnSh, ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]), () => run(sha, spawnSh, repo)));
+    withReleaseLock(must(spawnSh, ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]), () => {
+      let failed: unknown;
+      try {
+        console.log(run(sha, spawnSh, repo));
+      } catch (e) {
+        failed = e;
+        // a `gh release create` that failed after the push: wait a little and let the repair below create it
+        Bun.sleepSync(5000);
+      }
+      for (const t of repairReleases(spawnSh, repo)) console.log(`created the missing release for ${t}`);
+      if (failed) throw failed;
+    });
   } catch (e) {
     console.error((e as Error).message);
     process.exit(1);

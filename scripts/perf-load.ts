@@ -34,15 +34,15 @@ export const LONG_EVENTS = 2_000;
 const FIRST_UPDATE = Date.parse("2026-10-01T00:00:00Z");
 
 /** The long task's history: tool calls, their results and assistant text, in a fixed order. */
-export function longEvents(): AgentEvent[] {
+export function longEvents(n = LONG_EVENTS): AgentEvent[] {
   const out: AgentEvent[] = [];
-  for (let i = 0; out.length < LONG_EVENTS; i++) {
+  for (let i = 0; out.length < n; i++) {
     out.push({ t: "tool.call", id: `c${i}`, name: "Read", input: { file_path: `src/file${i}.ts` }, summary: `Read src/file${i}.ts` });
     out.push({ t: "tool.result", id: `c${i}`, ok: true, summary: `${40 + (i % 7)} lines` });
     out.push({ t: "message.delta", role: "assistant", text: `Step ${i}: the file reads as expected. `, messageId: `m${i}` });
     out.push({ t: "message.delta", role: "assistant", text: "Moving on to the next one.\n", messageId: `m${i}` });
   }
-  return out.slice(0, LONG_EVENTS);
+  return out.slice(0, n);
 }
 
 /** One Issue as the import's query asks for it. Every one has its own updatedAt, so a cursor leaves out what it read. */

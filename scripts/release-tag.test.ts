@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, utimesSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bumpType, latestSemver, nextVersion, releaseNotes, run, withReleaseLock, type Sh } from "./release-tag";
+import { bumpType, latestSemver, nextVersion, releaseNotes, repairReleases, run, withReleaseLock, type Sh } from "./release-tag";
 
 describe("release-tag bumpType", () => {
   test("feat only → minor", () => expect(bumpType(["feat(web): a"])).toBe("minor"));
@@ -287,5 +287,75 @@ describe("release-tag lock", () => {
     expect(() => withReleaseLock(dir, () => { throw new Error("boom"); })).toThrow("boom");
     expect(existsSync(join(dir, "switchboard-release-tag.lock"))).toBe(false);
     rmSync(dir, { recursive: true });
+  });
+});
+
+describe("release-tag repairReleases", () => {
+  /** origin has v1.3.0 / v1.2.0 / v1.1.0, this clone also a local-only v9.9.9; `released`: the tags with a Release. */
+  function fake(released: string[]) {
+    const calls: string[] = [];
+    const inputs: (string | undefined)[] = [];
+    const sh: Sh = (cmd, input) => {
+      const c = cmd.join(" ");
+      calls.push(c);
+      inputs.push(input);
+      if (c.startsWith("git remote get-url")) return { ok: true, out: "git@github.com:x/y.git" };
+      if (c.startsWith("git ls-remote")) return { ok: true, out: ["v1.3.0", "v1.2.0", "v1.1.0"].map((t) => `s\trefs/tags/${t}`).join("\n") };
+      if (c.startsWith("git tag -l")) return { ok: true, out: "v9.9.9\nv1.3.0\nv1.2.0\nv1.1.0" };
+      if (c.startsWith("gh release list")) return { ok: true, out: released.join("\n") };
+      if (c.startsWith("gh release view")) return { ok: released.includes(cmd[3]!), out: "" };
+      if (c.startsWith("git log")) return { ok: true, out: "c\tfix: y (#7)" };
+      return { ok: true, out: "" };
+    };
+    return { sh, calls, inputs };
+  }
+
+  test("an older tag left without a Release (its create failed after the push) gets it, not as Latest", () => {
+    const f = fake(["v1.3.0", "v1.1.0"]);
+    expect(repairReleases(f.sh, "x/y")).toEqual(["v1.2.0"]);
+    const at = f.calls.findIndex((c) => c.startsWith("gh release create"));
+    expect(f.calls[at]).toBe("gh release create v1.2.0 --title v1.2.0 --notes-file - --verify-tag --latest=false -R x/y");
+    expect(f.calls).toContain("git log --format=%H%x09%s v1.1.0..v1.2.0");
+    expect(f.inputs[at]).toContain("https://github.com/x/y/compare/v1.1.0...v1.2.0");
+    // the tag only in this clone is not on GitHub: never given a Release
+    expect(f.calls.some((c) => c.includes("v9.9.9"))).toBe(false);
+  });
+
+  test("the newest tag without a Release gets it as Latest", () => {
+    const f = fake(["v1.2.0", "v1.1.0"]);
+    expect(repairReleases(f.sh)).toEqual(["v1.3.0"]);
+    expect(f.calls).toContain("gh release create v1.3.0 --title v1.3.0 --notes-file - --verify-tag --latest=true");
+  });
+
+  test("every tag with its Release: nothing is created", () => {
+    const f = fake(["v1.3.0", "v1.2.0", "v1.1.0"]);
+    expect(repairReleases(f.sh)).toEqual([]);
+    expect(f.calls.some((c) => c.startsWith("gh release create") || c.startsWith("gh release view"))).toBe(false);
+  });
+
+  test("--repo naming another repository than the clone's origin throws before any read or write of Releases", () => {
+    const f = fake([]);
+    expect(() => repairReleases(f.sh, "other/repo")).toThrow("not other/repo");
+    expect(f.calls.some((c) => c.startsWith("gh "))).toBe(false);
+  });
+
+  test("the same commit's missing Release (run's own repair) is not made Latest when a newer tag exists", () => {
+    const calls: string[] = [];
+    const sh: Sh = (cmd) => {
+      const c = cmd.join(" ");
+      calls.push(c);
+      if (c.startsWith("git tag -l")) return { ok: true, out: "v1.1.0\nv1.0.1\nv1.0.0" };
+      if (c.startsWith("git tag --points-at")) return { ok: true, out: "v1.0.1" };
+      if (c.startsWith("gh release view")) return { ok: false, out: "" };
+      return { ok: true, out: "" };
+    };
+    expect(run("c1", sh)).toBe("created the missing release for v1.0.1");
+    expect(calls).toContain("gh release create v1.0.1 --title v1.0.1 --notes-file - --verify-tag --latest=false");
+  });
+
+  test("a create that fails throws (the run reports it; the next run tries again)", () => {
+    const f = fake([]);
+    const sh: Sh = (cmd, input) => (cmd.join(" ").startsWith("gh release create") ? { ok: false, out: "" } : f.sh(cmd, input));
+    expect(() => repairReleases(sh)).toThrow("failed: gh release create v1.3.0");
   });
 });

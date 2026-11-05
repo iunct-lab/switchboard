@@ -77,6 +77,30 @@ describe("perf-ratchet update", () => {
   });
 });
 
+describe("perf-ratchet bytes (#2088)", () => {
+  const huge: Budget = { journeys: { "open-task-huge": { bytes: 36108 } } };
+  const run = (bytes: number) => ({ runs: 5, journeys: { "open-task-huge": { msMedian: 150, msP90: 160, requests: 9, layoutCount: 4, recalcStyleCount: 4, layoutShift: 0.02, bytes } } });
+  test("bytes: one byte over its ceiling is over; the ceiling itself passes", () => {
+    expect(judge(run(36109), huge)).toEqual({ over: [{ key: "journeys.open-task-huge.bytes", value: 36109, ceiling: 36108 }], improved: [] });
+    expect(judge(run(36108), huge)).toEqual({ over: [], improved: [] });
+  });
+  test("bytes: the band is 0, so one byte below the ceiling is improved and update lowers it to the value; it never raises", () => {
+    const { improved } = judge(run(36107), huge);
+    expect(improved).toEqual([{ key: "journeys.open-task-huge.bytes", value: 36107, ceiling: 36108 }]);
+    expect(lowered(improved, huge)).toEqual({ journeys: { "open-task-huge": { bytes: 36107 } } });
+    expect(lowered(judge(run(40000), huge).improved, huge)).toEqual(huge);
+  });
+  test("bytes: the counts of open-task-huge other than bytes have no ceiling", () => {
+    const r = run(36108);
+    r.journeys["open-task-huge"].requests = 99;
+    expect(judge(r, huge)).toEqual({ over: [], improved: [] });
+  });
+  test("bytes: a raised bytes ceiling is raised against main's", () => {
+    const up: Budget = { journeys: { "open-task-huge": { bytes: 36109 } } };
+    expect(raisedAgainst({ github: huge, local: up }, { github: huge, local: huge })).toEqual([{ key: "local.journeys.open-task-huge.bytes", value: 36109, ceiling: 36108 }]);
+  });
+});
+
 describe("perf-ratchet raisedAgainst", () => {
   test("raised: a ceiling above main's in either environment; lower, equal and new keys are not", () => {
     const mine: Budgets = {
@@ -154,9 +178,11 @@ describe("perf-ratchet environments (#644)", () => {
       expect(b.journeys["open-task"]).not.toHaveProperty("layoutShift");
       expect(b.journeys.send).not.toHaveProperty("layoutCount");
       for (const name of ["launch", "new-task", "open-task", "send"]) {
-        const expected = ["requests", "layoutCount", "recalcStyleCount", "layoutShift"].filter((key) => !(name === "open-task" && key === "layoutShift") && !(name === "send" && key === "layoutCount"));
+        const expected = ["requests", "layoutCount", "recalcStyleCount", "layoutShift", ...(name === "open-task" ? ["bytes"] : [])].filter((key) => !(name === "open-task" && key === "layoutShift") && !(name === "send" && key === "layoutCount"));
         expect(Object.keys(b.journeys[name]!).sort()).toEqual(expected.sort());
       }
+      // the huge task's open has a ceiling on its responses' size only (#2088)
+      expect(Object.keys(b.journeys["open-task-huge"]!)).toEqual(["bytes"]);
       for (const [layoutShift, layoutCount] of [[0.0002, 4], [0.047, 7], [0.5, 30]]) {
         const r = structuredClone(b);
         r.journeys["open-task"]!.layoutShift = layoutShift!;
@@ -166,7 +192,7 @@ describe("perf-ratchet environments (#644)", () => {
       }
       const regression = structuredClone(b);
       regression.journeys.send!.requests!++;
-      expect(judge(regression, b).over).toContainEqual({ key: "journeys.send.requests", value: b.journeys.send!.requests + 1, ceiling: b.journeys.send!.requests });
+      expect(judge(regression, b).over).toContainEqual({ key: "journeys.send.requests", value: b.journeys.send!.requests! + 1, ceiling: b.journeys.send!.requests });
     }
   });
   test("github in Actions, local elsewhere (local-ci's CI=true is not Actions); --env overrides", () => {
@@ -175,16 +201,18 @@ describe("perf-ratchet environments (#644)", () => {
     expect(envOf("github", {})).toBe("github");
     expect(() => envOf("mac", {})).toThrow("--env");
   });
-  test("perf-budget.json has the four journeys for each environment and no bundle", async () => {
+  test("perf-budget.json has the five journeys for each environment and no bundle", async () => {
     const budgets = (await Bun.file(BUDGET_PATH).json()) as Budgets;
     expect(Object.keys(budgets).filter((k) => k !== "exceptions").sort()).toEqual([...ENVS].sort());
     for (const env of ENVS) {
-      expect(Object.keys(budgets[env].journeys).sort()).toEqual(["launch", "new-task", "open-task", "send"]);
+      expect(Object.keys(budgets[env].journeys).sort()).toEqual(["launch", "new-task", "open-task", "open-task-huge", "send"]);
       expect(budgets[env]).not.toHaveProperty("bundle");
     }
     // the seconds local-ci compares: `local` only (no ceilings for Actions)
     expect(Object.keys(budgets.local.durations!).sort()).toEqual(["test", "typecheck"]);
     expect(budgets.github.durations).toBeUndefined();
+    // a response's size does not depend on the Chrome: Actions has the same bytes ceilings as the host (#2088)
+    for (const name of ["open-task", "open-task-huge"]) expect(budgets.github.journeys[name]!.bytes).toBe(budgets.local.journeys[name]!.bytes!);
   });
 });
 

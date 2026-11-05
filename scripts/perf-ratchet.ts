@@ -20,7 +20,8 @@
  * The type check's and bun test's seconds have ceilings too (`durations`, `local` only): perf-bench does not have them, so
  * local-ci compares its own seconds with `judgeDurations`, on the high side only (`improved` would fail on a quiet host).
  * The counts that wobble (requests / layoutCount / recalcStyleCount ±1, layoutShift in its low digits — as medians of
- * `--runs 5`; a single run moves more) carry a fixed band: a ceiling is a measured value + the band, a count is over above
+ * `--runs 5`; a single run moves more) carry a fixed band; `bytes` (the size of the journey's /api/ responses) does not
+ * wobble — the daemon writes them, whatever the Chrome — so its band is 0 (three `--runs 5`, 2026-11-04, #2088): a ceiling is a measured value + the band, a count is over above
  * the ceiling and better below ceiling − 2 × band (more than a band below the measured value: a new low of the same code's
  * wobble is not an improvement, or every run that finds one would fail an unrelated PR). Fixed per count, not a setting: the band is how much the same code moves,
  * not how much worse a change may be.
@@ -35,7 +36,8 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 export interface Budget {
-  journeys: Record<string, { requests: number; layoutCount?: number; recalcStyleCount: number; layoutShift?: number }>;
+  /** `bytes` (the journey's /api/ responses, #2088): `open-task` and `open-task-huge` only; `open-task-huge` has no other ceiling. */
+  journeys: Record<string, { requests?: number; layoutCount?: number; recalcStyleCount?: number; layoutShift?: number; bytes?: number }>;
   /** The daemon's delay under load and overlap (perf-bench's `loaded`); `local` only: a ceiling nobody measured would be a guess. */
   loaded?: { healthMaxMs: number };
   /** A result only: why perf-bench did not measure `loaded` (`--skip-loaded`, #3635); judge then leaves its ceiling out. */
@@ -59,7 +61,7 @@ export function envOf(flag: string | undefined, env: Record<string, string | und
 
 export const BUDGET_PATH = join(import.meta.dir, "perf-budget.json");
 /** How much the same code moves from run to run (docs/design/perf.md の「数の意味」). */
-const BAND: Record<string, number> = { requests: 1, layoutCount: 1, recalcStyleCount: 1, layoutShift: 0.03, healthMaxMs: 10150 };
+const BAND: Record<string, number> = { requests: 1, layoutCount: 1, recalcStyleCount: 1, layoutShift: 0.03, bytes: 0, healthMaxMs: 10150 };
 const round4 = (n: number) => Math.round(n * 1e4) / 1e4;
 /** The ceilings judged on the high side only: `over` above them, never `improved` below, so `update` never lowers them.
  * The load moves them by more than twice (a quiet host: 1,700–1,924 ms against the first ceiling and band, 5,440 − 2 × 1,750 = 1,940, 2026-11-02),
