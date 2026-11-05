@@ -75,6 +75,29 @@ function fake(tags: Array<{ tag: string; body: string | null; fail?: { at: strin
 
 const testFail = { at: "bun test", output: "(fail) a > b\n1 fail" };
 
+describe("tag-ci: a tag left without a Release", () => {
+  test("the repair before the walk creates it, and the walk runs that tag instead of stopping there", async () => {
+    const f = fake([{ tag: "v2.0.0", body: null }, { tag: "v1.0.0", body: "- #0 y" }]);
+    const logs: string[] = [];
+    const d: TagCiDeps = { ...f.d, log: (l) => void logs.push(l), repair: async () => (f.bodies.set("v2.0.0", "- #1 x"), ["v2.0.0"]) };
+    const r = await tagCi(d, "o/r", "/repo", CACHE);
+    expect(r.map((x) => `${x.tag} ${x.result}`)).toEqual(["v2.0.0 pass"]);
+    expect(tagCiExit(r)).toBe(0);
+    expect(logs.some((l) => l.startsWith("v2.0.0: Release が無かったので作った"))).toBe(true);
+  });
+
+  test("a repair that fails is logged, and the walk stops at the missing Release as before", async () => {
+    const f = fake([{ tag: "v2.0.0", body: null }, { tag: "v1.0.0", body: "- #0 y" }]);
+    const logs: string[] = [];
+    const d: TagCiDeps = { ...f.d, log: (l) => void logs.push(l), repair: async () => { throw new Error("HTTP 502"); } };
+    const r = await tagCi(d, "o/r", "/repo", CACHE);
+    expect(r).toEqual([]);
+    expect(tagCiExit(r)).toBe(2);
+    expect(logs.some((l) => l.includes("Release の欠けを作れなかった（HTTP 502）"))).toBe(true);
+    expect(f.ran).toEqual([]);
+  });
+});
+
 describe("tag-ci", () => {
   test("records pass on the newest tag", async () => {
     const f = fake([{ tag: "v1.0.0", body: "- #1 x" }, { tag: "v0.9.0", body: "- #0 y" }]);

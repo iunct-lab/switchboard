@@ -3,8 +3,9 @@
  * `bun scripts/tag-ci.ts [--repo <owner/name>]` runs the same steps as local-ci (ci.yml's `run:` steps, `bun scripts/ci.ts`
  * as that checkout's scripts/ci.ts steps, the same environment) on the newest `vX.Y.Z` tag that has no result yet, and
  * adds the result to the end of that tag's GitHub Release: `[tag-ci] pass|fail <sha>`. A fail walks back to the tag
- * before it, until a pass or a tag that already has a result; the tags walked past are not run. A tag without a Release
- * is not run and the walk stops there (release-tag.ts makes the Release). A perf-ratchet check whose only findings are
+ * before it, until a pass or a tag that already has a result; the tags walked past are not run. Before the walk, the
+ * Releases missing from the newest tags are created (release-tag.ts's repairReleases: a tag whose `gh release create`
+ * failed after its push). A tag whose Release still cannot be read is not run and the walk stops there. A perf-ratchet check whose only findings are
  * `raised:` (a ceiling above main's, which an older tag has when main lowered it after) and `grew:` (the bundle 1% or
  * more above main's tip, which the tag is compared with as it is now) counts as a pass: both are the rule for a PR
  * before its merge, not a result of a merged tag.
@@ -36,6 +37,7 @@ import { withHeavySlot } from "../ops-kit/src/heavy.ts";
 import { findSecrets, hostAws, type HostAws } from "../ops-kit/src/secrets.ts";
 import { FILE_DEPS, type Filed, type OpenRequest, commentRequest, fileRequest, openRequests, requestText } from "./file-request.ts";
 import { requireRecordings } from "./recordings.ts";
+import { must, repairReleases, withReleaseLock } from "./release-tag.ts";
 import { remoteRepo, runCheckout, selectTests, step, stepEnv, TargetError, type Deps } from "./local-ci.ts";
 
 /** A result's line in a Release's body: pass or fail, then the tag's commit. */
@@ -119,6 +121,8 @@ export interface TagCiDeps extends Omit<Deps, "sh"> {
   onNewest?: (entries: TagCiEntry[]) => Promise<void>;
   /** Called for a tag not judged because of missing recordings: the public sync's watch names them (#3601). */
   onSkip?: (tag: string, missing: string[]) => void;
+  /** Creates the Releases missing from the newest tags and returns their names (release-tag.ts's repairReleases). */
+  repair?: () => Promise<string[]>;
 }
 
 /** The tags run in one go: a step of the walk takes minutes, and a run that is cut leaves no result. */
@@ -169,6 +173,14 @@ export async function tagCi(d: TagCiDeps, repo: string, root: string, cache = jo
   // one heavy slot for the whole run (every tag it walks): the same as local-ci, whose steps it runs with every test
   return d.slot(`tag-ci ${repo}`, async () => {
     await d.sh(["git", "-C", root, "fetch", "-q", "origin", "--tags", "--force"]);
+    // a tag left without a Release would stop every run here until someone made it by hand (v1.149.0, v1.166.0)
+    if (d.repair) {
+      try {
+        for (const t of await d.repair()) d.log(`${t}: Release が無かったので作った（タグの push の後の作成が失敗していた）`);
+      } catch (e) {
+        d.log(`Release の欠けを作れなかった（${(e as Error).message}）`);
+      }
+    }
     const tags = await listTags(root, d.sh);
     const out: TagCiEntry[] = [];
     for (const [i, tag] of tags.entries()) {
@@ -436,7 +448,15 @@ if (import.meta.main) {
   };
   const missingOf: Record<string, string[]> = {};
   const onSkip = (tag: string, missing: string[]) => void (missingOf[tag] = missing);
-  const entries = await tagCi({ sh, step, log, onNewest: report, onSkip, slot: (name, fn) => withHeavySlot(name, fn) }, t.repo, t.root);
+  const repair = async () => {
+    const at = (cmd: string[], input?: string) => {
+      const p = Bun.spawnSync(cmd, { cwd: t.root, stdin: input === undefined ? "ignore" : new TextEncoder().encode(input), stderr: "inherit" });
+      return { ok: p.exitCode === 0, out: p.stdout.toString().trim() };
+    };
+    // the same lock as release-tag.ts on this clone: the two would otherwise both create the missing Release
+    return withReleaseLock(must(at, ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]), () => repairReleases(at, t.repo));
+  };
+  const entries = await tagCi({ sh, step, log, onNewest: report, onSkip, repair, slot: (name, fn) => withHeavySlot(name, fn) }, t.repo, t.root);
   console.log(JSON.stringify(entries));
   await report(entries);
   if (!process.argv.includes("--repo")) {

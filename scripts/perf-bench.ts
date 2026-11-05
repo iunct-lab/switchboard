@@ -1,24 +1,30 @@
 /**
  * Run after `bun run --cwd apps/web build`: bun scripts/perf-bench.ts [--runs N] [--json <file>] [--skip-loaded <reason>]. Requires Chrome
- * (CHROME_BIN overrides). Times the four journeys of #637 (launch / new-task / open-task / send) the same way each run:
- * a fresh daemon with a fake runner (a long task of 2,000 events; every other turn a reply of 200 deltas) and a fresh
- * headless Chrome tab at 1280 × 800. Prints, per journey, the median and p90 of `sb:<journey>` in ms and the counts that
- * do not wobble (API requests, Chrome's LayoutCount / RecalcStyleCount, the layout shift) as the median of the runs.
+ * (CHROME_BIN overrides). Times the four journeys of #637 (launch / new-task / open-task / send), then `open-task-huge`
+ * (#2088: after send, a task of 20,000 events — the size of the real ones, 18,866 to 33,110 — is made and opened from
+ * the rail; it reads the `sb:open-task` measure, and comes last so the four others' counts do not move), the same way
+ * each run: a fresh daemon with a fake runner (a long task of 2,000 events; every other turn a reply of 200 deltas) and
+ * a fresh headless Chrome tab at 1280 × 800. Prints, per journey, the median and p90 of `sb:<journey>` in ms and the
+ * counts that do not wobble (API requests, Chrome's LayoutCount / RecalcStyleCount, the layout shift, and `bytes`: the
+ * size of the journey's /api/ responses as CDP's encodedDataLength — the daemon does not compress) as the median of the runs.
  * Then, once (LOADED_RUNS, not --runs), launch and send again on a daemon holding as much as the real home
  * (scripts/perf-load.ts): launch under a backlog import and the rescue page's status checks, send without them, and the
  * longest the daemon took to answer /api/health during the import (`loaded`, #2822, #3634). `--skip-loaded <reason>`:
  * local-ci gives it when the change does not reach this script (scripts/test-select.ts --loaded, #3635); the result then
  * holds `loadedSkipped` instead of `loaded`, and perf-ratchet leaves the `loaded` ceiling out.
  */
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { loadConfig } from "../packages/core/src/config.ts";
 import { startServer } from "../packages/core/src/server.ts";
 import { LOAD, LONG_EVENTS, loadGh, longEvents, overlap, seedLoad } from "./perf-load.ts";
 import { bundleOf } from "./perf-ratchet.ts";
 import type { Journey, RunnerAdapter } from "@switchboard/protocol";
+
+/** A journey of the bench: the app's four, and the same open of a task as big as the real ones (#2088). */
+type BenchJourney = Journey | "open-task-huge";
 
 const { values: args } = parseArgs({ options: { runs: { type: "string", default: "5" }, json: { type: "string" }, "skip-loaded": { type: "string" } } });
 const runs = Number(args.runs);
@@ -27,6 +33,8 @@ const dist = join(import.meta.dir, "../apps/web/dist");
 if (!existsSync(join(dist, "index.html"))) throw new Error("apps/web/dist is missing: run `bun run --cwd apps/web build` first");
 
 const REPLY_DELTAS = 200;
+/** The huge task (#2088): the real ones held 18,866 (6.8 MB) to 33,110 events. */
+const HUGE_EVENTS = 20_000;
 /** A loaded journey waits this long, not `until`'s 30 s: a daemon stuck for longer must read as over its ceiling, not as a timeout. */
 const LOADED_WAIT_MS = 300_000;
 /** `loaded` runs once, whatever --runs is (#3634): it tells a daemon stuck for minutes (the ceiling's ~90 times) from a
@@ -41,7 +49,7 @@ const benchAdapter: RunnerAdapter = {
     const exited = new Promise<number | null>((r) => (exit = r));
     queueMicrotask(() => {
       emit({ t: "session.start", runner: "claude", runnerSessionId: `s-${opts.resume ?? opts.prompt}`, cwd: opts.cwd });
-      if (opts.prompt === "long") for (const ev of longEvents()) emit(ev);
+      if (opts.prompt === "long" || opts.prompt === "huge") for (const ev of longEvents(opts.prompt === "huge" ? HUGE_EVENTS : LONG_EVENTS)) emit(ev);
       else for (let i = 0; i < REPLY_DELTAS; i++) emit({ t: "message.delta", role: "assistant", text: `word${i} `, messageId: "reply" });
       emit({ t: "session.end", status: "ok" });
       exit(0);
@@ -74,10 +82,30 @@ const benchGh = async (args: string[]) => args.some((a) => a.includes("rateLimit
   ? { code: 0, stdout: JSON.stringify({ data: { rateLimit: { limit: 5000, remaining: 4000, resetAt: new Date(Date.now() + 30 * 60_000).toISOString() } } }), stderr: "" }
   : { code: 1, stdout: "", stderr: "no GitHub in the bench" };
 
+/**
+ * The repository the bench's tasks run in: one README in one commit, made per run of the script, at a path of the same
+ * length on every machine (under /tmp, not tmpdir(): TMPDIR differs between machines). Not the checkout: a task's cwd is
+ * in its responses (twice in a task's), and its footprint (the files and bytes under it) is too, so the checkout's path
+ * (a local-ci worktree's is longer) and its size (it grew from 999 to 1,002 files in November 2026) would move `bytes`.
+ * `BENCH_REPO_BYTES` in a sparse file left out of Git (no disk, no hashing) keeps the Task screen's context meter where the
+ * checkout puts it (over 60% of the window: full, in its warning colour), so the journeys draw what they drew before.
+ */
+const BENCH_REPO_BYTES = 11_000_000;
+const benchRepo = join(mkdtempSync("/tmp/sb-perf-bench-repo-"), "repo");
+mkdirSync(benchRepo);
+writeFileSync(join(benchRepo, "README.md"), "# perf-bench\n");
+for (const cmd of [["init", "-q", "-b", "main"], ["add", "README.md"], ["-c", "user.name=perf-bench", "-c", "user.email=perf-bench@localhost", "commit", "-q", "-m", "perf-bench"]]) {
+  const p = Bun.spawnSync(["git", "-C", benchRepo, ...cmd], { stdout: "pipe", stderr: "pipe" });
+  if (p.exitCode !== 0) throw new Error(`git ${cmd.join(" ")}: ${p.stderr.toString().trim()}`);
+}
+writeFileSync(join(benchRepo, ".git/info/exclude"), "sources.bin\n");
+writeFileSync(join(benchRepo, "sources.bin"), "");
+truncateSync(join(benchRepo, "sources.bin"), BENCH_REPO_BYTES);
+
 /** A daemon of its own per run, so every run opens the same list and the same long task. */
 async function daemon() {
   const home = mkdtempSync(join(tmpdir(), "sb-perf-bench-"));
-  const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
+  const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0", SWITCHBOARD_REPO_ROOT: benchRepo });
   const core = await startServer(cfg, [benchAdapter], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: benchGh });
   const base = `http://127.0.0.1:${core.server.port}`;
   const stop = async () => {
@@ -91,10 +119,10 @@ async function daemon() {
     await stop();
     throw e;
   }
-  return { base, stop };
+  return { base, cwd: cfg.repoRoot, stop };
 }
 
-type Sample = { ms: number; requests: number; layoutCount: number; recalcStyleCount: number; layoutShift: number };
+type Sample = { ms: number; requests: number; layoutCount: number; recalcStyleCount: number; layoutShift: number; bytes: number };
 
 /** The daemon of a loaded run: a copy of the seeded home; `generation` is its GitHub, raised to make an import rewrite everything. */
 async function loadedDaemon(template: string) {
@@ -127,6 +155,7 @@ async function withTab<T>(chromePort: string, play: (tab: Tab) => Promise<T>): P
   let seq = 0;
   const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   let requests = 0;
+  let bytes = 0;
   const inflight = new Set<string>();
   let lastNetwork = Date.now();
   ws.onmessage = (event) => {
@@ -143,7 +172,10 @@ async function withTab<T>(chromePort: string, play: (tab: Tab) => Promise<T>): P
       inflight.add(m.params.requestId);
       lastNetwork = Date.now();
     }
-    if ((m.method === "Network.loadingFinished" || m.method === "Network.loadingFailed") && inflight.delete(m.params.requestId)) lastNetwork = Date.now();
+    if ((m.method === "Network.loadingFinished" || m.method === "Network.loadingFailed") && inflight.delete(m.params.requestId)) {
+      lastNetwork = Date.now();
+      if (m.method === "Network.loadingFinished") bytes += m.params.encodedDataLength;
+    }
   };
   const call = (method: string, params: object = {}): Promise<any> =>
     new Promise((resolve, reject) => {
@@ -179,19 +211,22 @@ async function withTab<T>(chromePort: string, play: (tab: Tab) => Promise<T>): P
     await call("Page.addScriptToEvaluateOnNewDocument", {
       source: "window.__sbShift = 0; new PerformanceObserver((l) => { for (const e of l.getEntries()) if (!e.hadRecentInput) window.__sbShift += e.value; }).observe({ type: 'layout-shift', buffered: true });",
     });
-    const journey = async (name: Journey, act: () => Promise<unknown>, around: Around = (run) => run(), wait?: number): Promise<Sample> => {
+    const journey = async (name: BenchJourney, act: () => Promise<unknown>, around: Around = (run) => run(), wait?: number): Promise<Sample> => {
+      const mark = name === "open-task-huge" ? "open-task" : name; // the app's own journey; the bench names the size
       if (name !== "launch") await settle(wait); // what the screen loads before the action is not the journey's
+      await evaluate(`performance.clearMeasures("sb:${mark}")`); // a second open-task must not read the first one's
       const m0 = await metrics();
       const r0 = requests;
+      const b0 = bytes;
       const s0 = name === "launch" ? 0 : await shift();
       let ms = 0;
       await around(async () => {
         await act();
-        ms = await until(() => evaluate(`performance.getEntriesByName("sb:${name}", "measure")[0]?.duration`) as Promise<number | undefined>, `sb:${name}`, wait);
+        ms = await until(() => evaluate(`performance.getEntriesByName("sb:${mark}", "measure")[0]?.duration`) as Promise<number | undefined>, `sb:${mark}`, wait);
         await settle(wait);
       });
       const m1 = await metrics();
-      return { ms, requests: requests - r0, layoutCount: m1.layoutCount - m0.layoutCount, recalcStyleCount: m1.recalcStyleCount - m0.recalcStyleCount, layoutShift: (await shift()) - s0 };
+      return { ms, requests: requests - r0, layoutCount: m1.layoutCount - m0.layoutCount, recalcStyleCount: m1.recalcStyleCount - m0.recalcStyleCount, layoutShift: (await shift()) - s0, bytes: bytes - b0 };
     };
     const click = (selector: string, text?: string) =>
       evaluate(`(() => { const b = [...document.querySelectorAll(${JSON.stringify(selector)})].find((e) => ${text ? `e.textContent.trim() === ${JSON.stringify(text)}` : "true"}); if (!b || b.disabled) return false; b.click(); return true; })()`);
@@ -210,15 +245,15 @@ async function withTab<T>(chromePort: string, play: (tab: Tab) => Promise<T>): P
 interface Tab {
   evaluate: (expression: string) => Promise<any>;
   call: (method: string, params?: object) => Promise<any>;
-  journey: (name: Journey, act: () => Promise<unknown>, around?: Around, wait?: number) => Promise<Sample>;
+  journey: (name: BenchJourney, act: () => Promise<unknown>, around?: Around, wait?: number) => Promise<Sample>;
   click: (selector: string, text?: string) => Promise<unknown>;
   type: (selector: string, text: string) => Promise<void>;
   settle: (wait?: number) => Promise<unknown>;
 }
 
-/** The four journeys in order. */
-const runOnce = (chromePort: string, base: string) => withTab(chromePort, async ({ call, journey, click, type, evaluate }) => {
-  const out = {} as Record<Journey, Sample>;
+/** The four journeys in order, then open-task-huge. */
+const runOnce = (chromePort: string, base: string, cwd: string) => withTab(chromePort, async ({ call, journey, click, type, evaluate, settle }) => {
+  const out = {} as Record<BenchJourney, Sample>;
   out.launch = await journey("launch", () => call("Page.navigate", { url: `${base}/` }));
   // the Workspace is picked, not left to 自動 (that asks the runner which one, a turn of its own)
   await until(() => evaluate(`(() => { const s = document.querySelector("main.home select"); const o = s && [...s.options].find((o) => o.value); if (!o) return false; Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(s, o.value); s.dispatchEvent(new Event("change", { bubbles: true })); return true; })()`), "a workspace to pick");
@@ -229,6 +264,12 @@ const runOnce = (chromePort: string, base: string) => withTab(chromePort, async 
   out["open-task"] = await journey("open-task", () => until(() => click(".rail .it", "long"), "the long task in the rail"));
   await type(".composer textarea", "reply");
   out.send = await journey("send", () => until(() => click(".composer .pri"), "the send button"));
+  // made only now: made before launch it would put a row in the rail and move the four journeys' counts
+  const huge = (await (await fetch(`${base}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd, title: "huge", prompt: "huge", runner: "claude" }) })).json()) as { id: string };
+  await until(async () => ((await (await fetch(`${base}/api/tasks/${huge.id}`)).json()) as { task: { status: string } }).task.status === "done", "the huge task ends", 120_000);
+  await until(() => click("header .tabs button", "Home"), "Home");
+  await settle();
+  out["open-task-huge"] = await journey("open-task-huge", () => until(() => click(".rail .it", "huge"), "the huge task in the rail"));
   return out;
 });
 
@@ -283,11 +324,11 @@ const chrome = Bun.spawn([findChrome(), "--headless=new", "--no-first-run", "--n
 });
 try {
   const chromePort = await until(() => { try { return readFileSync(join(profile, "DevToolsActivePort"), "utf8").split("\n")[0]; } catch { return null; } }, "Chrome port");
-  const samples: Array<Record<Journey, Sample>> = [];
+  const samples: Array<Record<BenchJourney, Sample>> = [];
   for (let i = 0; i < runs; i++) {
     const d = await daemon();
     try {
-      samples.push(await runOnce(chromePort, d.base));
+      samples.push(await runOnce(chromePort, d.base, d.cwd));
       console.log(`journeys: run ${i + 1} of ${runs} done`);
     } finally {
       await d.stop();
@@ -309,19 +350,19 @@ try {
     }
   }
   const journeys = Object.fromEntries(
-    (["launch", "new-task", "open-task", "send"] as const).map((name) => {
+    (["launch", "new-task", "open-task", "send", "open-task-huge"] as const).map((name) => {
       const of = (k: keyof Sample) => samples.map((s) => s[name][k]);
-      return [name, { msMedian: round(median(of("ms"))), msP90: round(p90(of("ms"))), requests: median(of("requests")), layoutCount: median(of("layoutCount")), recalcStyleCount: median(of("recalcStyleCount")), layoutShift: round(median(of("layoutShift")), 4) }];
+      return [name, { msMedian: round(median(of("ms"))), msP90: round(p90(of("ms"))), requests: median(of("requests")), layoutCount: median(of("layoutCount")), recalcStyleCount: median(of("recalcStyleCount")), layoutShift: round(median(of("layoutShift")), 4), bytes: median(of("bytes")) }];
     }),
   );
   const loadedMs = (xs: number[]) => ({ msMedian: round(median(xs)), msP90: round(p90(xs)) });
   const healthMs = loadedRuns.map((r) => r.healthMaxMs);
   const loaded = skipLoaded === undefined ? { ...LOAD, overlap: ["backlog-sync", "rescue-status"], journeys: { launch: loadedMs(loadedRuns.map((r) => r.launchMs)), send: loadedMs(loadedRuns.map((r) => r.sendMs)) }, healthMaxMs: round(median(healthMs)), healthMaxMsP90: round(p90(healthMs)) } : undefined;
   const result = { runs, journeys, bundle: bundleOf(dist), ...(loaded ? { loaded } : { loadedSkipped: skipLoaded }) };
-  console.log(`runs: ${runs} (1280×800, headless Chrome, fonts: ${fontconfig ? "Noto Sans + Noto Sans CJK only" : "the OS's"}, fake runner: long task ${LONG_EVENTS} events, reply ${REPLY_DELTAS} deltas)`);
-  console.log("| journey | ms median | ms p90 | requests | LayoutCount | RecalcStyleCount | layoutShift |");
-  console.log("|---|---:|---:|---:|---:|---:|---:|");
-  for (const [name, j] of Object.entries(journeys)) console.log(`| ${name} | ${j.msMedian} | ${j.msP90} | ${j.requests} | ${j.layoutCount} | ${j.recalcStyleCount} | ${j.layoutShift} |`);
+  console.log(`runs: ${runs} (1280×800, headless Chrome, fonts: ${fontconfig ? "Noto Sans + Noto Sans CJK only" : "the OS's"}, fake runner: long task ${LONG_EVENTS} events, huge task ${HUGE_EVENTS} events, reply ${REPLY_DELTAS} deltas)`);
+  console.log("| journey | ms median | ms p90 | requests | LayoutCount | RecalcStyleCount | layoutShift | bytes |");
+  console.log("|---|---:|---:|---:|---:|---:|---:|---:|");
+  for (const [name, j] of Object.entries(journeys)) console.log(`| ${name} | ${j.msMedian} | ${j.msP90} | ${j.requests} | ${j.layoutCount} | ${j.recalcStyleCount} | ${j.layoutShift} | ${j.bytes} |`);
   console.log(`bundle (gzip): js ${result.bundle.js} B, css ${result.bundle.css} B`);
   if (!loaded) console.log(`\nloaded: 測らなかった（${skipLoaded}）`);
   else {
@@ -338,4 +379,5 @@ try {
   rmSync(profile, { recursive: true, force: true });
   rmSync(fontsDir, { recursive: true, force: true });
   rmSync(template, { recursive: true, force: true });
+  rmSync(dirname(benchRepo), { recursive: true, force: true });
 }
