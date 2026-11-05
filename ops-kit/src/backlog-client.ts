@@ -22,7 +22,8 @@ export const BACKLOG_USAGE = `  backlog list [--search <語>] [--label <l>]... [
       Issue 1 件（本文、コメント、Project のフィールド、送信待ち、同期の状態）。<issue> は番号か、ここで作ってまだ番号の無い Issue の localId。保留中の編集（競合・失敗・結果不明）は「保留:」の行に理由つき
   backlog retry <issue>
       GitHub が受け付けなかった（失敗で保留中の）編集を、原因を直した後に全部送り直す（アプリの Task の中だけ）。無ければ 1
-  backlog create --title <t> [--body-file <f|->] [--label <l>]... [--milestone <m>] [--parent <n>] [--field <name>=<value>]...
+  backlog create --title <t> [--body-file <f|->] [--label <l>]... [--milestone <m>] [--parent <n>] [--field <name>=<value>]... [--head <枝> --base <枝>]
+      --head / --base: PR の代わりのローカルの「変更」として作る（GitHub 連携の無い workspace だけ。両方そろえる）
   backlog edit <issue> [--title <t>] [--body-file <f|->] [--add-label <l>]... [--remove-label <l>]... [--state open|closed]
                [--reason completed|not-planned] [--milestone <m> | --no-milestone] [--parent <n> | --no-parent]
       --reason: 閉じた理由（--state closed と一緒だけ。重複・やらないと決めた Issue は not-planned。閉じている Issue の理由の付け替えも同じ形）
@@ -220,7 +221,10 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         const milestone = take("--milestone");
         const parent = take("--parent");
         const fields = Object.fromEntries(takeAll("--field").map(fieldPair));
-        if (!title || args.length) throw new Refused("backlog create --title <t> [--body-file <f|->] [--label <l>]... [--milestone <m>] [--parent <n>] [--field <name>=<value>]...");
+        const head = take("--head");
+        const base = take("--base");
+        if (!title || args.length || !head !== !base) throw new Refused("backlog create --title <t> [--body-file <f|->] [--label <l>]... [--milestone <m>] [--parent <n>] [--field <name>=<value>]... [--head <枝> --base <枝>]");
+        if (direct && head) throw new Refused("--head / --base（ローカルの変更）はアプリの Task の中だけ（BACKLOG_URL が要る）");
         noSecrets(title, body, milestone, ...labels, ...Object.values(fields).map(String));
         if (direct) {
           if (Object.keys(fields).length) await config();
@@ -229,7 +233,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
           return 0;
         }
         const ws = await workspace();
-        const r = (await api("POST", "", { workspaceId: ws.workspaceId, title, body: body ?? "", labels, milestone: milestone ?? null, parent: parent ? number(parent) : null, fields: Object.keys(fields).length ? fields : null })) as { localId: string; number?: number | null };
+        const r = (await api("POST", "", { workspaceId: ws.workspaceId, title, body: body ?? "", labels, milestone: milestone ?? null, parent: parent ? number(parent) : null, fields: Object.keys(fields).length ? fields : null, ...(head && base ? { change: { head, base } } : {}) })) as { localId: string; number?: number | null };
         // a backlog kept in the app numbers it at once (#2265); GitHub's once it is sent
         io.out(typeof r.number === "number" ? `#${r.number} を作りました（localId ${r.localId}）` : `作りました（送信待ち）: localId ${r.localId}。番号が付く前も backlog view ${r.localId} で読める`);
         return 0;
@@ -434,7 +438,7 @@ function isSandboxRefusal(e: unknown): boolean {
 }
 
 /** Calls the app's backlog API: the parsed answer, or Refused (4xx) / Unknown (no app, 5xx, 424, not imported = 409 on a read). */
-function client(env: Record<string, string | undefined>, f: Fetch) {
+export function client(env: Record<string, string | undefined>, f: Fetch) {
   return async (method: string, path: string, body?: unknown): Promise<unknown> => {
     const base = env.BACKLOG_URL;
     if (!base) throw new Unknown("backlog: アプリの API の経路がありません（BACKLOG_URL がありません。アプリの Task の中で実行してください）。保存済みの値は読めません");
@@ -492,7 +496,11 @@ function freshness(ws: Sync): string {
 
 /** One Issue as `backlog view` shows it: the app's stored one, or GitHub's own without BACKLOG_URL (`sync.state` "github"). */
 export interface Detail {
-  issue: { number: number; title: string; state: string; stateReason?: string | null; labels: string[]; milestone: string | null; parent: number | null; subIssues: number[]; body: string; url: string };
+  /** The workspace the app answered from; absent in GitHub's own (without BACKLOG_URL). */
+  workspaceId?: string;
+  issue: { number: number; title: string; state: string; stateReason?: string | null; labels: string[]; milestone: string | null; parent: number | null; subIssues: number[]; body: string; url: string; change?: { head: string; base: string; mergeCommit: string | null; mergedAt: string | null } };
+  /** A local change's branch tips now (#2485); absent / null otherwise. */
+  changeRefs?: { head: string | null; base: string | null } | null;
   comments: Array<{ id: string; body: string; createdAt: string }>;
   fields: Record<string, string | number | null> | null;
   fetchedAt: number | null;
@@ -513,6 +521,7 @@ export function formatDetail(d: Detail): string {
   const at = d.sync.lastSuccessfulSync === null ? "未取得" : new Date(d.sync.lastSuccessfulSync).toLocaleString("sv-SE", { timeZone: "Asia/Tokyo" }) + " JST";
   return [
     `#${i.number || d.localId} ${i.title} [${i.state}${REASON[i.stateReason as keyof typeof REASON] ?? ""}]`,
+    ...(i.change ? [changeLine(i.change, d.changeRefs ?? null)] : []),
     `labels: ${i.labels.join(", ") || "-"}  milestone: ${i.milestone ?? "-"}  parent: ${i.parent ? `#${i.parent}` : "-"}`,
     `fields: ${d.fields ? Object.entries(d.fields).map(([k, v]) => `${k}=${v ?? "-"}`).join(", ") : "-"}`,
     `最終取得 ${at}  同期 ${d.sync.state}${d.sync.reason ? `（${d.sync.reason}）` : ""}  送信待ち ${d.pending}`,
@@ -521,6 +530,13 @@ export function formatDetail(d: Detail): string {
     i.body,
     ...d.comments.flatMap((c) => ["", `----- ${c.createdAt}`, c.body]),
   ].join("\n");
+}
+
+/** A local change's line (#2485): its branches and their tips now, or the commit it was merged as. */
+function changeLine(c: NonNullable<Detail["issue"]["change"]>, refs: Detail["changeRefs"]): string {
+  const sha = (x: string | null | undefined) => (x ? x.slice(0, 7) : "なし");
+  const tips = c.mergeCommit ? `MERGED ${c.mergeCommit.slice(0, 7)}` : `head ${sha(refs?.head)} base ${sha(refs?.base)}`;
+  return `変更: ${c.head} → ${c.base}  ${tips}`;
 }
 
 function issueRef(s: string): string {

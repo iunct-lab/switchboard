@@ -7,14 +7,11 @@ import { CLAUDE_MODELS } from "../packages/adapters/claude/src/index.ts";
 import { CODEX_MODELS } from "../packages/adapters/codex/src/index.ts";
 import { Database } from "bun:sqlite";
 import { loadPricing } from "../packages/core/src/pricing.ts";
-import { checkModels, claudeCatalog, listedModels, claudeTableText, classifyUnpriced, codexCatalog, compareModels, compareVersions, hostReaders, hostVersions, KINDS, REVIEWED, requestFor, settingsPrices, unpricedLedgerNames, unpricedListed, type Readers, type Report, type VersionReaders } from "./check-models";
+import { hostReaders, SHIPPED_HIDDEN_MODELS, type Readers } from "../packages/core/src/model-catalog.ts";
+import { checkModels, listedModels, classifyUnpriced, compareModels, compareVersions, hiddenModels, hostVersions, KINDS, requestFor, settingsPrices, unpricedLedgerNames, unpricedListed, type Report, type VersionReaders } from "./check-models";
 import { alreadyFiled } from "./file-request";
 
-// Excerpts of what the CLIs carry (claude 2.1.285's embedded table, codex-cli 0.159.2's `debug models --bundled`).
-const CLAUDE_TABLE =
-  'x=[{id:"claude-opus-5-5",family:"opus",display_name:"Opus 5.5",max_tokens:128000},' +
-  '{id:"claude-haiku-4-5",family:"haiku",display_name:"Haiku 4.5"},{id:"claude-opus-5-5",family:"opus",display_name:"Opus 5.5"}];' +
-  'y={id:"not-a-model",family:"x"}';
+// An excerpt of codex-cli 0.159.2's `debug models --bundled`.
 const CODEX_JSON = JSON.stringify({
   models: [
     { slug: "gpt-6.1-sol", visibility: "list" },
@@ -24,26 +21,22 @@ const CODEX_JSON = JSON.stringify({
   ],
 });
 
+/** The ids looked at with no settings saved: the bundled lists and what they leave out on purpose. */
+const KNOWN = {
+  claude: [...CLAUDE_MODELS.map((m) => m.value), ...SHIPPED_HIDDEN_MODELS.claude],
+  codex: [...CODEX_MODELS.map((m) => m.value), ...SHIPPED_HIDDEN_MODELS.codex],
+};
 const PRICING = loadPricing([join(import.meta.dir, "..", "packages", "core", "config", "pricing.json")]).table;
 /** No CLI on PATH as far as the version check is concerned: nothing is compared, no line. */
 const NO_VERSIONS: VersionReaders = { installed: async () => null, latest: async () => { throw new Error("not asked"); } };
 const sources = (read: Readers, pricing = PRICING, versions: VersionReaders = NO_VERSIONS) => ({ read, versions, pricing, dbPath: join(tmpdir(), "switchboard.check-models.no-such.db") });
 /** Tables that match the UI's lists exactly: no drift of their own, so a test of the version check sees only its lines. */
 const CLEAN: Readers = {
-  claude: async () => REVIEWED.claude.map((id) => `{id:"${id}",family:"x",display_name:"X"}`).join(","),
-  codex: async () => JSON.stringify({ models: REVIEWED.codex.map((slug) => ({ slug, visibility: "list" })) }),
+  claude: async () => KNOWN.claude.map((id) => `{id:"${id}",family:"x",display_name:"X"}`).join(","),
+  codex: async () => JSON.stringify({ models: KNOWN.codex.map((slug) => ({ slug, visibility: "list" })) }),
 };
 
 describe("check-models", () => {
-  test("claudeCatalog reads the ids of the embedded table once each", () => {
-    expect(claudeCatalog(CLAUDE_TABLE)).toEqual(["claude-opus-5-5", "claude-haiku-4-5"]);
-    expect(claudeCatalog("no table here")).toEqual([]);
-  });
-
-  test("codexCatalog keeps the listed slugs and drops hidden ones", () => {
-    expect(codexCatalog(CODEX_JSON)).toEqual(["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol"]);
-  });
-
   test("stale id is reported", () => {
     const r = compareModels({ listed: ["claude-opus-5-4", "claude-haiku-4-5"], catalog: ["claude-opus-5-5", "claude-haiku-4-5"], reviewed: ["claude-opus-5-5", "claude-haiku-4-5"] });
     expect(r).toEqual({ stale: ["claude-opus-5-4"], unseen: [] });
@@ -52,11 +45,6 @@ describe("check-models", () => {
   test("new catalog id is reported", () => {
     const r = compareModels({ listed: ["gpt-6-sol"], catalog: ["gpt-6-sol", "gpt-6.1-sol", "gpt-5.6-terra"], reviewed: ["gpt-6-sol", "gpt-5.6-terra"] });
     expect(r).toEqual({ stale: [], unseen: ["gpt-6.1-sol"] });
-  });
-
-  test("the lists in the UI are all reviewed ids", () => {
-    for (const m of CLAUDE_MODELS) expect(REVIEWED.claude).toContain(m.value);
-    for (const m of CODEX_MODELS) expect(REVIEWED.codex).toContain(m.value);
   });
 
   test("exit 2 when a CLI is missing or its table reads as empty; drift still shows for the other", async () => {
@@ -72,8 +60,8 @@ describe("check-models", () => {
     const table = { ...PRICING, models };
     expect(unpricedListed(["claude-opus-5-5", "claude-sonnet-5-5"], table, "claude")).toEqual(["claude-sonnet-5-5"]);
     expect(unpricedListed(["claude-opus-5-5", "claude-sonnet-5-5"], PRICING, "claude")).toEqual([]);
-    const claude = async () => REVIEWED.claude.map((id) => `{id:"${id}",family:"x",display_name:"X"}`).join(",");
-    const codex = async () => JSON.stringify({ models: REVIEWED.codex.map((slug) => ({ slug, visibility: "list" })) });
+    const claude = async () => KNOWN.claude.map((id) => `{id:"${id}",family:"x",display_name:"X"}`).join(",");
+    const codex = async () => JSON.stringify({ models: KNOWN.codex.map((slug) => ({ slug, visibility: "list" })) });
     const r = await checkModels(sources({ claude, codex }, table));
     expect(r.code).toBe(1);
     expect(r.lines[0]).toBe("claude 価格表未整備: claude-sonnet-5-5");
@@ -97,27 +85,6 @@ describe("check-models", () => {
       new Database(empty).close();
       expect(unpricedLedgerNames(empty)).toEqual([]);
       expect(unpricedLedgerNames(join(dir, "missing.db"))).toEqual([]);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("claudeTableText finds entries across chunk boundaries of a large file", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "switchboard.check-models."));
-    try {
-      const file = join(dir, "claude");
-      const entry = (id: string) => `{id:"${id}",family:"x",display_name:"X"}`;
-      writeFileSync(file, "\0".repeat(3_000_000));
-      let first = 0;
-      for await (const c of Bun.file(file).stream()) {
-        first = c.length;
-        break;
-      }
-      // One entry cut in two by the first chunk boundary, one well inside a later chunk.
-      const a = entry("claude-opus-5-5");
-      const head = "\0".repeat(first - 20) + a;
-      writeFileSync(file, head + "\0".repeat(1_000_000) + entry("claude-haiku-4-5") + "\0".repeat(1_000_000));
-      expect(claudeCatalog(await claudeTableText(file))).toEqual(["claude-opus-5-5", "claude-haiku-4-5"]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -154,13 +121,35 @@ describe("check-models", () => {
       db.exec("CREATE TABLE settings (key TEXT PRIMARY KEY, json TEXT NOT NULL)");
       db.query("INSERT INTO settings VALUES ('settings', ?)").run(JSON.stringify({ models: { claude: [{ value: "claude-x", label: "X" }] } }));
       db.close();
-      const claude = async () => REVIEWED.claude.map((id) => `{id:"${id}",family:"x",display_name:"X"}`).join(",");
-      const codex = async () => JSON.stringify({ models: REVIEWED.codex.filter((id) => id !== CODEX_MODELS[0]!.value).map((slug) => ({ slug, visibility: "list" })) });
+      const claude = async () => KNOWN.claude.map((id) => `{id:"${id}",family:"x",display_name:"X"}`).join(",");
+      const codex = async () => JSON.stringify({ models: KNOWN.codex.filter((id) => id !== CODEX_MODELS[0]!.value).map((slug) => ({ slug, visibility: "list" })) });
       const r = await checkModels({ read: { claude, codex }, versions: NO_VERSIONS, pricing: PRICING, dbPath });
       expect(r.findings).toContainEqual({ runner: "claude", kind: "stale", ids: ["claude-x"] });
       expect(r.findings).toContainEqual({ runner: "claude", kind: "価格表未整備", ids: ["claude-x"] });
       expect(r.findings).toContainEqual({ runner: "codex", kind: "stale", ids: [CODEX_MODELS[0]!.value] }); // the bundled list
       expect(r.code).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("hiddenModels (#1401): the settings' 載せない list hides an id from unseen; a runner never saved, and no database or row, falls back to SHIPPED_HIDDEN_MODELS", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "switchboard.check-models."));
+    try {
+      const dbPath = join(dir, "switchboard.db");
+      expect(hiddenModels(join(dir, "missing.db"))).toEqual(SHIPPED_HIDDEN_MODELS);
+      const db = new Database(dbPath);
+      db.exec("CREATE TABLE settings (key TEXT PRIMARY KEY, json TEXT NOT NULL)");
+      expect(hiddenModels(dbPath)).toEqual(SHIPPED_HIDDEN_MODELS); // no row
+      const claude = async () => [...KNOWN.claude, "claude-opus-6"].map((id) => `{id:"${id}",family:"x",display_name:"X"}`).join(",");
+      const codex = async () => JSON.stringify({ models: KNOWN.codex.map((slug) => ({ slug, visibility: "list" })) });
+      const run = () => checkModels({ read: { claude, codex }, versions: NO_VERSIONS, pricing: PRICING, dbPath });
+      expect((await run()).findings).toEqual([{ runner: "claude", kind: "unseen", ids: ["claude-opus-6"] }]);
+      // 載せない on the settings screen: the saved list replaces the shipped one for that runner only
+      db.query("INSERT INTO settings VALUES ('settings', ?)").run(JSON.stringify({ hiddenModels: { claude: ["claude-opus-6"] } }));
+      db.close();
+      expect(hiddenModels(dbPath)).toEqual({ claude: ["claude-opus-6"], codex: SHIPPED_HIDDEN_MODELS.codex });
+      expect((await run()).findings).toEqual([{ runner: "claude", kind: "unseen", ids: SHIPPED_HIDDEN_MODELS.claude }]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -194,8 +183,8 @@ describe("check-models", () => {
       db.exec("CREATE TABLE ledger (runner TEXT NOT NULL, model TEXT, source TEXT NOT NULL)");
       db.exec("INSERT INTO ledger VALUES ('claude', 'claude-opus-5-5', 'unpriced'), ('claude', 'claude-opus-6', 'unpriced')");
       db.close();
-      const claude = async () => [...REVIEWED.claude, "claude-opus-6"].map((id) => `{id:"${id}",family:"x",display_name:"X"}`).join(",");
-      const codex = async () => JSON.stringify({ models: REVIEWED.codex.map((slug) => ({ slug, visibility: "list" })) });
+      const claude = async () => [...KNOWN.claude, "claude-opus-6"].map((id) => `{id:"${id}",family:"x",display_name:"X"}`).join(",");
+      const codex = async () => JSON.stringify({ models: KNOWN.codex.map((slug) => ({ slug, visibility: "list" })) });
       const r = await checkModels({ read: { claude, codex }, versions: NO_VERSIONS, pricing: PRICING, dbPath });
       expect(r.lines).toContain("unpriced (ledger) new（価格表未整備）: claude claude-opus-6");
     } finally {
@@ -250,6 +239,8 @@ describe("check-models", () => {
     const req = requestFor(drift([{ runner: "claude", kind: "outdated", ids: ["2.1.289"] }, { runner: "claude", kind: "unseen", ids: ["claude-opus-6"] }]), SOURCE)!;
     expect(req.title).toBe("モデル一覧のズレ: claude unseen claude-opus-6 / claude outdated 2.1.289");
     expect(req.body).toContain("`outdated`: CLI を更新する");
+    expect(req.body).toContain("`unseen`: 設定画面の「モデルの選択肢」で「CLI の表を読む」を押し"); // the fix is on the screen, no REVIEWED (#1401)
+    expect(req.body).not.toContain("REVIEWED");
   });
 
   test("the 出典 says 誰の言葉: 定期の検査 (#1818)", () => {
@@ -319,10 +310,10 @@ describe("check-models", () => {
         throw new Error("no network in check-models");
       }, real) as typeof fetch;
       try {
-        install(REVIEWED.claude, REVIEWED.codex);
+        install(KNOWN.claude, KNOWN.codex);
         expect(await checkModels(sources(hostReaders(dir)))).toEqual({ lines: ["claude: ズレなし（22 件）", "codex: ズレなし（9 件）", "unpriced (ledger): なし"], code: 0, findings: [] });
         expect(called).toBe(0); // the table comparison alone never touches the network
-        install(REVIEWED.claude.filter((id) => id !== "claude-opus-5-5"), [...REVIEWED.codex, "gpt-7"]);
+        install(KNOWN.claude.filter((id) => id !== "claude-opus-5-5"), [...KNOWN.codex, "gpt-7"]);
         expect(await checkModels(sources(hostReaders(dir), PRICING, hostVersions(dir)))).toEqual({
           lines: ["claude stale: claude-opus-5-5", "codex unseen: gpt-7", "claude latest: 分からない（no network in check-models）", "codex latest: 分からない（no network in check-models）", "unpriced (ledger): なし"],
           code: 1,
@@ -338,7 +329,7 @@ describe("check-models", () => {
     });
 
     test("hostVersions reads `--version` of the CLIs on PATH, and the registry's latest through fetch", async () => {
-      install(REVIEWED.claude, REVIEWED.codex);
+      install(KNOWN.claude, KNOWN.codex);
       const v = hostVersions(dir);
       expect(await v.installed("claude")).toBe("2.1.296");
       expect(await v.installed("codex")).toBe("0.162.1");

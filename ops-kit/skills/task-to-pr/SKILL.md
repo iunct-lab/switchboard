@@ -30,6 +30,8 @@ git checkout -b <枝> && gh stack init <枝>     # 最初の枝（単発でも i
 # 既にスタックがあり、その上に積むなら: 下の枝にいる状態で  gh stack add <枝>
 ```
 
+**ローカルの変更では**（Task への指示が「この workspace の変更はアプリに置く」と言う workspace。リポジトリのサービスがアプリで、PR の代わりにアプリに置く「変更」を使う）: worktree は `git worktree add --detach <場所> main`（fetch しない）、枝は `git checkout -b <枝>` だけ（`gh stack init` はしない。積まない）。
+
 ### 3. 実装の規律
 
 文書を書くときは `issue-workflow` の「アプリが持つ可変の値を写さない」に従う。
@@ -81,6 +83,8 @@ gh pr edit <n> --title "<題>" --body-file "$W/pr.md"
 ops-kit backlog set <Task> Status "In review"
 echo "PR: #<n>（<1 行>）" | ops-kit backlog comment <Task> --body-file -
 ```
+
+**ローカルの変更では**（Task への指示が「この workspace の変更はアプリに置く」と言う workspace。リポジトリのサービスがアプリで、PR の代わりにアプリに置く「変更」を使う）: `gh stack submit` / `gh pr edit` の代わりに `ops-kit backlog create --title "<題>" --body-file "$W/pr.md" --head <枝> --base main`（本文は下と同じ形。先頭に `Backlog-Task: <Task>` の 1 行）で変更を作り、`ops-kit backlog comment <Task> --body "変更: #<変更>（<1 行>）"`。push はしない。
 
 PR 本文は `.github/PULL_REQUEST_TEMPLATE.md` の 4 節を埋め、**その上に「レビュアーへ」を置く**:
 

@@ -4,11 +4,12 @@ import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, truncateSync, utimesSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { AgentEvent, AskList, RunnerAdapter, RunnerDetection, RunnerId, RoutingStats, RunnerSession, StartOptions, Task } from "@switchboard/protocol";
+import type { AgentEvent, AskList, RunnerAdapter, RunnerDetection, RunnerId, RoutingStats, RunnerSession, Schedule, StartOptions, Task, Workspace } from "@switchboard/protocol";
 import { OpsLatency, OpsLoad, OpsResources, OpsStops } from "@switchboard/protocol";
 import { Database } from "bun:sqlite";
 import { isTempDir, loadConfig, teleportWorktreePath } from "./config.ts";
 import { abortOrphanedTasks, Db } from "./db.ts";
+import * as heavyModule from "../../../ops-kit/src/heavy.ts";
 import * as opsLoadModule from "./ops-load.ts";
 import { opsResources, readMemInfo } from "./ops-resources.ts";
 import { measureFootprint } from "./footprint.ts";
@@ -35,6 +36,7 @@ import { StopReport } from "./stops.ts";
 import { deployApprovedText, SSO_REST_TEXT, SSO_RESUME_TEXT } from "./approval-batch.ts";
 import { makePrivateTmp, privateTmpOf, sweepPrivateTmps, TaskManager, taskAllowRules } from "./tasks.ts";
 import { Scheduler } from "./scheduler.ts";
+import { loadProcess } from "./process-defs.ts";
 
 /** A gh that answers nothing: the ledger summary reads GitHub's budget (#549), which a test must not ask the real GitHub for. */
 const NO_GH = async () => ({ code: 1, stdout: "", stderr: "no gh in this test" });
@@ -220,6 +222,36 @@ describe("core daemon", () => {
     expect(h.runners[0]).toMatchObject({ id: "claude", available: true });
     const ws = await fetch(`${base}/api/workspaces`).then(j);
     expect(ws.some((w: { kind: string }) => w.kind === "meta")).toBe(true);
+  });
+
+  test("provenance: a task created with a process records it with the bundle hashes, GET /api/processes lists the candidates (#3647)", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-test-prov-"));
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
+    try {
+      const b = `http://127.0.0.1:${c.server.port}`;
+      const post = (body: object) => fetch(`${b}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "p", prompt: "explain", cwd: h, ...body }) });
+      expect((await post({ process: "nope" })).status).toBe(400);
+      const r = await post({ process: "p0-pipeline", processReason: "test" });
+      expect(r.status).toBe(201);
+      const t = await j(r);
+      const prov = await fetch(`${b}/api/tasks/${t.id}/provenance`).then(j);
+      expect(prov).toMatchObject({ v: 1, process: { id: "p0-pipeline", version: 1 }, processReason: "test", runner: "claude", repo: { head: null } });
+      expect(prov.bundle.skills).toMatch(/^[0-9a-f]{64}$/); // the meta workspace's ops-kit/skills
+      expect(prov.bundle.processes).toMatch(/^[0-9a-f]{64}$/);
+      expect(prov.bundle.claudeMd).toBeNull(); // cwd is an empty folder
+      expect(prov.instructionBytes).toBe(0);
+      // without a process: still recorded, process null
+      const t2 = await j(await post({}));
+      expect(await fetch(`${b}/api/tasks/${t2.id}/provenance`).then(j)).toMatchObject({ process: null, processReason: null, runner: "claude" });
+      expect((await fetch(`${b}/api/tasks/task_missing/provenance`)).status).toBe(404);
+      const procs = await fetch(`${b}/api/processes`).then(j);
+      expect(procs.map((p: { id: string }) => p.id)).toContain("p0-pipeline");
+      const p0 = loadProcess("p0-pipeline");
+      expect(procs.find((p: { id: string }) => p.id === "p0-pipeline")).toMatchObject({ version: p0.version, title: p0.title, fits: p0.fits });
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
   });
 
   test("health lists the running and waiting tasks as busyTasks, and not the done ones (#2814)", async () => {
@@ -2094,7 +2126,7 @@ describe("core daemon", () => {
       expect(saved.defaultPermissionMode).toEqual({ claude: "plan" });
       expect(saved.runners[0].defaultPermissionMode).toBe("plan");
       expect((await fetch(`${b8}/api/health`).then(j)).runners[0].defaultPermissionMode).toBe("plan");
-      expect(c8.db.getSetting("settings", {})).toEqual({ defaultPermissionMode: { claude: "plan" }, autoResume: {}, bedrock: {}, shadowRunner: null, routing: { llm: { enabled: false, runner: "claude", model: "", timeoutMs: 5000 } }, judge: { enabled: true, runner: "codex", model: "gpt-6-luna" }, autoStart: { runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9 }, evals: { judge: { enabled: true } }, titles: { auto: true }, quotaAndResume: { backlogQuotaLimit: 0.8, retryDelayMs: 900_000, retryMaxDelayMs: 14_400_000, maxLimitStops: 8, resumePrompt: "使用上限がリセットされました。中断した箇所から作業を続けてください。", maxStopResumes: 2, thinSample: 5 }, judgeAndChoice: { judgeFallbackRunner: "claude", judgeFallbackModel: "claude-haiku-4-5", judgeTimeoutMs: 60_000, workspaceChoiceTimeoutMs: 60_000 }, newDefaults: { taskRunner: "claude", scheduleCron: "0 3 * * *" }, prices: {}, models: {} });
+      expect(c8.db.getSetting("settings", {})).toEqual({ defaultPermissionMode: { claude: "plan" }, autoResume: {}, bedrock: {}, shadowRunner: null, routing: { llm: { enabled: false, runner: "claude", model: "", timeoutMs: 5000 } }, judge: { enabled: true, runner: "codex", model: "gpt-6-luna" }, autoStart: { runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9 }, evals: { judge: { enabled: true } }, titles: { auto: true }, quotaAndResume: { backlogQuotaLimit: 0.8, retryDelayMs: 900_000, retryMaxDelayMs: 14_400_000, maxLimitStops: 8, resumePrompt: "使用上限がリセットされました。中断した箇所から作業を続けてください。", maxStopResumes: 2, thinSample: 5 }, judgeAndChoice: { judgeFallbackRunner: "claude", judgeFallbackModel: "claude-haiku-4-5", judgeTimeoutMs: 60_000, workspaceChoiceTimeoutMs: 60_000 }, newDefaults: { taskRunner: "claude", scheduleCron: "0 3 * * *" }, prices: {}, models: {}, hiddenModels: {} });
       const t4 = await post("/api/tasks", { cwd: h8, title: "t4", prompt: "p", runner: "claude" }).then(j);
       expect(t4.permissionMode).toBe("plan");
       expect(starts[2]?.permissionMode).toBe("plan");
@@ -2354,6 +2386,58 @@ describe("core daemon", () => {
       expect((await patch({ bedrock: { claude: null }, models: { claude: null } })).status).toBe(200);
       expect((await fetch(`${b}/api/settings`).then(j)).models).toEqual({});
       expect(await models()).toEqual([opt("big"), opt("small")]);
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("model candidates (#1401): read only when asked; the CLI's models neither listed nor hidden, with the table's names; 載せない hides one until null brings it back; a runner not detected, a missing CLI, an empty table and a failed read answer why", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-test-model-candidates-"));
+    const asked: string[] = [];
+    const tables: Record<string, () => string | null> = {
+      claude: () => '{id:"big",family:"x",display_name:"Big"},{id:"claude-opus-4-0",family:"x",display_name:"Opus 4"},{id:"claude-test-1",family:"x",display_name:"Test 1"},{id:"claude-test-2",family:"x",display_name:"Test 2"}',
+    };
+    const modelCatalog = async (runner: "claude" | "codex") => {
+      asked.push(runner);
+      return tables[runner]!();
+    };
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { models: ["big", "small"] }), fakeAdapter(SCRIPT, { id: "dak" })], { port: 0, modelCatalog });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const candidates = () => fetch(`${b}/api/settings/model-candidates`).then(j);
+    const opt = (value: string, label = value) => ({ value, label });
+    try {
+      await fetch(`${b}/api/health`).then(j);
+      expect(asked).toEqual([]); // booting and reading the settings never read a CLI's table
+      expect((await fetch(`${b}/api/settings`).then(j)).defaults.hiddenModels.claude).toContain("claude-opus-4-0");
+      // big is listed, claude-opus-4-0 is hidden by the bundled list's 載せない (no row saved yet)
+      expect(await candidates()).toEqual([
+        { runner: "claude", candidates: [opt("claude-test-1", "Test 1"), opt("claude-test-2", "Test 2")] },
+        { runner: "codex", error: "ランナーが検出されていない" }, // no codex adapter here: its 足す / 載せない would be refused
+      ]);
+      expect(asked).toEqual(["claude"]);
+      // 足す = the list's PATCH with the candidate at the end
+      expect((await patch({ models: { claude: [opt("big"), opt("small"), opt("claude-test-1", "Test 1")] } })).status).toBe(200);
+      expect(((await fetch(`${b}/api/health`).then(j)).runners as { id: string; models: unknown }[]).find((r) => r.id === "claude")!.models).toEqual([opt("big"), opt("small"), opt("claude-test-1", "Test 1")]);
+      // 載せない: gone from the candidates and stays gone; null brings the bundled list's 載せない back
+      expect((await patch({ hiddenModels: { claude: [" claude-test-2 ", "", "claude-test-2"] } })).status).toBe(200);
+      expect((await fetch(`${b}/api/settings`).then(j)).hiddenModels).toEqual({ claude: ["claude-test-2"] });
+      expect((await candidates())[0]).toEqual({ runner: "claude", candidates: [opt("claude-opus-4-0", "Opus 4")] });
+      expect((await patch({ hiddenModels: { claude: [] } })).status).toBe(200); // [] hides nothing, not even the bundled list's 載せない
+      expect((await candidates())[0]).toEqual({ runner: "claude", candidates: [opt("claude-opus-4-0", "Opus 4"), opt("claude-test-2", "Test 2")] });
+      expect((await patch({ hiddenModels: { claude: null } })).status).toBe(200);
+      expect((await candidates())[0]).toEqual({ runner: "claude", candidates: [opt("claude-test-2", "Test 2")] });
+      for (const body of [{ dak: ["x"] }, { codex: ["x"] }]) expect((await patch({ hiddenModels: body })).status).toBe(400);
+      // a CLI not on PATH, an empty table, a failed read
+      tables.claude = () => null;
+      expect((await candidates())[0]).toEqual({ runner: "claude", error: "CLI が PATH に無い" });
+      tables.claude = () => "no table";
+      expect((await candidates())[0]).toEqual({ runner: "claude", error: "モデル表が 0 件（CLI の形式が変わった）" });
+      tables.claude = () => {
+        throw new Error("claude: read failed");
+      };
+      expect((await candidates())[0]).toEqual({ runner: "claude", error: "claude: read failed" });
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
@@ -5011,11 +5095,16 @@ describe("ops resources", () => {
       writeFileSync(join(state, "slot-0.json"), JSON.stringify({ pid: live, name: "local-ci 3639", cwd: "/w", taskId: "t_ci", queuedAt: "2026-11-03T10:00:00.000Z", startedAt: "2026-11-03T10:00:05.000Z", token: "a" }));
       writeFileSync(join(state, `wait-${live}-b.json`), JSON.stringify({ pid: live, name: "bun test", cwd: "/w", taskId: null, queuedAt: "2026-11-03T10:01:00.000Z", reason: "slot" }));
       writeFileSync(join(state, "wait-999999999-c.json"), JSON.stringify({ pid: 999_999_999, name: "gone", cwd: "/w", taskId: null, queuedAt: "2026-11-03T09:00:00.000Z", reason: "memory" }));
+      // a full history (500 lines): local-ci runs of 10 minutes, and 3 bun test runs of 20
+      const entry = (name: string, min: number) => JSON.stringify({ name, taskId: null, queuedAt: "2026-11-02T00:00:00.000Z", startedAt: "2026-11-02T00:00:00.000Z", endedAt: new Date(Date.parse("2026-11-02T00:00:00.000Z") + min * 60_000).toISOString(), exitCode: 0 });
+      writeFileSync(join(state, "history.jsonl"), `${[...Array.from({ length: 497 }, (_, i) => entry(`local-ci ${3000 + i}`, 10)), ...Array.from({ length: 3 }, () => entry("bun test", 20))].join("\n")}\n`);
+      const reads = spyOn(heavyModule, "readHeavyHistory");
+      const at = Date.parse("2026-11-03T10:30:05.000Z"); // the local-ci has run 30 minutes, 3 times its median
       const proc = join(h, "proc");
       mkdirSync(proc);
       writeFileSync(join(proc, "meminfo"), "MemTotal:        3921000 kB\nMemFree:          100000 kB\nMemAvailable:    1000000 kB\nSwapTotal:       2097148 kB\nSwapFree:        1997148 kB\n");
       // nothing sampled yet: no consumers
-      expect(opsResources(db, { home: h, procRoot: proc }).consumers).toBeNull();
+      expect(opsResources(db, { home: h, procRoot: proc, now: at }).consumers).toBeNull();
       const group = (ts: number, task: string | null, owner: string, kind: string, rss: number, n: number) =>
         db.sqlite.query("INSERT INTO ops_load_groups (ts, task_id, owner, kind, rss, cpu_ms, procs) VALUES (?, ?, ?, ?, ?, 0, ?)").run(ts, task, owner, kind, rss, n);
       group(now - 120_000, "t_ci", "task", "test", 9_000_000_000, 1); // an older minute: not now
@@ -5023,11 +5112,19 @@ describe("ops resources", () => {
       group(now - 60_000, "t_ci", "task", "test", 700_000_000, 4);
       group(now - 60_000, null, "daemon", "judge", 50_000_000, 1);
       group(now - 60_000, "t_unknown", "task", "runner", 100_000_000, 1);
-      const r = OpsResources.parse(opsResources(db, { home: h, procRoot: proc }));
+      const raw = opsResources(db, { home: h, procRoot: proc, now: at });
+      expect(reads).toHaveBeenCalledTimes(1); // the second read of an unchanged history uses the first's medians
+      reads.mockRestore();
+      expect(Object.keys(raw)).toEqual(["memory", "slots", "eta", "consumers"]); // the history's lines are not in the answer
+      // a run ends: the history changes, and the next read takes it in
+      appendFileSync(join(state, "history.jsonl"), `${entry("bun test", 20)}\n`);
+      expect(opsResources(db, { home: h, procRoot: proc, now: at }).slots.waiting[0]!.samples).toBe(4);
+      const r = OpsResources.parse(raw);
       expect(r.memory).toEqual({ availableBytes: 1_000_000 * 1024, totalBytes: 3_921_000 * 1024, swapUsedBytes: 100_000 * 1024, floorBytes: 1536 * 1024 * 1024 });
       expect(r.slots.max).toBe(1);
-      expect(r.slots.running).toEqual([{ pid: live, name: "local-ci 3639", cwd: "/w", taskId: "t_ci", taskTitle: "PBI の local-ci", queuedAt: "2026-11-03T10:00:00.000Z", startedAt: "2026-11-03T10:00:05.000Z" }]);
-      expect(r.slots.waiting).toEqual([{ pid: live, name: "bun test", cwd: "/w", taskId: null, taskTitle: null, queuedAt: "2026-11-03T10:01:00.000Z", reason: "slot" }]);
+      expect(r.slots.running).toEqual([{ pid: live, name: "local-ci 3639", cwd: "/w", taskId: "t_ci", taskTitle: "PBI の local-ci", queuedAt: "2026-11-03T10:00:00.000Z", startedAt: "2026-11-03T10:00:05.000Z", typicalMs: 600_000, samples: 497, verdict: "long" }]);
+      expect(r.slots.waiting).toEqual([{ pid: live, name: "bun test", cwd: "/w", taskId: null, taskTitle: null, queuedAt: "2026-11-03T10:01:00.000Z", reason: "slot", typicalMs: 1_200_000, samples: 3 }]);
+      expect(r.eta).toEqual({ etaMs: 1_200_000, unknown: 0 }); // the local-ci is past its median: the bun test's 20 minutes
       expect(r.consumers!.at).toBe(now - 60_000);
       expect(r.consumers!.groups.map((g) => `${g.taskId}/${g.taskTitle}/${g.kind}/${g.rssBytes}/${g.procs}`)).toEqual([
         "t_ci/PBI の local-ci/test/700000000/4",
@@ -5042,6 +5139,7 @@ describe("ops resources", () => {
       // no ops-kit heavy on this machine yet: the defaults and no jobs
       const empty = mkdtempSync(join(tmpdir(), "switchboard-ops-resources-empty-"));
       expect(opsResources(db, { home: empty, procRoot: proc }).slots).toEqual({ max: 1, running: [], waiting: [] });
+      expect(opsResources(db, { home: empty, procRoot: proc }).eta).toEqual({ etaMs: null, unknown: 0 });
       rmSync(empty, { recursive: true, force: true });
     } finally {
       procs.mockRestore();
@@ -5097,6 +5195,52 @@ describe("ops load (#2086)", () => {
       OpsResources.parse(await fetch(`${b}/api/ops/resources`).then(j));
     } finally {
       await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("ui-layers schedule (#3353)", () => {
+  test("ui-layers: the monthly check is put on meta once — a second start adds none, and one the person deleted is not put back", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-ui-layers-"));
+    const boot = () => startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
+    const checks = async (c: Awaited<ReturnType<typeof boot>>) =>
+      ((await fetch(`http://127.0.0.1:${c.server.port}/api/schedules`).then(j)) as Schedule[]).filter((s) => s.action === "ui-layers");
+    try {
+      let c = await boot();
+      const [first, ...more] = await checks(c);
+      expect(more).toHaveLength(0);
+      const meta = ((await fetch(`http://127.0.0.1:${c.server.port}/api/workspaces`).then(j)) as Workspace[]).find((w) => w.kind === "meta")!;
+      expect(first).toMatchObject({ title: "床・天井・壁の点検", cron: "0 9 1 * *", runner: "claude", workspaceId: meta.id, enabled: true });
+      await c.stop();
+      c = await boot();
+      expect((await checks(c)).map((s) => s.id)).toEqual([first!.id]);
+      expect((await fetch(`http://127.0.0.1:${c.server.port}/api/schedules/${first!.id}`, { method: "DELETE" })).ok).toBe(true);
+      await c.stop();
+      c = await boot();
+      expect(await checks(c)).toHaveLength(0);
+      await c.stop();
+    } finally {
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("ui-layers: a start that cannot add the check (the meta folder is missing) leaves it unseeded, and the next start adds it", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-ui-layers-"));
+    const repo = join(h, "repo");
+    const boot = () =>
+      startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", SWITCHBOARD_REPO_ROOT: repo, ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
+    const checks = async (c: Awaited<ReturnType<typeof boot>>) =>
+      ((await fetch(`http://127.0.0.1:${c.server.port}/api/schedules`).then(j)) as Schedule[]).filter((s) => s.action === "ui-layers");
+    try {
+      let c = await boot(); // repo does not exist yet: Scheduler.create refuses the meta workspace
+      expect(await checks(c)).toHaveLength(0);
+      await c.stop();
+      mkdirSync(repo);
+      c = await boot();
+      expect(await checks(c)).toHaveLength(1);
+      await c.stop();
+    } finally {
       rmSync(h, { recursive: true, force: true });
     }
   });

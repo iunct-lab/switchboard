@@ -17,3 +17,9 @@ test("Brief: 渡す MCP lists the handed servers, なし when none, and no row f
   expect(brief(task, [])).toContain("なし（ユーザー全体の MCP は渡さない）");
   expect(brief({ ...task, runner: "codex" }, [])).not.toContain("渡す MCP");
 });
+
+test("Brief: 操作 の欄は差分タブを指すだけで、Phase の予告を出さない (#3667)", () => {
+  const html = brief(task, []);
+  expect(html).toContain("変更したファイルは「差分」タブに。</div>");
+  expect(html).not.toMatch(/Phase ?\d/);
+});

@@ -1,7 +1,7 @@
 import type { RunnerId, RunnerInfo } from "@switchboard/protocol";
 
 /** What is missing when the daemon gave no note (or no runner list): the words Home showed on hover before #3354. */
-const MISSING: Record<RunnerId, string> = {
+const MISSING: Record<"claude" | "codex" | "dak", string> = {
   claude: "claude が PATH にありません。Claude Code をインストールしてください（https://claude.com/claude-code）",
   codex: "codex が PATH にありません（公式インストーラ: curl -fsSL https://chatgpt.com/codex/install.sh | sh）",
   dak: "DAK の agent（http://127.0.0.1:8000、SWITCHBOARD_DAK_URL で変更）に到達できません。DAK リポジトリで docker compose up",
@@ -10,7 +10,8 @@ const MISSING: Record<RunnerId, string> = {
 /** Why runner `id` cannot be picked and what to do, as text read without hovering (#3354); null when it can be picked. */
 export function unavailableNotice(info: RunnerInfo | undefined, id: RunnerId): string | null {
   if (info?.available) return null;
-  return info?.note ?? MISSING[id];
+  // an ADK server added in Settings (`custom:<name>`) has no fixed install advice: its own detect() note says what failed
+  return info?.note ?? (id in MISSING ? MISSING[id as keyof typeof MISSING] : `${info?.label ?? id} に到達できません`);
 }
 
 /**

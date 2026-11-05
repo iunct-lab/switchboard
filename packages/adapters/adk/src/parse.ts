@@ -3,9 +3,8 @@ import type { AgentEvent, Attachment } from "@switchboard/protocol";
 
 /**
  * Pure mapping from Google ADK `POST /run_sse` events (`adk api_server`, or DAK's agent container, `adk web --a2a`) to
- * AgentEvent. Recorded against google-adk 2.x behind DAK @ e966c05: text, tool calls, usage and attachments. Those
- * recordings hold no confirmation and no artifact handed to the person, so those two branches are tested only against
- * ../fixtures/fake-adk.ts:
+ * AgentEvent. Recorded against google-adk 2.x behind DAK @ e966c05 (text, tool calls, usage, attachments) and against
+ * `adk api_server` of google-adk 2.13.0 with a sample agent (both confirmation forms, an artifact; adk-replay.test.ts):
  *  - event.content.parts[].text (partial, not thought)   → message.delta (assistant), messageId = invocationId:segment
  *  - parts[].text with thought: true                      → status "thinking" (content not shown)
  *  - final (partial: false) event                         → text only if nothing streamed for the current segment
@@ -33,8 +32,11 @@ export interface AdkParserState {
   /** Text of the current segment only (reset at each boundary); becomes the session.end summary. */
   lastText?: string;
   model?: string;
-  /** Open confirmation requests: permission.ask id (= function call id) → original call. */
-  confirmations: Map<string, { name: string; args: unknown }>;
+  /**
+   * Open confirmation requests: permission.ask id (= function call id) → original call. `call` is the id of the tool's
+   * own call an `adk_request_confirmation` asks about: ADK names that same id again in requestedToolConfirmations.
+   */
+  confirmations: Map<string, { name: string; args: unknown; call?: string }>;
   errored?: string;
 }
 
@@ -83,7 +85,7 @@ export function mapAdkEvent(ev: Any, s: AdkParserState): AgentEvent[] {
         // ADK's explicit confirmation tool: the agent asks before running `originalFunctionCall`.
         const orig = fc.args?.originalFunctionCall ?? {};
         const name = String(orig.name ?? "tool");
-        s.confirmations.set(id, { name, args: orig.args });
+        s.confirmations.set(id, { name, args: orig.args, call: orig.id === undefined ? undefined : String(orig.id) });
         out.push({ t: "permission.ask", id, kind: kindOf(name), tool: name, input: orig.args ?? {}, detail: summarize(name, orig.args), toolUseId: String(orig.id ?? id) });
       } else if (confirmations[id]) {
         s.confirmations.set(id, { name: String(fc.name), args: fc.args });
@@ -103,12 +105,13 @@ export function mapAdkEvent(ev: Any, s: AdkParserState): AgentEvent[] {
       out.push({ t: "tool.result", id, ok: !failed, summary: truncate(responseText(resp), 600) });
     }
   }
-  // ADK-native confirmations that were not matched to a functionCall in this event still need an ask. The
-  // confirmation payload itself has not been observed to carry a tool name in any recording; best-effort probe a
-  // few likely keys before giving up (no recording holds a confirmation of either form, so treat the exact shape as
-  // unconfirmed).
+  // ADK-native confirmations that were not matched to a functionCall in this event, and not already asked through
+  // adk_request_confirmation, still need an ask. The recorded payload (google-adk 2.13.0: { hint, confirmed, payload })
+  // carries no tool name; best-effort probe a few likely keys before giving up.
   for (const [id, c] of Object.entries(confirmations)) {
-    if (s.confirmations.has(id)) continue;
+    // google-adk 2.13.0 asks once in both forms: the adk_request_confirmation call (answered on its own id), then the
+    // tool's response with requestedToolConfirmations keyed on the tool's call. The second is the same question.
+    if (s.confirmations.has(id) || [...s.confirmations.values()].some((x) => x.call === id)) continue;
     const name = str(c?.toolName) ?? str(c?.tool) ?? str(c?.name) ?? str(c?.payload?.name) ?? "tool";
     s.confirmations.set(id, { name, args: c?.payload });
     out.push({ t: "permission.ask", id, kind: kindOf(name), tool: name, input: c?.payload ?? {}, detail: str(c?.hint) ?? summarize(name, c?.payload), toolUseId: id });

@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
 import type { OpsResources, ResourceRun, ResourceWait } from "@switchboard/protocol";
-import { atLabel, consumerRows, latestAnswer, memoryLine, runOwner, since, waitLine, watchResources } from "./resources.ts";
+import { atLabel, consumerRows, etaLine, latestAnswer, memoryLine, runOwner, since, typicalLabel, verdictLabel, waitLine, watchResources } from "./resources.ts";
 
 const MB = 1024 * 1024;
 const GB = 1024 * MB;
 const memory: NonNullable<OpsResources["memory"]> = { availableBytes: 1 * GB, totalBytes: 3.7 * GB, swapUsedBytes: 1.1 * GB, floorBytes: 1.5 * GB };
-const run = (o: Partial<ResourceRun>): ResourceRun => ({ pid: 1, name: "local-ci 3320", cwd: "/w", taskId: "t1", taskTitle: "キャッシュの読みを直す", queuedAt: "2026-11-03T10:00:00Z", startedAt: "2026-11-03T10:00:00Z", ...o });
-const wait = (o: Partial<ResourceWait>): ResourceWait => ({ pid: 2, name: "review codex", cwd: "/w", taskId: "t2", taskTitle: "リソース画面の実装", queuedAt: "2026-11-03T10:05:00Z", reason: "slot", ...o });
+const run = (o: Partial<ResourceRun>): ResourceRun => ({ pid: 1, name: "local-ci 3320", cwd: "/w", taskId: "t1", taskTitle: "キャッシュの読みを直す", queuedAt: "2026-11-03T10:00:00Z", startedAt: "2026-11-03T10:00:00Z", typicalMs: null, samples: 0, verdict: "none", ...o });
+const wait = (o: Partial<ResourceWait>): ResourceWait => ({ pid: 2, name: "review codex", cwd: "/w", taskId: "t2", taskTitle: "リソース画面の実装", queuedAt: "2026-11-03T10:05:00Z", reason: "slot", typicalMs: null, samples: 0, ...o });
 
 test("resources: a slot wait names the holder's Task and run, a memory wait the free memory and the floor", () => {
   expect(waitLine(wait({}), [run({})], memory)).toBe("枠: キャッシュの読みを直す の local-ci 3320");
@@ -87,4 +87,22 @@ test("resources: an answer older than the one shown is dropped; slow answers tha
   expect(o.take(b)).toBe(false); // came after a newer one
   const d = o.ask();
   expect(o.take(d)).toBe(true);
+});
+
+test("resources: the usual time and the verdict of a run", () => {
+  expect(typicalLabel(run({ typicalMs: 14 * 60_000, samples: 28 }))).toBe("14 分 · 28 件");
+  expect(typicalLabel(wait({ typicalMs: 75 * 60_000, samples: 3 }))).toBe("1 時間 15 分 · 3 件");
+  expect(typicalLabel(wait({ typicalMs: null, samples: 2 }))).toBe("実績なし"); // fewer than 3: no median
+  expect(verdictLabel(run({ verdict: "none" }))).toBe("実績なし");
+  expect(verdictLabel(run({ verdict: "normal" }))).toBe("普段どおり");
+  expect(verdictLabel(run({ verdict: "long" }))).toBe("普段の 2 倍より長い");
+});
+
+test("resources: eta line", () => {
+  expect(etaLine({ etaMs: 38 * 60_000, unknown: 0 }, 2)).toEqual({ value: "約 38 分", note: null });
+  expect(etaLine({ etaMs: 38 * 60_000, unknown: 1 }, 3)).toEqual({ value: "約 38 分", note: "実績の無い 1 件を除く" });
+  expect(etaLine({ etaMs: 20_000, unknown: 0 }, 1)).toEqual({ value: "1 分以内", note: null });
+  expect(etaLine({ etaMs: 0, unknown: 1 }, 2)).toEqual({ value: "1 分以内", note: "実績の無い 1 件を除く" }); // the known one is past its median
+  expect(etaLine({ etaMs: 0, unknown: 3 }, 3)).toEqual({ value: "実績なし", note: "実績の無い 3 件" }); // nothing known: not 「1 分以内」
+  expect(etaLine({ etaMs: null, unknown: 0 }, 0)).toEqual({ value: "待ちはありません", note: null }); // nothing running or waiting
 });

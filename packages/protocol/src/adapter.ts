@@ -139,6 +139,8 @@ export interface RunnerDetection {
  */
 export interface RunnerAdapter {
   readonly id: RunnerId;
+  /** The name to show when it is not the id's own (a custom runner's label, docs/design/custom-adapter.md). */
+  readonly label?: string;
   /** Permission modes this runner offers, in display order. Omit / empty when the runner has no such knob (DAK). */
   readonly permissionModes?: PermissionModeOption[];
   /** Mode used when StartOptions.permissionMode is unset — the same one the runner's own terminal starts in. */

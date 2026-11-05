@@ -22,7 +22,7 @@
  * `unavailable` / `forbidden` that was open is asked again by every full import, so one that comes back is seen.
  */
 import { existsSync } from "node:fs";
-import type { BacklogCommentData, BacklogErrorKind, BacklogIssueData, BacklogPullRequestData, BacklogItem, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogSource } from "@switchboard/protocol";
+import type { Backlog, BacklogCommentData, BacklogErrorKind, BacklogIssueData, BacklogPullRequestData, BacklogItem, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogSource } from "@switchboard/protocol";
 import type { BacklogSnapshotEntry, Db } from "./db.ts";
 import { BacklogError, backlogRepoOf, prereqsOf, projectOf, readStoredBacklog, syncsGithub, waitsOf, type BacklogWorkspace, type GhRunner } from "./backlog.ts";
 import { linkedIssues } from "../../../scripts/task-paths.ts";
@@ -462,6 +462,8 @@ export interface StoredBacklog {
   /** When the last complete import was stored (ms); null = never imported. */
   fetchedAt: number | null;
   items: BacklogItem[];
+  /** Its local changes (#2485, readStoredBacklog); absent where none are read. */
+  changes?: Backlog["changes"];
   /** An import of the workspace is under way. */
   syncing: boolean;
   /** Why the last import failed (or is not asked, during a limit); null = it succeeded. */

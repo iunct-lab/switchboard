@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import type { Artifact } from "@switchboard/protocol";
-import { api } from "../api.ts";
-import { pickArtifact, viewOf } from "../artifacts.ts";
+import { api, apiRaw } from "../api.ts";
+import { isMarkdown, pickArtifact, viewOf } from "../artifacts.ts";
+import { Markdown, MdViewToggle } from "./Markdown.tsx";
+import { useMdView } from "../mdView.ts";
+import { createBridge } from "../scratchBridge.ts";
 
 export const UNDO_MS = 5000;
 /** A fetched view url is used again for this long (the daemon's key lasts an hour). */
@@ -155,6 +158,8 @@ export function Artifacts(props: { taskId: string; openId?: string; /** bumped b
 export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: () => void }) {
   const { a } = props;
   const how = viewOf(a);
+  const md = isMarkdown(a);
+  const [mdView] = useMdView();
   const [url, setUrl] = useState<string | null>(null);
   const [text, setText] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -188,6 +193,20 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
       removeEventListener("keydown", onKey);
     };
   }, [full]);
+  // The artifact bridge (docs/design/scratch-apps.md): the frame stays opaque; a GET /api it posts is read here and
+  // answered to that frame only — a message from any other window or another artifact's frame is ignored.
+  const inlineFrame = useRef<HTMLIFrameElement>(null);
+  const fullFrame = useRef<HTMLIFrameElement>(null);
+  useEffect(() => {
+    const bridge = createBridge({
+      frames: () => [inlineFrame.current?.contentWindow, fullFrame.current?.contentWindow].filter(Boolean),
+      read: (path) => apiRaw(path),
+      reply: (to, result) => (to as Window).postMessage(result, "*"), // an opaque origin can only be named as "*"; the window is fixed to the asker
+    });
+    const onMessage = (e: MessageEvent) => void bridge({ source: e.source, data: e.data });
+    addEventListener("message", onMessage);
+    return () => removeEventListener("message", onMessage);
+  }, []);
   // A view key lasts an hour (#1782): the tab stays mounted, so ask again when it is shown after a long time away.
   const keyAt = useRef(0);
   useEffect(() => {
@@ -243,10 +262,16 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
     }
   };
 
+  // A .md in the preview (#3677) once its text is read; everything else (and the switch on テキスト) as it was.
+  const textBody = md && mdView === "preview" && text !== null
+    ? <div className="art-text"><Markdown text={text} /></div>
+    : <pre className="art-text">{text ?? "読み込み中…"}</pre>;
+
   return (
     <div className="art-body">
       <div className="art-meta hint">
         <span className="mono" title={a.source}>{a.source}</span>
+        {md && <MdViewToggle />}
         {a.kind !== "url" && how !== "external" && url && (
           <button className="art-full-open" onClick={openFull}>
             全画面
@@ -271,9 +296,9 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
           <p className="muted">外部のリンクは切れることがあります。</p>
         </div>
       )}
-      {a.kind !== "url" && how === "frame" && url && !full && <iframe className="art-frame" title={a.title} sandbox="allow-scripts" src={url} />}
+      {a.kind !== "url" && how === "frame" && url && !full && <iframe ref={inlineFrame} className="art-frame" title={a.title} sandbox="allow-scripts" src={url} />}
       {a.kind !== "url" && how === "image" && url && <img className="art-image" alt={a.title} src={url} />}
-      {a.kind !== "url" && how === "text" && <pre className="art-text">{text ?? "読み込み中…"}</pre>}
+      {a.kind !== "url" && how === "text" && textBody}
       {full && url && (
         <div className="art-full" role="dialog" aria-modal="true" aria-label={`${a.title}（全画面）`}>
           <div className="art-full-bar">
@@ -283,17 +308,18 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
             <span className="art-full-title" title={a.source}>
               {a.title}
             </span>
+            {md && <MdViewToggle />}
             <button className="ghost" onClick={() => openFresh(false)}>
               新しいタブ
             </button>
           </div>
-          {how === "frame" && <iframe className="art-frame" title={a.title} sandbox="allow-scripts" src={url} />}
+          {how === "frame" && <iframe ref={fullFrame} className="art-frame" title={a.title} sandbox="allow-scripts" src={url} />}
           {how === "image" && (
             <div>
               <img className="art-image" alt={a.title} src={url} />
             </div>
           )}
-          {how === "text" && <pre className="art-text">{text ?? "読み込み中…"}</pre>}
+          {how === "text" && textBody}
         </div>
       )}
       {a.kind !== "url" && how === "external" && url && (

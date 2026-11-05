@@ -74,9 +74,9 @@ test("a comment made here keeps its seq across the send (#3069)", () => {
 
 test("a workspace never imported answers no items with no fetchedAt — not an empty list as if read", () => {
   const ws = db.upsertWorkspace({ name: "app", path: "/Users/dev/app", kind: "repo" });
-  expect(readStoredBacklog(db, ws)).toEqual({ fetchedAt: null, items: [] });
+  expect(readStoredBacklog(db, ws)).toEqual({ fetchedAt: null, items: [], changes: [] });
   db.setWorkspaceBacklogSource(ws.id, SOURCE); // a source with no complete import yet
-  expect(readStoredBacklog(db, ws)).toEqual({ fetchedAt: null, items: [] });
+  expect(readStoredBacklog(db, ws)).toEqual({ fetchedAt: null, items: [], changes: [] });
 });
 
 test("stages, Project fields of the workspace's Project and Task counts come from the stored records", () => {
@@ -227,7 +227,7 @@ test("the Project owner is compared without case; changing the workspace's Proje
   const ws = imported([issue(3, ["type:pbi"]), item(3, { Status: "Ready" }, "Acme")]);
   expect(byNumber(ws)[3]!.stage).toBe("ready");
   db.setWorkspaceProjectVar(ws.id, "OTHER_PROJECT_URL");
-  expect(readStoredBacklog(db, ws)).toEqual({ fetchedAt: null, items: [] });
+  expect(readStoredBacklog(db, ws)).toEqual({ fetchedAt: null, items: [], changes: [] });
 });
 
 test("a database restored from a backup (snapshotTo) answers the same backlog and questions", () => {

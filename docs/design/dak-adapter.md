@@ -1,10 +1,12 @@
 # DAK adapter — ADK REST `/run_sse` + Workspace MCP
 
-Issue #19, proposal §3 (runner adapters) and §6 Phase 2. Decentralized-Agent-Kit's agent is a Google ADK app in a container (`agent:8000`, `adk web --a2a`). Switchboard does not run it, bundle it or speak A2A; it is an ADK REST client. Recorded fixtures (outside Git; record your own outside Git with the `runner-adapter-recording` skill; `bun scripts/fixtures.ts fetch` works only in a clone with the private history): `packages/adapters/dak/fixtures/*.sse` (DAK @ e966c05, google-adk 2.x, local llama.cpp model); a deterministic stand-in for tests: `fixtures/fake-adk.ts`.
+Issue #19, proposal §3 (runner adapters) and §6 Phase 2. Decentralized-Agent-Kit's agent is a Google ADK app in a container (`agent:8000`, `adk web --a2a`). Switchboard does not run it, bundle it or speak A2A; it is an ADK REST client. Recorded fixtures (outside Git; record your own outside Git with the `runner-adapter-recording` skill; `bun scripts/fixtures.ts fetch` works only in a clone with the private history): `packages/adapters/dak/fixtures/*.sse` (DAK @ e966c05, google-adk 2.x, local llama.cpp model); a deterministic stand-in for tests: `packages/adapters/adk/fixtures/fake-adk.ts`.
 
 ## Enabling
 
 DAK is off by default. The daemon registers the adapter only when `SWITCHBOARD_DAK_URL` is set to a non-empty value (for example `http://127.0.0.1:8000`, where `docker compose up` in the Decentralized-Agent-Kit repository serves its agent). Without it DAK is not a runner: it is absent from `/api/health` and `/api/settings` `runners`, from the startup log, and from the runner choices on Home, in Settings and in schedules (a runner already saved there, such as an existing schedule's, stays selectable for that value), and Home offers no shadow toggle (Settings keeps its toggle only while a saved shadow default of `dak` exists, so it can be switched off).
+
+DAK is one ADK server among those the daemon registers at start (`docs/design/custom-adapter.md`): the generic ADK adapter with the id `dak`, the label `DAK`, the app `dak_agent` and the artifacts starting with `tool_output_` left out. The variable is its only record. It is not copied into the list of ADK servers saved in Settings (those run as `custom:<name>`), and the reviewer switch that looks at `SWITCHBOARD_DAK_URL` keeps working as before. Like the saved servers, it is read once at start.
 
 With it set, the adapter detects the agent through `/list-apps` and everything below applies as written. An unreachable URL is reported as `unavailable` and DAK stays listed but greyed out.
 
@@ -78,6 +80,7 @@ Because DAK discovers MCP servers at boot, a per-task URL means editing the conf
 ## Verified
 
 - Real DAK stack (`docker compose up`, local llama.cpp model): text reply, three tool calls (`list_skills` → `enable_skill` → `list_files` via DAK's MCP server) — both recorded as fixtures and replayed in tests.
+- An ADK server that is not DAK (`adk api_server`, google-adk 2.13.0, 2026-11-04): both confirmation forms, an artifact, abort and resume, through the same adapter (`docs/design/custom-adapter.md`, ADK REST).
 - Docker → host: `getent hosts host.docker.internal` resolves (spike doc); the MCP endpoint answers `initialize` from a container when the daemon listens on `0.0.0.0` (manual check below).
 
 ```bash

@@ -29,7 +29,12 @@ const ending: RunnerAdapter = {
   },
 };
 
-async function boot(fake: { push?: boolean | "missing"; cloneFails?: string; hold?: Promise<void>; git?: "clone" | "fork"; renamedTo?: string } = {}) {
+/**
+ * `git: "full"` clones a real repository with branches main and dev and tag v1 from `<root>/gh/<owner>/<name>.git`;
+ * the clone reads https://github.com/ as `<root>/gh/`, so the fetch and push of an own copy (#2579) stay on disk.
+ * `mine` is what `gh api repos/me/<name>` answers (absent = 404).
+ */
+async function boot(fake: { push?: boolean | "missing"; cloneFails?: string; hold?: Promise<void>; git?: "clone" | "fork" | "full"; renamedTo?: string; mine?: "exists" | "error"; createFails?: string; createMakesNothing?: boolean } = {}) {
   root = mkdtempSync(join(tmpdir(), "switchboard.clone."));
   const home = join(root, "home");
   const repoRoot = join(root, "switchboard");
@@ -38,10 +43,33 @@ async function boot(fake: { push?: boolean | "missing"; cloneFails?: string; hol
   const calls: string[][] = [];
   const gh: GhRunner = async (args, cwd) => {
     calls.push(args);
+    if (args[0] === "api" && args[1] === "user") return { code: 0, stdout: "me\n", stderr: "" };
+    if (args[0] === "api" && args[1]!.startsWith("repos/me/") && args[3] === ".full_name") {
+      if (fake.mine === "exists") return { code: 0, stdout: `${args[1]!.slice(6)}\n`, stderr: "" };
+      return { code: 1, stdout: "", stderr: fake.mine === "error" ? "HTTP 502: Bad Gateway" : "gh: Not Found (HTTP 404)" };
+    }
+    if (args[0] === "repo" && args[1] === "create") {
+      if (fake.createFails) return { code: 1, stdout: "", stderr: fake.createFails };
+      if (!fake.createMakesNothing) expect(spawnSync("git", ["init", "-q", "--bare", join(root!, "gh", `${args[2]}.git`)]).status).toBe(0);
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    if (args[0] === "repo" && args[1] === "set-default") {
+      // what gh does: marks the remote whose URL is the repository
+      expect(spawnSync("git", ["-C", cwd, "config", "remote.origin.gh-resolved", "base"]).status).toBe(0);
+      return { code: 0, stdout: "", stderr: "" };
+    }
     if (args[0] === "api") return fake.push === "missing" ? { code: 1, stdout: "", stderr: "HTTP 404" } : { code: 0, stdout: `${fake.push ?? true} ${fake.renamedTo ?? args[1]!.replace("repos/", "")}\n`, stderr: "" };
     if (args[0] === "repo" && args[1] === "clone") {
       await fake.hold;
       if (fake.cloneFails) return { code: 1, stdout: "", stderr: `Cloning...\n${fake.cloneFails}\n` };
+      if (fake.git === "full") {
+        const source = join(root!, "gh", `${args[2]}.git`);
+        seed(source);
+        expect(spawnSync("git", ["clone", "-q", source, args[3]!]).status).toBe(0);
+        gitOk(args[3]!, "remote", "set-url", "origin", `https://github.com/${args[2]}.git`);
+        gitOk(args[3]!, "config", `url.${join(root!, "gh")}/.insteadOf`, "https://github.com/");
+        return { code: 0, stdout: "", stderr: "" };
+      }
       mkdirSync(args[3]!);
       expect(cwd).toBe(root!);
       if (fake.git) {
@@ -98,6 +126,104 @@ test("workspace clone: an existing directory is 409 and nothing runs", async () 
 }, 30_000);
 
 const gitOut = (path: string, ...args: string[]) => spawnSync("git", ["-C", path, ...args], { encoding: "utf8" }).stdout.trim();
+
+const gitOk = (path: string, ...args: string[]) => {
+  const r = spawnSync("git", ["-C", path, "-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { encoding: "utf8" });
+  expect([args.join(" "), r.status, r.stderr]).toEqual([args.join(" "), 0, r.stderr]);
+};
+
+/** A bare repository at `bare` with branches main (checked out by a clone) and dev, and the tag v1. */
+function seed(bare: string): void {
+  const work = `${bare}.work`;
+  expect(spawnSync("git", ["init", "-q", "-b", "main", work]).status).toBe(0);
+  gitOk(work, "commit", "-q", "--allow-empty", "-m", "first");
+  gitOk(work, "tag", "v1");
+  gitOk(work, "checkout", "-q", "-b", "dev");
+  gitOk(work, "commit", "-q", "--allow-empty", "-m", "on dev");
+  gitOk(work, "checkout", "-q", "main");
+  expect(spawnSync("git", ["clone", "-q", "--bare", work, bare]).status).toBe(0);
+}
+
+const refsOf = (bare: string) => gitOut(bare, "for-each-ref", "--format=%(refname)").split("\n").sort();
+
+test("workspace clone: ownCopy creates a private repository, pushes every branch and tag, and makes it origin and the default", async () => {
+  const t = await boot({ push: false, git: "full" });
+  expect((await t.send("POST", "/api/workspaces", { repo: "other/lib", ownCopy: true })).status).toBe(202);
+  await t.until(async () => ((await t.send("GET", "/api/workspaces")).body as Workspace[]).some((w) => w.name === "lib"));
+  const path = join(root!, "lib");
+  // asked who you are and whether the name is free before cloning, created private after the clone
+  const order = t.calls.map((a) => a.slice(0, 2).join(" "));
+  expect(order).toEqual(["api repos/other/lib", "api user", "api repos/me/lib", "repo clone", "repo create", "repo set-default"]);
+  expect(t.calls.find((a) => a[1] === "create")).toEqual(["repo", "create", "me/lib", "--private"]);
+  expect(t.calls.find((a) => a[1] === "set-default")).toEqual(["repo", "set-default", "me/lib"]);
+  // as configured (git remote -v would show the test's insteadOf)
+  expect(gitOut(path, "config", "--get-regexp", "^remote\\..*\\.url$").split("\n")).toEqual([
+    "remote.upstream.url https://github.com/other/lib.git",
+    "remote.origin.url https://github.com/me/lib.git",
+  ]);
+  expect(gitOut(path, "config", "--get-all", "ops-kit.noWrite")).toBe("other/lib");
+  expect(gitOut(path, "config", "remote.origin.gh-resolved")).toBe("base");
+  // every branch tracks the copy: a plain git push goes there, not to upstream
+  expect(gitOut(path, "for-each-ref", "--format=%(refname:short) %(upstream:short)", "refs/heads").split("\n").sort()).toEqual(["dev origin/dev", "main origin/main"]);
+  // the copy has what the original has: every branch and tag
+  expect(refsOf(join(root!, "gh", "me/lib.git"))).toEqual(refsOf(join(root!, "gh", "other/lib.git")));
+  expect(refsOf(join(root!, "gh", "me/lib.git"))).toEqual(["refs/heads/dev", "refs/heads/main", "refs/tags/v1"]);
+  const ws = ((await t.send("GET", "/api/workspaces")).body as Workspace[]).find((w) => w.name === "lib")!;
+  expect([ws.backlog, ws.upstream]).toEqual(["github", "other/lib"]);
+  expect((await t.send("GET", "/api/workspaces/clones")).body).toEqual([]);
+}, 30_000);
+
+test("workspace clone: ownCopy with an existing repository of yours is 409 and creates nothing", async () => {
+  const t = await boot({ push: false, git: "full", mine: "exists" });
+  const r = await t.send("POST", "/api/workspaces", { repo: "other/lib", ownCopy: true });
+  expect(r.status).toBe(409);
+  expect((r.body as { error: string }).error).toContain("me/lib が既にあります");
+  expect(t.calls.filter((a) => a[0] === "repo")).toEqual([]);
+  expect(existsSync(join(root!, "lib"))).toBe(false);
+  expect((await t.send("GET", "/api/workspaces/clones")).body).toEqual([]);
+  // an answer that is not a 404 is not taken as free either
+  const u = await boot({ push: false, git: "full", mine: "error" });
+  expect((await u.send("POST", "/api/workspaces", { repo: "other/lib", ownCopy: true })).status).toBe(502);
+  expect(u.calls.filter((a) => a[0] === "repo")).toEqual([]);
+}, 30_000);
+
+test("workspace clone: ownCopy on a repository you can push to is 400", async () => {
+  const t = await boot({ git: "full" });
+  expect((await t.send("POST", "/api/workspaces", { repo: "acme/app", ownCopy: true })).status).toBe(400);
+  expect(t.calls.filter((a) => a[0] === "repo" || a[1] === "user")).toEqual([]);
+  expect((await t.send("GET", "/api/workspaces/clones")).body).toEqual([]);
+  for (const body of [{ repo: "other/lib", ownCopy: "yes" }, { path: root!, ownCopy: true }]) expect((await t.send("POST", "/api/workspaces", body)).status).toBe(400);
+}, 30_000);
+
+test("workspace clone: ownCopy keeps the backlog choice", async () => {
+  const t = await boot({ push: false, git: "full" });
+  expect((await t.send("POST", "/api/workspaces", { repo: "other/lib", ownCopy: true, backlog: "switchboard" })).status).toBe(202);
+  await t.until(async () => ((await t.send("GET", "/api/workspaces")).body as Workspace[]).some((w) => w.name === "lib"));
+  const ws = ((await t.send("GET", "/api/workspaces")).body as Workspace[]).find((w) => w.name === "lib")!;
+  expect([ws.backlog, ws.upstream]).toEqual(["switchboard", "other/lib"]);
+  expect(gitOut(join(root!, "lib"), "config", "remote.origin.url")).toBe("https://github.com/me/lib.git");
+}, 30_000);
+
+test("workspace clone: ownCopy that fails is failed with the reason, names what it made, and registers nothing", async () => {
+  const t = await boot({ push: false, git: "full", createFails: "HTTP 422: name already exists on this account" });
+  expect((await t.send("POST", "/api/workspaces", { repo: "other/lib", ownCopy: true })).status).toBe(202);
+  await t.until(async () => ((await t.send("GET", "/api/workspaces/clones")).body as WorkspaceClone[]).some((c) => c.state === "failed"));
+  const failed = ((await t.send("GET", "/api/workspaces/clones")).body as WorkspaceClone[])[0]!.error!;
+  expect(failed).toContain("gh repo create: HTTP 422");
+  expect(failed).not.toContain("作成済み");
+  expect(((await t.send("GET", "/api/workspaces")).body as Workspace[]).some((w) => w.name === "lib")).toBe(false);
+}, 30_000);
+
+test("workspace clone: ownCopy whose push fails after the create names the repository left behind", async () => {
+  const t = await boot({ push: false, git: "full", createMakesNothing: true });
+  expect((await t.send("POST", "/api/workspaces", { repo: "other/lib", ownCopy: true })).status).toBe(202);
+  await t.until(async () => ((await t.send("GET", "/api/workspaces/clones")).body as WorkspaceClone[]).some((c) => c.state === "failed"));
+  const failed = ((await t.send("GET", "/api/workspaces/clones")).body as WorkspaceClone[])[0]!.error!;
+  expect(failed).toContain("git push");
+  expect(failed).toContain("me/lib は作成済みです");
+  expect(t.calls.some((a) => a[1] === "set-default")).toBe(false);
+  expect(((await t.send("GET", "/api/workspaces")).body as Workspace[]).some((w) => w.name === "lib")).toBe(false);
+}, 30_000);
 
 test("workspace clone: a repository you cannot push to is added as a foreign workspace", async () => {
   const t = await boot({ push: false, git: "clone" });

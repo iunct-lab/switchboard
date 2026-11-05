@@ -27,6 +27,7 @@ import { RecentCheck } from "./components/RecentCheck.tsx";
 import { usePageDropGuard } from "./components/Attachments.tsx";
 import { screenLabel, type View } from "./screen.ts";
 import { pathToWrite, viewFromPath } from "./route.ts";
+import { rememberRunnerLabels } from "./runners.ts";
 import type { FeedbackTarget } from "./feedbackTarget.ts";
 
 /** The screen the URL names (#3355; /approvals is the phone app's start, #26), else Home. */
@@ -44,6 +45,8 @@ export function App() {
   // 改善要望にする (#1221): the draft the dialog opens with, from a task's evaluations
   const [feedbackPrefill, setFeedbackPrefill] = useState<FeedbackPrefill | undefined>();
   const [health, setHealth] = useState<Health | null>(null);
+  // a pill anywhere shows a custom runner by its label: read from the last health before the children render
+  rememberRunnerLabels(health?.runners);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [clones, setClones] = useState<WorkspaceClone[]>([]);
   // an older answer must not overwrite a newer one (a clone that finished while the earlier read was still on the wire)

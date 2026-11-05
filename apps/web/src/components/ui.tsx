@@ -2,11 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import type { GithubBudget, RunnerId, Task, TeleportProgress } from "@switchboard/protocol";
 import { copyText } from "../clipboard.ts";
 import { jstClock } from "../time.ts";
+import { runnerLabel } from "../runners.ts";
 
 export function RunnerPill(props: { runner: RunnerId }) {
   // a runner only a newer daemon knows still shows its id rather than an empty pill
-  const label = ({ claude: "Claude", codex: "Codex", dak: "DAK" } as Record<string, string>)[props.runner] ?? props.runner;
-  return <span className={`pill ${props.runner}`}>{label}</span>;
+  return <span className={`pill ${props.runner}`}>{runnerLabel(props.runner)}</span>;
 }
 
 /** "04:11", or "9/12 04:11" when not today — JST, like every other time the UI shows (#2028). */

@@ -405,13 +405,17 @@ export function parseArtifactFence(json: string): ArtifactFence {
   return r.success ? { ok: true, report: r.data } : { ok: false, why: `path と title の形ではありません（${r.error.issues.map((i) => `${i.path.join(".") || "本文"}: ${i.message}`).join("; ").slice(0, 200)}）` };
 }
 
+/** How a throwaway page reads the API through the screen (#3674): the copy in the running code's own tree (a release carries `docs/` too). */
+export const SCRATCH_APPS_DOC = join(import.meta.dir, "../../../docs/design/scratch-apps.md");
+
 /** What every runner start is told (#1778): how to hand a report over. Short: it goes before the prompt, after the stop report's paragraph. */
-export function artifactPrompt(): string {
+export function artifactPrompt(scratchDoc = SCRATCH_APPS_DOC): string {
   return [
     "[Switchboard: 成果物の登録]",
     "レポートや図など利用者に見せたいファイルを作ったら、返答の中に次のフェンスを書いてください。Switchboard がその Task の成果物として写し、画面で開けるようにします（パスは絶対パスか作業ディレクトリからの相対パス。題は任意。HTML が画像や CSS を相対パスで参照するならフォルダを登録する。同じパスをもう一度登録すると中身が新しくなる）:",
     "```switchboard-artifact",
     '{"path":"<ファイルかフォルダ>","title":"<題>"}',
     "```",
+    `Switchboard の API を読んで動く使い捨ての画面を作るなら ${scratchDoc} を読む。`,
   ].join("\n");
 }

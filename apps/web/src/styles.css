@@ -151,6 +151,28 @@ select.model-select { max-width: 100%; min-width: 0; font-size: 12px; }
 .transcript .jump-latest { position: sticky; bottom: 8px; align-self: center; z-index: 1; background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 6px 14px; box-shadow: 0 2px 8px rgba(0,0,0,.15); }
 .msg .who { font: 400 10px/1.4 var(--mono); color: var(--ink3); margin-bottom: 2px; display: flex; gap: 8px; align-items: center; }
 .msg .tx { white-space: pre-wrap; word-break: break-word; }
+/* Markdown preview (Markdown.tsx): undoes the reply's pre-wrap (line breaks come as <br>), keeps code blocks pre-wrap. */
+.md { white-space: normal; overflow-wrap: anywhere; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p, .md ul, .md ol, .md pre, .md blockquote, .md table { margin: 0 0 8px; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 14px 0 6px; font: 700 13px/1.4 var(--sans); letter-spacing: normal; text-transform: none; color: var(--ink); }
+.md h1 { font-size: 18px; } .md h2 { font-size: 16px; } .md h3 { font-size: 14px; }
+.md h6 { color: var(--ink2); }
+.md ul, .md ol { padding-left: 22px; }
+.md li > ul, .md li > ol { margin: 2px 0; }
+.md code { background: var(--bg2); border-radius: 3px; padding: 0 4px; font-size: 12px; }
+.md pre { background: var(--bg2); border: 1px solid var(--line2); border-radius: 4px; padding: 8px 10px; overflow-x: auto; white-space: pre-wrap; }
+.md pre code { background: none; padding: 0; }
+.md blockquote { padding: 0 0 0 10px; border-left: 3px solid var(--line); color: var(--ink2); }
+.md hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
+.md table { border-collapse: collapse; display: block; max-width: 100%; overflow-x: auto; }
+.md th, .md td { border: 1px solid var(--line); padding: 3px 8px; vertical-align: top; overflow-wrap: normal; }
+.md th { background: var(--bg2); font-weight: 600; text-align: left; }
+.md a { color: var(--acc); }
+.md-view { display: inline-flex; gap: 2px; }
+.md-view button { padding: 3px 8px; }
+.md-view button.on { background: var(--sel); color: var(--ink); }
 .msg.user .tx { background: var(--panel); border: 1px solid var(--line2); border-radius: 4px; padding: 8px 10px; }
 .tool { border: 1px solid var(--line2); border-radius: 4px; background: var(--bg2); }
 .tool .tool-row { width: 100%; display: flex; gap: 10px; align-items: center; border: 0; background: transparent; padding: 5px 10px; font-family: var(--mono); font-size: 11px; color: var(--ink2); text-align: left; }
@@ -245,6 +267,7 @@ button.copy { font: 400 10px/1.4 var(--mono); padding: 2px 6px; }
 .staged .actions { display: flex; gap: 6px; margin: 4px 0 8px; }
 
 .subtabs { margin-left: auto; display: flex; gap: 2px; }
+.task .task-tabs { margin-left: auto; display: flex; align-items: center; gap: 12px; }
 .subtabs button { border: 0; background: transparent; padding: 4px 10px; border-radius: 4px; color: var(--ink3); }
 .subtabs button.on { background: var(--sel); color: var(--ink); }
 .diffs { overflow-y: auto; padding: 8px 0; }
@@ -465,6 +488,13 @@ label.toggle.off { opacity: .45; cursor: default; }
      box, long lines scroll inside their own box, and every button is a 44px target. */
   .task .task-head { padding-top: 8px; }
   .task .subtabs { overflow-x: auto; }
+  /* The switch takes no line of its own (2026-11-04): the block opens into the head, and the switch, as small as
+     会話をコピー, goes where it fits — after 詳細 on its row, or else at the left of the tabs' row (the tabs scroll inside
+     their own box). The desktop keeps the block (send's layoutShift). */
+  .task .task-head > .task-tabs { display: contents; }
+  .task .task-head .md-view { flex: none; white-space: nowrap; }
+  .task .task-head .md-view button { font: 400 10px/1.4 var(--mono); padding: 2px 6px; }
+  .task .task-tabs .subtabs { min-width: 0; max-width: 100%; }
   .transcript, .composer, .perm { max-width: 100%; }
   .perm, .perm.question { flex-direction: column; align-items: stretch; }
   .perm .actions button { min-height: 44px; flex: 1; }
@@ -593,3 +623,7 @@ table.evals-table td button.open { font: inherit; color: inherit; padding: 0; te
 .resources-stat .value { font: 500 22px var(--mono); }
 .resources-stat .value.warn { color: var(--amber); }
 .resources td button.link { text-align: left; padding: 0; }
+
+/* a local change's row is a button (#2486): laid out as the other rows, not centered */
+.backlog .change-row { width: 100%; text-align: left; justify-content: flex-start; }
+.backlog .change-detail { padding: 4px 0 12px 12px; }

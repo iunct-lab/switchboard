@@ -1,13 +1,16 @@
-import { CloudSessionRef, HumanEval, JudgeEval, RuleEval, SizeClass } from "@switchboard/protocol";
+import { CloudSessionRef, CustomRunner, HumanEval, JudgeEval, RuleEval, SizeClass } from "@switchboard/protocol";
 import { Database } from "bun:sqlite";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import type { AgentEvent, AskAnswerResult, Artifact, Attachment, BacklogAction, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogRepositorySync, BacklogSource, CheckRun, CreatedIssue, EvalSource, EvalsListRow, EventEnvelope, HistorySession, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerRow, LedgerSummary, LedgerTaskRow, LlmSuggestion, LoadKind, Journey, PerfSample, PerfSummaryRow, ReportRow, RoutingLogRow, RoutingStats, RunnerId, RunnerStats, Schedule, StagedChange, StopRecord, Task, TaskEvals, TaskOrigin, TaskOutcome, TaskStatus, Workspace, WorkspaceSweep } from "@switchboard/protocol";
+import type { AgentEvent, AskAnswerResult, Artifact, Attachment, BacklogAction, Provenance, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogRepositorySync, BacklogSource, CheckRun, CreatedIssue, EvalSource, EvalsListRow, EventEnvelope, HistorySession, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerRow, LedgerSummary, LedgerTaskRow, LlmSuggestion, LoadKind, Journey, PerfSample, PerfSummaryRow, ReportRow, RoutingLogRow, RoutingStats, RunnerId, RunnerStats, Schedule, StagedChange, StopRecord, Task, TaskEvals, TaskOrigin, TaskOutcome, TaskStatus, Workspace, WorkspaceSweep } from "@switchboard/protocol";
 import { teleportWorktreePath } from "./config.ts";
 import { MAX_STOP_RESUMES, planResumeAfterStop } from "./interrupted.ts";
 import { canTransition, InvalidTaskTransitionError, outcomeOnStatus } from "./task-status.ts";
 import { backlogFieldValue, conflictRevision, mergeBacklogField, sameBacklogValue } from "./backlog-merge.ts";
 import type { ReportedTotal } from "./pricing.ts";
+
+/** The `settings` row of the ADK servers added in Settings (see Db.getCustomRunners). */
+export const CUSTOM_RUNNERS_KEY = "customRunners";
 
 /** One record of an import (#885): `remote` is read only when `fetchState` is `fetched`. */
 export type BacklogSnapshotEntry = BacklogRecord extends infer R ? (R extends BacklogRecord ? Pick<R, "objectKind" | "externalId" | "remote" | "fetchState"> : never) : never;
@@ -30,9 +33,10 @@ export type BacklogOperationStatus = "pending" | "sending" | "unknown" | "confli
 /**
  * What the read after a write found in GitHub's edit history (#1329): another login's edit of the field between the
  * check and the write, which the write replaced. `value` absent = the revision's content is gone from the history (the
- * editor and the time stay), or `unreadable` = why the history could not be read (then nothing is known).
+ * editor and the time stay), or `unreadable` = why the history could not be read (then nothing is known); `since` = the
+ * check read's time the history is read from, so a later send can read it again (#3518).
  */
-export interface BacklogOverwritten { value?: unknown; editor: string | null; at: string | null; unreadable?: string }
+export interface BacklogOverwritten { value?: unknown; editor: string | null; at: string | null; unreadable?: string; since?: string }
 export interface BacklogOperation extends BacklogRepositoryKey {
   seq: number;
   id: string;
@@ -68,7 +72,7 @@ export type BacklogLocalEntry = { objectKind: BacklogObjectKind; externalId: str
 
 /**
  * Applies a `set` operation's `value` to a copy of a record's data (#886): an Issue's `title` / `body` / `state` /
- * `stateReason` / `milestone` / `parent`, or `label:<name>` (true = on, false = off); a Project item's `field:<name>`. `member` (a
+ * `stateReason` / `milestone` / `parent` / `change` (a local change's merge, laid over it: #2485), or `label:<name>` (true = on, false = off); a Project item's `field:<name>`. `member` (a
  * Project item in the Project or not) changes no value. Anything else is refused.
  */
 export function applyBacklogField(kind: BacklogObjectKind, data: unknown, field: string, value: unknown): unknown {
@@ -78,6 +82,8 @@ export function applyBacklogField(kind: BacklogObjectKind, data: unknown, field:
     const name = field.slice("label:".length);
     d.labels = value ? [...new Set([...(d.labels ?? []), name])] : (d.labels ?? []).filter((l: string) => l !== name);
   } else if (field.startsWith("field:")) d.fields = { ...d.fields, [field.slice("field:".length)]: value };
+  // a local change's merge (#2485) is laid over its branches
+  else if (field === "change") d.change = { ...d.change, ...(value as object) };
   else {
     // a close is completed until a `stateReason` operation after it says otherwise, as GitHub answers it; an open Issue
     // has no reason. A state it already has changes nothing (#3146)
@@ -88,7 +94,7 @@ export function applyBacklogField(kind: BacklogObjectKind, data: unknown, field:
 }
 
 const isBacklogField = (kind: BacklogObjectKind, field: string | undefined): field is string =>
-  !!field && (kind === "issue" ? /^label:./.test(field) || ["title", "body", "state", "stateReason", "milestone", "parent"].includes(field) : kind === "project-item" && (/^field:./.test(field) || field === "member"));
+  !!field && (kind === "issue" ? /^label:./.test(field) || ["title", "body", "state", "stateReason", "milestone", "parent", "change"].includes(field) : kind === "project-item" && (/^field:./.test(field) || field === "member"));
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -99,7 +105,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   scope TEXT NOT NULL, status TEXT NOT NULL, runner_session_id TEXT, model TEXT, routing TEXT, budget_usd REAL, schedule_id TEXT,
   permission_mode TEXT, effort TEXT, origin TEXT NOT NULL DEFAULT 'switchboard', resume_at INTEGER, resume_reason TEXT, resume_window TEXT, resume_since INTEGER, resume_planned_at INTEGER, shadow_of TEXT, shadow_stopped INTEGER NOT NULL DEFAULT 0, workspace_reason TEXT,
   outcome TEXT NOT NULL DEFAULT 'unknown', reviewed_at INTEGER, archived_at INTEGER, judged_result TEXT, judged_reason TEXT, judged_by TEXT, judging_at INTEGER, stage_issue INTEGER, stage_action TEXT,
-  status_at INTEGER NOT NULL, title_pending INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  status_at INTEGER NOT NULL, title_pending INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, provenance TEXT
 );
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY, json TEXT NOT NULL
@@ -886,6 +892,16 @@ export class Db {
     return r ? rowToTask(r) : null;
   }
 
+  /** The task's provenance (K1), written once right after creation; a task from before it was recorded has none. */
+  setTaskProvenance(id: string, p: Provenance): void {
+    this.sqlite.query("UPDATE tasks SET provenance = ? WHERE id = ?").run(JSON.stringify(p), id);
+  }
+
+  getTaskProvenance(id: string): Provenance | null {
+    const r = this.sqlite.query("SELECT provenance FROM tasks WHERE id = ?").get(id) as { provenance: string | null } | null;
+    return r?.provenance ? safeJson<Provenance | null>(r.provenance, null) : null;
+  }
+
   /** Tasks changed at or after `ms` (#935), newest first. */
   listTasksUpdatedSince(ms: number): Task[] {
     return this.sqlite.query("SELECT * FROM tasks WHERE updated_at >= ? ORDER BY updated_at DESC").all(ms).map(rowToTask);
@@ -1258,6 +1274,24 @@ export class Db {
 
   setSetting(key: string, value: unknown) {
     this.sqlite.query("INSERT INTO settings (key, json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET json = excluded.json").run(key, JSON.stringify(value));
+  }
+
+  /**
+   * The ADK servers added in Settings (docs/design/custom-adapter.md), under their own key and not in `Settings`: an
+   * older daemon that reads `Settings` and writes it back drops the fields it does not know, but leaves this row alone.
+   * A row that does not parse reads as no servers; one entry that does not parse is left out.
+   */
+  getCustomRunners(): CustomRunner[] {
+    const raw = this.getSetting<unknown>(CUSTOM_RUNNERS_KEY, []);
+    if (!Array.isArray(raw)) return [];
+    return raw.flatMap((x) => {
+      const r = CustomRunner.safeParse(x);
+      return r.success ? [r.data] : [];
+    });
+  }
+
+  setCustomRunners(list: CustomRunner[]) {
+    this.setSetting(CUSTOM_RUNNERS_KEY, list);
   }
 
   /* ---------- events ---------- */
@@ -1848,6 +1882,7 @@ function migrate(db: Database) {
   if (!cols.has("judged_by")) db.exec("ALTER TABLE tasks ADD COLUMN judged_by TEXT");
   if (!cols.has("judging_at")) db.exec("ALTER TABLE tasks ADD COLUMN judging_at INTEGER"); // #1139
   if (!cols.has("title_pending")) db.exec("ALTER TABLE tasks ADD COLUMN title_pending INTEGER NOT NULL DEFAULT 0"); // #491: rows from before keep their title
+  if (!cols.has("provenance")) db.exec("ALTER TABLE tasks ADD COLUMN provenance TEXT"); // docs/design/process-kernel.md K1: what the task was started with, JSON, written once
   // #1431: where a finished task's event bodies went (S3 key, when, how many rows); the rows stay, as skeletons.
   if (!cols.has("events_archive_key")) db.exec("ALTER TABLE tasks ADD COLUMN events_archive_key TEXT");
   if (!cols.has("events_archived_at")) db.exec("ALTER TABLE tasks ADD COLUMN events_archived_at INTEGER");

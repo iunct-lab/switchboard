@@ -321,3 +321,19 @@ test("skills: the backlog is read and written only through ops-kit backlog (#307
   expect(review).toContain('ops-kit backlog view "$PBI" --fresh');
   expect(review).not.toContain("BACKLOG_WORKSPACE");
 });
+
+test("skills: the five delivery skills say what a workspace without a remote does instead of PRs (#2490)", () => {
+  const read = (name: string) => readFileSync(join(skills, name, "SKILL.md"), "utf8");
+  for (const name of ["task-to-pr", "cross-runner-review", "review-triage-and-merge", "pbi-complete", "stacked-pr-delivery"]) {
+    expect(`${name}: ${read(name).includes("**ローカルの変更では**")}`).toBe(`${name}: true`);
+  }
+  // made with the kit's backlog, judged and run by the change's number, merged by the merge script
+  expect(read("task-to-pr")).toContain("ops-kit backlog create --title \"<題>\" --body-file \"$W/pr.md\" --head <枝> --base main");
+  for (const name of ["review-triage-and-merge", "pbi-complete"]) {
+    expect(read(name)).toContain("<マージ判定> --change <変更>");
+    expect(read(name)).toContain("local-merge.ts <変更>");
+  }
+  expect(read("pbi-complete")).toContain("<ローカル CI> --change <変更>");
+  expect(read("cross-runner-review")).toContain("ops-kit backlog comment <変更> --body-file");
+  expect(read("stacked-pr-delivery")).toContain("積まない");
+});

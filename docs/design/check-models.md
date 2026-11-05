@@ -8,7 +8,8 @@ The model tables come from what the installed CLIs carry locally — no vendor A
 
 - **claude**: the model table embedded in the executable (`Bun.which("claude")`, resolved to the real file). Its entries look like `{id:"claude-opus-5-5",family:"opus",display_name:"Opus 5.5",…}`; the file (about 240 MB) is scanned chunk by chunk, never read into one string (that got the script OOM-killed on a 3.8 GB host).
 - **codex**: `codex debug models --bundled`, the table shipped in the binary. Without `--bundled` codex refreshes the list over the network with the ChatGPT login, so the flag is always given. Only `visibility: "list"` entries count (`"hide"` ones are internal).
-- **the model choices** as the daemon offers them: the list saved on the settings screen, from `switchboard.db`'s settings row (read-only; the same `Settings` schema the daemon parses), else the bundled list of that runner.
+- The two table readers live in `packages/core/src/model-catalog.ts` (since 2026-11-04): this script and the settings screen's 「CLI の表を読む」 (GET `/api/settings/model-candidates`, read only when pressed — never at boot or on a timer) call the same functions.
+- **the model choices** as the daemon offers them: the list saved on the settings screen, from `switchboard.db`'s settings row (read-only; the same `Settings` schema the daemon parses), else the bundled list of that runner; and from the same row the 載せない list (`hiddenModels`), else `SHIPPED_HIDDEN_MODELS`.
 - **the price table** as the daemon layers it: the rows saved on the settings screen's モデルの価格 (the settings row's `prices`, PBI #1402) over `pricing.json` — `~/.switchboard/pricing.json` (or `$SWITCHBOARD_HOME/pricing.json`) first, then the bundled one.
 - **the ledger** in `switchboard.db`, read-only: the claude / codex model names recorded as `source = 'unpriced'` that the price table still does not price.
 - **the CLIs' versions** (#1273, request #1271): `claude --version` / `codex --version` against the npm registry's `latest` of `@anthropic-ai/claude-code` / `@openai/codex` (`PACKAGES`; one GET per runner, 10 s, no key). This is the one read that uses the network: an old CLI carries an old table, so a new model looks like "no drift" until someone notices — on 2026-10-07 that someone was the user again (#1071, Haiku 5.5, while the host's CLI sat at 2.1.289 with auto-update off). The script never updates a CLI itself: `scripts/update-clis.ts` ([cli-update.md](cli-update.md)) runs first in the same schedule, so this read sees the updated version; a CLI still behind here means the update was rolled back or failed. A CLI not on PATH is skipped here (the table line already says so); the registry not answering is reported, not counted.
@@ -17,7 +18,7 @@ The model tables come from what the installed CLIs carry locally — no vendor A
 
 ```
 <runner> stale: <ids>          offered in the UI (saved list, else bundled), not in the CLI's table (an old or mistyped id)
-<runner> unseen: <ids>         in the CLI's table, not in REVIEWED (nobody has looked at it yet)
+<runner> unseen: <ids>         in the CLI's table, neither listed nor hidden (nobody has looked at it yet)
 <runner> 価格表未整備: <ids>    offered in the UI (saved list, else bundled), priced by no row of the settings' prices or pricing.json
 unpriced (ledger) new / unknown  past unpriced names: in the CLI's table (the price table lags) / not in it (a wrong name?)
 <runner> outdated: <installed> → <latest>   the installed CLI is behind the registry (drift, exit 1)
@@ -25,7 +26,7 @@ unpriced (ledger) new / unknown  past unpriced names: in the CLI's table (the pr
 <runner> version / latest: 分からない（<why>）  `--version` failed / the registry could not be read (report only; exit unchanged)
 ```
 
-"New in the CLI" is measured against `REVIEWED` in the script — the ids a person has looked at and decided to list or leave out — not against "the newest of each family": some models are left out on purpose (`gpt-5.6-terra`), and they would otherwise be reported every day. The ledger line is report only: past rows cannot be fixed.
+"New in the CLI" is measured against the ids a person has looked at and decided to list or leave out — the model choices as above, plus the settings row's `hiddenModels` (the 載せない list of モデルの選択肢), else `SHIPPED_HIDDEN_MODELS` in `packages/core/src/model-catalog.ts` (the ids the bundled list leaves out) — not against "the newest of each family": some models are left out on purpose (`gpt-5.6-terra`), and they would otherwise be reported every day. The ledger line is report only: past rows cannot be fixed.
 
 Exit 0 = no drift / 1 = drift / 2 = cannot tell (a CLI is not installed, or its table read as empty — the CLI's format changed and the script needs fixing). The same meaning as `scripts/merge-gate.ts`.
 
@@ -49,9 +50,9 @@ The CLIs are not installed in GitHub Actions, so CI cannot run the check; on the
 ## When a request arrives
 
 - `stale`: remove or fix the old / mistyped id in モデルの選択肢 on the 設定 tab (no PR: the next run reads the saved list).
-- `unseen`: decide whether the model goes in the list (and add it in モデルの選択肢 on the 設定 tab if so), then add the id to `REVIEWED` either way.
+- `unseen`: press 「CLI の表を読む」 in モデルの選択肢 on the 設定 tab and choose 足す or 載せない for each candidate (no PR: the next run reads the saved list and 載せない list).
 - `価格表未整備`: enter the official price in モデルの価格 on the 設定 tab (no PR: the next run reads the saved prices).
 - `outdated`: only appears when update-clis rolled back, failed, or could not tell (exit 2: the registry or the rollback link was unreadable, so it changed nothing) — look for the `CLI 更新の失敗` request first (cli-update.md); with none, read the schedule's update-clis lines. Otherwise update the CLI by hand. The request's title carries the installed version only, so one open request stands while the CLI stays, whatever npm publishes meanwhile. The next run says `version: …（最新）` and, if the new table carries a model nobody reviewed, `unseen` follows.
-- Close the request once it is fixed (a `stale`, a `価格表未整備` or the list half of `unseen` on the settings screen, the rest by a PR); the next run confirms (exit 0). An `outdated` request has no PR: update the CLI, let the next run print `version: …（最新）`, then close the request by hand (the script never closes one).
+- Close the request once it is fixed (a `stale`, an `unseen` or a `価格表未整備` on the settings screen); the next run confirms (exit 0). An `outdated` request has no PR: update the CLI, let the next run print `version: …（最新）`, then close the request by hand (the script never closes one).
 
-The model list is a setting since PBI #1400 (request #601); offering a model the installed CLI carries as a candidate at run time is #1401.
+The model list is a setting since PBI #1400 (request #601); offering a model the installed CLI carries as a candidate on the settings screen, and the 載せない list, since 2026-11-04.

@@ -1,9 +1,9 @@
 // test-reads: ops-kit/bin/ ops-kit/src/cli.ts
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { heavyConfig, heavyConfigPath, heavyStateDir, readHeavyState, withHeavySlot } from "./heavy.ts";
+import { heavyConfig, heavyConfigPath, heavyHistoryPath, heavyStateDir, readHeavyHistory, readHeavyState, withHeavySlot } from "./heavy.ts";
 
 const OPS_KIT = join(import.meta.dir, "..", "bin", "ops-kit");
 
@@ -49,7 +49,7 @@ test("heavy: with no config one runs at a time, with max 2 two run together", as
     const two: Span[] = [];
     await Promise.all([withHeavySlot("a", job(two, 80), o), withHeavySlot("b", job(two, 80), o)]);
     expect(overlap(two)).toBe(true);
-    expect(readdirSync(heavyStateDir(home))).toEqual([]);
+    expect(readdirSync(heavyStateDir(home))).toEqual(["history.jsonl"]); // the finished runs leave their lines, no slot
   });
 });
 
@@ -203,7 +203,7 @@ test("heavy: a stopped wrapper stops its command, gives the slot back and ends b
     await holder.exited;
     expect(holder.signalCode).toBe("SIGTERM");
     expect(performance.now() - t0).toBeLessThan(5000); // the sleep was stopped, not waited for
-    expect(readdirSync(heavyStateDir(home))).toEqual([]);
+    expect(readdirSync(heavyStateDir(home))).toEqual(["history.jsonl"]);
   });
 });
 
@@ -275,7 +275,7 @@ test("heavy: a killed waiter is not listed", async () => {
       process.kill(-holder.pid, "SIGKILL");
       await holder.exited;
       await withHeavySlot("next", async () => {}, { home, mem: () => undefined, pollMs: 10, log: () => {} });
-      expect(readdirSync(heavyStateDir(home))).toEqual([]); // the next waiter cleans the dead waiter's file up
+      expect(readdirSync(heavyStateDir(home))).toEqual(["history.jsonl"]); // the next waiter cleans the dead waiter's file up
     } finally {
       for (const p of [holder, waiter]) {
         try {
@@ -308,5 +308,50 @@ test.skipIf(process.getuid?.() === 0)("heavy: where a waiter's file cannot be wr
     } finally {
       chmodSync(heavyStateDir(home), 0o755);
     }
+  });
+});
+
+test("heavy: a finished run is in the history", async () => {
+  await scratch(async (home) => {
+    const o = { home, mem: () => undefined, pollMs: 10, log: () => {}, taskId: "task_1" };
+    await withHeavySlot("local-ci 3314", async () => 0, o);
+    await withHeavySlot("local-ci 3320", async () => 1, o);
+    await withHeavySlot("local-ci 3321", async () => ({ ok: false }), o); // local-ci's result
+    await withHeavySlot("x", async () => ({ exitCode: 2 }), o);
+    await withHeavySlot("void", async () => {}, o); // nothing to say: it ended well
+    await withHeavySlot("tag-ci o/r", async () => [{ tag: "v1", result: "fail" }], o); // a result that says nothing of success
+    await expect(withHeavySlot("thrown", async () => {
+      throw new Error("x");
+    }, o)).rejects.toThrow("x");
+    const h = readHeavyHistory(home);
+    expect(h.map((e) => [e.name, e.taskId, e.exitCode])).toEqual([
+      ["local-ci 3314", "task_1", 0],
+      ["local-ci 3320", "task_1", 1],
+      ["local-ci 3321", "task_1", 1],
+      ["x", "task_1", 2],
+      ["void", "task_1", 0],
+      ["tag-ci o/r", "task_1", null],
+      ["thrown", "task_1", null],
+    ]);
+    for (const e of h) {
+      expect(e.queuedAt <= e.startedAt && e.startedAt <= e.endedAt).toBe(true);
+      expect(Number.isNaN(Date.parse(e.endedAt))).toBe(false);
+    }
+  });
+});
+
+test("heavy: the history keeps the newest 500", async () => {
+  await scratch(async (home) => {
+    mkdirSync(heavyStateDir(home), { recursive: true });
+    const at = (i: number) => new Date(Date.UTC(2026, 0, 1) + i * 1000).toISOString();
+    const lines = Array.from({ length: 1000 }, (_, i) => JSON.stringify({ name: `old ${i}`, taskId: null, queuedAt: at(i), startedAt: at(i), endedAt: at(i), exitCode: 0 }));
+    writeFileSync(heavyHistoryPath(home), `${lines.join("\n")}\nnot json\n`);
+    expect(readHeavyHistory(home)).toHaveLength(500); // the broken line is skipped, the newest 500 read
+    await withHeavySlot("new", async () => 0, { home, mem: () => undefined, pollMs: 10, log: () => {} }); // the 1001st entry (1002 lines)
+    const kept = readFileSync(heavyHistoryPath(home), "utf8").trimEnd().split("\n");
+    expect(kept).toHaveLength(500);
+    expect(JSON.parse(kept.at(-1)!).name).toBe("new");
+    expect(JSON.parse(kept[0]!).name).toBe("old 501");
+    expect(readdirSync(heavyStateDir(home))).toEqual(["history.jsonl"]); // no draft left behind
   });
 });

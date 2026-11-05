@@ -53,7 +53,7 @@ file, 50 MB and 1000 files per folder; over is 413 and nothing is kept.
 |---|---|
 | `text/html`, XHTML, SVG | a frame: `<iframe sandbox="allow-scripts">`, scripts run |
 | `image/*` | `<img>` |
-| `text/*`, JSON, YAML, XML (Markdown is not rendered) | text, fetched and shown in `<pre>` |
+| `text/*`, JSON, YAML, XML | text, fetched and shown in `<pre>`. `text/markdown` also gets a プレビュー / テキスト switch (`isMarkdown`; the same value as the conversation tab's, kept in the browser): the preview renders it as React elements — raw HTML stays text, images become links, only http(s) and mailto links are clickable |
 | a URL, PDF, anything else | a new browser tab (a URL) / a new tab and a download link |
 
 A frame, an image or text also has 全画面 (#1826): the same content over the whole screen (`position: fixed`, same
@@ -75,6 +75,14 @@ The daemon's UI origin can call the whole local API (loopback asks no token), so
   count toward the failure limit; the access log writes `/artifacts/<key>` for the key.
 - Files are confined to the artifact's folder: the path is decoded once and then `..` (also as `%2e%2e`), a backslash, NUL, an absolute path and a symlink out are 404; an encoded `/` is just a `/` inside the folder.
 - A script inside the page that calls `/api` or `/ws` sends `Origin: null`; `sameOrigin` (`auth.ts`) refuses it (403).
+
+The page can still read the API through the screen that shows it (the artifact bridge, `scratch-apps.md`): the frame
+stays opaque, it posts a request to its parent, and the screen (`ArtifactBody`) answers only a message whose
+`event.source` is that artifact's own frame, reads only `GET /api/…` with its own login, and posts the answer back to
+that frame. A page opened on its own has no screen around it and nothing answers. The check is on the frame's window,
+not on the document in it: a link that moves the frame elsewhere keeps the window, and two opaque origins cannot be
+told apart. What keeps a page from another site out of that window is the UI's own CSP (`default-src 'self'`, so
+`frame-src` is the daemon's origin); the Vite dev server does not send it yet.
 
 ## Across Tasks: reports and every artifact
 

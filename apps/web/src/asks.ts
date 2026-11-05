@@ -180,25 +180,37 @@ export const blockerLines = (a: Pick<Ask, "blockers">) => a.blockers.map((b) => 
  */
 export type Answered = { ask: Ask; changes?: string[]; changed?: boolean };
 
-/** The list has the question answered under another id (a decision's names the answer's time). */
+/**
+ * The list has moved past the question answered here: a decision answered under another id (its id names the answer's
+ * time); a Task's question, once the list has any other question of the same Task (#3059: the Task went on and stopped
+ * again — open or answered, the card answered here gives way to it).
+ */
 const answeredIn = (x: Ask, list: Ask[]) =>
-  list.some((y) => y.kind === x.kind && y.state !== "open" && y.state !== "held" && y.workspace?.id === x.workspace?.id && (x.pbi ? y.pbi?.number === x.pbi.number : !!x.task && y.task?.id === x.task.id));
+  list.some((y) =>
+    y.id !== x.id && y.workspace?.id === x.workspace?.id &&
+    (x.pbi ? y.kind === x.kind && y.state !== "open" && y.state !== "held" && y.pbi?.number === x.pbi.number : !!x.task && !y.pbi && y.task?.id === x.task.id),
+  );
 
 /**
  * What stays of the answers given here once a newer list comes (#936): an answer the list has the question of gives way to
- * the list, one whose question left the list (a check whose Task went on) stays; a 409's notice stays on its question
- * until the list has that question changed again (or no longer has it).
+ * the list, one whose question left the list (a check whose Task went on) stays until the list has moved past it
+ * (answeredIn: the decision answered under a new id, the Task's next question — dropped then, so a later list without
+ * that question does not bring the card back, #3059); a 409's notice stays on its question until the list has that
+ * question changed again (or no longer has it).
  */
 export function pruneAnswered(answered: Map<string, Answered>, list: Ask[]): Map<string, Answered> {
   return new Map(
     [...answered].filter(([id, v]) => {
       const now = list.find((x) => x.id === id);
-      return v.changed ? !!now && now.changedAt === v.ask.changedAt : !now;
+      return v.changed ? !!now && now.changedAt === v.ask.changedAt : !now && !answeredIn(v.ask, list);
     }),
   );
 }
 
-/** The answers given here that the list no longer has, as their cards (not when the list has them answered under a new id). */
+/**
+ * The answers given here that the list no longer has, as their cards: not when the list has the decision answered under a
+ * new id, nor once the list has another question of the same Task (#3059).
+ */
 export const keptAnswers = (answered: Map<string, Answered>, list: Ask[]) =>
   [...answered.entries()].filter(([id, v]) => !v.changed && !list.some((y) => y.id === id) && !answeredIn(v.ask, list)).map(([, v]) => v.ask);
 

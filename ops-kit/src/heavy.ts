@@ -2,7 +2,7 @@
 // one of the machine's slots is free and the free memory is above the floor; otherwise wait and say why.
 // The limit is the machine's, not a repository's: the configuration and the slots live under the home directory, so every
 // repository, working tree and Task on the machine takes from the same slots (the kit README, 重い処理の枠).
-import { linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -11,6 +11,7 @@ export const HEAVY_DEFAULTS: HeavyConfig = { max: 1, minFreeMb: 1536 };
 
 export const heavyConfigPath = (home: string) => join(home, ".config", "ops-kit", "heavy.json");
 export const heavyStateDir = (home: string) => join(home, ".local", "state", "ops-kit", "heavy");
+export const heavyHistoryPath = (home: string) => join(heavyStateDir(home), "history.jsonl");
 
 /**
  * The machine's limits from `~/.config/ops-kit/heavy.json` (`{ "max": 2, "minFreeMb": 1536 }`, both optional). No file, or
@@ -239,12 +240,86 @@ export function readHeavyState(home: string): { config: HeavyConfig; running: He
   return { config, running, waiting };
 }
 
+/**
+ * A finished job, one line of `history.jsonl`. `exitCode` is the command's exit (null when the job threw, or its result
+ * does not say). The screen
+ * compares a running job with the finished ones of its kind (the design doc ops-metrics.md, リソース画面).
+ */
+export type HeavyHistoryEntry = { name: string; taskId: string | null; queuedAt: string; startedAt: string; endedAt: string; exitCode: number | null };
+export const HEAVY_HISTORY_KEEP = 500;
+// the file is cut back to the newest KEEP lines once it has twice as many: one rewrite per KEEP runs, not one per run
+const HISTORY_TRIM_AT = HEAVY_HISTORY_KEEP * 2;
+
+// the exit a job's result stands for: the command's exit (`ops-kit heavy`), `{ exitCode }`, or local-ci's `{ ok }`; a job
+// that gives nothing (undefined) ended well. Any other result (tag-ci's list of tags) says nothing of success: null, so it
+// is not counted among the successful runs of its kind
+function exitOf(result: unknown): number | null {
+  if (result === undefined) return 0;
+  if (typeof result === "number") return result;
+  if (result && typeof result === "object" && !Array.isArray(result)) {
+    const r = result as { exitCode?: unknown; ok?: unknown };
+    if (typeof r.exitCode === "number") return r.exitCode;
+    if (typeof r.ok === "boolean") return r.ok ? 0 : 1;
+  }
+  return null;
+}
+
+const parseEntry = (line: string): HeavyHistoryEntry | undefined => {
+  try {
+    const e = JSON.parse(line) as HeavyHistoryEntry;
+    const str = (v: unknown) => typeof v === "string";
+    return e && typeof e === "object" && str(e.name) && (e.taskId === null || str(e.taskId)) && str(e.queuedAt) && str(e.startedAt) && str(e.endedAt) && (e.exitCode === null || typeof e.exitCode === "number")
+      ? { name: e.name, taskId: e.taskId, queuedAt: e.queuedAt, startedAt: e.startedAt, endedAt: e.endedAt, exitCode: e.exitCode }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * Adds a finished job to the history and cuts the file back to the newest entries when it has grown past twice their
+ * number (a draft renamed over it, so a reader never sees half). Two jobs ending at once may lose one line to the other's
+ * rewrite; a history is a guide, not a record. A place that cannot be written says so and leaves the job's result alone.
+ */
+export function appendHeavyHistory(home: string, entry: HeavyHistoryEntry, log: (line: string) => void = () => {}): void {
+  const path = heavyHistoryPath(home);
+  const draft = join(heavyStateDir(home), `.draft-history-${process.pid}-${crypto.randomUUID()}`);
+  try {
+    appendFileSync(path, `${JSON.stringify(entry)}\n`);
+    const lines = readFileSync(path, "utf8").split("\n").filter(Boolean);
+    if (lines.length <= HISTORY_TRIM_AT) return;
+    const kept = lines.filter((l) => parseEntry(l)); // a broken line does not take a kept one's place
+    writeFileSync(draft, `${kept.slice(-HEAVY_HISTORY_KEEP).join("\n")}\n`);
+    renameSync(draft, path);
+  } catch (e) {
+    removeFile(draft); // one cut short (a full disk) or not renamed is not left behind
+    log(`heavy: 履歴に書けません（${path}: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}）`);
+  }
+}
+
+/** The newest entries of the history, oldest first. Lines that do not read are skipped; no file gives none. */
+export function readHeavyHistory(home: string): HeavyHistoryEntry[] {
+  let text: string;
+  try {
+    text = readFileSync(heavyHistoryPath(home), "utf8");
+  } catch {
+    return [];
+  }
+  const out: HeavyHistoryEntry[] = [];
+  for (const line of text.split("\n")) {
+    const e = line ? parseEntry(line) : undefined;
+    if (e) out.push(e);
+  }
+  return out.slice(-HEAVY_HISTORY_KEEP);
+}
+
 export type HeavyOptions = { home?: string; mem?: () => number | undefined; pollMs?: number; log?: (line: string) => void; taskId?: string | null };
 
 /**
  * Runs `fn` holding one of the machine's slots. Waits, polling every `pollMs`, while every slot is held or the free memory
  * is below the floor, and says so once each time the reason changes. The slot is given back when `fn` ends, also by an
- * exception; a holder killed outside `finally` (SIGKILL, a stopped Task) is found dead by the next waiter. Where the
+ * exception; a holder killed outside `finally` (SIGKILL, a stopped Task) is found dead by the next waiter. A job that ends
+ * (also by an exception) is added to the history (`appendHeavyHistory`); one killed is not. Where the
  * slots' directory cannot be written, says so and runs `fn` without a slot (a guard must not stop the work).
  */
 export async function withHeavySlot<T>(name: string, fn: () => Promise<T>, o: HeavyOptions = {}): Promise<T> {
@@ -303,9 +378,13 @@ export async function withHeavySlot<T>(name: string, fn: () => Promise<T>, o: He
   }
   if (wrote) removeFile(waitPath(dir, me));
   if (waited) log(`heavy: 始めます（${name}）`);
+  let exitCode: number | null = null;
   try {
-    return await fn();
+    const result = await fn();
+    exitCode = exitOf(result);
+    return result;
   } finally {
+    appendHeavyHistory(home, { name, taskId, queuedAt: me.queuedAt, startedAt: me.startedAt, endedAt: new Date().toISOString(), exitCode }, log);
     // only our own: a slot reaped and taken by someone else meanwhile is theirs
     if (readHolder(slot)?.token === me.token) {
       try {

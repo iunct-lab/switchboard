@@ -23,9 +23,25 @@ export interface ForgeTarget {
 /** What a repository without `forge` lives on: what every repository was before #920. */
 export const DEFAULT_SERVICE = "github";
 
-/** The repository's service from `<dir>/ops.config.json` (only `forge` is read); none there = DEFAULT_SERVICE. Throws on a malformed `forge`. */
+/** A checkout with no remote and no `forge` (#2488): its PRs are local changes kept in the agent management app (`forge-app.ts`). */
+export const LOCAL_SERVICE = "app";
+
+/**
+ * The repository's service from `<dir>/ops.config.json` (only `forge` is read). None there: LOCAL_SERVICE when the
+ * checkout has no `origin` (#2488: its changes, their review and CI live in the app), else DEFAULT_SERVICE. Throws on a
+ * malformed `forge`. forgeTargetOf keeps GitHub for a checkout without `forge` (the backlog's import reads it so).
+ */
 export function forgeOf(dir: string): string {
-  return forgeConfigOf(dir).service;
+  const file = join(dir, CONFIG_FILE);
+  // a config that cannot be read is forgeConfigOf's to refuse
+  const named = existsSync(file) && (() => {
+    try {
+      return (JSON.parse(readFileSync(file, "utf8")) as { forge?: unknown }).forge !== undefined;
+    } catch {
+      return true;
+    }
+  })();
+  return named || originOf(dir) !== null ? forgeConfigOf(dir).service : LOCAL_SERVICE;
 }
 
 /**

@@ -17,9 +17,9 @@ permission.ask / permission.resolved / usage / quota / artifact / session.end / 
    どの版で録ったか（CLI バージョン、commit）を fixture 名かテスト冒頭に書く。
    - Claude: `claude -p --input-format stream-json --output-format stream-json`（`docs/design/claude-stream-json.md`）
    - Codex: `codex app-server` stdio JSON-RPC（`docs/design/codex-app-server.md`）
-   - DAK: ADK REST `POST /run_sse`（`docs/design/dak-adapter.md`。`docker compose up` で 127.0.0.1:8000）
+   - DAK: ADK REST `POST /run_sse`（`docs/design/dak-adapter.md`。`docker compose up` で 127.0.0.1:8000）。DAK の録画は `packages/adapters/dak/fixtures/` のまま
 2. **再生テスト**: fixture を parse 関数に流し `AgentEvent` の列を assert。`AgentEvent.parse(ev)` で schema 準拠も見る。
-3. **偽サーバ / 偽プロセス**でセッション制御を検証（`fixtures/fake-adk.ts` の型）: 確認要求 → 応答、途中エラー、
+3. **偽サーバ / 偽プロセス**でセッション制御を検証（`packages/adapters/adk/fixtures/fake-adk.ts` の型）: 確認要求 → 応答、途中エラー、
    中断、ストリーム終了後の追加ターン。プロンプト接頭辞で挙動を切り替える。
 4. 実ランナーでのスモークを 1 回はやり、PR の「テスト観点」に**やった事実だけ**書く。
 

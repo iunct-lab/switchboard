@@ -212,6 +212,9 @@ try {
     const wide = scrollWidth > width ? await evaluate(`[...document.querySelectorAll('body *')].filter(e => e.getBoundingClientRect().right > ${width + 1}).slice(0, 6).map(e => e.tagName + '.' + e.className + ' ' + Math.round(e.getBoundingClientRect().right))`) : [];
     assert(scrollWidth <= width, `${label}: scrolls sideways (${scrollWidth}): ${JSON.stringify(wide)}`);
     if (shots) await shoot(`task-${width}x${height}.png`);
+    // 「プレビュー / テキスト」 takes no line of its own (2026-11-04): it shares a row of the head with another control.
+    const md = await evaluate(`(() => { const s = document.querySelector('.task-head .md-view'); if (!s?.checkVisibility()) return null; const r = s.getBoundingClientRect(); const mid = r.top + r.height / 2; return [...document.querySelectorAll('.task-head button, .task-head select')].filter(e => !s.contains(e) && e.checkVisibility()).filter(e => { const b = e.getBoundingClientRect(); return b.top < mid && mid < b.bottom; }).map(e => e.textContent); })()`) as string[] | null;
+    assert(md !== null && md.length > 0, `${label}: the Markdown switch has a row of its own (${JSON.stringify(md)})`);
     const short = await evaluate(`[...document.querySelectorAll('.perm .actions button, .composer button')].filter(b => b.getBoundingClientRect().height < 44).map(b => b.textContent)`) as string[];
     assert(short.length === 0, `${label}: shorter than 44px: ${JSON.stringify(short)}`);
     const reply = `from the phone at ${width}x${height}`;

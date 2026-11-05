@@ -6,7 +6,7 @@ import { ModelSelect } from "./ModelSelect.tsx";
 import { EffortSelect } from "./EffortSelect.tsx";
 import { effortLabel } from "../effortOptions.ts";
 import { scheduleResultLine } from "../scheduleResult.ts";
-import { SCHEDULE_ACTIONS, scheduleActionLabel } from "../scheduleActions.ts";
+import { claudeOnlyAction, SCHEDULE_ACTIONS, scheduleActionLabel } from "../scheduleActions.ts";
 import { scheduleCreateInput, scheduleDraft, scheduleEditPatch, type ScheduleDraft } from "../scheduleEdit.ts";
 import { jstDateTime } from "../time.ts";
 import { listedRunners } from "../runners.ts";
@@ -28,10 +28,11 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
   const [prompt, setPrompt] = useState("");
   const [action, setAction] = useState<Schedule["action"]>("prompt");
   const meta = props.workspaces.find((w) => w.kind === "meta");
-  // backlog-next, secret-scan, insights and approval-window work on the meta workspace and take no prompt (#267, #775, #1838, #2046)
+  // backlog-next, secret-scan, insights, approval-window and ui-layers work on the meta workspace and take no prompt (#267, #775, #1838, #2046, #3353)
   const metaOnly = action !== "prompt";
-  // insights runs Claude Code's own command: the runner is claude whatever the form shows elsewhere (#1838)
+  // insights runs Claude Code's own command, ui-layers a fixed instruction: the runner is claude whatever the form shows elsewhere (#1838, #3353)
   const insights = action === "insights";
+  const onClaude = claudeOnlyAction(action);
   const actionRef = useRef(action); // read when the saved defaults arrive: a kind chosen meanwhile must not be overwritten
   actionRef.current = action;
   const savedDefaults = useRef<{ runner: RunnerId; model: string; effort: string } | null>(null); // put back when the kind leaves insights
@@ -61,7 +62,7 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
       .settings()
       .then((st) => {
         // the defaults may land after the kind was chosen: insights keeps claude and the CLI defaults (#1838)
-        const bare = actionRef.current === "insights";
+        const bare = claudeOnlyAction(actionRef.current);
         savedDefaults.current = { runner: st.autoStart.runner, model: st.autoStart.model, effort: st.autoStart.effort };
         setRunner(bare ? "claude" : st.autoStart.runner);
         setModel(bare ? "" : st.autoStart.model);
@@ -199,11 +200,11 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
                   const next = e.target.value as Schedule["action"];
                   const was = action;
                   setAction(next);
-                  if (next === "insights") {
+                  if (claudeOnlyAction(next)) {
                     setRunner("claude");
                     setModel("");
                     setEffort("");
-                  } else if (was === "insights" && savedDefaults.current) {
+                  } else if (claudeOnlyAction(was) && savedDefaults.current) {
                     // back to the saved defaults the form started from
                     setRunner(savedDefaults.current.runner);
                     setModel(savedDefaults.current.model);
@@ -239,8 +240,8 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
             <label>
               <span>ランナー</span>
               <select
-                value={defaultsReady ? (insights ? "claude" : runner) : ""}
-                disabled={!defaultsReady || insights}
+                value={defaultsReady ? (onClaude ? "claude" : runner) : ""}
+                disabled={!defaultsReady || onClaude}
                 onChange={(e) => {
                   setRunner(e.target.value as RunnerId);
                   setModel(""); // a model belongs to one runner
@@ -268,6 +269,10 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
               <div className="muted" style={{ gridColumn: "1 / -1" }}>
                 Claude Code の <code>/insights</code> を meta workspace で走らせ、できたレポート（最近のセッションの傾向・つまずき・改善案）を Insights の画面の「レポート」に載せます。ランナーは claude、prompt はありません。Claude の 7 日枠が設定の閾値（使用量と自動再開）以上のときは飛ばします。1 回の対象は 200 セッションまでなので、週 2 回が目安です。
               </div>
+            ) : action === "ui-layers" ? (
+              <div className="muted" style={{ gridColumn: "1 / -1" }}>
+                床・天井・壁の点検を meta workspace の claude の Task で行います。Claude の 7 日枠が設定の閾値以上のときは飛ばします。
+              </div>
             ) : action === "secret-scan" ? (
               <div className="muted" style={{ gridColumn: "1 / -1" }}>
                 登録したリポジトリを全部（同じリポジトリの作業フォルダは 1 回）、Issue・PR・コメント・レビューに認証に使える値が書かれていないか検査します。ランナーは使いません（ホストの gh のログインで読む）。当たりか検査できなかったリポジトリがあれば判断待ちに出します（場所と種類だけ）。スケジュールは meta に置きます。
@@ -282,7 +287,7 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
             ) : action === "prompt" ? (
               <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={3} placeholder="毎回渡すプロンプト" style={{ gridColumn: "1 / -1" }} />
             ) : null}
-            <button className="pri" disabled={busy || !defaultsReady || !title.trim() || (metaOnly ? !meta : !prompt.trim()) || (insights && !props.runnerOk.has("claude"))} title={insights && !props.runnerOk.has("claude") ? "claude がインストールされていません" : undefined} onClick={() => void create()} style={{ gridColumn: "1 / -1" }}>
+            <button className="pri" disabled={busy || !defaultsReady || !title.trim() || (metaOnly ? !meta : !prompt.trim()) || (onClaude && !props.runnerOk.has("claude"))} title={onClaude && !props.runnerOk.has("claude") ? "claude がインストールされていません" : undefined} onClick={() => void create()} style={{ gridColumn: "1 / -1" }}>
               作成
             </button>
           </div>
@@ -347,7 +352,7 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
               </label>
               <label>
                 <span>ランナー</span>
-                <select value={draft.runner} disabled={s.action === "insights"} title={s.action === "insights" ? "Claude Code Insights は claude で動きます" : undefined} onChange={(e) => setDraft({ ...draft, runner: e.target.value as RunnerId, model: "", effort: "" })}>
+                <select value={draft.runner} disabled={claudeOnlyAction(s.action)} title={claudeOnlyAction(s.action) ? `${scheduleActionLabel(s.action)} は claude で動きます` : undefined} onChange={(e) => setDraft({ ...draft, runner: e.target.value as RunnerId, model: "", effort: "" })}>
                   {listedRunners(props.runners, s.runner).map((r) => (
                     <option key={r} value={r} disabled={!props.runnerOk.has(r) && r !== s.runner}>
                       {r}

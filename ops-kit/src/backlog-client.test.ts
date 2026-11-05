@@ -325,3 +325,26 @@ test("view shows held edits with why; retry sends every failed one of the Issue 
   const direct = await runBacklog(["retry", "3"], { GH_REPO: "acme/app" }, { out: () => {}, err: (s) => err.push(s) }, { gh: {} as never });
   expect([direct, err]).toEqual([1, ["retry はアプリの Task の中だけ（BACKLOG_URL が無いので送り直すものがありません）"]]);
 });
+
+test("create --head --base makes a local change; one without the other is refused, nothing sent (#2485)", async () => {
+  const fake = app((m) => ({ body: m === "GET" ? LIST : { localId: "u1", number: 7 } }));
+  const r = await run(["create", "--title", "変更", "--head", "sb/5-x", "--base", "main"], fake);
+  expect([r.code, r.out]).toEqual([0, "#7 を作りました（localId u1）"]);
+  expect(r.calls.find((c) => c.method === "POST")!.body).toMatchObject({ title: "変更", change: { head: "sb/5-x", base: "main" } });
+  // an Issue sends no change
+  const plain = await run(["create", "--title", "PBI: x"], app((m) => ({ body: m === "GET" ? LIST : { localId: "u2", number: 8 } })));
+  expect(plain.calls.find((c) => c.method === "POST")!.body).not.toHaveProperty("change");
+  for (const half of [["--head", "sb/5-x"], ["--base", "main"]]) {
+    const one = await run(["create", "--title", "変更", ...half]);
+    expect(one.code).toBe(1);
+    expect(one.calls.filter((c) => c.method === "POST")).toEqual([]);
+  }
+});
+
+test("view of a local change: its branches and tips on the second line, the merge commit once merged (#2485)", async () => {
+  const detail = (mergeCommit: string | null, refs: object | null) => ({ issue: { number: 7, title: "変更", state: mergeCommit ? "CLOSED" : "OPEN", stateReason: null, labels: [], milestone: null, parent: null, subIssues: [], body: "", url: "", change: { head: "sb/5-x", base: "main", mergeCommit, mergedAt: mergeCommit ? "2026-11-04T00:00:00Z" : null } }, changeRefs: refs, comments: [], fields: null, fetchedAt: 1, localId: null, pending: 0, held: [], sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } });
+  const second = async (d: object) => (await run(["view", "7"], app(routes((m, p) => (p.startsWith("/7?") ? { body: d } : { status: 404, body: {} }))))).out.split("\n")[1];
+  expect(await second(detail(null, { head: "a".repeat(40), base: "b".repeat(40) }))).toBe("変更: sb/5-x → main  head aaaaaaa base bbbbbbb");
+  expect(await second(detail(null, { head: null, base: "b".repeat(40) }))).toBe("変更: sb/5-x → main  head なし base bbbbbbb");
+  expect(await second(detail("c".repeat(40), { head: null, base: "b".repeat(40) }))).toBe("変更: sb/5-x → main  MERGED ccccccc");
+});

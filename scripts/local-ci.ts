@@ -29,15 +29,16 @@
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { forgeTargetOf, originOf, runForgeOperation } from "../ops-kit/src/forge.ts";
+import { forgeOf, forgeTargetOf, LOCAL_SERVICE, originOf, runForgeOperation } from "../ops-kit/src/forge.ts";
 import { withHeavySlot } from "../ops-kit/src/heavy.ts";
 import { gitlabForge, runGlab, viewGitlabMr, type Sh } from "../ops-kit/src/forge-gitlab.ts";
 import { githubForge } from "../ops-kit/src/forge-github.ts";
+import { appForge } from "../ops-kit/src/forge-app.ts";
 import { IDLE_KILLED_LINE, runIdle } from "../ops-kit/src/idle-run.ts";
 import { hostAws } from "../ops-kit/src/secrets.ts";
 import { ciExit, runCi, STEP_IDLE_SECONDS, type Step } from "./ci.ts";
 import { judgeDurations, recordRow, RECORDS_BRANCH, RECORDS_HEADER, RECORDS_PATH, type Budgets } from "./perf-ratchet.ts";
-import { localCiOf, MARK_AUTHORS, newestLocalCi } from "./merge-gate.ts";
+import { localCiOf, localCiOfChange, MARK_AUTHORS, newestLocalCi, readChangeDetail } from "./merge-gate.ts";
 import { isTest } from "./test-select.ts";
 
 export type { Step };
@@ -325,16 +326,24 @@ export async function durationOver(dir: string, seconds: StepSeconds): Promise<s
   return judgeDurations(seconds, local ?? { journeys: {} }).map((i) => `over: ${i.key} = ${i.value} > ceiling ${i.ceiling}`);
 }
 
+/**
+ * A local change (#2488) instead of a PR: its head and base read from the app with the checkout's own branches (no
+ * fetch: there is no remote), `label` naming its worktrees and logs. Its tests are chosen against the base's tip, and
+ * no bundle row is recorded (that is a GitHub records branch).
+ */
+export interface ChangeTarget { label: string; read: () => Promise<{ head: string; base: string }> }
+
 /** `cache`: where the worktree and the failure logs go (~/.cache; tests give their own). TMPDIR goes under tmpdir() (#1056). */
-export async function localCi(pr: number, repoRoot: string, d: Deps, repo: string, cache = join(homedir(), ".cache"), opts: { all?: boolean } = {}): Promise<LocalCiResult> {
+export async function localCi(pr: number, repoRoot: string, d: Deps, repo: string, cache = join(homedir(), ".cache"), opts: { all?: boolean; change?: ChangeTarget } = {}): Promise<LocalCiResult> {
+  const change = opts.change;
   // one slot for the whole run: the PR's steps and main's measure after them (measureBase) are not cut in between by
   // another heavy job, while this run's worktrees are still there. The head and base are read once it is held: a wait
   // must not leave the run on the head and base of before it
-  return d.slot(`local-ci ${repo}#${pr}`, async () => {
-    const { head: sha, base } = await readTarget(pr, repoRoot, repo, d);
+  return d.slot(change ? `local-ci ${change.label}` : `local-ci ${repo}#${pr}`, async () => {
+    const { head: sha, base } = change ? await change.read() : await readTarget(pr, repoRoot, repo, d);
     // ~/.cache need not exist (a fresh GitHub runner has none, 2026-09-28)
     mkdirSync(cache, { recursive: true });
-    const dir = mkdtempSync(join(cache, `switchboard.local-ci-${pr}.`));
+    const dir = mkdtempSync(join(cache, change ? `switchboard.${change.label}.` : `switchboard.local-ci-${pr}.`));
     const tmp = mkdtempSync(join(tmpdir(), `switchboard.local-ci-${pr}-tmp.`));
     try {
       await d.sh(["git", "-C", repoRoot, "worktree", "add", "-q", "--detach", dir, base]);
@@ -348,10 +357,10 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
         return { sha, base, results: [], ok: false, conflict: true };
       }
       const env = stepEnv(tmp);
-      const selection = opts.all ? undefined : await selectTests(dir, () => mainFork(dir, repo, d.sh), env, d);
+      const selection = opts.all ? undefined : await selectTests(dir, () => (change ? Promise.resolve(base) : mainFork(dir, repo, d.sh)), env, d);
       const narrowed = selection ? { selection } : {};
       const skipLoaded = selection?.loaded?.run === false ? selection.loaded.reason : undefined;
-      const run = await runCheckout(dir, env, `local-ci-${repo.replaceAll("/", "_")}-${pr}`, d, cache, selection?.files, skipLoaded);
+      const run = await runCheckout(dir, env, change ? change.label : `local-ci-${repo.replaceAll("/", "_")}-${pr}`, d, cache, selection?.files, skipLoaded);
       const { results } = run;
       const bundle = run.bundle.length ? { bundle: run.bundle } : {};
       // a checkout with scripts/ci.ts (this repository's CI) must have both steps; another repository's (--repo) need not
@@ -381,7 +390,7 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
       return { sha, base, results, ok: false, ...narrowed, ...bundle };
     } finally {
       // main's bundle as this run measured it, pass or fail (docs/design/perf.md の「bundle の推移」); never the run's result
-      await (async () => (forgeTargetOf(repoRoot, originOf(repoRoot)).service === "gitlab" ? "none" : recordBundle(repo, dir, new Date().toISOString(), d.sh)))().then(
+      await (async () => (change || forgeTargetOf(repoRoot, originOf(repoRoot)).service === "gitlab" ? "none" : recordBundle(repo, dir, new Date().toISOString(), d.sh)))().then(
         (r) => r === "recorded" && d.log(`bundle の記録: ${RECORDS_BRANCH}/${RECORDS_PATH} に 1 行足した`),
         (e: unknown) => d.log(`bundle の記録に失敗（結果は変えない）: ${e instanceof Error ? e.message : String(e)}`),
       );
@@ -581,6 +590,9 @@ export async function resolveTarget(argv: string[], cwd: string, scriptRoot: str
       throw new TargetError((e as Error).message);
     }
     if (named.service === "gitlab") return { pr, repo: named.repository!, root: scriptRoot, ...flags };
+    // a forge naming the app (#2488): its changes have no PR, and the result would go on the change of the same number
+    // (one without a forge or an origin fails below: no origin to read)
+    if (named.service === LOCAL_SERVICE) throw new TargetError(`${scriptRoot} の変更はアプリにある（PR は無い）。--change <n> で回す`);
     const url = (await run(["git", "-C", scriptRoot, "remote", "get-url", "origin"]).catch(() => "")).trim();
     const repo = remoteRepo(url);
     if (!repo) throw new TargetError(`${scriptRoot} の origin（${url ? "GitHub の owner/name として読めない URL" : "無し"}）から対象が分からない（--repo <owner/name> を付ける）`);
@@ -591,6 +603,15 @@ export async function resolveTarget(argv: string[], cwd: string, scriptRoot: str
   const root = (await run(["git", "-C", cwd, "rev-parse", "--show-toplevel"]).catch(() => {
     throw new TargetError(`${cwd} は git の作業ツリーでない（${repo} の作業ツリーから実行する）`);
   })).trim();
+  // the same for --repo; a checkout without an origin fails below. A forge that cannot be read, or a GitLab one of
+  // another origin, is the target's error (exit 2), as without --repo
+  let service: string;
+  try {
+    service = forgeTargetOf(root, originOf(root)).service;
+  } catch (e) {
+    throw new TargetError((e as Error).message);
+  }
+  if (service === LOCAL_SERVICE) throw new TargetError(`${root} の変更はアプリにある（PR は無い）。--change <n> で回す`);
   const url = (await run(["git", "-C", root, "remote", "get-url", "origin"]).catch(() => "")).trim();
   const origin = remoteRepo(url);
   if (origin?.toLowerCase() !== repo.toLowerCase()) {
@@ -620,12 +641,13 @@ export const step = stepWithIdle(STEP_IDLE_SECONDS);
  * `forge` (none = GitHub); one without a verification is said, not posted some other way. The texts go through the
  * kit's check for values usable for auth first.
  */
-export async function reportResult(t: { pr: number; repo: string; root: string }, body: string, run: Deps["sh"], glab: Sh = runGlab): Promise<void> {
+export async function reportResult(t: { pr: number; repo: string; root: string }, body: string, run: Deps["sh"], glab: Sh = runGlab, backlog: BacklogAccess = { env: process.env }): Promise<void> {
   // the repository is the origin's on github.com (`remoteRepo`), the one refs/heads/<base> and refs/pull/<n>/head are
-  // fetched from; a GitLab project is its `forge`'s, checked against the origin (#924): the note goes on the MR `pr`
-  const named = forgeTargetOf(t.root, originOf(t.root));
+  // fetched from; a GitLab project is its `forge`'s, checked against the origin (#924): the note goes on the MR `pr`.
+  // A checkout whose changes the app keeps (#2488, forgeOf): the change `pr` of the workspace `repo`
+  const named = forgeOf(t.root) === LOCAL_SERVICE ? { service: LOCAL_SERVICE, host: "local", repository: t.repo } : forgeTargetOf(t.root, originOf(t.root));
   const target = named.repository ? named : { ...named, host: "github.com", repository: t.repo };
-  await runForgeOperation({ kind: "verification", target, texts: [body], payload: { pr: t.pr, body } }, { github: githubForge((cmd) => run(cmd)), gitlab: gitlabForge(glab) }, hostAws());
+  await runForgeOperation({ kind: "verification", target, texts: [body], payload: { pr: t.pr, body } }, { github: githubForge((cmd) => run(cmd)), gitlab: gitlabForge(glab), [LOCAL_SERVICE]: appForge(backlog.env, backlog.fetch) }, hostAws());
 }
 
 /**
@@ -633,8 +655,8 @@ export async function reportResult(t: { pr: number; repo: string; root: string }
  * posted (a pass for an old head or base would be taken for the new one), false. Which PRs of a stack the pass covers is
  * merge-gate's to work out with git (#3118), not written here.
  */
-export async function notify(t: { pr: number; repo: string; root: string }, r: LocalCiResult, d: Pick<Deps, "sh" | "log">, post = reportResult): Promise<boolean> {
-  const now = await readTarget(t.pr, t.root, t.repo, d).catch((e: unknown) => (d.log(`head / base を読み直せない: ${e instanceof Error ? e.message : String(e)}`), undefined));
+export async function notify(t: { pr: number; repo: string; root: string }, r: LocalCiResult, d: Pick<Deps, "sh" | "log">, post = reportResult, read = () => readTarget(t.pr, t.root, t.repo, d)): Promise<boolean> {
+  const now = await read().catch((e: unknown) => (d.log(`head / base を読み直せない: ${e instanceof Error ? e.message : String(e)}`), undefined));
   if (!now) return false;
   if (now.head !== r.sha || now.base !== r.base) {
     d.log(`実行中に変わった（head ${r.sha.slice(0, 7)} → ${now.head.slice(0, 7)}、base ${r.base.slice(0, 7)} → ${now.base.slice(0, 7)}）。結果を投稿しない（回し直す）`);
@@ -646,12 +668,63 @@ export async function notify(t: { pr: number; repo: string; root: string }, r: L
   return true;
 }
 
+/** The app the kit's backlog client reads a local change from (#2488): its env (BACKLOG_URL, BACKLOG_WORKSPACE, the key's file) and, in tests, its fetch. */
+export interface BacklogAccess { env: Record<string, string | undefined>; fetch?: (url: string, init?: RequestInit) => Promise<Response> }
+
+/**
+ * `--change <n>` (#2488): a local change of the checkout `cwd` is in, run as a PR is — its head merged into its base's
+ * tip in a worktree of its own — and the result posted on the change (the app's verification, `reportResult`). Nothing
+ * is fetched and gh is never called. A pass of the same head and base already there is not run again (`--force` /
+ * `--all` run it). Exit codes as `main`'s.
+ */
+export async function changeMain(args: string[], at: number, cwd: string, d: Deps, backlog: BacklogAccess, cache?: string): Promise<number> {
+  const value = args[at + 1] ?? "";
+  const rest = args.filter((_, i) => i !== at && i !== at + 1);
+  if (!/^\d+$/.test(value) || rest.some((a) => a !== "--all" && a !== "--force")) {
+    console.error("usage: bun scripts/local-ci.ts --change <n> [--all] [--force]（PR の番号・--repo とは一緒に使えない）");
+    return 2;
+  }
+  const n = Number(value);
+  let root: string;
+  let first: Awaited<ReturnType<typeof readChangeDetail>>;
+  try {
+    root = (await d.sh(["git", "-C", cwd, "rev-parse", "--show-toplevel"])).trim();
+    // the result goes where the checkout's changes are: never on a PR of the same number
+    if (forgeOf(root) !== LOCAL_SERVICE) throw new Error(`${root} の変更はアプリに無い（forge が ${forgeOf(root)}）。PR は番号で回す`);
+    first = await readChangeDetail(n, backlog.env, { fetch: backlog.fetch, cwd });
+  } catch (e) {
+    console.error(`対象を読めない: ${(e as Error).message}`);
+    return 2;
+  }
+  const read = async () => {
+    const c = await readChangeDetail(n, backlog.env, { fetch: backlog.fetch, cwd });
+    return { head: c.changeRefs.head!, base: c.changeRefs.base! };
+  };
+  const workspace = (first as { workspaceId?: string }).workspaceId ?? backlog.env.BACKLOG_WORKSPACE ?? "local";
+  const label = `local-ci-change-${workspace.replace(/[^\w.-]/g, "_")}-${n}`;
+  if (!args.includes("--force") && !args.includes("--all") && localCiOfChange(first.comments, first.changeRefs.head!, first.changeRefs.base!).pass) {
+    d.log(`既に pass（#${n} の今の head と base）。回し直すなら --force`);
+    return 0;
+  }
+  const r = await localCi(n, root, d, workspace, cache, { all: args.includes("--all"), change: { label, read } });
+  const t = { pr: n, repo: workspace, root };
+  try {
+    if (!(await notify(t, r, d, (t, body, run) => reportResult(t, body, run, runGlab, backlog), read))) return 1;
+  } catch (e) {
+    console.error(`結果を変更 #${n} に投稿できなかった: ${e instanceof Error ? e.message : String(e)}`);
+    return 1;
+  }
+  return r.conflict ? 1 : ciExit(r.results);
+}
+
 /**
  * The command: its exit code. 2 = the target cannot be run (nothing posted), 1 = a failure, a conflict, a result not
  * posted (moved, or the post failed), 0 = a pass posted or one already there. `scriptRoot`: the clone without --repo.
  * `cache`: where the run's worktrees and logs go (~/.cache; tests give their own).
  */
-export async function main(args: string[], cwd: string, d: Deps, post = reportResult, scriptRoot = join(import.meta.dir, ".."), cache?: string): Promise<number> {
+export async function main(args: string[], cwd: string, d: Deps, post = reportResult, scriptRoot = join(import.meta.dir, ".."), cache?: string, backlog: BacklogAccess = { env: process.env }): Promise<number> {
+  const changeAt = args.indexOf("--change");
+  if (changeAt >= 0) return changeMain(args, changeAt, cwd, d, backlog, cache);
   let t: Awaited<ReturnType<typeof resolveTarget>>;
   try {
     t = await resolveTarget(args, cwd, scriptRoot, d.sh);

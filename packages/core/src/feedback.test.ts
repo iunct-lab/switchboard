@@ -295,7 +295,9 @@ test("new-repo: packages/core has no repository-creation steps", () => {
   const dir = join(import.meta.dir);
   for (const f of readdirSync(dir).filter((n) => n.endsWith(".ts") && !n.endsWith(".test.ts"))) {
     const text = readFileSync(join(dir, f), "utf8");
-    for (const word of ["repo create", "labels.yml", "ISSUE_TEMPLATE"]) expect(`${f}:${text.includes(word)}`).toBe(`${f}:false`);
+    // the one exception (#2579): a private copy of someone else's repository is the repository only, no template, labels or Project
+    const words = f === "workspace-clone.ts" ? ["labels.yml", "ISSUE_TEMPLATE"] : ["repo create", "labels.yml", "ISSUE_TEMPLATE"];
+    for (const word of words) expect(`${f}:${word}:${text.includes(word)}`).toBe(`${f}:${word}:false`);
   }
 });
 

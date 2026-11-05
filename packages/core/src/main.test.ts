@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Db } from "./db.ts";
 
 // `bun main.ts` listening off loopback (the cloud host, #181): /api/health tells an unauthorized caller only whether a
 // token is needed, so the startup banner must ask with the token. It crashed on `health.runners` on the first deploy (#232).
@@ -105,8 +106,10 @@ test("SIGTERM takes the runners' children with the daemon", async () => {
 }, 40_000);
 
 // #2558: DAK is opt-in. The URL that points at it is also the switch that registers it.
-async function bootAndRead(extraEnv: Record<string, string>): Promise<{ out: string; runners: string[] }> {
+type HealthRunner = { id: string; label?: string; available: boolean; note?: string };
+async function bootAndRead(extraEnv: Record<string, string>, seed?: (home: string) => void): Promise<{ out: string; runners: string[]; info: HealthRunner[] }> {
   const home = mkdtempSync(join(tmpdir(), "switchboard-test-main-"));
+  seed?.(home);
   const env: Record<string, string | undefined> = { ...process.env, SWITCHBOARD_HOME: home, SWITCHBOARD_HOST: "127.0.0.1", SWITCHBOARD_PORT: "0", SWITCHBOARD_CANDIDATE: "1", SWITCHBOARD_HISTORY_POLL_MS: "0", SWITCHBOARD_CLAUDE_PROJECTS: join(home, "none"), SWITCHBOARD_SUPERVISED: "" };
   delete env.SWITCHBOARD_DAK_URL;
   const p = Bun.spawn(["bun", join(import.meta.dir, "main.ts")], { env: { ...env, ...extraEnv }, stdout: "pipe", stderr: "pipe" });
@@ -127,8 +130,8 @@ async function bootAndRead(extraEnv: Record<string, string>): Promise<{ out: str
     }
     const port = /switchboard core  http:\/\/127\.0\.0\.1:(\d+)/.exec(out)?.[1];
     expect(port).toBeDefined();
-    const health = (await (await fetch(`http://127.0.0.1:${port}/api/health`)).json()) as { runners: { id: string }[] };
-    return { out, runners: health.runners.map((r) => r.id) };
+    const health = (await (await fetch(`http://127.0.0.1:${port}/api/health`)).json()) as { runners: HealthRunner[] };
+    return { out, runners: health.runners.map((r) => r.id), info: health.runners };
   } finally {
     p.kill();
     await p.exited;
@@ -141,10 +144,37 @@ test("main.ts lists no DAK runner unless SWITCHBOARD_DAK_URL is set", async () =
   expect(out).toMatch(/runner claude/);
   expect(out).not.toMatch(/runner dak/);
   expect(runners).not.toContain("dak");
+  expect(runners.every((r) => r === "claude" || r === "codex")).toBe(true);
 }, 40_000);
 
 test("main.ts lists DAK when SWITCHBOARD_DAK_URL is set", async () => {
   const { out, runners } = await bootAndRead({ SWITCHBOARD_DAK_URL: "http://127.0.0.1:1" });
   expect(out).toMatch(/runner dak\s+unavailable/);
   expect(runners).toContain("dak");
+}, 40_000);
+
+// #3386: the ADK servers saved in Settings are read at start and run as `custom:<name>` with their label, next to the
+// DAK of SWITCHBOARD_DAK_URL; a server that does not answer is listed as unavailable with the reason.
+test("main.ts registers the saved ADK servers as custom:<name> and DAK from SWITCHBOARD_DAK_URL", async () => {
+  const adk = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => (new URL(req.url).pathname === "/list-apps" ? Response.json(["x_app", "dak_agent"]) : new Response("no", { status: 404 })) });
+  try {
+    const base = `http://127.0.0.1:${adk.port}`;
+    const { info } = await bootAndRead({ SWITCHBOARD_DAK_URL: base }, (home) => {
+      const db = new Db(join(home, "switchboard.db"));
+      db.setCustomRunners([
+        { name: "x", label: "Agent X", url: base, app: "x_app" },
+        { name: "gone", label: "Gone", url: "http://127.0.0.1:1", app: "y" },
+        { name: "dak", label: "Saved DAK", url: base, app: "dak_agent" },
+      ]);
+      db.close();
+    });
+    const by = (id: string) => info.find((r) => r.id === id);
+    expect(by("custom:x")).toMatchObject({ label: "Agent X", available: true });
+    expect(by("custom:gone")).toMatchObject({ label: "Gone", available: false });
+    expect(by("custom:gone")?.note).toContain("not reachable");
+    expect(by("dak")).toMatchObject({ label: "DAK", available: true });
+    expect(by("custom:dak")).toBeUndefined(); // the variable is DAK's only record
+  } finally {
+    await adk.stop(true);
+  }
 }, 40_000);

@@ -10,6 +10,7 @@ import { closesOf } from "./backlog-sync.ts";
 import { findSecrets, hostAws } from "../../../ops-kit/src/secrets.ts";
 import { noWriteRefusal } from "../../../ops-kit/src/config.ts";
 import type { SetupScripts } from "./skillsync.ts";
+import { loadProcess, renderEntry, type ProcessDef } from "./process-defs.ts";
 import { judge, type Work } from "../../../scripts/parallel-guard.ts";
 import { pathsIn } from "../../../scripts/task-paths.ts";
 import { readdirSync } from "node:fs";
@@ -248,7 +249,7 @@ export interface OtherRepo {
  * How a Task on another registered workspace reads the skills and scripts, which are written for this repository
  * (a backlog stage Task, a request registered for that workspace).
  */
-export function otherRepoRules(other: OtherRepo, local = false): string {
+export function otherRepoRules(other: OtherRepo, local = false, localForge = false): string {
   const { meta, setup } = other;
   const projectUrl = `SWITCHBOARD_PROJECT_URL=$(gh variable get ${other.projectVar ?? "SWITCHBOARD_PROJECT_URL"})`;
   // a backlog kept in Switchboard only (#2265): no GitHub Issue, Project or its variable, so none of the setup scripts for them
@@ -260,8 +261,8 @@ export function otherRepoRules(other: OtherRepo, local = false): string {
   const copies = !local && setup.copies.length > 0
     ? `このリポジトリの \`scripts/setup/\` の ${setup.copies.join("、")} は共通キットを呼ばない写しなので使わない。代わりに ${meta} の \`scripts/setup/\` の同じ名前の入口に \`${projectUrl}\` を付けて使う。`
     : "";
-  const project = local ? LOCAL_BACKLOG_RULES : own ? "" : `Project の URL はリポジトリ変数 \`${other.projectVar ?? "SWITCHBOARD_PROJECT_URL"}\` にあり、Project を触るスクリプトには \`${projectUrl}\` を付けて渡す。`;
-  return `スキル（\`.claude/skills/…\`）は Switchboard がこのリポジトリに置いたもの（Git 管理外）を使ってください。${scripts}${copies}スキルは Switchboard 向けに書かれているので、次のように読み替えてください: スキル中の「このリポジトリ」「開発リポジトリ」はこのリポジトリ。${project}${local ? "\`scripts/merge-gate.ts\`・\`scripts/local-ci.ts\`" : "\`scripts/merge-gate.ts\`・\`scripts/parallel-guard.ts\`・\`scripts/local-ci.ts\`"} の既定の対象は実行する場所（環境変数・作業ツリー・スクリプトの clone）で変わるので、必ず \`--repo <このリポジトリの owner/name>\` を付けて実行し、その判定に従う（自分で条件を確かめて代わりにしない）。再チェックの手順は \`${meta}/docs/merge-gate.md\` の「再チェック」（その中の \`-R <owner/name>\` と \`origin\` はこのリポジトリ。印は必ずこのリポジトリの PR に付ける）。Actions が始まらない（ジョブのステップ 0 件）ときは、このリポジトリの作業ツリーから \`bun ${meta}/scripts/local-ci.ts <PR> --repo <このリポジトリの owner/name>\` で CI を回す（作業ツリーの origin が \`--repo\` と違えば何も投稿せず exit 2）。回すのはスタックの一番上で 1 回（全部の PR の指摘の処理が済んでから。いつ回し、どう数えるかは \`${meta}/docs/merge-gate.md\` の「ローカル CI を回す時と数え方」）。PR をマージするたびに、\`git fetch origin\` のあと \`bun ${meta}/scripts/release-tag.ts $(git rev-parse origin/main) --repo <このリポジトリの owner/name>\` でそのマージにタグと Release を付け（タグの無い前のマージもその Release に入る）、出力を PBI の結果に書く。main をタグの状態に戻すときは \`bun ${meta}/scripts/rollback-pr.ts <tag> --repo <このリポジトリの owner/name>\` で PR を作り、ふつうの PR と同じくレビューと merge-gate を通してマージする。ビルド・テスト・ブランチ・コミットの決まりは、このリポジトリの CLAUDE.md / AGENTS.md / README がスキルと食い違えばこのリポジトリの方に従う。Switchboard のリポジトリ自体は変更しない。`;
+  const project = localForge ? LOCAL_ISSUE_RULES + localChangeRules(`${meta}/`) : local ? LOCAL_BACKLOG_RULES : own ? "" : `Project の URL はリポジトリ変数 \`${other.projectVar ?? "SWITCHBOARD_PROJECT_URL"}\` にあり、Project を触るスクリプトには \`${projectUrl}\` を付けて渡す。`;
+  return `スキル（\`.claude/skills/…\`）は Switchboard がこのリポジトリに置いたもの（Git 管理外）を使ってください。${scripts}${copies}スキルは Switchboard 向けに書かれているので、次のように読み替えてください: スキル中の「このリポジトリ」「開発リポジトリ」はこのリポジトリ。${project}${localForge ? "" : `${local ? "\`scripts/merge-gate.ts\`・\`scripts/local-ci.ts\`" : "\`scripts/merge-gate.ts\`・\`scripts/parallel-guard.ts\`・\`scripts/local-ci.ts\`"} の既定の対象は実行する場所（環境変数・作業ツリー・スクリプトの clone）で変わるので、必ず \`--repo <このリポジトリの owner/name>\` を付けて実行し、その判定に従う（自分で条件を確かめて代わりにしない）。再チェックの手順は \`${meta}/docs/merge-gate.md\` の「再チェック」（その中の \`-R <owner/name>\` と \`origin\` はこのリポジトリ。印は必ずこのリポジトリの PR に付ける）。Actions が始まらない（ジョブのステップ 0 件）ときは、このリポジトリの作業ツリーから \`bun ${meta}/scripts/local-ci.ts <PR> --repo <このリポジトリの owner/name>\` で CI を回す（作業ツリーの origin が \`--repo\` と違えば何も投稿せず exit 2）。回すのはスタックの一番上で 1 回（全部の PR の指摘の処理が済んでから。いつ回し、どう数えるかは \`${meta}/docs/merge-gate.md\` の「ローカル CI を回す時と数え方」）。PR をマージするたびに、\`git fetch origin\` のあと \`bun ${meta}/scripts/release-tag.ts $(git rev-parse origin/main) --repo <このリポジトリの owner/name>\` でそのマージにタグと Release を付け（タグの無い前のマージもその Release に入る）、出力を PBI の結果に書く。main をタグの状態に戻すときは \`bun ${meta}/scripts/rollback-pr.ts <tag> --repo <このリポジトリの owner/name>\` で PR を作り、ふつうの PR と同じくレビューと merge-gate を通してマージする。`}ビルド・テスト・ブランチ・コミットの決まりは、このリポジトリの CLAUDE.md / AGENTS.md / README がスキルと食い違えばこのリポジトリの方に従う。Switchboard のリポジトリ自体は変更しない。`;
 }
 
 /**
@@ -269,7 +270,17 @@ export function otherRepoRules(other: OtherRepo, local = false): string {
  * `ops-kit backlog` (it is given the workspace, BACKLOG_WORKSPACE) and `ops-kit lint --fresh`, and the parallel guard
  * without `--repo` (it writes its claims there too).
  */
-export const LOCAL_BACKLOG_RULES = "Issue・Project のフィールド・Milestone・親子（sub-issue）・コメント・lint は `ops-kit backlog`（create / edit / comment / set / triage / view）と `ops-kit lint --fresh` だけで行い、`gh issue` / `gh project` / `gh api graphql` の Issue・Project の操作 / `scripts/setup/*` / Project の変数は使わない（GitHub にこの Issue は無い）。並列ガード（`scripts/parallel-guard.ts`）は `--repo` を付けずに実行する（占有と着手の印もアプリに書く）。PR・レビュー・CI・マージはリポジトリの PR で行う。ただし PR の本文・コミットには GitHub の閉じるキーワード（close / fix / resolve とその -s / -d 形）も `#<番号>` の形の Task・PBI の参照も書かない（番号は Switchboard の番号で、GitHub の同じ番号の別の Issue を閉じる・参照する）。Task は PR 本文の 1 行 `Backlog-Task: <番号>` と枝 `sb/<番号>-<topic>` で示す。PR をマージしたら `ops-kit backlog edit <Task> --state closed` で Task を閉じる（自動では閉じない）。";
+/** The Issue half of LOCAL_BACKLOG_RULES: the kit's backlog and the parallel guard without --repo. */
+export const LOCAL_ISSUE_RULES = "Issue・Project のフィールド・Milestone・親子（sub-issue）・コメント・lint は `ops-kit backlog`（create / edit / comment / set / triage / view）と `ops-kit lint --fresh` だけで行い、`gh issue` / `gh project` / `gh api graphql` の Issue・Project の操作 / `scripts/setup/*` / Project の変数は使わない（GitHub にこの Issue は無い）。並列ガード（`scripts/parallel-guard.ts`）は `--repo` を付けずに実行する（占有と着手の印もアプリに書く）。";
+export const LOCAL_BACKLOG_RULES = LOCAL_ISSUE_RULES + "PR・レビュー・CI・マージはリポジトリの PR で行う。ただし PR の本文・コミットには GitHub の閉じるキーワード（close / fix / resolve とその -s / -d 形）も `#<番号>` の形の Task・PBI の参照も書かない（番号は Switchboard の番号で、GitHub の同じ番号の別の Issue を閉じる・参照する）。Task は PR 本文の 1 行 `Backlog-Task: <番号>` と枝 `sb/<番号>-<topic>` で示す。PR をマージしたら `ops-kit backlog edit <Task> --state closed` で Task を閉じる（自動では閉じない）。";
+
+/**
+ * What a Task does instead of PRs on a checkout whose changes the app keeps (#2490, the kit's `forgeOf` is its local
+ * service: no remote, or `forge` names it): the skills' 「ローカルの変更では」 lines, with `scripts` = where the
+ * Switchboard checkout is (`` in its own, `<meta>/` in another's): its scripts and docs/merge-gate.md.
+ */
+export const localChangeRules = (root: string) =>
+  `この workspace の変更はアプリに置く（リモートは使わない）。PR の代わりにローカルの「変更」で、レビュー・ローカル CI・マージ判定・マージを行う（各スキルの「ローカルの変更では」の行）。\`gh pr\` / \`gh stack\` / \`git push\` / \`git fetch\`・リリースタグ・\`ops-kit pull-main\` は使わない。枝は \`git checkout -b sb/<Task>-<topic>\` で 1 本ずつ（積まず、マージしてから次の枝を main から切る）。変更は \`ops-kit backlog create --title <題> --body-file <本文> --head <枝> --base main\`（本文の 1 行 \`Backlog-Task: <Task>\`。閉じるキーワードと \`#<番号>\` は書かない）。ローカル CI は \`bun ${root}scripts/local-ci.ts --change <変更>\`、マージ判定は \`bun ${root}scripts/merge-gate.ts --change <変更>\`、マージは \`bun ${root}scripts/local-merge.ts <変更>\`（判定をもう一度通し、Task も閉じる）。どれも \`--repo\` は付けない。マージ判定が \`[再チェック <kind>]\` で止めたら、\`${root}docs/merge-gate.md\` の「再チェック」を、PR の情報を \`ops-kit backlog view <変更>\`、差分を \`git diff main...<枝>\` に読み替えて回し、印（\`[recheck] <kind> pass <head の sha>\`）は \`ops-kit backlog comment <変更>\` で変更に付ける。\`[merge-ask]\` / \`[merge-answer]\` の印も変更のコメントに付ける（形は同じ文書の「記録の印」）。リリースタグは無いので、決定ログの「戻すなら <tag>」は「戻すなら: タグなし（変更 #<変更> の mergeCommit の前）」と書く。`;
 
 /** The form of a ## 状況 (#522), the same in a 状況確認 and in a resume of a stalled PBI (#578). */
 const REPORT_FORMAT = "`## 状況` で始まるコメントを 1 件書いてください。中身は `### 済んだこと` / `### 残り` / `### 止まっている理由`（動いているなら「動いている」とその Task）/ `### 次にやること`。";
@@ -293,26 +304,26 @@ const COMPLETE_SCOPE = "この依頼は、マージ判定（`scripts/merge-gate.
  * `answer` (#2745): the newest `## 回答` the person gave on the screen (screenAnswer), put in the prompt as the person's
  * words — read with a tool, an operation it allows is not the person's say to the runner's approval. Not for a check.
  */
-export function buildStartPrompt(item: Pick<BacklogItem, "number"> & Partial<Pick<BacklogItem, "tasks">>, action: BacklogAction, opts: { other?: OtherRepo; resume?: { tasksDone: number }; local?: boolean; answer?: { issue: number; text: string } | null } = {}): string {
+/** The entries a stage start renders from the pipeline's definition (`ops-kit/processes/p0-pipeline.md`); a definition missing one cannot start a stage. */
+export const PIPELINE_ENTRIES = ["to-pbi", "to-tasks", "to-tasks-ready", "complete", "complete-other", "complete-resume", "check", "close"] as const;
+
+/** The stage Task's first prompt: the entry's text from `def` (the pipeline candidate; `opts` are explained above `PIPELINE_ENTRIES`), then what the daemon adds around it (the answer to read, the scope of a complete, where the Issue is). */
+export function buildStartPrompt(item: Pick<BacklogItem, "number"> & Partial<Pick<BacklogItem, "tasks">>, action: BacklogAction, opts: { other?: OtherRepo; resume?: { tasksDone: number }; local?: boolean; localForge?: boolean; answer?: { issue: number; text: string } | null } = {}, def: ProcessDef = loadProcess("p0-pipeline")): string {
   const n = item.number;
   const subIssues = item.tasks?.total ?? 0;
-  const complete = opts.other ? `.claude/skills/pbi-complete/SKILL.md に従い、PBI #${n} を完了させてください。` : `/pbi-complete ${n}`;
-  const body = {
-    "to-pbi": `.claude/skills/request-to-backlog/SKILL.md に従い、既存の要望 Issue #${n} から PBI を作ってください（要望 Issue は新しく作らない。#${n} の原文を正本にする）。続けて .claude/skills/pbi-to-tasks/SKILL.md で、作った PBI を Ready にしてください。`,
-    // a PBI in 分解待ち that already has sub-issues is waiting to be made Ready, not to be decomposed again (#1393)
-    "to-tasks": subIssues > 0
-      ? `PBI #${n} は Task（sub-issue ${subIssues} 件）に分解済みですが、Project の Status が Ready になっていません。.claude/skills/pbi-to-tasks/SKILL.md に従い、既にある Task を作り直さずに、最新の \`## 回答\` を PBI と Task に反映し、受け入れ条件の被覆と Task の粒度を確かめ、足りなければ Task を足して、PBI #${n} を Ready にしてください。`
-      : `.claude/skills/pbi-to-tasks/SKILL.md に従い、PBI #${n} を Task に分解して Ready にしてください。`,
-    // every complete, from Ready too: backlog-next also uses it to resume an in-progress PBI whose Task was answered (#562)
-    // a resume names the skill's file: a slash command is expanded only at the start of a prompt
-    complete: opts.resume
-      ? `PBI #${n} は実装中のまま止まっています。sub-issue の Task（状態・PR）、関連する PR、受け入れ条件を確かめ、Issue #${n} に ${REPORT_FORMAT}その末尾に \`${TASKS_DONE_MARK(opts.resume.tasksDone)}\` を 1 行そのまま入れてください（この PBI を選んだ時点の閉じた Task の数。数え直さない。次に Task が閉じるか \`## 回答\` が付くまで、定期実行がこの PBI を再開しないための印です）。利用者の判断が要るもの（要件の読み・設計の選択・受け入れ条件の利用者確認など）があれば、.claude/skills/issue-workflow/SKILL.md の「判断待ちの出し方」で \`## 判断待ち\` を出して止めてください。無ければ続けて .claude/skills/pbi-complete/SKILL.md に従い、PBI #${n} を完了させてください。`
-      : complete,
-    check: `PBI #${n} の今の状況を確認してください。sub-issue の Task（状態・PR）、関連する PR（\`gh pr list -R <このリポジトリの owner/name> --state all --search "#${n}"\` と各 Task の PR。状態・レビュー・CI）、PBI の受け入れ条件（それぞれ満たされているか、検証の結果）、決定ログ・コメントを読み、Issue #${n} に ${REPORT_FORMAT}利用者の判断が要るもの（受け入れ条件の利用者確認など）があれば、.claude/skills/issue-workflow/SKILL.md の「判断待ちの出し方」で \`## 判断待ち\` を出してください。コードの変更・PR の作成やマージ・Issue のクローズ・Project の Status の変更はしないでください。これまでの \`## 回答\` は状況の材料として読むだけにし、その続きの作業はしないでください。`,
-    close: `.claude/skills/pbi-complete/SKILL.md の「6. PBI を閉じる」に従い、PBI #${n} の受け入れ条件を検証結果つきで埋め、## 結果 を書いて閉じてください（Task は全部閉じ、利用者確認の項目も確認済みです）。`,
-  }[action];
+  const missing = PIPELINE_ENTRIES.filter((e) => !(e in def.entries));
+  if (missing.length) throw new Error(`${def.path}: the pipeline definition lacks entries ${missing.join(", ")}`);
+  // which entry of the definition (docs/design/process-kernel.md, K4): the texts themselves are in the file, not here
+  const entry =
+    action === "to-tasks"
+      ? subIssues > 0 ? "to-tasks-ready" : "to-tasks" // a PBI in 分解待ち that already has sub-issues is waiting to be made Ready, not to be decomposed again (#1393)
+      : action === "complete"
+        ? opts.resume ? "complete-resume" : opts.other ? "complete-other" : "complete" // every complete, from Ready too: backlog-next also uses it to resume an in-progress PBI whose Task was answered (#562); a resume names the skill's file: a slash command is expanded only at the start of a prompt
+        : action;
+  // the mark only exists on a resume: an entry that uses it without one is refused by renderEntry, not rendered as 0
+  const body = renderEntry(def, entry, { n, subIssues, reportFormat: REPORT_FORMAT, ...(opts.resume ? { tasksDoneMark: TASKS_DONE_MARK(opts.resume.tasksDone) } : {}) });
   const elsewhere = opts.local
-    ? `\n\n#${n} はこの workspace の Switchboard のバックログの Issue です（GitHub には無い）。${opts.other ? otherRepoRules(opts.other, true) : LOCAL_BACKLOG_RULES}`
+    ? `\n\n#${n} はこの workspace の Switchboard のバックログの Issue です（GitHub には無い）。${opts.other ? otherRepoRules(opts.other, true, !!opts.localForge) : opts.localForge ? LOCAL_ISSUE_RULES + localChangeRules("") : LOCAL_BACKLOG_RULES}`
     : opts.other ? `\n\n#${n} はこのディレクトリのリポジトリ（\`gh repo view\` が答えるもの）の Issue です。${otherRepoRules(opts.other)}` : "";
   const answer = action === "check" ? "" : `始める前に Issue #${n} の最新の \`## 回答\` コメント${action === "complete" ? "（sub-issue の Task のものも）" : ""}を読み（\`ops-kit backlog view ${n} --fresh\`。アプリが GitHub と同期してから答え、GitHub に届かなければ保存値と未同期の印で答える）、あればそれに従って続きから進めてください。`;
   const scope = action === "complete" ? COMPLETE_SCOPE : "";
@@ -796,6 +807,8 @@ export interface BacklogCreatePayload {
   milestone: string | null;
   parent: number | null;
   project: { owner: string; number: number; fields: Record<string, string | number | null> } | null;
+  /** A local change's branches (#2485); absent on an Issue. */
+  change?: { head: string; base: string };
 }
 
 /** A new Issue, kept until it is created on GitHub; read and edited by the returned local id until then and after. */
@@ -803,8 +816,9 @@ export function createStoredIssue(db: Db, source: BacklogSource, input: Omit<Bac
   refuseSecrets(input.title, input.body, input.milestone ?? undefined, ...input.labels, ...texts(input.fields));
   const localId = crypto.randomUUID();
   const at = new Date(now).toISOString();
-  const draft: BacklogIssueData = { number: 0, title: input.title, url: "", state: "OPEN", stateReason: null, body: input.body, labels: input.labels, milestone: input.milestone, parent: input.parent, subIssues: [], createdAt: at, updatedAt: at, closedAt: null };
-  const payload: BacklogCreatePayload = { title: input.title, body: input.body, state: "OPEN", labels: input.labels, milestone: input.milestone, parent: input.parent, project: someFields(input.fields) ? { ...source.project, fields: input.fields! } : null };
+  const change = input.change ? { head: input.change.head, base: input.change.base } : undefined;
+  const draft: BacklogIssueData = { number: 0, title: input.title, url: "", state: "OPEN", stateReason: null, body: input.body, labels: input.labels, milestone: input.milestone, parent: input.parent, subIssues: [], createdAt: at, updatedAt: at, closedAt: null, ...(change ? { change: { ...change, mergeCommit: null, mergedAt: null } } : {}) };
+  const payload: BacklogCreatePayload = { title: input.title, body: input.body, state: "OPEN", labels: input.labels, milestone: input.milestone, parent: input.parent, project: someFields(input.fields) ? { ...source.project, fields: input.fields! } : null, ...(change ? { change } : {}) };
   const id = `local:${localId}`;
   db.applyBacklogEdit(source, { records: [{ objectKind: "issue", externalId: id, local: draft }], operations: [{ id: localId, issue: id, targetKind: "issue", target: id, kind: "create", payload }] }, now);
   return { localId };
@@ -827,11 +841,15 @@ export function editStoredIssue(db: Db, source: BacklogSource, ref: number | str
   const create = pendingCreate(db, source, rec.externalId);
   // a create sends no reason: closing one with a reason waits for it to be made (#3146)
   if (create && input.stateReason) throw new BacklogEditError("作成を GitHub に送っている間は閉じた理由を付けられません。送り終えてから編集してください", 409);
+  if (input.change && !cur.change) throw new BacklogEditError(`#${ref} は変更ではありません`, 422);
+  // a merged or closed change is not opened again: its branch may have another open one now (make a new change)
+  if (cur.change && input.state === "OPEN" && cur.state === "CLOSED") throw new BacklogEditError(`#${ref} は閉じた変更なので開き直せません（新しい変更を作る）`, 422);
+  if (create && input.change) throw new BacklogEditError("作成が確定する前の変更はマージ済みにできません", 409);
   if (create) {
     const p = create.payload as BacklogCreatePayload;
     const project = input.project === false ? null : input.project || someFields(input.fields) || p.project ? { ...source.project, fields: { ...p.project?.fields, ...input.fields } } : null;
-    const next: BacklogCreatePayload = { title: input.title ?? p.title, body: input.body ?? p.body, state: input.state ?? p.state, labels: labels(p.labels), milestone: input.milestone === undefined ? p.milestone : input.milestone, parent: input.parent === undefined ? p.parent : input.parent, project };
-    const { project: _, ...fields } = next;
+    const next: BacklogCreatePayload = { title: input.title ?? p.title, body: input.body ?? p.body, state: input.state ?? p.state, labels: labels(p.labels), milestone: input.milestone === undefined ? p.milestone : input.milestone, parent: input.parent === undefined ? p.parent : input.parent, project, ...(p.change ? { change: p.change } : {}) };
+    const { project: _, change: __, ...fields } = next;
     db.applyBacklogEdit(source, { records: [{ objectKind: "issue", externalId: rec.externalId, local: { ...cur, ...fields } }], operations: [{ issue: create.issue, targetKind: "issue", target: create.target, kind: "create", payload: next, replace: create.id }] }, now);
     return { localId, operations: [create.id] };
   }
@@ -841,6 +859,7 @@ export function editStoredIssue(db: Db, source: BacklogSource, ref: number | str
   // the body as shown: without the marker a post sent from here left on it
   const was = { ...cur, body: withoutMarker(cur.body) };
   for (const f of ["title", "body", "state", "milestone", "parent"] as const) if (input[f] !== undefined && input[f] !== was[f]) set(f, input[f], was[f]);
+  if (input.change) set("change", input.change, was.change ?? null);
   // after the close (#3146): an Issue closed just now is completed until its reason is changed, as GitHub answers it
   // (one closed by a close still waiting to be sent shows that: applyBacklogField). A close that only takes back a
   // reopen still waiting is one with it (Db.applyBacklogEdit) and writes nothing: GitHub keeps its reason, or the one a
@@ -1282,10 +1301,10 @@ function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIssueData>
  * the last complete import was stored. A workspace never imported answers `fetchedAt: null` and no items — never an
  * empty list as if read.
  */
-export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "name" | "path">, opts: { released?: (oid: string) => boolean | null; importFailed?: boolean; now?: number } = {}): { fetchedAt: number | null; items: BacklogItem[] } {
+export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "name" | "path">, opts: { released?: (oid: string) => boolean | null; importFailed?: boolean; now?: number } = {}): { fetchedAt: number | null; items: BacklogItem[]; changes: Backlog["changes"] } {
   const source = db.getWorkspaceBacklogSource(ws.id);
   const fetchedAt = source ? db.getBacklogRepository(source)?.lastSuccessfulSync ?? null : null;
-  if (!source || fetchedAt === null) return { fetchedAt: null, items: [] };
+  if (!source || fetchedAt === null) return { fetchedAt: null, items: [], changes: [] };
   const records = shownRecords(db, source);
   const ops = db.listPendingBacklogOperations(source);
   const repoSync = db.getBacklogRepository(source);
@@ -1355,7 +1374,14 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
   withWaits(withComments(asked, buildingOf(asked), commentsOf, tasksOf), targets, issues);
   const startable = withPrereqs(items, issues, targets, opts.released ?? (() => null));
   withOverlap(items, issues, startable, pulls, statuses, ws.path);
-  return { fetchedAt, items };
+  return { fetchedAt, items, changes: changesOf(ws.id, issues.values()) };
+}
+
+/** The local changes (#2485) among a workspace's Issues: every open one, then the newest 10 closed; newest first each. */
+function changesOf(workspaceId: string, issues: Iterable<BacklogIssueData>): Backlog["changes"] {
+  const all = [...issues].flatMap((i) => (i.change ? [{ workspaceId, number: i.number, title: i.title, state: i.state, head: i.change.head, base: i.change.base, mergeCommit: i.change.mergeCommit, mergedAt: i.change.mergedAt, updatedAt: i.updatedAt }] : []));
+  const newest = (a: { updatedAt: string; number: number }, b: { updatedAt: string; number: number }) => b.updatedAt.localeCompare(a.updatedAt) || b.number - a.number;
+  return [...all.filter((c) => c.state === "OPEN").sort(newest), ...all.filter((c) => c.state === "CLOSED").sort(newest).slice(0, 10)];
 }
 
 /**
@@ -1403,7 +1429,7 @@ export function readStoredIssue(db: Db, ws: Pick<BacklogWorkspace, "id">, ref: n
     workspaceId: ws.id, issue, comments: comments.sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
     fields: item ? (item.remote as BacklogProjectItemData).fields : (create?.project?.fields ?? null), fetchedAt: rec.fetchedAt, fetchState: rec.fetchState,
     localId: typeof ref === "string" ? ref : rec.externalId.startsWith("local:") ? rec.externalId.slice("local:".length) : null, pending: pending.length,
-    held, limits: SYNC_LIMITS,
+    held, limits: SYNC_LIMITS, changeRefs: null,
     sync: syncOf(db, all.filter((o) => family.has(o.issue)), { lastSuccessfulSync: freshAt(db.getBacklogRepository(source)?.lastSuccessfulSync ?? null, rec), retryAt: db.getBacklogRepository(source)?.retryAt ?? null, fetchState: rec.externalId.startsWith("local:") && !rec.remote ? "fetched" : rec.fetchState, importFailed: opts.importFailed, now: opts.now ?? Date.now() }),
   };
 }

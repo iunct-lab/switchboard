@@ -140,8 +140,10 @@ try {
   await until(() => evaluate(`document.querySelector('.end.ok') !== null && document.querySelectorAll('.msg.assistant').length === 3`), "the finished reply");
 
   // (a) each YOU / runner row copies its own text as it is
-  const rows = await evaluate(`[...document.querySelectorAll('.msg')].map((m) => m.querySelector('.tx')?.textContent ?? '')`) as string[];
-  assert(JSON.stringify(rows) === JSON.stringify(["done", FIRST, "二通目", "三通目"]), `rows: ${JSON.stringify(rows)}`);
+  // The runner's rows show the Markdown preview (#3677, the default), so their text on screen is not the source; the copy is.
+  const rows = ["done", FIRST, "二通目", "三通目"];
+  const count = await evaluate(`[...document.querySelectorAll('.msg')].filter((m) => m.querySelector('.tx')).length`) as number;
+  assert(count === rows.length, `rows: ${count}`);
   for (let i = 0; i < rows.length; i++) {
     const got = await press(".msg", "コピー", i);
     assert(got.text === rows[i], `row ${i}: ${JSON.stringify(got.text)} != ${JSON.stringify(rows[i])}`);

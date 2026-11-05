@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
-import { AskAnswerInput, AutoStartKind, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, type EvalsSummary, InboxAddInput, InboxCloseInput, InboxEditInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PermissionAnswers, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskBatch, type AskList, type Backlog, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type ScanCursors, type Workspace, type WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
+import { AskAnswerInput, AutoStartKind, CustomRunnerList, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, type EvalsSummary, InboxAddInput, InboxCloseInput, InboxEditInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PermissionAnswers, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskBatch, type AskList, type Backlog, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type ScanCursors, type Workspace, type WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
 import type { CoreConfig } from "./config.ts";
 import { abortOrphanedTasks, createdIssuesOf, Db, deferredOf, type ApiRequestRow } from "./db.ts";
 import { opsLatency } from "./ops-latency.ts";
@@ -29,6 +29,7 @@ import { skillCommandTitle, suggestTitle } from "./suggest-title.ts";
 import { evalRequestDraft, judgeHumanGap, RULES_BY, rulesEvalOf, weekStartUtc, weeklyHumanSample } from "./evals.ts";
 import { judgeRubric } from "./rubric-judge.ts";
 import { loadRubric } from "./rubric.ts";
+import { claudeCatalog, codexCatalog, hostReaders, modelCandidates, SHIPPED_HIDDEN_MODELS, type CatalogRunner } from "./model-catalog.ts";
 import { ledgerRowFor, loadPricing } from "./pricing.ts";
 import { checksEnabledByDefault, isSupervised, RESTART_EXIT_CODE, restartArgv, SelfDev, spawnDetached } from "./selfdev.ts";
 import { isAuthText, LOGIN_FORCED_RECHECK_MS, LOGIN_RECHECK_MS } from "./login.ts";
@@ -37,12 +38,14 @@ import { type BacklogNextResult, Scheduler } from "./scheduler.ts";
 import { BacklogSync, noticeTargets, type StoredBacklog } from "./backlog-sync.ts";
 import { scanAllRepos } from "./secretscan.ts";
 import { setupScripts } from "./skillsync.ts";
+import { listProcesses, loadProcess } from "./process-defs.ts";
+import { collectProvenance } from "./provenance.ts";
 import { Staging } from "./staging.ts";
 import { collectTaskDiff } from "./taskdiff.ts";
 import { parseCron } from "./cron.ts";
 import { FlowCache, flowScope, flowView, type FlowWorkspace } from "./flow.ts";
 import { interventionView } from "./interventions.ts";
-import { checkLocalFields, checkLocalParent } from "./backlog-local.ts";
+import { branchTip, checkLocalChange, checkLocalFields, checkLocalParent, localForgeOf } from "./backlog-local.ts";
 import { enableGithubSync, enablingOf } from "./backlog-enable.ts";
 import { RUNNER_CONFIG_PATHS, runnerConfigOf } from "./runner-config.ts";
 import { CloneError, parseGithubRepo, registerWorkspace, unusableWorkspaces, WorkspaceClones } from "./workspace-clone.ts";
@@ -145,6 +148,11 @@ export interface StartServerOptions {
   sessionRecheckMs?: number;
   /** Overrides where the machine's heavy-process slots are (#2213); tests keep them out of the real home. Unset = `ops-kit heavy`'s own, under the home directory. */
   heavyStateDir?: string;
+  /**
+   * Overrides where 「CLI の表を読む」 reads a CLI's model table from (#1401); tests answer with a fake table. null = the
+   * CLI is not installed. Unset = the installed CLIs on PATH (`hostReaders`). Called only by GET /api/settings/model-candidates.
+   */
+  modelCatalog?: (runner: CatalogRunner) => Promise<string | null>;
 }
 
 /** GitHub's `sha256=<hex>` signature of the delivery body under the Webhook's Secret; no signature or another length is false. */
@@ -175,7 +183,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   const detected: Array<{ adapter: RunnerAdapter; info: RunnerInfo }> = [];
   for (const a of adapters) {
     const d = await a.detect();
-    detected.push({ adapter: a, info: { id: a.id, ...d, permissionModes: a.permissionModes ?? [], models: a.models ?? [], efforts: a.efforts ?? [], bedrockAvailable: a.bedrockModels !== undefined } });
+    detected.push({ adapter: a, info: { id: a.id, ...(a.label ? { label: a.label } : {}), ...d, permissionModes: a.permissionModes ?? [], models: a.models ?? [], efforts: a.efforts ?? [], bedrockAvailable: a.bedrockModels !== undefined } });
     if (d.available) adapterMap.set(a.id, a);
   }
   // Login (#180): the runner's own status command runs again when /api/health is read and its last answer is over a
@@ -247,9 +255,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     return parsed.success ? parsed.data : Settings.parse({});
   };
   // The defaults of the tunables (#835), so the settings screen can show each item's default without zod at runtime
+  // and what a runner's 載せない list is while none is saved (#1401)
   const tunableDefaults = () => {
     const d = Settings.parse({});
-    return { quotaAndResume: d.quotaAndResume, judgeAndChoice: d.judgeAndChoice, newDefaults: d.newDefaults };
+    return { quotaAndResume: d.quotaAndResume, judgeAndChoice: d.judgeAndChoice, newDefaults: d.newDefaults, hiddenModels: SHIPPED_HIDDEN_MODELS };
   };
   const savedDefaultMode = (runner: RunnerId) => settings().defaultPermissionMode[runner];
   const savedAutoResume = (runner: RunnerId) => settings().autoResume[runner] === true;
@@ -367,6 +376,20 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     void run.finally(() => adviceRunning.delete(run));
   };
   /**
+   * Provenance (docs/design/process-kernel.md, K1): written right after the row exists, from the input the task was created
+   * with. A failure to record never stops the task (it is noted on it). The process named by the input must exist
+   * (checked where the input is parsed); `version` comes from the definition as it is at this moment.
+   */
+  const recordProvenance = (t: Task, input: { process?: string; processReason?: string }) => {
+    try {
+      const meta = metaWorkspace();
+      const def = input.process ? loadProcess(input.process, meta?.path) : null;
+      db.setTaskProvenance(t.id, collectProvenance({ cwd: t.cwd, metaPath: meta?.path ?? null, runner: t.runner, model: t.model, effort: t.effort, permissionMode: t.permissionMode, process: def ? { id: def.id, version: def.version } : null, processReason: input.processReason ?? null }));
+    } catch (e) {
+      tasks.record(t.id, { t: "status", text: `由来を記録できませんでした: ${(e as Error).message ?? e}` });
+    }
+  };
+  /**
    * Creates a routed task on the rule table's suggestion and asks the LLM afterwards. A task whose runner failed to start
    * is saved as an error before `tasks.create` throws, so the advice follows the row rather than the return.
    */
@@ -376,6 +399,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     try {
       return tasks.create(input, suggestRunner(routing.table, ctx), (t) => {
         saved.push(t.id);
+        recordProvenance(t, input);
         afterInsert?.(t);
       });
     } finally {
@@ -639,7 +663,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
    * workspace's Issue, and a request filed for another workspace, pass that workspace (`ws`). The kind's own choice
    * (`autoStart.byKind`, #1337) wins over both, when its runner is detected; otherwise it is as if there were none.
    */
-  const startMetaTask = async (req: { kind: AutoStartKind; title: string; prompt: string; attachmentIds?: string[]; runner?: RunnerId; model?: string; effort?: string; scheduleId?: string; shadowRunner?: null; budgetUsd?: number | null; ws?: Workspace; stage?: Task["stage"] }): Promise<{ task: Task } | { error: string; status: number }> => {
+  const startMetaTask = async (req: { kind: AutoStartKind; title: string; prompt: string; attachmentIds?: string[]; runner?: RunnerId; model?: string; effort?: string; scheduleId?: string; shadowRunner?: null; budgetUsd?: number | null; ws?: Workspace; stage?: Task["stage"]; process?: string; processReason?: string }): Promise<{ task: Task } | { error: string; status: number }> => {
     const meta = req.ws ?? metaWorkspace();
     if (!meta) return { error: "meta workspace がありません", status: 409 };
     if (!existsSync(meta.path)) return { error: "workspace directory does not exist", status: 409 };
@@ -666,6 +690,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       ...(req.shadowRunner === null ? { shadowRunner: null } : {}),
       ...(req.budgetUsd ? { budgetUsd: req.budgetUsd } : {}),
       ...(req.stage ? { stage: req.stage } : {}),
+      ...(req.process ? { process: req.process, processReason: req.processReason } : {}),
     };
     try {
       const task = createRouted(input, (t) => {
@@ -705,7 +730,15 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       // the person's newest answer on the screen goes in as their words (#2745)
       const source = action === "check" ? null : db.getWorkspaceBacklogSource(ws.id);
       const answer = source ? screenAnswer(db, source, item.number) : null;
-      return await startMetaTask({ kind: action, ws, title: startTitle(item, action), stage: { issue: item.number, action }, prompt: buildStartPrompt(item, action, { other, resume: input.resume, local: ws.backlog === "switchboard", answer }), ...input.extra });
+      // the stage runs under the pipeline candidate (docs/design/process-kernel.md, K4); its definition is the meta checkout's, like the skills, not the running release's.
+      // A checkout without it (behind, or mid-edit) answers like any other reason a stage cannot start, so a button gets its 409 and a sweep skips the item
+      let def;
+      try {
+        def = loadProcess("p0-pipeline", input.meta.path);
+      } catch (e) {
+        return { error: `候補の定義を読めません: ${(e as Error).message ?? e}`, status: 409 };
+      }
+      return await startMetaTask({ kind: action, ws, title: startTitle(item, action), stage: { issue: item.number, action }, prompt: buildStartPrompt(item, action, { other, resume: input.resume, local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path), answer }, def), process: def.id, processReason: `backlog stage ${action}`, ...input.extra });
     } finally {
       startingStage.delete(key);
     }
@@ -750,6 +783,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     return withActive({
       fetchedAt: imported.length ? Math.min(...imported) : Date.now(),
       items: read.flatMap(({ stored }) => stored?.items ?? []),
+      changes: read.flatMap(({ stored }) => stored?.changes ?? []),
       errors,
       syncs: read.flatMap(({ ws, stored }) => (stored ? [{ workspaceId: ws.id, backlog: ws.backlog, enabling: enablingOf(db, db.getWorkspaceBacklogSource(ws.id)), repository: db.getWorkspaceBacklogSource(ws.id)?.repository ?? null, syncing: stored.syncing, syncedAt: stored.fetchedAt, ...workspaceSyncOf(db, ws, { importFailed: stored.error !== null }) }] : [])),
     });
@@ -957,7 +991,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const done = (resume: Ask["resume"]): { status: number; body: AskAnswerResult } => ({ status: 200, body: { ask: { ...ask, state: answer.kind === "hold" ? "held" : "answered", changedAt: at, answers: [], resume }, already: false, changes: moved } });
     if (answer.kind === "hold") return done(null);
     // the work goes on from the item as stored now (the answer is in it): a hold or what an answer does not take away stops it here
-    const item = withActive({ fetchedAt: 0, items: storedBacklog(ws).items, errors: [], syncs: [] }).items.find((i) => i.number === pbi);
+    const item = withActive({ fetchedAt: 0, items: storedBacklog(ws).items, errors: [], changes: [], syncs: [] }).items.find((i) => i.number === pbi);
     if (!item) return done(null);
     const blockers = blockersOf({ waits: item.waits, stops: item.stopSummary, approvalPending: approvalPendingOf()(item) });
     if (blockers.length) return done({ state: "queued", reason: blockers.map((b) => b.detail).join("・"), taskId: null, at });
@@ -1321,7 +1355,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       // cannot (a limit, an outage) the workspace goes on with what is stored; only an Issue with a conflict is not picked
       // a narrow firing comes right after the import that cleared the waits: it is not read again here (the read right before a start still is)
       const unsynced = only ? null : await backlog.settle(ws).then(() => null, (e) => notSettled(e));
-      const all = withActive({ fetchedAt: 0, items: backlog.read(ws, { released: await releasedIn(ws) }).items, errors: [], syncs: [] }).items;
+      const all = withActive({ fetchedAt: 0, items: backlog.read(ws, { released: await releasedIn(ws) }).items, errors: [], changes: [], syncs: [] }).items;
       const judged = all.filter((i) => !only || only.numbers.includes(i.number)).map((item) => ({ item, can: canStartStoredBacklog(item) }));
       return { ws, items: judged.filter((j) => j.can.ok).map((j) => j.item), syncHeld: judged.flatMap((j) => (j.can.ok ? [] : [`#${j.item.number}（${j.can.why}）`])), unsynced };
     }));
@@ -1386,7 +1420,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           // edit may have been kept meanwhile — GitHub when it can be reached, the stored data either way (#2264)
           const late = await backlog.settle(ws).then(() => null, (e) => notSettled(e));
           if (late && !r.unsynced) skipped.push(`${ws.name}: GitHub と照合できない（保存データで進める）: ${late}`);
-          const fresh = withActive({ fetchedAt: 0, items: backlog.read(ws, { released: await releasedIn(ws) }).items, errors: [], syncs: [] }).items.find((i) => i.number === next.item.number);
+          const fresh = withActive({ fetchedAt: 0, items: backlog.read(ws, { released: await releasedIn(ws) }).items, errors: [], changes: [], syncs: [] }).items.find((i) => i.number === next.item.number);
           const can = fresh ? canStartStoredBacklog(fresh) : { ok: false as const, why: "バックログから無くなった" };
           // its stage Task started meanwhile (a button, an answer's resume): the slot's next item instead
           if (fresh?.activeTaskId) {
@@ -1439,6 +1473,17 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     return note ? note.title : "待ちなし";
   };
   const scheduler = new Scheduler(db, tasks, Date.now, startNext, scanSecrets, () => settings().quotaAndResume.backlogQuotaLimit, autoRunner, approvalWindow);
+  // The monthly floor / ceiling / walls check (#3353) is there from the start: put in once, so one the person deleted
+  // stays deleted (a setting, not a migration: the row is theirs to change or remove from Schedules)
+  const seedMeta = metaWorkspace();
+  if (seedMeta && !db.getSetting("uiLayers.seeded", false)) {
+    try {
+      scheduler.create({ title: "床・天井・壁の点検", cron: "0 9 1 * *", action: "ui-layers", runner: "claude", workspaceId: seedMeta.id });
+      db.setSetting("uiLayers.seeded", true);
+    } catch (e) {
+      console.warn(`ui-layers: could not add the monthly check: ${String((e as Error).message ?? e)}`);
+    }
+  }
   /**
    * After an import that stored a change (#1879): the PBIs whose waits it closed and no stage Task runs for go on now, in
    * the implement slot of an enabled backlog-next schedule, not at its next firing. No schedule enabled, nothing starts.
@@ -1447,7 +1492,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const schedule = db.listSchedules().find((s) => s.action === "backlog-next" && s.enabled);
     const ws = schedule && db.getWorkspace(wsId);
     if (!schedule || !ws) return;
-    const numbers = withActive({ fetchedAt: 0, items: backlog.read(ws, { released: await releasedIn(ws) }).items, errors: [], syncs: [] }).items
+    const numbers = withActive({ fetchedAt: 0, items: backlog.read(ws, { released: await releasedIn(ws) }).items, errors: [], changes: [], syncs: [] }).items
       .filter((i) => isUnblocked(i) && !i.activeTaskId).map((i) => i.number);
     if (numbers.length) await scheduler.runUnblocked(schedule.id, ws.id, numbers);
   };
@@ -1959,6 +2004,30 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           return v ? json(v) : bad("no login in progress", 404);
         },
       },
+      // 「CLI の表を読む」 (#1401): read only when asked (the claude executable is about 240 MB), never at boot or on a timer
+      "/api/settings/model-candidates": {
+        GET: async () => {
+          const read = opts.modelCatalog ?? ((r: CatalogRunner) => hostReaders()[r]());
+          const parsers: [CatalogRunner, typeof claudeCatalog][] = [["claude", claudeCatalog], ["codex", codexCatalog]];
+          const out = await Promise.all(
+            parsers.map(async ([runner, parse]) => {
+              try {
+                // a runner without its adapter cannot take a 足す or 載せない (the PATCH refuses it), so its table is not offered
+                if (!adapterMap.has(runner)) return { runner, error: "ランナーが検出されていない" };
+                const text = await read(runner);
+                if (text === null) return { runner, error: "CLI が PATH に無い" };
+                const catalog = parse(text);
+                if (!catalog.length) return { runner, error: "モデル表が 0 件（CLI の形式が変わった）" };
+                const listed = (savedModels(runner) ?? adapterMap.get(runner)?.models ?? []).map((m) => m.value);
+                return { runner, candidates: modelCandidates(catalog, listed, settings().hiddenModels[runner] ?? SHIPPED_HIDDEN_MODELS[runner]) };
+              } catch (e) {
+                return { runner, error: String((e as Error).message ?? e) };
+              }
+            }),
+          );
+          return json(out);
+        },
+      },
       "/api/settings": {
         GET: () => json({ ...settings(), runners: runnerInfo(), defaults: tunableDefaults() }),
         PATCH: strong(async (req, srv) => {
@@ -2012,6 +2081,18 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             const dup = rows.find((m, i) => rows.findIndex((o) => o.value === m.value) !== i);
             if (dup) return bad(`model "${dup.value}" is listed twice`);
             next.models[runner] = rows;
+          }
+          // The 載せない list (#1401): the whole list per runner, null = back to the bundled list's. Only a runner with a
+          // model list of its own; blank ids are dropped, an empty list hides nothing.
+          for (const [runner, ids] of Object.entries(parsed.data.hiddenModels ?? {})) {
+            if (ids === null) {
+              delete next.hiddenModels[runner];
+              continue;
+            }
+            const adapter = adapterMap.get(runner as RunnerId);
+            if (!adapter) return bad(`runner "${runner}" is not installed`);
+            if (!adapter.models?.length) return bad(`runner "${runner}" has no model list`);
+            next.hiddenModels[runner] = [...new Set(ids.map((id) => id.trim()).filter(Boolean))];
           }
           // LLM routing suggestions (#25): a partial patch; the runner must be detected because the suggestion is
           // produced by that runner's own adapter. Enabling it spends that subscription's quota per task creation.
@@ -2094,6 +2175,24 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           db.setSetting(SETTINGS_KEY, next);
           logOp(req, srv, "settings.update", { detail: { keys: Object.keys(parsed.data) } });
           return json({ ...next, runners: runnerInfo(), defaults });
+        }),
+      },
+
+      /**
+       * The ADK servers added in Settings (docs/design/custom-adapter.md). PUT replaces the whole list; the daemon reads
+       * it at start, so a change takes effect after a restart. A token's value has no field (strict: refused).
+       */
+      "/api/custom-runners": {
+        GET: () => json(db.getCustomRunners()),
+        PUT: strong(async (req, srv) => {
+          const parsed = CustomRunnerList.safeParse(await req.json().catch(() => null));
+          if (!parsed.success) return bad(parsed.error.message);
+          const names = parsed.data.map((r) => r.name);
+          const dup = names.find((n, i) => names.indexOf(n) !== i);
+          if (dup) return bad(`name "${dup}" is used twice`);
+          db.setCustomRunners(parsed.data);
+          logOp(req, srv, "settings.customRunners", { detail: { names } });
+          return json(parsed.data);
         }),
       },
 
@@ -2394,19 +2493,23 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
          * `backlog`: `switchboard` keeps the workspace's backlog in Switchboard only (#2265): its source is set now and
          * stored as an empty import, so it reads as current and nothing asks GitHub. Absent = `github` (a path already
          * registered keeps its own). A path already registered with the other one is 409 (switching is #2266).
+         * `ownCopy` (with `repo`, #2579): someone else's repository is also copied to a new private `<you>/<name>`, the
+         * clone's origin; 400 on a repository you can push to, 409 when `<you>/<name>` is already there.
          */
         POST: strong(async (req, srv) => {
-          const body = await readJson(req, (x) => x as { path?: string; name?: string; repo?: string; backlog?: unknown });
+          const body = await readJson(req, (x) => x as { path?: string; name?: string; repo?: string; backlog?: unknown; ownCopy?: unknown });
           // absent = github; any other value (null too) is refused
           const backlogAt = body.backlog === undefined ? "github" : body.backlog;
           if (backlogAt !== "github" && backlogAt !== "switchboard") return bad('backlog must be "github" or "switchboard"');
+          if (body.ownCopy !== undefined && typeof body.ownCopy !== "boolean") return bad("ownCopy must be a boolean");
+          if (body.ownCopy && body.repo === undefined) return bad("ownCopy は repo と一緒に指定してください");
           if (body.repo !== undefined) {
             if (body.path !== undefined) return bad("path と repo はどちらか一方です");
             const repo = typeof body.repo === "string" ? parseGithubRepo(body.repo) : null;
             if (!repo) return bad("repo は owner/name か https://github.com/owner/name の形で指定してください");
             try {
-              const row = await clones.start(repo, { backlog: body.backlog === undefined ? undefined : backlogAt });
-              logOp(req, srv, "workspace.clone", { detail: { repo: row.repo, path: row.path } });
+              const row = await clones.start(repo, { backlog: body.backlog === undefined ? undefined : backlogAt, ownCopy: body.ownCopy === true });
+              logOp(req, srv, "workspace.clone", { detail: { repo: row.repo, path: row.path, ...(body.ownCopy ? { ownCopy: true } : {}) } });
               return json({ repo: row.repo, path: row.path, state: row.state }, 202);
             } catch (e) {
               if (e instanceof CloneError) return bad(e.message, e.status);
@@ -2602,6 +2705,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           if (!db.getWorkspace(workspaceId)) return bad("workspace not found", 404);
           if (!source) return bad("まだ GitHub から取り込んでいません", 409);
           try {
+            // a local change (#2485): its branches are read in the workspace's checkout
+            if (input.change) checkLocalChange(db, source, db.getWorkspace(workspaceId)!.path, input.change);
             // a backlog kept here only (#2265) has no service to refuse a parent that is not there, and its fields take
             // the choices of the workspace's ops.config.json
             if (!syncsGithub(source)) {
@@ -2701,7 +2806,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           const ws = db.getWorkspace(new URL(req.url).searchParams.get("workspaceId") ?? "");
           if (!ws) return bad("workspace not found", 404);
           const detail = readStoredIssue(db, ws, issueRef(req.params.number ?? ""), { importFailed: backlog.importError(ws) !== null });
-          return detail ? json(detail) : bad(`#${req.params.number} は保存されていません`, 404);
+          if (!detail) return bad(`#${req.params.number} は保存されていません`, 404);
+          // a local change's tips (#2485), read now: they move with every commit and are not kept
+          const change = detail.issue.change;
+          return json({ ...detail, changeRefs: change ? { head: branchTip(ws.path, change.head), base: branchTip(ws.path, change.base) } : null });
         },
         /**
          * Edits it (#886): stored here at once (202, the operations) and sent to GitHub later. Or, with `resolve` alone,
@@ -2717,6 +2825,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           if (!source) return bad("まだ GitHub から取り込んでいません", 409);
           try {
             const { resolve, retry, ...edit } = input;
+            if (edit.change && source.service !== "switchboard") return bad("変更は GitHub 連携の無い workspace だけで作れます", 422);
             if (!syncsGithub(source)) {
               // the Issue's own number, whether named by it or by its local id
               checkLocalParent(db, source, edit.parent, readStoredIssue(db, { id: workspaceId }, issueRef(req.params.number ?? ""))?.issue.number);
@@ -2905,6 +3014,13 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             const why = attachments.check(parsed.data.attachmentIds);
             if (why) return bad(why.message, why.status);
           }
+          if (parsed.data.process !== undefined) {
+            try {
+              loadProcess(parsed.data.process, metaWorkspace()?.path);
+            } catch (e) {
+              return bad(`process not found: ${(e as Error).message ?? e}`);
+            }
+          }
           try {
             // cwd omitted: the named Workspace's path, or — with no Workspace named either — "自動" (#135). The LLM
             // turn comes after every check above and after the runner check, so a request that cannot become a task
@@ -2921,7 +3037,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             const bill = (t: Task) => {
               if (chosen) for (const u of chosen.usage) db.insertLedger(ledgerRowFor(pricingTable(), { id: t.id, runner: chosen.runner, model: u.model ?? null }, u, Date.now()));
             };
-            const task = input.executionMode === "cloud" ? tasks.create(input, undefined, bill) : createRouted(input, bill);
+            const task = input.executionMode === "cloud" ? tasks.create(input, undefined, (t) => { recordProvenance(t, input); bill(t); }) : createRouted(input, bill);
             if (task.permissionMode && adapterMap.get(task.runner)?.permissionModes?.find((m) => m.value === task.permissionMode)?.danger) {
               logOp(req, srv, "task.create.danger", { task: task.id, detail: { runner: task.runner, mode: task.permissionMode } });
             }
@@ -2930,6 +3046,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             return bad(String((e as Error).message ?? e), 409);
           }
         },
+      },
+
+      // The process candidates (docs/design/process-kernel.md, K4), as the meta checkout defines them.
+      "/api/processes": {
+        GET: () => json(listProcesses(metaWorkspace()?.path).map((d) => ({ id: d.id, version: d.version, title: d.title, fits: d.fits }))),
       },
 
       "/api/tasks/suggest": {
@@ -3167,6 +3288,15 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
 
       "/api/tasks/:id/abort": {
         POST: async (req) => json(await tasks.abort(String(req.params.id))),
+      },
+
+      // Provenance (docs/design/process-kernel.md, K1): what the task was started with; null for a task from before it was recorded.
+      "/api/tasks/:id/provenance": {
+        GET: (req) => {
+          const id = String(req.params.id);
+          if (!db.getTask(id)) return bad("not found", 404);
+          return json(db.getTaskProvenance(id));
+        },
       },
 
       // Usage-limit resume (#102): continue now instead of waiting, or forget the planned resume.
@@ -3555,7 +3685,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           // the user can fix the note; the task is not silently duplicated because get() above refuses promoted notes.
           let task;
           try {
-            task = tasks.create({ ...input.data, cwd: ws.path });
+            task = tasks.create({ ...input.data, cwd: ws.path }, undefined, (t) => recordProvenance(t, input.data));
           } catch (e) {
             return bad(String((e as Error).message ?? e), 409);
           }

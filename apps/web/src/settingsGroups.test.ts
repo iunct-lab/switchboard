@@ -32,9 +32,9 @@ describe("SETTINGS_GROUPS", () => {
   });
 
   test("the values that can be set are the same as before the reordering", () => {
-    // the top-level keys of every save({ … }) in Settings.tsx on main before #3356
+    // the top-level keys of every save({ … }) in Settings.tsx on main before #3356, and hiddenModels (載せない, #1401)
     const keys = new Set([...source.matchAll(/save\(\{ ?(\w+):/g)].map((m) => m[1]));
-    expect([...keys].sort()).toEqual(["autoResume", "autoStart", "bedrock", "defaultPermissionMode", "evals", "judge", "judgeAndChoice", "models", "newDefaults", "prices", "quotaAndResume", "routing", "shadowRunner", "titles"]);
+    expect([...keys].sort()).toEqual(["autoResume", "autoStart", "bedrock", "defaultPermissionMode", "evals", "hiddenModels", "judge", "judgeAndChoice", "models", "newDefaults", "prices", "quotaAndResume", "routing", "shadowRunner", "titles"]);
   });
 
   test("an unknown group id throws", () => {

@@ -1047,7 +1047,10 @@ describe("merge-gate reads GitHub, not the stored backlog (#909)", () => {
   test("it does not import the daemon's database or the stored backlog: a PR's head, reviews, checks and protection are read from gh each time", async () => {
     const src = await Bun.file(new URL("./merge-gate.ts", import.meta.url)).text();
     const imports = [...src.matchAll(/^import .* from "([^"]+)"/gm)].map((m) => m[1]!);
-    expect(imports.filter((i) => /packages\/core|db|backlog|sqlite|parallel-guard/.test(i))).toEqual([]);
+    // a local change (--change, #2487) has no other place than the app: its view, through the kit's client, never a PR's
+    expect(imports.filter((i) => /packages\/core|db|backlog|sqlite|parallel-guard/.test(i))).toEqual(["../ops-kit/src/backlog-client.ts"]);
+    // readPr (a PR) never reads it
+    expect(src.slice(src.indexOf("export async function readPr("), src.indexOf("/** A local change as")).includes("Backlog")).toBe(false);
     expect(src).not.toMatch(/bun:sqlite|switchboard\.db|readStoredBacklog|listBacklogRecords/);
   });
 });
@@ -1147,5 +1150,144 @@ describe("GitLab MR (#924)", () => {
     } finally {
       require("node:fs").rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("local change (#2487)", () => {
+  const BACKLOG = "http://app/api/backlog";
+  /** A repository with no remote: main, and a branch sb/5-x of `lines` added lines in one commit dated 2026-01-01. */
+  function repo(lines = 3) {
+    const dir = mkdtempSync(join(tmpdir(), "merge-gate-change-"));
+    const git = (...args: string[]) => execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgSign=false", ...args], { encoding: "utf8", env: { ...process.env, GIT_AUTHOR_DATE: "2026-01-01T00:00:00Z", GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z" } }).trim();
+    git("init", "-q", "-b", "main");
+    writeFileSync(join(dir, "a.ts"), "a\n");
+    git("add", "-A");
+    git("commit", "-q", "-m", "a");
+    git("checkout", "-q", "-b", "sb/5-x");
+    mkdirSync(join(dir, "src"));
+    writeFileSync(join(dir, "src", "b.ts"), Array.from({ length: lines }, (_, i) => `b${i}\n`).join(""));
+    git("add", "-A");
+    git("commit", "-q", "-m", "b");
+    git("checkout", "-q", "main");
+    return { dir, git, tip: (b: string) => git("rev-parse", b) };
+  }
+  type Repo = ReturnType<typeof repo>;
+  const REVIEW = { body: "[claude] review\n\n### Intent and design", createdAt: "2026-01-02T00:00:00Z" };
+  /** The app's answers: the workspace list, and change #7 with these comments and the tips of `r` now. */
+  function app(r: Repo, comments: { body: string; createdAt: string }[], state = "OPEN") {
+    const calls: string[] = [];
+    const fetch = async (url: string) => {
+      const path = url.replace(BACKLOG, "");
+      calls.push(path);
+      const body = path === ""
+        ? { syncs: [{ workspaceId: "ws_local", backlog: "switchboard", repository: "ws_local", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] }
+        : { issue: { number: 7, title: "変更", state, labels: [], milestone: null, parent: null, subIssues: [], body: "", url: "", change: { head: "sb/5-x", base: "main", mergeCommit: null, mergedAt: null } }, changeRefs: { head: r.tip("sb/5-x"), base: r.tip("main") }, comments: comments.map((c, i) => ({ id: `sb:${i}`, ...c })), fields: null, fetchedAt: 1, localId: null, pending: 0, held: [], sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } };
+      return new Response(JSON.stringify(body));
+    };
+    return { fetch, calls };
+  }
+  /** main --change 7 in `r` with gh failing the test if called. */
+  async function gate(r: Repo, comments: { body: string; createdAt: string }[], extra: string[] = [], state = "OPEN") {
+    const a = app(r, comments, state);
+    const out: string[] = [];
+    const err: string[] = [];
+    const ghCalls: string[][] = [];
+    const run = async (args: string[]) => { ghCalls.push(args); throw new Error("gh called"); };
+    const code = await main(["--change", "7", ...extra], run, (s) => out.push(s), (s) => err.push(s), () => undefined, async () => { throw new Error("glab called"); }, r.dir, { env: { BACKLOG_URL: BACKLOG, BACKLOG_WORKSPACE: "ws_local" }, fetch: a.fetch });
+    expect(ghCalls).toEqual([]);
+    return { code, j: out.length ? JSON.parse(out.join("\n")) : null, err: err.join("\n"), calls: a.calls };
+  }
+  const mark = (result: "pass" | "fail", r: Repo) => `[local-ci] ${result} ${r.tip("sb/5-x")} base=${r.tip("main")}\n\n結果`;
+  const pass = (r: Repo, at = "2026-01-03T00:00:00Z") => ({ body: mark("pass", r), createdAt: at });
+  const repos: Repo[] = [];
+  const fresh = (lines?: number) => {
+    const r = repo(lines);
+    repos.push(r);
+    return r;
+  };
+  afterAll(() => { for (const r of repos) rmSync(r.dir, { recursive: true, force: true }); });
+
+  test("(a) reviewed and a local-ci pass of the head and base now: merge, read from the app and git only", async () => {
+    const r = fresh();
+    const g = await gate(r, [REVIEW, pass(r)]);
+    expect(g.code).toBe(0);
+    expect(g.j).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [] });
+    expect(g.calls).toEqual(["", "/7?workspaceId=ws_local"]);
+  });
+
+  test("(b) a commit after the review: no newer main review stops", async () => {
+    const r = fresh();
+    r.git("checkout", "-q", "sb/5-x");
+    writeFileSync(join(r.dir, "src", "c.ts"), "c\n");
+    r.git("add", "-A");
+    execFileSync("git", ["-C", r.dir, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "c"], { env: { ...process.env, GIT_AUTHOR_DATE: "2026-01-05T00:00:00Z" } });
+    r.git("checkout", "-q", "main");
+    const g = await gate(r, [REVIEW, pass(r, "2026-01-06T00:00:00Z")]);
+    expect(g.code).toBe(1);
+    expect(g.j.reasons).toEqual([expect.stringContaining("より新しい主レビュー")]);
+  });
+
+  test("(c) a pass of an older base: no CI, with the note", async () => {
+    const r = fresh();
+    const old = pass(r);
+    writeFileSync(join(r.dir, "z.ts"), "z\n");
+    r.git("add", "-A");
+    r.git("commit", "-q", "-m", "z");
+    const g = await gate(r, [REVIEW, old]);
+    expect(g.code).toBe(1);
+    expect(g.j.reasons).toEqual(["CI のチェックが 1 つも無い", expect.stringMatching(/^local-ci の pass の base（[0-9a-f]{7}）が今の base の先端（[0-9a-f]{7}）でない/)]);
+    // none at all: no note
+    const none = await gate(r, [REVIEW]);
+    expect(none.j.reasons).toEqual(["CI のチェックが 1 つも無い"]);
+  });
+
+  test("(c') a fail after the pass does not count the pass", async () => {
+    const r = fresh();
+    const g = await gate(r, [REVIEW, pass(r), { body: mark("fail", r), createdAt: "2026-01-04T00:00:00Z" }]);
+    expect(g.j.reasons).toEqual(["CI のチェックが 1 つも無い", "local-ci の最新が fail"]);
+  });
+
+  test("(d) a conflict with the base's tip: DIRTY", async () => {
+    const r = fresh();
+    mkdirSync(join(r.dir, "src"));
+    writeFileSync(join(r.dir, "src", "b.ts"), "other\n");
+    r.git("add", "-A");
+    r.git("commit", "-q", "-m", "conflict");
+    const g = await gate(r, [REVIEW, pass(r)]);
+    expect(g.code).toBe(1);
+    expect(g.j.reasons).toEqual(["mergeStateStatus が CLEAN でない: DIRTY"]);
+  });
+
+  test("(e) a closed change stops", async () => {
+    const r = fresh();
+    const g = await gate(r, [REVIEW, pass(r)], [], "CLOSED");
+    expect(g.j.reasons).toEqual(["mergeStateStatus が CLEAN でない: CLOSED"]);
+  });
+
+  test("(f) over 300 lines: [再チェック size], lifted by its mark of the head", async () => {
+    const r = fresh(301);
+    const g = await gate(r, [REVIEW, pass(r)]);
+    expect(g.code).toBe(1);
+    expect(g.j).toMatchObject({ impact: "large", recheck: ["size"], reasons: [expect.stringMatching(/^\[再チェック size\] .*301 行/)] });
+    const marked = await gate(r, [REVIEW, pass(r), { body: `[recheck] size pass ${r.tip("sb/5-x")}`, createdAt: "2026-01-04T00:00:00Z" }]);
+    expect(marked.code).toBe(0);
+  });
+
+  test("not judged (2): not a change, a branch gone, a PR number or --repo or a merge mode with it", async () => {
+    const r = fresh();
+    for (const extra of [["12"], ["--repo", "a/b"], ["--merge"]]) expect((await gate(r, [REVIEW], extra)).code).toBe(2);
+    const noChange = async (url: string) => new Response(JSON.stringify(url.endsWith("/api/backlog") ? { syncs: [{ workspaceId: "ws_local", backlog: "switchboard", repository: "ws_local", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] } : { issue: { number: 7, title: "x", state: "OPEN", labels: [], milestone: null, parent: null, subIssues: [], body: "", url: "" }, changeRefs: null, comments: [], fields: null, fetchedAt: 1, localId: null, pending: 0, sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } }));
+    const err: string[] = [];
+    expect(await main(["--change", "7"], async () => { throw new Error("gh"); }, () => {}, (s) => err.push(s), () => undefined, async () => { throw new Error("glab"); }, r.dir, { env: { BACKLOG_URL: BACKLOG, BACKLOG_WORKSPACE: "ws_local" }, fetch: noChange })).toBe(2);
+    expect(err.join("")).toContain("#7 は変更ではない");
+    // a branch gone: the app answers its tip as null
+    const gone = async (url: string) => {
+      const body = JSON.parse(await (await app(r, [REVIEW]).fetch(url)).text());
+      if (body.changeRefs) body.changeRefs.head = null;
+      return new Response(JSON.stringify(body));
+    };
+    const goneErr: string[] = [];
+    expect(await main(["--change", "7"], async () => { throw new Error("gh"); }, () => {}, (s) => goneErr.push(s), () => undefined, async () => { throw new Error("glab"); }, r.dir, { env: { BACKLOG_URL: BACKLOG, BACKLOG_WORKSPACE: "ws_local" }, fetch: gone })).toBe(2);
+    expect(goneErr.join("")).toContain("#7 の枝が無い（sb/5-x）");
   });
 });

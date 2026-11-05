@@ -13,6 +13,7 @@ import { withHeavySlot } from "./heavy.ts";
 import { IDLE_KILLED_LINE, IDLE_SECONDS_MAX, runIdle } from "./idle-run.ts";
 import { formatLint, lint } from "./lint.ts";
 import { pullMain } from "./pull-main.ts";
+import { gitIn, pushRebased } from "./push-rebased.ts";
 import { check, spawnRun, sync, withStaleNote } from "./public-sync.ts";
 import { checkRequestBody, createRequest } from "./request.ts";
 import { scanIssues } from "./scan.ts";
@@ -91,6 +92,9 @@ ${BACKLOG_USAGE}
   pr resolve-thread <thread id>...
       PR のレビュースレッドを resolve する（GraphQL の resolveReviewThread だけ。id は PRRT_ で始まるもの）。
       id の形が違えば何もせず exit 1。resolve にならなかったスレッドがあれば exit 1。設定ファイルは要らない
+  pr push-rebased
+      自動の rebase が解けなかった枝を手で rebase した後、今の枝だけを origin の同名の枝へ --force-with-lease で push する（引数なし）。
+      今の枝が既定の枝（origin/HEAD。読めなければ main と master）か枝の無い HEAD なら push せずに exit 1。push が断られても exit 1
   heavy [--name <名前>] -- <コマンド…>
       重い処理（ローカル CI、全テスト、偽のデーモン + headless Chrome、レビューのセッションなど）の枠をマシンで 1 つ取ってから
       コマンドを動かす。枠が全部埋まっている間と、空きメモリ（MemAvailable）が下限を下回る間は待ち、理由（枠を持つ処理の名前・cwd・
@@ -331,7 +335,13 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
   if (command === "mr") return mr(rest, glab, out, err);
   if (command === "pr") {
     const [sub, ...ids] = rest;
-    if (sub !== "resolve-thread" || ids.length === 0) return usage(err, "pr resolve-thread <thread id>...");
+    if (sub === "push-rebased") {
+      if (ids.length) return usage(err, "pr push-rebased（引数は取りません）", 2);
+      const r = pushRebased(gitIn(process.cwd()));
+      (r.ok ? out : err)(r.message);
+      return r.ok ? 0 : 1;
+    }
+    if (sub !== "resolve-thread" || ids.length === 0) return usage(err, "pr resolve-thread <thread id>... | pr push-rebased");
     const bad = ids.filter((id) => !/^PRRT_[\w-]+$/.test(id));
     if (bad.length) return usage(err, `レビュースレッドの id ではありません（PRRT_ で始まるもの）: ${bad.join(" ")}`);
     let failed = 0;
