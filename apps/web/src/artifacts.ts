@@ -12,6 +12,11 @@ export function viewOf(a: Pick<Artifact, "kind" | "mime">): ArtifactView {
   return "external";
 }
 
+/** A Markdown file (#3677): shown as text, with the プレビュー / テキスト switch. A URL artifact never is. */
+export function isMarkdown(a: Pick<Artifact, "kind" | "mime">): boolean {
+  return a.kind !== "url" && a.mime.toLowerCase() === "text/markdown";
+}
+
 /** The tab's name: the count shows once there is something. */
 export function artifactsLabel(n: number): string {
   return n > 0 ? `成果物（${n}）` : "成果物";

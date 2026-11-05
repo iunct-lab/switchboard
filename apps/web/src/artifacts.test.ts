@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { artifactsLabel, pickArtifact, viewOf } from "./artifacts.ts";
+import { artifactsLabel, isMarkdown, pickArtifact, viewOf } from "./artifacts.ts";
 
 const f = (mime: string, kind: "file" | "dir" | "url" = "file") => viewOf({ kind, mime });
 
@@ -26,4 +26,12 @@ test("pickArtifact (#1778): the requested one when present, else the current one
   expect(pickArtifact(list, undefined, null)).toEqual({ id: "a", gone: false });
   expect(pickArtifact([], "zz", null)).toEqual({ id: null, gone: true });
   expect(pickArtifact([], undefined, "a")).toEqual({ id: null, gone: false });
+});
+
+test("isMarkdown: only markdown files", () => {
+  expect(isMarkdown({ kind: "file", mime: "text/markdown" })).toBe(true);
+  expect(isMarkdown({ kind: "dir", mime: "text/markdown" })).toBe(true);
+  expect(isMarkdown({ kind: "file", mime: "text/plain" })).toBe(false);
+  expect(isMarkdown({ kind: "file", mime: "text/html" })).toBe(false);
+  expect(isMarkdown({ kind: "url", mime: "text/markdown" })).toBe(false);
 });

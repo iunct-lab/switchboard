@@ -4,6 +4,12 @@ import { recording, recordingsDir } from "./recordings.ts";
 
 export const RECORDINGS_COMMIT = "fcfbb6918f3ca4443a5d6b366c6fabd5a60303ec";
 export const RECORDINGS = [
+  "packages/adapters/adk/fixtures/adk-2.13.0-artifact.sse",
+  "packages/adapters/adk/fixtures/adk-2.13.0-ask-deny.sse",
+  "packages/adapters/adk/fixtures/adk-2.13.0-ask.sse",
+  "packages/adapters/adk/fixtures/adk-2.13.0-native-allow.sse",
+  "packages/adapters/adk/fixtures/adk-2.13.0-native.sse",
+  "packages/adapters/adk/fixtures/adk-2.13.0-text.sse",
   "packages/adapters/claude/fixtures/ask-user-question.jsonl",
   "packages/adapters/claude/fixtures/classifier-ask.jsonl",
   "packages/adapters/claude/fixtures/classifier-stop.jsonl",

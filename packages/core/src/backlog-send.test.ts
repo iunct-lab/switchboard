@@ -558,6 +558,71 @@ test("a field read again right after it was written: another value there is held
   expect(db.listPendingBacklogOperations(S)[0]).toMatchObject({ status: "conflict", error: expect.stringContaining('GitHub は "あちらの題"') });
 });
 
+test("422 で断られた set (#3515): GitHub が既に送る値なら done で後ろも送られ、読み直しても違う値なら failed", async () => {
+  const g = fakeGithub();
+  editStoredIssue(db, S, 12, { state: "CLOSED" });
+  commentStoredIssue(db, S, 12, "閉じた後の結果");
+  editStoredIssue(db, S, 3, { state: "CLOSED" });
+  // #12: the Project's Auto-close closes it between the check and the PATCH, which GitHub refuses with 422
+  const gh: GhRunner = async (args, cwd) => {
+    if (args.includes("PATCH") && args.includes("repos/acme/app/issues/12")) g.issues.get(12)!.state = "CLOSED";
+    return g.gh(args, cwd);
+  };
+  g.fail.push({ match: (a) => a.includes("PATCH") && a.includes("repos/acme/app/issues/12"), status: 422 });
+  // #3: refused, and GitHub is still OPEN
+  g.fail.push({ match: (a) => a.includes("PATCH") && a.includes("repos/acme/app/issues/3"), status: 422 });
+  const [closing] = db.listPendingBacklogOperations(S);
+  expect(await send(gh)).toBe(2);
+  expect(db.getBacklogOperation(closing!.id)).toMatchObject({ status: "done", error: expect.stringContaining("読み直すと GitHub は既に送る値") });
+  expect(statuses()).toEqual([["set", "state", "failed"]]);
+  expect(g.issues.get(12)!.comments.map((c) => c.body)).toEqual([expect.stringContaining("閉じた後の結果")]);
+  expect(g.issues.get(3)!.state).toBe("OPEN");
+});
+
+test("422 で断られた set の読み直し (#3515): 上限なら待って送り直し、ほかの失敗なら failed", async () => {
+  const g = fakeGithub();
+  editStoredIssue(db, S, 12, { state: "CLOSED" });
+  // the read after the refusal meets a limit: the run stops, the edit waits for the time and is not failed
+  const readAfterPatch = (status: number, headers?: string): GhRunner => async (args, cwd) => {
+    if (args.includes("PATCH")) {
+      g.issues.get(12)!.state = "CLOSED";
+      g.fail.push({ match: (a) => a[1] === "graphql", status, headers });
+    }
+    return g.gh(args, cwd);
+  };
+  g.fail.push({ match: (a) => a.includes("PATCH"), status: 422 });
+  await expect(send(readAfterPatch(429, "retry-after: 120\n"))).rejects.toMatchObject({ kind: "limit" });
+  expect(db.listPendingBacklogOperations(S)[0]).toMatchObject({ status: "pending", retryAt: t + 120_000 });
+  // GitHub not reached, or the login refused, on the read: the same, waiting and not failed
+  for (const [answer, kind] of [["error connecting to api.github.com", "offline"], ["HTTP 401: Bad credentials", "auth"]] as const) {
+    t += 3_600_000;
+    g.issues.get(12)!.state = "OPEN";
+    let patched = false;
+    const gh: GhRunner = async (args, cwd) => {
+      if (args.includes("PATCH")) {
+        patched = true;
+        g.issues.get(12)!.state = "CLOSED";
+      } else if (patched && args[1] === "graphql") return { code: 1, stdout: kind === "auth" ? "HTTP/2.0 401 X\ncontent-type: application/json\n\n{}" : "", stderr: answer };
+      return g.gh(args, cwd);
+    };
+    g.fail.push({ match: (a) => a.includes("PATCH"), status: 422 });
+    await expect(send(gh)).rejects.toMatchObject({ kind, until: kind === "offline" ? t + 60_000 : t });
+    // not a try and no time of its own: the host's wait decides when it goes again
+    expect(db.listPendingBacklogOperations(S)[0]).toMatchObject({ status: "pending", retryAt: null });
+  }
+  // another failure of the read: failed as before
+  db.sqlite.query("DELETE FROM backlog_operations").run();
+  g.issues.get(12)!.state = "OPEN";
+  editStoredIssue(db, S, 3, { state: "CLOSED" });
+  const other: GhRunner = async (args, cwd) => {
+    if (args.includes("PATCH")) g.fail.push({ match: (a) => a[1] === "graphql", status: 404 });
+    return g.gh(args, cwd);
+  };
+  g.fail.push({ match: (a) => a.includes("PATCH"), status: 422 });
+  expect(await send(other)).toBe(0);
+  expect(statuses()).toEqual([["set", "state", "failed"]]);
+});
+
 test("a field edit left unknown by a restart is checked again like any edit: refused, it is failed, not unknown", async () => {
   const g = fakeGithub();
   editStoredIssue(db, S, 12, { title: "再起動の前" });
@@ -674,6 +739,88 @@ test("history (#1329): two edits of theirs in the same second keep the newer; an
   expect(d3.listPendingBacklogOperations(S).map((o) => [o.issue, o.status])).toEqual([["I_12", "conflict"], ["I_3", "pending"]]);
   expect(g3.issues.get(3)!.title).toBe("親");
   d3.close();
+});
+
+test("unreadable の未確認の競合 (#3518): 上限が戻った後の送信で履歴を読み直し、ほかの編集が無ければ done、あれば競合、読み切れない・旧形式は今どおり", async () => {
+  const afterRead = (a: string[]) => a.some((x) => x.includes("timelineItems"));
+  const unverified = async (d: Db, g: ReturnType<typeof fakeGithub>) => {
+    g.fail.push({ match: afterRead, status: 429, headers: "retry-after: 120\n" });
+    editStoredIssue(d, S, 12, { title: "v3" }, t);
+    commentStoredIssue(d, S, 12, "題の後のコメント", t);
+    await expect(sendGithubOperations(g.gh, d, dir, S, clock)).rejects.toBeInstanceOf(Limit);
+    const [op] = d.listPendingBacklogOperations(S);
+    expect(op).toMatchObject({ status: "conflict", overwritten: { unreadable: expect.stringContaining("429"), since: expect.any(String) } });
+    t += 3_600_000;
+    return op!;
+  };
+  // the history read again: no one else's edit → done, and the comment behind it goes out
+  const g = fakeGithub();
+  const op = await unverified(db, g);
+  expect(await send(g.gh)).toBe(2);
+  expect(db.getBacklogOperation(op.id)).toMatchObject({ status: "done", overwritten: null, error: expect.stringContaining("確かめました") });
+  expect(g.issues.get(12)!.comments).toHaveLength(1);
+  // another login's edit in the window → the conflict with it, the comment still held
+  const g2 = fakeGithub();
+  const d2 = new Db(join(dir, "two.db"));
+  seed(d2);
+  const op2 = await unverified(d2, g2);
+  g2.history.push({ issue: 12, by: "them", at: op2.overwritten!.since!, field: "title", value: "相手の題" });
+  expect(await sendGithubOperations(g2.gh, d2, dir, S, clock)).toBe(0);
+  expect(d2.getBacklogOperation(op2.id)).toMatchObject({ status: "conflict", overwritten: { value: "相手の題", editor: "them" } });
+  expect(g2.issues.get(12)!.comments).toHaveLength(0);
+  d2.close();
+  // still not read whole, or the history read refused again: held as it was
+  const g3 = fakeGithub();
+  const d3 = new Db(join(dir, "three.db"));
+  seed(d3);
+  const op3 = await unverified(d3, g3);
+  g3.state.historyNext = true;
+  expect(await sendGithubOperations(g3.gh, d3, dir, S, clock)).toBe(0);
+  g3.state.historyNext = false;
+  g3.fail.push({ match: afterRead, status: 403 });
+  expect(await sendGithubOperations(g3.gh, d3, dir, S, clock)).toBe(0);
+  expect(d3.getBacklogOperation(op3.id)).toMatchObject({ status: "conflict", overwritten: { unreadable: expect.stringContaining("429") } });
+  // a limit on the read again: the run stops, the conflict stays as it was
+  g3.fail.push({ match: afterRead, status: 429, headers: "retry-after: 120\n" });
+  await expect(sendGithubOperations(g3.gh, d3, dir, S, clock)).rejects.toBeInstanceOf(Limit);
+  expect(d3.getBacklogOperation(op3.id)).toMatchObject({ status: "conflict", overwritten: { unreadable: expect.stringContaining("429") } });
+  d3.close();
+  // stored before `since` was kept (no since): not read again, the user chooses as before
+  const g4 = fakeGithub();
+  const d4 = new Db(join(dir, "four.db"));
+  seed(d4);
+  const op4 = await unverified(d4, g4);
+  d4.sqlite.query("UPDATE backlog_operations SET overwritten = ? WHERE id = ?").run(JSON.stringify({ editor: null, at: null, unreadable: "古い保留" }), op4.id);
+  let reads = 0;
+  const counting: GhRunner = async (a, c) => {
+    if (afterRead(a)) reads++;
+    return g4.gh(a, c);
+  };
+  expect(await sendGithubOperations(counting, d4, dir, S, clock)).toBe(0);
+  expect(reads).toBe(0);
+  expect(d4.getBacklogOperation(op4.id)).toMatchObject({ status: "conflict", overwritten: { unreadable: "古い保留" } });
+  d4.close();
+});
+
+test("unreadable の未確認の競合 (#3518): Project の Status は自動化の変更を相手の編集と数えず、Project の読みの上限は送信を止めて保留のまま", async () => {
+  const afterRead = (a: string[]) => a.some((x) => x.includes("timelineItems"));
+  const projectRead = (a: string[]) => a.some((x) => x.includes("projectV2(number:"));
+  const g = fakeGithub();
+  g.fail.push({ match: afterRead, status: 429, headers: "retry-after: 120\n" });
+  editStoredIssue(db, S, 12, { fields: { Status: "Ready" } }, t);
+  await expect(send(g.gh)).rejects.toBeInstanceOf(Limit);
+  const [op] = db.listPendingBacklogOperations(S);
+  expect(op).toMatchObject({ field: "field:Status", status: "conflict", overwritten: { since: expect.any(String) } });
+  t += 3_600_000;
+  // the Project's id read again by the new run meets a limit: the run stops, the conflict stays as it was
+  g.fail.push({ match: projectRead, status: 429, headers: "retry-after: 120\n" });
+  await expect(send(g.gh)).rejects.toBeInstanceOf(Limit);
+  expect(db.getBacklogOperation(op!.id)).toMatchObject({ status: "conflict", overwritten: { unreadable: expect.stringContaining("429") } });
+  // the automation moving the Status in the window is nobody's edit: done
+  g.history.push({ issue: 12, by: "github-project-automation", at: op!.overwritten!.since!, field: "field:Status", value: "In progress" });
+  t += 3_600_000;
+  expect(await send(g.gh)).toBe(1);
+  expect(db.getBacklogOperation(op!.id)).toMatchObject({ status: "done", error: expect.stringContaining("確かめました") });
 });
 
 test("history (#1329): a title write does not ask for the body's edits — a body edit of theirs in the history is not its concern", async () => {

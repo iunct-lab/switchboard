@@ -119,6 +119,17 @@ describe("noWrite: a clone marked ops-kit.noWrite (#2576)", () => {
     expect(await repoOf(fakeGh([]), {}, repoWithOrigin("https://github.com/someone/widget.git"))).toEqual({ owner: "someone", name: "widget" });
   });
 
+  test("noWrite: origin is mine and upstream is marked → repoOf is mine, writes to upstream stop", async () => {
+    // a workspace with its own private copy (#2579): origin is the copy, gh's default chosen on it
+    const dir = foreign();
+    Bun.spawnSync(["git", "remote", "add", "origin", "https://github.com/me/widget.git"], { cwd: dir, env: { ...process.env } });
+    expect(await repoOf(fakeGh([]), {}, dir)).toEqual({ owner: "me", name: "widget" });
+    Bun.spawnSync(["git", "config", "remote.origin.gh-resolved", "base"], { cwd: dir, env: { ...process.env } });
+    expect(await repoOf(fakeGh([]), {}, dir)).toEqual({ owner: "me", name: "widget" });
+    const e = await repoOf(fakeGh([]), { GH_REPO: "someone/widget" }, dir).then(() => null, (err: unknown) => err);
+    expect((e as Error).message).toContain("ops-kit.noWrite");
+  });
+
   test("noWrite: noWriteTargets lists the public copy and every mark once, lower-cased; outside git it is empty", () => {
     const dir = repoWithOrigin(null, "Acme/Widget");
     for (const v of ["someone/widget", "https://github.com/Someone/Widget.git", "other/thing"]) Bun.spawnSync(["git", "config", "--add", "ops-kit.noWrite", v], { cwd: dir, env: { ...process.env } });

@@ -1,13 +1,13 @@
-// test-reads: none
+// test-reads: scripts/ui-layers-metrics.ts scripts/ui-layers-placement.ts scripts/ui-layers-report.ts scripts/ui-layers-requests.ts
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, AskBatch, RunnerAdapter, RunnerSession, StartOptions } from "@switchboard/protocol";
 import { approvalWindowNote } from "./approval-batch.ts";
 import { loadConfig } from "./config.ts";
 import { Db } from "./db.ts";
-import { Scheduler } from "./scheduler.ts";
+import { Scheduler, UI_LAYERS_PROMPT } from "./scheduler.ts";
 import { scanAllRepos } from "./secretscan.ts";
 import { noticeAsks, scanFindings } from "./asks.ts";
 import { promotionNote, type PromotionHold } from "./backlog.ts";
@@ -99,6 +99,8 @@ describe("scheduler (#20)", () => {
     const task = await sc.runNow(s.id, "manual");
     expect(task).not.toBeNull();
     expect(sc.recentLog().at(-1)).toContain("started");
+    // a schedule's Task records no candidate and the schedule as its reason (docs/design/process-kernel.md, K1)
+    expect(db.getTaskProvenance(task!.id)).toMatchObject({ process: null, processReason: `schedule ${s.id}` });
     await expect(sc.runNow("nope")).rejects.toThrow(/not found/);
   });
 
@@ -708,4 +710,43 @@ describe("scheduler approval-window (#2046)", () => {
     await sc.tick();
     expect(shown(newer, 2, now + 1).asks.map((a) => a.question)).toEqual(["昇格待ち: v0.9.1（18 時間、動いている Task 2 件）— ヘッダーの「新しい版 →」から昇格できる"]);
   });
+});
+
+describe("scheduler ui-layers (#3353)", () => {
+  test("ui-layers: claude only on meta; a firing starts the check's Task with its fixed instruction, and a hot 7-day window skips it with the reason", async () => {
+    const metaPath = join(home, "meta");
+    mkdirSync(metaPath);
+    const metaId = db.upsertWorkspace({ name: "meta", path: metaPath, kind: "meta" }).id;
+    const sc = new Scheduler(db, tasks, () => now, undefined, undefined, () => 0.8);
+    expect(() => sc.create({ title: "点検", cron: "0 9 1 * *", workspaceId: metaId, runner: "codex", action: "ui-layers" })).toThrow("ui-layers runs on claude");
+    expect(() => sc.create({ title: "点検", cron: "0 9 1 * *", workspaceId: wsId, runner: "claude", action: "ui-layers" })).toThrow("meta workspace only");
+    const s = sc.create({ title: "点検", cron: "0 9 1 * *", workspaceId: metaId, runner: "claude", action: "ui-layers" });
+    expect(() => sc.update(s.id, { runner: "codex" })).toThrow("ui-layers runs on claude");
+
+    // at the threshold, the window not reset yet: no Task, the reason in the log
+    db.upsertQuota("claude", "seven_day", 0.85, now / 1000 + 3600);
+    expect(await sc.runNow(s.id)).toBeNull();
+    expect(db.listTasks()).toHaveLength(0);
+    expect(sc.recentLog().at(-1)).toMatch(/点検: ui-layers を飛ばした \(manual\): Claude の 7 日枠が 85% で閾値 80% 以上/);
+
+    // under it: one Task on claude with the fixed instruction, tied to the schedule
+    db.upsertQuota("claude", "seven_day", 0.5, now / 1000 + 3600);
+    const t = await sc.runNow(s.id);
+    expect(t).toMatchObject({ runner: "claude", scheduleId: s.id, title: "床・天井・壁の点検 (2026-09-06 00:00)" });
+    // the instruction goes with the usual preamble (unlike insights' bare /insights): the Task registers its report as an artifact
+    expect(started.at(-1)!.prompt).toContain(UI_LAYERS_PROMPT);
+    expect(started.at(-1)!.preamble).toContain("switchboard-artifact");
+  });
+});
+
+test("UI_LAYERS_PROMPT names scripts that exist, with flags they read (#3353)", () => {
+  const root = join(import.meta.dir, "../../..");
+  const calls = [...UI_LAYERS_PROMPT.matchAll(/bun (scripts\/[\w-]+\.ts)([^。（\n]*)/g)];
+  expect(calls.map((c) => c[1])).toEqual(["scripts/ui-layers-metrics.ts", "scripts/ui-layers-placement.ts", "scripts/ui-layers-report.ts", "scripts/ui-layers-requests.ts"]);
+  for (const [, script, rest] of calls) {
+    expect(existsSync(join(root, script!))).toBe(true);
+    const src = readFileSync(join(root, script!), "utf8");
+    for (const [flag] of rest!.matchAll(/--[\w-]+/g)) expect(`${script} ${flag}: ${src.includes(`"${flag}"`)}`).toBe(`${script} ${flag}: true`);
+  }
+  expect(readFileSync(join(root, "scripts/ui-layers-report.ts"), "utf8")).toContain('"--history"');
 });

@@ -885,6 +885,17 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     expect(e).toBeInstanceOf(TargetError);
     expect(e.message).not.toContain("SECRET");
     expect(remoteRepo("https://gitlab.com/o/r.git")).toBeUndefined();
+    // a forge naming the app (#2488): no PR to run, whatever the origin
+    const appTree = mkdtempSync(join(CACHE, "app-forge-"));
+    writeFileSync(join(appTree, "ops.config.json"), JSON.stringify({ forge: { service: "app" } }));
+    for (const args of [["7"], ["7", "--repo", "o/r"]]) {
+      const x = await resolveTarget(args, appTree, appTree, run("https://github.com/o/r.git", appTree).sh).catch((err) => err);
+      expect(x).toBeInstanceOf(TargetError);
+      expect(x.message).toContain("--change <n> で回す");
+    }
+    // a forge that cannot be read is the target's error too (exit 2), not a crash
+    writeFileSync(join(appTree, "ops.config.json"), "{");
+    expect(await resolveTarget(["7", "--repo", "o/r"], appTree, appTree, run("https://github.com/o/r.git", appTree).sh).catch((err) => err)).toBeInstanceOf(TargetError);
   });
 });
 
@@ -957,6 +968,9 @@ test("recordBundle: appends one row per run to perf-records/bundle.tsv, creating
 test("the result is reported as the repository's forge verification (#920): GitHub's is the PR comment; another service is said, nothing posted", async () => {
   const root = mkdtempSync(join(tmpdir(), "local-ci-forge-"));
   try {
+    // a checkout of GitHub (one without a remote is the app's: the "local change" tests)
+    Bun.spawnSync(["git", "init", "-q", root]);
+    Bun.spawnSync(["git", "-C", root, "remote", "add", "origin", "https://github.com/example/app.git"]);
     const calls: string[][] = [];
     const run = async (cmd: string[]) => (calls.push(cmd), "");
     await reportResult({ pr: 7, repo: "example/app", root }, "[local-ci] pass abc", run);
@@ -965,8 +979,7 @@ test("the result is reported as the repository's forge verification (#920): GitH
     await expect(reportResult({ pr: 7, repo: "group/app", root }, "[local-ci] pass abc", run)).rejects.toThrow("サービス gitea には対応していません");
     expect(calls).toHaveLength(1);
     // GitLab's (#924): a note on the MR through glab, on the project its forge names (checked against the origin)
-    Bun.spawnSync(["git", "init", "-q", root]);
-    Bun.spawnSync(["git", "-C", root, "remote", "add", "origin", "git@gitlab.example.com:group/app.git"]);
+    Bun.spawnSync(["git", "-C", root, "remote", "set-url", "origin", "git@gitlab.example.com:group/app.git"]);
     require("node:fs").writeFileSync(join(root, "ops.config.json"), JSON.stringify({ forge: { service: "gitlab", host: "gitlab.example.com", project: "group/app" } }));
     const lab: string[][] = [];
     await reportResult({ pr: 7, repo: "ignored/here", root }, "[local-ci] pass abc", run, async (cmd) => (lab.push(cmd), "{}"));
@@ -1065,4 +1078,113 @@ test("two local-ci runs do not overlap: each takes one heavy slot for its whole 
   expect(of("b").length).toBeGreaterThan(0);
   const [first, second] = of("a")[0]!.start < of("b")[0]!.start ? [of("a"), of("b")] : [of("b"), of("a")];
   expect(Math.max(...first.map((s) => s.end))).toBeLessThanOrEqual(Math.min(...second.map((s) => s.start)));
+});
+
+describe("local change (#2488)", () => {
+  const BACKLOG = "http://app/api/backlog";
+  /** A repository with no remote: main with a ci.yml whose one step is `run`, and sb/5-x one commit ahead. */
+  function repo(run: string) {
+    const dir = mkdtempSync(join(tmpdir(), "local-ci-change-"));
+    const git = (...a: string[]) => Bun.spawnSync(["git", "-C", dir, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgSign=false", ...a]).stdout.toString().trim();
+    git("init", "-q", "-b", "main");
+    mkdirSync(join(dir, ".github/workflows"), { recursive: true });
+    writeFileSync(join(dir, ".github/workflows/ci.yml"), `jobs:\n  check:\n    steps:\n      - run: ${run}\n`);
+    git("add", "-A");
+    git("commit", "-q", "-m", "ci");
+    git("checkout", "-q", "-b", "sb/5-x");
+    writeFileSync(join(dir, "b.txt"), "b\n");
+    git("add", "-A");
+    git("commit", "-q", "-m", "b");
+    git("checkout", "-q", "main");
+    return { dir, git, tip: (b: string) => git("rev-parse", b) };
+  }
+  /** The app: change #7 of `r`'s branches, its comments, and the comments posted. `onRead` runs at each read of the change. */
+  function app(r: ReturnType<typeof repo>, comments: { body: string; createdAt: string }[] = [], onRead = () => {}) {
+    const posted: unknown[] = [];
+    const fetch = async (url: string, init: RequestInit = {}) => {
+      const path = url.replace(BACKLOG, "");
+      if (path === "") return new Response(JSON.stringify({ syncs: [{ workspaceId: "ws_l", backlog: "switchboard", repository: "ws_l", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] }));
+      if (path === "/7/comment") return posted.push(JSON.parse(String(init.body))), new Response("{}", { status: 202 });
+      onRead();
+      return new Response(JSON.stringify({ workspaceId: "ws_l", issue: { number: 7, title: "変更", state: "OPEN", labels: [], milestone: null, parent: null, subIssues: [], body: "", url: "", change: { head: "sb/5-x", base: "main", mergeCommit: null, mergedAt: null } }, changeRefs: { head: r.tip("sb/5-x"), base: r.tip("main") }, comments: comments.map((c, i) => ({ id: `sb:${i}`, ...c })), fields: null, fetchedAt: 1, localId: null, pending: 0, held: [], sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } }));
+    };
+    return { fetch, posted };
+  }
+  const env = { BACKLOG_URL: BACKLOG, BACKLOG_WORKSPACE: "ws_l" };
+  async function run(r: ReturnType<typeof repo>, a: ReturnType<typeof app>, args: string[] = []) {
+    const gh: string[][] = [];
+    const logs: string[] = [];
+    const d: Deps = {
+      sh: async (cmd, cwd) => {
+        if (cmd[0] === "gh") gh.push(cmd);
+        return realSh(cmd, cwd);
+      },
+      step: stepWithIdle(60),
+      log: (l) => logs.push(l),
+      slot: (_name, fn) => fn(),
+    };
+    const code = await main(["--change", "7", ...args], r.dir, d, async () => { throw new Error("reportResult called"); }, r.dir, CACHE, { env, fetch: a.fetch });
+    expect(gh).toEqual([]);
+    return { code, logs };
+  }
+  const dirs: string[] = [];
+  afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
+  const fresh = (step: string) => {
+    const r = repo(step);
+    dirs.push(r.dir);
+    return r;
+  };
+
+  test("pass: head merged into the base's tip, the pass mark of both goes on the change; again is not run", async () => {
+    const r = fresh("test -f b.txt");
+    const a = app(r);
+    expect((await run(r, a)).code).toBe(0);
+    expect(a.posted).toHaveLength(1);
+    const posted = a.posted[0] as { workspaceId: string; text: string };
+    expect(posted.workspaceId).toBe("ws_l");
+    expect(passOf(posted.text)).toEqual([r.tip("sb/5-x"), r.tip("main")]);
+    // the run's worktree is gone after it
+    expect(readdirSync(CACHE).filter((f) => f.startsWith("switchboard.local-ci-change-ws_l-7."))).toEqual([]);
+    const again = app(r, [{ body: posted.text, createdAt: new Date().toISOString() }]);
+    const second = await run(r, again);
+    expect([second.code, again.posted.length]).toEqual([0, 0]);
+    expect(second.logs.join("\n")).toContain("既に pass");
+    // --force runs it again and posts
+    const forced = app(r, [{ body: posted.text, createdAt: new Date().toISOString() }]);
+    expect([(await run(r, forced, ["--force"])).code, forced.posted.length]).toEqual([0, 1]);
+  });
+
+  test("fail: the fail mark goes on the change, exit 1; its log dir is the change's", async () => {
+    const r = fresh("exit 1");
+    const a = app(r);
+    expect((await run(r, a)).code).toBe(1);
+    const text = (a.posted[0] as { text: string }).text;
+    expect(LOCAL_CI_RESULT.exec(text)?.slice(1)).toEqual(["fail", r.tip("sb/5-x"), r.tip("main")]);
+    expect(readdirSync(CACHE).some((f) => f.startsWith("switchboard.local-ci-change-ws_l-7-log."))).toBe(true);
+  });
+
+  test("a branch that moved during the run: nothing posted, exit 1", async () => {
+    const r = fresh("echo ok");
+    let reads = 0;
+    const a = app(r, [], () => {
+      // the first read is the target's, the second the run's own; the third (after the run) sees a new base
+      if (++reads === 3) {
+        writeFileSync(join(r.dir, "z.txt"), "z\n");
+        r.git("add", "-A");
+        r.git("commit", "-q", "-m", "z");
+      }
+    });
+    const res = await run(r, a);
+    expect([res.code, a.posted.length]).toEqual([1, 0]);
+    expect(res.logs.join("\n")).toContain("実行中に変わった");
+  });
+
+  test("not run (2): a PR number or --repo with it; not a change", async () => {
+    const r = fresh("echo ok");
+    for (const extra of [["12"], ["--repo", "a/b"]]) expect((await run(r, app(r), extra)).code).toBe(2);
+    // a checkout with an origin keeps its PRs on its service: nothing is run or posted on a PR of that number
+    r.git("remote", "add", "origin", "https://github.com/example/app.git");
+    const a = app(r);
+    expect([(await run(r, a)).code, a.posted.length]).toEqual([2, 0]);
+  });
 });

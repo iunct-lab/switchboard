@@ -10,7 +10,7 @@ import { reportMeta } from "../reports.ts";
 import { quotaAsOf, quotaStale, resetLabel, windowLabel } from "../quota.ts";
 import { staleDraft } from "../presets.ts";
 import { editChanged, toggleDraft, type DraftEdit } from "../inbox.ts";
-import { listedRunners } from "../runners.ts";
+import { isAdkRunner, listedRunners, runnerLabel } from "../runners.ts";
 import { PresetPicker } from "./PresetPicker.tsx";
 import { titleToSend } from "../taskTitle.ts";
 import { detailsSummary, loadDetailsOpen, saveDetailsOpen } from "../composeDetails.ts";
@@ -204,20 +204,21 @@ export function Home(props: {
         .catch(() => undefined);
   }, [props.health]);
   const dakOk = props.runnerOk.has("dak");
-  const shadowOn = runner !== "dak" && dakOk && (shadow ?? shadowDefault === "dak");
+  const shadowOn = !isAdkRunner(runner) && dakOk && (shadow ?? shadowDefault === "dak");
   // What 詳細 says while closed: what differs from an untouched form (the rule's model, the saved shadow). Cloud sends
   // none of model / effort / budget / shadow, so they are not shown as changed there. An untouched model is the rule's
   // (the effect below fills the select a render later): read so, the line does not flash 「モデル: CLI 既定」 meanwhile.
   const defaultModel = suggestion?.model && runner === suggestion.runner ? suggestion.model : "";
-  const defaultShadow = runner !== "dak" && dakOk && shadowDefault === "dak";
+  const defaultShadow = !isAdkRunner(runner) && dakOk && shadowDefault === "dak";
   const summary = detailsSummary(
     cloud ? { title, executionMode: "cloud", model: defaultModel, effort: "", budget: "", shadow: defaultShadow } : { title, executionMode: "local", model: modelTouched ? model : defaultModel, effort, budget, shadow: shadowOn },
     { model: defaultModel, shadow: defaultShadow, briefTitle: brief?.title },
   );
   // What the request says about the shadow. Untouched → omitted, so the daemon applies its saved default itself (also
   // one this page has not loaded yet, or a non-DAK one set through the API); a click → explicit. A DAK primary with
-  // DAK as the default says null: the daemon would only note that the shadow equals the primary.
-  const shadowRunnerField: RunnerId | null | undefined = runner === "dak" ? (shadowDefault === "dak" ? null : undefined) : shadow === null ? undefined : shadow && dakOk ? "dak" : null;
+  // DAK as the default says null: the daemon would only note that the shadow equals the primary. An ADK server added in
+  // Settings offers no shadow toggle, so it says null too: the saved DAK default does not ride along unseen.
+  const shadowRunnerField: RunnerId | null | undefined = runner.startsWith("custom:") ? null : runner === "dak" ? (shadowDefault === "dak" ? null : undefined) : shadow === null ? undefined : shadow && dakOk ? "dak" : null;
   // The newest report across Tasks (#1835), read once per visit to Home, and whether any artifact exists (#1833): the
   // レポート heading and its link to every artifact show when either does; nothing at all when neither does.
   const [latestReport, setLatestReport] = useState<ReportRow | null>(null);
@@ -486,8 +487,8 @@ export function Home(props: {
               </select>
             )}
             {!cloud && runnerInfo && modes.length === 0 && (
-              <span className="hint" title="DAK は agent 側の require_confirmation と Switchboard の mcp.yaml が確認の要否を決めます。承認は従来どおりここに届きます">
-                承認: DAK 側の設定で決まる
+              <span className="hint" title={`${runnerLabel(runner, runnerInfo)} は agent 側の require_confirmation と Switchboard の mcp.yaml が確認の要否を決めます。承認は従来どおりここに届きます`}>
+                承認: {runnerLabel(runner, runnerInfo)} 側の設定で決まる
               </span>
             )}
           </div>
@@ -525,7 +526,7 @@ export function Home(props: {
             {!cloud && <ModelSelect runner={runnerInfo} value={model} onChange={(v) => { setModel(v); setModelTouched(true); setRunnerTouched(true); /* a model belongs to this runner: the router must not swap it away */ }} label="モデル" title="この Task を動かすモデル。「CLI 既定」はランナー自身の設定（かっこ内）で動きます。作成後も Brief から変えられます" />}
             {!cloud && <EffortSelect runner={runnerInfo} value={effort} onChange={(e) => { setEffort(e); setRunnerTouched(true); /* chosen for this runner: the router must not swap it away */ }} label="思考の深さ" title="この Task の思考の深さ。「CLI 既定」はランナー自身の設定で動きます。作成後は変えられません" />}
             {!cloud && <input className="model" value={budget} onChange={(e) => setBudget(e.target.value)} placeholder="予算 USD（API 換算・任意）" inputMode="decimal" title="超過したら確認して止まります" />}
-            {!cloud && runner !== "dak" && listedRunners(props.health?.runners).includes("dak") && (
+            {!cloud && !isAdkRunner(runner) && listedRunners(props.health?.runners).includes("dak") && (
               <label
                 className={`hint toggle shadow ${!dakOk || shadowDefault === undefined ? "off" : ""}`}
                 title={!dakOk ? "DAK の agent（http://127.0.0.1:8000、SWITCHBOARD_DAK_URL で変更）に到達できません。DAK リポジトリで docker compose up" : shadowDefault === undefined ? "保存した既定を読み込み中" : "同じ依頼を DAK（DAK に設定したモデル。ローカルモデルなら API 料金なし）でも同時に実行し、並走 Task として並べます。追加の返信も写されます"}

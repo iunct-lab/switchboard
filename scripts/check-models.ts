@@ -7,7 +7,8 @@
  *
  * Prints one line per runner and finding:
  *   <runner> stale: <ids>   — listed in the UI but not in the CLI's table (an old or mistyped id)
- *   <runner> unseen: <ids>  — in the CLI's table but not in REVIEWED (a model nobody has looked at yet)
+ *   <runner> unseen: <ids>  — in the CLI's table but neither listed nor hidden (the settings' 載せない, else
+ *                             SHIPPED_HIDDEN_MODELS): a model nobody has looked at yet
  *   <runner> 価格表未整備: <ids> — listed in the UI but priced by no row of the settings screen's prices or pricing.json (the
  *                                  user's ~/.switchboard/pricing.json first), layered as the daemon layers them
  *   unpriced (ledger): ...       — the claude / codex model names the ledger could not price, split into new (in the CLI's
@@ -25,63 +26,18 @@
  */
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { PricingTable } from "@switchboard/protocol";
 import { Settings, type SettingsPrice } from "../packages/protocol/src/index.ts";
 import { CLAUDE_MODELS } from "../packages/adapters/claude/src/index.ts";
 import { CODEX_MODELS } from "../packages/adapters/codex/src/index.ts";
+import { claudeCatalog, codexCatalog, hostReaders, SHIPPED_HIDDEN_MODELS, type Readers } from "../packages/core/src/model-catalog.ts";
 import { loadPricing, resolveModel } from "../packages/core/src/pricing.ts";
 import { fileRequest } from "./file-request";
 
 export type Runner = "claude" | "codex";
-
-/**
- * Ids a person has looked at and decided to list or leave out (2026-10-30, claude 2.1.312 / codex-cli 0.166.0).
- * When a new id shows up as unseen, decide whether it goes in the settings screen's list first, then add it here.
- */
-export const REVIEWED: Record<Runner, string[]> = {
-  claude: [
-    "claude-3-5-haiku", "claude-3-5-sonnet", "claude-3-7-sonnet",
-    "claude-fable-5", "claude-fable-5-1",
-    "claude-haiku-4-5", "claude-haiku-5-5",
-    "claude-mythos-5", "claude-mythos-5-1",
-    "claude-opus-4-0", "claude-opus-4-1", "claude-opus-4-5", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5",
-    "claude-sonnet-4-0", "claude-sonnet-4-5", "claude-sonnet-4-6", "claude-sonnet-5", "claude-sonnet-5-5",
-  ],
-  codex: ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
-};
-
-const CLAUDE_ENTRY = /\{id:"(claude-[a-z0-9-]+)",family:"([a-z]+)",display_name:"([^"]+)"/g;
-
-/** Ids of the model table embedded in the claude executable: `{id:"claude-opus-5-5",family:"opus",display_name:"Opus 5.5",…}`. */
-export function claudeCatalog(text: string): string[] {
-  const ids = new Set<string>();
-  for (const m of text.matchAll(CLAUDE_ENTRY)) ids.add(m[1]!);
-  return [...ids];
-}
-
-/**
- * The embedded table's entries, scanned chunk by chunk: the executable is about 240 MB, and one string of it got the
- * script OOM-killed on a 3.8 GB host. The tail of each chunk is carried into the next so an entry cut in two is found.
- */
-export async function claudeTableText(file: string): Promise<string> {
-  const found: string[] = [];
-  let carry = "";
-  for await (const chunk of Bun.file(file).stream()) {
-    const text = carry + Buffer.from(chunk).toString("latin1");
-    for (const m of text.matchAll(CLAUDE_ENTRY)) found.push(m[0]);
-    carry = text.slice(-512);
-  }
-  return found.join("\n");
-}
-
-/** Slugs of `codex debug models --bundled` that the CLI offers (`visibility: "list"`; `"hide"` is internal). */
-export function codexCatalog(json: string): string[] {
-  const models = (JSON.parse(json) as { models?: { slug?: unknown; visibility?: unknown }[] }).models ?? [];
-  return models.filter((m) => m.visibility === "list" && typeof m.slug === "string").map((m) => m.slug as string);
-}
 
 export function compareModels(a: { listed: string[]; catalog: string[]; reviewed: string[] }): { stale: string[]; unseen: string[] } {
   return {
@@ -143,6 +99,15 @@ export function listedModels(dbPath: string): Record<Runner, string[]> {
   return { claude: (saved.claude ?? CLAUDE_MODELS).map((m) => m.value), codex: (saved.codex ?? CODEX_MODELS).map((m) => m.value) };
 }
 
+/**
+ * The ids each runner leaves out of its list on purpose (#1401): the settings' 載せない list, else the bundled list's
+ * (SHIPPED_HIDDEN_MODELS) — also when there is no database, table or row.
+ */
+export function hiddenModels(dbPath: string): Record<Runner, string[]> {
+  const saved: Partial<Record<string, string[]>> = savedSettings(dbPath)?.hiddenModels ?? {};
+  return { claude: saved.claude ?? SHIPPED_HIDDEN_MODELS.claude, codex: saved.codex ?? SHIPPED_HIDDEN_MODELS.codex };
+}
+
 /** The price rows saved on the settings screen's モデルの価格 (#1402); {} when there is none. */
 export function settingsPrices(dbPath: string): Record<string, SettingsPrice> {
   return savedSettings(dbPath)?.prices ?? {};
@@ -160,30 +125,6 @@ export function classifyUnpriced(names: { runner: Runner; model: string }[], cat
     if (catalog) (catalog.includes(n.model.replace(/\[[^\]]*\]$/, "").replace(/-\d{8}$/, "")) ? out.new : out.unknown).push(`${n.runner} ${n.model}`);
   }
   return out;
-}
-
-/** Where each CLI's table comes from. null = the CLI is not installed. */
-export interface Readers {
-  claude(): Promise<string | null>;
-  codex(): Promise<string | null>;
-}
-
-/** The installed CLIs found on `path` (the process's PATH unless given). */
-export function hostReaders(path = process.env.PATH ?? ""): Readers {
-  return {
-    async claude() {
-      const bin = Bun.which("claude", { PATH: path });
-      return bin ? claudeTableText(realpathSync(bin)) : null;
-    },
-    async codex() {
-      const bin = Bun.which("codex", { PATH: path });
-      if (!bin) return null;
-      const p = Bun.spawn([bin, "debug", "models", "--bundled"], { stdout: "pipe", stderr: "pipe" });
-      const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
-      if (code !== 0) throw new Error(`codex debug models --bundled exited ${code}: ${err.trim()}`);
-      return out;
-    },
-  };
 }
 
 /** The npm package each CLI ships as; its `latest` dist-tag is the newest version (#1273). */
@@ -271,11 +212,13 @@ export async function checkModels(src: Sources = hostSources()): Promise<Report>
   const catalogs: Partial<Record<Runner, string[]>> = {};
   let code: 0 | 1 | 2 = 0;
   const listed = listedModels(src.dbPath);
+  const hidden = hiddenModels(src.dbPath);
   // the settings screen's rows over the file's, as the daemon layers them (#1402)
   const pricing: PricingTable = { ...src.pricing, models: { ...src.pricing.models, ...settingsPrices(src.dbPath) } };
+  const ids = (parse: (s: string) => { value: string }[]) => (s: string) => parse(s).map((m) => m.value);
   const runners: [Runner, string[], (s: string) => string[], () => Promise<string | null>][] = [
-    ["claude", listed.claude, claudeCatalog, read.claude],
-    ["codex", listed.codex, codexCatalog, read.codex],
+    ["claude", listed.claude, ids(claudeCatalog), read.claude],
+    ["codex", listed.codex, ids(codexCatalog), read.codex],
   ];
   for (const [runner, listed, parse, source] of runners) {
     const unpriced = unpricedListed(listed, pricing, runner);
@@ -304,7 +247,7 @@ export async function checkModels(src: Sources = hostSources()): Promise<Report>
       continue;
     }
     catalogs[runner] = catalog;
-    const { stale, unseen } = compareModels({ listed, catalog, reviewed: REVIEWED[runner] });
+    const { stale, unseen } = compareModels({ listed, catalog, reviewed: [...listed, ...hidden[runner]] });
     if (stale.length) {
       lines.push(`${runner} stale: ${stale.join(", ")}`);
       findings.push({ runner, kind: "stale", ids: stale });
@@ -374,7 +317,7 @@ export function requestFor(report: Report, source: { date: string; versions: str
     "",
     "直し方（docs/design/check-models.md）:",
     "- `stale`: 設定画面の「モデルの選択肢」で古い / 誤った ID を外す・直す（保存していないランナーの一覧は同梱の `CLAUDE_MODELS` / `CODEX_MODELS`。設定画面で直すとその一覧が保存される）",
-    "- `unseen`: 一覧に載せるかを決めて設定画面の「モデルの選択肢」に足し（載せないなら足さない）、どちらでも scripts/check-models.ts の `REVIEWED` に足す",
+    "- `unseen`: 設定画面の「モデルの選択肢」で「CLI の表を読む」を押し、候補を「足す」か「載せない」を選ぶ（PR は要らない。次の実行で設定を読む）",
     "- `価格表未整備`: 設定画面の「モデルの価格」で公式の価格を入れる（`pricing.json` の PR は要らない。次の実行で設定の価格を読む）",
     "- `outdated`: CLI を更新する（Switchboard は更新しない。更新した次の実行で `version: …（最新）` になる）",
     "",

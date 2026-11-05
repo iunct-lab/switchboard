@@ -7,7 +7,7 @@ import type { Backlog, BacklogIssueDetail, RunnerAdapter, Task, Workspace } from
 import { loadConfig } from "./config.ts";
 import { startServer, type CoreServer } from "./server.ts";
 import { createStoredIssue, editStoredIssue, localBacklogSource, type GhRunner } from "./backlog.ts";
-import { applyLocalOperations } from "./backlog-local.ts";
+import { applyLocalOperations, localForgeOf } from "./backlog-local.ts";
 import { Db } from "./db.ts";
 
 // A workspace whose backlog is kept in Switchboard only (#2265): no GitHub Issue or Project, and gh never asked for it.
@@ -355,4 +355,105 @@ test("PATCH backlog switchboard turns sync off and keeps the source (#2266)", as
   expect([gh, never].map((w) => list.syncs.find((s) => s.workspaceId === w.id)?.backlog)).toEqual(["switchboard", "switchboard"]);
   expect(list.errors.map((e) => e.workspaceId)).not.toContain(gh.id);
   expect((await send("PATCH", `/api/workspaces/${gh.id}`, { projectVar: "OTHER_PROJECT_URL" })).status).toBe(409);
+});
+
+/** A git repository in `path` with `main` and a branch `sb/9-x` one commit ahead; the tips. */
+function gitRepo(path: string): { main: string; head: string } {
+  const git = (...args: string[]) => {
+    const r = Bun.spawnSync(["git", "-C", path, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgSign=false", ...args]);
+    if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+    return r.stdout.toString().trim();
+  };
+  git("init", "-q", "-b", "main");
+  writeFileSync(join(path, "a.txt"), "a\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "a");
+  git("checkout", "-q", "-b", "sb/9-x");
+  writeFileSync(join(path, "b.txt"), "b\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "b");
+  git("checkout", "-q", "main");
+  return { main: git("rev-parse", "main"), head: git("rev-parse", "sb/9-x") };
+}
+
+test("a local change: made, numbered with the Issues, commented, read with its tips and merged (#2485)", async () => {
+  const { base, local, create, view, send } = await boot();
+  const ws = await local();
+  const tips = gitRepo(ws.path);
+  await create(ws, { title: "PBI: a", labels: ["type:pbi"] });
+  const made = await create(ws, { title: "Task 9 の変更", body: "Closes #9", change: { head: "sb/9-x", base: "main" } });
+  expect(made).toMatchObject({ status: 202, body: { number: 2 } });
+  // numbered with the Issues, as GitHub numbers PRs
+  expect((await create(ws, { title: "Task: next" })).body.number).toBe(3);
+  // the review's summary and the triage's replies, oldest first
+  for (const text of ["[claude] review\n要約", "振り分け\n| 指摘 | 振り分け | 返信 |"]) expect((await send("POST", "/api/backlog/2/comment", { workspaceId: ws.id, text })).status).toBe(202);
+  const d = await view(ws, 2);
+  expect(d.issue.change).toEqual({ head: "sb/9-x", base: "main", mergeCommit: null, mergedAt: null });
+  expect(d.changeRefs).toEqual({ head: tips.head, base: tips.main });
+  expect(d.comments.map((c) => c.body.split("\n")[0])).toEqual(["[claude] review", "振り分け"]);
+  // an Issue is no change
+  expect((await view(ws, 1)).changeRefs).toBeNull();
+  const list = (await (await fetch(`${base}/api/backlog`)).json()) as Backlog;
+  expect(list.changes).toEqual([{ workspaceId: ws.id, number: 2, title: "Task 9 の変更", state: "OPEN", head: "sb/9-x", base: "main", mergeCommit: null, mergedAt: null, updatedAt: expect.any(String) }]);
+  // a branch not there is 422, a second open change of the same branch 409, head = base 422
+  expect((await create(ws, { title: "x", change: { head: "sb/none", base: "main" } })).status).toBe(422);
+  expect((await create(ws, { title: "x", change: { head: "sb/9-x", base: "nope" } })).status).toBe(422);
+  expect((await create(ws, { title: "x", change: { head: "sb/9-x", base: "main" } })).status).toBe(409);
+  expect((await create(ws, { title: "x", change: { head: "main", base: "main" } })).status).toBe(422);
+  // not a branch name
+  expect((await create(ws, { title: "x", change: { head: "--upload-pack=x", base: "main" } })).status).toBe(400);
+  // merged: the commit stays with its branches; the change is closed
+  const at = new Date().toISOString();
+  expect((await send("PATCH", "/api/backlog/2", { workspaceId: ws.id, state: "CLOSED", change: { mergeCommit: tips.head, mergedAt: at } })).status).toBe(202);
+  expect((await view(ws, 2)).issue).toMatchObject({ state: "CLOSED", change: { head: "sb/9-x", base: "main", mergeCommit: tips.head, mergedAt: at } });
+  // an Issue cannot be merged; a closed change's branch can have a new one
+  expect((await send("PATCH", "/api/backlog/1", { workspaceId: ws.id, state: "CLOSED", change: { mergeCommit: tips.head, mergedAt: at } })).status).toBe(422);
+  // the merge goes with the close; a closed change is not opened again
+  expect((await send("PATCH", "/api/backlog/2", { workspaceId: ws.id, change: { mergeCommit: tips.head, mergedAt: at } })).status).toBe(400);
+  expect((await send("PATCH", "/api/backlog/2", { workspaceId: ws.id, state: "OPEN" })).status).toBe(422);
+  expect((await create(ws, { title: "again", change: { head: "sb/9-x", base: "main" } })).status).toBe(202);
+  // a reflog or a lock name is no branch
+  for (const head of ["main@{0}", "sb/9-x.lock", "sb/", "/sb"]) expect((await create(ws, { title: "x", change: { head, base: "main" } })).status).toBe(400);
+});
+
+test("changes: every open one newest first, then the newest 10 closed (#2485)", async () => {
+  const { base, local, create, send } = await boot();
+  const ws = await local();
+  gitRepo(ws.path);
+  // 13 changes of the same branch, each closed before the next; the last one stays open
+  for (let i = 1; i <= 13; i++) {
+    const n = (await create(ws, { title: `c${i}`, change: { head: "sb/9-x", base: "main" } })).body.number as number;
+    if (i < 13) expect((await send("PATCH", `/api/backlog/${n}`, { workspaceId: ws.id, state: "CLOSED" })).status).toBe(202);
+  }
+  const list = (await (await fetch(`${base}/api/backlog`)).json()) as Backlog;
+  expect(list.changes.map((c) => c.title)).toEqual(["c13", "c12", "c11", "c10", "c9", "c8", "c7", "c6", "c5", "c4", "c3"]);
+});
+
+test("a local change is refused on a GitHub workspace (#2485)", async () => {
+  const { add, dir, send } = await boot();
+  const gh = (await (await add(dir("gh"))).json()) as Workspace;
+  gitRepo(gh.path);
+  const source = { service: "github" as const, host: "github.com", repository: "acme/app", project: { owner: "acme", number: 1 } };
+  core!.db.setWorkspaceBacklogSource(gh.id, source);
+  core!.db.putBacklogSnapshot(source, { records: [], cursor: null, syncedAt: Date.now() });
+  const r = await send("POST", "/api/backlog", { workspaceId: gh.id, title: "x", change: { head: "sb/9-x", base: "main" } });
+  expect(r).toMatchObject({ status: 422, body: { error: expect.stringContaining("GitHub 連携の無い") } });
+  expect((await send("PATCH", "/api/backlog/1", { workspaceId: gh.id, state: "CLOSED", change: { mergeCommit: "a".repeat(40), mergedAt: "x" } })).status).toBe(422);
+  expect(core!.db.listBacklogOperations(source)).toEqual([]);
+});
+
+test("localForgeOf: no origin is the app's; an origin is not; a forge naming the app is, one that cannot be read is not (#2490)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sb-local-forge-"));
+  try {
+    Bun.spawnSync(["git", "init", "-q", dir]);
+    expect(localForgeOf(dir)).toBe(true);
+    Bun.spawnSync(["git", "-C", dir, "remote", "add", "origin", "https://github.com/example/app.git"]);
+    expect(localForgeOf(dir)).toBe(false);
+    writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ forge: { service: "app" } }));
+    expect(localForgeOf(dir)).toBe(true);
+    writeFileSync(join(dir, "ops.config.json"), "{");
+    expect(localForgeOf(dir)).toBe(false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

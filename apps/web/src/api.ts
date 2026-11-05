@@ -1,4 +1,4 @@
-import type { AnswerPolicy, Artifact, AskAnswer, AskAnswerResult, AskBatch, AskBatchResult, AskList, Attachment, Backlog, BacklogAction, BacklogCreateInput, BacklogEditInput, BacklogIssueDetail, CheckRun, CloudPreparation, CreatedIssue, CreateTaskInput, DeviceAuthView, EvalsListRow, EvalsSummary, EventEnvelope, FeedbackInput, FlowView, Footprint, HistoryScanResult, HistorySession, HistoryStatus, InboxNote, InterventionView, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerSummary, LedgerTaskRow, OpsLatency, OpsLoad, OpsResources, OpsStops, PendingApproval, PerfSample, PerfSummaryRow, PolicyInput, PolicyList, PolicyPatch, Preset, PresetExpandInput, PresetExpansion, PresetInput, PresetList, PricingTable, Queue, ReportRow, RoutingLogRow, RoutingStats, RoutingSuggestion, RunnerId, RunnerInfo, Schedule, ScheduleInput, ServerMessage, Settings, SettingsPatch, StagedChange, StopSummary, SuggestInput, Task, TaskDiffFile, TaskEvals, TaskOutcome, TeleportProgress, Workspace, WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
+import type { AnswerPolicy, Artifact, AskAnswer, AskAnswerResult, AskBatch, AskBatchResult, AskList, Attachment, Backlog, BacklogAction, BacklogCreateInput, BacklogEditInput, BacklogIssueDetail, CheckRun, CloudPreparation, CreatedIssue, CreateTaskInput, CustomRunner, DeviceAuthView, EvalsListRow, EvalsSummary, EventEnvelope, FeedbackInput, FlowView, Footprint, HistoryScanResult, HistorySession, HistoryStatus, InboxNote, InterventionView, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerSummary, LedgerTaskRow, ModelCandidates, OpsLatency, OpsLoad, OpsResources, OpsStops, PendingApproval, PerfSample, PerfSummaryRow, PolicyInput, PolicyList, PolicyPatch, Preset, PresetExpandInput, PresetExpansion, PresetInput, PresetList, PricingTable, Queue, ReportRow, RoutingLogRow, RoutingStats, RoutingSuggestion, RunnerId, RunnerInfo, Schedule, ScheduleInput, ServerMessage, Settings, SettingsPatch, StagedChange, StopSummary, SuggestInput, Task, TaskDiffFile, TaskEvals, TaskOutcome, TeleportProgress, Workspace, WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
 import { acrossParams, type AcrossQuery } from "./reports.ts";
 import { hasTypedText, hostStopped, LEAVE_STOPPED, loginRoute, stoppedRoute, type LoginMode } from "./login.ts";
 import type { ReleaseStatus } from "./release.ts";
@@ -145,17 +145,18 @@ export function renewLogin(mode: LoginMode | undefined, method: string | undefin
 /** Test hook: forget the last renewal. */
 export const resetRenewal = () => { renewedAt = 0; };
 
-async function req<T>(url: string, init?: RequestInit, retried = false): Promise<T> {
+async function req<T>(url: string, init?: RequestInit, retried = false, seen?: { status: number }): Promise<T> {
   const token = getToken();
   // A FormData body sets its own multipart content-type (with the boundary); forcing JSON here would break it.
   const headers: Record<string, string> = init?.body instanceof FormData ? {} : { "content-type": "application/json" };
   if (token) headers.authorization = `Bearer ${token}`;
   const r = await fetch(url, { ...init, headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) } });
+  if (seen) seen.status = r.status;
   if (!r.ok) {
     const body = await r.json().catch(() => ({}));
     // a strong operation wants a passkey check from the last 5 minutes (#1491): ask once, then send it again once
     if (isRecentRefusal(r.status, body)) {
-      if (!retried && (await askRecentCheck())) return req<T>(url, init, true);
+      if (!retried && (await askRecentCheck())) return req<T>(url, init, true, seen);
       throw Object.assign(new Error(RECENT_MESSAGE), { status: r.status, body });
     }
     // the cloud host is stopped (CloudFront's HTML page instead of JSON): to the login page, which starts it (#211) —
@@ -175,8 +176,26 @@ async function req<T>(url: string, init?: RequestInit, retried = false): Promise
   return (await r.json()) as T;
 }
 
+/**
+ * A read for the artifact bridge (`scratchBridge.ts`): the same login and retry path as every call here, but a failure
+ * comes back as its status and body instead of a throw, for the artifact to tell. A dropped connection, or a 2xx that is
+ * not JSON, is status 0.
+ */
+export async function apiRaw(path: string, init?: RequestInit): Promise<{ status: number; body: unknown }> {
+  const seen = { status: 0 };
+  try {
+    const body = await req<unknown>(path, init, false, seen);
+    return { status: seen.status, body };
+  } catch (e) {
+    const x = e as { status?: number; body?: unknown; message?: string };
+    // a 2xx whose body is not JSON threw after `seen` was set: not a success for the caller (status 0 like a dropped connection)
+    return { status: x.status ?? (seen.status >= 200 && seen.status < 300 ? 0 : seen.status), body: x.body ?? { error: String(x.message ?? e) } };
+  }
+}
+
 /** GET / PATCH /api/settings: the saved settings, the runners, and the defaults of the tunables (#835) for the settings screen. */
-export type SettingsResponse = Settings & { runners: RunnerInfo[]; defaults: Pick<Settings, "quotaAndResume" | "judgeAndChoice" | "newDefaults"> };
+/** `defaults.hiddenModels` (#1401): each runner's 載せない list while none is saved. */
+export type SettingsResponse = Settings & { runners: RunnerInfo[]; defaults: Pick<Settings, "quotaAndResume" | "judgeAndChoice" | "newDefaults" | "hiddenModels"> };
 
 /** Events per 「以前の会話を読む」 (#1142); the daemon sends the last 200 when a Task is opened. */
 export const OLDER_PAGE = 200;
@@ -285,7 +304,12 @@ export const api = {
   resumeNow: (id: string) => req<Task>(`/api/tasks/${id}/resume`, { method: "POST" }),
   cancelResume: (id: string) => req<Task>(`/api/tasks/${id}/resume`, { method: "DELETE" }),
   settings: () => req<SettingsResponse>("/api/settings"),
+  /** The ADK servers added in Settings (#3388); read by the daemon at its next start. */
+  customRunners: () => req<CustomRunner[]>("/api/custom-runners"),
+  putCustomRunners: (list: CustomRunner[]) => req<CustomRunner[]>("/api/custom-runners", { method: "PUT", body: JSON.stringify(list) }),
   updateSettings: (patch: SettingsPatch) => req<SettingsResponse>("/api/settings", { method: "PATCH", body: JSON.stringify(patch) }),
+  /** 「CLI の表を読む」 (#1401): the installed CLIs' models neither listed nor hidden, or why a table could not be read. Reads the tables (the claude executable is about 240 MB), so only on the button. */
+  modelCandidates: () => req<ModelCandidates>("/api/settings/model-candidates"),
   footprint: (id: string) => req<Footprint>(`/api/tasks/${id}/footprint`),
   footprintFor: (dirs: string[]) => req<Footprint>(`/api/footprint?${dirs.map((d) => `dir=${encodeURIComponent(d)}`).join("&")}`),
   mcpEndpoint: (id: string) => req<{ url: string; token: string }>(`/api/tasks/${id}/mcp`),

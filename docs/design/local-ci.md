@@ -51,6 +51,15 @@ When the perf check ran and printed a `bundle:` line, pass or fail, the comment 
 
 投稿の直前に head と base を同じ方法で読み直し（`notify`）、どちらかが実行中に変わっていたら何も投稿せず exit 1（テストしていない head や base の結果を書かない。回し直す）。投稿した後に base が進んだこと、下の PR のマージ後の自動 rebase で head が変わったことでは回し直さない（コミットごとの差分が同じなら、merge-gate が `git cherry` で pass の head に入っていると数える。印は 1 行目だけで、ほかのリポジトリの local-ci の写しに書式を求めないため（2026-10-29 の決定。前は 2 行目に各 PR の patch-id を書いていた）。いつ回し、merge-gate がどう数えるかは [docs/merge-gate.md](../merge-gate.md) の「ローカル CI を回す時と数え方」）。読み直せなかったときも投稿しない。投稿する文はキットの認証の値の検査（`runForgeOperation`）を通る。投稿が認証・権限で失敗したら、理由を出して exit 1 で止まる（別の経路で投稿しない。Task なら会話で確認する）。結果の印の読み方は `LOCAL_CI_RESULT`（pass か fail、head、続けて `base=`。マージ判定での扱いは [docs/merge-gate.md](../merge-gate.md)）。
 
+### Local changes (`--change`)
+
+A change of a repository without a remote (the kit's `forgeOf` is `app`: no `forge` and no `origin`, or `forge: { "service": "app" }`) runs with `bun scripts/local-ci.ts --change <n> [--all] [--force]`, from inside its checkout, with `BACKLOG_URL` and `BACKLOG_WORKSPACE` (an app Task has them) to read the change. With a PR number or `--repo` it exits 2, and so it does in a checkout whose `forgeOf` is not `app` (the result is never posted on a PR of the same number). The other way round, a PR number in a checkout whose `forge` names `app` exits 2 too (it is never posted on the change of the same number).
+
+- Target: the change's `changeRefs` (the branches' tips, read by `git rev-parse` at each read). Nothing is fetched (there is no remote; the local `refs/heads/<branch>` are read) and gh is not called
+- Steps, environment, worktrees and conflicts are as for a PR (`localCi`): the head merged `--no-ff` into the base's tip. Tests are chosen against the base's tip. Worktrees and logs go to `~/.cache/switchboard.local-ci-change-<workspace id>-<n>…`. No bundle row is recorded (that goes to a GitHub records branch)
+- Result: the same first line, posted as a comment on the change by the `app` row of `reportResult`'s services. The re-read before posting (`notify`) is the PR's: if a branch moved, nothing is posted (exit 1)
+- Reuse: when the change's newest mark is a pass of the current head and base, it does not run again (exit 0; `--force` / `--all` run it). The merge gate (`scripts/merge-gate.ts --change`) counts a pass only for the current head and the base's current tip (there is no tag CI after a local merge). The whole flow: [local-changes.md](local-changes.md)
+
 ### タグの CI
 
 マージ後の main に付いたタグの CI（`bun scripts/tag-ci.ts [--repo <owner/name>]`）は、この文書の手順を同じ環境で回す（worktree で手順を回して失敗の全文を `~/.cache` に残す部分 `runCheckout` を `localCi` と共有する。対象は PR のマージではなく、タグのコミットそのもの）。印は PR の `[local-ci]` ではなく、そのタグの GitHub Release の本文の `[tag-ci] pass|fail <sha>`。`SWITCHBOARD_FIXTURES` を付けて録画が足りないと、タグの CI は手順を回さず印も書かずに exit 2 で止まる（ホストの不足で、タグの結果ではない）。最新のタグから回し、落ちたら遡る規則と読み方は [releases-and-rescue.md](releases-and-rescue.md) の「Tag CI」。

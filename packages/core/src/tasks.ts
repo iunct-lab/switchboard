@@ -738,7 +738,10 @@ export class TaskManager {
    */
   private startShadow(primary: Task, input: NewTaskInput, prompt: string, atts: Attachment[]) {
     if (primary.executionMode === "cloud") return;
-    const runner = input.shadowRunner === undefined ? this.defaultShadowRunner?.() ?? null : input.shadowRunner;
+    // The saved default is for the built-in runners: a Task on an ADK server added in Settings gets a shadow only when
+    // its creation asks for one (a second runner on the same prompt is not what that server's agent was added for).
+    const saved = primary.runner.startsWith("custom:") ? null : (this.defaultShadowRunner?.() ?? null);
+    const runner = input.shadowRunner === undefined ? saved : input.shadowRunner;
     if (!runner) return;
     if (runner === primary.runner) {
       this.record(primary.id, { t: "status", text: `並走（${runner}）は主ランナーと同じなので作りません` });
@@ -1130,6 +1133,8 @@ export class TaskManager {
     const recovery = stopRecoveryPrompt(reduceStops(stopRecordsFor(this.db, task)).filter((s) => s.state !== "resolved"));
     // The insights schedule's Task (#1838) sends `/insights` and nothing else: Claude Code expands a built-in slash
     // command only when it is the whole user message, so nothing goes in front of it (no recap, no stop report).
+    // The ui-layers schedule's Task (#3353) keeps the usual preamble: its instruction is text, and it registers its report
+    // through the artifact fence the preamble describes.
     const bare = !!task.scheduleId && this.db.getSchedule(task.scheduleId)?.action === "insights";
     preamble = bare ? undefined : [preamble, recovery, artifactPrompt()].filter((p): p is string => !!p).join("\n\n");
     // in flight before the adapter can emit anything: its events only move a running / waiting task (onEvent)

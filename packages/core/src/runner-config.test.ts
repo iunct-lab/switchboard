@@ -1,7 +1,7 @@
-// test-reads: none
+// test-reads: ops-kit/processes/
 import { afterEach, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunnerAdapter, Task, Workspace } from "@switchboard/protocol";
@@ -49,6 +49,8 @@ async function boot() {
   const clone = join(base, "widget");
   const own = join(base, "mine");
   for (const d of [home, repoRoot, clone, own]) mkdirSync(d);
+  // the meta checkout carries the kit's process candidates: a stage start reads p0-pipeline from it (#3647)
+  cpSync(join(import.meta.dir, "../../../ops-kit/processes"), join(repoRoot, "ops-kit/processes"), { recursive: true });
   write(clone, ".claude/settings.json", '{"hooks":{}}');
   write(own, ".claude/settings.json", '{"hooks":{}}');
   const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_REPO_ROOT: repoRoot, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
@@ -272,6 +274,30 @@ test("runner config: a stage task on an unconfirmed workspace answers with the r
   expect(r.status).toBe(409);
   expect(r.body.error).toContain("widget は他者のリポジトリです");
   expect(b.core.db.listTasks()).toEqual([]);
+});
+
+test("runner config: an ownCopy workspace is asked too", async () => {
+  // what workspace-clone registers with ownCopy (#2579): origin is your private copy, upstream the original, backlog on GitHub
+  const b = await boot();
+  const copy = join(root!, "copy");
+  mkdirSync(copy);
+  write(copy, ".claude/settings.json", '{"hooks":{}}');
+  spawnSync("git", ["init", "-q", copy]);
+  spawnSync("git", ["-C", copy, "remote", "add", "origin", "https://github.com/me/copy.git"]);
+  spawnSync("git", ["-C", copy, "remote", "add", "upstream", "https://github.com/someone/copy.git"]);
+  const ws = b.core.db.upsertWorkspace({ name: "copy", path: copy, kind: "repo", upstream: "someone/copy" });
+  expect(ws.backlog).toBe("github");
+  const refused = await b.start(ws);
+  expect(refused.status).toBe(409);
+  expect(refused.body.error).toContain("copy は他者のリポジトリです");
+  const seen = await b.send<{ hash: string; files: unknown[] }>("GET", `/api/workspaces/${ws.id}/runner-config`);
+  expect(seen.body.files).toMatchObject([{ path: ".claude/settings.json" }]);
+  expect((await b.send("POST", `/api/workspaces/${ws.id}/runner-config`, { hash: seen.body.hash })).status).toBe(200);
+  expect((await b.start(ws)).status).toBe(201);
+  // the 元の更新を取り込む Task is there for it too
+  const sync = await b.send<Task>("POST", `/api/workspaces/${ws.id}/upstream-sync`);
+  expect(sync.status).toBe(201);
+  expect(sync.body.title).toBe("元の更新を取り込む: someone/copy");
 });
 
 test("runner config: own workspaces are not asked", async () => {

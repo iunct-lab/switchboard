@@ -18,6 +18,8 @@ import { PresetPicker } from "./PresetPicker.tsx";
 import { jstDateTime, jstTime } from "../time.ts";
 import { titleToSave } from "../taskTitle.ts";
 import { AnswerArea } from "./Approvals.tsx";
+import { Markdown, MdViewToggle } from "./Markdown.tsx";
+import { useMdView } from "../mdView.ts";
 import { KIND_LABEL, STATE_LABEL, taskAsks } from "../asks.ts";
 
 export function TaskView(props: {
@@ -320,28 +322,33 @@ export function TaskView(props: {
         <button className="ghost brief-toggle" onClick={props.onBrief}>
           詳細
         </button>
-        <nav className="subtabs">
-          <button className={tab === "chat" ? "on" : ""} onClick={() => setTab("chat")}>
-            会話
-          </button>
-          {!cloud && <button className={tab === "diff" ? "on" : ""} onClick={() => setTab("diff")}>
-            差分{diffCount > 0 ? `（${diffCount} ファイル）` : ""}
-          </button>}
-          <button className={tab === "artifacts" ? "on" : ""} onClick={() => { setArtifactsOpened(true); setTab("artifacts"); }}>
-            {artifactsLabel(artifactCount)}
-          </button>
-          {props.pty && (
-            <button
-              className={tab === "terminal" ? "on" : ""}
-              onClick={() => {
-                setTerminalOpened(true);
-                setTab("terminal");
-              }}
-            >
-              ターミナル
+        {/* the switch rides with the tabs (#3677): one item of the wrapping head, so a run's status line and the 完了-only
+            buttons coming and going break the head's first line as before and do not push the switch to a line of its own */}
+        <div className="task-tabs">
+          {tab === "chat" && <MdViewToggle />}
+          <nav className="subtabs">
+            <button className={tab === "chat" ? "on" : ""} onClick={() => setTab("chat")}>
+              会話
             </button>
-          )}
-        </nav>
+            {!cloud && <button className={tab === "diff" ? "on" : ""} onClick={() => setTab("diff")}>
+              差分{diffCount > 0 ? `（${diffCount} ファイル）` : ""}
+            </button>}
+            <button className={tab === "artifacts" ? "on" : ""} onClick={() => { setArtifactsOpened(true); setTab("artifacts"); }}>
+              {artifactsLabel(artifactCount)}
+            </button>
+            {props.pty && (
+              <button
+                className={tab === "terminal" ? "on" : ""}
+                onClick={() => {
+                  setTerminalOpened(true);
+                  setTab("terminal");
+                }}
+              >
+                ターミナル
+              </button>
+            )}
+          </nav>
+        </div>
       </div>
 
       {tab === "diff" && (
@@ -470,6 +477,13 @@ export function TaskView(props: {
   );
 }
 
+/** A runner's reply: Markdown preview or the plain text (#3677). Only this subscribes to the switch, so switching redraws the
+ *  replies and not the tool rows around them. */
+function ReplyText(props: { text: string }) {
+  const [view] = useMdView();
+  return view === "preview" ? <div className="tx"><Markdown text={props.text} /></div> : <div className="tx">{props.text}</div>;
+}
+
 function TranscriptItem(props: {
   item: Item;
   runner: Task["runner"];
@@ -507,7 +521,7 @@ function TranscriptItem(props: {
             {it.text && copy(undefined, () => itemText(it))}
             {props.turn && copy("ターンの返答をコピー", props.turn)}
           </div>
-          {it.text && <div className="tx">{it.text}</div>}
+          {it.text && <ReplyText text={it.text} />}
           {it.attachments && <AttachmentGallery items={it.attachments} />}
         </div>
       );

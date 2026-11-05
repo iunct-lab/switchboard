@@ -3,6 +3,7 @@ import { LOCAL_CI_RESULT, sh } from "./local-ci";
 import { forgeTargetOf, originOf, type ForgeTarget } from "../ops-kit/src/forge.ts";
 import { mergeGitlabMr, readGitlabMerge, runGlab, type Sh } from "../ops-kit/src/forge-gitlab.ts";
 import { linkedIssues, overlaps, scopeIn } from "./task-paths.ts";
+import { runBacklog, type Detail } from "../ops-kit/src/backlog-client.ts";
 
 export const LARGE_LINES = 300;
 
@@ -43,8 +44,8 @@ const SECURITY_WORD_FILES = glob(["**/.env*", "**/.gitleaks.toml"]);
 export const SECURITY_GROUPS: Record<Exclude<SecurityKind, "security:docs" | "security:words">, Bun.Glob[]> = {
   "security:lockfile": glob(["**/{bun.lock,package-lock.json,pnpm-lock.yaml,yarn.lock,uv.lock,poetry.lock,go.sum,Cargo.lock}", "**/requirements*.txt"]),
   "security:github": glob([".github/**"]),
-  // the gate and local CI decide merges like CI does: a small change to them is still the user's to approve (#751)
-  "security:gates": glob(["scripts/merge-gate.ts", "scripts/local-ci.ts"]),
+  // the gate and local CI decide merges like CI does, and local-merge makes them (#2489): a small change to them is still the user's to approve (#751)
+  "security:gates": glob(["scripts/merge-gate.ts", "scripts/local-ci.ts", "scripts/local-merge.ts"]),
   // Switchboard's own (a --repo without aws/host never meets it): the cloud host runs main's host scripts as root at
   // every start (sb-host-update, #435)
   "security:host": glob(["aws/host/**"]),
@@ -484,6 +485,89 @@ export async function readPr(n: number, run = gh, repo = currentRepo(), git = { 
   };
 }
 
+/** A local change as `ops-kit backlog view --json` reads it (#2487): the stored change and its branch tips now. */
+export type ChangeDetail = Detail & { issue: Detail["issue"] & { change: NonNullable<Detail["issue"]["change"]> }; changeRefs: { head: string | null; base: string | null } };
+
+/**
+ * A local change (`--change <n>`, #2487) from the app (`ops-kit backlog view <n> --json`: BACKLOG_URL and
+ * BACKLOG_WORKSPACE, as the kit picks the workspace) — what a GitHub PR's view gives otherwise. Not a change, a branch
+ * gone or the app not answering throws: no judgement (exit 2).
+ */
+export async function readChangeDetail(n: number, env: Record<string, string | undefined>, opts: { fetch?: (url: string, init?: RequestInit) => Promise<Response>; cwd?: string } = {}): Promise<ChangeDetail> {
+  const out: string[] = [];
+  const err: string[] = [];
+  const code = await runBacklog(["view", String(n), "--json"], env, { out: (s) => out.push(s), err: (s) => err.push(s) }, opts);
+  if (code !== 0) throw new Error(`#${n} を読めない: ${err.join(" ").trim() || `exit ${code}`}`);
+  const d = JSON.parse(out.join("\n")) as Detail;
+  if (!d.issue.change) throw new Error(`#${n} は変更ではない`);
+  if (!d.changeRefs?.head || !d.changeRefs.base) throw new Error(`#${n} の枝が無い（${!d.changeRefs?.head ? d.issue.change.head : d.issue.change.base}）`);
+  return d as ChangeDetail;
+}
+
+/**
+ * The newest `[local-ci]` result of a local change (#2487) counts only for its head and its base's tip now: there is no
+ * tag CI after the merge to catch a fault of two changes together, so a base that moved runs it again.
+ */
+export function localCiOfChange(comments: { body: string; createdAt: string }[], head: string, baseTip: string): { pass: boolean; note?: string } {
+  const newest = newestLocalCi(comments);
+  if (!newest) return { pass: false };
+  const [, result, passHead, passBase] = newest.m;
+  if (result !== "pass") return { pass: false, note: "local-ci の最新が fail" };
+  if (passHead !== head) return { pass: false, note: `local-ci の pass（${passHead!.slice(0, 7)}）は今の head（${head.slice(0, 7)}）のものでない（回し直す）` };
+  if (passBase !== baseTip) return { pass: false, note: `local-ci の pass の base（${passBase!.slice(0, 7)}）が今の base の先端（${baseTip.slice(0, 7)}）でない（回し直す）` };
+  return { pass: true };
+}
+
+export const LOCAL_CHANGE_CI = "local-ci（ローカルで pass）";
+
+/**
+ * The facts of a local change (#2487) from the app and the checkout `root` (its own git; nothing is fetched, gh is not
+ * called): the same PrFacts readPr gives a PR, judged by the same `judge`. No review threads (findings and their triage
+ * are comments); every comment counts (only the app's API writes them: the person and their Tasks, trusted on loopback).
+ */
+export async function readChange(d: ChangeDetail, root: string): Promise<PrFacts> {
+  const git = (...args: string[]) => sh(["git", "-C", root, ...args]);
+  const { head, base } = d.changeRefs as { head: string; base: string };
+  const range = `${base}...${head}`;
+  const files = (await git("diff", "--numstat", "--no-renames", range)).split("\n").filter(Boolean).map((l) => {
+    const [add, del, ...path] = l.split("\t");
+    // a binary file is "-": no lines
+    return { path: path.join("\t"), additions: Number(add) || 0, deletions: Number(del) || 0 };
+  });
+  const dates = (await git("log", "--format=%aI", `${base}..${head}`)).split("\n").filter(Boolean);
+  const headCommittedAt = dates.length ? dates.reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a)) : (await git("log", "-1", "--format=%aI", head)).trim();
+  const comments = d.comments.map((c) => ({ body: c.body, createdAt: c.createdAt }));
+  const local = localCiOfChange(comments, head, base);
+  let rules = false;
+  if (files.some((f) => f.path === "README.md")) {
+    const mergeBase = (await git("merge-base", base, head)).trim();
+    const readme = await git("show", `${mergeBase}:README.md`).catch(() => "");
+    rules = DESIGN_RULES_HEADING.test(readme) && designRulesTouched(readme, await git("diff", range, "--", "README.md"));
+  }
+  const rechecks = RECHECK_KINDS.filter((k) => comments.some((c) => {
+    const m = RECHECK_PASS.exec(c.body);
+    return m?.[1] === k && m[2] === head;
+  }));
+  // a conflict with the base's tip: the merge cannot be made as is. Only exit 1 is a conflict; any other failure (an old
+  // git without --write-tree, a missing object) is no judgement
+  const tree = Bun.spawnSync(["git", "-C", root, "merge-tree", "--write-tree", base, head], { stdout: "ignore", stderr: "pipe" });
+  if (tree.exitCode !== 0 && tree.exitCode !== 1) throw new Error(`git merge-tree が exit ${tree.exitCode}: ${tree.stderr.toString().trim().split("\n")[0]}`);
+  const clean = tree.exitCode === 0;
+  return {
+    files,
+    headCommittedAt,
+    checks: local.pass ? [{ name: LOCAL_CHANGE_CI, conclusion: "SUCCESS" }] : [],
+    ...(rules ? { designRulesTouched: true } : {}),
+    ...(local.note ? { localCiNote: local.note } : {}),
+    ...(rechecks.length > 0 ? { rechecks } : {}),
+    unresolvedThreads: 0,
+    mergeState: d.issue.state === "CLOSED" ? "CLOSED" : clean ? "CLEAN" : "DIRTY",
+    reviewComments: comments,
+    head,
+    base: d.issue.change.base,
+  };
+}
+
 /** GitLab's Developer: the access level whose notes count as marks (as MARK_AUTHORS on GitHub). */
 export const GITLAB_MARK_LEVEL = 30;
 /** GitLab is still working the MR's merge status out: nothing to judge by yet. */
@@ -557,10 +641,12 @@ export async function mergePr(n: number, repo: string, mode: MergeMode, facts: P
   await run(["stack", "merge", String(n), "--rebase", "-y"]);
 }
 
-const USAGE = "usage: bun scripts/merge-gate.ts <PR> [--allow-large] [--merge | --merge-stack] [--repo <owner/name>]";
+const USAGE = "usage: bun scripts/merge-gate.ts <PR> [--allow-large] [--merge | --merge-stack] [--repo <owner/name>]\n       bun scripts/merge-gate.ts --change <n> [--allow-large]";
 
 /** The command: 0 = merge (and merged, with --merge / --merge-stack) / 1 = stop, or the merge failed / 2 = not judged. Only a merge verdict merges. */
-export async function main(args: string[], run: (args: string[]) => Promise<string> = gh, log = console.log, err = console.error, stackRepo: () => string | undefined = originRepo, glab: Sh = runGlab, cwd = process.cwd()): Promise<number> {
+export async function main(args: string[], run: (args: string[]) => Promise<string> = gh, log = console.log, err = console.error, stackRepo: () => string | undefined = originRepo, glab: Sh = runGlab, cwd = process.cwd(), backlog: { env: Record<string, string | undefined>; fetch?: (url: string, init?: RequestInit) => Promise<Response> } = { env: process.env }): Promise<number> {
+  const changeAt = args.indexOf("--change");
+  if (changeAt >= 0) return changeMain(args, changeAt, log, err, cwd, backlog);
   const n = Number(args.find((a) => /^\d+$/.test(a)));
   const repoAt = args.indexOf("--repo");
   const modes = (["merge", "merge-stack"] as const).filter((m) => args.includes(`--${m}`));
@@ -600,6 +686,30 @@ export async function main(args: string[], run: (args: string[]) => Promise<stri
     return 1;
   }
   return 0;
+}
+
+/**
+ * `--change <n>` (#2487): a local change judged by the same rules from the app and the checkout's git, gh never called.
+ * It only judges: the merge is scripts/local-merge.ts. A PR number, --repo or a merge mode with it is not judged (2).
+ */
+async function changeMain(args: string[], at: number, log: (s: string) => void, err: (s: string) => void, cwd: string, backlog: { env: Record<string, string | undefined>; fetch?: (url: string, init?: RequestInit) => Promise<Response> }): Promise<number> {
+  const value = args[at + 1] ?? "";
+  const rest = args.filter((_, i) => i !== at && i !== at + 1);
+  if (!/^\d+$/.test(value) || rest.some((a) => a !== "--allow-large")) {
+    err(USAGE);
+    return 2;
+  }
+  let facts: PrFacts;
+  try {
+    const root = (await sh(["git", "-C", cwd, "rev-parse", "--show-toplevel"])).trim();
+    facts = await readChange(await readChangeDetail(Number(value), backlog.env, { fetch: backlog.fetch, cwd }), root);
+  } catch (e) {
+    err(`判定できなかった: ${(e as Error).message}`);
+    return 2;
+  }
+  const j = judge(facts, { allowLarge: args.includes("--allow-large") });
+  log(JSON.stringify(j, null, 2));
+  return j.verdict === "merge" ? 0 : 1;
 }
 
 /** The command on a GitLab MR: --merge merges only the judged head; there is no stack to merge (--merge-stack is refused). */

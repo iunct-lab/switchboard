@@ -1,10 +1,11 @@
-// test-reads: packages/core/fixtures/ ops.config.json scripts/parallel-guard.ts
+// test-reads: packages/core/fixtures/ ops.config.json scripts/parallel-guard.ts ops-kit/processes/p0-pipeline.md
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, Backlog, BacklogAction, BacklogIssueDetail, BacklogSource, BacklogItem, RunnerAdapter, StartOptions, Task, TaskStatus } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
+import { loadProcess, parseProcessDef } from "./process-defs.ts";
 import type { Suggester } from "./routing.ts";
 import { startServer, type CoreServer } from "./server.ts";
 import { taskAllowRules } from "./tasks.ts";
@@ -487,6 +488,8 @@ test("start: complete on a Ready PBI creates a meta Task with the fixed /pbi-com
   expect(task.title.startsWith("#304 実装: ")).toBe(true);
   for (let i = 0; !claude.starts.length && i < 100; i++) await Bun.sleep(10);
   expect(claude.starts[0]!.prompt).toContain("/pbi-complete 304");
+  // the stage Task records the pipeline candidate and the stage as its reason (docs/design/process-kernel.md, K1)
+  expect(await fetch(`${base}/api/tasks/${task.id}/provenance`).then((r) => r.json())).toMatchObject({ process: { id: "p0-pipeline", version: 1 }, processReason: "backlog stage complete" });
   expect(claude.starts[0]!.prompt).toContain("#304");
   expect(claude.starts[0]!.cwd).toBe(meta.path);
 });
@@ -575,6 +578,30 @@ test("start: a local backlog's stage prompt says ops-kit backlog only, no gh iss
   // a GitHub one is as before
   expect(buildStartPrompt({ number: 1 }, "complete", { other })).toContain("`gh repo view` が答えるもの");
   expect(buildStartPrompt({ number: 1 }, "complete", { other })).toContain("APP_PROJECT_URL");
+});
+
+test("start: a local workspace without a remote (localForge) gets local changes, not PRs (#2490)", () => {
+  const other = { meta: "/work/switchboard", projectVar: "APP_PROJECT_URL", setup: { config: true, kit: ["triage_issue.sh"], copies: ["lint_backlog.sh"] } };
+  for (const [p, scripts] of [[buildStartPrompt({ number: 1 }, "complete", { other, local: true, localForge: true }), "/work/switchboard/"], [buildStartPrompt({ number: 1 }, "complete", { local: true, localForge: true }), ""]] as const) {
+    // the backlog half stays
+    expect(p).toContain("`ops-kit lint --fresh`");
+    expect(p).toContain("`--repo` を付けずに実行する");
+    // changes, not PRs
+    expect(p).toContain("この workspace の変更はアプリに置く（リモートは使わない）");
+    // the marks that lift a recheck or answer a merge ask go on the change
+    expect(p).toContain(`${scripts}docs/merge-gate.md` + "\` の「再チェック」");
+    expect(p).toContain("\`ops-kit backlog comment <変更>\` で変更に付ける");
+    expect(p).toContain("--head <枝> --base main");
+    expect(p).toContain("Backlog-Task: <Task>");
+    for (const cmd of [`bun ${scripts}scripts/local-ci.ts --change <変更>`, `bun ${scripts}scripts/merge-gate.ts --change <変更>`, `bun ${scripts}scripts/local-merge.ts <変更>`]) expect(p).toContain(cmd);
+    expect(p).not.toContain("PR・レビュー・CI・マージはリポジトリの PR で行う");
+    expect(p).not.toContain("release-tag.ts");
+    expect(p).not.toContain("rollback-pr.ts");
+    expect(p).not.toContain("--repo <このリポジトリの owner/name>");
+    expect(p).not.toMatch(/gh pr (?:create|merge|comment)/);
+  }
+  // without it, as before
+  expect(buildStartPrompt({ number: 1 }, "complete", { local: true })).toContain("PR・レビュー・CI・マージはリポジトリの PR で行う");
 });
 
 test("start: check on a stage other than in-progress is 409", async () => {
@@ -1755,6 +1782,26 @@ test("buildStartPrompt: to-tasks on a PBI that already has Tasks asks to make it
   }
 });
 
+/** A fake meta checkout carries the kit's process candidates, as the real one does: a stage start reads `ops-kit/processes/p0-pipeline.md` from the meta workspace (#3647). */
+function withProcesses(repo: string): void {
+  cpSync(join(import.meta.dir, "../../../ops-kit/processes"), join(repo, "ops-kit/processes"), { recursive: true });
+}
+
+test("buildStartPrompt: the stage text comes from the p0-pipeline definition — a swapped entry changes the prompt, a missing entry refuses to start", () => {
+  const def = loadProcess("p0-pipeline");
+  const swapped = { ...def, entries: { ...def.entries, complete: "TEST {{n}} swapped" } };
+  expect(buildStartPrompt({ number: 305 }, "complete", {}, swapped).startsWith("TEST 305 swapped\n\n対象: #305。")).toBe(true);
+  // the parts the daemon adds around the entry (the answer to read, the scope of the request) stay
+  expect(buildStartPrompt({ number: 305 }, "complete", {}, swapped)).toContain("この依頼は、マージ判定");
+  expect(buildStartPrompt({ number: 305 }, "check", {}, swapped)).toBe(buildStartPrompt({ number: 305 }, "check"));
+  const { complete: _dropped, ...rest } = def.entries;
+  expect(() => buildStartPrompt({ number: 305 }, "check", {}, { ...def, entries: rest })).toThrow("lacks entries complete");
+  // the tasks-done mark is given only on a resume: an entry that asks for it otherwise does not render a 0
+  expect(() => buildStartPrompt({ number: 305 }, "complete", {}, { ...def, entries: { ...def.entries, complete: "X {{tasksDoneMark}}" } })).toThrow("uses {{tasksDoneMark}}, which was not given");
+  const bare = parseProcessDef("---\nid: x\nversion: 1\ntitle: X\n---\n## entry complete\nonly\n", "x.md");
+  expect(() => buildStartPrompt({ number: 1 }, "complete", {}, bare)).toThrow("lacks entries to-pbi, to-tasks, to-tasks-ready, complete-other, complete-resume, check, close");
+});
+
 test("pickNext answered: an in-progress PBI answered after its last stage Task goes on with complete, before Ready", () => {
   const finished = (at: string) => ({ id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null });
   const items = [
@@ -2226,6 +2273,7 @@ describe("backlog-next prerequisite (#937)", () => {
 
   test("release: a merged prerequisite not in the running release waits, starts once it is; without sb-rescue it cannot be told", async () => {
     const repo = mkdtempSync(join(tmpdir(), "sb-backlog-repo-"));
+    withProcesses(repo);
     const git = (...a: string[]) => Bun.spawnSync(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...a]).stdout.toString().trim();
     git("init", "-q");
     git("commit", "-q", "--allow-empty", "-m", "running");
@@ -3367,6 +3415,7 @@ test("promote: a subject without (#n), or a number that is no stored Issue, repo
 /** A checkout with one commit tagged v0.2.0, and a fake sb-rescue whose current release is another commit. */
 async function releasedDaemon(history: ReleaseState["history"] = [], runningNewer = false) {
   const repo = mkdtempSync(join(tmpdir(), "sb-backlog-repo-"));
+  withProcesses(repo);
   const git = (...a: string[]) => Bun.spawnSync(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...a]).stdout.toString().trim();
   git("init", "-q"); git("commit", "-q", "--allow-empty", "-m", "feat(core): x (#501)"); git("tag", "v0.2.0");
   const sha = git("rev-parse", "HEAD");

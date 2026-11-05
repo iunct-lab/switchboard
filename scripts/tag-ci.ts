@@ -23,6 +23,10 @@
  * (a fail, no result and no Release are passed over), only from the tags in `<commit>`'s history when given (the
  * public sync gives the running release's commit). Exit 0 = printed, 1 = no tag passed (prints nothing), 2 = bad
  * arguments or an unknown commit.
+ * After its report, the scheduled run (Switchboard itself, no --repo) looks at the public sync (#3601,
+ * scripts/public-stall.ts): a tag newer than the newest pass for more than 24 hours files a request with the reasons
+ * (the tags this run did not judge give theirs, e.g. the missing recordings), or comments on the open one. A failure
+ * there is written to stderr and leaves the exit code alone.
  */
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
@@ -113,6 +117,8 @@ export interface TagCiDeps extends Omit<Deps, "sh"> {
   sh: (cmd: string[], cwd?: string, input?: string) => Promise<string>;
   /** Called when the newest tag has failed, before the walk: what it reports stays if the walk is cut. followUp runs again after the walk. */
   onNewest?: (entries: TagCiEntry[]) => Promise<void>;
+  /** Called for a tag not judged because of missing recordings: the public sync's watch names them (#3601). */
+  onSkip?: (tag: string, missing: string[]) => void;
 }
 
 /** The tags run in one go: a step of the walk takes minutes, and a run that is cut leaves no result. */
@@ -182,6 +188,7 @@ export async function tagCi(d: TagCiDeps, repo: string, root: string, cache = jo
       const r = await runTag(tag, tags[i + 1], sha, repo, root, d, cache);
       if ("missing" in r) {
         d.log(`${tag}: 録画が足りないので判定しない（印は書かない）: ${r.missing.join(" ")}`);
+        d.onSkip?.(tag, r.missing);
         break;
       }
       await d.sh(["gh", "release", "edit", tag, "-R", repo, "--notes-file", "-"], undefined, `${body.trimEnd()}${resultSection(r, host)}`.trimStart());
@@ -427,8 +434,20 @@ if (import.meta.main) {
       console.error(`要望: 起票かコメントができなかった（${(e as Error).message}）`);
     }
   };
-  const entries = await tagCi({ sh, step, log, onNewest: report, slot: (name, fn) => withHeavySlot(name, fn) }, t.repo, t.root);
+  const missingOf: Record<string, string[]> = {};
+  const onSkip = (tag: string, missing: string[]) => void (missingOf[tag] = missing);
+  const entries = await tagCi({ sh, step, log, onNewest: report, onSkip, slot: (name, fn) => withHeavySlot(name, fn) }, t.repo, t.root);
   console.log(JSON.stringify(entries));
   await report(entries);
+  if (!process.argv.includes("--repo")) {
+    try {
+      // imported here: public-stall.ts imports this file
+      const { publicTarget, skipReason, stallFollow } = await import("./public-stall.ts");
+      const skipped = Object.fromEntries(Object.entries(missingOf).map(([tag, missing]) => [tag, skipReason(missing)]));
+      await stallFollow(t.repo, t.root, { sh, log, file, comment: commentRequest, open: openRequests, text: requestText, print: log }, { target: publicTarget(t.root), skipped });
+    } catch (e) {
+      console.error(`公開の同期の見張り: 判定か起票ができなかった（${(e as Error).message}）`);
+    }
+  }
   process.exit(tagCiExit(entries));
 }

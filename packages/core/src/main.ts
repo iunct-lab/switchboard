@@ -83,8 +83,24 @@ if (cmd === "relocate") {
 }
 
 // Adapters are plugins: any subset may be missing. Missing binaries / unreachable servers are reported, not fatal.
-// DAK is registered only when SWITCHBOARD_DAK_URL is set (off by default).
-const adapters = [createClaudeAdapter(), createCodexAdapter(), ...(process.env.SWITCHBOARD_DAK_URL ? [createAdkAdapter({ id: "dak", label: "DAK", baseUrl: process.env.SWITCHBOARD_DAK_URL, app: "dak_agent", artifactSkipPrefix: "tool_output_" })] : [])];
+// DAK is registered only when SWITCHBOARD_DAK_URL is set (off by default): the variable is its only record, it is not
+// copied into the saved list. The ADK servers added in Settings (docs/design/custom-adapter.md) are read once here and
+// run as `custom:<name>`; a change to them takes effect on the next start.
+const customRunners = (() => {
+  const db = new Db(cfg.dbPath);
+  try {
+    // a saved `dak` would run as `custom:dak` next to the DAK of the variable: two runners called the same, so it is left out
+    return db.getCustomRunners().filter((r) => r.name !== "dak");
+  } finally {
+    db.close();
+  }
+})();
+const adapters = [
+  createClaudeAdapter(),
+  createCodexAdapter(),
+  ...(process.env.SWITCHBOARD_DAK_URL ? [createAdkAdapter({ id: "dak", label: "DAK", baseUrl: process.env.SWITCHBOARD_DAK_URL, app: "dak_agent", artifactSkipPrefix: "tool_output_" })] : []),
+  ...customRunners.map((r) => createAdkAdapter({ id: `custom:${r.name}`, label: r.label, baseUrl: r.url, app: r.app, tokenEnv: r.tokenEnv, artifactSkipPrefix: r.artifactSkipPrefix })),
+];
 
 /**
  * LLM routing suggestions (#25). Off unless the settings say otherwise; `SWITCHBOARD_SUGGESTER=fake` swaps in a

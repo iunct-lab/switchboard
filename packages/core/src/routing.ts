@@ -5,7 +5,7 @@ import { z } from "zod";
 
 /**
  * Rule-table routing (proposal §3, issue #6). v1 is pure data: no LLM. The suggestion and the user's actual
- * choice are recorded per task so a later LLM router (Phase 3) has training data.
+ * choice are recorded per task so a later LLM router has training data.
  */
 // Strict: a typo'd key in a user file (`keyword:`) must be an error, not an always-matching empty condition.
 export const RoutingRule = z

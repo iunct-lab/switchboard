@@ -138,7 +138,34 @@ export function theirEdit(field: string, after: AfterAnswer, since: string, proj
   return "value" in last && sameBacklogValue(field, last.value, sent) ? null : last;
 }
 
+/**
+ * The wait a call's failure asks for, the operation not failed for it: GitHub not reached (a minute), a limit (its time;
+ * nothing was done, nothing more is asked until then), the login refused (the next send asks again, a token renewed).
+ * Null for anything else — a permission refused on one thing (a locked Issue, a Project the token cannot write) is that
+ * operation's own.
+ */
+function waitOf(e: CallError, at: number): Limit | null {
+  if (unreached(e.response)) return new Limit(at + 60_000, "offline");
+  const c = retryAtFromResponse(e.response, at);
+  if (c?.kind === "primary" || c?.kind === "secondary") return new Limit(c.at ?? at + 60_000, "limit", e.response);
+  if (c?.kind === "auth" && (e.response.status === 401 || /bad credentials|gh auth login|authentication/i.test(`${e.response.message ?? ""} ${e.message}`))) return new Limit(at, "auth", e.response);
+  return null;
+}
+
 const SETTLED = "後の編集の値に GitHub が既になっています";
+const ALREADY = "GitHub に断られましたが、読み直すと GitHub は既に送る値でした";
+const VERIFIED = "書いた後の編集履歴を読み直し、ほかの編集を上書きしていないと確かめました";
+
+/** A write that replaced another login's edit of the field (#1329): held with it, for the user to choose. */
+function overwrote(op: BacklogOperation, theirs: BacklogOverwritten): Outcome {
+  const who = `${theirs.editor ?? "誰か"} が ${theirs.at ?? "書く直前"} に`;
+  return {
+    status: "conflict", overwritten: theirs,
+    error: "value" in theirs
+      ? `書く直前に ${who} ${op.field} を ${JSON.stringify(theirs.value)} にしていました（送った値で上書きしました）。どちらにするか選んでください`
+      : `書く直前に ${who} ${op.field} を編集していましたが、その版の内容は履歴から消されています（送った値で上書きしました）`,
+  };
+}
 const CLOSED_BY_GITHUB = "Issue が GitHub で閉じ、Project の自動化が Status を動かしたので送りません";
 
 /** What one run sends with: the repository, the Issue numbers of the records, the Project (read once). */
@@ -350,19 +377,35 @@ class Sender {
         if (unreached(e.response)) this.stopAfter = new Limit(at + 60_000, "offline");
         else if (c?.kind === "primary" || c?.kind === "secondary") this.stopAfter = new Limit(c.at ?? at + 60_000, "limit", e.response);
       }
-      return { status: "conflict", overwritten: { editor: null, at: null, unreadable: why }, error: `書いた後に GitHub の編集履歴を読めませんでした（${why}）。ほかの編集を上書きしたか確かめられていません` };
+      return { status: "conflict", overwritten: { editor: null, at: null, unreadable: why, since }, error: `書いた後に GitHub の編集履歴を読めませんでした（${why}）。ほかの編集を上書きしたか確かめられていません` };
     }
     if (!same(read.value, op.payload)) return { status: "conflict", error: `送った直後の GitHub の値が送った値と違います（${op.field}: GitHub は ${JSON.stringify(read.value)}）。ほかの編集と重なりました` };
-    if (!read.complete) return { status: "conflict", overwritten: { editor: null, at: null, unreadable: "履歴が 1 ページに収まらず、読み切れませんでした" }, error: "書いた後に GitHub の編集履歴を読み切れませんでした。ほかの編集を上書きしたか確かめられていません" };
+    if (!read.complete) return { status: "conflict", overwritten: { editor: null, at: null, unreadable: "履歴が 1 ページに収まらず、読み切れませんでした", since }, error: "書いた後に GitHub の編集履歴を読み切れませんでした。ほかの編集を上書きしたか確かめられていません" };
     const theirs = theirEdit(op.field!, read.answer, since, op.targetKind === "project-item" ? (await this.projectOf()).id : "", op.payload);
-    if (!theirs) return out;
-    const who = `${theirs.editor ?? "誰か"} が ${theirs.at ?? "書く直前"} に`;
-    return {
-      status: "conflict", overwritten: theirs,
-      error: "value" in theirs
-        ? `書く直前に ${who} ${op.field} を ${JSON.stringify(theirs.value)} にしていました（送った値で上書きしました）。どちらにするか選んでください`
-        : `書く直前に ${who} ${op.field} を編集していましたが、その版の内容は履歴から消されています（送った値で上書きしました）`,
-    };
+    return theirs ? overwrote(op, theirs) : out;
+  }
+
+  /**
+   * An unverified conflict (#3518) — written, but the history after the write could not be read (a limit) or not read
+   * whole — read again from the same check time. GitHub still at the value sent, the history whole and no other login's
+   * edit: done, nothing for the user to choose. Another login's edit: the conflict with it. Anything else (not read
+   * again, not whole, the value moved since): null, held as it was. The read asked to wait (`waitOf`) throws its
+   * Limit, the operation left as it was.
+   */
+  async recheck(op: BacklogOperation): Promise<Outcome | null> {
+    const since = op.overwritten!.since!;
+    try {
+      const read = await this.after(op, this.numberOf(op.issue), since);
+      if (!sameBacklogValue(op.field!, read.value, op.payload) || !read.complete) return null;
+      // the Project's id is read here too (an item's Status): its failure is the read's
+      const theirs = theirEdit(op.field!, read.answer, since, op.targetKind === "project-item" ? (await this.projectOf()).id : "", op.payload);
+      return theirs ? overwrote(op, theirs) : { status: "done", overwritten: null, error: VERIFIED };
+    } catch (e) {
+      if (e instanceof Limit) throw e;
+      const wait = e instanceof CallError ? waitOf(e, this.now()) : null;
+      if (wait) throw wait;
+      return null;
+    }
   }
 
   /** Pages of a list since the operation was made, for its marker; null = not every page could be read. */
@@ -435,13 +478,9 @@ class Sender {
       // looked for again, never posted again blindly
       const unsure = posting.on || (op.kind !== "set" && op.status === "unknown" && !op.remoteId);
       if (!(e instanceof CallError)) return { status: unsure ? "unknown" : "failed", error: message };
-      if (unreached(e.response)) throw new Limit(at + 60_000, "offline");
+      const wait = waitOf(e, at);
+      if (wait) throw wait;
       const c = retryAtFromResponse(e.response, at);
-      // GitHub refused it: nothing was done, and nothing more is asked until its time
-      if (c?.kind === "primary" || c?.kind === "secondary") throw new Limit(c.at ?? at + 60_000, "limit", e.response);
-      // the login refused: nothing was done; the next send asks again (a token renewed), nothing is failed for it. A
-      // permission refused on one thing (a locked Issue, a Project the token cannot write) is that operation's: failed
-      if (c?.kind === "auth" && (e.response.status === 401 || /bad credentials|gh auth login|authentication/i.test(`${e.response.message ?? ""} ${e.message}`))) throw new Limit(at, "auth", e.response);
       // a write GitHub refused for the state it is in (409 / 412): checked again, held — never failed, nothing was lost (#1329)
       if (op.kind === "set" && (e.response.status === 409 || e.response.status === 412)) {
         const { value } = await this.current(op, this.numberOf(op.issue)).catch(() => ({ value: undefined, at: "" }));
@@ -449,6 +488,20 @@ class Sender {
       }
       // GitHub answered and refused the input (4xx): nothing was made, a post included
       const refused = c?.kind === "auth" || (c === null && e.response.status !== undefined && e.response.status < 500);
+      // a set refused while GitHub got to the value another way (#3515: the Project's Auto-close closed the Issue
+      // between the read and the PATCH, which GitHub answers 422): nothing is left to send. A read that meets a limit,
+      // does not reach GitHub or finds the login refused waits as any call does (sent again after it); otherwise: failed
+      if (refused && op.kind === "set" && !(op.targetKind === "project-item" && op.field === "member")) {
+        const now = await this.current(op, this.numberOf(op.issue)).then(
+          (r) => r.value,
+          (r) => {
+            const wait = r instanceof CallError ? waitOf(r, at) : null;
+            if (wait) throw wait;
+            return undefined;
+          },
+        );
+        if (now !== undefined && sameBacklogValue(op.field!, now, op.payload)) return { status: "done", error: ALREADY };
+      }
       if (refused && (posting.on || !unsure)) return { status: "failed", error: e.message };
       if (unsure) return { status: "unknown", error: e.message };
       if (op.attempt + 1 >= MAX_ATTEMPTS) return { status: "failed", error: `${MAX_ATTEMPTS} 回送れませんでした: ${e.message}` };
@@ -604,6 +657,16 @@ export async function sendGithubOperations(gh: GhRunner, db: Db, cwd: string, so
     // left `sending` by a run that broke off after its request (its result could not be stored): never sent blindly
     if (op.status === "sending") {
       db.setBacklogOperationResult(op.id, { status: op.kind === "set" || op.remoteId ? "pending" : "unknown" }, now());
+      op = db.getBacklogOperation(op.id)!;
+    }
+    // an unverified conflict of a write (#3518): its history read again, the first held operation of its Issue only
+    if (!held.has(op.issue) && op.status === "conflict" && op.kind === "set" && op.overwritten?.unreadable && op.overwritten.since && source.service === "github" && !waits(op)) {
+      const out = await sender.recheck(op);
+      if (out) db.setBacklogOperationResult(op.id, out, now());
+      if (out?.status === "done") {
+        done++;
+        continue;
+      }
       op = db.getBacklogOperation(op.id)!;
     }
     if (held.has(op.issue) || op.status === "conflict" || op.status === "failed" || (op.retryAt ?? 0) > now() || waits(op)) {

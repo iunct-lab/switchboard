@@ -7,9 +7,11 @@ import type { BacklogCommentData, BacklogIssueData, BacklogObjectKind, BacklogPr
 import { applyBacklogField, type BacklogOperation, type BacklogSnapshotEntry, type Db } from "./db.ts";
 import { BacklogEditError, type BacklogCreatePayload } from "./backlog.ts";
 import { existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { CONFIG_FILE, defaultConfig, loadConfig, type OpsConfig } from "../../../ops-kit/src/config.ts";
 import { STATUS_OPTIONS } from "../../../ops-kit/src/bootstrap.ts";
+import { forgeOf, LOCAL_SERVICE } from "../../../ops-kit/src/forge.ts";
 
 /**
  * Applies the workspace's queued operations, oldest first, in one transaction (a failure applies none): a `create` gets
@@ -56,7 +58,7 @@ export function applyLocalOperations(db: Db, source: BacklogSource, now = Date.n
         // the API refuses a parent that is not there (checkLocalParent); one gone meanwhile is not kept
         const parent = p.parent !== null && byNumber(p.parent) ? p.parent : null;
         const id = `sb:${op.id}`;
-        const value: BacklogIssueData = { number, title: p.title, url: "", state: p.state, stateReason: null, body: p.body, labels: p.labels, milestone: p.milestone, parent, subIssues: [], createdAt: at, updatedAt: at, closedAt: p.state === "CLOSED" ? at : null };
+        const value: BacklogIssueData = { number, title: p.title, url: "", state: p.state, stateReason: null, body: p.body, labels: p.labels, milestone: p.milestone, parent, subIssues: [], createdAt: at, updatedAt: at, closedAt: p.state === "CLOSED" ? at : null, ...(p.change ? { change: { ...p.change, mergeCommit: null, mergedAt: null } } : {}) };
         db.setBacklogOperationResult(op.id, { status: "done", remoteId: id, record: { externalId: id, remote: value } }, now);
         if (p.project) store("project-item", `sb:item:${op.id}`, { issue: number, owner: p.project.owner, project: p.project.number, fields: p.project.fields } satisfies BacklogProjectItemData);
         if (parent !== null) moveSub(number, null, parent);
@@ -146,4 +148,35 @@ export function checkLocalFields(dir: string, input: { fields?: Record<string, s
   if (m !== undefined && m !== null && !(cfg.milestone && new RegExp(cfg.milestone.pattern).test(m)))
     throw new BacklogEditError(`Milestone は ${m} にできません（${cfg.milestone ? `${cfg.milestone.pattern} に合うもの` : "milestone.pattern がありません"}。${source}）`, 422);
   return fields ? out : fields;
+}
+
+/** A branch's tip in a checkout (#2485): 40 hex, or null when there is no such branch (or no git there). Read, never kept. */
+export function branchTip(dir: string, branch: string): string | null {
+  const r = spawnSync("git", ["-C", dir, "rev-parse", "--verify", "-q", `refs/heads/${branch}^{commit}`], { encoding: "utf8" });
+  const sha = r.status === 0 ? r.stdout.trim() : "";
+  return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+}
+
+/**
+ * Checks a new local change (#2485) before anything is stored: only on a backlog kept here (422), both branches there
+ * in the workspace's checkout (422), no other open change of the same branch (409). Throws BacklogEditError.
+ */
+export function checkLocalChange(db: Db, source: BacklogSource, dir: string, change: { head: string; base: string }): void {
+  if (source.service !== "switchboard") throw new BacklogEditError("変更は GitHub 連携の無い workspace だけで作れます", 422);
+  for (const b of [change.head, change.base]) if (!branchTip(dir, b)) throw new BacklogEditError(`枝 ${b} がありません`, 422);
+  if (change.head === change.base) throw new BacklogEditError("head と base が同じ枝です", 422);
+  const open = db.listBacklogRecords(source, "issue").map((r) => (r.remote ?? r.local) as BacklogIssueData | null).find((v) => v?.state === "OPEN" && v.change?.head === change.head);
+  if (open) throw new BacklogEditError(`枝 ${change.head} の開いた変更 #${open.number} があります`, 409);
+}
+
+/**
+ * Whether a checkout's changes are kept here (#2490): the kit's `forgeOf` names the app (no remote and no `forge`, or a
+ * `forge` naming it). A `forge` that cannot be read is not (its stage Task then says so where it reads it).
+ */
+export function localForgeOf(dir: string): boolean {
+  try {
+    return forgeOf(dir) === LOCAL_SERVICE;
+  } catch {
+    return false;
+  }
 }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { AutoStartKind, Backlog, HistoryStatus, JudgeSettings, LlmRoutingSettings, ModelOption, Preset, RunnerId, RunnerInfo, Settings as SettingsData, SettingsPrice, Task, Workspace } from "@switchboard/protocol";
+import type { CustomRunner, AutoStartKind, Backlog, HistoryStatus, JudgeSettings, LlmRoutingSettings, ModelCandidates, ModelOption, Preset, RunnerId, RunnerInfo, Settings as SettingsData, SettingsPrice, Task, Workspace } from "@switchboard/protocol";
 import { api, type Health, type SettingsResponse, type WorkspaceClone } from "../api.ts";
 import { ModelSelect } from "./ModelSelect.tsx";
 import { ClaudeLoginRow } from "./ClaudeLoginRow.tsx";
@@ -8,10 +8,10 @@ import { PolicySettings } from "./PolicySettings.tsx";
 import { EffortSelect } from "./EffortSelect.tsx";
 import { notifyPermission } from "../notify.ts";
 import { EMPTY_PRICE_FORM, parsePriceForm, priceFormOf, type PriceForm } from "../priceForm.ts";
-import { addModel, moveModel, removeModel } from "../modelList.ts";
+import { addModel, hideModel, moveModel, removeModel, unhideModel } from "../modelList.ts";
 import { countriesUrl, logoutPath } from "../login.ts";
 import { presetRow } from "../presets.ts";
-import { listedRunners } from "../runners.ts";
+import { customRunnerFromDraft, isAdkRunner, listedRunners, sendsOffHost, type CustomRunnerDraft } from "../runners.ts";
 import { githubSyncText } from "../backlogSync.ts";
 import { WorkspaceCard } from "./WorkspaceCard.tsx";
 import { jstTime } from "../time.ts";
@@ -197,7 +197,7 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
       <section className="card">
         <h5>使用上限での自動再開</h5>
         <div className="muted">ランナーが 5 時間 / 7 日の使用上限で止まったとき、枠が戻った時点で同じセッションに「続きを」と送ります（Task ごとに Brief から取り消せます）。</div>
-        {runners.filter((r) => r.id !== "dak").map((r) => (
+        {runners.filter((r) => !isAdkRunner(r.id)).map((r) => (
           <div key={r.id} className="row" style={{ alignItems: "center", gap: 6 }}>
             <label className="hint toggle">
               <input type="checkbox" checked={!!r.autoResume} disabled={saving} onChange={(e) => void save({ autoResume: { [r.id]: e.target.checked } })} />
@@ -209,6 +209,8 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
       </section>
 
       <PolicySettings onError={props.onError} />
+
+      <CustomRunnersSection onError={props.onError} />
 
       <SettingsGroupHeading id="settings-judge" />
       <section className="card tunables">
@@ -298,6 +300,7 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
         {runners.filter((r) => r.models.length > 0 && r.loginKind !== "bedrock").map((r) => (
           <ModelChoices key={r.id} runner={r.id} list={r.models} saved={!!s.models[r.id]} disabled={saving} save={trySave} />
         ))}
+        <CliModelCandidates runners={runners} hidden={(runner) => s.hiddenModels[runner] ?? s.defaults.hiddenModels[runner] ?? []} disabled={saving} save={trySave} onError={props.onError} />
       </section>
 
       <section className="card">
@@ -734,6 +737,90 @@ function ModelChoices(props: { runner: RunnerId; list: ModelOption[]; saved: boo
   );
 }
 
+/**
+ * 「CLI の表を読む」 (#1401): the installed CLIs' models that are neither listed nor hidden, each to 足す (at the end of the
+ * list) or 載せない; the 載せない list folded below with 取り消し. Read only on the button: the claude table is about 240 MB.
+ */
+function CliModelCandidates(props: { runners: RunnerInfo[]; hidden: (runner: RunnerId) => string[]; disabled: boolean; save: (patch: { models?: Record<string, ModelOption[]>; hiddenModels?: Record<string, string[]> }) => Promise<boolean>; onError: (msg: string) => void }) {
+  const [loading, setLoading] = useState(false);
+  const [found, setFound] = useState<ModelCandidates | null>(null);
+  const read = async () => {
+    setLoading(true);
+    try {
+      setFound(await api.modelCandidates());
+    } catch (e) {
+      props.onError(String((e as Error).message ?? e));
+    } finally {
+      setLoading(false);
+    }
+  };
+  const drop = (runner: RunnerId, value: string) => setFound((f) => f?.map((r) => (r.runner === runner && "candidates" in r ? { ...r, candidates: r.candidates.filter((m) => m.value !== value) } : r)) ?? null);
+  // the list 足す appends to: the runner's own login list, as モデルの選択肢 above shows it (not Bedrock's)
+  const listOf = (runner: RunnerId) => props.runners.find((r) => r.id === runner && r.models.length > 0 && r.loginKind !== "bedrock")?.models;
+  const add = async (runner: RunnerId, m: ModelOption) => {
+    const list = listOf(runner);
+    if (!list) return;
+    const next = addModel(list, m.value, m.label);
+    // already in the list (added by hand above since the read): nothing to save, the row goes
+    if (typeof next === "string") return drop(runner, m.value);
+    if (await props.save({ models: { [runner]: next } })) drop(runner, m.value);
+  };
+  const hide = async (runner: RunnerId, value: string) => {
+    if (await props.save({ hiddenModels: { [runner]: hideModel(props.hidden(runner), value) } })) drop(runner, value);
+  };
+  const catalogRunners = props.runners.filter((r) => (r.id === "claude" || r.id === "codex") && r.models.length > 0);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <div className="row" style={{ alignItems: "center", justifyContent: "flex-start", gap: 6 }}>
+        <button className="btn" disabled={props.disabled || loading} onClick={() => void read()} title="インストール済みの CLI が持つモデル表を読み、一覧にも「載せない」にも無いモデルを出します（ネットワークには出ません）">
+          {loading ? "読み込み中…" : "CLI の表を読む"}
+        </button>
+      </div>
+      {found?.map((r) => (
+        <div key={r.runner} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span className="t">{r.runner} の候補</span>
+          {"error" in r ? (
+            <div className="muted">{r.error}</div>
+          ) : r.candidates.length === 0 ? (
+            <div className="muted">候補なし</div>
+          ) : (
+            r.candidates.map((m) => (
+              <div key={m.value} className="row" style={{ alignItems: "center", justifyContent: "flex-start", gap: 6 }}>
+                <span>
+                  {m.label}（<span className="mono">{m.value}</span>）
+                </span>
+                <button className="ghost" disabled={props.disabled || !listOf(r.runner)} aria-label={`${r.runner} の候補 ${m.value} を足す`} title={listOf(r.runner) ? "一覧の末尾に足します" : "Amazon Bedrock で動いている間は足せません"} onClick={() => void add(r.runner, m)}>
+                  足す
+                </button>
+                <button className="ghost" disabled={props.disabled} aria-label={`${r.runner} の候補 ${m.value} を載せない`} title="次に読んでも候補に出しません（下の「載せないにしたモデル」で取り消せます）" onClick={() => void hide(r.runner, m.value)}>
+                  載せない
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+      ))}
+      <details>
+        <summary>載せないにしたモデル</summary>
+        {catalogRunners.map((r) => (
+          <div key={r.id} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span className="t">{r.id}</span>
+            {props.hidden(r.id).length === 0 && <div className="muted">なし</div>}
+            {props.hidden(r.id).map((id) => (
+              <div key={id} className="row" style={{ alignItems: "center", justifyContent: "flex-start", gap: 6 }}>
+                <span className="mono">{id}</span>
+                <button className="ghost" disabled={props.disabled} aria-label={`${r.id} の ${id} の載せないを取り消す`} onClick={() => void props.save({ hiddenModels: { [r.id]: unhideModel(props.hidden(r.id), id) } })}>
+                  取り消し
+                </button>
+              </div>
+            ))}
+          </div>
+        ))}
+      </details>
+    </div>
+  );
+}
+
 function ModelPrices(props: { prices: Record<string, SettingsPrice>; disabled: boolean; save: (patch: { prices: Record<string, SettingsPrice | null> }) => Promise<boolean> }) {
   const [form, setForm] = useState<PriceForm>(EMPTY_PRICE_FORM);
   const [why, setWhy] = useState<string | null>(null);
@@ -924,5 +1011,93 @@ export function TerminalHistory(props: { onError: (msg: string) => void }) {
         読み込み元: <span className="mono">{history?.dir ?? "~/.claude/projects"}</span>。取り込んだ Task には「Terminal」タグが付き、会話・差分・台帳は Switchboard から始めた Task と同じ見え方。Switchboard 自身が動かしたセッションは二重に入りません。
       </div>
     </>
+  );
+}
+
+const EMPTY_DRAFT: CustomRunnerDraft = { name: "", label: "", url: "", app: "", tokenEnv: "" };
+
+/** The ADK servers that run as `custom:<name>` (#3388, docs/design/custom-adapter.md). No edit: remove and add again. */
+function CustomRunnersSection(props: { onError: (msg: string) => void }) {
+  const [list, setList] = useState<CustomRunner[] | null>(null);
+  const [draft, setDraft] = useState<CustomRunnerDraft>(EMPTY_DRAFT);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [changed, setChanged] = useState(false);
+  const { onError } = props;
+  useEffect(() => {
+    api.customRunners().then(setList).catch((e) => onError(`ADK の接続先を読めませんでした: ${String(e.message ?? e)}`));
+  }, [onError]);
+  const put = (next: CustomRunner[]) => {
+    setSaving(true);
+    return api
+      .putCustomRunners(next)
+      .then((saved) => {
+        setList(saved);
+        setChanged(true);
+        return true;
+      })
+      .catch((e) => {
+        setError(String(e.message ?? e));
+        return false;
+      })
+      .finally(() => setSaving(false));
+  };
+  const add = () => {
+    if (!list) return;
+    const r = customRunnerFromDraft(draft, list);
+    if ("error" in r) return setError(r.error);
+    setError(null);
+    void put([...list, r.entry]).then((ok) => ok && setDraft(EMPTY_DRAFT));
+  };
+  const field = (key: keyof CustomRunnerDraft, label: string, placeholder: string, size: number) => (
+    <label className="hint">
+      {label} <input value={draft[key]} size={size} placeholder={placeholder} disabled={saving} onChange={(e) => setDraft({ ...draft, [key]: e.target.value })} />
+    </label>
+  );
+  const offHost = draft.url.trim() !== "" && sendsOffHost(draft.url.trim());
+  return (
+    <section className="card">
+      <h5>ADK のエージェント（カスタムランナー）</h5>
+      <div className="muted">ADK で作ったエージェントの接続先を足すと、再起動の後に Home のランナーに並びます。トークンの値は保存せず、環境変数の名前だけを保存します。DAK は SWITCHBOARD_DAK_URL で有効にし、ここには出ません。</div>
+      {list?.length ? (
+        <table>
+          <tbody>
+            {list.map((r) => (
+              <tr key={r.name}>
+                <td>
+                  <b>custom:{r.name}</b>
+                </td>
+                <td>{r.label}</td>
+                <td>
+                  {r.url} / app {r.app}
+                  {sendsOffHost(r.url) && <span className="hint">（依頼の文と添付がこのサーバへ送られます）</span>}
+                </td>
+                <td>{r.tokenEnv ? `トークン: $${r.tokenEnv}` : "トークンなし"}</td>
+                <td>
+                  <button className="ghost" disabled={saving} onClick={() => void put(list.filter((x) => x.name !== r.name))}>
+                    削除
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        list && <div className="hint">まだありません</div>
+      )}
+      <div className="row" style={{ flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+        {field("name", "名前", "research", 10)}
+        {field("label", "表示名", "Research agent", 14)}
+        {field("url", "URL", "http://127.0.0.1:8001", 24)}
+        {field("app", "アプリ名", "research_agent", 14)}
+        {field("tokenEnv", "トークンの環境変数名（任意）", "RESEARCH_TOKEN", 16)}
+        <button disabled={saving || !list} onClick={add}>
+          足す
+        </button>
+      </div>
+      {offHost && <div className="hint">この URL はローカルではありません。依頼の文と添付がこのサーバへ送られます。</div>}
+      {error && <div className="error">{error}</div>}
+      {changed && <div className="hint">保存しました。反映にはデーモンの再起動が要ります。</div>}
+    </section>
   );
 }

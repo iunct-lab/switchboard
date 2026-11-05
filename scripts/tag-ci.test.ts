@@ -336,11 +336,13 @@ describe("tag-ci: recordings and the walk (#3534)", () => {
     return { d, lists };
   };
 
-  test("recordings asked for and missing: nothing runs, no mark, no walk, the names are logged, exit 2", async () => {
+  test("recordings asked for and missing: nothing runs, no mark, no walk, the names are logged and given to onSkip, exit 2", async () => {
     process.env.SWITCHBOARD_FIXTURES = "/vault";
     const f = fake([{ tag: "v2.0.0", body: "- b" }, { tag: "v1.0.0", body: "- a" }]);
     const { d, lists } = listing(f, "present packages/a.jsonl\nmissing packages/b.jsonl\n");
-    const r = await tagCi(d, "o/r", "/repo", CACHE, NO_HOST);
+    const skipped: Array<[string, string[]]> = [];
+    const r = await tagCi({ ...d, onSkip: (tag, missing) => void skipped.push([tag, missing]) }, "o/r", "/repo", CACHE, NO_HOST);
+    expect(skipped).toEqual([["v2.0.0", ["packages/b.jsonl"]]]);
     expect(r).toEqual([]);
     expect(tagCiExit(r)).toBe(2);
     expect(f.ran).toEqual([]);

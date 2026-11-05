@@ -1,4 +1,5 @@
 import type { RunnerId, Schedule, ScheduleInput } from "@switchboard/protocol";
+import { claudeOnlyAction } from "./scheduleActions.ts";
 
 /** The edit form's values for one schedule row (#1480). Strings throughout: they are input values. */
 export type ScheduleDraft = { title: string; cron: string; workspaceId: string; runner: RunnerId; model: string; effort: string; budget: string; prompt: string };
@@ -44,14 +45,14 @@ export function scheduleEditPatch(cur: Schedule, d: ScheduleDraft): { patch: Par
 
 /**
  * The create form's body (#1924): the kinds that run on the meta workspace (backlog-next, secret-scan, insights) take the
- * meta workspace and no prompt; insights runs on claude whatever runner the form held (its select is locked, but the
+ * meta workspace and no prompt; insights and ui-layers (#3353) run on claude whatever runner the form held (its select is locked, but the
  * saved defaults can land late) and keeps the model and effort the form shows — those are claude's, the form resets them
  * when the kind is chosen. A prompt schedule keeps its workspace and its trimmed prompt.
  */
 export function scheduleCreateInput(f: { title: string; cron: string; wsId: string; metaId: string | undefined; runner: RunnerId; model: string; effort: string; prompt: string; action: Schedule["action"]; budgetUsd?: number }): ScheduleInput {
   const metaOnly = f.action !== "prompt";
-  const insights = f.action === "insights";
+  const onClaude = claudeOnlyAction(f.action);
   return metaOnly
-    ? { title: f.title.trim(), cron: f.cron, workspaceId: f.metaId ?? "", runner: insights ? "claude" : f.runner, model: f.model, effort: f.effort, prompt: "", action: f.action, budgetUsd: f.budgetUsd }
+    ? { title: f.title.trim(), cron: f.cron, workspaceId: f.metaId ?? "", runner: onClaude ? "claude" : f.runner, model: f.model, effort: f.effort, prompt: "", action: f.action, budgetUsd: f.budgetUsd }
     : { title: f.title.trim(), cron: f.cron, workspaceId: f.wsId, runner: f.runner, model: f.model, effort: f.effort, prompt: f.prompt.trim(), action: f.action, budgetUsd: f.budgetUsd };
 }

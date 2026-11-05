@@ -1,7 +1,9 @@
 import { z } from "zod";
 
+/** The id of a connection the person added in Settings (an ADK server): `custom:<name>`. */
+export const CustomRunnerId = z.templateLiteral(["custom:", z.string()]).refine((id) => /^custom:[a-z0-9][a-z0-9-]{0,31}$/.test(id), "custom:<name> with a-z, 0-9 and -");
 /** Which runner produced a session. Adapters are plugins; any subset may be installed. */
-export const RunnerId = z.enum(["claude", "codex", "dak"]);
+export const RunnerId = z.union([z.enum(["claude", "codex", "dak"]), CustomRunnerId]);
 export type RunnerId = z.infer<typeof RunnerId>;
 
 export const PermissionKind = z.enum(["exec", "write", "network", "other"]);

@@ -26,3 +26,13 @@ export function moveModel(list: ModelOption[], value: string, dir: -1 | 1): Mode
   [out[i], out[j]] = [out[j]!, out[i]!];
   return out;
 }
+
+/** The 載せない list (#1401) with one id added at the end (once); the screen saves the whole list (PATCH `hiddenModels`). */
+export function hideModel(hidden: string[], value: string): string[] {
+  return hidden.includes(value) ? hidden : [...hidden, value];
+}
+
+/** The 載せない list without one id: the next 「CLI の表を読む」 offers it again. */
+export function unhideModel(hidden: string[], value: string): string[] {
+  return hidden.filter((id) => id !== value);
+}

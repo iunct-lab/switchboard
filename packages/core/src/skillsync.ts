@@ -66,7 +66,7 @@ function git(cwd: string, ...args: string[]): string | null {
 }
 
 /** A hash of every file under `dir` (relative path and content), without the marker. */
-function treeHash(dir: string): string {
+export function treeHash(dir: string): string {
   const h = createHash("sha256");
   const walk = (d: string) => {
     for (const e of readdirSync(d, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {

@@ -5,6 +5,7 @@ import { api } from "../api.ts";
 import { backlogHeading, createWord, draftKey, editOf, formAfterRead, GUARANTEE_A, githubSyncText, heldIssueText, issueHref, loadDraft, loadNewIssueDraft, savedWords, syncLine, textDraftKey, valueText, workspaceErrorGuide, type EditForm, type NewIssueDraft } from "../backlogSync.ts";
 import { activeTaskLine, ago, autoByWorkspace, inProgressState, readyPending, startButton, lastTaskLine, overlapLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl, type PrereqPart } from "../inProgress.ts";
 import { promotionLine } from "../release.ts";
+import { changeMarks, changeStateLabel, short } from "../changes.ts";
 import { Flow } from "./Flow.tsx";
 import { Interventions } from "./Interventions.tsx";
 import { Mockups } from "./Approvals.tsx";
@@ -366,6 +367,86 @@ function Made(props: { workspaceId: string; localId: string; title: string }) {
         更新
       </button>
     </div>
+  );
+}
+
+/**
+ * One local change opened (#2486): its branches' tips now, the marks merge-gate counts (main review, local-ci of this
+ * head and base, rechecks), then its body and every comment oldest first — the review, the triage, the results.
+ */
+function ChangeDetail(props: { workspaceId: string; number: number }) {
+  const [detail, setDetail] = useState<BacklogIssueDetail | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  useEffect(() => {
+    api.backlogIssue(props.workspaceId, props.number).then(setDetail, (e: unknown) => setFailed(e instanceof Error ? e.message : String(e)));
+  }, [props.workspaceId, props.number]);
+  if (failed) return <div className="muted">読めませんでした: {failed}</div>;
+  if (!detail) return <div className="hint">読み込み中…</div>;
+  const marks = changeMarks(detail.comments, detail.changeRefs);
+  const ci = { pass: "local-ci 合格", fail: "local-ci 不合格", stale: "local-ci は前の head / base のもの" } as const;
+  return (
+    <div className="change-detail" data-change={props.number}>
+      <div className="hint change-marks">
+        head {short(detail.changeRefs?.head)} · base {short(detail.changeRefs?.base)}
+        {" · "}
+        {marks.review ? `最新のレビュー: ${marks.review.runner}（${jstDateTime(Date.parse(marks.review.at))}）` : "レビューなし"}
+        {" · "}
+        {marks.localCi ? ci[marks.localCi] : "local-ci なし"}
+        {marks.rechecks.length > 0 && ` · 再チェック ${marks.rechecks.join(", ")}`}
+      </div>
+      <pre className="wrap">{detail.issue.body || "（本文なし）"}</pre>
+      {detail.comments.map((c) => (
+        <div key={c.id} className="change-comment">
+          <div className="hint">{jstDateTime(Date.parse(c.createdAt))}</div>
+          <pre className="wrap">{c.body}</pre>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * The local changes of the workspaces in view (#2486): one row each, opened in place. Only open ones are on the floor;
+ * the closed ones (merged or not) are folded. Nothing when none is open.
+ */
+function Changes(props: { changes: BacklogData["changes"] }) {
+  const [open, setOpen] = useState<string | null>(null);
+  const opened = props.changes.filter((c) => c.state === "OPEN");
+  const closed = props.changes.filter((c) => c.state !== "OPEN");
+  if (opened.length === 0) return null;
+  const row = (c: BacklogData["changes"][number]) => {
+    const id = `${c.workspaceId}#${c.number}`;
+    return (
+      <Fragment key={id}>
+        <button className="row backlog-item change-row ghost" data-change={c.number} data-state={c.state} aria-expanded={open === id} onClick={() => setOpen(open === id ? null : id)}>
+          <span className="t">
+            #{c.number} {c.title}
+          </span>
+          <span className="m">
+            {c.head} → {c.base}
+          </span>
+          <span className="m">{changeStateLabel(c)}</span>
+          <span className="m">{jstDateTime(Date.parse(c.updatedAt))}</span>
+        </button>
+        {open === id && <ChangeDetail workspaceId={c.workspaceId} number={c.number} />}
+      </Fragment>
+    );
+  };
+  return (
+    <section className="card backlog-changes">
+      <div className="row head">
+        <h5>
+          変更 <span className="hint">{opened.length}</span>
+        </h5>
+      </div>
+      {opened.map(row)}
+      {closed.length > 0 && (
+        <details>
+          <summary className="hint">閉じた変更 {closed.length}</summary>
+          {closed.map(row)}
+        </details>
+      )}
+    </section>
   );
 }
 
@@ -1004,6 +1085,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
         ))}
       </section>
 
+      {data && <Changes changes={data.changes.filter((c) => inView(c.workspaceId))} />}
       {data && view.layout === "board" && (
         <>
           {/* phones only (CSS): one stage at a time instead of the columns side by side */}

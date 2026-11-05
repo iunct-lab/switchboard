@@ -1,10 +1,10 @@
-// test-reads: none
+// test-reads: docs/design/scratch-apps.md
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Artifact, Task } from "@switchboard/protocol";
-import { ArtifactStore, checkViewKey, MAX_ARTIFACT_DIR_FILES, MAX_ARTIFACT_FILE_BYTES, viewKey } from "./artifacts.ts";
+import { ArtifactStore, artifactPrompt, checkViewKey, SCRATCH_APPS_DOC, MAX_ARTIFACT_DIR_FILES, MAX_ARTIFACT_FILE_BYTES, viewKey } from "./artifacts.ts";
 import { loadConfig } from "./config.ts";
 import { startServer } from "./server.ts";
 
@@ -410,5 +410,13 @@ describe("addCopy (#1838)", () => {
     writeFileSync(big, Buffer.alloc(MAX_ARTIFACT_FILE_BYTES + 1));
     expect(() => store.addCopy(task, big, "b")).toThrow(/max/);
     rmSync(outside, { recursive: true, force: true });
+  });
+});
+
+describe("artifactPrompt (#3674)", () => {
+  test("points at the scratch-apps document, by default the one in this code's tree", () => {
+    expect(artifactPrompt("/x/docs/design/scratch-apps.md")).toContain("/x/docs/design/scratch-apps.md");
+    expect(artifactPrompt()).toContain(SCRATCH_APPS_DOC);
+    expect(existsSync(SCRATCH_APPS_DOC)).toBe(true);
   });
 });

@@ -158,13 +158,32 @@ test("pruneAnswered / keptAnswers: the list replaces an answer it has the questi
   // the list: the approval answered (same id), #3 answered under its new id, the check gone, the changed one as it was
   const list = [ask({ id: approval.id, kind: "approval", state: "resolved" }), ask({ id: "decision:ws#3@b", kind: "decision", state: "answered", workspace: { id: "ws", name: "w" }, pbi: { number: 3, title: "p", url: "u" } }), ask({ id: changed.id, kind: "check", changedAt: 5 })];
   const pruned = pruneAnswered(m, list);
-  expect([...pruned.keys()].sort()).toEqual([changed.id, check.id, decision.id].sort());
+  expect([...pruned.keys()].sort()).toEqual([changed.id, check.id].sort());
   expect(keptAnswers(pruned, list).map((a) => a.id)).toEqual([check.id]);
   // the changed question moved again: its notice goes
   expect([...pruneAnswered(pruned, [ask({ id: changed.id, kind: "check", changedAt: 6 })]).keys()]).not.toContain(changed.id);
   // an answer with neither PBI nor Task is not taken for another one answered
   const bare = ask({ id: "x", kind: "stop", state: "answered" });
   expect(keptAnswers(new Map([["x", { ask: bare }]]), [ask({ id: "y", kind: "stop", state: "answered" })]).map((a) => a.id)).toEqual(["x"]);
+});
+
+test("answered card gives way to the next question", () => {
+  const t1 = { id: "t1", title: "t" };
+  const answered = ask({ id: "check:t1:9", kind: "check", state: "answered", task: t1 });
+  const m = new Map<string, Answered>([[answered.id, { ask: answered }]]);
+  // the Task went on: its answered check left the list, the card stays
+  expect(keptAnswers(pruneAnswered(m, []), []).map((a) => a.id)).toEqual([answered.id]);
+  // only another Task's question: the card stays
+  const other = [ask({ id: "check:t2:3", kind: "check", state: "open", task: { id: "t2", title: "u" } })];
+  expect(keptAnswers(pruneAnswered(m, other), other).map((a) => a.id)).toEqual([answered.id]);
+  // the same Task stopped again with an open question (a check or a stop): the card gives way
+  for (const next of [ask({ id: "check:t1:14", kind: "check", state: "open", task: t1 }), ask({ id: "stop:t1:s", kind: "stop", state: "open", task: t1 })]) {
+    const list = [...other, next];
+    const pruned = pruneAnswered(m, list);
+    expect(keptAnswers(pruned, list)).toEqual([]);
+    // the next question answered too and gone from the list: the first card does not come back
+    expect(keptAnswers(pruneAnswered(pruned, []), [])).toEqual([]);
+  }
 });
 
 const subject = { kind: "approval" as const, op: "exec", target: "bun test packages/core", conditions: [], head: null };

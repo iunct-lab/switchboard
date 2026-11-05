@@ -594,7 +594,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
           </a>
         </div>
         <div className="hint" style={{ marginTop: 6 }}>
-          {cloud ? "Cloudの続行・設定・停止は公式 Web で操作してください。ローカル中断ではCloud作業を止められません。" : "変更したファイルは「差分」タブに。PR 作成は Phase 3"}
+          {cloud ? "Cloudの続行・設定・停止は公式 Web で操作してください。ローカル中断ではCloud作業を止められません。" : "変更したファイルは「差分」タブに。"}
         </div>
       </div>
 

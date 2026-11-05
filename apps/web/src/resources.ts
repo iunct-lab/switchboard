@@ -61,10 +61,34 @@ export function waitLine(wait: ResourceWait, running: ResourceRun[], memory: Ops
 
 /** How long since `iso`: 「45 秒」 under a minute, 「12 分」 under an hour, then 「1 時間 5 分」. */
 export function since(iso: string, now: number): string {
-  const s = Math.max(0, Math.floor((now - Date.parse(iso)) / 1000));
+  return duration(now - Date.parse(iso));
+}
+
+function duration(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
   if (s < 60) return `${s} 秒`;
   const m = Math.floor(s / 60);
   return m < 60 ? `${m} 分` : `${Math.floor(m / 60)} 時間 ${m % 60} 分`;
+}
+
+/** A run's usual time: 「14 分 · 28 件」 (the median of its kind's successful runs and how many), or 「実績なし」 under 3 of them. */
+export function typicalLabel(row: Pick<ResourceRun | ResourceWait, "typicalMs" | "samples">): string {
+  return row.typicalMs === null ? "実績なし" : `${duration(row.typicalMs)} · ${row.samples} 件`;
+}
+
+/** The running run against its usual time, in words (not by color alone). */
+export function verdictLabel(run: Pick<ResourceRun, "verdict">): string {
+  return { none: "実績なし", normal: "普段どおり", long: "普段の 2 倍より長い" }[run.verdict];
+}
+
+/**
+ * 「全部終わるまでの目安」: 「約 38 分」 and the runs left out for having no record; 「待ちはありません」 when nothing runs or
+ * waits; 「実績なし」 when every one of the `jobs` running and waiting has no record (a 0 left of nothing known is not 「1 分以内」).
+ */
+export function etaLine(eta: OpsResources["eta"], jobs: number): { value: string; note: string | null } {
+  if (eta.etaMs === null) return { value: "待ちはありません", note: null };
+  if (eta.unknown >= jobs) return { value: "実績なし", note: `実績の無い ${eta.unknown} 件` };
+  return { value: eta.etaMs < 60_000 ? "1 分以内" : `約 ${duration(eta.etaMs)}`, note: eta.unknown > 0 ? `実績の無い ${eta.unknown} 件を除く` : null };
 }
 
 /** The latest minute's rows, named: the Task (a link when there is one), the daemon, or the rest. */

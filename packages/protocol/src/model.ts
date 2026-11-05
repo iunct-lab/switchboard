@@ -490,8 +490,36 @@ export const CreateTaskInput = z.object({
   shadowRunner: RunnerId.nullable().optional(),
   /** Attachments (#125): ids from `POST /api/attachments`, not yet attached to another task. Their paths go at the end of the prompt. */
   attachmentIds: z.array(z.string()).optional(),
+  /** The process candidate the task is started under (`ops-kit/processes/<id>.md`, docs/design/process-kernel.md K4); omitted = none named. Recorded in the task's provenance, nothing else reads it yet. */
+  process: z.string().optional(),
+  /** Why that candidate (free text, e.g. `backlog stage complete`); recorded with it. */
+  processReason: z.string().optional(),
 });
 export type CreateTaskInput = z.infer<typeof CreateTaskInput>;
+
+/**
+ * Provenance (docs/design/process-kernel.md, K1): what a task was started with, written once at creation and read at
+ * `GET /api/tasks/:id/provenance`. `bundle` holds sha256 hashes of the instruction sources the task could read (null = that
+ * source is not there); `instructionBytes` is the size of the root instruction files and project skills in its working directory.
+ */
+export const Provenance = z.object({
+  v: z.literal(1),
+  process: z.object({ id: z.string(), version: z.number().int() }).nullable(),
+  processReason: z.string().nullable(),
+  bundle: z.object({ skills: z.string().nullable(), repoSkills: z.string().nullable(), claudeMd: z.string().nullable(), processes: z.string().nullable() }),
+  repo: z.object({ head: z.string().nullable() }),
+  runner: RunnerId,
+  model: z.string().nullable(),
+  effort: z.string().nullable(),
+  permissionMode: z.string().nullable(),
+  instructionBytes: z.number().int().nullable(),
+  recordedAt: z.number(),
+});
+export type Provenance = z.infer<typeof Provenance>;
+
+/** One process candidate as `GET /api/processes` lists it (the entries' texts are not sent; they are the file's). */
+export const ProcessSummary = z.object({ id: z.string(), version: z.number().int(), title: z.string(), fits: z.array(z.string()) });
+export type ProcessSummary = z.infer<typeof ProcessSummary>;
 
 /** `PATCH /api/tasks/:id` (#491): the person renames the task; it is never set again automatically. */
 export const PatchTaskInput = z.object({ title: z.string().trim().min(1).max(200) });
@@ -800,8 +828,22 @@ export const Settings = z.object({
    * the runner's own login only: on Amazon Bedrock the ids are spelled differently and the adapter's Bedrock list stays.
    */
   models: z.record(z.string(), z.array(ModelOption)).default({}),
+  /**
+   * runner → the CLI's model ids left out of the list on purpose (#1401): not offered as candidates by 「CLI の表を読む」.
+   * Absent = the ids the bundled list leaves out (the daemon's SHIPPED_HIDDEN_MODELS).
+   */
+  hiddenModels: z.record(z.string(), z.array(z.string())).default({}),
 });
 export type Settings = z.infer<typeof Settings>;
+
+/**
+ * GET /api/settings/model-candidates (#1401): per runner, the models of the installed CLI's table that are neither
+ * listed nor hidden, or why the table could not be read.
+ */
+export const ModelCandidates = z.array(
+  z.union([z.object({ runner: RunnerId, candidates: z.array(ModelOption) }), z.object({ runner: RunnerId, error: z.string() })]),
+);
+export type ModelCandidates = z.infer<typeof ModelCandidates>;
 
 const autoStartChoicePatch = z.object({ runner: RunnerId, model: z.string(), effort: z.string() }).partial().nullable();
 
@@ -813,6 +855,12 @@ export const SettingsPatch = z.object({
   bedrock: z.record(z.string(), z.object({ region: z.string().regex(/^[a-z]{2}(-[a-z]+)+-\d$/) }).nullable()).optional(),
   /** The whole list per runner (#1400); null = back to the adapter's bundled list. */
   models: z.record(z.string(), z.array(ModelOption).nullable()).optional(),
+  /**
+   * The whole 載せない list per runner (#1401), replacing the saved one — not added to SHIPPED_HIDDEN_MODELS: to hide
+   * one more id, send the current list (the saved one, else GET /api/settings' `defaults.hiddenModels`) with it. [] hides
+   * nothing; null = back to the bundled list's (SHIPPED_HIDDEN_MODELS).
+   */
+  hiddenModels: z.record(z.string(), z.array(z.string()).nullable()).optional(),
   shadowRunner: RunnerId.nullable().optional(),
   /** Partial: `{ routing: { llm: { enabled: true } } }` leaves the saved runner / model alone. */
   routing: z.object({ llm: z.object({ enabled: z.boolean(), runner: RunnerId, model: z.string(), timeoutMs: z.number().int().min(1000).max(60_000) }).partial().optional() }).partial().optional(),
@@ -968,19 +1016,27 @@ export type OpsLoadGroup = z.infer<typeof OpsLoadGroup>;
 /** `GET /api/ops/load?days=&task=`. `available` false: this host has no cgroup v2 / /proc to read (macOS). */
 export const OpsLoad = z.object({ available: z.boolean(), days: z.number(), hours: z.array(OpsLoadHour), groups: z.array(OpsLoadGroup) });
 export type OpsLoad = z.infer<typeof OpsLoad>;
-/** A job holding one of the machine's heavy-process slots (`ops-kit heavy`, #3332). `taskTitle` null: outside a Task, or a Task this daemon does not know. */
-export const ResourceRun = z.object({ pid: z.number(), name: z.string(), cwd: z.string(), taskId: z.string().nullable(), taskTitle: z.string().nullable(), queuedAt: z.string(), startedAt: z.string() });
+/** How a running job compares with the finished ones of its kind (#3335): `none` too few to say, `long` past twice their median. */
+export const RunVerdict = z.enum(["none", "normal", "long"]);
+export type RunVerdict = z.infer<typeof RunVerdict>;
+/**
+ * A job holding one of the machine's heavy-process slots (`ops-kit heavy`, #3332). `taskTitle` null: outside a Task, or a Task this daemon does not know.
+ * `typicalMs`: the median time of the finished runs of its kind that ended with exit 0 (null: fewer than 3); `samples`: how many there were.
+ */
+export const ResourceRun = z.object({ pid: z.number(), name: z.string(), cwd: z.string(), taskId: z.string().nullable(), taskTitle: z.string().nullable(), queuedAt: z.string(), startedAt: z.string(), typicalMs: z.number().nullable(), samples: z.number(), verdict: RunVerdict });
 export type ResourceRun = z.infer<typeof ResourceRun>;
 /** A job waiting for a slot (`slot`) or for the free memory to rise above the floor (`memory`). */
-export const ResourceWait = z.object({ pid: z.number(), name: z.string(), cwd: z.string(), taskId: z.string().nullable(), taskTitle: z.string().nullable(), queuedAt: z.string(), reason: z.enum(["slot", "memory"]) });
+export const ResourceWait = z.object({ pid: z.number(), name: z.string(), cwd: z.string(), taskId: z.string().nullable(), taskTitle: z.string().nullable(), queuedAt: z.string(), reason: z.enum(["slot", "memory"]), typicalMs: z.number().nullable(), samples: z.number() });
 export type ResourceWait = z.infer<typeof ResourceWait>;
 /**
  * `GET /api/ops/resources` (#3332): now. `memory` null: no /proc/meminfo (macOS). `consumers` is the latest minute of
- * ops_load_groups (null: none in the last 7 days), largest RSS first.
+ * ops_load_groups (null: none in the last 7 days), largest RSS first. `eta`: ms from now until everything running and
+ * waiting would be done by their kinds' medians (null: nothing running or waiting); `unknown` runs had no median and are left out.
  */
 export const OpsResources = z.object({
   memory: z.object({ availableBytes: z.number(), totalBytes: z.number(), swapUsedBytes: z.number(), floorBytes: z.number() }).nullable(),
   slots: z.object({ max: z.number(), running: z.array(ResourceRun), waiting: z.array(ResourceWait) }),
+  eta: z.object({ etaMs: z.number().nullable(), unknown: z.number() }),
   consumers: z
     .object({
       at: z.number(),
@@ -1162,8 +1218,9 @@ export const Schedule = z.object({
    * `secret-scan` = check every registered repository for values written on GitHub (#775); those two use no runner.
    * `insights` = run Claude Code's /insights as a Task of its own and keep the report as its artifact (#1838; claude, no prompt).
    * `approval-window` = the SSO / deploy batches still waiting go in one inbox note, none when there are none (#2046; no runner).
+   * `ui-layers` = the monthly floor / ceiling / walls check as a Task of its own on a fixed instruction (#3353; claude, no prompt).
    */
-  action: z.enum(["prompt", "backlog-next", "secret-scan", "insights", "approval-window"]),
+  action: z.enum(["prompt", "backlog-next", "secret-scan", "insights", "approval-window", "ui-layers"]),
   budgetUsd: z.number().nullable(),
   enabled: z.boolean(),
   lastRunAt: z.number().nullable(),
@@ -1184,7 +1241,7 @@ export const ScheduleInput = z.object({
   effort: z.string().optional(),
   /** Required (non-blank) when action is `prompt` — checked by the scheduler, since PATCH takes a partial of this; the other kinds take none (#1838). */
   prompt: z.string().optional(),
-  action: z.enum(["prompt", "backlog-next", "secret-scan", "insights", "approval-window"]).optional(),
+  action: z.enum(["prompt", "backlog-next", "secret-scan", "insights", "approval-window", "ui-layers"]).optional(),
   budgetUsd: z.number().positive().nullable().optional(),
   enabled: z.boolean().optional(),
 });
@@ -1528,8 +1585,33 @@ export type RunnerLogin = z.infer<typeof RunnerLogin>;
 export const LoginKind = z.enum(["claude.ai", "console", "bedrock"]);
 export type LoginKind = z.infer<typeof LoginKind>;
 
+/**
+ * An ADK server the person added in Settings (docs/design/custom-adapter.md): it runs as the runner `custom:<name>`.
+ * Saved in the `settings` table under its own key, not in `Settings`, so an older daemon that writes `Settings` back
+ * cannot drop it. There is no field for a token's value: only the name of the environment variable that holds it.
+ */
+export const CustomRunner = z
+  .object({
+    /** The part after `custom:` in the runner's id. */
+    name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/),
+    /** The name the person knows the runner by. */
+    label: z.string().trim().min(1).max(60),
+    url: z.url({ protocol: /^https?$/ }),
+    /** The ADK app name. */
+    app: z.string().trim().min(1).max(100),
+    tokenEnv: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).optional(),
+    /** Artifacts whose name starts with this are the agent's own and are not fetched. */
+    artifactSkipPrefix: z.string().min(1).max(100).optional(),
+  })
+  .strict();
+export type CustomRunner = z.infer<typeof CustomRunner>;
+/** PUT /api/custom-runners: the whole list. */
+export const CustomRunnerList = z.array(CustomRunner);
+
 export const RunnerInfo = z.object({
   id: RunnerId,
+  /** The name to show (a custom runner's label); absent = the id's own name. */
+  label: z.string().optional(),
   available: z.boolean(),
   version: z.string().optional(),
   path: z.string().optional(),
@@ -1800,6 +1882,11 @@ export const Backlog = z.object({
    * stored still comes; one never imported has no items — never an empty list as if read.
    */
   errors: z.array(z.object({ workspaceId: z.string(), workspaceName: z.string(), message: z.string(), kind: BacklogErrorKind })).default([]),
+  /** The local changes (#2485) of the workspaces kept here: every open one, and each workspace's newest 10 closed. */
+  changes: z.array(z.object({
+    workspaceId: z.string(), number: z.number(), title: z.string(), state: z.enum(["OPEN", "CLOSED"]),
+    head: z.string(), base: z.string(), mergeCommit: z.string().nullable(), mergedAt: z.string().nullable(), updatedAt: z.string(),
+  })).default([]),
   /** Each workspace's sync (#885): an import under way, and when the last complete one was stored (null = never). */
   syncs: z.array(z.object({
     workspaceId: z.string(),
@@ -1871,6 +1958,15 @@ export type BacklogObjectKind = z.infer<typeof BacklogObjectKind>;
 export const BacklogFetchState = z.enum(["fetched", "unfetched", "unavailable", "forbidden"]);
 export type BacklogFetchState = z.infer<typeof BacklogFetchState>;
 
+/**
+ * A local change (#2485): what a pull request is on a workspace with no forge — a Task's branch to be merged into `base`.
+ * Kept on the Issue record it is (numbered with the Issues, as GitHub numbers PRs). `head` / `base` = branch names; the
+ * tips are not kept (they move): read from git when shown. `mergeCommit` / `mergedAt` = the tip `base` was moved to by
+ * the merge, and when; null until then.
+ */
+export const BacklogChange = z.object({ head: z.string(), base: z.string(), mergeCommit: z.string().nullable(), mergedAt: z.string().nullable() });
+export type BacklogChange = z.infer<typeof BacklogChange>;
+
 /** An Issue as stored (#885): body (Markdown) and the standard fields; `parent` / `subIssues` are Issue numbers of the same repository. */
 export const BacklogIssueData = z.object({
   number: z.number(),
@@ -1888,6 +1984,8 @@ export const BacklogIssueData = z.object({
   updatedAt: z.string(),
   /** When it was closed (#651); null = open, never read, or stored before this was kept (the next import fills it). */
   closedAt: z.string().nullable(),
+  /** Set when it is a local change (#2485), not an Issue. */
+  change: BacklogChange.optional(),
 });
 export type BacklogIssueData = z.infer<typeof BacklogIssueData>;
 
@@ -2002,10 +2100,14 @@ export const BacklogIssueDetail = z.object({
   sync: BacklogSyncInfo,
   /** What the check before and after a send can and cannot keep (#887, 初期方式 A). */
   limits: z.string(),
+  /** A local change's branch tips now (#2485, 40 hex; null = the branch is not there); null when it is not a change. */
+  changeRefs: z.object({ head: z.string().nullable(), base: z.string().nullable() }).nullable().default(null),
 });
 export type BacklogIssueDetail = z.infer<typeof BacklogIssueDetail>;
 
 const fieldValue = z.union([z.string(), z.number(), z.null()]);
+/** A branch name as `refs/heads/<name>` takes it (#2485): no space, `..`, `@{`, `//`, not starting with `-` or `/`, not ending with `/`, `.` or `.lock`. */
+const branchName = z.string().min(1).max(255).regex(/^(?![-/])(?!.*(?:\.\.|@\{|\/\/))(?!.*(?:\/|\.|\.lock)$)[^\s~^:?*\[\\]+$/, "枝の名前ではありません");
 const issueText = { title: z.string().trim().min(1).max(256), body: z.string().max(65_536) };
 
 /**
@@ -2033,11 +2135,14 @@ export const BacklogEditInput = z
     resolve: z.object({ field: z.string().min(1), choice: z.enum(["local", "remote"]), expectedRevision: z.string().min(1) }).strict().optional(),
     /** Sends a `failed` operation of the Issue again (#2885), its cause put right: `operation` = the held edit's id. */
     retry: z.object({ operation: z.string().min(1) }).strict().optional(),
+    /** A local change merged (#2485): the tip its base was moved to, and when. Only on a backlog kept here. */
+    change: z.object({ mergeCommit: z.string().regex(/^[0-9a-f]{40}$/), mergedAt: z.string().min(1) }).strict().optional(),
   })
   .strict()
   .refine((e) => !e.resolve || Object.keys(e).every((k) => k === "workspaceId" || k === "resolve"), { message: "resolve は編集と一緒には送れません" })
   .refine((e) => !e.retry || Object.keys(e).every((k) => k === "workspaceId" || k === "retry"), { message: "retry は編集と一緒には送れません" })
-  .refine((e) => !e.stateReason || e.state === "CLOSED", { message: "閉じた理由は state CLOSED と一緒に送ります" });
+  .refine((e) => !e.stateReason || e.state === "CLOSED", { message: "閉じた理由は state CLOSED と一緒に送ります" })
+  .refine((e) => !e.change || e.state === "CLOSED", { message: "変更のマージは state CLOSED と一緒に送ります" });
 export type BacklogEditInput = z.infer<typeof BacklogEditInput>;
 
 /** A new Issue (`POST /api/backlog`, #886), kept here and created on GitHub later; `fields` puts it in the workspace's Project. */
@@ -2050,6 +2155,8 @@ export const BacklogCreateInput = z
     milestone: z.string().min(1).nullable().default(null),
     parent: z.number().int().positive().nullable().default(null),
     fields: z.record(z.string().min(1), fieldValue).nullable().default(null),
+    /** Makes it a local change (#2485): the branch to merge and the one it goes into. Only on a backlog kept here. */
+    change: z.object({ head: branchName, base: branchName }).strict().optional(),
   })
   .strict();
 export type BacklogCreateInput = z.infer<typeof BacklogCreateInput>;

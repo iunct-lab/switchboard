@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { RunnerInfo } from "@switchboard/protocol";
 import { modelOptions } from "../modelOptions.ts";
+import { runnerLabel } from "../runners.ts";
 
 const TYPE_IT = "\u0000type"; // never a model name
 
@@ -12,7 +13,7 @@ const TYPE_IT = "\u0000type"; // never a model name
 export function ModelSelect(props: { runner: RunnerInfo | undefined; value: string; onChange: (model: string) => void; label: string; disabled?: boolean; title?: string }) {
   const [typing, setTyping] = useState(false);
   useEffect(() => setTyping(false), [props.runner?.id]);
-  if (props.runner && props.runner.models.length === 0) return <span className="hint">{props.label}: DAK 側の設定で決まる</span>;
+  if (props.runner && props.runner.models.length === 0) return <span className="hint">{props.label}: {runnerLabel(props.runner.id, props.runner)} 側の設定で決まる</span>;
   if (typing) {
     const commit = (v: string) => {
       setTyping(false);

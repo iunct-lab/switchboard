@@ -56,6 +56,7 @@ export function createAdkAdapter(options: AdkAdapterOptions): RunnerAdapter {
   const o = { ...DEFAULTS, ...defined } as ResolvedOptions;
   return {
     id: o.id,
+    label: o.label,
     // No permission knob (#58): the agent decides what to confirm (`require_confirmation` / adk_request_confirmation),
     // and exec.run approvals come from Switchboard's own Workspace MCP policy. Every confirmation still reaches the UI.
     permissionModes: [],

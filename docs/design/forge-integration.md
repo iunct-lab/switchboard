@@ -14,6 +14,7 @@
 - GitHub の host とリポジトリはサービスの実装が今までの場所から取る（取込みは `gh repo view` と `githubHost()`、送信は保存元のキー、ローカル CI は origin の `owner/name`）。GitHub の設定に書けるのは `service` だけで、ほかのキーは不正（読まない値を書けるようにしない）
 - GitLab は `host`（名前だけ。`https://`・ポート・パスは不正）と `project`（全体のパス。サブグループも）が必須。`forgeTargetOf(dir, origin)` が checkout の `origin` の host・パス（大文字小文字は区別しない）と照合し、違えば `ForgeUnsupported` で何も送らない。remote は変えない
 - `forge` の無いリポジトリは `github`（#920 より前の全部のリポジトリ）。このリポジトリの設定には 1 回書き足した
+- A checkout with neither a `forge` nor an `origin` is `app` (`LOCAL_SERVICE`) for `forgeOf`: its changes are kept in the agent management app instead of PRs, and are reviewed, run, judged and merged there ([local-changes.md](local-changes.md)). A checkout with an origin is the same with `"forge": { "service": "app" }`. `forgeTargetOf` still reads a checkout without a `forge` as `github` (the backlog import reads it)
 - Workspace のランナーの設定（`projectVar` など）とは別。リポジトリがどこにあるかはリポジトリが持つ
 - バックログの置き場（workspace の `backlog`: `github` / `switchboard`、#2265）とも別。GitHub 連携の無い workspace でも、PR・CI の報告は `forge` のサービスのまま
 - 資格情報は持たない。各サービスの既存の CLI のログイン（GitHub は `gh`、GitLab は `glab`）に任せる。Project の URL は今までどおり `projectUrl` / `<envPrefix>_PROJECT_URL` / リポジトリ変数
@@ -28,6 +29,8 @@
 | `comment` | コメントを書く（回答を含む） | 同上 |
 | `project` | Project への出し入れとフィールド | 同上 |
 | `verification` | 検査の結果を PR に報告する（ローカル CI の合格） | `githubForge`（[`forge-github.ts`](../../ops-kit/src/forge-github.ts)、`gh pr comment`） |
+
+`app` has `verification` only: the result becomes a comment on the change in the app (`appForge`, [`forge-app.ts`](../../ops-kit/src/forge-app.ts), one row of `reportResult`'s services). It goes the way `ops-kit backlog comment` goes and needs `BACKLOG_URL` and `BACKLOG_WORKSPACE`; without them it fails with the reason and is not sent any other way.
 
 送信待ちの操作の種類は `forgeKind`（`backlog-send.ts`）で決まる: `create` / `comment` はそのまま、Project 項目と `field:*`・`member` は `project`、ほかの `set` は `write`。
 

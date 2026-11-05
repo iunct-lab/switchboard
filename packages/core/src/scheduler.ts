@@ -4,6 +4,7 @@ import { nextRun, parseCron } from "./cron.ts";
 import { type Db, newId } from "./db.ts";
 import type { ScanSummary } from "./secretscan.ts";
 import type { TaskManager } from "./tasks.ts";
+import { collectProvenance } from "./provenance.ts";
 
 /**
  * Scheduler (#20): DAK-style nightly jobs started from Switchboard. A schedule is a cron expression plus everything a
@@ -17,6 +18,23 @@ export type BacklogNextResult = { started: Array<{ task: Task; label: string }>;
 
 /** What the insights schedule's Task sends (#1838): the built-in command alone — Claude Code expands it only as the whole message. */
 export const INSIGHTS_PROMPT = "/insights";
+
+/**
+ * What the ui-layers schedule's Task is told (#3353): the monthly floor / ceiling / walls check (docs/design/ui-layers.md,
+ * docs/design/scheduler.md). The scripts count and write; the Task reads the code and writes the ratings and findings.
+ */
+export const UI_LAYERS_PROMPT = `床・天井・壁の月次の点検をしてください（docs/design/ui-layers.md の原則）。このリポジトリの root で、作業ファイルは W=$(mktemp -d /tmp/switchboard.ui-layers.XXXXXX) の下に置きます。
+
+1. 指標を数える: bun scripts/ui-layers-metrics.ts > "$W/metrics.json"
+2. 置き場所の行が無い画面の PBI を名指しする: bun scripts/ui-layers-placement.ts --days 30 > "$W/placement.json"（exit 2 なら理由をレポートの評価の文に書き、{"checked":0,"missing":[]} で続ける）
+3. 評価を書く: docs/design/ui-layers.md を読み、1 の値と前回の値（\${SWITCHBOARD_HOME:-$HOME/.switchboard}/ui-layers/history.jsonl の最後の行。無ければ初回）、画面のコード（apps/web/src）を読んだ所見から、床・天井・壁それぞれの評価を 2〜4 文で書き、{"floor":"…","ceiling":"…","walls":"…"} を "$W/ratings.json" に置く
+4. レポートを作る: bun scripts/ui-layers-report.ts --metrics "$W/metrics.json" --placement "$W/placement.json" --ratings "$W/ratings.json" --out "$W/ui-layers.html"。走らせるたびに履歴に 1 行積むので、1 回の点検で 1 度だけ走らせる（作り直すなら、その履歴を "$W" に写して最後の行（今回の分）を除き、--history にその写しを渡す）。できた HTML を返答の switchboard-artifact のフェンスで成果物に登録する（題は「床・天井・壁の点検 YYYY-MM-DD」）
+5. 要望にする: 前回より悪くなった点と、新しく見つけた問題だけを、所見の JSON（[{"key","title","detail","source"}]。最大 3 件、大事な順。source は指標の変化なら「定期の検査」、コードを読んだ所見なら「エージェント」）にして bun scripts/ui-layers-requests.ts --findings "$W/findings.json"。無ければ走らせない
+
+指標が悪くなっても何も止めません。マージ・リリース・画面の修正・PBI の作成はしません。最後に、作った要望の番号（無ければ「なし」）と評価の要約を 3 行で返してください。`;
+
+/** The kinds that run on claude only and fire as a Task of their own on a fixed instruction (#1838, #3353). */
+const claudeOnly = (action: string): action is "insights" | "ui-layers" => action === "insights" || action === "ui-layers";
 
 export class Scheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -39,7 +57,7 @@ export class Scheduler {
     private now: () => number = Date.now,
     private startNext: (scheduleId: string, only?: { workspaceId: string; numbers: number[] }) => Promise<BacklogNextResult> = async () => ({ started: [], skipped: ["backlog-next is not available"] }),
     private scanSecrets: (schedule: { id: string; title: string }, cursors: ScanCursors) => Promise<{ lines: string[]; summary: ScanSummary; cursors?: ScanCursors }> = async () => ({ lines: ["secret-scan is not available"], summary: { repos: 0, hits: 0, failed: 1 } }),
-    /** Claude's 7-day utilization at or above this and an insights firing is skipped (#1838): the backlog's `backlogQuotaLimit`. */
+    /** Claude's 7-day utilization at or above this and an insights or ui-layers firing is skipped (#1838, #3353): the backlog's `backlogQuotaLimit`. */
     private quotaLimit: () => number = () => 0.8,
     /** 上限のときの代わり (#834): the runner a prompt schedule's Task starts on, and the status line when it is another. */
     private autoRunner: (r: RunnerId) => { runner: RunnerId; note?: string } = (r) => ({ runner: r }),
@@ -55,7 +73,7 @@ export class Scheduler {
     parseCron(input.cron); // validate
     const action = input.action ?? "prompt";
     if (action === "prompt" && !(input.prompt ?? "").trim()) throw new Error("prompt is required");
-    if (action === "insights" && input.runner !== "claude") throw new Error("insights runs on claude");
+    if (claudeOnly(action) && input.runner !== "claude") throw new Error(`${action} runs on claude`);
     const ws = this.db.getWorkspace(input.workspaceId);
     if (!ws) throw new Error("workspace not found");
     if (!existsSync(ws.path)) throw new Error("workspace directory does not exist");
@@ -101,7 +119,7 @@ export class Scheduler {
     // an effort belongs to one runner's list (#833): a runner change without one goes back to the CLI default. Only a
     // sent effort is checked, so a kept one the runner no longer lists does not block e.g. turning the schedule off.
     const runner = patch.runner ?? cur.runner;
-    if (action === "insights" && runner !== "claude") throw new Error("insights runs on claude");
+    if (claudeOnly(action) && runner !== "claude") throw new Error(`${action} runs on claude`);
     const effort = patch.effort ?? (runner !== cur.runner ? "" : cur.effort);
     const effortWhy = patch.effort ? this.tasks.checkEffort(runner, patch.effort) : undefined;
     if (effortWhy) throw new Error(effortWhy);
@@ -126,7 +144,7 @@ export class Scheduler {
     // `tasks.create()` ever becomes async, or a real async step (e.g. an I/O-bound validation) is inserted below,
     // this must move behind a per-schedule lock (or a DB-level compare-and-swap on lastTaskId) instead.
     // backlog-next decides per workspace and slot instead (#561): its last Task running does not hold the others.
-    const prev = (s.action === "prompt" || s.action === "insights") && s.lastTaskId ? this.db.getTask(s.lastTaskId) : null;
+    const prev = (s.action === "prompt" || claudeOnly(s.action)) && s.lastTaskId ? this.db.getTask(s.lastTaskId) : null;
     if (prev && (prev.status === "running" || prev.status === "waiting")) {
       this.note(`${s.title}: skipped (${reason}); previous run ${prev.id} is still ${prev.status}`);
       return null;
@@ -137,24 +155,25 @@ export class Scheduler {
     const stamp = new Date(this.now());
     const p = (n: number) => String(n).padStart(2, "0");
     const when = `${stamp.getFullYear()}-${p(stamp.getMonth() + 1)}-${p(stamp.getDate())} ${p(stamp.getHours())}:${p(stamp.getMinutes())}`;
-    const insights = s.action === "insights";
-    if (insights) {
-      // the report's session summaries spend the subscription: not while Claude's 7-day window is at the backlog's threshold (#1838)
+    const fixed = claudeOnly(s.action);
+    if (fixed) {
+      // the report's session summaries (insights) and the check's reading (ui-layers) spend the subscription: not while
+      // Claude's 7-day window is at the backlog's threshold (#1838, #3353)
       const limit = this.quotaLimit();
       const hot = this.db.quotaFor("claude").find((q) => q.window === "seven_day" && q.utilization >= limit && q.resetsAt * 1000 > this.now());
       if (hot) {
         this.db.updateSchedule(id, { nextRunAt: nextRun(s.cron, new Date(this.now()))?.getTime() ?? null });
-        this.note(`${s.title}: 飛ばした (${reason}): Claude の 7 日枠が ${Math.round(hot.utilization * 100)}% で閾値 ${Math.round(limit * 100)}% 以上`);
+        this.note(`${s.title}: ${s.action} を飛ばした (${reason}): Claude の 7 日枠が ${Math.round(hot.utilization * 100)}% で閾値 ${Math.round(limit * 100)}% 以上`);
         return null;
       }
     }
-    // insights runs on claude only; a prompt schedule's runner at its limit gives way to the fallback order, on its CLI default model (#834)
-    const { runner, note } = insights ? { runner: "claude" as const, note: undefined } : this.autoRunner(s.runner);
+    // insights and ui-layers run on claude only; a prompt schedule's runner at its limit gives way to the fallback order, on its CLI default model (#834)
+    const { runner, note } = fixed ? { runner: "claude" as const, note: undefined } : this.autoRunner(s.runner);
     const task = this.tasks.create({
       workspaceId: ws.id,
       cwd: ws.path,
-      title: `${insights ? "Claude Code Insights" : s.title} (${when})`,
-      prompt: insights ? INSIGHTS_PROMPT : s.prompt,
+      title: `${s.action === "insights" ? "Claude Code Insights" : s.action === "ui-layers" ? "床・天井・壁の点検" : s.title} (${when})`,
+      prompt: s.action === "insights" ? INSIGHTS_PROMPT : s.action === "ui-layers" ? UI_LAYERS_PROMPT : s.prompt,
       runner,
       ...(s.model && !note ? { model: s.model } : {}),
       ...(s.effort && !note ? { effort: s.effort } : {}),
@@ -166,6 +185,13 @@ export class Scheduler {
       shadowRunner: null,
     }, undefined, (t) => {
       if (note) this.tasks.record(t.id, { t: "status", text: note });
+      // Provenance (docs/design/process-kernel.md, K1), from the row just inserted; a failure to record never stops the task
+      try {
+        const meta = this.db.listWorkspaces().find((w) => w.kind === "meta");
+        this.db.setTaskProvenance(t.id, collectProvenance({ cwd: t.cwd, metaPath: meta?.path ?? null, runner: t.runner, model: t.model, effort: t.effort, permissionMode: t.permissionMode, process: null, processReason: `schedule ${s.id}` }));
+      } catch (e) {
+        this.tasks.record(t.id, { t: "status", text: `由来を記録できませんでした: ${(e as Error).message ?? e}` });
+      }
     });
     this.db.updateSchedule(id, { lastRunAt: this.now(), lastTaskId: task.id, nextRunAt: nextRun(s.cron, new Date(this.now()))?.getTime() ?? null });
     if (note) this.note(`${s.title}: ${note}`);
