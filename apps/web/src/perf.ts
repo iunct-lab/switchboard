@@ -1,5 +1,7 @@
 import type { Journey, PerfSample, PerfSummaryRow, SizeClass } from "@switchboard/protocol";
 import { api } from "./api.ts";
+import { t } from "./i18n.ts";
+import { insights as m } from "./i18n/insights.ts";
 
 // Journey timing (#637): the start is a mark at the person's action, the end a measure `sb:<journey>` left after the
 // result is painted; perf-bench reads the measures from the page. Each measure is also sent to this daemon (#639),
@@ -109,8 +111,8 @@ export interface PerfRow {
 
 /** `240 ms` under a second, `1.5 s` from a second up. */
 export const fmtMs = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`);
-const SIZE_LABEL: Record<SizeClass, string> = { small: "〜1,000 件", medium: "〜5,000 件", large: "5,000 件超" };
-const period = (p: PerfSummaryRow["current"]) => (p ? `${fmtMs(p.p50)} / ${fmtMs(p.p90)}（${p.count} 件）` : "—");
+const SIZE_LABEL: Record<SizeClass, string> = { small: t(m.sizeSmall), medium: t(m.sizeMedium), large: t(m.sizeLarge) };
+const period = (p: PerfSummaryRow["current"]) => (p ? t(m.period, { p50: fmtMs(p.p50), p90: fmtMs(p.p90), count: p.count }) : "—");
 
 export function perfRows(summary: PerfSummaryRow[]): PerfRow[] {
   return summary.map(({ journey, device, size, current, previous }) => {

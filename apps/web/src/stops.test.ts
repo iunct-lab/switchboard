@@ -1,3 +1,4 @@
+// test-reads: apps/web/src/asks.ts apps/web/src/inProgress.ts apps/web/src/terminalReconnect.ts apps/web/src/i18n.ts apps/web/src/i18n/task.ts
 import { describe, expect, test } from "bun:test";
 import type { StopSummary } from "@switchboard/protocol";
 import { shownStops, stopDisplay } from "./stops.ts";
@@ -42,5 +43,22 @@ describe("shownStops", () => {
   test("a person's first, resolved one-offs hidden, resolved repeats kept", () => {
     const out = shownStops([s({ key: "a", lastAt: 9 }), s({ key: "b", next: "decide", lastAt: 1 }), s({ key: "c", state: "resolved", next: "none" }), s({ key: "d", state: "resolved", next: "none", count: 2 })]);
     expect(out.map((x) => x.key)).toEqual(["b", "a", "d"]);
+  });
+});
+
+describe("in English (#2444)", () => {
+  // the language is read once when i18n.ts loads: a fresh process with the browser's choice set to en
+  test("a stop, a question's badge, a backlog row's wait and the terminal's end read in English", () => {
+    const at = (f: string) => JSON.stringify(new URL(f, import.meta.url).pathname);
+    const code = `globalThis.localStorage = { getItem: (k) => (k === "switchboard.lang" ? "en" : null) };
+const { stopDisplay } = await import(${at("./stops.ts")});
+const { resumeLabel, KIND_LABEL } = await import(${at("./asks.ts")});
+const { ago } = await import(${at("./inProgress.ts")});
+const { afterClose } = await import(${at("./terminalReconnect.ts")});
+const d = stopDisplay(${JSON.stringify(s({ count: 2, changes: [{ kind: "answer", detail: "x" }], next: "decide", actions: [{ attempt: 1, what: "retry", ok: false }] }))});
+console.log(JSON.stringify([d.count, d.changes, d.next, d.actions, resumeLabel({ state: "answered", resume: { state: "queued", reason: "budget" } }).text, KIND_LABEL.check, ago(0, 3 * 3_600_000), afterClose(1000, null, 0).message]));`;
+    const r = Bun.spawnSync([process.execPath, "-e", code]);
+    expect(r.stderr.toString()).toBe("");
+    expect(JSON.parse(r.stdout.toString())).toEqual(["seen 2 times", "A new answer (x)", "Needs your decision", ["Attempt 1: retry (failed)"], "Waiting to resume: budget", "Operations check", "3 h ago", "The terminal has exited."]);
   });
 });

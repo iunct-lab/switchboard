@@ -1,12 +1,14 @@
 import type { BacklogAction, BacklogItem, BacklogStage, Schedule, TaskStatus, Workspace } from "@switchboard/protocol";
 import { jstClock } from "./time.ts";
+import { t } from "./i18n.ts";
+import { task as m } from "./i18n/task.ts";
 
 /** The button a row shows for its stage (#265; in-progress asks for its status, #522); needs-decision rows get none. */
 const START: Partial<Record<BacklogStage, [BacklogAction, string]>> = {
-  request: ["to-pbi", "PBI にする"],
-  "needs-tasks": ["to-tasks", "Task に分解"],
-  ready: ["complete", "実装する"],
-  "in-progress": ["check", "状況を確認"],
+  request: ["to-pbi", t(m.toPbi)],
+  "needs-tasks": ["to-tasks", t(m.toTasks)],
+  ready: ["complete", t(m.implement)],
+  "in-progress": ["check", t(m.checkStatus)],
 };
 
 /** A PBI waiting for Tasks that already has sub-issues (#1393): decomposed, only not Ready yet. Its sub-issues alone decide, not whether they cover it. */
@@ -14,12 +16,20 @@ export const readyPending = (item: BacklogItem) => item.stage === "needs-tasks" 
 
 /** The row's stage button: the action and its words. A decomposed PBI waiting for Tasks starts the same `to-tasks` as 「Ready にする」 (#1393). */
 export function startButton(item: BacklogItem): [BacklogAction, string] | null {
-  if (readyPending(item)) return ["to-tasks", "Ready にする"];
+  if (readyPending(item)) return ["to-tasks", t(m.makeReady)];
   return START[item.stage] ?? null;
 }
 
+/**
+ * The row's second button, 直行で直す (#3691): on the same rows as PBI にする (a request with no PBI, not waiting for a
+ * decision), of the meta workspace only (`metaId`; the start refuses another repository's for now).
+ */
+export function directButton(item: BacklogItem, metaId: string | null): [BacklogAction, string] | null {
+  return item.stage === "request" && item.workspaceId === metaId ? ["direct", t(m.direct)] : null;
+}
+
 /** A Task's state as the backlog row names it. */
-export const TASK_STATUS: Record<TaskStatus, string> = { idle: "未開始", running: "実行中", waiting: "承認待ち", done: "完了", error: "失敗", aborted: "中断" };
+export const TASK_STATUS: Record<TaskStatus, string> = { idle: t(m.statusIdle), running: t(m.running), waiting: t(m.statusWaiting), done: t(m.statusDone), error: t(m.statusFailed), aborted: t(m.statusAborted) };
 
 /**
  * Whether an in-progress item is moving (#522), from the item's own values only: the first that holds of a running
@@ -29,46 +39,46 @@ export const TASK_STATUS: Record<TaskStatus, string> = { idle: "未開始", runn
  */
 export function inProgressState(item: BacklogItem): { running: boolean; label: string } {
   // the last Task may have started between the two lookups of one read: running / waiting is moving, not "stopped"
-  if (item.activeTaskId || item.lastTask?.status === "running" || item.lastTask?.status === "waiting") return { running: true, label: "動いている" };
-  if (item.replyWaiting) return { running: false, label: "止まっている: 返事待ち（Task の会話で答える）" };
-  if (item.tasks && item.tasks.total > 0 && item.tasks.done === item.tasks.total) return { running: false, label: "止まっている: Task は全部完了、PBI は開いたまま" };
-  if (item.lastTask?.status === "error") return { running: false, label: "止まっている: 最後の工程 Task が失敗" };
-  if (!item.lastTask) return { running: false, label: "止まっている: 工程 Task なし" };
-  return { running: false, label: `止まっている: 最後の工程 Task は${TASK_STATUS[item.lastTask.status]}` };
+  if (item.activeTaskId || item.lastTask?.status === "running" || item.lastTask?.status === "waiting") return { running: true, label: t(m.moving) };
+  if (item.replyWaiting) return { running: false, label: t(m.stoppedReply) };
+  if (item.tasks && item.tasks.total > 0 && item.tasks.done === item.tasks.total) return { running: false, label: t(m.stoppedAllDone) };
+  if (item.lastTask?.status === "error") return { running: false, label: t(m.stoppedFailed) };
+  if (!item.lastTask) return { running: false, label: t(m.stoppedNoTask) };
+  return { running: false, label: t(m.stoppedLast, { status: TASK_STATUS[item.lastTask.status] }) };
 }
 
 /** The status a Task has been in since `statusAt`, in the Task screen's words (its head's badge): idle is 待機 (an idle Task with a time has been waiting since then, a Cloud landing), error is エラー. */
-export const SINCE: Record<TaskStatus, string> = { ...TASK_STATUS, idle: "待機", error: "エラー" };
+export const SINCE: Record<TaskStatus, string> = { ...TASK_STATUS, idle: t(m.sinceIdle), error: t(m.sinceError) };
 
 /**
  * When a Task started and since when it is in its status, in JST (#2030): `開始 17:03` and `17:40 から完了` (the date too
  * on another day). A reply that runs it again makes `since` that run's start; `started` stays the first.
  */
-export function taskTimes(t: { status: TaskStatus; createdAt: number; statusAt: number }, now: number, word = SINCE[t.status]): { started: string; since: string } {
-  return { started: `開始 ${jstClock(t.createdAt, now)}`, since: `${jstClock(t.statusAt, now)} から${word}` };
+export function taskTimes(x: { status: TaskStatus; createdAt: number; statusAt: number }, now: number, word = SINCE[x.status]): { started: string; since: string } {
+  return { started: t(m.started, { time: jstClock(x.createdAt, now) }), since: t(m.since, { time: jstClock(x.statusAt, now), word }) };
 }
 
 /** The Backlog row's last stage Task (#2030): `最後の Task: 完了（17:40 から・開始 16:02）`, in the backlog's words; `返事待ち` for one waiting for the person's reply (#1619). */
-export function lastTaskLine(t: { status: TaskStatus; createdAt: number; statusAt: number }, now: number, word = TASK_STATUS[t.status]): string {
-  return `最後の Task: ${word}（${jstClock(t.statusAt, now)} から・開始 ${jstClock(t.createdAt, now)}）`;
+export function lastTaskLine(x: { status: TaskStatus; createdAt: number; statusAt: number }, now: number, word = TASK_STATUS[x.status]): string {
+  return t(m.lastTask, { word, since: jstClock(x.statusAt, now), started: jstClock(x.createdAt, now) });
 }
 
 /** The row's button for its running stage Task: running or waiting, and since when (`承認待ち（17:40 から）`). */
-export function activeTaskLine(t: { status: TaskStatus; statusAt: number } | null, now: number): string {
-  return t && (t.status === "running" || t.status === "waiting") ? `${TASK_STATUS[t.status]}（${jstClock(t.statusAt, now)} から）` : "実行中";
+export function activeTaskLine(x: { status: TaskStatus; statusAt: number } | null, now: number): string {
+  return x && (x.status === "running" || x.status === "waiting") ? t(m.activeTask, { status: TASK_STATUS[x.status], time: jstClock(x.statusAt, now) }) : t(m.running);
 }
 
 /** How long ago `at` (ISO string or epoch ms) was: N 分前 under an hour, N 時間前 under a day, else N 日前. */
 export function ago(at: string | number, now: number): string {
   const min = Math.max(0, Math.floor((now - (typeof at === "number" ? at : Date.parse(at))) / 60_000));
-  if (min < 60) return `${min} 分前`;
-  if (min < 24 * 60) return `${Math.floor(min / 60)} 時間前`;
-  return `${Math.floor(min / (24 * 60))} 日前`;
+  if (min < 60) return t(m.agoMin, { n: min });
+  if (min < 24 * 60) return t(m.agoHour, { n: Math.floor(min / 60) });
+  return t(m.agoDay, { n: Math.floor(min / (24 * 60)) });
 }
 
 type Wait = BacklogItem["waits"][number];
 
-const WAIT_STATE: Record<Wait["state"], string> = { met: "完了", pending: "開いている", missing: "未取得", withdrawn: "取り下げ", cycle: "循環", unknown: "判定できない" };
+const WAIT_STATE: Record<Wait["state"], string> = { met: t(m.waitMet), pending: t(m.waitPending), missing: t(m.waitMissing), withdrawn: t(m.waitWithdrawn), cycle: t(m.waitCycle), unknown: t(m.waitUnknown) };
 
 /**
  * One wait as a row names it (#817, #1046): `PR #n` / `#n` and its state; not read is said, not guessed. A PR closed
@@ -101,27 +111,27 @@ export function waitText(item: BacklogItem, auto: boolean): { label: string; don
   if (item.waitsAt === null) return null;
   const done = item.waits.every((w) => w.state === "met");
   const cond = [
-    item.waits.some((w) => w.reason === "overlap") ? "相手が閉じてファイルの重なりが解けたら" : null,
-    item.waits.some((w) => w.reason === "prerequisite") ? "前提が完了したら" : null,
-    item.waits.some((w) => w.state === "missing") ? "未取得の相手は状態が分からない" : null,
-    item.waits.some((w) => w.state === "withdrawn") ? "取り下げた相手は完了とみなさない" : null,
+    item.waits.some((w) => w.reason === "overlap") ? t(m.condOverlap) : null,
+    item.waits.some((w) => w.reason === "prerequisite") ? t(m.condPrereq) : null,
+    item.waits.some((w) => w.state === "missing") ? t(m.condMissing) : null,
+    item.waits.some((w) => w.state === "withdrawn") ? t(m.condWithdrawn) : null,
   ].filter(Boolean).join(" / ");
   // not read or withdrawn (#937): nothing changes it by itself, so a person looks whatever backlog-next does
   // a Ready row's button starts 実装; an in-progress row's is 状況を確認, which does not resume it
-  const byHand = item.stage === "ready" ? "「実装する」で再開" : `/pbi-complete ${item.number} を手で始める`;
+  const byHand = item.stage === "ready" ? t(m.byHandReady) : t(m.byHandPbi, { n: item.number });
   const stuck = [...new Set(item.waits.filter((w) => w.state !== "met" && w.state !== "pending").map((w) => WAIT_STATE[w.state]))];
   // the row's prerequisites (#937) hold it too: backlog-next goes on only once they are met
   const held = item.prereqs.filter((p) => p.state !== "met");
   const next = stuck.length
-    ? `定期実行は再開しない: ${stuck.join("・")}の相手を確かめて${byHand}`
+    ? t(m.nextStuck, { states: stuck.join(t(m.listDot)), byHand })
     : held.some((p) => p.state !== "pending")
-      ? `定期実行は再開しない: 前提を確かめて${byHand}`
+      ? t(m.nextHeld, { byHand })
       : !auto
-        ? `定期実行が無効: ${byHand}`
+        ? t(m.nextOff, { byHand })
         : held.length
-          ? "前提が完了したら次の定期実行で再開"
-          : "待ちが解けたら再開";
-  return { label: done ? "待ちが解けた" : "待ち", done, cond, next };
+          ? t(m.nextPrereq)
+          : t(m.nextWait);
+  return { label: done ? t(m.waitCleared) : t(m.waiting), done, cond, next };
 }
 
 /**
@@ -169,7 +179,7 @@ export function waitOwner(w: Wait, row: BacklogItem, items: BacklogItem[]): { pb
   const last = owner.lastTask;
   // the last Task may have started between the two lookups of one read: running / waiting is moving (inProgressState)
   const running = owner.activeTaskId ?? (last && (last.status === "running" || last.status === "waiting") ? last.id : null);
-  const task = running ? { id: running, running: true, label: "動いている" } : last ? { id: last.id, running: false, label: `止まっている: ${TASK_STATUS[last.status]}` } : null;
+  const task = running ? { id: running, running: true, label: t(m.moving) } : last ? { id: last.id, running: false, label: t(m.stoppedStatus, { status: TASK_STATUS[last.status] }) } : null;
   return { pbi, task, startable: w.open !== false && !running && (owner.stage === "ready" || owner.stage === "in-progress") };
 }
 
@@ -187,9 +197,9 @@ export function prereqLine(item: BacklogItem): { waiting: PrereqPart[]; stuck: P
   const part = (p: BacklogItem["prereqs"][number], after: string): PrereqPart => ({
     ref: `${p.kind === "pr" ? "PR " : ""}#${p.number}`, url: at(p.number, p.kind === "pr"), after, via: p.via, viaUrl: p.via === null ? null : at(p.via),
   });
-  const waiting = item.prereqs.filter((p) => p.state === "pending").map((p) => part(p, `（${p.need === "release" ? "リリース待ち" : p.kind === "pr" ? "マージ待ち" : "未完"}）`));
+  const waiting = item.prereqs.filter((p) => p.state === "pending").map((p) => part(p, p.need === "release" ? t(m.prereqRelease) : p.kind === "pr" ? t(m.prereqMerge) : t(m.prereqOpen)));
   const stuck = item.prereqs.filter((p) => p.state !== "met" && p.state !== "pending").map((p) =>
-    part(p, p.state === "withdrawn" ? " 取り下げ" : p.state === "missing" ? " 見つからない" : p.state === "cycle" ? " と循環" : p.need === "release" ? " の反映を確かめられない" : " 判定できない"),
+    part(p, p.state === "withdrawn" ? t(m.stuckWithdrawn) : p.state === "missing" ? t(m.stuckMissing) : p.state === "cycle" ? t(m.stuckCycle) : p.need === "release" ? t(m.stuckRelease) : t(m.stuckUnknown)),
   );
   return { waiting, stuck };
 }

@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import type { RunnerInfo } from "@switchboard/protocol";
 import { modelOptions } from "../modelOptions.ts";
 import { runnerLabel } from "../runners.ts";
+import { t } from "../i18n.ts";
+import { home } from "../i18n/home.ts";
 
 const TYPE_IT = "\u0000type"; // never a model name
 
@@ -13,7 +15,7 @@ const TYPE_IT = "\u0000type"; // never a model name
 export function ModelSelect(props: { runner: RunnerInfo | undefined; value: string; onChange: (model: string) => void; label: string; disabled?: boolean; title?: string }) {
   const [typing, setTyping] = useState(false);
   useEffect(() => setTyping(false), [props.runner?.id]);
-  if (props.runner && props.runner.models.length === 0) return <span className="hint">{props.label}: {runnerLabel(props.runner.id, props.runner)} 側の設定で決まる</span>;
+  if (props.runner && props.runner.models.length === 0) return <span className="hint">{t(home.setByRunner, { label: props.label, runner: runnerLabel(props.runner.id, props.runner) })}</span>;
   if (typing) {
     const commit = (v: string) => {
       setTyping(false);
@@ -24,8 +26,8 @@ export function ModelSelect(props: { runner: RunnerInfo | undefined; value: stri
         className="model"
         autoFocus
         defaultValue={props.value}
-        placeholder={`${props.label}を手入力（Enter で確定）`}
-        aria-label={`${props.label}（手入力）`}
+        placeholder={t(home.typePlaceholder, { label: props.label })}
+        aria-label={t(home.typedLabel, { label: props.label })}
         onBlur={(e) => commit(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") commit(e.currentTarget.value);
@@ -41,7 +43,7 @@ export function ModelSelect(props: { runner: RunnerInfo | undefined; value: stri
           {props.label}: {o.label}
         </option>
       ))}
-      <option value={TYPE_IT}>手入力…</option>
+      <option value={TYPE_IT}>{t(home.typeIt)}</option>
     </select>
   );
 }

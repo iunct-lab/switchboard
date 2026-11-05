@@ -1,5 +1,7 @@
 import type { AgentEvent, EventEnvelope } from "@switchboard/protocol";
 import { fmtDuration } from "./evals.ts";
+import { t } from "./i18n.ts";
+import { task as m } from "./i18n/task.ts";
 
 export type PermissionAsk = Extract<AgentEvent, { t: "permission.ask" }>;
 export type ToolCall = Extract<AgentEvent, { t: "tool.call" }>;
@@ -138,13 +140,14 @@ export function foldTranscript(events: EventEnvelope[]): Transcript {
         assistant = undefined;
         break;
       case "cloud.session.created":
-        items.push({ kind: "note", key, at: ts, tone: "info", text: `Cloudセッションを作成: ${ev.id}。Cloud側の状態は未確認です。` });
+        items.push({ kind: "note", key, at: ts, tone: "info", text: t(m.cloudCreated, { id: ev.id }) });
         break;
       case "error":
         items.push({ kind: "note", key, at: ts, tone: "error", text: ev.message });
         break;
       case "status":
         lastStatus = ev.text;
+        // compared with the daemon's status line
         if (ev.text.startsWith("Codex 自動審査: ")) items.push({ kind: "note", key, at: ts, tone: "info", text: ev.text });
         break;
       case "artifact.saved":
@@ -161,7 +164,7 @@ export function foldTranscript(events: EventEnvelope[]): Transcript {
 
 /** A span as the transcript shows it (#2254): under a second is `<1 秒`, the rest as the Brief's 所要時間. */
 export function spanText(ms: number): string {
-  return ms < 1000 ? "<1 秒" : fmtDuration(ms);
+  return ms < 1000 ? t(m.underSecond) : fmtDuration(ms);
 }
 
 // What the copy buttons put on the clipboard (#695): the raw text, as the runner wrote it, never reformatted.
@@ -195,7 +198,7 @@ export function turnReply(items: Item[], key: string): { text: string; rows: num
   return { text: texts.join("\n\n"), rows: texts.length };
 }
 
-const END_LABEL = { ok: "完了", aborted: "中断", error: "エラー" } as const;
+const END_LABEL = { ok: t(m.statusDone), aborted: t(m.statusAborted), error: t(m.sinceError) } as const;
 
 /** The whole conversation as Markdown: a heading per message, one line per tool row (no input or result) and per registered artifact, the end. */
 export function transcriptMarkdown(items: Item[], runner: string): string {
@@ -203,7 +206,7 @@ export function transcriptMarkdown(items: Item[], runner: string): string {
     switch (it.kind) {
       case "user":
       case "assistant": {
-        const files = it.attachments?.length ? `添付: ${it.attachments.map((a) => a.name).join(", ")}` : "";
+        const files = it.attachments?.length ? t(m.mdAttachments, { names: it.attachments.map((a) => a.name).join(", ") }) : "";
         return [it.kind === "user" ? "### YOU" : `### ${runner}`, it.text, files].filter(Boolean).join("\n\n");
       }
       case "tool": {
@@ -214,7 +217,7 @@ export function transcriptMarkdown(items: Item[], runner: string): string {
         return `- ${[name, summary.replace(/\s+/g, " ").trim(), mark].filter(Boolean).join(" ")}`;
       }
       case "artifact":
-        return `- 成果物: ${it.title.replace(/\s+/g, " ").trim()}`;
+        return `- ${t(m.artifactLine, { title: it.title.replace(/\s+/g, " ").trim() })}`;
       case "end":
         return `— ${END_LABEL[it.status]}${it.status !== "ok" && it.summary ? `: ${it.summary}` : ""} —`;
       case "note":

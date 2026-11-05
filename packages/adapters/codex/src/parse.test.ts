@@ -141,6 +141,31 @@ describe("codex app-server → AgentEvent (recorded replay, codex-cli 0.148.0-al
   });
 });
 
+// fixtures/subagent-0.166.0.jsonl: codex-cli 0.166.0, recorded 2026-11-05 — the main turn spawns one subagent (`ls -la`),
+// waits for it, then runs `pwd`. The subagent thread sends no thread/started; its notifications carry its own threadId.
+describe("codex app-server → AgentEvent (recorded replay, codex-cli 0.166.0)", () => {
+  test.skipIf(skipRecordings("packages/adapters/codex/fixtures/subagent-0.166.0.jsonl"))("subagent: only the main turn/completed ends the session, with the main answer; usage(reported) once per thread's turn", async () => {
+    assertRecordings("packages/adapters/codex/fixtures/subagent-0.166.0.jsonl");
+    const lines = (await load("subagent-0.166.0")).filter((l) => !l.startsWith("> ")).map((l) => JSON.parse(l));
+    const main = lines.find((m) => m.result?.thread)!.result.thread.id as string;
+    const sub = lines.find((m) => m.method === "turn/completed" && m.params.threadId !== main)!.params.threadId as string;
+    const evs = await replay("subagent-0.166.0");
+    for (const ev of evs) expect(() => AgentEvent.parse(ev)).not.toThrow();
+    const ends = evs.filter((e) => e.t === "session.end");
+    expect(ends).toHaveLength(1);
+    expect(ends[0]).toMatchObject({ status: "ok" });
+    expect(ends[0]!.t === "session.end" && ends[0]!.summary).toStartWith("MAIN-DONE");
+    // the session ends with the last line: the main turn/completed
+    expect(evs.at(-1)).toBe(ends[0]);
+    const total = (u: { inputTokens?: number; outputTokens?: number }) => (u.inputTokens ?? 0) + (u.outputTokens ?? 0);
+    const lastSum = (thread: string) => lines.filter((m) => m.method === "thread/tokenUsage/updated" && m.params.threadId === thread).reduce((n, m) => n + total(m.params.tokenUsage.last), 0);
+    const reported = evs.filter((e) => e.t === "usage" && e.source === "reported").map((e) => (e.t === "usage" ? e.inputTokens + e.cacheReadTokens + e.outputTokens : 0));
+    expect(reported).toEqual([lastSum(sub), lastSum(main)]);
+    expect(lastSum(sub)).toBeGreaterThan(0);
+    expect(evs.filter((e) => e.t === "session.start")).toMatchObject([{ runnerSessionId: main }]);
+  });
+});
+
 describe("request building", () => {
   test.skipIf(skipRecordings("packages/adapters/codex/fixtures/auto-review-0.155.0-alpha.2.6.jsonl"))("recorded auto-review outcomes are visible without human approval (0.155.0-alpha.2.6)", async () => {
     assertRecordings("packages/adapters/codex/fixtures/auto-review-0.155.0-alpha.2.6.jsonl");

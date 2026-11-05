@@ -1,4 +1,6 @@
 import type { Task, TaskOutcome, TerminalStatus } from "@switchboard/protocol";
+import { t } from "./i18n.ts";
+import { task as m } from "./i18n/task.ts";
 
 /**
  * 要対応 (#492): the stopped tasks the person has not reviewed yet, except those that came to 完了 — a finished task needs
@@ -16,7 +18,7 @@ export function attentionList(tasks: Task[]): Task[] {
   return tasks.filter(needsAttention).sort((a, b) => RANK[a.outcome] - RANK[b.outcome] || b.updatedAt - a.updatedAt);
 }
 
-const LABEL: Record<TaskOutcome, string> = { needs_action: "要対応", failed: "失敗", done: "完了", unknown: "未判定" };
+const LABEL: Record<TaskOutcome, string> = { needs_action: t(m.outcomeNeedsAction), failed: t(m.statusFailed), done: t(m.statusDone), unknown: t(m.outcomeUnknown) };
 
 export function outcomeLabel(o: TaskOutcome): string {
   return LABEL[o];
@@ -26,12 +28,12 @@ export function outcomeLabel(o: TaskOutcome): string {
  * What the Task screen shows next to the outcome (#493): the judge's one-line reason, and in the tooltip who judged.
  * When the person set a different outcome by hand, the judged result is named in the text so the two can be told apart.
  */
-export function judgementNote(t: Task): { text: string; title: string } | null {
-  if (!t.judgedResult || !t.judgedReason) return null;
-  const judged = outcomeLabel(t.judgedResult);
+export function judgementNote(x: Task): { text: string; title: string } | null {
+  if (!x.judgedResult || !x.judgedReason) return null;
+  const judged = outcomeLabel(x.judgedResult);
   // `<runner>:` = judged on that runner's CLI default model (the setting's model is "")
-  const by = t.judgedBy?.endsWith(":") ? `${t.judgedBy}CLI 既定` : (t.judgedBy ?? "?");
-  return { text: t.outcome === t.judgedResult ? t.judgedReason : `自動判定: ${judged} — ${t.judgedReason}`, title: `自動判定（${by}）: ${judged}` };
+  const by = x.judgedBy?.endsWith(":") ? t(m.cliDefaultBy, { runner: x.judgedBy }) : (x.judgedBy ?? "?");
+  return { text: x.outcome === x.judgedResult ? x.judgedReason : t(m.judgedText, { judged, reason: x.judgedReason }), title: t(m.judgedTitle, { by, judged }) };
 }
 
 /** The dot of a row under 要対応: coloured by the outcome, not the runner's status. */
@@ -41,5 +43,5 @@ export function outcomeDotClass(o: TaskOutcome): string {
 
 /** The rail's mark for Claude Code in a Task's terminal tab (#1574). Done shows nothing: it needs nothing from the person. */
 export function terminalMark(status: TerminalStatus | undefined): { text: string; className: string } | null {
-  return status === "working" ? { text: "端末: 作業中", className: "m" } : status === "waiting" ? { text: "端末: 返事待ち", className: "m term-wait" } : null;
+  return status === "working" ? { text: t(m.termWorking), className: "m" } : status === "waiting" ? { text: t(m.termWaiting), className: "m term-wait" } : null;
 }

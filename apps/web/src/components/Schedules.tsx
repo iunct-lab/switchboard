@@ -10,6 +10,8 @@ import { claudeOnlyAction, SCHEDULE_ACTIONS, scheduleActionLabel } from "../sche
 import { scheduleCreateInput, scheduleDraft, scheduleEditPatch, type ScheduleDraft } from "../scheduleEdit.ts";
 import { jstDateTime } from "../time.ts";
 import { listedRunners } from "../runners.ts";
+import { t } from "../i18n.ts";
+import { backlog as m } from "../i18n/backlog.ts";
 
 /** Scheduler screen (#20): DAK-style nightly jobs, and the morning queue of what needs a person. */
 export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[]; runnerOk: Set<RunnerId>; onOpenTask: (id: string) => void; onOpenSettings: () => void; onError: (msg: string) => void }) {
@@ -71,7 +73,7 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
         setCron(st.newDefaults.scheduleCron);
         setDefaultsReady(true);
       })
-      .catch((e) => props.onError(`自動で始まる Task の既定を読めませんでした: ${String(e.message ?? e)}`));
+      .catch((e) => props.onError(t(m.defaultsReadFailed, { error: String(e.message ?? e) })));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showNew, defaultsReady]);
   // Every new schedule starts from the saved cron (#835), not from the one the last form was left with
@@ -92,7 +94,7 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
     if (budget.trim()) {
       const n = Number(budget);
       if (!Number.isFinite(n) || n < 0) {
-        props.onError(`予算は0以上の数値で入力してください: "${budget}"`);
+        props.onError(t(m.budgetNonNegative, { budget }));
         return;
       }
       budgetUsd = n;
@@ -150,9 +152,9 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
     <main className="main schedules">
       <section className="card">
         <div className="row head">
-          <h5>承認待ち・キュー（朝まとめて）</h5>
+          <h5>{t(m.queueHeading)}</h5>
         </div>
-        {queue && queue.waiting.length === 0 && queue.staged.length === 0 && <div className="muted">承認待ちはありません</div>}
+        {queue && queue.waiting.length === 0 && queue.staged.length === 0 && <div className="muted">{t(m.noApprovals)}</div>}
         {queue?.waiting.map((w) => (
           <button key={w.taskId} className="row link" onClick={() => props.onOpenTask(w.taskId)}>
             <RunnerPill runner={w.runner} />
@@ -163,12 +165,12 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
         {queue?.staged.map((s) => (
           <button key={s.taskId} className="row link" onClick={() => props.onOpenTask(s.taskId)}>
             <span className="t">{s.title}</span>
-            <span className="m">{s.pending} 件の未適用の書き込み</span>
+            <span className="m">{t(m.stagedWrites, { n: s.pending })}</span>
           </button>
         ))}
         {queue && queue.scheduled.length > 0 && (
           <>
-            <h5 style={{ marginTop: 14 }}>夜間の実行結果（36h）</h5>
+            <h5 style={{ marginTop: 14 }}>{t(m.nightlyResults)}</h5>
             {queue.scheduled.map((s) => (
               <button key={s.taskId} className="row link" onClick={() => props.onOpenTask(s.taskId)}>
                 <RunnerPill runner={s.runner} />
@@ -185,15 +187,15 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
 
       <section className="card">
         <div className="row head">
-          <h5>定期タスク</h5>
+          <h5>{t(m.schedulesHeading)}</h5>
           <button className="ghost" onClick={() => setShowNew((v) => !v)}>
-            {showNew ? "やめる" : "+ 追加"}
+            {showNew ? t(m.cancel) : t(m.add)}
           </button>
         </div>
         {showNew && (
           <div className="fields" style={{ marginBottom: 10 }}>
             <label>
-              <span>種類</span>
+              <span>{t(m.kind)}</span>
               <select
                 value={action}
                 onChange={(e) => {
@@ -220,11 +222,11 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
               </select>
             </label>
             <label>
-              <span>タイトル</span>
+              <span>{t(m.title)}</span>
               <input value={title} onChange={(e) => setTitle(e.target.value)} />
             </label>
             <label>
-              <span>cron（分 時 日 月 曜日、または @nightly など）</span>
+              <span>{t(m.cron)}</span>
               <input value={cron} onChange={(e) => setCron(e.target.value)} className="mono" />
             </label>
             <label>
@@ -238,7 +240,7 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
               </select>
             </label>
             <label>
-              <span>ランナー</span>
+              <span>{t(m.runner)}</span>
               <select
                 value={defaultsReady ? (onClaude ? "claude" : runner) : ""}
                 disabled={!defaultsReady || onClaude}
@@ -248,70 +250,72 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
                   setEffort(""); // so does an effort
                 }}
               >
-                {!defaultsReady && <option value="">読み込み中…</option>}
+                {!defaultsReady && <option value="">{t(m.loading)}</option>}
                 {listedRunners(props.runners, runner).map((r) => (
                   <option key={r} value={r} disabled={!props.runnerOk.has(r)}>
                     {r}
-                    {props.runnerOk.has(r) ? "" : "（未インストール）"}
+                    {props.runnerOk.has(r) ? "" : t(m.notInstalled)}
                   </option>
                 ))}
               </select>
             </label>
             <div className="row" style={{ alignItems: "center" }}>
-              <ModelSelect runner={props.runners.find((r) => r.id === runner)} value={model} onChange={setModel} disabled={!defaultsReady} label="モデル" title="このスケジュールの Task を動かすモデル。「CLI 既定」はランナー自身の設定で動きます" />
-              <EffortSelect runner={props.runners.find((r) => r.id === runner)} value={effort} onChange={setEffort} disabled={!defaultsReady} label="思考の深さ" title="このスケジュールの Task の思考の深さ。「CLI 既定」はランナー自身の設定で動きます" />
+              <ModelSelect runner={props.runners.find((r) => r.id === runner)} value={model} onChange={setModel} disabled={!defaultsReady} label={t(m.model)} title={t(m.modelTitle)} />
+              <EffortSelect runner={props.runners.find((r) => r.id === runner)} value={effort} onChange={setEffort} disabled={!defaultsReady} label={t(m.effort)} title={t(m.effortTitle)} />
             </div>
             <label>
-              <span>予算 USD（任意）</span>
+              <span>{t(m.budgetOptional)}</span>
               <input value={budget} onChange={(e) => setBudget(e.target.value)} inputMode="decimal" />
             </label>
             {insights ? (
               <div className="muted" style={{ gridColumn: "1 / -1" }}>
-                Claude Code の <code>/insights</code> を meta workspace で走らせ、できたレポート（最近のセッションの傾向・つまずき・改善案）を Insights の画面の「レポート」に載せます。ランナーは claude、prompt はありません。Claude の 7 日枠が設定の閾値（使用量と自動再開）以上のときは飛ばします。1 回の対象は 200 セッションまでなので、週 2 回が目安です。
+                {t(m.insightsBefore)}
+                <code>/insights</code>
+                {t(m.insightsAfter)}
               </div>
             ) : action === "ui-layers" ? (
               <div className="muted" style={{ gridColumn: "1 / -1" }}>
-                床・天井・壁の点検を meta workspace の claude の Task で行います。Claude の 7 日枠が設定の閾値以上のときは飛ばします。
+                {t(m.uiLayersHint)}
               </div>
             ) : action === "secret-scan" ? (
               <div className="muted" style={{ gridColumn: "1 / -1" }}>
-                登録したリポジトリを全部（同じリポジトリの作業フォルダは 1 回）、Issue・PR・コメント・レビューに認証に使える値が書かれていないか検査します。ランナーは使いません（ホストの gh のログインで読む）。当たりか検査できなかったリポジトリがあれば判断待ちに出します（場所と種類だけ）。スケジュールは meta に置きます。
+                {t(m.secretScanHint)}
               </div>
             ) : action === "backlog-next" ? (
               <>
                 <div className="muted backlog-next-hint" style={{ gridColumn: "1 / -1" }}>
-                  登録したリポジトリごとに、実装の枠（Ready → 実装）と計画の枠（分解待ち → 要望）に空きがあれば 1 件ずつ選んで始めます（枠の数は 設定 画面で変える。判断待ち・実行中の項目は飛ばす。Claude の使用量 80% 以上のときは全体で同時に 1 件まで）。スケジュールは meta に置きます。無人で始めた実装は、各 PR を merge-gate が通したときだけマージし、それ以外は判断待ちで止まります。
+                  {t(m.backlogNextHint)}
                 </div>
-                <button className="ghost" onClick={props.onOpenSettings} style={{ gridColumn: "1 / -1" }}>設定 を開く</button>
+                <button className="ghost" onClick={props.onOpenSettings} style={{ gridColumn: "1 / -1" }}>{t(m.openSettings)}</button>
               </>
             ) : action === "prompt" ? (
-              <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={3} placeholder="毎回渡すプロンプト" style={{ gridColumn: "1 / -1" }} />
+              <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={3} placeholder={t(m.promptPlaceholder)} style={{ gridColumn: "1 / -1" }} />
             ) : null}
-            <button className="pri" disabled={busy || !defaultsReady || !title.trim() || (metaOnly ? !meta : !prompt.trim()) || (onClaude && !props.runnerOk.has("claude"))} title={onClaude && !props.runnerOk.has("claude") ? "claude がインストールされていません" : undefined} onClick={() => void create()} style={{ gridColumn: "1 / -1" }}>
-              作成
+            <button className="pri" disabled={busy || !defaultsReady || !title.trim() || (metaOnly ? !meta : !prompt.trim()) || (onClaude && !props.runnerOk.has("claude"))} title={onClaude && !props.runnerOk.has("claude") ? t(m.claudeMissing) : undefined} onClick={() => void create()} style={{ gridColumn: "1 / -1" }}>
+              {t(m.create)}
             </button>
           </div>
         )}
-        {schedules.length === 0 && !showNew && <div className="muted">定期タスクはまだありません</div>}
+        {schedules.length === 0 && !showNew && <div className="muted">{t(m.noSchedules)}</div>}
         {schedules.map((s) => (
           <Fragment key={s.id}>
           <div className="row" style={{ alignItems: "center" }}>
             <span className="t">
               {s.title}
-              {!s.enabled && <span className="hint"> （停止中）</span>}
+              {!s.enabled && <span className="hint">{t(m.paused)}</span>}
             </span>
             {s.action !== "prompt" && <span className="tag">{scheduleActionLabel(s.action)}</span>}
             <RunnerPill runner={s.runner} />
-            <span className="hint">{s.model || "CLI 既定"}</span>
-            <span className="hint">思考の深さ: {effortLabel(s.effort, props.runners.find((r) => r.id === s.runner))}</span>
+            <span className="hint">{s.model || t(m.cliDefault)}</span>
+            <span className="hint">{t(m.effortLine, { effort: effortLabel(s.effort, props.runners.find((r) => r.id === s.runner)) })}</span>
             <span className="mono hint">{s.cron}</span>
-            <span className="hint">{s.nextRunAt ? `次回 ${jstDateTime(s.nextRunAt)}` : "次回なし"}</span>
+            <span className="hint">{s.nextRunAt ? t(m.nextRun, { at: jstDateTime(s.nextRunAt) }) : t(m.noNextRun)}</span>
             {scheduleResultLine(s) && <span className="hint">{scheduleResultLine(s)}</span>}
             <button className="ghost" onClick={() => void runNow(s)}>
-              今すぐ実行
+              {t(m.runNow)}
             </button>
             <button className="ghost" onClick={() => void toggle(s)}>
-              {s.enabled ? "停止" : "再開"}
+              {s.enabled ? t(m.pause) : t(m.resume)}
             </button>
             <button
               className="ghost"
@@ -321,23 +325,25 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
                 setDraft(scheduleDraft(s));
               }}
             >
-              編集
+              {t(m.edit)}
             </button>
             <button className="ghost" onClick={() => void remove(s)}>
-              削除
+              {t(m.delete)}
             </button>
           </div>
           {editingId === s.id && draft && (
             <div className="fields schedule-edit" style={{ marginBottom: 10 }}>
               <div className="muted" style={{ gridColumn: "1 / -1" }}>
-                種類: <span className="tag">{scheduleActionLabel(s.action)}</span>（変えられません。変えたいときは作り直す）。変更は次の発火から効きます
+                {t(m.editKind)}
+                <span className="tag">{scheduleActionLabel(s.action)}</span>
+                {t(m.editKindAfter)}
               </div>
               <label>
-                <span>タイトル</span>
+                <span>{t(m.title)}</span>
                 <input value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} />
               </label>
               <label>
-                <span>cron（分 時 日 月 曜日、または @nightly など）</span>
+                <span>{t(m.cron)}</span>
                 <input value={draft.cron} onChange={(e) => setDraft({ ...draft, cron: e.target.value })} className="mono" />
               </label>
               <label>
@@ -351,27 +357,27 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
                 </select>
               </label>
               <label>
-                <span>ランナー</span>
-                <select value={draft.runner} disabled={claudeOnlyAction(s.action)} title={claudeOnlyAction(s.action) ? `${scheduleActionLabel(s.action)} は claude で動きます` : undefined} onChange={(e) => setDraft({ ...draft, runner: e.target.value as RunnerId, model: "", effort: "" })}>
+                <span>{t(m.runner)}</span>
+                <select value={draft.runner} disabled={claudeOnlyAction(s.action)} title={claudeOnlyAction(s.action) ? t(m.runsOnClaude, { kind: scheduleActionLabel(s.action) }) : undefined} onChange={(e) => setDraft({ ...draft, runner: e.target.value as RunnerId, model: "", effort: "" })}>
                   {listedRunners(props.runners, s.runner).map((r) => (
                     <option key={r} value={r} disabled={!props.runnerOk.has(r) && r !== s.runner}>
                       {r}
-                      {props.runnerOk.has(r) ? "" : "（未インストール）"}
+                      {props.runnerOk.has(r) ? "" : t(m.notInstalled)}
                     </option>
                   ))}
                 </select>
               </label>
               <div className="row" style={{ alignItems: "center" }}>
-                <ModelSelect runner={props.runners.find((r) => r.id === draft.runner)} value={draft.model} onChange={(v) => setDraft({ ...draft, model: v })} label="モデル" title="このスケジュールの Task を動かすモデル。「CLI 既定」はランナー自身の設定で動きます" />
-                <EffortSelect runner={props.runners.find((r) => r.id === draft.runner)} value={draft.effort} onChange={(v) => setDraft({ ...draft, effort: v })} label="思考の深さ" title="このスケジュールの Task の思考の深さ。「CLI 既定」はランナー自身の設定で動きます" />
+                <ModelSelect runner={props.runners.find((r) => r.id === draft.runner)} value={draft.model} onChange={(v) => setDraft({ ...draft, model: v })} label={t(m.model)} title={t(m.modelTitle)} />
+                <EffortSelect runner={props.runners.find((r) => r.id === draft.runner)} value={draft.effort} onChange={(v) => setDraft({ ...draft, effort: v })} label={t(m.effort)} title={t(m.effortTitle)} />
               </div>
               <label>
-                <span>予算 USD（空なら予算なし）</span>
+                <span>{t(m.budgetEmptyNone)}</span>
                 <input value={draft.budget} onChange={(e) => setDraft({ ...draft, budget: e.target.value })} inputMode="decimal" />
               </label>
-              {s.action === "prompt" && <textarea value={draft.prompt} onChange={(e) => setDraft({ ...draft, prompt: e.target.value })} rows={3} placeholder="毎回渡すプロンプト" style={{ gridColumn: "1 / -1" }} />}
+              {s.action === "prompt" && <textarea value={draft.prompt} onChange={(e) => setDraft({ ...draft, prompt: e.target.value })} rows={3} placeholder={t(m.promptPlaceholder)} style={{ gridColumn: "1 / -1" }} />}
               <button className="pri" disabled={busy} onClick={() => void save(s)}>
-                保存
+                {t(m.save)}
               </button>
               <button
                 className="ghost"
@@ -380,7 +386,7 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
                   setDraft(null);
                 }}
               >
-                やめる
+                {t(m.cancel)}
               </button>
             </div>
           )}
@@ -390,7 +396,7 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
 
       {log.length > 0 && (
         <section className="card">
-          <h5>ログ</h5>
+          <h5>{t(m.log)}</h5>
           <pre className="diff">{log.join("\n")}</pre>
         </section>
       )}

@@ -5,6 +5,8 @@ import "@xterm/xterm/css/xterm.css";
 import { getToken, wsUrl } from "../api.ts";
 import { askRecentCheck, isRecentRefusal } from "../recent.ts";
 import { afterClose, ptyQuery } from "../terminalReconnect.ts";
+import { t } from "../i18n.ts";
+import { task as m } from "../i18n/task.ts";
 
 /**
  * The task's shell (#16). The shell lives in the daemon: unmounting only drops the socket, and the daemon re-sends
@@ -59,7 +61,7 @@ export function Terminal(props: { taskId: string; teleport?: boolean; onEnded?: 
       const next = afterClose(e.code, shell.current?.task === props.taskId ? shell.current.id : null, attempt.current);
       if (next.kind === "retry") {
         attempt.current++;
-        setEnded({ message: "再接続しています…", reopen: false });
+        setEnded({ message: t(m.reconnecting), reopen: false });
         retry = setTimeout(() => setSession((n) => n + 1), next.delayMs);
         return;
       }
@@ -96,7 +98,7 @@ export function Terminal(props: { taskId: string; teleport?: boolean; onEnded?: 
           {ended.reopen && (
             // a new shell starts only from here: the one it was on is forgotten
             <button className="btn" onClick={() => { reopened.current = false; shell.current = null; attempt.current = 0; setSession((n) => n + 1); }}>
-              開き直す
+              {t(m.reopen)}
             </button>
           )}
         </div>

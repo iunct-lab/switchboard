@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.ts";
 import { releasePanel, rescueLink, shortSha, type ReleaseStatus } from "../release.ts";
+import { t } from "../i18n.ts";
+import { settings } from "../i18n/settings.ts";
 
 /** Which version runs, whether HEAD is newer, and the button that promotes it (#1660). Under sb-rescue only; elsewhere one line. */
 export function ReleasePanel(props: { disabled?: boolean; onPromoted?: () => void }) {
@@ -23,7 +25,7 @@ export function ReleasePanel(props: { disabled?: boolean; onPromoted?: () => voi
     api
       .promote(head, force)
       .then((r) => {
-        setMsg(`${shortSha(r.commit)} を別ポートで起動して確認しています。通れば切り替わり、UI は再接続します。通らなければ今の版のままです`);
+        setMsg(t(settings.promoteStarted, { sha: shortSha(r.commit) }));
         props.onPromoted?.();
       })
       .catch((e) => setMsg(String(e.message ?? e)));
@@ -36,22 +38,22 @@ export function ReleasePanel(props: { disabled?: boolean; onPromoted?: () => voi
       ))}
       {release?.managed && (
         <div className="actions" style={{ marginTop: 6 }}>
-          <button className="pri" disabled={props.disabled || !view.canPromote} onClick={press} title="このコミットのリリースを作り、別ポートで起動して確認してから切り替えます。切り替え後に確認できなければ自動で前の版に戻ります">
-            この版を昇格（{shortSha(release.head)}）
+          <button className="pri" disabled={props.disabled || !view.canPromote} onClick={press} title={t(settings.promoteTitle)}>
+            {t(settings.promoteButton, { sha: shortSha(release.head) })}
           </button>
         </div>
       )}
-      {release?.managed && view.busyTasks > 0 && <div className="hint">動いている Task {view.busyTasks} 件: 昇格するとデーモンが再起動します</div>}
+      {release?.managed && view.busyTasks > 0 && <div className="hint">{t(settings.promoteBusy, { n: view.busyTasks })}</div>}
       {confirming && (
         <div className="actions" style={{ marginTop: 6 }}>
-          <button className="pri" disabled={props.disabled || !view.canPromote} onClick={() => send(true)}>待たずに昇格する</button>
-          <button className="ghost" onClick={() => setConfirming(false)}>やめる</button>
+          <button className="pri" disabled={props.disabled || !view.canPromote} onClick={() => send(true)}>{t(settings.promoteNow)}</button>
+          <button className="ghost" onClick={() => setConfirming(false)}>{t(settings.cancel)}</button>
         </div>
       )}
       {msg && <div className="hint">{msg}</div>}
       {rescueLink(release) && (
         <div className="hint">
-          <a href={rescueLink(release)!}>救援画面 →</a>
+          <a href={rescueLink(release)!}>{t(settings.rescuePage)}</a>
         </div>
       )}
     </div>

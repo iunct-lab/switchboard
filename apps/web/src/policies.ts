@@ -1,6 +1,8 @@
 import type { AnswerPolicy } from "@switchboard/protocol";
 import { broadLines } from "./asks.ts";
 import { jstDay, jstStamp } from "./time.ts";
+import { t } from "./i18n.ts";
+import { settings } from "./i18n/settings.ts";
 
 /* The settings screen's list of saved answer policies (#938). */
 
@@ -11,21 +13,21 @@ const stamp = jstStamp;
 export type PolicyTone = "ok" | "wait" | "bad";
 
 /** 有効 / 期限切れ (`now === expiresAt` is expired) / 無効 (revoked) / 使用済み (a 今回のみ one that answered). */
-export function policyState(p: AnswerPolicy, now: number): { text: "有効" | "期限切れ" | "無効" | "使用済み"; tone: PolicyTone } {
-  if (p.revokedAt !== null) return { text: "無効", tone: "bad" };
-  if (p.scope === "once" && p.uses.length > 0) return { text: "使用済み", tone: "wait" };
-  if (p.expiresAt !== null && now >= p.expiresAt) return { text: "期限切れ", tone: "wait" };
-  return { text: "有効", tone: "ok" };
+export function policyState(p: AnswerPolicy, now: number): { text: string; tone: PolicyTone } {
+  if (p.revokedAt !== null) return { text: t(settings.policyRevoked), tone: "bad" };
+  if (p.scope === "once" && p.uses.length > 0) return { text: t(settings.policyUsed), tone: "wait" };
+  if (p.expiresAt !== null && now >= p.expiresAt) return { text: t(settings.policyExpired), tone: "wait" };
+  return { text: t(settings.policyActive), tone: "ok" };
 }
 
 export function policyRow(p: AnswerPolicy, workspaceName: (id: string) => string, now = Date.now()): { scope: string; subject: string; when: string; expires: string; uses: string } {
-  const scope = p.scope === "once" ? "今回のみ" : p.scope === "pbi" ? `この PBI 内（#${p.pbi ?? "不明"}）` : `このリポジトリ（${workspaceName(p.workspaceId)}）`;
+  const scope = p.scope === "once" ? t(settings.scopeOnce) : p.scope === "pbi" ? t(settings.scopePbi, { pbi: p.pbi ?? t(settings.unknown) }) : t(settings.scopeRepo, { name: workspaceName(p.workspaceId) });
   return {
     scope,
     subject: `${p.op}: ${p.target}`,
-    when: p.when.length ? p.when.map((w) => `${w.key}=${w.value}`).join(" ") : "条件なし",
-    expires: p.expiresAt === null ? "期限なし（1 回きり）" : `${dayOf(p.expiresAt)}（あと ${Math.max(0, Math.ceil((p.expiresAt - now) / DAY_MS))} 日）`,
-    uses: p.uses.length ? `${p.uses.length} 回・最後 ${stamp(p.uses[0]!.at)}` : "未使用",
+    when: p.when.length ? p.when.map((w) => `${w.key}=${w.value}`).join(" ") : t(settings.noCondition),
+    expires: p.expiresAt === null ? t(settings.noExpiry) : t(settings.expiresIn, { day: dayOf(p.expiresAt), days: Math.max(0, Math.ceil((p.expiresAt - now) / DAY_MS)) }),
+    uses: p.uses.length ? t(settings.usesLine, { n: p.uses.length, at: stamp(p.uses[0]!.at) }) : t(settings.unused),
   };
 }
 
@@ -33,7 +35,7 @@ export function policyRow(p: AnswerPolicy, workspaceName: (id: string) => string
 export function useLines(p: AnswerPolicy, taskTitle: (id: string) => string | undefined = () => undefined): string[] {
   return [...p.uses]
     .sort((a, b) => b.at - a.at)
-    .map((u) => `${stamp(u.at)} ${u.issue !== null ? `Issue #${u.issue}` : u.taskId ? `Task ${taskTitle(u.taskId) ?? u.taskId}` : "不明"} ${u.subject.op} ${u.subject.target}`);
+    .map((u) => `${stamp(u.at)} ${u.issue !== null ? `Issue #${u.issue}` : u.taskId ? `Task ${taskTitle(u.taskId) ?? u.taskId}` : t(settings.unknown)} ${u.subject.op} ${u.subject.target}`);
 }
 
 /** Warnings shown above the edit's save button: the same broad-target line as the card's confirmation. */

@@ -1,4 +1,6 @@
 import type { RoutingStats, RunnerId, RunnerStats } from "@switchboard/protocol";
+import { t } from "./i18n.ts";
+import { insights as m } from "./i18n/insights.ts";
 
 /** Fewer tasks than this in the window and a runner's record is too thin to compare with the others (#612). The default of `quotaAndResume.thinSample` (#835). */
 export const THIN_SAMPLE = 5;
@@ -19,11 +21,11 @@ export function runnerRows(stats: RoutingStats, runners: RunnerId[], thin = THIN
 
 /** The count cell: the number, or why the row is not worth comparing. */
 export function countLabel(row: RunnerRow): string {
-  return row.thin ? `比べるには記録が少ない（${row.total} 件）` : String(row.total);
+  return row.thin ? t(m.tooThin, { n: row.total }) : String(row.total);
 }
 
 /** A median duration: minutes, or seconds under a minute (so a short task does not read as "0 分"); — for none. */
 export function fmtMedianDuration(ms: number | null): string {
   if (ms === null) return "—";
-  return ms < 60_000 ? `${Math.round(ms / 1000)} 秒` : `${Math.round(ms / 60_000)} 分`;
+  return ms < 60_000 ? t(m.seconds, { n: Math.round(ms / 1000) }) : t(m.minutes, { n: Math.round(ms / 60_000) });
 }

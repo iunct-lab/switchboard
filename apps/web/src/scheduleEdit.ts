@@ -1,5 +1,7 @@
 import type { RunnerId, Schedule, ScheduleInput } from "@switchboard/protocol";
 import { claudeOnlyAction } from "./scheduleActions.ts";
+import { t } from "./i18n.ts";
+import { backlog as m } from "./i18n/backlog.ts";
 
 /** The edit form's values for one schedule row (#1480). Strings throughout: they are input values. */
 export type ScheduleDraft = { title: string; cron: string; workspaceId: string; runner: RunnerId; model: string; effort: string; budget: string; prompt: string };
@@ -37,7 +39,7 @@ export function scheduleEditPatch(cur: Schedule, d: ScheduleDraft): { patch: Par
     if (cur.budgetUsd != null) patch.budgetUsd = null;
   } else {
     const n = Number(budget);
-    if (!Number.isFinite(n) || n <= 0) return { error: `予算は0より大きい数値で入力してください: "${d.budget}"` };
+    if (!Number.isFinite(n) || n <= 0) return { error: t(m.budgetPositive, { budget: d.budget }) };
     if (n !== cur.budgetUsd) patch.budgetUsd = n;
   }
   return { patch };

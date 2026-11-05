@@ -94,7 +94,7 @@ ops-kit backlog set <Task> Status "In progress"
 1. In progress にしていたら Backlog に戻し（`ops-kit backlog set <Task> Status Backlog`）、Task に「後回し: <PR #n / Task #n> と <path> が重なる」とコメントする（`ops-kit backlog comment <Task> --body-file -`）
 2. その Task と、それを `**前提**:` に書いている Task を順番の最後へ回し、残りから重ならない Task を次に積む（PBI の決定ログに順番の変更を 1 行）
 3. 後回しの Task は、他の Task を 5 までマージし終えてから `overlap` をやり直す。exit 0 なら `git fetch origin && git checkout --detach origin/main` から新しいスタックとして積む（相手の変更が入った main の上に作る。古いスタックの上に積まない）
-4. まだ重なっていれば PBI は閉じない。`<guard> release <PBI> "後回し: #<Task>（<相手> と重なる）" --overlap-waits <相手の番号>` で占有を外し、報告の「利用者へ」に書いて終わる。`--overlap-waits` は `overlap` の出力の `blocking[].ref` の番号（`PR #778` → `778`、`Task #603` → `603`。複数ならカンマで）。相手が全部閉じるか、待っている PR が Draft・`needs-decision`、または重複相手の Task が `needs-decision` になって占有対象から外れたら、定期実行（バックログを進める）が次の発火でこの PBI を再開する（#817）。手で再開するなら /pbi-complete <PBI>
+4. まだ重なっていれば PBI は閉じない。`<guard> release <PBI> "後回し: #<Task>（<相手> と重なる）" --overlap-waits <相手の番号>` で占有を外し、報告の「利用者へ」に書いて終わる。`--overlap-waits` は `overlap` の出力の `blocking[].ref` の番号（`PR #778` → `778`、`Task #603` → `603`。複数ならカンマで）。相手が全部閉じるか、待っている PR が Draft・`needs-decision`、または重複相手の Task が `needs-decision` になって占有対象から外れたら、定期実行（バックログを進める）が次の発火でこの PBI を再開する（#817）。停止の報告（reason `depends`）には `overlap` の出力の `conditions` をそのまま写す。手で再開するなら /pbi-complete <PBI>
 5. 前提（`**前提**:` の番号）がほかの PBI のもので、未完のまま進めずに止まるときも同じく `<guard> release <PBI> "後回し: #<Task>（前提 #N が未完）" --waits <N>` で止め、停止の記録は引き渡した印（「前提が未完のとき」）
 
 `--overlap-waits` はファイル重複待ち、`--waits` は未完の前提待ちとして区別する。前提 Task が判断待ちになっても、完了するまでは進めない。古い `waits=` の Task 待ちは種類が不明なので前提として扱い、手で再開して overlap を再確認する。

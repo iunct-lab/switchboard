@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { ciExit, ciSteps } from "./ci";
 import { withHeavySlot } from "../ops-kit/src/heavy";
 import { RECORDS_HEADER } from "./perf-ratchet";
-import { checkoutSteps, DURATION_STEP, recordBundle, existingPass, failLines, failureSummary, perfSteps, LOCAL_CI_RESULT, localCi, main, mainFork, markerSeconds, narrowPerfStep, narrowTestStep, notify, perfVerdict, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepSeconds, stepWithIdle, TargetError, testsOf, type Deps, type LocalCiResult } from "./local-ci";
+import { checkoutSteps, DURATION_STEP, groupScript, HOST_TESTS, hostOffload, OFFLOAD_GROUPS, parseGroup, placeSteps, recordBundle, existingPass, failLines, failureSummary, perfSteps, LOCAL_CI_RESULT, localCi, main, mainFork, markerSeconds, narrowPerfStep, narrowTestStep, notify, perfVerdict, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepSeconds, stepWithIdle, TargetError, testsOf, type Deps, type LocalCiResult } from "./local-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
 const ciTs = await Bun.file(new URL("./ci.ts", import.meta.url)).text();
@@ -896,6 +896,201 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     // a forge that cannot be read is the target's error too (exit 2), not a crash
     writeFileSync(join(appTree, "ops.config.json"), "{");
     expect(await resolveTarget(["7", "--repo", "o/r"], appTree, appTree, run("https://github.com/o/r.git", appTree).sh).catch((err) => err)).toBeInstanceOf(TargetError);
+  });
+  describe("off the host: sb-offload (#2305)", () => {
+    const REC = ["packages/core/src/core.test.ts", "packages/adapters/claude/src/parse.test.ts"];
+    /** The fake deps with a fake offload: each build's script, size and when it started and ended; `answer` gives a group's code and log from its steps. */
+    const withOffload = (answer?: (steps: string[], script: string) => { code: number; output: string } | undefined, o: Parameters<typeof deps>[5] = {}, failAt?: string) => {
+      const x = deps(failAt, undefined, "1 fail", {}, false, o);
+      const builds: Array<{ script: string; size: string; cwd: string; start: number; end: number }> = [];
+      const fake = x.d.sh;
+      x.d.sh = async (cmd, cwd) => (cmd.includes("grep") && cmd.includes("-l") ? `${REC.join("\n")}\n` : fake(cmd, cwd));
+      x.d.offload = {
+        bun: "1.4.4",
+        codex: "0.166.0",
+        run: async (script, cwd, size) => {
+          const start = performance.now();
+          await Bun.sleep(30);
+          const names = [...script.matchAll(/^bash -e -c '(.*?)'; c=\$\?/gm)].map((m) => m[1]!.replaceAll(`'\\''`, "'"));
+          const given = answer?.(names, script);
+          builds.push({ script, size, cwd, start, end: performance.now() });
+          if (given) return given;
+          return { code: 0, output: names.flatMap((n, i) => [`sb-step: ${i} begin 100`, `ran ${n}`, "", `sb-step: ${i} exit 0 ${101 + i}`]).join("\n") };
+        },
+      };
+      return { ...x, builds };
+    };
+
+    test("typecheck, licenses and bun test go to the builds, not to a step here; the rest stays here, the files that read recordings too", async () => {
+      const { d, ran, builds } = withOffload();
+      const r = await localCi(42, "/repo", d, "example/development", CACHE);
+      expect(r.ok).toBe(true);
+      const sent = builds.map((b) => [...b.script.matchAll(/^bash -e -c '(.*?)'; c=/gm)].map((m) => m[1]));
+      expect(sent).toEqual([["bun run licenses:check", "bun run typecheck"], [`bun test --path-ignore-patterns='\\''${REC[0]}'\\'' --path-ignore-patterns='\\''${REC[1]}'\\''`]]);
+      for (const moved of ["bun run licenses:check", "bun run typecheck", "bun test"]) expect(ran).not.toContain(moved);
+      // git over the checkout, the install the web build needs, the web build and perf, main's fetch: here
+      expect(ran).toContain(ciSteps[0]!.run.trim());
+      expect(ran).toContain("bun run --cwd apps/web build");
+      expect(ran.some((s) => s.includes("git fetch"))).toBe(true);
+      expect(ran).toContain(`bun test './${REC[0]}' './${REC[1]}'`);
+      // the results in the CI's order, with the host's recordings run after bun test
+      expect(r.results.map((x) => x.name)).toEqual([...ciSteps.map((s) => s.name), HOST_TESTS]);
+      expect(r.results.find((x) => x.name === "bun test")!.seconds).toBe(1);
+      expect(resultComment(r)).toContain(`| \`${HOST_TESTS}\` | pass |`);
+    });
+
+    test("the two builds run at the same time, each with its size", async () => {
+      const { d, builds } = withOffload();
+      await localCi(42, "/repo", d, "example/development", CACHE);
+      expect(builds.map((b) => b.size)).toEqual(OFFLOAD_GROUPS.map((g) => g.size));
+      expect(builds.every((b) => b.size === "small")).toBe(true);
+      const [a, b] = builds;
+      expect(Math.max(a!.start, b!.start)).toBeLessThan(Math.min(a!.end, b!.end));
+    });
+
+    test("bun test failing off the host: the comment names it with its (fail) lines, a fail mark", async () => {
+      const { d } = withOffload((names) => (names[0]!.startsWith("bun test") ? { code: 1, output: "sb-offload: sent the work tree\nsb-step: 0 begin 10\n(fail) a > b [1ms]\n1 fail\n\nsb-step: 0 exit 1 20\nsb-offload: exit 1" } : undefined));
+      const r = await localCi(42, "/repo", d, "example/development", CACHE);
+      expect(r.ok).toBe(false);
+      const body = resultComment(r);
+      expect(LOCAL_CI_RESULT.exec(body)?.[1]).toBe("fail");
+      expect(body).toContain("結果: `bun test` が exit 1");
+      expect(body).toContain("(fail) a > b [1ms]");
+      expect(r.results.find((x) => x.name === "bun test")!.log).toStartWith(CACHE);
+      // after the step that stopped the run, nothing is listed (as one run here would have stopped)
+      expect(r.results.at(-1)!.name).toBe("bun test");
+    });
+
+    test("the scripts carry no token or recordings, and the real sb-offload runs without a GitHub token in its environment", async () => {
+      const { d, builds, envs } = withOffload();
+      const saved = { gh: process.env.GH_TOKEN, github: process.env.GITHUB_TOKEN, path: process.env.PATH };
+      process.env.GH_TOKEN = "gho_offloadtesttoken";
+      process.env.GITHUB_TOKEN = "ghs_offloadtesttoken";
+      const bin = mkdtempSync(join(CACHE, "bin-"));
+      try {
+        await localCi(42, "/repo", d, "example/development", CACHE);
+        for (const b of builds) {
+          expect(b.script).not.toMatch(/GH_TOKEN|GITHUB_TOKEN|offloadtesttoken|SWITCHBOARD_FIXTURES/);
+          // origin is the repository's URL with no credentials
+          expect(b.script).toContain("git remote add origin 'https://github.com/example/development.git'");
+        }
+        expect(envs.every((e) => !("GH_TOKEN" in e) && !("GITHUB_TOKEN" in e))).toBe(true);
+        writeFileSync(join(bin, "sb-offload"), '#!/bin/sh\nenv\necho "args: $*"\nexit 3\n', { mode: 0o755 });
+        process.env.PATH = `${bin}:${saved.path}`;
+        const real = hostOffload()!;
+        expect(real.bun).toBe(Bun.version);
+        const out = await real.run("echo x", bin, "small");
+        expect(out.code).toBe(3);
+        expect(out.output).toContain("args: --size small echo x");
+        expect(out.output).not.toContain("offloadtesttoken");
+      } finally {
+        for (const [k, v] of [["GH_TOKEN", saved.gh], ["GITHUB_TOKEN", saved.github], ["PATH", saved.path]] as const) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+      }
+    });
+
+    test("without sb-offload every step runs here, as before", async () => {
+      const saved = process.env.PATH;
+      process.env.PATH = mkdtempSync(join(CACHE, "empty-path-"));
+      try {
+        expect(hostOffload()).toBeUndefined();
+      } finally {
+        process.env.PATH = saved;
+      }
+      const { d, ran } = deps();
+      const r = await localCi(42, "/repo", d, "example/development", CACHE);
+      expect(ran).toEqual(ciSteps.map((s) => s.run.trim()));
+      expect(r.results.map((x) => x.name)).not.toContain(HOST_TESTS);
+    });
+
+    test("a build that timed out, was stopped or failed before its steps: a failure with the reason, never run again here", async () => {
+      for (const [code, reason] of [[124, "時間切れ"], [130, "中断"], [1, "ビルドの失敗"]] as const) {
+        const { d, ran } = withOffload((names) => (names[0]!.startsWith("bun test") ? { code, output: code === 124 ? "sb-step: 0 begin 10\n(pass) x\n" : "sb-offload: no free build in 15 minutes (2 run at a time)" } : undefined));
+        const r = await localCi(42, "/repo", d, "example/development", CACHE);
+        const t = r.results.find((x) => x.name === "bun test")!;
+        expect(t.code).toBe(code);
+        expect(t.fails).toContain(`sb-offload: exit ${code}（${reason}）`);
+        const body = resultComment(r);
+        expect(LOCAL_CI_RESULT.exec(body)?.[1]).toBe("fail");
+        expect(body).toContain(`sb-offload: exit ${code}（${reason}）`);
+        expect(ran.some((s) => s.startsWith("bun test --path"))).toBe(false);
+      }
+    });
+
+    test("seconds off the host are not compared with the host's `local` ceilings", async () => {
+      const budget = { local: { journeys: {}, durations: { typecheck: 0.5, test: 0.5 } } };
+      const { d } = withOffload(undefined, { budget });
+      const r = await localCi(42, "/repo", d, "example/development", CACHE);
+      expect(r.ok).toBe(true);
+      expect(r.seconds).toEqual({ typecheck: 2, test: 1 });
+    });
+
+    test("placeSteps: a narrowed selection is split between the build and here; a group the CI does not have is left out", () => {
+      const steps = [{ name: "bun install --frozen-lockfile", run: "bun install --frozen-lockfile" }, { name: "bun test", run: "bun test" }];
+      const p = placeSteps(steps, ["a.test.ts", REC[0]!], REC);
+      expect(p.groups).toEqual([{ size: "small", steps: [{ name: "bun test", run: "bun test './a.test.ts'" }] }]);
+      expect(p.host).toEqual([steps[0], { name: HOST_TESTS, run: `bun test './${REC[0]}'` }]);
+      expect(p.order).toEqual(["bun install --frozen-lockfile", "bun test", HOST_TESTS]);
+      expect(placeSteps(steps, ["a.test.ts"], REC).host[1]).toEqual({ name: HOST_TESTS, run: 'echo "no test files selected"' });
+    });
+
+    test("parseGroup: each step between its marks with its seconds; the steps after a failure are not listed; no mark at all is the setup's failure", () => {
+      const s = [{ name: "a", run: "a" }, { name: "b", run: "b" }, { name: "c", run: "c" }];
+      const log = "setup\nsb-step: 0 begin 10.5\nA\n\nsb-step: 0 exit 0 12\nsb-step: 1 begin 12\nB\n\nsb-step: 1 exit 2 15\nsb-offload: exit 2";
+      expect(parseGroup(log, s, 2).map((r) => [r.name, r.code, r.seconds, r.output])).toEqual([["a", 0, 1.5, "A\n"], ["b", 2, 3, "B\n"]]);
+      const setup = parseGroup("sb-setup: bun install が失敗\nsb-offload: exit 1", s, 1);
+      expect(setup.map((r) => [r.name, r.code])).toEqual([["a", 1]]);
+      expect(setup[0]!.output).toContain("sb-setup: bun install が失敗");
+      // a build that ended 0 without the step's exit mark is no pass
+      expect(parseGroup("sb-step: 0 begin 1\n", s, 0)[0]!.code).toBe(1);
+      // every step marked a pass, but the build was stopped before it ended: no pass either
+      const stopped = parseGroup("sb-step: 0 begin 1\nA\nsb-step: 0 exit 0 2\n", [s[0]!], 130);
+      expect(stopped.map((r) => [r.name, r.code])).toEqual([["a", 130]]);
+      expect(failLines(stopped[0]!.output)).toEqual(["sb-offload: exit 130（中断）"]);
+    });
+
+    test("recordings: with SWITCHBOARD_FIXTURES, only the steps here get it, the files that read recordings among them; no build's script holds it or its path", async () => {
+      const saved = process.env.SWITCHBOARD_FIXTURES;
+      const fixtures = mkdtempSync(join(CACHE, "fixtures-"));
+      for (const given of [fixtures, undefined]) {
+        if (given === undefined) delete process.env.SWITCHBOARD_FIXTURES;
+        else process.env.SWITCHBOARD_FIXTURES = given;
+        try {
+          const { d, ran, envs, builds } = withOffload();
+          await localCi(42, "/repo", d, "example/development", CACHE);
+          const at = ran.indexOf(`bun test './${REC[0]}' './${REC[1]}'`);
+          expect(at).toBeGreaterThanOrEqual(0);
+          // the host's run of the recordings reads them when given, and skips them (as before) when not
+          expect(envs[at]!.SWITCHBOARD_FIXTURES).toBe(given);
+          for (const b of builds) {
+            expect(b.script).not.toContain("SWITCHBOARD_FIXTURES");
+            expect(b.script).not.toContain(fixtures);
+          }
+          // the real sb-offload's environment (what hostOffload starts it with) has neither
+          const bin = mkdtempSync(join(CACHE, "bin-fixtures-"));
+          writeFileSync(join(bin, "sb-offload"), "#!/bin/sh\nenv\n", { mode: 0o755 });
+          const path = process.env.PATH;
+          process.env.PATH = `${bin}:${path}`;
+          try {
+            const out = await hostOffload()!.run("x", bin, "small");
+            expect(out.output).toContain("PATH=");
+            expect(out.output).not.toContain("SWITCHBOARD_FIXTURES");
+            expect(out.output).not.toContain(fixtures);
+          } finally {
+            process.env.PATH = path;
+          }
+        } finally {
+          if (saved === undefined) delete process.env.SWITCHBOARD_FIXTURES;
+          else process.env.SWITCHBOARD_FIXTURES = saved;
+        }
+      }
+    });
+
+    test("groupScript: git with PCRE, a tmpfs TMPDIR, not root, this host's Bun and Codex, each step between marks and stopping at a failure", () => {
+      const script = groupScript([{ name: "x", run: "echo 'it'" }], { bun: "1.4.4", codex: "0.166.0", repo: "o/r" });
+      for (const part of ["dnf reinstall -y -q git-core", "mount -t tmpfs", "su - sb -c", "bash -s 'bun-v1.4.4'", "npm i -g '@openai/codex@0.166.0'", "git remote add origin 'https://github.com/o/r.git'", "bun install --frozen-lockfile", `bash -e -c 'echo '\\''it'\\'''; c=$?`, '[ "$c" -eq 0 ] || exit "$c"']) expect(script).toContain(part);
+      // a repository that is not owner/name (a local change's workspace) gets no origin
+      expect(groupScript([], { bun: "1", repo: "ws_1" })).not.toContain("remote add");
+    });
   });
 });
 

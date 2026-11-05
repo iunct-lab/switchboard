@@ -257,6 +257,13 @@ describe("reserveStopRetry / stopRecoveryPrompt (#949)", () => {
     expect(stopRecoveryPrompt([])).toContain('許可文を "grant" に 1 文で書く');
   });
 
+  test("prompt asks for wait conditions: a depends stop names its PRs / Issues as pr#N / issue#N, copied from overlap (#2045)", () => {
+    const p = stopRecoveryPrompt([]);
+    expect(p).toContain('"conditions":[{"key":"pr#12","value":"open","met":false}]');
+    expect(p).toContain("pr#N / issue#N");
+    expect(p).toContain("overlap が重なり（defer）で進めないと言ったら、その出力の conditions をそのまま写す");
+  });
+
   test("recovery prompt forbids out-of-scope writes (#1987)", () => {
     const p = stopRecoveryPrompt([]);
     expect(p).toContain("依頼の範囲外の書き込み");

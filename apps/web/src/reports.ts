@@ -1,6 +1,8 @@
 import type { Artifact, ReportRow } from "@switchboard/protocol";
 import { viewOf } from "./artifacts.ts";
 import { jstStamp } from "./time.ts";
+import { t } from "./i18n.ts";
+import { insights as m } from "./i18n/insights.ts";
 
 /** `M/D HH:MM` in JST, as the Task list and a schedule's last result show times. */
 const stamp = jstStamp;
@@ -16,11 +18,11 @@ export function reportMeta(r: Pick<ReportRow, "updatedAt" | "taskTitle" | "sched
 /** The kind a row of every artifact names (#1833), in the words of how the 成果物 tab opens it. */
 export function kindLabel(a: Pick<Artifact, "kind" | "mime">): string {
   if (a.kind === "url") return "URL";
-  if (a.kind === "dir") return "フォルダ";
+  if (a.kind === "dir") return t(m.artFolder);
   const how = viewOf(a);
-  if (how === "frame") return a.mime.toLowerCase() === "image/svg+xml" ? "画像" : "HTML";
-  if (how === "image") return "画像";
-  if (how === "text") return "テキスト";
+  if (how === "frame") return a.mime.toLowerCase() === "image/svg+xml" ? t(m.artImage) : "HTML";
+  if (how === "image") return t(m.artImage);
+  if (how === "text") return t(m.artText);
   return (a.mime.split("/")[1] ?? a.mime).toUpperCase();
 }
 

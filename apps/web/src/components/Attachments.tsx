@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type DragEvent } from "react";
 import type { Attachment } from "@switchboard/protocol";
 import { api } from "../api.ts";
+import { t } from "../i18n.ts";
+import { panels as m } from "../i18n/panels.ts";
 
 /** Same limits as the daemon (`packages/core/src/attachments.ts`); checked here first so a too-big drop never leaves the browser. */
 export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
@@ -36,12 +38,12 @@ export function useAttachments(onError: (msg: string) => void) {
       if (!list.length) return;
       const big = list.find((f) => f.size > MAX_ATTACHMENT_BYTES);
       if (big) {
-        onError(`${big.name} は ${formatBytes(big.size)} あります。添付は 1 件 ${formatBytes(MAX_ATTACHMENT_BYTES)} までです`);
+        onError(t(m.tooBig, { name: big.name, size: formatBytes(big.size), max: formatBytes(MAX_ATTACHMENT_BYTES) }));
         return;
       }
       const have = committed.current + pending.current;
       if (have + list.length > MAX_ATTACHMENTS) {
-        onError(`添付は 1 回 ${MAX_ATTACHMENTS} 件までです（いま ${have} 件）`);
+        onError(t(m.tooMany, { max: MAX_ATTACHMENTS, have }));
         return;
       }
       const gen = generation.current;
@@ -128,7 +130,7 @@ export function useDropZone(add: (files: File[]) => void, onError: (msg: string)
       depth.current = 0;
       setDropping(false);
       const { files, folders } = droppedFiles(e.dataTransfer);
-      if (folders) onError("フォルダは添付できません。中のファイルを選んでください");
+      if (folders) onError(t(m.noFolders));
       if (files.length) add(files);
     },
   };
@@ -180,8 +182,8 @@ export function AttachButton(props: { onFiles: (files: File[]) => void; disabled
           e.target.value = "";
         }}
       />
-      <button type="button" disabled={props.disabled} onClick={() => ref.current?.click()} title={`ファイルを添付（ドロップや貼り付けでも）。1 件 ${formatBytes(MAX_ATTACHMENT_BYTES)}、${MAX_ATTACHMENTS} 件まで`}>
-        添付
+      <button type="button" disabled={props.disabled} onClick={() => ref.current?.click()} title={t(m.attachTitle, { size: formatBytes(MAX_ATTACHMENT_BYTES), max: MAX_ATTACHMENTS })}>
+        {t(m.attach)}
       </button>
     </>
   );
@@ -191,18 +193,18 @@ export function AttachButton(props: { onFiles: (files: File[]) => void; disabled
 export function AttachmentBar(props: { items: Attachment[]; onRemove: (id: string) => void; busy?: boolean }) {
   if (!props.items.length && !props.busy) return null;
   return (
-    <div className="attach-bar" aria-label="添付">
+    <div className="attach-bar" aria-label={t(m.attachments)}>
       {props.items.map((a) => (
         <span key={a.id} className="attach-chip" title={`${a.name} · ${a.mime} · ${formatBytes(a.size)}`}>
           {isImage(a.mime) ? <AttachmentImage a={a} className="thumb" /> : <span className="ico">📄</span>}
           <span className="n">{a.name}</span>
           <span className="m">{formatBytes(a.size)}</span>
-          <button type="button" className="x" aria-label={`${a.name} を外す`} onClick={() => props.onRemove(a.id)}>
+          <button type="button" className="x" aria-label={t(m.detach, { name: a.name })} onClick={() => props.onRemove(a.id)}>
             ×
           </button>
         </span>
       ))}
-      {props.busy && <span className="hint">アップロード中…</span>}
+      {props.busy && <span className="hint">{t(m.uploading)}</span>}
     </div>
   );
 }
@@ -236,7 +238,7 @@ function useAttachmentUrl(id: string): { src: string | null; failed: boolean } {
 /** An attachment as an <img> (an image element never runs a script, whatever the file is). */
 export function AttachmentImage(props: { a: AttachmentRef; className?: string; onClick?: () => void }) {
   const { src, failed } = useAttachmentUrl(props.a.id);
-  if (failed) return <span className={`${props.className ?? ""} ph gone`} title={`${props.a.name}: 取得できません（ファイルが無い、または権限）`} />;
+  if (failed) return <span className={`${props.className ?? ""} ph gone`} title={`${props.a.name}: ${t(m.unavailableTitle)}`} />;
   if (!src) return <span className={`${props.className ?? ""} ph`} title={props.a.name} />;
   return <img className={props.className} src={src} alt={props.a.name} title={props.a.name} onClick={props.onClick} />;
 }
@@ -248,7 +250,7 @@ function AttachmentLink(props: { a: AttachmentRef }) {
     <a
       href={api.attachmentUrl(props.a.id)}
       className={failed ? "gone" : ""}
-      title={failed ? "取得できません（ファイルが無い、または権限）" : `${props.a.mime} · ${formatBytes(props.a.size)}`}
+      title={failed ? t(m.unavailableTitle) : `${props.a.mime} · ${formatBytes(props.a.size)}`}
       onClick={(e) => {
         e.preventDefault();
         api
@@ -265,7 +267,7 @@ function AttachmentLink(props: { a: AttachmentRef }) {
       }}
     >
       📄 {props.a.name} <span className="m">{formatBytes(props.a.size)}</span>
-      {failed && <span className="m"> — 取得できません</span>}
+      {failed && <span className="m">{t(m.unavailable)}</span>}
     </a>
   );
 }
@@ -291,7 +293,7 @@ export function AttachmentGallery(props: { items: AttachmentRef[] }) {
       {open && (
         <div className="lightbox" role="dialog" aria-label={open.name} onClick={() => setOpen(null)}>
           <AttachmentImage a={open} className="full" />
-          <div className="hint">{open.name} · クリックか Esc で閉じる</div>
+          <div className="hint">{open.name}{t(m.lightboxClose)}</div>
         </div>
       )}
     </div>

@@ -1,5 +1,8 @@
+import { t } from "./i18n.ts";
+import { home } from "./i18n/home.ts";
+
 /** The cloud host's "passkey checked in the last 5 minutes" (#1491): what the Web UI does when a strong operation answers 401 `recent`. */
-export const RECENT_MESSAGE = "操作の前にパスキーで確かめてください";
+export const RECENT_MESSAGE = t(home.recentMessage);
 
 export function isRecentRefusal(status: number, body: unknown): boolean {
   return status === 401 && typeof body === "object" && body !== null && (body as { reason?: unknown }).reason === "recent";
@@ -13,7 +16,7 @@ export async function confirmPasskey(): Promise<void> {
   const post = async (path: string, body: unknown) => {
     const r = await fetch(path, { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     const data = (await r.json().catch(() => ({}))) as { error?: string; challenge?: string; rpId?: string };
-    if (!r.ok) throw new Error(data.error || `パスキーを確かめられませんでした (${r.status})`);
+    if (!r.ok) throw new Error(data.error || t(home.passkeyFailed, { status: r.status }));
     return data;
   };
   const { challenge, rpId } = await post("/_auth/challenge", {});
@@ -21,7 +24,7 @@ export async function confirmPasskey(): Promise<void> {
   const cred = (await navigator.credentials
     .get({ publicKey: { challenge: unb64(challenge!), rpId, userVerification: "required" } })
     .catch((e) => { if (e?.name === "NotAllowedError") return null; throw e; })) as PublicKeyCredential | null;
-  if (!cred) throw new Error("キャンセルしました");
+  if (!cred) throw new Error(t(home.passkeyCancelled));
   const c = cred.response as AuthenticatorAssertionResponse;
   await post("/_auth/login", { challenge, id: cred.id, clientDataJSON: b64(c.clientDataJSON), authenticatorData: b64(c.authenticatorData), signature: b64(c.signature) });
 }

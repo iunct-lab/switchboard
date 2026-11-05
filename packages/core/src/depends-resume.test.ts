@@ -1,0 +1,254 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { StopRecord, type AgentEvent, type BacklogRecord, type RunnerAdapter, type RunnerSession } from "@switchboard/protocol";
+import { Db, type BacklogSnapshotEntry } from "./db.ts";
+import { dependsResumePrompt, dependsWaits, resumeDepends, stateFromRecords, waitsClosed } from "./depends-resume.ts";
+import { AUTO_RESUME_HEAD } from "./evals.ts";
+import { TaskManager } from "./tasks.ts";
+
+// A Task that stopped on another session's work is resumed when that work closes (#2045): which stops wait on what.
+
+let n = 0;
+const stop = (over: Partial<StopRecord> = {}): StopRecord =>
+  StopRecord.parse({
+    id: `t1/s${++n}`,
+    work: { workspaceId: "ws1", issue: null, taskId: "t1" },
+    op: "parallel-guard overlap",
+    target: "Task #52",
+    reason: "depends",
+    conditions: [{ key: "pr#12", value: "open", met: false }],
+    state: "waiting",
+    at: n * 1000,
+    ...over,
+  });
+
+const KEY = { service: "github" as const, host: "github.com", repository: "acme/app" };
+const PROJECT = { owner: "acme", number: 1 };
+const rec = (r: Record<string, unknown>) => ({ ...KEY, base: null, local: null, fetchedAt: 1, fetchState: "fetched", ...r }) as BacklogRecord;
+const pr = (number: number, state: "OPEN" | "MERGED" | "CLOSED", over: Record<string, unknown> = {}) =>
+  rec({ objectKind: "pull-request", externalId: `PR_${number}`, remote: { number, state, isDraft: false, labels: [], closes: [], mergeCommit: null, updatedAt: "", files: [], closedAt: null, mergedAt: null }, ...over });
+const issue = (number: number, state: "OPEN" | "CLOSED", labels = ["type:task"]) =>
+  rec({ objectKind: "issue", externalId: `I_${number}`, remote: { number, title: "", url: "", state, stateReason: null, body: "", labels, milestone: null, parent: null, subIssues: [], createdAt: "", updatedAt: "", closedAt: null } });
+const item = (number: number, status: string | null, project = PROJECT) =>
+  rec({ objectKind: "project-item", externalId: `PVTI_${number}_${project.owner}_${project.number}`, remote: { issue: number, owner: project.owner, project: project.number, fields: { Status: status } } });
+
+describe("depends-resume (#2045)", () => {
+  test("dependsWaits picks open depends stops with wait keys", () => {
+    const pick = stop({ conditions: [{ key: "pr#12", value: "open", met: false }, { key: "issue#34", value: "open", met: false }, { key: "issue#35", value: "open", met: true }] });
+    const records = [
+      pick,
+      stop({ reason: "decision" }), // not a wait on other work
+      stop({ conditions: [] }), // waits on nothing it names
+      stop({ conditions: [{ key: "pr#12", value: "open", met: false }, { key: "resetsAt", value: "1", met: false }] }), // a time is not closed by GitHub
+      stop({ conditions: [{ key: "pr#12", value: "merged", met: true }] }), // nothing left to wait for
+      stop({ state: "resolved" }),
+    ];
+    expect(dependsWaits(records)).toEqual([{ stop: pick, numbers: [12, 34] }]);
+    // the newest record of a stop decides: one resolved later is not open
+    const later = { ...pick, state: "resolved" as const, at: pick.at + 1 };
+    expect(dependsWaits([pick, later])).toEqual([]);
+  });
+
+  test("waitsClosed needs every wait closed", () => {
+    const states = stateFromRecords([
+      pr(12, "MERGED"), pr(13, "CLOSED"), pr(14, "OPEN"),
+      issue(30, "CLOSED"), issue(31, "OPEN"), issue(32, "OPEN"), issue(33, "OPEN"), issue(36, "OPEN", ["type:pbi"]),
+      item(31, "Backlog"), item(32, "In progress"), item(33, "In progress", { owner: "other", number: 1 }),
+      pr(15, "MERGED", { fetchState: "unavailable" }),
+    ], PROJECT);
+    expect([12, 13, 14, 30, 31, 32, 33, 36, 15, 99].map(states)).toEqual([
+      "closed", "closed", "open", // a PR merged or closed is closed
+      "closed", "closed", "open", // a Task closed, or not In progress any more, is closed
+      "unknown", // a Status of another Project does not count
+      "open", // an open Issue that is not a Task
+      "unknown", "unknown", // not read as it is, not stored
+    ]);
+    expect(waitsClosed({ numbers: [12, 13, 30, 31] }, states)).toBe(true);
+    expect(waitsClosed({ numbers: [12, 14] }, states)).toBe(false);
+    expect(waitsClosed({ numbers: [12, 32] }, states)).toBe(false);
+    expect(waitsClosed({ numbers: [12, 99] }, states)).toBe(false);
+  });
+
+  test("an edit made here and not sent yet counts over what GitHub last answered", () => {
+    const local = (r: BacklogRecord, value: unknown) => ({ ...r, local: value }) as BacklogRecord;
+    const backlog = item(31, "Backlog");
+    const reopened = issue(30, "CLOSED");
+    const states = stateFromRecords([
+      issue(31, "OPEN"), local(backlog, { ...backlog.remote!, fields: { Status: "In progress" } }), // set In progress here
+      local(reopened, { ...reopened.remote!, state: "OPEN" }), item(30, "In progress"), // reopened here
+    ], PROJECT);
+    expect([31, 30].map(states)).toEqual(["open", "open"]);
+  });
+});
+
+/** A runner whose every turn ends ok in session `sess-1`; records the turns it was sent (ratelimit.test.ts's fake, cut down). `ctl.failSend` refuses the next send. */
+function fakeAdapter(sends: string[], ctl: { failSend?: boolean } = {}): RunnerAdapter {
+  const turn: AgentEvent[] = [{ t: "session.start", runner: "claude", runnerSessionId: "sess-1", cwd: "/tmp" }, { t: "message.delta", role: "assistant", text: "done" }, { t: "session.end", status: "ok", summary: "done" }];
+  return {
+    id: "claude",
+    async detect() {
+      return { available: true };
+    },
+    start(_opts, emit) {
+      let resolveExit!: (c: number | null) => void;
+      const exited = new Promise<number | null>((r) => (resolveExit = r));
+      const play = () => queueMicrotask(() => turn.forEach(emit));
+      play();
+      const session: RunnerSession = {
+        send: (text) => {
+          if (ctl.failSend) {
+            ctl.failSend = false;
+            throw new Error("runner process has exited; resume the task instead");
+          }
+          sends.push(text);
+          emit({ t: "message.delta", role: "user", text });
+          play();
+        },
+        respondPermission: () => undefined,
+        abort: async () => resolveExit(null),
+        close: async () => resolveExit(0),
+        exited,
+      };
+      return session;
+    },
+  };
+}
+
+describe("resumeDepends (#2045)", () => {
+  let home: string;
+  let db: Db;
+  let tasks: TaskManager;
+  let sends: string[];
+  const ctl: { failSend?: boolean } = {};
+  const settle = () => new Promise((r) => setTimeout(r, 20));
+  const SOURCE = { ...KEY, project: PROJECT, private: true };
+  const WAIT = { id: "overlap", op: "parallel-guard overlap", target: "Task #52", reason: "depends" as const, evidence: "PR #12 と同じファイル", safety: "read-only" as const, conditions: [{ key: "pr#12", value: "open", met: false }, { key: "issue#34", value: "open", met: false }], actions: [], state: "waiting" as const };
+  const store = (records: BacklogRecord[]) => db.putBacklogSnapshot(KEY, { records: records.map((r) => ({ objectKind: r.objectKind, externalId: r.externalId, remote: r.remote, fetchState: r.fetchState }) as BacklogSnapshotEntry), cursor: null, syncedAt: Date.now() });
+  const stopOf = (id: string) => db.listStopRecords([id]).filter((r) => r.id === `${id}/overlap`).at(-1)!;
+  const start = async (over: { stage?: { issue: number; action: "complete" } } = {}) => {
+    const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude", workspaceId: "ws_app", ...over });
+    await settle();
+    expect(db.getTask(t.id)!.status).toBe("done");
+    expect(tasks.recordStop(t.id, WAIT).ok).toBe(true);
+    return t;
+  };
+  const resume = () => resumeDepends({ db, tasks, workspaceId: "ws_app", now: Date.now() });
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "sb-depends-"));
+    db = new Db(join(home, "db.sqlite"));
+    db.upsertWorkspace({ id: "ws_app", name: "app", path: home, kind: "repo" });
+    db.setWorkspaceBacklogSource("ws_app", SOURCE);
+    sends = [];
+    ctl.failSend = false;
+    tasks = new TaskManager(db, new Map([["claude", fakeAdapter(sends, ctl)]]), () => undefined, { idleMs: -1 });
+  });
+  afterEach(async () => {
+    await tasks.shutdown();
+    db.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("resumes the same task when its waits close: the follow-up turn in its session, the stop resolved under the same id", async () => {
+    const t = await start();
+    tasks.recordStop(t.id, { ...WAIT, id: "ask", op: "ask", target: "", reason: "decision", conditions: [] }); // another stop, still open
+    store([pr(12, "MERGED"), issue(34, "OPEN"), item(34, "Backlog")]);
+    expect(await resume()).toEqual([t.id]);
+    await settle();
+    // the daemon's turn is no answer of the person's to the task's other stops (send's `daemon`)
+    expect(db.listStopRecords([t.id]).filter((r) => r.id === `${t.id}/ask`).at(-1)!).toMatchObject({ state: "waiting", answer: null });
+    expect(sends).toEqual([dependsResumePrompt(["pr#12", "issue#34"])]);
+    expect(sends[0]).toStartWith(AUTO_RESUME_HEAD);
+    const s = stopOf(t.id);
+    expect(s).toMatchObject({ state: "resolved", reason: "depends", conditions: [{ key: "pr#12", met: true }, { key: "issue#34", met: true }] });
+    expect(s.actions.at(-1)).toMatchObject({ what: "待ちが片づいた: pr#12, issue#34", ok: true });
+    expect(s.answer).toBeNull(); // the daemon's turn is no answer of the person's
+  });
+
+  test("stage task stop is only resolved: backlog-next starts what comes next", async () => {
+    const t = await start({ stage: { issue: 50, action: "complete" } });
+    store([pr(12, "MERGED"), issue(34, "CLOSED")]);
+    expect(await resume()).toEqual([]);
+    await settle();
+    expect(sends).toEqual([]);
+    expect(stopOf(t.id).state).toBe("resolved");
+  });
+
+  test("does not resume while a wait is open, not read, or the task has no session or a resume planned", async () => {
+    const t = await start();
+    const before = db.listStopRecords([t.id]).length;
+    for (const records of [[pr(12, "MERGED"), issue(34, "OPEN"), item(34, "In progress")], [pr(12, "MERGED")], [pr(12, "MERGED"), issue(34, "CLOSED", ["type:task"]), pr(12, "OPEN")]]) {
+      store(records);
+      expect(await resume()).toEqual([]);
+    }
+    store([pr(12, "MERGED"), issue(34, "CLOSED")]);
+    tasks.setResumeAt(t.id, Date.now() + 60_000); // a usage-limit resume will continue it
+    expect(await resume()).toEqual([]);
+    tasks.setResumeAt(t.id, null);
+    db.updateTask(t.id, { runnerSessionId: null });
+    expect(await resume()).toEqual([]);
+    await settle();
+    expect(sends).toEqual([]);
+    expect(db.listStopRecords([t.id])).toHaveLength(before); // the record did not move
+    expect(stopOf(t.id).state).toBe("waiting");
+  });
+
+  test("sends once: the next import finds the stop resolved", async () => {
+    const t = await start();
+    store([pr(12, "MERGED"), issue(34, "CLOSED")]);
+    expect(await resume()).toEqual([t.id]);
+    await settle();
+    expect(await resume()).toEqual([]);
+    await settle();
+    expect(sends).toHaveLength(1);
+  });
+
+  test("a turn that could not be sent puts the stop back to waiting with the reason; the next import sends it", async () => {
+    const t = await start();
+    store([pr(12, "MERGED"), issue(34, "CLOSED")]);
+    ctl.failSend = true;
+    expect(await resume()).toEqual([]);
+    const s = stopOf(t.id);
+    expect(s.state).toBe("waiting");
+    expect(s.actions.at(-1)).toMatchObject({ ok: false, what: expect.stringContaining("続きを送れなかった: runner process has exited") });
+    expect(await resume()).toEqual([t.id]);
+    await settle();
+    expect(sends).toHaveLength(1);
+    expect(stopOf(t.id).state).toBe("resolved");
+  });
+
+  test("中断 while the turn waits for the runner's process to close: nothing is sent", async () => {
+    const t = await start();
+    store([pr(12, "MERGED"), issue(34, "CLOSED")]);
+    let open!: () => void;
+    (tasks as unknown as { closing: Map<string, Promise<void>> }).closing.set(t.id, new Promise<void>((r) => (open = r)));
+    const resumed = resume();
+    await settle();
+    await tasks.abort(t.id);
+    open();
+    expect(await resumed).toEqual([]);
+    await settle();
+    expect(sends).toEqual([]);
+  });
+
+  test("a task that stopped twice gets one turn, once neither of its stops still waits", async () => {
+    const t = await start(); // stop `overlap` waits on pr#12 and issue#34
+    tasks.recordStop(t.id, { ...WAIT, id: "overlap-2", conditions: [{ key: "pr#13", value: "open", met: false }] });
+    store([pr(12, "MERGED"), issue(34, "CLOSED"), pr(13, "OPEN")]);
+    expect(await resume()).toEqual([]); // pr#13 still holds it: the closed stop is resolved, nothing is sent
+    expect(stopOf(t.id).state).toBe("resolved");
+    store([pr(12, "MERGED"), issue(34, "CLOSED"), pr(13, "MERGED")]);
+    expect(await resume()).toEqual([t.id]);
+    await settle();
+    expect(sends).toEqual([dependsResumePrompt(["pr#13"])]);
+    // both closed at once: one turn naming every key
+    const u = await start();
+    tasks.recordStop(u.id, { ...WAIT, id: "overlap-2", conditions: [{ key: "pr#13", value: "open", met: false }] });
+    sends.length = 0;
+    expect(await resume()).toEqual([u.id]);
+    await settle();
+    expect(sends).toEqual([dependsResumePrompt(["pr#12", "issue#34", "pr#13"])]);
+  });
+});

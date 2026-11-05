@@ -2,6 +2,8 @@ import { useState } from "react";
 import type { RunnerInfo } from "@switchboard/protocol";
 import { api } from "../api.ts";
 import { loginRowView } from "../loginRow.ts";
+import { t } from "../i18n.ts";
+import { common as m } from "../i18n/common.ts";
 import { RunnerLogin } from "./RunnerLogin.tsx";
 
 /**
@@ -19,34 +21,34 @@ export function ClaudeLoginRow(props: { runner: RunnerInfo; region?: string; onB
   const saved = props.region ?? "";
   const bedrockControl = onBedrock ? (
     <span className="bedrock-switch">
-      <input aria-label="Amazon Bedrock のリージョン" placeholder="リージョン（例 ap-northeast-1）" value={region} onChange={(e) => setRegion(e.target.value)} />
+      <input aria-label={t(m.bedrockRegionLabel)} placeholder={t(m.bedrockRegionPlaceholder)} value={region} onChange={(e) => setRegion(e.target.value)} />
       {v?.bedrock ? (
         <>
           <button className="ghost" disabled={busy || !region.trim() || region.trim() === saved} onClick={() => onBedrock({ region: region.trim() })}>
-            リージョンを保存
+            {t(m.bedrockSaveRegion)}
           </button>
           <button className="ghost" disabled={busy} onClick={() => onBedrock(null)}>
-            {props.runner.id === "claude" ? "Claude アカウントに戻す" : "定額の契約に戻す"}
+            {props.runner.id === "claude" ? t(m.bedrockBackClaude) : t(m.bedrockBackPlan)}
           </button>
         </>
       ) : (
         <button className="ghost" disabled={busy || !region.trim()} onClick={() => onBedrock({ region: region.trim() })}>
-          Amazon Bedrock を使う
+          {t(m.bedrockUse)}
         </button>
       )}
-      <span className="hint">Bedrock では AWS の資格情報（ホストのロールなど）で動き、Switchboard は鍵を持ちません。モデルの選択肢は Bedrock の id になり、これから始まる Task に効きます。利用は AWS に課金されます。</span>
+      <span className="hint">{t(m.bedrockHint)}</span>
     </span>
   ) : null;
   const logout = () => {
     setBusy(true);
-    api.runnerLogout("claude").then(props.onChanged).catch((e) => props.onError(`ログアウトできません: ${String(e.message ?? e)}`)).finally(() => setBusy(false));
+    api.runnerLogout("claude").then(props.onChanged).catch((e) => props.onError(t(m.logoutFailed, { error: String(e.message ?? e) }))).finally(() => setBusy(false));
   };
   return (
     <span className="runner-login">
       {v && <span className="hint">{v.text}</span>}
       {!v || v.bedrock ? null : v.logout ? (
         <button className="ghost" disabled={busy} onClick={logout}>
-          ログアウト
+          {t(m.logout)}
         </button>
       ) : (
         <RunnerLogin runner="claude" onDone={() => void props.onChanged()} onError={props.onError} />

@@ -68,6 +68,27 @@ export function prereqVerdict(prereqs: Prereq[]): "wait" | "stop" | null {
   return prereqs.some((p) => p.state === "pending" && !p.sibling) ? "wait" : null;
 }
 
+/** A wait key of a stop record (`conditions`, #2045): the daemon reads `pr#N` / `issue#N` and resumes the Task once all are closed. */
+export interface WaitCondition { key: string; value: string; met: false }
+
+/**
+ * What a Task that cannot go waits for, as stop-record conditions the runner copies into its stop report: each blocking
+ * PR / Task, and each prerequisite of another PBI not met yet. A go waits for nothing.
+ */
+export function waitConditions(v: { verdict: string; blocking: Hit[]; prereqs?: Prereq[] }): WaitCondition[] {
+  if (v.verdict === "go") return [];
+  const out = new Map<string, WaitCondition>();
+  const put = (ref: string, value: string) => {
+    const m = /^(PR |Task )?#(\d+)$/.exec(ref);
+    if (!m) return;
+    const key = `${m[1] === "PR " ? "pr" : "issue"}#${m[2]}`;
+    if (!out.has(key)) out.set(key, { key, value, met: false });
+  };
+  for (const b of v.blocking) put(b.ref, "open");
+  for (const p of v.prereqs ?? []) if (p.state !== "met" && !p.sibling) put(p.ref, p.state);
+  return [...out.values()];
+}
+
 /**
  * Before claiming (`claimId` undefined) every overlapping PR or In progress Task blocks. After claiming, an In progress
  * Task blocks only if it claimed first; one without a claim comment yet will claim after this one and yield itself.
@@ -393,7 +414,8 @@ export async function overlap(board: Board, task: number, claimed: boolean, now 
   const v = judge({ paths, claimId }, others, now);
   const verdict = prereqVerdict(prereqs) ?? v.verdict;
   if (verdict !== "go") await back();
-  return { paths, ...v, verdict, ...(prereqs.length ? { prereqs } : {}) };
+  const conditions = waitConditions({ verdict, blocking: v.blocking, prereqs });
+  return { paths, ...v, verdict, ...(prereqs.length ? { prereqs } : {}), ...(conditions.length ? { conditions } : {}) };
 }
 
 if (import.meta.main) {

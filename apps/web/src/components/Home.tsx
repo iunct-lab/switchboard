@@ -15,10 +15,12 @@ import { PresetPicker } from "./PresetPicker.tsx";
 import { titleToSend } from "../taskTitle.ts";
 import { detailsSummary, loadDetailsOpen, saveDetailsOpen } from "../composeDetails.ts";
 import { startBlockedReason, unavailableNotice, unavailableNotices } from "../runnerNotice.ts";
+import { t } from "../i18n.ts";
+import { home } from "../i18n/home.ts";
 
 /** The prefix "改善 →" inserted: remembered so a Workspace switch can swap it for the new workspace's brief (and only it). */
 type Brief = { wsId: string; text: string; title: string };
-const briefTitle = (ws: Workspace) => (ws.kind === "meta" ? "Switchboard を改善: " : `${ws.name} を改善: `);
+const briefTitle = (ws: Workspace) => (ws.kind === "meta" ? t(home.briefTitleSelf) : t(home.briefTitle, { name: ws.name }));
 
 export function Home(props: {
   health: Health | null;
@@ -129,7 +131,7 @@ export function Home(props: {
           const r = startRunner(s);
           if (!runnerTouchedRef.current && r) setRunner(r);
         })
-        .catch(() => { if (seq === suggestSeq.current && cloud) setCloudPreparationError("Git状態は取得できません。内容を確認してから開始してください。"); });
+        .catch(() => { if (seq === suggestSeq.current && cloud) setCloudPreparationError(t(home.gitStateUnknown)); });
     }, 250);
     return () => clearTimeout(h);
   }, [ws, title, prompt, executionMode, cloud]);
@@ -241,9 +243,9 @@ export function Home(props: {
   const blocked = startBlockedReason({ prompt, stale, attachBusy: attach.busy, runnerOk: !runnersKnown || props.runnerOk.has(runner), cloud, ws: !!ws, anyRunnerOk: !runnersKnown || props.runnerOk.size > 0 });
   const submit = async () => {
     if (!prompt.trim() || (!cloud && attach.busy) || stale) return;
-    if (cloud && !ws) { props.onError("Cloud は Workspace を明示選択してください"); wsSelect.current?.focus(); return; }
+    if (cloud && !ws) { props.onError(t(home.cloudNeedsWorkspace)); wsSelect.current?.focus(); return; }
     if (!cloud && budget.trim() && !(Number(budget) > 0)) {
-      props.onError("予算は正の数（USD）で入力してください");
+      props.onError(t(home.budgetInvalid));
       return;
     }
     setBusy(true);
@@ -316,7 +318,7 @@ export function Home(props: {
       const s = await api.suggest({ executionMode: "local", workspaceId: target.id, cwd: target.path, title: n.title, prompt: n.body }).catch(() => null);
       const installed = [...props.runnerOk];
       const runner = s && props.runnerOk.has(s.runner) ? s.runner : installed[0];
-      if (!runner) throw new Error("実行できるランナーがありません（claude / codex をインストールしてください）");
+      if (!runner) throw new Error(t(home.noRunner));
       const r = await api.inboxPromote(n.path, target.id, runner);
       await loadInbox();
       props.onOpenTask(r.task.id);
@@ -367,8 +369,8 @@ export function Home(props: {
       const cur = promptRef.current;
       const rest = brief && cur.startsWith(brief.text) ? cur.slice(brief.text.length) : cur;
       setPrompt(next.text + rest);
-      const t = titleRef.current;
-      setTitle(brief && t.startsWith(brief.title) ? next.title + t.slice(brief.title.length) : t.trim() ? t : next.title);
+      const curTitle = titleRef.current;
+      setTitle(brief && curTitle.startsWith(brief.title) ? next.title + curTitle.slice(brief.title.length) : curTitle.trim() ? curTitle : next.title);
       setBrief(next);
       if (target.kind === "meta") setRunner("claude");
     } catch (e) {
@@ -381,15 +383,15 @@ export function Home(props: {
       {!props.workspaces.some((w) => w.kind === "repo") && (
         <section className="card">
           <div className="row">
-            <span>Workspace がまだありません</span>
-            <button onClick={props.onOpenWorkspaces}>設定で追加 →</button>
+            <span>{t(home.noWorkspace)}</span>
+            <button onClick={props.onOpenWorkspaces}>{t(home.addInSettings)}</button>
           </div>
         </section>
       )}
       <section className="card compose">
         <div className="row head">
-          <h5>新しいタスク · Inbox</h5>
-          <span className="hint">⌘↵ で Inbox に保存 · ⌘⇧↵ で Task に</span>
+          <h5>{t(home.newTaskHeading)}</h5>
+          <span className="hint">{t(home.shortcutsHint)}</span>
         </div>
         <div className="fields">
           <label>
@@ -402,11 +404,11 @@ export function Home(props: {
                 setWsTouched(true);
               }}
             >
-              <option value="" disabled={cloud}>{cloud ? "Workspace を選択してください" : "自動（LLM が選ぶ）"}</option>
+              <option value="" disabled={cloud}>{cloud ? t(home.chooseWorkspace) : t(home.autoWorkspace)}</option>
               {props.workspaces.map((w) => (
                 <option key={w.id} value={w.id}>
                   {w.name}
-                  {w.kind === "meta" ? "（自分自身）" : ""} — {w.path}
+                  {w.kind === "meta" ? t(home.selfSuffix) : ""} — {w.path}
                 </option>
               ))}
             </select>
@@ -414,15 +416,15 @@ export function Home(props: {
         </div>
         <PresetPicker
           workspaceId={ws?.id ?? null}
-          onText={(text, t) => {
+          onText={(text, title) => {
             setPrompt(text);
-            setTitle(t);
+            setTitle(title);
             setBrief(null);
             setDraft({ workspaceId: ws?.id ?? null, text });
           }}
           onError={props.onError}
         />
-        {stale && <div className="hint warn">Workspace を変えたので、本文に入れ直してください</div>}
+        {stale && <div className="hint warn">{t(home.staleDraft)}</div>}
         <div className={`dropzone ${drop.dropping ? "dropping" : ""}`} {...(cloud ? {} : drop.handlers)}>
           <textarea
             value={prompt}
@@ -437,7 +439,7 @@ export function Home(props: {
               }
             }}
             rows={6}
-            placeholder={cloud ? "Cloud に依頼する内容。Workspace と転送範囲を確認してから「開始」。" : "思いついたことを書く。リポジトリは後で決めてよい（⌘↵ で Inbox）。今すぐ動かすなら ⌘⇧↵ か「開始」。画像やファイルはここにドロップ / 貼り付け。"}
+            placeholder={cloud ? t(home.promptCloud) : t(home.promptLocal)}
           />
           {!cloud && <AttachmentBar items={attach.items} onRemove={attach.remove} busy={attach.busy} />}
         </div>
@@ -449,7 +451,7 @@ export function Home(props: {
               const expired = ok && info?.login === "expired";
               const offTitle = unavailableNotice(info, r) ?? "";
               return (
-                <label key={r} className={`runner-opt ${!ok ? "off" : ""} ${runner === r ? "sel" : ""}`} title={!ok ? offTitle : expired ? `ログインが切れています。Task の「ターミナル」tab で ${info.loginHint ?? r} を実行` : (info?.note ?? "")}>
+                <label key={r} className={`runner-opt ${!ok ? "off" : ""} ${runner === r ? "sel" : ""}`} title={!ok ? offTitle : expired ? t(home.loginExpiredTitle, { command: info.loginHint ?? r }) : (info?.note ?? "")}>
                   <input
                     type="radio"
                     name="runner"
@@ -462,8 +464,8 @@ export function Home(props: {
                     }}
                   />
                   <RunnerPill runner={r} />
-                  {expired && <span className="hint">要ログイン</span>}
-                  {runner === r && !runnerTouched && suggestion?.runner === r && <span className="hint">推奨</span>}
+                  {expired && <span className="hint">{t(home.needsLogin)}</span>}
+                  {runner === r && !runnerTouched && suggestion?.runner === r && <span className="hint">{t(home.suggestedTag)}</span>}
                 </label>
               );
             })}
@@ -475,29 +477,29 @@ export function Home(props: {
                   setMode(e.target.value);
                   setRunnerTouched(true); // a mode is chosen for this runner: the router must not swap it away
                 }}
-                title={selectedOpt ? `${selectedOpt.label}: ${selectedOpt.description}` : "承認モード"}
-                aria-label="承認モード"
+                title={selectedOpt ? `${selectedOpt.label}: ${selectedOpt.description}` : t(home.approvalMode)}
+                aria-label={t(home.approvalMode)}
               >
                 {modes.map((m) => (
                   <option key={m.value} value={m.value}>
-                    承認: {m.label}
-                    {m.value === defaultMode ? " ← 既定" : ""}
+                    {t(home.approvalOption, { label: m.label })}
+                    {m.value === defaultMode ? t(home.defaultSuffix) : ""}
                   </option>
                 ))}
               </select>
             )}
             {!cloud && runnerInfo && modes.length === 0 && (
-              <span className="hint" title={`${runnerLabel(runner, runnerInfo)} は agent 側の require_confirmation と Switchboard の mcp.yaml が確認の要否を決めます。承認は従来どおりここに届きます`}>
-                承認: {runnerLabel(runner, runnerInfo)} 側の設定で決まる
+              <span className="hint" title={t(home.approvalByRunnerTitle, { runner: runnerLabel(runner, runnerInfo) })}>
+                {t(home.approvalByRunner, { runner: runnerLabel(runner, runnerInfo) })}
               </span>
             )}
           </div>
           <AttachButton onFiles={(files) => void attach.add(files)} disabled={busy || cloud} />
-          <button disabled={busy || stale || !prompt.trim() || attach.items.length > 0} onClick={() => void saveToInbox()} title={attach.items.length ? "添付つきの依頼は Inbox に保存できません（メモは文章だけ）。「開始」で動かすか、添付を外してください" : "Knowledge の notes/ に保存"}>
-            Inbox に保存
+          <button disabled={busy || stale || !prompt.trim() || attach.items.length > 0} onClick={() => void saveToInbox()} title={attach.items.length ? t(home.inboxNoAttachments) : t(home.inboxSaveTitle)}>
+            {t(home.saveToInbox)}
           </button>
-          <button className="pri" disabled={busy || stale || (!cloud && attach.busy) || !prompt.trim() || !props.runnerOk.has(runner) || (cloud && !ws)} onClick={() => void submit()} title={!cloud && attach.busy ? "添付のアップロードが終わるまで待ってください" : ""}>
-            {choosing ? "Workspace を選択中…" : busy ? "起動中…" : !cloud && attach.busy ? "アップロード中…" : "開始"}
+          <button className="pri" disabled={busy || stale || (!cloud && attach.busy) || !prompt.trim() || !props.runnerOk.has(runner) || (cloud && !ws)} onClick={() => void submit()} title={!cloud && attach.busy ? t(home.waitUpload) : ""}>
+            {choosing ? t(home.choosingWorkspace) : busy ? t(home.starting) : !cloud && attach.busy ? t(home.uploading) : t(home.start)}
           </button>
         </div>
         {/* why a runner or 開始 cannot be used, read without hovering (#3354); an empty prompt needs no words, a stale one is said above */}
@@ -511,25 +513,25 @@ export function Home(props: {
             ))}
           </div>
         )}
-        {blocked && prompt.trim() && !stale && <div className="hint warn">開始できません: {blocked}</div>}
-        {!cloud && selectedOpt?.danger && <div className="hint warn">「{selectedOpt.label}」は確認なしで実行します — {selectedOpt.description}。このタスクだけに適用され、既定にはできません</div>}
+        {blocked && prompt.trim() && !stale && <div className="hint warn">{t(home.cannotStart, { reason: blocked })}</div>}
+        {!cloud && selectedOpt?.danger && <div className="hint warn">{t(home.dangerMode, { label: selectedOpt.label, description: selectedOpt.description })}</div>}
         <details className="compose-details" open={detailsOpen} onToggle={(e) => { const open = e.currentTarget.open; setDetailsOpen(open); saveDetailsOpen(localStorage, open); }}>
           <summary>
-            詳細{!detailsOpen && summary && <span className="hint"> · {summary}</span>}
+            {t(home.details)}{!detailsOpen && summary && <span className="hint"> · {summary}</span>}
           </summary>
           <div className="runners">
             <label>
-              <span>タイトル</span>
-              <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="空なら本文の先頭から生成" />
+              <span>{t(home.title)}</span>
+              <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t(home.titlePlaceholder)} />
             </label>
-            {runner === "claude" && <label>実行場所 <select aria-label="実行場所" value={executionMode} onChange={e => { setExecutionMode(e.target.value as ExecutionMode); setRunnerTouched(true); }}><option value="local">ローカル</option><option value="cloud">クラウド</option></select></label>}
-            {!cloud && <ModelSelect runner={runnerInfo} value={model} onChange={(v) => { setModel(v); setModelTouched(true); setRunnerTouched(true); /* a model belongs to this runner: the router must not swap it away */ }} label="モデル" title="この Task を動かすモデル。「CLI 既定」はランナー自身の設定（かっこ内）で動きます。作成後も Brief から変えられます" />}
-            {!cloud && <EffortSelect runner={runnerInfo} value={effort} onChange={(e) => { setEffort(e); setRunnerTouched(true); /* chosen for this runner: the router must not swap it away */ }} label="思考の深さ" title="この Task の思考の深さ。「CLI 既定」はランナー自身の設定で動きます。作成後は変えられません" />}
-            {!cloud && <input className="model" value={budget} onChange={(e) => setBudget(e.target.value)} placeholder="予算 USD（API 換算・任意）" inputMode="decimal" title="超過したら確認して止まります" />}
+            {runner === "claude" && <label>{t(home.runLocation)} <select aria-label={t(home.runLocation)} value={executionMode} onChange={e => { setExecutionMode(e.target.value as ExecutionMode); setRunnerTouched(true); }}><option value="local">{t(home.local)}</option><option value="cloud">{t(home.cloud)}</option></select></label>}
+            {!cloud && <ModelSelect runner={runnerInfo} value={model} onChange={(v) => { setModel(v); setModelTouched(true); setRunnerTouched(true); /* a model belongs to this runner: the router must not swap it away */ }} label={t(home.model)} title={t(home.modelTitle)} />}
+            {!cloud && <EffortSelect runner={runnerInfo} value={effort} onChange={(e) => { setEffort(e); setRunnerTouched(true); /* chosen for this runner: the router must not swap it away */ }} label={t(home.effort)} title={t(home.effortTitle)} />}
+            {!cloud && <input className="model" value={budget} onChange={(e) => setBudget(e.target.value)} placeholder={t(home.budgetPlaceholder)} inputMode="decimal" title={t(home.budgetTitle)} />}
             {!cloud && !isAdkRunner(runner) && listedRunners(props.health?.runners).includes("dak") && (
               <label
                 className={`hint toggle shadow ${!dakOk || shadowDefault === undefined ? "off" : ""}`}
-                title={!dakOk ? "DAK の agent（http://127.0.0.1:8000、SWITCHBOARD_DAK_URL で変更）に到達できません。DAK リポジトリで docker compose up" : shadowDefault === undefined ? "保存した既定を読み込み中" : "同じ依頼を DAK（DAK に設定したモデル。ローカルモデルなら API 料金なし）でも同時に実行し、並走 Task として並べます。追加の返信も写されます"}
+                title={!dakOk ? t(home.dakUnreachable) : shadowDefault === undefined ? t(home.loadingDefault) : t(home.dakShadowTitle)}
               >
                 <input
                   type="checkbox"
@@ -540,36 +542,36 @@ export function Home(props: {
                     setRunnerTouched(true); // the pair was chosen for this runner: the router must not swap the primary to DAK
                   }}
                 />
-                DAK にも同時に流す
-                {shadowOn && shadowDefault === "dak" && <span className="hint">既定</span>}
-                {!dakOk && shadowDefault === "dak" && <span className="hint">既定は ON（DAK 未検出のため今は並走しません）</span>}
-                {shadowDefault && shadowDefault !== "dak" && shadow === null && <span className="hint">既定の並走: {shadowDefault}</span>}
+                {t(home.dakShadow)}
+                {shadowOn && shadowDefault === "dak" && <span className="hint">{t(home.defaultTag)}</span>}
+                {!dakOk && shadowDefault === "dak" && <span className="hint">{t(home.shadowDefaultOff)}</span>}
+                {shadowDefault && shadowDefault !== "dak" && shadow === null && <span className="hint">{t(home.shadowDefault, { runner: shadowDefault })}</span>}
               </label>
             )}
-            <button className="ghost" onClick={props.onOpenSettings} title="承認モード・並走・使用上限での自動再開・LLM 提案・自動判定の既定は 設定 画面で変えます">既定は 設定 で変える</button>
+            <button className="ghost" onClick={props.onOpenSettings} title={t(home.defaultsInSettingsTitle)}>{t(home.defaultsInSettings)}</button>
           </div>
         </details>
         {cloud && <div className="cloud-preparation card" role="note">
-          <p>Cloud を選んで開始すると、公式 CLI の自動 Bundle 転送を了承します。GitHub clone では未pushコミット・未コミット変更が反映されない場合があります。自動 Bundle では全ブランチの履歴・追跡ファイルの変更が送られ得ます。未追跡ファイルは含まれず、秘密情報が必ず除外される保証はありません。Switchboard は commit/push や強制 Bundle を行いません。</p>
-          <p className="hint">モデル・承認・添付・予算・並走はここでは指定できません。Cloud側の操作は公式 Web で行ってください。</p>
+          <p>{t(home.cloudConsent)}</p>
+          <p className="hint">{t(home.cloudNotHere)}</p>
           <div className="kv">
-            <span>リポジトリ</span><span>{cloudPreparation?.repository ?? "判定不明"}</span>
-            <span>ブランチ</span><span>{cloudPreparation?.branch ?? "判定不明"}</span>
-            <span>未コミット変更</span><span>{cloudPreparation?.dirty === null || !cloudPreparation ? "判定不明" : cloudPreparation.dirty ? "あり" : "なし"}</span>
-            <span>未pushコミット</span><span>{cloudPreparation?.unpushed === null || !cloudPreparation ? "判定不明" : cloudPreparation.unpushed ? "あり" : "なし"}</span>
+            <span>{t(home.repository)}</span><span>{cloudPreparation?.repository ?? t(home.unknown)}</span>
+            <span>{t(home.branch)}</span><span>{cloudPreparation?.branch ?? t(home.unknown)}</span>
+            <span>{t(home.uncommitted)}</span><span>{cloudPreparation?.dirty === null || !cloudPreparation ? t(home.unknown) : cloudPreparation.dirty ? t(home.present) : t(home.absent)}</span>
+            <span>{t(home.unpushed)}</span><span>{cloudPreparation?.unpushed === null || !cloudPreparation ? t(home.unknown) : cloudPreparation.unpushed ? t(home.present) : t(home.absent)}</span>
           </div>
           {cloudPreparation?.warnings.slice(1).map(w => <p className="hint" key={w}>{w}</p>)}
           {cloudPreparationError && <p className="hint warn">{cloudPreparationError}</p>}
-          {!ws && <p className="hint warn">Workspace を明示選択してください。</p>}
+          {!ws && <p className="hint warn">{t(home.cloudChooseWorkspace)}</p>}
         </div>}
         <div className="row sub">
-          <span className="hint suggestion" title={suggestion ? `ルール: ${suggestion.ruleId}` : ""}>
+          <span className="hint suggestion" title={suggestion ? t(home.rule, { rule: suggestion.ruleId }) : ""}>
             {!cloud && suggestion ? (
               <>
-                推奨: <RunnerPill runner={suggestion.runner} />
-                {suggestion.model && <span> / モデル: {props.health?.runners?.find((r) => r.id === suggestion.runner)?.models?.find((m) => m.value === suggestion.model)?.label ?? suggestion.model}</span>}{" "}
+                {t(home.suggested)} <RunnerPill runner={suggestion.runner} />
+                {suggestion.model && <span> / {t(home.suggestedModel, { model: props.health?.runners?.find((r) => r.id === suggestion.runner)?.models?.find((m) => m.value === suggestion.model)?.label ?? suggestion.model })}</span>}{" "}
                 <span>{suggestion.reason}</span>
-                {!suggestion.available && <span className="warn"> — 未インストール</span>}
+                {!suggestion.available && <span className="warn"> — {t(home.notInstalled)}</span>}
                 {(suggestion.runner !== runner || model !== (suggestion.model ?? "")) && props.runnerOk.has(suggestion.runner) && (
                   <button
                     className="ghost"
@@ -579,32 +581,32 @@ export function Home(props: {
                       setModelTouched(false);
                     }}
                   >
-                    推奨に戻す
+                    {t(home.backToSuggested)}
                   </button>
                 )}
               </>
             ) : (
-              <>{cloud ? "Cloud は Claude を使います" : "推奨ランナー: 入力するとルール表（routing.yaml）から提案します"}</>
+              <>{cloud ? t(home.cloudUsesClaude) : t(home.suggestHint)}</>
             )}
           </span>
           {ws && ws.kind !== "meta" && (
-            <button className="ghost" onClick={() => void improve(ws)} title={`${ws.name} の構成・指示ファイル・テスト手順（デーモンがリポジトリから読む）を前置きにして改善依頼を書く。書きかけの本文は残る。Workspace を切り替えると前置きも切り替わる`}>
-              {ws.name} を改善 →
+            <button className="ghost" onClick={() => void improve(ws)} title={t(home.improveTitle, { name: ws.name })}>
+              {t(home.improve, { name: ws.name })}
             </button>
           )}
           {meta && (
-            <button className="ghost" onClick={() => void improve(meta)} title="Switchboard 自身（meta workspace）を選び、構成とテスト手順を前置きにして改善依頼を書く。書きかけの本文は残る">
-              このアプリを改善 →
+            <button className="ghost" onClick={() => void improve(meta)} title={t(home.improveSelfTitle)}>
+              {t(home.improveSelf)}
             </button>
           )}
         </div>
       </section>
 
-      {saved && <div className="banner ok">Inbox に保存しました: {saved}</div>}
+      {saved && <div className="banner ok">{t(home.savedToInbox, { path: saved })}</div>}
 
       {drafts.length > 0 && (
         <section className="card">
-          <h5>Inbox（まだリポジトリに紐づかないメモ）</h5>
+          <h5>{t(home.inboxHeading)}</h5>
           {drafts.map((n) => {
             const open = editing?.path === n.path ? editing : null;
             return (
@@ -620,9 +622,9 @@ export function Home(props: {
                     ))}
                   </select>
                   <button disabled={promoting !== null} onClick={() => void promote(n)}>
-                    {promoting === n.path ? "起動中…" : "Task に昇格"}
+                    {promoting === n.path ? t(home.starting) : t(home.promote)}
                   </button>
-                  <button onClick={() => void closeNote(n)}>閉じる</button>
+                  <button onClick={() => void closeNote(n)}>{t(home.close)}</button>
                 </div>
                 {open && <DraftEditor edit={open} note={n} saving={savingEdit} onChange={setEditing} onCancel={() => setEditing(null)} onSave={() => void saveEdit(open)} />}
               </Fragment>
@@ -633,19 +635,19 @@ export function Home(props: {
 
       <div className="grid2">
         <section className="card">
-          <h5>実行中 · 待ち</h5>
-          {active.length === 0 && <div className="muted">なし</div>}
-          {active.map((t) => (
-            <button key={t.id} className="row link" onClick={() => props.onOpenTask(t.id)}>
-              <span className={`dot ${t.status === "waiting" ? "wait" : "run"}`} />
-              <span className="t">{t.title}</span>
-              <RunnerPill runner={t.runner} />
-              <ShadowTag task={t} />
-              <span className="m">{t.status === "waiting" ? "承認待ち" : "実行中"}</span>
+          <h5>{t(home.activeHeading)}</h5>
+          {active.length === 0 && <div className="muted">{t(home.none)}</div>}
+          {active.map((x) => (
+            <button key={x.id} className="row link" onClick={() => props.onOpenTask(x.id)}>
+              <span className={`dot ${x.status === "waiting" ? "wait" : "run"}`} />
+              <span className="t">{x.title}</span>
+              <RunnerPill runner={x.runner} />
+              <ShadowTag task={x} />
+              <span className="m">{x.status === "waiting" ? t(home.waitingApproval) : t(home.running)}</span>
             </button>
           ))}
-          <h5 style={{ marginTop: 14 }}>要対応 · {attention.length}</h5>
-          {attention.length === 0 && <div className="muted">なし</div>}
+          <h5 style={{ marginTop: 14 }}>{t(home.attentionHeading, { count: attention.length })}</h5>
+          {attention.length === 0 && <div className="muted">{t(home.none)}</div>}
           {attention.map((t) => (
             <button key={t.id} className="row link" onClick={() => props.onOpenTask(t.id)}>
               <span className={`dot ${outcomeDotClass(t.outcome)}`} />
@@ -656,43 +658,43 @@ export function Home(props: {
               <span className="m">{outcomeLabel(t.outcome)}</span>
             </button>
           ))}
-          {recent.length > 0 && <h5 style={{ marginTop: 14 }}>最近</h5>}
-          {recent.map((t) => (
-            <button key={t.id} className="row link" onClick={() => props.onOpenTask(t.id)}>
-              <span className={`dot ${t.status === "error" ? "err" : "idle"}`} />
-              <span className="t">{t.title}</span>
-              <RunnerPill runner={t.runner} />
-              <OriginTag origin={t.origin} />
-              <ResumeTag resumeAt={t.resumeAt} reason={t.resumeReason} plannedAt={t.resumePlannedAt} />
-              <ShadowTag task={t} />
-              <span className="m">{t.executionMode === "cloud" ? "Cloud・状態未確認" : t.status}</span>
+          {recent.length > 0 && <h5 style={{ marginTop: 14 }}>{t(home.recentHeading)}</h5>}
+          {recent.map((x) => (
+            <button key={x.id} className="row link" onClick={() => props.onOpenTask(x.id)}>
+              <span className={`dot ${x.status === "error" ? "err" : "idle"}`} />
+              <span className="t">{x.title}</span>
+              <RunnerPill runner={x.runner} />
+              <OriginTag origin={x.origin} />
+              <ResumeTag resumeAt={x.resumeAt} reason={x.resumeReason} plannedAt={x.resumePlannedAt} />
+              <ShadowTag task={x} />
+              <span className="m">{x.executionMode === "cloud" ? t(home.cloudUnchecked) : x.status}</span>
             </button>
           ))}
         </section>
 
         <section className="card">
-          <h5>今日のコスト</h5>
+          <h5>{t(home.costToday)}</h5>
           <div className="bigno">
             {fmtUsd(props.ledger?.todayUsd ?? 0)}
             <small>
-              API 換算 · 実課金 {fmtUsd(props.ledger?.billedTodayUsd ?? 0)} · 今週 {fmtUsd(props.ledger?.weekUsd ?? 0)}
+              {t(home.costLine, { billed: fmtUsd(props.ledger?.billedTodayUsd ?? 0), week: fmtUsd(props.ledger?.weekUsd ?? 0) })}
             </small>
           </div>
           <div className="kv" style={{ marginTop: 10 }}>
             {(props.ledger?.quota ?? []).map((q) => (
               <QuotaRow key={`${q.runner}-${q.window}`} label={`${q.runner} · ${windowLabel(q.window)}`} utilization={q.utilization} resetsAt={q.resetsAt} ts={q.ts} />
             ))}
-            {(props.ledger?.quota ?? []).length === 0 && <span className="muted">枠の消費は最初のタスク実行後に表示されます</span>}
+            {(props.ledger?.quota ?? []).length === 0 && <span className="muted">{t(home.quotaEmpty)}</span>}
           </div>
           {props.ledger && props.ledger.topTasks.length > 0 && (
             <>
-              <h5 style={{ marginTop: 14 }}>タスク別 · 今週</h5>
-              {props.ledger.topTasks.map((t) => (
-                <button key={t.taskId} className="row link" onClick={() => props.onOpenTask(t.taskId)}>
-                  <span className="t">{t.title}</span>
-                  <RunnerPill runner={t.runner} />
+              <h5 style={{ marginTop: 14 }}>{t(home.byTaskHeading)}</h5>
+              {props.ledger.topTasks.map((x) => (
+                <button key={x.taskId} className="row link" onClick={() => props.onOpenTask(x.taskId)}>
+                  <span className="t">{x.title}</span>
+                  <RunnerPill runner={x.runner} />
                   <span className="m num">
-                    {fmtUsd(t.costUsd)} · {Math.round(t.tokens / 1000)}k トークン
+                    {fmtUsd(x.costUsd)} · {t(home.tokens, { count: Math.round(x.tokens / 1000) })}
                   </span>
                 </button>
               ))}
@@ -701,13 +703,13 @@ export function Home(props: {
           {(latestReport || anyArtifact) && (
             <>
               <div className="row head" style={{ marginTop: 14 }}>
-                <h5>レポート</h5>
+                <h5>{t(home.reportsHeading)}</h5>
                 <button className="ghost" onClick={props.onOpenArtifacts}>
-                  成果物をすべて見る
+                  {t(home.allArtifacts)}
                 </button>
               </div>
               {latestReport && (
-                <button className="row link" onClick={() => props.onOpenReport(latestReport.id)} title="Insights で開く">
+                <button className="row link" onClick={() => props.onOpenReport(latestReport.id)} title={t(home.openInInsights)}>
                   <span className="t">{latestReport.title}</span>
                   <span className="m">{reportMeta(latestReport)}</span>
                 </button>
@@ -754,9 +756,9 @@ export function DraftEditor(props: { edit: DraftEdit; note: InboxNote; saving: b
       <input value={edit.title} onChange={(e) => props.onChange({ ...edit, title: e.target.value })} />
       <textarea value={edit.text} onChange={(e) => props.onChange({ ...edit, text: e.target.value })} />
       <div className="acts">
-        <button onClick={props.onCancel}>やめる</button>
+        <button onClick={props.onCancel}>{t(home.cancel)}</button>
         <button className="pri" disabled={props.saving || !editChanged(edit, props.note)} onClick={props.onSave}>
-          保存
+          {t(home.save)}
         </button>
       </div>
     </div>

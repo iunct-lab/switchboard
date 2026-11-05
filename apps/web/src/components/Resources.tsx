@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import type { OpsResources } from "@switchboard/protocol";
 import { api } from "../api.ts";
 import { atLabel, consumerRows, etaLine, latestAnswer, memoryLine, runOwner, since, typicalLabel, verdictLabel, waitLine, watchResources } from "../resources.ts";
+import { t } from "../i18n.ts";
+import { common as m } from "../i18n/common.ts";
 
 /**
  * Resources (#3333, docs/design/ops-metrics.md): now — the free memory against the floor, the machine's heavy-process
@@ -34,13 +36,13 @@ export function Resources(props: { onOpenTask: (id: string) => void }) {
       stop();
     };
   }, []);
-  const task = (t: { taskId: string | null; taskTitle: string | null }) =>
-    t.taskId ? (
-      <button className="ghost link" data-resources-task={t.taskId} onClick={() => props.onOpenTask(t.taskId!)}>
-        {runOwner(t)}
+  const task = (x: { taskId: string | null; taskTitle: string | null }) =>
+    x.taskId ? (
+      <button className="ghost link" data-resources-task={x.taskId} onClick={() => props.onOpenTask(x.taskId!)}>
+        {runOwner(x)}
       </button>
     ) : (
-      <span className="muted">{runOwner(t)}</span>
+      <span className="muted">{runOwner(x)}</span>
     );
   const mem = r && memoryLine(r.memory);
   const eta = r && etaLine(r.eta, r.slots.running.length + r.slots.waiting.length);
@@ -49,14 +51,14 @@ export function Resources(props: { onOpenTask: (id: string) => void }) {
       <section className="card">
         <div className="row head">
           <h5>Resources</h5>
-          <span className="hint">5 秒ごとに更新（この画面を表に出している間だけ）</span>
+          <span className="hint">{t(m.resPolling)}</span>
         </div>
-        {failure && <div className="muted" data-resources-error>読めませんでした: {failure}</div>}
+        {failure && <div className="muted" data-resources-error>{t(m.resFailed, { error: failure })}</div>}
         {r && (
           <>
             <div className="resources-stats">
               <div className="resources-stat" data-resources-memory>
-                <div className="label">空きメモリ{mem ? `（下限 ${mem.floor}）` : ""}</div>
+                <div className="label">{t(m.resFreeMemory)}{mem ? t(m.resFloor, { floor: mem.floor }) : ""}</div>
                 {mem ? (
                   <>
                     <div className={`value${mem.below ? " warn" : ""}`}>{mem.free}</div>
@@ -64,45 +66,45 @@ export function Resources(props: { onOpenTask: (id: string) => void }) {
                       <i style={{ width: `${Math.round(mem.usedRatio * 100)}%` }} />
                     </span>
                     <div className="hint">
-                      {mem.below ? "下限を下回っています · " : ""}
+                      {mem.below ? t(m.resBelowFloor) : ""}
                       {mem.detail}
                     </div>
                   </>
                 ) : (
-                  <div className="hint">この環境では測れません（/proc/meminfo が無い）</div>
+                  <div className="hint">{t(m.resNoMeminfo)}</div>
                 )}
               </div>
               <div className="resources-stat" data-resources-slots>
-                <div className="label">重い処理の枠</div>
+                <div className="label">{t(m.resSlots)}</div>
                 <div className="value">
                   {r.slots.running.length} / {r.slots.max}
                 </div>
                 <div className="hint">
-                  待ち {r.slots.waiting.length} 件
+                  {t(m.resWaitingCount, { n: r.slots.waiting.length })}
                   {r.slots.waiting.length > 0 &&
-                    `（枠 ${r.slots.waiting.filter((w) => w.reason === "slot").length} · メモリ ${r.slots.waiting.filter((w) => w.reason === "memory").length}）`}
+                    t(m.resWaitingWhy, { slot: r.slots.waiting.filter((w) => w.reason === "slot").length, memory: r.slots.waiting.filter((w) => w.reason === "memory").length })}
                 </div>
               </div>
               <div className="resources-stat" data-resources-eta>
-                <div className="label">全部終わるまでの目安</div>
+                <div className="label">{t(m.resEta)}</div>
                 <div className="value">{eta!.value}</div>
                 <div className="hint">
-                  {eta!.note ? `${eta!.note} · ` : ""}空きメモリの回復にかかる時間は含まない
+                  {eta!.note ? `${eta!.note} · ` : ""}{t(m.resEtaExcludes)}
                 </div>
               </div>
             </div>
-            <h5>待っている実行</h5>
+            <h5>{t(m.resWaitingHeading)}</h5>
             {r.slots.waiting.length === 0 ? (
-              <div className="muted">ありません</div>
+              <div className="muted">{t(m.resNone)}</div>
             ) : (
               <table className="pricing" data-resources-waiting>
                 <thead>
                   <tr>
                     <th>Task</th>
-                    <th>実行</th>
-                    <th>何を待っているか</th>
-                    <th>待ち時間</th>
-                    <th>普段</th>
+                    <th>{t(m.resColRun)}</th>
+                    <th>{t(m.resColWaitsFor)}</th>
+                    <th>{t(m.resColWaited)}</th>
+                    <th>{t(m.resColTypical)}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -118,19 +120,19 @@ export function Resources(props: { onOpenTask: (id: string) => void }) {
                 </tbody>
               </table>
             )}
-            <h5>いま走っている実行</h5>
+            <h5>{t(m.resRunningHeading)}</h5>
             {r.slots.running.length === 0 ? (
-              <div className="muted">ありません</div>
+              <div className="muted">{t(m.resNone)}</div>
             ) : (
               <table className="pricing" data-resources-running>
                 <thead>
                   <tr>
                     <th>Task</th>
-                    <th>実行</th>
-                    <th>作業フォルダ</th>
-                    <th>経過</th>
-                    <th>普段（中央値）</th>
-                    <th>判定</th>
+                    <th>{t(m.resColRun)}</th>
+                    <th>{t(m.resColCwd)}</th>
+                    <th>{t(m.resColElapsed)}</th>
+                    <th>{t(m.resColTypicalMedian)}</th>
+                    <th>{t(m.resColVerdict)}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -150,19 +152,19 @@ export function Resources(props: { onOpenTask: (id: string) => void }) {
               </table>
             )}
             <div className="row head">
-              <h5>メモリを使っているもの</h5>
-              {r.consumers && <span className="hint">{atLabel(r.consumers.at)}（毎分の記録）</span>}
+              <h5>{t(m.resConsumersHeading)}</h5>
+              {r.consumers && <span className="hint">{atLabel(r.consumers.at)}{t(m.resPerMinute)}</span>}
             </div>
             {!r.consumers ? (
-              <div className="muted">記録がありません</div>
+              <div className="muted">{t(m.resNoRecord)}</div>
             ) : (
               <table className="pricing" data-resources-consumers>
                 <thead>
                   <tr>
-                    <th>もの</th>
-                    <th>種類</th>
+                    <th>{t(m.resColWhat)}</th>
+                    <th>{t(m.resColKind)}</th>
                     <th>RSS</th>
-                    <th>プロセス</th>
+                    <th>{t(m.resColProcs)}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -177,7 +179,7 @@ export function Resources(props: { onOpenTask: (id: string) => void }) {
                 </tbody>
               </table>
             )}
-            <div className="hint">ops-kit heavy を通った実行だけが「待っている」「走っている」に出ます。</div>
+            <div className="hint">{t(m.resFooter)}</div>
           </>
         )}
       </section>

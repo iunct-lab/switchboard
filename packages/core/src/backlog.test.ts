@@ -16,7 +16,7 @@ import { main as opsKit } from "../../../ops-kit/src/cli.ts";
 import { fakeGh as fakeKitGh } from "../../../ops-kit/src/gh.ts";
 import { ghBoard, overlap, storedMaterial } from "../../../scripts/parallel-guard.ts";
 import { fmtTime } from "./ratelimit.ts";
-import { answerStoredDecision, buildStartPrompt, localBacklogSource, canStartStoredBacklog, screenAnswer, confirmationsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, onHoldIn, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld } from "./backlog.ts";
+import { answerStoredDecision, buildDirectPrompt, buildStartPrompt, localBacklogSource, canStartStoredBacklog, screenAnswer, confirmationsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, onHoldIn, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld } from "./backlog.ts";
 
 // the writer of the waits (#817), read at run time: scripts/ is not type-checked under core's settings
 const guard = "../../../scripts/parallel-guard.ts";
@@ -691,6 +691,44 @@ test("start: the title and the skill follow the action", async () => {
   const prompts = claude.starts.map((s) => s.prompt).join("\n----\n");
   expect(prompts).toContain(".claude/skills/pbi-to-tasks/SKILL.md に従い、PBI #303");
   expect(prompts).toContain(".claude/skills/request-to-backlog/SKILL.md に従い、既存の要望 Issue #302");
+});
+
+test("start: direct on a request starts a p1-direct Task recorded as the direct button; p0 and p1 never run together on it (#3690)", async () => {
+  const claude = holdingClaude();
+  const base = await boot(fakeGh().gh, claude.adapter);
+  const r = await start(base, 302, { action: "direct" });
+  expect(r.status).toBe(201);
+  const task = await r.json() as Task;
+  expect(task.title.startsWith("#302 直行で直す: ")).toBe(true);
+  expect(task.stage).toEqual({ issue: 302, action: "direct" });
+  expect(await fetch(`${base}/api/tasks/${task.id}/provenance`).then((r) => r.json())).toMatchObject({ process: { id: "p1-direct" }, processReason: "direct button" });
+  for (let i = 0; !claude.starts.length && i < 100; i++) await Bun.sleep(10);
+  expect(claude.starts[0]!.prompt).toBe(buildDirectPrompt({ number: 302 }, { local: false, localForge: false, answer: null }));
+  expect(claude.starts[0]!.prompt).toContain("次の信号を読み、それが求める最小の変更を 1 本の PR にしてください: #302");
+  // while it runs, neither PBI にする nor a second 直行 starts on the same request
+  expect((await start(base, 302, { action: "to-pbi" })).status).toBe(409);
+  expect((await start(base, 302, { action: "direct" })).status).toBe(409);
+});
+
+test("buildDirectPrompt: carries the screen answer as the person's words, and a local backlog's rules (PR #3826 review)", () => {
+  const answer = { issue: 302, text: "B: 直す — 許可: X だけ許可します" };
+  const said = buildDirectPrompt({ number: 302 }, { answer });
+  expect(said).toContain("利用者が画面で答えた Issue #302 の最新の回答（利用者の言葉）:\n\n````text\nB: 直す — 許可: X だけ許可します\n````");
+  expect(buildDirectPrompt({ number: 302 }, { answer: { issue: 302, text: "a ```` b" } })).toContain("`````text\na ```` b\n`````");
+  expect(buildDirectPrompt({ number: 302 })).not.toContain("利用者が画面で答えた");
+  // a meta workspace whose backlog is kept in Switchboard: the same rules as a stage Task there (no #<n> or closing keywords in the PR)
+  const local = buildDirectPrompt({ number: 302 }, { local: true });
+  expect(local).toContain("#302 はこの workspace の Switchboard のバックログの Issue です（GitHub には無い）。");
+  expect(local).toContain(buildStartPrompt({ number: 302 }, "to-pbi", { local: true }).split("（GitHub には無い）。")[1]!);
+  expect(buildDirectPrompt({ number: 302 }, { local: true, localForge: true })).toContain(buildStartPrompt({ number: 302 }, "to-pbi", { local: true, localForge: true }).split("（GitHub には無い）。")[1]!);
+  expect(buildDirectPrompt({ number: 302 })).not.toContain("GitHub には無い");
+});
+
+test("start: direct while PBI にする runs is 409; direct on anything but a request is 409 (#3690)", async () => {
+  const base = await boot(fakeGh().gh, holdingClaude().adapter);
+  expect((await start(base, 302, { action: "to-pbi" })).status).toBe(201);
+  expect((await start(base, 302, { action: "direct" })).status).toBe(409);
+  for (const n of [303, 304, 306]) expect((await start(base, n, { action: "direct" })).status).toBe(409); // needs-tasks, ready, needs-decision
 });
 
 test("start: an action that does not match the stage is 409; unknown Issue 404; bad action 400", async () => {
@@ -1769,6 +1807,19 @@ test("pickNext: Priority (none last), then Ready before 分解待ち before 要�
   expect(pickNext([items[0]!], "implement")).toBeNull();
   expect(pickNext(items.slice(5), "implement")).toBeNull();
   expect(pickNext(items.slice(5), "plan")).toBeNull();
+});
+
+test("pickNext: never 直行で直す, and leaves a request whose last Task was one (#3690)", () => {
+  const at = "2026-09-28T00:00:00Z";
+  const direct = (status: TaskStatus) => ({ id: "tsk_direct", status, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "direct" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null });
+  const items = [
+    item({ number: 1, stage: "request", type: "request", priority: "P0", lastTask: direct("done"), updatedAt: "2026-09-28T01:00:00Z" }),
+    item({ number: 2, stage: "request", type: "request", priority: "P0", lastTask: direct("error") }),
+    item({ number: 3, stage: "request", type: "request", priority: "P3" }),
+  ];
+  for (const slot of ["plan", "implement"] as const) for (let k = 0; k <= items.length; k++) expect(pickNext(items.slice(k), slot)?.action).not.toBe("direct");
+  expect(pickNext(items, "plan")).toMatchObject({ item: { number: 3 }, action: "to-pbi" });
+  expect(pickNext(items.slice(0, 2), "plan")).toBeNull();
 });
 
 test("buildStartPrompt: to-tasks on a PBI that already has Tasks asks to make it Ready without decomposing again", () => {

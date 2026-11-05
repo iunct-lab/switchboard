@@ -76,10 +76,10 @@ The daemon's UI origin can call the whole local API (loopback asks no token), so
 - Files are confined to the artifact's folder: the path is decoded once and then `..` (also as `%2e%2e`), a backslash, NUL, an absolute path and a symlink out are 404; an encoded `/` is just a `/` inside the folder.
 - A script inside the page that calls `/api` or `/ws` sends `Origin: null`; `sameOrigin` (`auth.ts`) refuses it (403).
 
-The page can still read the API through the screen that shows it (the artifact bridge, `scratch-apps.md`): the frame
+The page can still read and, once confirmed, write the API through the screen that shows it (the artifact bridge, `scratch-apps.md`): the frame
 stays opaque, it posts a request to its parent, and the screen (`ArtifactBody`) answers only a message whose
-`event.source` is that artifact's own frame, reads only `GET /api/…` with its own login, and posts the answer back to
-that frame. A page opened on its own has no screen around it and nothing answers. The check is on the frame's window,
+`event.source` is that artifact's own frame, reads `GET /api/…` with its own login — and calls a write only after the
+person confirms that one request — and posts the answer back to that frame. A page opened on its own has no screen around it and nothing answers. The check is on the frame's window,
 not on the document in it: a link that moves the frame elsewhere keeps the window, and two opaque origins cannot be
 told apart. What keeps a page from another site out of that window is the UI's own CSP (`default-src 'self'`, so
 `frame-src` is the daemon's origin); the Vite dev server does not send it yet.

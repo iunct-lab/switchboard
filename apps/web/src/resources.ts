@@ -1,6 +1,8 @@
 import type { OpsResources, ResourceRun, ResourceWait } from "@switchboard/protocol";
 import { watchHealth } from "./healthWatch.ts";
 import { fmtBytes, kindLabel } from "./ops.ts";
+import { t } from "./i18n.ts";
+import { common } from "./i18n/common.ts";
 
 /** How often the resources screen reads `/api/ops/resources` while it is shown (docs/design/ops-metrics.md, リソース画面). */
 export const RESOURCES_POLL_MS = 5000;
@@ -39,24 +41,24 @@ export function memoryLine(memory: OpsResources["memory"]): { free: string; floo
     floor: fmtBytes(memory.floorBytes),
     below: memory.availableBytes < memory.floorBytes,
     usedRatio: memory.totalBytes > 0 ? Math.min(1, Math.max(0, 1 - memory.availableBytes / memory.totalBytes)) : 0,
-    detail: `全体 ${fmtBytes(memory.totalBytes)} · スワップ ${fmtBytes(memory.swapUsedBytes)} 使用`,
+    detail: t(common.resMemoryDetail, { total: fmtBytes(memory.totalBytes), swap: fmtBytes(memory.swapUsedBytes) }),
   };
 }
 
 /** A run named for a person: its Task's title (or the id of a Task this daemon does not know), or 「Task の外」. */
 export function runOwner(r: { taskId: string | null; taskTitle: string | null }): string {
-  return r.taskTitle ?? (r.taskId ? `Task ${r.taskId}` : "Task の外");
+  return r.taskTitle ?? (r.taskId ? `Task ${r.taskId}` : t(common.resOutsideTask));
 }
 
 /** What a waiting run waits for: the slot's holders (Task and run), or the free memory against the floor. */
 export function waitLine(wait: ResourceWait, running: ResourceRun[], memory: OpsResources["memory"]): string {
   if (wait.reason === "memory") {
     const m = memoryLine(memory);
-    if (!m) return "空きメモリ（下限未満）";
+    if (!m) return t(common.resWaitMemoryUnknown);
     // the kit decided on its own read; this one may already be above the floor before its next look
-    return m.below ? `空きメモリ ${m.free} < 下限 ${m.floor}` : `空きメモリ ${m.free}（下限 ${m.floor} を超えた。次の見回りで枠を見る）`;
+    return t(m.below ? common.resWaitMemoryBelow : common.resWaitMemoryAbove, { free: m.free, floor: m.floor });
   }
-  return running.length ? `枠: ${running.map((r) => `${runOwner(r)} の ${r.name}`).join("、")}` : "枠（持ち主は終わったところ）";
+  return running.length ? t(common.resWaitSlot, { holders: running.map((r) => t(common.resSlotHolder, { owner: runOwner(r), name: r.name })).join(t(common.resSlotHolderSep)) }) : t(common.resWaitSlotGone);
 }
 
 /** How long since `iso`: 「45 秒」 under a minute, 「12 分」 under an hour, then 「1 時間 5 分」. */
@@ -66,19 +68,19 @@ export function since(iso: string, now: number): string {
 
 function duration(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
-  if (s < 60) return `${s} 秒`;
+  if (s < 60) return t(common.resSeconds, { n: s });
   const m = Math.floor(s / 60);
-  return m < 60 ? `${m} 分` : `${Math.floor(m / 60)} 時間 ${m % 60} 分`;
+  return m < 60 ? t(common.resMinutes, { n: m }) : t(common.resHoursMinutes, { h: Math.floor(m / 60), m: m % 60 });
 }
 
 /** A run's usual time: 「14 分 · 28 件」 (the median of its kind's successful runs and how many), or 「実績なし」 under 3 of them. */
 export function typicalLabel(row: Pick<ResourceRun | ResourceWait, "typicalMs" | "samples">): string {
-  return row.typicalMs === null ? "実績なし" : `${duration(row.typicalMs)} · ${row.samples} 件`;
+  return row.typicalMs === null ? t(common.resNoHistory) : t(common.resTypical, { time: duration(row.typicalMs), n: row.samples });
 }
 
 /** The running run against its usual time, in words (not by color alone). */
 export function verdictLabel(run: Pick<ResourceRun, "verdict">): string {
-  return { none: "実績なし", normal: "普段どおり", long: "普段の 2 倍より長い" }[run.verdict];
+  return { none: t(common.resNoHistory), normal: t(common.resVerdictNormal), long: t(common.resVerdictLong) }[run.verdict];
 }
 
 /**
@@ -86,9 +88,9 @@ export function verdictLabel(run: Pick<ResourceRun, "verdict">): string {
  * waits; 「実績なし」 when every one of the `jobs` running and waiting has no record (a 0 left of nothing known is not 「1 分以内」).
  */
 export function etaLine(eta: OpsResources["eta"], jobs: number): { value: string; note: string | null } {
-  if (eta.etaMs === null) return { value: "待ちはありません", note: null };
-  if (eta.unknown >= jobs) return { value: "実績なし", note: `実績の無い ${eta.unknown} 件` };
-  return { value: eta.etaMs < 60_000 ? "1 分以内" : `約 ${duration(eta.etaMs)}`, note: eta.unknown > 0 ? `実績の無い ${eta.unknown} 件を除く` : null };
+  if (eta.etaMs === null) return { value: t(common.resNoWaits), note: null };
+  if (eta.unknown >= jobs) return { value: t(common.resNoHistory), note: t(common.resUnknownAll, { n: eta.unknown }) };
+  return { value: eta.etaMs < 60_000 ? t(common.resUnderMinute) : t(common.resAbout, { time: duration(eta.etaMs) }), note: eta.unknown > 0 ? t(common.resUnknownSome, { n: eta.unknown }) : null };
 }
 
 /** The latest minute's rows, named: the Task (a link when there is one), the daemon, or the rest. */
@@ -97,7 +99,7 @@ export function consumerRows(c: NonNullable<OpsResources["consumers"]>): Array<{
     key: `${g.owner}/${g.taskId ?? ""}/${g.kind}`,
     taskId: g.owner === "task" ? g.taskId : null,
     taskTitle: g.taskTitle,
-    label: g.owner === "task" ? runOwner(g) : g.owner === "daemon" ? "デーモン" : "その他",
+    label: g.owner === "task" ? runOwner(g) : g.owner === "daemon" ? t(common.resDaemon) : t(common.resOther),
     kind: kindLabel[g.kind],
     rss: fmtBytes(g.rssBytes),
     procs: g.procs,
@@ -107,5 +109,5 @@ export function consumerRows(c: NonNullable<OpsResources["consumers"]>): Array<{
 /** 「15:31 時点」: the minute the sampler's rows are from, in this browser's clock. */
 export function atLabel(ms: number): string {
   const d = new Date(ms);
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")} 時点`;
+  return t(common.resAt, { time: `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}` });
 }

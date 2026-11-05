@@ -6,25 +6,27 @@ import { fmtClock, fmtUsd, RunnerPill } from "./ui.tsx";
 import { outcomeLabel } from "../attention.ts";
 import { Reports } from "./Reports.tsx";
 import { Ops } from "./Ops.tsx";
+import { t } from "../i18n.ts";
+import { insights as m } from "../i18n/insights.ts";
 
 const COLUMNS: Array<{ key: EvalsSortKey | null; label: string; title?: string }> = [
   { key: null, label: "Task" },
-  { key: null, label: "ランナー" },
-  { key: null, label: "モデル" },
-  { key: null, label: "思考の深さ" },
-  { key: null, label: "状態" },
-  { key: "toolCalls", label: "ツール" },
-  { key: "toolFailures", label: "失敗" },
-  { key: "errors", label: "エラー" },
-  { key: "userInstructions", label: "追加指示" },
-  { key: "stops", label: "停止" },
-  { key: "daemonStops", label: "デーモン停止" },
-  { key: null, label: "終わり方" },
-  { key: "judge", label: "ルーブリック", title: "観点の平均（1〜5）" },
-  { key: "human", label: "自分の評価" },
-  { key: "costUsd", label: "費用" },
-  { key: "updatedAt", label: "更新" },
-  { key: null, label: "", title: "操作" },
+  { key: null, label: t(m.runner) },
+  { key: null, label: t(m.model) },
+  { key: null, label: t(m.colEffort) },
+  { key: null, label: t(m.colStatus) },
+  { key: "toolCalls", label: t(m.colTools) },
+  { key: "toolFailures", label: t(m.failures) },
+  { key: "errors", label: t(m.errors) },
+  { key: "userInstructions", label: t(m.userInstructions) },
+  { key: "stops", label: t(m.stops) },
+  { key: "daemonStops", label: t(m.daemonStopsShort) },
+  { key: null, label: t(m.ending) },
+  { key: "judge", label: t(m.colRubric), title: t(m.colRubricTitle) },
+  { key: "human", label: t(m.colHuman) },
+  { key: "costUsd", label: t(m.colCost) },
+  { key: "updatedAt", label: t(m.colUpdated) },
+  { key: null, label: "", title: t(m.colActions) },
 ];
 
 /**
@@ -91,15 +93,15 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
       <Reports openId={props.openReport} scope={props.scope} onScope={props.onScope} onOpenTask={props.onOpenArtifact} onError={props.onError} />
       <Ops onOpenTask={props.onOpenTask} />
       <section className="card">
-        <h5>評価をお願い（先週の判定から）</h5>
+        <h5>{t(m.askHeading)}</h5>
         {summaryFailed ? (
-          <div className="muted">読み込めませんでした</div>
+          <div className="muted">{t(m.loadFailedShort)}</div>
         ) : summary === null ? (
-          <div className="muted">読み込み中…</div>
+          <div className="muted">{t(m.loading)}</div>
         ) : (
           <>
             {summary.sample.length === 0 ? (
-              <div className="muted">先週に判定した Task がありません</div>
+              <div className="muted">{t(m.noneJudgedLastWeek)}</div>
             ) : (
               <table className="pricing evals-table evals-ask">
                 <tbody>
@@ -114,63 +116,63 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
                         <RunnerPill runner={r.runner as RunnerId} />
                       </td>
                       <td className="num">{r.judge ? r.judge.average.toFixed(1) : "-"}</td>
-                      <td className="num">{r.human ? `${r.human.rating} / 5` : "まだ"}</td>
+                      <td className="num">{r.human ? `${r.human.rating} / 5` : t(m.notYet)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             )}
-            <div className="hint">人の評価と判定の差: {gapLabel(summary.gap)}</div>
+            <div className="hint">{t(m.gapLine, { gap: gapLabel(summary.gap) })}</div>
           </>
         )}
       </section>
       <section className="card">
-        <h5>Insights · Task ごとの評価</h5>
+        <h5>{t(m.listHeading)}</h5>
         <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <select className="mode" value={workspaceId} aria-label="Workspace" onChange={(e) => setWorkspaceId(e.target.value)}>
-            <option value="">すべての Workspace</option>
+            <option value="">{t(m.allWorkspaces)}</option>
             {props.workspaces.map((w) => (
               <option key={w.id} value={w.id}>
                 {w.name}
               </option>
             ))}
           </select>
-          <select className="mode" value={runner} aria-label="ランナー" onChange={(e) => setRunner(e.target.value)}>
-            <option value="">すべてのランナー</option>
+          <select className="mode" value={runner} aria-label={t(m.runner)} onChange={(e) => setRunner(e.target.value)}>
+            <option value="">{t(m.allRunners)}</option>
             {(props.runners ?? []).map((r) => (
               <option key={r.id} value={r.id}>
                 {r.id}
               </option>
             ))}
           </select>
-          <select className="mode" value={model} aria-label="モデル" onChange={(e) => setModel(e.target.value)}>
-            <option value="">すべてのモデル</option>
+          <select className="mode" value={model} aria-label={t(m.model)} onChange={(e) => setModel(e.target.value)}>
+            <option value="">{t(m.allModels)}</option>
             {withCurrent(options.models, model).map((m) => (
               <option key={m} value={m}>
                 {m}
               </option>
             ))}
           </select>
-          <select className="mode" value={effort} aria-label="思考の深さ" onChange={(e) => setEffort(e.target.value)}>
-            <option value="">すべての思考の深さ</option>
+          <select className="mode" value={effort} aria-label={t(m.colEffort)} onChange={(e) => setEffort(e.target.value)}>
+            <option value="">{t(m.allEfforts)}</option>
             {withCurrent(options.efforts, effort).map((v) => (
               <option key={v} value={v}>
-                {v === "-" ? "CLI 既定" : v}
+                {v === "-" ? t(m.cliDefault) : v}
               </option>
             ))}
           </select>
-          <select className="mode" value={limit} aria-label="件数" onChange={(e) => setLimit(Number(e.target.value))}>
+          <select className="mode" value={limit} aria-label={t(m.count)} onChange={(e) => setLimit(Number(e.target.value))}>
             {[50, 100, 200, 500].map((n) => (
               <option key={n} value={n}>
-                {n} 件
+                {t(m.rows, { n })}
               </option>
             ))}
           </select>
-          <span className="hint">見出しを押すと並べ替え（もう一度で逆順）。失敗・エラー・停止、平均 2.5 以下、自分の評価 2 以下は amber。</span>
+          <span className="hint">{t(m.sortHint)}</span>
         </div>
-        {rows === null && <div className="muted">読み込み中…</div>}
-        {rows && rows.length === 0 && <div className="muted">{failed ? "読み込めませんでした" : "Task がありません"}</div>}
-        {rows && rows.length > 0 && sorted.length === 0 && <div className="muted">条件に合う Task がありません</div>}
+        {rows === null && <div className="muted">{t(m.loading)}</div>}
+        {rows && rows.length === 0 && <div className="muted">{failed ? t(m.loadFailedShort) : t(m.noTasks)}</div>}
+        {rows && rows.length > 0 && sorted.length === 0 && <div className="muted">{t(m.noMatch)}</div>}
         {rows && sorted.length > 0 && (
           <table className="pricing evals-table">
             <thead>
@@ -208,8 +210,8 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
                       {cells.mixed && (
                         <>
                           {" "}
-                          <span className="tag" title={`途中でモデルを変えた Task: ${cells.model}`}>
-                            混在
+                          <span className="tag" title={t(m.mixedTitle, { model: cells.model })}>
+                            {t(m.mixed)}
                           </span>
                         </>
                       )}
@@ -235,8 +237,8 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
                     <td className="num">{fmtClock(r.updatedAt)}</td>
                     <td>
                       {props.onImprove && (
-                        <button className="ghost" onClick={() => props.onImprove?.(r.taskId)} title="この Task の評価を下書きにして、改善の要望を登録するダイアログを開きます">
-                          改善要望にする
+                        <button className="ghost" onClick={() => props.onImprove?.(r.taskId)} title={t(m.improveTitle)}>
+                          {t(m.improve)}
                         </button>
                       )}
                     </td>
@@ -246,7 +248,7 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
             </tbody>
           </table>
         )}
-        <div className="hint">新しい順に {limit} 件まで。評価の無い Task は「-」。</div>
+        <div className="hint">{t(m.listFooter, { limit })}</div>
       </section>
     </main>
   );

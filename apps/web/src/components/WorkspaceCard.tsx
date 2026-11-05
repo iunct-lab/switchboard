@@ -3,6 +3,8 @@ import type { Task, Workspace, WorkspaceRemoval } from "@switchboard/protocol";
 import { api, type RunnerConfigView, type WorkspaceClone } from "../api.ts";
 import { runnerConfigSummary } from "../foreignWorkspace.ts";
 import { canRemove, cloneRowText, removalWarning } from "../workspaceAdd.ts";
+import { t } from "../i18n.ts";
+import { common as m } from "../i18n/common.ts";
 
 /** A foreign repository (#2576): its runner config shown as text until confirmed, then 元の更新を取り込む. */
 function ForeignRow(props: { workspace: Workspace; onTaskStarted: (task: Task) => void; onError: (msg: string) => void }) {
@@ -28,7 +30,7 @@ function ForeignRow(props: { workspace: Workspace; onTaskStarted: (task: Task) =
             }).finally(() => setBusy(false));
           }}
         >
-          元の更新を取り込む
+          {t(m.syncUpstream)}
         </button>
       </div>
     );
@@ -53,7 +55,7 @@ function ForeignRow(props: { workspace: Workspace; onTaskStarted: (task: Task) =
             }).finally(() => setBusy(false));
           }}
         >
-          確認した
+          {t(m.configConfirmed)}
         </button>
       </div>
     </div>
@@ -79,7 +81,7 @@ export function WorkspaceCard(props: { workspaces: Workspace[]; clones: Workspac
   const fail = (e: unknown) => props.onError(String((e as Error).message ?? e));
   const localBacklogBox = (
     <label className="hint">
-      <input type="checkbox" checked={localBacklog} onChange={(e) => setLocalBacklog(e.target.checked)} /> GitHub と連携しない（Issue・Project を Switchboard に置く。PR は今どおり Remote）
+      <input type="checkbox" checked={localBacklog} onChange={(e) => setLocalBacklog(e.target.checked)} /> {t(m.localBacklog)}
     </label>
   );
   return (
@@ -88,18 +90,18 @@ export function WorkspaceCard(props: { workspaces: Workspace[]; clones: Workspac
       {props.workspaces.filter((w) => w.kind === "repo").map((w) => (
         <div key={w.id}>
           <div className="row">
-            <span>{w.upstream ? `${w.name}（元: ${w.upstream}）` : w.name}</span>
+            <span>{w.upstream ? t(m.upstreamName, { name: w.name, upstream: w.upstream }) : w.name}</span>
             <span className="mono hint" style={{ flex: 1 }}>{w.path}</span>
-            <button className="ghost" onClick={() => api.workspaceRemoval(w.id).then((info) => setRemoving({ id: w.id, info, typed: "", deleteCopy: false })).catch(fail)}>登録を外す</button>
+            <button className="ghost" onClick={() => api.workspaceRemoval(w.id).then((info) => setRemoving({ id: w.id, info, typed: "", deleteCopy: false })).catch(fail)}>{t(m.unregister)}</button>
           </div>
           {w.upstream ? <ForeignRow workspace={w} onTaskStarted={props.onTaskStarted} onError={props.onError} /> : null}
           {removing?.id === w.id ? (
             <div className="row" style={{ flexDirection: "column", alignItems: "stretch" }}>
               {removalWarning(removing.info, removing.deleteCopy) ? <div className="hint">{removalWarning(removing.info, removing.deleteCopy)}</div> : null}
-              <input value={removing.typed} onChange={(e) => setRemoving({ ...removing, typed: e.target.value })} aria-label="外す workspace の名前" placeholder={removing.info.name} />
+              <input value={removing.typed} onChange={(e) => setRemoving({ ...removing, typed: e.target.value })} aria-label={t(m.removeNameLabel)} placeholder={removing.info.name} />
               {removing.info.copy.deletable ? (
                 <label className="hint">
-                  <input type="checkbox" checked={removing.deleteCopy} onChange={(e) => setRemoving({ ...removing, deleteCopy: e.target.checked })} /> ローカルのコピーも消す
+                  <input type="checkbox" checked={removing.deleteCopy} onChange={(e) => setRemoving({ ...removing, deleteCopy: e.target.checked })} /> {t(m.deleteCopy)}
                 </label>
               ) : null}
               <div className="row">
@@ -110,24 +112,24 @@ export function WorkspaceCard(props: { workspaces: Workspace[]; clones: Workspac
                     api.removeWorkspace(w.id, removing.deleteCopy).then(() => setRemoving(null)).catch(fail).finally(() => setBusy(false));
                   }}
                 >
-                  登録を外す
+                  {t(m.unregister)}
                 </button>
-                <button className="ghost" onClick={() => setRemoving(null)}>やめる</button>
+                <button className="ghost" onClick={() => setRemoving(null)}>{t(m.cancel)}</button>
               </div>
             </div>
           ) : null}
         </div>
       ))}
-      <h5>追加</h5>
+      <h5>{t(m.addHeading)}</h5>
       <div className="row">
-        <button className={method === "github" ? undefined : "ghost"} onClick={() => setMethod("github")}>GitHub から</button>
-        <button className={method === "new" ? undefined : "ghost"} onClick={() => setMethod("new")}>新しく作る</button>
-        <button className={method === "path" ? undefined : "ghost"} onClick={() => setMethod("path")}>ホストにあるディレクトリを追加</button>
+        <button className={method === "github" ? undefined : "ghost"} onClick={() => setMethod("github")}>{t(m.fromGithub)}</button>
+        <button className={method === "new" ? undefined : "ghost"} onClick={() => setMethod("new")}>{t(m.createNew)}</button>
+        <button className={method === "path" ? undefined : "ghost"} onClick={() => setMethod("path")}>{t(m.addHostDir)}</button>
       </div>
       {method === "github" ? (
         <>
           <div className="row">
-            <input value={repo} onChange={(e) => setRepo(e.target.value)} aria-label="GitHub のリポジトリ" placeholder="owner/name か https://github.com/owner/name" style={{ flex: 1 }} />
+            <input value={repo} onChange={(e) => setRepo(e.target.value)} aria-label={t(m.githubRepoLabel)} placeholder={t(m.githubRepoPlaceholder)} style={{ flex: 1 }} />
             <button
               disabled={!repo.trim()}
               onClick={() =>
@@ -137,7 +139,7 @@ export function WorkspaceCard(props: { workspaces: Workspace[]; clones: Workspac
                   .catch(fail)
               }
             >
-              追加
+              {t(m.add)}
             </button>
           </div>
           {props.clones.map((c) => (
@@ -147,8 +149,8 @@ export function WorkspaceCard(props: { workspaces: Workspace[]; clones: Workspac
         </>
       ) : method === "new" ? (
         <div className="row">
-          <input value={name} onChange={(e) => setName(e.target.value)} aria-label="新しいリポジトリの名前" placeholder="名前" pattern="[A-Za-z0-9._-]{1,100}" />
-          <input value={purpose} onChange={(e) => setPurpose(e.target.value)} aria-label="新しいリポジトリの用途" placeholder="用途" style={{ flex: 1 }} />
+          <input value={name} onChange={(e) => setName(e.target.value)} aria-label={t(m.newRepoNameLabel)} placeholder={t(m.newRepoNamePlaceholder)} pattern="[A-Za-z0-9._-]{1,100}" />
+          <input value={purpose} onChange={(e) => setPurpose(e.target.value)} aria-label={t(m.newRepoPurposeLabel)} placeholder={t(m.newRepoPurposePlaceholder)} style={{ flex: 1 }} />
           <button
             disabled={busy || !name.trim() || !purpose.trim()}
             onClick={() => {
@@ -164,7 +166,7 @@ export function WorkspaceCard(props: { workspaces: Workspace[]; clones: Workspac
                 .finally(() => setBusy(false));
             }}
           >
-            作成を頼む
+            {t(m.askToCreate)}
           </button>
         </div>
       ) : (
@@ -183,7 +185,7 @@ export function WorkspaceCard(props: { workspaces: Workspace[]; clones: Workspac
                   .catch(fail)
               }
             >
-              追加
+              {t(m.add)}
             </button>
           </div>
           {localBacklogBox}

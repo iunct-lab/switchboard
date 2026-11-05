@@ -27,9 +27,13 @@ import type { TurnStartedNotification } from "./generated/v2/TurnStartedNotifica
  *  - turn/completed                                               → usage(reported) for the turn (Δ of `total`) + session.end
  *  - account/rateLimits/updated                                   → quota (primary 5h / secondary 7d as five_hour / seven_day)
  *  - error                                                        → error (or status when willRetry)
+ * Subagents run as their own threads (`parentThreadId` set) on the same stdio. Only the main thread decides the turn
+ * state and session.end; a subagent's turn/completed gives its usage(reported) and nothing else (what is left
+ * unreported when the main turn completes is reported then).
  */
 export interface CodexParserState {
-  threadId?: string;
+  /** The thread without a parent: the only one whose turns count as the task's. */
+  mainThreadId?: string;
   activeTurnId?: string;
   sessionStarted: boolean;
   /** agentMessage item ids that already streamed deltas (item/completed must not repeat them). */
@@ -40,12 +44,14 @@ export interface CodexParserState {
   toolPaths: Map<string, string[]>;
   /** Sum of `last` breakdowns for the active turn → usage(reported) at turn/completed. */
   turnUsage?: TokenUsageBreakdown;
+  /** threadId → sum of `last` for a subagent's turn → usage(reported) at that thread's turn/completed. */
+  subagentUsage: Map<string, TokenUsageBreakdown>;
   lastAgentText?: string;
   model?: string;
 }
 
 export function createCodexParserState(): CodexParserState {
-  return { sessionStarted: false, streamed: new Set(), toolSummaries: new Map(), toolPaths: new Map() };
+  return { sessionStarted: false, streamed: new Set(), toolSummaries: new Map(), toolPaths: new Map(), subagentUsage: new Map() };
 }
 
 export function createCodexParser() {
@@ -90,11 +96,13 @@ export function mapCodexMessage(m: Any, s: CodexParserState): AgentEvent[] {
     case "thread/started":
       return threadStartedEvents((p as ThreadStartedNotification).thread, s);
     case "thread/status/changed": {
-      const st = (p as ThreadStatusChangedNotification).status;
-      return [{ t: "status", text: `thread ${st.type}` }];
+      const n = p as ThreadStatusChangedNotification;
+      if (!isMainThread(n.threadId, s)) return [];
+      return [{ t: "status", text: `thread ${n.status.type}` }];
     }
     case "turn/started": {
-      const turn = (p as TurnStartedNotification).turn;
+      const { threadId, turn } = p as TurnStartedNotification;
+      if (!isMainThread(threadId, s)) return [];
       s.activeTurnId = turn.id;
       s.turnUsage = undefined;
       s.lastAgentText = undefined;
@@ -108,9 +116,13 @@ export function mapCodexMessage(m: Any, s: CodexParserState): AgentEvent[] {
       return [{ t: "message.delta", role: "assistant", text: d.delta, messageId: d.itemId }];
     }
     case "item/completed":
-      return itemCompleted((p as ItemCompletedNotification).item, s);
+      return itemCompleted(p as ItemCompletedNotification, s);
     case "thread/tokenUsage/updated": {
       const n = p as ThreadTokenUsageUpdatedNotification;
+      if (!isMainThread(n.threadId, s)) {
+        s.subagentUsage.set(n.threadId, addUsage(s.subagentUsage.get(n.threadId), n.tokenUsage.last));
+        return [usageEvent("turn", n.tokenUsage.last, s.model)];
+      }
       // After thread/resume Codex replays the previous turn's usage before turn/started; ignore anything not from the
       // active turn so it is neither double-counted nor charged to this turn.
       if (!s.activeTurnId || n.turnId !== s.activeTurnId) return [];
@@ -127,11 +139,19 @@ export function mapCodexMessage(m: Any, s: CodexParserState): AgentEvent[] {
       return Object.keys(windows).length ? [{ t: "quota", runner: "codex", windows }] : [];
     }
     case "turn/completed": {
-      const turn = (p as TurnCompletedNotification).turn;
+      const { threadId, turn } = p as TurnCompletedNotification;
+      if (!isMainThread(threadId, s)) {
+        const usage = s.subagentUsage.get(threadId);
+        s.subagentUsage.delete(threadId);
+        return usage ? [usageEvent("reported", usage, s.model)] : [];
+      }
       s.activeTurnId = undefined;
       const out: AgentEvent[] = [];
       if (s.turnUsage) out.push(usageEvent("reported", s.turnUsage, s.model));
       s.turnUsage = undefined;
+      // a subagent cut off with the main turn (interrupt) sends no turn/completed of its own: report what it used so far
+      for (const u of s.subagentUsage.values()) out.push(usageEvent("reported", u, s.model));
+      s.subagentUsage.clear();
       const status = turn.status === "completed" ? "ok" : turn.status === "interrupted" ? "aborted" : "error";
       out.push({ t: "session.end", status, summary: turn.error?.message ?? s.lastAgentText, durationMs: turn.durationMs ?? undefined });
       return out;
@@ -146,8 +166,13 @@ export function mapCodexMessage(m: Any, s: CodexParserState): AgentEvent[] {
   }
 }
 
+function isMainThread(threadId: string, s: CodexParserState): boolean {
+  return !s.mainThreadId || threadId === s.mainThreadId;
+}
+
 export function threadStartedEvents(thread: Thread, s: CodexParserState): AgentEvent[] {
-  s.threadId = thread.id;
+  if (thread.parentThreadId) return [];
+  s.mainThreadId = thread.id;
   if (s.sessionStarted) return [];
   s.sessionStarted = true;
   return [
@@ -228,10 +253,10 @@ function itemStarted(item: ThreadItem, s: CodexParserState): AgentEvent[] {
   }
 }
 
-function itemCompleted(item: ThreadItem, s: CodexParserState): AgentEvent[] {
+function itemCompleted({ threadId, item }: ItemCompletedNotification, s: CodexParserState): AgentEvent[] {
   switch (item.type) {
     case "agentMessage": {
-      if (item.phase !== "commentary") s.lastAgentText = item.text;
+      if (item.phase !== "commentary" && isMainThread(threadId, s)) s.lastAgentText = item.text;
       if (s.streamed.has(item.id) || !item.text) return [];
       return [{ t: "message.delta", role: "assistant", text: item.text, messageId: item.id }];
     }

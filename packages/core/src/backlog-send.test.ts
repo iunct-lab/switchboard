@@ -1248,16 +1248,136 @@ test("a GraphQL error GitHub answered (an input it refuses) fails the operation 
   expect(db.listPendingBacklogOperations(S)[0]).toMatchObject({ status: "failed", attempt: 1 });
 });
 
-test("a post whose result is unknown and not found stays unknown: nothing is posted again by itself", async () => {
+test("a create whose answer was lost and that GitHub does not have is made again once every page is read (#3804)", async () => {
   const g = fakeGithub();
-  const { localId } = createStoredIssue(db, S, { title: "新しい", body: "", labels: [], milestone: null, parent: null, fields: null });
-  db.setBacklogOperationResult(localId, { status: "sending" });
-  db.recoverBacklogOperations();
-  expect(await send(g.gh)).toBe(0);
+  createStoredIssue(db, S, { title: "新しい", body: "", labels: [], milestone: null, parent: null, fields: null });
+  // GitHub answers 502 and makes nothing
+  g.fail.push({ match: (a) => a[1] === "repos/acme/app/issues" && a.includes("POST"), status: 502 });
   expect(await send(g.gh)).toBe(0);
   expect(statuses()).toEqual([["create", null, "unknown"]]);
+  expect(g.issues.size).toBe(2);
+  // the next send reads every page, finds no marker, and makes it with the same marker
+  expect(await send(g.gh)).toBe(1);
+  expect(statuses()).toEqual([]);
+  const made = [...g.issues.values()].filter((i) => i.title === "新しい");
+  expect(made).toHaveLength(1);
+  expect(made[0]!.body).toMatch(/<!-- switchboard-op:[0-9a-f-]+ -->$/);
+});
+
+test("a comment whose answer was lost and that GitHub does not have is posted again; its label waits for it (#3804)", async () => {
+  const g = fakeGithub();
+  answerStoredDecision(db, S, 12, "A で");
+  g.fail.push({ match: (a) => a[1]!.endsWith("/comments") && a.includes("POST"), status: 502 });
+  expect(await send(g.gh)).toBe(0);
+  expect(statuses()).toEqual([["comment", null, "unknown"], ["set", "label:needs-decision", "pending"]]);
+  // a look that cannot read the comments keeps it, the first 502 still told in the Issue's held line
+  const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
+  db.setWorkspaceBacklogSource(ws.id, S);
+  g.fail.push({ match: (a) => a[1]!.includes("/comments?"), status: 503 });
+  expect(await send(g.gh)).toBe(0);
+  expect(g.issues.get(12)!.comments).toHaveLength(0);
+  expect(readStoredIssue(db, ws, 12)!.held).toEqual([expect.objectContaining({ kind: "comment", status: "unknown", reason: expect.stringMatching(/^最初の失敗: .*HTTP 502 \/ 照合: .*HTTP 503/) })]);
+  expect(await send(g.gh)).toBe(2);
+  expect(g.issues.get(12)!.comments).toHaveLength(1);
+  expect(g.issues.get(12)!.labels).toEqual(["type:pbi"]);
+});
+
+test("an unknown create whose look cannot read the list is not made again: it waits unknown, its first error kept in front (#3804)", async () => {
+  const g = fakeGithub();
+  createStoredIssue(db, S, { title: "新しい", body: "", labels: [], milestone: null, parent: null, fields: null });
+  g.fail.push({ match: (a) => a[1] === "repos/acme/app/issues" && a.includes("POST"), status: 502 });
+  await send(g.gh);
+  g.fail.push({ match: (a) => a[1]!.startsWith("repos/acme/app/issues?"), status: 502, stderr: "HTTP 502 list" });
+  g.writes.length = 0;
+  expect(await send(g.gh)).toBe(0);
   expect(g.writes).toEqual([]);
-  expect(g.issues.size).toBe(2); // #12 and #3 only
+  const op = () => db.listPendingBacklogOperations(S)[0]!;
+  expect(op()).toMatchObject({ status: "unknown", error: expect.stringMatching(/^最初の失敗: gh api repos\/acme\/app\/issues: HTTP 502 \/ 照合: .*HTTP 502 list/) });
+  // and again: the first one stays in front, once
+  g.fail.push({ match: (a) => a[1]!.startsWith("repos/acme/app/issues?"), status: 503 });
+  await send(g.gh);
+  expect(op().error).toMatch(/^最初の失敗: gh api repos\/acme\/app\/issues: HTTP 502 \/ 照合: .*HTTP 503$/);
+  expect(op().error!.match(/最初の失敗/g)).toHaveLength(1);
+});
+
+test("both answers lost (the first post and the one made again): the next look finds two, keeps the first made and drops the other (#3804)", async () => {
+  const g = fakeGithub();
+  const { localId } = createStoredIssue(db, S, { title: "二度失う", body: "", labels: [], milestone: null, parent: null, fields: null });
+  answerStoredDecision(db, S, 12, "A で");
+  const op = db.getBacklogOperation(localId)!;
+  const comment = db.listPendingBacklogOperations(S).find((o) => o.kind === "comment")!;
+  // two of each already on GitHub with the operation's marker (both posts carried out, both answers lost)
+  const issueBody = `\n\n<!-- switchboard-op:${op.id} -->`;
+  for (const number of [200, 201]) g.issues.set(number, { node_id: `I_${number}`, number, title: "二度失う", body: issueBody, state: "OPEN", labels: [], parent: null, comments: [] });
+  g.issues.get(12)!.comments.push(...[0, 1].map((k) => ({ node_id: `IC_12_${k}`, body: `## 回答\n\nA で\n\n<!-- switchboard-op:${comment.id} -->`, created_at: `2026-10-08T00:00:0${k}Z` })));
+  for (const id of [op.id, comment.id]) db.setBacklogOperationResult(id, { status: "unknown" });
+  g.writes.length = 0;
+  expect(await send(g.gh)).toBe(3);
+  // the list is newest first: the first made (#200) stays, #201 is closed; the older comment stays
+  expect(db.getBacklogOperation(localId)!.remoteId).toBe("I_200");
+  expect([g.issues.get(200)!.state, g.issues.get(201)!.state, g.issues.get(201)!.stateReason]).toEqual(["OPEN", "CLOSED", "NOT_PLANNED"]);
+  expect(g.issues.get(12)!.comments.map((c) => c.node_id)).toEqual(["IC_12_0"]);
+  expect(g.writes.filter((w) => w.startsWith("PATCH") || w.includes("deleteIssueComment"))).toEqual(["PATCH repos/acme/app/issues/201", expect.stringContaining("deleteIssueComment")]);
+});
+
+test("a limit on the close of the second one: the operation is done with the first, and the run stops for GitHub's time (#3804)", async () => {
+  const g = fakeGithub();
+  const { localId } = createStoredIssue(db, S, { title: "制限", body: "", labels: [], milestone: null, parent: null, fields: null });
+  editStoredIssue(db, S, 12, { title: "後ろの編集" });
+  const op = db.getBacklogOperation(localId)!;
+  for (const number of [200, 201]) g.issues.set(number, { node_id: `I_${number}`, number, title: "制限", body: `<!-- switchboard-op:${op.id} -->`, state: "OPEN", labels: [], parent: null, comments: [] });
+  db.setBacklogOperationResult(localId, { status: "unknown" });
+  g.fail.push({ match: (a) => a[1] === "repos/acme/app/issues/201" && a.includes("PATCH"), status: 429, headers: "retry-after: 600\n" });
+  await expect(send(g.gh)).rejects.toBeInstanceOf(Limit);
+  expect(db.getBacklogOperation(localId)).toMatchObject({ status: "done", remoteId: "I_200" });
+  // the edit after it waits for the limit, not sent in the same run
+  expect(g.issues.get(12)!.title).toBe("PBI");
+});
+
+test("a limit on the close of the second one holds the create's own steps too: its parent waits, then is set from the Issue kept (#3804)", async () => {
+  const g = fakeGithub();
+  const { localId } = createStoredIssue(db, S, { title: "親つき", body: "", labels: [], milestone: null, parent: 3, fields: null });
+  const op = db.getBacklogOperation(localId)!;
+  for (const number of [200, 201]) g.issues.set(number, { node_id: `I_${number}`, number, title: "親つき", body: `<!-- switchboard-op:${op.id} -->`, state: "OPEN", labels: [], parent: null, comments: [] });
+  db.setBacklogOperationResult(localId, { status: "unknown" });
+  g.fail.push({ match: (a) => a[1] === "repos/acme/app/issues/201" && a.includes("PATCH"), status: 429, headers: "retry-after: 600\n" });
+  await expect(send(g.gh)).rejects.toBeInstanceOf(Limit);
+  expect(g.issues.get(200)!.parent).toBeNull();
+  expect(db.getBacklogOperation(localId)).toMatchObject({ status: "unknown", remoteId: "I_200" });
+  // after the wait: the steps go on from the Issue kept, nothing made again
+  t += 700_000;
+  expect(await send(g.gh)).toBe(1);
+  expect(g.issues.get(200)!.parent).toBe(3);
+  expect(db.getBacklogOperation(localId)).toMatchObject({ status: "done", remoteId: "I_200" });
+  expect([...g.issues.values()].filter((i) => i.title === "親つき")).toHaveLength(2);
+});
+
+test("made again and the first one shows up after all: the later one is closed (an Issue) or deleted (a comment), one left (#3804)", async () => {
+  const g = fakeGithub();
+  const { localId } = createStoredIssue(db, S, { title: "新しい", body: "", labels: [], milestone: null, parent: null, fields: null });
+  answerStoredDecision(db, S, 12, "A で");
+  // both carried out, both answers lost
+  g.fail.push({ match: (a) => a[1] === "repos/acme/app/issues" && a.includes("POST"), status: 502, after: true });
+  g.fail.push({ match: (a) => a[1]!.endsWith("/comments") && a.includes("POST"), status: 502, after: true });
+  await send(g.gh);
+  expect(statuses().map((s) => s[2])).toEqual(["unknown", "unknown", "pending"]);
+  const first = [...g.issues.values()].find((i) => i.title === "新しい")!;
+  // the first look misses them (the lists lag behind), the one after the post made again sees both
+  const lag = new Set(["issues", "comments"]);
+  const gh: GhRunner = async (args, cwd) => {
+    const r = await g.gh(args, cwd);
+    const list = /^repos\/acme\/app\/issues(\/12\/comments)?\?/.exec(args[1] ?? "");
+    const kind = list ? (list[1] ? "comments" : "issues") : null;
+    if (!kind || !lag.delete(kind)) return r;
+    const [head, body] = r.stdout.split("\n\n");
+    return { ...r, stdout: `${head}\n\n${JSON.stringify((JSON.parse(body!) as Array<{ body: string }>).filter((x) => !x.body.includes("switchboard-op")))}` };
+  };
+  expect(await send(gh)).toBe(3);
+  const made = [...g.issues.values()].filter((i) => i.title === "新しい");
+  expect(made.map((i) => [i.number, i.state, i.stateReason ?? null])).toEqual([[first.number, "OPEN", null], [first.number + 1, "CLOSED", "NOT_PLANNED"]]);
+  expect(db.getBacklogOperation(localId)!.remoteId).toBe(first.node_id);
+  expect(g.issues.get(12)!.comments).toHaveLength(1);
+  expect(g.issues.get(12)!.comments[0]!.node_id).toBe("IC_12_0");
 });
 
 test("a limit stops sending until GitHub's time, then it goes on; an auth refusal stops the run without failing anything", async () => {
@@ -1414,6 +1534,11 @@ function fakeGitlab() {
         if (f.milestone_id) i.milestone = milestones.find((x) => String(x.id) === f.milestone_id) ?? null;
       }
       out = raw(i);
+    } else if (m === "DELETE" && /^\/issues\/\d+\/notes\/\d+$/.test(path)) {
+      const [, iid, id] = /^\/issues\/(\d+)\/notes\/(\d+)$/.exec(path)!;
+      const i = issues.get(Number(iid))!;
+      i.notes = i.notes.filter((x) => x.id !== Number(id));
+      out = null;
     } else if (one && one[2]) {
       const i = issues.get(Number(one[1]))!;
       if (m === "POST") i.notes.push({ id: next++, body: f.body!, system: false, created_at: "2026-10-02T00:00:00Z" });
@@ -1490,6 +1615,110 @@ test("GitLab: a comment and a create carry their marker; a lost answer is looked
   expect(g.writes).toEqual(["POST /issues"]);
   expect(db.listBacklogRecords(LAB, "issue").find((r) => r.externalId === `gitlab:issue:${made.id}`)?.remote).toMatchObject({ number: 13, parent: 12, state: "OPEN" });
 });
+
+test("GitLab: a create or a comment whose answer was lost and that GitLab does not have is made again once every page is read; a look that fails keeps the first error (#3804)", async () => {
+  const g = fakeGitlab();
+  seedLab();
+  createStoredIssue(db, LAB, { title: "作られなかった", body: "本文", labels: [], milestone: null, parent: null, fields: null });
+  answerStoredDecision(db, LAB, 12, "A で");
+  // GitLab answers 502 and makes nothing
+  g.failWith({ on: (m) => m === "POST", status: 502 });
+  await sendLab(g);
+  expect(labStatuses().map((o) => [o[0], o[2]])).toEqual([["create", "unknown"], ["comment", "unknown"], ["set", "pending"]]);
+  // the look cannot read the lists: nothing posted, the first 502 kept in front
+  g.failWith({ on: (m, p) => m === "GET" && (p.startsWith("/issues?") || p.includes("/notes?")), status: 503 });
+  g.writes.length = 0;
+  await sendLab(g);
+  expect(g.writes).toEqual([]);
+  for (const o of labStatuses().slice(0, 2)) expect(o[3]).toMatch(/^最初の失敗: .*HTTP 502.* \/ 照合: .*HTTP 503/);
+  // every page read, none marked: made again, one each
+  g.failWith(null);
+  expect(await sendLab(g)).toBe(3);
+  expect(labStatuses()).toEqual([]);
+  expect([...g.issues.values()].filter((i) => i.title === "作られなかった")).toHaveLength(1);
+  expect(g.issues.get(12)!.notes).toHaveLength(1);
+  expect(g.issues.get(12)!.labels).toEqual(["type:pbi"]);
+});
+
+test("GitLab: made again and the first one shows up after all: the later Issue is closed, the later note deleted (#3804)", async () => {
+  const g = fakeGitlab();
+  seedLab();
+  const { localId } = createStoredIssue(db, LAB, { title: "遅れて見える", body: "本文", labels: [], milestone: null, parent: null, fields: null });
+  answerStoredDecision(db, LAB, 12, "A で");
+  g.failWith({ on: (m) => m === "POST", status: 502, after: true });
+  await sendLab(g);
+  g.failWith(null);
+  const first = [...g.issues.values()].find((i) => i.title === "遅れて見える")!;
+  const firstNote = g.issues.get(12)!.notes[0]!.id;
+  // the first look of each list misses them (the lists lag behind)
+  const lag = new Set(["issues", "notes"]);
+  const glab = async (cmd: string[]) => {
+    const out = await g.glab(cmd);
+    const path = cmd.at(-1)!;
+    const kind = cmd.includes("GET") ? (path.includes("/notes?") ? "notes" : path.includes("/issues?") ? "issues" : null) : null;
+    if (!kind || !lag.delete(kind)) return out;
+    return JSON.stringify((JSON.parse(out) as Array<{ description?: string; body?: string }>).filter((x) => !String(x.description ?? x.body).includes("switchboard-op")));
+  };
+  expect(await sendGithubOperations(noGh, db, dir, LAB, clock, undefined, undefined, undefined, glab)).toBe(3);
+  const made = [...g.issues.values()].filter((i) => i.title === "遅れて見える");
+  expect(made.map((i) => [i.iid, i.state])).toEqual([[first.iid, "opened"], [first.iid + 1, "closed"]]);
+  expect(db.getBacklogOperation(localId)!.remoteId).toBe(`gitlab:issue:${first.id}`);
+  expect(g.issues.get(12)!.notes.map((n) => n.id)).toEqual([firstNote]);
+});
+
+test("GitLab: both answers lost: the next look finds two, keeps the first made and closes / deletes the other; a 429 on the cleanup stops the run with the operation done (#3804)", async () => {
+  const g = fakeGitlab();
+  seedLab();
+  const { localId } = createStoredIssue(db, LAB, { title: "二度失う", body: "本文", labels: [], milestone: null, parent: null, fields: null });
+  answerStoredDecision(db, LAB, 12, "A で");
+  const op = db.getBacklogOperation(localId)!;
+  const comment = db.listPendingBacklogOperations(LAB).find((o) => o.kind === "comment")!;
+  const raw = { title: "二度失う", state: "opened" as const, labels: [], milestone: null, notes: [] };
+  g.issues.set(20, { id: 9200, iid: 20, description: `本文\n\n<!-- switchboard-op:${op.id} -->`, ...raw });
+  g.issues.set(21, { id: 9201, iid: 21, description: `本文\n\n<!-- switchboard-op:${op.id} -->`, ...raw });
+  g.issues.get(12)!.notes.push(...[9300, 9301].map((id) => ({ id, body: `## 回答\n\nA で\n\n<!-- switchboard-op:${comment.id} -->`, system: false, created_at: "2026-10-02T00:00:00Z" })));
+  for (const id of [op.id, comment.id]) db.setBacklogOperationResult(id, { status: "unknown" });
+  // the close of the second Issue meets GitLab's limit: the create is done with the first, the run stops there
+  g.failWith({ on: (m, p) => m === "PUT" && p === "/issues/21", status: 429 });
+  await expect(sendLab(g)).rejects.toBeInstanceOf(Limit);
+  expect(db.getBacklogOperation(localId)).toMatchObject({ status: "done", remoteId: "gitlab:issue:9200" });
+  expect(g.issues.get(12)!.notes).toHaveLength(2);
+  // the comment goes next: the first note stays
+  g.failWith(null);
+  expect(await sendLab(g)).toBe(2);
+  expect(g.issues.get(12)!.notes.map((n) => n.id)).toEqual([9300]);
+  expect(g.issues.get(21)!.state).toBe("opened"); // left: nothing looks for it again
+});
+
+test("GitLab: a 429 on the cleanup holds the create's close too, sent after the wait from the Issue kept (#3804)", async () => {
+  for (const unreached of [false, true]) await holdsTheClose(unreached);
+});
+
+async function holdsTheClose(unreached: boolean) {
+  db.sqlite.query("DELETE FROM backlog_operations").run();
+  const g = fakeGitlab();
+  seedLab();
+  const { localId } = createStoredIssue(db, LAB, { title: "閉じて作る", body: "本文", labels: [], milestone: null, parent: null, fields: null });
+  db.sqlite.query("UPDATE backlog_operations SET payload = json_set(payload, '$.state', 'CLOSED') WHERE id = ?").run(localId);
+  const op = db.getBacklogOperation(localId)!;
+  const raw = { title: "閉じて作る", state: "opened" as const, labels: [], milestone: null, notes: [] };
+  for (const [iid, id] of [[20, 9200], [21, 9201]]) g.issues.set(iid!, { id: id!, iid: iid!, description: `<!-- switchboard-op:${op.id} -->`, ...raw });
+  db.setBacklogOperationResult(localId, { status: "unknown" });
+  // GitLab's limit, or GitLab not reached at all (no HTTP status): the same wait
+  const glab = async (cmd: string[]) => {
+    if (unreached && cmd.includes("PUT") && cmd.at(-1)!.endsWith("/issues/21")) throw new Error("glab: dial tcp: connection refused");
+    return g.glab(cmd);
+  };
+  if (!unreached) g.failWith({ on: (m, p) => m === "PUT" && p === "/issues/21", status: 429 });
+  await expect(sendGithubOperations(noGh, db, dir, LAB, clock, undefined, undefined, undefined, glab)).rejects.toMatchObject({ kind: unreached ? "offline" : "limit" });
+  expect(g.issues.get(20)!.state).toBe("opened");
+  expect(db.getBacklogOperation(localId)).toMatchObject({ status: "unknown", remoteId: "gitlab:issue:9200" });
+  g.failWith(null);
+  t += 120_000;
+  expect(await sendLab(g)).toBe(1);
+  expect(g.issues.get(20)!.state).toBe("closed");
+  expect(db.getBacklogOperation(localId)).toMatchObject({ status: "done", remoteId: "gitlab:issue:9200" });
+}
 
 test("GitLab: a lost create is found by its marker; a failed look for it keeps it unknown, never posted twice; a value moved right after the write is a conflict", async () => {
   const g = fakeGitlab();

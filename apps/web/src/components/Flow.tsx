@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import type { FlowView } from "@switchboard/protocol";
 import { api } from "../api.ts";
 import { bottleneckLine, flowRows, slowRow } from "../flow.ts";
+import { t } from "../i18n.ts";
+import { panels as m } from "../i18n/panels.ts";
 import { jstTime } from "../time.ts";
 
 /**
@@ -29,13 +31,13 @@ export function Flow() {
   return (
     <section className="card flow" data-flow>
       <div className="row head">
-        <h5>流れ（直近 30 日）</h5>
-        <span className="hint">{view ? `${jstTime(view.fetchedAt)} に集計${busy ? " · 読み込み中…" : ""}` : busy ? "読み込み中…" : ""}</span>
+        <h5>{t(m.flowHeading)}</h5>
+        <span className="hint">{view ? `${t(m.tallied, { time: jstTime(view.fetchedAt) })}${busy ? t(m.loadingSuffix) : ""}` : busy ? t(m.loading) : ""}</span>
         <button className="ghost" disabled={busy} onClick={() => load(true)}>
-          読み直す
+          {t(m.reread)}
         </button>
       </div>
-      {failure && <div className="muted">流れを読めませんでした: {failure}</div>}
+      {failure && <div className="muted">{t(m.flowFailed, { error: failure })}</div>}
       {view?.errors.map((e) => (
         <div key={e.workspace} className="muted" data-flow-error>
           {e.workspace}: {e.message}
@@ -43,23 +45,23 @@ export function Flow() {
       ))}
       {view && view.unread.length > 0 && (
         <div className="muted" data-flow-unread>
-          取り込み前で、数に入っていません: {view.unread.join("、")}
+          {t(m.unread, { list: view.unread.join(t(m.listSep)) })}
         </div>
       )}
       {view && view.current.closed + view.previous.closed > 0 && (
         <>
           <div className="hint">
-            閉じた PBI {view.current.closed} 件（前の 30 日 {view.previous.closed} 件）· Story Points {view.current.storyPoints}
-            {bottleneck && <> · 一番時間を食った段: <b data-flow-bottleneck>{bottleneck}</b></>}
+            {t(m.closedLine, { now: view.current.closed, before: view.previous.closed, points: view.current.storyPoints })}
+            {bottleneck && <>{t(m.bottleneck)}<b data-flow-bottleneck>{bottleneck}</b></>}
           </div>
           <table className="pricing flow-table">
             <thead>
               <tr>
-                <th>段</th>
-                <th>中央値</th>
+                <th>{t(m.stage)}</th>
+                <th>{t(m.median)}</th>
                 <th>p90</th>
-                <th>前の 30 日</th>
-                <th>変化</th>
+                <th>{t(m.previous30)}</th>
+                <th>{t(m.change)}</th>
               </tr>
             </thead>
             <tbody>
@@ -74,7 +76,7 @@ export function Flow() {
               ))}
             </tbody>
           </table>
-          <div className="hint">時間がかかった PBI</div>
+          <div className="hint">{t(m.slowest)}</div>
           {view.slowest.map((p) => {
             const r = slowRow(p);
             return (
@@ -92,7 +94,7 @@ export function Flow() {
           })}
         </>
       )}
-      {view && view.current.closed + view.previous.closed === 0 && !view.errors.length && <div className="muted">この期間に閉じた PBI はありません</div>}
+      {view && view.current.closed + view.previous.closed === 0 && !view.errors.length && <div className="muted">{t(m.noClosed)}</div>}
     </section>
   );
 }

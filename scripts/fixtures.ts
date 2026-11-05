@@ -32,6 +32,7 @@ export const RECORDINGS = [
   "packages/adapters/codex/fixtures/effort-high.jsonl",
   "packages/adapters/codex/fixtures/exec-workspace-write.jsonl",
   "packages/adapters/codex/fixtures/resume.jsonl",
+  "packages/adapters/codex/fixtures/subagent-0.166.0.jsonl",
   "packages/adapters/dak/fixtures/artifact-spill.sse",
   "packages/adapters/dak/fixtures/attachment-image.sse",
   "packages/adapters/dak/fixtures/text-reply.sse",

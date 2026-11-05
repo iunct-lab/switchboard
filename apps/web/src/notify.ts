@@ -1,4 +1,6 @@
 import type { ServerMessage, Task, TerminalStatus } from "@switchboard/protocol";
+import { t } from "./i18n.ts";
+import { home } from "./i18n/home.ts";
 
 /**
  * OS notifications for approval waits (#1138), shown only while the page is open (no Web Push).
@@ -27,24 +29,24 @@ export function noticeFor(m: ServerMessage, tasks: Task[], seen: Set<string>): N
     if (seen.has(key)) return null;
     seen.add(key);
     if (ev.t === "permission.resolved") return null;
-    return { key, taskId, title: tasks.find((t) => t.id === taskId)?.title ?? taskId, body: `ツール承認待ち: ${ev.tool}` };
+    return { key, taskId, title: tasks.find((x) => x.id === taskId)?.title ?? taskId, body: t(home.noticeToolApproval, { tool: ev.tool }) };
   }
   if (m.type === "task.updated") {
-    const t = m.task;
-    const prev = tasks.find((x) => x.id === t.id);
-    const diskKey = `${t.id}\u0000disk`;
-    if (t.resumeReason !== "disk") seen.delete(diskKey);
+    const task = m.task;
+    const prev = tasks.find((x) => x.id === task.id);
+    const diskKey = `${task.id}\u0000disk`;
+    if (task.resumeReason !== "disk") seen.delete(diskKey);
     else if (!seen.has(diskKey)) {
       seen.add(diskKey);
-      if (prev?.resumeReason !== "disk") return { key: diskKey, taskId: t.id, title: t.title, body: "ディスクの空き切れで停止しました" };
+      if (prev?.resumeReason !== "disk") return { key: diskKey, taskId: task.id, title: task.title, body: t(home.noticeDiskFull) };
     }
     // One notice per turn into needs_action: leaving it re-arms (a hand-set outcome keeps updatedAt, so no timestamp)
-    const key = `${t.id}\u0000needs_action`;
-    if (t.outcome !== "needs_action") seen.delete(key);
-    if (prev?.outcome === "needs_action" || t.outcome !== "needs_action" || t.reviewedAt !== null || t.status === "waiting") return null;
+    const key = `${task.id}\u0000needs_action`;
+    if (task.outcome !== "needs_action") seen.delete(key);
+    if (prev?.outcome === "needs_action" || task.outcome !== "needs_action" || task.reviewedAt !== null || task.status === "waiting") return null;
     if (seen.has(key)) return null;
     seen.add(key);
-    return { key, taskId: t.id, title: t.title, body: "要対応: 回答を待っています" };
+    return { key, taskId: task.id, title: task.title, body: t(home.noticeNeedsAnswer) };
   }
   if (m.type === "task.terminal") return terminalNotice(m.taskId, m.status, true, tasks, seen);
   // a device code to approve (#2046): once per code, like an approval wait
@@ -52,7 +54,7 @@ export function noticeFor(m: ServerMessage, tasks: Task[], seen: Set<string>): N
     const key = `${m.taskId}\u0000deviceAuth\u0000${m.auth.expiresAt}`;
     if (seen.has(key)) return null;
     seen.add(key);
-    return { key, taskId: m.taskId, title: tasks.find((t) => t.id === m.taskId)?.title ?? m.taskId, body: "SSO のログイン待ち: コードを承認してください" };
+    return { key, taskId: m.taskId, title: tasks.find((x) => x.id === m.taskId)?.title ?? m.taskId, body: t(home.noticeSso) };
   }
   return null;
 }
@@ -83,7 +85,7 @@ function terminalNotice(taskId: string, status: TerminalStatus | null, live: boo
   if (seen.has(key)) return null;
   seen.add(key);
   if (!live && !seen.has(known)) return null;
-  return { key, taskId, title: tasks.find((t) => t.id === taskId)?.title ?? taskId, body: "ターミナルの Claude Code が返事を待っています" };
+  return { key, taskId, title: tasks.find((x) => x.id === taskId)?.title ?? taskId, body: t(home.noticeTerminal) };
 }
 
 /** The part of the browser's Notification API used here; injected so tests can pass a fake. */

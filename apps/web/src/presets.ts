@@ -1,4 +1,6 @@
 import type { Preset } from "@switchboard/protocol";
+import { t } from "./i18n.ts";
+import { home } from "./i18n/home.ts";
 
 /* 定型の指示 (#940): what the settings list and the pickers show of a saved instruction. */
 
@@ -11,7 +13,7 @@ const HEAD_MAX = 80;
 export function presetRow(p: Pick<Preset, "name" | "text">): { name: string; head: string; target: string } {
   const first = p.text.split("\n", 1)[0]!;
   const head = first.length > HEAD_MAX ? `${first.slice(0, HEAD_MAX)}…` : first;
-  return { name: p.name, head, target: usesTarget(p) ? "対象: Issue / PR を選ぶ" : "対象なし" };
+  return { name: p.name, head, target: usesTarget(p) ? t(home.presetTarget) : t(home.presetNoTarget) };
 }
 
 /** The request box's state: its workspace and its text. */

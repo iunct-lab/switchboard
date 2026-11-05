@@ -178,16 +178,17 @@ export async function gitlabMilestoneId(sh: Sh, target: ForgeTarget, title: stri
 }
 
 /**
- * The first item of a list (`path`, newest first) whose body carries `marker`, among those made since `since` (ms):
- * an Issue (`description`) or a note (`body`). undefined = not there; null = not every page could be read.
+ * The items of a list (`path`) whose body carries `marker`, among those made since `since` (ms), in the list's order:
+ * Issues (`description`) or notes (`body`). [] = every page read, none there; null = not every page could be read.
  */
-export async function findGitlabMarked(sh: Sh, target: ForgeTarget, path: string, marker: string, since: number): Promise<Record<string, unknown> | undefined | null> {
+export async function findGitlabMarked(sh: Sh, target: ForgeTarget, path: string, marker: string, since: number): Promise<Array<Record<string, unknown>> | null> {
+  const hits: Array<Record<string, unknown>> = [];
   for (let page = 1; page <= 10; page++) {
     const q = `created_after=${encodeURIComponent(new Date(since - 60_000).toISOString())}&per_page=${PER_PAGE}&page=${page}`;
     const list = (await glabApi(sh, target, `${projectPath(target)}${path}${path.includes("?") ? "&" : "?"}${q}`)) as Array<Record<string, unknown>>;
     if (!Array.isArray(list)) return null;
-    const hit = list.find((x) => String(x.description ?? x.body ?? "").includes(marker));
-    if (hit || list.length < PER_PAGE) return hit;
+    hits.push(...list.filter((x) => String(x.description ?? x.body ?? "").includes(marker)));
+    if (list.length < PER_PAGE) return hits;
   }
   return null;
 }

@@ -1,22 +1,23 @@
 import type { Backlog, BacklogEditInput, BacklogIssueDetail, BacklogSyncInfo, BacklogSyncReason, BacklogSyncState } from "@switchboard/protocol";
 import { jstDateTime, jstTime } from "./time.ts";
+import { t } from "./i18n.ts";
+import { backlog as m } from "./i18n/backlog.ts";
 
 /** What the list says a send promises (BacklogSyncInfo.guarantee "A"), and what it does not. */
-export const GUARANTEE_A =
-  "送る直前と直後に GitHub の値を読み、編集の元から変わっていれば上書きせずに競合として保留します。見つけられないもの: Status 以外の Project フィールド、同じアカウントで GitHub の画面から書いた編集、押し出された古い版。";
+export const GUARANTEE_A = t(m.guaranteeA);
 
-const STATE_LABEL: Record<BacklogSyncState, string> = { synced: "同期済み", pending: "送信待ち", conflict: "競合", error: "同期失敗" };
+const STATE_LABEL: Record<BacklogSyncState, string> = { synced: t(m.stateSynced), pending: t(m.statePending), conflict: t(m.stateConflict), error: t(m.stateError) };
 const REASON_LABEL: Record<BacklogSyncReason, string> = {
-  failed: "GitHub が編集を受け付けませんでした",
-  unknown: "送信の結果が分からない（送り直す前に探します）",
-  unavailable: "GitHub がこの Issue を返しません（404）",
-  forbidden: "この Issue を読む権限がありません（403）",
-  unfetched: "まだ読んでいません",
-  import: "GitHub との照合に失敗しているか、待っています",
+  failed: t(m.reasonFailed),
+  unknown: t(m.reasonUnknown),
+  unavailable: t(m.reasonUnavailable),
+  forbidden: t(m.reasonForbidden),
+  unfetched: t(m.reasonUnfetched),
+  import: t(m.reasonImport),
 };
 
 /** Where the public copy says how to set up a Project and its repository variable (#2362; the owner reads it, not this repository's own). */
-export const PROJECT_SETUP_DOC = "https://github.com/iunct-lab/switchboard/blob/main/ops-kit/README.md#fork-して開発を始める";
+export const PROJECT_SETUP_DOC = "https://github.com/iunct-lab/switchboard/blob/main/ops-kit/README.md#fork-して開発を始める"; // a URL anchor of the README
 
 /**
  * What a workspace that could not be read asks of the owner (#2362), by the error's kind: a lead line and the steps.
@@ -24,16 +25,16 @@ export const PROJECT_SETUP_DOC = "https://github.com/iunct-lab/switchboard/blob/
  */
 export function workspaceErrorGuide(e: Backlog["errors"][number], projectVar: string | undefined): { lead: string; steps: Array<{ text: string; link?: string }> } {
   if (e.kind === "gh-login")
-    return { lead: `${e.workspaceName} を読むには gh のログインが要ります`, steps: [{ text: "ターミナルで gh auth login を実行する" }, { text: "終わったら「再読込」を押す" }] };
+    return { lead: t(m.ghLoginLead, { name: e.workspaceName }), steps: [{ text: t(m.ghLoginStep) }, { text: t(m.ghLoginReload) }] };
   if (e.kind === "project-var")
     return {
-      lead: `${e.workspaceName} の Project の URL がリポジトリ変数 ${projectVar ?? "SWITCHBOARD_PROJECT_URL"} にありません。次のどちらかで始められます`,
+      lead: t(m.projectVarLead, { name: e.workspaceName, variable: projectVar ?? "SWITCHBOARD_PROJECT_URL" }),
       steps: [
-        { text: "Project を用意する: 手順に従って Project を作り、変数に URL を設定してから「再読込」を押す", link: PROJECT_SETUP_DOC },
-        { text: "GitHub と連携しないで使う: 設定の「Workspace」で「ホストのパス」を選び「GitHub と連携しない」に印を付けて自分のリポジトリを追加するか、設定の「GitHub 同期」でこの workspace の同期を無効にする" },
+        { text: t(m.projectVarSetup), link: PROJECT_SETUP_DOC },
+        { text: t(m.projectVarLocal) },
       ],
     };
-  return { lead: `${e.workspaceName} を読めませんでした: ${e.message}`, steps: [] };
+  return { lead: t(m.workspaceReadFailed, { name: e.workspaceName, error: e.message }), steps: [] };
 }
 
 /**
@@ -42,18 +43,18 @@ export function workspaceErrorGuide(e: Backlog["errors"][number], projectVar: st
  * view keep their backlogs; null = the workspaces have not arrived yet.
  */
 export function backlogHeading(fetchedAt: number | null, busy: boolean, kinds: Array<"github" | "switchboard"> | null, fmt: (ms: number) => string = jstTime): string {
-  if (fetchedAt === null) return busy ? "読み込み中…" : "";
+  if (fetchedAt === null) return busy ? t(m.loading) : "";
   const github = kinds?.includes("github") ?? true;
   const here = kinds?.includes("switchboard") ?? false;
-  const line = !github ? "Switchboard に保存" : here ? `${fmt(fetchedAt)} に読み込み（GitHub の workspace は GitHub から取得）` : `${fmt(fetchedAt)} に GitHub から取得`;
-  return `${line}${busy ? " · 読み込み中…" : ""}`;
+  const line = !github ? t(m.headingKeptHere) : here ? t(m.headingMixed, { time: fmt(fetchedAt) }) : t(m.headingGithub, { time: fmt(fetchedAt) });
+  return `${line}${busy ? t(m.headingBusy) : ""}`;
 }
 
 /** What the backlog screen says of what was saved (#2343): nothing of GitHub for a workspace kept here. */
 export const savedWords = (keptHere: boolean) =>
   keptHere
-    ? { edit: "保存しました", comment: "コメントを保存しました", commentHint: "コメント（Switchboard に保存されます）", created: "保存しました。番号は下に出ます", made: "作成済み" }
-    : { edit: "手元に保存しました。GitHub への反映は送信待ちです（下の同期の表示で確かめてください）", comment: "コメントを手元に保存しました。GitHub への反映は送信待ちです", commentHint: "コメント（手元に保存され、GitHub へは後で送られます）", created: "手元に保存しました。GitHub での作成は送信待ちで、番号は作られた後に下に出ます", made: "GitHub に作成済み" };
+    ? { edit: t(m.savedEditHere), comment: t(m.savedCommentHere), commentHint: t(m.commentHintHere), created: t(m.createdHere), made: t(m.madeHere) }
+    : { edit: t(m.savedEditGithub), comment: t(m.savedCommentGithub), commentHint: t(m.commentHintGithub), created: t(m.createdGithub), made: t(m.madeGithub) };
 
 /** An Issue's link, or null for one with no page on GitHub (#2343): kept in Switchboard, or not created there yet. */
 export const issueHref = (url: string): string | null => url || null;
@@ -65,20 +66,20 @@ export const issueHref = (url: string): string | null => url || null;
 export function githubSyncText(s: Pick<Backlog["syncs"][number], "backlog" | "enabling" | "sync">, fmt: (ms: number) => string = jstDateTime): { state: BacklogSyncState; label: string; parts: string[] } {
   // a conflict or a refusal on the way is said with the progress: the turning on waits for it
   if (s.enabling) {
-    const held = [s.sync.conflicts.length > 0 ? `競合 ${s.sync.conflicts.length} 件` : "", s.sync.reason ? REASON_LABEL[s.sync.reason] : ""].filter(Boolean);
-    return { state: s.sync.state === "conflict" || s.sync.state === "error" ? s.sync.state : "pending", label: "GitHub に移しています", parts: [`${s.enabling.done} / ${s.enabling.total}`, ...held] };
+    const held = [s.sync.conflicts.length > 0 ? t(m.conflictCount, { n: s.sync.conflicts.length }) : "", s.sync.reason ? REASON_LABEL[s.sync.reason] : ""].filter(Boolean);
+    return { state: s.sync.state === "conflict" || s.sync.state === "error" ? s.sync.state : "pending", label: t(m.syncMoving), parts: [`${s.enabling.done} / ${s.enabling.total}`, ...held] };
   }
-  if (s.backlog === "switchboard") return { state: "synced", label: "GitHub 同期: 無効", parts: s.sync.pendingCount > 0 ? [`未送信 ${s.sync.pendingCount} 件（有効にすると送ります）`] : [] };
+  if (s.backlog === "switchboard") return { state: "synced", label: t(m.syncOff), parts: s.sync.pendingCount > 0 ? [t(m.unsentOnEnable, { n: s.sync.pendingCount })] : [] };
   return syncLine(s.sync, fmt);
 }
 
 /** One line's parts for a row or workspace: the state's word, when it was last read, what it waits for and why. */
 export function syncLine(s: BacklogSyncInfo, fmt: (ms: number) => string = jstDateTime): { state: BacklogSyncState; label: string; parts: string[] } {
-  const parts: string[] = [s.lastSuccessfulSync === null ? "最終成功: なし（未取得）" : `最終成功: ${fmt(s.lastSuccessfulSync)}`];
-  if (s.pendingCount > 0) parts.push(`未送信 ${s.pendingCount} 件`);
-  if (s.conflicts.length > 0) parts.push(`競合 ${s.conflicts.length} 件`);
+  const parts: string[] = [s.lastSuccessfulSync === null ? t(m.lastSuccessNone) : t(m.lastSuccess, { time: fmt(s.lastSuccessfulSync) })];
+  if (s.pendingCount > 0) parts.push(t(m.unsentCount, { n: s.pendingCount }));
+  if (s.conflicts.length > 0) parts.push(t(m.conflictCount, { n: s.conflicts.length }));
   if (s.reason) parts.push(REASON_LABEL[s.reason]);
-  if (s.retryAt !== null) parts.push(`${fmt(s.retryAt)} まで待機`);
+  if (s.retryAt !== null) parts.push(t(m.waitUntil, { time: fmt(s.retryAt) }));
   return { state: s.state, label: STATE_LABEL[s.state], parts };
 }
 
@@ -89,11 +90,11 @@ export function syncLine(s: BacklogSyncInfo, fmt: (ms: number) => string = jstDa
 export function heldIssueText(i: Backlog["syncs"][number]["issues"][number]): string {
   const parts = [
     i.state === "error" ? STATE_LABEL.error : "",
-    i.conflictCount > 0 ? `競合 ${i.conflictCount} 件` : "",
-    i.pendingCount > i.conflictCount ? `未送信 ${i.pendingCount - i.conflictCount} 件` : "",
+    i.conflictCount > 0 ? t(m.conflictCount, { n: i.conflictCount }) : "",
+    i.pendingCount > i.conflictCount ? t(m.unsentCount, { n: i.pendingCount - i.conflictCount }) : "",
     i.closed ? "Closed" : "",
   ].filter(Boolean);
-  return `#${i.number} ${i.title}${parts.length ? `（${parts.join(" · ")}）` : ""}`;
+  return `#${i.number} ${i.title}${parts.length ? t(m.paren, { text: parts.join(" · ") }) : ""}`;
 }
 
 /** The values of the edit form, all strings as typed; `labels` is comma-separated. */
@@ -142,7 +143,7 @@ export function editOf(d: Pick<BacklogIssueDetail, "issue" | "fields">, f: EditF
   if (f.milestone.trim() !== was.milestone) edit.milestone = f.milestone.trim() || null;
   if (f.parent.trim() !== was.parent) {
     const n = Number(f.parent.trim());
-    if (f.parent.trim() && !(Number.isInteger(n) && n > 0)) return { edit: null, error: "親 Issue は番号で入力してください" };
+    if (f.parent.trim() && !(Number.isInteger(n) && n > 0)) return { edit: null, error: t(m.parentNotNumber) };
     edit.parent = f.parent.trim() ? n : null;
   }
   const fields: Record<string, string | number | null> = {};
@@ -156,7 +157,7 @@ export function editOf(d: Pick<BacklogIssueDetail, "issue" | "fields">, f: EditF
 }
 
 /** A value of a held edit as text: a string as is, else JSON; GitHub's not read is said so. */
-export const valueText = (v: unknown, read = true) => (!read ? "（読めていません）" : typeof v === "string" ? v : v === null || v === undefined ? "（なし）" : JSON.stringify(v));
+export const valueText = (v: unknown, read = true) => (!read ? t(m.valueUnread) : typeof v === "string" ? v : v === null || v === undefined ? t(m.valueNone) : JSON.stringify(v));
 
 /** What the person typed and has not saved, kept per Issue so that a refused or unreachable save and a reload lose nothing. */
 export const draftKey = (workspaceId: string, number: number | string) => `switchboard.backlog.draft.${workspaceId}:${number}`;
@@ -204,7 +205,7 @@ export function rebaseForm(before: Pick<BacklogIssueDetail, "issue" | "fields">,
 
 /** A creation's word: what GitHub has (or has not) done with it, not always "waiting". */
 export const createWord = (state: BacklogSyncState) =>
-  ({ synced: "作成済み", pending: "作成は送信待ち", conflict: "作成が競合", error: "作成できていません（GitHub が受け付けない・保留中）" })[state];
+  ({ synced: t(m.createSynced), pending: t(m.createPending), conflict: t(m.createConflict), error: t(m.createError) })[state];
 
 /** One free-text draft (a comment, a new Issue) kept across a failed save and a reload. */
 export const textDraftKey = (scope: string) => `switchboard.backlog.text.${scope}`;

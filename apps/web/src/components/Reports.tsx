@@ -3,6 +3,8 @@ import type { ReportRow } from "@switchboard/protocol";
 import { api } from "../api.ts";
 import { artifactMeta, reportMeta, type AcrossQuery } from "../reports.ts";
 import { ArtifactBody, UNDO_MS } from "./Artifacts.tsx";
+import { t } from "../i18n.ts";
+import { insights as m } from "../i18n/insights.ts";
 
 /** Rows read at a time; a full page offers さらに表示 (#1833). */
 const PAGE = 50;
@@ -58,7 +60,7 @@ export function Reports(props: { scope: "reports" | "all"; onScope: (scope: "rep
       setRows((r) => [...(r ?? []), ...list]);
       setMore(list.length === PAGE);
     } catch (e) {
-      if (n === seq.current) setErr(`続きを読めません: ${String((e as Error).message ?? e)}`);
+      if (n === seq.current) setErr(t(m.moreFailed, { error: String((e as Error).message ?? e) }));
     } finally {
       moreBusyRef.current = false;
       setMoreBusy(false);
@@ -75,7 +77,7 @@ export function Reports(props: { scope: "reports" | "all"; onScope: (scope: "rep
       (e) => {
         setRows([]);
         setMore(false);
-        setErr(`${all ? "成果物" : "レポート"}を読めません: ${String((e as Error).message ?? e)}`);
+        setErr(t(all ? m.readArtifactsFailed : m.readReportsFailed, { error: String((e as Error).message ?? e) }));
       },
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps -- read again when the scope or the words change; openId changes select below
@@ -107,7 +109,7 @@ export function Reports(props: { scope: "reports" | "all"; onScope: (scope: "rep
       const list = await load();
       if (list && sel === r.id) setSel(list[0]?.id ?? null);
     } catch (e) {
-      setErr(`一覧を読み直せません: ${String((e as Error).message ?? e)}`);
+      setErr(t(m.reloadFailed, { error: String((e as Error).message ?? e) }));
     }
   };
   const restore = async () => {
@@ -128,31 +130,31 @@ export function Reports(props: { scope: "reports" | "all"; onScope: (scope: "rep
   return (
     <section className="card reports">
       <div className="row head">
-        <h5>レポート</h5>
+        <h5>{t(m.reports)}</h5>
         <div className="reports-scope">
           <button className="ghost" aria-pressed={!all} onClick={() => props.onScope("reports")}>
-            レポート（HTML）
+            {t(m.reportsHtml)}
           </button>
           <button className="ghost" aria-pressed={all} onClick={() => props.onScope("all")}>
-            すべての成果物
+            {t(m.allArtifacts)}
           </button>
         </div>
       </div>
-      <input className="reports-q" type="search" aria-label="成果物を絞り込む" placeholder="題・パス・Task の題" value={q} onChange={(e) => setQ(e.target.value)} />
-      {rows === null && !err && <div className="muted">読み込み中…</div>}
-      {rows && rows.length === 0 && !err && <div className="muted">{term ? `「${term}」に合う成果物はありません` : all ? "Task の成果物に登録すると、ここに新しい順に並びます。" : "定期タスクや Task が HTML を成果物に登録すると、ここに新しい順に並びます。"}</div>}
+      <input className="reports-q" type="search" aria-label={t(m.filterLabel)} placeholder={t(m.filterPlaceholder)} value={q} onChange={(e) => setQ(e.target.value)} />
+      {rows === null && !err && <div className="muted">{t(m.loading)}</div>}
+      {rows && rows.length === 0 && !err && <div className="muted">{term ? t(m.noMatchArtifacts, { term }) : all ? t(m.emptyAll) : t(m.emptyReports)}</div>}
       {rows && rows.length > 0 && (
-        <div role="tablist" aria-label={all ? "すべての成果物" : "レポート"}>
+        <div role="tablist" aria-label={all ? t(m.allArtifacts) : t(m.reports)}>
           {rows.map((r) => (
             <div key={r.id} className={`row${r.id === sel ? " on" : ""}`}>
               <button role="tab" aria-selected={r.id === sel} className="ghost t" onClick={() => setSel(r.id)} title={r.source}>
                 {r.title}
               </button>
               <span className="m">{all ? artifactMeta(r) : reportMeta(r)}</span>
-              <button className="ghost" onClick={() => props.onOpenTask(r.taskId, r.id)} title={`Task「${r.taskTitle}」の成果物タブで開く`}>
-                Task を開く
+              <button className="ghost" onClick={() => props.onOpenTask(r.taskId, r.id)} title={t(m.openOnTabTitle, { title: r.taskTitle })}>
+                {t(m.openTask)}
               </button>
-              <button className="art-x" aria-label={`${r.title} を消す`} title="消す" onClick={() => remove(r)}>
+              <button className="art-x" aria-label={t(m.removeLabel, { title: r.title })} title={t(m.remove)} onClick={() => remove(r)}>
                 ×
               </button>
             </div>
@@ -161,7 +163,7 @@ export function Reports(props: { scope: "reports" | "all"; onScope: (scope: "rep
       )}
       {more && (
         <button className="ghost" disabled={moreBusy} onClick={() => void loadMore()}>
-          さらに表示
+          {t(m.showMore)}
         </button>
       )}
       {err && (
@@ -171,13 +173,13 @@ export function Reports(props: { scope: "reports" | "all"; onScope: (scope: "rep
       )}
       {undo && (
         <div className="hint art-undo" role="status">
-          「{undo.title}」を消しました
+          {t(m.removed, { title: undo.title })}
           <button className="ghost" onClick={restore}>
-            元に戻す
+            {t(m.undo)}
           </button>
         </div>
       )}
-      {current && <ArtifactBody key={`${current.id}:${current.updatedAt}`} a={current} shown onRefreshed={() => load().catch((e) => setErr(`一覧を読み直せません: ${String((e as Error).message ?? e)}`))} />}
+      {current && <ArtifactBody key={`${current.id}:${current.updatedAt}`} a={current} shown onRefreshed={() => load().catch((e) => setErr(t(m.reloadFailed, { error: String((e as Error).message ?? e) })))} />}
     </section>
   );
 }

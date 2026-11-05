@@ -227,7 +227,7 @@ const noSync: BacklogSyncInfo = { state: "error", reason: "unfetched", lastSucce
 
 export const ACTION_FOR_STAGE: Partial<Record<BacklogStage, BacklogAction>> = { request: "to-pbi", "needs-tasks": "to-tasks", ready: "complete", "in-progress": "check" };
 
-const ACTION_NAME: Record<BacklogAction, string> = { "to-pbi": "PBI にする", "to-tasks": "Task に分解", complete: "実装", check: "状況確認", close: "閉じる" };
+const ACTION_NAME: Record<BacklogAction, string> = { "to-pbi": "PBI にする", "to-tasks": "Task に分解", complete: "実装", check: "状況確認", close: "閉じる", direct: "直行で直す" };
 
 export function startTitle(item: Pick<BacklogItem, "number" | "title">, action: BacklogAction): string {
   return `#${item.number} ${ACTION_NAME[action]}: ${item.title}`;
@@ -236,7 +236,7 @@ export function startTitle(item: Pick<BacklogItem, "number" | "title">, action: 
 /** backlog-next's two slots per workspace (#561): implementing a PBI, and planning (to a PBI, to Tasks, a status check). */
 export type Slot = "implement" | "plan";
 
-export const SLOT_OF_ACTION: Record<BacklogAction, Slot> = { complete: "implement", close: "implement", "to-pbi": "plan", "to-tasks": "plan", check: "plan" };
+export const SLOT_OF_ACTION: Record<BacklogAction, Slot> = { complete: "implement", close: "implement", "to-pbi": "plan", "to-tasks": "plan", check: "plan", direct: "plan" };
 
 /** What `scripts/setup/` of another repository holds (`setupScripts`), for the instructions of a Task that runs there (#557). */
 export interface OtherRepo {
@@ -327,10 +327,27 @@ export function buildStartPrompt(item: Pick<BacklogItem, "number"> & Partial<Pic
     : opts.other ? `\n\n#${n} はこのディレクトリのリポジトリ（\`gh repo view\` が答えるもの）の Issue です。${otherRepoRules(opts.other)}` : "";
   const answer = action === "check" ? "" : `始める前に Issue #${n} の最新の \`## 回答\` コメント${action === "complete" ? "（sub-issue の Task のものも）" : ""}を読み（\`ops-kit backlog view ${n} --fresh\`。アプリが GitHub と同期してから答え、GitHub に届かなければ保存値と未同期の印で答える）、あればそれに従って続きから進めてください。`;
   const scope = action === "complete" ? COMPLETE_SCOPE : "";
-  // a fence longer than any run of backticks in the answer, so the answer cannot close it
-  const fence = "`".repeat(Math.max(4, ...[...(opts.answer?.text.matchAll(/`+/g) ?? [])].map((m) => m[0].length + 1)));
-  const said = opts.answer && action !== "check" ? `\n\n利用者が画面で答えた Issue #${opts.answer.issue} の最新の回答（利用者の言葉）:\n\n${fence}text\n${opts.answer.text}\n${fence}` : "";
+  const said = action !== "check" ? saidOf(opts.answer) : "";
   return `${body}\n\n対象: #${n}。${answer}${scope}${elsewhere}${said}`;
+}
+
+/** The person's newest answer on the screen (#2745) as their words, in a fence longer than any run of backticks in it, so the answer cannot close it. */
+function saidOf(answer: { issue: number; text: string } | null | undefined): string {
+  if (!answer) return "";
+  const fence = "`".repeat(Math.max(4, ...[...answer.text.matchAll(/`+/g)].map((m) => m[0].length + 1)));
+  return `\n\n利用者が画面で答えた Issue #${answer.issue} の最新の回答（利用者の言葉）:\n\n${fence}text\n${answer.text}\n${fence}`;
+}
+
+/**
+ * The first prompt of a 直行で直す (#3690): the `direct` entry of the `p1-direct` candidate with the request as its signal,
+ * then the answer to read, a local backlog's rules and the screen answer as a stage Task has them (the meta workspace's
+ * only: another repository's is refused before). No PBI or Task Issue: the entry itself says what it leaves on the request.
+ */
+export function buildDirectPrompt(item: Pick<BacklogItem, "number">, opts: { local?: boolean; localForge?: boolean; answer?: { issue: number; text: string } | null } = {}, def: ProcessDef = loadProcess("p1-direct")): string {
+  const n = item.number;
+  const body = renderEntry(def, "direct", { signal: `#${n}` });
+  const elsewhere = opts.local ? `\n\n#${n} はこの workspace の Switchboard のバックログの Issue です（GitHub には無い）。${opts.localForge ? LOCAL_ISSUE_RULES + localChangeRules("") : LOCAL_BACKLOG_RULES}` : "";
+  return `${body}\n\n対象: #${n}。始める前に Issue #${n} の最新の \`## 回答\` コメントを読み（\`ops-kit backlog view ${n} --fresh\`。アプリが GitHub と同期してから答え、GitHub に届かなければ保存値と未同期の印で答える）、あればそれに従ってください。${elsewhere}${saidOf(opts.answer)}`;
 }
 
 /** While any usage window of the runner the stage Tasks start on (after 上限のときの代わり, #834) is at or above this, the scheduler starts a stage Task only when none runs anywhere (#267, #561). The default of `quotaAndResume.backlogQuotaLimit` (#835). */
@@ -627,7 +644,8 @@ function candidates(items: BacklogItem[], slot: Slot): Array<{ item: BacklogItem
   const first = (i: BacklogItem) => resumed(i) ?? 0;
   const tried = (i: BacklogItem) => (isTriedBefore(i) ? 1 : 0);
   // #1275: a Task that failed or stopped asking, with no update to the Issue since, holds the item in any stage (an unblocked one still goes on, #817)
-  const open = items.filter((i) => !i.onHold && !i.activeTaskId && !isWaiting(i) && (isUnblocked(i) || (!isUnchanged(i) && !failedSince(i) && !awaitingReply(i) && !stopHeld(i))) && (SLOT_STAGES[slot].includes(i.stage) || (slot === "implement" && resumed(i) !== null)));
+  // a request the person sent down 直行で直す (#3690) stays theirs: backlog-next does not make it a PBI after the direct Task
+  const open = items.filter((i) => !i.onHold && !i.activeTaskId && i.lastTask?.action !== "direct" && !isWaiting(i) && (isUnblocked(i) || (!isUnchanged(i) && !failedSince(i) && !awaitingReply(i) && !stopHeld(i))) && (SLOT_STAGES[slot].includes(i.stage) || (slot === "implement" && resumed(i) !== null)));
   // #2929: the ones to finish first (`resumed`), then Priority, then not yet worked on, then the stage, then the oldest
   open.sort(
     (a, b) =>

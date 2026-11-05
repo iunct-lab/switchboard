@@ -13,6 +13,8 @@ import { firstInstruction, foldTranscript } from "../transcript.ts";
 import { effortLabel } from "../effortOptions.ts";
 import { humanLabel, judgeAverage, judgeRows, metricRows, modelsLabel } from "../evals.ts";
 import { jstDateTime } from "../time.ts";
+import { t } from "../i18n.ts";
+import { brief as m } from "../i18n/brief.ts";
 
 /** How long 再評価 shows 判定中 without word from the daemon: the judge's 90 s, a fallback turn, and slack. */
 const JUDGING_WAIT_MS = 200_000;
@@ -74,7 +76,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
     setLoad(null);
     api.opsLoad(7, props.task.id).then(setLoad).catch(() => undefined);
   }, [props.task.id]);
-  const loadLine = load ? (load.available ? taskLoadLine(load.groups) : "この環境では測れません") : null;
+  const loadLine = load ? (load.available ? taskLoadLine(load.groups) : t(m.loadUnavailable)) : null;
 
   const quota = (props.ledger?.quota ?? []).filter((q) => q.runner === props.task.runner);
   const [mcp, setMcp] = useState<{ url: string; token: string } | null>(null);
@@ -204,7 +206,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
     api
       .restartDaemon(props.task.id, force)
       .then((r) => {
-        setRestartMsg(r.restarting ? (r.supervised ? "再起動中（dev.ts が再起動します）… UI は再接続を待ちます" : "再起動中… 新しいデーモンが起動するまで UI は再接続を待ちます（ログ: ~/.switchboard/daemon.log）") : "再起動は実行されませんでした");
+        setRestartMsg(r.restarting ? (r.supervised ? t(m.restartingSupervised) : t(m.restarting)) : t(m.restartNotRun));
         if (r.restarting) props.onRestarting?.();
       })
       .catch((e) => setRestartMsg(String(e.message ?? e)));
@@ -242,137 +244,137 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
     <aside className={`side ${props.open ? "open" : ""}`}>
       {/* Phones only (#369): the Brief is laid over the chat there. */}
       <button className="ghost brief-close" onClick={props.onClose}>
-        閉じる
+        {t(m.close)}
       </button>
       <div className="blk">
-        <h5>Task の概要</h5>
+        <h5>{t(m.overviewHeading)}</h5>
         {/* The instruction the task was started with (#1314): read here, beside the end of a long conversation. */}
         {instruction && (
           <div className="blk brief-instruction">
-            <h5>指示</h5>
+            <h5>{t(m.instructionHeading)}</h5>
             <div className="tx">{instruction.text}</div>
             {instruction.attachments && <AttachmentGallery items={instruction.attachments} />}
           </div>
         )}
-        {props.detail?.sourceCloudTask && <p><button className="ghost" onClick={() => props.onOpenTask?.(props.detail!.sourceCloudTask!.id)}>元Cloud Task</button> — Localで続行中・Cloudへ自動同期なし <span className="hint">作業コピー: {props.task.cwd}</span></p>}
-        {props.detail?.localContinuations.map(t => <p key={t.id}><button className="ghost" onClick={() => props.onOpenTask?.(t.id)}>ローカルの Task: {t.title}</button> <span className="hint">作業コピー: {t.cwd}</span></p>)}
-        {props.noTerminal && <div className="hint">この配布ではターミナルは使えません</div>}
+        {props.detail?.sourceCloudTask && <p><button className="ghost" onClick={() => props.onOpenTask?.(props.detail!.sourceCloudTask!.id)}>{t(m.sourceCloudTask)}</button>{t(m.continuingLocally)}<span className="hint">{t(m.workingCopy, { cwd: props.task.cwd })}</span></p>}
+        {props.detail?.localContinuations.map((lt) => <p key={lt.id}><button className="ghost" onClick={() => props.onOpenTask?.(lt.id)}>{t(m.localTask, { title: lt.title })}</button> <span className="hint">{t(m.workingCopy, { cwd: lt.cwd })}</span></p>)}
+        {props.noTerminal && <div className="hint">{t(m.noTerminal)}</div>}
         <div className="kv">
           {props.task.workspaceReason && (
             <>
               <span>Workspace</span>
               <span>
                 {props.workspaces?.find((w) => w.id === props.task.workspaceId)?.name ?? props.task.cwd}
-                <span className="hint">（自動: {props.task.workspaceReason}）</span>
+                <span className="hint">{t(m.workspaceAuto, { reason: props.task.workspaceReason })}</span>
               </span>
             </>
           )}
-          <span>ランナー</span>
+          <span>{t(m.runner)}</span>
           <span>
             <RunnerPill runner={props.task.runner} />{" "}
             {props.task.routing ? (
               props.task.routing.overridden ? (
-                <span className="hint" title={`ルール: ${props.task.routing.ruleId}`}>
-                  手動で上書き（推奨は {props.task.routing.suggested}: {props.task.routing.reason}）
+                <span className="hint" title={t(m.ruleTitle, { rule: props.task.routing.ruleId })}>
+                  {t(m.overridden, { suggested: props.task.routing.suggested, reason: props.task.routing.reason })}
                 </span>
               ) : (
-                <span className="hint" title={`ルール: ${props.task.routing.ruleId}`}>
-                  推奨どおり — {props.task.routing.reason}
+                <span className="hint" title={t(m.ruleTitle, { rule: props.task.routing.ruleId })}>
+                  {t(m.asRecommended, { reason: props.task.routing.reason })}
                 </span>
               )
             ) : (
-              <span className="hint">手動選択</span>
+              <span className="hint">{t(m.manualChoice)}</span>
             )}
             {/* LLM の提案（#25）は作成後に届く助言で、ランナーは決めない。提案と実際を並べるだけで、どちらが良かったかは言わない */}
             {props.task.routing?.llm && (
-              <span className="hint llm-suggest" title="作成後に届いた LLM の助言です。ランナーは変えません">
-                {" · "}LLM の提案: {props.task.routing.llm.runner} — {props.task.routing.llm.reason} · 実際: {props.task.runner}（{outcomeLabel(props.task.outcome)}）
+              <span className="hint llm-suggest" title={t(m.llmTitle)}>
+                {" · "}{t(m.llmSuggest, { runner: props.task.routing.llm.runner, reason: props.task.routing.llm.reason, actual: props.task.runner, outcome: outcomeLabel(props.task.outcome) })}
               </span>
             )}
           </span>
-          <span>モデル</span>
+          <span>{t(m.model)}</span>
           <span>
-            {cloud ? <span>公式 Web で操作してください</span> : <ModelSelect runner={runnerInfo} value={props.task.model ?? ""} onChange={changeModel} label="モデル" disabled={modelBusy} />}
-            {!cloud && runnerInfo && runnerInfo.models.length > 0 && <div className="hint">{props.task.status === "running" || props.task.status === "waiting" ? "変更は次のターンから（今のターンを止めるなら中断してから返信）" : "変更は次の返信から。同じセッションを新しいモデルで再開します"}</div>}
+            {cloud ? <span>{t(m.cloudModel)}</span> : <ModelSelect runner={runnerInfo} value={props.task.model ?? ""} onChange={changeModel} label={t(m.model)} disabled={modelBusy} />}
+            {!cloud && runnerInfo && runnerInfo.models.length > 0 && <div className="hint">{props.task.status === "running" || props.task.status === "waiting" ? t(m.modelNextTurn) : t(m.modelNextReply)}</div>}
             {modelErr && <div className="hint warn">{modelErr}</div>}
           </span>
-          <span>思考の深さ</span>
-          <span className="brief-effort" title="作成時に決まり、途中では変えられません">{effortLabel(props.task.effort, runnerInfo)}</span>
-          <span>承認</span>
+          <span>{t(m.effort)}</span>
+          <span className="brief-effort" title={t(m.effortTitle)}>{effortLabel(props.task.effort, runnerInfo)}</span>
+          <span>{t(m.approval)}</span>
           <span>
-            {cloud ? <span>公式 Web で承認・権限を操作してください</span> : modes.length > 0 ? (
+            {cloud ? <span>{t(m.cloudApproval)}</span> : modes.length > 0 ? (
               <>
-                <select value={props.task.permissionMode ?? ""} disabled={modeBusy} onChange={(e) => changeMode(e.target.value)} aria-label="承認モード" title={modes.find((m) => m.value === props.task.permissionMode)?.description ?? ""}>
-                  {props.task.permissionMode === null && <option value="">（未設定 — 再開時にランナー既定で解決）</option>}
-                  {props.task.permissionMode && !modes.some((m) => m.value === props.task.permissionMode) && <option value={props.task.permissionMode}>{props.task.permissionMode}</option>}
-                  {modes.map((m) => (
-                    <option key={m.value} value={m.value}>
-                      {m.label}
+                <select value={props.task.permissionMode ?? ""} disabled={modeBusy} onChange={(e) => changeMode(e.target.value)} aria-label={t(m.modeLabel)} title={modes.find((pm) => pm.value === props.task.permissionMode)?.description ?? ""}>
+                  {props.task.permissionMode === null && <option value="">{t(m.modeUnset)}</option>}
+                  {props.task.permissionMode && !modes.some((pm) => pm.value === props.task.permissionMode) && <option value={props.task.permissionMode}>{props.task.permissionMode}</option>}
+                  {modes.map((pm) => (
+                    <option key={pm.value} value={pm.value}>
+                      {pm.label}
                     </option>
                   ))}
                 </select>
                 <div className="hint">
-                  {props.task.runner === "claude" ? "変更は実行中でも即時に反映" : "変更は次のターンから反映"}
-                  {reportedMode ? ` · ランナー報告: ${reportedMode}` : ""}
-                  。Knowledge の rules に approval があれば allow / confirm も適用
+                  {props.task.runner === "claude" ? t(m.modeLive) : t(m.modeNextTurn)}
+                  {reportedMode ? t(m.modeReported, { mode: reportedMode }) : ""}
+                  {t(m.modeRules)}
                 </div>
                 {modeErr && <div className="hint warn">{modeErr}</div>}
               </>
             ) : (
-              <span>DAK 側の設定（require_confirmation / mcp.yaml）で決まる。Knowledge の rules に approval があれば allow / confirm を適用</span>
+              <span>{t(m.modeDak)}</span>
             )}
           </span>
-          <span>セッション</span>
+          <span>{t(m.session)}</span>
           <span className="mono" title={props.task.runnerSessionId ?? ""}>
-            {cloud ? props.task.cloudSession?.id ?? "未確認" : props.task.runnerSessionId ? props.task.runnerSessionId.slice(0, 8) + "…" : "—"}
+            {cloud ? props.task.cloudSession?.id ?? t(m.unconfirmed) : props.task.runnerSessionId ? props.task.runnerSessionId.slice(0, 8) + "…" : "—"}
           </span>
-          <span>実行導線</span>
+          <span>{t(m.origin)}</span>
           <span>
             {props.task.origin === "terminal" ? (
               <>
-                Terminal で開始（Claude Code のログから取り込み）
-                <div className="hint">返信すると Switchboard 側で同じセッションを再開します。Terminal で開いたままなら先に閉じてください</div>
+                {t(m.originTerminal)}
+                <div className="hint">{t(m.originTerminalHint)}</div>
               </>
             ) : (
-              <>Switchboard{props.task.scheduleId ? "（スケジュール）" : ""}</>
+              <>Switchboard{props.task.scheduleId ? t(m.originSchedule) : ""}</>
             )}
             {props.detail?.history && (
               <div className="hint mono" title={props.detail.history.path} style={{ wordBreak: "break-all" }}>
-                {props.task.origin === "terminal" ? `取り込み元 ${props.detail.history.pathDisplay} · 取り込み ${jstDateTime(props.detail.history.importedAt)}` : `ログ ${props.detail.history.pathDisplay}`}
+                {props.task.origin === "terminal" ? t(m.historyImported, { path: props.detail.history.pathDisplay, at: jstDateTime(props.detail.history.importedAt) }) : t(m.historyLog, { path: props.detail.history.pathDisplay })}
               </div>
             )}
           </span>
           {(shadowTask || props.task.shadowOf) && (
             <>
-              <span>並走</span>
+              <span>{t(m.shadow)}</span>
               <span>
                 {shadowTask ? (
                   <>
                     <button className="ghost" onClick={() => props.onOpenTask?.(shadowTask.id)} title={shadowTask.title}>
-                      <RunnerPill runner={shadowTask.runner} /> の Task を開く
+                      <RunnerPill runner={shadowTask.runner} />{t(m.openShadow)}
                     </button>
                     <div className="hint">
                       {shadowTask.shadowStopped
-                        ? `同じ依頼を ${shadowTask.runner} でも実行したが停止済み。ここへの返信はもう写されません。`
+                        ? t(m.shadowStopped, { runner: shadowTask.runner })
                         : shadowTask.status === "waiting"
-                          ? `同じ依頼を ${shadowTask.runner} でも実行中。向こうは承認待ちなので、今の返信は写されません。`
-                          : `同じ依頼を ${shadowTask.runner} でも実行中。ここへの返信は向こうにも写されます（向こうからは戻りません）。`}
-                      承認・差分・台帳は別々
+                          ? t(m.shadowWaiting, { runner: shadowTask.runner })
+                          : t(m.shadowRunning, { runner: shadowTask.runner })}
+                      {t(m.shadowSeparate)}
                     </div>
                   </>
                 ) : (
                   <>
                     {primaryTask ? (
                       <button className="ghost" onClick={() => props.onOpenTask?.(primaryTask.id)} title={primaryTask.title}>
-                        並走元 <RunnerPill runner={primaryTask.runner} /> を開く
+                        {t(m.openPrimaryBefore)}<RunnerPill runner={primaryTask.runner} />{t(m.openPrimaryAfter)}
                       </button>
                     ) : (
                       <span className="mono">{props.task.shadowOf}</span>
                     )}
                     <div className="hint">
                       {props.task.shadowStopped
-                        ? "この Task は並走元と同じ依頼の写し（停止済み）。並走元への返信はもう届きません。ここへ直接送ることはできます"
-                        : "この Task は並走元と同じ依頼の写し。並走元への返信がここにも届きます（承認待ちの間は除く）。ここへの返信は並走元に戻りません"}
+                        ? t(m.copyStopped)
+                        : t(m.copyRunning)}
                     </div>
                   </>
                 )}
@@ -383,7 +385,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
       </div>
 
       <div className="blk">
-        <h5>スコープ</h5>
+        <h5>{t(m.scopeHeading)}</h5>
         <div className="tree">
           {props.task.scope.map((d) => (
             <div key={d} className={d === props.task.cwd ? "on" : ""} title={d}>
@@ -392,35 +394,35 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
           ))}
         </div>
         <div className="kv" style={{ marginTop: 8 }}>
-          <span>コンテキストの量</span>
-          <span className="num">{fp ? `${fp.files.toLocaleString()} ファイル · 約 ${Math.round(fp.estTokens / 1000)}k トークン${fp.truncated ? "+" : ""}` : "計測中…"}</span>
+          <span>{t(m.contextSize)}</span>
+          <span className="num">{fp ? t(m.footprint, { files: fp.files.toLocaleString(), k: Math.round(fp.estTokens / 1000), more: fp.truncated ? "+" : "" }) : t(m.measuring)}</span>
         </div>
         <div className={`meter ${fp && fp.estTokens > contextWindow * 0.6 ? "warn" : ""}`}>
           <i style={{ width: `${fp ? Math.min(100, (fp.estTokens / contextWindow) * 100) : 0}%` }} />
         </div>
-        <div className="hint">全部読んだ場合の目安。200k コンテキスト比</div>
+        <div className="hint">{t(m.footprintHint)}</div>
         {loadLine && (
           <div className="kv" data-brief-load>
-            <span>負荷</span>
+            <span>{t(m.load)}</span>
             <span className="num">{loadLine}</span>
           </div>
         )}
       </div>
 
       <div className="blk evals">
-        <h5>評価</h5>
+        <h5>{t(m.evalsHeading)}</h5>
         {evals && modelsLabel(evals) && (
           <div className="kv">
-            <span>モデル</span>
+            <span>{t(m.model)}</span>
             <span title={evals.models.length >= 2 ? evals.models.join(" → ") : undefined}>{modelsLabel(evals)}</span>
           </div>
         )}
         {cloud ? (
-          <div className="hint">Cloud の Task はルール指標とルーブリックを出しません（イベントが手元に無いため）。自分の評価は付けられます。</div>
+          <div className="hint">{t(m.cloudEvals)}</div>
         ) : evals === null ? (
-          <div className="hint">読み込み中…</div>
+          <div className="hint">{t(m.loading)}</div>
         ) : !evals.rules ? (
-          <div className="hint">ターンが終わると集計します。</div>
+          <div className="hint">{t(m.evalsAfterTurn)}</div>
         ) : (
           <>
             <div className="kv">
@@ -432,11 +434,11 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
               ))}
             </div>
             <div className="kv" style={{ marginTop: 8 }}>
-              <span>ルーブリック</span>
+              <span>{t(m.rubric)}</span>
               <span className="num">
-                {judging ? "判定中…" : evals.judge ? `平均 ${judgeAverage(evals) ?? "-"} / 5 · ${evals.judge.by} · ${evals.judge.rubric}` : "まだ判定していません"}{" "}
-                <button className="ghost" disabled={busy || judging} onClick={rejudge} title="今の会話でルーブリックの採点をやり直します（判定のランナーの 1 ターン）">
-                  再評価
+                {judging ? t(m.judging) : evals.judge ? t(m.judgeAverage, { avg: judgeAverage(evals) ?? "-", by: evals.judge.by, rubric: evals.judge.rubric }) : t(m.notJudged)}{" "}
+                <button className="ghost" disabled={busy || judging} onClick={rejudge} title={t(m.rejudgeTitle)}>
+                  {t(m.rejudge)}
                 </button>
               </span>
               {judgeRows(evals).map((r) => (
@@ -459,32 +461,32 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
         {evals && (
           <>
             <div className="kv" id="brief-human-eval" style={{ marginTop: 8 }}>
-              <span>自分の評価</span>
+              <span>{t(m.humanEval)}</span>
               <span className="num">
-                {humanLabel(evals) ?? "なし"}{" "}
+                {humanLabel(evals) ?? t(m.none)}{" "}
                 {evals.human && (
                   <button className="ghost" disabled={humanBusy} onClick={() => saveHuman(() => api.clearHumanEval(props.task.id))}>
-                    消す
+                    {t(m.clear)}
                   </button>
                 )}
               </span>
             </div>
             <div className="row" style={{ alignItems: "center", gap: 4, marginTop: 4, flexWrap: "wrap" }}>
               {[1, 2, 3, 4, 5].map((n) => (
-                <button key={n} className={rating === n ? "pri" : "ghost"} disabled={humanBusy} onClick={() => setRating(n)} title={`${n} / 5`} aria-label={`自分の評価 ${n}`}>
+                <button key={n} className={rating === n ? "pri" : "ghost"} disabled={humanBusy} onClick={() => setRating(n)} title={`${n} / 5`} aria-label={t(m.humanEvalN, { n })}>
                   {n}
                 </button>
               ))}
-              <input value={comment} maxLength={1000} placeholder="一言（任意）" disabled={humanBusy} onChange={(e) => setComment(e.target.value)} style={{ flex: 1, minWidth: 80 }} />
+              <input value={comment} maxLength={1000} placeholder={t(m.commentPlaceholder)} disabled={humanBusy} onChange={(e) => setComment(e.target.value)} style={{ flex: 1, minWidth: 80 }} />
               <button disabled={humanBusy || rating === null} onClick={() => saveHuman(() => api.setHumanEval(props.task.id, { rating: rating!, comment }))}>
-                保存
+                {t(m.save)}
               </button>
             </div>
             {humanErr && <div className="hint warn">{humanErr}</div>}
             {props.onImprove && (
               <div className="row" style={{ marginTop: 6 }}>
-                <button className="ghost" onClick={() => props.onImprove?.(props.task.id)} title="この Task の評価を下書きにして、改善の要望を登録するダイアログを開きます">
-                  改善要望にする
+                <button className="ghost" onClick={() => props.onImprove?.(props.task.id)} title={t(m.improveTitle)}>
+                  {t(m.improve)}
                 </button>
               </div>
             )}
@@ -493,26 +495,26 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
       </div>
 
       <div className="blk">
-        <h5>コスト</h5>
-        {cloud ? <div className="hint">Cloud の費用・使用量はここでは取得していません。公式 Web で確認してください。</div> : <div className="kv">
-          <span>このタスク（API 換算）</span>
+        <h5>{t(m.costHeading)}</h5>
+        {cloud ? <div className="hint">{t(m.cloudCost)}</div> : <div className="kv">
+          <span>{t(m.taskCost)}</span>
           <span className="num">{fmtUsd(props.detail?.cost.costUsd ?? 0)}</span>
-          <span>トークン</span>
+          <span>{t(m.tokens)}</span>
           <span className="num">{((props.detail?.cost.tokens ?? 0) / 1000).toFixed(1)}k</span>
-          <span>予算</span>
+          <span>{t(m.budget)}</span>
           <span className="num">
             {props.task.budgetUsd === null ? (
-              <span className="hint">なし</span>
+              <span className="hint">{t(m.none)}</span>
             ) : (
               <>
                 {fmtUsd(props.detail?.cost.costUsd ?? 0)} / {fmtUsd(props.task.budgetUsd)}
-                {(props.detail?.cost.costUsd ?? 0) > props.task.budgetUsd && <span className="warn"> 超過 — 次のターンは予算を上げるまで送れません</span>}{" "}
-                <button className="ghost" onClick={() => api.setBudget(props.task.id, props.task.budgetUsd! * 2).catch((e) => setBudgetErr(String(e.message ?? e)))} title="予算を 2 倍にする">
+                {(props.detail?.cost.costUsd ?? 0) > props.task.budgetUsd && <span className="warn">{t(m.overBudget)}</span>}{" "}
+                <button className="ghost" onClick={() => api.setBudget(props.task.id, props.task.budgetUsd! * 2).catch((e) => setBudgetErr(String(e.message ?? e)))} title={t(m.doubleBudget)}>
                   ×2
                 </button>
                 {(props.detail?.cost.costUsd ?? 0) > props.task.budgetUsd && busy && (
-                  <button className="ghost" onClick={props.onAbort} title="このタスクを中断する">
-                    中断
+                  <button className="ghost" onClick={props.onAbort} title={t(m.abortTitle)}>
+                    {t(m.abort)}
                   </button>
                 )}
                 {budgetErr && <span className="warn"> {budgetErr}</span>}
@@ -525,7 +527,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
           {/* not shown while it cannot be read: unknown is not 0 (#549) */}
           {props.ledger?.github && (
             <>
-              <span>GitHub API 残量</span>
+              <span>{t(m.githubBudget)}</span>
               <span className={`num ${githubBudgetLow(props.ledger.github) ? "warn" : ""}`}>{githubBudgetLabel(props.ledger.github)}</span>
             </>
           )}
@@ -534,49 +536,49 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
 
       {!cloud && props.task.resumeAt !== null && (
         <div className="blk">
-          <h5>{props.task.resumeReason === "disk" ? "ディスクの空き切れ" : props.task.resumeReason === "github" ? "GitHub の API 上限" : "使用上限"}</h5>
+          <h5>{props.task.resumeReason === "disk" ? t(m.resumeDiskHeading) : props.task.resumeReason === "github" ? t(m.resumeGithubHeading) : t(m.resumeLimitHeading)}</h5>
           <div className="hint">
-            {props.task.resumeReason === "disk" ? "ディスクの空き切れで止まりました。" : props.task.resumeReason === "github" ? "GitHub の API 上限で待っています。" : "ランナーの使用上限で止まりました。"}
+            {props.task.resumeReason === "disk" ? t(m.resumeDiskStopped) : props.task.resumeReason === "github" ? t(m.resumeGithubWaiting) : t(m.resumeLimitStopped)}
             {props.task.resumeReason === "disk" ? (
               !props.task.runnerSessionId ? (
-                "再開できるセッションがありません。返信すると新しいセッションで始まります。"
+                t(m.resumeNoSession)
               ) : autoResumeOn === false ? (
-                "空きが 1 GiB に戻ったら再開できます。自動再開は OFF（Home のランナー設定で ON にできます）。"
+                t(m.diskAutoOff)
               ) : autoResumeOn === true ? (
                 <>
-                  空きが 1 GiB に戻ったら同じセッションで自動再開します（次の確認は <b>{fmtClock(props.task.resumeAt)}</b>）。
+                  {t(m.diskAutoOnBefore)}<b>{fmtClock(props.task.resumeAt)}</b>{t(m.diskAutoOnAfter)}
                 </>
               ) : (
-                "空きが 1 GiB に戻るのを待っています。自動再開の設定はデーモンに接続すると表示されます。"
+                t(m.diskAutoUnknown)
               )
             ) : !props.task.runnerSessionId ? (
               <>
-                <b>{fmtClock(props.task.resumeAt)}</b> に枠が戻る見込みですが、再開できるセッションがありません。返信すると新しいセッションで始まります。
+                <b>{fmtClock(props.task.resumeAt)}</b>{t(m.limitNoSession)}
               </>
             ) : autoResumeOn === true && props.task.resumePlannedAt !== null ? (
               <>
-                <b>{fmtClock(props.task.resumeAt)}</b> に 1 回試します（だめなら <b>{fmtClock(props.task.resumePlannedAt)}</b>）。
+                <b>{fmtClock(props.task.resumeAt)}</b>{t(m.limitTryOnce)}<b>{fmtClock(props.task.resumePlannedAt)}</b>{t(m.limitTryOnceAfter)}
               </>
             ) : autoResumeOn === true ? (
               <>
-                <b>{fmtClock(props.task.resumeAt)}</b> に同じセッションで自動再開します。
+                <b>{fmtClock(props.task.resumeAt)}</b>{t(m.limitAutoOn)}
               </>
             ) : autoResumeOn === false ? (
               <>
-                <b>{fmtClock(props.task.resumeAt)}</b> 以降に再開できます。自動再開は OFF（Home のランナー設定で ON にできます）。
+                <b>{fmtClock(props.task.resumeAt)}</b>{t(m.limitAutoOff)}
               </>
             ) : (
               <>
-                <b>{fmtClock(props.task.resumeAt)}</b> に枠が戻る見込み。自動再開の設定はデーモンに接続すると表示されます。
+                <b>{fmtClock(props.task.resumeAt)}</b>{t(m.limitAutoUnknown)}
               </>
             )}
           </div>
           <div className="actions" style={{ marginTop: 6 }}>
-            <button className="pri" disabled={resumeBusy || busy || !props.task.runnerSessionId} onClick={() => resumeCall(() => api.resumeNow(props.task.id))} title={props.task.resumeReason === "disk" ? "待たずに今すぐ「続きを」と送る。空きが戻っていなければまた止まり、空き待ちに戻ります" : props.task.resumeReason === "github" ? "待たずに今すぐ「続きを」と送る。GitHub の枠がまだ戻っていなければコマンドがまた上限に当たり、次の時刻で待ち直します" : "待たずに今すぐ「続きを」と送る。枠がまだ戻っていなければまた止まり、次の時刻で待ち直します"}>
-              今すぐ再開
+            <button className="pri" disabled={resumeBusy || busy || !props.task.runnerSessionId} onClick={() => resumeCall(() => api.resumeNow(props.task.id))} title={props.task.resumeReason === "disk" ? t(m.resumeNowDiskTitle) : props.task.resumeReason === "github" ? t(m.resumeNowGithubTitle) : t(m.resumeNowLimitTitle)}>
+              {t(m.resumeNow)}
             </button>
-            <button disabled={resumeBusy} onClick={() => resumeCall(() => api.cancelResume(props.task.id))} title="自動再開をやめる。返信すればいつでも再開できます">
-              取り消す
+            <button disabled={resumeBusy} onClick={() => resumeCall(() => api.cancelResume(props.task.id))} title={t(m.cancelResumeTitle)}>
+              {t(m.cancelResume)}
             </button>
           </div>
           {resumeErr && <div className="hint warn">{resumeErr}</div>}
@@ -584,26 +586,26 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
       )}
 
       <div className="blk">
-        <h5>操作</h5>
+        <h5>{t(m.actionsHeading)}</h5>
         <div className="actions">
           <button disabled={cloud || !busy} onClick={props.onAbort}>
-            中断
+            {t(m.abort)}
           </button>
-          <a className="btn" href={`vscode://file${props.task.cwd}`} title="VS Code で開く">
-            エディタで開く
+          <a className="btn" href={`vscode://file${props.task.cwd}`} title={t(m.openInVsCode)}>
+            {t(m.openInEditor)}
           </a>
         </div>
         <div className="hint" style={{ marginTop: 6 }}>
-          {cloud ? "Cloudの続行・設定・停止は公式 Web で操作してください。ローカル中断ではCloud作業を止められません。" : "変更したファイルは「差分」タブに。"}
+          {cloud ? t(m.cloudActions) : t(m.diffTabHint)}
         </div>
       </div>
 
       {!cloud && checks?.meta && (
         <div className="blk">
-          <h5>Self-dev · このアプリ自身</h5>
-          {!checks.run && !checks.running && <div className="hint">ターン完了後に bun run typecheck を自動実行します。</div>}
-          {checks.running && <div className="hint">チェック実行中…</div>}
-          {checks.run && !checks.current && !checks.running && <div className="hint warn">このチェック以降にツリーが変わっています。再実行してください。</div>}
+          <h5>{t(m.selfDevHeading)}</h5>
+          {!checks.run && !checks.running && <div className="hint">{t(m.checksAuto)}</div>}
+          {checks.running && <div className="hint">{t(m.checksRunning)}</div>}
+          {checks.run && !checks.current && !checks.running && <div className="hint warn">{t(m.checksStale)}</div>}
           {checks.run && (
             <div className="kv">
               {checks.run.results.map((r) => (
@@ -621,16 +623,16 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
           )}
           <div className="actions" style={{ marginTop: 6 }}>
             <button disabled={checks.running || busy} onClick={() => api.runChecks(props.task.id).then(setChecks).catch(() => undefined)}>
-              チェック実行
+              {t(m.runChecks)}
             </button>
             {managed ? null : (
               <>
-                <button className="pri" disabled={busy || checks.running || !checks.run?.ok || !checks.current} onClick={() => void restart(false)} title="デーモンを今のコードで再起動します。UI は再接続します">
-                  適用してデーモン再起動
+                <button className="pri" disabled={busy || checks.running || !checks.run?.ok || !checks.current} onClick={() => void restart(false)} title={t(m.restartTitle)}>
+                  {t(m.restart)}
                 </button>
                 {checks.run && !checks.run.ok && (
-                  <button className="ghost" disabled={busy} onClick={() => void restart(true)} title="チェックが失敗していても再起動する">
-                    強制再起動
+                  <button className="ghost" disabled={busy} onClick={() => void restart(true)} title={t(m.forceRestartTitle)}>
+                    {t(m.forceRestart)}
                   </button>
                 )}
               </>
@@ -639,33 +641,33 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
           {managed && <ReleasePanel disabled={busy} />}
           {release && !release.managed && release.error && <div className="hint warn">{release.error}</div>}
           {restartMsg && <div className="hint">{restartMsg}</div>}
-          <div className="hint">apps/web の変更は Vite の HMR で即反映。packages/core の変更は再起動で反映。再起動中も UI は保持されます。</div>
+          <div className="hint">{t(m.selfDevHint)}</div>
         </div>
       )}
 
       {staged.length > 0 && (
         <div className="blk">
-          <h5>ステージング（未適用の書き込み）</h5>
+          <h5>{t(m.stagingHeading)}</h5>
           {stagedErr && <div className="hint warn">{stagedErr}</div>}
           {staged.map((c) => (
             <div key={c.id} className="staged">
               <button className="row link" onClick={() => setOpenDiff(openDiff === c.id ? null : c.id)} title={c.path}>
                 <span className="t mono">{c.rel}</span>
                 <span className="tag">{c.kind}</span>
-                <span className={`m ${c.status}`}>{c.status === "pending" ? "承認待ち" : c.status === "applied" ? "適用済み" : "却下"}</span>
+                <span className={`m ${c.status}`}>{c.status === "pending" ? t(m.stagedPending) : c.status === "applied" ? t(m.stagedApplied) : t(m.reject)}</span>
               </button>
-              {openDiff === c.id && <pre className="diff">{c.diff || "(差分なし)"}</pre>}
+              {openDiff === c.id && <pre className="diff">{c.diff || t(m.noDiff)}</pre>}
               {c.status === "pending" && (
                 <div className="actions">
                   <button className="pri" onClick={() => void decide(c.id, "apply")}>
-                    適用
+                    {t(m.apply)}
                   </button>
-                  <button onClick={() => void decide(c.id, "reject")}>却下</button>
+                  <button onClick={() => void decide(c.id, "reject")}>{t(m.reject)}</button>
                 </div>
               )}
             </div>
           ))}
-          <div className="hint">エージェントの fs.write / fs.patch はここに積まれ、適用するまで実ファイルは変わりません。</div>
+          <div className="hint">{t(m.stagingHint)}</div>
         </div>
       )}
 
@@ -673,8 +675,8 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
         <h5>Workspace MCP</h5>
         {props.task.runner === "claude" && props.detail && (
           <div className="kv">
-            <span>渡す MCP</span>
-            <span title="mcp.yaml の servers から。ユーザー全体の ~/.claude.json の MCP は Task に渡さない（#2090）">{props.detail.mcpServers?.length ? props.detail.mcpServers.join("、") : "なし（ユーザー全体の MCP は渡さない）"}</span>
+            <span>{t(m.mcpServers)}</span>
+            <span title={t(m.mcpServersTitle)}>{props.detail.mcpServers?.length ? props.detail.mcpServers.join(t(m.mcpSeparator)) : t(m.mcpNone)}</span>
           </div>
         )}
         {!mcp && (
@@ -687,9 +689,9 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
                   .then(setMcp)
                   .catch((e) => setMcpErr(String(e.message ?? e)))
               }
-              title="このタスクのスコープに封じ込めた MCP エンドポイントを発行する（タスク終了で失効）"
+              title={t(m.issueEndpointTitle)}
             >
-              エンドポイントを発行
+              {t(m.issueEndpoint)}
             </button>
           </div>
         )}
@@ -700,14 +702,14 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
             <span className="mono" style={{ wordBreak: "break-all" }}>
               {mcp.url}
             </span>
-            <span>トークン</span>
+            <span>{t(m.token)}</span>
             <span className="mono" style={{ wordBreak: "break-all" }}>
               {mcp.token}
             </span>
             <span />
             <span>
               <button className="ghost" onClick={() => void navigator.clipboard?.writeText(`${mcp.url}?token=${mcp.token}`)}>
-                URL+token をコピー
+                {t(m.copyUrlToken)}
               </button>{" "}
               <button
                 className="ghost"
@@ -717,15 +719,15 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
                     .then(setMcp)
                     .catch((e) => setMcpErr(String(e.message ?? e)))
                 }
-                title="今のトークンを失効させて新しく発行する"
+                title={t(m.rotateTitle)}
               >
-                失効して再発行
+                {t(m.rotate)}
               </button>
             </span>
           </div>
         )}
         <div className="hint" style={{ marginTop: 6 }}>
-          fs.list / fs.read / fs.grep はスコープ内のみ。fs.write / fs.patch はステージングに積まれ、ここで適用。exec.run は読み取り系だけ即時、他はここで承認。タスク終了で失効。
+          {t(m.mcpHint)}
         </div>
       </div>}
     </aside>
@@ -735,7 +737,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
 function QuotaKv(props: { window: string; utilization: number }) {
   return (
     <>
-      <span>{windowLabel(props.window)}の枠</span>
+      <span>{t(m.quotaWindow, { window: windowLabel(props.window) })}</span>
       <span className="num">{pct(props.utilization)}</span>
     </>
   );

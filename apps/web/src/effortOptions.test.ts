@@ -1,3 +1,4 @@
+// test-reads: apps/web/src/modelOptions.ts apps/web/src/presets.ts apps/web/src/i18n.ts apps/web/src/i18n/home.ts
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -44,5 +45,20 @@ describe("Brief (#833)", () => {
     expect(render({ ...task, effort: null })).toContain(ROW("CLI 既定"));
     expect(render({ ...task, effort: "ultra" })).toContain(ROW("ultra")); // no longer on the list: as it is
     expect(render(task)).not.toContain('aria-label="思考の深さ"'); // no select: fixed at creation
+  });
+});
+
+describe("in English (#2442)", () => {
+  // the language is read once when i18n.ts loads: a fresh process with the browser's choice set to en
+  test("the CLI default, a listed model and a preset's target read in English", () => {
+    const at = (f: string) => JSON.stringify(new URL(f, import.meta.url).pathname);
+    const code = `globalThis.localStorage = { getItem: (k) => (k === "switchboard.lang" ? "en" : null) };
+const { effortLabel } = await import(${at("./effortOptions.ts")});
+const { modelOptions } = await import(${at("./modelOptions.ts")});
+const { presetRow } = await import(${at("./presets.ts")});
+console.log(JSON.stringify([effortLabel(null), modelOptions({ models: [{ value: "m-1", label: "M" }], cliDefaultModel: "m-1" }, "").map((o) => o.label), presetRow({ name: "x", text: "{{target}}" }).target]));`;
+    const r = Bun.spawnSync([process.execPath, "-e", code]);
+    expect(r.stderr.toString()).toBe("");
+    expect(JSON.parse(r.stdout.toString())).toEqual(["CLI default", ["CLI default (m-1)", "M (m-1)"], "Target: choose an Issue / PR"]);
   });
 });

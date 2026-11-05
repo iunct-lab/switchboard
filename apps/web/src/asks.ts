@@ -1,26 +1,28 @@
 import type { Ask, AskAnswer, AskBatch, PolicyInput, PolicyScope } from "@switchboard/protocol";
 import { jstClock, jstDay } from "./time.ts";
+import { t } from "./i18n.ts";
+import { task as m } from "./i18n/task.ts";
 
 /** 判断待ち (#935): what each kind of question is called on screen. */
 export const KIND_LABEL: Record<Ask["kind"], string> = {
-  approval: "ツール承認",
-  decision: "実装の判断",
-  check: "運用の確認",
-  confirmation: "利用者確認",
-  stop: "停止",
-  wait: "依存待ち",
-  notice: "お知らせ",
+  approval: t(m.kindApproval),
+  decision: t(m.kindDecision),
+  check: t(m.kindCheck),
+  confirmation: t(m.kindConfirmation),
+  stop: t(m.kindStop),
+  wait: t(m.kindWait),
+  notice: t(m.kindNotice),
 };
 
 // open is 未回答: 保留 is the person's hold (#936)
-export const STATE_LABEL: Record<Ask["state"], string> = { open: "未回答", held: "保留", answered: "回答済み", resolved: "解消済み" };
+export const STATE_LABEL: Record<Ask["state"], string> = { open: t(m.stateOpen), held: t(m.stateHeld), answered: t(m.stateAnswered), resolved: t(m.stateResolved) };
 
 type GroupKey = "person" | "auto" | "answered" | "resolved";
 const GROUPS: Array<{ key: GroupKey; label: string }> = [
-  { key: "person", label: "あなたの判断待ち" },
-  { key: "auto", label: "自動で待っている（操作不要）" },
-  { key: "answered", label: "回答済み" },
-  { key: "resolved", label: "解消済み" },
+  { key: "person", label: t(m.groupPerson) },
+  { key: "auto", label: t(m.groupAuto) },
+  { key: "answered", label: t(m.stateAnswered) },
+  { key: "resolved", label: t(m.stateResolved) },
 ];
 
 // a held one (#936) is still the person's to answer
@@ -32,7 +34,7 @@ export function groupAsks(asks: Ask[]): Array<{ key: GroupKey; label: string; as
 }
 
 /** The heading of the questions whose Workspace is not known (#1673). */
-export const UNKNOWN_WORKSPACE = "Workspace 不明";
+export const UNKNOWN_WORKSPACE = t(m.unknownWorkspace);
 
 /** The Workspace a question is filtered by (#1673): its id, "" when not known. */
 export const workspaceKey = (a: Pick<Ask, "workspace">) => a.workspace?.id ?? "";
@@ -56,7 +58,8 @@ export function workspaceSections(asks: Ask[]): Array<{ key: string; name: strin
 export const workspaceChips = (asks: Ask[]) =>
   workspaceSections(asks).map((s) => ({ key: s.key, name: s.name, count: s.asks.filter((a) => groupKeyOf(a) === "person").length }));
 
-const UNKNOWN = "不明";
+/** What a fact the daemon did not record reads as; the 判断待ち screen greys it out. */
+export const UNKNOWN = t(m.unknown);
 
 /** The facts of one question card, in the PBI's order; a value the records do not have says 不明. Choices and conditions only when there are some. */
 export function askFacts(a: Ask): Array<{ label: string; value: string; href?: string }> {
@@ -64,22 +67,22 @@ export function askFacts(a: Ask): Array<{ label: string; value: string; href?: s
   // a daemon's notice (#2866) has no PBI, Task or choice: what it is about, why, what to do, and what put it there
   if (a.kind === "notice")
     return [
-      { label: "お知らせ", value: a.question ?? UNKNOWN },
-      ...(a.reason ? [{ label: "内容", value: a.reason }] : []),
-      ...(a.next ? [{ label: "すること", value: a.next }] : []),
-      { label: "出したもの", value: a.source.label },
+      { label: t(m.kindNotice), value: a.question ?? UNKNOWN },
+      ...(a.reason ? [{ label: t(m.factContent), value: a.reason }] : []),
+      ...(a.next ? [{ label: t(m.factTodo), value: a.next }] : []),
+      { label: t(m.factSource), value: a.source.label },
     ];
   return [
-    { label: "対象リポジトリ", value: a.workspace?.name ?? UNKNOWN },
+    { label: t(m.factRepo), value: a.workspace?.name ?? UNKNOWN },
     a.pbi ? { label: "PBI", value: `#${a.pbi.number} ${a.pbi.title}`, href: a.pbi.url } : { label: "PBI", value: UNKNOWN },
     { label: "Task", value: a.task ? (a.task.title ?? a.task.id) : UNKNOWN },
-    { label: "停止理由", value: a.reason ?? UNKNOWN },
-    { label: "問い", value: a.question ?? UNKNOWN },
-    ...(a.choices.length ? [{ label: "選択肢", value: a.choices.join("\n") }] : []),
-    { label: "推奨と根拠", value: r ? (r.why ? `${r.choice} — ${r.why}` : r.choice) : UNKNOWN },
-    { label: "回答後", value: a.next ?? UNKNOWN },
-    ...(a.conditions.length ? [{ label: "条件", value: a.conditions.map((c) => `${c.key}: ${c.value}${c.met ? "（済み）" : ""}`).join("\n") }] : []),
-    a.source.url ? { label: "元の記録", value: a.source.label, href: a.source.url } : { label: "元の記録", value: a.source.label },
+    { label: t(m.factReason), value: a.reason ?? UNKNOWN },
+    { label: t(m.factQuestion), value: a.question ?? UNKNOWN },
+    ...(a.choices.length ? [{ label: t(m.factChoices), value: a.choices.join("\n") }] : []),
+    { label: t(m.factRecommendation), value: r ? (r.why ? `${r.choice} — ${r.why}` : r.choice) : UNKNOWN },
+    { label: t(m.factAfter), value: a.next ?? UNKNOWN },
+    ...(a.conditions.length ? [{ label: t(m.factConditions), value: a.conditions.map((c) => `${c.key}: ${c.value}${c.met ? t(m.conditionMet) : ""}`).join("\n") }] : []),
+    a.source.url ? { label: t(m.factRecord), value: a.source.label, href: a.source.url } : { label: t(m.factRecord), value: a.source.label },
   ];
 }
 
@@ -99,16 +102,16 @@ export interface AnswerButton {
 
 /** Where an answer goes (#936): the Issue it is written on (a decision, a confirmation), else the Task it is sent to. */
 export const answerTarget = (a: Pick<Ask, "kind" | "issue" | "task">) =>
-  a.kind === "decision" || a.kind === "confirmation" ? (a.issue ? `Issue #${a.issue.number}` : "Issue") : a.task ? `Task「${a.task.title ?? a.task.id}」` : "Task";
+  a.kind === "decision" || a.kind === "confirmation" ? (a.issue ? `Issue #${a.issue.number}` : "Issue") : a.task ? t(m.taskTarget, { title: a.task.title ?? a.task.id }) : "Task";
 
 /** A choice's grant (#2745): what follows ` — 許可: ` in its line; null = none. The daemon's parseAskBlock reads the same. */
 export function grantOf(choice: string): string | null {
-  const m = / — 許可[:：]\s*(.+)$/.exec(choice);
+  const m = / — 許可[:：]\s*(.+)$/.exec(choice); // compared with the daemon's choice line
   return m ? m[1]!.trim() : null;
 }
 
 /** A choice's text before its grant: what the card shows on the 送る line, the grant going on the next. */
-export const withoutGrant = (choice: string) => choice.replace(/ — 許可[:：]\s*.+$/, "");
+export const withoutGrant = (choice: string) => choice.replace(/ — 許可[:：]\s*.+$/, ""); // compared with the daemon's choice line
 
 /** `A` of `A: 置き換える — 影響: …`; the whole choice when it has no short head. */
 const choiceKey = (c: string) => /^([^:：\s]{1,12})(?::\s|：)/.exec(c)?.[1] ?? c;
@@ -121,25 +124,26 @@ const choiceKey = (c: string) => /^([^:：\s]{1,12})(?::\s|：)/.exec(c)?.[1] ??
 export function answerButtons(a: Ask): AnswerButton[] {
   const takes = new Set(a.answers);
   const target = answerTarget(a);
-  const next = a.next ?? "不明";
+  const next = a.next ?? t(m.unknown);
   const out: AnswerButton[] = [];
-  if (takes.has("grant") && a.grant) out.push({ label: "この操作だけ許可して続ける", answer: { kind: "grant" }, send: a.grant, grant: a.grant, target: a.issue ? `Issue #${a.issue.number}` : target, next, primary: true });
+  if (takes.has("grant") && a.grant) out.push({ label: t(m.btnGrant), answer: { kind: "grant" }, send: a.grant, grant: a.grant, target: a.issue ? `Issue #${a.issue.number}` : target, next, primary: true });
   if (takes.has("allow")) {
-    const tool = a.reason?.split(": ").at(-1) ?? "ツール";
-    out.push({ label: "承認して続行", answer: { kind: "allow" }, send: `${tool} を許可`, grant: null, target, next, primary: true });
+    // `send` (here and below) is sent to the daemon as the answer: it stays Japanese in either language
+    const tool = a.reason?.split(": ").at(-1) ?? "ツール"; // sent to the daemon
+    out.push({ label: t(m.btnAllow), answer: { kind: "allow" }, send: `${tool} を許可`, grant: null, target, next, primary: true });
   }
-  if (takes.has("deny")) out.push({ label: "拒否", answer: { kind: "deny" }, send: "拒否", grant: null, target, next: "Task は許可されずに続く", primary: false });
+  if (takes.has("deny")) out.push({ label: t(m.deny), answer: { kind: "deny" }, send: "拒否" /* sent to the daemon */, grant: null, target, next: t(m.denyNext), primary: false });
   if (takes.has("choice")) {
     const rec = a.recommendation ? choiceKey(a.recommendation.choice) : null;
     const choices = [...a.choices].sort((x, y) => Number(choiceKey(y) === rec) - Number(choiceKey(x) === rec));
     for (const c of choices) {
       const recommended = choiceKey(c) === rec;
-      out.push({ label: recommended ? `推奨案で進める（${choiceKey(c)}）` : `${choiceKey(c)} で進める`, answer: { kind: "choice", choice: c }, send: c, grant: grantOf(c), target, next, primary: recommended && !takes.has("grant") });
+      out.push({ label: recommended ? t(m.btnRecommended, { key: choiceKey(c) }) : t(m.btnChoice, { key: choiceKey(c) }), answer: { kind: "choice", choice: c }, send: c, grant: grantOf(c), target, next, primary: recommended && !takes.has("grant") });
     }
   }
-  if (takes.has("confirm")) out.push({ label: "確認した", answer: { kind: "confirm", ok: true }, send: `受け入れ条件「${a.question ?? ""}」を確認しました`, grant: null, target, next, primary: true });
-  if (takes.has("dismiss")) out.push({ label: "誤検知として閉じる", answer: { kind: "dismiss" }, send: "誤検知として閉じる", grant: null, target, next: "同じ当たりは次の検査でも出ない", primary: false });
-  if (takes.has("hold")) out.push({ label: "保留", answer: { kind: "hold" }, send: "## 保留 を書く。判断待ちのまま", grant: null, target, next: "続行しない", primary: false });
+  if (takes.has("confirm")) out.push({ label: t(m.btnConfirm), answer: { kind: "confirm", ok: true }, send: `受け入れ条件「${a.question ?? ""}」を確認しました` /* sent to the daemon */, grant: null, target, next, primary: true });
+  if (takes.has("dismiss")) out.push({ label: t(m.btnDismiss), answer: { kind: "dismiss" }, send: "誤検知として閉じる" /* sent to the daemon */, grant: null, target, next: t(m.dismissNext), primary: false });
+  if (takes.has("hold")) out.push({ label: t(m.btnHold), answer: { kind: "hold" }, send: "## 保留 を書く。判断待ちのまま" /* sent to the daemon */, grant: null, target, next: t(m.holdNext), primary: false });
   return out;
 }
 
@@ -160,19 +164,19 @@ export const taskAsks = (list: Ask[], taskId: string) => list.filter((a) => a.ta
 /** How the work goes on after the answer (#936), as the card's badge; null while nothing is answered. */
 export function resumeLabel(a: Pick<Ask, "state" | "resume">): { text: string; tone: "ok" | "wait" | "bad" } | null {
   const r = a.resume;
-  if (!r) return a.state === "answered" ? { text: "回答済み", tone: "ok" } : null;
-  if (r.state === "running") return { text: "実行中", tone: "ok" };
-  if (r.state === "queued") return { text: `再開待ち${r.reason ? `: ${r.reason}` : ""}`, tone: "wait" };
-  if (r.state === "failed") return { text: `再開失敗${r.reason ? `: ${r.reason}` : ""}`, tone: "bad" };
-  return { text: "回答済み", tone: "ok" };
+  if (!r) return a.state === "answered" ? { text: t(m.stateAnswered), tone: "ok" } : null;
+  if (r.state === "running") return { text: t(m.running), tone: "ok" };
+  if (r.state === "queued") return { text: r.reason ? t(m.resumeQueuedWhy, { reason: r.reason }) : t(m.resumeQueued), tone: "wait" };
+  if (r.state === "failed") return { text: r.reason ? t(m.resumeFailedWhy, { reason: r.reason }) : t(m.resumeFailed), tone: "bad" };
+  return { text: t(m.stateAnswered), tone: "ok" };
 }
 
 /** How many other PBIs wait on the question (#1674); null = none. */
-export const unblocksLine = (a: Pick<Ask, "unblocks">) => (a.unblocks.length ? `答えると ${a.unblocks.length} 件が進められる` : null);
+export const unblocksLine = (a: Pick<Ask, "unblocks">) => (a.unblocks.length ? t(m.unblocks, { count: a.unblocks.length }) : null);
 
 /** What an answer does not take away (#936), one line each, shown above the buttons. */
 // a runner's refusal already says it
-export const blockerLines = (a: Pick<Ask, "blockers">) => a.blockers.map((b) => (b.kind === "runner" ? b.detail : `回答だけでは解除されません: ${b.detail}`));
+export const blockerLines = (a: Pick<Ask, "blockers">) => a.blockers.map((b) => (b.kind === "runner" ? b.detail : t(m.blocker, { detail: b.detail })));
 
 /**
  * What a card answered on this screen shows (#936): the question the answer returned (`changed` = a 409: what changed,
@@ -221,9 +225,9 @@ const dayOf = jstDay;
 
 /** The range a policy is saved under, as the card says it. */
 export function scopeLabel(scope: PolicyScope, ask: Pick<Ask, "pbi" | "workspace" | "task">): string {
-  if (scope === "once") return "今回のみ";
-  if (scope === "pbi") return `この PBI 内（${ask.pbi ? `#${ask.pbi.number}` : ask.task?.stageIssue ? `#${ask.task.stageIssue}` : "不明"}）`;
-  return `このリポジトリ（${ask.workspace?.name ?? "不明"}）`;
+  if (scope === "once") return t(m.scopeOnce);
+  if (scope === "pbi") return t(m.scopePbi, { ref: ask.pbi ? `#${ask.pbi.number}` : ask.task?.stageIssue ? `#${ask.task.stageIssue}` : t(m.unknown) });
+  return t(m.scopeRepo, { name: ask.workspace?.name ?? t(m.unknown) });
 }
 
 /** `{a,b}` alternatives spelled out (`npm{,x}` → npm, npmx). */
@@ -244,19 +248,19 @@ export function broadTarget(op: string, target: string): string[] | null {
 /** The warning line for a broad target, or none. */
 export const broadLines = (op: string, target: string): string[] => {
   const names = broadTarget(op, target);
-  return names ? [`広い指定: ${names.join(" / ")} のどのサブコマンドにも当たります`] : [];
+  return names ? [t(m.broad, { names: names.join(" / ") })] : [];
 };
 
 /** What the person confirms before a policy is saved: operation, target (and a broad target's warning), conditions, expiry and what is answered. */
-export function policySummary(ask: Pick<Ask, "subject">, input: PolicyInput, answerText = "許可", now = Date.now()): string[] {
+export function policySummary(ask: Pick<Ask, "subject">, input: PolicyInput, answerText = t(m.allow), now = Date.now()): string[] {
   const left = input.expiresAt === null ? null : Math.max(0, Math.ceil((input.expiresAt - now) / DAY_MS));
   return [
-    `操作: ${ask.subject?.op ?? "不明"}`,
-    `対象: ${input.target}`,
+    t(m.sumOp, { op: ask.subject?.op ?? t(m.unknown) }),
+    t(m.sumTarget, { target: input.target }),
     ...broadLines(ask.subject?.op ?? "", input.target),
-    `条件: ${input.when.length ? input.when.map((w) => `${w.key}=${w.value}`).join(" ") : "なし"}`,
-    `期限: ${input.expiresAt === null ? "なし" : `${dayOf(input.expiresAt)}（あと ${left} 日）`}`,
-    `回答: ${answerText}`,
+    t(m.sumWhen, { when: input.when.length ? input.when.map((w) => `${w.key}=${w.value}`).join(" ") : t(m.none) }),
+    t(m.sumExpires, { expires: input.expiresAt === null ? t(m.none) : t(m.expiresLeft, { day: dayOf(input.expiresAt), left: left ?? 0 }) }),
+    t(m.answerLine, { answer: answerText }),
   ];
 }
 
@@ -264,12 +268,12 @@ export function policySummary(ask: Pick<Ask, "subject">, input: PolicyInput, ans
 export function previousLines(ask: Pick<Ask, "policy">): string[] {
   const p = ask.policy.previous;
   if (!p) return [];
-  const said = p.answer.kind === "choice" ? p.answer.choice : p.answer.kind === "text" ? p.answer.text : p.answer.kind === "allow" ? "許可" : p.answer.kind;
-  return [`前回の回答: ${said}（${dayOf(p.at)}、方針 ${p.id}）`, `適用しなかった理由: ${p.why}`, ...p.changes];
+  const said = p.answer.kind === "choice" ? p.answer.choice : p.answer.kind === "text" ? p.answer.text : p.answer.kind === "allow" ? t(m.allow) : p.answer.kind;
+  return [t(m.prevAnswer, { said, day: dayOf(p.at), id: p.id }), t(m.prevWhy, { why: p.why }), ...p.changes];
 }
 
 /** The policy that answered this question, as one line. */
-export const appliedLine = (ask: Pick<Ask, "policy">): string | null => (ask.policy.applied ? `方針で回答: ${ask.policy.applied.summary}` : null);
+export const appliedLine = (ask: Pick<Ask, "policy">): string | null => (ask.policy.applied ? t(m.applied, { summary: ask.policy.applied.summary }) : null);
 
 /** The "次回も使う" form of a card. */
 export interface PolicyForm {
@@ -298,7 +302,7 @@ export function policyInput(form: PolicyForm | null): PolicyInput | undefined {
 
 /* ---------- batches (#2046) ---------- */
 
-export const BATCH_LABEL: Record<AskBatch["kind"], string> = { sso: "SSO のログイン待ち", deploy: "配備の承認待ち" };
+export const BATCH_LABEL: Record<AskBatch["kind"], string> = { sso: t(m.batchSso), deploy: t(m.batchDeploy) };
 
 /** A batch's Task lines: the Task, its operation and when it stopped. */
 export const batchLines = (b: Pick<AskBatch, "asks">, now = Date.now()) => b.asks.map((a) => ({ taskId: a.taskId, text: `${a.title} — ${a.op} — ${jstClock(a.at, now)}` }));

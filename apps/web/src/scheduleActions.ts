@@ -1,13 +1,15 @@
 import type { Schedule } from "@switchboard/protocol";
+import { t } from "./i18n.ts";
+import { backlog as m } from "./i18n/backlog.ts";
 
 /** The kinds of schedule as the screen names them (#1838): the create form's select, the row's tag and the edit form's heading share this. */
 export const SCHEDULE_ACTIONS: ReadonlyArray<{ value: Schedule["action"]; label: string }> = [
-  { value: "prompt", label: "プロンプト" },
-  { value: "backlog-next", label: "バックログを進める" },
-  { value: "secret-scan", label: "認証の値の検査" },
+  { value: "prompt", label: t(m.actionPrompt) },
+  { value: "backlog-next", label: t(m.actionBacklogNext) },
+  { value: "secret-scan", label: t(m.actionSecretScan) },
   { value: "insights", label: "Claude Code Insights" },
-  { value: "approval-window", label: "承認待ちのメモ" },
-  { value: "ui-layers", label: "床・天井・壁の点検" },
+  { value: "approval-window", label: t(m.actionApprovalWindow) },
+  { value: "ui-layers", label: t(m.actionUiLayers) },
 ];
 
 /** The kinds that run on claude only (#1838, #3353): the form locks the runner on them. */

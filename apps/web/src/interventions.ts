@@ -1,11 +1,13 @@
 import type { InterventionReason, InterventionWindow } from "@switchboard/protocol";
+import { t } from "./i18n.ts";
+import { panels as m } from "./i18n/panels.ts";
 
 /** A count that may not be known: null shows 不明 and takes part in no change (never 0). */
 export type Counted = number | null;
 
 export type InterventionRow = { key: string; label: string; now: string; before: string; change: string };
 
-const show = (n: Counted): string => (n === null ? "不明" : String(+n.toFixed(1)));
+const show = (n: Counted): string => (n === null ? t(m.unknown) : String(+n.toFixed(1)));
 
 /** now − before as +3 / -2 / ±0; a dash when either is not known. */
 const diff = (now: Counted, before: Counted): string => {
@@ -15,7 +17,7 @@ const diff = (now: Counted, before: Counted): string => {
 };
 
 /** A count told with the places that could not be counted: `3（不明 2）`. */
-const withUnknown = (count: number, unknown: number): string => (unknown > 0 ? `${count}（不明 ${unknown}）` : String(count));
+const withUnknown = (count: number, unknown: number): string => (unknown > 0 ? t(m.withUnknown, { count, unknown }) : String(count));
 
 /**
  * The comparison table of one period against the one before (#651): by kind, the total, re-asks, manual resumes after what
@@ -25,38 +27,38 @@ export function interventionRows(now: InterventionWindow, before: InterventionWi
   // places that could not be counted have no time and may belong to either period: the counts are "at least" and no difference is told
   const partial = now.unknown + before.unknown > 0;
   const plain = (key: string, label: string, a: number, b: number): InterventionRow =>
-    partial ? { key, label, now: `${a} 以上`, before: `${b} 以上`, change: "—" } : { key, label, now: String(a), before: String(b), change: diff(a, b) };
+    partial ? { key, label, now: t(m.atLeast, { n: a }), before: t(m.atLeast, { n: b }), change: "—" } : { key, label, now: String(a), before: String(b), change: diff(a, b) };
   return [
-    plain("approval", "承認", now.byKind.approval, before.byKind.approval),
-    plain("classifier", "分類器の後", now.byKind.classifier, before.byKind.classifier),
-    plain("decision", "判断", now.byKind.decision, before.byKind.decision),
-    plain("resume", "再開", now.byKind.resume, before.byKind.resume),
-    plain("total", "合計", now.total, before.total),
-    plain("reAsks", "同じ理由の再質問", now.reAsks, before.reAsks),
-    { key: "afterWaits", label: "依存解消後の手動再開", now: withUnknown(now.resumesAfterWaits.count, now.resumesAfterWaits.unknown), before: withUnknown(before.resumesAfterWaits.count, before.resumesAfterWaits.unknown), change: partial || now.resumesAfterWaits.unknown + before.resumesAfterWaits.unknown > 0 ? "—" : diff(now.resumesAfterWaits.count, before.resumesAfterWaits.count) },
-    { key: "perPbi", label: "完了までの介入（PBI 1 件あたり）", now: show(now.completed.perPbi), before: show(before.completed.perPbi), change: partial ? "—" : diff(now.completed.perPbi, before.completed.perPbi) },
+    plain("approval", t(m.rowApproval), now.byKind.approval, before.byKind.approval),
+    plain("classifier", t(m.rowClassifier), now.byKind.classifier, before.byKind.classifier),
+    plain("decision", t(m.rowDecision), now.byKind.decision, before.byKind.decision),
+    plain("resume", t(m.rowResume), now.byKind.resume, before.byKind.resume),
+    plain("total", t(m.rowTotal), now.total, before.total),
+    plain("reAsks", t(m.rowReAsks), now.reAsks, before.reAsks),
+    { key: "afterWaits", label: t(m.rowAfterWaits), now: withUnknown(now.resumesAfterWaits.count, now.resumesAfterWaits.unknown), before: withUnknown(before.resumesAfterWaits.count, before.resumesAfterWaits.unknown), change: partial || now.resumesAfterWaits.unknown + before.resumesAfterWaits.unknown > 0 ? "—" : diff(now.resumesAfterWaits.count, before.resumesAfterWaits.count) },
+    { key: "perPbi", label: t(m.rowPerPbi), now: show(now.completed.perPbi), before: show(before.completed.perPbi), change: partial ? "—" : diff(now.completed.perPbi, before.completed.perPbi) },
   ];
 }
 
 /** The line that says which PBIs the numbers are over: finished ones (and the unknown among them) and the interventions on PBIs still open. */
 export function populationLine(w: InterventionWindow): string {
-  return `完了した PBI ${w.completed.pbis} 件（不明 ${w.completed.unknownPbis} 件）· 未完了 ${w.open.pbis} 件の介入 ${w.open.interventions} 回 · 完了済みの PBI への介入 ${w.done.interventions} 回`;
+  return t(m.population, { done: w.completed.pbis, unknown: w.completed.unknownPbis, open: w.open.pbis, openInterventions: w.open.interventions, doneInterventions: w.done.interventions });
 }
 
 /** The places that could not be counted at all: told so that the totals read as "at least". */
-export const unknownLine = (w: InterventionWindow): string | null => (w.unknown > 0 ? `数えられなかった場所が ${w.unknown} 件あります（取り込み前の workspace、写しに無い Issue）。上の数は「それ以上」で、増減は出しません` : null);
+export const unknownLine = (w: InterventionWindow): string | null => (w.unknown > 0 ? t(m.uncounted, { n: w.unknown }) : null);
 
 export const REASON_LABEL: Record<InterventionReason["reason"], string> = {
-  "usage-limit": "使用上限",
-  "github-limit": "GitHub の上限",
-  "disk-full": "ディスクの空き切れ",
-  transient: "一時障害",
-  auth: "認証",
-  permission: "承認待ち",
-  input: "入力待ち",
-  decision: "判断待ち",
-  depends: "依存の待ち",
-  unknown: "不明",
+  "usage-limit": t(m.reasonUsageLimit),
+  "github-limit": t(m.reasonGithubLimit),
+  "disk-full": t(m.reasonDiskFull),
+  transient: t(m.reasonTransient),
+  auth: t(m.reasonAuth),
+  permission: t(m.reasonPermission),
+  input: t(m.reasonInput),
+  decision: t(m.reasonDecision),
+  depends: t(m.reasonDepends),
+  unknown: t(m.unknown),
 };
 
 export type ReasonRow = {

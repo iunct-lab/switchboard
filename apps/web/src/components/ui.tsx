@@ -3,6 +3,8 @@ import type { GithubBudget, RunnerId, Task, TeleportProgress } from "@switchboar
 import { copyText } from "../clipboard.ts";
 import { jstClock } from "../time.ts";
 import { runnerLabel } from "../runners.ts";
+import { t } from "../i18n.ts";
+import { task as m } from "../i18n/task.ts";
 
 export function RunnerPill(props: { runner: RunnerId }) {
   // a runner only a newer daemon knows still shows its id rather than an empty pill
@@ -14,7 +16,7 @@ export const fmtClock = jstClock;
 
 /** GitHub's GraphQL budget left (#549): "3,965 / 5,000 · 11:31 に戻る". */
 export function githubBudgetLabel(g: GithubBudget, now = Date.now()): string {
-  return `${g.remaining.toLocaleString()} / ${g.limit.toLocaleString()} · ${fmtClock(g.resetsAt * 1000, now)} に戻る`;
+  return t(m.githubBudget, { remaining: g.remaining.toLocaleString(), limit: g.limit.toLocaleString(), time: fmtClock(g.resetsAt * 1000, now) });
 }
 
 /** Less than 2 tenths left: the share Home's usage meter warns at (above 0.8 used), not the daemon's constant copied. */
@@ -32,9 +34,9 @@ export function BackgroundTag(props: { background: Task["background"]; compact?:
   if (!b) return null;
   const n = b.jobs.length || 1;
   const min = Math.max(0, Math.floor((Date.now() - b.since) / 60_000));
-  const text = `裏で実行中 ${n} 件 ${min} 分`;
+  const text = t(m.background, { n, min });
   return (
-    <span className="tag" title={b.jobs.join("\n") || "内容不明"}>
+    <span className="tag" title={b.jobs.join("\n") || t(m.contentsUnknown)}>
       {props.compact || !b.jobs.length ? text : `${text}: ${b.jobs.join(" / ")}`}
     </span>
   );
@@ -45,25 +47,25 @@ export function ResumeTag(props: { resumeAt: Task["resumeAt"]; reason: Task["res
   const when = fmtClock(props.resumeAt);
   if (props.reason === "github")
     return (
-      <span className="tag resume" title={`GitHub の API 上限（1 時間の枠）で待機。${when} に枠が戻る見込み（自動再開はランナーごとの設定。Task の Brief から今すぐ再開・取り消しができます）`}>
-        {props.compact ? "GitHub 待ち" : `GitHub の上限待ち（${when} に再開）`}
+      <span className="tag resume" title={t(m.resumeGithubTitle, { when })}>
+        {props.compact ? t(m.resumeGithubCompact) : t(m.resumeGithub, { when })}
       </span>
     );
   if (props.reason === "disk")
     return (
-      <span className="tag resume" title="ディスクの空き切れで停止。空きが 1 GiB に戻るまで待ちます（5 分ごとに確認。自動再開はランナーごとの設定。Task の Brief から今すぐ再開・取り消しができます）">
-        {props.compact ? "空き待ち" : `空き待ち（${when} に確認）`}
+      <span className="tag resume" title={t(m.resumeDiskTitle)}>
+        {props.compact ? t(m.resumeDiskCompact) : t(m.resumeDisk, { when })}
       </span>
     );
   if (props.plannedAt != null)
     return (
-      <span className="tag resume" title={`ランナーの使用上限で停止。${when} に 1 回試し、だめなら ${fmtClock(props.plannedAt)} に再開（自動再開はランナーごとの設定。Task の Brief から今すぐ再開・取り消しができます）`}>
-        {props.compact ? "再開待ち" : `再開待ち ${when} に試す`}
+      <span className="tag resume" title={t(m.resumePlannedTitle, { when, planned: fmtClock(props.plannedAt) })}>
+        {props.compact ? t(m.resumeQueued) : t(m.resumePlanned, { when })}
       </span>
     );
   return (
-    <span className="tag resume" title={`ランナーの使用上限で停止。${when} に枠が戻る見込み（自動再開はランナーごとの設定。Task の Brief から今すぐ再開・取り消しができます）`}>
-      {props.compact ? "再開待ち" : `再開待ち ${when}`}
+    <span className="tag resume" title={t(m.resumeTitle, { when })}>
+      {props.compact ? t(m.resumeQueued) : t(m.resumeAt, { when })}
     </span>
   );
 }
@@ -72,7 +74,7 @@ export function ResumeTag(props: { resumeAt: Task["resumeAt"]; reason: Task["res
 export function OriginTag(props: { origin: Task["origin"] }) {
   if (props.origin !== "terminal") return null;
   return (
-    <span className="tag origin" title="Terminal で実行した Claude Code のセッション（~/.claude/projects から取り込み）。返信すると Switchboard 側で同じセッションを再開します">
+    <span className="tag origin" title={t(m.originTitle)}>
       Terminal
     </span>
   );
@@ -82,11 +84,11 @@ export function OriginTag(props: { origin: Task["origin"] }) {
 export function ShadowTag(props: { task: Pick<Task, "shadowOf" | "shadowStopped"> }) {
   if (!props.task.shadowOf) return null;
   const title = props.task.shadowStopped
-    ? "並走 Task（停止済み）: 主 Task への返信はもう写されません。ここへ直接送ることはできます"
-    : "並走 Task: 別の Task と同じ依頼を別ランナーで実行しています。主 Task への返信はここにも写されます（承認待ちの間は除く）。承認・差分・台帳はこの Task 単独のものです";
+    ? t(m.shadowStoppedTitle)
+    : t(m.shadowTitle);
   return (
     <span className={`tag shadow ${props.task.shadowStopped ? "stopped" : ""}`} title={title}>
-      並走{props.task.shadowStopped ? "・停止" : ""}
+      {t(m.shadowTag)}{props.task.shadowStopped ? t(m.shadowStoppedSuffix) : ""}
     </span>
   );
 }
@@ -96,12 +98,12 @@ export function ShadowTag(props: { task: Pick<Task, "shadowOf" | "shadowStopped"
  * the button. Always shown (not on hover): a phone has no hover. A failure goes to `onError` instead of doing nothing.
  */
 export function CopyButton(props: { text: () => string; partial?: boolean; label?: string; onError: (msg: string) => void }) {
-  const label = props.label ?? "コピー";
+  const label = props.label ?? t(m.copy);
   const [done, setDone] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
   useEffect(() => () => clearTimeout(timer.current), []);
   const copy = () => {
-    const shown = props.partial ? "途中までコピーしました" : "コピーしました";
+    const shown = props.partial ? t(m.copiedPartial) : t(m.copied);
     copyText(props.text()).then(
       () => {
         setDone(shown);
@@ -125,12 +127,12 @@ export const pct = (x: number) => `${Math.round(x * 100)}%`;
 export function teleportView(p: TeleportProgress | null | undefined): { text: string; question?: string; answerInTerminal: boolean; active: boolean } | null {
   if (!p) return null;
   switch (p.phase) {
-    case "teleporting": return { text: "公式CLIでTeleport中…", answerInTerminal: false, active: true };
-    case "needs-input": return { text: "公式CLIが確認を求めています。ターミナルで答えてください", question: p.question, answerInTerminal: true, active: true };
+    case "teleporting": return { text: t(m.teleporting), answerInTerminal: false, active: true };
+    case "needs-input": return { text: t(m.needsInput), question: p.question, answerInTerminal: true, active: true };
     case "exiting":
-    case "importing": return { text: "Local Taskへ取込み中…", answerInTerminal: false, active: true };
-    case "done": return { text: "取込みを確認しました", answerInTerminal: false, active: false };
-    case "unconfirmed": return { text: p.message ?? "取込み結果は未確認です", answerInTerminal: false, active: false };
+    case "importing": return { text: t(m.importing), answerInTerminal: false, active: true };
+    case "done": return { text: t(m.importDone), answerInTerminal: false, active: false };
+    case "unconfirmed": return { text: p.message ?? t(m.importUnconfirmed), answerInTerminal: false, active: false };
   }
 }
 
@@ -139,9 +141,9 @@ export function teleportView(p: TeleportProgress | null | undefined): { text: st
 export function CloudSourceTag(props: { source: Task; switched: boolean; onOpen: () => void }) {
   return (
     <>
-      <span className="tag" title="このTaskへの返信で再開します。Cloudへ自動同期しません。">Cloudから取込み</span>
-      <button className="ghost" onClick={props.onOpen}>元Cloud Taskを開く</button>
-      {props.switched && <p className="hint switched-from-cloud" role="status">{`Cloud Task「${props.source.title}」から、取り込んだLocal Taskに切り替わりました`}</p>}
+      <span className="tag" title={t(m.cloudSourceTitle)}>{t(m.cloudSource)}</span>
+      <button className="ghost" onClick={props.onOpen}>{t(m.openCloudSource)}</button>
+      {props.switched && <p className="hint switched-from-cloud" role="status">{t(m.switchedFromCloud, { title: props.source.title })}</p>}
     </>
   );
 }
@@ -152,20 +154,20 @@ export function CloudSessionNotice(props: { session: Task["cloudSession"]; onTel
   const view = teleportView(props.progress);
   const valid = ref !== null && /^session_[A-Za-z0-9_-]+$/.test(ref.id) && ref.url === `https://claude.ai/code/${ref.id}`;
   return <div className="cloud-session card" role="status">
-    <p>Cloud側の状態は未確認です。開始プロセスの終了は、Cloud作業の完了を意味しません。</p>
-    {valid ? <a className="btn pri" href={ref.url} target="_blank" rel="noopener noreferrer">公式Cloudで続ける</a> : <p>Cloudセッションの参照を確認できていません。公式 Web で作成の有無を確認してください。</p>}
+    <p>{t(m.cloudUnchecked)}</p>
+    {valid ? <a className="btn pri" href={ref.url} target="_blank" rel="noopener noreferrer">{t(m.continueInCloud)}</a> : <p>{t(m.cloudRefUnchecked)}</p>}
     {props.onTeleport && <>
-      <button className="btn" disabled={!!props.teleportReason || view?.active} onClick={props.onTeleport}>ローカルで続ける</button>
+      <button className="btn" disabled={!!props.teleportReason || view?.active} onClick={props.onTeleport}>{t(m.continueLocally)}</button>
       {props.teleportReason && <p className="hint">{props.teleportReason}</p>}
       {view && <div role="status" data-testid="teleport-progress">
         <p>{view.text}</p>
         {view.question && <pre>{view.question}</pre>}
-        {view.answerInTerminal && <button className="btn" onClick={props.onAnswerInTerminal}>ターミナルで答える</button>}
+        {view.answerInTerminal && <button className="btn" onClick={props.onAnswerInTerminal}>{t(m.answerInTerminal)}</button>}
       </div>}
-      <p className="hint">同じアカウント・リポジトリのclaude.aiサブスクリプション認証が必要です。Cloudの作業ブランチがpush済みか確認してください。公式CLIでCloudの変更を取り込みます。確認を求められたときだけターミナルで答えます。取消・失敗は自動再試行しません。</p>
+      <p className="hint">{t(m.teleportHint)}</p>
     </>}
-    {props.onRefresh && <button className="btn" onClick={props.onRefresh}>Local Taskを確認</button>}
-    {props.localTasks?.map(t => <p key={t.id}><button className="btn" onClick={() => props.onOpenTask?.(t.id)}>ローカルの Task: {t.title}</button> <span className="hint">作業コピー: {t.cwd}</span></p>)}
-    <p className="hint">Cloud側の続行・承認・停止は公式 Web で操作してください。Localへの取込み後はCloudへ自動同期しません。</p>
+    {props.onRefresh && <button className="btn" onClick={props.onRefresh}>{t(m.checkLocalTask)}</button>}
+    {props.localTasks?.map(lt => <p key={lt.id}><button className="btn" onClick={() => props.onOpenTask?.(lt.id)}>{t(m.localTask, { title: lt.title })}</button> <span className="hint">{t(m.workCopy, { cwd: lt.cwd })}</span></p>)}
+    <p className="hint">{t(m.cloudOps)}</p>
   </div>;
 }

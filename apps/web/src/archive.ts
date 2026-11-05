@@ -1,10 +1,12 @@
 import type { Health } from "./api.ts";
 import { jstStamp } from "./time.ts";
+import { t } from "./i18n.ts";
+import { task as m } from "./i18n/task.ts";
 
 /** The top banner for a problem with the daily history archive (#1201). */
 export function archiveBanner(p: NonNullable<Health["archive"]>): string {
   const at = jstStamp(p.at);
-  if (p.kind === "failed") return `履歴のアーカイブが ${at} に失敗しました（終了コード ${p.detail ?? "不明"}）。sb-archive のログ（journalctl -u sb-archive）を確認してください`;
-  if (p.kind === "stuck") return `履歴のアーカイブが ${at} に始まったまま終わっていません（メモリ不足などで止まった可能性）`;
-  return `履歴のアーカイブが ${at} から上がっていません`;
+  if (p.kind === "failed") return t(m.archiveFailed, { at, code: p.detail ?? t(m.unknown) });
+  if (p.kind === "stuck") return t(m.archiveStuck, { at });
+  return t(m.archiveMissing, { at });
 }

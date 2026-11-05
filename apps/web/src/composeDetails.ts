@@ -1,4 +1,6 @@
 import type { ExecutionMode } from "@switchboard/protocol";
+import { t } from "./i18n.ts";
+import { home } from "./i18n/home.ts";
 import { titleToSend } from "./taskTitle.ts";
 
 /** What the 詳細 of Home's compose form holds (#3354): the values a request rarely sets. */
@@ -16,12 +18,12 @@ const TITLE_CHARS = 20;
 export function detailsSummary(v: ComposeDetails, defaults: { model: string; shadow: boolean; briefTitle?: string }): string {
   const parts: string[] = [];
   const title = titleToSend(v.title, defaults.briefTitle) ?? "";
-  if (title) parts.push(`タイトル: ${[...title].length > TITLE_CHARS ? `${[...title].slice(0, TITLE_CHARS).join("")}…` : title}`);
-  if (v.executionMode === "cloud") parts.push("実行場所: クラウド");
-  if (v.model !== defaults.model) parts.push(`モデル: ${v.model || "CLI 既定"}`);
-  if (v.effort) parts.push(`思考: ${v.effort}`);
-  if (v.budget.trim()) parts.push(`予算 $${v.budget.trim()}`);
-  if (v.shadow !== defaults.shadow) parts.push(`並走: ${v.shadow ? "DAK" : "なし"}`);
+  if (title) parts.push(t(home.sumTitle, { title: [...title].length > TITLE_CHARS ? `${[...title].slice(0, TITLE_CHARS).join("")}…` : title }));
+  if (v.executionMode === "cloud") parts.push(t(home.sumCloud));
+  if (v.model !== defaults.model) parts.push(t(home.sumModel, { model: v.model || t(home.cliDefault) }));
+  if (v.effort) parts.push(t(home.sumEffort, { effort: v.effort }));
+  if (v.budget.trim()) parts.push(t(home.sumBudget, { budget: v.budget.trim() }));
+  if (v.shadow !== defaults.shadow) parts.push(t(home.sumShadow, { shadow: v.shadow ? "DAK" : t(home.none) }));
   return parts.join(" · ");
 }
 

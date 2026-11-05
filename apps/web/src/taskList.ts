@@ -1,13 +1,15 @@
 import type { Task } from "@switchboard/protocol";
+import { t } from "./i18n.ts";
+import { common } from "./i18n/common.ts";
 
 /** The rail's state filter (#1142): four fixed choices, not saved. */
 export type StatusFilter = "all" | "active" | "done" | "stopped";
 
 export const STATUS_FILTERS: Array<{ value: StatusFilter; label: string }> = [
-  { value: "all", label: "全部" },
-  { value: "active", label: "実行中・待ち" },
-  { value: "done", label: "完了" },
-  { value: "stopped", label: "エラー・中断" },
+  { value: "all", label: t(common.filterAll) },
+  { value: "active", label: t(common.filterActive) },
+  { value: "done", label: t(common.filterDone) },
+  { value: "stopped", label: t(common.filterStopped) },
 ];
 
 /** Rows the rail draws at once, and how many more each 「さらに表示」 adds. */

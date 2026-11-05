@@ -17,6 +17,12 @@ test("the kit's candidates are read: p0-pipeline has the 8 stage entries, p1-dir
   expect(Object.keys(loadProcess("p1-direct").entries)).toEqual(["direct"]);
 });
 
+test("p1-direct's entry makes no PBI or Task Issue and leaves one line on the request (#3690)", () => {
+  const text = renderEntry(loadProcess("p1-direct"), "direct", { signal: "#1" });
+  expect(text).toContain("PBI・Task Issue は作らない");
+  expect(text).toContain("`直行: PR #<番号>`");
+});
+
 test("a definition without id, version or title is refused with the path and the reason", () => {
   expect(() => parseProcessDef("---\nversion: 1\ntitle: t\n---\n", "x.md")).toThrow("x.md: frontmatter needs `id`");
   expect(() => parseProcessDef("---\nid: a\ntitle: t\n---\n", "x.md")).toThrow("needs an integer `version`");

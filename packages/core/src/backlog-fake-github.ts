@@ -79,6 +79,7 @@ export function fakeGithub(now: () => number) {
       if (q.includes("projectItems")) return answer({ data: { node: { projectItems: { nodes: [...items].filter(([, i]) => i.issue === v.c).map(([id]) => ({ id, project: { id: "P_1" } })) } } } });
       if (q.includes("updateProjectV2ItemFieldValue")) return (items.get(v.i)!.fields.Status = STATUS[Number(String(v.value).slice(1)) - 1]!), answer({ data: {} });
       if (q.includes("deleteProjectV2Item")) return items.delete(v.i), answer({ data: {} });
+      if (q.includes("deleteIssueComment")) return [...issues.values()].forEach((i) => (i.comments = i.comments.filter((c) => c.node_id !== v.i))), answer({ data: {} });
       if (q.includes("removeSubIssue")) return (byId(v.c).parent = null), answer({ data: {} });
       if (q.includes("addSubIssue")) return (byId(v.c).parent = byId(v.p).number), answer({ data: {} });
       if (q.includes("... on Issue{ node_id")) {

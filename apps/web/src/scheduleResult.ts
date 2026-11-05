@@ -1,5 +1,7 @@
 import type { Schedule } from "@switchboard/protocol";
 import { jstStamp } from "./time.ts";
+import { t } from "./i18n.ts";
+import { backlog as m } from "./i18n/backlog.ts";
 
 /** `M/D HH:MM` in JST, as the Task list shows times. */
 const stamp = jstStamp;
@@ -15,7 +17,7 @@ export function scheduleResultLine(s: Pick<Schedule, "action" | "lastResult">): 
   const r = s.lastResult;
   // the scan itself failed (the scheduler's `repos: 0, failed: 1` with the reason as its one line); two checkouts the
   // scanner could not place (`failed: 2`) are a normal result and keep their count below
-  if (r.repos === 0 && r.failed === 1 && r.hits === 0) return `最後の検査 ${stamp(r.at)}: 失敗（${r.lines[0] ?? "理由なし"}）`;
-  const failed = r.failed > 0 ? ` / 検査できなかった ${r.failed}` : "";
-  return `最後の検査 ${stamp(r.at)}: ${r.repos} リポジトリ / 当たり ${r.hits} 件${failed}`;
+  if (r.repos === 0 && r.failed === 1 && r.hits === 0) return t(m.scanFailed, { at: stamp(r.at), reason: r.lines[0] ?? t(m.scanNoReason) });
+  const failed = r.failed > 0 ? t(m.scanUnchecked, { n: r.failed }) : "";
+  return t(m.scanResult, { at: stamp(r.at), repos: r.repos, hits: r.hits, failed });
 }

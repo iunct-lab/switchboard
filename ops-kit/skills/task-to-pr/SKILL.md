@@ -16,7 +16,7 @@ description: Task Issue 1 件を最小の実装で 1 本の PR にする型。�
    - **要件の解釈**（どちらの読みで作るか）: 実装しない。その Task を In progress のまま止め、他の Task に進む。勝手に一方の解釈で作らない
    - **お金 / 他 OS / 破壊的操作**: 安全側（何も消費しない、既定 off、消さない）だけ実装して進む。問いの `## 判断待ち`（ラベル `needs-decision`）は出したまま残す（利用者が判断待ちの一覧で見つけられるように）
 3. 着手コメント（3 行: ブランチ / 進め方 / 想定する検証。`ops-kit backlog comment <Task> --body-file -`）→ `ops-kit backlog set <Task> Status "In progress"`
-4. 他のセッションと同じファイルを触らないか（並列ガードのコマンドが CLAUDE.md にあるとき。以下 `<guard>`）: 着手コメントの前に `<guard> overlap <Task>`、In progress にした後に `--claimed` を付けてもう一度。exit 1 / 2 なら着手せず（In progress にしていたら `ops-kit backlog set <Task> Status Backlog` で戻し）、重なった相手とパスを Task にコメントして（`ops-kit backlog comment <Task> --body-file -`）別の Task に進む（`pbi-complete` の「並列で動かす」）
+4. 他のセッションと同じファイルを触らないか（並列ガードのコマンドが CLAUDE.md にあるとき。以下 `<guard>`）: 着手コメントの前に `<guard> overlap <Task>`、In progress にした後に `--claimed` を付けてもう一度。exit 1 / 2 なら着手せず（In progress にしていたら `ops-kit backlog set <Task> Status Backlog` で戻し）、重なった相手とパスを Task にコメントして（`ops-kit backlog comment <Task> --body-file -`）別の Task に進む（`pbi-complete` の「並列で動かす」）。進める Task が無く止まるなら、停止の報告（reason `depends`）の `conditions` に `overlap` の出力の `conditions` をそのまま写す
 
 ### 2. 場所を作る
 
