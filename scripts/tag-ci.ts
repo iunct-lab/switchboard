@@ -12,7 +12,9 @@
  * Output: one line of JSON, the tags looked at, newest first. Exit 0 = the newest tag passed (now or before), 1 = it
  * failed, 2 = nothing judged (no tag, no Release, not run, or recordings asked for and missing).
  * With SWITCHBOARD_FIXTURES given, a tag whose recordings are missing on this host is not run and gets no result: that
- * says what the host lacks, not how the tag is, and it stops the walk. At most MAX_TAG_RUNS tags run in one go.
+ * says what the host lacks, not how the tag is, and it stops the walk. Before that, Switchboard itself (no --repo) syncs
+ * the recordings with their branch (#3532, `bun scripts/fixtures.ts sync`): the new ones go to it and the missing ones
+ * come back from it; a failed sync is logged and the check above judges. At most MAX_TAG_RUNS tags run in one go.
  * For the newest tag (#2936; a fail before the walk and again after it, anything else after it; Switchboard itself, no --repo): a fail files a request (type:request, from a
  * scheduled check) unless one with the same title is open, which gets a comment naming the tag instead; a pass comments
  * on the open tag-CI requests (they stay open: the PBI that fixed it closes them). What an open request already says is
@@ -121,6 +123,8 @@ export interface TagCiDeps extends Omit<Deps, "sh"> {
   onNewest?: (entries: TagCiEntry[]) => Promise<void>;
   /** Called for a tag not judged because of missing recordings: the public sync's watch names them (#3601). */
   onSkip?: (tag: string, missing: string[]) => void;
+  /** With SWITCHBOARD_FIXTURES given, run first: syncs the recordings folder with its branch (Switchboard itself only). Throws on a failure. */
+  sync?: () => Promise<void>;
   /** Creates the Releases missing from the newest tags and returns their names (release-tag.ts's repairReleases). */
   repair?: () => Promise<string[]>;
 }
@@ -173,6 +177,14 @@ export async function tagCi(d: TagCiDeps, repo: string, root: string, cache = jo
   // one heavy slot for the whole run (every tag it walks): the same as local-ci, whose steps it runs with every test
   return d.slot(`tag-ci ${repo}`, async () => {
     await d.sh(["git", "-C", root, "fetch", "-q", "origin", "--tags", "--force"]);
+    // a recording made since the last run reaches the branch, and one this host lost comes back before the check reads the folder
+    if (d.sync && requireRecordings()) {
+      try {
+        await d.sync();
+      } catch (e) {
+        d.log(`録画を枝と同期できなかった（${(e as Error).message}）`);
+      }
+    }
     // a tag left without a Release would stop every run here until someone made it by hand (v1.149.0, v1.166.0)
     if (d.repair) {
       try {
@@ -456,7 +468,10 @@ if (import.meta.main) {
     // the same lock as release-tag.ts on this clone: the two would otherwise both create the missing Release
     return withReleaseLock(must(at, ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]), () => repairReleases(at, t.repo));
   };
-  const entries = await tagCi({ sh, step, log, onNewest: report, onSkip, repair, slot: (name, fn) => withHeavySlot(name, fn) }, t.repo, t.root);
+  // fixtures.ts's own clone is t.root without --repo; its output goes to stderr: stdout is the JSON only
+  const sync = async () => void log((await sh([process.execPath, join(import.meta.dir, "fixtures.ts"), "sync"], t.root)).trim());
+  const self = !process.argv.includes("--repo");
+  const entries = await tagCi({ sh, step, log, onNewest: report, onSkip, repair, ...(self ? { sync } : {}), slot: (name, fn) => withHeavySlot(name, fn) }, t.repo, t.root);
   console.log(JSON.stringify(entries));
   await report(entries);
   if (!process.argv.includes("--repo")) {

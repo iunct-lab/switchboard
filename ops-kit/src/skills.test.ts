@@ -300,7 +300,7 @@ test("skills: the backlog is read and written only through ops-kit backlog (#307
     ["task-to-pr", "着手コメント（3 行"],
     ["task-to-pr", 'Status "In review"'],
     ["task-to-pr", "PR: #<n>"],
-    ["pbi-complete", "どちらも無く Task も全部閉じていれば"],
+    ["pbi-complete", "1 で在りかの無い行（満たせなかった行を含む）が残っておらず、Task も全部閉じていれば"],
     ["pbi-complete", "PBI の Status が Ready でなければ"],
     ["cross-runner-review", "転記したら Task の Issue に 1 行"],
     ["pbi-complete", "後回し: <PR #n / Task #n> と <path> が重なる」とコメント"],
@@ -336,4 +336,18 @@ test("skills: the five delivery skills say what a workspace without a remote doe
   expect(read("pbi-complete")).toContain("<ローカル CI> --change <変更>");
   expect(read("cross-runner-review")).toContain("ops-kit backlog comment <変更> --body-file");
   expect(read("stacked-pr-delivery")).toContain("積まない");
+});
+
+test("skills: a PBI closes only when every acceptance criterion links its evidence, said in issue-workflow and pointed to from pbi-complete (#3793)", () => {
+  const read = (name: string) => readFileSync(join(skills, name, "SKILL.md"), "utf8");
+  const rules = read("issue-workflow");
+  const duty = rules.slice(rules.indexOf("4. **完了時（PBI）**"), rules.indexOf("5. **Milestone**"));
+  for (const word of ["証跡の在りか", "結果コメントか PR の URL", "コマンドと出力", "`## 回答` のコメントの URL", "在りかを書けない行は `- [ ]` のまま理由を書き", "その PBI は閉じない", "「利用者確認の項目」"]) expect({ word, said: duty.includes(word) }).toEqual({ word, said: true });
+  const steps = read("pbi-complete");
+  const close = steps.slice(steps.indexOf("## 6. PBI を閉じる"), steps.indexOf("## 報告"));
+  const one = close.slice(close.indexOf("\n1. "), close.indexOf("\n2. "));
+  expect(one).toContain("`issue-workflow` の記録の義務 4");
+  expect(one).not.toContain("テスト名 / コマンドと出力 / 画面で見た事実");
+  const four = close.slice(close.indexOf("\n4. "), close.indexOf("\n5. "));
+  expect(four).toContain("1 で在りかの無い行（満たせなかった行を含む）が残っておらず");
 });

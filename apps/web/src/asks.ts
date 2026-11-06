@@ -129,7 +129,8 @@ export function answerButtons(a: Ask): AnswerButton[] {
   if (takes.has("grant") && a.grant) out.push({ label: t(m.btnGrant), answer: { kind: "grant" }, send: a.grant, grant: a.grant, target: a.issue ? `Issue #${a.issue.number}` : target, next, primary: true });
   if (takes.has("allow")) {
     // `send` (here and below) is sent to the daemon as the answer: it stays Japanese in either language
-    const tool = a.reason?.split(": ").at(-1) ?? "ツール"; // sent to the daemon
+    // ui-strings: value "ツール" — part of the answer sent to the daemon
+    const tool = a.reason?.split(": ").at(-1) ?? "ツール";
     out.push({ label: t(m.btnAllow), answer: { kind: "allow" }, send: `${tool} を許可`, grant: null, target, next, primary: true });
   }
   if (takes.has("deny")) out.push({ label: t(m.deny), answer: { kind: "deny" }, send: "拒否" /* sent to the daemon */, grant: null, target, next: t(m.denyNext), primary: false });

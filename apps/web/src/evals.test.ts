@@ -5,7 +5,7 @@ import type { EvalsSortKey } from "./evals.ts";
 import { endLabel, evalCells, evalFilterOptions, evalRowWarn, filterEvalRows, firstSortDir, fmtDuration, gapLabel, humanLabel, judgeAverage, judgeRows, metricRows, modelsLabel, sortEvalRows } from "./evals.ts";
 
 const rules = (over: Partial<RuleEval["metrics"]> = {}): RuleEval => ({
-  metrics: { turns: 2, toolCalls: 7, toolFailures: 0, errors: 0, asks: 1, denials: 0, stops: 0, stopReasons: {}, userInstructions: 1, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false, durationMs: 184_000, classifier: null, ...over },
+  metrics: { turns: 2, toolCalls: 7, toolFailures: 0, errors: 0, asks: 1, denials: 0, stops: 0, stopReasons: {}, userInstructions: 1, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false, durationMs: 184_000, classifier: null, delegatedModel: null, ...over },
   status: "done", outcome: "unknown", costUsd: 0.0123, by: "rules@3", ts: 1,
 });
 const evals = (r: RuleEval | null, judge: JudgeEval | null = null): TaskEvals => ({ rules: r, judge, human: null, models: [] });
@@ -28,6 +28,11 @@ describe("evals rows (#1218)", () => {
     // an earlier stop, then a turn that failed by itself: both are marked
     expect(warns({ lastEnd: "aborted", daemonStops: 1, lastCutByDaemon: false })).toEqual(["デーモン停止", "終わり方"]);
     expect(metricRows(evals(rules({ daemonStops: 2 }))).find((r) => r.label === "デーモン停止")?.value).toBe("2");
+  });
+
+  test("metricRows: delegated model — a row with the model and （試験） only when the Task handed its Tasks to one (#2769)", () => {
+    expect(metricRows(evals(rules())).some((r) => r.label === "Task ごとの実装")).toBe(false);
+    expect(metricRows(evals(rules({ delegatedModel: "claude-sonnet-5-5" }))).at(-1)).toEqual({ label: "Task ごとの実装", value: "claude-sonnet-5-5（試験）" });
   });
 
   test("metricRows: classifier — counts with categories, unknown when none (#2236)", () => {

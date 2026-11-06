@@ -22,6 +22,8 @@ export const BACKLOG_USAGE = `  backlog list [--search <語>] [--label <l>]... [
       Issue 1 件（本文、コメント、Project のフィールド、送信待ち、同期の状態）。<issue> は番号か、ここで作ってまだ番号の無い Issue の localId。保留中の編集（競合・失敗・結果不明）は「保留:」の行に理由つき
   backlog retry <issue>
       GitHub が受け付けなかった（失敗で保留中の）編集を、原因を直した後に全部送り直す（アプリの Task の中だけ）。無ければ 1
+  backlog withdraw <issue> [--reason <文>]
+      結果不明・失敗で保留中の編集を、GitHub に何も書かずに全部取り下げる（中身を確かめてから。アプリの Task の中だけ）。無ければ 1
   backlog create --title <t> [--body-file <f|->] [--label <l>]... [--milestone <m>] [--parent <n>] [--field <name>=<value>]... [--head <枝> --base <枝>]
       --head / --base: PR の代わりのローカルの「変更」として作る（GitHub 連携の無い workspace だけ。両方そろえる）
   backlog edit <issue> [--title <t>] [--body-file <f|->] [--add-label <l>]... [--remove-label <l>]... [--state open|closed]
@@ -29,6 +31,7 @@ export const BACKLOG_USAGE = `  backlog list [--search <語>] [--label <l>]... [
       --reason: 閉じた理由（--state closed と一緒だけ。重複・やらないと決めた Issue は not-planned。閉じている Issue の理由の付け替えも同じ形）
   backlog comment <issue> --body-file <f|->
   backlog set <issue> <field> <value>
+      <value> が空（""）ならそのフィールドを空にする
   backlog triage <issue> <area> <kind> <priority> [<phase>] [<parent>] [<status>]
       編集はアプリに保存して返り、アプリが後で GitHub に送る（GitHub 連携の無い workspace ではその場で確定し、作成で番号が付く。
       BACKLOG_URL が無ければ GitHub にその場で書く）。認証に使える値を含む文は送らない
@@ -295,6 +298,8 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
           io.out(`#${number(ref)} を保存しました`);
           return 0;
         }
+        // an empty value empties the field (#3810): the app sends a clear for null
+        if (value === "") return await edit(ref, { fields: { [field]: null } });
         // GitHub's field type decides when it is sent (backlog-send.ts): a number only where the stored value is one
         const ws = await workspace();
         const d = (await api("GET", `/${encodeURIComponent(issueRef(ref))}?workspaceId=${encodeURIComponent(ws.workspaceId)}`)) as Detail;
@@ -336,6 +341,31 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
           sent++;
         }
         io.out(`#${issueRef(ref)} の失敗した編集 ${failed.length} 件を送り直します`);
+        return 0;
+      }
+      case "withdraw": {
+        // a held post or edit taken back (#3804): nothing written to GitHub, the Issue's edits after it go on
+        const reason = take("--reason") ?? "エージェントが中身を確かめて取り下げ";
+        const [ref, ...extra] = args;
+        if (!ref || extra.length || !reason.trim()) throw new Refused("backlog withdraw <issue> [--reason <文>]");
+        noSecrets(reason);
+        if (direct) throw new Refused("withdraw はアプリの Task の中だけ（BACKLOG_URL が無いので取り下げるものがありません）");
+        const ws = await workspace();
+        const d = (await api("GET", `/${encodeURIComponent(issueRef(ref))}?workspaceId=${encodeURIComponent(ws.workspaceId)}`)) as Detail;
+        // a create last: the Issue's operations after it are taken back first
+        const held = (d.held ?? []).filter((h) => h.status === "unknown" || h.status === "failed").sort((a, b) => Number(a.kind === "create") - Number(b.kind === "create"));
+        if (!held.length) throw new Refused(`#${issueRef(ref)} に結果不明・失敗で保留中の編集はありません`);
+        let done = 0;
+        for (const h of held) {
+          try {
+            await api("PATCH", `/${encodeURIComponent(issueRef(ref))}`, { workspaceId: ws.workspaceId, withdraw: { operation: h.operation, reason } });
+          } catch (e) {
+            if (done) io.out(`#${issueRef(ref)} の保留中の編集 ${held.length} 件のうち ${done} 件を取り下げました。残りは止まりました`);
+            throw e;
+          }
+          done++;
+        }
+        io.out(`#${issueRef(ref)} の保留中の編集 ${held.length} 件を取り下げました（GitHub には何も書いていません）`);
         return 0;
       }
       default:

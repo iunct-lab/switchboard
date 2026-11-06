@@ -58,8 +58,8 @@ export function fieldValue(name: string, field: Field, value: string): { type: s
 }
 
 /**
- * Set one Project field of one Issue (single select / number / text / date). One query reads the Project, the field
- * and the Issue; one mutation writes (plus one to add the Issue to the Project when it is not there).
+ * Set one Project field of one Issue (single select / number / text / date); an empty value empties it. One query reads
+ * the Project, the field and the Issue; one mutation writes (plus one to add the Issue to the Project when it is not there).
  */
 export async function setField(gh: GhClient, cfg: OpsConfig, num: number, name: string, value: string, log: (s: string) => void = console.log): Promise<void> {
   const { owner, number } = projectOf(cfg);
@@ -72,6 +72,13 @@ export async function setField(gh: GhClient, cfg: OpsConfig, num: number, name: 
   if (!issue?.id) throw new Error(`Issue #${num} が ${repo.owner}/${repo.name} にありません`);
   const field = project.field as Field | null;
   if (!field?.id) throw new UsageError(`フィールド '${name}' が Project にありません`);
+  // an empty value empties the field (#3810); an Issue not in the Project has nothing to empty and is not added for it
+  if (value === "") {
+    const found = issue.projectItems.nodes.find((i) => i.project.number === number);
+    if (!found) return log(`#${num}  ${name}: Project に無いので空にするものがありません`);
+    await gh.graphql("mutation($p:ID!,$i:ID!,$f:ID!){ clearProjectV2ItemFieldValue(input:{ projectId:$p, itemId:$i, fieldId:$f }){ projectV2Item{ id } } }", { p: project.id, i: found.id, f: field.id });
+    return log(`#${num}  ${name} = (空)`);
+  }
   const v = fieldValue(name, field, value);
   const item = await ensureItem(gh, project.id, number, issue, num, log);
   await gh.graphql(`mutation($p:ID!,$i:ID!,$f:ID!,$value:${v.type}){ updateProjectV2ItemFieldValue(input:{ projectId:$p, itemId:$i, fieldId:$f, value:${v.input} }){ projectV2Item{ id } } }`, {

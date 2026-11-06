@@ -163,6 +163,7 @@ test("edits go to the app's routes as its screen sends them; a refusal is exit 1
   expect((await run(["edit", "#3", "--title", "T", "--body-file", "-", "--add-label", "a", "--remove-label", "b", "--state", "closed", "--no-milestone"], ok)).code).toBe(0);
   expect((await run(["set", "3", "Story Points", "5"], ok)).code).toBe(0);
   expect((await run(["set", "3", "Code", "001"], ok)).code).toBe(0);
+  expect((await run(["set", "3", "Story Points", ""], ok)).code).toBe(0);
   expect((await run(["triage", "3", "core", "feature", "P2", "Phase 2", "891", "Ready"], ok)).code).toBe(0);
   expect((await run(["comment", "3", "--body-file", "-"], ok)).code).toBe(0);
   expect((await run(["create", "--title", "New", "--label", "type:task", "--parent", "891", "--field", "Status=Backlog"], ok)).code).toBe(0);
@@ -171,12 +172,17 @@ test("edits go to the app's routes as its screen sends them; a refusal is exit 1
     // a number only where the stored value is one; GitHub's field type decides when the app sends it
     ["PATCH", "/3", { workspaceId: "ws1", fields: { "Story Points": 5 } }],
     ["PATCH", "/3", { workspaceId: "ws1", fields: { Code: "001" } }],
+    // an empty value empties the field (#3810)
+    ["PATCH", "/3", { workspaceId: "ws1", fields: { "Story Points": null } }],
     ["PATCH", "/3", { workspaceId: "ws1", project: true, fields: { Area: "core", Kind: "feature", Priority: "P2", Phase: "Phase 2", Status: "Ready" }, parent: 891 }],
     ["POST", "/3/comment", { workspaceId: "ws1", text: "from stdin" }],
     ["POST", "", { workspaceId: "ws1", title: "New", body: "", labels: ["type:task"], milestone: null, parent: 891, fields: { Status: "Backlog" } }],
   ]);
   const refused = await run(["edit", "3", "--title", "T"], app((m) => (m === "GET" ? { body: LIST } : { status: 404, body: { error: "#3 は保存されていません" } })));
   expect(refused).toMatchObject({ code: 1, err: "backlog: 404 #3 は保存されていません" });
+  // a value that does not fit its field is refused by the app before it is stored (#3811)
+  const unfit = await run(["set", "3", "Story Points", "abc"], app((m, p) => (m === "GET" ? { body: p === "" ? LIST : detail } : { status: 422, body: { error: "'Story Points' は数値フィールドです。整数だけを渡す（例: 5）: 'abc'" } })));
+  expect(unfit).toMatchObject({ code: 1, err: "backlog: 422 'Story Points' は数値フィールドです。整数だけを渡す（例: 5）: 'abc'" });
   expect((await run(["edit", "3"])).code).toBe(1);
   // an edit has nothing to wait for: --fresh there is refused, not ignored
   const fresh = await run(["edit", "3", "--title", "T", "--fresh"]);
@@ -324,6 +330,40 @@ test("view shows held edits with why; retry sends every failed one of the Issue 
   const err: string[] = [];
   const direct = await runBacklog(["retry", "3"], { GH_REPO: "acme/app" }, { out: () => {}, err: (s) => err.push(s) }, { gh: {} as never });
   expect([direct, err]).toEqual([1, ["retry はアプリの Task の中だけ（BACKLOG_URL が無いので送り直すものがありません）"]]);
+});
+
+test("withdraw takes back every unknown and failed edit of the Issue, the create last, and the held lines go (#3804)", async () => {
+  const held = [
+    { operation: "op-create", kind: "create", field: null, status: "unknown", reason: "最初の失敗: HTTP 502 / 照合: 送ったかどうかを確かめきれません" },
+    { operation: "op-title", kind: "set", field: "title", status: "conflict", reason: "GitHub で変わった" },
+    { operation: "op-status", kind: "set", field: "field:Status", status: "failed", reason: "HTTP 422" },
+  ];
+  let left = held;
+  const detail = () => ({ issue: { number: 3, title: "PBI 3", state: "OPEN", labels: [], milestone: null, parent: null, subIssues: [], body: "本文", url: "" }, comments: [], fields: null, fetchedAt: 1, localId: null, pending: left.length, held: left, sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } });
+  const fake = app(routes((m, p, body) => {
+    if (m === "GET" && p.startsWith("/3?")) return { body: detail() };
+    if (m === "PATCH") {
+      left = left.filter((h) => h.operation !== (body as { withdraw: { operation: string } }).withdraw.operation);
+      return { status: 202, body: {} };
+    }
+    return { status: 404, body: {} };
+  }));
+  const out = await run(["withdraw", "3", "--reason", "GitHub に無いと確かめた"], fake);
+  expect(out).toMatchObject({ code: 0, out: "#3 の保留中の編集 2 件を取り下げました（GitHub には何も書いていません）" });
+  expect(out.calls.filter((c) => c.method === "PATCH").map((c) => c.body)).toEqual([
+    { workspaceId: "ws1", withdraw: { operation: "op-status", reason: "GitHub に無いと確かめた" } },
+    { workspaceId: "ws1", withdraw: { operation: "op-create", reason: "GitHub に無いと確かめた" } },
+  ]);
+  // the held lines of the two are gone; the conflict stays for its own choice
+  expect((await run(["view", "3"], fake)).out.split("\n").filter((l) => l.startsWith("保留: "))).toEqual(["保留: title 競合（GitHub で変わった）"]);
+  // nothing left to take back: refused, nothing sent
+  const patches = () => fake.calls.filter((c) => c.method === "PATCH").length;
+  const sent = patches();
+  expect(await run(["withdraw", "3"], fake)).toMatchObject({ code: 1, err: "#3 に結果不明・失敗で保留中の編集はありません" });
+  expect(patches()).toBe(sent);
+  const err: string[] = [];
+  expect(await runBacklog(["withdraw", "3"], { GH_REPO: "acme/app" }, { out: () => {}, err: (s) => err.push(s) }, { gh: {} as never })).toBe(1);
+  expect(err).toEqual(["withdraw はアプリの Task の中だけ（BACKLOG_URL が無いので取り下げるものがありません）"]);
 });
 
 test("create --head --base makes a local change; one without the other is refused, nothing sent (#2485)", async () => {

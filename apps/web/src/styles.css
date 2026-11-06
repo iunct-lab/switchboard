@@ -122,6 +122,7 @@ select.model-select { max-width: 100%; min-width: 0; font-size: 12px; }
 .compose-details { margin-top: 8px; }
 .compose-details > summary { cursor: pointer; font-size: 12px; color: var(--ink2); overflow-wrap: anywhere; }
 .compose-details > .runners { margin-top: 8px; }
+.compose-improve { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 
 .pill { display: inline-block; font: 400 10px/1.5 var(--mono); padding: 0 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink2); white-space: nowrap; }
 .pill.claude { border-color: var(--claude); color: var(--claude); }
@@ -408,6 +409,12 @@ label.toggle.off { opacity: .45; cursor: default; }
 .backlog .backlog-tile { margin-top: 6px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px; overflow-wrap: anywhere; }
 .backlog .backlog-tile .t { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .backlog .backlog-tile .row { flex-wrap: wrap; justify-content: flex-start; gap: 2px 8px; }
+.backlog .mark { font-size: 11px; padding: 0 4px; border: 1px solid var(--line); border-radius: 3px; color: var(--ink3); white-space: nowrap; }
+.backlog .mark.warn { color: var(--amber); border-color: var(--amber); }
+/* #3708: an opened tile shows the list row's parts in the column's width */
+.backlog .backlog-tile-detail { margin-top: 4px; min-width: 0; overflow-wrap: anywhere; }
+.backlog .backlog-tile .row .m { white-space: normal; }
+.backlog .backlog-tile-detail :is(.backlog-syncline, .backlog-report) { margin-left: 0; }
 .backlog .backlog-board-tabs { display: none; }
 /* by width only (#2703): a landscape phone 768px or wider keeps the columns. The stage tabs (only the strip scrolls) show
    one column at a time; a tile's title is 2 lines. */
@@ -520,7 +527,7 @@ label.toggle.off { opacity: .45; cursor: default; }
   .compose-details > summary { padding: 12px 0; }
   .compose-details > .runners > label:not(.toggle) { min-width: 0; flex: 1 1 100%; }
   .compose-details > .runners > label:not(.toggle) > input { width: 100%; min-width: 0; }
-  .compose label.toggle { white-space: normal; }
+  .compose label.toggle, .settings label.toggle { white-space: normal; }
   .compose > .row > button { flex: 1; min-height: 44px; white-space: nowrap; }
   /* Knowledge (#392): the list, the note and its details one under another, with the page as the one scroll (a scroll
      inside a scroll is hard to move with a finger); a long line already scrolls inside the note (`overflow: auto`). */

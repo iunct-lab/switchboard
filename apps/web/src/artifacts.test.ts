@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { artifactsLabel, isMarkdown, pickArtifact, viewOf } from "./artifacts.ts";
+import { appRequestDraft, appRequestOf, artifactsLabel, copyKind, isMarkdown, pickArtifact, viewOf } from "./artifacts.ts";
 
 const f = (mime: string, kind: "file" | "dir" | "url" = "file") => viewOf({ kind, mime });
 
@@ -34,4 +34,20 @@ test("isMarkdown: only markdown files", () => {
   expect(isMarkdown({ kind: "file", mime: "text/plain" })).toBe(false);
   expect(isMarkdown({ kind: "file", mime: "text/html" })).toBe(false);
   expect(isMarkdown({ kind: "url", mime: "text/markdown" })).toBe(false);
+});
+
+test("appRequestOf (#3683): 要望にする once the page used the bridge (earlier days or now); the link once a request Task was started", () => {
+  expect(appRequestOf({ appDays: 0, appRequestTaskId: null }, false)).toEqual({ offer: false, taskId: null });
+  expect(appRequestOf({ appDays: 0, appRequestTaskId: null }, true)).toEqual({ offer: true, taskId: null });
+  expect(appRequestOf({ appDays: 2, appRequestTaskId: null }, false)).toEqual({ offer: true, taskId: null });
+  expect(appRequestOf({ appDays: 3, appRequestTaskId: "task_r" }, false)).toEqual({ offer: true, taskId: "task_r" });
+  expect(appRequestDraft("ボード")).toBe("使い捨てアプリ「ボード」を一般機能にしたい。");
+});
+
+test("copyKind: content for text and pages, url for links, none for images, folders and downloads", () => {
+  const c = (mime: string, kind: "file" | "dir" | "url" = "file") => copyKind({ kind, mime });
+  expect([c("text/plain"), c("text/markdown"), c("application/json"), c("text/html"), c("image/svg+xml")]).toEqual(["content", "content", "content", "content", "content"]);
+  expect([c("text/uri-list", "url"), c("text/html", "url")]).toEqual(["url", "url"]);
+  expect([c("image/png"), c("application/pdf"), c("application/octet-stream")]).toEqual([null, null, null]);
+  expect([c("text/html", "dir"), c("text/plain", "dir")]).toEqual([null, null]);
 });

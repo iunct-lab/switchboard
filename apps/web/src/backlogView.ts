@@ -1,6 +1,8 @@
 import type { BacklogItem, BacklogStage } from "@switchboard/protocol";
 import { t } from "./i18n.ts";
 import { common } from "./i18n/common.ts";
+import { overlapLine, prereqLine, waitText } from "./inProgress.ts";
+import { shownStops, stopDisplay } from "./stops.ts";
 
 /**
  * How the Backlog screen sorts and narrows its rows (#2695), kept in the browser. Empty arrays = every value; `query`
@@ -132,4 +134,33 @@ export function loadView(store: Pick<Storage, "getItem">): BacklogView {
 export function saveView(store: Pick<Storage, "setItem" | "removeItem">, view: BacklogView): void {
   if (viewSummary(view) === null && view.layout === "list") store.removeItem(VIEW_KEY);
   else store.setItem(VIEW_KEY, JSON.stringify(view));
+}
+
+/** A short mark on a board tile (#3707): which of the row's sections the item has, without opening the tile. */
+export interface ItemMark {
+  key: "waits" | "prereq" | "stuck" | "overlap" | "stops" | "reply";
+  label: string;
+  warn: boolean;
+}
+
+/**
+ * The marks of one item, in the order of the list row's sections, each from the function that decides whether the row
+ * shows that section (no condition of its own): 待ち (`waitText`, not cleared), 前提待ち / 進められない (`prereqLine`),
+ * 重なり (`overlapLine`), 停止 N (`shownStops`; warn when one needs a person) and 返事待ち (the row's last Task line says
+ * so: a last Task that is not the running one). A needs-decision item has none: its list card shows none of these.
+ */
+export function itemMarks(item: BacklogItem, auto: boolean): ItemMark[] {
+  if (item.stage === "needs-decision") return [];
+  const marks: ItemMark[] = [];
+  const wait = waitText(item, auto);
+  if (wait && !wait.done) marks.push({ key: "waits", label: t(common.markWaits), warn: false });
+  const prereq = prereqLine(item);
+  if (prereq.waiting.length) marks.push({ key: "prereq", label: t(common.markPrereq), warn: false });
+  if (prereq.stuck.length) marks.push({ key: "stuck", label: t(common.markStuck), warn: true });
+  if (overlapLine(item)) marks.push({ key: "overlap", label: t(common.markOverlap), warn: true });
+  const stops = shownStops(item.stopSummary);
+  if (stops.length) marks.push({ key: "stops", label: t(common.markStops, { n: stops.length }), warn: stops.some((s) => stopDisplay(s).needsPerson) });
+  const last = item.lastTask;
+  if (item.replyWaiting && last && last.id !== item.activeTaskId) marks.push({ key: "reply", label: t(common.markReply), warn: false });
+  return marks;
 }

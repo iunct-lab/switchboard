@@ -79,6 +79,11 @@ export const settings = msgs({
   kindModelTitle: { ja: "{label}の Task を動かすモデル", en: "The model that runs {label} Tasks" },
   kindEffortTitle: { ja: "{label}の Task の思考の深さ", en: "The thinking effort of {label} Tasks" },
   backToCommon: { ja: "共通に戻す", en: "Back to common" },
+  taskModel: { ja: "Task ごとのモデル（試験）", en: "Per-Task model (trial)" },
+  taskModelTitle: { ja: "/pbi-complete の Task ごとの実装を動かすモデル（試験）", en: "The model that runs each Task's implementation in /pbi-complete (trial)" },
+  taskModelSame: { ja: "Task ごと: 同じ", en: "Per Task: same" },
+  taskModelChoice: { ja: "Task ごと: {label}（試験）", en: "Per Task: {label} (trial)" },
+  taskModelMissing: { ja: "Task ごと: {value}（試験・一覧に無い）", en: "Per Task: {value} (trial, not on the list)" },
   backToCommonTitle: { ja: "この種類の値を消し、共通の値で始まるようにします", en: "Removes this kind's values so it starts with the common ones" },
   fallback: { ja: "上限のときの代わり", en: "Fallback at the limit" },
   fallbackHint: {
@@ -350,4 +355,6 @@ export const settings = msgs({
   leaveStopped: { ja: "ホストが止まっているようです。ログインページへ移ると、入力中の文は消えます。移りますか？", en: "The host seems to be stopped. Going to the login page loses what you are typing. Go anyway?" },
   sessionUntil: { ja: "ログイン {at} まで", en: "Logged in until {at}" },
   sessionTitle: { ja: "操作するたびに 24 時間延びます（最長 {at}）", en: "Each action extends it by 24 hours (until {at} at most)" },
+  runnerLoginUntil: { ja: "Claude のログイン {at} まで", en: "Claude login until {at}" },
+  runnerLoginTitle: { ja: "Claude のログイン {at} まで。やり直すときは Task の「ターミナル」tab で {command}", en: "Claude login until {at}. To log in again, run {command} in a Task's terminal tab" },
 });

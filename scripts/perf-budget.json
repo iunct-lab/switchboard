@@ -16,16 +16,12 @@
       "open-task": {
         "requests": 7,
         "layoutCount": 4,
-        "recalcStyleCount": 4,
-        "bytes": 35597
+        "recalcStyleCount": 4
       },
       "send": {
         "requests": 6,
         "recalcStyleCount": 5,
         "layoutShift": 0.0404
-      },
-      "open-task-huge": {
-        "bytes": 36106
       }
     }
   },
@@ -46,16 +42,12 @@
       "open-task": {
         "requests": 9,
         "layoutCount": 4,
-        "recalcStyleCount": 4,
-        "bytes": 35597
+        "recalcStyleCount": 4
       },
       "send": {
         "requests": 8,
         "recalcStyleCount": 5,
         "layoutShift": 0.0427
-      },
-      "open-task-huge": {
-        "bytes": 36106
       }
     },
     "loaded": {

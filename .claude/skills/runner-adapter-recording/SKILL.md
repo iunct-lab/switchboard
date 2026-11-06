@@ -11,9 +11,11 @@ permission.ask / permission.resolved / usage / quota / artifact / session.end / 
 
 既存の録画は配布しない。自分の実ランナーで下記の手順に従って録画し、Git の外に保存する。`bun scripts/fixtures.ts list` で有無を確認する。録画が無いテストは理由と録画手順を出して skip する。`SWITCHBOARD_FIXTURES` を明示した場合だけ不足を fail にする（local-ci も同じ）。
 
+録画の 2 つ目の写しは、origin のリポジトリの枝 `recordings-vault`（main にマージしない。公開の同期は main のツリーだけを送る）。`bun scripts/fixtures.ts save` が保管庫の全ファイルを枝に足し（変わったファイルは置き換え、枝にしか無いファイルは残す）、`fetch` が枝にあって保管庫に無いファイルを書き（既にあるファイルは上書きしない）、`sync` が両方をする。タグの CI（`scripts/tag-ci.ts`、`SWITCHBOARD_FIXTURES` を付けた定期実行）が最初に `sync` するので、録った録画はその定期実行の次の回に人の手なしで枝に届き（いつ走るかは登録された定期実行、`GET /api/schedules`）、作り直しで保管庫が空になっても次の実行で戻る。すぐ戻すなら `bun scripts/fixtures.ts fetch`。枝が無い clone（公開の clone、fork）では `save` / `fetch` は理由を出して exit 2 で、`save` は `--create` を付けたときだけ枝を作る（公開の fork に録画を出さないため）。
+
 ## 手順
 
-1. **録画**: 実ランナーを 1 回動かし、ワイヤをそのまま `SWITCHBOARD_FIXTURES`（既定 `~/.switchboard/fixtures`）の下に、リポジトリ相対の `packages/adapters/<r>/fixtures/*.{jsonl,sse}` として保存。録画はリポジトリに入れず、Git で管理しない。
+1. **録画**: 実ランナーを 1 回動かし、ワイヤをそのまま `SWITCHBOARD_FIXTURES`（既定 `~/.switchboard/fixtures`）の下に、リポジトリ相対の `packages/adapters/<r>/fixtures/*.{jsonl,sse}` として保存。録画は main のツリーに入れない。新しい録画は `scripts/fixtures.ts` の `RECORDINGS` に名前を足し、`bun scripts/fixtures.ts save` で枝に送る（省いても次のタグの CI の `sync` が送る）。
    どの版で録ったか（CLI バージョン、commit）を fixture 名かテスト冒頭に書く。
    - Claude: `claude -p --input-format stream-json --output-format stream-json`（`docs/design/claude-stream-json.md`）
    - Codex: `codex app-server` stdio JSON-RPC（`docs/design/codex-app-server.md`）

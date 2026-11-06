@@ -16,7 +16,8 @@ import { main as opsKit } from "../../../ops-kit/src/cli.ts";
 import { fakeGh as fakeKitGh } from "../../../ops-kit/src/gh.ts";
 import { ghBoard, overlap, storedMaterial } from "../../../scripts/parallel-guard.ts";
 import { fmtTime } from "./ratelimit.ts";
-import { answerStoredDecision, buildDirectPrompt, buildStartPrompt, localBacklogSource, canStartStoredBacklog, screenAnswer, confirmationsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, onHoldIn, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld } from "./backlog.ts";
+import { delegatedNote } from "./evals.ts";
+import { answerStoredDecision, BacklogEditError, checkFieldTypes, buildDirectPrompt, buildStartPrompt, subagentModelAlias, localBacklogSource, canStartStoredBacklog, screenAnswer, confirmationsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, onHoldIn, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld } from "./backlog.ts";
 
 // the writer of the waits (#817), read at run time: scripts/ is not type-checked under core's settings
 const guard = "../../../scripts/parallel-guard.ts";
@@ -620,6 +621,58 @@ test("start: complete on an in-progress item resumes it (#1045)", async () => {
   // the same Task backlog-next starts for a stalled in-progress PBI (#578): the closed Tasks when it was chosen
   expect(claude.starts[0]!.prompt).toBe(buildStartPrompt({ number: 305 }, "complete", { resume: { tasksDone: 1 } }));
   expect(claude.starts[0]!.prompt).toContain("PBI #305 は実装中のまま止まっています");
+});
+
+test("complete task model (#2769): with the trial's model the 実装 Task's prompt hands each Task to a sonnet subagent and the transcript says so; another kind gets neither (同じ: the existing complete tests' prompts)", async () => {
+  const c2 = holdingClaude();
+  const base2 = await boot(fakeGh().gh, { ...c2.adapter, models: [{ value: "claude-sonnet-5-5", label: "Sonnet 5.5" }] });
+  const notes = (id: string) => core!.db.listEvents(id).flatMap((e) => (e.ev.t === "status" ? [e.ev.text] : []));
+  expect((await fetch(`${base2}/api/settings`, { method: "PATCH", body: JSON.stringify({ autoStart: { completeTaskModel: "claude-sonnet-5-5" } }) })).status).toBe(200);
+  const r = await start(base2, 305, { action: "complete" });
+  expect(r.status).toBe(201);
+  const t = (await r.json()) as Task;
+  for (let i = 0; !c2.starts.length && i < 100; i++) await Bun.sleep(10);
+  expect(c2.starts[0]!.prompt).toBe(buildStartPrompt({ number: 305 }, "complete", { resume: { tasksDone: 1 }, taskModel: "claude-sonnet-5-5" }));
+  expect(c2.starts[0]!.prompt).toContain("Agent ツールの model に `sonnet` を指定したサブエージェントに前景で任せてください");
+  expect(notes(t.id)).toEqual([delegatedNote("claude-sonnet-5-5")]);
+  // the mark reads back through the Task's evals (#2775)
+  expect(((await (await fetch(`${base2}/api/tasks/${t.id}/evals`)).json()) as { rules: { metrics: { delegatedModel: string | null } } }).rules.metrics.delegatedModel).toBe("claude-sonnet-5-5");
+  // another kind: no paragraph, no note
+  const check = await start(base2, 303, { action: "to-tasks" });
+  expect(check.status).toBe(201);
+  const ct = (await check.json()) as Task;
+  for (let i = 0; c2.starts.length < 2 && i < 100; i++) await Bun.sleep(10);
+  expect(c2.starts[1]!.prompt).not.toContain("試験:");
+  expect(notes(ct.id)).toEqual([]);
+});
+
+test("complete task model (#2769): an 実装 Task that starts on codex (its kind's runner changed after the model was saved) gets neither the paragraph nor the note", async () => {
+  const claude = holdingClaude();
+  const codex = holdingClaude();
+  const base = await boot(fakeGh().gh, [{ ...claude.adapter, models: [{ value: "claude-sonnet-5-5", label: "Sonnet 5.5" }] }, { ...codex.adapter, id: "codex" }]);
+  const patch = (body: unknown) => fetch(`${base}/api/settings`, { method: "PATCH", body: JSON.stringify(body) });
+  expect((await patch({ autoStart: { completeTaskModel: "claude-sonnet-5-5" } })).status).toBe(200);
+  expect((await patch({ autoStart: { byKind: { complete: { runner: "codex" } } } })).status).toBe(200); // the saved model stays
+  const r = await start(base, 305, { action: "complete" });
+  expect(r.status).toBe(201);
+  const t = (await r.json()) as Task;
+  for (let i = 0; !codex.starts.length && i < 100; i++) await Bun.sleep(10);
+  expect(t.runner).toBe("codex");
+  expect(codex.starts[0]!.prompt).toBe(buildStartPrompt({ number: 305 }, "complete", { resume: { tasksDone: 1 } }));
+  expect(core!.db.listEvents(t.id).some((e) => e.ev.t === "status" && e.ev.text === delegatedNote("claude-sonnet-5-5"))).toBe(false);
+});
+
+test("buildStartPrompt task model (#2769): every complete entry carries the alias's paragraph; another action, an unaliased model or none leaves the prompt as before", () => {
+  const para = (a: string) => `Agent ツールの model に \`${a}\` を指定したサブエージェントに前景で任せてください`;
+  expect(buildStartPrompt({ number: 1 }, "complete", { taskModel: "claude-sonnet-5-5" })).toContain(para("sonnet"));
+  expect(buildStartPrompt({ number: 1 }, "complete", { taskModel: "claude-opus-5-5", resume: { tasksDone: 2 } })).toContain(para("opus"));
+  expect(buildStartPrompt({ number: 1 }, "complete", { taskModel: "claude-haiku-4-5", other: { meta: "/work/switchboard", projectVar: "APP_PROJECT_URL", setup: { config: true, kit: [], copies: [] } } })).toContain(para("haiku"));
+  expect(buildStartPrompt({ number: 1 }, "complete", { taskModel: "claude-fable-5-1" })).toContain(para("fable"));
+  expect(buildStartPrompt({ number: 1 }, "complete", { taskModel: "gpt-6" })).toBe(buildStartPrompt({ number: 1 }, "complete"));
+  expect(buildStartPrompt({ number: 1 }, "complete", { taskModel: "" })).toBe(buildStartPrompt({ number: 1 }, "complete"));
+  expect(buildStartPrompt({ number: 1 }, "to-tasks", { taskModel: "claude-sonnet-5-5" })).toBe(buildStartPrompt({ number: 1 }, "to-tasks"));
+  expect(subagentModelAlias("claude-sonnet-5-5")).toBe("sonnet");
+  expect(subagentModelAlias("us.anthropic.claude-sonnet-5-5")).toBeNull();
 });
 
 test("start: complete while the in-progress item's check is running is 409 with its id (#1045)", async () => {
@@ -1375,6 +1428,68 @@ test("edit: an Issue put in the Project here shows each later field edit before 
   expect(queued().map((o) => o[2])).toEqual(["member", "field:Status", "field:Priority"]);
 });
 
+/** The Project's field definitions as GitHub answers the send's read of them (#3811). */
+const PROJECT_DEFS = [
+  { id: "F_s", name: "Status", dataType: "SINGLE_SELECT", options: [{ id: "o1", name: "Backlog" }, { id: "o2", name: "Ready" }] },
+  { id: "F_sp", name: "Story Points", dataType: "NUMBER" },
+  { id: "F_d", name: "Due", dataType: "DATE" },
+];
+
+test("checkFieldTypes (#3811): a value that does not fit its field is a 422; a fitting one and null pass", () => {
+  for (const [fields, msg] of [
+    [{ "Story Points": "abc" }, /整数だけ/],
+    [{ Status: "Done" }, /選択肢 'Done'/],
+    [{ Due: "2026/11/04" }, /YYYY-MM-DD/],
+    [{ Nope: "x" }, /フィールド 'Nope' が Project にありません/],
+  ] as const) {
+    let err: unknown;
+    try {
+      checkFieldTypes(PROJECT_DEFS, fields);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(BacklogEditError);
+    expect((err as BacklogEditError).status).toBe(422);
+    expect((err as Error).message).toMatch(msg);
+  }
+  expect(() => checkFieldTypes(PROJECT_DEFS, { Status: "Ready", "Story Points": 3, Due: "2026-11-04", Nope: null })).not.toThrow();
+  expect(() => checkFieldTypes(PROJECT_DEFS, { "Story Points": "5" })).not.toThrow();
+});
+
+test("edit (#3811): a field value that does not fit the Project's field is refused before it is stored; GitHub out of reach stores it", async () => {
+  const fake = fakeGh();
+  const down = { on: false, reads: 0 };
+  const base = await boot(async (args, cwd) => {
+    if (!args.some((a) => a.includes("ProjectV2FieldCommon{ id name dataType }"))) return fake.gh(args, cwd);
+    down.reads++;
+    if (down.on) return { code: 1, stdout: "", stderr: "HTTP 503" };
+    return { code: 0, stdout: JSON.stringify({ data: { repositoryOwner: { projectV2: { id: "P_1", fields: { nodes: PROJECT_DEFS } } } } }), stderr: "" };
+  });
+  const r = await patch(base, 304, { fields: { "Story Points": "abc" } });
+  expect(r.status).toBe(422);
+  expect(((await r.json()) as { error: string }).error).toMatch(/整数だけ/);
+  expect((await patch(base, 304, { fields: { Status: "Done" } })).status).toBe(422);
+  expect(core!.db.listPendingBacklogOperations()).toEqual([]);
+  // an empty passes (Due has no value, so nothing to send for it); a fitting value is stored
+  expect((await patch(base, 304, { fields: { "Story Points": 5, Due: null } })).status).toBe(202);
+  expect(core!.db.listPendingBacklogOperations().map((o) => o.field)).toEqual(["field:Story Points"]);
+  // GitHub not reached: stored, the send checks it last
+  down.on = true;
+  expect((await patch(base, 304, { fields: { "Story Points": "abc" } })).status).toBe(202);
+  // another repository waited for (a GitLab one): this one's values are still checked
+  down.on = false;
+  const db = core!.db;
+  const lab = { service: "gitlab" as const, host: "gitlab.com", repository: "acme/other", project: { owner: "acme", number: 1 } };
+  db.setWorkspaceBacklogSource(db.upsertWorkspace({ id: "ws_lab", name: "lab", path: join(home!, "lab"), kind: "repo" }).id, lab);
+  db.sqlite.query("INSERT INTO backlog_repositories (service, host, repository, retry_at) VALUES ('gitlab', 'gitlab.com', 'acme/other', ?)").run(Date.now() + 3_600_000);
+  expect((await patch(base, 304, { fields: { Status: "Done" } })).status).toBe(422);
+  // this repository waited for: the definitions are not read at all, the value is stored
+  core!.db.sqlite.query("UPDATE backlog_repositories SET retry_at = ? WHERE service = 'github'").run(Date.now() + 3_600_000);
+  const before = down.reads;
+  expect((await patch(base, 304, { fields: { Status: "Done" } })).status).toBe(202);
+  expect(down.reads).toBe(before);
+});
+
 /** Runs `fn` with AWS_CONFIG_FILE on a made-up config holding one account id, which it is given bare. */
 async function withHostAccount<T>(fn: (id: string) => Promise<T> | T): Promise<T> {
   const id = ["8642", "9753", "1086"].join("");
@@ -1659,6 +1774,8 @@ test("send: an answer kept is sent to GitHub at once; after a restart one that w
   const looked = () => fake.calls.some((a) => a[1]?.startsWith("repos/acme/app/issues/306/comments?"));
   for (let i = 0; i < 100 && !looked(); i++) await Bun.sleep(10);
   expect(looked()).toBe(true);
+  // the look runs with it `sending` (#3804: not taken back meanwhile); this fake cannot answer the list, so it waits unknown
+  for (let i = 0; i < 100 && core.db.listPendingBacklogOperations()[0]?.status === "sending"; i++) await Bun.sleep(10);
   expect(posts()).toBe(0);
   expect(core.db.listPendingBacklogOperations()[0]).toMatchObject({ kind: "comment", status: "unknown" });
 });

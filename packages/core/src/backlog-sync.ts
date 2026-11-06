@@ -864,7 +864,7 @@ export class BacklogSync {
   }
 
   /** The end of the host's or the workspace's repository's wait (ms); 0 = none. */
-  private waitUntil(ws: Pick<BacklogWorkspace, "id">): number {
+  waitUntil(ws: Pick<BacklogWorkspace, "id">): number {
     const source = this.db.getWorkspaceBacklogSource(ws.id);
     return Math.max(this.limits.waiting(source?.host ?? githubHost())?.until ?? 0, (source && this.db.getBacklogRepository(source)?.retryAt) || 0);
   }

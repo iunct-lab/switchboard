@@ -588,6 +588,28 @@ describe("login (#180)", () => {
     }
   });
 
+  test("loginExpiresAt of `claude auth status` (#3867): ISO or a number (s below 1e12, else ms) → epoch ms; absent, unreadable or not JSON → none; the account never reaches the detection", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "claude-login-"));
+    const status = async (stdout: string) => loginStatus(fakeClaude(dir, `echo '${stdout}'; exit 0`));
+    try {
+      const d = await createClaudeAdapter({ bin: fakeClaude(dir, `echo '{"authMethod":"claude.ai","email":"a@example.com","orgName":"Acme Org","loginExpiresAt":"2026-11-20T00:15:00Z"}'; exit 0`) }).detect();
+      expect(d).toMatchObject({ login: "ok", loginKind: "claude.ai", loginExpiresAt: Date.parse("2026-11-20T00:15:00Z") });
+      for (const secret of ["a@example.com", "Acme Org"]) expect(JSON.stringify(d)).not.toContain(secret);
+      expect((await status(`{"loginExpiresAt":1763597700}`)).expiresAt).toBe(1763597700_000);
+      expect((await status(`{"loginExpiresAt":1763597700123}`)).expiresAt).toBe(1763597700123);
+      expect((await status(`{"loginExpiresAt":"2026-11-20T09:15:00.5+09:00"}`)).expiresAt).toBe(Date.parse("2026-11-20T00:15:00.5Z"));
+      for (const out of [`{"authMethod":"claude.ai"}`, `{"loginExpiresAt":"soon"}`, `{"loginExpiresAt":"0"}`, `{"loginExpiresAt":"2026-02-30T00:00:00Z"}`, `{"loginExpiresAt":"2026-11-20"}`, `{"loginExpiresAt":null}`, `{"loginExpiresAt":-1}`, `not json`]) {
+        const r = await status(out);
+        expect(r.login).toBe("ok");
+        expect(r.expiresAt).toBeUndefined();
+      }
+      const none = await createClaudeAdapter({ bin: fakeClaude(dir, `echo '{"authMethod":"claude.ai"}'; exit 0`) }).detect();
+      expect("loginExpiresAt" in none).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("a multibyte character cut at the end of stderr does not break the stdout JSON (#2528)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "claude-login-"));
     try {

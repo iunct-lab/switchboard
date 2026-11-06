@@ -9,6 +9,7 @@ import { conflictRevision, withoutMarker } from "./backlog-merge.ts";
 import { closesOf } from "./backlog-sync.ts";
 import { findSecrets, hostAws } from "../../../ops-kit/src/secrets.ts";
 import { noWriteRefusal } from "../../../ops-kit/src/config.ts";
+import { fieldValue, UsageError, type Field } from "../../../ops-kit/src/set.ts";
 import type { SetupScripts } from "./skillsync.ts";
 import { loadProcess, renderEntry, type ProcessDef } from "./process-defs.ts";
 import { judge, type Work } from "../../../scripts/parallel-guard.ts";
@@ -308,7 +309,7 @@ const COMPLETE_SCOPE = "この依頼は、マージ判定（`scripts/merge-gate.
 export const PIPELINE_ENTRIES = ["to-pbi", "to-tasks", "to-tasks-ready", "complete", "complete-other", "complete-resume", "check", "close"] as const;
 
 /** The stage Task's first prompt: the entry's text from `def` (the pipeline candidate; `opts` are explained above `PIPELINE_ENTRIES`), then what the daemon adds around it (the answer to read, the scope of a complete, where the Issue is). */
-export function buildStartPrompt(item: Pick<BacklogItem, "number"> & Partial<Pick<BacklogItem, "tasks">>, action: BacklogAction, opts: { other?: OtherRepo; resume?: { tasksDone: number }; local?: boolean; localForge?: boolean; answer?: { issue: number; text: string } | null } = {}, def: ProcessDef = loadProcess("p0-pipeline")): string {
+export function buildStartPrompt(item: Pick<BacklogItem, "number"> & Partial<Pick<BacklogItem, "tasks">>, action: BacklogAction, opts: { other?: OtherRepo; resume?: { tasksDone: number }; local?: boolean; localForge?: boolean; answer?: { issue: number; text: string } | null; taskModel?: string } = {}, def: ProcessDef = loadProcess("p0-pipeline")): string {
   const n = item.number;
   const subIssues = item.tasks?.total ?? 0;
   const missing = PIPELINE_ENTRIES.filter((e) => !(e in def.entries));
@@ -321,7 +322,10 @@ export function buildStartPrompt(item: Pick<BacklogItem, "number"> & Partial<Pic
         ? opts.resume ? "complete-resume" : opts.other ? "complete-other" : "complete" // every complete, from Ready too: backlog-next also uses it to resume an in-progress PBI whose Task was answered (#562); a resume names the skill's file: a slash command is expanded only at the start of a prompt
         : action;
   // the mark only exists on a resume: an entry that uses it without one is refused by renderEntry, not rendered as 0
-  const body = renderEntry(def, entry, { n, subIssues, reportFormat: REPORT_FORMAT, ...(opts.resume ? { tasksDoneMark: TASKS_DONE_MARK(opts.resume.tasksDone) } : {}) });
+  const rendered = renderEntry(def, entry, { n, subIssues, reportFormat: REPORT_FORMAT, ...(opts.resume ? { tasksDoneMark: TASKS_DONE_MARK(opts.resume.tasksDone) } : {}) });
+  // Task ごとの実装のモデル（試験, #2769): every complete entry, a resume too; a model without an alias adds nothing
+  const alias = action === "complete" && opts.taskModel ? subagentModelAlias(opts.taskModel) : null;
+  const body = alias ? `${rendered}\n\n${taskModelParagraph(alias)}` : rendered;
   const elsewhere = opts.local
     ? `\n\n#${n} はこの workspace の Switchboard のバックログの Issue です（GitHub には無い）。${opts.other ? otherRepoRules(opts.other, true, !!opts.localForge) : opts.localForge ? LOCAL_ISSUE_RULES + localChangeRules("") : LOCAL_BACKLOG_RULES}`
     : opts.other ? `\n\n#${n} はこのディレクトリのリポジトリ（\`gh repo view\` が答えるもの）の Issue です。${otherRepoRules(opts.other)}` : "";
@@ -329,6 +333,19 @@ export function buildStartPrompt(item: Pick<BacklogItem, "number"> & Partial<Pic
   const scope = action === "complete" ? COMPLETE_SCOPE : "";
   const said = action !== "check" ? saidOf(opts.answer) : "";
   return `${body}\n\n対象: #${n}。${answer}${scope}${elsewhere}${said}`;
+}
+
+/**
+ * The Agent tool's `model` alias of a Claude model id (#2769): `claude-sonnet-*` → `sonnet`, and opus / haiku / fable
+ * alike. null = none (another runner's model, a Bedrock id): the setting refuses it and the prompt leaves it out.
+ */
+export function subagentModelAlias(model: string): string | null {
+  return /^claude-(sonnet|opus|haiku|fable)-/.exec(model)?.[1] ?? null;
+}
+
+/** The trial's paragraph of an 実装 Task's prompt (#2769): each Task's implementation on a foreground subagent of `alias`; the rest stays here. */
+function taskModelParagraph(alias: string): string {
+  return `試験: Task ごとの実装（task-to-pr の着手コメントから PR を出して In review にするまで）は、Agent ツールの model に \`${alias}\` を指定したサブエージェントに前景で任せてください（\`run_in_background\` にしない）。並べる順・レビューの処理・マージ判定・PBI を閉じるのはこの会話で行ってください。`;
 }
 
 /** The person's newest answer on the screen (#2745) as their words, in a fence longer than any run of backticks in it, so the answer cannot close it. */
@@ -767,6 +784,24 @@ export class BacklogEditError extends Error {
   }
 }
 
+/**
+ * Refuses a value that does not fit its Project field (#3811), before it is stored: checked as the send checks it
+ * (`fieldValue`), against the Project's definitions. `null` (empties the field) fits every field.
+ */
+export function checkFieldTypes(defs: Array<Field & { name: string }>, fields: Record<string, string | number | null>): void {
+  for (const [name, v] of Object.entries(fields)) {
+    if (v === null) continue;
+    const def = defs.find((d) => d.name === name);
+    if (!def) throw new BacklogEditError(`フィールド '${name}' が Project にありません`, 422);
+    try {
+      fieldValue(name, def, String(v));
+    } catch (e) {
+      if (e instanceof UsageError) throw new BacklogEditError(e.message, 422);
+      throw e;
+    }
+  }
+}
+
 /** Refuses a text with a value that signs in or acts as the user (#661): it would be stored, then posted to GitHub. */
 function refuseSecrets(...texts: Array<string | undefined>): void {
   const host = hostAws();
@@ -904,7 +939,8 @@ export function editStoredIssue(db: Db, source: BacklogSource, ref: number | str
       if (!item.remote) records.push({ objectKind: "project-item", externalId: item.externalId, local: null });
     }
     if (item && input.project !== false && out) member(true);
-    const made = !item && input.project !== false;
+    // only emptying fields (#3810) does not put the Issue in the Project: it has nothing to empty there
+    const made = !item && input.project !== false && (input.project === true || Object.values(input.fields ?? {}).some((v) => v !== null));
     if (made) {
       const local: BacklogProjectItemData = { issue: cur.number, owner: source.project.owner, project: source.project.number, fields: { ...input.fields } };
       item = { ...source, objectKind: "project-item", externalId: `local:${crypto.randomUUID()}`, remote: null, base: null, local, fetchedAt: null, fetchState: "unfetched" };
@@ -913,7 +949,7 @@ export function editStoredIssue(db: Db, source: BacklogSource, ref: number | str
     }
     if (item && input.project !== false) {
       const fields = (shown(item) as BacklogProjectItemData).fields ?? {};
-      for (const [name, v] of Object.entries(input.fields ?? {})) if (made || fields[name] !== v) ops.push({ issue, targetKind: "project-item", target: item.externalId, kind: "set", field: `field:${name}`, payload: v, base: made ? null : (fields[name] ?? null) });
+      for (const [name, v] of Object.entries(input.fields ?? {})) if (made || (fields[name] ?? null) !== v) ops.push({ issue, targetKind: "project-item", target: item.externalId, kind: "set", field: `field:${name}`, payload: v, base: made ? null : (fields[name] ?? null) });
       // an item GitHub does not have yet shows its fields here
       if (!made && !item.remote && input.fields) records.push({ objectKind: "project-item", externalId: item.externalId, local: { ...(shown(item) as BacklogProjectItemData), fields: { ...fields, ...input.fields } } });
     }
@@ -954,6 +990,25 @@ export function retryStoredOperation(db: Db, source: BacklogSource, ref: number 
   if (!op) throw new BacklogEditError(`#${ref} に送り直せる操作 ${operation} はありません`, 409);
   try {
     db.retryBacklogOperation(source, op.id, now);
+  } catch (e) {
+    if (e instanceof BacklogResolveError) throw new BacklogEditError(e.message, e.status);
+    throw e;
+  }
+  return { operation: op.id };
+}
+
+/**
+ * Takes back a held operation of the Issue (#3804): one `unknown` or `failed`, with why. Nothing is written to GitHub;
+ * the Issue's operations after it go on (a create of an Issue never made takes them back with it). 404 = the Issue is
+ * not stored; 409 = no such held operation on this Issue.
+ */
+export function withdrawStoredOperation(db: Db, source: BacklogSource, ref: number | string, withdraw: { operation: string; reason: string }, now = Date.now()): { operation: string } {
+  const rec = issueRecord(db, source, ref);
+  if (!rec) throw new BacklogEditError(`#${ref} は保存されていません`, 404);
+  const op = db.listPendingBacklogOperations(source).find((o) => o.issue === rec.externalId && o.id === withdraw.operation);
+  if (!op) throw new BacklogEditError(`#${ref} に取り下げられる操作 ${withdraw.operation} はありません`, 409);
+  try {
+    db.withdrawBacklogOperation(source, op.id, withdraw.reason, now);
   } catch (e) {
     if (e instanceof BacklogResolveError) throw new BacklogEditError(e.message, e.status);
     throw e;

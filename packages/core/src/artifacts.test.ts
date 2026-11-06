@@ -179,6 +179,42 @@ describe("artifacts (#1777)", () => {
   });
 });
 
+describe("app-use (#3682)", () => {
+  test("a day counts once; only the call that reaches the 3rd day is due, a later day is not once a request is set; a removed artifact does not count", async () => {
+    writeFileSync(join(work, "app.html"), "<p>app</p>");
+    const a: Artifact = await j(await add("app.html"));
+    expect(a).toMatchObject({ appDays: 0, appRequestTaskId: null });
+    expect(core.artifacts.markAppUse(a.id, "2026-11-01")).toEqual({ appDays: 1, appRequestTaskId: null, due: false });
+    expect(core.artifacts.markAppUse(a.id, "2026-11-01")).toEqual({ appDays: 1, appRequestTaskId: null, due: false });
+    expect(core.artifacts.markAppUse(a.id, "2026-11-02").due).toBe(false);
+    expect(core.artifacts.markAppUse(a.id, "2026-11-03")).toEqual({ appDays: 3, appRequestTaskId: null, due: true });
+    // two reads on the 3rd day: the second is not due again, so one request at most
+    expect(core.artifacts.markAppUse(a.id, "2026-11-03").due).toBe(false);
+    // a request that did not start leaves it unset: the next day that counts is due again
+    expect(core.artifacts.markAppUse(a.id, "2026-11-04")).toEqual({ appDays: 4, appRequestTaskId: null, due: true });
+    core.artifacts.setAppRequest(a.id, "tsk_req");
+    expect(core.artifacts.markAppUse(a.id, "2026-11-05")).toEqual({ appDays: 5, appRequestTaskId: "tsk_req", due: false });
+    // a refresh keeps the count and the request
+    writeFileSync(join(work, "app.html"), "<p>app 2</p>");
+    expect(await j(await post(`/api/artifacts/${a.id}/refresh`))).toMatchObject({ appDays: 5, appRequestTaskId: "tsk_req" });
+    expect((await list()).find((x) => x.id === a.id)).toMatchObject({ appDays: 5, appRequestTaskId: "tsk_req" });
+
+    writeFileSync(join(work, "gone-app.html"), "<p>gone</p>");
+    const b: Artifact = await j(await add("gone-app.html"));
+    core.artifacts.markAppUse(b.id, "2026-11-01");
+    core.artifacts.markAppUse(b.id, "2026-11-02");
+    await fetch(`${base}/api/artifacts/${b.id}`, { method: "DELETE" });
+    expect(core.artifacts.markAppUse(b.id, "2026-11-03")).toEqual({ appDays: 2, appRequestTaskId: null, due: false });
+    expect(core.db.getArtifact(b.id)!.appDays).toBe(2);
+    // through the API too: a removed artifact neither counts nor starts a request; an unknown one is 404
+    expect(await j(await post(`/api/artifacts/${b.id}/app-use`))).toEqual({ appDays: 2, appRequestTaskId: null });
+    expect((await post("/api/artifacts/art_nope/app-use")).status).toBe(404);
+    const u: Artifact = await j(await add("https://example.com/app"));
+    expect((await post(`/api/artifacts/${u.id}/app-use`)).status).toBe(400);
+    expect(core.db.getArtifact(u.id)!.appDays).toBe(0);
+  });
+});
+
 describe("serving a report (#1782)", () => {
   const view = async (id: string): Promise<string> => (await j(await post(`/api/artifacts/${id}/view`))).url;
   const get = (path: string, init?: RequestInit) => fetch(`${base}${path}`, init);
@@ -361,7 +397,7 @@ describe("artifacts across tasks (#1833)", () => {
     for (let i = 0; i < 1000; i++) {
       const id = `art_many_${String(i).padStart(4, "0")}`;
       // three rows share each updated_at, so the id breaks the ties across a page boundary
-      core.db.insertArtifact({ id, taskId: "tsk_many", title: `m${i}.txt`, kind: "file", source: `/x/m${i}.txt`, entry: `m${i}.txt`, mime: "text/plain", size: 1, removedAt: null, createdAt: at, updatedAt: at + Math.floor(i / 3) });
+      core.db.insertArtifact({ id, taskId: "tsk_many", title: `m${i}.txt`, kind: "file", source: `/x/m${i}.txt`, entry: `m${i}.txt`, mime: "text/plain", size: 1, removedAt: null, createdAt: at, updatedAt: at + Math.floor(i / 3), appDays: 0, appRequestTaskId: null });
     }
     const seen: string[] = [];
     let before = "";

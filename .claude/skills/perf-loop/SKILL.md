@@ -14,7 +14,7 @@ description: Switchboard の速さを計測して改善を回すときに読む�
 bun run --cwd apps/web build && bun scripts/perf-bench.ts --json perf-result.json   # 既定 --runs 5。1 回 30 秒前後
 ```
 
-表（ジャーニー / ms の中央値・p90 / 揺れない数 / `bytes`）が出る。ジャーニーは 4 つと `open-task-huge`（実物の大きさ 20,000 件の Task を開く。印は `sb:open-task`）。大きな Task の遅さは `open-task-huge` の ms と `bytes`（ジャーニー中の `/api/` の応答のバイト数。揺れない）で見る。`bytes` が `open-task` の何倍にもなっていたら、Task を開くときに全件を読んでいる。選ぶ基準は ms の中央値が大きいもの、または揺れない数（`requests` / `layoutCount` / `recalcStyleCount` / `layoutShift`）が多いもの。ms は共有マシンで揺れるので、同じマシンの前後でだけ比べる。
+表（ジャーニー / ms の中央値・p90 / 揺れない数 / `bytes`）が出る。ジャーニーは 4 つと `open-task-huge`（実物の大きさ 20,000 件の Task を開く。印は `sb:open-task`）。大きな Task の遅さは `open-task-huge` の ms と `bytes`（ジャーニー中の `/api/` の応答のバイト数。揺れない。応答のパスごとの内訳は JSON の `responses`）で見る。`bytes` が `open-task` の何倍にもなっていたら、Task を開くときに全件を読んでいる。選ぶ基準は ms の中央値が大きいもの、または揺れない数（`requests` / `layoutCount` / `recalcStyleCount` / `layoutShift`）が多いもの。ms は共有マシンで揺れるので、同じマシンの前後でだけ比べる。
 実際に使っているときの所要時間の台帳（#639）ができたら、その「速さ」も見て、利用者が待っている操作を優先する。
 
 ## 2. ラボで再現し、原因を 1 つに絞る
@@ -55,9 +55,9 @@ bun scripts/perf-ratchet.ts update perf-result.json                  # このホ
 bun scripts/perf-ratchet.ts update <Actions の結果>.json --env github  # Actions の上限。check が落ちた run の log の最後に出る JSON をファイルにして渡す
 ```
 
-`update` は下げる方向にしか書き換えない。`open-task` / `open-task-huge` の `bytes` も同じく下がる（幅 0 なので 1 バイト減っても「良くなった」になり、同じ PR で下げる）。bundle は上限が無いので下げるものも無い。上限は環境ごとに 2 組（`github` / `local`）あり、片方だけ下げると、もう片方は次の CI で「良くなった」と出る — 両方下げる。
+`update` は下げる方向にしか書き換えない。bundle と `bytes`（`open-task` / `open-task-huge`）は上限が無いので下げるものも無い（main の先端との増分で判定する。`docs/design/perf.md` の「ラチェット」の冒頭）。上限は環境ごとに 2 組（`github` / `local`）あり、片方だけ下げると、もう片方は次の CI で「良くなった」と出る — 両方下げる。
 
-**上限を上げたい**（機能を足して数が増えるなど）ときは、`scripts/perf-budget.json` を手で上げる（bundle は上限が無いので書き換えない。1% 以上増えたら `grew:` で赤になり、マージするかは利用者の判断）。`check` が main より上げた項目で exit 1 になるので CI は落ち、マージするかは利用者の判断（運用の確認として聞く。理由と前後の表を添える）。
+**上限を上げたい**（機能を足して数が増えるなど）ときは、`scripts/perf-budget.json` を手で上げる（bundle と `bytes` は上限が無いので書き換えない。1% 未満の増えで利用者に聞かない・上限を上げる PR を出さない。止まらずに通り、推移は `bun scripts/perf-ratchet.ts history` で追う。1% 以上増えたら `grew:` で赤になり、マージするかは利用者の判断）。`check` が main より上げた項目で exit 1 になるので CI は落ち、マージするかは利用者の判断（運用の確認として聞く。理由と前後の表を添える）。
 
 ## 5. マージ後に実測を見る
 

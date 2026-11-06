@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { ciExit, ciSteps } from "./ci";
 import { withHeavySlot } from "../ops-kit/src/heavy";
 import { RECORDS_HEADER } from "./perf-ratchet";
-import { checkoutSteps, DURATION_STEP, groupScript, HOST_TESTS, hostOffload, OFFLOAD_GROUPS, parseGroup, placeSteps, recordBundle, existingPass, failLines, failureSummary, perfSteps, LOCAL_CI_RESULT, localCi, main, mainFork, markerSeconds, narrowPerfStep, narrowTestStep, notify, perfVerdict, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepSeconds, stepWithIdle, TargetError, testsOf, type Deps, type LocalCiResult } from "./local-ci";
+import { checkoutSteps, DURATION_STEP, groupScript, HOST_TESTS, hostOffload, OFFLOAD_GROUPS, parseGroup, placeSteps, recordBundle, recordBytes, existingPass, failLines, failureSummary, perfSteps, LOCAL_CI_RESULT, localCi, main, mainFork, markerSeconds, narrowPerfStep, narrowTestStep, notify, perfVerdict, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepSeconds, stepWithIdle, TargetError, testsOf, type Deps, type LocalCiResult } from "./local-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
 const ciTs = await Bun.file(new URL("./ci.ts", import.meta.url)).text();
@@ -1155,6 +1155,53 @@ test("recordBundle: appends one row per run to perf-records/bundle.tsv, creating
     const before = puts.length;
     await expect(recordBundle("o/r", dir, "2026-11-02T04:00:00.000Z", sh)).rejects.toThrow("1 MB");
     expect(puts.length).toBe(before);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recordBytes: appends main's bytes to perf-records/bytes.tsv, a row per response's path; a perf-base.json without journeys writes nothing", async () => {
+  const dir = mkdtempSync(join(CACHE, "record-bytes-"));
+  const files = new Map<string, { text: string; sha: string }>();
+  const calls: string[][] = [];
+  const sh: Deps["sh"] = async (c) => {
+    calls.push(c);
+    const path = c.find((a) => a.startsWith("repos/"))!;
+    if (path.endsWith("/git/ref/heads/perf-records")) return "{}";
+    const read = /\/contents\/([^?]+)\?ref=perf-records$/.exec(path);
+    if (read) {
+      const f = files.get(read[1]!);
+      if (!f) throw new Error("gh api failed: gh: Not Found (HTTP 404)");
+      return JSON.stringify({ sha: f.sha, encoding: "base64", content: Buffer.from(f.text).toString("base64") });
+    }
+    if (c.includes("PUT")) {
+      const body = JSON.parse(readFileSync(c[c.indexOf("--input") + 1]!, "utf8")) as { content: string };
+      files.set(path.split("/contents/")[1]!, { text: Buffer.from(body.content, "base64").toString("utf8"), sha: `s${calls.length}` });
+      return "{}";
+    }
+    throw new Error(`unexpected ${c.join(" ")}`);
+  };
+  try {
+    const A = "a".repeat(40);
+    writeFileSync(join(dir, "perf-base.json"), JSON.stringify({ sha: A, bundle: { js: 1000, css: 100 } }));
+    expect(await recordBytes("o/r", dir, "2026-11-05T01:00:00.000Z", sh)).toBe("none");
+    expect(calls).toEqual([]);
+    const journeys = { "open-task": { bytes: 1100, responses: { "/api/tasks/:id": { count: 1, bytes: 1000 }, "/api/tasks/:id/evals": { count: 2, bytes: 100 } } }, "open-task-huge": { bytes: 2000 } };
+    writeFileSync(join(dir, "perf-base.json"), JSON.stringify({ sha: A, bundle: { js: 1000, css: 100 }, journeys }));
+    expect(await recordBundle("o/r", dir, "2026-11-05T02:00:00.000Z", sh)).toBe("recorded");
+    expect(await recordBytes("o/r", dir, "2026-11-05T02:00:00.000Z", sh)).toBe("recorded");
+    expect(await recordBytes("o/r", dir, "2026-11-05T03:00:00.000Z", sh)).toBe("recorded");
+    // bundle.tsv keeps its four columns; bytes.tsv is a file of its own on the same branch
+    expect(files.get("bundle.tsv")!.text).toBe(`${RECORDS_HEADER}\n2026-11-05T02:00:00.000Z\t1000\t100\t${A}\n`);
+    expect(files.get("bytes.tsv")!.text).toBe([
+      "measured_at\tjourney\tpath\tcount\tbytes\tmain",
+      ...["02", "03"].flatMap((h) => [
+        `2026-11-05T${h}:00:00.000Z\topen-task\t/api/tasks/:id\t1\t1000\t${A}`,
+        `2026-11-05T${h}:00:00.000Z\topen-task\t/api/tasks/:id/evals\t2\t100\t${A}`,
+        `2026-11-05T${h}:00:00.000Z\topen-task-huge\t(total)\t0\t2000\t${A}`,
+      ]),
+      "",
+    ].join("\n"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

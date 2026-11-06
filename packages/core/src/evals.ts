@@ -7,7 +7,7 @@ import { DEFAULT_RUBRIC } from "./rubric.ts";
  * (`Db.upsertEval`) under `source: rules`, one row per task; `RULES_BY` names the counter so a change in what is
  * counted tells old rows apart.
  */
-export const RULES_BY = "rules@3";
+export const RULES_BY = "rules@4";
 
 /** How every message the daemon sends by itself begins (`RESUME_PROMPT`, `STOP_RESUME_PROMPT`): not the person's instruction. */
 export const AUTO_RESUME_HEAD = "[Switchboard 自動再開]";
@@ -19,6 +19,21 @@ export function isAutomaticUserText(text: string): boolean {
 /** The transcript note a daemon stop leaves (interrupted.ts); also how the resumer, its cap and the counts below recognise one. Here, not there, because interrupted.ts imports this file. */
 export const STOP_NOTE = "デーモンの停止でターンが中断されました";
 
+/** How the transcript note of Task ごとの実装のモデル（試験, #2769) begins; the model follows it. */
+export const DELEGATED_HEAD = "Task ごとの実装は ";
+const DELEGATED_TAIL = " に任せます（試験）";
+
+/** The note an 実装 Task started with the trial's model leaves (server.ts `startStage`): what was handed over, not what ran. */
+export function delegatedNote(model: string): string {
+  return `${DELEGATED_HEAD}${model}${DELEGATED_TAIL}`;
+}
+
+/** The model of a `delegatedNote` line; null for any other status text. */
+export function delegatedModelOf(text: string): string | null {
+  if (!text.startsWith(DELEGATED_HEAD) || !text.endsWith(DELEGATED_TAIL)) return null;
+  return text.slice(DELEGATED_HEAD.length, -DELEGATED_TAIL.length) || null;
+}
+
 /**
  * The counts over a task's events. Consecutive user deltas are one message (a streamed message arrives in chunks; any
  * other event between them ends it — `recapOf` cuts only on a role change, a tool call or a turn's end) unless a delta
@@ -28,7 +43,7 @@ export const STOP_NOTE = "デーモンの停止でターンが中断されまし
  * writes the note before that turn's `session.end`, `abortOrphanedTasks` after it, so the turn's end is not the boundary.
  */
 export function ruleMetrics(events: EventEnvelope[]): RuleMetrics {
-  const m: RuleMetrics = { turns: 0, toolCalls: 0, toolFailures: 0, errors: 0, asks: 0, denials: 0, stops: 0, stopReasons: {}, userInstructions: 0, lastEnd: null, daemonStops: 0, lastCutByDaemon: false, durationMs: null, classifier: null };
+  const m: RuleMetrics = { turns: 0, toolCalls: 0, toolFailures: 0, errors: 0, asks: 0, denials: 0, stops: 0, stopReasons: {}, userInstructions: 0, lastEnd: null, daemonStops: 0, lastCutByDaemon: false, durationMs: null, classifier: null, delegatedModel: null };
   let userMessages = 0;
   let userText: string | null = null; // the user message being assembled; null = not in one
   let userId: string | undefined; // its messageId, when the adapter gave one
@@ -77,6 +92,7 @@ export function ruleMetrics(events: EventEnvelope[]): RuleMetrics {
           m.daemonStops++;
           cut = true;
         }
+        m.delegatedModel ??= delegatedModelOf(ev.text);
         break;
       case "stop.record":
         m.stops++;

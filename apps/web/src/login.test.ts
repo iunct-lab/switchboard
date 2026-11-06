@@ -1,6 +1,6 @@
 // test-reads: apps/web/public/sw.js
 import { describe, expect, test } from "bun:test";
-import { countriesUrl, hasTypedText, logoutPath, hostStopped, loginRoute, sessionLabel, sessionRefreshDelay, STUCK_RESCUE, stoppedRoute, withoutFromAuth } from "./login.ts";
+import { countriesUrl, hasTypedText, logoutPath, hostStopped, loginRoute, RUNNER_LOGIN_WARN_MS, runnerLoginLabel, sessionLabel, sessionRefreshDelay, STUCK_RESCUE, stoppedRoute, withoutFromAuth } from "./login.ts";
 
 describe("login route (#211)", () => {
   test("the daemon's login mode decides: passkey goes to /_auth/ with the way back, token asks for the token", () => {
@@ -123,6 +123,22 @@ describe("sessionLabel (#498)", () => {
     expect(sessionLabel({ idleUntil: at(14), expiresAt: at(9, 31) }, at(14)).expired).toBe(true); // exactly at the idle time
     expect(sessionLabel({ idleUntil: at(14), expiresAt: at(9, 31) }, at(14) - 1).expired).toBe(false);
     expect(sessionLabel({ idleUntil: at(14, 29), expiresAt: at(9, 27) }, at(9)).expired).toBe(true); // the cap
+  });
+});
+
+describe("runnerLoginLabel (#3864)", () => {
+  const end = new Date(2026, 10, 20, 9, 15).getTime();
+  const info = { loginExpiresAt: end, loginHint: "claude auth login" };
+  test("no expiry → null; the title names the end and the command; the bar only under 72 hours", () => {
+    expect(runnerLoginLabel({ loginHint: "claude auth login" }, end)).toBeNull();
+    expect(runnerLoginLabel({ loginExpiresAt: 1e16 }, end)).toBeNull(); // past the Date range
+    expect(runnerLoginLabel(info, end - 71 * 3600_000)).toEqual({
+      title: "Claude のログイン 11/20 09:15 まで。やり直すときは Task の「ターミナル」tab で claude auth login",
+      bar: "Claude のログイン 11/20 09:15 まで",
+    });
+    expect(runnerLoginLabel(info, end - 73 * 3600_000)?.bar).toBe("");
+    expect(runnerLoginLabel(info, end - RUNNER_LOGIN_WARN_MS)?.bar).toBe(""); // exactly 72 hours left is not yet
+    expect(runnerLoginLabel(info, end - RUNNER_LOGIN_WARN_MS + 1)?.bar).toBe("Claude のログイン 11/20 09:15 まで");
   });
 });
 

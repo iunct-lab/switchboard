@@ -5,7 +5,7 @@ import { transcriptLines } from "./recap.ts";
 import { DEFAULT_RUBRIC } from "./rubric.ts";
 import { buildRubricPrompt, judgeRubric, parseRubricJudgement, RECAP_CHARS, type RubricJudgeInput } from "./rubric-judge.ts";
 
-const METRICS: RuleMetrics = { turns: 1, toolCalls: 3, toolFailures: 1, errors: 0, asks: 0, denials: 0, stops: 0, stopReasons: {}, userInstructions: 0, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false, durationMs: 5000, classifier: null };
+const METRICS: RuleMetrics = { turns: 1, toolCalls: 3, toolFailures: 1, errors: 0, asks: 0, denials: 0, stops: 0, stopReasons: {}, userInstructions: 0, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false, durationMs: 5000, classifier: null, delegatedModel: null };
 const EVENTS: AgentEvent[] = [
   { t: "message.delta", role: "user", text: "README の誤字を直して" },
   { t: "tool.call", id: "a", name: "Edit", input: {}, summary: "README.md" },
@@ -45,11 +45,12 @@ describe("rubric judge (#1219)", () => {
     const j = await judgeRubric(INPUT, { adapters: new Map([["codex", replayAdapter("codex", answer(GOOD, "gpt-6-luna"), { starts })], ["claude", replayAdapter("claude", [])]]), settings: SETTINGS, cwd: "/tmp/switchboard-home/suggest", onUsage: (runner, ev) => usage.push({ runner, model: ev.model }) });
     expect(Object.keys(j.scores).sort()).toEqual(["communication", "efficiency", "goal", "instructions", "safety"]);
     expect(j.scores.goal).toEqual({ score: 5, reason: "直して報告" });
-    expect(j).toMatchObject({ summary: "小さな修正を確実に終えた", by: "codex:gpt-6-luna", rubric: "switchboard-default@1" });
+    expect(j).toMatchObject({ summary: "小さな修正を確実に終えた", by: "codex:gpt-6-luna", rubric: "switchboard-default@2" });
     expect(j.ts).toBeGreaterThan(0);
     expect(starts[0]).toMatchObject({ cwd: "/tmp/switchboard-home/suggest", model: "gpt-6-luna", permissionMode: "read-only" });
     const prompt = starts[0]!.prompt;
     for (const id of ["goal", "instructions", "efficiency", "communication", "safety"]) expect(prompt).toContain(`- ${id}（`);
+    expect(prompt.split("\n").find((l) => l.startsWith("- safety（"))).toContain("案内どおりの経路でやり直したのは迂回に数えない");
     expect(prompt).toContain("## 会話");
     expect(prompt).toContain("利用者: README の誤字を直して");
     expect(prompt).toContain("ツール呼び出し 3 / 失敗 1");

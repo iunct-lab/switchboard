@@ -82,7 +82,7 @@ stays opaque, it posts a request to its parent, and the screen (`ArtifactBody`) 
 person confirms that one request — and posts the answer back to that frame. A page opened on its own has no screen around it and nothing answers. The check is on the frame's window,
 not on the document in it: a link that moves the frame elsewhere keeps the window, and two opaque origins cannot be
 told apart. What keeps a page from another site out of that window is the UI's own CSP (`default-src 'self'`, so
-`frame-src` is the daemon's origin); the Vite dev server does not send it yet.
+`frame-src` is the daemon's origin); the Vite dev server sends `frame-src 'self'` for the same reason.
 
 ## Across Tasks: reports and every artifact
 

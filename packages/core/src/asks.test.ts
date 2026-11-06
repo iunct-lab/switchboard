@@ -365,7 +365,7 @@ describe("rankAsks (#1674)", () => {
 });
 
 describe("mockups (#2221)", () => {
-  const art = (id: string, title: string): Artifact => ({ id, taskId: "tk_m", title, kind: "file", source: `/w/${id}.html`, entry: `${id}.html`, mime: "text/html", size: 1, removedAt: null, createdAt: NOW, updatedAt: NOW });
+  const art = (id: string, title: string): Artifact => ({ id, taskId: "tk_m", title, kind: "file", source: `/w/${id}.html`, entry: `${id}.html`, mime: "text/html", size: 1, removedAt: null, createdAt: NOW, updatedAt: NOW, appDays: 0, appRequestTaskId: null });
   const two = [art("art_a", "画面イメージ A: 上に並べる"), art("art_b", "画面イメージ B: 下に並べる")];
   const asked: string[] = [];
   const mockups = (id: string) => (asked.push(id), id === "tk_m" ? two : []);

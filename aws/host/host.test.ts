@@ -1498,7 +1498,7 @@ describe("aws/host cloudwatch (#539)", () => {
 describe("aws/host offload (#678)", () => {
   // a fake aws that logs its calls, keeps the upload in $S3OUT and answers from files in $FAKE: status (the build's
   // "<status> <group> <stream>") and events.json (one page of the log; a call with its token gets no more)
-  let home: string, repo: string, fakeDir: string, out: string;
+  let home: string, repo: string, fakeDir: string, out: string, sleepBin: string;
   const awsFake = () =>
     fake(
       "aws",
@@ -1518,10 +1518,9 @@ exit 0`,
   };
   const offload = (args: string[], env: Record<string, string> = {}) => {
     rmSync(log, { force: true });
-    fake("sleep", "exit 0"); // offload.sh's polls wait 5 s each; the order of the calls is what these tests read (#3268)
     const p = Bun.spawnSync(["bash", join(HERE, "offload.sh"), ...args], {
       cwd: repo,
-      env: { PATH: `${join(dir, "bin")}:/usr/bin:/bin`, SB_HOST_ENV: join(dir, "host.env"), HOME: home, FAKE: fakeDir, S3OUT: out, ...env },
+      env: { PATH: `${sleepBin}:${join(dir, "bin")}:/usr/bin:/bin`, SB_HOST_ENV: join(dir, "host.env"), HOME: home, FAKE: fakeDir, S3OUT: out, ...env },
       stderr: "pipe",
       stdout: "pipe",
     });
@@ -1534,7 +1533,12 @@ exit 0`,
     repo = join(dir, "repo-offload");
     fakeDir = join(dir, "fake-offload");
     out = join(dir, "offload-out.tar.gz");
-    for (const d of [home, repo, fakeDir]) mkdirSync(d, { recursive: true });
+    sleepBin = join(dir, "bin-offload-sleep");
+    for (const d of [home, repo, fakeDir, sleepBin]) mkdirSync(d, { recursive: true });
+    // offload.sh's polls wait 5 s each; the order of the calls is what these tests read (#3268). Only offload()'s PATH
+    // has it: the shared bin would make every later script's sleep return at once
+    writeFileSync(join(sleepBin, "sleep"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(sleepBin, "sleep"), 0o755);
     git("init", "-q");
     writeFileSync(join(repo, ".gitignore"), "node_modules/\n.env\n");
     writeFileSync(join(repo, "compose.yaml"), "services: {}\n");
@@ -1671,14 +1675,17 @@ exit 0`,
     // interrupted while the build runs
     setLog("IN_PROGRESS", ["building"]);
     rmSync(log, { force: true });
+    // the real sleep waits: with the fake one the polls do not wait, and the TERM can land outside the wait (#3435)
+    expect(existsSync(join(dir, "bin", "sleep"))).toBe(false);
     const p = Bun.spawn(["bash", join(HERE, "offload.sh"), "docker", "compose", "up"], {
       cwd: repo,
       env: { PATH: `${join(dir, "bin")}:/usr/bin:/bin`, SB_HOST_ENV: join(dir, "host.env"), HOME: home, FAKE: fakeDir, S3OUT: out },
       stdout: "pipe",
       stderr: "pipe",
     });
-    // load (the flake of #2939): a deadline, not a count of sleeps — the TERM must come after the script's first poll
-    for (const t0 = Date.now(); !calls().some((l) => l.startsWith("aws codebuild batch-get-builds")) && Date.now() - t0 < 20_000; ) await Bun.sleep(50);
+    // load (the flake of #2939): a deadline, not a count of sleeps — the TERM must come in the first poll's wait: the
+    // call with the token is pull_log's last, and only `sleep 5 & wait $!` follows it
+    for (const t0 = Date.now(); !calls().some((l) => l.startsWith("aws logs get-log-events") && l.includes("--next-token")) && Date.now() - t0 < 20_000; ) await Bun.sleep(50);
     // TERM, as a stopped Task sends; INT takes the same trap (bun's test runner hands its children an ignored INT)
     p.kill("SIGTERM");
     expect(await p.exited).toBe(130);

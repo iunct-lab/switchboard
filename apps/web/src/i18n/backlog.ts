@@ -147,6 +147,8 @@ export const backlog = msgs({
   // Backlog.tsx: a row's facts, waits, prerequisites and overlap
   updated: { ja: "更新 {ago}", en: "Updated {ago}" },
   replyWaiting: { ja: "返事待ち", en: "Waiting for a reply" },
+  openTile: { ja: "開く（一覧の行と同じ詳細と編集）", en: "Open (the list row's details and edit)" },
+  closeTile: { ja: "畳む", en: "Collapse" },
   ownerUnknown: { ja: " ← 不明", en: " ← unknown" },
   ownerOf: { ja: " の ", en: ": " },
   taskUnknown: { ja: "Task 不明", en: "Task unknown" },

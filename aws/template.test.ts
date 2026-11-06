@@ -194,6 +194,12 @@ describe("aws/template.yaml (#229)", () => {
     expect(rules).toContain("{ Id: archives, Status: Enabled, Prefix: archive/, ExpirationInDays: 30 }");
   });
 
+  test("request metrics (#3242): Data counts requests per prefix for litestream/, archive/ and history/", () => {
+    const data = resource("Data");
+    const metrics = data.slice(data.indexOf("MetricsConfigurations:"));
+    for (const p of ["litestream", "archive", "history"]) expect(metrics).toContain(`- { Id: ${p}, Prefix: ${p}/ }`);
+  });
+
   test("request logs (#1490): CloudFront's standard log goes to Data's cdn-logs/ for 90 days or more, without cookies, and the host sees the viewer address", () => {
     const cdn = resource("Cdn");
     expect(cdn).toContain("Logging: { Bucket: !GetAtt Data.DomainName, Prefix: cdn-logs/, IncludeCookies: false }");
