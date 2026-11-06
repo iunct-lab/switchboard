@@ -34,3 +34,18 @@ console.log(JSON.stringify({ sent, shown: sent.map(shownScreen) }));`;
     shown: ["Awaiting you", "Backlog", 'Task "要望: a" (task_1)'],
   });
 });
+
+test("要望にする (#3683): 送信元 names the artifact, and its Task unless the screen already does; the draft is sent in Japanese whatever the language", async () => {
+  const { sentFromArtifact } = await import("./components/Feedback.tsx");
+  const a = { title: "ボード", taskId: "task_1" };
+  expect(sentFromArtifact("Task「元」(task_1)", a)).toBe("送信元: Task「元」(task_1)・成果物「ボード」");
+  expect(sentFromArtifact("Insights", { ...a, taskTitle: "元" })).toBe("送信元: Insights・Task「元」の成果物「ボード」");
+  expect(sentFromArtifact("判断待ち", a)).toBe("送信元: 判断待ち・Task「task_1」の成果物「ボード」");
+  const at = (f: string) => JSON.stringify(new URL(f, import.meta.url).pathname);
+  const code = `globalThis.localStorage = { getItem: (k) => (k === "switchboard.lang" ? "en" : null) };
+const { appRequestDraft } = await import(${at("./artifacts.ts")});
+console.log(JSON.stringify(appRequestDraft("ボード")));`;
+  const r = Bun.spawnSync([process.execPath, "-e", code]);
+  expect(r.stderr.toString()).toBe("");
+  expect(JSON.parse(r.stdout.toString())).toBe("使い捨てアプリ「ボード」を一般機能にしたい。");
+});

@@ -1,5 +1,5 @@
 // test-reads: packages/core/src/
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, setSystemTime, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -52,6 +52,61 @@ test("the 出典 says 誰の言葉: 利用者, also for a request drafted from e
   const when = new Date("2026-09-19T00:00:00Z");
   expect(buildFeedbackPrompt({ text: "x", when })).toEndWith("## 出典\n- 誰の言葉: 利用者\nフィードバックボタン、2026-09-19T00:00:00.000Z");
   expect(buildFeedbackPrompt({ text: "x", when, source: { kind: "eval", taskId: "task_9" } })).toContain("## 出典\n- 誰の言葉: 利用者\n");
+});
+
+test("artifact (#3682): the 出典 names the throwaway app, its Task and where its copy is; auto says Switchboard filed it", () => {
+  const when = new Date("2026-11-05T00:00:00Z");
+  const source = { kind: "artifact" as const, artifactId: "art_1", taskId: "task_9", copy: "~/.switchboard/artifacts/task_9/art_1/" };
+  const p = buildFeedbackPrompt({ text: "使い捨てアプリ「ボード」を一般機能にしたい。", when, screen: "Task「t」(task_9)", source });
+  expect(p).toEndWith("\n画面: Task「t」(task_9)\n使い捨てアプリから: 成果物 art_1（Task task_9）、写し ~/.switchboard/artifacts/task_9/art_1/");
+  expect(p).toContain("## 出典\n- 誰の言葉: 利用者\nフィードバックボタン、2026-11-05T00:00:00.000Z");
+  expect(buildFeedbackPrompt({ text: "x", when, source, auto: true })).toContain("## 出典\n- 誰の言葉: 定期の検査（使い捨てアプリが使われた日数から Switchboard が起こした）\n自動、2026-11-05T00:00:00.000Z\n使い捨てアプリから: 成果物 art_1");
+});
+
+test("artifact (#3682): /api/feedback with an artifact source puts its copy in the 出典; an unknown artifact is 404 and starts nothing", async () => {
+  const base = await boot();
+  const t = await (await post(base, { text: "元の Task" })).json() as Task;
+  core.db.insertArtifact({ id: "art_fb", taskId: t.id, title: "board.html", kind: "file", source: "/w/board.html", entry: "board.html", mime: "text/html", size: 1, removedAt: null, createdAt: 1, updatedAt: 1, appDays: 1, appRequestTaskId: null });
+  for (let i = 0; starts.length < 1 && i < 100; i++) await Bun.sleep(10);
+  const r = await post(base, { text: "使い捨てアプリ「board.html」を一般機能にしたい。", source: { kind: "artifact", artifactId: "art_fb" } });
+  expect(r.status).toBe(201);
+  for (let i = 0; starts.length < 2 && i < 100; i++) await Bun.sleep(10);
+  expect(starts[1]!.prompt).toContain(`使い捨てアプリから: 成果物 art_fb（Task ${t.id}）、写し `);
+  expect(starts[1]!.prompt).toContain(`artifacts/${t.id}/art_fb/`);
+  const n = core.db.listTasks(false).length;
+  expect((await post(base, { text: "x", source: { kind: "artifact", artifactId: "art_nope" } })).status).toBe(404);
+  expect(core.db.listTasks(false).length).toBe(n);
+});
+
+test("app-use (#3682): read on 3 separate days, the app starts one request Task; the 4th day does not start another", async () => {
+  const base = await boot();
+  const origin = await (await post(base, { text: "元の Task" })).json() as Task;
+  core.db.insertArtifact({ id: "art_app", taskId: origin.id, title: "進み具合のボード", kind: "file", source: "/w/b.html", entry: "b.html", mime: "text/html", size: 1, removedAt: null, createdAt: 1, updatedAt: 1, appDays: 0, appRequestTaskId: null });
+  const use = async (day: string) => {
+    setSystemTime(new Date(`${day}T12:00:00`));
+    try {
+      return await (await fetch(`${base}/api/artifacts/art_app/app-use`, { method: "POST" })).json() as { appDays: number; appRequestTaskId: string | null };
+    } finally {
+      setSystemTime();
+    }
+  };
+  const requests = () => core.db.listTasks(false).filter((x) => x.title.startsWith("要望: 使い捨てアプリ"));
+  expect(await use("2026-11-01")).toEqual({ appDays: 1, appRequestTaskId: null });
+  expect(await use("2026-11-01")).toEqual({ appDays: 1, appRequestTaskId: null });
+  expect(await use("2026-11-02")).toEqual({ appDays: 2, appRequestTaskId: null });
+  expect(requests()).toHaveLength(0);
+  const third = await use("2026-11-03");
+  expect(requests()).toHaveLength(1);
+  expect(third).toEqual({ appDays: 3, appRequestTaskId: requests()[0]!.id });
+  expect(requests()[0]!.title).toBe("要望: 使い捨てアプリ「進み具合のボード」を一般機能にしたい。");
+  expect(core.db.getArtifact("art_app")!.appDays).toBe(3);
+  expect(await use("2026-11-03")).toEqual({ appDays: 3, appRequestTaskId: third.appRequestTaskId });
+  expect(await use("2026-11-04")).toEqual({ appDays: 4, appRequestTaskId: third.appRequestTaskId });
+  expect(requests()).toHaveLength(1);
+  for (let i = 0; !starts.some((s) => s.prompt.includes("使い捨てアプリから")) && i < 100; i++) await Bun.sleep(10);
+  const prompt = starts.find((s) => s.prompt.includes("使い捨てアプリから"))!.prompt;
+  expect(prompt).toContain(`使い捨てアプリから: 成果物 art_app（Task ${origin.id}）`);
+  expect(prompt).toContain("- 誰の言葉: 定期の検査（");
 });
 
 test("screen: the 出典 names the screen it was sent from; without one it is as before", async () => {

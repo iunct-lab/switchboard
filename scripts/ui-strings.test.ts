@@ -165,6 +165,27 @@ export function label() {
     ]);
   });
 
+  test("outside JSX, Japanese in a .ts helper or a .tsx constant is untranslated; values, English and the dictionaries are not collected", () => {
+    const d = tree({
+      "notice.ts": `export const done = () => "保存しました";
+export const status = (s: string) => (s === "完了" ? t(m.done) : \`\${s} を待っています\`);
+export const key = { kind: "要望" };
+export const path = "/api/tasks";
+// ui-strings: value "拒否" — sent to the daemon
+export const deny = "拒否";`,
+      "Panel.tsx": `const HEAD = "見出し";\nexport const Panel = () => <h5>{HEAD}</h5>;`,
+      "i18n/home.ts": `export const home = msgs({ save: { ja: "保存", en: "Save" } });`,
+      "notice.test.ts": `test("x", () => expect(done()).toBe("保存しました"));`,
+    });
+    const got = collectUiStrings([d], d).map((s) => [s.file, s.line, s.kind, s.text, s.verdict, s.reason]);
+    expect(got).toEqual([
+      ["Panel.tsx", 1, "literal", "見出し", "violation", "untranslated"],
+      ["notice.ts", 1, "literal", "保存しました", "violation", "untranslated"],
+      ["notice.ts", 2, "literal", "… を待っています", "violation", "untranslated"],
+      ["notice.ts", 6, "literal", "拒否", "ok", "marked as a value"],
+    ]);
+  });
+
   test("apps/web/src has no violation: Japanese added without the dictionary fails here", () => {
     const root = join(import.meta.dir, "..");
     const run = spawnSync("bun", [join(import.meta.dir, "ui-strings.ts"), "--check", "apps/web/src"], { cwd: root, encoding: "utf8" });

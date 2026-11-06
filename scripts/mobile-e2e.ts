@@ -5,10 +5,11 @@
  * does not scroll sideways with long lines in it, a reply and an approval reach the runner, and 詳細 opens the task's Brief.
  * Home's new-task form fits a phone and 開始 starts a task from it (#391). Knowledge stacks its list, the note and its
  * details, and a note picked from the list can be read (#392). Ledger, Backlog and Schedules (its form open too) do not
- * scroll sideways, and a schedule is added from a phone (#393). At 1280 and 390 the top bar's Rescue opens the rescue page
+ * scroll sideways, and a schedule is added from a phone (#393). Settings does not either, its toggles' labels wrapping inside
+ * the screen, with the LLM suggestions' "not detected" note shown too (#3819). At 1280 and 390 the top bar's Rescue opens the rescue page
  * the daemon names (a fake sb-rescue standing in for the host's /rescue/, #399); when its answer comes late the tabs keep their
  * places and a tap before it lands on the tab, not on Rescue (#1485).
- * SCREENSHOT_DIR=<dir> saves Home and a task at 1280 × 800 first (compare them before and after a layout change).
+ * SCREENSHOT_DIR=<dir> saves Home, a task and Settings at 1280 × 800 first (compare them before and after a layout change).
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -70,6 +71,10 @@ const rescuePage = `${rescueOrigin}/rescue/`;
 const cfg = loadConfig({ SWITCHBOARD_RESCUE_URL: rescueOrigin, SWITCHBOARD_WEB_URL: rescueOrigin, SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
 const core = await startServer(cfg, [adapter], { port: 0, selfdevChecks: false, dryRunRestart: true });
 const base = `http://127.0.0.1:${core.server.port}`;
+// LLM suggestions on with a runner that has no adapter, so Settings shows its "not detected" note in the toggle's label (#3819).
+// Written to the store: PATCH /api/settings refuses a runner that is not installed.
+const saved = await (await fetch(`${base}/api/settings`)).json();
+core.db.setSetting("settings", { ...saved, routing: { ...saved.routing, llm: { ...saved.routing.llm, enabled: true, runner: "codex" } } });
 const assert = (ok: unknown, message: string) => { if (!ok) throw new Error(message); };
 async function until<T>(fn: () => T | Promise<T>, label: string): Promise<NonNullable<T>> {
   const end = Date.now() + 20_000;
@@ -143,6 +148,13 @@ try {
   await shoot("task-1280.png");
   const pc = { list: await visible(".rail-list"), button: await visible(".rail-tasks"), side: await visible(".side"), brief: await visible(".brief-toggle") };
   assert(pc.list && !pc.button && pc.side && !pc.brief, `1280: ${JSON.stringify(pc)}`);
+  if (shots) {
+    await tap(`[...document.querySelectorAll('.tabs button')].find(b => b.textContent === 'Settings')`, false);
+    await until(() => evaluate(`!!document.querySelector('.main.settings .warn')`), "Settings at 1280");
+    await shoot("settings-1280x800.png");
+    // The toggles' row heights, to compare before and after a change to their wrapping.
+    console.log(JSON.stringify({ settingsToggleHeights1280: await evaluate(`[...document.querySelectorAll('.settings label.toggle')].map(e => e.getBoundingClientRect().height)`) }));
+  }
 
   const results: Record<string, unknown> = { pc };
   // The rescue page (#399): Rescue in the top bar, on Home, inside the screen on a phone too; it opens the page the daemon names.
@@ -286,7 +298,8 @@ try {
     results[label] = { sideways: layout.over, listNoteDetails: layout.below, itemsUnder44px: layout.short };
   }
 
-  // Ledger, Backlog, Schedules (#393): nothing scrolls sideways (a table only inside itself); a schedule is added.
+  // Ledger, Backlog, Settings (#3819), Schedules (#393): nothing scrolls sideways (a table only inside itself); a schedule is
+  // added (Schedules stays last: the form below is filled on its screen).
   const overflow = (width: number) => evaluate(`(() => { const m = document.querySelector('.main'); return { over: Math.max(document.documentElement.scrollWidth - ${width}, m.scrollWidth - m.clientWidth), wide: [...m.querySelectorAll('*')].filter(e => e.getBoundingClientRect().right > ${width + 1} && !e.closest('table')).slice(0, 6).map(e => e.tagName + '.' + e.className) }; })()`);
   const openTab = async (name: string, cls: string) => {
     await tap(`[...document.querySelectorAll('.tabs button')].find(b => b.textContent === ${JSON.stringify(name)})`, true);
@@ -297,12 +310,17 @@ try {
     const label = `screens ${width}x${height}`;
     await size(width, height, true);
     const measured: Record<string, number> = {};
-    for (const [name, cls] of [["Ledger", "ledger"], ["Backlog", "backlog"], ["Schedules", "schedules"]] as const) {
+    for (const [name, cls] of [["Ledger", "ledger"], ["Backlog", "backlog"], ["Settings", "settings"], ["Schedules", "schedules"]] as const) {
       await openTab(name, cls);
       if (cls === "ledger") await until(() => evaluate(`[...document.querySelectorAll('.ledger .row .hint.mono')].some(e => e.textContent.includes('0123456789abcdef'))`), `${label}: Ledger shows the long model id`);
       if (cls === "schedules") {
         await tap(`[...document.querySelectorAll('.schedules .card .row.head button')].find(b => b.textContent.includes('追加'))`, true);
         await until(() => evaluate(`!!document.querySelector('.schedules .fields textarea')`), `${label}: the schedule form opens`);
+      }
+      if (cls === "settings") {
+        assert(await evaluate(`!!document.querySelector('.settings label.toggle .warn')`), `${label}: Settings does not show the LLM runner's "not detected" note`);
+        const over = await evaluate(`[...document.querySelectorAll('.settings label.toggle')].filter(e => e.getBoundingClientRect().right >= ${width + 1}).map(e => e.textContent + ' ' + Math.round(e.getBoundingClientRect().right))`) as string[];
+        assert(over.length === 0, `${label}: Settings toggles past the screen: ${JSON.stringify(over)}`);
       }
       const o = await overflow(width);
       assert(o.over <= 0, `${label}: ${name} scrolls sideways by ${o.over}: ${JSON.stringify(o.wide)}`);

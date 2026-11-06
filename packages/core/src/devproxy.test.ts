@@ -1,5 +1,5 @@
 // test-reads: apps/web/
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -85,6 +85,26 @@ describe("dev UI through the Vite proxy (apps/web/vite.config.ts)", () => {
     const r = await fetch(`${page}/artifacts/${"a".repeat(20)}/index.html`, { headers: browser });
     expect(r.status).toBe(403);
     expect(await r.json()).toEqual({ error: "forbidden" });
+  });
+
+  test("the dev page answers with frame-src 'self' (#3728): a link in a report's frame cannot load another site into it", async () => {
+    const csp = (await fetch(`${page}/`)).headers.get("content-security-policy") ?? "";
+    expect(csp).toContain("frame-src 'self'");
+  });
+
+  test("a report served through the proxy keeps the daemon's sandbox CSP, not the dev page's (#3728)", async () => {
+    // A task row is all the artifact store needs (no runner is started); its scope is the folder the report sits in.
+    const work = join(home, "report");
+    mkdirSync(work, { recursive: true });
+    writeFileSync(join(work, "index.html"), "<h1>r</h1>");
+    const at = Date.now();
+    core.db.insertTask({ id: "tsk_devproxy", workspaceId: null, title: "t", stage: null, runner: "claude", cwd: work, scope: [work], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, statusAt: at, createdAt: at, updatedAt: at } as unknown as Parameters<typeof core.db.insertTask>[0]);
+    const json = { ...browser, "content-type": "application/json" };
+    const a = (await (await fetch(`${page}/api/tasks/tsk_devproxy/artifacts`, { method: "POST", headers: json, body: JSON.stringify({ source: join(work, "index.html") }) })).json()) as { id: string };
+    const { url } = (await (await fetch(`${page}/api/artifacts/${a.id}/view`, { method: "POST", headers: browser })).json()) as { url: string };
+    const r = await fetch(`${page}${url}`, { headers: browser });
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-security-policy")).toBe("sandbox allow-scripts; frame-ancestors 'self'");
   });
 
   test("the terminal socket (/ws/pty, #16) goes through the same proxy rule: the daemon answers, not the Origin check", async () => {

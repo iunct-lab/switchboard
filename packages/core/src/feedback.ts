@@ -1,11 +1,21 @@
 import { LOCAL_BACKLOG_RULES, type OtherRepo, otherRepoRules } from "./backlog.ts";
 
+/** Where a request came from besides the button (#1221 evals, #3682 a throwaway app with the folder its copy is in). */
+export type FeedbackSource = { kind: "eval"; taskId: string } | { kind: "artifact"; artifactId: string; taskId: string; copy: string };
+
+const oneLine = (v: string) => v.replace(/\s+/g, "");
+
+function sourceLine(source: FeedbackSource): string {
+  return source.kind === "eval" ? `評価から: Task ${oneLine(source.taskId)}` : `使い捨てアプリから: 成果物 ${oneLine(source.artifactId)}（Task ${oneLine(source.taskId)}）、写し ${source.copy.replace(/[\r\n]+/g, " ")}`;
+}
+
 /**
  * The request goes in as the user wrote it, for the agent to tidy without changing its intent; a longer fence keeps backticks in a report inside the block.
  * `other` = the request is for another registered workspace's repository: the Task runs there and files it in that
  * repository and its Project, reading the skills as a backlog stage Task on that workspace does.
+ * `auto` = Switchboard filed it by itself (#3682, a throwaway app read on enough days), not the person through the button.
  */
-export function buildFeedbackPrompt({ text, when, screen, other, local, source }: { text: string; when: Date; screen?: string; other?: OtherRepo; local?: boolean; source?: { kind: "eval"; taskId: string } }): string {
+export function buildFeedbackPrompt({ text, when, screen, other, local, source, auto }: { text: string; when: Date; screen?: string; other?: OtherRepo; local?: boolean; source?: FeedbackSource; auto?: boolean }): string {
   const fence = "`".repeat(Math.max(4, ...Array.from(text.matchAll(/`+/g), (m) => m[0].length + 1)));
   // a workspace whose backlog is kept in Switchboard only (#2265, #2344): the Issues are made there, not in the GitHub repository
   const where = local
@@ -27,8 +37,7 @@ ${text}
 ${fence}
 
 ## 出典
-- 誰の言葉: 利用者
-フィードバックボタン、${when.toISOString()}${screen ? `\n画面: ${screen.replace(/\s+/g, " ").trim()}` : ""}${source ? `\n評価から: Task ${source.taskId.replace(/\s+/g, "")}` : ""}`;
+${auto ? "- 誰の言葉: 定期の検査（使い捨てアプリが使われた日数から Switchboard が起こした）\n自動" : "- 誰の言葉: 利用者\nフィードバックボタン"}、${when.toISOString()}${screen ? `\n画面: ${screen.replace(/\s+/g, " ").trim()}` : ""}${source ? `\n${sourceLine(source)}` : ""}`;
 }
 
 /** 新しいリポジトリ (#1447): the steps live in the skill; this only points at it and hands over the name and purpose as data. */

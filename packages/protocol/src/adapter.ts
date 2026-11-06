@@ -129,6 +129,8 @@ export interface RunnerDetection {
   login?: RunnerLogin;
   /** Which login it is while `login` is `ok` (#2528). */
   loginKind?: LoginKind;
+  /** When the login runs out, epoch ms (#3867); absent = not known. */
+  loginExpiresAt?: number;
   /** What to type in a terminal tab to log in again. */
   loginHint?: string;
 }

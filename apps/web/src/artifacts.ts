@@ -14,9 +14,37 @@ export function viewOf(a: Pick<Artifact, "kind" | "mime">): ArtifactView {
   return "external";
 }
 
+/**
+ * What コピー on the artifact's bar copies (#3687): a file's text (text, Markdown, a page's or an SVG's source), a link's
+ * URL, or nothing (an image, a folder, a file only the browser can open).
+ */
+export function copyKind(a: Pick<Artifact, "kind" | "mime">): "content" | "url" | null {
+  if (a.kind === "url") return "url";
+  if (a.kind !== "file") return null;
+  const how = viewOf(a);
+  return how === "text" || how === "frame" ? "content" : null;
+}
+
 /** A Markdown file (#3677): shown as text, with the プレビュー / テキスト switch. A URL artifact never is. */
 export function isMarkdown(a: Pick<Artifact, "kind" | "mime">): boolean {
   return a.kind !== "url" && a.mime.toLowerCase() === "text/markdown";
+}
+
+/**
+ * A throwaway app (#3683): an artifact whose page read the API through the screen on some day, or did so now. Its row
+ * offers 要望にする; once Switchboard started a request for it, the row links that Task.
+ */
+export function appRequestOf(use: { appDays: number; appRequestTaskId: string | null }, usedNow: boolean): { offer: boolean; taskId: string | null } {
+  return { offer: usedNow || use.appDays > 0, taskId: use.appRequestTaskId };
+}
+
+/**
+ * The draft 要望にする opens the feedback dialog with: the same words the daemon files on the 3rd day. It is sent to the
+ * daemon as the request's text, so it is not translated (docs/design/ui-language.md).
+ */
+export function appRequestDraft(title: string): string {
+  // ui-strings: value "使い捨てアプリ「…」を一般機能にしたい。" — sent to the daemon as the request's text
+  return `使い捨てアプリ「${title}」を一般機能にしたい。`;
 }
 
 /** The tab's name: the count shows once there is something. */

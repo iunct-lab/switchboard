@@ -1,13 +1,17 @@
 /**
  * The CI ratchet on the counts of `bun scripts/perf-bench.ts --json` (#638): the ceilings in scripts/perf-budget.json only
- * go down. The bundle has no ceiling (#3167): it is compared with main's tip, measured in the same run.
- *   bun scripts/perf-ratchet.ts base <ref> <out.json>   builds <ref> in a worktree next to this checkout and writes its
- *                                        bundle as `{ sha, bundle: { js, css } }` (CI: origin/main → perf-base.json)
+ * go down. The bundle and `bytes` (the size of open-task's and open-task-huge's /api/ responses) have no ceiling (#3167,
+ * #3921): they are compared with main's tip, measured in the same run.
+ *   bun scripts/perf-ratchet.ts base <ref> <out.json>   builds <ref> in a worktree next to this checkout, runs its perf-bench
+ *                                        once there (`--runs 1 --skip-loaded`: a response's size does not wobble) and
+ *                                        writes `{ sha, bundle: { js, css }, journeys: { <open-task…>: { bytes, responses? } } }`
+ *                                        (CI: origin/main → perf-base.json)
  *   bun scripts/perf-ratchet.ts check <result.json> --base <base.json> [--env github|local]
  *                                        exit 1 if a count is over its ceiling, a count is better than its ceiling (lower
- *                                        it in the same PR), a ceiling is above main's, or the bundle (js or css, gzip) is
- *                                        BUNDLE_GROWTH_LIMIT or more above the base's (`grew:`); a `bundle:` line says the
- *                                        sizes and the difference either way
+ *                                        it in the same PR), a ceiling is above main's, or the bundle (js or css, gzip) or
+ *                                        a journey's `bytes` is BUNDLE_GROWTH_LIMIT or more above the base's (`grew:`); the
+ *                                        `bundle:` and `bytes:` lines say the sizes and the difference either way, and the
+ *                                        responses that differ (`/api/tasks/:id/evals +22 B × 2`)
  *   bun scripts/perf-ratchet.ts update <result.json> [--env github|local]   lowers the ceilings the result beats; never
  *                                        raises one
  * The budget has one set of ceilings per environment (#644): `github` (Actions' ubuntu-latest Chrome) and `local` (the
@@ -20,8 +24,7 @@
  * The type check's and bun test's seconds have ceilings too (`durations`, `local` only): perf-bench does not have them, so
  * local-ci compares its own seconds with `judgeDurations`, on the high side only (`improved` would fail on a quiet host).
  * The counts that wobble (requests / layoutCount / recalcStyleCount ±1, layoutShift in its low digits — as medians of
- * `--runs 5`; a single run moves more) carry a fixed band; `bytes` (the size of the journey's /api/ responses) does not
- * wobble — the daemon writes them, whatever the Chrome — so its band is 0 (three `--runs 5`, 2026-11-04, #2088): a ceiling is a measured value + the band, a count is over above
+ * `--runs 5`; a single run moves more) carry a fixed band: a ceiling is a measured value + the band, a count is over above
  * the ceiling and better below ceiling − 2 × band (more than a band below the measured value: a new low of the same code's
  * wobble is not an improvement, or every run that finds one would fail an unrelated PR). Fixed per count, not a setting: the band is how much the same code moves,
  * not how much worse a change may be.
@@ -30,14 +33,14 @@
  *   bun scripts/perf-ratchet.ts history [--repo <owner/name>] [--since YYYY-MM-DD]
  *                                        main's bundle as local-ci measured it, in time order, with the increase from the
  *                                        first row (#3169): one read of `bundle.tsv` on the `perf-records` branch; nothing
- *                                        is built again. A row is one measure, not one commit (docs/design/perf.md).
+ *                                        is built again. A row is one measure, not one commit (docs/design/perf.md). Then
+ *                                        main's `bytes` the same way from `bytes.tsv` (#3921), summed per measure.
  */
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 export interface Budget {
-  /** `bytes` (the journey's /api/ responses, #2088): `open-task` and `open-task-huge` only; `open-task-huge` has no other ceiling. */
-  journeys: Record<string, { requests?: number; layoutCount?: number; recalcStyleCount?: number; layoutShift?: number; bytes?: number }>;
+  journeys: Record<string, { requests?: number; layoutCount?: number; recalcStyleCount?: number; layoutShift?: number }>;
   /** The daemon's delay under load and overlap (perf-bench's `loaded`); `local` only: a ceiling nobody measured would be a guess. */
   loaded?: { healthMaxMs: number };
   /** A result only: why perf-bench did not measure `loaded` (`--skip-loaded`, #3635); judge then leaves its ceiling out. */
@@ -61,17 +64,17 @@ export function envOf(flag: string | undefined, env: Record<string, string | und
 
 export const BUDGET_PATH = join(import.meta.dir, "perf-budget.json");
 /** How much the same code moves from run to run (docs/design/perf.md の「数の意味」). */
-const BAND: Record<string, number> = { requests: 1, layoutCount: 1, recalcStyleCount: 1, layoutShift: 0.03, bytes: 0, healthMaxMs: 10150 };
+const BAND: Record<string, number> = { requests: 1, layoutCount: 1, recalcStyleCount: 1, layoutShift: 0.03, healthMaxMs: 10150 };
 const round4 = (n: number) => Math.round(n * 1e4) / 1e4;
 /** The ceilings judged on the high side only: `over` above them, never `improved` below, so `update` never lowers them.
  * The load moves them by more than twice (a quiet host: 1,700–1,924 ms against the first ceiling and band, 5,440 − 2 × 1,750 = 1,940, 2026-11-02),
  * the same reason as `judgeDurations` (a regression of #2822, #3574). */
 const HIGH_SIDE_ONLY = new Set(["loaded.healthMaxMs"]);
 
-/** Every ceiling as `journeys.<name>.<count>` / `loaded.healthMaxMs` → value. */
+/** Every ceiling as `journeys.<name>.<count>` / `loaded.healthMaxMs` → value (a result's `bytes` and `responses` are not ceilings). */
 function flat(b: Budget): Map<string, number> {
   const out = new Map<string, number>();
-  for (const [name, counts] of Object.entries(b.journeys)) for (const [k, v] of Object.entries(counts)) out.set(`journeys.${name}.${k}`, v);
+  for (const [name, counts] of Object.entries(b.journeys)) for (const [k, v] of Object.entries(counts)) if (typeof v === "number" && k !== "bytes") out.set(`journeys.${name}.${k}`, v);
   if (b.loaded) out.set("loaded.healthMaxMs", b.loaded.healthMaxMs);
   return out;
 }
@@ -199,9 +202,55 @@ export function bundleGrowth(merged: Bundle, base: Bundle): { line: string; grew
   return { line, grew };
 }
 
+/** The journeys whose `bytes` are compared with main's (#2088, #3921): opening a task, and one as big as the real ones. */
+export const BYTES_JOURNEYS = ["open-task", "open-task-huge"] as const;
+/** A journey's /api/ responses by the shape of their path (`shapeOf`): how many finished and their bytes. */
+export type Responses = Record<string, { count: number; bytes: number }>;
+export interface JourneyBytes { bytes: number; responses?: Responses }
+
+/** A path's shape: the segments that are ids (`task_0123abcd…`, a uuid, digits) become `:id`, so the same response of another task is the same key. */
+export function shapeOf(pathname: string): string {
+  return pathname.split("/").map((seg) => (/^[a-z]+_[0-9a-f]{8,}$/.test(seg) || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(seg) || /^\d+$/.test(seg) ? ":id" : seg)).join("/");
+}
+
+/**
+ * The `bytes:` line per journey (the merged size, main's, the difference) and a `grew:` line per journey
+ * BUNDLE_GROWTH_LIMIT or more above main's — the same limit as the bundle, not a setting of its own (the user's rule,
+ * 2026-10-30, applied to `bytes` 2026-11-05). Under each `bytes:` line, the responses whose size differs when both sides
+ * have them: `  /api/tasks/:id/evals +22 B × 2` (the same count: the change per response × the count), else
+ * `  <shape> +44 B（2 回、main 1 回）`. A base without journeys (main measured before #3921) judges nothing.
+ */
+export function bytesGrowth(merged: Partial<Record<string, JourneyBytes>>, base: Partial<Record<string, JourneyBytes>> | undefined): { lines: string[]; grew: string[] } {
+  if (!base) return { lines: ["bytes: main の測定に journeys が無い（main の perf-bench が bytes を出す前）。判定しない"], grew: [] };
+  const lines: string[] = [];
+  const grew: string[] = [];
+  for (const name of BYTES_JOURNEYS) {
+    const [m, b] = [merged[name], base[name]];
+    if (!m) throw new Error(`the result has no journeys.${name}.bytes`);
+    if (!b) {
+      lines.push(`bytes: ${name} ${m.bytes} B (main: 無し。判定しない)`);
+      continue;
+    }
+    const d = m.bytes - b.bytes;
+    const pct = b.bytes ? (d / b.bytes) * 100 : d > 0 ? Infinity : 0;
+    lines.push(`bytes: ${name} ${m.bytes} B (main ${b.bytes} B, ${signed(d)} B, ${signed(pct, 2)}%)`);
+    if (pct >= BUNDLE_GROWTH_LIMIT * 100) grew.push(`grew: bytes.${name} ${signed(pct, 2)}% (${b.bytes} → ${m.bytes} B) ≥ ${BUNDLE_GROWTH_LIMIT * 100}%: merging is the user's call (docs/design/perf.md)`);
+    if (!m.responses || !b.responses) continue;
+    for (const shape of [...new Set([...Object.keys(m.responses), ...Object.keys(b.responses)])].sort()) {
+      const [now, was] = [m.responses[shape] ?? { count: 0, bytes: 0 }, b.responses[shape] ?? { count: 0, bytes: 0 }];
+      const by = now.bytes - was.bytes;
+      if (!by && now.count === was.count) continue;
+      lines.push(now.count === was.count && now.count && by % now.count === 0 ? `  ${shape} ${signed(by / now.count)} B × ${now.count}` : `  ${shape} ${signed(by)} B（${now.count} 回、main ${was.count} 回）`);
+    }
+  }
+  return { lines, grew };
+}
+
 /**
  * Builds `ref` in a worktree next to this checkout's top (not under /tmp, which is RAM: node_modules does not go there)
- * and writes `{ sha, bundle }` to `out`; the worktree goes whatever happens. Each command's output is printed.
+ * and writes `{ sha, bundle, journeys }` to `out`: `journeys` is `bytes` (and `responses`, when `ref`'s perf-bench has
+ * them) of BYTES_JOURNEYS from one run of `ref`'s own perf-bench in the worktree. The worktree goes whatever happens.
+ * Each command's output is printed.
  */
 async function measureRef(ref: string, out: string): Promise<void> {
   const run = (cmd: string[], cwd?: string) => {
@@ -221,8 +270,12 @@ async function measureRef(ref: string, out: string): Promise<void> {
     console.log(run(["bun", "install", "--frozen-lockfile"], dir).trim());
     console.log(run(["bun", "run", "--cwd", "apps/web", "build"], dir).trim().split("\n").slice(-3).join("\n"));
     const bundle = bundleOf(join(dir, "apps/web/dist"));
-    await Bun.write(out, `${JSON.stringify({ sha, bundle })}\n`);
-    console.log(`base ${sha.slice(0, 7)}: js ${bundle.js} B, css ${bundle.css} B (${((Date.now() - started) / 1000).toFixed(0)} s)`);
+    const bench = join(dir, "perf-base-bench.json");
+    console.log(run(["bun", "scripts/perf-bench.ts", "--runs", "1", "--skip-loaded", "main's bytes only (perf-ratchet base)", "--json", bench], dir).trim().split("\n").slice(-9).join("\n"));
+    const measured = ((await Bun.file(bench).json()) as { journeys: Record<string, JourneyBytes> }).journeys;
+    const journeys = Object.fromEntries(BYTES_JOURNEYS.map((name) => [name, { bytes: measured[name]!.bytes, ...(measured[name]!.responses ? { responses: measured[name]!.responses } : {}) }]));
+    await Bun.write(out, `${JSON.stringify({ sha, bundle, journeys })}\n`);
+    console.log(`base ${sha.slice(0, 7)}: js ${bundle.js} B, css ${bundle.css} B, ${BYTES_JOURNEYS.map((n) => `${n} ${journeys[n]!.bytes} B`).join(", ")} (${((Date.now() - started) / 1000).toFixed(0)} s)`);
   } finally {
     Bun.spawnSync(["git", "-C", top, "worktree", "remove", "--force", dir], { stdout: "ignore", stderr: "ignore" });
     rmSync(dir, { recursive: true, force: true });
@@ -269,18 +322,64 @@ export function historyTable(rows: Row[], since?: string): string[] {
   ];
 }
 
-/** bundle.tsv as it is on the records branch of `repo`; "" when the branch or the file is not there yet. */
-async function readRecords(repo: string): Promise<string> {
-  const p = Bun.spawn(["gh", "api", `repos/${repo}/contents/${RECORDS_PATH}?ref=${RECORDS_BRANCH}`], { stdout: "pipe", stderr: "pipe" });
+/** Where local-ci appends main's `bytes` of the same measure (`recordBytes`, #3921): a row per journey and response's path. */
+export const BYTES_RECORDS_PATH = "bytes.tsv";
+export const BYTES_RECORDS_HEADER = "measured_at\tjourney\tpath\tcount\tbytes\tmain";
+/** One response's path of one journey in one measure; `path` is `(total)` when main's perf-bench gave the journey's bytes alone. */
+export interface BytesRow { measuredAt: string; journey: string; path: string; count: number; bytes: number; main: string }
+
+/** The rows of one measure of main: per journey of BYTES_JOURNEYS, a row per response's path, or one `(total)` row without `responses`. */
+export function bytesRows(measuredAt: string, base: { sha: string; journeys: Partial<Record<string, JourneyBytes>> }): string[] {
+  return BYTES_JOURNEYS.flatMap((journey) => {
+    const j = base.journeys[journey];
+    if (!j) return [];
+    const by = j.responses ? Object.entries(j.responses).sort(([a], [b]) => a.localeCompare(b)) : [["(total)", { count: 0, bytes: j.bytes }] as const];
+    return by.map(([path, r]) => [measuredAt, journey, path, r.count, r.bytes, base.sha].join("\t"));
+  });
+}
+
+/** The rows of bytes.tsv; the header and a row that is not six fields with a time and two whole numbers are passed over. */
+export function parseBytesRows(tsv: string): BytesRow[] {
+  return tsv.split("\n").flatMap((l) => {
+    const [measuredAt, journey, path, count, bytes, main, ...rest] = l.split("\t");
+    if (rest.length || !main || !journey || !path || !/^\d+$/.test(count ?? "") || !/^\d+$/.test(bytes ?? "") || Number.isNaN(Date.parse(measuredAt!))) return [];
+    return [{ measuredAt: measuredAt!, journey, path, count: Number(count), bytes: Number(bytes), main }];
+  });
+}
+
+/** Each measure from `since` (YYYY-MM-DD, UTC) in time order: the journeys' bytes summed over their paths, with the increase from the first measure, then the period's increase. */
+export function bytesHistoryTable(rows: BytesRow[], since?: string): string[] {
+  const measures = new Map<string, { main: string; total: Record<string, number> }>();
+  for (const r of rows.filter((r) => !since || r.measuredAt.slice(0, 10) >= since)) {
+    const m = measures.get(r.measuredAt) ?? { main: r.main, total: {} };
+    m.total[r.journey] = (m.total[r.journey] ?? 0) + r.bytes;
+    measures.set(r.measuredAt, m);
+  }
+  const kept = [...measures].sort(([a], [b]) => Date.parse(a) - Date.parse(b));
+  const first = kept[0]?.[1];
+  const last = kept.at(-1)?.[1];
+  if (!first || !last) return ["bytes: 記録なし"];
+  const of = (m: { total: Record<string, number> }, j: string) => m.total[j] ?? 0;
+  return [
+    `| 測った日時 | ${BYTES_JOURNEYS.map((j) => `${j} B`).join(" | ")} | ${BYTES_JOURNEYS.map((j) => `${j} 初めから`).join(" | ")} | main |`,
+    `|---|${BYTES_JOURNEYS.map(() => "---|---|").join("")}---|`,
+    ...kept.map(([at, m]) => `| ${at} | ${BYTES_JOURNEYS.map((j) => of(m, j)).join(" | ")} | ${BYTES_JOURNEYS.map((j) => growth(of(m, j), of(first, j))).join(" | ")} | ${m.main.slice(0, 7)} |`),
+    `期間の増加: ${BYTES_JOURNEYS.map((j) => `${j} ${growth(of(last, j), of(first, j))}`).join(" / ")}`,
+  ];
+}
+
+/** `path` (bundle.tsv / bytes.tsv) as it is on the records branch of `repo`; "" when the branch or the file is not there yet. */
+async function readRecords(repo: string, path: string): Promise<string> {
+  const p = Bun.spawn(["gh", "api", `repos/${repo}/contents/${path}?ref=${RECORDS_BRANCH}`], { stdout: "pipe", stderr: "pipe" });
   const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
   if (code === 0) {
     const f = JSON.parse(out) as { content: string; encoding?: string };
     // over 1 MB the API leaves the content out: say so, not 記録なし
-    if (f.encoding !== "base64") throw new Error(`${RECORDS_BRANCH}/${RECORDS_PATH} を contents API で読めない（encoding ${f.encoding ?? "なし"}。1 MB を超えたら分ける）`);
+    if (f.encoding !== "base64") throw new Error(`${RECORDS_BRANCH}/${path} を contents API で読めない（encoding ${f.encoding ?? "なし"}。1 MB を超えたら分ける）`);
     return Buffer.from(f.content.replace(/\s/g, ""), "base64").toString("utf8");
   }
   if (/HTTP 404/.test(err)) return "";
-  throw new Error(`${RECORDS_BRANCH}/${RECORDS_PATH} を読めない: ${err.trim().split("\n")[0]}`);
+  throw new Error(`${RECORDS_BRANCH}/${path} を読めない: ${err.trim().split("\n")[0]}`);
 }
 
 /** main's budgets, or why there are none (no origin/main in a shallow checkout, or main has no budget yet). */
@@ -309,7 +408,9 @@ if (import.meta.main && process.argv[2] === "history") {
     console.error("origin is not a GitHub owner/name: give --repo");
     process.exit(2);
   }
-  for (const l of historyTable(parseRows(await readRecords(repo)), since)) console.log(l);
+  for (const l of historyTable(parseRows(await readRecords(repo, RECORDS_PATH)), since)) console.log(l);
+  console.log(`\nbytes（${BYTES_JOURNEYS.join(" / ")} の /api/ 応答の合計。応答ごとの行は ${RECORDS_BRANCH}/${BYTES_RECORDS_PATH}）`);
+  for (const l of bytesHistoryTable(parseBytesRows(await readRecords(repo, BYTES_RECORDS_PATH)), since)) console.log(l);
 } else if (import.meta.main && process.argv[2] === "base") {
   const [ref, out, ...rest] = process.argv.slice(3);
   if (!ref || !out || rest.length) {
@@ -331,7 +432,7 @@ if (import.meta.main && process.argv[2] === "history") {
     process.exit(2);
   }
   const env = envOf(flag);
-  const result = (await Bun.file(file).json()) as Budget & { bundle: Bundle };
+  const result = (await Bun.file(file).json()) as Budget & { bundle: Bundle; journeys: Record<string, JourneyBytes> };
   const budgets = (await Bun.file(BUDGET_PATH).json()) as Budgets;
   const budget = budgets[env];
   console.log(`ceilings: ${env}`);
@@ -353,10 +454,13 @@ if (import.meta.main && process.argv[2] === "history") {
     for (const i of improved) console.log(`improved: ${i.key} = ${i.value} < ceiling ${i.ceiling} − 2 × ${band(i.key)}: lower it with \`bun scripts/perf-ratchet.ts update ${file} --env ${env}\``);
     for (const i of raised) console.log(`raised: ${i.key} ceiling ${i.value} > main's ${i.ceiling} (raising a ceiling is merged by hand)`);
     for (const e of added) console.log(`added exception: ${e.key} #${e.issue}（例外を足すのは手でマージ）`);
-    const growth = bundleGrowth(result.bundle, ((await Bun.file(baseFile!).json()) as { bundle: Bundle }).bundle);
+    const mainMeasure = (await Bun.file(baseFile!).json()) as { bundle: Bundle; journeys?: Record<string, JourneyBytes> };
+    const growth = bundleGrowth(result.bundle, mainMeasure.bundle);
     console.log(growth.line);
     for (const l of growth.grew) console.log(l);
-    if (over.length || improved.length || raised.length || added.length || growth.grew.length) process.exit(1);
+    const bytes = bytesGrowth(result.journeys, mainMeasure.journeys);
+    for (const l of [...bytes.lines, ...bytes.grew]) console.log(l);
+    if (over.length || improved.length || raised.length || added.length || growth.grew.length || bytes.grew.length) process.exit(1);
     console.log("perf ratchet: ok");
   }
 }

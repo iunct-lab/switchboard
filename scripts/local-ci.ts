@@ -37,7 +37,7 @@ import { appForge } from "../ops-kit/src/forge-app.ts";
 import { IDLE_KILLED_LINE, runIdle } from "../ops-kit/src/idle-run.ts";
 import { hostAws } from "../ops-kit/src/secrets.ts";
 import { ciExit, runCi, STEP_IDLE_SECONDS, type Step } from "./ci.ts";
-import { judgeDurations, recordRow, RECORDS_BRANCH, RECORDS_HEADER, RECORDS_PATH, type Budgets } from "./perf-ratchet.ts";
+import { BYTES_RECORDS_HEADER, BYTES_RECORDS_PATH, bytesRows, judgeDurations, recordRow, RECORDS_BRANCH, RECORDS_HEADER, RECORDS_PATH, type Budgets, type JourneyBytes } from "./perf-ratchet.ts";
 import { localCiOf, localCiOfChange, MARK_AUTHORS, newestLocalCi, readChangeDetail } from "./merge-gate.ts";
 import { isTest } from "./test-select.ts";
 
@@ -548,6 +548,10 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
         (r) => r === "recorded" && d.log(`bundle の記録: ${RECORDS_BRANCH}/${RECORDS_PATH} に 1 行足した`),
         (e: unknown) => d.log(`bundle の記録に失敗（結果は変えない）: ${e instanceof Error ? e.message : String(e)}`),
       );
+      await (async () => (change || forgeTargetOf(repoRoot, originOf(repoRoot)).service === "gitlab" ? "none" : recordBytes(repo, dir, new Date().toISOString(), d.sh)))().then(
+        (r) => r === "recorded" && d.log(`bytes の記録: ${RECORDS_BRANCH}/${BYTES_RECORDS_PATH} に足した`),
+        (e: unknown) => d.log(`bytes の記録に失敗（結果は変えない）: ${e instanceof Error ? e.message : String(e)}`),
+      );
       await d.sh(["git", "-C", repoRoot, "worktree", "remove", "--force", dir]).catch(() => undefined);
       rmSync(dir, { recursive: true, force: true });
       rmSync(tmp, { recursive: true, force: true });
@@ -557,16 +561,37 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
 
 /**
  * Appends one row (when, js, css, main's sha) to bundle.tsv on the records branch of `repo` (#3169), from the
- * perf-base.json the CI wrote in `dir` (main's tip measured in the same run); "none" without that file. The branch is
- * made once (a root commit with a README, never merged). A measure is a row: the same main measured twice is two rows.
- * The file goes by the contents API with its sha; a 409 or 422 (another run wrote first, or made the file first) reads
- * it again and puts once more. A file the API no longer returns in base64 (over 1 MB) is an error, not an empty file:
- * putting a row on it would replace every row.
+ * perf-base.json the CI wrote in `dir` (main's tip measured in the same run); "none" without that file. A measure is a
+ * row: the same main measured twice is two rows.
  */
 export async function recordBundle(repo: string, dir: string, measuredAt: string, sh: Deps["sh"]): Promise<"recorded" | "none"> {
   const file = join(dir, "perf-base.json");
   if (!existsSync(file)) return "none";
   const row = recordRow(measuredAt, JSON.parse(readFileSync(file, "utf8")) as { sha: string; bundle: { js: number; css: number } });
+  await appendRecord(repo, RECORDS_PATH, RECORDS_HEADER, [row], `${RECORDS_BRANCH}: bundle ${measuredAt}`, sh);
+  return "recorded";
+}
+
+/**
+ * Appends main's `bytes` of the same measure to bytes.tsv on the records branch (#3921), a row per response's path
+ * (`bytesRows`); "none" without perf-base.json or without its `journeys` (a main measured before perf-ratchet measured them).
+ */
+export async function recordBytes(repo: string, dir: string, measuredAt: string, sh: Deps["sh"]): Promise<"recorded" | "none"> {
+  const file = join(dir, "perf-base.json");
+  if (!existsSync(file)) return "none";
+  const base = JSON.parse(readFileSync(file, "utf8")) as { sha: string; journeys?: Record<string, JourneyBytes> };
+  if (!base.journeys) return "none";
+  await appendRecord(repo, BYTES_RECORDS_PATH, BYTES_RECORDS_HEADER, bytesRows(measuredAt, { sha: base.sha, journeys: base.journeys }), `${RECORDS_BRANCH}: bytes ${measuredAt}`, sh);
+  return "recorded";
+}
+
+/**
+ * Appends `rows` to `path` on the records branch of `repo`, with `header` when the file is new. The branch is made once
+ * (a root commit with a README, never merged). The file goes by the contents API with its sha; a 409 or 422 (another run
+ * wrote first, or made the file first) reads it again and puts once more. A file the API no longer returns in base64
+ * (over 1 MB) is an error, not an empty file: putting a row on it would replace every row.
+ */
+async function appendRecord(repo: string, path: string, header: string, rows: string[], message: string, sh: Deps["sh"]): Promise<void> {
   const api = (...a: string[]) => sh(["gh", "api", ...a]);
   const http = (code: number) => (e: unknown) => new RegExp(`HTTP ${code}\\b`).test(e instanceof Error ? e.message : String(e));
   const absent = <T>(e: unknown): T | undefined => {
@@ -587,16 +612,16 @@ export async function recordBundle(repo: string, dir: string, measuredAt: string
   try {
     for (let attempt = 1; ; attempt++) {
       type File = { sha: string; content: string; encoding?: string };
-      const now = await api(`repos/${repo}/contents/${RECORDS_PATH}?ref=${RECORDS_BRANCH}`).then((o) => JSON.parse(o) as File, absent<File>);
-      if (now && now.encoding !== "base64") throw new Error(`${RECORDS_BRANCH}/${RECORDS_PATH} を contents API で読めない（encoding ${now.encoding ?? "なし"}。1 MB を超えたら分ける）。書かない`);
-      const text = now ? Buffer.from(now.content.replace(/\s/g, ""), "base64").toString("utf8") : `${RECORDS_HEADER}\n`;
-      const body = { message: `${RECORDS_BRANCH}: bundle ${measuredAt}`, branch: RECORDS_BRANCH, content: Buffer.from(`${text}${text.endsWith("\n") ? "" : "\n"}${row}\n`).toString("base64"), ...(now ? { sha: now.sha } : {}) };
+      const now = await api(`repos/${repo}/contents/${path}?ref=${RECORDS_BRANCH}`).then((o) => JSON.parse(o) as File, absent<File>);
+      if (now && now.encoding !== "base64") throw new Error(`${RECORDS_BRANCH}/${path} を contents API で読めない（encoding ${now.encoding ?? "なし"}。1 MB を超えたら分ける）。書かない`);
+      const text = now ? Buffer.from(now.content.replace(/\s/g, ""), "base64").toString("utf8") : `${header}\n`;
+      const body = { message, branch: RECORDS_BRANCH, content: Buffer.from(`${text}${text.endsWith("\n") ? "" : "\n"}${rows.join("\n")}\n`).toString("base64"), ...(now ? { sha: now.sha } : {}) };
       // the body by a file: the whole file in base64 does not fit in the arguments for long
       const input = join(work, "put.json");
       writeFileSync(input, JSON.stringify(body));
       try {
-        await api("-X", "PUT", `repos/${repo}/contents/${RECORDS_PATH}`, "--input", input);
-        return "recorded";
+        await api("-X", "PUT", `repos/${repo}/contents/${path}`, "--input", input);
+        return;
       } catch (e) {
         if (attempt > 1 || !(http(409)(e) || http(422)(e))) throw e;
       }

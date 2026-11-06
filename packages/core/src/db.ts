@@ -164,7 +164,8 @@ CREATE TABLE IF NOT EXISTS attachments (
 CREATE INDEX IF NOT EXISTS attachments_task ON attachments (task_id);
 CREATE TABLE IF NOT EXISTS artifacts (
   id TEXT PRIMARY KEY, task_id TEXT NOT NULL, title TEXT NOT NULL, kind TEXT NOT NULL, source TEXT NOT NULL, entry TEXT, mime TEXT NOT NULL,
-  size INTEGER NOT NULL, removed_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  size INTEGER NOT NULL, removed_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  app_days INTEGER NOT NULL DEFAULT 0, app_last_day TEXT, app_request_task_id TEXT
 );
 CREATE INDEX IF NOT EXISTS artifacts_task ON artifacts (task_id);
 CREATE TABLE IF NOT EXISTS perf_samples (
@@ -851,6 +852,34 @@ export class Db {
     })();
   }
 
+  /**
+   * Takes back an operation held `unknown` or `failed` (#3804): nothing is sent to the service for it, it is `done` with
+   * why (`error`), and the Issue's operations after it go on. A post never made (its target still `local:`) leaves no
+   * record behind; a create of an Issue never made takes the Issue's operations after it back with it (they cannot be
+   * sent to an Issue that does not exist), its record and its comments' too. 404 = no such operation of the repository,
+   * 409 = not held so (one being sent is `sending`), or an operation of the enabling of GitHub sync (an `sb:` target).
+   */
+  withdrawBacklogOperation(repo: BacklogRepositoryKey, id: string, reason: string, now = Date.now()): void {
+    this.sqlite.transaction(() => {
+      const op = this.getBacklogOperation(id);
+      if (!op || op.service !== repo.service || op.host !== repo.host || op.repository !== repo.repository) throw new BacklogResolveError(`操作 ${id} はありません`, 404);
+      if (op.status !== "unknown" && op.status !== "failed") throw new BacklogResolveError("この操作は結果不明か失敗で保留されていません", 409);
+      // the enabling of GitHub sync waits for its creates and comments (backlog-enable.ts): sent again, never taken back
+      if (op.target.startsWith("sb:")) throw new BacklogResolveError("GitHub 同期の有効化の操作は取り下げられません（有効化をもう一度押すか retry で送り直します）", 409);
+      const key = [op.service, op.host, op.repository] as const;
+      const unmade = op.kind === "create" && op.target.startsWith("local:");
+      const why = `取り下げました: ${reason}`.slice(0, 300);
+      const take = (o: BacklogOperation) => {
+        this.sqlite.query("UPDATE backlog_operations SET status = 'done', retry_at = NULL, error = ?, updated_at = ? WHERE id = ?").run(why, now, o.id);
+        if (o.target.startsWith("local:")) this.sqlite.query("DELETE FROM backlog_records WHERE service = ? AND host = ? AND repository = ? AND object_kind = ? AND external_id = ?").run(...key, o.targetKind, o.target);
+      };
+      // an Issue never made: what was to be sent to it goes with it
+      if (unmade && op.kind === "create") for (const o of this.listPendingBacklogOperations(op).filter((o) => o.issue === op.issue && o.id !== id)) take(o);
+      take(op);
+      if (op.kind === "set") this.rebaseBacklogRecord(op, op.targetKind, op.target);
+    })();
+  }
+
   /** The value the last `set` of a field still to send makes (#2924); undefined when there is none. */
   lastBacklogSetValue(repo: BacklogRepositoryKey, targetKind: BacklogObjectKind, target: string, field: string): unknown {
     const r = this.sqlite
@@ -1171,7 +1200,7 @@ export class Db {
   /* ---------- artifacts (#1777) ---------- */
 
   insertArtifact(a: Artifact): void {
-    this.sqlite.query("INSERT INTO artifacts (id, task_id, title, kind, source, entry, mime, size, removed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(a.id, a.taskId, a.title, a.kind, a.source, a.entry, a.mime, a.size, a.removedAt, a.createdAt, a.updatedAt);
+    this.sqlite.query("INSERT INTO artifacts (id, task_id, title, kind, source, entry, mime, size, removed_at, created_at, updated_at, app_days, app_request_task_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(a.id, a.taskId, a.title, a.kind, a.source, a.entry, a.mime, a.size, a.removedAt, a.createdAt, a.updatedAt, a.appDays, a.appRequestTaskId);
   }
 
   getArtifact(id: string): Artifact | null {
@@ -1220,6 +1249,21 @@ export class Db {
 
   updateArtifact(a: Artifact): void {
     this.sqlite.query("UPDATE artifacts SET title = ?, kind = ?, entry = ?, mime = ?, size = ?, removed_at = ?, updated_at = ? WHERE id = ?").run(a.title, a.kind, a.entry, a.mime, a.size, a.removedAt, a.updatedAt, a.id);
+  }
+
+  /**
+   * One read through the screen on the local day `day` (#3682): counts a new day once. A removed or unknown artifact
+   * is not counted (null). `counted` = this call added the day.
+   */
+  markArtifactAppUse(id: string, day: string): { appDays: number; appRequestTaskId: string | null; counted: boolean } | null {
+    const r = this.sqlite.query("UPDATE artifacts SET app_days = app_days + 1, app_last_day = ? WHERE id = ? AND removed_at IS NULL AND (app_last_day IS NULL OR app_last_day != ?) RETURNING app_days, app_request_task_id").get(day, id, day) as { app_days: number; app_request_task_id: string | null } | null;
+    if (r) return { appDays: Number(r.app_days), appRequestTaskId: r.app_request_task_id ?? null, counted: true };
+    const a = this.getArtifact(id);
+    return a && a.removedAt === null ? { appDays: a.appDays, appRequestTaskId: a.appRequestTaskId, counted: false } : null;
+  }
+
+  setArtifactAppRequest(id: string, taskId: string): void {
+    this.sqlite.query("UPDATE artifacts SET app_request_task_id = ? WHERE id = ?").run(taskId, id);
   }
 
   deleteArtifact(id: string): void {
@@ -1975,6 +2019,11 @@ function migrate(db: Database) {
   if (!perfCols.has("task_id")) db.exec("ALTER TABLE perf_samples ADD COLUMN task_id TEXT"); // #2100; earlier rows stay null
   if (!perfCols.has("bytes")) db.exec("ALTER TABLE perf_samples ADD COLUMN bytes INTEGER");
   if (!perfCols.has("events")) db.exec("ALTER TABLE perf_samples ADD COLUMN events INTEGER");
+  // #3682: the days a throwaway app read the API through the screen, and the request Task started for it
+  const artCols = new Set((db.query("PRAGMA table_info(artifacts)").all() as Array<{ name: string }>).map((c) => c.name));
+  if (!artCols.has("app_days")) db.exec("ALTER TABLE artifacts ADD COLUMN app_days INTEGER NOT NULL DEFAULT 0");
+  if (!artCols.has("app_last_day")) db.exec("ALTER TABLE artifacts ADD COLUMN app_last_day TEXT");
+  if (!artCols.has("app_request_task_id")) db.exec("ALTER TABLE artifacts ADD COLUMN app_request_task_id TEXT");
   const scols = new Set((db.query("PRAGMA table_info(staging)").all() as Array<{ name: string }>).map((c) => c.name));
   if (!scols.has("diff_text")) db.exec("ALTER TABLE staging ADD COLUMN diff_text TEXT NOT NULL DEFAULT ''");
   if (!scols.has("stat")) db.exec("ALTER TABLE staging ADD COLUMN stat TEXT NOT NULL DEFAULT ''");
@@ -2105,7 +2154,7 @@ function rowToHistoryImport(r: any): HistoryImportRow {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function rowToArtifact(r: any): Artifact {
-  return { id: r.id, taskId: r.task_id, title: r.title, kind: r.kind, source: r.source, entry: r.entry ?? null, mime: r.mime, size: Number(r.size), removedAt: r.removed_at ?? null, createdAt: Number(r.created_at), updatedAt: Number(r.updated_at) };
+  return { id: r.id, taskId: r.task_id, title: r.title, kind: r.kind, source: r.source, entry: r.entry ?? null, mime: r.mime, size: Number(r.size), removedAt: r.removed_at ?? null, createdAt: Number(r.created_at), updatedAt: Number(r.updated_at), appDays: Number(r.app_days ?? 0), appRequestTaskId: r.app_request_task_id ?? null };
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -53,6 +53,10 @@ describe("check-models", () => {
     // CODEX_JSON lacks gpt-6-luna, which the UI lists: the codex comparison still runs after claude could not be read.
     expect(r.lines).toEqual(["claude: 判定できなかった（CLI が PATH に無い）", "codex stale: gpt-6-luna", "unpriced (ledger): なし"]);
     expect((await checkModels(sources({ claude: async () => "", codex: async () => CODEX_JSON }))).lines[0]).toContain("0 件");
+    const claude = async () => KNOWN.claude.map((id) => `{id:"${id}",family:"x",display_name:"X"}`).join(",");
+    const stuck = await checkModels(sources({ claude, codex: async () => { throw new Error("codex debug models --bundled did not answer within 30s"); } }));
+    expect(stuck.code).toBe(2);
+    expect(stuck.lines).toContain("codex: 判定できなかった（codex debug models --bundled did not answer within 30s）");
   });
 
   test("unpriced listed model", async () => {

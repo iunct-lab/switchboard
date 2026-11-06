@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { BacklogItem } from "@switchboard/protocol";
-import { applyView, DEFAULT_VIEW, loadView, resetView, saveView, VIEW_KEY, viewSummary, type BacklogView } from "./backlogView.ts";
+import { applyView, DEFAULT_VIEW, itemMarks, loadView, resetView, saveView, VIEW_KEY, viewSummary, type BacklogView } from "./backlogView.ts";
 
 const item = (number: number, over: Partial<BacklogItem> = {}): BacklogItem =>
   ({ number, title: `題 ${number}`, type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z", ...over }) as BacklogItem;
@@ -121,5 +121,60 @@ describe("layout", () => {
     saveView(s, view({ layout: "board" }));
     saveView(s, DEFAULT_VIEW);
     expect(s.m.has(VIEW_KEY)).toBe(false);
+  });
+});
+
+describe("itemMarks", () => {
+  // the shape inProgress.test.ts builds a row with: nothing to mark
+  const row = (over: Partial<BacklogItem> = {}): BacklogItem =>
+    item(1, { url: "https://github.com/o/r/issues/1", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], ...over });
+  const wait = (state: BacklogItem["waits"][number]["state"]) => ({ kind: "pr", number: 9, state, reason: "overlap", open: state !== "met", pbi: null }) as unknown as BacklogItem["waits"][number];
+  const prereq = (state: BacklogItem["prereqs"][number]["state"]) => ({ number: 7, kind: "issue", need: "done", state, via: null }) as BacklogItem["prereqs"][number];
+  const stop = (next: "decide" | "wait", state: "waiting" | "resolved" = "waiting", count = 1) =>
+    ({ key: `k${next}${state}${count}`, op: "op", target: "", reason: "depends", evidence: "", count, state, lastAt: 1, lastAnswer: null, changes: [], actions: [], next }) as unknown as BacklogItem["stopSummary"][number];
+  const keys = (i: BacklogItem, auto = false) => itemMarks(i, auto).map((x) => x.key);
+
+  test("a row with nothing to mark has none", () => {
+    expect(itemMarks(row(), false)).toEqual([]);
+  });
+  test("待ち while a wait is open; none once every wait is met", () => {
+    expect(itemMarks(row({ waitsAt: "2026-11-01T00:00:00Z", waits: [wait("pending")] }), true)).toEqual([{ key: "waits", label: "待ち", warn: false }]);
+    expect(keys(row({ waitsAt: "2026-11-01T00:00:00Z", waits: [wait("met")] }))).toEqual([]);
+    expect(keys(row({ waitsAt: null, waits: [wait("pending")] }))).toEqual([]);
+  });
+  test("前提待ち for a pending prerequisite, 進められない (warn) for one a person fixes, none for a met one", () => {
+    expect(itemMarks(row({ prereqs: [prereq("pending")] }), false)).toEqual([{ key: "prereq", label: "前提待ち", warn: false }]);
+    expect(itemMarks(row({ prereqs: [prereq("withdrawn")] }), false)).toEqual([{ key: "stuck", label: "進められない", warn: true }]);
+    expect(keys(row({ prereqs: [prereq("pending"), prereq("missing")] }))).toEqual(["prereq", "stuck"]);
+    expect(keys(row({ prereqs: [prereq("met")] }))).toEqual([]);
+  });
+  test("重なり (warn) for a hit or an unknown overlap, none for an empty one", () => {
+    expect(itemMarks(row({ overlap: { hits: [{ ref: "PR #5", path: "a.ts" }], unknown: null } as BacklogItem["overlap"] }), false)).toEqual([{ key: "overlap", label: "重なり", warn: true }]);
+    expect(keys(row({ overlap: { hits: [], unknown: "読めない" } as BacklogItem["overlap"] }))).toEqual(["overlap"]);
+    expect(keys(row({ overlap: { hits: [], unknown: null } as BacklogItem["overlap"] }))).toEqual([]);
+  });
+  test("停止 N counts the shown stops; warn when one needs a person; a resolved one-off is not shown", () => {
+    expect(itemMarks(row({ stopSummary: [stop("wait"), stop("wait", "resolved", 2)] }), false)).toEqual([{ key: "stops", label: "停止 2", warn: false }]);
+    expect(itemMarks(row({ stopSummary: [stop("wait"), stop("decide")] }), false)).toEqual([{ key: "stops", label: "停止 2", warn: true }]);
+    expect(keys(row({ stopSummary: [stop("wait", "resolved", 1)] }))).toEqual([]);
+  });
+  test("返事待ち where the row's last Task line says so: a last Task not running; not on a needs-decision row", () => {
+    const last = { id: "task_1", status: "done", updatedAt: 0 } as BacklogItem["lastTask"];
+    expect(itemMarks(row({ replyWaiting: true, lastTask: last }), false)).toEqual([{ key: "reply", label: "返事待ち", warn: false }]);
+    expect(keys(row({ stage: "in-progress", replyWaiting: true, lastTask: last }))).toEqual(["reply"]);
+    expect(keys(row({ replyWaiting: true, lastTask: null }))).toEqual([]);
+    expect(keys(row({ replyWaiting: true, lastTask: last, activeTaskId: "task_1" }))).toEqual([]);
+    expect(keys(row({ replyWaiting: false, lastTask: last }))).toEqual([]);
+  });
+  test("a needs-decision row has none (its list card shows only the question, the sync line and 編集)", () => {
+    expect(keys(row({ stage: "needs-decision", prereqs: [prereq("pending")], stopSummary: [stop("decide")] }))).toEqual([]);
+  });
+  test("the marks keep the order of the row's sections", () => {
+    const i = row({
+      waitsAt: "2026-11-01T00:00:00Z", waits: [wait("pending")], prereqs: [prereq("pending"), prereq("withdrawn")],
+      overlap: { hits: [{ ref: "Task #4", path: "b.ts" }], unknown: null } as BacklogItem["overlap"], stopSummary: [stop("wait")],
+      replyWaiting: true, lastTask: { id: "task_1", status: "done", updatedAt: 0 } as BacklogItem["lastTask"],
+    });
+    expect(keys(i)).toEqual(["waits", "prereq", "stuck", "overlap", "stops", "reply"]);
   });
 });

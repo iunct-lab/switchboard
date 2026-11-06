@@ -68,8 +68,14 @@ export interface Readers {
   codex(): Promise<string | null>;
 }
 
-/** The installed CLIs found on `path` (the process's PATH unless given). */
-export function hostReaders(path = process.env.PATH ?? ""): Readers {
+/**
+ * How long `codex debug models --bundled` may take (it answers in about 0.04 s). Shorter than Bun's idleTimeout (120 s),
+ * so the settings request answers with the reason instead of being closed, and the morning check-models ends.
+ */
+export const CODEX_CATALOG_TIMEOUT_MS = 30_000;
+
+/** The installed CLIs found on `path` (the process's PATH unless given). `timeoutMs` is shortened only by tests. */
+export function hostReaders(path = process.env.PATH ?? "", timeoutMs = CODEX_CATALOG_TIMEOUT_MS): Readers {
   return {
     async claude() {
       const bin = Bun.which("claude", { PATH: path });
@@ -79,7 +85,18 @@ export function hostReaders(path = process.env.PATH ?? ""): Readers {
       const bin = Bun.which("codex", { PATH: path });
       if (!bin) return null;
       const p = Bun.spawn([bin, "debug", "models", "--bundled"], { stdout: "pipe", stderr: "pipe" });
-      const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const limit = new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), timeoutMs); });
+      // The pipes are part of the read: a child the CLI left behind may hold them open after the CLI exits.
+      const read = Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+      const done = await Promise.race([read, limit]);
+      clearTimeout(timer);
+      if (done === "timeout") {
+        p.kill("SIGKILL");
+        await p.exited;
+        throw new Error(`codex debug models --bundled did not answer within ${timeoutMs / 1000}s`);
+      }
+      const [out, err, code] = done;
       if (code !== 0) throw new Error(`codex debug models --bundled exited ${code}: ${err.trim()}`);
       return out;
     },

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { apiRaw } from "./api.ts";
-import { BRIDGE_MAX, BRIDGE_REFUSED, BRIDGE_WINDOW_MS, BridgeLimiter, type BridgePending, type BridgeRequest, type BridgeResult, createBridge, DECLINED, parseBridgeRequest } from "./scratchBridge.ts";
+import { BRIDGE_MAX, BRIDGE_REFUSED, BRIDGE_WINDOW_MS, BridgeLimiter, type BridgePending, type BridgeRequest, type BridgeResult, createBridge, DECLINED, parseBridgeRequest, parseNavigateRequest } from "./scratchBridge.ts";
 
 const get = (path: string, extra: Record<string, unknown> = {}) => ({ type: "switchboard-api", id: "r1", method: "GET", path, ...extra });
 
@@ -83,6 +83,25 @@ describe("parseBridgeRequest", () => {
   });
 });
 
+const nav = (path: unknown) => ({ type: "switchboard-navigate", path });
+
+describe("parseNavigateRequest", () => {
+  test("a Task's path and each header tab's path pass as they are", () => {
+    for (const path of ["/task/task_x", "/task/a_b-1", "/", "/backlog", "/schedules", "/insights", "/settings", "/approvals", "/knowledge", "/ledger", "/resources"])
+      expect(parseNavigateRequest(nav(path))).toBe(path);
+  });
+
+  test("another site, /api/, a script, an unknown screen, a query, a fragment, an escape or a trailing slash is dropped", () => {
+    for (const path of ["https://example.com/", "//evil", "/api/tasks", "javascript:alert(1)", "/nope", "/task/", "/task/a/b", "/task/x?y=1", "/task/x#y", "/backlog/", "/task/a%2Fb", "/task/a b", "/task/a\\b", "\\\\evil", "/task/x\n", "/task/.", "/task/..", "/task/./x", "/backlog/..", "/./backlog", "backlog", "", "/" + "a".repeat(3000)])
+      expect(parseNavigateRequest(nav(path))).toBeNull();
+  });
+
+  test("a message of another shape is dropped", () => {
+    for (const data of [null, "x", 1, {}, { type: "switchboard-api", path: "/backlog" }, nav(3), nav(undefined), { path: "/backlog" }])
+      expect(parseNavigateRequest(data)).toBeNull();
+  });
+});
+
 describe("BridgeLimiter", () => {
   test("the 21st request in 10 s is refused, and passes once the window has moved on", () => {
     const l = new BridgeLimiter();
@@ -101,14 +120,16 @@ describe("createBridge", () => {
     const reads: string[] = [];
     const calls: BridgeRequest[] = [];
     let t = 0;
+    const moved: string[] = [];
     const bridge = createBridge({
       frames: () => [frame],
+      navigate: (path) => moved.push(path),
       call: (r) => (reads.push(r.path), calls.push(r), read(r.path)),
       confirm,
       reply: (to, result) => (result.type === "switchboard-api-pending" ? pending.push(result) : sent.push({ to, result })),
       now: () => t,
     });
-    return { frame, other, sent, pending, reads, calls, bridge, tick: (ms: number) => (t += ms) };
+    return { frame, other, sent, pending, reads, calls, moved, bridge, tick: (ms: number) => (t += ms) };
   };
 
   test("reads a GET for its frame and answers that frame with the status and body", async () => {
@@ -195,6 +216,30 @@ describe("createBridge", () => {
     await second;
     expect(s.calls.map((c) => c.path)).toEqual(["/api/tasks/b/abort"]);
     expect(s.sent.map((x) => [x.result.id, x.result.status])).toEqual([["w1", 0], ["w2", 200]]);
+  });
+
+  test("a navigate from its frame moves the screen once, without a read or a reply", async () => {
+    const s = setup();
+    await s.bridge({ source: s.frame, data: nav("/task/task_x") });
+    expect(s.moved).toEqual(["/task/task_x"]);
+    expect(s.reads).toEqual([]);
+    expect(s.sent).toEqual([]);
+    expect(s.pending).toEqual([]);
+  });
+
+  test("a navigate from another window or frame, or to a path that is no screen, moves nothing", async () => {
+    const s = setup();
+    await s.bridge({ source: s.other, data: nav("/task/task_x") });
+    await s.bridge({ source: null, data: nav("/backlog") });
+    for (const path of ["https://example.com/", "/api/tasks", "javascript:alert(1)", "/nope"]) await s.bridge({ source: s.frame, data: nav(path) });
+    expect(s.moved).toEqual([]);
+    expect(s.sent).toEqual([]);
+  });
+
+  test("navigates count against the same limit as reads", async () => {
+    const s = setup();
+    for (let i = 0; i < BRIDGE_MAX + 1; i++) await s.bridge({ source: s.frame, data: nav("/backlog") });
+    expect(s.moved.length).toBe(BRIDGE_MAX);
   });
 
   test("the 21st request in 10 s gets 429 without a read; after 10 s it is read again", async () => {

@@ -48,10 +48,28 @@ async function captureTab(): Promise<File> {
   }
 }
 
-/** 改善要望にする (#1221): the text the dialog opens with and the task it was drafted from. */
+/**
+ * 改善要望にする (#1221): the text the dialog opens with and the task it was drafted from. `artifact`: 要望にする on a
+ * throwaway app (#3683) — its title and its Task (the title when the screen around the artifact knows it), shown in 送信元.
+ */
 export interface FeedbackPrefill {
   text: string;
   source: FeedbackSource;
+  artifact?: { title: string; taskId: string; taskTitle?: string };
+}
+
+/** 送信元 of 要望にする (#3683): the artifact's title, and its Task unless the screen already names that Task (the Task screen). */
+export function sentFromArtifact(screen: string, a: NonNullable<FeedbackPrefill["artifact"]>): string {
+  return screen.endsWith(`(${a.taskId})`) ? t(m.sentFromArtifact, { screen: shownScreen(screen), title: a.title }) : t(m.sentFromTaskArtifact, { screen: shownScreen(screen), task: a.taskTitle ?? a.taskId, title: a.title });
+}
+
+/**
+ * 要望にする on a throwaway app (#3683): the artifact sits several components below App (Task screen, Insights,
+ * 判断待ち), so it asks App to open the dialog with this event instead of a callback through each of them.
+ */
+export const OPEN_FEEDBACK_EVENT = "switchboard:open-feedback";
+export function requestFeedback(prefill: FeedbackPrefill): void {
+  dispatchEvent(new CustomEvent<FeedbackPrefill>(OPEN_FEEDBACK_EVENT, { detail: prefill }));
 }
 
 /**
@@ -158,7 +176,7 @@ export function FeedbackDialog({ open, screen, workspaces, workspace, prefill, o
           </fieldset>
         )}
         <p className="hint">{mode === "fix" ? t(m.fixHint) : t(m.requestHint, { target: targets.list.find((w) => w.id === shown)?.name ?? t(m.targetFallback) })}</p>
-        <p className="hint feedback-screen">{t(m.sentFrom, { screen: shownScreen(screen) })}</p>
+        <p className="hint feedback-screen">{prefill?.artifact ? sentFromArtifact(screen, prefill.artifact) : t(m.sentFrom, { screen: shownScreen(screen) })}</p>
         <fieldset disabled={locked} className={`dropzone ${drop.dropping ? "dropping" : ""}`} {...(!locked ? drop.handlers : {})}>
           <label htmlFor="feedback-text">{t(m.bodyLabel)}</label>
           <textarea ref={textarea} id="feedback-text" rows={7} required maxLength={20_000} value={text} onChange={(e) => setText(e.target.value)} onPaste={drop.onPaste} placeholder={t(m.bodyPlaceholder)} />

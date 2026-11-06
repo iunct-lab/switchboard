@@ -13,7 +13,7 @@ import { Stops } from "./Stops.tsx";
 import { jstDateTime } from "../time.ts";
 import { t } from "../i18n.ts";
 import { backlog as m } from "../i18n/backlog.ts";
-import { applyView, loadView, PRIORITIES, resetView, saveView, SORTS, STAGES, TYPES, viewSummary, type BacklogView } from "../backlogView.ts";
+import { applyView, itemMarks, loadView, PRIORITIES, resetView, saveView, SORTS, STAGES, TYPES, viewSummary, type BacklogView } from "../backlogView.ts";
 
 /** The first lines of a ## 状況 comment shown under its row; the rest is on the Issue. */
 const REPORT_LINES = 3;
@@ -823,32 +823,112 @@ function RowActions(props: { item: BacklogItem; now: number; starting: number | 
 }
 
 /**
- * A board tile (#2696): the numbered title, SP · Priority and the row's buttons; the rest of a row is on the list. A
- * needs-decision tile is its title only and opens on the question and the answer box, which stays (with what was typed)
- * when it is closed again.
+ * A row's facts after its title (#3708: the list row's and an opened board tile's): the workspace, the Task count,
+ * 分解済み, SP · Priority, an in-progress row's moving / stopped and its last stage Task (a Ready row's too, and one
+ * waiting for the person's reply).
  */
-function Tile(props: { item: BacklogItem; now: number; starting: number | null; metaId: string | null; onStart: (action: BacklogAction) => void; onOpenTask: (id: string) => void; onAnswered: (item: BacklogItem) => void; onError: (msg: string) => void }) {
+function ItemFacts(props: { item: BacklogItem; now: number; onOpenTask: (id: string) => void }) {
+  const { item: i, now } = props;
+  return (
+    <>
+      <span className="m workspace">{i.workspaceName}</span>
+      {i.tasks && <span className="m num">Task {i.tasks.done}/{i.tasks.total}</span>}
+      {readyPending(i) && <span className="m">{t(m.readyPending)}</span>}
+      <span className="m">
+        {[i.storyPoints !== null ? `SP ${i.storyPoints}` : null, i.priority].filter(Boolean).join(" · ")}
+      </span>
+      {i.stage === "in-progress" && <InProgressFacts item={i} now={now} onOpenTask={props.onOpenTask} />}
+      {(i.stage === "ready" || (i.replyWaiting && i.stage !== "in-progress")) && <LastTask item={i} now={now} onOpenTask={props.onOpenTask} />}
+    </>
+  );
+}
+
+/**
+ * What a row shows under its facts (#3708: one part for the list row and an opened board tile, so what is added to the
+ * list shows on the board too): the sync line, the PBI's mockups, an in-progress row's report, its waits,
+ * prerequisites, overlap and stops, and 編集. `onStart` continues the PBI behind a wait (続きを始める).
+ */
+function ItemDetail(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; starting: number | null; onStart: (pbi: number) => void; onOpenTask: (id: string) => void; onChanged: () => void; onError: (msg: string) => void }) {
+  const { item: i } = props;
+  return (
+    <>
+      <div className="backlog-syncline">
+        <SyncLine sync={i.sync} />
+      </div>
+      {/* #2296: the screen the PBI decided, as a question's mockups (#2221); nothing without a **画面イメージ** line */}
+      <Mockups list={i.mockups} />
+      {i.stage === "in-progress" && i.report && (
+        <div className="backlog-report">
+          <div className="hint">{t(m.reportAt, { at: jstDateTime(Date.parse(i.report.at)) })}</div>
+          <pre className="wrap">{reportHead(i.report.body)}</pre>
+        </div>
+      )}
+      <Waits item={i} items={props.items} auto={props.auto} starting={props.starting} onOpenTask={props.onOpenTask} onStart={props.onStart} />
+      <Prereqs item={i} />
+      <Overlap item={i} />
+      <Stops stops={i.stopSummary} issue={i.url} />
+      <EditToggle target={i} onChanged={props.onChanged} onError={props.onError} />
+    </>
+  );
+}
+
+/**
+ * A board tile (#2696): the numbered title (the Issue's link), SP · Priority, the marks of the row's sections (#3707)
+ * and the row's buttons. ▶ (outside the title, #3708) opens it on what the list row shows: its facts in place of SP ·
+ * Priority and the marks, then ItemDetail; whether it is open is not kept. A needs-decision tile is its title only and
+ * opens on the list card's parts: the sync line, the question and the answer box (which stays, with what was typed,
+ * when it is closed again) and 編集.
+ */
+function Tile(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; now: number; starting: number | null; metaId: string | null; onStart: (action: BacklogAction) => void; onContinue: (pbi: number) => void; onOpenTask: (id: string) => void; onAnswered: (item: BacklogItem) => void; onChanged: () => void; onError: (msg: string) => void }) {
   const { item: i } = props;
   const [opened, setOpened] = useState(false);
+  const [open, setOpen] = useState(false);
   if (i.stage === "needs-decision")
     return (
       <details className="backlog-tile" data-issue={i.url} onToggle={(e) => e.currentTarget.open && setOpened(true)}>
         <summary className="t">
           #{i.number} {i.title}
         </summary>
-        {opened && <Decision item={i} onAnswered={props.onAnswered} onError={props.onError} />}
+        {opened && (
+          <div className="backlog-tile-detail">
+            <SyncLine sync={i.sync} />
+            <Decision item={i} onAnswered={props.onAnswered} onError={props.onError} />
+            <EditToggle target={i} onChanged={props.onChanged} onError={props.onError} />
+          </div>
+        )}
       </details>
     );
   const facts = [i.storyPoints !== null ? `SP ${i.storyPoints}` : null, i.priority].filter(Boolean).join(" · ");
+  const label = t(open ? m.closeTile : m.openTile);
   return (
     <div className="backlog-tile" data-issue={i.url}>
       <IssueLink className="t" url={i.url}>
         #{i.number} {i.title}
       </IssueLink>
       <div className="row">
-        {facts && <span className="m">{facts}</span>}
+        <button className="ghost" aria-expanded={open} aria-label={label} title={label} data-open-tile onClick={() => setOpen(!open)}>
+          {open ? "▼" : "▶"}
+        </button>
+        {open ? (
+          <ItemFacts item={i} now={props.now} onOpenTask={props.onOpenTask} />
+        ) : (
+          <>
+            {facts && <span className="m">{facts}</span>}
+            {/* #3707: which of the row's sections (待ち・前提・重なり・停止・返事待ち) the item has, without opening it */}
+            {itemMarks(i, props.auto).map((x) => (
+              <span key={x.key} className={"mark" + (x.warn ? " warn" : "")} data-mark={x.key}>
+                {x.label}
+              </span>
+            ))}
+          </>
+        )}
         <RowActions item={i} now={props.now} starting={props.starting} metaId={props.metaId} onStart={props.onStart} onOpenTask={props.onOpenTask} />
       </div>
+      {open && (
+        <div className="backlog-tile-detail">
+          <ItemDetail item={i} items={props.items} auto={props.auto} starting={props.starting} onStart={props.onContinue} onOpenTask={props.onOpenTask} onChanged={props.onChanged} onError={props.onError} />
+        </div>
+      )}
     </div>
   );
 }
@@ -1116,7 +1196,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
                   {label} <span className="hint">{items.length}</span>
                 </h5>
                 {items.map((i) => (
-                  <Tile key={key(i)} item={i} now={now} starting={starting} metaId={metaId} onStart={(action) => start(i.workspaceId, i.number, action)} onOpenTask={props.onOpenTask} onAnswered={answered} onError={props.onError} />
+                  <Tile key={key(i)} item={i} items={data.items} auto={auto[i.workspaceId] ?? false} now={now} starting={starting} metaId={metaId} onStart={(action) => start(i.workspaceId, i.number, action)} onContinue={(pbi) => start(i.workspaceId, pbi, "complete")} onOpenTask={props.onOpenTask} onAnswered={answered} onChanged={() => load(false)} onError={props.onError} />
                 ))}
               </section>
             ))}
@@ -1158,32 +1238,10 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
                     </IssueLink>{" "}
                     {i.title}
                   </span>
-                  <span className="m workspace">{i.workspaceName}</span>
-                  {i.tasks && <span className="m num">Task {i.tasks.done}/{i.tasks.total}</span>}
-                  {readyPending(i) && <span className="m">{t(m.readyPending)}</span>}
-                  <span className="m">
-                    {[i.storyPoints !== null ? `SP ${i.storyPoints}` : null, i.priority].filter(Boolean).join(" · ")}
-                  </span>
-                  {i.stage === "in-progress" && <InProgressFacts item={i} now={now} onOpenTask={props.onOpenTask} />}
-                  {(i.stage === "ready" || (i.replyWaiting && i.stage !== "in-progress")) && <LastTask item={i} now={now} onOpenTask={props.onOpenTask} />}
+                  <ItemFacts item={i} now={now} onOpenTask={props.onOpenTask} />
                   <RowActions item={i} now={now} starting={starting} metaId={metaId} onStart={(action) => start(i.workspaceId, i.number, action)} onOpenTask={props.onOpenTask} />
                 </div>
-                <div className="backlog-syncline">
-                  <SyncLine sync={i.sync} />
-                </div>
-                {/* #2296: the screen the PBI decided, as a question's mockups (#2221); nothing without a **画面イメージ** line */}
-                <Mockups list={i.mockups} />
-                {i.stage === "in-progress" && i.report && (
-                  <div className="backlog-report">
-                    <div className="hint">{t(m.reportAt, { at: jstDateTime(Date.parse(i.report.at)) })}</div>
-                    <pre className="wrap">{reportHead(i.report.body)}</pre>
-                  </div>
-                )}
-                <Waits item={i} items={data.items} auto={auto[i.workspaceId] ?? false} starting={starting} onOpenTask={props.onOpenTask} onStart={(pbi) => start(i.workspaceId, pbi, "complete")} />
-                <Prereqs item={i} />
-                <Overlap item={i} />
-                <Stops stops={i.stopSummary} issue={i.url} />
-                <EditToggle target={i} onChanged={() => load(false)} onError={props.onError} />
+                <ItemDetail item={i} items={data.items} auto={auto[i.workspaceId] ?? false} starting={starting} onStart={(pbi) => start(i.workspaceId, pbi, "complete")} onOpenTask={props.onOpenTask} onChanged={() => load(false)} onError={props.onError} />
                 </Fragment>
                 ),
               )}

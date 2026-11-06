@@ -4,7 +4,7 @@
  * backlog-graphql-2.json (a second registered workspace, acme/lib; #294), so no GitHub access is needed.
  * SCREENSHOT=<file.png> also saves what the screen looked like.
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../packages/core/src/config.ts";
@@ -83,6 +83,8 @@ const adapter: RunnerAdapter = {
 // until the last step tags v0.2.0.
 const repo = join(home, "app");
 mkdirSync(repo);
+// a stage start reads the candidate from the meta checkout (`ops-kit/processes/p0-pipeline.md`, #3647), as backlog.test.ts gives its fake one
+cpSync(join(import.meta.dir, "../ops-kit/processes"), join(repo, "ops-kit/processes"), { recursive: true });
 const git = (...a: string[]) => Bun.spawnSync(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...a]).stdout.toString().trim();
 git("init", "-q");
 git("commit", "-q", "--allow-empty", "-m", "feat: first (#1)");
@@ -267,7 +269,7 @@ try {
 
   // A row's stage button (#265): Ready → 実装する → the Task screen → back on the backlog the row says 実行中
   const buttons = await evaluate(`Object.fromEntries([...document.querySelectorAll('.backlog section[data-stage]')].map(s => [s.dataset.stage, [...s.querySelectorAll('.backlog-item button')].map(b => b.textContent)]))`) as Record<string, string[]>;
-  const expectedButtons = { "needs-decision": [], request: ["PBI にする"], "needs-tasks": ["Task に分解"], ready: ["実装する"], "in-progress": ["状況を確認", "状況を確認", "閉じる", "状況を確認"] };
+  const expectedButtons = { "needs-decision": [], request: ["PBI にする", "直行で直す"], "needs-tasks": ["Task に分解"], ready: ["実装する"], "in-progress": ["状況を確認", "状況を確認", "閉じる", "状況を確認"] };
   assert(JSON.stringify(buttons) === JSON.stringify(expectedButtons), `buttons: ${JSON.stringify(buttons)}`);
   await click("実装する");
   const startedTitle = await until(() => evaluate(`document.querySelector('.backlog') ? null : [...document.querySelectorAll('h1,h2,h3,h4,h5,.title,.t')].map(e => e.textContent.trim()).find(t => t.startsWith('#304 実装: ')) ?? null`), "Task screen");
@@ -567,7 +569,8 @@ try {
   };
   await setSweep(2);
   libRequest = true;
-  await click("今すぐ実行");
+  // this schedule's own 今すぐ実行: the meta also has the seeded 床・天井・壁の点検, listed before it
+  await clickIn(`[...document.querySelectorAll('main.schedules .row')].find(r => r.querySelector('.t')?.textContent.trim() === 'バックログを進める')`, "今すぐ実行");
   await until(() => core.db.listTasks().length > tasksBefore, "scheduled stage Task");
   // the screen moves to the started Task when the daemon answers, which is after the Task is in the DB: go back after that
   await until(() => evaluate(`!document.querySelector('main.schedules')`), "今すぐ実行 opens the Task");
@@ -711,7 +714,7 @@ try {
   const lastShownMs = Date.now() - back;
   const loadingHint = await hintNow();
   assert(lastShownMs < 1_000 && loadingHint === `${readAt} に GitHub から取得 · 読み込み中…`, `last list after ${lastShownMs} ms, hint: ${loadingHint}`);
-  const onBacklog = () => evaluate(`location.pathname === "/" && !!document.querySelector('.backlog') && document.querySelector('nav.tabs button.on')?.textContent.trim() === "Backlog"`) as Promise<boolean>;
+  const onBacklog = () => evaluate(`location.pathname === "/backlog" && !!document.querySelector('.backlog') && document.querySelector('nav.tabs button.on')?.textContent.trim() === "Backlog"`) as Promise<boolean>;
   while (Date.now() - back < 15_000) { assert(await onBacklog(), `left the backlog after ${Date.now() - back} ms`); await Bun.sleep(250); }
   let replaced = "";
   while (Date.now() - back < 45_000 && !replaced) { assert(await onBacklog(), `left the backlog after ${Date.now() - back} ms`); const h = await hintNow(); if (!h.includes("読み込み中") && !h.startsWith(readAt)) replaced = h; else await Bun.sleep(250); }

@@ -17,7 +17,8 @@ const REASON_LABEL: Record<BacklogSyncReason, string> = {
 };
 
 /** Where the public copy says how to set up a Project and its repository variable (#2362; the owner reads it, not this repository's own). */
-export const PROJECT_SETUP_DOC = "https://github.com/iunct-lab/switchboard/blob/main/ops-kit/README.md#fork-して開発を始める"; // a URL anchor of the README
+// ui-strings: value "https://github.com/iunct-lab/switchboard/blob/main/ops-kit/README.md#fork-して開発を始める" — a URL whose anchor is the README's heading
+export const PROJECT_SETUP_DOC = "https://github.com/iunct-lab/switchboard/blob/main/ops-kit/README.md#fork-して開発を始める";
 
 /**
  * What a workspace that could not be read asks of the owner (#2362), by the error's kind: a lead line and the steps.

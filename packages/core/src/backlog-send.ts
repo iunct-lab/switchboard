@@ -235,6 +235,11 @@ class Sender {
     return (this.project = { id: p.id, fields: (p.fields.nodes as Array<Field & { name: string }>).filter((f) => f.id) });
   }
 
+  /** The Project's field definitions (#3811): what a set's value is checked against before it is stored. */
+  async projectFields(): Promise<Array<Field & { name: string }>> {
+    return (await this.projectOf()).fields;
+  }
+
   private async milestone(title: string | null): Promise<number | null> {
     if (title === null) return null;
     const all = (await call(this.gh, this.cwd, [this.repo("/milestones?state=all&per_page=100")])) as Array<{ number: number; title: string }>;
@@ -745,6 +750,11 @@ class GitlabSender {
 export const forgeKind = (op: Pick<BacklogOperation, "kind" | "field" | "targetKind">): ForgeKind =>
   op.kind === "create" ? "create" : op.kind === "comment" ? "comment" : op.targetKind === "project-item" || op.field === "member" || op.field?.startsWith("field:") ? "project" : "write";
 
+/** The workspace Project's field definitions, read from GitHub once (#3811). Throws when GitHub is not reached. */
+export function readProjectFields(gh: GhRunner, db: Db, cwd: string, source: BacklogSource): Promise<Array<Field & { name: string }>> {
+  return new Sender(gh, db, cwd, source, Date.now).projectFields();
+}
+
 /**
  * Sends what is waiting for one repository (`source`, gh run in `cwd`), oldest first; resolves to how many were done.
  * Throws Limit when GitHub said to wait (the rest waits too). `on` is asked before each operation and each write:
@@ -812,6 +822,8 @@ export async function sendGithubOperations(gh: GhRunner, db: Db, cwd: string, so
       continue;
     }
     if (op.status === "pending") db.setBacklogOperationResult(op.id, { status: "sending", attempt: op.attempt + 1 }, now());
+    // an unknown one looked for (and maybe posted again, #3804) is being sent too: not taken back meanwhile
+    else if (op.status === "unknown") db.setBacklogOperationResult(op.id, { status: "sending" }, now());
     let out: Outcome;
     try {
       out = await run(forged);

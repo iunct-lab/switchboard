@@ -10,6 +10,8 @@ import { Db, newId } from "./db.ts";
 export const MAX_ARTIFACT_FILE_BYTES = 20 * 1024 * 1024;
 export const MAX_ARTIFACT_DIR_BYTES = 50 * 1024 * 1024;
 export const MAX_ARTIFACT_DIR_FILES = 1000;
+/** A throwaway app read through the screen on this many separate days becomes a request, once (#3682). Not a setting. */
+export const APP_REQUEST_DAYS = 3;
 /** A removed artifact stays this long so "undo" works; the boot sweep deletes it after. */
 export const ARTIFACT_UNDO_MS = 24 * 60 * 60 * 1000;
 
@@ -93,7 +95,7 @@ export class ArtifactStore {
     const now = Date.now();
     if (src.kind === "url") {
       if (same) return same;
-      const a: Artifact = { id: newId("art"), taskId: task.id, title: input.title?.trim() || urlTitle(src.url), kind: "url", source: src.url, entry: null, mime: "text/uri-list", size: 0, removedAt: null, createdAt: now, updatedAt: now };
+      const a: Artifact = { id: newId("art"), taskId: task.id, title: input.title?.trim() || urlTitle(src.url), kind: "url", source: src.url, entry: null, mime: "text/uri-list", size: 0, removedAt: null, createdAt: now, updatedAt: now, appDays: 0, appRequestTaskId: null };
       this.db.insertArtifact(a);
       return a;
     }
@@ -135,6 +137,8 @@ export class ArtifactStore {
       removedAt: null,
       createdAt: same?.createdAt ?? now,
       updatedAt: now,
+      appDays: same?.appDays ?? 0,
+      appRequestTaskId: same?.appRequestTaskId ?? null,
     };
     if (same) this.db.updateArtifact(a);
     else this.db.insertArtifact(a);
@@ -163,6 +167,26 @@ export class ArtifactStore {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * The page read the API through the screen on the local day `day` (#3682). A new day counts once; a removed artifact
+   * is not counted. `due` = this call reached the {@link APP_REQUEST_DAYS}th day (or a later one, when starting the
+   * request failed before) and no request was started yet: only the call that adds a day can be due, so two reads on
+   * the same day never start two requests.
+   */
+  markAppUse(id: string, day: string): { appDays: number; appRequestTaskId: string | null; due: boolean } {
+    const r = this.db.markArtifactAppUse(id, day);
+    if (!r) {
+      const a = this.mustGet(id);
+      return { appDays: a.appDays, appRequestTaskId: a.appRequestTaskId, due: false };
+    }
+    return { appDays: r.appDays, appRequestTaskId: r.appRequestTaskId, due: r.counted && r.appDays >= APP_REQUEST_DAYS && r.appRequestTaskId === null };
+  }
+
+  /** The request Task started for the app; it is started once per artifact. */
+  setAppRequest(id: string, taskId: string): void {
+    this.db.setArtifactAppRequest(id, taskId);
   }
 
   /** Hide it; the copy stays for the undo window. */

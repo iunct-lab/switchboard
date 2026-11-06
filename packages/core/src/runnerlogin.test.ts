@@ -120,7 +120,7 @@ describe("logout (#2528)", () => {
       loginArgs: [],
       logoutArgs: ["auth", "logout"],
       async detect() {
-        return existsSync(marker) ? { available: true, version: "fake", path: bin, login: "expired" } : { available: true, version: "fake", path: bin, login: "ok", loginKind: "console" };
+        return existsSync(marker) ? { available: true, version: "fake", path: bin, login: "expired" } : { available: true, version: "fake", path: bin, login: "ok", loginKind: "console", loginExpiresAt: 1763597700000 };
       },
       start() {
         throw new Error("no runs");
@@ -134,7 +134,7 @@ describe("logout (#2528)", () => {
     await core.stop();
     rmSync(home, { recursive: true, force: true });
   });
-  const runners = async () => ((await (await fetch(`${base}/api/health`)).json()) as { runners: { id: string; login?: string; loginKind?: string }[] }).runners;
+  const runners = async () => ((await (await fetch(`${base}/api/health`)).json()) as { runners: { id: string; login?: string; loginKind?: string; loginExpiresAt?: number }[] }).runners;
 
   test("a failing logout is a 502 and leaves the login as it was", async () => {
     writeFileSync(join(home, "fail"), "");
@@ -143,8 +143,8 @@ describe("logout (#2528)", () => {
     expect((await runners()).find((r) => r.id === "claude")).toMatchObject({ login: "ok", loginKind: "console" });
   });
 
-  test("POST /api/runners/claude/logout runs `auth logout`, then health says expired and the kind is gone; codex has no logout", async () => {
-    expect((await runners()).find((r) => r.id === "claude")).toMatchObject({ login: "ok", loginKind: "console" });
+  test("POST /api/runners/claude/logout runs `auth logout`, then health says expired and the kind and the expiry (#3867) are gone; codex has no logout", async () => {
+    expect((await runners()).find((r) => r.id === "claude")).toMatchObject({ login: "ok", loginKind: "console", loginExpiresAt: 1763597700000 });
     const res = await fetch(`${base}/api/runners/claude/logout`, { method: "POST" });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
@@ -152,6 +152,7 @@ describe("logout (#2528)", () => {
     const claude = (await runners()).find((r) => r.id === "claude");
     expect(claude?.login).toBe("expired");
     expect(claude?.loginKind).toBeUndefined();
+    expect(claude?.loginExpiresAt).toBeUndefined();
     expect((await fetch(`${base}/api/runners/codex/logout`, { method: "POST" })).status).toBe(404);
   });
 });

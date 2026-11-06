@@ -397,6 +397,34 @@ describe("tag-ci: recordings and the walk (#3534)", () => {
     expect(f.edits).toEqual([]);
   });
 
+  test("recordings asked for: the folder is synced with its branch before the list is read (#3532)", async () => {
+    process.env.SWITCHBOARD_FIXTURES = "/vault";
+    const f = fake([{ tag: "v1.0.0", body: "- a" }]);
+    const { d, lists } = listing(f, "present packages/a.jsonl\n");
+    const r = await tagCi({ ...d, sync: async () => void lists.push("synced") }, "o/r", "/repo", CACHE, NO_HOST);
+    expect(r.map((e) => e.result)).toEqual(["pass"]);
+    expect(lists.indexOf("synced")).toBeGreaterThanOrEqual(0);
+    expect(lists.indexOf("synced")).toBeLessThan(lists.indexOf("listed"));
+  });
+
+  test("a failed sync is logged and the list still judges (#3532)", async () => {
+    process.env.SWITCHBOARD_FIXTURES = "/vault";
+    const f = fake([{ tag: "v1.0.0", body: "- a" }]);
+    const { d, lists } = listing(f, "missing packages/b.jsonl\n");
+    const r = await tagCi({ ...d, sync: async () => { throw new Error("no branch"); } }, "o/r", "/repo", CACHE, NO_HOST);
+    expect(r).toEqual([]);
+    expect(lists.some((l) => l.includes("同期できなかった") && l.includes("no branch"))).toBe(true);
+    expect(lists).toContain("listed");
+  });
+
+  test("recordings not asked for: no sync", async () => {
+    delete process.env.SWITCHBOARD_FIXTURES;
+    const f = fake([{ tag: "v1.0.0", body: "- a" }]);
+    let synced = false;
+    await tagCi({ ...listing(f, "").d, sync: async () => void (synced = true) }, "o/r", "/repo", CACHE, NO_HOST);
+    expect(synced).toBe(false);
+  });
+
   test("recordings not asked for: the list is not read", async () => {
     delete process.env.SWITCHBOARD_FIXTURES;
     const f = fake([{ tag: "v1.0.0", body: "- a" }]);

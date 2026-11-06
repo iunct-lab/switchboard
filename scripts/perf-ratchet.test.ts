@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { addedExceptions, BUDGET_PATH, BUNDLE_GROWTH_LIMIT, bundleGrowth, ENVS, envOf, historyTable, judge, judgeDurations, knownExceptions, lowered, loweredBudgets, parseRows, raisedAgainst, recordRow, RECORDS_HEADER, type Budget, type Budgets } from "./perf-ratchet";
+import { addedExceptions, BUDGET_PATH, BUNDLE_GROWTH_LIMIT, bundleGrowth, BYTES_RECORDS_HEADER, bytesGrowth, bytesHistoryTable, bytesRows, parseBytesRows, ENVS, envOf, historyTable, judge, judgeDurations, knownExceptions, lowered, loweredBudgets, parseRows, raisedAgainst, recordRow, RECORDS_HEADER, shapeOf, type Budget, type Budgets } from "./perf-ratchet";
 
 const budget: Budget = {
   journeys: { send: { requests: 6, layoutCount: 4, recalcStyleCount: 5, layoutShift: 0.0727 } },
@@ -77,27 +77,70 @@ describe("perf-ratchet update", () => {
   });
 });
 
-describe("perf-ratchet bytes (#2088)", () => {
-  const huge: Budget = { journeys: { "open-task-huge": { bytes: 36108 } } };
-  const run = (bytes: number) => ({ runs: 5, journeys: { "open-task-huge": { msMedian: 150, msP90: 160, requests: 9, layoutCount: 4, recalcStyleCount: 4, layoutShift: 0.02, bytes } } });
-  test("bytes: one byte over its ceiling is over; the ceiling itself passes", () => {
-    expect(judge(run(36109), huge)).toEqual({ over: [{ key: "journeys.open-task-huge.bytes", value: 36109, ceiling: 36108 }], improved: [] });
-    expect(judge(run(36108), huge)).toEqual({ over: [], improved: [] });
+describe("perf-ratchet bytes against main's (#3921)", () => {
+  const evals = (n: number) => ({ "/api/tasks/:id": { count: 2, bytes: 30000 }, "/api/tasks/:id/evals": { count: 2, bytes: n } });
+  const main = { "open-task": { bytes: 35597, responses: evals(1000) }, "open-task-huge": { bytes: 36106, responses: evals(1000) } };
+  test("shapeOf: a task id, a uuid and digits are :id; words stay", () => {
+    expect(shapeOf("/api/tasks/task_0002103a4e35/evals")).toBe("/api/tasks/:id/evals");
+    expect(shapeOf("/api/backlog/0b9f4c1e-2a3d-4e5f-8a9b-0c1d2e3f4a5b")).toBe("/api/backlog/:id");
+    expect(shapeOf("/api/issues/3921/comments")).toBe("/api/issues/:id/comments");
+    expect(shapeOf("/api/workspaces")).toBe("/api/workspaces");
   });
-  test("bytes: the band is 0, so one byte below the ceiling is improved and update lowers it to the value; it never raises", () => {
-    const { improved } = judge(run(36107), huge);
-    expect(improved).toEqual([{ key: "journeys.open-task-huge.bytes", value: 36107, ceiling: 36108 }]);
-    expect(lowered(improved, huge)).toEqual({ journeys: { "open-task-huge": { bytes: 36107 } } });
-    expect(lowered(judge(run(40000), huge).improved, huge)).toEqual(huge);
+  test("bytesGrowth: +44 B (0.12%) is a bytes line and the response that grew, no grew:", () => {
+    const merged = { "open-task": { bytes: 35641, responses: evals(1044) }, "open-task-huge": { bytes: 36150, responses: evals(1044) } };
+    expect(bytesGrowth(merged, main)).toEqual({
+      lines: [
+        "bytes: open-task 35641 B (main 35597 B, +44 B, +0.12%)",
+        "  /api/tasks/:id/evals +22 B × 2",
+        "bytes: open-task-huge 36150 B (main 36106 B, +44 B, +0.12%)",
+        "  /api/tasks/:id/evals +22 B × 2",
+      ],
+      grew: [],
+    });
   });
-  test("bytes: the counts of open-task-huge other than bytes have no ceiling", () => {
-    const r = run(36108);
-    r.journeys["open-task-huge"].requests = 99;
-    expect(judge(r, huge)).toEqual({ over: [], improved: [] });
+  test("bytesGrowth: 1% or more is grew:, the same limit as the bundle; a response read more often says both counts", () => {
+    const merged = { "open-task": { bytes: 35953, responses: { ...evals(1000), "/api/tasks/:id/diff": { count: 1, bytes: 356 } } }, "open-task-huge": { bytes: 36106, responses: evals(1000) } };
+    const g = bytesGrowth(merged, main);
+    expect(g.grew).toEqual(["grew: bytes.open-task +1.00% (35597 → 35953 B) ≥ 1%: merging is the user's call (docs/design/perf.md)"]);
+    expect(g.lines).toEqual(["bytes: open-task 35953 B (main 35597 B, +356 B, +1.00%)", "  /api/tasks/:id/diff +356 B（1 回、main 0 回）", "bytes: open-task-huge 36106 B (main 36106 B, +0 B, +0.00%)"]);
   });
-  test("bytes: a raised bytes ceiling is raised against main's", () => {
-    const up: Budget = { journeys: { "open-task-huge": { bytes: 36109 } } };
-    expect(raisedAgainst({ github: huge, local: up }, { github: huge, local: huge })).toEqual([{ key: "local.journeys.open-task-huge.bytes", value: 36109, ceiling: 36108 }]);
+  test("bytesGrowth: a main without responses judges bytes alone; a main without journeys judges nothing", () => {
+    const merged = { "open-task": { bytes: 36000, responses: evals(1000) }, "open-task-huge": { bytes: 36106, responses: evals(1000) } };
+    expect(bytesGrowth(merged, { "open-task": { bytes: 35597 }, "open-task-huge": { bytes: 36106 } })).toEqual({
+      lines: ["bytes: open-task 36000 B (main 35597 B, +403 B, +1.13%)", "bytes: open-task-huge 36106 B (main 36106 B, +0 B, +0.00%)"],
+      grew: ["grew: bytes.open-task +1.13% (35597 → 36000 B) ≥ 1%: merging is the user's call (docs/design/perf.md)"],
+    });
+    expect(bytesGrowth(merged, undefined).grew).toEqual([]);
+    expect(() => bytesGrowth({ "open-task": merged["open-task"] }, main)).toThrow("journeys.open-task-huge.bytes");
+  });
+  test("check: +0.12% bytes is exit 0 with the bytes and response lines; 1% or more is exit 1 with grew:", async () => {
+    const budgets = (await Bun.file(BUDGET_PATH).json()) as Budgets;
+    const dir = mkdtempSync(join(tmpdir(), "sb-perf-ratchet-test-"));
+    try {
+      const bundle = { js: 100000, css: 10000 };
+      const base = join(dir, "base.json");
+      writeFileSync(base, JSON.stringify({ sha: "a".repeat(40), bundle, journeys: main }));
+      const run = async (openTask: number, evalsBytes: number) => {
+        const r = join(dir, "result.json");
+        const journeys = { ...budgets.local.journeys, "open-task": { ...budgets.local.journeys["open-task"], bytes: openTask, responses: evals(evalsBytes) }, "open-task-huge": { bytes: 36106, responses: evals(1000) } };
+        writeFileSync(r, JSON.stringify({ runs: 5, journeys, bundle, loaded: budgets.local.loaded }));
+        const p = Bun.spawn([process.execPath, "scripts/perf-ratchet.ts", "check", r, "--base", base, "--env", "local"], { cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" });
+        const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+        return { out: out + err, code };
+      };
+      const small = await run(35641, 1044);
+      expect([small.code, small.out.includes("grew:")]).toEqual([0, false]);
+      expect(small.out).toContain("bytes: open-task 35641 B (main 35597 B, +44 B, +0.12%)\n  /api/tasks/:id/evals +22 B × 2\n");
+      const big = await run(35953, 1356);
+      expect(big.code).toBe(1);
+      expect(big.out).toContain("grew: bytes.open-task +1.00% (35597 → 35953 B)");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  test("bytes has no ceiling: judge leaves a result's bytes and responses out", () => {
+    const r = { journeys: { "open-task": { requests: 9, bytes: 99999, responses: evals(1) } } } as unknown as Budget;
+    expect(judge(r, { journeys: { "open-task": { requests: 9 } } })).toEqual({ over: [], improved: [] });
   });
 });
 
@@ -178,11 +221,12 @@ describe("perf-ratchet environments (#644)", () => {
       expect(b.journeys["open-task"]).not.toHaveProperty("layoutShift");
       expect(b.journeys.send).not.toHaveProperty("layoutCount");
       for (const name of ["launch", "new-task", "open-task", "send"]) {
-        const expected = ["requests", "layoutCount", "recalcStyleCount", "layoutShift", ...(name === "open-task" ? ["bytes"] : [])].filter((key) => !(name === "open-task" && key === "layoutShift") && !(name === "send" && key === "layoutCount"));
+        const expected = ["requests", "layoutCount", "recalcStyleCount", "layoutShift"].filter((key) => !(name === "open-task" && key === "layoutShift") && !(name === "send" && key === "layoutCount"));
         expect(Object.keys(b.journeys[name]!).sort()).toEqual(expected.sort());
       }
-      // the huge task's open has a ceiling on its responses' size only (#2088)
-      expect(Object.keys(b.journeys["open-task-huge"]!)).toEqual(["bytes"]);
+      // bytes is judged against main's tip, not a ceiling (#3921): open-task-huge has none
+      expect(b.journeys["open-task"]).not.toHaveProperty("bytes");
+      expect(b.journeys).not.toHaveProperty("open-task-huge");
       for (const [layoutShift, layoutCount] of [[0.0002, 4], [0.047, 7], [0.5, 30]]) {
         const r = structuredClone(b);
         r.journeys["open-task"]!.layoutShift = layoutShift!;
@@ -201,18 +245,16 @@ describe("perf-ratchet environments (#644)", () => {
     expect(envOf("github", {})).toBe("github");
     expect(() => envOf("mac", {})).toThrow("--env");
   });
-  test("perf-budget.json has the five journeys for each environment and no bundle", async () => {
+  test("perf-budget.json has the four journeys for each environment and no bundle or bytes", async () => {
     const budgets = (await Bun.file(BUDGET_PATH).json()) as Budgets;
     expect(Object.keys(budgets).filter((k) => k !== "exceptions").sort()).toEqual([...ENVS].sort());
     for (const env of ENVS) {
-      expect(Object.keys(budgets[env].journeys).sort()).toEqual(["launch", "new-task", "open-task", "open-task-huge", "send"]);
+      expect(Object.keys(budgets[env].journeys).sort()).toEqual(["launch", "new-task", "open-task", "send"]);
       expect(budgets[env]).not.toHaveProperty("bundle");
     }
     // the seconds local-ci compares: `local` only (no ceilings for Actions)
     expect(Object.keys(budgets.local.durations!).sort()).toEqual(["test", "typecheck"]);
     expect(budgets.github.durations).toBeUndefined();
-    // a response's size does not depend on the Chrome: Actions has the same bytes ceilings as the host (#2088)
-    for (const name of ["open-task", "open-task-huge"]) expect(budgets.github.journeys[name]!.bytes).toBe(budgets.local.journeys[name]!.bytes!);
   });
 });
 
@@ -309,5 +351,39 @@ describe("perf-ratchet bundle records", () => {
       expect([a.join(" "), p.exitCode]).toEqual([a.join(" "), 2]);
       expect(p.stderr.toString()).toContain("usage: bun scripts/perf-ratchet.ts history");
     }
+  });
+});
+
+describe("perf-ratchet bytes records (#3921)", () => {
+  const A = "a".repeat(40);
+  const B = "b".repeat(40);
+  const responses = (evals: number) => ({ "/api/tasks/:id/evals": { count: 2, bytes: evals }, "/api/tasks/:id": { count: 1, bytes: 30000 } });
+  test("bytesRows: a row per journey and response's path, sorted; a journey without responses is one (total) row", () => {
+    expect(bytesRows("2026-11-05T01:00:00.000Z", { sha: A, journeys: { "open-task": { bytes: 31000, responses: responses(1000) }, "open-task-huge": { bytes: 36106 } } })).toEqual([
+      `2026-11-05T01:00:00.000Z\topen-task\t/api/tasks/:id\t1\t30000\t${A}`,
+      `2026-11-05T01:00:00.000Z\topen-task\t/api/tasks/:id/evals\t2\t1000\t${A}`,
+      `2026-11-05T01:00:00.000Z\topen-task-huge\t(total)\t0\t36106\t${A}`,
+    ]);
+  });
+  test("history: per measure the journeys' sums in time order with the increase from the first; --since drops earlier ones; bad rows are passed over", () => {
+    const tsv = [
+      BYTES_RECORDS_HEADER,
+      ...bytesRows("2026-11-06T09:00:00.000Z", { sha: B, journeys: { "open-task": { bytes: 31044, responses: responses(1044) }, "open-task-huge": { bytes: 36150, responses: responses(6150) } } }),
+      ...bytesRows("2026-11-05T09:00:00.000Z", { sha: A, journeys: { "open-task": { bytes: 31000, responses: responses(1000) }, "open-task-huge": { bytes: 36106 } } }),
+      "2026-11-05T10:00:00.000Z\topen-task\t/api/x\tmany\t1\tc",
+      "",
+    ].join("\n");
+    const rows = parseBytesRows(tsv);
+    expect(rows).toHaveLength(7);
+    expect(bytesHistoryTable(rows)).toEqual([
+      "| 測った日時 | open-task B | open-task-huge B | open-task 初めから | open-task-huge 初めから | main |",
+      "|---|---|---|---|---|---|",
+      "| 2026-11-05T09:00:00.000Z | 31000 | 36106 | +0 B (+0.00%) | +0 B (+0.00%) | aaaaaaa |",
+      "| 2026-11-06T09:00:00.000Z | 31044 | 36150 | +44 B (+0.14%) | +44 B (+0.12%) | bbbbbbb |",
+      "期間の増加: open-task +44 B (+0.14%) / open-task-huge +44 B (+0.12%)",
+    ]);
+    expect(bytesHistoryTable(rows, "2026-11-06")).toHaveLength(4);
+    expect(bytesHistoryTable(rows, "2026-11-07")).toEqual(["bytes: 記録なし"]);
+    expect(bytesHistoryTable([])).toEqual(["bytes: 記録なし"]);
   });
 });

@@ -322,6 +322,11 @@ export const RuleMetrics = z.object({
    * `asked` for the asks). null = nothing recorded: not Claude, not Auto, or a runner that reports no such thing.
    */
   classifier: z.object({ allowed: z.number(), denied: z.number(), byCategory: z.record(z.string(), z.number()) }).nullable(),
+  /**
+   * Task ごとの実装のモデル（試験, #2769): the model an 実装 Task handed each Task's implementation to, from the note it
+   * started with — what was handed over, not what ran. null = none (同じ, another kind, a row counted before it).
+   */
+  delegatedModel: z.string().nullable().default(null),
 });
 export type RuleMetrics = z.infer<typeof RuleMetrics>;
 
@@ -453,8 +458,12 @@ export const FeedbackInput = z.object({
   mode: z.enum(["request", "fix"]).default("request"),
   /** Where a request is filed: the workspace whose repository and Project get it. Omitted = the meta workspace. すぐ直す always fixes Switchboard. */
   workspaceId: z.string().optional(),
-  /** Evals (#1221): the request was drafted from a task's evaluations; the task goes into the request's 出典. */
-  source: z.object({ kind: z.literal("eval"), taskId: z.string() }).optional(),
+  /** Evals (#1221): the request was drafted from a task's evaluations; the task goes into the request's 出典. An artifact (#3682): from a throwaway app. */
+  source: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("eval"), taskId: z.string() }),
+    /** A throwaway app (#3682): the artifact goes into the request's 出典 with where its copy is. */
+    z.object({ kind: z.literal("artifact"), artifactId: z.string() }),
+  ]).optional(),
 });
 export type FeedbackInput = z.infer<typeof FeedbackInput>;
 
@@ -577,6 +586,9 @@ export const Artifact = z.object({
   removedAt: z.number().nullable(),
   createdAt: z.number(),
   updatedAt: z.number(),
+  /** Throwaway apps (#3682): the local days the page read the API through the screen, and the request Task Switchboard started for it. */
+  appDays: z.number(),
+  appRequestTaskId: z.string().nullable(),
 });
 export type Artifact = z.infer<typeof Artifact>;
 
@@ -689,6 +701,12 @@ export const AutoStartSettings = z
      */
     fallback: z.array(RunnerId).default([]),
     fallbackAt: z.number().min(0.5).max(1).default(0.9),
+    /**
+     * Task ごとの実装のモデル（試験, #2769): the model an 実装 Task (/pbi-complete) hands each Task's implementation
+     * to, as a subagent; reviews, merge decisions and closing stay on the kind's own model. Empty = 同じ (no paragraph,
+     * as before). Claude only.
+     */
+    completeTaskModel: z.string().default(""),
   })
   .prefault({});
 export type AutoStartSettings = z.infer<typeof AutoStartSettings>;
@@ -894,6 +912,8 @@ export const SettingsPatch = z.object({
       /** Replaces the whole order (#834). */
       fallback: z.array(RunnerId),
       fallbackAt: z.number().min(0.5).max(1),
+      /** "" = 同じ (#2769). */
+      completeTaskModel: z.string(),
     })
     .partial()
     .optional(),
@@ -1635,6 +1655,8 @@ export const RunnerInfo = z.object({
   login: RunnerLogin.optional(),
   /** Which login `login: "ok"` is (#2528); absent = not known (an older CLI, another runner, or not logged in). `bedrock` = the user chose Amazon Bedrock in the settings (#1730). */
   loginKind: LoginKind.optional(),
+  /** When the login runs out, epoch ms (#3867); absent = not known (an older CLI, another runner, not logged in, or Bedrock). */
+  loginExpiresAt: z.number().optional(),
   /** The runner can run on Amazon Bedrock (it has `bedrockModels`, #1730). */
   bedrockAvailable: z.boolean().default(false),
   /** What to type in a terminal tab to log in again. */
@@ -2138,12 +2160,15 @@ export const BacklogEditInput = z
     resolve: z.object({ field: z.string().min(1), choice: z.enum(["local", "remote"]), expectedRevision: z.string().min(1) }).strict().optional(),
     /** Sends a `failed` operation of the Issue again (#2885), its cause put right: `operation` = the held edit's id. */
     retry: z.object({ operation: z.string().min(1) }).strict().optional(),
+    /** Takes back an `unknown` / `failed` operation of the Issue (#3804): nothing is sent for it; `reason` is kept with it. */
+    withdraw: z.object({ operation: z.string().min(1), reason: z.string().min(1).max(200) }).strict().optional(),
     /** A local change merged (#2485): the tip its base was moved to, and when. Only on a backlog kept here. */
     change: z.object({ mergeCommit: z.string().regex(/^[0-9a-f]{40}$/), mergedAt: z.string().min(1) }).strict().optional(),
   })
   .strict()
   .refine((e) => !e.resolve || Object.keys(e).every((k) => k === "workspaceId" || k === "resolve"), { message: "resolve は編集と一緒には送れません" })
   .refine((e) => !e.retry || Object.keys(e).every((k) => k === "workspaceId" || k === "retry"), { message: "retry は編集と一緒には送れません" })
+  .refine((e) => !e.withdraw || Object.keys(e).every((k) => k === "workspaceId" || k === "withdraw"), { message: "withdraw は編集と一緒には送れません" })
   .refine((e) => !e.stateReason || e.state === "CLOSED", { message: "閉じた理由は state CLOSED と一緒に送ります" })
   .refine((e) => !e.change || e.state === "CLOSED", { message: "変更のマージは state CLOSED と一緒に送ります" });
 export type BacklogEditInput = z.infer<typeof BacklogEditInput>;

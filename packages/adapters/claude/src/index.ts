@@ -153,10 +153,10 @@ export const CLAUDE_LOGIN_HINT = "claude auth login";
 /**
  * `claude auth status` (2.1.281): exit 0 = logged in, 1 = not. Of its stdout only `authMethod` is read (`claude.ai` =
  * a Claude account, `api_key` = an Anthropic Console account, #2528); the account, email and organization it also
- * names are never looked at, and the credential files neither (#180). No answer within `timeoutMs`, or a CLI without
- * the subcommand → unknown.
+ * names are never looked at, and the credential files neither (#180). `loginExpiresAt` (from 2.1.318) is read too, as
+ * `expiresAt` in epoch ms (#3867). No answer within `timeoutMs`, or a CLI without the subcommand → unknown.
  */
-export async function loginStatus(exe: string, timeoutMs = 10_000): Promise<{ login: RunnerLogin; kind?: LoginKind }> {
+export async function loginStatus(exe: string, timeoutMs = 10_000): Promise<{ login: RunnerLogin; kind?: LoginKind; expiresAt?: number }> {
   try {
     const proc = Bun.spawn([exe, "auth", "status"], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: childEnv() });
     // Both pipes are collected as they arrive and awaited only briefly after the exit: a child the command left behind
@@ -176,20 +176,41 @@ export async function loginStatus(exe: string, timeoutMs = 10_000): Promise<{ lo
     clearTimeout(timer);
     if (proc.signalCode) return { login: "unknown" };
     await Promise.race([drained, Bun.sleep(500)]);
-    if (code === 0) return { login: "ok", kind: loginKindOf(stdout) };
+    if (code === 0) {
+      const { kind, expiresAt } = loginFieldsOf(stdout);
+      return { login: "ok", kind, ...(expiresAt !== undefined ? { expiresAt } : {}) };
+    }
     return { login: /unknown (command|option)|unrecognized/i.test(stderr) ? "unknown" : "expired" };
   } catch {
     return { login: "unknown" };
   }
 }
 
-function loginKindOf(stdout: string): LoginKind | undefined {
+/** Only `authMethod` and `loginExpiresAt` are read; the account, email and organization are not. */
+function loginFieldsOf(stdout: string): { kind?: LoginKind; expiresAt?: number } {
+  let parsed: { authMethod?: unknown; loginExpiresAt?: unknown } | null;
   try {
-    const method = (JSON.parse(stdout) as { authMethod?: unknown } | null)?.authMethod;
-    return method === "claude.ai" ? "claude.ai" : method === "api_key" ? "console" : undefined;
+    parsed = JSON.parse(stdout);
   } catch {
-    return undefined;
+    return {};
   }
+  const method = parsed?.authMethod;
+  const kind = method === "claude.ai" ? "claude.ai" : method === "api_key" ? "console" : undefined;
+  return { kind, expiresAt: expiresAtOf(parsed?.loginExpiresAt) };
+}
+
+/**
+ * An ISO 8601 date-time with a zone (`2026-11-20T00:15:00Z`, `…+09:00`), or a number: seconds below 1e12, milliseconds
+ * from it (the shape on 2.1.318 is not yet seen, #3867). Anything else, and a date that does not exist (Feb 30), is none.
+ */
+function expiresAtOf(v: unknown): number | undefined {
+  if (typeof v === "number") return Number.isFinite(v) && v > 0 ? (v < 1e12 ? v * 1000 : v) : undefined;
+  const m = typeof v === "string" ? /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.exec(v) : null;
+  if (!m) return undefined;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (new Date(Date.UTC(y, mo - 1, d)).getUTCDate() !== d || mo < 1 || mo > 12) return undefined;
+  const ms = Date.parse(v as string);
+  return Number.isFinite(ms) && ms > 0 ? ms : undefined;
 }
 
 /**
@@ -234,8 +255,8 @@ export function createClaudeAdapter(options: ClaudeAdapterOptions = {}): RunnerA
         await proc.exited;
         const version = text.match(/\d+\.\d+\.\d+/)?.[0] ?? text;
         if (proc.exitCode !== 0) return { available: false, version, path: which };
-        const { login, kind } = await loginStatus(which);
-        return { available: true, version, path: which, login, ...(kind ? { loginKind: kind } : {}), loginHint: CLAUDE_LOGIN_HINT };
+        const { login, kind, expiresAt } = await loginStatus(which);
+        return { available: true, version, path: which, login, ...(kind ? { loginKind: kind } : {}), ...(expiresAt !== undefined ? { loginExpiresAt: expiresAt } : {}), loginHint: CLAUDE_LOGIN_HINT };
       } catch (e) {
         return { available: false, note: String(e) };
       }

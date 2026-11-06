@@ -70,6 +70,26 @@ function procStart(pid: number): string | undefined {
   }
 }
 
+// the process's ancestors, its parent first, up to (not including) pid 1, read from the ppid in /proc/<pid>/stat (the
+// second field after the name, read as procStart reads). The process itself is not one: two jobs of one process are
+// two jobs. None where /proc is not there (the slots are waited for as before)
+function ancestorPids(pid: number): number[] {
+  const out: number[] = [];
+  for (let p = pid; out.length < 1000; ) {
+    let ppid: number;
+    try {
+      const stat = readFileSync(`/proc/${p}/stat`, "utf8");
+      ppid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+    } catch {
+      break;
+    }
+    if (!Number.isInteger(ppid) || ppid <= 1) break;
+    out.push(ppid);
+    p = ppid;
+  }
+  return out;
+}
+
 function alive(h: { pid: number; procStart?: string }): boolean {
   try {
     process.kill(h.pid, 0);
@@ -321,6 +341,9 @@ export type HeavyOptions = { home?: string; mem?: () => number | undefined; poll
  * exception; a holder killed outside `finally` (SIGKILL, a stopped Task) is found dead by the next waiter. A job that ends
  * (also by an exception) is added to the history (`appendHeavyHistory`); one killed is not. Where the
  * slots' directory cannot be written, says so and runs `fn` without a slot (a guard must not stop the work).
+ * Called by a descendant of a live holder (an `ops-kit heavy -- bun scripts/local-ci.ts …`), it neither waits nor takes a
+ * slot: the job runs in the outer one, says so in one line and is added to the history as `<name> (入れ子)`. The holder is
+ * found by its pid among the caller's ancestors, not by the environment (local-ci runs its steps under `env -i`).
  */
 export async function withHeavySlot<T>(name: string, fn: () => Promise<T>, o: HeavyOptions = {}): Promise<T> {
   const home = o.home ?? homedir();
@@ -351,9 +374,12 @@ export async function withHeavySlot<T>(name: string, fn: () => Promise<T>, o: He
       wrote = why;
     }
   };
+  let outer: Holder | undefined;
   try {
     mkdirSync(dir, { recursive: true });
-    for (;;) {
+    const up = new Set(ancestorPids(process.pid));
+    outer = up.size ? holders(dir).find((h) => up.has(h.pid)) : undefined;
+    for (; !outer; ) {
       const free = mem();
       if (free !== undefined && free < cfg.minFreeMb) {
         say("memory", `空きメモリ ${free} MB < 下限 ${cfg.minFreeMb} MB`, "memory");
@@ -376,6 +402,18 @@ export async function withHeavySlot<T>(name: string, fn: () => Promise<T>, o: He
     log(`heavy: 枠の置き場に書けないので、枠を取らずに動かします（${dir}: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}）`);
     return fn();
   }
+  if (outer) {
+    log(`heavy: 枠を持つ処理の中なので、外側の枠の中で動きます（${name}。外側: ${outer.name}）`);
+    const at = new Date().toISOString();
+    let exitCode: number | null = null;
+    try {
+      const result = await fn();
+      exitCode = exitOf(result);
+      return result;
+    } finally {
+      appendHeavyHistory(home, { name: `${name} (入れ子)`, taskId, queuedAt: at, startedAt: at, endedAt: new Date().toISOString(), exitCode }, log);
+    }
+  }
   if (wrote) removeFile(waitPath(dir, me));
   if (waited) log(`heavy: 始めます（${name}）`);
   let exitCode: number | null = null;
@@ -386,7 +424,7 @@ export async function withHeavySlot<T>(name: string, fn: () => Promise<T>, o: He
   } finally {
     appendHeavyHistory(home, { name, taskId, queuedAt: me.queuedAt, startedAt: me.startedAt, endedAt: new Date().toISOString(), exitCode }, log);
     // only our own: a slot reaped and taken by someone else meanwhile is theirs
-    if (readHolder(slot)?.token === me.token) {
+    if (slot && readHolder(slot)?.token === me.token) {
       try {
         unlinkSync(slot);
       } catch {

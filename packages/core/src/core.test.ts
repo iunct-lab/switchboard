@@ -456,7 +456,8 @@ describe("core daemon", () => {
   test("health shows each runner's login (#180): the status command's answer, rechecked when over a minute old; a turn's auth error marks it expired", async () => {
     let login: RunnerDetection["login"] = "expired";
     let detects = 0;
-    const detect = () => (detects++, { login, loginHint: "fake login" });
+    let loginExpiresAt: number | undefined = 1_800_000_000_000;
+    const detect = () => (detects++, { login, loginHint: "fake login", loginExpiresAt });
     const script: AgentEvent[] = [
       { t: "session.start", runner: "claude", runnerSessionId: "sess-auth", cwd: "/tmp" },
       { t: "error", message: "Not logged in · Please run /login" },
@@ -478,16 +479,21 @@ describe("core daemon", () => {
       expect((await runners())[0].login).toBe("expired");
       expect(detects).toBe(1);
       offset += 61_000;
-      expect((await runners())[0].login).toBe("ok");
+      expect((await runners())[0]).toMatchObject({ login: "ok", loginExpiresAt: 1_800_000_000_000 });
       expect(detects).toBe(2);
       // the status command still says ok, but a turn ended on the runner's auth error: expired, with what to type
       const t = await fetch(`${b}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: h, title: "t", prompt: "p", runner: "claude" }) }).then(j);
       await waitFor(async () => (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task.status === "error");
       expect((await runners())[0].login).toBe("expired");
+      expect((await runners())[0].loginExpiresAt).toBeUndefined(); // no expiry beside "expired" (#3867)
       expect((await fetch(`${b}/api/tasks/${t.id}`).then(j)).events.some((e: { ev: AgentEvent }) => e.ev.t === "status" && e.ev.text.includes("`fake login`"))).toBe(true);
-      // the next check that says ok clears it
+      // the next check that says ok clears it, with the expiry it reads now (#3867)
+      loginExpiresAt = 1_900_000_000_000;
       offset += 61_000;
-      expect((await runners())[0].login).toBe("ok");
+      expect((await runners())[0]).toMatchObject({ login: "ok", loginExpiresAt: 1_900_000_000_000 });
+      loginExpiresAt = undefined;
+      offset += 61_000;
+      expect((await runners())[0].loginExpiresAt).toBeUndefined();
       // a turn that goes through clears expired, even when the last status-command answer (within the minute) said so
       login = "expired";
       offset += 61_000;
@@ -2008,7 +2014,7 @@ describe("core daemon", () => {
     const cwd = mkdtempSync(join(tmpdir(), "switchboard-bedrock-cwd-"));
     const script = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");
     // the Claude account's login is expired: the lapse must never turn into Bedrock by itself
-    const claude = fakeAdapter(script, { starts, models: ["claude-haiku-5-5"], bedrockModels: ["global.anthropic.claude-haiku-5-5"], detect: () => ({ login: "expired", loginKind: undefined }) });
+    const claude = fakeAdapter(script, { starts, models: ["claude-haiku-5-5"], bedrockModels: ["global.anthropic.claude-haiku-5-5"], detect: () => ({ login: "expired", loginKind: undefined, loginExpiresAt: 1_800_000_000_000 }) });
     const cx = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [claude, fakeAdapter(script, { id: "dak" })], { port: 0 });
     const b = `http://127.0.0.1:${cx.server.port}`;
     const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -2027,6 +2033,7 @@ describe("core daemon", () => {
       const saved = await patch({ bedrock: { claude: { region: "ap-northeast-1", accessKey: "x" } } }).then(j);
       expect(saved.bedrock).toEqual({ claude: { region: "ap-northeast-1" } });
       expect(await run("claude")).toMatchObject({ login: "ok", loginKind: "bedrock" });
+      expect((await run("claude")).loginExpiresAt).toBeUndefined(); // the Claude account's expiry does not apply on Bedrock (#3867)
       expect((await run("claude")).models.map((x: { value: string }) => x.value)).toEqual(["global.anthropic.claude-haiku-5-5"]);
       expect((await run("dak")).bedrockAvailable).toBe(false);
       await create();
@@ -2126,7 +2133,7 @@ describe("core daemon", () => {
       expect(saved.defaultPermissionMode).toEqual({ claude: "plan" });
       expect(saved.runners[0].defaultPermissionMode).toBe("plan");
       expect((await fetch(`${b8}/api/health`).then(j)).runners[0].defaultPermissionMode).toBe("plan");
-      expect(c8.db.getSetting("settings", {})).toEqual({ defaultPermissionMode: { claude: "plan" }, autoResume: {}, bedrock: {}, shadowRunner: null, routing: { llm: { enabled: false, runner: "claude", model: "", timeoutMs: 5000 } }, judge: { enabled: true, runner: "codex", model: "gpt-6-luna" }, autoStart: { runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9 }, evals: { judge: { enabled: true } }, titles: { auto: true }, quotaAndResume: { backlogQuotaLimit: 0.8, retryDelayMs: 900_000, retryMaxDelayMs: 14_400_000, maxLimitStops: 8, resumePrompt: "使用上限がリセットされました。中断した箇所から作業を続けてください。", maxStopResumes: 2, thinSample: 5 }, judgeAndChoice: { judgeFallbackRunner: "claude", judgeFallbackModel: "claude-haiku-4-5", judgeTimeoutMs: 60_000, workspaceChoiceTimeoutMs: 60_000 }, newDefaults: { taskRunner: "claude", scheduleCron: "0 3 * * *" }, prices: {}, models: {}, hiddenModels: {} });
+      expect(c8.db.getSetting("settings", {})).toEqual({ defaultPermissionMode: { claude: "plan" }, autoResume: {}, bedrock: {}, shadowRunner: null, routing: { llm: { enabled: false, runner: "claude", model: "", timeoutMs: 5000 } }, judge: { enabled: true, runner: "codex", model: "gpt-6-luna" }, autoStart: { runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" }, evals: { judge: { enabled: true } }, titles: { auto: true }, quotaAndResume: { backlogQuotaLimit: 0.8, retryDelayMs: 900_000, retryMaxDelayMs: 14_400_000, maxLimitStops: 8, resumePrompt: "使用上限がリセットされました。中断した箇所から作業を続けてください。", maxStopResumes: 2, thinSample: 5 }, judgeAndChoice: { judgeFallbackRunner: "claude", judgeFallbackModel: "claude-haiku-4-5", judgeTimeoutMs: 60_000, workspaceChoiceTimeoutMs: 60_000 }, newDefaults: { taskRunner: "claude", scheduleCron: "0 3 * * *" }, prices: {}, models: {}, hiddenModels: {} });
       const t4 = await post("/api/tasks", { cwd: h8, title: "t4", prompt: "p", runner: "claude" }).then(j);
       expect(t4.permissionMode).toBe("plan");
       expect(starts[2]?.permissionMode).toBe("plan");
@@ -2319,14 +2326,14 @@ describe("core daemon", () => {
     const b = `http://127.0.0.1:${c.server.port}`;
     const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     try {
-      expect((await fetch(`${b}/api/settings`).then(j)).autoStart).toEqual({ runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9 });
+      expect((await fetch(`${b}/api/settings`).then(j)).autoStart).toEqual({ runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" });
       expect((await patch({ autoStart: { runner: "dak" } })).status).toBe(400); // not detected here
       expect((await fetch(`${b}/api/settings`).then(j)).autoStart.runner).toBe("claude");
-      expect((await patch({ autoStart: { model: "m1" } }).then(j)).autoStart).toEqual({ runner: "claude", model: "m1", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9 });
+      expect((await patch({ autoStart: { model: "m1" } }).then(j)).autoStart).toEqual({ runner: "claude", model: "m1", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" });
       // a runner change on its own goes back to that runner's CLI default; with a model it takes the model
-      expect((await patch({ autoStart: { runner: "codex" } }).then(j)).autoStart).toEqual({ runner: "codex", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9 });
-      expect((await patch({ autoStart: { runner: "claude", model: "m2" } }).then(j)).autoStart).toEqual({ runner: "claude", model: "m2", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9 });
-      expect((await patch({ autoStart: { runner: "claude" } }).then(j)).autoStart).toEqual({ runner: "claude", model: "m2", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9 }); // same runner: the model stays
+      expect((await patch({ autoStart: { runner: "codex" } }).then(j)).autoStart).toEqual({ runner: "codex", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" });
+      expect((await patch({ autoStart: { runner: "claude", model: "m2" } }).then(j)).autoStart).toEqual({ runner: "claude", model: "m2", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" });
+      expect((await patch({ autoStart: { runner: "claude" } }).then(j)).autoStart).toEqual({ runner: "claude", model: "m2", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" }); // same runner: the model stays
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
@@ -2342,20 +2349,20 @@ describe("core daemon", () => {
     const b = `http://127.0.0.1:${c.server.port}`;
     const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     try {
-      expect((await fetch(`${b}/api/settings`).then(j)).autoStart).toEqual({ runner: "claude", model: "m", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9 });
-      expect((await patch({ autoStart: { effort: "high" } }).then(j)).autoStart).toEqual({ runner: "claude", model: "m", effort: "high", byKind: {}, fallback: [], fallbackAt: 0.9 });
+      expect((await fetch(`${b}/api/settings`).then(j)).autoStart).toEqual({ runner: "claude", model: "m", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" });
+      expect((await patch({ autoStart: { effort: "high" } }).then(j)).autoStart).toEqual({ runner: "claude", model: "m", effort: "high", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" });
       expect((await fetch(`${b}/api/settings`).then(j)).autoStart.effort).toBe("high");
       const bad = await patch({ autoStart: { effort: "max" } });
       expect(bad.status).toBe(400);
       expect((await j(bad)).error).toContain('unknown effort "max"');
       expect((await patch({ autoStart: { runner: "codex", effort: "high" } })).status).toBe(400); // high is claude's, not codex's
-      expect((await fetch(`${b}/api/settings`).then(j)).autoStart).toEqual({ runner: "claude", model: "m", effort: "high", byKind: {}, fallback: [], fallbackAt: 0.9 }); // a refused PATCH saves nothing
-      expect((await patch({ autoStart: { runner: "codex" } }).then(j)).autoStart).toEqual({ runner: "codex", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9 });
+      expect((await fetch(`${b}/api/settings`).then(j)).autoStart).toEqual({ runner: "claude", model: "m", effort: "high", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" }); // a refused PATCH saves nothing
+      expect((await patch({ autoStart: { runner: "codex" } }).then(j)).autoStart).toEqual({ runner: "codex", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" });
       expect((await patch({ autoStart: { runner: "codex", effort: "medium" } }).then(j)).autoStart.effort).toBe("medium");
       expect((await patch({ autoStart: { effort: "" } }).then(j)).autoStart.effort).toBe(""); // back to the CLI default
       const saved = c.db.getSetting("settings", {}) as Record<string, unknown>;
       c.db.setSetting("settings", { ...saved, autoStart: { runner: "codex", model: "", effort: "ultra" } }); // kept from a version whose list had it
-      expect((await patch({ autoStart: { model: "m3" } }).then(j)).autoStart).toEqual({ runner: "codex", model: "m3", effort: "ultra", byKind: {}, fallback: [], fallbackAt: 0.9 }); // not checked again
+      expect((await patch({ autoStart: { model: "m3" } }).then(j)).autoStart).toEqual({ runner: "codex", model: "m3", effort: "ultra", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" }); // not checked again
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
@@ -2454,7 +2461,7 @@ describe("core daemon", () => {
     const get = () => fetch(`${b}/api/settings`).then(j);
     const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     try {
-      expect((await get()).autoStart).toEqual({ runner: "claude", model: "m", effort: "high", byKind: {}, fallback: [], fallbackAt: 0.9 }); // every kind follows 共通
+      expect((await get()).autoStart).toEqual({ runner: "claude", model: "m", effort: "high", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" }); // every kind follows 共通
       // a runner change on one kind: that kind's model and effort go back to the CLI default; the others stay on 共通
       expect((await patch({ autoStart: { byKind: { check: { runner: "codex" } } } }).then(j)).autoStart.byKind).toEqual({ check: { runner: "codex", model: "", effort: "" } });
       // without a runner, the base is the common values
@@ -2472,12 +2479,39 @@ describe("core daemon", () => {
       expect((await patch({ autoStart: { byKind: { check: { runner: "codex", model: "gpt-mini", effort: "medium" } } } }).then(j)).autoStart.byKind.check).toEqual({ runner: "codex", model: "gpt-mini", effort: "medium" });
       // the common runner's change leaves the kinds alone
       const common = (await patch({ autoStart: { runner: "codex" } }).then(j)).autoStart;
-      expect(common).toEqual({ runner: "codex", model: "", effort: "", byKind: { check: { runner: "codex", model: "gpt-mini", effort: "medium" }, complete: { runner: "claude", model: "m-big", effort: "high" } }, fallback: [], fallbackAt: 0.9 });
+      expect(common).toEqual({ runner: "codex", model: "", effort: "", byKind: { check: { runner: "codex", model: "gpt-mini", effort: "medium" }, complete: { runner: "claude", model: "m-big", effort: "high" } }, fallback: [], fallbackAt: 0.9, completeTaskModel: "" });
       // null: back to 共通
       expect((await patch({ autoStart: { byKind: { check: null } } }).then(j)).autoStart.byKind).toEqual({ complete: { runner: "claude", model: "m-big", effort: "high" } });
       expect((await get()).autoStart.byKind).toEqual({ complete: { runner: "claude", model: "m-big", effort: "high" } });
       expect((await patch({ autoStart: { byKind: { nope: { runner: "codex" } } } })).status).toBe(200); // unknown keys are dropped, like the rest of SettingsPatch
       expect((await get()).autoStart.byKind).toEqual({ complete: { runner: "claude", model: "m-big", effort: "high" } });
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("complete task model (#2769): 同じ by default; PATCH saves a Claude model of claude's list and GET reads it; another runner's 実装, an unknown model or one without a subagent alias is 400; \"\" goes back to 同じ", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-test-task-model-"));
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { lingers: true, models: ["claude-opus-5-5", "claude-sonnet-5-5", "m-plain"] }), fakeAdapter(SCRIPT, { id: "codex", lingers: true, models: ["gpt-6"] })], { port: 0 });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    const get = () => fetch(`${b}/api/settings`).then(j);
+    const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    try {
+      expect((await get()).autoStart.completeTaskModel).toBe("");
+      expect((await patch({ autoStart: { completeTaskModel: "claude-sonnet-5-5" } })).status).toBe(200);
+      expect((await get()).autoStart.completeTaskModel).toBe("claude-sonnet-5-5");
+      expect((await patch({ autoStart: { completeTaskModel: "claude-haiku-9" } })).status).toBe(400); // not in claude's list
+      expect((await patch({ autoStart: { completeTaskModel: "m-plain" } })).status).toBe(400); // listed, but no subagent alias
+      expect((await patch({ autoStart: { completeTaskModel: "gpt-6" } })).status).toBe(400); // another runner's
+      // 実装 on codex: no trial there, even with a Claude model
+      expect((await patch({ autoStart: { byKind: { complete: { runner: "codex" } }, completeTaskModel: "claude-opus-5-5" } })).status).toBe(400);
+      expect((await get()).autoStart).toMatchObject({ byKind: {}, completeTaskModel: "claude-sonnet-5-5" }); // a refused PATCH saves nothing
+      // 実装 following 共通 on codex is refused too; "" (同じ) is always accepted
+      expect((await patch({ autoStart: { runner: "codex" } })).status).toBe(200);
+      expect((await patch({ autoStart: { completeTaskModel: "claude-opus-5-5" } })).status).toBe(400);
+      expect((await patch({ autoStart: { completeTaskModel: "" } })).status).toBe(200);
+      expect((await get()).autoStart.completeTaskModel).toBe("");
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
@@ -2490,7 +2524,7 @@ describe("core daemon", () => {
     const b = `http://127.0.0.1:${c.server.port}`;
     const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     try {
-      expect((await fetch(`${b}/api/settings`).then(j)).autoStart).toMatchObject({ fallback: [], fallbackAt: 0.9 });
+      expect((await fetch(`${b}/api/settings`).then(j)).autoStart).toMatchObject({ fallback: [], fallbackAt: 0.9, completeTaskModel: "" });
       expect((await patch({ autoStart: { fallback: ["codex", "claude"], fallbackAt: 0.85 } }).then(j)).autoStart).toMatchObject({ runner: "claude", fallback: ["codex", "claude"], fallbackAt: 0.85 });
       expect((await patch({ autoStart: { fallback: ["codex"] } }).then(j)).autoStart).toMatchObject({ fallback: ["codex"], fallbackAt: 0.85 });
       for (const body of [{ autoStart: { fallback: ["codex", "dak"] } }, { autoStart: { fallbackAt: 0.4 } }, { autoStart: { fallbackAt: 1.1 } }]) expect((await patch(body)).status).toBe(400);
@@ -4206,7 +4240,7 @@ describe("task evals (#1218)", () => {
       const first = await evals(t.id);
       expect(first.judge).toBeNull();
       expect(first.human).toBeNull();
-      expect(first.rules).toMatchObject({ status: "done", by: "rules@3", metrics: { turns: 1, toolCalls: 1, toolFailures: 0, asks: 1, denials: 0, userInstructions: 0, lastEnd: "ok" } });
+      expect(first.rules).toMatchObject({ status: "done", by: "rules@4", metrics: { turns: 1, toolCalls: 1, toolFailures: 0, asks: 1, denials: 0, userInstructions: 0, lastEnd: "ok" } });
       expect(first.rules.costUsd).toBeGreaterThan(0);
       // a second turn: the person's follow-up counts as one instruction; still one row
       await post(`${b}/api/tasks/${t.id}/send`, { text: "続けて" });
@@ -4225,9 +4259,9 @@ describe("task evals (#1218)", () => {
       const { daemonStops: _d, lastCutByDaemon: _l, ...oldMetrics } = (await evals(t.id)).rules.metrics;
       c.db.upsertEval({ taskId: t.id, source: "rules", by: "rules@1", rubric: null, json: { metrics: oldMetrics, status: "done", outcome: "unknown", costUsd: 0, by: "rules@1", ts: 1 }, ts: 1 });
       const recounted = (await evals(t.id)).rules;
-      expect(recounted.by).toBe("rules@3");
+      expect(recounted.by).toBe("rules@4");
       expect(recounted.metrics).toMatchObject({ daemonStops: 0, lastCutByDaemon: false });
-      expect(c.db.getEval(t.id, "rules")?.by).toBe("rules@3");
+      expect(c.db.getEval(t.id, "rules")?.by).toBe("rules@4");
       // (c) the task's status / outcome / cost of the moment, not the snapshot the turn's end stored (the person or the judge sets the outcome afterwards)
       await post(`${b}/api/tasks/${t.id}/outcome`, { outcome: "done" });
       expect((await evals(t.id)).rules).toMatchObject({ status: "done", outcome: "done" });
@@ -4305,7 +4339,7 @@ describe("rubric judge (#1219)", () => {
       const t = await post(`${b}/api/tasks`, { cwd: h, title: "rubric", prompt: "依頼文", runner: "claude" }).then(j);
       await waitFor(async () => (await get(t.id)).status === "done");
       await waitFor(async () => calls.length === 1);
-      expect(calls[0]!.input).toMatchObject({ title: "rubric", prompt: "依頼文", rubric: { id: "switchboard-default", version: 1 } });
+      expect(calls[0]!.input).toMatchObject({ title: "rubric", prompt: "依頼文", rubric: { id: "switchboard-default", version: 2 } });
       expect(calls[0]!.input.metrics.toolCalls).toBe(1);
       expect(calls[0]!.opts.settings).toMatchObject({ runner: "codex", model: "gpt-6-luna" });
       expect((await evals(t.id)).judge).toBeNull();
@@ -4313,9 +4347,9 @@ describe("rubric judge (#1219)", () => {
       calls[0]!.answer(4);
       await waitFor(async () => rows(t.id) === 1);
       const e = await evals(t.id);
-      expect(e.judge).toMatchObject({ scores: { goal: { score: 4, reason: "goal 4" }, safety: { score: 4 } }, summary: "総評 4", rubric: "switchboard-default@1", by: "codex:gpt-6-luna" });
+      expect(e.judge).toMatchObject({ scores: { goal: { score: 4, reason: "goal 4" }, safety: { score: 4 } }, summary: "総評 4", rubric: "switchboard-default@2", by: "codex:gpt-6-luna" });
       expect(Object.keys(e.judge.scores)).toHaveLength(5);
-      expect(c.db.getEval(t.id, "judge")).toMatchObject({ by: "codex:gpt-6-luna", rubric: "switchboard-default@1" });
+      expect(c.db.getEval(t.id, "judge")).toMatchObject({ by: "codex:gpt-6-luna", rubric: "switchboard-default@2" });
       await waitFor(async () => updated.includes(t.id));
       expect(ledgerRows(t.id)).toBe(before + 1);
       // (b) a second turn: judged again, the row is replaced, still one

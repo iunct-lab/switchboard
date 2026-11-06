@@ -6,7 +6,9 @@
  * each run: a fresh daemon with a fake runner (a long task of 2,000 events; every other turn a reply of 200 deltas) and
  * a fresh headless Chrome tab at 1280 × 800. Prints, per journey, the median and p90 of `sb:<journey>` in ms and the
  * counts that do not wobble (API requests, Chrome's LayoutCount / RecalcStyleCount, the layout shift, and `bytes`: the
- * size of the journey's /api/ responses as CDP's encodedDataLength — the daemon does not compress) as the median of the runs.
+ * size of the journey's /api/ responses as CDP's encodedDataLength — the daemon does not compress) as the median of the runs;
+ * open-task and open-task-huge also say `responses`, those bytes by the shape of the path (`/api/tasks/:id/evals`, the
+ * last run's: a response's size does not wobble), which perf-ratchet lists when `bytes` differs from main's (#3921).
  * Then, once (LOADED_RUNS, not --runs), launch and send again on a daemon holding as much as the real home
  * (scripts/perf-load.ts): launch under a backlog import and the rescue page's status checks, send without them, and the
  * longest the daemon took to answer /api/health during the import (`loaded`, #2822, #3634). `--skip-loaded <reason>`:
@@ -20,7 +22,7 @@ import { parseArgs } from "node:util";
 import { loadConfig } from "../packages/core/src/config.ts";
 import { startServer } from "../packages/core/src/server.ts";
 import { LOAD, LONG_EVENTS, loadGh, longEvents, overlap, seedLoad } from "./perf-load.ts";
-import { bundleOf } from "./perf-ratchet.ts";
+import { BYTES_JOURNEYS, bundleOf, shapeOf, type Responses } from "./perf-ratchet.ts";
 import type { Journey, RunnerAdapter } from "@switchboard/protocol";
 
 /** A journey of the bench: the app's four, and the same open of a task as big as the real ones (#2088). */
@@ -122,7 +124,7 @@ async function daemon() {
   return { base, cwd: cfg.repoRoot, stop };
 }
 
-type Sample = { ms: number; requests: number; layoutCount: number; recalcStyleCount: number; layoutShift: number; bytes: number };
+type Sample = { ms: number; requests: number; layoutCount: number; recalcStyleCount: number; layoutShift: number; bytes: number; responses: Responses };
 
 /** The daemon of a loaded run: a copy of the seeded home; `generation` is its GitHub, raised to make an import rewrite everything. */
 async function loadedDaemon(template: string) {
@@ -156,6 +158,9 @@ async function withTab<T>(chromePort: string, play: (tab: Tab) => Promise<T>): P
   const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   let requests = 0;
   let bytes = 0;
+  /** Every finished /api/ response of the tab by its path's shape; a journey takes the difference. */
+  const responses: Responses = {};
+  const shapes = new Map<string, string>();
   const inflight = new Set<string>();
   let lastNetwork = Date.now();
   ws.onmessage = (event) => {
@@ -170,11 +175,18 @@ async function withTab<T>(chromePort: string, play: (tab: Tab) => Promise<T>): P
     if (api.startsWith("/api/") && api !== "/api/perf") {
       requests++;
       inflight.add(m.params.requestId);
+      shapes.set(m.params.requestId, shapeOf(api));
       lastNetwork = Date.now();
     }
     if ((m.method === "Network.loadingFinished" || m.method === "Network.loadingFailed") && inflight.delete(m.params.requestId)) {
       lastNetwork = Date.now();
-      if (m.method === "Network.loadingFinished") bytes += m.params.encodedDataLength;
+      if (m.method === "Network.loadingFinished") {
+        bytes += m.params.encodedDataLength;
+        const r = (responses[shapes.get(m.params.requestId)!] ??= { count: 0, bytes: 0 });
+        r.count++;
+        r.bytes += m.params.encodedDataLength;
+      }
+      shapes.delete(m.params.requestId);
     }
   };
   const call = (method: string, params: object = {}): Promise<any> =>
@@ -218,6 +230,7 @@ async function withTab<T>(chromePort: string, play: (tab: Tab) => Promise<T>): P
       const m0 = await metrics();
       const r0 = requests;
       const b0 = bytes;
+      const resp0 = structuredClone(responses);
       const s0 = name === "launch" ? 0 : await shift();
       let ms = 0;
       await around(async () => {
@@ -226,7 +239,7 @@ async function withTab<T>(chromePort: string, play: (tab: Tab) => Promise<T>): P
         await settle(wait);
       });
       const m1 = await metrics();
-      return { ms, requests: requests - r0, layoutCount: m1.layoutCount - m0.layoutCount, recalcStyleCount: m1.recalcStyleCount - m0.recalcStyleCount, layoutShift: (await shift()) - s0, bytes: bytes - b0 };
+      return { ms, requests: requests - r0, layoutCount: m1.layoutCount - m0.layoutCount, recalcStyleCount: m1.recalcStyleCount - m0.recalcStyleCount, layoutShift: (await shift()) - s0, bytes: bytes - b0, responses: since(resp0, responses) };
     };
     const click = (selector: string, text?: string) =>
       evaluate(`(() => { const b = [...document.querySelectorAll(${JSON.stringify(selector)})].find((e) => ${text ? `e.textContent.trim() === ${JSON.stringify(text)}` : "true"}); if (!b || b.disabled) return false; b.click(); return true; })()`);
@@ -240,6 +253,14 @@ async function withTab<T>(chromePort: string, play: (tab: Tab) => Promise<T>): P
     ws.close();
     await fetch(`http://127.0.0.1:${chromePort}/json/close/${target.id}`).catch(() => undefined);
   }
+}
+
+/** The responses finished after `before`. */
+function since(before: Responses, now: Responses): Responses {
+  return Object.fromEntries(Object.entries(now).flatMap(([shape, r]) => {
+    const b = before[shape] ?? { count: 0, bytes: 0 };
+    return r.count > b.count ? [[shape, { count: r.count - b.count, bytes: r.bytes - b.bytes }]] : [];
+  }));
 }
 
 interface Tab {
@@ -351,8 +372,9 @@ try {
   }
   const journeys = Object.fromEntries(
     (["launch", "new-task", "open-task", "send", "open-task-huge"] as const).map((name) => {
-      const of = (k: keyof Sample) => samples.map((s) => s[name][k]);
-      return [name, { msMedian: round(median(of("ms"))), msP90: round(p90(of("ms"))), requests: median(of("requests")), layoutCount: median(of("layoutCount")), recalcStyleCount: median(of("recalcStyleCount")), layoutShift: round(median(of("layoutShift")), 4), bytes: median(of("bytes")) }];
+      const of = (k: Exclude<keyof Sample, "responses">) => samples.map((s) => s[name][k]);
+      const responses = (BYTES_JOURNEYS as readonly string[]).includes(name) ? { responses: samples.at(-1)![name].responses } : {};
+      return [name, { msMedian: round(median(of("ms"))), msP90: round(p90(of("ms"))), requests: median(of("requests")), layoutCount: median(of("layoutCount")), recalcStyleCount: median(of("recalcStyleCount")), layoutShift: round(median(of("layoutShift")), 4), bytes: median(of("bytes")), ...responses }];
     }),
   );
   const loadedMs = (xs: number[]) => ({ msMedian: round(median(xs)), msP90: round(p90(xs)) });

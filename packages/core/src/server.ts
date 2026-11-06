@@ -8,7 +8,7 @@ import { basename, join, resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
 import { AskAnswerInput, AutoStartKind, CustomRunnerList, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, type EvalsSummary, InboxAddInput, InboxCloseInput, InboxEditInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PermissionAnswers, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskBatch, type AskList, type Backlog, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type ScanCursors, type Workspace, type WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
 import type { CoreConfig } from "./config.ts";
-import { abortOrphanedTasks, createdIssuesOf, Db, deferredOf, type ApiRequestRow } from "./db.ts";
+import { abortOrphanedTasks, createdIssuesOf, Db, deferredOf, displayPath, type ApiRequestRow } from "./db.ts";
 import { opsLatency } from "./ops-latency.ts";
 import { OpsLoadSampler, opsLoad, readCgroup } from "./ops-load.ts";
 import { opsResources } from "./ops-resources.ts";
@@ -18,7 +18,7 @@ import { AttachmentError, AttachmentStore, extValue, formatBytes, isActiveConten
 import { MAX_PTY_SESSIONS, type PtyAttached, type PtyClient, PtyClientMessage, PtyManager } from "./pty.ts";
 import { accessLine, authKind, opLine } from "./accesslog.ts";
 import { addressKey, EDGE_HEADER, edgeOk, hostAllowed, isLoopback, isLoopbackAddress, LOOPBACK_HOSTNAMES, loadOrCreateToken, makeFailureLimit, makeSessionCheck, recentOk, sameOrigin, SESSION_COOKIE, SESSION_RECHECK_MS, sessionTimes, tokenEquals, tokenFromRequest } from "./auth.ts";
-import { buildFeedbackPrompt, buildFixPrompt, buildNewRepoPrompt, feedbackTitle, fixTitle, newRepoTitle } from "./feedback.ts";
+import { buildFeedbackPrompt, buildFixPrompt, buildNewRepoPrompt, type FeedbackSource, feedbackTitle, fixTitle, newRepoTitle } from "./feedback.ts";
 import { measureFootprint } from "./footprint.ts";
 import { loadMcpPolicy, mcpServersFor, WorkspaceMcp } from "./mcp.ts";
 import { decisionsFromOtlp } from "./otel.ts";
@@ -26,7 +26,7 @@ import { ApprovalRules, subjectsOf } from "./approval.ts";
 import { workspaceBrief } from "./brief.ts";
 import { judgeTurn } from "./judge.ts";
 import { skillCommandTitle, suggestTitle } from "./suggest-title.ts";
-import { evalRequestDraft, judgeHumanGap, RULES_BY, rulesEvalOf, weekStartUtc, weeklyHumanSample } from "./evals.ts";
+import { delegatedNote, evalRequestDraft, judgeHumanGap, RULES_BY, rulesEvalOf, weekStartUtc, weeklyHumanSample } from "./evals.ts";
 import { judgeRubric } from "./rubric-judge.ts";
 import { loadRubric } from "./rubric.ts";
 import { claudeCatalog, codexCatalog, hostReaders, modelCandidates, SHIPPED_HIDDEN_MODELS, type CatalogRunner } from "./model-catalog.ts";
@@ -47,17 +47,18 @@ import { parseCron } from "./cron.ts";
 import { FlowCache, flowScope, flowView, type FlowWorkspace } from "./flow.ts";
 import { interventionView } from "./interventions.ts";
 import { branchTip, checkLocalChange, checkLocalFields, checkLocalParent, localForgeOf } from "./backlog-local.ts";
+import { readProjectFields } from "./backlog-send.ts";
 import { enableGithubSync, enablingOf } from "./backlog-enable.ts";
 import { RUNNER_CONFIG_PATHS, runnerConfigOf } from "./runner-config.ts";
 import { CloneError, parseGithubRepo, registerWorkspace, unusableWorkspaces, WorkspaceClones } from "./workspace-clone.ts";
 import { copyDeletable, inspectRemoval } from "./workspace-remove.ts";
-import { ACTION_FOR_STAGE, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, buildDirectPrompt, buildStartPrompt, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionNote, promotionStep, type PromotionHold, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, type GhRunner, type OtherRepo } from "./backlog.ts";
+import { ACTION_FOR_STAGE, checkFieldTypes, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, withdrawStoredOperation, buildDirectPrompt, buildStartPrompt, subagentModelAlias, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionNote, promotionStep, type PromotionHold, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, type GhRunner, type OtherRepo } from "./backlog.ts";
 import { issueOf, reduceStops, stopRecordsFor } from "./stops.ts";
 import { approvalBatches, approvalWindowNote, BatchAnswers } from "./approval-batch.ts";
 import { ASK_HISTORY_MS, ON_HOLD_RESUME, asksFromBacklog, closedHits, asksFromTasks, blockersOf, dedupeAsks, noticeAsks, policyPbi, rankAsks, prFacts, resumeOfTask, type NoticeRecord, type PolicyEnv, type PrFacts } from "./asks.ts";
 import { checkPolicy, matchPolicies, readPolicies, recordUse, subjectChanges, writePolicies } from "./policies.ts";
 import { checkPreset, expandPreset, needsTarget, parseTarget, readPresets, writePresets } from "./presets.ts";
-import { Inbox } from "./inbox.ts";
+import { Inbox, localDate } from "./inbox.ts";
 import { KnowledgeStore } from "./knowledge.ts";
 import * as materializer from "./materializer.ts";
 import { CompositeSuggester, loadRoutingTable, RuleSuggester, suggestRunner, type RoutingContext, type Suggester } from "./routing.ts";
@@ -204,7 +205,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         .map(async (d) => {
           const r = await d.adapter.detect().catch(() => null);
           if (!r?.available || r.login === undefined) return;
-          d.info = { ...d.info, login: r.login, loginKind: r.loginKind, loginHint: r.loginHint, note: r.note };
+          d.info = { ...d.info, login: r.login, loginKind: r.loginKind, loginExpiresAt: r.loginExpiresAt, loginHint: r.loginHint, note: r.note };
           if (r.login === "ok") loginExpired.delete(d.adapter.id);
         }),
     ).then(() => {
@@ -278,7 +279,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       // on Bedrock the runner's own login is not used: it reads as ok, with the kind that says where the bill goes
       const login = bedrock ? "ok" : info.login !== undefined && loginExpired.has(adapter.id) ? "expired" : info.login;
       const loginKind = bedrock ? "bedrock" : login === "ok" ? info.loginKind : undefined;
-      const base = { ...info, login, loginKind, bedrockAvailable: adapter.bedrockModels !== undefined, autoResume: savedAutoResume(adapter.id), models: (bedrock ? adapter.bedrockModels : (savedModels(adapter.id) ?? adapter.models)) ?? [], cliDefaultModel: adapter.cliDefaultModel?.() };
+      const loginExpiresAt = !bedrock && login === "ok" ? info.loginExpiresAt : undefined; // an expiry beside "expired" or Bedrock would mislead
+      const base = { ...info, login, loginKind, loginExpiresAt, bedrockAvailable: adapter.bedrockModels !== undefined, autoResume: savedAutoResume(adapter.id), models: (bedrock ? adapter.bedrockModels : (savedModels(adapter.id) ?? adapter.models)) ?? [], cliDefaultModel: adapter.cliDefaultModel?.() };
       if (!info.permissionModes.length) return base;
       const saved = savedDefaultMode(adapter.id);
       const valid = saved !== undefined && info.permissionModes.some((m) => m.value === saved);
@@ -664,7 +666,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
    * workspace's Issue, and a request filed for another workspace, pass that workspace (`ws`). The kind's own choice
    * (`autoStart.byKind`, #1337) wins over both, when its runner is detected; otherwise it is as if there were none.
    */
-  const startMetaTask = async (req: { kind: AutoStartKind; title: string; prompt: string; attachmentIds?: string[]; runner?: RunnerId; model?: string; effort?: string; scheduleId?: string; shadowRunner?: null; budgetUsd?: number | null; ws?: Workspace; stage?: Task["stage"]; process?: string; processReason?: string }): Promise<{ task: Task } | { error: string; status: number }> => {
+  const startMetaTask = async (req: { kind: AutoStartKind; title: string; prompt: string; attachmentIds?: string[]; runner?: RunnerId; model?: string; effort?: string; scheduleId?: string; shadowRunner?: null; budgetUsd?: number | null; ws?: Workspace; stage?: Task["stage"]; process?: string; processReason?: string; note?: string }): Promise<{ task: Task } | { error: string; status: number }> => {
     const meta = req.ws ?? metaWorkspace();
     if (!meta) return { error: "meta workspace がありません", status: 409 };
     if (!existsSync(meta.path)) return { error: "workspace directory does not exist", status: 409 };
@@ -696,11 +698,41 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     try {
       const task = createRouted(input, (t) => {
         if (note) tasks.record(t.id, { t: "status", text: note });
+        if (req.note) tasks.record(t.id, { t: "status", text: req.note });
       });
       return { task };
     } catch (e) {
       return { error: String((e as Error).message ?? e), status: 409 };
     }
+  };
+  /**
+   * A request Task (request-to-backlog): the feedback button's 要望 and a throwaway app used on enough days (#3682).
+   * `workspaceId` files it in that workspace's repository, as its backlog stage buttons act there; omitted = the meta.
+   * An artifact source must name a known artifact; its 出典 gets the Task it came from and where its copy is.
+   */
+  const startRequestTask = async (input: { text: string; screen?: string; attachmentIds?: string[]; workspaceId?: string; source?: FeedbackInput["source"]; auto?: boolean }): Promise<{ task: Task } | { error: string; status: number }> => {
+    const meta = metaWorkspace();
+    if (!meta) return { error: "meta workspace がありません", status: 409 };
+    const ws = input.workspaceId ? db.getWorkspace(input.workspaceId) : meta;
+    if (!ws) return { error: "workspace not found", status: 404 };
+    let source: FeedbackSource | undefined;
+    if (input.source?.kind === "artifact") {
+      const a = artifacts.get(input.source.artifactId);
+      if (!a) return { error: "artifact not found", status: 404 };
+      source = { kind: "artifact", artifactId: a.id, taskId: a.taskId, copy: `${displayPath(artifacts.folderOf(a))}/` };
+    } else source = input.source;
+    const prompt = buildFeedbackPrompt({ text: input.text, when: new Date(), screen: input.screen, other: otherRepo(meta, ws), local: ws.backlog === "switchboard", source, auto: input.auto });
+    return startMetaTask({ kind: "request", ws, title: feedbackTitle(input.text), prompt, attachmentIds: input.attachmentIds });
+  };
+  /**
+   * Task ごとの実装のモデル（試験, #2769) of an 実装 Task that starts now: the saved one while the Task starts on claude
+   * (its kind's runner, after 上限のときの代わり) and the model has a subagent alias; else "" — the prompt as before.
+   */
+  const completeTaskModelFor = (runner?: RunnerId): string => {
+    const model = settings().autoStart.completeTaskModel;
+    if (!model || !subagentModelAlias(model)) return "";
+    const decided = decidedRunner("complete", runner);
+    return decided && autoRunner(decided).runner === "claude" ? model : "";
   };
   /** A stage Task runs on the workspace whose repository the Issue is in, so another repository's #n is not the meta's #n. */
   const activeStageTask = (workspaceId: string, n: number) => db.activeStageTask(workspaceId, n);
@@ -741,7 +773,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         return { error: `候補の定義を読めません: ${(e as Error).message ?? e}`, status: 409 };
       }
       if (action === "direct") return await startMetaTask({ kind: action, ws, title: startTitle(item, action), stage: { issue: item.number, action }, prompt: buildDirectPrompt(item, { local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path), answer }, def), process: def.id, processReason: "direct button", ...input.extra });
-      return await startMetaTask({ kind: action, ws, title: startTitle(item, action), stage: { issue: item.number, action }, prompt: buildStartPrompt(item, action, { other, resume: input.resume, local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path), answer }, def), process: def.id, processReason: `backlog stage ${action}`, ...input.extra });
+      const taskModel = action === "complete" ? completeTaskModelFor(input.extra?.runner) : "";
+      return await startMetaTask({ kind: action, ws, title: startTitle(item, action), stage: { issue: item.number, action }, prompt: buildStartPrompt(item, action, { other, resume: input.resume, local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path), answer, taskModel }, def), process: def.id, processReason: `backlog stage ${action}`, ...(taskModel ? { note: delegatedNote(taskModel) } : {}), ...input.extra });
     } finally {
       startingStage.delete(key);
     }
@@ -2155,6 +2188,13 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
               if (kindWhy) return bad(kindWhy);
               next.autoStart.byKind[kind] = choice;
             }
+            // Task ごとの実装のモデル（試験, #2769): a Claude model of claude's list, while 実装 runs on claude. A later runner change keeps it; the start leaves it out then
+            const taskModel = patch.completeTaskModel;
+            if (taskModel) {
+              if ((next.autoStart.byKind.complete ?? next.autoStart).runner !== "claude") return bad("Task ごとのモデル（試験）は「実装」のランナーが claude のときだけ選べます");
+              const listed = (savedModels("claude") ?? adapterMap.get("claude")?.models ?? []).map((m) => m.value);
+              if (!listed.includes(taskModel) || !subagentModelAlias(taskModel)) return bad(`model "${taskModel}" is not one of claude's`);
+            }
           }
           // The tunables (#835): a partial patch over the saved group, null = the whole group back to the defaults.
           // Read on every use, so the next use takes the new value without a restart.
@@ -2823,6 +2863,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
          * Edits it (#886): stored here at once (202, the operations) and sent to GitHub later. Or, with `resolve` alone,
          * a choice on a held conflict (#887): 202 with the operation, 409 when none is held there or it moved since read.
          * With `retry` alone, a failed operation of the Issue sent again (#2885): 202, 409 when it is not a failed one of it.
+         * With `withdraw` alone, an `unknown` / `failed` operation of it taken back (#3804), nothing sent: 202, 409 likewise.
          */
         PATCH: async (req) => {
           const parsed = BacklogEditInput.safeParse(await req.json().catch(() => null));
@@ -2832,15 +2873,20 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           const source = db.getWorkspaceBacklogSource(workspaceId);
           if (!source) return bad("まだ GitHub から取り込んでいません", 409);
           try {
-            const { resolve, retry, ...edit } = input;
+            const { resolve, retry, withdraw, ...edit } = input;
             if (edit.change && source.service !== "switchboard") return bad("変更は GitHub 連携の無い workspace だけで作れます", 422);
             if (!syncsGithub(source)) {
               // the Issue's own number, whether named by it or by its local id
               checkLocalParent(db, source, edit.parent, readStoredIssue(db, { id: workspaceId }, issueRef(req.params.number ?? ""))?.issue.number);
               edit.fields = checkLocalFields(db.getWorkspace(workspaceId)!.path, edit);
+            } else if (source.service === "github" && edit.fields && !resolve && !retry && !withdraw) {
+              // a value that does not fit its field is refused before it is stored (#3811); GitHub out of reach (or waited
+              // for: nothing is asked of it meanwhile, docs/design/github-api-budget.md) stores it, the send checks last
+              const defs = backlog.waitUntil({ id: workspaceId }) > Date.now() ? null : await readProjectFields(opts.gh ?? runGh, db, db.getWorkspace(workspaceId)!.path, source).catch(() => null);
+              if (defs) checkFieldTypes(defs, edit.fields);
             }
             const ref = issueRef(req.params.number ?? "");
-            const edited = resolve ? resolveStoredConflict(db, source, ref, resolve) : retry ? retryStoredOperation(db, source, ref, retry.operation) : editStoredIssue(db, source, ref, edit);
+            const edited = resolve ? resolveStoredConflict(db, source, ref, resolve) : retry ? retryStoredOperation(db, source, ref, retry.operation) : withdraw ? withdrawStoredOperation(db, source, ref, withdraw) : editStoredIssue(db, source, ref, edit);
             backlog.send(db.getWorkspace(workspaceId)!);
             return json(edited, 202);
           } catch (e) {
@@ -2956,19 +3002,17 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         POST: async (req) => {
           const parsed = FeedbackInput.safeParse(await req.json().catch(() => null));
           if (!parsed.success) return bad(parsed.error.message);
+          if (parsed.data.mode === "request") {
+            const r = await startRequestTask(parsed.data);
+            return "task" in r ? json(r.task, 201) : bad(r.error, r.status);
+          }
           const meta = metaWorkspace();
-          // no meta workspace: startMetaTask answers 409 for either mode; the brief only needs one to exist
+          // no meta workspace: startMetaTask answers 409; the brief only needs one to exist
           if (!meta) return bad("meta workspace がありません", 409);
-          // a request for another workspace is filed in that repository, as its backlog stage buttons act there
-          const ws = parsed.data.mode === "request" && parsed.data.workspaceId ? db.getWorkspace(parsed.data.workspaceId) : meta;
-          if (!ws) return bad("workspace not found", 404);
-          const other = otherRepo(meta, ws);
-          const when = new Date();
           const r = await startMetaTask({
-            kind: parsed.data.mode,
-            ...(parsed.data.mode === "fix"
-              ? { title: fixTitle(parsed.data.text), prompt: buildFixPrompt({ brief: workspaceBrief(meta, [...adapterMap.keys()]), text: parsed.data.text, when, screen: parsed.data.screen }) }
-              : { ws, title: feedbackTitle(parsed.data.text), prompt: buildFeedbackPrompt({ text: parsed.data.text, when, screen: parsed.data.screen, other, local: ws.backlog === "switchboard", source: parsed.data.source }) }),
+            kind: "fix",
+            title: fixTitle(parsed.data.text),
+            prompt: buildFixPrompt({ brief: workspaceBrief(meta, [...adapterMap.keys()]), text: parsed.data.text, when: new Date(), screen: parsed.data.screen }),
             attachmentIds: parsed.data.attachmentIds,
           });
           return "task" in r ? json(r.task, 201) : bad(r.error, r.status);
@@ -3237,6 +3281,27 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       },
       "/api/artifacts/:id": {
         DELETE: (req) => artifactResult(() => json(artifacts.remove(String(req.params.id)))),
+      },
+      // A throwaway app read the API through the screen (#3682): count the local day; on the APP_REQUEST_DAYS-th day
+      // Switchboard starts a request Task for it, once per artifact.
+      "/api/artifacts/:id/app-use": {
+        POST: async (req) => {
+          const a = artifacts.get(String(req.params.id));
+          if (!a) return bad("not found", 404);
+          // only a page the screen frames can use the bridge; a URL has no copy to count or to name in the 出典
+          if (a.kind === "url") return bad("a URL artifact is not a throwaway app", 400);
+          const use = artifacts.markAppUse(a.id, localDate(new Date()));
+          if (!use.due) return json({ appDays: use.appDays, appRequestTaskId: use.appRequestTaskId });
+          // the same draft as 要望にする (the PBI's 「同じ下書き」); the 出典 says Switchboard filed it and why
+          const r = await startRequestTask({ text: `使い捨てアプリ「${a.title}」を一般機能にしたい。`, source: { kind: "artifact", artifactId: a.id }, auto: true });
+          if (!("task" in r)) {
+            // the next day that counts tries again; the page still reads as before
+            console.warn(`artifacts: the request for the throwaway app ${a.id} did not start: ${r.error}`);
+            return json({ appDays: use.appDays, appRequestTaskId: null });
+          }
+          artifacts.setAppRequest(a.id, r.task.id);
+          return json({ appDays: use.appDays, appRequestTaskId: r.task.id });
+        },
       },
       "/api/artifacts/:id/restore": {
         POST: (req) => artifactResult(() => json(artifacts.restore(String(req.params.id)))),

@@ -6,6 +6,11 @@ const CORE = process.env.SWITCHBOARD_CORE_URL ?? "http://127.0.0.1:47831";
 export default defineConfig({
   plugins: [react()],
   server: {
+    // The daemon's own UI is kept by its CSP `default-src 'self'`, which also stops a link in a report's frame from
+    // loading another site into that frame — and the report bridge trusts that frame's window (docs/design/artifacts.md).
+    // Only frame-src here (#3726 review): a wider policy would break Vite's HMR and React's dev injections.
+    // Proxied responses (/api, /artifacts) keep the daemon's headers; packages/core/src/devproxy.test.ts checks both.
+    headers: { "content-security-policy": "frame-src 'self'" },
     proxy: {
       // No `changeOrigin`: the daemon's cross-site defence (core/src/auth.ts sameOrigin) requires the browser's
       // Origin host to equal the Host header. The proxy forwards Origin (http://localhost:5173) untouched, so Host

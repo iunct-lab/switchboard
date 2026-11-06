@@ -10,7 +10,7 @@ describe("rubric (#1219)", () => {
     expect(Rubric.safeParse(DEFAULT_RUBRIC).success).toBe(true);
     expect(DEFAULT_RUBRIC.criteria.map((c) => c.id)).toEqual(["goal", "instructions", "efficiency", "communication", "safety"]);
     for (const c of DEFAULT_RUBRIC.criteria) expect(Object.keys(c.anchors).sort()).toEqual(["1", "3", "5"]);
-    expect(rubricKey(DEFAULT_RUBRIC)).toBe("switchboard-default@1");
+    expect(rubricKey(DEFAULT_RUBRIC)).toBe("switchboard-default@2");
   });
 
   test("the person's evals/rubric.json replaces the default; a broken or invalid one falls back with one warning; none → default, no warning", () => {

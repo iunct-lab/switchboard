@@ -17,6 +17,8 @@ Task の親は必ずその PBI（sub-issue）。Task は 1 PR で終わる大き
 
 元要望（`## 元要望` の Issue）の原文も読む。PBI の解釈が原文からずれていたら PBI を直してから分解する。
 
+受け入れ条件の誰かに伝える・投稿する行（〜に知らせる、〜にコメントする）に、投稿先（リポジトリ `owner/name` と Issue の番号か URL）が名指しされているか確かめる。無ければ Task を切らずに `## 判断待ち` で投稿先を聞く（`issue-workflow` の「Ready の判定（PBI）」の 5）。
+
 ### 2. コードを読む
 
 受け入れ条件ごとに「今どこで何が起きているか」を確かめ、触る場所を `path:line` で控える。読むもの:
@@ -89,8 +91,9 @@ Task 本文（`.github/ISSUE_TEMPLATE/task.yml` の見出し。「やること�
 
 1. PBI の `## Tasks` に着手順を 1 行（`sub-issue 参照。順番: core → web`）
 2. 決定ログに「YYYY-MM-DD: Task 分解（#a, #b, #c）。被覆: …。Story Points N → M（理由）」
-3. `ops-kit backlog set <PBI> Status Ready`
-4. `ops-kit lint --fresh` → exit 0
+3. `issue-workflow` の「Ready の判定（PBI）」の 5 つを確かめる（伝える・投稿する受け入れ条件の投稿先の名指しを含む）
+4. `ops-kit backlog set <PBI> Status Ready`
+5. `ops-kit lint --fresh` → exit 0
 
 ## 報告（利用者への返事の型）
 

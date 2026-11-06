@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLAUDE_MODELS } from "@switchboard/adapter-claude";
 import { CODEX_MODELS } from "@switchboard/adapter-codex";
-import { claudeCatalog, claudeTableText, codexCatalog, hostReaders, modelCandidates, SHIPPED_HIDDEN_MODELS } from "./model-catalog.ts";
+import { CODEX_CATALOG_TIMEOUT_MS, claudeCatalog, claudeTableText, codexCatalog, hostReaders, modelCandidates, SHIPPED_HIDDEN_MODELS } from "./model-catalog.ts";
 
 // Excerpts of what the CLIs carry (claude 2.1.285's embedded table, codex-cli 0.159.2's `debug models --bundled`).
 const CLAUDE_TABLE =
@@ -81,6 +81,33 @@ describe("model-catalog", () => {
       expect(await hostReaders(join(dir, "no-such-dir")).codex()).toBeNull();
       writeFileSync(join(dir, "codex"), `#!/bin/sh\necho boom >&2\nexit 3\n`);
       await expect(read.codex()).rejects.toThrow("codex debug models --bundled exited 3: boom");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("hostReaders: a codex that does not answer is stopped at the limit and the read fails with the limit", async () => {
+    // The limit ends before Bun's idleTimeout (120 s) would close the settings request with no reason shown (#3845).
+    expect(CODEX_CATALOG_TIMEOUT_MS).toBeLessThan(120_000);
+    const dir = mkdtempSync(join(tmpdir(), "switchboard.model-catalog."));
+    try {
+      const pidfile = join(dir, "pid");
+      writeFileSync(join(dir, "codex"), `#!/bin/sh\necho $$ > "${pidfile}"\nexec sleep 60\n`);
+      chmodSync(join(dir, "codex"), 0o755);
+      const started = Date.now();
+      await expect(hostReaders(dir, 200).codex()).rejects.toThrow("codex debug models --bundled did not answer within 0.2s");
+      expect(Date.now() - started).toBeLessThan(2_000);
+      const pid = Number(readFileSync(pidfile, "utf8").trim());
+      expect(() => process.kill(pid, 0)).toThrow();
+      // A codex that exits while a child it left keeps the output open is held to the same limit.
+      writeFileSync(join(dir, "codex"), `#!/bin/sh\nsleep 60 &\necho $! > "${pidfile}"\nexit 0\n`);
+      try {
+        const before = Date.now();
+        await expect(hostReaders(dir, 200).codex()).rejects.toThrow("did not answer within 0.2s");
+        expect(Date.now() - before).toBeLessThan(2_000);
+      } finally {
+        process.kill(Number(readFileSync(pidfile, "utf8").trim()), "SIGKILL");
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

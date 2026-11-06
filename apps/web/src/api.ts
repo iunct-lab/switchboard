@@ -95,6 +95,7 @@ export interface MaterializeApplyResult {
 
 /** Evals (#1221): where a request was drafted from; goes into its 出典. The protocol's own shape, so the two cannot drift. */
 export type FeedbackSource = NonNullable<FeedbackInput["source"]>;
+export type AppUse = { appDays: number; appRequestTaskId: string | null };
 
 export interface TaskDetail {
   localContinuations: Task[];
@@ -268,6 +269,8 @@ export const api = {
   restoreArtifact: (id: string) => req<Artifact>(`/api/artifacts/${id}/restore`, { method: "POST" }),
   refreshArtifact: (id: string) => req<Artifact>(`/api/artifacts/${id}/refresh`, { method: "POST" }),
   viewArtifact: (id: string) => req<{ url: string }>(`/api/artifacts/${id}/view`, { method: "POST" }),
+  /** A throwaway app read the API through the screen (#3682): the days counted, and the request Task Switchboard started for it on the 3rd. */
+  artifactAppUse: (id: string) => req<AppUse>(`/api/artifacts/${id}/app-use`, { method: "POST" }),
   /** Reports across Tasks (#1835): every task's HTML artifacts, newest first. */
   reports: (o: AcrossQuery = {}) => req<ReportRow[]>(`/api/reports${acrossParams(o)}`),
   /** Every artifact across Tasks (#1833), newest first; the same query as `reports`. */

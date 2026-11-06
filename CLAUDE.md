@@ -35,7 +35,7 @@ ops-kit heavy -- bun scripts/test-changed.ts     # <関係するテスト>。Tas
 env -u SWITCHBOARD_SUPERVISED bun test <file> -t "<name>"     # 変数を継承すると selfdev の dry-run テストが落ちる
 ```
 
-型検査と `test-changed`（一式に広がることがある）は、マシンの重い処理の枠を取ってから始める（`ops-kit heavy`。上限・置き場・足し方はキットの README の「重い処理の枠」）。1 ファイルの `bun test` は包まない。一式（`ops-kit heavy -- env -u SWITCHBOARD_SUPERVISED bun test`）は Task の中で手では回さない（`bun scripts/test-changed.ts` が判定できない変更は、スクリプトが自分で一式に広げる）。PR の CI は差分の決まった head で 1 回回り（Actions は全テスト、`bun scripts/local-ci.ts` は影響範囲に絞る）、全テストの安全網はタグの CI。
+型検査と `test-changed`（一式に広がることがある）は、マシンの重い処理の枠を取ってから始める（`ops-kit heavy`。上限・置き場・足し方はキットの README の「重い処理の枠」）。1 ファイルの `bun test` は包まない。ローカル CI（`bun scripts/local-ci.ts`）は自分で枠を取るので `ops-kit heavy` で包まない。一式（`ops-kit heavy -- env -u SWITCHBOARD_SUPERVISED bun test`）は Task の中で手では回さない（`bun scripts/test-changed.ts` が判定できない変更は、スクリプトが自分で一式に広げる）。PR の CI は差分の決まった head で 1 回回り（Actions は全テスト、`bun scripts/local-ci.ts` は影響範囲に絞る）、全テストの安全網はタグの CI。
 
 変更ごとのテストの型（軽い順。上の行で足りるなら下の行へ行かない。足す前の検討は `task-to-pr` の「足す前に」）:
 

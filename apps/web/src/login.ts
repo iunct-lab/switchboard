@@ -99,12 +99,14 @@ export function hasTypedText(doc: { querySelectorAll(sel: string): ArrayLike<{ v
   return Array.from(doc.querySelectorAll('textarea, input:not([type]), input[type="text"], input[type="search"], input[type="url"], input[type="email"]')).some((f) => f.value.trim() !== "");
 }
 
+/** M/D HH:mm in local time, for the status bar and its hover text. */
+const at = (ms: number) => {
+  const d = new Date(ms);
+  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+};
+
 /** The cloud login's end, for the status bar (#498): the earlier of the idle time and the cap, with the cap in the hover text. */
 export function sessionLabel(s: { idleUntil: number; expiresAt: number }, now: number): { text: string; title: string; expired: boolean } {
-  const at = (ms: number) => {
-    const d = new Date(ms);
-    return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-  };
   return {
     text: t(settings.sessionUntil, { at: at(Math.min(s.idleUntil, s.expiresAt)) }),
     title: t(settings.sessionTitle, { at: at(s.expiresAt) }),
@@ -115,4 +117,20 @@ export function sessionLabel(s: { idleUntil: number; expiresAt: number }, now: n
 /** How long until /api/health is read again at the login's end (#498): a second after it, at once when it has passed. */
 export function sessionRefreshDelay(end: number, now: number): number {
   return Math.max(end - now, 0) + 1000;
+}
+
+/** How close the Claude login's end must be before the status bar shows it (#3864): long enough to be seen twice across a night. */
+export const RUNNER_LOGIN_WARN_MS = 72 * 3600_000;
+
+/**
+ * The Claude login's end (#3864), from `/api/health`'s `loginExpiresAt`: `title` for the runner choice on Home, `bar`
+ * for the status bar — only when less than RUNNER_LOGIN_WARN_MS is left, else "". Null when the end is not known or is no date.
+ */
+export function runnerLoginLabel(info: { loginExpiresAt?: number; loginHint?: string }, now: number): { title: string; bar: string } | null {
+  if (info.loginExpiresAt === undefined || Number.isNaN(new Date(info.loginExpiresAt).getTime())) return null; // past the Date range: not shown as NaN
+  const when = at(info.loginExpiresAt);
+  return {
+    title: t(settings.runnerLoginTitle, { at: when, command: info.loginHint ?? "claude auth login" }),
+    bar: info.loginExpiresAt - now < RUNNER_LOGIN_WARN_MS ? t(settings.runnerLoginUntil, { at: when }) : "",
+  };
 }

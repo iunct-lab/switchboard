@@ -9,7 +9,7 @@ import { noticesFor, showNotice } from "./notify.ts";
 import { Approvals } from "./components/Approvals.tsx";
 import { api, connectEvents, getToken, setToken, type Health, type TaskDetail, type WorkspaceClone } from "./api.ts";
 import { journeyCancel, journeyEnd, journeyStart } from "./perf.ts";
-import { loginRoute, sessionLabel, sessionRefreshDelay, STUCK_MESSAGE, STUCK_LOGIN, STUCK_RESCUE, withoutFromAuth } from "./login.ts";
+import { loginRoute, runnerLoginLabel, sessionLabel, sessionRefreshDelay, STUCK_MESSAGE, STUCK_LOGIN, STUCK_RESCUE, withoutFromAuth } from "./login.ts";
 import { newVersionLink, rescueLink, type ReleaseStatus } from "./release.ts";
 import { archiveBanner } from "./archive.ts";
 import { watchHealth } from "./healthWatch.ts";
@@ -21,7 +21,7 @@ import { Ledger } from "./components/Ledger.tsx";
 import { Evals } from "./components/Evals.tsx";
 import { Resources } from "./components/Resources.tsx";
 import { Schedules } from "./components/Schedules.tsx";
-import { FeedbackDialog, type FeedbackPrefill } from "./components/Feedback.tsx";
+import { FeedbackDialog, OPEN_FEEDBACK_EVENT, type FeedbackPrefill } from "./components/Feedback.tsx";
 import { Rail } from "./components/Rail.tsx";
 import { RunnerLogin } from "./components/RunnerLogin.tsx";
 import { Settings } from "./components/Settings.tsx";
@@ -99,6 +99,12 @@ export function App() {
     setFeedbackOpen(true);
     api.workspaces().then(setWorkspaces).catch(() => undefined);
   };
+  // 要望にする on a throwaway app (#3683): the artifact's row asks for the dialog with its draft and source
+  useEffect(() => {
+    const onOpen = (e: Event) => openFeedback(undefined, (e as CustomEvent<FeedbackPrefill>).detail);
+    addEventListener(OPEN_FEEDBACK_EVENT, onOpen);
+    return () => removeEventListener(OPEN_FEEDBACK_EVENT, onOpen);
+  }, []);
   // 改善要望にする (#1221): the daemon drafts the request from the task's evaluations; the dialog opens with it
   const improveFromEvals = (taskId: string) => {
     api
@@ -666,11 +672,15 @@ export function App() {
           {t(home.daemon)} <b>{health ? "OK" : "…"}</b>
           {health && t(home.protocol, { version: health.protocol })}
         </span>
-        {(health?.runners ?? []).map((r) => (
-          <span key={r.id}>
-            {r.id} <b>{r.available ? r.version ?? "OK" : t(home.unavailable)}</b>
-          </span>
-        ))}
+        {(health?.runners ?? []).map((r) => {
+          const expiry = runnerLoginLabel(r, Date.now());
+          return (
+            <span key={r.id} title={expiry?.bar ? expiry.title : undefined}>
+              {r.id} <b>{r.available ? r.version ?? "OK" : t(home.unavailable)}</b>
+              {expiry?.bar && <> · <b className="warn">{expiry.bar}</b></>}
+            </span>
+          );
+        })}
         {health && (
           <span title={health.home}>
             {t(home.data)} <b className={health.homeIsTemp ? "warn" : ""}>{health.homeDisplay ?? health.home}</b>

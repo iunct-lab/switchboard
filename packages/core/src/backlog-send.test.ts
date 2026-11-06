@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BacklogIssueData, BacklogSource } from "@switchboard/protocol";
 import { Db } from "./db.ts";
-import { answerStoredDecision, commentStoredIssue, createStoredIssue, editStoredIssue, readStoredIssue, retryStoredOperation, type GhRunner } from "./backlog.ts";
+import { answerStoredDecision, commentStoredIssue, createStoredIssue, editStoredIssue, readStoredIssue, retryStoredOperation, withdrawStoredOperation, type GhRunner } from "./backlog.ts";
 import { forgeKind, Limit, sendGithubOperations, theirEdit } from "./backlog-send.ts";
 import { backlogFieldValue, conflictRevision } from "./backlog-merge.ts";
 import { BacklogSync } from "./backlog-sync.ts";
@@ -543,6 +543,61 @@ test("a permission refused on one thing fails that operation only; the login ref
   g.fail.push({ match: (a) => a.includes("PATCH"), status: 401 });
   await expect(send(g.gh)).rejects.toMatchObject({ kind: "auth" });
   expect(db.listPendingBacklogOperations(S)[0]).toMatchObject({ status: "pending", attempt: 0, error: expect.stringContaining("ログイン") });
+});
+
+test("a Project field emptied here (#3810): GitHub's field is cleared, and a closed Issue's stored item has no value for it after the send's read-back", async () => {
+  const g = fakeGithub();
+  const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
+  db.setWorkspaceBacklogSource(ws.id, S);
+  db.putBacklogSnapshot(S, { records: [], cursor: "2026-10-01T00:00:00Z", syncedAt: 1 });
+  g.items.get("PVTI_I_12")!.fields["Story Points"] = 3;
+  const reads = importsToo(g);
+  const answer = (data: unknown) => ({ code: 0, stdout: JSON.stringify({ data }), stderr: "" });
+  const values = () => Object.entries(g.items.get("PVTI_I_12")!.fields).map(([name, v]) => ({ ...(typeof v === "number" ? { number: v } : { name: v }), field: { name } }));
+  const item12 = () => ({ number: 12, projectItems: { totalCount: 1, nodes: [{ id: "PVTI_I_12", project: { number: 1, owner: { login: "acme" } }, fieldValues: { totalCount: values().length, nodes: values() } }] } });
+  let closed = false;
+  let closing: unknown = null;
+  const gh: GhRunner = async (args, cwd) => {
+    const q = args.find((a) => a.startsWith("query=")) ?? "";
+    if (/w\d+: issue\(number:/.test(q)) return answer({ repository: { w12: item12() } });
+    // closed, the Issue is on no list: only the read by number after the send has its item
+    if (q.includes("issues(first:100")) return answer({ repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: closed ? [] : [item12()] } } });
+    if (q.includes("states:[OPEN,CLOSED]")) {
+      // the Issues updated since: the closing, read with the item as it was then
+      if (!closing) return answer({ repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } });
+      const r = JSON.parse((await reads(args, cwd)).stdout);
+      r.data.repository.issues.nodes[0].projectItems = closing;
+      closing = null;
+      return { code: 0, stdout: JSON.stringify(r), stderr: "" };
+    }
+    return reads(args, cwd);
+  };
+  const sync = makeSync(db, gh, () => Date.parse("2026-10-20T00:00:00Z"));
+  await sync.sync(ws);
+  expect(readStoredIssue(db, ws, 12)!.fields).toEqual({ Status: "Backlog", "Story Points": 3 });
+  g.issues.get(12)!.state = "CLOSED";
+  closed = true;
+  closing = item12().projectItems;
+  await sync.sync(ws);
+  expect(readStoredIssue(db, ws, 12)!).toMatchObject({ issue: { state: "CLOSED" }, fields: { "Story Points": 3 } });
+  editStoredIssue(db, S, 12, { fields: { "Story Points": null } });
+  await sync.send(ws);
+  expect(g.writes).toEqual([expect.stringContaining("clearProjectV2ItemFieldValue")]);
+  expect(g.items.get("PVTI_I_12")!.fields).toEqual({ Status: "Backlog" });
+  await sync.sync(ws);
+  expect(db.listPendingBacklogOperations(S)).toEqual([]);
+  expect(readStoredIssue(db, ws, 12)!.issue.state).toBe("CLOSED");
+  expect(readStoredIssue(db, ws, 12)!.fields).toEqual({ Status: "Backlog" });
+  // already empty: nothing is stored to send
+  expect(editStoredIssue(db, S, 12, { fields: { "Story Points": null } }).operations).toEqual([]);
+});
+
+test("emptying a field of an Issue not in the Project (#3810) stores nothing and does not put it there, as the set outside a Task", () => {
+  expect(editStoredIssue(db, S, 3, { fields: { "Story Points": null } }).operations).toEqual([]);
+  expect(db.listBacklogRecords(S, "project-item").map((r) => r.externalId)).toEqual(["PVTI_I_12"]);
+  // a value still puts it there
+  editStoredIssue(db, S, 3, { fields: { "Story Points": 5, Area: null } });
+  expect(statuses()).toEqual([["set", "member", "pending"], ["set", "field:Story Points", "pending"], ["set", "field:Area", "pending"]]);
 });
 
 test("a field read again right after it was written: another value there is held as a conflict", async () => {
@@ -1298,6 +1353,75 @@ test("an unknown create whose look cannot read the list is not made again: it wa
   await send(g.gh);
   expect(op().error).toMatch(/^最初の失敗: gh api repos\/acme\/app\/issues: HTTP 502 \/ 照合: .*HTTP 503$/);
   expect(op().error!.match(/最初の失敗/g)).toHaveLength(1);
+});
+
+test("a held failed edit and an unknown comment taken back: nothing written, the held lines and the waiting count go, the edits after them are sent (#3804)", async () => {
+  const g = fakeGithub();
+  const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
+  db.setWorkspaceBacklogSource(ws.id, S);
+  editStoredIssue(db, S, 12, { title: "断られる題" });
+  answerStoredDecision(db, S, 12, "A で");
+  g.fail.push({ match: (a) => a[1] === "repos/acme/app/issues/12" && a.includes("PATCH"), status: 422 });
+  expect(await send(g.gh)).toBe(0);
+  expect(readStoredIssue(db, ws, 12)!.held).toEqual([expect.objectContaining({ field: "title", status: "failed" })]);
+  const title = db.listPendingBacklogOperations(S).find((o) => o.field === "title")!;
+  const before = readStoredIssue(db, ws, 12)!.pending;
+  g.writes.length = 0;
+  expect(withdrawStoredOperation(db, S, 12, { operation: title.id, reason: "題は GitHub のままでよい" })).toEqual({ operation: title.id });
+  expect(g.writes).toEqual([]);
+  expect(readStoredIssue(db, ws, 12)).toMatchObject({ held: [], pending: before - 1, issue: { title: "PBI" } });
+  expect(db.getBacklogOperation(title.id)).toMatchObject({ status: "done", error: "取り下げました: 題は GitHub のままでよい" });
+  // a comment left unknown: taken back the same way, its unsent record gone, the label after it goes out
+  g.fail.push({ match: (a) => a[1]!.endsWith("/comments") && a.includes("POST"), status: 502 });
+  expect(await send(g.gh)).toBe(0);
+  const note = db.listPendingBacklogOperations(S).find((o) => o.kind === "comment")!;
+  expect(note.status).toBe("unknown");
+  withdrawStoredOperation(db, S, 12, { operation: note.id, reason: "回答は別に書き直す" });
+  expect(db.getBacklogRecord({ ...S, objectKind: "comment", externalId: note.target })).toBeNull();
+  expect(await send(g.gh)).toBe(1);
+  expect(g.issues.get(12)!.labels).toEqual(["type:pbi"]);
+  expect(g.issues.get(12)!.comments).toEqual([]);
+  expect(statuses()).toEqual([]);
+  // only a held one of the Issue: a pending one or another Issue's is refused
+  editStoredIssue(db, S, 12, { title: "待っている題" });
+  const pending = db.listPendingBacklogOperations(S)[0]!;
+  expect(() => withdrawStoredOperation(db, S, 12, { operation: pending.id, reason: "x" })).toThrow("結果不明か失敗で保留されていません");
+  expect(() => withdrawStoredOperation(db, S, 3, { operation: pending.id, reason: "x" })).toThrow("取り下げられる操作");
+});
+
+test("an unknown comment is not taken back while it is being looked for and sent; an operation of the enabling of GitHub sync never is (#3804)", async () => {
+  const g = fakeGithub();
+  answerStoredDecision(db, S, 12, "A で");
+  g.fail.push({ match: (a) => a[1]!.endsWith("/comments") && a.includes("POST"), status: 502 });
+  await send(g.gh);
+  const note = db.listPendingBacklogOperations(S).find((o) => o.kind === "comment")!;
+  expect(note.status).toBe("unknown");
+  // the withdraw comes while the send looks for its marker: refused, and the send goes on to post it once
+  let refused: unknown = null;
+  const gh: GhRunner = async (args, cwd) => {
+    if (args[1]?.includes("/comments?") && !refused) refused = (() => { try { withdrawStoredOperation(db, S, 12, { operation: note.id, reason: "x" }); return "taken"; } catch (e) { return (e as Error).message; } })();
+    return g.gh(args, cwd);
+  };
+  expect(await send(gh)).toBe(2);
+  expect(refused).toBe("この操作は結果不明か失敗で保留されていません");
+  expect(g.issues.get(12)!.comments).toHaveLength(1);
+  // an `sb:` create (the enabling, backlog-enable.ts) held failed: sent again, not taken back
+  const { localId } = createStoredIssue(db, S, { title: "有効化", body: "", labels: [], milestone: null, parent: null, fields: null });
+  db.sqlite.query("UPDATE backlog_operations SET target = 'sb:7', status = 'failed' WHERE id = ?").run(localId);
+  expect(() => db.withdrawBacklogOperation(S, localId, "x")).toThrow("GitHub 同期の有効化の操作は取り下げられません");
+});
+
+test("an unknown create of an Issue never made, taken back: the edits made to it go with it, and nothing is left to send (#3804)", async () => {
+  const g = fakeGithub();
+  const { localId } = createStoredIssue(db, S, { title: "作らない", body: "", labels: [], milestone: null, parent: null, fields: null });
+  editStoredIssue(db, S, localId, { title: "作らない（直した）" });
+  db.setBacklogOperationResult(localId, { status: "unknown" });
+  const create = db.getBacklogOperation(localId)!;
+  withdrawStoredOperation(db, S, localId, { operation: create.id, reason: "作らないと決めた" });
+  expect(statuses()).toEqual([]);
+  expect(db.listBacklogRecords(S, "issue").some((r) => r.externalId === create.target)).toBe(false);
+  expect(await send(g.gh)).toBe(0);
+  expect(g.writes).toEqual([]);
 });
 
 test("both answers lost (the first post and the one made again): the next look finds two, keeps the first made and drops the other (#3804)", async () => {

@@ -6,19 +6,24 @@
  * again"): a throwaway page is not tested, so its mistake must not become an operation unseen (`ui-layers.md`).
  */
 
+import { viewFromPath, viewPath } from "./route.ts";
+
 /** What the frame posts to its parent. */
 export type BridgeRequest = { type: "switchboard-api"; id: string; method: string; path: string; body?: unknown };
 /** What the screen posts back to the frame that asked. */
 export type BridgeResult = { type: "switchboard-api-result"; id: string; ok: boolean; status: number; body: unknown };
 /** Posted at once for a write that waits for the person: the client stops its 3-second "no screen around me" timer. */
 export type BridgePending = { type: "switchboard-api-pending"; id: string };
+/** What the frame posts to move the screen to one of Switchboard's own screens (a Task, a header tab). No answer. */
+export type NavigateRequest = { type: "switchboard-navigate"; path: string };
 
 export const BRIDGE_MAX = 20;
 export const BRIDGE_WINDOW_MS = 10_000;
 const MAX_PATH = 2_000;
 const WRITES = ["POST", "PUT", "PATCH", "DELETE"];
 /** The answer a write gets when the person presses やめる (or Esc, or outside the dialog). */
-export const DECLINED = "利用者が断った"; // sent to the artifact frame (docs/design/scratch-apps.md); compared by the artifact's code
+// ui-strings: value "利用者が断った" — sent to the artifact frame (docs/design/scratch-apps.md); compared by the artifact's code
+export const DECLINED = "利用者が断った";
 
 /**
  * Writes refused without asking: a sign-in or an approval is the person's own step on the screen, and a key or a
@@ -37,9 +42,28 @@ export const BRIDGE_REFUSED: RegExp[] = [
   /^\/api\/tasks\/[^/]+\/mcp\/rotate$/, // a Task's new MCP token
 ];
 
+/**
+ * The path a `switchboard-navigate` message may move the screen to, or null: only a screen's own path as `route.ts`
+ * writes it (`/task/<id>` or a header tab's path). Another site, `/api/…`, a query, a fragment, a %-escape, a `.` or
+ * `..` segment or a trailing slash is dropped, so an untrusted artifact cannot take the screen anywhere else.
+ */
+export function parseNavigateRequest(data: unknown): string | null {
+  if (!data || typeof data !== "object") return null;
+  const d = data as Record<string, unknown>;
+  if (d.type !== "switchboard-navigate" || typeof d.path !== "string") return null;
+  const path = d.path;
+  if (path.length > MAX_PATH || !path.startsWith("/") || path.startsWith("//")) return null;
+  if (/[\u0000-\u0020\u007f\\?#%]/.test(path)) return null;
+  // pushState resolves `.` and `..` segments: `/task/..` would land on Home, so the path must be the one the browser keeps
+  if (new URL(path, "http://switchboard.invalid").pathname !== path) return null;
+  const view = viewFromPath(path);
+  return view && viewPath(view) === path ? path : null;
+}
+
 export type ParsedRequest = { ok: true; req: BridgeRequest; confirm: boolean } | { ok: false; status: number; why: string };
 
 /** Checks a posted message: a path under `/api/` that does not climb out of it; a GET is read, a write is confirmed first. */
+// ui-strings: value "要求の形が違います" "パスが長すぎます" "/api/ の下だけを読めます" "パスに空白・制御文字・# は使えません" "パスを読めません" "パスに使えない文字があります" "パスの形が違います" "取り次ぎでは refresh（GitHub からの取り込み）を使えません" "本文を JSON にできません" — API errors handed to the artifact's code, not switched (docs/design/ui-language.md)
 export function parseBridgeRequest(data: unknown): ParsedRequest {
   // every `why` here, and the limiter's error below, is sent to the artifact frame as an API error, like the daemon's own errors
   const bad = (why: string): ParsedRequest => ({ ok: false, status: 400, why });
@@ -106,6 +130,8 @@ export type BridgeDeps = {
   /** Shows the write to the person; true = 実行する. Called one at a time: the next waits until this one is closed. */
   confirm: (req: BridgeRequest) => Promise<boolean>;
   reply: (to: unknown, result: BridgeResult | BridgePending) => void;
+  /** Moves the screen to a path `parseNavigateRequest` let through (a screen of Switchboard's own). */
+  navigate: (path: string) => void;
   limiter?: BridgeLimiter;
   now?: () => number;
 };
@@ -124,7 +150,14 @@ export function createBridge(deps: BridgeDeps): (ev: { source: unknown; data: un
   return async (ev) => {
     if (!ev.source || !deps.frames().includes(ev.source)) return;
     const d = ev.data as { type?: unknown; id?: unknown } | null;
-    if (!d || typeof d !== "object" || d.type !== "switchboard-api") return;
+    if (!d || typeof d !== "object") return;
+    if (d.type === "switchboard-navigate") {
+      // no answer either way: a refused path, or one over the limit, is dropped
+      const path = parseNavigateRequest(d);
+      if (path !== null && limiter.take(now())) deps.navigate(path);
+      return;
+    }
+    if (d.type !== "switchboard-api") return;
     const id = typeof d.id === "string" ? d.id : "";
     const send = (status: number, body: unknown) => deps.reply(ev.source, { type: "switchboard-api-result", id, ok: status >= 200 && status < 300, status, body });
     if (!limiter.take(now())) return send(429, { error: `取り次ぎは ${BRIDGE_WINDOW_MS / 1000} 秒に ${BRIDGE_MAX} 件までです` });

@@ -1,6 +1,6 @@
 {
   "api_requests": ["ts","method","route","status","ms","bytes"],
-  "artifacts": ["id","task_id","title","kind","source","entry","mime","size","removed_at","created_at","updated_at"],
+  "artifacts": ["id","task_id","title","kind","source","entry","mime","size","removed_at","created_at","updated_at","app_days","app_last_day","app_request_task_id"],
   "ask_answers": ["id","at","result","failure"],
   "attachments": ["id","task_id","name","mime","size","path","created_at"],
   "backlog_operations": ["seq","id","service","host","repository","issue","target_kind","target","kind","field","payload","base","status","attempt","retry_at","remote_id","error","created_at","updated_at","overwritten"],

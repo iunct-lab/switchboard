@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createClaudeParser } from "@switchboard/adapter-claude";
 import type { AgentEvent, EvalsListRow, EventEnvelope, StopRecord, Task } from "@switchboard/protocol";
 import { Db } from "./db.ts";
-import { AUTO_RESUME_HEAD, evalRequestDraft, isAutomaticUserText, judgeHumanGap, RULES_BY, ruleMetrics, rulesEvalOf, STOP_NOTE, weekStartUtc, weeklyHumanSample } from "./evals.ts";
+import { AUTO_RESUME_HEAD, delegatedNote, evalRequestDraft, isAutomaticUserText, judgeHumanGap, RULES_BY, ruleMetrics, rulesEvalOf, STOP_NOTE, weekStartUtc, weeklyHumanSample } from "./evals.ts";
 import { decisionsFromOtlp } from "./otel.ts";
 import { RESUME_PROMPT } from "./ratelimit.ts";
 import { STOP_RESUME_PROMPT } from "./interrupted.ts";
@@ -42,7 +42,7 @@ describe("ruleMetrics (#1218)", () => {
         end("ok"),
       ]),
     );
-    expect(m).toEqual({ turns: 2, toolCalls: 2, toolFailures: 1, errors: 1, asks: 2, denials: 1, stops: 0, stopReasons: {}, userInstructions: 1, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false, durationMs: 14_000, classifier: null });
+    expect(m).toEqual({ turns: 2, toolCalls: 2, toolFailures: 1, errors: 1, asks: 2, denials: 1, stops: 0, stopReasons: {}, userInstructions: 1, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false, durationMs: 14_000, classifier: null, delegatedModel: null });
   });
 
   test("user instructions: the first message is the request; the daemon's resume messages do not count; a streamed message counts once; different messageIds split", () => {
@@ -100,7 +100,7 @@ describe("ruleMetrics (#1218)", () => {
   });
 
   test("no events: zeros, no last end, no duration", () => {
-    expect(ruleMetrics([])).toEqual({ turns: 0, toolCalls: 0, toolFailures: 0, errors: 0, asks: 0, denials: 0, stops: 0, stopReasons: {}, userInstructions: 0, lastEnd: null, daemonStops: 0, lastCutByDaemon: false, durationMs: null, classifier: null });
+    expect(ruleMetrics([])).toEqual({ turns: 0, toolCalls: 0, toolFailures: 0, errors: 0, asks: 0, denials: 0, stops: 0, stopReasons: {}, userInstructions: 0, lastEnd: null, daemonStops: 0, lastCutByDaemon: false, durationMs: null, classifier: null, delegatedModel: null });
   });
 
   test("daemon stops: STOP_NOTE status lines are counted; the last turn cut by one is marked", () => {
@@ -119,6 +119,22 @@ describe("ruleMetrics (#1218)", () => {
     expect(ruleMetrics(envelopes([user("x"), note("。…")]))).toMatchObject({ daemonStops: 1, lastCutByDaemon: false, lastEnd: null });
   });
 
+  test("delegated model (#2769): the model of the trial's note; null without one or for another status line; a rules@3 row without it reads as null", () => {
+    expect(ruleMetrics(envelopes([{ t: "status", text: delegatedNote("claude-sonnet-5-5") }, user("x"), end("ok")])).delegatedModel).toBe("claude-sonnet-5-5");
+    expect(ruleMetrics(envelopes([user("x"), end("ok")])).delegatedModel).toBeNull();
+    expect(ruleMetrics(envelopes([{ t: "status", text: "Task ごとの実装は 自分で行います" }, user("x"), end("ok")])).delegatedModel).toBeNull();
+    const dir = mkdtempSync(join(tmpdir(), "switchboard-evals-"));
+    try {
+      const db = new Db(join(dir, "switchboard.db"));
+      const { delegatedModel: _d, ...old } = ruleMetrics(envelopes([user("x"), end("ok")]));
+      db.upsertEval({ taskId: "t1", source: "rules", by: "rules@3", rubric: null, json: { metrics: old, status: "done", outcome: "unknown", costUsd: 0, by: "rules@3", ts: 1 }, ts: 1 });
+      expect(db.evalsOf("t1").rules?.metrics.delegatedModel).toBeNull();
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("an old rules@1 row without daemonStops reads as null, so it is counted again", () => {
     const dir = mkdtempSync(join(tmpdir(), "switchboard-evals-"));
     try {
@@ -126,7 +142,7 @@ describe("ruleMetrics (#1218)", () => {
       const { daemonStops: _d, lastCutByDaemon: _l, ...old } = ruleMetrics(envelopes([user("x"), end("ok")]));
       db.upsertEval({ taskId: "t1", source: "rules", by: "rules@1", rubric: null, json: { metrics: old, status: "done", outcome: "unknown", costUsd: 0, by: "rules@1", ts: 1 }, ts: 1 });
       expect(db.evalsOf("t1").rules).toBeNull();
-      expect(RULES_BY).toBe("rules@3");
+      expect(RULES_BY).toBe("rules@4");
       db.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -164,7 +180,7 @@ describe("ruleMetrics (#1218)", () => {
 
 describe("evalRequestDraft (#1221)", () => {
   const task = { id: "task_1", title: "README を\n直す", runner: "claude" as const };
-  const rules = { metrics: { turns: 2, toolCalls: 7, toolFailures: 2, errors: 1, asks: 0, denials: 0, stops: 1, stopReasons: { "usage-limit": 1 }, userInstructions: 3, lastEnd: "ok" as const, daemonStops: 0, lastCutByDaemon: false, durationMs: 1000, classifier: null }, status: "done" as const, outcome: "done" as const, costUsd: 0.1, by: RULES_BY, ts: 1 };
+  const rules = { metrics: { turns: 2, toolCalls: 7, toolFailures: 2, errors: 1, asks: 0, denials: 0, stops: 1, stopReasons: { "usage-limit": 1 }, userInstructions: 3, lastEnd: "ok" as const, daemonStops: 0, lastCutByDaemon: false, durationMs: 1000, classifier: null, delegatedModel: null }, status: "done" as const, outcome: "done" as const, costUsd: 0.1, by: RULES_BY, ts: 1 };
   test("the task, the counts, the criteria at 3 or below with their reasons, the summary, the rating, then the line to fill", () => {
     const text = evalRequestDraft(task, {
       rules,

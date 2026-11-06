@@ -67,6 +67,20 @@ describe("set", () => {
     }
   });
 
+  test("an empty value clears the field; an Issue not in the Project is left as it is (#3810)", async () => {
+    const gh = fakeGh([read({ id: "F2", dataType: "NUMBER" }, [{ id: "IT1", project: { number: 1 } }]), () => ({})]);
+    const log: string[] = [];
+    await setField(gh, withPhase, 3, "Story Points", "", (s) => log.push(s));
+    expect(gh.calls).toHaveLength(2);
+    expect(query(gh.calls[1])).toContain("clearProjectV2ItemFieldValue");
+    expect(query(gh.calls[1])).not.toContain("updateProjectV2ItemFieldValue");
+    expect(vars(gh.calls[1])).toEqual({ p: "P1", i: "IT1", f: "F2" });
+    expect(log).toEqual(["#3  Story Points = (空)"]);
+    const out = fakeGh([read({ id: "F2", dataType: "NUMBER" }, [])]);
+    await setField(out, withPhase, 3, "Story Points", "", () => undefined);
+    expect(out.calls).toHaveLength(1);
+  });
+
   test("text and date fields; the @me owner reads the viewer's Project", async () => {
     const gh = fakeGh([read({ id: "F3", dataType: "DATE" }, [{ id: "IT1", project: { number: 1 } }], "viewer"), () => ({})]);
     await setField(gh, { ...withPhase, owner: "@me" }, 1, "Due", "2026-09-28", () => undefined);

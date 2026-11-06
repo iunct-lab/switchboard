@@ -355,3 +355,76 @@ test("heavy: the history keeps the newest 500", async () => {
     expect(readdirSync(heavyStateDir(home))).toEqual(["history.jsonl"]); // no draft left behind
   });
 });
+
+// a child of `ops-kit heavy` that calls withHeavySlot itself (local-ci under a wrapping `ops-kit heavy`): with one slot it
+// would wait for its own parent's slot for good
+const NESTED = `const { withHeavySlot } = await import(${JSON.stringify(join(import.meta.dir, "heavy.ts"))});
+await withHeavySlot("inner", async () => { console.log("inner ran"); return 0; }, { pollMs: 10 });`;
+
+test("heavy: a descendant of the holder runs in the outer slot without waiting or taking another", async () => {
+  await scratch(async (home) => {
+    configure(home, { minFreeMb: 0 }); // max 1
+    const slots: string[][] = [];
+    const watch = setInterval(() => {
+      try {
+        slots.push(readdirSync(heavyStateDir(home)).filter((f) => f.startsWith("slot-") || f.startsWith("wait-")));
+      } catch {
+        /* not there yet */
+      }
+    }, 5);
+    try {
+      for (const cmd of [
+        [process.execPath, "-e", NESTED],
+        // local-ci runs its steps under `env -i`: the environment is gone, the parent is not
+        ["env", "-i", `HOME=${home}`, `PATH=${process.env.PATH}`, process.execPath, "-e", NESTED],
+      ]) {
+        const run = Bun.spawn([OPS_KIT, "heavy", "--name", "outer", "--", ...cmd], { env: { ...process.env, HOME: home }, stdio: ["ignore", "pipe", "pipe"] });
+        const t0 = performance.now();
+        const timer = setTimeout(() => run.kill("SIGKILL"), 15_000) // without the nesting it waits for good;
+        expect(await run.exited).toBe(0);
+        clearTimeout(timer);
+        expect(performance.now() - t0).toBeLessThan(15_000);
+        expect(await new Response(run.stdout).text()).toBe("inner ran\n");
+        const err = (await new Response(run.stderr).text()).split("\n").filter(Boolean);
+        expect(err).toEqual(["heavy: 枠を持つ処理の中なので、外側の枠の中で動きます（inner。外側: outer）"]);
+      }
+    } finally {
+      clearInterval(watch);
+    }
+    expect(slots.every((s) => s.length <= 1 && s.every((f) => f === "slot-0.json"))).toBe(true); // one slot, no waiter
+    expect(readHeavyHistory(home).map((e) => [e.name, e.exitCode])).toEqual([
+      ["inner (入れ子)", 0],
+      ["outer", 0],
+      ["inner (入れ子)", 0],
+      ["outer", 0],
+    ]);
+  });
+}, 40_000);
+
+test("heavy: a process that is not the holder's descendant still waits", async () => {
+  await scratch(async (home) => {
+    configure(home, { minFreeMb: 0 });
+    const holder = heavyCli(home, "task_a", "holder");
+    try {
+      await slotHeld(home);
+      const lines: string[] = [];
+      let ran = false;
+      const next = withHeavySlot("other", async () => {
+        ran = true;
+      }, { home, mem: () => undefined, pollMs: 10, log: (l) => lines.push(l) });
+      await until("the other waits", () => lines.length > 0);
+      expect(ran).toBe(false);
+      expect(lines[0]).toContain("heavy: 待っています（枠 1/1: holder");
+      process.kill(-holder.pid, "SIGKILL");
+      await next;
+      expect(ran).toBe(true);
+      expect(readHeavyHistory(home).map((e) => e.name)).toEqual(["other"]);
+    } finally {
+      try {
+        process.kill(-holder.pid, "SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
+  });
+});

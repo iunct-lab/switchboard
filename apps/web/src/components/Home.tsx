@@ -17,6 +17,7 @@ import { detailsSummary, loadDetailsOpen, saveDetailsOpen } from "../composeDeta
 import { startBlockedReason, unavailableNotice, unavailableNotices } from "../runnerNotice.ts";
 import { t } from "../i18n.ts";
 import { home } from "../i18n/home.ts";
+import { runnerLoginLabel } from "../login.ts";
 
 /** The prefix "改善 →" inserted: remembered so a Workspace switch can swap it for the new workspace's brief (and only it). */
 type Brief = { wsId: string; text: string; title: string };
@@ -451,7 +452,7 @@ export function Home(props: {
               const expired = ok && info?.login === "expired";
               const offTitle = unavailableNotice(info, r) ?? "";
               return (
-                <label key={r} className={`runner-opt ${!ok ? "off" : ""} ${runner === r ? "sel" : ""}`} title={!ok ? offTitle : expired ? t(home.loginExpiredTitle, { command: info.loginHint ?? r }) : (info?.note ?? "")}>
+                <label key={r} className={`runner-opt ${!ok ? "off" : ""} ${runner === r ? "sel" : ""}`} title={!ok ? offTitle : expired ? t(home.loginExpiredTitle, { command: info.loginHint ?? r }) : ((info && runnerLoginLabel(info, Date.now())?.title) ?? info?.note ?? "")}>
                   <input
                     type="radio"
                     name="runner"
@@ -550,6 +551,21 @@ export function Home(props: {
             )}
             <button className="ghost" onClick={props.onOpenSettings} title={t(home.defaultsInSettingsTitle)}>{t(home.defaultsInSettings)}</button>
           </div>
+          {/* the improve preambles are for an improvement request only, not every request: folded with the rest (#3850) */}
+          {((ws && ws.kind !== "meta") || meta) && (
+            <div className="compose-improve">
+              {ws && ws.kind !== "meta" && (
+                <button className="ghost" onClick={() => void improve(ws)} title={t(home.improveTitle, { name: ws.name })}>
+                  {t(home.improve, { name: ws.name })}
+                </button>
+              )}
+              {meta && (
+                <button className="ghost" onClick={() => void improve(meta)} title={t(home.improveSelfTitle)}>
+                  {t(home.improveSelf)}
+                </button>
+              )}
+            </div>
+          )}
         </details>
         {cloud && <div className="cloud-preparation card" role="note">
           <p>{t(home.cloudConsent)}</p>
@@ -589,16 +605,6 @@ export function Home(props: {
               <>{cloud ? t(home.cloudUsesClaude) : t(home.suggestHint)}</>
             )}
           </span>
-          {ws && ws.kind !== "meta" && (
-            <button className="ghost" onClick={() => void improve(ws)} title={t(home.improveTitle, { name: ws.name })}>
-              {t(home.improve, { name: ws.name })}
-            </button>
-          )}
-          {meta && (
-            <button className="ghost" onClick={() => void improve(meta)} title={t(home.improveSelfTitle)}>
-              {t(home.improveSelf)}
-            </button>
-          )}
         </div>
       </section>
 

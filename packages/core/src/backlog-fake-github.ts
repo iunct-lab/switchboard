@@ -69,7 +69,7 @@ export function fakeGithub(now: () => number) {
         const i = issues.get(v.n);
         return answer({ data: { repository: { issue: i && { id: i.node_id, title: i.title, body: i.body, state: i.state, stateReason: i.stateReason ?? null, milestone: milestones.find((m) => m.number === i.milestone) ?? null, parent: i.parent && { id: issues.get(i.parent)!.node_id, number: i.parent }, labels: { nodes: i.labels.map((name) => ({ name })) } } } } });
       }
-      if (q.includes("projectV2(number:$p)")) return answer({ data: { repositoryOwner: { projectV2: { id: "P_1", fields: { nodes: [{ id: "F_s", name: "Status", dataType: "SINGLE_SELECT", options: STATUS.map((name, n) => ({ id: `o${n + 1}`, name })) }] } } } } });
+      if (q.includes("projectV2(number:$p)")) return answer({ data: { repositoryOwner: { projectV2: { id: "P_1", fields: { nodes: [{ id: "F_s", name: "Status", dataType: "SINGLE_SELECT", options: STATUS.map((name, n) => ({ id: `o${n + 1}`, name })) }, { id: "F_sp", name: "Story Points", dataType: "NUMBER" }] } } } } });
       if (q.includes("addProjectV2ItemById")) {
         const id = `PVTI_${v.c}`;
         if (state.autoAdd && items.has(id)) return { code: 1, stdout: `HTTP/2.0 200 OK\ncontent-type: application/json\n\n${JSON.stringify({ data: { addProjectV2ItemById: null }, errors: [{ type: "UNPROCESSABLE", message: "Content already exists in this project" }] })}`, stderr: "gh: Content already exists in this project" };
@@ -78,6 +78,7 @@ export function fakeGithub(now: () => number) {
       }
       if (q.includes("projectItems")) return answer({ data: { node: { projectItems: { nodes: [...items].filter(([, i]) => i.issue === v.c).map(([id]) => ({ id, project: { id: "P_1" } })) } } } });
       if (q.includes("updateProjectV2ItemFieldValue")) return (items.get(v.i)!.fields.Status = STATUS[Number(String(v.value).slice(1)) - 1]!), answer({ data: {} });
+      if (q.includes("clearProjectV2ItemFieldValue")) return delete items.get(v.i)!.fields[v.f === "F_s" ? "Status" : "Story Points"], answer({ data: {} });
       if (q.includes("deleteProjectV2Item")) return items.delete(v.i), answer({ data: {} });
       if (q.includes("deleteIssueComment")) return [...issues.values()].forEach((i) => (i.comments = i.comments.filter((c) => c.node_id !== v.i))), answer({ data: {} });
       if (q.includes("removeSubIssue")) return (byId(v.c).parent = null), answer({ data: {} });

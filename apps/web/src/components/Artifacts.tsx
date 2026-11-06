@@ -1,12 +1,15 @@
-import { useEffect, useRef, useState } from "react";
+import { type MouseEvent, useEffect, useRef, useState } from "react";
 import type { Artifact } from "@switchboard/protocol";
-import { api, apiRaw } from "../api.ts";
-import { isMarkdown, pickArtifact, viewOf } from "../artifacts.ts";
+import { type AppUse, api, apiRaw } from "../api.ts";
+import { appRequestDraft, appRequestOf, copyKind, isMarkdown, pickArtifact, viewOf } from "../artifacts.ts";
+import { requestFeedback } from "./Feedback.tsx";
+import { viewPath } from "../route.ts";
 import { t } from "../i18n.ts";
 import { panels as m } from "../i18n/panels.ts";
 import { Markdown, MdViewToggle } from "./Markdown.tsx";
 import { useMdView } from "../mdView.ts";
 import { type BridgeRequest, createBridge } from "../scratchBridge.ts";
+import { CopyButton } from "./ui.tsx";
 
 export const UNDO_MS = 5000;
 /** A fetched view url is used again for this long (the daemon's key lasts an hour). */
@@ -161,9 +164,12 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
   const { a } = props;
   const how = viewOf(a);
   const md = isMarkdown(a);
+  const copy = copyKind(a);
+  const read = how === "text" || copy === "content"; // a page or an SVG is read as text too, for コピー (#3687); the frame still loads its url
   const [mdView] = useMdView();
   const [url, setUrl] = useState<string | null>(null);
   const [text, setText] = useState<string | null>(null);
+  const [readOk, setReadOk] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   // 全画面 (#1826): the report over the whole screen, and three ways back to the Task screen — the 戻る button, Esc, and
@@ -203,6 +209,11 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
   const [ask, setAsk] = useState<{ req: BridgeRequest; answer: (yes: boolean) => void } | null>(null);
   const askRef = useRef(ask);
   askRef.current = ask;
+  // A throwaway app (#3683): the first request through the bridge tells the daemon the page was used today (it counts a
+  // day once and starts a request on the 3rd); the answer says whether that request was started.
+  const [use, setUse] = useState<AppUse>({ appDays: a.appDays, appRequestTaskId: a.appRequestTaskId });
+  const [usedNow, setUsedNow] = useState(false);
+  const told = useRef(false);
   // Leaving the artifact (another tab hides it, or it unmounts) declines what is asked and what waits behind it (#3880)
   const shownRef = useRef(props.shown);
   useEffect(() => {
@@ -213,7 +224,14 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
     let closed = false;
     const bridge = createBridge({
       frames: () => [inlineFrame.current?.contentWindow, fullFrame.current?.contentWindow].filter(Boolean),
-      call: (r) => apiRaw(r.path, r.method === "GET" ? undefined : { method: r.method, ...(r.body !== undefined ? { body: JSON.stringify(r.body) } : {}) }),
+      call: (r) => {
+        if (!told.current) {
+          told.current = true;
+          setUsedNow(true);
+          api.artifactAppUse(a.id).then((u) => !closed && setUse(u), () => undefined); // not counted: the page reads all the same
+        }
+        return apiRaw(r.path, r.method === "GET" ? undefined : { method: r.method, ...(r.body !== undefined ? { body: JSON.stringify(r.body) } : {}) });
+      },
       confirm: (req) =>
         closed || !shownRef.current
           ? Promise.resolve(false)
@@ -227,6 +245,13 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
           }),
         ),
       reply: (to, result) => (to as Window).postMessage(result, "*"), // an opaque origin can only be named as "*"; the window is fixed to the asker
+      // a screen of Switchboard's own (the path is checked): a new history entry, so back returns here; App's popstate
+      // handler shows it, as for the browser's own back / forward
+      navigate: (path) => {
+        if (closed || !shownRef.current || location.pathname === path) return;
+        history.pushState(null, "", path);
+        dispatchEvent(new PopStateEvent("popstate"));
+      },
     });
     const onMessage = (e: MessageEvent) => void bridge({ source: e.source, data: e.data });
     addEventListener("message", onMessage);
@@ -239,7 +264,7 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
   // A view key lasts an hour (#1782): the tab stays mounted, so ask again when it is shown after a long time away.
   const keyAt = useRef(0);
   useEffect(() => {
-    if (a.kind === "url" || !props.shown || (url !== null && (how !== "text" || text !== null) && Date.now() - keyAt.current < KEY_REUSE_MS)) return;
+    if (a.kind === "url" || !props.shown || (url !== null && (!read || text !== null) && Date.now() - keyAt.current < KEY_REUSE_MS)) return;
     let live = true;
     api
       .viewArtifact(a.id)
@@ -247,10 +272,12 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
         if (!live) return;
         keyAt.current = Date.now();
         setUrl(u);
-        if (how === "text") {
+        if (read) {
           const r = await fetch(u);
           const body = await r.text();
-          if (live) setText(r.ok ? body : t(m.cannotRead, { status: r.status }));
+          if (!live) return;
+          setText(r.ok ? body : t(m.cannotRead, { status: r.status }));
+          setReadOk(r.ok); // コピー copies the file, never the error shown in its place
         }
       })
       .catch((e) => live && setErr(String((e as Error).message ?? e)));
@@ -291,6 +318,24 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
     }
   };
 
+  const app = appRequestOf(use, usedNow);
+  // 要望にする (#3683): the dialog names the artifact's Task by its title; a screen that has no title for it (判断待ち's
+  // mockups) reads it first, and the id stands in only when that read fails
+  const openAppRequest = async () => {
+    let taskTitle = "taskTitle" in a && typeof a.taskTitle === "string" ? a.taskTitle : undefined;
+    if (taskTitle === undefined) {
+      const r = await apiRaw(`/api/tasks/${encodeURIComponent(a.taskId)}?limit=0`).catch(() => null);
+      const title = (r?.body as { task?: { title?: unknown } } | undefined)?.task?.title;
+      if (r && r.status === 200 && typeof title === "string") taskTitle = title;
+    }
+    requestFeedback({ text: appRequestDraft(a.title), source: { kind: "artifact", artifactId: a.id }, artifact: { title: a.title, taskId: a.taskId, ...(taskTitle !== undefined ? { taskTitle } : {}) } });
+  };
+  const openTaskPath = (id: string) => (e: MouseEvent) => {
+    e.preventDefault();
+    history.pushState(null, "", viewPath({ name: "task", id }));
+    dispatchEvent(new PopStateEvent("popstate"));
+  };
+
   // A .md in the preview (#3677) once its text is read; everything else (and the switch on テキスト) as it was.
   const textBody = md && mdView === "preview" && text !== null
     ? <div className="art-text"><Markdown text={text} /></div>
@@ -301,6 +346,8 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
       <div className="art-meta hint">
         <span className="mono" title={a.source}>{a.source}</span>
         {md && <MdViewToggle />}
+        {/* the file's own text even while a .md shows its preview */}
+        {(copy === "url" || (copy === "content" && readOk)) && <CopyButton text={() => (copy === "url" ? a.source : (text ?? ""))} onError={setErr} />}
         {a.kind !== "url" && how !== "external" && url && (
           <button className="art-full-open" onClick={openFull}>
             {t(m.fullScreen)}
@@ -310,6 +357,16 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
           <button className="ghost" onClick={refresh} disabled={refreshing}>
             {refreshing ? t(m.refreshing) : t(m.refresh)}
           </button>
+        )}
+        {app.offer && (
+          <button className="ghost art-app-request" title={t(m.appRequestTitle)} onClick={openAppRequest}>
+            {t(m.appRequest)}
+          </button>
+        )}
+        {app.taskId && (
+          <a className="art-app-task" href={viewPath({ name: "task", id: app.taskId })} onClick={openTaskPath(app.taskId)}>
+            {t(m.appRequestStarted)}
+          </a>
         )}
       </div>
       {err && (

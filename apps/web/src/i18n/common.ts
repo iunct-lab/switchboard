@@ -17,6 +17,13 @@ export const common = msgs({
   sortPoints: { ja: "Story Points 順", en: "By Story Points" },
   typeRequest: { ja: "要望", en: "Request" },
   quoted: { ja: "「{text}」", en: "\"{text}\"" },
+  // backlogView.ts: a board tile's marks (#3707)
+  markWaits: { ja: "待ち", en: "Waiting" },
+  markPrereq: { ja: "前提待ち", en: "Prerequisite pending" },
+  markStuck: { ja: "進められない", en: "Cannot proceed" },
+  markOverlap: { ja: "重なり", en: "Overlap" },
+  markStops: { ja: "停止 {n}", en: "Stopped {n}" },
+  markReply: { ja: "返事待ち", en: "Waiting for a reply" },
 
   // changes.ts: a PR's state, a missing sha
   changeOpen: { ja: "開いている", en: "Open" },
