@@ -1,8 +1,8 @@
 import { createContext, Fragment, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import type { Artifact, Backlog as BacklogData, BacklogAction, BacklogIssueDetail, BacklogItem, BacklogStage, BacklogSyncInfo, Task, Workspace } from "@switchboard/protocol";
+import type { Artifact, Backlog as BacklogData, BacklogAction, BacklogIssueDetail, BacklogItem, BacklogQueue, BacklogQueueInput, BacklogStage, BacklogSyncInfo, Task, Workspace } from "@switchboard/protocol";
 import type { FeedbackTarget } from "../feedbackTarget.ts";
 import { api } from "../api.ts";
-import { backlogHeading, createWord, draftKey, editOf, formAfterRead, GUARANTEE_A, githubSyncText, heldIssueText, issueHref, loadDraft, loadNewIssueDraft, savedWords, syncLine, textDraftKey, valueText, workspaceErrorGuide, type EditForm, type NewIssueDraft } from "../backlogSync.ts";
+import { backlogHeading, createWord, decisionQuestion, syncSummary, draftKey, editOf, formAfterRead, GUARANTEE_A, githubSyncText, heldIssueText, issueHref, loadDraft, loadNewIssueDraft, savedWords, syncLine, textDraftKey, valueText, workspaceErrorGuide, type EditForm, type NewIssueDraft } from "../backlogSync.ts";
 import { activeTaskLine, ago, autoByWorkspace, inProgressState, readyPending, startButton, directButton, lastTaskLine, overlapLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl, type PrereqPart } from "../inProgress.ts";
 import { promotionLine } from "../release.ts";
 import { changeMarks, changeStateLabel, short } from "../changes.ts";
@@ -13,6 +13,8 @@ import { Stops } from "./Stops.tsx";
 import { jstDateTime } from "../time.ts";
 import { t } from "../i18n.ts";
 import { backlog as m } from "../i18n/backlog.ts";
+import { common } from "../i18n/common.ts";
+import { dropIndex, moveEntry, noteSummary, pickTop, queueFacts, queueSaver, queueSections, withAdded, withRemoved, withWaiting, type PickAxis, type QueueRow } from "../backlogQueue.ts";
 import { applyView, itemMarks, loadView, PRIORITIES, resetView, saveView, SORTS, STAGES, TYPES, viewSummary, type BacklogView } from "../backlogView.ts";
 
 /** The first lines of a ## 状況 comment shown under its row; the rest is on the Issue. */
@@ -531,7 +533,7 @@ function NewIssue(props: { workspaces: Workspace[]; current: string; onCreated: 
 }
 
 /** The open question of a needs-decision item as plain text (no Markdown renderer) and a free-text answer (#266). */
-function Decision(props: { item: BacklogItem; onAnswered: (item: BacklogItem) => void; onError: (msg: string) => void }) {
+function Decision(props: { item: BacklogItem; folded?: boolean; onAnswered: (item: BacklogItem) => void; onError: (msg: string) => void }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const d = props.item.decision;
@@ -561,8 +563,8 @@ function Decision(props: { item: BacklogItem; onAnswered: (item: BacklogItem) =>
       .catch((e) => props.onError(t(m.answerFailed, { n: props.item.number, error: String(e.message ?? e) })))
       .finally(() => setSending(false));
   };
-  return (
-    <div className="decision">
+  const body = (
+    <>
       {d ? (
         <>
           {d.issue !== props.item.number && (
@@ -585,8 +587,23 @@ function Decision(props: { item: BacklogItem; onAnswered: (item: BacklogItem) =>
       <button className="pri" disabled={sending || !text.trim()} onClick={send}>
         {t(m.answer)}
       </button>
-    </div>
+    </>
   );
+  // the list's card (#4064): the question in one line, the whole body and the answer box when opened — one card took
+  // more than a phone's screen and the list could not be read through
+  if (props.folded && d)
+    return (
+      <details className="decision folded">
+        <summary>
+          <span className="decision-q">{decisionQuestion(d.body)}</span>
+          <span className="hint"> {t(m.decisionOpen)}</span>
+        </summary>
+        {/* the item's own sync line (its state, why it failed) with the rest of what opens */}
+        <SyncLine sync={props.item.sync} />
+        {body}
+      </details>
+    );
+  return <div className="decision">{body}</div>;
 }
 
 /**
@@ -934,6 +951,298 @@ function Tile(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; n
 }
 
 /**
+ * One row of the queue view (#3957): the order number (waiting rows), the numbered title, the list row's facts and
+ * marks, its buttons and 外す; ▶ opens what the list row shows under it (a needs-decision item: the question and the
+ * answer box). `item` null = its workspace's backlog does not have it here: the number and 外す only.
+ */
+function QueueItem(props: { row: QueueRow; order: number | null; drag?: { dy: number | null; onDown: (e: React.PointerEvent<HTMLSpanElement>) => void; onMove: (e: React.PointerEvent<HTMLSpanElement>) => void; onUp: (e: React.PointerEvent<HTMLSpanElement>) => void; onCancel: () => void }; items: BacklogItem[]; auto: boolean; now: number; starting: number | null; metaId: string | null; onStart: (action: BacklogAction) => void; onContinue: (pbi: number) => void; onRemove: () => void; onOpenTask: (id: string) => void; onAnswered: (item: BacklogItem) => void; onChanged: () => void; onError: (msg: string) => void }) {
+  const { row, order } = props;
+  const [open, setOpen] = useState(false);
+  const i = row.item;
+  const label = t(open ? m.closeTile : m.openTile);
+  // #4055: one button for the stage, as the list row's (RowActions), short enough for a phone
+  const action = i && !i.activeTaskId ? startButton(i) : null;
+  return (
+    <div className={"queue-row" + (props.drag?.dy != null ? " dragging" : "")} data-queue={`${row.entry.workspaceId}:${row.entry.number}`} data-issue={i?.url} style={props.drag?.dy != null ? { transform: `translateY(${props.drag.dy}px)` } : undefined}>
+      <div className="queue-main">
+        {props.drag ? (
+          // #3958: drag to reorder — mouse and touch alike (Pointer Events); a long press is not needed, the handle does not scroll
+          <span className="queue-handle" aria-label={t(m.queueDrag)} title={t(m.queueDrag)} data-queue-handle onPointerDown={props.drag.onDown} onPointerMove={props.drag.onMove} onPointerUp={props.drag.onUp} onPointerCancel={props.drag.onCancel}>
+            ≡
+          </span>
+        ) : (
+          <span className="queue-handle" aria-hidden />
+        )}
+        <span className="queue-order">{order ?? ""}</span>
+        <div className="queue-body">
+          {i ? (
+            <>
+              <div className="queue-title">
+                <IssueLink url={i.url}>#{i.number}</IssueLink> {i.title}
+              </div>
+              <div className="queue-facts">
+                <span>{queueFacts(i)}</span>
+                {i.activeTaskId && <span className="mark run">{activeTaskLine(i.lastTask?.id === i.activeTaskId ? i.lastTask : null, props.now)}</span>}
+                {itemMarks(i, props.auto).map((x) => (
+                  <span key={x.key} className={"mark" + (x.warn ? " warn" : "")} data-mark={x.key}>
+                    {x.label}
+                  </span>
+                ))}
+                {i.decision && <span className="mark warn">{t(common.stageNeedsDecision)}</span>}
+              </div>
+            </>
+          ) : (
+            <div className="queue-title muted">{t(m.queueUnread, { n: row.entry.number, workspace: row.entry.workspaceId })}</div>
+          )}
+        </div>
+        <div className="queue-actions">
+          {i?.activeTaskId && (
+            <button className="queue-btn" onClick={() => props.onOpenTask(i.activeTaskId!)}>
+              {t(m.queueOpenTask)}
+            </button>
+          )}
+          {action && (
+            <button className="queue-btn" disabled={props.starting !== null} onClick={() => props.onStart(action[0])}>
+              {action[1]}
+            </button>
+          )}
+          {i?.closable && !i.activeTaskId && (
+            <button className="queue-btn" disabled={props.starting !== null} onClick={() => props.onStart("close")}>
+              {t(m.close)}
+            </button>
+          )}
+          <button className="queue-btn" data-queue-remove onClick={props.onRemove}>
+            {t(m.queueRemove)}
+          </button>
+          {i && (
+            <button className="queue-btn queue-open" aria-expanded={open} aria-label={label} title={label} data-open-tile onClick={() => setOpen(!open)}>
+              {open ? "▼" : "▶"}
+            </button>
+          )}
+        </div>
+      </div>
+      {i && open && (
+        <div className="backlog-tile-detail">
+          {i.stage === "needs-decision" ? (
+            <>
+              <SyncLine sync={i.sync} />
+              <Decision item={i} onAnswered={props.onAnswered} onError={props.onError} />
+              <EditToggle target={i} onChanged={props.onChanged} onError={props.onError} />
+            </>
+          ) : (
+            <>
+              {/* the list row's facts (#4055): its last stage Task, a stopped or waiting one too, opens from here */}
+              <div className="row backlog-item">
+                <ItemFacts item={i} now={props.now} onOpenTask={props.onOpenTask} />
+              </div>
+              <ItemDetail item={i} items={props.items} auto={props.auto} starting={props.starting} onStart={props.onContinue} onOpenTask={props.onOpenTask} onChanged={props.onChanged} onError={props.onError} />
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The queue view (#3957): the backlog queue's on / off and how many run at once, its last decision, then the running
+ * and the waiting PBIs in order (外す), the PBIs not in it (＋ キューに入れる) and the newest left ones (folded). Every
+ * change is saved at once (`PUT /api/backlog/queue`); no save button, no draft.
+ */
+function QueueView(props: { queue: BacklogQueue; items: BacklogItem[]; inView: (workspaceId: string) => boolean; auto: Record<string, boolean>; now: number; starting: number | null; metaId: string | null; onSave: (input: BacklogQueueInput) => unknown; onStart: (item: BacklogItem, action: BacklogAction) => void; onOpenTask: (id: string) => void; onAnswered: (item: BacklogItem) => void; onChanged: () => void; onError: (msg: string) => void }) {
+  const { queue, items } = props;
+  const s = queueSections(queue, items);
+  // #3958: the waiting row being dragged — by its entry, with the waiting entries when it was taken, where the pointer
+  // started, how far it moved, and the other rows' middles then
+  const [drag, setDrag] = useState<{ key: string; keys: string[]; startY: number; dy: number; mid: number; mids: number[] } | null>(null);
+  const waitingList = useRef<HTMLDivElement>(null);
+  const entryKey = (e: { workspaceId: string; number: number }) => `${e.workspaceId}:${e.number}`;
+  const waitingKeys = s.waiting.map((r) => entryKey(r.entry));
+  const dragOf = (n: number) => {
+    const key = waitingKeys[n]!;
+    return {
+      dy: drag?.key === key ? drag.dy : null,
+      onDown: (e: React.PointerEvent<HTMLSpanElement>) => {
+        const rows = [...(waitingList.current?.querySelectorAll<HTMLElement>(":scope > .queue-row") ?? [])].map((r) => r.getBoundingClientRect());
+        if (!rows[n]) return;
+        e.currentTarget.setPointerCapture(e.pointerId);
+        e.preventDefault();
+        const mid = (r: DOMRect) => r.top + r.height / 2;
+        setDrag({ key, keys: waitingKeys, startY: e.clientY, dy: 0, mid: mid(rows[n]!), mids: rows.filter((_, i) => i !== n).map(mid) });
+      },
+      onMove: (e: React.PointerEvent<HTMLSpanElement>) => {
+        if (drag?.key === key) setDrag({ ...drag, dy: e.clientY - drag.startY });
+      },
+      // the browser took the gesture away (a scroll, another app): the row goes back, nothing is saved
+      onCancel: () => {
+        if (drag?.key === key) setDrag(null);
+      },
+      onUp: (e: React.PointerEvent<HTMLSpanElement>) => {
+        if (drag?.key !== key) return;
+        setDrag(null);
+        // the waiting rows changed while it was dragged (a reload, a row that started): where it was dropped no longer means the same, nothing is saved
+        if (drag.keys.join() !== waitingKeys.join()) return;
+        const to = dropIndex(drag.mids, drag.mid + (e.clientY - drag.startY));
+        const moved = moveEntry(s.waiting.map((r) => r.entry), n, to);
+        if (to !== n) props.onSave({ items: withWaiting(queue, s.running.map((r) => r.entry), moved) });
+      },
+    };
+  };
+  const outside = s.outside.filter((i) => props.inView(i.workspaceId));
+  // #3959: several at once, by what to put first and how many (not kept: a choice made now and then)
+  const [axis, setAxis] = useState<PickAxis>("priority");
+  const [count, setCount] = useState(5);
+  const [withWaitingOnes, setWithWaitingOnes] = useState(false);
+  const addTop = () => {
+    const top = pickTop(items.filter((i) => props.inView(i.workspaceId)), queue, axis, count, withWaitingOnes, (w) => props.auto[w] ?? false);
+    if (top.length) props.onSave({ items: [...queue.items, ...top.map((i) => ({ workspaceId: i.workspaceId, number: i.number }))] });
+  };
+  const row = (r: QueueRow, order: number | null) => (
+    <QueueItem
+      key={`${r.entry.workspaceId}:${r.entry.number}`}
+      row={r}
+      order={order}
+      drag={order !== null ? dragOf(order - 1) : undefined}
+      items={items}
+      auto={r.item ? (props.auto[r.item.workspaceId] ?? false) : false}
+      now={props.now}
+      starting={props.starting}
+      metaId={props.metaId}
+      onStart={(action) => r.item && props.onStart(r.item, action)}
+      onContinue={(pbi) => r.item && props.onStart({ ...r.item, number: pbi }, "complete")}
+      onRemove={() => props.onSave({ items: withRemoved(queue, r.entry) })}
+      onOpenTask={props.onOpenTask}
+      onAnswered={props.onAnswered}
+      onChanged={props.onChanged}
+      onError={props.onError}
+    />
+  );
+  const note = queue.lastNote ? noteSummary(queue.lastNote) : null;
+  return (
+    <>
+      <section className="card queue" data-queue-enabled={queue.enabled}>
+        <div className="queue-bar">
+          <label className="queue-switch">
+            <input type="checkbox" role="switch" data-queue-switch checked={queue.enabled} onChange={(e) => props.onSave({ enabled: e.target.checked })} />
+            <span className="queue-switch-track" aria-hidden />
+            {t(m.queueEnabled)}
+          </label>
+          <label>
+            {t(m.queueConcurrency)}{" "}
+            <select data-queue-concurrency value={queue.concurrency} onChange={(e) => props.onSave({ concurrency: Number(e.target.value) as BacklogQueue["concurrency"] })}>
+              {[1, 2, 3].map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span className="hint">{t(m.queueHow)}</span>
+        </div>
+        {/* #4055: the last decision in one line with its time; every reason folded */}
+        {queue.lastNote && note && (
+          <details className="queue-note">
+            <summary className="hint">
+              <span className="queue-note-line">{t(m.queueLastNote, { text: `${queue.lastNoteAt ? `${jstDateTime(queue.lastNoteAt)} ` : ""}${note.line}${note.rest ? t(m.queueNoteRest, { n: note.rest }) : ""}` })}</span>
+            </summary>
+            <ul>
+              {queue.lastNote.split("\n").filter(Boolean).map((l, n) => (
+                <li key={n} className="hint">
+                  {l}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+        {queue.enabled && Object.values(props.auto).some(Boolean) && <div className="hint">{t(m.queueAuto)}</div>}
+        <div className="queue-h">
+          {t(m.queueRunning)} <span className="hint">{s.running.length} / {queue.concurrency}</span>
+        </div>
+        <div className="queue-list">{s.running.map((r) => row(r, null))}</div>
+        <div className="queue-h">
+          {t(m.queueWaiting)} <span className="hint">{s.waiting.length}</span>
+        </div>
+        {queue.items.length === 0 && <div className="muted">{t(m.queueEmpty)}</div>}
+        <div className="queue-list" ref={waitingList}>
+          {s.waiting.map((r, n) => row(r, n + 1))}
+        </div>
+        {s.waiting.length > 1 && <div className="hint">{t(m.queueDragHint)}</div>}
+        <details className="queue-ended">
+          <summary className="hint">{t(m.queueEnded)}</summary>
+          <ul>
+            {s.ended.map((x) => (
+              <li key={`${x.workspaceId}:${x.number}:${x.at}`} className="hint">
+                #{x.number} {x.title} · {t(x.reason === "closed" ? m.queueEndedClosed : m.queueEndedRemoved)} · {jstDateTime(x.at)}
+              </li>
+            ))}
+          </ul>
+        </details>
+      </section>
+      <section className="card queue">
+        <div className="queue-h">
+          {t(m.queueOutside)} <span className="hint">{t(m.queueOutsideHint)}</span>
+        </div>
+        <div className="queue-pick" data-queue-pick>
+          <b className="hint">{t(m.queuePickLead)}</b>
+          <label>
+            {t(m.queuePickAxis)}{" "}
+            <select data-queue-pick-axis value={axis} onChange={(e) => setAxis(e.target.value as PickAxis)}>
+              <option value="priority">{t(m.queuePickPriority)}</option>
+              <option value="progress">{t(m.queuePickProgress)}</option>
+              <option value="small">{t(m.queuePickSmall)}</option>
+              <option value="old">{t(m.queuePickOld)}</option>
+            </select>
+          </label>
+          <label>
+            {t(m.queuePickCount)}{" "}
+            <select data-queue-pick-count value={count} onChange={(e) => setCount(Number(e.target.value))}>
+              {[3, 5, 8, 12].map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <input type="checkbox" data-queue-pick-waiting checked={withWaitingOnes} onChange={(e) => setWithWaitingOnes(e.target.checked)} /> {t(m.queuePickWaiting)}
+          </label>
+          <button className="queue-btn" data-queue-pick-add disabled={outside.length === 0} onClick={addTop}>
+            {t(m.queuePickAdd)}
+          </button>
+        </div>
+        {outside.length === 0 && <div className="muted">{t(m.none)}</div>}
+        <div className="queue-list">
+          {outside.map((i) => (
+            <div key={`${i.workspaceId}:${i.number}`} className="queue-row" data-outside={`${i.workspaceId}:${i.number}`}>
+              <div className="queue-main">
+                <div className="queue-body">
+                  <div className="queue-title">
+                    <IssueLink url={i.url}>#{i.number}</IssueLink> {i.title}
+                  </div>
+                  <div className="queue-facts">
+                    <span>{queueFacts(i)}</span>
+                    {itemMarks(i, props.auto[i.workspaceId] ?? false).map((x) => (
+                      <span key={x.key} className={"mark" + (x.warn ? " warn" : "")} data-mark={x.key}>
+                        {x.label}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+                <div className="queue-actions">
+                  <button className="queue-btn" data-queue-add onClick={() => props.onSave({ items: withAdded(queue, i) })}>
+                    {t(m.queueAdd)}
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+    </>
+  );
+}
+
+/**
  * Backlog screen (#264): the open requests and PBIs on GitHub of every registered workspace (#294), grouped by the stage
  * they are stuck at, each row naming its workspace. Read when opened and on 再読込 only (the daemon answers what it
  * imported from GitHub, #885; 再読込 imports first); the last list shows first and the new one replaces it once read (#441). GitHub stays the place to edit them. The stage buttons and answers act on the row's own workspace. The list
@@ -951,6 +1260,7 @@ function toggle<T>(list: T[], v: T): T[] {
 const LAYOUTS: Array<[BacklogView["layout"], string]> = [
   ["list", t(m.layoutList)],
   ["board", t(m.layoutBoard)],
+  ["queue", t(m.layoutQueue)],
 ];
 
 function ViewPicker(props: { view: BacklogView; onChange: (v: BacklogView) => void }) {
@@ -1008,6 +1318,19 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
   const [auto, setAuto] = useState<Record<string, boolean>>({});
   const [shown, setShown] = useState(() => localStorage.getItem(SHOWN_KEY) ?? "");
   const [view, setView] = useState(() => loadView(localStorage));
+  // the backlog queue (#3957): read with the list, saved at each change
+  const [queue, setQueue] = useState<BacklogQueue | null>(null);
+  const [queueFailure, setQueueFailure] = useState<string | null>(null);
+  // each change shows at once and is sent after the one before it has been answered (queueSaver)
+  const [saveQueue] = useState(() =>
+    queueSaver<BacklogQueue, BacklogQueueInput>({
+      send: (input) => api.saveBacklogQueue(input),
+      show: (f) => setQueue(f),
+      apply: (q, input) => ({ ...q, ...input }),
+      reread: () => api.backlogQueue(),
+      failed: (e) => props.onError(t(m.queueSaveFailed, { error: String((e as Error).message ?? e) })),
+    }),
+  );
   // the board's stage on a phone (#2703): not kept; none chosen = the first with a tile
   const [boardStage, setBoardStage] = useState<BacklogStage | null>(null);
   const changeView = (next: BacklogView) => {
@@ -1061,6 +1384,13 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
     Promise.all([api.schedules(), api.workspaces()])
       .then(([schedules, workspaces]) => setAuto(autoByWorkspace(schedules, workspaces)))
       .catch(() => setAuto({}));
+    api
+      .backlogQueue()
+      .then((q) => {
+        setQueue(q);
+        setQueueFailure(null);
+      })
+      .catch((e) => setQueueFailure(String(e.message ?? e)));
     api
       .release()
       .then((r) => setPromotion(promotionLine(r)))
@@ -1149,33 +1479,45 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
           </nav>
         )}
         {failure && <div className="muted">{t(m.githubReadFailed, { error: failure })}</div>}
-        {data?.syncs.filter((x) => inView(x.workspaceId)).map((x) => (
-          <div key={x.workspaceId} className="hint backlog-sync" data-workspace={x.workspaceId}>
-            <SyncLine sync={x.sync} line={githubSyncText(x)} scope={data.syncs.length > 1 ? (workspaces?.find((w) => w.id === x.workspaceId)?.name ?? x.workspaceId) : undefined} />
-            {x.creates.map((c) => (
-              <div key={c.localId} className="m" data-sync={c.state}>
-                {t(m.createNoNumber, { word: createWord(c.state), title: c.title })}
+        {/* #4064: each workspace's sync line and what to fix to read one, folded under one line (they took a phone's
+            whole first screen before the first item); open by itself when something is to be looked at */}
+        {data && (() => {
+          const syncs = data.syncs.filter((x) => inView(x.workspaceId));
+          const errors = data.errors.filter((e) => inView(e.workspaceId));
+          const sum = syncSummary(syncs, errors);
+          return (
+            <details className={`backlog-syncs${sum.bad ? " bad" : ""}`}>
+              <summary className="hint">{sum.text}</summary>
+            {syncs.map((x) => (
+              <div key={x.workspaceId} className="hint backlog-sync" data-workspace={x.workspaceId}>
+                <SyncLine sync={x.sync} line={githubSyncText(x)} scope={data.syncs.length > 1 ? (workspaces?.find((w) => w.id === x.workspaceId)?.name ?? x.workspaceId) : undefined} />
+                {x.creates.map((c) => (
+                  <div key={c.localId} className="m" data-sync={c.state}>
+                    {t(m.createNoNumber, { word: createWord(c.state), title: c.title })}
+                  </div>
+                ))}
+                {x.issues.map((h) => (
+                  <EditToggle key={h.number} target={{ workspaceId: x.workspaceId, number: h.number, url: h.url }} summary={heldIssueText(h)} held onChanged={() => load(false)} onError={props.onError} />
+                ))}
               </div>
             ))}
-            {x.issues.map((h) => (
-              <EditToggle key={h.number} target={{ workspaceId: x.workspaceId, number: h.number, url: h.url }} summary={heldIssueText(h)} held onChanged={() => load(false)} onError={props.onError} />
+            {errors.map((e) => (
+              <WorkspaceError
+                key={e.workspaceId}
+                error={e}
+                loaded={projectVars !== null}
+                projectVar={projectVars?.[e.workspaceId]}
+                onSaved={() => {
+                  api.workspaces().then(setWorkspaces).catch(() => undefined);
+                  load(true);
+                }}
+                onError={props.onError}
+              />
             ))}
-          </div>
-        ))}
+            </details>
+          );
+        })()}
         {workspaces && workspaces.length > 0 && <NewIssue workspaces={workspaces} current={current} onCreated={() => load(false)} />}
-        {data?.errors.filter((e) => inView(e.workspaceId)).map((e) => (
-          <WorkspaceError
-            key={e.workspaceId}
-            error={e}
-            loaded={projectVars !== null}
-            projectVar={projectVars?.[e.workspaceId]}
-            onSaved={() => {
-              api.workspaces().then(setWorkspaces).catch(() => undefined);
-              load(true);
-            }}
-            onError={props.onError}
-          />
-        ))}
       </section>
 
       {data && <Changes changes={data.changes.filter((c) => inView(c.workspaceId))} />}
@@ -1203,6 +1545,24 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
           </div>
         </>
       )}
+      {view.layout === "queue" && queueFailure && <div className="muted">{t(m.queueReadFailed, { error: queueFailure })}</div>}
+      {data && queue && view.layout === "queue" && (
+        <QueueView
+          queue={queue}
+          items={data.items}
+          inView={inView}
+          auto={auto}
+          now={now}
+          starting={starting}
+          metaId={metaId}
+          onSave={saveQueue}
+          onStart={(i, action) => start(i.workspaceId, i.number, action)}
+          onOpenTask={props.onOpenTask}
+          onAnswered={answered}
+          onChanged={() => load(false)}
+          onError={props.onError}
+        />
+      )}
       {data &&
         view.layout === "list" &&
         stages.map(([stage, label]) => {
@@ -1225,8 +1585,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
                       </IssueLink>{" "}
                       <span className="m workspace">{i.workspaceName}</span>
                     </h5>
-                    <SyncLine sync={i.sync} />
-                    <Decision item={i} onAnswered={answered} onError={props.onError} />
+                    <Decision item={i} folded onAnswered={answered} onError={props.onError} />
                     <EditToggle target={i} onChanged={() => load(false)} onError={props.onError} />
                   </div>
                 ) : (

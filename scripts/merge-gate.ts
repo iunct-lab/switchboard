@@ -44,8 +44,9 @@ const SECURITY_WORD_FILES = glob(["**/.env*", "**/.gitleaks.toml"]);
 export const SECURITY_GROUPS: Record<Exclude<SecurityKind, "security:docs" | "security:words">, Bun.Glob[]> = {
   "security:lockfile": glob(["**/{bun.lock,package-lock.json,pnpm-lock.yaml,yarn.lock,uv.lock,poetry.lock,go.sum,Cargo.lock}", "**/requirements*.txt"]),
   "security:github": glob([".github/**"]),
-  // the gate and local CI decide merges like CI does, and local-merge makes them (#2489): a small change to them is still the user's to approve (#751)
-  "security:gates": glob(["scripts/merge-gate.ts", "scripts/local-ci.ts", "scripts/local-merge.ts"]),
+  // the gate and local CI decide merges like CI does, local-merge makes them (#2489) and forge-resync pushes main (#2705):
+  // a small change to them is still the user's to approve (#751)
+  "security:gates": glob(["scripts/merge-gate.ts", "scripts/local-ci.ts", "scripts/local-merge.ts", "scripts/forge-resync.ts"]),
   // Switchboard's own (a --repo without aws/host never meets it): the cloud host runs main's host scripts as root at
   // every start (sb-host-update, #435)
   "security:host": glob(["aws/host/**"]),
@@ -305,7 +306,7 @@ const PROTECTION_DOC = "docs/merge-gate.md の「保護枝とローカルの結�
 
 /**
  * The top of `n`'s stack (#2940): up by the one open PR whose base is this one's head branch. None or two above → here.
- * gh stack's state is a worktree's local file, and GitHub's API has no stack, so the PRs' branches are what is read.
+ * gh stack's tracking is a catalog local to one clone (`<common-dir>/gh-stack`), and GitHub's API has no stack, so the PRs' branches are what is read.
  */
 export async function stackTop(n: number, headRefName: string, run: (args: string[]) => Promise<string>, repo: string): Promise<number> {
   const seen = new Set([n]);

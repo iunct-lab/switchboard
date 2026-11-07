@@ -368,3 +368,25 @@ describe("background jobs of a task whose turn ended", () => {
     expect(db.listEvents(t.id).some((e) => e.ev.t === "status" && e.ev.text.includes("local CI"))).toBe(true);
   });
 });
+
+describe("OPS_KIT_REVIEW_RUNNER (#4024)", () => {
+  /** The env the runner was started with, under a TaskManager given `reviewRunner` (or none). */
+  async function startedEnv(reviewRunner?: () => "other" | "same"): Promise<Record<string, string> | undefined> {
+    let seen: Record<string, string> | undefined;
+    const inner = fakeAdapter([]);
+    const adapter: RunnerAdapter = { ...inner, start: (opts, emit) => ((seen = opts.env), inner.start(opts, emit)) };
+    const m = new TaskManager(db, new Map([["claude", adapter]]), () => undefined, { idleMs: IDLE_MS, ...(reviewRunner ? { reviewRunner } : {}) });
+    const wsId = db.upsertWorkspace({ name: "w", path: home, kind: "repo" }).id;
+    m.create({ workspaceId: wsId, cwd: home, title: "t", prompt: "p", runner: "claude" });
+    await sleep(0);
+    return seen;
+  }
+
+  test("OPS_KIT_REVIEW_RUNNER carries the setting's value at the start", async () => {
+    expect((await startedEnv(() => "same"))?.OPS_KIT_REVIEW_RUNNER).toBe("same");
+  });
+
+  test("OPS_KIT_REVIEW_RUNNER is other without the setting", async () => {
+    expect((await startedEnv())?.OPS_KIT_REVIEW_RUNNER).toBe("other");
+  });
+});

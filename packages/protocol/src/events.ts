@@ -12,13 +12,6 @@ export type PermissionKind = z.infer<typeof PermissionKind>;
 export const PermissionDecision = z.enum(["allow", "deny"]);
 export type PermissionDecision = z.infer<typeof PermissionDecision>;
 
-/**
- * The user's reply to a question tool (Claude's AskUserQuestion): question text → chosen label(s) / free text. Checked
- * in place rather than with z.record, which rebuilds the object and drops a `__proto__` key — the question text is
- * the agent's, and its answer must not get lost on the way back.
- */
-export const PermissionAnswers = z.custom<Record<string, string>>((v) => !!v && typeof v === "object" && !Array.isArray(v) && Object.values(v).every((x) => typeof x === "string"));
-export type PermissionAnswers = z.infer<typeof PermissionAnswers>;
 
 /** Which Knowledge approval rule matched a permission.ask (issue #13). */
 export const ApprovalRuleMatch = z.object({
@@ -77,6 +70,18 @@ export const StopRecord = z.object({
 export type StopRecord = z.infer<typeof StopRecord>;
 
 /**
+ * One question of a runner's question tool (#3053: Claude's AskUserQuestion, Codex's requestUserInput). `options` empty =
+ * the question takes free text; `multiSelect` = more than one option may be chosen.
+ */
+export const AskQuestion = z.object({
+  header: z.string().nullable(),
+  question: z.string(),
+  options: z.array(z.object({ label: z.string(), description: z.string().nullable() })),
+  multiSelect: z.boolean(),
+});
+export type AskQuestion = z.infer<typeof AskQuestion>;
+
+/**
  * AgentEvent — the one event vocabulary every adapter normalizes into.
  * Everything above the adapter layer (store, ledger, UI) only knows this.
  */
@@ -124,6 +129,11 @@ export const AgentEvent = z.discriminatedUnion("t", [
     /** Set by the daemon when a Knowledge approval rule matched (confirm → still asked, with the reason shown). */
     rule: ApprovalRuleMatch.optional(),
   }),
+  /**
+   * The runner's question tool asked the person (#3053). The adapter declines the call at once (QUESTION_DEFERRED_REPLY),
+   * so the turn ends; the daemon marks the Task as needing action and the answers come back as one reply (docs/design/asks.md).
+   */
+  z.object({ t: z.literal("question.ask"), id: z.string(), questions: z.array(AskQuestion) }),
   z.object({
     t: z.literal("permission.resolved"),
     id: z.string(),

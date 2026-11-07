@@ -1,12 +1,12 @@
 // test-reads: none
 import { recordingText, skipRecordings, assertRecordings } from "../../../../scripts/recordings.ts";
 import { describe, expect, test } from "bun:test";
-import { AgentEvent } from "@switchboard/protocol";
+import { AgentEvent, QUESTION_DEFERRED_REPLY } from "@switchboard/protocol";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildArgs, childEnv, otelEnv, CLAUDE_EFFORTS, CLAUDE_LOGIN_HINT, CLAUDE_MODELS, CLAUDE_PERMISSION_MODES, cliDefaultModelFromSettings, createClaudeAdapter, loginStatus } from "./index.ts";
-import { createClaudeParser, permissionResponseLine, setPermissionModeLine, summarizeToolInput } from "./parse.ts";
+import { askQuestionsOf, createClaudeParser, permissionResponseLine, setPermissionModeLine, summarizeToolInput } from "./parse.ts";
 
 const fixture = recordingText("packages/adapters/claude/fixtures/write-with-permission.jsonl");
 const resumeFixture = recordingText("packages/adapters/claude/fixtures/resume-turn.jsonl");
@@ -478,22 +478,33 @@ describe("spawn plumbing", () => {
     expect(deny.response.response).toEqual({ behavior: "deny", message: "no" });
   });
 
-  test.skipIf(skipRecordings("packages/adapters/claude/fixtures/ask-user-question.jsonl"))("AskUserQuestion: the recorded ask becomes a permission.ask carrying the questions, and answers go back inside updatedInput (2.1.277)", async () => {
-    assertRecordings("packages/adapters/claude/fixtures/ask-user-question.jsonl");
-    const lines = (recordingText("packages/adapters/claude/fixtures/ask-user-question.jsonl")).split("\n").filter(Boolean);
-    const [request, sent, toolResult] = lines as [string, string, string];
-    const [ask] = createClaudeParser().feed(request);
-    expect(AgentEvent.parse(ask)).toMatchObject({ t: "permission.ask", kind: "other", tool: "AskUserQuestion" });
-    if (ask?.t !== "permission.ask") throw new Error("not an ask");
-    const input = ask.input as { questions: { question: string }[] };
-    const answers = { [input.questions[0]!.question]: "Blue", [input.questions[1]!.question]: "Apple, 梨（自由記述）" };
-    // byte-for-byte what the recording sent (the "> " line), which Claude answered with "The user answered: …"
-    expect(permissionResponseLine(ask.id, "allow", ask.input, undefined, answers).trim()).toBe(sent.slice(2));
-    expect(JSON.parse(toolResult).message.content[0].content).toContain('"Which color do you prefer?"="Blue"');
-    // the question text is the agent's: a prototype-named key is sent like any other (ids in the fixture are synthetic)
-    expect(permissionResponseLine(ask.id, "allow", ask.input, undefined, JSON.parse('{"__proto__":"x"}'))).toContain('"answers":{"__proto__":"x"}');
-    // a deny never carries answers
-    expect(JSON.parse(permissionResponseLine(ask.id, "deny", ask.input, undefined, answers)).response.response).toEqual({ behavior: "deny", message: "Denied by user in Switchboard" });
+  test.skipIf(skipRecordings("packages/adapters/claude/fixtures/question-tool.jsonl"))("question tool ends the turn: AskUserQuestion is a question.ask, declined with the deferred reply, and the turn ends ok (2.1.318)", async () => {
+    // recorded 2026-11-05 with Claude Code 2.1.318, claude-sonnet-5-5, --permission-mode default: two questions, declined, one line, result success
+    const rel = "packages/adapters/claude/fixtures/question-tool.jsonl";
+    assertRecordings(rel);
+    const lines = recordingText(rel).split("\n").filter(Boolean);
+    const p = createClaudeParser();
+    const events = lines.filter((l) => !l.startsWith("> ")).flatMap((l) => p.feed(l));
+    for (const e of events) AgentEvent.parse(e);
+    expect(events.some((e) => e.t === "permission.ask")).toBe(false);
+    const asks = events.filter((e) => e.t === "question.ask");
+    expect(asks).toHaveLength(1);
+    const ask = asks[0]!;
+    if (ask.t !== "question.ask") throw new Error("not a question");
+    expect(ask.questions.map((q) => [q.header, q.options.map((o) => o.label), q.multiSelect])).toEqual([["Area", ["web", "core"], false], ["Extras", ["tests", "docs"], true]]);
+    expect(events.at(-1)).toMatchObject({ t: "session.end", status: "ok" });
+    // byte-for-byte what the recording sent back (the "> " line)
+    const request = JSON.parse(lines.find((l) => l.includes('"can_use_tool"'))!);
+    const sent = lines.find((l) => l.startsWith("> ") && l.includes('"behavior":"deny"'))!;
+    expect(permissionResponseLine(ask.id, "deny", request.request.input, QUESTION_DEFERRED_REPLY).trim()).toBe(sent.slice(2));
+  });
+
+  test("askQuestionsOf: header / description absent → null, multiSelect absent → false, a malformed entry left out", () => {
+    expect(askQuestionsOf({ questions: [{ question: "q", options: [{ label: "a" }, { label: "b", description: "d" }, { x: 1 }] }, { header: 3 }, { question: "free", header: "H", multiSelect: true }] })).toEqual([
+      { header: null, question: "q", options: [{ label: "a", description: null }, { label: "b", description: "d" }], multiSelect: false },
+      { header: "H", question: "free", options: [], multiSelect: true },
+    ]);
+    expect(askQuestionsOf(null)).toEqual([]);
   });
 
   test("tool summaries prefer the human-relevant field", () => {

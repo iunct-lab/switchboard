@@ -48,6 +48,15 @@ export const ForgeConfig = z
 export type ForgeConfig = z.infer<typeof ForgeConfig>;
 
 /**
+ * The local CI's steps of a repository that keeps no CI on GitHub (#3932): `bun scripts/local-ci.ts` runs them in
+ * place of `.github/workflows/ci.yml`'s. A step's `name` defaults to the first line of its `run`.
+ */
+export const CiConfig = z
+  .object({ steps: z.array(z.object({ name: z.string().min(1).optional(), run: z.string().min(1) }).strict()).min(1) })
+  .strict();
+export type CiConfig = z.infer<typeof CiConfig>;
+
+/**
  * A repository's backlog settings (`ops.config.json`). The kit itself holds no value of any one repository: the
  * Project, the choices of each field, the required sections and the Story Points all come from here.
  */
@@ -85,6 +94,8 @@ export const OpsConfig = z
     publicSync: PublicSync.optional(),
     /** The service the repository lives on (#920, `forge.ts`); omitted = GitHub. */
     forge: ForgeConfig.optional(),
+    /** The local CI's steps (#3932); omitted = `.github/workflows/ci.yml`'s. */
+    ci: CiConfig.optional(),
   })
   .strict();
 export type OpsConfig = z.infer<typeof OpsConfig>;

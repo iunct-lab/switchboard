@@ -1,8 +1,8 @@
-import { CloudSessionRef, CustomRunner, HumanEval, JudgeEval, RuleEval, SizeClass } from "@switchboard/protocol";
+import { AskQuestion, CloudSessionRef, CustomRunner, HumanEval, JudgeEval, RuleEval, SizeClass } from "@switchboard/protocol";
 import { Database } from "bun:sqlite";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import type { AgentEvent, AskAnswerResult, Artifact, Attachment, BacklogAction, Provenance, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogRepositorySync, BacklogSource, CheckRun, CreatedIssue, EvalSource, EvalsListRow, EventEnvelope, HistorySession, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerRow, LedgerSummary, LedgerTaskRow, LlmSuggestion, LoadKind, Journey, PerfSample, PerfSummaryRow, ReportRow, RoutingLogRow, RoutingStats, RunnerId, RunnerStats, Schedule, StagedChange, StopRecord, Task, TaskEvals, TaskOrigin, TaskOutcome, TaskStatus, Workspace, WorkspaceSweep } from "@switchboard/protocol";
+import type { AgentEvent, AskAnswerResult, Artifact, Attachment, BacklogAction, Provenance, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogRepositorySync, BacklogSource, CheckRun, CreatedIssue, EvalSource, EvalsListRow, EventEnvelope, HistorySession, Job, JobKind, JobStatus, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerRow, LedgerSummary, LedgerTaskRow, LlmSuggestion, LoadKind, Journey, PerfSample, PerfSummaryRow, ReportRow, RoutingLogRow, RoutingStats, RunnerId, RunnerStats, Schedule, StagedChange, StopRecord, Task, TaskEvals, TaskOrigin, TaskOutcome, TaskStatus, Workspace, WorkspaceSweep } from "@switchboard/protocol";
 import { teleportWorktreePath } from "./config.ts";
 import { MAX_STOP_RESUMES, planResumeAfterStop } from "./interrupted.ts";
 import { canTransition, InvalidTaskTransitionError, outcomeOnStatus } from "./task-status.ts";
@@ -217,6 +217,12 @@ CREATE TABLE IF NOT EXISTS api_requests (
   ts INTEGER NOT NULL, method TEXT NOT NULL, route TEXT NOT NULL, status INTEGER NOT NULL, ms REAL NOT NULL, bytes INTEGER
 );
 CREATE INDEX IF NOT EXISTS api_requests_ts ON api_requests (ts);
+-- a job a Task asked the daemon to run as the daemon's child (#3992, jobs.ts): local CI or a review. pid = the wrapper shell
+CREATE TABLE IF NOT EXISTS jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, task_id TEXT NOT NULL, pr INTEGER NOT NULL, runner TEXT, cwd TEXT NOT NULL,
+  pid INTEGER, boot_id TEXT, status TEXT NOT NULL, exit_code INTEGER, started_at INTEGER NOT NULL, ended_at INTEGER, summary TEXT
+);
+CREATE INDEX IF NOT EXISTS jobs_ended ON jobs (ended_at);
 `;
 
 /** Wait out the write lock Litestream's checkpoint takes for a moment, instead of failing with SQLITE_BUSY (#688). */
@@ -368,6 +374,12 @@ function deepFreeze<T>(v: T): T {
   }
   return v;
 }
+
+/**
+ * A stage Task still at work: running / waiting, or a turn ended on background jobs that start its next turn (the
+ * `background` mark, cleared when they end or the runner goes). Starting the same Issue's stage again then runs it twice.
+ */
+const ACTIVE_STAGE = "(status IN ('running', 'waiting') OR background IS NOT NULL)";
 
 export class Db {
   readonly sqlite: Database;
@@ -946,9 +958,12 @@ export class Db {
     return this.sqlite.query("SELECT * FROM tasks WHERE judging_at IS NOT NULL").all().map(rowToTask);
   }
 
-  /** The newest running / waiting stage Task of a backlog Issue in a workspace (#1139). */
+  /**
+   * The newest active stage Task of a backlog Issue in a workspace (#1139): running / waiting, or one whose turn ended while
+   * its runner's background jobs still run (`background` set) — their notification starts its next turn, so it is not over.
+   */
   activeStageTask(workspaceId: string, issue: number): Task | null {
-    const r = this.sqlite.query("SELECT * FROM tasks WHERE workspace_id = ? AND stage_issue = ? AND status IN ('running', 'waiting') ORDER BY updated_at DESC LIMIT 1").get(workspaceId, issue);
+    const r = this.sqlite.query(`SELECT * FROM tasks WHERE workspace_id = ? AND stage_issue = ? AND ${ACTIVE_STAGE} ORDER BY updated_at DESC LIMIT 1`).get(workspaceId, issue);
     return r ? rowToTask(r) : null;
   }
 
@@ -965,9 +980,9 @@ export class Db {
     return (this.sqlite.query("SELECT id FROM tasks WHERE workspace_id = ? AND stage_issue = ?").all(workspaceId, issue) as Array<{ id: string }>).map((r) => r.id);
   }
 
-  /** Every running / waiting stage Task, whatever the workspace (#1139). */
+  /** Every active stage Task (as activeStageTask's), whatever the workspace (#1139). */
   listActiveStageTasks(): Task[] {
-    return this.sqlite.query("SELECT * FROM tasks WHERE stage_issue IS NOT NULL AND status IN ('running', 'waiting')").all().map(rowToTask);
+    return this.sqlite.query(`SELECT * FROM tasks WHERE stage_issue IS NOT NULL AND ${ACTIVE_STAGE}`).all().map(rowToTask);
   }
 
   /** The `stop.record` events of these tasks (#948), oldest first. */
@@ -1008,6 +1023,24 @@ export class Db {
     const prefix = '{"t":"session.end",';
     const r = this.sqlite.query("SELECT seq, json_extract(json, '$.summary') AS text FROM events WHERE task_id = ? AND substr(json, 1, length(?)) = ? ORDER BY seq DESC LIMIT 1").get(taskId, prefix, prefix) as { seq: number; text: string | null } | null;
     return r ? { text: r.text ?? "", seq: r.seq } : null;
+  }
+
+  /**
+   * The question tool's questions of the Task's last turn (#3053): those of the `question.ask` events between the last
+   * `session.end` and the one before it, in order. Read from the events, so they outlive a restart of the daemon.
+   */
+  lastTurnQuestions(taskId: string): AskQuestion[] {
+    const end = '{"t":"session.end",';
+    const ask = '{"t":"question.ask",';
+    const ends = this.sqlite.query("SELECT seq FROM events WHERE task_id = ? AND substr(json, 1, length(?)) = ? ORDER BY seq DESC LIMIT 2").all(taskId, end, end) as Array<{ seq: number }>;
+    if (!ends.length) return [];
+    const rows = this.sqlite
+      .query("SELECT json FROM events WHERE task_id = ? AND seq < ? AND seq > ? AND substr(json, 1, length(?)) = ? ORDER BY seq")
+      .all(taskId, ends[0]!.seq, ends[1]?.seq ?? -1, ask, ask) as Array<{ json: string }>;
+    return rows.flatMap((r) => {
+      const qs = AskQuestion.array().safeParse((JSON.parse(r.json) as { questions?: unknown }).questions);
+      return qs.success ? qs.data : [];
+    });
   }
 
   insertTask(t: Task): Task {
@@ -1700,6 +1733,44 @@ export class Db {
     return this.sqlite.query("SELECT * FROM tasks WHERE schedule_id IS NOT NULL AND created_at >= ? ORDER BY created_at DESC LIMIT 100").all(sinceTs).map(rowToTask);
   }
 
+  /* ---------- jobs the daemon runs for Tasks (#3992) ---------- */
+
+  insertJob(j: { kind: JobKind; taskId: string; pr: number; runner: "codex" | "claude" | null; cwd: string; startedAt: number }): Job {
+    const r = this.sqlite
+      .query("INSERT INTO jobs (kind, task_id, pr, runner, cwd, status, started_at) VALUES (?, ?, ?, ?, ?, 'running', ?) RETURNING *")
+      .get(j.kind, j.taskId, j.pr, j.runner, j.cwd, j.startedAt) as JobRow;
+    return rowToJob(r);
+  }
+
+  /** The wrapper's pid and the boot it runs in: after a reboot the pid may be another process's (recoverJobs). */
+  setJobPid(id: number, pid: number, bootId: string | null) {
+    this.sqlite.query("UPDATE jobs SET pid = ?, boot_id = ? WHERE id = ?").run(pid, bootId, id);
+  }
+
+  /** Ends a running job once; a job already ended stays as it was (null). */
+  finishJob(id: number, end: { status: Exclude<JobStatus, "running">; exitCode: number | null; summary: string; endedAt: number }): Job | null {
+    const r = this.sqlite
+      .query("UPDATE jobs SET status = ?, exit_code = ?, summary = ?, ended_at = ? WHERE id = ? AND status = 'running' RETURNING *")
+      .get(end.status, end.exitCode, end.summary, end.endedAt, id) as JobRow | null;
+    return r ? rowToJob(r) : null;
+  }
+
+  getJob(id: number): Job | null {
+    const r = this.sqlite.query("SELECT * FROM jobs WHERE id = ?").get(id) as JobRow | null;
+    return r ? rowToJob(r) : null;
+  }
+
+  /** The pid of a job's wrapper shell and the boot it started in (null: not started / not known), for recoverJobs. */
+  jobPid(id: number): { pid: number | null; bootId: string | null } {
+    const r = this.sqlite.query("SELECT pid, boot_id FROM jobs WHERE id = ?").get(id) as { pid: number | null; boot_id: string | null } | null;
+    return { pid: r?.pid ?? null, bootId: r?.boot_id ?? null };
+  }
+
+  /** Running jobs and those that ended since `sinceMs`, newest first. */
+  listJobs(sinceMs: number): Job[] {
+    return (this.sqlite.query("SELECT * FROM jobs WHERE status = 'running' OR ended_at >= ? ORDER BY id DESC").all(sinceMs) as JobRow[]).map(rowToJob);
+  }
+
   /* ---------- self-dev check runs ---------- */
 
   saveCheckRun(run: CheckRun) {
@@ -1855,7 +1926,11 @@ export class Db {
 /** The status a runner sends while it thinks, as stored (#2738): the one form in the events. */
 const THINKING_JSON = JSON.stringify({ t: "status", text: "thinking" });
 
+type JobRow = { id: number; kind: string; task_id: string; pr: number; runner: string | null; cwd: string; status: string; exit_code: number | null; started_at: number; ended_at: number | null; summary: string | null };
+const rowToJob = (r: JobRow): Job => ({ id: r.id, kind: r.kind as JobKind, taskId: r.task_id, pr: r.pr, runner: r.runner as Job["runner"], cwd: r.cwd, status: r.status as JobStatus, exitCode: r.exit_code, startedAt: r.started_at, endedAt: r.ended_at, summary: r.summary });
+
 /** Additive schema changes for databases created by earlier versions. Each step is idempotent. */
+
 function migrate(db: Database) {
   const cols = new Set((db.query("PRAGMA table_info(tasks)").all() as Array<{ name: string }>).map((c) => c.name));
   if (!cols.has("execution_mode")) db.exec("ALTER TABLE tasks ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'local'");
@@ -2019,6 +2094,8 @@ function migrate(db: Database) {
   if (!perfCols.has("task_id")) db.exec("ALTER TABLE perf_samples ADD COLUMN task_id TEXT"); // #2100; earlier rows stay null
   if (!perfCols.has("bytes")) db.exec("ALTER TABLE perf_samples ADD COLUMN bytes INTEGER");
   if (!perfCols.has("events")) db.exec("ALTER TABLE perf_samples ADD COLUMN events INTEGER");
+  // #4055: the backlog queue's last decision gained its time; a queue stored before has none (null), once
+  db.exec(`UPDATE settings SET json = json_set(json, '$.lastNoteAt', json('null')) WHERE key = 'backlogQueue' AND json_valid(json) AND json_type(json, '$.lastNoteAt') IS NULL`);
   // #3682: the days a throwaway app read the API through the screen, and the request Task started for it
   const artCols = new Set((db.query("PRAGMA table_info(artifacts)").all() as Array<{ name: string }>).map((c) => c.name));
   if (!artCols.has("app_days")) db.exec("ALTER TABLE artifacts ADD COLUMN app_days INTEGER NOT NULL DEFAULT 0");

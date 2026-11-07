@@ -1,4 +1,4 @@
-import type { AgentEvent, PermissionKind } from "@switchboard/protocol";
+import { QUESTION_DEFERRED_REPLY, type AgentEvent, type PermissionKind } from "@switchboard/protocol";
 import type { AccountRateLimitsUpdatedNotification } from "./generated/v2/AccountRateLimitsUpdatedNotification";
 import type { AgentMessageDeltaNotification } from "./generated/v2/AgentMessageDeltaNotification";
 import type { CommandExecutionRequestApprovalParams } from "./generated/v2/CommandExecutionRequestApprovalParams";
@@ -11,6 +11,8 @@ import type { ThreadItem } from "./generated/v2/ThreadItem";
 import type { ThreadStartedNotification } from "./generated/v2/ThreadStartedNotification";
 import type { ThreadStatusChangedNotification } from "./generated/v2/ThreadStatusChangedNotification";
 import type { ThreadTokenUsageUpdatedNotification } from "./generated/v2/ThreadTokenUsageUpdatedNotification";
+import type { ToolRequestUserInputParams } from "./generated/v2/ToolRequestUserInputParams";
+import type { ToolRequestUserInputResponse } from "./generated/v2/ToolRequestUserInputResponse";
 import type { TokenUsageBreakdown } from "./generated/v2/TokenUsageBreakdown";
 import type { TurnCompletedNotification } from "./generated/v2/TurnCompletedNotification";
 import type { TurnStartedNotification } from "./generated/v2/TurnStartedNotification";
@@ -218,8 +220,19 @@ function mapServerRequest(id: string, method: string, p: Any, s: CodexParserStat
         },
       ];
     }
+    case "item/tool/requestUserInput": {
+      // the question tool (#3057): its questions go to the person; the session answers each with the deferred reply
+      const r = p as ToolRequestUserInputParams;
+      const questions = (r.questions ?? []).map((q) => ({
+        header: q.header || null,
+        question: q.question,
+        options: (q.options ?? []).map((o) => ({ label: o.label, description: o.description || null })),
+        multiSelect: false,
+      }));
+      return [{ t: "question.ask", id, questions }];
+    }
     default:
-      // Anything else (permission profiles, user input, elicitation, tool calls back into the client) is answered by
+      // Anything else (permission profiles, elicitation, tool calls back into the client) is answered by
       // the session with a JSON-RPC error: no fixture covers them yet, so we do not guess their response shape.
       return [{ t: "status", text: `unsupported server request: ${method}` }];
   }
@@ -355,6 +368,15 @@ export function jsonRpcRequest(id: number, method: string, params: unknown): str
 export function jsonRpcNotification(method: string, params?: unknown): string {
   return JSON.stringify(params === undefined ? { jsonrpc: "2.0", method } : { jsonrpc: "2.0", method, params }) + "\n";
 }
+/**
+ * The answer to a requestUserInput (#3057): every question gets QUESTION_DEFERRED_REPLY, so the model ends the turn
+ * ("Waiting for your choices", recorded 2026-11-05 on codex-cli 0.166.0) and the person's answers come as the next turn.
+ */
+export function deferredUserInput(params: unknown): ToolRequestUserInputResponse {
+  const qs = (params as Partial<ToolRequestUserInputParams> | null)?.questions ?? [];
+  return { answers: Object.fromEntries(qs.map((q) => [q.id, { answers: [QUESTION_DEFERRED_REPLY] }])) };
+}
+
 export function jsonRpcResult(id: string | number, result: unknown): string {
   return JSON.stringify({ jsonrpc: "2.0", id: /^\d+$/.test(String(id)) ? Number(id) : id, result }) + "\n";
 }

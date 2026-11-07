@@ -54,6 +54,7 @@ export function Interventions(props: { inView: (workspaceId: string | null) => b
             {t(m.beforeLine, { line: populationLine(pair.previous) })}
           </div>
           {unknown && <div className="muted" data-unknown>{unknown}</div>}
+          <div className="table-scroll">
           <table className="pricing intervention-table">
             <thead>
               <tr>
@@ -74,17 +75,23 @@ export function Interventions(props: { inView: (workspaceId: string | null) => b
               ))}
             </tbody>
           </table>
+          </div>
           <div className="hint">{t(m.reasonsHint)}</div>
           {reasonRows(pair.current, pair.previous, props.inView).length === 0 && <div className="muted">{t(m.noStops)}</div>}
           {reasonRows(pair.current, pair.previous, props.inView).map((r) => (
-            <div key={r.reason} className="row" data-reason={r.reason}>
-              <span className="t">{r.label}</span>
-              <span className="m num">
-                {t(m.reasonCount, { count: r.count, before: r.before, change: r.change })}
-              </span>
-              <span className="m">
-                {t(m.notAutoResumed, { n: r.notAutoResumed, before: r.notAutoResumedBefore })}
-              </span>
+            // #4060: the reason and its counts on one line, the Tasks it names wrapping under it (kept on one row they
+            // squeezed the reason to a letter and widened the page past the screen)
+            <div key={r.reason} className="reason-row" data-reason={r.reason}>
+              <div className="reason-head">
+                <span className="t">{r.label}</span>
+                <span className="m num">
+                  {t(m.reasonCount, { count: r.count, before: r.before, change: r.change })}
+                </span>
+                <span className="m">
+                  {t(m.notAutoResumed, { n: r.notAutoResumed, before: r.notAutoResumedBefore })}
+                </span>
+              </div>
+              <div className="reason-links">
               {[...r.links.map((l) => ({ l, period: "now" })), ...r.linksBefore.map((l) => ({ l, period: "before" }))].map(({ l, period }) => (
                 <span key={`${period}:${l.taskId}:${l.at}`} className="m" data-evidence={period}>
                   {period === "before" ? t(m.evidenceBefore) : ""}
@@ -98,6 +105,7 @@ export function Interventions(props: { inView: (workspaceId: string | null) => b
                   </button>
                 </span>
               ))}
+              </div>
             </div>
           ))}
         </>

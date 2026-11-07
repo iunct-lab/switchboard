@@ -22,9 +22,13 @@
  * narrows: tag-ci's `runCheckout` runs every test, and the other steps always run (#3297).
  * A head whose newest result merge-gate already counts as a pass is not run again (`existingPass`, #1882): `--force` runs
  * it, and `--all` does too (a narrowed pass is not what it asks for). GitHub only.
+ * A checkout whose `ops.config.json` has `ci.steps` runs those instead of ci.yml's (a repository that keeps no CI on
+ * GitHub, #3932); one with neither exits 2 with one line naming where they go, nothing posted.
  * `--repo <owner/name>` (#1203): another repository's PR, run from that repository's working tree (its origin must be
  * owner/name); the mark goes on that PR. Without it: the repository of the clone this script is in (that clone's
  * origin), run in that clone.
+ * On the cloud host (`sb-offload` on PATH) the type check and `bun test` run off the host in two small builds at the same
+ * time, and the rest stays here (`OFFLOAD_GROUPS`, docs/design/local-ci-offload.md).
  */
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -34,6 +38,7 @@ import { withHeavySlot } from "../ops-kit/src/heavy.ts";
 import { gitlabForge, runGlab, viewGitlabMr, type Sh } from "../ops-kit/src/forge-gitlab.ts";
 import { githubForge } from "../ops-kit/src/forge-github.ts";
 import { appForge } from "../ops-kit/src/forge-app.ts";
+import { CiConfig, CONFIG_FILE } from "../ops-kit/src/config.ts";
 import { IDLE_KILLED_LINE, runIdle } from "../ops-kit/src/idle-run.ts";
 import { hostAws } from "../ops-kit/src/secrets.ts";
 import { ciExit, runCi, STEP_IDLE_SECONDS, type Step } from "./ci.ts";
@@ -124,14 +129,44 @@ export function perfSteps(steps: Step[]): Step[] {
 /** The step of ci.yml that runs scripts/ci.ts: Actions runs those steps in one go, local-ci one by one (#912). */
 export const SHARED_ENTRY = "bun scripts/ci.ts";
 
+/** A checkout whose CI steps cannot be read: none in `ops.config.json`'s `ci.steps` nor in ci.yml, or `ci` is not in its shape (#3932). */
+export class NoCiSteps extends Error {}
+
+/** Where a checkout keeps its CI's steps, for the message of `NoCiSteps`. */
+export const CI_STEPS_PLACES = "`ops.config.json` の `ci.steps`（GitHub と連携するなら `.github/workflows/ci.yml`）";
+
 /**
- * What a checkout's CI runs: ci.yml's `run:` steps, with the shared entry replaced by that checkout's own scripts/ci.ts
- * steps (another repository's ci.yml has none, #1203). Those are the PR's code: read by `--list` in a process of its
- * own with `env` (the steps' environment), never imported into this one.
+ * The steps of `ops.config.json`'s `ci.steps` in `dir` (#3932), or null when the file or the key is not there. Only
+ * `ci` is read (as `loadPublicSync` reads its key): another key's mistake is not the CI's to refuse.
+ */
+export function configSteps(dir: string): Step[] | null {
+  const file = join(dir, CONFIG_FILE);
+  if (!existsSync(file)) return null;
+  let json: { ci?: unknown } | null;
+  try {
+    json = JSON.parse(readFileSync(file, "utf8")) as { ci?: unknown } | null;
+  } catch (e) {
+    throw new NoCiSteps(`${CONFIG_FILE} を読めない: ${(e as Error).message}`);
+  }
+  if (json === null || typeof json !== "object" || json.ci === undefined) return null;
+  const r = CiConfig.safeParse(json.ci);
+  if (!r.success) throw new NoCiSteps(`${CONFIG_FILE} の ci が不正: ${r.error.issues.map((i) => `ci.${i.path.join(".")}: ${i.message}`).join(" / ")}`);
+  return r.data.steps.map((s) => ({ name: s.name ?? s.run.split("\n")[0]!, run: s.run }));
+}
+
+/**
+ * What a checkout's CI runs: `ops.config.json`'s `ci.steps` when it has them (a repository that keeps no CI on GitHub,
+ * #3932; ci.yml is not read then), else ci.yml's `run:` steps, with the shared entry replaced by that checkout's own
+ * scripts/ci.ts steps (another repository's ci.yml has none, #1203). Those are the PR's code: read by `--list` in a
+ * process of its own with `env` (the steps' environment), never imported into this one. Neither → `NoCiSteps`.
  */
 export async function checkoutSteps(dir: string, env: Record<string, string>): Promise<Step[]> {
+  const configured = configSteps(dir);
+  if (configured) return configured;
+  const yml = join(dir, ".github/workflows/ci.yml");
+  if (!existsSync(yml)) throw new NoCiSteps(`CI の手順が無い。${CI_STEPS_PLACES}に置く`);
   const steps: Step[] = [];
-  for (const s of workflowSteps(await Bun.file(join(dir, ".github/workflows/ci.yml")).text())) {
+  for (const s of workflowSteps(await Bun.file(yml).text())) {
     if (s.run.trim() !== SHARED_ENTRY) { steps.push(s); continue; }
     const p = Bun.spawn([process.execPath, "scripts/ci.ts", "--list"], { cwd: dir, env, stdout: "pipe", stderr: "pipe" });
     const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
@@ -179,7 +214,8 @@ export interface LocalCiResult { sha: string; base: string; results: StepResult[
 /** What a run's bun test covered, for the comment: the seen line and the machine line; a selection's reason can list every changed file. */
 function testsLines(s: TestSelection | undefined): string[] {
   if (!s) return ["テスト: 全ファイル（--all）"];
-  const seen = s.files ? `テスト: ${s.files.length} / ${s.total} ファイル（影響範囲の選択）` : `テスト: 全 ${s.total} ファイル（全テストに倒した: ${s.reason.length > 300 ? `${s.reason.slice(0, 300)}…` : s.reason}）`;
+  // none counted: "every test" would read as if they all ran (#3932). Only what `total` counts is named (isTest)
+  const seen = s.total === 0 ? "テスト: なし（`*.test.ts` / `*.test.tsx` のファイルが 1 つも無い）" : s.files ? `テスト: ${s.files.length} / ${s.total} ファイル（影響範囲の選択）` : `テスト: 全 ${s.total} ファイル（全テストに倒した: ${s.reason.length > 300 ? `${s.reason.slice(0, 300)}…` : s.reason}）`;
   const loaded = s.loaded && !s.loaded.run ? [`loaded（量と重なりの計測）: 測らなかった（${s.loaded.reason}）`] : [];
   return [seen, ...loaded, `<!-- local-ci-tests ${JSON.stringify({ ran: s.files?.length ?? null, total: s.total })} -->`];
 }
@@ -190,7 +226,7 @@ export function resultComment(r: LocalCiResult): string {
     `[local-ci] ${r.ok ? "pass" : "fail"} ${r.sha} base=${r.base}`,
     ...(r.ok && r.seconds ? [`<!-- local-ci-seconds ${JSON.stringify(r.seconds)} -->`] : []),
     "",
-    "`.github/workflows/ci.yml` の手順（`bun scripts/ci.ts` は `scripts/ci.ts` の各手順）を、PR の head を base にマージしたものでローカルで実行した（`bun scripts/local-ci.ts`）。",
+    "CI の手順（`ops.config.json` の `ci.steps`、無ければ `.github/workflows/ci.yml`。`bun scripts/ci.ts` は `scripts/ci.ts` の各手順）を、head を base にマージしたものでローカルで実行した（`bun scripts/local-ci.ts`）。",
     "",
     `対象: head \`${r.sha}\` を base \`${r.base}\` にマージ`,
   ];
@@ -907,7 +943,15 @@ export async function changeMain(args: string[], at: number, cwd: string, d: Dep
     d.log(`既に pass（#${n} の今の head と base）。回し直すなら --force`);
     return 0;
   }
-  const r = await localCi(n, root, d, workspace, cache, { all: args.includes("--all"), change: { label, read } });
+  let r: LocalCiResult;
+  try {
+    r = await localCi(n, root, d, workspace, cache, { all: args.includes("--all"), change: { label, read } });
+  } catch (e) {
+    // nothing to run: one line naming where the steps go, nothing posted (#3932)
+    if (!(e instanceof NoCiSteps)) throw e;
+    console.error(e.message);
+    return 2;
+  }
   const t = { pr: n, repo: workspace, root };
   try {
     if (!(await notify(t, r, d, (t, body, run) => reportResult(t, body, run, runGlab, backlog), read))) return 1;
@@ -919,7 +963,7 @@ export async function changeMain(args: string[], at: number, cwd: string, d: Dep
 }
 
 /**
- * The command: its exit code. 2 = the target cannot be run (nothing posted), 1 = a failure, a conflict, a result not
+ * The command: its exit code. 2 = the target cannot be run, or its checkout has no CI steps (nothing posted), 1 = a failure, a conflict, a result not
  * posted (moved, or the post failed), 0 = a pass posted or one already there. `scriptRoot`: the clone without --repo.
  * `cache`: where the run's worktrees and logs go (~/.cache; tests give their own).
  */
@@ -939,7 +983,14 @@ export async function main(args: string[], cwd: string, d: Deps, post = reportRe
     d.log(`既に pass（${url}）。回し直すなら --force`);
     return 0;
   }
-  const r = await localCi(t.pr, t.root, d, t.repo, cache, { all: t.all });
+  let r: LocalCiResult;
+  try {
+    r = await localCi(t.pr, t.root, d, t.repo, cache, { all: t.all });
+  } catch (e) {
+    if (!(e instanceof NoCiSteps)) throw e;
+    console.error(e.message);
+    return 2;
+  }
   try {
     if (!(await notify(t, r, d, post))) return 1;
   } catch (e) {

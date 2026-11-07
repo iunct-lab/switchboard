@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { loadConfig } from "./config.ts";
 import { fakeGh, type FakeCall } from "./gh.ts";
-import { setField, UsageError } from "./set.ts";
+import { fieldChoice, setField, UsageError } from "./set.ts";
 
 const fixtures = join(import.meta.dir, "../fixtures");
 const withPhase = loadConfig(join(fixtures, "config-with-phase.json"));
@@ -96,5 +96,33 @@ describe("set", () => {
   test("a missing Project or Issue is an error, not a silent no-op", async () => {
     await expect(setField(fakeGh([() => ({ repositoryOwner: { projectV2: null }, repository: { issue: { id: "I1", projectItems: { nodes: [] } } } })]), withPhase, 1, "Status", "Ready", () => undefined)).rejects.toThrow(/Project example\/1/);
     await expect(setField(fakeGh([() => ({ repositoryOwner: { projectV2: { id: "P1", field } }, repository: { issue: null } })]), withPhase, 1, "Status", "Ready", () => undefined)).rejects.toThrow(/Issue #1/);
+  });
+});
+
+describe("fieldChoice", () => {
+  test("a value that differs from a choice only in case is that choice; Story Points' digits are its number (#3795)", () => {
+    expect(fieldChoice(withPhase, "Status", "In Progress")).toBe("In progress");
+    expect(fieldChoice(withPhase, "Priority", "p2")).toBe("P2");
+    expect(fieldChoice(withPhase, "Area", "ONE")).toBe("one");
+    expect(fieldChoice(withPhase, "Phase", "phase 1")).toBe("Phase 1");
+    expect(fieldChoice(withPhase, "Status", "Ready")).toBe("Ready");
+    expect(fieldChoice(withPhase, "Story Points", "5")).toBe(5);
+    expect(fieldChoice(withPhase, "Story Points", 8)).toBe(8);
+  });
+
+  test("a value no choice matches is refused with the choices; a field without choices and null pass as they are", () => {
+    for (const [name, value, msg] of [
+      ["Status", "Doing", "'Status' に選択肢 'Doing' がありません: Backlog / Ready / In progress / In review / Done"],
+      ["Story Points", "4", "'Story Points' に選択肢 '4' がありません: 1 / 2 / 3 / 5 / 8"],
+      ["Story Points", "", "'Story Points' に選択肢 '' がありません: 1 / 2 / 3 / 5 / 8"],
+      ["Kind", "InProgress", "'Kind' に選択肢 'InProgress' がありません: bug / feature"],
+    ] as const) {
+      expect(() => fieldChoice(withPhase, name, value)).toThrow(new UsageError(msg));
+    }
+    // no Phase in this config: nothing to check it against
+    expect(fieldChoice(noPhase, "Phase", "anything")).toBe("anything");
+    expect(fieldChoice(withPhase, "Notes", "x")).toBe("x");
+    expect(fieldChoice(withPhase, "Status", null)).toBeNull();
+    expect(fieldChoice(withPhase, "constructor", "x")).toBe("x");
   });
 });

@@ -4,29 +4,35 @@
  * import reads those again with the waits of #817, and once every one is closed the stop is over.
  *
  * This file decides which stops are over, from what the import stored (it asks GitHub nothing), and after each import
- * continues each such Task (`resumeDepends`).
+ * continues each such Task (`resumeDepends`). A stop may also wait on a job the daemon runs for the Task (`job#<id>`,
+ * #3993, jobs.ts): that one is over when the job ends, and the end of a job runs `resumeDepends` too.
  */
-import type { BacklogIssueData, BacklogPullRequestData, BacklogRecord, BacklogSource, StopRecord } from "@switchboard/protocol";
+import type { BacklogIssueData, BacklogPullRequestData, BacklogRecord, BacklogSource, Job, StopRecord } from "@switchboard/protocol";
 import type { Db } from "./db.ts";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
 import { issueOf, openStops, type StopReport } from "./stops.ts";
 import { ResumeSupersededError, type TaskManager } from "./tasks.ts";
 
-/** A wait key of a stop's condition: a PR or an Issue of the workspace's repository, by number. */
-export const WAIT_KEY = /^(pr|issue)#(\d+)$/;
+/** A wait key of a stop's condition: a PR or an Issue of the workspace's repository, by number, or a job of the daemon (#3993), by id. */
+export const WAIT_KEY = /^(pr|issue|job)#(\d+)$/;
+/** A job the daemon runs for the Task (#3993): its id is no number on GitHub, and is read from the jobs table. */
+export const JOB_KEY = /^job#(\d+)$/;
 
 /** How long a Task's stops are looked at after it last changed: the stops' summary covers the same week. */
 export const STOP_WAITS_MS = 7 * 24 * 3600_000;
 
 /**
- * The open `depends` stops that wait only on PRs / Issues (every condition a WAIT_KEY, at least one not met yet), with
- * the numbers they still wait for. A stop with any other condition (a time, a value) is not one of these.
+ * The open `depends` stops that wait only on PRs / Issues / jobs (every condition a WAIT_KEY, at least one not met yet),
+ * with what they still wait for: `numbers` the PRs / Issues (GitHub's), `jobs` the daemon's jobs (#3993). A stop with
+ * any other condition (a time, a value) is not one of these.
  */
-export function dependsWaits(records: StopRecord[]): { stop: StopRecord; numbers: number[] }[] {
+export function dependsWaits(records: StopRecord[]): { stop: StopRecord; numbers: number[]; jobs: number[] }[] {
   return openStops(records).flatMap((stop) => {
     if (stop.reason !== "depends" || stop.conditions.length === 0 || !stop.conditions.every((c) => WAIT_KEY.test(c.key))) return [];
-    const numbers = stop.conditions.filter((c) => !c.met).map((c) => Number(WAIT_KEY.exec(c.key)![2]));
-    return numbers.length ? [{ stop, numbers: [...new Set(numbers)] }] : [];
+    const open = stop.conditions.filter((c) => !c.met).map((c) => WAIT_KEY.exec(c.key)!);
+    const numbers = [...new Set(open.filter((m) => m[1] !== "job").map((m) => Number(m[2])))];
+    const jobs = [...new Set(open.filter((m) => m[1] === "job").map((m) => Number(m[2])))];
+    return numbers.length || jobs.length ? [{ stop, numbers, jobs }] : [];
   });
 }
 
@@ -39,7 +45,14 @@ export function stopWaitNumbers(db: Db, workspaceId: string, now: number): numbe
 export type WaitState = "closed" | "open" | "unknown";
 
 /** Every wait closed. One open, or one not read, keeps the stop. */
-export const waitsClosed = (w: { numbers: number[] }, stateOf: (n: number) => WaitState): boolean => w.numbers.every((n) => stateOf(n) === "closed");
+export const waitsClosed = (w: { numbers: number[]; jobs?: number[] }, stateOf: (n: number) => WaitState, jobStateOf: (id: number) => WaitState = () => "unknown"): boolean =>
+  w.numbers.every((n) => stateOf(n) === "closed") && (w.jobs ?? []).every((id) => jobStateOf(id) === "closed");
+
+/** How a waited-for job stands (#3993): running is open, ended (pass / fail / aborted) is closed, no such job is unknown. */
+export const jobWaitState = (db: Pick<Db, "getJob">) => (id: number): WaitState => {
+  const job = db.getJob(id);
+  return !job ? "unknown" : job.status === "running" ? "open" : "closed";
+};
 
 /**
  * How a waited-for number stands, from the stored records: a PR merged or closed is closed; an Issue closed, or a Task
@@ -78,6 +91,16 @@ export const dependsResumePrompt = (keys: string[]) =>
   `${AUTO_RESUME_HEAD} 待っていた ${keys.join("、")} が片づきました。並列ガードの overlap をやり直してから、中断した箇所から作業を続けてください。`;
 
 /**
+ * The follow-up turn of a Task whose waited-for jobs ended (#3993): each job's result and summary (status, exit code, the
+ * log's last lines and its path), and the other keys that closed with them.
+ */
+export function jobResumePrompt(jobs: Job[], others: string[] = []): string {
+  const lines = jobs.map((j) => [`job#${j.id} ${j.kind}${j.runner ? ` (${j.runner})` : ""} PR #${j.pr}: ${j.status}（終了コード ${j.exitCode ?? "なし"}）`, j.summary ?? ""].filter(Boolean).join("\n"));
+  const also = others.length ? `\n\n待っていた ${others.join("、")} も片づきました。` : "";
+  return `${AUTO_RESUME_HEAD} 頼んだ仕事が終わりました。\n\n${lines.join("\n\n")}${also}\n\n結果を読んでから続けてください。`;
+}
+
+/**
  * After an import of the workspace: every open depends stop (of its Tasks changed in the last week) whose waits all
  * closed is recorded `resolved` under the same id, its conditions met. A Task started by hand then gets one follow-up
  * turn (`dependsResumePrompt`, every key of those stops), in the same runner session — once no depends stop of it still
@@ -87,22 +110,29 @@ export const dependsResumePrompt = (keys: string[]) =>
  * or one with a resume planned (that resume continues it). The record is written before the turn, so the next import
  * does not send a second; a turn that could not be sent puts it back to waiting with the reason, and the next import
  * tries again. One given up for a turn that came first (中断, a reply, a planned resume) stays resolved: that turn goes
- * on. Runs after every import of the workspace that stored (BacklogSync.onImported's `every`). Returns the ids of the
- * Tasks it sent a turn to.
+ * on. Runs after every import of the workspace that stored (BacklogSync.onImported's `every`), and after a job of one
+ * of its Tasks ended (#3993; `workspaceId` null = the Tasks without a workspace, whose waits can only be jobs). A stop
+ * that waits on a job gets its turn on a stage Task too, with the jobs' results (`jobResumePrompt`): it waits on its own
+ * PR's CI or review, which backlog-next does not start. Returns the ids of the Tasks it sent a turn to.
  */
-export async function resumeDepends(deps: { db: Db; tasks: Pick<TaskManager, "send" | "recordStop">; workspaceId: string; now: number }): Promise<string[]> {
+export async function resumeDepends(deps: { db: Db; tasks: Pick<TaskManager, "send" | "recordStop">; workspaceId: string | null; now: number }): Promise<string[]> {
   const { db, tasks, workspaceId, now } = deps;
-  const source = db.getWorkspaceBacklogSource(workspaceId);
-  if (!source) return [];
-  const stateOf = stateFromRecords(db.listBacklogRecords(source), source.project);
+  const source = workspaceId === null ? null : db.getWorkspaceBacklogSource(workspaceId);
+  const stateOf: (n: number) => WaitState = source ? stateFromRecords(db.listBacklogRecords(source), source.project) : () => "unknown";
+  const jobStateOf = jobWaitState(db);
   const sent: string[] = [];
   for (const task of db.listTasksUpdatedSince(now - STOP_WAITS_MS)) {
     if (task.workspaceId !== workspaceId) continue;
-    const stage = issueOf(task) !== null;
-    if (!stage && (!task.runnerSessionId || task.status === "running" || task.status === "waiting" || task.resumeAt !== null)) continue;
     const waits = dependsWaits(db.listStopRecords([task.id])).filter((w) => w.stop.work.taskId === task.id);
-    const closed = waits.filter((w) => waitsClosed(w, stateOf));
+    const closed = waits.filter((w) => waitsClosed(w, stateOf, jobStateOf));
     if (!closed.length) continue;
+    const jobKeys = closed.flatMap((w) => w.stop.conditions.filter((c) => JOB_KEY.test(c.key)).map((c) => c.key));
+    // a stop on a job stays open while another depends stop of the Task still waits: resolved alone, its result would
+    // not be in the turn the last one sends
+    if (jobKeys.length && closed.length < waits.length) continue;
+    // a stage Task (#1139) gets no turn here for a PR / Issue — that is backlog-next's — but does for its own jobs
+    const turn = issueOf(task) === null || jobKeys.length > 0;
+    if (turn && (!task.runnerSessionId || task.status === "running" || task.status === "waiting" || task.resumeAt !== null)) continue;
     const report = (w: (typeof waits)[number], state: StopRecord["state"], what: string, ok: boolean): StopReport => ({
       id: w.stop.id.slice(task.id.length + 1),
       op: w.stop.op,
@@ -117,10 +147,12 @@ export async function resumeDepends(deps: { db: Db; tasks: Pick<TaskManager, "se
     });
     for (const w of closed) tasks.recordStop(task.id, report(w, "resolved", `待ちが片づいた: ${w.stop.conditions.map((c) => c.key).join(", ")}`, true));
     // one turn for the Task, once none of its waits is open any more (a runner that stopped twice has two stops)
-    if (stage || closed.length < waits.length) continue;
+    if (!turn || closed.length < waits.length) continue;
     const keys = [...new Set(closed.flatMap((w) => w.stop.conditions.map((c) => c.key)))];
+    const ended = [...new Set(jobKeys)].map((k) => db.getJob(Number(JOB_KEY.exec(k)![1]))).filter((j): j is Job => j !== null);
+    const prompt = jobKeys.length ? jobResumePrompt(ended, keys.filter((k) => !JOB_KEY.test(k))) : dependsResumePrompt(keys);
     try {
-      await tasks.send(task.id, dependsResumePrompt(keys), { daemon: true });
+      await tasks.send(task.id, prompt, { daemon: true });
       sent.push(task.id);
     } catch (e) {
       // someone else's turn came first (a reply, a planned resume): it goes on without this one
@@ -129,4 +161,16 @@ export async function resumeDepends(deps: { db: Db; tasks: Pick<TaskManager, "se
     }
   }
   return sent;
+}
+
+/**
+ * A job can end before its Task wrote the stop on it and ended the turn (#3993): `resumeDepends` at the job's end then
+ * skips the Task (it is running), and a Task without a workspace has no import to look again. So the end of a turn of
+ * a Task with a stop on a job looks again. Returns the unsubscribe.
+ */
+export function resumeJobsOnTurnEnd(db: Db, tasks: Pick<TaskManager, "send" | "recordStop" | "onTurnEnd">): () => void {
+  return tasks.onTurnEnd((id, task) => {
+    if (!dependsWaits(db.listStopRecords([id])).some((w) => w.jobs.length)) return;
+    void resumeDepends({ db, tasks, workspaceId: task.workspaceId, now: Date.now() }).catch((e) => console.error(`[jobs] depends resume after the turn of ${id}: ${String((e as Error)?.message ?? e)}`));
+  });
 }

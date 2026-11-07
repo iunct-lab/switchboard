@@ -89,6 +89,8 @@ try {
     if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
     return result.result.value;
   };
+  /** Opens the folded Settings card with this title (#3849), once Settings has drawn it: a card shows only its title until opened. */
+  const openSettingsCard = (title: string) => until(() => evaluate(`(() => { const d = [...document.querySelectorAll('.settings details.card')].find((d) => d.querySelector('summary').textContent.trim() === ${JSON.stringify(title)}); if (d) d.open = true; return !!d; })()`), `the ${title} card`);
   // React reads a typed value from the native setter + an input / change event
   const page = (body: string) => evaluate(`(() => {
     const set = (el, v) => { const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, v); el.dispatchEvent(new Event(el instanceof HTMLSelectElement ? 'change' : 'input', { bubbles: true })); };
@@ -106,6 +108,7 @@ try {
     await until(() => evaluate(`!!document.querySelector('nav button')`), "nav");
     await page(`button(document.querySelector('nav'), ${JSON.stringify(label)}).click()`);
     await until(() => evaluate(`!!document.querySelector(${JSON.stringify(ready)})`), `${label}: ${ready}`).catch(async (e) => { console.error(await evaluate(`document.querySelector(".main")?.innerText.slice(0, 600)`)); throw e; });
+    if (label === "Settings") await openSettingsCard("定型の指示");
   };
   const open = async (label: string, ready: string) => {
     await call("Page.navigate", { url: base });
@@ -173,7 +176,7 @@ try {
   await page(`set(document.querySelector('.preset-picker input'), '#12')`);
   await sleep();
   await page(`button(picker(), '本文に入れる').click()`);
-  const box = await until(() => evaluate(`(() => { const v = document.querySelector('.compose textarea').value; return v.includes('#12') && { text: v, title: document.querySelector('.compose input:not([type])').value }; })()`), "the text in the request box");
+  const box = await until(() => evaluate(`(() => { const v = document.querySelector('.compose textarea').value; return v.includes('#12') && { text: v, title: document.querySelector('.compose-details input:not([type])').value }; })()`), "the text in the request box");
   assert(box.text === `PR ${REPO}#12 のレビュー指摘に対応してマージまで進めてください（review-triage-and-merge）`, `text: ${box.text}`);
   assert(box.title === `レビュー対応からマージまで ${REPO}#12`, `title: ${box.title}`);
   const chosenMode = await evaluate(`document.querySelector('.compose select.mode').value`);

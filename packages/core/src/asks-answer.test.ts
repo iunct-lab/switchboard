@@ -379,7 +379,7 @@ describe("POST /api/asks/answer — task side", () => {
   });
 
   test("task side: usage limit — the reply's turn stops at the limit; asked again, the answer says it waits for the limit to lift", async () => {
-    const base = await boot(fakeGh().gh, scripted([[{ t: "message.delta", role: "assistant", text: "**確認**: 続けるか" }, end("**確認**: 続けるか")], limitTurn]));
+    const base = await boot(fakeGh().gh, scripted([[{ t: "message.delta", role: "assistant", text: "**確認**: 続けるか\n**選択肢**:\n- A: 続ける" }, end("**確認**: 続けるか\n**選択肢**:\n- A: 続ける")], limitTurn]));
     const id = await checkTask(base, { workspaceId: undefined });
     const ask = await askOf(base, (a) => a.kind === "check" && a.task?.id === id);
     expect((await answer(base, ask.id, { kind: "text", text: "続けて" })).status).toBe(200);
@@ -391,7 +391,7 @@ describe("POST /api/asks/answer — task side", () => {
   });
 
   test("task side: send fails — over its budget the reply is not sent: resume failed with the reason, the question still open", async () => {
-    const base = await boot(fakeGh().gh, scripted([[{ t: "message.delta", role: "assistant", text: "**確認**: 続けるか" }, end("**確認**: 続けるか")]]));
+    const base = await boot(fakeGh().gh, scripted([[{ t: "message.delta", role: "assistant", text: "**確認**: 続けるか\n**選択肢**:\n- A: 続ける" }, end("**確認**: 続けるか\n**選択肢**:\n- A: 続ける")]]));
     const id = await checkTask(base, { budgetUsd: 0.01 });
     core!.db.insertLedger({ taskId: id, runner: "claude", model: "m", inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, costUsd: 1, billedUsd: 0, source: "reported", ts: Date.now() });
     const ask = await askOf(base, (a) => a.kind === "check" && a.task?.id === id);
@@ -417,17 +417,6 @@ describe("POST /api/asks/answer — task side", () => {
     expect(t.changes).toHaveLength(1);
     await until(() => userTurns(id).length > 0);
     expect(userTurns(id)[0]).toStartWith("マージ判定をやり直して\n\n（この回答は問いの時点の PR へのものです。回答の時点で: PR #12 の差分が変わりました");
-  });
-
-  test("task side: AskUserQuestion — answered with its questions on the Task's screen: no answers here, POST is 409, nothing reaches the runner", async () => {
-    const allows: string[] = [];
-    const base = await boot(fakeGh().gh, scripted([[{ ...ASK_WRITE, tool: "AskUserQuestion", detail: "どちらにしますか" }]], allows));
-    const id = await newTask(base, "question tool");
-    await until(() => status(id) === "waiting");
-    const ask = await askOf(base, (a) => a.kind === "approval" && a.task?.id === id);
-    expect(ask).toMatchObject({ route: "task", answers: [] });
-    expect((await answer(base, ask.id, { kind: "allow" })).status).toBe(409);
-    expect(allows).toEqual([]);
   });
 
   test("task side: stale approval — answered on the Task's screen first, the answer here is 409 and the runner hears once", async () => {

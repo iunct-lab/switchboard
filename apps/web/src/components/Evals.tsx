@@ -103,6 +103,7 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
             {summary.sample.length === 0 ? (
               <div className="muted">{t(m.noneJudgedLastWeek)}</div>
             ) : (
+              <div className="table-scroll">
               <table className="pricing evals-table evals-ask">
                 <tbody>
                   {summary.sample.map((r) => (
@@ -121,6 +122,7 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
                   ))}
                 </tbody>
               </table>
+              </div>
             )}
             <div className="hint">{t(m.gapLine, { gap: gapLabel(summary.gap) })}</div>
           </>
@@ -174,6 +176,7 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
         {rows && rows.length === 0 && <div className="muted">{failed ? t(m.loadFailedShort) : t(m.noTasks)}</div>}
         {rows && rows.length > 0 && sorted.length === 0 && <div className="muted">{t(m.noMatch)}</div>}
         {rows && sorted.length > 0 && (
+          <div className="table-scroll">
           <table className="pricing evals-table">
             <thead>
               <tr>
@@ -247,6 +250,7 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
               })}
             </tbody>
           </table>
+          </div>
         )}
         <div className="hint">{t(m.listFooter, { limit })}</div>
       </section>

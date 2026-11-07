@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Ask, AskBatch } from "@switchboard/protocol";
-import { answerButtons, batchLines, hiddenByBatches, grantOf, taskAsks, withoutGrant, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, broadTarget, previousLines, scopeLabel, blockerLines, groupAsks, isQuick, keptAnswers, KIND_LABEL, quickGroups, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, unblocksLine, workspaceChips, workspaceSections, type Answered } from "./asks.ts";
+import { answerButtons, askCardParts, batchLines, questionHead, hiddenByBatches, grantOf, taskAsks, withoutGrant, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, broadTarget, previousLines, scopeLabel, blockerLines, groupAsks, isQuick, keptAnswers, KIND_LABEL, quickGroups, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, unblocksLine, workspaceChips, workspaceSections, type Answered } from "./asks.ts";
 
 const ask = (over: Partial<Ask>): Ask => ({
   id: "a", kind: "decision", needs: "person", state: "open", at: 1, changedAt: 1, workspace: null, pbi: null, issue: null, task: null, reason: null, question: null, choices: [], grants: [], grant: null, recommendation: null, next: null,
@@ -350,4 +350,31 @@ test("quick: filtering keeps the order — the person's narrowed to the quick on
   const kept = after[0]!.asks.map((a) => order.indexOf(a.id));
   expect(kept).toEqual([...kept].sort((x, y) => x - y));
   expect(quickGroups(groupAsks([slow("s"), ask({ id: "w", kind: "wait", needs: "auto" })])).map((g) => g.key)).toEqual(["auto"]);
+});
+
+test("askCardParts (#4068): the PBI (else the Task) as the title, the question above, known facts, the unknown ones in one list", () => {
+  const empty = askCardParts(ask({}));
+  expect(empty.title).toBeNull();
+  expect(empty.question).toBeNull();
+  expect(empty.facts.map((f) => f.label)).toEqual(["元の記録"]);
+  expect(empty.unknown).toEqual(["問い", "対象リポジトリ", "PBI", "Task", "停止理由", "推奨と根拠", "回答後"]);
+  const some = askCardParts(ask({ task: { id: "tk", title: "#3 実装" }, question: "どちらにするか", reason: "実装の判断" }));
+  expect(some.title).toEqual({ text: "#3 実装" });
+  expect(some.question).toBe("どちらにするか");
+  expect(some.facts.map((f) => f.label)).toEqual(["Task", "停止理由", "元の記録"]);
+  const withPbi = askCardParts(ask({ pbi: { number: 3, title: "PBI: 判断待ち", url: "https://github.com/o/r/issues/3" }, task: { id: "tk", title: "#3 実装" } }));
+  expect(withPbi.title).toEqual({ text: "#3 PBI: 判断待ち", href: "https://github.com/o/r/issues/3" });
+});
+
+test("questionHead (#4068): a short question whole; a long one cut at six lines or about 300 characters, with more", () => {
+  expect(questionHead("どちらにするか")).toEqual({ head: "どちらにするか", more: false });
+  const many = Array.from({ length: 10 }, (_, i) => `行 ${i + 1}`).join("\n");
+  expect(questionHead(many)).toEqual({ head: "行 1\n行 2\n行 3\n行 4\n行 5\n行 6 …", more: true });
+  const long = "あ".repeat(500);
+  const h = questionHead(long);
+  expect(h.more).toBe(true);
+  expect(h.head.length).toBeLessThanOrEqual(302);
+  // an emoji across the cut stays whole
+  const emoji = questionHead("あ".repeat(299) + "😀" + "い".repeat(10));
+  expect(Array.from(emoji.head).at(-3)).toBe("😀");
 });

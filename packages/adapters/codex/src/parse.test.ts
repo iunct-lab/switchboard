@@ -1,9 +1,9 @@
 // test-reads: packages/adapters/codex/fixtures/fake-app-server.ts
 import { recordingText, skipRecordings, assertRecordings } from "../../../../scripts/recordings.ts";
 import { describe, expect, test } from "bun:test";
-import { AgentEvent, type StartOptions } from "@switchboard/protocol";
+import { AgentEvent, QUESTION_DEFERRED_REPLY, type StartOptions } from "@switchboard/protocol";
 import { appServerEnv, buildSandboxPolicy, buildThreadResumeParams, buildThreadStartParams, buildTurnStartParams, childEnv, CODEX_PERMISSION_MODES, resolveApprovalPolicy, resolvePermissionPreset } from "./index.ts";
-import { approvalDecision, createCodexParser, diffStat, jsonRpcResult, windowName } from "./parse.ts";
+import { approvalDecision, createCodexParser, deferredUserInput, diffStat, jsonRpcResult, windowName } from "./parse.ts";
 
 /** Fixtures are raw app-server stdio recordings; lines starting with "> " are what Switchboard sent. */
 async function load(name: string) {
@@ -41,6 +41,26 @@ describe("codex app-server → AgentEvent (recorded replay, codex-cli 0.148.0-al
     for (const f of ["exec-workspace-write", "approval-and-second-turn", "resume", "decline-and-interrupt"]) {
       for (const ev of await replay(f)) expect(() => AgentEvent.parse(ev)).not.toThrow();
     }
+  });
+
+  test.skipIf(skipRecordings("packages/adapters/codex/fixtures/question-tool.jsonl"))("question tool ends the turn: requestUserInput is a question.ask, every question answered with the deferred reply, the turn ends ok (0.166.0)", async () => {
+    // recorded 2026-11-05 with codex-cli 0.166.0, -c features.default_mode_request_user_input=true, no experimentalApi capability
+    assertRecordings("packages/adapters/codex/fixtures/question-tool.jsonl");
+    const evs = await replay("question-tool");
+    for (const ev of evs) expect(() => AgentEvent.parse(ev)).not.toThrow();
+    const asks = evs.filter((e) => e.t === "question.ask");
+    expect(asks).toHaveLength(1);
+    const ask = asks[0]!;
+    if (ask.t !== "question.ask") throw new Error();
+    expect(ask.questions.map((q) => [q.header, q.options.map((o) => o.label), q.multiSelect])).toEqual([["Area", ["web", "core"], false], ["Extras", ["tests", "docs"], false]]);
+    expect(evs.some((e) => e.t === "permission.ask")).toBe(false);
+    expect(evs.filter((e) => e.t === "session.end")).toMatchObject([{ status: "ok" }]);
+    // what the recording sent back is the deferred answer to each question id
+    const lines = await load("question-tool");
+    const request = lines.filter((l) => !l.startsWith("> ")).map((l) => JSON.parse(l)).find((m) => m.method === "item/tool/requestUserInput");
+    const sent = lines.filter((l) => l.startsWith("> ")).map((l) => JSON.parse(l.slice(2))).find((m) => m.id === request.id && m.result);
+    expect(sent.result).toEqual(deferredUserInput(request.params));
+    expect(Object.values(sent.result.answers)).toEqual([{ answers: [QUESTION_DEFERRED_REPLY] }, { answers: [QUESTION_DEFERRED_REPLY] }]);
   });
 
   test.skipIf(skipRecordings("packages/adapters/codex/fixtures/exec-workspace-write.jsonl"))("workspace-write run: session.start once, two exec tool calls with results, streamed answer, usage + quota, session.end ok", async () => {

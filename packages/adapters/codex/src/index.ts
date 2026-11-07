@@ -11,7 +11,7 @@ import type { ThreadStartParams } from "./generated/v2/ThreadStartParams";
 import type { Turn } from "./generated/v2/Turn";
 import type { TurnStartParams } from "./generated/v2/TurnStartParams";
 import type { TurnSteerParams } from "./generated/v2/TurnSteerParams";
-import { approvalDecision, CLIENT_INFO, createCodexParser, jsonRpcError, jsonRpcNotification, jsonRpcRequest, jsonRpcResult } from "./parse.ts";
+import { approvalDecision, CLIENT_INFO, createCodexParser, deferredUserInput, jsonRpcError, jsonRpcNotification, jsonRpcRequest, jsonRpcResult } from "./parse.ts";
 
 export * from "./parse.ts";
 
@@ -226,6 +226,12 @@ export async function loginStatus(exe: string, timeoutMs = 10_000): Promise<Runn
  * says: an sqlite under ~/.codex is not Markdown in a repo, and a Claude task cannot read it (docs/design/codex-app-server.md).
  */
 const MEMORY_OFF = "features.memories=false";
+/**
+ * The question tool in the default mode (#3057): without it the model asks in its reply (`agentMessage` questions with
+ * `delivery: "async"`) and sleeps 60 s before ending the turn; with it the questions arrive as `item/tool/requestUserInput`
+ * (codex-cli 0.165.0 and 0.166.0, no `experimentalApi` capability needed, docs/design/codex-app-server.md).
+ */
+const QUESTION_TOOL_ON = "features.default_mode_request_user_input=true";
 
 /**
  * A warning when this Codex does not turn memory off under the override: no `memories` row, still on, a failed
@@ -341,7 +347,7 @@ class CodexSession implements RunnerSession {
     private emit: (ev: AgentEvent) => void,
     private o: CodexAdapterOptions,
   ) {
-    const args = ["app-server", "--listen", "stdio://", "-c", MEMORY_OFF];
+    const args = ["app-server", "--listen", "stdio://", "-c", MEMORY_OFF, "-c", QUESTION_TOOL_ON];
     for (const c of o.config ?? []) args.push("-c", c);
     args.push(...bedrockConfigArgs(opts));
     this.proc = Bun.spawn([bin, ...args], { cwd: opts.cwd, env: childEnv(process.env, appServerEnv(opts)), stdin: "pipe", stdout: "pipe", stderr: "pipe", detached: true });
@@ -569,11 +575,13 @@ class CodexSession implements RunnerSession {
       return;
     }
     if (hasId) {
-      // Server request. Only approvals are supported; they get a per-process-unique public id the UI answers with.
+      // Server request: approvals get a per-process-unique public id the UI answers with; the question tool is answered here.
       const publicId = `${this.nonce}:${String(m.id)}`;
       const events = this.parser.feed(JSON.stringify({ ...m, id: publicId }));
       const ask = events.find((e) => e.t === "permission.ask");
       if (ask && ask.t === "permission.ask") this.openApprovals.set(ask.id, m.id as RpcId);
+      // the question tool (#3057) is answered at once with the deferred reply: the turn ends, the answers come as the next turn
+      else if (events.some((e) => e.t === "question.ask")) this.write(jsonRpcResult(m.id as RpcId, deferredUserInput(m.params)));
       else this.write(jsonRpcError(m.id as RpcId, `Switchboard does not support ${m.method}`));
       for (const ev of events) this.emit(ev);
       return;

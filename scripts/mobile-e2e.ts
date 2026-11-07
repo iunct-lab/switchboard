@@ -6,7 +6,7 @@
  * Home's new-task form fits a phone and 開始 starts a task from it (#391). Knowledge stacks its list, the note and its
  * details, and a note picked from the list can be read (#392). Ledger, Backlog and Schedules (its form open too) do not
  * scroll sideways, and a schedule is added from a phone (#393). Settings does not either, its toggles' labels wrapping inside
- * the screen, with the LLM suggestions' "not detected" note shown too (#3819). At 1280 and 390 the top bar's Rescue opens the rescue page
+ * the screen, with the LLM suggestions' "not detected" note shown too (#3819); its folded cards' titles are 44px or taller (#3849). At 1280 and 390 the top bar's Rescue opens the rescue page
  * the daemon names (a fake sb-rescue standing in for the host's /rescue/, #399); when its answer comes late the tabs keep their
  * places and a tap before it lands on the tab, not on Rescue (#1485).
  * SCREENSHOT_DIR=<dir> saves Home, a task and Settings at 1280 × 800 first (compare them before and after a layout change).
@@ -137,6 +137,8 @@ try {
   // The PC layout first: 1280 × 800 keeps the rail's list, no 一覧 button.
   await size(1280, 800, false);
   const shots = process.env.SCREENSHOT_DIR;
+  /** Settings' cards are folded (#3849): opened all, so what is measured inside them is drawn. */
+  const openAllSettingsCards = `document.querySelectorAll('.settings details.card').forEach((d) => { d.open = true; })`;
   const shoot = async (name: string) => {
     if (!shots) return;
     mkdirSync(shots, { recursive: true });
@@ -151,6 +153,7 @@ try {
   if (shots) {
     await tap(`[...document.querySelectorAll('.tabs button')].find(b => b.textContent === 'Settings')`, false);
     await until(() => evaluate(`!!document.querySelector('.main.settings .warn')`), "Settings at 1280");
+    await evaluate(openAllSettingsCards);
     await shoot("settings-1280x800.png");
     // The toggles' row heights, to compare before and after a change to their wrapping.
     console.log(JSON.stringify({ settingsToggleHeights1280: await evaluate(`[...document.querySelectorAll('.settings label.toggle')].map(e => e.getBoundingClientRect().height)`) }));
@@ -318,6 +321,11 @@ try {
         await until(() => evaluate(`!!document.querySelector('.schedules .fields textarea')`), `${label}: the schedule form opens`);
       }
       if (cls === "settings") {
+        // folded, each card's title is a tap target of 44px or more on a phone (#3849)
+        const titles = await evaluate(`[...document.querySelectorAll('.settings details.card > summary')].map(e => [e.textContent.trim(), e.getBoundingClientRect().height])`) as Array<[string, number]>;
+        assert(titles.length > 0 && (width !== 390 || titles.every(([, h]) => h >= 44)), `${label}: Settings card titles under 44px: ${JSON.stringify(titles.filter(([, h]) => h < 44))}`);
+        if (width === 390) measured.settingsTitlesMinHeight = Math.min(...titles.map(([, h]) => h));
+        await evaluate(openAllSettingsCards);
         assert(await evaluate(`!!document.querySelector('.settings label.toggle .warn')`), `${label}: Settings does not show the LLM runner's "not detected" note`);
         const over = await evaluate(`[...document.querySelectorAll('.settings label.toggle')].filter(e => e.getBoundingClientRect().right >= ${width + 1}).map(e => e.textContent + ' ' + Math.round(e.getBoundingClientRect().right))`) as string[];
         assert(over.length === 0, `${label}: Settings toggles past the screen: ${JSON.stringify(over)}`);

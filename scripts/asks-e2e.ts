@@ -15,12 +15,15 @@
  * #1674: #306's decision, which the Ready #309 names as its prerequisite, is the first of the person's with 答えると 1 件が進められる.
  * #2221: a decision and an operational check that name a Task's two screen mockups — a button each on their cards, the
  * pressed one opened in the card, the same buttons over the Backlog's answer box — at 1280 and 390.
+ * #3058: a question tool's three questions (two with options, one without) on one card — a free-text field only on the
+ * one without, one 回答する once all are answered, one reply — on the 判断待ち screen at 1280 and the Task screen at 390;
+ * a card whose one question has no options takes no answer (Task を開く); nothing sideways at 390.
  */
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent, RunnerAdapter, RunnerId, Task } from "@switchboard/protocol";
+import type { AgentEvent, AskQuestion, RunnerAdapter, RunnerId, Task } from "@switchboard/protocol";
 import { importing, sending } from "../packages/core/fixtures/github-import.ts";
 import type { GhRunner } from "../packages/core/src/backlog.ts";
 import { loadConfig } from "../packages/core/src/config.ts";
@@ -79,6 +82,15 @@ let mockTask = "";
 const mockCheck = () => `**確認**: どちらの画面にするか\n**選択肢**:\n- A: 上に並べる — 影響: 1 回で届く\n- B: 下に並べる — 影響: 2 回で届く\n**推奨**: A — 手数が少ない\n**画面イメージ**: ${mockTask}`;
 const LIMIT = "You've hit your session limit · resets 4:10am (Asia/Tokyo)";
 const answered: string[] = [];
+/** #3058: the question tool's questions of the "questions" and "questionfree" prompts. */
+const QUESTION_SCRIPTS: Record<string, AskQuestion[]> = {
+  questions: [
+    { header: "場所", question: "どこを直すか", options: [{ label: "web", description: "画面" }, { label: "core", description: "デーモン" }], multiSelect: false },
+    { header: null, question: "何を足すか", options: [{ label: "テスト", description: null }, { label: "文書", description: null }], multiSelect: true },
+    { header: null, question: "ほかに", options: [], multiSelect: false },
+  ],
+  questionfree: [{ header: null, question: "何を直せばよいか", options: [], multiSelect: false }],
+};
 const replies: Array<{ prompt: string; text: string }> = [];
 /**
  * Either runner: "write" asks for a Write and keeps running after the answer, a stage Task's /pbi-complete just runs, any
@@ -91,9 +103,10 @@ const runner = (id: RunnerId): RunnerAdapter => ({
   start(opts, emit) {
     let exit!: (c: number | null) => void;
     const exited = new Promise<number | null>((r) => (exit = r));
-    const summary = opts.prompt === "checkmock" ? mockCheck() : opts.prompt === "check" ? CHECK : opts.prompt === "check14" ? checkOf(14) : opts.prompt === "checknopr" ? "**確認**: 続けるか\n**選択肢**:\n- A: はい — 影響: 進む\n- B: いいえ — 影響: 止まる" : opts.prompt === "check13" ? checkOf(13) : opts.prompt === "limit" || opts.prompt === "budget" ? "**確認**: 続けるか" : "done";
+    const summary = opts.prompt === "checkmock" ? mockCheck() : opts.prompt === "check" ? CHECK : opts.prompt === "check14" ? checkOf(14) : opts.prompt === "checknopr" ? "**確認**: 続けるか\n**選択肢**:\n- A: はい — 影響: 進む\n- B: いいえ — 影響: 止まる" : opts.prompt === "check13" ? checkOf(13) : opts.prompt === "limit" || opts.prompt === "budget" ? "**確認**: 続けるか\n**選択肢**:\n- A: 続ける — 影響: 進む" : "done";
     const execAsk = (command: string): AgentEvent[] => [{ t: "permission.ask", id: "perm1", kind: "exec", tool: "Bash", input: { command }, detail: command }];
-    const script: AgentEvent[] = opts.prompt.includes("/pbi-complete") ? [] : opts.prompt === "exec" ? execAsk("bun test packages/core") : opts.prompt === "exec2" ? execAsk("bun test apps/web") : opts.prompt === "exec3" ? execAsk("git status --short") : opts.prompt === "write" ? [{ t: "permission.ask", id: "perm1", kind: "write", tool: "Write", input: { file_path: "/tmp/x" }, detail: "write x" }] : [{ t: "session.end", status: "ok", summary }];
+    const asked = QUESTION_SCRIPTS[opts.prompt];
+    const script: AgentEvent[] = asked ? [{ t: "question.ask", id: "q1", questions: asked }, { t: "session.end", status: "ok", summary: "Waiting for your choices" }] : opts.prompt.includes("/pbi-complete") ? [] : opts.prompt === "exec" ? execAsk("bun test packages/core") : opts.prompt === "exec2" ? execAsk("bun test apps/web") : opts.prompt === "exec3" ? execAsk("git status --short") : opts.prompt === "write" ? [{ t: "permission.ask", id: "perm1", kind: "write", tool: "Write", input: { file_path: "/tmp/x" }, detail: "write x" }] : [{ t: "session.end", status: "ok", summary }];
     queueMicrotask(() => script.forEach((ev) => emit(ev)));
     return {
       send(text: string) {
@@ -189,6 +202,8 @@ try {
     if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
     return result.result.value;
   };
+  /** Opens the folded Settings card with this title (#3849), once Settings has drawn it: a card shows only its title until opened. */
+  const openSettingsCard = (title: string) => until(() => evaluate(`(() => { const d = [...document.querySelectorAll('.settings details.card')].find((d) => d.querySelector('summary').textContent.trim() === ${JSON.stringify(title)}); if (d) d.open = true; return !!d; })()`), `the ${title} card`);
   await call("Runtime.enable");
   await call("Log.enable");
   await call("Page.enable");
@@ -477,6 +492,7 @@ stageOf(ci, 304);
   // (c) the settings list the two with range, operation and expiry
   const settings = async () => {
     await evaluate(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Settings').click()`);
+    await openSettingsCard("回答の方針");
     await until(() => evaluate(`!!document.querySelector('.policies .policy-row')`), "the policy list");
     await evaluate(`document.querySelector('.policies').scrollIntoView()`);
   };
@@ -696,6 +712,64 @@ stageOf(ci, 304);
   await call("Emulation.setTouchEmulationEnabled", { enabled: true });
   await checkMock(390);
   report.mockups = { task: mt.id, widths: [1280, 390] };
+
+  // #3058: the question tool's questions, answered together on the same card on both screens
+  const qTask = async (title: string, prompt: string) => {
+    const t = await post("/api/tasks", { workspaceId: meta.id, title, prompt, runner: "codex" });
+    await until(() => status(t.id) === "done", `task ${title}`);
+    return t.id as string;
+  };
+  const q1 = await qTask("質問ツールの Task", "questions");
+  const q2 = await qTask("質問ツールの Task（Task 画面）", "questions");
+  const qf = await qTask("選択肢の無い問いだけの Task", "questionfree");
+  const REPLY = "- どこを直すか: core\n- 何を足すか: テスト, 文書\n- ほかに: 急ぎで";
+  const shape = (scope: string) => evaluate(`(() => { const c = ${scope}; const fs = [...c.querySelectorAll('.ask-questions fieldset')]; return { fieldsets: fs.length, free: fs.map(f => !!f.querySelector('textarea')), textareas: c.querySelectorAll('textarea').length, submit: [...c.querySelectorAll('button')].some(b => b.textContent.trim() === '回答する'), openTask: [...c.querySelectorAll('button')].some(b => b.textContent.trim() === 'Task を開く') }; })()`) as Promise<Json>;
+  const submitOff = (scope: string) => evaluate(`[...(${scope}).querySelectorAll('.ask-questions button')].find(b => b.textContent.trim() === '回答する').disabled`) as Promise<boolean>;
+  const answerAll = async (scope: string, where: string) => {
+    assert(await submitOff(scope), `${where}: 回答する is off before any answer`);
+    for (const label of ["core", "テスト", "文書"]) await evaluate(`[...(${scope}).querySelectorAll('.ask-questions label.opt')].find(l => l.textContent.trim().startsWith(${JSON.stringify(label)})).querySelector('input').click()`);
+    assert(await submitOff(scope), `${where}: 回答する is still off with the free-text question unanswered`);
+    await evaluate(`(() => { const t = (${scope}).querySelector('.ask-questions textarea'); const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; set.call(t, '急ぎで'); t.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    assert(!(await submitOff(scope)), `${where}: 回答する is on once every question has an answer`);
+    await evaluate(`[...(${scope}).querySelectorAll('.ask-questions button')].find(b => b.textContent.trim() === '回答する').click()`);
+  };
+  const sideways = async (w: number, where: string) => {
+    const sw = await evaluate("document.documentElement.scrollWidth") as number;
+    assert(sw <= w, `${where} scrolls sideways at ${w}px (${sw})`);
+  };
+  await call("Emulation.setTouchEmulationEnabled", { enabled: false });
+  await call("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  await open();
+  await cardOf(`check:${q1}:`);
+  await cardOf(`check:${qf}:`);
+  const q1Shape = await shape(card(`check:${q1}:`));
+  assert(same(q1Shape, { fieldsets: 3, free: [false, false, true], textareas: 1, submit: true, openTask: true }), `the questions' card: ${JSON.stringify(q1Shape)}`);
+  const qfShape = await shape(card(`check:${qf}:`));
+  assert(same(qfShape, { fieldsets: 0, free: [], textareas: 0, submit: false, openTask: true }), `the card of a question without options: ${JSON.stringify(qfShape)}`);
+  await evaluate(`${card(`check:${q1}:`)}.scrollIntoView({ block: "start" })`);
+  await shot("asks-questions-1280.png");
+  await answerAll(card(`check:${q1}:`), "判断待ち");
+  await until(() => replies.filter((r) => r.prompt === "questions").length === 1, "the answers reach the Task");
+  assert(same(replies.filter((r) => r.prompt === "questions").map((r) => r.text), [REPLY]), `the reply: ${JSON.stringify(replies.filter((r) => r.prompt === "questions"))}`);
+  await call("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
+  await call("Emulation.setTouchEmulationEnabled", { enabled: true });
+  await open();
+  await cardOf(`check:${qf}:`);
+  await sideways(390, "the 判断待ち screen with the questions' cards");
+  await evaluate(`${card(`check:${qf}:`)}.scrollIntoView({ block: "start" })`);
+  await shot("asks-questions-390.png");
+  await press(`check:${q2}:`, "Task を開く");
+  const taskAsks = "document.querySelector('.task-asks')";
+  await until(() => evaluate(`!!${taskAsks}?.querySelector('.ask-questions')`), "the questions on the Task screen");
+  const onTask = await shape(taskAsks);
+  assert(same({ ...onTask, openTask: undefined }, { fieldsets: 3, free: [false, false, true], textareas: 1, submit: true, openTask: undefined }), `the questions on the Task screen: ${JSON.stringify(onTask)}`);
+  await sideways(390, "the Task screen with the questions");
+  await evaluate(`${taskAsks}.scrollIntoView({ block: "start" })`);
+  await shot("task-questions-390.png");
+  await answerAll(taskAsks, "Task 画面");
+  await until(() => replies.filter((r) => r.prompt === "questions").length === 2, "the answers on the Task screen reach the Task");
+  assert(replies.filter((r) => r.prompt === "questions")[1]!.text === REPLY, "the reply from the Task screen");
+  report.questions = { tasks: [q1, q2, qf], reply: REPLY, widths: [1280, 390] };
 
   assert(!errors.length, `console errors: ${JSON.stringify(errors)}`);
   console.log(JSON.stringify({ ...report, answered, consoleErrors: errors.length }));

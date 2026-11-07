@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent } from "@switchboard/protocol";
+import { QUESTION_DEFERRED_REPLY, type AgentEvent } from "@switchboard/protocol";
 import { bedrockModelName, CODEX_BEDROCK_MODELS, codexSessionExists, createCodexAdapter, memoryOffNote } from "./index.ts";
 
 const FAKE = new URL("../fixtures/fake-app-server.ts", import.meta.url).pathname;
@@ -182,9 +182,9 @@ describe("bedrock (#1731)", () => {
     };
     try {
       const plain = await run("plain");
-      expect(plain.argv).toEqual(["app-server", "--listen", "stdio://", "-c", "features.memories=false", "-c", "x=1"]);
+      expect(plain.argv).toEqual(["app-server", "--listen", "stdio://", "-c", "features.memories=false", "-c", "features.default_mode_request_user_input=true", "-c", "x=1"]);
       const bedrock = await run("bedrock", { region: "ap-northeast-1" });
-      expect(bedrock.argv).toEqual(["app-server", "--listen", "stdio://", "-c", "features.memories=false", "-c", "x=1", "-c", 'model_provider="amazon-bedrock"', "-c", 'model_providers.amazon-bedrock.aws.region="ap-northeast-1"']);
+      expect(bedrock.argv).toEqual(["app-server", "--listen", "stdio://", "-c", "features.memories=false", "-c", "features.default_mode_request_user_input=true", "-c", "x=1", "-c", 'model_provider="amazon-bedrock"', "-c", 'model_providers.amazon-bedrock.aws.region="ap-northeast-1"']);
       // the environment is the same either way: no key or variable is added for Bedrock
       const names = (env: string) => env.split("\n").map((l) => l.split("=")[0]).filter((n) => n && n !== "OUT").sort();
       expect(names(bedrock.env)).toEqual(names(plain.env));
@@ -270,6 +270,29 @@ describe("memories", () => {
       expect(await memoryOffNote(script("memories   stable   false'; sleep 5; echo '"), 100)).toContain("features.memories");
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("question tool (#3057)", () => {
+  test("question tool ends the turn: requestUserInput gets the deferred reply for every question once, and the turn ends ok", async () => {
+    const home = mkdtempSync(join(tmpdir(), "sb-codex-question-"));
+    const log = join(home, "wire.jsonl");
+    const events: AgentEvent[] = [];
+    const session = createCodexAdapter({ bin: FAKE, codexHome: home, config: [`test_wire_log=${log}`] }).start({ cwd: home, scope: [home], prompt: "question: ask", permissionMode: "auto" }, (e) => events.push(e));
+    try {
+      for (const deadline = Date.now() + 5000; !events.some((e) => e.t === "session.end") && Date.now() < deadline; ) await Bun.sleep(20);
+      const wire = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+      // started with the flag that hands the model the tool in the default mode
+      const argv = wire[0].argv as string[];
+      expect(argv[argv.indexOf("features.default_mode_request_user_input=true") - 1]).toBe("-c");
+      const answers = wire.filter((m) => m.result?.answers);
+      expect(answers.map((m) => m.result)).toEqual([{ answers: { area: { answers: [QUESTION_DEFERRED_REPLY] }, note: { answers: [QUESTION_DEFERRED_REPLY] } } }]);
+      expect(events.filter((e) => e.t === "question.ask")).toMatchObject([{ questions: [{ header: "Area", question: "Which part?", options: [{ label: "web", description: "web." }, { label: "core", description: "core." }], multiSelect: false }, { header: "Note", options: [] }] }]);
+      expect(events.filter((e) => e.t === "session.end")).toMatchObject([{ status: "ok", summary: "Waiting for your choices" }]);
+    } finally {
+      await session.close();
+      rmSync(home, { recursive: true, force: true });
     }
   });
 });

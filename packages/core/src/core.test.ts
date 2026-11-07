@@ -44,7 +44,7 @@ const NO_GH = async () => ({ code: 1, stdout: "", stderr: "no gh in this test" }
 const NO_HISTORY = { SWITCHBOARD_CLAUDE_PROJECTS: join(tmpdir(), "switchboard-test-no-claude-projects"), SWITCHBOARD_HISTORY_POLL_MS: "0" };
 
 /** A scripted fake runner: replays the recorded Claude fixture events, pauses on permission.ask until answered. */
-function fakeAdapter(script: AgentEvent[], opts: { id?: RunnerId; lingers?: boolean; starts?: StartOptions[]; sends?: string[]; modes?: string[]; dangerModes?: string[]; defaultMode?: string; liveSwitch?: boolean; refuseMode?: string; modeChanges?: string[]; slowMs?: number; closeMs?: number; models?: string[]; bedrockModels?: string[]; efforts?: string[]; cliDefaultModel?: () => string | undefined; answers?: unknown[]; detect?: () => Partial<RunnerDetection> } = {}): RunnerAdapter {
+function fakeAdapter(script: AgentEvent[], opts: { id?: RunnerId; lingers?: boolean; starts?: StartOptions[]; sends?: string[]; modes?: string[]; dangerModes?: string[]; defaultMode?: string; liveSwitch?: boolean; refuseMode?: string; modeChanges?: string[]; slowMs?: number; closeMs?: number; models?: string[]; bedrockModels?: string[]; efforts?: string[]; cliDefaultModel?: () => string | undefined; detect?: () => Partial<RunnerDetection> } = {}): RunnerAdapter {
   return {
     id: opts.id ?? "claude",
     models: opts.models?.map((value) => ({ value, label: value })),
@@ -85,9 +85,8 @@ function fakeAdapter(script: AgentEvent[], opts: { id?: RunnerId; lingers?: bool
           i = 0;
           schedule(pump);
         },
-        respondPermission: (id, decision, _reason, by = "user", answers) => {
+        respondPermission: (id, decision, _reason, by = "user") => {
           if (waitingFor !== id) throw new Error("unexpected permission id");
-          opts.answers?.push(answers);
           waitingFor = null;
           emit({ t: "permission.resolved", id, decision, by });
           queueMicrotask(pump);
@@ -133,13 +132,11 @@ const j = (r: Response) => r.json() as Promise<any>;
 let home: string;
 let core: Awaited<ReturnType<typeof startServer>>;
 let base: string;
-/** `answers` of every permission answered through the shared daemon, in order (undefined for a bare allow / deny). */
-const ANSWERS: unknown[] = [];
 
 beforeAll(async () => {
   home = mkdtempSync(join(tmpdir(), "switchboard-test-"));
   const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_PORT: "0", ...NO_HISTORY });
-  core = await startServer(cfg, [fakeAdapter(SCRIPT, { answers: ANSWERS })], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: NO_GH });
+  core = await startServer(cfg, [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: NO_GH });
   base = `http://127.0.0.1:${core.server.port}`;
 });
 
@@ -1244,30 +1241,6 @@ describe("core daemon", () => {
     expect(log[0]).toMatchObject({ taskId: t.id, suggested: "codex", chosen: "claude", status: "done" });
   });
 
-  test("POST /permission hands `answers` (AskUserQuestion) to the runner session; a malformed one is a 400 and the ask stays open", async () => {
-    const dir = join(home, "answers-cwd");
-    mkdirSync(dir, { recursive: true });
-    const t = await fetch(`${base}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: dir, title: "question", prompt: "p", runner: "claude" }) }).then(j);
-    await waitFor(async () => (await getTask(t.id)).task.status === "waiting");
-    const ask = (await getTask(t.id)).events.map((e: { ev: AgentEvent }) => e.ev).find((e: AgentEvent) => e.t === "permission.ask");
-    const send = (answers: unknown) => fetch(`${base}/api/tasks/${t.id}/permission`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: ask.id, decision: "allow", answers }) });
-    expect((await send({ "Which color?": ["Blue"] })).status).toBe(400);
-    expect((await getTask(t.id)).task.status).toBe("waiting");
-    const before = ANSWERS.length;
-    expect((await send({ "Which color?": "Blue" })).status).toBe(200);
-    expect(ANSWERS.slice(before)).toEqual([{ "Which color?": "Blue" }]);
-    await waitFor(async () => (await getTask(t.id)).task.status === "done");
-
-    // the question text is the agent's: a key that is an Object.prototype name reaches the session like any other
-    const t2 = await fetch(`${base}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: dir, title: "question 2", prompt: "p", runner: "claude" }) }).then(j);
-    await waitFor(async () => (await getTask(t2.id)).task.status === "waiting");
-    const ask2 = (await getTask(t2.id)).events.map((e: { ev: AgentEvent }) => e.ev).find((e: AgentEvent) => e.t === "permission.ask");
-    const raw = `{"id":${JSON.stringify(ask2.id)},"decision":"allow","answers":{"__proto__":"x","constructor":"A"}}`;
-    expect((await fetch(`${base}/api/tasks/${t2.id}/permission`, { method: "POST", headers: { "content-type": "application/json" }, body: raw })).status).toBe(200);
-    expect(JSON.stringify(ANSWERS.at(-1))).toBe('{"__proto__":"x","constructor":"A"}');
-    await waitFor(async () => (await getTask(t2.id)).task.status === "done");
-  });
-
   test("the routing log carries the task's outcome (status / costUsd / durationMs) and exports as JSONL (#25)", async () => {
     const dir = join(home, "routing-export-cwd");
     mkdirSync(dir, { recursive: true });
@@ -1320,6 +1293,26 @@ describe("core daemon", () => {
     const all = await logRows();
     for (const q of ["?limit=nonsense", "?limit=", "?limit=0", "?limit=-5"]) expect(await logRows(q)).toHaveLength(all.length);
   });
+
+  test("settings: reviewRunner is other until set, keeps what PATCH saved, and refuses other values (#4024)", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-test-review-runner-"));
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0 });
+    const b = `http://${"127.0.0.1"}:${c.server.port}`;
+    const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const saved = async () => (await fetch(`${b}/api/settings`).then(j)).reviewRunner;
+    try {
+      expect(await saved()).toBe("other");
+      expect((await patch({ reviewRunner: "same" })).status).toBe(200);
+      expect(await saved()).toBe("same");
+      expect((await patch({ titles: { auto: false } })).status).toBe(200);
+      expect(await saved()).toBe("same");
+      expect((await patch({ reviewRunner: "codex" })).status).toBe(400);
+      expect(await saved()).toBe("same");
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  }, 20000);
 
   test("suggester: the LLM proposal rides along, and a disabled one leaves the rule table in charge (#25)", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-suggester-"));
@@ -2133,7 +2126,7 @@ describe("core daemon", () => {
       expect(saved.defaultPermissionMode).toEqual({ claude: "plan" });
       expect(saved.runners[0].defaultPermissionMode).toBe("plan");
       expect((await fetch(`${b8}/api/health`).then(j)).runners[0].defaultPermissionMode).toBe("plan");
-      expect(c8.db.getSetting("settings", {})).toEqual({ defaultPermissionMode: { claude: "plan" }, autoResume: {}, bedrock: {}, shadowRunner: null, routing: { llm: { enabled: false, runner: "claude", model: "", timeoutMs: 5000 } }, judge: { enabled: true, runner: "codex", model: "gpt-6-luna" }, autoStart: { runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" }, evals: { judge: { enabled: true } }, titles: { auto: true }, quotaAndResume: { backlogQuotaLimit: 0.8, retryDelayMs: 900_000, retryMaxDelayMs: 14_400_000, maxLimitStops: 8, resumePrompt: "使用上限がリセットされました。中断した箇所から作業を続けてください。", maxStopResumes: 2, thinSample: 5 }, judgeAndChoice: { judgeFallbackRunner: "claude", judgeFallbackModel: "claude-haiku-4-5", judgeTimeoutMs: 60_000, workspaceChoiceTimeoutMs: 60_000 }, newDefaults: { taskRunner: "claude", scheduleCron: "0 3 * * *" }, prices: {}, models: {}, hiddenModels: {} });
+      expect(c8.db.getSetting("settings", {})).toEqual({ defaultPermissionMode: { claude: "plan" }, autoResume: {}, bedrock: {}, shadowRunner: null, routing: { llm: { enabled: false, runner: "claude", model: "", timeoutMs: 5000 } }, judge: { enabled: true, runner: "codex", model: "gpt-6-luna" }, autoStart: { runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" }, reviewRunner: "other", evals: { judge: { enabled: true } }, titles: { auto: true }, quotaAndResume: { backlogQuotaLimit: 0.8, retryDelayMs: 900_000, retryMaxDelayMs: 14_400_000, maxLimitStops: 8, resumePrompt: "使用上限がリセットされました。中断した箇所から作業を続けてください。", maxStopResumes: 2, thinSample: 5 }, judgeAndChoice: { judgeFallbackRunner: "claude", judgeFallbackModel: "claude-haiku-4-5", judgeTimeoutMs: 60_000, workspaceChoiceTimeoutMs: 60_000 }, newDefaults: { taskRunner: "claude", scheduleCron: "0 3 * * *" }, prices: {}, models: {}, hiddenModels: {} });
       const t4 = await post("/api/tasks", { cwd: h8, title: "t4", prompt: "p", runner: "claude" }).then(j);
       expect(t4.permissionMode).toBe("plan");
       expect(starts[2]?.permissionMode).toBe("plan");
@@ -5146,10 +5139,16 @@ describe("ops resources", () => {
       group(now - 60_000, "t_ci", "task", "test", 700_000_000, 4);
       group(now - 60_000, null, "daemon", "judge", 50_000_000, 1);
       group(now - 60_000, "t_unknown", "task", "runner", 100_000_000, 1);
+      // the jobs Tasks asked for (#3995): one running, one ended an hour ago, one ended 8 days ago (not shown)
+      const job = (pr: number) => db.insertJob({ kind: pr === 3 ? "review" : "local-ci", taskId: pr === 2 ? "t_unknown" : "t_ci", pr, runner: pr === 3 ? "codex" : null, cwd: "/w", startedAt: at - 9 * 24 * 3600_000 });
+      const running = job(1);
+      const ended = job(2);
+      db.finishJob(ended.id, { status: "fail", exitCode: 1, summary: "fail", endedAt: at - 3600_000 });
+      db.finishJob(job(3).id, { status: "pass", exitCode: 0, summary: "pass", endedAt: at - 8 * 24 * 3600_000 });
       const raw = opsResources(db, { home: h, procRoot: proc, now: at });
       expect(reads).toHaveBeenCalledTimes(1); // the second read of an unchanged history uses the first's medians
       reads.mockRestore();
-      expect(Object.keys(raw)).toEqual(["memory", "slots", "eta", "consumers"]); // the history's lines are not in the answer
+      expect(Object.keys(raw)).toEqual(["memory", "slots", "eta", "consumers", "jobs"]); // the history's lines are not in the answer
       // a run ends: the history changes, and the next read takes it in
       appendFileSync(join(state, "history.jsonl"), `${entry("bun test", 20)}\n`);
       expect(opsResources(db, { home: h, procRoot: proc, now: at }).slots.waiting[0]!.samples).toBe(4);
@@ -5165,6 +5164,10 @@ describe("ops resources", () => {
         "t_ci/PBI の local-ci/browser/300000000/3",
         "t_unknown/null/runner/100000000/1",
         "null/null/judge/50000000/1",
+      ]);
+      expect(r.jobs).toEqual([
+        { id: ended.id, kind: "local-ci", taskId: "t_unknown", taskTitle: null, pr: 2, runner: null, status: "fail", exitCode: 1, startedAt: at - 9 * 24 * 3600_000, endedAt: at - 3600_000 },
+        { id: running.id, kind: "local-ci", taskId: "t_ci", taskTitle: "PBI の local-ci", pr: 1, runner: null, status: "running", exitCode: null, startedAt: at - 9 * 24 * 3600_000, endedAt: null },
       ]);
       expect(procs).not.toHaveBeenCalled();
       // no meminfo (macOS): no memory, the rest as before

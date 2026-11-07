@@ -85,8 +85,10 @@ export function WorkspaceCard(props: { workspaces: Workspace[]; clones: Workspac
     </label>
   );
   return (
-    <section className="card" id="workspace">
-      <h5>Workspace</h5>
+    <details className="card" id="workspace">
+      <summary>
+        <h5>Workspace</h5>
+      </summary>
       {props.workspaces.filter((w) => w.kind === "repo").map((w) => (
         <div key={w.id}>
           <div className="row">
@@ -191,6 +193,6 @@ export function WorkspaceCard(props: { workspaces: Workspace[]; clones: Workspac
           {localBacklogBox}
         </>
       )}
-    </section>
+    </details>
   );
 }

@@ -54,6 +54,7 @@ export function Flow() {
             {t(m.closedLine, { now: view.current.closed, before: view.previous.closed, points: view.current.storyPoints })}
             {bottleneck && <>{t(m.bottleneck)}<b data-flow-bottleneck>{bottleneck}</b></>}
           </div>
+          <div className="table-scroll">
           <table className="pricing flow-table">
             <thead>
               <tr>
@@ -76,6 +77,7 @@ export function Flow() {
               ))}
             </tbody>
           </table>
+          </div>
           <div className="hint">{t(m.slowest)}</div>
           {view.slowest.map((p) => {
             const r = slowRow(p);

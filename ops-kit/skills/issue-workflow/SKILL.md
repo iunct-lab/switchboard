@@ -334,7 +334,7 @@ Issue・Project の照会と編集は、どの環境でも `ops-kit backlog`（`
 
 ```bash
 ops-kit backlog view <num> [--fresh]          # 本文・コメント・Project のフィールドと「最終取得 … 同期 …」
-ops-kit backlog list [--search <語>] [--label <l>]... [--state open|closed|all] [--fresh]
+ops-kit backlog list [--search <語>] [--label <l>]... [--state open|closed|all] [--type issue|change|all] [--fresh]
 ops-kit backlog create --title "要望: <題>" --body-file "$W/request.md" --label type:request --field Status=Backlog   # 要望は 4 バッククォートの text フェンスに。--field が無いと Project に入らない
 ops-kit backlog create --title "PBI: <題>" --body-file "$W/pbi.md" --label type:pbi --milestone "Phase N — …" --field Status=Backlog
 ops-kit backlog create --title "Task: <題>" --body-file "$W/task.md" --label type:task --parent <PBI> --milestone "Phase N — …" --field Status=Backlog

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { OpsResources } from "@switchboard/protocol";
 import { api } from "../api.ts";
-import { atLabel, consumerRows, etaLine, latestAnswer, memoryLine, runOwner, since, typicalLabel, verdictLabel, waitLine, watchResources } from "../resources.ts";
+import { atLabel, consumerRows, etaLine, jobRow, latestAnswer, memoryLine, runOwner, since, typicalLabel, verdictLabel, waitLine, watchResources } from "../resources.ts";
 import { t } from "../i18n.ts";
 import { common as m } from "../i18n/common.ts";
 
@@ -97,6 +97,7 @@ export function Resources(props: { onOpenTask: (id: string) => void }) {
             {r.slots.waiting.length === 0 ? (
               <div className="muted">{t(m.resNone)}</div>
             ) : (
+              <div className="table-scroll">
               <table className="pricing" data-resources-waiting>
                 <thead>
                   <tr>
@@ -119,11 +120,13 @@ export function Resources(props: { onOpenTask: (id: string) => void }) {
                   ))}
                 </tbody>
               </table>
+              </div>
             )}
             <h5>{t(m.resRunningHeading)}</h5>
             {r.slots.running.length === 0 ? (
               <div className="muted">{t(m.resNone)}</div>
             ) : (
+              <div className="table-scroll">
               <table className="pricing" data-resources-running>
                 <thead>
                   <tr>
@@ -150,6 +153,44 @@ export function Resources(props: { onOpenTask: (id: string) => void }) {
                   ))}
                 </tbody>
               </table>
+              </div>
+            )}
+            <div className="row head">
+              <h5>{t(m.resJobsHeading)}</h5>
+              <span className="hint">{t(m.resJobsHint)}</span>
+            </div>
+            {r.jobs.length === 0 ? (
+              <div className="muted">{t(m.resNone)}</div>
+            ) : (
+              <div className="table-scroll">
+              <table className="pricing" data-resources-jobs>
+                <thead>
+                  <tr>
+                    <th>id</th>
+                    <th>{t(m.resColKind)}</th>
+                    <th>PR</th>
+                    <th>Task</th>
+                    <th>{t(m.resColStatus)}</th>
+                    <th>{t(m.resColElapsed)}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {r.jobs.map((j) => {
+                    const row = jobRow(j, now);
+                    return (
+                      <tr key={j.id} data-resources-job={j.id}>
+                        <td className="mono">job#{j.id}</td>
+                        <td>{row.kind}</td>
+                        <td className="num">#{j.pr}</td>
+                        <td>{task(j)}</td>
+                        <td data-resources-job-status={j.status}>{j.status === "fail" || j.status === "aborted" ? <span className="hint warn">{row.status}</span> : row.status}</td>
+                        <td className="num">{row.elapsed}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              </div>
             )}
             <div className="row head">
               <h5>{t(m.resConsumersHeading)}</h5>
@@ -158,6 +199,7 @@ export function Resources(props: { onOpenTask: (id: string) => void }) {
             {!r.consumers ? (
               <div className="muted">{t(m.resNoRecord)}</div>
             ) : (
+              <div className="table-scroll">
               <table className="pricing" data-resources-consumers>
                 <thead>
                   <tr>
@@ -178,6 +220,7 @@ export function Resources(props: { onOpenTask: (id: string) => void }) {
                   ))}
                 </tbody>
               </table>
+              </div>
             )}
             <div className="hint">{t(m.resFooter)}</div>
           </>

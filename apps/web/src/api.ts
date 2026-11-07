@@ -1,4 +1,4 @@
-import type { AnswerPolicy, Artifact, AskAnswer, AskAnswerResult, AskBatch, AskBatchResult, AskList, Attachment, Backlog, BacklogAction, BacklogCreateInput, BacklogEditInput, BacklogIssueDetail, CheckRun, CloudPreparation, CreatedIssue, CreateTaskInput, CustomRunner, DeviceAuthView, EvalsListRow, EvalsSummary, EventEnvelope, FeedbackInput, FlowView, Footprint, HistoryScanResult, HistorySession, HistoryStatus, InboxNote, InterventionView, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerSummary, LedgerTaskRow, ModelCandidates, OpsLatency, OpsLoad, OpsResources, OpsStops, PendingApproval, PerfSample, PerfSummaryRow, PolicyInput, PolicyList, PolicyPatch, Preset, PresetExpandInput, PresetExpansion, PresetInput, PresetList, PricingTable, Queue, ReportRow, RoutingLogRow, RoutingStats, RoutingSuggestion, RunnerId, RunnerInfo, Schedule, ScheduleInput, ServerMessage, Settings, SettingsPatch, StagedChange, StopSummary, SuggestInput, Task, TaskDiffFile, TaskEvals, TaskOutcome, TeleportProgress, Workspace, WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
+import type { AnswerPolicy, Artifact, AskAnswer, AskAnswerResult, AskBatch, AskBatchResult, AskList, Attachment, Backlog, BacklogAction, BacklogCreateInput, BacklogEditInput, BacklogIssueDetail, BacklogQueue, BacklogQueueInput, CheckRun, CloudPreparation, CreatedIssue, CreateTaskInput, CustomRunner, DeviceAuthView, EvalsListRow, EvalsSummary, EventEnvelope, FeedbackInput, FlowView, Footprint, HistoryScanResult, HistorySession, HistoryStatus, InboxNote, InterventionView, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerSummary, LedgerTaskRow, ModelCandidates, OpsLatency, OpsLoad, OpsResources, OpsStops, PendingApproval, PerfSample, PerfSummaryRow, PolicyInput, PolicyList, PolicyPatch, Preset, PresetExpandInput, PresetExpansion, PresetInput, PresetList, PricingTable, Queue, ReportRow, RoutingLogRow, RoutingStats, RoutingSuggestion, RunnerId, RunnerInfo, Schedule, ScheduleInput, ServerMessage, Settings, SettingsPatch, StagedChange, StopSummary, SuggestInput, Task, TaskDiffFile, TaskEvals, TaskOutcome, TeleportProgress, Workspace, WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
 import { acrossParams, type AcrossQuery } from "./reports.ts";
 import { hasTypedText, hostStopped, LEAVE_STOPPED, loginRoute, stoppedRoute, type LoginMode } from "./login.ts";
 import type { ReleaseStatus } from "./release.ts";
@@ -295,9 +295,7 @@ export const api = {
   /** #938: the saved answer policies, and one edited / revoked. */
   listPolicies: () => req<PolicyList>("/api/policies"),
   patchPolicy: (id: string, patch: PolicyPatch) => req<AnswerPolicy>(`/api/policies/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
-  /** `answers` (question text → answer) replies to an AskUserQuestion together with the allow. */
-  permission: (id: string, permId: string, decision: "allow" | "deny", answers?: Record<string, string>) =>
-    req<Task>(`/api/tasks/${id}/permission`, { method: "POST", body: JSON.stringify({ id: permId, decision, answers }) }),
+  permission: (id: string, permId: string, decision: "allow" | "deny") => req<Task>(`/api/tasks/${id}/permission`, { method: "POST", body: JSON.stringify({ id: permId, decision }) }),
   abort: (id: string) => req<Task>(`/api/tasks/${id}/abort`, { method: "POST" }),
   /** Change the permission mode of an existing task (#58): live for Claude, next turn for Codex. */
   setPermissionMode: (id: string, mode: string) => req<Task>(`/api/tasks/${id}/permission-mode`, { method: "POST", body: JSON.stringify({ mode }) }),
@@ -330,6 +328,10 @@ export const api = {
   flow: (refresh = false) => req<FlowView>(`/api/flow${refresh ? "?refresh=1" : ""}`),
   /** Open requests and PBIs of every registered workspace's GitHub backlog (#264, #294); as stored by the daemon's last import (#885); refresh imports first. */
   backlog: (refresh = false) => req<Backlog>(`/api/backlog${refresh ? "?refresh=1" : ""}`),
+  /** The backlog queue (#3955): the PBIs to implement in order, kept in the daemon; the closed ones moved to `ended`. */
+  backlogQueue: () => req<BacklogQueue>("/api/backlog/queue"),
+  /** Changes the fields of the queue it names (#3955) and answers the queue as stored. */
+  saveBacklogQueue: (input: BacklogQueueInput) => req<BacklogQueue>("/api/backlog/queue", { method: "PUT", body: JSON.stringify(input) }),
   /** Starts a row's next stage as a meta Task (#265). 409 with `body.taskId` = that stage is already running. */
   startBacklog: (workspaceId: string, n: number, action: BacklogAction) => req<Task>(`/api/backlog/${n}/start`, { method: "POST", body: JSON.stringify({ workspaceId, action }) }),
   /** Answers a needs-decision item (#266): `## 回答` on the Issue and the label off. */

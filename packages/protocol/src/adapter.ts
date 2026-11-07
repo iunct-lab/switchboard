@@ -92,12 +92,8 @@ export interface StartOptions {
 export interface RunnerSession {
   /** Send a follow-up user turn. `attachments`: as in StartOptions, for this turn. */
   send(text: string, attachments?: Attachment[]): void;
-  /**
-   * Answer a pending permission.ask. `by` says who decided (default user; the daemon passes "rule" for auto-allows).
-   * `answers` (question text → chosen label(s) / free text) is the user's reply to a question tool such as Claude's
-   * AskUserQuestion; adapters whose runner has no such tool ignore it.
-   */
-  respondPermission(id: string, decision: PermissionDecision, reason?: string, by?: "user" | "rule", answers?: Record<string, string>): void;
+  /** Answer a pending permission.ask. `by` says who decided (default user; the daemon passes "rule" for auto-allows). */
+  respondPermission(id: string, decision: PermissionDecision, reason?: string, by?: "user" | "rule"): void;
   /**
    * Switch the permission mode of the live session (#58). Claude applies it at once (`set_permission_mode`) and
    * resolves once the runner confirmed (rejects if it refused), Codex from the next turn (`turn/start` overrides).
@@ -182,3 +178,10 @@ export interface RunnerAdapter {
   /** Hosts the login URL may be on: another URL the CLI prints first (an update notice) is not relayed. */
   readonly loginHosts?: string[];
 }
+
+/**
+ * What an adapter answers its runner's question tool with at once (#3053): the questions are on the person's screen, so the
+ * model ends the turn and the answers come as the next user message. Both runners ended cleanly on this (2026-10-29).
+ */
+export const QUESTION_DEFERRED_REPLY =
+  "The questions have been recorded and shown to the user. Do not answer them yourself, and do not continue the work or call any more tools: end your turn now with one short line. The user's answers will arrive in the next user message.";

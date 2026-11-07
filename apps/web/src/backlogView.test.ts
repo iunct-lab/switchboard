@@ -105,6 +105,9 @@ describe("layout", () => {
     expect(loadView(s)).toEqual(view({ layout: "board" }));
     saveView(s, view({ layout: "board", priorities: ["P1"] }));
     expect(loadView(s)).toEqual(view({ layout: "board", priorities: ["P1"] }));
+    // the queue (#3957) is kept and read back the same way
+    saveView(s, view({ layout: "queue" }));
+    expect(loadView(s)).toEqual(view({ layout: "queue" }));
   });
   test("a kept view without a layout, or with an unknown one, reads as the list", () => {
     const { layout: _, ...old } = view({ sort: "priority" });

@@ -1,0 +1,32 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  The role a person's deploy of the host stack runs as (scripts/host-ops.ts person-deploy). It holds no permission:
+  person-deploy attaches AdministratorAccess with the person's own login for the length of one deploy and detaches it at
+  the end, whatever happened. A role passed to a stack stays attached to that stack and anyone who may operate on the
+  stack can use it, so a role with standing permissions would hand them to every principal that can (the GitHub
+  workflow's role included, whether Actions runs today or not). Deployed once by a person, without a role: aws/README.md.
+Parameters:
+  HostStack:
+    Type: String
+    Default: switchboard-host
+    Description: The host stack's name; only that stack may assume this role
+Resources:
+  PersonDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${HostStack}-person-deploy'
+      Description: A person's deploy of the host stack; no permission outside scripts/host-ops.ts person-deploy
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: cloudformation.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { 'aws:SourceAccount': !Ref AWS::AccountId }
+              ArnLike: { 'aws:SourceArn': !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${HostStack}/*' }
+Outputs:
+  PersonDeployRoleArn:
+    Value: !GetAtt PersonDeployRole.Arn
+  PersonDeployRoleName:
+    Value: !Ref PersonDeployRole

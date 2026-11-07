@@ -61,3 +61,9 @@ export function pickArtifact(list: Pick<Artifact, "id">[], want: string | undefi
   if (want && has(want)) return { id: want, gone: false };
   return { id: has(current) ? current : (list[0]?.id ?? null), gone: !!want };
 }
+
+/**
+ * Whether a page or SVG cannot be shown in its frame (#4062): reading its text answered an error (the file is gone, the
+ * key expired). The frame would show the server's own error body; the screen says so in words instead.
+ */
+export const frameUnavailable = (readStatus: number | null): boolean => readStatus !== null && readStatus >= 400;

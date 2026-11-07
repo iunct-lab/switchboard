@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { BACKLOG_USAGE, readRecords, runBacklog } from "./backlog-client.ts";
+import { JOB_USAGE, runJob } from "./job-client.ts";
 import { bootstrap } from "./bootstrap.ts";
 import { defaultConfig, findConfig, loadConfig, loadPublicSync, projectOf, publicCopyRefusal, resolveProject, type OpsConfig } from "./config.ts";
 import { realGh, repoOf, type GhClient } from "./gh.ts";
@@ -56,6 +57,7 @@ const USAGE = `使い方: bun ops-kit/src/cli.ts <command> [--config <ops.config
       節が本文に無ければ作らない。BACKLOG_URL がある（アプリの Task の中）なら gh で作らず backlog create でアプリに保存する
 
 ${BACKLOG_USAGE}
+${JOB_USAGE}
 
   pull-main
       main の作業ツリー（git worktree list の最初）を upstream に fast-forward する。fast-forward できない・未コミットの変更が取り込むファイルと重なる・detached・upstream 無しは何も変えず理由を出して exit 1、fetch できない・Git でないは exit 2。設定ファイルは要らない
@@ -206,6 +208,13 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
       }
     };
     return runBacklog(command === "backlog" ? rest : args, env, { out, err }, { phase, gh, project, config });
+  }
+  if (command === "job") {
+    if (rest[0] === "--help" || rest[0] === "-h") {
+      out(JOB_USAGE);
+      return 0;
+    }
+    return runJob(rest, env, { out, err });
   }
   if (command === "pull-main") {
     if (rest.length) return usage(err, "pull-main", 2);

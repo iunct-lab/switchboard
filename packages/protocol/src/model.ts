@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { PermissionKind, RunnerId, StopCondition, StopReasonCode, StopRecord, StopState } from "./events.ts";
+import { AskQuestion, PermissionKind, RunnerId, StopCondition, StopReasonCode, StopRecord, StopState } from "./events.ts";
 
 export const WorkspaceKind = z.enum(["repo", "meta"]);
 export type WorkspaceKind = z.infer<typeof WorkspaceKind>;
@@ -812,6 +812,10 @@ export const ModelPrice = z.object({
 export const SettingsPrice = ModelPrice.omit({ changes: true });
 export type SettingsPrice = z.infer<typeof SettingsPrice>;
 
+/** Who reviews a PR (#4024): the runner other than the one that implemented it, or a new session of the same runner. */
+export const ReviewRunnerChoice = z.enum(["other", "same"]);
+export type ReviewRunnerChoice = z.infer<typeof ReviewRunnerChoice>;
+
 /** Daemon settings the UI can change (#58). Stored in sqlite; `~/.switchboard` files stay for the other knobs. */
 export const Settings = z.object({
   /** runner → permission mode used when a task is created without one. Absent = the adapter's own default. */
@@ -826,6 +830,8 @@ export const Settings = z.object({
   judge: JudgeSettings.prefault({}),
   /** Runner and model of the Tasks that start by themselves (#832). */
   autoStart: AutoStartSettings.prefault({}),
+  /** Main reviewer of a PR (#4024); Tasks read it as OPS_KIT_REVIEW_RUNNER at their start. */
+  reviewRunner: ReviewRunnerChoice.default("other"),
   /** The rubric judge (#1219). */
   evals: EvalsSettings.prefault({}),
   /** Name a task after its first turn (#491). */
@@ -917,6 +923,7 @@ export const SettingsPatch = z.object({
     })
     .partial()
     .optional(),
+  reviewRunner: ReviewRunnerChoice.optional(),
   /** `{ evals: { judge: { enabled: false } } }` switches the rubric judge off (#1219). */
   evals: z.object({ judge: z.object({ enabled: z.boolean() }).partial().optional() }).partial().optional(),
   titles: z.object({ auto: z.boolean() }).partial().optional(),
@@ -1051,6 +1058,36 @@ export type ResourceRun = z.infer<typeof ResourceRun>;
 /** A job waiting for a slot (`slot`) or for the free memory to rise above the floor (`memory`). */
 export const ResourceWait = z.object({ pid: z.number(), name: z.string(), cwd: z.string(), taskId: z.string().nullable(), taskTitle: z.string().nullable(), queuedAt: z.string(), reason: z.enum(["slot", "memory"]), typicalMs: z.number().nullable(), samples: z.number() });
 export type ResourceWait = z.infer<typeof ResourceWait>;
+/** What a Task can ask the daemon to run for it (#3992): the kinds are fixed and the daemon builds their argv — no command is taken. */
+export const JobKind = z.enum(["local-ci", "review"]);
+export type JobKind = z.infer<typeof JobKind>;
+/** `aborted`: the job's process went away without leaving its exit code (the host stopped, it was killed). */
+export const JobStatus = z.enum(["running", "pass", "fail", "aborted"]);
+export type JobStatus = z.infer<typeof JobStatus>;
+/** A job the daemon runs as its own child, not the Task's (#3992). Times are epoch ms. `summary`: status, exit code, the log's last lines and its path. */
+export const Job = z.object({
+  id: z.number(),
+  kind: JobKind,
+  taskId: z.string(),
+  pr: z.number(),
+  runner: z.enum(["codex", "claude"]).nullable(),
+  cwd: z.string(),
+  status: JobStatus,
+  exitCode: z.number().nullable(),
+  startedAt: z.number(),
+  endedAt: z.number().nullable(),
+  summary: z.string().nullable(),
+});
+export type Job = z.infer<typeof Job>;
+/** `POST /api/jobs`. `cwd`: a checkout of the Task's repository (its folder, a worktree, a clone). Review reads `promptFile` and writes `outFile`. */
+export const JobRequest = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("local-ci"), taskId: z.string().min(1), pr: z.number().int().positive(), cwd: z.string().min(1) }),
+  z.object({ kind: z.literal("review"), taskId: z.string().min(1), pr: z.number().int().positive(), runner: z.enum(["codex", "claude"]), cwd: z.string().min(1), promptFile: z.string().min(1), outFile: z.string().min(1) }),
+]);
+export type JobRequest = z.infer<typeof JobRequest>;
+/** A job as the resources screen lists it (#3995): without its summary and folder, with its Task's title (null: a Task this daemon does not know). */
+export const OpsJob = Job.omit({ summary: true, cwd: true }).extend({ taskTitle: z.string().nullable() });
+export type OpsJob = z.infer<typeof OpsJob>;
 /**
  * `GET /api/ops/resources` (#3332): now. `memory` null: no /proc/meminfo (macOS). `consumers` is the latest minute of
  * ops_load_groups (null: none in the last 7 days), largest RSS first. `eta`: ms from now until everything running and
@@ -1066,6 +1103,8 @@ export const OpsResources = z.object({
       groups: z.array(z.object({ taskId: z.string().nullable(), taskTitle: z.string().nullable(), owner: z.enum(["task", "daemon", "other"]), kind: LoadKind, rssBytes: z.number(), procs: z.number() })),
     })
     .nullable(),
+  /** The jobs Tasks asked the daemon for (#3995): running, and ended in the last 7 days, newest first. Waiting for a slot shows in `slots.waiting`. */
+  jobs: z.array(OpsJob),
 });
 export type OpsResources = z.infer<typeof OpsResources>;
 /** One method × route of api_requests (#2102): request count, nearest-rank p50 / p90 of ms, the p50 of the known bytes (null: none known). */
@@ -1324,9 +1363,14 @@ export const AskAnswer = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("grant") }),
   /** Close a daemon's notice as a false positive (#2866): the same findings do not come back. */
   z.object({ kind: z.literal("dismiss") }),
+  /**
+   * The answers to a question tool's questions (#3053), in the order of `Ask.questions`: the chosen option labels, or the
+   * free text of a question without options. Sent to the Task as one reply.
+   */
+  z.object({ kind: z.literal("questions"), answers: z.array(z.object({ choices: z.array(z.string()), text: answerText.optional() })).min(1) }),
 ]);
 export type AskAnswer = z.infer<typeof AskAnswer>;
-export const AskAnswerKind = z.enum(["choice", "text", "hold", "allow", "deny", "confirm", "grant", "dismiss"]);
+export const AskAnswerKind = z.enum(["choice", "text", "hold", "allow", "deny", "confirm", "grant", "dismiss", "questions"]);
 export type AskAnswerKind = z.infer<typeof AskAnswerKind>;
 
 /**
@@ -1440,6 +1484,8 @@ export const Ask = z.object({
   reason: z.string().nullable(),
   question: z.string().nullable(),
   choices: z.array(z.string()),
+  /** A runner's question tool's questions (#3053), answered together by `{ kind: "questions" }`; empty for any other question. */
+  questions: z.array(AskQuestion).default([]),
   /** Each choice's grant (#2745: the ` — 許可: <文>` of its line), in the order of `choices`; null = the choice has none. */
   grants: z.array(z.string().nullable()).default([]),
   /** A permission stop's grant (#2745), sent once by the `grant` answer. */
@@ -1886,6 +1932,37 @@ export type BacklogCommentInput = z.infer<typeof BacklogCommentInput>;
 
 /** `POST /api/backlog/sync` (#918): the workspace whose stored backlog is brought up to date. */
 export const BacklogSyncInput = z.object({ workspaceId: z.string() }).strict();
+
+/** One PBI in the backlog queue (#3955): the order the person chose to implement in, one list across the workspaces. */
+export const BacklogQueueEntry = z.object({ workspaceId: z.string(), number: z.number().int().positive() }).strict();
+export type BacklogQueueEntry = z.infer<typeof BacklogQueueEntry>;
+
+/** A PBI that left the queue (#3955): closed on GitHub, or taken out by the person. The newest 20 are kept. */
+export const BacklogQueueEnded = z.object({ workspaceId: z.string(), number: z.number(), title: z.string(), at: z.number(), reason: z.enum(["closed", "removed"]) });
+export type BacklogQueueEnded = z.infer<typeof BacklogQueueEnded>;
+
+/** How many of the queue's implementation Tasks may run at once (#3955). */
+export const BacklogQueueConcurrency = z.union([z.literal(1), z.literal(2), z.literal(3)]);
+
+/**
+ * The backlog queue (#3955): the PBIs to implement, in order, kept in the daemon (`GET /api/backlog/queue`). `enabled`
+ * off (the default) starts nothing from it.
+ */
+export const BacklogQueue = z.object({
+  enabled: z.boolean(),
+  concurrency: BacklogQueueConcurrency,
+  items: z.array(BacklogQueueEntry),
+  ended: z.array(BacklogQueueEnded),
+  /** What the queue's last start decided (#3966): what it started, what it left and why, or that it is empty; one line each. null = never ran. */
+  lastNote: z.string().nullable(),
+  /** When `lastNote` was written (ms; #4055). null = never. */
+  lastNoteAt: z.number().nullable(),
+});
+export type BacklogQueue = z.infer<typeof BacklogQueue>;
+
+/** `PUT /api/backlog/queue` (#3955): what changes; the fields left out stay. */
+export const BacklogQueueInput = z.object({ enabled: z.boolean().optional(), concurrency: BacklogQueueConcurrency.optional(), items: z.array(BacklogQueueEntry).optional() }).strict();
+export type BacklogQueueInput = z.infer<typeof BacklogQueueInput>;
 
 /**
  * What a backlog error asks of the owner (#2362), decided where gh was called (not read back from its wording):

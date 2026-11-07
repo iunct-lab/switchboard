@@ -1,4 +1,4 @@
-import type { AnswerPolicy, Artifact, Ask, AskAnswerKind, AskBlocker, AskResume, AskPolicy, ApprovalRuleMatch, BacklogItem, EventEnvelope, PendingApproval, PolicySubject, ScheduleResult, StopSummary, Task } from "@switchboard/protocol";
+import type { AnswerPolicy, Artifact, Ask, AskAnswerKind, AskQuestion, AskBlocker, AskResume, AskPolicy, ApprovalRuleMatch, BacklogItem, EventEnvelope, PendingApproval, PolicySubject, ScheduleResult, StopSummary, Task } from "@switchboard/protocol";
 import { MERGE_ASK } from "../../../scripts/merge-gate.ts";
 import { isAnswered, isUnblocked, priorityRank, type GhRunner } from "./backlog.ts";
 import { matchPolicies, POLICY_DEFAULT_DAYS, subjectChanges } from "./policies.ts";
@@ -127,8 +127,11 @@ export function resumeOfTask(input: { task: Task; repliedAt: number | null; fail
 /**
  * The kinds of answer a question takes on screen (#936). Only an open or held one is answered; an automatic one takes
  * none, and neither does a check or a stop with something an answer does not take away (a reply would set the Task going).
+ * A check with a question tool's questions takes their answers together (#3053) when any of them has options; one whose
+ * questions all lack options, or with neither choices nor questions, takes none on the card — it is answered from the
+ * Task's own send box.
  */
-export function answersOf(a: Pick<Ask, "kind" | "needs" | "state" | "choices" | "blockers" | "grant">): AskAnswerKind[] {
+export function answersOf(a: Pick<Ask, "kind" | "needs" | "state" | "choices" | "questions" | "blockers" | "grant">): AskAnswerKind[] {
   if (a.state !== "open" && a.state !== "held") return [];
   if ((a.kind === "check" || a.kind === "stop") && a.blockers.length) return [];
   const choice: AskAnswerKind[] = a.choices.length ? ["choice"] : [];
@@ -138,7 +141,8 @@ export function answersOf(a: Pick<Ask, "kind" | "needs" | "state" | "choices" | 
     case "decision":
       return [...choice, "text", "hold"];
     case "check":
-      return [...choice, "text"];
+      // questions none of which has options take no answer on the card either (#3030's criterion 6): the send box answers them
+      return a.questions.some((q) => q.options.length) ? ["questions"] : a.questions.length ? [] : a.choices.length ? ["choice", "text"] : [];
     case "confirmation":
       return ["confirm"];
     case "stop":
@@ -146,6 +150,29 @@ export function answersOf(a: Pick<Ask, "kind" | "needs" | "state" | "choices" | 
     default:
       return [];
   }
+}
+
+/**
+ * The one reply that answers a question tool's questions (#3053): a line per question, `- <question>: <labels joined by
+ * ", "> | <free text>`. null = the answers do not fit the questions as they are now (a different count, an option no
+ * longer offered, more than one option of a single-choice question, a question left unanswered).
+ */
+export function questionsReply(questions: AskQuestion[], answers: Array<{ choices: string[]; text?: string }>): string | null {
+  if (!questions.length || answers.length !== questions.length) return null;
+  const lines: string[] = [];
+  for (const [i, q] of questions.entries()) {
+    const a = answers[i]!;
+    if (q.options.length) {
+      const labels = new Set(q.options.map((o) => o.label));
+      if (!a.choices.length || (!q.multiSelect && a.choices.length > 1) || a.choices.some((c) => !labels.has(c)) || a.text) return null;
+      lines.push(`- ${q.question}: ${a.choices.join(", ")}`);
+    } else {
+      const text = a.text?.trim();
+      if (!text || a.choices.length) return null;
+      lines.push(`- ${q.question}: ${text}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -250,14 +277,14 @@ const withPolicy = (a: Ask, subject: PolicySubject | null, confirmHit: ApprovalR
 
 /** The answer fields of a built question: what it takes, and nothing in the way or going on yet. */
 const noPolicy: AskPolicy = { scopes: [], note: null, defaults: null, applied: null, previous: null };
-const unanswered = { grants: [] as Array<string | null>, grant: null, answers: [] as AskAnswerKind[], mockups: [] as Artifact[], place: null, blockers: [] as AskBlocker[], resume: null, subject: null, policy: noPolicy, unblocks: [] as Ask["unblocks"], priority: null };
+const unanswered = { questions: [] as AskQuestion[], grants: [] as Array<string | null>, grant: null, answers: [] as AskAnswerKind[], mockups: [] as Artifact[], place: null, blockers: [] as AskBlocker[], resume: null, subject: null, policy: noPolicy, unblocks: [] as Ask["unblocks"], priority: null };
 /** Fills `answers` once the rest is known. */
 const withAnswers = (a: Ask): Ask => ({ ...a, answers: answersOf(a) });
 
 const issueUrl = (i: BacklogItem, n: number) => i.url.replace(/\d+$/, String(n));
 
 /** The fields every question of a backlog item shares. */
-const base = (i: BacklogItem): Pick<Ask, "workspace" | "pbi" | "issue" | "task" | "choices" | "grants" | "grant" | "recommendation" | "conditions" | "answers" | "mockups" | "place" | "blockers" | "resume" | "subject" | "policy" | "unblocks" | "priority"> => ({
+const base = (i: BacklogItem): Pick<Ask, "workspace" | "pbi" | "issue" | "task" | "choices" | "questions" | "grants" | "grant" | "recommendation" | "conditions" | "answers" | "mockups" | "place" | "blockers" | "resume" | "subject" | "policy" | "unblocks" | "priority"> => ({
   ...unanswered,
   workspace: { id: i.workspaceId, name: i.workspaceName },
   pbi: { number: i.number, title: i.title, url: i.url },
@@ -421,6 +448,8 @@ export interface TaskAskInput {
   tasks: Task[];
   /** The Task's last reply (the newest session.end's summary) and that event's seq. */
   lastReply: (taskId: string) => { text: string; seq: number } | null;
+  /** The question tool's questions of the Task's last turn (#3053, `Db.lastTurnQuestions`). */
+  lastTurnQuestions?: (taskId: string) => AskQuestion[];
   /** The permission.ask / permission.resolved events of these Tasks, oldest first. */
   permissionEvents: (taskIds: string[]) => EventEnvelope[];
   stops: (task: Task) => StopSummary[];
@@ -507,11 +536,13 @@ export function asksFromTasks(input: TaskAskInput): Ask[] {
     const superseded = n !== null && tasks.some((o) => o.id !== t.id && o.workspaceId === t.workspaceId && issueOf(o) === n && o.createdAt > t.updatedAt);
     if (t.outcome === "needs_action" && t.reviewedAt === null && t.status !== "running" && t.status !== "idle" && !superseded) {
       const reply = input.lastReply(t.id);
+      const questions = input.lastTurnQuestions?.(t.id) ?? [];
       const checkId = `check:${t.id}:${reply?.seq ?? ""}`;
       const failed = input.resumeFailures?.(checkId) ?? null;
       asks.push({
         ...shared(t, t.id, t.title),
-        ...(reply ? askBlock(reply.text, input.mockups) : { question: null }),
+        // the question tool's questions (#3053) are the check's, not what the reply's text says
+        ...(questions.length ? { question: questions[0]!.question, questions } : reply ? askBlock(reply.text, input.mockups) : { question: null }),
         id: checkId,
         // a reply the Task refused (#936: its budget) left the check open; its failure stays visible
         resume: failed ? { state: "failed", reason: failed.reason, taskId: t.id, at: failed.at } : null,
@@ -547,7 +578,6 @@ export function asksFromTasks(input: TaskAskInput): Ask[] {
     if (issueOf(t) === null)
       for (const s of input.stops(t)) asks.push({ ...stopAsk(s, shared(t, t.id, t.title), `Task「${t.title}」が続く`), task: { id: t.id, title: t.title, stageIssue: t.stage?.issue ?? null } });
   }
-  // a question tool (AskUserQuestion) is answered with its questions' answers, on the Task's screen
   const env = input.policy;
   const policed = (a: Ask): Ask => {
     if (!env) return a;
@@ -560,7 +590,7 @@ export function asksFromTasks(input: TaskAskInput): Ask[] {
     const subject = t && (a.kind === "check" || a.kind === "stop") ? stopSubject(input.stops(t), a.at, a.kind === "check" ? "check" : "decision") : null;
     return withPolicy(a, subject, subject ? env.confirm(a.workspace?.id ?? null, `${subject.op} ${subject.target}`) : null, env, now);
   };
-  return asks.map((a) => policed(a.kind === "approval" && a.reason?.endsWith(": AskUserQuestion") ? { ...a, route: "task" as const } : withAnswers(a))).filter(isShown(now));
+  return asks.map((a) => policed(withAnswers(a))).filter(isShown(now));
 }
 
 /** The reason code a stop question was built with (`<reason>: <evidence>`). */

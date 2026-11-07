@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { commentOnGithub, createOnGithub, editOnGithub, listFromGithub, viewFromGithub, type Project } from "./backlog-github.ts";
 import { projectOf, type OpsConfig } from "./config.ts";
 import { repoOf, type GhClient } from "./gh.ts";
-import { setField, UsageError } from "./set.ts";
+import { fieldChoice, setField, UsageError } from "./set.ts";
 import { triage } from "./triage.ts";
 import { findSecrets, hostAws } from "./secrets.ts";
 
@@ -63,12 +63,16 @@ const Unknown = BacklogUnknown;
 
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 
-/** One line of `backlog list`: `#<number>\t<type>\t<OPEN|CLOSED>\t<Status|->\t<title>` (type = the x of a `type:x` label, else `-`). */
-export function listRow(i: { number: number; title: string; state: string; labels: string[]; status: string | null }): string {
-  return `#${i.number}\t${typeOf(i.labels)}\t${i.state}\t${i.status ?? "-"}\t${i.title}`;
+/**
+ * One line of `backlog list`: `#<number>\t<type>\t<OPEN|CLOSED>\t<Status|->\t<title>` (type = `change` for a local
+ * change (#3969), else the x of a `type:x` label, else `-`).
+ */
+export function listRow(i: { number: number; title: string; state: string; type: string; status: string | null }): string {
+  return `#${i.number}\t${i.type}\t${i.state}\t${i.status ?? "-"}\t${i.title}`;
 }
 
-const typeOf = (labels: string[]) => labels.find((l) => l.startsWith("type:"))?.slice("type:".length) || "-";
+/** A local change shares the Issues' numbers (#2463) but is not one (#3969): its row says `change`. */
+const typeOf = (i: { labels: string[]; change?: unknown }) => (i.change ? "change" : i.labels.find((l) => l.startsWith("type:"))?.slice("type:".length) || "-");
 
 export interface ListFilter {
   /** A part of the title, case-insensitive. */
@@ -76,12 +80,15 @@ export interface ListFilter {
   /** Every one of these labels. */
   labels: string[];
   state: "open" | "closed" | "all";
+  /** Issues, local changes or both (#3969); absent = Issues, so an open change is not counted as an open Issue. */
+  kind?: "issue" | "change" | "all";
 }
 
 /** The issues `backlog list` shows for `f`, by number (the app's stored order and GitHub's search order differ). */
-export function filterIssues<T extends { number: number; title: string; state: string; labels: string[] }>(issues: T[], f: ListFilter): T[] {
+export function filterIssues<T extends { number: number; title: string; state: string; labels: string[]; change?: unknown }>(issues: T[], f: ListFilter): T[] {
   const word = f.search?.toLowerCase();
-  return issues.filter((i) => (f.state === "all" || i.state.toLowerCase() === f.state) && f.labels.every((l) => i.labels.includes(l)) && (!word || i.title.toLowerCase().includes(word))).sort((a, b) => a.number - b.number);
+  const kind = f.kind ?? "issue";
+  return issues.filter((i) => (kind === "all" || (kind === "change") === Boolean(i.change)) && (f.state === "all" || i.state.toLowerCase() === f.state) && f.labels.every((l) => i.labels.includes(l)) && (!word || i.title.toLowerCase().includes(word))).sort((a, b) => a.number - b.number);
 }
 
 interface List {
@@ -144,6 +151,19 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         throw new Refused(`GitHub の Project のフィールドを書くには ops.config.json（Project の URL）が要ります: ${(e as Error).message}`);
       }
     };
+    // a value written straight to GitHub is checked against this clone's ops.config.json first (#3795): a choice that
+    // differs only in case is written as the choice, one not there is refused before anything is written. Not when
+    // GH_REPO names another repository than origin's (another Project, whose choices are not this config's)
+    const choose = async (fields: Record<string, string>): Promise<Record<string, string>> => {
+      // no field named: nothing to check, and no config asked for (a plain create needs none)
+      if (!Object.keys(fields).length) return fields;
+      if (env.GH_REPO) {
+        const origin = await repoName({ ...env, GH_REPO: undefined }, opts.cwd).catch(() => "");
+        if ((await repoName(env, opts.cwd)).toLowerCase() !== origin.toLowerCase()) return fields;
+      }
+      const c = await config();
+      return Object.fromEntries(Object.entries(fields).map(([name, value]) => [name, String(fieldChoice(c, name, value))]));
+    };
     // what the Project's commands say on GitHub goes to stderr: stdout keeps the lines the app's answers give
     const note = (s: string) => io.err(s);
     if (direct && explicit !== undefined) throw new Refused("--workspace はアプリの Task の中だけ（BACKLOG_URL が無いので GitHub に直接つなぐ）");
@@ -176,12 +196,13 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         const search = take("--search");
         const labels = takeAll("--label");
         const state = take("--state") ?? "open";
-        if (args.length || !/^(open|closed|all)$/.test(state)) throw new Refused("backlog list [--search <語>] [--label <l>]... [--state open|closed|all] [--fresh] [--json]");
-        const filter: ListFilter = { search, labels, state: state as ListFilter["state"] };
+        const kind = take("--type") ?? "issue";
+        if (args.length || !/^(open|closed|all)$/.test(state) || !/^(issue|change|all)$/.test(kind)) throw new Refused("backlog list [--search <語>] [--label <l>]... [--state open|closed|all] [--type issue|change|all（既定 issue。change はローカルの変更）] [--fresh] [--json]");
+        const filter: ListFilter = { search, labels, state: state as ListFilter["state"], kind: kind as ListFilter["kind"] };
         if (direct) {
           // GitHub's word search is wider than a part of the title: filtered again as the stored values are
           const repo = await githubRepo();
-          const items = filterIssues(await listFromGithub(direct.gh, repo, await direct.project(), filter), filter).map((i) => ({ number: i.number, type: typeOf(i.labels), state: i.state, status: i.status, title: i.title, labels: i.labels }));
+          const items = filterIssues(await listFromGithub(direct.gh, repo, await direct.project(), filter), filter).map((i) => ({ number: i.number, type: typeOf(i), state: i.state, status: i.status, title: i.title, labels: i.labels }));
           if (asJson) io.out(JSON.stringify({ repository: `${repo.owner}/${repo.name}`, source: "github", items }));
           else {
             io.out(`# ${repo.owner}/${repo.name}  GitHub から直接（アプリの保存値ではない）`);
@@ -192,7 +213,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         let ws = await workspace(!fresh);
         if (fresh) await settle(ws), (ws = await workspace());
         const records = (await api("GET", `/records?workspaceId=${encodeURIComponent(ws.workspaceId)}`)) as StoredRecords;
-        const items = filterIssues(records.issues, filter).map((i) => ({ number: i.number, type: typeOf(i.labels), state: i.state, status: (i.fields?.Status as string | null | undefined) ?? null, title: i.title, labels: i.labels }));
+        const items = filterIssues(records.issues, filter).map((i) => ({ number: i.number, type: typeOf(i), state: i.state, status: (i.fields?.Status as string | null | undefined) ?? null, title: i.title, labels: i.labels }));
         // what the last import could not read is kept as it was stored: shown, and said to be not current
         const unread = items.filter((i) => records.unread.includes(i.number)).map((i) => i.number);
         if (unread.length) io.err(`最後の取込みで読めていない Issue（保存値のまま。今の値ではない）: ${unread.map((n) => `#${n}`).join(", ")}（--fresh で取り込み直す）`);
@@ -231,7 +252,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         noSecrets(title, body, milestone, ...labels, ...Object.values(fields).map(String));
         if (direct) {
           if (Object.keys(fields).length) await config();
-          const n = await createOnGithub(direct.gh, config, await githubRepo(), { title, body, labels, milestone, parent: parent ? number(parent) : null, fields }, note);
+          const n = await createOnGithub(direct.gh, config, await githubRepo(), { title, body, labels, milestone, parent: parent ? number(parent) : null, fields: await choose(fields) }, note);
           io.out(`#${n} を作りました（GitHub）`);
           return 0;
         }
@@ -294,7 +315,9 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         if (!ref || !field || value === undefined || extra.length) throw new Refused("backlog set <issue> <field> <value>");
         noSecrets(value);
         if (direct) {
-          await setField(direct.gh, await config(), number(ref), field, value, note);
+          // an empty value empties the field (#3810): not a choice to check
+          const chosen = value === "" ? value : (await choose({ [field]: value }))[field]!;
+          await setField(direct.gh, await config(), number(ref), field, chosen, note);
           io.out(`#${number(ref)} を保存しました`);
           return 0;
         }
@@ -313,7 +336,8 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         if (!ref || !area || !kind || !priority || (opts.phase && !phase) || extra.length) throw new Refused(`backlog triage <issue> <area> <kind> <priority> ${opts.phase ? "<phase> " : ""}[<parent>] [<status>]`);
         noSecrets(area, kind, priority, phase, status);
         if (direct) {
-          await triage(direct.gh, await config(), number(ref), { area, kind, priority, ...(phase !== undefined && { phase }), ...(parent ? { parent: number(parent) } : {}), status: status || "Backlog" }, note);
+          const c = await choose({ Area: area, Kind: kind, Priority: priority, ...(phase !== undefined && { Phase: phase }), Status: status || "Backlog" });
+          await triage(direct.gh, await config(), number(ref), { area: c.Area!, kind: c.Kind!, priority: c.Priority!, ...(phase !== undefined && { phase: c.Phase! }), ...(parent ? { parent: number(parent) } : {}), status: c.Status! }, note);
           io.out(`#${number(ref)} を保存しました`);
           return 0;
         }
@@ -388,7 +412,7 @@ export interface StoredRecords {
   /** The checkout's top level, against which a Task body's paths are read. */
   top: Array<{ name: string; dir: boolean }>;
   /** Every stored Issue (open and closed) as shown, with its fields in the workspace's Project (null = not in it). */
-  issues: Array<{ number: number; title: string; url: string; state: "OPEN" | "CLOSED"; stateReason: string | null; body: string; labels: string[]; parent: number | null; subIssues: number[]; createdAt: string; updatedAt: string; closedAt: string | null; fields: Record<string, string | number | null> | null }>;
+  issues: Array<{ number: number; title: string; url: string; state: "OPEN" | "CLOSED"; stateReason: string | null; body: string; labels: string[]; parent: number | null; subIssues: number[]; createdAt: string; updatedAt: string; closedAt: string | null; fields: Record<string, string | number | null> | null; change?: NonNullable<Detail["issue"]["change"]> }>;
   /** The stored Issues' comments as shown (with those not sent yet), oldest first. */
   comments: Array<{ issue: number; body: string; createdAt: string }>;
   /** Issues whose last read was not complete (404 / 403 / not read yet): what is stored of them is not current. */

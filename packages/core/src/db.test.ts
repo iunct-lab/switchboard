@@ -694,6 +694,25 @@ test("opening the database while another connection writes waits instead of fail
   expect(opened).toBeGreaterThan(0);
 }, 15_000);
 
+test("stage: a stage Task whose turn ended on background jobs is still active, until the mark is cleared", () => {
+  const db = new Db(join(dir, "switchboard.db"));
+  const mk = (id: string, status: "done" | "error" | "running", issue: number, updatedAt: number) => db.insertTask({ id, workspaceId: "ws", title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue, action: "complete" }, statusAt: updatedAt, createdAt: updatedAt, updatedAt });
+  mk("t_bg", "done", 3621, 1);
+  mk("t_err", "error", 7, 2);
+  mk("t_plain", "done", 8, 3);
+  db.setTaskBackground("t_bg", { jobs: ["Run Codex review of PR 4048 in background"], since: 1 });
+  db.setTaskBackground("t_err", { jobs: ["tests"], since: 2 });
+  expect(db.activeStageTask("ws", 3621)!.id).toBe("t_bg");
+  expect(db.activeStageTask("ws", 7)!.id).toBe("t_err");
+  expect(db.activeStageTask("ws", 8)).toBeNull();
+  expect(db.listActiveStageTasks().map((t) => t.id).sort()).toEqual(["t_bg", "t_err"]);
+  // the jobs ended (or the runner went): the Issue is free again
+  db.setTaskBackground("t_bg", null);
+  expect(db.activeStageTask("ws", 3621)).toBeNull();
+  expect(db.listActiveStageTasks().map((t) => t.id)).toEqual(["t_err"]);
+  db.close();
+});
+
 test("stage: a database from before #1139 takes the Issue and stage of a stage Task from its title once, and four lookups read the columns", () => {
   const path = join(dir, "switchboard.db");
   new Db(path).close();

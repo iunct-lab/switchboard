@@ -7,6 +7,9 @@ import { msgs } from "../i18n.ts";
  */
 export const panels = msgs({
   unknown: { ja: "不明", en: "Unknown" },
+  unknownFacts: { ja: "不明: {labels}", en: "Unknown: {labels}" },
+  questionWhole: { ja: "全文", en: "Whole" },
+  questionFold: { ja: "畳む", en: "Fold" },
   loading: { ja: "読み込み中…", en: "Loading…" },
   reread: { ja: "読み直す", en: "Reload" },
 

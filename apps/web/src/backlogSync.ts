@@ -227,3 +227,25 @@ export function loadNewIssueDraft(store: Pick<Storage, "getItem">, key: string):
     return null;
   }
 }
+
+/**
+ * The one line the folded sync section of the Backlog heading shows (#4064): how many workspaces, and how many of them
+ * are not synced (a conflict, a failure, edits waiting to be sent) or cannot be read at all. `bad` = something to look at.
+ */
+export function syncSummary(syncs: Array<Pick<Backlog["syncs"][number], "workspaceId" | "sync">>, errors: Array<Pick<Backlog["errors"][number], "workspaceId">>): { text: string; bad: boolean } {
+  // a workspace whose import failed has a sync line and an error both: counted once
+  const all = new Set([...syncs.map((s) => s.workspaceId), ...errors.map((e) => e.workspaceId)]);
+  const off = syncs.filter((s) => s.sync.state !== "synced").length;
+  const parts = [t(m.syncSummaryAll, { n: all.size }), off ? t(m.syncSummaryOff, { n: off }) : null, errors.length ? t(m.syncSummaryUnread, { n: errors.length }) : null].filter(Boolean);
+  return { text: parts.join(" · "), bad: off + errors.length > 0 };
+}
+
+/**
+ * The question of a ## 判断待ち in one line (#4064): the text after `**問い**:` when there is one, else the first line
+ * that is not the heading; the Markdown marks taken off. The whole body is what opens.
+ */
+export function decisionQuestion(body: string): string {
+  const lines = body.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("## "));
+  const q = lines.find((l) => /^\*{0,2}問い\*{0,2}[:：]/.test(l));
+  return (q ?? lines[0] ?? "").replace(/^\*{0,2}問い\*{0,2}[:：]\s*/, "").replace(/\*\*/g, "");
+}

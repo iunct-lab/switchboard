@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { scheduleResultLine } from "./scheduleResult.ts";
+import { scheduledFacts, scheduleResultLine } from "./scheduleResult.ts";
 
 const at = Date.parse("2026-10-12T03:10:00+09:00"); // JST 10/12 03:10
 
@@ -16,4 +16,11 @@ test("scheduleResultLine: nothing for the other actions and before the first fir
   expect(scheduleResultLine({ action: "secret-scan", lastResult: null })).toBeNull();
   expect(scheduleResultLine({ action: "prompt", lastResult: null })).toBeNull();
   expect(scheduleResultLine({ action: "backlog-next", lastResult: { at, repos: 1, hits: 0, failed: 0, lines: [] } })).toBeNull();
+});
+
+test("scheduledFacts (#4058): the schedule's title only when the Task's does not say it, then status, cost, time", () => {
+  const s = { title: "公開リポジトリへの同期（switchboard）", scheduleTitle: "公開リポジトリへの同期（switchboard）", status: "done", createdAt: at };
+  expect(scheduledFacts(s, "$0.01")).toBe("done · $0.01 · 10/12 03:10");
+  expect(scheduledFacts({ ...s, title: "#4033 Task に分解: PBI: …" , scheduleTitle: "バックログを進める" }, "$1.93")).toBe("バックログを進める · done · $1.93 · 10/12 03:10");
+  expect(scheduledFacts({ ...s, scheduleTitle: "" }, "$0")).toBe("done · $0 · 10/12 03:10");
 });

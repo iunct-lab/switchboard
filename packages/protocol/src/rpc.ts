@@ -1,11 +1,11 @@
 import { z } from "zod";
-import { EventEnvelope, PermissionAnswers, PermissionDecision } from "./events.ts";
+import { EventEnvelope, PermissionDecision } from "./events.ts";
 import { DeviceAuthView, Task, TeleportProgress, TerminalStatus } from "./model.ts";
 
 /** Client → daemon over WebSocket. REST covers the rest (see core/server.ts). */
 export const ClientMessage = z.discriminatedUnion("type", [
   z.object({ type: z.literal("task.send"), taskId: z.string(), text: z.string() }),
-  z.object({ type: z.literal("permission.respond"), taskId: z.string(), id: z.string(), decision: PermissionDecision, answers: PermissionAnswers.optional() }),
+  z.object({ type: z.literal("permission.respond"), taskId: z.string(), id: z.string(), decision: PermissionDecision }),
   z.object({ type: z.literal("task.abort"), taskId: z.string() }),
 ]);
 export type ClientMessage = z.infer<typeof ClientMessage>;

@@ -4,14 +4,15 @@ import { readCloudPreparation, cloudTransferNotice, prepareTeleportWorktree } fr
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
-import { AskAnswerInput, AutoStartKind, CustomRunnerList, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, type EvalsSummary, InboxAddInput, InboxCloseInput, InboxEditInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PermissionAnswers, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskBatch, type AskList, type Backlog, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type ScanCursors, type Workspace, type WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
+import { AskAnswerInput, JobRequest, AutoStartKind, CustomRunnerList, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogQueueInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, type EvalsSummary, InboxAddInput, InboxCloseInput, InboxEditInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskBatch, type AskList, type Backlog, type BacklogQueue, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type ScanCursors, type Workspace, type WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
 import type { CoreConfig } from "./config.ts";
 import { abortOrphanedTasks, createdIssuesOf, Db, deferredOf, displayPath, type ApiRequestRow } from "./db.ts";
 import { opsLatency } from "./ops-latency.ts";
 import { OpsLoadSampler, opsLoad, readCgroup } from "./ops-load.ts";
 import { opsResources } from "./ops-resources.ts";
+import { type JobDeps, JobError, recoverJobs, requestJob } from "./jobs.ts";
 import { type CleanExit, daemonVersion, endDaemonRun, opsStops, readBootId, readJournal, readReleaseHistory, startDaemonRun } from "./ops-stops.ts";
 import { ArtifactError, ArtifactStore, artifactMime, checkViewKey, withCharset, VIEW_KEY_MS, viewKey } from "./artifacts.ts";
 import { AttachmentError, AttachmentStore, extValue, formatBytes, isActiveContent, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_REQUEST } from "./attachments.ts";
@@ -36,7 +37,7 @@ import { isAuthText, LOGIN_FORCED_RECHECK_MS, LOGIN_RECHECK_MS } from "./login.t
 import { fallbackNote, fallbackRunner, fmtTime, RateLimitResumer } from "./ratelimit.ts";
 import { type BacklogNextResult, Scheduler } from "./scheduler.ts";
 import { BacklogSync, noticeTargets, type StoredBacklog } from "./backlog-sync.ts";
-import { resumeDepends } from "./depends-resume.ts";
+import { resumeDepends, resumeJobsOnTurnEnd } from "./depends-resume.ts";
 import { scanAllRepos } from "./secretscan.ts";
 import { setupScripts } from "./skillsync.ts";
 import { listProcesses, loadProcess } from "./process-defs.ts";
@@ -52,10 +53,11 @@ import { enableGithubSync, enablingOf } from "./backlog-enable.ts";
 import { RUNNER_CONFIG_PATHS, runnerConfigOf } from "./runner-config.ts";
 import { CloneError, parseGithubRepo, registerWorkspace, unusableWorkspaces, WorkspaceClones } from "./workspace-clone.ts";
 import { copyDeletable, inspectRemoval } from "./workspace-remove.ts";
+import { noteQueue, pruneClosed, QUEUE_KEY, readQueue, saveQueue } from "./backlog-queue.ts";
 import { ACTION_FOR_STAGE, checkFieldTypes, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, withdrawStoredOperation, buildDirectPrompt, buildStartPrompt, subagentModelAlias, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionNote, promotionStep, type PromotionHold, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, type GhRunner, type OtherRepo } from "./backlog.ts";
 import { issueOf, reduceStops, stopRecordsFor } from "./stops.ts";
 import { approvalBatches, approvalWindowNote, BatchAnswers } from "./approval-batch.ts";
-import { ASK_HISTORY_MS, ON_HOLD_RESUME, asksFromBacklog, closedHits, asksFromTasks, blockersOf, dedupeAsks, noticeAsks, policyPbi, rankAsks, prFacts, resumeOfTask, type NoticeRecord, type PolicyEnv, type PrFacts } from "./asks.ts";
+import { ASK_HISTORY_MS, ON_HOLD_RESUME, asksFromBacklog, closedHits, asksFromTasks, blockersOf, dedupeAsks, noticeAsks, policyPbi, rankAsks, prFacts, questionsReply, resumeOfTask, type NoticeRecord, type PolicyEnv, type PrFacts } from "./asks.ts";
 import { checkPolicy, matchPolicies, readPolicies, recordUse, subjectChanges, writePolicies } from "./policies.ts";
 import { checkPreset, expandPreset, needsTarget, parseTarget, readPresets, writePresets } from "./presets.ts";
 import { Inbox, localDate } from "./inbox.ts";
@@ -131,6 +133,8 @@ export interface StartServerOptions {
   loadPty?: () => Promise<PtyManager | null>;
   /** Overrides how `gh` is run for GET /api/backlog (#264); tests and the E2E answer from a fixture. Unset = `gh` from PATH. */
   gh?: GhRunner;
+  /** Overrides the command of a job a Task asks for (#3992); tests run a fake. Unset = local CI / the review runner. */
+  jobCommand?: JobDeps["command"];
   /**
    * Overrides how a checkout's origin URL is read before a runner starts (#2799); tests whose fake `gh` names a
    * repository the checkout is not answer for it. Unset = git.
@@ -529,7 +533,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         writePolicies(db, recordUse(readPolicies(db), id, { at: Date.now(), askId: `approval:${task.id}:${ask.id}`, taskId: task.id, issue: issueOf(task), subject: { kind: "approval", op: ask.kind, target: v.match.subject, conditions: [], head: null } }));
       }
       return v;
-    }, pricing: pricingTable, defaultPermissionMode: savedDefaultMode, defaultShadowRunner: () => settings().shadowRunner, attachments, privateTmpRoot: join(cfg.home, "tmp"), heavyStateDir: opts.heavyStateDir ?? heavyStateDir(homedir()), deviceAuthEnv: (id) => ({ DEVICE_AUTH_URL: `${localUrl()}/api/tasks/${id}/device-auth`, DEVICE_AUTH_TOKEN_FILE: cfg.tokenPath, SWITCHBOARD_DAEMON_HOME: cfg.home, BACKLOG_URL: `${localUrl()}/api/backlog`, BACKLOG_TOKEN_FILE: cfg.tokenPath, ...localBacklogEnv(id) }), otelFor: (id) => ({ endpoint: `${localUrl()}/otel/${id}/v1/logs`, token: mcp.issue(id).token }), dockerEnv: (id) => ({ DOCKER_MARK_LABEL: `${LABEL_KEY}=${id}`, DOCKER_MARK_LOG: join(dockerLogDir, `${id}.jsonl`) }), maxStopResumes: () => settings().quotaAndResume.maxStopResumes, mcpServers: taskMcpServers, bedrock: (task) => { const b = bedrockOf(task.runner); if (b) bedrockTasks.add(task.id); else bedrockTasks.delete(task.id); return b; } });
+    }, pricing: pricingTable, defaultPermissionMode: savedDefaultMode, defaultShadowRunner: () => settings().shadowRunner, attachments, privateTmpRoot: join(cfg.home, "tmp"), heavyStateDir: opts.heavyStateDir ?? heavyStateDir(homedir()), deviceAuthEnv: (id) => ({ DEVICE_AUTH_URL: `${localUrl()}/api/tasks/${id}/device-auth`, DEVICE_AUTH_TOKEN_FILE: cfg.tokenPath, SWITCHBOARD_DAEMON_HOME: cfg.home, BACKLOG_URL: `${localUrl()}/api/backlog`, BACKLOG_TOKEN_FILE: cfg.tokenPath, ...localBacklogEnv(id) }), otelFor: (id) => ({ endpoint: `${localUrl()}/otel/${id}/v1/logs`, token: mcp.issue(id).token }), dockerEnv: (id) => ({ DOCKER_MARK_LABEL: `${LABEL_KEY}=${id}`, DOCKER_MARK_LOG: join(dockerLogDir, `${id}.jsonl`) }), maxStopResumes: () => settings().quotaAndResume.maxStopResumes, reviewRunner: () => settings().reviewRunner, mcpServers: taskMcpServers, bedrock: (task) => { const b = bedrockOf(task.runner); if (b) bedrockTasks.add(task.id); else bedrockTasks.delete(task.id); return b; } });
   // Terminal sessions (#91): what Claude Code wrote to ~/.claude/projects while nobody in Switchboard was watching.
   const claudeDanger = new Set((adapters.find((a) => a.id === "claude")?.permissionModes ?? []).filter((m) => m.danger).map((m) => m.value));
   const history = new HistoryImporter(db, { projectsDir: cfg.claudeProjectsDir, pollMs: cfg.historyPollMs, pricing: pricingTable, broadcast, isLive: (id) => tasks.isLive(id), dangerModes: claudeDanger, log: (m) => console.warn(m) });
@@ -824,6 +828,19 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       syncs: read.flatMap(({ ws, stored }) => (stored ? [{ workspaceId: ws.id, backlog: ws.backlog, enabling: enablingOf(db, db.getWorkspaceBacklogSource(ws.id)), repository: db.getWorkspaceBacklogSource(ws.id)?.repository ?? null, syncing: stored.syncing, syncedAt: stored.fetchedAt, ...workspaceSyncOf(db, ws, { importFailed: stored.error !== null }) }] : [])),
     });
   };
+  /** A queued PBI's stored Issue (#3955): its title, and whether it is closed; null when not stored. */
+  const queuedIssue = (e: { workspaceId: string; number: number }) => readStoredIssue(db, { id: e.workspaceId }, e.number)?.issue ?? null;
+  /** The stored queue without the PBIs whose stored Issue is closed (#3955): those go to its `ended`, stored. Read and written at once, no wait between. */
+  const prunedQueue = (): BacklogQueue => {
+    const queue = readQueue(db);
+    const pruned = pruneClosed(queue, (e) => ((i) => (i?.state === "CLOSED" ? { title: i.title } : null))(queuedIssue(e)));
+    if (pruned !== queue) db.setSetting(QUEUE_KEY, pruned);
+    return pruned;
+  };
+  /** Called after each PUT of the queue (#3955), with the queue before and after: an enabled queue starts what it may (#3966). */
+  const onQueueSaved = (before: BacklogQueue, after: BacklogQueue): void => {
+    if (after.enabled && !cfg.candidate) void startFromQueue(before.enabled ? "saved" : "enabled");
+  };
   /** A start that failed after an answer (#936), by the question's id: kept in `ask_answers` for a day (#1139). */
   const failed = (id: string) => db.askAnswer(id)?.failure ?? null;
   /** What the saved policies (#938) need from the daemon: the subject of a tool approval and the Knowledge confirm rules. */
@@ -908,6 +925,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       approvals: tasks.pendingApprovals(),
       tasks: [...live.values()],
       lastReply: (id) => db.lastReply(id),
+      lastTurnQuestions: (id) => db.lastTurnQuestions(id),
       permissionEvents: (ids) => db.listPermissionEvents(ids),
       stops: (t) => reduceStops(db.listStopRecords([t.id])),
       workspaceName: (id) => db.getWorkspace(id)?.name ?? null,
@@ -1185,6 +1203,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     let moved: string[] = [];
     const changed = (error: string, changes: string[]) => ({ status: 409, body: { error, changes, current: ask } satisfies AskChanged });
     if (!ask.answers.includes(answer.kind) || (answer.kind === "choice" && !ask.choices.includes(answer.choice))) return changed("選択肢が変わりました", ["選択肢が変わりました"]);
+    // a question tool's questions (#3053) are answered all at once, each with what it offers now
+    const toQuestions = answer.kind === "questions" ? questionsReply(ask.questions, answer.answers) : null;
+    if (answer.kind === "questions" && toQuestions === null) return changed("選択肢が変わりました", ["選択肢が変わりました"]);
     const at = Date.now();
     const result = (state: Ask["state"], resume: Ask["resume"]): { status: number; body: AskAnswerResult } => ({ status: 200, body: { ask: { ...ask, state, changedAt: at, answers: state === "answered" ? [] : ask.answers, resume }, already: false, changes: moved } });
     if (ask.kind === "approval") {
@@ -1223,7 +1244,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         return { status: UPSTREAM_FAILED, body: { error: `PR #${ask.place.pr} を確かめられない: ${String((e as Error).message ?? e)}` } };
       }
     }
-    const said = answer.kind === "choice" ? `${answer.choice}${answer.note ? `\n\n${answer.note}` : ""}` : answer.kind === "text" ? answer.text : "";
+    const said = answer.kind === "choice" ? `${answer.choice}${answer.note ? `\n\n${answer.note}` : ""}` : answer.kind === "text" ? answer.text : (toQuestions ?? "");
     const text = moved.length ? `${said}\n\n（この回答は問いの時点の PR へのものです。回答の時点で: ${moved.join(" / ")}）` : said;
     const gone = policyGone(by);
     if (gone) return changed(gone, [gone]);
@@ -1332,6 +1353,43 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   tasks.onTurnEnd(promoteWhenIdle);
   tasks.onTaskEnd(promoteWhenIdle);
   /**
+   * Why the slot's items are left, one line each in backlog-next's words (`<what>: #N …`; the firing puts the workspace
+   * and the slot before each). The backlog queue says it the same way for its own items (#3966).
+   */
+  const leftLines = (items: BacklogItem[], slot: Slot): string[] => {
+    const out: string[] = [];
+    // on hold (#2930): named on this line only, whatever else would also leave it
+    const onHold = onHoldIn(items, slot);
+    if (onHold.length) out.push(`保留: ${onHold.map((i) => `#${i.number}`).join(" ")}`);
+    const unheld = items.filter((i) => !i.onHold);
+    // a Task that ended asking the person, or failed, with no update to the Issue since (#1275); named under that, not as unchanged
+    const replyWaiting = replyWaitingIn(unheld, slot);
+    if (replyWaiting.length) out.push(`返事待ち: ${replyWaiting.map((i) => `#${i.number}`).join(" ")}`);
+    const failed = failedIn(unheld, slot);
+    if (failed.length) out.push(`前回の Task が失敗したまま更新が無い: ${failed.map((i) => `#${i.number}${i.lastTask!.resumeAt ? `（使用上限、${fmtTime(i.lastTask!.resumeAt, Date.now())} に戻る）` : ""}`).join(" ")}`);
+    const unchanged = unchangedIn(unheld, slot).filter((i) => !failedSince(i) && !awaitingReply(i));
+    if (unchanged.length) out.push(`前回から更新が無い: ${unchanged.map((i) => `#${i.number}`).join(" ")}`);
+    // what holds them (#817, #937): an overlap still open, a prerequisite not done yet, one a person has to look at
+    const held = heldIn(unheld, slot);
+    for (const [label, of] of HELD_LINES) {
+      const rows = held.flatMap(({ item, pending, stuck }) => {
+        const named = of(pending, stuck);
+        return named.length ? [`#${item.number}（${named.map(heldWhy).join("・")}）`] : [];
+      });
+      if (rows.length) out.push(`${label}: ${rows.join(" ")}`);
+    }
+    // PBIs whose Tasks' files other work touches (#1044): left before a session starts only to find that out
+    const overlapped = overlapIn(unheld, slot);
+    const touching = overlapped.filter((i) => i.overlap!.hits.length > 0);
+    if (touching.length) out.push(`重なり: ${touching.map((i) => `#${i.number}（${i.overlap!.hits.map((h) => `${h.ref}: ${h.path}`).join("・")}）`).join(" ")}`);
+    const undecided = overlapped.filter((i) => i.overlap!.unknown !== null);
+    if (undecided.length) out.push(`重なりを判定できない: ${undecided.map((i) => `#${i.number}（${i.overlap!.unknown}）`).join(" ")}`);
+    // stalled PBIs whose newest ## 状況 counts as many closed Tasks as now (#578)
+    const spinning = spinningIn(unheld, slot);
+    if (spinning.length) out.push(`前回の再開から進んでいない: ${spinning.map((i) => `#${i.number}`).join(" ")}`);
+    return out;
+  };
+  /**
    * One backlog-next firing (#267, #561): for every registered workspace and each of its two slots (implement / plan),
    * start the slot's next item while fewer stage Tasks of that slot run there than the workspace's own slots allow
    * (`Workspace.sweep`, #2656; read per firing). While the usage of the runner it starts them on is high, one stage Task at most runs anywhere; while the newest tag waits to be
@@ -1350,7 +1408,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     // Stage Tasks running or waiting, and ones a button (or this firing) is creating right now (startingStage), per workspace and slot.
     const stageTasks = () => db.listActiveStageTasks();
     const busy = (wsId: string, slot: Slot) => {
-      const tasks = stageTasks().filter((t) => t.workspaceId === wsId && SLOT_OF_ACTION[t.stage!.action] === slot).map((t) => `工程 Task ${t.id}（${t.title}）が ${t.status}`);
+      const tasks = stageTasks().filter((t) => t.workspaceId === wsId && SLOT_OF_ACTION[t.stage!.action] === slot).map((t) => `工程 Task ${t.id}（${t.title}）が ${t.background && t.status !== "running" && t.status !== "waiting" ? "裏の処理を待っている" : t.status}`);
       const starting = [...startingStage].filter(([k, v]) => k.startsWith(`${wsId}:`) && SLOT_OF_ACTION[v.action] === slot).map(([, v]) => `#${v.n} の工程 Task を開始しているところ`);
       return [...tasks, ...starting];
     };
@@ -1385,6 +1443,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     await applyPolicies();
     const SLOTS: Slot[] = only ? ["implement"] : ["implement", "plan"];
     const SLOT_NAME: Record<Slot, string> = { implement: "実装の枠", plan: "計画の枠" };
+    // an enabled backlog queue starts the 実装 slot's PBIs itself, in its order (#3956); the firing moves the 計画 slot only.
+    // Read again where it is used: the queue may be enabled while GitHub is read
+    const queued = () => readQueue(db).enabled;
     // read every workspace that has a free slot in parallel (#441); one GitHub cannot be read for goes on with what is stored (#2264)
     const read = await Promise.all(db.listWorkspaces().filter((ws) => !only || ws.id === only.workspaceId).map(async (ws) => {
       if (!SLOTS.some((slot) => busy(ws.id, slot).length < ws.sweep[slot])) return { ws, items: [] as BacklogItem[], syncHeld: [] as string[], unsynced: null };
@@ -1407,6 +1468,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       if (r.syncHeld.length) skipped.push(`${ws.name}: 競合があるので自動では始めない: ${r.syncHeld.join(" ")}`);
       const picked = new Set<number>();
       for (const slot of SLOTS) {
+        if (slot === "implement" && queued()) {
+          if (ws.sweep[slot] > 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: キューに任せる`);
+          continue;
+        }
         // checked again after GitHub was read: a button may have started a stage meanwhile
         for (let n = 0; ; n++) {
           const running = busy(ws.id, slot);
@@ -1420,35 +1485,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             break;
           }
           const next = pickNext(r.items.filter((i) => !picked.has(i.number)), slot);
-          // on hold (#2930): named on this line only, whatever else would also leave it
-          const onHold = n === 0 ? onHoldIn(r.items, slot) : [];
-          if (onHold.length) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 保留: ${onHold.map((i) => `#${i.number}`).join(" ")}`);
-          const unheld = r.items.filter((i) => !i.onHold);
-          // a Task that ended asking the person, or failed, with no update to the Issue since (#1275); named under that, not as unchanged
-          const replyWaiting = n === 0 ? replyWaitingIn(unheld, slot) : [];
-          if (replyWaiting.length) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 返事待ち: ${replyWaiting.map((i) => `#${i.number}`).join(" ")}`);
-          const failed = n === 0 ? failedIn(unheld, slot) : [];
-          if (failed.length) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 前回の Task が失敗したまま更新が無い: ${failed.map((i) => `#${i.number}${i.lastTask!.resumeAt ? `（使用上限、${fmtTime(i.lastTask!.resumeAt, Date.now())} に戻る）` : ""}`).join(" ")}`);
-          const unchanged = n === 0 ? unchangedIn(unheld, slot).filter((i) => !failedSince(i) && !awaitingReply(i)) : [];
-          if (unchanged.length) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 前回から更新が無い: ${unchanged.map((i) => `#${i.number}`).join(" ")}`);
-          // what holds them (#817, #937): an overlap still open, a prerequisite not done yet, one a person has to look at
-          const held = n === 0 ? heldIn(unheld, slot) : [];
-          for (const [label, of] of HELD_LINES) {
-            const rows = held.flatMap(({ item, pending, stuck }) => {
-              const named = of(pending, stuck);
-              return named.length ? [`#${item.number}（${named.map(heldWhy).join("・")}）`] : [];
-            });
-            if (rows.length) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: ${label}: ${rows.join(" ")}`);
-          }
-          // PBIs whose Tasks' files other work touches (#1044): left before a session starts only to find that out
-          const overlapped = n === 0 ? overlapIn(unheld, slot) : [];
-          const touching = overlapped.filter((i) => i.overlap!.hits.length > 0);
-          if (touching.length) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 重なり: ${touching.map((i) => `#${i.number}（${i.overlap!.hits.map((h) => `${h.ref}: ${h.path}`).join("・")}）`).join(" ")}`);
-          const undecided = overlapped.filter((i) => i.overlap!.unknown !== null);
-          if (undecided.length) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 重なりを判定できない: ${undecided.map((i) => `#${i.number}（${i.overlap!.unknown}）`).join(" ")}`);
-          // stalled PBIs whose newest ## 状況 counts as many closed Tasks as now (#578)
-          const spinning = n === 0 ? spinningIn(unheld, slot) : [];
-          if (spinning.length) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 前回の再開から進んでいない: ${spinning.map((i) => `#${i.number}`).join(" ")}`);
+          if (n === 0) skipped.push(...leftLines(r.items, slot).map((l) => `${ws.name}: ${SLOT_NAME[slot]}: ${l}`));
           if (!next) {
             if (n === 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 進められる項目が無い`);
             break;
@@ -1476,6 +1513,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           if (why) {
             skipped.push(`${ws.name}: #${next.item.number} を始めない: ${why}`);
             continue;
+          }
+          // the queue enabled since this workspace was read: the 実装 slot is the queue's now (#3956)
+          if (slot === "implement" && queued()) {
+            skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: キューに任せる`);
+            break;
           }
           // Unattended: no shadow (#99, like prompt schedules) and the schedule's budget applies to the stage Task.
           const t = await startStage({
@@ -1524,9 +1566,14 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   }
   /**
    * After an import that stored a change (#1879): the PBIs whose waits it closed and no stage Task runs for go on now, in
-   * the implement slot of an enabled backlog-next schedule, not at its next firing. No schedule enabled, nothing starts.
+   * the implement slot of an enabled backlog-next schedule, not at its next firing. No schedule enabled, or the backlog
+   * queue enabled (its own start takes the 実装 slot), nothing starts.
    */
+  /** The actions of the 実装 slot the backlog queue starts (#3966). */
+  const SLOT_ACTIONS = BacklogAction.options.filter((a) => SLOT_OF_ACTION[a] === "implement" && a !== "direct");
   const resumeUnblocked = async (wsId: string) => {
+    // an enabled backlog queue starts the 実装 slot's PBIs itself (#3956)
+    if (readQueue(db).enabled) return;
     const schedule = db.listSchedules().find((s) => s.action === "backlog-next" && s.enabled);
     const ws = schedule && db.getWorkspace(wsId);
     if (!schedule || !ws) return;
@@ -1534,12 +1581,152 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       .filter((i) => isUnblocked(i) && !i.activeTaskId).map((i) => i.number);
     if (numbers.length) await scheduler.runUnblocked(schedule.id, ws.id, numbers);
   };
+  /**
+   * The backlog queue's own start (#3966): no schedule and no managing Task. While the queue is enabled and fewer of its
+   * PBIs' 実装 Tasks (stage Tasks of the implement slot) run or wait than its `concurrency`, the next PBI in the queue's
+   * order that may go starts as the row's button starts it (`startStage`; the runner of 自動で始まる Task の既定). What
+   * holds the others is judged as backlog-next judges it, and said in its words (`leftLines`). What it decided goes to
+   * the schedules' log (`キュー: …`) and to the queue's `lastNote`. Called when the queue is saved enabled, when a stage
+   * Task's turn or Task ends, after an import that stored a change, and at boot; a call while one runs makes it run once
+   * more after.
+   */
+  let queueRun: Promise<void> | null = null;
+  let queueAgain = false;
+  const startFromQueue = (reason: "enabled" | "saved" | "task-end" | "import" | "boot"): Promise<void> => {
+    if (queueRun) {
+      queueAgain = true;
+      return queueRun;
+    }
+    queueRun = (async () => {
+      try {
+        do {
+          queueAgain = false;
+          await queueOnce(reason);
+        } while (queueAgain);
+      } catch (e) {
+        scheduler.note(`キュー: 始められない (${reason}): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+      }
+    })().finally(() => {
+      queueRun = null;
+    });
+    return queueRun;
+  };
+  const queueKey = (workspaceId: string, n: number) => `${workspaceId}:${n}`;
+  /** The queue's PBIs' 実装 Tasks running / waiting, and the ones being created right now (a button's too). */
+  const queueRunning = (queue: BacklogQueue) => {
+    const queued = new Set(queue.items.map((e) => queueKey(e.workspaceId, e.number)));
+    return (
+      db.listActiveStageTasks().filter((t) => t.workspaceId && SLOT_OF_ACTION[t.stage!.action] === "implement" && queued.has(queueKey(t.workspaceId, t.stage!.issue))).length +
+      [...startingStage].filter(([k, v]) => queued.has(k) && SLOT_OF_ACTION[v.action] === "implement").length
+    );
+  };
+  /** Why an action of the 実装 slot does not start now: its runner's usage at the limit, as backlog-next's (#1275, #834); "" = it may. */
+  const queueUsage = (action: BacklogAction): string => {
+    const decided = decidedRunner(action);
+    const runner = decided ? autoRunner(decided).runner : null;
+    if (!runner) return "始めるランナーがない";
+    const limit = settings().quotaAndResume.backlogQuotaLimit;
+    const hot = db.quotaFor(runner).find((q) => q.utilization >= limit && q.resetsAt * 1000 > Date.now());
+    return hot ? `${runner} の使用量 ${hot.window} が ${Math.round(hot.utilization * 100)}%（${Math.round(limit * 100)}% 以上）: 始めない` : "";
+  };
+  const queueOnce = async (reason: string): Promise<void> => {
+    const queue = prunedQueue();
+    if (!queue.enabled) return;
+    const lines: string[] = [];
+    const finish = () => {
+      for (const l of lines) scheduler.note(`キュー: ${l} (${reason})`);
+      noteQueue(db, lines);
+    };
+    if (!queue.items.length) return (lines.push("キューが空"), finish());
+    const meta = metaWorkspace();
+    if (!meta) return (lines.push("meta workspace がありません"), finish());
+    if (queueRunning(queue) >= queue.concurrency) return (lines.push(`同時に動かす数 ${queue.concurrency} に達している`), finish());
+    const usage = SLOT_ACTIONS.map(queueUsage);
+    if (usage.every(Boolean)) return (lines.push(...new Set(usage)), finish());
+    // each workspace of the queue, as stored, its queued items only
+    const read: Array<{ ws: Workspace; items: BacklogItem[] }> = [];
+    for (const id of [...new Set(queue.items.map((e) => e.workspaceId))]) {
+      const order = queue.items.filter((e) => e.workspaceId === id).map((e) => e.number);
+      const ws = db.getWorkspace(id);
+      if (!ws || !existsSync(ws.path)) {
+        lines.push(`${ws?.name ?? id}: workspace が無い: ${order.map((n) => `#${n}`).join(" ")}`);
+        continue;
+      }
+      const all = withActive({ fetchedAt: 0, items: backlog.read(ws, { released: await releasedIn(ws) }).items, errors: [], changes: [], syncs: [] }).items.filter((i) => order.includes(i.number));
+      const missing = order.filter((n) => !all.some((i) => i.number === n));
+      if (missing.length) lines.push(`${ws.name}: バックログに無い: ${missing.map((n) => `#${n}`).join(" ")}`);
+      const judged = all.map((item) => ({ item, can: canStartStoredBacklog(item) }));
+      const conflicted = judged.filter((j) => !j.can.ok);
+      if (conflicted.length) lines.push(`${ws.name}: 競合があるので自動では始めない: ${conflicted.map((j) => `#${j.item.number}（${(j.can as { why: string }).why}）`).join(" ")}`);
+      const items = judged.filter((j) => j.can.ok).map((j) => j.item);
+      const notReady = items.filter((i) => !i.onHold && (i.stage === "needs-tasks" || i.stage === "request" || i.stage === "needs-decision"));
+      if (notReady.length) lines.push(`${ws.name}: まだ Ready でない: ${notReady.map((i) => `#${i.number}（${i.stage === "needs-decision" ? "判断待ち" : "Task 分解前"}）`).join(" ")}`);
+      lines.push(...leftLines(items, "implement").map((l) => `${ws.name}: ${l}`));
+      read.push({ ws, items });
+    }
+    const picked = new Set<string>();
+    let startedAny = false;
+    for (;;) {
+      // the queue as it is now: an entry taken out or moved, the queue disabled or the number lowered while the backlog was read count
+      const live = readQueue(db);
+      if (!live.enabled || queueRunning(live) >= live.concurrency) break;
+      const at = (workspaceId: string, n: number) => live.items.findIndex((e) => e.workspaceId === workspaceId && e.number === n);
+      // the first that may go in each workspace; of those, the one first in the queue
+      const next = read
+        .flatMap(({ ws, items }) => {
+          const order = live.items.filter((e) => e.workspaceId === ws.id).map((e) => e.number);
+          const p = pickNext(items.filter((i) => !picked.has(queueKey(ws.id, i.number))), "implement", order);
+          return p ? [{ ws, p }] : [];
+        })
+        .sort((a, b) => at(a.ws.id, a.p.item.number) - at(b.ws.id, b.p.item.number))[0];
+      if (!next) break;
+      const { ws, p } = next;
+      picked.add(queueKey(ws.id, p.item.number));
+      const why = queueUsage(p.action);
+      if (why) {
+        lines.push(`${ws.name}: #${p.item.number} を始めない: ${why}`);
+        continue;
+      }
+      const t = await startStage({ ws, meta, item: p.item, action: p.action, resume: p.resume && { tasksDone: p.item.tasks!.done } });
+      if ("active" in t || "starting" in t) {
+        lines.push(`${ws.name}: #${p.item.number} は工程 Task が${"active" in t ? "動いている" : "開始中"}`);
+        continue;
+      }
+      if ("error" in t) {
+        lines.push(`${ws.name}: #${p.item.number} を始められない: ${t.error}`);
+        break;
+      }
+      startedAny = true;
+      lines.push(`${ws.name} #${p.item.number} を ${p.action} で開始 ${t.task.id}`);
+    }
+    const after = readQueue(db);
+    if (!startedAny && after.enabled && queueRunning(after) < after.concurrency) lines.push("進められる項目が無い");
+    finish();
+  };
+  /**
+   * A stage Task's turn or the Task ended (#3966): an 実装 frees a place, and a Task に分解 may have made a queued PBI
+   * Ready — the queue may start its next.
+   */
+  const queueTaskEnded = (_id: string, task: Task) => {
+    if (task.stage && readQueue(db).enabled) void startFromQueue("task-end");
+  };
+  if (!cfg.candidate) {
+    tasks.onTurnEnd(queueTaskEnded);
+    tasks.onTaskEnd(queueTaskEnded);
+    // an import that stored a change: a queued PBI's wait may have closed, or it became Ready
+    backlog.onImported((wsId) => {
+      const queue = readQueue(db);
+      if (queue.enabled && queue.items.some((e) => e.workspaceId === wsId)) void startFromQueue("import");
+    });
+  }
   if (!cfg.candidate) backlog.onImported((wsId) => void resumeUnblocked(wsId).catch((e) => console.error(`[backlog] resume after the import of ${wsId}: ${String((e as Error)?.message ?? e)}`)));
   // a Task started by hand that stopped on other work (its depends stop's pr#N / issue#N) goes on once that closed (#2045);
   // after every import, so a wait already closed when the stop came, or a turn that could not be sent, is tried again
   if (!cfg.candidate) backlog.onImported((wsId) => void resumeDepends({ db, tasks, workspaceId: wsId, now: Date.now() }).catch((e) => console.error(`[backlog] depends resume after the import of ${wsId}: ${String((e as Error)?.message ?? e)}`)), { every: true });
   if (!cfg.candidate) {
     scheduler.start();
+    // the queue goes on where it was (#3966): what ended while no daemon ran
+    void startFromQueue("boot");
     // the stored backlog is brought up to date at boot (#885); reading it does not wait for this
     // what was kept before the stop is sent (a wait still running is waited for by a timer, #886)
     // and read again by itself from then on (#887), more often while it changes
@@ -1560,6 +1747,24 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       for (const [id, n] of stopped) if (n > 0) tasks.record(id, { t: "status", text: `前回のデーモンの間に残った、切り離されたプロセスを ${n} 件止めました` });
     }).catch(() => undefined);
   }
+  // Jobs a Task asks for (#3992): the daemon's children, with the kit's bin first on PATH as a Task has it (ops-kit
+  // heavy / idle-run). A candidate runs on a copy of the database: the live daemon's jobs are not its to end.
+  const jobDeps: JobDeps = {
+    db,
+    dir: join(cfg.home, "jobs"),
+    get env() {
+      const meta = db.listWorkspaces().find((w) => w.kind === "meta");
+      return { ...process.env, PATH: [...(meta ? [join(meta.path, "ops-kit/bin")] : []), process.env.PATH ?? "", dirname(process.execPath)].join(delimiter) };
+    },
+    command: opts.jobCommand,
+    reviewIdleS: cfg.jobReviewIdleS,
+    // a Task that stopped on `job#<id>` goes on with the job's result (#3993), without waiting for the next import
+    onFinish: (job) => {
+      const workspaceId = db.getTask(job.taskId)?.workspaceId ?? null;
+      void resumeDepends({ db, tasks, workspaceId, now: Date.now() }).catch((e) => console.error(`[jobs] depends resume after job#${job.id}: ${String((e as Error)?.message ?? e)}`));
+    },
+  };
+  if (!cfg.candidate) recoverJobs(jobDeps);
   // Stopping an idle cloud host (#181): only where the environment set a stop command. Core decides when; the command
   // (sb-stop on the host) registers the wake-up and shuts the machine down.
   let wsCount = 0;
@@ -1583,7 +1788,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   const hostIdle =
     cfg.idleStopCmd && !cfg.candidate
       ? new HostIdle(
-          () => ({ running: db.listTasksByStatus("running").length, waiting: db.listTasksByStatus("waiting").length, background: tasks.backgroundJobs(), ws: wsCount, pty: pty?.size ?? 0, nextWakeAt: nextWakeAt() }),
+          () => ({ running: db.listTasksByStatus("running").length, waiting: db.listTasksByStatus("waiting").length, background: tasks.backgroundJobs() + db.listJobs(Number.MAX_SAFE_INTEGER).length /* the running jobs (#3992) */, ws: wsCount, pty: pty?.size ?? 0, nextWakeAt: nextWakeAt() }),
           (at) => {
             const arg = at === null ? "-" : new Date(at).toISOString();
             console.log(`hostidle: idle for 20 minutes; running ${cfg.idleStopCmd} ${arg}`);
@@ -1597,6 +1802,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       : null;
   hostIdle?.start();
   tasks.onTurnEnd(() => hostIdle?.touch());
+  if (!cfg.candidate) resumeJobsOnTurnEnd(db, tasks);
   const isMeta = (t: { workspaceId: string | null }) => !!t.workspaceId && db.getWorkspace(t.workspaceId)?.kind === "meta";
   let restarting = false;
   tasks.onTurnEnd((taskId, t, turn) => {
@@ -1826,6 +2032,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
    * host CloudFront replaces an origin's 502/504 with the "stopped" start page, and the app then leaves for the login page.
    */
   const UPSTREAM_FAILED = 424;
+  /** How far back GET /api/jobs lists ended jobs (#3992); running ones are always listed. */
+  const JOBS_LIST_MS = 7 * 24 * 3600 * 1000;
   /** The largest Webhook delivery read (#887): GitHub's Issue payloads are a few KiB; a larger body is refused unread. */
   const WEBHOOK_MAX_BYTES = 64 * 1024;
   /** A request's body, or null once it is longer than `max` bytes (read no further). */
@@ -2155,6 +2363,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             next.judge = { ...next.judge, ...patch };
           }
           // The rubric judge (#1219): on / off only; the runner and model are the judge's
+          // The main reviewer of a PR (#4024): Tasks read it as OPS_KIT_REVIEW_RUNNER from their next start or resume
+          if (parsed.data.reviewRunner !== undefined) next.reviewRunner = parsed.data.reviewRunner;
           if (parsed.data.titles?.auto !== undefined) next.titles = { ...next.titles, auto: parsed.data.titles.auto };
           if (parsed.data.evals?.judge?.enabled !== undefined) next.evals = { ...next.evals, judge: { ...next.evals.judge, enabled: parsed.data.evals.judge.enabled } };
           // The Tasks that start by themselves (#832): the runner must be detected. A runner change without a model
@@ -2423,6 +2633,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           }
           // a grant allows one operation once (#2745): never saved to be used again
           if (policy && answer.kind === "grant") return bad("許可文は方針に保存できません");
+          // nor a question tool's answers (#3053): they answer that one turn's questions
+          if (policy && answer.kind === "questions") return bad("質問ツールへの回答は方針に保存できません");
           if (policy) {
             const refusal = await humanCheck(req, srv);
             if (refusal) return refusal;
@@ -2842,6 +3054,24 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           if (!ws) return bad("workspace not found", 404);
           const records = readStoredRecords(db, ws);
           return records ? json(records) : bad("まだ GitHub から取り込んでいません", 409);
+        },
+      },
+
+      /**
+       * The backlog queue (#3955): the PBIs to implement, in the order the person chose, kept in the daemon. GET drops the
+       * PBIs whose stored Issue is closed (to `ended`, stored); PUT changes the fields it names (400 when one does
+       * not parse) and answers the queue as stored.
+       */
+      "/api/backlog/queue": {
+        GET: () => json(prunedQueue()),
+        PUT: async (req) => {
+          const parsed = BacklogQueueInput.safeParse(await req.json().catch(() => null));
+          if (!parsed.success) return bad(parsed.error.message);
+          // read and written with no wait between, so two requests do not write over each other
+          const before = readQueue(db);
+          const queue = saveQueue(db, parsed.data, (e) => queuedIssue(e)?.title ?? null);
+          onQueueSaved(before, queue);
+          return json(queue);
         },
       },
 
@@ -3351,12 +3581,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
 
       "/api/tasks/:id/permission": {
         POST: async (req) => {
-          const body = await readJson(req, (x) => x as { id?: string; decision?: "allow" | "deny"; answers?: unknown });
+          const body = await readJson(req, (x) => x as { id?: string; decision?: "allow" | "deny" });
           if (!body.id || (body.decision !== "allow" && body.decision !== "deny")) return bad("id and decision required");
-          const answers = PermissionAnswers.optional().safeParse(body.answers);
-          if (!answers.success) return bad("answers must map question text to a string");
           try {
-            return json(tasks.respondPermission(String(req.params.id), body.id, body.decision, answers.data));
+            return json(tasks.respondPermission(String(req.params.id), body.id, body.decision));
           } catch (e) {
             return bad(String((e as Error).message ?? e), 409);
           }
@@ -3576,6 +3804,24 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       },
       // now, for the resources screen (#3332): read when asked; the screen asks every 5 s only while it is shown
       "/api/ops/resources": () => json(opsResources(db, { home: homedir() })),
+      /**
+       * Jobs a Task asks the daemon to run (#3992, jobs.ts): local CI or a review, as the daemon's child. POST answers
+       * 202 with the job (its `id` is what the Task waits on as `job#<id>`); GET lists the running ones and those that
+       * ended in the last 7 days, newest first.
+       */
+      "/api/jobs": {
+        GET: () => json(db.listJobs(Date.now() - JOBS_LIST_MS)),
+        POST: async (req) => {
+          const parsed = JobRequest.safeParse(await req.json().catch(() => null));
+          if (!parsed.success) return bad(parsed.error.message);
+          try {
+            return json(requestJob(jobDeps, parsed.data), 202);
+          } catch (e) {
+            if (e instanceof JobError) return bad(e.message, e.status);
+            throw e;
+          }
+        },
+      },
       "/api/ledger/pricing": () => json({ ...pricingTable(), fromSettings: Object.keys(settings().prices), source: pricing.source.replace(cfg.home, "~/.switchboard").replace(cfg.codeRoot, "<repo>"), problems: pricing.problems }),
       "/api/tasks/:id/budget": {
         POST: async (req) => {
@@ -3914,7 +4160,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           if (m.type === "task.send") {
             catchUpWithShadow(m.taskId);
             tasks.send(m.taskId, m.text).catch((e) => ws.send(JSON.stringify({ type: "error", message: String((e as Error).message ?? e) } satisfies ServerMessage)));
-          } else if (m.type === "permission.respond") tasks.respondPermission(m.taskId, m.id, m.decision, m.answers);
+          } else if (m.type === "permission.respond") tasks.respondPermission(m.taskId, m.id, m.decision);
           else if (m.type === "task.abort") void tasks.abort(m.taskId);
         } catch (e) {
           ws.send(JSON.stringify({ type: "error", message: String((e as Error).message ?? e) } satisfies ServerMessage));

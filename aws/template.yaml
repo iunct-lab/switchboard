@@ -133,11 +133,12 @@ Resources:
       OwnershipControls: { Rules: [{ ObjectOwnership: BucketOwnerPreferred }] }
       # Request metrics per prefix, to see where the PUTs come from before choosing Litestream's sync-interval (#3242).
       # Each filter publishes about 16 metrics, billed hourly as custom metrics (about $0.30 per metric-month, so up to
-      # about $14 a month for the three); remove these once the counts are recorded.
+      # about $14 a month for the three); remove these once the counts are recorded. In S3's order (by Id): a drift
+      # detection counts a different order as a difference.
       MetricsConfigurations:
-        - { Id: litestream, Prefix: litestream/ }
         - { Id: archive, Prefix: archive/ }
         - { Id: history, Prefix: history/ }
+        - { Id: litestream, Prefix: litestream/ }
       LifecycleConfiguration:
         Rules:
           # a delete (Litestream retention, an agent) only adds a marker; the data itself goes after 30 days
@@ -866,8 +867,16 @@ Resources:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action: [cloudformation:DescribeStacks, cloudformation:DescribeStackEvents, cloudformation:CreateChangeSet, cloudformation:DescribeChangeSet, cloudformation:ExecuteChangeSet, cloudformation:UpdateStack, cloudformation:GetTemplateSummary]
+                Action: [cloudformation:DescribeStacks, cloudformation:DescribeStackEvents, cloudformation:DescribeChangeSet, cloudformation:ExecuteChangeSet, cloudformation:GetTemplateSummary]
                 Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*'
+              # A role passed to the stack stays attached, and anyone who may operate on it can use it: while a person's
+              # deploy runs, that is the person's deploy role with AdministratorAccess (scripts/host-ops.ts person-deploy).
+              # So the workflow makes or updates a change set only naming DeployRole, whether Actions runs today or not.
+              # ExecuteChangeSet has no cloudformation:RoleArn key; what it can run is a change set someone already made.
+              - Effect: Allow
+                Action: [cloudformation:CreateChangeSet, cloudformation:UpdateStack]
+                Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*'
+                Condition: { StringEquals: { 'cloudformation:RoleArn': !GetAtt DeployRole.Arn } }
               - Effect: Allow
                 Action: iam:PassRole
                 Resource: !GetAtt DeployRole.Arn

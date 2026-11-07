@@ -104,6 +104,7 @@ export function Ops(props: { onOpenTask: (id: string) => void }) {
       )}
       {table && table.days.length === 0 && <div className="muted">{t(m.noStops)}</div>}
       {table && table.days.length > 0 && (
+        <div className="table-scroll">
         <table className="pricing ops-stops-table">
           <thead>
             <tr>
@@ -130,12 +131,14 @@ export function Ops(props: { onOpenTask: (id: string) => void }) {
             ))}
           </tbody>
         </table>
+        </div>
       )}
       <h5>{t(m.hostLoad)}</h5>
       {loadFailure && <div className="muted" data-ops-load-error>{t(m.loadFailed, { error: loadFailure })}</div>}
       {load && !load.available && <div className="muted" data-ops-load-unavailable>{t(m.loadUnavailable)}</div>}
       {load?.available && load.hours.length === 0 && load.groups.length === 0 && <div className="muted">{t(m.noRecords)}</div>}
       {load?.available && load.hours.length > 0 && (
+        <div className="table-scroll">
         <table className="pricing ops-load-days">
           <thead>
             <tr>
@@ -159,8 +162,10 @@ export function Ops(props: { onOpenTask: (id: string) => void }) {
             ))}
           </tbody>
         </table>
+        </div>
       )}
       {load?.available && load.groups.length > 0 && (
+        <div className="table-scroll">
         <table className="pricing ops-load-top">
           <thead>
             <tr>
@@ -187,6 +192,7 @@ export function Ops(props: { onOpenTask: (id: string) => void }) {
             ))}
           </tbody>
         </table>
+        </div>
       )}
       <div className="row head">
         <h5>{t(m.speed)}</h5>
@@ -195,6 +201,7 @@ export function Ops(props: { onOpenTask: (id: string) => void }) {
       {perfFailure && <div className="muted" data-ops-perf-error>{t(m.speedFailed, { error: perfFailure })}</div>}
       {perf && perf.length === 0 && <div className="muted">{t(m.noRecords)}</div>}
       {perf && perf.length > 0 && (
+        <div className="table-scroll">
         <table className="pricing perf" data-ops-perf>
           <thead>
             <tr>
@@ -219,6 +226,7 @@ export function Ops(props: { onOpenTask: (id: string) => void }) {
             ))}
           </tbody>
         </table>
+        </div>
       )}
       <div className="row head">
         <h5>{t(m.apiTimes)}</h5>
@@ -227,6 +235,7 @@ export function Ops(props: { onOpenTask: (id: string) => void }) {
       {latencyFailure && <div className="muted" data-ops-latency-error>{t(m.apiTimesFailed, { error: latencyFailure })}</div>}
       {latency && latency.total.length === 0 && <div className="muted">{t(m.noRecords)}</div>}
       {latency && latency.total.length > 0 && (
+        <div className="table-scroll">
         <table className="pricing ops-latency" data-ops-latency>
           <thead>
             <tr>
@@ -260,6 +269,7 @@ export function Ops(props: { onOpenTask: (id: string) => void }) {
             ))}
           </tbody>
         </table>
+        </div>
       )}
       <div className="hint">{t(m.opsFooter)}</div>
     </section>

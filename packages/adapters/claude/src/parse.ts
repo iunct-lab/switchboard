@@ -1,4 +1,4 @@
-import type { AgentEvent, PermissionKind } from "@switchboard/protocol";
+import type { AgentEvent, AskQuestion, PermissionKind } from "@switchboard/protocol";
 
 /**
  * Pure mapping from Claude Code `--output-format stream-json` lines to AgentEvent.
@@ -135,6 +135,11 @@ export function mapClaudeMessage(m: Any, s: ClaudeParserState): AgentEvent[] {
       const r = m.request;
       if (r?.subtype === "can_use_tool" && typeof m.request_id === "string") {
         const tool = String(r.tool_name ?? "tool");
+        // the question tool (#3056) is not an approval: its questions go to the person, the adapter declines the call
+        if (tool === "AskUserQuestion") {
+          out.push({ t: "question.ask", id: m.request_id, questions: askQuestionsOf(r.input) });
+          break;
+        }
         out.push({
           t: "permission.ask",
           id: m.request_id,
@@ -259,17 +264,21 @@ export function initializeLine(requestId = "init-1"): string {
 }
 
 /**
- * `answers` is how an AskUserQuestion is answered (verified 2026-09-19 on 2.1.277, external recording packages/adapters/claude/fixtures/ask-user-question.jsonl (record your own outside Git with the runner-adapter-recording skill;
- * bun scripts/fixtures.ts fetch works only in a clone with the private history)):
- * `updatedInput = { ...input, answers: { [question]: label } }`, several labels of a multiSelect joined with ", ",
- * free text as is. Claude turns it into the tool result "The user answered: …". Without `answers` the tool gets
- * nothing to report, which is why a bare allow was useless for it.
+ * AskUserQuestion's `questions` as the protocol's (#3056): `header` / an option's `description` absent → null,
+ * `multiSelect` absent → false. A malformed entry is left out.
  */
-export function permissionResponseLine(requestId: string, decision: "allow" | "deny", input: unknown, reason?: string, answers?: Record<string, string>): string {
-  const response =
-    decision === "allow"
-      ? { behavior: "allow", updatedInput: answers && input && typeof input === "object" ? { ...input, answers } : input }
-      : { behavior: "deny", message: reason ?? "Denied by user in Switchboard" };
+export function askQuestionsOf(input: unknown): AskQuestion[] {
+  const qs = (input as { questions?: unknown } | null)?.questions;
+  if (!Array.isArray(qs)) return [];
+  return qs.flatMap((q: Any) => {
+    if (typeof q?.question !== "string") return [];
+    const options = Array.isArray(q.options) ? q.options.filter((o: Any) => typeof o?.label === "string").map((o: Any) => ({ label: o.label as string, description: typeof o.description === "string" ? o.description : null })) : [];
+    return [{ header: typeof q.header === "string" ? q.header : null, question: q.question, options, multiSelect: q.multiSelect === true }];
+  });
+}
+
+export function permissionResponseLine(requestId: string, decision: "allow" | "deny", input: unknown, reason?: string): string {
+  const response = decision === "allow" ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: reason ?? "Denied by user in Switchboard" };
   return JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: requestId, response } }) + "\n";
 }
 

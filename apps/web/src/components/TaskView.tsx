@@ -4,7 +4,6 @@ import { api, OLDER_PAGE, type TaskDetail } from "../api.ts";
 import { journeyCancel, journeyEnd, journeyStart } from "../perf.ts";
 import { eventsArchiveNotice } from "../events-archive.ts";
 import { foldTranscript, itemText, spanText, toolInputText, toolResultText, transcriptMarkdown, turnReply, type Item, type PermissionAsk } from "../transcript.ts";
-import { answerOf, answersOf, questionsOf, type AskQuestion, type QuestionChoice } from "../questions.ts";
 import { CloudSessionNotice, CloudSourceTag, CopyButton, OriginTag, BackgroundTag, ResumeTag, RunnerPill, ShadowTag } from "./ui.tsx";
 import { Terminal } from "./Terminal.tsx";
 import { DeviceAuth } from "./DeviceAuth.tsx";
@@ -34,8 +33,7 @@ export function TaskView(props: {
   detail?: TaskDetail;
   /** Resolves once the daemon took the turn; rejects (after showing the error) otherwise — the composer keeps its text and chips then. */
   onSend: (text: string, attachmentIds?: string[]) => Promise<void>;
-  /** `answers` comes with an allow of a question card (AskUserQuestion). */
-  onPermission: (id: string, decision: "allow" | "deny", answers?: Record<string, string>) => void;
+  onPermission: (id: string, decision: "allow" | "deny") => void;
   onError: (msg: string) => void;
   shadowTask?: Task;
   /** health.features.pty: the daemon can open a shell. False = no terminal tab. */
@@ -73,6 +71,7 @@ export function TaskView(props: {
     }
     return ends;
   }, [transcript.items]);
+  const [reasonOpen, setReasonOpen] = useState(false);
   const [text, setText] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
   // 最新へ (#1315): shown only while the conversation's end is below the view; 48px of slack counts as the end. Measured
@@ -315,7 +314,8 @@ export function TaskView(props: {
           </button>
         )}
         {judgement && (
-          <span className="hint judged" title={judgement.title}>
+          // one line on a phone (#4066); a tap shows the whole reason
+          <span className={`hint judged${reasonOpen ? " open" : ""}`} title={judgement.title} onClick={() => setReasonOpen(!reasonOpen)}>
             {judgement.text}
           </span>
         )}
@@ -427,8 +427,6 @@ export function TaskView(props: {
       {!cloud && <DeviceAuth auth={props.deviceAuth} onError={props.onError} />}
       {!cloud && <TaskAsks task={props.task} stops={props.detail?.stopSummary ?? []} onError={props.onError} />}
       {transcript.pending.map((p) => {
-        const questions = questionsOf(p.tool, p.input);
-        if (questions) return <QuestionCard key={p.id} ask={p} questions={questions} onPermission={props.onPermission} />;
         return (
           <div key={p.id} className="perm" role="alertdialog">
             <div>
@@ -585,63 +583,6 @@ function TranscriptItem(props: {
 
 function permLabel(k: "exec" | "write" | "network" | "other") {
   return { exec: t(m.permExec), write: t(m.permWrite), network: t(m.permNetwork), other: t(m.permOther) }[k];
-}
-
-/**
- * A pending AskUserQuestion: the agent is not asking for permission but for an answer. Options are radios
- * (checkboxes for multiSelect) plus a free-text field, as in the terminal's 「Other」; 回答する sends the allow with
- * `answers`, 答えない is the deny.
- */
-function QuestionCard(props: { ask: PermissionAsk; questions: AskQuestion[]; onPermission: (id: string, decision: "allow" | "deny", answers?: Record<string, string>) => void }) {
-  const [choices, setChoices] = useState<(QuestionChoice | undefined)[]>([]); // indexed like props.questions
-  const answers = answersOf(props.questions, choices);
-  const update = (i: number, fn: (c: QuestionChoice) => QuestionChoice) => setChoices((s) => Object.assign([...s], { [i]: fn(s[i] ?? { labels: [], other: "" }) }));
-  return (
-    <div className="perm question" role="alertdialog" aria-label={t(m.questionAria)}>
-      <div className="questions">
-        <b>{t(m.question)}</b>
-        {props.questions.map((q, i) => (
-          <fieldset key={i}>
-            <legend>
-              {q.header && <span className="tag">{q.header}</span>}
-              {q.question}
-              {q.multiSelect && <span className="hint">{t(m.multiSelect)}</span>}
-            </legend>
-            {q.options.map((o) => (
-              <label key={o.label} className="opt">
-                <input
-                  type={q.multiSelect ? "checkbox" : "radio"}
-                  name={`${props.ask.id}:${i}`}
-                  checked={(choices[i]?.labels ?? []).includes(o.label)}
-                  onChange={(e) =>
-                    update(i, (c) => (q.multiSelect ? { ...c, labels: e.target.checked ? [...c.labels, o.label] : c.labels.filter((l) => l !== o.label) } : { labels: [o.label], other: "" }))
-                  }
-                />
-                <span>
-                  {o.label}
-                  {o.description && <span className="hint"> — {o.description}</span>}
-                </span>
-              </label>
-            ))}
-            <input
-              type="text"
-              className="other"
-              placeholder={q.options.length ? t(m.otherPlaceholder) : t(m.writeAnswer)}
-              value={choices[i]?.other ?? ""}
-              onChange={(e) => update(i, (c) => (q.multiSelect ? { ...c, other: e.target.value } : { labels: e.target.value ? [] : c.labels, other: e.target.value }))}
-            />
-            {answerOf(q, choices[i]) && <div className="hint">{t(m.answerLine, { answer: answerOf(q, choices[i]) })}</div>}
-          </fieldset>
-        ))}
-      </div>
-      <div className="actions">
-        <button className="pri" disabled={!answers} title={answers ? "" : t(m.answerAllTitle)} onClick={() => answers && props.onPermission(props.ask.id, "allow", answers)}>
-          {t(m.answer)}
-        </button>
-        <button onClick={() => props.onPermission(props.ask.id, "deny")}>{t(m.noAnswer)}</button>
-      </div>
-    </div>
-  );
 }
 
 /**

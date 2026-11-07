@@ -50,6 +50,8 @@ env -u SWITCHBOARD_SUPERVISED bun test <file> -t "<name>"     # 変数を継承�
 
 動いている Switchboard での確認（live check）は `verify-live-ui` スキル（デーモンと Web UI `localhost:5173`）。
 
+画面に関わる変更（`apps/web` の描画・CSS）の PR は、`ops-kit heavy -- bun scripts/screens-audit.ts --screens <触った画面>`（`bun run --cwd apps/web build` の後。実データの写しの候補のデーモンで、スマホ縦 390×844 と PC 1280×900 を中のスクロールごとに撮る）で撮った画面を自分の目で見てから出し、本文に貼る（置き場は下の「画像」の `feedback-assets`）。スマホ縦は必ず見る。題が読めない・横にはみ出す・1 字幅で縦に並ぶ・ボタンが崩れる・ヘッダーなどの帯が要る段数より多い（1 つの項目だけで 1 段を取る、詰めれば収まるのに段が増える。スクリプトの「帯の余分な段」。2026-11-07 の利用者の指摘）なら直してから出す。PBI に `**画面イメージ**` があれば、撮った画面と並べて見比べ、違いを本文に書く。動き・文言の E2E だけで画面を確かめたことにしない（2026-11-06 の利用者の指摘。#4020）
+
 ## 作業の場所
 
 - main の作業ツリーでは作業しない（利用者の `bun run dev` か release のデーモンがそこを見ている。`packages/core` を触るとセッションごと再起動する）。`git worktree add --detach ../switchboard-<topic> origin/main` → `bun install`。PBI を丸ごとなら `../switchboard-pbi<PBI>`
@@ -95,7 +97,7 @@ Codex の `five_hour` が 0.9 以上、または `codex exec` が使用上限で
 ## マージ判定とローカル CI
 
 - マージ判定: `bun scripts/merge-gate.ts <PR> [--allow-large] [--merge|--merge-stack]`（exit 0 = merge / 1 = stop / 2 = 判定不能。`--merge`（単発）/ `--merge-stack`（スタックの最下段）は判定が merge のときだけマージまで進む。Task の許可に入る既定のマージはこれ。利用者が Task の会話で判定の外のマージを認めたときは `gh pr merge` / `gh stack merge`（`pbi-complete` の 5）。規則は `scripts/merge-gate.ts`、手順と印は `docs/merge-gate.md`）。スキルの `<マージ判定>`。large の理由のうち `[再チェック <kind>]` は、`docs/merge-gate.md` の「## 再チェック」（スキルの `<再チェック>`）を回して付ける印 `[recheck] <kind> pass <head sha>` で外れる。`[聞く]` は利用者が認めたとき（`--allow-large`）だけ
-- ローカル CI: Actions が始まらない（ジョブのステップ 0 件）か run が無い（全部の run が skip された、も同じ）ときは `bun scripts/local-ci.ts <PR>` で Actions と同じ手順（`scripts/ci.ts`）を、最新の head を最新の base にマージして回す。結果は PR に付き（`[local-ci] pass|fail <head sha> base=<base sha>`）、スタックでは全部の PR の指摘の処理が済んでから一番上で 1 回回し、merge-gate は一番上の最新の結果が pass で、その PR の今のコミットがその pass の head に同じ差分で入っていれば（`git cherry`）CI の成功と数える（いつ回し、どう数えるかは `docs/merge-gate.md` の「ローカル CI を回す時と数え方」。自動 rebase と base の前進では回し直さない）。base の枝の保護が必須チェックを求めると BLOCKED で止まる（ローカルの結果では満たせない。確かめ方は `docs/merge-gate.md` の「保護枝とローカルの結果」）。スキルの `<ローカル CI>`。`bun test` は影響範囲だけを回す（`--all` で全部、全テストの安全網はタグの CI）。同じ head の最新の結果が merge-gate の数える pass なら回さず exit 0（`--force` か `--all` で回す）。詳細は `docs/merge-gate.md`
+- ローカル CI: Actions が始まらない（ジョブのステップ 0 件）か run が無い（全部の run が skip された、も同じ）ときは `bun scripts/local-ci.ts <PR>` で Actions と同じ手順（`scripts/ci.ts`）を、最新の head を最新の base にマージして回す。結果は PR に付き（`[local-ci] pass|fail <head sha> base=<base sha>`）、スタックでは全部の PR の指摘の処理が済んでから一番上で 1 回回し、merge-gate は一番上の最新の結果が pass で、その PR の今のコミットがその pass の head に同じ差分で入っていれば（`git cherry`）CI の成功と数える（いつ回し、どう数えるかは `docs/merge-gate.md` の「ローカル CI を回す時と数え方」。自動 rebase と base の前進では回し直さない）。base の枝の保護が必須チェックを求めると BLOCKED で止まる（ローカルの結果では満たせない。確かめ方は `docs/merge-gate.md` の「保護枝とローカルの結果」）。スキルの `<ローカル CI>`。`bun test` は影響範囲だけを回す（`--all` で全部、全テストの安全網はタグの CI）。同じ head の最新の結果が merge-gate の数える pass なら回さず exit 0（`--force` か `--all` で回す）。クラウドのホストでは重い手順（型検査・`bun test`）を外で回す（`docs/design/local-ci-offload.md`）。詳細は `docs/merge-gate.md`
 - `gh pr checks` が権限不足で 403 になるときは、`gh run list -R "$(gh repo view --json nameWithOwner -q .nameWithOwner)" --commit <sha>` で見る
 
 ## 追加のレビュアー

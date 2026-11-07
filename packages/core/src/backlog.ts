@@ -646,16 +646,20 @@ export const spinningIn = (items: BacklogItem[], slot: Slot) =>
  * any stage (`failedIn`, `replyWaitingIn`).
  * #2930: an item labelled `on-hold` is left in every slot and stage (`onHoldIn`), and in no other reason's list.
  */
-export function pickNext(items: BacklogItem[], slot: Slot): { item: BacklogItem; action: BacklogAction; resume?: true } | null {
+export function pickNext(items: BacklogItem[], slot: Slot, order?: number[]): { item: BacklogItem; action: BacklogAction; resume?: true } | null {
   // #1044: an 実装 (`complete`) that would touch what other work touches is not started; the next candidate goes instead
-  return candidates(items, slot).find((c) => !(c.action === "complete" && isOverlapped(c.item))) ?? null;
+  return candidates(items, slot, order).find((c) => !(c.action === "complete" && isOverlapped(c.item))) ?? null;
 }
 
 /** The items of the 実装 slot backlog-next leaves for their files overlapping other work, or for that not being judged (#1044). */
-export const overlapIn = (items: BacklogItem[], slot: Slot) => candidates(items, slot).filter((c) => c.action === "complete" && isOverlapped(c.item)).map((c) => c.item);
+export const overlapIn = (items: BacklogItem[], slot: Slot, order?: number[]) => candidates(items, slot, order).filter((c) => c.action === "complete" && isOverlapped(c.item)).map((c) => c.item);
 
-/** The items a slot may move on, in the order backlog-next takes them, each with what it would do. */
-function candidates(items: BacklogItem[], slot: Slot): Array<{ item: BacklogItem; action: BacklogAction; resume?: true }> {
+/**
+ * The items a slot may move on, in the order backlog-next takes them, each with what it would do. With `order` (the
+ * backlog queue's numbers, #3956) the 実装 slot takes only the items in it, in its order; what holds an item is judged as
+ * without it.
+ */
+function candidates(items: BacklogItem[], slot: Slot, order?: number[]): Array<{ item: BacklogItem; action: BacklogAction; resume?: true }> {
   const resumed = (i: BacklogItem) =>
     isAnswered(i) ? -4 : isUnblocked(i) ? -3 : i.stage !== "in-progress" ? null : isClosable(i) ? -2 : isStalled(i) && !isSpinning(i) ? -1 : null;
   const first = (i: BacklogItem) => resumed(i) ?? 0;
@@ -663,16 +667,20 @@ function candidates(items: BacklogItem[], slot: Slot): Array<{ item: BacklogItem
   // #1275: a Task that failed or stopped asking, with no update to the Issue since, holds the item in any stage (an unblocked one still goes on, #817)
   // a request the person sent down 直行で直す (#3690) stays theirs: backlog-next does not make it a PBI after the direct Task
   const open = items.filter((i) => !i.onHold && !i.activeTaskId && i.lastTask?.action !== "direct" && !isWaiting(i) && (isUnblocked(i) || (!isUnchanged(i) && !failedSince(i) && !awaitingReply(i) && !stopHeld(i))) && (SLOT_STAGES[slot].includes(i.stage) || (slot === "implement" && resumed(i) !== null)));
-  // #2929: the ones to finish first (`resumed`), then Priority, then not yet worked on, then the stage, then the oldest
-  open.sort(
+  const queued = order && slot === "implement" ? (i: BacklogItem) => order.indexOf(i.number) : null;
+  // #2929: the ones to finish first (`resumed`), then Priority, then not yet worked on, then the stage, then the oldest;
+  // the queue's order instead when there is one (#3956)
+  const ranked = queued ? open.filter((i) => queued(i) >= 0) : open;
+  ranked.sort(
     (a, b) =>
+      (queued ? queued(a) - queued(b) : 0) ||
       first(a) - first(b) ||
       priorityRank(a.priority) - priorityRank(b.priority) ||
       tried(a) - tried(b) ||
       STAGE_ORDER.indexOf(a.stage) - STAGE_ORDER.indexOf(b.stage) ||
       a.createdAt.localeCompare(b.createdAt),
   );
-  return open.map((item) => {
+  return ranked.map((item) => {
     const r = resumed(item);
     const action: BacklogAction = r === -2 ? "close" : r !== null ? "complete" : ACTION_FOR_STAGE[item.stage]!;
     return r === -1 ? { item, action, resume: true } : { item, action };

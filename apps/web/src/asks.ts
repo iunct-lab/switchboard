@@ -317,3 +317,38 @@ export function hiddenByBatches(asks: Ask[], batches: AskBatch[]): Ask[] {
   const loggingIn = new Set(batches.flatMap((b) => (b.loggingIn ? [b.loggingIn.taskId] : [])));
   return asks.filter((a) => !ids.has(a.id) && !(a.task && loggingIn.has(a.task.id) && a.state === "open" && (a.kind === "stop" || a.kind === "check")));
 }
+
+/**
+ * A question card's parts in the order a phone reads them (#4068): what it is about (the PBI, else the Task, else
+ * nothing), the question itself (above the answer buttons), the facts that are known, and the labels of the ones the
+ * records do not have — one line 「不明: …」 instead of a row each (docs/design/asks.md still says they are 不明).
+ */
+export function askCardParts(a: Ask): { title: { text: string; href?: string } | null; question: string | null; facts: Array<{ label: string; value: string; href?: string }>; unknown: string[] } {
+  const all = askFacts(a);
+  const questionLabel = a.kind === "notice" ? t(m.kindNotice) : t(m.factQuestion);
+  const q = all.find((f) => f.label === questionLabel);
+  const rest = all.filter((f) => f !== q);
+  const title = a.kind === "notice" ? null : a.pbi ? { text: `#${a.pbi.number} ${a.pbi.title}`, href: a.pbi.url } : a.task ? { text: a.task.title ?? a.task.id } : null;
+  return {
+    title,
+    question: q && q.value !== UNKNOWN ? q.value : null,
+    facts: rest.filter((f) => f.value !== UNKNOWN),
+    unknown: [...(q && q.value === UNKNOWN ? [q.label] : []), ...rest.filter((f) => f.value === UNKNOWN).map((f) => f.label)],
+  };
+}
+
+/** How much of a long question a card shows before 全文 (#4068): six lines, and about 300 characters (a short screenful of Japanese on a phone). */
+export const QUESTION_HEAD = 300;
+
+/** A question's first part and whether there is more (#4068): at most six lines, cut at a line end within QUESTION_HEAD characters when there is one; counted in characters, so an emoji is not split. */
+export function questionHead(q: string): { head: string; more: boolean } {
+  const lines = q.split("\n");
+  let head = lines.slice(0, 6).join("\n");
+  const chars = Array.from(head);
+  if (chars.length > QUESTION_HEAD) {
+    const within = chars.slice(0, QUESTION_HEAD).join("");
+    const cut = within.lastIndexOf("\n");
+    head = cut > within.length / 2 ? within.slice(0, cut) : within;
+  }
+  return head.length < q.length ? { head: head.trimEnd() + " …", more: true } : { head: q, more: false };
+}

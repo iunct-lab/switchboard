@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent } from "@switchboard/protocol";
+import { QUESTION_DEFERRED_REPLY, type AgentEvent } from "@switchboard/protocol";
 import { claudeSessionExists, createClaudeAdapter } from "./index.ts";
 
 describe("claudeSessionExists", () => {
@@ -88,6 +88,32 @@ describe("bedrock (#1730)", () => {
         if (v === undefined) delete process.env[k];
         else process.env[k] = v;
       }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("question tool (#3056)", () => {
+  test("question tool ends the turn: AskUserQuestion is declined once with the deferred reply, nothing left pending", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sb-claude-question-"));
+    const got = join(dir, "reply.jsonl");
+    const bin = join(dir, "claude");
+    const ask = JSON.stringify({ type: "control_request", request_id: "q-1", request: { subtype: "can_use_tool", tool_name: "AskUserQuestion", input: { questions: [{ question: "Which?", header: "H", options: [{ label: "a", description: "x" }], multiSelect: false }] } } });
+    const result = JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "Waiting.", session_id: "s1" });
+    // reads the initialize line and the first message, asks, keeps what comes back, ends the turn and exits
+    writeFileSync(bin, `#!/bin/sh\nread a\nread b\necho '${ask}'\nread c\nprintf '%s\\n' "$c" > "${got}"\necho '${result}'\nexit 0\n`);
+    chmodSync(bin, 0o755);
+    const events: AgentEvent[] = [];
+    try {
+      const s = createClaudeAdapter({ bin }).start({ cwd: dir, scope: [dir], prompt: "ask" }, (e) => events.push(e));
+      await s.exited;
+      const reply = readFileSync(got, "utf8").trim().split("\n");
+      expect(reply).toHaveLength(1);
+      expect(JSON.parse(reply[0]!).response).toEqual({ subtype: "success", request_id: "q-1", response: { behavior: "deny", message: QUESTION_DEFERRED_REPLY } });
+      expect(events.filter((e) => e.t === "question.ask")).toEqual([{ t: "question.ask", id: "q-1", questions: [{ header: "H", question: "Which?", options: [{ label: "a", description: "x" }], multiSelect: false }] }]);
+      expect(events.some((e) => e.t === "permission.ask")).toBe(false);
+      expect(events.find((e) => e.t === "session.end")).toMatchObject({ status: "ok" });
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
