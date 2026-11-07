@@ -1,7 +1,7 @@
 // test-reads: apps/web/src/scheduleActions.ts apps/web/src/scheduleResult.ts apps/web/src/scheduleEdit.ts apps/web/src/i18n.ts apps/web/src/i18n/backlog.ts
 import { describe, expect, test } from "bun:test";
 import type { BacklogIssueDetail, BacklogSyncInfo } from "@switchboard/protocol";
-import { backlogHeading, createWord, draftKey, heldIssueText, issueHref, savedWords, editOf, formAfterRead, formOf, githubSyncText, labelList, loadDraft, loadNewIssueDraft, PROJECT_SETUP_DOC, rebaseForm, syncLine, valueText, workspaceErrorGuide } from "./backlogSync.ts";
+import { backlogHeading, createWord, decisionQuestion, syncSummary, draftKey, heldIssueText, issueHref, savedWords, editOf, formAfterRead, formOf, githubSyncText, labelList, loadDraft, loadNewIssueDraft, PROJECT_SETUP_DOC, rebaseForm, syncLine, valueText, workspaceErrorGuide } from "./backlogSync.ts";
 
 const fmt = (ms: number) => `t${ms}`;
 const info = (over: Partial<BacklogSyncInfo>): BacklogSyncInfo => ({ state: "synced", reason: null, lastSuccessfulSync: 1000, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A", ...over });
@@ -229,5 +229,18 @@ console.log(JSON.stringify([
       "Last scan D: repositories 4 / hits 2 / could not scan 3",
       'Enter the budget as a number greater than 0: "abc"',
     ]);
+  });
+});
+
+describe("syncSummary / decisionQuestion (Backlog on a phone)", () => {
+  const s = (workspaceId: string, state: "synced" | "pending" | "conflict" | "error") => ({ workspaceId, sync: { state } }) as Parameters<typeof syncSummary>[0][number];
+  test("syncSummary: how many workspaces (one with a sync line and an error counted once), how many not synced or unreadable", () => {
+    expect(syncSummary([s("a", "synced"), s("b", "synced")], [])).toEqual({ text: "同期: 2 workspace", bad: false });
+    expect(syncSummary([s("a", "synced"), s("b", "error"), s("c", "pending")], [{ workspaceId: "b" }, { workspaceId: "d" }])).toEqual({ text: "同期: 4 workspace · 同期していない 2 · 読めない 2", bad: true });
+  });
+  test("decisionQuestion: the 問い line without its marks, else the first line under the heading", () => {
+    expect(decisionQuestion("## 判断待ち\n**問い**: この要望を統合して閉じるか\n**選択肢**:\n- A")).toBe("この要望を統合して閉じるか");
+    expect(decisionQuestion("## 判断待ち\n\nどちらで作るか **太字** で\n- A")).toBe("どちらで作るか 太字 で");
+    expect(decisionQuestion("")).toBe("");
   });
 });

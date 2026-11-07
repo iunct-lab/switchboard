@@ -1,4 +1,4 @@
-import type { OpsResources, ResourceRun, ResourceWait } from "@switchboard/protocol";
+import type { OpsJob, OpsResources, ResourceRun, ResourceWait } from "@switchboard/protocol";
 import { watchHealth } from "./healthWatch.ts";
 import { fmtBytes, kindLabel } from "./ops.ts";
 import { t } from "./i18n.ts";
@@ -104,6 +104,16 @@ export function consumerRows(c: NonNullable<OpsResources["consumers"]>): Array<{
     rss: fmtBytes(g.rssBytes),
     procs: g.procs,
   }));
+}
+
+/**
+ * A job's row on the resources screen (#3995): its kind (with the review's runner), its status in words (not by color
+ * alone; a failure with its exit code), and how long it has run or ran.
+ */
+export function jobRow(job: OpsJob, now: number): { kind: string; status: string; elapsed: string } {
+  const status =
+    job.status === "running" ? t(common.resJobRunning) : job.status === "pass" ? t(common.resJobPass) : job.status === "fail" ? t(common.resJobFail, { code: job.exitCode ?? "-" }) : t(common.resJobAborted);
+  return { kind: job.runner ? `${job.kind} (${job.runner})` : job.kind, status, elapsed: duration((job.endedAt ?? now) - job.startedAt) };
 }
 
 /** 「15:31 時点」: the minute the sampler's rows are from, in this browser's clock. */

@@ -120,6 +120,20 @@ test("cross-runner-review: an extra reviewer that can be off says its switch in 
   expect(text).toContain("CLAUDE.md が名指しし、有効の条件を満たしていれば");
 });
 
+test("cross-runner-review: OPS_KIT_REVIEW_RUNNER=same picks the same runner with its own mark; no value keeps the other runner (#4026)", () => {
+  const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
+  const chosen = "（同じランナーの別セッション。設定による選択）";
+  const substitute = "（同じランナーの別セッション。<上限のランナー> が利用上限のため代替）";
+  expect(text).toContain('[ "${OPS_KIT_REVIEW_RUNNER:-other}" = same ]');
+  expect(text).toContain(`\`[<runner>] review${chosen}\``);
+  expect(text).toContain(`\`[<runner>] review${substitute}\``);
+  expect(chosen).not.toBe(substitute);
+  expect(text).toContain("値が無い・`other`・それ以外の値なら、**既定の別のランナー**");
+  // the 4th argument of post_review is how either mark reaches the summary's first line
+  expect(text).toContain("note=${4:-}");
+  expect(text).toContain("printf '[%s] review%s\\n\\n' \"$who\" \"$note\"");
+});
+
 /** cross-runner-review's step 1 before the clone, run as written with /tmp moved under `root` and a fake gh / df first on PATH. */
 function runCloneSweep(availKb: number) {
   const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");

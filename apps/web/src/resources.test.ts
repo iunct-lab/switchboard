@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import type { OpsResources, ResourceRun, ResourceWait } from "@switchboard/protocol";
-import { atLabel, consumerRows, etaLine, latestAnswer, memoryLine, runOwner, since, typicalLabel, verdictLabel, waitLine, watchResources } from "./resources.ts";
+import type { OpsJob, OpsResources, ResourceRun, ResourceWait } from "@switchboard/protocol";
+import { atLabel, consumerRows, etaLine, jobRow, latestAnswer, memoryLine, runOwner, since, typicalLabel, verdictLabel, waitLine, watchResources } from "./resources.ts";
 
 const MB = 1024 * 1024;
 const GB = 1024 * MB;
@@ -105,4 +105,13 @@ test("resources: eta line", () => {
   expect(etaLine({ etaMs: 0, unknown: 1 }, 2)).toEqual({ value: "1 分以内", note: "実績の無い 1 件を除く" }); // the known one is past its median
   expect(etaLine({ etaMs: 0, unknown: 3 }, 3)).toEqual({ value: "実績なし", note: "実績の無い 3 件" }); // nothing known: not 「1 分以内」
   expect(etaLine({ etaMs: null, unknown: 0 }, 0)).toEqual({ value: "待ちはありません", note: null }); // nothing running or waiting
+});
+
+test("resources: a job's row — its kind with the review's runner, its status in words, how long it ran or has run (#3995)", () => {
+  const t0 = Date.parse("2026-11-06T10:00:00Z");
+  const job = (o: Partial<OpsJob>): OpsJob => ({ id: 7, kind: "local-ci", taskId: "t1", taskTitle: "仕事の口", pr: 12, runner: null, status: "running", exitCode: null, startedAt: t0, endedAt: null, ...o });
+  expect(jobRow(job({}), t0 + 125_000)).toEqual({ kind: "local-ci", status: "実行中", elapsed: "2 分" });
+  expect(jobRow(job({ kind: "review", runner: "codex", status: "pass", exitCode: 0, endedAt: t0 + 45_000 }), t0 + 3600_000)).toEqual({ kind: "review (codex)", status: "成功", elapsed: "45 秒" });
+  expect(jobRow(job({ status: "fail", exitCode: 1, endedAt: t0 + 3900_000 }), t0 + 9e9).status).toBe("失敗（終了コード 1）");
+  expect(jobRow(job({ status: "aborted", endedAt: t0 + 1000 }), t0).status).toBe("中断");
 });

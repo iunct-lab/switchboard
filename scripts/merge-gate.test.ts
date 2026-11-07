@@ -251,6 +251,7 @@ describe("security sub-kinds", () => {
     ["bun.lock", "security:lockfile"],
     [".github/workflows/ci.yml", "security:github"],
     ["scripts/local-ci.ts", "security:gates"],
+    ["scripts/forge-resync.ts", "security:gates"],
     ["aws/host/sb-host-update.sh", "security:host"],
   ] as const)("%s → %s: the reason names the group, ask has it, still asked", (path, kind) => {
     const j = one(path);

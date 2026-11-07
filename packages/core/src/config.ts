@@ -35,6 +35,8 @@ export interface CoreConfig {
   webDist: string;
   /** How long a finished runner process is kept alive for follow-ups before it is released (then `--resume` is used). */
   runnerIdleMs: number;
+  /** How long a review job (#3992) may print nothing before `ops-kit idle-run` cuts it (seconds). Default 900, as cross-runner-review runs it. */
+  jobReviewIdleS: number;
   /**
    * The Markdown folder that is the source of truth for rules / commands / notes. Override with SWITCHBOARD_KNOWLEDGE.
    * Default ~/Knowledge, or <home>/Knowledge when the data folder is temporary (a test or a fake-runner daemon must not
@@ -112,6 +114,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig {
     starterUrl: env.SWITCHBOARD_STARTER_URL || undefined,
     webDist: join(codeRoot, "apps", "web", "dist"),
     runnerIdleMs: numberOr(env.SWITCHBOARD_RUNNER_IDLE_MS, 10 * 60 * 1000),
+    jobReviewIdleS: numberOr(env.SWITCHBOARD_JOB_REVIEW_IDLE_S, 900),
     knowledgeDir: env.SWITCHBOARD_KNOWLEDGE ? resolve(expandHome(env.SWITCHBOARD_KNOWLEDGE)) : join(homeIsTemp ? home : homedir(), "Knowledge"),
     tokenPath: env.SWITCHBOARD_TOKEN_FILE ?? join(home, "token"),
     publicUrl: env.SWITCHBOARD_PUBLIC_URL,

@@ -5,19 +5,33 @@
  * start / rebuild ask the stack's Starter with the start token and the edge header (read from SSM, never printed);
  * deploy builds a change set run by the stack's DeployRole and executes it only when aws/change-set-check.ts lets it:
  * not when it touches the launch template or the instance (a replaced Instance is a person's deploy, aws/README.md).
- * `--dry-run` prints the plan and calls nothing (no AWS, no secret); start / rebuild / deploy need `--yes`.
+ * deploy is the workflow's. A person deploys with person-deploy and their own administrator login: the change set runs as
+ * the role of aws/person-deploy.yaml, which holds no permission except while person-deploy runs (it attaches
+ * AdministratorAccess first and detaches it at the end, whatever happened, and detaches one left by a run that died).
+ * A role passed to a stack stays attached and anyone who may operate on the stack can use it, so no role here keeps a
+ * standing permission beyond DeployRole's. person-deploy keeps every parameter's previous value unless
+ * SWITCHBOARD_HOST_PARAMS names it, and refuses to replace the instance unless `--allow-replace`.
+ * `--dry-run` prints the plan and calls nothing (no AWS, no secret); start / rebuild / deploy / person-deploy need `--yes`.
  * Stack and region: SWITCHBOARD_HOST_STACK (switchboard-host), SWITCHBOARD_AWS_REGION (ap-northeast-1); deploy's
- * `--parameter-overrides` from SWITCHBOARD_HOST_PARAMS (the repository variable of the same name).
+ * `--parameter-overrides` from SWITCHBOARD_HOST_PARAMS (the repository variable of the same name); the person's deploy
+ * role's stack from SWITCHBOARD_PERSON_DEPLOY_STACK (`<stack>-person-deploy`).
  */
 import { checkChangeSet } from "../aws/change-set-check";
 
-export const ACTIONS = ["status", "start", "rebuild", "deploy"] as const;
+export const ACTIONS = ["status", "start", "rebuild", "deploy", "person-deploy", "person-drift"] as const;
 export type HostAction = (typeof ACTIONS)[number];
 
 export interface HostEnv {
   stack: string;
   region: string;
   params?: string;
+  personStack: string;
+  /** person-drift: how long to wait for a drift detection (SWITCHBOARD_DRIFT_TIMEOUT_SECONDS, 300; at most 3600) */
+  driftTimeoutSeconds: number;
+  /** person-drift: how often to ask whether it has finished (SWITCHBOARD_DRIFT_POLL_SECONDS, 5) */
+  driftPollSeconds: number;
+  /** person-deploy only: let a change set that replaces the instance through (a person's choice, aws/README.md) */
+  allowReplace?: boolean;
 }
 
 /** A command's result: both streams are kept, so they can be printed with the secrets taken out. */
@@ -30,8 +44,20 @@ export interface Deps {
 }
 
 export function hostEnv(env: Record<string, string | undefined> = process.env): HostEnv {
-  return { stack: env.SWITCHBOARD_HOST_STACK || "switchboard-host", region: env.SWITCHBOARD_AWS_REGION || "ap-northeast-1", params: env.SWITCHBOARD_HOST_PARAMS || undefined };
+  const stack = env.SWITCHBOARD_HOST_STACK || "switchboard-host";
+  return { stack, region: env.SWITCHBOARD_AWS_REGION || "ap-northeast-1", params: env.SWITCHBOARD_HOST_PARAMS || undefined, personStack: env.SWITCHBOARD_PERSON_DEPLOY_STACK || `${stack}-person-deploy`, driftTimeoutSeconds: seconds(env.SWITCHBOARD_DRIFT_TIMEOUT_SECONDS, 300), driftPollSeconds: seconds(env.SWITCHBOARD_DRIFT_POLL_SECONDS, 5) };
 }
+
+/**
+ * A positive, finite number of seconds, at most an hour: the wait runs while the person's deploy role holds
+ * AdministratorAccess, so no value may make it unbounded. Anything else is the default.
+ */
+function seconds(v: string | undefined, fallback: number): number {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.min(n, 3600) : fallback;
+}
+
+export const ADMIN_POLICY = "arn:aws:iam::aws:policy/AdministratorAccess";
 
 const NO_AUTH = "AWS に認証できない: 自分のログイン（aws sso login、AWS_PROFILE）を確かめてからやり直す。キーをこのスクリプトや Switchboard に保存しない";
 
@@ -41,6 +67,28 @@ export function planHostOperation(action: HostAction, e: HostEnv): string[] {
   if (action === "status") return [`${at} の出力 InstanceId を読む`, "その instance の状態を出す"];
   if (action === "start" || action === "rebuild") {
     return [`${at} の出力 StarterUrl を読む`, "SSM の /switchboard/start-token と /switchboard/edge-header を読む（値は出さない）", `Starter に POST /${action}`];
+  }
+  if (action === "person-drift") {
+    return [
+      `stack ${e.personStack} の出力 PersonDeployRoleArn / PersonDeployRoleName を読む`,
+      "人の配備用ロールに前の回の AdministratorAccess が残っていれば外す",
+      "人の配備用ロールに AdministratorAccess を付ける（自分のログインで。drift の検査はスタックに付いたロールで動く）",
+      `${at} の detect-stack-drift を終わるまで待ち、ずれたリソースを出す`,
+      "成功しても失敗しても、人の配備用ロールから AdministratorAccess を外す",
+    ];
+  }
+  if (action === "person-deploy") {
+    return [
+      "bun install --frozen-lockfile、bun run --cwd aws build",
+      `stack ${e.personStack} の出力 PersonDeployRoleArn / PersonDeployRoleName、${at} の出力 DataBucket を読む`,
+      "人の配備用ロールに前の回の AdministratorAccess が残っていれば外す",
+      "人の配備用ロールに AdministratorAccess を付ける（自分のログインで）",
+      "aws cloudformation package（Starter の build を DataBucket に上げる）",
+      `aws cloudformation deploy --no-execute-changeset（人の配備用ロールで。パラメータは前の値のまま${e.params ? "、SWITCHBOARD_HOST_PARAMS の分だけ変える" : ""}）`,
+      `change set を検査し${e.allowReplace ? "（--allow-replace: インスタンスの置き換えも通す）" : "、LaunchTemplate か Instance に触れるなら実行せずに止める"}`,
+      "execute-change-set、stack-update-complete を待つ",
+      "成功しても失敗しても、人の配備用ロールから AdministratorAccess を外す",
+    ];
   }
   return [
     "bun install --frozen-lockfile、bun run --cwd aws build",
@@ -82,43 +130,125 @@ export async function runHostOperation(action: HostAction, e: HostEnv, d: Deps):
     return text;
   }
 
+  // person-deploy / person-drift: the person's own login lends the role AdministratorAccess for this one run (the stack
+  // runs both a deploy and a drift detection as the role attached to it). A policy left by a run that died goes first,
+  // before anything that can fail (install, build, reads), so it never outlives a failed start
+  let person: { roleArn: string; roleName: string; detach: () => string } | undefined;
+  if (action === "person-deploy" || action === "person-drift") {
+    const personOutput = (key: string) => aws(["cloudformation", "describe-stacks", "--stack-name", e.personStack, "--query", `Stacks[0].Outputs[?OutputKey=='${key}'].OutputValue`, "--output", "text"]);
+    const roleArn = personOutput("PersonDeployRoleArn");
+    const roleName = personOutput("PersonDeployRoleName");
+    const detach = () => aws(["iam", "detach-role-policy", "--role-name", roleName, "--policy-arn", ADMIN_POLICY]);
+    const attached = aws(["iam", "list-attached-role-policies", "--role-name", roleName, "--query", "AttachedPolicies[].PolicyArn", "--output", "text"]);
+    if (attached.split(/\s+/).includes(ADMIN_POLICY)) {
+      d.log(`${action}: 前の回の AdministratorAccess が残っていたので外す`);
+      detach();
+    }
+    person = { roleArn, roleName, detach };
+  }
+
+  /** Run `fn` while the person's deploy role holds AdministratorAccess; detached at the end, whatever happened. */
+  const withPersonRole = (fn: (roleArn: string) => string): string => {
+    const { roleArn, roleName, detach } = person!;
+    try {
+      // inside the try: an attach that IAM applied but the CLI reported as failed is detached too
+      aws(["iam", "attach-role-policy", "--role-name", roleName, "--policy-arn", ADMIN_POLICY]);
+      // IAM takes a few seconds to let CloudFormation use a policy just attached
+      d.run(["sleep", "15"]);
+      return fn(roleArn);
+    } finally {
+      // never left behind: a role attached to the stack with AdministratorAccess is anyone's who may operate on the stack
+      try {
+        detach();
+      } catch (err) {
+        // only IAM's own "not attached" (an attach that never happened) is not a failure; a listing could lag the change,
+        // so it is not asked: anything else keeps the error and the command to run by hand
+        if (!/NoSuchEntity/.test((err as Error).message)) {
+          throw new Error(`AdministratorAccess を外せなかった（${(err as Error).message}）: すぐ手で外す: aws iam detach-role-policy --role-name ${roleName} --policy-arn ${ADMIN_POLICY}`);
+        }
+      }
+      d.log(`${action}: 人の配備用ロールから AdministratorAccess を外した`);
+    }
+  };
+
+  if (action === "person-drift") {
+    return withPersonRole(() => {
+      const id = aws(["cloudformation", "detect-stack-drift", "--stack-name", e.stack, "--query", "StackDriftDetectionId", "--output", "text"]);
+      const status = () => JSON.parse(aws(["cloudformation", "describe-stack-drift-detection-status", "--stack-drift-detection-id", id, "--output", "json"])) as { DetectionStatus?: string; StackDriftStatus?: string; DetectionStatusReason?: string };
+      let st = status();
+      // detection takes a minute or so; bounded so a stuck one ends (and the policy is detached). A bigger stack may need
+      // longer: SWITCHBOARD_DRIFT_TIMEOUT_SECONDS (and SWITCHBOARD_DRIFT_POLL_SECONDS for how often to ask)
+      // each sleep is cut to what is left, so no interval stretches the wait past the timeout
+      for (let waited = 0; st.DetectionStatus === "DETECTION_IN_PROGRESS" && waited < e.driftTimeoutSeconds; ) {
+        const step = Math.min(e.driftPollSeconds, e.driftTimeoutSeconds - waited);
+        d.run(["sleep", String(step)]);
+        waited += step;
+        st = status();
+      }
+      if (st.DetectionStatus !== "DETECTION_COMPLETE") {
+        const more = st.DetectionStatus === "DETECTION_IN_PROGRESS" ? `${e.driftTimeoutSeconds} 秒で終わらなかった（SWITCHBOARD_DRIFT_TIMEOUT_SECONDS で延ばせる）` : st.DetectionStatusReason ?? "";
+        throw new Error(`drift の検査が終わらなかった（${st.DetectionStatus}）: ${more}`);
+      }
+      if (st.StackDriftStatus !== "DRIFTED") return `drift: ${st.StackDriftStatus}`;
+      const drifts = JSON.parse(aws(["cloudformation", "describe-stack-resource-drifts", "--stack-name", e.stack, "--stack-resource-drift-status-filters", "MODIFIED", "DELETED", "--output", "json"])) as {
+        StackResourceDrifts?: { LogicalResourceId?: string; StackResourceDriftStatus?: string; PropertyDifferences?: unknown[] }[];
+      };
+      const lines = (drifts.StackResourceDrifts ?? []).map((r) => `- ${r.LogicalResourceId}: ${r.StackResourceDriftStatus}（プロパティの差 ${r.PropertyDifferences?.length ?? 0}）`);
+      return ["drift: DRIFTED", ...lines, `差分の中身: aws cloudformation describe-stack-resource-drifts --stack-name ${e.stack}（Admin のログインでも読める）`].join("\n");
+    });
+  }
+
   for (const cmd of [["bun", "install", "--frozen-lockfile"], ["bun", "run", "--cwd", "aws", "build"]]) {
     if (!d.run(cmd).ok) throw new Error(`failed: ${cmd.join(" ")}`);
   }
-  const role = output("DeployRoleArn");
   const bucket = output("DataBucket");
-  const edge = secret("/switchboard/edge-header");
-  // the AWS CLI, not sam: sam deploy / sam package cannot read the template's Fn::ForEach (#465). The SAM transform
-  // still runs in CloudFormation; package only uploads the Starter's build and points CodeUri at it
-  const packaged = "dist/template.packaged.yaml";
-  aws(["cloudformation", "package", "--template-file", "aws/template.yaml", "--s3-bucket", bucket, "--s3-prefix", "releases/sam", "--output-template-file", packaged]);
-  // the change set runs as the stack's DeployRole (the boundary keeps it to this stack); the caller only passes it
-  const deploy = d.run([
-    "aws", "cloudformation", "deploy", "--template-file", packaged, "--stack-name", e.stack, "--region", e.region, "--role-arn", role, "--s3-bucket", bucket, "--s3-prefix", "releases/sam",
-    "--capabilities", "CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND", "--no-execute-changeset", "--no-fail-on-empty-changeset", "--tags", "Project=switchboard",
-    "--parameter-overrides", ...e.params!.split(/\s+/).filter(Boolean), `EdgeHeaderValue=${edge}`,
-  ]);
-  // the edge header must not reach a log, whatever the CLI prints
-  d.log(hide(`${deploy.out}\n${deploy.err}`.trim(), secrets));
-  // a failed deploy is a failure, never "no changes" (#759)
-  if (!deploy.ok) throw new Error("failed: aws cloudformation deploy");
-  const cs = [...`${deploy.out}\n${deploy.err}`.matchAll(/arn:aws:cloudformation:[^\s]+:changeSet\/[^\s]+/g)].at(-1)?.[0];
-  if (!cs) return "no changes";
-  const verdict = checkChangeSet(JSON.parse(aws(["cloudformation", "describe-change-set", "--change-set-name", cs, "--output", "json"])));
-  if (!verdict.ok) throw new Error(`not executed: ${verdict.reason}`);
-  aws(["cloudformation", "execute-change-set", "--change-set-name", cs]);
-  aws(["cloudformation", "wait", "stack-update-complete", "--stack-name", e.stack]);
-  return `executed ${cs}`;
+
+  /** Package, make the change set as `role`, check it, execute it. "no changes" for an empty one. */
+  const deploy = (role: string, overrides: string[], allowReplace: boolean): string => {
+    // the AWS CLI, not sam: sam deploy / sam package cannot read the template's Fn::ForEach (#465). The SAM transform
+    // still runs in CloudFormation; package only uploads the Starter's build and points CodeUri at it
+    const packaged = "dist/template.packaged.yaml";
+    aws(["cloudformation", "package", "--template-file", "aws/template.yaml", "--s3-bucket", bucket, "--s3-prefix", "releases/sam", "--output-template-file", packaged]);
+    const r = d.run([
+      "aws", "cloudformation", "deploy", "--template-file", packaged, "--stack-name", e.stack, "--region", e.region, "--role-arn", role, "--s3-bucket", bucket, "--s3-prefix", "releases/sam",
+      "--capabilities", "CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND", "--no-execute-changeset", "--no-fail-on-empty-changeset", "--tags", "Project=switchboard",
+      ...(overrides.length ? ["--parameter-overrides", ...overrides] : []),
+    ]);
+    // the edge header must not reach a log, whatever the CLI prints
+    d.log(hide(`${r.out}\n${r.err}`.trim(), secrets));
+    // a failed deploy is a failure, never "no changes" (#759)
+    if (!r.ok) throw new Error("failed: aws cloudformation deploy");
+    const cs = [...`${r.out}\n${r.err}`.matchAll(/arn:aws:cloudformation:[^\s]+:changeSet\/[^\s]+/g)].at(-1)?.[0];
+    if (!cs) return "no changes";
+    const verdict = checkChangeSet(JSON.parse(aws(["cloudformation", "describe-change-set", "--change-set-name", cs, "--output", "json"])), { allowReplace });
+    if (!verdict.ok) throw new Error(`not executed: ${verdict.reason}`);
+    aws(["cloudformation", "execute-change-set", "--change-set-name", cs]);
+    aws(["cloudformation", "wait", "stack-update-complete", "--stack-name", e.stack]);
+    return `executed ${cs}`;
+  };
+
+  if (action === "deploy") {
+    // the change set runs as the stack's DeployRole (the boundary keeps it to this stack); the caller only passes it
+    const role = output("DeployRoleArn");
+    const edge = secret("/switchboard/edge-header");
+    return deploy(role, [...e.params!.split(/\s+/).filter(Boolean), `EdgeHeaderValue=${edge}`], false);
+  }
+
+  return withPersonRole((roleArn) => deploy(roleArn, (e.params ?? "").split(/\s+/).filter(Boolean), e.allowReplace ?? false));
 }
 
-/** The arguments: one action, `--dry-run`, `--yes`. Anything else, or start / rebuild / deploy without either flag, is null. */
-export function parseArgs(args: string[]): { action: HostAction; dryRun: boolean } | null {
+/**
+ * The arguments: one action, `--dry-run`, `--yes`, and `--allow-replace` with person-deploy only. Anything else, or an
+ * action other than status without `--yes` or `--dry-run`, is null.
+ */
+export function parseArgs(args: string[]): { action: HostAction; dryRun: boolean; allowReplace: boolean } | null {
   const action = args.find((a) => !a.startsWith("--"));
   const flags = args.filter((a) => a.startsWith("--"));
-  if (!ACTIONS.includes(action as HostAction) || args.filter((a) => !a.startsWith("--")).length !== 1 || flags.some((f) => f !== "--dry-run" && f !== "--yes")) return null;
+  const known = action === "person-deploy" ? ["--dry-run", "--yes", "--allow-replace"] : ["--dry-run", "--yes"];
+  if (!ACTIONS.includes(action as HostAction) || args.filter((a) => !a.startsWith("--")).length !== 1 || flags.some((f) => !known.includes(f))) return null;
   const dryRun = flags.includes("--dry-run");
   if (action !== "status" && !dryRun && !flags.includes("--yes")) return null;
-  return { action: action as HostAction, dryRun };
+  return { action: action as HostAction, dryRun, allowReplace: flags.includes("--allow-replace") };
 }
 
 export const spawnRun: Run = (cmd) => {
@@ -134,10 +264,10 @@ export const fetchPost: Post = async (url, headers) => {
 if (import.meta.main) {
   const parsed = parseArgs(process.argv.slice(2));
   if (!parsed) {
-    console.error("usage: bun scripts/host-ops.ts <status|start|rebuild|deploy> [--dry-run] [--yes]（start / rebuild / deploy は --yes か --dry-run が要る）");
+    console.error("usage: bun scripts/host-ops.ts <status|start|rebuild|deploy|person-deploy|person-drift> [--dry-run] [--yes] [--allow-replace]（status 以外は --yes か --dry-run が要る。--allow-replace は person-deploy だけ。人の配備は person-deploy、deploy は GitHub の workflow 用）");
     process.exit(2);
   }
-  const e = hostEnv();
+  const e = { ...hostEnv(), allowReplace: parsed.allowReplace };
   if (parsed.dryRun) {
     for (const l of planHostOperation(parsed.action, e)) console.log(`- ${l}`);
     process.exit(0);

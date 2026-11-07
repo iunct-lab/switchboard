@@ -183,7 +183,14 @@ export function bodiesOf(argv: string[], read: (path: string) => string | null, 
 const BACKLOG_WRITES = new Set(["create", "new", "comment", "edit", "close", "reopen"]);
 /** The flags of `gh issue create / comment / edit / close / reopen` that take a value: the value is not the Issue argument. */
 const ISSUE_VALUE_FLAGS = new Set(["--title", "-t", "--body", "-b", "--body-file", "-F", "--comment", "-c", "--reason", "-r", "--duplicate-of", "--assignee", "-a", "--label", "-l", "--milestone", "-m", "--project", "-p", "--template", "-T", "--recover", "--add-assignee", "--remove-assignee", "--add-label", "--remove-label", "--add-project", "--remove-project"]);
-const NO_EQUIVALENT = "Task の外の gh（この操作は ops-kit backlog に無い）";
+/** The stop of a write `ops-kit backlog` has no command for (deleting or moving an Issue): bin/gh says to write it with `env -u BACKLOG_URL gh …`. */
+export const NO_EQUIVALENT = "Task の外の gh（この操作は ops-kit backlog に無い）";
+/** `gh issue` subcommands that delete or move an Issue: the app's copy loses it, and ops-kit backlog has no equivalent. */
+const ISSUE_REMOVALS = new Set(["delete", "transfer"]);
+/** `gh label` subcommands that write a label's definition, which `ops-kit sync-labels` owns. */
+const LABEL_DEF_WRITES = new Set(["create", "edit", "delete", "clone"]);
+/** The flags of `gh label create / edit` that take a value. Only for `gh label`: elsewhere `-d` is a switch (`gh pr close -d`). */
+const LABEL_VALUE_FLAGS = new Set(["--color", "-c", "--description", "-d", "--name", "-n"]);
 const ISSUE_INSTEAD: Record<string, string> = { create: "create", new: "create", comment: "comment", edit: "edit", close: "edit --state closed", reopen: "edit --state open" };
 const LABEL_DEF_INSTEAD = "ops-kit sync-labels（ラベルの定義。Task の中では env -u BACKLOG_URL ops-kit sync-labels）";
 const PROJECT_INSTEAD = "ops-kit backlog set / triage";
@@ -202,6 +209,7 @@ const BACKLOG_MUTATIONS: Array<[string[], string]> = [
   [["closeIssue", "reopenIssue"], "ops-kit backlog edit --state closed / open"],
   [["updateIssue"], "ops-kit backlog edit"],
   [["deleteIssue", "transferIssue"], NO_EQUIVALENT],
+  [["createLabel", "updateLabel", "deleteLabel"], LABEL_DEF_INSTEAD],
 ];
 const PROJECT_ITEM_WRITES = new Set(["item-add", "item-edit", "item-delete", "item-archive"]);
 
@@ -213,10 +221,12 @@ export interface BacklogWrite {
 
 /**
  * A write to the backlog (Issues, their comments and labels, the Project's items) the app's Task makes in place of
- * `ops-kit backlog` (#2694, #3073), whatever form it takes: `gh issue create / comment / edit / close / reopen`, `gh api`
+ * `ops-kit backlog` (#2694, #3073), whatever form it takes: `gh issue create / comment / edit / close / reopen / delete /
+ * transfer`, `gh label create / edit / delete / clone`, `gh api`
  * with a method other than GET / HEAD (or a field and no method) on `repos/<o>/<r>/issues…` or `…/labels…`, a graphql
  * mutation that names one of BACKLOG_MUTATIONS in `texts` (the fields and the `--input` bodiesOf read), and
- * `gh project item-add / item-edit / item-delete / item-archive`. `repo` is the repository it names (`-R` / `--repo`,
+ * `gh project item-add / item-edit / item-delete / item-archive`. Locking and pinning an Issue pass in every form: the app
+ * does not sync them (#3559). `repo` is the repository it names (`-R` / `--repo`,
  * before the group too, the URL given for the Issue, or the path of `gh api`), null when it names none — gh then writes
  * to GH_REPO or the checkout's; graphql and `gh project` are read as naming none (their node id or Project is not asked
  * of GitHub). Null for anything else: a read, a pull request, Actions, git, contents, a release.
@@ -234,7 +244,7 @@ export function backlogWrite(argv: string[], texts: string[] = []): BacklogWrite
     if (a === "-R" || a === "--repo") named = argv[++i];
     else if (/^(?:--repo=|-R=?)./.test(a)) named = a.replace(/^(?:--repo=|-R=?)/, "");
     // the value of a flag (a body that is a URL or starts with -R) names no repository and is not the Issue
-    else if (ISSUE_VALUE_FLAGS.has(a)) i++;
+    else if (ISSUE_VALUE_FLAGS.has(a) || (words.length > 0 && argv[words[0]!] === "label" && LABEL_VALUE_FLAGS.has(a))) i++;
     else if (!a.startsWith("-")) words.push(i);
   }
   if (words.length === 0) return null;
@@ -242,9 +252,14 @@ export function backlogWrite(argv: string[], texts: string[] = []): BacklogWrite
   if (argv[at] === "api") return apiBacklogWrite(argv, at, texts);
   if (argv[at] === "project") return PROJECT_ITEM_WRITES.has(argv[subcommandAt(argv, at)] ?? "") ? { instead: PROJECT_INSTEAD, repo: null } : null;
   const [group, sub, ...refs] = words.map((i) => argv[i]!);
-  if (group !== "issue" || sub === undefined || !BACKLOG_WRITES.has(sub)) return null;
-  const url = refs.map((r) => /^https?:\/\/[^/]+\/([^/]+\/[^/]+)\/issues\/\d+/.exec(r)?.[1]).find((r) => r !== undefined);
-  return { instead: `ops-kit backlog ${ISSUE_INSTEAD[sub]}`, repo: named !== undefined ? named.split("/").slice(-2).join("/") : (url ?? null) };
+  const repoNamed = named !== undefined ? named.split("/").slice(-2).join("/") : undefined;
+  // a label's definition: only -R / --repo names the repository (the argument of `clone` is the source)
+  if (group === "label" && sub !== undefined && LABEL_DEF_WRITES.has(sub)) return { instead: LABEL_DEF_INSTEAD, repo: repoNamed ?? null };
+  if (group !== "issue" || sub === undefined || !(BACKLOG_WRITES.has(sub) || ISSUE_REMOVALS.has(sub))) return null;
+  // `transfer` takes the Issue, then the repository it moves to: the Issue's side is the one written
+  const issueRefs = ISSUE_REMOVALS.has(sub) ? refs.slice(0, 1) : refs;
+  const url = issueRefs.map((r) => /^https?:\/\/[^/]+\/([^/]+\/[^/]+)\/issues\/\d+/.exec(r)?.[1]).find((r) => r !== undefined);
+  return { instead: ISSUE_REMOVALS.has(sub) ? NO_EQUIVALENT : `ops-kit backlog ${ISSUE_INSTEAD[sub]}`, repo: repoNamed ?? url ?? null };
 }
 
 function apiBacklogWrite(argv: string[], at: number, texts: string[]): BacklogWrite | null {
@@ -268,9 +283,11 @@ function apiBacklogWrite(argv: string[], at: number, texts: string[]): BacklogWr
     : /^issues\/[^/]+\/comments$/.test(rest) ? "ops-kit backlog comment"
     : /^issues\/[^/]+\/labels(\/|$)/.test(rest) ? LABEL_INSTEAD
     : /^issues\/[^/]+\/(sub_issues?|parent)(\/|$)/.test(rest) ? PARENT_INSTEAD
-    : /^issues\/[^/]+\/lock$/.test(rest) ? NO_EQUIVALENT
+    : /^issues\/[^/]+\/transfer$/.test(rest) ? NO_EQUIVALENT
+    // locking is not a value the app syncs: it does not conflict with the app's copy (#3559)
+    : /^issues\/[^/]+\/lock$/.test(rest) ? null
     : "ops-kit backlog edit";
-  return { instead, repo };
+  return instead === null ? null : { instead, repo };
 }
 
 /** The subcommands of each group that only read; any other subcommand of these groups writes. */

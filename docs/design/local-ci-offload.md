@@ -1,29 +1,17 @@
 # local-ci off the host
 
-On the cloud host (where `sb-offload` is installed, see [aws/README.md](../../aws/README.md) "Offload"), `bun scripts/local-ci.ts <PR>` runs its heavy steps off the host, in small builds of the offload CodeBuild project, so that local-ci runs of several Tasks no longer fill the host's memory. What stays on the host, how the steps are grouped and how large each build is are below; the grouping is measured first (2026-11-04) and local-ci follows it once it runs the groups off the host. Until then every step runs on the host. How local-ci itself works is [local-ci.md](local-ci.md).
+On the cloud host (where `sb-offload` is installed, see [aws/README.md](../../aws/README.md) "Offload"), `bun scripts/local-ci.ts <PR>` runs its heavy steps off the host, in small builds of the offload CodeBuild project, so that local-ci runs of several Tasks no longer fill the host's memory. There is no setting or flag: with `sb-offload` on `PATH` the groups below go off the host, without it (any machine that is not the cloud host) every step runs where local-ci runs. The groups are `OFFLOAD_GROUPS` in `scripts/local-ci.ts`. How local-ci itself works is [local-ci.md](local-ci.md).
 
-## Groups and sizes
+## What runs off the host
 
-Measured on 2026-11-04 in eight builds (`/usr/bin/time -v` around each step, the work tree of main at that date), then once more on 2026-11-05 with the two groups exactly as local-ci builds them (its own build script, `bun test` without the files that read recordings, and the build's whole memory from `/sys/fs/cgroup/memory.peak` after the steps). The host's local-ci runs every other step as before.
+Two builds, started at the same time (the project runs two builds at a time; a third waits for a slot):
 
-| Group | Steps | Size | Max memory: largest process (`Maximum resident set size`, 2026-11-04) / whole build (`memory.peak`, 2026-11-05) | Time (2026-11-05, start to end of the build) |
-|---|---|---|---|---|
-| typecheck | `bun install --frozen-lockfile` → `bun run licenses:check` → `bun run typecheck` | small (2 vCPU / 4 GiB) | 140 MB (typecheck), 84 MB (install) / 2.1 GB | 52 s, of which the steps take 2 s and the rest is the setup below |
-| test | `bun install --frozen-lockfile` → `bun test` without the files that read recordings | small (2 vCPU / 4 GiB) | 410 MB (`bun test`, every file) / 2.3 GB | 524 s, of which `bun test` takes 460 s: 3300 pass, 0 fail |
+| Group | Steps | Size | Why this size |
+|---|---|---|---|
+| typecheck | `bun install --frozen-lockfile` → `bun run licenses:check` → `bun run typecheck` | small (2 vCPU / 4 GiB) | the whole build peaks at about 2.1 GB |
+| test | `bun install --frozen-lockfile` → `bun test` without the files that read recordings | small (2 vCPU / 4 GiB) | the whole build peaks at about 2.3 GB; medium gives `bun test` no time back |
 
-- Both fit in small: the largest process stays under 0.5 GB, and the whole build (the setup, the page cache and the tmpfs below included) under 2.4 GB of 4 GiB. medium (4 vCPU / 8 GiB) gave `bun test` no time back (604 s on both sizes, same run otherwise), so small is the size of both groups.
-- Two groups, run at the same time: the project runs two builds at a time (`ConcurrentBuildLimit: 2`), and a third waits for a slot.
-- The web build (`bun run --cwd apps/web build`) stays on the host: the perf steps after it measure that build (`apps/web/dist`) in the same checkout, and they stay on the host until they move off as well. It took 3 s and 470 MB off the host; built off the host it would be built twice.
-
-## What the build does before the steps
-
-The work tree arrives without `.git` and without `node_modules`, on an image whose user is root. Each build first sets up, in about 41 s on small:
-
-- `dnf reinstall git-core`: the image's own `git` has no PCRE, so `git grep -P` (the home-path check of the CI and public-sync's checks) exits 128. The distribution's package has it.
-- a tmpfs (`mount -t tmpfs`, the project's builds are privileged) as `TMPDIR`: with `TMPDIR` on the build's disk, SQLite tests ran several times slower (a test that takes under 300 ms on the host went over its 5 s limit).
-- a user other than root runs the steps: as root, the tests of unreadable files read them anyway and fail.
-- `git init`, `git add -A`, one commit, and `origin` set to the repository's URL (no credentials): tests read this repository's own files through git and resolve the repository from `origin`.
-- Bun of the host's version, and for the typecheck group the Codex CLI of the host's version (`bun run typecheck` generates the Codex types from it first).
+The work tree arrives without `.git` and without `node_modules`. Each build first sets up, in about 40 s: the distribution's `git` (the image's has no PCRE, which `git grep -P` needs), a tmpfs as `TMPDIR` (SQLite tests are several times slower on the build's disk), a user other than root for the steps (as root, the tests of unreadable files fail), a one-commit `git init` with `origin` set to the repository's URL without credentials (tests read the repository through git), and Bun (and for the typecheck group the Codex CLI) of the host's versions.
 
 Nothing else is sent: no token, no credentials, no host file, no recordings.
 
@@ -35,15 +23,21 @@ Nothing else is sent: no token, no credentials, no host file, no recordings.
 | `bun install --frozen-lockfile` | the host's later steps need `node_modules` |
 | `public tree check` | reads the checkout's git objects and the host's own names and accounts |
 | `bun run --cwd apps/web build` and every step after it up to the perf check (`fetch main`, fonts, perf base, perf-bench, perf check) | the perf steps measure this build with Chrome on the host; `fetch main` needs the host's GitHub credentials |
-| `bun test` of the files that read recordings | the recordings (`SWITCHBOARD_FIXTURES`) are not sent. These files also hold the two tests that failed off the host and pass on it (in `packages/core/src/core.test.ts`: the daemon tests "events tail" and "late LLM suggestion preserves task outcome and rule log", both timing-dependent). 14 files, 77 s and 360 MB on the host without recordings |
+| `bun test` of the files that read recordings | the recordings (`SWITCHBOARD_FIXTURES`) are not sent; these files also hold timing-dependent daemon tests that pass on the host but not off it |
 | posting the result on the PR | needs the host's GitHub credentials |
 
-Without `sb-offload` (any machine that is not the cloud host) every step runs where local-ci runs, as before.
+The result is the same as running every step on the host, and the host's memory peak is lower by what the type check and `bun test` held.
+
+## When a build fails
+
+A build's steps print a begin and an exit mark each, and local-ci reads every step's output, exit code and seconds from the build's log, so a step that failed off the host is listed on the PR like one that failed on the host: its name, its `(fail)` lines, and its whole output in the log dir under `~/.cache`. When the build itself ends without the step's exit mark, the step fails with `sb-offload`'s own code and one line naming it: `sb-offload: exit 124（時間切れ）` (the build's time limit), `exit 130（中断）` (stopped), any other code `（ビルドの失敗）` (1: the build failed before the command ran, its state could not be read, or no build freed up in 15 minutes). The steps after it in that build did not run and are not listed.
+
+Nothing is run again on the host after a failure off the host: the builds exist to keep the host's memory free, and quietly falling back to the host would fill it at the moment several runs are waiting. Run local-ci again (`--force` for the same head).
 
 ## Seconds and the `local` ceilings
 
-The `local` ceilings were measured on the host; a build is another machine (`bun test` of every file took 537 s there against the `local` ceiling of 513.7 s). Seconds measured off the host are not compared with the host's `local` ceilings.
+The `local` ceilings in `scripts/perf-budget.json` were measured on the host; a build is another machine, so seconds measured off the host are not compared with them.
 
 ## Cost
 
-A run is two builds of small at USD 0.00425 a build minute: 1 minute (typecheck) and 9 minutes (test), as billed by the started minute, about USD 0.04 a local-ci run.
+A run is two builds of small at USD 0.00425 a build minute: about 1 minute (typecheck) and 9 minutes (test), billed by the started minute, about USD 0.04 a local-ci run.

@@ -5,7 +5,7 @@ import { fmtUsd, RunnerPill } from "./ui.tsx";
 import { ModelSelect } from "./ModelSelect.tsx";
 import { EffortSelect } from "./EffortSelect.tsx";
 import { effortLabel } from "../effortOptions.ts";
-import { scheduleResultLine } from "../scheduleResult.ts";
+import { NIGHTLY_SHOWN, scheduledFacts, scheduleResultLine } from "../scheduleResult.ts";
 import { claudeOnlyAction, SCHEDULE_ACTIONS, scheduleActionLabel } from "../scheduleActions.ts";
 import { scheduleCreateInput, scheduleDraft, scheduleEditPatch, type ScheduleDraft } from "../scheduleEdit.ts";
 import { jstDateTime } from "../time.ts";
@@ -21,6 +21,8 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
   const [showNew, setShowNew] = useState(false);
   const [title, setTitle] = useState("");
   const [cron, setCron] = useState("0 3 * * *");
+  // #4058: the newest nightly results first, the rest on a press (a phone showed 20 before the schedules)
+  const [showAllNightly, setShowAllNightly] = useState(false);
   const savedCron = useRef("0 3 * * *");
   const [wsId, setWsId] = useState("");
   // A new schedule starts from 自動で始まる Task の既定 (設定, #832); empty model = the runner's CLI default
@@ -171,16 +173,20 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
         {queue && queue.scheduled.length > 0 && (
           <>
             <h5 style={{ marginTop: 14 }}>{t(m.nightlyResults)}</h5>
-            {queue.scheduled.map((s) => (
-              <button key={s.taskId} className="row link" onClick={() => props.onOpenTask(s.taskId)}>
+            {(showAllNightly ? queue.scheduled : queue.scheduled.slice(0, NIGHTLY_SHOWN)).map((s) => (
+              <button key={s.taskId} className="schedule-row nightly link" onClick={() => props.onOpenTask(s.taskId)}>
                 <RunnerPill runner={s.runner} />
-                <span className="t">{s.title}</span>
-                <span className="hint">{s.scheduleTitle}</span>
-                <span className="m num">
-                  {s.status} · {fmtUsd(s.costUsd)}
+                <span className="schedule-body">
+                  <span className="schedule-title">{s.title}</span>
+                  <span className="schedule-facts">{scheduledFacts(s, fmtUsd(s.costUsd))}</span>
                 </span>
               </button>
             ))}
+            {queue.scheduled.length > NIGHTLY_SHOWN && (
+              <button className="ghost link" onClick={() => setShowAllNightly(!showAllNightly)}>
+                {showAllNightly ? t(m.nightlyFewer) : t(m.nightlyMore, { n: queue.scheduled.length - NIGHTLY_SHOWN })}
+              </button>
+            )}
           </>
         )}
       </section>
@@ -299,37 +305,43 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
         {schedules.length === 0 && !showNew && <div className="muted">{t(m.noSchedules)}</div>}
         {schedules.map((s) => (
           <Fragment key={s.id}>
-          <div className="row" style={{ alignItems: "center" }}>
-            <span className="t">
-              {s.title}
-              {!s.enabled && <span className="hint">{t(m.paused)}</span>}
-            </span>
-            {s.action !== "prompt" && <span className="tag">{scheduleActionLabel(s.action)}</span>}
+          <div className="schedule-row" data-schedule={s.id}>
             <RunnerPill runner={s.runner} />
-            <span className="hint">{s.model || t(m.cliDefault)}</span>
-            <span className="hint">{t(m.effortLine, { effort: effortLabel(s.effort, props.runners.find((r) => r.id === s.runner)) })}</span>
-            <span className="mono hint">{s.cron}</span>
-            <span className="hint">{s.nextRunAt ? t(m.nextRun, { at: jstDateTime(s.nextRunAt) }) : t(m.noNextRun)}</span>
-            {scheduleResultLine(s) && <span className="hint">{scheduleResultLine(s)}</span>}
-            <button className="ghost" onClick={() => void runNow(s)}>
-              {t(m.runNow)}
-            </button>
-            <button className="ghost" onClick={() => void toggle(s)}>
-              {s.enabled ? t(m.pause) : t(m.resume)}
-            </button>
-            <button
-              className="ghost"
-              disabled={busy} // a pending save would otherwise close the form opened meanwhile
-              onClick={() => {
-                setEditingId(s.id);
-                setDraft(scheduleDraft(s));
-              }}
-            >
-              {t(m.edit)}
-            </button>
-            <button className="ghost" onClick={() => void remove(s)}>
-              {t(m.delete)}
-            </button>
+            <span className="schedule-body">
+              <span className="schedule-title">{s.title}</span>
+              <span className="schedule-facts">
+                {/* outside the title's two-line clip, so a long title does not hide it */}
+                {!s.enabled && <span className="tag warn">{t(m.paused).trim()}</span>}
+                {s.action !== "prompt" && <span className="tag">{scheduleActionLabel(s.action)}</span>}
+                <span>{s.model || t(m.cliDefault)}</span>
+                <span>{t(m.effortLine, { effort: effortLabel(s.effort, props.runners.find((r) => r.id === s.runner)) })}</span>
+                <span className="mono">{s.cron}</span>
+                <span>{s.nextRunAt ? t(m.nextRun, { at: jstDateTime(s.nextRunAt) }) : t(m.noNextRun)}</span>
+                {scheduleResultLine(s) && <span>{scheduleResultLine(s)}</span>}
+              </span>
+            </span>
+            {/* #4058: the same buttons in the same order on every row; 削除 looks like what it does */}
+            <span className="schedule-actions">
+              <button className="small" onClick={() => void runNow(s)}>
+                {t(m.runNow)}
+              </button>
+              <button className="small" onClick={() => void toggle(s)}>
+                {s.enabled ? t(m.pause) : t(m.resume)}
+              </button>
+              <button
+                className="small"
+                disabled={busy} // a pending save would otherwise close the form opened meanwhile
+                onClick={() => {
+                  setEditingId(s.id);
+                  setDraft(scheduleDraft(s));
+                }}
+              >
+                {t(m.edit)}
+              </button>
+              <button className="small danger" onClick={() => void remove(s)}>
+                {t(m.delete)}
+              </button>
+            </span>
           </div>
           {editingId === s.id && draft && (
             <div className="fields schedule-edit" style={{ marginBottom: 10 }}>

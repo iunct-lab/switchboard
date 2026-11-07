@@ -5,7 +5,7 @@ Verified 2026-09-05 against **codex-cli 0.148.0-alpha.9** (driven from Bun). Rec
 ## Invocation
 
 ```
-codex app-server --listen stdio:// -c features.memories=false        # cwd = task cwd
+codex app-server --listen stdio:// -c features.memories=false -c features.default_mode_request_user_input=true        # cwd = task cwd
 ```
 
 One JSON-RPC 2.0 message per line on stdin/stdout. Protocol types come from `codex app-server generate-ts`; the subset the adapter uses is generated into `packages/adapters/codex/src/generated/` from the installed Codex on every typecheck (`bun run codex:types`) and is not kept in Git.
@@ -14,7 +14,7 @@ Detection order: `codex` on `PATH` → unavailable with the official installer h
 
 ## Memory is off
 
-The daemon starts app-server as `codex app-server --listen stdio:// -c features.memories=false`, before any `CodexAdapterOptions.config` entry. It does so regardless of `~/.codex/config.toml`, which it never writes, and of the default of a fresh profile (memory v2 is on by default for fresh profiles since 0.165.0).
+The daemon starts app-server with `-c features.memories=false` (see Invocation), before any `CodexAdapterOptions.config` entry. It does so regardless of `~/.codex/config.toml`, which it never writes, and of the default of a fresh profile (memory v2 is on by default for fresh profiles since 0.165.0).
 
 Why: README's "Text stays text" keeps knowledge as Markdown in a git repo you own. Codex memory is an sqlite under `~/.codex` that a Claude task cannot read, so rules collected there would diverge from the written ones. Rules go into the written docs on both runners. There is no setting for this, and a Codex started outside Switchboard is not touched.
 
@@ -41,6 +41,12 @@ If a later version stops honouring the override, the runner's option on Home say
 
 `never` is reachable only through `full-access`, an explicit choice per task — never a default. Auto uses Codex's risk-based reviewer; all other presets explicitly use `user`. Scope directories other than cwd become `writableRoots`. Start, resume and `turn/start` carry the reviewer; turn-level policy and reviewer changes apply on the next turn, while steering an active turn retains its current policy. Auto-review notifications become persistent transcript notes with their outcome and rationale.
 
+## The question tool
+
+The daemon also passes `-c features.default_mode_request_user_input=true` (a feature flag under development, fixed in the adapter, no setting). Recorded 2026-10-29 on codex-cli 0.165.0: without it the model in the default mode does not get `request_user_input`; it writes its questions into an `agentMessage` (`questions` with `delivery: "async"`), sleeps 60 seconds and ends the turn. With it the questions arrive as the server request `item/tool/requestUserInput` (`questions[] = {id, header, question, isOther, isSecret, options[{label, description}] | null}`). Recorded again 2026-11-05 on 0.166.0 (`question-tool.jsonl`): the flag is enough, the `experimentalApi` capability of `initialize` is not needed.
+
+The adapter maps the request to `question.ask` (`multiSelect: false`; `isOther` and `isSecret` are not read — a question with options takes only its options on the card) and answers at once, for every question id, `{"answers":{"<id>":{"answers":["<QUESTION_DEFERRED_REPLY>"]}}}`. The model ends the turn with one line ("I'll wait for your answers.") and `turn/completed` is `completed`; the daemon marks the Task as needing action, and the person's answers come back as the next turn. The asynchronous questions of the default mode without the flag are not read.
+
 ## Server → client
 
 | message | kind | AgentEvent |
@@ -53,6 +59,7 @@ If a later version stops honouring the override, the runner's option on Home say
 | `item/agentMessage/delta {itemId, delta}` | notification | `message.delta(assistant)`; `item/completed agentMessage` fills text only if nothing streamed |
 | `item/commandExecution/requestApproval {itemId, command, commandActions, reason}` | **request** (has `id`) | `permission.ask(kind=exec, id=<nonce>:<rpc id>, toolUseId=itemId)` — server ids restart at 0 per process, so the public id carries a per-process nonce; the reply uses the raw id and type |
 | `item/fileChange/requestApproval {itemId, reason, grantRoot}` | **request** | `permission.ask(kind=write)` |
+| `item/tool/requestUserInput {itemId, questions}` | **request** | `question.ask(id=<nonce>:<rpc id>)`; answered at once with the deferred reply (The question tool) |
 | `thread/tokenUsage/updated {turnId, tokenUsage:{last,total}}` | notification | `usage(turn)` from `last`, only when `turnId` is the active turn (after `thread/resume` Codex replays the previous turn's usage before `turn/started`; it is ignored) |
 | `turn/completed {turn:{status, error, durationMs}}` | notification | `usage(reported)` = sum of the active turn's `last` breakdowns (tokens only, no cost) + `session.end` (`completed`→ok, `interrupted`→aborted, `failed`→error) |
 | `account/rateLimits/updated {rateLimits:{primary,secondary}}` | notification | `quota` — 300-minute window → `five_hour`, 10080 → `seven_day` |
@@ -76,7 +83,8 @@ Only the main thread (the one without `parentThreadId`) decides the turn state a
 
 - Approve: `{"jsonrpc":"2.0","id":<request id>,"result":{"decision":"accept"}}`; deny: `"decline"` (turn continues; the agent sees a declined exec) or `"cancel"` (turn interrupted). Switchboard uses accept / decline.
 - Interrupt: `turn/interrupt {threadId, turnId}` → `turn/completed` with `status: "interrupted"`.
-- Other server requests (`item/permissions/requestApproval`, `item/tool/requestUserInput`, `mcpServer/elicitation/request`, `item/tool/call`, …) are answered with a JSON-RPC error `-32601`; the transcript gets a `status` note. They get mapped once a recording shows their shape.
+- Question tool: `{"jsonrpc":"2.0","id":<request id>,"result":{"answers":{"<question id>":{"answers":["<QUESTION_DEFERRED_REPLY>"]}}}}` (The question tool).
+- Other server requests (`item/permissions/requestApproval`, `mcpServer/elicitation/request`, `item/tool/call`, …) are answered with a JSON-RPC error `-32601`; the transcript gets a `status` note. They get mapped once a recording shows their shape.
 - Turns are serialized: the next `turn/start` / `turn/steer` is decided after the previous request was answered, and the turn id is taken from the `turn/start` **response** (which precedes `turn/started`). A `turn/steer` rejected because the turn just completed falls back to `turn/start`.
 
 ## Cost model

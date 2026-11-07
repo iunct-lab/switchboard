@@ -5,7 +5,8 @@
  *   the stack rolls back. That is a deploy that changes the launch template without a new LaunchGeneration.
  * - any change to the launch template or Instance: it replaces the instance (the runners' logins on its disk go, a Spot
  *   request has to be cancelled first), so it is a person's deploy. `--allow-replace` (that person) lets this one through.
- * scripts/host-ops.ts (the GitHub workflow's deploy) runs the check without the flag; aws/README.md, a person, with it.
+ * scripts/host-ops.ts runs the check: deploy (the GitHub workflow's) without the flag, person-deploy with it when the person
+ * passes --allow-replace.
  */
 export interface ChangeSet {
   Changes?: { ResourceChange?: { Action?: string; LogicalResourceId?: string; ResourceType?: string; Replacement?: string } }[];

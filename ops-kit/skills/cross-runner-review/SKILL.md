@@ -15,6 +15,18 @@ description: PR を「実装したのとは別のランナー」（と、あれ�
 | Claude Code（`$CLAUDECODE` が 1） | Codex（`codex exec`） | 追加のレビュアー（あれば） |
 | Codex | Claude Code（`claude -p`） | 追加のレビュアー（あれば） |
 
+### 設定で同じランナーを選ぶ
+
+主レビュアーは、環境変数 `OPS_KIT_REVIEW_RUNNER` で選べる（エージェント管理アプリが Task の開始時に設定の値を渡す）。値が無い・`other`・それ以外の値なら、**既定の別のランナー**（上の表）のまま。`same` のときだけ、主レビュアーを実装したランナーの新しいセッションにし、別のランナーを求めない:
+
+```bash
+[ "${OPS_KIT_REVIEW_RUNNER:-other}" = same ] && echo "主レビュアー: 同じランナーの新しいセッション（設定による選択）" || echo "主レビュアー: 別のランナー（既定）"
+```
+
+- 新しいセッションは 0 の代替の表と同じ（Claude Code は新しい Claude のサブエージェント / `claude -p`、Codex は新しい Codex のサブエージェント / `codex exec --ephemeral`）。材料・実行・転記・4 の見直しも 0 の代替と同じ手順（実装時の会話・要約・memory は渡さない）
+- 要約の 1 行目は `[<runner>] review（同じランナーの別セッション。設定による選択）`（`post_review` の 4 つ目の引数 `（同じランナーの別セッション。設定による選択）`）。0 の利用上限の代替の印は付けない（上限で替えたのではない）
+- 追加のレビュアーの有無・呼び方は変えない
+
 追加のレビュアー（例: ローカルモデル）は任意。使うリポジトリは、名前（転記の接頭辞にする）・呼び方・材料の上限を CLAUDE.md に書く。以下では `<extra>` と書く。
 追加のレビュアーを止めておける（例: 環境変数で有効にするローカルモデル）なら、有効の条件も CLAUDE.md に書く。条件が満たされないときは呼ばず（既定の接続先に当てて失敗を待たない）、要約に「<extra>: 無効（<条件>）」と 1 行書く。
 
@@ -33,7 +45,7 @@ Codex の 5 時間枠が **0.9 以上**、またはレビュー実行の出力�
 
 - 材料と指示は 1 と同じ fresh clone と `_review/` だけ。**実装時の会話・判断の要約・memory は渡さない**。同じランナーでも別セッションによる独立レビューとして扱い、実装した自分による自己レビューとは区別して報告する。同じランナーのため見落としが重なりうることも記録する。
 - 実行は 2 の該当ランナーのコマンド。サブエージェントなら渡すのは「`$R` の checkout で `_review/prompt.md` に従い、出力を `_review/<runner>.md` に書く」だけ。
-- 転記は 3 の `post_review` で実際のランナーを who にし、要約の 1 行目を `[<runner>] review（同じランナーの別セッション。<上限のランナー> が利用上限のため代替）` にする。自己レビューだけでこの印を付けない。
+- 転記は 3 の `post_review` で実際のランナーを who にし、要約の 1 行目を `[<runner>] review（同じランナーの別セッション。<上限のランナー> が利用上限のため代替）` にする（4 つ目の引数）。自己レビューだけでこの印を付けない。設定で同じランナーを選んだときは、この印ではなく「設定で同じランナーを選ぶ」の印にする。
 - 4 の修正後の見直しも同じ代替を使い、`WHO` は今回のレビュアー、`PREV` は前回のレビューが実際に書かれたファイルにする（ランナーを替えても `PREV` を今回の名前に替えない）。責務などの再チェックで指定ランナーが上限なら、上限でない側の新しいセッションに、その手順が定める材料を渡す。主レビューとは別のセッションで行う。
 - 代替も利用上限なら、未レビューのままマージせず、運用の確認として Task の会話で止める。追加認証が要るレビューを自動で選ばない。
 
@@ -94,8 +106,9 @@ Judge the PR on these, in this order:
 1. Intent: does the diff do what the Task's 手順 and the PBI's acceptance criteria ask — no less, and nothing beyond it?
    Name anything the PR does that no criterion asks for, and any criterion the PR claims but does not meet.
 2. Design consistency: contradictions with `design-rules.md`, the relevant `docs/design/*.md`, the PBI's スコープ外 and
-   決定ログ, or the existing shape of neighbouring code. Flag compatibility layers, one-use abstractions, just-in-case
-   settings, per-adapter branches, new tables/endpoints where an existing one would do.
+   決定ログ, or the existing shape of neighbouring code. Flag compatibility layers, one-use abstractions,
+   just-in-case feature or path toggles (not overrides for values that depend on the environment or usage, such as sizes, counts, periods, intervals, limits — the design check expects those to be derived or overridable),
+   per-adapter branches, new tables/endpoints where an existing one would do.
    Flag any diff that copies a value the running app owns and can change (a registered schedule's cron/prompt/budget/runner,
    a settings value or default, a default model name) into docs/skills/templates/CLAUDE.md; point to its source instead.
 3. Correctness: concrete bugs with a failure scenario (input/state → wrong output). Reproduce claims when you can
@@ -159,15 +172,15 @@ gh pr comment $N --body "[<runner>] 無進捗で打ち切り（900 秒出力な�
 レビュアーはファイルを変えず PR にも書かない。**自分が接頭辞つきで転記する**（`[codex]` / `[claude]` / `[<extra>]`）。Findings の各行はインラインに、残りは要約コメントに:
 
 ```bash
-post_review() { # <pr> <who> <file>   ※ /tmp にスクリプトとして保存しない（同名のファイルを別リポジトリのセッションが上書きした）。使う呼び出しの中で定義する。※ 変数名に path を使わない（zsh では $path が PATH に結ばれていて、local path で全コマンドが見えなくなる）
-  local pr=$1 who=$2 f=$3 sha line rel ln
+post_review() { # <pr> <who> <file> [1 行目の印の続き]   ※ /tmp にスクリプトとして保存しない（同名のファイルを別リポジトリのセッションが上書きした）。使う呼び出しの中で定義する。※ 変数名に path を使わない（zsh では $path が PATH に結ばれていて、local path で全コマンドが見えなくなる）
+  local pr=$1 who=$2 f=$3 note=${4:-} sha line rel ln
   sha=$(gh pr view "$pr" --json headRefOid -q .headRefOid)
   grep -E '^- \[(blocker|should-fix|nit|question)\] `[^`]+:[0-9]+`' "$f" | while IFS= read -r line; do
     rel=$(sed -E 's/^- \[[^]]+\] `([^`]+):([0-9]+)`.*/\1/' <<<"$line"); ln=$(sed -E 's/^- \[[^]]+\] `([^`]+):([0-9]+)`.*/\2/' <<<"$line")
     gh api "repos/{owner}/{repo}/pulls/$pr/comments" -f path="$rel" -F line="$ln" -f side=RIGHT -f commit_id="$sha" -f body="[$who] $line" >/dev/null 2>&1 \
       || gh pr comment "$pr" --body "[$who] $line（差分外の行のため一般コメント）" >/dev/null
   done
-  { printf '[%s] review\n\n' "$who"; sed -n '/^### Intent and design/,$p' "$f"; } | gh pr comment "$pr" --body-file - >/dev/null
+  { printf '[%s] review%s\n\n' "$who" "$note"; sed -n '/^### Intent and design/,$p' "$f"; } | gh pr comment "$pr" --body-file - >/dev/null
 }
 post_review $N codex "$M/codex.md"; post_review $N <extra> "$M/<extra>.md"     # 追加のレビュアーが無ければ後ろは省く
 ```
@@ -196,7 +209,8 @@ rm -f "$M/fix-review.md"                     # 切れたときに前回の出力
 ( cd "$R" && ops-kit heavy --name "review codex" -- ops-kit idle-run --idle 900 -- "$CODEX" exec --sandbox read-only --skip-git-repo-check --ephemeral -o "$M/fix-review.md" - < "$M/prompt-fix.md" ) > "$M/fix-review.log" 2>&1; RC=$?; WHO=codex
 # Claude Code が主レビュアー（Codex が実装したとき）は上の代わりに:
 # ( set -o pipefail; cd "$R" && ops-kit heavy --name "review claude" -- ops-kit idle-run --idle 900 -- claude -p --permission-mode plan --output-format stream-json --verbose "$(cat "$M/prompt-fix.md")" | tee "$M/fix-review.jsonl" | jq -r 'select(.type=="result").result' ) > "$M/fix-review.md" 2> "$M/fix-review.log"; RC=$?; WHO=claude
-[ "$RC" = 0 ] && grep -q '^### Findings' "$M/fix-review.md" && post_review $N $WHO "$M/fix-review.md" \
+NOTE=                                         # 0 の代替・設定で同じランナーのときは、主レビューと同じ 1 行目の印の続き（例 NOTE='（同じランナーの別セッション。設定による選択）'）
+[ "$RC" = 0 ] && grep -q '^### Findings' "$M/fix-review.md" && post_review $N $WHO "$M/fix-review.md" "$NOTE" \
   || echo "見直しが exit $RC か、出力に ### Findings が無い（打ち切り・枠切れ・sandbox）。ログを読んで一度だけやり直す。空のまま転記しない"
 ```
 

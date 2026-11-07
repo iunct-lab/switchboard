@@ -116,6 +116,8 @@ export const home = msgs({
   waitingApproval: { ja: "承認待ち", en: "Waiting for approval" },
   running: { ja: "実行中", en: "Running" },
   attentionHeading: { ja: "要対応 · {count}", en: "Needs action · {count}" },
+  attentionAll: { ja: "すべて表示（{n} 件）", en: "Show all ({n})" },
+  attentionFewer: { ja: "最初の分だけにする", en: "Show the first ones only" },
   recentHeading: { ja: "最近", en: "Recent" },
   cloudUnchecked: { ja: "Cloud・状態未確認", en: "Cloud · status not checked" },
   costToday: { ja: "今日のコスト", en: "Today's cost" },

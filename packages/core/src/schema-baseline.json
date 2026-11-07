@@ -10,6 +10,7 @@
   "daemon_runs": ["id","started_at","ended_at","end_reason","end_detail","clean_exit","version","boot_id","interrupted_task_ids"],
   "events": ["task_id","seq","ts","json"],
   "history_imports": ["session_id","task_id","path","offset","state","imported_at"],
+  "jobs": ["id","kind","task_id","pr","runner","cwd","pid","boot_id","status","exit_code","started_at","ended_at","summary"],
   "knowledge_docs": ["path","title","kind","frontmatter","mtime","size"],
   "knowledge_fts": ["path","title","body"],
   "knowledge_fts_config": ["k","v"],

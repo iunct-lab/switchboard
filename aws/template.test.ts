@@ -103,6 +103,18 @@ describe("aws/template.yaml (#229)", () => {
     expect(oidc).toContain("'token.actions.githubusercontent.com:aud': sts.amazonaws.com");
   });
 
+  test("the OIDC role makes or updates a change set only naming DeployRole, so it cannot use a role attached to the stack (#4088)", () => {
+    const oidc = resource("GitHubOidcRole");
+    const statements = oidc.split("- Effect: Allow").slice(1);
+    const writes = statements.filter((st) => /cloudformation:(CreateChangeSet|UpdateStack)\b/.test(st) && st.includes(":stack/${AWS::StackName}/*"));
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toContain("Action: [cloudformation:CreateChangeSet, cloudformation:UpdateStack]");
+    expect(writes[0]).toContain("Condition: { StringEquals: { 'cloudformation:RoleArn': !GetAtt DeployRole.Arn } }");
+    // nothing else in the role makes or updates a stack, or deletes one
+    expect(oidc.match(/cloudformation:(CreateChangeSet|UpdateStack|CreateStack|DeleteStack)\b/g)).toEqual(["cloudformation:CreateChangeSet", "cloudformation:UpdateStack", "cloudformation:CreateChangeSet"]);
+    expect(oidc).toContain("Action: cloudformation:CreateChangeSet\n                Resource: [!Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/");
+  });
+
   test("CloudFront sends the shared header to the host, and a stopped host is answered by the start page", () => {
     const cdn = resource("Cdn");
     expect(cdn.match(/HeaderName: x-switchboard-edge, HeaderValue: !Ref EdgeHeaderValue/g)).toHaveLength(3); // host, rescue, auth (#211)
@@ -198,6 +210,10 @@ describe("aws/template.yaml (#229)", () => {
     const data = resource("Data");
     const metrics = data.slice(data.indexOf("MetricsConfigurations:"));
     for (const p of ["litestream", "archive", "history"]) expect(metrics).toContain(`- { Id: ${p}, Prefix: ${p}/ }`);
+    // S3 returns them sorted by Id; another order reads as drift (#4098)
+    const ids = [...metrics.matchAll(/- \{ Id: ([a-z]+), Prefix:/g)].map((m) => m[1]);
+    expect(ids).toEqual([...ids].sort());
+    expect(ids).toHaveLength(3);
   });
 
   test("request logs (#1490): CloudFront's standard log goes to Data's cdn-logs/ for 90 days or more, without cookies, and the host sees the viewer address", () => {

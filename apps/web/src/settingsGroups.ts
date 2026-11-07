@@ -15,9 +15,9 @@ export interface SettingsGroup {
 }
 
 export const SETTINGS_GROUPS: SettingsGroup[] = [
-  { id: "settings-task-start", title: settings.groupTaskStart, sections: ["新規作成の既定", "承認モードの既定", "自動で始まる Task の既定", "定型の指示", "並走（DAK）の既定"] },
-  { id: "settings-resume", title: settings.groupResume, sections: ["使用量と自動再開", "使用上限での自動再開", "回答の方針"] },
-  { id: "settings-judge", title: settings.groupJudge, sections: ["判定と自動選択", "ターン終了時の自動判定", "ルーブリック判定", "LLM 提案", "タスク名の自動付与"] },
+  { id: "settings-task-start", title: settings.groupTaskStart, sections: ["新規作成の既定", "承認モードの既定", "自動で始まる Task の既定", "レビューのランナー", "定型の指示", "並走（DAK）の既定"] },
+  { id: "settings-resume", title: settings.groupResume, sections: ["使用量と自動再開", "回答の方針"] },
+  { id: "settings-judge", title: settings.groupJudge, sections: ["判定と自動選択", "LLM 提案", "タスク名の自動付与"] },
   { id: "settings-model", title: settings.groupModel, sections: ["モデルの選択肢", "モデルの価格"] },
   { id: "settings-connect", title: settings.groupConnect, sections: ["Workspace", "端末通知", "言語", "動いている版", "バックログを進める", "GitHub 同期", "Terminal の履歴（Claude Code）", "海外から使う", "ログイン"] },
 ];

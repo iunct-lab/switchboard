@@ -6,6 +6,7 @@ import { taskTimes } from "../inProgress.ts";
 import { filterTasks, PAGE, STATUS_FILTERS, type StatusFilter } from "../taskList.ts";
 import { t } from "../i18n.ts";
 import { home } from "../i18n/home.ts";
+import { listTitle } from "../taskTitle.ts";
 
 /** The tooltip's line of when a Task started and since when it is in its status, JST (#2030); the row itself has no room. */
 const timesLine = (t: Task) => {
@@ -54,7 +55,7 @@ export function Rail(props: { workspaces: Workspace[]; tasks: Task[]; currentTas
           <div className="grp">Running · Waiting</div>
           {active.map((t) => (
             <button key={t.id} className={`it ${props.currentTaskId === t.id ? "on" : ""}`} onClick={() => props.onOpenTask(t.id)} title={`${t.title}\n${timesLine(t)}`}>
-              <span className="t">{t.title}</span>
+              <span className="t">{listTitle(t.title)}</span>
               <ShadowTag task={t} />
               <TerminalMark status={props.terminals[t.id]} />
               <span className={`dot ${dotClass(t.status)}`} />
@@ -67,7 +68,7 @@ export function Rail(props: { workspaces: Workspace[]; tasks: Task[]; currentTas
           <div className="grp">{t(home.railAttention, { count: attention.length })}</div>
           {attention.map((t) => (
             <button key={t.id} className={`it ${props.currentTaskId === t.id ? "on" : ""}`} onClick={() => props.onOpenTask(t.id)} title={`${t.title}\n${outcomeLabel(t.outcome)}\n${timesLine(t)}`}>
-              <span className="t">{t.title}</span>
+              <span className="t">{listTitle(t.title)}</span>
               <span className="m">{outcomeLabel(t.outcome)}</span>
               <span className={`dot ${outcomeDotClass(t.outcome)}`} />
             </button>
@@ -111,7 +112,7 @@ export function Rail(props: { workspaces: Workspace[]; tasks: Task[]; currentTas
       {props.tasks.length > 0 && rows.length === 0 && <div className="it muted">{t(home.noMatch)}</div>}
       {rows.slice(0, shown).map((x) => (
         <button key={x.id} className={`it ${props.currentTaskId === x.id ? "on" : ""}`} onClick={() => props.onOpenTask(x.id)} title={`${x.title}\n${timesLine(x)}\n${x.cwd}${x.origin === "terminal" ? `\n${t(home.terminalImported)}` : ""}`}>
-          <span className="t">{x.title}</span>
+          <span className="t">{listTitle(x.title)}</span>
           {/* Two tags leave the title no room in this width; while a resume is planned that tag matters more (the tooltip still says Terminal). */}
           {x.resumeAt === null && <OriginTag origin={x.origin} />}
           <ResumeTag resumeAt={x.resumeAt} reason={x.resumeReason} plannedAt={x.resumePlannedAt} compact />

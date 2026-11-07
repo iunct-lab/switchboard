@@ -1,4 +1,4 @@
-import type { Schedule } from "@switchboard/protocol";
+import type { Queue, Schedule } from "@switchboard/protocol";
 import { jstStamp } from "./time.ts";
 import { t } from "./i18n.ts";
 import { backlog as m } from "./i18n/backlog.ts";
@@ -20,4 +20,16 @@ export function scheduleResultLine(s: Pick<Schedule, "action" | "lastResult">): 
   if (r.repos === 0 && r.failed === 1 && r.hits === 0) return t(m.scanFailed, { at: stamp(r.at), reason: r.lines[0] ?? t(m.scanNoReason) });
   const failed = r.failed > 0 ? t(m.scanUnchecked, { n: r.failed }) : "";
   return t(m.scanResult, { at: stamp(r.at), repos: r.repos, hits: r.hits, failed });
+}
+
+/** How many nightly results show before 残り N 件 (#4058): the newest, the ones to look at first. */
+export const NIGHTLY_SHOWN = 5;
+
+/**
+ * The small line under a nightly result's title (#4058): the schedule's title when the Task's own title does not
+ * already say it (most do: the same words twice left no room for either on a phone), the status, the cost and when.
+ */
+export function scheduledFacts(s: Pick<Queue["scheduled"][number], "title" | "scheduleTitle" | "status" | "createdAt">, cost: string): string {
+  const named = s.scheduleTitle && !s.title.includes(s.scheduleTitle) ? s.scheduleTitle : null;
+  return [named, s.status, cost, stamp(s.createdAt)].filter(Boolean).join(" · ");
 }

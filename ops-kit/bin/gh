@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { repoName, syncedRepositories } from "../src/backlog-client.ts";
 import { noWriteMarkRefusal, noWriteMarks, noWriteRefusal, noWriteTargets } from "../src/config.ts";
-import { backlogWrite, bodiesOf, GUARD_MARK, realCommand, writeTargetOf } from "../src/gh-guard.ts";
+import { backlogWrite, bodiesOf, GUARD_MARK, NO_EQUIVALENT, realCommand, writeTargetOf } from "../src/gh-guard.ts";
 import { findSecrets, hostAws } from "../src/secrets.ts";
 
 const argv = process.argv.slice(2);
@@ -54,6 +54,11 @@ if (backlog) {
     if (synced === null) console.error("gh-guard: アプリに届かない（か 5 秒で答えない）ので、同期しているほかのリポジトリは判定していません");
     other = synced?.find((s) => s.repository.toLowerCase() === target.toLowerCase())?.workspaceId;
     stop = other !== undefined;
+  }
+  if (stop && backlog.instead === NO_EQUIVALENT) {
+    // no ops-kit backlog command does it (deleting or moving an Issue): the way to do it is the direct write itself
+    console.error(`gh-guard: アプリの Task の中では ${target} のバックログ（Issue・コメント・ラベル・Project）に直接書きません。その操作は ops-kit backlog に無いので、env -u BACKLOG_URL gh … で書いてよい（秘密の検査は残る。直接書いた値はアプリの次の取込みで入る）`);
+    process.exit(1);
   }
   if (stop) {
     console.error(`gh-guard: アプリの Task の中では ${target} のバックログ（Issue・コメント・ラベル・Project）に直接書きません。${backlog.instead} を使ってください${other && backlog.instead.startsWith("ops-kit backlog") ? `（${target} は ops-kit backlog … --workspace ${other}）` : ""}（issue-workflow の「操作」）`);

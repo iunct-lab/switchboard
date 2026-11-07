@@ -1,7 +1,7 @@
 import { currentRepo } from "./repo.ts";
 /**
- * Lets several /pbi-complete sessions run side by side, each in its own worktree (gh stack keeps its state per worktree,
- * in .git/worktrees/<name>/gh-stack, so the stacks do not see each other). Two things are not safe by themselves:
+ * Lets several /pbi-complete sessions run side by side, each in its own worktree (gh stack keeps one catalog per clone,
+ * in `<common-dir>/gh-stack`, and each worktree's stack is its own entry in it). Two things are not safe by themselves:
  *   claim   — the same PBI started twice. The first claim comment on the PBI after the last release wins; a later one
  *             withdraws. A takeover (the user said 再開 after a session died) starts a new holder.
  *   overlap — two sessions editing the same file. A Task's named paths are compared with the files of open PRs and the

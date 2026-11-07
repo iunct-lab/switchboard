@@ -29,6 +29,7 @@ const SEEDS = [
   "v2/AccountRateLimitsUpdatedNotification",
   "v2/CommandExecutionRequestApprovalParams", "v2/CommandExecutionRequestApprovalResponse",
   "v2/FileChangeRequestApprovalParams", "v2/FileChangeRequestApprovalResponse",
+  "v2/ToolRequestUserInputParams", "v2/ToolRequestUserInputResponse",
 ];
 
 let genDir = process.env.CODEX_TS_DIR;

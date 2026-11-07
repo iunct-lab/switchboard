@@ -6,14 +6,79 @@ import { DeviceAuth } from "./DeviceAuth.tsx";
 import { summarize } from "../approvals.ts";
 import { t } from "../i18n.ts";
 import { panels as m } from "../i18n/panels.ts";
-import { answerButtons, answerTarget, withoutGrant, appliedLine, askFacts, BATCH_LABEL, batchLines, blockerLines, groupAsks, hiddenByBatches, isQuick, quickGroups, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, resumeLabel, scopeLabel, STATE_LABEL, unblocksLine, UNKNOWN, workspaceChips, workspaceKey, workspaceSections, type Answered, type PolicyForm } from "../asks.ts";
+import { task as tm } from "../i18n/task.ts";
+import { answerOf, answersOf, type QuestionChoice } from "../questions.ts";
+import { answerButtons, answerTarget, withoutGrant, appliedLine, askCardParts, questionHead, BATCH_LABEL, batchLines, blockerLines, groupAsks, hiddenByBatches, isQuick, quickGroups, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, resumeLabel, scopeLabel, STATE_LABEL, unblocksLine, workspaceChips, workspaceKey, workspaceSections, type Answered, type PolicyForm } from "../asks.ts";
+
+/**
+ * A question tool's questions on a card (#3058): a fieldset per question — its options (checkboxes for multiSelect), or a
+ * free-text field for a question without options — and one 回答する once every question has an answer. No policy: the
+ * answers are that turn's.
+ */
+function QuestionFields(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAnswer) => void }) {
+  const { ask: x, busy } = props;
+  const [choices, setChoices] = useState<(QuestionChoice | undefined)[]>([]); // indexed like x.questions
+  const answer = answersOf(x.questions, choices);
+  const update = (i: number, fn: (c: QuestionChoice) => QuestionChoice) => setChoices((s) => Object.assign([...s], { [i]: fn(s[i] ?? { labels: [], text: "" }) }));
+  return (
+    <div className="ask-questions">
+      {x.questions.map((q, i) => (
+        <fieldset key={i}>
+          <legend>
+            {q.header && <span className="tag">{q.header}</span>}
+            {q.question}
+            {q.multiSelect && <span className="hint">{t(tm.multiSelect)}</span>}
+          </legend>
+          {q.options.map((o) => (
+            <label key={o.label} className="opt">
+              <input
+                type={q.multiSelect ? "checkbox" : "radio"}
+                name={`${x.id}:${i}`}
+                checked={(choices[i]?.labels ?? []).includes(o.label)}
+                disabled={busy}
+                onChange={(e) => update(i, (c) => ({ ...c, labels: q.multiSelect ? (e.target.checked ? [...c.labels, o.label] : c.labels.filter((l) => l !== o.label)) : [o.label] }))}
+              />
+              <span>
+                {o.label}
+                {o.description && <span className="hint"> — {o.description}</span>}
+              </span>
+            </label>
+          ))}
+          {!q.options.length && <textarea placeholder={t(tm.writeAnswer)} value={choices[i]?.text ?? ""} disabled={busy} onChange={(e) => update(i, (c) => ({ ...c, text: e.target.value }))} />}
+          {answerOf(q, choices[i]) && <div className="hint">{t(tm.answerLine, { answer: answerOf(q, choices[i]) })}</div>}
+        </fieldset>
+      ))}
+      <button className="pri" disabled={busy || !answer} title={answer ? "" : t(tm.answerAllTitle)} onClick={() => answer && props.onAnswer(answer)}>
+        {t(tm.answer)}
+      </button>
+      <div className="hint ask-send">{t(m.sendTyped, { target: answerTarget(x), next: x.next ?? t(m.unknown) })}</div>
+    </div>
+  );
+}
 
 /**
  * A card's answers (#936): what an answer does not take away, then one button per answer with what it sends and where,
  * and free text when the question takes it (a confirmation's 違う with its reason). Every button is off while one is
  * being sent, so a second tap sends nothing. A grant (#2745) is on a line of its own. Also the Task screen's (TaskView).
+ * A question tool's questions (#3058) are answered together by QuestionFields, with no free-text box of the card's own.
  */
 export function AnswerArea(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAnswer, policy?: PolicyInput) => void }) {
+  const { ask: x, busy } = props;
+  if (x.answers.includes("questions"))
+    return (
+      <div className="ask-answer">
+        {blockerLines(x).map((l) => (
+          <div key={l} className="hint warn ask-blocker">
+            {l}
+          </div>
+        ))}
+        <QuestionFields ask={x} busy={busy} onAnswer={(a) => props.onAnswer(a)} />
+      </div>
+    );
+  return <AnswerButtons {...props} />;
+}
+
+function AnswerButtons(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAnswer, policy?: PolicyInput) => void }) {
   const { ask: x, busy } = props;
   const [text, setText] = useState("");
   const [form, setForm] = useState<PolicyForm | null>(() => initialPolicyForm(x));
@@ -304,6 +369,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
                 const a = live(x);
                 const resume = resumeLabel(x);
                 const taskId = x.source.taskId ?? x.task?.id ?? null;
+                const parts = askCardParts(x);
                 return (
                   <section key={x.id} className={`card ask${a ? " approval" : ""}`} data-ask={x.id}>
                     <div className="ask-tags">
@@ -321,6 +387,20 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
                         ))}
                       </div>
                     )}
+                    {/* #4068: what it is about and the question, before the answer buttons — a card read from its buttons up */}
+                    {parts.title && (
+                      <div className="ask-title">
+                        {parts.title.href ? (
+                          <a href={parts.title.href} target="_blank" rel="noreferrer">
+                            {parts.title.text}
+                          </a>
+                        ) : (
+                          parts.title.text
+                        )}
+                      </div>
+                    )}
+                    {/* a live approval's own head says what it asks (approvalHead); a long question shows its first lines, 全文 opens it */}
+                    {parts.question && !a && <AskQuestion text={parts.question} />}
                     {a && approvalHead(a, !x.answers.length)}
                     {was?.changes && (
                       <div className={`hint ${was.changed ? "warn " : ""}ask-changes`}>
@@ -358,10 +438,10 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
                     {/* before the facts: on a phone the buttons stay in the first screenful (#26) */}
                     <AnswerArea key={x.id} ask={x} busy={sending !== null} onAnswer={(answer, policy) => send(x, answer, policy)} />
                     <dl className="ask-facts">
-                      {askFacts(x).map((f) => (
+                      {parts.facts.map((f) => (
                         <div key={f.label} className="ask-fact">
                           <dt>{f.label}</dt>
-                          <dd className={f.value === UNKNOWN ? "muted" : undefined}>
+                          <dd>
                             {f.href ? (
                               <a href={f.href} target="_blank" rel="noreferrer">
                                 {f.value}
@@ -373,6 +453,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
                         </div>
                       ))}
                     </dl>
+                    {parts.unknown.length > 0 && <div className="hint ask-unknown">{t(m.unknownFacts, { labels: parts.unknown.join("・") })}</div>}
                     <div className="approval-actions">
                       {x.route === "backlog" && (x.state === "open" || x.state === "held") && (
                         <button className="pri ask-route" onClick={props.onOpenBacklog}>
@@ -475,5 +556,21 @@ export function Mockups(props: { list: Artifact[] }) {
       </div>
       {shown && <ArtifactBody key={shown.id} a={shown} shown onRefreshed={() => undefined} />}
     </div>
+  );
+}
+
+/** A question card's question (#4068): whole when short; the first lines and 全文 when long. */
+function AskQuestion(props: { text: string }) {
+  const q = questionHead(props.text);
+  if (!q.more) return <div className="ask-question">{props.text}</div>;
+  return (
+    <details className="ask-question">
+      <summary>
+        <span className="q-head">{q.head}</span>
+        <span className="hint q-more"> {t(m.questionWhole)}</span>
+        <span className="hint q-less">{t(m.questionFold)}</span>
+      </summary>
+      {props.text}
+    </details>
   );
 }

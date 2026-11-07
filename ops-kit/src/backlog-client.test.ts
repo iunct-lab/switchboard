@@ -1,3 +1,4 @@
+// test-reads: ops-kit/fixtures/
 import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -85,6 +86,22 @@ test("list --search / --label / --state (#3071): filtered from the stored record
   const unread = await run(["list", "--json"], app((m, p) => (p.startsWith("/records") ? { body: { ...RECORDS("ws1"), unread: [5, 6] } } : routes()(m, p, undefined))));
   expect([JSON.parse(unread.out).unread, unread.err]).toEqual([[5], "最後の取込みで読めていない Issue（保存値のまま。今の値ではない）: #5（--fresh で取り込み直す）"]);
   const wrong = await run(["list", "--state", "merged"]);
+  expect([wrong.code, wrong.calls.length]).toEqual([1, 0]);
+});
+
+test("list --type (#3969): a local change is not an Issue — left out by default, its row says change", async () => {
+  const change = { ...issue(7, "変更: local-merge", "OPEN", [], null), change: { head: "sb/7-x", base: "main", mergeCommit: null, mergedAt: null } };
+  const withChange = app((m, p) => (p.startsWith("/records") ? { body: { ...RECORDS("ws1"), issues: [...RECORDS("ws1").issues, change] } } : routes()(m, p, undefined)));
+  const rows = async (...argv: string[]) => {
+    const r = await run(["list", ...argv], withChange);
+    expect(r.code).toBe(0);
+    return r.out.split("\n").slice(1);
+  };
+  expect((await rows()).map((l) => l.split("\t")[0])).toEqual(["#3", "#5"]);
+  expect(await rows("--type", "change")).toEqual(["#7\tchange\tOPEN\t-\t変更: local-merge"]);
+  expect((await rows("--type", "all")).map((l) => l.split("\t")[0])).toEqual(["#3", "#5", "#7"]);
+  expect(JSON.parse((await run(["list", "--type", "change", "--json"], withChange)).out).items).toEqual([{ number: 7, type: "change", state: "OPEN", status: null, title: "変更: local-merge", labels: [] }]);
+  const wrong = await run(["list", "--type", "pr"]);
   expect([wrong.code, wrong.calls.length]).toEqual([1, 0]);
 });
 
@@ -387,4 +404,45 @@ test("view of a local change: its branches and tips on the second line, the merg
   expect(await second(detail(null, { head: "a".repeat(40), base: "b".repeat(40) }))).toBe("変更: sb/5-x → main  head aaaaaaa base bbbbbbb");
   expect(await second(detail(null, { head: null, base: "b".repeat(40) }))).toBe("変更: sb/5-x → main  head なし base bbbbbbb");
   expect(await second(detail("c".repeat(40), { head: null, base: "b".repeat(40) }))).toBe("変更: sb/5-x → main  MERGED ccccccc");
+});
+
+test("outside the app: a choice in another case is written as the choice; one not there is refused before anything is written (#3795)", async () => {
+  const { fakeGh } = await import("./gh.ts");
+  const { loadConfig } = await import("./config.ts");
+  const config = async () => loadConfig(join(import.meta.dir, "../fixtures/config-with-phase.json"));
+  // a clone whose origin is the repository GH_REPO names: this config's choices are its Project's
+  const dir = mkdtempSync(join(tmpdir(), "ops-kit-choice-"));
+  Bun.spawnSync(["git", "init", "-q", dir]);
+  Bun.spawnSync(["git", "-C", dir, "remote", "add", "origin", "https://github.com/acme/app.git"]);
+  const saved = process.env.GH_REPO;
+  process.env.GH_REPO = "acme/app";
+  try {
+    const err: string[] = [];
+    const io = { out: () => {}, err: (s: string) => err.push(s) };
+    const refused = fakeGh([]);
+    expect(await runBacklog(["create", "--title", "t", "--field", "Status=Doing"], { GH_REPO: "acme/app" }, io, { gh: refused, config, cwd: dir })).toBe(1);
+    expect(refused.calls).toEqual([]);
+    expect(err.at(-1)).toContain("'Status' に選択肢 'Doing' がありません: Backlog / Ready / In progress / In review / Done");
+
+    // no --field: no config is asked for, the Issue is made as before
+    const plain = fakeGh([() => "https://github.com/acme/app/issues/12\n"]);
+    expect(await runBacklog(["create", "--title", "t"], { GH_REPO: "acme/app" }, io, { gh: plain, cwd: dir })).toBe(0);
+    expect(plain.calls.map((c) => c.kind === "run" && c.args.slice(0, 2))).toEqual([["issue", "create"]]);
+
+    const field = { id: "F1", dataType: "SINGLE_SELECT", options: [{ id: "O4", name: "In review" }] };
+    const gh = fakeGh([() => ({ repositoryOwner: { projectV2: { id: "P1", field } }, repository: { issue: { id: "I1", projectItems: { nodes: [{ id: "IT1", project: { number: 1 } }] } } } }), () => ({})]);
+    expect(await runBacklog(["set", "3", "Status", "in review"], { GH_REPO: "acme/app" }, io, { gh, config, cwd: dir })).toBe(0);
+    const write = gh.calls[1]!;
+    expect(write.kind === "graphql" && write.query).toContain("updateProjectV2ItemFieldValue");
+    expect(write.kind === "graphql" && write.vars).toMatchObject({ value: "O4" });
+
+    // GH_REPO naming another repository than origin: another Project, whose choices this config does not hold
+    const other = fakeGh([() => ({ repositoryOwner: { projectV2: { id: "P1", field: { ...field, options: [{ id: "OD", name: "Doing" }] } } }, repository: { issue: { id: "I1", projectItems: { nodes: [{ id: "IT1", project: { number: 1 } }] } } } }), () => ({})]);
+    expect(await runBacklog(["set", "3", "Status", "Doing"], { GH_REPO: "acme/other" }, io, { gh: other, config, cwd: dir })).toBe(0);
+    expect(other.calls[1]!.kind === "graphql" && other.calls[1]!.vars).toMatchObject({ value: "OD" });
+  } finally {
+    if (saved === undefined) delete process.env.GH_REPO;
+    else process.env.GH_REPO = saved;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

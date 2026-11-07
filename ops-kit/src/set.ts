@@ -1,3 +1,4 @@
+import { STATUS_OPTIONS } from "./bootstrap.ts";
 import { projectOf, type OpsConfig } from "./config.ts";
 import { repoOf, type GhClient } from "./gh.ts";
 
@@ -34,6 +35,24 @@ export async function ensureItem(gh: GhClient, projectId: string, projectNumber:
   if (typeof id !== "string") throw new Error(`#${num} を Project に追加できませんでした`);
   log(`>> Project に追加: #${num}`);
   return id;
+}
+
+/**
+ * A field value as the choice it names (#3795): a value that differs from one of the field's choices only in case is
+ * written as that choice; one no choice matches is refused before anything is stored or written. The choices are the
+ * config's (the Project is made from it) and the kit's Status; a field without choices here (TEXT, DATE, …) and null
+ * pass as they are. No other spelling is guessed: only the case, which names one choice.
+ */
+export function fieldChoice(cfg: OpsConfig, name: string, value: string | number | null): string | number | null {
+  const choices: Record<string, ReadonlyArray<string | number> | undefined> = { Status: STATUS_OPTIONS, Area: cfg.fields.area, Kind: cfg.fields.kind, Priority: cfg.fields.priority, Phase: cfg.fields.phase, "Story Points": cfg.storyPoints };
+  const options = Object.hasOwn(choices, name) ? choices[name] : undefined;
+  if (!options || value === null) return value;
+  const given = typeof value === "string" && /^[0-9]+$/.test(value) && options.every((o) => typeof o === "number") ? Number(value) : value;
+  const hits = options.filter((o) => o === given || (typeof o === "string" && typeof given === "string" && o.toLowerCase() === given.toLowerCase()));
+  const exact = hits.find((o) => o === given);
+  if (exact !== undefined) return exact;
+  if (hits.length === 1) return hits[0]!;
+  throw new UsageError(`'${name}' に選択肢 '${value}' がありません: ${options.join(" / ")}`);
 }
 
 /** The value part of updateProjectV2ItemFieldValue for a field of this type, after checking the value fits it. */

@@ -65,6 +65,8 @@ interface LiveSession {
   turnDisk?: string;
   /** The last quota report of the turn in flight — the runner's own view of the window that stopped it (#102). */
   turnQuota?: Extract<AgentEvent, { t: "quota" }>;
+  /** The turn in flight asked the person through the runner's question tool (#3053): its ok end leaves the Task 要対応. */
+  turnQuestion?: boolean;
   /** `switchboard-stop` reports in the runner's reply as it streams (#948). */
   stopReader: StopFenceReader;
 }
@@ -193,6 +195,8 @@ export interface TaskManagerOptions {
   otelFor?: (taskId: string) => { endpoint: string; token: string };
   /** What the kit's `docker` front reads (#1418): the label for the task's containers and the file its compose projects are written to. */
   dockerEnv?: (taskId: string) => Record<string, string>;
+  /** The main reviewer the kit's cross-runner-review picks (#4024, `settings.reviewRunner`). Absent = "other". */
+  reviewRunner?: () => "other" | "same";
   /** How many daemon stops in a row a turn is resumed after (#835, `quotaAndResume.maxStopResumes`). Absent = `MAX_STOP_RESUMES`. */
   maxStopResumes?: () => number;
   /** The MCP servers a Task's runner gets (#2090, `mcp.yaml` `servers`). Absent = none. */
@@ -227,7 +231,7 @@ export function taskAllowRules(metaPath: string, cwd: string): string[] {
  * end. The person's next message closes them too, but after it is recorded — its files are recorded before it, and a row
  * between them would split them.
  */
-const endsReply = (ev: AgentEvent) => ev.t === "tool.call" || ev.t === "permission.ask" || ev.t === "session.end";
+const endsReply = (ev: AgentEvent) => ev.t === "tool.call" || ev.t === "permission.ask" || ev.t === "question.ask" || ev.t === "session.end";
 
 /**
  * TaskManager owns the lifecycle: create → start adapter → persist/broadcast events → status transitions → ledger.
@@ -255,6 +259,7 @@ export class TaskManager {
   private otelFor: TaskManagerOptions["otelFor"];
   private dockerEnv: TaskManagerOptions["dockerEnv"];
   private maxStopResumes: () => number;
+  private reviewRunner: TaskManagerOptions["reviewRunner"];
   private mcpServers: TaskManagerOptions["mcpServers"];
   private bedrock: TaskManagerOptions["bedrock"];
 
@@ -285,6 +290,7 @@ export class TaskManager {
     this.otelFor = opts.otelFor;
     this.dockerEnv = opts.dockerEnv;
     this.maxStopResumes = opts.maxStopResumes ?? (() => MAX_STOP_RESUMES);
+    this.reviewRunner = opts.reviewRunner;
     this.mcpServers = opts.mcpServers;
     this.bedrock = opts.bedrock;
   }
@@ -912,6 +918,7 @@ export class TaskManager {
       this.disarmIdle(live);
       live.turnErrors = [];
       live.turnQuota = undefined;
+      live.turnQuestion = undefined;
       live.session.send(text, atts);
       return this.setStatus(taskId, "running");
     }
@@ -976,8 +983,7 @@ export class TaskManager {
     if (t && TERMINAL.has(t.status)) for (const l of this.endListeners) l(taskId, t);
   }
 
-  /** `answers`: the user's reply to a question tool (AskUserQuestion), handed to the adapter with the allow. */
-  respondPermission(taskId: string, id: string, decision: PermissionDecision, answers?: Record<string, string>): Task {
+  respondPermission(taskId: string, id: string, decision: PermissionDecision): Task {
     this.requireLocal(this.mustGet(taskId));
     const live = this.live.get(taskId);
     if (!live) throw new Error("task has no live runner session");
@@ -990,7 +996,7 @@ export class TaskManager {
       this.onEvent(taskId, live, { t: "permission.resolved", id, decision, by: "user" });
       return this.afterAnswer(taskId, live);
     }
-    live.session.respondPermission(id, decision, undefined, "user", answers);
+    live.session.respondPermission(id, decision, undefined, "user");
     live.pendingPermissions.delete(id);
     return this.afterAnswer(taskId, live);
   }
@@ -1140,8 +1146,9 @@ export class TaskManager {
     const path = meta ? { PATH: [join(meta.path, "ops-kit/bin"), process.env.PATH ?? "", dirname(process.execPath)].join(delimiter) } : undefined;
     const deviceAuth = this.deviceAuthEnv?.(task.id);
     // #1397: everything the task starts, detached or not, carries this; onTaskEnd stops what still does. The kit's
-    // `ops-kit heavy` names the Task of a job holding or waiting for a slot by OPS_KIT_TASK_ID (the kit names no app)
-    const env = { ...path, ...deviceAuth, ...this.dockerEnv?.(task.id), SWITCHBOARD_TASK_ID: task.id, OPS_KIT_TASK_ID: task.id };
+    // `ops-kit heavy` names the Task of a job holding or waiting for a slot by OPS_KIT_TASK_ID (the kit names no app).
+    // OPS_KIT_REVIEW_RUNNER (#4024): the setting's value at this start or resume; a later change waits for the next one
+    const env = { ...path, ...deviceAuth, ...this.dockerEnv?.(task.id), SWITCHBOARD_TASK_ID: task.id, OPS_KIT_TASK_ID: task.id, OPS_KIT_REVIEW_RUNNER: this.reviewRunner?.() ?? "other" };
     // The stop for writes to fixed names right under /tmp (#764, docs/design/shared-tmp-guard.md): the kit's hook
     const guards = meta ? [shellQuote(join(meta.path, "ops-kit/bin/deny-shared-tmp"))] : undefined;
     const allow = meta ? taskAllowRules(meta.path, task.cwd) : undefined;
@@ -1390,6 +1397,7 @@ export class TaskManager {
             this.disarmIdle(live);
             live.turnErrors = [];
             live.turnQuota = undefined;
+            live.turnQuestion = undefined;
           }
           if (!(IN_FLIGHT.has(task.status) || ownTurn) || !this.transition(taskId, "running", extra)) this.db.updateTask(taskId, extra);
         }
@@ -1397,6 +1405,9 @@ export class TaskManager {
       case "permission.ask":
         live.pendingPermissions.set(ev.id, { ask: ev, at: env.ts }); // the recorded event's time, as the transcript and /api/queue show it
         if (IN_FLIGHT.has(task.status)) this.transition(taskId, "waiting");
+        break;
+      case "question.ask":
+        live.turnQuestion = true;
         break;
       case "permission.resolved":
         live.pendingPermissions.delete(ev.id);
@@ -1451,7 +1462,8 @@ export class TaskManager {
         // Only an in-flight turn can end. A late session.end (e.g. the process being released) must not
         // rewrite a task that already finished.
         if (task.status === "running" || task.status === "waiting") {
-          this.transition(taskId, ev.status === "ok" ? "done" : ev.status === "aborted" ? "aborted" : "error");
+          // a turn that asked through the question tool ends on the person's answer (#3053): 要対応 at once, not judged
+          this.transition(taskId, ev.status === "ok" ? "done" : ev.status === "aborted" ? "aborted" : "error", ev.status === "ok" && live.turnQuestion ? { outcome: "needs_action" } : {});
           // A shadow's turn that ended in error (#99) — a session the agent lost, an ADK error — is invisible from the
           // primary, which is where the person is looking; the copies stop matching from here on.
           if (ev.status === "error" && task.shadowOf) this.record(task.shadowOf, { t: "status", text: `並走（${task.runner}）のターンがエラーで終わりました（${ev.summary ?? ""}）。ここから先の会話は並走と食い違います` });
@@ -1468,6 +1480,7 @@ export class TaskManager {
           live.turnDisk = undefined;
           live.turnErrors = [];
           live.turnQuota = undefined;
+          live.turnQuestion = undefined;
           if (after) {
             for (const l of this.turnEndListeners) {
               // one listener's failure must not skip the others, nor the broadcast of the end below
@@ -1568,7 +1581,7 @@ export class TaskManager {
    * The one place a task's status is written (#1140): checked against the table (task-status.ts) first, and `null`
    * when the move is not allowed, with the row untouched. The outcome follows by rule in `Db.updateTask`.
    */
-  private transition(taskId: string, status: Task["status"], extra: Partial<Pick<Task, "runnerSessionId" | "model" | "resumeAt" | "resumeReason" | "resumeWindow" | "resumeSince" | "resumePlannedAt">> = {}): Task | null {
+  private transition(taskId: string, status: Task["status"], extra: Partial<Pick<Task, "outcome" | "runnerSessionId" | "model" | "resumeAt" | "resumeReason" | "resumeWindow" | "resumeSince" | "resumePlannedAt">> = {}): Task | null {
     const cur = this.db.getTask(taskId);
     if (!cur || !canTransition(cur.status, status)) return null;
     return this.db.updateTask(taskId, { status, ...extra });

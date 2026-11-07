@@ -18,7 +18,7 @@ description: Task を Stacked PR（GitHub public preview, gh stack）として�
 3. `gh stack submit --auto --open` で push + PR 作成（`--open` で最初から ready。無いと draft）。**テンプレは未記入**なので必ず
    `gh pr edit <n> --title ... --body ...`（PULL_REQUEST_TEMPLATE.md の項目を埋める）。draft のままなら `gh pr ready <n>`。
 4. レビュー: `review-with-subagent` スキルの手順で、PR ごとにサブエージェントを起動しコメントさせる。
-5. 指摘対応: **指摘のある枝で**修正 → commit → `gh stack rebase`（スタック全体を下から rebase）→ `gh stack push`。
+5. 指摘対応: **指摘のある枝で**修正 → commit → `gh stack rebase`（スタック全体を下から rebase）→ `gh stack push`（`submit` と同じく全部の枝を atomic に push する。1 本でも断られたらどの枝も更新されない）。
    各指摘コメントに個別返信（`gh api .../comments/<id>/replies`）し、最後に要約コメント。Issue にも結果を記録する（`ops-kit backlog comment <Task> --body-file …`）。
 6. CI 緑・返信済みを確認して `<マージ判定> <PR番号> --merge-stack`（判定が merge のときだけ `gh stack merge <PR番号> --rebase -y` を呼ぶ。最下段だけ。`gh stack merge` はその PR と下の PR をまとめて atomic に merge する）。
    スタックに属さない単発 PR は `<マージ判定> <n> --merge`（`gh stack merge` は「not a stacked pull request」で失敗する）。
@@ -31,9 +31,7 @@ description: Task を Stacked PR（GitHub public preview, gh stack）として�
 
 - **下の枝を直したら上を必ず cascade**: `gh stack rebase` は全体を面倒みる。手でやるなら
   `git rebase --onto <new-lower> <old-lower-tip>` を上の枝ごとに。
-- **`gh stack rebase` が古い commit を復活させることがある**: マージ済み枝の再生で、削除したはずの調査用ファイルが
-  main に戻った（追加 → 削除 → 再追加）。別の枝で消しても main には残ったままで、
-  レビューで指摘されるまで気づかなかった（別の PR で再削除）。マージ後は `git ls-tree --name-only origin/main | grep -i <消したもの>` で確認。
+- **base の PR がマージされずに閉じたスタックの rebase は確認を聞く**: base の枝が消えると GitHub はスタックを main に付け替え、`gh stack rebase` / `gh stack sync` はその上に rebase する。元の base がマージされていれば聞かずに進むが、マージされずに閉じていればその commit を落とすかを聞き、Task（対話の無い端末）では止まる。閉じた PR の中身を捨ててよいと確かめてから `--accept-base-change` を付ける（中身が要るなら先にその commit を上の枝へ移す）。
 - **作業ファイルをリポジトリに置かない**: 調査用スクリプトはスクラッチパッドに。
 - **コミットはパスを指定する**（`git add -A` を使わない）。コミットの前に `git diff --cached --name-only` を Task の触る場所と比べる。
 - **枝を移る前に未コミットの変更を無くす**: `git checkout` / `gh stack switch` / `gh stack add` の前に `git status --porcelain` が空であること（途中の変更はその枝にコミットしてから移る）。1 つの worktree にスタック全体があるので、未コミットの変更は黙って次の枝に持ち越され、別の Task の PR に混ざる（`-q` だと持ち越しの表示も出ない）。

@@ -7,7 +7,7 @@ import { shownStops, stopDisplay } from "./stops.ts";
 /**
  * How the Backlog screen sorts and narrows its rows (#2695), kept in the browser. Empty arrays = every value; `query`
  * matches a title or a number; `sort` "default" keeps the daemon's order. `layout` is how the rows are laid out (#2696:
- * the stage cards, or the stages as the columns of a board), not a condition.
+ * the stage cards, or the stages as the columns of a board; #3957: the backlog queue), not a condition.
  */
 export interface BacklogView {
   sort: "default" | "priority" | "updated" | "created" | "points";
@@ -15,7 +15,7 @@ export interface BacklogView {
   types: Array<"request" | "pbi">;
   priorities: string[];
   query: string;
-  layout: "list" | "board";
+  layout: "list" | "board" | "queue";
 }
 
 export const DEFAULT_VIEW: BacklogView = { sort: "default", stages: [], types: [], priorities: [], query: "", layout: "list" };
@@ -124,7 +124,7 @@ export function loadView(store: Pick<Storage, "getItem">): BacklogView {
       v.types.every((t) => TYPES.some(([k]) => k === t)) &&
       strings(v.priorities) &&
       typeof v.query === "string";
-    return ok ? { ...(v as BacklogView), layout: v.layout === "board" ? "board" : "list" } : DEFAULT_VIEW;
+    return ok ? { ...(v as BacklogView), layout: v.layout === "board" || v.layout === "queue" ? v.layout : "list" } : DEFAULT_VIEW;
   } catch {
     return DEFAULT_VIEW;
   }

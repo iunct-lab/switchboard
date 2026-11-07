@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { lang, setLang, t, type Lang, type Msg } from "../i18n.ts";
 import { settings } from "../i18n/settings.ts";
-import type { CustomRunner, AutoStartKind, Backlog, HistoryStatus, JudgeSettings, LlmRoutingSettings, ModelCandidates, ModelOption, Preset, RunnerId, RunnerInfo, Settings as SettingsData, SettingsPrice, Task, Workspace } from "@switchboard/protocol";
+import type { CustomRunner, AutoStartKind, Backlog, HistoryStatus, JudgeSettings, LlmRoutingSettings, ModelCandidates, ModelOption, Preset, ReviewRunnerChoice, RunnerId, RunnerInfo, Settings as SettingsData, SettingsPrice, Task, Workspace } from "@switchboard/protocol";
 import { api, type Health, type SettingsResponse, type WorkspaceClone } from "../api.ts";
 import { ModelSelect } from "./ModelSelect.tsx";
 import { taskModelOptions } from "../modelOptions.ts";
@@ -64,7 +64,12 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
   // the header's 「新しい版 →」 and Home's 「設定で追加 →」: the section exists only once the settings have loaded
   const loaded = s !== null;
   useEffect(() => {
-    if (loaded && props.focus) document.getElementById(props.focus.id)?.scrollIntoView();
+    if (!loaded || !props.focus) return;
+    const el = document.getElementById(props.focus.id);
+    // the cards are folded (#3849): open the one the link points at before showing it
+    const folded = el?.closest("details");
+    if (folded) folded.open = true;
+    el?.scrollIntoView();
   }, [loaded, props.focus]);
   if (!s) return <main className="main settings"><section className="card"><div className="muted">{t(settings.loading)}</div></section></main>;
   const dakOk = props.runnerOk.has("dak");
@@ -83,8 +88,7 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
     <main className="main settings">
       <SettingsToc />
       <SettingsGroupHeading id="settings-task-start" />
-      <section className="card tunables">
-        <h5>{t(settings.newDefaults)}</h5>
+      <SettingsCard title={t(settings.newDefaults)} className="tunables">
         <div className="row" style={{ alignItems: "center", gap: 6 }}>
           <span className="hint">{t(settings.newTaskRunner)}</span>
           <select className="mode" value={nd.taskRunner} disabled={saving} aria-label={t(settings.newTaskRunner)} onChange={(e) => void save({ newDefaults: { taskRunner: e.target.value as RunnerId } })}>
@@ -94,7 +98,7 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
         </div>
         <TextField label={t(settings.scheduleCron)} value={nd.scheduleCron} def={d.newDefaults.scheduleCron} mono disabled={saving} onSave={(v) => save({ newDefaults: { scheduleCron: v } })} />
         <ResetButton disabled={saving} onClick={() => save({ newDefaults: null })} />
-      </section>
+      </SettingsCard>
 
       <section className="card">
         <h5>{t(settings.approvalDefaults)}</h5>
@@ -118,8 +122,7 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
         ))}
       </section>
 
-      <section className="card">
-        <h5>{t(settings.autoStart)}</h5>
+      <SettingsCard title={t(settings.autoStart)}>
         <div className="muted">{t(settings.autoStartHint)}</div>
         <div className="row" style={{ alignItems: "center", gap: 6 }}>
           {/* a runner change goes back to that runner's CLI default: a model and an effort belong to one runner (the daemon does the same) */}
@@ -165,42 +168,37 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
           </div>
           <NumberField label={t(settings.fallbackAt)} hint={t(settings.fallbackAtHint)} value={s.autoStart.fallbackAt} def={0.9} step={0.05} min={0.5} max={1} disabled={saving} onSave={(v) => save({ autoStart: { fallbackAt: v } })} />
         </div>
-      </section>
+      </SettingsCard>
 
-      <section className="card presets">
-        <h5>{t(settings.presets)}</h5>
+      <SettingsCard title={t(settings.reviewRunner)}>
+        <div className="muted">{t(settings.reviewRunnerHint)}</div>
+        {(Object.entries(REVIEW_RUNNER_LABELS) as [ReviewRunnerChoice, Msg][]).map(([value, label]) => (
+          <label key={value} className="hint toggle">
+            <input type="radio" name="review-runner" value={value} checked={s.reviewRunner === value} disabled={saving} onChange={() => void save({ reviewRunner: value })} />
+            {t(label)}
+          </label>
+        ))}
+      </SettingsCard>
+
+      <SettingsCard title={t(settings.presets)} className="presets">
         <div className="muted">{t(settings.presetsHint)}</div>
         <PresetSettings onError={props.onError} />
-      </section>
+      </SettingsCard>
 
       {(listed.includes("dak") || s.shadowRunner === "dak") && (
-      <section className="card">
-        <h5>{t(settings.dakDefault)}</h5>
+      <SettingsCard title={t(settings.dakDefault)}>
         <label className={`hint toggle ${!dakOk && s.shadowRunner !== "dak" ? "off" : ""}`} title={dakOk ? t(settings.dakTitle) : t(settings.dakUnreachable)}>
           <input type="checkbox" checked={s.shadowRunner === "dak"} disabled={saving || (!dakOk && s.shadowRunner !== "dak")} onChange={(e) => void save({ shadowRunner: e.target.checked ? "dak" : null })} />
           {t(settings.dakToggle)}
           {!dakOk && s.shadowRunner === "dak" && <span className="hint">{t(settings.dakMissing)}</span>}
         </label>
-      </section>
+      </SettingsCard>
       )}
 
       <SettingsGroupHeading id="settings-resume" />
       {/* The tunables (#835): one card per group, saved on blur / Enter; 既定に戻す puts the whole group back (PATCH null) */}
-      <section className="card tunables">
-        <h5>{t(settings.usage)}</h5>
-        <div className="muted">{t(settings.usageHint)}</div>
-        <NumberField label={t(settings.backlogQuotaLimit)} hint={t(settings.backlogQuotaLimitHint)} value={qr.backlogQuotaLimit} def={d.quotaAndResume.backlogQuotaLimit} step={0.05} disabled={saving} onSave={(v) => save({ quotaAndResume: { backlogQuotaLimit: v } })} />
-        <NumberField label={t(settings.retryDelay)} unit={t(settings.unitMinutes)} scale={60_000} hint={t(settings.retryDelayHint)} value={qr.retryDelayMs} def={d.quotaAndResume.retryDelayMs} disabled={saving} onSave={(v) => save({ quotaAndResume: { retryDelayMs: v } })} />
-        <NumberField label={t(settings.retryMaxDelay)} unit={t(settings.unitMinutes)} scale={60_000} value={qr.retryMaxDelayMs} def={d.quotaAndResume.retryMaxDelayMs} disabled={saving} onSave={(v) => save({ quotaAndResume: { retryMaxDelayMs: v } })} />
-        <NumberField label={t(settings.maxLimitStops)} unit={t(settings.unitTimes)} value={qr.maxLimitStops} def={d.quotaAndResume.maxLimitStops} disabled={saving} onSave={(v) => save({ quotaAndResume: { maxLimitStops: v } })} />
-        <TextField label={t(settings.resumePrompt)} hint={t(settings.resumePromptHint)} value={qr.resumePrompt} def={d.quotaAndResume.resumePrompt} multiline disabled={saving} onSave={(v) => save({ quotaAndResume: { resumePrompt: v } })} />
-        <NumberField label={t(settings.maxStopResumes)} unit={t(settings.unitTimes)} value={qr.maxStopResumes} def={d.quotaAndResume.maxStopResumes} disabled={saving} onSave={(v) => save({ quotaAndResume: { maxStopResumes: v } })} />
-        <NumberField label={t(settings.thinSample)} unit={t(settings.unitItems)} hint={t(settings.thinSampleHint)} value={qr.thinSample} def={d.quotaAndResume.thinSample} disabled={saving} onSave={(v) => save({ quotaAndResume: { thinSample: v } })} />
-        <ResetButton disabled={saving} onClick={() => save({ quotaAndResume: null })} />
-      </section>
-
-      <section className="card">
-        <h5>{t(settings.autoResume)}</h5>
+      <SettingsCard title={t(settings.usage)} className="tunables">
+        <div className="hint">{t(settings.autoResume)}</div>
         <div className="muted">{t(settings.autoResumeHint)}</div>
         {runners.filter((r) => !isAdkRunner(r.id)).map((r) => (
           <div key={r.id} className="row" style={{ alignItems: "center", gap: 6 }}>
@@ -211,32 +209,25 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
             <ClaudeLoginRow runner={r} region={s.bedrock?.[r.id]?.region} onBedrock={(next) => void save({ bedrock: { [r.id]: next } })} onChanged={refresh} onError={props.onError} />
           </div>
         ))}
-      </section>
+        <div className="hint">{t(settings.usageWait)}</div>
+        <div className="muted">{t(settings.usageHint)}</div>
+        <NumberField label={t(settings.backlogQuotaLimit)} hint={t(settings.backlogQuotaLimitHint)} value={qr.backlogQuotaLimit} def={d.quotaAndResume.backlogQuotaLimit} step={0.05} disabled={saving} onSave={(v) => save({ quotaAndResume: { backlogQuotaLimit: v } })} />
+        <NumberField label={t(settings.retryDelay)} unit={t(settings.unitMinutes)} scale={60_000} hint={t(settings.retryDelayHint)} value={qr.retryDelayMs} def={d.quotaAndResume.retryDelayMs} disabled={saving} onSave={(v) => save({ quotaAndResume: { retryDelayMs: v } })} />
+        <NumberField label={t(settings.retryMaxDelay)} unit={t(settings.unitMinutes)} scale={60_000} value={qr.retryMaxDelayMs} def={d.quotaAndResume.retryMaxDelayMs} disabled={saving} onSave={(v) => save({ quotaAndResume: { retryMaxDelayMs: v } })} />
+        <NumberField label={t(settings.maxLimitStops)} unit={t(settings.unitTimes)} value={qr.maxLimitStops} def={d.quotaAndResume.maxLimitStops} disabled={saving} onSave={(v) => save({ quotaAndResume: { maxLimitStops: v } })} />
+        <TextField label={t(settings.resumePrompt)} hint={t(settings.resumePromptHint)} value={qr.resumePrompt} def={d.quotaAndResume.resumePrompt} multiline disabled={saving} onSave={(v) => save({ quotaAndResume: { resumePrompt: v } })} />
+        <NumberField label={t(settings.maxStopResumes)} unit={t(settings.unitTimes)} value={qr.maxStopResumes} def={d.quotaAndResume.maxStopResumes} disabled={saving} onSave={(v) => save({ quotaAndResume: { maxStopResumes: v } })} />
+        <NumberField label={t(settings.thinSample)} unit={t(settings.unitItems)} hint={t(settings.thinSampleHint)} value={qr.thinSample} def={d.quotaAndResume.thinSample} disabled={saving} onSave={(v) => save({ quotaAndResume: { thinSample: v } })} />
+        <ResetButton disabled={saving} onClick={() => save({ quotaAndResume: null })} />
+      </SettingsCard>
 
       <PolicySettings onError={props.onError} />
 
       <CustomRunnersSection onError={props.onError} />
 
       <SettingsGroupHeading id="settings-judge" />
-      <section className="card tunables">
-        <h5>{t(settings.judgeAndChoice)}</h5>
-        <div className="muted">{t(settings.judgeAndChoiceHint)}</div>
-        <div className="row" style={{ alignItems: "center", gap: 6 }}>
-          <span className="hint">{t(settings.judgeFallback)}</span>
-          {/* a model belongs to one runner: a runner change goes back to that runner's CLI default */}
-          <select className="mode" value={jc.judgeFallbackRunner} disabled={saving} aria-label={t(settings.judgeFallbackRunner)} onChange={(e) => void save({ judgeAndChoice: { judgeFallbackRunner: e.target.value as RunnerId, judgeFallbackModel: "" } })}>
-            {runnerOptions(jc.judgeFallbackRunner, t(settings.judgeFallbackOption))}
-          </select>
-          <ModelSelect runner={info(jc.judgeFallbackRunner)} value={jc.judgeFallbackModel} onChange={(m) => void save({ judgeAndChoice: { judgeFallbackModel: m } })} label={t(settings.judgeFallbackModel)} disabled={saving} title={t(settings.judgeFallbackModelTitle)} />
-          <span className="muted">{t(settings.defaultValue, { value: `${d.judgeAndChoice.judgeFallbackRunner} / ${d.judgeAndChoice.judgeFallbackModel}` })}</span>
-        </div>
-        <NumberField label={t(settings.judgeTimeout)} unit={t(settings.unitSeconds)} scale={1000} hint={t(settings.judgeTimeoutHint)} value={jc.judgeTimeoutMs} def={d.judgeAndChoice.judgeTimeoutMs} disabled={saving} onSave={(v) => save({ judgeAndChoice: { judgeTimeoutMs: v } })} />
-        <NumberField label={t(settings.workspaceChoiceTimeout)} unit={t(settings.unitSeconds)} scale={1000} hint={t(settings.workspaceChoiceTimeoutHint)} value={jc.workspaceChoiceTimeoutMs} def={d.judgeAndChoice.workspaceChoiceTimeoutMs} disabled={saving} onSave={(v) => save({ judgeAndChoice: { workspaceChoiceTimeoutMs: v } })} />
-        <ResetButton disabled={saving} onClick={() => save({ judgeAndChoice: null })} />
-      </section>
-
-      <section className="card">
-        <h5>{t(settings.turnJudge)}</h5>
+      <SettingsCard title={t(settings.judgeAndChoice)} className="tunables">
+        <div className="hint">{t(settings.turnJudge)}</div>
         <div className="muted">{t(settings.turnJudgeHint)}</div>
         <div className="row" style={{ alignItems: "center", gap: 6 }}>
           <label className="hint toggle">
@@ -254,19 +245,29 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
             </>
           )}
         </div>
-      </section>
-
-      <section className="card">
-        <h5>{t(settings.rubric)}</h5>
+        <div className="hint">{t(settings.rubric)}</div>
         <div className="muted">{t(settings.rubricHint)}</div>
         <label className="hint toggle">
           <input type="checkbox" checked={s.evals.judge.enabled} disabled={saving} onChange={(e) => void save({ evals: { judge: { enabled: e.target.checked } } })} />
           {t(settings.rubricToggle)}
         </label>
-      </section>
+        <div className="hint">{t(settings.judgeFallbackAndTimeout)}</div>
+        <div className="muted">{t(settings.judgeAndChoiceHint)}</div>
+        <div className="row" style={{ alignItems: "center", gap: 6 }}>
+          <span className="hint">{t(settings.judgeFallback)}</span>
+          {/* a model belongs to one runner: a runner change goes back to that runner's CLI default */}
+          <select className="mode" value={jc.judgeFallbackRunner} disabled={saving} aria-label={t(settings.judgeFallbackRunner)} onChange={(e) => void save({ judgeAndChoice: { judgeFallbackRunner: e.target.value as RunnerId, judgeFallbackModel: "" } })}>
+            {runnerOptions(jc.judgeFallbackRunner, t(settings.judgeFallbackOption))}
+          </select>
+          <ModelSelect runner={info(jc.judgeFallbackRunner)} value={jc.judgeFallbackModel} onChange={(m) => void save({ judgeAndChoice: { judgeFallbackModel: m } })} label={t(settings.judgeFallbackModel)} disabled={saving} title={t(settings.judgeFallbackModelTitle)} />
+          <span className="muted">{t(settings.defaultValue, { value: `${d.judgeAndChoice.judgeFallbackRunner} / ${d.judgeAndChoice.judgeFallbackModel}` })}</span>
+        </div>
+        <NumberField label={t(settings.judgeTimeout)} unit={t(settings.unitSeconds)} scale={1000} hint={t(settings.judgeTimeoutHint)} value={jc.judgeTimeoutMs} def={d.judgeAndChoice.judgeTimeoutMs} disabled={saving} onSave={(v) => save({ judgeAndChoice: { judgeTimeoutMs: v } })} />
+        <NumberField label={t(settings.workspaceChoiceTimeout)} unit={t(settings.unitSeconds)} scale={1000} hint={t(settings.workspaceChoiceTimeoutHint)} value={jc.workspaceChoiceTimeoutMs} def={d.judgeAndChoice.workspaceChoiceTimeoutMs} disabled={saving} onSave={(v) => save({ judgeAndChoice: { workspaceChoiceTimeoutMs: v } })} />
+        <ResetButton disabled={saving} onClick={() => save({ judgeAndChoice: null })} />
+      </SettingsCard>
 
-      <section className="card">
-        <h5>{t(settings.llm)}</h5>
+      <SettingsCard title={t(settings.llm)}>
         <div className="muted">{t(settings.llmHint)}</div>
         <div className="row" style={{ alignItems: "center", gap: 6 }}>
           <label className="hint toggle">
@@ -286,39 +287,35 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
             ))}
           </select>
         </div>
-      </section>
+      </SettingsCard>
 
-      <section className="card">
-        <h5>{t(settings.titles)}</h5>
+      <SettingsCard title={t(settings.titles)}>
         <div className="muted">{t(settings.titlesHint)}</div>
         <label className="hint toggle">
           <input type="checkbox" checked={s.titles.auto} disabled={saving} onChange={(e) => void save({ titles: { auto: e.target.checked } })} />
           {t(settings.titlesToggle)}
         </label>
-      </section>
+      </SettingsCard>
 
       <SettingsGroupHeading id="settings-model" />
-      <section className="card">
-        <h5>{t(settings.models)}</h5>
+      <SettingsCard title={t(settings.models)}>
         <div className="muted">{t(settings.modelsHint)}</div>
         {/* dak has no list of its own; on Bedrock the list is the adapter's Bedrock one, not the saved one (#1400) */}
         {runners.filter((r) => r.models.length > 0 && r.loginKind !== "bedrock").map((r) => (
           <ModelChoices key={r.id} runner={r.id} list={r.models} saved={!!s.models[r.id]} disabled={saving} save={trySave} />
         ))}
         <CliModelCandidates runners={runners} hidden={(runner) => s.hiddenModels[runner] ?? s.defaults.hiddenModels[runner] ?? []} disabled={saving} save={trySave} onError={props.onError} />
-      </section>
+      </SettingsCard>
 
-      <section className="card">
-        <h5>{t(settings.prices)}</h5>
+      <SettingsCard title={t(settings.prices)}>
         <div className="muted">{t(settings.pricesHint)}</div>
         <ModelPrices prices={s.prices} disabled={saving} save={trySave} />
-      </section>
+      </SettingsCard>
 
       <SettingsGroupHeading id="settings-connect" />
       <WorkspaceCard workspaces={props.workspaces} clones={props.clones} onAddWorkspaceFromGithub={props.onAddWorkspaceFromGithub} onAddWorkspace={props.onAddWorkspace} onTaskStarted={props.onTaskStarted} onError={props.onError} />
 
-      <section className="card">
-        <h5>{t(settings.notifications)}</h5>
+      <SettingsCard title={t(settings.notifications)}>
         {perm === "default" && (
           <>
             <div className="muted">{t(settings.notifyAsk)}</div>
@@ -332,10 +329,9 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
         {perm === "granted" && <div className="muted">{t(settings.notifyGranted)}</div>}
         {perm === "denied" && <div className="muted">{t(settings.notifyDenied)}</div>}
         {perm === "unsupported" && <div className="muted">{t(settings.notifyUnsupported)}</div>}
-      </section>
+      </SettingsCard>
 
-      <section className="card">
-        <h5>{t(settings.language)}</h5>
+      <SettingsCard title={t(settings.language)}>
         <div className="row" style={{ alignItems: "center", gap: 6 }}>
           <select className="mode" value={lang} aria-label={t(settings.language)} onChange={(e) => setLang(e.target.value as Lang)}>
             <option value="ja">{t(settings.japanese)}</option>
@@ -343,43 +339,55 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
           </select>
           <span className="hint">{t(settings.languageHint)}</span>
         </div>
-      </section>
+      </SettingsCard>
 
-      <section className="card" id="release">
-        <h5>{t(settings.release)}</h5>
+      <SettingsCard title={t(settings.release)} id="release">
         <ReleasePanel />
-      </section>
+      </SettingsCard>
 
-      <section className="card">
-        <h5>{t(settings.sweep)}</h5>
+      <SettingsCard title={t(settings.sweep)}>
         <SweepSlots onError={props.onError} />
-      </section>
+      </SettingsCard>
 
-      <section className="card">
-        <h5>{t(settings.githubSync)}</h5>
+      <SettingsCard title={t(settings.githubSync)}>
         <GithubSync />
-      </section>
+      </SettingsCard>
 
-      <section className="card">
-        <h5>{t(settings.terminalHistory)}</h5>
+      <SettingsCard title={t(settings.terminalHistory)}>
         <TerminalHistory onError={props.onError} />
-      </section>
+      </SettingsCard>
 
       {countriesUrl(props.health?.login) && (
-        <section className="card">
-          <h5>{t(settings.abroad)}</h5>
+        <SettingsCard title={t(settings.abroad)}>
           <div className="muted">{t(settings.abroadHint)}</div>
           <a href={countriesUrl(props.health?.login)!}>{t(settings.abroadLink)}</a>
-        </section>
+        </SettingsCard>
       )}
 
       {logoutPath(props.health?.login) && (
-        <section className="card">
-          <h5>{t(settings.login)}</h5>
+        <SettingsCard title={t(settings.login)}>
           <button onClick={() => void logout(logoutPath(props.health?.login)!, props.onError)}>{t(settings.logout)}</button>
-        </section>
+        </SettingsCard>
       )}
     </main>
+  );
+}
+
+/** The choices of レビューのランナー (#4025), in the order shown: the default first. */
+const REVIEW_RUNNER_LABELS: Record<ReviewRunnerChoice, Msg> = { other: settings.reviewRunnerOther, same: settings.reviewRunnerSame };
+
+/**
+ * A folded card of the Settings screen (#3849): only its title shows until pressed. React is not given `open`, so a save's
+ * re-render leaves an opened card open. 承認モードの既定 is not one of these (a safety setting stays unfolded).
+ */
+function SettingsCard(props: { title: string; id?: string; className?: string; children: ReactNode }) {
+  return (
+    <details className={`card ${props.className ?? ""}`.trim()} id={props.id}>
+      <summary>
+        <h5>{props.title}</h5>
+      </summary>
+      {props.children}
+    </details>
   );
 }
 
@@ -669,10 +677,10 @@ function NumberField(props: { label: string; unit?: string; scale?: number; step
     void props.onSave(v);
   };
   return (
-    <label className="row" style={{ alignItems: "center", gap: 6 }} title={props.hint}>
+    <label className="num-field" title={props.hint}>
       <span className="hint">{props.label}</span>
       <input type="number" step={props.step ?? 1} min={props.min} max={props.max} aria-label={props.label} value={text ?? shown(props.value)} disabled={props.disabled} onChange={(e) => setText(e.target.value)} onBlur={(e) => commit(e.currentTarget.value)} onKeyDown={(e) => e.key === "Enter" && commit(e.currentTarget.value)} style={{ width: 88 }} />
-      {props.unit && <span className="hint">{props.unit}</span>}
+      <span className="hint">{props.unit ?? ""}</span>
       <span className="muted">{t(settings.defaultValue, { value: `${shown(props.def)}${props.unit ? ` ${props.unit}` : ""}` })}</span>
     </label>
   );
@@ -688,10 +696,10 @@ function TextField(props: { label: string; hint?: string; value: string; def: st
   };
   const common = { "aria-label": props.label, value: text ?? props.value, disabled: props.disabled, onBlur: (e: { currentTarget: { value: string } }) => commit(e.currentTarget.value), className: props.mono ? "mono" : undefined };
   return (
-    <div className="row" style={{ alignItems: "center", gap: 6 }} title={props.hint}>
+    <div className="text-field" title={props.hint}>
       <span className="hint">{props.label}</span>
       {props.multiline ? (
-        <textarea rows={2} {...common} onChange={(e) => setText(e.target.value)} style={{ flex: 1, minWidth: 240 }} />
+        <textarea rows={2} {...common} onChange={(e) => setText(e.target.value)} />
       ) : (
         <input {...common} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === "Enter" && commit(e.currentTarget.value)} style={{ width: 140 }} />
       )}
@@ -859,6 +867,7 @@ function ModelPrices(props: { prices: Record<string, SettingsPrice>; disabled: b
   return (
     <>
       {rows.length > 0 && (
+        <div className="table-scroll">
         <table className="pricing">
           <thead>
             <tr>
@@ -890,6 +899,7 @@ function ModelPrices(props: { prices: Record<string, SettingsPrice>; disabled: b
             ))}
           </tbody>
         </table>
+        </div>
       )}
       <div className="row" style={{ alignItems: "center", gap: 6, flexWrap: "wrap" }}>
         <input className="mono" aria-label={t(settings.modelName)} placeholder={t(settings.modelName)} value={form.model} disabled={props.disabled} onChange={(e) => setForm({ ...form, model: e.target.value })} style={{ width: 200 }} />
@@ -1096,8 +1106,7 @@ function CustomRunnersSection(props: { onError: (msg: string) => void }) {
   );
   const offHost = draft.url.trim() !== "" && sendsOffHost(draft.url.trim());
   return (
-    <section className="card">
-      <h5>{t(settings.adk)}</h5>
+    <SettingsCard title={t(settings.adk)}>
       <div className="muted">{t(settings.adkHint)}</div>
       {list?.length ? (
         <table>
@@ -1140,6 +1149,6 @@ function CustomRunnersSection(props: { onError: (msg: string) => void }) {
       {offHost && <div className="hint">{t(settings.adkOffHost)}</div>}
       {error && <div className="error">{error}</div>}
       {changed && <div className="hint">{t(settings.adkSaved)}</div>}
-    </section>
+    </SettingsCard>
   );
 }

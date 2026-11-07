@@ -8,6 +8,8 @@ import { insights as m } from "../i18n/insights.ts";
 
 /** Rows read at a time; a full page offers さらに表示 (#1833). */
 const PAGE = 50;
+/** How many rows show before 残り N 件 (#4035): the newest; a list of 50 pushed Insights' other sections seven screens down on a phone. */
+const SHOWN = 5;
 
 /**
  * The レポート section of Insights (#1835): every task's HTML artifacts — or, switched to すべての成果物, every artifact
@@ -17,6 +19,7 @@ const PAGE = 50;
 export function Reports(props: { scope: "reports" | "all"; onScope: (scope: "reports" | "all") => void; openId?: string; onOpenTask: (taskId: string, artifactId: string) => void; onError: (msg: string) => void }) {
   const [rows, setRows] = useState<ReportRow[] | null>(null);
   const [more, setMore] = useState(false);
+  const [shown, setShown] = useState(SHOWN);
   const [q, setQ] = useState("");
   const [term, setTerm] = useState(""); // q, once typing pauses
   const seq = useRef(0); // a read from the top that a newer one replaced is dropped, its failure too
@@ -28,6 +31,8 @@ export function Reports(props: { scope: "reports" | "all"; onScope: (scope: "rep
   const undoTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const all = props.scope === "all";
+  // other words or the other scope: a new list, folded again to its first rows
+  useEffect(() => setShown(SHOWN), [term, all]);
   // what is on screen now: a read that a × or 元に戻す starts after the scope or the words changed uses these, not its render's
   const now = useRef({ all, term });
   now.current = { all, term };
@@ -58,6 +63,7 @@ export function Reports(props: { scope: "reports" | "all"; onScope: (scope: "rep
       const list = await read({ limit: PAGE, q: now.current.term, before: last.id });
       if (n !== seq.current) return;
       setRows((r) => [...(r ?? []), ...list]);
+      setShown(Number.MAX_SAFE_INTEGER); // さらに表示 is pressed with every row shown: the next page shows too
       setMore(list.length === PAGE);
     } catch (e) {
       if (n === seq.current) setErr(t(m.moreFailed, { error: String((e as Error).message ?? e) }));
@@ -145,7 +151,7 @@ export function Reports(props: { scope: "reports" | "all"; onScope: (scope: "rep
       {rows && rows.length === 0 && !err && <div className="muted">{term ? t(m.noMatchArtifacts, { term }) : all ? t(m.emptyAll) : t(m.emptyReports)}</div>}
       {rows && rows.length > 0 && (
         <div role="tablist" aria-label={all ? t(m.allArtifacts) : t(m.reports)}>
-          {rows.map((r) => (
+          {rows.slice(0, shown).map((r) => (
             <div key={r.id} className={`row${r.id === sel ? " on" : ""}`}>
               <button role="tab" aria-selected={r.id === sel} className="ghost t" onClick={() => setSel(r.id)} title={r.source}>
                 {r.title}
@@ -161,7 +167,12 @@ export function Reports(props: { scope: "reports" | "all"; onScope: (scope: "rep
           ))}
         </div>
       )}
-      {more && (
+      {rows && rows.length > shown && (
+        <button className="ghost" onClick={() => setShown(rows.length)}>
+          {t(m.showRest, { n: rows.length - shown })}
+        </button>
+      )}
+      {more && rows && shown >= rows.length && (
         <button className="ghost" disabled={moreBusy} onClick={() => void loadMore()}>
           {t(m.showMore)}
         </button>

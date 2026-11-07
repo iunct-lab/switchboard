@@ -24,6 +24,20 @@ description: Switchboard の変更を「動く」と言う前に、実際に動�
    `read_console_messages`（`error|403|CORS|refused`）、スクリーンショット、デーモン側 `curl /api/inbox` で反映確認。
 4. 後始末: 作ったメモを消す（`~/Knowledge/notes/<date>-<title>.md`）、タブを閉じる、立てたプロセスを止める。
 
+## 画面を撮って見る（画面の変更は必ず）
+
+動きと文言の確認だけでは見た目の崩れは分からない（#3953 のキューの表示は E2E が全部通ったまま、スマホでは題が「#40…」まで潰れていた）。画面に関わる変更は、PR を出す前に全画面か触った画面を撮って見る:
+
+```bash
+bun run --cwd apps/web build
+ops-kit heavy --name "screens-audit" -- bun scripts/screens-audit.ts --screens backlog-queue,schedules --out "$HOME/.cache/switchboard.shots-<PR>"
+```
+
+- 実データを `~/.cache` の下に写した候補のデーモン（`SWITCHBOARD_CANDIDATE=1`、ランナーなし、gh は答えない）で、スマホ縦 390×844 と PC 1280×900 を、中でスクロールする要素を 1 画面ずつ送って `<width>-<screen>-<n>.png` に撮る。画面の名前は `scripts/screens-audit.ts` の `screens()`
+- 画面ごとの 1 行（はみ出しの数・1 字幅の縦書きの数）は目安。0 でも崩れはありうるので、画像を全部開いて見る。スマホ縦を先に見る
+- PBI に画面イメージがあれば、画面イメージを同じ幅で開いて並べる
+- 見た画像は PR の本文に貼る（`feedback-assets` の枝。CLAUDE.md の「画像」）
+
 ## ユーザーの環境を壊さない
 
 - `bun run dev`（`scripts/dev.ts`）は web を kill すると core も止める。**ユーザーのプロセスは kill しない**。

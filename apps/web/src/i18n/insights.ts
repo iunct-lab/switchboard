@@ -233,6 +233,7 @@ export const insights = msgs({
   removeLabel: { ja: "{title} を消す", en: "Remove {title}" },
   remove: { ja: "消す", en: "Remove" },
   showMore: { ja: "さらに表示", en: "Show more" },
+  showRest: { ja: "残り {n} 件を表示", en: "Show {n} more" },
   removed: { ja: "「{title}」を消しました", en: "Removed \"{title}\"" },
   undo: { ja: "元に戻す", en: "Undo" },
 });

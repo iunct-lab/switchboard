@@ -18,6 +18,10 @@ import { startBlockedReason, unavailableNotice, unavailableNotices } from "../ru
 import { t } from "../i18n.ts";
 import { home } from "../i18n/home.ts";
 import { runnerLoginLabel } from "../login.ts";
+import { ago } from "../inProgress.ts";
+
+/** How many 要対応 rows show before すべて (#4066). */
+const ATTENTION_SHOWN = 8;
 
 /** The prefix "改善 →" inserted: remembered so a Workspace switch can swap it for the new workspace's brief (and only it). */
 type Brief = { wsId: string; text: string; title: string };
@@ -236,6 +240,8 @@ export function Home(props: {
   }, []);
   const active = useMemo(() => props.tasks.filter((t) => t.status === "running" || t.status === "waiting"), [props.tasks]);
   const attention = useMemo(() => attentionList(props.tasks), [props.tasks]);
+  // the first ones (#4066): 60 rows pushed the cost and the reports five screens down on a phone
+  const [allAttention, setAllAttention] = useState(false);
   const recent = useMemo(() => props.tasks.filter((t) => t.status !== "running" && t.status !== "waiting" && !needsAttention(t)).slice(0, 6), [props.tasks]);
 
   // runners not listed yet (loading, unreachable, no token): no runner reason is given, the button stays disabled as before
@@ -654,16 +660,24 @@ export function Home(props: {
           ))}
           <h5 style={{ marginTop: 14 }}>{t(home.attentionHeading, { count: attention.length })}</h5>
           {attention.length === 0 && <div className="muted">{t(home.none)}</div>}
-          {attention.map((t) => (
+          {(allAttention ? attention : attention.slice(0, ATTENTION_SHOWN)).map((t) => (
             <button key={t.id} className="row link" onClick={() => props.onOpenTask(t.id)}>
               <span className={`dot ${outcomeDotClass(t.outcome)}`} />
               <span className="t">{t.title}</span>
               <RunnerPill runner={t.runner} />
               <OriginTag origin={t.origin} />
               <ShadowTag task={t} />
-              <span className="m">{outcomeLabel(t.outcome)}</span>
+              {/* when it last moved (#4066): two Tasks of the same stage of one PBI have the same title */}
+              <span className="m">
+                {outcomeLabel(t.outcome)} · {ago(t.updatedAt, Date.now())}
+              </span>
             </button>
           ))}
+          {attention.length > ATTENTION_SHOWN && (
+            <button className="ghost link" onClick={() => setAllAttention(!allAttention)}>
+              {allAttention ? t(home.attentionFewer) : t(home.attentionAll, { n: attention.length })}
+            </button>
+          )}
           {recent.length > 0 && <h5 style={{ marginTop: 14 }}>{t(home.recentHeading)}</h5>}
           {recent.map((x) => (
             <button key={x.id} className="row link" onClick={() => props.onOpenTask(x.id)}>

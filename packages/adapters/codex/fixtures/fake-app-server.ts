@@ -10,6 +10,8 @@
  * `features list` prints the memories row with the value of FAKE_CODEX_MEMORIES (default false) and exits.
  * A prompt starting with "subagent:" runs a subagent thread inside the main turn: thread/started (parentThreadId),
  * its turn/started, answer, a commandExecution approval request, usage, turn/completed; then the main turn finishes.
+ * A prompt starting with "question:" asks two questions (item/tool/requestUserInput) and, once answered, ends the turn
+ * with "Waiting for your choices".
  * Prompts containing "crash" make the process exit 3 without a result; "sleep" keeps the turn open until interrupted.
  */
 import { appendFileSync } from "node:fs";
@@ -55,6 +57,18 @@ async function runTurn(threadId: string, text: string) {
   if (/crash/.test(text)) {
     process.stderr.write("fake app-server: simulated crash\n");
     process.exit(3);
+  }
+  if (text.startsWith("question:")) {
+    const reqId = approvalSeq++;
+    await new Promise<string>((r) => {
+      waiting.set(reqId, r);
+      const option = (label: string) => ({ label, description: `${label}.` });
+      enc({ method: "item/tool/requestUserInput", id: reqId, params: { threadId, turnId: id, itemId: "call-q", questions: [{ id: "area", header: "Area", question: "Which part?", isOther: true, isSecret: false, options: [option("web"), option("core")] }, { id: "note", header: "Note", question: "Anything else?", isOther: false, isSecret: false, options: null }], isBlocking: false, autoResolutionMs: null } });
+    });
+    enc({ method: "item/completed", params: { threadId, turnId: id, item: { type: "agentMessage", id: `msg-${id}`, text: "Waiting for your choices", phase: "final_answer" } } });
+    active = null;
+    enc({ method: "turn/completed", params: { threadId, turn: { id, items: [], status: "completed", error: null, durationMs: 5 } } });
+    return;
   }
   if (text.startsWith("subagent:")) {
     await runSubagent(threadId);

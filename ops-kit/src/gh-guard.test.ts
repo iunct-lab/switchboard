@@ -272,8 +272,24 @@ describe("backlog (#2694): in the app's Task an Issue of the workspace is not wr
       [["project", "item-delete", "1", "--owner", "acme", "--id", "x"], "ops-kit backlog set / triage"],
       [["api", "-X", "POST", "repos/acme/app/issues/5/sub_issues", "-F", "sub_issue_id=1"], "ops-kit backlog edit --parent / --no-parent"],
       [["api", "-X", "POST", "repos/:owner/:repo/issues/5/comments", "-f", "body=x"], "ops-kit backlog comment"],
-      [["api", "-X", "PUT", "repos/acme/app/issues/5/lock"], "Task の外の gh（この操作は ops-kit backlog に無い）"],
-      [["api", "graphql", "-f", 'query=mutation{transferIssue(input:{issueId:"I",repositoryId:"R"}){issue{id}}}'], "Task の外の gh（この操作は ops-kit backlog に無い）"],
+      // #3559: a label's definition, in every form
+      [["label", "create", "x", "--color", "fff"], "ops-kit sync-labels"],
+      [["label", "edit", "x", "--name", "y", "-R", "acme/app"], "ops-kit sync-labels"],
+      [["label", "delete", "x", "--yes"], "ops-kit sync-labels"],
+      [["label", "clone", "acme/public", "--repo", "acme/app"], "ops-kit sync-labels"],
+      [["api", "graphql", "-f", 'query=mutation{createLabel(input:{repositoryId:"R",name:"x",color:"fff"}){label{id}}}'], "ops-kit sync-labels"],
+      [["api", "graphql", "-f", 'query=mutation{updateLabel(input:{id:"L",name:"y"}){label{id}}}'], "ops-kit sync-labels"],
+      [["api", "graphql", "-f", 'query=mutation{deleteLabel(input:{id:"L"}){clientMutationId}}'], "ops-kit sync-labels"],
+    ];
+    // #3559: deleting or moving an Issue, which ops-kit backlog has no command for, in every form
+    const removals = (): string[][] => [
+      ["issue", "delete", "5", "--yes"],
+      ["issue", "delete", "https://github.com/acme/app/issues/5", "--yes"],
+      ["issue", "transfer", "5", "acme/public"],
+      ["issue", "transfer", "https://github.com/acme/app/issues/5", "acme/public"],
+      ["api", "-X", "POST", "repos/acme/app/issues/5/transfer", "-f", "new_owner=acme"],
+      ["api", "graphql", "-f", 'query=mutation{transferIssue(input:{issueId:"I",repositoryId:"R"}){issue{id}}}'],
+      ["api", "graphql", "-f", 'query=mutation{deleteIssue(input:{issueId:"I"}){clientMutationId}}'],
     ];
 
     test("gh api's REST, a graphql mutation and gh project item-* on the workspace stop before gh, with the command to use and the one-time way out", () => {
@@ -283,7 +299,43 @@ describe("backlog (#2694): in the app's Task an Issue of the workspace is not wr
         expect(r.err).toContain("acme/app のバックログ（Issue・コメント・ラベル・Project）に直接書きません。");
         expect(r.err).toContain(instead);
         expect(r.err).toContain("その 1 回だけ env -u BACKLOG_URL gh … で書けます");
+        expect(r.err).not.toContain("で書いてよい");
       }
+    });
+
+    test("deleting or moving an Issue stops before gh, and says the write is to be made with env -u BACKLOG_URL gh, without the broken-only way out", () => {
+      for (const argv of removals()) {
+        const r = run(argv, "", awsConfig, task);
+        expect([argv, r.code, r.called]).toEqual([argv, 1, null]);
+        expect(r.err).toContain("acme/app のバックログ（Issue・コメント・ラベル・Project）に直接書きません。");
+        expect(r.err).toContain("その操作は ops-kit backlog に無いので、env -u BACKLOG_URL gh … で書いてよい");
+        expect([argv, r.err.includes("壊れている")]).toEqual([argv, false]);
+      }
+    });
+
+    test("locking and pinning an Issue reach gh in every form (#3559: the app does not sync them)", () => {
+      for (const argv of [
+        ["issue", "lock", "5", "--reason", "resolved"],
+        ["issue", "unlock", "5"],
+        ["issue", "pin", "5"],
+        ["issue", "unpin", "https://github.com/acme/app/issues/5"],
+        ["api", "-X", "PUT", "repos/acme/app/issues/5/lock", "-f", "lock_reason=resolved"],
+        ["api", "-X", "DELETE", "repos/acme/app/issues/5/lock"],
+        ["api", "graphql", "-f", 'query=mutation{lockLockable(input:{lockableId:"I"}){clientMutationId}}'],
+        ["api", "graphql", "-f", 'query=mutation{unlockLockable(input:{lockableId:"I"}){clientMutationId}}'],
+        ["api", "graphql", "-f", 'query=mutation{pinIssue(input:{issueId:"I"}){issue{id}}}'],
+        ["api", "graphql", "-f", 'query=mutation{unpinIssue(input:{issueId:"I"}){issue{id}}}'],
+      ]) expect([argv, run(argv, "", awsConfig, task).called?.argv]).toEqual([argv, argv]);
+    });
+
+    test("the repository of a removal is the Issue's, and of a label's definition only -R / --repo", () => {
+      expect(backlogWrite(["issue", "transfer", "5", "https://github.com/acme/public/issues/1"])?.repo).toBeNull();
+      expect(backlogWrite(["issue", "transfer", "https://github.com/acme/app/issues/5", "acme/public"])?.repo).toBe("acme/app");
+      expect(backlogWrite(["label", "clone", "acme/app"])).toEqual({ instead: expect.stringContaining("ops-kit sync-labels"), repo: null });
+      // a label's description that starts with -R names no repository (#4051's review)
+      for (const flag of ["--description", "-d", "--name", "-n", "--color", "-c"]) expect([flag, backlogWrite(["label", "create", "x", flag, "-Racme/public"])?.repo]).toEqual([flag, null]);
+      expect(run(["label", "create", "x", "--description", "-Racme/public"], "", awsConfig, task)).toMatchObject({ code: 1, called: null });
+      expect(backlogWrite(["label", "list", "-R", "acme/app"])).toBeNull();
     });
 
     test("a query, a read, a pull request, git, contents, a release, creating a Project and another repository's Issue reach gh", () => {
@@ -300,11 +352,13 @@ describe("backlog (#2694): in the app's Task an Issue of the workspace is not wr
         ["api", "repos/acme/public/issues/5/comments", "-f", "body=x"],
         ["project", "field-list", "1", "--owner", "acme"],
         ["label", "list"],
+        ["label", "create", "x", "-R", "acme/public"],
+        ["issue", "delete", "5", "-R", "acme/public", "--yes"],
       ]) expect([argv, run(argv, "", awsConfig, task).called?.argv]).toEqual([argv, argv]);
     });
 
     test("without BACKLOG_URL every one of them reaches gh", () => {
-      for (const [argv] of stops()) expect([argv, run(argv, "", awsConfig, { BACKLOG_URL: undefined, GH_REPO: "acme/app" }).called?.argv]).toEqual([argv, argv]);
+      for (const argv of [...stops().map(([a]) => a), ...removals()]) expect([argv, run(argv, "", awsConfig, { BACKLOG_URL: undefined, GH_REPO: "acme/app" }).called?.argv]).toEqual([argv, argv]);
     });
 
     test("the way out: with BACKLOG_URL taken away the write reaches gh, and a secret in it still stops", () => {
@@ -498,6 +552,8 @@ describe("public copy (#2466): a write from a clone that still writes to its pub
         stops(argv, { FAKE_DEFAULT: "" });
       }
       stops(["issue", "comment", "1", "-b", "x"], { GH_REPO: "someone/widget" });
+      // a switch (`pr close -d`: delete the branch) takes no value: the -R after it still names the mark (#3717's review)
+      stops(["pr", "close", "5", "-d", "-R", "someone/widget"], { GH_REPO: "me/widget", FAKE_DEFAULT: "me/widget" });
     });
 
     test("noWrite: a write naming nothing reaches gh when the default is elsewhere", () => {

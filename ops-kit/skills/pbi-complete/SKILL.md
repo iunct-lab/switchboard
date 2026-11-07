@@ -39,7 +39,7 @@ description: PBI 1 件を一気通貫で終わらせるコマンド。/pbi-compl
 
 /pbi-complete は PBI ごとに別のセッションで同時に走らせてよい。ただし CLAUDE.md が並列ガードのコマンドを名指ししているときだけ（以下 `<guard>` と書く）。無ければ PBI は 1 セッションずつ進める。待たずに並べるための決まり:
 
-- **1 PBI = 1 セッション = 1 worktree**（場所と名前は CLAUDE.md の worktree の規則。PBI 番号を入れる）。`gh stack` の状態は worktree ごと（`.git/worktrees/<名前>/gh-stack`）なので、スタック同士は干渉しない。他のセッションの worktree・枝・スクラッチには触らない（`git worktree list` に出ても消さない）
+- **1 PBI = 1 セッション = 1 worktree**（場所と名前は CLAUDE.md の worktree の規則。PBI 番号を入れる）。`gh stack` の追跡はリポジトリに 1 つの目録（`<common-dir>/gh-stack`）で、worktree ごとに別のスタックを持てるので、スタック同士は干渉しない。他のセッションの worktree・枝・スクラッチには触らない（`git worktree list` に出ても消さない）
 - **同じ PBI は 1 セッションだけ**: 1 の最初に `<guard> claim <PBI>`。PBI に占有コメントを書き、release 後の最初の占有が勝つ（同時に書いたら後の方が自分のコメントを消して exit 1）
 - **同じファイルは同時に触らない**: Task に着手する前に `<guard> overlap <Task>`。Task 本文に名指ししたパスを、他のセッションの Draft・`needs-decision` を除く開いている PR の変更ファイルと、判断待ちを除く In progress の Task が名指ししたパスと突き合わせる（自分の PBI の Task と PR は除く）。In progress にした後の `--claimed` は Task に着手の印コメントを書き、同じファイルの In progress の Task のうち**先に印を書いた方**だけが進む（印を書く前に見落とした相手も、後から印を書く側が譲るので二重にならない）。Draft は単独では占有しないが、その実装を進めている In progress Task は占有する。先着の印は同時編集の衝突防止だけであり、作成順・古い PR の存在を優先度の根拠にしない。保留した PR を他の作業のためにマージ・クローズする必要はない。重なったら**その Task だけ後回しにして、重ならない次の Task を進める**（3 の「重なったとき」）。`STALE_HOURS`（72 時間）更新の無い PR / Task は `stale` に出るだけで止めない
 - exit 2（判定できなかった）は重なりありとみなす。Task にパスが無いなら `pbi-to-tasks` の書き方で Task 本文を直してからやり直す

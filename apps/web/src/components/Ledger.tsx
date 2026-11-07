@@ -132,6 +132,7 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
         {models === null && <div className="muted">{t(m.loading)}</div>}
         {models && models.length === 0 && <div className="muted">{t(m.noRecords)}</div>}
         {models && models.length > 0 && (
+          <div className="table-scroll">
           <table className="pricing">
             <thead>
               <tr>
@@ -158,6 +159,7 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </section>
 
@@ -221,6 +223,7 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
               <h5>{t(m.outcomesByRunner, { days: routing.days })}</h5>
               <span className="hint">{t(m.outcomesHint)}</span>
             </div>
+            <div className="table-scroll">
             <table className="pricing runner-stats">
               <thead>
                 <tr>
@@ -251,6 +254,7 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
                 ))}
               </tbody>
             </table>
+            </div>
           </>
         )}
       </section>
@@ -291,6 +295,7 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
             {p}
           </div>
         ))}
+        <div className="table-scroll">
         <table className="pricing">
           <thead>
             <tr>
@@ -305,6 +310,7 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
             <PriceRows models={pricing?.models ?? {}} fromSettings={pricing?.fromSettings ?? []} />
           </tbody>
         </table>
+        </div>
         <div className="hint">
           {t(m.priceNote, { billing: Object.entries(pricing?.billing ?? {}).map(([r, b]) => `${r}: ${b}`).join(" · ") })}
         </div>

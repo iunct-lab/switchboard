@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, ModelOption, PermissionDecision, PermissionModeOption, RunnerAdapter, RunnerDetection, LoginKind, RunnerLogin, RunnerSession, StartOptions } from "@switchboard/protocol";
+import { QUESTION_DEFERRED_REPLY } from "@switchboard/protocol";
 import { createClaudeParser, initializeLine, interruptLine, permissionResponseLine, setPermissionModeLine, userMessageLine } from "./parse.ts";
 
 export * from "./parse.ts";
@@ -325,10 +326,10 @@ class ClaudeSession implements RunnerSession {
     this.write(userMessageLine(text));
   }
 
-  respondPermission(id: string, decision: PermissionDecision, reason?: string, by: "user" | "rule" = "user", answers?: Record<string, string>): void {
+  respondPermission(id: string, decision: PermissionDecision, reason?: string, by: "user" | "rule" = "user"): void {
     const input = this.pending.get(id);
     this.pending.delete(id);
-    this.write(permissionResponseLine(id, decision, input, reason, answers));
+    this.write(permissionResponseLine(id, decision, input, reason));
     this.emit({ t: "permission.resolved", id, decision, by });
   }
 
@@ -453,7 +454,9 @@ class ClaudeSession implements RunnerSession {
         this.turnActive = false;
       }
       if (m?.type === "control_request" && m.request?.subtype === "can_use_tool") {
-        this.pending.set(m.request_id, m.request.input);
+        // the question tool (#3056) is declined at once with the deferred reply: the turn ends, the answers come as the next message
+        if (m.request.tool_name === "AskUserQuestion") this.write(permissionResponseLine(m.request_id, "deny", m.request.input, QUESTION_DEFERRED_REPLY));
+        else this.pending.set(m.request_id, m.request.input);
       }
       // set_permission_mode answers are the only control_responses we act on; the parser ignores the rest.
       if (m?.type === "control_response" && m.response?.request_id) {

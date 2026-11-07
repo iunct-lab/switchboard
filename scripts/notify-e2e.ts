@@ -105,6 +105,8 @@ try {
     if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
     return result.result.value;
   };
+  /** Opens the folded Settings card with this title (#3849), once Settings has drawn it: a card shows only its title until opened. */
+  const openSettingsCard = (title: string) => until(() => evaluate(`(() => { const d = [...document.querySelectorAll('.settings details.card')].find((d) => d.querySelector('summary').textContent.trim() === ${JSON.stringify(title)}); if (d) d.open = true; return !!d; })()`), `the ${title} card`);
   const notices = () => evaluate(`window.__notices.map(n => ({ title: n.title, body: n.body }))`) as Promise<Array<{ title: string; body: string }>>;
   const tap = async (selector: string) => {
     const point = await evaluate(`(() => { const e = ${selector}; e.scrollIntoView({ block: 'center' }); const b = e.getBoundingClientRect(); return { x: b.x + b.width / 2, y: b.y + b.height / 2 }; })()`);
@@ -163,6 +165,7 @@ try {
   await call("Page.reload");
   await until(() => evaluate(`!!document.querySelector('.conn.ok')`), "connected after reload");
   await tap(`[...document.querySelectorAll('.tabs button')].find(b => b.textContent.trim() === 'Settings')`);
+  await openSettingsCard("端末通知");
   await until(() => evaluate(`[...document.querySelectorAll('button')].some(b => b.textContent.trim() === '通知を許可する')`), "the allow button");
   await tap(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === '通知を許可する')`);
   await until(() => evaluate(`document.body.textContent.includes('許可済み。承認待ちが来ると通知します') && ![...document.querySelectorAll('button')].some(b => b.textContent.trim() === '通知を許可する')`), "granted text");
@@ -172,6 +175,7 @@ try {
   await call("Page.reload");
   await until(() => evaluate(`!!document.querySelector('.conn.ok')`), "connected again");
   await tap(`[...document.querySelectorAll('.tabs button')].find(b => b.textContent.trim() === 'Settings')`);
+  await openSettingsCard("端末通知");
   await until(() => evaluate(`document.body.textContent.includes('ブラウザが拒否しています')`), "denied text in settings");
   const b = (await post("/api/tasks", { cwd: cfg.repoRoot, title: "notify-b", prompt: "notify-b", runner: "claude" })).id as string;
   assert(b, "task notify-b created");

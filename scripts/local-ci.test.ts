@@ -312,6 +312,11 @@ describe("local-ci", () => {
     expect(testsOf(narrowed)).toEqual({ ran: 2, total: 200 });
     expect(testsOf(full)).toEqual({ ran: null, total: 200 });
     expect(testsOf(all)).toBeUndefined();
+    // a checkout with no test file says so, not that it fell back to every test (#3932)
+    const none = resultComment({ ...r, selection: { files: null, total: 0, reason: "scripts/test-select.ts が無い", unjudged: true } });
+    expect(none).toContain("テスト: なし（`*.test.ts` / `*.test.tsx` のファイルが 1 つも無い）");
+    expect(none).not.toContain("全テストに倒した");
+    expect(testsOf(none)).toEqual({ ran: null, total: 0 });
     for (const body of [narrowed, full, all]) {
       expect(passOf(body)).toEqual([SHA, BASE]);
       expect(markerSeconds(body)).toEqual({ typecheck: 1, test: 2 });
@@ -1324,13 +1329,22 @@ test("two local-ci runs do not overlap: each takes one heavy slot for its whole 
 
 describe("local change (#2488)", () => {
   const BACKLOG = "http://app/api/backlog";
-  /** A repository with no remote: main with a ci.yml whose one step is `run`, and sb/5-x one commit ahead. */
-  function repo(run: string) {
+  /**
+   * A repository with no remote: main with a CI whose one step is `run`, and sb/5-x one commit ahead. `place`: where the
+   * step is — ci.yml, `ops.config.json`'s `ci.steps` with no `.github/` (#3932), or nowhere.
+   */
+  function repo(run: string, place: "yml" | "config" | "none" = "yml") {
     const dir = mkdtempSync(join(tmpdir(), "local-ci-change-"));
     const git = (...a: string[]) => Bun.spawnSync(["git", "-C", dir, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgSign=false", ...a]).stdout.toString().trim();
     git("init", "-q", "-b", "main");
-    mkdirSync(join(dir, ".github/workflows"), { recursive: true });
-    writeFileSync(join(dir, ".github/workflows/ci.yml"), `jobs:\n  check:\n    steps:\n      - run: ${run}\n`);
+    if (place === "yml") {
+      mkdirSync(join(dir, ".github/workflows"), { recursive: true });
+      writeFileSync(join(dir, ".github/workflows/ci.yml"), `jobs:\n  check:\n    steps:\n      - run: ${run}\n`);
+    } else if (place === "config") {
+      writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ ci: { steps: [{ run }] } }));
+    } else {
+      writeFileSync(join(dir, "a.txt"), "a\n");
+    }
     git("add", "-A");
     git("commit", "-q", "-m", "ci");
     git("checkout", "-q", "-b", "sb/5-x");
@@ -1371,8 +1385,8 @@ describe("local change (#2488)", () => {
   }
   const dirs: string[] = [];
   afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
-  const fresh = (step: string) => {
-    const r = repo(step);
+  const fresh = (step: string, place?: "yml" | "config" | "none") => {
+    const r = repo(step, place);
     dirs.push(r.dir);
     return r;
   };
@@ -1403,6 +1417,58 @@ describe("local change (#2488)", () => {
     const text = (a.posted[0] as { text: string }).text;
     expect(LOCAL_CI_RESULT.exec(text)?.slice(1)).toEqual(["fail", r.tip("sb/5-x"), r.tip("main")]);
     expect(readdirSync(CACHE).some((f) => f.startsWith("switchboard.local-ci-change-ws_l-7-log."))).toBe(true);
+  });
+
+  test("ops.config.json's ci.steps with no .github/: pass and fail are run and posted; no test file says so (#3932)", async () => {
+    const ok = fresh("test -f b.txt", "config");
+    expect(existsSync(join(ok.dir, ".github"))).toBe(false);
+    const a = app(ok);
+    expect((await run(ok, a)).code).toBe(0);
+    const text = (a.posted[0] as { text: string }).text;
+    expect(passOf(text)).toEqual([ok.tip("sb/5-x"), ok.tip("main")]);
+    expect(text).toContain("| `test -f b.txt` | pass |");
+    expect(text).toContain("テスト: なし（`*.test.ts` / `*.test.tsx` のファイルが 1 つも無い）");
+    const bad = fresh("exit 3", "config");
+    const b = app(bad);
+    expect((await run(bad, b)).code).toBe(1);
+    expect(LOCAL_CI_RESULT.exec((b.posted[0] as { text: string }).text)?.[1]).toBe("fail");
+  });
+
+  test("checkoutSteps: ci.steps wins over ci.yml, and a step's name is its own or its run's first line (#3932)", async () => {
+    const r = fresh("echo yml");
+    writeFileSync(join(r.dir, "ops.config.json"), JSON.stringify({ ci: { steps: [{ name: "lint", run: "echo a" }, { run: "echo b\necho c" }] } }));
+    expect(await checkoutSteps(r.dir, {})).toEqual([{ name: "lint", run: "echo a" }, { name: "echo b", run: "echo b\necho c" }]);
+    // a config without ci leaves ci.yml as it was
+    writeFileSync(join(r.dir, "ops.config.json"), JSON.stringify({ envPrefix: "X" }));
+    expect(await checkoutSteps(r.dir, {})).toEqual([{ name: "echo yml", run: "echo yml" }]);
+  });
+
+  test("no CI steps anywhere: exit 2 with one line naming where they go, nothing posted (#3932)", async () => {
+    const r = fresh("", "none");
+    const a = app(r);
+    const errors: string[] = [];
+    const orig = console.error;
+    console.error = (...m: unknown[]) => void errors.push(m.join(" "));
+    try {
+      expect((await run(r, a)).code).toBe(2);
+    } finally {
+      console.error = orig;
+    }
+    expect(a.posted).toEqual([]);
+    expect(errors).toEqual(["CI の手順が無い。`ops.config.json` の `ci.steps`（GitHub と連携するなら `.github/workflows/ci.yml`）に置く"]);
+    // a ci that is not in its shape is refused the same way, naming the key
+    const w = fresh("", "none");
+    writeFileSync(join(w.dir, "ops.config.json"), JSON.stringify({ ci: { steps: [] } }));
+    w.git("add", "-A");
+    w.git("commit", "-q", "-m", "ci");
+    errors.length = 0;
+    console.error = (...m: unknown[]) => void errors.push(m.join(" "));
+    try {
+      expect((await run(w, app(w))).code).toBe(2);
+    } finally {
+      console.error = orig;
+    }
+    expect(errors[0]).toStartWith("ops.config.json の ci が不正: ci.steps:");
   });
 
   test("a branch that moved during the run: nothing posted, exit 1", async () => {

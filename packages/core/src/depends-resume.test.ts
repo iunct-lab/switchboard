@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StopRecord, type AgentEvent, type BacklogRecord, type RunnerAdapter, type RunnerSession } from "@switchboard/protocol";
 import { Db, type BacklogSnapshotEntry } from "./db.ts";
-import { dependsResumePrompt, dependsWaits, resumeDepends, stateFromRecords, waitsClosed } from "./depends-resume.ts";
+import { dependsResumePrompt, dependsWaits, jobResumePrompt, resumeDepends, resumeJobsOnTurnEnd, stateFromRecords, waitsClosed } from "./depends-resume.ts";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
 import { TaskManager } from "./tasks.ts";
 
@@ -45,7 +45,10 @@ describe("depends-resume (#2045)", () => {
       stop({ conditions: [{ key: "pr#12", value: "merged", met: true }] }), // nothing left to wait for
       stop({ state: "resolved" }),
     ];
-    expect(dependsWaits(records)).toEqual([{ stop: pick, numbers: [12, 34] }]);
+    expect(dependsWaits(records)).toEqual([{ stop: pick, numbers: [12, 34], jobs: [] }]);
+    // a job of the daemon (#3993) is a wait too, kept apart from GitHub's numbers
+    const job = stop({ conditions: [{ key: "job#7", value: "done", met: false }, { key: "pr#12", value: "open", met: false }] });
+    expect(dependsWaits([job])).toEqual([{ stop: job, numbers: [12], jobs: [7] }]);
     // the newest record of a stop decides: one resolved later is not open
     const later = { ...pick, state: "resolved" as const, at: pick.at + 1 };
     expect(dependsWaits([pick, later])).toEqual([]);
@@ -250,5 +253,80 @@ describe("resumeDepends (#2045)", () => {
     expect(await resume()).toEqual([u.id]);
     await settle();
     expect(sends).toEqual([dependsResumePrompt(["pr#12", "issue#34", "pr#13"])]);
+  });
+  describe("job#<id> (#3993)", () => {
+    const JOB_WAIT = { ...WAIT, id: "overlap", op: "ops-kit job request", target: "PR #12", evidence: "ローカル CI を頼んだ", conditions: [{ key: "job#1", value: "done", met: false }] };
+    const startJob = async (over: { stage?: { issue: number; action: "complete" } } = {}, wait = JOB_WAIT) => {
+      const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude", workspaceId: "ws_app", ...over });
+      await settle();
+      const job = db.insertJob({ kind: "local-ci", taskId: t.id, pr: 12, runner: null, cwd: home, startedAt: Date.now() });
+      expect(tasks.recordStop(t.id, { ...wait, conditions: wait.conditions.map((c) => (c.key === "job#1" ? { ...c, key: `job#${job.id}` } : c)) }).ok).toBe(true);
+      return { t, job };
+    };
+    const end = (id: number, code = 1) => db.finishJob(id, { status: code === 0 ? "pass" : "fail", exitCode: code, summary: `fail（終了コード ${code}）\nerror: 2 tests failed\nログ: /jobs/${id}/log`, endedAt: Date.now() })!;
+
+    test("waits while the job runs; once it ends, one turn with its result", async () => {
+      const { t, job } = await startJob();
+      expect(await resume()).toEqual([]);
+      expect(stopOf(t.id).state).toBe("waiting");
+      const ended = end(job.id);
+      expect(await resume()).toEqual([t.id]);
+      await settle();
+      expect(sends).toEqual([jobResumePrompt([ended])]);
+      expect(sends[0]).toStartWith(AUTO_RESUME_HEAD);
+      expect(sends[0]).toContain(`job#${job.id} local-ci PR #12: fail（終了コード 1）`);
+      expect(sends[0]).toContain("error: 2 tests failed");
+      expect(stopOf(t.id)).toMatchObject({ state: "resolved", conditions: [{ key: `job#${job.id}`, met: true }] });
+      expect(await resume()).toEqual([]); // once
+    });
+
+    test("a stop on a PR and a job goes on once both closed", async () => {
+      const { t, job } = await startJob({}, { ...JOB_WAIT, conditions: [{ key: "pr#12", value: "open", met: false }, { key: "job#1", value: "done", met: false }] });
+      end(job.id, 0);
+      expect(await resume()).toEqual([]); // the PR is not read yet
+      store([pr(12, "MERGED")]);
+      expect(await resume()).toEqual([t.id]);
+      await settle();
+      expect(sends).toHaveLength(1);
+      expect(sends[0]).toContain("pass（終了コード 0）");
+      expect(sends[0]).toContain("pr#12");
+    });
+
+    test("a job stop is held while another depends stop waits, so the last turn still carries the job's result", async () => {
+      const { t, job } = await startJob({ stage: { issue: 50, action: "complete" } });
+      expect(tasks.recordStop(t.id, { ...WAIT, id: "pr", conditions: [{ key: "pr#12", value: "open", met: false }] }).ok).toBe(true);
+      end(job.id);
+      expect(await resume()).toEqual([]); // the PR still waits: nothing resolved, nothing sent
+      expect(stopOf(t.id).state).toBe("waiting");
+      store([pr(12, "MERGED")]);
+      expect(await resume()).toEqual([t.id]);
+      await settle();
+      expect(sends).toHaveLength(1);
+      expect(sends[0]).toContain(`job#${job.id} local-ci PR #12: fail`);
+      expect(stopOf(t.id).state).toBe("resolved");
+    });
+
+    test("a job that ended while the Task was still in its turn is picked up when the turn ends (resumeJobsOnTurnEnd)", async () => {
+      const stop = resumeJobsOnTurnEnd(db, tasks);
+      const { t, job } = await startJob();
+      db.sqlite.query("UPDATE tasks SET workspace_id = NULL WHERE id = ?").run(t.id); // no import will look again
+      db.updateTask(t.id, { status: "running" }); // the turn that asked for the job has not ended yet
+      const ended = end(job.id);
+      expect(await resumeDepends({ db, tasks, workspaceId: null, now: Date.now() })).toEqual([]); // the job's end: skipped
+      db.updateTask(t.id, { status: "done" });
+      await tasks.send(t.id, "続き", { daemon: true }); // a turn of the Task ends
+      await settle();
+      await settle();
+      expect(sends).toEqual(["続き", jobResumePrompt([ended])]);
+      stop();
+    });
+
+    test("a stage Task gets its job's turn too", async () => {
+      const { t, job } = await startJob({ stage: { issue: 50, action: "complete" } });
+      end(job.id);
+      expect(await resume()).toEqual([t.id]);
+      await settle();
+      expect(sends).toHaveLength(1);
+    });
   });
 });

@@ -96,6 +96,13 @@ export const settings = msgs({
   addOption: { ja: "追加…", en: "Add…" },
   fallbackAt: { ja: "切り替える使用率", en: "Usage to switch at" },
   fallbackAtHint: { ja: "既定のランナーの使用量のどれかの窓がこれ以上なら切り替えます（0.5〜1）", en: "Switches when any window of the default runner's usage is at or above this (0.5–1)" },
+  reviewRunner: { ja: "レビューのランナー", en: "Review runner" },
+  reviewRunnerHint: {
+    ja: "PR のレビュー（cross-runner-review の主レビュアー）を誰がするか。同じランナーを選ぶと見落としが重なりうる。追加のレビュアー（DAK）は変わらない。動いている Task には次の開始・再開から効く。",
+    en: "Who reviews a PR (the main reviewer of cross-runner-review). With the same runner, oversights can overlap. The extra reviewer (DAK) does not change. A running Task picks it up from its next start or resume.",
+  },
+  reviewRunnerOther: { ja: "実装したのとは別のランナー（Claude が実装したら Codex、Codex が実装したら Claude）— 既定", en: "The other runner than the one that implemented it (Codex for Claude, Claude for Codex) — default" },
+  reviewRunnerSame: { ja: "実装したのと同じランナーの新しいセッション（Claude はサブエージェント）", en: "A new session of the runner that implemented it (a subagent on Claude)" },
   presets: { ja: "定型の指示", en: "Instruction presets" },
   presetsHint: { ja: "新規依頼と返信で選べる指示です。本文の {{target}} に選んだ Issue / PR が入ります。承認モードは含みません", en: "Instructions to choose for new requests and replies. The chosen Issue / PR goes into {{target}} in the text. Approval mode is not included" },
   presetsUnreadable: { ja: "定型の指示を読めませんでした: {error}", en: "Could not read the instruction presets: {error}" },
@@ -115,6 +122,7 @@ export const settings = msgs({
 
   // 止まったときと再開
   usage: { ja: "使用量と自動再開", en: "Usage and auto-resume" },
+  usageWait: { ja: "使用量と待ち", en: "Usage and waiting" },
   usageHint: { ja: "運用中に変えたくなる値です。変えると次に使うときから効きます（デーモンの再起動は要りません）。", en: "Values you may want to change while running. A change applies from the next use (no daemon restart needed)." },
   backlogQuotaLimit: { ja: "バックログを進めるときの使用量の閾値", en: "Usage threshold for advancing the backlog" },
   backlogQuotaLimitHint: { ja: "工程 Task を始めるランナー（上限のときの代わりを通した後）の使用量がこれ以上なら、工程 Task は全体で 1 件まで（0〜1）", en: "When the usage of the runner that starts stage Tasks (after the fallback at the limit) is at or above this, at most 1 stage Task runs overall (0–1)" },
@@ -127,12 +135,13 @@ export const settings = msgs({
   maxStopResumes: { ja: "デーモン停止で止まった Task を再開する回数", en: "Times to resume a Task stopped by a daemon stop" },
   thinSample: { ja: "ランナー比較で記録が少ないとみなす件数", en: "Records below which a runner comparison counts as thin" },
   thinSampleHint: { ja: "Ledger のランナーごとの表で、これ未満の行は比べない", en: "Rows below this in the Ledger's per-runner table are not compared" },
-  autoResume: { ja: "使用上限での自動再開", en: "Auto-resume at the usage limit" },
+  autoResume: { ja: "使用上限で止まったら自動再開", en: "Auto-resume after stopping at the usage limit" },
   autoResumeHint: { ja: "ランナーが 5 時間 / 7 日の使用上限で止まったとき、枠が戻った時点で同じセッションに「続きを」と送ります（Task ごとに Brief から取り消せます）。", en: "When a runner stops at its 5-hour / 7-day usage limit, sends \"continue\" to the same session once the quota is back (each Task can cancel it from its Brief)." },
   autoResumeToggle: { ja: "{runner}: 使用上限で止まったら自動再開", en: "{runner}: auto-resume after stopping at the usage limit" },
 
   // 判定と提案
   judgeAndChoice: { ja: "判定と自動選択", en: "Judging and automatic choice" },
+  judgeFallbackAndTimeout: { ja: "代わりとタイムアウト", en: "Fallback and timeouts" },
   judgeAndChoiceHint: { ja: "判定のランナーが動かないときの代わりは、2 つの判定（ターン終了時の自動判定とルーブリック判定）の両方に使います。", en: "The fallback for when the judging runner does not work is used for both judges (the auto-judge at turn end and the rubric judge)." },
   judgeFallback: { ja: "判定の代わり", en: "Judging fallback" },
   judgeFallbackRunner: { ja: "判定の代わりのランナー", en: "Runner for the judging fallback" },

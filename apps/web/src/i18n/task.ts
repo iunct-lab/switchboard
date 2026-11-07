@@ -300,15 +300,11 @@ export const task = msgs({
   permNetwork: { ja: "ネットワークアクセスの許可", en: "Permission for network access" },
   permOther: { ja: "ツール実行の許可", en: "Permission to run a tool" },
 
-  // TaskView.tsx: a question from the agent (AskUserQuestion)
-  questionAria: { ja: "エージェントからの質問", en: "A question from the agent" },
-  question: { ja: "質問", en: "Question" },
+  // Approvals.tsx: a question tool's questions on a card (#3058)
   multiSelect: { ja: "（複数選択可）", en: " (choose any)" },
-  otherPlaceholder: { ja: "その他（自由記述）", en: "Other (free text)" },
   writeAnswer: { ja: "回答を書く", en: "Write an answer" },
   answerAllTitle: { ja: "すべての質問に答えると送れます", en: "Answer every question to send" },
   answer: { ja: "回答する", en: "Answer" },
-  noAnswer: { ja: "答えない", en: "Don't answer" },
 
   // DeviceAuth.tsx
   approveAt: { ja: "{host} で承認してください", en: "Approve at {host}" },

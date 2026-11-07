@@ -155,4 +155,11 @@ export const common = msgs({
   resDaemon: { ja: "デーモン", en: "Daemon" },
   resOther: { ja: "その他", en: "Other" },
   resAt: { ja: "{time} 時点", en: "As of {time}" },
+  resJobsHeading: { ja: "頼まれた仕事（ローカル CI・レビュー）", en: "Requested jobs (local CI, review)" },
+  resJobsHint: { ja: "実行中と、終わって 7 日以内。枠を待っている仕事は「待っている実行」にも出ます", en: "Running, and ended within 7 days. A job waiting for a slot also shows under waiting runs" },
+  resColStatus: { ja: "状態", en: "Status" },
+  resJobRunning: { ja: "実行中", en: "Running" },
+  resJobPass: { ja: "成功", en: "Passed" },
+  resJobFail: { ja: "失敗（終了コード {code}）", en: "Failed (exit {code})" },
+  resJobAborted: { ja: "中断", en: "Aborted" },
 });

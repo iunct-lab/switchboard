@@ -599,7 +599,7 @@ export function App() {
                   },
                 )
               }
-              onPermission={(id, decision, answers) => api.permission(currentTask.id, id, decision, answers).catch((e) => setError(e.message))}
+              onPermission={(id, decision) => api.permission(currentTask.id, id, decision).catch((e) => setError(e.message))}
               onError={setError}
               onBrief={() => setBriefOpen(true)}
               onOpenTask={openTask}

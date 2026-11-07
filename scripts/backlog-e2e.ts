@@ -150,6 +150,8 @@ try {
     if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
     return result.result.value;
   };
+  /** Opens the folded Settings card with this title (#3849), once Settings has drawn it: a card shows only its title until opened. */
+  const openSettingsCard = (title: string) => until(() => evaluate(`(() => { const d = [...document.querySelectorAll('.settings details.card')].find((d) => d.querySelector('summary').textContent.trim() === ${JSON.stringify(title)}); if (d) d.open = true; return !!d; })()`), `the ${title} card`);
   /**
    * Presses the button `find` (a JS expression) returns, once it has stayed where it is: a line that arrives later
    * (承認待ち N 件 →) moves the rows, and a click between measuring and pressing lands on whatever moved in. So
@@ -604,6 +606,7 @@ try {
   const implBox = `input[aria-label="${metaName} の実装の枠"]`;
   const planBox = `input[aria-label="${metaName} の計画の枠"]`;
   await click("Settings");
+  for (const c of ["バックログを進める", "自動で始まる Task の既定"]) await openSettingsCard(c);
   await until(() => evaluate(`!!document.querySelector('main.settings')`), "設定 screen");
   await until(() => evaluate(`document.querySelector('${implBox}')?.value === "1" && document.querySelector('${planBox}')?.value === "1" && !!document.querySelector('input[aria-label="lib の実装の枠"]')`), "a row per workspace at its value");
   await setField(implBox, "2");
@@ -612,6 +615,7 @@ try {
   await call("Page.reload");
   await until(() => evaluate(`!!document.querySelector('.rail')`), "Rail after the reload");
   await click("Settings");
+  for (const c of ["バックログを進める", "自動で始まる Task の既定"]) await openSettingsCard(c);
   const slotsAfterReload = await until(() => evaluate(`(() => { const i = document.querySelector('${implBox}'); const p = document.querySelector('${planBox}'); return i && p && i.value !== "" ? i.value + "/" + p.value : null; })()`), "slots after the reload") as string;
   assert(slotsAfterReload === "2/1", `slots: ${slotsAfterReload}`);
   // an emptied box is refused, not saved as 0 (which would switch the slot off)
@@ -625,7 +629,7 @@ try {
   // shows the selects on 実装 alone. lib's 実装する below then starts on codex
   // the two lists of kinds (フィードバック / バックログの工程); the third .auto-start-kinds is 上限のときの代わり (#834)
   const kindLines = `[...document.querySelectorAll('.auto-start-kinds')].slice(0, 2).flatMap(d => [...d.querySelectorAll('.row')]).map(r => r.textContent.trim())`;
-  const runnerSelects = `[...document.querySelector('.auto-start-kinds').closest('section').querySelectorAll('select')].map(s => s.getAttribute('aria-label')).filter(l => l.endsWith('のランナー'))`;
+  const runnerSelects = `[...document.querySelector('.auto-start-kinds').closest('.card').querySelectorAll('select')].map(s => s.getAttribute('aria-label')).filter(l => l.endsWith('のランナー'))`;
   const kindsBefore = await until(async () => { const l = await evaluate(kindLines) as string[]; return l.length === 8 ? l : null; }, "8 kind lines") as string[];
   assert(kindsBefore.every((l) => l.endsWith("共通変える")) && JSON.stringify(await evaluate(runnerSelects)) === JSON.stringify(["自動で始まる Task のランナー"]), `kinds: ${kindsBefore.join(" / ")}`);
   await clickIn(`[...document.querySelectorAll('.auto-start-kinds .row')].find(r => r.textContent.startsWith('実装'))`, "変える");
@@ -635,6 +639,7 @@ try {
   await call("Page.reload");
   await until(() => evaluate(`!!document.querySelector('.rail')`), "Rail after the reload");
   await click("Settings");
+  for (const c of ["バックログを進める", "自動で始まる Task の既定"]) await openSettingsCard(c);
   const kindsAfter = await until(async () => { const l = await evaluate(kindLines) as string[]; return l.length === 8 ? l : null; }, "8 kind lines after the reload") as string[];
   const selectsAfter = await evaluate(runnerSelects) as string[];
   const kindRunner = await evaluate(`document.querySelector('select[aria-label="実装 のランナー"]')?.value`);
@@ -654,6 +659,7 @@ try {
   await stopAll();
   // 共通に戻す (#1337): 実装 is one word again and the saved byKind is empty
   await click("Settings");
+  for (const c of ["バックログを進める", "自動で始まる Task の既定"]) await openSettingsCard(c);
   await until(() => evaluate(`!!document.querySelector('select[aria-label="実装 のランナー"]')`), "実装's selects again");
   await click("共通に戻す");
   await until(async () => { const l = await evaluate(kindLines) as string[]; return l.length === 8 && l.every((x) => x.endsWith("共通変える")); }, "every kind on 共通 again");

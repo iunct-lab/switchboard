@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent, AnswerPolicy, ApprovalRuleMatch, Artifact, AskList, PolicySubject, Backlog, BacklogItem, PendingApproval, RunnerAdapter, RunnerId, RunnerSession, StopRecord, StopSummary, Task } from "@switchboard/protocol";
+import type { AgentEvent, AnswerPolicy, ApprovalRuleMatch, Artifact, AskList, AskQuestion, PolicySubject, Backlog, BacklogItem, PendingApproval, RunnerAdapter, RunnerId, RunnerSession, StopRecord, StopSummary, Task } from "@switchboard/protocol";
 import { importing } from "../fixtures/github-import.ts";
 import { answersOf, ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, closedHits, grantOfChoice, noticeAsks, ON_HOLD_RESUME, parseAskBlock, rankAsks, resumeOfIssue, resumeOfTask } from "./asks.ts";
 import { approvalBatches } from "./approval-batch.ts";
@@ -143,11 +143,18 @@ describe("answers (#936)", () => {
   });
 
   test("answers: an approval, a decision with choices, a check without, a confirmation, a refused stop and an automatic one", () => {
-    const a = (over: Partial<Parameters<typeof answersOf>[0]>) => answersOf({ kind: "decision", needs: "person", state: "open", choices: [], blockers: [], grant: null, ...over });
+    const a = (over: Partial<Parameters<typeof answersOf>[0]>) => answersOf({ kind: "decision", needs: "person", state: "open", choices: [], questions: [], blockers: [], grant: null, ...over });
     expect(a({ kind: "approval" })).toEqual(["allow", "deny"]);
     expect(a({ kind: "decision", choices: ["A", "B"] })).toEqual(["choice", "text", "hold"]);
     expect(a({ kind: "decision", state: "held" })).toEqual(["text", "hold"]);
-    expect(a({ kind: "check" })).toEqual(["text"]);
+    // a check without choices is answered from the Task's send box (#3053); one with a question tool's questions takes their answers
+    expect(a({ kind: "check" })).toEqual([]);
+    const free = { header: null, question: "q", options: [], multiSelect: false };
+    const picked = { ...free, options: [{ label: "A", description: null }] };
+    expect(a({ kind: "check", questions: [picked, free] })).toEqual(["questions"]);
+    // only questions without options: none on the card (#3030's criterion 6)
+    expect(a({ kind: "check", questions: [free] })).toEqual([]);
+    expect(a({ kind: "check", questions: [free, free], choices: ["A"] })).toEqual([]);
     expect(a({ kind: "check", choices: ["A"] })).toEqual(["choice", "text"]);
     expect(a({ kind: "confirmation" })).toEqual(["confirm"]);
     expect(a({ kind: "stop" })).toEqual(["text"]);
@@ -201,7 +208,7 @@ describe("grants (#2745)", () => {
     expect(list).toHaveLength(1);
     expect(list[0]).toMatchObject({ kind: "check", grant: GRANT, answers: ["grant", "choice", "text"], policy: { scopes: [], note: "許可文は 1 回きりで、方針には保存しません" } });
     // a stop without a grant folds as before
-    expect(dedupeAsks(fromTasks(task(), [refused({ reason: "input" })], "**確認**: 続けるか"))[0]).toMatchObject({ kind: "check", grant: null, answers: ["text"] });
+    expect(dedupeAsks(fromTasks(task(), [refused({ reason: "input" })], "**確認**: 続けるか"))[0]).toMatchObject({ kind: "check", grant: null, answers: [] });
   });
 });
 
@@ -611,6 +618,48 @@ describe("GET /api/asks", () => {
     await post(`/api/tasks/${a}/abort`, {});
     await until(async () => (await status(a)) === "aborted");
     expect(await mine()).toMatchObject([{ id: `approval:${a}:perm1`, state: "resolved" }]);
+  });
+
+  test("question tool asks answered in one reply", async () => {
+    const questions: AskQuestion[] = [
+      { header: "場所", question: "どこを直すか", options: [{ label: "web", description: null }, { label: "core", description: "デーモン" }], multiSelect: false },
+      { header: null, question: "何を足すか", options: [{ label: "テスト", description: null }, { label: "文書", description: null }], multiSelect: true },
+    ];
+    const script: AgentEvent[] = [{ t: "question.ask", id: "q1", questions }, { t: "session.end", status: "ok", summary: "Waiting for your choices" }];
+    // what reaches the runner: the prompt of each start (after a restart the reply resumes the session)
+    const prompts: string[] = [];
+    const asking = runner("claude", script);
+    const start = asking.start.bind(asking);
+    asking.start = (opts, emit) => (prompts.push(opts.prompt), start(opts, emit));
+    const boot = async () => {
+      const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
+      core = await startServer(cfg, [asking, runner("codex", [])], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: importing(fakeGh), judge: () => new Promise(() => undefined), rubricJudge: () => new Promise(() => undefined) });
+      base = `http://127.0.0.1:${core.server.port}`;
+    };
+    await core.stop();
+    await boot();
+    const t = await post("/api/tasks", { cwd: home, title: "ask me", prompt: "ask two questions", runner: "claude" });
+    await until(async () => (await status(t.id)) === "done");
+    // the question tool's turn leaves the Task 要対応 at once, no judge
+    expect(core.db.getTask(t.id)!.outcome).toBe("needs_action");
+    const mine = async () => (await asks()).filter((x) => x.task?.id === t.id && x.state === "open");
+    const [check] = await mine();
+    expect(check).toMatchObject({ kind: "check", needs: "person", question: "どこを直すか", questions, choices: [], answers: ["questions"], route: "task" });
+    // one answer for two questions, an option not offered, two options of a single choice: 409, nothing sent
+    for (const answers of [[{ choices: ["web"] }], [{ choices: ["ui"] }, { choices: ["テスト"] }], [{ choices: ["web", "core"] }, { choices: ["テスト"] }]]) {
+      const r = await fetch(`${base}/api/asks/answer`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: check!.id, answer: { kind: "questions", answers } }) });
+      expect(r.status).toBe(409);
+    }
+    // the daemon restarts: the same question, under the same id, from the events
+    await core.stop();
+    await boot();
+    expect((await mine()).map((x) => [x.id, x.questions.length, x.answers])).toEqual([[check!.id, 2, ["questions"]]]);
+    const r = await post("/api/asks/answer", { id: check!.id, answer: { kind: "questions", answers: [{ choices: ["core"] }, { choices: ["テスト", "文書"] }] } });
+    expect(r.ask).toMatchObject({ id: check!.id, state: "answered" });
+    // one reply with every answer reaches the runner, and the Task goes on
+    await until(async () => core.db.listEvents(t.id).filter((e) => e.ev.t === "session.end").length === 2);
+    expect(prompts).toEqual(["ask two questions", "- どこを直すか: core\n- 何を足すか: テスト, 文書"]);
+    expect(core.db.listEvents(t.id).filter((e) => e.ev.t === "session.end")).toHaveLength(2);
   });
 });
 

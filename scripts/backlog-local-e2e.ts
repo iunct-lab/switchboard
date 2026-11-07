@@ -118,6 +118,8 @@ try {
     if (r.exceptionDetails) throw new Error(`${r.exceptionDetails.exception?.description ?? JSON.stringify(r.exceptionDetails)} in: ${expression.slice(0, 160)}`);
     return r.result.value;
   };
+  /** Opens the folded Settings card with this title (#3849), once Settings has drawn it: a card shows only its title until opened. */
+  const openSettingsCard = (title: string) => until(() => evaluate(`(() => { const d = [...document.querySelectorAll('.settings details.card')].find((d) => d.querySelector('summary').textContent.trim() === ${JSON.stringify(title)}); if (d) d.open = true; return !!d; })()`), `the ${title} card`);
   /** Presses what `find` returns once it has stayed still (rows move while the list reads). */
   const press = async (find: string, label: string) => {
     const at = `(() => { const b = ${find}; if (!b || b.disabled) return null; b.scrollIntoView({ block: 'center' }); const r = b.getBoundingClientRect(); const x = r.x + r.width / 2, y = r.y + r.height / 2; return b.contains(document.elementFromPoint(x, y)) ? { x, y } : null; })()`;
@@ -132,7 +134,7 @@ try {
     await call("Input.dispatchMouseEvent", { type: "mouseReleased", ...point, button: "left", clickCount: 1 });
   };
   const shot = async (name: string) => writeFileSync(join(shots, `${name}.png`), Buffer.from((await call("Page.captureScreenshot", { format: "png" })).data, "base64"));
-  const addCard = `[...document.querySelectorAll('section.card')].find(s => s.querySelector('h5')?.textContent.trim() === 'Workspace')`;
+  const addCard = `[...document.querySelectorAll('.settings .card')].find(s => s.querySelector('h5')?.textContent.trim() === 'Workspace')`;
   const pathField = `(${addCard})?.querySelector('input[placeholder="/absolute/path/to/repo"]')`;
   const localBox = `(${addCard})?.querySelector('label input[type=checkbox]')`;
   const openHome = async () => {
@@ -140,6 +142,7 @@ try {
     await until(() => evaluate(`!!document.querySelector('.rail')`), "Rail");
     await press(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Settings')`, "Settings");
     await until(() => evaluate(`!!(${addCard})`), "設定's Workspace card");
+    await openSettingsCard("Workspace");
     await press(`[...(${addCard})?.querySelectorAll('button') ?? []].find(b => b.textContent.trim() === 'ホストにあるディレクトリを追加')`, "ホストにあるディレクトリを追加");
     await until(() => evaluate(`!!(${pathField})`), "the path field");
   };

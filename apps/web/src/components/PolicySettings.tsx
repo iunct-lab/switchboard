@@ -37,8 +37,10 @@ export function PolicySettings(props: { onError: (msg: string) => void }) {
   };
   const now = Date.now();
   return (
-    <section className="card policies">
-      <h5>{t(settings.policies)}</h5>
+    <details className="card policies">
+      <summary>
+        <h5>{t(settings.policies)}</h5>
+      </summary>
       <div className="muted">{t(settings.policiesHint)}</div>
       {list && list.length === 0 && <div className="muted">{t(settings.noPolicies)}</div>}
       {list?.map((p) => {
@@ -107,6 +109,6 @@ export function PolicySettings(props: { onError: (msg: string) => void }) {
           </div>
         );
       })}
-    </section>
+    </details>
   );
 }

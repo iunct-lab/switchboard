@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { appRequestDraft, appRequestOf, artifactsLabel, copyKind, isMarkdown, pickArtifact, viewOf } from "./artifacts.ts";
+import { appRequestDraft, appRequestOf, artifactsLabel, copyKind, frameUnavailable, isMarkdown, pickArtifact, viewOf } from "./artifacts.ts";
 
 const f = (mime: string, kind: "file" | "dir" | "url" = "file") => viewOf({ kind, mime });
 
@@ -50,4 +50,11 @@ test("copyKind: content for text and pages, url for links, none for images, fold
   expect([c("text/uri-list", "url"), c("text/html", "url")]).toEqual(["url", "url"]);
   expect([c("image/png"), c("application/pdf"), c("application/octet-stream")]).toEqual([null, null, null]);
   expect([c("text/html", "dir"), c("text/plain", "dir")]).toEqual([null, null]);
+});
+
+test("frameUnavailable (#4062): an error reading the page keeps the frame from showing the server's error body", () => {
+  expect(frameUnavailable(null)).toBe(false);
+  expect(frameUnavailable(200)).toBe(false);
+  expect(frameUnavailable(404)).toBe(true);
+  expect(frameUnavailable(403)).toBe(true);
 });

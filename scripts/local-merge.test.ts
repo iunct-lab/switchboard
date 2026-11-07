@@ -81,7 +81,10 @@ test("(a, c) base not moved: main gets the branch's commits in order, no merge c
   expect(s.tip("main")).toBe(head);
   expect(s.branches()).toEqual(["main"]);
   expect((await s.view(3)).issue).toMatchObject({ state: "CLOSED", change: { head: "sb/2-x", base: "main", mergeCommit: head, mergedAt: "2026-01-02T00:00:00.000Z" } });
-  expect((await s.view(2)).issue.state).toBe("CLOSED");
+  // the Task had no Status (no field set when made): it is Done now (#3970)
+  const task = await s.view(2);
+  expect(task.issue.state).toBe("CLOSED");
+  expect(task.fields).toMatchObject({ Status: "Done" });
   expect((await s.done())).toMatchObject({ total: 1, done: 1 });
 });
 

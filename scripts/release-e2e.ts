@@ -103,6 +103,8 @@ try {
   assert(mark === `新しい版 ${short} →`, `header mark: ${mark}`);
   await press(`document.querySelector('.new-version')`, "新しい版 →");
   await until(() => evaluate(`!!document.querySelector('#release')`), "the 動いている版 section");
+  // the cards are folded (#3849): the link opens the one it points at
+  assert(await until(() => evaluate(`document.querySelector('#release').open`), "the 動いている版 section open"), "the section is folded");
   const ahead = await until(async () => { const t = await panelText(); return t.includes("1 コミット先") ? t : null; }, "1 コミット先");
   assert(ahead.includes("動いている版") && ahead.includes(`HEAD: ${short} feat: the newer version — 1 コミット先`), `section: ${ahead}`);
   assert(await until(() => evaluate(`document.getElementById('release').getBoundingClientRect().top < innerHeight`), "the section is scrolled into view"), "the section is below the viewport");
@@ -143,6 +145,7 @@ try {
   if (process.env.SCREENSHOT) writeFileSync(process.env.SCREENSHOT.replace(/\.png$/, "") + "-asks.png", Buffer.from((await call("Page.captureScreenshot", { format: "png" })).data, "base64"));
   await press(`document.querySelector('.new-version')`, "新しい版 → (from 判断待ち)");
   await until(async () => (await panelText()).includes("動いている Task 1 件"), "the 動いている版 section again");
+  assert(await evaluate(`document.querySelector('#release').open`), "the section is folded (from 判断待ち)");
 
   await press(byText("この版を昇格", "#release button"), "この版を昇格 (busy)");
   await until(() => evaluate(`!!(${byText("待たずに昇格する")})`), "the confirmation");

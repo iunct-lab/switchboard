@@ -3,13 +3,14 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { copyFileSync, cpSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent, Backlog, BacklogAction, BacklogIssueDetail, BacklogSource, BacklogItem, RunnerAdapter, StartOptions, Task, TaskStatus } from "@switchboard/protocol";
+import type { AgentEvent, Backlog, BacklogAction, BacklogIssueDetail, BacklogQueue, BacklogSource, BacklogItem, RunnerAdapter, StartOptions, Task, TaskStatus } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import { loadProcess, parseProcessDef } from "./process-defs.ts";
 import type { Suggester } from "./routing.ts";
 import { startServer, type CoreServer } from "./server.ts";
 import { taskAllowRules } from "./tasks.ts";
 import { Db } from "./db.ts";
+import { saveQueue } from "./backlog-queue.ts";
 import { importing } from "../fixtures/github-import.ts";
 import { readRecords, runBacklog } from "../../../ops-kit/src/backlog-client.ts";
 import { main as opsKit } from "../../../ops-kit/src/cli.ts";
@@ -1926,6 +1927,24 @@ test("pickNext: Priority (none last), then Ready before 分解待ち before 要�
   expect(pickNext(items.slice(5), "plan")).toBeNull();
 });
 
+test("pickNext queue (#3956): the queue's order over Priority, only the queued items, a held head gives the next, no order is as before", () => {
+  const items = [
+    item({ number: 1, stage: "ready", priority: "P0" }),
+    item({ number: 2, stage: "ready", priority: "P3" }),
+    item({ number: 3, stage: "ready", priority: "P1", waits: [wait(778, "pr", true)] }),
+    item({ number: 4, stage: "needs-tasks", priority: "P0" }),
+  ];
+  expect(pickNext(items, "implement", [2, 1])).toEqual({ item: items[1]!, action: "complete" });
+  // a Ready PBI not in the queue is never picked from it
+  expect(pickNext(items, "implement", [4])).toBeNull();
+  expect(pickNext(items, "implement", [])).toBeNull();
+  // the head waits for a PR still open: the second goes
+  expect(pickNext(items, "implement", [3, 2, 1])).toMatchObject({ item: { number: 2 } });
+  // the plan slot does not follow the queue
+  expect(pickNext(items, "plan", [2])).toMatchObject({ item: { number: 4 }, action: "to-tasks" });
+  expect(pickNext(items, "implement")).toMatchObject({ item: { number: 1 } });
+});
+
 test("pickNext: never 直行で直す, and leaves a request whose last Task was one (#3690)", () => {
   const at = "2026-09-28T00:00:00Z";
   const direct = (status: TaskStatus) => ({ id: "tsk_direct", status, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "direct" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null });
@@ -2788,6 +2807,154 @@ const startedTasks = () => core!.db.listTasks().filter((t) => !t.id.startsWith("
 const runSchedule = (base: string, id: string) => fetch(`${base}/api/schedules/${id}/run`, { method: "POST" });
 const scheduleLogAll = async (base: string) => await (await fetch(`${base}/api/schedules/log`)).json() as string[];
 const scheduleLog = async (base: string) => (await scheduleLogAll(base)).at(-1) ?? "";
+
+test("backlog-next queue (#3956): with the queue enabled a firing starts no Ready PBI, logs 実装の枠: キューに任せる, and still moves the 計画 slot", async () => {
+  const claude = holdingClaude();
+  const base = await boot(fakeGh().gh, claude.adapter);
+  closeTried();
+  saveQueue(core!.db, { enabled: true, items: [{ workspaceId: metaId(), number: 304 }] });
+  const id = await backlogNextSchedule(base);
+  expect((await runSchedule(base, id)).status).toBe(201);
+  expect(startedTasks().map((t) => t.title.split(":")[0])).toEqual(["#303 Task に分解"]);
+  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: キューに任せる`));
+  // disabled: the firing picks as before
+  saveQueue(core!.db, { enabled: false });
+  expect((await runSchedule(base, id)).status).toBe(201);
+  expect(startedTasks().map((t) => t.title.split(":")[0])).toContain("#304 実装");
+});
+
+test("backlog-next queue (#3956): the queue enabled while a firing reads GitHub takes the 実装 slot from that firing", async () => {
+  const claude = holdingClaude();
+  const fake = fakeGh();
+  let enableOnRead = false;
+  const gh: GhRunner = async (args, cwd) => {
+    if (enableOnRead) {
+      enableOnRead = false;
+      saveQueue(core!.db, { enabled: true });
+    }
+    return fake.gh(args, cwd);
+  };
+  const base = await boot(gh, claude.adapter);
+  closeTried();
+  const id = await backlogNextSchedule(base);
+  enableOnRead = true;
+  expect((await runSchedule(base, id)).status).toBe(201);
+  expect(startedTasks().map((t) => t.title.split(":")[0])).not.toContain("#304 実装");
+  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: キューに任せる`));
+});
+
+/** The backlog queue's API (#3955) on a test daemon, and a wait for what it starts (#3966). */
+const putQueue = (base: string, body: object) => fetch(`${base}/api/backlog/queue`, { method: "PUT", body: JSON.stringify(body) });
+const getQueue = async (base: string) => (await (await fetch(`${base}/api/backlog/queue`)).json()) as BacklogQueue;
+const queueOf = (...numbers: number[]) => numbers.map((number) => ({ workspaceId: metaId(), number }));
+const startedTitles = () => startedTasks().map((t) => t.title.split(":")[0]);
+async function until(f: () => boolean | Promise<boolean>, ms = 5000) {
+  for (const t0 = Date.now(); Date.now() - t0 < ms; ) {
+    if (await f()) return;
+    await Bun.sleep(20);
+  }
+}
+
+test("startFromQueue (#3966): enabling starts the head with no schedule; its Task's end starts the next; nothing starts while disabled", async () => {
+  const claude = holdingClaude();
+  const base = await boot(fakeGh().gh, claude.adapter);
+  expect(core!.db.listSchedules().filter((s) => s.action === "backlog-next")).toEqual([]);
+  // #307 can be closed, #304 is Ready: the queue's order, not Priority, says which goes first
+  expect((await putQueue(base, { items: queueOf(307, 304) })).status).toBe(200);
+  await Bun.sleep(100);
+  expect(startedTitles()).toEqual([]);
+  await putQueue(base, { enabled: true });
+  await until(() => startedTitles().length > 0);
+  expect(startedTitles()).toEqual(["#307 閉じる"]);
+  await until(async () => (await getQueue(base)).lastNote?.includes("#307 を close で開始") ?? false);
+  // its Task ends (aborted: #307 is then left until the Issue moves): the second starts
+  const first = startedTasks()[0]!;
+  await fetch(`${base}/api/tasks/${first.id}/abort`, { method: "POST" });
+  await until(() => startedTitles().length > 1);
+  expect(startedTitles().sort()).toEqual(["#304 実装", "#307 閉じる"]);
+  // disabled: a Task's end starts nothing
+  await putQueue(base, { enabled: false, items: queueOf(304, 305) });
+  await fetch(`${base}/api/tasks/${startedTasks().find((t) => t.title.startsWith("#304"))!.id}/abort`, { method: "POST" });
+  await Bun.sleep(300);
+  expect(startedTitles().sort()).toEqual(["#304 実装", "#307 閉じる"]);
+});
+
+test("startFromQueue (#3966): concurrency 2 starts two, and no third", async () => {
+  const claude = holdingClaude();
+  const base = await boot(fakeGh().gh, claude.adapter);
+  await putQueue(base, { items: queueOf(307, 304, 305), concurrency: 2, enabled: true });
+  await until(() => startedTitles().length >= 2);
+  await Bun.sleep(300);
+  expect(startedTitles().sort()).toEqual(["#304 実装", "#307 閉じる"]);
+  await putQueue(base, { concurrency: 2 });
+  await until(async () => (await getQueue(base)).lastNote === "同時に動かす数 2 に達している");
+  expect((await getQueue(base)).lastNote).toBe("同時に動かす数 2 に達している");
+});
+
+test("startFromQueue (#3966): a head waiting for a PR still open is left and named as backlog-next names it; the second starts", async () => {
+  const claude = holdingClaude();
+  const fake = waitsGh({ i304: [[releaseBody("後回し", [778]), STOPPED]] }, { w778: { __typename: "PullRequest", state: "OPEN" } });
+  const base = await boot(fake.gh, claude.adapter);
+  await putQueue(base, { items: queueOf(304, 307), enabled: true });
+  await until(() => startedTitles().length > 0);
+  expect(startedTitles()).toEqual(["#307 閉じる"]);
+  await until(async () => (await getQueue(base)).lastNote?.includes("#307 を close で開始") ?? false);
+  const note = (await getQueue(base)).lastNote!;
+  expect(note).toContain(`${metaName()}: 前提: #304（PR #778 マージ待ち）`);
+  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`キュー: ${metaName()}: 前提: #304（PR #778 マージ待ち） (enabled)`));
+});
+
+test("startFromQueue (#3966): an empty queue says so and starts nothing", async () => {
+  const claude = holdingClaude();
+  const base = await boot(fakeGh().gh, claude.adapter);
+  await putQueue(base, { enabled: true });
+  await until(async () => (await getQueue(base)).lastNote !== null);
+  expect((await getQueue(base)).lastNote).toBe("キューが空");
+  expect(startedTasks()).toEqual([]);
+  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("キュー: キューが空 (enabled)"));
+});
+
+test("startFromQueue (#3966): a queued PBI not yet split is named; a 計画 Task's end runs the queue again", async () => {
+  const claude = holdingClaude();
+  const base = await boot(fakeGh().gh, claude.adapter);
+  await putQueue(base, { items: queueOf(303), enabled: true });
+  await until(async () => (await getQueue(base)).lastNote !== null);
+  expect((await getQueue(base)).lastNote).toContain(`${metaName()}: まだ Ready でない: #303（Task 分解前）`);
+  expect(startedTasks()).toEqual([]);
+  // its Task に分解 (the button) ends: the queue looks again
+  const r = await start(base, 303, { action: "to-tasks" });
+  expect(r.status).toBe(201);
+  await fetch(`${base}/api/tasks/${((await r.json()) as Task).id}/abort`, { method: "POST" });
+  await until(async () => (await scheduleLogAll(base)).some((l) => l.includes("(task-end)")));
+  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`キュー: ${metaName()}: まだ Ready でない: #303（Task 分解前） (task-end)`));
+});
+
+test("startFromQueue (#3966): the queue's start and a backlog-next firing at once start one Task per PBI", async () => {
+  const claude = holdingClaude();
+  const base = await boot(fakeGh().gh, claude.adapter);
+  closeTried();
+  await putQueue(base, { items: queueOf(304) });
+  const id = await backlogNextSchedule(base);
+  await Promise.all([runSchedule(base, id), putQueue(base, { enabled: true })]);
+  await until(() => startedTitles().includes("#304 実装"));
+  await Bun.sleep(300);
+  expect(startedTitles().filter((t) => t === "#304 実装")).toHaveLength(1);
+});
+
+test("startFromQueue (#3966): at boot an enabled queue goes on", async () => {
+  const claude = holdingClaude();
+  const base = await boot(fakeGh().gh, claude.adapter);
+  // stored as a PUT stores it, without the PUT's start: only the boot starts it
+  saveQueue(core!.db, { items: queueOf(304), enabled: true });
+  await Bun.sleep(100);
+  expect(startedTitles()).toEqual([]);
+  void base;
+  await core!.stop();
+  const cfg = loadConfig({ SWITCHBOARD_HOME: home!, SWITCHBOARD_KNOWLEDGE: join(home!, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home!, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
+  core = await startServer(cfg, [claude.adapter], { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: FAKE_ORIGIN, gh: importing(fakeGh().gh, () => openPulls), backlogAutoImport: true });
+  await until(() => startedTitles().length > 0);
+  expect(startedTitles()).toEqual(["#304 実装"]);
+});
 
 test("backlog-next: a firing starts the picked item's stage Task, and the scheduled complete uses the button prompt", async () => {
   const claude = holdingClaude();

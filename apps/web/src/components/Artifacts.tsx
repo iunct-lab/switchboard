@@ -1,7 +1,7 @@
 import { type MouseEvent, useEffect, useRef, useState } from "react";
 import type { Artifact } from "@switchboard/protocol";
 import { type AppUse, api, apiRaw } from "../api.ts";
-import { appRequestDraft, appRequestOf, copyKind, isMarkdown, pickArtifact, viewOf } from "../artifacts.ts";
+import { appRequestDraft, appRequestOf, copyKind, frameUnavailable, isMarkdown, pickArtifact, viewOf } from "../artifacts.ts";
 import { requestFeedback } from "./Feedback.tsx";
 import { viewPath } from "../route.ts";
 import { t } from "../i18n.ts";
@@ -170,6 +170,7 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
   const [url, setUrl] = useState<string | null>(null);
   const [text, setText] = useState<string | null>(null);
   const [readOk, setReadOk] = useState(false);
+  const [readStatus, setReadStatus] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   // 全画面 (#1826): the report over the whole screen, and three ways back to the Task screen — the 戻る button, Esc, and
@@ -264,7 +265,8 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
   // A view key lasts an hour (#1782): the tab stays mounted, so ask again when it is shown after a long time away.
   const keyAt = useRef(0);
   useEffect(() => {
-    if (a.kind === "url" || !props.shown || (url !== null && (!read || text !== null) && Date.now() - keyAt.current < KEY_REUSE_MS)) return;
+    // a frame's page is checked again when its check did not finish (hidden while it read, #4062)
+    if (a.kind === "url" || !props.shown || (url !== null && (!read || text !== null) && (how !== "frame" || readStatus !== null) && Date.now() - keyAt.current < KEY_REUSE_MS)) return;
     let live = true;
     api
       .viewArtifact(a.id)
@@ -272,12 +274,16 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
         if (!live) return;
         keyAt.current = Date.now();
         setUrl(u);
-        if (read) {
+        // a page in a frame is read too (a folder's entry as well, #4062): its status tells whether the frame can show it
+        if (read || how === "frame") {
           const r = await fetch(u);
           const body = await r.text();
           if (!live) return;
-          setText(r.ok ? body : t(m.cannotRead, { status: r.status }));
-          setReadOk(r.ok); // コピー copies the file, never the error shown in its place
+          setReadStatus(r.status);
+          if (read) {
+            setText(r.ok ? body : t(m.cannotRead, { status: r.status }));
+            setReadOk(r.ok); // コピー copies the file, never the error shown in its place
+          }
         }
       })
       .catch((e) => live && setErr(String((e as Error).message ?? e)));
@@ -348,7 +354,7 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
         {md && <MdViewToggle />}
         {/* the file's own text even while a .md shows its preview */}
         {(copy === "url" || (copy === "content" && readOk)) && <CopyButton text={() => (copy === "url" ? a.source : (text ?? ""))} onError={setErr} />}
-        {a.kind !== "url" && how !== "external" && url && (
+        {a.kind !== "url" && how !== "external" && url && !frameUnavailable(readStatus) && (
           <button className="art-full-open" onClick={openFull}>
             {t(m.fullScreen)}
           </button>
@@ -382,7 +388,8 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
           <p className="muted">{t(m.externalNote)}</p>
         </div>
       )}
-      {a.kind !== "url" && how === "frame" && url && !full && <iframe ref={inlineFrame} className="art-frame" title={a.title} sandbox="allow-scripts" src={url} />}
+      {a.kind !== "url" && how === "frame" && url && !full && !frameUnavailable(readStatus) && <iframe ref={inlineFrame} className="art-frame" title={a.title} sandbox="allow-scripts" src={url} />}
+      {a.kind !== "url" && how === "frame" && frameUnavailable(readStatus) && <div className="muted">{t(m.cannotRead, { status: readStatus! })}</div>}
       {a.kind !== "url" && how === "image" && url && <img className="art-image" alt={a.title} src={url} />}
       {a.kind !== "url" && how === "text" && textBody}
       {full && url && (
@@ -399,7 +406,8 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
               {t(m.newTab)}
             </button>
           </div>
-          {how === "frame" && <iframe ref={fullFrame} className="art-frame" title={a.title} sandbox="allow-scripts" src={url} />}
+          {how === "frame" && frameUnavailable(readStatus) && <div className="muted">{t(m.cannotRead, { status: readStatus! })}</div>}
+          {how === "frame" && !frameUnavailable(readStatus) && <iframe ref={fullFrame} className="art-frame" title={a.title} sandbox="allow-scripts" src={url} />}
           {how === "image" && (
             <div>
               <img className="art-image" alt={a.title} src={url} />

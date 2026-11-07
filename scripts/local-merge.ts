@@ -5,7 +5,7 @@
  * The merge is GitHub's Rebase and merge: the branch's commits rebased one by one onto the base's tip (no merge commit,
  * author dates kept) in a throwaway worktree under ~/.cache, then the base fast-forwarded to them, the branch deleted (only at the judged head),
  * the change closed with its merge commit and the Tasks it closes (`Closes #n`, `Backlog-Task: n`, the branch `sb/<n>-`)
- * closed. A conflict, a stop, a dirty worktree of the base or a base that moved changes nothing (exit 1). Once the base
+ * closed with their Status Done. A conflict, a stop, a dirty worktree of the base or a base that moved changes nothing (exit 1). Once the base
  * moved, a failure of the app is said with what is left (exit 1); the base is not moved back. No fetch, no push, no gh.
  */
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
@@ -38,13 +38,30 @@ export function closedBy(n: number, body: string, head: string): number[] {
 }
 
 /** The worktree that has `branch` checked out, or undefined (`git worktree list --porcelain`). */
-async function worktreeOf(root: string, branch: string): Promise<string | undefined> {
+export async function worktreeOf(root: string, branch: string): Promise<string | undefined> {
   let path: string | undefined;
   for (const line of (await sh(["git", "-C", root, "worktree", "list", "--porcelain"])).split("\n")) {
     if (line.startsWith("worktree ")) path = line.slice("worktree ".length);
     else if (line === `branch refs/heads/${branch}`) return path;
   }
   return undefined;
+}
+
+/**
+ * Moves `branch` of the repository at `root` from `expected` to `to` (#2705: forge-resync moves main the same way). The
+ * worktree that has it checked out, if any, is fast-forwarded only when it is clean and still at `expected`; with none, the
+ * ref is updated only from `expected`. A branch that moved since is not overwritten: it throws, and nothing changed.
+ */
+export async function advanceBranch(root: string, branch: string, to: string, expected: string): Promise<void> {
+  const tree = await worktreeOf(root, branch);
+  if (!tree) {
+    await sh(["git", "-C", root, "update-ref", `refs/heads/${branch}`, to, expected]);
+    return;
+  }
+  if ((await sh(["git", "-C", tree, "status", "--porcelain", "--untracked-files=no"])).trim()) throw new Error(`${branch} を checkout している作業ツリー（${tree}）に未コミットの変更がある`);
+  const now = (await sh(["git", "-C", tree, "rev-parse", "HEAD"])).trim();
+  if (now !== expected) throw new Error(`${branch} が判定の後に動いた（${expected.slice(0, 7)} → ${now.slice(0, 7)}）`);
+  await sh(["git", "-C", tree, "merge", "-q", "--ff-only", to]);
 }
 
 /** The command: 0 = merged and every state written / 1 = stopped (nothing changed), or the app's update failed after the merge / 2 = not judged. */
@@ -107,11 +124,7 @@ export async function main(args: string[], cwd: string, o: MergeOpts): Promise<n
 
   // the base to the new tip: only from the base that was judged (one that moved since is not overwritten)
   try {
-    if (baseTree) {
-      const now = (await sh(["git", "-C", baseTree, "rev-parse", "HEAD"])).trim();
-      if (now !== base) throw new Error(`${baseName} が判定の後に動いた（${base.slice(0, 7)} → ${now.slice(0, 7)}）`);
-      await sh(["git", "-C", baseTree, "merge", "-q", "--ff-only", tip]);
-    } else await git("update-ref", `refs/heads/${baseName}`, tip, base);
+    await advanceBranch(root, baseName, tip, base);
   } catch (e) {
     err(`${baseName} を進められない: ${(e as Error).message.split("\n")[0]}。何も変えていない（判定し直す）`);
     return 1;
@@ -139,7 +152,8 @@ export async function main(args: string[], cwd: string, o: MergeOpts): Promise<n
   }
   for (const t of closedBy(n, detail.issue.body, headName)) {
     try {
-      await api("PATCH", `/${t}`, { workspaceId: workspace, state: "CLOSED" });
+      // its Status with it (#3970): a closed Task left In review on the board reads as not done
+      await api("PATCH", `/${t}`, { workspaceId: workspace, state: "CLOSED", fields: { Status: "Done" } });
       log(`#${t} を閉じた`);
     } catch (e) {
       left.push(`#${t} を閉じる（${(e as Error).message}）`);

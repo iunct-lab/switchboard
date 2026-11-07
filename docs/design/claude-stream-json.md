@@ -51,13 +51,15 @@ Without step 1 (or without `--permission-prompt-tool stdio`) any tool that needs
 
 - Allow: `{"type":"control_response","response":{"subtype":"success","request_id":R,"response":{"behavior":"allow","updatedInput":<input>}}}`
 - Deny: `... "response":{"behavior":"deny","message":"..."}`
-- Answer an `AskUserQuestion` (verified 2026-09-19 on 2.1.277, `fixtures/ask-user-question.jsonl`, outside Git; record your own outside Git with the `runner-adapter-recording` skill; `bun scripts/fixtures.ts fetch` works only in a clone with the private history): it arrives as a
+- Decline an `AskUserQuestion` (verified 2026-11-05 on 2.1.318, `fixtures/question-tool.jsonl`, outside Git; record your own outside Git with the `runner-adapter-recording` skill): it arrives as a
   `can_use_tool` like any other tool (`requires_user_interaction: true`, in every permission mode) with
-  `input.questions[] = {question, header, options[{label, description}], multiSelect}`. The answer rides on the allow:
-  `"updatedInput": {...input, "answers": {"<question text>": "<label>"}}` — several labels of a multiSelect joined with
-  `", "`, free text as is. Claude turns it into the tool result `The user answered: "<question>"="<answer>", …`. A bare
-  allow gives the tool nothing to report, so the UI shows a question card (選択肢 + 自由記述, 回答する / 答えない)
-  instead of 許可 / 拒否, and `POST /api/tasks/:id/permission` takes an optional `answers`.
+  `input.questions[] = {question, header, options[{label, description}], multiSelect}`. The adapter does not ask for an
+  approval: it emits `question.ask` (the questions; `header` / `description` absent → null, `multiSelect` absent → false)
+  and at once answers a deny whose message is `QUESTION_DEFERRED_REPLY` ("recorded and shown to the user … end your turn
+  now with one short line …"). Claude ends the turn with one line and `result` success; the daemon marks the Task as needing
+  action, and the person's answers come back as the next user message. No `interrupt` follows the deny:
+  with one the turn ends `error_during_execution` (2026-10-29). The older way — the answers riding on an allow as
+  `updatedInput.answers`, with the process kept waiting — is not used.
 - Interrupt: `{"type":"control_request","request_id":"int-1","request":{"subtype":"interrupt"}}`
 - Switch mode (verified 2026-09-06 on 2.1.263, no model call involved): `{"type":"control_request","request_id":"mode-1","request":{"subtype":"set_permission_mode","mode":"acceptEdits"}}`
   → `{"type":"control_response","response":{"subtype":"success","request_id":"mode-1","response":{"mode":"acceptEdits"}}}` followed by
