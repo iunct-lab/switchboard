@@ -1,6 +1,6 @@
 // test-reads: scripts/merge-gate.ts
 import { expect, test } from "bun:test";
-import { changeMarks, changeStateLabel, LOCAL_CI_RESULT, RECHECK_PASS, REVIEW } from "./changes.ts";
+import { changeMarks, changeStateLabel, mergedPair, LOCAL_CI_RESULT, RECHECK_PASS, REVIEW } from "./changes.ts";
 import { LOCAL_CI_RESULT as SCRIPT_LOCAL_CI } from "../../../scripts/local-ci.ts";
 import { RECHECK_PASS as SCRIPT_RECHECK } from "../../../scripts/merge-gate.ts";
 
@@ -38,4 +38,10 @@ test("changeStateLabel: open, merged, closed without a merge", () => {
   expect(changeStateLabel({ state: "OPEN", mergeCommit: null })).toBe("開いている");
   expect(changeStateLabel({ state: "CLOSED", mergeCommit: H })).toBe("マージ済み");
   expect(changeStateLabel({ state: "CLOSED", mergeCommit: null })).toBe("閉じた");
+});
+
+test("mergedPair: reviewed → merged in 7 digits, なし for one merged before it was kept, null when not merged (#3971)", () => {
+  expect(mergedPair({ mergeCommit: B, reviewedHead: H })).toBe("aaaaaaa → bbbbbbb");
+  expect(mergedPair({ mergeCommit: B, reviewedHead: null })).toBe("なし → bbbbbbb");
+  expect(mergedPair({ mergeCommit: null, reviewedHead: null })).toBeNull();
 });

@@ -63,8 +63,26 @@ describe("lint", () => {
     expect(await lines("sp-mismatch")).toEqual([
       "#10: Story Points が本文（3）と Project（5）で違う",
       '#12: Project の Story Points が未設定（set 12 "Story Points" 3）',
-      "#13: Project の Story Points が 1 / 2 / 3 / 5 / 8 以外（4）",
+      "#13: Project の Story Points が 1 / 2 / 3 / 5 / 8 / 13 以外（4）",
       "violations: 3  warnings: 0  (api errors: 0)",
+    ]);
+  });
+
+  test("lint: story points up to 13 — 13 passes in the body and the Project even under a config that still lists 1 to 8, 21 is only 'not one of the set'", async () => {
+    const run = async (body: number, project: number) => {
+      const raw = JSON.parse(readFileSync(join(fixtures, "lint", "sp-13.json"), "utf8"));
+      const [a] = raw.repository.issues.nodes;
+      a.body = a.body.replace("**Story Points**: 13", `**Story Points**: ${body}`);
+      a.projectItems.nodes[0].fieldValues.nodes.find((f: { field: { name: string } }) => f.field.name === "Story Points").number = project;
+      raw.repository.issues.nodes = [a];
+      const { violations } = await lint(fakeGh([() => raw]), cfg, { sleep: noSleep });
+      return formatLint(violations);
+    };
+    expect(await run(13, 13)).toEqual(["violations: 0  warnings: 0  (api errors: 0)"]);
+    expect(await run(21, 21)).toEqual([
+      "#10: Story Points は 1 / 2 / 3 / 5 / 8 / 13 のどれか（本文: 21）",
+      "#10: Project の Story Points が 1 / 2 / 3 / 5 / 8 / 13 以外（21）",
+      "violations: 2  warnings: 0  (api errors: 0)",
     ]);
   });
 
@@ -76,14 +94,13 @@ describe("lint", () => {
     ]);
   });
 
-  test("lint: sp-13 — too big, not in the set, missing in the body", async () => {
+  test("lint: sp-13 — a body / Project mismatch, not in the set, missing in the body", async () => {
     expect(await lines("sp-13")).toEqual([
-      "#10: Story Points 13 は「大きすぎる」の印。分割してから Backlog に入れる",
       "#10: Story Points が本文（13）と Project（8）で違う",
-      "#12: Story Points は 1 / 2 / 3 / 5 / 8 のどれか（本文: 4）",
-      "#12: Project の Story Points が 1 / 2 / 3 / 5 / 8 以外（4）",
+      "#12: Story Points は 1 / 2 / 3 / 5 / 8 / 13 のどれか（本文: 4）",
+      "#12: Project の Story Points が 1 / 2 / 3 / 5 / 8 / 13 以外（4）",
       "#13: PBI 本文に `**Story Points**: N` が無い",
-      "violations: 5  warnings: 0  (api errors: 0)",
+      "violations: 4  warnings: 0  (api errors: 0)",
     ]);
   });
 

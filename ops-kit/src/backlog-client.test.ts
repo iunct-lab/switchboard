@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appSync, BacklogUnknown, readRecords, runBacklog, syncedRepositories } from "./backlog-client.ts";
+import { appSync, BACKLOG_USAGE, BacklogUnknown, readRecords, runBacklog, syncedRepositories, triageUsage } from "./backlog-client.ts";
 
 // `ops-kit backlog` (#918) against a fake app: what it sends, and the exit it gives for each answer. The real app's
 // routes are checked in packages/core/src/backlog.test.ts ("ops-kit backlog …").
@@ -42,10 +42,10 @@ function app(answer: (method: string, path: string, body: unknown) => { status?:
   return { fetch, calls };
 }
 
-async function run(argv: string[], fake = app(), env: Record<string, string | undefined> = {}) {
+async function run(argv: string[], fake = app(), env: Record<string, string | undefined> = {}, phase = true) {
   const out: string[] = [];
   const err: string[] = [];
-  const code = await runBacklog(argv, { BACKLOG_URL: "http://app/api/backlog", GH_REPO: "acme/app", ...env }, { out: (s) => out.push(s), err: (s) => err.push(s), stdin: async () => "from stdin" }, { fetch: fake.fetch, phase: true });
+  const code = await runBacklog(argv, { BACKLOG_URL: "http://app/api/backlog", GH_REPO: "acme/app", ...env }, { out: (s) => out.push(s), err: (s) => err.push(s), stdin: async () => "from stdin" }, { fetch: fake.fetch, phase });
   return { code, out: out.join("\n"), err: err.join("\n"), calls: fake.calls };
 }
 
@@ -172,6 +172,31 @@ test("readRecords --fresh: a 424 sync answers the stored records with unsynced; 
   expect(synced.unsynced).toBeNull();
   await expect(readRecords(env, { fresh: true, fetch: app(() => "down").fetch })).rejects.toThrow("届きません");
   await expect(readRecords(env, { fresh: true, fetch: app((m, p) => (p === "/sync" ? { status: 503 } : { body: LIST })).fetch })).rejects.toThrow("503");
+});
+
+test("--help / -h print the usage only and exit 0; triage's usage is the same text in the list and in the error", async () => {
+  for (const flag of ["--help", "-h"]) {
+    const r = await run([flag]);
+    expect(r).toMatchObject({ code: 0, out: BACKLOG_USAGE, err: "" });
+    expect(r.out).not.toContain("backlog のコマンドではありません");
+    expect(r.calls).toHaveLength(0);
+  }
+  expect(BACKLOG_USAGE).toContain(`backlog ${triageUsage(true)}`);
+  expect((await run(["triage", "3"])).err).toContain(`backlog ${triageUsage(true)}`);
+  expect((await run(["triage", "3"], app(), {}, false)).err).toContain(`backlog ${triageUsage(false)}`);
+});
+
+test("triage without a Phase: an empty Phase position is skipped and parent / status are read; with a Phase it is a usage error (exit 1)", async () => {
+  const ok = app((m, p) => (m === "GET" ? { body: LIST } : { status: 202, body: { localId: "L1", operations: ["o"] } }));
+  expect((await run(["triage", "3", "core", "feature", "P2", "", "891", "Ready"], ok, {}, false)).code).toBe(0);
+  expect((await run(["triage", "3", "core", "feature", "P2", "", "Ready"], ok, {}, false)).code).toBe(0);
+  expect(ok.calls.filter((c) => c.method !== "GET").map((c) => c.body)).toEqual([
+    { workspaceId: "ws1", project: true, fields: { Area: "core", Kind: "feature", Priority: "P2", Status: "Ready" }, parent: 891 },
+    { workspaceId: "ws1", project: true, fields: { Area: "core", Kind: "feature", Priority: "P2", Status: "Ready" } },
+  ]);
+  const phased = await run(["triage", "3", "core", "feature", "P2", "", "891", "Ready"], ok);
+  expect(phased.code).toBe(1);
+  expect(phased.err).toContain(triageUsage(true));
 });
 
 test("edits go to the app's routes as its screen sends them; a refusal is exit 1", async () => {
@@ -399,11 +424,12 @@ test("create --head --base makes a local change; one without the other is refuse
 });
 
 test("view of a local change: its branches and tips on the second line, the merge commit once merged (#2485)", async () => {
-  const detail = (mergeCommit: string | null, refs: object | null) => ({ issue: { number: 7, title: "変更", state: mergeCommit ? "CLOSED" : "OPEN", stateReason: null, labels: [], milestone: null, parent: null, subIssues: [], body: "", url: "", change: { head: "sb/5-x", base: "main", mergeCommit, mergedAt: mergeCommit ? "2026-11-04T00:00:00Z" : null } }, changeRefs: refs, comments: [], fields: null, fetchedAt: 1, localId: null, pending: 0, held: [], sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } });
+  const detail = (mergeCommit: string | null, refs: object | null, reviewedHead: string | null = null) => ({ issue: { number: 7, title: "変更", state: mergeCommit ? "CLOSED" : "OPEN", stateReason: null, labels: [], milestone: null, parent: null, subIssues: [], body: "", url: "", change: { head: "sb/5-x", base: "main", mergeCommit, mergedAt: mergeCommit ? "2026-11-04T00:00:00Z" : null, reviewedHead } }, changeRefs: refs, comments: [], fields: null, fetchedAt: 1, localId: null, pending: 0, held: [], sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } });
   const second = async (d: object) => (await run(["view", "7"], app(routes((m, p) => (p.startsWith("/7?") ? { body: d } : { status: 404, body: {} }))))).out.split("\n")[1];
   expect(await second(detail(null, { head: "a".repeat(40), base: "b".repeat(40) }))).toBe("変更: sb/5-x → main  head aaaaaaa base bbbbbbb");
   expect(await second(detail(null, { head: null, base: "b".repeat(40) }))).toBe("変更: sb/5-x → main  head なし base bbbbbbb");
-  expect(await second(detail("c".repeat(40), { head: null, base: "b".repeat(40) }))).toBe("変更: sb/5-x → main  MERGED ccccccc");
+  expect(await second(detail("c".repeat(40), { head: null, base: "b".repeat(40) }))).toBe("変更: sb/5-x → main  MERGED ccccccc (reviewed なし)");
+  expect(await second(detail("c".repeat(40), { head: null, base: "b".repeat(40) }, "d".repeat(40)))).toBe("変更: sb/5-x → main  MERGED ccccccc (reviewed ddddddd)");
 });
 
 test("outside the app: a choice in another case is written as the choice; one not there is refused before anything is written (#3795)", async () => {

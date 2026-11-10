@@ -1,6 +1,6 @@
 // test-reads: none
-import { afterEach, beforeEach, expect, setDefaultTimeout, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, setDefaultTimeout, test } from "bun:test";
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sync, type Run } from "./public-sync.ts";
@@ -49,15 +49,24 @@ const run: Run = (cmd, options) => {
   const p = Bun.spawnSync(mapped, { cwd: priv, stdin: options?.input === undefined ? "ignore" : new TextEncoder().encode(options.input), env: { ...process.env, ...options?.env }, stderr: "pipe" });
   return { code: p.exitCode ?? 1, out: p.stdout.toString().trimEnd(), err: p.stderr.toString().split("\n")[0] };
 };
-beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "public-version.test."));
-  priv = join(dir, "private"); pub = join(dir, "public.git"); origin = join(dir, "origin.git");
+// The repositories are made once, with their first release, and copied for each test: git init, config and the first push are most of a test's time.
+let template: string;
+const place = (root: string) => { dir = root; priv = join(dir, "private"); pub = join(dir, "public.git"); origin = join(dir, "origin.git"); };
+beforeAll(() => {
+  place(mkdtempSync(join(tmpdir(), "public-version.template.")));
+  template = dir;
   mkdirSync(priv); git(priv, "init", "-q", "-b", "main");
   git(priv, "config", "user.name", "dev"); git(priv, "config", "user.email", "dev@example.com");
   git(dir, "init", "-q", "--bare", "-b", "main", pub); git(dir, "init", "-q", "--bare", "-b", "main", origin);
   git(priv, "remote", "add", "origin", origin);
-  calls = []; releases = new Set(); fail = ""; openPr = false;
   commit("v4.2.0");
+});
+afterAll(() => rmSync(template, { recursive: true, force: true }));
+beforeEach(() => {
+  place(mkdtempSync(join(tmpdir(), "public-version.test.")));
+  cpSync(template, dir, { recursive: true });
+  git(priv, "remote", "set-url", "origin", origin); // the copy's origin is its own, not the template's
+  calls = []; releases = new Set(); fail = ""; openPr = false;
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 

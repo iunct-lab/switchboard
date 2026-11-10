@@ -3,24 +3,30 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defaultConfig, findConfig, loadConfig, parseConfig, projectOf, publicCopyOf, publicCopyRefusal, resolveProject, TEMPLATE_CONFIG } from "./config.ts";
+import { defaultConfig, findConfig, loadConfig, parseConfig, projectOf, publicCopyOf, publicCopyRefusal, resolveProject, STORY_POINTS, TEMPLATE_CONFIG } from "./config.ts";
 
 const fixtures = join(import.meta.dir, "../fixtures");
 const withPhase = () => loadConfig(join(fixtures, "config-with-phase.json"));
 const noPhase = () => loadConfig(join(fixtures, "config-no-phase.json"));
 
 describe("config", () => {
-  test("both fixtures load; Story Points default to 1, 2, 3, 5, 8", () => {
+  test("both fixtures load; Story Points are not defaulted by the config", () => {
     expect(withPhase().fields.phase).toEqual(["Phase 0", "Phase 1"]);
     expect(noPhase().fields.phase).toBeUndefined();
-    expect(noPhase().storyPoints).toEqual([1, 2, 3, 5, 8]);
+    expect(noPhase().storyPoints).toBeUndefined();
+  });
+
+  test("story points belong to the kit — a config that still has storyPoints loads and the kit's scale is 1 to 13", () => {
+    expect(withPhase().storyPoints).toEqual([1, 2, 3, 5, 8]);
+    expect(STORY_POINTS).toEqual([1, 2, 3, 5, 8, 13]);
+    expect(defaultConfig().storyPoints).toBeUndefined();
   });
 
   test("defaultConfig is the kit's template with Area app, no Phase and no Milestone (#2361)", () => {
     const template = JSON.parse(require("node:fs").readFileSync(TEMPLATE_CONFIG, "utf8"));
     const cfg = defaultConfig();
     expect(cfg.fields).toEqual({ area: ["app"], kind: template.fields.kind, priority: template.fields.priority });
-    expect([cfg.sections, cfg.storyPoints, cfg.envPrefix]).toEqual([template.sections, template.storyPoints, "BACKLOG"]);
+    expect([cfg.sections, cfg.envPrefix]).toEqual([template.sections, "BACKLOG"]);
     expect([cfg.fields.phase, cfg.milestone]).toEqual([undefined, undefined]);
   });
 
@@ -51,6 +57,13 @@ describe("config", () => {
     expect(parseConfig({ ...base, publicSync: { target: "example-org/app-public", serviceUsers: ["svc"] } }).publicSync?.serviceUsers).toEqual(["svc"]);
   });
 
+  test("publicSync.allowRefs names paths the exclude leaves out", () => {
+    const base = withPhase();
+    const ps = (allowRefs: string[]) => ({ ...base, publicSync: { target: "example-org/app-public", exclude: ["a.md", "dir/"], allowRefs } });
+    expect(parseConfig(ps(["a.md", "dir/b.md", "dir/"])).publicSync?.allowRefs).toEqual(["a.md", "dir/b.md", "dir/"]);
+    expect(() => parseConfig(ps(["other.md"]))).toThrow(/publicSync\.allowRefs: other\.md は exclude が外すパスではありません/);
+  });
+
   test("an invalid config is refused with the path of each problem", () => {
     const base = withPhase();
     expect(() => parseConfig({ ...base, projectUrl: "https://example.com/p/1" })).toThrow(/projectUrl/);
@@ -59,7 +72,8 @@ describe("config", () => {
     expect(() => parseConfig({ ...base, envPrefix: "lower" })).toThrow(/envPrefix/);
     expect(() => parseConfig({ ...base, milestone: { pattern: "(" } })).toThrow(/milestone\.pattern/);
     expect(() => parseConfig({ ...base, sections: { ...base.sections, origin: { name: "x", pattern: "(", hint: "h" } } })).toThrow(/sections\.origin\.pattern/);
-    expect(() => parseConfig({ ...base, storyPoints: [1.5] })).toThrow(/storyPoints/);
+    // storyPoints is not read (the kit owns the scale), so even a malformed leftover does not fail the config
+    expect(() => parseConfig({ ...base, storyPoints: [1.5] })).not.toThrow();
   });
 
   test("without --config the nearest ops.config.json from the working folder up is used", () => {

@@ -82,7 +82,7 @@ export type Run = (cmd: string[], opts?: { input?: string; env?: Record<string, 
  * `user`: the name of the OS user running the sync, looked for in paths (default `os.userInfo().username`);
  * `serviceUsers`: OS users that are no one's, not looked for. `host`: the host's AWS names and accounts (`hostAws()`), looked for in
  * the change. `adoptBaseline`: with `versioning`, give a published target without a version record its baseline (`releaseBaseline`). */
-export type Options = { host?: HostAws; privateRepo: string; target: string; include?: string[]; exclude?: string[]; rewrite?: string[]; versioning?: "independent"; source?: string; targetUrl?: string; dryRun?: boolean; adopted?: boolean; adoptBaseline?: boolean; user?: string; serviceUsers?: string[] };
+export type Options = { host?: HostAws; privateRepo: string; target: string; include?: string[]; exclude?: string[]; rewrite?: string[]; versioning?: "independent"; source?: string; targetUrl?: string; dryRun?: boolean; adopted?: boolean; adoptBaseline?: boolean; user?: string; serviceUsers?: string[]; allowRefs?: string[] };
 
 /** The first line of a failed command's stderr for its error, withheld when it has a secret's shape; the exit code when it is empty. */
 export function stderrLine(r: { code: number; err?: string }): string {
@@ -284,6 +284,84 @@ export function checkTree(tree: string, privateRepo: string, { raw, git }: Git, 
   if (secrets.length) throw new Error(`${TREE_SECRETS}\n${[...new Set(secrets)].join("\n")}`);
 }
 
+/** A character of a path a document names: not whitespace, not a Markdown or sentence delimiter (ASCII or Japanese). */
+const PATH_CHAR = String.raw`[^\s\x60'"()<>\[\]{},;:|*#?!、。，．「」『』（）【】]`;
+
+/**
+ * The lines of the tree's Markdown documents that name a path the sync leaves out (`exclude`), as `<file>:<line> <path>`:
+ * a reader of the public copy cannot open it. A file entry is named by its path, a directory entry (`dir/`) by a path
+ * under it (`dir/` alone is not a path). A name inside a longer path (`a/docs/x.md`, `/private/tmp`) is not one, and a
+ * full stop that ends the sentence is not part of it. `allowRefs` are the names that are meant.
+ */
+export function leftOutRefs(tree: string, exclude: string[], allowRefs: string[], { git }: Git): string[] {
+  if (!exclude.length) return [];
+  // a path character before the name makes it part of a longer path; one after a file entry too (but not a full stop that ends
+  // the sentence). A path under a directory entry runs to whitespace or a Markdown / sentence delimiter, so `+` and non-ASCII
+  // names stay whole (`private/計画.md`, `private/plan+draft.md`) and are matched against allowRefs in full.
+  const names = exclude.map((e) => (e.endsWith("/") ? `${literal(e)}${PATH_CHAR}+` : `${literal(e)}(?![A-Za-z0-9_/+~@%-]|\\.[A-Za-z0-9_])`));
+  const re = new RegExp(`(?<![A-Za-z0-9_./-])(?:${names.join("|")})`, "g");
+  const hits: string[] = [];
+  for (const path of git(["ls-tree", "-r", "-z", "--name-only", tree]).split("\0").filter((p) => p.endsWith(".md"))) {
+    git(["show", `${tree}:${path}`]).split("\n").forEach((line, i) => {
+      for (const m of line.matchAll(re)) {
+        const name = m[0].replace(/\.+$/, "");
+        if (name.endsWith("/") || allowRefs.includes(name)) continue;
+        hits.push(`${path}:${i + 1} ${name}`);
+      }
+    });
+  }
+  return [...new Set(hits)];
+}
+
+/** A line break a code span does not cross: the next line starts a new block (blank, heading, quote, list item, a fence). */
+const BLOCK = String.raw`\n(?:[ \t]*(?:\n|\0|$)|[ \t]{0,3}(?:#{1,6}(?:[ \t]|$)|>|[-*+][ \t]|\d{1,9}[.)][ \t]))`;
+/** A code span: a run of backticks, then the shortest text up to the same run, not over a {@link BLOCK} break. */
+const SPAN = new RegExp(String.raw`(?<!\x60)(\x60+)(?!\x60)(?:(?!${BLOCK})[^\0])*?(?<!\x60)\1(?!\x60)`, "g");
+
+/**
+ * The lines of the tree's Markdown documents whose running text (code fences and inline code left out) holds a value in the
+ * shape of a commit hash, as `<file>:<line> <value>`: 7 to 40 hexadecimal digits with both a digit and a letter a-f in them
+ * (a decimal number, or a word made of letters only, is not one). A reader of the public copy cannot use a commit of the
+ * private history; an example goes in code.
+ */
+export function commitHashes(tree: string, { git }: Git): string[] {
+  const re = /(?<![0-9A-Za-z_])[0-9a-f]{7,40}(?![0-9A-Za-z_])/g;
+  const hits: string[] = [];
+  for (const path of git(["ls-tree", "-r", "-z", "--name-only", tree]).split("\0").filter((p) => p.endsWith(".md"))) {
+    // Fenced lines become empty (a closing fence is the marker alone, as lint's `unfenced` reads it). A code span may hold
+    // backticks of a shorter run and go on over a line break, but not into a new block (a blank line, a heading, a quote, a
+    // list item, a fence): an unclosed backtick does not hide the next heading. Spans become blanks with the line breaks kept.
+    let fence = "";
+    const prose = git(["show", `${tree}:${path}`]).split("\n").map((line) => {
+      const open = /^\s*(`{3,}|~{3,})/.exec(line)?.[1];
+      if (fence) {
+        if (open && open[0] === fence[0] && open.length >= fence.length && line.trim() === open) fence = "";
+        return "\0";
+      }
+      if (open) fence = open;
+      return open ? "\0" : line;
+    });
+    prose
+      .join("\n")
+      .replace(SPAN, (span) => span.replace(/[^\n]/g, " "))
+      .split("\n")
+      .forEach((text, i) => {
+        for (const m of text.matchAll(re)) if (/[0-9]/.test(m[0]) && /[a-f]/.test(m[0])) hits.push(`${path}:${i + 1} ${m[0]}`);
+      });
+  }
+  return [...new Set(hits)];
+}
+
+function checkHashes(tree: string, g: Git): void {
+  const hashes = commitHashes(tree, g);
+  if (hashes.length) throw new Error(`a document names a commit hash in its text (a reader of the public copy cannot use it: write what it means, or put an example in code):\n${hashes.join("\n")}`);
+}
+
+function checkRefs(tree: string, opts: Pick<Options, "exclude" | "allowRefs">, g: Git): void {
+  const refs = leftOutRefs(tree, opts.exclude ?? [], opts.allowRefs ?? [], g);
+  if (refs.length) throw new Error(`a document names a path the sync leaves out (fix the line, or name the path in publicSync.allowRefs):\n${refs.join("\n")}`);
+}
+
 const TREE_SECRETS = "a secret-shaped value in the tree:";
 
 /**
@@ -292,7 +370,7 @@ const TREE_SECRETS = "a secret-shaped value in the tree:";
  * sync sends the running release's tag, which lags main until the next promotion). The stop reads as waiting for a newer
  * tag rather than as a value to remove; the sync still stops. `main` loads origin/main's options (it may throw).
  */
-export function withStaleNote(message: string, main: () => Pick<Options, "privateRepo" | "target" | "include" | "exclude" | "rewrite">, run: Run): string {
+export function withStaleNote(message: string, main: () => Pick<Options, "privateRepo" | "target" | "include" | "exclude" | "rewrite" | "allowRefs">, run: Run): string {
   if (!message.startsWith(TREE_SECRETS)) return message;
   try {
     check({ ...main(), source: "origin/main" }, run);
@@ -332,11 +410,13 @@ function secretsBetween(from: string, to: string, host: HostAws, git: Git["git"]
  * (default HEAD) built as the sync builds it, then `checkTree`. For CI, so that a change stops before it is merged
  * rather than at the sync after its tag.
  */
-export function check(opts: Pick<Options, "host" | "privateRepo" | "target" | "include" | "exclude" | "rewrite" | "source">, run: Run): string {
+export function check(opts: Pick<Options, "host" | "privateRepo" | "target" | "include" | "exclude" | "rewrite" | "allowRefs" | "source">, run: Run): string {
   const g = gitAt(run);
   const src = g.git(["rev-parse", "--verify", `${opts.source ?? "HEAD"}^{commit}`]);
   const { tree } = publicTree(src, opts, g);
   checkTree(tree, opts.privateRepo, g, opts.host);
+  checkRefs(tree, opts, g);
+  checkHashes(tree, g);
   return `public check: ok (${g.git(["ls-tree", "-r", "--name-only", tree]).split("\n").filter(Boolean).length} files)`;
 }
 
@@ -410,6 +490,8 @@ export function sync(opts: Options, run: Run, publication?: Publication): string
   const message = `${title}\n`;
 
   checkTree(tree, opts.privateRepo, g);
+  checkRefs(tree, opts, g);
+  checkHashes(tree, g);
   // The same in the message, and no address of a person in the author / committer the commit will carry (env and
   // config, as git itself resolves them).
   if (new RegExp(privateName, "i").test(message)) throw new Error("private repository name in public output:\n(commit message)");

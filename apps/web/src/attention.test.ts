@@ -12,7 +12,7 @@ test("needsAttention: a stopped task not reviewed yet that did not come to 完�
       expect(needsAttention(task("t", status, outcome, 5)), `${status} ${outcome} reviewed`).toBe(false);
     }
   }
-  for (const status of ["running", "idle"] as const) for (const outcome of ["done", "needs_action", "failed", "unknown"] as const) expect(needsAttention(task("t", status, outcome))).toBe(false);
+  for (const status of ["running", "background", "idle"] as const) for (const outcome of ["done", "needs_action", "failed", "unknown"] as const) expect(needsAttention(task("t", status, outcome))).toBe(false);
 });
 
 test("attentionList: 要対応 → 失敗 → 未判定, newest first within each; 完了, reviewed and running ones left out", () => {

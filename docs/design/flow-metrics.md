@@ -60,9 +60,10 @@ W=$(mktemp -d /tmp/switchboard.flow.XXXXXX); bun scripts/flow-report.ts --days 3
 ```
 
 - 期間内に閉じた PBI（`type:pbi`）をアプリの保存値から読む（`ops-kit lint` と同じ `readRecords`。アプリの Task の中で、`BACKLOG_URL` があるときだけ動く。無い・アプリに届かない・取り込む前は理由を出して exit 2）。マージ済みの PR は GitHub から読む。PR を読むリポジトリは `--repo`、無ければバックログのリポジトリ、アプリだけのバックログは cwd の `origin`（画面と同じ `prRepoOf`。どれも無ければ PR を読まず、PR の段は不明）。保存値を読む workspace は `ops-kit lint` と同じ選び方（`--repo` を付けたらそれ、無ければ `GH_REPO`、`BACKLOG_WORKSPACE`（アプリだけのバックログ）、`origin` の順）
-- 表は 2 つ。段ごとの「中央値 / p90 / 件数」（不明は件数に入らない）と、期間内に閉じた PBI の数・Story Points の合計・中央値が一番大きい段。PBI ごとの「各段 / 返事待ち / レビュー回数 / Task / 費用」。`--json` は `stages`（段ごとの p50 / p90 / count）、`pbis`、`cutPbis` ほか
+- 表は 4 つ。1 つ目は段ごとの「中央値 / p90 / 件数」（不明は件数に入らない）と、期間内に閉じた PBI の数・Story Points の合計・中央値が一番大きい段。2 つ目は PBI ごとの「各段 / 返事待ち / レビュー回数 / Task / 費用」。`--json` は `stages`（段ごとの p50 / p90 / count）、`pbis`、`cutPbis` ほか
 - **Switchboard の Task**: DB（`SWITCHBOARD_HOME` の `switchboard.db`、読み取り専用）から、保存値を読んだ workspace の Task のうち、工程 Task（`stage_issue` が PBI か Task の番号）または題が `#<PBI または Task の番号> ` で始まるものを数える。件数・実行時間（作成から最後のイベントまで。`routingLog` と同じ）・費用（台帳の合計）。Issue の番号はリポジトリをまたいで重なるので、workspace で絞る。DB が無いときは Task の列を出さない。PBI ごとに、その PBI 番号の工程 Task のうち実装（`stage_action` が `complete`。再開も 1 回）を起動した回数（`--json` の `pbis[].tasks.implementLaunches`）も数え、表の後に 2 行を出す: 「実装を 3 回以上起動した PBI: <n>/<Task を読めた PBI の数>（<%>）」（読めた PBI が無ければ「不明」）と「段 wait の中央値」。待ちの改善（#1866）が効いたかを見る数
 - 3 つ目の表は週ごとの「PBI 起票 / PBI 閉鎖 / 要望 起票 / 要望 閉鎖 / 純増 / 先送り Task / そこからの起票」（上の「バックログの純増と先送り」）。DB が無いときは先送りの 2 列を `-` にする。`--json` の `weeks`
+- 4 つ目の表は Story Points ごとの実績「SP / 件数 / Task の数 / 費用 / 稼働時間」（`actualsByStoryPoints`。SP の小さい順、SP の無い PBI は入らない）。Task の数・費用・稼働時間は p50 (p25〜p75)（p25 と p75 は最近傍順位）。Task の数 = PBI の Task Issue（sub-issue）の数（`pbis[].taskIssues`。一覧が切れたら少なく出る。取り下げて閉じた Task も数える）、費用・稼働時間 = Switchboard の Task の合計（上の `tasks`）で、DB を読めない PBI は費用・稼働時間に入らない。`--json` の `bySp`。`GET /api/flow` と画面には出さない
 - 自分のリポジトリの表は、その clone を見るアプリの Task の中で `bun scripts/flow-report.ts --days 30` を回すと先頭に出る
 - 読み方は下の「数の読み方」
 

@@ -22,8 +22,15 @@ export const PublicSync = z
     rewrite: z.array(z.string().min(1)).default([]),
     /** OS users that are no one's (a host template's service user, whose home the docs describe): the check for the syncing user's name in paths skips them. */
     serviceUsers: z.array(z.string().min(1)).optional(),
+    /** Paths a document in the tree may name although `exclude` leaves them out (a reference meant for the reader's own tree): the check for such names skips them. */
+    allowRefs: z.array(TreePath).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((c, ctx) => {
+    for (const p of c.allowRefs ?? []) {
+      if (!c.exclude.some((e) => (e.endsWith("/") ? p.startsWith(e) : p === e))) ctx.addIssue({ code: "custom", path: ["allowRefs"], message: `${p} は exclude が外すパスではありません` });
+    }
+  });
 export type PublicSync = z.infer<typeof PublicSync>;
 
 /**
@@ -58,7 +65,8 @@ export type CiConfig = z.infer<typeof CiConfig>;
 
 /**
  * A repository's backlog settings (`ops.config.json`). The kit itself holds no value of any one repository: the
- * Project, the choices of each field, the required sections and the Story Points all come from here.
+ * Project, the choices of each field and the required sections all come from here. The Story Points scale is the kit's
+ * (`STORY_POINTS`), not a repository's.
  */
 export const OpsConfig = z
   .object({
@@ -90,7 +98,8 @@ export const OpsConfig = z
         origin: z.object({ name: z.string().min(1), pattern: z.string().min(1), hint: z.string().min(1) }).strict().optional(),
       })
       .strict(),
-    storyPoints: z.array(z.number().int().positive()).min(1).default([1, 2, 3, 5, 8]),
+    /** Accepted and not used: the kit owns the scale (`STORY_POINTS`). Kept so a config that still has it (in any shape) does not fail `.strict()`. */
+    storyPoints: z.unknown().optional(),
     publicSync: PublicSync.optional(),
     /** The service the repository lives on (#920, `forge.ts`); omitted = GitHub. */
     forge: ForgeConfig.optional(),
@@ -124,6 +133,9 @@ export function parseConfig(json: unknown, where = CONFIG_FILE): OpsConfig {
   }
   return r.data;
 }
+
+/** The Story Points scale, owned by the kit (not by a repository's config). */
+export const STORY_POINTS: readonly number[] = [1, 2, 3, 5, 8, 13];
 
 /** The kit's template of `ops.config.json`: the choices a workspace kept in the app without its own file is checked with (#2361). */
 export const TEMPLATE_CONFIG = join(import.meta.dir, "../template/ops.config.json");

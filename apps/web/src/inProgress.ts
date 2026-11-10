@@ -1,4 +1,4 @@
-import type { BacklogAction, BacklogItem, BacklogStage, Schedule, TaskStatus, Workspace } from "@switchboard/protocol";
+import { isWorkingStatus, type BacklogAction, type BacklogItem, type BacklogStage, type Schedule, type TaskStatus, type Workspace } from "@switchboard/protocol";
 import { jstClock } from "./time.ts";
 import { t } from "./i18n.ts";
 import { task as m } from "./i18n/task.ts";
@@ -29,7 +29,7 @@ export function directButton(item: BacklogItem, metaId: string | null): [Backlog
 }
 
 /** A Task's state as the backlog row names it. */
-export const TASK_STATUS: Record<TaskStatus, string> = { idle: t(m.statusIdle), running: t(m.running), waiting: t(m.statusWaiting), done: t(m.statusDone), error: t(m.statusFailed), aborted: t(m.statusAborted) };
+export const TASK_STATUS: Record<TaskStatus, string> = { idle: t(m.statusIdle), running: t(m.running), waiting: t(m.statusWaiting), background: t(m.statusBackground), done: t(m.statusDone), error: t(m.statusFailed), aborted: t(m.statusAborted) };
 
 /**
  * Whether an in-progress item is moving (#522), from the item's own values only: the first that holds of a running
@@ -38,8 +38,8 @@ export const TASK_STATUS: Record<TaskStatus, string> = { idle: t(m.statusIdle), 
  * anywhere; asking why is the 状況を確認 button.
  */
 export function inProgressState(item: BacklogItem): { running: boolean; label: string } {
-  // the last Task may have started between the two lookups of one read: running / waiting is moving, not "stopped"
-  if (item.activeTaskId || item.lastTask?.status === "running" || item.lastTask?.status === "waiting") return { running: true, label: t(m.moving) };
+  // the last Task may have started between the two lookups of one read: working (running / waiting / background) is moving, not "stopped"
+  if (item.activeTaskId || item.lastTask && isWorkingStatus(item.lastTask.status)) return { running: true, label: t(m.moving) };
   if (item.replyWaiting) return { running: false, label: t(m.stoppedReply) };
   if (item.tasks && item.tasks.total > 0 && item.tasks.done === item.tasks.total) return { running: false, label: t(m.stoppedAllDone) };
   if (item.lastTask?.status === "error") return { running: false, label: t(m.stoppedFailed) };
@@ -65,7 +65,7 @@ export function lastTaskLine(x: { status: TaskStatus; createdAt: number; statusA
 
 /** The row's button for its running stage Task: running or waiting, and since when (`承認待ち（17:40 から）`). */
 export function activeTaskLine(x: { status: TaskStatus; statusAt: number } | null, now: number): string {
-  return x && (x.status === "running" || x.status === "waiting") ? t(m.activeTask, { status: TASK_STATUS[x.status], time: jstClock(x.statusAt, now) }) : t(m.running);
+  return x && isWorkingStatus(x.status) ? t(m.activeTask, { status: TASK_STATUS[x.status], time: jstClock(x.statusAt, now) }) : t(m.running);
 }
 
 /** How long ago `at` (ISO string or epoch ms) was: N 分前 under an hour, N 時間前 under a day, else N 日前. */
@@ -178,7 +178,7 @@ export function waitOwner(w: Wait, row: BacklogItem, items: BacklogItem[]): { pb
   if (!owner) return { pbi, task: "unknown", startable: false };
   const last = owner.lastTask;
   // the last Task may have started between the two lookups of one read: running / waiting is moving (inProgressState)
-  const running = owner.activeTaskId ?? (last && (last.status === "running" || last.status === "waiting") ? last.id : null);
+  const running = owner.activeTaskId ?? (last && isWorkingStatus(last.status) ? last.id : null);
   const task = running ? { id: running, running: true, label: t(m.moving) } : last ? { id: last.id, running: false, label: t(m.stoppedStatus, { status: TASK_STATUS[last.status] }) } : null;
   return { pbi, task, startable: w.open !== false && !running && (owner.stage === "ready" || owner.stage === "in-progress") };
 }

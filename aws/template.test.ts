@@ -262,6 +262,19 @@ describe("aws/template.yaml (#229)", () => {
     expect(text.match(/Action: sts:AssumeRole\n/g)).toHaveLength(2);
   });
 
+  test("the host may invoke only the DAK function named by DakFunctionArn", () => {
+    expect(text).toContain("  DakFunctionArn:\n    Type: String\n    Default: ''");
+    expect(text).toMatch(/DakFunctionArn:[^]*?AllowedPattern: '\^\$\|\^arn:aws:lambda:/);
+    expect(text).toContain("  HasDakFunction: !Not [!Equals [!Ref DakFunctionArn, '']]");
+    for (const name of ["Boundary", "InstanceRole"]) {
+      const block = resource(name);
+      expect(block).toMatch(/- !If\n +\- HasDakFunction\n +\- (Sid: DakFunction\n +)?Effect: Allow\n +Action: \[lambda:InvokeFunction, lambda:GetFunction\]\n +Resource: !Ref DakFunctionArn\n +\- !Ref AWS::NoValue/);
+      // the only lambda statement, and it names no function by pattern
+      expect(block.match(/lambda:/g)).toHaveLength(2);
+      expect(block.match(/Resource: .*DakFunctionArn.*/g)!.every((l) => !l.includes("*"))).toBe(true);
+    }
+  });
+
   test("UpdateStack on the SAM template may create the transforms' change set (review #344, #465)", () => {
     expect(resource("GitHubOidcRole")).toContain("Resource: [!Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31', !Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/LanguageExtensions']");
     // Describe has no resource-level permissions: never behind a tag condition
@@ -488,7 +501,7 @@ describe("aws/template.yaml memory alarms (#540)", () => {
     expect(deploy).not.toMatch(/cloudwatch:\*|sns:\*|PutMetricData/);
     // nothing else in the boundary changed: its statements are the ones before plus Countries (#1639), AgentMetrics and HostLogs (#1490), CostRead and BudgetRead (#2278), BedrockMantle (#1731)
     const sids = resource("Boundary").split("- Sid: ").slice(1).map((x) => x.split("\n")[0]);
-    expect(sids).toEqual(["Parameters", "RegisterCode", "Buckets", "Wake", "ThisInstance", "RootReplacement", "Describe", "Stack", "Bedrock", "BedrockMantle", "CostRead", "BudgetRead", "OwnRoles", "Countries", "AgentMetrics", "OwnLogs", "HostLogs", "Offload", "HostAssumeRoles", "ManagedKeysThroughServices"]);
+    expect(sids).toEqual(["Parameters", "RegisterCode", "Buckets", "Wake", "ThisInstance", "RootReplacement", "Describe", "Stack", "Bedrock", "BedrockMantle", "CostRead", "BudgetRead", "OwnRoles", "Countries", "AgentMetrics", "OwnLogs", "HostLogs", "Offload", "HostAssumeRoles", "DakFunction", "ManagedKeysThroughServices"]);
   });
 });
 

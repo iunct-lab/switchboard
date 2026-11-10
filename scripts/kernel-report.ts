@@ -19,12 +19,29 @@ export const NO_PROVENANCE = "記録なし";
 export const NO_PROCESS = "候補なし";
 export const SKILLS_PREFIX = 8;
 
+export type ReasonKind = "button" | "auto" | "returned" | "other" | "none";
+
+/**
+ * Who chose the process, from `processReason` (the words the choosers write): the button (`direct button`,
+ * `backlog stage <action>`), the automatic choice (`auto direct: …` / `auto pipeline: …`), a direct Task sent back to the
+ * pipeline (`direct returned`). No reason recorded (no provenance, or none named) is `none`; any other text is `other`.
+ */
+export function reasonKind(reason: string | null | undefined): ReasonKind {
+  if (typeof reason !== "string" || !reason) return "none";
+  if (reason === "direct button" || reason.startsWith("backlog stage ")) return "button";
+  if (reason.startsWith("auto ")) return "auto";
+  if (reason === "direct returned") return "returned";
+  return "other";
+}
+
 export type Stratum = {
   /** `<process id, 候補なし or 記録なし>@<skills hash prefix or ->` */
   key: string;
   process: string;
   skills: string;
   n: number;
+  /** How many of the group's Tasks each kind of reason chose; sums to `n`. */
+  reasons: Record<ReasonKind, number>;
   /** Done Tasks only (`status_at - created_at`); null when none is done. */
   durationMsMedian: number | null;
   /** Sum of the ledger's `cost_usd` per Task; null when no Task has a row. */
@@ -61,7 +78,7 @@ export function kernelReport(db: Database, opts: { days: number; now?: number })
       /* an unreadable eval counts as none */
     }
   }
-  const groups = new Map<string, { process: string; skills: string; duration: number[]; cost: number[]; interventions: number[]; bytes: number[]; n: number }>();
+  const groups = new Map<string, { process: string; skills: string; duration: number[]; cost: number[]; interventions: number[]; bytes: number[]; n: number; reasons: Record<ReasonKind, number> }>();
   for (const r of rows) {
     let p: Provenance | null = null;
     if (r.provenance) {
@@ -76,8 +93,9 @@ export function kernelReport(db: Database, opts: { days: number; now?: number })
     const processId = p ? p.process?.id ?? NO_PROCESS : NO_PROVENANCE;
     const skills = p?.bundle.skills ? p.bundle.skills.slice(0, SKILLS_PREFIX) : "-";
     const key = `${processId}@${skills}`;
-    const g = groups.get(key) ?? { process: processId, skills, duration: [], cost: [], interventions: [], bytes: [], n: 0 };
+    const g = groups.get(key) ?? { process: processId, skills, duration: [], cost: [], interventions: [], bytes: [], n: 0, reasons: { button: 0, auto: 0, returned: 0, other: 0, none: 0 } };
     g.n++;
+    g.reasons[reasonKind(p?.processReason)]++;
     if (r.status === "done") g.duration.push(r.status_at - r.created_at);
     const c = cost.get(r.id);
     if (c !== undefined) g.cost.push(c);
@@ -87,7 +105,7 @@ export function kernelReport(db: Database, opts: { days: number; now?: number })
     groups.set(key, g);
   }
   const strata = [...groups.entries()]
-    .map(([key, g]) => ({ key, process: g.process, skills: g.skills, n: g.n, durationMsMedian: median(g.duration), costUsdMedian: median(g.cost), interventionsMedian: median(g.interventions), instructionBytesMedian: median(g.bytes) }))
+    .map(([key, g]) => ({ key, process: g.process, skills: g.skills, n: g.n, reasons: g.reasons, durationMsMedian: median(g.duration), costUsdMedian: median(g.cost), interventionsMedian: median(g.interventions), instructionBytesMedian: median(g.bytes) }))
     .sort((a, b) => b.n - a.n || a.key.localeCompare(b.key));
   return { days: opts.days, since, tasks: rows.length, strata };
 }
@@ -97,10 +115,12 @@ const fmtUsd = (x: number | null) => (x === null ? "-" : `$${x.toFixed(2)}`);
 const fmtNum = (x: number | null) => (x === null ? "-" : String(Math.round(x * 10) / 10));
 const fmtBytes = (x: number | null) => (x === null ? "-" : `${Math.round(x / 1024)} KB`);
 
+const fmtReasons = (x: Record<ReasonKind, number>) => `ボタン ${x.button} / 自動 ${x.auto} / 戻した ${x.returned}${x.other ? ` / その他 ${x.other}` : ""}`;
+
 export function renderReport(r: Report): string {
-  const lines = [`# カーネルの報告 — 直近 ${r.days} 日の Task ${r.tasks} 件（${new Date(r.since).toISOString().slice(0, 10)} 以降、shadow を除く）`, "", "| プロセス | スキルの束 | n | 所要時間の中央値（done） | 費用の中央値 | 介入の中央値 | 命令の大きさの中央値 |", "|---|---|---:|---:|---:|---:|---:|"];
-  for (const s of r.strata) lines.push(`| ${s.process} | ${s.skills} | ${s.n} | ${fmtMs(s.durationMsMedian)} | ${fmtUsd(s.costUsdMedian)} | ${fmtNum(s.interventionsMedian)} | ${fmtBytes(s.instructionBytesMedian)} |`);
-  lines.push("", `層別は観察で、決着ではない（n と幅を見る。費用は API 相当の見積、介入は rules の評価がある Task だけ。${NO_PROVENANCE} = 由来の記録が無い Task、${NO_PROCESS} = 記録はあるが候補を名指ししていない Task）。`);
+  const lines = [`# カーネルの報告 — 直近 ${r.days} 日の Task ${r.tasks} 件（${new Date(r.since).toISOString().slice(0, 10)} 以降、shadow を除く）`, "", "| プロセス | スキルの束 | n | 選んだ理由 | 所要時間の中央値（done） | 費用の中央値 | 介入の中央値 | 命令の大きさの中央値 |", "|---|---|---:|---|---:|---:|---:|---:|"];
+  for (const s of r.strata) lines.push(`| ${s.process} | ${s.skills} | ${s.n} | ${fmtReasons(s.reasons)} | ${fmtMs(s.durationMsMedian)} | ${fmtUsd(s.costUsdMedian)} | ${fmtNum(s.interventionsMedian)} | ${fmtBytes(s.instructionBytesMedian)} |`);
+  lines.push("", `層別は観察で、決着ではない（n と幅を見る。費用は API 相当の見積、介入は rules の評価がある Task だけ。${NO_PROVENANCE} = 由来の記録が無い Task、${NO_PROCESS} = 記録はあるが候補を名指ししていない Task。選んだ理由は processReason の語で分け、理由が無い Task は ボタン・自動・戻した のどれにも入らない）。`);
   return lines.join("\n");
 }
 

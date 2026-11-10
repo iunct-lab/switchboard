@@ -15,7 +15,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { FlowStage } from "../packages/protocol/src/index.ts";
 import { runGh } from "../packages/core/src/backlog.ts";
-import { backlogGrowth, fetchFlow, FlowError, launchShare, prRepoOf, summarize, weekStartOf, withSwitchboardTasks } from "../packages/core/src/flow.ts";
+import { actualsByStoryPoints, backlogGrowth, fetchFlow, FlowError, launchShare, type Spread, prRepoOf, summarize, weekStartOf, withSwitchboardTasks } from "../packages/core/src/flow.ts";
 import { deferredTasksSince } from "../packages/core/src/db.ts";
 import { readRecords, type StoredRecords } from "../ops-kit/src/backlog-client.ts";
 
@@ -80,8 +80,13 @@ async function main(): Promise<number> {
     const weeks = backlogGrowth(growth, known ? deferredTasksSince(db!, workspaces, weekStartOf(now - days * 86_400_000)) : [], records.repository, days, now);
     console.log("\n週\tPBI 起票\tPBI 閉鎖\t要望 起票\t要望 閉鎖\t純増\t先送り Task\tそこからの起票");
     for (const w of weeks) console.log(`${w.weekStart}\t${w.pbiOpened}\t${w.pbiClosed}\t${w.requestOpened}\t${w.requestClosed}\t${w.net > 0 ? "+" : ""}${w.net}\t${known ? w.deferredTasks : "-"}\t${known ? w.deferredIssues : "-"}`);
+    // the actuals by Story Points: how big a PBI of each size turned out to be
+    const bySp = actualsByStoryPoints(pbis);
+    const range = (s: Spread, f: (n: number) => string) => (s.p50 === null ? "-" : `${f(s.p50)} (${f(s.p25!)}〜${f(s.p75!)})`);
+    console.log("\nSP\t件数\tTask の数 p50 (p25〜p75)\t費用 p50 (p25〜p75)\t稼働時間 p50 (p25〜p75)");
+    for (const a of bySp) console.log(`${a.storyPoints}\t${a.count}\t${range(a.taskIssues, String)}\t${range(a.costUsd, (n) => `$${n.toFixed(2)}`)}\t${range(a.runMs, dur)}`);
     const json = arg("--json");
-    if (json) writeFileSync(json, JSON.stringify({ repo: name, days, cutPbis, stages: sum.stages, bottleneck: sum.bottleneck, closed: sum.closed, storyPoints: sum.storyPoints, pbis, weeks }, null, 2));
+    if (json) writeFileSync(json, JSON.stringify({ repo: name, days, cutPbis, stages: sum.stages, bottleneck: sum.bottleneck, closed: sum.closed, storyPoints: sum.storyPoints, pbis, bySp, weeks }, null, 2));
     return 0;
   } catch (e) {
     if (!(e instanceof FlowError)) throw e;

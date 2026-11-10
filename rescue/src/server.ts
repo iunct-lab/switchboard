@@ -297,7 +297,7 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
       running: ctx.sup.running,
       /** null = the daemon answers; otherwise why it does not. */
       unhealthy,
-      /** The running and waiting tasks that 再起動 and the release switches stop (#435). */
+      /** The running and waiting tasks, and those with background jobs left, that 再起動 and the release switches stop (#435). */
       stopping,
       port: ctx.port,
       busy,

@@ -12,6 +12,7 @@ import type { Db } from "./db.ts";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
 import { issueOf, openStops, type StopReport } from "./stops.ts";
 import { ResumeSupersededError, type TaskManager } from "./tasks.ts";
+import { isWorking } from "./task-status.ts";
 
 /** A wait key of a stop's condition: a PR or an Issue of the workspace's repository, by number, or a job of the daemon (#3993), by id. */
 export const WAIT_KEY = /^(pr|issue|job)#(\d+)$/;
@@ -132,7 +133,7 @@ export async function resumeDepends(deps: { db: Db; tasks: Pick<TaskManager, "se
     if (jobKeys.length && closed.length < waits.length) continue;
     // a stage Task (#1139) gets no turn here for a PR / Issue — that is backlog-next's — but does for its own jobs
     const turn = issueOf(task) === null || jobKeys.length > 0;
-    if (turn && (!task.runnerSessionId || task.status === "running" || task.status === "waiting" || task.resumeAt !== null)) continue;
+    if (turn && (!task.runnerSessionId || isWorking(task, "dedupe"))) continue;
     const report = (w: (typeof waits)[number], state: StopRecord["state"], what: string, ok: boolean): StopReport => ({
       id: w.stop.id.slice(task.id.length + 1),
       op: w.stop.op,

@@ -7,6 +7,7 @@
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isWorkingStatus } from "../packages/protocol/src/model.ts";
 import { loadConfig } from "../packages/core/src/config.ts";
 import { startServer } from "../packages/core/src/server.ts";
 import type { GhRunner } from "../packages/core/src/backlog.ts";
@@ -177,6 +178,9 @@ try {
   await call("Runtime.enable");
   await call("Log.enable");
   await call("Page.enable");
+  // a list row is one line, its details under ▶ (#3709): once window.__openRows is set (after the closed rows are read
+  // below), every list row is opened as it appears, so the scenes after read the details the row had before
+  await call("Page.addScriptToEvaluateOnNewDocument", { source: `new MutationObserver(() => { if (window.__openRows) for (const b of document.querySelectorAll('[data-open-row][aria-expanded="false"]')) b.click(); }).observe(document, { childList: true, subtree: true });` });
   await call("Page.navigate", { url: base });
   await until(() => evaluate(`!!document.querySelector('.rail')`), "Rail");
 
@@ -195,13 +199,18 @@ try {
   assert(!(await evaluate(`document.querySelector('section[data-stage="request"] .backlog-item').textContent.includes('Task')`)), "a request has no Task count");
   // each row names its workspace, and every workspace's rows have their stage buttons
   const readyRows = (await evaluate(`[...document.querySelectorAll('section[data-stage="ready"] .backlog-item')].map(r => ({ ws: r.querySelector('.workspace')?.textContent, href: r.querySelector('a').href, buttons: [...r.querySelectorAll('button')].map(b => b.textContent) }))`) as Array<{ ws: string; href: string; buttons: string[] }>).sort((a, b) => a.href.localeCompare(b.href));
+  // closed (#3709): the row is its line only — the ▶ and its stage button, no details under it
+  const closedRows = await evaluate(`(() => { const rows = [...document.querySelectorAll('.backlog .backlog-listrow')]; return rows.length > 0 && rows.every(r => r.querySelector('[data-open-row]')?.getAttribute('aria-expanded') === 'false') && !document.querySelector('.backlog .backlog-row-detail, .backlog-listrow .backlog-syncline, .backlog-listrow .backlog-editor'); })()`);
+  assert(closedRows, "list rows start closed, without their details");
   const workspaceNames = readyRows.map((r) => r.ws);
   assert(JSON.stringify(readyRows) === JSON.stringify([
-    { ws: metaName, href: "https://github.com/acme/app/issues/304", buttons: ["実装する"] },
-    { ws: "lib", href: "https://github.com/acme/lib/issues/304", buttons: ["実装する"] },
+    { ws: metaName, href: "https://github.com/acme/app/issues/304", buttons: ["▶", "実装する"] },
+    { ws: "lib", href: "https://github.com/acme/lib/issues/304", buttons: ["▶", "実装する"] },
   ]), `ready rows: ${JSON.stringify(readyRows)}`);
+  await evaluate(`window.__openRows = true; for (const b of document.querySelectorAll('[data-open-row][aria-expanded="false"]')) b.click()`);
+  await until(() => evaluate(`!document.querySelector('[data-open-row][aria-expanded="false"]') && !!document.querySelector('.backlog .backlog-row-detail')`), "list rows opened");
   // #2296: the screen mockup under acme/app's Ready #304 — one button; no other row has one; pressed it opens the HTML, again it closes
-  const mockupsOf304 = `(() => { const r = [...document.querySelectorAll('section[data-stage="ready"] .backlog-item')].find(r => r.querySelector('a').href === 'https://github.com/acme/app/issues/304'); const m = r?.nextElementSibling?.nextElementSibling; return m?.classList.contains('mockups') ? m : null; })()`;
+  const mockupsOf304 = `(() => { const r = [...document.querySelectorAll('section[data-stage="ready"] .backlog-item')].find(r => r.querySelector('a').href === 'https://github.com/acme/app/issues/304'); return r?.closest('.backlog-listrow')?.querySelector('.mockups') ?? null; })()`;
   const mockupButtons = await evaluate(`[...(${mockupsOf304})?.querySelectorAll('button.mockup') ?? []].map(b => b.textContent.trim())`) as string[];
   assert(JSON.stringify(mockupButtons) === JSON.stringify(["画面イメージ: e2e"]), `#304 mockups: ${JSON.stringify(mockupButtons)}`);
   assert(await evaluate(`document.querySelectorAll('.backlog .mockups').length === 1 && (${mockupsOf304}).querySelector('.hint').textContent === '画面イメージ'`), "only #304's row has mockups");
@@ -270,7 +279,7 @@ try {
   await press(`[...document.querySelectorAll('dialog.feedback-dialog[open] button')].find(b => b.textContent.trim() === "閉じる")`, "the dialog's 閉じる");
 
   // A row's stage button (#265): Ready → 実装する → the Task screen → back on the backlog the row says 実行中
-  const buttons = await evaluate(`Object.fromEntries([...document.querySelectorAll('.backlog section[data-stage]')].map(s => [s.dataset.stage, [...s.querySelectorAll('.backlog-item button')].map(b => b.textContent)]))`) as Record<string, string[]>;
+  const buttons = await evaluate(`Object.fromEntries([...document.querySelectorAll('.backlog section[data-stage]')].map(s => [s.dataset.stage, [...s.querySelectorAll('.backlog-item button:not([data-open-row])')].map(b => b.textContent)]))`) as Record<string, string[]>;
   const expectedButtons = { "needs-decision": [], request: ["PBI にする", "直行で直す"], "needs-tasks": ["Task に分解"], ready: ["実装する"], "in-progress": ["状況を確認", "状況を確認", "閉じる", "状況を確認"] };
   assert(JSON.stringify(buttons) === JSON.stringify(expectedButtons), `buttons: ${JSON.stringify(buttons)}`);
   await click("実装する");
@@ -278,8 +287,8 @@ try {
   assert(prompts[0]?.includes("/pbi-complete 304"), `prompt: ${prompts[0]}`);
   await click("Backlog");
   // the screen first shows the list from before the start, not yet loading (`read` holds for that frame): wait for 実行中
-  await until(() => evaluate(`${read} && [...document.querySelectorAll('section[data-stage="ready"] .backlog-item button')].some(b => /^(実行中|承認待ち)（/.test(b.textContent))`), "backlog again with the row 実行中");
-  const readyButtons = await evaluate(`[...document.querySelectorAll('section[data-stage="ready"] .backlog-item button')].map(b => b.textContent)`) as string[];
+  await until(() => evaluate(`${read} && [...document.querySelectorAll('section[data-stage="ready"] .backlog-item button:not([data-open-row])')].some(b => /^(実行中|承認待ち)（/.test(b.textContent))`), "backlog again with the row 実行中");
+  const readyButtons = await evaluate(`[...document.querySelectorAll('section[data-stage="ready"] .backlog-item button:not([data-open-row])')].map(b => b.textContent)`) as string[];
   const rowShowsRunning = readyButtons.length === 1 && /^(実行中|承認待ち)（/.test(readyButtons[0]!); // activeTaskLine (#2044): 承認待ち / 実行中 with since when
   assert(rowShowsRunning, `ready row: ${JSON.stringify(readyButtons)}`);
   // the started Task waits on an approval: 承認待ち 1 件 → opens the Schedules screen (its queue), then back
@@ -289,7 +298,7 @@ try {
   await click("Backlog");
   await until(() => evaluate(`${read} && !!document.querySelector('section[data-stage="ready"] .backlog-item') && [...document.querySelectorAll('.backlog button')].some(b => b.textContent.trim() === '承認待ち 1 件 →')`), "backlog after 承認待ち");
   const approvalsLink = true;
-  await press(`[...document.querySelectorAll('section[data-stage="ready"] .backlog-item button')].find(b => /^(実行中|承認待ち)（/.test(b.textContent))`, "the row's running Task");
+  await press(`[...document.querySelectorAll('section[data-stage="ready"] .backlog-item button:not([data-open-row])')].find(b => /^(実行中|承認待ち)（/.test(b.textContent))`, "the row's running Task");
   await until(() => evaluate(`!document.querySelector('.backlog')`), "実行中 opens the Task");
   await click("Backlog");
   await until(() => evaluate(`${read} && !!document.querySelector('section[data-stage="ready"] .backlog-item')`), "backlog once more");
@@ -317,16 +326,18 @@ try {
 
   // 実装中 (#522): each row says whether it moves, its Project Status, how long since the Issue changed, its last stage
   // Task, and the head of its newest ## 状況; 状況を確認 starts a check and the row turns 実行中
-  const ipRow = (n: number) => `[...document.querySelectorAll('section[data-stage="in-progress"] .backlog-item')].find(r => r.querySelector('a').href === 'https://github.com/acme/app/issues/${n}')`;
+  // a list row with what ▶ opened under it (#3709); its own buttons are the line's and its facts', not the ▶ or the details'
+  const ipRow = (n: number) => `[...document.querySelectorAll('section[data-stage="in-progress"] .backlog-item')].find(r => r.querySelector('a').href === 'https://github.com/acme/app/issues/${n}')?.closest('.backlog-listrow')`;
+  const rowButtons = `.backlog-item button:not([data-open-row]), .backlog-row-facts button`;
   const clickIn = (rowExpr: string, prefix: string) => press(`[...(${rowExpr})?.querySelectorAll('button') ?? []].find(b => b.textContent.trim().startsWith(${JSON.stringify(prefix)}))`, `clickable ${prefix}`);
   const rowText = (n: number) => evaluate(`${ipRow(n)}?.textContent ?? ""`) as Promise<string>;
   // (a) #305: In review, and the newest ## 状況 — its date and first 3 lines after the heading, the rest cut
-  const report = await evaluate(`(() => { const r = ${ipRow(305)}.nextElementSibling?.nextElementSibling; return r?.classList.contains('backlog-report') ? { at: r.querySelector('.hint').textContent, head: r.querySelector('pre').textContent } : null; })()`) as { at: string; head: string } | null;
+  const report = await evaluate(`(() => { const r = ${ipRow(305)}.querySelector('.backlog-report'); return r?.classList.contains('backlog-report') ? { at: r.querySelector('.hint').textContent, head: r.querySelector('pre').textContent } : null; })()`) as { at: string; head: string } | null;
   const n305 = await rowText(305);
   assert(n305.includes("In review") && report?.at === "2026/09/27 14:00:00 の状況" && report.head === "### 済んだこと\n- #310 をマージ\n### 残り\n…", `#305: ${n305} ${JSON.stringify(report)}`);
   // (b) #307: every Task done with the PBI open, and days since its last update; no ## 状況 → nothing under the row
   const n307 = await rowText(307);
-  assert(n307.includes("In progress") && n307.includes("止まっている: Task は全部完了、PBI は開いたまま") && /更新 \d+ 日前/.test(n307) && !(await evaluate(`${ipRow(307)}.nextElementSibling?.nextElementSibling?.classList.contains('backlog-report') ?? false`)), `#307: ${n307}`);
+  assert(n307.includes("In progress") && n307.includes("止まっている: Task は全部完了、PBI は開いたまま") && /更新 \d+ 日前/.test(n307) && !(await evaluate(`!!${ipRow(307)}.querySelector('.backlog-report')`)), `#307: ${n307}`);
   // #531: every Task closed and no 利用者確認 left → 閉じられる, and a 閉じる next to 状況を確認 (pressed below)
   const closableShown = n307.includes("閉じられる") && !(await rowText(305)).includes("閉じられる") && !(await rowText(308)).includes("閉じられる");
   assert(closableShown, `閉じられる: #307 ${n307}`);
@@ -443,7 +454,7 @@ try {
   assert(prompts.at(-1)!.includes("PBI #307 の今の状況を確認してください") && core.db.getTask(finished.id)!.status === "done", `check prompt: ${prompts.at(-1)}`);
   await click("Backlog");
   await until(() => evaluate(`${read} && [...(${ipRow(307)})?.querySelectorAll('button') ?? []].some(b => /^(実行中|承認待ち)（/.test(b.textContent.trim()))`), "backlog after the check with #307 実行中");
-  const checkRow = await evaluate(`(() => { const r = ${ipRow(307)}; return { buttons: [...r.querySelectorAll('button')].map(b => b.textContent.trim()), state: r.querySelector('[data-state]').dataset.state, text: r.textContent }; })()`) as { buttons: string[]; state: string; text: string };
+  const checkRow = await evaluate(`(() => { const r = ${ipRow(307)}; return { buttons: [...r.querySelectorAll(${JSON.stringify(rowButtons)})].map(b => b.textContent.trim()), state: r.querySelector('[data-state]').dataset.state, text: r.textContent }; })()`) as { buttons: string[]; state: string; text: string };
   const checkRunning = checkRow.buttons.length === 1 && /^(実行中|承認待ち)（/.test(checkRow.buttons[0]!) && checkRow.state === "running" && checkRow.text.includes("動いている");
   assert(checkRunning, `#307 while checking: ${JSON.stringify(checkRow)}`);
   const inProgress = { report: report!.head.split("\n").length, lastTaskShown, checkTitle, checkRunning, waits };
@@ -483,12 +494,12 @@ try {
   const stopAll = async () => {
     for (const t of [...core.db.listTasksByStatus("running"), ...core.db.listTasksByStatus("waiting")]) { // waiting: on its approval
       await fetch(`${base}/api/tasks/${t.id}/abort`, { method: "POST" });
-      await until(() => !["running", "waiting"].includes(core.db.getTask(t.id)?.status ?? ""), "stage Task stopped");
+      await until(() => !isWorkingStatus(core.db.getTask(t.id)?.status ?? "idle"), "stage Task stopped");
     }
   };
   await stopAll();
   // a Ready row's last stage Task (#1045): the meta's #304, started above and stopped → 最後の Task: 中断, which opens it
-  const readyRow = (n: number) => `[...document.querySelectorAll('section[data-stage="ready"] .backlog-item')].find(r => r.querySelector('a').href === 'https://github.com/acme/app/issues/${n}')`;
+  const readyRow = (n: number) => `[...document.querySelectorAll('section[data-stage="ready"] .backlog-item')].find(r => r.querySelector('a').href === 'https://github.com/acme/app/issues/${n}')?.closest('.backlog-listrow')`;
   await click("再読込");
   await until(() => evaluate(`${read} && (${readyRow(304)}?.textContent ?? "").includes("最後の Task: 中断")`), "Ready #304's last Task");
   await clickIn(readyRow(304), "最後の Task:");
@@ -536,7 +547,7 @@ try {
   assert(prompts.at(-1)!.includes("pbi-complete/SKILL.md の「6. PBI を閉じる」") && prompts.at(-1)!.includes("PBI #307"), `close prompt: ${prompts.at(-1)}`);
   await click("Backlog");
   await until(() => evaluate(`${read} && [...(${ipRow(307)})?.querySelectorAll('button') ?? []].some(b => /^(実行中|承認待ち)（/.test(b.textContent.trim()))`), "backlog after 閉じる with #307 実行中");
-  const closeRow = await evaluate(`(() => { const r = ${ipRow(307)}; return { buttons: [...r.querySelectorAll('button')].map(b => b.textContent.trim()), text: r.textContent }; })()`) as { buttons: string[]; text: string };
+  const closeRow = await evaluate(`(() => { const r = ${ipRow(307)}; return { buttons: [...r.querySelectorAll(${JSON.stringify(rowButtons)})].map(b => b.textContent.trim()), text: r.textContent }; })()`) as { buttons: string[]; text: string };
   assert(closeRow.buttons.length === 1 && /^(実行中|承認待ち)（/.test(closeRow.buttons[0]!) && !closeRow.text.includes("閉じられる"), `#307 while closing: ${JSON.stringify(closeRow)}`);
   const closable = closableShown && closeTitle.startsWith("#307 閉じる: ");
   await stopAll();
@@ -654,7 +665,7 @@ try {
   await until(() => evaluate(`(() => { const rows = [...document.querySelectorAll('section[data-stage="ready"] .backlog-item')]; return rows.length === 1 && rows[0].querySelector('a').href.includes('/acme/lib/') && rows[0].textContent.includes('実装する'); })()`), "lib's Ready row");
   await click("実装する");
   await until(() => evaluate(`!document.querySelector('.backlog')`), "lib's Task screen");
-  const libTask = await until(() => core.db.listTasks().find((t) => t.workspaceId === libId && ["running", "waiting"].includes(t.status)) ?? null, "lib stage Task");
+  const libTask = await until(() => core.db.listTasks().find((t) => t.workspaceId === libId && isWorkingStatus(t.status)) ?? null, "lib stage Task");
   assert(libTask.title.startsWith("#304 実装: ") && libTask.runner === "codex" && libTask.cwd === libDir && prompts.at(-1)!.includes(".claude/skills/pbi-complete/SKILL.md に従い、PBI #304") && prompts.at(-1)!.includes("Switchboard のリポジトリ"), `lib task: ${libTask.title} ${libTask.cwd} ${prompts.at(-1)}`);
   await stopAll();
   // 共通に戻す (#1337): 実装 is one word again and the saved byKind is empty

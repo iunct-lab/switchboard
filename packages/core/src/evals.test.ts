@@ -208,7 +208,7 @@ describe("evalRequestDraft (#1221)", () => {
 
 /** A list row with a judge average (null = not judged) and a human rating (null = none). */
 const listRow = (taskId: string, average: number | null, o: { runner?: EvalsListRow["runner"]; workspaceId?: string | null; rating?: number } = {}): EvalsListRow => ({
-  taskId, title: taskId, runner: o.runner ?? "claude", workspaceId: o.workspaceId === undefined ? "w1" : o.workspaceId, status: "done", outcome: "unknown", updatedAt: 1, costUsd: 0, models: [], effort: null, rules: null,
+  taskId, title: taskId, runner: o.runner ?? "claude", workspaceId: o.workspaceId === undefined ? "w1" : o.workspaceId, status: "done", outcome: "unknown", updatedAt: 1, costUsd: 0, models: [], efforts: [], subagentEffort: null, rules: null,
   judge: average === null ? null : { average, scores: {}, rubric: "r@1", by: "x", ts: 1 },
   human: o.rating === undefined ? null : { rating: o.rating, comment: "" },
 });

@@ -7,7 +7,9 @@ import { DISK_NOTE, GITHUB_NOTE, lastStopWasDaemon, STOP_RESUME_PROMPT } from ".
 import { GITHUB_REMAINING_MIN } from "./backlog.ts";
 import type { GithubBudget } from "@switchboard/protocol";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
-import type { StopReport } from "./stops.ts";
+import { reportedLimit, type StopReport } from "./stops.ts";
+import type { StopRecord } from "@switchboard/protocol";
+import { isWorking } from "./task-status.ts";
 
 /**
  * Usage-limit auto-resume (#102). A subscription runner stops a turn when its window (Claude: 5 hours / 7 days) is
@@ -317,6 +319,11 @@ export class RateLimitResumer {
   private githubPending = new Set<string>();
   private turnEnds = new Map<string, number>();
   private unsubscribeForget: (() => void) | null = null;
+  private unsubscribeStops: (() => void) | null = null;
+  /** The reported usage-limit stop (#4408) each task's standing plan came from: a repeat of it while the plan stands is not a second stop. */
+  private reportedPlans = new Map<string, string>();
+  /** Tasks that reported a limit stop in the turn now running: its end keeps their count of consecutive stops. */
+  private reportedThisTurn = new Set<string>();
   private now: () => number;
   private prompt: string;
   private log: (m: string) => void;
@@ -351,6 +358,7 @@ export class RateLimitResumer {
   start(intervalMs = 30_000) {
     if (!this.unsubscribe) this.unsubscribe = this.tasks.onTurnEnd((taskId, task, turn) => this.onTurnEnd(taskId, task, turn));
     if (!this.unsubscribeForget) this.unsubscribeForget = this.tasks.onPlanForgotten((taskId) => this.forgetPlan(taskId));
+    if (!this.unsubscribeStops) this.unsubscribeStops = this.tasks.onStopRecorded((taskId, stop, prev) => this.planReported(taskId, stop, prev));
     if (this.timer) return;
     this.timer = setInterval(() => void this.tick(), intervalMs);
     this.timer.unref?.();
@@ -363,6 +371,8 @@ export class RateLimitResumer {
     this.unsubscribe = null;
     this.unsubscribeForget?.();
     this.unsubscribeForget = null;
+    this.unsubscribeStops?.();
+    this.unsubscribeStops = null;
   }
 
   /** The task's GitHub plans still waiting for their budget read are dropped; true when there was one. */
@@ -380,6 +390,9 @@ export class RateLimitResumer {
   /** Called on every turn end: records the stop (with the time) or forgets a task that got past it. */
   onTurnEnd(taskId: string, task: Task, turn: TurnEnd): void {
     const ours = this.resumedByUs.delete(taskId);
+    // a limit the turn reported (#4408) keeps the count of stops after it; a turn without one ends the plan it came from
+    const reported = this.reportedThisTurn.delete(taskId);
+    if (!reported) this.reportedPlans.delete(taskId);
     const probe = this.probing.get(taskId);
     this.probing.delete(taskId);
     const now = this.now();
@@ -396,7 +409,7 @@ export class RateLimitResumer {
         void this.planGithub(taskId, task, turn.githubLimit, ours, turn.githubLimitAt);
         return;
       }
-      this.stops.delete(taskId);
+      if (!reported) this.stops.delete(taskId);
       return;
     }
     const wait = stop.window ? { window: stop.window, since: now } : {};
@@ -438,6 +451,79 @@ export class RateLimitResumer {
   }
 
   /**
+   * A usage limit of another runner that the task reported as a stop (#4408, `runner#<runner>` in its conditions): the
+   * resume is planned as for the task's own runner's limit — at the reported time, else the runner's quota row that lifts
+   * after the stop, else the retry delay — with the same count of consecutive stops. The same stop reported again with a
+   * new time moves the plan without counting a stop; reported as anything but such a limit (resolved / exhausted, another
+   * reason, no `runner#`) takes the plan back when it is the task's
+   * newest reported limit in the DB (the one the plan came from), after a daemon restart too. Without a `runner#` condition nothing is planned.
+   */
+  private planReported(taskId: string, stop: StopRecord, prev: StopRecord | undefined): void {
+    try {
+      const task = this.db.getTask(taskId);
+      if (!task) return;
+      const standing = task.resumeReason === "limit" && task.resumeAt !== null;
+      const reported = reportedLimit(stop);
+      if (!reported) {
+        // the plan's stop no longer waits on a limit (resolved / exhausted, another reason, no runner#): its plan goes
+        if (!prev || prev === stop || !reportedLimit(prev)) return;
+        if (this.reportedOwner(taskId, prev) !== stop.id) return;
+        this.reportedPlans.delete(taskId);
+        if (standing) this.tasks.setResumeAt(taskId, null);
+        return;
+      }
+      const same = this.reportedPlans.get(taskId) === stop.id && standing;
+      // the same report again while its plan stands (a note and a fence of one turn) is not a second stop
+      if (same && prev === stop) return;
+      // a repeat of another stop does not take a standing plan (it is not written to the DB again, so the owner read after a restart would not see it)
+      if (prev === stop && standing && this.reportedOwner(taskId) !== stop.id) return;
+      const now = this.now();
+      // a repeat of an older stop that plans (no other plan stands) is written again, so the DB's newest stays the plan's owner
+      if (prev === stop && this.reportedOwner(taskId) !== stop.id) this.tasks.record(taskId, { t: "stop.record", stop: { ...stop, at: Date.now() } });
+      const resetsAt = reported.resetsAt ?? this.db.quotaFor(reported.runner).map((w) => w.resetsAt * 1000).filter((at) => at > stop.at).sort((a, b) => a - b)[0];
+      // a new time for the stop whose plan stands moves the plan, not the count
+      const count = same ? (this.stops.get(taskId) ?? 1) : this.resumedByUs.has(taskId) ? (this.stops.get(taskId) ?? 0) + 1 : 1;
+      this.stops.set(taskId, count);
+      this.reportedThisTurn.add(taskId);
+      const tunables = this.tunables();
+      if (count > tunables.maxLimitStops) {
+        // no more resumes: a plan another stop made in this turn goes too (this stop, written last, would be read as its owner)
+        if (standing) this.tasks.setResumeAt(taskId, null);
+        this.tasks.record(taskId, { t: "status", text: `別のランナー（${reported.runner}）の使用上限で停止: ${stop.evidence}。自動再開の後 ${count - 1} 回続けて止まったので、これ以上は再開しません。返信すると再開します` });
+        return;
+      }
+      const at = planResumeAt({ resetsAt, source: resetsAt ? "banner" : "none", text: stop.evidence }, now, count, tunables);
+      this.tasks.setResumeAt(taskId, at, "limit");
+      this.reportedPlans.set(taskId, stop.id);
+      const action = this.opts.enabled(task.runner) ? `${fmtTime(at, now)} に自動再開します` : `${fmtTime(at, now)} に再開できます（自動再開は OFF — Home のランナー設定で ON にするか、返信で再開）`;
+      this.tasks.record(taskId, { t: "status", text: `別のランナー（${reported.runner}）の使用上限で停止: ${stop.evidence}。${action}` });
+      this.log(`ratelimit: ${taskId} reported the ${reported.runner} limit; resume at ${new Date(at).toISOString()}`);
+    } catch (e) {
+      this.log(`ratelimit: ${taskId} reported limit not planned: ${String((e as Error).message ?? e)}`);
+    }
+  }
+
+  /**
+   * The stop a reported-limit plan belongs to (#4408): the newest stop of the task whose latest record in the DB is still a
+   * waiting reported limit (every plan's stop is written last — `planReported` writes a repeat again when it plans), so it
+   * holds after a daemon restart. `before` stands for its stop's latest
+   * record before the report just written that is no longer such a limit.
+   */
+  private reportedOwner(taskId: string, before?: StopRecord): string | undefined {
+    const records = this.db.listStopRecords([taskId]); // in the order written
+    // `before`: the stop's own record just written (its resolved / exhausted report) is left out
+    const own = before ? records.map((r) => r.id).lastIndexOf(before.id) : -1;
+    if (own >= 0) records.splice(own, 1);
+    // each stop at the place of its latest record, so the order is the order written (not `at`, which can tie)
+    const latest = new Map<string, StopRecord>();
+    for (const r of records) {
+      latest.delete(r.id);
+      latest.set(r.id, r);
+    }
+    return [...latest.values()].filter((r) => reportedLimit(r)).at(-1)?.id;
+  }
+
+  /**
    * A turn whose commands met GitHub's API limit and ended by itself (#550): planned at GitHub's reset (+ margin) when
    * the budget says the limit is still on; a short retry when it is back already; a fallback delay when it cannot be
    * read. The budget is read after the turn, so a turn the person started meanwhile is left alone. A limit met a whole
@@ -453,7 +539,7 @@ export class RateLimitResumer {
     // turn of the task ended (its own marker replaced this one): a plan on the old turn would be a wrong one
     if (!this.githubPending.delete(marker) || (this.turnEnds.get(taskId) ?? 0) !== n) return;
     const cur = this.db.getTask(taskId);
-    if (!cur || cur.status === "running" || cur.status === "waiting") return;
+    if (!cur || isWorking(cur, "slot")) return;
     const now = this.now();
     const limited = budget !== null && budget.remaining < GITHUB_REMAINING_MIN;
     if (budget !== null && !limited && limitAt !== undefined && now - limitAt >= GITHUB_WINDOW_MS) {
@@ -519,7 +605,7 @@ export class RateLimitResumer {
       if (t.resumeAt === null) continue;
       const early = t.resumeAt > now && this.liftedEarly(t);
       if (t.resumeAt > now && !early) continue;
-      if (t.status === "running" || t.status === "waiting" || this.sending.has(t.id)) continue;
+      if (isWorking(t, "slot") || this.sending.has(t.id)) continue;
       // before the auto-resume setting: with it off nothing is sent, but the stop still ends when the space is back
       if (t.resumeReason === "disk") {
         const free = this.diskFree();
@@ -550,7 +636,7 @@ export class RateLimitResumer {
   async resumeNow(taskId: string): Promise<Task> {
     const t = this.db.getTask(taskId);
     if (!t) throw new Error(`task ${taskId} not found`);
-    if (t.status === "running" || t.status === "waiting") throw new Error("the task is still running");
+    if (isWorking(t, "slot")) throw new Error("the task is still running");
     if (!t.runnerSessionId) throw new Error("the task has no runner session to resume");
     if (this.sending.has(taskId)) throw new Error("a resume is already in flight");
     this.sending.add(taskId);

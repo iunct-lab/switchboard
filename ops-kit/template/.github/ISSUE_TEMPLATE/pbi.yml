@@ -46,7 +46,7 @@ body:
     id: story_points
     attributes:
       label: Story Points
-      description: 相対見積り（フィボナッチ）。基準にする閉じた PBI は root の CLAUDE.md の「Story Points の基準」。13 は「大きすぎる」の印で、lint が弾くので分割してから入れる。作成後に `ops-kit backlog set <num> "Story Points" <N>`（数字だけ）で Project にも入れる。
+      description: 尺度と付け方は `issue-workflow` の「### Story Points」。作成後に `ops-kit backlog set <num> "Story Points" <N>`（数字だけ）で Project にも入れる。
       options: ["1", "2", "3", "5", "8", "13"]
     validations:
       required: true

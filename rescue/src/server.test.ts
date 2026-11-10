@@ -606,6 +606,7 @@ test("the status lists the running and waiting tasks a restart would stop, and n
   const busyTasks = [
     { id: "t1", title: "走っている <b>Task</b>", status: "running" },
     { id: "t2", title: "承認を待つ Task", status: "waiting" },
+    { id: "t4", title: "裏で動く Task", status: "background" },
     { id: "t3", title: "終わった Task", status: "done" }, // a daemon's answer is not trusted as is
   ];
   const daemon = Bun.serve({
@@ -627,6 +628,7 @@ test("the status lists the running and waiting tasks a restart would stop, and n
     expect(s.stopping).toEqual([
       { id: "t1", title: "走っている <b>Task</b>", status: "running" },
       { id: "t2", title: "承認を待つ Task", status: "waiting" },
+      { id: "t4", title: "裏で動く Task", status: "background" },
     ]);
     expect(seen).toContain("Bearer sb_secret"); // the daemon's token, as checkDaemon sends it
     expect(asked).toContain("GET /api/health");

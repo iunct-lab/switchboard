@@ -28,6 +28,16 @@ Nothing else is sent: no token, no credentials, no host file, no recordings.
 
 The result is the same as running every step on the host, and the host's memory peak is lower by what the type check and `bun test` held.
 
+## The host's heavy slot
+
+Without `sb-offload`, a local-ci run holds one heavy slot (`ops-kit heavy`) for its whole run. With it, the run holds no slot while it makes the work tree, merges and chooses the tests, nor while it waits for the builds: it holds one only for the steps that stay on the host. When none of the CI's steps goes to a build (another repository's CI with none of those steps), every step stays on the host, inside the slot. The builds start before the slot is asked for, so a wait for the slot does not hold them back. The builds use none of the host's memory, so another heavy job may run while a run waits for them.
+
+## test-changed
+
+`bun scripts/test-changed.ts` (the tests a Task runs for its change) uses the same parts. With `sb-offload`, the selected test files that read no recording go to one `small` build (`placeSteps`, `groupScript`, `parseGroup`) and the files that read recordings run on the host; a full run sends everything but the recording files. The script takes the heavy slot itself, only around the host's files, and holds none while it waits for the build; when no file stays on the host it takes none. Without `sb-offload` every file runs on the host inside the slot, as before. A build that fails, times out or is stopped fails the run with its reason line; the host does not rerun it. The type check stays on the host.
+
+Unlike local-ci, which sends a fresh checkout, test-changed sends the Task's work tree as it is: `sb-offload` ships the tracked files and the untracked files that are not ignored. Do not leave a file with a secret in the work tree (keep scratch files in a `mktemp -d` directory outside it). When the build passes, the script logs one line with the number of files that ran off the host and the pass count, so a pass can be told from a skip.
+
 ## When a build fails
 
 A build's steps print a begin and an exit mark each, and local-ci reads every step's output, exit code and seconds from the build's log, so a step that failed off the host is listed on the PR like one that failed on the host: its name, its `(fail)` lines, and its whole output in the log dir under `~/.cache`. When the build itself ends without the step's exit mark, the step fails with `sb-offload`'s own code and one line naming it: `sb-offload: exit 124（時間切れ）` (the build's time limit), `exit 130（中断）` (stopped), any other code `（ビルドの失敗）` (1: the build failed before the command ran, its state could not be read, or no build freed up in 15 minutes). The steps after it in that build did not run and are not listed.

@@ -1,4 +1,4 @@
-import { StopRecord, type StopChange, type StopNext, type StopSummary, type Task } from "@switchboard/protocol";
+import { RunnerId, StopRecord, type StopChange, type StopNext, type StopSummary, type Task } from "@switchboard/protocol";
 import { z } from "zod";
 import type { Db } from "./db.ts";
 
@@ -253,6 +253,24 @@ export function reserveStopRetry(prev: StopRecord | undefined, next: Pick<StopRe
   return { ok: true, attempt: used + 1, delayMs: RETRY_DELAYS_MS[used]! };
 }
 
+/** The runner a usage-limit stop names in its conditions (#4408): `runner#codex` with the time the limit lifts as the value. */
+export const RUNNER_LIMIT_KEY = /^runner#(.+)$/;
+
+/**
+ * The other runner's usage limit a stop reports (#4408): a waiting `usage-limit` stop with a `runner#<runner>` condition.
+ * `resetsAt` (ms) is the condition's value read as a time; `unknown` or anything unreadable leaves it out.
+ */
+export function reportedLimit(stop: StopRecord): { runner: RunnerId; resetsAt?: number } | undefined {
+  if (stop.reason !== "usage-limit" || stop.state !== "waiting") return undefined;
+  for (const c of stop.conditions) {
+    const runner = RunnerId.safeParse(RUNNER_LIMIT_KEY.exec(c.key)?.[1]);
+    if (!runner.success) continue;
+    const at = Date.parse(c.value);
+    return Number.isNaN(at) ? { runner: runner.data } : { runner: runner.data, resetsAt: at };
+  }
+  return undefined;
+}
+
 /**
  * What every runner start is told (#949): how to report a stop (task.note's `stop`, or a `switchboard-stop` fence), the
  * retry rule, not to write beyond the request (#1987), and the stops of its work still open with the retries left. The runner retries its own tools itself;
@@ -266,7 +284,7 @@ export function stopRecoveryPrompt(open: StopSummary[]): string {
     '{"id":"<この停止の短い名前>","op":"<操作>","target":"<対象>","reason":"usage-limit|github-limit|transient|auth|permission|input|decision|depends|disk-full|unknown","safety":"read-only|before-effect|unknown","evidence":"<根拠>","state":"waiting|retrying|exhausted|resolved","conditions":[{"key":"pr#12","value":"open","met":false}],"actions":[{"attempt":1,"what":"<したこと>","ok":null}]}',
     "```",
     `再実行してよいのは、一時障害（通信の切断・タイムアウト・HTTP 502/503/504）で、読み取り専用か何かする前に失敗したと確かめられる操作だけ。同じ操作を最大 ${RETRY_DELAYS_MS.length} 回（${RETRY_DELAYS_MS.map((d) => `${d / 1000} 秒後`).join("、")}）まで。再実行の前に state "retrying" と試行番号を報告し、承認はいつもどおり毎回受ける。成功したら "resolved"、使い切ったら "exhausted" を報告して止まる。認証・権限・入力のエラー、ディスクの空き切れや、何かしたか分からない操作は再実行しない。Workspace MCP の exec.run は自分で再試行するので、その失敗は再実行しない。`,
-    "依存の待ち（depends）は待っている PR・Issue を conditions に pr#N / issue#N で書く（ほかの停止は conditions を省く）。並列ガードの overlap が重なり（defer）で進めないと言ったら、その出力の conditions をそのまま写す（前提の待ちを定期実行に引き渡すときの書き方は、手順にあればそれに従う）。",
+    "依存の待ち（depends）は待っている PR・Issue を conditions に pr#N / issue#N で、使用上限（usage-limit）は止めたランナーを runner#<ランナー>（value は戻る時刻を ISO 8601 のタイムゾーンつきで、分からなければ unknown）で書く（ほかの停止は conditions を省く）。並列ガードの overlap が重なり（defer）で進めないと言ったら、その出力の conditions をそのまま写す（前提の待ちを定期実行に引き渡すときの書き方は、手順にあればそれに従う）。",
     'ランナーの自動承認や権限に拒まれて止まった（reason "permission"）なら、拒まれた操作だけを名指しした許可文を "grant" に 1 文で書く（例 "grant":"<対象> に <内容> を登録することだけ許可します"。値や秘密は書かない）。利用者が選べば、その許可文が利用者の返信として 1 回だけ届く。',
     "依頼の範囲外の書き込み（計画モードでの commit・push・マージ、リポジトリの CLAUDE.md が認めていない昇格、依頼に無い Issue を閉じる）はしない。要るなら判断待ちで聞く。",
   ];

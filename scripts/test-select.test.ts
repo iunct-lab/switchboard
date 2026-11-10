@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { buildImportGraph, classify, findStaleReads, findUndeclared, formatSelection, parseReads, select, selectFrom, selectLoaded } from "./test-select";
+import { buildImportGraph, classify, findStaleReads, findUndeclared, formatSelection, parseReads, select, selectFrom, selectPerf } from "./test-select";
 
 /** 偽のツリー。パス → 中身。 */
 function tree(src: Record<string, string>) {
@@ -112,6 +112,29 @@ describe("select", () => {
   });
 });
 
+describe("テストの共通部品", () => {
+  test("import で読むテストと test-reads で宣言したテストだけを選び、理由は共通部品で始まる", () => {
+    const { graph, tests } = tree({
+      "core/x-fake-github.ts": "",
+      "core/a.test.ts": `import "./x-fake-github";`,
+      "core/b.test.ts": "",
+      "core/c.test.ts": "",
+    });
+    const s = select(["core/x-fake-github.ts"], graph, tests, new Map([["core/b.test.ts", ["core/x-fake-github.ts"]]]));
+    expect(s.full).toBeUndefined();
+    expect(s.tests).toEqual(["core/a.test.ts", "core/b.test.ts"]);
+    expect(s.reasons["core/a.test.ts"]).toBe("共通部品 core/x-fake-github.ts を読む: core/x-fake-github.ts → core/a.test.ts");
+    expect(s.reasons["core/b.test.ts"]).toStartWith("共通部品 core/x-fake-github.ts を読む: ");
+  });
+
+  test("どのテストも読まない共通部品の変更は、テストを選ばず全テストにも倒さない", () => {
+    const { graph, tests } = tree({ "core/p-harness.ts": "", "core/a.test.ts": "" });
+    const s = select(["core/p-harness.ts"], graph, tests);
+    expect(s.full).toBeUndefined();
+    expect(s.tests).toEqual([]);
+  });
+});
+
 describe("classify", () => {
   test.each([
     ["package.json", "依存の定義や設定"],
@@ -123,11 +146,6 @@ describe("classify", () => {
     ["scripts/ci.ts", "CI の手順"],
     ["scripts/test-select.ts", "判定の道具自体"],
     ["scripts/test-select.test.ts", "判定の道具自体"],
-    ["rescue/src/fixture.ts", "テストの共通部品"],
-    ["packages/core/fixtures/github-import.ts", "テストの共通部品"],
-    ["packages/adapters/adk/fixtures/fake-adk.ts", "テストの共通部品"],
-    ["packages/core/src/backlog-fake-github.ts", "テストの共通部品"],
-    ["packages/core/src/policies-harness.ts", "テストの共通部品"],
     ["LICENSE", "分類できないファイル"],
     ["apps/web/public/icon.png", "分類できないファイル"],
   ])("%s → %s", (path, why) => {
@@ -138,7 +156,8 @@ describe("classify", () => {
     for (const p of ["README.md", ".claude/skills/new-repo/SKILL.md", "apps/web/public/sw.js", "aws/host/bootstrap.sh", "compose.yaml", "ops.config.json", "aws/host/switchboard.service"]) expect(classify(p)).toBeUndefined();
   });
 
-  test("普通のコードとテストは倒さない", () => {
+  test("普通のコードとテスト、テストの共通部品は倒さない", () => {
+    for (const p of ["rescue/src/fixture.ts", "packages/core/fixtures/github-import.ts", "packages/adapters/adk/fixtures/fake-adk.ts", "packages/core/src/backlog-fake-github.ts", "packages/core/src/policies-harness.ts"]) expect(classify(p)).toBeUndefined();
     expect(classify("packages/core/src/db.ts")).toBeUndefined();
     expect(classify("apps/web/src/App.tsx")).toBeUndefined();
     expect(classify("packages/core/src/db.test.ts")).toBeUndefined();
@@ -264,29 +283,21 @@ describe("selectFrom / formatSelection", () => {
   });
 });
 
-describe("selectLoaded", () => {
-  const src: Record<string, string> = {
-    "scripts/perf-bench.ts": `import "../packages/core/src/server.ts";`,
-    "packages/core/src/server.ts": "",
-    "packages/core/src/server.test.ts": `import "./server.ts";`,
-    "apps/web/src/App.tsx": "",
-    "docs/design/perf.md": "",
-  };
-  const loaded = (...changed: string[]) => selectLoaded(changed, Object.keys(src), (p) => src[p]!);
+describe("selectPerf（変更が perf-bench に届くか、#4124）", () => {
+  const src: Record<string, string> = { "scripts/perf-bench.ts": "", "docs/design/a.md": "", "scripts/person-deploy/x.sh": "", "apps/web/src/a.ts": "", "packages/core/src/b.ts": "", "scripts/perf-budget.json": "{}" };
+  const pick = (...changed: string[]) => selectPerf(changed, Object.keys(src), (p) => src[p]!);
 
-  test("perf-bench に届かない変更（文書・テストだけ）は回さない", () => {
-    expect(loaded("docs/design/perf.md")).toEqual({ run: false, reason: "変更 1 ファイルのどれも scripts/perf-bench.ts に届かない" });
-    expect(loaded("docs/design/perf.md", "packages/core/src/server.test.ts").run).toBe(false);
+  test("docs と person-deploy だけの範囲は届かない", () => {
+    expect(pick("docs/design/a.md", "scripts/person-deploy/x.sh", "aws/README.md").run).toBe(false);
   });
 
-  test("import で届く変更と、宣言した画面は回す", () => {
-    expect(loaded("docs/design/perf.md", "packages/core/src/server.ts")).toEqual({ run: true, reason: "packages/core/src/server.ts → scripts/perf-bench.ts" });
-    expect(loaded("apps/web/src/App.tsx")).toEqual({ run: true, reason: "apps/web/src/App.tsx ← scripts/perf-bench.ts（test-reads）" });
+  test.each(["apps/web/src/a.ts", "packages/core/src/b.ts", "scripts/perf-budget.json"])("%s は届く", (f) => {
+    expect(pick("docs/design/a.md", f).run).toBe(true);
   });
 
-  test("判定できない変更と、読めない依存は回す", () => {
-    expect(loaded("bun.lock")).toEqual({ run: true, reason: "bun.lock: 依存の定義や設定" });
-    expect(selectLoaded(["docs/design/perf.md"], ["bad.ts", "scripts/perf-bench.ts"], (p) => (p === "bad.ts" ? "import {" : "")).run).toBe(true);
+  test("変更の一覧が空・読めない依存は届く側に倒す", () => {
+    expect(pick().run).toBe(true);
+    expect(selectPerf(["docs/design/a.md"], ["x.ts"], () => "import {").run).toBe(true);
   });
 });
 
@@ -309,17 +320,6 @@ describe("実行例（このリポジトリの実物）", () => {
 
   test("シェルは宣言したテストを理由つきで選ぶ", () => {
     expect(run("aws/host/bootstrap.sh")).toContain("aws/host/host.test.ts  aws/host/bootstrap.sh ← aws/host/host.test.ts（test-reads）");
-  });
-
-  test.each([
-    ["docs/design/perf.md", "loaded: skip  変更 1 ファイルのどれも scripts/perf-bench.ts に届かない"],
-    ["packages/core/src/server.ts", "loaded: run  packages/core/src/server.ts → scripts/perf-bench.ts"],
-    ["rescue/src/promote.ts", "loaded: run  rescue/src/promote.ts → scripts/perf-load.ts → scripts/perf-bench.ts"],
-    ["apps/web/src/App.tsx", "loaded: run  apps/web/src/App.tsx ← scripts/perf-bench.ts（test-reads）"],
-    ["scripts/perf-budget.json", "loaded: run  scripts/perf-budget.json ← scripts/perf-bench.ts（test-reads）"],
-    ["packages/core/config/routing.yaml", "loaded: run  packages/core/config/routing.yaml ← scripts/perf-bench.ts（test-reads）"],
-  ])("--loaded %s", (path, line) => {
-    expect(run("--loaded", path).trimEnd()).toBe(line);
   });
 
   test("db.ts は依存するテストを選ぶ", () => {

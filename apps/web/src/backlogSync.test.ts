@@ -1,7 +1,7 @@
 // test-reads: apps/web/src/scheduleActions.ts apps/web/src/scheduleResult.ts apps/web/src/scheduleEdit.ts apps/web/src/i18n.ts apps/web/src/i18n/backlog.ts
 import { describe, expect, test } from "bun:test";
 import type { BacklogIssueDetail, BacklogSyncInfo } from "@switchboard/protocol";
-import { backlogHeading, createWord, decisionQuestion, syncSummary, draftKey, heldIssueText, issueHref, savedWords, editOf, formAfterRead, formOf, githubSyncText, labelList, loadDraft, loadNewIssueDraft, PROJECT_SETUP_DOC, rebaseForm, syncLine, valueText, workspaceErrorGuide } from "./backlogSync.ts";
+import { backlogHeading, createWord, decisionQuestion, syncSummary, draftKey, heldIssueText, issueHref, savedWords, editOf, formAfterRead, formOf, githubSyncText, heldEditName, labelList, loadDraft, loadNewIssueDraft, PROJECT_SETUP_DOC, rebaseForm, syncLine, valueText, workspaceErrorGuide } from "./backlogSync.ts";
 
 const fmt = (ms: number) => `t${ms}`;
 const info = (over: Partial<BacklogSyncInfo>): BacklogSyncInfo => ({ state: "synced", reason: null, lastSuccessfulSync: 1000, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A", ...over });
@@ -127,6 +127,13 @@ test("a creation says what became of it", () => {
   expect(createWord("error")).toContain("作成できていません");
 });
 
+test("heldEditName: a create, a comment and a field edit each name themselves (a comment is not 新規作成)", () => {
+  const held = (kind: "create" | "set" | "comment", field: string | null) => ({ operation: "o", kind, field, status: "unknown" as const, reason: null, updatedAt: 0, conflict: null });
+  expect(heldEditName(held("create", null))).toBe("新規作成");
+  expect(heldEditName(held("comment", null))).toBe("コメント");
+  expect(heldEditName(held("set", "title"))).toBe("title");
+});
+
 test("heldIssueText: number, title, the counts that are not zero, Closed", () => {
   const held = (over: Partial<Parameters<typeof heldIssueText>[0]>) => ({ number: 354, title: "題", url: "u", closed: false, state: "pending" as const, pendingCount: 0, conflictCount: 0, ...over });
   // a conflict is one of the operations not sent: 未送信 counts the others
@@ -171,19 +178,25 @@ test("savedWords names GitHub only for a workspace that sends to it", () => {
 
 describe("backlogHeading (#2362)", () => {
   test("names GitHub only for GitHub workspaces", () => {
-    expect(backlogHeading(1000, false, ["github", "switchboard"], fmt)).toBe("t1000 に読み込み（GitHub の workspace は GitHub から取得）");
+    expect(backlogHeading(1000, null, ["github", "switchboard"], fmt)).toBe("t1000 に読み込み（GitHub の workspace は GitHub から取得）");
   });
   test("GitHub in view (or not known yet): the import's time", () => {
-    expect(backlogHeading(1000, false, ["github"], fmt)).toBe("t1000 に GitHub から取得");
-    expect(backlogHeading(1000, true, null, fmt)).toBe("t1000 に GitHub から取得 · 読み込み中…");
+    expect(backlogHeading(1000, null, ["github"], fmt)).toBe("t1000 に GitHub から取得");
+    expect(backlogHeading(1000, "refresh", null, fmt)).toBe("t1000 に GitHub から取得 · GitHub から取り込み中…");
   });
   test("only workspaces kept here: not \"from GitHub\"", () => {
-    expect(backlogHeading(1000, false, ["switchboard"], fmt)).toBe("Switchboard に保存");
-    expect(backlogHeading(1000, true, ["switchboard"], fmt)).toBe("Switchboard に保存 · 読み込み中…");
+    expect(backlogHeading(1000, null, ["switchboard"], fmt)).toBe("Switchboard に保存");
+    expect(backlogHeading(1000, "refresh", ["switchboard"], fmt)).toBe("Switchboard に保存 · 読み込み中…");
+  });
+  test("#4119: opened says the saved copy; a reload with a GitHub workspace says importing; one kept here only says loading", () => {
+    expect(backlogHeading(1000, "open", ["github"], fmt)).toBe("t1000 に GitHub から取得 · 保存済みを読み込み中…");
+    expect(backlogHeading(1000, "open", ["switchboard"], fmt)).toBe("Switchboard に保存 · 保存済みを読み込み中…");
+    expect(backlogHeading(1000, "refresh", ["github", "switchboard"], fmt)).toBe("t1000 に読み込み（GitHub の workspace は GitHub から取得） · GitHub から取り込み中…");
+    expect(backlogHeading(1000, "refresh", ["switchboard"], fmt)).toBe("Switchboard に保存 · 読み込み中…");
   });
   test("nothing read yet", () => {
-    expect(backlogHeading(null, true, ["github"], fmt)).toBe("読み込み中…");
-    expect(backlogHeading(null, false, ["switchboard"], fmt)).toBe("");
+    expect(backlogHeading(null, "open", ["github"], fmt)).toBe("読み込み中…");
+    expect(backlogHeading(null, null, ["switchboard"], fmt)).toBe("");
   });
 });
 
@@ -212,7 +225,7 @@ const s = { id: "s", title: "x", cron: "0 3 * * *", workspaceId: "w", runner: "c
 console.log(JSON.stringify([
   [l.label, ...l.parts],
   heldIssueText({ number: 354, title: "T", url: "u", closed: true, state: "conflict", pendingCount: 3, conflictCount: 1 }),
-  backlogHeading(1000, true, ["github"], fmt),
+  backlogHeading(1000, "refresh", ["github"], fmt),
   createWord("pending"),
   scheduleActionLabel("backlog-next"),
   scheduleResultLine({ action: "secret-scan", lastResult: { at: 0, repos: 4, hits: 2, failed: 3, lines: [] } }).replace(/\\d+\\/\\d+ \\d+:\\d+/, "D"),
@@ -223,7 +236,7 @@ console.log(JSON.stringify([
     expect(JSON.parse(r.stdout.toString())).toEqual([
       ["Waiting to send", "Last success: none (not read)", "Not sent: 2", "Not read yet", "Waiting until t5000"],
       "#354 T (Conflicts: 1 · Not sent: 2 · Closed)",
-      "Fetched from GitHub at t1000 · Loading…",
+      "Fetched from GitHub at t1000 · Importing from GitHub…",
       "Creation waiting to send",
       "Advance the backlog",
       "Last scan D: repositories 4 / hits 2 / could not scan 3",

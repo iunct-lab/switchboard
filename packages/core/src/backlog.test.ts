@@ -1,13 +1,13 @@
 // test-reads: packages/core/fixtures/ ops.config.json scripts/parallel-guard.ts ops-kit/processes/p0-pipeline.md
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { copyFileSync, cpSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, Backlog, BacklogAction, BacklogIssueDetail, BacklogQueue, BacklogSource, BacklogItem, RunnerAdapter, StartOptions, Task, TaskStatus } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
-import { loadProcess, parseProcessDef } from "./process-defs.ts";
+import { listProcesses, loadProcess, parseProcessDef } from "./process-defs.ts";
 import type { Suggester } from "./routing.ts";
-import { startServer, type CoreServer } from "./server.ts";
+import { startServer, type CoreServer, type StartServerOptions } from "./server.ts";
 import { taskAllowRules } from "./tasks.ts";
 import { Db } from "./db.ts";
 import { saveQueue } from "./backlog-queue.ts";
@@ -18,7 +18,7 @@ import { fakeGh as fakeKitGh } from "../../../ops-kit/src/gh.ts";
 import { ghBoard, overlap, storedMaterial } from "../../../scripts/parallel-guard.ts";
 import { fmtTime } from "./ratelimit.ts";
 import { delegatedNote } from "./evals.ts";
-import { answerStoredDecision, BacklogEditError, checkFieldTypes, buildDirectPrompt, buildStartPrompt, subagentModelAlias, localBacklogSource, canStartStoredBacklog, screenAnswer, confirmationsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, onHoldIn, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld } from "./backlog.ts";
+import { answerStoredDecision, BacklogEditError, checkFieldTypes, buildDirectPrompt, buildStartPrompt, subagentModelAlias, localBacklogSource, canStartStoredBacklog, screenAnswer, confirmationsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, onHoldIn, chooseProcess, flowHeldIn, flowHeldLine, flowRunning, flowStopped, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld, storedIssueHeads, readStoredIssue, editStoredIssue } from "./backlog.ts";
 
 // the writer of the waits (#817), read at run time: scripts/ is not type-checked under core's settings
 const guard = "../../../scripts/parallel-guard.ts";
@@ -127,11 +127,11 @@ afterEach(async () => {
   openPulls = [];
   if (savedProjectUrl !== undefined) process.env.SWITCHBOARD_PROJECT_URL = savedProjectUrl;
 });
-async function boot(gh: GhRunner, adapter: RunnerAdapter | RunnerAdapter[] = { id: "claude", detect: async () => ({ available: false }), start() { throw new Error("no runs"); } }, env: Record<string, string> = {}, llmSuggester?: () => Suggester, outer: (gh: GhRunner) => GhRunner = (g) => g) {
+async function boot(gh: GhRunner, adapter: RunnerAdapter | RunnerAdapter[] = { id: "claude", detect: async () => ({ available: false }), start() { throw new Error("no runs"); } }, env: Record<string, string> = {}, llmSuggester?: () => Suggester, outer: (gh: GhRunner) => GhRunner = (g) => g, extra: Partial<StartServerOptions> = {}) {
   home = mkdtempSync(join(tmpdir(), "sb-backlog-"));
   const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0", ...env });
   // as the daemon starts: every workspace is imported at boot (#885); the tests begin once it is stored
-  core = await startServer(cfg, [adapter].flat(), { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: FAKE_ORIGIN, gh: outer(importing(gh, () => openPulls)), llmSuggester, backlogAutoImport: true });
+  core = await startServer(cfg, [adapter].flat(), { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: FAKE_ORIGIN, gh: outer(importing(gh, () => openPulls)), llmSuggester, backlogAutoImport: true, ...extra });
   const base = `http://127.0.0.1:${core.server.port}`;
   await refreshed(base, false);
   return base;
@@ -1468,7 +1468,7 @@ test("edit (#3811): a field value that does not fit the Project's field is refus
   });
   const r = await patch(base, 304, { fields: { "Story Points": "abc" } });
   expect(r.status).toBe(422);
-  expect(((await r.json()) as { error: string }).error).toMatch(/整数だけ/);
+  expect(((await r.json()) as { error: string }).error).toMatch(/選択肢 'abc'/)  // the config's choices first (#3795); the Project's type is read for what has none;
   expect((await patch(base, 304, { fields: { Status: "Done" } })).status).toBe(422);
   expect(core!.db.listPendingBacklogOperations()).toEqual([]);
   // an empty passes (Due has no value, so nothing to send for it); a fitting value is stored
@@ -1476,7 +1476,7 @@ test("edit (#3811): a field value that does not fit the Project's field is refus
   expect(core!.db.listPendingBacklogOperations().map((o) => o.field)).toEqual(["field:Story Points"]);
   // GitHub not reached: stored, the send checks it last
   down.on = true;
-  expect((await patch(base, 304, { fields: { "Story Points": "abc" } })).status).toBe(202);
+  expect((await patch(base, 304, { fields: { Due: "2026/11/04" } })).status).toBe(202);
   // another repository waited for (a GitLab one): this one's values are still checked
   down.on = false;
   const db = core!.db;
@@ -1735,6 +1735,24 @@ test("retry: a failed set / comment / create goes back to pending; one not faile
   expect(db.getBacklogOperation(other.id)).toMatchObject({ status: "failed", attempt: 3 });
 });
 
+test("cancel: a comment inside its send window is taken back (202); again, past the window, or not a comment is 409; with an edit 400 (#3719)", async () => {
+  const base = await boot(fakeGh().gh);
+  const db = core!.db;
+  expect((await fetch(`${base}/api/backlog/304/comment`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), text: "取り消すコメント" }) })).status).toBe(202);
+  expect((await patch(base, 304, { title: "コメントでない操作" })).status).toBe(202);
+  const ops = db.listPendingBacklogOperations();
+  const comment = ops.find((o) => o.kind === "comment")!;
+  const title = ops.find((o) => o.field === "title")!;
+  const cancel = (operation: string, extra = {}) => patch(base, 304, { cancel: { operation }, ...extra });
+  expect((await cancel(comment.id, { title: "ついで" })).status).toBe(400);
+  expect((await cancel(title.id)).status).toBe(409);
+  const r = await cancel(comment.id);
+  expect(r.status).toBe(202);
+  expect(await r.json()).toEqual({ operation: comment.id });
+  expect(db.getBacklogOperation(comment.id)).toMatchObject({ status: "done", error: "送る前に取り消しました" });
+  expect((await cancel(comment.id)).status).toBe(409);
+});
+
 test("create: a new Issue is kept with a local id, read and edited by it before it has a number; it is not in the list yet", async () => {
   const base = await boot(fakeGh().gh);
   // during a limit: nothing is sent, so the create can still be changed
@@ -1752,11 +1770,16 @@ test("create: a new Issue is kept with a local id, read and edited by it before 
   expect((await fetch(`${base}/api/backlog`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), title: " " }) })).status).toBe(400);
 });
 
-test("send: an answer kept is sent to GitHub at once; after a restart one that was out is looked for, not posted again", async () => {
+test("send: an answer kept is sent to GitHub once its window has passed; after a restart one that was out is looked for, not posted again", async () => {
   const fake = fakeGh();
   const base = await boot(fake.gh);
   const posts = () => fake.calls.filter((a) => a[1] === "repos/acme/app/issues/306/comments" && a.includes("POST")).length;
   expect((await fetch(`${base}/api/backlog/306/answer`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), text: "すぐ送る" }) })).status).toBe(202);
+  // inside its 60 s window nothing is posted (#3719); the window over, the next send run posts it
+  await Bun.sleep(50);
+  expect(posts()).toBe(0);
+  core!.db.sqlite.exec("UPDATE backlog_operations SET retry_at = NULL");
+  expect((await patch(base, 306, { title: "送りを促す" })).status).toBe(202);
   for (let i = 0; i < 100 && posts() === 0; i++) await Bun.sleep(10);
   expect(posts()).toBe(1);
 
@@ -1766,6 +1789,7 @@ test("send: an answer kept is sent to GitHub at once; after a restart one that w
   db.sqlite.exec("DELETE FROM backlog_operations; DELETE FROM backlog_records WHERE remote IS NULL; UPDATE backlog_records SET local = NULL");
   db.setBacklogRetryAt(db.getWorkspaceBacklogSource(metaId())!, Date.now() + 3_600_000);
   expect((await fetch(`${base}/api/backlog/306/answer`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), text: "送信中に止まった" }) })).status).toBe(202);
+  db.sqlite.exec("UPDATE backlog_operations SET retry_at = NULL"); // its window over
   db.setBacklogOperationResult(db.listPendingBacklogOperations()[0]!.id, { status: "sending" });
   db.sqlite.exec("UPDATE backlog_repositories SET retry_at = NULL");
   await core!.stop();
@@ -1904,7 +1928,7 @@ test("start: the prompt says to read the newest ## 回答 first", async () => {
 });
 
 const item = (over: Partial<BacklogItem>): BacklogItem => ({
-  number: 1, title: "t", url: "u", type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
+  number: 1, title: "t", url: "u", type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, flow: false, bodyChars: 0, labels: [], waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
 
 test("pickNext: Priority (none last), then Ready before 分解待ち before 要望, then the oldest; skips decisions and running items", () => {
@@ -1945,17 +1969,26 @@ test("pickNext queue (#3956): the queue's order over Priority, only the queued i
   expect(pickNext(items, "implement")).toMatchObject({ item: { number: 1 } });
 });
 
-test("pickNext: never 直行で直す, and leaves a request whose last Task was one (#3690)", () => {
+test("pickNext: a request goes to 直行で直す or PBI にする by chooseProcess; one a direct Task ran on is left unless it came back (#4322)", () => {
   const at = "2026-09-28T00:00:00Z";
   const direct = (status: TaskStatus) => ({ id: "tsk_direct", status, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "direct" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null });
+  const defs = listProcesses();
   const items = [
     item({ number: 1, stage: "request", type: "request", priority: "P0", lastTask: direct("done"), updatedAt: "2026-09-28T01:00:00Z" }),
     item({ number: 2, stage: "request", type: "request", priority: "P0", lastTask: direct("error") }),
-    item({ number: 3, stage: "request", type: "request", priority: "P3" }),
+    item({ number: 3, stage: "request", type: "request", priority: "P3", bodyChars: 5000 }),
   ];
-  for (const slot of ["plan", "implement"] as const) for (let k = 0; k <= items.length; k++) expect(pickNext(items.slice(k), slot)?.action).not.toBe("direct");
-  expect(pickNext(items, "plan")).toMatchObject({ item: { number: 3 }, action: "to-pbi" });
-  expect(pickNext(items.slice(0, 2), "plan")).toBeNull();
+  // the one a direct Task ran on (done or failed) is not made a PBI; the large one is
+  expect(pickNext(items, "plan", undefined, undefined, defs)).toMatchObject({ item: { number: 3 }, action: "to-pbi", reason: expect.stringContaining("auto pipeline") });
+  expect(pickNext(items.slice(0, 2), "plan", undefined, undefined, defs)).toBeNull();
+  // a small one starts directly, with the reason; without the definitions every request is a PBI にする
+  const small = item({ number: 4, stage: "request", type: "request", bodyChars: 100 });
+  expect(pickNext([small], "plan", undefined, undefined, defs)).toMatchObject({ action: "direct", reason: expect.stringContaining("auto direct") });
+  expect(pickNext([small], "plan")?.action).toBe("to-pbi");
+  // brought back by the direct Task: the pipeline takes it, whatever its size
+  const back = item({ number: 1, stage: "request", type: "request", bodyChars: 100, labels: ["direct-returned"], lastTask: direct("done") });
+  expect(pickNext([back], "plan", undefined, undefined, defs)).toMatchObject({ action: "to-pbi", reason: "direct returned" });
+  expect(pickNext([item({ number: 5, stage: "ready" })], "implement", undefined, undefined, defs)?.reason).toBeUndefined();
 });
 
 test("buildStartPrompt: to-tasks on a PBI that already has Tasks asks to make it Ready without decomposing again", () => {
@@ -2149,6 +2182,93 @@ test("pickNext stalled: the implement slot's order is 回答済みの実装中 �
   expect(pickNext(all.slice(0, 1), "implement")).toEqual({ item: ready, action: "complete" });
   // an open wait holds a stalled PBI too (#817)
   expect(pickNext([{ ...stalled, waits: [wait(778, "pr", true)] }, ready], "implement")).toMatchObject({ item: { number: 1 } });
+});
+
+/** fakeGh with two more requests: #320 large, and #302 (small) brought back by its direct Task when `returned` is set (#4322). */
+function requestsGh(returned: { on: boolean }) {
+  const fake = fakeGh();
+  const gh: GhRunner = async (args, cwd) => {
+    const r = await fake.gh(args, cwd);
+    if (!r.stdout.includes('"subIssuesSummary"')) return r;
+    const page = JSON.parse(r.stdout) as { data?: { repository?: { issues?: { nodes: Array<{ number: number; body: string; updatedAt: string; labels: { nodes: { name: string }[] } }> } } } };
+    const nodes = page.data?.repository?.issues?.nodes;
+    if (!nodes) return r;
+    const small = nodes.find((n) => n.number === 302);
+    if (!small) return r;
+    nodes.push({ ...structuredClone(small), number: 320, body: `${small.body}\n${"長い要望。".repeat(300)}`, createdAt: "2026-09-20T03:00:00Z" } as (typeof nodes)[number]);
+    if (returned.on) { small.labels.nodes.push({ name: "direct-returned" }); small.updatedAt = "2026-09-30T00:00:00Z"; }
+    return { ...r, stdout: JSON.stringify(page) };
+  };
+  return { ...fake, gh };
+}
+
+test("backlog-next: each request starts in the candidate its own criteria choose, with the reason; a returned one goes to PBI にする, once; the buttons keep their reasons (#4322)", async () => {
+  const claude = holdingClaude();
+  const returned = { on: false };
+  const base = await boot(requestsGh(returned).gh, claude.adapter);
+  const id = await backlogNextSchedule(base);
+  expect((await sweepAll(base, { implement: 0, plan: 3 })).status).toBe(200);
+  expect((await runSchedule(base, id)).status).toBe(201);
+  const provenance = async (n: number) => {
+    const t = startedTasks().find((x) => x.stage?.issue === n)!;
+    return { title: t.title.split(":")[0], ...((await fetch(`${base}/api/tasks/${t.id}/provenance`).then((r) => r.json())) as { process: { id: string }; processReason: string }) };
+  };
+  const small = await provenance(302);
+  const big = await provenance(320);
+  expect(small).toMatchObject({ title: "#302 直行で直す", process: { id: "p1-direct" }, processReason: expect.stringMatching(/^auto direct: 本文 \d+ 字 ≤ 600$/) });
+  expect(big).toMatchObject({ title: "#320 PBI にする", process: { id: "p0-pipeline" }, processReason: expect.stringMatching(/^auto pipeline: p1-direct: 本文 \d+ 字 > 600$/) });
+  expect(small.processReason).not.toBe(big.processReason);
+  // the direct Task ends and the request comes back: PBI にする starts with `direct returned`; no second 直行 on it
+  core!.db.updateTask(startedTasks().find((x) => x.stage?.issue === 302)!.id, { status: "done" });
+  returned.on = true;
+  await refreshed(base);
+  expect((await runSchedule(base, id)).status).toBe(201);
+  expect(startedTasks().filter((x) => x.stage?.issue === 302).map((x) => x.stage!.action).sort()).toEqual(["direct", "to-pbi"]);
+  const t2 = startedTasks().find((x) => x.stage?.issue === 302 && x.stage.action === "to-pbi")!;
+  expect(await fetch(`${base}/api/tasks/${t2.id}/provenance`).then((r) => r.json())).toMatchObject({ process: { id: "p0-pipeline" }, processReason: "direct returned" });
+  core!.db.updateTask(t2.id, { status: "done" });
+  expect((await runSchedule(base, id)).status).toBe(409); // nothing left to start
+  expect(startedTasks().filter((x) => x.stage?.issue === 302 && x.stage.action === "direct")).toHaveLength(1);
+});
+
+test("backlog-next: 直行で直す is the meta workspace's only — another repository's small request goes to PBI にする (PR #4359 review)", async () => {
+  const claude = holdingClaude();
+  const { base, ids } = await threeWorkspaces(claude.adapter, undefined, requestsGh({ on: false }).gh);
+  const id = await backlogNextSchedule(base);
+  expect((await sweepAll(base, { implement: 0, plan: 3 })).status).toBe(200);
+  expect((await runSchedule(base, id)).status).toBe(201);
+  const of = (ws: string) => startedTasks().find((t) => t.workspaceId === ws && t.stage?.issue === 302)!;
+  expect(of(ids.switchboard!).stage!.action).toBe("direct");
+  for (const ws of [ids.lib!, ids.app!]) {
+    const t = of(ws);
+    expect(t.stage!.action).toBe("to-pbi");
+    expect(await fetch(`${base}/api/tasks/${t.id}/provenance`).then((r) => r.json())).toMatchObject({ process: { id: "p0-pipeline" }, processReason: "auto pipeline: 自動の基準を持つ候補なし" });
+  }
+});
+
+test("backlog-next: unreadable candidate definitions start no request, and say why; other stages go on (PR #4359 review)", async () => {
+  const claude = holdingClaude();
+  const base = await boot(requestsGh({ on: false }).gh, claude.adapter);
+  // the meta checkout with a broken p1-direct.md (the real p0-pipeline.md beside it)
+  const meta = core!.db.listWorkspaces().find((w) => w.kind === "meta")!;
+  const root = mkdtempSync(join(home!, "meta-"));
+  mkdirSync(join(root, "ops-kit/processes"), { recursive: true });
+  copyFileSync(join(meta.path, "ops-kit/processes/p0-pipeline.md"), join(root, "ops-kit/processes/p0-pipeline.md"));
+  writeFileSync(join(root, "ops-kit/processes/p1-direct.md"), "---\nid: p1-direct\nauto: 600\n---\n");
+  core!.db.sqlite.query("UPDATE workspaces SET path = ? WHERE id = ?").run(root, meta.id);
+  const id = await backlogNextSchedule(base);
+  expect((await sweepAll(base, { implement: 0, plan: 3 })).status).toBe(200);
+  await runSchedule(base, id);
+  expect(startedTasks().filter((t) => t.stage?.issue === 302 || t.stage?.issue === 320)).toEqual([]);
+  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("#302 を始めない: 候補の定義を読めません"));
+});
+
+test("start: the buttons record their own reason, not the criteria's (#4322)", async () => {
+  const base = await boot(requestsGh({ on: false }).gh, holdingClaude().adapter);
+  const d = (await (await start(base, 302, { action: "direct" })).json()) as Task;
+  const p = (await (await start(base, 320, { action: "to-pbi" })).json()) as Task;
+  expect(await fetch(`${base}/api/tasks/${d.id}/provenance`).then((r) => r.json())).toMatchObject({ processReason: "direct button" });
+  expect(await fetch(`${base}/api/tasks/${p.id}/provenance`).then((r) => r.json())).toMatchObject({ processReason: "backlog stage to-pbi" });
 });
 
 test("backlog-next stalled: the closable #307 is closed and #305, unmoved since its last resume, is left and logged", async () => {
@@ -2501,6 +2621,36 @@ describe("backlog-next prerequisite (#937)", () => {
     }
   });
 
+  test("GET /api/backlog reads each workspace's stored records once when the release's answers are known (#4119)", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "sb-backlog-repo-"));
+    withProcesses(repo);
+    const git = (...a: string[]) => Bun.spawnSync(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...a]).stdout.toString().trim();
+    git("init", "-q");
+    git("commit", "-q", "--allow-empty", "-m", "running");
+    git("commit", "-q", "--allow-empty", "-m", "the prerequisite (#450)");
+    const merged = git("rev-parse", "HEAD");
+    const rescue = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => (new URL(req.url).pathname === "/api/status" ? Response.json({ current: merged, previous: null, state: "running", busy: null, lastError: null, history: [] }) : new Response("no", { status: 404 })) });
+    const gh = prereqGh({ 401: { priority: "P0", body: "**前提**: #450（リリース）" } }, { w450: { __typename: "PullRequest", state: "MERGED", mergeCommit: { oid: merged } } });
+    try {
+      const base = await boot(gh, holdingClaude().adapter, { SWITCHBOARD_REPO_ROOT: repo, SWITCHBOARD_RESCUE_URL: `http://127.0.0.1:${rescue.port}` });
+      const source = core!.db.getWorkspaceBacklogSource(metaId())!;
+      const issueReads = () => spy.mock.calls.filter(([s, kind]) => kind === "issue" && s.repository === source.repository).length;
+      const get = async () => ((await (await fetch(`${base}/api/backlog`)).json()) as Backlog).items.find((i) => i.number === 401)!;
+      const original = core!.db.listBacklogRecords.bind(core!.db);
+      const spy = spyOn(core!.db, "listBacklogRecords").mockImplementation(original);
+      const first = await get(); // the merge commit's answer is asked of git and kept
+      expect(first.prereqs).toEqual([{ number: 450, kind: "pr", need: "release", state: "met", via: null }]);
+      const reads = issueReads();
+      await get();
+      // the answer is known now: no read to find what to ask. 3 = the one full read + the two the stage Tasks' rows (withActive) make; a read to find what to ask made it 4
+      expect(issueReads() - reads).toBe(3);
+      spy.mockRestore();
+    } finally {
+      rescue.stop(true);
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
   test("withdrawn / missing / cycle: each is logged as 進められない, and the independent Ready starts", async () => {
     const pbis: Record<number, Pbi> = {
       401: { priority: "P0", body: "**前提**: #402" }, 404: { priority: "P0", body: "**前提**: #499" },
@@ -2717,6 +2867,7 @@ test("backlog-next failed / awaiting reply: a firing leaves a PBI whose last Tas
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
   expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#303 Task に分解", "#304 実装", "#307 閉じる"]); // only the two inserted ones
+  // a stopped Task with its resume planned takes no slot (slot does not count a resume, #4072): the firing names it as failed
   const log = await scheduleLogAll(base);
   expect(log).toContainEqual(expect.stringContaining(`飛ばした (manual): ${metaName()}: 実装の枠: 返事待ち: #304`));
   expect(log).toContainEqual(expect.stringContaining(`飛ばした (manual): ${metaName()}: 実装の枠: 前回の Task が失敗したまま更新が無い: #307（使用上限、${fmtTime(resumeAt, now)} に戻る）`));
@@ -2786,6 +2937,67 @@ test("backlog-next overlap: a Ready PBI whose Task names a file an open PR chang
   const ready = (await refreshed(base)).items.find((i) => i.number === 304)!;
   expect(ready.overlap).toBeNull();
   expect(pickNext([ready], "implement")).toMatchObject({ item: { number: 304 }, action: "complete" });
+});
+
+/** moreReadyGh(309, 310) whose Ready PBIs #304 / #309 / #310 each have one open Task naming the file given (#3228). */
+function overlapReadyGh(files: { 304: string; 309: string; 310: string }, bodies: Partial<Record<304 | 309 | 310, string>> = {}): GhRunner {
+  const inner = moreReadyGh(309, 310);
+  const task = (number: number, file: string) => ({ number, state: "OPEN", labels: { nodes: [{ name: "type:task" }] }, body: bodies[Math.floor(number / 10) as 304 | 309 | 310] ?? `触る場所: \`${file}\``, comments: { nodes: [] } });
+  return async (args, cwd) => {
+    const r = await inner(args, cwd);
+    if (r.stdout.includes('"subIssuesSummary"')) {
+      // each PBI has just the one Task named below (no made-up free Task beside it)
+      const page = JSON.parse(r.stdout) as { data?: { repository?: { issues?: { nodes: { number: number; subIssuesSummary: { total: number; completed: number } }[] } } } };
+      for (const node of page.data?.repository?.issues?.nodes ?? []) if ([304, 309, 310].includes(node.number)) node.subIssuesSummary = { total: 1, completed: 0 };
+      return { ...r, stdout: JSON.stringify(page) };
+    }
+    if (!args.find((a) => a.startsWith("query="))?.includes("comments(last:")) return r;
+    const body = JSON.parse(r.stdout);
+    for (const [pbi, file] of [[304, files[304]], [309, files[309]], [310, files[310]]] as const) body.data.repository[`i${pbi}`] = { ...body.data.repository[`i${pbi}`], subIssues: { nodes: [task(pbi * 10 + 1, file)] } };
+    return { ...r, stdout: JSON.stringify(body) };
+  };
+}
+
+test("backlog-next overlap (#3228): in one firing of implement 2, a Ready PBI whose Task names the path of the PBI started before it is not started, and the log names that Task and the path; the one with another path is", async () => {
+  const base = await boot(overlapReadyGh({ 304: "src/a.ts", 309: "src/a.ts", 310: "src/c.ts" }), holdingClaude().adapter);
+  closeTried();
+  expect((await sweepAll(base, { implement: 2, plan: 0 })).status).toBe(200);
+  const id = await backlogNextSchedule(base);
+  expect((await runSchedule(base, id)).status).toBe(201);
+  expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#304 実装", "#310 実装"]);
+  const log = await scheduleLogAll(base);
+  expect(log).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: 重なり: #309（Task #3041: src/a.ts）`));
+  expect(log.filter((l) => l.includes("実装の枠: 重なり: "))).toHaveLength(1);
+});
+
+test("backlog-next overlap (#3228): Ready PBIs whose Tasks name different paths all start in one firing", async () => {
+  const base = await boot(overlapReadyGh({ 304: "src/a.ts", 309: "src/b.ts", 310: "src/c.ts" }), holdingClaude().adapter);
+  closeTried();
+  expect((await sweepAll(base, { implement: 2, plan: 0 })).status).toBe(200);
+  const id = await backlogNextSchedule(base);
+  expect((await runSchedule(base, id)).status).toBe(201);
+  expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#304 実装", "#309 実装"]); // implement 2: two places
+  expect((await scheduleLogAll(base)).some((l) => l.includes("重なり"))).toBe(false);
+});
+
+test("backlog-next overlap (#4382): a Task that only refers to a root file in the middle of a step does not hold back the PBI that touches it", async () => {
+  const base = await boot(overlapReadyGh({ 304: "src/a.ts", 309: "src/b.ts", 310: "src/c.ts" }, { 304: "1. 昇格は CLAUDE.md の規則に従う。`CLAUDE.md` も読む", 309: "触る場所: CLAUDE.md" }), holdingClaude().adapter);
+  closeTried();
+  expect((await sweepAll(base, { implement: 2, plan: 0 })).status).toBe(200);
+  const id = await backlogNextSchedule(base);
+  expect((await runSchedule(base, id)).status).toBe(201);
+  expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#304 実装", "#309 実装"]);
+  expect((await scheduleLogAll(base)).some((l) => l.includes("重なり"))).toBe(false);
+});
+
+test("backlog-next overlap (#4382): a Task that names a root file at the head of a step holds back the PBI that touches it, and the log names the file", async () => {
+  const base = await boot(overlapReadyGh({ 304: "src/a.ts", 309: "src/b.ts", 310: "src/c.ts" }, { 304: "1. CLAUDE.md: 追記する", 309: "触る場所: CLAUDE.md" }), holdingClaude().adapter);
+  closeTried();
+  expect((await sweepAll(base, { implement: 2, plan: 0 })).status).toBe(200);
+  const id = await backlogNextSchedule(base);
+  expect((await runSchedule(base, id)).status).toBe(201);
+  expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#304 実装", "#310 実装"]);
+  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("実装の枠: 重なり: #309（Task #3041: CLAUDE.md）"));
 });
 
 async function backlogNextSchedule(base: string, budgetUsd?: number, model?: string, effort?: string) {
@@ -2941,6 +3153,16 @@ test("startFromQueue (#3966): the queue's start and a backlog-next firing at onc
   expect(startedTitles().filter((t) => t === "#304 実装")).toHaveLength(1);
 });
 
+test("startFromQueue (#3228): with concurrency 2, a queued PBI whose Task names the path of the PBI started before it is not started in the same run; the one with another path is", async () => {
+  const base = await boot(overlapReadyGh({ 304: "src/a.ts", 309: "src/a.ts", 310: "src/c.ts" }), holdingClaude().adapter);
+  closeTried();
+  await putQueue(base, { items: queueOf(304, 309, 310), concurrency: 2, enabled: true });
+  await until(() => startedTitles().length >= 2);
+  await Bun.sleep(300);
+  expect(startedTitles().sort()).toEqual(["#304 実装", "#310 実装"]);
+  expect((await getQueue(base)).lastNote ?? "").toContain("重なり: #309（Task #3041: src/a.ts）");
+});
+
 test("startFromQueue (#3966): at boot an enabled queue goes on", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
@@ -2955,6 +3177,95 @@ test("startFromQueue (#3966): at boot an enabled queue goes on", async () => {
   await until(() => startedTitles().length > 0);
   expect(startedTitles()).toEqual(["#304 実装"]);
 });
+
+/** boot, with daemon options the default boot leaves out (a judge, a job command). */
+async function bootWith(adapter: RunnerAdapter, opts: Partial<Parameters<typeof startServer>[2]>) {
+  home = mkdtempSync(join(tmpdir(), "sb-backlog-"));
+  const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
+  core = await startServer(cfg, [adapter], { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: FAKE_ORIGIN, gh: importing(fakeGh().gh, () => openPulls), backlogAutoImport: true, ...opts });
+  const base = `http://127.0.0.1:${core.server.port}`;
+  await refreshed(base, false);
+  return base;
+}
+
+test("startFromQueue: a stage Task whose turn ended on a job it asked the daemon for keeps its place until the job ends, and the job's end runs the queue", async () => {
+  const claude = endableClaude();
+  const gate = join(tmpdir(), `sb-job-gate-${process.pid}-${Date.now()}`);
+  const base = await bootWith(claude.adapter, { jobCommand: () => ({ argv: ["sh", "-c", `while [ ! -e '${gate}' ]; do sleep 0.05; done`], tail: "" }) });
+  core!.db.setSetting("settings", { judge: { enabled: false } });
+  await putQueue(base, { items: queueOf(304, 307), enabled: true });
+  await claude.started(1);
+  const task = startedTasks()[0]!;
+  expect(task.title.startsWith("#304 実装")).toBe(true);
+  // the Task asks the daemon for local CI (ops-kit job request, #3992) and ends its turn on it: its work is not over
+  const r = await fetch(`${base}/api/jobs`, { method: "POST", body: JSON.stringify({ kind: "local-ci", taskId: task.id, pr: 900, cwd: task.cwd }) });
+  expect(r.status).toBe(202);
+  const job = (await r.json()) as { id: number };
+  claude.end(0);
+  await until(async () => (await scheduleLogAll(base)).some((l) => l.includes("(task-end)")));
+  expect(core!.db.getTask(task.id)!.status).toBe("done");
+  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("キュー: 同時に動かす数 1 に達している (task-end)"));
+  await Bun.sleep(200);
+  expect(startedTitles()).toEqual(["#304 実装"]);
+  // the job ends: its end runs the queue; #304 is not started again on top of it, the next goes
+  writeFileSync(gate, "");
+  try {
+    await until(() => startedTitles().length > 1, 10_000);
+  } finally {
+    rmSync(gate, { force: true });
+  }
+  expect(core!.db.getJob(job.id)!.status).toBe("pass");
+  expect(startedTitles().sort()).toEqual(["#304 実装", "#307 閉じる"]);
+  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("(job-end)"));
+}, 30_000);
+
+test("startFromQueue: a stage Task that stopped on its job# is resumed by the job's end before the queue looks, and keeps its place", async () => {
+  const claude = endableClaude();
+  const gate = join(tmpdir(), `sb-job-gate-${process.pid}-${Date.now()}`);
+  const base = await bootWith(claude.adapter, { jobCommand: () => ({ argv: ["sh", "-c", `while [ ! -e '${gate}' ]; do sleep 0.05; done`], tail: "" }) });
+  core!.db.setSetting("settings", { judge: { enabled: false } });
+  await putQueue(base, { items: queueOf(304, 307), enabled: true });
+  await claude.started(1);
+  const task = startedTasks()[0]!;
+  claude.emit(0, { t: "session.start", runnerSessionId: "sess-304" } as AgentEvent);
+  const job = (await (await fetch(`${base}/api/jobs`, { method: "POST", body: JSON.stringify({ kind: "local-ci", taskId: task.id, pr: 900, cwd: task.cwd }) })).json()) as { id: number };
+  // as `ops-kit job request` asks: a depends stop on job#<id>, then the turn ends
+  expect(core!.tasks.recordStop(task.id, { id: `job-${job.id}`, op: "ops-kit job request local-ci", target: "PR #900", reason: "depends", safety: "read-only", evidence: `job#${job.id}`, state: "waiting", conditions: [{ key: `job#${job.id}`, value: "done", met: false }], actions: [] }).ok).toBe(true);
+  claude.end(0);
+  await until(async () => (await scheduleLogAll(base)).some((l) => l.includes("(task-end)")));
+  writeFileSync(gate, "");
+  try {
+    await until(async () => (await scheduleLogAll(base)).some((l) => l.includes("(job-end)")), 10_000);
+  } finally {
+    rmSync(gate, { force: true });
+  }
+  // the job's end resumed the Task first: the queue found its place taken, and #304 runs once
+  expect(core!.db.getTask(task.id)!.status).toBe("running");
+  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("キュー: 同時に動かす数 1 に達している (job-end)"));
+  await Bun.sleep(200);
+  expect(startedTitles()).toEqual(["#304 実装"]);
+}, 30_000);
+
+test("startFromQueue: a stage Task's place stays taken while its last reply is judged, and the judgement runs the queue again", async () => {
+  const claude = endableClaude();
+  let judged: (r: { result: "needs_action"; reason: string; runner: "claude"; model: string }) => void = () => {};
+  const base = await bootWith(claude.adapter, { judge: () => new Promise((r) => (judged = r)), rubricJudge: () => new Promise(() => undefined), titleSuggester: () => new Promise(() => undefined) });
+  await putQueue(base, { items: queueOf(304, 307), enabled: true });
+  await claude.started(1);
+  const task = startedTasks()[0]!;
+  // the turn ends asking the person; its outcome is known only once the judge answers
+  claude.emit(0, { t: "session.end", status: "ok", summary: "確認: PR をマージしてよいですか" });
+  await until(async () => (await scheduleLogAll(base)).some((l) => l.includes("(task-end)")));
+  expect(core!.db.getTask(task.id)).toMatchObject({ status: "done", outcome: "unknown", judgingAt: expect.any(Number) });
+  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("キュー: 同時に動かす数 1 に達している (task-end)"));
+  await Bun.sleep(200);
+  expect(startedTitles()).toEqual(["#304 実装"]);
+  judged({ result: "needs_action", reason: "マージの確認", runner: "claude", model: "m" });
+  await until(() => startedTitles().length > 1);
+  expect(core!.db.getTask(task.id)).toMatchObject({ outcome: "needs_action", judgingAt: null });
+  expect(startedTitles().sort()).toEqual(["#304 実装", "#307 閉じる"]);
+  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("(judged)"));
+}, 30_000);
 
 test("backlog-next: a firing starts the picked item's stage Task, and the scheduled complete uses the button prompt", async () => {
   const claude = holdingClaude();
@@ -3144,6 +3455,96 @@ test("backlog quota (#834): a kind's own runner (#1337) is judged by its own usa
   core!.db.setSetting("settings", { autoStart: { byKind: { complete: { runner: "claude", model: "", effort: "" } }, fallback: ["codex"] } });
   expect((await runSchedule(b.base, b.id)).status).toBe(201);
   expect(startedTasks().map((t) => t.runner)).toEqual(["codex", "codex"]);
+});
+
+/** backlog-next login: a Claude and a Codex that say `login` / `loginExpiresAt` from detect() (read again after a minute); the schedule runs on `runner`. */
+type LoginState = { login?: "ok" | "expired" | "unknown"; loginExpiresAt?: number };
+async function bootLogin(runner: "claude" | "codex", login: { claude?: LoginState; codex?: LoginState }, bedrock = false) {
+  const state: { claude: LoginState; codex: LoginState } = { claude: { login: "ok", ...login.claude }, codex: { login: "ok", ...login.codex } };
+  const claude = holdingClaude();
+  const codex = holdingClaude();
+  const withBedrock = bedrock ? { bedrockModels: [{ value: "global.anthropic.claude-haiku-5-5", label: "haiku" }] } : {};
+  const base = await boot(fakeGh().gh, [{ ...claude.adapter, ...withBedrock, detect: async () => ({ available: true, ...state.claude }) }, { ...codex.adapter, id: "codex", detect: async () => ({ available: true, ...state.codex }) }]);
+  closeTried();
+  const r = await fetch(`${base}/api/schedules`, { method: "POST", body: JSON.stringify({ title: "バックログを進める", cron: "0 */3 * * *", workspaceId: metaId(), runner, prompt: "", action: "backlog-next" }) });
+  expect(r.status).toBe(201);
+  return { base, id: (await r.json() as { id: string }).id, state };
+}
+const HOUR = 3600_000;
+const titles = () => startedTasks().map((t) => t.title.split(":")[0]).sort();
+
+test("backlog-next login: a runner whose login lapsed (claude) starts no stage Task in any slot and the log says so", async () => {
+  const a = await bootLogin("claude", { claude: { login: "expired" } });
+  expect((await runSchedule(a.base, a.id)).status).toBe(409);
+  expect(startedTasks()).toHaveLength(0);
+  expect(await scheduleLog(a.base)).toContain("飛ばした (manual): claude のログインが切れている: 始めない");
+});
+
+test("backlog-next login: codex expired holds a codex schedule the same way, and a claude schedule is not held by it", async () => {
+  const a = await bootLogin("codex", { codex: { login: "expired" } });
+  expect((await runSchedule(a.base, a.id)).status).toBe(409);
+  expect(startedTasks()).toHaveLength(0);
+  expect(await scheduleLog(a.base)).toContain("飛ばした (manual): codex のログインが切れている: 始めない");
+  await shutdown();
+  const b = await bootLogin("claude", { codex: { login: "expired" } });
+  expect((await runSchedule(b.base, b.id)).status).toBe(201);
+  expect(titles()).toEqual(["#303 Task に分解", "#304 実装"]);
+});
+
+test("backlog-next login: claude's login lapsing in 23 hours holds the implement slot only, naming the time", async () => {
+  const at = Date.now() + 23 * HOUR;
+  const a = await bootLogin("claude", { claude: { loginExpiresAt: at } });
+  expect((await runSchedule(a.base, a.id)).status).toBe(201);
+  expect(titles()).toEqual(["#303 Task に分解"]);
+  expect(await scheduleLogAll(a.base)).toContainEqual(expect.stringContaining(`claude のログインが ${fmtTime(at, Date.now())} に切れる: 実装の枠を始めない`));
+});
+
+test("backlog-next login: with 25 hours left both slots start", async () => {
+  const a = await bootLogin("claude", { claude: { loginExpiresAt: Date.now() + 25 * HOUR } });
+  expect((await runSchedule(a.base, a.id)).status).toBe(201);
+  expect(titles()).toEqual(["#303 Task に分解", "#304 実装"]);
+  expect((await scheduleLogAll(a.base)).some((l) => l.includes("のログインが"))).toBe(false);
+});
+
+test("backlog-next login: the expiry hold does not apply to a codex schedule, whatever Claude's expiry", async () => {
+  const a = await bootLogin("codex", { claude: { loginExpiresAt: Date.now() + HOUR }, codex: { loginExpiresAt: Date.now() + HOUR } });
+  expect((await runSchedule(a.base, a.id)).status).toBe(201);
+  expect(startedTasks().map((t) => t.runner)).toEqual(["codex", "codex"]);
+});
+
+test("backlog-next login: Claude on Bedrock (login reads ok, no expiry) is not held, even if its own login lapsed", async () => {
+  const a = await bootLogin("claude", { claude: { login: "expired", loginExpiresAt: Date.now() + HOUR } }, true);
+  core!.db.setSetting("settings", { bedrock: { claude: { region: "ap-northeast-1" } } });
+  expect((await runSchedule(a.base, a.id)).status).toBe(201);
+  expect(titles()).toEqual(["#303 Task に分解", "#304 実装"]);
+});
+
+test("backlog-next login: an unknown expiry does not hold", async () => {
+  const a = await bootLogin("claude", {});
+  expect((await runSchedule(a.base, a.id)).status).toBe(201);
+  expect(titles()).toEqual(["#303 Task に分解", "#304 実装"]);
+});
+
+test("backlog-next login: the row's button still starts a stage Task while the login is expired", async () => {
+  const a = await bootLogin("claude", { claude: { login: "expired" } });
+  expect((await runSchedule(a.base, a.id)).status).toBe(409);
+  expect((await start(a.base, 304, { action: "complete" })).status).toBe(201);
+});
+
+test("backlog-next login: after logging in again (ok, expiry in 30 days) the next firing starts as before", async () => {
+  const a = await bootLogin("claude", { claude: { login: "expired" } });
+  expect((await runSchedule(a.base, a.id)).status).toBe(409);
+  expect(startedTasks()).toHaveLength(0);
+  a.state.claude = { login: "ok", loginExpiresAt: Date.now() + 30 * 24 * HOUR };
+  const realNow = Date.now.bind(Date);
+  const clock = spyOn(Date, "now").mockImplementation(() => realNow() + 61_000); // the health check reads the status again after a minute
+  try {
+    await fetch(`${a.base}/api/health`);
+    expect((await runSchedule(a.base, a.id)).status).toBe(201);
+    expect(titles()).toEqual(["#303 Task に分解", "#304 実装"]);
+  } finally {
+    clock.mockRestore();
+  }
 });
 
 test("backlog-next slots: settings tunables (#835) — backlogQuotaLimit 0.5 holds back at Claude usage 0.6, read at each firing", async () => {
@@ -3531,6 +3932,29 @@ test("backlog-next slots: the workspace's sweep applies from the next firing —
   expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#303 Task に分解", "#304 実装", "#309 実装"]);
 });
 
+test("backlog-next flow limit (#4082): with implement 2, a firing starts one flow PBI, logs the other as waiting, and starts the one without the label", async () => {
+  // #304 and its copies #309 / #310 are Ready; #304 and #309 carry flow-improvement
+  const inner = moreReadyGh(309, 310);
+  const gh: GhRunner = async (args, cwd) => {
+    const r = await inner(args, cwd);
+    if (!r.stdout.includes('"subIssuesSummary"')) return r;
+    const page = JSON.parse(r.stdout) as { data?: { repository?: { issues?: { nodes: { number: number; labels: { nodes: { name: string }[] } }[] } } } };
+    for (const node of page.data?.repository?.issues?.nodes ?? []) if (node.number === 304 || node.number === 309) node.labels.nodes.push({ name: "flow-improvement" });
+    return { ...r, stdout: JSON.stringify(page) };
+  };
+  const base = await boot(gh, holdingClaude().adapter);
+  closeTried();
+  expect((await sweepAll(base, { implement: 2, plan: 0 })).status).toBe(200);
+  const id = await backlogNextSchedule(base);
+  expect((await runSchedule(base, id)).status).toBe(201);
+  const started = startedTasks().map((t) => t.title.split(":")[0]);
+  // one flow PBI from Ready, then not the second in the same firing: the one without the label instead
+  expect(started.filter((t) => t === "#304 実装" || t === "#309 実装")).toHaveLength(1);
+  expect(started).toContain("#310 実装");
+  const waiting = started.includes("#304 実装") ? 309 : 304;
+  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: 開発の流れの PBI は同時 1 件まで（実装中 1 件）: 待ち #${waiting}`));
+});
+
 test("backlog-next slots per workspace (#2656): lib implement 2 starts two, app and meta at implement 0 start none and log no slot line", async () => {
   const { base, ids } = await threeWorkspaces(holdingClaude().adapter, undefined, moreReadyGh(309));
   closeTried(...Object.values(ids));
@@ -3597,7 +4021,8 @@ test("start race: a firing skips an item whose stage Task started after GitHub w
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
   expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#304 実装", "#309 実装", "#310 実装"]);
-  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`飛ばした (manual): ${metaName()}: #309 は工程 Task が動いている`));
+  // #309 is not picked at all now: the read after #304's start (#3228) already shows its stage Task, so there is no "工程 Task が動いている" skip line
+  expect(startedTasks().filter((t) => t.title.startsWith("#309 実装"))).toHaveLength(1); // the one started elsewhere only
 });
 
 test("backlog-next slots: a workspace whose GitHub cannot be read goes on with what is stored (nothing, never imported); the others start (#2264)", async () => {
@@ -3671,6 +4096,8 @@ test("promote: promotionStep — only under sb-rescue, only a newer tag, never w
   }
   // what runs already contains the tag's commit (a newer commit promoted by hand): never go back to the tag
   expect(promotionStep({ status: released(), latest: v2, busyTasks: 0, latestInCurrent: true })).toEqual({ action: "pick" });
+  // sb-rescue is promoting: the next check does not ask for the same tag again (#2477)
+  expect(promotionStep({ status: released({ busy: "promote" }), latest: v2, busyTasks: 0 })).toEqual({ action: "wait", reason: "sb-rescue が promote の最中なので v0.2.0 の昇格を待つ" });
   // a failure of another commit does not hold this one
   expect(promotionStep({ status: released({ history: [{ action: "rejected", from: "aaa", to: "ccc", ok: false, reason: "x" }] }), latest: v2, busyTasks: 0 }).action).toBe("promote");
 });
@@ -3748,7 +4175,7 @@ test("promote: a subject without (#n), or a number that is no stored Issue, repo
 });
 
 /** A checkout with one commit tagged v0.2.0, and a fake sb-rescue whose current release is another commit. */
-async function releasedDaemon(history: ReleaseState["history"] = [], runningNewer = false) {
+async function releasedDaemon(history: ReleaseState["history"] = [], runningNewer = false, { busy = null, promoteDelayMs = 0, refuse = false, statusDelayMs = 0 }: { busy?: string | null; promoteDelayMs?: number; refuse?: boolean; statusDelayMs?: number } = {}) {
   const repo = mkdtempSync(join(tmpdir(), "sb-backlog-repo-"));
   withProcesses(repo);
   const git = (...a: string[]) => Bun.spawnSync(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...a]).stdout.toString().trim();
@@ -3756,15 +4183,17 @@ async function releasedDaemon(history: ReleaseState["history"] = [], runningNewe
   const sha = git("rev-parse", "HEAD");
   // runningNewer: what sb-rescue runs is a later, untagged commit on top of the tag (promoted by hand)
   if (runningNewer) git("commit", "-q", "--allow-empty", "-m", "fix: later");
-  const current = runningNewer ? git("rev-parse", "HEAD") : "old";
+  let current = runningNewer ? git("rev-parse", "HEAD") : "old";
   const promoted: string[] = [];
+  const statusAsked = { pending: 0 };
   const rescue = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
     const url = new URL(req.url);
-    if (url.pathname === "/api/status") return Response.json({ current, previous: null, state: "running", busy: null, lastError: null, history: history.map((h) => ({ ...h, to: h.to === "SHA" ? sha : h.to, from: h.from === "SHA" ? sha : h.from })) });
-    if (url.pathname === "/api/promote") { promoted.push(((await req.json()) as { commit: string }).commit); return Response.json({ started: "promote" }, { status: 202 }); }
+    if (url.pathname === "/api/status" && statusDelayMs) { statusAsked.pending++; await Bun.sleep(statusDelayMs); statusAsked.pending--; }
+    if (url.pathname === "/api/status") return Response.json({ current, previous: null, state: "running", busy, lastError: null, history: history.map((h) => ({ ...h, to: h.to === "SHA" ? sha : h.to, from: h.from === "SHA" ? sha : h.from })) });
+    if (url.pathname === "/api/promote") { if (refuse) return Response.json({ error: "refused" }, { status: 409 }); if (promoteDelayMs) await Bun.sleep(promoteDelayMs); const commit = ((await req.json()) as { commit: string }).commit; promoted.push(commit); current = commit; return Response.json({ started: "promote" }, { status: 202 }); }
     return new Response("no", { status: 404 });
   } });
-  return { repo, sha, promoted, rescue, env: { SWITCHBOARD_REPO_ROOT: repo, SWITCHBOARD_RESCUE_URL: `http://127.0.0.1:${rescue.port}` } };
+  return { repo, sha, promoted, statusAsked, rescue, env: { SWITCHBOARD_REPO_ROOT: repo, SWITCHBOARD_RESCUE_URL: `http://127.0.0.1:${rescue.port}` } };
 }
 
 test("promote: a firing of the items whose waits cleared (#1879) asks for the newer tag first, logs it, and starts nothing", async () => {
@@ -3791,9 +4220,14 @@ test("promote: under sb-rescue a newer tag is promoted first, and that firing st
   try {
     const base = await boot(fakeGh().gh, holdingClaude().adapter, r.env);
     const id = await backlogNextSchedule(base);
-    expect((await runSchedule(base, id)).status).toBe(409);
+    const res = await runSchedule(base, id);
+    expect([res.status, await res.json()]).toEqual([202, { promotion: "v0.2.0 の昇格を依頼" }]);
     expect(r.promoted).toEqual([r.sha]);
-    expect(await scheduleLog(base)).toContain("飛ばした (manual): v0.2.0 の昇格を依頼");
+    expect(await scheduleLog(base)).toContain("v0.2.0 の昇格を依頼 (manual)");
+    // what was asked is shown on 動いている版 (#2479): the tag, the sha, who asked
+    const asked = ((await (await fetch(`${base}/api/daemon/release`)).json()) as { asked: { tag: string; sha: string; by: string; error?: string } | null }).asked;
+    expect(asked).toMatchObject({ tag: "v0.2.0", sha: r.sha, by: "backlog-next" });
+    expect(asked!.error).toBeUndefined();
     expect(core!.db.listTasks()).toHaveLength(0);
   } finally {
     r.rescue.stop(true);
@@ -3829,8 +4263,9 @@ test("promote: while the newest tag is one that failed, nothing is promoted or s
     const pr = { objectKind: "pull-request", externalId: "PR501", fetchState: "fetched", remote: { number: 501, state: "MERGED", isDraft: false, labels: [], closes: [500], mergeCommit: r.sha, updatedAt: at, files: [], closedAt: at, mergedAt: at } };
     core!.db.putBacklogSnapshot(source, { records: [issue(499, ["type:pbi"], null), issue(500, ["type:task"], 499), pr] as never, cursor: core!.db.getBacklogRepository(source)!.cursor, syncedAt: Date.now() });
     const id = await backlogNextSchedule(base);
-    expect((await runSchedule(base, id)).status).toBe(409);
-    expect(await scheduleLog(base)).toContain("昇格に失敗した版のまま: v0.2.0（判断待ち: #499）");
+    const res = await runSchedule(base, id);
+    expect([res.status, await res.json()]).toEqual([202, { promotion: "昇格に失敗した版のまま: v0.2.0（判断待ち: #499）" }]);
+    expect(await scheduleLog(base)).toContain("昇格に失敗した版のまま: v0.2.0（判断待ち: #499） (manual)");
     expect(r.promoted).toEqual([]);
     expect(core!.db.listTasks()).toHaveLength(0);
     // kept in the app and sent from there: comment then label, on #499
@@ -3855,10 +4290,117 @@ function endableClaude() {
     },
   };
   const started = async (n: number) => { for (const t0 = Date.now(); emits.length < n && Date.now() - t0 < 20_000; ) await Bun.sleep(10); expect(emits).toHaveLength(n); };
-  return { adapter, started, end: (i: number) => emits[i]!({ t: "session.end", status: "ok" }) };
+  return { adapter, started, end: (i: number) => emits[i]!({ t: "session.end", status: "ok" }), emit: (i: number, ev: AgentEvent) => emits[i]!(ev) };
 }
 const releaseHold = async (base: string) => ((await (await fetch(`${base}/api/daemon/release`)).json()) as { hold: unknown }).hold;
 const settle = async (until: () => boolean) => { for (const t0 = Date.now(); !until() && Date.now() - t0 < 20_000; ) await Bun.sleep(10); };
+
+const CHECK = { promotionCheckMs: 50 };
+
+test("promote: check — with no schedule, the newest tag is asked for on the interval", async () => {
+  const r = await releasedDaemon();
+  try {
+    const base = await boot(fakeGh().gh, holdingClaude().adapter, r.env, undefined, undefined, CHECK);
+    expect(core!.db.listSchedules().filter((s) => s.action === "backlog-next")).toEqual([]); // no firing: only the interval can ask
+    await settle(() => r.promoted.length > 0);
+    await Bun.sleep(150);
+    expect(r.promoted).toEqual([r.sha]);
+    expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("最新のタグの確認: v0.2.0 の昇格を依頼"));
+  } finally {
+    r.rescue.stop(true);
+    rmSync(r.repo, { recursive: true, force: true });
+  }
+});
+
+test("promote: check — a running Task holds it, and the request comes when the Task ends", async () => {
+  const r = await releasedDaemon();
+  const claude = endableClaude();
+  try {
+    const base = await boot(fakeGh().gh, claude.adapter, r.env, undefined, undefined, CHECK);
+    expect((await start(base, 304, { action: "complete" })).status).toBe(201);
+    await claude.started(1);
+    for (const t0 = Date.now(); (await releaseHold(base)) === null && Date.now() - t0 < 20_000; ) await Bun.sleep(10);
+    expect(await releaseHold(base)).toMatchObject({ tag: "v0.2.0", failed: false, busyTasks: 1 });
+    await Bun.sleep(200);
+    expect(r.promoted).toEqual([]);
+    claude.end(0);
+    await settle(() => r.promoted.length > 0);
+    await Bun.sleep(150);
+    expect(r.promoted).toEqual([r.sha]);
+  } finally {
+    r.rescue.stop(true);
+    rmSync(r.repo, { recursive: true, force: true });
+  }
+}, 30_000);
+
+test("promote: check — a failed tag is not asked again and gets no ## 判断待ち", async () => {
+  const r = await releasedDaemon([{ action: "auto-rollback", from: "SHA", to: "old", ok: false, reason: "went back by itself: health" }]);
+  const fake = fakeGh();
+  try {
+    const base = await boot(fake.gh, holdingClaude().adapter, r.env, undefined, undefined, CHECK);
+    await Bun.sleep(300);
+    expect(r.promoted).toEqual([]);
+    expect(await releaseHold(base)).toMatchObject({ tag: "v0.2.0", failed: true });
+    expect(await scheduleLogAll(base)).toEqual([expect.stringContaining("最新のタグの確認: 昇格に失敗した版のまま: v0.2.0")]);
+    expect(fake.calls.filter((a) => a[0] === "issue" && a[1] === "comment")).toHaveLength(0);
+    expect(core!.db.listBacklogOperations(core!.db.getWorkspaceBacklogSource(metaId())!).filter((o) => o.kind === "comment")).toHaveLength(0);
+  } finally {
+    r.rescue.stop(true);
+    rmSync(r.repo, { recursive: true, force: true });
+  }
+});
+
+test("promote: check — backlog-next that joins a check of a failed tag still writes its ## 判断待ち", async () => {
+  const r = await releasedDaemon([{ action: "auto-rollback", from: "SHA", to: "old", ok: false, reason: "went back by itself: health" }], false, { statusDelayMs: 300 });
+  try {
+    const base = await boot(fakeGh().gh, holdingClaude().adapter, r.env, undefined, undefined, { promotionCheckMs: 1_000 });
+    const source = core!.db.getWorkspaceBacklogSource(metaId())!;
+    const at = "2030-01-01T00:00:00Z";
+    const issue = (number: number, labels: string[], parent: number | null) =>
+      ({ objectKind: "issue", externalId: `I${number}`, fetchState: "fetched", remote: { number, title: `#${number}`, url: "", state: "OPEN", stateReason: null, body: "", labels, milestone: null, parent, subIssues: [], createdAt: at, updatedAt: at, closedAt: null } });
+    const pr = { objectKind: "pull-request", externalId: "PR501", fetchState: "fetched", remote: { number: 501, state: "MERGED", isDraft: false, labels: [], closes: [500], mergeCommit: r.sha, updatedAt: at, files: [], closedAt: at, mergedAt: at } };
+    core!.db.putBacklogSnapshot(source, { records: [issue(499, ["type:pbi"], null), issue(500, ["type:task"], 499), pr] as never, cursor: core!.db.getBacklogRepository(source)!.cursor, syncedAt: Date.now() });
+    const id = await backlogNextSchedule(base);
+    // the check is asking sb-rescue when backlog-next comes, so backlog-next joins it
+    await settle(() => r.statusAsked.pending > 0);
+    await runSchedule(base, id);
+    expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("昇格に失敗した版のまま: v0.2.0（判断待ち: #499）"));
+    expect(core!.db.listBacklogOperations(source).filter((o) => o.kind === "comment")).toHaveLength(1);
+    expect(r.promoted).toEqual([]);
+  } finally {
+    r.rescue.stop(true);
+    rmSync(r.repo, { recursive: true, force: true });
+  }
+}, 30_000);
+
+test("promote: a request sb-rescue refuses is answered with 202 and shown as asked.error (#2479)", async () => {
+  const r = await releasedDaemon([], false, { refuse: true });
+  try {
+    const base = await boot(fakeGh().gh, holdingClaude().adapter, r.env);
+    const id = await backlogNextSchedule(base);
+    const res = await runSchedule(base, id);
+    expect([res.status, await res.json()]).toEqual([202, { promotion: `v0.2.0 の昇格を依頼できない: {"error":"refused"}` }]);
+    const asked = ((await (await fetch(`${base}/api/daemon/release`)).json()) as { asked: { tag: string; error?: string } }).asked;
+    expect(asked).toMatchObject({ tag: "v0.2.0", error: `{"error":"refused"}` });
+  } finally {
+    r.rescue.stop(true);
+    rmSync(r.repo, { recursive: true, force: true });
+  }
+});
+
+test("promote: check and backlog-next at once ask /api/promote once", async () => {
+  const r = await releasedDaemon([], false, { promoteDelayMs: 200 });
+  try {
+    const base = await boot(fakeGh().gh, holdingClaude().adapter, r.env, undefined, undefined, CHECK);
+    const id = await backlogNextSchedule(base);
+    await runSchedule(base, id);
+    await Bun.sleep(500);
+    expect(r.promoted).toEqual([r.sha]);
+  } finally {
+    r.rescue.stop(true);
+    rmSync(r.repo, { recursive: true, force: true });
+  }
+}, 30_000);
 
 test("promote: when idle — a promotion held by a running Task is asked for as soon as that Task's turn ends", async () => {
   const r = await releasedDaemon();
@@ -3868,13 +4410,13 @@ test("promote: when idle — a promotion held by a running Task is asked for as 
     expect((await start(base, 304, { action: "complete" })).status).toBe(201);
     await claude.started(1);
     const id = await backlogNextSchedule(base);
-    expect((await runSchedule(base, id)).status).toBe(409);
+    expect((await runSchedule(base, id)).status).toBe(202);
     expect(r.promoted).toEqual([]);
     expect(await scheduleLog(base)).toContain("1 件の Task が動いているので v0.2.0 の昇格を待つ");
     expect(await releaseHold(base)).toMatchObject({ tag: "v0.2.0", failed: false, busyTasks: 1 });
     // the same tag held again keeps when it began (#2148)
     const since = ((await releaseHold(base)) as { since: number }).since;
-    expect((await runSchedule(base, id)).status).toBe(409);
+    expect((await runSchedule(base, id)).status).toBe(202);
     expect(((await releaseHold(base)) as { since: number }).since).toBe(since);
     // the daily approval-window firing tells the hold in 判断待ち, with the Task count
     const meta = core!.db.listWorkspaces().find((w) => w.kind === "meta")!;
@@ -3900,6 +4442,31 @@ test("promote: when idle — a promotion held by a running Task is asked for as 
   }
 }, 30_000); // a git promotion and HTTP turns under a loaded full suite: over the 5 s default (docs/design/perf.md "テストの揺れ")
 
+test("promote: when idle — a Task whose turn ended with background jobs holds the promotion until they end", async () => {
+  const r = await releasedDaemon();
+  const claude = endableClaude();
+  try {
+    const base = await boot(fakeGh().gh, claude.adapter, r.env);
+    expect((await start(base, 304, { action: "complete" })).status).toBe(201);
+    await claude.started(1);
+    const id = await backlogNextSchedule(base);
+    claude.emit(0, { t: "background", count: 1, jobs: ["Recheck"] });
+    claude.end(0);
+    // the turn is over: only the background job holds the promotion from here
+    await settle(() => core!.db.listTasksByStatus("running").length === 0 && core!.db.listTasksByStatus("background").length === 1);
+    expect(core!.db.listTasksByStatus("running")).toEqual([]);
+    expect((await runSchedule(base, id)).status).toBe(202);
+    expect(r.promoted).toEqual([]);
+    expect(await releaseHold(base)).toMatchObject({ tag: "v0.2.0", failed: false, busyTasks: 1 });
+    claude.emit(0, { t: "background", count: 0 });
+    await settle(() => r.promoted.length > 0);
+    expect(r.promoted).toEqual([r.sha]);
+  } finally {
+    r.rescue.stop(true);
+    rmSync(r.repo, { recursive: true, force: true });
+  }
+}, 30_000);
+
 test("promote: when idle — not while another Task still runs, and asked for once only", async () => {
   const r = await releasedDaemon();
   const claude = endableClaude();
@@ -3909,7 +4476,7 @@ test("promote: when idle — not while another Task still runs, and asked for on
     expect((await start(base, 303, { action: "to-tasks" })).status).toBe(201);
     await claude.started(2);
     const id = await backlogNextSchedule(base);
-    expect((await runSchedule(base, id)).status).toBe(409);
+    expect((await runSchedule(base, id)).status).toBe(202);
     claude.end(0);
     await Bun.sleep(200);
     expect(r.promoted).toEqual([]);
@@ -3949,7 +4516,7 @@ test("promote: when idle — a Task that ends while a firing runs git is not los
     claude.end(0);
     await Bun.sleep(50);
     await Bun.write(gate, "");
-    expect((await firing).status).toBe(409);
+    expect((await firing).status).toBe(202);
     await settle(() => r.promoted.length > 0);
     expect(r.promoted).toEqual([r.sha]);
     expect(await releaseHold(base)).toBeNull();
@@ -3968,7 +4535,7 @@ test("promote: when idle — a tag that failed is not asked for when the Tasks e
     expect((await start(base, 304, { action: "complete" })).status).toBe(201);
     await claude.started(1);
     const id = await backlogNextSchedule(base);
-    expect((await runSchedule(base, id)).status).toBe(409);
+    expect((await runSchedule(base, id)).status).toBe(202);
     expect(await releaseHold(base)).toMatchObject({ tag: "v0.2.0", failed: true, busyTasks: 1 });
     claude.end(0);
     await Bun.sleep(200);
@@ -4230,6 +4797,9 @@ test("#950: a stop that came again with nothing changed holds the item through a
   });
   const touched = "2026-09-12T00:00:00Z"; // the Issue was updated after the Task ended
   const base = item({ number: 3, stage: "ready", lastTask: last, updatedAt: touched, stopSummary: [stopOf()] });
+  // an in-progress PBI moved since its last resume (its ## 状況 written): resumed unless a stop holds it
+  const progressOf = (i: BacklogItem): BacklogItem => ({ ...i, stage: "in-progress", tasks: { done: 1, total: 3, doneAt: null } });
+  expect(pickNext([{ ...progressOf(base), stopSummary: [] }], "implement")?.item.number).toBe(3);
   // same condition, restopped: an update to the Issue alone starts nothing, and the item is listed as left alone
   expect(stopHeld(base)).toBe(true);
   expect(pickNext([base], "implement")).toBeNull();
@@ -4245,6 +4815,12 @@ test("#950: a stop that came again with nothing changed holds the item through a
   expect(stopHeld({ ...base, stopSummary: [waitingOn], prereqs: [{ number: 12, kind: "pr", need: "merged", state: "pending", via: null }] })).toBe(true);
   // retries used up: held until something changes
   expect(stopHeld({ ...base, stopSummary: [stopOf({ count: 1, state: "exhausted", next: "decide" })] })).toBe(true);
+  // a first stop waiting for the person's decision (asked to merge): held — starting again asks the same on top of it;
+  // the person's reply in that Task lets it go
+  const ask = stopOf({ count: 1, unchanged: false, reason: "decision", next: "decide" });
+  expect(stopHeld({ ...base, stopSummary: [ask] })).toBe(true);
+  expect(pickNext([{ ...progressOf(base), stopSummary: [ask] }], "implement")).toBeNull();
+  expect(stopHeld({ ...base, stopSummary: [{ ...ask, lastAnswer: { ref: "seq:9", at: 3 } }] })).toBe(false);
   // one of two conditions met: the other still holds it
   const two = stopOf({ count: 1, unchanged: false, changes: [{ kind: "condition-met", detail: "pr#12: merged" }], conditions: [{ key: "pr#12", value: "merged", met: true }, { key: "review", value: "pending", met: false }] });
   expect(stopHeld({ ...base, stopSummary: [two] })).toBe(true);
@@ -4260,8 +4836,13 @@ test("#950: a stop that came again with nothing changed holds the item through a
   // a different item still goes first
   expect(pickNext([base, item({ number: 5, stage: "ready" })], "implement")?.item.number).toBe(5);
   // the newest series decides: an older one that stayed the same does not hold back a new cause
-  const newCause = stopOf({ key: "k2", reason: "auth", count: 1, lastAt: 9, unchanged: false, changes: [{ kind: "cause", detail: "depends → auth" }], next: "decide" });
+  const newCause = stopOf({ key: "k2", reason: "input", count: 1, lastAt: 9, unchanged: false, changes: [{ kind: "cause", detail: "depends → input" }], next: "wait", conditions: [] });
   expect(stopHeld({ ...base, stopSummary: [stopOf(), newCause] })).toBe(false);
+  // ...but a new cause that waits for the person's decision (CI waited on, then asked to merge, at the same place) holds:
+  // the cause moving is not the person answering
+  const nowAsks = stopOf({ key: "k2", reason: "decision", count: 1, lastAt: 9, unchanged: false, changes: [{ kind: "cause", detail: "depends → decision" }], next: "decide" });
+  expect(stopHeld({ ...base, stopSummary: [stopOf(), nowAsks] })).toBe(true);
+  expect(stopHeld({ ...base, stopSummary: [stopOf(), { ...nowAsks, lastAnswer: { ref: "seq:9", at: 10 } }] })).toBe(false);
   // an unmet condition's value moving is not a condition met; and an Issue #12 met is not PR #12 met
   const moved = stopOf({ unchanged: false, changes: [{ kind: "condition", detail: "pr#12: open → draft" }], conditions: [{ key: "pr#12", value: "draft", met: false }] });
   expect(stopHeld({ ...base, stopSummary: [moved] })).toBe(true);
@@ -4548,5 +5129,173 @@ describe("GET /api/backlog — mockups (#2296)", () => {
     } finally {
       for (const n of nodes) n.body = saved.get(n.number)!;
     }
+  });
+});
+
+test("storedIssueHeads reads each stored Issue's state and title as readStoredIssue does (#4120)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sb-heads-"));
+  const db = new Db(join(dir, "switchboard.db"));
+  try {
+    const source: BacklogSource = { service: "github", host: "github.com", repository: "acme/app", project: { owner: "acme", number: 1 } };
+    const data = (n: number, title: string, state: "OPEN" | "CLOSED") => ({ number: n, title, url: `https://github.com/acme/app/issues/${n}`, state, stateReason: null, body: "", labels: [], milestone: null, parent: null, subIssues: [], createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-02T00:00:00Z", closedAt: null });
+    const rec = (externalId: string, v: ReturnType<typeof data>) => ({ objectKind: "issue" as const, externalId, fetchState: "fetched" as const, remote: v });
+    const ws = db.upsertWorkspace({ name: "app", path: "/Users/dev/app", kind: "repo" });
+    // #5: an `sb:` record with the number of one of GitHub's, stored first
+    db.putBacklogSnapshot(source, { records: [rec("sb:5", data(5, "ここで作った 5", "OPEN")), rec("I_5", data(5, "GitHub の 5", "CLOSED")), rec("I_1", data(1, "GitHub の 1", "OPEN")), rec("I_2", data(2, "GitHub の 2", "OPEN"))], cursor: null, syncedAt: 5000 });
+    db.setWorkspaceBacklogSource(ws.id, source);
+    editStoredIssue(db, source, 2, { state: "CLOSED", stateReason: "COMPLETED" }); // not sent yet
+    const heads = storedIssueHeads(db, ws);
+    expect([...heads.keys()].sort()).toEqual([1, 2, 5]);
+    for (const [n, head] of heads) {
+      const issue = readStoredIssue(db, ws, n)!.issue;
+      expect(head).toEqual({ state: issue.state, title: issue.title });
+    }
+    expect(heads.get(2)!.state).toBe("CLOSED");
+    expect(heads.get(5)).toEqual({ state: "CLOSED", title: "GitHub の 5" });
+    expect(storedIssueHeads(db, { id: "ws_none" }).size).toBe(0);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+describe("flow-improvement limit (#4082)", () => {
+  const flowItem = (over: Partial<BacklogItem>) => item({ flow: true, ...over });
+  const working = flowItem({ number: 1, stage: "in-progress", projectStatus: "In progress", activeTaskId: "t1", tasks: { total: 3, done: 1, doneAt: null } });
+  const limit = (n: number, items: BacklogItem[]) => ({ limit: n, running: flowRunning(items), stopped: flowStopped(items) });
+
+  test("flow: with one flow PBI in progress, the next flow Ready is left and the one without the label is taken", () => {
+    const next = flowItem({ number: 2, priority: "P1" });
+    const plain = item({ number: 3, priority: "P3" });
+    const all = [working, next, plain];
+    expect(flowRunning(all)).toBe(1);
+    expect(pickNext(all, "implement", undefined, limit(1, all))).toMatchObject({ item: { number: 3 } });
+    expect(pickNext([working, next], "implement", undefined, limit(1, all))).toBeNull();
+    expect(flowHeldIn(all, "implement", limit(1, all)).map((i) => i.number)).toEqual([2]);
+    expect(pickNext(all, "implement")).toMatchObject({ item: { number: 2 } });
+  });
+
+  test("flow: the running count comes from the caller, not from the candidates passed (a queue's few, the picked taken out)", () => {
+    const next = flowItem({ number: 2, priority: "P1" });
+    const plain = item({ number: 3, priority: "P3" });
+    // the in-progress one is outside the candidates (not queued, or already picked to resume), yet it counts
+    expect(pickNext([next, plain], "implement", undefined, { limit: 1, running: 1 })).toMatchObject({ item: { number: 3 } });
+    expect(pickNext([next, plain], "implement", undefined, { limit: 1, running: 0 })).toMatchObject({ item: { number: 2 } });
+  });
+
+  test("flow: a P0 flow PBI is taken whatever the count", () => {
+    const urgent = flowItem({ number: 2, priority: "P0" });
+    expect(pickNext([working, urgent], "implement", undefined, limit(1, [working]))).toMatchObject({ item: { number: 2 } });
+    expect(flowHeldIn([working, urgent], "implement", limit(1, [working]))).toEqual([]);
+  });
+
+  test("flow: the resume or close of an in-progress flow PBI is not held", () => {
+    const stalled = flowItem({ number: 1, stage: "in-progress", projectStatus: "In progress", tasks: { total: 3, done: 3, doneAt: null }, closable: true });
+    expect(pickNext([stalled], "implement", undefined, { limit: 1, running: 1 })).toMatchObject({ item: { number: 1 }, action: "close" });
+    const resumed = flowItem({ number: 4, stage: "in-progress", tasks: { total: 3, done: 1, doneAt: null } });
+    expect(pickNext([resumed], "implement", undefined, { limit: 1, running: 2 })).toEqual({ item: resumed, action: "complete", resume: true });
+    expect(flowHeldIn([stalled, resumed], "implement", { limit: 1, running: 2 })).toEqual([]);
+  });
+
+  test("flow: with limit 2 the second flow PBI starts", () => {
+    const next = flowItem({ number: 2, priority: "P1" });
+    expect(pickNext([working, next], "implement", undefined, limit(2, [working]))).toMatchObject({ item: { number: 2 } });
+    expect(flowHeldIn([working, next], "implement", limit(2, [working]))).toEqual([]);
+  });
+
+  // #4380: an in-progress flow PBI backlog-next leaves (a reply, decision or wait it is stuck on) does not use the limit
+  const at = "2026-09-28T00:00:00Z";
+  const asked = { id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "needs_action" as const, reviewedAt: null, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null };
+  const progress = { stage: "in-progress" as const, projectStatus: "In progress", tasks: { total: 3, done: 1, doneAt: null }, updatedAt: at };
+
+  test("flow (#4380): a flow PBI in progress that waits for a reply, a decision or a dependency is not counted, so a Ready flow PBI is taken", () => {
+    const next = flowItem({ number: 2, priority: "P1" });
+    const reply = flowItem({ number: 10, ...progress, lastTask: asked });
+    // a decision stop on a Task that ended done (no reply waited for): only the stop holds it
+    const decided = { ...asked, outcome: "done" as const };
+    const ask: BacklogItem["stopSummary"][number] = {
+      key: "k", work: { workspaceId: "ws_meta", issue: 11, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "decision", evidence: "large", safety: "before-effect",
+      count: 1, state: "waiting", firstAt: 1, lastAt: 2, lastAnswer: null, grant: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide",
+    };
+    const free = flowItem({ number: 11, ...progress, lastTask: decided, updatedAt: "2026-09-29T00:00:00Z" }); // moved since the Task
+    expect(flowRunning([free])).toBe(1);
+    const decide = { ...free, stopSummary: [ask] };
+    const waiting = flowItem({ number: 12, ...progress, waits: [wait(778, "pr", true)] });
+    for (const stuck of [reply, decide, waiting]) {
+      const all = [stuck, next];
+      expect(flowRunning(all)).toBe(0);
+      expect(flowStopped(all)).toBe(1);
+      expect(pickNext(all, "implement", undefined, limit(1, all))).toMatchObject({ item: { number: 2 } });
+    }
+  });
+
+  test("flow (#4380): one with a stage Task running, and one that backlog-next resumes next, are still counted", () => {
+    const next = flowItem({ number: 2, priority: "P1" });
+    expect(flowRunning([working])).toBe(1);
+    expect(flowStopped([working])).toBe(0);
+    expect(pickNext([working, next], "implement", undefined, limit(1, [working, next]))).toBeNull();
+    // no stop holds it, so it is the next resume: counted
+    const stalled = flowItem({ number: 13, ...progress });
+    expect(pickNext([stalled], "implement")).toMatchObject({ action: "complete", resume: true });
+    expect(flowRunning([stalled])).toBe(1);
+    expect(flowStopped([stalled])).toBe(0);
+    expect(pickNext([stalled, next], "implement", undefined, limit(1, [stalled, next]))).toMatchObject({ item: { number: 13 } });
+    // a closable one is closed next: counted
+    expect(flowRunning([flowItem({ number: 14, ...progress, tasks: { total: 3, done: 3, doneAt: null }, closable: true })])).toBe(1);
+    // on hold is stopped
+    expect(flowStopped([flowItem({ number: 15, ...progress, onHold: true })])).toBe(1);
+  });
+
+  test("flowHeldLine (#4380): says how many in-progress flow PBIs were left out of the count", () => {
+    const a = flowItem({ number: 4077, priority: "P1" });
+    const stuck = flowItem({ number: 10, ...progress, lastTask: asked });
+    const all = [working, stuck, a];
+    expect(flowRunning(all)).toBe(1);
+    expect(flowHeldLine(flowHeldIn(all, "implement", limit(1, all)), limit(1, all))).toBe("開発の流れの PBI は同時 1 件まで（実装中 1 件、止まっていて数に入れない 1 件）: 待ち #4077");
+  });
+
+  test("flowHeldLine: names the held PBIs with the limit and the running count; null when none", () => {
+    const a = flowItem({ number: 4077, priority: "P1" });
+    const b = flowItem({ number: 4078, priority: "P2" });
+    expect(flowHeldLine(flowHeldIn([working, a, b], "implement", limit(1, [working])), limit(1, [working]))).toBe("開発の流れの PBI は同時 1 件まで（実装中 1 件）: 待ち #4077 #4078");
+    expect(flowHeldLine(flowHeldIn([a], "implement", limit(1, [a])), limit(1, [a]))).toBeNull();
+    const second = flowItem({ number: 5, stage: "in-progress", projectStatus: "In progress", activeTaskId: "t2" });
+    const all = [working, second, a];
+    expect(flowHeldLine(flowHeldIn(all, "implement", limit(2, all)), limit(2, all))).toBe("開発の流れの PBI は同時 2 件まで（実装中 2 件）: 待ち #4077");
+  });
+});
+
+
+describe("chooseProcess: the candidate a request starts in (#4324)", () => {
+  const defs = (max: number) => [
+    parseProcessDef("---\nid: p0-pipeline\nversion: 1\ntitle: p0\n---\n", "p0.md"),
+    parseProcessDef(`---\nid: p1-direct\nversion: 1\ntitle: p1\nauto: { maxBodyChars: ${max}, excludeLabels: [needs-decision, flow-improvement] }\n---\n`, "p1.md"),
+  ];
+  const small = item({ type: "request", stage: "request", bodyChars: 120, labels: ["type:request"] });
+  const big = item({ type: "request", stage: "request", bodyChars: 2000, labels: ["type:request"] });
+
+  test("a small request goes direct and a large one to the pipeline, each with its reason", () => {
+    expect(chooseProcess(small, defs(600))).toEqual({ process: "p1-direct", reason: "auto direct: 本文 120 字 ≤ 600" });
+    const c = chooseProcess(big, defs(600));
+    expect(c.process).toBe("p0-pipeline");
+    expect(c.reason).toBe("auto pipeline: p1-direct: 本文 2000 字 > 600");
+  });
+
+  test("changing only the definition's maxBodyChars changes the choice of the same request", () => {
+    expect(chooseProcess(big, defs(600)).process).toBe("p0-pipeline");
+    expect(chooseProcess(big, defs(5000)).process).toBe("p1-direct");
+    expect(chooseProcess(small, defs(100)).process).toBe("p0-pipeline");
+  });
+
+  test("an excluded label keeps it out of the candidate; direct-returned goes to the pipeline", () => {
+    const flagged = item({ ...small, labels: ["type:request", "needs-decision"] });
+    expect(chooseProcess(flagged, defs(600))).toEqual({ process: "p0-pipeline", reason: "auto pipeline: p1-direct: ラベル needs-decision" });
+    expect(chooseProcess(item({ ...small, labels: ["direct-returned"] }), defs(600))).toEqual({ process: "p0-pipeline", reason: "direct returned" });
+  });
+
+  test("the kit's own definitions: p1-direct has the criteria and p0-pipeline has none", () => {
+    const kit = listProcesses();
+    expect(chooseProcess(small, kit).process).toBe("p1-direct");
+    expect(chooseProcess(item({ ...small, labels: ["flow-improvement"] }), kit).process).toBe("p0-pipeline");
   });
 });

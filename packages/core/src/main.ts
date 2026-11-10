@@ -1,13 +1,14 @@
 import { createClaudeAdapter } from "@switchboard/adapter-claude";
 import { createCodexAdapter } from "@switchboard/adapter-codex";
 import { createAdkAdapter } from "@switchboard/adapter-adk";
+import { createAguiAdapter } from "@switchboard/adapter-agui";
 import { loadConfig } from "./config.ts";
 import { startServer } from "./server.ts";
 import type { Suggester } from "./routing.ts";
 import { relocate } from "./relocate.ts";
 import { shutdownOnce } from "./selfdev.ts";
 import { exportHistory, importHistory } from "./transfer.ts";
-import { Db } from "./db.ts";
+import { Db, snapshotBeforeMigrate } from "./db.ts";
 import { commitEventsArchive, prepareEventsArchive, readUploaded } from "./events-archive.ts";
 
 const cfg = loadConfig();
@@ -82,9 +83,14 @@ if (cmd === "relocate") {
   }
 }
 
+// The first open of the database on a start moves its schema: when that changes it, a snapshot is taken first (the
+// rescue page's "restore the database" offers it), and a failure to take it stops the start.
+const migrationSnapshot = await snapshotBeforeMigrate(cfg.dbPath, cfg.home);
+if (migrationSnapshot) console.log(`schema migration: snapshot ${migrationSnapshot} taken first`);
+
 // Adapters are plugins: any subset may be missing. Missing binaries / unreachable servers are reported, not fatal.
 // DAK is registered only when SWITCHBOARD_DAK_URL is set (off by default): the variable is its only record, it is not
-// copied into the saved list. The ADK servers added in Settings (docs/design/custom-adapter.md) are read once here and
+// copied into the saved list. The ADK / AG-UI servers added in Settings (docs/design/custom-adapter.md) are read once here and
 // run as `custom:<name>`; a change to them takes effect on the next start.
 const customRunners = (() => {
   const db = new Db(cfg.dbPath);
@@ -99,7 +105,11 @@ const adapters = [
   createClaudeAdapter(),
   createCodexAdapter(),
   ...(process.env.SWITCHBOARD_DAK_URL ? [createAdkAdapter({ id: "dak", label: "DAK", baseUrl: process.env.SWITCHBOARD_DAK_URL, app: "dak_agent", artifactSkipPrefix: "tool_output_" })] : []),
-  ...customRunners.map((r) => createAdkAdapter({ id: `custom:${r.name}`, label: r.label, baseUrl: r.url, app: r.app, tokenEnv: r.tokenEnv, artifactSkipPrefix: r.artifactSkipPrefix })),
+  ...customRunners.map((r) =>
+    r.port === "agui"
+      ? createAguiAdapter({ id: `custom:${r.name}`, label: r.label, baseUrl: r.url, tokenEnv: r.tokenEnv, sendWorkspaceMcp: r.sendWorkspaceMcp })
+      : createAdkAdapter({ id: `custom:${r.name}`, label: r.label, baseUrl: r.url, app: r.app, tokenEnv: r.tokenEnv, artifactSkipPrefix: r.artifactSkipPrefix }),
+  ),
 ];
 
 /**

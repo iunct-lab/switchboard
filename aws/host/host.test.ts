@@ -1,4 +1,4 @@
-// test-reads: aws/host/ aws/README.md docs/design/cloud-hosting.md
+// test-reads: aws/host/ aws/README.md docs/design/cloud-hosting.md docs/design/host-operations.md
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -221,30 +221,46 @@ case "$1 $2" in "repo clone") mkdir -p "$4";; "repo view") echo "${view}";; esac
   });
 
   // sb-host-update (#435): a fake git whose clone puts the given sb-env.sh into a new tree; the installed ones are in bin/
-  function hostUpdate(clone: string, prepare?: (opt: string) => void, repo?: string) {
+  // current: what releases/current links to (omitted = no link); ancestor: whether the fake git finds it in main's history
+  // forward: whether the installed clone's head is in the new tree's history (false = a promotion back to an older release)
+  // again: the next start on the host the last call left (bin, the clone and its record as they are)
+  function hostUpdate(clone: string, prepare?: (opt: string) => void, repo?: string, rel: { current?: string; ancestor?: boolean; forward?: boolean } = {}, env: Record<string, string> = {}, again = false) {
     const root = join(dir, "hu");
-    rmSync(root, { recursive: true, force: true });
-    mkdirSync(join(root, "bin"), { recursive: true });
-    mkdirSync(join(root, "opt", "switchboard-host", "aws", "host"), { recursive: true });
-    writeFileSync(join(root, "bin", "sb-env"), "old sb-env\n");
-    prepare?.(join(root, "opt"));
+    if (!again) {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(log, { force: true });
+      mkdirSync(join(root, "bin"), { recursive: true });
+      mkdirSync(join(root, "opt", "switchboard-host", "aws", "host"), { recursive: true });
+      writeFileSync(join(root, "opt", "switchboard-host", ".fakehead"), "1111111111111111111111111111111111111111\n"); // the installed clone's head
+      writeFileSync(join(root, "bin", "sb-env"), "old sb-env\n");
+      prepare?.(join(root, "opt"));
+      mkdirSync(join(root, "rel"));
+      if (rel.current) symlinkSync(rel.current, join(root, "rel", "current"));
+    }
+    rmSync(join(root, "checked"), { force: true });
     fake("aws", `case "$*" in *github-token*) echo gh-tok-123;; *github-repo*) ${repo ? `echo "${repo}"` : "exit 254"};; *) exit 254;; esac`);
     fake("git", `echo "git $* | header=$GIT_CONFIG_VALUE_0" >> "${log}"
-case "$1 $3" in "-C remote") echo https://github.com/o/r.git; exit 0;; "-C rev-parse") echo abc1234; exit 0;; esac
+case "$1 $3" in
+  "-C remote") echo https://github.com/o/r.git; exit 0;;
+  "-C rev-parse") [ "$4" = HEAD ] && { if [ -f "$2/.fakehead" ]; then cat "$2/.fakehead"; elif [ -f "${root}/checked" ]; then cat "${root}/checked"; else echo 2222222222222222222222222222222222222222; fi; exit 0; }; if [ -f "${root}/checked" ]; then cut -c1-7 "${root}/checked"; else echo abc1234; fi; exit 0;;
+  "-C merge-base") case "$5" in fedcba9876543210fedcba9876543210fedcba98|1111111111111111111111111111111111111111) exit ${rel.forward === false ? 1 : 0};; esac; exit ${rel.ancestor === false ? 1 : 0};;
+  "-C checkout") for a; do :; done; echo "$a" > "${root}/checked"; exit 0;;
+esac
 [ "$1" = clone ] || exit 1
 ${clone}`);
-    const r = run("host-update.sh", [], { SB_BIN_DIR: join(root, "bin"), SB_HOST_CLONE: join(root, "opt", "switchboard-host") });
+    const r = run("host-update.sh", [], { SB_BIN_DIR: join(root, "bin"), SB_HOST_CLONE: join(root, "opt", "switchboard-host"), SB_RELEASES_DIR: join(root, "rel"), ...env });
     rmSync(join(dir, "bin", "git")); // the later tests (sb-offload) use the real one
     return { ...r, root };
   }
-  const newTree = `for d; do :; done; mkdir -p "$d/aws/host"; for f in sb-stop sb-env archive runner-sync offload pre-rebuild node host-update; do echo "new $f" > "$d/aws/host/$f.sh"; done`;
+  const newTree = `for d; do :; done; mkdir -p "$d/aws/host"; for f in sb-stop sb-env archive runner-sync offload pre-rebuild node host-update; do echo ": new $f" > "$d/aws/host/$f.sh"; done`;
 
   test("sb-host-update installs the host scripts from a fresh clone of main before sb-env runs (#435)", () => {
     const r = hostUpdate(newTree);
     expect(r.code).toBe(0);
     expect(r.out).toContain("sb-host-update: abc1234 from main");
+    expect(r.err).toContain("no promoted release sha; using main");
     for (const [name, src] of [["sb-env", "sb-env"], ["sb-stop", "sb-stop"], ["sb-archive", "archive"], ["sb-runner-sync", "runner-sync"], ["sb-offload", "offload"], ["sb-pre-rebuild", "pre-rebuild"], ["sb-node", "node"], ["sb-host-update", "host-update"]]) {
-      expect(readFileSync(join(r.root, "bin", name), "utf8")).toBe(`new ${src}\n`);
+      expect(readFileSync(join(r.root, "bin", name), "utf8")).toBe(`: new ${src}\n`);
       expect(statSync(join(r.root, "bin", name)).mode & 0o777).toBe(0o755);
     }
     expect(existsSync(join(r.root, "opt", "switchboard-host", "aws", "host", "sb-env.sh"))).toBe(true); // the new clone took the old one's place
@@ -252,7 +268,7 @@ ${clone}`);
     expect(calls()).toContain(`systemd-run --unit=sb-node-update --no-block --collect --quiet -- ${join(r.root, "bin", "sb-node")}`);
     expect(existsSync(join(r.root, "opt", "switchboard-host.new"))).toBe(false);
     // With no parameter, the root-owned clone supplies the destination, and the journal says so.
-    expect(readFileSync(log, "utf8")).toContain("clone --depth 1 --branch main -q https://github.com/o/r.git");
+    expect(readFileSync(log, "utf8")).toContain("clone --filter=blob:none --branch main -q https://github.com/o/r.git");
     expect(r.err).toContain("no readable /switchboard/github-repo; following the origin of");
 
     // the unit runs it before sb-env, and a failure does not stop the start
@@ -263,10 +279,132 @@ ${clone}`);
     expect(readFileSync(join(HERE, "host-update.sh"), "utf8").trimEnd().split("\n").at(-1)).toBe('main "$@"; exit'); // it replaces itself
   });
 
+  const SHA = "0123456789abcdef0123456789abcdef01234567";
+  test("sb-host-update installs the promoted release's sha when it is in main's history", () => {
+    const r = hostUpdate(newTree, undefined, undefined, { current: `/home/u/.switchboard/releases/${SHA}` });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("sb-host-update: 0123456 from release");
+    expect(readFileSync(log, "utf8")).toContain(`-C ${join(r.root, "opt", "switchboard-host.new")} checkout -q --detach ${SHA}`);
+    expect(readFileSync(join(r.root, "bin", "sb-env"), "utf8")).toBe(": new sb-env\n");
+    expect(r.err).not.toContain("using main");
+  });
+
+  test("sb-host-update uses main's head when current is missing, not a sha or not in main's history", () => {
+    for (const [rel, why] of [
+      [{}, "no promoted release sha"],
+      [{ current: "../releases/not-a-sha" }, "no promoted release sha"],
+      [{ current: `/x/${SHA.toUpperCase()}` }, "no promoted release sha"],
+      [{ current: `/x/${SHA}0` }, "no promoted release sha"],
+      [{ current: `/x/${SHA}`, ancestor: false }, "is not in main's history; using main"],
+    ] as const) {
+      const r = hostUpdate(newTree, undefined, undefined, rel);
+      expect(r.code).toBe(0);
+      expect(r.out).toContain("abc1234 from main");
+      expect(r.err).toContain(why);
+      expect(readFileSync(log, "utf8")).not.toContain("checkout");
+      expect(readFileSync(join(r.root, "bin", "sb-env"), "utf8")).toBe(": new sb-env\n");
+    }
+  });
+
+  test("sb-host-update reads the releases directory from SB_HOST_HOME in the host env file", () => {
+    const home = join(dir, "hu-home");
+    rmSync(home, { recursive: true, force: true });
+    mkdirSync(join(home, ".switchboard", "releases"), { recursive: true });
+    symlinkSync(`/x/${SHA}`, join(home, ".switchboard", "releases", "current"));
+    const saved = readFileSync(join(dir, "host.env"), "utf8");
+    writeFileSync(join(dir, "host.env"), `${saved}SB_HOST_HOME=${home}\n`);
+    try {
+      const root = join(dir, "hu");
+      rmSync(root, { recursive: true, force: true });
+      mkdirSync(join(root, "bin"), { recursive: true });
+      mkdirSync(join(root, "opt", "switchboard-host"), { recursive: true });
+      fake("git", `case "$1 $3" in "-C remote") echo https://github.com/o/r.git;; "-C rev-parse") echo abc1234;; "-C merge-base") ;; "-C checkout") for a; do :; done; echo "checked $a";; *) [ "$1" = clone ] || exit 1; for d; do :; done; mkdir -p "$d/aws/host"; echo : > "$d/aws/host/host-update.sh";; esac`);
+      fake("aws", `case "$*" in *github-token*) echo t;; *) exit 254;; esac`);
+      const r = run("host-update.sh", [], { SB_BIN_DIR: join(root, "bin"), SB_HOST_CLONE: join(root, "opt", "switchboard-host") });
+      expect(r.code).toBe(0);
+      expect(r.out).toContain("abc1234 from release");
+    } finally {
+      rmSync(join(dir, "bin", "git"));
+      writeFileSync(join(dir, "host.env"), saved);
+    }
+  });
+
+  test("sb-host-update does not install a tree whose scripts do not parse or whose sb-env trial run fails", () => {
+    for (const [file, body, why] of [
+      ["sb-env", "if then", "sb-env.sh does not parse"],
+      ["node", "fi", "node.sh does not parse"],
+      ["sb-env", "exit 3", "sb-env.sh trial run exited 3"],
+    ] as const) {
+      const f = file === "sb-env" ? "sb-env.sh" : "node.sh";
+      const r = hostUpdate(`${newTree}; echo '${body}' > "$d/aws/host/${f}"`, undefined, undefined, { current: `/x/${SHA}` });
+      expect(r.code).toBe(0);
+      expect(r.err).toContain(`sb-host-update: ${why}; keeping the installed scripts`);
+      expect(readFileSync(join(r.root, "bin", "sb-env"), "utf8")).toBe("old sb-env\n");
+      expect(existsSync(join(r.root, "bin", "sb-stop"))).toBe(false);
+      expect(existsSync(join(r.root, "opt", "switchboard-host.new"))).toBe(false);
+      expect(existsSync(join(r.root, "opt", "switchboard-host", "aws", "host"))).toBe(true); // the old clone stays
+    }
+  });
+
+  test("a promotion back to an older release installs its scripts but keeps the installed sb-host-update, start after start", () => {
+    // the installed updater came from a later commit than the release promoted back to
+    const marker = (r: { root: string }) => join(r.root, "opt", "switchboard-host.updater");
+    const pinned = (opt: string) => {
+      writeFileSync(join(opt, "..", "bin", "sb-host-update"), ": pinning updater\n");
+      writeFileSync(join(opt, "switchboard-host.updater"), "fedcba9876543210fedcba9876543210fedcba98\n");
+    };
+    // two starts, each as the host finds it after the one before: the record of where the updater came from is not moved
+    // back with the clone, so the second start decides as the first did
+    for (const n of [1, 2]) {
+      const r = hostUpdate(newTree, pinned, undefined, { current: `/x/${SHA}`, forward: false }, {}, n === 2);
+      expect(r.code).toBe(0);
+      expect(r.out).toContain("0123456 from release");
+      expect(r.err).toContain("the tree is behind the installed sb-host-update (fedcba9); keeping it as it is");
+      expect(readFileSync(join(r.root, "bin", "sb-host-update"), "utf8")).toBe(": pinning updater\n");
+      expect(readFileSync(join(r.root, "bin", "sb-env"), "utf8")).toBe(": new sb-env\n");
+      expect(readFileSync(marker(r), "utf8")).toBe("fedcba9876543210fedcba9876543210fedcba98\n");
+    }
+    // going forward it is replaced as before, and the record moves with it
+    const f = hostUpdate(newTree, pinned, undefined, { current: `/x/${SHA}` });
+    expect(readFileSync(join(f.root, "bin", "sb-host-update"), "utf8")).toBe(": new host-update\n");
+    expect(readFileSync(marker(f), "utf8")).toBe(`${SHA}\n`);
+    // a host with no record yet (just bootstrapped from the clone, or from before the record): the clone's head says where
+    // the installed one came from, and is written down before the clone moves back — so the next start, on the clone the
+    // first one left (now the older release), still keeps it
+    const first = hostUpdate(newTree, (opt) => writeFileSync(join(opt, "..", "bin", "sb-host-update"), ": pinning updater\n"), undefined, { current: `/x/${SHA}`, forward: false });
+    expect(first.err).toContain("the tree is behind the installed sb-host-update (1111111); keeping it as it is");
+    expect(readFileSync(join(first.root, "bin", "sb-host-update"), "utf8")).toBe(": pinning updater\n");
+    expect(readFileSync(marker(first), "utf8")).toBe("1111111111111111111111111111111111111111\n");
+    const second = hostUpdate(newTree, undefined, undefined, { current: `/x/${SHA}`, forward: false }, {}, true);
+    expect(second.code).toBe(0);
+    expect(second.err).toContain("the tree is behind the installed sb-host-update (1111111); keeping it as it is");
+    expect(readFileSync(join(second.root, "bin", "sb-host-update"), "utf8")).toBe(": pinning updater\n");
+    expect(readFileSync(marker(second), "utf8")).toBe("1111111111111111111111111111111111111111\n");
+    // with no record and the clone's head in the new tree's history, it moves forward and starts the record
+    const fwd = hostUpdate(newTree, undefined, undefined, { current: `/x/${SHA}` });
+    expect(readFileSync(join(fwd.root, "bin", "sb-host-update"), "utf8")).toBe(": new host-update\n");
+    expect(readFileSync(marker(fwd), "utf8")).toBe(`${SHA}\n`);
+  });
+
+  test("sb-host-update shares one time budget within the unit's 90 s start: without enough left for the sb-env trial, the installed scripts stay", () => {
+    const r = hostUpdate(newTree, undefined, undefined, { current: `/x/${SHA}` }, { SB_HOST_UPDATE_BUDGET: "0" });
+    expect(r.code).toBe(0);
+    expect(r.err).toContain("sb-host-update: no time left for the sb-env.sh trial run; keeping the installed scripts");
+    expect(readFileSync(join(r.root, "bin", "sb-env"), "utf8")).toBe("old sb-env\n");
+    // every bounded step is cut to the budget, never `timeout 0` (no limit)
+    const src = readFileSync(join(HERE, "host-update.sh"), "utf8");
+    expect(src).not.toMatch(/^[^#]*timeout [0-9]/m);
+    expect(src.match(/timeout "\$\(cap \d+\)"/g)?.length).toBe(4);
+  });
+
+  test("bootstrap writes the host user's home to the host env file for sb-host-update", () => {
+    expect(readFileSync(join(HERE, "bootstrap.sh"), "utf8")).toContain("SB_HOST_HOME=$SB_HOST_HOME\nENV");
+  });
+
   test("sb-host-update follows the administrator's repository parameter", () => {
     const r = hostUpdate(newTree, undefined, "example/private");
     expect(r.code).toBe(0);
-    expect(readFileSync(log, "utf8")).toContain("clone --depth 1 --branch main -q https://github.com/example/private.git");
+    expect(readFileSync(log, "utf8")).toContain("clone --filter=blob:none --branch main -q https://github.com/example/private.git");
     expect(readFileSync(log, "utf8")).not.toContain("-C remote");
     expect(r.err).not.toContain("no readable");
   });
@@ -274,7 +412,7 @@ ${clone}`);
   test("sb-host-update ignores an invalid repository parameter and uses origin", () => {
     const r = hostUpdate(newTree, undefined, "not a repository");
     expect(r.code).toBe(0);
-    expect(readFileSync(log, "utf8")).toContain("clone --depth 1 --branch main -q https://github.com/o/r.git");
+    expect(readFileSync(log, "utf8")).toContain("clone --filter=blob:none --branch main -q https://github.com/o/r.git");
     expect(r.err).toContain("no readable /switchboard/github-repo");
   });
 
@@ -303,15 +441,15 @@ ${clone}`);
     const r = hostUpdate(newTree.replace("runner-sync ", ""));
     expect(r.code).toBe(0);
     expect(r.err).toContain("sb-host-update: main has no aws/host/runner-sync.sh; sb-runner-sync left as it was");
-    expect(readFileSync(join(r.root, "bin", "sb-host-update"), "utf8")).toBe("new host-update\n");
-    expect(readFileSync(join(r.root, "bin", "sb-offload"), "utf8")).toBe("new offload\n");
+    expect(readFileSync(join(r.root, "bin", "sb-host-update"), "utf8")).toBe(": new host-update\n");
+    expect(readFileSync(join(r.root, "bin", "sb-offload"), "utf8")).toBe(": new offload\n");
     expect(existsSync(join(r.root, "bin", "sb-runner-sync"))).toBe(false);
   });
 
   test("the scripts sb-host-update installs as root are the ones docs/design/cloud-hosting.md lists (#852)", () => {
     const sh = readFileSync(join(HERE, "host-update.sh"), "utf8");
     const self = sh.match(/install -m 755 "\$h\/(\S+)" "\$BIN\/(\S+)"/)!;
-    const list = sh.match(/for src in (.+?); do/)![1].split(/\s+/).map((p) => p.split(":") as [string, string]);
+    const list = sh.match(/^SCRIPTS="(.+)"$/m)![1].split(/\s+/).map((p) => p.split(":") as [string, string]);
     const installed = [[self[1], self[2]] as [string, string], ...list].map(([src, dst]) => `aws/host/${src} ${dst}`).sort();
     const doc = readFileSync(join(HERE, "..", "..", "docs", "design", "cloud-hosting.md"), "utf8");
     const section = doc.slice(doc.indexOf("### 6.5 "), doc.indexOf("#### 見直す契機"));
@@ -324,7 +462,7 @@ ${clone}`);
     expect(r.code).toBe(0);
     const clone = calls().find((l) => l.startsWith("git clone"))!;
     const [args, header] = clone.split(" | header=");
-    expect(args).toBe(`git clone --depth 1 --branch main -q https://github.com/o/r.git ${join(r.root, "opt", "switchboard-host.new")}`);
+    expect(args).toBe(`git clone --filter=blob:none --branch main -q https://github.com/o/r.git ${join(r.root, "opt", "switchboard-host.new")}`);
     expect(args).not.toContain("gh-tok-123");
     expect(args).not.toContain(Buffer.from("x-access-token:gh-tok-123").toString("base64"));
     expect(header).toBe(`AUTHORIZATION: basic ${Buffer.from("x-access-token:gh-tok-123").toString("base64")}`);
@@ -1785,8 +1923,10 @@ describe("aws/host gh-guard on the host shell (#824)", () => {
   });
 });
 
-describe("aws/README.md emergency steps (#1492)", () => {
-  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+// docs/design/host-operations.md is left out of the public tree (publicSync.exclude), so a public clone skips these
+const hostOps = new URL("../../docs/design/host-operations.md", import.meta.url);
+describe.skipIf(!existsSync(hostOps))("docs/design/host-operations.md emergency steps (#1492)", () => {
+  const readme = existsSync(hostOps) ? readFileSync(hostOps, "utf8") : "";
   const at = readme.indexOf("## 緊急時: 不審なアクセスがあったとき（#1492）");
   const section = at < 0 ? "" : readme.slice(at, readme.indexOf("\n## ", at + 1));
 
@@ -1810,7 +1950,7 @@ describe("aws/README.md emergency steps (#1492)", () => {
 
 describe("aws/README.md travelling (#1639)", () => {
   const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
-  const at = readme.indexOf("- **Travelling (#1639)**");
+  const at = readme.indexOf("- **Travelling**");
   const section = at < 0 ? "" : readme.slice(at, readme.indexOf("- **Web ACL**", at));
 
   test("the section says how to set it before a trip, that it ends by itself, and how to undo it when it was forgotten", () => {

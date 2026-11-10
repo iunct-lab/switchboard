@@ -132,7 +132,7 @@ README の原則「No keys, no telemetry. Your own login, on your own machine.�
 
 - UI と救援画面への入り方は §3 のパスキー（#211）。Switchboard のコードが持つ秘密はデーモンのトークンだけで、環境の層（Parameter Store → sb-env）から来る。エージェントは同じ OS ユーザーなので読めるが、外からはそのトークンでは入れない（#748）。Cookie を確かめる公開鍵は秘密ではなく、署名の seed は起動用 Lambda だけが読む（#701）
 
-- アクセスログ・操作ログ（#1490）: loopback 以外で待ち受けるときだけ、デーモンが標準出力に 1 行 1 JSON を出す（sb-rescue が `~/.switchboard/daemon.log` に書く。ファイルもローテーションも増やさない）。`{"log":"access"}` は 1 要求 1 行で、時刻・接続元・method・パス（クエリを除く）・status・認証の種類（`cookie` / `token` / `none`。示した種類で、通ったかは status で分かる）。接続元は CloudFront の `CloudFront-Viewer-Address` を、共有ヘッダが通った要求でだけ信じ、無ければ接続相手。`{"log":"op"}` は `pty.open`（Task id）・`task.create.danger`・`daemon.restart`・`daemon.promote`・`settings.update`（変えたキーの名前だけ）・`workspace.add`（パス）。本文・クエリ・Cookie・トークンの値は出さない。loopback は今のまま出さない。見方（侵害の確認）は `aws/README.md` の「侵害の確認」
+- アクセスログ・操作ログ: loopback 以外で待ち受けるときだけ、デーモンが標準出力に 1 行 1 JSON を出す（sb-rescue が `~/.switchboard/daemon.log` に書く。ファイルもローテーションも増やさない）。`{"log":"access"}` は 1 要求 1 行で、時刻・接続元・method・パス（クエリを除く）・status・認証の種類（`cookie` / `token` / `none`。示した種類で、通ったかは status で分かる）。接続元は CloudFront の `CloudFront-Viewer-Address` を、共有ヘッダが通った要求でだけ信じ、無ければ接続相手。`{"log":"op"}` は `pty.open`（Task id）・`task.create.danger`・`daemon.restart`・`daemon.promote`・`settings.update`（変えたキーの名前だけ）・`workspace.add`（パス）。本文・クエリ・Cookie・トークンの値は出さない。loopback は今のまま出さない。見方は `~/.switchboard/daemon.log` を `jq` で絞る
 
 ### 4.1 切れていると分かる（#180）
 
@@ -168,8 +168,8 @@ Starter（`aws/auth.ts`）と同じ規則を、デーモンの入口にも置く
 - 書き換えないもの: Claude の jsonl・Codex の rollout の中身（中の `cwd` は履歴として旧パスのまま。再開に要るのはファイルの場所と Switchboard が渡す cwd）、`knowledge_docs.path`（`~/Knowledge` からの相対。絶対の行があれば relocate は止まる）
 - 確かめてから書き、どこかで止まれば何も書かない（止まる条件は `packages/core/src/relocate.ts`）
 - 旧パスも読める互換層・旧パスへのシンボリックリンクは作らない（書き換えは 1 回のコマンド）
-- `/private/tmp/...` の worktree など、この機械に無いパスは作らない。そういう Task も一覧・トランスクリプト・diff は表示でき、返信すると「作業フォルダ … がこの機械に無い」と出て Task が error になる（API は 409）。デーモンは止まらない（#220）
-- AWS のスタックでは bootstrap が import してすぐデーモンを起動するので、relocate はその後に `aws/README.md` の「Moving to the default paths」の 2〜4 で行い、GitHub の workflow の `rebuild`（Actions → host。救援画面は 2 で止めている）で作り直す（relocate 済みの DB が戻り、Workspace が新しい `ReposDir` に clone され、改名したフォルダが展開される）
+- `/private/tmp/...` の worktree など、この機械に無いパスは作らない。そういう Task も一覧・トランスクリプト・diff は表示でき、返信すると「作業フォルダ … がこの機械に無い」と出て Task が error になる（API は 409）。デーモンは止まらない
+- AWS のスタックでは bootstrap が import してすぐデーモンを起動するので、relocate はその後に手で行い、GitHub の workflow の `rebuild`（Actions → host。デーモンを止め、救援画面（sb-rescue）も止めてから）で作り直す（relocate 済みの DB が戻り、Workspace が新しい `ReposDir` に clone され、改名したフォルダが展開される）
 
 ### パッケージ
 
@@ -349,7 +349,7 @@ DB のマイグレーションは追加だけにする（列を消さない）�
 
 - 経路は 2 つある
   - 作り直すたび: UserData がスタックの `GitHubRepo` の main を clone し、`aws/host/bootstrap.sh` を root で走らせる（§6.4、`aws/README.md`）。bootstrap は最初に `/switchboard/github-repo` の main を root の clone に取り直し、その bootstrap に乗り換える（`sb-host-update` と同じパラメータ、同じ取り方）。読めない・取り直せないときは理由を stderr に出して、`GitHubRepo` の clone のまま続ける。乗り換えは UserData の clone にこの版の bootstrap があるときだけ効く（`GitHubRepo` が公開側の写しなら、その写しに同期されてから）。作り直した後の確かめ方: `journalctl --no-pager | grep 'bootstrap: running main of'` に行が出る。これが乗り換えの証拠で、`-b` は付けない（bootstrap がカーネル更新で再起動すると、行は 1 つ前の起動に残る）。行が出るのは UserData の clone が別のリポジトリのときだけで、`GitHubRepo` がパラメータと同じなら乗り換えないので出ない。root の clone の origin は `git -c safe.directory=/opt/switchboard-host -C /opt/switchboard-host remote get-url origin` で開発リポジトリを指すことを見る（root 所有なので Switchboard の OS ユーザーには `safe.directory` が要る）。`sb-host-update` も起動のたびに同じ main を取り直すので、origin だけでは乗り換えを示さない
-  - 起動のたび: `sb-host-update`（#435 / PR #803）が main を clone し直し、下の表のスクリプトを root で `/usr/local/bin` に入れる。入れ替えは `host-update.sh` の `for src in …` の一覧が正本で、`aws/host/host.test.ts` の "#852" のテストがこの表と突き合わせる。同じ起動で、AL2023 の最新のリポジトリのセキュリティ更新を `sb-security-update` の unit（`dnf --releasever=latest upgrade --security --refresh`、起動は待たない）に渡す（#2186）。root が走らせるのは distribution の署名つきのパッケージだけで、main から root で走る範囲は変わらない。Node.js は dnf のパッケージではないので、同じ起動で `sb-node` を `sb-node-update` の unit に渡す（起動は待たない）。`node.sh` に固定した版と sha256 の nodejs.org の tarball だけを入れ、入っている版が違うときだけ入れ替える
+  - 起動のたび: `sb-host-update`（#435 / PR #803）が main を root 所有の clone に取り直し（履歴つき、blob は後から）、昇格済みのリリースの sha（`~/.switchboard/releases/current` のリンク先の名前。40 桁の 16 進で、main の祖先であるときだけ）を checkout し、全スクリプトの `bash -n` と新しい `sb-env` の試走（一時ファイルへ書き出して 0 で終わる）が通れば、下の表のスクリプトを root で `/usr/local/bin` に入れる。sha が無い・形が違う・祖先でないときは main の先頭を使い、理由を stderr に出す。試走が通らない版は入れず、入っている版のまま起動を続ける。ホストのユーザーの場所から読むのは `current` のリンク先の名前だけで、そこから何も実行しない。ホストのユーザーが選べるのは main の履歴の中のコミットだけ（main に無いコミットは選べない）。`sb-host-update` 自身は、入っている版の出どころ（root 所有の `/opt/switchboard-host.updater` に記録した sha。clone の先頭は昇格で戻るので使わない。記録がまだ無いとき（bootstrap の直後、記録より前のホスト）は、updater を入れた clone の先頭を、clone を入れ替える前に記録に書く）より履歴を前に進むときだけ入れ替える（古いリリースへの昇格では、ほかのスクリプトはその版に戻し、固定と試走をする updater は残す）。取得・checkout・試走は 60 秒の枠を分け合い（unit の起動の 90 秒のうち。残りは sb-env と sb-rescue）、試走に 5 秒残っていなければ入れずに今の版のまま起動する。ホストのユーザーのホームは `/etc/switchboard-host.env` の `SB_HOST_HOME`（bootstrap が書く。この行が入る前に作ったホストは次の作り直すまで main の先頭）。ログは `sb-host-update: <sha> from release` / `from main`。入れ替えは `host-update.sh` の `for src in …` の一覧が正本で、`aws/host/host.test.ts` の "#852" のテストがこの表と突き合わせる。同じ起動で、AL2023 の最新のリポジトリのセキュリティ更新を `sb-security-update` の unit（`dnf --releasever=latest upgrade --security --refresh`、起動は待たない）に渡す（#2186）。root が走らせるのは distribution の署名つきのパッケージだけで、main から root で走る範囲は変わらない。Node.js は dnf のパッケージではないので、同じ起動で `sb-node` を `sb-node-update` の unit に渡す（起動は待たない）。`node.sh` に固定した版と sha256 の nodejs.org の tarball だけを入れ、入っている版が違うときだけ入れ替える
 
 | スクリプト | 入れ先の名前 |
 |---|---|

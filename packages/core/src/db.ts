@@ -1,11 +1,14 @@
 import { AskQuestion, CloudSessionRef, CustomRunner, HumanEval, JudgeEval, RuleEval, SizeClass } from "@switchboard/protocol";
 import { Database } from "bun:sqlite";
-import { realpathSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, mkdirSync, realpathSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
+import { pipeline } from "node:stream/promises";
+import { constants, createGzip } from "node:zlib";
 import type { AgentEvent, AskAnswerResult, Artifact, Attachment, BacklogAction, Provenance, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogRepositorySync, BacklogSource, CheckRun, CreatedIssue, EvalSource, EvalsListRow, EventEnvelope, HistorySession, Job, JobKind, JobStatus, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerRow, LedgerSummary, LedgerTaskRow, LlmSuggestion, LoadKind, Journey, PerfSample, PerfSummaryRow, ReportRow, RoutingLogRow, RoutingStats, RunnerId, RunnerStats, Schedule, StagedChange, StopRecord, Task, TaskEvals, TaskOrigin, TaskOutcome, TaskStatus, Workspace, WorkspaceSweep } from "@switchboard/protocol";
 import { teleportWorktreePath } from "./config.ts";
 import { MAX_STOP_RESUMES, planResumeAfterStop } from "./interrupted.ts";
-import { canTransition, InvalidTaskTransitionError, outcomeOnStatus } from "./task-status.ts";
+import { canTransition, IN_FLIGHT, InvalidTaskTransitionError, outcomeOnStatus, type WorkPurpose, workingSql } from "./task-status.ts";
 import { backlogFieldValue, conflictRevision, mergeBacklogField, sameBacklogValue } from "./backlog-merge.ts";
 import type { ReportedTotal } from "./pricing.ts";
 
@@ -60,8 +63,15 @@ export interface BacklogOperation extends BacklogRepositoryKey {
   updatedAt: number;
 }
 /** An operation `applyBacklogEdit` queues (`id`: given, else a new UUID); `replace` = the id of a `pending` one of the same record and field whose payload this replaces instead. */
-export type NewBacklogOperation = Pick<BacklogOperation, "issue" | "targetKind" | "target" | "kind" | "payload"> & { id?: string; field?: string; base?: unknown; replace?: string };
+export type NewBacklogOperation = Pick<BacklogOperation, "issue" | "targetKind" | "target" | "kind" | "payload"> & { id?: string; field?: string; base?: unknown; replace?: string; /** a comment written earlier (moved when GitHub sync is turned on): sent without the window */ noDelay?: boolean };
 /** A choice on a conflict refused (#887); `status` = the HTTP status the API answers with. Nothing was changed. */
+/** A comment is sent to GitHub only this long after it is written, and can be taken back until then (it notifies people). */
+export const SEND_DELAY_MS = 60_000;
+/** A comment still inside the window it was written with (not one waiting out a limit or a backoff after a try). */
+export function inSendWindow(op: Pick<BacklogOperation, "kind" | "status" | "attempt" | "retryAt" | "createdAt">, now: number): boolean {
+  return op.kind === "comment" && op.status === "pending" && op.attempt === 0 && op.retryAt === op.createdAt + SEND_DELAY_MS && op.retryAt > now;
+}
+
 export class BacklogResolveError extends Error {
   constructor(message: string, readonly status: 404 | 409) {
     super(message);
@@ -96,6 +106,26 @@ export function applyBacklogField(kind: BacklogObjectKind, data: unknown, field:
 const isBacklogField = (kind: BacklogObjectKind, field: string | undefined): field is string =>
   !!field && (kind === "issue" ? /^label:./.test(field) || ["title", "body", "state", "stateReason", "milestone", "parent", "change"].includes(field) : kind === "project-item" && (/^field:./.test(field) || field === "member"));
 
+/** The prefixes listEventsByPrefix reads, with the length each events_* index compares (#4174): keep them equal to SCHEMA's WHERE. */
+const EVENT_PREFIX_INDEX: Record<string, number> = {
+  '{"t":"permission.ask",': 22,
+  '{"t":"permission.resolved",': 27,
+  '{"t":"message.delta","role":"user"': 34,
+  '{"t":"stop.record",': 19,
+};
+
+/** listEventsByPrefix's query (exported for the test's EXPLAIN QUERY PLAN): one SELECT per prefix, each WHERE the events_* index's word for word. */
+export function eventsByPrefixSql(prefixes: string[]): string {
+  return prefixes
+    .map((p) => {
+      const len = EVENT_PREFIX_INDEX[p];
+      if (len === undefined) throw new Error(`listEventsByPrefix: no index for the prefix ${p}`);
+      // the literal has no quote, so it is safe inline
+      return `SELECT task_id, ts, seq, json FROM events WHERE substr(json, 1, ${len}) = '${p}'`;
+    })
+    .join(" UNION ALL ");
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS workspaces (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, created_at INTEGER NOT NULL
@@ -103,7 +133,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY, workspace_id TEXT, title TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL,
   scope TEXT NOT NULL, status TEXT NOT NULL, runner_session_id TEXT, model TEXT, routing TEXT, budget_usd REAL, schedule_id TEXT,
-  permission_mode TEXT, effort TEXT, origin TEXT NOT NULL DEFAULT 'switchboard', resume_at INTEGER, resume_reason TEXT, resume_window TEXT, resume_since INTEGER, resume_planned_at INTEGER, shadow_of TEXT, shadow_stopped INTEGER NOT NULL DEFAULT 0, workspace_reason TEXT,
+  permission_mode TEXT, effort TEXT, subagent_effort TEXT, origin TEXT NOT NULL DEFAULT 'switchboard', resume_at INTEGER, resume_reason TEXT, resume_window TEXT, resume_since INTEGER, resume_planned_at INTEGER, shadow_of TEXT, shadow_stopped INTEGER NOT NULL DEFAULT 0, workspace_reason TEXT,
   outcome TEXT NOT NULL DEFAULT 'unknown', reviewed_at INTEGER, archived_at INTEGER, judged_result TEXT, judged_reason TEXT, judged_by TEXT, judging_at INTEGER, stage_issue INTEGER, stage_action TEXT,
   status_at INTEGER NOT NULL, title_pending INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, provenance TEXT
 );
@@ -120,6 +150,10 @@ CREATE TABLE IF NOT EXISTS events (
 );
 -- listStopRecords (#3080): the stop.record rows only, so the backlog list does not read every event's json; the WHERE is that query's, word for word
 CREATE INDEX IF NOT EXISTS events_stop ON events (task_id) WHERE substr(json, 1, 19) = '{"t":"stop.record",';
+-- listEventsByPrefix (#4174): the intervention events only; each WHERE is the one listEventsByPrefix builds from EVENT_PREFIX_INDEX, word for word
+CREATE INDEX IF NOT EXISTS events_ask ON events (task_id) WHERE substr(json, 1, 22) = '{"t":"permission.ask",';
+CREATE INDEX IF NOT EXISTS events_resolved ON events (task_id) WHERE substr(json, 1, 27) = '{"t":"permission.resolved",';
+CREATE INDEX IF NOT EXISTS events_user_say ON events (task_id) WHERE substr(json, 1, 34) = '{"t":"message.delta","role":"user"';
 CREATE TABLE IF NOT EXISTS ledger (
   id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, runner TEXT NOT NULL, model TEXT,
   input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, cache_read INTEGER NOT NULL, cache_write INTEGER NOT NULL, cache_write_1h INTEGER NOT NULL DEFAULT 0,
@@ -376,10 +410,80 @@ function deepFreeze<T>(v: T): T {
 }
 
 /**
- * A stage Task still at work: running / waiting, or a turn ended on background jobs that start its next turn (the
- * `background` mark, cleared when they end or the runner goes). Starting the same Issue's stage again then runs it twice.
+ * A stage Task still at work: running / waiting; a turn ended on background jobs that start its next turn (the
+ * `background` mark, cleared when they end or the runner goes); a turn ended on a job it asked the daemon for (`jobs`
+ * running, #3992 — local CI or a review whose end resumes it, #3993); or a turn that ended done whose last reply is still
+ * being judged (`judging_at`, #493 — until then its outcome is unknown, so a question it ended on does not hold the
+ * Issue yet). Starting the same Issue's stage again in any of these runs it twice. `dedupe` also counts a planned resume
+ * (it would run the stage again); `slot` (the capacity of a slot) does not (task-status.ts COUNTS).
  */
-const ACTIVE_STAGE = "(status IN ('running', 'waiting') OR background IS NOT NULL)";
+const activeStage = (purpose: "dedupe" | "slot") => `(${workingSql(purpose)} OR judging_at IS NOT NULL OR id IN (SELECT task_id FROM jobs WHERE status = 'running'))`;
+
+/** Table name -> column names, and `user_version`: what `needsMigration` compares. */
+function schemaShape(db: Database): { tables: Map<string, Set<string>>; version: number } {
+  const tables = new Map<string, Set<string>>();
+  for (const t of db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as Array<{ name: string }>) {
+    const cols = db.query("SELECT name FROM pragma_table_info(?)").all(t.name) as Array<{ name: string }>;
+    tables.set(t.name, new Set(cols.map((c) => c.name)));
+  }
+  return { tables, version: (db.query("PRAGMA user_version").get() as { user_version: number }).user_version };
+}
+
+/**
+ * Whether opening `path` with `Db` would change its schema (a table or column the current code expects is missing, or
+ * `user_version` is behind): the shape of an empty database that got `SCHEMA` and `migrate` is the reference. False when
+ * there is no file. Read-only: the file is not touched.
+ */
+export function needsMigration(path: string): boolean {
+  if (!existsSync(path)) return false;
+  const want = new Database(":memory:");
+  const have = new Database(path, { readonly: true });
+  try {
+    want.exec(SCHEMA);
+    migrate(want);
+    const w = schemaShape(want);
+    const h = schemaShape(have);
+    if (h.version < w.version) return true;
+    for (const [table, cols] of w.tables) {
+      const present = h.tables.get(table);
+      if (!present) return true;
+      for (const c of cols) if (!present.has(c)) return true;
+    }
+    return false;
+  } finally {
+    have.close();
+    want.close();
+  }
+}
+
+/**
+ * Before the schema is moved on, a copy of the database in sb-rescue's snapshot folder and form (`<home>/snapshots/<ISO>-before-migrate.db.gz`,
+ * the rescue page's "restore the database" lists it). Null when nothing needs migrating. Throws when the copy cannot be
+ * made: the caller must not migrate without a way back. Old snapshots are pruned by sb-rescue's next `snapshotDb`.
+ */
+export async function snapshotBeforeMigrate(path: string, home: string, now = new Date()): Promise<string | null> {
+  if (!needsMigration(path)) return null;
+  const dir = join(home, "snapshots");
+  mkdirSync(dir, { recursive: true });
+  const name = `${now.toISOString().replace(/[:.]/g, "-")}-before-migrate.db`;
+  const copy = join(dir, `${name}.tmp`);
+  const raw = join(dir, name);
+  const part = `${raw}.gz.part`;
+  const db = new Database(path);
+  try {
+    db.exec(`VACUUM INTO '${copy.replace(/'/g, "''")}'`);
+    renameSync(copy, raw);
+    await pipeline(createReadStream(raw), createGzip({ level: constants.Z_BEST_SPEED }), createWriteStream(part));
+    renameSync(part, `${raw}.gz`);
+    rmSync(raw, { force: true });
+  } catch (e) {
+    for (const f of [copy, raw, part, `${raw}.gz`]) rmSync(f, { force: true });
+    throw e;
+  } finally {
+    db.close();
+  }
+  return `${name}.gz`;
+}
 
 export class Db {
   readonly sqlite: Database;
@@ -642,9 +746,9 @@ export class Db {
         }
         const id = op.id ?? crypto.randomUUID();
         this.sqlite
-          .query(`INSERT INTO backlog_operations (id, service, host, repository, issue, target_kind, target, kind, field, payload, base, status, created_at, updated_at)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`)
-          .run(id, ...key, op.issue, op.targetKind, op.target, op.kind, op.field ?? null, payload, op.kind === "set" ? JSON.stringify(op.base ?? null) : null, now, now);
+          .query(`INSERT INTO backlog_operations (id, service, host, repository, issue, target_kind, target, kind, field, payload, base, status, retry_at, created_at, updated_at)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`)
+          .run(id, ...key, op.issue, op.targetKind, op.target, op.kind, op.field ?? null, payload, op.kind === "set" ? JSON.stringify(op.base ?? null) : null, op.kind === "comment" && !op.noDelay ? now + SEND_DELAY_MS : null, now, now);
         return id;
       });
       // a record the service has shows its operations on top of it, whatever `local` the caller wrote
@@ -865,6 +969,22 @@ export class Db {
   }
 
   /**
+   * A comment taken back inside its send window (SEND_DELAY_MS): nothing is sent for it, it is `done` with why. Throws
+   * BacklogResolveError: 404 = no such operation of the repository, 409 = not a comment still waiting in its window
+   * (it is being sent, sent, or past the window).
+   */
+  cancelBacklogOperation(repo: BacklogRepositoryKey, id: string, now = Date.now()): void {
+    this.sqlite.transaction(() => {
+      const op = this.getBacklogOperation(id);
+      if (!op || op.service !== repo.service || op.host !== repo.host || op.repository !== repo.repository) throw new BacklogResolveError(`操作 ${id} はありません`, 404);
+      if (!inSendWindow(op, now)) throw new BacklogResolveError("このコメントは取り消せる間（送る前）を過ぎています", 409);
+      this.sqlite.query("UPDATE backlog_operations SET status = 'done', retry_at = NULL, error = '送る前に取り消しました', updated_at = ? WHERE id = ?").run(now, id);
+      // the comment kept here goes with it, as a withdrawn post's does: nothing reads its words (or its heading) any more
+      if (op.target.startsWith("local:")) this.sqlite.query("DELETE FROM backlog_records WHERE service = ? AND host = ? AND repository = ? AND object_kind = ? AND external_id = ?").run(op.service, op.host, op.repository, op.targetKind, op.target);
+    })();
+  }
+
+  /**
    * Takes back an operation held `unknown` or `failed` (#3804): nothing is sent to the service for it, it is `done` with
    * why (`error`), and the Issue's operations after it go on. A post never made (its target still `local:`) leaves no
    * record behind; a create of an Issue never made takes the Issue's operations after it back with it (they cannot be
@@ -953,17 +1073,22 @@ export class Db {
     return this.sqlite.query("SELECT * FROM tasks WHERE status = ? ORDER BY updated_at DESC").all(status).map(rowToTask);
   }
 
+  /** Tasks that count as working for `purpose` (task-status.ts `isWorking`, in SQL): a turn, an open approval, a wait on background jobs, and for `dedupe` a planned resume. */
+  listWorkingTasks(purpose: WorkPurpose): Task[] {
+    return this.sqlite.query(`SELECT * FROM tasks WHERE ${workingSql(purpose)} ORDER BY updated_at DESC`).all().map(rowToTask);
+  }
+
   /** The Tasks whose judgement of the last reply was under way (#1139): after a restart, those it cut short. */
   listTasksJudging(): Task[] {
     return this.sqlite.query("SELECT * FROM tasks WHERE judging_at IS NOT NULL").all().map(rowToTask);
   }
 
   /**
-   * The newest active stage Task of a backlog Issue in a workspace (#1139): running / waiting, or one whose turn ended while
-   * its runner's background jobs still run (`background` set) — their notification starts its next turn, so it is not over.
+   * The newest active stage Task of a backlog Issue in a workspace (#1139): running / waiting, or one whose turn ended but
+   * whose work is not over (activeStage: its runner's background jobs, a daemon job it asked for, its reply being judged).
    */
   activeStageTask(workspaceId: string, issue: number): Task | null {
-    const r = this.sqlite.query(`SELECT * FROM tasks WHERE workspace_id = ? AND stage_issue = ? AND ${ACTIVE_STAGE} ORDER BY updated_at DESC LIMIT 1`).get(workspaceId, issue);
+    const r = this.sqlite.query(`SELECT * FROM tasks WHERE workspace_id = ? AND stage_issue = ? AND ${activeStage("dedupe")} ORDER BY updated_at DESC LIMIT 1`).get(workspaceId, issue);
     return r ? rowToTask(r) : null;
   }
 
@@ -980,9 +1105,9 @@ export class Db {
     return (this.sqlite.query("SELECT id FROM tasks WHERE workspace_id = ? AND stage_issue = ?").all(workspaceId, issue) as Array<{ id: string }>).map((r) => r.id);
   }
 
-  /** Every active stage Task (as activeStageTask's), whatever the workspace (#1139). */
+  /** Every stage Task taking a slot (as activeStageTask's, less a planned resume), whatever the workspace (#1139). */
   listActiveStageTasks(): Task[] {
-    return this.sqlite.query(`SELECT * FROM tasks WHERE stage_issue IS NOT NULL AND ${ACTIVE_STAGE}`).all().map(rowToTask);
+    return this.sqlite.query(`SELECT * FROM tasks WHERE stage_issue IS NOT NULL AND ${activeStage("slot")}`).all().map(rowToTask);
   }
 
   /** The `stop.record` events of these tasks (#948), oldest first. */
@@ -1009,12 +1134,13 @@ export class Db {
   }
 
   /**
-   * The events of every task whose JSON begins with one of these (#651), oldest first — one pass over the table, with the
-   * prefix compare of listStopRecords (`t` is always written first).
+   * The events of every task whose JSON begins with one of these (#651), oldest first — one UNION ALL of the per-prefix
+   * partial indexes (#4174), with the prefix compare of listStopRecords (`t` is always written first). A prefix not in
+   * EVENT_PREFIX_INDEX throws: add its index to SCHEMA and the table together.
    */
   listEventsByPrefix(prefixes: string[]): EventEnvelope[] {
-    const where = prefixes.map(() => "substr(json, 1, length(?)) = ?").join(" OR ");
-    const rows = this.sqlite.query(`SELECT task_id, ts, seq, json FROM events WHERE ${where}`).all(...prefixes.flatMap((p) => [p, p])) as Array<{ task_id: string; ts: number; seq: number; json: string }>;
+    if (prefixes.length === 0) return [];
+    const rows = this.sqlite.query(eventsByPrefixSql(prefixes)).all() as Array<{ task_id: string; ts: number; seq: number; json: string }>;
     return rows.sort((a, b) => a.ts - b.ts || a.seq - b.seq).map((r) => ({ taskId: r.task_id, ts: r.ts, seq: r.seq, ev: JSON.parse(r.json) as AgentEvent }));
   }
 
@@ -1049,10 +1175,10 @@ export class Db {
     this.sqlite.transaction(() => {
       this.sqlite
         .query(
-          `INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, runner_session_id, model, routing, budget_usd, schedule_id, permission_mode, effort, origin, resume_at, resume_reason, resume_window, resume_since, resume_planned_at, shadow_of, shadow_stopped, workspace_reason, outcome, reviewed_at, archived_at, judged_result, judged_reason, judged_by, created_at, updated_at, execution_mode, cloud_session, source_cloud_task_id, stage_issue, stage_action, judging_at, status_at, title_pending)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, runner_session_id, model, routing, budget_usd, schedule_id, permission_mode, effort, subagent_effort, origin, resume_at, resume_reason, resume_window, resume_since, resume_planned_at, shadow_of, shadow_stopped, workspace_reason, outcome, reviewed_at, archived_at, judged_result, judged_reason, judged_by, created_at, updated_at, execution_mode, cloud_session, source_cloud_task_id, stage_issue, stage_action, judging_at, status_at, title_pending)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(t.id, t.workspaceId, t.title, t.runner, t.cwd, JSON.stringify(t.scope), t.status, t.runnerSessionId, t.model, t.routing ? JSON.stringify(t.routing) : null, t.budgetUsd, t.scheduleId, t.permissionMode, t.effort, t.origin, t.resumeAt, t.resumeReason, t.resumeWindow, t.resumeSince, t.resumePlannedAt, t.shadowOf, t.shadowStopped ? 1 : 0, t.workspaceReason, t.outcome, t.reviewedAt, t.archivedAt, t.judgedResult, t.judgedReason, t.judgedBy, t.createdAt, t.updatedAt, t.executionMode, t.cloudSession ? JSON.stringify(t.cloudSession) : null, t.sourceCloudTaskId, t.stage?.issue ?? null, t.stage?.action ?? null, t.judgingAt, t.statusAt, t.titlePending ? 1 : 0);
+        .run(t.id, t.workspaceId, t.title, t.runner, t.cwd, JSON.stringify(t.scope), t.status, t.runnerSessionId, t.model, t.routing ? JSON.stringify(t.routing) : null, t.budgetUsd, t.scheduleId, t.permissionMode, t.effort, t.subagentEffort ?? null, t.origin, t.resumeAt, t.resumeReason, t.resumeWindow, t.resumeSince, t.resumePlannedAt, t.shadowOf, t.shadowStopped ? 1 : 0, t.workspaceReason, t.outcome, t.reviewedAt, t.archivedAt, t.judgedResult, t.judgedReason, t.judgedBy, t.createdAt, t.updatedAt, t.executionMode, t.cloudSession ? JSON.stringify(t.cloudSession) : null, t.sourceCloudTaskId, t.stage?.issue ?? null, t.stage?.action ?? null, t.judgingAt, t.statusAt, t.titlePending ? 1 : 0);
       if (t.routing) {
         const logRow = this.sqlite.query("INSERT INTO routing_log (task_id, workspace_id, cwd, suggested, rule_id, reason, chosen, ts, suggested_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
         logRow.run(t.id, t.workspaceId, t.cwd, t.routing.suggested, t.routing.ruleId, t.routing.reason, t.runner, t.createdAt, "rule");
@@ -1211,7 +1337,7 @@ export class Db {
    * an `outcome` in the patch sets the outcome by rule (#492, `outcomeOnStatus` in task-status.ts) — the one place the rule lives. A status the table (`TASK_TRANSITIONS`) does
    * does not allow is not stored: it throws `InvalidTaskTransitionError` (#1140).
    */
-  updateTask(id: string, patch: Partial<Pick<Task, "sourceCloudTaskId" | "cloudSession" | "status" | "runnerSessionId" | "model" | "title" | "titlePending" | "budgetUsd" | "permissionMode" | "resumeAt" | "resumeReason" | "resumeWindow" | "resumeSince" | "resumePlannedAt" | "shadowStopped" | "scope" | "outcome" | "reviewedAt" | "archivedAt" | "judgedResult" | "judgedReason" | "judgedBy" | "judgingAt" | "updatedAt">>): Task | null {
+  updateTask(id: string, patch: Partial<Pick<Task, "sourceCloudTaskId" | "cloudSession" | "status" | "runnerSessionId" | "model" | "title" | "titlePending" | "budgetUsd" | "permissionMode" | "effort" | "resumeAt" | "resumeReason" | "resumeWindow" | "resumeSince" | "resumePlannedAt" | "shadowStopped" | "scope" | "outcome" | "reviewedAt" | "archivedAt" | "judgedResult" | "judgedReason" | "judgedBy" | "judgingAt" | "updatedAt">>): Task | null {
     if (patch.cloudSession) CloudSessionRef.parse(patch.cloudSession);
     const cur = this.getTask(id);
     if (!cur) return null;
@@ -1221,12 +1347,12 @@ export class Db {
     const updatedAt = patch.updatedAt ?? Date.now();
     // statusAt moves only when the status does (#2029): a title, outcome or 確認済み change keeps when the task came to it
     // a new turn shows the Task again (#1142): only a stopped one stays archived
-    const shown = moves && (patch.status === "running" || patch.status === "waiting" || patch.status === "idle") ? { archivedAt: null } : {};
+    const shown = moves && (IN_FLIGHT.has(patch.status!) || patch.status === "idle") ? { archivedAt: null } : {};
     const next: Task = { ...cur, ...rule, ...patch, ...shown, updatedAt, statusAt: moves ? updatedAt : cur.statusAt };
     this.validateCloudSource(next, cur);
     this.sqlite
-      .query("UPDATE tasks SET status = ?, runner_session_id = ?, model = ?, title = ?, title_pending = ?, budget_usd = ?, permission_mode = ?, resume_at = ?, resume_reason = ?, resume_window = ?, resume_since = ?, resume_planned_at = ?, shadow_stopped = ?, scope = ?, outcome = ?, reviewed_at = ?, archived_at = ?, judged_result = ?, judged_reason = ?, judged_by = ?, judging_at = ?, updated_at = ?, status_at = ?, cloud_session = ?, source_cloud_task_id = ? WHERE id = ?")
-      .run(next.status, next.runnerSessionId, next.model, next.title, next.titlePending ? 1 : 0, next.budgetUsd, next.permissionMode, next.resumeAt, next.resumeReason, next.resumeWindow, next.resumeSince, next.resumePlannedAt, next.shadowStopped ? 1 : 0, JSON.stringify(next.scope), next.outcome, next.reviewedAt, next.archivedAt, next.judgedResult, next.judgedReason, next.judgedBy, next.judgingAt, next.updatedAt, next.statusAt, next.cloudSession ? JSON.stringify(next.cloudSession) : null, next.sourceCloudTaskId, id);
+      .query("UPDATE tasks SET status = ?, runner_session_id = ?, model = ?, title = ?, title_pending = ?, budget_usd = ?, permission_mode = ?, effort = ?, resume_at = ?, resume_reason = ?, resume_window = ?, resume_since = ?, resume_planned_at = ?, shadow_stopped = ?, scope = ?, outcome = ?, reviewed_at = ?, archived_at = ?, judged_result = ?, judged_reason = ?, judged_by = ?, judging_at = ?, updated_at = ?, status_at = ?, cloud_session = ?, source_cloud_task_id = ? WHERE id = ?")
+      .run(next.status, next.runnerSessionId, next.model, next.title, next.titlePending ? 1 : 0, next.budgetUsd, next.permissionMode, next.effort, next.resumeAt, next.resumeReason, next.resumeWindow, next.resumeSince, next.resumePlannedAt, next.shadowStopped ? 1 : 0, JSON.stringify(next.scope), next.outcome, next.reviewedAt, next.archivedAt, next.judgedResult, next.judgedReason, next.judgedBy, next.judgingAt, next.updatedAt, next.statusAt, next.cloudSession ? JSON.stringify(next.cloudSession) : null, next.sourceCloudTaskId, id);
     return next;
   }
 
@@ -1362,7 +1488,8 @@ export class Db {
     const raw = this.getSetting<unknown>(CUSTOM_RUNNERS_KEY, []);
     if (!Array.isArray(raw)) return [];
     return raw.flatMap((x) => {
-      const r = CustomRunner.safeParse(x);
+      // a row saved before `port` existed is an ADK server
+      const r = CustomRunner.safeParse(typeof x === "object" && x !== null && !("port" in x) ? { port: "adk", ...x } : x);
       return r.success ? [r.data] : [];
     });
   }
@@ -1485,25 +1612,31 @@ export class Db {
     const r = rules ? RuleEval.safeParse(rules.json) : null;
     const j = judge ? JudgeEval.safeParse(judge.json) : null;
     const h = human ? HumanEval.safeParse(human.json) : null;
-    return { rules: r?.success ? r.data : null, judge: j?.success ? j.data : null, human: h?.success ? h.data : null, models: this.taskModels([taskId]).get(taskId) ?? [] };
+    return { rules: r?.success ? r.data : null, judge: j?.success ? j.data : null, human: h?.success ? h.data : null, models: this.taskStarts([taskId]).get(taskId)?.models ?? [] };
   }
 
   /**
-   * The models each task ran on (#1801): the distinct `model` of its `session.start` events, in the order first used, empty
-   * ones not counted. Read from the events rather than `tasks.model` (the last one only) or the ledger (judging, routing and
-   * a runner's background model share the task id). A task with none is absent from the map.
+   * What each task started its sessions with (#1801, #1802): the distinct `model` and `effort` of its `session.start`
+   * events, in the order first used. A model that is empty is not counted; an effort of "" (the CLI default) is, one that
+   * is absent (a start from before it was recorded) is not. Read from the events rather than `tasks.model` / `tasks.effort`
+   * (the last one only) or the ledger (judging, routing and a runner's background model share the task id). A task with
+   * no start is absent from the map.
    */
-  taskModels(taskIds: string[]): Map<string, string[]> {
-    const out = new Map<string, string[]>();
+  taskStarts(taskIds: string[]): Map<string, { models: string[]; efforts: string[] }> {
+    const out = new Map<string, { models: string[]; efforts: string[] }>();
     if (!taskIds.length) return out;
     const rows = this.sqlite
       .query(
-        `SELECT task_id AS taskId, json_extract(json, '$.model') AS model, MIN(seq) AS first FROM events
-         WHERE task_id IN (${taskIds.map(() => "?").join(", ")}) AND json_extract(json, '$.t') = 'session.start'
-         GROUP BY task_id, model HAVING COALESCE(model, '') <> '' ORDER BY task_id, first`,
+        `SELECT task_id AS taskId, json_extract(json, '$.model') AS model, json_extract(json, '$.effort') AS effort FROM events
+         WHERE task_id IN (${taskIds.map(() => "?").join(", ")}) AND json_extract(json, '$.t') = 'session.start' ORDER BY task_id, seq`,
       )
-      .all(...taskIds) as Array<{ taskId: string; model: string }>;
-    for (const r of rows) out.set(r.taskId, [...(out.get(r.taskId) ?? []), r.model]);
+      .all(...taskIds) as Array<{ taskId: string; model: string | null; effort: string | null }>;
+    for (const r of rows) {
+      const cur = out.get(r.taskId) ?? { models: [], efforts: [] };
+      if (r.model && !cur.models.includes(r.model)) cur.models.push(r.model);
+      if (r.effort !== null && !cur.efforts.includes(r.effort)) cur.efforts.push(r.effort);
+      out.set(r.taskId, cur);
+    }
     return out;
   }
 
@@ -1516,7 +1649,7 @@ export class Db {
   evalsList(q: { workspaceId?: string; runner?: RunnerId; judgedFrom?: number; judgedTo?: number; rated?: boolean; limit: number }): EvalsListRow[] {
     const rows = this.sqlite
       .query(
-        `SELECT t.id AS taskId, t.title AS title, t.runner AS runner, t.workspace_id AS workspaceId, t.status AS status, t.outcome AS outcome, t.updated_at AS updatedAt, t.effort AS effort,
+        `SELECT t.id AS taskId, t.title AS title, t.runner AS runner, t.workspace_id AS workspaceId, t.status AS status, t.outcome AS outcome, t.updated_at AS updatedAt, t.subagent_effort AS subagentEffort,
                 (SELECT COALESCE(SUM(cost_usd), 0) FROM ledger WHERE task_id = t.id) AS costUsd,
                 r.json AS rulesJson, j.json AS judgeJson, j.ts AS judgeTs, h.json AS humanJson
          FROM tasks t
@@ -1527,7 +1660,7 @@ export class Db {
            AND (? IS NULL OR j.ts >= ?) AND (? IS NULL OR j.ts < ?) AND (? = 0 OR h.task_id IS NOT NULL)
          ORDER BY t.updated_at DESC LIMIT ?`,
       )
-      .all(q.workspaceId ?? null, q.workspaceId ?? null, q.runner ?? null, q.runner ?? null, q.judgedFrom ?? null, q.judgedFrom ?? null, q.judgedTo ?? null, q.judgedTo ?? null, q.rated ? 1 : 0, q.limit) as Array<{ taskId: string; title: string; runner: RunnerId; workspaceId: string | null; status: TaskStatus; outcome: TaskOutcome; updatedAt: number; effort: string | null; costUsd: number; rulesJson: string | null; judgeJson: string | null; judgeTs: number | null; humanJson: string | null }>;
+      .all(q.workspaceId ?? null, q.workspaceId ?? null, q.runner ?? null, q.runner ?? null, q.judgedFrom ?? null, q.judgedFrom ?? null, q.judgedTo ?? null, q.judgedTo ?? null, q.rated ? 1 : 0, q.limit) as Array<{ taskId: string; title: string; runner: RunnerId; workspaceId: string | null; status: TaskStatus; outcome: TaskOutcome; updatedAt: number; subagentEffort: string | null; costUsd: number; rulesJson: string | null; judgeJson: string | null; judgeTs: number | null; humanJson: string | null }>;
     const parse = <T>(json: string | null, schema: { safeParse: (v: unknown) => { success: boolean; data?: T } }): T | null => {
       if (!json) return null;
       try {
@@ -1537,7 +1670,7 @@ export class Db {
         return null;
       }
     };
-    const models = this.taskModels(rows.map((r) => r.taskId));
+    const starts = this.taskStarts(rows.map((r) => r.taskId));
     return rows.map((r) => {
       const rules = parse(r.rulesJson, RuleEval);
       const judge = parse(r.judgeJson, JudgeEval);
@@ -1546,7 +1679,7 @@ export class Db {
       const values = Object.values(scores);
       return {
         taskId: r.taskId, title: r.title, runner: r.runner, workspaceId: r.workspaceId, status: r.status, outcome: r.outcome, updatedAt: r.updatedAt, costUsd: r.costUsd,
-        models: models.get(r.taskId) ?? [], effort: r.effort,
+        models: starts.get(r.taskId)?.models ?? [], efforts: starts.get(r.taskId)?.efforts ?? [], subagentEffort: r.subagentEffort,
         rules: rules ? { toolCalls: rules.metrics.toolCalls, toolFailures: rules.metrics.toolFailures, errors: rules.metrics.errors, userInstructions: rules.metrics.userInstructions, stops: rules.metrics.stops, lastEnd: rules.metrics.lastEnd, daemonStops: rules.metrics.daemonStops, lastCutByDaemon: rules.metrics.lastCutByDaemon } : null,
         judge: judge && values.length ? { average: Math.round((values.reduce((a, b) => a + b, 0) / values.length) * 10) / 10, scores, rubric: judge.rubric, by: judge.by, ts: r.judgeTs ?? 0 } : null,
         human: human ? { rating: human.rating, comment: human.comment } : null,
@@ -1941,6 +2074,7 @@ function migrate(db: Database) {
   if (!cols.has("schedule_id")) db.exec("ALTER TABLE tasks ADD COLUMN schedule_id TEXT");
   if (!cols.has("permission_mode")) db.exec("ALTER TABLE tasks ADD COLUMN permission_mode TEXT");
   if (!cols.has("effort")) db.exec("ALTER TABLE tasks ADD COLUMN effort TEXT");
+  if (!cols.has("subagent_effort")) db.exec("ALTER TABLE tasks ADD COLUMN subagent_effort TEXT");
   if (!cols.has("origin")) db.exec("ALTER TABLE tasks ADD COLUMN origin TEXT NOT NULL DEFAULT 'switchboard'");
   if (!cols.has("resume_at")) db.exec("ALTER TABLE tasks ADD COLUMN resume_at INTEGER");
   if (!cols.has("resume_reason")) db.exec("ALTER TABLE tasks ADD COLUMN resume_reason TEXT");
@@ -1969,6 +2103,23 @@ function migrate(db: Database) {
            WHERE json = ?1 AND next = ?1)`,
       ).run(THINKING_JSON);
       db.exec("PRAGMA user_version = 2");
+    })();
+  }
+  // #4208: a turn that ended on background jobs is status `background`, not `done` with a mark; once
+  if ((db.query("PRAGMA user_version").get() as { user_version: number }).user_version < 3) {
+    db.exec("UPDATE tasks SET status = 'background' WHERE status = 'done' AND background IS NOT NULL");
+    db.exec("PRAGMA user_version = 3");
+  }
+  // Settings `outbound` starts off; a database that already ran Tasks (this environment) keeps what it sent until now: both on, once
+  if ((db.query("PRAGMA user_version").get() as { user_version: number }).user_version < 4) {
+    db.transaction(() => {
+      if (db.query("SELECT 1 FROM tasks LIMIT 1").get()) {
+        const row = db.query("SELECT json FROM settings WHERE key = 'settings'").get() as { json: string } | null;
+        const saved = row ? safeJson<Record<string, unknown>>(row.json, {}) : {};
+        saved.outbound = { classifierLog: true, runnerTelemetry: true };
+        db.query("INSERT INTO settings (key, json) VALUES ('settings', ?) ON CONFLICT(key) DO UPDATE SET json = excluded.json").run(JSON.stringify(saved));
+      }
+      db.exec("PRAGMA user_version = 4");
     })();
   }
   if (!cols.has("shadow_stopped")) db.exec("ALTER TABLE tasks ADD COLUMN shadow_stopped INTEGER NOT NULL DEFAULT 0");
@@ -2108,11 +2259,17 @@ function migrate(db: Database) {
   // the item that is there, so such an operation is sent again (a create only with the Issue it made: never made twice).
   // GitHub's "Something went wrong" failed it at once too; it is an outage now, sent again (not one failed after 5 tries)
   db.exec(`UPDATE backlog_operations SET status = 'pending', attempt = 0, retry_at = NULL, error = NULL WHERE status = 'failed' AND (error LIKE '%already exists in this project%' OR error LIKE 'gh api %: gh: Something went wrong while executing your query%') AND (kind != 'create' OR remote_id IS NOT NULL)`);
+  // #3971: a local change gained `reviewedHead`; one stored before (merged or not) has none: null, once
+  for (const col of ["remote", "base", "local"])
+    db.exec(`UPDATE backlog_records SET ${col} = json_set(${col}, '$.change.reviewedHead', json('null')) WHERE object_kind = 'issue' AND ${col} IS NOT NULL AND json_type(${col}, '$.change') = 'object' AND json_type(${col}, '$.change.reviewedHead') IS NULL`);
   // #1059: a stored PR gained `updatedAt` and `files`; one stored before is dropped and the next import reads it again
   db.exec(`DELETE FROM backlog_records WHERE object_kind = 'pull-request' AND json_type(remote, '$.files') IS NULL AND json_type(remote, '$.updatedAt') IS NULL`);
   // #1183: a stored PR gained `closes`; one stored before reads as closing nothing until the next import reads it
   for (const col of ["remote", "base", "local"])
     db.exec(`UPDATE backlog_records SET ${col} = json_set(${col}, '$.closes', json('[]')) WHERE object_kind = 'pull-request' AND ${col} IS NOT NULL AND json_type(${col}, '$.closes') IS NULL`);
+  // #1802: a session.start gained `effort` (the effort the process was started with); one recorded before reads as the task's
+  // own, which no one could change until then ("" = the CLI's default)
+  db.exec(`UPDATE events SET json = json_set(json, '$.effort', COALESCE((SELECT effort FROM tasks WHERE id = events.task_id), '')) WHERE substr(json, 1, 21) = '{"t":"session.start",' AND json_type(json, '$.effort') IS NULL`);
   // #1014: a stored Issue gained `stateReason`, a PR `mergeCommit`; null until the next import, which reads every Issue
   // again when a value GitHub gave lacked them (one made here gets them when it is sent)
   // #651: a stored Issue / PR gained `closedAt` (a PR `mergedAt`): the same, so a closed one is read again for its time
@@ -2137,7 +2294,7 @@ function migrate(db: Database) {
 export function abortOrphanedTasks(db: Db, now = Date.now(), maxStopResumes = MAX_STOP_RESUMES): string[] {
   const ids: string[] = [];
   db.sqlite.transaction(() => {
-    for (const status of ["running", "waiting"] as const) {
+    for (const status of IN_FLIGHT) {
       for (const t of db.listTasksByStatus(status)) {
         if (t.executionMode === "cloud") {
           db.updateTask(t.id, { status: t.cloudSession ? "idle" : "error", runnerSessionId: null, resumeAt: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null });
@@ -2159,12 +2316,14 @@ export function abortOrphanedTasks(db: Db, now = Date.now(), maxStopResumes = MA
         ids.push(t.id);
       }
     }
-    // a task whose turn ended waiting for background jobs is `done`, not running: they died with the daemon all the same.
+    // a task whose turn ended waiting for background jobs is `background`, not running: they died with the daemon all the same.
     // A clean shutdown planned its resume already; a kill (oomd) did not.
     for (const r of db.sqlite.query("SELECT * FROM tasks WHERE background IS NOT NULL").all()) {
       const t = rowToTask(r);
       db.setTaskBackground(t.id, null);
-      if (t.status !== "done" && t.status !== "error") continue;
+      // the jobs were the wait: the turn itself had ended ok
+      if (t.status === "background") db.updateTask(t.id, { status: "done" });
+      else if (t.status !== "done" && t.status !== "error") continue;
       db.appendEvent(t.id, { t: "status", text: `裏で実行中の処理が前回のデーモンの終了で失われました: ${t.background?.jobs.join(" / ") || "内容不明"}` });
       if (t.resumeAt === null) planResumeAfterStop(db, t, now, (ev) => db.appendEvent(t.id, ev), maxStopResumes);
       ids.push(t.id);
@@ -2280,6 +2439,7 @@ function rowToTask(r: any): Task {
     scheduleId: r.schedule_id ?? null,
     permissionMode: r.permission_mode ?? null,
     effort: r.effort ?? null,
+    subagentEffort: r.subagent_effort ?? null,
     origin: (r.origin ?? "switchboard") as TaskOrigin,
     resumeAt: r.resume_at ?? null,
     resumeReason: r.resume_reason ?? null,

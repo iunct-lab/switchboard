@@ -96,4 +96,99 @@ describe("task diff (#12)", () => {
       rmSync(fresh, { recursive: true, force: true });
     }
   });
+
+  test("files written in a worktree outside the scope are listed relative to its top", async () => {
+    const scope = mkdtempSync(join(tmpdir(), "sb-scope-"));
+    const wt = join(mkdtempSync(join(tmpdir(), "sb-wt-")), "wt");
+    try {
+      git(root, ["worktree", "add", "-q", "--detach", wt]);
+      mkdirSync(join(wt, "docs"));
+      writeFileSync(join(wt, "docs", "n.md"), "note\n");
+      const events = [env({ t: "tool.call", id: "w", name: "Write", input: { file_path: join(wt, "docs", "n.md") }, summary: "" }, 1)];
+      const files = await collectTaskDiff(task(scope), events, []);
+      expect(files.map((f) => [f.source, f.rel, f.stat])).toEqual([["worktree", "docs/n.md", "new"]]);
+      expect(files[0]!.path).toBe(join(realpathSync(wt), "docs", "n.md"));
+    } finally {
+      git(root, ["worktree", "remove", "--force", wt]);
+      rmSync(scope, { recursive: true, force: true });
+      rmSync(join(wt, ".."), { recursive: true, force: true });
+    }
+  });
+
+  test("a write elsewhere in the repository that holds a subdirectory scope is listed relative to the repository top", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "sb-sub-"));
+    try {
+      git(repo, ["init", "-q"]);
+      mkdirSync(join(repo, "pkg"));
+      mkdirSync(join(repo, "docs"));
+      writeFileSync(join(repo, "pkg", "p.ts"), "p\n");
+      writeFileSync(join(repo, "docs", "a.md"), "a\n");
+      git(repo, ["add", "."]);
+      git(repo, ["commit", "-qm", "init"]);
+      writeFileSync(join(repo, "pkg", "p.ts"), "p\nq\n");
+      writeFileSync(join(repo, "docs", "a.md"), "a\nb\n");
+      const events = [
+        env({ t: "tool.call", id: "p", name: "Edit", input: { file_path: join(repo, "pkg", "p.ts") }, summary: "" }, 1),
+        env({ t: "tool.call", id: "d", name: "Edit", input: { file_path: join(repo, "docs", "a.md") }, summary: "" }, 2),
+      ];
+      const files = await collectTaskDiff(task(join(repo, "pkg")), events, []);
+      expect(files.map((f) => [f.source, f.rel])).toEqual([["worktree", "p.ts"], ["worktree", "docs/a.md"]]);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test("committed since the fork point from origin/HEAD are listed with the uncommitted ones; without a remote the base stays HEAD", async () => {
+    const base = mkdtempSync(join(tmpdir(), "sb-fork-"));
+    const scope = mkdtempSync(join(tmpdir(), "sb-scope-"));
+    try {
+      const bare = join(base, "remote.git");
+      const work = join(base, "work");
+      git(base, ["init", "-q", "--bare", bare]);
+      git(base, ["clone", "-q", bare, work]);
+      writeFileSync(join(work, "a.txt"), "a\n");
+      writeFileSync(join(work, "b.txt"), "b\n");
+      git(work, ["add", "."]);
+      git(work, ["commit", "-qm", "init"]);
+      git(work, ["push", "-q", "origin", "HEAD"]);
+      git(work, ["remote", "set-head", "origin", git(work, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout.toString().trim()]);
+      git(work, ["checkout", "-qb", "topic"]);
+      writeFileSync(join(work, "a.txt"), "a\nA\n");
+      git(work, ["commit", "-qam", "committed change"]);
+      writeFileSync(join(work, "b.txt"), "b\nB\n");
+      const events = ["a.txt", "b.txt"].map((n, i) => env({ t: "tool.call", id: n, name: "Edit", input: { file_path: join(work, n) }, summary: "" }, i + 1));
+      const files = await collectTaskDiff(task(scope), events, []);
+      expect(files.map((f) => [f.rel, f.stat]).sort()).toEqual([["a.txt", "+1 −0"], ["b.txt", "+1 −0"]]);
+      // the scope itself keeps comparing with HEAD, so a Task that wrote nothing sees what it saw before
+      expect((await collectTaskDiff(task(work), [], [])).map((f) => f.rel)).toEqual(["b.txt"]);
+      git(work, ["remote", "remove", "origin"]);
+      expect((await collectTaskDiff(task(scope), events, [])).map((f) => f.rel)).toEqual(["b.txt"]);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+      rmSync(scope, { recursive: true, force: true });
+    }
+  });
+
+  test("removed worktree is reported, scratch under tmpdir is not", async () => {
+    const scope = mkdtempSync(join(tmpdir(), "sb-scope-"));
+    const parent = mkdtempSync(join(tmpdir(), "sb-gone-"));
+    const scratchDir = mkdtempSync(join(tmpdir(), "sb-scratch-"));
+    const wt = join(parent, "wt");
+    try {
+      git(root, ["worktree", "add", "-q", "--detach", wt]);
+      writeFileSync(join(wt, "n.md"), "note\n");
+      const events = [env({ t: "tool.call", id: "w", name: "Write", input: { file_path: join(wt, "n.md") }, summary: "" }, 1), env({ t: "tool.call", id: "s", name: "Write", input: { file_path: join(scratchDir, "gone", "tmp.txt") }, summary: "" }, 2)];
+      git(root, ["worktree", "remove", "--force", wt]);
+      const real = realpathSync(parent);
+      // tmp classification is injected: the test's worktree lives under tmpdir() itself
+      const files = await collectTaskDiff(task(scope), events, [], [realpathSync(scratchDir)]);
+      expect(files.map((f) => [f.source, f.path, f.rel, f.stat, f.diff])).toEqual([["removed", join(real, "wt"), join(real, "wt"), "", ""]]);
+      // with tmpdir() as the scratch place, nothing under it is reported
+      expect(await collectTaskDiff(task(scope), events, [], [tmpdir()])).toEqual([]);
+    } finally {
+      rmSync(scope, { recursive: true, force: true });
+      rmSync(parent, { recursive: true, force: true });
+      rmSync(scratchDir, { recursive: true, force: true });
+    }
+  });
 });

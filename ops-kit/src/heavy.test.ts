@@ -119,6 +119,65 @@ test("heavy: below the free-memory floor it waits and says so, above it starts",
   });
 });
 
+test("heavy: --memory-only starts beside a held slot, waits only for memory, takes no slot and is in the history", async () => {
+  await scratch(async (home) => {
+    const held = { home, mem: () => undefined, pollMs: 10, log: () => {} };
+    let release!: () => void;
+    const holder = withHeavySlot("local-ci 1", () => new Promise<void>((r) => (release = r)), held);
+    await slotHeld(home);
+
+    // the only slot is held: a memory-only job still starts, and leaves no slot file of its own
+    let slotsWhileRunning: string[] = [];
+    const lines: string[] = [];
+    await withHeavySlot("review codex", async () => {
+      slotsWhileRunning = readdirSync(heavyStateDir(home)).filter((f) => f.startsWith("slot-"));
+    }, { ...held, memoryOnly: true, log: (l) => lines.push(l) });
+    expect(slotsWhileRunning).toEqual(["slot-0.json"]); // the holder's alone
+    expect(lines).toEqual([]);
+
+    // below the floor it waits, listed as memory, and starts once the memory is back
+    let free = 1000;
+    const t0 = performance.now();
+    let started = 0;
+    const low = withHeavySlot("review claude", async () => {
+      started = performance.now() - t0;
+    }, { ...held, mem: () => free, memoryOnly: true });
+    for (let i = 0; i < 250 && !readHeavyState(home).waiting.length; i++) await Bun.sleep(10);
+    expect(readHeavyState(home).waiting.map((w) => [w.name, w.reason])).toEqual([["review claude", "memory"]]);
+    expect(started).toBe(0);
+    free = 2000;
+    await low;
+    expect(started).toBeGreaterThan(0);
+    expect(readHeavyState(home).waiting).toEqual([]);
+    expect(readHeavyState(home).running.map((r) => r.name)).toEqual(["local-ci 1"]);
+
+    release();
+    await holder;
+    expect(readHeavyHistory(home).map((e) => e.name)).toEqual(["review codex", "review claude", "local-ci 1"]);
+    expect(readdirSync(heavyStateDir(home)).filter((f) => f.startsWith("slot-"))).toEqual([]);
+  });
+});
+
+test("heavy: the CLI reads --memory-only and --name in either order", async () => {
+  await scratch(async (home) => {
+    configure(home, { minFreeMb: 0 });
+    const env = { ...process.env, HOME: home };
+    const holder = Bun.spawn([OPS_KIT, "heavy", "--", "sleep", "30"], { env, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      await slotHeld(home);
+      for (const args of [["--memory-only", "--name", "review a"], ["--name", "review b", "--memory-only"]]) {
+        const run = Bun.spawn([OPS_KIT, "heavy", ...args, "--", "true"], { env, stdout: "ignore", stderr: "pipe" });
+        expect(await run.exited).toBe(0);
+        expect(await new Response(run.stderr).text()).toBe("");
+      }
+      expect(readHeavyHistory(home).map((e) => e.name)).toEqual(["review a", "review b"]);
+    } finally {
+      holder.kill();
+      await holder.exited;
+    }
+  });
+});
+
 test("heavy: two different working directories share the machine's slots", async () => {
   await scratch(async (home) => {
     configure(home, { minFreeMb: 0 });

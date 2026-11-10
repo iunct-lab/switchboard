@@ -12,12 +12,14 @@
  *                                        a journey's `bytes` is BUNDLE_GROWTH_LIMIT or more above the base's (`grew:`); the
  *                                        `bundle:` and `bytes:` lines say the sizes and the difference either way, and the
  *                                        responses that differ (`/api/tasks/:id/evals +22 B × 2`)
- *   bun scripts/perf-ratchet.ts update <result.json> [--env github|local]   lowers the ceilings the result beats; never
+ *   bun scripts/perf-ratchet.ts update [--env github|local] [--repo <owner/name>]   lowers a ceiling only when the last
+ *                                        LOWER_AFTER tags' counts (`counts.tsv`, one read) are all below it by more than
+ *                                        2 × the band, to their max + the band; a count with fewer tags is `waiting`; never
  *                                        raises one
  * The budget has one set of ceilings per environment (#644): `github` (Actions' ubuntu-latest Chrome) and `local` (the
  * host's Chromium, which local-ci uses). The same code draws a frame differently on a faster machine, so the counts differ
  * between the two by more than the bands. The environment is `github` when GITHUB_ACTIONS=true (local-ci sets CI=true but
- * not that), else `local`; --env picks it, e.g. to lower `github` from a result taken from Actions.
+ * not that), else `local`; --env picks it (`update` reads the tag CI's `local` rows unless asked).
  * Times (msMedian / msP90) are never compared: they wobble on a shared machine (docs/design/perf.md). The one time with a
  * ceiling is `loaded.healthMaxMs`, the daemon's delay under load, in `local` only, with a band measured for it, judged on
  * the high side only (`HIGH_SIDE_ONLY`: a quiet host runs it far below its ceiling, so `improved` would fail there).
@@ -35,6 +37,11 @@
  *                                        first row (#3169): one read of `bundle.tsv` on the `perf-records` branch; nothing
  *                                        is built again. A row is one measure, not one commit (docs/design/perf.md). Then
  *                                        main's `bytes` the same way from `bytes.tsv` (#3921), summed per measure.
+ *   bun scripts/perf-ratchet.ts spread [--repo <owner/name>] [--env github|local] [--last N]
+ *                                        the counts the tag CI measured (`counts.tsv` on `perf-records`, one row per tag and
+ *                                        count): per count the last N tags' values (default 10), their min / max / spread
+ *                                        (max − min) against the band and the ceiling, marked when the spread is wider than
+ *                                        the band. One read; nothing is built again.
  */
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -169,11 +176,6 @@ export function lowered(improved: Item[], budget: Budget): Budget {
     else next.journeys[name]![count as keyof Budget["journeys"][string]] = v;
   }
   return next;
-}
-
-/** The budgets with `env`'s beaten ceilings lowered; the exceptions and the other environment stay as they are. */
-export function loweredBudgets(budgets: Budgets, env: Env, improved: Item[]): Budgets {
-  return { ...budgets, [env]: lowered(improved, budgets[env]) };
 }
 
 export interface Bundle { js: number; css: number }
@@ -368,6 +370,91 @@ export function bytesHistoryTable(rows: BytesRow[], since?: string): string[] {
   ];
 }
 
+/** Where the tag CI appends the counts it measured (`recordCounts`): a row per tag and count, in a file of its own (bundle.tsv and bytes.tsv have fixed columns). */
+export const COUNTS_RECORDS_PATH = "counts.tsv";
+export const COUNTS_RECORDS_HEADER = "measured_at\tenv\ttag\tsha\tkey\tvalue";
+/** One count of one tag's measure; `key` is `journeys.<name>.<count>`. */
+export interface CountsRow { measuredAt: string; env: Env; tag: string; sha: string; key: string; value: number }
+
+/** The rows of one tag's measure: every count of the result that has a band (requests / layoutCount / recalcStyleCount / layoutShift), not `loaded.*` or the times. */
+export function countsRows(measuredAt: string, env: Env, tag: string, sha: string, result: Budget): string[] {
+  return [...flat(result)]
+    .filter(([key]) => key.startsWith("journeys.") && key.split(".").at(-1)! in BAND)
+    .map(([key, value]) => [measuredAt, env, tag, sha, key, value].join("\t"));
+}
+
+/** The rows of counts.tsv; the header and a row that is not six fields with a time, an environment and a number are passed over. */
+export function parseCountsRows(tsv: string): CountsRow[] {
+  return tsv.split("\n").flatMap((l) => {
+    const [measuredAt, env, tag, sha, key, value, ...rest] = l.split("\t");
+    if (rest.length || !tag || !sha || !key || !(ENVS as readonly string[]).includes(env ?? "") || !/^\d+(\.\d+)?$/.test(value ?? "") || Number.isNaN(Date.parse(measuredAt!))) return [];
+    return [{ measuredAt: measuredAt!, env: env as Env, tag, sha, key, value: Number(value) }];
+  });
+}
+
+/**
+ * Per count of `env`: the values of the last `last` tags (a tag once, its last measure; tags in the time of their last
+ * measure), the min, max and spread (max − min), the band and the ceiling now, and `!` when the spread is wider than the band
+ * (a ceiling cannot sit where every value passes `judge`: it passes the ceiling − 2 × band .. ceiling window only).
+ */
+export function spreadTable(rows: CountsRow[], budgets: Budgets, env: Env, last: number): string[] {
+  const perKey = new Map<string, Map<string, { at: number; value: number }>>();
+  for (const r of rows.filter((r) => r.env === env)) {
+    const tags = perKey.get(r.key) ?? new Map<string, { at: number; value: number }>();
+    const at = Date.parse(r.measuredAt);
+    if (at >= (tags.get(r.tag)?.at ?? -Infinity)) tags.set(r.tag, { at, value: r.value });
+    perKey.set(r.key, tags);
+  }
+  if (!perKey.size) return ["記録なし"];
+  const ceilingOf = flat(budgets[env]);
+  return [
+    `散り（${env}。直近 ${last} タグ、古い順）`,
+    "| 数 | タグ数 | 値 | 最小 | 最大 | 散り | 幅 | 上限 | 散り > 幅 |",
+    "|---|---|---|---|---|---|---|---|---|",
+    ...[...perKey].sort(([a], [b]) => a.localeCompare(b)).map(([key, tags]) => {
+      const values = [...tags.values()].sort((a, b) => a.at - b.at).slice(-last).map((t) => t.value);
+      const [min, max] = [Math.min(...values), Math.max(...values)];
+      const spread = round4(max - min);
+      const width = BAND[key.split(".").at(-1)!];
+      return `| ${key} | ${values.length} | ${values.join(", ")} | ${min} | ${max} | ${spread} | ${width ?? "-"} | ${ceilingOf.get(key) ?? "-"} | ${width !== undefined && spread > width ? "!" : ""} |`;
+    }),
+  ];
+}
+
+/** How many tags in a row must be below a ceiling before `update` lowers it: one low run left the window under the real spread, and the next high one was `over`; the max of three sits inside it (#4124). */
+export const LOWER_AFTER = 3;
+
+/**
+ * `budget` with each ceiling lowered whose last `n` tags (a tag once, its last measure in `rows` of `env`) are all `improved`
+ * (below ceiling − 2 × band) to the max of the n + its band. A count with fewer than n tags is `waiting`; nothing is raised.
+ */
+export function loweredBy(budget: Budget, env: Env, rows: CountsRow[], n = LOWER_AFTER): { budget: Budget; lowered: { key: string; from: number; to: number; tags: number[] }[]; waiting: { key: string; have: number }[] } {
+  const perKey = new Map<string, Map<string, { at: number; value: number }>>();
+  for (const r of rows.filter((r) => r.env === env)) {
+    const tags = perKey.get(r.key) ?? new Map<string, { at: number; value: number }>();
+    const at = Date.parse(r.measuredAt);
+    if (at >= (tags.get(r.tag)?.at ?? -Infinity)) tags.set(r.tag, { at, value: r.value });
+    perKey.set(r.key, tags);
+  }
+  const items: Item[] = [];
+  const lowered_: { key: string; from: number; to: number; tags: number[] }[] = [];
+  const waiting: { key: string; have: number }[] = [];
+  for (const [key, ceiling] of flat(budget)) {
+    if (HIGH_SIDE_ONLY.has(key)) continue;
+    const tags = [...(perKey.get(key)?.values() ?? [])].sort((a, b) => b.at - a.at);
+    if (tags.length < n) {
+      waiting.push({ key, have: tags.length });
+      continue;
+    }
+    const values = tags.slice(0, n).map((t) => t.value);
+    if (!values.every((v) => v < round4(ceiling - 2 * band(key)))) continue;
+    const max = Math.max(...values);
+    items.push({ key, value: max, ceiling });
+    lowered_.push({ key, from: ceiling, to: round4(max + band(key)), tags: values });
+  }
+  return { budget: lowered(items, budget), lowered: lowered_, waiting };
+}
+
 /** `path` (bundle.tsv / bytes.tsv) as it is on the records branch of `repo`; "" when the branch or the file is not there yet. */
 async function readRecords(repo: string, path: string): Promise<string> {
   const p = Bun.spawn(["gh", "api", `repos/${repo}/contents/${path}?ref=${RECORDS_BRANCH}`], { stdout: "pipe", stderr: "pipe" });
@@ -382,14 +469,65 @@ async function readRecords(repo: string, path: string): Promise<string> {
   throw new Error(`${RECORDS_BRANCH}/${path} を読めない: ${err.trim().split("\n")[0]}`);
 }
 
-/** main's budgets, or why there are none (no origin/main in a shallow checkout, or main has no budget yet). */
+/** The ref the budgets are compared with: origin/main, or PERF_BASE_REF (the tag CI sets the tag before, #4219). */
+const baseRef = () => process.env.PERF_BASE_REF || "origin/main";
+
+/** The base ref's budgets, or why there are none (no such ref in a shallow checkout, or it has no budget yet). */
 async function mainBudgets(): Promise<Partial<Budgets> | string> {
-  const p = Bun.spawn(["git", "show", "origin/main:scripts/perf-budget.json"], { cwd: import.meta.dir, stdout: "pipe", stderr: "pipe" });
+  const p = Bun.spawn(["git", "show", `${baseRef()}:scripts/perf-budget.json`], { cwd: import.meta.dir, stdout: "pipe", stderr: "pipe" });
   const [out, err] = [await new Response(p.stdout).text(), await new Response(p.stderr).text()];
   return (await p.exited) === 0 ? (JSON.parse(out) as Partial<Budgets>) : err.trim().split("\n")[0]!;
 }
 
-if (import.meta.main && process.argv[2] === "history") {
+if (import.meta.main && process.argv[2] === "spread") {
+  const args = process.argv.slice(3);
+  const opt = (name: string) => {
+    const at = args.indexOf(name);
+    return at < 0 ? undefined : args.splice(at, 2)[1] ?? "";
+  };
+  const [repoFlag, envFlag, lastFlag] = [opt("--repo"), opt("--env"), opt("--last")];
+  const last = lastFlag === undefined ? 10 : Number(lastFlag);
+  if (args.length || repoFlag === "" || envFlag === "" || !Number.isInteger(last) || last < 1) {
+    console.error("usage: bun scripts/perf-ratchet.ts spread [--repo <owner/name>] [--env github|local] [--last N]");
+    process.exit(2);
+  }
+  const { remoteRepo } = await import("./local-ci.ts");
+  const origin = Bun.spawnSync(["git", "remote", "get-url", "origin"], { cwd: import.meta.dir, stdout: "pipe" }).stdout.toString();
+  const repo = repoFlag ?? remoteRepo(origin);
+  if (!repo) {
+    console.error("origin is not a GitHub owner/name: give --repo");
+    process.exit(2);
+  }
+  // the tag CI measures on the host: `local` unless asked (the same default as `envOf` outside Actions)
+  const env = envOf(envFlag ?? "local");
+  for (const l of spreadTable(parseCountsRows(await readRecords(repo, COUNTS_RECORDS_PATH)), (await Bun.file(BUDGET_PATH).json()) as Budgets, env, last)) console.log(l);
+} else if (import.meta.main && process.argv[2] === "update") {
+  const args = process.argv.slice(3);
+  const opt = (name: string) => {
+    const at = args.indexOf(name);
+    return at < 0 ? undefined : args.splice(at, 2)[1] ?? "";
+  };
+  const [repoFlag, envFlag] = [opt("--repo"), opt("--env")];
+  if (args.length || repoFlag === "" || envFlag === "") {
+    console.error("usage: bun scripts/perf-ratchet.ts update [--env github|local] [--repo <owner/name>]");
+    process.exit(2);
+  }
+  const { remoteRepo } = await import("./local-ci.ts");
+  const origin = Bun.spawnSync(["git", "remote", "get-url", "origin"], { cwd: import.meta.dir, stdout: "pipe" }).stdout.toString();
+  const repo = repoFlag ?? remoteRepo(origin);
+  if (!repo) {
+    console.error("origin is not a GitHub owner/name: give --repo");
+    process.exit(2);
+  }
+  const env = envOf(envFlag ?? "local"); // the tag CI measures on the host: `local` unless asked
+  const budgets = (await Bun.file(BUDGET_PATH).json()) as Budgets;
+  const done = loweredBy(budgets[env], env, parseCountsRows(await readRecords(repo, COUNTS_RECORDS_PATH)));
+  console.log(`ceilings: ${env}`);
+  if (done.lowered.length) await Bun.write(BUDGET_PATH, JSON.stringify({ ...budgets, [env]: done.budget }, null, 2) + "\n");
+  for (const l of done.lowered) console.log(`lowered ${l.key}: ${l.from} → ${l.to}（直近 ${LOWER_AFTER} タグ: ${l.tags.join(", ")}）`);
+  for (const w of done.waiting) console.log(`waiting ${w.key}: ${w.have}/${LOWER_AFTER}`);
+  if (!done.lowered.length) console.log("nothing to lower");
+} else if (import.meta.main && process.argv[2] === "history") {
   const args = process.argv.slice(3);
   const opt = (name: string) => {
     const at = args.indexOf(name);
@@ -427,8 +565,8 @@ if (import.meta.main && process.argv[2] === "history") {
   const [envGiven, flag] = opt("--env");
   const [, baseFile] = opt("--base");
   const [cmd, file] = args;
-  if ((cmd !== "check" && cmd !== "update") || !file || (envGiven && flag === undefined) || (cmd === "check" && !baseFile)) {
-    console.error("usage: bun scripts/perf-ratchet.ts check <result.json> --base <base.json> [--env github|local] | update <result.json> [--env github|local] | base <ref> <out.json> | history [--repo <owner/name>] [--since YYYY-MM-DD]");
+  if (cmd !== "check" || !file || (envGiven && flag === undefined) || !baseFile) {
+    console.error("usage: bun scripts/perf-ratchet.ts check <result.json> --base <base.json> [--env github|local] | update [--env github|local] [--repo <owner/name>] | base <ref> <out.json> | history [--repo <owner/name>] [--since YYYY-MM-DD] | spread [--repo <owner/name>] [--env github|local] [--last N]");
     process.exit(2);
   }
   const env = envOf(flag);
@@ -437,21 +575,16 @@ if (import.meta.main && process.argv[2] === "history") {
   const budget = budgets[env];
   console.log(`ceilings: ${env}`);
   if (result.loadedSkipped !== undefined) console.log(`loaded: 測らなかった（${result.loadedSkipped}）。loaded の上限は判定しない`);
-  if (cmd === "update") {
-    const changed = judge(result, budget).improved;
-    await Bun.write(BUDGET_PATH, JSON.stringify(loweredBudgets(budgets, env, changed), null, 2) + "\n");
-    for (const i of changed) console.log(`lowered ${i.key}: ${i.ceiling} → ${round4(i.value + band(i.key))}`);
-    if (!changed.length) console.log("nothing to lower");
-  } else {
+  {
     const { over: above, improved } = judge(result, budget);
     const { known, over } = knownExceptions(above, env, budgets.exceptions ?? [], issueOpen);
     const base = await mainBudgets();
-    if (typeof base === "string") console.log(`ceilings are not compared with main's (origin/main:scripts/perf-budget.json: ${base})`);
+    if (typeof base === "string") console.log(`ceilings are not compared with main's (${baseRef()}:scripts/perf-budget.json: ${base})`);
     const raised = typeof base === "string" ? [] : raisedAgainst(budgets, base);
     const added = typeof base === "string" ? [] : addedExceptions(budgets, base);
     for (const i of known) console.log(`known exception: ${i.key} = ${i.value} > ceiling ${i.ceiling}（#${i.issue} が開いている）`);
     for (const i of over) console.log(`over: ${i.key} = ${i.value} > ceiling ${i.ceiling}`);
-    for (const i of improved) console.log(`improved: ${i.key} = ${i.value} < ceiling ${i.ceiling} − 2 × ${band(i.key)}: lower it with \`bun scripts/perf-ratchet.ts update ${file} --env ${env}\``);
+    for (const i of improved) console.log(`improved: ${i.key} = ${i.value} < ceiling ${i.ceiling} − 2 × ${band(i.key)}: lower it with \`bun scripts/perf-ratchet.ts update --env ${env}\` once the last ${LOWER_AFTER} tags are below it`);
     for (const i of raised) console.log(`raised: ${i.key} ceiling ${i.value} > main's ${i.ceiling} (raising a ceiling is merged by hand)`);
     for (const e of added) console.log(`added exception: ${e.key} #${e.issue}（例外を足すのは手でマージ）`);
     const mainMeasure = (await Bun.file(baseFile!).json()) as { bundle: Bundle; journeys?: Record<string, JourneyBytes> };

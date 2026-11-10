@@ -1,6 +1,6 @@
 ---
 name: new-repo
-description: 新しいリポジトリを雛形から作り、GitHub 側（リポジトリ・Project・変数・ラベル）と Switchboard への登録まで済ませる手順。設定タブの「新しいリポジトリ」から始まった Task、利用者に新しいリポジトリを頼まれたときに読む。次は request-to-backlog
+description: 新しいリポジトリを雛形から作り、GitHub 側（リポジトリ・Project・変数・ラベル）と Switchboard への登録まで済ませる手順。設定タブの「新しいリポジトリ」から始まった Task、利用者に新しいリポジトリを頼まれたときに読む。GitHub を使わないリポジトリの作成（7-1）と、前の雛形で作った既存リポジトリへの写し方（7-2）も扱う。次は request-to-backlog
 ---
 
 # 新しいリポジトリを作る（雛形 → GitHub 側 → 初期コミット → 登録 → 開始条件 → 報告）
@@ -8,6 +8,8 @@ description: 新しいリポジトリを雛形から作り、GitHub 側（リポ
 何が要り、どこまで揃えば開始してよいかの正本は `docs/design/new-repo.md`（3 つの層・用途による違い・手作業で残るもの・開始してよい条件）。ここは**それを実行する順番とコマンド**だけで、条件は写さない。雛形は `ops-kit/template/`（`ops-kit/README.md` の「雛形（新しいリポジトリ）」にファイルとプレースホルダの表）。手順をスクリプトやデーモンのコードにしない。失敗しても作ったものを消さず、作ったものを報告して止まる（削除は人が行う）。
 
 前提: 自分は Switchboard の Task で、`$SWITCHBOARD_REPO_ROOT` が Switchboard のチェックアウトを指す。
+
+**GitHub を使わないリポジトリ（リモートなし）なら**、2（GitHub 側）と、3 の `.github/`・`project-autoadd` の手順を飛ばし、雛形は `ops-kit/template/` でなく `ops-kit/template-local/` を使う。手順は末尾の 7 にまとめてある（新しく作る手順と、前の雛形で作った既存のリポジトリへの写し方）。
 
 ## 1. 決めること
 
@@ -100,7 +102,7 @@ git rev-parse HEAD                                                       # 期�
 
 ## 4. Switchboard への登録
 
-デーモンは API に鍵を求める。Task にはデーモンが `BACKLOG_URL`（`<デーモン>/api/backlog`）と鍵のファイル `BACKLOG_TOKEN_FILE` を渡している（`docs/design/backlog-sync.md` の「経路」）ので、その鍵を Bearer で付ける。鍵の値は出力に出さない。
+デーモンは API に鍵を求める。Task にはデーモンが `BACKLOG_URL`（`<デーモン>/api/backlog`）と鍵のファイル `BACKLOG_TOKEN_FILE` を渡しているので、その鍵を Bearer で付ける。鍵の値は出力に出さない。
 
 ```bash
 B=${BACKLOG_URL%/api/backlog}
@@ -128,3 +130,42 @@ curl -s -X PATCH $B/api/workspaces/$ID -H "authorization: Bearer $K" -H 'content
 ```
 
 Project のリポジトリへのひも付けとラベルは 2 で済ませているので、利用者確認に入れない。秘密の値は報告に書かない（`issue-workflow` の「Issue・PR・コメントに書かない値」）。期待: 作ったもの・条件の表・利用者確認の 3 つが埋まっている。
+
+## 7. GitHub を使わないリポジトリ
+
+雛形は `ops-kit/template-local/`（`.github/` と `scripts/setup/` を持たない単体の 1 式。ファイルは `ops-kit/README.md` の「雛形（新しいリポジトリ）」）。1 のうち、owner・可視性・`<PREFIX>_PROJECT_URL` の変数・project-autoadd・`__KIT_REPO__`・`__QUOTA_CHECK__` は要らない（`envPrefix` そのものは `ops.config.json` の `__PREFIX__` に置くので決める）。Phase を使うなら `ops.config.json` に `phase` / `milestone` を足すだけ（`pbi.yml` は無い）。リモートが無いので、`gh` も `git push` も使わない。
+
+### 7-1. 新しく作る
+
+```bash
+mkdir -p <dir> && cp -R "$SWITCHBOARD_REPO_ROOT/ops-kit/template-local/." <dir>
+mv <dir>/CLAUDE.md.tmpl <dir>/CLAUDE.md; mv <dir>/AGENTS.md.tmpl <dir>/AGENTS.md; mv <dir>/README.md.tmpl <dir>/README.md
+```
+
+`__REPO__`（リポジトリ名）・`__PREFIX__`（`envPrefix`）・`__AREA__`（`ops.config.json` の 1 要素。Area の数だけ増やす）・`__COMPAT__`・`__TEST_TYPECHECK__` / `__TEST_ALL__` / `__TEST_ONE__`（テストのコマンドが 1 で決まっていなければ、3 つとも次のシェルのコメント 1 行に置換する。コードブロックの中で実行しても何も起きず、下の `grep` の 0 件も保てる。空・「なし」・存在しないコマンドは置かない: `# テストなし。最初のテストを足す変更で、この行を実際のコマンドに置き換える`）・`__LIVE_CHECK__`・`__DEPLOY_OK__`・`__TASK_CHECK__` を 1 で決めた値で `sed` などで置換する。置換のコマンドは作らない。置換してからコミットする:
+
+```bash
+grep -rnE '__[A-Z_]+__' <dir> --exclude-dir=.git                                  # 期待: 0 件（出たら置換し直す。コミットしない）
+for f in $(find <dir> -type f -not -path '*/.git/*'); do bun "$SWITCHBOARD_REPO_ROOT/ops-kit/src/cli.ts" scan-text "$f" || echo "HIT $f"; done   # 期待: HIT が 0 件
+cd <dir> && git init -b main && git add -A && git commit -m "chore: 雛形から土台を置く"     # remote は足さない
+```
+
+CI の手順は `ops.config.json` の `ci.steps`（`{"ci":{"steps":[{"name":"test","run":"<テストのコマンド>"}]}}`。`.github/workflows/ci.yml` は読まれない）。雛形には無く、無い間は `local-ci.ts --change` が「CI の手順が無い」で止まり、マージ判定が merge を返さない。テストのコマンドが 1 で決まっていれば初期コミットに足す。テストが無い間は、テストを足す最初の変更で、上の 3 行の置き換えと `ci.steps` の追加を一緒にする（ローカル CI はその変更の `ops.config.json` を読む）。
+
+登録は 4 のとおり。ただし `POST /api/workspaces` の本文に `"backlog":"switchboard"` を足す（`-d '{"path":"<dir>","backlog":"switchboard"}'`。無いと既定の `github` で登録され、バックログが GitHub に向く）。`projectVar` の PATCH は**しない**（Project が無い）。バックログは Switchboard に置かれ、取込みの確認（`/api/backlog?refresh=1`）は要らない。返りが workspace の id なら済み。
+
+5 は GitHub 由来を飛ばす。「Project の URL」（変数）と「バックログ画面」の Project 由来の取込みは対象外、「マージ判定」は最初の変更で `--change` で確かめる（`merge-gate.ts --change <変更>`）。残るのは `lint_backlog.sh` の代わりの `ops-kit lint --fresh`（新しい workspace を名指しして `<dir>` で走らせる: `cd <dir> && env -u GH_REPO BACKLOG_WORKSPACE=$ID ops-kit lint --fresh`。自分の Task の `GH_REPO` / `BACKLOG_WORKSPACE` を継ぐと元のバックログを検査する。最後の行 `violations: 0`）、スキル、CLAUDE.md の 4 項目（雛形の節名は `docs/design/new-repo.md` の表と同じ）。
+
+6 の報告からは、リポジトリ・Project・変数・ラベル・Project のビューの利用者確認・PAT を外す。
+
+### 7-2. 前の雛形で作った既存のリポジトリへ写す
+
+対象は `ops-kit/template/` で作った、GitHub を使わないリポジトリ。自動で書き換えない。`template-local/` とそのリポジトリを見比べて、次の順に手で直す。
+
+1. `.github/workflows/ci.yml` があれば、その `run:` の手順を `ops.config.json` の `ci.steps` に写す（7-1 の形。消すとローカル CI が読む手順が無くなる）。そのあと `.github/` と `scripts/setup/` を消す: `git rm -r .github scripts/setup`（残っていれば `docs/` などから指す文も外す）
+2. `CLAUDE.md` の次の節を、`$SWITCHBOARD_REPO_ROOT/ops-kit/template-local/CLAUDE.md.tmpl` の同じ節で置き換える: 「リポジトリとバックログ」（前の雛形では「リポジトリと Project」。`-R` と `__KIT_REPO__` の行も消える。起票の入口は `ops-kit backlog create`）・「テスト」（テストが無い間の扱い）・「作業の場所」（`origin/main` と `gh stack` を使わず、`main` から切って積まない）・「マージ判定とローカル CI」（`--change` の 3 スクリプトと、main の更新は `local-merge.ts`）。冒頭の「このリポジトリは GitHub を使わない」の段落と、「エージェント管理アプリの Task と動いているコード」の節も合わせ、「Issue・PR に書かない値」は「Issue・変更に書かない値」で置き換える。`template-local/` に無い節（「画像」「利用上限」）は GitHub に依らないので残す。このリポジトリ固有の値（テストの 3 コマンド・互換の前提・live check・反映の OK・Story Points の基準）は残す
+3. `README.md` に `## Design rules` と `## License` の見出しを足す（中身はそのリポジトリの値）。README が無ければ `$SWITCHBOARD_REPO_ROOT/ops-kit/template-local/README.md.tmpl` を `README.md` として写し、`__REPO__` を置換する
+4. `docs/change-template.md` を `$SWITCHBOARD_REPO_ROOT/ops-kit/template-local/docs/change-template.md` から足す
+5. 確かめる: `grep -rn 'request_issue\|pull-main' CLAUDE.md` が「使わない」と書く文脈だけ、`grep -n 'origin/main\|gh stack' CLAUDE.md` が 0 件。そのリポジトリで `env -u GH_REPO BACKLOG_WORKSPACE=<その workspace の id> ops-kit lint --fresh` が `violations: 0`
+
+写すのはファイルの内容だけ。登録（workspace）と、すでにある Issue・変更は触らない。

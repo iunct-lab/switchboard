@@ -12,12 +12,19 @@ import { findRepoRoot } from "./config.ts";
 /** Where the candidates live, relative to the meta repository's root (beside `ops-kit/skills`). */
 export const PROCESS_SOURCE = "ops-kit/processes";
 
+export type ProcessAuto = { maxBodyChars?: number; excludeLabels?: string[] };
+
 export type ProcessDef = {
   id: string;
   version: number;
   title: string;
   /** The kinds of work the candidate is meant for, as its author wrote them (free text, one line each). */
   fits: string[];
+  /**
+   * When a request may start in this candidate without a person choosing (#4322): `maxBodyChars` = the body's length limit,
+   * `excludeLabels` = labels that keep it out. null = the candidate is never chosen automatically (the default one).
+   */
+  auto: ProcessAuto | null;
   /** `## entry <name>` → the section's text, trimmed. */
   entries: Record<string, string>;
   /** The file it was read from (for messages). */
@@ -41,6 +48,15 @@ export function parseProcessDef(text: string, path: string): ProcessDef {
   if (typeof fm.title !== "string" || !fm.title.trim()) throw new Error(`${path}: frontmatter needs \`title\``);
   const fits = fm.fits === undefined ? [] : fm.fits;
   if (!Array.isArray(fits) || fits.some((f) => typeof f !== "string")) throw new Error(`${path}: \`fits\` must be a list of strings`);
+  let auto: ProcessAuto | null = null;
+  if (fm.auto !== undefined && fm.auto !== null) {
+    const a = fm.auto;
+    if (typeof a !== "object" || Array.isArray(a)) throw new Error(`${path}: \`auto\` must be a mapping (maxBodyChars, excludeLabels)`);
+    const { maxBodyChars, excludeLabels } = a as Record<string, unknown>;
+    if (maxBodyChars !== undefined && (typeof maxBodyChars !== "number" || !Number.isInteger(maxBodyChars) || maxBodyChars < 0)) throw new Error(`${path}: \`auto.maxBodyChars\` must be an integer ≥ 0`);
+    if (excludeLabels !== undefined && (!Array.isArray(excludeLabels) || excludeLabels.some((l) => typeof l !== "string"))) throw new Error(`${path}: \`auto.excludeLabels\` must be a list of strings`);
+    auto = { ...(maxBodyChars !== undefined ? { maxBodyChars: maxBodyChars as number } : {}), ...(excludeLabels !== undefined ? { excludeLabels: excludeLabels as string[] } : {}) };
+  }
   const entries: Record<string, string> = {};
   let name: string | null = null;
   let lines: string[] = [];
@@ -57,7 +73,7 @@ export function parseProcessDef(text: string, path: string): ProcessDef {
     } else if (name !== null) lines.push(line);
   }
   flush();
-  return { id: fm.id.trim(), version: fm.version, title: fm.title.trim(), fits: fits as string[], entries, path };
+  return { id: fm.id.trim(), version: fm.version, title: fm.title.trim(), fits: fits as string[], auto, entries, path };
 }
 
 /**

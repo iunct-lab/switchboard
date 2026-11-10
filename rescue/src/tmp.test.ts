@@ -352,3 +352,67 @@ test.skipIf(process.platform !== "linux")("a directory with a bound Unix socket 
   }
   expect(inUse(root)!.has("sockdir")).toBe(false); // closed: nothing listens there any more
 });
+
+/** The device number the root itself has; a path `other` names answers one more, as another mount would. */
+const MOUNTED = (other: (path: string) => boolean) => (path: string, dev: number) => (other(path) ? dev + 1 : dev);
+
+test("a mount point right under /tmp stays in every mode, and cleanTmp skips it and leaves the directory (#3741)", () => {
+  const judge = { ...OWNED, dev: MOUNTED((p) => p === join(root, "foo-abcdef")) };
+  for (const mode of [{ kind: "auto" }, { kind: "manual", staleMs: 60_000 }, { kind: "force" }] as const) {
+    const r = scanTmp(root, judge, Date.now(), mode);
+    expect(r.entries.find((e) => e.name === "foo-abcdef")!.keep).toBe("mount");
+    expect(r.cleanable.names).not.toContain("foo-abcdef");
+    const c = cleanTmp(root, ["foo-abcdef"], judge, Date.now(), mode);
+    expect(c.removed).toEqual([]);
+    expect(c.skipped).toEqual([{ name: "foo-abcdef", keep: "mount" }]);
+    expect(existsSync(join(root, "foo-abcdef", "sub", "f"))).toBe(true);
+  }
+});
+
+test("a mount point inside an old directory keeps the whole directory, and nothing in it is entered or removed; the other old ones still go (#3741)", () => {
+  const judge = { ...OWNED, dev: MOUNTED((p) => p === join(root, "switchboard.review12.abcDEF", "sub")) };
+  const r = scanTmp(root, judge);
+  expect(r.entries.find((e) => e.name === "switchboard.review12.abcDEF")!.keep).toBe("mount");
+  const c = cleanTmp(root, readdirSync(root), judge);
+  expect(c.skipped).toContainEqual({ name: "switchboard.review12.abcDEF", keep: "mount" });
+  expect(c.removed.sort()).toEqual(REMOVABLE.filter((n) => n !== "switchboard.review12.abcDEF"));
+  expect(existsSync(join(root, "switchboard.review12.abcDEF", "sub", "f"))).toBe(true);
+});
+
+test("a mount point right under /tmp is not read into: nothing below it is looked at (#3741)", () => {
+  const seen: string[] = [];
+  const top = join(root, "foo-abcdef");
+  const judge = { ...OWNED, dev: (p: string, d: number) => (seen.push(p), p === top ? d + 1 : d) };
+  for (const mode of [{ kind: "auto" }, { kind: "force" }] as const) {
+    scanTmp(root, judge, Date.now(), mode);
+    cleanTmp(root, ["foo-abcdef"], judge, Date.now(), mode);
+  }
+  expect(seen.filter((p) => p.startsWith(top + "/"))).toEqual([]);
+});
+
+test("a mount point a folder without permissions hid is neither entered nor changed by the permission repair, and keeps the directory (#3741)", () => {
+  const entry = join(root, "x.recheck3.a1b2c3");
+  const mount = join(entry, "locked", "m");
+  mkdirSync(join(mount, "inner"), { recursive: true });
+  writeFileSync(join(mount, "inner", "f"), "x");
+  utimesSync(join(mount, "inner", "f"), OLD, OLD);
+  utimesSync(join(mount, "inner"), OLD, OLD);
+  chmodSync(mount, 0o500);
+  utimesSync(mount, OLD, OLD);
+  chmodSync(join(entry, "locked"), 0o000);
+  utimesSync(join(entry, "locked"), OLD, OLD);
+  utimesSync(entry, OLD, OLD);
+  const seen: string[] = [];
+  const judge = { ...OWNED, dev: (p: string, d: number) => (seen.push(p), p === mount ? d + 1 : d) };
+  try {
+    expect(scanTmp(root, judge).cleanable.names).toContain("x.recheck3.a1b2c3"); // the locked folder hides the mount at first
+    const r = cleanTmp(root, ["x.recheck3.a1b2c3"], judge);
+    expect(r.removed).toEqual([]);
+    expect(r.skipped).toEqual([{ name: "x.recheck3.a1b2c3", keep: "mount" }]);
+    expect(statSync(mount).mode & 0o777).toBe(0o500); // not made writable
+    expect(seen.filter((p) => p.startsWith(mount + "/"))).toEqual([]);
+    expect(existsSync(join(mount, "inner", "f"))).toBe(true);
+  } finally {
+    chmodSync(mount, 0o755);
+  }
+});

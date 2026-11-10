@@ -2,7 +2,7 @@
 
 Switchboard starts the user's own, unmodified `claude` and never touches its credentials. As we read Anthropic's terms, using a Claude Pro / Max login this way is allowed only for the user's own, individual use (our reading, not legal advice).
 
-Verified 2026-09-05 against Claude Code **2.1.261** by driving `claude` from Bun (`scripts` in the Phase 0 spike; recorded fixture at `packages/adapters/claude/fixtures/write-with-permission.jsonl`, outside Git; record your own outside Git with the `runner-adapter-recording` skill; `bun scripts/fixtures.ts fetch` works only in a clone with the private history).
+Verified 2026-09-05 against Claude Code **2.1.261** by driving `claude` from Bun (`scripts` in the Phase 0 spike; recorded fixture at `packages/adapters/claude/fixtures/write-with-permission.jsonl`, outside Git; record your own outside Git with the `runner-adapter-recording` skill).
 
 ## Invocation
 
@@ -74,7 +74,7 @@ Without step 1 (or without `--permission-prompt-tool stdio`) any tool that needs
 
 ## Resume (verified 2026-09-05, issue #2)
 
-Recorded fixtures (outside Git; record your own outside Git with the `runner-adapter-recording` skill; `bun scripts/fixtures.ts fetch` works only in a clone with the private history): `fixtures/resume-turn.jsonl` (same session id re-announced by `system/init`, answer drawn from the earlier process) and `fixtures/resume-missing.jsonl` (`--resume` of an unknown id).
+Recorded fixtures (outside Git; record your own outside Git with the `runner-adapter-recording` skill): `fixtures/resume-turn.jsonl` (same session id re-announced by `system/init`, answer drawn from the earlier process) and `fixtures/resume-missing.jsonl` (`--resume` of an unknown id).
 
 - The process does **not** exit after `result`; it waits for more user turns on stdin. Ending stdin does not make it exit promptly either — the daemon ends stdin and kills after a 5 s grace period (`RunnerSession.close()`). The runner is spawned as the leader of its own process group (`detached`) and every kill goes to the whole group (SIGTERM, then one SIGKILL once the runner has exited), so its tool shells and MCP servers do not outlive it.
 - The daemon therefore keeps a finished process for `SWITCHBOARD_RUNNER_IDLE_MS` (default 10 min; a negative value keeps processes until shutdown; non-numeric values fall back to the default) for quick follow-ups, then releases it. Not while the process still has background jobs: `system/background_tasks_changed` (verified on 2.1.311, `tasks` = the jobs left, sent when a `run_in_background` shell or a Monitor starts or ends) maps to `background {count}`; a count above 0 holds the release (and counts as activity for the host's idle stop), 0 starts the clock. A job's `task_notification` makes the process start a turn on its own (a new `system/init` with no user message); the daemon treats that turn as in flight (`running`) like a sent one, so the release never kills it mid-command. A follow-up that arrives while a release is in progress waits for it, so one session id never has two processes. At daemon shutdown idle processes are killed immediately (no grace). A crash (`uncaughtException` / `unhandledRejection`) goes through the same stop, capped at 20 s (a running Codex turn waits up to 8 s for the interrupt and 3 s for close before its group is killed), before exit 1. Later turns spawn `claude --resume <session_id>`; the conversation context comes from `~/.claude/projects/...`, so this survives a daemon restart.
@@ -93,7 +93,7 @@ Eval log (real Claude Code 2.1.261, model `claude-haiku-4-5-20251001`): task "Re
 ## Session log (`~/.claude/projects`) — reading terminal sessions (issue #91)
 
 Verified 2026-09-09 against logs written by Claude Code **2.1.263** (interactive terminal and `claude -p` alike). Mapping in
-`packages/adapters/claude/src/history.ts`; recorded shape in `fixtures/terminal-session.jsonl` (values sanitized; outside Git; record your own outside Git with the `runner-adapter-recording` skill; `bun scripts/fixtures.ts fetch` works only in a clone with the private history).
+`packages/adapters/claude/src/history.ts`; recorded shape in `fixtures/terminal-session.jsonl` (values sanitized; outside Git; record your own outside Git with the `runner-adapter-recording` skill).
 
 Claude Code appends every session to `~/.claude/projects/<dir>/<sessionId>.jsonl`, where `<dir>` is the cwd with every
 character outside `[A-Za-z0-9]` replaced by `-` (`/home/user/my_repo` → `-home-user-my-repo`). Subagent transcripts live in

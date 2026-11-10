@@ -38,13 +38,16 @@ describe("Brief (#833)", () => {
   const task: Task = { id: "task_e", executionMode: "local", cloudSession: null, sourceCloudTaskId: null, workspaceId: null, title: "e", runner: "claude", cwd: "/w", scope: ["/w"], status: "done", runnerSessionId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: "high", origin: "switchboard", resumeAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 };
   const runners: RunnerInfo[] = [{ id: "claude", available: true, permissionModes: [], models: [], efforts: [{ value: "high", label: "深い" }] }];
   const render = (t: Task) => renderToStaticMarkup(createElement(Brief, { task: t, ledger: null, onAbort: () => {}, open: true, onClose: () => {}, runners }));
-  const ROW = (text: string) => `<span>思考の深さ</span><span class="brief-effort" title="作成時に決まり、途中では変えられません">${text}</span>`;
-
-  test("shows the task's effort by the runner's label, read-only; empty is CLI 既定", () => {
-    expect(render(task)).toContain(ROW("深い"));
-    expect(render({ ...task, effort: null })).toContain(ROW("CLI 既定"));
-    expect(render({ ...task, effort: "ultra" })).toContain(ROW("ultra")); // no longer on the list: as it is
-    expect(render(task)).not.toContain('aria-label="思考の深さ"'); // no select: fixed at creation
+  test("a local task's effort is a select (changeable from the next turn); the cloud task has none", () => {
+    const html = render(task);
+    expect(html).toContain('aria-label="思考の深さ"');
+    expect(html).toContain("思考の深さ: 深い");
+    expect(render({ ...task, effort: null })).toContain("思考の深さ: CLI 既定");
+    expect(html).toContain("新しい思考の深さで再開"); // done: the next reply
+    expect(render({ ...task, status: "running" })).toContain("変更は次のターンから");
+    const cloud = render({ ...task, executionMode: "cloud" });
+    expect(cloud).not.toContain('aria-label="思考の深さ"');
+    expect(cloud).toContain("公式 Web で操作してください");
   });
 });
 

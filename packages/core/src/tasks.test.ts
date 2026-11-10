@@ -159,8 +159,9 @@ describe("background work", () => {
     expect(tasks.backgroundJobs()).toBe(1);
     await sleep(IDLE_MS * 3);
     expect(fakes[0]!.closes).toBe(0);
-    expect(db.getTask(t.id)!.status).toBe("done");
+    expect(db.getTask(t.id)!.status).toBe("background");
     fakes[0]!.emit({ t: "background", count: 0 });
+    expect(db.getTask(t.id)!.status).toBe("done");
     expect(tasks.backgroundJobs()).toBe(0);
     await sleep(IDLE_MS * 3);
     expect(fakes[0]!.closes).toBe(1);
@@ -171,7 +172,7 @@ describe("background work", () => {
     fakes[0]!.emit({ t: "session.start", runner: "claude", runnerSessionId: "s", cwd: "/" });
     fakes[0]!.emit({ t: "background", count: 2 });
     fakes[0]!.emit({ t: "session.end", status: "ok", summary: "待ちます" });
-    expect(db.getTask(t.id)!.status).toBe("done");
+    expect(db.getTask(t.id)!.status).toBe("background");
     await sleep(IDLE_MS * 3);
     expect(fakes[0]!.closes).toBe(0);
     // the notification: the count drops, and the runner goes on in a turn of its own
@@ -186,7 +187,8 @@ describe("daemon stop", () => {
     const t = await finishedTask();
     fakes[0]!.emit({ t: "background", count: 1 });
     expect(await tasks.shutdown()).toEqual([t.id]);
-    expect(db.getTask(t.id)).toMatchObject({ status: "done" });
+    await sleep(5);
+    expect(db.getTask(t.id)).toMatchObject({ status: "done", background: null });
     expect(db.getTask(t.id)!.resumeAt).not.toBeNull();
     const notes = db.listEvents(t.id).map((e) => e.ev).filter((ev) => ev.t === "status" && ev.text.startsWith(STOP_NOTE));
     expect(notes).toHaveLength(1);
@@ -198,6 +200,7 @@ describe("daemon stop", () => {
     tasks.setResumeAt(t.id, reset);
     fakes[0]!.emit({ t: "background", count: 1 });
     expect(await tasks.shutdown()).toEqual([]);
+    await sleep(5);
     expect(db.getTask(t.id)!.resumeAt).toBe(reset);
     expect(db.listEvents(t.id).map((e) => e.ev).some((ev) => ev.t === "status" && ev.text.startsWith(STOP_NOTE))).toBe(false);
   });
@@ -339,13 +342,62 @@ describe("background jobs of a task whose turn ended", () => {
   test("the task says what is running and since when, until the job ends", async () => {
     const t = await finishedTask();
     fakes[0]!.emit({ t: "background", count: 1, jobs: ["local CI"] });
-    expect(db.getTask(t.id)?.status).toBe("done");
+    expect(db.getTask(t.id)?.status).toBe("background");
     expect(db.getTask(t.id)?.background?.jobs).toEqual(["local CI"]);
     const since = db.getTask(t.id)!.background!.since;
     fakes[0]!.emit({ t: "background", count: 2, jobs: ["local CI", "review"] });
     expect(db.getTask(t.id)?.background).toEqual({ jobs: ["local CI", "review"], since });
     fakes[0]!.emit({ t: "background", count: 0, jobs: [] });
     expect(db.getTask(t.id)?.background).toBeNull();
+    expect(db.getTask(t.id)?.status).toBe("done");
+  });
+
+  test("the turn's end decides the status: ok with a job left is background, error stays error with the mark kept, a reply runs it", async () => {
+    const t = await finishedTask();
+    fakes[0]!.emit({ t: "session.start", runner: "claude", runnerSessionId: "s", cwd: "/" });
+    fakes[0]!.emit({ t: "background", count: 1, jobs: ["local CI"] });
+    fakes[0]!.emit({ t: "session.end", status: "error", summary: "失敗" });
+    expect(db.getTask(t.id)).toMatchObject({ status: "error", background: { jobs: ["local CI"] } });
+    fakes[0]!.emit({ t: "session.start", runner: "claude", runnerSessionId: "s", cwd: "/" });
+    fakes[0]!.emit({ t: "session.end", status: "ok", summary: "待ちます" });
+    expect(db.getTask(t.id)?.status).toBe("background");
+    await tasks.send(t.id, "続けて");
+    expect(db.getTask(t.id)?.status).toBe("running");
+    fakes[0]!.emit({ t: "session.end", status: "ok", summary: "待ちます" });
+    expect(db.getTask(t.id)?.status).toBe("background");
+  });
+
+  test("an abort while waiting on jobs aborts the task and tells the background-empty listeners once", async () => {
+    const t = await finishedTask();
+    const told: string[] = [];
+    tasks.onBackgroundEmpty((id) => told.push(id));
+    fakes[0]!.emit({ t: "background", count: 1, jobs: ["local CI"] });
+    expect(db.getTask(t.id)?.status).toBe("background");
+    await tasks.abort(t.id);
+    await sleep(5);
+    expect(db.getTask(t.id)).toMatchObject({ status: "aborted", background: null });
+    expect(told).toEqual([t.id]);
+  });
+
+  test("a runner that exits while the task waits on jobs ends it as done and tells the listeners", async () => {
+    const t = await finishedTask();
+    const told: string[] = [];
+    tasks.onBackgroundEmpty((id) => told.push(id));
+    fakes[0]!.emit({ t: "background", count: 1, jobs: ["local CI"] });
+    fakes[0]!.exit(137);
+    await sleep(5);
+    expect(db.getTask(t.id)).toMatchObject({ status: "done", background: null });
+    expect(told).toEqual([t.id]);
+  });
+
+  test("a runner that exits mid turn with a job counted ends the turn done, not background", async () => {
+    const t = await finishedTask();
+    fakes[0]!.emit({ t: "session.start", runner: "claude", runnerSessionId: "s", cwd: "/" });
+    fakes[0]!.emit({ t: "background", count: 1, jobs: ["local CI"] });
+    expect(db.getTask(t.id)?.status).toBe("running");
+    fakes[0]!.exit(0);
+    await sleep(5);
+    expect(db.getTask(t.id)).toMatchObject({ status: "done", background: null });
   });
 
   test("a runner that dies with a job says so and plans a resume", async () => {

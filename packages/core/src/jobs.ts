@@ -46,7 +46,8 @@ export type JobDeps = {
 /** The argv of each kind, as `cross-runner-review` runs a review and CLAUDE.md runs local CI. */
 export function jobCommand(req: JobRequest, idleS = 900): JobCommand {
   if (req.kind === "local-ci") return { argv: ["bun", "scripts/local-ci.ts", String(req.pr)], tail: "" };
-  const head = ["ops-kit", "heavy", "--name", `review ${req.runner}`, "--", "ops-kit", "idle-run", "--idle", String(idleS), "--"];
+  // a review takes no heavy slot, only waits for the memory floor (the kit README, 重い処理の枠): local CI keeps its slot
+  const head = ["ops-kit", "heavy", "--memory-only", "--name", `review ${req.runner}`, "--", "ops-kit", "idle-run", "--idle", String(idleS), "--"];
   if (req.runner === "codex") return { argv: [...head, "codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "-o", req.outFile, "-"], tail: ' < "$JOB_PROMPT"' };
   // stream-json: text output says nothing until the end, and idle-run would cut it
   return { argv: [...head, "claude", "-p", "--permission-mode", "plan", "--output-format", "stream-json", "--verbose"], tail: ` < "$JOB_PROMPT" | tee "$J/claude.jsonl" | jq -r 'select(.type=="result").result' > "$JOB_OUT"` };
@@ -147,6 +148,10 @@ export function requestJob(deps: JobDeps, req: JobRequest): Job {
     if (!within(cwd, prompt) || !within(cwd, out)) throw new JobError("promptFile and outFile must be inside cwd", 400);
     files.JOB_PROMPT = prompt;
     files.JOB_OUT = out;
+  }
+  if (req.kind === "local-ci" && req.fixtures) {
+    if (!isAbsolute(req.fixtures)) throw new JobError(`fixtures must be absolute: ${req.fixtures}`, 400);
+    files.SWITCHBOARD_FIXTURES = req.fixtures;
   }
   const resolved: JobRequest = req.kind === "review" ? { ...req, cwd, promptFile: files.JOB_PROMPT!, outFile: files.JOB_OUT! } : { ...req, cwd };
   const job = deps.db.insertJob({ kind: req.kind, taskId: req.taskId, pr: req.pr, runner: req.kind === "review" ? req.runner : null, cwd, startedAt: (deps.now ?? Date.now)() });

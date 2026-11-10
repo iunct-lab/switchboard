@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { BACKLOG_USAGE, readRecords, runBacklog } from "./backlog-client.ts";
+import { BACKLOG_USAGE, readRecords, runBacklog, triageUsage } from "./backlog-client.ts";
 import { JOB_USAGE, runJob } from "./job-client.ts";
 import { bootstrap } from "./bootstrap.ts";
 import { defaultConfig, findConfig, loadConfig, loadPublicSync, projectOf, publicCopyRefusal, resolveProject, type OpsConfig } from "./config.ts";
@@ -23,13 +23,17 @@ import { setField, UsageError } from "./set.ts";
 import { parseLabels, syncLabels } from "./labels.ts";
 import { reconcileProject, triage } from "./triage.ts";
 
+const SCAN_TEXT_USAGE = `  scan-text <file|->
+      文（ファイル、- は標準入力）に認証に使える値（device code、承認 URL、トークン、鍵、アカウント ID、ホストの AWS の設定のプロファイル名・SSO のセッション名など）が無いか検査する
+      出力は <file>:<行>: <種類>。値は出さない。exit 0 = 無い、1 = ある、2 = 読めなかった。設定ファイルは要らない`;
+
 const USAGE = `使い方: bun ops-kit/src/cli.ts <command> [--config <ops.config.json>] ...
 
   set <issue> <field> <value>
       Issue 1 件の Project フィールドを 1 つ設定する（単一選択 / 数値 / テキスト / 日付）。Project に無ければ追加する
       例: set 16 Status Ready / set 16 "Story Points" 5
       BACKLOG_URL がある（アプリの Task の中）なら GitHub に書かずアプリに保存する（backlog set / backlog triage と同じ。triage も）
-  triage <issue> <area> <kind> <priority> [<phase>] [<parent>] [<status>]
+  ${triageUsage(true)}
       Issue を Project に入れ、Area / Kind / Priority /（Phase）/ Status と親（Task の親 PBI）を設定する
       <phase> は設定に fields.phase があるときだけ渡す。<parent> を飛ばすなら "" を渡す。<status> の既定は Backlog
   reconcile-project [--dry-run]
@@ -38,7 +42,7 @@ const USAGE = `使い方: bun ops-kit/src/cli.ts <command> [--config <ops.config
       BACKLOG_URL がある（アプリの Task の中）なら GitHub を読み書きせず exit 1（--dry-run も）。取り込み済みの要望・PBI・Task 1 件なら backlog triage、ほかは Task の外で回す
 
   lint [--no-project] [--fresh]
-      open の PBI / Task / 要望が記載規約（設定の sections と storyPoints）を満たすか検査する。1 つのクエリ（100 件ずつ）で読む
+      open の PBI / Task / 要望が記載規約（設定の sections とキットの Story Points の尺度）を満たすか検査する。1 つのクエリ（100 件ずつ）で読む
       BACKLOG_URL がある（アプリの Task の中）なら GitHub ではなくアプリの保存値を読む（Project はアプリがその workspace に読むもの）。
       --fresh: その前にアプリに送信と取込みをさせる。アプリが GitHub に届かなければ保存値を検査し「GitHub 未同期」を出す。
       アプリに届かない・未取得は 2（gh には切り替えない）
@@ -65,9 +69,7 @@ ${JOB_USAGE}
       リポジトリのラベルを <file>（既定 .github/labels.yml）に合わせる。無いものを作り、色・説明が違うものを直す。
       <file> に無いラベルは消さない。--dry-run は変えるものを出すだけ。設定ファイルは要らない
       BACKLOG_URL がある（アプリの Task の中）なら GitHub を読み書きせず exit 1（--dry-run も）。Task の中で反映するなら env -u BACKLOG_URL ops-kit sync-labels
-  scan-text <file|->
-      文（ファイル、- は標準入力）に認証に使える値（device code、承認 URL、トークン、鍵、アカウント ID、ホストの AWS の設定のプロファイル名・SSO のセッション名など）が無いか検査する
-      出力は <file>:<行>: <種類>。値は出さない。exit 0 = 無い、1 = ある、2 = 読めなかった。設定ファイルは要らない
+${SCAN_TEXT_USAGE}
   scan-issues [<owner/name>] [--since <ISO 8601>] [--recheck <URL>]...
       リポジトリの Issue・PR の題と本文、コメント、PR のレビューコメントとレビュー本文を全部、同じ検査に通す。出力は <URL>: <種類>（<行> 行目）と、最後に hits: <当たり> / scanned: <読んだ文の数>
       --since はその時刻より後に更新されたものだけを読む。--recheck は前回の当たりの場所（URL）を差分の外でも読み直す（何回でも）
@@ -97,11 +99,12 @@ ${JOB_USAGE}
   pr push-rebased
       自動の rebase が解けなかった枝を手で rebase した後、今の枝だけを origin の同名の枝へ --force-with-lease で push する（引数なし）。
       今の枝が既定の枝（origin/HEAD。読めなければ main と master）か枝の無い HEAD なら push せずに exit 1。push が断られても exit 1
-  heavy [--name <名前>] -- <コマンド…>
-      重い処理（ローカル CI、全テスト、偽のデーモン + headless Chrome、レビューのセッションなど）の枠をマシンで 1 つ取ってから
+  heavy [--memory-only] [--name <名前>] -- <コマンド…>
+      重い処理（ローカル CI、全テスト、偽のデーモン + headless Chrome など）の枠をマシンで 1 つ取ってから
       コマンドを動かす。枠が全部埋まっている間と、空きメモリ（MemAvailable）が下限を下回る間は待ち、理由（枠を持つ処理の名前・cwd・
       開始時刻、空きメモリ）を 1 行出す。上限は ~/.config/ops-kit/heavy.json（{ "max": 1, "minFreeMb": 1536 }。無ければこの既定値）、
       枠は ~/.local/state/ops-kit/heavy/ で、どのリポジトリから呼んでも同じ枠を取り合う。--name の既定はコマンドの先頭 3 語。
+      --memory-only は枠を取らず、空きメモリが下限を下回る間だけ待つ（レビューのセッションなど、短くて枠を待たせたくない処理）。
       設定ファイル（ops.config.json）は要らない。exit = コマンドの exit、127 = 起動できない、2 = 使い方の誤りか heavy.json の誤り
   idle-run --idle <秒> [--] <コマンド…>
       コマンドを自分のプロセスグループで動かし、stdout / stderr のどちらにも <秒> 出力が無ければグループごと切る。総時間の上限は無い。
@@ -221,13 +224,19 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
     return pullMain(process.cwd(), out, err);
   }
   if (command === "heavy") {
-    const HEAVY_USAGE = "heavy [--name <名前>] -- <コマンド…>";
+    const HEAVY_USAGE = "heavy [--memory-only] [--name <名前>] -- <コマンド…>";
     let name: string | undefined;
+    let memoryOnly = false;
     let i = 0;
-    if (rest[0] === "--name") {
-      name = rest[1];
-      if (!name) return usage(err, HEAVY_USAGE, 2);
-      i = 2;
+    for (;;) {
+      if (rest[i] === "--memory-only" && !memoryOnly) {
+        memoryOnly = true;
+        i += 1;
+      } else if (rest[i] === "--name" && name === undefined) {
+        name = rest[i + 1];
+        if (!name) return usage(err, HEAVY_USAGE, 2);
+        i += 2;
+      } else break;
     }
     const cmd = rest[i] === "--" ? rest.slice(i + 1) : rest.slice(i);
     if (!cmd.length) return usage(err, HEAVY_USAGE, 2);
@@ -254,7 +263,7 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
         } finally {
           for (const s of signals) process.off(s, forward);
         }
-      }, { log: err });
+      }, { log: err, memoryOnly });
     } catch (e) {
       err((e as Error).message);
       return 2;
@@ -303,7 +312,7 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
           out(`public check: skipped (${repo} is publicSync.target, the public copy)`);
           return 0;
         }
-        out(check({ host: hostAws(), privateRepo: repo, target: cfg.target, include: cfg.include, exclude: cfg.exclude, rewrite: cfg.rewrite, source: given["--source"] }, spawnRun));
+        out(check({ host: hostAws(), privateRepo: repo, target: cfg.target, include: cfg.include, exclude: cfg.exclude, allowRefs: cfg.allowRefs, rewrite: cfg.rewrite, source: given["--source"] }, spawnRun));
         return 0;
       } catch (e) {
         err((e as Error).message);
@@ -317,7 +326,7 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
       if (on.has("--adopt-baseline") && cfg.versioning !== "independent") return usage(err, adoptUsage, 2);
       const r = await repoOf(gh);
       privateRepo = `${r.owner}/${r.name}`;
-      out(sync({ host: hostAws(), privateRepo, target: cfg.target, versioning: cfg.versioning, include: cfg.include, exclude: cfg.exclude, rewrite: cfg.rewrite, serviceUsers: cfg.serviceUsers, source: given["--source"], targetUrl: given["--target-url"], dryRun: on.has("--dry-run"), adopted: on.has("--adopted"), adoptBaseline: on.has("--adopt-baseline") }, spawnRun));
+      out(sync({ host: hostAws(), privateRepo, target: cfg.target, versioning: cfg.versioning, include: cfg.include, exclude: cfg.exclude, allowRefs: cfg.allowRefs, rewrite: cfg.rewrite, serviceUsers: cfg.serviceUsers, source: given["--source"], targetUrl: given["--target-url"], dryRun: on.has("--dry-run"), adopted: on.has("--adopted"), adoptBaseline: on.has("--adopt-baseline") }, spawnRun));
       return 0;
     } catch (e) {
       const message = (e as Error).message;
@@ -369,6 +378,10 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
   if (command === "scan-text" || command === "scan-issues") {
     try {
       if (command === "scan-text") {
+        if (rest[0] === "--help" || rest[0] === "-h") {
+          out(SCAN_TEXT_USAGE);
+          return 0;
+        }
         const [file, ...extra] = rest;
         if (!file || extra.length) return usage(err, "scan-text <file|->", 2);
         const hits = findSecrets(file === "-" ? await Bun.stdin.text() : readFileSync(file, "utf8"), hostAws());
@@ -431,10 +444,12 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
       }
       case "triage": {
         const [issue, area, kind, priority, ...tail] = rest;
+        // a repository without a Phase: "" in its place means none; <parent> and <status> follow
+        if (!cfg.fields.phase && tail[0] === "" && tail.length > 2) tail.shift();
         const phase = cfg.fields.phase ? tail.shift() : undefined;
         const [parent, status, ...extra] = tail;
         if (!issue || !area || !kind || !priority || (cfg.fields.phase && !phase) || extra.length) {
-          return usage(err, `triage <issue> <area> <kind> <priority> ${cfg.fields.phase ? "<phase> " : ""}[<parent>] [<status>]`);
+          return usage(err, triageUsage(!!cfg.fields.phase));
         }
         await triage(gh, cfg, issueNumber(issue), { area, kind, priority, phase, parent: parent ? issueNumber(parent) : undefined, status: status || undefined }, out);
         return 0;

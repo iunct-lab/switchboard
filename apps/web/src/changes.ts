@@ -40,3 +40,8 @@ export function changeStateLabel(change: Pick<Backlog["changes"][number], "state
 
 /** A sha's first 7, or なし. */
 export const short = (sha: string | null | undefined) => (sha ? sha.slice(0, 7) : t(common.shaNone));
+
+/** A merged change's `reviewed → merged` (7 digits each; なし for one merged before the head was kept): the head that was judged, and the commit it became on the base. null = not merged. */
+export function mergedPair(change: { mergeCommit: string | null; reviewedHead: string | null }): string | null {
+  return change.mergeCommit ? `${short(change.reviewedHead)} → ${short(change.mergeCommit)}` : null;
+}

@@ -14,6 +14,7 @@
  */
 import type { BacklogCommentData, BacklogIssueData, BacklogProjectItemData, BacklogSource } from "@switchboard/protocol";
 import type { BacklogOperation, Db, NewBacklogOperation } from "./db.ts";
+import { inSendWindow } from "./db.ts";
 import { BacklogError, type BacklogCreatePayload, type BacklogWorkspace, type GhRunner } from "./backlog.ts";
 import { importGithubSnapshot } from "./backlog-sync.ts";
 
@@ -85,7 +86,8 @@ export async function enableGithubSync(gh: GhRunner, db: Db, ws: Pick<BacklogWor
   // the press is the user's "again": what waits for its time after an outage (a create, a body, a comment) goes now,
   // and a create GitHub refused (a Milestone it does not have, tries used up) is tried once more — what refused it may
   // have been put right meanwhile
-  for (const o of db.listPendingBacklogOperations(source)) if (o.status === "pending" && o.retryAt) db.setBacklogOperationResult(o.id, { status: "pending", retryAt: null }, now);
+  // (a comment still in its send window keeps it: the window is for taking it back, not an outage's wait)
+  for (const o of db.listPendingBacklogOperations(source)) if (o.status === "pending" && o.retryAt && !inSendWindow(o, now)) db.setBacklogOperationResult(o.id, { status: "pending", retryAt: null }, now);
   for (const o of enablingCreates(db, source)) if (o.status === "failed") db.setBacklogOperationResult(o.id, { status: "pending", attempt: 0, retryAt: null, error: null }, now);
   return enablingOf(db, source)!;
 }
@@ -206,7 +208,7 @@ function queueFollowUps(db: Db, source: BacklogSource, creates: BacklogOperation
     const c = r.remote as BacklogCommentData | null;
     const issue = c ? issueIds.get(c.issue) : undefined;
     if (!c || !issue || commenting.has(r.externalId)) continue;
-    ops.push({ issue, targetKind: "comment", target: r.externalId, kind: "comment", payload: { body: renumberRefs(c.body, numbers) } });
+    ops.push({ issue, targetKind: "comment", target: r.externalId, kind: "comment", payload: { body: renumberRefs(c.body, numbers) }, noDelay: true });
   }
   if (ops.length) db.applyBacklogEdit(source, { records: [], operations: ops }, now);
 }

@@ -5,6 +5,7 @@ import { ACTIONS, hostEnv, parseArgs, planHostOperation, runHostOperation, type 
 const e = { stack: "switchboard-host", region: "ap-northeast-1", params: "ImageId=ami-0 VpcId=vpc-0", personStack: "switchboard-host-person-deploy", driftTimeoutSeconds: 300, driftPollSeconds: 5 };
 const TOKEN = "start-token-value";
 const EDGE = "edge-header-value";
+const CS = "arn:aws:cloudformation:ap-northeast-1:123456789012:changeSet/awscli-cloudformation-package-deploy-1/abc";
 const changeSet = "Changeset created successfully. Run the following command to review changes:\naws cloudformation describe-change-set --change-set-name arn:aws:cloudformation:ap-northeast-1:123456789012:changeSet/awscli-cloudformation-package-deploy-1/abc";
 
 /** A fake AWS CLI / bun: answers by command prefix (the first match), records every call and every log line. */
@@ -165,9 +166,12 @@ describe("host-ops person-deploy", () => {
   const attach = (c: string) => c.startsWith("aws iam attach-role-policy --role-name switchboard-host-person-deploy --policy-arn " + ADMIN);
   const detach = (c: string) => c.startsWith("aws iam detach-role-policy --role-name switchboard-host-person-deploy --policy-arn " + ADMIN);
 
-  test("runs the change set as the person's deploy role, never DeployRole, keeps the previous parameters, and detaches AdministratorAccess last", async () => {
+  test("makes the change set as the person's deploy role, never DeployRole, keeps the previous parameters, stops before executing it, and detaches AdministratorAccess last", async () => {
     const f = fake();
-    expect(await runHostOperation("person-deploy", p, f.d)).toBe(`executed ${changeSet.split(" ").at(-1)}`);
+    const out = await runHostOperation("person-deploy", p, f.d);
+    expect(out).toStartWith(`created ${CS}`);
+    expect(out).toContain(`bun scripts/host-ops.ts person-deploy --execute=${CS} --yes`);
+    expect(f.calls.some((c) => c.includes("execute-change-set"))).toBe(false);
     const deploy = f.calls.find((c) => c.startsWith("aws cloudformation deploy"))!;
     expect(deploy).toContain("--role-arn arn:person-role");
     expect(f.calls.some((c) => c.includes("OutputKey=='DeployRoleArn'"))).toBe(false);
@@ -178,6 +182,13 @@ describe("host-ops person-deploy", () => {
     expect(a).toBeLessThan(f.calls.indexOf(deploy));
     expect(detach(f.calls.at(-1)!)).toBe(true);
     expect(f.calls.filter(detach)).toHaveLength(1);
+  });
+
+  test("prints each resource of the change set before running it", async () => {
+    const cs = { Changes: [{ ResourceChange: { Action: "Modify", LogicalResourceId: "GitHubOidcRole", Replacement: "False" } }] };
+    const f = fake([["aws cloudformation describe-change-set", { out: JSON.stringify(cs) }]]);
+    await runHostOperation("person-deploy", p, f.d);
+    expect(f.logs).toContain("change: Modify GitHubOidcRole (replacement: False)");
   });
 
   test("SWITCHBOARD_HOST_PARAMS changes only the parameters it names", async () => {
@@ -191,8 +202,6 @@ describe("host-ops person-deploy", () => {
     const cases: Array<[string, Array<[string, { ok?: boolean; out?: string; err?: string }]>, RegExp | string]> = [
       ["refused", [["aws cloudformation describe-change-set", { out: JSON.stringify(instance) }]], /replaces the instance/],
       ["deploy failed", [["aws cloudformation deploy", { ok: false, err: "AccessDenied" }]], "failed: aws cloudformation deploy"],
-      ["execute failed", [["aws cloudformation execute-change-set", { ok: false, err: "boom" }]], /execute-change-set/],
-      ["wait failed", [["aws cloudformation wait", { ok: false, err: "UPDATE_ROLLBACK_COMPLETE" }]], /wait/],
     ];
     for (const [, answers, error] of cases) {
       const f = fake(answers);
@@ -204,11 +213,45 @@ describe("host-ops person-deploy", () => {
     expect(detach(empty.calls.at(-1)!)).toBe(true);
   });
 
-  test("a replacing change set passes only with --allow-replace", async () => {
+  test("a replacing change set passes only with --allow-replace, and the command to execute it carries the flag", async () => {
     const instance = { Changes: [{ ResourceChange: { Action: "Modify", LogicalResourceId: "Instance", ResourceType: "AWS::EC2::Instance", Replacement: "True" } }] };
     const f = fake([["aws cloudformation describe-change-set", { out: JSON.stringify(instance) }]]);
-    expect(await runHostOperation("person-deploy", { ...p, allowReplace: true }, f.d)).toStartWith("executed ");
+    expect(await runHostOperation("person-deploy", { ...p, allowReplace: true }, f.d)).toContain(`--execute=${CS} --yes --allow-replace`);
     expect(detach(f.calls.at(-1)!)).toBe(true);
+  });
+
+  test("--execute runs the change set the person looked at, as the person's deploy role, and detaches last; no install, no package", async () => {
+    const ok = { StackName: "switchboard-host", ExecutionStatus: "AVAILABLE", Changes: [{ ResourceChange: { Action: "Modify", LogicalResourceId: "Data", Replacement: "False" } }] };
+    const f = fake([["aws cloudformation describe-change-set", { out: JSON.stringify(ok) }]]);
+    expect(await runHostOperation("person-deploy", { ...p, execute: CS }, f.d)).toBe(`executed ${CS}`);
+    expect(f.calls.findIndex(attach)).toBeLessThan(f.calls.findIndex((c) => c.startsWith("aws cloudformation execute-change-set")));
+    expect(f.calls.some((c) => c.startsWith("bun ") || c.startsWith("aws cloudformation package") || c.startsWith("aws cloudformation deploy"))).toBe(false);
+    expect(f.logs).toContain("change: Modify Data (replacement: False)");
+    expect(detach(f.calls.at(-1)!)).toBe(true);
+  });
+
+  test("--execute refuses another stack's change set, one already run, or one the check refuses, and detaches each time", async () => {
+    const instance = { ResourceChange: { Action: "Modify", LogicalResourceId: "Instance", ResourceType: "AWS::EC2::Instance", Replacement: "True" } };
+    const cases: Array<[object, RegExp]> = [
+      [{ StackName: "other", ExecutionStatus: "AVAILABLE", Changes: [] }, /switchboard-host の change set ではない/],
+      [{ StackName: "switchboard-host", ExecutionStatus: "EXECUTE_COMPLETE", Changes: [] }, /実行できる状態ではない/],
+      [{ StackName: "switchboard-host", ExecutionStatus: "AVAILABLE", Changes: [instance] }, /replaces the instance/],
+    ];
+    for (const [cs, error] of cases) {
+      const f = fake([["aws cloudformation describe-change-set", { out: JSON.stringify(cs) }]]);
+      await expect(runHostOperation("person-deploy", { ...p, execute: CS }, f.d)).rejects.toThrow(error);
+      expect(f.calls.some((c) => c.includes("execute-change-set"))).toBe(false);
+      expect(detach(f.calls.at(-1)!)).toBe(true);
+    }
+    for (const [name, answers, error] of [
+      ["execute failed", [["aws cloudformation execute-change-set", { ok: false, err: "boom" }]], /execute-change-set/],
+      ["wait failed", [["aws cloudformation wait", { ok: false, err: "UPDATE_ROLLBACK_COMPLETE" }]], /wait/],
+    ] as const) {
+      const ok = { StackName: "switchboard-host", ExecutionStatus: "AVAILABLE", Changes: [] };
+      const f = fake([["aws cloudformation describe-change-set", { out: JSON.stringify(ok) }], ...answers]);
+      await expect(runHostOperation("person-deploy", { ...p, execute: CS }, f.d), name).rejects.toThrow(error);
+      expect(detach(f.calls.at(-1)!)).toBe(true);
+    }
   });
 
   test("a policy left by a run that died is detached before anything else, then attached again for this run", async () => {
@@ -249,6 +292,10 @@ describe("host-ops person-deploy", () => {
 
   test("--allow-replace is person-deploy's only; person-deploy needs --yes; the workflow cannot pick person-deploy", async () => {
     expect(parseArgs(["person-deploy", "--yes", "--allow-replace"])).toEqual({ action: "person-deploy", dryRun: false, allowReplace: true });
+    expect(parseArgs(["person-deploy", `--execute=${CS}`, "--yes"])).toEqual({ action: "person-deploy", dryRun: false, allowReplace: false, execute: CS });
+    expect(parseArgs(["person-deploy", "--execute=nope", "--yes"])).toBeNull();
+    expect(parseArgs(["deploy", `--execute=${CS}`, "--yes"])).toBeNull();
+    expect(parseArgs(["person-deploy", `--execute=${CS}`, `--execute=${CS}`, "--yes"])).toBeNull();
     expect(parseArgs(["person-deploy"])).toBeNull();
     expect(parseArgs(["deploy", "--yes", "--allow-replace"])).toBeNull();
     const wf = await Bun.file(new URL("../.github/workflows/host.yml", import.meta.url)).text();

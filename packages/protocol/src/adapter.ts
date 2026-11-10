@@ -25,10 +25,14 @@ export interface StartOptions {
    * docs/design/claude-otel.md). Claude Code sends its `tool_decision` events there; other runners ignore it.
    */
   otel?: { endpoint: string; token: string };
+  /** true = do not stop the runner CLI's own telemetry (Settings `outbound.runnerTelemetry`). Unset = the adapter stops it. */
+  runnerTelemetry?: boolean;
   /** Runner-native permission mode (one of RunnerAdapter.permissionModes). Unset = the adapter's default. */
   permissionMode?: string;
   /** Runner-native thinking effort (one of RunnerAdapter.efforts, #833). Unset = the CLI's own default. */
   effort?: string;
+  /** Thinking effort of the subagents the runner starts. Unset = same as the task. */
+  subagentEffort?: string;
   /** Resume a previous runner session (runner-native id). */
   resumeSessionId?: string;
   /**

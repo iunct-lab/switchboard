@@ -4,8 +4,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BacklogIssueData, BacklogSource } from "@switchboard/protocol";
-import { Db } from "./db.ts";
-import { answerStoredDecision, commentStoredIssue, createStoredIssue, editStoredIssue, readStoredIssue, retryStoredOperation, withdrawStoredOperation, type GhRunner } from "./backlog.ts";
+import { Db, inSendWindow, SEND_DELAY_MS } from "./db.ts";
+import { answerStoredDecision as answerWindowed, commentStoredIssue as commentWindowed,cancelStoredOperation, createStoredIssue, editStoredIssue, readStoredIssue, retryStoredOperation, withdrawStoredOperation, type GhRunner } from "./backlog.ts";
 import { forgeKind, Limit, sendGithubOperations, theirEdit } from "./backlog-send.ts";
 import { backlogFieldValue, conflictRevision } from "./backlog-merge.ts";
 import { BacklogSync } from "./backlog-sync.ts";
@@ -31,6 +31,10 @@ function importsToo(g: ReturnType<typeof fakeGithub>): GhRunner {
     return g.gh(args, cwd);
   };
 }
+
+// A comment waits SEND_DELAY_MS before it is sent (it can be taken back meanwhile); these write it as if the window had passed, so the tests that are not about the window need not move the clock. The window's own tests use `…Windowed`.
+const answerStoredDecision: typeof answerWindowed = (db, source, n, text, now = t, opts) => answerWindowed(db, source, n, text, now - SEND_DELAY_MS, opts);
+const commentStoredIssue: typeof commentWindowed = (db, source, n, text, now = t) => commentWindowed(db, source, n, text, now - SEND_DELAY_MS);
 
 const syncs: BacklogSync[] = [];
 function makeSync(...args: ConstructorParameters<typeof BacklogSync>): BacklogSync {
@@ -1523,7 +1527,7 @@ test("a limit stops sending until GitHub's time, then it goes on; an auth refusa
   g.fail.push({ match: (a) => a.includes("PATCH"), status: 401 });
   const auth = await send(g.gh).catch((e) => e);
   expect(auth).toMatchObject({ kind: "auth" });
-  expect(db.listPendingBacklogOperations(S).map((o) => [o.status, o.attempt, o.retryAt])).toEqual([["pending", 0, null], ["pending", 0, null], ["pending", 0, null]]);
+  expect(db.listPendingBacklogOperations(S).map((o) => [o.status, o.attempt, o.retryAt])).toEqual([["pending", 0, null], ["pending", 0, t], ["pending", 0, null]]); // the comment's window ended at t
   expect(g.issues.get(12)!.comments).toHaveLength(0);
   expect(await send(g.gh)).toBe(3);
   expect(g.issues.get(12)!.title).toBe("認証切れ");
@@ -1940,4 +1944,81 @@ test("a set whose read was out when the sync was turned off writes nothing; it w
   await expect(sendGithubOperations(gh, db, dir, S, clock, undefined, () => on)).rejects.toMatchObject({ kind: "off" });
   expect(g.writes).toEqual([]);
   expect(statuses()).toEqual([["set", "title", "pending"]]);
+});
+
+test("a comment is sent only after its window (60 s), and can be taken back inside it; a set after it waits for it (#3719)", async () => {
+  const g = fakeGithub();
+  const kept = commentWindowed(db, S, 12, "送る", t).operation;
+  expect(db.getBacklogOperation(kept)).toMatchObject({ status: "pending", retryAt: t + SEND_DELAY_MS });
+  // inside the window: not asked, and a `set` queued after the comment waits behind it (the held rule as it is)
+  editStoredIssue(db, S, 12, { title: "コメントのあと" });
+  expect(await send(g.gh)).toBe(0);
+  expect(g.writes).toEqual([]);
+  t += SEND_DELAY_MS;
+  expect(await send(g.gh)).toBe(2);
+  expect(g.issues.get(12)!.comments).toHaveLength(1);
+  expect(g.issues.get(12)!.title).toBe("コメントのあと");
+
+  // taken back inside the window: never sent, done with why
+  const gone = commentWindowed(db, S, 12, "取り消す", t).operation;
+  expect(cancelStoredOperation(db, S, 12, gone, t + 1)).toEqual({ operation: gone });
+  const kept2 = db.getBacklogOperation(gone)!;
+  expect(kept2).toMatchObject({ status: "done", error: "送る前に取り消しました" });
+  // and the comment kept here goes with it (as a withdrawn post's does): nothing reads its words any more
+  expect(kept2.target).toStartWith("local:");
+  expect(db.getBacklogRecord({ ...S, objectKind: "comment", externalId: kept2.target })).toBeNull();
+  t += 10 * SEND_DELAY_MS;
+  expect(await send(g.gh)).toBe(0);
+  expect(g.issues.get(12)!.comments).toHaveLength(1);
+});
+
+test("a comment whose window ends during a send run still gets its timer (#3719)", async () => {
+  const g = fakeGithub();
+  const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
+  db.setWorkspaceBacklogSource(ws.id, S);
+  // the run takes longer than the window: the edit of #3 after the comment moves the clock past the comment's time
+  const gh: GhRunner = async (args, cwd) => {
+    const r = await g.gh(args, cwd);
+    if (args.includes("PATCH")) t += 2 * SEND_DELAY_MS;
+    return r;
+  };
+  const sync = makeSync(db, gh, clock);
+  const timers: number[] = [];
+  (sync as unknown as { later: (w: unknown, s: unknown, at: number) => void }).later = (_w, _s, at) => void timers.push(at);
+  const kept = commentWindowed(db, S, 12, "窓の中", t).operation;
+  const due = db.getBacklogOperation(kept)!.retryAt!;
+  editStoredIssue(db, S, 3, { title: "別の Issue" });
+  await sync.send(ws);
+  expect(g.issues.get(3)!.title).toBe("別の Issue");
+  expect(db.getBacklogOperation(kept)!.status).toBe("pending");
+  expect(timers).toEqual([due]);
+  // the next run sends it, and leaves no timer behind
+  timers.length = 0;
+  await sync.send(ws);
+  expect(g.issues.get(12)!.comments.some((c) => c.body.startsWith("窓の中"))).toBe(true);
+  expect(timers).toEqual([]);
+});
+
+test("inSendWindow: only a comment still in the window it was written with — not one waiting out a backoff or a limit (#3719)", () => {
+  const op = { kind: "comment" as const, status: "pending" as const, attempt: 0, createdAt: t, retryAt: t + SEND_DELAY_MS };
+  expect(inSendWindow(op, t)).toBe(true);
+  expect(inSendWindow(op, t + SEND_DELAY_MS)).toBe(false);
+  expect(inSendWindow({ ...op, attempt: 1 }, t)).toBe(false);
+  expect(inSendWindow({ ...op, retryAt: t + 5 * 60_000 }, t)).toBe(false);
+  expect(inSendWindow({ ...op, kind: "set" }, t)).toBe(false);
+});
+
+test("a comment past its window, sent, or not a comment is not taken back: 409; no such operation: 404 (#3719)", async () => {
+  const g = fakeGithub();
+  const late = commentWindowed(db, S, 12, "遅い", t).operation;
+  expect(() => cancelStoredOperation(db, S, 12, late, t + SEND_DELAY_MS)).toThrow(expect.objectContaining({ status: 409 }));
+  expect(await send(g.gh)).toBe(0);
+  t += SEND_DELAY_MS;
+  expect(await send(g.gh)).toBe(1);
+  // sent: no longer to send, so nothing to take back
+  expect(() => cancelStoredOperation(db, S, 12, late, t)).toThrow(expect.objectContaining({ status: 409 }));
+  // an edit is not a comment
+  const [title] = editStoredIssue(db, S, 12, { title: "題" }).operations;
+  expect(() => cancelStoredOperation(db, S, 12, title!, t)).toThrow(expect.objectContaining({ status: 409 }));
+  expect(() => db.cancelBacklogOperation(S, "no-such", t)).toThrow(expect.objectContaining({ status: 404 }));
 });

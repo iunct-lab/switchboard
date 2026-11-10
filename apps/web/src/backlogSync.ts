@@ -1,4 +1,4 @@
-import type { Backlog, BacklogEditInput, BacklogIssueDetail, BacklogSyncInfo, BacklogSyncReason, BacklogSyncState } from "@switchboard/protocol";
+import type { Backlog, BacklogEditInput, BacklogHeldEdit, BacklogIssueDetail, BacklogSyncInfo, BacklogSyncReason, BacklogSyncState } from "@switchboard/protocol";
 import { jstDateTime, jstTime } from "./time.ts";
 import { t } from "./i18n.ts";
 import { backlog as m } from "./i18n/backlog.ts";
@@ -43,12 +43,13 @@ export function workspaceErrorGuide(e: Backlog["errors"][number], projectVar: st
  * is stored here, with no GitHub in it; with both, that only the GitHub ones were imported. `kinds` = where the workspaces in
  * view keep their backlogs; null = the workspaces have not arrived yet.
  */
-export function backlogHeading(fetchedAt: number | null, busy: boolean, kinds: Array<"github" | "switchboard"> | null, fmt: (ms: number) => string = jstTime): string {
+export function backlogHeading(fetchedAt: number | null, busy: "open" | "refresh" | null, kinds: Array<"github" | "switchboard"> | null, fmt: (ms: number) => string = jstTime): string {
   if (fetchedAt === null) return busy ? t(m.loading) : "";
   const github = kinds?.includes("github") ?? true;
   const here = kinds?.includes("switchboard") ?? false;
   const line = !github ? t(m.headingKeptHere) : here ? t(m.headingMixed, { time: fmt(fetchedAt) }) : t(m.headingGithub, { time: fmt(fetchedAt) });
-  return `${line}${busy ? t(m.headingBusy) : ""}`;
+  const word = busy === "open" ? t(m.headingBusyStored) : busy === "refresh" ? t(github ? m.headingBusyImport : m.headingBusy) : "";
+  return `${line}${word}`;
 }
 
 /** What the backlog screen says of what was saved (#2343): nothing of GitHub for a workspace kept here. */
@@ -82,6 +83,11 @@ export function syncLine(s: BacklogSyncInfo, fmt: (ms: number) => string = jstDa
   if (s.reason) parts.push(REASON_LABEL[s.reason]);
   if (s.retryAt !== null) parts.push(t(m.waitUntil, { time: fmt(s.retryAt) }));
   return { state: s.state, label: STATE_LABEL[s.state], parts };
+}
+
+/** The name a held edit's row opens with: what was made or left, or the field that was changed. */
+export function heldEditName(h: BacklogHeldEdit): string {
+  return h.kind === "create" ? t(m.heldNew) : h.kind === "comment" ? t(m.heldComment) : h.field ?? "";
 }
 
 /**

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pre-rebuild (#2186) — what to keep before 作り直す, which replaces the root volume (aws/README.md, the CVE section).
+# pre-rebuild (#2186) — what to keep before 作り直す, which replaces the root volume.
 #   save              to s3://<data>/archive/pre-rebuild/<UTC time>/ : switchboard.sql.zst (a dump of the database; Litestream
 #                     brings the database back, this copy is for when it does not), files.tar.zst (attachments, the
 #                     recordings vault, Knowledge and artifacts: a point-in-time copy, sb-runner-sync brings them back
@@ -56,7 +56,7 @@ collect_worktrees() {
         n=$((n + 1))
         o="$out/worktrees/$n"; mkdir -p "$o"
         { echo "path $wt"; echo "repo $repo"; echo "branch $(git -C "$wt" symbolic-ref -q --short HEAD || echo HEAD)"; echo "head ${head:-none}"; } > "$o/info"
-        # bringing it back: restore-work below, or by hand aws/README.md, the CVE section
+        # bringing it back: restore-work below
         # against the default branch, not --remotes: a local tracking ref can hold a branch GitHub has dropped, which a new
         # clone will not have. One pack thread: with more, the same commits make different bytes and an upload each hour
         base="$(git -C "$wt" rev-parse -q --verify refs/remotes/origin/HEAD || git -C "$wt" rev-parse -q --verify refs/remotes/origin/main || true)"

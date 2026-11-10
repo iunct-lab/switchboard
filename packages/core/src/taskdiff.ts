@@ -1,31 +1,41 @@
 import { existsSync, statSync } from "node:fs";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { AgentEvent, EventEnvelope, StagedChange, Task, TaskDiffFile } from "@switchboard/protocol";
 import { safeRealpath } from "./mcp.ts";
 
 /**
  * "差分" tab (proposal Screen B, issue #12): the files a task changed, as diffs, with deep links to the editor.
  * Sources, in order: staged writes (not yet applied), then the working tree of each scope root that is inside a git
- * repository, restricted to the paths the transcript shows the runner touched (Write/Edit tool calls, artifact events).
- * If the transcript names nothing, every change under the root is shown (the runner may have used a shell).
+ * repository (compared with HEAD), restricted to the paths the transcript shows the runner touched (Write/Edit tool
+ * calls, artifact events). If the transcript names nothing, every change under the root is shown (the runner may have
+ * used a shell). Then each git worktree outside the scope that the transcript wrote to (compared with its fork point
+ * from origin/HEAD, so committed work shows too), and the written places that no longer exist (`removed`).
  */
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const MAX_FILES = 60;
 const MAX_DIFF_BYTES = 200_000;
 
-export async function collectTaskDiff(task: Task, events: EventEnvelope[], staged: StagedChange[]): Promise<TaskDiffFile[]> {
-  const roots = (task.scope.length ? task.scope : [task.cwd]).map(canonical);
-  const touched = touchedPaths(events, roots);
+export async function collectTaskDiff(task: Task, events: EventEnvelope[], staged: StagedChange[], scratch: Array<string | undefined> = [tmpdir(), process.env.TMPDIR]): Promise<TaskDiffFile[]> {
+  const scopeRoots = (task.scope.length ? task.scope : [task.cwd]).map(canonical);
+  const touched = touchedPaths(events, scopeRoots);
+  const outside = await outsideRoots(touched, scopeRoots, scratch);
   const out: TaskDiffFile[] = [];
   for (const c of staged) {
     if (c.status !== "pending") continue;
     out.push({ path: c.path, rel: c.rel, stat: c.stat, diff: c.diff, source: "staging", stagedId: c.id });
   }
-  for (const root of roots) {
+  // scope roots compare with HEAD as before; an outside worktree (its top) compares with its fork point from origin/HEAD
+  // and lists only what was written outside the scope (the scope's own files are already listed from the scope root)
+  const sources = [
+    ...scopeRoots.map((root) => ({ root, outside: false })),
+    ...outside.roots.map((root) => ({ root, outside: true })),
+  ];
+  for (const { root, outside: isOutside } of sources) {
     const top = await gitTop(root);
     if (!top) continue;
-    const inRoot = [...touched].filter((p) => p === root || p.startsWith(root + sep));
-    const base = (await gitHasHead(top)) ? "HEAD" : EMPTY_TREE;
+    const inRoot = [...touched].filter((p) => under(p, root) && !(isOutside && scopeRoots.some((r) => under(p, r))));
+    const base = isOutside ? await diffBase(top) : (await gitHasHead(top)) ? "HEAD" : EMPTY_TREE;
     const files = await gitChangedFiles(top, root, inRoot.length ? inRoot : null, base);
     for (const f of files.slice(0, MAX_FILES)) {
       const abs = join(top, f.rel);
@@ -34,7 +44,44 @@ export async function collectTaskDiff(task: Task, events: EventEnvelope[], stage
     }
     if (files.length > MAX_FILES) out.push({ path: root, rel: `… ${files.length - MAX_FILES} more changed files`, stat: "", diff: "", source: "worktree" });
   }
+  for (const path of outside.removed) out.push({ path, rel: path, stat: "", diff: "", source: "removed" });
   return out;
+}
+
+const under = (p: string, dir: string) => p === dir || p.startsWith(dir + sep);
+
+/**
+ * Touched paths outside every scope root: the git worktrees they live in (`roots`, as toplevels) and the places the
+ * Task wrote that no longer exist (`removed`). A vanished place inside a repository is left to `git status`; one in a
+ * scratch directory is dropped; otherwise the first missing segment below the deepest existing ancestor is reported.
+ */
+export async function outsideRoots(touched: Set<string>, roots: string[], scratch: Array<string | undefined> = [tmpdir(), process.env.TMPDIR]): Promise<{ roots: string[]; removed: string[] }> {
+  const scratchDirs = scratch.filter((s): s is string => !!s).map(canonical);
+  const dirs = new Set<string>();
+  for (const p of touched) if (!roots.some((r) => under(p, r))) dirs.add(dirname(p));
+  const tops = new Set<string>();
+  const removed = new Set<string>();
+  for (const dir of dirs) {
+    let a = dir;
+    while (!existsSync(a) && dirname(a) !== a) a = dirname(a);
+    const top = await gitTop(a);
+    if (top) {
+      if (!roots.some((r) => under(top, r))) tops.add(top);
+    } else if (a !== dir && !scratchDirs.some((s) => under(a, s))) {
+      removed.add(join(a, relative(a, dir).split(sep)[0]!));
+    }
+  }
+  return { roots: [...tops], removed: [...removed] };
+}
+
+/** What a worktree is compared with: the fork point from origin/HEAD, else HEAD, else the empty tree. */
+async function diffBase(top: string): Promise<string> {
+  if (!(await gitHasHead(top))) return EMPTY_TREE;
+  if ((await run(top, ["rev-parse", "--verify", "-q", "refs/remotes/origin/HEAD"])).code === 0) {
+    const mb = await run(top, ["merge-base", "HEAD", "refs/remotes/origin/HEAD"]);
+    if (mb.code === 0 && mb.out.trim()) return mb.out.trim();
+  }
+  return "HEAD";
 }
 
 /** Real path with symlinks resolved on the deepest existing ancestor (so new files under /var → /private/var too). */
@@ -97,6 +144,15 @@ async function gitChangedFiles(top: string, root: string, only: string[] | null,
     if (existsSync(abs) && statSync(abs).isDirectory()) continue;
     const untracked = code === "??";
     files.push({ rel, stat: untracked ? "new" : code.includes("D") ? "deleted" : "", untracked });
+  }
+  // committed since `base` with a clean working tree: `git status` does not list them
+  const ns0 = await run(top, ["diff", "--name-status", "--no-renames", "-z", base, "--", ...spec]);
+  if (ns0.code === 0) {
+    const f = ns0.out.split("\0");
+    for (let i = 0; i + 1 < f.length; i += 2) {
+      const rel = f[i + 1]!;
+      if (!files.some((x) => x.rel === rel)) files.push({ rel, stat: f[i]!.startsWith("D") ? "deleted" : "", untracked: false });
+    }
   }
   const tracked = files.filter((f) => !f.untracked);
   if (tracked.length) {

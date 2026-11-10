@@ -14,6 +14,7 @@ const list = [
   task("e", "boom", "/work/app", "error"),
   task("f", "stopped", "/work/app", "aborted"),
   task("g", "Fix old", "/work/app", "done", 5),
+  task("h", "bg", "/work/app", "background"),
 ];
 
 test("filterTasks: q matches the title, case-insensitive and trimmed", () => {
@@ -25,11 +26,11 @@ test("filterTasks: q matches the cwd too", () => {
 });
 
 test("filterTasks: an empty q keeps every row not archived", () => {
-  expect(ids(filterTasks(list, all))).toEqual(["a", "b", "c", "d", "e", "f"]);
+  expect(ids(filterTasks(list, all))).toEqual(["a", "b", "c", "d", "e", "f", "h"]);
 });
 
-test("filterTasks: the state filter — active = running / waiting, done, stopped = error / aborted", () => {
-  expect(ids(filterTasks(list, { ...all, status: "active" }))).toEqual(["c", "d"]);
+test("filterTasks: the state filter — active = running / waiting / background, done, stopped = error / aborted", () => {
+  expect(ids(filterTasks(list, { ...all, status: "active" }))).toEqual(["c", "d", "h"]);
   expect(ids(filterTasks(list, { ...all, status: "done" }))).toEqual(["a", "b"]);
   expect(ids(filterTasks(list, { ...all, status: "stopped" }))).toEqual(["e", "f"]);
 });

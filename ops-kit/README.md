@@ -23,7 +23,7 @@ GitHub の Issue と Project で回す開発の流れ（要望 → PBI → Task 
 | `set <issue> <field> <value>` | Issue 1 件の Project のフィールドを 1 つ設定する | 要る |
 | `triage <issue> <area> <kind> <priority> [<phase>] [<parent>] [<status>]` | Issue を Project に入れ、Area / Kind / Priority /（Phase）/ Status と親を設定する | 要る |
 | `reconcile-project [--dry-run]` | open の Issue / PR のうち Project に無いものだけを入れる（フィールドは付けない。Actions の autoadd の代わり）。`BACKLOG_URL` があると（アプリの Task の中）止まる（exit 1）。代わり: 取り込み済みの要望・PBI・Task 1 件なら `backlog triage`、ほかは Task の外で回す | 要る |
-| `lint [--no-project] [--fresh]` | open の PBI / Task / 要望が設定の必須の節と Story Points を満たすか、1 つのクエリ（ページ送り）で検査する。`BACKLOG_URL` があればアプリの保存値を読む（`--fresh` で先に取込み。GitHub に届かなければ保存値のまま） | 要る |
+| `lint [--no-project] [--fresh]` | open の PBI / Task / 要望が設定の必須の節とキットの Story Points の尺度を満たすか、1 つのクエリ（ページ送り）で検査する。`BACKLOG_URL` があればアプリの保存値を読む（`--fresh` で先に取込み。GitHub に届かなければ保存値のまま） | 要る |
 | `bootstrap <title> [--dry-run]` | Project と、設定にあって Project に無いフィールドを作る。`BACKLOG_URL` があると（アプリの Task の中）止まる（exit 1）。代わり: Task の外で回す（新しいリポジトリは `new-repo` スキルの手順） | 要る |
 | `request <title> <body-file>` | 要望 Issue を作り、Project に Backlog で入れる | 要る |
 | `backlog list\|view\|create\|edit\|comment\|set\|triage …` | キットを同梱するアプリが保存したバックログを、そのアプリの API（`BACKLOG_URL`）で読み書きする。読むのは保存値と鮮度、`--fresh` で最新化を待つ（アプリが GitHub に届かなければ保存値と「GitHub 未同期」で exit 0）。`BACKLOG_URL` が無い環境では GitHub に直接つないで同じ形で出す・書く（`gh` のログインで。`--fresh` は何もしない）。`BACKLOG_URL` があってアプリに届かなければ exit 2（GitHub に切り替えない） | `BACKLOG_URL` があれば要らない（`triage` の Phase だけ読む）。無ければ list / view の Status と set / triage / `--field` に Project を読む（無ければ Status は `-`、書き込みは断る） |
@@ -32,7 +32,7 @@ GitHub の Issue と Project で回す開発の流れ（要望 → PBI → Task 
 | `scan-issues [<owner/name>] [--since <ISO>] [--recheck <URL>]...` | リポジトリの Issue・PR・コメントを全部（`--since` ならその時刻より後の更新だけと、`--recheck` の前回の当たり）、同じ検査に通す | 要らない |
 | `public-sync [--source <ref>] [--dry-run] [--adopted] [--target-url <url>]` / `public-sync --check [--source <ref>]` | main のツリーだけを公開リポジトリへ送る。`--check` は送らずに、公開に出すツリーの検査だけを CI で走らせる（下の「公開リポジトリへの同期」） | 要る（`publicSync` だけ） |
 | `export-copy <dest> --words-file <file>` | キットを読めないリポジトリが同梱するコピーを作る（下の「公開リポジトリ」） | 要らない |
-| `heavy [--name <名前>] -- <コマンド…>` | 重い処理の枠をマシンで 1 つ取ってからコマンドを動かす。枠が埋まっている・空きメモリが下限未満の間は待ち、理由を 1 行出す。上限は `~/.config/ops-kit/heavy.json`（既定 `max` 1・`minFreeMb` 1536） | 要らない |
+| `heavy [--memory-only] [--name <名前>] -- <コマンド…>` | 重い処理の枠をマシンで 1 つ取ってからコマンドを動かす。枠が埋まっている・空きメモリが下限未満の間は待ち、理由を 1 行出す。`--memory-only` は枠を取らず空きメモリだけを待つ。上限は `~/.config/ops-kit/heavy.json`（既定 `max` 1・`minFreeMb` 1536） | 要らない |
 
 ## 使う側の設定（`ops.config.json`）
 
@@ -55,8 +55,7 @@ GitHub の Issue と Project で回す開発の流れ（要望 → PBI → Task 
     "task": ["親 PBI", "やること", "手順", "検証", "完了条件"],
     "request": ["要望", "出典"],
     "origin": { "name": "元要望", "pattern": "^(#[0-9]+|なし[（(].+[）)])", "hint": "`#N` か `なし（理由）`" }
-  },
-  "storyPoints": [1, 2, 3, 5, 8]
+  }
 }
 ```
 
@@ -70,13 +69,13 @@ GitHub の Issue と Project で回す開発の流れ（要望 → PBI → Task 
 | `milestone.pattern` | 省略可。Phase の Milestone の題が満たす正規表現 |
 | `sections.pbi` / `task` / `request` | 各 Issue に要る `##` の見出し。`{ "name", "hint" }` にすると違反の行に `hint` が付く |
 | `sections.origin` | 省略可。PBI の元要望の節。最初の空でない行が `pattern` に合うこと |
-| `storyPoints` | 許す Story Points（既定 `[1, 2, 3, 5, 8]`） |
 | `publicSync.target` | `public-sync` の送り先の公開リポジトリ（`<owner>/<name>`）。Private のリポジトリと同じなら止まる |
 | `publicSync.include` | 省略可。公開側に送るものを名指しする（パス。ディレクトリは末尾 `/`）。名指ししていない最上位のエントリ（あとから足したものも）は送らない。名指ししたディレクトリの下に足したファイルは送るので、そこで外すものは `exclude` に書く。省略はツリー全部 |
 | `publicSync.exclude` | `include` の中で送らないもの（Private だけで意味を持つもの。ディレクトリは末尾 `/`） |
 | `publicSync.rewrite` | 本文中の Private のリポジトリ名を公開リポジトリ名に書き換えるファイル（脆弱性の報告先など） |
 | `publicSync.versioning` | 省略可。`"independent"` は独立した公開版（下記）。省略時は開発タグをそのまま公開版に使う |
 | `publicSync.serviceUsers` | 省略可。人ではない OS の利用者の名前（ホストの雛形のサービスの利用者など、そのホームを文書に書いているもの）。同期を回す利用者の名前のパスの検査がこの名前を見ない |
+| `publicSync.allowRefs` | 省略可。公開に出す文書が名指ししてよい、`exclude` が外すパス（意図して残す参照。例: fork した人が置く `private/CLAUDE.md`）。`exclude` が外さないパスを書くと設定の誤りで止まる |
 
 リポジトリは `GH_REPO`、無ければ `origin` から読む。Project の URL は環境変数 `<envPrefix>_PROJECT_URL`、設定の `projectUrl`、同名のリポジトリ変数（`gh variable get <envPrefix>_PROJECT_URL`）の順で読む（Project を使わないコマンドは変数を読まない）。リポジトリ変数に置くなら `gh variable set <envPrefix>_PROJECT_URL --body https://github.com/orgs/example/projects/7`。
 
@@ -95,13 +94,14 @@ exec bun "${OPS_KIT:-$R/ops-kit}/src/cli.ts" lint --config "$R/ops.config.json" 
 
 ## 重い処理の枠
 
-重い処理（ローカル CI、全テスト・型検査、偽ランナーのデーモン + headless Chrome、レビューのセッション）は、`ops-kit heavy [--name <名前>] -- <コマンド…>` で包んで始める。マシンの枠が空いていて空きメモリが下限以上のときだけコマンドを動かし、そうでなければ待つ。待つ間は理由（枠を持っているコマンド・作業フォルダ・開始時刻、または空きメモリと下限）を stderr に 1 行出し（理由が変わるたびに 1 行）、待ったあとで始めるときは「始めます」を出す。エラーにはしない。exit はコマンドの exit。
+重い処理（ローカル CI、全テスト・型検査、偽ランナーのデーモン + headless Chrome）は、`ops-kit heavy [--name <名前>] -- <コマンド…>` で包んで始める。マシンの枠が空いていて空きメモリが下限以上のときだけコマンドを動かし、そうでなければ待つ。待つ間は理由（枠を持っているコマンド・作業フォルダ・開始時刻、または空きメモリと下限）を stderr に 1 行出し（理由が変わるたびに 1 行）、待ったあとで始めるときは「始めます」を出す。エラーにはしない。exit はコマンドの exit。
 
 - **上限はマシンの値**: `~/.config/ops-kit/heavy.json` の `{ "max": 1, "minFreeMb": 1536 }`（どちらも省略でき、ファイルが無ければこの既定）。`max` は同時に走る重い処理の数、`minFreeMb` は始める前に要る空きメモリ（Linux の MemAvailable、MB。読めない OS では数だけで決める）。リポジトリ（`ops.config.json`）にも環境変数にも置かない。リポジトリごとに書くと、マシン 1 つの数にならない
 - **枠はマシンで 1 つ**: `~/.local/state/ops-kit/heavy/` の `slot-<i>.json`。どのリポジトリ・作業ツリー・Task から呼んでも同じ枠を取り合う。持ち主が死んだ枠（`kill -9`、Task の中断、デーモンの停止）は次に待つ処理が取り直す
 - **大きいマシンでの上げ方**: 設定ファイルを書くだけ（コードもリポジトリも変えない）。例: 16 GB のマシンで `{ "max": 3 }`。4 GB 程度なら既定の 1 のまま
 - **誰が持ち、誰が待っているか**: 待っている処理は同じ置き場に `wait-<pid>-<id>.json`（名前・作業フォルダ・待ち始めた時刻・理由 `slot` / `memory`）を置き、理由が変わったときだけ書き直し、枠を取ったら消す。枠と待ちはほかのプロセスから `readHeavyState(home)`（`src/heavy.ts`）で読める（終わったプロセスのものは返さない）。環境変数 `OPS_KIT_TASK_ID` があれば、その値を Task の id として枠と待ちに載せる（Task を動かすアプリが付ける）
 - **入れ子は外側の枠の中で動く**: 枠を持つ処理の子孫（`ops-kit heavy -- bun scripts/local-ci.ts …` の中のローカル CI など）が `ops-kit heavy` か `withHeavySlot` を呼ぶと、新しい枠を取らず、待たずに外側の枠の中で動く（空きメモリの下限も待たない）。見分けは環境変数ではなく、生きている枠の持ち主の pid が呼んだ処理の祖先（`/proc/<pid>/stat` の ppid をたどる）にあるか（ローカル CI は手順を `env -i` で回すので、環境変数は途中で消える）。そのときは「枠を持つ処理の中なので、外側の枠の中で動きます」を 1 行出し、履歴（`history.jsonl`）には名前の末尾に ` (入れ子)` を付けて残す。`/proc` が無い OS では祖先が分からず、今までどおり枠を待つ
+- **席を取らない処理**（`--memory-only`）: 枠（`slot-<i>.json`）を取らず、空きメモリが下限 `minFreeMb` を下回る間だけ待つ（待ちの一覧には理由 `memory` で出る）。枠を持つ処理が走っていても始まり、終わると履歴に名前つきで残る。レビューのセッション（`cross-runner-review` の Codex・`claude -p`）はこれで包む。レビュー専用の値は作らない（待つのは同じ下限）
 - **置き場に書けないとき**: サンドボックスで書けない Task（Codex の Task など）では「枠を取らずに動かします」を 1 行出して、待たずに動く（作業を止めない）。Task を動かすアプリが置き場をその Task の書ける場所に足していれば、ほかと同じ数に入る
 
 **足し方**: 手で打つ重い処理のコマンドを `ops-kit heavy --name "<何か>" -- …` で包む（スキル・`CLAUDE.md` のコマンドの行）。ほかの包み（`ops-kit idle-run` など）があれば `ops-kit heavy` をいちばん外にする（枠を待つ間を無進捗と数えない）。1 回の実行全体で枠を持つスクリプト（ローカル CI・タグの CI）が回す手順（CI の手順・`package.json` の scripts）の中には入れない（入れ子は待たずに外側の枠の中で動くが、二重に包んでも枠は増えず意味が無い）。自分で枠を取るスクリプトを `ops-kit heavy` で包まない。
@@ -128,7 +128,7 @@ exec bun "${OPS_KIT:-$R/ops-kit}/src/cli.ts" lint --config "$R/ops.config.json" 
 
 | 場所 | 中身 |
 |---|---|
-| `ops.config.json` | 設定（`envPrefix`・Area・必須の節・Story Points。Project の URL は置かず、リポジトリ変数 `<PREFIX>_PROJECT_URL` に置く: `gh variable set <PREFIX>_PROJECT_URL --body https://github.com/orgs/<owner>/projects/<n>`（ユーザーの Project なら `orgs` を `users` に）） |
+| `ops.config.json` | 設定（`envPrefix`・Area・必須の節。Project の URL は置かず、リポジトリ変数 `<PREFIX>_PROJECT_URL` に置く: `gh variable set <PREFIX>_PROJECT_URL --body https://github.com/orgs/<owner>/projects/<n>`（ユーザーの Project なら `orgs` を `users` に）） |
 | `scripts/setup/` | 入口 4 本: `lint_backlog.sh` / `set_project_field.sh` / `triage_issue.sh` / `request_issue.sh`（実行ビット付き） |
 | `.github/ISSUE_TEMPLATE/` | `bug_report.yml` / `config.yml` / `feature_request.yml` / `pbi.yml` / `task.yml` |
 | `.github/PULL_REQUEST_TEMPLATE.md` | PR 本文の型 |
@@ -136,6 +136,7 @@ exec bun "${OPS_KIT:-$R/ops-kit}/src/cli.ts" lint --config "$R/ops.config.json" 
 | `.github/workflows/` | `labels.yml`（ラベルの同期）/ `ci.yml`（Bun / TypeScript の最小。ほかの言語は run の行を書き換える）/ 任意の `project-autoadd.yml`（設定は下の fork の手順） |
 | `.gitignore` | 汎用の行だけ |
 | `CLAUDE.md.tmpl` / `AGENTS.md.tmpl` | このリポジトリ固有の値の置き場（`issue-workflow` の「使う側のリポジトリが持つもの」の項目の節立て）。`.tmpl` なのは、キットの下を読んだランナーが入れ子の指示として読み込まないため。置くときに外す |
+| `template-local/` | GitHub を使わないリポジトリ用の、単体で完結する 1 式（`template/` を外して作る手順ではなく別に持つ）。`ops.config.json` / `.gitignore` / `AGENTS.md.tmpl` は `template/` の写し。`CLAUDE.md.tmpl` は起票を `ops-kit backlog create`、ローカル CI・マージ判定・マージを `--change` の 3 スクリプト、main の更新を `local-merge.ts` と書き、`README.md.tmpl`（設計ルール・ライセンスの見出し）と `docs/change-template.md`（変更の本文のひな形 `Backlog-Task: <Task>`）を持つ。`.github/` と `scripts/setup/` は置かない |
 
 | プレースホルダ | 入れる値 | 出てくるファイル |
 |---|---|---|
@@ -165,9 +166,11 @@ Phase は雛形に入れない（使うなら `fixtures/config-with-phase.json` 
 - workflow の job は、リポジトリ変数が `on` のリポジトリでだけ動く: 開発元・雛形の `ci.yml` と `labels.yml` は `<PREFIX>_ACTIONS`、公開側の 1 式の `close-pull-requests.yml` は `PUBLIC_ACTIONS`（公開側の 1 式は `envPrefix` を持たない）。変数の無い写しではどの job も走らないので、Actions が許可されていない場所に置いても失敗のメールが来ず、写しの上の PR も閉じない。公開先には `PUBLIC_ACTIONS` を、条件の入った workflow を同期する前に `on` で置く（無いと PR が閉じない）。Release のアーカイブから root の `.github` を外すなら `.gitattributes` に `/.github/ export-ignore`
 - そのあと公開側の 1 式（`public/`）をツリーに入れる（入れる / 入れないの設定は無い。`__PUBLIC_REPO__` は `publicSync.target`）: `.github/ISSUE_TEMPLATE/` を要望のテンプレ（`request.yml` + `config.yml`）だけに置き換える、PR を閉じる workflow（`.github/workflows/close-pull-requests.yml`）を足す、`SECURITY.md` はリポジトリに無いとき（root・`.github/`・`docs/` のどこにも）だけ雛形を入れる、`README.md` の `## How this repository works` の節を置き換える（無ければ最初の `## ` 見出しの前、見出しが無ければ末尾に差し込む。コードブロックの中の `## ` は見出しに数えない。`README.md` が無ければ止まる）。出力の `public kit:` の行がしたことを言う
 - 送る前の検査（1 件でも当たれば何も送らず exit 1）: 公開側で変わる行（初回はツリー全部）に、キットの秘密の規則（gh の前段と同じ。ホストの AWS のプロファイル名・SSO のセッション名・アカウント ID も）に当たる値（出すのは種類とファイル名だけ）。Private のリポジトリ名（名前全体の一致。ファイルの中・パス名・コミット本文）、ホームパス（macOS のホームディレクトリの形。`dev` / `example` / `me` / `x` / `<you>` の名前は通す）、個人のメールアドレス（例示用ドメイン・GitHub・Anthropic の公開アドレスは通す）。対象はツリー（バイナリも）、コミット本文、author / committer。ホストに依らない秘密の規則は、変わる行だけでなくツリー全部にも当てる（ホストの値の無い環境の下の `--check` と同じ。出すのはファイルと行と種類）
+- 公開に出すツリーの Markdown（`*.md`）が `publicSync.exclude` の外すパスを名指ししていても止まる（公開側の読者は開けない）。当てるのは exclude のファイルそのもののパスと、exclude のディレクトリの下のパス。長いパスの一部（`a/docs/x.md`・`/private/tmp`）、ディレクトリだけの名指し（`private/`）、`.md` 以外のファイル、`ops.config.json` は当てない。意図して残す参照は `publicSync.allowRefs` に書く。出すのはファイルと行と名指したパス
+- 公開に出すツリーの Markdown の地の文にコミットハッシュの形の値（7〜40 桁の 16 進で、数字と a-f の両方を含む）があっても止まる（公開側の読者は Private のコミットを開けない。何を指すかを文で書く）。インラインコード・コードフェンスの中は当てない（例の値はそこに入れる）。出すのはファイルと行と値
 - 同期を回している OS の利用者名（`os.userInfo().username`、大文字と小文字は区別しない。空か、上の置き換え名か、`publicSync.serviceUsers` の名前なら見ない。見るのは同期を回す利用者の名前だけで、録画などを作った別の利用者の名前は見ない）がパスの形（`/home/<you>`・`/Users/<you>`・`pytest-of-<you>`・`C:\Users\<you>`。JSON や JS の文字列の `C:\\Users\\<you>` も）でファイルの中・パス名・コミット本文にあっても止まる
 - `--source <ref>`（既定 `origin/main`）はタグでも指せる。タグを指すと同期のコミットと PR の題がその名前だけになる（`v1.2.0`。タグでなければ `sync`）。題が `vX.Y.Z` の同期が公開側の main に入ると、同じ実行（マージに失敗したときは次の実行）で公開側のそのコミットに同じ名前のタグと GitHub Release が付く（`gh release create --target`、本文は無い。push しない。`--target-url` のときは付けない）。`--dry-run` は除外・書き換え・検査の結果と作るツリーの sha を出して終わる（公開側に届かなくてもよい。何も push しない。公開側に届くときは比較のために `refs/public-sync/main` へ fetch する）。`--target-url` は公開先の URL を差し替える（テストの bare リポジトリ用）
-- `--check`（`--source` の既定は `HEAD`）は、同期と同じ関数でツリーを組み立て、同じ関数でツリーの中の Private のリポジトリ名（ファイルと行、パス名）・ホームパス・個人のメールアドレスと、秘密の規則（全ファイルの全行。前回の公開から変わっていないファイルも。出すのはファイルと行と種類で、値は出さない）を検査する。ホストの AWS のプロファイル名・SSO のセッション名・アカウント ID の値は、検査を回す環境に AWS の設定（`AWS_CONFIG_FILE`、なければ `~/.aws/config`）があるときだけ数える（Actions には無いので数えない。ホストで回すローカルの CI では数える）。公開側には触らない（ネットワークも `gh` も要らない）ので、PR の CI に入れて、同期より前のマージの前に止める（例: CI の手順に `bun ops-kit/src/cli.ts public-sync --check`）。題・author に依る検査と、同期する OS の利用者名は同期のときだけ見る（ARN などの形で分かるアカウント ID はホストの値が無くても当たり、例示は `123456789012`）。`origin`（か `GH_REPO`）が `publicSync.target` の clone（公開側の写しの CI）では検査せずに exit 0
+- `--check`（`--source` の既定は `HEAD`）は、同期と同じ関数でツリーを組み立て、同じ関数でツリーの中の Private のリポジトリ名（ファイルと行、パス名）・ホームパス・個人のメールアドレスと、秘密の規則（全ファイルの全行。前回の公開から変わっていないファイルも。出すのはファイルと行と種類で、値は出さない）を検査する。ホストの AWS のプロファイル名・SSO のセッション名・アカウント ID の値は、検査を回す環境に AWS の設定（`AWS_CONFIG_FILE`、なければ `~/.aws/config`）があるときだけ数える（Actions には無いので数えない。ホストで回すローカルの CI では数える）。公開側には触らない（ネットワークも `gh` も要らない）ので、PR の CI に入れて、同期より前のマージの前に止める（例: CI の手順に `bun ops-kit/src/cli.ts public-sync --check`）。題・author に依る検査と、同期する OS の利用者名は同期のときだけ見る（ARN などの形で分かるアカウント ID はホストの値が無くても当たり、例示は `123456789012`）。同じ関数で、公開に出す文書が外すパスを名指ししていないか、地の文にコミットハッシュの形の値がないかも見る（上の送る前の検査と同じ。`publicSync.allowRefs` の参照は通す）。`origin`（か `GH_REPO`）が `publicSync.target` の clone（公開側の写しの CI）では検査せずに exit 0
 - exit 0 = 送った / 送るものが無い / dry-run、1 = 止まった（理由は stderr）、2 = 使い方の誤り
 
 ## 公開リポジトリ
@@ -189,18 +192,9 @@ cat <公開リポジトリ>/vendor/ops-kit/KIT_VERSION    # commit <sha> / date 
 
 ## fork して開発を始める
 
-上流の公開リポジトリは読み取り専用の写しで、要望を受け取り、PR は自動で閉じる。fork は自分の開発先にして、キットを持つアプリと工程（要望 → PBI → Task → PR → レビュー → マージ）を使える。上流の非公開の履歴・Project・認証情報は要らない。
+このキットを持つアプリの fork して開発する手順は、そのリポジトリの [`docs/development.md`](../docs/development.md)。
 
-1. 公開リポジトリを fork して clone する。`origin` が自分の fork を指すことを `git remote -v` で確認する。`GH_REPO` を使う環境では自分の `owner/name` に設定し、上流を指す値を残さない（未設定なら origin を使う）。`gh repo fork --clone` の clone や、上流を `upstream` に足した clone では `gh` の既定（`gh repo view` の答え）が上流になるので、`gh repo set-default <自分の owner/name>` を実行する。`bun install --frozen-lockfile` のあと、キットを持つアプリの起動は、そのリポジトリの README に従う。
-2. 自分の Project を用意し、`ops.config.json` の `envPrefix` に合わせて `gh variable set <PREFIX>_PROJECT_URL --repo <owner/name> --body <ProjectのURL>` を設定する。同名の環境変数があればそちらが優先されるので更新する。フィールド・必須の節を `ops.config.json` で確認し、`bun ops-kit/src/cli.ts bootstrap <Projectの題>` でフィールドを揃える。所有者だけの値・記録は `private/` に置き、公開に含めない。
-3. `.github/ISSUE_TEMPLATE/` の公開用フォームを `ops-kit/template/.github/ISSUE_TEMPLATE/` の開発用フォームで置き換える。`__OWNER__`・`__REPO__`・`__AREA__`・`__TEST_ALL__` を自分の値にして、Area と必須の節を設定に合わせる。PR 本文の型も `template/.github/PULL_REQUEST_TEMPLATE.md` から置く。ラベルは `.github/labels.yml` を確認して同期する。
-4. fork の `.github/workflows/close-pull-requests.yml` を削除して PR の自動クローズを止める。fork の README の `How this repository works` と `SECURITY.md`・Issue フォームのリンクを自分の方針・報告先に直す。fork の Actions と Issues を有効にし、`ci.yml` の `if:` が見る変数を `on` にして CI を動かす（`gh variable set <変数> --repo <owner/name> --body on`。`envPrefix` を変えたなら、`.github/workflows/` の同じ条件をすべて `<PREFIX>_ACTIONS` に直す。変数が無いと job は走らない）。`ops.config.json` の `publicSync` は残す。`target` は上流の公開リポジトリで、キットの道具・`gh` の前段・アプリのバックログは、既定の書き込み先がそこを向くときに書き込みを止める目印にする。消すとこの歯止めが無くなる。上流への `public-sync` は権限が無いので送れない（独自の公開先へ同期するときは `target` を自分の公開先に書き換える）。
-5. Project への自動追加が必要なら `ops-kit/template/.github/workflows/project-autoadd.yml` を `.github/workflows/` へ写す。`__PREFIX__` は `envPrefix` に置き換える。`<PREFIX>_PROJECT_URL` と、Project を書けるリポジトリ secret `<PREFIX>_PROJECT_TOKEN` を設定する（PR のコードは実行しない）。
-6. キットを持つアプリ固有のリリースやホストの設定は、そのリポジトリの開発・配置のドキュメントに従う。
-
-共通のスキルは同梱の `ops-kit/skills/`、入口は `scripts/setup/`。スキルの導入は上の節に従い、リポジトリ固有の手順は自分の `CLAUDE.md` / `AGENTS.md` に書く。fork の Issue と PR で工程を回し、上流への提案は上流の Request として送る。
-
-### 公開側への書き込みが止まったとき
+## 公開側への書き込みが止まったとき
 
 既定の書き込み先（`GH_REPO`、無ければ `gh repo view`）が最寄りの `ops.config.json` の `publicSync.target` と同じ clone では、書き込みが止まり、次の文が出る: 「書き込み先 <owner/name> は、この clone の ops.config.json の publicSync.target（公開側の写し）です。自分のリポジトリに向けてから実行してください: …」。判定にリポジトリの名前は使わない。上流の開発元は既定が開発元なので止まらない。
 

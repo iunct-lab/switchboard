@@ -86,3 +86,24 @@ test("waits for another process's write lock instead of failing with SQLITE_BUSY
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("migration moves a done task with a background mark to background once (#4208)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "switchboard-bgstatus-"));
+  try {
+    const path = join(dir, "switchboard.db");
+    const first = new Db(path);
+    const ins = first.sqlite.query("INSERT INTO tasks (id, title, runner, cwd, scope, status, background, status_at, created_at, updated_at) VALUES (?, 't', 'claude', '/x', '[]', ?, ?, 1, 1, 1)");
+    ins.run("bg", "done", '{"jobs":["a"],"since":1}');
+    ins.run("plain", "done", null);
+    ins.run("run", "running", '{"jobs":["a"],"since":1}');
+    first.sqlite.exec("PRAGMA user_version = 2");
+    first.close();
+    const second = new Db(path);
+    const status = (id: string) => (second.sqlite.query("SELECT status FROM tasks WHERE id = ?").get(id) as { status: string }).status;
+    expect([status("bg"), status("plain"), status("run")]).toEqual(["background", "done", "running"]);
+    expect((second.sqlite.query("SELECT count(*) AS c FROM tasks").get() as { c: number }).c).toBe(3);
+    second.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

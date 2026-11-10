@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +7,7 @@ import { abortOrphanedTasks, Db } from "./db.ts";
 import { STOP_NOTE } from "./evals.ts";
 import { consecutiveStops, lastStopWasDaemon, MAX_STOP_RESUMES, STOP_RESUME_PROMPT } from "./interrupted.ts";
 import { FALLBACK_DELAY_MS, GITHUB_NOTE, GITHUB_RESUME_PROMPT, GITHUB_WINDOW_MS, LATE_RETRY_MS, MAX_CONSECUTIVE_STOPS, MAX_FALLBACK_DELAY_MS, PAST_GRACE_MS, PROBE_AFTER_MS, RESUME_MARGIN_MS, RESUME_PROMPT, RateLimitResumer, type ResumeTunables, detectLimitStop, fallbackNote, fallbackRunner, fmtTime, githubLimitHit, isLimitText, parseResetBanner, planResumeAt, resetFromQuota, usesGraphql } from "./ratelimit.ts";
+import { parseStopReport } from "./stops.ts";
 import { ResumeSupersededError, TaskManager } from "./tasks.ts";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
 
@@ -431,6 +432,16 @@ describe("rate limit: RateLimitResumer (#102)", () => {
     await expect(resumer.resumeNow(t.id)).resolves.toBeDefined(); // still possible by hand (a new turn)
   });
 
+  test("resumeNow refuses a task waiting on its runner's background jobs", async () => {
+    boot([LIMIT_TURN]);
+    const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
+    await settle();
+    expect(db.getTask(t.id)!.resumeAt).not.toBeNull();
+    db.updateTask(t.id, { status: "running", resumeAt: null });
+    db.updateTask(t.id, { status: "background" });
+    await expect(resumer.resumeNow(t.id)).rejects.toThrow("still running");
+  });
+
   test("a resume that lost the race to a reply / cancel sends nothing (send asResume checks the plan after the wait); a passing send failure keeps the plan and retries", async () => {
     boot([LIMIT_TURN, OK_TURN]);
     const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
@@ -481,6 +492,171 @@ describe("rate limit: RateLimitResumer (#102)", () => {
     expect(db.getTask(t.id)!.resumeAt).toBeNull();
     now += 24 * 3600 * 1000;
     expect(await resumer.tick()).toEqual([]);
+  });
+
+  // a usage limit of another runner that the task reported as a stop (#4408)
+  const reportOf = (over: Record<string, unknown> = {}): Parameters<TaskManager["recordStop"]>[1] =>
+    parseStopReport(JSON.stringify({ id: "codex-limit", op: "codex review", target: "PR", reason: "usage-limit", safety: "unknown", evidence: "Codex の週の上限", state: "waiting", conditions: [{ key: "runner#codex", value: "2026-09-11T04:00:00+09:00", met: false }], actions: [], ...over }))!;
+  const REPORTED_RESET = Date.parse("2026-09-11T04:00:00+09:00");
+
+  test("a reported usage-limit stop of another runner plans the resume at its reset", async () => {
+    boot([OK_TURN]);
+    const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
+    await settle();
+    expect(db.getTask(t.id)!.resumeAt).toBeNull();
+    enabled = false; // planned while off: only shown
+    expect(tasks.recordStop(t.id, reportOf()).ok).toBe(true);
+    enabled = true;
+    const cur = db.getTask(t.id)!;
+    expect(cur.resumeAt).toBe(REPORTED_RESET + RESUME_MARGIN_MS);
+    expect(cur.resumeReason).toBe("limit");
+    expect(statuses(t.id).at(-1)).toContain("別のランナー（codex）の使用上限で停止: Codex の週の上限");
+    expect(statuses(t.id).at(-1)).toContain("自動再開は OFF");
+    expect(await resumer.tick()).toEqual([]); // not due
+    // due, but the setting is off: only the plan
+    now = cur.resumeAt! + 1;
+    enabled = false;
+    expect(await resumer.tick()).toEqual([]);
+    expect(db.getTask(t.id)!.resumeAt).toBe(cur.resumeAt);
+    enabled = true;
+    expect(await resumer.tick()).toEqual([t.id]);
+    await settle();
+    expect(sends).toEqual([RESUME_PROMPT]); // the same session, the usage-limit follow-up
+    expect(db.getTask(t.id)!.resumeAt).toBeNull();
+  });
+
+  test("a reported usage-limit stop without a time falls back to the quota then the retry delay", async () => {
+    boot([OK_TURN]);
+    const noTime = (id: string, value: string) => reportOf({ id, conditions: [{ key: "runner#codex", value, met: false }] });
+    const a = tasks.create({ cwd: home, title: "a", prompt: "go", runner: "claude" });
+    const b = tasks.create({ cwd: home, title: "b", prompt: "go", runner: "claude" });
+    const c = tasks.create({ cwd: home, title: "c", prompt: "go", runner: "claude" });
+    await settle();
+    // no quota row of codex: the retry delay (the first of the consecutive stops)
+    tasks.recordStop(a.id, noTime("x", "unknown"));
+    expect(db.getTask(a.id)!.resumeAt).toBe(now + FALLBACK_DELAY_MS);
+    expect(statuses(a.id).at(-1)).toContain(fmtTime(now + FALLBACK_DELAY_MS, now));
+    // codex rows: one that lifted before the stop does not count, the earliest that lifts after it does
+    const nowS = Math.floor(Date.now() / 1000);
+    db.upsertQuota("codex", "five_hour", 1.02, nowS - 3600, Date.now());
+    db.upsertQuota("codex", "weekly", 1.02, nowS + 3 * 3600, Date.now());
+    db.upsertQuota("codex", "monthly", 0.5, nowS + 2 * 3600, Date.now());
+    tasks.recordStop(b.id, noTime("x", "soon")); // unreadable is unknown
+    expect(db.getTask(b.id)!.resumeAt).toBe((nowS + 2 * 3600) * 1000 + RESUME_MARGIN_MS);
+    expect(statuses(b.id).at(-1)).toContain("codex");
+    // stops that plan nothing: resolved, another reason, no runner# condition
+    tasks.recordStop(c.id, reportOf({ id: "r", state: "resolved" }));
+    tasks.recordStop(c.id, reportOf({ id: "d", reason: "depends", conditions: [{ key: "pr#12", value: "open", met: false }] }));
+    tasks.recordStop(c.id, reportOf({ id: "n", conditions: [] }));
+    expect(db.getTask(c.id)!.resumeAt).toBeNull();
+  });
+
+  test("a reported usage-limit stop is cleared by a reply and capped by maxLimitStops", async () => {
+    const fenceTurn: AgentEvent[] = [OK_TURN[0]!, { t: "message.delta", role: "assistant", text: "```switchboard-stop\n" + JSON.stringify(reportOf()) + "\n```\n" }, OK_TURN[2]!];
+    boot([OK_TURN, OK_TURN, fenceTurn]);
+    resumer.stop();
+    resumer = new RateLimitResumer(db, tasks, { enabled: () => enabled, now: () => now, tunables: () => ({ retryDelayMs: FALLBACK_DELAY_MS, retryMaxDelayMs: MAX_FALLBACK_DELAY_MS, maxLimitStops: 1, resumePrompt: "続けて" }) });
+    resumer.start(3_600_000);
+    const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
+    await settle();
+    // a reply takes the plan
+    tasks.recordStop(t.id, reportOf());
+    expect(db.getTask(t.id)!.resumeAt).toBe(REPORTED_RESET + RESUME_MARGIN_MS);
+    await tasks.send(t.id, "先に進めて");
+    await settle();
+    expect(db.getTask(t.id)!.resumeAt).toBeNull();
+    // the same report again (a recorded duplicate) after the reply: the first one in a row is planned (maxLimitStops 1) ...
+    tasks.recordStop(t.id, reportOf());
+    expect(db.getTask(t.id)!.resumeAt).not.toBeNull();
+    now = db.getTask(t.id)!.resumeAt! + 1;
+    expect(await resumer.tick()).toEqual([t.id]);
+    await settle();
+    // ... and the daemon's resumed turn reports it once more: the second in a row, no plan
+    expect(db.getTask(t.id)!.resumeAt).toBeNull();
+    expect(statuses(t.id).at(-1)).toContain("これ以上は再開しません");
+    // resolved takes a standing plan back
+    tasks.recordStop(t.id, reportOf({ id: "fresh" }));
+    expect(db.getTask(t.id)!.resumeAt).not.toBeNull();
+    tasks.recordStop(t.id, reportOf({ id: "fresh", state: "resolved" }));
+    expect(db.getTask(t.id)!.resumeAt).toBeNull();
+    // the same stop with its time learned later moves the standing plan, without counting a second stop
+    tasks.recordStop(t.id, reportOf({ id: "later", conditions: [{ key: "runner#codex", value: "unknown", met: false }] }));
+    expect(db.getTask(t.id)!.resumeAt).toBe(now + FALLBACK_DELAY_MS);
+    const learned = now + 2 * 3600_000;
+    tasks.recordStop(t.id, reportOf({ id: "later", conditions: [{ key: "runner#codex", value: new Date(learned).toISOString(), met: false }] }));
+    expect(db.getTask(t.id)!.resumeAt).toBe(learned + RESUME_MARGIN_MS);
+    // after a daemon restart (a new resumer remembers no plan) resolved still takes the plan back
+    resumer.stop();
+    resumer = new RateLimitResumer(db, tasks, { enabled: () => enabled, now: () => now });
+    resumer.start(3_600_000);
+    // ... but only the stop the plan came from: an older stop resolved leaves the newer one's plan
+    tasks.recordStop(t.id, reportOf({ id: "newer", conditions: [{ key: "runner#codex", value: new Date(learned).toISOString(), met: false }] }));
+    resumer.stop();
+    resumer = new RateLimitResumer(db, tasks, { enabled: () => enabled, now: () => now });
+    resumer.start(3_600_000);
+    tasks.recordStop(t.id, reportOf({ id: "later", state: "resolved" }));
+    expect(db.getTask(t.id)!.resumeAt).toBe(learned + RESUME_MARGIN_MS);
+    tasks.recordStop(t.id, reportOf({ id: "newer", state: "resolved" }));
+    expect(db.getTask(t.id)!.resumeAt).toBeNull();
+    // an identical repeat of an older stop (not written again) does not take the newer one's plan
+    const at = (iso: number) => [{ key: "runner#codex", value: new Date(iso).toISOString(), met: false }];
+    tasks.recordStop(t.id, reportOf({ id: "a", conditions: at(learned) }));
+    tasks.recordStop(t.id, reportOf({ id: "b", conditions: at(learned + 3600_000) }));
+    tasks.recordStop(t.id, reportOf({ id: "a", conditions: at(learned) }));
+    expect(db.getTask(t.id)!.resumeAt).toBe(learned + 3600_000 + RESUME_MARGIN_MS);
+    tasks.recordStop(t.id, reportOf({ id: "a", state: "resolved" }));
+    expect(db.getTask(t.id)!.resumeAt).toBe(learned + 3600_000 + RESUME_MARGIN_MS);
+    // once the newer stop is resolved, an identical repeat of an older open stop plans again
+    tasks.recordStop(t.id, reportOf({ id: "c", conditions: at(learned) }));
+    tasks.recordStop(t.id, reportOf({ id: "d", conditions: at(learned + 3600_000) }));
+    tasks.recordStop(t.id, reportOf({ id: "d", state: "resolved" }));
+    expect(db.getTask(t.id)!.resumeAt).toBeNull();
+    tasks.recordStop(t.id, reportOf({ id: "c", conditions: at(learned) }));
+    expect(db.getTask(t.id)!.resumeAt).toBe(learned + RESUME_MARGIN_MS);
+    // a plan an older repeat made stays its own after a restart: E after C, the plan canceled, C repeated, restart, C resolved
+    tasks.recordStop(t.id, reportOf({ id: "e", conditions: at(learned + 3600_000) }));
+    tasks.setResumeAt(t.id, null);
+    tasks.recordStop(t.id, reportOf({ id: "c", conditions: at(learned) }));
+    expect(db.getTask(t.id)!.resumeAt).toBe(learned + RESUME_MARGIN_MS);
+    resumer.stop();
+    resumer = new RateLimitResumer(db, tasks, { enabled: () => enabled, now: () => now });
+    resumer.start(3_600_000);
+    tasks.recordStop(t.id, reportOf({ id: "c", state: "resolved" }));
+    expect(db.getTask(t.id)!.resumeAt).toBeNull();
+    // the owner is the order written, not `at`: F, G and the rewritten F in one millisecond, then F resolved after a restart
+    setSystemTime(new Date(Date.now()));
+    try {
+      tasks.recordStop(t.id, reportOf({ id: "f", conditions: at(learned) }));
+      tasks.recordStop(t.id, reportOf({ id: "g", conditions: at(learned + 3600_000) }));
+      tasks.setResumeAt(t.id, null);
+      tasks.recordStop(t.id, reportOf({ id: "f", conditions: at(learned) }));
+    } finally {
+      setSystemTime();
+    }
+    expect(db.getTask(t.id)!.resumeAt).toBe(learned + RESUME_MARGIN_MS);
+    resumer.stop();
+    resumer = new RateLimitResumer(db, tasks, { enabled: () => enabled, now: () => now, tunables: () => ({ retryDelayMs: FALLBACK_DELAY_MS, retryMaxDelayMs: MAX_FALLBACK_DELAY_MS, maxLimitStops: 2, resumePrompt: "続けて" }) });
+    resumer.start(3_600_000);
+    tasks.recordStop(t.id, reportOf({ id: "f", state: "resolved" }));
+    expect(db.getTask(t.id)!.resumeAt).toBeNull();
+    // a stop over maxLimitStops in a resumed turn takes the plan another stop of the turn made (no more resumes; it would read as the owner)
+    const inner = resumer as unknown as { resumedByUs: Set<string>; stops: Map<string, number> };
+    inner.resumedByUs.add(t.id);
+    inner.stops.set(t.id, 1);
+    tasks.recordStop(t.id, reportOf({ id: "h", conditions: at(learned) }));
+    expect(db.getTask(t.id)!.resumeAt).toBe(learned + RESUME_MARGIN_MS);
+    tasks.recordStop(t.id, reportOf({ id: "i", conditions: at(learned) }));
+    expect(db.getTask(t.id)!.resumeAt).toBeNull();
+    expect(statuses(t.id).at(-1)).toContain("これ以上は再開しません");
+    // the plan's stop updated to another reason takes its plan back; an older stop resolved after it does not take a plan it does not own
+    inner.resumedByUs.delete(t.id);
+    tasks.recordStop(t.id, reportOf({ id: "j", conditions: at(learned) }));
+    tasks.recordStop(t.id, reportOf({ id: "k", conditions: at(learned + 3600_000) }));
+    tasks.recordStop(t.id, reportOf({ id: "k", reason: "permission", conditions: [] }));
+    expect(db.getTask(t.id)!.resumeAt).toBeNull();
+    tasks.recordStop(t.id, reportOf({ id: "l", conditions: at(learned + 3600_000) }));
+    tasks.recordStop(t.id, reportOf({ id: "j", state: "resolved" }));
+    expect(db.getTask(t.id)!.resumeAt).toBe(learned + 3600_000 + RESUME_MARGIN_MS);
   });
 });
 

@@ -1,7 +1,9 @@
 #!/usr/bin/env bun
 // テストの棚卸しの候補を根拠の数字つきで出す。消すかは決めない（PR のレビューで決める）。
 //   bun scripts/test-audit.ts candidates [--json <file>]
+//   bun scripts/test-audit.ts growth [--weeks N] [--json <file>]
 // 全テストを 1 回回し（赤なら候補を出さない）、遅い・似た・赤にならないテストの上位を表で出す。--json は全件を書く。
+// growth は直近 N 週（既定 5）の週の末の origin/main を数え直し、製品と道具のテスト・本体の増えを表にする。exit は常に 0。
 // exit 0 = 出した / 1 = 止まった（テストが赤、実行の結果や git log を読めない） / 2 = 引数
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -151,12 +153,77 @@ async function candidates(jsonPath: string | undefined): Promise<number> {
   }
 }
 
-if (import.meta.main) {
-  const [command, flag, jsonPath, ...rest] = process.argv.slice(2);
-  const valid = command === "candidates" && rest.length === 0 && (flag === undefined || (flag === "--json" && jsonPath !== undefined));
-  if (!valid) {
-    console.error("usage: bun scripts/test-audit.ts candidates [--json <file>]");
-    process.exit(2);
+export type GrowthCounts = { testCases: number; testLines: number; bodyLines: number };
+export type GrowthWeek = { weekEnd: string; product: GrowthCounts; tools: GrowthCounts };
+
+const PRODUCT_DIRS = ["packages", "apps"];
+const TOOL_DIRS = ["scripts", "ops-kit", "aws", "rescue"];
+const WEEK_SECONDS = 7 * 86_400;
+
+/** 直近の週で、道具のテストの行数の増えが本体（製品＋道具の本体）の行数の増えを上回ったか。2 週未満は判定できない。 */
+export function growthAlert(weeks: GrowthWeek[]): { alert: boolean; toolTestLinesDelta: number; bodyLinesDelta: number } | null {
+  const [prev, last] = weeks.slice(-2);
+  if (weeks.length < 2 || !prev || !last) return null;
+  const toolTestLinesDelta = last.tools.testLines - prev.tools.testLines;
+  const bodyLinesDelta = last.product.bodyLines + last.tools.bodyLines - (prev.product.bodyLines + prev.tools.bodyLines);
+  return { alert: toolTestLinesDelta > bodyLinesDelta && toolTestLinesDelta > 0, toolTestLinesDelta, bodyLinesDelta };
+}
+
+export function formatGrowth(weeks: GrowthWeek[]): string {
+  const head = ["週の末", "製品 件数", "製品 テスト行", "製品 本体行", "道具 件数", "道具 テスト行", "道具 本体行"];
+  const rows = weeks.map((w) => [w.weekEnd, ...[w.product, w.tools].flatMap((c) => [c.testCases, c.testLines, c.bodyLines])]);
+  const verdict = growthAlert(weeks);
+  const line = !verdict
+    ? "判定できません（2 週以上が要ります）"
+    : `${verdict.alert ? "棚卸しを早める" : "棚卸しは早めません"}: 直近の週の道具のテスト行の増え ${verdict.toolTestLinesDelta}、本体行の増え ${verdict.bodyLinesDelta}`;
+  return [`| ${head.join(" | ")} |`, `|${head.map(() => "---").join("|")}|`, ...rows.map((r) => `| ${r.join(" | ")} |`), "", line].join("\n");
+}
+
+/** rev の時点で pathspec に当たる行の数（git grep -c の和）。 */
+function grepCount(rev: string, args: string[], pathspecs: string[]): number {
+  const run = Bun.spawnSync(["git", "grep", "-c", ...args, rev, "--", ...pathspecs], { cwd: ROOT });
+  if (run.exitCode > 1) throw new Error(`git grep が失敗しました: ${run.stderr.toString().trim()}`);
+  return run.stdout.toString().split("\n").filter(Boolean).reduce((sum, l) => sum + Number(l.slice(l.lastIndexOf(":") + 1)), 0);
+}
+
+/** rev の時点の、dirs 以下のテストの件数・テストの行数・本体の行数。テストは *.test.ts(x)、本体はそれ以外の .ts / .tsx。 */
+export function countAt(rev: string, dirs: string[]): GrowthCounts {
+  const glob = (...exts: string[]) => dirs.flatMap((d) => exts.map((e) => `:(glob)${d}/**/*${e}`));
+  const tests = glob(".test.ts", ".test.tsx");
+  const body = [...glob(".ts", ".tsx"), ":(exclude,glob)**/*.test.ts", ":(exclude,glob)**/*.test.tsx"];
+  return {
+    testCases: grepCount(rev, ["-E", "-e", "^[[:space:]]*(test|it)(\\.[A-Za-z]+)?\\("], tests),
+    testLines: grepCount(rev, ["-e", ""], tests),
+    bodyLines: grepCount(rev, ["-e", ""], body),
+  };
+}
+
+function growth(weeks: number, jsonPath: string | undefined): number {
+  const base = Bun.spawnSync(["git", "rev-parse", "--verify", "-q", "origin/main"], { cwd: ROOT }).exitCode === 0 ? "origin/main" : "HEAD";
+  const today = Math.floor(Date.now() / 1000 / 86_400) * 86_400 + 86_400;
+  const rows: GrowthWeek[] = [];
+  for (let i = weeks - 1; i >= 0; i--) {
+    const end = today - i * WEEK_SECONDS;
+    const rev = Bun.spawnSync(["git", "rev-list", "-1", `--before=${end}`, base], { cwd: ROOT }).stdout.toString().trim();
+    const zero = { testCases: 0, testLines: 0, bodyLines: 0 };
+    const weekEnd = new Date((end - 1) * 1000).toISOString().slice(0, 10);
+    rows.push({ weekEnd, product: rev ? countAt(rev, PRODUCT_DIRS) : zero, tools: rev ? countAt(rev, TOOL_DIRS) : zero });
   }
-  process.exit(await candidates(jsonPath));
+  console.log(formatGrowth(rows));
+  if (jsonPath) writeFileSync(jsonPath, `${JSON.stringify({ weeks: rows, verdict: growthAlert(rows) }, null, 2)}\n`);
+  return 0;
+}
+
+if (import.meta.main) {
+  const [command, ...args] = process.argv.slice(2);
+  const usage = () => {
+    console.error("usage: bun scripts/test-audit.ts candidates [--json <file>] | growth [--weeks N] [--json <file>]");
+    process.exit(2);
+  };
+  const option = (name: string): string | undefined => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
+  const known = (flags: string[]) => args.length === 2 * args.filter((a) => a.startsWith("--")).length && args.every((a, i) => (i % 2 === 0 ? flags.includes(a) : !a.startsWith("--")));
+  if (command === "candidates" && known(["--json"])) process.exit(await candidates(option("--json")));
+  const weeks = Number(option("--weeks") ?? 5);
+  if (command === "growth" && known(["--weeks", "--json"]) && Number.isInteger(weeks) && weeks >= 1) process.exit(growth(weeks, option("--json")));
+  usage();
 }

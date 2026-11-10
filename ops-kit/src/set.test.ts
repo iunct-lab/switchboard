@@ -113,8 +113,8 @@ describe("fieldChoice", () => {
   test("a value no choice matches is refused with the choices; a field without choices and null pass as they are", () => {
     for (const [name, value, msg] of [
       ["Status", "Doing", "'Status' に選択肢 'Doing' がありません: Backlog / Ready / In progress / In review / Done"],
-      ["Story Points", "4", "'Story Points' に選択肢 '4' がありません: 1 / 2 / 3 / 5 / 8"],
-      ["Story Points", "", "'Story Points' に選択肢 '' がありません: 1 / 2 / 3 / 5 / 8"],
+      ["Story Points", "4", "'Story Points' に選択肢 '4' がありません: 1 / 2 / 3 / 5 / 8 / 13"],
+      ["Story Points", "", "'Story Points' に選択肢 '' がありません: 1 / 2 / 3 / 5 / 8 / 13"],
       ["Kind", "InProgress", "'Kind' に選択肢 'InProgress' がありません: bug / feature"],
     ] as const) {
       expect(() => fieldChoice(withPhase, name, value)).toThrow(new UsageError(msg));

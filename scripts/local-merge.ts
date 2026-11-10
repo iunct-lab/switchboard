@@ -146,7 +146,7 @@ export async function main(args: string[], cwd: string, o: MergeOpts): Promise<n
   const api = client(o.env, o.fetch ?? fetch);
   const mergedAt = (o.now ?? (() => new Date()))().toISOString();
   try {
-    await api("PATCH", `/${n}`, { workspaceId: workspace, state: "CLOSED", change: { mergeCommit: tip, mergedAt } });
+    await api("PATCH", `/${n}`, { workspaceId: workspace, state: "CLOSED", change: { mergeCommit: tip, mergedAt, reviewedHead: head } });
   } catch (e) {
     left.push(`変更 #${n} をマージ済みにする（${(e as Error).message}）`);
   }

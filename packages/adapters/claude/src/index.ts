@@ -96,6 +96,20 @@ export function bedrockEnv(opts: Pick<StartOptions, "bedrock">): Record<string, 
 }
 
 /**
+ * Stops the CLI's own non-essential sending (#4308) unless the user allowed it (`opts.runnerTelemetry`, Settings
+ * `outbound.runnerTelemetry`): telemetry, error reports, the auto-updater. Auto mode's classifier is a model call, not
+ * telemetry, so it still works (checked against the real CLI).
+ */
+export function telemetryEnv(opts: Pick<StartOptions, "runnerTelemetry">): Record<string, string> {
+  return opts.runnerTelemetry ? {} : { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", DISABLE_TELEMETRY: "1", DISABLE_ERROR_REPORTING: "1", DISABLE_AUTOUPDATER: "1" };
+}
+
+/** The subagents' thinking effort: only when the user chose one (`opts.subagentEffort`); `childEnv` drops the parent's same-named variable. */
+export function subagentEnv(opts: Pick<StartOptions, "subagentEffort">): Record<string, string> {
+  return opts.subagentEffort ? { CLAUDE_CODE_SUBAGENT_EFFORT: opts.subagentEffort } : {};
+}
+
+/**
  * Where the child sends its OpenTelemetry logs (#2236, docs/design/claude-otel.md): only the daemon's loopback port for
  * this Task, with the Task's token. Metrics and traces are off; `classifier_category` needs `OTEL_LOG_TOOL_DETAILS`.
  */
@@ -291,7 +305,7 @@ class ClaudeSession implements RunnerSession {
     const args = buildArgs(opts, extraArgs);
     this.proc = Bun.spawn([bin, ...args], {
       cwd: opts.cwd,
-      env: childEnv(process.env, { ...opts.env, ...bedrockEnv(opts), ...otelEnv(opts) }),
+      env: childEnv(process.env, { ...opts.env, ...bedrockEnv(opts), ...subagentEnv(opts), ...telemetryEnv(opts), ...otelEnv(opts) }),
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",

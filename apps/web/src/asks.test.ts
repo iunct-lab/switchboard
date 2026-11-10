@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Ask, AskBatch } from "@switchboard/protocol";
-import { answerButtons, askCardParts, batchLines, questionHead, hiddenByBatches, grantOf, taskAsks, withoutGrant, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, broadTarget, previousLines, scopeLabel, blockerLines, groupAsks, isQuick, keptAnswers, KIND_LABEL, quickGroups, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, unblocksLine, workspaceChips, workspaceSections, type Answered } from "./asks.ts";
+import { answerButtons, askCardParts, batchLines, questionHead, hiddenByBatches, grantOf, taskAsks, withoutGrant, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, broadTarget, previousLines, scopeLabel, blockerLines, groupAsks, isQuick, keptAnswers, KIND_LABEL, quickGroups, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, issueOpenHref, unblockLinks, unblocksLine, workspaceChips, workspaceSections, type Answered } from "./asks.ts";
 
 const ask = (over: Partial<Ask>): Ask => ({
   id: "a", kind: "decision", needs: "person", state: "open", at: 1, changedAt: 1, workspace: null, pbi: null, issue: null, task: null, reason: null, question: null, choices: [], grants: [], grant: null, recommendation: null, next: null,
@@ -377,4 +377,18 @@ test("questionHead (#4068): a short question whole; a long one cut at six lines 
   // an emoji across the cut stays whole
   const emoji = questionHead("あ".repeat(299) + "😀" + "い".repeat(10));
   expect(Array.from(emoji.head).at(-3)).toBe("😀");
+});
+
+test("unblockLinks / issueOpenHref: an Issue with no url (a workspace without GitHub sync) gets no link; one with a url keeps it", () => {
+  const unblocks = [
+    { number: 1, title: "local", url: "" },
+    { number: 2, title: "remote", url: "https://github.com/o/r/issues/2" },
+  ];
+  expect(unblockLinks(unblocks)).toEqual([
+    { number: 1, title: "local", href: null },
+    { number: 2, title: "remote", href: "https://github.com/o/r/issues/2" },
+  ]);
+  expect(issueOpenHref(ask({ route: "issue", issue: { number: 1, url: "" } }))).toBeNull();
+  expect(issueOpenHref(ask({ route: "issue", issue: { number: 2, url: "https://github.com/o/r/issues/2" } }))).toBe("https://github.com/o/r/issues/2");
+  expect(issueOpenHref(ask({ route: "none", issue: { number: 2, url: "https://github.com/o/r/issues/2" } }))).toBeNull();
 });

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, test } from "bun:test";
 import { ciExit, ciSteps, runCi } from "./ci";
-import { checkoutSteps, localCi, type Deps } from "./local-ci";
+import { checkoutSteps, runCheckout, stepEnv, type Deps } from "./local-ci";
 
 const ROOT = mkdtempSync(join(tmpdir(), "sb-ci-test-"));
 afterAll(() => rmSync(ROOT, { recursive: true, force: true }));
@@ -25,6 +25,7 @@ exit 0
   tool("git", `[ "$1" = grep ] && exit 1\n[ "$1" = rev-parse ] && { echo false; exit 0; }`);
   tool("fc-list", "echo Noto");
   tool("sudo");
+  tool("codex");
   return bin;
 }
 
@@ -40,34 +41,27 @@ async function actions(fail: string, code: number): Promise<{ exit: number; ran:
   return { exit, ran: commands(log) };
 }
 
-/** local-ci's run of the same checkout: its steps go through the same fakes, one `bash -e -c` each as the real `step` does. */
+/** local-ci's step runner (`runCheckout`, with the perf steps as the tag CI runs it) over the same checkout: its steps go through the same fakes, one `bash -e -c` each as the real `step` does. */
 async function local(fail: string, code: number): Promise<{ results: Array<{ code: number }>; ran: string[] }> {
   const log = join(mkdtempSync(join(ROOT, "local.")), "log");
   writeFileSync(log, "");
   const bin = fakeBin(log, fail, code);
-  let fetched = "";
-  const d: Deps = {
-    sh: async (cmd) => {
-      if (cmd[0] === "gh") return JSON.stringify({ headRefOid: "0123456789abcdef0123456789abcdef01234567", baseRefName: "main" });
-      if (cmd.includes("fetch")) fetched = cmd.at(-1)!;
-      if (cmd.includes("rev-parse")) return fetched.startsWith("+refs/pull/") ? "0123456789abcdef0123456789abcdef01234567\n" : "1111111111111111111111111111111111111111\n";
-      if (cmd.includes("worktree") && cmd.includes("add")) {
-        const dir = cmd[cmd.indexOf("--detach") + 1]!;
-        mkdirSync(join(dir, ".github/workflows"), { recursive: true });
-        writeFileSync(join(dir, ".github/workflows/ci.yml"), readFileSync(join(import.meta.dir, "../.github/workflows/ci.yml")));
-        mkdirSync(join(dir, "scripts"), { recursive: true });
-        writeFileSync(join(dir, "scripts/ci.ts"), readFileSync(join(import.meta.dir, "ci.ts")));
-      }
-      return "";
-    },
+  const cache = mkdtempSync(join(ROOT, "cache."));
+  const dir = mkdtempSync(join(ROOT, "co."));
+  mkdirSync(join(dir, ".github/workflows"), { recursive: true });
+  writeFileSync(join(dir, ".github/workflows/ci.yml"), readFileSync(join(import.meta.dir, "../.github/workflows/ci.yml")));
+  mkdirSync(join(dir, "scripts"), { recursive: true });
+  writeFileSync(join(dir, "scripts/ci.ts"), readFileSync(join(import.meta.dir, "ci.ts")));
+  const d: Omit<Deps, "slot"> = {
+    sh: async () => "",
     step: async (script, cwd, env) => {
       const p = Bun.spawn(["bash", "-e", "-c", script], { cwd, env: { ...env, PATH: `${bin}:/usr/bin:/bin` }, stdout: "pipe", stderr: "pipe" });
       return { code: await p.exited, output: "" };
     },
     log: () => undefined,
-    slot: (_name, fn) => fn(),
   };
-  const r = await localCi(42, "/repo", d, "example/development", join(ROOT, "cache"));
+  // the tag CI's run (every step, perf included): the same steps as Actions
+  const r = await runCheckout(dir, stepEnv(dir), "ci-test", d, cache, undefined, undefined, true);
   return { results: r.results, ran: commands(log) };
 }
 
@@ -87,13 +81,31 @@ describe("ci", () => {
     expect(ciExit(kept)).toBe(1);
   });
 
-  test("the steps: home paths, install, public tree check, licenses, typecheck, web build, perf, then test — in that order; only the perf steps keep going", () => {
+  test("the steps: home paths, install, public tree check, licenses, Codex CLI, typecheck, web build, perf, then test — in that order; only the perf steps keep going", () => {
     const first = ciSteps.map((s) => s.run.split("\n")[0]!.trim());
     const at = (cmd: string) => first.findIndex((r) => r === cmd || r.startsWith(`${cmd} `) || (cmd.endsWith(" ") && r.startsWith(cmd)));
-    const order = ["rc=0; git grep ", "bun install --frozen-lockfile", "bun ops-kit/src/cli.ts public-sync --check", "bun run licenses:check", "bun run typecheck", "bun run --cwd apps/web build", "bun scripts/perf-ratchet.ts base ", "bun scripts/perf-bench.ts", "bun scripts/perf-ratchet.ts check ", "bun test"].map(at);
+    const order = ["rc=0; git grep ", "bun install --frozen-lockfile", "bun ops-kit/src/cli.ts public-sync --check", "bun run licenses:check", "if command -v codex ", "bun run typecheck", "bun run --cwd apps/web build", "bun scripts/perf-ratchet.ts base ", "bun scripts/perf-bench.ts", "bun scripts/perf-ratchet.ts check ", "bun test"].map(at);
     expect(order.every((i) => i >= 0)).toBe(true);
     expect(order).toEqual([...order].sort((a, b) => a - b));
     expect(ciSteps.filter((s) => s.keepGoing).map((s) => s.run.split(" ").slice(1, 3).join(" "))).toEqual(["scripts/perf-ratchet.ts base", "scripts/perf-bench.ts --runs", "scripts/perf-ratchet.ts check"]);
+  });
+
+  test("the Codex CLI step installs it with npm when codex is not on PATH, and does not touch npm when it is", async () => {
+    const step = ciSteps.find((s) => s.name === "Codex CLI for typecheck")!;
+    const run = async (withCodex: boolean) => {
+      const log = join(mkdtempSync(join(ROOT, "codex.")), "log");
+      writeFileSync(log, "");
+      const bin = mkdtempSync(join(ROOT, "bin."));
+      for (const name of withCodex ? ["npm", "codex"] : ["npm"]) {
+        writeFileSync(join(bin, name), `#!/bin/bash\necho "${name} $*" >> ${JSON.stringify(log)}\n`);
+        chmodSync(join(bin, name), 0o755);
+      }
+      // PATH holds only the fakes (bash by its absolute path; `command -v` is a builtin), so a real codex or npm on the host cannot stand in for them
+      const p = Bun.spawn(["/bin/bash", "-e", "-c", step.run], { env: { PATH: bin }, stdout: "pipe", stderr: "pipe" });
+      return { code: await p.exited, ran: readFileSync(log, "utf8").trimEnd().split("\n").filter(Boolean) };
+    };
+    expect(await run(false)).toEqual({ code: 0, ran: ["npm install -g @openai/codex"] });
+    expect(await run(true)).toEqual({ code: 0, ran: [] });
   });
 
   test("the home-path step does not find itself in this file", async () => {

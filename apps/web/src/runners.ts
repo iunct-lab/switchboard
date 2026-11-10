@@ -33,7 +33,24 @@ export function runnerLabel(id: string, info?: Pick<RunnerInfo, "label">): strin
 export const isAdkRunner = (id: string) => id === "dak" || id.startsWith("custom:");
 
 /** The fields of a server being added in Settings, as typed. */
-export type CustomRunnerDraft = { name: string; label: string; url: string; app: string; tokenEnv: string };
+export type CustomRunnerDraft = { port: CustomRunner["port"]; name: string; label: string; url: string; app: string; tokenEnv: string; sendWorkspaceMcp: boolean };
+
+/** The kind's name on screen (the protocol names, not a sentence). */
+export const PORT_LABEL: Record<CustomRunner["port"], string> = { adk: "ADK", agui: "AG-UI" };
+
+/**
+ * What to tell the person before they add an AG-UI server, as keys the screen words (#3409).
+ * `request`: the text leaves this machine. `token`: the Task's Workspace MCP token goes with it. `confirm`: always.
+ */
+export function aguiNotices(d: Pick<CustomRunnerDraft, "url" | "sendWorkspaceMcp">): ("request" | "token" | "confirm")[] {
+  const url = d.url.trim();
+  return [...(url !== "" && sendsOffHost(url) ? (["request"] as const) : []), ...(d.sendWorkspaceMcp ? (["token"] as const) : []), "confirm"];
+}
+
+/** The sentence after an abort on a `custom:` runner: Switchboard only closes the connection, and cannot say the server stopped. */
+export function abortNote(runner: string, status: "ok" | "error" | "aborted"): string | undefined {
+  return status === "aborted" && runner.startsWith("custom:") ? t(common.customAborted) : undefined;
+}
 
 /**
  * The entry a draft adds, or why it cannot be added (the same rules as `CustomRunner` in the protocol, said in words).
@@ -44,14 +61,17 @@ export function customRunnerFromDraft(d: CustomRunnerDraft, saved: CustomRunner[
   const label = d.label.trim() || name;
   const url = d.url.trim();
   const app = d.app.trim();
+  const adk = d.port === "adk";
   const tokenEnv = d.tokenEnv.trim();
   if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(name)) return { error: t(common.runnerNameRule) };
   if (name === "dak") return { error: t(common.runnerNameDak) };
   if (saved.some((r) => r.name === name)) return { error: t(common.runnerExists, { name }) };
   if (!/^https?:\/\/[^/]/.test(url) || !URL.canParse(url)) return { error: t(common.runnerUrlRule) };
-  if (!app) return { error: t(common.runnerAppMissing) };
+  if (adk && !app) return { error: t(common.runnerAppMissing) };
   if (tokenEnv && !/^[A-Z_][A-Z0-9_]*$/.test(tokenEnv)) return { error: t(common.runnerTokenEnvRule) };
-  return { entry: { name, label, url: url.replace(/\/+$/, ""), app, ...(tokenEnv ? { tokenEnv } : {}) } };
+  // an ADK URL is a base the adapter adds routes to; an AG-UI URL is the endpoint itself, posted to as written
+  const base = { name, label, url: adk ? url.replace(/\/+$/, "") : url, ...(tokenEnv ? { tokenEnv } : {}) };
+  return { entry: adk ? { port: "adk", ...base, app } : { port: "agui", ...base, sendWorkspaceMcp: d.sendWorkspaceMcp } };
 }
 
 /** The request and its attachments leave this machine when the server is not on loopback. */

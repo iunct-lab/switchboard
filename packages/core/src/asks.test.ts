@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent, AnswerPolicy, ApprovalRuleMatch, Artifact, AskList, AskQuestion, PolicySubject, Backlog, BacklogItem, PendingApproval, RunnerAdapter, RunnerId, RunnerSession, StopRecord, StopSummary, Task } from "@switchboard/protocol";
+import type { AgentEvent, AnswerPolicy, ApprovalRuleMatch, Artifact, AskList, AskQuestion, PolicySubject, Backlog, BacklogItem, EventEnvelope, PendingApproval, RunnerAdapter, RunnerId, RunnerSession, StopRecord, StopSummary, Task } from "@switchboard/protocol";
 import { importing } from "../fixtures/github-import.ts";
 import { answersOf, ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, closedHits, grantOfChoice, noticeAsks, ON_HOLD_RESUME, parseAskBlock, rankAsks, resumeOfIssue, resumeOfTask } from "./asks.ts";
 import { approvalBatches } from "./approval-batch.ts";
@@ -16,7 +16,7 @@ const NOW = Date.parse("2026-10-07T12:00:00Z");
 const ISSUES = "https://github.com/o/r/issues";
 
 const item = (over: Partial<BacklogItem>): BacklogItem => ({
-  number: 1, title: "t", url: `${ISSUES}/${over.number ?? 1}`, type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-10-07T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
+  number: 1, title: "t", url: `${ISSUES}/${over.number ?? 1}`, type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-10-07T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, flow: false, bodyChars: 0, labels: [], waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
 
 const stop = (over: Partial<StopSummary>): StopSummary => ({
@@ -411,6 +411,19 @@ describe("asksFromTasks", () => {
   test("a resumeAt in the past is the resume after an interruption, its condition met", () => {
     const at = NOW - 1_000;
     expect(build([task({ resumeAt: at })])).toMatchObject([{ kind: "stop", needs: "auto", reason: "transient: 中断からの自動再開待ち", conditions: [{ key: "resumeAt", met: true }] }]);
+  });
+
+  test("an answered approval is resolved once the Task's turn ended, also with a background process left (#4212)", () => {
+    const ts = NOW - 30_000;
+    const events = [
+      { taskId: "tk_1", ts: ts - 5_000, ev: { t: "permission.ask", id: "p1", kind: "write", tool: "Write", input: {}, detail: "write p1" } },
+      { taskId: "tk_1", ts, ev: { t: "permission.resolved", id: "p1", decision: "allow", by: "user" } },
+    ] as unknown as EventEnvelope[];
+    const stateOf = (status: Task["status"]) =>
+      asksFromTasks({ approvals: [], tasks: [task({ status, updatedAt: ts + 1_000 })], lastReply: () => null, permissionEvents: () => events, stops: () => [], workspaceName: () => null, now: NOW }).find((a) => a.kind === "approval")?.state;
+    expect(stateOf("done")).toBe("resolved");
+    expect(stateOf("background")).toBe("resolved");
+    expect(stateOf("running")).toBe("answered");
   });
 
   test("fold: a check and a person's stop go into the newest open approval with their conditions; two approvals stay two", () => {

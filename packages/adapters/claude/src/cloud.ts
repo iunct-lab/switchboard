@@ -44,8 +44,7 @@ export function cloudFailure(output: string): string {
 }
 
 /**
- * Claude Code's folder-trust dialog ("Quick safety check … Yes, I trust this folder"); recorded outside Git as packages/adapters/claude/fixtures/cloud-trust-prompt.txt (record your own outside Git with the runner-adapter-recording skill;
- * bun scripts/fixtures.ts fetch works only in a clone with the private history). Cursor moves leave no spaces once stripped.
+ * Claude Code's folder-trust dialog ("Quick safety check … Yes, I trust this folder"); recorded outside Git as packages/adapters/claude/fixtures/cloud-trust-prompt.txt (record your own outside Git with the runner-adapter-recording skill). Cursor moves leave no spaces once stripped.
  */
 const TRUST_PROMPT = /Quick\s*safety\s*check|Yes,\s*I\s*trust\s*this\s*folder/i;
 

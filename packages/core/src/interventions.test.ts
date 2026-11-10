@@ -309,6 +309,33 @@ describe("re-asks and reasons", () => {
     expect(sevenDays(summarizeInterventions([], [], stops, lookupOf([]), NOW)).current.reAsks).toBe(0);
   });
 
+  test("2,000 stops in a few places count the same as the plain definition (the newest stop of the place that began before the answer)", () => {
+    const reasons = ["decision", "auth", "permission"] as const;
+    const places = [{ op: "answer", target: "#30" }, { op: "answer", target: "#31" }];
+    const stops: StopRecord[] = [];
+    for (let i = 0; i < 2000; i++) {
+      const began = NOW - 6 * DAY + i * 60_000;
+      // every third stop carries an answer from somewhere in the past, some of them exactly at another stop's start
+      const answer = i % 3 === 0 ? { ref: `seq:${i}`, at: NOW - 6 * DAY + ((i * 7) % 2000) * 60_000 } : null;
+      stops.push(stop(`s${i}`, began, { ...places[i % 2]!, reason: reasons[(i >> 1) % 3]!, answer }));
+    }
+    // the plain definition: the series of the newest stop of the place that began before the answer gets the answer
+    const key = (r: StopRecord) => [r.work.taskId, r.op, r.target, r.reason].join("|");
+    const place = (r: StopRecord) => [r.work.taskId, r.op, r.target].join("|");
+    const answered = new Map<string, number[]>();
+    for (const r of stops) {
+      if (!r.answer) continue;
+      const owner = stops.filter((x) => place(x) === place(r) && x.at < r.answer!.at).at(-1);
+      if (owner && key(owner) === key(r)) answered.set(key(r), [...(answered.get(key(r)) ?? []), r.answer.at]);
+    }
+    const NEEDS = new Set(["decision", "auth", "permission"]);
+    const expected = stops.filter((r) => NEEDS.has(r.reason) && (answered.get(key(r)) ?? []).some((at) => at <= r.at)).length;
+    const w = sevenDays(summarizeInterventions([], [], stops, lookupOf([]), NOW)).current;
+    expect(expected).toBeGreaterThan(0);
+    expect(w.reAsks).toBe(expected);
+    expect(w.reasons.map((r) => [r.reason, r.count])).toEqual([["decision", 668], ["auth", 666], ["permission", 666]]);
+  });
+
   test("an answer the daemon did not see (a runner's pointer to an Issue comment) is not an answer to ask again after", () => {
     const stops = [stop("s1", NOW - 6 * DAY, { answer: { ref: "https://github.com/acme/app/issues/30#issuecomment-1", at: NOW - 5 * DAY } }), stop("s2", NOW - 4 * DAY)];
     expect(sevenDays(summarizeInterventions([], [], stops, lookupOf([]), NOW)).current.reAsks).toBe(0);

@@ -2,7 +2,7 @@
 
 An optional stage. GitHub stays the default; nothing here is needed to run Switchboard. This document lets the operator compare the ways to adopt a self-managed GitLab Community Edition (CE) and pick one. It is a procedure, not a running instance: writing it started no instance, bought nothing, logged in nowhere and changed no Git remote.
 
-The kit's GitLab support (`docs/design/forge-integration.md`, "GitLab") was checked against a fake `glab` only. Check it on hosted gitlab.com first; a self-managed instance comes after that check and after a review of GitLab's current security advisories.
+The kit's GitLab support (`docs/design/forge-integration.md`, "GitLab") was checked against a fake `glab` only. Check it on hosted gitlab.com first; a self-managed instance comes after that check and after a review of GitLab's current security advisories (`docs/design/gitlab-security.md`).
 
 Sources are GitLab's own documentation, read on 2026-10-28. Version numbers in the quotes below are GitLab's examples, not a choice; re-read the linked pages before acting.
 
@@ -90,7 +90,7 @@ The kit uses only the operator's `glab` login (`gitlabAuth` checks `glab auth st
 
 - Log in on the host as the user Switchboard runs as: `glab auth login --hostname <host>`. `--web` uses OAuth in a browser; `--device` is for a headless host (GitLab 17.9 or later); `--stdin` reads a token from standard input ([glab auth login](https://gitlab.com/gitlab-org/cli/-/blob/main/docs/source/auth/login.md)). Never pass the token on the command line or paste it into a Task.
 - Without an OS keyring, `glab` keeps the token in plain text in `~/.config/glab-cli/config.yml`. Every Task runs as the same OS user and can read it (the loopback trust model, `docs/design/workspace-mcp.md`). Give the account no more than the next two items.
-- Token scope ([scopes](https://docs.gitlab.com/security/tokens/access_token_scopes/)): `api`, because the kit writes Issues, notes and merge requests through `glab api`. Pushing over HTTPS also needs `write_repository`; over SSH, a key instead. Tokens expire after at most 365 days by default ([personal access tokens](https://docs.gitlab.com/user/profile/personal_access_tokens/)), so plan the renewal.
+- Token scope ([scopes](https://docs.gitlab.com/security/tokens/access_token_scopes/)): `api`, because the kit writes Issues, notes and merge requests through `glab api`. A personal token with `api` also grants Git over HTTP, so pushing over HTTPS needs no further scope (`write_repository` alone does not authenticate API calls); over SSH, a key instead. `docs/design/gitlab-security.md` derives the minimum. Tokens expire after at most 365 days by default ([personal access tokens](https://docs.gitlab.com/user/profile/personal_access_tokens/)), so plan the renewal.
 - Role ([permissions](https://docs.gitlab.com/user/permissions/)): Developer pushes to unprotected branches, opens merge requests and writes notes; labels and milestones need Planner or above. `scripts/merge-gate.ts` counts marks only from notes by Developer or above. Merging into the protected default branch follows that branch's "Allowed to merge" (Maintainers by default).
 - The kit refuses to send a text that holds a GitLab token (`findSecrets` knows the `glpat-` family).
 

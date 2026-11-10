@@ -110,10 +110,18 @@ Parameters:
     Description: >-
       Emergency switch (#1492): the WAF Web ACL for CloudFront (made by aws/waf.yaml in us-east-1; its WebAclArn output).
       Empty = no WAF (a Web ACL costs money every month)
+  DakFunctionArn:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^arn:aws:lambda:[a-z0-9-]+:[0-9]{12}:function:[A-Za-z0-9_-]+(:[A-Za-z0-9_$-]+)?$'
+    Description: >-
+      The one Lambda function (DAK's) the host may invoke, as a function ARN (optionally with a version or alias).
+      Empty = the host gets no Lambda permission. The function's own resource-based policy must also allow the host role
 Conditions:
   HasHostAssumeRoles: !Not [!Equals [!Join ['', !Ref HostAssumeRoleArns], '']]
   HasGeo: !Not [!Equals [!Join ['', !Ref AllowedCountries], '']]
   HasWebAcl: !Not [!Equals [!Ref WebAclArn, '']]
+  HasDakFunction: !Not [!Equals [!Ref DakFunctionArn, '']]
   CreateOidcProvider: !Equals [!Ref GitHubOidcProviderArn, '']
   ImmutableSub: !Not [!Equals [!Ref GitHubSubPrefix, '']]
   Spot: !Equals [!Ref Market, spot]
@@ -292,6 +300,15 @@ Resources:
               Action: sts:AssumeRole
               Resource: !Ref HostAssumeRoleArns
             - !Ref AWS::NoValue
+          # the one DAK function the deployer names in DakFunctionArn (empty = none). InvokeFunction is also the action
+          # for a streaming invoke. Not a name pattern, and not the AssumeRole above
+          - !If
+            - HasDakFunction
+            - Sid: DakFunction
+              Effect: Allow
+              Action: [lambda:InvokeFunction, lambda:GetFunction]
+              Resource: !Ref DakFunctionArn
+            - !Ref AWS::NoValue
           # SecureStrings (aws/ssm) and the encrypted root volume (aws/ebs) use AWS managed keys, whose key policies
           # allow any principal of the account through that service. A key policy's grant to a role is still capped by
           # the role's boundary, so the boundary has to allow the same use — only through those two services.
@@ -391,6 +408,13 @@ Resources:
                 - Effect: Allow
                   Action: sts:AssumeRole
                   Resource: !Ref HostAssumeRoleArns
+                - !Ref AWS::NoValue
+              # the one DAK function named by DakFunctionArn (empty = none); same as the boundary's DakFunction
+              - !If
+                - HasDakFunction
+                - Effect: Allow
+                  Action: [lambda:InvokeFunction, lambda:GetFunction]
+                  Resource: !Ref DakFunctionArn
                 - !Ref AWS::NoValue
               # sb-offload (#678): the work tree goes to offload/, one build of the offload project runs it, its log
               # comes back. No other project, and no project edits: the size and the time limit are the template's

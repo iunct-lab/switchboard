@@ -1,6 +1,6 @@
 # DAK adapter — ADK REST `/run_sse` + Workspace MCP
 
-Issue #19, proposal §3 (runner adapters) and §6 Phase 2. Decentralized-Agent-Kit's agent is a Google ADK app in a container (`agent:8000`, `adk web --a2a`). Switchboard does not run it, bundle it or speak A2A; it is an ADK REST client. Recorded fixtures (outside Git; record your own outside Git with the `runner-adapter-recording` skill; `bun scripts/fixtures.ts fetch` works only in a clone with the private history): `packages/adapters/dak/fixtures/*.sse` (DAK @ e966c05, google-adk 2.x, local llama.cpp model); a deterministic stand-in for tests: `packages/adapters/adk/fixtures/fake-adk.ts`.
+Issue #19, proposal §3 (runner adapters) and §6 Phase 2. Decentralized-Agent-Kit's agent is a Google ADK app in a container (`agent:8000`, `adk web --a2a`). Switchboard does not run it, bundle it or speak A2A; it is an ADK REST client. Recorded fixtures (outside Git; record your own outside Git with the `runner-adapter-recording` skill): `packages/adapters/dak/fixtures/*.sse` (DAK at the time of recording, google-adk 2.x, local llama.cpp model); a deterministic stand-in for tests: `packages/adapters/adk/fixtures/fake-adk.ts`.
 
 ## Enabling
 

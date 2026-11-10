@@ -72,7 +72,7 @@ export const home = msgs({
   model: { ja: "モデル", en: "Model" },
   modelTitle: { ja: "この Task を動かすモデル。「CLI 既定」はランナー自身の設定（かっこ内）で動きます。作成後も Brief から変えられます", en: "The model this Task runs on. \"CLI default\" runs on the runner's own setting (in parentheses). It can be changed from the Brief after creation" },
   effort: { ja: "思考の深さ", en: "Thinking effort" },
-  effortTitle: { ja: "この Task の思考の深さ。「CLI 既定」はランナー自身の設定で動きます。作成後は変えられません", en: "This Task's thinking effort. \"CLI default\" runs on the runner's own setting. It cannot be changed after creation" },
+  effortTitle: { ja: "この Task の思考の深さ。「CLI 既定」はランナー自身の設定で動きます。作成後も Brief から変えられます", en: "This Task's thinking effort. \"CLI default\" runs on the runner's own setting. It can be changed from the Brief after creation" },
   budgetPlaceholder: { ja: "予算 USD（API 換算・任意）", en: "Budget USD (API-equivalent, optional)" },
   budgetTitle: { ja: "超過したら確認して止まります", en: "Stops and asks when exceeded" },
   dakUnreachable: { ja: "DAK の agent（http://127.0.0.1:8000、SWITCHBOARD_DAK_URL で変更）に到達できません。DAK リポジトリで docker compose up", en: "Cannot reach DAK's agent (http://127.0.0.1:8000, changed with SWITCHBOARD_DAK_URL). Run docker compose up in the DAK repository" },

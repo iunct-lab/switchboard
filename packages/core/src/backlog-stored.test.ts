@@ -333,6 +333,23 @@ describe("pickNext overlap (#1044)", () => {
     }
   });
 
+  test("a PBI whose stage Task runs (active) holds its open Tasks as the other work, Ready or not; one that does not overlap starts too; without active nothing changes (#3228)", () => {
+    const ws = imported([...pbi(1, "P0", "src/a.ts"), ...pbi(2, "P1", "src/a.ts"), ...pbi(3, "P2", "src/c.ts")]);
+    const read = (active?: (n: number) => boolean) => readStoredBacklog(db, ws, { active }).items;
+    const at = (items: ReturnType<typeof read>, n: number) => items.find((i) => i.number === n)!;
+    const on = read((n) => n === 1);
+    expect(at(on, 2).overlap).toEqual({ hits: [{ ref: "Task #10", path: "src/a.ts" }], unknown: null });
+    expect(at(on, 1).overlap).toBeNull();
+    expect(at(on, 3).overlap).toBeNull();
+    expect(pickNext(on.filter((i) => i.number !== 1), "implement")?.item.number).toBe(3);
+    // both start when the paths do not overlap
+    expect(at(read((n) => n === 3), 2).overlap).toBeNull();
+    expect(pickNext(read((n) => n === 3).filter((i) => i.number !== 3), "implement")?.item.number).toBe(1);
+    // the default: nobody is active
+    expect(at(read(), 2).overlap).toBeNull();
+    expect(at(read(() => false), 2).overlap).toBeNull();
+  });
+
   test("a PR whose files are not all stored cannot be judged: it is not started and says why", () => {
     const ws = imported([...pbi(1, "P0", "src/a.ts"), pr(50, null)]);
     expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [], unknown: "PR #50 の変更ファイルが記録に無い" });

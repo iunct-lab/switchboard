@@ -63,3 +63,8 @@ export function shownStops(stops: StopSummary[]): StopSummary[] {
     .filter((s) => s.state !== "resolved" || s.count > 1)
     .sort((a, b) => Number(b.next === "decide") - Number(a.next === "decide") || b.lastAt - a.lastAt);
 }
+
+/** 人の操作が要る系列だけ (#3709): 閉じた一覧の行の下に畳まずに出す。開いた行は詳細 (`ItemDetail`) の中に全部出す。 */
+export function personStops(stops: StopSummary[]): StopSummary[] {
+  return shownStops(stops).filter((s) => stopDisplay(s).needsPerson);
+}

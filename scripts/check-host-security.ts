@@ -80,7 +80,7 @@ export function urgentRequest(s: State, date: string): { title: string; body: st
     ...(s.kernel.pending ? [`- 再起動待ち: ${s.kernel.why}`] : []),
     ...pins.map(pinRow),
     "",
-    "当て方は aws/README.md の「ホストの OS・カーネルの脆弱性（CVE）」。再起動・停止は人が判断する。",
+    "当て方は aws/README.md の「Start, stop, rebuild」（起動のたびにセキュリティ更新が当たり、新しいカーネルは停止→起動で使われる）。再起動・停止は人が判断する。",
     "",
     ...source(date),
   ].join("\n");

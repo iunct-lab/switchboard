@@ -35,8 +35,13 @@ export const Workspace = z.object({
 });
 export type Workspace = z.infer<typeof Workspace>;
 
-export const TaskStatus = z.enum(["idle", "running", "waiting", "done", "error", "aborted"]);
+export const TaskStatus = z.enum(["idle", "running", "waiting", "background", "done", "error", "aborted"]);
 export type TaskStatus = z.infer<typeof TaskStatus>;
+
+/** Whether a status is "working" for display (turn in progress, approval open, or a background process left): the part of core's `COUNTS.display` that status alone decides. A planned resume (`resumeAt`) is not counted here. The web calls this instead of listing statuses; a core test keeps the two equal. */
+export function isWorkingStatus(status: TaskStatus): boolean {
+  return status === "running" || status === "waiting" || status === "background";
+}
 
 /**
  * What a stopped task came to, for the person (#492), apart from whether its runner is running (`status`):
@@ -218,6 +223,8 @@ export const Task = z.object({
   permissionMode: z.string().nullable(),
   /** Runner-native thinking effort fixed at creation (#833); null = the CLI's own default. */
   effort: z.string().nullable(),
+  /** Subagent thinking effort fixed at creation (the setting `subagentEffort`); passed as CLAUDE_CODE_SUBAGENT_EFFORT; null = same as the task. */
+  subagentEffort: z.string().nullable().optional(),
   origin: TaskOrigin,
   /**
    * The task stopped on the runner's usage limit (#102): when the limit is expected to lift (ms). With auto-resume on
@@ -225,8 +232,8 @@ export const Task = z.object({
    * by any turn the person sends and by 中断.
    */
   /**
-   * Jobs the runner still has in the background and since when (the last `background` event). Set on a task that is `done`
-   * too: its turn ended waiting for them, so the status alone says nothing is happening. Cleared when they end or are lost.
+   * Jobs the runner still has in the background and since when (the last `background` event). Set while the status is
+   * `background`: the turn ended waiting for them. Cleared when they end or are lost.
    */
   background: z.object({ jobs: z.array(z.string()), since: z.number() }).nullable().optional(),
   resumeAt: z.number().nullable(),
@@ -428,8 +435,10 @@ export const EvalsListRow = z.object({
   costUsd: z.number(),
   /** As `TaskEvals.models`: the distinct `session.start` models in the order first used. Two or more = the model was changed mid-task. */
   models: z.array(z.string()),
-  /** The task's thinking depth (`tasks.effort`); null = the CLI's default. */
-  effort: z.string().nullable(),
+  /** The distinct `session.start` efforts in the order first used. "" = the CLI's default (counted). [] = never started. Two or more = the effort was changed mid-task (#1802). */
+  efforts: z.array(z.string()),
+  /** The thinking depth the task's subagents started with (`tasks.subagent_effort`); null = not set. */
+  subagentEffort: z.string().nullable(),
   rules: z.object({ toolCalls: z.number(), toolFailures: z.number(), errors: z.number(), userInstructions: z.number(), stops: z.number(), lastEnd: z.enum(["ok", "error", "aborted"]).nullable(), daemonStops: z.number(), lastCutByDaemon: z.boolean() }).nullable(),
   /** `ts`: when the judge row was written (`task_evals.ts`) — the weekly sample (#1877) picks by it. */
   judge: z.object({ average: z.number(), scores: z.record(z.string(), z.number()), rubric: z.string(), by: z.string(), ts: z.number() }).nullable(),
@@ -730,6 +739,10 @@ const quotaAndResumeFields = {
   maxStopResumes: z.number().int().min(1).max(10),
   /** The runner comparison marks a row with fewer Tasks than this as a thin sample (`THIN_SAMPLE` in web). */
   thinSample: z.number().int().min(1).max(1000),
+  /** At most this many flow-improvement PBIs are in progress at once; backlog-next starts no more (P0 excepted, #4082). */
+  flowLimit: z.number().int().min(0).max(100),
+  /** The budget (USD) of a Task made without one (a request, a schedule with none). null = no budget. Cost caps live in this group: this and `backlogQuotaLimit`. */
+  defaultBudgetUsd: z.number().positive().max(10_000).nullable(),
 };
 const judgeAndChoiceFields = {
   /** Asked once when the judge's runner cannot answer (`JUDGE_FALLBACK`). */
@@ -760,6 +773,8 @@ export const QuotaAndResumeSettings = z
     resumePrompt: quotaAndResumeFields.resumePrompt.default("使用上限がリセットされました。中断した箇所から作業を続けてください。"),
     maxStopResumes: quotaAndResumeFields.maxStopResumes.default(2),
     thinSample: quotaAndResumeFields.thinSample.default(5),
+    flowLimit: quotaAndResumeFields.flowLimit.default(1),
+    defaultBudgetUsd: quotaAndResumeFields.defaultBudgetUsd.default(null),
   })
   .prefault({});
 export type QuotaAndResumeSettings = z.infer<typeof QuotaAndResumeSettings>;
@@ -820,6 +835,8 @@ export type ReviewRunnerChoice = z.infer<typeof ReviewRunnerChoice>;
 export const Settings = z.object({
   /** runner → permission mode used when a task is created without one. Absent = the adapter's own default. */
   defaultPermissionMode: z.record(z.string(), z.string()).default({}),
+  /** runner → thinking effort of the subagents a task starts (CLAUDE_CODE_SUBAGENT_EFFORT). Absent = same as the task. */
+  subagentEffort: z.record(z.string(), z.string()).default({}),
   /** runner → resume a task stopped on the usage limit once it lifts (#102). Absent = off. */
   autoResume: z.record(z.string(), z.boolean()).default({}),
   /** Shadow run (#99): runner every new task is mirrored to unless the creation says otherwise; null = off. */
@@ -859,6 +876,11 @@ export const Settings = z.object({
    * Absent = the ids the bundled list leaves out (the daemon's SHIPPED_HIDDEN_MODELS).
    */
   hiddenModels: z.record(z.string(), z.array(z.string())).default({}),
+  /**
+   * What leaves the machine (each off by default). classifierLog: Claude's OpenTelemetry `tool_decision` logs, sent to the
+   * daemon's own loopback to keep the classifier's verdicts. runnerTelemetry: the runner CLIs' own telemetry and update checks.
+   */
+  outbound: z.object({ classifierLog: z.boolean().default(false), runnerTelemetry: z.boolean().default(false) }).prefault({}),
 });
 export type Settings = z.infer<typeof Settings>;
 
@@ -876,6 +898,7 @@ const autoStartChoicePatch = z.object({ runner: RunnerId, model: z.string(), eff
 /** PATCH body: null removes the override (back to the adapter default / off). */
 export const SettingsPatch = z.object({
   defaultPermissionMode: z.record(z.string(), z.string().nullable()).optional(),
+  subagentEffort: z.record(z.string(), z.string().nullable()).optional(),
   autoResume: z.record(z.string(), z.boolean().nullable()).optional(),
   /** null = back to the runner's own login (#1730). */
   bedrock: z.record(z.string(), z.object({ region: z.string().regex(/^[a-z]{2}(-[a-z]+)+-\d$/) }).nullable()).optional(),
@@ -888,6 +911,8 @@ export const SettingsPatch = z.object({
    */
   hiddenModels: z.record(z.string(), z.array(z.string()).nullable()).optional(),
   shadowRunner: RunnerId.nullable().optional(),
+  /** Partial: `{ outbound: { classifierLog: true } }` leaves the other value alone. */
+  outbound: z.object({ classifierLog: z.boolean(), runnerTelemetry: z.boolean() }).partial().optional(),
   /** Partial: `{ routing: { llm: { enabled: true } } }` leaves the saved runner / model alone. */
   routing: z.object({ llm: z.object({ enabled: z.boolean(), runner: RunnerId, model: z.string(), timeoutMs: z.number().int().min(1000).max(60_000) }).partial().optional() }).partial().optional(),
   /** Partial: `{ judge: { enabled: false } }` leaves the saved runner / model alone. */
@@ -1081,7 +1106,11 @@ export const Job = z.object({
 export type Job = z.infer<typeof Job>;
 /** `POST /api/jobs`. `cwd`: a checkout of the Task's repository (its folder, a worktree, a clone). Review reads `promptFile` and writes `outFile`. */
 export const JobRequest = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("local-ci"), taskId: z.string().min(1), pr: z.number().int().positive(), cwd: z.string().min(1) }),
+  z.object({
+    kind: z.literal("local-ci"), taskId: z.string().min(1), pr: z.number().int().positive(), cwd: z.string().min(1),
+    /** The recordings folder: it becomes `SWITCHBOARD_FIXTURES` in the job's environment, so a missing recording fails the run. */
+    fixtures: z.string().min(1).optional(),
+  }),
   z.object({ kind: z.literal("review"), taskId: z.string().min(1), pr: z.number().int().positive(), runner: z.enum(["codex", "claude"]), cwd: z.string().min(1), promptFile: z.string().min(1), outFile: z.string().min(1) }),
 ]);
 export type JobRequest = z.infer<typeof JobRequest>;
@@ -1231,8 +1260,11 @@ export const TaskDiffFile = z.object({
   rel: z.string(),
   stat: z.string(),
   diff: z.string(),
-  /** staging = proposed through Workspace MCP and not yet applied · worktree = the repository as changed by the runner */
-  source: z.enum(["staging", "worktree"]),
+  /**
+   * staging = proposed through Workspace MCP and not yet applied · worktree = the repository as changed by the runner ·
+   * removed = the Task wrote under `path`, which no longer exists; `rel` is the same path, `stat` and `diff` are empty
+   */
+  source: z.enum(["staging", "worktree", "removed"]),
   stagedId: z.string().optional(),
 });
 export type TaskDiffFile = z.infer<typeof TaskDiffFile>;
@@ -1655,24 +1687,39 @@ export const LoginKind = z.enum(["claude.ai", "console", "bedrock"]);
 export type LoginKind = z.infer<typeof LoginKind>;
 
 /**
- * An ADK server the person added in Settings (docs/design/custom-adapter.md): it runs as the runner `custom:<name>`.
+ * A server the person added in Settings (docs/design/custom-adapter.md): it runs as the runner `custom:<name>`.
+ * `port` says which protocol it speaks: `adk` (an ADK server) or `agui` (an AG-UI endpoint).
  * Saved in the `settings` table under its own key, not in `Settings`, so an older daemon that writes `Settings` back
  * cannot drop it. There is no field for a token's value: only the name of the environment variable that holds it.
  */
-export const CustomRunner = z
-  .object({
-    /** The part after `custom:` in the runner's id. */
-    name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/),
-    /** The name the person knows the runner by. */
-    label: z.string().trim().min(1).max(60),
-    url: z.url({ protocol: /^https?$/ }),
-    /** The ADK app name. */
-    app: z.string().trim().min(1).max(100),
-    tokenEnv: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).optional(),
-    /** Artifacts whose name starts with this are the agent's own and are not fetched. */
-    artifactSkipPrefix: z.string().min(1).max(100).optional(),
-  })
-  .strict();
+const CustomRunnerBase = {
+  /** The part after `custom:` in the runner's id. */
+  name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/),
+  /** The name the person knows the runner by. */
+  label: z.string().trim().min(1).max(60),
+  url: z.url({ protocol: /^https?$/ }),
+  tokenEnv: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).optional(),
+};
+export const CustomRunner = z.discriminatedUnion("port", [
+  z
+    .object({
+      port: z.literal("adk"),
+      ...CustomRunnerBase,
+      /** The ADK app name. */
+      app: z.string().trim().min(1).max(100),
+      /** Artifacts whose name starts with this are the agent's own and are not fetched. */
+      artifactSkipPrefix: z.string().min(1).max(100).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      port: z.literal("agui"),
+      ...CustomRunnerBase,
+      /** Hand the Task's Workspace MCP endpoint and token to the agent. Off by default: it sends a credential. */
+      sendWorkspaceMcp: z.boolean().default(false),
+    })
+    .strict(),
+]);
 export type CustomRunner = z.infer<typeof CustomRunner>;
 /** PUT /api/custom-runners: the whole list. */
 export const CustomRunnerList = z.array(CustomRunner);
@@ -1862,6 +1909,12 @@ export const BacklogItem = z.object({
   closable: z.boolean(),
   /** Labelled `on-hold` (#2930): backlog-next leaves it in every slot and stage; only that firing looks at this, its row's buttons do not. */
   onHold: z.boolean(),
+  /** Carries the `flow-improvement` label (#4082). */
+  flow: z.boolean(),
+  /** The length of the Issue's body in characters (#4324): what a process definition's `auto` criteria compare a request's size with. */
+  bodyChars: z.number().int().min(0),
+  /** The Issue's label names (#4324): what a process definition's `auto.excludeLabels` and `direct-returned` read. */
+  labels: z.array(z.string()),
   /**
    * What a Ready / in-progress PBI stopped to wait for (#817): the PRs / Issues of the same repository named by its newest
    * /pbi-complete release, with whether each is still open. Deferred PRs and explicitly recorded overlap waits on decision Tasks are excluded. Empty when there is no such record, a later one cleared it,
@@ -2064,9 +2117,10 @@ export type BacklogFetchState = z.infer<typeof BacklogFetchState>;
  * A local change (#2485): what a pull request is on a workspace with no forge — a Task's branch to be merged into `base`.
  * Kept on the Issue record it is (numbered with the Issues, as GitHub numbers PRs). `head` / `base` = branch names; the
  * tips are not kept (they move): read from git when shown. `mergeCommit` / `mergedAt` = the tip `base` was moved to by
- * the merge, and when; null until then.
+ * the merge, and when; null until then. `reviewedHead` = the head that was judged and merged (what the review and the local
+ * CI saw): the merge rebases it, so `mergeCommit` is another sha; null until then, and for one merged before this was kept.
  */
-export const BacklogChange = z.object({ head: z.string(), base: z.string(), mergeCommit: z.string().nullable(), mergedAt: z.string().nullable() });
+export const BacklogChange = z.object({ head: z.string(), base: z.string(), mergeCommit: z.string().nullable(), mergedAt: z.string().nullable(), reviewedHead: z.string().nullable() });
 export type BacklogChange = z.infer<typeof BacklogChange>;
 
 /** An Issue as stored (#885): body (Markdown) and the standard fields; `parent` / `subIssues` are Issue numbers of the same repository. */
@@ -2237,14 +2291,17 @@ export const BacklogEditInput = z
     resolve: z.object({ field: z.string().min(1), choice: z.enum(["local", "remote"]), expectedRevision: z.string().min(1) }).strict().optional(),
     /** Sends a `failed` operation of the Issue again (#2885), its cause put right: `operation` = the held edit's id. */
     retry: z.object({ operation: z.string().min(1) }).strict().optional(),
+    /** Takes back a comment still inside its send window (60 s): `operation` = the held edit's id. */
+    cancel: z.object({ operation: z.string().min(1) }).strict().optional(),
     /** Takes back an `unknown` / `failed` operation of the Issue (#3804): nothing is sent for it; `reason` is kept with it. */
     withdraw: z.object({ operation: z.string().min(1), reason: z.string().min(1).max(200) }).strict().optional(),
     /** A local change merged (#2485): the tip its base was moved to, and when. Only on a backlog kept here. */
-    change: z.object({ mergeCommit: z.string().regex(/^[0-9a-f]{40}$/), mergedAt: z.string().min(1) }).strict().optional(),
+    change: z.object({ mergeCommit: z.string().regex(/^[0-9a-f]{40}$/), mergedAt: z.string().min(1), reviewedHead: z.string().regex(/^[0-9a-f]{40}$/) }).strict().optional(),
   })
   .strict()
   .refine((e) => !e.resolve || Object.keys(e).every((k) => k === "workspaceId" || k === "resolve"), { message: "resolve は編集と一緒には送れません" })
   .refine((e) => !e.retry || Object.keys(e).every((k) => k === "workspaceId" || k === "retry"), { message: "retry は編集と一緒には送れません" })
+  .refine((e) => !e.cancel || Object.keys(e).every((k) => k === "workspaceId" || k === "cancel"), { message: "cancel は編集と一緒には送れません" })
   .refine((e) => !e.withdraw || Object.keys(e).every((k) => k === "workspaceId" || k === "withdraw"), { message: "withdraw は編集と一緒には送れません" })
   .refine((e) => !e.stateReason || e.state === "CLOSED", { message: "閉じた理由は state CLOSED と一緒に送ります" })
   .refine((e) => !e.change || e.state === "CLOSED", { message: "変更のマージは state CLOSED と一緒に送ります" });
@@ -2291,6 +2348,8 @@ export const FlowPbi = z.object({
   userWaitMs: z.number(),
   /** Per PR: how many `[codex|claude|dak] review` comments it got. */
   reviewRounds: z.array(z.number()),
+  /** How many Task Issues (sub-issues) the PBI has; fewer when the list was cut. */
+  taskIssues: z.number(),
   /**
    * The Switchboard Tasks whose title starts with `#<PBI or Task number> `; null when the DB was not read.
    * `implementLaunches`: the PBI's stage Tasks of 実装 (`stage.action` `complete`; a resume counts as one too).

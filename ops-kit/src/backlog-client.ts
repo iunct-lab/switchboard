@@ -15,6 +15,9 @@ import { findSecrets, hostAws } from "./secrets.ts";
  * answers what is stored with its last sync and 「GitHub 未同期」. The app's address comes in `BACKLOG_URL`, its key in the file `BACKLOG_TOKEN_FILE` names.
  */
 
+/** triage's usage, one text for the list and the errors: `<phase>` is read only when the configuration has fields.phase. */
+export const triageUsage = (phase: boolean) => `triage <issue> <area> <kind> <priority> ${phase ? "[<phase>] " : ""}[<parent>] [<status>]`;
+
 export const BACKLOG_USAGE = `  backlog list [--search <語>] [--label <l>]... [--state open|closed|all] [--fresh] [--json]
       保存済みの Issue を、取得の時刻と同期の状態つきで出す（行: #番号 type OPEN|CLOSED Status 題）。GitHub には問い合わせない
       --search: 題の部分一致（大文字小文字を区別しない）/ --label: すべてを持つもの / --state: 既定 open
@@ -32,7 +35,8 @@ export const BACKLOG_USAGE = `  backlog list [--search <語>] [--label <l>]... [
   backlog comment <issue> --body-file <f|->
   backlog set <issue> <field> <value>
       <value> が空（""）ならそのフィールドを空にする
-  backlog triage <issue> <area> <kind> <priority> [<phase>] [<parent>] [<status>]
+  backlog ${triageUsage(true)}
+      <phase> は設定に fields.phase があるときだけ渡す（無い設定では "" を渡しても読み飛ばす）
       編集はアプリに保存して返り、アプリが後で GitHub に送る（GitHub 連携の無い workspace ではその場で確定し、作成で番号が付く。
       BACKLOG_URL が無ければ GitHub にその場で書く）。認証に使える値を含む文は送らない
       --fresh: アプリに送信と取込みを済ませてから答えさせる（着手・マージの判断の前、最新の回答を読むとき）。
@@ -133,6 +137,10 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
   };
   try {
     const [sub] = args.splice(0, 1);
+    if (sub === "--help" || sub === "-h") {
+      io.out(BACKLOG_USAGE);
+      return 0;
+    }
     const explicit = take("--workspace");
     const fresh = has("--fresh");
     const asJson = has("--json");
@@ -331,9 +339,11 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
       }
       case "triage": {
         const [ref, area, kind, priority, ...tail] = args;
+        // a repository without a Phase: "" in its place means none; <parent> and <status> follow
+        if (!opts.phase && tail[0] === "" && tail.length > 2) tail.shift();
         const phase = opts.phase ? tail.shift() : undefined;
         const [parent, status, ...extra] = tail;
-        if (!ref || !area || !kind || !priority || (opts.phase && !phase) || extra.length) throw new Refused(`backlog triage <issue> <area> <kind> <priority> ${opts.phase ? "<phase> " : ""}[<parent>] [<status>]`);
+        if (!ref || !area || !kind || !priority || (opts.phase && !phase) || extra.length) throw new Refused(`backlog ${triageUsage(!!opts.phase)}`);
         noSecrets(area, kind, priority, phase, status);
         if (direct) {
           const c = await choose({ Area: area, Kind: kind, Priority: priority, ...(phase !== undefined && { Phase: phase }), Status: status || "Backlog" });
@@ -552,7 +562,7 @@ function freshness(ws: Sync): string {
 export interface Detail {
   /** The workspace the app answered from; absent in GitHub's own (without BACKLOG_URL). */
   workspaceId?: string;
-  issue: { number: number; title: string; state: string; stateReason?: string | null; labels: string[]; milestone: string | null; parent: number | null; subIssues: number[]; body: string; url: string; change?: { head: string; base: string; mergeCommit: string | null; mergedAt: string | null } };
+  issue: { number: number; title: string; state: string; stateReason?: string | null; labels: string[]; milestone: string | null; parent: number | null; subIssues: number[]; body: string; url: string; change?: { head: string; base: string; mergeCommit: string | null; mergedAt: string | null; reviewedHead: string | null } };
   /** A local change's branch tips now (#2485); absent / null otherwise. */
   changeRefs?: { head: string | null; base: string | null } | null;
   comments: Array<{ id: string; body: string; createdAt: string }>;
@@ -589,7 +599,7 @@ export function formatDetail(d: Detail): string {
 /** A local change's line (#2485): its branches and their tips now, or the commit it was merged as. */
 function changeLine(c: NonNullable<Detail["issue"]["change"]>, refs: Detail["changeRefs"]): string {
   const sha = (x: string | null | undefined) => (x ? x.slice(0, 7) : "なし");
-  const tips = c.mergeCommit ? `MERGED ${c.mergeCommit.slice(0, 7)}` : `head ${sha(refs?.head)} base ${sha(refs?.base)}`;
+  const tips = c.mergeCommit ? `MERGED ${c.mergeCommit.slice(0, 7)} (reviewed ${sha(c.reviewedHead)})` : `head ${sha(refs?.head)} base ${sha(refs?.base)}`;
   return `変更: ${c.head} → ${c.base}  ${tips}`;
 }
 

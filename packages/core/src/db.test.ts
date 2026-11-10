@@ -1,11 +1,12 @@
 // test-reads: none
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { BacklogIssueData, BacklogRepositoryKey } from "@switchboard/protocol";
-import { createdIssuesOf, Db, deferredOf, DEFERRED_WORDS, EVENTS_PAGE_MAX, issuesInText, sizeClass, type BacklogSnapshotEntry, type NewBacklogOperation } from "./db.ts";
+import { gunzipSync } from "node:zlib";
+import type { AgentEvent, BacklogIssueData, BacklogRepositoryKey } from "@switchboard/protocol";
+import { abortOrphanedTasks, createdIssuesOf, Db, deferredOf, DEFERRED_WORDS, eventsByPrefixSql, EVENTS_PAGE_MAX, issuesInText, needsMigration, sizeClass, snapshotBeforeMigrate, type BacklogSnapshotEntry, type NewBacklogOperation } from "./db.ts";
 import { backlogFieldValue, conflictRevision } from "./backlog-merge.ts";
 
 // The stored backlog (#885): records per repository, kept across a restart and a backup.
@@ -206,6 +207,26 @@ test("a pull request stored before #1059 (no updatedAt / files) is dropped, so t
   raw.close();
   const db = new Db(path);
   expect(db.listBacklogRecords(A).map((r) => r.externalId)).toEqual(["PR_41"]);
+  db.close();
+});
+
+test("migration: a local change stored before #3971 gains reviewedHead as null, once; one with it keeps it", () => {
+  const path = join(dir, "switchboard.db");
+  new Db(path).close();
+  const raw = new Database(path);
+  const put = raw.query("INSERT INTO backlog_records (service, host, repository, object_kind, external_id, remote, base, local, fetched_at, fetch_state) VALUES ('github', 'github.com', 'acme/app', 'issue', ?, ?, ?, ?, 1000, 'fetched')");
+  const issue = (n: number, change: string) => `{"number":${n},"title":"t","url":"","state":"CLOSED","stateReason":null,"body":"","labels":[],"milestone":null,"parent":null,"subIssues":[],"createdAt":"x","updatedAt":"x","closedAt":"x"${change}}`;
+  const before = issue(2, ',"change":{"head":"sb/2-x","base":"main","mergeCommit":"m","mergedAt":"x"}');
+  put.run("I_2", before, before, before);
+  put.run("I_3", issue(3, ',"change":{"head":"sb/3-x","base":"main","mergeCommit":"m","mergedAt":"x","reviewedHead":"r"}'), null, null);
+  put.run("I_4", issue(4, ""), null, null);
+  raw.close();
+
+  const db = new Db(path);
+  const byId = Object.fromEntries(db.listBacklogRecords(A).map((r) => [r.externalId, r]));
+  for (const col of ["remote", "base", "local"] as const) expect((byId.I_2![col] as BacklogIssueData).change).toEqual({ head: "sb/2-x", base: "main", mergeCommit: "m", mergedAt: "x", reviewedHead: null });
+  expect((byId.I_3!.remote as BacklogIssueData).change?.reviewedHead).toBe("r");
+  expect(byId.I_4!.remote).not.toHaveProperty("change"); // an Issue that is not a change gains nothing
   db.close();
 });
 
@@ -694,22 +715,53 @@ test("opening the database while another connection writes waits instead of fail
   expect(opened).toBeGreaterThan(0);
 }, 15_000);
 
-test("stage: a stage Task whose turn ended on background jobs is still active, until the mark is cleared", () => {
+test("startup: a migrated `background` task whose jobs died with the daemon goes back to done and plans its resume", () => {
   const db = new Db(join(dir, "switchboard.db"));
-  const mk = (id: string, status: "done" | "error" | "running", issue: number, updatedAt: number) => db.insertTask({ id, workspaceId: "ws", title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue, action: "complete" }, statusAt: updatedAt, createdAt: updatedAt, updatedAt });
-  mk("t_bg", "done", 3621, 1);
+  db.insertTask({ id: "t_bg", workspaceId: "ws", title: "t_bg", runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "background", runnerSessionId: "s1", executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 });
+  db.setTaskBackground("t_bg", { jobs: ["tests"], since: 1 });
+  expect(abortOrphanedTasks(db, 10)).toEqual(["t_bg"]);
+  const t = db.getTask("t_bg")!;
+  expect(t.status).toBe("done");
+  expect(t.background).toBeNull();
+  expect(t.resumeAt).not.toBeNull();
+  db.close();
+});
+
+test("stage: a stage Task in `background` status, with a daemon job or a reply being judged is still active, until that ends", () => {
+  const db = new Db(join(dir, "switchboard.db"));
+  const mk = (id: string, status: "done" | "error" | "running" | "background", issue: number, updatedAt: number) => db.insertTask({ id, workspaceId: "ws", title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue, action: "complete" }, statusAt: updatedAt, createdAt: updatedAt, updatedAt });
+  mk("t_bg", "background", 3621, 1);
   mk("t_err", "error", 7, 2);
   mk("t_plain", "done", 8, 3);
   db.setTaskBackground("t_bg", { jobs: ["Run Codex review of PR 4048 in background"], since: 1 });
   db.setTaskBackground("t_err", { jobs: ["tests"], since: 2 });
   expect(db.activeStageTask("ws", 3621)!.id).toBe("t_bg");
-  expect(db.activeStageTask("ws", 7)!.id).toBe("t_err");
+  // a failed turn keeps the mark but is not working: its Issue is free
+  expect(db.activeStageTask("ws", 7)).toBeNull();
   expect(db.activeStageTask("ws", 8)).toBeNull();
-  expect(db.listActiveStageTasks().map((t) => t.id).sort()).toEqual(["t_bg", "t_err"]);
+  expect(db.listActiveStageTasks().map((t) => t.id)).toEqual(["t_bg"]);
+  expect(db.listWorkingTasks("gate").map((t) => t.id)).toEqual(["t_bg"]);
   // the jobs ended (or the runner went): the Issue is free again
+  db.updateTask("t_bg", { status: "done" });
   db.setTaskBackground("t_bg", null);
   expect(db.activeStageTask("ws", 3621)).toBeNull();
-  expect(db.listActiveStageTasks().map((t) => t.id)).toEqual(["t_err"]);
+  expect(db.listActiveStageTasks()).toEqual([]);
+  expect(db.listWorkingTasks("gate")).toEqual([]);
+  // a failed one with its resume planned holds its Issue (dedupe) but takes no slot of the backlog's capacity
+  db.updateTask("t_err", { resumeAt: 100 });
+  expect(db.activeStageTask("ws", 7)!.id).toBe("t_err");
+  expect(db.listActiveStageTasks()).toEqual([]);
+  db.updateTask("t_err", { resumeAt: null });
+  // a job it asked the daemon for (#3992) keeps it active until the job ends
+  const job = db.insertJob({ kind: "local-ci", taskId: "t_plain", pr: 1, runner: null, cwd: "/work/app", startedAt: 4 });
+  expect(db.activeStageTask("ws", 8)!.id).toBe("t_plain");
+  db.finishJob(job.id, { status: "pass", exitCode: 0, summary: "", endedAt: 5 });
+  expect(db.activeStageTask("ws", 8)).toBeNull();
+  // so does its last reply being judged (#493): until then a question it ended on does not show
+  db.updateTask("t_plain", { judgingAt: 6, updatedAt: 3 });
+  expect(db.activeStageTask("ws", 8)!.id).toBe("t_plain");
+  db.updateTask("t_plain", { judgingAt: null, updatedAt: 3 });
+  expect(db.activeStageTask("ws", 8)).toBeNull();
   db.close();
 });
 
@@ -916,6 +968,26 @@ test("listStopRecords uses the events_stop index (#3080)", () => {
   expect(plan.map((p) => p.detail).join("\n")).toContain("USING INDEX events_stop");
 });
 
+test("listEventsByPrefix reads the partial indexes and returns the rows oldest first (#4174)", () => {
+  const db = new Db(join(dir, "switchboard.db"));
+  const ask = { t: "permission.ask", id: "a1", tool: "Bash", input: {} } as unknown as AgentEvent;
+  db.appendEventAt("t1", { t: "message.delta", role: "assistant", text: "x" }, 1000);
+  db.appendEventAt("t2", { t: "message.delta", role: "user", text: "hello" }, 1004);
+  db.appendEventAt("t1", ask, 1002);
+  db.appendEventAt("t1", { t: "permission.resolved", id: "a1", allow: true } as unknown as AgentEvent, 1003);
+  db.appendEventAt("t1", { t: "message.delta", role: "user", text: '{"t":"permission.ask",' }, 1001);
+  db.appendEventAt("t3", { t: "session.end", summary: "s" } as unknown as AgentEvent, 1005);
+  db.appendEventAt("t3", { t: "stop.record", stop: { id: "s1" } } as unknown as AgentEvent, 1006);
+  const all = db.listEventsByPrefix(['{"t":"permission.ask",', '{"t":"permission.resolved",', '{"t":"message.delta","role":"user"', '{"t":"stop.record",']);
+  expect(all.map((e) => [e.taskId, e.ts, e.ev.t])).toEqual([["t1", 1001, "message.delta"], ["t1", 1002, "permission.ask"], ["t1", 1003, "permission.resolved"], ["t2", 1004, "message.delta"], ["t3", 1006, "stop.record"]]);
+  expect(db.listEventsByPrefix(['{"t":"stop.record",']).map((e) => e.ev.t)).toEqual(["stop.record"]);
+  expect(() => db.listEventsByPrefix(['{"t":"session.end",'])).toThrow();
+  expect(db.listEventsByPrefix([])).toEqual([]);
+  const plan = (db.sqlite.query(`EXPLAIN QUERY PLAN ${eventsByPrefixSql(['{"t":"permission.ask",', '{"t":"permission.resolved",', '{"t":"message.delta","role":"user"', '{"t":"stop.record",'])}`).all() as Array<{ detail: string }>).map((p) => p.detail).join("\n");
+  for (const name of ["events_ask", "events_resolved", "events_user_say", "events_stop"]) expect(plan).toContain(`INDEX ${name}`);
+  expect(plan).not.toMatch(/SCAN events$/m); // a bare SCAN is the full table; "SCAN events USING INDEX" reads the partial index only
+});
+
 test("listBacklogRecords keeps a copy until the repository's records change (#3080)", () => {
   const db = new Db(join(dir, "switchboard.db"));
   db.putBacklogSnapshot(A, { records: entries(issue()), cursor: "c1", syncedAt: 1000 });
@@ -986,6 +1058,32 @@ test("listPendingBacklogOperations uses the backlog_operations_open index (#3080
   db.close();
 });
 
+test("outbound: an existing DB keeps both on, a new DB has both off", () => {
+  const path = join(dir, "db.sqlite");
+  const fresh = new Db(path);
+  expect(fresh.getSetting<unknown>("settings", null)).toBeNull();
+  fresh.insertTask({ id: "t1", workspaceId: null, title: "t1", runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "done", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 });
+  fresh.setSetting("settings", { titles: { auto: false } });
+  fresh.close();
+  // from before this migration: it has Tasks
+  const old = new Database(path);
+  old.exec("PRAGMA user_version = 3");
+  old.close();
+  const again = new Db(path);
+  expect(again.getSetting<unknown>("settings", null)).toMatchObject({ titles: { auto: false }, outbound: { classifierLog: true, runnerTelemetry: true } }); // what was saved stays
+  again.close();
+  // without Tasks (a new environment) nothing is written
+  const empty = new Db(join(dir, "empty.sqlite"));
+  expect(empty.getSetting<unknown>("settings", null)).toBeNull();
+  empty.close();
+  const old2 = new Database(join(dir, "empty.sqlite"));
+  old2.exec("PRAGMA user_version = 3");
+  old2.close();
+  const reopened = new Db(join(dir, "empty.sqlite"));
+  expect(reopened.getSetting<unknown>("settings", null)).toBeNull();
+  reopened.close();
+});
+
 test("repeated thinking status is folded once at open (#2738)", () => {
   const path = join(dir, "db.sqlite");
   const thinking = { t: "status", text: "thinking" } as const;
@@ -1008,11 +1106,66 @@ test("repeated thinking status is folded once at open (#2738)", () => {
   expect(kinds(again, "b")).toEqual(["thinking", "使用上限で止まりました", "使用上限で止まりました"]);
   // the task's last row stays: its last seq and ts do not move
   expect(again.listEvents("a").at(-1)!.seq).toBe(9);
-  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2);
+  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(4);
   // once: a run written after it (an old daemon's copy restored, say) is not read again at the next open
   again.appendEvent("a", thinking);
   again.close();
   const third = new Db(path);
   expect(kinds(third, "a")).toEqual(["thinking", "message.delta", "thinking", "thinking"]);
   third.close();
+});
+
+test("migration (#1802): a session.start without effort gets its task's effort (null = \"\"), and a second open changes nothing", () => {
+  const path = join(dir, "db-effort.sqlite");
+  const d = new Db(path);
+  const base = { workspaceId: null, title: "t", runner: "claude", cwd: "/x", scope: ["/x"] as string[], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 } as const;
+  d.insertTask({ ...base, id: "hi", effort: "high" });
+  d.insertTask({ ...base, id: "none", effort: null });
+  const start = { t: "session.start", runner: "claude", cwd: "/x" } as const;
+  d.appendEvent("hi", start);
+  d.appendEvent("hi", { ...start, effort: "low" }); // already stamped: left alone
+  d.appendEvent("none", start);
+  d.appendEvent("hi", { t: "status", text: "x" });
+  d.close();
+  const efforts = (db: Db, id: string) => db.listEvents(id).filter((e) => e.ev.t === "session.start").map((e) => (e.ev as { effort?: string }).effort);
+  const again = new Db(path);
+  expect(efforts(again, "hi")).toEqual(["high", "low"]);
+  expect(efforts(again, "none")).toEqual([""]);
+  again.close();
+  const third = new Db(path);
+  expect(efforts(third, "hi")).toEqual(["high", "low"]);
+  expect(efforts(third, "none")).toEqual([""]);
+  third.close();
+});
+
+// Before the schema is moved on, the old file is kept where the rescue page's "restore the database" lists it.
+const oldDb = (path: string) => {
+  new Db(path).close();
+  const raw = new Database(path);
+  raw.exec("ALTER TABLE tasks DROP COLUMN background; INSERT INTO workspaces (id, name, path, kind, created_at) VALUES ('w', 'w', '/x', 'git', 1)");
+  raw.close();
+};
+
+test("migrate: an older database is copied to snapshots/*-before-migrate.db.gz as it was, a current one and a missing one are not", async () => {
+  const path = join(dir, "switchboard.db");
+  expect(needsMigration(path)).toBe(false);
+  expect(await snapshotBeforeMigrate(path, dir)).toBeNull(); // no file
+  new Db(path).close();
+  expect(needsMigration(path)).toBe(false);
+  expect(await snapshotBeforeMigrate(path, dir)).toBeNull(); // current shape
+  expect(existsSync(join(dir, "snapshots"))).toBe(false);
+  oldDb(path);
+  expect(needsMigration(path)).toBe(true);
+  const name = await snapshotBeforeMigrate(path, dir, new Date("2026-11-08T01:02:03.456Z"));
+  expect(name).toBe("2026-11-08T01-02-03-456Z-before-migrate.db.gz");
+  expect(readdirSync(join(dir, "snapshots"))).toEqual([name!]); // no .db / .tmp / .part left
+  const copy = join(dir, "restored.db");
+  await Bun.write(copy, gunzipSync(readFileSync(join(dir, "snapshots", name!))));
+  const snap = new Database(copy, { readonly: true });
+  expect((snap.query("PRAGMA table_info(tasks)").all() as Array<{ name: string }>).some((c) => c.name === "background")).toBe(false);
+  expect(snap.query("SELECT id FROM workspaces").all()).toEqual([{ id: "w" }]);
+  snap.close();
+  expect(needsMigration(path)).toBe(true); // the database itself was not touched
+  new Db(path).close();
+  expect(needsMigration(path)).toBe(false);
 });

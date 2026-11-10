@@ -14,6 +14,7 @@ const COLUMNS: Array<{ key: EvalsSortKey | null; label: string; title?: string }
   { key: null, label: t(m.runner) },
   { key: null, label: t(m.model) },
   { key: null, label: t(m.colEffort) },
+  { key: null, label: t(m.colSubagentEffort) },
   { key: null, label: t(m.colStatus) },
   { key: "toolCalls", label: t(m.colTools) },
   { key: "toolFailures", label: t(m.failures) },
@@ -42,6 +43,7 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
   // the model and effort are filtered on the rows read, not by the daemon (#1801)
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
+  const [subagentEffort, setSubagentEffort] = useState("");
   const [sort, setSort] = useState<{ key: EvalsSortKey; dir: "asc" | "desc" }>({ key: "updatedAt", dir: "desc" });
   useEffect(() => {
     let live = true;
@@ -82,7 +84,7 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
       live = false;
     };
   }, [workspaceId, props.rev]);
-  const sorted = useMemo(() => (rows ? sortEvalRows(filterEvalRows(rows, { model, effort }), sort.key, sort.dir) : []), [rows, sort, model, effort]);
+  const sorted = useMemo(() => (rows ? sortEvalRows(filterEvalRows(rows, { model, effort, subagentEffort }), sort.key, sort.dir) : []), [rows, sort, model, effort, subagentEffort]);
   const options = useMemo(() => evalFilterOptions(rows ?? []), [rows]);
   const withCurrent = (values: string[], current: string) => (current && !values.includes(current) ? [...values, current] : values);
   // the first click on a score column shows the weak tasks first (ascending); on a count, the heavy ones first (descending)
@@ -163,6 +165,14 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
               </option>
             ))}
           </select>
+          <select className="mode" value={subagentEffort} aria-label={t(m.colSubagentEffort)} onChange={(e) => setSubagentEffort(e.target.value)}>
+            <option value="">{t(m.allSubagentEfforts)}</option>
+            {withCurrent(options.subagentEfforts, subagentEffort).map((v) => (
+              <option key={v} value={v}>
+                {v === "-" ? "—" : v}
+              </option>
+            ))}
+          </select>
           <select className="mode" value={limit} aria-label={t(m.count)} onChange={(e) => setLimit(Number(e.target.value))}>
             {[50, 100, 200, 500].map((n) => (
               <option key={n} value={n}>
@@ -219,7 +229,18 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
                         </>
                       )}
                     </td>
-                    <td>{cells.effort}</td>
+                    <td>
+                      {cells.effort}
+                      {cells.effortMixed && (
+                        <>
+                          {" "}
+                          <span className="tag" title={t(m.mixedEffortTitle, { effort: cells.effort })}>
+                            {t(m.mixed)}
+                          </span>
+                        </>
+                      )}
+                    </td>
+                    <td>{cells.subagentEffort}</td>
                     <td>
                       {r.status} · {outcomeLabel(r.outcome)}
                     </td>

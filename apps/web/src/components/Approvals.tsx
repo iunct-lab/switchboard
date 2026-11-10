@@ -8,7 +8,7 @@ import { t } from "../i18n.ts";
 import { panels as m } from "../i18n/panels.ts";
 import { task as tm } from "../i18n/task.ts";
 import { answerOf, answersOf, type QuestionChoice } from "../questions.ts";
-import { answerButtons, answerTarget, withoutGrant, appliedLine, askCardParts, questionHead, BATCH_LABEL, batchLines, blockerLines, groupAsks, hiddenByBatches, isQuick, quickGroups, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, resumeLabel, scopeLabel, STATE_LABEL, unblocksLine, workspaceChips, workspaceKey, workspaceSections, type Answered, type PolicyForm } from "../asks.ts";
+import { answerButtons, answerTarget, withoutGrant, appliedLine, askCardParts, questionHead, BATCH_LABEL, batchLines, blockerLines, groupAsks, hiddenByBatches, isQuick, quickGroups, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, resumeLabel, scopeLabel, STATE_LABEL, issueOpenHref, unblockLinks, unblocksLine, workspaceChips, workspaceKey, workspaceSections, type Answered, type PolicyForm } from "../asks.ts";
 
 /**
  * A question tool's questions on a card (#3058): a fieldset per question — its options (checkboxes for multiSelect), or a
@@ -380,11 +380,17 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
                     </div>
                     {x.unblocks.length > 0 && (
                       <div className="hint ask-unblocks-list">
-                        {x.unblocks.map((u) => (
-                          <a key={u.number} href={u.url} target="_blank" rel="noreferrer">
-                            #{u.number} {u.title}
-                          </a>
-                        ))}
+                        {unblockLinks(x.unblocks).map((u) =>
+                          u.href ? (
+                            <a key={u.number} href={u.href} target="_blank" rel="noreferrer">
+                              #{u.number} {u.title}
+                            </a>
+                          ) : (
+                            <span key={u.number}>
+                              #{u.number} {u.title}
+                            </span>
+                          ),
+                        )}
                       </div>
                     )}
                     {/* #4068: what it is about and the question, before the answer buttons — a card read from its buttons up */}
@@ -465,8 +471,8 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
                           {t(m.openTask)}
                         </button>
                       )}
-                      {x.route === "issue" && x.issue && (
-                        <a className="button ask-route" href={x.issue.url} target="_blank" rel="noreferrer">
+                      {issueOpenHref(x) && (
+                        <a className="button ask-route" href={issueOpenHref(x) ?? undefined} target="_blank" rel="noreferrer">
                           {t(m.openIssue)}
                         </a>
                       )}

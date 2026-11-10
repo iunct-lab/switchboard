@@ -49,10 +49,10 @@ test("probe: a wait with a planned time shows when it tries and the fallback (#2
   expect(compact).toContain(">再開待ち<");
   expect(compact).toContain(`だめなら ${fmtClock(planned)} に再開`);
   const limited = { ...task, resumeReason: "limit" as const, resumePlannedAt: planned };
-  const brief = renderToStaticMarkup(createElement(Brief, { task: limited, ledger: null, onAbort: noop, open: true, onClose: noop, runners: [{ id: "claude", autoResume: true, models: [] }] as never }));
+  const brief = renderToStaticMarkup(createElement(Brief, { task: limited, ledger: null, onAbort: noop, open: true, onClose: noop, runners: [{ id: "claude", autoResume: true, models: [], efforts: [] }] as never }));
   expect(brief).toContain(`<b>${fmtClock(at)}</b> に 1 回試します（だめなら <b>${fmtClock(planned)}</b>）`);
   // no try planned: as before
-  expect(renderToStaticMarkup(createElement(Brief, { task: { ...limited, resumePlannedAt: null }, ledger: null, onAbort: noop, open: true, onClose: noop, runners: [{ id: "claude", autoResume: true, models: [] }] as never }))).toContain("に同じセッションで自動再開します");
+  expect(renderToStaticMarkup(createElement(Brief, { task: { ...limited, resumePlannedAt: null }, ledger: null, onAbort: noop, open: true, onClose: noop, runners: [{ id: "claude", autoResume: true, models: [], efforts: [] }] as never }))).toContain("に同じセッションで自動再開します");
 });
 
 test("ResumeTag: a disk wait says so, with the threshold in its title (the Rail's compact form too); the Brief names it", () => {
@@ -61,7 +61,7 @@ test("ResumeTag: a disk wait says so, with the threshold in its title (the Rail'
   expect(disk).toContain("ディスクの空き切れで停止。空きが 1 GiB に戻るまで待ちます");
   expect(disk).toContain("自動再開はランナーごとの設定");
   expect(renderToStaticMarkup(createElement(ResumeTag, { resumeAt: at, reason: "disk", compact: true }))).toContain(">空き待ち<");
-  const brief = (over: object, autoResume?: boolean) => renderToStaticMarkup(createElement(Brief, { task: { ...task, resumeReason: "disk", ...over }, ledger: null, onAbort: noop, open: true, onClose: noop, ...(autoResume === undefined ? {} : { runners: [{ id: "claude", autoResume, models: [] }] as never }) }));
+  const brief = (over: object, autoResume?: boolean) => renderToStaticMarkup(createElement(Brief, { task: { ...task, resumeReason: "disk", ...over }, ledger: null, onAbort: noop, open: true, onClose: noop, ...(autoResume === undefined ? {} : { runners: [{ id: "claude", autoResume, models: [], efforts: [] }] as never }) }));
   const on = brief({}, true);
   expect(on).toContain("ディスクの空き切れで止まりました。");
   expect(on).toContain("空きが 1 GiB に戻ったら同じセッションで自動再開します");

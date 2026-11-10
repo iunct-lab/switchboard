@@ -14,7 +14,7 @@ import { EMPTY_PRICE_FORM, parsePriceForm, priceFormOf, type PriceForm } from ".
 import { addModel, hideModel, moveModel, removeModel, unhideModel } from "../modelList.ts";
 import { countriesUrl, logoutPath } from "../login.ts";
 import { presetRow } from "../presets.ts";
-import { customRunnerFromDraft, isAdkRunner, listedRunners, sendsOffHost, type CustomRunnerDraft } from "../runners.ts";
+import { aguiNotices, customRunnerFromDraft, PORT_LABEL, isAdkRunner, listedRunners, sendsOffHost, type CustomRunnerDraft } from "../runners.ts";
 import { githubSyncText } from "../backlogSync.ts";
 import { WorkspaceCard } from "./WorkspaceCard.tsx";
 import { jstTime } from "../time.ts";
@@ -168,6 +168,23 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
           </div>
           <NumberField label={t(settings.fallbackAt)} hint={t(settings.fallbackAtHint)} value={s.autoStart.fallbackAt} def={0.9} step={0.05} min={0.5} max={1} disabled={saving} onSave={(v) => save({ autoStart: { fallbackAt: v } })} />
         </div>
+      </SettingsCard>
+
+      <SettingsCard title={t(settings.subagentEffort)}>
+        <div className="muted">{t(settings.subagentEffortHint)}</div>
+        {runners.filter((r) => r.id === "claude" && r.efforts.length > 0).map((r) => (
+          <div key={r.id} className="row" style={{ alignItems: "center", gap: 6 }}>
+            <span className="t">{r.id}</span>
+            <select className="mode" value={s.subagentEffort[r.id] ?? ""} disabled={saving} aria-label={t(settings.subagentEffortLabel, { runner: r.id })} onChange={(e) => void save({ subagentEffort: { [r.id]: e.target.value || null } })}>
+              <option value="">{t(settings.subagentEffortSame)}</option>
+              {r.efforts.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        ))}
       </SettingsCard>
 
       <SettingsCard title={t(settings.reviewRunner)}>
@@ -369,6 +386,20 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
           <button onClick={() => void logout(logoutPath(props.health?.login)!, props.onError)}>{t(settings.logout)}</button>
         </SettingsCard>
       )}
+
+      <SettingsCard title={t(settings.outbound)}>
+        <div className="muted">{t(settings.outboundHint)}</div>
+        <label className="hint toggle">
+          <input type="checkbox" checked={s.outbound.classifierLog} disabled={saving} onChange={(e) => void save({ outbound: { classifierLog: e.target.checked } })} />
+          {t(settings.classifierLogToggle)}
+        </label>
+        <div className="muted">{t(settings.classifierLogHint)}</div>
+        <label className="hint toggle">
+          <input type="checkbox" checked={s.outbound.runnerTelemetry} disabled={saving} onChange={(e) => void save({ outbound: { runnerTelemetry: e.target.checked } })} />
+          {t(settings.runnerTelemetryToggle)}
+        </label>
+        <div className="muted">{t(settings.runnerTelemetryHint)}</div>
+      </SettingsCard>
     </main>
   );
 }
@@ -1064,7 +1095,7 @@ export function TerminalHistory(props: { onError: (msg: string) => void }) {
   );
 }
 
-const EMPTY_DRAFT: CustomRunnerDraft = { name: "", label: "", url: "", app: "", tokenEnv: "" };
+const EMPTY_DRAFT: CustomRunnerDraft = { port: "adk", sendWorkspaceMcp: false, name: "", label: "", url: "", app: "", tokenEnv: "" };
 
 /** The ADK servers that run as `custom:<name>` (#3388, docs/design/custom-adapter.md). No edit: remove and add again. */
 function CustomRunnersSection(props: { onError: (msg: string) => void }) {
@@ -1099,7 +1130,7 @@ function CustomRunnersSection(props: { onError: (msg: string) => void }) {
     setError(null);
     void put([...list, r.entry]).then((ok) => ok && setDraft(EMPTY_DRAFT));
   };
-  const field = (key: keyof CustomRunnerDraft, label: string, placeholder: string, size: number) => (
+  const field = (key: "name" | "label" | "url" | "app" | "tokenEnv", label: string, placeholder: string, size: number) => (
     <label className="hint">
       {label} <input value={draft[key]} size={size} placeholder={placeholder} disabled={saving} onChange={(e) => setDraft({ ...draft, [key]: e.target.value })} />
     </label>
@@ -1109,44 +1140,57 @@ function CustomRunnersSection(props: { onError: (msg: string) => void }) {
     <SettingsCard title={t(settings.adk)}>
       <div className="muted">{t(settings.adkHint)}</div>
       {list?.length ? (
-        <table>
+        <div>
           {/* ui-strings: value "custom:" "/ app" — the runner id's prefix and ADK's word for the app */}
-          <tbody>
-            {list.map((r) => (
-              <tr key={r.name}>
-                <td>
-                  <b>custom:{r.name}</b>
-                </td>
-                <td>{r.label}</td>
-                <td>
-                  {r.url} / app {r.app}
-                  {sendsOffHost(r.url) && <span className="hint">{t(settings.adkSentHere)}</span>}
-                </td>
-                <td>{r.tokenEnv ? t(settings.adkToken, { name: r.tokenEnv }) : t(settings.adkNoToken)}</td>
-                <td>
-                  <button className="ghost" disabled={saving} onClick={() => void put(list.filter((x) => x.name !== r.name))}>
-                    {t(settings.delete)}
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+          {list.map((r) => (
+            <div key={r.name} className="row" style={{ flexWrap: "wrap", gap: "2px 12px", padding: "4px 0", alignItems: "baseline" }}>
+              <b>custom:{r.name}</b>
+              <span>{r.label}</span>
+              <span style={{ overflowWrap: "anywhere" }}>
+                {PORT_LABEL[r.port]} {r.url}
+                {r.port === "adk" ? <> / app {r.app}</> : r.sendWorkspaceMcp && <span className="hint">{t(settings.aguiSendsMcp)}</span>}
+                {sendsOffHost(r.url) && <span className="hint">{t(settings.adkSentHere)}</span>}
+              </span>
+              <span>{r.tokenEnv ? t(settings.adkToken, { name: r.tokenEnv }) : t(settings.adkNoToken)}</span>
+              <button className="ghost" disabled={saving} onClick={() => void put(list.filter((x) => x.name !== r.name))}>
+                {t(settings.delete)}
+              </button>
+            </div>
+          ))}
+        </div>
       ) : (
         list && <div className="hint">{t(settings.nothingYet)}</div>
       )}
       {/* ui-strings: value "name" "label" "url" "app" "tokenEnv" "research" "Research agent" — the fields' keys and a sample runner */}
       <div className="row" style={{ flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+        <label className="hint">
+          {t(settings.runnerKind)}{" "}
+          <select value={draft.port} disabled={saving} onChange={(e) => setDraft({ ...draft, port: e.target.value as CustomRunnerDraft["port"] })}>
+            <option value="adk">{PORT_LABEL.adk}</option>
+            <option value="agui">{PORT_LABEL.agui}</option>
+          </select>
+        </label>
         {field("name", t(settings.name), "research", 10)}
         {field("label", t(settings.displayName), "Research agent", 14)}
         {field("url", "URL", "http://127.0.0.1:8001", 24)}
-        {field("app", t(settings.adkApp), "research_agent", 14)}
+        {draft.port === "adk" && field("app", t(settings.adkApp), "research_agent", 14)}
         {field("tokenEnv", t(settings.adkTokenEnv), "RESEARCH_TOKEN", 16)}
         <button disabled={saving || !list} onClick={add}>
           {t(settings.add)}
         </button>
       </div>
-      {offHost && <div className="hint">{t(settings.adkOffHost)}</div>}
+      {draft.port === "agui" && (
+        <label className="hint">
+          <input type="checkbox" checked={draft.sendWorkspaceMcp} disabled={saving} onChange={(e) => setDraft({ ...draft, sendWorkspaceMcp: e.target.checked })} /> {t(settings.aguiSendMcp)}
+        </label>
+      )}
+      {draft.port === "adk" && offHost && <div className="hint">{t(settings.adkOffHost)}</div>}
+      {draft.port === "agui" &&
+        aguiNotices(draft).map((k) => (
+          <div key={k} className="hint">
+            {t(k === "request" ? settings.aguiNoticeRequest : k === "token" ? settings.aguiNoticeToken : settings.aguiNoticeConfirm)}
+          </div>
+        ))}
       {error && <div className="error">{error}</div>}
       {changed && <div className="hint">{t(settings.adkSaved)}</div>}
     </SettingsCard>

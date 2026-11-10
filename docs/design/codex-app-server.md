@@ -1,6 +1,6 @@
 # Codex app-server — wire notes
 
-Verified 2026-09-05 against **codex-cli 0.148.0-alpha.9** (driven from Bun). Recorded fixtures are kept outside Git under the same relative path `packages/adapters/codex/fixtures/` (record your own outside Git with the `runner-adapter-recording` skill; `bun scripts/fixtures.ts fetch` works only in a clone with the private history); lines prefixed `> ` are what Switchboard sent.
+Verified 2026-09-05 against **codex-cli 0.148.0-alpha.9** (driven from Bun). Recorded fixtures are kept outside Git under the same relative path `packages/adapters/codex/fixtures/` (record your own outside Git with the `runner-adapter-recording` skill); lines prefixed `> ` are what Switchboard sent.
 
 ## Invocation
 

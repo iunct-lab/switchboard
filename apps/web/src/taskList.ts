@@ -1,4 +1,4 @@
-import type { Task } from "@switchboard/protocol";
+import { isWorkingStatus, type Task } from "@switchboard/protocol";
 import { t } from "./i18n.ts";
 import { common } from "./i18n/common.ts";
 
@@ -16,7 +16,7 @@ export const STATUS_FILTERS: Array<{ value: StatusFilter; label: string }> = [
 export const PAGE = 50;
 
 const inStatus = (t: Task, s: StatusFilter) =>
-  s === "all" || (s === "active" ? t.status === "running" || t.status === "waiting" || !!t.background : s === "done" ? t.status === "done" : t.status === "error" || t.status === "aborted");
+  s === "all" || (s === "active" ? isWorkingStatus(t.status) : s === "done" ? t.status === "done" : t.status === "error" || t.status === "aborted");
 
 /**
  * The rail's Task list (#1142): the archived ones or the others, in the chosen state, whose title or cwd holds `q`

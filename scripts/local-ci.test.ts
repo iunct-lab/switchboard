@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { ciExit, ciSteps } from "./ci";
 import { withHeavySlot } from "../ops-kit/src/heavy";
 import { RECORDS_HEADER } from "./perf-ratchet";
-import { checkoutSteps, DURATION_STEP, groupScript, HOST_TESTS, hostOffload, OFFLOAD_GROUPS, parseGroup, placeSteps, recordBundle, recordBytes, existingPass, failLines, failureSummary, perfSteps, LOCAL_CI_RESULT, localCi, main, mainFork, markerSeconds, narrowPerfStep, narrowTestStep, notify, perfVerdict, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepSeconds, stepWithIdle, TargetError, testsOf, type Deps, type LocalCiResult } from "./local-ci";
+import { checkoutSteps, DURATION_STEP, groupScript, HOST_TESTS, hostOffload, OFFLOAD_GROUPS, parseGroup, placeSteps, recordBundle, recordBytes, recordCounts, existingPass, failLines, incrementalBase, incrementalSteps, LOCAL_CI_RESULT, localCi, main, mainFork, markerSeconds, narrowTestStep, notify, perfVerdict, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, runCheckout, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepSeconds, stepWithIdle, TargetError, onlyPerf, testsOf, withoutPerf, type Deps, type LocalCiResult } from "./local-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
 const ciTs = await Bun.file(new URL("./ci.ts", import.meta.url)).text();
@@ -15,6 +15,8 @@ const passOf = (body: string) => {
   const m = LOCAL_CI_RESULT.exec(body);
   return m?.[1] === "pass" ? [m[2], m[3]] : undefined;
 };
+/** The steps a PR's local CI runs: Actions' without the perf ones (the tag CI measures them, #4076). */
+const prSteps = withoutPerf(ciSteps);
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const BASE = "3333333333333333333333333333333333333333";
 // local-ci's worktrees and failure logs: never the real ~/.cache (a failure removes that PR's earlier logs)
@@ -38,7 +40,7 @@ describe("local-ci", () => {
    * `pullHead`: what refs/pull/<n>/head holds (none = the head the PR named last). `o.heads` / `o.bases`: what the PR names as its head and what the base
    * branch's tip is, one per read (the last repeats). `o.conflict`: the merge stops on a conflict; `o.mergeError`: it fails otherwise.
    */
-  const deps = (failAt?: string, pullHead?: string, failOutput = "1 fail", base: Record<string, { code: number; output: string }> = {}, throwOnBase = false, o: { heads?: string[]; bases?: string[]; conflict?: boolean; mergeError?: boolean; noCiTs?: boolean; budget?: unknown; select?: string; loaded?: string } = {}) => {
+  const deps = (failAt?: string, pullHead?: string, failOutput = "1 fail", _base: Record<string, { code: number; output: string }> = {}, _throwOnBase = false, o: { heads?: string[]; bases?: string[]; conflict?: boolean; mergeError?: boolean; noCiTs?: boolean; budget?: unknown; select?: string } = {}) => {
     const next = (xs: string[]) => (xs.length > 1 ? xs.shift()! : xs[0]!);
     const heads = [...(o.heads ?? [SHA])];
     const bases = [...(o.bases ?? [BASE])];
@@ -51,7 +53,7 @@ describe("local-ci", () => {
     const d: Deps = {
       sh: async (cmd) => {
         calls.push(cmd);
-        if (cmd[0] === "env") return (cmd.includes("--loaded") ? o.loaded : o.select) ?? "";
+        if (cmd[0] === "env") return o.select ?? "";
         if (cmd.includes("merge-base")) return "f".repeat(40) + "\n";
         if (cmd[0] === "gh") return JSON.stringify({ headRefOid: (named = next(heads)), baseRefName: "main" });
         if (cmd.includes("fetch")) fetched = cmd.at(-1)!;
@@ -59,7 +61,6 @@ describe("local-ci", () => {
         if (cmd.includes("merge") && (o.conflict || o.mergeError)) throw new Error(o.conflict ? "git -C merge failed: CONFLICT (content)" : "git -C merge failed: gpg failed to sign the data");
         if (cmd.includes("--diff-filter=U")) return o.conflict ? "a.ts\n" : "";
         if (cmd.includes("worktree") && cmd.includes("add")) {
-          if (throwOnBase && cmd[cmd.indexOf("--detach") + 1]!.includes("-base.")) throw new Error("git worktree add failed: fatal: bad object");
           // the worktree gets the real ci.yml and scripts/ci.ts
           const dir = cmd[cmd.indexOf("--detach") + 1]!;
           await Bun.write(`${dir}/.github/workflows/ci.yml`, o.noCiTs ? ciYml.replace(SHARED_ENTRY, "make check") : ciYml);
@@ -73,11 +74,6 @@ describe("local-ci", () => {
         ran.push(script.trim());
         envs.push(env);
         // the bench leaves its result in the worktree, as the real one does
-        if (cwd.includes("-base.")) {
-          const b = base[script.trim()] ?? { code: 0, output: "ok" };
-          if (script.includes("perf-bench.ts") && b.code === 0) await Bun.write(join(cwd, "perf-result.json"), '{"runs":5,"base":true}');
-          return b;
-        }
         if (script.includes("perf-bench.ts") && script.trim() !== failAt) await Bun.write(join(cwd, "perf-result.json"), '{"runs":5}');
         if (failAt && script.trim() === failAt) return { code: 1, output: failOutput };
         // the check reads the bench's result, as the real one does: none after a failed bench
@@ -89,6 +85,100 @@ describe("local-ci", () => {
     };
     return { d, calls, ran, envs, logged };
   };
+
+  describe("incremental run", () => {
+    const PASS = "a".repeat(40);
+    const comment = (body: string, createdAt = "2026-11-07T00:00:00Z", authorAssociation = "OWNER") => ({ body, createdAt, authorAssociation });
+    const passComment = comment(`[local-ci] pass ${PASS} base=${BASE}\n`);
+    /** `o.comments`: the PR's comments; `o.cherry`: git cherry's output; `o.merges`: the PR's merge commits; `o.notAncestor`: they are not in the pass; `o.files`: `git show` by commit */
+    const incDeps = (select: string, o: { comments?: unknown[]; cherry?: string; merges?: string; notAncestor?: boolean; files?: Record<string, string> } = {}) => {
+      const f = deps(undefined, undefined, "1 fail", {}, false, { select });
+      const inner = f.d.sh;
+      f.d.sh = async (cmd, cwd) => {
+        if (cmd[0] === "gh" && cmd.includes("comments")) { f.calls.push(cmd); return JSON.stringify({ comments: o.comments ?? [passComment] }); }
+        if (cmd.includes("cherry")) { f.calls.push(cmd); return o.cherry ?? `+ ${"c".repeat(40)}\n- ${"d".repeat(40)}\n`; }
+        if (cmd.includes("--merges")) { f.calls.push(cmd); return o.merges ?? ""; }
+        if (cmd.includes("--is-ancestor")) { f.calls.push(cmd); if (o.notAncestor) throw new Error("not ancestor"); return ""; }
+        if (cmd.includes("show")) { f.calls.push(cmd); return (o.files ?? { [`${"c".repeat(40)}`]: "a.ts\0b.test.ts\0" })[cmd.at(-1)!] ?? ""; }
+        return inner(cmd, cwd);
+      };
+      return f;
+    };
+    const names = (ran: string[]) => ran.map((r) => (r.startsWith("bun test") ? "bun test" : r));
+    const INCREMENTAL_RUNS = ["bun install --frozen-lockfile", "bun run typecheck", "bun test './a.test.ts'"];
+
+    test("a commit added after the pass: the tests are chosen from its files only, and only install, type check and that bun test run", async () => {
+      const { d, ran, calls } = incDeps("selected: 1\na.test.ts  a.ts → a.test.ts");
+      const r = await localCi(42, "/repo", d, "example/development", CACHE);
+      expect(ran).toEqual(INCREMENTAL_RUNS);
+      // the selection got the commit's files, and no diff against main's fork was asked
+      expect(calls.find((c) => c[0] === "env")!.slice(-2)).toEqual(["a.ts", "b.test.ts"]);
+      expect(calls.some((c) => c.includes("diff") && c.includes("--no-renames"))).toBe(false);
+      expect(r.ok).toBe(true);
+      expect(r.incremental).toEqual({ pass: PASS, commits: 1, files: 2 });
+      expect(r.selection).toMatchObject({ files: ["a.test.ts"] });
+      expect(r.seconds?.test).toBeNumber();
+      const text = resultComment(r);
+      expect(text.split("\n")[0]).toBe(`[local-ci] pass ${SHA} base=${BASE}`);
+      expect(LOCAL_CI_RESULT.test(text)).toBe(true);
+      const lines = text.split("\n");
+      expect(lines.findIndex((l) => l.startsWith("増分: "))).toBe(lines.findIndex((l) => l.startsWith("テスト: ")) - 1);
+      expect(text).toContain("増分: aaaaaaa の pass の後の 1 コミット（変更 2 ファイル）で、型検査と選んだテストだけ");
+      expect(testsOf(text)).toEqual({ ran: 1, total: 0 });
+    });
+
+    test("a fix that touches bun.lock, scripts/ci.ts or scripts/test-select.ts runs every step", async () => {
+      for (const reason of ["bun.lock: 依存の定義や設定", "scripts/ci.ts: CI の手順", "scripts/test-select.ts: 判定の道具自体"]) {
+        const { d, ran } = incDeps(`full: ${reason}`);
+        const r = await localCi(42, "/repo", d, "example/development", CACHE);
+        expect(names(ran)).toEqual(prSteps.map((s) => s.run.trim()));
+        expect(r.incremental).toBeUndefined();
+        expect(resultComment(r)).not.toContain("増分:");
+      }
+    });
+
+    test("no earlier pass, a fail, a pass of this head, a merge commit the pass lacks, --all or --force: every step", async () => {
+      const full = prSteps.map((s) => s.run.trim());
+      const cases: Array<[string, Parameters<typeof incDeps>[1], { all?: boolean; force?: boolean }]> = [
+        ["no result", { comments: [] }, {}],
+        ["a fail", { comments: [comment(`[local-ci] fail ${PASS} base=${BASE}`)] }, {}],
+        ["a pass of a stranger", { comments: [comment(`[local-ci] pass ${PASS} base=${BASE}`, undefined, "NONE")] }, {}],
+        ["a pass of this head", { comments: [comment(`[local-ci] pass ${SHA} base=${BASE}`)] }, {}],
+        ["a merge commit", { merges: `${"e".repeat(40)}\n`, notAncestor: true }, {}],
+        ["--all", {}, { all: true }],
+        ["--force", {}, { force: true }],
+      ];
+      for (const [name, o, opts] of cases) {
+        const { d, ran } = incDeps("selected: 1\na.test.ts  x", o);
+        const r = await localCi(42, "/repo", d, "example/development", CACHE, opts);
+        expect([name, names(ran)]).toEqual([name, full]);
+        expect(r.incremental).toBeUndefined();
+      }
+    });
+
+    test("a merge commit that the pass has does not stop it", async () => {
+      const { d, ran } = incDeps("selected: 1\na.test.ts  x", { merges: `${"e".repeat(40)}\n` });
+      expect((await localCi(42, "/repo", d, "example/development", CACHE)).incremental).toBeDefined();
+      expect(ran).toEqual(INCREMENTAL_RUNS);
+    });
+
+    test("incrementalBase: the files of every added commit (deleted ones too, once), none for a failure to read", async () => {
+      const [c1, c2] = ["1".repeat(40), "2".repeat(40)];
+      const mk = (o: Parameters<typeof incDeps>[1]) => incDeps("", { cherry: `+ ${c1}\n- ${"d".repeat(40)}\n+ ${c2}\n`, files: { [c1]: "a.ts\0gone.ts\0", [c2]: "a.ts\0c.md\0" }, ...o }).d;
+      expect(await incrementalBase(42, "example/development", "/repo", SHA, BASE, mk({}))).toEqual({ pass: PASS, commits: [c1, c2], files: ["a.ts", "gone.ts", "c.md"] });
+      const broken = mk({});
+      const was = broken.sh;
+      broken.sh = async (c, w) => { if (c.includes("fetch")) throw new Error("offline"); return was(c, w); };
+      expect(await incrementalBase(42, "example/development", "/repo", SHA, BASE, broken)).toBeUndefined();
+      // a rebase that kept every diff: no commit added, nothing to select
+      expect(await incrementalBase(42, "example/development", "/repo", SHA, BASE, mk({ cherry: `- ${c1}\n` }))).toEqual({ pass: PASS, commits: [], files: [] });
+    });
+
+    test("incrementalSteps keeps the install, type check and the narrowed test; a CI lacking one gives none", () => {
+      expect(incrementalSteps(ciSteps, ["a.test.ts"])!.map((s) => s.run)).toEqual(["bun install --frozen-lockfile", "bun run typecheck", "bun test './a.test.ts'"]);
+      expect(incrementalSteps(ciSteps.filter((s) => s.run.trim() !== "bun run typecheck"), [])).toBeUndefined();
+    });
+  });
 
   describe("the narrowed bun test (#3297)", () => {
     const opts = (select: string) => [undefined, undefined, "1 fail", {}, false, { select }] as const;
@@ -170,7 +260,6 @@ describe("local-ci", () => {
       const sh: Deps["sh"] = async (c, cwd) => {
         if (c[0] === "gh") return "main\n";
         if (c[0] !== "env") return realSh(c, cwd);
-        if (c.includes("--loaded")) return "loaded: run  x";
         args = c.slice(c.indexOf("scripts/test-select.ts") + 1);
         expect(cwd).toBe(dir);
         return "selected: 0";
@@ -184,42 +273,11 @@ describe("local-ci", () => {
     });
   });
 
-  describe("perf-bench's loaded only for a change that reaches it (#3635)", () => {
-    const SKIP = "変更 1 ファイルのどれも scripts/perf-bench.ts に届かない";
-    const opts = (loaded: string) => [undefined, undefined, "1 fail", {}, false, { select: "selected: 0", loaded }] as const;
-    const bench = (ran: string[]) => ran.filter((r) => r.startsWith("bun scripts/perf-bench.ts"));
-
-    test("skip: perf-bench gets --skip-loaded and the reason, and the comment says it was not measured", async () => {
-      const { d, ran, calls } = deps(...opts(`loaded: skip  ${SKIP}`));
-      const r = await localCi(42, "/repo", d, "example/development", CACHE);
-      expect(calls.some((c) => c[0] === "env" && c.includes("scripts/test-select.ts") && c.includes("--loaded"))).toBe(true);
-      expect(bench(ran)).toEqual([`bun scripts/perf-bench.ts --runs 5 --json perf-result.json --skip-loaded '${SKIP}'`]);
-      expect(r.selection?.loaded).toEqual({ run: false, reason: SKIP });
-      expect(r.results.find((x) => x.run.startsWith("bun scripts/perf-bench.ts"))!.name).toBe("bun scripts/perf-bench.ts --runs 5 --json perf-result.json");
-      expect(resultComment(r)).toContain(`loaded（量と重なりの計測）: 測らなかった（${SKIP}）`);
-    });
-
-    test("run, `all`, or an answer it cannot read: perf-bench measures loaded as it is", async () => {
-      for (const [o, all] of [[opts("loaded: run  packages/core/src/server.ts → scripts/perf-bench.ts"), false], [opts(`loaded: skip  ${SKIP}`), true], [opts("selected: 0"), false]] as const) {
-        const { d, ran, logged } = deps(...o);
-        const r = await localCi(42, "/repo", d, "example/development", CACHE, all ? { all: true } : undefined);
-        expect(bench(ran)).toEqual(["bun scripts/perf-bench.ts --runs 5 --json perf-result.json"]);
-        expect(resultComment(r)).not.toContain("測らなかった");
-        if (o[5].loaded === "selected: 0") expect(logged).toContain("loaded の判定に失敗（測る）: 出力を読めない: selected: 0");
-      }
-    });
-
-    test("narrowPerfStep quotes the reason and leaves a CI without perf-bench as it is", () => {
-      expect(narrowPerfStep([{ name: "b", run: "bun scripts/perf-bench.ts --runs 5" }], "it's")).toEqual([{ name: "b", run: "bun scripts/perf-bench.ts --runs 5 --skip-loaded 'it'\\''s'" }]);
-      expect(narrowPerfStep([{ name: "x", run: "make" }], "r")).toEqual([{ name: "x", run: "make" }]);
-    });
-  });
-
   test("every step green → ok with the head sha; the worktree is removed", async () => {
     const { d, calls, ran, envs } = deps();
     const r = await localCi(42, "/repo", d, "example/development", CACHE);
     expect(r).toMatchObject({ ok: true, sha: SHA });
-    expect(ran).toEqual(ciSteps.map((s) => s.run.trim()));
+    expect(ran).toEqual(prSteps.map((s) => s.run.trim()));
     // what Actions' pull_request run tests: the latest head merged here into the base branch's latest tip (#913)
     expect(calls.filter((c) => c.includes("fetch")).map((c) => c.slice(1).join(" "))).toEqual(["-C /repo fetch -q origin +refs/heads/main:refs/local-ci/42/base", "-C /repo fetch -q origin +refs/pull/42/head:refs/local-ci/42/head"]);
     const add = calls.find((c) => c.includes("worktree") && c.includes("add"))!;
@@ -232,6 +290,49 @@ describe("local-ci", () => {
     expect(calls.some((c) => c.includes("worktree") && c.includes("remove"))).toBe(true);
     const body = resultComment(r);
     expect(passOf(body)).toEqual([SHA, BASE]);
+  });
+
+  test("a PR's steps have no perf: no web build, fetch main, fonts, base, perf-bench or perf-ratchet; the install, typecheck and bun test stay (#4076)", async () => {
+    const { d, ran } = deps();
+    await localCi(42, "/repo", d, "example/development", CACHE);
+    expect(ran.some((r) => r.includes("perf-bench") || r.includes("perf-ratchet") || r.includes("apps/web build") || r.includes("git fetch") || r.includes("fc-list"))).toBe(false);
+    expect(ran).toContain("bun install --frozen-lockfile");
+    expect(ran).toContain("bun run typecheck");
+    expect(ran.at(-1)).toBe("bun test");
+  });
+
+  test("onlyPerf: the install, the web build and the perf-bench step, not perf-ratchet's base and check; a CI without perf has none", () => {
+    const names = onlyPerf(ciSteps).map((x) => x.name);
+    expect(names[0]).toBe("bun install --frozen-lockfile");
+    expect(names).toContain("bun run --cwd apps/web build");
+    expect(names).toContain("bun scripts/perf-bench.ts --runs 5 --json perf-result.json");
+    expect(names.some((n) => n.includes("perf-ratchet"))).toBe(false);
+    expect(names).not.toContain("bun test");
+    expect(onlyPerf([{ name: "make", run: "make" }, { name: "bun test", run: "bun test" }])).toEqual([]);
+  });
+
+  test("withoutPerf: the range from the web build to the last perf step goes, the install and what follows stay; a CI without it is as it is", () => {
+    const names = (xs: Array<{ name: string }>) => xs.map((x) => x.name);
+    const dropped = names(ciSteps).filter((n) => !names(withoutPerf(ciSteps)).includes(n));
+    expect(dropped).toContain("bun run --cwd apps/web build");
+    expect(dropped).toContain("fetch main");
+    expect(names(withoutPerf(ciSteps))).toEqual(names(ciSteps).filter((n) => !dropped.includes(n)));
+    expect(names(withoutPerf(ciSteps))).toContain("bun install --frozen-lockfile");
+    expect(names(withoutPerf(ciSteps)).at(-1)).toBe("bun test");
+    const other = [{ name: "make", run: "make" }, { name: "bun test", run: "bun test" }];
+    expect(withoutPerf(other)).toEqual(other);
+  });
+
+  test("runCheckout with perf (the tag CI's) runs every step as before; with false (a PR's) the PR's steps", async () => {
+    for (const [perf, want] of [[true, ciSteps], [false, prSteps]] as const) {
+      const { d, ran } = deps();
+      const dir = mkdtempSync(join(CACHE, "co-"));
+      await Bun.write(join(dir, ".github/workflows/ci.yml"), ciYml);
+      await Bun.write(join(dir, "scripts/ci.ts"), ciTs);
+      const run = await runCheckout(dir, stepEnv(dir), "t4104-steps", d, CACHE, undefined, undefined, perf);
+      expect(run.ok).toBe(true);
+      expect(ran).toEqual(want.map((x) => x.run.trim()));
+    }
   });
 
   test("step seconds in pass marker: a checkout without scripts/ci.ts (--repo) passes without the seconds, not with an error (#1886)", async () => {
@@ -368,7 +469,7 @@ describe("local-ci", () => {
     // the first line only (#3118): what merge-gate reads; the seconds line is hidden in GitHub's view
     expect(posted[0]!.split("\n")[1]).toStartWith("<!-- local-ci-seconds ");
     expect(posted[0]).toContain(`対象: head \`${SHA}\` を base \`${BASE}\` にマージ`);
-    expect(posted[0]!.split("\n").filter((l) => l.startsWith("| `")).length).toBe(ciSteps.length);
+    expect(posted[0]!.split("\n").filter((l) => l.startsWith("| `")).length).toBe(prSteps.length);
   });
 
   test("notify: a failure is posted as a result without a pass mark, naming the step and its (fail) lines", async () => {
@@ -546,34 +647,29 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
   const CHECK = "bun scripts/perf-ratchet.ts check perf-result.json --base perf-base.json || { cat perf-result.json; exit 1; }";
   const BENCH = "bun scripts/perf-bench.ts --runs 5 --json perf-result.json";
   const JSON_DUMP = Array.from({ length: 60 }, (_, i) => `  "line${i}": ${i},`).join("\n");
-  const perfRun = async (failAt: string, output: string, base: Record<string, { code: number; output: string }> = {}, throwOnBase = false) => {
-    const { d, calls, logged, envs } = deps(failAt, SHA, output, base, throwOnBase);
-    const r = await localCi(42, "/repo", d, "example/development", CACHE);
-    const log = r.results.find((x) => x.code !== 0)!.log!;
-    const dir = log.slice(0, log.lastIndexOf("/"));
-    const summary = existsSync(join(dir, "summary.md")) ? readFileSync(join(dir, "summary.md"), "utf8") : "";
-    const perfResult = existsSync(join(dir, "perf-result.json")) ? readFileSync(join(dir, "perf-result.json"), "utf8") : undefined;
-    const baseResult = existsSync(join(dir, "perf-result.base.json")) ? readFileSync(join(dir, "perf-result.base.json"), "utf8") : undefined;
-    const files = readdirSync(dir);
-    const worktrees = (verb: string) => calls.filter((c) => c.includes("worktree") && c.includes(verb)).length;
-    rmSync(dir, { recursive: true, force: true });
-    // a failure posts nothing: the only gh call is reading the head
-    expect(calls.filter((c) => c[0] === "gh").map((c) => c.slice(0, 4).join(" "))).toEqual(["gh pr view 42"]);
-    expect(r.ok).toBe(false);
-    return { r, summary, logged, perfResult, baseResult, files, calls, envs, adds: worktrees("add"), removes: worktrees("remove") };
+  /** The tag CI's run (runCheckout with perf): the steps with `failAt` failing with `output`, as the checkout's whole CI. The failure log dir is removed after `use`. */
+  const perfRun = async (failAt: string, output: string, wrap?: (d: Deps, ran: string[]) => Deps) => {
+    const x = deps(failAt, SHA, output);
+    const d = wrap ? wrap(x.d, x.ran) : x.d;
+    const dir = mkdtempSync(join(CACHE, "co-"));
+    await Bun.write(join(dir, ".github/workflows/ci.yml"), ciYml);
+    await Bun.write(join(dir, "scripts/ci.ts"), ciTs);
+    const run = await runCheckout(dir, stepEnv(dir), "t4104-perf", d, CACHE, undefined, undefined, true);
+    const failed = run.results.filter((x) => x.code !== 0);
+    const logDir = failed[0]!.log!.slice(0, failed[0]!.log!.lastIndexOf("/"));
+    const perfResult = existsSync(join(logDir, "perf-result.json")) ? readFileSync(join(logDir, "perf-result.json"), "utf8") : undefined;
+    const r: LocalCiResult = { sha: SHA, base: BASE, results: run.results, ok: run.ok, ...(run.perf ? { perf: run.perf } : {}), ...(run.bundle.length ? { bundle: run.bundle } : {}) };
+    return { run, r, failed, logDir, perfResult, logged: x.logged, ran: x.ran, cleanup: () => rmSync(logDir, { recursive: true, force: true }) };
   };
 
-  test("perf over: the over line, head / base and the environment are in summary.md and on the console, even under a long JSON dump; perf-result.json is kept", async () => {
+  test("perf over: the over line is in the verdict and the step's fails, even under a long JSON dump; perf-result.json is kept in the failure's log dir", async () => {
     const over = "over: journeys.launch.layoutShift = 0.3015 > ceiling 0.2371";
-    const { r, summary, logged, perfResult } = await perfRun(CHECK, `ceilings: local\n${over}\n{\n${JSON_DUMP}\n}`);
-    expect(r.perf).toEqual({ env: "local", over: [over], improved: [], raised: [], grew: [], unknown: false });
-    expect(summary).toContain(`head ${SHA} / base ${BASE}`);
-    expect(summary).toContain(`環境: ceilings local, TMPDIR ${join(tmpdir(), "switchboard.local-ci-42-tmp.")}`);
-    expect(summary).toContain(", CI=true");
-    expect(summary).toContain(`超過（over）:\n${over}`);
+    const { run, perfResult, cleanup } = await perfRun(CHECK, `ceilings: local\n${over}\n{\n${JSON_DUMP}\n}`);
+    cleanup();
+    expect(run.ok).toBe(false);
+    expect(run.perf).toEqual({ env: "local", over: [over], improved: [], raised: [], grew: [], unknown: false });
     expect(perfResult).toBe('{"runs":5}');
-    expect(logged.join("\n")).toContain(over);
-    expect(logged.some((l) => l.startsWith("記録: "))).toBe(true);
+    expect(run.results.find((x) => x.run === CHECK)!.fails).toEqual([over]);
   });
 
   test("a GitLab project in a subgroup keeps its failure log too: every slash of its path goes (#892)", async () => {
@@ -593,7 +689,8 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     const other = mkdtempSync(join(CACHE, "switchboard.local-ci-example_development-420-log."));
     const otherRepo = mkdtempSync(join(CACHE, "switchboard.local-ci-o_r-42-log."));
     try {
-      const { r } = await perfRun(CHECK, "ceilings: local\nover: journeys.launch.layoutShift = 0.3 > ceiling 0.2371");
+      const { d } = deps("bun test", SHA, "(fail) x");
+      const r = await localCi(42, "/repo", d, "example/development", CACHE);
       expect(r.ok).toBe(false);
       expect(existsSync(old)).toBe(false);
       expect(existsSync(other)).toBe(true);
@@ -606,96 +703,34 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
 
   test("perf raised: a ceiling above main's is its own kind, not ok", async () => {
     const raised = "raised: local.bundle.js ceiling 195136 > main's 195128 (raising a ceiling is merged by hand)";
-    const { r, summary } = await perfRun(CHECK, `ceilings: local\n${raised}\n{\n${JSON_DUMP}\n}`);
-    expect(r.perf).toMatchObject({ raised: [raised], over: [], improved: [], unknown: false });
-    expect(summary).toContain(`main より予算引上げ（raised）:\n${raised}`);
+    const { run, cleanup } = await perfRun(CHECK, `ceilings: local\n${raised}\n{\n${JSON_DUMP}\n}`);
+    cleanup();
+    expect(run.perf).toMatchObject({ raised: [raised], over: [], improved: [], unknown: false });
   });
 
   test("perf improved: a beaten ceiling is the request to lower it", async () => {
     const improved = "improved: journeys.launch.layoutShift = 0.1688 < ceiling 0.2371 − 2 × 0.03: lower it with `bun scripts/perf-ratchet.ts update perf-result.json --env local`";
-    const { r, summary } = await perfRun(CHECK, `ceilings: local\n${improved}\n{\n${JSON_DUMP}\n}`);
-    expect(r.perf).toMatchObject({ improved: [improved], unknown: false });
-    expect(summary).toContain(`改善による予算更新要求（improved）:\n${improved}`);
+    const { run, cleanup } = await perfRun(CHECK, `ceilings: local\n${improved}\n{\n${JSON_DUMP}\n}`);
+    cleanup();
+    expect(run.perf).toMatchObject({ improved: [improved], unknown: false });
   });
 
-  test("perf 原因不明: a check that failed without a verdict line says so, with its last lines", async () => {
-    const { r, summary } = await perfRun(CHECK, "ceilings: local\nerror: the result has no journeys.launch.layoutShift");
-    expect(r.perf).toMatchObject({ unknown: true, over: [], improved: [], raised: [] });
-    expect(summary).toContain("原因不明（判定の行が無い）:\nceilings: local\nerror: the result has no journeys.launch.layoutShift");
+  test("perf 原因不明: a check that failed without a verdict line has no verdict", async () => {
+    const { run, cleanup } = await perfRun(CHECK, "ceilings: local\nerror: the result has no journeys.launch.layoutShift");
+    cleanup();
+    expect(run.perf).toMatchObject({ unknown: true, over: [], improved: [], raised: [] });
   });
 
-  test("perf 原因不明: the bench failing is a failure with no verdict, named by the bench's error (not the check failing after it)", async () => {
-    const { r, summary } = await perfRun(BENCH, "Error: Chrome not found");
-    // the check keeps going after the bench and fails on the missing result: both fail, the bench is the cause
-    expect(r.results.filter((x) => x.code !== 0).map((x) => x.run)).toEqual([BENCH, CHECK]);
-    expect(summary).toContain(`手順 ${BENCH}: exit 1`);
-    expect(summary).not.toContain("ENOENT");
-    expect(r.perf).toEqual({ env: null, over: [], improved: [], raised: [], grew: [], unknown: true });
-    expect(summary).toContain("環境: ceilings ?, TMPDIR ");
-    expect(summary).toContain("原因不明（判定の行が無い）:\nError: Chrome not found");
-  });
-
-  test("perfSteps: the install, then the web build up to the perf check (not bun test after it)", () => {
-    expect(perfSteps(ciSteps).map((s) => s.run.trim().split("\n")[0])).toEqual([
-      "bun install --frozen-lockfile",
-      "bun run --cwd apps/web build",
-      'if [ "$(git rev-parse --is-shallow-repository)" = true ]; then depth=--depth=1; else depth=; fi',
-      "if fc-list ':family=Noto Sans' | grep -q . && fc-list ':family=Noto Sans CJK JP' | grep -q .; then exit 0; fi",
-      "bun scripts/perf-ratchet.ts base origin/main perf-base.json",
-      BENCH,
-      CHECK,
-    ]);
-    expect(() => perfSteps([{ name: "x", run: "bun test" }])).toThrow("perfSteps");
-  });
-
-  const OVER = "over: journeys.launch.layoutShift = 0.3015 > ceiling 0.2371";
-  test("perf over and main over the same key: main でも超過, main measured in its own worktree the same way", async () => {
-    const mainOver = "over: journeys.launch.layoutShift = 0.2943 > ceiling 0.2371";
-    const { r, summary, baseResult, files, adds, removes, calls, envs } = await perfRun(CHECK, `ceilings: local\n${OVER}`, { [CHECK]: { code: 1, output: `ceilings: local\n${mainOver}` } });
-    // main is checked out at the merge's first parent and measured in the PR's environment (TMPDIR too)
-    expect(calls.filter((c) => c.includes("worktree") && c.includes("add")).at(-1)!.at(-1)).toBe(BASE);
-    expect(new Set(envs.map((e) => JSON.stringify(e))).size).toBe(1);
-    expect(r.baseline).toEqual({ sha: BASE, verdict: { env: "local", over: [mainOver], improved: [], raised: [], grew: [], unknown: false } });
-    expect(summary).toContain(`main（${BASE.slice(0, 7)}）との比較:\njourneys.launch.layoutShift: main でも超過（PR の変更によらない）\nmain の over:\n${mainOver}`);
-    expect(baseResult).toBe('{"runs":5,"base":true}');
-    expect(files.filter((f) => f.startsWith("base-")).length).toBe(perfSteps(ciSteps).length);
-    expect([adds, removes]).toEqual([2, 2]);
-  });
-
-  test("perf over and main within its ceilings: PR 固有の悪化", async () => {
-    const { r, summary } = await perfRun(CHECK, `ceilings: local\n${OVER}`, { [CHECK]: { code: 0, output: "ceilings: local\nperf ratchet: ok" } });
-    expect(r.baseline?.verdict).toMatchObject({ over: [], unknown: false });
-    expect(summary).toContain("journeys.launch.layoutShift: PR 固有の悪化");
-  });
-
-  test("perf over and main's measure failing: main の計測に失敗（原因不明）", async () => {
-    const { r, summary, adds, removes } = await perfRun(CHECK, `ceilings: local\n${OVER}`, { [BENCH]: { code: 1, output: "Error: Chrome not found" } });
-    expect(r.baseline).toEqual({ sha: BASE, verdict: null });
-    expect(summary).toContain(`main（${BASE.slice(0, 7)}）との比較:\nmain の計測に失敗（原因不明）`);
-    expect([adds, removes]).toEqual([2, 2]);
-  });
-
-  test("perf over and main's worktree failing to start: the PR's summary is still written, main の計測に失敗（原因不明）", async () => {
-    const { r, summary, logged } = await perfRun(CHECK, `ceilings: local\n${OVER}`, {}, true);
-    expect(r.baseline).toEqual({ sha: BASE, verdict: null });
-    expect(summary).toContain(`超過（over）:\n${OVER}`);
-    expect(summary).toContain("main の計測に失敗（原因不明）");
-    expect(logged.some((l) => l.startsWith("main の計測が止まった: git worktree add failed"))).toBe(true);
-  });
-
-  test("perf raised only: main is not measured", async () => {
-    const { r, summary, adds } = await perfRun(CHECK, "ceilings: local\nraised: local.bundle.js ceiling 195136 > main's 195128 (raising a ceiling is merged by hand)");
-    expect(r.baseline).toBeUndefined();
-    expect(summary).not.toContain("との比較");
-    expect(adds).toBe(1);
+  test("perf 原因不明: the bench failing is a failure with no verdict (the check keeps going after it and fails on the missing result)", async () => {
+    const { run, cleanup } = await perfRun(BENCH, "Error: Chrome not found");
+    cleanup();
+    expect(run.results.filter((x) => x.code !== 0).map((x) => x.run)).toEqual([BENCH, CHECK]);
+    expect(run.perf).toEqual({ env: null, over: [], improved: [], raised: [], grew: [], unknown: true });
   });
 
   test("perf and bun test both failing: the comment names both steps with their raised: and (fail) lines (#2945)", async () => {
     const raised = "raised: local.journeys.launch.requests ceiling 14 > main's 13 (raising a ceiling is merged by hand)";
-    const { d, ran, logged } = deps(CHECK, SHA, `ceilings: local\n${raised}\n{\n${JSON_DUMP}\n}`);
-    const failing: Deps = { ...d, step: async (script, cwd, env) => (script.trim() === "bun test" ? (ran.push("bun test"), { code: 1, output: "(fail) a > b\n1 fail" }) : d.step(script, cwd, env)) };
-    const r = await localCi(42, "/repo", failing, "example/development", CACHE);
-    const failed = r.results.filter((x) => x.code !== 0);
+    const { r, failed, ran, logged, logDir } = await perfRun(CHECK, `ceilings: local\n${raised}\n{\n${JSON_DUMP}\n}`, (d, ran) => ({ ...d, step: async (script, cwd, env) => (script.trim() === "bun test" ? (ran.push("bun test"), { code: 1, output: "(fail) a > b\n1 fail" }) : d.step(script, cwd, env)) }));
     try {
       // the perf check failed before bun test, and bun test still ran
       expect(ran.indexOf(CHECK)).toBeLessThan(ran.indexOf("bun test"));
@@ -706,8 +741,8 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
       // one log dir with both steps' whole output and the perf summary
       expect(new Set(failed.map((x) => x.log!.slice(0, x.log!.lastIndexOf("/")))).size).toBe(1);
       expect(readFileSync(failed[1]!.log!, "utf8")).toBe("(fail) a > b\n1 fail");
+      expect(failed[0]!.log!.slice(0, failed[0]!.log!.lastIndexOf("/"))).toBe(logDir);
       expect(logged).toContain("✗ bun test: exit 1");
-      expect(logged).toContain("✗ bun scripts/perf-ratchet.ts check perf-result.json: exit 1");
       const body = resultComment(r);
       expect(body).toContain(`結果: \`bun scripts/perf-ratchet.ts check perf-result.json\` が exit 1。全文は実行したホストの記録（~/.cache の下）。\n\`\`\`\n${raised}\n\`\`\``);
       expect(body).toContain("結果: `bun test` が exit 1。全文は実行したホストの記録（~/.cache の下）。\n```\n(fail) a > b\n```");
@@ -721,21 +756,23 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
   test("bundle lines: a pass's comment has the bundle line; a grew fail's comment has the bundle line and the grew: line under its result", async () => {
     const small = "bundle: js 1005 B (main 1000 B, +5 B, +0.50%) / css 50 B (main 50 B, +0 B, +0.00%)";
     const header = "bundle（gzip、マージ後と main の先端の差）:";
-    // a pass: the check's output is not kept as a failure, its bundle line still reaches the comment
+    // a pass: every step passes, the check's bundle line still reaches the comment
     const { d } = deps();
-    const passing: Deps = { ...d, step: async (script, cwd, env) => (script.trim() === CHECK ? { code: 0, output: `ceilings: local\n${small}\nperf ratchet: ok` } : d.step(script, cwd, env)) };
-    const ok = await localCi(42, "/repo", passing, "example/development", CACHE);
-    expect(ok.ok).toBe(true);
-    expect(ok.bundle).toEqual([small]);
-    expect(resultComment(ok)).toContain(`${header}\n    ${small}`);
+    const dir = mkdtempSync(join(CACHE, "co-"));
+    await Bun.write(join(dir, ".github/workflows/ci.yml"), ciYml);
+    await Bun.write(join(dir, "scripts/ci.ts"), ciTs);
+    const passing = await runCheckout(dir, stepEnv(dir), "t4104-pass", { ...d, step: async (script, cwd, env) => (script.trim() === CHECK ? { code: 0, output: `ceilings: local\n${small}\nperf ratchet: ok` } : d.step(script, cwd, env)) }, CACHE, undefined, undefined, true);
+    rmSync(dir, { recursive: true, force: true });
+    expect(passing.ok).toBe(true);
+    expect(passing.bundle).toEqual([small]);
+    expect(resultComment({ sha: SHA, base: BASE, results: passing.results, ok: passing.ok, bundle: passing.bundle })).toContain(`${header}\n    ${small}`);
     // a grew fail: the bundle line, and the grew: line under the check's result
     const big = "bundle: js 1011 B (main 1000 B, +11 B, +1.10%) / css 50 B (main 50 B, +0 B, +0.00%)";
     const grew = "grew: bundle.js +1.10% (1000 → 1011 B) ≥ 1%: merging is the user's call (docs/design/perf.md)";
-    const { r, adds } = await perfRun(CHECK, `ceilings: local\n${big}\n${grew}\n{\n${JSON_DUMP}\n}`);
+    const { r, cleanup } = await perfRun(CHECK, `ceilings: local\n${big}\n${grew}\n{\n${JSON_DUMP}\n}`);
+    cleanup();
     expect(r.perf).toMatchObject({ grew: [grew], unknown: false });
     expect(r.bundle).toEqual([big, grew]);
-    // grew alone does not measure main (it is measured by the check's own base already)
-    expect(adds).toBe(1);
     const body = resultComment(r);
     expect(body).toContain(`${header}\n    ${big}\n    ${grew}`);
     expect(body).toContain(`結果: \`bun scripts/perf-ratchet.ts check perf-result.json\` が exit 1。全文は実行したホストの記録（~/.cache の下）。\n\`\`\`\n${grew}\n\`\`\``);
@@ -744,15 +781,11 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     expect(resultComment({ ...r, conflict: true })).not.toContain(header);
   });
 
-  test("perfVerdict and failureSummary: kinds as printed; a step that is not perf keeps its tail", () => {
+  test("perfVerdict: kinds as printed", () => {
     expect(perfVerdict("ceilings: github\nover: a = 2 > ceiling 1\nperf ratchet: ok")).toEqual({ env: "github", over: ["over: a = 2 > ceiling 1"], improved: [], raised: [], grew: [], unknown: false });
     const grew = "grew: bundle.js +1.10% (1000 → 1011 B) ≥ 1%: merging is the user's call (docs/design/perf.md)";
     const p = perfVerdict(`ceilings: local\nbundle: js 1011 B (main 1000 B, +11 B, +1.10%) / css 50 B (main 50 B, +0 B, +0.00%)\n${grew}`);
     expect(p).toMatchObject({ grew: [grew], over: [], unknown: false });
-    const check = { name: "check", run: "bun scripts/perf-ratchet.ts check perf-result.json", code: 1, seconds: 1, tail: grew };
-    expect(failureSummary({ sha: "h", base: "b", step: check, env: {}, output: grew, perf: p })).toContain(`1% 以上の増加（grew）:\n${grew}`);
-    const step = { name: "bun test", run: "bun test", code: 1, seconds: 1, tail: "(fail) x" };
-    expect(failureSummary({ sha: "h", base: "b", step, env: {}, output: "(fail) x" })).toBe("head h / base b\n手順 bun test: exit 1\n(fail) x");
   });
 
   test("failLines: bun test's (fail) lines and perf-ratchet's over: / raised: / improved: lines, once each, in order", () => {
@@ -765,36 +798,18 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     expect(failLines("all good")).toEqual([]);
   });
 
-  test("localCi records main's bundle once, from its finally, pass or fail; a failed record changes nothing and the worktree still goes", async () => {
-    for (const [failAt, recordFails] of [[undefined, false], ["bun test", false], [undefined, true]] as const) {
-      const { d } = deps(failAt);
-      const order: string[] = [];
-      const logged: string[] = [];
-      const recording: Deps = {
-        ...d,
-        log: (l) => void logged.push(l),
-        // the CI's base step leaves perf-base.json in the PR's worktree
-        step: async (script, cwd, env) => {
-          if (!cwd.includes("-base.")) writeFileSync(join(cwd, "perf-base.json"), JSON.stringify({ sha: BASE, bundle: { js: 1000, css: 100 } }));
-          return d.step(script, cwd, env);
-        },
-        sh: async (c, cwd) => {
-          if (c[0] !== "gh" || c[1] !== "api") {
-            if (c.includes("worktree") && c.includes("remove")) order.push("remove");
-            return d.sh(c, cwd);
-          }
-          if (recordFails) throw new Error("gh api failed: gh: Server Error (HTTP 502)");
-          if (c.includes("PUT")) return order.push("put"), "{}";
-          if (c.some((a) => a.includes("/contents/"))) throw new Error("gh api failed: gh: Not Found (HTTP 404)");
-          return "{}";
-        },
-      };
-      const r = await localCi(42, "/repo", recording, "example/development", CACHE);
-      expect(r.ok).toBe(failAt === undefined);
-      expect(order).toEqual(recordFails ? ["remove"] : ["put", "remove"]);
-      expect(logged.filter((l) => l.startsWith("bundle の記録"))).toEqual([recordFails ? "bundle の記録に失敗（結果は変えない）: gh api failed: gh: Server Error (HTTP 502)" : "bundle の記録: perf-records/bundle.tsv に 1 行足した"]);
-      if (failAt) rmSync(r.results.find((x) => x.code !== 0)!.log!.replace(/\/[^/]*$/, ""), { recursive: true, force: true });
-    }
+  test("localCi writes no record of main's bundle or bytes (the tag CI does, #4105), even with a perf-base.json in the worktree", async () => {
+    const { d, calls } = deps();
+    const withBase: Deps = {
+      ...d,
+      step: async (script, cwd, env) => {
+        writeFileSync(join(cwd, "perf-base.json"), JSON.stringify({ sha: BASE, bundle: { js: 1000, css: 100 } }));
+        return d.step(script, cwd, env);
+      },
+    };
+    const r = await localCi(42, "/repo", withBase, "example/development", CACHE);
+    expect(r.ok).toBe(true);
+    expect(calls.filter((c) => c[0] === "gh" && c[1] === "api")).toEqual([]);
   });
 
   test("--repo: gh -R, git -C and the clone are the given repository's", async () => {
@@ -933,15 +948,58 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
       const sent = builds.map((b) => [...b.script.matchAll(/^bash -e -c '(.*?)'; c=/gm)].map((m) => m[1]));
       expect(sent).toEqual([["bun run licenses:check", "bun run typecheck"], [`bun test --path-ignore-patterns='\\''${REC[0]}'\\'' --path-ignore-patterns='\\''${REC[1]}'\\''`]]);
       for (const moved of ["bun run licenses:check", "bun run typecheck", "bun test"]) expect(ran).not.toContain(moved);
-      // git over the checkout, the install the web build needs, the web build and perf, main's fetch: here
+      // git over the checkout and the install: here (a PR's run has no web build nor perf)
       expect(ran).toContain(ciSteps[0]!.run.trim());
-      expect(ran).toContain("bun run --cwd apps/web build");
-      expect(ran.some((s) => s.includes("git fetch"))).toBe(true);
+      expect(ran).not.toContain("bun run --cwd apps/web build");
       expect(ran).toContain(`bun test './${REC[0]}' './${REC[1]}'`);
       // the results in the CI's order, with the host's recordings run after bun test
-      expect(r.results.map((x) => x.name)).toEqual([...ciSteps.map((s) => s.name), HOST_TESTS]);
+      expect(r.results.map((x) => x.name)).toEqual([...prSteps.map((s) => s.name), HOST_TESTS]);
       expect(r.results.find((x) => x.name === "bun test")!.seconds).toBe(1);
       expect(resultComment(r)).toContain(`| \`${HOST_TESTS}\` | pass |`);
+    });
+
+    test("the heavy slot is held for the steps here only, not while the builds are awaited; without sb-offload the whole run is in it", async () => {
+      /** `d.slot` that counts how deep inside it the code is, and the names it was given. */
+      const track = (d: Deps) => {
+        const t = { inside: 0, names: [] as string[], atBuild: [] as number[], atStep: [] as Array<{ step: string; inside: number }>, atGit: [] as number[] };
+        d.slot = async (name, fn) => {
+          t.names.push(name);
+          t.inside++;
+          try { return await fn(); } finally { t.inside--; }
+        };
+        const step = d.step;
+        d.step = (script, cwd, env) => { t.atStep.push({ step: script.trim(), inside: t.inside }); return step(script, cwd, env); };
+        const sh = d.sh;
+        d.sh = (cmd, cwd) => { if (cmd.includes("worktree") && cmd.includes("add")) t.atGit.push(t.inside); return sh(cmd, cwd); };
+        return t;
+      };
+      const off = withOffload();
+      const t = track(off.d);
+      const run = off.d.offload!.run;
+      off.d.offload!.run = (script, cwd, size) => { t.atBuild.push(t.inside); return run(script, cwd, size); };
+      expect((await localCi(42, "/repo", off.d, "example/development", CACHE)).ok).toBe(true);
+      // the builds (two) were awaited outside the slot, the worktree was made outside it, and the steps here ran inside it
+      expect(t.atBuild).toEqual([0, 0]);
+      expect(t.atGit).toEqual([0]);
+      expect(t.atStep.length).toBeGreaterThan(0);
+      expect(t.atStep.every((x) => x.inside === 1)).toBe(true);
+      expect(t.names).toHaveLength(1);
+      expect(t.names[0]).toEndWith("(host)");
+
+      const plain = deps();
+      const p = track(plain.d);
+      expect((await localCi(42, "/repo", plain.d, "example/development", CACHE)).ok).toBe(true);
+      expect(p.names).toEqual(["local-ci example/development#42"]);
+      expect(p.atGit).toEqual([1]);
+      expect(p.atStep.every((x) => x.inside === 1)).toBe(true);
+
+      // sb-offload, but a CI with no step the builds take (`make check` only): no build, and its steps here are in the slot
+      const none = withOffload(undefined, { noCiTs: true });
+      const n = track(none.d);
+      expect((await localCi(42, "/repo", none.d, "example/development", CACHE)).ok).toBe(true);
+      expect(none.builds).toHaveLength(0);
+      expect(n.atStep.length).toBeGreaterThan(0);
+      expect(n.atStep.every((x) => x.inside === 1)).toBe(true);
     });
 
     test("the two builds run at the same time, each with its size", async () => {
@@ -1003,7 +1061,7 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
       }
       const { d, ran } = deps();
       const r = await localCi(42, "/repo", d, "example/development", CACHE);
-      expect(ran).toEqual(ciSteps.map((s) => s.run.trim()));
+      expect(ran).toEqual(prSteps.map((s) => s.run.trim()));
       expect(r.results.map((x) => x.name)).not.toContain(HOST_TESTS);
     });
 
@@ -1207,6 +1265,30 @@ test("recordBytes: appends main's bytes to perf-records/bytes.tsv, a row per res
       ]),
       "",
     ].join("\n"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recordCounts: appends the tag's counts to perf-records/counts.tsv; without perf-result.json it is none and writes nothing", async () => {
+  const dir = mkdtempSync(join(CACHE, "record-counts-"));
+  const puts: string[] = [];
+  const sh: Deps["sh"] = async (c) => {
+    const path = c.find((a) => a.startsWith("repos/"))!;
+    if (path.endsWith("/git/ref/heads/perf-records")) return "{}";
+    if (c.includes("PUT")) {
+      puts.push(Buffer.from((JSON.parse(readFileSync(c[c.indexOf("--input") + 1]!, "utf8")) as { content: string }).content, "base64").toString("utf8"));
+      return "{}";
+    }
+    throw new Error("gh api failed: gh: Not Found (HTTP 404)");
+  };
+  try {
+    expect(await recordCounts("o/r", dir, "2026-11-08T01:00:00.000Z", "local", "v1.2.3", "a".repeat(40), sh)).toBe("none");
+    expect(puts).toEqual([]);
+    writeFileSync(join(dir, "perf-result.json"), JSON.stringify({ journeys: { send: { msMedian: 9, requests: 6, layoutCount: 4, recalcStyleCount: 5, layoutShift: 0.07, bytes: 1 } }, loaded: { healthMaxMs: 99 } }));
+    expect(await recordCounts("o/r", dir, "2026-11-08T01:00:00.000Z", "local", "v1.2.3", "a".repeat(40), sh)).toBe("recorded");
+    const A = "a".repeat(40);
+    expect(puts[0]).toBe(["measured_at\tenv\ttag\tsha\tkey\tvalue", ...["requests\t6", "layoutCount\t4", "recalcStyleCount\t5", "layoutShift\t0.07"].map((kv) => `2026-11-08T01:00:00.000Z\tlocal\tv1.2.3\t${A}\tjourneys.send.${kv}`), ""].join("\n"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

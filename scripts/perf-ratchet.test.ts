@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { addedExceptions, BUDGET_PATH, BUNDLE_GROWTH_LIMIT, bundleGrowth, BYTES_RECORDS_HEADER, bytesGrowth, bytesHistoryTable, bytesRows, parseBytesRows, ENVS, envOf, historyTable, judge, judgeDurations, knownExceptions, lowered, loweredBudgets, parseRows, raisedAgainst, recordRow, RECORDS_HEADER, shapeOf, type Budget, type Budgets } from "./perf-ratchet";
+import { addedExceptions, BUDGET_PATH, BUNDLE_GROWTH_LIMIT, bundleGrowth, BYTES_RECORDS_HEADER, bytesGrowth, bytesHistoryTable, bytesRows, COUNTS_RECORDS_HEADER, countsRows, type CountsRow, parseBytesRows, parseCountsRows, spreadTable, ENVS, envOf, historyTable, judge, judgeDurations, knownExceptions, lowered, loweredBy, parseRows, raisedAgainst, recordRow, RECORDS_HEADER, shapeOf, type Budget, type Budgets } from "./perf-ratchet";
 
 const budget: Budget = {
   journeys: { send: { requests: 6, layoutCount: 4, recalcStyleCount: 5, layoutShift: 0.0727 } },
@@ -26,7 +26,7 @@ describe("perf-ratchet judge", () => {
     // a quiet host: 1714 far below the ceiling (5440 − 2 × 1750 = 1940 with the band then), yet not improved
     const { over, improved } = judge(loaded(1714), b.local);
     expect([over, improved]).toEqual([[], []]);
-    expect(loweredBudgets(b, "local", improved).local.loaded).toEqual({ healthMaxMs: 5440 });
+    expect(loweredBy(b.local, "local", []).budget.loaded).toEqual({ healthMaxMs: 5440 });
     expect(judge(loaded(5441), b.local)).toEqual({ over: [{ key: "loaded.healthMaxMs", value: 5441, ceiling: 5440 }], improved: [] });
     // a journey count below ceiling − 2 × band is still improved
     expect(judge({ ...result({ requests: 3 }), loaded: { healthMaxMs: 1714, healthMaxMsP90: 1901 } }, b.local).improved.map((i) => i.key)).toEqual(["journeys.send.requests"]);
@@ -64,16 +64,49 @@ describe("perf-ratchet judge", () => {
   });
 });
 
-describe("perf-ratchet update", () => {
-  test("update lowers only: a beaten ceiling becomes the value + its band; worse counts leave theirs", () => {
-    const r = result({ requests: 3, layoutCount: 9, layoutShift: 0.001 });
-    expect(lowered(judge(r, budget).improved, budget)).toEqual({
-      journeys: { send: { requests: 4, layoutCount: 4, recalcStyleCount: 5, layoutShift: 0.031 } },
-    });
+describe("perf-ratchet loweredBy (#4150)", () => {
+  const row = (tag: string, key: string, value: number, env: "github" | "local" = "local", at = 0): CountsRow => ({ measuredAt: new Date(Date.UTC(2026, 10, 1 + at)).toISOString(), env, tag, sha: "a".repeat(40), key, value });
+  const send = (key: string) => `journeys.send.${key}`;
+  const rowsOf = (key: string, values: number[], env: "github" | "local" = "local") => values.map((v, i) => row(`v${i}`, send(key), v, env, i));
+  test("loweredBy: all of the last 3 tags below the window lower the ceiling to their max + the band", () => {
+    const done = loweredBy(budget, "local", rowsOf("requests", [2, 3, 3]));
+    expect(done.budget.journeys.send!.requests).toBe(4);
+    expect(done.lowered).toEqual([{ key: send("requests"), from: 6, to: 4, tags: [3, 3, 2] }]);
   });
-  test("a lowered budget judges the same result as equal", () => {
-    const r = result({ requests: 3, layoutShift: 0.001 });
-    expect(judge(r, lowered(judge(r, budget).improved, budget))).toEqual({ over: [], improved: [] });
+  test("loweredBy: one of the 3 inside the window keeps the ceiling", () => {
+    const done = loweredBy(budget, "local", rowsOf("requests", [2, 4, 3]));
+    expect(done.budget).toEqual(budget);
+    expect(done.lowered).toEqual([]);
+  });
+  test("loweredBy: only the last 3 count; an older high tag does not hold it", () => {
+    expect(loweredBy(budget, "local", rowsOf("requests", [6, 3, 3, 3])).budget.journeys.send!.requests).toBe(4);
+  });
+  test("loweredBy: fewer than 3 tags wait", () => {
+    const done = loweredBy(budget, "local", rowsOf("requests", [2, 2]));
+    expect(done.budget).toEqual(budget);
+    expect(done.waiting).toContainEqual({ key: send("requests"), have: 2 });
+    expect(done.waiting).toContainEqual({ key: send("layoutCount"), have: 0 });
+  });
+  test("loweredBy: two rows of one tag are one tag, the later measure", () => {
+    const rows = [row("v0", send("requests"), 2, "local", 0), row("v1", send("requests"), 2, "local", 1), row("v1", send("requests"), 2, "local", 2), row("v1", send("requests"), 1, "local", 1)];
+    expect(loweredBy(budget, "local", rows).waiting).toContainEqual({ key: send("requests"), have: 2 });
+    expect(loweredBy(budget, "local", [...rows, row("v2", send("requests"), 3, "local", 3)]).budget.journeys.send!.requests).toBe(4);
+  });
+  test("loweredBy: loaded.healthMaxMs is never lowered", () => {
+    const b: Budget = { ...budget, loaded: { healthMaxMs: 5440 } };
+    const done = loweredBy(b, "local", rowsOf("healthMaxMs", [100, 100, 100]).map((r) => ({ ...r, key: "loaded.healthMaxMs" })));
+    expect(done.budget.loaded).toEqual({ healthMaxMs: 5440 });
+    expect(done.waiting.map((w) => w.key)).not.toContain("loaded.healthMaxMs");
+  });
+  test("loweredBy: the other environment's rows are not counted", () => {
+    const done = loweredBy(budget, "local", rowsOf("requests", [2, 2, 2], "github"));
+    expect(done.budget).toEqual(budget);
+    expect(done.waiting).toContainEqual({ key: send("requests"), have: 0 });
+  });
+  test("loweredBy: a lowered budget keeps the other counts and judges the lowest as equal", () => {
+    const done = loweredBy(budget, "local", rowsOf("layoutShift", [0.001, 0.002, 0.001]));
+    expect(done.budget.journeys.send).toEqual({ requests: 6, layoutCount: 4, recalcStyleCount: 5, layoutShift: 0.032 });
+    expect(judge(result({ layoutShift: 0.002 }), done.budget).over).toEqual([]);
   });
 });
 
@@ -164,6 +197,40 @@ describe("perf-ratchet raisedAgainst", () => {
   });
 });
 
+describe("perf-ratchet PERF_BASE_REF (#4219)", () => {
+  test("check reads the ceilings to compare from that ref: a lower ceiling there is raised:, and a ref without the file is named", async () => {
+    const budgets = (await Bun.file(BUDGET_PATH).json()) as Budgets;
+    const dir = mkdtempSync(join(tmpdir(), "sb-perf-ratchet-test-"));
+    try {
+      const root = join(import.meta.dir, "..");
+      const git = (input: string | undefined, ...a: string[]) => {
+        const p = Bun.spawnSync(["git", "-C", root, ...a], { stdin: input === undefined ? undefined : Buffer.from(input) });
+        if (p.exitCode !== 0) throw new Error(p.stderr.toString());
+        return p.stdout.toString().trim();
+      };
+      // a commit (no ref, just objects) whose budget has a lower launch.requests ceiling than the checkout's
+      const lower = structuredClone(budgets);
+      lower.local.journeys.launch!.requests--;
+      const blob = git(JSON.stringify(lower), "hash-object", "-w", "--stdin");
+      const scripts = git(`100644 blob ${blob}\tperf-budget.json\n`, "mktree");
+      const top = git(`040000 tree ${scripts}\tscripts\n`, "mktree");
+      const commit = git(undefined, "-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", top, "-m", "t");
+      const base = join(dir, "base.json");
+      writeFileSync(base, JSON.stringify({ sha: "a".repeat(40), bundle: { js: 100000, css: 10000 } }));
+      const r = join(dir, "result.json");
+      writeFileSync(r, JSON.stringify({ runs: 5, journeys: budgets.local.journeys, bundle: { js: 100000, css: 10000 }, loaded: budgets.local.loaded }));
+      const run = async (ref: string) => {
+        const p = Bun.spawn([process.execPath, "scripts/perf-ratchet.ts", "check", r, "--base", base, "--env", "local"], { cwd: root, env: { ...process.env, PERF_BASE_REF: ref }, stdout: "pipe", stderr: "pipe" });
+        return (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
+      };
+      expect(await run(commit)).toContain(`raised: local.journeys.launch.requests`);
+      expect(await run("no-such-ref-4219")).toContain("ceilings are not compared with main's (no-such-ref-4219:scripts/perf-budget.json:");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("perf-ratchet durations (#1887)", () => {
   const timed: Budget = { ...budget, durations: { typecheck: 60, test: 50 } };
   test("test duration ceiling: the ceiling itself passes, 0.1 over is over, far below is no failure", () => {
@@ -207,9 +274,6 @@ describe("perf-ratchet exceptions (#1890)", () => {
     expect(addedExceptions(budgets, { exceptions })).toEqual([]);
     expect(addedExceptions(budgets, { exceptions: [{ ...exceptions[0]!, issue: 8 }] })).toEqual(exceptions);
     expect(addedExceptions({ github: budget, local: budget }, { exceptions })).toEqual([]);
-  });
-  test("update keeps the exceptions", () => {
-    expect(loweredBudgets({ exceptions, github: budget, local: budget }, "local", []).exceptions).toEqual(exceptions);
   });
 });
 
@@ -385,5 +449,35 @@ describe("perf-ratchet bytes records (#3921)", () => {
     expect(bytesHistoryTable(rows, "2026-11-06")).toHaveLength(4);
     expect(bytesHistoryTable(rows, "2026-11-07")).toEqual(["bytes: 記録なし"]);
     expect(bytesHistoryTable([])).toEqual(["bytes: 記録なし"]);
+  });
+});
+
+describe("perf-ratchet counts records and spread", () => {
+  const A = "a".repeat(40);
+  const AT = (d: number, h = 9) => `2026-11-0${d}T0${h}:00:00.000Z`;
+  const measured = (nl: number, req = 6, shift = 0.07) => ({ journeys: { send: { msMedian: 9, requests: req, layoutCount: nl, recalcStyleCount: 5, layoutShift: shift, bytes: 1 } }, loaded: { healthMaxMs: 99 } });
+  const budgets = { github: budget, local: { journeys: { send: { requests: 6, layoutCount: 7, recalcStyleCount: 5, layoutShift: 0.0727 } } } } as Budgets;
+  const rowsOf = (vals: [string, number, number?][]) => parseCountsRows([COUNTS_RECORDS_HEADER, ...vals.flatMap(([at, nl, hh]) => countsRows(at, "local", `t${at.slice(8, 10)}${hh ?? ""}`, A, measured(nl) as Budget)), ""].join("\n"));
+  test("countsRows / parseCountsRows round trip: the four counts of each journey, not times, bytes or loaded; bad rows are passed over", () => {
+    const lines = countsRows(AT(5), "local", "v1.0.0", A, measured(6) as Budget);
+    expect(lines).toEqual(["requests", "layoutCount", "recalcStyleCount", "layoutShift"].map((k) => `${AT(5)}\tlocal\tv1.0.0\t${A}\tjourneys.send.${k}\t${(measured(6).journeys.send as Record<string, number>)[k]}`));
+    const rows = parseCountsRows([COUNTS_RECORDS_HEADER, ...lines, `${AT(5)}\tmars\tv1\t${A}\tjourneys.send.requests\t1`, `${AT(5)}\tlocal\tv1\t${A}\tjourneys.send.requests\tmany`, ""].join("\n"));
+    expect(rows).toHaveLength(4);
+    expect(rows[1]).toEqual({ measuredAt: AT(5), env: "local", tag: "v1.0.0", sha: A, key: "journeys.send.layoutCount", value: 6 });
+  });
+  test("spreadTable: the last N tags' values oldest first, min / max / spread against the band, marked when wider", () => {
+    const t = spreadTable(rowsOf([[AT(1), 6], [AT(2), 9], [AT(3), 7]]), budgets, "local", 10);
+    expect(t.filter((l) => l.includes("journeys.send.layoutCount"))).toEqual(["| journeys.send.layoutCount | 3 | 6, 9, 7 | 6 | 9 | 3 | 1 | 7 | ! |"]);
+    expect(t.find((l) => l.includes("journeys.send.requests"))).toBe("| journeys.send.requests | 3 | 6, 6, 6 | 6 | 6 | 0 | 1 | 6 |  |");
+    expect(t.find((l) => l.includes("layoutShift"))).toContain("| 0.07, 0.07, 0.07 | 0.07 | 0.07 | 0 | 0.03 | 0.0727 |");
+    expect(spreadTable(rowsOf([[AT(1), 6], [AT(2), 9], [AT(3), 7]]), budgets, "local", 2).find((l) => l.includes("layoutCount"))).toContain("| 2 | 9, 7 | 7 | 9 | 2 | 1 | 7 | ! |");
+  });
+  test("spreadTable: one tag has spread 0; a tag measured twice counts once, by its last measure; another environment or no rows is 記録なし", () => {
+    expect(spreadTable(rowsOf([[AT(1), 6]]), budgets, "local", 5).find((l) => l.includes("layoutCount"))).toBe("| journeys.send.layoutCount | 1 | 6 | 6 | 6 | 0 | 1 | 7 |  |");
+    // the same tag t01 measured at 09:00 (9) and 10:00 (6): the last one stands
+    const twice = [...rowsOf([[AT(1), 9]]), ...parseCountsRows(countsRows(AT(1, 1).replace("T01", "T10"), "local", "t01", A, measured(6) as Budget).join("\n"))];
+    expect(spreadTable(twice, budgets, "local", 5).find((l) => l.includes("layoutCount"))).toBe("| journeys.send.layoutCount | 1 | 6 | 6 | 6 | 0 | 1 | 7 |  |");
+    expect(spreadTable(rowsOf([[AT(1), 6]]), budgets, "github", 5)).toEqual(["記録なし"]);
+    expect(spreadTable([], budgets, "local", 5)).toEqual(["記録なし"]);
   });
 });

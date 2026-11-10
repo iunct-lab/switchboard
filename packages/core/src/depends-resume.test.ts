@@ -190,6 +190,9 @@ describe("resumeDepends (#2045)", () => {
     tasks.setResumeAt(t.id, Date.now() + 60_000); // a usage-limit resume will continue it
     expect(await resume()).toEqual([]);
     tasks.setResumeAt(t.id, null);
+    db.updateTask(t.id, { status: "background" }); // its runner's background jobs are still going
+    expect(await resume()).toEqual([]);
+    db.updateTask(t.id, { status: "done" });
     db.updateTask(t.id, { runnerSessionId: null });
     expect(await resume()).toEqual([]);
     await settle();

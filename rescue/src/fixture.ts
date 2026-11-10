@@ -7,12 +7,15 @@ import { run } from "./releases.ts";
 /** A daemon that answers what sb-rescue checks. `extra` runs at boot (throw, exit later, …). */
 export const daemonSource = (version: string, extra = "") => `
 const port = Number(process.env.SWITCHBOARD_PORT);
+let tasks = "ok"; // \`extra\` may set "500" (the list fails), "empty" (a host with no task yet), "html" (the list is not JSON), "detail500" / "other" (the first task does not read back)
 ${extra}
 Bun.serve({
   port, hostname: "127.0.0.1",
   fetch(req, srv) {
     const path = new URL(req.url).pathname;
     if (path === "/api/health") return Response.json({ ok: true, version: ${JSON.stringify(version)}, repoRoot: process.env.SWITCHBOARD_REPO_ROOT, webUrl: process.env.SWITCHBOARD_WEB_URL ?? null, starterToken: process.env.SWITCHBOARD_STARTER_TOKEN ?? null, busyTasks: [] });
+    if (path === "/api/tasks") return tasks === "500" ? new Response("boom", { status: 500 }) : tasks === "html" ? new Response("<html></html>", { headers: { "content-type": "text/html" } }) : Response.json(tasks === "empty" ? [] : [{ id: "t1", title: "fixture" }]);
+    if (path === "/api/tasks/t1") return tasks === "detail500" ? new Response("boom", { status: 500 }) : Response.json({ task: { id: tasks === "other" ? "t2" : "t1", title: "fixture" }, events: [] });
     if (path === "/ws") return srv.upgrade(req) ? undefined : new Response("upgrade failed", { status: 400 });
     return new Response("not found", { status: 404 });
   },

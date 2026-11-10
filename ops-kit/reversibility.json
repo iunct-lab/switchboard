@@ -1,0 +1,136 @@
+{
+  "v": 1,
+  "effects": [
+    "repository",
+    "state",
+    "external",
+    "person"
+  ],
+  "answers": [
+    "reversible",
+    "compensable",
+    "irreversible"
+  ],
+  "rows": [
+    {
+      "op": "merge: security docs",
+      "gateKind": "security:docs",
+      "effect": "repository",
+      "beforeObserved": false,
+      "answer": "irreversible",
+      "why": "A merged change to the files that tell people or Tasks what is safe is read and acted on before anyone can revert it."
+    },
+    {
+      "op": "merge: security words",
+      "gateKind": "security:words",
+      "effect": "repository",
+      "beforeObserved": false,
+      "answer": "irreversible",
+      "why": "Words that must not be published are copied by readers and mirrors once they are on main."
+    },
+    {
+      "op": "merge: security lockfile",
+      "gateKind": "security:lockfile",
+      "effect": "repository",
+      "beforeObserved": false,
+      "answer": "irreversible",
+      "why": "A changed dependency tree is installed and run on the next install before a revert reaches it."
+    },
+    {
+      "op": "merge: security github",
+      "gateKind": "security:github",
+      "effect": "external",
+      "beforeObserved": false,
+      "answer": "irreversible",
+      "why": "Workflow and repository settings run with the repository's credentials as soon as they are merged."
+    },
+    {
+      "op": "merge: security gates",
+      "gateKind": "security:gates",
+      "effect": "repository",
+      "beforeObserved": false,
+      "answer": "irreversible",
+      "why": "The gate itself decides what is asked, so a bad change here weakens the check on every later merge."
+    },
+    {
+      "op": "merge: security host",
+      "gateKind": "security:host",
+      "effect": "external",
+      "beforeObserved": false,
+      "answer": "irreversible",
+      "why": "Host scripts run as root from main on every start; a revert comes after the first run."
+    },
+    {
+      "op": "merge: size",
+      "gateKind": "size",
+      "effect": "repository",
+      "beforeObserved": true,
+      "answer": "compensable",
+      "why": "A large diff can be reverted as a whole, and a recheck reads it again before the merge."
+    },
+    {
+      "op": "merge: responsibility",
+      "gateKind": "responsibility",
+      "effect": "repository",
+      "beforeObserved": true,
+      "answer": "compensable",
+      "why": "Instruction files change what Tasks do next, but a revert restores them and a recheck reads the scope first."
+    },
+    {
+      "op": "merge: migration",
+      "gateKind": "migration",
+      "effect": "state",
+      "beforeObserved": true,
+      "answer": "compensable",
+      "why": "The schema only grows, so a migration is undone by a later one, and traces of the run remain."
+    },
+    {
+      "op": "merge: rescue",
+      "gateKind": "rescue",
+      "effect": "state",
+      "beforeObserved": true,
+      "answer": "compensable",
+      "why": "The rollback path itself is rechecked before the merge; a bad change is undone from the release tag."
+    },
+    {
+      "op": "merge: design rules",
+      "gateKind": "design-rules",
+      "effect": "repository",
+      "beforeObserved": true,
+      "answer": "compensable",
+      "why": "The rules are text in the repository; a revert restores them and a recheck reads the change first."
+    },
+    {
+      "op": "send a comment to GitHub",
+      "gateKind": null,
+      "effect": "external",
+      "beforeObserved": false,
+      "answer": "compensable",
+      "why": "A sent comment can be edited or deleted, but notifications and the edit history remain."
+    },
+    {
+      "op": "migrate the database",
+      "gateKind": null,
+      "effect": "state",
+      "beforeObserved": false,
+      "answer": "compensable",
+      "why": "No snapshot is taken of its own; an undo is a later migration and the earlier data shape is gone."
+    },
+    {
+      "op": "promote a release",
+      "gateKind": null,
+      "effect": "state",
+      "beforeObserved": true,
+      "answer": "reversible",
+      "why": "The candidate is boot-checked first and the daemon rolls back by itself; the rescue page undoes it."
+    },
+    {
+      "op": "replace the host scripts",
+      "gateKind": null,
+      "effect": "external",
+      "beforeObserved": false,
+      "answer": "irreversible",
+      "why": "They run as root from main on every start, so a bad script has run before it can be stopped."
+    }
+  ]
+}

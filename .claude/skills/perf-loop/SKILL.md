@@ -44,11 +44,11 @@ bun run --cwd apps/web build && bun scripts/perf-bench.ts --json perf-result.jso
 | bundle (gzip) | js 186608 → 186650 B、css 6031 → 6031 B | | | | | |
 ```
 
-bundle には上限が無い（`scripts/perf-budget.json` に無い）。CI の `perf-ratchet.ts check` が main の先端との差を `bundle:` の行に出し（local-ci のコメントにも出る）、js か css が 1% 以上増えたら `grew:` で赤にする（`docs/design/perf.md` の「ラチェット」の Bundle）。表の bundle の行は前後の比較のために書く。
+bundle には上限が無い（`scripts/perf-budget.json` に無い）。タグの CI の `perf-ratchet.ts check` が main の先端との差を `bundle:` の行に出し（PR の local-ci は perf を測らないので、コメントには出ない）、js か css が 1% 以上増えたら `grew:` で赤にする（`docs/design/perf.md` の「ラチェット」の Bundle）。表の bundle の行は前後の比較のために書く。
 
 ## 4. 上限を下げる（マージの前に、同じ PR で）
 
-改善の PR では CI のラチェットが「良くなった」で落ちる（両側のゲート）ので、マージの前に同じ PR で上限を下げる。`perf-result.json` は 3 の「後」の結果（1 の前の結果を渡すと何も下がらない）:
+PR のローカル CI は perf を測らないので、上限を下げ忘れても PR では落ちない。ただしタグの CI のラチェットが「良くなった」で落ちる（両側のゲート）ので、マージの前に同じ PR で上限を下げる。`perf-result.json` は 3 の「後」の結果（1 の前の結果を渡すと何も下がらない）:
 
 ```bash
 bun scripts/perf-ratchet.ts update perf-result.json                  # このホストの上限（local）を下げる
@@ -57,7 +57,7 @@ bun scripts/perf-ratchet.ts update <Actions の結果>.json --env github  # Acti
 
 `update` は下げる方向にしか書き換えない。bundle と `bytes`（`open-task` / `open-task-huge`）は上限が無いので下げるものも無い（main の先端との増分で判定する。`docs/design/perf.md` の「ラチェット」の冒頭）。上限は環境ごとに 2 組（`github` / `local`）あり、片方だけ下げると、もう片方は次の CI で「良くなった」と出る — 両方下げる。
 
-**上限を上げたい**（機能を足して数が増えるなど）ときは、`scripts/perf-budget.json` を手で上げる（bundle と `bytes` は上限が無いので書き換えない。1% 未満の増えで利用者に聞かない・上限を上げる PR を出さない。止まらずに通り、推移は `bun scripts/perf-ratchet.ts history` で追う。1% 以上増えたら `grew:` で赤になり、マージするかは利用者の判断）。`check` が main より上げた項目で exit 1 になるので CI は落ち、マージするかは利用者の判断（運用の確認として聞く。理由と前後の表を添える）。
+**上限を上げたい**（機能を足して数が増えるなど）ときは、`scripts/perf-budget.json` を手で上げる（bundle と `bytes` は上限が無いので書き換えない。1% 未満の増えで利用者に聞かない・上限を上げる PR を出さない。止まらずに通り、推移は `bun scripts/perf-ratchet.ts history` で追う）。PR のローカル CI は perf を測らないので、上げた PR も 1% 以上増えた PR も PR では落ちない。タグの CI でも、比べる相手の main がタグ自身か後のコミットなので、タグ自身の増えは `raised:` / `grew:` に出ない（出るのは後の main で上限や bundle が下がったときで、タグの増えではない。`docs/design/perf.md` の「ラチェット」の冒頭）。bundle と `bytes` の増えはマージの前に聞かず、`bun scripts/perf-ratchet.ts history` で追い、直す要望を起票するか前のタグへ戻す。上限を手で上げるのは利用者の判断なので、上げる PR はマージの前に運用の確認として聞く（理由と前後の表を添える）。
 
 ## 5. マージ後に実測を見る
 

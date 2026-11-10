@@ -29,6 +29,17 @@ describe("ops-kit job (#3994)", () => {
     expect(r.out).toContain('"reason":"depends"');
   });
 
+  test("request local-ci --fixtures sends the absolute folder; a relative one and one on a review are usage errors (1) and call nothing", async () => {
+    const ok = await run(["request", "local-ci", "12", "--fixtures", "/home/u/fixtures"], () => job());
+    expect(ok.code).toBe(0);
+    expect(ok.calls[0]!.body).toEqual({ kind: "local-ci", taskId: "task_1", pr: 12, cwd: "/work/app", fixtures: "/home/u/fixtures" });
+    for (const argv of [["request", "local-ci", "12", "--fixtures", "fixtures"], ["request", "review", "12", "--runner", "codex", "--prompt", "p", "--out", "o", "--fixtures", "/home/u/f"]]) {
+      const r = await run(argv, () => job());
+      expect(r.code, argv.join(" ")).toBe(1);
+      expect(r.calls).toEqual([]);
+    }
+  });
+
   test("request review sends the runner and the files resolved against --cwd", async () => {
     const r = await run(["request", "review", "12", "--runner", "codex", "--prompt", "_review/prompt.md", "--out", "_review/codex.md", "--cwd", "/tmp/clone"], () => job({ kind: "review", runner: "codex" }));
     expect(r.code).toBe(0);

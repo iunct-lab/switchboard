@@ -47,6 +47,7 @@ export const common = msgs({
   runnerNameDak: { ja: "dak は SWITCHBOARD_DAK_URL の DAK の名前です（別の名前に）", en: "dak is the name of the DAK at SWITCHBOARD_DAK_URL (choose another name)" },
   runnerExists: { ja: "custom:{name} は既にあります（変えるなら削除して足し直す）", en: "custom:{name} already exists (to change it, delete it and add it again)" },
   runnerUrlRule: { ja: "URL は http:// か https:// で始まる形で", en: "The URL starts with http:// or https://" },
+  customAborted: { ja: "接続を切りました。このサーバが処理を止めたかは分かりません。", en: "The connection was closed. Whether this server stopped its work is not known." },
   runnerAppMissing: { ja: "アプリ名を入れてください", en: "Enter the app name" },
   runnerTokenEnvRule: { ja: "トークンの環境変数名は英大文字・数字・_ で（値ではなく名前）", en: "The token's environment variable name is uppercase letters, digits and _ (the name, not the value)" },
 

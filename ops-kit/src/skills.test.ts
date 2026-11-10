@@ -120,6 +120,12 @@ test("cross-runner-review: an extra reviewer that can be off says its switch in 
   expect(text).toContain("CLAUDE.md が名指しし、有効の条件を満たしていれば");
 });
 
+test("cross-runner-review: the Intent check also asks whether design document changes are in scope (#4116)", () => {
+  const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
+  expect(text).toContain("design documents");
+  expect(text).toContain("out-of-scope edits");
+});
+
 test("cross-runner-review: OPS_KIT_REVIEW_RUNNER=same picks the same runner with its own mark; no value keeps the other runner (#4026)", () => {
   const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
   const chosen = "（同じランナーの別セッション。設定による選択）";
@@ -172,7 +178,7 @@ test("cross-runner-review: step 1 stops before cloning when /tmp has less than M
   expect(out).toMatch(/^\d+\t.*other\.review1\.Abc123$/m); // du's top entries are reported
 });
 
-/** A home whose `ops-kit heavy` has its own slots and no memory floor. */
+/** A home whose `ops-kit heavy` has its own state and no memory floor. */
 function noFloor(home: string) {
   mkdirSync(join(home, ".config", "ops-kit"), { recursive: true });
   writeFileSync(join(home, ".config", "ops-kit", "heavy.json"), '{ "minFreeMb": 0 }\n');
@@ -192,7 +198,7 @@ function runReviewCommand(marker: RegExp, fake: string) {
     const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
     const line = text.split("\n").find((l) => l.startsWith("( ") && marker.test(l))!.replace("--idle 900", "--idle 1");
     const script = `R=${R} M=${M} CODEX=${join(bin, "codex")}\n${line}\necho "exit=$?"\n`;
-    // HOME is the test's own: `ops-kit heavy` takes its slot there, not one of the machine's (a local CI holding the machine's slot would wait on itself),
+    // HOME is the test's own: `ops-kit heavy --memory-only` takes no slot, but writes its history there, not into the machine's,
     // and its heavy.json has no memory floor (the host's free memory must not decide a test)
     noFloor(dir);
     const env = { ...process.env, HOME: dir, PATH: `${bin}:${join(import.meta.dir, "../bin")}:${process.env.PATH}` };
@@ -260,9 +266,11 @@ test("cross-runner-review: every review command goes through idle-run, and the s
   const commands = text.split("\n").filter((l) => /^(# )?\( .*(exec --sandbox|claude -p)/.test(l));
   expect(commands.length).toBe(4);
   for (const line of commands) expect(line).toContain("ops-kit idle-run --idle 900 --");
-  for (const line of commands) expect(line).toMatch(/ops-kit heavy --name "review (codex|claude)" -- ops-kit idle-run /); // the slot is outside idle-run: waiting for it is not 'no progress'
+  // no slot, only the memory floor (PBI 4017: a review runs about a minute, the slot's wait ran minutes to hours), and outside idle-run: waiting is not 'no progress'
+  for (const line of commands) expect(line).toMatch(/ops-kit heavy --memory-only --name "review (codex|claude)" -- ops-kit idle-run --idle 900 -- /);
+  expect(text).not.toContain("枠が空くまで順に待つ");
   expect(text).not.toContain("--output-format text");
-  for (const word of ["exit 124", "無進捗で打ち切り（900 秒出力なし）", "一度だけやり直す", "止まって報告する"]) expect({ word, says: text.includes(word) }).toEqual({ word, says: true });
+  for (const word of ["exit 124", "無進捗で打ち切り（<秒> 秒出力なし）", "ops-kit job request review", "一度だけやり直す", "止まって報告する"]) expect({ word, says: text.includes(word) }).toEqual({ word, says: true });
 });
 
 test("skills: the review clones are removed by their own path, and a cut session's leftovers only after gh says MERGED / CLOSED (#796)", () => {
@@ -348,7 +356,13 @@ test("skills: the five delivery skills say what a workspace without a remote doe
     expect(read(name)).toContain("local-merge.ts <変更>");
   }
   expect(read("pbi-complete")).toContain("<ローカル CI> --change <変更>");
+  expect(read("pbi-complete")).toContain("を回し直してから判定する（前の合格は新しい base では数えられない）");
+  // a repository without a Phase leaves the argument out; an empty one is refused
+  for (const name of ["request-to-backlog", "pbi-to-tasks"]) expect(read(name)).toContain("`ops-kit backlog triage <num> <area> <kind> <P0-P3>");
   expect(read("cross-runner-review")).toContain("ops-kit backlog comment <変更> --body-file");
+  expect(read("cross-runner-review")).toContain("`gh repo clone`・`gh pr view` の行は飛ばす（`gh` を呼ばない");
+  expect(read("review-triage-and-merge")).toContain("CI 緑は `<ローカル CI> --change <変更>` の合格");
+  expect(read("review-triage-and-merge")).toContain("`ops-kit backlog view <変更> --fresh` の末尾のコメント");
   expect(read("stacked-pr-delivery")).toContain("積まない");
 });
 
@@ -364,4 +378,19 @@ test("skills: a PBI closes only when every acceptance criterion links its eviden
   expect(one).not.toContain("テスト名 / コマンドと出力 / 画面で見た事実");
   const four = close.slice(close.indexOf("\n4. "), close.indexOf("\n5. "));
   expect(four).toContain("1 で在りかの無い行（満たせなかった行を含む）が残っておらず");
+});
+
+test("skills: a 利用者確認 line checked by answering decisions names them and is checked once they are all answered, not asked again (#4259)", () => {
+  const read = (name: string) => readFileSync(join(skills, name, "SKILL.md"), "utf8");
+  const rules = read("issue-workflow");
+  const start = rules.indexOf("### 利用者確認の項目");
+  const section = rules.slice(start, rules.indexOf("\n### ", start + 1));
+  for (const word of ["回答で確かめる #", "needs-decision", "聞き直さず", "## 保留", "判断待ちへの回答で確かめる行"]) expect({ word, said: section.includes(word) }).toEqual({ word, said: true });
+  const steps = read("pbi-complete");
+  const close = steps.slice(steps.indexOf("## 6. PBI を閉じる"), steps.indexOf("## 報告"));
+  const four = close.slice(close.indexOf("\n4. "), close.indexOf("\n5. "));
+  expect(four).toContain("判断待ちへの回答で確かめる行");
+  const report = steps.slice(steps.indexOf("## 報告"));
+  const toUser = report.split("\n").find((line) => line.startsWith("利用者へ:")) ?? "";
+  expect(toUser).toContain("判断待ちへの回答で確かめる行");
 });

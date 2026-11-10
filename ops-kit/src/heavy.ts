@@ -1,5 +1,6 @@
-// heavy: run a heavy job (a local CI, the whole test suite, a fake daemon with a headless Chrome, a review session) only when
-// one of the machine's slots is free and the free memory is above the floor; otherwise wait and say why.
+// heavy: run a heavy job (a local CI, the whole test suite, a fake daemon with a headless Chrome) only when one of the
+// machine's slots is free and the free memory is above the floor; otherwise wait and say why. A job run with `memoryOnly`
+// (a review session) takes no slot and waits only while the free memory is below the floor.
 // The limit is the machine's, not a repository's: the configuration and the slots live under the home directory, so every
 // repository, working tree and Task on the machine takes from the same slots (the kit README, 重い処理の枠).
 import { appendFileSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -333,7 +334,7 @@ export function readHeavyHistory(home: string): HeavyHistoryEntry[] {
   return out.slice(-HEAVY_HISTORY_KEEP);
 }
 
-export type HeavyOptions = { home?: string; mem?: () => number | undefined; pollMs?: number; log?: (line: string) => void; taskId?: string | null };
+export type HeavyOptions = { home?: string; mem?: () => number | undefined; pollMs?: number; log?: (line: string) => void; taskId?: string | null; memoryOnly?: boolean };
 
 /**
  * Runs `fn` holding one of the machine's slots. Waits, polling every `pollMs`, while every slot is held or the free memory
@@ -344,6 +345,8 @@ export type HeavyOptions = { home?: string; mem?: () => number | undefined; poll
  * Called by a descendant of a live holder (an `ops-kit heavy -- bun scripts/local-ci.ts …`), it neither waits nor takes a
  * slot: the job runs in the outer one, says so in one line and is added to the history as `<name> (入れ子)`. The holder is
  * found by its pid among the caller's ancestors, not by the environment (local-ci runs its steps under `env -i`).
+ * With `memoryOnly`, it takes no slot and does not wait for one: it waits (listed as `memory`) only while the free memory
+ * is below the floor, then runs beside the jobs holding the slots, and is added to the history as any other job.
  */
 export async function withHeavySlot<T>(name: string, fn: () => Promise<T>, o: HeavyOptions = {}): Promise<T> {
   const home = o.home ?? homedir();
@@ -383,6 +386,10 @@ export async function withHeavySlot<T>(name: string, fn: () => Promise<T>, o: He
       const free = mem();
       if (free !== undefined && free < cfg.minFreeMb) {
         say("memory", `空きメモリ ${free} MB < 下限 ${cfg.minFreeMb} MB`, "memory");
+      } else if (o.memoryOnly) {
+        me.startedAt = new Date().toISOString();
+        if (!waited) me.queuedAt = me.startedAt;
+        break;
       } else {
         const held = holders(dir);
         if (held.length < cfg.max) {

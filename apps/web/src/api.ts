@@ -301,6 +301,8 @@ export const api = {
   setPermissionMode: (id: string, mode: string) => req<Task>(`/api/tasks/${id}/permission-mode`, { method: "POST", body: JSON.stringify({ mode }) }),
   /** Change the model of an existing task (#155): used from the next turn. null = the CLI's default. */
   setTaskModel: (id: string, model: string | null) => req<Task>(`/api/tasks/${id}/model`, { method: "POST", body: JSON.stringify({ model }) }),
+  /** Change the thinking effort of an existing task (#1802): used from the next turn. null = the CLI's default. */
+  setTaskEffort: (id: string, effort: string | null) => req<Task>(`/api/tasks/${id}/effort`, { method: "POST", body: JSON.stringify({ effort }) }),
   /** Usage-limit resume (#102): send the follow-up now, or forget the planned resume. */
   resumeNow: (id: string) => req<Task>(`/api/tasks/${id}/resume`, { method: "POST" }),
   cancelResume: (id: string) => req<Task>(`/api/tasks/${id}/resume`, { method: "DELETE" }),
@@ -349,7 +351,7 @@ export const api = {
   updateSchedule: (id: string, patch: Partial<ScheduleInput>) => req<Schedule>(`/api/schedules/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteSchedule: (id: string) => req<{ ok: boolean }>(`/api/schedules/${id}`, { method: "DELETE" }),
   /** A Task, or `scanning` for a secret-scan schedule (it starts no Task; its lines go to the log, #775). */
-  runSchedule: (id: string) => req<Task | { scanning: true }>(`/api/schedules/${id}/run`, { method: "POST" }),
+  runSchedule: (id: string) => req<Task | { scanning: true } | { promotion: string }>(`/api/schedules/${id}/run`, { method: "POST" }),
   scheduleLog: () => req<string[]>("/api/schedules/log"),
   presets: () => req<PresetList>("/api/presets"),
   createPreset: (input: PresetInput) => req<Preset>("/api/presets", { method: "POST", body: JSON.stringify(input) }),

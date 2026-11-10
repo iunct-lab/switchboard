@@ -234,11 +234,19 @@ export function summarizeInterventions(items: Intervention[], unknown: Intervent
   // proof), and only for the series of the stop that was newest at that place when it came — an answer a later record carried
   // over belongs to the series it was given to (the same rule as `reduceStops`)
   const answeredAt = new Map<string, number[]>();
+  // the stops of one place in `list` order (oldest began first), so the newest one that began before an answer is found by bisection
+  const atPlace = new Map<string, typeof list>();
+  for (const x of list) { const k = placeKey(x.last); const g = atPlace.get(k); if (g) g.push(x); else atPlace.set(k, [x]); }
+  const newestBefore = (g: typeof list, at: number) => {
+    let lo = 0, hi = g.length; // first index whose began is not before `at`
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (g[mid]!.began < at) lo = mid + 1; else hi = mid; }
+    return lo > 0 ? g[lo - 1] : undefined;
+  };
   for (const s of list) {
     for (const r of [s.first, s.last]) {
       const a = r.answer;
       if (!a?.ref.startsWith("seq:")) continue;
-      const owner = list.filter((x) => placeKey(x.last) === placeKey(r) && x.began < a.at).at(-1);
+      const owner = newestBefore(atPlace.get(placeKey(r)) ?? [], a.at);
       if (owner && stopKey(owner.last) === stopKey(r)) answeredAt.set(stopKey(r), [...(answeredAt.get(stopKey(r)) ?? []), a.at]);
     }
   }

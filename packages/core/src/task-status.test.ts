@@ -1,17 +1,20 @@
+// test-reads: docs/design/task-work-phase.md
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import type { Task, TaskStatus } from "@switchboard/protocol";
+import { isWorkingStatus, type Task, type TaskStatus } from "@switchboard/protocol";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Db, abortOrphanedTasks } from "./db.ts";
-import { canTransition, InvalidTaskTransitionError, outcomeOnStatus } from "./task-status.ts";
+import { readFileSync } from "node:fs";
+import { canTransition, COUNTS, InvalidTaskTransitionError, isWorking, outcomeOnStatus, workingSql, type WorkPhase, type WorkPurpose } from "./task-status.ts";
 
-const ALL: TaskStatus[] = ["idle", "running", "waiting", "done", "error", "aborted"];
+const ALL: TaskStatus[] = ["idle", "running", "waiting", "background", "done", "error", "aborted"];
 const ALLOWED: Record<TaskStatus, TaskStatus[]> = {
   idle: ["running", "error", "aborted"],
-  running: ["waiting", "done", "error", "aborted", "idle"],
-  waiting: ["running", "done", "error", "aborted", "idle"],
-  done: ["running", "error"],
+  running: ["waiting", "background", "done", "error", "aborted", "idle"],
+  waiting: ["running", "background", "done", "error", "aborted", "idle"],
+  background: ["running", "done", "error", "aborted"],
+  done: ["running", "background", "error"],
   error: ["running"],
   aborted: ["running", "error"],
 };
@@ -72,5 +75,70 @@ describe("task status transitions (#1140)", () => {
     expect(db.getTask("loc")).toMatchObject({ status: "aborted", outcome: "failed" });
     expect(db.getTask("cs")).toMatchObject({ status: "idle", outcome: "unknown" });
     expect(db.getTask("cn")).toMatchObject({ status: "error", outcome: "unknown" });
+  });
+
+  test("isWorkingStatus in protocol equals COUNTS.display for every status (the web uses it, #4213)", () => {
+    for (const st of ALL) expect(isWorkingStatus(st), st).toBe(isWorking({ status: st, resumeAt: null }, "display"));
+  });
+
+  test("workingSql selects the same rows as isWorking for every purpose, status and resumeAt", () => {
+    const rows: Array<[string, TaskStatus, number | null]> = [];
+    for (const st of ALL) for (const r of [null, 1]) { const id = `${st}-${r}`; mk(id, st, { resumeAt: r }); rows.push([id, st, r]); }
+    for (const purpose of Object.keys(COUNTS) as WorkPurpose[]) {
+      const sql = (db.sqlite.query(`SELECT id FROM tasks WHERE ${workingSql(purpose)}`).all() as Array<{ id: string }>).map((r) => r.id).sort();
+      const aliased = (db.sqlite.query(`SELECT x.id FROM tasks x WHERE ${workingSql(purpose, "x")}`).all() as Array<{ id: string }>).map((r) => r.id).sort();
+      const fn = rows.filter(([, status, resumeAt]) => isWorking({ status, resumeAt }, purpose)).map(([id]) => id).sort();
+      expect(sql, purpose).toEqual(fn);
+      expect(aliased, purpose).toEqual(fn);
+    }
+  });
+});
+
+describe("work phase table (#4208)", () => {
+  test("COUNTS matches the table in docs/design/task-work-phase.md", () => {
+    const doc = readFileSync(join(import.meta.dir, "../../../docs/design/task-work-phase.md"), "utf8").split("\n");
+    const head = doc.findIndex((l) => /^\| Phase \| dedupe /.test(l));
+    expect(head).toBeGreaterThan(-1);
+    const cells = (l: string) => l.split("|").slice(1, -1).map((c) => c.trim().replaceAll("`", ""));
+    const purposes = cells(doc[head]!).slice(1) as WorkPurpose[];
+    const rows = doc.slice(head + 2).filter((l) => l.startsWith("|")).map(cells);
+    expect(rows.map((r) => r[0]).sort()).toEqual(["approval", "background", "resume", "stopped", "turn"]);
+    for (const purpose of Object.keys(COUNTS) as WorkPurpose[]) {
+      const col = purposes.indexOf(purpose) + 1;
+      expect(col, purpose).toBeGreaterThan(0);
+      const documented = rows.filter((r) => r[col] === "yes").map((r) => r[0] as WorkPhase).sort();
+      expect(documented, purpose).toEqual([...COUNTS[purpose]].sort());
+    }
+  });
+});
+
+describe("no side-by-side status comparison (#4072)", () => {
+  // The forms of "is this Task working?" written out by hand. A new one goes through isWorking / isWorkingStatus / IN_FLIGHT / workPhase instead.
+  const FORMS = String.raw`status === "running" \|\||IN \('running'|"running", ?"waiting"`;
+  // One entry per place that may keep a form: file, the one line that must contain `has` (a second such line fails), and why.
+  const ALLOWED: Array<{ file: string; has: string; why: string }> = [
+    { file: "packages/core/src/task-status.ts", has: "IN_FLIGHT", why: "the definition of IN_FLIGHT" },
+    { file: "packages/protocol/src/model.ts", has: "TaskStatus = z.enum", why: "the list of statuses" },
+    { file: "packages/protocol/src/model.ts", has: "return status === \"running\" || status === \"waiting\" || status === \"background\";", why: "isWorkingStatus, the web's copy of COUNTS.display (a test keeps them equal)" },
+    { file: "packages/core/src/db.ts", has: "NOT IN ('running', 'waiting', 'idle')", why: "a migration is frozen at the statuses of its day" },
+    { file: "rescue/src/promote.ts", has: "t.status === \"running\" ||", why: "sb-rescue shares no code with the app; it reads the status strings of /api/health" },
+  ];
+
+  test("no file outside tests and the allow list compares statuses side by side", () => {
+    const r = Bun.spawnSync(["git", "grep", "-nE", FORMS, "--", "*.ts", "*.tsx", ":!*.test.ts", ":!*.test.tsx"], { cwd: join(import.meta.dir, "../../..") });
+    const hits = r.stdout.toString().split("\n").filter(Boolean);
+    const stray = hits.filter((h) => {
+      const [file, , ...rest] = h.split(":");
+      const line = rest.join(":");
+      return !ALLOWED.some((a) => a.file === file && line.includes(a.has));
+    });
+    expect(stray).toEqual([]);
+  });
+
+  test("every allow-list entry matches exactly one line", () => {
+    const r = Bun.spawnSync(["git", "grep", "-nE", FORMS, "--", "*.ts", "*.tsx", ":!*.test.ts", ":!*.test.tsx"], { cwd: join(import.meta.dir, "../../..") });
+    const hits = r.stdout.toString().split("\n").filter(Boolean);
+    // a copy of an allowed line (another helper written the same way) counts twice, and a removed one zero times
+    for (const a of ALLOWED) expect(hits.filter((h) => h.startsWith(`${a.file}:`) && h.includes(a.has)).length, a.file + " " + a.why).toBe(1);
   });
 });

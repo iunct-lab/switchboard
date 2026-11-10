@@ -56,6 +56,7 @@ describe("events archive", () => {
     seed(db, "old-done", "done", LONG_AGO);
     seed(db, "old-error", "error", LONG_AGO);
     seed(db, "old-running", "running", LONG_AGO);
+    seed(db, "old-background", "background", LONG_AGO); // a background process still runs: its record stays
     seed(db, "recent", "done", NOW - DAY);
     const dir = join(tmp, "prepare-out");
     const entries = await prepareEventsArchive(db.sqlite, dir, { now: NOW });

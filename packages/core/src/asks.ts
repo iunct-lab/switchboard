@@ -3,6 +3,7 @@ import { MERGE_ASK } from "../../../scripts/merge-gate.ts";
 import { isAnswered, isUnblocked, priorityRank, type GhRunner } from "./backlog.ts";
 import { matchPolicies, POLICY_DEFAULT_DAYS, subjectChanges } from "./policies.ts";
 import { issueOf, NEEDS_PERSON } from "./stops.ts";
+import { IN_FLIGHT, TURN_ENDED } from "./task-status.ts";
 
 /**
  * The questions waiting on the user (#935), built from the records each time they are read — the
@@ -100,7 +101,7 @@ export function resumeOfIssue(input: {
   if (answeredAt === null) return null;
   const t = input.stageTasks.filter((x) => x.createdAt >= answeredAt).sort((a, b) => b.createdAt - a.createdAt)[0];
   if (t) {
-    if (t.status === "running" || t.status === "waiting") return { state: "running", reason: null, taskId: t.id, at: t.createdAt };
+    if (IN_FLIGHT.has(t.status)) return { state: "running", reason: null, taskId: t.id, at: t.createdAt };
     if (t.status === "error" || t.status === "aborted") return { state: "failed", reason: `工程 Task が ${t.status}`, taskId: t.id, at: t.updatedAt };
     return null;
   }
@@ -119,7 +120,7 @@ export function resumeOfTask(input: { task: Task; repliedAt: number | null; fail
   if (repliedAt === null) return null;
   if (failure && failure.at >= repliedAt) return { state: "failed", reason: failure.reason, taskId: t.id, at: failure.at };
   if (t.resumeAt !== null) return { state: "queued", reason: `使用上限の解除待ち（${new Date(t.resumeAt).toISOString()}）`, taskId: t.id, at: t.updatedAt };
-  if (t.status === "running" || t.status === "waiting") return { state: "running", reason: null, taskId: t.id, at: repliedAt };
+  if (IN_FLIGHT.has(t.status)) return { state: "running", reason: null, taskId: t.id, at: repliedAt };
   if (t.status === "error" || t.status === "aborted") return { state: "failed", reason: `Task が ${t.status}`, taskId: t.id, at: t.updatedAt };
   return null;
 }
@@ -440,8 +441,6 @@ export function asksFromBacklog(items: BacklogItem[], now: number, opts: { resum
 /** Open and held ones always; answered / resolved ones for ASK_HISTORY_MS after their change. */
 const isShown = (now: number) => (a: Ask) => a.state === "open" || a.state === "held" || now - a.changedAt <= ASK_HISTORY_MS;
 
-const ENDED = new Set<Task["status"]>(["done", "error", "aborted"]);
-
 export interface TaskAskInput {
   approvals: PendingApproval[];
   /** The Tasks changed within ASK_HISTORY_MS, and the live ones. */
@@ -512,7 +511,7 @@ export function asksFromTasks(input: TaskAskInput): Ask[] {
     const t = byId.get(e.taskId);
     const ask = asked.get(`${e.taskId}:${e.ev.id}`);
     if (!t || !ask || ask.ev.t !== "permission.ask") continue;
-    const resolved = ENDED.has(t.status) && t.updatedAt >= e.ts;
+    const resolved = TURN_ENDED.has(t.status) && t.updatedAt >= e.ts;
     const id = `approval:${t.id}:${e.ev.id}`;
     asks.push({
       ...shared(t, t.id, t.title),

@@ -1,4 +1,5 @@
 import type { Ask, AskAnswer, AskBatch, PolicyInput, PolicyScope } from "@switchboard/protocol";
+import { issueHref } from "./backlogSync.ts";
 import { jstClock, jstDay } from "./time.ts";
 import { t } from "./i18n.ts";
 import { task as m } from "./i18n/task.ts";
@@ -171,6 +172,12 @@ export function resumeLabel(a: Pick<Ask, "state" | "resume">): { text: string; t
   if (r.state === "failed") return { text: r.reason ? t(m.resumeFailedWhy, { reason: r.reason }) : t(m.resumeFailed), tone: "bad" };
   return { text: t(m.stateAnswered), tone: "ok" };
 }
+
+/** The Issues an Ask unblocks, each with its link — null when the Issue has no url (a workspace without GitHub sync, #2343). */
+export const unblockLinks = (unblocks: Ask["unblocks"]): Array<{ number: number; title: string; href: string | null }> => unblocks.map((u) => ({ number: u.number, title: u.title, href: issueHref(u.url) }));
+
+/** Where "open the Issue" goes: the Issue's url when the Ask routes to it and it has one, else null (no link to show). */
+export const issueOpenHref = (x: Pick<Ask, "route" | "issue">): string | null => (x.route === "issue" && x.issue ? issueHref(x.issue.url) : null);
 
 /** How many other PBIs wait on the question (#1674); null = none. */
 export const unblocksLine = (a: Pick<Ask, "unblocks">) => (a.unblocks.length ? t(m.unblocks, { count: a.unblocks.length }) : null);

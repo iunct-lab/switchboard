@@ -5,16 +5,16 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Db } from "../packages/core/src/db.ts";
-import { kernelReport, median, NO_PROCESS, NO_PROVENANCE, renderReport } from "./kernel-report.ts";
+import { kernelReport, median, NO_PROCESS, NO_PROVENANCE, reasonKind, renderReport } from "./kernel-report.ts";
 
-const prov = (process: string | null, skills: string, bytes: number | null) => JSON.stringify({ v: 1, process: process ? { id: process, version: 1 } : null, processReason: null, bundle: { skills, repoSkills: null, claudeMd: null, processes: null }, repo: { head: null }, runner: "claude", model: null, effort: null, permissionMode: null, instructionBytes: bytes, recordedAt: 1 });
+const prov = (process: string | null, skills: string, bytes: number | null, reason: string | null = null) => JSON.stringify({ v: 1, process: process ? { id: process, version: 1 } : null, processReason: reason, bundle: { skills, repoSkills: null, claudeMd: null, processes: null }, repo: { head: null }, runner: "claude", model: null, effort: null, permissionMode: null, instructionBytes: bytes, recordedAt: 1 });
 
 test("a database without the provenance column (an older daemon's) reports every Task as 記録なし instead of failing", () => {
   const db = new Database(":memory:");
   db.exec("CREATE TABLE tasks (id TEXT, status TEXT, created_at INTEGER, status_at INTEGER, shadow_of TEXT); CREATE TABLE ledger (task_id TEXT, cost_usd REAL); CREATE TABLE task_evals (task_id TEXT, source TEXT, json TEXT)");
   db.query("INSERT INTO tasks VALUES ('t', 'done', 100, 160, NULL)").run();
   const r = kernelReport(db, { days: 1, now: 1000 });
-  expect(r.strata).toEqual([{ key: `${NO_PROVENANCE}@-`, process: NO_PROVENANCE, skills: "-", n: 1, durationMsMedian: 60, costUsdMedian: null, interventionsMedian: null, instructionBytesMedian: null }]);
+  expect(r.strata).toEqual([{ key: `${NO_PROVENANCE}@-`, process: NO_PROVENANCE, skills: "-", n: 1, reasons: { button: 0, auto: 0, returned: 0, other: 0, none: 1 }, durationMsMedian: 60, costUsdMedian: null, interventionsMedian: null, instructionBytesMedian: null }]);
   db.close();
 });
 
@@ -65,7 +65,7 @@ test("kernelReport groups the window's Tasks by process and skills hash, with �
       expect(none).toMatchObject({ process: NO_PROVENANCE, skills: "-", n: 2, durationMsMedian: 75_000, costUsdMedian: null, interventionsMedian: 4, instructionBytesMedian: null });
       const text = renderReport(r);
       expect(text).toContain("Task 7 件");
-      expect(text).toContain(`| p0-pipeline | ${"a".repeat(8)} | 3 | 2.0 分 | $5.00 | 1.5 | 2 KB |`);
+      expect(text).toContain(`| p0-pipeline | ${"a".repeat(8)} | 3 | ボタン 0 / 自動 0 / 戻した 0 | 2.0 分 | $5.00 | 1.5 | 2 KB |`);
       expect(text).toContain(`| ${NO_PROVENANCE} | - | 2 |`);
       expect(text).toContain(`| ${NO_PROCESS} | ${"a".repeat(8)} | 1 |`);
       expect(text).toContain("層別は観察で、決着ではない");
@@ -75,4 +75,39 @@ test("kernelReport groups the window's Tasks by process and skills hash, with �
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("reasonKind reads the words the choosers write", () => {
+  expect(reasonKind("direct button")).toBe("button");
+  expect(reasonKind("backlog stage to-pbi")).toBe("button");
+  expect(reasonKind("auto direct: 本文 120 字 ≤ 400")).toBe("auto");
+  expect(reasonKind("auto pipeline: 本文が長い")).toBe("auto");
+  expect(reasonKind("direct returned")).toBe("returned");
+  expect(reasonKind("something else")).toBe("other");
+  expect(reasonKind(null)).toBe("none");
+  expect(reasonKind("")).toBe("none");
+});
+
+test("p0-pipeline and p1-direct are separate rows, each with its Tasks counted by the kind of reason", () => {
+  const db = new Database(":memory:");
+  db.exec("CREATE TABLE tasks (id TEXT, status TEXT, created_at INTEGER, status_at INTEGER, shadow_of TEXT, provenance TEXT); CREATE TABLE ledger (task_id TEXT, cost_usd REAL); CREATE TABLE task_evals (task_id TEXT, source TEXT, json TEXT)");
+  const skills = "c".repeat(64);
+  const rows: Array<[string, string | null]> = [
+    ["t1", prov("p0-pipeline", skills, 1, "backlog stage to-pbi")],
+    ["t2", prov("p0-pipeline", skills, 1, "direct returned")],
+    ["t3", prov("p1-direct", skills, 1, "direct button")],
+    ["t4", prov("p1-direct", skills, 1, "auto direct: 本文 100 字")],
+    ["t5", prov("p1-direct", skills, 1, "auto direct: 本文 90 字")],
+    ["t6", prov("p1-direct", skills, 1, "hand-written")],
+  ];
+  for (const [id, p] of rows) db.query("INSERT INTO tasks VALUES (?, 'done', 100, 160, NULL, ?)").run(id, p);
+  const r = kernelReport(db, { days: 1, now: 1000 });
+  const p0 = r.strata.find((s) => s.process === "p0-pipeline")!;
+  const p1 = r.strata.find((s) => s.process === "p1-direct")!;
+  expect(p0.reasons).toEqual({ button: 1, auto: 0, returned: 1, other: 0, none: 0 });
+  expect(p1.reasons).toEqual({ button: 1, auto: 2, returned: 0, other: 1, none: 0 });
+  const text = renderReport(r);
+  expect(text).toContain(`| p0-pipeline | cccccccc | 2 | ボタン 1 / 自動 0 / 戻した 1 |`);
+  expect(text).toContain(`| p1-direct | cccccccc | 4 | ボタン 1 / 自動 2 / 戻した 0 / その他 1 |`);
+  db.close();
 });

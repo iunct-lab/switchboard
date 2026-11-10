@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { batchKindOf } from "./approval-batch.ts";
+import type { AskBatch, Task, TaskStatus } from "@switchboard/protocol";
+import { batchKindOf, BatchAnswers } from "./approval-batch.ts";
 
 describe("batchKindOf", () => {
   test("batchKindOf tells sso and deploy", () => {
@@ -10,5 +11,23 @@ describe("batchKindOf", () => {
     // a resolved stop waits on nothing; a deploy word with another reason is not a refused deploy
     expect(batchKindOf({ reason: "auth", op: "aws sso login", target: "profile", state: "resolved" })).toBeNull();
     expect(batchKindOf({ reason: "decision", op: "sam deploy", target: "stack", state: "waiting" })).toBeNull();
+  });
+});
+
+describe("BatchAnswers.turnEnded", () => {
+  const task = (status: TaskStatus) => ({ id: "t1", status }) as Task;
+  const run = async (status: TaskStatus) => {
+    const sent: string[] = [];
+    const batch = { id: "batch:sso", kind: "sso", asks: [{ taskId: "t2" }], loggingIn: null, deviceAuth: null } as unknown as AskBatch;
+    const b = new BatchAnswers({ send: async (id) => void sent.push(id), task: () => task(status), stopRecords: () => [], batches: async () => [batch], deviceAuth: () => null });
+    b.pendingSso = { first: "t1", rest: ["t2"], at: 0 };
+    await b.turnEnded("t1");
+    return sent;
+  };
+
+  test("the rest are sent on when the first Task's turn ended with a background process left; not when it errored (#4212)", async () => {
+    expect(await run("done")).toEqual(["t2"]);
+    expect(await run("background")).toEqual(["t2"]);
+    expect(await run("error")).toEqual([]);
   });
 });

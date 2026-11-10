@@ -1,6 +1,6 @@
 // test-reads: none
 import { describe, expect, test } from "bun:test";
-import { failureLines, formatCandidates, parseJunit, quietCandidates, similarCandidates, slowCandidates, type TestCase } from "./test-audit";
+import { failureLines, formatCandidates, formatGrowth, growthAlert, parseJunit, quietCandidates, similarCandidates, slowCandidates, type GrowthCounts, type GrowthWeek, type TestCase } from "./test-audit";
 
 const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <testsuites name="bun test" tests="2">
@@ -75,4 +75,34 @@ test("the tables carry the numbers and stop at the top 20", () => {
   expect(out).toContain("| 1.000 | 4.00% | a.test.ts | t0 |");
   expect(out).not.toContain("t24");
   expect(out).toContain("## 赤にならない（0 件）");
+});
+
+const counts = (testLines: number, bodyLines: number): GrowthCounts => ({ testCases: testLines / 10, testLines, bodyLines });
+const week = (weekEnd: string, tools: GrowthCounts, product = counts(100, 100)): GrowthWeek => ({ weekEnd, product, tools });
+
+describe("growthAlert", () => {
+  test("the tools' test lines growing faster than the body is an alert", () => {
+    const weeks = [week("2026-11-01", counts(100, 100)), week("2026-11-08", counts(300, 150), counts(120, 150))];
+    expect(growthAlert(weeks)).toEqual({ alert: true, toolTestLinesDelta: 200, bodyLinesDelta: 100 });
+  });
+
+  test("the body growing faster, or the tests not growing, is no alert", () => {
+    expect(growthAlert([week("a", counts(100, 100)), week("b", counts(150, 300))])).toMatchObject({ alert: false, toolTestLinesDelta: 50, bodyLinesDelta: 200 });
+    expect(growthAlert([week("a", counts(100, 100)), week("b", counts(80, 90), counts(100, 90))])).toMatchObject({ alert: false, toolTestLinesDelta: -20 });
+  });
+
+  test("fewer than two weeks cannot be judged", () => {
+    expect(growthAlert([week("a", counts(100, 100))])).toBeNull();
+    expect(growthAlert([])).toBeNull();
+  });
+});
+
+test("formatGrowth has one row per week and the verdict line", () => {
+  const weeks = [week("2026-10-25", counts(100, 100)), week("2026-11-01", counts(200, 120)), week("2026-11-08", counts(500, 140))];
+  const out = formatGrowth(weeks);
+  expect(out.split("\n").filter((l) => /^\| 2026-/.test(l))).toHaveLength(3);
+  expect(out).toContain("| 2026-11-08 | 10 | 100 | 100 | 50 | 500 | 140 |");
+  expect(out).toContain("棚卸しを早める");
+  expect(formatGrowth(weeks.slice(0, 1))).toContain("判定できません");
+  expect(formatGrowth([weeks[0]!, { ...weeks[1]!, tools: counts(100, 500) }])).toContain("早めません");
 });

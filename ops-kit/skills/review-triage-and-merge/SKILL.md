@@ -19,6 +19,8 @@ gh pr view $N --comments --json comments -q '.comments[] | "---- \(.author.login
 
 同じ指摘が複数のレビュアーから来たら 1 件にまとめ、返信で「[codex] と [<extra>] の同じ指摘」と書く。
 
+**ローカルの変更では**（4 の同名の段落と同じ workspace）: 上の `gh api` と `gh pr view` は呼ばない。指摘の一覧は変更へのコメント（`ops-kit backlog view <変更> --fresh` の末尾のコメント。`[codex]` / `[<extra>]` / サブエージェントの要約も全文）を読む。
+
 ## 2. 振り分ける
 
 | 振り分け | いつ | やること |
@@ -44,7 +46,7 @@ gh stack rebase && gh stack push        # 下の枝を直したら上に cascade
 
 **1 回のレビューの修正は 1 コミットにまとめてから見直しを頼む**。nit ごとにコミットすると、コミットごとに新しい見直しが次の端のケースを見つけ、収束しない（nit は直さなくてよいもの）。直すのは blocker / should-fix と、同じコミットに入る 1 行程度の nit だけ。ほかの nit は対処不要か記録（Issue）にする。直し方は、端のケースを広げる推測より、限界を書いた保守的な規則を選ぶ。文書に「〜だけ」「全部」のような網羅の主張を書かない。
 
-修正のたびに `gh pr view $N --json headRefOid` が進む。インラインコメントは古い commit に紐づくが返信はできる。
+修正のたびに `gh pr view $N --json headRefOid` が進む。インラインコメントは古い commit に紐づくが返信はできる。ローカルの変更では push せず（4 の同名の段落）、今の head は `ops-kit backlog view <変更>` の `変更:` の行に出る。
 
 ## 4. 返信する
 
@@ -81,7 +83,7 @@ gh pr comment $N --body-file "$W/summary.md"      # W=$(mktemp -d /tmp/<リポ�
 <可 / 不可 と理由（下のチェックリストの結果）>
 ```
 
-**ローカルの変更では**（Task への指示が「この workspace の変更はアプリに置く」と言う workspace。リポジトリのサービスがアプリで、PR の代わりにアプリに置く「変更」を使う）: スレッドが無いので、指摘ごとの振り分けと返信は、変更へのコメント 1 件に表で書く（`| 指摘（引用） | 振り分け | 返信 |`、`ops-kit backlog comment <変更> --body-file "$W/summary.md"`。上の要約も同じコメントに）。修正は枝に commit するだけ（push しない）。
+**ローカルの変更では**（Task への指示が「この workspace の変更はアプリに置く」と言う workspace。リポジトリのサービスがアプリで、PR の代わりにアプリに置く「変更」を使う）: スレッドが無いので、指摘ごとの振り分けと返信は、変更へのコメント 1 件に表で書く（`| 指摘（引用） | 振り分け | 返信 |`、`ops-kit backlog comment <変更> --body-file "$W/summary.md"`。上の要約も同じコメントに）。修正は枝に commit するだけ（push しない）。返信は `gh api` で書かずこの表 1 件で済ませ、resolve するスレッドは無い。
 
 ## 5. マージ可否
 
@@ -91,12 +93,14 @@ gh pr comment $N --body-file "$W/summary.md"      # W=$(mktemp -d /tmp/<リポ�
 - [ ] 全指摘が 修正 / Issue 化 / 対処不要 / 回答 のどれかで、返信済み
 - [ ] blocker が残っていない（修正済みか、誤読の根拠つき）
 - [ ] 主レビュアーの独立レビューがある（通常は別ランナー。利用上限なら `cross-runner-review` の 0 に従い、同じランナーの新しいセッションで代替する。自己レビューだけでは満たさない。代替も利用できなければ未レビューとして止める。追加のレビュアーは未着でもよく、届いたら転記して比較する）
-- [ ] security / license / personal data の 3 節が主レビューにあり、finding は処理済み
+- [ ] security / license / personal data / public readers の 4 項目が主レビューにあり、finding は処理済み
 - [ ] CI 緑: `gh run list --commit "$(gh pr view $N --json headRefOid -q .headRefOid)"`（`gh pr checks` は Checks の権限が要り、fine-grained トークンでは 403 になることがある）。**Actions が始まらない**（請求の問題。run が数秒で failure、ジョブのステップが 0 件: `gh api repos/{owner}/{repo}/actions/runs/<id>/jobs -q '.jobs[].steps|length'`）ときは待たず、ローカル CI（CLAUDE.md のコマンド）で CI の手順をローカルで回す。通ったときの印をマージ判定がその CI の成功と数える仕組みなら、それで進める（テストが実際に落ちた CI の代わりにはならない）。スタックなら一番上の PR で、全部の PR の指摘の処理が済んでから 1 回回す。修正で差分が変わったら一番上でもう 1 回（下の PR のマージ後の自動 rebase と base の前進では回し直さない。CLAUDE.md が名指しするマージ判定の規則の「ローカル CI を回す時と数え方」）
 - [ ] PR 本文が今の差分と一致（修正で変わったなら `gh pr edit` で直す。[x] は事実だけ）
 - [ ] Task の DoD が事実として満たされている（テスト / typecheck / 実構成、および Task が名指しした doc）
 - [ ] `git diff --stat origin/main...HEAD` に迷いファイル（作業ファイル、fixture の絶対パス）が無い
 - [ ] `gh pr view $N --json baseRefName,mergeable,mergeStateStatus` が base=main（スタックの一番下）で CLEAN
+
+**ローカルの変更では**（4 の同名の段落と同じ workspace）: 上の `gh` の行は呼ばない。CI 緑は `<ローカル CI> --change <変更>` の合格（`<マージ判定> --change <変更>` が数える）、PR 本文は変更の本文（`ops-kit backlog edit <変更> --body-file <ファイル>` で直す）、迷いファイルは `git diff --stat main...<枝>`、base と CLEAN は `<マージ判定> --change <変更>` が見る。
 
 ## 6. マージと記録
 

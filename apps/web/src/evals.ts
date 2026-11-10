@@ -143,32 +143,40 @@ export function firstSortDir(key: EvalsSortKey): "asc" | "desc" {
 /**
  * The text of a row's cells that are not plain numbers; "-" where the task has no such eval. `model` is every model the
  * task ran on in the order first used (#1801: the list is distinct, so its last entry is not always the one running at
- * the end); `mixed` = two or more.
+ * the end); `mixed` = two or more. `effort` is the same for the thinking depths the task started with (#1802): the runner's
+ * label of each, "—" when it never started.
  */
-export function evalCells(row: EvalsListRow, runner?: Pick<RunnerInfo, "efforts">): { judge: string; human: string; end: string; model: string; mixed: boolean; effort: string } {
+export function evalCells(row: EvalsListRow, runner?: Pick<RunnerInfo, "efforts">): { judge: string; human: string; end: string; model: string; mixed: boolean; effort: string; effortMixed: boolean; subagentEffort: string } {
+  const efforts = row.efforts.map((e) => effortLabel(e, runner));
   return {
     judge: row.judge ? row.judge.average.toFixed(1) : "-",
     human: row.human ? `${row.human.rating} / 5` : "-",
     end: endLabel(row.rules?.lastEnd ?? null),
     model: row.models.length ? row.models.join(" → ") : "-",
     mixed: row.models.length >= 2,
-    effort: effortLabel(row.effort, runner),
+    effort: efforts.length ? efforts.join(" → ") : "—",
+    effortMixed: efforts.length >= 2,
+    subagentEffort: row.subagentEffort ?? "-",
   };
 }
 
+/** The filter key of a started effort: "-" is the CLI default (""). */
+const effortKey = (e: string): string => e || "-";
+
 /**
- * The rows that used `model` and ran at `effort` (#1801); an empty value does not filter, "-" is the CLI default. Done on
+ * The rows that used `model` and started at `effort` (#1801, #1802); an empty value does not filter, "-" is the CLI default. Done on
  * the rows the screen read: the daemon has no index to filter its events by.
  */
-export function filterEvalRows(rows: EvalsListRow[], f: { model: string; effort: string }): EvalsListRow[] {
-  return rows.filter((r) => (!f.model || r.models.includes(f.model)) && (!f.effort || (r.effort ?? "-") === f.effort));
+export function filterEvalRows(rows: EvalsListRow[], f: { model: string; effort: string; subagentEffort?: string }): EvalsListRow[] {
+  return rows.filter((r) => (!f.model || r.models.includes(f.model)) && (!f.effort || r.efforts.map(effortKey).includes(f.effort)) && (!f.subagentEffort || (r.subagentEffort ?? "-") === f.subagentEffort));
 }
 
 /** The choices of the model and effort selects (#1801): the values in the rows read, distinct and sorted; "-" when a task ran at the CLI default. */
-export function evalFilterOptions(rows: EvalsListRow[]): { models: string[]; efforts: string[] } {
+export function evalFilterOptions(rows: EvalsListRow[]): { models: string[]; efforts: string[]; subagentEfforts: string[] } {
   return {
     models: [...new Set(rows.flatMap((r) => r.models))].sort(),
-    efforts: [...new Set(rows.map((r) => r.effort ?? "-"))].sort(),
+    efforts: [...new Set(rows.flatMap((r) => r.efforts.map(effortKey)))].sort(),
+    subagentEfforts: [...new Set(rows.map((r) => r.subagentEffort ?? "-"))].sort(),
   };
 }
 
