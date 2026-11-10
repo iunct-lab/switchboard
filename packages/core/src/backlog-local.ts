@@ -9,8 +9,9 @@ import { BacklogEditError, type BacklogCreatePayload } from "./backlog.ts";
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
-import { CONFIG_FILE, defaultConfig, loadConfig, type OpsConfig } from "../../../ops-kit/src/config.ts";
+import { CONFIG_FILE, STORY_POINTS, defaultConfig, loadConfig, type OpsConfig } from "../../../ops-kit/src/config.ts";
 import { STATUS_OPTIONS } from "../../../ops-kit/src/bootstrap.ts";
+import { fieldChoice, UsageError } from "../../../ops-kit/src/set.ts";
 import { forgeOf, LOCAL_SERVICE } from "../../../ops-kit/src/forge.ts";
 
 /**
@@ -58,7 +59,7 @@ export function applyLocalOperations(db: Db, source: BacklogSource, now = Date.n
         // the API refuses a parent that is not there (checkLocalParent); one gone meanwhile is not kept
         const parent = p.parent !== null && byNumber(p.parent) ? p.parent : null;
         const id = `sb:${op.id}`;
-        const value: BacklogIssueData = { number, title: p.title, url: "", state: p.state, stateReason: null, body: p.body, labels: p.labels, milestone: p.milestone, parent, subIssues: [], createdAt: at, updatedAt: at, closedAt: p.state === "CLOSED" ? at : null, ...(p.change ? { change: { ...p.change, mergeCommit: null, mergedAt: null } } : {}) };
+        const value: BacklogIssueData = { number, title: p.title, url: "", state: p.state, stateReason: null, body: p.body, labels: p.labels, milestone: p.milestone, parent, subIssues: [], createdAt: at, updatedAt: at, closedAt: p.state === "CLOSED" ? at : null, ...(p.change ? { change: { ...p.change, mergeCommit: null, mergedAt: null, reviewedHead: null } } : {}) };
         db.setBacklogOperationResult(op.id, { status: "done", remoteId: id, record: { externalId: id, remote: value } }, now);
         if (p.project) store("project-item", `sb:item:${op.id}`, { issue: number, owner: p.project.owner, project: p.project.number, fields: p.project.fields } satisfies BacklogProjectItemData);
         if (parent !== null) moveSub(number, null, parent);
@@ -112,10 +113,37 @@ export function checkLocalParent(db: Db, source: BacklogSource, parent: number |
   if (!there || parent === self) throw new BacklogEditError(`#${parent} は親にできません（${there ? "自分自身です" : "この workspace にありません"}）`, 422);
 }
 
+/** `fieldChoice` (the kit's, the one `ops-kit backlog set` uses) with its refusal as a 422. */
+function choiceOf(cfg: OpsConfig, name: string, value: string | number | null): string | number | null {
+  try {
+    return fieldChoice(cfg, name, value);
+  } catch (e) {
+    if (e instanceof UsageError) throw new BacklogEditError(e.message, 422);
+    throw e;
+  }
+}
+
+/**
+ * The fields of an edit of a backlog kept on GitHub, corrected to the choices of the workspace's `ops.config.json` (or
+ * the kit's template) before anything is stored: the case of a choice is fixed, a value that is none is 422. A field
+ * without choices (TEXT, DATE, …) and null (a value taken off) pass; the Project is not read. Throws BacklogEditError.
+ */
+export function checkFieldChoices(dir: string, fields: Record<string, string | number | null> | null | undefined): Record<string, string | number | null> | undefined {
+  if (!fields || Object.keys(fields).length === 0) return fields ?? undefined;
+  const own = existsSync(join(dir, CONFIG_FILE));
+  let cfg: OpsConfig;
+  try {
+    cfg = own ? loadConfig(join(dir, CONFIG_FILE)) : defaultConfig();
+  } catch {
+    throw new BacklogEditError(`${CONFIG_FILE} を読めないので Project のフィールドの選択肢を確かめられません`, 422);
+  }
+  return Object.fromEntries(Object.entries(fields).map(([name, v]) => [name, choiceOf(cfg, name, v)]));
+}
+
 /**
  * The Project fields and the Milestone of an edit of a backlog kept here (#2265), checked against the workspace's
  * `ops.config.json` before anything is stored — there is no GitHub Project to resolve them when sent: Status takes the
- * kit's STATUS_OPTIONS, Area / Kind / Priority / Phase the config's `fields`, Story Points one of `storyPoints` (a
+ * kit's STATUS_OPTIONS, Area / Kind / Priority / Phase the config's `fields`, Story Points one of the kit's STORY_POINTS (a
  * number; a numeric text, as `ops-kit backlog create --field` sends it, is read as one), the Milestone `milestone.pattern`.
  * null (a value taken off) passes. Without a config the kit's template (`defaultConfig`, #2361) gives the choices; with
  * one that cannot be read, any field or Milestone is refused. Throws BacklogEditError 422; returns the fields to store.
@@ -132,17 +160,14 @@ export function checkLocalFields(dir: string, input: { fields?: Record<string, s
   } catch {
     throw new BacklogEditError(`${CONFIG_FILE} を読めないので Project のフィールドと Milestone は付けられません`, 422);
   }
-  const choices: Record<string, Array<string | number> | undefined> = {
-    Status: STATUS_OPTIONS, Area: cfg.fields.area, Kind: cfg.fields.kind, Priority: cfg.fields.priority, Phase: cfg.fields.phase, "Story Points": cfg.storyPoints,
+  const choices: Record<string, ReadonlyArray<string | number> | undefined> = {
+    Status: STATUS_OPTIONS, Area: cfg.fields.area, Kind: cfg.fields.kind, Priority: cfg.fields.priority, Phase: cfg.fields.phase, "Story Points": STORY_POINTS,
   };
   const out: Record<string, string | number | null> = {};
   for (const [name, raw] of Object.entries(fields ?? {})) {
     // own names only: `toString` / `constructor` are no fields either
-    const options = Object.hasOwn(choices, name) ? choices[name] : undefined;
-    if (!options) throw new BacklogEditError(`${name} というフィールドはありません（${Object.keys(choices).filter((k) => choices[k]).join(" / ")}。${source}）`, 422);
-    const v = name === "Story Points" && typeof raw === "string" && /^[0-9]+$/.test(raw) ? Number(raw) : raw;
-    if (v !== null && !options.includes(v)) throw new BacklogEditError(`${name} は ${v} にできません（選択肢: ${options.join(", ")}。${source}）`, 422);
-    out[name] = v;
+    if (!Object.hasOwn(choices, name) || !choices[name]) throw new BacklogEditError(`${name} というフィールドはありません（${Object.keys(choices).filter((k) => choices[k]).join(" / ")}。${source}）`, 422);
+    out[name] = choiceOf(cfg, name, raw);
   }
   const m = input.milestone;
   if (m !== undefined && m !== null && !(cfg.milestone && new RegExp(cfg.milestone.pattern).test(m)))

@@ -757,6 +757,67 @@ describe("public-sync", () => {
     expect(() => checked({ targetUrl: "/nonexistent" })).toThrow("personal e-mail address"); // no public side is reached for
   });
 
+  test("check and the sync stop on a document that names a path the sync leaves out, with the file, the line and the path", () => {
+    const ex = [".github/workflows/host.yml", "docs/design/secret.md", "private/"];
+    const checked = (extra: object = {}) => check({ ...opts({ exclude: ex }), source: "HEAD", ...extra }, run);
+    write("docs/design/secret.md", "secret\n");
+    write("private/plan.md", "plan\n");
+    write("README.md", "# App\n\nsee docs/design/secret.md for it.\nand `private/plan.md`, then docs/design/secret.md.\n");
+    commit("docs: refs");
+    const words = "a document names a path the sync leaves out (fix the line, or name the path in publicSync.allowRefs):\nREADME.md:3 docs/design/secret.md\nREADME.md:4 private/plan.md\nREADME.md:4 docs/design/secret.md";
+    expect(() => checked()).toThrow(words);
+    expect(() => sync({ ...opts({ exclude: ex }), dryRun: true }, run)).toThrow(words);
+  });
+
+  test("check and the sync stop on a commit hash in a document's text, with the file and the line", () => {
+    const ex = ["docs/design/secret.md"];
+    const checked = () => check({ ...opts({ exclude: ex }), source: "HEAD" }, run);
+    write("docs/design/secret.md", "secret\nmain (462c6d4)\n");
+    write("src/a.ts", "// 462c6d4\n");
+    write("README.md", "# App\n\n1048576 bytes, `head 1a2b3c4`, <sha>, deadbeefdeadbeef.\n```\n1a2b3c4\n```\n~~~\n2b3c4d5\n~~~js\n3c4d5e6\n~~~\n``foo `bar` 4d5e6f7`` and `head\n5e6f7a8` b\n");
+    commit("docs: not hashes");
+    expect(checked()).toMatch(/^public check: ok/);
+    write("docs/x.md", "# X\n\nfixed in main（462c6d4）\nand `1a2b3c4` then 0123456789abcdef0123456789abcdef01234567.\n\na lone ` here\n# main 5e6f7a8 `x`\n\n- a ` b\n- 6f7a8b9 `c`\n");
+    commit("docs: hash");
+    const words = "a document names a commit hash in its text (a reader of the public copy cannot use it: write what it means, or put an example in code):\ndocs/x.md:3 462c6d4\ndocs/x.md:4 0123456789abcdef0123456789abcdef01234567\ndocs/x.md:7 5e6f7a8\ndocs/x.md:10 6f7a8b9";
+    expect(() => checked()).toThrow(words);
+    expect(() => sync({ ...opts({ exclude: ex }), dryRun: true }, run)).toThrow(words);
+  });
+
+  test("not a reference: a longer path, a directory itself, a file that is not Markdown, ops.config.json", () => {
+    const ex = [".github/workflows/host.yml", "docs/design/secret.md", "private/"];
+    write("docs/design/secret.md", "secret\n");
+    write("README.md", "# App\n\nsee a/docs/design/secret.md, /private/tmp and the private/ directory; also x-private/plan.md and docs/design/secret.md.bak\nend of sentence private/plan.md.\n");
+    write("notes.txt", "docs/design/secret.md\n");
+    write("ops.config.json", JSON.stringify({ publicSync: { exclude: ex } }));
+    commit("docs: not refs");
+    // only the last line's "private/plan.md." is a name (the full stop ends the sentence)
+    expect(() => check({ ...opts({ exclude: ex }), source: "HEAD" }, run)).toThrow(/^a document names a path the sync leaves out[^]*README\.md:4 private\/plan\.md$/);
+    write("README.md", "# App\n\nsee a/docs/design/secret.md, /private/tmp and the private/ directory; also x-private/plan.md and docs/design/secret.md.bak\n");
+    commit("docs: only not refs");
+    expect(check({ ...opts({ exclude: ex }), source: "HEAD" }, run)).toMatch(/^public check: ok/);
+  });
+
+  test("allowRefs lets the listed paths through and only those", () => {
+    const ex = [".github/workflows/host.yml", "docs/design/secret.md", "private/"];
+    write("docs/design/secret.md", "secret\n");
+    write("README.md", "# App\n\nsee private/plan.md.\n");
+    commit("docs: plan");
+    expect(check({ ...opts({ exclude: ex, allowRefs: ["private/plan.md"] }), source: "HEAD" }, run)).toMatch(/^public check: ok/);
+    expect(sync({ ...opts({ exclude: ex, allowRefs: ["private/plan.md"] }), dryRun: true }, run)).toBeTruthy();
+    write("README.md", "# App\n\nsee private/plan.md and docs/design/secret.md.\n");
+    commit("docs: both");
+    expect(() => check({ ...opts({ exclude: ex, allowRefs: ["private/plan.md"] }), source: "HEAD" }, run)).toThrow(/README\.md:3 docs\/design\/secret\.md$/);
+  });
+
+  test("a path under a directory entry is named whole, with + and non-ASCII names, against allowRefs too", () => {
+    const ex = ["private/"];
+    write("README.md", "# App\n\nsee `private/計画.md`。\nand private/plan+draft.md, then (private/plan.md).\n");
+    commit("docs: whole names");
+    const words = "a document names a path the sync leaves out (fix the line, or name the path in publicSync.allowRefs):\nREADME.md:3 private/計画.md\nREADME.md:4 private/plan+draft.md";
+    expect(() => check({ ...opts({ exclude: ex, allowRefs: ["private/plan", "private/plan.md"] }), source: "HEAD" }, run)).toThrow(words);
+  });
+
   test("a tree stop gets the stale-source line only when origin/main's tree, by origin/main's own options, passes check", () => {
     const code = "ABCD" + "-EFGH";
     const note = "origin/main's tree has none";

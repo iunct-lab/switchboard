@@ -184,6 +184,69 @@ describe("codex app-server → AgentEvent (recorded replay, codex-cli 0.166.0)",
     expect(lastSum(sub)).toBeGreaterThan(0);
     expect(evs.filter((e) => e.t === "session.start")).toMatchObject([{ runnerSessionId: main }]);
   });
+
+  // Replays the recording with every notification passed through `edit` (return null to drop it).
+  async function replayEdited(edit: (m: any) => any | null) {
+    const p = createCodexParser();
+    p.state.model = "gpt-main"; // the session sets the main model; the recording's thread/start asks for the default (null)
+    const sent = new Map<number, string>();
+    const evs: AgentEvent[] = [];
+    for (const line of await load("subagent-0.166.0")) {
+      if (line.startsWith("> ")) {
+        const m = JSON.parse(line.slice(2));
+        if (typeof m.id === "number" && typeof m.method === "string") sent.set(m.id, m.method);
+        continue;
+      }
+      const m = JSON.parse(line);
+      if (m.id !== undefined && typeof m.method !== "string") {
+        const method = sent.get(m.id);
+        if ((method === "thread/start" || method === "thread/resume") && m.result?.thread) evs.push(...p.threadStarted(m.result.thread));
+        continue;
+      }
+      const edited = edit(m);
+      if (edited) evs.push(...p.feed(JSON.stringify(edited)));
+    }
+    return evs;
+  }
+  const isActivity = (m: any) => m.params?.item?.type === "subAgentActivity";
+  const usageModels = (evs: AgentEvent[], source: string) => evs.flatMap((e) => (e.t === "usage" && e.source === source ? [e.model] : []));
+
+  test.skipIf(skipRecordings("packages/adapters/codex/fixtures/subagent-0.166.0.jsonl"))("subagent model: the subagent's usage carries the subAgentActivity model, the main turn's the main model", async () => {
+    assertRecordings("packages/adapters/codex/fixtures/subagent-0.166.0.jsonl");
+    const evs = await replayEdited((m) => {
+      if (isActivity(m) && m.params.item.model) m.params.item.model = "gpt-sub-edited";
+      return m;
+    });
+    const main = "gpt-main";
+    // reported: the subagent's thread first, then the main turn (see the test above)
+    expect(usageModels(evs, "reported")).toEqual(["gpt-sub-edited", main]);
+    const turn = usageModels(evs, "turn");
+    expect(turn).toContain("gpt-sub-edited");
+    expect(turn).toContain(main);
+  });
+
+  test.skipIf(skipRecordings("packages/adapters/codex/fixtures/subagent-0.166.0.jsonl"))("subagent model: a subagent cut off with the main turn is reported with its own model", async () => {
+    assertRecordings("packages/adapters/codex/fixtures/subagent-0.166.0.jsonl");
+    const subThreads = new Set<string>();
+    const evs = await replayEdited((m) => {
+      if (isActivity(m) && m.params.item.model) {
+        m.params.item.model = "gpt-sub-edited";
+        subThreads.add(m.params.item.agentThreadId);
+      }
+      // drop the subagent's own turn/completed: the main turn/completed flushes its usage (interrupt)
+      if (m.method === "turn/completed" && subThreads.has(m.params.threadId)) return null;
+      return m;
+    });
+    expect(subThreads.size).toBeGreaterThan(0);
+    expect(usageModels(evs, "reported")).toEqual(["gpt-main", "gpt-sub-edited"]);
+  });
+
+  test.skipIf(skipRecordings("packages/adapters/codex/fixtures/subagent-0.166.0.jsonl"))("subagent model: without subAgentActivity every usage carries the main model", async () => {
+    assertRecordings("packages/adapters/codex/fixtures/subagent-0.166.0.jsonl");
+    const evs = await replayEdited((m) => (isActivity(m) ? null : m));
+    const models = new Set([...usageModels(evs, "turn"), ...usageModels(evs, "reported")]);
+    expect([...models]).toEqual(["gpt-main"]);
+  });
 });
 
 describe("request building", () => {

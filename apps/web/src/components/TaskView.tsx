@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { Ask, AskAnswer, DeviceAuthView, PolicyInput, StopSummary, EventEnvelope, Task, TaskDiffFile, TaskOutcome, TeleportProgress } from "@switchboard/protocol";
+import { isWorkingStatus, type Ask, AskAnswer, DeviceAuthView, PolicyInput, StopSummary, EventEnvelope, Task, TaskDiffFile, TaskOutcome, TeleportProgress } from "@switchboard/protocol";
 import { api, OLDER_PAGE, type TaskDetail } from "../api.ts";
 import { journeyCancel, journeyEnd, journeyStart } from "../perf.ts";
 import { eventsArchiveNotice } from "../events-archive.ts";
@@ -20,6 +20,8 @@ import { AnswerArea } from "./Approvals.tsx";
 import { Markdown, MdViewToggle } from "./Markdown.tsx";
 import { useMdView } from "../mdView.ts";
 import { KIND_LABEL, STATE_LABEL, taskAsks } from "../asks.ts";
+import { diffRows } from "../diffView.ts";
+import { abortNote } from "../runners.ts";
 import { t } from "../i18n.ts";
 import { task as m } from "../i18n/task.ts";
 
@@ -159,7 +161,7 @@ export function TaskView(props: {
     }
   };
 
-  const busy = props.task.status === "running" || props.task.status === "waiting";
+  const busy = isWorkingStatus(props.task.status);
   // 結果 / 確認済み (#492): the answer comes back as task.updated too, which is what the lists redraw from
   const [outcomeErr, setOutcomeErr] = useState<string | null>(null);
   const setOutcome = (body: { outcome?: TaskOutcome; reviewed?: boolean }) => {
@@ -190,7 +192,7 @@ export function TaskView(props: {
   const [terminalEpoch, setTerminalEpoch] = useState(0);
   const lastPhase = useRef<string | undefined>(undefined);
   const [importDetail, setImportDetail] = useState<TaskDetail | null>(null);
-  const teleportReason = (!props.task.cloudSession || !/^session_[A-Za-z0-9_-]+$/.test(props.task.cloudSession.id) || props.task.cloudSession.url !== `https://claude.ai/code/${props.task.cloudSession.id}`) ? t(m.teleportNoId) : (props.task.status === "running" || props.task.status === "waiting") ? t(m.teleportRunning) : !props.pty ? t(m.teleportNoPty) : undefined;
+  const teleportReason = (!props.task.cloudSession || !/^session_[A-Za-z0-9_-]+$/.test(props.task.cloudSession.id) || props.task.cloudSession.url !== `https://claude.ai/code/${props.task.cloudSession.id}`) ? t(m.teleportNoId) : isWorkingStatus(props.task.status) ? t(m.teleportRunning) : !props.pty ? t(m.teleportNoPty) : undefined;
   // The terminal is only for the CLI's own questions (#1306); starting does not leave the screen.
   // The title is edited in place (#491): Enter / blur saves, Esc drops, an empty or unchanged one is not sent
   const [editingTitle, setEditingTitle] = useState(false);
@@ -267,7 +269,8 @@ export function TaskView(props: {
   const headStatus = cloud ? (props.task.status === "running" ? t(m.cloudStarting) : t(m.cloudStatusUnchecked)) : SINCE[props.task.status];
   // a Cloud Task's times line does not name a state its head says is not known (#2030)
   const times = taskTimes(props.task, Date.now(), cloud ? (props.task.status === "running" ? t(m.startingWord) : t(m.statusUncheckedWord)) : undefined);
-  const diffCount = diff ? new Set(diff.filter((f) => f.stat !== "").map((f) => f.path)).size : 0;
+  const diffShown = useMemo(() => diffRows(diff ?? []), [diff]);
+  const diffCount = new Set(diffShown.files.filter((f) => f.stat !== "").map((f) => f.path)).size;
 
   return (
     <main className="main task" ref={mainRef} onScroll={checkEnd}>
@@ -358,8 +361,8 @@ export function TaskView(props: {
         <div className="diffs">
           {diffErr && <div className="warn">{diffErr}</div>}
           {diff === null && !diffErr && <div className="muted">{t(m.counting)}</div>}
-          {diff && diff.length === 0 && <div className="muted">{t(m.noChanges)}</div>}
-          {(diff ?? []).map((f) => (
+          {diff && diffShown.notes.map((n) => <div key={n} className="muted">{n}</div>)}
+          {diffShown.files.map((f) => (
             <div key={`${f.source}:${f.path}`} className="diff-file">
               <button className="row link" onClick={() => setOpenFile(openFile === f.path ? null : f.path)} title={f.path}>
                 <span className="t mono">{f.rel}</span>
@@ -565,6 +568,7 @@ function TranscriptItem(props: {
           {it.status === "ok" ? t(m.statusDone) : it.status === "aborted" ? t(m.statusAborted) : t(m.sinceError)}
           {it.at !== undefined && t(m.endTime, { time: jstTime(it.at), span: spanText(it.durationMs) })}
           {it.summary && it.status !== "ok" && <span> — {it.summary}</span>}
+          {abortNote(props.runner, it.status) && <span> — {abortNote(props.runner, it.status)}</span>}
         </div>
       );
     case "note":
@@ -604,7 +608,7 @@ function TaskAsks(props: { task: Task; stops: StopSummary[]; onError: (msg: stri
     );
   };
   const cur = props.task;
-  const may = (cur.outcome === "needs_action" && cur.status !== "running" && cur.status !== "idle") || props.stops.some((s) => s.next === "decide");
+  const may = (cur.outcome === "needs_action" && (cur.status === "waiting" || !isWorkingStatus(cur.status)) && cur.status !== "idle") || props.stops.some((s) => s.next === "decide");
   useEffect(() => {
     if (may) load();
     else {

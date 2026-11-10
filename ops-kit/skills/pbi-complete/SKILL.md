@@ -102,7 +102,7 @@ ops-kit backlog set <Task> Status "In progress"
 後回し以外で止まるとき（完了・返事待ち・判断待ち）の release には `--waits` を付けない — 待ちの無い release が前の待ちを打ち消す（新しい claim も同じ）。
 
 重ならなければ `task-to-pr` の全部（着手コメント → 実装 → テスト / E2E → commit → `gh stack submit --auto --open` → `gh pr edit` → In review）。
-**次の Task に進む前に、その PR のレビューを起動しておく**（`cross-runner-review`。Bash の background で走らせ、次の実装と並行）。
+**次の Task に進む前に、その PR のレビューを起動しておく**（`cross-runner-review`。アプリの Task の中では `ops-kit job request review` で仕事に頼み、終わりを待たずに次の実装へ進む。次の Task も終わって待つものだけになったら、`job#<id>` を止まりの報告に書いてターンを終える。Task の外では Bash の background で走らせ、次の実装と並行）。
 
 Task の途中で設計が変わった（Task に書いた場所では足りない、受け入れ条件が満たせない）ら、その Task と PBI の決定ログに書いてから続ける。
 利用者の判断が要る箇所は `issue-workflow` の「判断待ちの出し方」で種類を分けて止める: 実装の判断（要件の読み・設計の選択・受け入れ条件の変更）は Issue に `## 判断待ち`（ラベル `needs-decision`）、運用の確認（マージ・昇格・認証・実行のタイミング）は Issue に書かず Task の会話で聞いてターンを終える（下の 5）。実装の判断の返事が来ないとき、**要件の解釈**が絡む Task は実装せず飛ばして次の Task へ（PBI は閉じない）。お金 / 他 OS / 破壊的操作だけは安全側（既定 off / 何も消費しない）で実装して進む（`task-to-pr` 1-2）。
@@ -115,16 +115,16 @@ Task の途中で設計が変わった（Task に書いた場所では足りな�
 下の枝を直したあと上の枝のテストも走らせる（スタックの一番上で、型検査と `<関係するテスト>`。`task-to-pr` の 4）。
 
 全 PR の指摘が処理され、CI が緑になるまで**マージしない**（途中で下だけ入れると、上の PR の指摘対応で main を汚す）。
-Actions が始まらないリポジトリのローカル CI（CLAUDE.md のコマンド。以下 `<ローカル CI>`）は、全部の PR の指摘の処理が済んでから、スタックの一番上の PR で 1 回だけ回す。差分が変わったら（修正コミット、手で解いたコンフリクト）一番上でもう 1 回。同じ head の合格が既にあれば `<ローカル CI>` は回さず終わる（そうするコマンドのとき）。いつ回し、マージ判定がどう数えるかは CLAUDE.md が名指しするマージ判定の規則（ローカル CI を回す時と数え方）。
+Actions が始まらないリポジトリのローカル CI（CLAUDE.md のコマンド。以下 `<ローカル CI>`）は、全部の PR の指摘の処理が済んでから、スタックの一番上の PR で 1 回だけ回す。差分が変わったら（修正コミット、手で解いたコンフリクト）一番上でもう 1 回。同じ head の合格が既にあれば `<ローカル CI>` は回さず終わる（そうするコマンドのとき）。いつ回し、マージ判定がどう数えるかは CLAUDE.md が名指しするマージ判定の規則（ローカル CI を回す時と数え方）。アプリの Task の中では `<ローカル CI>` を自分のシェルで回さず `ops-kit job request local-ci <PR>` で頼み、request が出す JSON（reason `depends`、conditions に `job#<id>`）を 止まりの報告（アプリが Task に渡す書式）に書いてターンを終える。仕事が終わるとアプリが結果の要約を添えて再開するので、それを読んで次へ進む（背景の `sleep` の繰り返しで待たない。セッションが閉じず 150〜250 MB を開き続ける）。
 
 ## 5. マージ（main に近い方から 1 本ずつ）
 
-**ローカルの変更では**（Task への指示が「この workspace の変更はアプリに置く」と言う workspace。リポジトリのサービスがアプリで、PR の代わりにアプリに置く「変更」を使う）: スタックは無い（1 枝ずつ）。ローカル CI は `<ローカル CI> --change <変更>`、判定は `<マージ判定> --change <変更>`、マージは `local-merge.ts <変更>`（どれも Task への指示が名指しする場所のスクリプト。`--repo` は付けない）。マージしたら次の Task の枝を main から切る。リリースタグと `ops-kit pull-main` は飛ばす（リモートを使わない）。再チェックの印と `[merge-ask]` / `[merge-answer]` は変更のコメントに付け、再チェックでマージした決定ログの「戻すなら <tag>」は「戻すなら: タグなし」。
+**ローカルの変更では**（Task への指示が「この workspace の変更はアプリに置く」と言う workspace。リポジトリのサービスがアプリで、PR の代わりにアプリに置く「変更」を使う）: スタックは無い（1 枝ずつ）。ローカル CI は `<ローカル CI> --change <変更>`、判定は `<マージ判定> --change <変更>`、マージは `local-merge.ts <変更>`（どれも Task への指示が名指しする場所のスクリプト。`--repo` は付けない）。マージしたら次の Task の枝を main から切る。リリースタグと `ops-kit pull-main` は飛ばす（リモートを使わない）。再チェックの印と `[merge-ask]` / `[merge-answer]` は変更のコメントに付け、再チェックでマージした決定ログの「戻すなら <tag>」は「戻すなら: タグなし」。ローカル CI の合格は base の先端ごと。1 件をマージしたら、残りの変更ごとに `<ローカル CI> --change <変更>`（変更の枝を main の今の先端にマージして回す）を回し直してから判定する（前の合格は新しい base では数えられない）。
 
 **各 PR のマージ直前にマージ判定**（CLAUDE.md が名指しするコマンド。以下 `<マージ判定>`。無ければ `review-triage-and-merge` の 5 のチェックリストを自分で確かめる）。exit 1（stop）なら:
 - large の理由が `[再チェック <kind>]` だけ（`[聞く]` が無い。マージ判定が large の理由をこの 2 つに分ける仕組みのとき。`rescue/**` と README の Design rules もここ）→ **利用者に聞かずに**、出力の `recheck` の種類ごとに再チェック（CLAUDE.md が名指しする手順。以下 `<再チェック>`）を回す。通れば印を投稿し、マージ判定をもう一度通してマージする。再チェックでマージしたら PBI の決定ログに 1 行「YYYY-MM-DD: 自動マージ: PR #n（<種類>、再チェック合格）、戻すなら <tag>」（`<tag>` は CI を通ったタグの中の最新。見方は `<再チェック>`）。通らなければ指摘を直して（`review-triage-and-merge` の 2〜4）回し直す。別のランナーが使用上限なら `<再チェック>` の代わりの回し方（CLAUDE.md が名指しする手順にあれば）で回す。直せない・代わりの回し方も無く待てないときだけ、下の `[聞く]` と同じく運用の確認で聞く。CI など large 以外の理由が一緒に出ていれば、それは次の「それ以外の理由」と同じく先に片づける
 - `[聞く]` の理由がある（セキュリティ。分けない仕組みなら impact が large の理由すべて）で、それ以外の理由が無い → 運用の確認として Task の会話で聞いてターンを終える（`issue-workflow` の「判断待ちの出し方」の「運用の確認」。確認「PR #n をマージしてよいか」、PR の番号と `+add/-del`、推奨。Issue に `## 判断待ち` を出さない）。`reasons` は分類の見出しで分けてそのまま貼る: `**セキュリティ**:`（「[聞く] セキュリティ:」。認証・秘密・CI・依存）/ `**再チェックの残り**:`（まだ印の無い `[再チェック …]`。聞く間に再チェックも回しておくと、返事の後にそれを待たない）。当たらない分類の見出しは書かない。聞く直前に記録の印 `[merge-ask] <kinds> <head sha>` を PR に投稿する（`<kinds>` はマージ判定の出力の `ask` と残った `recheck` を `,` でつなぐ。投稿の形は CLAUDE.md が名指しするマージ判定の規則の「記録の印」。上の再チェックの分岐から聞くときも同じ）
-- それ以外の理由（CI、未解決のスレッド、見直されていないコミット、CLEAN でない、Task の名指しの外のファイル）→ 自分で直す（CI を待つ / 返信して resolve / `cross-runner-review` の 4 で見直し）。「Task の本文に名指しの無いファイル」は、`（Task #k が名指し）` が付いていればその Task の枝へ移し、付いていなければ Task の本文に逸脱として名指しを足す（`issue-workflow` の「記録の義務」。本文を直したら `ops-kit backlog view <Task> --fresh` で GitHub に送ってから判定し直す）。CI が**始まらずに**失敗している（請求の問題。ジョブのステップ 0 件）なら待たずローカル CI（CLAUDE.md のコマンド。`review-triage-and-merge` の「CI 緑」）。主レビュアーが使用上限なら見直しも実装したランナーの新しいセッションで代替（`cross-runner-review` の 0）。直せなければ同じく運用の確認として Task の会話で聞く
+- それ以外の理由（CI、未解決のスレッド、見直されていないコミット、CLEAN でない、Task の名指しの外のファイル）→ 自分で直す（CI を待つ（`gh run list` で見る。`sleep` の繰り返しで待たない。ローカル CI は上のとおり仕事に頼む）/ 返信して resolve / `cross-runner-review` の 4 で見直し）。「Task の本文に名指しの無いファイル」は、`（Task #k が名指し）` が付いていればその Task の枝へ移し、付いていなければ Task の本文に逸脱として名指しを足す（`issue-workflow` の「記録の義務」。本文を直したら `ops-kit backlog view <Task> --fresh` で GitHub に送ってから判定し直す）。CI が**始まらずに**失敗している（請求の問題。ジョブのステップ 0 件）なら待たずローカル CI（CLAUDE.md のコマンド。`review-triage-and-merge` の「CI 緑」）。主レビュアーが使用上限なら見直しも実装したランナーの新しいセッションで代替（`cross-runner-review` の 0）。直せなければ同じく運用の確認として Task の会話で聞く
 - exit 2（判定できなかった）はマージしない（止めた理由を Task の会話に書いてターンを終える）
 
 止めるときは `<guard> release <PBI> "返事待ち: <確認の 1 文>"`（並列ガードを使うとき）。返信を受けて再開するときは `<guard> claim <PBI>` からやり直し、**必ずマージ判定をもう一度通す**。`[merge-ask]` を付けて聞いた PR への返信なら、マージ判定の前に `[merge-answer] <yes|no> <聞いたときと同じ kinds> <head sha>` を PR に投稿する（記録の印。CI など large 以外の理由で聞いたときは `[merge-ask]` も `[merge-answer]` も付けない）。`[merge-ask]` を付けずに聞いていた（印の手順より前に始めた会話、Task の会話以外の経路で認められた、付け忘れ）なら、`[merge-answer]` の前に `[merge-ask] <kinds> <head sha>` を投稿してから付ける（`<kinds>` はマージ判定の出力の `ask` と印の無い `recheck`。印の時刻はどちらも付けた時刻で、聞いた時刻には遡れない — その PR の「返事まで」は短く出る。それでよい。#1069）。返信が大きい変更のマージを認めた（`yes`）ときだけ、`[merge-answer] yes` を投稿して `--allow-large` を付ける（印が無ければ効かない。マージ判定が止める。CI・未解決のスレッド・見直されていないコミット・CLEAN でないこと・Task の名指しの外のファイルは、返信があっても外れない）。再チェックの印は head ごとなので、下の PR のマージ後の自動 rebase で head が変わったら出し直す（`<再チェック>`）。
@@ -133,9 +133,8 @@ Actions が始まらないリポジトリのローカル CI（CLAUDE.md のコ�
 
 ```bash
 <マージ判定> <一番下の PR> --merge-stack
-# GitHub の Stacked PR が次の PR を main に retarget して rebase する。これを待つ:
-until gh pr view <次> --json baseRefName,mergeStateStatus -q '"\(.baseRefName) \(.mergeStateStatus)"' | grep -qE '^main (CLEAN|UNSTABLE)$'; do
-  gh pr view <次> --json baseRefName,mergeable,mergeStateStatus -q '"\(.baseRefName) \(.mergeable) \(.mergeStateStatus)"'; sleep 30; done
+# GitHub の Stacked PR が次の PR を main に retarget して rebase する。数秒〜数十秒で済むので、状態を見て、まだなら次の手（ほかの PR の返信・記録）を済ませてからもう一度見る（`sleep` のループにしない）:
+gh pr view <次> --json baseRefName,mergeable,mergeStateStatus -q '"\(.baseRefName) \(.mergeable) \(.mergeStateStatus)"'   # main CLEAN|UNSTABLE になるまで
 # 自動 rebase で head の sha が変わっても、差分が同じなら一番上のローカル CI の合格のまま数える（回し直さない）
 <マージ判定> <次> --merge-stack
 ```
@@ -149,10 +148,10 @@ until gh pr view <次> --json baseRefName,mergeStateStatus -q '"\(.baseRefName) 
 
 ## 6. PBI を閉じる
 
-1. 受け入れ条件の各行を `- [x]` にし、行末に証跡の在りか（`issue-workflow` の記録の義務 4。満たせなかった行も、在りかを書けない行としてそこに従う）。`（利用者確認: …）` の行は除く（利用者の返事が無いまま自分でチェックしない。4 を見る）
+1. 受け入れ条件の各行を `- [x]` にし、行末に証跡の在りか（`issue-workflow` の記録の義務 4。満たせなかった行も、在りかを書けない行としてそこに従う）。`（利用者確認: …）` の行は除く（利用者の返事が無いまま自分でチェックしない。4 を見る。名指しした判断待ちが全部回答済みの行は `issue-workflow` の「利用者確認の項目」の「判断待ちへの回答で確かめる行」でチェックする）
 2. `## 結果`（1 と一緒に `ops-kit backlog edit <PBI> --body-file "$W/body.md"`）: 受け入れ条件ごとの検証、レビュー件数、Story Points の妥当性、残したもの（Issue 番号）
 3. 認証の値の後からの検査（`ops-kit scan-issues`）は PBI を閉じるたびには走らせない（エージェント管理アプリの毎日の予定が前回からの差分を読む。`issue-workflow` の「Issue・PR・コメントに書かない値」の「後からの検査」）
-4. 利用者の確認待ちの項目があれば Status は In review のまま open。確認待ちは `ops-kit backlog list --label needs-decision --fresh` で PBI と その Task を探す（`## 判断待ち` を出したのに回答が無いもの。数えるのは実装の判断だけ。運用の確認は Issue に無く、Task の会話で聞いて返事を受けてから進んでいる）と、PBI の受け入れ条件に `- [ ]` のまま残っている `（利用者確認: …）` の行（利用者の返事が無いまま自分でチェックしない。頼み方と返事の記録は `issue-workflow` の「利用者確認の項目」）。どちらも無く、1 で在りかの無い行（満たせなかった行を含む）が残っておらず、Task も全部閉じていれば `ops-kit backlog edit <PBI> --state closed`、`ops-kit backlog set <PBI> Status Done`（Task は PR の `Closes` で自動では閉じないことがあるので、マージした PR の Task が open のままなら先に `ops-kit backlog edit <Task> --state closed` で閉じる。`review-triage-and-merge` の 6。閉じ忘れた Task で止まらない）。`## 回答` に「違う」の理由があれば、それを直す Task を切る（`pbi-to-tasks`）
+4. 利用者の確認待ちの項目があれば Status は In review のまま open。確認待ちは `ops-kit backlog list --label needs-decision --fresh` で PBI と その Task を探す（`## 判断待ち` を出したのに回答が無いもの。数えるのは実装の判断だけ。運用の確認は Issue に無く、Task の会話で聞いて返事を受けてから進んでいる）と、PBI の受け入れ条件に `- [ ]` のまま残っている `（利用者確認: …）` の行（利用者の返事が無いまま自分でチェックしない。頼み方と返事の記録は `issue-workflow` の「利用者確認の項目」。判断待ちへの回答で確かめる行は、名指しした判断待ちが全部回答済みなら同じ節の決まりでチェックして確認待ちに数えず、未回答・`## 保留` が残る間は待つ）。どちらも無く、1 で在りかの無い行（満たせなかった行を含む）が残っておらず、Task も全部閉じていれば `ops-kit backlog edit <PBI> --state closed`、`ops-kit backlog set <PBI> Status Done`（Task は PR の `Closes` で自動では閉じないことがあるので、マージした PR の Task が open のままなら先に `ops-kit backlog edit <Task> --state closed` で閉じる。`review-triage-and-merge` の 6。閉じ忘れた Task で止まらない）。`## 回答` に「違う」の理由があれば、それを直す Task を切る（`pbi-to-tasks`）
 5. Milestone の説明を更新（残り / やらない）。元要望 Issue の `## 派生 PBI` の行に Done と書き、派生が全部 Done ならその Issue も閉じる（`ops-kit backlog edit <req> --body-file "$W/req.md" [--state closed]`）。要望の `## 出典` の経路が「公開側 Issue <URL>」なら、派生が全部 Done（か「やらない」）になったとき、公開側の Issue に結果を 3 行（何が変わったか / それを含む公開側の同期の PR か「まだ同期されていない」/ やらないならその理由）書いて閉じる（`gh issue close <URL> --reason completed`。やらないなら `--reason "not planned"`）。Private の Issue の番号・URL・内部の情報は書かない（`request-to-backlog` の「公開側の Issue から」）
 6. `<guard> release <PBI> "完了"`（並列ガードを使ったとき。閉じないで終わるときも理由を書いて release する。外さないと次の /pbi-complete が止まる）。PBI の worktree を `git worktree remove`、この PBI で作ったスクラッチ（`mktemp -d` が返した実際のパス）だけを `rm -rf`（`/tmp/review*` や `/tmp/<リポジトリ名>.*` の glob は並行している別のセッションのものも消す）。**main の作業ツリーの更新は `ops-kit pull-main`**（CLAUDE.md の有無によらず、どのリポジトリでも同じ既定。fast-forward でき、未コミットの変更が取り込むファイルと重ならなければ pull し、でなければ何も変えずに理由を 1 行出して exit 1。fetch できない・Git でないは exit 2）。CLAUDE.md が既定を変えている（pull が動いているサービスを再起動するので利用者の OK を取る、など）ならそれに従い、OK 待ちなら走らせない。exit 1 / 2 なら出力の 1 行を報告の `main:` に書く。`ops-kit` が PATH に無い（`command -v ops-kit` が空）ときだけ走らせず「pull していない（キットが PATH に無い）」と書く。動いているコードの更新（昇格・再起動）は CLAUDE.md が書く手順に従い、再起動するなら利用者の OK を取ってから
 
@@ -165,7 +164,7 @@ PBI #<n>「<題>」: Task <k> 件 → PR #a, #b, #c を下から順にマージ�
 残したもの: #.., #..（Issue 化した指摘）
 後回し: #<Task>（<PR #n / Task #n> と <path> が重なる。相手のマージ後に再開） / なし
 main: <pull 済み（pulled <old>..<new>） / up to date / pull していない（コマンドの出力の 1 行、キットが PATH に無い、OK 待ち）>。動いているコードの更新: <済み / Task の会話で確認中 / 不要>
-利用者へ: <確認待ちの項目があれば、`issue-workflow` の「利用者確認の項目」の「確認を頼むとき」の形で>
+利用者へ: <確認待ちの項目があれば、`issue-workflow` の「利用者確認の項目」の「確認を頼むとき」の形で。「判断待ちへの回答で確かめる行」でチェックした行は出さない>
 ```
 
 ## 途中で止まったとき（再開）

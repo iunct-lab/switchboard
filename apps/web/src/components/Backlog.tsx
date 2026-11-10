@@ -2,10 +2,10 @@ import { createContext, Fragment, useContext, useEffect, useRef, useState, type 
 import type { Artifact, Backlog as BacklogData, BacklogAction, BacklogIssueDetail, BacklogItem, BacklogQueue, BacklogQueueInput, BacklogStage, BacklogSyncInfo, Task, Workspace } from "@switchboard/protocol";
 import type { FeedbackTarget } from "../feedbackTarget.ts";
 import { api } from "../api.ts";
-import { backlogHeading, createWord, decisionQuestion, syncSummary, draftKey, editOf, formAfterRead, GUARANTEE_A, githubSyncText, heldIssueText, issueHref, loadDraft, loadNewIssueDraft, savedWords, syncLine, textDraftKey, valueText, workspaceErrorGuide, type EditForm, type NewIssueDraft } from "../backlogSync.ts";
+import { backlogHeading, createWord, decisionQuestion, heldEditName, syncSummary, draftKey, editOf, formAfterRead, GUARANTEE_A, githubSyncText, heldIssueText, issueHref, loadDraft, loadNewIssueDraft, savedWords, syncLine, textDraftKey, valueText, workspaceErrorGuide, type EditForm, type NewIssueDraft } from "../backlogSync.ts";
 import { activeTaskLine, ago, autoByWorkspace, inProgressState, readyPending, startButton, directButton, lastTaskLine, overlapLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl, type PrereqPart } from "../inProgress.ts";
 import { promotionLine } from "../release.ts";
-import { changeMarks, changeStateLabel, short } from "../changes.ts";
+import { changeMarks, changeStateLabel, mergedPair, short } from "../changes.ts";
 import { Flow } from "./Flow.tsx";
 import { Interventions } from "./Interventions.tsx";
 import { Mockups } from "./Approvals.tsx";
@@ -257,7 +257,7 @@ function Editor(props: { target: EditTarget; onChanged: () => void; onError: (ms
       {detail.held.map((h) => (
         <div key={h.operation} className="backlog-held warn" data-field={h.field ?? ""}>
           <div>
-            {h.field ?? t(m.heldNew)}: {h.status === "conflict" ? t(m.heldConflict) : h.status === "failed" ? t(m.heldFailed) : t(m.heldUnknown)}
+            {heldEditName(h)}: {h.status === "conflict" ? t(m.heldConflict) : h.status === "failed" ? t(m.heldFailed) : t(m.heldUnknown)}
             {h.reason ? t(m.paren, { text: h.reason }) : ""}
           </div>
           {h.status === "failed" && (
@@ -388,6 +388,7 @@ function ChangeDetail(props: { workspaceId: string; number: number }) {
   if (failed) return <div className="muted">{t(m.readFailedWith, { error: failed })}</div>;
   if (!detail) return <div className="hint">{t(m.loading)}</div>;
   const marks = changeMarks(detail.comments, detail.changeRefs);
+  const merged = detail.issue.change ? mergedPair(detail.issue.change) : null;
   const ci = { pass: t(m.ciPass), fail: t(m.ciFail), stale: t(m.ciStale) } as const;
   return (
     <div className="change-detail" data-change={props.number}>
@@ -398,6 +399,7 @@ function ChangeDetail(props: { workspaceId: string; number: number }) {
         {" · "}
         {marks.localCi ? ci[marks.localCi] : t(m.noCi)}
         {marks.rechecks.length > 0 && t(m.rechecks, { list: marks.rechecks.join(", ") })}
+        {merged && t(m.mergedPair, { pair: merged })}
       </div>
       <pre className="wrap">{detail.issue.body || t(m.noBody)}</pre>
       {detail.comments.map((c) => (
@@ -842,18 +844,17 @@ function RowActions(props: { item: BacklogItem; now: number; starting: number | 
 /**
  * A row's facts after its title (#3708: the list row's and an opened board tile's): the workspace, the Task count,
  * 分解済み, SP · Priority, an in-progress row's moving / stopped and its last stage Task (a Ready row's too, and one
- * waiting for the person's reply).
+ * waiting for the person's reply). `compact` (#3709: an opened list row, whose title line already has the workspace,
+ * the Task count and SP · Priority) is the rest.
  */
-function ItemFacts(props: { item: BacklogItem; now: number; onOpenTask: (id: string) => void }) {
+function ItemFacts(props: { item: BacklogItem; now: number; onOpenTask: (id: string) => void; compact?: boolean }) {
   const { item: i, now } = props;
   return (
     <>
-      <span className="m workspace">{i.workspaceName}</span>
-      {i.tasks && <span className="m num">Task {i.tasks.done}/{i.tasks.total}</span>}
+      {!props.compact && <span className="m workspace">{i.workspaceName}</span>}
+      {!props.compact && i.tasks && <span className="m num">Task {i.tasks.done}/{i.tasks.total}</span>}
       {readyPending(i) && <span className="m">{t(m.readyPending)}</span>}
-      <span className="m">
-        {[i.storyPoints !== null ? `SP ${i.storyPoints}` : null, i.priority].filter(Boolean).join(" · ")}
-      </span>
+      {!props.compact && <span className="m">{[i.storyPoints !== null ? `SP ${i.storyPoints}` : null, i.priority].filter(Boolean).join(" · ")}</span>}
       {i.stage === "in-progress" && <InProgressFacts item={i} now={now} onOpenTask={props.onOpenTask} />}
       {(i.stage === "ready" || (i.replyWaiting && i.stage !== "in-progress")) && <LastTask item={i} now={now} onOpenTask={props.onOpenTask} />}
     </>
@@ -886,6 +887,50 @@ function ItemDetail(props: { item: BacklogItem; items: BacklogItem[]; auto: bool
       <Stops stops={i.stopSummary} issue={i.url} />
       <EditToggle target={i} onChanged={props.onChanged} onError={props.onError} />
     </>
+  );
+}
+
+/**
+ * A list row (#3709: a request, one waiting to be split, a Ready or an in-progress PBI): one line of what matters, the
+ * ▶ (outside the title, first so it lines up), the numbered title (the Issue's link), the workspace, the Task count, SP ·
+ * Priority, the marks (#3707) and the row's buttons. ▶ opens the rest under it: the facts left (分解済み, an in-progress row's moving /
+ * stopped, the last stage Task) and ItemDetail, the same part an opened board tile shows; whether it is open is not
+ * kept. A closed row shows the stops that need the person (not folded); an open one has all of them in ItemDetail.
+ */
+function ListRow(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; now: number; starting: number | null; metaId: string | null; onStart: (action: BacklogAction) => void; onStartPbi: (pbi: number) => void; onOpenTask: (id: string) => void; onChanged: () => void; onError: (msg: string) => void }) {
+  const { item: i } = props;
+  const [open, setOpen] = useState(false);
+  const label = t(open ? m.closeTile : m.openRow);
+  return (
+    <div className="backlog-listrow">
+      <div className="row backlog-item" data-issue={i.url}>
+        <button className="ghost" aria-expanded={open} aria-label={label} title={label} data-open-row onClick={() => setOpen(!open)}>
+          {open ? "▼" : "▶"}
+        </button>
+        <span className="t">
+          <IssueLink url={i.url}>#{i.number}</IssueLink> {i.title}
+        </span>
+        <span className="m workspace">{i.workspaceName}</span>
+        {i.tasks && <span className="m num">Task {i.tasks.done}/{i.tasks.total}</span>}
+        <span className="m">{[i.storyPoints !== null ? `SP ${i.storyPoints}` : null, i.priority].filter(Boolean).join(" · ")}</span>
+        {itemMarks(i, props.auto).map((x) => (
+          <span key={x.key} className={"mark" + (x.warn ? " warn" : "")} data-mark={x.key}>
+            {x.label}
+          </span>
+        ))}
+        <RowActions item={i} now={props.now} starting={props.starting} metaId={props.metaId} onStart={props.onStart} onOpenTask={props.onOpenTask} />
+      </div>
+      {open ? (
+        <div className="backlog-row-detail">
+          <div className="row backlog-row-facts">
+            <ItemFacts item={i} now={props.now} onOpenTask={props.onOpenTask} compact />
+          </div>
+          <ItemDetail item={i} items={props.items} auto={props.auto} starting={props.starting} onStart={props.onStartPbi} onOpenTask={props.onOpenTask} onChanged={props.onChanged} onError={props.onError} />
+        </div>
+      ) : (
+        <Stops stops={i.stopSummary} issue={i.url} only="needs-person" />
+      )}
+    </div>
   );
 }
 
@@ -1309,7 +1354,7 @@ function ViewPicker(props: { view: BacklogView; onChange: (v: BacklogView) => vo
 export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => void; onError: (msg: string) => void; onStarted: (task: Task) => void; onOpenTask: (id: string) => void; onOpenSchedules: () => void }) {
   const [data, setData] = useState<BacklogData | null>(lastBacklog);
   const [failure, setFailure] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<"open" | "refresh" | null>(null);
   const [starting, setStarting] = useState<number | null>(null);
   const [approvals, setApprovals] = useState(0);
   const [promotion, setPromotion] = useState<ReturnType<typeof promotionLine>>(null);
@@ -1379,7 +1424,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
   };
 
   const load = (refresh: boolean) => {
-    setBusy(true);
+    setBusy(refresh ? "refresh" : "open");
     // read with the list (opened, 再読込): backlog-next may have been turned on or off meanwhile
     Promise.all([api.schedules(), api.workspaces()])
       .then(([schedules, workspaces]) => setAuto(autoByWorkspace(schedules, workspaces)))
@@ -1407,7 +1452,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
         setFailure(message);
         props.onError(t(m.githubReadFailed, { error: message }));
       })
-      .finally(() => setBusy(false));
+      .finally(() => setBusy(null));
   };
   useEffect(() => {
     load(false);
@@ -1430,7 +1475,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
         <div className="row head">
           <h5>Backlog</h5>
           <span className="hint backlog-heading">{backlogHeading(data?.fetchedAt ?? null, busy, workspaces ? workspaces.filter((w) => inView(w.id)).map((w) => w.backlog) : null)}</span>
-          <button className="ghost" disabled={busy} onClick={() => load(true)}>
+          <button className="ghost" disabled={busy !== null} onClick={() => load(true)}>
             {t(m.reload)}
           </button>
           <ViewPicker view={view} onChange={changeView} />
@@ -1589,26 +1634,15 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
                     <EditToggle target={i} onChanged={() => load(false)} onError={props.onError} />
                   </div>
                 ) : (
-                <Fragment key={key(i)}>
-                <div className={`row backlog-item${i.stage === "in-progress" ? " in-progress" : ""}`}>
-                  <span className="t">
-                    <IssueLink url={i.url}>
-                      #{i.number}
-                    </IssueLink>{" "}
-                    {i.title}
-                  </span>
-                  <ItemFacts item={i} now={now} onOpenTask={props.onOpenTask} />
-                  <RowActions item={i} now={now} starting={starting} metaId={metaId} onStart={(action) => start(i.workspaceId, i.number, action)} onOpenTask={props.onOpenTask} />
-                </div>
-                <ItemDetail item={i} items={data.items} auto={auto[i.workspaceId] ?? false} starting={starting} onStart={(pbi) => start(i.workspaceId, pbi, "complete")} onOpenTask={props.onOpenTask} onChanged={() => load(false)} onError={props.onError} />
-                </Fragment>
+                <ListRow key={key(i)} item={i} items={data.items} auto={auto[i.workspaceId] ?? false} now={now} starting={starting} metaId={metaId} onStart={(action) => start(i.workspaceId, i.number, action)} onStartPbi={(pbi) => start(i.workspaceId, pbi, "complete")} onOpenTask={props.onOpenTask} onChanged={() => load(false)} onError={props.onError} />
                 ),
               )}
             </section>
           );
         })}
       <Flow />
-      <Interventions inView={(workspaceId) => workspaceId === null || inView(workspaceId)} onOpenTask={props.onOpenTask} />
+      {/* after the list's first read (#4119): interventions reads the whole event log in one synchronous pass, which holds the daemon and the list behind it */}
+      {(data !== null || failure !== null) && <Interventions inView={(workspaceId) => workspaceId === null || inView(workspaceId)} onOpenTask={props.onOpenTask} />}
     </main>
     </KeptHere.Provider>
   );

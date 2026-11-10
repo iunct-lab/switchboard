@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { QUESTION_DEFERRED_REPLY, type AgentEvent } from "@switchboard/protocol";
-import { claudeSessionExists, createClaudeAdapter } from "./index.ts";
+import { claudeSessionExists, createClaudeAdapter, telemetryEnv } from "./index.ts";
 
 describe("claudeSessionExists", () => {
   test("finds <id>.jsonl under any project folder; false when missing or there is no projects folder", () => {
@@ -55,6 +55,46 @@ describe("preamble", () => {
       expect(user.message.content).toBe("RECAP\n\n状況は？");
       expect(events.filter((e) => e.t === "message.delta" && e.role === "user").map((e) => (e.t === "message.delta" ? e.text : ""))).toEqual(["状況は？"]);
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("telemetryEnv (#4308)", () => {
+  test("telemetryEnv: off by default adds the disabling variables, on adds none", () => {
+    const off = { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", DISABLE_TELEMETRY: "1", DISABLE_ERROR_REPORTING: "1", DISABLE_AUTOUPDATER: "1" };
+    expect(telemetryEnv({})).toEqual(off);
+    expect(telemetryEnv({ runnerTelemetry: false })).toEqual(off);
+    expect(telemetryEnv({ runnerTelemetry: true })).toEqual({});
+  });
+
+  test("telemetryEnv: the child gets the disabling variables by default and no OTEL_ name, even if the parent env has one", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sb-claude-telemetry-"));
+    const bin = join(dir, "claude");
+    writeFileSync(bin, `#!/bin/sh\nhead -n 2 >/dev/null\nenv > "$OUT"\nexit 0\n`);
+    chmodSync(bin, 0o755);
+    const out = join(dir, "env.txt");
+    const before = { out: process.env.OUT, otel: process.env.OTEL_EXPORTER_OTLP_ENDPOINT };
+    const names = async (runnerTelemetry?: boolean) => {
+      const s = createClaudeAdapter({ bin }).start({ cwd: dir, scope: [dir], prompt: "p", runnerTelemetry }, () => undefined);
+      await s.exited;
+      const v = readFileSync(out, "utf8").split("\n").map((l) => l.split("=")[0] ?? "");
+      rmSync(out);
+      return v;
+    };
+    try {
+      process.env.OUT = out;
+      process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:1";
+      const off = await names();
+      expect(off.filter((n) => n.startsWith("OTEL_"))).toEqual([]);
+      expect(off).toContain("DISABLE_TELEMETRY");
+      expect(off).toContain("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC");
+      expect(await names(true)).not.toContain("DISABLE_TELEMETRY");
+    } finally {
+      for (const [k, v] of [["OUT", before.out], ["OTEL_EXPORTER_OTLP_ENDPOINT", before.otel]] as const) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
       rmSync(dir, { recursive: true, force: true });
     }
   });

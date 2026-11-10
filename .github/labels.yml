@@ -34,6 +34,9 @@
 - name: on-hold
   color: "d4c5f9"
   description: 保留。バックログを進めるが取りかからない。行のボタンは押せる
+- name: flow-improvement
+  color: 1D76DB
+  description: 開発の流れを改善する PBI（同時に進める数を絞る）
 
 # --- 自動化ドメイン / Automation domains ---
 - name: deps

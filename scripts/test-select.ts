@@ -3,8 +3,8 @@
 //   bun scripts/test-select.ts <path>...        （引数が無ければ stdin から 1 行 1 パス）
 // 1 行目は `full: <理由>`（全テストに倒した）か `selected: <件数>`、続けて `<テスト>  <理由>`。
 // 依存は import と、テストの先頭の宣言 `// test-reads: <パスかディレクトリ（末尾 /）> …` を見る（一時ディレクトリだけなら `none`）。
+// テストの共通部品（TEST_HELPERS）も倒さず、ほかのコードと同じに import の木と宣言で選ぶ。import で辿れない読み方（子プロセスなど）は `test-reads` で宣言する。
 // 判定できないものは全テストに倒す（classify）。local-ci がこの出力で bun test を絞る（scripts/local-ci.ts の selectTests）。
-//   bun scripts/test-select.ts --loaded <path>...   perf-bench の loaded を回すか（`loaded: run|skip  <理由>`）
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";
 
@@ -73,7 +73,7 @@ export function buildImportGraph(files: string[], read: (p: string) => string): 
   return graph;
 }
 
-/** テストの共通部品。import で辿れても、どのテストの前提を変えたかは import の木では測れない。 */
+/** テストの共通部品。全テストには倒さず、選んだ理由の行に「共通部品 <path> を読む」を付けるためだけに使う。読むテストは import の木と `test-reads` で選ぶ（漏れはタグの CI が拾う）。 */
 const TEST_HELPERS = [/(^|\/)fixtures\/[^/]+\.ts$/, /(^|\/)fixture\.ts$/, /-fake-[^/]+\.ts$/, /-harness\.ts$/];
 
 /** 宣言か import で判定する種類。ほかの拡張子は分類できない。 */
@@ -85,7 +85,6 @@ export function classify(path: string): string | undefined {
   if (name === "package.json" || name === "bun.lock" || name === "bunfig.toml" || /^tsconfig.*\.json$/.test(name)) return "依存の定義や設定";
   if (path.startsWith(".github/workflows/") || path === "scripts/ci.ts") return "CI の手順";
   if (path.startsWith("scripts/test-select")) return "判定の道具自体";
-  if (TEST_HELPERS.some((re) => re.test(path))) return "テストの共通部品";
   return JUDGED.test(name) ? undefined : "分類できないファイル";
 }
 
@@ -140,19 +139,20 @@ export function select(changed: string[], graph: ImportGraph, tests: string[], r
   const testSet = new Set(tests);
   const reasons: Record<string, string> = {};
   for (const c of changed) {
+    const tag = TEST_HELPERS.some((re) => re.test(c)) ? `共通部品 ${c} を読む: ` : "";
     const from = new Map<string, string | null>([[c, null]]);
     const queue = [c];
     for (let f = queue.shift(); f !== undefined; f = queue.shift()) {
       if (testSet.has(f) && !reasons[f]) {
         const chain = [f];
         for (let p = from.get(f); p; p = from.get(p)) chain.unshift(p);
-        reasons[f] = chain.length === 1 ? `${f}（変更したテスト）` : chain.join(" → ");
+        reasons[f] = chain.length === 1 ? `${f}（変更したテスト）` : `${tag}${chain.join(" → ")}`;
       }
       for (const [test, declared] of reads) {
         if (reasons[test] || !declared.some((r) => matchesRead(f, r))) continue;
         const chain = [f];
         for (let p = from.get(f); p; p = from.get(p)) chain.unshift(p);
-        reasons[test] = `${chain.join(" → ")} ← ${test}（test-reads）`;
+        reasons[test] = `${tag}${chain.join(" → ")} ← ${test}（test-reads）`;
       }
       for (const importer of graph.get(f) ?? []) {
         if (from.has(importer)) continue;
@@ -175,15 +175,15 @@ export function selectFrom(changed: string[], files: string[], read: (p: string)
   }
 }
 
-/** 変更が perf-bench の `loaded`（量と重なりの計測）に届くかを見るとき、テスト 1 本と見なすファイル（#3635）。 */
+/** 変更が届くかを見るとき、テスト 1 本と見なすファイル（#4124。タグの CI の perf の `over` が、perf-bench に届かない範囲の揺れかを決める）。 */
 export const PERF_BENCH = "scripts/perf-bench.ts";
-/** perf-bench が import せずに測る・判定に使うもの。ビルドして測る画面、デーモンが起動時に読む設定（server.ts の routing / pricing / mcp）、上限。 */
-const LOADED_READS = ["apps/web/", "packages/core/config/", "scripts/perf-budget.json"];
+/** perf-bench が import せずに測る・判定に使うもの。ビルドして測る画面（apps の下の web）、デーモンの応答（packages）と上限。 */
+const PERF_READS = ["apps/web/", "packages/", "scripts/perf-budget.json"];
 
-/** 変更が perf-bench の `loaded` に届くか（#3635）。テストと同じ決まり（import と上の宣言）で、判定できない変更・読めない依存は回す側に倒す。 */
-export function selectLoaded(changed: string[], files: string[], read: (p: string) => string): { run: boolean; reason: string } {
+/** 変更が perf-bench に届くか。テストと同じ決まり（import と上の宣言）で、判定できない変更・読めない依存は届く（run）側に倒す。 */
+export function selectPerf(changed: string[], files: string[], read: (p: string) => string): { run: boolean; reason: string } {
   try {
-    const s = select(changed, buildImportGraph(files, read), [PERF_BENCH], new Map([[PERF_BENCH, LOADED_READS]]));
+    const s = select(changed, buildImportGraph(files, read), [PERF_BENCH], new Map([[PERF_BENCH, PERF_READS]]));
     if (s.full) return { run: true, reason: s.full };
     const why = s.reasons[PERF_BENCH];
     return why ? { run: true, reason: why } : { run: false, reason: `変更 ${changed.length} ファイルのどれも ${PERF_BENCH} に届かない` };
@@ -204,13 +204,7 @@ export function repoFiles(root: string): string[] {
 }
 
 if (import.meta.main) {
-  // --loaded: テストの一覧の代わりに `loaded: run|skip  <理由>` の 1 行（selectLoaded）
-  const loaded = process.argv[2] === "--loaded";
-  const args = process.argv.slice(loaded ? 3 : 2);
-  const changed = (args.length ? args : (await Bun.stdin.text()).split("\n")).map((l) => l.trim().replace(/^\.\//, "")).filter(Boolean);
+  const changed = (process.argv.length > 2 ? process.argv.slice(2) : (await Bun.stdin.text()).split("\n")).map((l) => l.trim().replace(/^\.\//, "")).filter(Boolean);
   const read = (p: string) => readFileSync(join(ROOT, p), "utf8");
-  if (loaded) {
-    const l = selectLoaded(changed, repoFiles(ROOT), read);
-    console.log(`loaded: ${l.run ? "run" : "skip"}  ${l.reason}`);
-  } else console.log(formatSelection(selectFrom(changed, repoFiles(ROOT), read)));
+  console.log(formatSelection(selectFrom(changed, repoFiles(ROOT), read)));
 }

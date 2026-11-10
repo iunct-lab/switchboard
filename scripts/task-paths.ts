@@ -14,21 +14,57 @@ const FILE_EXT = /\.(?:tsx?|[cm]?js|json|md|ya?ml|toml|lock|sh|css|html|sql|txt)
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
+ * The lines where a name without a directory is read as a file the Task touches (#4382): the head of a numbered or bulleted step
+ * that starts with a name or an ASCII word, up to its first `:` `：` `—` outside backticks and before any `。` (so `a.md`・`b.md`:
+ * and `new.json`（新規）: keep every name before it), and a line that starts with 触る (after a bullet / number mark). A name in the
+ * middle of a step or a sentence is a reference.
+ */
+function stepHead(rest: string): string | null {
+  if (!/^(?:`[^`\s]+`|[\w./-])/.test(rest)) return null;
+  let tick = false;
+  for (let i = 0; i < rest.length; i++) {
+    const c = rest[i];
+    if (c === "`") tick = !tick;
+    else if (!tick && c === "。") return null;
+    else if (!tick && (c === ":" || c === "：" || c === "—")) return rest.slice(0, i);
+  }
+  return null;
+}
+
+function touchLines(text: string): string {
+  const out: string[] = [];
+  for (const line of text.split("\n")) {
+    const mark = /^\s*(?:[-*+]|\d+[.)])\s+/.exec(line);
+    const rest = line.slice(mark?.[0].length ?? line.length - line.trimStart().length);
+    if (rest.startsWith("触る")) out.push(rest);
+    else if (mark) {
+      const head = stepHead(rest);
+      if (head) out.push(head);
+    }
+  }
+  return out.join("\n");
+}
+
+/**
  * Repository paths named in an Issue body. `top` is the repository's root (plus what open PRs add to it): its
- * directories start a path, its files are paths by themselves (`package.json`). A backticked word that looks like a
- * file (it ends in a file extension) counts too, so a file no branch has yet (`new-config.json`) is still seen.
+ * directories start a path anywhere in the body. A name without a directory (a root file such as `package.json`, or a backticked
+ * word that ends in a file extension, so a file no branch has yet is still seen) counts only on `touchLines`.
  * `path:line` loses the line; a directory keeps its trailing slash.
  */
 export function pathsIn(text: string, top: { name: string; dir: boolean }[]): string[] {
   const dirs = top.filter((t) => t.dir).map((t) => esc(t.name));
   const files = top.filter((t) => !t.dir).map((t) => esc(t.name));
-  const alts = [...(dirs.length ? [`(?:${dirs.join("|")})\\/[\\w.@\\/-]*[\\w\\/]`] : []), ...(files.length ? [`(?:${files.join("|")})`] : [])];
-  const found = alts.length
-    ? [...text.matchAll(new RegExp(`(?<![\\w./-])(?:${alts.join("|")})(?![\\w-])`, "g"))].map((m) => m[0])
-    : [];
+  const touch = touchLines(text);
+  const scan = (alt: string, from: string) => [...from.matchAll(new RegExp(`(?<![\\w./-])(?:${alt})(?![\\w-])`, "g"))].map((m) => m[0]);
+  const found = [
+    ...(dirs.length ? scan(`(?:${dirs.join("|")})\\/[\\w.@\\/-]*[\\w\\/]`, text) : []),
+    ...(files.length ? scan(`(?:${files.join("|")})`, touch) : []),
+  ];
   // Only a file name counts here: `turn/completed`, `origin/main` and `@switchboard/protocol` have a / but are not paths
-  for (const m of text.matchAll(/`([\w.-]+(?:\/[\w.-]+)*)(?::\d+(?:-\d+)?)?`/g)) {
-    if (m[1] && FILE_EXT.test(m[1]) && !m[1].startsWith(".")) found.push(m[1]);
+  for (const [from, withDir] of [[text, true], [touch, false]] as const) {
+    for (const m of from.matchAll(/`([\w.-]+(?:\/[\w.-]+)*)(?::\d+(?:-\d+)?)?`/g)) {
+      if (m[1] && FILE_EXT.test(m[1]) && !m[1].startsWith(".") && m[1].includes("/") === withDir) found.push(m[1]);
+    }
   }
   return [...new Set(found)];
 }

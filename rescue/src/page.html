@@ -107,8 +107,8 @@ let tags = {};
 /** Why this page's last action failed: shown over the 2 s refresh, before the service's (older) lastError, until the next action. */
 let refused = "";
 let restartReloads = false; // 再起動 restarts sb-rescue too and reads the environment again (#435)
-let stopping = []; // the running and waiting tasks a restart or a release switch stops (#435)
-const STATUS = { running: "実行中", waiting: "承認待ち" };
+let stopping = []; // the running and waiting tasks, and those with background jobs left, that a restart or a release switch stops (#435)
+const STATUS = { running: "実行中", waiting: "承認待ち", background: "裏で実行中" };
 const taskName = (t) => t.title + "（" + (STATUS[t.status] || t.status) + "）";
 /** The confirm text's tail: up to 5 titles, then how many more. */
 function stopsText() {
@@ -269,7 +269,7 @@ $("agent-stop").onclick = () => act("api/agent/stop", {}, "救援エージェン
 const size = (n) => { const u = ["B", "KB", "MB", "GB"]; let i = 0; while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; } return (i ? n.toFixed(1) : n) + " " + u[i]; };
 // the host's clock, not the browser's: never "-3 分前"
 const ago = (ms) => { const m = Math.max(0, Math.floor((Date.now() - ms) / 60000)); return m < 60 ? m + " 分前" : Math.floor(m / 60) + " 時間前"; };
-const KEEP = { pattern: "型に合わない", owner: "持ち主が違う", "not-a-directory": "ディレクトリでない", "in-use": "使用中", "use-unknown": "使用中か確かめられない" };
+const KEEP = { pattern: "型に合わない", owner: "持ち主が違う", "not-a-directory": "ディレクトリでない", "in-use": "使用中", "use-unknown": "使用中か確かめられない", mount: "マウントされている" };
 // the ages the owner picks (#tmp-age's options, rescue/src/tmp.ts STALE_CHOICES_MS); the list and the button follow the one sb-rescue answered with
 const AGES = { 1800000: "30 分", 7200000: "2 時間", 21600000: "6 時間", 86400000: "24 時間" };
 let cleanable = { names: [], bytes: 0 };

@@ -35,7 +35,7 @@ Local Tasks run non-interactively (`claude -p`) and never meet Claude Code's
 trust dialog, so a repository that works Locally can still stop Cloud creation:
 Cloud runs the interactive CLI in a PTY, which asks "Quick safety check … Yes, I
 trust this folder" for a folder it has not trusted (CLI **2.1.296**; recording
-`packages/adapters/claude/fixtures/cloud-trust-prompt.txt`, kept outside Git: record your own outside Git with the `runner-adapter-recording` skill; `bun scripts/fixtures.ts fetch` works only in a clone with the private history). The dialog appears
+`packages/adapters/claude/fixtures/cloud-trust-prompt.txt`, kept outside Git: record your own outside Git with the `runner-adapter-recording` skill). The dialog appears
 before authentication.
 
 - **Where trust is recorded**: `projects["<absolute path>"].hasTrustDialogAccepted`
@@ -238,11 +238,10 @@ runner reset, official link and idle/unknown. Fake App-absent and web-setup
 scenarios test that Switchboard adds no App gate; they do not establish any
 real provider permission. Git content, index and configuration stay unchanged.
 
-Reproduce without live Cloud usage or a real login (requires installed Chrome and the recording `cloud-trust-prompt.txt`, which you record yourself and keep outside Git with the `runner-adapter-recording` skill — `bun scripts/fixtures.ts fetch` gets it only in a clone with the private history; without the recording the script prints `skipped: …` on stderr and exits 0, or exits 2 when `SWITCHBOARD_FIXTURES` is given):
+Reproduce without live Cloud usage or a real login (requires installed Chrome and the recording `cloud-trust-prompt.txt`, which you record yourself and keep outside Git with the `runner-adapter-recording` skill; without the recording the script prints `skipped: …` on stderr and exits 0, or exits 2 when `SWITCHBOARD_FIXTURES` is given):
 
 ```sh
 # Record cloud-trust-prompt.txt outside Git with runner-adapter-recording first.
-# Only clones with the private history can use: bun scripts/fixtures.ts fetch
 bun run --cwd apps/web build
 env -u SWITCHBOARD_SUPERVISED CHROME_BIN=<Chrome executable> bun scripts/claude-cloud-e2e.ts
 ```

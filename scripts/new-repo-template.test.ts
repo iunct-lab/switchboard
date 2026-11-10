@@ -1,4 +1,4 @@
-// test-reads: .claude/skills/ ops-kit/template/ scripts/setup/
+// test-reads: .claude/skills/ ops-kit/template/ ops-kit/template-local/ scripts/setup/
 import { afterAll, describe, expect, test } from "bun:test";
 import { cpSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,6 +8,7 @@ import { parseConfig, resolveProject } from "../ops-kit/src/config.ts";
 import { fakeGh, type FakeCall } from "../ops-kit/src/gh.ts";
 import { lint } from "../ops-kit/src/lint.ts";
 import { findSecrets } from "../ops-kit/src/secrets.ts";
+import { localChangeRules } from "../packages/core/src/backlog.ts";
 import { setupScripts } from "../packages/core/src/skillsync.ts";
 import { checkoutSteps } from "./local-ci.ts";
 
@@ -17,6 +18,7 @@ import { checkoutSteps } from "./local-ci.ts";
  */
 const root = join(import.meta.dir, "..");
 const template = join(root, "ops-kit/template");
+const templateLocal = join(root, "ops-kit/template-local");
 const values: Record<string, string> = {
   __OWNER__: "example",
   __REPO__: "sample-app",
@@ -47,8 +49,8 @@ function filesOf(dir: string): string[] {
   });
 }
 
-function fillTemplate(dir: string, vals: Record<string, string>): void {
-  cpSync(template, dir, { recursive: true });
+function fillTemplate(dir: string, vals: Record<string, string>, from: string = template): void {
+  cpSync(from, dir, { recursive: true });
   for (const f of filesOf(dir)) {
     const text = readFileSync(f, "utf8").replace(/__[A-Z_]+__/g, (m) => vals[m] ?? m);
     writeFileSync(f, text);
@@ -168,5 +170,52 @@ describe("new-repo template", () => {
     for (const l of curls) expect(l).toContain('-H "authorization: Bearer $K"');
     const said = Bun.spawnSync(["git", "grep", "-l", "トークンが要らない", "--", ".claude/skills"], { cwd: root });
     expect(said.stdout.toString()).toBe("");
+  });
+});
+
+/** #4221: the template for a repository that does not use GitHub, checked against the Task prompt's `localChangeRules`. */
+describe("new-repo template-local", () => {
+  function filledLocal(): string {
+    const dir = mkdtempSync(join(tmpdir(), "switchboard.new-repo-template-local."));
+    made.push(dir);
+    fillTemplate(dir, values, templateLocal);
+    return dir;
+  }
+  const scriptsOf = (text: string) => [...new Set([...text.matchAll(/scripts\/([a-z-]+)\.ts/g)].map((m) => m[1]!))].sort();
+
+  test("new-repo template-local: placeholders are filled, nothing usable for auth, no .tmpl left", () => {
+    const dir = filledLocal();
+    const left = filesOf(dir).flatMap((f) => (readFileSync(f, "utf8").match(/__[A-Z_]+__/g) ?? []).map((m) => `${relative(dir, f)}: ${m}`));
+    expect(left).toEqual([]);
+    const hits = filesOf(dir).flatMap((f) => findSecrets(readFileSync(f, "utf8")).map((h) => `${relative(dir, f)}:${h.line} ${h.kind}`));
+    expect(hits).toEqual([]);
+    expect(readdirSync(dir).filter((n) => n.endsWith(".tmpl"))).toEqual([]);
+  });
+
+  test("new-repo template-local: no .github/ and no scripts/setup/; README has the two headings; the change body starts with Backlog-Task", () => {
+    const dir = filledLocal();
+    const names = readdirSync(dir);
+    expect(names).not.toContain(".github");
+    expect(names).not.toContain("scripts");
+    const readme = readFileSync(join(dir, "README.md"), "utf8");
+    expect(readme).toContain("## Design rules");
+    expect(readme).toContain("## License");
+    const body = readFileSync(join(dir, "docs/change-template.md"), "utf8");
+    expect(body.split("\n")[0]).toBe("Backlog-Task: <Task>");
+    expect(body).not.toMatch(/Closes #/);
+  });
+
+  test("new-repo template-local: CLAUDE.md names the same scripts as localChangeRules and does not contradict it", () => {
+    const claude = readFileSync(join(filledLocal(), "CLAUDE.md"), "utf8");
+    expect(scriptsOf(claude)).toEqual(scriptsOf(localChangeRules("")));
+    expect(scriptsOf(claude)).toEqual(["local-ci", "local-merge", "merge-gate"]);
+    expect(claude).not.toContain("request_issue.sh");
+    expect(claude).not.toContain("scripts/setup/");
+    expect(claude).toContain("ops-kit backlog create");
+    expect(claude).toContain("`ops-kit pull-main` は使わない");
+    expect(claude).toContain("「ローカルの変更では」の手順は、このファイルより優先する");
+    // kept from template/: where the deploy approval goes, and how the test section reads while there are no tests
+    expect(claude).toContain(`- 動いている実物への反映: ${values.__DEPLOY_OK__}`);
+    expect(claude).toContain("テストが無い間は");
   });
 });

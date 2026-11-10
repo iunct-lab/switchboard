@@ -5,6 +5,7 @@ import { type Db, newId } from "./db.ts";
 import type { ScanSummary } from "./secretscan.ts";
 import type { TaskManager } from "./tasks.ts";
 import { collectProvenance } from "./provenance.ts";
+import { isWorking } from "./task-status.ts";
 
 /**
  * Scheduler (#20): DAK-style nightly jobs started from Switchboard. A schedule is a cron expression plus everything a
@@ -14,7 +15,8 @@ import { collectProvenance } from "./provenance.ts";
  * schedules did overnight.
  */
 /** What a backlog-next firing did (#267, #561): the stage Tasks it started, and why each workspace / slot started nothing. */
-export type BacklogNextResult = { started: Array<{ task: Task; label: string }>; skipped: string[] };
+/** `promotion`: the firing asked for the newest tag, or stopped on it (a Task running, a tag that failed): it started nothing else (#2479). */
+export type BacklogNextResult = { started: Array<{ task: Task; label: string }>; skipped: string[]; promotion?: string };
 
 /** What the insights schedule's Task sends (#1838): the built-in command alone — Claude Code expands it only as the whole message. */
 export const INSIGHTS_PROMPT = "/insights";
@@ -63,6 +65,8 @@ export class Scheduler {
     private autoRunner: (r: RunnerId) => { runner: RunnerId; note?: string } = (r) => ({ runner: r }),
     /** approval-window (#2046): reads the batches still waiting (判断待ち shows them as a notice, #2866) and says so, in a line. */
     private approvalWindow: (schedule: { id: string; title: string }) => Promise<string> = async () => "approval-window is not available",
+    /** The budget of a schedule's Task when the schedule has none: the settings' `defaultBudgetUsd` (null = none). */
+    private defaultBudgetUsd: () => number | null = () => null,
   ) {}
 
   list(): Schedule[] {
@@ -131,8 +135,8 @@ export class Scheduler {
     this.db.deleteSchedule(id);
   }
 
-  /** Start the schedule's task now (manual or due). Returns null when its previous task is still active or nothing was started. */
-  async runNow(id: string, reason: "manual" | "due" = "manual"): Promise<Task | null> {
+  /** Start the schedule's task now (manual or due). Returns null when its previous task is still active or nothing was started; `{ promotion }` when backlog-next only asked for (or held on) the newest tag. */
+  async runNow(id: string, reason: "manual" | "due" = "manual"): Promise<Task | { promotion: string } | null> {
     const s = this.db.getSchedule(id);
     if (!s) throw new Error("schedule not found");
     const ws = this.db.getWorkspace(s.workspaceId);
@@ -145,7 +149,7 @@ export class Scheduler {
     // this must move behind a per-schedule lock (or a DB-level compare-and-swap on lastTaskId) instead.
     // backlog-next decides per workspace and slot instead (#561): its last Task running does not hold the others.
     const prev = (s.action === "prompt" || claudeOnly(s.action)) && s.lastTaskId ? this.db.getTask(s.lastTaskId) : null;
-    if (prev && (prev.status === "running" || prev.status === "waiting")) {
+    if (prev && isWorking(prev, "slot")) {
       this.note(`${s.title}: skipped (${reason}); previous run ${prev.id} is still ${prev.status}`);
       return null;
     }
@@ -177,7 +181,7 @@ export class Scheduler {
       runner,
       ...(s.model && !note ? { model: s.model } : {}),
       ...(s.effort && !note ? { effort: s.effort } : {}),
-      budgetUsd: s.budgetUsd ?? undefined,
+      budgetUsd: s.budgetUsd ?? this.defaultBudgetUsd() ?? undefined,
       scheduleId: s.id,
       kind: "maintenance",
       // Unattended runs get no shadow (#99): the one-active-run guard and the queue's scheduled section only know the
@@ -220,11 +224,12 @@ export class Scheduler {
       }
       return null;
     }
-    return this.runBacklogNext(id, s.title, s.cron, "unblocked", { workspaceId, numbers });
+    const r = await this.runBacklogNext(id, s.title, s.cron, "unblocked", { workspaceId, numbers });
+    return r && "promotion" in r ? null : r;
   }
 
   /** backlog-next (#267, #561): the daemon picks the items and starts their stage Tasks; one firing at a time per schedule. */
-  private async runBacklogNext(id: string, title: string, cron: string, reason: "manual" | "due" | "unblocked", only?: { workspaceId: string; numbers: number[] }): Promise<Task | null> {
+  private async runBacklogNext(id: string, title: string, cron: string, reason: "manual" | "due" | "unblocked", only?: { workspaceId: string; numbers: number[] }): Promise<Task | { promotion: string } | null> {
     // a full firing that comes during a narrow one waits for it (a narrow one reads one workspace's items only: the
     // firing it would take the place of is not made up until the next due time)
     if (!only && this.narrow.has(id) && !this.fullWaiting.has(id)) {
@@ -249,13 +254,14 @@ export class Scheduler {
       if (reason === "unblocked") {
         if (last) this.db.updateSchedule(id, { lastTaskId: last.id });
         for (const x of r.started) this.note(`${title}: ${x.label} で開始 ${x.task.id} (待ちが解けた)`);
-        return last;
+        return last ?? (r.promotion ? { promotion: r.promotion } : null);
       }
       const next = nextRun(cron, new Date(this.now()))?.getTime() ?? null;
       this.db.updateSchedule(id, { lastRunAt: this.now(), nextRunAt: next, ...(last ? { lastTaskId: last.id } : {}) });
       for (const x of r.started) this.note(`${title}: ${x.label} で開始 ${x.task.id} (${reason})`);
+      if (r.promotion) this.note(`${title}: ${r.promotion} (${reason})`);
       for (const why of r.skipped) this.note(`${title}: 飛ばした (${reason}): ${why}`);
-      return last;
+      return last ?? (r.promotion ? { promotion: r.promotion } : null);
     } finally {
       this.starting.delete(id);
       this.narrow.delete(id);
@@ -352,7 +358,7 @@ export class Scheduler {
       if (!s.enabled || s.nextRunAt === null || s.nextRunAt > t) continue;
       try {
         const task = await this.runNow(s.id, "due");
-        if (task) started.push(task);
+        if (task && !("promotion" in task)) started.push(task);
         // a firing that started nothing still moves on — unless it already did, after a long firing (a secret-scan
         // reads for minutes: the next run from before it could be due again at once)
         else if ((this.db.getSchedule(s.id)?.nextRunAt ?? 0) <= t) this.db.updateSchedule(s.id, { nextRunAt: nextRun(s.cron, new Date(t))?.getTime() ?? null });

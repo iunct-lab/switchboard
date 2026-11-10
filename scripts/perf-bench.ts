@@ -12,7 +12,7 @@
  * Then, once (LOADED_RUNS, not --runs), launch and send again on a daemon holding as much as the real home
  * (scripts/perf-load.ts): launch under a backlog import and the rescue page's status checks, send without them, and the
  * longest the daemon took to answer /api/health during the import (`loaded`, #2822, #3634). `--skip-loaded <reason>`:
- * local-ci gives it when the change does not reach this script (scripts/test-select.ts --loaded, #3635); the result then
+ * perf-ratchet's base measure gives it (only main's bytes are wanted there); the result then
  * holds `loadedSkipped` instead of `loaded`, and perf-ratchet leaves the `loaded` ceiling out.
  */
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";

@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import type { CheckRun, Footprint, LedgerSummary, OpsLoad, RunnerInfo, StagedChange, Task, TaskEvals, Workspace } from "@switchboard/protocol";
+import { isWorkingStatus, type CheckRun, Footprint, LedgerSummary, OpsLoad, RunnerInfo, StagedChange, Task, TaskEvals, Workspace } from "@switchboard/protocol";
 import { outcomeLabel } from "../attention.ts";
 import { taskLoadLine } from "../ops.ts";
 import { api, type TaskDetail } from "../api.ts";
@@ -8,9 +8,9 @@ import { ReleasePanel } from "./ReleasePanel.tsx";
 import { fmtClock, fmtUsd, githubBudgetLabel, githubBudgetLow, pct, RunnerPill } from "./ui.tsx";
 import { windowLabel } from "../quota.ts";
 import { ModelSelect } from "./ModelSelect.tsx";
+import { EffortSelect } from "./EffortSelect.tsx";
 import { AttachmentGallery } from "./Attachments.tsx";
 import { firstInstruction, foldTranscript } from "../transcript.ts";
-import { effortLabel } from "../effortOptions.ts";
 import { humanLabel, judgeAverage, judgeRows, metricRows, modelsLabel } from "../evals.ts";
 import { jstDateTime } from "../time.ts";
 import { t } from "../i18n.ts";
@@ -54,6 +54,21 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
       })
       .catch((e) => setModelErr(String(e.message ?? e)))
       .finally(() => setModelBusy(false));
+  };
+  // Thinking effort (#1802): same as the model — stored now, used from the next turn.
+  const [effortErr, setEffortErr] = useState<string | null>(null);
+  const [effortBusy, setEffortBusy] = useState(false);
+  useEffect(() => setEffortErr(null), [props.task.id]);
+  const changeEffort = (effort: string) => {
+    setEffortBusy(true);
+    api
+      .setTaskEffort(props.task.id, effort || null)
+      .then((t) => {
+        setEffortErr(null);
+        props.onTask?.(t);
+      })
+      .catch((e) => setEffortErr(String(e.message ?? e)))
+      .finally(() => setEffortBusy(false));
   };
   const changeMode = (mode: string) => {
     setModeBusy(true);
@@ -236,7 +251,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
       .catch((e) => setStagedErr(String(e.message ?? e)))
       .then(loadStaged);
   const cloud = props.task.executionMode === "cloud";
-  const busy = props.task.status === "running" || props.task.status === "waiting";
+  const busy = isWorkingStatus(props.task.status);
   const contextWindow = 200_000;
   const instruction = useMemo(() => firstInstruction(foldTranscript(props.detail?.events ?? []).items), [props.detail?.events]);
 
@@ -295,11 +310,15 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
           <span>{t(m.model)}</span>
           <span>
             {cloud ? <span>{t(m.cloudModel)}</span> : <ModelSelect runner={runnerInfo} value={props.task.model ?? ""} onChange={changeModel} label={t(m.model)} disabled={modelBusy} />}
-            {!cloud && runnerInfo && runnerInfo.models.length > 0 && <div className="hint">{props.task.status === "running" || props.task.status === "waiting" ? t(m.modelNextTurn) : t(m.modelNextReply)}</div>}
+            {!cloud && runnerInfo && runnerInfo.models.length > 0 && <div className="hint">{isWorkingStatus(props.task.status) ? t(m.modelNextTurn) : t(m.modelNextReply)}</div>}
             {modelErr && <div className="hint warn">{modelErr}</div>}
           </span>
           <span>{t(m.effort)}</span>
-          <span className="brief-effort" title={t(m.effortTitle)}>{effortLabel(props.task.effort, runnerInfo)}</span>
+          <span>
+            {cloud ? <span>{t(m.cloudModel)}</span> : <EffortSelect runner={runnerInfo} value={props.task.effort ?? ""} onChange={changeEffort} label={t(m.effort)} disabled={effortBusy} />}
+            {!cloud && runnerInfo && runnerInfo.efforts.length > 0 && <div className="hint">{isWorkingStatus(props.task.status) ? t(m.modelNextTurn) : t(m.effortNextReply)}</div>}
+            {effortErr && <div className="hint warn">{effortErr}</div>}
+          </span>
           <span>{t(m.approval)}</span>
           <span>
             {cloud ? <span>{t(m.cloudApproval)}</span> : modes.length > 0 ? (

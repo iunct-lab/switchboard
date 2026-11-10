@@ -91,7 +91,7 @@ describe("human label (#1220)", () => {
 
 describe("evals list rows (#1221)", () => {
   const row = (taskId: string, over: Partial<EvalsListRow> = {}): EvalsListRow => ({
-    taskId, title: taskId, runner: "claude", workspaceId: null, status: "done", outcome: "done", updatedAt: 1, costUsd: 0, models: [], effort: null,
+    taskId, title: taskId, runner: "claude", workspaceId: null, status: "done", outcome: "done", updatedAt: 1, costUsd: 0, models: [], efforts: [], subagentEffort: null,
     rules: { toolCalls: 3, toolFailures: 0, errors: 0, userInstructions: 0, stops: 0, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false }, judge: null, human: null, ...over,
   });
   const rows = [row("a", { updatedAt: 3, judge: { average: 4.2, scores: {}, rubric: "r@1", by: "x" } }), row("b", { updatedAt: 2, rules: null }), row("c", { updatedAt: 1, judge: { average: 2.0, scores: {}, rubric: "r@1", by: "x" }, rules: { toolCalls: 1, toolFailures: 2, errors: 0, userInstructions: 1, stops: 0, lastEnd: "error", daemonStops: 0, lastCutByDaemon: false } })];
@@ -117,20 +117,21 @@ describe("evals list rows (#1221)", () => {
   });
 
   test("evalCells and evalRowWarn", () => {
-    expect(evalCells(rows[0]!)).toEqual({ judge: "4.2", human: "-", end: "正常", model: "-", mixed: false, effort: "CLI 既定" });
-    expect(evalCells(rows[1]!)).toEqual({ judge: "-", human: "-", end: "-", model: "-", mixed: false, effort: "CLI 既定" });
+    expect(evalCells(rows[0]!)).toEqual({ judge: "4.2", human: "-", end: "正常", model: "-", mixed: false, effort: "—", effortMixed: false, subagentEffort: "-" });
+    expect(evalCells(rows[1]!)).toEqual({ judge: "-", human: "-", end: "-", model: "-", mixed: false, effort: "—", effortMixed: false, subagentEffort: "-" });
     expect(evalCells(row("h", { human: { rating: 2, comment: "" } })).human).toBe("2 / 5");
     expect(rows.map(evalRowWarn)).toEqual([false, false, true]);
     expect(evalRowWarn(row("h", { human: { rating: 2, comment: "" } }))).toBe(true);
     expect(evalRowWarn(row("j", { judge: { average: 2.5, scores: {}, rubric: "r@1", by: "x" } }))).toBe(true);
   });
 
-  test("evalCells: every model in the order first used (混在 with two or more) and the effort by the runner's label (#1801)", () => {
+  test("evalCells: every model in the order first used (混在 with two or more) and the efforts started with by the runner's label (#1801, #1802)", () => {
     const runner = { efforts: [{ value: "high", label: "高" }] };
-    expect(evalCells(row("one", { models: ["claude-opus-5-5"], effort: "high" }), runner)).toMatchObject({ model: "claude-opus-5-5", mixed: false, effort: "高" });
+    expect(evalCells(row("one", { models: ["claude-opus-5-5"], efforts: ["high"] }), runner)).toMatchObject({ model: "claude-opus-5-5", mixed: false, effort: "高", effortMixed: false });
     // opus → sonnet → opus reads ["opus", "sonnet"] (distinct): the cell names both rather than claim sonnet ran last
-    expect(evalCells(row("two", { models: ["claude-opus-5-5", "claude-sonnet-5-5"], effort: "xhigh" }), runner)).toMatchObject({ model: "claude-opus-5-5 → claude-sonnet-5-5", mixed: true, effort: "xhigh" });
-    expect(evalCells(row("none", { models: [], effort: null }))).toMatchObject({ model: "-", mixed: false, effort: "CLI 既定" });
+    expect(evalCells(row("two", { models: ["claude-opus-5-5", "claude-sonnet-5-5"], efforts: ["low", "high"] }), runner)).toMatchObject({ model: "claude-opus-5-5 → claude-sonnet-5-5", mixed: true, effort: "low → 高", effortMixed: true });
+    expect(evalCells(row("cli", { efforts: [""] }), runner)).toMatchObject({ effort: "CLI 既定", effortMixed: false });
+    expect(evalCells(row("none", { models: [], efforts: [] }))).toMatchObject({ model: "-", mixed: false, effort: "—", effortMixed: false });
   });
 
   test("modelsLabel: null when not known, the one, or every one with （混在） (#1801)", () => {
@@ -139,22 +140,40 @@ describe("evals list rows (#1221)", () => {
     expect(modelsLabel({ models: ["claude-opus-5-5", "claude-sonnet-5-5"] })).toBe("claude-opus-5-5 → claude-sonnet-5-5（混在）");
   });
 
-  test("filterEvalRows and evalFilterOptions: by a model used, by the effort (- = the CLI default), both (#1801)", () => {
+  test("filterEvalRows and evalFilterOptions: by a model used, by an effort started with (- = the CLI default; a mixed row matches both values), both (#1801, #1802)", () => {
     const list = [
-      row("a", { models: ["claude-opus-5-5", "claude-sonnet-5-5"], effort: "high" }),
-      row("b", { models: ["claude-sonnet-5-5"], effort: null }),
-      row("c", { models: [], effort: "low" }),
+      row("a", { models: ["claude-opus-5-5", "claude-sonnet-5-5"], efforts: ["low", "high"] }),
+      row("b", { models: ["claude-sonnet-5-5"], efforts: [""] }),
+      row("c", { models: [], efforts: ["low"] }),
     ];
     const ids = (rs: EvalsListRow[]) => rs.map((r) => r.taskId);
     expect(ids(filterEvalRows(list, { model: "", effort: "" }))).toEqual(["a", "b", "c"]);
     expect(ids(filterEvalRows(list, { model: "claude-sonnet-5-5", effort: "" }))).toEqual(["a", "b"]);
     expect(ids(filterEvalRows(list, { model: "claude-opus-5-5", effort: "" }))).toEqual(["a"]);
     expect(ids(filterEvalRows(list, { model: "", effort: "-" }))).toEqual(["b"]);
-    expect(ids(filterEvalRows(list, { model: "", effort: "low" }))).toEqual(["c"]);
+    expect(ids(filterEvalRows(list, { model: "", effort: "low" }))).toEqual(["a", "c"]);
+    expect(ids(filterEvalRows(list, { model: "", effort: "high" }))).toEqual(["a"]);
     expect(ids(filterEvalRows(list, { model: "claude-sonnet-5-5", effort: "high" }))).toEqual(["a"]);
     expect(ids(filterEvalRows(list, { model: "claude-opus-5-5", effort: "-" }))).toEqual([]);
-    expect(evalFilterOptions(list)).toEqual({ models: ["claude-opus-5-5", "claude-sonnet-5-5"], efforts: ["-", "high", "low"] });
-    expect(evalFilterOptions([])).toEqual({ models: [], efforts: [] });
+    expect(evalFilterOptions(list)).toEqual({ models: ["claude-opus-5-5", "claude-sonnet-5-5"], efforts: ["-", "high", "low"], subagentEfforts: ["-"] });
+    expect(evalFilterOptions([])).toEqual({ models: [], efforts: [], subagentEfforts: [] });
+  });
+});
+
+describe("subagentEffort on the Evals list (#3866)", () => {
+  const sub = (taskId: string, subagentEffort: string | null): EvalsListRow => ({
+    taskId, title: taskId, runner: "claude", workspaceId: null, status: "done", outcome: "done", updatedAt: 1, costUsd: 0, models: [], efforts: [], subagentEffort,
+    rules: null, judge: null, human: null,
+  });
+  test("subagentEffort: the cell, the filter (- = not set) and the options", () => {
+    const list = [sub("a", "medium"), sub("b", null), sub("c", "low")];
+    const ids = (r: EvalsListRow[]) => r.map((x) => x.taskId);
+    expect(evalCells(list[0]!).subagentEffort).toBe("medium");
+    expect(evalCells(list[1]!).subagentEffort).toBe("-");
+    expect(ids(filterEvalRows(list, { model: "", effort: "", subagentEffort: "" }))).toEqual(["a", "b", "c"]);
+    expect(ids(filterEvalRows(list, { model: "", effort: "", subagentEffort: "medium" }))).toEqual(["a"]);
+    expect(ids(filterEvalRows(list, { model: "", effort: "", subagentEffort: "-" }))).toEqual(["b"]);
+    expect(evalFilterOptions(list).subagentEfforts).toEqual(["-", "low", "medium"]);
   });
 });
 

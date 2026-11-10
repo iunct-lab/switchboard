@@ -1,5 +1,5 @@
 // test-reads: none
-import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setSystemTime, spyOn, test } from "bun:test";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -181,6 +181,52 @@ describe("the account behind `claude auth status` stays out of the API and the l
       rmSync(home, { recursive: true, force: true });
     }
   });
+});
+
+describe("/api/health does not wait for the login check (#3734)", () => {
+  test("only ?recheck=1 waits; a plain read answers with the last result and the check finishes behind it", async () => {
+    const home = mkdtempSync(join(tmpdir(), "switchboard-test-healthwait-"));
+    let calls = 0;
+    let login: "ok" | "expired" = "ok";
+    const claude: RunnerAdapter = {
+      id: "claude",
+      loginArgs: [],
+      async detect() {
+        if (calls++ > 0) await Bun.sleep(3000); // the first call is the boot's
+        return { available: true, version: "fake", path: "/nonexistent/claude", login };
+      },
+      start() {
+        throw new Error("no runs");
+      },
+    };
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_PORT: "0", SWITCHBOARD_CLAUDE_PROJECTS: join(home, "none"), SWITCHBOARD_HISTORY_POLL_MS: "0" }), [claude], { port: 0, selfdevChecks: false });
+    const base = `http://127.0.0.1:${c.server.port}`;
+    const read = async (path = "") => {
+      const t0 = performance.now();
+      const body = (await (await fetch(`${base}/api/health${path}`)).json()) as { runners: { id: string; login?: string }[] };
+      return { ms: performance.now() - t0, login: body.runners.find((r) => r.id === "claude")?.login };
+    };
+    try {
+      // a plain read, a minute later: the old answer at once, the new one after the check ran behind it
+      login = "expired";
+      setSystemTime(new Date(Date.now() + 61_000));
+      const plain = await read();
+      expect(plain.ms).toBeLessThan(1000);
+      expect(plain.login).toBe("ok");
+      await Bun.sleep(3300);
+      expect((await read()).login).toBe("expired");
+      // the forced one waits for the check and answers with its result
+      login = "ok";
+      setSystemTime(new Date(Date.now() + 61_000));
+      const forced = await read("?recheck=1");
+      expect(forced.ms).toBeGreaterThan(2500);
+      expect(forced.login).toBe("ok");
+    } finally {
+      setSystemTime();
+      await c.stop();
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 20_000);
 });
 
 describe("the API (#354)", () => {

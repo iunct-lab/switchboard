@@ -96,6 +96,7 @@ export function flowOfPbi(raw: RawPbi, requestCreatedAt: string | null): Omit<Fl
     stages,
     userWaitMs: [raw.comments, ...tasks.map((t) => t.comments)].reduce((sum, cs) => sum + userWait(cs), 0), // pair ask and answer within one Issue
     reviewRounds: prs.map((p) => p.comments.filter((c) => REVIEW.test(c.body)).length),
+    taskIssues: tasks.length,
   };
 }
 
@@ -318,6 +319,24 @@ export function summarize(pbis: FlowPbi[]): FlowSummary {
   const known = FlowStage.options.filter((st) => stages[st].p50 !== null);
   const bottleneck = known.length ? known.reduce((a, b) => (stages[b].p50! > stages[a].p50! ? b : a)) : null;
   return { stages, bottleneck, closed: pbis.length, storyPoints: pbis.reduce((s, p) => s + (p.storyPoints ?? 0), 0) };
+}
+
+/** p25 / p50 / p75 of a set of numbers (nearest rank for p25 and p75, as `percentile`); null when it is empty. */
+export type Spread = { p25: number | null; p50: number | null; p75: number | null };
+export type SpActuals = { storyPoints: number; count: number; taskIssues: Spread; runMs: Spread; costUsd: Spread };
+const spread = (xs: number[]): Spread => ({ p25: percentile(xs, 0.25), p50: median(xs), p75: percentile(xs, 0.75) });
+
+/**
+ * The closed PBIs by Story Points (smallest first; a PBI with none is left out): how many, and the spread of the Task
+ * Issues, the Switchboard Tasks' run time and cost. `runMs` / `costUsd` leave out a PBI whose `tasks` were not read.
+ */
+export function actualsByStoryPoints(pbis: FlowPbi[]): SpActuals[] {
+  const points = [...new Set(pbis.flatMap((p) => p.storyPoints ?? []))].sort((a, b) => a - b);
+  return points.map((sp) => {
+    const of = pbis.filter((p) => p.storyPoints === sp);
+    const tasks = of.flatMap((p) => p.tasks ?? []);
+    return { storyPoints: sp, count: of.length, taskIssues: spread(of.map((p) => p.taskIssues)), runMs: spread(tasks.map((t) => t.runMs)), costUsd: spread(tasks.map((t) => t.costUsd)) };
+  });
 }
 
 /** What `flowView` reads and leaves out for these workspaces — the cache's scope: an import that finishes later (a repository, or another workspace of one already read) is not left out for the hour. */

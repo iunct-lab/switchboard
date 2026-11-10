@@ -7,7 +7,7 @@ PBI #1445、要望 #1444。新しいリポジトリを Switchboard の開発資�
 
 | 層 | もの | 置き場所 | 正本 |
 |---|---|---|---|
-| A | 設定 `ops.config.json`（Project の URL・`envPrefix`・Area などの選択肢・必須の節・Story Points） | リポジトリの root | [使う側の設定](../../ops-kit/README.md#使う側の設定opsconfigjson) |
+| A | 設定 `ops.config.json`（Project の URL・`envPrefix`・Area などの選択肢・必須の節。Story Points の尺度はキットが持つ） | リポジトリの root | [使う側の設定](../../ops-kit/README.md#使う側の設定opsconfigjson) |
 | A | `scripts/setup/` の入口（`lint_backlog.sh` / `set_project_field.sh` / `triage_issue.sh` / `request_issue.sh`。`bootstrap_project.sh` は Project を作る側だけ） | リポジトリの `scripts/setup/` | [入口（使う側のリポジトリ）](../../ops-kit/README.md#入口使う側のリポジトリ) |
 | A | `CLAUDE.md` / `AGENTS.md`（そのリポジトリ固有の値。テスト・作業の場所と枝・live check・反映の OK ほか） | リポジトリの root | [使う側のリポジトリが持つもの](../../ops-kit/skills/issue-workflow/SKILL.md#使う側のリポジトリが持つもの) |
 | A | Issue テンプレ・PR テンプレ・`labels.yml`・workflows（`labels.yml` / `ci.yml`）・`.gitignore` | リポジトリの `.github/` と root | [雛形（新しいリポジトリ）](../../ops-kit/README.md#雛形新しいリポジトリ) |
@@ -31,6 +31,8 @@ PBI #1445、要望 #1444。新しいリポジトリを Switchboard の開発資�
 | 期限なしのアプリ（利用者が使い続ける） | 利用者の有無と、旧形式を読む層を置くか。データは migration で 1 回移すのか | 実物は利用者の環境。反映（再起動・配置）は利用者の OK を取ってから |
 | バックエンドの置き換え・新規追加 | 旧バックエンドとの併存期間と、外部クライアントの有無。切り戻しの手段 | 動いている旧バックエンドは触らない。新しい側の dev で確かめ、本番への切り替えは利用者の OK |
 | 独自のモニタリング | 観測対象に影響を与えないこと（読み取りだけか）。保存するデータの形の互換 | 監視が動いている間の変更は、監視の欠測が出ない反映の手順と、その OK |
+
+GitHub を使わないリポジトリ（リモートなし）は、`ops-kit/template/` でなく単体の `ops-kit/template-local/` で作る（`.github/` と `scripts/setup/` を持たず、起票・ローカル CI・マージ判定・マージ・main の更新を Task の指示文と同じ手順で書く）。正本はこの雛形と、スキル `.claude/skills/new-repo` の 7（新しく作る手順と、前の雛形で作った既存のリポジトリへの写し方）。手順はここに写さない。
 
 この 2 列に収まらない違いが出たら、表に足さず PBI #1445 の決定ログに書く。
 

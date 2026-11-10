@@ -91,6 +91,20 @@ test("panel: busy tasks, the hold, the last operation and a failure each get a l
   expect(p.lines.filter((l) => l.warn).map((l) => l.text)).toEqual(["直近: bbbbbbb の昇格を却下（今の版のまま） — boom", "失敗: disk full"]);
 });
 
+test("panel: asked is a line until what runs is that sha, and an error is a warning (#2479)", async () => {
+  const { releasePanel } = await import("./release.ts");
+  const at = Date.UTC(2030, 0, 1, 0, 5); // 09:05 JST whatever the browser's time zone; another day than now, so with the date
+  const asked = { tag: "v0.3.0", sha: "c".repeat(40), at, by: "backlog-next" as const };
+  const texts = (r: Parameters<typeof releasePanel>[0]) => releasePanel(r)!.lines.filter((l) => l.text.includes("v0.3.0"));
+  expect(texts({ ...managed, asked })).toEqual([{ text: "v0.3.0 の昇格を依頼（1/1 09:05、バックログを進める）", warn: false }]);
+  expect(texts({ ...managed, asked: { ...asked, by: "check" } })[0]!.text).toBe("v0.3.0 の昇格を依頼（1/1 09:05、定期の確認）");
+  expect(texts({ ...managed, asked: { ...asked, by: "idle" } })[0]!.text).toBe("v0.3.0 の昇格を依頼（1/1 09:05、Task が空いた）");
+  expect(texts({ ...managed, asked: { ...asked, error: "refused" } })).toEqual([{ text: "v0.3.0 の昇格を依頼できない: refused", warn: true }]);
+  // what runs caught up with it: no line; none asked: no line
+  expect(texts({ ...managed, current: asked.sha, asked })).toEqual([]);
+  expect(texts({ ...managed, asked: null })).toEqual([]);
+});
+
 test("newVersionLink shows only when HEAD is ahead of what runs under sb-rescue", async () => {
   const { newVersionLink } = await import("./release.ts");
   expect(newVersionLink(null)).toBeNull();

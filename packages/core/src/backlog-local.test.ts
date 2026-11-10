@@ -1,6 +1,6 @@
 // test-reads: ops.config.json
 import { afterEach, expect, test } from "bun:test";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Backlog, BacklogIssueDetail, RunnerAdapter, Task, Workspace } from "@switchboard/protocol";
@@ -252,7 +252,7 @@ test("close reason: closed with a reason is that reason, without one COMPLETED, 
   }
 });
 
-/** A local workspace with this repository's ops.config.json (its choices: Area / Kind / Priority / Phase, Story Points 1 2 3 5 8, Milestone `^Phase \\d+ — `). */
+/** A local workspace with this repository's ops.config.json (its choices: Area / Kind / Priority / Phase, Story Points 1 2 3 5 8 13, the kit's scale, Milestone `^Phase \\d+ — `). */
 async function configured(t: Awaited<ReturnType<typeof boot>>, name = "configured") {
   const ws = await t.local(name);
   copyFileSync(join(import.meta.dir, "../../../ops.config.json"), join(ws.path, "ops.config.json"));
@@ -278,6 +278,12 @@ test("local fields take the choices of ops.config.json (#2265)", async () => {
   expect((await fetch(`${t.base}/api/backlog/2?workspaceId=${ws.id}`)).status).toBe(404);
   // a value taken off passes
   expect((await t.send("PATCH", "/api/backlog/1", { workspaceId: ws.id, fields: { Phase: null } })).status).toBe(202);
+  // the kit owns the Story Points scale: 13 passes even when the config still lists its own `storyPoints`
+  const cfgPath = join(ws.path, "ops.config.json");
+  writeFileSync(cfgPath, JSON.stringify({ ...JSON.parse(readFileSync(cfgPath, "utf8")), storyPoints: [1, 2, 3, 5, 8] }));
+  expect((await t.send("PATCH", "/api/backlog/1", { workspaceId: ws.id, fields: { "Story Points": 13 } })).status).toBe(202);
+  expect((await t.send("PATCH", "/api/backlog/1", { workspaceId: ws.id, fields: { "Story Points": 21 } })).status).toBe(422);
+  expect((await t.send("PATCH", "/api/backlog/1", { workspaceId: ws.id, fields: { "Story Points": 3 } })).status).toBe(202);
   // no ops.config.json: the kit's template gives the choices (#2361); what it has not, and any Milestone, is refused
   const bare = await t.local("bare");
   expect((await t.create(bare, { title: "PBI: z", labels: ["type:pbi"], fields: { Status: "Ready", Priority: "P1", "Story Points": 5 } })).status).toBe(202);
@@ -388,7 +394,7 @@ test("a local change: made, numbered with the Issues, commented, read with its t
   // the review's summary and the triage's replies, oldest first
   for (const text of ["[claude] review\n要約", "振り分け\n| 指摘 | 振り分け | 返信 |"]) expect((await send("POST", "/api/backlog/2/comment", { workspaceId: ws.id, text })).status).toBe(202);
   const d = await view(ws, 2);
-  expect(d.issue.change).toEqual({ head: "sb/9-x", base: "main", mergeCommit: null, mergedAt: null });
+  expect(d.issue.change).toEqual({ head: "sb/9-x", base: "main", mergeCommit: null, mergedAt: null, reviewedHead: null });
   expect(d.changeRefs).toEqual({ head: tips.head, base: tips.main });
   expect(d.comments.map((c) => c.body.split("\n")[0])).toEqual(["[claude] review", "振り分け"]);
   // an Issue is no change
@@ -404,12 +410,12 @@ test("a local change: made, numbered with the Issues, commented, read with its t
   expect((await create(ws, { title: "x", change: { head: "--upload-pack=x", base: "main" } })).status).toBe(400);
   // merged: the commit stays with its branches; the change is closed
   const at = new Date().toISOString();
-  expect((await send("PATCH", "/api/backlog/2", { workspaceId: ws.id, state: "CLOSED", change: { mergeCommit: tips.head, mergedAt: at } })).status).toBe(202);
-  expect((await view(ws, 2)).issue).toMatchObject({ state: "CLOSED", change: { head: "sb/9-x", base: "main", mergeCommit: tips.head, mergedAt: at } });
+  expect((await send("PATCH", "/api/backlog/2", { workspaceId: ws.id, state: "CLOSED", change: { mergeCommit: tips.head, mergedAt: at, reviewedHead: tips.head } })).status).toBe(202);
+  expect((await view(ws, 2)).issue).toMatchObject({ state: "CLOSED", change: { head: "sb/9-x", base: "main", mergeCommit: tips.head, mergedAt: at, reviewedHead: tips.head } });
   // an Issue cannot be merged; a closed change's branch can have a new one
-  expect((await send("PATCH", "/api/backlog/1", { workspaceId: ws.id, state: "CLOSED", change: { mergeCommit: tips.head, mergedAt: at } })).status).toBe(422);
+  expect((await send("PATCH", "/api/backlog/1", { workspaceId: ws.id, state: "CLOSED", change: { mergeCommit: tips.head, mergedAt: at, reviewedHead: tips.head } })).status).toBe(422);
   // the merge goes with the close; a closed change is not opened again
-  expect((await send("PATCH", "/api/backlog/2", { workspaceId: ws.id, change: { mergeCommit: tips.head, mergedAt: at } })).status).toBe(400);
+  expect((await send("PATCH", "/api/backlog/2", { workspaceId: ws.id, change: { mergeCommit: tips.head, mergedAt: at, reviewedHead: tips.head } })).status).toBe(400);
   expect((await send("PATCH", "/api/backlog/2", { workspaceId: ws.id, state: "OPEN" })).status).toBe(422);
   expect((await create(ws, { title: "again", change: { head: "sb/9-x", base: "main" } })).status).toBe(202);
   // a reflog or a lock name is no branch
@@ -438,7 +444,7 @@ test("a local change is refused on a GitHub workspace (#2485)", async () => {
   core!.db.putBacklogSnapshot(source, { records: [], cursor: null, syncedAt: Date.now() });
   const r = await send("POST", "/api/backlog", { workspaceId: gh.id, title: "x", change: { head: "sb/9-x", base: "main" } });
   expect(r).toMatchObject({ status: 422, body: { error: expect.stringContaining("GitHub 連携の無い") } });
-  expect((await send("PATCH", "/api/backlog/1", { workspaceId: gh.id, state: "CLOSED", change: { mergeCommit: "a".repeat(40), mergedAt: "x" } })).status).toBe(422);
+  expect((await send("PATCH", "/api/backlog/1", { workspaceId: gh.id, state: "CLOSED", change: { mergeCommit: "a".repeat(40), mergedAt: "x", reviewedHead: "a".repeat(40) } })).status).toBe(422);
   expect(core!.db.listBacklogOperations(source)).toEqual([]);
 });
 
@@ -456,4 +462,35 @@ test("localForgeOf: no origin is the app's; an origin is not; a forge naming the
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("choice: a GitHub workspace's field values are fixed to the config's spelling or refused before they are stored (#3795)", async () => {
+  const { add, dir, send, create, local, view } = await boot();
+  const gh = (await (await add(dir("gh"))).json()) as Workspace;
+  const source = { service: "github" as const, host: "github.com", repository: "acme/app", project: { owner: "acme", number: 1 } };
+  core!.db.setWorkspaceBacklogSource(gh.id, source);
+  core!.db.putBacklogSnapshot(source, { records: [{ objectKind: "issue", externalId: "gh:issue:1", fetchState: "fetched", remote: { number: 1, title: "A", url: "", state: "OPEN", stateReason: null, body: "", labels: [], milestone: null, parent: null, subIssues: [], createdAt: "2026-10-22T00:00:00Z", updatedAt: "2026-10-22T00:00:00Z", closedAt: null } }], cursor: null, syncedAt: Date.now() });
+  // (a) a create is stored with the choices' spelling
+  const made = await create(gh, { title: "x", fields: { Status: "In Progress", Priority: "p2" } });
+  expect(made.status).toBe(202);
+  const op = core!.db.listPendingBacklogOperations(source).find((o) => o.kind === "create")!;
+  expect((op.payload as { project: { fields: unknown } }).project.fields).toEqual({ Status: "In progress", Priority: "P2" });
+  // (b) a value that is no choice (and an empty text) is 422 with the choices; nothing waits more
+  const before = core!.db.listPendingBacklogOperations(source).length;
+  for (const fields of [{ Status: "Doing" }, { "Story Points": "" }]) {
+    const r = await send("PATCH", `/api/backlog/1`, { workspaceId: gh.id, fields });
+    expect(r.status).toBe(422);
+    expect(r.body.error).toContain(" / ");
+  }
+  expect((await create(gh, { title: "y", fields: { Priority: "P9" } })).status).toBe(422);
+  expect(core!.db.listPendingBacklogOperations(source).length).toBe(before);
+  // null takes a value off and passes
+  expect((await send("PATCH", `/api/backlog/1`, { workspaceId: gh.id, fields: { Priority: null } })).status).toBe(202);
+  // (c) a field without choices passes as it is
+  expect((await send("PATCH", `/api/backlog/1`, { workspaceId: gh.id, fields: { Notes: "x" } })).status).toBe(202);
+  // (d) a workspace without GitHub fixes the case too
+  const ws = await local();
+  const m = await create(ws, { title: "z", fields: { Status: "in review" } });
+  expect(m.status).toBe(202);
+  expect((await view(ws, m.body.number)).fields?.Status).toBe("In review");
 });

@@ -5,6 +5,7 @@ import { BacklogHeldEdit, BacklogSyncConflict, CloudSessionRef, CreateTaskInput,
 
 test("creation defaults Local and preserves explicit Cloud", () => {
   expect(CreateTaskInput.parse({ title: "task", prompt: "explain" }).executionMode).toBe("local");
+  expect(CreateTaskInput.parse({ title: "task", prompt: "explain" }).runner).toBe("claude");
   expect(CreateTaskInput.parse({ title: "task", prompt: "explain", executionMode: "cloud" }).executionMode).toBe("cloud");
 });
 
@@ -14,6 +15,8 @@ test("Cloud references reject foreign hosts, credentials, query strings and mism
   for (const url of [`http://claude.ai/code/${id}`, `https://example.com/code/${id}`, `https://user@claude.ai/code/${id}`, `https://claude.ai/code/${id}?code=secret`, `https://claude.ai/code/session_other`, `https://claude.ai/code/${id}#secret`]) {
     expect(CloudSessionRef.safeParse({ id, url }).success).toBe(false);
   }
+  // an ID that is not a session ID is refused even when the URL is built from it
+  for (const bad of ["abc", "session_a/../b", "session_a?x=1"]) expect(CloudSessionRef.safeParse({ id: bad, url: `https://claude.ai/code/${bad}` }).success).toBe(false);
 });
 
 describe("what zod 4 changed, kept as zod 3 had it (#2968)", () => {

@@ -4,7 +4,7 @@ import { activeTaskLine, ago, autoByWorkspace, inProgressState, lastTaskLine, re
 
 const item = (over: Partial<BacklogItem>): BacklogItem => ({
   number: 1, title: "t", url: "u", type: "pbi", stage: "in-progress", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z",
-  tasks: { total: 3, done: 1, doneAt: null }, decision: null, activeTaskId: null, projectStatus: "In progress", lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
+  tasks: { total: 3, done: 1, doneAt: null }, decision: null, activeTaskId: null, projectStatus: "In progress", lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, flow: false, waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
 const last = (status: NonNullable<BacklogItem["lastTask"]>["status"]) => ({ id: "task_1", status, updatedAt: 0 });
 
@@ -12,6 +12,8 @@ test("inProgressState: running / all Tasks done / last failed / no stage Task / 
   // a running stage Task wins over everything else
   expect(inProgressState(item({ activeTaskId: "task_1", tasks: { total: 2, done: 2, doneAt: null }, lastTask: last("running") }))).toEqual({ running: true, label: "動いている" });
   expect(inProgressState(item({ lastTask: last("waiting") }))).toEqual({ running: true, label: "動いている" });
+  // a Task whose turn ended with a background process left is still moving
+  expect(inProgressState(item({ lastTask: last("background") }))).toEqual({ running: true, label: "動いている" });
   expect(inProgressState(item({ tasks: { total: 2, done: 2, doneAt: null }, lastTask: last("error") }))).toEqual({ running: false, label: "止まっている: Task は全部完了、PBI は開いたまま" });
   // no sub-issues at all is not "all done"
   expect(inProgressState(item({ tasks: { total: 0, done: 0, doneAt: null }, lastTask: last("error") })).label).toBe("止まっている: 最後の工程 Task が失敗");
@@ -99,6 +101,7 @@ test("waitOwner: the PBI behind a wait and its stage Task, from the same list; �
   expect(owner({ activeTaskId: "task_run", lastTask: last("running") })).toEqual({ pbi: pbi20, task: { id: "task_run", running: true, label: "動いている" }, startable: false });
   // a last Task still running is moving even before activeTaskId says so
   expect(owner({ lastTask: last("waiting") })).toMatchObject({ task: { id: "task_1", running: true }, startable: false });
+  expect(owner({ lastTask: last("background") })).toMatchObject({ task: { id: "task_1", running: true }, startable: false });
   expect(owner({ lastTask: last("done") })).toEqual({ pbi: pbi20, task: { id: "task_1", running: false, label: "止まっている: 完了" }, startable: true });
   expect(owner({ stage: "ready", lastTask: null })).toEqual({ pbi: pbi20, task: null, startable: true });
   // a closed wait still names its PBI and Task, with nothing to continue
@@ -161,6 +164,8 @@ describe("taskTimes (#2030)", () => {
     expect(taskTimes({ status: "aborted", createdAt: Date.parse("2026-10-18T13:00:00Z"), statusAt: Date.parse("2026-10-18T14:10:00Z") }, now)).toEqual({ started: "開始 10/18 22:00", since: "10/18 23:10 から中断" });
     const at = Date.parse("2026-10-19T08:50:00Z");
     expect(taskTimes({ status: "running", createdAt: at - 3_600_000, statusAt: at }, now).since).toBe("17:50 から実行中");
+    expect(taskTimes({ status: "background", createdAt: at - 3_600_000, statusAt: at }, now).since).toBe("17:50 から裏で実行中");
+    expect(lastTaskLine({ status: "background", createdAt: at - 3_600_000, statusAt: at }, now)).toContain("裏で実行中");
     expect(taskTimes({ status: "waiting", createdAt: at, statusAt: at }, now).since).toBe("17:50 から承認待ち");
     expect(taskTimes({ status: "error", createdAt: at, statusAt: at }, now).since).toBe("17:50 からエラー"); // the Task screen's word, as its head and the rail say it
     expect(taskTimes({ status: "idle", createdAt: at, statusAt: at }, now).since).toBe("17:50 から待機");

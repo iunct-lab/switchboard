@@ -114,7 +114,10 @@ export async function restoreDb(ctx: Ctx, snapshot: string): Promise<HistoryEntr
   return appendHistory(ctx.home, { action: "restore-db", from: currentOf(ctx.home), to: currentOf(ctx.home), ok: true, reason: `database restored from ${snapshot}${kept ? `; the one before is kept as ${kept}` : ""}` });
 }
 
-/** What "it works" means: health says ok, a WebSocket opens. Null = fine, else the reason. */
+/**
+ * What "it works" means: health says ok, a WebSocket opens. Null = fine, else the reason. The features the screens
+ * depend on are checkFeatures, asked once after this passes (it is polled every 200 ms; the task list is too big for that).
+ */
 export async function checkDaemon(port: number, home: string): Promise<string | null> {
   const tokenFile = join(home, "token");
   const token = existsSync(tokenFile) ? readFileSync(tokenFile, "utf8").trim() : "";
@@ -139,7 +142,35 @@ export async function checkDaemon(port: number, home: string): Promise<string | 
 }
 
 /**
- * The tasks a restart or a release switch stops (#435): the daemon's running and waiting ones, from its health's
+ * The smoke of the screens: the task list (`GET /api/tasks`, the call the UI makes first) answers with an array, and when
+ * it is not empty its first task reads back (`GET /api/tasks/:id`). A host with no task yet passes. Null = fine, else the reason.
+ */
+export async function checkFeatures(port: number, home: string): Promise<string | null> {
+  const tokenFile = join(home, "token");
+  const token = existsSync(tokenFile) ? readFileSync(tokenFile, "utf8").trim() : "";
+  const headers = token ? { authorization: `Bearer ${token}` } : undefined;
+  const get = (path: string) => fetch(`http://127.0.0.1:${port}${path}`, { headers, signal: AbortSignal.timeout(10_000) });
+  let path = "/api/tasks";
+  try {
+    const list = await get(path);
+    const tasks: unknown = list.ok ? await list.json().catch(() => null) : null;
+    if (!Array.isArray(tasks)) return `${path} answered ${list.ok ? "something that is not a list" : list.status}`;
+    if (tasks.length === 0) return null;
+    const id = (tasks[0] as { id?: unknown }).id;
+    if (typeof id !== "string") return `${path} listed a task without an id`;
+    // the task as the UI reads it (`{ task, events, … }`); limit=0 leaves out its events, which can be many
+    path = `/api/tasks/${encodeURIComponent(id)}`;
+    const one = await get(`${path}?limit=0`);
+    if (!one.ok) return `${path} answered ${one.status}`;
+    if (((await one.json()) as { task?: { id?: unknown } } | null)?.task?.id !== id) return `${path} answered another task`;
+    return null;
+  } catch (e) {
+    return `${path} did not answer (${String((e as Error).message ?? e)})`;
+  }
+}
+
+/**
+ * The tasks a restart or a release switch stops (#435): the daemon's running and waiting ones and those whose turn ended with background jobs still going, from its health's
  * `busyTasks` (#2814: not the whole task list), read with the same token as checkDaemon. [] when it does not answer or
  * answers something else: a daemon that is down has nothing to stop.
  */
@@ -151,7 +182,7 @@ export async function tasksThatStop(port: number, home: string): Promise<{ id: s
     const tasks: unknown = r.ok ? ((await r.json()) as { busyTasks?: unknown } | null)?.busyTasks : null;
     if (!Array.isArray(tasks)) return [];
     return tasks
-      .filter((t): t is { id: string; title: string; status: string } => typeof t?.id === "string" && typeof t?.title === "string" && (t.status === "running" || t.status === "waiting"))
+      .filter((t): t is { id: string; title: string; status: string } => typeof t?.id === "string" && typeof t?.title === "string" && (t.status === "running" || t.status === "waiting" || t.status === "background"))
       .map(({ id, title, status }) => ({ id, title, status }));
   } catch {
     return [];
@@ -186,7 +217,7 @@ async function tryCandidate(ctx: Ctx, sha: string, snapshot: string | null, cand
     const end = Date.now() + candidateMs;
     while (Date.now() < end && exited === null) {
       const r = await checkDaemon(port, home);
-      if (r === null) return null;
+      if (r === null) return await checkFeatures(port, home); // once (awaited: the finally below kills the candidate): the list is big, and a failure here is the release's, not a slow start
       reason = r;
       await Bun.sleep(200);
     }
@@ -209,7 +240,7 @@ async function confirm(ctx: Ctx, confirmMs: number, settleMs: number): Promise<s
     const r = await checkDaemon(ctx.port, ctx.home);
     if (r === null) {
       passedAt ??= Date.now();
-      if (Date.now() - passedAt >= settleMs) return null;
+      if (Date.now() - passedAt >= settleMs) return checkFeatures(ctx.port, ctx.home);
     } else {
       passedAt = null;
       reason = r;

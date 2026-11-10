@@ -94,6 +94,8 @@ export const AgentEvent = z.discriminatedUnion("t", [
     cwd: z.string(),
     model: z.string().optional(),
     permissionMode: z.string().optional(),
+    /** core が付ける、そのプロセスを起動した思考の深さ。"" = CLI 既定（#1802） */
+    effort: z.string().optional(),
     runnerVersion: z.string().optional(),
   }),
   z.object({ t: z.literal("status"), text: z.string() }),

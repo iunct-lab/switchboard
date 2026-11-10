@@ -409,10 +409,6 @@ label.toggle.off { opacity: .45; cursor: default; }
 .feedback-dialog .row { flex-wrap: wrap; }
 .feedback-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .backlog pre.wrap { white-space: pre-wrap; }
-/* an in-progress row carries more facts (#522): the title gets its own line so it is not cut to a few letters */
-.backlog .backlog-item.in-progress { flex-wrap: wrap; justify-content: flex-start; column-gap: 12px; row-gap: 2px; }
-.backlog .backlog-item.in-progress .t { flex-basis: 100%; }
-.backlog .backlog-item.in-progress > button:last-child { margin-left: auto; }
 .backlog .backlog-report { margin: 0 0 8px 16px; }
 .backlog .sync[data-sync="conflict"], .backlog .sync[data-sync="error"] { color: var(--amber); }
 .backlog .backlog-syncline { margin: 0 0 4px 16px; overflow-wrap: anywhere; }
@@ -505,6 +501,14 @@ label.toggle.off { opacity: .45; cursor: default; }
 .backlog .backlog-tile-detail { margin-top: 4px; min-width: 0; overflow-wrap: anywhere; }
 .backlog .backlog-tile .row .m { white-space: normal; }
 .backlog .backlog-tile-detail :is(.backlog-syncline, .backlog-report) { margin-left: 0; }
+/* a list row (#3709): one line of what matters; the title is 2 lines at most, the rest (opened with ▶) is indented under it */
+.backlog .backlog-listrow > .row.backlog-item { gap: 2px 12px; }
+.backlog .backlog-listrow > .row.backlog-item > .t { flex: 1 1 22em; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; white-space: normal; overflow-wrap: anywhere; }
+.backlog .backlog-row-detail { margin: 0 0 8px 16px; min-width: 0; overflow-wrap: anywhere; }
+.backlog .backlog-row-detail .row { flex-wrap: wrap; justify-content: flex-start; gap: 2px 12px; }
+.backlog .backlog-row-facts:empty { display: none; }
+.backlog .backlog-row-facts button.link { text-align: left; }
+.backlog .backlog-row-detail :is(.backlog-syncline, .backlog-report, .backlog-editor) { margin-left: 0; }
 .backlog .backlog-board-tabs { display: none; }
 /* by width only (#2703): a landscape phone 768px or wider keeps the columns. The stage tabs (only the strip scrolls) show
    one column at a time; a tile's title is 2 lines. */

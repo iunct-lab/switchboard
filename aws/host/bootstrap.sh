@@ -124,6 +124,7 @@ SB_INSTANCE_ID=$INSTANCE_ID
 SB_SCHEDULER_ROLE_ARN=$SB_SCHEDULER_ROLE_ARN
 SB_DATA_BUCKET=$SB_DATA_BUCKET
 SB_REPO_DIR=$REPO_DIR
+SB_HOST_HOME=$SB_HOST_HOME
 ENV
 chmod 644 /etc/switchboard-host.env
 # the daemon user may stop the machine (sb-stop) and start its dockerd (dockerd-up), nothing else as root

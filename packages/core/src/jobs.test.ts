@@ -77,6 +77,18 @@ describe("jobs (#3992)", () => {
     expect(env).not.toContain("SWITCHBOARD_SUPERVISED=");
   });
 
+  test("a local-ci job with fixtures runs with SWITCHBOARD_FIXTURES set to it; one without has none", async () => {
+    const run = async (req: JobRequest) => {
+      const { deps, ended } = fake('env > "$J/env"');
+      delete deps.env.SWITCHBOARD_FIXTURES;
+      const job = requestJob(deps, req);
+      await ended;
+      return readFileSync(join(root, "jobs", String(job.id), "env"), "utf8");
+    };
+    expect(await run({ kind: "local-ci", taskId: "t1", pr: 12, cwd: repo, fixtures: "/srv/recordings" })).toContain("SWITCHBOARD_FIXTURES=/srv/recordings\n");
+    expect(await run(local())).not.toContain("SWITCHBOARD_FIXTURES=");
+  });
+
   test("a folder outside the Task's repository is refused; a worktree and a clone of the same origin are not", () => {
     const outside = join(root, "outside");
     mkdirSync(outside);
@@ -131,16 +143,17 @@ describe("jobs (#3992)", () => {
     expect(review("link.md")).toThrow("inside cwd");
     expect(review("_review/missing-dir/out.md")).toThrow("inside cwd");
     const codex = jobCommand({ kind: "review", taskId: "t1", pr: 12, runner: "codex", cwd: repo, promptFile: "/p.md", outFile: "/o.md" });
-    expect(codex.argv.slice(0, 2)).toEqual(["ops-kit", "heavy"]);
+    expect(codex.argv.slice(0, 3)).toEqual(["ops-kit", "heavy", "--memory-only"]); // no slot, only the memory floor
     expect(codex.argv).toContain("/o.md");
     expect(codex.tail).toBe(' < "$JOB_PROMPT"');
     const claude = jobCommand({ kind: "review", taskId: "t1", pr: 12, runner: "claude", cwd: repo, promptFile: "/p.md", outFile: "/o.md" });
     expect(claude.argv).toContain("stream-json");
     expect(claude.tail).toContain('> "$JOB_OUT"');
-    expect(jobCommand(local()).argv).toEqual(["bun", "scripts/local-ci.ts", "12"]);
-    expect(codex.argv.slice(5, 9)).toEqual(["ops-kit", "idle-run", "--idle", "900"]);
+    expect(claude.argv.slice(0, 3)).toEqual(["ops-kit", "heavy", "--memory-only"]);
+    expect(jobCommand(local()).argv).toEqual(["bun", "scripts/local-ci.ts", "12"]); // local CI takes its own slot: no --memory-only
+    expect(codex.argv.slice(6, 10)).toEqual(["ops-kit", "idle-run", "--idle", "900"]);
     // the host may need longer (SWITCHBOARD_JOB_REVIEW_IDLE_S)
-    expect(jobCommand({ kind: "review", taskId: "t1", pr: 12, runner: "claude", cwd: repo, promptFile: "/p.md", outFile: "/o.md" }, 1800).argv.slice(5, 9)).toEqual(["ops-kit", "idle-run", "--idle", "1800"]);
+    expect(jobCommand({ kind: "review", taskId: "t1", pr: 12, runner: "claude", cwd: repo, promptFile: "/p.md", outFile: "/o.md" }, 1800).argv.slice(6, 10)).toEqual(["ops-kit", "idle-run", "--idle", "1800"]);
   });
 
   test("recoverJobs ends a job by its exit file, watches one still running, and aborts one whose process is gone or that started in another boot", async () => {
@@ -207,6 +220,20 @@ describe("/api/jobs (#3992)", () => {
       expect(list.map((j) => j.id)).toContain(job.id);
       for (let i = 0; i < 50 && core.db.getJob(job.id)!.status === "running"; i++) await Bun.sleep(20);
       expect(core.db.getJob(job.id)!.status).toBe("pass");
+    } finally {
+      await core.stop();
+    }
+  });
+
+  test("POST with a relative fixtures folder answers 400", async () => {
+    const home = join(root, "home-fixtures");
+    const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_PORT: "0", SWITCHBOARD_CLAUDE_PROJECTS: join(tmpdir(), "switchboard-test-no-claude-projects"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
+    const core = await startServer(cfg, [], { port: 0, selfdevChecks: false, dryRunRestart: true, jobCommand: () => ({ argv: ["true"], tail: "" }) });
+    try {
+      core.db.insertTask(mkTask("t8", repo));
+      const r = await fetch(`http://127.0.0.1:${core.server.port}/api/jobs`, { method: "POST", body: JSON.stringify({ kind: "local-ci", taskId: "t8", pr: 5, cwd: repo, fixtures: "recordings" }) });
+      expect(r.status).toBe(400);
+      expect(((await r.json()) as { error: string }).error).toContain("fixtures must be absolute");
     } finally {
       await core.stop();
     }

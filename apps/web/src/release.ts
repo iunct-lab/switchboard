@@ -1,5 +1,6 @@
 import { t } from "./i18n.ts";
 import { settings } from "./i18n/settings.ts";
+import { jstClock } from "./time.ts";
 
 /** Releases (#178): what `GET /api/daemon/release` returns under sb-rescue, and one line of its history in words. */
 export interface ReleaseHistoryEntry {
@@ -32,6 +33,8 @@ export interface ReleaseStatus {
   rescuePage?: string;
   /** Why the newest tag is not promoted yet (#626): Tasks still running (`failed: false`), or it is a tag that failed. */
   hold?: { tag: string; failed: boolean; reason: string; busyTasks: number } | null;
+  /** The last promotion the daemon asked for (#2479), or why it could not (`error`). Memory only: gone after a restart, when `history` has the result. */
+  asked?: { tag: string; sha: string; at: number; by: "check" | "backlog-next" | "idle"; error?: string } | null;
 }
 
 /** The link at the top of every screen (#399): only under sb-rescue, and only when the daemon names the page. */
@@ -81,6 +84,12 @@ export function releasePanel(r: ReleaseStatus | null): ReleasePanelView | null {
   if (r.busy) lines.push({ text: t(settings.inProgress, { what: r.busy }), warn: false });
   const last = r.history?.[0] ? describeRelease(r.history[0]) : null;
   if (last) lines.push({ text: t(settings.latest, { text: last.text }), warn: !last.ok });
+  const asked = r.asked && r.asked.sha !== r.current ? r.asked : null;
+  if (asked) {
+    const by = t({ check: settings.askedByCheck, "backlog-next": settings.askedByBacklogNext, idle: settings.askedByIdle }[asked.by]);
+    const time = jstClock(asked.at);
+    lines.push(asked.error ? { text: t(settings.askFailed, { tag: asked.tag, error: asked.error }), warn: true } : { text: t(settings.asked, { tag: asked.tag, time, by }), warn: false });
+  }
   const hold = promotionLine(r);
   if (hold) lines.push({ text: hold.text, warn: !!r.hold?.failed });
   if (r.lastError) lines.push({ text: t(settings.failed, { error: r.lastError }), warn: true });

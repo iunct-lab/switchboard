@@ -48,13 +48,15 @@ export interface TmpJudge {
   proc?: string;
   /** Whose entries are this user's; tests pass another to stand for someone else's. Default process.getuid(). */
   uid?: number;
+  /** A path's device number; tests play another mount. Default as is. */
+  dev?: (path: string, dev: number) => number;
 }
 
 /**
  * Why an entry stays: not a kind above, not a directory, someone else's, touched within STALE_MS, a running process uses it,
- * or the running processes cannot be read (no /proc: nothing goes).
+ * the running processes cannot be read (no /proc: nothing goes), or it is or holds a mount point (another device than the root's).
  */
-export type Keep = "pattern" | "not-a-directory" | "owner" | "recent" | "in-use" | "use-unknown";
+export type Keep = "pattern" | "not-a-directory" | "owner" | "recent" | "in-use" | "use-unknown" | "mount";
 export interface TmpEntry {
   name: string;
   bytes: number;
@@ -159,12 +161,14 @@ const tmpKinds = (owned: boolean) => (owned ? [...CLEANABLE.own, ...CLEANABLE.sh
  * name is one of `kinds` and it is a directory (`kinds` null: any name and any entry), it is this user's, and — unless `staleMs`
  * is null (the force clean) — nothing in it was touched within `staleMs` and no running process uses it.
  */
-export function inspect(root: string, name: string, now: number, busy: Set<string> | null, kinds: RegExp[] | null, staleMs: number | null, uid = process.getuid?.()): TmpEntry {
+export function inspect(root: string, name: string, now: number, busy: Set<string> | null, kinds: RegExp[] | null, staleMs: number | null, uid = process.getuid?.(), devOf: NonNullable<TmpJudge["dev"]> = (_, d) => d): TmpEntry {
   const path = join(root, name);
   const top = lstatSync(path);
+  const rootDev = lstatSync(root).dev;
+  let mounted = devOf(path, top.dev) !== rootDev; // a mount point is not this directory's to remove, and rmSync would go into it
   let bytes = top.blocks * 512;
   let newestMs = top.mtimeMs;
-  if (top.isDirectory()) {
+  if (top.isDirectory() && !mounted) {
     const dirs = [path];
     while (dirs.length) {
       const dir = dirs.pop()!;
@@ -177,6 +181,10 @@ export function inspect(root: string, name: string, now: number, busy: Set<strin
       for (const child of names) {
         try {
           const s = lstatSync(join(dir, child));
+          if (devOf(join(dir, child), s.dev) !== rootDev) {
+            mounted = true; // not entered, not counted
+            continue;
+          }
           bytes += s.blocks * 512;
           newestMs = Math.max(newestMs, s.mtimeMs);
           if (s.isDirectory()) dirs.push(join(dir, child));
@@ -185,7 +193,9 @@ export function inspect(root: string, name: string, now: number, busy: Set<strin
     }
   }
   const mine = top.uid === uid;
-  const keep: Keep | null = kinds && !kinds.some((re) => re.test(name))
+  const keep: Keep | null = mounted
+    ? "mount"
+    : kinds && !kinds.some((re) => re.test(name))
     ? "pattern"
     : kinds && !top.isDirectory()
       ? "not-a-directory"
@@ -221,7 +231,7 @@ export function scanTmp(root: string, judge: TmpJudge, now = Date.now(), mode: T
   const [kinds, staleMs] = rule(mode, judge);
   for (const name of readdirSync(root)) {
     try {
-      all.push(inspect(root, name, now, busy, kinds, staleMs, judge.uid));
+      all.push(inspect(root, name, now, busy, kinds, staleMs, judge.uid, judge.dev));
     } catch {} // gone since readdir
   }
   all.sort((a, b) => b.bytes - a.bytes);
@@ -237,13 +247,13 @@ export function scanTmp(root: string, judge: TmpJudge, now = Date.now(), mode: T
 }
 
 /** Gives this user's folders under `path` the rights rmSync needs. Symbolic links are not followed; what cannot be changed is left for rmSync to fail on. */
-function makeWritable(path: string) {
+function makeWritable(path: string, rootDev: number, devOf: NonNullable<TmpJudge["dev"]>) {
   const dirs = [path];
   while (dirs.length) {
     const dir = dirs.pop()!;
     try {
       const s = lstatSync(dir);
-      if (!s.isDirectory()) continue;
+      if (!s.isDirectory() || devOf(dir, s.dev) !== rootDev) continue; // a mount a locked folder hid: not changed, not entered; the next inspect keeps the entry
       chmodSync(dir, (s.mode & 0o7777) | 0o700);
       dirs.push(...readdirSync(dir).map((child) => join(dir, child)));
     } catch {}
@@ -267,7 +277,7 @@ export function cleanTmp(root: string, names: string[], judge: TmpJudge, now = D
     }
     let entry: TmpEntry;
     try {
-      entry = inspect(root, name, now, busy, kinds, staleMs, judge.uid);
+      entry = inspect(root, name, now, busy, kinds, staleMs, judge.uid, judge.dev);
     } catch {
       skipped.push({ name, keep: "gone" });
       continue;
@@ -277,8 +287,8 @@ export function cleanTmp(root: string, names: string[], judge: TmpJudge, now = D
       continue;
     }
     try {
-      makeWritable(join(root, name));
-      entry = inspect(root, name, now, busy, kinds, staleMs, judge.uid); // what a folder without permissions held counts now
+      makeWritable(join(root, name), lstatSync(root).dev, judge.dev ?? ((_, d) => d));
+      entry = inspect(root, name, now, busy, kinds, staleMs, judge.uid, judge.dev); // what a folder without permissions held counts now
       if (!entry.removable) {
         skipped.push({ name, keep: entry.keep! });
         continue;

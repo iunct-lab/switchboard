@@ -186,6 +186,8 @@ export const insights = msgs({
 
   // Evals.tsx
   colEffort: { ja: "思考の深さ", en: "Thinking effort" },
+  colSubagentEffort: { ja: "サブエージェント", en: "Subagent effort" },
+  allSubagentEfforts: { ja: "すべてのサブエージェント", en: "All subagent efforts" },
   colStatus: { ja: "状態", en: "Status" },
   colTools: { ja: "ツール", en: "Tools" },
   colRubric: { ja: "ルーブリック", en: "Rubric" },
@@ -210,6 +212,7 @@ export const insights = msgs({
   noTasks: { ja: "Task がありません", en: "No Tasks" },
   noMatch: { ja: "条件に合う Task がありません", en: "No Tasks match" },
   mixedTitle: { ja: "途中でモデルを変えた Task: {model}", en: "A Task that changed models midway: {model}" },
+  mixedEffortTitle: { ja: "途中で思考の深さを変えた Task: {effort}", en: "A Task that changed its thinking depth midway: {effort}" },
   mixed: { ja: "混在", en: "Mixed" },
   improveTitle: { ja: "この Task の評価を下書きにして、改善の要望を登録するダイアログを開きます", en: "Opens the dialog to file an improvement request, drafted from this Task's evaluation" },
   improve: { ja: "改善要望にする", en: "Make an improvement request" },

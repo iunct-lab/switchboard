@@ -49,7 +49,7 @@ Each element below says what it is for, what exists today, and how it is itself 
 
 **Today.** Raw signals are dense: ledger rows, `stop.record` events, the owner's overrides of the turn judge, re-instructions, approvals, the web UI's journey samples, the feedback button, flow stages derived from Issue marks. They are read per Task or per screen; nothing joins them to the process or bundle that produced the work, and the human rating exists per Task, where it is too fine to be given (six ratings against more than a thousand judge rows).
 
-**Shape, first step.** A report (`scripts/kernel-report.ts`) that groups Tasks by their provenance (process id and skills hash) and shows, per group, count, median duration, median cost, median interventions and median instruction size, with the Tasks that have no provenance as their own group, and those recorded without a candidate as another. Observational, with n shown; not a verdict. The human rating moves to the level of a problem, is not scheduled, and is asked only when the system cannot decide and the decision is large.
+**Shape, first step.** A report (`scripts/kernel-report.ts`) that groups Tasks by their provenance (process id and skills hash) and shows, per group, count, median duration, median cost, median interventions and median instruction size, with the Tasks that have no provenance as their own group, and those recorded without a candidate as another. Each row also splits its Tasks by who chose the process, read from `processReason`: the button (`direct button`, `backlog stage …`), the automatic choice (`auto …`) or a direct Task sent back to the pipeline (`direct returned`), so `p0-pipeline` and `p1-direct` show how they were reached. Observational, with n shown; not a verdict. The human rating moves to the level of a problem, is not scheduled, and is asked only when the system cannot decide and the decision is large.
 
 **Revised by.** Dropping a signal no decision has used; weighting signals by how they track the owner's own judgement where that exists.
 
@@ -59,7 +59,9 @@ Each element below says what it is for, what exists today, and how it is itself 
 
 **Shape.** Four kinds of effect — on the repository, on the daemon's own state, on an external system, on a person — and three answers: reversible (undo restores everything), compensable (an undo operation exists but traces, cost or time remain), irreversible. The question that decides most cases is whether the effect can be stopped *before anyone observes it*: a delayed send is reversible, a sent comment is compensable, a notification read is irreversible. A compensable operation runs unattended only when its compensation is prepared; an irreversible one is an invariant (K6) or the owner's call beforehand.
 
-**Today, and what is missing.** Releases are immutable, a promotion checks the candidate boots and rolls back by itself, the rescue page undoes it from a phone, the schema only grows. Backlog writes to GitHub are sent at once; a schema migration takes no snapshot of its own; the promotion check is boot-and-WebSocket only; the host scripts run as root from `main` on every start. These are the first things to change, and they are out of this document's first implementation.
+**Today, and what is missing.** Releases are immutable, a promotion checks the candidate boots and rolls back by itself, the rescue page undoes it from a phone, the schema only grows. Since the second implementation: a comment to GitHub waits 60 s and can be taken back meanwhile; a schema migration first takes a snapshot the rescue page can restore; the promotion check also reads the task list and one task; the host scripts root installs follow the promoted release when it is an ancestor of `main` (else `main`'s head, said in the journal), the updater itself only moves forward, and the installed scripts are kept when the new ones fail a trial run (`docs/design/cloud-hosting.md` §6.5). Missing: compensation for systems other than GitHub, and approvals taken off per operation as the table and its compensations allow.
+
+**The table.** `ops-kit/reversibility.json` holds one row per operation (effect, whether it can be stopped before it is observed, the answer, one sentence of why), including the merge gate's kinds and the operations named above that have no gate kind. The merge gate reads it: a kind whose answer is `irreversible` is asked of the owner, any other kind is lifted by a recheck; the path globs stay in the gate.
 
 **Revised by.** The record of every rollback: what was undone, what stayed. The decision table is data and is corrected from that record.
 
@@ -80,6 +82,8 @@ Each element below says what it is for, what exists today, and how it is itself 
 **Shape (not yet built).** A share of work or cost reserved for candidates whose record is thin or uncertain; before an experiment, the decision it would change written down ("if X then A, if Y then B" — if both branches are A, do not run it); afterwards, whether the decision changed. Kinds of experiment whose results never change decisions lose budget.
 
 **Revised by.** The share of experiments that changed a decision.
+
+The cost ceilings sit in one settings group, `quotaAndResume`: `backlogQuotaLimit` (the usage at which the backlog holds back) and `defaultBudgetUsd` (the budget of a Task made without one; null = none). Changing the group's value changes the default for every path that makes a local Task (a Cloud Task takes no budget); `autoStart.fallbackAt` switches runner by usage and is not a cost ceiling.
 
 ## K6 Invariants
 
@@ -110,11 +114,11 @@ One or two of them is progress inside the current step, not a new one.
 
 ## Decided
 
-- **The first chooser is the owner's button, per request.** A request with no PBI yet offers both "PBI にする" (`p0-pipeline`) and "直行で直す" (`p1-direct`) on its row; the owner picks one, and the Task records which (`processReason` `direct button` for the direct one). Only one of them runs on a request at a time, and the sweep only ever starts `p0-pipeline`. Agents or rules choosing come after there is a record to choose from (decided 2026-11-03).
+- **The chooser is the owner's button, and the backlog's automatic processing on the candidates' own criteria.** A request with no PBI yet offers both "PBI にする" (`p0-pipeline`) and "直行で直す" (`p1-direct`) on its row; the owner picks one, and the Task records which (`processReason` `direct button` for the direct one). The sweep also starts a request in the candidate whose `auto` criteria (in the candidate's frontmatter) it meets, or in `p0-pipeline` when none does, and records why (`auto direct: …`, `auto pipeline: …`); the button comes first, and a request a direct Task has run on is not started again. There is a way back: when the direct Task finds the work is not small, not clear, or touches an invariant, it makes no change, labels the request `direct-returned` and comments why, and the sweep then starts that request in `p0-pipeline` (decided 2026-11-03 for the button alone; changed 2026-11-08 to add the automatic choice).
 
 ## Not decided
 
-- **The chooser beyond the button.** Whether an agent or a rule picks a candidate for a piece of work, from what signals, and how a weak candidate still gets chosen often enough to learn from. Today the choice is recorded (`process`, `processReason`) and made by the owner or by the stage: the backlog's stage buttons and sweep name `p0-pipeline`, a Task typed on Home names nothing.
+- **The chooser beyond the criteria rows.** Whether an agent, not a fixed row (`auto` in the frontmatter), picks a candidate, from what signals, and how a weak candidate still gets chosen often enough to learn from. Today the choice is recorded (`process`, `processReason`) and made by the owner's button or by the sweep's criteria; a Task typed on Home names nothing.
 - **The candidate list and each candidate's inside** — stages, artefacts, number of agents, cadence. `p1-direct` is a sketch, not a commitment.
 - **Which experiment forms** (replay on recorded inputs, parallel runs on a database copy, canary with rollback) are built; each waits for a decision that needs it.
 - **Thresholds** for continuing, improving or retiring a candidate: recorded when first used, then changed from the record; a new candidate gets a learning allowance and is judged on its trend, not its first level.

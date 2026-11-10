@@ -325,8 +325,8 @@ if (MODE_BROWSER) {
     };
     const issue = (n: number) => `a[href$="/issues/${n}"]`;
     const rowOf = (n: number) => `[...document.querySelectorAll('.backlog-item')].find(r => r.querySelector('${issue(n)}'))`;
-    /** The row's sync line: the element after the row. */
-    const lineOf = (n: number) => `(${rowOf(n)}).nextElementSibling`;
+    /** The row's sync line: in what ▶ opened under a list row (#3709), else the element after the row. */
+    const lineOf = (n: number) => `(() => { const r = ${rowOf(n)}; return r?.closest('.backlog-listrow')?.querySelector('.backlog-syncline') ?? r?.nextElementSibling; })()`;
     const cardOf = (n: number) => `[...document.querySelectorAll('.decision-card')].find(r => r.querySelector('${issue(n)}'))`;
     const editor = (n: number) => `document.querySelector('.backlog-edit[data-issue$="/issues/${n}"]')`;
     const text = (expr: string) => evaluate(`(${expr})?.textContent ?? ''`) as Promise<string>;
@@ -371,13 +371,22 @@ if (MODE_BROWSER) {
       await press(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Backlog')`, "Backlog");
       await until(() => evaluate(`document.querySelectorAll('.backlog section[data-stage]').length === 5 && !document.querySelector('.backlog .head .hint')?.textContent.includes('読み込み中')`), "the list");
     };
+    // #4064: an Issue only on the sync line sits under the folded 同期 line: open it as a person would
+    const unfold = async (n: number) => {
+      const folded = `(() => { const d = [...document.querySelectorAll('details.backlog-editor')].find(d => d.dataset.issue.endsWith('/issues/${n}')); const p = d && d.closest('details.backlog-syncs'); return p && !p.open ? p : null; })()`;
+      if (await evaluate(`!!${folded}`)) await press(`${folded}.querySelector('summary')`, "同期の行を開く");
+    };
     const openEditor = async (n: number) => {
+      await unfold(n);
       await press(`[...document.querySelectorAll('details.backlog-editor')].find(d => d.dataset.issue.endsWith('/issues/${n}')).querySelector('summary')`, `編集 #${n}`);
       await until(() => evaluate(`!!${editor(n)}`), `editor #${n}`);
     };
     await call("Runtime.enable");
     await call("Log.enable");
     await call("Page.enable");
+    // a list row is one line, its sync line and 編集 under ▶ (#3709): open every list row as it appears, as a person
+    // reading its sync would
+    await call("Page.addScriptToEvaluateOnNewDocument", { source: `new MutationObserver(() => { for (const b of document.querySelectorAll('[data-open-row][aria-expanded="false"]')) b.click(); }).observe(document, { childList: true, subtree: true });` });
     const api = async (method: string, path: string, body?: object) => {
       const r = await fetch(`${base}${path}`, { method, body: body && JSON.stringify({ workspaceId: ws(), ...body }) });
       return { status: r.status, body: await r.json().catch(() => null) };
@@ -408,6 +417,7 @@ if (MODE_BROWSER) {
     await fill(`document.querySelector('details.backlog-new input')`, "PBI: 画面で作った");
     await press(button(`document.querySelector('details.backlog-new')`, "手元に保存"), "手元に保存");
     await until(async () => (await text(`document.querySelector('.backlog-sync')`)).includes("番号なし"), "the new Issue is listed without a number");
+    await press(`(${cardOf(12)}).querySelector('details.decision summary')`, "判断待ちを開く");
     await fill(`${cardOf(12)}.querySelector('textarea')`, "画面から B で");
     await press(button(cardOf(12), "回答する"), "回答する");
     await until(() => core!.db.listPendingBacklogOperations().some((o) => o.kind === "comment" && JSON.stringify(o.payload).includes("画面から B で")), "the answer is kept");
@@ -445,6 +455,11 @@ if (MODE_BROWSER) {
     await until(async () => (await text(editor(13))).includes("選び直してください"), "the old choice asks for a re-read");
     check("an old choice is refused and GitHub is not written", github.get(13)!.body === "GitHub 側の本文（さらに変更）", github.get(13)!.body);
     await until(async () => (await text(`document.querySelector('.backlog-held[data-field="body"]')`)).includes("さらに変更"), "the screen shows the new GitHub value");
+    // the comment kept while GitHub was down is in its backoff and goes first: let the kept operations go with the next send
+    for (const o of core!.db.listPendingBacklogOperations()) core!.db.setBacklogOperationResult(o.id, { status: "pending", retryAt: null });
+    await restart();
+    await open();
+    await openEditor(13);
     await press(button(editor(13), "手元の値を送る"), "手元の値を送る");
     await until(() => github.get(13)!.body === "手元の本文", "the explicit choice is sent", 20_000);
     await until(async () => (await text(lineOf(13))).includes("同期済み"), "the row is in step again", 20_000);
@@ -681,6 +696,7 @@ if (MODE_BROWSER) {
     // 4k. the first read of an editor fails: it can be read again without closing it
     await open();
     await press(`[...document.querySelectorAll('.backlog-ws button')].find(b => b.textContent.trim().startsWith('すべて'))`, "すべて");
+    await unfold(21);
     const firstRead = await hold("GET", "/api/backlog/21");
     await press(`[...document.querySelectorAll('details.backlog-editor')].find(d => d.dataset.issue.endsWith('/issues/21')).querySelector('summary')`, "編集 #21");
     const failedRead = await firstRead();
@@ -693,6 +709,9 @@ if (MODE_BROWSER) {
 
     // 4l. an edit GitHub refused (failed, #2885): only its row offers 送り直す — not one whose result is unknown;
     // pressed, the row goes and it waits to be sent
+    // an earlier case left an operation in its backoff: it would hold the ones behind it back
+    for (const o of core!.db.listPendingBacklogOperations()) if (o.status === "pending") core!.db.setBacklogOperationResult(o.id, { status: "pending", retryAt: null });
+    await restart();
     writesFail = "403";
     check("the edit to be refused is kept", (await api("PATCH", "/api/backlog/21", { title: "要望: 断られた題" })).status === 202);
     const refused = await until(() => core!.db.listPendingBacklogOperations().find((o) => o.field === "title" && o.payload === "要望: 断られた題" && o.status === "failed"), "GitHub refuses the edit", 45_000);
@@ -707,6 +726,7 @@ if (MODE_BROWSER) {
     const retries = `[...${heldRows}].map(r => [r.dataset.field, [...r.querySelectorAll('button')].filter(b => b.textContent.trim() === '送り直す').length])`;
     await until(async () => (await evaluate(`${heldRows}.length`)) === 2, "the failed and the unknown edits are held");
     check("only the failed edit's row offers 送り直す, once; the unknown one none", JSON.stringify(await evaluate(retries)) === JSON.stringify([["title", 1], ["", 0]]), await evaluate(retries));
+    check("the unknown comment's row is named コメント, not 新規作成", (await evaluate(`[...${heldRows}].find(r => r.dataset.field === '').textContent.trim().startsWith('コメント')`)) === true);
     await shot("4l-failed");
     await press(button(editor(21), "送り直す"), "送り直す #21");
     await until(async () => (await evaluate(`${heldRows}.length`)) === 1, "the failed row is gone");

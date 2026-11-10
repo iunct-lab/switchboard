@@ -114,3 +114,6 @@ stop; no turn-and-tool-name guess is needed. An allow to such an ask has not bee
   and every other event are dropped.
 - The Task's evaluation counts them (`RuleMetrics.classifier`): allowed = `allow`; stopped = `block` + the
   classifier-reasoned asks (kind `asked`); null when nothing was recorded.
+- The logs are off by default (the default is `Settings.outbound` in `packages/protocol/src/model.ts`); Settings →
+  Outbound data → count the classifier's decisions turns them on for the Tasks started after it. Databases
+  from before the setting keep them on (a one-time migration).

@@ -10,16 +10,17 @@
  * merge-gate takes in place of an Actions CI that never started; a failure or a conflict → `[local-ci] fail <head sha>
  * base=<base sha>` and exit 1. Before posting, head and base are read again: either moved → nothing posted, exit 1
  * (run again). Each failed step's whole output stays in a log dir under ~/.cache (a perf step's failure does not stop
- * `bun test`, so a run can have two, #2945); a perf step's failure also leaves perf-result.json and summary.md there
- * (head / base, environment, over / improved / raised, #1056).
- * A perf check that is `over` also measures the base (main's tip) the same way in a second worktree,
- * so the summary says per key whether main goes over too or the PR does (#1191); the run stays a failure either way.
+ * `bun test`, so a run can have two, #2945); the perf steps do not run here (the tag CI's, #4076).
  * After every step passed, the type check's and bun test's seconds are compared with the `local` ceilings of the checkout's
  * scripts/perf-budget.json (#1887), bun test's only when every test ran (#3297): over one → a failure like a failed step,
  * named `DURATION_STEP`. A checkout without that file or those ceilings is not compared.
  * `bun test` runs the tests of the checkout's scripts/test-select.ts for what the PR and the PRs below it changed; a
  * change it cannot judge, or a selection that cannot be read, runs all of them, and so does `--all`. Only this script
- * narrows: tag-ci's `runCheckout` runs every test, and the other steps always run (#3297).
+ * narrows: tag-ci's `runCheckout` runs every test, and the other steps run, except in an incremental run (below) (#3297).
+ * Incremental run: when the PR's newest result is a pass of an earlier head and the commits added since (`git cherry`) hold no
+ * merge commit the pass lacks, `bun test` is chosen from those commits' files only and only the install, the type check
+ * and that `bun test` run; the other steps are the tag CI's (`incrementalBase`, `incrementalSteps`). A change the
+ * selection cannot judge, `--all`, `--change` or a missing earlier pass run every step. The mark is the usual pass.
  * A head whose newest result merge-gate already counts as a pass is not run again (`existingPass`, #1882): `--force` runs
  * it, and `--all` does too (a narrowed pass is not what it asks for). GitHub only.
  * A checkout whose `ops.config.json` has `ci.steps` runs those instead of ci.yml's (a repository that keeps no CI on
@@ -32,7 +33,7 @@
  */
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { forgeOf, forgeTargetOf, LOCAL_SERVICE, originOf, runForgeOperation } from "../ops-kit/src/forge.ts";
 import { withHeavySlot } from "../ops-kit/src/heavy.ts";
 import { gitlabForge, runGlab, viewGitlabMr, type Sh } from "../ops-kit/src/forge-gitlab.ts";
@@ -42,7 +43,7 @@ import { CiConfig, CONFIG_FILE } from "../ops-kit/src/config.ts";
 import { IDLE_KILLED_LINE, runIdle } from "../ops-kit/src/idle-run.ts";
 import { hostAws } from "../ops-kit/src/secrets.ts";
 import { ciExit, runCi, STEP_IDLE_SECONDS, type Step } from "./ci.ts";
-import { BYTES_RECORDS_HEADER, BYTES_RECORDS_PATH, bytesRows, judgeDurations, recordRow, RECORDS_BRANCH, RECORDS_HEADER, RECORDS_PATH, type Budgets, type JourneyBytes } from "./perf-ratchet.ts";
+import { BYTES_RECORDS_HEADER, BYTES_RECORDS_PATH, bytesRows, COUNTS_RECORDS_HEADER, COUNTS_RECORDS_PATH, countsRows, type Env, envOf, judgeDurations, recordRow, RECORDS_BRANCH, RECORDS_HEADER, RECORDS_PATH, type Budget, type Budgets, type JourneyBytes } from "./perf-ratchet.ts";
 import { localCiOf, localCiOfChange, MARK_AUTHORS, newestLocalCi, readChangeDetail } from "./merge-gate.ts";
 import { isTest } from "./test-select.ts";
 
@@ -114,16 +115,25 @@ export const isPerfStep = (s: Step) => /scripts\/perf-(bench|ratchet)\.ts/.test(
 /** The ratchet's check alone: the step whose output has the verdict and the bundle lines. */
 export const isPerfCheck = (s: Step) => s.run.includes("perf-ratchet") && s.run.includes(" check ");
 
-/** What the base (main) measured the same way: its check's verdict, or null when a step before it failed. */
-export interface Baseline { sha: string; verdict: PerfVerdict | null }
-
-/** The steps that measure a checkout: the install, then the web build up to the last perf step (main's fetch, fonts, bench, check; not bun test after them). */
-export function perfSteps(steps: Step[]): Step[] {
-  const install = steps.find((s) => s.run.trim() === "bun install --frozen-lockfile");
+/** The steps without the perf ones (the web build up to the last perf step; the install stays, bun test and the rest are not between). A CI without them is returned as it is. */
+export function withoutPerf(steps: Step[]): Step[] {
   const build = steps.findIndex((s) => s.run.trim() === "bun run --cwd apps/web build");
   const last = steps.map((s) => isPerfStep(s)).lastIndexOf(true);
-  if (!install || build < 0 || last < build) throw new Error("CI の手順に `bun install --frozen-lockfile` か `bun run --cwd apps/web build` とその後の性能の手順が無い（perfSteps）");
-  return [install, ...steps.slice(build, last + 1)];
+  if (build < 0 || last < build) return steps;
+  return [...steps.slice(0, build), ...steps.slice(last + 1)];
+}
+
+/**
+ * The steps that measure perf and nothing else (#4124): the install, then from the web build to the last perf step, without
+ * perf-ratchet's own steps (main's base and the check judge a result against a checkout of their own; the one who asks judges it).
+ * A CI without the build or a perf step has none to run: empty.
+ */
+export function onlyPerf(steps: Step[]): Step[] {
+  const build = steps.findIndex((s) => s.run.trim() === "bun run --cwd apps/web build");
+  const last = steps.map((s) => isPerfStep(s)).lastIndexOf(true);
+  if (build < 0 || last < build) return [];
+  const install = steps.slice(0, build).filter((s) => s.run.trim().startsWith("bun install"));
+  return [...install, ...steps.slice(build, last + 1).filter((s) => !s.run.includes("perf-ratchet"))];
 }
 
 /** The step of ci.yml that runs scripts/ci.ts: Actions runs those steps in one go, local-ci one by one (#912). */
@@ -176,30 +186,6 @@ export async function checkoutSteps(dir: string, env: Record<string, string>): P
   return steps;
 }
 
-const overKey = (line: string) => /^over: (\S+) = /.exec(line)?.[1] ?? line;
-
-/** Per key the PR is over on: main over it too, or the PR's own; one line when main's measure failed. Then main's over lines. */
-export function baselineLines(over: string[], b: Baseline): string[] {
-  const out = [`main（${b.sha.slice(0, 7)}）との比較:`];
-  if (!b.verdict || b.verdict.unknown) return [...out, "main の計測に失敗（原因不明）"];
-  const mainKeys = new Set(b.verdict.over.map(overKey));
-  out.push(...over.map((l) => `${overKey(l)}: ${mainKeys.has(overKey(l)) ? "main でも超過（PR の変更によらない）" : "PR 固有の悪化"}`));
-  return b.verdict.over.length ? [...out, "main の over:", ...b.verdict.over] : out;
-}
-
-/** The summary of a failed step that stays readable after the run: head / base, the environment, and for a perf step the verdict by kind. */
-export function failureSummary(r: { sha: string; base: string; step: StepResult; env: Record<string, string>; output: string; perf?: PerfVerdict; baseline?: Baseline }): string {
-  const out = [`head ${r.sha} / base ${r.base}`, `手順 ${r.step.name}: exit ${r.step.code}`];
-  if (!r.perf) return [...out, r.step.tail].join("\n");
-  const p = r.perf;
-  out.push(`環境: ceilings ${p.env ?? "?"}, TMPDIR ${r.env.TMPDIR ?? "?"}, CI=${r.env.CI ?? "?"}`);
-  const kinds: Array<[string, string[]]> = [["超過（over）", p.over], ["改善による予算更新要求（improved）", p.improved], ["main より予算引上げ（raised）", p.raised], ["1% 以上の増加（grew）", p.grew]];
-  for (const [title, lines] of kinds) if (lines.length) out.push(`${title}:`, ...lines);
-  if (p.unknown) out.push("原因不明（判定の行が無い）:", ...r.output.trimEnd().split("\n").slice(-10));
-  if (r.baseline) out.push(...baselineLines(p.over, r.baseline));
-  return out.join("\n");
-}
-
 /** The `run:` steps of every job in ci.yml, in order (`uses:` steps are the checkout and Bun, which this machine has). */
 export function workflowSteps(yaml: string): Step[] {
   const doc = Bun.YAML.parse(yaml) as { jobs: Record<string, { steps: Array<{ name?: string; run?: string }> }> };
@@ -209,15 +195,15 @@ export function workflowSteps(yaml: string): Step[] {
 /** What one run tested and how it went; `conflict` = the head did not merge into the base, nothing ran. */
 /** `seconds`: a pass's type check and bun test seconds (#1886), for a checkout with scripts/ci.ts. */
 /** `selection`: what chose this run's tests, none with `--all` (#3297). `bundle`: the perf check's `bundle:` and `grew:` lines, pass or fail. */
-export interface LocalCiResult { sha: string; base: string; results: StepResult[]; ok: boolean; seconds?: StepSeconds; conflict?: boolean; perf?: PerfVerdict; baseline?: Baseline; selection?: TestSelection; bundle?: string[] }
+/** `incremental`: this run was only the commits since the earlier pass `pass` (`incrementalBase`). */
+export interface LocalCiResult { sha: string; base: string; results: StepResult[]; ok: boolean; seconds?: StepSeconds; conflict?: boolean; perf?: PerfVerdict; selection?: TestSelection; bundle?: string[]; incremental?: { pass: string; commits: number; files: number } }
 
 /** What a run's bun test covered, for the comment: the seen line and the machine line; a selection's reason can list every changed file. */
 function testsLines(s: TestSelection | undefined): string[] {
   if (!s) return ["テスト: 全ファイル（--all）"];
   // none counted: "every test" would read as if they all ran (#3932). Only what `total` counts is named (isTest)
   const seen = s.total === 0 ? "テスト: なし（`*.test.ts` / `*.test.tsx` のファイルが 1 つも無い）" : s.files ? `テスト: ${s.files.length} / ${s.total} ファイル（影響範囲の選択）` : `テスト: 全 ${s.total} ファイル（全テストに倒した: ${s.reason.length > 300 ? `${s.reason.slice(0, 300)}…` : s.reason}）`;
-  const loaded = s.loaded && !s.loaded.run ? [`loaded（量と重なりの計測）: 測らなかった（${s.loaded.reason}）`] : [];
-  return [seen, ...loaded, `<!-- local-ci-tests ${JSON.stringify({ ran: s.files?.length ?? null, total: s.total })} -->`];
+  return [seen, `<!-- local-ci-tests ${JSON.stringify({ ran: s.files?.length ?? null, total: s.total })} -->`];
 }
 
 /** The PR comment of a run, pass or not (#913): the mark (the first line only: merge-gate reads no more, #3118), a pass's seconds line, what was tested, the bundle against main's tip, every step that ran; a failure names its step and what failed in it. */
@@ -235,6 +221,7 @@ export function resultComment(r: LocalCiResult): string {
   const failed = r.results.filter((x) => x.code !== 0);
   return [
     ...head,
+    ...(r.incremental ? [`増分: ${r.incremental.pass.slice(0, 7)} の pass の後の ${r.incremental.commits} コミット（変更 ${r.incremental.files} ファイル）で、型検査と選んだテストだけ`] : []),
     ...testsLines(r.selection),
     ...(r.bundle?.length ? ["", "bundle（gzip、マージ後と main の先端の差）:", ...r.bundle.map((l) => `    ${l}`)] : []),
     // a fenced block: 4 spaces right after a paragraph line are no code block in CommonMark (they join the paragraph)
@@ -285,7 +272,8 @@ export const HOST_TESTS = "bun test (host)";
 
 /** The test files that read recordings (scripts/recordings.ts): they run on the host, recordings or not. */
 export async function recordingTestFiles(dir: string, sh: Deps["sh"]): Promise<string[]> {
-  const out = await sh(["git", "-C", dir, "grep", "-l", "-E", 'scripts/recordings(\\.ts)?"', "--", "*.test.ts", "*.test.tsx"]).catch(() => "");
+  // --untracked: test-changed runs a new test before it is added; local-ci's checkout has none, so the same there
+  const out = await sh(["git", "-C", dir, "grep", "--untracked", "-l", "-E", 'scripts/recordings(\\.ts)?"', "--", "*.test.ts", "*.test.tsx"]).catch(() => "");
   return out.split("\n").filter(Boolean);
 }
 
@@ -437,46 +425,29 @@ export async function readTarget(pr: number, repoRoot: string, repo: string, d: 
 }
 
 /** `files: null` = every test; `total` = the checkout's test files; `reason` = why these tests, or why all of them; `unjudged`: the selection itself did not run or could not be read. */
-/** `loaded`: whether the change reaches perf-bench's `loaded` (#3635); none = not judged, and it runs. */
-export interface TestSelection { files: string[] | null; total: number; reason: string; unjudged?: true; loaded?: { run: boolean; reason: string } }
+export interface TestSelection { files: string[] | null; total: number; reason: string; unjudged?: true }
 
 /**
- * The tests for what changed since the commit `base` gives, by the checkout's scripts/test-select.ts: its code, run in
+ * The tests for what changed since the commit `base` gives (or for `changed`, when given: no diff is run), by the checkout's scripts/test-select.ts: its code, run in
  * a process of its own with `env` (as checkoutSteps runs the checkout's scripts/ci.ts), never imported into this one.
  * A checkout without it, a failure or an output it cannot read → every test. A failure's text goes to the log, not in
  * `reason`: that goes on the PR, and the text holds the host's paths.
  */
-export async function selectTests(dir: string, base: () => Promise<string>, env: Record<string, string>, d: Pick<Deps, "sh" | "log">): Promise<TestSelection> {
+export async function selectTests(dir: string, base: () => Promise<string>, env: Record<string, string>, d: Pick<Deps, "sh" | "log">, changed?: string[]): Promise<TestSelection> {
   const total = (await d.sh(["git", "-C", dir, "ls-files"])).split("\n").filter(isTest).length;
   if (!existsSync(join(dir, "scripts/test-select.ts"))) return { files: null, total, reason: "scripts/test-select.ts が無い", unjudged: true };
   try {
     // --no-renames: a rename's old path is a deleted file, whose dependents the selection must see
-    const changed = (await d.sh(["git", "-C", dir, "diff", "--name-only", "--no-renames", "-z", await base()])).split("\0").filter(Boolean);
+    changed ??= (await d.sh(["git", "-C", dir, "diff", "--name-only", "--no-renames", "-z", await base()])).split("\0").filter(Boolean);
     const vars = Object.entries(env).map(([k, v]) => `${k}=${v}`);
     const [head = "", ...rows] = (await d.sh(["env", "-i", ...vars, process.execPath, "scripts/test-select.ts", ...changed], dir)).trimEnd().split("\n");
     const full = /^full: (.*)$/.exec(head);
     if (!full && head !== `selected: ${rows.length}`) throw new Error(`出力を読めない: ${head.slice(0, 80)}`);
     const tests = full ? { files: null, total, reason: full[1]!.replaceAll(dir, "<checkout>") } : { files: rows.map((r) => r.split("  ")[0]!), total, reason: `変更 ${changed.length} ファイルから選んだ` };
-    return { ...tests, ...(await loadedOf(dir, vars, changed, d)) };
+    return tests;
   } catch (e) {
     d.log(`テストの選択に失敗: ${e instanceof Error ? e.message : String(e)}`);
     return { files: null, total, reason: "選択を実行できなかった（実行したホストのログを見る）", unjudged: true };
-  }
-}
-
-/**
- * Whether the change reaches perf-bench's `loaded`, by the checkout's `scripts/test-select.ts --loaded` (#3635). A
- * failure or an output it cannot read (a checkout from before it) → nothing, and `loaded` runs.
- */
-async function loadedOf(dir: string, vars: string[], changed: string[], d: Pick<Deps, "sh" | "log">): Promise<{ loaded?: { run: boolean; reason: string } }> {
-  try {
-    const out = (await d.sh(["env", "-i", ...vars, process.execPath, "scripts/test-select.ts", "--loaded", ...changed], dir)).trim();
-    const m = /^loaded: (run|skip) {2}(.*)$/.exec(out);
-    if (!m) throw new Error(`出力を読めない: ${out.slice(0, 80)}`);
-    return { loaded: { run: m[1] === "run", reason: m[2]!.replaceAll(dir, "<checkout>") } };
-  } catch (e) {
-    d.log(`loaded の判定に失敗（測る）: ${e instanceof Error ? e.message : String(e)}`);
-    return {};
   }
 }
 
@@ -497,10 +468,38 @@ export function narrowTestStep(steps: Step[], files: string[]): Step[] {
   return steps.map((s) => (s.run.trim() === "bun test" ? { ...s, run } : s));
 }
 
-/** The steps with perf-bench told to skip `loaded` and why (#3635); a checkout without that step keeps its steps. */
-export function narrowPerfStep(steps: Step[], reason: string): Step[] {
-  const arg = `'${reason.replaceAll("'", `'\\''`)}'`;
-  return steps.map((s) => (s.run.trim().startsWith("bun scripts/perf-bench.ts") ? { ...s, run: `${s.run.trim()} --skip-loaded ${arg}` } : s));
+/**
+ * What the PR gained since its newest pass (an incremental run): the pass's head `pass`, the commits `git cherry` marks
+ * `+` between the PR's merge-base with the base's tip and `head` (a rebase that kept a diff adds none), and the files
+ * they touch, deleted ones too. None when the newest result (of MARK_AUTHORS) is no pass, is of this head, a merge
+ * commit of the PR is not in the pass's history (a conflict resolved: `inPass`'s rule), or anything cannot be read.
+ */
+export async function incrementalBase(pr: number, repo: string, repoRoot: string, head: string, baseTip: string, d: Pick<Deps, "sh">): Promise<{ pass: string; commits: string[]; files: string[] } | undefined> {
+  try {
+    const view = JSON.parse(await d.sh(["gh", "pr", "view", String(pr), "-R", repo, "--json", "comments"])) as { comments?: Array<{ body: string; createdAt: string; authorAssociation?: string }> };
+    const newest = newestLocalCi((view.comments ?? []).filter((c) => MARK_AUTHORS.includes(c.authorAssociation ?? "")));
+    if (newest?.m[1] !== "pass" || newest.m[2] === head) return undefined;
+    const pass = newest.m[2]!;
+    const at = ["git", "-C", repoRoot];
+    await d.sh([...at, "fetch", "-q", "--no-tags", "--no-write-fetch-head", "origin", pass]);
+    const mergeBase = (await d.sh([...at, "merge-base", baseTip, head])).trim();
+    const commits = (await d.sh([...at, "cherry", pass, head, mergeBase])).split("\n").filter((l) => l.startsWith("+ ")).map((l) => l.slice(2).trim());
+    for (const m of (await d.sh([...at, "rev-list", "--merges", `${mergeBase}..${head}`])).split("\n").filter(Boolean)) {
+      if (!await d.sh([...at, "merge-base", "--is-ancestor", m, pass]).then(() => true, () => false)) return undefined;
+    }
+    const files = new Set<string>();
+    for (const c of commits) for (const f of (await d.sh([...at, "show", "--name-only", "--no-renames", "--format=", "-z", c])).split("\0").filter(Boolean)) files.add(f);
+    return { pass, commits, files: [...files] };
+  } catch {
+    return undefined;
+  }
+}
+
+/** The steps of an incremental run: the install, the type check and `bun test` given `files`; none when the CI lacks one of them. */
+export function incrementalSteps(steps: Step[], files: string[]): Step[] | undefined {
+  const keep = ["bun install --frozen-lockfile", "bun run typecheck", "bun test"];
+  const kept = steps.filter((s) => keep.includes(s.run.trim()));
+  return keep.every((k) => kept.some((s) => s.run.trim() === k)) ? narrowTestStep(kept, files) : undefined;
 }
 
 /** What the result's table calls the comparison of the seconds, which no step of the CI runs. */
@@ -522,12 +521,11 @@ export async function durationOver(dir: string, seconds: StepSeconds): Promise<s
 export interface ChangeTarget { label: string; read: () => Promise<{ head: string; base: string }> }
 
 /** `cache`: where the worktree and the failure logs go (~/.cache; tests give their own). TMPDIR goes under tmpdir() (#1056). */
-export async function localCi(pr: number, repoRoot: string, d: Deps, repo: string, cache = join(homedir(), ".cache"), opts: { all?: boolean; change?: ChangeTarget } = {}): Promise<LocalCiResult> {
+export async function localCi(pr: number, repoRoot: string, d: Deps, repo: string, cache = join(homedir(), ".cache"), opts: { all?: boolean; force?: boolean; change?: ChangeTarget } = {}): Promise<LocalCiResult> {
   const change = opts.change;
-  // one slot for the whole run: the PR's steps and main's measure after them (measureBase) are not cut in between by
-  // another heavy job, while this run's worktrees are still there. The head and base are read once it is held: a wait
-  // must not leave the run on the head and base of before it
-  return d.slot(change ? `local-ci ${change.label}` : `local-ci ${repo}#${pr}`, async () => {
+  const label = change ? `local-ci ${change.label}` : `local-ci ${repo}#${pr}`;
+  // The head and base are read once the slot is held: a wait must not leave the run on the head and base of before it
+  const body = async (): Promise<LocalCiResult> => {
     const { head: sha, base } = change ? await change.read() : await readTarget(pr, repoRoot, repo, d);
     // ~/.cache need not exist (a fresh GitHub runner has none, 2026-09-28)
     mkdirSync(cache, { recursive: true });
@@ -545,10 +543,14 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
         return { sha, base, results: [], ok: false, conflict: true };
       }
       const env = stepEnv(tmp);
-      const selection = opts.all ? undefined : await selectTests(dir, () => (change ? Promise.resolve(base) : mainFork(dir, repo, d.sh)), env, d);
+      // the commits since the PR's newest pass, when there is one to build on (never for --all or a local change)
+      const inc = opts.all || opts.force || change ? undefined : await incrementalBase(pr, repo, repoRoot, sha, base, d);
+      const picked = opts.all ? undefined : await selectTests(dir, () => (change ? Promise.resolve(base) : mainFork(dir, repo, d.sh)), env, d, inc?.files);
+      const run = await runCheckout(dir, env, change ? change.label : `local-ci-${repo.replaceAll("/", "_")}-${pr}`, d, cache, picked?.files, change ? undefined : repo, false, !!inc && !!picked?.files);
+      // a CI without the incremental steps ran every test, whatever the commits since the pass chose
+      const selection = picked && inc && picked.files && !run.incremental ? { files: null, total: picked.total, reason: "増分に使える手順が無い", unjudged: true as const } : picked;
       const narrowed = selection ? { selection } : {};
-      const skipLoaded = selection?.loaded?.run === false ? selection.loaded.reason : undefined;
-      const run = await runCheckout(dir, env, change ? change.label : `local-ci-${repo.replaceAll("/", "_")}-${pr}`, d, cache, selection?.files, skipLoaded, change ? undefined : repo);
+      const incremental = run.incremental && inc ? { incremental: { pass: inc.pass, commits: inc.commits.length, files: inc.files.length } } : {};
       const { results } = run;
       const bundle = run.bundle.length ? { bundle: run.bundle } : {};
       // a checkout with scripts/ci.ts (this repository's CI) must have both steps; another repository's (--repo) need not
@@ -558,41 +560,22 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
         // the host's `local` ceilings (docs/design/local-ci-offload.md); the ceilings are on the high side only
         const off = (s: string) => run.offloaded.includes(s);
         const over = seconds ? await durationOver(dir, { typecheck: off(SECONDS_STEPS.typecheck) ? 0 : seconds.typecheck, test: selection?.files || off(SECONDS_STEPS.test) ? 0 : seconds.test }) : [];
-        if (over.length === 0) return { sha, base, results, ok: true, ...(seconds ? { seconds } : {}), ...narrowed, ...bundle };
+        if (over.length === 0) return { sha, base, results, ok: true, ...(seconds ? { seconds } : {}), ...narrowed, ...bundle, ...incremental };
         for (const l of over) d.log(l);
         d.log(`✗ ${DURATION_STEP}`);
         // a result of its own: the comment names it, and the exit (ciExit) reads the results
-        return { sha, base, results: [...results, { name: DURATION_STEP, run: "", code: 1, seconds: 0, tail: over.join("\n"), fails: over }], ok: false, ...narrowed, ...bundle };
+        return { sha, base, results: [...results, { name: DURATION_STEP, run: "", code: 1, seconds: 0, tail: over.join("\n"), fails: over }], ok: false, ...narrowed, ...bundle, ...incremental };
       }
-      // the first perf step that failed: a failed bench is the cause, the check after it only finds no result
-      const result = results.find((x) => x.code !== 0 && isPerfStep(x));
-      if (run.perf && result) {
-        // over only: main measured the same way tells an environment's (or main's) excess from the PR's own
-        const logDir = dirname(result.log!);
-        const baseline = run.perf.over.length ? await measureBase(pr, repoRoot, base, perfSteps(run.steps), env, logDir, cache, d) : undefined;
-        const summary = failureSummary({ sha, base, step: result, env, output: run.outputs[result.name]!, perf: run.perf, baseline });
-        await Bun.write(join(logDir, "summary.md"), `${summary}\n`);
-        d.log(summary);
-        d.log(`記録: ${logDir}`);
-        d.log(`✗ ${result.name}: exit ${result.code}`);
-        return { sha, base, results, ok: false, perf: run.perf, baseline, ...narrowed, ...bundle };
-      }
-      return { sha, base, results, ok: false, ...narrowed, ...bundle };
+      return { sha, base, results, ok: false, ...narrowed, ...bundle, ...incremental };
     } finally {
-      // main's bundle as this run measured it, pass or fail (docs/design/perf.md の「bundle の推移」); never the run's result
-      await (async () => (change || forgeTargetOf(repoRoot, originOf(repoRoot)).service === "gitlab" ? "none" : recordBundle(repo, dir, new Date().toISOString(), d.sh)))().then(
-        (r) => r === "recorded" && d.log(`bundle の記録: ${RECORDS_BRANCH}/${RECORDS_PATH} に 1 行足した`),
-        (e: unknown) => d.log(`bundle の記録に失敗（結果は変えない）: ${e instanceof Error ? e.message : String(e)}`),
-      );
-      await (async () => (change || forgeTargetOf(repoRoot, originOf(repoRoot)).service === "gitlab" ? "none" : recordBytes(repo, dir, new Date().toISOString(), d.sh)))().then(
-        (r) => r === "recorded" && d.log(`bytes の記録: ${RECORDS_BRANCH}/${BYTES_RECORDS_PATH} に足した`),
-        (e: unknown) => d.log(`bytes の記録に失敗（結果は変えない）: ${e instanceof Error ? e.message : String(e)}`),
-      );
       await d.sh(["git", "-C", repoRoot, "worktree", "remove", "--force", dir]).catch(() => undefined);
       rmSync(dir, { recursive: true, force: true });
       rmSync(tmp, { recursive: true, force: true });
     }
-  });
+  };
+  // one slot for the whole run, so another heavy job does not cut in while this run's worktree is still there. With
+  // `offload` the heavy steps run off the host: the slot is held only for the steps here (`runCheckout`), not while the builds are awaited
+  return d.offload ? body() : d.slot(label, body);
 }
 
 /**
@@ -618,6 +601,17 @@ export async function recordBytes(repo: string, dir: string, measuredAt: string,
   const base = JSON.parse(readFileSync(file, "utf8")) as { sha: string; journeys?: Record<string, JourneyBytes> };
   if (!base.journeys) return "none";
   await appendRecord(repo, BYTES_RECORDS_PATH, BYTES_RECORDS_HEADER, bytesRows(measuredAt, { sha: base.sha, journeys: base.journeys }), `${RECORDS_BRANCH}: bytes ${measuredAt}`, sh);
+  return "recorded";
+}
+
+/**
+ * Appends the counts of `dir`'s perf-result.json (the median of `--runs 5` this run measured) to counts.tsv on the records
+ * branch, a row per count of `tag` at `sha` (`countsRows`); "none" without that file.
+ */
+export async function recordCounts(repo: string, dir: string, measuredAt: string, env: Env, tag: string, sha: string, sh: Deps["sh"]): Promise<"recorded" | "none"> {
+  const file = join(dir, "perf-result.json");
+  if (!existsSync(file)) return "none";
+  await appendRecord(repo, COUNTS_RECORDS_PATH, COUNTS_RECORDS_HEADER, countsRows(measuredAt, env, tag, sha, JSON.parse(readFileSync(file, "utf8")) as Budget), `${RECORDS_BRANCH}: counts ${tag} ${measuredAt}`, sh);
   return "recorded";
 }
 
@@ -671,16 +665,19 @@ async function appendRecord(repo: string, path: string, header: string, rows: st
  * A checkout's CI in `dir` (#2953; local-ci's merge, tag-ci's tag): its steps (`checkoutSteps`) run with `env` until one
  * without `keepGoing` fails (`runCi`). Each failed step's whole output goes to one log dir `switchboard.<label>-log.*`
  * under `cache` (the latest of a label only: earlier ones go, the host's disk is small) and, for a perf step, its verdict
- * and perf-result.json there. A failure that is not a perf step is logged here; a perf step's is the caller's (local-ci
- * adds main's measure to it). `outputs`: each failed step's whole output by its name.
- * `tests`: only those test files for `bun test` (local-ci); none, or null = every test. `skipLoaded`: perf-bench skips
- * `loaded` for this reason (local-ci, #3635); none = it measures it.
+ * and perf-result.json there. A failure that is not a perf step is logged here; a perf step's is the caller's (the tag CI's). `outputs`: each failed step's whole output by its name.
+ * `tests`: only those test files for `bun test` (local-ci); none, or null = every test.
  * `bundle`: the perf check's `bundle:` and `grew:` lines, whether it passed or not (none without that check).
+ * `incremental`: `tests` choose the steps of `incrementalSteps` only (a PR's local CI after an earlier pass); `incremental` in the result says whether that happened.
+ * `withPerf`: false = the steps without the perf ones (`withoutPerf`): a PR's local CI; the tag CI measures (#4076).
  */
-export async function runCheckout(dir: string, env: Record<string, string>, label: string, d: Omit<Deps, "slot">, cache: string, tests?: string[] | null, skipLoaded?: string, repo?: string): Promise<{ steps: Step[]; results: StepResult[]; ok: boolean; perf?: PerfVerdict; outputs: Record<string, string>; bundle: string[]; offloaded: string[] }> {
-  const listed = await checkoutSteps(dir, env);
-  const narrowed = tests ? narrowTestStep(listed, tests) : listed;
-  const steps = skipLoaded === undefined ? narrowed : narrowPerfStep(narrowed, skipLoaded);
+export async function runCheckout(dir: string, env: Record<string, string>, label: string, d: Omit<Deps, "slot"> & { slot?: Deps["slot"] }, cache: string, tests?: string[] | null, repo?: string, withPerf = true, incremental = false): Promise<{ steps: Step[]; results: StepResult[]; ok: boolean; perf?: PerfVerdict; outputs: Record<string, string>; bundle: string[]; offloaded: string[]; incremental: boolean }> {
+  const all = await checkoutSteps(dir, env);
+  const listed = withPerf ? all : withoutPerf(all);
+  // incremental: `tests` came from the commits since an earlier pass, so they narrow only the install, type check and test steps; a CI without those runs every test
+  const inc = incremental && tests ? incrementalSteps(listed, tests) : undefined;
+  if (incremental && !inc) tests = null;
+  const steps = inc ?? (tests ? narrowTestStep(listed, tests) : listed);
   const runHere = async (s: Step) => {
     d.log(`▶ ${s.name}`);
     const started = Date.now();
@@ -690,14 +687,17 @@ export async function runCheckout(dir: string, env: Record<string, string>, labe
   const offload = d.offload;
   const plan = offload ? placeSteps(steps, tests, await recordingTestFiles(dir, d.sh)) : undefined;
   let ran: Array<Step & { code: number; output: string; seconds: number; tail: string }>;
-  if (!offload || !plan || plan.groups.length === 0) ran = await runCi(steps, runHere);
+  if (!offload || !plan) ran = await runCi(steps, runHere);
+  // sb-offload, but a CI with no step the builds take: every step runs here, in the slot (localCi took none for the run)
+  else if (plan.groups.length === 0) ran = await (d.slot ? d.slot(`${label} (host)`, () => runCi(steps, runHere)) : runCi(steps, runHere));
   else {
     // the builds start first: sb-offload sends the work tree as it is, before the steps here write in it
     const off = plan.groups.map((g) => {
       d.log(`▶ 外（${g.size}）: ${g.steps.map((s) => s.name).join(" → ")}`);
       return offload.run(groupScript(g.steps, { bun: offload.bun, ...(offload.codex ? { codex: offload.codex } : {}), ...(repo ? { repo } : {}) }), dir, g.size).then((r) => parseGroup(r.output, g.steps, r.code));
     });
-    const here = await runCi(plan.host, runHere);
+    // the steps here hold a heavy slot (when given) while the builds are awaited without one; the builds started above
+    const here = await (d.slot ? d.slot(`${label} (host)`, () => runCi(plan.host, runHere)) : runCi(plan.host, runHere));
     const byName = new Map([...here, ...(await Promise.all(off)).flat()].map((r) => [r.name, r]));
     // in the CI's order, up to the first failure that stops it, as one run here would have stopped (runCi)
     ran = [];
@@ -713,7 +713,7 @@ export async function runCheckout(dir: string, env: Record<string, string>, labe
   const check = ran.find(isPerfCheck);
   const bundle = check ? check.output.split("\n").filter((l) => l.startsWith("bundle: ") || l.startsWith("grew: ")) : [];
   const failedAt = ran.flatMap((x, i) => (x.code === 0 ? [] : [i]));
-  if (failedAt.length === 0) return { steps, results, ok: true, outputs: {}, bundle, offloaded };
+  if (failedAt.length === 0) return { steps, results, ok: true, outputs: {}, bundle, offloaded, incremental: !!inc };
   // a 1,400-test run's failures do not fit in its last 30 lines
   const prefix = `switchboard.${label}-log.`;
   for (const old of readdirSync(cache)) if (old.startsWith(prefix)) rmSync(join(cache, old), { recursive: true, force: true });
@@ -739,32 +739,7 @@ export async function runCheckout(dir: string, env: Record<string, string>, labe
   }
   // the measured values are kept before the worktree goes
   if (perf && existsSync(join(dir, "perf-result.json"))) copyFileSync(join(dir, "perf-result.json"), join(logDir, "perf-result.json"));
-  return { steps, results, ok: false, ...(perf ? { perf } : {}), outputs, bundle, offloaded };
-}
-
-/** Runs `steps` on `base` in its own worktree with the PR's environment; each step's output and the result JSON go to `logDir` as base-*. */
-async function measureBase(pr: number, repoRoot: string, base: string, steps: Step[], env: Record<string, string>, logDir: string, cache: string, d: Deps): Promise<Baseline> {
-  const dir = mkdtempSync(join(cache, `switchboard.local-ci-${pr}-base.`));
-  try {
-    await d.sh(["git", "-C", repoRoot, "worktree", "add", "-q", "--detach", dir, base]);
-    for (const [i, s] of steps.entries()) {
-      d.log(`▶ main ${s.name}`);
-      const r = await d.step(s.run, dir, env);
-      await Bun.write(join(logDir, `base-${i + 1}-${s.name.replace(/[^\w.-]/g, "_")}.log`), r.output);
-      if (existsSync(join(dir, "perf-result.json"))) copyFileSync(join(dir, "perf-result.json"), join(logDir, "perf-result.base.json"));
-      // a check that passes judged main within every ceiling
-      if (isPerfCheck(s)) return { sha: base, verdict: r.code === 0 ? { ...perfVerdict(r.output), unknown: false } : perfVerdict(r.output) };
-      if (r.code !== 0) return { sha: base, verdict: null };
-    }
-    return { sha: base, verdict: null };
-  } catch (e) {
-    // the PR's failure is summarized whatever happened to main's measure
-    d.log(`main の計測が止まった: ${e instanceof Error ? e.message : String(e)}`);
-    return { sha: base, verdict: null };
-  } finally {
-    await d.sh(["git", "-C", repoRoot, "worktree", "remove", "--force", dir]).catch(() => undefined);
-    rmSync(dir, { recursive: true, force: true });
-  }
+  return { steps, results, ok: false, ...(perf ? { perf } : {}), outputs, bundle, offloaded, incremental: !!inc };
 }
 
 /** The whole environment of a step here: PATH and HOME from here, external recordings only when supplied, CI=true as on the runner, TMPDIR its own dir. A build off the host gets none of it (`groupScript`): the recordings stay here, read by `HOST_TESTS`. */
@@ -985,7 +960,7 @@ export async function main(args: string[], cwd: string, d: Deps, post = reportRe
   }
   let r: LocalCiResult;
   try {
-    r = await localCi(t.pr, t.root, d, t.repo, cache, { all: t.all });
+    r = await localCi(t.pr, t.root, d, t.repo, cache, { all: t.all, force: t.force });
   } catch (e) {
     if (!(e instanceof NoCiSteps)) throw e;
     console.error(e.message);

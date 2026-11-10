@@ -48,12 +48,14 @@ export interface CodexParserState {
   turnUsage?: TokenUsageBreakdown;
   /** threadId → sum of `last` for a subagent's turn → usage(reported) at that thread's turn/completed. */
   subagentUsage: Map<string, TokenUsageBreakdown>;
+  /** agentThreadId → model of a subagent thread, from its subAgentActivity item (a null model never overwrites). */
+  subagentModel: Map<string, string>;
   lastAgentText?: string;
   model?: string;
 }
 
 export function createCodexParserState(): CodexParserState {
-  return { sessionStarted: false, streamed: new Set(), toolSummaries: new Map(), toolPaths: new Map(), subagentUsage: new Map() };
+  return { sessionStarted: false, streamed: new Set(), toolSummaries: new Map(), toolPaths: new Map(), subagentUsage: new Map(), subagentModel: new Map() };
 }
 
 export function createCodexParser() {
@@ -111,6 +113,7 @@ export function mapCodexMessage(m: Any, s: CodexParserState): AgentEvent[] {
       return [{ t: "status", text: "turn started" }];
     }
     case "item/started":
+      noteSubagentModel((p as ItemStartedNotification).item, s);
       return itemStarted((p as ItemStartedNotification).item, s);
     case "item/agentMessage/delta": {
       const d = p as AgentMessageDeltaNotification;
@@ -118,12 +121,13 @@ export function mapCodexMessage(m: Any, s: CodexParserState): AgentEvent[] {
       return [{ t: "message.delta", role: "assistant", text: d.delta, messageId: d.itemId }];
     }
     case "item/completed":
+      noteSubagentModel((p as ItemCompletedNotification).item, s);
       return itemCompleted(p as ItemCompletedNotification, s);
     case "thread/tokenUsage/updated": {
       const n = p as ThreadTokenUsageUpdatedNotification;
       if (!isMainThread(n.threadId, s)) {
         s.subagentUsage.set(n.threadId, addUsage(s.subagentUsage.get(n.threadId), n.tokenUsage.last));
-        return [usageEvent("turn", n.tokenUsage.last, s.model)];
+        return [usageEvent("turn", n.tokenUsage.last, subagentModelOf(n.threadId, s))];
       }
       // After thread/resume Codex replays the previous turn's usage before turn/started; ignore anything not from the
       // active turn so it is neither double-counted nor charged to this turn.
@@ -144,16 +148,19 @@ export function mapCodexMessage(m: Any, s: CodexParserState): AgentEvent[] {
       const { threadId, turn } = p as TurnCompletedNotification;
       if (!isMainThread(threadId, s)) {
         const usage = s.subagentUsage.get(threadId);
+        const model = subagentModelOf(threadId, s);
         s.subagentUsage.delete(threadId);
-        return usage ? [usageEvent("reported", usage, s.model)] : [];
+        s.subagentModel.delete(threadId);
+        return usage ? [usageEvent("reported", usage, model)] : [];
       }
       s.activeTurnId = undefined;
       const out: AgentEvent[] = [];
       if (s.turnUsage) out.push(usageEvent("reported", s.turnUsage, s.model));
       s.turnUsage = undefined;
       // a subagent cut off with the main turn (interrupt) sends no turn/completed of its own: report what it used so far
-      for (const u of s.subagentUsage.values()) out.push(usageEvent("reported", u, s.model));
+      for (const [id, u] of s.subagentUsage) out.push(usageEvent("reported", u, subagentModelOf(id, s)));
       s.subagentUsage.clear();
+      s.subagentModel.clear();
       const status = turn.status === "completed" ? "ok" : turn.status === "interrupted" ? "aborted" : "error";
       out.push({ t: "session.end", status, summary: turn.error?.message ?? s.lastAgentText, durationMs: turn.durationMs ?? undefined });
       return out;
@@ -236,6 +243,16 @@ function mapServerRequest(id: string, method: string, p: Any, s: CodexParserStat
       // the session with a JSON-RPC error: no fixture covers them yet, so we do not guess their response shape.
       return [{ t: "status", text: `unsupported server request: ${method}` }];
   }
+}
+
+/** A subagent thread's model comes from its subAgentActivity item; without one it is the main model. */
+function subagentModelOf(threadId: string, s: CodexParserState): string | undefined {
+  return s.subagentModel.get(threadId) ?? s.model;
+}
+
+function noteSubagentModel(item: ThreadItem, s: CodexParserState): void {
+  const a = item as Any;
+  if (a.type === "subAgentActivity" && typeof a.model === "string" && typeof a.agentThreadId === "string") s.subagentModel.set(a.agentThreadId, a.model);
 }
 
 function itemStarted(item: ThreadItem, s: CodexParserState): AgentEvent[] {

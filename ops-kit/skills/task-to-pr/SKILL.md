@@ -55,6 +55,8 @@ git checkout -b <枝> && gh stack init <枝>     # 最初の枝（単発でも i
 2. 関数の単体テスト（デーモンや DB を起動しない）で書けるか
 3. 足りないときだけ、新しいテスト・起動を伴うテストを書く
 
+開発の流れの道具（リポジトリの CLAUDE.md が挙げる）の規則を変えるときは、規則 1 つに代表のケースを 1 つ置き、同じ判定を見る既存のテストがあれば足さない。
+
 選んだ階層と理由を PR 本文の「テスト観点」に 1〜2 行書く。
 
 何をどう試すか（軽い順。変更の種類ごとのテストの型は CLAUDE.md。無ければ既存の同型のテストに合わせる）:
@@ -83,6 +85,8 @@ gh pr edit <n> --title "<題>" --body-file "$W/pr.md"
 ops-kit backlog set <Task> Status "In review"
 echo "PR: #<n>（<1 行>）" | ops-kit backlog comment <Task> --body-file -
 ```
+
+**ローカル CI を回すとき**（CLAUDE.md がローカル CI を名指しし、アプリの Task の中のとき）: 自分のシェルで回して待たず、`ops-kit job request local-ci <PR>` でアプリに頼む。仕事はアプリの子として重い処理の枠を取って走る。request は `job#<id>` の 1 行と、止まりの報告（アプリが Task に渡す書式）に書く JSON を出す。それを reason `depends`・conditions に `job#<id>` で書いてターンを終える。仕事が終わるとアプリが pass / fail の要約を添えて再開するので、その結果を読んで続ける（fail なら直して出し直し、再度頼む）。背景の `sleep` の繰り返しで結果を待たない — ターンを終えても背景の作業が残るとセッションが閉じず、1 本 150〜250 MB を何時間も開いたままにする。`gh pr view` で足りる数秒の確認は今まで通り直接でよい。アプリの Task の外では `ops-kit job` は使えないので、CLAUDE.md のコマンドを直接回す。
 
 **ローカルの変更では**（Task への指示が「この workspace の変更はアプリに置く」と言う workspace。リポジトリのサービスがアプリで、PR の代わりにアプリに置く「変更」を使う）: `gh stack submit` / `gh pr edit` の代わりに `ops-kit backlog create --title "<題>" --body-file "$W/pr.md" --head <枝> --base main`（本文は下と同じ形。先頭に `Backlog-Task: <Task>` の 1 行）で変更を作り、`ops-kit backlog comment <Task> --body "変更: #<変更>（<1 行>）"`。push はしない。
 

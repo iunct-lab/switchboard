@@ -162,14 +162,16 @@ test("main.ts registers the saved ADK servers as custom:<name> and DAK from SWIT
     const { info } = await bootAndRead({ SWITCHBOARD_DAK_URL: base }, (home) => {
       const db = new Db(join(home, "switchboard.db"));
       db.setCustomRunners([
-        { name: "x", label: "Agent X", url: base, app: "x_app" },
-        { name: "gone", label: "Gone", url: "http://127.0.0.1:1", app: "y" },
-        { name: "dak", label: "Saved DAK", url: base, app: "dak_agent" },
+        { port: "adk", name: "x", label: "Agent X", url: base, app: "x_app" },
+        { port: "adk", name: "gone", label: "Gone", url: "http://127.0.0.1:1", app: "y" },
+        { port: "agui", name: "ag", label: "AG agent", url: `${base}/agui`, sendWorkspaceMcp: false },
+        { port: "adk", name: "dak", label: "Saved DAK", url: base, app: "dak_agent" },
       ]);
       db.close();
     });
     const by = (id: string) => info.find((r) => r.id === id);
     expect(by("custom:x")).toMatchObject({ label: "Agent X", available: true });
+    expect(by("custom:ag")).toMatchObject({ label: "AG agent", available: true }); // AG-UI: any HTTP answer is reachable
     expect(by("custom:gone")).toMatchObject({ label: "Gone", available: false });
     expect(by("custom:gone")?.note).toContain("not reachable");
     expect(by("dak")).toMatchObject({ label: "DAK", available: true });

@@ -475,6 +475,17 @@ export interface StoredBacklog {
 }
 
 /**
+ * Where the time of one `settle` went (ms, real time): `queueMs` = waiting for the repository's earlier send, `sendMs` =
+ * this send itself, `importMs` = the import — including the time spent riding on an import already under way and the
+ * one queued after a write.
+ */
+export interface SettleTimings {
+  queueMs: number;
+  sendMs: number;
+  importMs: number;
+}
+
+/**
  * Keeps each workspace's stored backlog in step with GitHub (#885): one import at a time per workspace, which every
  * caller of `sync` shares. After a limit or an outage GitHub is not asked until its time (GithubRetryState per host,
  * and the `retryAt` stored with the repository, which outlives a restart): the call is refused with the reason.
@@ -705,6 +716,11 @@ export class BacklogSync {
    * operation still waiting may go. Resolves when this send is over; never rejects.
    */
   send(ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">): Promise<void> {
+    return this.sendTimed(ws);
+  }
+
+  /** `send`, filling `t` (when given) with the wait behind the repository's earlier send and the time of this one's own. */
+  private sendTimed(ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">, t?: Pick<SettleTimings, "queueMs" | "sendMs">): Promise<void> {
     if (this.stopped) return Promise.resolve();
     const source = this.db.getWorkspaceBacklogSource(ws.id);
     // a backlog kept here only (#2265), or one whose GitHub sync is off (#2266): applied at once, nothing goes out — on
@@ -720,7 +736,18 @@ export class BacklogSync {
     }
     if (!source || !this.sends) return Promise.resolve();
     const key = repoName(source);
-    const run = (this.sending.get(key) ?? Promise.resolve()).then(() => this.sendNow(ws, source)).catch(() => undefined);
+    const queued = performance.now();
+    const run = (this.sending.get(key) ?? Promise.resolve())
+      .then(async () => {
+        const began = performance.now();
+        if (t) t.queueMs = began - queued;
+        try {
+          await this.sendNow(ws, source);
+        } finally {
+          if (t) t.sendMs = performance.now() - began;
+        }
+      })
+      .catch(() => undefined);
     this.sending.set(key, run);
     void run.finally(() => this.sending.get(key) === run && this.sending.delete(key));
     return run;
@@ -768,7 +795,10 @@ export class BacklogSync {
     // held at the check before the write (#887): nothing written, but GitHub's value it read is not stored — an import
     // reads it, so the choice on the conflict is offered with GitHub's value, not the older copy
     else if (pending.some((o) => o.status === "conflict" && !held.has(o.id))) this.request(ws);
-    const next = pending.flatMap((o) => (o.status === "pending" && o.retryAt ? [o.retryAt] : []));
+    // only a time still to come when this run began: one past it was looked at in the run (sent, or held behind another
+    // operation of its Issue — a comment whose send window ran out there would set a timer for now over and over; it
+    // goes when what holds it does). One skipped for its time whose time came during the run still gets its timer
+    const next = pending.flatMap((o) => (o.status === "pending" && o.retryAt && o.retryAt > now ? [o.retryAt] : []));
     if (next.length) this.later(ws, source, Math.min(...next));
   }
 
@@ -912,9 +942,16 @@ export class BacklogSync {
    * the repository is imported. Resolves once the import is stored; rejects with BacklogError during a limit or an
    * outage, or when GitHub cannot be read — a start then goes on with the stored data (#2264).
    */
-  async settle(ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">): Promise<void> {
-    await this.send(ws);
-    await this.sync(ws);
+  async settle(ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">): Promise<SettleTimings> {
+    const timings: SettleTimings = { queueMs: 0, sendMs: 0, importMs: 0 };
+    await this.sendTimed(ws, timings);
+    const began = performance.now();
+    try {
+      await this.sync(ws);
+    } finally {
+      timings.importMs = performance.now() - began;
+    }
+    return timings;
   }
 
   /** Asks for an import without waiting for it; its failure is kept for `read`. */

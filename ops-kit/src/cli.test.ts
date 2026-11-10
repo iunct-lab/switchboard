@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { triageUsage } from "./backlog-client.ts";
 import { main } from "./cli.ts";
 import { fakeGh, type FakeCall } from "./gh.ts";
 
@@ -66,6 +67,38 @@ describe("cli", () => {
     expect(r.out).toContain("   Phase = Phase 0");
     expect(r.out).toContain("   Status = Ready");
     expect(r.gh.calls).toHaveLength(2);
+  });
+
+  test("triage without a Phase in the config: an empty Phase position is skipped and the parent and status follow; with a Phase it stays a usage error", async () => {
+    const noPhase = join(import.meta.dir, "../fixtures/config-no-phase.json");
+    const fields = ["Area:one", "Kind:bug", "Priority:high", "Status:Ready"].map((s) => {
+      const [name, opt] = s.split(":");
+      return { id: name, name, options: [{ id: `${name}:${opt}`, name: opt }] };
+    });
+    const r = await run(["triage", "3", "one", "bug", "high", "", "891", "Ready", "--config", noPhase], [
+      () => ({ repositoryOwner: { projectV2: { id: "P1", fields: { nodes: fields } } }, repository: { issue: { id: "I1", projectItems: { nodes: [{ id: "IT1", project: { number: 7 } }] } }, parent: { id: "I891" } } }),
+      () => ({}),
+      () => ({}),
+    ]);
+    expect(r.err).toBe("");
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("   Status = Ready");
+    expect(r.out).toContain("   parent = #891");
+    const withPhase = await run(["triage", "3", "one", "bug", "P1", "", "891", "Ready", "--config", config]);
+    expect(withPhase.code).toBe(1);
+    expect(withPhase.err).toContain(triageUsage(true));
+  });
+
+  test("triage's usage is one text in the list and in the error; scan-text --help prints its usage and exits 0", async () => {
+    expect((await run(["--help"])).out).toContain(triageUsage(true));
+    expect((await run(["triage", "3", "--config", config])).err).toContain(triageUsage(true));
+    expect((await run(["triage", "3", "--config", join(import.meta.dir, "../fixtures/config-no-phase.json")])).err).toContain(triageUsage(false));
+    for (const flag of ["--help", "-h"]) {
+      const r = await run(["scan-text", flag]);
+      expect(r).toMatchObject({ code: 0, err: "" });
+      expect(r.out).toContain("scan-text <file|->");
+      expect(r.out).not.toContain("ENOENT");
+    }
   });
 
   test("bootstrap takes a title and --dry-run in either order; request takes a title and a body file", async () => {

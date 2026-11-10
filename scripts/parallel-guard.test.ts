@@ -50,6 +50,24 @@ describe("parallel-guard pathsIn", () => {
   });
 });
 
+describe("parallel-guard pathsIn: a name without a directory (#4382)", () => {
+  test("a root file named in the middle of a step is a reference, not a touched file", () => {
+    expect(pathsIn("1. 昇格は README.md の規則に従う。`package.json` も読む\n- 手順の途中の `new-config.json` も参照", top)).toEqual([]);
+  });
+
+  test("the same name at the head of a step, or on a line starting with 触る, is touched", () => {
+    expect(pathsIn("1. README.md: 追記する\n- `new-config.json` — 足す\n2. 説明の中の package.json は参照", top)).toEqual(["README.md", "new-config.json"]);
+    expect(pathsIn("- 触るファイル: package.json", top)).toEqual(["package.json"]);
+    expect(pathsIn("1. `README.md`・`package.json`: 直す\n2. README.md と package.json: 直す", top)).toEqual(["README.md", "package.json"]);
+    expect(pathsIn("1. `scripts/a.ts` を直す。読み方は README.md と `new-config.json` の手順: 根拠は下", top)).toEqual(["scripts/a.ts"]);
+    expect(pathsIn("1. `new-config.json`（新規）: 足す\n2. `other.json:3`: 足す\n3. `x.ts` の /ws ルート: 直す", top)).toEqual(["new-config.json", "other.json", "x.ts"]);
+  });
+
+  test("a path from a root directory counts anywhere in a sentence", () => {
+    expect(pathsIn("昇格は docs/design/x.md の規則で、`apps/web/a.ts` も読む", top)).toEqual(["docs/design/x.md", "apps/web/a.ts"]);
+  });
+});
+
 test("scopeIn: a top directory alone in backticks counts for merge-gate, pathsIn and a glob do not make it one", () => {
   const body = "`docs/` と packages/core/ を触る。`scripts/*.ts`、`apps/<name>/x`、`docs/… の下`、`packages/{a,b}.ts`、`nothere/`";
   expect(pathsIn("`docs/` だけ", top)).toEqual([]);
@@ -58,7 +76,7 @@ test("scopeIn: a top directory alone in backticks counts for merge-gate, pathsIn
 });
 
 test("parallel-guard pathsIn: a backticked path counts even when no branch has it yet", () => {
-  expect(pathsIn("`new-config.json:10-20`、`tools/gen.ts:3`、`gh stack add`、`readOthers`、`Bun.serve`、`.env`、`turn/completed`、`origin/main`、`@switchboard/protocol`", top)).toEqual(["new-config.json", "tools/gen.ts"]);
+  expect(pathsIn("触る: `new-config.json:10-20`、`tools/gen.ts:3`、`gh stack add`、`readOthers`、`Bun.serve`、`.env`、`turn/completed`、`origin/main`、`@switchboard/protocol`", top)).toEqual(["tools/gen.ts", "new-config.json"]);
 });
 
 describe("parallel-guard judge", () => {
@@ -92,6 +110,13 @@ describe("parallel-guard judge", () => {
     expect(judge({ paths: db, claimId: 100 }, [task(60, db, 90)], now).verdict).toBe("defer");
     expect(judge({ paths: db, claimId: 100 }, [task(40, db, 110)], now).verdict).toBe("go");
     expect(judge({ paths: db, claimId: 100 }, [task(40, db)], now).verdict).toBe("go");
+  });
+
+  test("a Task that only refers to a root file in a step does not block; one that names it at the head of a step does, and two of those defer (#4382)", () => {
+    const refers = pathsIn("1. 規則は README.md に従う", top);
+    const touches = pathsIn("1. README.md: 追記する", top);
+    expect(judge({ paths: touches }, [task(40, refers)], now).verdict).toBe("go");
+    expect(judge({ paths: touches }, [task(40, touches)], now).verdict).toBe("defer");
   });
 
   test("the last claim of a Task counts", () => {
@@ -292,7 +317,7 @@ describe("parallel-guard readOthers", () => {
   // Codex's follow-up on #485: a root file only an open PR adds is not in the repository's root yet
   test("a new root file or directory an open PR adds is a path in the Task too", async () => {
     const g = github({
-      bodies: { 11: "new-config.json と tools/gen.ts を足す。packages/core/src/db.ts" },
+      bodies: { 11: "触る: new-config.json と tools/gen.ts を足す。packages/core/src/db.ts" },
       prs: [{ number: 80, headRefName: "feat/cfg", body: "", files: ["new-config.json", "tools/gen.ts"] }],
     });
     const r = await readOthers(11, await ghMaterial(REPO, 11, g.run));

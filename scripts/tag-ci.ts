@@ -6,9 +6,10 @@
  * before it, until a pass or a tag that already has a result; the tags walked past are not run. Before the walk, the
  * Releases missing from the newest tags are created (release-tag.ts's repairReleases: a tag whose `gh release create`
  * failed after its push). A tag whose Release still cannot be read is not run and the walk stops there. A perf-ratchet check whose only findings are
- * `raised:` (a ceiling above main's, which an older tag has when main lowered it after) and `grew:` (the bundle 1% or
- * more above main's tip, which the tag is compared with as it is now) counts as a pass: both are the rule for a PR
- * before its merge, not a result of a merged tag.
+ * `raised:` (a ceiling above the tag before's) and `grew:` (the bundle 1% or
+ * more above the tag before's; the first tag is compared with origin/main's tip, #4219) counts as a pass: both are the rule for a PR
+ * before its merge, not a result of a merged tag. So does `improved:` (a ceiling that can be lowered: the Release keeps the lines), and an `over:` when
+ * no file changed since the tag that passed last reaches perf-bench (selectPerf, #4124): a wobble of the measure, kept in the Release.
  * Output: one line of JSON, the tags looked at, newest first. Exit 0 = the newest tag passed (now or before), 1 = it
  * failed, 2 = nothing judged (no tag, no Release, not run, or recordings asked for and missing).
  * With SWITCHBOARD_FIXTURES given, a tag whose recordings are missing on this host is not run and gets no result: that
@@ -26,21 +27,27 @@
  * (a fail, no result and no Release are passed over), only from the tags in `<commit>`'s history when given (the
  * public sync gives the running release's commit). Exit 0 = printed, 1 = no tag passed (prints nothing), 2 = bad
  * arguments or an unknown commit.
+ * A run waits (exit 0, the log says why, no mark anywhere) while fewer than SWITCHBOARD_TAG_CI_MIN_TAGS (default 8) tags
+ * have no result, counted from the newest to the first tag with a result, and the oldest of them is younger than
+ * SWITCHBOARD_TAG_CI_MAX_WAIT_HOURS (default 6) by its `creatordate` (#4079): the schedule can run more often than that.
  * After its report, the scheduled run (Switchboard itself, no --repo) looks at the public sync (#3601,
  * scripts/public-stall.ts): a tag newer than the newest pass for more than 24 hours files a request with the reasons
  * (the tags this run did not judge give theirs, e.g. the missing recordings), or comments on the open one. A failure
  * there is written to stderr and leaves the exit code alone.
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { forgeTargetOf, originOf } from "../ops-kit/src/forge.ts";
 import { withHeavySlot } from "../ops-kit/src/heavy.ts";
 import { findSecrets, hostAws, type HostAws } from "../ops-kit/src/secrets.ts";
+import { repoFiles, selectPerf } from "./test-select.ts";
 import { FILE_DEPS, type Filed, type OpenRequest, commentRequest, fileRequest, openRequests, requestText } from "./file-request.ts";
+import { BYTES_RECORDS_PATH, COUNTS_RECORDS_PATH, envOf, RECORDS_BRANCH, RECORDS_PATH } from "./perf-ratchet.ts";
 import { requireRecordings } from "./recordings.ts";
 import { must, repairReleases, withReleaseLock } from "./release-tag.ts";
-import { remoteRepo, runCheckout, selectTests, step, stepEnv, TargetError, type Deps } from "./local-ci.ts";
+import { checkoutSteps, onlyPerf, perfVerdict, recordBundle, recordBytes, recordCounts, remoteRepo, runCheckout, selectTests, step, stepEnv, TargetError, type Deps } from "./local-ci.ts";
 
 /** A result's line in a Release's body: pass or fail, then the tag's commit. */
 export const TAG_CI_RESULT = /^\[tag-ci\] (pass|fail) ([0-9a-f]{40})(?=\s|$)/m;
@@ -64,12 +71,18 @@ export function hidePaths(line: string, roots: Record<string, string> = {}, home
  * named, at most 20 lines, without host paths. When the step's name or its lines have a value usable for auth
  * (`findSecrets`), none of them is written: the mark stays, a note says why the rest is missing.
  */
-export function resultSection(r: { sha: string; ok: boolean; step?: string; fails?: string[]; raisedOnly?: boolean; selection?: string }, host: HostAws = hostAws()): string {
-  const out = ["", "", "## CI", `[tag-ci] ${r.ok ? "pass" : "fail"} ${r.sha}${r.raisedOnly ? " (raised/grew only)" : ""}`, "", "`bun scripts/tag-ci.ts` がこのタグのコミットで `.github/workflows/ci.yml` の手順（local-ci と同じ）を回した。"];
+export function resultSection(r: { sha: string; ok: boolean; step?: string; fails?: string[]; raisedOnly?: boolean; improved?: boolean; wobble?: string; remeasured?: string; selection?: string }, host: HostAws = hostAws()): string {
+  // the mark's first part (`[tag-ci] pass <sha>`) is what tagResult reads; the words after it say why a perf finding still passes
+  const why = r.wobble !== undefined ? " (wobble: perf-bench に届く変更なし)" : r.remeasured !== undefined ? ` (wobble: 前のタグ ${r.remeasured} も同じ数で外れた)` : r.raisedOnly || r.improved ? ` (${[r.raisedOnly ? "raised/grew" : "", r.improved ? "improved" : ""].filter(Boolean).join("/")} only)` : "";
+  const out = ["", "", "## CI", `[tag-ci] ${r.ok ? "pass" : "fail"} ${r.sha}${why}`, "", "`bun scripts/tag-ci.ts` がこのタグのコミットで `.github/workflows/ci.yml` の手順（local-ci と同じ）を回した。"];
   // an unnamed step's name is its script's first line, which may hold a path or a value as much as its output
   const step = hidePaths(r.step ?? "");
   const detail = [
-    ...(r.raisedOnly ? [`\`${step}\` は main より上げた上限（raised）か main の先端からの 1% 以上の増加（grew）だけで落ちた。マージ済みのタグでは pass と数える:`] : r.ok ? [] : [`\`${step}\` が落ちた:`]),
+    ...(r.raisedOnly ? [`\`${step}\` は前のタグより上げた上限（raised）か前のタグからの 1% 以上の増加（grew）だけで落ちた。マージ済みのタグでは pass と数える:`] : []),
+    ...(r.improved ? [`\`${step}\` は下げられる上限（improved）があった。下げられる上限（\`bun scripts/perf-ratchet.ts update\`）:`] : []),
+    ...(r.wobble !== undefined ? [`\`${step}\` の over は揺れ（範囲に perf-bench に届く変更なし: ${hidePaths(r.wobble)}）。pass と数える:`] : []),
+    ...(r.remeasured !== undefined ? [`\`${step}\` の over は揺れ（前のタグ ${r.remeasured} を同じ手順で測り直しても同じ数で外れた）。pass と数える:`] : []),
+    ...(r.ok ? [] : [`\`${step}\` が落ちた:`]),
     ...(r.fails ?? []).slice(0, 20).map((l) => `    ${hidePaths(l)}`),
   ];
   if (detail.length === 0) return `${out.join("\n")}\n`;
@@ -127,6 +140,59 @@ export interface TagCiDeps extends Omit<Deps, "sh"> {
   sync?: () => Promise<void>;
   /** Creates the Releases missing from the newest tags and returns their names (release-tag.ts's repairReleases). */
   repair?: () => Promise<string[]>;
+  /**
+   * Given for Switchboard itself only (no --repo): the run may wait for more tags to pile up (#4079) and calls this
+   * with the reason, as logged, instead of running. Without it the run never waits (the other repositories keep
+   * running on every scheduled run: the PBI leaves their frequency alone).
+   */
+  onWait?: (reason: string) => void;
+  /** The environment the wait's limits are read from (default process.env). */
+  env?: Record<string, string | undefined>;
+  /** The current time in ms (default Date.now()). */
+  now?: () => number;
+}
+
+/** The tags without a result that pile up before a run (#4079): the number that makes it run, and the hours after which the oldest does. */
+export const DEFAULT_MIN_TAGS = 8;
+export const DEFAULT_MAX_WAIT_HOURS = 6;
+
+/** A non-negative number from an environment value; anything else (empty, text, negative) is `fallback`. */
+export function envNumber(raw: string | undefined, fallback: number, integer = false): number {
+  const n = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
+  return Number.isFinite(n) && n >= 0 && (!integer || Number.isInteger(n)) ? n : fallback;
+}
+
+/**
+ * Why this run waits, or null to run: `pending` = the tags without a result, newest first, `at` in ms. It waits while
+ * there are fewer than `min` of them and the oldest is younger than `maxWaitMs`. No pending tag is not a wait: the walk
+ * reads what the newest tag has.
+ */
+export function waitForMore(pending: Array<{ tag: string; at: number }>, now: number, min: number, maxWaitMs: number): string | null {
+  if (pending.length === 0 || pending.length >= min) return null;
+  const oldest = pending.reduce((a, b) => (b.at < a.at ? b : a));
+  const age = now - oldest.at;
+  if (age >= maxWaitMs) return null;
+  const hours = (ms: number) => Math.round((ms / 3_600_000) * 10) / 10;
+  return `結果の無いタグが ${pending.length} 件（${min} 件未満）で、最古の ${oldest.tag} から ${hours(age)} 時間（${hours(maxWaitMs)} 時間未満）。溜まるか時間がたつまで回さない`;
+}
+
+/** The tags of `tags` (newest first) with no result yet, read from the newest until a tag with a result, a Release that cannot be read, or `limit` of them. */
+async function pendingTags(tags: string[], root: string, repo: string, limit: number, d: TagCiDeps): Promise<Array<{ tag: string; at: number }>> {
+  const dates = new Map<string, number>();
+  for (const line of (await d.sh(["git", "-C", root, "for-each-ref", "--format=%(refname:short)\t%(creatordate:unix)", "refs/tags/v*"])).split("\n")) {
+    const [tag, unix] = line.split("\t");
+    if (tag && Number.isFinite(Number(unix)) && unix) dates.set(tag, Number(unix) * 1000);
+  }
+  const out: Array<{ tag: string; at: number }> = [];
+  for (const tag of tags) {
+    if (out.length >= limit) break;
+    const sha = (await d.sh(["git", "-C", root, "rev-parse", `${tag}^{commit}`])).trim();
+    const body = await d.sh(["gh", "release", "view", tag, "-R", repo, "--json", "body", "-q", ".body"]).catch(() => null);
+    if (body === null || tagResult(body, sha)) break;
+    // a date that cannot be read counts as old: the run goes on rather than waiting for ever
+    out.push({ tag, at: dates.get(tag) ?? 0 });
+  }
+  return out;
 }
 
 /** The tags run in one go: a step of the walk takes minutes, and a run that is cut leaves no result. */
@@ -135,14 +201,46 @@ export const MAX_TAG_RUNS = 3;
 /** `step` / `fails`: a fail run now, the failed step and its lines (without host paths). */
 export interface TagCiEntry { tag: string; sha: string; result: "pass" | "fail"; ran: boolean; step?: string; fails?: string[] }
 
+/**
+ * main's bundle and bytes as this tag's run measured them (perf-base.json in `dir`) and the tag's own counts
+ * (perf-result.json), pass or fail, on the records branch (#4105; docs/design/perf.md の「bundle の推移」). A failure is logged and changes nothing; a GitLab target is not recorded.
+ */
+export async function recordMeasures(repo: string, root: string, dir: string, tag: string, sha: string, d: Pick<TagCiDeps, "sh" | "log">): Promise<void> {
+  const at = new Date().toISOString();
+  await recordOne(root, d, "bundle", RECORDS_PATH, (r, dr, t, sh) => recordBundle(r, dr, t, sh), repo, dir, at);
+  await recordOne(root, d, "bytes", BYTES_RECORDS_PATH, (r, dr, t, sh) => recordBytes(r, dr, t, sh), repo, dir, at);
+  await recordCountsOf(repo, root, dir, tag, sha, d, at);
+}
+
+/** The counts of `dir`'s perf-result.json as `tag`'s row on the records branch (a measure of its own: a remeasure of an older tag records them too). */
+async function recordCountsOf(repo: string, root: string, dir: string, tag: string, sha: string, d: Pick<TagCiDeps, "sh" | "log">, at = new Date().toISOString()): Promise<void> {
+  await recordOne(root, d, "counts", COUNTS_RECORDS_PATH, (r, dr, t, sh) => recordCounts(r, dr, t, envOf(undefined), tag, sha, sh), repo, dir, at);
+}
+
+async function recordOne(
+  root: string,
+  d: Pick<TagCiDeps, "sh" | "log">,
+  what: string,
+  path: string,
+  record: (repo: string, dir: string, at: string, sh: TagCiDeps["sh"]) => Promise<"recorded" | "none">,
+  repo: string,
+  dir: string,
+  at: string,
+): Promise<void> {
+  await (async () => (forgeTargetOf(root, originOf(root)).service === "gitlab" ? "none" : record(repo, dir, at, d.sh)))().then(
+    (r) => r === "recorded" && d.log(`${what}の記録: ${RECORDS_BRANCH}/${path} に足した`),
+    (e: unknown) => d.log(`${what}の記録に失敗（結果は変えない）: ${e instanceof Error ? e.message : String(e)}`),
+  );
+}
+
 /** One tag's CI in its own worktree; the result to record. */
-async function runTag(tag: string, before: string | undefined, sha: string, repo: string, root: string, d: TagCiDeps, cache: string) {
+async function runTag(tag: string, before: string | undefined, sha: string, repo: string, root: string, d: TagCiDeps, cache: string, memo: Remeasures) {
   mkdirSync(cache, { recursive: true });
   const dir = mkdtempSync(join(cache, `switchboard.tag-ci-${tag}.`));
   const tmp = mkdtempSync(join(tmpdir(), `switchboard.tag-ci-${tag}-tmp.`));
   try {
     await d.sh(["git", "-C", root, "worktree", "add", "-q", "--detach", dir, sha]);
-    const env = stepEnv(tmp);
+    const env = { ...stepEnv(tmp), ...(before ? { PERF_BASE_REF: before } : {}) };
     // a checkout without the list (another repository) has no recordings to ask for; one that cannot say is not judged
     if (requireRecordings() && existsSync(join(dir, "scripts/fixtures.ts"))) {
       const vars = Object.entries(env).map(([k, v]) => `${k}=${v}`);
@@ -152,19 +250,28 @@ async function runTag(tag: string, before: string | undefined, sha: string, repo
       if (missing.length > 0) return { missing };
     }
     const run = await runCheckout(dir, env, `tag-ci-${repo.replaceAll("/", "_")}`, d, cache);
+    await recordMeasures(repo, root, dir, tag, sha, d);
     // every failed step: a perf step's failure does not stop bun test (#2945)
     const failed = run.results.filter((x) => x.code !== 0);
     const p = run.perf;
-    // a pass by raised / grew only: the check is the one failure and every step ran (none was left unrun after it)
-    const raisedOnly = !run.ok && !!p && !p.unknown && p.raised.length + p.grew.length > 0 && p.over.length + p.improved.length === 0
-      && failed.length === 1 && failed[0]!.run.includes("perf-ratchet") && run.results.length === run.steps.length;
+    // a pass by perf findings that are not a regression of a merged tag: the check is the one failure and every step ran (none was left
+    // unrun after it); raised / grew / improved always, an over only when the range since the tag that passed last holds nothing that reaches perf-bench (a wobble)
+    const perfOnly = !run.ok && !!p && !p.unknown && failed.length === 1 && failed[0]!.run.includes("perf-ratchet") && run.results.length === run.steps.length;
+    const range = perfOnly && p!.over.length > 0 ? await perfRange(tag, repo, root, dir, d) : null;
+    const wobble = range && !range.reaches ? `${range.last}..${tag}` : undefined;
+    // a change that reaches perf-bench: the tag that passed last is measured again, and only an over it did not have is the tag's own (#4124)
+    const again = range?.reaches ? await sameOver(range.last, p!.over, dir, env, repo, root, d, cache, memo) : undefined;
+    const remeasured = again?.same ? range!.last : undefined;
+    const perfPass = perfOnly && (p!.over.length === 0 || wobble !== undefined || remeasured !== undefined);
+    const raisedOnly = perfPass && p!.raised.length + p!.grew.length > 0;
+    const improved = perfPass && p!.improved.length > 0;
     // failLines has the check's raised: and grew: lines already. The Release keeps 20 lines: each failed step gets its share, so
     // a check's many lines do not push bun test's (fail) lines out
-    const fails = raisedOnly ? [...p!.raised, ...p!.grew] : failed.flatMap((f) => (f.fails ?? []).slice(0, Math.floor(20 / failed.length)));
+    const fails = perfPass ? [...p!.raised, ...p!.grew, ...p!.improved, ...p!.over] : [...(again?.fine ?? []), ...failed.flatMap((f) => (f.fails ?? []).slice(0, Math.floor(20 / failed.length)))];
     const test = run.outputs["bun test"];
     const selection = test !== undefined ? await selectionLine(test, before, dir, env, d) : undefined;
     const step = failed.length ? failed.map((f) => f.name).join(" / ") : undefined;
-    return { sha, ok: run.ok || raisedOnly, step, fails: fails.map((l) => hidePaths(l, { [dir]: "<checkout>", [tmp]: "<tmp>" })), raisedOnly, selection };
+    return { sha, ok: run.ok || perfPass, step, fails: fails.map((l) => hidePaths(l, { [dir]: "<checkout>", [tmp]: "<tmp>" })), raisedOnly, improved, wobble, remeasured, selection };
   } finally {
     await d.sh(["git", "-C", root, "worktree", "remove", "--force", dir]).catch(() => undefined);
     rmSync(dir, { recursive: true, force: true });
@@ -174,6 +281,15 @@ async function runTag(tag: string, before: string | undefined, sha: string, repo
 
 /** Walks the tags of `repo` (its clone at `root`) newest first: see the file's comment. `cache`: the worktrees and failure logs (~/.cache; tests give their own). */
 export async function tagCi(d: TagCiDeps, repo: string, root: string, cache = join(homedir(), ".cache"), host: HostAws = hostAws()): Promise<TagCiEntry[]> {
+  const memo: Remeasures = new Map();
+  try {
+    return await walkTags(d, repo, root, cache, host, memo);
+  } finally {
+    for (const r of memo.values()) await r.then((m) => ("resultFile" in m ? rmSync(dirname(m.resultFile), { recursive: true, force: true }) : undefined), () => undefined);
+  }
+}
+
+async function walkTags(d: TagCiDeps, repo: string, root: string, cache: string, host: HostAws, memo: Remeasures): Promise<TagCiEntry[]> {
   // one heavy slot for the whole run (every tag it walks): the same as local-ci, whose steps it runs with every test
   return d.slot(`tag-ci ${repo}`, async () => {
     await d.sh(["git", "-C", root, "fetch", "-q", "origin", "--tags", "--force"]);
@@ -194,6 +310,18 @@ export async function tagCi(d: TagCiDeps, repo: string, root: string, cache = jo
       }
     }
     const tags = await listTags(root, d.sh);
+    // fewer than MIN tags without a result and the oldest not yet MAX_WAIT old: wait for more (#4079); no mark, the Release is untouched
+    const env = d.env ?? process.env;
+    const min = envNumber(env.SWITCHBOARD_TAG_CI_MIN_TAGS, DEFAULT_MIN_TAGS, true);
+    const maxWaitMs = envNumber(env.SWITCHBOARD_TAG_CI_MAX_WAIT_HOURS, DEFAULT_MAX_WAIT_HOURS) * 3_600_000;
+    if (d.onWait && min > 0) {
+      const reason = waitForMore(await pendingTags(tags, root, repo, min, d), d.now?.() ?? Date.now(), min, maxWaitMs);
+      if (reason !== null) {
+        d.log(reason);
+        d.onWait(reason);
+        return [];
+      }
+    }
     const out: TagCiEntry[] = [];
     for (const [i, tag] of tags.entries()) {
       const sha = (await d.sh(["git", "-C", root, "rev-parse", `${tag}^{commit}`])).trim();
@@ -209,14 +337,14 @@ export async function tagCi(d: TagCiDeps, repo: string, root: string, cache = jo
         break;
       }
       d.log(`${tag}（${sha.slice(0, 7)}）を回す`);
-      const r = await runTag(tag, tags[i + 1], sha, repo, root, d, cache);
+      const r = await runTag(tag, tags[i + 1], sha, repo, root, d, cache, memo);
       if ("missing" in r) {
         d.log(`${tag}: 録画が足りないので判定しない（印は書かない）: ${r.missing.join(" ")}`);
         d.onSkip?.(tag, r.missing);
         break;
       }
       await d.sh(["gh", "release", "edit", tag, "-R", repo, "--notes-file", "-"], undefined, `${body.trimEnd()}${resultSection(r, host)}`.trimStart());
-      d.log(`${tag}: ${r.ok ? "pass" : "fail"}${r.raisedOnly ? "（raised/grew only）" : ""}`);
+      d.log(`${tag}: ${r.ok ? "pass" : "fail"}${r.raisedOnly ? "（raised/grew only）" : ""}${r.improved ? "（improved only）" : ""}${r.wobble !== undefined || r.remeasured !== undefined ? "（wobble）" : ""}`);
       out.push({ tag, sha, result: r.ok ? "pass" : "fail", ran: true, ...(r.ok ? {} : { step: hidePaths(r.step ?? ""), fails: r.fails }) });
       if (r.ok) break;
       if (out.length === 1) await d.onNewest?.(out);
@@ -267,7 +395,7 @@ export const REQUEST_TITLE = "要望: タグの CI が ";
  * step, its lines or the commits hold a value usable for auth, they are left out and a note says so.
  */
 export function failureRequest(
-  r: { tag: string; sha: string; step: string; fails: string[]; lastPass: string | null; commits: string[] },
+  r: { tag: string; sha: string; step: string; fails: string[]; lastPass: string | null; commits: string[]; repo?: string },
   date = new Date().toISOString().slice(0, 10),
   host: HostAws = hostAws(),
 ): { title: string; body: string } {
@@ -282,6 +410,10 @@ export function failureRequest(
     "行:",
     ...(fails.length ? fails.slice(0, 20).map((l) => `  ${l}`) : ["  （行なし）"]),
     `最後に通ったタグ: ${r.lastPass ?? "不明（遡りで見つからない。前のタグの Release の [tag-ci] を見る）"}`,
+    // one squash merge per commit and one tag per merge: the count is all of `commits` (only 50 are listed)
+    r.lastPass
+      ? `戻す先の候補: ${r.lastPass}（${r.tag} まで ${r.commits.length} 件のマージ。戻すなら bun scripts/rollback-pr.ts ${r.lastPass} --repo ${r.repo ?? "<owner/name>"}）`
+      : "戻す先の候補: 不明（最後に通ったタグが見つからない。前のタグの Release の [tag-ci] を見て、通ったタグを探す）",
     ...(range ? [`その間のコミット（${range}）:`, ...(commits.length ? commits.slice(0, 50).map((l) => `  ${l}`) : ["  （なし）"])] : []),
   ];
   const safe = findSecrets([step, ...detail].join("\n"), host).length === 0;
@@ -334,18 +466,108 @@ export function failedIn(releaseBody: string): { step: string; fails: string[] }
   return m ? { step: m[1]!, fails: m[2]!.split("\n").filter(Boolean).map((l) => l.slice(4)) } : null;
 }
 
-/** The newest tag before the walk's last one whose Release says pass, read without running (at most 50; a tag without a Release stops it). */
-async function lastPassBefore(entries: TagCiEntry[], repo: string, root: string, sh: TagCiDeps["sh"]): Promise<string | null> {
-  const seen = entries.find((e) => e.result === "pass");
-  if (seen) return seen.tag;
+/** The newest tag before `tag` whose Release says pass, read without running (at most 50; a tag without a Release stops it). */
+async function passBefore(tag: string, repo: string, root: string, sh: TagCiDeps["sh"]): Promise<string | null> {
   const tags = await listTags(root, sh);
-  for (const tag of tags.slice(tags.indexOf(entries.at(-1)!.tag) + 1, tags.indexOf(entries.at(-1)!.tag) + 51)) {
-    const sha = (await sh(["git", "-C", root, "rev-parse", `${tag}^{commit}`])).trim();
-    const body = await sh(["gh", "release", "view", tag, "-R", repo, "--json", "body", "-q", ".body"]).catch(() => null);
+  for (const t of tags.slice(tags.indexOf(tag) + 1, tags.indexOf(tag) + 51)) {
+    const sha = (await sh(["git", "-C", root, "rev-parse", `${t}^{commit}`])).trim();
+    const body = await sh(["gh", "release", "view", t, "-R", repo, "--json", "body", "-q", ".body"]).catch(() => null);
     if (body === null) return null;
-    if (tagResult(body, sha) === "pass") return tag;
+    if (tagResult(body, sha) === "pass") return t;
   }
   return null;
+}
+
+/** The newest tag before the walk's last one whose Release says pass (a pass the walk met first). */
+async function lastPassBefore(entries: TagCiEntry[], repo: string, root: string, sh: TagCiDeps["sh"]): Promise<string | null> {
+  return entries.find((e) => e.result === "pass")?.tag ?? passBefore(entries.at(-1)!.tag, repo, root, sh);
+}
+
+/**
+ * The tag that passed last before `tag` (within 50) and whether a file changed since it reaches perf-bench (selectPerf: apps/web,
+ * packages, perf-budget.json): when none does, an `over` in the range is a wobble of the measure, not of the code (#4124). null = no
+ * tag passed before, or the range cannot be read: those stay a fail.
+ */
+async function perfRange(tag: string, repo: string, root: string, dir: string, d: Pick<TagCiDeps, "sh">): Promise<{ last: string; reaches: boolean } | null> {
+  try {
+    const last = await passBefore(tag, repo, root, d.sh);
+    if (last === null) return null;
+    const changed = (await d.sh(["git", "-C", root, "diff", "--name-only", `${last}..${tag}`])).split("\n").map((l) => l.trim()).filter(Boolean);
+    return { last, reaches: selectPerf(changed, repoFiles(dir), (p) => readFileSync(join(dir, p), "utf8")).run };
+  } catch {
+    return null;
+  }
+}
+
+/** The measures of the tags that passed last, one per tag for the whole walk (several failing tags share the one before them). */
+type Remeasures = Map<string, ReturnType<typeof remeasure>>;
+
+/**
+ * Whether every `over` of the tag (`over` lines of perf-ratchet) is also over for `last`, the tag that passed last, measured again
+ * by the same steps and judged against this checkout's base and ceilings. `same` = all of them; `fine` = the lines of the ones `last` kept
+ * under the ceiling. undefined = the measure or its judgement failed: the fail stays as it was.
+ */
+async function sameOver(last: string, over: string[], dir: string, env: Record<string, string>, repo: string, root: string, d: TagCiDeps, cache: string, memo: Remeasures): Promise<{ same: boolean; fine: string[] } | undefined> {
+  if (!memo.has(last)) memo.set(last, d.sh(["git", "-C", root, "rev-parse", `${last}^{commit}`]).then((sha) => remeasure(last, sha.trim(), repo, root, d, cache), (e: unknown) => ({ failed: String(e) })));
+  const m = await memo.get(last)!;
+  if (!("resultFile" in m)) {
+    d.log(`前のタグ ${last} を測り直せなかった（今までどおり fail）: ${m.failed}`);
+    return undefined;
+  }
+  const checked = await d.step(`bun scripts/perf-ratchet.ts check '${m.resultFile}' --base perf-base.json`, dir, env);
+  const before = perfVerdict(checked.output);
+  // A check that passes prints no verdict line (`perf ratchet: ok`): every key of the tag before was under its ceiling
+  if (before.unknown && checked.code !== 0) {
+    d.log(`前のタグ ${last} の判定を読めなかった（今までどおり fail）`);
+    return undefined;
+  }
+  const key = (l: string) => /^over: (\S+) = /.exec(l)?.[1];
+  const kept = new Set(before.over.map(key));
+  const values = numbers(JSON.parse(readFileSync(m.resultFile, "utf8")));
+  const fine = over.filter((l) => !kept.has(key(l))).map((l) => `前のタグ ${last} では収まった: ${key(l)} = ${values.get(key(l) ?? "") ?? "?"} / ${/ = (\S+) /.exec(l)?.[1] ?? "?"}`);
+  return { same: fine.length === 0, fine };
+}
+
+/** Every number of a JSON value by its dotted path (the keys perf-ratchet prints). */
+function numbers(v: unknown, path = "", out = new Map<string, number>()): Map<string, number> {
+  if (typeof v === "number") out.set(path, v);
+  else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) numbers(x, path ? `${path}.${k}` : k, out);
+  return out;
+}
+
+/**
+ * The perf steps of the tag `tag` again, in a worktree of its own (the steps of `onlyPerf`: install, web build, perf-bench --runs 5), and
+ * its perf-result.json kept in a folder of its own (the caller removes it) with its counts recorded like a tag CI's own. `failed` =
+ * the worktree or a step failed, or no result came out.
+ */
+export async function remeasure(tag: string, sha: string, repo: string, root: string, d: TagCiDeps, cache: string): Promise<{ resultFile: string } | { failed: string }> {
+  mkdirSync(cache, { recursive: true });
+  const dir = mkdtempSync(join(cache, `switchboard.tag-ci-${tag}.`));
+  const tmp = mkdtempSync(join(tmpdir(), `switchboard.tag-ci-${tag}-tmp.`));
+  try {
+    await d.sh(["git", "-C", root, "worktree", "add", "-q", "--detach", dir, sha]);
+    const env = stepEnv(tmp);
+    const steps = onlyPerf(await checkoutSteps(dir, env));
+    if (steps.length === 0) return { failed: "CI に perf の手順が無い" };
+    for (const s of steps) {
+      d.log(`▶ ${tag} を測り直す: ${s.name}`);
+      const r = await d.step(s.run, dir, env);
+      if (r.code !== 0) return { failed: `${s.name} が exit ${r.code}` };
+    }
+    const made = join(dir, "perf-result.json");
+    if (!existsSync(made)) return { failed: "perf-result.json が残らなかった" };
+    await recordCountsOf(repo, root, dir, tag, sha, d);
+    const keep = mkdtempSync(join(cache, `switchboard.tag-ci-remeasure-${tag}.`));
+    const resultFile = join(keep, "perf-result.json");
+    copyFileSync(made, resultFile);
+    return { resultFile };
+  } catch (e) {
+    return { failed: e instanceof Error ? e.message : String(e) };
+  } finally {
+    await d.sh(["git", "-C", root, "worktree", "remove", "--force", dir]).catch(() => undefined);
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -375,7 +597,7 @@ export async function followUp(entries: TagCiEntry[], repo: string, root: string
   }
   const lastPass = await lastPassBefore(entries, repo, root, d.sh);
   const commits = lastPass ? (await d.sh(["git", "-C", root, "log", "--format=%h %s", `${lastPass}..${newest.tag}`])).split("\n").filter(Boolean) : [];
-  const req = failureRequest({ tag: newest.tag, sha: newest.sha, ...failed, lastPass, commits }, date, host);
+  const req = failureRequest({ tag: newest.tag, sha: newest.sha, ...failed, lastPass, commits, repo }, date, host);
   if (!self) {
     d.print(`要望は立てない（--repo）。止まった理由として報告する:\n${req.title}\n\n${req.body}`);
     return;
@@ -393,7 +615,7 @@ export async function followUp(entries: TagCiEntry[], repo: string, root: string
     d.log(`要望: 既存 ${r.open} にコメントした（起票しない）`);
   }
   // filed before the walk, or by a run cut after it: a nearer pass narrows the commits
-  if (lastPass && !said.includes(`最後に通ったタグ: ${lastPass}`)) await d.comment(r.open, `最後に通ったタグ: ${lastPass}（間のコミット ${commits.length} 件）`);
+  if (lastPass && !said.includes(`最後に通ったタグ: ${lastPass}`)) await d.comment(r.open, `最後に通ったタグ: ${lastPass}（間のコミット ${commits.length} 件）。戻す先の候補: ${lastPass}（間のマージ ${commits.length} 件。戻すなら bun scripts/rollback-pr.ts ${lastPass} --repo ${repo}）`);
 }
 
 /** The repository and its clone from `[--repo <owner/name>]`, as local-ci's resolveTarget reads them (GitHub only: the results go on GitHub Releases). */
@@ -459,6 +681,8 @@ if (import.meta.main) {
     }
   };
   const missingOf: Record<string, string[]> = {};
+  let waited = false;
+  const onWait = () => void (waited = true);
   const onSkip = (tag: string, missing: string[]) => void (missingOf[tag] = missing);
   const repair = async () => {
     const at = (cmd: string[], input?: string) => {
@@ -471,7 +695,7 @@ if (import.meta.main) {
   // fixtures.ts's own clone is t.root without --repo; its output goes to stderr: stdout is the JSON only
   const sync = async () => void log((await sh([process.execPath, join(import.meta.dir, "fixtures.ts"), "sync"], t.root)).trim());
   const self = !process.argv.includes("--repo");
-  const entries = await tagCi({ sh, step, log, onNewest: report, onSkip, repair, ...(self ? { sync } : {}), slot: (name, fn) => withHeavySlot(name, fn) }, t.repo, t.root);
+  const entries = await tagCi({ sh, step, log, onNewest: report, onSkip, repair, ...(self ? { sync, onWait } : {}), slot: (name, fn) => withHeavySlot(name, fn) }, t.repo, t.root);
   console.log(JSON.stringify(entries));
   await report(entries);
   if (!process.argv.includes("--repo")) {
@@ -484,5 +708,6 @@ if (import.meta.main) {
       console.error(`公開の同期の見張り: 判定か起票ができなかった（${(e as Error).message}）`);
     }
   }
-  process.exit(tagCiExit(entries));
+  // a wait is not "nothing judged": the next run decides
+  process.exit(waited ? 0 : tagCiExit(entries));
 }

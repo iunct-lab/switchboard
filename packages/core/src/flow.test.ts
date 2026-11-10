@@ -1,7 +1,7 @@
 // test-reads: none
 import { describe, expect, test } from "bun:test";
 import { Db } from "./db.ts";
-import { backlogGrowth, fetchFlow, fetchMergedPrs, FlowCache, FlowError, flowOfPbi, flowOfStored, flowScope, flowView, launchShare, weekStartOf, repoOfRemote, requestOf, summarize, withSwitchboardTasks, type RawComment, type RawPbi, type RawPr } from "./flow.ts";
+import { actualsByStoryPoints, backlogGrowth, fetchFlow, fetchMergedPrs, FlowCache, FlowError, flowOfPbi, flowOfStored, flowScope, flowView, launchShare, weekStartOf, repoOfRemote, requestOf, summarize, withSwitchboardTasks, type RawComment, type RawPbi, type RawPr } from "./flow.ts";
 import type { StoredRecords } from "../../../ops-kit/src/backlog-client.ts";
 import { loadConfig } from "./config.ts";
 import { startServer } from "./server.ts";
@@ -55,6 +55,7 @@ describe("flow", () => {
     });
     expect(f.reviewRounds).toEqual([2, 2, 3]);
     expect(f.storyPoints).toBe(5);
+    expect(f.taskIssues).toBe(3); // the PBI's Task Issues (#11, #12, #13)
   });
 
   test("missing markers are unknown", () => {
@@ -257,6 +258,27 @@ describe("summarize", () => {
     expect(s.closed).toBe(3);
     expect(s.storyPoints).toBe(8);
     expect(summarize([]).bottleneck).toBeNull();
+  });
+});
+
+describe("actuals by story points", () => {
+  test("count, Task Issues and the Tasks' run time and cost as p25 / p50 / p75; no points and unread Tasks are left out", () => {
+    const pbi = (sp: number | null, issues: number, tasks: { runMs: number; costUsd: number } | null) =>
+      ({ storyPoints: sp, taskIssues: issues, tasks: tasks && { count: 1, implementLaunches: 1, ...tasks } }) as never;
+    const three = [[1, 10, 1], [2, 20, 2], [4, 30, 3], [9, 40, 10]].map(([i, ms, usd]) => pbi(3, i!, { runMs: ms! * MIN, costUsd: usd! }));
+    const s = actualsByStoryPoints([
+      pbi(5, 8, { runMs: 60 * MIN, costUsd: 20 }), ...three, pbi(5, 6, { runMs: 90 * MIN, costUsd: 40 }),
+      pbi(null, 99, { runMs: 1, costUsd: 1 }), pbi(3, 5, null),
+    ]);
+    expect(s.map((a) => [a.storyPoints, a.count])).toEqual([[3, 5], [5, 2]]); // smallest first; the null one is not counted
+    // SP 3: Task Issues [1, 2, 4, 9, 5] -> sorted 1 2 4 5 9; the one with no Tasks read is out of run time and cost
+    expect(s[0]!.taskIssues).toEqual({ p25: 2, p50: 4, p75: 5 });
+    expect(s[0]!.runMs).toEqual({ p25: 10 * MIN, p50: 25 * MIN, p75: 30 * MIN });
+    expect(s[0]!.costUsd).toEqual({ p25: 1, p50: 2.5, p75: 3 });
+    expect(s[1]!.taskIssues).toEqual({ p25: 6, p50: 7, p75: 8 });
+    expect(s[1]!.costUsd).toEqual({ p25: 20, p50: 30, p75: 40 });
+    expect(actualsByStoryPoints([pbi(2, 1, null)])[0]!.costUsd).toEqual({ p25: null, p50: null, p75: null });
+    expect(actualsByStoryPoints([])).toEqual([]);
   });
 });
 

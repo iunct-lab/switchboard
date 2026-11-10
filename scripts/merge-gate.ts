@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { currentRepo, originRepo } from "./repo.ts";
 import { LOCAL_CI_RESULT, sh } from "./local-ci";
 import { forgeTargetOf, originOf, type ForgeTarget } from "../ops-kit/src/forge.ts";
@@ -46,7 +48,7 @@ export const SECURITY_GROUPS: Record<Exclude<SecurityKind, "security:docs" | "se
   "security:github": glob([".github/**"]),
   // the gate and local CI decide merges like CI does, local-merge makes them (#2489) and forge-resync pushes main (#2705):
   // a small change to them is still the user's to approve (#751)
-  "security:gates": glob(["scripts/merge-gate.ts", "scripts/local-ci.ts", "scripts/local-merge.ts", "scripts/forge-resync.ts"]),
+  "security:gates": glob(["scripts/merge-gate.ts", "ops-kit/reversibility.json", "scripts/local-ci.ts", "scripts/local-merge.ts", "scripts/forge-resync.ts"]),
   // Switchboard's own (a --repo without aws/host never meets it): the cloud host runs main's host scripts as root at
   // every start (sb-host-update, #435)
   "security:host": glob(["aws/host/**"]),
@@ -57,8 +59,9 @@ export const SECURITY_GROUPS: Record<Exclude<SecurityKind, "security:docs" | "se
  */
 const INSTRUCTIONS = glob([".claude/skills/**", "ops-kit/skills/**", "**/CLAUDE.md", "**/AGENTS.md", ".github/**"]);
 const HOST_ROOT_NOTE = "（aws/host は起動のたびに root が main から入れて走らせる。root で走る範囲が増えるなら #852 の見直しの契機: docs/design/cloud-hosting.md §6.5）";
+// Design documents are not here: they do not decide what a Task does, and a PR fixes them with the change, so they would
+// match nearly every PR. Whether a PBI's scope holds for them is the main review's (cross-runner-review).
 export const RESPONSIBILITY = [
-  "docs/design/**",
   "**/CLAUDE.md",
   "**/AGENTS.md",
   "ops.config.json",
@@ -74,13 +77,47 @@ const DESIGN_RULES = "README.md の ## Design rules";
  * design-rules: README.md's Design rules).
  */
 export type RecheckKind = "size" | "responsibility" | "migration" | "rescue" | "design-rules";
-export const RECHECK_KINDS: RecheckKind[] = ["size", "responsibility", "migration", "rescue", "design-rules"];
-export const RECHECK_PASS = /^\[recheck\] (size|responsibility|migration|rescue|design-rules) pass ([0-9a-f]{40})\b/;
 export type AskKind = SecurityKind;
-export const ASK_KINDS: AskKind[] = [...SECURITY_KINDS];
 /** The words of the record marks (#752), in this order: who lifted which kind of a large PR. */
 export const MERGE_KINDS = [...SECURITY_KINDS, "rescue", "design-rules", "size", "responsibility", "migration"] as const;
 export type MergeKind = (typeof MERGE_KINDS)[number];
+
+/**
+ * The split into ask and recheck comes from the reversibility table (ops-kit/reversibility.json, docs/design/process-kernel.md K3):
+ * a gateKind whose answer is `irreversible` is asked of the user, any other is lifted by a recheck. The globs stay here.
+ * Throws, with the reason, on a table of the wrong shape (unknown effect or answer, a repeated or missing kind).
+ */
+export const REVERSIBILITY_PATH = join(import.meta.dir, "..", "ops-kit", "reversibility.json");
+/** The fixed vocabulary of the table: the file must list exactly these, so a table cannot widen its own words. */
+const EFFECTS = ["repository", "state", "external", "person"];
+const ANSWERS = ["reversible", "compensable", "irreversible"];
+export function loadReversibility(path = REVERSIBILITY_PATH): { ask: AskKind[]; recheck: RecheckKind[] } {
+  const t = JSON.parse(readFileSync(path, "utf8"));
+  const bad = (m: string): never => { throw new Error(`reversibility table ${path}: ${m}`); };
+  if (t?.v !== 1 || !Array.isArray(t.effects) || !Array.isArray(t.answers) || !Array.isArray(t.rows)) bad("expected { v: 1, effects, answers, rows }");
+  if (JSON.stringify(t.effects) !== JSON.stringify(EFFECTS)) bad(`effects must be ${JSON.stringify(EFFECTS)}`);
+  if (JSON.stringify(t.answers) !== JSON.stringify(ANSWERS)) bad(`answers must be ${JSON.stringify(ANSWERS)}`);
+  const ask: string[] = [];
+  const recheck: string[] = [];
+  const seen = new Set<string>();
+  for (const row of t.rows) {
+    if (!t.effects.includes(row.effect)) bad(`unknown effect ${JSON.stringify(row.effect)} in "${row.op}"`);
+    if (!t.answers.includes(row.answer)) bad(`unknown answer ${JSON.stringify(row.answer)} in "${row.op}"`);
+    if (row.gateKind == null) continue;
+    if (seen.has(row.gateKind)) bad(`kind ${row.gateKind} appears twice`);
+    seen.add(row.gateKind);
+    (row.answer === "irreversible" ? ask : recheck).push(row.gateKind);
+  }
+  const missing = MERGE_KINDS.filter((k) => !seen.has(k));
+  if (missing.length) bad(`kinds missing: ${missing.join(", ")}`);
+  const unknown = [...seen].filter((k) => !(MERGE_KINDS as readonly string[]).includes(k));
+  if (unknown.length) bad(`unknown kinds: ${unknown.join(", ")}`);
+  return { ask: ask as AskKind[], recheck: recheck as RecheckKind[] };
+}
+const REVERSIBILITY = loadReversibility();
+export const RECHECK_KINDS: RecheckKind[] = REVERSIBILITY.recheck;
+export const ASK_KINDS: AskKind[] = REVERSIBILITY.ask;
+export const RECHECK_PASS = new RegExp(`^\\[recheck\\] (${RECHECK_KINDS.join("|")}) pass ([0-9a-f]{40})\\b`);
 /**
  * Record marks for the user's side (#761; the recheck side is RECHECK_PASS): asked with `[merge-ask] <kinds> <head sha>`,
  * answered with `[merge-answer] <yes|no> <kinds> <head sha>` (kinds comma-separated; the comment's createdAt is the time).

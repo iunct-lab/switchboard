@@ -91,6 +91,7 @@ export const task = msgs({
   direct: { ja: "直行で直す", en: "Fix directly" },
   statusIdle: { ja: "未開始", en: "Not started" },
   statusWaiting: { ja: "承認待ち", en: "Waiting for approval" },
+  statusBackground: { ja: "裏で実行中", en: "Running in background" },
   statusDone: { ja: "完了", en: "Done" },
   statusFailed: { ja: "失敗", en: "Failed" },
   statusAborted: { ja: "中断", en: "Aborted" },
@@ -262,6 +263,7 @@ export const task = msgs({
   // TaskView.tsx: the diff tab
   counting: { ja: "集計中…", en: "Counting…" },
   noChanges: { ja: "このタスクによる変更はまだありません（スコープ内の git 作業ツリーとステージングを見ています）。", en: "No changes from this task yet (looking at the git working tree and staging in scope)." },
+  diffRemoved: { ja: "このタスクが書いた場所は削除済みのため、差分を出せません: {path}", en: "The place this task wrote to has been deleted, so no diff can be shown: {path}" },
   staging: { ja: "ステージング", en: "Staging" },
   worktree: { ja: "作業ツリー", en: "Working tree" },
   openInVscode: { ja: "VS Code で開く", en: "Open in VS Code" },

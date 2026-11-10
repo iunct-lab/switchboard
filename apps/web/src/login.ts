@@ -15,7 +15,7 @@ export type LoginRoute = { kind: "passkey"; url: string } | { kind: "token" } | 
 
 export function loginRoute(o: { authorized: boolean; hasToken: boolean; mode: LoginMode | undefined; path: string }): LoginRoute {
   if (o.authorized) return { kind: "none" };
-  if (o.mode !== "passkey") return o.hasToken ? { kind: "none" } : { kind: "token" };
+  if (o.mode !== "passkey") return { kind: "token" }; // a saved token that the daemon refuses is invalid: the field comes back (#3740)
   const [pathname, query = ""] = o.path.split("?", 2);
   const params = new URLSearchParams(query);
   if (params.get("from") === "auth") return { kind: "stuck" };

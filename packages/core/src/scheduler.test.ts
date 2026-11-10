@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent, AskBatch, RunnerAdapter, RunnerSession, StartOptions } from "@switchboard/protocol";
+import type { AgentEvent, AskBatch, RunnerAdapter, RunnerSession, StartOptions, Task } from "@switchboard/protocol";
 import { approvalWindowNote } from "./approval-batch.ts";
 import { loadConfig } from "./config.ts";
 import { Db } from "./db.ts";
@@ -91,12 +91,41 @@ describe("scheduler (#20)", () => {
     expect(db.getSchedule(s.id)!.nextRunAt).toBe(Date.parse("2026-09-08T03:00:00")); // still advances so it isn't stuck
   });
 
+  test("a schedule without a budget takes the settings' default budget; its own budget is kept", async () => {
+    let dflt: number | null = 3;
+    const sc = new Scheduler(db, tasks, () => now, undefined, undefined, undefined, undefined, undefined, () => dflt);
+    const plain = sc.create({ title: "plain", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "p" });
+    const own = sc.create({ title: "own", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "p", budgetUsd: 1 });
+    now = Date.parse("2026-09-06T03:00:00");
+    const started = await sc.tick();
+    expect(started.find((t) => t.scheduleId === plain.id)!.budgetUsd).toBe(3);
+    expect(started.find((t) => t.scheduleId === own.id)!.budgetUsd).toBe(1);
+    dflt = null; // no default: no budget, as before
+    now = Date.parse("2026-09-07T03:00:00");
+    db.updateTask(started[0]!.id, { status: "done" });
+    db.updateTask(started[1]!.id, { status: "done" });
+    const next = await sc.tick();
+    expect(next.find((t) => t.scheduleId === plain.id)!.budgetUsd).toBeNull();
+  });
+
+  test("tick skips a schedule whose previous run waits on background jobs", async () => {
+    const sc = new Scheduler(db, tasks, () => now);
+    const s = sc.create({ title: "nightly", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "p" });
+    now = Date.parse("2026-09-06T03:00:00");
+    const started = await sc.tick();
+    db.updateTask(started[0]!.id, { status: "background" });
+    now = Date.parse("2026-09-07T03:00:00");
+    expect((await sc.tick())).toHaveLength(0);
+    expect(sc.recentLog().at(-1)).toContain("is still background");
+    expect(db.getSchedule(s.id)!.lastTaskId).toBe(started[0]!.id);
+  });
+
   test("disabled schedules never fire; runNow works regardless of enabled and records the log", async () => {
     const sc = new Scheduler(db, tasks, () => now);
     const s = sc.create({ title: "off", cron: "* * * * *", workspaceId: wsId, runner: "claude", prompt: "p", enabled: false });
     now += 120_000;
     expect((await sc.tick())).toHaveLength(0);
-    const task = await sc.runNow(s.id, "manual");
+    const task = (await sc.runNow(s.id, "manual")) as Task | null;
     expect(task).not.toBeNull();
     expect(sc.recentLog().at(-1)).toContain("started");
     // a schedule's Task records no candidate and the schedule as its reason (docs/design/process-kernel.md, K1)
@@ -108,11 +137,11 @@ describe("scheduler (#20)", () => {
     const sc = new Scheduler(db, tasks, () => now);
     const s = sc.create({ title: "m", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", model: "m1", prompt: "p" });
     expect(s.model).toBe("m1");
-    expect(db.getTask((await sc.runNow(s.id))!.id)!.model).toBe("m1");
+    expect(db.getTask(((await sc.runNow(s.id)) as Task).id)!.model).toBe("m1");
     expect(started.at(-1)!.model).toBe("m1");
     const none = sc.create({ title: "n", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "p" });
     expect(none.model).toBe("");
-    expect(db.getTask((await sc.runNow(none.id))!.id)!.model).toBeNull();
+    expect(db.getTask(((await sc.runNow(none.id)) as Task).id)!.model).toBeNull();
     expect(started.at(-1)!.model).toBeUndefined();
     expect(sc.update(s.id, { model: "m2" }).model).toBe("m2");
     expect(db.getSchedule(s.id)!.model).toBe("m2");
@@ -123,11 +152,11 @@ describe("scheduler (#20)", () => {
     const sc = new Scheduler(db, tasks, () => now);
     const s = sc.create({ title: "e", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", effort: "high", prompt: "p" });
     expect(s.effort).toBe("high");
-    expect(db.getTask((await sc.runNow(s.id))!.id)!.effort).toBe("high");
+    expect(db.getTask(((await sc.runNow(s.id)) as Task).id)!.effort).toBe("high");
     expect(started.at(-1)!.effort).toBe("high");
     const none = sc.create({ title: "n", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "p" });
     expect(none.effort).toBe("");
-    expect(db.getTask((await sc.runNow(none.id))!.id)!.effort).toBeNull();
+    expect(db.getTask(((await sc.runNow(none.id)) as Task).id)!.effort).toBeNull();
     expect(started.at(-1)!.effort).toBeUndefined();
     expect(() => sc.create({ title: "x", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", effort: "max", prompt: "p" })).toThrow('unknown effort "max"');
     expect(sc.update(s.id, { effort: "low" }).effort).toBe("low");
@@ -138,25 +167,14 @@ describe("scheduler (#20)", () => {
     expect(sc.update(s.id, { runner: "codex" }).effort).toBe(""); // another runner's list: back to the CLI default
   });
 
-  test("a database from before schedules had an effort reads its rows with an empty one (schedule effort)", () => {
-    const p = join(home, "old-effort.sqlite");
-    const raw = new (require("bun:sqlite").Database)(p);
-    raw.exec(`CREATE TABLE schedules (id TEXT PRIMARY KEY, title TEXT NOT NULL, cron TEXT NOT NULL, workspace_id TEXT NOT NULL, runner TEXT NOT NULL, prompt TEXT NOT NULL, budget_usd REAL, enabled INTEGER NOT NULL DEFAULT 1, last_run_at INTEGER, last_task_id TEXT, next_run_at INTEGER, created_at INTEGER NOT NULL, action TEXT NOT NULL DEFAULT 'prompt', model TEXT NOT NULL DEFAULT '');
-      INSERT INTO schedules (id, title, cron, workspace_id, runner, prompt, created_at) VALUES ('sch_old', 'old', '0 3 * * *', 'w', 'codex', 'p', 1);`);
-    raw.close();
-    const old = new Db(p);
-    expect(old.getSchedule("sch_old")).toMatchObject({ runner: "codex", effort: "" });
-    old.close();
-  });
-
-  test("a database from before schedules had a model reads its rows with an empty one (model)", () => {
+  test("a database from before schedules had a model or an effort reads its rows with an empty one", () => {
     const p = join(home, "old.sqlite");
     const raw = new (require("bun:sqlite").Database)(p);
     raw.exec(`CREATE TABLE schedules (id TEXT PRIMARY KEY, title TEXT NOT NULL, cron TEXT NOT NULL, workspace_id TEXT NOT NULL, runner TEXT NOT NULL, prompt TEXT NOT NULL, budget_usd REAL, enabled INTEGER NOT NULL DEFAULT 1, last_run_at INTEGER, last_task_id TEXT, next_run_at INTEGER, created_at INTEGER NOT NULL, action TEXT NOT NULL DEFAULT 'prompt');
       INSERT INTO schedules (id, title, cron, workspace_id, runner, prompt, created_at) VALUES ('sch_old', 'old', '0 3 * * *', 'w', 'codex', 'p', 1);`);
     raw.close();
     const old = new Db(p);
-    expect(old.getSchedule("sch_old")).toMatchObject({ runner: "codex", model: "" });
+    expect(old.getSchedule("sch_old")).toMatchObject({ runner: "codex", model: "", effort: "" });
     old.close();
   });
 
@@ -201,7 +219,7 @@ describe("scheduler (#20)", () => {
     }
     const sc = new Scheduler(db, tasks, () => now);
     const s = sc.create({ title: "nightly", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "p" });
-    const started = (await sc.runNow(s.id, "manual"))!;
+    const started = (await sc.runNow(s.id, "manual")) as Task;
     // after the await: the fake runner ends `t` on a microtask, which would overwrite an earlier "waiting"
     // written straight to the row: done → waiting is not a transition (task-status.ts), the queue only reads the status
     db.sqlite.query("UPDATE tasks SET status = 'waiting' WHERE id = ?").run(t.id);
@@ -317,7 +335,7 @@ describe("scheduler backlog-next (#267)", () => {
     const calls: string[] = [];
     const sc = new Scheduler(db, tasks, () => now, async (id) => (calls.push(id), { started: [{ task: t, label: "#304 を complete" }], skipped: [] }));
     const s = sc.create({ title: "バックログを進める", cron: "0 */3 * * *", workspaceId: wsId, runner: "claude", prompt: "", action: "backlog-next" });
-    expect((await sc.runNow(s.id, "manual"))!.id).toBe(t.id);
+    expect(((await sc.runNow(s.id, "manual")) as Task).id).toBe(t.id);
     expect(calls).toEqual([s.id]);
     expect(db.getSchedule(s.id)!.lastTaskId).toBe(t.id);
     expect(sc.recentLog().at(-1)).toContain("バックログを進める: #304 を complete で開始");
@@ -337,7 +355,7 @@ describe("scheduler backlog-next (#267)", () => {
     let calls = 0;
     const sc = new Scheduler(db, tasks, () => now, async () => (calls++, { started, skipped: ["lib: GitHub を読めない: HTTP 404"] }));
     const s = sc.create({ title: "b", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "", action: "backlog-next" });
-    expect((await sc.runNow(s.id, "manual"))!.id).toBe(started[5]!.task.id);
+    expect(((await sc.runNow(s.id, "manual")) as Task).id).toBe(started[5]!.task.id);
     expect(db.getSchedule(s.id)!.lastTaskId).toBe(started[5]!.task.id);
     const log = sc.recentLog();
     expect(log.filter((l) => / で開始 task_/.test(l))).toHaveLength(6);
@@ -358,7 +376,7 @@ describe("scheduler backlog-next (#267)", () => {
     expect(await sc.runNow(s.id, "manual")).toBeNull();
     expect(sc.recentLog().at(-1)).toContain("前の発火がまだ項目を選んでいる");
     release();
-    expect((await first)!.id).toBe(t.id);
+    expect(((await first) as Task).id).toBe(t.id);
   });
 });
 

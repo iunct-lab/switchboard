@@ -96,6 +96,11 @@ export function bedrockConfigArgs(opts: Pick<StartOptions, "bedrock">): string[]
   return opts.bedrock ? ["-c", 'model_provider="amazon-bedrock"', "-c", `model_providers.amazon-bedrock.aws.region=${JSON.stringify(opts.bedrock.region)}`] : [];
 }
 
+/** Stops app-server's analytics and feedback sending (#4308) unless the user allowed it (`opts.runnerTelemetry`, Settings `outbound.runnerTelemetry`). */
+export function telemetryArgs(opts: Pick<StartOptions, "runnerTelemetry">): string[] {
+  return opts.runnerTelemetry ? [] : ["-c", "analytics.enabled=false", "-c", "feedback.enabled=false"];
+}
+
 /** Thinking efforts offered in the UI (#833): the reasoning efforts every model above takes (`codex debug models`, 0.162.1). */
 export const CODEX_EFFORTS: ModelOption[] = ["low", "medium", "high", "xhigh", "max"].map((value) => ({ value, label: value }));
 
@@ -349,7 +354,7 @@ class CodexSession implements RunnerSession {
   ) {
     const args = ["app-server", "--listen", "stdio://", "-c", MEMORY_OFF, "-c", QUESTION_TOOL_ON];
     for (const c of o.config ?? []) args.push("-c", c);
-    args.push(...bedrockConfigArgs(opts));
+    args.push(...bedrockConfigArgs(opts), ...telemetryArgs(opts));
     this.proc = Bun.spawn([bin, ...args], { cwd: opts.cwd, env: childEnv(process.env, appServerEnv(opts)), stdin: "pipe", stdout: "pipe", stderr: "pipe", detached: true });
     const stderrDone = this.pumpStderr();
     const stdoutDone = this.pumpStdout();

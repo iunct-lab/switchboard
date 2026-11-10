@@ -18,6 +18,7 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [queue, setQueue] = useState<Queue | null>(null);
   const [log, setLog] = useState<string[]>([]);
+  const [notice, setNotice] = useState<string | null>(null); // a manual backlog-next that only asked for a promotion (#2479)
   const [showNew, setShowNew] = useState(false);
   const [title, setTitle] = useState("");
   const [cron, setCron] = useState("0 3 * * *");
@@ -144,6 +145,7 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
       .then((t) => {
         load();
         if ("id" in t) props.onOpenTask(t.id);
+        setNotice("promotion" in t ? t.promotion : null);
       })
       .catch((e) => {
         load(); // a skipped backlog-next firing says why in the log
@@ -406,6 +408,7 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
         ))}
       </section>
 
+      {notice && <div className="muted">{notice}</div>}
       {log.length > 0 && (
         <section className="card">
           <h5>{t(m.log)}</h5>

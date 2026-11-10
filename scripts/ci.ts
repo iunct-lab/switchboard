@@ -27,7 +27,8 @@ export const ciSteps: Step[] = [
   // 公開側の写しでは origin が publicSync.target なので飛ぶ
   { name: "public tree check", run: "bun ops-kit/src/cli.ts public-sync --check" },
   { name: "bun run licenses:check", run: "bun run licenses:check" },
-  // typecheck は先に入っている Codex から型を生成する（scripts/codex_types.ts）。CI を回す環境にも Codex CLI が要る
+  // typecheck は Codex から型を生成する（scripts/codex_types.ts）ので CI を回す環境にも Codex CLI が要る。入っていれば飛ばし（Codex のあるホストのローカル CI）、無ければ入れる（公開側の Actions。ログインは要らない）
+  { name: "Codex CLI for typecheck", run: "if command -v codex >/dev/null; then exit 0; fi\nnpm install -g @openai/codex" },
   { name: "bun run typecheck", run: "bun run typecheck" },
   // perf-bench measures this build; bun test does not depend on it
   { name: "bun run --cwd apps/web build", run: "bun run --cwd apps/web build" },
@@ -38,7 +39,7 @@ export const ciSteps: Step[] = [
   {
     name: "fetch main",
     run: `if [ "$(git rev-parse --is-shallow-repository)" = true ]; then depth=--depth=1; else depth=; fi
-git fetch $depth origin +refs/heads/main:refs/remotes/origin/main`,
+git fetch $depth origin +refs/heads/main:refs/remotes/origin/main`, // the tag CI compares perf with the tag before (PERF_BASE_REF), not this tip
   },
   // perf-bench shows Chrome only Noto Sans + Noto Sans CJK (the same text size everywhere); ubuntu-latest has neither
   {
@@ -47,8 +48,9 @@ git fetch $depth origin +refs/heads/main:refs/remotes/origin/main`,
 sudo apt-get update -qq && sudo apt-get install -y -qq fonts-noto-core fonts-noto-cjk`,
   },
   // main's tip, built and measured for the bundle check: compared with origin/main's tip, not the PR's base branch, so a
-  // stack's top compares the whole stack. local-ci records it (perf-records/bundle.tsv)
-  { name: "bun scripts/perf-ratchet.ts base origin/main perf-base.json", run: "bun scripts/perf-ratchet.ts base origin/main perf-base.json", keepGoing: true },
+  // stack's top compares the whole stack. The tag CI records it (perf-records/bundle.tsv) and compares with the tag before:
+  // it passes PERF_BASE_REF (#4219), so the growth and raised ceilings are the tag's own
+  { name: "bun scripts/perf-ratchet.ts base origin/main perf-base.json", run: 'bun scripts/perf-ratchet.ts base "${PERF_BASE_REF:-origin/main}" perf-base.json', keepGoing: true },
   // the perf steps run before bun test (their result does not wait 5 minutes for it) and keep going: a perf red still
   // runs bun test, so a run says both (#2945). Not in parallel: perf-bench is not measured next to another load.
   { name: "bun scripts/perf-bench.ts --runs 5 --json perf-result.json", run: "bun scripts/perf-bench.ts --runs 5 --json perf-result.json", keepGoing: true },

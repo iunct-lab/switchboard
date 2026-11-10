@@ -16,7 +16,7 @@
  * `--parameter-overrides` from SWITCHBOARD_HOST_PARAMS (the repository variable of the same name); the person's deploy
  * role's stack from SWITCHBOARD_PERSON_DEPLOY_STACK (`<stack>-person-deploy`).
  */
-import { checkChangeSet } from "../aws/change-set-check";
+import { checkChangeSet, type ChangeSet } from "../aws/change-set-check";
 
 export const ACTIONS = ["status", "start", "rebuild", "deploy", "person-deploy", "person-drift"] as const;
 export type HostAction = (typeof ACTIONS)[number];
@@ -32,6 +32,8 @@ export interface HostEnv {
   driftPollSeconds: number;
   /** person-deploy only: let a change set that replaces the instance through (a person's choice, aws/README.md) */
   allowReplace?: boolean;
+  /** person-deploy only: the change set a person looked at, to execute (`--execute=<arn>`) */
+  execute?: string;
 }
 
 /** A command's result: both streams are kept, so they can be printed with the secrets taken out. */
@@ -77,6 +79,16 @@ export function planHostOperation(action: HostAction, e: HostEnv): string[] {
       "成功しても失敗しても、人の配備用ロールから AdministratorAccess を外す",
     ];
   }
+  if (action === "person-deploy" && e.execute) {
+    return [
+      `stack ${e.personStack} の出力 PersonDeployRoleArn / PersonDeployRoleName を読む`,
+      "人の配備用ロールに前の回の AdministratorAccess が残っていれば外す",
+      "人の配備用ロールに AdministratorAccess を付ける（自分のログインで）",
+      `change set ${e.execute} が ${e.stack} のもので実行できる状態かを確かめ、リソースを 1 行ずつ出し、検査する`,
+      "execute-change-set、stack-update-complete を待つ",
+      "成功しても失敗しても、人の配備用ロールから AdministratorAccess を外す",
+    ];
+  }
   if (action === "person-deploy") {
     return [
       "bun install --frozen-lockfile、bun run --cwd aws build",
@@ -85,8 +97,8 @@ export function planHostOperation(action: HostAction, e: HostEnv): string[] {
       "人の配備用ロールに AdministratorAccess を付ける（自分のログインで）",
       "aws cloudformation package（Starter の build を DataBucket に上げる）",
       `aws cloudformation deploy --no-execute-changeset（人の配備用ロールで。パラメータは前の値のまま${e.params ? "、SWITCHBOARD_HOST_PARAMS の分だけ変える" : ""}）`,
-      `change set を検査し${e.allowReplace ? "（--allow-replace: インスタンスの置き換えも通す）" : "、LaunchTemplate か Instance に触れるなら実行せずに止める"}`,
-      "execute-change-set、stack-update-complete を待つ",
+      `change set のリソースを 1 行ずつ出して検査し${e.allowReplace ? "（--allow-replace: インスタンスの置き換えも通す）" : "、LaunchTemplate か Instance に触れるなら止める"}`,
+      "実行はしない: 中身を見てから person-deploy --execute=<change set> --yes で実行する",
       "成功しても失敗しても、人の配備用ロールから AdministratorAccess を外す",
     ];
   }
@@ -198,13 +210,42 @@ export async function runHostOperation(action: HostAction, e: HostEnv, d: Deps):
     });
   }
 
+  /** Print a change set one resource a line and check it; throws when it may not run. */
+  const review = (cs: string, allowReplace: boolean): ChangeSet & { StackName?: string; ExecutionStatus?: string } => {
+    const described = JSON.parse(aws(["cloudformation", "describe-change-set", "--change-set-name", cs, "--output", "json"]));
+    for (const c of (described as ChangeSet).Changes ?? []) d.log(`change: ${c.ResourceChange?.Action} ${c.ResourceChange?.LogicalResourceId} (replacement: ${c.ResourceChange?.Replacement ?? "-"})`);
+    const verdict = checkChangeSet(described, { allowReplace });
+    if (!verdict.ok) throw new Error(`not executed: ${verdict.reason}`);
+    return described;
+  };
+  const execute = (cs: string): string => {
+    aws(["cloudformation", "execute-change-set", "--change-set-name", cs]);
+    aws(["cloudformation", "wait", "stack-update-complete", "--stack-name", e.stack]);
+    return `executed ${cs}`;
+  };
+
+  if (action === "person-deploy" && e.execute) {
+    const cs = e.execute;
+    return withPersonRole(() => {
+      const described = review(cs, e.allowReplace ?? false);
+      // only a change set of this stack that can still run: another stack's, or one already run, is refused
+      if (described.StackName !== e.stack) throw new Error(`not executed: ${cs} は ${e.stack} の change set ではない（${described.StackName}）`);
+      if (described.ExecutionStatus !== "AVAILABLE") throw new Error(`not executed: ${cs} は実行できる状態ではない（${described.ExecutionStatus}）`);
+      return execute(cs);
+    });
+  }
+
   for (const cmd of [["bun", "install", "--frozen-lockfile"], ["bun", "run", "--cwd", "aws", "build"]]) {
     if (!d.run(cmd).ok) throw new Error(`failed: ${cmd.join(" ")}`);
   }
   const bucket = output("DataBucket");
 
   /** Package, make the change set as `role`, check it, execute it. "no changes" for an empty one. */
-  const deploy = (role: string, overrides: string[], allowReplace: boolean): string => {
+  /**
+   * Package and make the change set as `role`, print and check it. The workflow's deploy executes it at once; a person's
+   * stops there, so the person reads it first and runs `person-deploy --execute=<arn>` (as with the manual steps before).
+   */
+  const deploy = (role: string, overrides: string[], allowReplace: boolean, run: boolean): string => {
     // the AWS CLI, not sam: sam deploy / sam package cannot read the template's Fn::ForEach (#465). The SAM transform
     // still runs in CloudFormation; package only uploads the Starter's build and points CodeUri at it
     const packaged = "dist/template.packaged.yaml";
@@ -220,35 +261,36 @@ export async function runHostOperation(action: HostAction, e: HostEnv, d: Deps):
     if (!r.ok) throw new Error("failed: aws cloudformation deploy");
     const cs = [...`${r.out}\n${r.err}`.matchAll(/arn:aws:cloudformation:[^\s]+:changeSet\/[^\s]+/g)].at(-1)?.[0];
     if (!cs) return "no changes";
-    const verdict = checkChangeSet(JSON.parse(aws(["cloudformation", "describe-change-set", "--change-set-name", cs, "--output", "json"])), { allowReplace });
-    if (!verdict.ok) throw new Error(`not executed: ${verdict.reason}`);
-    aws(["cloudformation", "execute-change-set", "--change-set-name", cs]);
-    aws(["cloudformation", "wait", "stack-update-complete", "--stack-name", e.stack]);
-    return `executed ${cs}`;
+    review(cs, allowReplace);
+    if (run) return execute(cs);
+    return `created ${cs}\n上の change の行を見て、よければ実行する: bun scripts/host-ops.ts person-deploy --execute=${cs} --yes${allowReplace ? " --allow-replace" : ""}`;
   };
 
   if (action === "deploy") {
     // the change set runs as the stack's DeployRole (the boundary keeps it to this stack); the caller only passes it
     const role = output("DeployRoleArn");
     const edge = secret("/switchboard/edge-header");
-    return deploy(role, [...e.params!.split(/\s+/).filter(Boolean), `EdgeHeaderValue=${edge}`], false);
+    return deploy(role, [...e.params!.split(/\s+/).filter(Boolean), `EdgeHeaderValue=${edge}`], false, true);
   }
 
-  return withPersonRole((roleArn) => deploy(roleArn, (e.params ?? "").split(/\s+/).filter(Boolean), e.allowReplace ?? false));
+  return withPersonRole((roleArn) => deploy(roleArn, (e.params ?? "").split(/\s+/).filter(Boolean), e.allowReplace ?? false, false));
 }
 
 /**
- * The arguments: one action, `--dry-run`, `--yes`, and `--allow-replace` with person-deploy only. Anything else, or an
- * action other than status without `--yes` or `--dry-run`, is null.
+ * The arguments: one action, `--dry-run`, `--yes`; with person-deploy also `--allow-replace` and `--execute=<change set
+ * ARN>`. Anything else, or an action other than status without `--yes` or `--dry-run`, is null.
  */
-export function parseArgs(args: string[]): { action: HostAction; dryRun: boolean; allowReplace: boolean } | null {
+export function parseArgs(args: string[]): { action: HostAction; dryRun: boolean; allowReplace: boolean; execute?: string } | null {
   const action = args.find((a) => !a.startsWith("--"));
   const flags = args.filter((a) => a.startsWith("--"));
-  const known = action === "person-deploy" ? ["--dry-run", "--yes", "--allow-replace"] : ["--dry-run", "--yes"];
-  if (!ACTIONS.includes(action as HostAction) || args.filter((a) => !a.startsWith("--")).length !== 1 || flags.some((f) => !known.includes(f))) return null;
+  const person = action === "person-deploy";
+  const known = (f: string) => ["--dry-run", "--yes"].includes(f) || (person && (f === "--allow-replace" || /^--execute=arn:aws:cloudformation:[^\s]+:changeSet\/\S+$/.test(f)));
+  if (!ACTIONS.includes(action as HostAction) || args.filter((a) => !a.startsWith("--")).length !== 1 || !flags.every(known)) return null;
+  if (flags.filter((f) => f.startsWith("--execute=")).length > 1) return null;
   const dryRun = flags.includes("--dry-run");
   if (action !== "status" && !dryRun && !flags.includes("--yes")) return null;
-  return { action: action as HostAction, dryRun, allowReplace: flags.includes("--allow-replace") };
+  const execute = flags.find((f) => f.startsWith("--execute="))?.slice("--execute=".length);
+  return { action: action as HostAction, dryRun, allowReplace: flags.includes("--allow-replace"), ...(execute ? { execute } : {}) };
 }
 
 export const spawnRun: Run = (cmd) => {
@@ -264,10 +306,10 @@ export const fetchPost: Post = async (url, headers) => {
 if (import.meta.main) {
   const parsed = parseArgs(process.argv.slice(2));
   if (!parsed) {
-    console.error("usage: bun scripts/host-ops.ts <status|start|rebuild|deploy|person-deploy|person-drift> [--dry-run] [--yes] [--allow-replace]（status 以外は --yes か --dry-run が要る。--allow-replace は person-deploy だけ。人の配備は person-deploy、deploy は GitHub の workflow 用）");
+    console.error("usage: bun scripts/host-ops.ts <status|start|rebuild|deploy|person-deploy|person-drift> [--dry-run] [--yes] [--allow-replace] [--execute=<change set>]（status 以外は --yes か --dry-run が要る。--allow-replace と --execute は person-deploy だけ。person-deploy は change set を作って止まり、中身を見てから --execute で実行する。人の配備は person-deploy、deploy は GitHub の workflow 用）");
     process.exit(2);
   }
-  const e = { ...hostEnv(), allowReplace: parsed.allowReplace };
+  const e = { ...hostEnv(), allowReplace: parsed.allowReplace, execute: parsed.execute };
   if (parsed.dryRun) {
     for (const l of planHostOperation(parsed.action, e)) console.log(`- ${l}`);
     process.exit(0);

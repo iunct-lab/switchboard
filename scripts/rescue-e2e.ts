@@ -12,6 +12,7 @@ const f = await makeRepo();
 const crashFlag = join(f.root, "crash");
 const v2 = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource("v2", `if (require("node:fs").existsSync(${JSON.stringify(crashFlag)})) { console.error("v2: cannot start"); process.exit(1); }`), `v2: crashes once the flag exists ${"x".repeat(120)}`);
 Bun.spawnSync(["git", "-C", f.repo, "tag", "v0.2.0", v2]); // a release tag (#282): shown before the sha
+const v3 = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource("v3", `tasks = "500";`), "v3: the task list answers 500");
 const [port, rescuePort] = [await freePort(), await freePort()];
 // A stand-in for `claude` on PATH: the bundle starts its real default command line, and no quota is spent.
 mkdirSync(join(f.root, "bin"));
@@ -33,7 +34,7 @@ try {
   await Bun.spawn([process.execPath, join(import.meta.dir, "..", "rescue", "install.ts")], { env, stdout: "ignore", stderr: "inherit" }).exited;
   const bundle = join(f.home, "rescue", "sb-rescue.js");
   assert(existsSync(bundle), "install.ts wrote no bundle");
-  await Bun.spawn(["git", "-C", f.repo, "checkout", "-q", "HEAD~1"], {}).exited; // first release = v1
+  await Bun.spawn(["git", "-C", f.repo, "checkout", "-q", `${v2}~1`], {}).exited; // first release = v1
   const rescue = Bun.spawn([process.execPath, bundle], { env, cwd: f.root, stdout: "ignore", stderr: "inherit" });
   procs.push(rescue);
   const base = `http://127.0.0.1:${rescuePort}`;
@@ -107,6 +108,14 @@ try {
   assert((await until(() => health(port), "v1 back", 30_000)).version === "v1", "rollback did not bring v1 up");
   await until(() => evaluate(`document.getElementById("state").textContent.includes("動いています") && document.getElementById("history").textContent.includes("戻した")`), "page shows the rollback");
   say(`clicked 前の版に戻す (confirm: "${dialogs.at(-1)}") → v1 answers; page: "${await evaluate(`document.getElementById("state").textContent`)}" / history: "${await evaluate(`document.querySelector("#history li").textContent`)}"`);
+
+  // a release whose task list is broken boots and answers health, but is turned down (#3721): the page lists it as rejected
+  await fetch(`${base}/api/promote`, { method: "POST", body: JSON.stringify({ commit: v3 }) });
+  await until(async () => (await status()).history[0]?.action === "rejected", "v3 rejected", 60_000);
+  assert((await status()).history[0]!.reason.includes("/api/tasks answered 500"), `the rejection does not name the task list: ${(await status()).history[0]!.reason}`);
+  await until(() => evaluate(`document.querySelector("#history li").textContent.includes("昇格を却下")`), "page shows the rejection");
+  assert((await health(port))?.version === "v1", "the rejected release changed what runs");
+  say(`promoted v3 (task list 500) → page history: "${await evaluate(`document.querySelector("#history li").textContent`)}"; v1 still runs`);
 
   const tagged = await evaluate(`[...document.getElementById("release").options].map((o) => o.textContent).find((t) => t.startsWith("v0.2.0 ${v2.slice(0, 7)} v2: crashes")) ?? ""`);
   assert(tagged, "the release list does not show the tag before the sha");

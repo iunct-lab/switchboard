@@ -1,11 +1,15 @@
 import type { StopSummary } from "@switchboard/protocol";
-import { shownStops, stopDisplay } from "../stops.ts";
+import { personStops, shownStops, stopDisplay } from "../stops.ts";
 import { t } from "../i18n.ts";
 import { task as m } from "../i18n/task.ts";
 
-/** The stops of a row's stage Tasks (#939): how many times, the last answer, what changed and what is needed next; none when it never stopped. */
-export function Stops(props: { stops: StopSummary[]; issue: string }) {
-  const shown = shownStops(props.stops);
+/**
+ * The stops of a row's stage Tasks (#939): how many times, the last answer, what changed and what is needed next; none
+ * when it never stopped. `only="needs-person"` (#3709: under a closed list row) is the stops that need the person's
+ * action; the opened row's `ItemDetail` shows them all in place, so they are not shown twice.
+ */
+export function Stops(props: { stops: StopSummary[]; issue: string; only?: "needs-person" }) {
+  const shown = props.only === "needs-person" ? personStops(props.stops) : shownStops(props.stops);
   if (!shown.length) return null;
   return (
     <div className="backlog-stops hint" data-issue={props.issue}>

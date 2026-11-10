@@ -1,4 +1,4 @@
-import { projectOf, sectionName, type OpsConfig, type Section } from "./config.ts";
+import { projectOf, sectionName, STORY_POINTS, type OpsConfig, type Section } from "./config.ts";
 import { GhError, repoOf, type GhClient } from "./gh.ts";
 import { projectFragment, selectProject } from "./set.ts";
 import type { StoredRecords } from "./backlog-client.ts";
@@ -192,8 +192,8 @@ export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: b
     const named = freeTextPrereqs(body).filter((k) => open.has(k) && !declared.includes(k) && !own(k));
     if (named.length) warnings.push({ issue: row.number, message: freeTextPrereq(named) });
   };
-  const points = cfg.storyPoints.join(" / ");
-  const isPoint = (n: number) => cfg.storyPoints.includes(n);
+  const points = STORY_POINTS.join(" / ");
+  const isPoint = (n: number) => STORY_POINTS.includes(n);
 
   const origin = cfg.sections.origin;
   for (const row of rows.filter((r) => labelsOf(r).includes("type:pbi"))) {
@@ -212,7 +212,6 @@ export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: b
     }
     const bodySp = bodyStoryPoints(body);
     if (bodySp === null) bad(n, "PBI 本文に `**Story Points**: N` が無い");
-    else if (bodySp > Math.max(...cfg.storyPoints)) bad(n, `Story Points ${bodySp} は「大きすぎる」の印。分割してから Backlog に入れる`);
     else if (!isPoint(bodySp)) bad(n, `Story Points は ${points} のどれか（本文: ${bodySp}）`);
     freePrereqs(row, body);
     if (row.parent) bad(n, `PBI に親 Issue（#${row.parent.number}）が付いている。PBI は親なし（Backlog ビューに出すため）`);

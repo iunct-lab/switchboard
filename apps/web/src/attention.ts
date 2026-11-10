@@ -1,4 +1,4 @@
-import type { Task, TaskOutcome, TerminalStatus } from "@switchboard/protocol";
+import { isWorkingStatus, type Task, type TaskOutcome, type TerminalStatus } from "@switchboard/protocol";
 import { t } from "./i18n.ts";
 import { task as m } from "./i18n/task.ts";
 
@@ -8,7 +8,7 @@ import { task as m } from "./i18n/task.ts";
  * waiting on an approval is in both lists. Home and the rail both use these, below 実行中.
  */
 export function needsAttention(t: Task): boolean {
-  return t.reviewedAt === null && t.outcome !== "done" && t.status !== "running" && t.status !== "idle";
+  return t.reviewedAt === null && t.outcome !== "done" && (t.status === "waiting" || !isWorkingStatus(t.status)) && t.status !== "idle";
 }
 
 const RANK: Record<TaskOutcome, number> = { needs_action: 0, failed: 1, done: 2, unknown: 2 };

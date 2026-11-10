@@ -104,15 +104,25 @@ describe("applying saved policies (#938)", () => {
       ["when", { when: [{ key: "area", value: "x" }] }, "条件 area が無い"],
       ["choice", { answer: { kind: "choice", choice: "Z: 別の案" } }, "回答が今回の選択肢に無い"],
     ];
+    const tasks: string[] = [];
+    // the policies pile up (each misses every ask for its own reason), so the daemon's weighing after the last one still meets each variant's policy
+    const pols: AnswerPolicy[] = [];
     for (const [name, over, why] of variants) {
-      writePolicies(h.core!.db, [checkPolicy(over)]);
+      pols.push(checkPolicy({ id: `pol_${name}`, ...over }));
+      writePolicies(h.core!.db, pols);
       const t = await checkTask(name);
-      await settle();
-      const ask = (await asks()).find((x) => x.task?.id === t && x.kind === "check")!;
-      expect(ask.state).toBe("open");
-      expect(ask.policy.previous?.why).toBe(why);
+      tasks.push(t);
+      // the ask is listed as soon as the outcome is set, with the newest policy's miss reason: wait for that, not a fixed 250 ms
+      let ask: Awaited<ReturnType<typeof asks>>[number] | undefined;
+      await until(async () => (ask = (await asks()).find((x) => x.task?.id === t && x.kind === "check")) !== undefined);
+      expect(ask).toBeDefined();
+      expect(ask!.state).toBe("open");
+      expect(ask!.policy.previous?.why).toBe(why);
     }
+    // "nothing happens" cannot be waited for by its state: one settle for all of them, then no reply was sent and every ask is still open
+    await settle();
     expect(h.sent).toEqual([]);
+    expect((await asks()).filter((x) => tasks.includes(x.task?.id ?? "") && x.kind === "check").map((x) => x.state)).toEqual(variants.map(() => "open"));
   });
 
   test("not applied: a matching policy does not answer a PR carrying a security merge check, nor a refused permission", async () => {

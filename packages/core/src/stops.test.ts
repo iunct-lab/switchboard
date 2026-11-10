@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { StopRecord } from "@switchboard/protocol";
-import { compareStopConditions, FenceReader, issueOf, reduceStops, reserveStopRetry, StopFenceReader, stopKey, stopRecoveryPrompt } from "./stops.ts";
+import { compareStopConditions, FenceReader, issueOf, reduceStops, reportedLimit, reserveStopRetry, StopFenceReader, stopKey, stopRecoveryPrompt } from "./stops.ts";
 import { parseArtifactFence } from "./artifacts.ts";
 
 let n = 0;
@@ -262,6 +262,22 @@ describe("reserveStopRetry / stopRecoveryPrompt (#949)", () => {
     expect(p).toContain('"conditions":[{"key":"pr#12","value":"open","met":false}]');
     expect(p).toContain("pr#N / issue#N");
     expect(p).toContain("overlap が重なり（defer）で進めないと言ったら、その出力の conditions をそのまま写す");
+  });
+
+  test("stop prompt names the runner condition of a usage-limit stop: runner#<runner> with the time (#4408), read by reportedLimit", () => {
+    const p = stopRecoveryPrompt([]);
+    expect(p).toContain("使用上限（usage-limit）は止めたランナーを runner#<ランナー>");
+    expect(p).toContain("分からなければ unknown");
+    const limit = (over: Partial<Omit<StopRecord, "work">> = {}) => stop({ reason: "usage-limit", state: "waiting", conditions: [{ key: "runner#codex", value: "2026-11-04T15:39:00+09:00", met: false }], ...over });
+    expect(reportedLimit(limit())).toEqual({ runner: "codex", resetsAt: Date.parse("2026-11-04T06:39:00Z") });
+    expect(reportedLimit(limit({ conditions: [{ key: "runner#codex", value: "unknown", met: false }] }))).toEqual({ runner: "codex" });
+    expect(reportedLimit(limit({ conditions: [{ key: "runner#custom:foo", value: "soon", met: false }] }))).toEqual({ runner: "custom:foo" });
+    expect(reportedLimit(limit({ state: "resolved" }))).toBeUndefined();
+    expect(reportedLimit(limit({ state: "exhausted" }))).toBeUndefined();
+    expect(reportedLimit(limit({ reason: "depends" }))).toBeUndefined();
+    expect(reportedLimit(limit({ conditions: [] }))).toBeUndefined();
+    expect(reportedLimit(limit({ conditions: [{ key: "pr#12", value: "open", met: false }] }))).toBeUndefined();
+    expect(reportedLimit(limit({ conditions: [{ key: "runner#nobody", value: "unknown", met: false }] }))).toBeUndefined(); // not a runner id
   });
 
   test("recovery prompt forbids out-of-scope writes (#1987)", () => {

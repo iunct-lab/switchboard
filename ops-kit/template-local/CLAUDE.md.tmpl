@@ -1,0 +1,55 @@
+# __REPO__ — このリポジトリ固有の値
+
+開発の流れ（要望 → PBI → Task → 変更 → レビュー → マージ）は共通スキル（`issue-workflow` ほか。エージェント管理アプリが Task の起動時に `.claude/skills` / `.agents/skills` へ置く）に従う。スキルに書かれていない、このリポジトリだけの値はここに置く（`issue-workflow` の「使う側のリポジトリが持つもの」の各項目）。スキルとこのファイルが食い違えば、このファイルに従う。ただし Task の指示文の「ローカルの変更では」の手順は、このファイルより優先する。
+
+このリポジトリは GitHub を使わない。Issue・Project・変更（PR の代わり）はエージェント管理アプリが持つ。
+
+## リポジトリとバックログ
+
+- バックログの道具: `ops-kit backlog`（Task の中でも外でも同じ。`--help`）と `ops-kit lint --fresh`。要望・PBI・Task の起票の入口は `ops-kit backlog create`。`gh` と Project の変数は使わない
+- Area・Kind・Priority の選択肢・必須の節: root の `ops.config.json`
+- Story Points の基準（閉じた PBI）: まだ無い。最初の PBI を閉じたら、ここに「2 = #N / 3 = #N / 5 = #N / 8 = #N / 13 = #N」で足す
+- 設計ルール・ライセンス: README の `## Design rules` と `## License` に書く
+- 互換の前提: __COMPAT__
+- 並列ガード: 使わない（使うなら、ここにコマンドを書く）
+
+## テスト
+
+テストが無い間は、`package.json` やテストを足す最初の Task までこの節のコマンドは動かない。無い間の検証は Task の検証の手順で書く。
+
+```bash
+__TEST_TYPECHECK__
+__TEST_ALL__
+__TEST_ONE__
+```
+
+変更ごとのテストの型は、最初の変更で決めてここに表で足す（変更 | テスト）。
+
+## 作業の場所
+
+- main の作業ツリーでは作業しない。`git worktree add --detach ../__REPO__-<topic> main` → 依存の導入。PBI を丸ごとなら `../__REPO__-pbi<PBI>`
+- 枝: `sb/<Task番号>-<topic>`。積まず、マージしてから次の枝を main から切る
+- 作業ファイル: `W=$(mktemp -d /tmp/__REPO__.<用途>.XXXXXX)`。`/tmp` 直下に固定の名前で置かない（別のリポジトリのセッションとぶつかる）
+
+## 動いている実物で確かめる（live check）
+
+- __LIVE_CHECK__
+
+## Issue・変更に書かない値
+
+認証に使える値（トークン・鍵・Cookie・device code・承認 URL・アカウント ID）を Issue・変更・コメントに書かない（`issue-workflow` の「Issue・PR・コメントに書かない値」）。検査は共通の仕組み（`ops-kit scan-issues`）で、このリポジトリに独自の検査を置かない。
+
+## エージェント管理アプリの Task と動いているコード
+
+- __TASK_CHECK__ なら自分はエージェント管理アプリの Task（スキルの「エージェント管理アプリの Task」）
+- 動いている実物への反映: __DEPLOY_OK__
+- 場所（エージェント管理アプリのチェックアウト）、変更の作り方、ローカル CI・マージ判定・マージの手順は Task の指示文が渡す。下の「マージ判定とローカル CI」のコマンドの `<エージェント管理アプリのチェックアウト>` はその場所
+
+## マージ判定とローカル CI
+
+- 変更の本文のひな形: `docs/change-template.md`（1 行目 `Backlog-Task: <Task>`。閉じるキーワードと `#<番号>` は書かない）
+- ローカル CI: `bun <エージェント管理アプリのチェックアウト>/scripts/local-ci.ts --change <変更>`
+- マージ判定: `bun <エージェント管理アプリのチェックアウト>/scripts/merge-gate.ts --change <変更>`
+- マージ: `bun <エージェント管理アプリのチェックアウト>/scripts/local-merge.ts <変更>`（判定をもう一度通し、Task も閉じる）
+- どれも `--repo` は付けない。リモートが無いので `gh pr` / `git push` / リリースタグは使わない
+- main の更新は `local-merge.ts` がする。`ops-kit pull-main` は使わない。main の作業ツリーでは作業しない

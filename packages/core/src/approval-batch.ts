@@ -1,4 +1,5 @@
 import type { Ask, AskBatch, AskBatchResult, DeviceAuthView, StopRecord, Task } from "@switchboard/protocol";
+import { IN_FLIGHT, TURN_DONE } from "./task-status.ts";
 import { stopKey } from "./stops.ts";
 
 /**
@@ -22,7 +23,7 @@ export function batchKindOf(s: Pick<StopRecord, "reason" | "op" | "target" | "st
 }
 
 /** A Task that runs a turn, waits on a tool approval (a turn sent now would end it as denied), or was stopped, waits on no batch. */
-const NOT_WAITING = new Set<Task["status"]>(["running", "waiting", "aborted"]);
+const NOT_WAITING = new Set<Task["status"]>([...IN_FLIGHT, "aborted"]);
 
 /**
  * The Task's newest stop (by when it stopped) when it waits on the person: open (waiting / exhausted — not one retrying
@@ -146,7 +147,8 @@ export class BatchAnswers {
     if (!p || p.first !== taskId) return [];
     // the batch says who logs in until the rest are sent: the screen reads it again only while it does
     try {
-      if (this.deps.task(taskId)?.status !== "done" || loginStopSince(this.deps.stopRecords(taskId), p.at)) return [];
+      const status = this.deps.task(taskId)?.status;
+      if (!status || !TURN_DONE.has(status) || loginStopSince(this.deps.stopRecords(taskId), p.at)) return [];
       const waiting = new Set((await this.deps.batches()).find((b) => b.id === "batch:sso")?.asks.map((a) => a.taskId) ?? []);
       const sent: string[] = [];
       for (const t of p.rest.filter((x) => waiting.has(x))) {

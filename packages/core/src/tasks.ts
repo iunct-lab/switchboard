@@ -55,6 +55,8 @@ interface LiveSession {
    * session.start (Claude reports one per turn) names the old model and must not write it back over the choice.
    */
   modelChanged?: boolean;
+  /** The thinking effort this process was started with ("" = the CLI's default); core stamps it on the session.start it records (#1802). */
+  effort: string;
   /** `error` messages of the turn in flight (bounded), handed to turn-end listeners with the session.end (#102). */
   turnErrors: string[];
   /** The turn's tool calls not yet answered: id → the tool and its input as one key (#550). */
@@ -183,6 +185,8 @@ export interface TaskManagerOptions {
   bedrock?: (task: Task) => { region: string } | undefined;
   /** Saved per-runner default permission mode (#58); undefined = the adapter's own default. */
   defaultPermissionMode?: (runner: RunnerId) => string | undefined;
+  /** Saved subagent thinking effort of the runner (setting `subagentEffort`); undefined = same as the task. Fixed on a local Task when it is created. */
+  subagentEffort?: (runner: RunnerId) => string | undefined;
   /** Saved shadow runner (#99), used when a creation does not say; null / undefined = no shadow by default. */
   defaultShadowRunner?: () => RunnerId | null | undefined;
   /** Files attached to turns (#125). Absent = `attachmentIds` are refused. */
@@ -192,7 +196,9 @@ export interface TaskManagerOptions {
   /** Where the kit's `device-auth` sends a Task's approval wait (#662): added to the runner's environment. */
   deviceAuthEnv?: (taskId: string) => Record<string, string>;
   /** Where a Task's runner sends its OpenTelemetry logs (#2236, docs/design/claude-otel.md): the daemon's loopback port and the Task's token. */
-  otelFor?: (taskId: string) => { endpoint: string; token: string };
+  otelFor?: (taskId: string) => { endpoint: string; token: string } | undefined;
+  /** Settings `outbound.runnerTelemetry`: true = the runner CLI's own telemetry is not stopped. */
+  runnerTelemetry?: () => boolean;
   /** What the kit's `docker` front reads (#1418): the label for the task's containers and the file its compose projects are written to. */
   dockerEnv?: (taskId: string) => Record<string, string>;
   /** The main reviewer the kit's cross-runner-review picks (#4024, `settings.reviewRunner`). Absent = "other". */
@@ -200,7 +206,7 @@ export interface TaskManagerOptions {
   /** How many daemon stops in a row a turn is resumed after (#835, `quotaAndResume.maxStopResumes`). Absent = `MAX_STOP_RESUMES`. */
   maxStopResumes?: () => number;
   /** The MCP servers a Task's runner gets (#2090, `mcp.yaml` `servers`). Absent = none. */
-  mcpServers?: (task: Task) => Record<string, McpServerConfig>;
+  mcpServers?: (task: Task) => Record<string, McpServerConfig> | undefined;
 }
 
 /** One word for the shell: in single quotes, a quote inside written as '\''. */
@@ -250,6 +256,7 @@ export class TaskManager {
   private approval: TaskManagerOptions["approval"];
   private pricing: TaskManagerOptions["pricing"];
   private defaultPermissionMode: TaskManagerOptions["defaultPermissionMode"];
+  private subagentEffort: TaskManagerOptions["subagentEffort"];
   private defaultShadowRunner: TaskManagerOptions["defaultShadowRunner"];
   private attachments: TaskManagerOptions["attachments"];
   private artifacts: TaskManagerOptions["artifacts"];
@@ -257,6 +264,7 @@ export class TaskManager {
   private heavyStateDir: string | undefined;
   private deviceAuthEnv: TaskManagerOptions["deviceAuthEnv"];
   private otelFor: TaskManagerOptions["otelFor"];
+  private runnerTelemetry: TaskManagerOptions["runnerTelemetry"];
   private dockerEnv: TaskManagerOptions["dockerEnv"];
   private maxStopResumes: () => number;
   private reviewRunner: TaskManagerOptions["reviewRunner"];
@@ -264,9 +272,11 @@ export class TaskManager {
   private bedrock: TaskManagerOptions["bedrock"];
 
   private endListeners = new Set<(taskId: string, task: Task) => void>();
+  private backgroundEmptyListeners = new Set<(taskId: string) => void>();
   private turnEndListeners = new Set<(taskId: string, task: Task, turn: TurnEnd) => void>();
   /** Told whenever a task's planned resume is forgotten, or a person starts a turn (#550: a plan still being made must be dropped too). */
   private planForgottenListeners = new Set<(taskId: string) => void>();
+  private stopRecordedListeners = new Set<(taskId: string, stop: StopRecord, prev: StopRecord | undefined) => void>();
 
   constructor(
     private db: Db,
@@ -281,6 +291,7 @@ export class TaskManager {
     this.approval = opts.approval;
     this.pricing = opts.pricing;
     this.defaultPermissionMode = opts.defaultPermissionMode;
+    this.subagentEffort = opts.subagentEffort;
     this.defaultShadowRunner = opts.defaultShadowRunner;
     this.attachments = opts.attachments;
     this.artifacts = opts.artifacts;
@@ -288,6 +299,7 @@ export class TaskManager {
     this.heavyStateDir = opts.heavyStateDir;
     this.deviceAuthEnv = opts.deviceAuthEnv;
     this.otelFor = opts.otelFor;
+    this.runnerTelemetry = opts.runnerTelemetry;
     this.dockerEnv = opts.dockerEnv;
     this.maxStopResumes = opts.maxStopResumes ?? (() => MAX_STOP_RESUMES);
     this.reviewRunner = opts.reviewRunner;
@@ -404,10 +416,60 @@ export class TaskManager {
     return updated;
   }
 
+  /**
+   * Change the thinking effort of an existing task (#1802); null = back to the CLI's default. The same path as the
+   * model: the process keeps the effort it was started with, so it is released (now if idle, else before the next
+   * turn — `restartNext`) and the next turn resumes the same session with the new one. The caller checks the value
+   * (`checkEffort`).
+   */
+  async setEffort(taskId: string, effort: string | null): Promise<Task> {
+    this.requireLocal(this.mustGet(taskId));
+    const updated = this.db.updateTask(taskId, { effort });
+    if (!updated) throw new Error(`task ${taskId} not found`);
+    this.broadcast({ type: "task.updated", task: updated });
+    const name = effort ?? "CLI default";
+    const live = this.live.get(taskId);
+    if (!live) {
+      this.record(taskId, { t: "status", text: `effort → ${name} (applies when the task resumes)` });
+      return updated;
+    }
+    this.onEvent(taskId, live, { t: "status", text: `effort → ${name} (applies to the next turn)` });
+    live.restartNext = true;
+    if (updated.status !== "running" && updated.status !== "waiting") await this.release(taskId);
+    return updated;
+  }
+
   /** Called when a task's planned resume is forgotten (setResumeAt null — a reply, 中断, a cancel) or a person starts a turn. */
   onPlanForgotten(l: (taskId: string) => void): () => void {
     this.planForgottenListeners.add(l);
     return () => this.planForgottenListeners.delete(l);
+  }
+
+  /**
+   * Called with every stop the runner reported (#4408) and the record of the same id before it (from the DB, so it holds
+   * across a daemon restart). A repeat of the same report comes too, as `stop === prev` (a resumed turn reports the same
+   * stop again).
+   */
+  onStopRecorded(l: (taskId: string, stop: StopRecord, prev: StopRecord | undefined) => void): () => void {
+    this.stopRecordedListeners.add(l);
+    return () => this.stopRecordedListeners.delete(l);
+  }
+
+  /** Called when the last background job of a task is gone (its count went from some to 0). */
+  onBackgroundEmpty(l: (taskId: string) => void): () => void {
+    this.backgroundEmptyListeners.add(l);
+    return () => this.backgroundEmptyListeners.delete(l);
+  }
+
+  private notifyBackgroundEmpty(taskId: string) {
+    // one listener's failure must not skip the others
+    for (const l of this.backgroundEmptyListeners) {
+      try {
+        l(taskId);
+      } catch (e) {
+        console.error(`task ${taskId}: background-empty listener failed:`, e);
+      }
+    }
   }
 
   /** Called on every session.end of a task (turn finished), with the task as it stands after the transition and what the turn ended with. */
@@ -491,8 +553,12 @@ export class TaskManager {
       if (lastAttempt(stop) !== r.attempt) return { ok: false, why: `再試行 ${r.attempt - 1} 回目は予約済みです（次は ${r.attempt} 回目）` };
     }
     const same = (s: StopRecord) => JSON.stringify({ ...s, at: 0, work: 0 });
-    if (prev && same(prev) === same(stop)) return { ok: true, stop: prev };
+    if (prev && same(prev) === same(stop)) {
+      for (const l of this.stopRecordedListeners) l(taskId, prev, prev);
+      return { ok: true, stop: prev };
+    }
     this.record(taskId, { t: "stop.record", stop });
+    for (const l of this.stopRecordedListeners) l(taskId, stop, prev);
     return { ok: true, stop };
   }
 
@@ -561,7 +627,7 @@ export class TaskManager {
   /** Hide a stopped Task from the list, or bring it back (#1142). Like setOutcome, the list order does not move. */
   setArchived(taskId: string, archived: boolean): Task {
     const cur = this.mustGet(taskId);
-    if (cur.status === "running" || cur.status === "waiting" || cur.status === "idle") throw new Error("a running or idle task cannot be archived");
+    if (IN_FLIGHT.has(cur.status) || cur.status === "idle") throw new Error("a running or idle task cannot be archived");
     const t = this.db.updateTask(taskId, { archivedAt: archived ? Date.now() : null, updatedAt: cur.updatedAt })!;
     this.broadcast({ type: "task.updated", task: t });
     return t;
@@ -656,6 +722,7 @@ export class TaskManager {
       scheduleId: input.scheduleId ?? null,
       permissionMode,
       effort,
+      subagentEffort: cloud ? null : this.subagentEffort?.(input.runner) ?? null,
       origin: "switchboard",
       resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null,
       shadowOf: null,
@@ -774,6 +841,7 @@ export class TaskManager {
       scheduleId: null,
       permissionMode,
       effort: null, // another runner: its own list, so the CLI default (#833)
+      subagentEffort: this.subagentEffort?.(runner) ?? null, // the shadow runner's own setting (a shadow is always local)
       origin: "switchboard",
       resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null,
       shadowOf: primary.id,
@@ -888,12 +956,12 @@ export class TaskManager {
     this.beforeResume?.(task);
     if (opts.asResume) {
       if (task.resumeAt === null) throw new ResumeSupersededError("the plan was cleared meanwhile");
-      if (task.status === "running" || task.status === "waiting") throw new ResumeSupersededError(`the task is ${task.status}`);
+      if (IN_FLIGHT.has(task.status)) throw new ResumeSupersededError(`the task is ${task.status}`);
       task = this.setResumeAt(taskId, null);
     }
     if (opts.daemon) {
       if (task.resumeAt !== null) throw new ResumeSupersededError("a resume is planned");
-      if (task.status === "running" || task.status === "waiting") throw new ResumeSupersededError(`the task is ${task.status}`);
+      if (IN_FLIGHT.has(task.status)) throw new ResumeSupersededError(`the task is ${task.status}`);
     }
     if (this.isOverBudget(taskId)) throw new Error(`budget exceeded ($${task.budgetUsd}); raise the budget to continue`);
     return task;
@@ -1038,6 +1106,8 @@ export class TaskManager {
     }
     // 中断 cancels a planned retry (#948): the stop waits for the person again.
     this.moveOpenStops(taskId, (s) => (s.state === "retrying" ? { ...s, state: "waiting", actions: [...s.actions, { attempt: Math.max(0, ...s.actions.map((a) => a.attempt)), at: Date.now(), what: "中断で再試行を取り消し", ok: false }].slice(-20) } : null));
+    // A task waiting on background jobs is stopped like a running one: aborted, not released (its jobs go with the process)
+    if (task.status === "background") task = this.setStatus(taskId, "aborted");
     if (live) {
       this.disarmIdle(live);
       this.live.delete(taskId);
@@ -1063,10 +1133,11 @@ export class TaskManager {
       [...this.live.entries()].map(([taskId, l]) => {
         this.disarmIdle(l);
         const task = this.db.getTask(taskId);
-        const idle = !task || TERMINAL.has(task.status) || task.status === "idle";
-        // a finished task still waiting on its runner's background jobs loses them with the process: planned like a cut turn,
+        const onJobs = task?.status === "background";
+        const idle = !task || TERMINAL.has(task.status) || task.status === "idle" || onJobs;
+        // a task still waiting on its runner's background jobs loses them with the process: planned like a cut turn,
         // unless it already waits for a limit's reset (that plan stays; its resume comes then)
-        const waitingOnJobs = !!task && (task.status === "done" || task.status === "error") && (l.background ?? 0) > 0 && task.resumeAt === null;
+        const waitingOnJobs = onJobs && task.resumeAt === null;
         if (task && (!idle || waitingOnJobs) && task.executionMode !== "cloud") {
           planResumeAfterStop(this.db, task, now, (ev) => this.record(taskId, ev), this.maxStopResumes());
           cut.push(taskId);
@@ -1162,7 +1233,7 @@ export class TaskManager {
     preamble = bare ? undefined : [preamble, recovery, artifactPrompt()].filter((p): p is string => !!p).join("\n\n");
     // in flight before the adapter can emit anything: its events only move a running / waiting task (onEvent)
     this.setStatus(task.id, "running");
-    const live: LiveSession = { session: undefined as unknown as RunnerSession, held: [], pendingPermissions: new Map(), hostAsks: new Map(), ruleMatches: new Map(), turnErrors: [], turnCalls: new Map(), turnGithub: new Map(), stopReader: new StopFenceReader(), artifactReader: new FenceReader("switchboard-artifact", parseArtifactFence) };
+    const live: LiveSession = { session: undefined as unknown as RunnerSession, held: [], pendingPermissions: new Map(), hostAsks: new Map(), ruleMatches: new Map(), effort: task.effort ?? "", turnErrors: [], turnCalls: new Map(), turnGithub: new Map(), stopReader: new StopFenceReader(), artifactReader: new FenceReader("switchboard-artifact", parseArtifactFence) };
     this.live.set(task.id, live);
     try {
       // For the runner that cannot run the hook (Codex, #787): a temp directory of the task's own, removed when it ends.
@@ -1171,7 +1242,7 @@ export class TaskManager {
       // The heavy slots are writable to the sandbox too (#2213): only for this start, never into the saved scope
       const heavy = meta && task.runner === "codex" ? this.heavySlotsDir(task.id) : undefined;
       live.session = adapter.start(
-        { cwd: task.cwd, scope: heavy && !task.scope.includes(heavy) ? [...task.scope, heavy] : task.scope, prompt, model: task.model ?? undefined, permissionMode: task.permissionMode ?? undefined, effort: task.effort ?? undefined, resumeSessionId, preamble, env, guards, allow, privateTmp, bedrock: this.bedrock?.(task), attachments, attachmentDir: this.attachments?.taskDir(task.id), mcpServers: this.mcpServers?.(task), otel: this.otelFor?.(task.id) },
+        { cwd: task.cwd, scope: heavy && !task.scope.includes(heavy) ? [...task.scope, heavy] : task.scope, prompt, model: task.model ?? undefined, permissionMode: task.permissionMode ?? undefined, effort: task.effort ?? undefined, subagentEffort: task.subagentEffort ?? undefined, resumeSessionId, preamble, env, guards, allow, privateTmp, bedrock: this.bedrock?.(task), attachments, attachmentDir: this.attachments?.taskDir(task.id), mcpServers: this.mcpServers?.(task), otel: this.otelFor?.(task.id), runnerTelemetry: this.runnerTelemetry?.() ?? false },
         (ev) => this.fromRunner(task.id, live, ev),
       );
     } catch (e) {
@@ -1189,24 +1260,29 @@ export class TaskManager {
         const afterExit = () => {
           const cur = this.db.getTask(task.id);
           // the runner gone took its background jobs with it, and no notification will start the next turn
+          // (nor count them: the turn end made up below must not read the count as jobs still running)
+          live.background = 0;
           if (cur?.background) {
             const jobs = cur.background.jobs.join(" / ") || "内容不明";
             try {
               this.db.sqlite
                 .transaction(() => {
                   this.db.setTaskBackground(task.id, null);
-                  if (cur.status !== "done" && cur.status !== "error") return;
+                  // the turn had ended ok (that is how it came to wait): back to done, with the resume planned below
+                  const now = cur.status === "background" ? this.transition(task.id, "done") ?? cur : cur;
+                  if (now.status !== "done" && now.status !== "error") return;
                   this.record(task.id, { t: "status", text: `裏で実行中の処理がランナーの終了で失われました: ${jobs}` });
-                  if (cur.resumeAt === null) planResumeAfterStop(this.db, cur, Date.now(), (ev) => this.record(task.id, ev), this.maxStopResumes());
+                  if (now.resumeAt === null) planResumeAfterStop(this.db, now, Date.now(), (ev) => this.record(task.id, ev), this.maxStopResumes());
                 })
                 .immediate();
               this.broadcast({ type: "task.updated", task: this.db.getTask(task.id)! });
+              this.notifyBackgroundEmpty(task.id);
             } catch (e) {
               console.error(`task ${task.id}: the lost background jobs were not recorded:`, e); // the mark stays: the next start reports them
             }
           }
           live.afterHeld = () => this.maybeEnded(task.id);
-          if (cur && (cur.status === "running" || cur.status === "waiting")) {
+          if (cur && IN_FLIGHT.has(cur.status)) {
             this.fromRunner(task.id, live, { t: "session.end", status: code === 0 ? "ok" : "error", summary: `runner exited (${code})` });
           } else this.takeHeld(task.id, live);
         };
@@ -1216,8 +1292,11 @@ export class TaskManager {
         // closed on purpose (released, aborted): nothing will report these jobs ending. Not when a new process took over the task.
         try {
           this.db.setTaskBackground(task.id, null);
+          // an abort moved the task already; a shutdown's cut leaves it waiting on jobs that are gone: back to done (its resume is planned)
+          if (this.db.getTask(task.id)?.status === "background") this.transition(task.id, "done");
           const cur = this.db.getTask(task.id);
           if (cur) this.broadcast({ type: "task.updated", task: cur });
+          this.notifyBackgroundEmpty(task.id);
         } catch (e) {
           console.error(`task ${task.id}: background mark not cleared:`, e); // the next start clears it
         }
@@ -1240,7 +1319,7 @@ export class TaskManager {
   private startCloudSession(task: Task, prompt: string, adapter: RunnerAdapter) {
     const preparation = readCloudPreparation(task.cwd);
     this.record(task.id, { t: "status", text: `Cloud 明示選択による転送範囲の了承。起動直前の Git 状態: ${JSON.stringify(preparation)}` });
-    const live: LiveSession = { session: undefined as unknown as RunnerSession, held: [], pendingPermissions: new Map(), hostAsks: new Map(), ruleMatches: new Map(), turnErrors: [], turnCalls: new Map(), turnGithub: new Map(), stopReader: new StopFenceReader(), artifactReader: new FenceReader("switchboard-artifact", parseArtifactFence) };
+    const live: LiveSession = { session: undefined as unknown as RunnerSession, held: [], effort: "", pendingPermissions: new Map(), hostAsks: new Map(), ruleMatches: new Map(), turnErrors: [], turnCalls: new Map(), turnGithub: new Map(), stopReader: new StopFenceReader(), artifactReader: new FenceReader("switchboard-artifact", parseArtifactFence) };
     this.live.set(task.id, live);
     this.setStatus(task.id, "running");
     try {
@@ -1353,6 +1432,7 @@ export class TaskManager {
       if (m) ev = { ...ev, rule: m };
       live.ruleMatches.delete(ev.id);
     }
+    if (ev.t === "session.start") ev = { ...ev, effort: live.effort }; // the runner does not name its effort; core knows what it was started with (#1802)
     // a fence whose closing line ends the reply (no newline after it) is only read when the reply ends: read it before the
     // event that ends the reply is recorded, so its stop / artifact row comes before the tool row or 完了 (#1936)
     if (endsReply(ev)) this.readFences(taskId, live, ev);
@@ -1392,7 +1472,7 @@ export class TaskManager {
           // A turn the attached runner starts on its own after the last one ended (Claude Code on a background job's
           // notification) is in flight like a sent one: the idle release must not kill it mid-command (Exit code 137),
           // and its end must be reported. A released or aborted process is no longer attached.
-          const ownTurn = (task.status === "done" || task.status === "error") && this.live.get(taskId) === live;
+          const ownTurn = (task.status === "done" || task.status === "error" || task.status === "background") && this.live.get(taskId) === live;
           if (ownTurn) {
             this.disarmIdle(live);
             live.turnErrors = [];
@@ -1461,9 +1541,10 @@ export class TaskManager {
       case "session.end":
         // Only an in-flight turn can end. A late session.end (e.g. the process being released) must not
         // rewrite a task that already finished.
-        if (task.status === "running" || task.status === "waiting") {
+        if (IN_FLIGHT.has(task.status)) {
           // a turn that asked through the question tool ends on the person's answer (#3053): 要対応 at once, not judged
-          this.transition(taskId, ev.status === "ok" ? "done" : ev.status === "aborted" ? "aborted" : "error", ev.status === "ok" && live.turnQuestion ? { outcome: "needs_action" } : {});
+          // a turn that ended ok with jobs left is `background`, not `done`; a failed or aborted one is shown as such (the mark stays)
+          this.transition(taskId, ev.status === "ok" ? (live.background ?? 0) > 0 ? "background" : "done" : ev.status === "aborted" ? "aborted" : "error", ev.status === "ok" && live.turnQuestion ? { outcome: "needs_action" } : {});
           // A shadow's turn that ended in error (#99) — a session the agent lost, an ADK error — is invisible from the
           // primary, which is where the person is looking; the copies stop matching from here on.
           if (ev.status === "error" && task.shadowOf) this.record(task.shadowOf, { t: "status", text: `並走（${task.runner}）のターンがエラーで終わりました（${ev.summary ?? ""}）。ここから先の会話は並走と食い違います` });
@@ -1471,7 +1552,7 @@ export class TaskManager {
         // Keep the process for quick follow-ups only when nothing is pending; a permission still open means the turn is not over.
         if (ev.status !== "aborted" && live.pendingPermissions.size === 0 && this.live.get(taskId) === live) this.armIdle(taskId, live);
         // A turn ended only if one was in flight; the session.end that closing an idle process emits is not a turn.
-        if (task.status === "running" || task.status === "waiting") {
+        if (IN_FLIGHT.has(task.status)) {
           const after = this.db.getTask(taskId);
           const github = [...live.turnGithub.values()].at(-1);
           const turn: TurnEnd = { end: ev, errors: live.turnErrors, quota: live.turnQuota, githubLimit: github?.line, githubLimitAt: github?.at, diskFull: live.turnDisk ?? [ev.status === "error" ? ev.summary : undefined, ...live.turnErrors].map(diskFullText).find(Boolean) };
@@ -1496,11 +1577,16 @@ export class TaskManager {
         break;
       case "background":
         live.background = ev.count;
+        const hadBackground = task.background !== null;
         this.db.setTaskBackground(taskId, ev.count > 0 ? { jobs: ev.jobs ?? [], since: task.background?.since ?? env.ts } : null);
+        // the last job gone ends the wait; a mark that arrives after the turn ended starts one
+        if (ev.count === 0 && task.status === "background") this.transition(taskId, "done");
+        else if (ev.count > 0 && task.status === "done") this.transition(taskId, "background");
         this.broadcast({ type: "task.updated", task: this.db.getTask(taskId)! });
         // a job left keeps the process (its notification starts the next turn); the last one gone starts the idle clock
         if (ev.count > 0) this.disarmIdle(live);
         else if (!IN_FLIGHT.has(task.status) && live.pendingPermissions.size === 0 && this.live.get(taskId) === live) this.armIdle(taskId, live);
+        if (ev.count === 0 && hadBackground) this.notifyBackgroundEmpty(taskId);
         break;
       case "error":
         // Recorded in the transcript only. The status is decided by session.end (or by the exit handler when the

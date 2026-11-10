@@ -1,7 +1,7 @@
 // test-reads: apps/web/src/asks.ts apps/web/src/inProgress.ts apps/web/src/terminalReconnect.ts apps/web/src/i18n.ts apps/web/src/i18n/task.ts
 import { describe, expect, test } from "bun:test";
 import type { StopSummary } from "@switchboard/protocol";
-import { shownStops, stopDisplay } from "./stops.ts";
+import { personStops, shownStops, stopDisplay } from "./stops.ts";
 
 const s = (over: Partial<StopSummary> = {}): StopSummary => ({
   key: "k", work: { workspaceId: "ws", issue: 939, taskId: "t" }, op: "gh pr merge", target: "PR #12", reason: "depends", evidence: "CI が終わっていない", safety: "unknown",
@@ -60,5 +60,15 @@ console.log(JSON.stringify([d.count, d.changes, d.next, d.actions, resumeLabel({
     const r = Bun.spawnSync([process.execPath, "-e", code]);
     expect(r.stderr.toString()).toBe("");
     expect(JSON.parse(r.stdout.toString())).toEqual(["seen 2 times", "A new answer (x)", "Needs your decision", ["Attempt 1: retry (failed)"], "Waiting to resume: budget", "Operations check", "3 h ago", "The terminal has exited."]);
+  });
+});
+
+describe("personStops", () => {
+  test("keeps only the series that need a person, in the order shownStops gives", () => {
+    const stops = [s({ key: "wait", next: "wait", lastAt: 9 }), s({ key: "d1", next: "decide", lastAt: 3 }), s({ key: "d2", next: "decide", lastAt: 5 }), s({ key: "resolved", next: "decide", state: "resolved", count: 1 })];
+    expect(personStops(stops).map((x) => x.key)).toEqual(["d2", "d1"]);
+  });
+  test("none when nothing needs a person", () => {
+    expect(personStops([s({ next: "retry" })])).toEqual([]);
   });
 });

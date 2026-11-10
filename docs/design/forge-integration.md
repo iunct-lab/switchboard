@@ -131,7 +131,7 @@ PR とレビューは各サービスの標準のものを使う（自前の MR�
 | マージ | `gh pr merge --match-head-commit` / `gh stack merge` | `PUT …/merge` に sha。スタックのマージは無い |
 | 認証 | `gh` のログイン | `glab` のログイン（`gitlabAuth`。足りなければ「ログインしていません」とだけ言う） |
 
-実 GitLab を使い始めるときに要るもの（glab の導入とログイン、OSS GitLab の起動、Git の remote の切り替え）は [`gitlab-adoption.md`](gitlab-adoption.md) で比べる。ここでは何もしない。どれも利用者の確認の後だけ。
+実 GitLab を使い始めるときに要るもの（glab の導入とログイン、OSS GitLab の起動、Git の remote の切り替え）は [`gitlab-adoption.md`](gitlab-adoption.md) で比べる。使ってよいかの安全性の調査（直近の脆弱性・glab・トークンの最小権限）は [`gitlab-security.md`](gitlab-security.md)。ここでは何もしない。どれも利用者の確認の後だけ。
 
 今の形のまま残っていること（どの PBI にも渡していない事実）:
 

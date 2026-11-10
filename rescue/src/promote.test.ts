@@ -4,7 +4,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { commitFile, daemonSource, freePort, health, makeRepo, until } from "./fixture.ts";
-import { checkDaemon, KEEP_SNAPSHOTS, listSnapshots, promote, restoreDb, rollback, snapshotDb, type Ctx } from "./promote.ts";
+import { checkDaemon, checkFeatures, KEEP_SNAPSHOTS, listSnapshots, promote, restoreDb, rollback, snapshotDb, type Ctx } from "./promote.ts";
 import { appendHistory, buildRelease, currentOf, previousOf, readHistory, switchTo } from "./releases.ts";
 import { Supervisor } from "./supervisor.ts";
 
@@ -246,8 +246,37 @@ test("checkDaemon says why the daemon is unhealthy, in the same words (#2814)", 
     expect(await checkDaemon(notOk!, f.home)).toBe("/api/health answered 200");
     expect(["WebSocket /ws refused", "WebSocket /ws did not open"]).toContain((await checkDaemon(noWs!, f.home))!);
     expect(await checkDaemon(fine!, f.home)).toBeNull();
-    expect(asked).not.toContain("/api/tasks");
+    expect(asked).not.toContain("/api/tasks"); // the features are checkFeatures, asked once, not every 200 ms
   } finally {
     for (const s of servers) await s.stop(true);
   }
 });
+
+test("a release whose task list fails is rejected on the candidate; one that breaks it after the switch goes back by itself; an empty list passes", async () => {
+  const cur = currentOf(f.home);
+  const noList = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource("no-list", `tasks = "500";`), "task list 500");
+  const rejected = await promote(ctx, noList, FAST);
+  expect(rejected).toMatchObject({ action: "rejected", ok: false, to: noList });
+  expect(rejected.reason).toContain("/api/tasks answered 500");
+  expect(currentOf(f.home)).toBe(cur);
+
+  const late = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource("late-list", `if (!process.env.SWITCHBOARD_CANDIDATE) tasks = "500";`), "task list 500 after the switch");
+  const back = await promote(ctx, late, FAST);
+  expect(back).toMatchObject({ action: "auto-rollback", ok: false, from: late, to: cur });
+  expect(back.reason).toContain("/api/tasks answered 500");
+  expect(currentOf(f.home)).toBe(cur);
+  expect((await until(() => health(ctx.port), "back after the task list failed")).ok).toBe(true);
+
+  const empty = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource("empty-list", `tasks = "empty";`), "no task yet");
+  expect(await promote(ctx, empty, FAST)).toMatchObject({ action: "promote", ok: true, to: empty });
+
+  // the first task does not read back (as the API answers it: `{ task, … }`): rejected with the path
+  const now = currentOf(f.home);
+  for (const [name, why] of [["html", "/api/tasks answered something that is not a list"], ["detail500", "/api/tasks/t1 answered 500"], ["other", "/api/tasks/t1 answered another task"]] as const) {
+    const bad = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource(`detail-${name}`, `tasks = "${name}";`), `task detail ${name}`);
+    const r = await promote(ctx, bad, FAST);
+    expect(r).toMatchObject({ action: "rejected", ok: false, to: bad });
+    expect(r.reason).toContain(why);
+    expect(currentOf(f.home)).toBe(now);
+  }
+}, 90_000);

@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { QUESTION_DEFERRED_REPLY, type AgentEvent } from "@switchboard/protocol";
-import { bedrockModelName, CODEX_BEDROCK_MODELS, codexSessionExists, createCodexAdapter, memoryOffNote } from "./index.ts";
+import { bedrockModelName, telemetryArgs, CODEX_BEDROCK_MODELS, codexSessionExists, createCodexAdapter, memoryOffNote } from "./index.ts";
 
 const FAKE = new URL("../fixtures/fake-app-server.ts", import.meta.url).pathname;
 
@@ -169,6 +169,14 @@ describe("subagent threads", () => {
   });
 });
 
+describe("telemetryArgs (#4308)", () => {
+  test("telemetryArgs: off by default passes analytics.enabled=false, on adds none", () => {
+    expect(telemetryArgs({})).toEqual(["-c", "analytics.enabled=false", "-c", "feedback.enabled=false"]);
+    expect(telemetryArgs({ runnerTelemetry: false })).toEqual(telemetryArgs({}));
+    expect(telemetryArgs({ runnerTelemetry: true })).toEqual([]);
+  });
+});
+
 describe("bedrock (#1731)", () => {
   test("app-server gets the amazon-bedrock provider and region only when StartOptions.bedrock is set", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sb-codex-bedrock-"));
@@ -182,9 +190,9 @@ describe("bedrock (#1731)", () => {
     };
     try {
       const plain = await run("plain");
-      expect(plain.argv).toEqual(["app-server", "--listen", "stdio://", "-c", "features.memories=false", "-c", "features.default_mode_request_user_input=true", "-c", "x=1"]);
+      expect(plain.argv).toEqual(["app-server", "--listen", "stdio://", "-c", "features.memories=false", "-c", "features.default_mode_request_user_input=true", "-c", "x=1", "-c", "analytics.enabled=false", "-c", "feedback.enabled=false"]);
       const bedrock = await run("bedrock", { region: "ap-northeast-1" });
-      expect(bedrock.argv).toEqual(["app-server", "--listen", "stdio://", "-c", "features.memories=false", "-c", "features.default_mode_request_user_input=true", "-c", "x=1", "-c", 'model_provider="amazon-bedrock"', "-c", 'model_providers.amazon-bedrock.aws.region="ap-northeast-1"']);
+      expect(bedrock.argv).toEqual(["app-server", "--listen", "stdio://", "-c", "features.memories=false", "-c", "features.default_mode_request_user_input=true", "-c", "x=1", "-c", 'model_provider="amazon-bedrock"', "-c", 'model_providers.amazon-bedrock.aws.region="ap-northeast-1"', "-c", "analytics.enabled=false", "-c", "feedback.enabled=false"]);
       // the environment is the same either way: no key or variable is added for Bedrock
       const names = (env: string) => env.split("\n").map((l) => l.split("=")[0]).filter((n) => n && n !== "OUT").sort();
       expect(names(bedrock.env)).toEqual(names(plain.env));

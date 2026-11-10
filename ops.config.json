@@ -16,7 +16,6 @@
     "request": [{"name": "要望", "hint": "意図を変えずに整えた文を入れる"}, {"name": "出典", "hint": "誰の言葉 / いつ / 経路"}],
     "origin": {"name": "元要望", "pattern": "^(#[0-9]+([^0-9].*)?|なし[（(].+[）)].*)$", "hint": "`#N（要望のどの部分か）` か `なし（理由）`"}
   },
-  "storyPoints": [1, 2, 3, 5, 8],
   "publicSync": {
     "target": "iunct-lab/switchboard",
     "include": [".claude/", ".gitattributes", ".github/", ".gitignore", "AGENTS.md", "CLAUDE.md", "LICENSE", "NOTICE", "README.md", "SECURITY.md", "apps/", "aws/", "bun.lock", "bunfig.toml", "docs/", "ops-kit/", "ops.config.json", "package.json", "packages/", "rescue/", "scripts/", "tsconfig.base.json"],
@@ -34,6 +33,7 @@
       "docs/design/github-api-budget.md",
       "docs/design/github-operations.md",
       "docs/design/host-disk.md",
+      "docs/design/host-operations.md",
       "docs/design/interventions.md",
       "docs/design/ledger.md",
       "docs/design/license-review.md",
@@ -59,6 +59,7 @@
     ],
     "rewrite": ["SECURITY.md"],
     "serviceUsers": ["switchboard"],
+    "allowRefs": ["private/CLAUDE.md", ".github/workflows/project-autoadd.yml"],
     "versioning": "independent"
   }
 }

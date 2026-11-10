@@ -80,7 +80,7 @@ test("(a, c) base not moved: main gets the branch's commits in order, no merge c
   // nothing to rebase onto: the same commits
   expect(s.tip("main")).toBe(head);
   expect(s.branches()).toEqual(["main"]);
-  expect((await s.view(3)).issue).toMatchObject({ state: "CLOSED", change: { head: "sb/2-x", base: "main", mergeCommit: head, mergedAt: "2026-01-02T00:00:00.000Z" } });
+  expect((await s.view(3)).issue).toMatchObject({ state: "CLOSED", change: { head: "sb/2-x", base: "main", mergeCommit: head, mergedAt: "2026-01-02T00:00:00.000Z", reviewedHead: head } });
   // the Task had no Status (no field set when made): it is Done now (#3970)
   const task = await s.view(2);
   expect(task.issue.state).toBe("CLOSED");
@@ -95,8 +95,14 @@ test("(b) base moved before: the branch's commits are rebased onto the new tip, 
   s.git("commit", "-q", "-m", "z");
   // the pass was of the old base: a new one for this base
   await s.mark();
+  const reviewed = s.tip("sb/2-x");
   const r = await s.run();
   expect(r.code).toBe(0);
+  // the change keeps the head that was judged (#3971) beside the commit main got: the rebase made them differ
+  const merged = (await s.view(3)).issue.change!;
+  expect(merged.reviewedHead).toBe(reviewed);
+  expect(merged.mergeCommit).toBe(s.tip("main"));
+  expect(merged.reviewedHead).not.toBe(merged.mergeCommit);
   expect(s.subjects()).toEqual(["c", "b", "z", "a"]);
   expect(s.merges()).toBe("");
   expect(s.git("log", "-1", "--format=%aI %an", "main")).toBe("2026-01-01T00:00:00Z t");

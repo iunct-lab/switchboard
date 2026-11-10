@@ -1,5 +1,5 @@
 // test-reads: .github/workflows/ci.yml scripts/ci.ts
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
@@ -7,7 +7,7 @@ import { withHeavySlot } from "../ops-kit/src/heavy";
 import { NO_HOST } from "../ops-kit/src/secrets";
 import type { Filed, OpenRequest } from "./file-request";
 import { stepWithIdle } from "./local-ci";
-import { classifyMiss, failedIn, failedTestFiles, failureRequest, followUp, hidePaths, latestPass, latestPassTag, MAX_TAG_RUNS, parseArgs, REQUEST_TITLE, resolveRepo, resultSection, tagCi, tagCiExit, tagResult, TAG_CI_RESULT, type FollowDeps, type TagCiDeps, type TagCiEntry } from "./tag-ci";
+import { classifyMiss, failedIn, failedTestFiles, failureRequest, followUp, hidePaths, latestPass, latestPassTag, MAX_TAG_RUNS, parseArgs, waitForMore, REQUEST_TITLE, resolveRepo, resultSection, tagCi, tagCiExit, tagResult, TAG_CI_RESULT, type FollowDeps, type TagCiDeps, type TagCiEntry } from "./tag-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
 const ciTs = await Bun.file(new URL("./ci.ts", import.meta.url)).text();
@@ -22,7 +22,7 @@ const CHECK = "bun scripts/perf-ratchet.ts check perf-result.json --base perf-ba
  * A fake clone of o/r: `tags` newest first, each with its Release body (null = no Release) and how its CI goes
  * (`fail`: the step's script that fails and its output; none = every step passes). Edits of a Release change its body.
  */
-function fake(tags: Array<{ tag: string; body: string | null; fail?: { at: string; output: string }; merged?: false }>, yml = ciYml, select?: string | Error) {
+function fake(tags: Array<{ tag: string; body: string | null; at?: number; fail?: { at: string; output: string }; merged?: false }>, yml = ciYml, select?: string | Error, changed = "") {
   const bodies = new Map(tags.map((t) => [t.tag, t.body]));
   const ran: Array<{ tag: string; script: string }> = [];
   const viewed: string[] = [];
@@ -34,12 +34,15 @@ function fake(tags: Array<{ tag: string; body: string | null; fail?: { at: strin
     sh: async (cmd, _cwd, input) => {
       const c = cmd.join(" ");
       diffs.push(...(cmd.includes("diff") ? [cmd.at(-1)!] : []));
+      if (cmd.includes("diff") && cmd.includes("--name-only")) return changed;
       if (cmd[0] === "env") {
         if (select instanceof Error) throw select;
         return select ?? "";
       }
       // `merged: false` = a tag after the commit given to --merged
       if (c.includes(" tag -l ")) return `${tags.filter((t) => !cmd.includes("--merged") || t.merged !== false).map((t) => t.tag).join("\n")}\nv1.0\n`;
+      // `at` = the tag's creatordate in unix seconds
+      if (c.includes(" for-each-ref ")) return tags.map((t) => `${t.tag}\t${t.at ?? ""}`).join("\n");
       if (c.includes(" rev-parse ")) return `${shaOf(cmd.at(-1)!.replace("^{commit}", ""))}\n`;
       if (c.startsWith("gh release view")) {
         viewed.push(cmd[3]!);
@@ -69,11 +72,80 @@ function fake(tags: Array<{ tag: string; body: string | null; fail?: { at: strin
     },
     log: () => undefined,
     slot: (_name, fn) => fn(),
+    // no waiting for tags to pile up unless a test asks for it (#4079)
+    env: { SWITCHBOARD_TAG_CI_MIN_TAGS: "0" },
   };
   return { d, ran, viewed, worktrees, edits, bodies, diffs };
 }
 
 const testFail = { at: "bun test", output: "(fail) a > b\n1 fail" };
+
+describe("tag-ci: waits for tags to pile up (#4079)", () => {
+  const NOW = 1_800_000_000_000;
+  const H = 3_600_000;
+  const unix = (msAgo: number) => (NOW - msAgo) / 1000;
+  // three tags without a result, then one with: the newest at v3.0.0
+  const piled = (ago: number[]) => fake([
+    ...ago.map((a, i) => ({ tag: `v${ago.length - i}.0.0`, body: "- #1 x", at: unix(a) })),
+    { tag: "v0.9.0", body: `x\n[tag-ci] pass ${shaOf("v0.9.0")}`, at: unix(100 * H) },
+  ]);
+  const withEnv = (f: ReturnType<typeof fake>, env: Record<string, string>, waits: string[] = []): TagCiDeps => ({ ...f.d, env, now: () => NOW, log: (l) => void waits.push(l), onWait: (r) => void waits.push(`wait: ${r}`) });
+
+  test("waitForMore: fewer than min and young waits, the rest runs", () => {
+    const p = (n: number, ago: number) => Array.from({ length: n }, (_, i) => ({ tag: `v${n - i}.0.0`, at: NOW - (i === n - 1 ? ago : 0) }));
+    expect(waitForMore(p(3, H), NOW, 8, 6 * H)).toContain("3 件");
+    expect(waitForMore(p(8, H), NOW, 8, 6 * H)).toBeNull();
+    expect(waitForMore(p(3, 6 * H), NOW, 8, 6 * H)).toBeNull();
+    expect(waitForMore([], NOW, 8, 6 * H)).toBeNull();
+  });
+
+  test("fewer than min and new: nothing runs, the Release is untouched, onWait hears why", async () => {
+    const f = piled([2 * H, H, H / 2]);
+    const waits: string[] = [];
+    const r = await tagCi(withEnv(f, { SWITCHBOARD_TAG_CI_MIN_TAGS: "4" }, waits), "o/r", "/repo", CACHE);
+    expect(r).toEqual([]);
+    expect(f.worktrees).toEqual([]);
+    expect(f.edits).toEqual([]);
+    expect(waits.filter((w) => w.startsWith("wait: "))).toHaveLength(1);
+    // the count reads down to the tag with a result and no further
+    expect(f.viewed).toEqual(["v3.0.0", "v2.0.0", "v1.0.0", "v0.9.0"]);
+  });
+
+  test("min or more pile up: it runs", async () => {
+    const f = piled([2 * H, H, H / 2]);
+    const r = await tagCi(withEnv(f, { SWITCHBOARD_TAG_CI_MIN_TAGS: "3" }), "o/r", "/repo", CACHE);
+    expect(r.map((e) => e.tag)).toEqual(["v3.0.0"]);
+  });
+
+  test("fewer than min but the oldest is MAX_WAIT old: it runs", async () => {
+    const f = piled([7 * H, H, H / 2]);
+    const r = await tagCi(withEnv(f, { SWITCHBOARD_TAG_CI_MIN_TAGS: "8" }), "o/r", "/repo", CACHE);
+    expect(r.map((e) => e.tag)).toEqual(["v3.0.0"]);
+  });
+
+  test("the environment overrides the hours, and a bad value is the default (8 tags, 6 hours)", async () => {
+    const run = async (env: Record<string, string>) => (await tagCi(withEnv(piled([7 * H, H, H / 2]), env), "o/r", "/repo", CACHE)).length;
+    expect(await run({ SWITCHBOARD_TAG_CI_MAX_WAIT_HOURS: "8" })).toBe(0);
+    expect(await run({ SWITCHBOARD_TAG_CI_MAX_WAIT_HOURS: "7" })).toBe(1);
+    // bad: 8 tags / 6 hours, so the 7-hour-old oldest runs and a 5-hour-old one waits
+    expect(await run({ SWITCHBOARD_TAG_CI_MIN_TAGS: "abc", SWITCHBOARD_TAG_CI_MAX_WAIT_HOURS: "-1" })).toBe(1);
+    expect(await run({ SWITCHBOARD_TAG_CI_MIN_TAGS: "2.5", SWITCHBOARD_TAG_CI_MAX_WAIT_HOURS: "" })).toBe(1);
+    const young = piled([5 * H, H, H / 2]);
+    expect((await tagCi(withEnv(young, { SWITCHBOARD_TAG_CI_MIN_TAGS: "x", SWITCHBOARD_TAG_CI_MAX_WAIT_HOURS: "x" }), "o/r", "/repo", CACHE))).toEqual([]);
+  });
+
+  test("without onWait (another repository, --repo) it never waits", async () => {
+    const f = piled([2 * H, H, H / 2]);
+    const r = await tagCi({ ...f.d, env: { SWITCHBOARD_TAG_CI_MIN_TAGS: "8" }, now: () => NOW }, "o/r", "/repo", CACHE);
+    expect(r.map((e) => e.tag)).toEqual(["v3.0.0"]);
+  });
+
+  test("a newest tag that already has a result is not a wait", async () => {
+    const f = fake([{ tag: "v1.0.0", body: `x\n[tag-ci] pass ${shaOf("v1.0.0")}`, at: unix(H) }]);
+    const r = await tagCi(withEnv(f, {}), "o/r", "/repo", CACHE);
+    expect(r.map((e) => `${e.tag} ${e.result} ${e.ran}`)).toEqual(["v1.0.0 pass false"]);
+  });
+});
 
 describe("tag-ci: a tag left without a Release", () => {
   test("the repair before the walk creates it, and the walk runs that tag instead of stopping there", async () => {
@@ -110,6 +182,49 @@ describe("tag-ci", () => {
     expect(tagResult(f.bodies.get("v1.0.0")!, shaOf("v1.0.0"))).toBe("pass");
     expect(f.worktrees).toEqual(["v1.0.0"]);
     expect(f.ran.some((x) => x.script === "bun test")).toBe(true);
+  });
+
+  test("main's bundle and bytes are recorded once each from the tag's worktree, pass or fail; a failed record changes nothing (#4105)", async () => {
+    for (const [fail, recordFails] of [[undefined, false], [testFail, false], [undefined, true]] as const) {
+      const f = fake([{ tag: "v1.0.0", body: "- #1 x", fail }]);
+      const puts: string[] = [];
+      const contents: string[] = [];
+      const logged: string[] = [];
+      let removed = false;
+      const d: TagCiDeps = {
+        ...f.d,
+        log: (l) => void logged.push(l),
+        // the perf step leaves perf-base.json (with the journeys' bytes) in the tag's worktree
+        step: async (script, cwd, env) => {
+          await Bun.write(`${cwd}/perf-base.json`, JSON.stringify({ sha: "a".repeat(40), bundle: { js: 1000, css: 100 }, journeys: { "open-task": { bytes: 5, responses: { "/a": { count: 1, bytes: 5 } } } } }));
+          await Bun.write(`${cwd}/perf-result.json`, JSON.stringify({ runs: 5, journeys: { "new-task": { msMedian: 9, msP90: 9, requests: 7, layoutCount: 6, recalcStyleCount: 8, layoutShift: 0.01, bytes: 5 } } }));
+          return f.d.step(script, cwd, env);
+        },
+        sh: async (cmd, cwd, input) => {
+          if (cmd.includes("worktree") && cmd.includes("remove")) removed = true;
+          if (cmd[0] !== "gh" || cmd[1] !== "api") return f.d.sh(cmd, cwd, input);
+          if (recordFails) throw new Error("gh api failed: gh: Server Error (HTTP 502)");
+          if (cmd.includes("PUT")) {
+            expect(removed).toBe(false);
+            puts.push(cmd.find((a) => a.includes("/contents/"))!);
+            contents.push(Buffer.from((JSON.parse(readFileSync(cmd[cmd.indexOf("--input") + 1]!, "utf8")) as { content: string }).content, "base64").toString("utf8"));
+            return "{}";
+          }
+          if (cmd.some((a) => a.includes("/contents/"))) throw new Error("gh api failed: gh: Not Found (HTTP 404)");
+          return "{}";
+        },
+      };
+      const r = await tagCi(d, "o/r", "/repo", CACHE);
+      expect(r[0]!.result).toBe(fail ? "fail" : "pass");
+      expect(puts.map((p) => p.replace(/.*\/contents\//, ""))).toEqual(recordFails ? [] : ["bundle.tsv", "bytes.tsv", "counts.tsv"]);
+      // the bytes record has the journey's per-path row, not only its header
+      if (!recordFails) expect(contents[1]!).toContain(["open-task", "/a", "1", "5", "a".repeat(40)].join("\t"));
+      // counts.tsv: a row per count of the tag (no times), with the tag and its commit
+      if (!recordFails) expect(contents[2]!.split("\n").filter((l) => l.includes("\tjourneys.new-task.layoutCount\t"))).toEqual([expect.stringMatching(/^\S+\t(github|local)\tv1\.0\.0\t[0-9a-f]{40}\tjourneys\.new-task\.layoutCount\t6$/)]);
+      expect(logged.filter((l) => l.includes("の記録")).length).toBe(3);
+      expect(logged.some((l) => l.includes("の記録に失敗（結果は変えない）"))).toBe(recordFails);
+      expect(removed).toBe(true);
+    }
   });
 
   test("every test runs: the tag's bun test is never narrowed, even with the selection in the checkout (#3297)", async () => {
@@ -201,6 +316,32 @@ describe("tag-ci", () => {
     expect(tagCiExit(r)).toBe(0);
   });
 
+  test("previous tag: the steps' env names the tag before as PERF_BASE_REF; the first tag gets none (#4219)", async () => {
+    const f = fake([{ tag: "v3.0.0", body: "" }, { tag: "v2.0.0", body: "" }, { tag: "v1.0.0", body: "" }]);
+    const seen = new Map<string, string | undefined>();
+    const d: TagCiDeps = { ...f.d, step: (script, cwd, env) => (seen.set(/switchboard\.tag-ci-(v\d+\.\d+\.\d+)\./.exec(cwd)?.[1] ?? "?", env?.PERF_BASE_REF), f.d.step(script, cwd, env)) };
+    await tagCi(d, "o/r", "/repo", CACHE);
+    expect([...seen]).toEqual([["v3.0.0", "v2.0.0"]]);
+    const g = fake([{ tag: "v1.0.0", body: "" }]);
+    const first = new Map<string, string | undefined>();
+    await tagCi({ ...g.d, step: (script, cwd, env) => (first.set("v1.0.0", env?.PERF_BASE_REF), g.d.step(script, cwd, env)) }, "o/r", "/repo", CACHE);
+    expect([...first]).toEqual([["v1.0.0", undefined]]);
+  });
+
+  test("previous tag: grew and raised against it reach the Release's CI section with (raised/grew only)", async () => {
+    const grew = "grew: bundle.js +1.10% (1000 → 1011 B) ≥ 1%: merging is the user's call (docs/design/perf.md)";
+    const raised = "raised: launch.ms = 900 (main 800)";
+    const f = fake([{ tag: "v2.0.0", body: "", fail: { at: CHECK, output: `ceilings: local\n${grew}\n` } }, { tag: "v1.0.0", body: "" }]);
+    await tagCi(f.d, "o/r", "/repo", CACHE);
+    expect(f.bodies.get("v2.0.0")).toContain(`[tag-ci] pass ${shaOf("v2.0.0")} (raised/grew only)`);
+    expect(f.bodies.get("v2.0.0")).toContain(`    ${grew}`);
+    expect(f.bodies.get("v2.0.0")).toContain("前のタグ");
+    const g = fake([{ tag: "v2.0.0", body: "", fail: { at: CHECK, output: `ceilings: local\n${raised}\n` } }, { tag: "v1.0.0", body: "" }]);
+    await tagCi(g.d, "o/r", "/repo", CACHE);
+    expect(g.bodies.get("v2.0.0")).toContain(`(raised/grew only)`);
+    expect(g.bodies.get("v2.0.0")).toContain(`    ${raised}`);
+  });
+
   test("raised only counts as pass", async () => {
     const raised = { at: CHECK, output: "ceilings: local\nraised: launch.ms = 900 (main 800)\n" };
     const f = fake([{ tag: "v2.0.0", body: "", fail: raised }, { tag: "v1.0.0", body: "" }]);
@@ -213,6 +354,132 @@ describe("tag-ci", () => {
     const over = { at: CHECK, output: "ceilings: local\nover: launch.ms = 900 > 800\nraised: launch.ms = 900 (main 800)\n" };
     const g = fake([{ tag: "v2.0.0", body: "", fail: over }, { tag: "v1.0.0", body: "" }]);
     expect((await tagCi(g.d, "o/r", "/repo", CACHE)).map((x) => `${x.tag} ${x.result}`)).toEqual(["v2.0.0 fail", "v1.0.0 pass"]);
+  });
+
+  test("improved only is a pass that keeps the lines as ceilings to lower; over is a wobble only when the range since the last pass does not reach perf-bench (#4124)", async () => {
+    const pass = (tag: string) => `[tag-ci] pass ${shaOf(tag)}`;
+    const improved = { at: CHECK, output: "ceilings: local\nimproved: launch.ms = 600 (ceiling 800)\n" };
+    const a = fake([{ tag: "v2.0.0", body: "", fail: improved }, { tag: "v1.0.0", body: "" }]);
+    const ra = await tagCi(a.d, "o/r", "/repo", CACHE, NO_HOST);
+    expect(ra.map((x) => `${x.tag} ${x.result}`)).toEqual(["v2.0.0 pass"]);
+    expect(a.bodies.get("v2.0.0")).toContain(`[tag-ci] pass ${shaOf("v2.0.0")} (improved only)`);
+    expect(a.bodies.get("v2.0.0")).toContain("bun scripts/perf-ratchet.ts update");
+    expect(a.bodies.get("v2.0.0")).toContain("    improved: launch.ms = 600 (ceiling 800)");
+    expect(a.bodies.get("v2.0.0")).not.toContain("が落ちた:");
+    expect(tagResult(a.bodies.get("v2.0.0")!, shaOf("v2.0.0"))).toBe("pass");
+
+    const over = { at: CHECK, output: "ceilings: local\nover: launch.ms = 900 > 800\n" };
+    const tags = [{ tag: "v3.0.0", body: "", fail: over }, { tag: "v2.0.0", body: "" }, { tag: "v1.0.0", body: pass("v1.0.0") }];
+    // (b) the range since v1.0.0 (v2.0.0 had no result) holds only docs: a wobble
+    const b = fake(tags, ciYml, undefined, "docs/design/a.md\naws/README.md\n");
+    expect((await tagCi(b.d, "o/r", "/repo", CACHE, NO_HOST)).map((x) => `${x.tag} ${x.result}`)).toEqual(["v3.0.0 pass"]);
+    expect(b.diffs).toContain("v1.0.0..v3.0.0");
+    expect(b.bodies.get("v3.0.0")).toContain(`[tag-ci] pass ${shaOf("v3.0.0")} (wobble: perf-bench に届く変更なし)`);
+    expect(b.bodies.get("v3.0.0")).toContain("揺れ（範囲に perf-bench に届く変更なし: v1.0.0..v3.0.0）");
+    expect(b.bodies.get("v3.0.0")).toContain("    over: launch.ms = 900 > 800");
+    expect(b.bodies.get("v3.0.0")).not.toContain("が落ちた:");
+    // (c) a change under apps/web reaches it: a fail as before
+    const c = fake(tags, ciYml, undefined, "docs/design/a.md\napps/web/src/main.ts\n");
+    expect((await tagCi(c.d, "o/r", "/repo", CACHE, NO_HOST)).map((x) => `${x.tag} ${x.result}`)).toEqual(["v3.0.0 fail", "v2.0.0 pass"]);
+    expect(c.bodies.get("v3.0.0")).toContain(`[tag-ci] fail ${shaOf("v3.0.0")}`);
+    // (d) no tag passed before: it cannot say what the range is, a fail
+    const d = fake([{ tag: "v3.0.0", body: "", fail: over }, { tag: "v2.0.0", body: "" }], ciYml, undefined, "docs/design/a.md\n");
+    expect((await tagCi(d.d, "o/r", "/repo", CACHE, NO_HOST))[0]!.result).toBe("fail");
+  });
+
+  describe("an over in a range that reaches perf-bench: the tag that passed last is measured again (#4124)", () => {
+    const pass = (tag: string) => `[tag-ci] pass ${shaOf(tag)}`;
+    const over = (...keys: string[]) => ({ at: CHECK, output: `ceilings: local\n${keys.map((k) => `over: ${k} = 9 > ceiling 6\n`).join("")}` });
+    const tags = (fail: { at: string; output: string }) => [{ tag: "v3.0.0", body: "", fail }, { tag: "v2.0.0", body: "" }, { tag: "v1.0.0", body: pass("v1.0.0") }];
+    const REACH = "apps/web/src/main.ts\n";
+    /** The fake with the measure of the previous tag: its perf-bench leaves a result (7 for every count), its check says `before`; `puts` = the records' paths and rows. */
+    function again(t: ReturnType<typeof tags>, changed: string, before: string | "bench fails") {
+      const f = fake(t, ciYml, undefined, changed);
+      const puts: Array<{ path: string; text: string }> = [];
+      const d: TagCiDeps = {
+        ...f.d,
+        step: async (script, cwd, env) => {
+          if (script.includes("scripts/perf-bench.ts")) {
+            if (before === "bench fails" && cwd.includes("tag-ci-v1.0.0.")) return { code: 1, output: "bench failed" };
+            await Bun.write(`${cwd}/perf-result.json`, JSON.stringify({ journeys: { "new-task": { layoutCount: 7 } } }));
+          }
+          if (script.startsWith("bun scripts/perf-ratchet.ts check '")) return { code: before === "ok" || before.includes("perf ratchet: ok") ? 0 : 1, output: before };
+          return f.d.step(script, cwd, env);
+        },
+        sh: async (cmd, cwd, input) => {
+          if (cmd[0] === "gh" && cmd[1] === "api") {
+            if (cmd.includes("PUT")) puts.push({ path: cmd.find((a) => a.includes("/contents/"))!, text: Buffer.from((JSON.parse(readFileSync(cmd[cmd.indexOf("--input") + 1]!, "utf8")) as { content: string }).content, "base64").toString("utf8") });
+            else if (cmd.some((a) => a.includes("/contents/"))) throw new Error("gh api failed: gh: Not Found (HTTP 404)");
+            return "{}";
+          }
+          return f.d.sh(cmd, cwd, input);
+        },
+      };
+      return { f, d, puts };
+    }
+    const results = async (d: TagCiDeps) => (await tagCi(d, "o/r", "/repo", CACHE, NO_HOST)).map((x) => `${x.tag} ${x.result}`);
+
+    test("(a) the tag before is over too: a wobble that passes with the mark; its counts are recorded", async () => {
+      const a = again(tags(over("journeys.new-task.layoutCount")), REACH, "ceilings: local\nover: journeys.new-task.layoutCount = 7 > ceiling 6\n");
+      expect(await results(a.d)).toEqual(["v3.0.0 pass"]);
+      expect(a.f.worktrees).toEqual(["v3.0.0", "v1.0.0"]);
+      expect(a.f.ran.filter((x) => x.tag === "v1.0.0").map((x) => x.script)).toContain("bun scripts/perf-bench.ts --runs 5 --json perf-result.json");
+      expect(a.f.ran.filter((x) => x.tag === "v1.0.0").some((x) => x.script === "bun test")).toBe(false);
+      expect(a.f.bodies.get("v3.0.0")).toContain(`[tag-ci] pass ${shaOf("v3.0.0")} (wobble: 前のタグ v1.0.0 も同じ数で外れた)`);
+      expect(a.f.bodies.get("v3.0.0")).not.toContain("が落ちた:");
+      const counts = a.puts.filter((p) => p.path.endsWith("/counts.tsv") && p.text.includes("\tv1.0.0\t"));
+      expect(counts.map((p) => p.text.split("\n").filter((l) => l.includes("\tv1.0.0\t")))).toEqual([[expect.stringMatching(/\tv1\.0\.0\t[0-9a-f]{40}\tjourneys\.new-task\.layoutCount\t7$/)]]);
+    });
+
+    test("(b) the tag before stayed under the ceiling: a fail that says so, with the values", async () => {
+      const b = again(tags(over("journeys.new-task.layoutCount")), REACH, "ceilings: local\nimproved: launch.ms = 1 (ceiling 2)\n");
+      expect(await results(b.d)).toEqual(["v3.0.0 fail", "v2.0.0 pass"]);
+      expect(b.f.bodies.get("v3.0.0")).toContain("    前のタグ v1.0.0 では収まった: journeys.new-task.layoutCount = 7 / 9");
+    });
+
+    test("(b) the tag before passed its check outright (no verdict line): a fail with the values, not an unknown", async () => {
+      const b = again(tags(over("journeys.new-task.layoutCount")), REACH, "ceilings: local\nperf ratchet: ok\n");
+      expect(await results(b.d)).toEqual(["v3.0.0 fail", "v2.0.0 pass"]);
+      expect(b.f.bodies.get("v3.0.0")).toContain("    前のタグ v1.0.0 では収まった: journeys.new-task.layoutCount = 7 / 9");
+    });
+
+    test("(c) no over, or a range that does not reach perf-bench: the tag before is not measured", async () => {
+      const none = again(tags({ at: CHECK, output: "ceilings: local\nimproved: launch.ms = 1 (ceiling 2)\n" }), REACH, "ok");
+      expect(await results(none.d)).toEqual(["v3.0.0 pass"]);
+      expect(none.f.worktrees).toEqual(["v3.0.0"]);
+      const docs = again(tags(over("launch.ms")), "docs/design/a.md\n", "ok");
+      expect(await results(docs.d)).toEqual(["v3.0.0 pass"]);
+      expect(docs.f.worktrees).toEqual(["v3.0.0"]);
+    });
+
+    test("(d) the measure of the tag before fails: a fail as before", async () => {
+      const x = again(tags(over("launch.ms")), REACH, "bench fails");
+      expect(await results(x.d)).toEqual(["v3.0.0 fail", "v2.0.0 pass"]);
+      expect(x.f.worktrees.filter((t) => t === "v1.0.0")).toEqual(["v1.0.0"]);
+      expect(x.f.bodies.get("v3.0.0")).toContain(`[tag-ci] fail ${shaOf("v3.0.0")}`);
+    });
+
+    test("(e) two overs and only one of them also over before: a fail that names the other; one measure serves the tags of a walk", async () => {
+      const two = over("journeys.new-task.layoutCount", "journeys.new-task.requests");
+      const e = again([{ tag: "v3.0.0", body: "", fail: two }, { tag: "v2.0.0", body: "", fail: two }, { tag: "v1.0.0", body: pass("v1.0.0") }], REACH, "ceilings: local\nover: journeys.new-task.layoutCount = 7 > ceiling 6\n");
+      expect(await results(e.d)).toEqual(["v3.0.0 fail", "v2.0.0 fail", "v1.0.0 pass"]);
+      expect(e.f.bodies.get("v3.0.0")).toContain("前のタグ v1.0.0 では収まった: journeys.new-task.requests = ? / 9");
+      expect(e.f.bodies.get("v3.0.0")).not.toContain("では収まった: journeys.new-task.layoutCount");
+      // v2.0.0 also fails by the same over: v1.0.0 was measured once for both
+      expect(e.f.worktrees.filter((t) => t === "v1.0.0")).toEqual(["v1.0.0"]);
+    });
+  });
+
+  test("a perf check that is over is a fail written to the Release: the perf steps run in the tag CI, which a PR's local CI no longer runs (#4076)", async () => {
+    const over = { at: CHECK, output: "ceilings: local\nover: launch.ms = 900 > 800\n" };
+    const f = fake([{ tag: "v1.0.0", body: "", fail: over }]);
+    const r = await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST);
+    expect(r.map((x) => `${x.tag} ${x.result}`)).toEqual(["v1.0.0 fail"]);
+    expect(r[0]!.step).toBe("bun scripts/perf-ratchet.ts check perf-result.json");
+    expect(r[0]!.fails).toEqual(["over: launch.ms = 900 > 800"]);
+    expect(f.ran.some((x) => x.script.includes("scripts/perf-bench.ts"))).toBe(true);
+    expect(f.bodies.get("v1.0.0")).toContain(`[tag-ci] fail ${shaOf("v1.0.0")}`);
+    expect(f.bodies.get("v1.0.0")).toContain("over: launch.ms = 900 > 800");
   });
 
   test("grew only (and grew next to raised) counts as pass", async () => {
@@ -558,6 +825,7 @@ describe("tag-ci requests", () => {
     q.bodies[0] = `v3.0.0（${shaOf("v3.0.0").slice(0, 7)}）\n最後に通ったタグ: v1.0.0`;
     await followUp(await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST), "o/r", "/repo", true, q.d, "2026-10-30", NO_HOST);
     expect(q.comments.map((c) => c.body)).toEqual([expect.stringContaining("最後に通ったタグ: v2.0.0")]);
+    expect(q.comments[0]!.body).toContain("戻す先の候補: v2.0.0（間のマージ 2 件。戻すなら bun scripts/rollback-pr.ts v2.0.0 --repo o/r）");
   });
 
   test("filed before the walk, then the walk finds a pass: the open request is told once (#3534)", async () => {
@@ -582,6 +850,16 @@ describe("tag-ci requests", () => {
     const over = failureRequest({ tag: "v3.0.0", sha: "c".repeat(40), step: "check", fails: ["over: launch.ms = 900 > 800", "raised: x = 2 (main 1)"], lastPass: null, commits: [] }, "2026-10-30", NO_HOST);
     expect(over.body).toContain("  over: launch.ms = 900 > 800\n  raised: x = 2 (main 1)");
     expect(over.body).toContain("最後に通ったタグ: 不明");
+  });
+
+  test("the body names the rollback candidate and the merge count, all of them past the 50 listed", () => {
+    const commits = Array.from({ length: 60 }, (_, i) => `h${i} fix: ${i}`);
+    const r = (lastPass: string | null, cs: string[]) => failureRequest({ tag: "v3.0.0", sha: "c".repeat(40), step: "bun test", fails: ["(fail) a"], lastPass, commits: cs, repo: "o/r" }, "2026-10-30", NO_HOST);
+    const withPass = r("v1.0.0", commits);
+    expect(withPass.body).toContain("戻す先の候補: v1.0.0（v3.0.0 まで 60 件のマージ。戻すなら bun scripts/rollback-pr.ts v1.0.0 --repo o/r）");
+    expect(withPass.body).not.toContain("h55 fix");
+    expect(withPass.title).toBe(r("v2.0.0", []).title);
+    expect(r(null, []).body).toContain("戻す先の候補: 不明（");
   });
 
   test("the same failure comments on the open request instead of filing", async () => {
@@ -632,7 +910,7 @@ describe("tag-ci requests", () => {
     const f = fake([{ tag: "v3.0.0", body: "", fail: testFail }, { tag: "v2.0.0", body: `[tag-ci] fail ${shaOf("v2.0.0")}` }, { tag: "v1.0.0", body: `[tag-ci] pass ${shaOf("v1.0.0")}` }]);
     const q = requests(f);
     await followUp(await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST), "o/r", "/repo", true, q.d, "2026-10-30", NO_HOST);
-    expect(q.bodies[0]).toContain("最後に通ったタグ: v1.0.0\nその間のコミット（v1.0.0..v3.0.0）:");
+    expect(q.bodies[0]).toContain("最後に通ったタグ: v1.0.0\n戻す先の候補: v1.0.0（v3.0.0 まで");
   });
 
   test("a recorded fail whose request was not filed files it on the next run, once, without a comment", async () => {

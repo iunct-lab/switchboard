@@ -1,6 +1,6 @@
 // test-reads: scripts/merge-gate.ts
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { checksFromRuns, designRulesTouched, judge, localCiOf, main, MERGE_ANSWER, MERGE_ASK, PROTECTED, readGitlabPr, readPr, RECHECK_PASS, type PrFacts, type RecheckKind } from "./merge-gate";
+import { ASK_KINDS, checksFromRuns, designRulesTouched, judge, loadReversibility, localCiOf, main, MERGE_ANSWER, MERGE_ASK, PROTECTED, RECHECK_KINDS, REVERSIBILITY_PATH, SECURITY_KINDS, readGitlabPr, readPr, RECHECK_PASS, type PrFacts, type RecheckKind } from "./merge-gate";
 import { resultComment } from "./local-ci";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -134,9 +134,9 @@ describe("merge-gate judge", () => {
   test("--allow-large lifts the security and responsibility stops too", () => {
     const files = [
       { path: "src/auth/session.ts", additions: 1, deletions: 0 },
-      { path: "docs/design/x.md", additions: 1, deletions: 0 },
+      { path: ".claude/skills/x/SKILL.md", additions: 1, deletions: 0 },
     ];
-    expect(judge(base({ files }), off).reasons).toEqual(["[聞く] セキュリティ（security:words）: src/auth/session.ts", "[再チェック responsibility] 責務: docs/design/x.md"]);
+    expect(judge(base({ files }), off).reasons).toEqual(["[聞く] セキュリティ（security:words）: src/auth/session.ts", "[再チェック responsibility] 責務: .claude/skills/x/SKILL.md"]);
     expect(judge(yes("security:words,responsibility,design-rules", { files, designRulesTouched: true }), { allowLarge: true })).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: ["security:words"], recheck: ["responsibility", "design-rules"] });
   });
 
@@ -151,8 +151,8 @@ describe("merge-gate judge", () => {
   });
 
   test("allow-large needs merge-answer", () => {
-    const files = [{ path: "src/auth/session.ts", additions: 1, deletions: 0 }, { path: "docs/design/x.md", additions: 1, deletions: 0 }];
-    const large = ["[聞く] セキュリティ（security:words）: src/auth/session.ts", "[再チェック responsibility] 責務: docs/design/x.md"];
+    const files = [{ path: "src/auth/session.ts", additions: 1, deletions: 0 }, { path: ".claude/skills/x/SKILL.md", additions: 1, deletions: 0 }];
+    const large = ["[聞く] セキュリティ（security:words）: src/auth/session.ts", "[再チェック responsibility] 責務: .claude/skills/x/SKILL.md"];
     const missing = expect.stringContaining("[merge-answer] yes が無い: security:words,responsibility");
     const allow = { allowLarge: true };
     // no mark: the reasons of a judgement without the flag, and the missing mark
@@ -252,6 +252,7 @@ describe("security sub-kinds", () => {
     [".github/workflows/ci.yml", "security:github"],
     ["scripts/local-ci.ts", "security:gates"],
     ["scripts/forge-resync.ts", "security:gates"],
+    ["ops-kit/reversibility.json", "security:gates"],
     ["aws/host/sb-host-update.sh", "security:host"],
   ] as const)("%s → %s: the reason names the group, ask has it, still asked", (path, kind) => {
     const j = one(path);
@@ -291,7 +292,7 @@ describe("security sub-kinds", () => {
 });
 
 describe("responsibility", () => {
-  test.each(["docs/design/x.md", "CLAUDE.md", "packages/core/CLAUDE.md", "AGENTS.md", "ops.config.json", ".claude/skills/a/SKILL.md", "ops-kit/skills/a/SKILL.md"])(
+  test.each(["CLAUDE.md", "packages/core/CLAUDE.md", "AGENTS.md", "ops.config.json", ".claude/skills/a/SKILL.md", "ops-kit/skills/a/SKILL.md"])(
     "one line in %s stops as 責務",
     (path) => {
       const j = judge(base({ files: [{ path, additions: 1, deletions: 0 }] }), off);
@@ -299,6 +300,14 @@ describe("responsibility", () => {
       expect(j.reasons).toEqual([`[再チェック responsibility] 責務: ${path}`]);
     },
   );
+
+  test("docs/design alone is not a responsibility file (the scope is the main review's, #4078)", () => {
+    const design = { path: "docs/design/x.md", additions: 1, deletions: 0 };
+    expect(judge(base({ files: [design] }), off)).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [] });
+    const j = judge(base({ files: [design, { path: ".claude/skills/x/SKILL.md", additions: 1, deletions: 0 }] }), off);
+    expect(j.recheck).toEqual(["responsibility"]);
+    expect(j.reasons).toEqual(["[再チェック responsibility] 責務: .claude/skills/x/SKILL.md"]);
+  });
 
   test("docs outside docs/design do not stop", () => {
     expect(judge(base({ files: [{ path: "docs/guide/setup.md", additions: 1, deletions: 0 }] }), off).verdict).toBe("merge");
@@ -348,7 +357,7 @@ describe("recheck", () => {
     ["security only", one("src/auth.ts"), ["[聞く] セキュリティ（security:words）: src/auth.ts"], ["security:words"], []],
     ["rescue only", one("rescue/src/server.ts"), ["[再チェック rescue] rescue: rescue/src/server.ts"], [], ["rescue"]],
     ["Design rules only", one("README.md"), ["[再チェック design-rules] 責務: README.md の ## Design rules"], [], ["design-rules"]],
-    ["responsibility only", one("docs/design/x.md"), ["[再チェック responsibility] 責務: docs/design/x.md"], [], ["responsibility"]],
+    ["responsibility only", one(".claude/skills/x/SKILL.md"), ["[再チェック responsibility] 責務: .claude/skills/x/SKILL.md"], [], ["responsibility"]],
     ["size only", one("apps/web/src/App.tsx", 301), ["[再チェック size] テストと docs を除いた変更が 301 行で、300 行を超えている"], [], ["size"]],
     ["another protected path", one("scripts/setup/x.sh"), ["[再チェック size] 保護するパスに触れている: scripts/setup/x.sh"], [], ["size"]],
     ["db.ts only", one("packages/core/src/db.ts"), ["[再チェック migration] 保護するパスに触れている: packages/core/src/db.ts"], [], ["migration"]],
@@ -390,7 +399,7 @@ describe("recheck", () => {
   test("the kinds come once each, in the order size, responsibility, migration", () => {
     const files = [
       { path: "packages/core/src/db.ts", additions: 1, deletions: 0 },
-      { path: "docs/design/x.md", additions: 1, deletions: 0 },
+      { path: ".claude/skills/x/SKILL.md", additions: 1, deletions: 0 },
       { path: "apps/web/src/App.tsx", additions: 301, deletions: 0 },
       { path: "package.json", additions: 1, deletions: 0 },
     ];
@@ -398,13 +407,13 @@ describe("recheck", () => {
   });
 
   test("a recheck-only PR with a mark per kind merges; impact stays large", () => {
-    expect(marked(one("docs/design/x.md"), ["responsibility"])).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: [] });
-    const files = [...one("apps/web/src/App.tsx", 301), ...one("docs/design/x.md"), ...one("packages/core/src/schema-baseline.json")];
+    expect(marked(one(".claude/skills/x/SKILL.md"), ["responsibility"])).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: [] });
+    const files = [...one("apps/web/src/App.tsx", 301), ...one(".claude/skills/x/SKILL.md"), ...one("packages/core/src/schema-baseline.json")];
     expect(marked(files, ["size", "responsibility", "migration"])).toMatchObject({ verdict: "merge", reasons: [], ask: [], recheck: [] });
   });
 
   test("a kind without its mark still stops, and only that kind is left", () => {
-    const files = [...one("apps/web/src/App.tsx", 301), ...one("docs/design/x.md")];
+    const files = [...one("apps/web/src/App.tsx", 301), ...one("CLAUDE.md")];
     expect(marked(files, ["responsibility"])).toEqual({
       verdict: "stop",
       impact: "large",
@@ -415,7 +424,7 @@ describe("recheck", () => {
   });
 
   test("a mark does not lift an ask reason", () => {
-    const files = [...one("src/auth.ts"), ...one("docs/design/x.md")];
+    const files = [...one("src/auth.ts"), ...one(".claude/skills/x/SKILL.md")];
     expect(marked(files, ["size", "responsibility", "migration"])).toMatchObject({ verdict: "stop", reasons: ["[聞く] セキュリティ（security:words）: src/auth.ts"], recheck: [] });
   });
 
@@ -425,7 +434,7 @@ describe("recheck", () => {
     ["a commit after the review", { headCommittedAt: "2026-09-24T12:00:00Z" }, "最後のコミット（2026-09-24T12:00:00Z）より新しい主レビュー（[codex] review / [claude] review）が無い"],
     ["not CLEAN", { mergeState: "BLOCKED" }, "mergeStateStatus が CLEAN でない: BLOCKED"],
   ] as const)("a mark does not lift %s", (_, over, reason) => {
-    expect(marked(one("docs/design/x.md"), ["responsibility"], over as Partial<PrFacts>)).toMatchObject({ verdict: "stop", reasons: [reason] });
+    expect(marked(one(".claude/skills/x/SKILL.md"), ["responsibility"], over as Partial<PrFacts>)).toMatchObject({ verdict: "stop", reasons: [reason] });
   });
 });
 
@@ -707,6 +716,34 @@ describe("merge-gate readPr", () => {
     test("a narrowed pass counts as any pass: the comment's added lines change nothing (#3297)", async () => {
       const body = resultComment({ sha: S.b1!, base: BASE, ok: true, results: [], selection: { files: ["a.test.ts"], total: 200, reason: "x" } });
       expect(await localCiOf(1, 1, [{ body, createdAt: "2026-11-01T00:00:00Z" }], async () => "", "o/r", async (h) => h === S.b1)).toEqual({ pass: true });
+    });
+
+    test("an incremental pass of the head after a fix commit counts as any pass: the 増分 line changes nothing", async () => {
+      const incremental = resultComment({ sha: S.b2fix!, base: BASE, ok: true, results: [], incremental: { pass: S.b2!, commits: 1, files: 1 }, selection: { files: ["a.test.ts"], total: 200, reason: "x" } });
+      expect(incremental).toContain(`増分: ${S.b2!.slice(0, 7)} の pass の後の 1 コミット（変更 1 ファイル）`);
+      // #2 is the top here: the fix commit is in the pass's head, with the same diff
+      const f = await facts({ n: 2, head: S.b2fix, comments: [pass(S.b2!), incremental], steps: 0 }).read();
+      expect(f.checks).toEqual(SUCCESS);
+      expect(f.localCi).toBe(true);
+      expect(reasons(f)).toEqual([]);
+      // the same without the line (a full run of that head) counts the same
+      expect(reasons(await facts({ n: 2, head: S.b2fix, comments: [pass(S.b2!), pass(S.b2fix!)], steps: 0 }).read())).toEqual([]);
+    });
+
+    test("before the incremental pass is posted, the newest result is the earlier pass and the fix commit is not counted", async () => {
+      const f = await facts({ n: 2, head: S.b2fix, comment: pass(S.b2!), steps: 0 }).read();
+      expect(f.checks).toEqual([{ name: "CI", conclusion: "FAILURE" }]);
+      expect(reasons(f)).toContain(`この PR のコミットが #2 の pass（${S.b2!.slice(0, 7)}）に同じ差分で入っていない（一番上で回し直す）`);
+    });
+
+    test("a pass whose comment has no perf step counts as SUCCESS: the gate asks for the mark only (a PR's run does not measure perf)", async () => {
+      const steps = ["bun install --frozen-lockfile", "bun run typecheck", "bun test"].map((name) => ({ name, code: 0, seconds: 1 }));
+      const body = resultComment({ sha: S.b1!, base: BASE, ok: true, results: steps as never, selection: { files: ["a.test.ts"], total: 200, reason: "x" } });
+      expect(body).not.toMatch(/perf-bench|perf-ratchet|bundle:|grew:/);
+      const f = await facts({ comment: body, steps: 0, runs: false }).read();
+      expect(f.checks).toEqual([{ name: "local-ci（Actions の run が無く、ローカルで pass）", conclusion: "SUCCESS" }]);
+      expect(f.localCi).toBe(true);
+      expect(reasons(f)).toEqual([]);
     });
 
     test("no Actions run at all + the pass → one local-ci SUCCESS check; without it, no check", async () => {
@@ -1290,5 +1327,47 @@ describe("local change (#2487)", () => {
     const goneErr: string[] = [];
     expect(await main(["--change", "7"], async () => { throw new Error("gh"); }, () => {}, (s) => goneErr.push(s), () => undefined, async () => { throw new Error("glab"); }, r.dir, { env: { BACKLOG_URL: BACKLOG, BACKLOG_WORKSPACE: "ws_local" }, fetch: gone })).toBe(2);
     expect(goneErr.join("")).toContain("#7 の枝が無い（sb/5-x）");
+  });
+});
+
+describe("reversibility table", () => {
+  const W = mkdtempSync(join(tmpdir(), "switchboard.t3718.test."));
+  afterAll(() => rmSync(W, { recursive: true, force: true }));
+  const table = () => JSON.parse(require("node:fs").readFileSync(REVERSIBILITY_PATH, "utf8"));
+  const write = (name: string, t: unknown) => { const p = join(W, name); writeFileSync(p, JSON.stringify(t)); return p; };
+
+  test("derives the ask and recheck kinds the gate has always had", () => {
+    expect(ASK_KINDS).toEqual([...SECURITY_KINDS]);
+    expect(RECHECK_KINDS).toEqual(["size", "responsibility", "migration", "rescue", "design-rules"]);
+    expect(RECHECK_PASS.test(`[recheck] design-rules pass ${"a".repeat(40)}`)).toBe(true);
+    expect(RECHECK_PASS.test(`[recheck] security:gates pass ${"a".repeat(40)}`)).toBe(false);
+  });
+
+  test("moving a kind to irreversible moves it to the ask side", () => {
+    const t = table();
+    t.rows.find((r: { gateKind: string }) => r.gateKind === "size").answer = "irreversible";
+    const d = loadReversibility(write("size.json", t));
+    expect(d.ask).toContain("size" as never);
+    expect(d.recheck).not.toContain("size");
+  });
+
+  test("a table with a missing kind, an unknown answer or a repeated kind throws with the reason", () => {
+    const t = table();
+    t.rows = t.rows.filter((r: { gateKind: string }) => r.gateKind !== "migration");
+    expect(() => loadReversibility(write("missing.json", t))).toThrow(/kinds missing: migration/);
+    const u = table();
+    u.rows[0].answer = "maybe";
+    expect(() => loadReversibility(write("answer.json", u))).toThrow(/unknown answer "maybe"/);
+    const d = table();
+    d.rows.push({ ...d.rows.find((r: { gateKind: string }) => r.gateKind === "size") });
+    expect(() => loadReversibility(write("dup.json", d))).toThrow(/size appears twice/);
+    const a = table();
+    a.answers.push("maybe");
+    a.rows.find((r: { gateKind: string }) => r.gateKind === "security:docs").answer = "maybe";
+    expect(() => loadReversibility(write("own-answer.json", a))).toThrow(/answers must be/);
+    const e = table();
+    e.effects.push("weather");
+    e.rows[0].effect = "weather";
+    expect(() => loadReversibility(write("own-effect.json", e))).toThrow(/effects must be/);
   });
 });

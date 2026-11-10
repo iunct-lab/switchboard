@@ -5,7 +5,7 @@ import { AgentEvent, QUESTION_DEFERRED_REPLY } from "@switchboard/protocol";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildArgs, childEnv, otelEnv, CLAUDE_EFFORTS, CLAUDE_LOGIN_HINT, CLAUDE_MODELS, CLAUDE_PERMISSION_MODES, cliDefaultModelFromSettings, createClaudeAdapter, loginStatus } from "./index.ts";
+import { buildArgs, childEnv, otelEnv, CLAUDE_EFFORTS, CLAUDE_LOGIN_HINT, CLAUDE_MODELS, CLAUDE_PERMISSION_MODES, cliDefaultModelFromSettings, createClaudeAdapter, loginStatus, subagentEnv } from "./index.ts";
 import { askQuestionsOf, createClaudeParser, permissionResponseLine, setPermissionModeLine, summarizeToolInput } from "./parse.ts";
 
 const fixture = recordingText("packages/adapters/claude/fixtures/write-with-permission.jsonl");
@@ -380,6 +380,14 @@ describe("spawn plumbing", () => {
     expect(env).toEqual({ PATH: "/bin", HOME: "/h" });
     // what the daemon adds (StartOptions.env) goes over what is inherited
     expect(childEnv({ PATH: "/bin", HOME: "/h" }, { PATH: "/kit/bin:/bin" })).toEqual({ PATH: "/kit/bin:/bin", HOME: "/h" });
+  });
+
+  test("subagentEffort: a chosen value becomes CLAUDE_CODE_SUBAGENT_EFFORT, none adds nothing, the parent's same-named variable never passes", () => {
+    expect(childEnv({ PATH: "/bin" }, subagentEnv({ subagentEffort: "medium" }))).toEqual({ PATH: "/bin", CLAUDE_CODE_SUBAGENT_EFFORT: "medium" });
+    expect(subagentEnv({})).toEqual({});
+    const parent = { PATH: "/bin", CLAUDE_CODE_SUBAGENT_EFFORT: "max" };
+    expect(childEnv(parent, subagentEnv({}))).toEqual({ PATH: "/bin" });
+    expect(childEnv(parent, subagentEnv({ subagentEffort: "low" }))).toEqual({ PATH: "/bin", CLAUDE_CODE_SUBAGENT_EFFORT: "low" });
   });
 
   test("otel: logs go to the loopback endpoint only, metrics and traces none, the parent's OTEL_* dropped", () => {

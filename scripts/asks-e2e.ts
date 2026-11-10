@@ -129,16 +129,20 @@ const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(hom
 const core = await startServer(cfg, [runner("claude"), runner("codex")], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: importing(sending(gh)), backlogAutoImport: true, judge: () => new Promise(() => undefined), rubricJudge: () => new Promise(() => undefined) });
 const base = `http://127.0.0.1:${core.server.port}`;
 const assert = (ok: unknown, message: string) => { if (!ok) throw new Error(message); };
-async function until<T>(fn: () => T | Promise<T>, label: string): Promise<NonNullable<T>> {
+async function until<T>(fn: () => T | Promise<T>, label: string, seen?: () => unknown): Promise<NonNullable<T>> {
   const end = Date.now() + 20_000;
-  while (Date.now() < end) { const value = await fn(); if (value) return value as NonNullable<T>; await Bun.sleep(50); }
-  throw new Error(`Timeout: ${label}`);
+  let last: unknown;
+  while (Date.now() < end) { const value = await fn(); if (value) return value as NonNullable<T>; last = seen ? await seen() : value; await Bun.sleep(50); }
+  throw new Error(`Timeout: ${label}（最後の値: ${(JSON.stringify(last) ?? String(last)).slice(0, 200)}）`);
 }
 const post = (path: string, body: unknown) => fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json() as Promise<Json>);
+// A comment waits 60 s before it goes to GitHub, so it can be taken back (a8bcd189, #3719). This script's answers are not waited out for a minute each: the window is over as soon as it is looked at, as the unit tests of backlog-send write it
+// (the comment's `retry_at` is its window's end; null = due), and the screen's refresh sends what is due (GET /api/backlog?refresh=1). The window itself is backlog-send.test.ts's and backlog.test.ts's.
 const imported = async (refresh: boolean) => {
   let b = await (await fetch(`${base}/api/backlog${refresh ? "?refresh=1" : ""}`)).json() as Json;
   while (b.syncs.some((s: Json) => s.syncing)) { await Bun.sleep(20); b = await (await fetch(`${base}/api/backlog`)).json(); }
 };
+const windowOver = async () => { core.db.sqlite.query("UPDATE backlog_operations SET retry_at = NULL WHERE kind = 'comment' AND status = 'pending' AND attempt = 0").run(); await imported(true); return true; };
 await imported(false);
 const meta = core.db.listWorkspaces().find((w) => w.kind === "meta")!;
 const status = (id: string) => core.db.getTask(id)!.status;
@@ -162,6 +166,9 @@ await post(`/api/tasks/${stage}/outcome`, { outcome: "needs_action" });
 // the Issue of a stage Task is its stage column, not its title (#1170)
 const stageOf = (id: string, issueNo: number) => core.db.sqlite.query("UPDATE tasks SET stage_issue = ?, stage_action = 'complete' WHERE id = ?").run(issueNo, id);
 stageOf(stage, 306);
+// the judge of this script never answers (judge: never resolves), and since 95b76b3c a Task whose reply is still being judged counts as working: #306's stage Task would be the active one and
+// the answer below would not start a 実装. Its judgement is over here, as a real daemon's is by the time the person answers.
+core.db.updateTask(stage, { judgingAt: null });
 // C: waits for the usage limit to lift
 const c = await task("使用上限の Task", "codex", "done", (s) => s !== "running");
 await post(`/api/tasks/${c}/outcome`, { reviewed: true });
@@ -212,6 +219,9 @@ try {
   const groups = () => evaluate(`Object.fromEntries([...document.querySelectorAll('.ask-group')].map(g => [g.className.match(/ask-group-(\\w+)/)[1], [...g.querySelectorAll('.card.ask .ask-kind')].map(k => k.textContent).sort()]))`) as Promise<Record<string, string[]>>;
   const card = (prefix: string) => `[...document.querySelectorAll('.card.ask')].find(c => c.dataset.ask.startsWith(${JSON.stringify(prefix)}))`;
   const facts = (prefix: string) => evaluate(`Object.fromEntries([...${card(prefix)}.querySelectorAll('.ask-fact')].map(f => [f.querySelector('dt').textContent, { text: f.querySelector('dd').textContent, href: f.querySelector('a')?.href ?? null }]))`) as Promise<Record<string, { text: string; href: string | null }>>;
+  /** #4068: the card's question (above the answer buttons, not a fact row) and the one 「不明: …」 line that names the facts the records do not have. */
+  const questionOf = (prefix: string) => evaluate(`${card(prefix)}.querySelector('.ask-question')?.textContent ?? null`) as Promise<string | null>;
+  const unknownOf = (prefix: string) => evaluate(`${card(prefix)}.querySelector('.ask-unknown')?.textContent ?? null`) as Promise<string | null>;
   const press = (prefix: string, label: string) => evaluate(`(${card(prefix)}).querySelector('.approval-actions') && [...${card(prefix)}.querySelectorAll('button')].find(b => b.textContent.trim() === ${JSON.stringify(label)}).click()`);
   const open = async () => {
     await call("Page.navigate", { url: `${base}/approvals` });
@@ -235,9 +245,11 @@ try {
   assert(same(before.resolved, ["停止"]), `resolved: ${JSON.stringify(before.resolved)}`);
   assert(await evaluate(`document.querySelector('.ask-group-auto').textContent.includes('操作は要りません')`), "the automatic group says no action is needed");
   const full = await facts(`decision:${meta.id}#306@`);
-  assert(full["問い"]!.text === "保存先をどちらにするか" && full["推奨と根拠"]!.text === "B — 小さい" && full["PBI"]!.href === "https://github.com/acme/app/issues/306" && full["元の記録"]!.href === "https://github.com/acme/app/issues/306" && full["対象リポジトリ"]!.text === meta.name, `#306: ${JSON.stringify(full)}`);
+  assert((await questionOf(`decision:${meta.id}#306@`)) === "保存先をどちらにするか" && !((await unknownOf(`decision:${meta.id}#306@`)) ?? "").match(/問い|推奨と根拠|PBI|元の記録/) && full["推奨と根拠"]!.text === "B — 小さい" && full["PBI"]!.href === "https://github.com/acme/app/issues/306" && full["元の記録"]!.href === "https://github.com/acme/app/issues/306" && full["対象リポジトリ"]!.text === meta.name, `#306: ${JSON.stringify(full)} q=${await questionOf(`decision:${meta.id}#306@`)} u=${await unknownOf(`decision:${meta.id}#306@`)} name=${meta.name}`);
   const missing = await facts(`decision:${meta.id}#303@`);
-  assert(missing["問い"]!.text === "不明" && missing["推奨と根拠"]!.text === "不明" && missing["PBI"]!.text.startsWith("#303 "), `#303: ${JSON.stringify(missing)}`);
+  // 不明 facts are one line now: 「不明: 問い・推奨と根拠…」, no question, no rows of their own
+  const missingUnknown = await unknownOf(`decision:${meta.id}#303@`);
+  assert((await questionOf(`decision:${meta.id}#303@`)) === null && missingUnknown !== null && missingUnknown.startsWith("不明:") && missingUnknown.includes("問い") && missingUnknown.includes("推奨と根拠") && !missing["問い"] && !missing["推奨と根拠"] && missing["PBI"]!.text.startsWith("#303 "), `#303: ${JSON.stringify(missing)}`);
   const wait = await facts(`wait:${meta.id}#304@`);
   assert(wait["停止理由"]!.text === "PR #779 の完了待ち" && wait["条件"]!.text === "pr#779: open", `#304: ${JSON.stringify(wait)}`);
   // #1674: the question other PBIs wait on comes first, with how many and which
@@ -307,8 +319,8 @@ try {
   const line306 = await evaluate(`[...${card(d306)}.querySelectorAll('.ask-button')].find(b => b.querySelector('button').textContent.startsWith('推奨案で進める')).textContent`) as string;
   assert(line306.includes("推奨案で進める（B）") && line306.includes("送る: B: ファイル — 影響: 移行が要らない → Issue #306、続き: #306 の続きの工程 Task"), `#306's button: ${line306}`);
   await press(d306, "推奨案で進める（B）");
-  await until(async () => (await badge(d306))?.startsWith("実行中"), "#306's card says 実行中");
-  await until(() => comments(306).some((c: Json) => c.body === "## 回答\n\nB: ファイル — 影響: 移行が要らない") && !issue(306).labels.nodes.some((l: Json) => l.name === "needs-decision"), "#306's ## 回答 and its label off reach GitHub");
+  await until(async () => (await badge(d306))?.startsWith("実行中"), "#306's card says 実行中", () => badge(d306));
+  await until(async () => (await windowOver()) && comments(306).some((c: Json) => c.body === "## 回答\n\nB: ファイル — 影響: 移行が要らない") && !issue(306).labels.nodes.some((l: Json) => l.name === "needs-decision"), "#306's ## 回答 and its label off reach GitHub");
   const impl306 = core.db.listTasks().filter((t) => t.title.startsWith("#306 実装: "));
   assert(impl306.length === 1, `#306 実装 Tasks: ${impl306.length}`);
   await imported(true);
@@ -400,7 +412,7 @@ stageOf(ci, 304);
   const d303 = `decision:${meta.id}#303@`;
   await press(d303, "保留");
   await until(() => evaluate(`${card(d303)}?.querySelector('.ask-state')?.textContent === '保留'`), "#303 held");
-  await until(() => comments(303).some((c: Json) => c.body.startsWith("## 保留")), "#303's ## 保留 reaches GitHub");
+  await until(async () => (await windowOver()) && comments(303).some((c: Json) => c.body.startsWith("## 保留")), "#303's ## 保留 reaches GitHub");
   assert(issue(303).labels.nodes.some((l: Json) => l.name === "needs-decision"), "#303 lost its label");
   await imported(true);
   await evaluate(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === '再読込').click()`);
@@ -487,7 +499,7 @@ stageOf(ci, 304);
   await until(async () => (await policies()).length === 2, "the PBI policy is saved");
   const pbi = (await policies()).find((p) => p.scope === "pbi")!;
   assert(pbi.pbi === 305 && pbi.op === "decide" && pbi.target === "approach" && pbi.answer.choice.startsWith("A:"), `pbi policy: ${JSON.stringify(pbi)}`);
-  await until(() => comments(305).some((c: Json) => c.body.startsWith("## 回答")), "#305's ## 回答 reaches GitHub");
+  await until(async () => (await windowOver()) && comments(305).some((c: Json) => c.body.startsWith("## 回答")), "#305's ## 回答 reaches GitHub");
 
   // (c) the settings list the two with range, operation and expiry
   const settings = async () => {
@@ -507,7 +519,7 @@ stageOf(ci, 304);
   comments(305).push({ body: "## 判断待ち\n**問い**: 次はどの方針で進めるか\n**選択肢**:\n- A: 小さく — 影響: 速い\n- B: 大きく — 影響: 遅い\n**推奨**: A — 小さい", createdAt: new Date().toISOString() });
   await imported(true);
   await post(`/api/tasks/${fire}/outcome`, { reviewed: true });
-  await until(() => comments(305).some((c: Json) => c.body.includes("（方針 ") && c.body.includes("を適用: この PBI 内 / decide approach / 条件 なし / 期限 ")), "the policy answers #305 again, with its basis");
+  await until(async () => (await windowOver()) && comments(305).some((c: Json) => c.body.includes("（方針 ") && c.body.includes("を適用: この PBI 内 / decide approach / 条件 なし / 期限 ")), "the policy answers #305 again, with its basis");
   const p2 = await task("方針で許可される Task", "claude", "exec", (s) => s === "waiting" || approvedBy(core.db.listTasks().find((t) => t.title === "方針で許可される Task")!.id).length > 0);
   await until(() => approvedBy(p2).length > 0, "the approval is allowed by the policy");
   assert(approvedBy(p2)[0] === `policy:${repo.id}`, `allowed by ${approvedBy(p2)}`);

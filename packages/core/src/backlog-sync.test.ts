@@ -1381,7 +1381,10 @@ test("with GitHub sync off, create / answer / start go on stored data and gh is 
     // the label taken off a GitHub record waits for the sync to be on; the comment is decided here
     expect(ten.pending).toBe(1);
     expect((await send("POST", "/api/backlog/10/start", { workspaceId: ws.id, action: "complete" })).status).toBe(201);
-    expect((await send("POST", "/api/backlog/sync", { workspaceId: ws.id })).status).toBe(200);
+    const synced = await send("POST", "/api/backlog/sync", { workspaceId: ws.id });
+    expect(synced.status).toBe(200);
+    // where its time went (#3436): the kit reads it no further, the bench does
+    expect(synced.body).toEqual({ workspaceId: ws.id, timings: { queueMs: expect.any(Number), sendMs: expect.any(Number), importMs: expect.any(Number) } });
     expect(asked).toEqual([]);
     // GitHub's records stay as they were: its ids, numbers, comment and fields (the answer made #10 changed now)
     const after = Object.fromEntries(core.db.listBacklogRecords(key).map((r) => [r.externalId, r.remote]));
@@ -1550,4 +1553,72 @@ test("an import records the repository's visibility", async () => {
   asked.pop();
   // one gh repo view reads both
   expect(asked).toEqual([["repo", "view", "--json", "nameWithOwner,isPrivate", "-q", '"\\(.nameWithOwner) \\(.isPrivate)"'], ["repo", "view", "--json", "nameWithOwner,isPrivate", "-q", '"\\(.nameWithOwner) \\(.isPrivate)"']]);
+});
+
+test("settle answers where the time went: the wait behind an earlier send, the send, the import (#3436)", async () => {
+  const path = join(dir, "app");
+  mkdirSync(path);
+  const ws = db.upsertWorkspace({ id: WS.id, name: "app", path, kind: "repo" });
+  const { gh } = fakeGh({ changed: () => pageOf([raw(12)]), open: () => pageOf([]) });
+  // every call but the repository's is held while `gate` is set, and slowed by `delay` ms
+  let gate: Promise<void> | null = null;
+  let delay = 0;
+  const slow: GhRunner = async (args, cwd) => {
+    if (args[0] !== "repo") {
+      if (gate) await gate;
+      if (delay) await Bun.sleep(delay);
+    }
+    return gh(args, cwd);
+  };
+  let now = 1_000_000;
+  const sync = makeSync(db, slow, () => now);
+  // the first one imports (the repository is known after it)
+  expect(Object.keys(await sync.settle(ws)).sort()).toEqual(["importMs", "queueMs", "sendMs"]);
+  // an edit kept here: the earlier send asks GitHub, and is held there
+  db.applyBacklogEdit(KEY, { records: [], operations: [{ issue: "I_12", targetKind: "issue", target: "I_12", kind: "set", field: "title", payload: "t", base: "PBI 12" }] });
+  let release!: () => void;
+  gate = new Promise<void>((r) => (release = r));
+  const earlier = sync.send(ws);
+  const settling = sync.settle(ws);
+  const t0 = performance.now();
+  await Bun.sleep(60);
+  // the real time waited is the lower bound (1 ms for rounding)
+  const waited = performance.now() - t0;
+  gate = null;
+  delay = 20;
+  release();
+  await earlier;
+  const t = await settling;
+  // it waited for the earlier send to end before its own began
+  expect(t.queueMs).toBeGreaterThanOrEqual(Math.floor(waited) - 1);
+  expect(t.sendMs).toBeGreaterThanOrEqual(0);
+  // the import asked GitHub at least once, each call slowed by 20 ms
+  expect(t.importMs).toBeGreaterThanOrEqual(19);
+  expect(t.queueMs + t.sendMs + t.importMs).toBeLessThan(5_000);
+
+  // its own send asks GitHub (the edit that failed above, at its retry time; nothing before it): the time is in sendMs
+  now = Math.max(...db.listPendingBacklogOperations(KEY).map((o) => o.retryAt ?? 0)) + 1;
+  const own = await sync.settle(ws);
+  expect(own.sendMs).toBeGreaterThanOrEqual(19);
+  expect(own.queueMs).toBeLessThan(19);
+
+  // riding on an import under way: the wait for it is in importMs
+  delay = 0;
+  gate = new Promise<void>((r) => (release = r));
+  const under = sync.sync(ws);
+  // settle's import clock starts after its own send, a little after the call: read the time where it calls `sync`, which is after the clock began
+  let t1 = 0;
+  const callSync = sync.sync.bind(sync);
+  sync.sync = (...a) => ((t1 ||= performance.now()), callSync(...a));
+  const riding = sync.settle(ws);
+  // wait until it rides (its own send may take a while under load), so the check below always holds the wait
+  while (!t1) await Bun.sleep(1);
+  sync.sync = callSync;
+  await Bun.sleep(60);
+  // the real time waited is the lower bound (1 ms for rounding)
+  const ridden = performance.now() - t1;
+  gate = null;
+  release();
+  await under;
+  expect((await riding).importMs).toBeGreaterThanOrEqual(Math.floor(ridden) - 1);
 });

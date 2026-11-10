@@ -8,7 +8,9 @@ describe("login route (#211)", () => {
     expect(loginRoute({ authorized: false, hasToken: true, mode: "passkey", path: "/" })).toEqual({ kind: "passkey", url: "/_auth/?next=%2F" }); // a stale token does not help there
     expect(loginRoute({ authorized: false, hasToken: false, mode: "token", path: "/" })).toEqual({ kind: "token" });
     expect(loginRoute({ authorized: false, hasToken: false, mode: undefined, path: "/" })).toEqual({ kind: "token" }); // an older daemon
-    expect(loginRoute({ authorized: false, hasToken: true, mode: "token", path: "/" })).toEqual({ kind: "none" });
+    expect(loginRoute({ authorized: false, hasToken: true, mode: "token", path: "/" })).toEqual({ kind: "token" }); // the saved token is refused: ask again
+    expect(loginRoute({ authorized: false, hasToken: true, mode: undefined, path: "/" })).toEqual({ kind: "token" }); // an older daemon
+    expect(loginRoute({ authorized: true, hasToken: true, mode: "token", path: "/" })).toEqual({ kind: "none" });
     expect(loginRoute({ authorized: true, hasToken: false, mode: "passkey", path: "/" })).toEqual({ kind: "none" }); // the cookie worked
   });
 
