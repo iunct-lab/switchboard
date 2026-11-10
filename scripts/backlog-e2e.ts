@@ -119,9 +119,11 @@ const libId = core.db.listWorkspaces().find((w) => w.name === "lib")!.id;
   const r = await fetch(`${base}/api/tasks/task_e2emock/artifacts`, { method: "POST", body: JSON.stringify({ source: join(home, "e2emock.html"), title: "画面イメージ: e2e" }) });
   if (r.status !== 201) throw new Error(`mockup artifact: ${r.status}`);
 }
+// a comment goes to GitHub only after its 60 s send window (SEND_DELAY_MS, #3719), and the label off after it
+const SEND_WAIT_MS = 90_000;
 const assert = (ok: unknown, message: string) => { if (!ok) throw new Error(message); };
-async function until<T>(fn: () => T | Promise<T>, label: string): Promise<NonNullable<T>> {
-  const end = Date.now() + 20_000;
+async function until<T>(fn: () => T | Promise<T>, label: string, ms = 20_000): Promise<NonNullable<T>> {
+  const end = Date.now() + ms;
   while (Date.now() < end) { const value = await fn(); if (value) return value as NonNullable<T>; await Bun.sleep(50); }
   throw new Error(`Timeout: ${label}`);
 }
@@ -311,6 +313,7 @@ try {
     const shot = await call("Page.captureScreenshot", { format: "png" });
     await Bun.write(process.env.SCREENSHOT, Buffer.from(shot.data, "base64"));
   }
+  await evaluate(`document.querySelector('section[data-stage="needs-decision"] details.decision').open = true`); // 問いと回答欄は畳まれている (#4064)
   await evaluate(`document.querySelector('section[data-stage="needs-decision"] textarea').focus()`);
   await call("Input.insertText", { text: "B で。移行は不要" });
   await click("回答する");
@@ -319,7 +322,7 @@ try {
   await tab("すべて");
   await until(() => evaluate(`(() => { const links = [...document.querySelectorAll('section[data-stage="needs-decision"] .backlog-item a')].map(a => a.href); return links.length === 1 && links[0] === 'https://github.com/acme/lib/issues/306'; })()`), "the other workspace's stays");
   // kept at once, then sent to GitHub (#886): the comment, then the label off
-  await until(() => issueWrites.length >= 2 || null, "the answer sent");
+  await until(() => issueWrites.length >= 2 || null, "the answer sent", SEND_WAIT_MS);
   const ghCalls = issueWrites.map((a) => a.slice(0, 3).join(" ") + (a.includes("--remove-label") ? " --remove-label " + a[a.indexOf("--remove-label") + 1] : ""));
   const answered = JSON.stringify(issueWrites[0]) === JSON.stringify(["issue", "comment", "306", "-R", "acme/app", "--body", "## 回答\n\nB で。移行は不要"]) && ghCalls[1] === "issue edit 306 --remove-label needs-decision";
   assert(answered, `gh: ${JSON.stringify(issueWrites)}`);
@@ -748,10 +751,11 @@ try {
   const writesBefore = issueWrites.length;
   await evaluate(`(() => { for (const c of document.querySelectorAll('section[data-stage="needs-decision"] .decision-card')) { const t = c.querySelector('textarea'); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(t, 'A で'); t.dispatchEvent(new Event('input', { bubbles: true })); } })()`);
   await evaluate(`[...document.querySelectorAll('section[data-stage="needs-decision"] .decision-card button')].forEach((b) => b.click())`);
-  await until(() => issueWrites.length >= writesBefore + 4 || null, "both answers written"); // comment + label, per answer
+  // the reads after the answers (3 s) end long before the comments leave their 60 s send window, so look while they are in flight
   await Bun.sleep(1_500);
   const cardsWhileReading = await evaluate(`document.querySelectorAll('section[data-stage="needs-decision"] .decision-card').length`) as number;
   assert(cardsWhileReading === 0 && (await hintNow()).includes("読み込み中"), `判断待ち after both answers: ${cardsWhileReading}, hint: ${await hintNow()}`);
+  await until(() => issueWrites.length >= writesBefore + 4 || null, "both answers written", SEND_WAIT_MS); // comment + label, per answer
   writeDelayMs = () => 0;
   delayMs = 0;
   await fetch(`${base}/api/workspaces/${libId}`, { method: "PATCH", body: JSON.stringify({ projectVar: null }) });
@@ -768,7 +772,7 @@ try {
   await evaluate(`(() => { const t = ${card307}.querySelector('textarea'); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(t, 'A で'); t.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   await evaluate(`${card307}.querySelector('button').click()`);
   await until(async () => (await evaluate(`${read} && !${card307}`)) || null, "#307 leaves 判断待ち");
-  await until(() => issueWrites.length >= writesBeforeTask + 2 || null, "the Task's answer sent");
+  await until(() => issueWrites.length >= writesBeforeTask + 2 || null, "the Task's answer sent", SEND_WAIT_MS);
   const taskAnswer = issueWrites.slice(writesBeforeTask).map((a) => a.slice(0, 3).join(" ") + (a.includes("--remove-label") ? " --remove-label " + a[a.indexOf("--remove-label") + 1] : ""));
   assert(JSON.stringify(taskAnswer) === JSON.stringify(["issue comment 330", "issue edit 330 --remove-label needs-decision"]), `task answer: ${JSON.stringify(taskAnswer)}`);
 

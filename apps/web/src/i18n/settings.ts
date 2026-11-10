@@ -250,6 +250,9 @@ export const settings = msgs({
   slotImplement: { ja: "実装", en: "Implement" },
   slotPlan: { ja: "計画", en: "Plan" },
   slotLabel: { ja: "{name} の{slot}の枠", en: "{name}'s {slot} slots" },
+  maxRunnersInvalid: { ja: "同時に動かす Task の上限は 1〜8 の整数で入力してください: \"{value}\"", en: "Enter the limit of Tasks running at once as a whole number from 1 to 8: \"{value}\"" },
+  maxRunnersLabel: { ja: "同時に動かす Task の上限", en: "Limit of Tasks running at once" },
+  maxRunnersHint: { ja: "同時に動かす Task の上限。超えた分は実行枠待ちになり、空いた順に始まります（ホストのメモリに合わせて）", en: "The limit of Tasks running at once. The rest wait for a run slot and start in the order slots free up (set it to the host's memory)" },
   slotsHint: { ja: "0 = 自動で進めない", en: "0 = do not advance automatically" },
 
   // Terminal の履歴

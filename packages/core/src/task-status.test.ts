@@ -32,7 +32,7 @@ describe("task status transitions (#1140)", () => {
   });
   const mk = (id: string, status: TaskStatus, extra: Partial<Task> = {}) => {
     const now = Date.now();
-    db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: home, scope: [home], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now, ...extra });
+    db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: home, scope: [home], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now, ...extra });
   };
 
   test("canTransition matches the table for every pair of statuses", () => {
@@ -122,6 +122,7 @@ describe("no side-by-side status comparison (#4072)", () => {
     { file: "packages/protocol/src/model.ts", has: "return status === \"running\" || status === \"waiting\" || status === \"background\";", why: "isWorkingStatus, the web's copy of COUNTS.display (a test keeps them equal)" },
     { file: "packages/core/src/db.ts", has: "NOT IN ('running', 'waiting', 'idle')", why: "a migration is frozen at the statuses of its day" },
     { file: "rescue/src/promote.ts", has: "t.status === \"running\" ||", why: "sb-rescue shares no code with the app; it reads the status strings of /api/health" },
+    { file: "packages/core/src/jobs.ts", has: "job.status === \"running\" ||", why: "a job's status (running / pass / fail / aborted), not a Task's" },
   ];
 
   test("no file outside tests and the allow list compares statuses side by side", () => {

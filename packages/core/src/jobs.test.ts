@@ -1,12 +1,12 @@
 // test-reads: none
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Job, JobRequest, Task } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import { Db } from "./db.ts";
-import { jobCommand, JobError, type JobDeps, recoverJobs, requestJob, sameRepository } from "./jobs.ts";
+import { jobCommand, JobError, JOBS_KEEP_MS, type JobDeps, pruneJobDirs, recoverJobs, requestJob, sameRepository } from "./jobs.ts";
 import { startServer } from "./server.ts";
 
 // Jobs a Task asks the daemon to run (#3992): the daemon's child, not the Task's; its end is recorded once.
@@ -62,6 +62,16 @@ describe("jobs (#3992)", () => {
     expect(end.summary).toContain("hello");
     expect(end.summary).toContain(join(root, "jobs", String(job.id), "log"));
     expect(db.getJob(job.id)!.status).toBe("fail");
+  });
+
+  test("a job's environment drops Claude Code's session markers and OTEL_* as childEnv does, and the Task's mark and SWITCHBOARD_SUPERVISED", async () => {
+    const { deps, ended } = fake('env > "$J/env"');
+    deps.env = { ...deps.env, CLAUDECODE: "1", CLAUDE_CODE_ENTRYPOINT: "x", CLAUDE_PID: "1", CLAUDE_EFFORT: "high", OTEL_EXPORTER_OTLP_ENDPOINT: "x" };
+    const job = requestJob(deps, local());
+    await ended;
+    const env = readFileSync(join(root, "jobs", String(job.id), "env"), "utf8");
+    for (const k of ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PID", "CLAUDE_EFFORT", "OTEL_EXPORTER_OTLP_ENDPOINT", "SWITCHBOARD_SUPERVISED"]) expect(env).not.toMatch(new RegExp(`^${k}=`, "m"));
+    expect(env).toContain("OPS_KIT_TASK_ID=t1");
   });
 
   test("the job goes on after the Task's process is gone, without the Task's mark", async () => {
@@ -197,8 +207,52 @@ test("the list keeps a job for 7 days after it ended, and every running one", ()
   d.finishJob(endedNow.id, { status: "pass", exitCode: 0, summary: "", endedAt: now });
   const endedLong = mk();
   d.finishJob(endedLong.id, { status: "pass", exitCode: 0, summary: "", endedAt: now - 8 * day });
-  expect(d.listJobs(now - 7 * day).map((j) => j.id)).toEqual([endedNow.id, running.id]);
+  expect(d.listJobs(now - JOBS_KEEP_MS).map((j) => j.id)).toEqual([endedNow.id, running.id]);
   d.close();
+});
+
+test("pruneJobDirs removes the folders of jobs that ended more than 7 days ago; running and recent ones stay", () => {
+  const d = new Db(join(root, "prune.sqlite"));
+  const dir = join(root, "prune-jobs");
+  const now = Date.now();
+  const day = 24 * 3600 * 1000;
+  const mk = () => d.insertJob({ kind: "local-ci", taskId: "t1", pr: 1, runner: null, cwd: repo, startedAt: now - 9 * day });
+  const old = mk();
+  d.finishJob(old.id, { status: "pass", exitCode: 0, summary: "", endedAt: now - 8 * day });
+  const recent = mk();
+  d.finishJob(recent.id, { status: "pass", exitCode: 0, summary: "", endedAt: now - 6 * day });
+  const running = mk();
+  const orphan = running.id + 100;
+  for (const id of [old.id, recent.id, running.id, orphan]) {
+    mkdirSync(join(dir, String(id)), { recursive: true });
+    writeFileSync(join(dir, String(id), "log"), "x");
+  }
+  const deps = { db: d, dir, env: {}, now: () => now } as JobDeps;
+  expect(pruneJobDirs(deps)).toBe(1);
+  expect(existsSync(join(dir, String(old.id)))).toBe(false);
+  for (const id of [recent.id, running.id, orphan]) expect(existsSync(join(dir, String(id)))).toBe(true);
+  expect(d.getJob(old.id)).not.toBeNull();
+  expect(pruneJobDirs({ ...deps, dir: join(root, "no-such") })).toBe(0);
+  d.close();
+});
+
+test("a job's end and recoverJobs prune the folder of a job that ended more than 7 days ago", async () => {
+  const day = 24 * 3600 * 1000;
+  const { deps, ended } = fake("exit 0");
+  const oldFolder = () => {
+    const j = db.insertJob({ kind: "local-ci", taskId: "t1", pr: 1, runner: null, cwd: repo, startedAt: Date.now() - 9 * day });
+    db.finishJob(j.id, { status: "pass", exitCode: 0, summary: "", endedAt: Date.now() - 8 * day });
+    mkdirSync(join(deps.dir, String(j.id)), { recursive: true });
+    return join(deps.dir, String(j.id));
+  };
+  const atEnd = oldFolder();
+  const job = requestJob(deps, local());
+  await ended;
+  expect(existsSync(atEnd)).toBe(false);
+  expect(existsSync(join(deps.dir, String(job.id)))).toBe(true);
+  const atStart = oldFolder();
+  recoverJobs(deps);
+  expect(existsSync(atStart)).toBe(false);
 });
 
 describe("/api/jobs (#3992)", () => {

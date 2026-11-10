@@ -1,7 +1,7 @@
 import { existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { AgentEvent, EventEnvelope, StagedChange, Task, TaskDiffFile } from "@switchboard/protocol";
+import type { AgentEvent, EventEnvelope, StagedChange, Task, TaskDiffFile, TaskDiffSnapshot } from "@switchboard/protocol";
 import { safeRealpath } from "./mcp.ts";
 
 /**
@@ -40,11 +40,81 @@ export async function collectTaskDiff(task: Task, events: EventEnvelope[], stage
     for (const f of files.slice(0, MAX_FILES)) {
       const abs = join(top, f.rel);
       const diff = capDiff(f.untracked ? await gitNoIndexDiff(top, f.rel) : await gitDiff(top, base, f.rel));
-      out.push({ path: abs, rel: relative(root, abs).split(sep).join("/") || f.rel, stat: f.stat, diff, source: "worktree" });
+      out.push({ path: abs, rel: relative(root, abs).split(sep).join("/") || f.rel, stat: f.stat, diff, source: "worktree", root: top });
     }
-    if (files.length > MAX_FILES) out.push({ path: root, rel: `… ${files.length - MAX_FILES} more changed files`, stat: "", diff: "", source: "worktree" });
+    if (files.length > MAX_FILES) out.push({ path: root, rel: `… ${files.length - MAX_FILES} more changed files`, stat: "", diff: "", source: "worktree", root: top });
   }
   for (const path of outside.removed) out.push({ path, rel: path, stat: "", diff: "", source: "removed" });
+  return out;
+}
+
+/** The tool calls whose input names a file the Task wrote. */
+export const WRITE_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit", "fileChange", "fs.write", "fs.patch"];
+const SNAPSHOT_MARK = "\n… (snapshot truncated)";
+
+/**
+ * The next copy of a Task's diff (#3833): the live worktree rows (seen now), plus the rows of the previous copy whose
+ * working tree no longer exists (kept as they were, with the time they were last seen). Staging and removed rows are not copied.
+ */
+export function mergeSnapshot(prev: TaskDiffSnapshot | null, live: TaskDiffFile[], at: number, exists: (p: string) => boolean = existsSync): TaskDiffSnapshot {
+  const files: TaskDiffFile[] = [];
+  for (const f of live) if (f.source === "worktree" && f.root) files.push({ ...f, at });
+  for (const f of prev?.files ?? []) {
+    if (!f.root || exists(f.root)) continue;
+    files.push({ ...f, source: "worktree", at: f.at ?? prev!.at });
+  }
+  return { at, files };
+}
+
+/**
+ * Keep a copy under `maxBytes` (as JSON): cut the largest diffs first (each marked "… (snapshot truncated)"), and if the
+ * rows alone are still over, drop whole rows: those whose working tree still exists first (the next copy rebuilds them
+ * from the tree), the rest last (a removed place cannot be rebuilt), oldest first within each. Each root that lost rows
+ * keeps one row that says how many, carrying the root so it follows the place like any copied row.
+ */
+export function capSnapshot(s: TaskDiffSnapshot, maxBytes = 1_000_000, exists: (p: string) => boolean = existsSync): TaskDiffSnapshot {
+  const files = s.files.map((f) => ({ ...f }));
+  const sizes = files.map((f) => Buffer.byteLength(JSON.stringify(f)) + 1);
+  let total = 2 + sizes.reduce((a, b) => a + b, 0);
+  while (total > maxBytes) {
+    let i = 0;
+    for (let k = 1; k < files.length; k++) if (files[k]!.diff.length > files[i]!.diff.length) i = k;
+    const big = files[i];
+    if (!big || big.diff.length <= SNAPSHOT_MARK.length) break;
+    const body = big.diff.endsWith(SNAPSHOT_MARK) ? big.diff.slice(0, -SNAPSHOT_MARK.length) : big.diff;
+    const over = total - maxBytes;
+    big.diff = body.slice(0, Math.max(0, Math.min(Math.floor(body.length / 2), body.length - over - 1))) + SNAPSHOT_MARK;
+    const n = Buffer.byteLength(JSON.stringify(big)) + 1;
+    total += n - sizes[i]!;
+    sizes[i] = n;
+  }
+  if (total <= maxBytes) return { at: s.at, files };
+  const gone = new Set<number>();
+  const dropped = new Map<string, number>(); // root -> rows dropped
+  const note = (root: string, n: number): TaskDiffFile => ({ path: root, rel: `… ${n} files dropped (snapshot truncated)`, stat: "", diff: "", source: "worktree", root, at: s.at });
+  const notesSize = () => [...dropped].reduce((a, [root, n]) => a + Buffer.byteLength(JSON.stringify(note(root, n))) + 1, 0);
+  const rebuildable = files.map((f) => !f.root || exists(f.root));
+  const order = files.map((_, i) => i).sort((a, b) => Number(rebuildable[b]) - Number(rebuildable[a]) || (files[a]!.at ?? s.at) - (files[b]!.at ?? s.at) || b - a);
+  for (const i of order) {
+    if (total + notesSize() <= maxBytes) break;
+    gone.add(i);
+    total -= sizes[i]!;
+    const root = files[i]!.root ?? "";
+    dropped.set(root, (dropped.get(root) ?? 0) + 1);
+  }
+  const kept = files.filter((_, i) => !gone.has(i));
+  return { at: s.at, files: [...kept, ...[...dropped].map(([root, n]) => note(root, n))] };
+}
+
+/** The live rows, with the copied rows of a removed place added right after its `removed` row. */
+export function withSnapshot(live: TaskDiffFile[], snap: TaskDiffSnapshot | null): TaskDiffFile[] {
+  if (!snap) return live;
+  const out: TaskDiffFile[] = [];
+  for (const f of live) {
+    out.push(f);
+    if (f.source !== "removed") continue;
+    for (const s of snap.files) if (s.root && (s.root === f.path || under(s.root, f.path))) out.push({ ...s, source: "snapshot", at: s.at ?? snap.at });
+  }
   return out;
 }
 
@@ -97,7 +167,7 @@ export function touchedPaths(events: EventEnvelope[], roots: string[]): Set<stri
   for (const { ev } of events) {
     if (ev.t === "tool.call") {
       const input = ev.input as { file_path?: unknown; notebook_path?: unknown; path?: unknown; changes?: Array<{ path?: unknown }> } | null;
-      const writeTool = ["Write", "Edit", "MultiEdit", "NotebookEdit", "fileChange", "fs.write", "fs.patch"].includes(ev.name);
+      const writeTool = WRITE_TOOLS.includes(ev.name);
       if (!writeTool || !input || typeof input !== "object") continue;
       if (typeof input.file_path === "string") out.add(abs(input.file_path));
       if (typeof input.notebook_path === "string") out.add(abs(input.notebook_path));

@@ -364,6 +364,7 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
 
       <SettingsCard title={t(settings.sweep)}>
         <SweepSlots onError={props.onError} />
+        <MaxRunners onError={props.onError} />
       </SettingsCard>
 
       <SettingsCard title={t(settings.githubSync)}>
@@ -597,6 +598,46 @@ export function SweepSlots(props: { onError: (msg: string) => void }) {
         </button>
         <span className="hint">{t(settings.slotsHint)}</span>
       </div>
+    </div>
+  );
+}
+
+/** The limit of Tasks running at once (#1141): what is over it waits for a run slot (scheduler.md). Saved with the PATCH of the settings, so the daemon starts the waiting ones at once. */
+export function MaxRunners(props: { onError: (msg: string) => void }) {
+  const [saved, setSaved] = useState<number | null>(null);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const show = (n: number) => {
+    setSaved(n);
+    setDraft(String(n));
+  };
+  useEffect(() => {
+    api.settings().then((r) => show(r.maxRunners)).catch((e) => props.onError(String(e.message ?? e)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const save = async () => {
+    // an emptied box would be Number("") = 0: only a typed digit counts
+    if (!/^\s*[1-8]\s*$/.test(draft)) {
+      props.onError(t(settings.maxRunnersInvalid, { value: draft }));
+      return;
+    }
+    setBusy(true);
+    try {
+      show((await api.updateSettings({ maxRunners: Number(draft) })).maxRunners);
+    } catch (e) {
+      props.onError(String((e as Error).message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="row" style={{ gridColumn: "1 / -1", alignItems: "center", gap: 6 }}>
+      <span className="hint">{t(settings.maxRunnersLabel)}</span>
+      <input type="number" min={1} max={8} step={1} aria-label={t(settings.maxRunnersLabel)} value={draft} onChange={(e) => setDraft(e.target.value)} style={{ width: 56 }} />
+      <button className="ghost" disabled={busy || saved === null} onClick={() => void save()}>
+        {t(settings.save)}
+      </button>
+      <span className="hint">{t(settings.maxRunnersHint)}</span>
     </div>
   );
 }

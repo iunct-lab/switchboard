@@ -1428,6 +1428,32 @@ test("an unknown create of an Issue never made, taken back: the edits made to it
   expect(g.writes).toEqual([]);
 });
 
+test("a create failed after the Issue was made (its Project item refused), taken back: the Issue stays, no Project step is sent, and the comment behind it is sent (#3794)", async () => {
+  const g = fakeGithub();
+  const { localId } = createStoredIssue(db, S, { title: "Project に入れない作成", body: "", labels: [], milestone: null, parent: null, fields: { Status: "Ready" } });
+  g.fail.push({ match: (a) => a.some((x) => x.includes("addProjectV2ItemById")), status: 403 });
+  expect(await send(g.gh)).toBe(0);
+  const made = [...g.issues.values()].find((i) => i.title === "Project に入れない作成")!;
+  expect(db.getBacklogOperation(localId)).toMatchObject({ status: "failed", remoteId: made.node_id });
+  commentStoredIssue(db, S, made.number, "後ろのコメント");
+  expect(await send(g.gh)).toBe(0);
+  expect(statuses()).toEqual([["create", null, "failed"], ["comment", null, "pending"]]);
+
+  expect(withdrawStoredOperation(db, S, made.number, { operation: localId, reason: "Project には入れない" })).toEqual({ operation: localId });
+  g.fail.length = 0;
+  g.writes.length = 0;
+  expect(await send(g.gh)).toBe(1);
+  expect(g.writes).toEqual([`POST repos/acme/app/issues/${made.number}/comments`]);
+  expect(g.writes.some((w) => w.includes("addProjectV2ItemById") || w.includes("updateProjectV2ItemFieldValue"))).toBe(false);
+  expect([...g.items.values()].filter((i) => i.issue === made.node_id)).toEqual([]);
+  expect([...g.issues.values()].filter((i) => i.title === "Project に入れない作成")).toHaveLength(1);
+  expect(made.comments.map((c) => c.body)).toEqual([expect.stringContaining("後ろのコメント")]);
+  expect(db.getBacklogOperation(localId)).toMatchObject({ status: "done", error: "取り下げました: Project には入れない" });
+  // unlike a create never made, the Issue's record stays here too
+  expect(db.getBacklogRecord({ ...S, objectKind: "issue", externalId: made.node_id })?.remote).toMatchObject({ number: made.number });
+  expect(statuses()).toEqual([]);
+});
+
 test("both answers lost (the first post and the one made again): the next look finds two, keeps the first made and drops the other (#3804)", async () => {
   const g = fakeGithub();
   const { localId } = createStoredIssue(db, S, { title: "二度失う", body: "", labels: [], milestone: null, parent: null, fields: null });

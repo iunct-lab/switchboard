@@ -24,7 +24,7 @@
 import { existsSync } from "node:fs";
 import type { Backlog, BacklogCommentData, BacklogErrorKind, BacklogIssueData, BacklogPullRequestData, BacklogItem, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogSource } from "@switchboard/protocol";
 import type { BacklogSnapshotEntry, Db } from "./db.ts";
-import { BacklogError, backlogRepoOf, prereqsOf, projectOf, readStoredBacklog, syncsGithub, waitsOf, type BacklogWorkspace, type GhRunner } from "./backlog.ts";
+import { BacklogError, backlogRepoOf, confirmationsOf, confirmDecisionsOf, prereqsOf, projectOf, readStoredBacklog, syncsGithub, waitsOf, type BacklogWorkspace, type GhRunner } from "./backlog.ts";
 import { linkedIssues } from "../../../scripts/task-paths.ts";
 import { Limit, sendGithubOperations } from "./backlog-send.ts";
 import { applyLocalOperations } from "./backlog-local.ts";
@@ -242,6 +242,11 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
     });
   // the prerequisites an open PBI / Task names (#937) are asked like the waits
   const prereqs = issues.filter((r) => r.remote.state === "OPEN" && (r.remote.labels.includes("type:pbi") || r.remote.labels.includes("type:task"))).flatMap((r) => prereqsOf(r.remote.body).map((p) => p.number));
+  // and the decisions an open In progress / In review PBI's confirmation lines name to be checked by their answers
+  const working = new Set([...known.values()].filter((r) => r.kind === "project-item" && ["In progress", "In review"].includes(String((r.remote as { fields?: Record<string, unknown> } | null)?.fields?.Status))).map((r) => (r.remote as { issue: number }).issue));
+  const confirmDecisions = issues
+    .filter((r) => r.remote.state === "OPEN" && r.remote.labels.includes("type:pbi") && working.has(r.remote.number))
+    .flatMap((r) => confirmationsOf(r.remote.body).flatMap((c) => confirmDecisionsOf(c.text)));
   const byNumber = new Map([...known.values()].filter((r) => (r.kind === "issue" || r.kind === "pull-request") && r.remote && !r.id.startsWith("sb:")).map((r) => [(r.remote as { number: number }).number, r]));
   // a wait on a closed request / PBI / Task is answered by what is stored: reopening it moves its updatedAt, and the
   // first read lists it then. Another closed Issue is asked again: no list would show it reopened
@@ -253,7 +258,7 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
   // a stored open PR the full list no longer has was closed or merged: asked again by its number (#1059)
   const gone = [...known.values()].filter((r) => r.kind === "pull-request" && (r.remote as BacklogPullRequestData | null)?.state === "OPEN").map((r) => (r.remote as BacklogPullRequestData).number).filter((n) => !openPulls.has(n));
   // and what the Tasks' depends stops wait for (#2045), asked like the waits
-  const numbers = [...new Set([...stale, ...gone, ...[...waits, ...prereqs, ...stopWaits].filter((n) => !closed(n))])].filter((n) => !read.has(n) && !open.has(n) && !openPulls.has(n)).sort((a, b) => a - b);
+  const numbers = [...new Set([...stale, ...gone, ...[...waits, ...prereqs, ...confirmDecisions, ...stopWaits].filter((n) => !closed(n))])].filter((n) => !read.has(n) && !open.has(n) && !openPulls.has(n)).sort((a, b) => a - b);
   for (let i = 0; i < numbers.length; i += RECHECK_BATCH) {
     const batch = numbers.slice(i, i + RECHECK_BATCH);
     const { data, errors } = await graphql(gh, cwd, recheckQuery(batch), vars, true);

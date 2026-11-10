@@ -3,14 +3,14 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { EventEnvelope, StagedChange, Task } from "@switchboard/protocol";
-import { collectTaskDiff, touchedPaths } from "./taskdiff.ts";
+import type { EventEnvelope, StagedChange, Task, TaskDiffFile } from "@switchboard/protocol";
+import { capSnapshot, collectTaskDiff, mergeSnapshot, touchedPaths, withSnapshot } from "./taskdiff.ts";
 
 let root: string;
 const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com" };
 const git = (cwd: string, args: string[]) => Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: gitEnv });
 const env = (ev: EventEnvelope["ev"], seq: number): EventEnvelope => ({ taskId: "t", seq, ts: 0, ev });
-const task = (cwd: string, scope: string[] = [cwd]): Task => ({ id: "t", workspaceId: null, title: "", runner: "claude", cwd, scope, status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 0, createdAt: 0, updatedAt: 0 });
+const task = (cwd: string, scope: string[] = [cwd]): Task => ({ id: "t", workspaceId: null, title: "", runner: "claude", cwd, scope, status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 0, createdAt: 0, updatedAt: 0 });
 
 beforeAll(() => {
   // tmpdir() is a symlink on macOS (/var → /private/var): the collector must canonicalize roots and paths alike
@@ -190,5 +190,68 @@ describe("task diff (#12)", () => {
       rmSync(parent, { recursive: true, force: true });
       rmSync(scratchDir, { recursive: true, force: true });
     }
+  });
+  const row = (root: string, rel: string, diff = "d"): TaskDiffFile => ({ path: join(root, rel), rel, stat: "+1 −0", diff, source: "worktree", root });
+
+  test("snapshot merges the live diff", () => {
+    const live = [row(root, "a.ts"), { path: "/p", rel: "p", stat: "", diff: "x", source: "staging" as const }, { path: "/gone", rel: "/gone", stat: "", diff: "", source: "removed" as const }];
+    const s = mergeSnapshot(null, live, 100);
+    expect(s.at).toBe(100);
+    expect(s.files.map((f) => [f.source, f.rel, f.root, f.at])).toEqual([["worktree", "a.ts", root, 100]]); // staging and removed rows are not copied
+    // a second copy replaces the live rows of a place that still exists
+    const s2 = mergeSnapshot(s, [row(root, "b.ts")], 200);
+    expect(s2.files.map((f) => [f.rel, f.at])).toEqual([["b.ts", 200]]);
+  });
+
+  test("snapshot keeps a removed place", () => {
+    const gone = join(tmpdir(), "sb-snapshot-never-existed");
+    const first = mergeSnapshot(null, [row(root, "a.ts"), row(gone, "w.ts", "old diff")], 100);
+    // the place is removed: only the live rows of the other place are seen, the removed one's rows stay as they were
+    const second = mergeSnapshot(first, [row(root, "a.ts")], 200);
+    expect(second.files.map((f) => [f.rel, f.diff, f.at])).toEqual([["a.ts", "d", 200], ["w.ts", "old diff", 100]]);
+    const shown = withSnapshot([{ path: gone, rel: gone, stat: "", diff: "", source: "removed" }, row(root, "a.ts")], second);
+    expect(shown.map((f) => [f.source, f.rel, f.at])).toEqual([["removed", gone, undefined], ["snapshot", "w.ts", 100], ["worktree", "a.ts", undefined]]);
+    // the copied rows follow their removed row directly, before the next live row
+    expect(shown.findIndex((f) => f.source === "snapshot")).toBe(shown.findIndex((f) => f.source === "removed") + 1);
+    // a place that is not removed never gets copied rows
+    expect(withSnapshot([row(root, "a.ts")], second).map((f) => f.source)).toEqual(["worktree"]);
+    expect(withSnapshot([row(root, "a.ts")], null).length).toBe(1);
+  });
+
+  test("snapshot cap", () => {
+    const big = (rel: string, n: number) => row(root, rel, "x".repeat(n));
+    const s = capSnapshot({ at: 1, files: [big("small", 100), big("huge", 5000), big("mid", 1500)] }, 3000);
+    expect(Buffer.byteLength(JSON.stringify(s.files))).toBeLessThanOrEqual(3000);
+    const by = (rel: string) => s.files.find((f) => f.rel === rel)!;
+    expect(by("huge").diff.endsWith("… (snapshot truncated)")).toBe(true);
+    expect(by("small").diff).toBe("x".repeat(100));
+    // many small rows that are over the limit on their own: the oldest go, one row says how many
+    const many = Array.from({ length: 50 }, (_, i) => ({ ...big(`f${i}`, 10), at: i }));
+    const m = capSnapshot({ at: 100, files: many }, 3000);
+    expect(Buffer.byteLength(JSON.stringify(m.files))).toBeLessThanOrEqual(3000);
+    const note = m.files[m.files.length - 1]!;
+    expect(note.rel).toMatch(/^… \d+ files dropped \(snapshot truncated\)$/);
+    expect(m.files.length).toBeLessThan(50);
+    expect(m.files.slice(0, -1).every((f) => (f.at ?? 0) >= 50 - (m.files.length - 1))).toBe(true); // the newest rows stay
+    // rows of a place that is gone stay; rows of a place that still exists go first
+    const alive = Array.from({ length: 30 }, (_, i) => ({ ...row("/alive", `a${i}`, "x".repeat(10)), at: 100 + i }));
+    const lost = Array.from({ length: 10 }, (_, i) => ({ ...row("/lost", `l${i}`, "x".repeat(10)), at: i }));
+    const c = capSnapshot({ at: 200, files: [...lost, ...alive] }, 3500, (p) => p === "/alive");
+    expect(Buffer.byteLength(JSON.stringify(c.files))).toBeLessThanOrEqual(3500);
+    expect(c.files.filter((f) => f.root === "/lost" && f.rel.startsWith("l")).length).toBe(10);
+    const aliveNote = c.files.find((f) => f.root === "/alive" && f.rel.includes("files dropped"));
+    expect(aliveNote).toBeDefined();
+    expect(c.files.some((f) => f.root === "/lost" && f.rel.includes("files dropped"))).toBe(false);
+    // the note carries the root, so it is shown under the removed place and survives the next copy
+    const gone = join(tmpdir(), "sb-note-gone");
+    const noted = capSnapshot({ at: 5, files: Array.from({ length: 40 }, (_, i) => row(gone, `n${i}`, "x")) }, 1500, () => false);
+    const gnote = noted.files.find((f) => f.rel.includes("files dropped"))!;
+    expect(gnote.root).toBe(gone);
+    const shown = withSnapshot([{ path: gone, rel: gone, stat: "", diff: "", source: "removed" }], noted);
+    expect(shown.some((f) => f.source === "snapshot" && f.rel.includes("files dropped"))).toBe(true);
+    expect(mergeSnapshot(noted, [], 9, () => false).files.some((f) => f.rel.includes("files dropped"))).toBe(true);
+    // under the limit: unchanged
+    const same = { at: 1, files: [big("a", 10)] };
+    expect(capSnapshot(same, 1_000_000)).toEqual(same);
   });
 });

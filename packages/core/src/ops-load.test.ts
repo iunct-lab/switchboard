@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Db } from "./db.ts";
-import { attribute, OpsLoadSampler, overLimit, readCgroup, readProcs, summarize, type Attributed, type CgroupReading, type ProcInfo } from "./ops-load.ts";
+import { attribute, memoryHeadroom, OpsLoadSampler, overLimit, readCgroup, readProcs, summarize, type Attributed, type CgroupReading, type ProcInfo } from "./ops-load.ts";
 
 const roots: string[] = [];
 afterAll(() => {
@@ -285,5 +285,35 @@ describe("ops-load sampler (#2086)", () => {
     expect(rows(d)).toEqual([]);
     expect(d.sqlite.query("SELECT COUNT(*) AS n FROM ops_load_groups").get()).toEqual({ n: 0 });
     d.close();
+  });
+});
+
+describe("memoryHeadroom (#1141)", () => {
+  const MB = 1_000_000;
+  const mkDb = () => {
+    const dir = mkdtempSync(join(tmpdir(), "switchboard-ops-load-headroom-"));
+    roots.push(dir);
+    return new Db(join(dir, "x.db"));
+  };
+  const row = { memCurrent: 0, memMax: null, swapCurrent: 0, eventsMax: 0, cpuPct: 0, pressureSome: 0, pressureFull: 0, dockerMem: 0, top: "[]" };
+  const g = (taskId: string | null, owner: "task" | "daemon" | "other", kind: string, rss: number) => ({ taskId, owner, kind, rssBytes: rss, cpuMs: 0, procs: 1 }) as never;
+
+  test("free is memory.max − memory.current; need is the largest sum of one Task's groups in one sample of the last day", () => {
+    const d = mkDb();
+    const host = fakeHost(TREE); // memory.max 3.4 GB, memory.current 3.0 GB
+    const now = 2_000_000_000_000;
+    d.insertOpsLoad(row as never, [g("t_old", "task", "runner", 5_000 * MB)], now - 25 * 3_600_000); // older than a day: left out
+    d.insertOpsLoad(row as never, [g("t1", "task", "runner", 400 * MB), g("t1", "task", "other", 600 * MB), g("t2", "task", "runner", 700 * MB), g(null, "daemon", "daemon", 2_000 * MB)], now - 3_600_000);
+    d.insertOpsLoad(row as never, [g("t1", "task", "runner", 300 * MB)], now - 60_000);
+    expect(memoryHeadroom(d, { now, ...host })).toEqual({ free: 400 * MB, need: 1_000 * MB });
+  });
+
+  test("null when the unit has no memory limit, the cgroup cannot be read, or nothing is recorded", () => {
+    const d = mkDb();
+    const now = 2_000_000_000_000;
+    expect(memoryHeadroom(d, { now, ...fakeHost(TREE) })).toBeNull(); // nothing recorded
+    d.insertOpsLoad(row as never, [g("t1", "task", "runner", 400 * MB)], now - 60_000);
+    expect(memoryHeadroom(d, { now, ...fakeHost(TREE, { "memory.max": "max\n" }) })).toBeNull();
+    expect(memoryHeadroom(d, { now, cgRoot: "/nonexistent", procRoot: "/nonexistent" })).toBeNull();
   });
 });

@@ -108,6 +108,20 @@ describe("scheduler (#20)", () => {
     expect(next.find((t) => t.scheduleId === plain.id)!.budgetUsd).toBeNull();
   });
 
+  test("tick skips a schedule whose previous run waits for a run slot, however long since (#1141)", async () => {
+    const sc = new Scheduler(db, tasks, () => now);
+    const s = sc.create({ title: "nightly", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "p" });
+    now = Date.parse("2026-09-06T03:00:00");
+    const started = await sc.tick();
+    db.updateTask(started[0]!.id, { status: "running" });
+    db.updateTask(started[0]!.id, { status: "idle" });
+    db.setQueued(started[0]!.id, "p", now);
+    now = Date.parse("2026-09-07T03:00:00");
+    expect(await sc.tick()).toHaveLength(0);
+    expect(sc.recentLog().at(-1)).toContain("is still queued");
+    expect(db.getSchedule(s.id)!.lastTaskId).toBe(started[0]!.id);
+  });
+
   test("tick skips a schedule whose previous run waits on background jobs", async () => {
     const sc = new Scheduler(db, tasks, () => now);
     const s = sc.create({ title: "nightly", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "p" });
@@ -229,6 +243,26 @@ describe("scheduler (#20)", () => {
     expect(q.staged).toEqual([{ taskId: t.id, title: "manual", pending: 2 }]);
     expect(q.scheduled).toHaveLength(1);
     expect(q.scheduled[0]).toMatchObject({ taskId: started.id, scheduleTitle: "nightly", costUsd: 0.5 });
+  });
+
+  test("queue().queued lists the Tasks waiting for a run slot in queuedAt order, and takeQueued takes one out (#1141)", () => {
+    const base = db.getTask(tasks.create({ workspaceId: wsId, cwd: home, title: "base", prompt: "p", runner: "claude" }).id)!;
+    const mk = (id: string, createdAt: number): Task => ({ ...base, id, title: id, status: "idle", queuedAt: null, createdAt, updatedAt: createdAt, statusAt: createdAt });
+    db.insertTask(mk("tsk_q_late", 1));
+    db.insertTask(mk("tsk_q_early", 2));
+    db.insertTask(mk("tsk_q_none", 3));
+    db.setQueued("tsk_q_late", "second", 2000);
+    db.setQueued("tsk_q_early", "first", 1000);
+    const sc = new Scheduler(db, tasks, () => now);
+    expect(sc.queue().queued).toEqual([
+      { taskId: "tsk_q_early", title: "tsk_q_early", runner: "claude", since: 1000, position: 1 },
+      { taskId: "tsk_q_late", title: "tsk_q_late", runner: "claude", since: 2000, position: 2 },
+    ]);
+    expect(db.getTask("tsk_q_early")!.queuedAt).toBe(1000);
+    expect(db.takeQueued("tsk_q_early")).toBe("first");
+    expect(db.takeQueued("tsk_q_early")).toBeNull();
+    expect(db.takeQueued("tsk_q_none")).toBeNull();
+    expect(sc.queue().queued).toEqual([{ taskId: "tsk_q_late", title: "tsk_q_late", runner: "claude", since: 2000, position: 1 }]);
   });
 });
 

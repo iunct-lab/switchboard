@@ -601,6 +601,7 @@ export class RateLimitResumer {
   async tick(): Promise<string[]> {
     const now = this.now();
     const resumed: string[] = [];
+    let full = false;
     for (const t of this.db.listTasksWithResume()) {
       if (t.resumeAt === null) continue;
       const early = t.resumeAt > now && this.liftedEarly(t);
@@ -616,6 +617,12 @@ export class RateLimitResumer {
         this.resolveDiskStop(t.id, free, "空きが戻った");
       }
       if (!this.opts.enabled(t.runner)) continue;
+      // no free slot: not a failure, only a turn in line. resumeAt stays, the next tick looks again
+      if (this.tasks.freeSlots() === 0) {
+        if (!full) this.log("ratelimit: 実行枠が空いていない（数か空きメモリ）ため再開を次の tick に回す");
+        full = true;
+        continue;
+      }
       if (early) this.tasks.record(t.id, { t: "status", text: `使用上限が予定（${fmtTime(t.resumePlannedAt ?? t.resumeAt, now)}）より早く戻ったと報告があったので再開します` });
       if (await this.resume(t)) resumed.push(t.id);
     }

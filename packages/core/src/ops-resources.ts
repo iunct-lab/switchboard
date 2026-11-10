@@ -8,6 +8,7 @@ import { join } from "node:path";
 import type { LoadKind, OpsResources, RunVerdict } from "@switchboard/protocol";
 import { type HeavyHistoryEntry, heavyHistoryPath, readHeavyHistory, readHeavyState } from "../../../ops-kit/src/heavy.ts";
 import type { Db } from "./db.ts";
+import { JOBS_KEEP_MS } from "./jobs.ts";
 
 /** /proc/meminfo in bytes; null where it cannot be read. */
 export function readMemInfo(procRoot = "/proc"): { availableBytes: number; totalBytes: number; swapUsedBytes: number } | null {
@@ -28,8 +29,6 @@ export function readMemInfo(procRoot = "/proc"): { availableBytes: number; total
 }
 
 const MB = 1024 * 1024;
-/** How long an ended job stays on the resources screen (#3995): the same week GET /api/jobs lists. */
-const JOBS_SHOWN_MS = 7 * 24 * 3600 * 1000;
 
 /** A run is long past this many times its kind's median. Not a setting (the PBI's 決定ログ). */
 export const LONG_RATIO = 2;
@@ -149,6 +148,6 @@ export function opsResources(db: Db, opts: { home: string; procRoot?: string; no
     consumers: latest?.ts
       ? { at: latest.ts, groups: rows.map((g) => ({ taskId: g.task_id, taskTitle: title(g.task_id), owner: g.owner, kind: g.kind, rssBytes: g.rss, procs: g.procs })) }
       : null,
-    jobs: db.listJobs(now - JOBS_SHOWN_MS).map(({ summary: _s, cwd: _c, ...j }) => ({ ...j, taskTitle: title(j.taskId) })),
+    jobs: db.listJobs(now - JOBS_KEEP_MS).map(({ summary: _s, cwd: _c, ...j }) => ({ ...j, taskTitle: title(j.taskId) })),
   };
 }

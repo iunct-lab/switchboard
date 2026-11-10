@@ -4,7 +4,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { RunnerAdapter, StartOptions, Task } from "@switchboard/protocol";
+import type { AgentEvent, RunnerAdapter, StartOptions, Task } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import { Db } from "./db.ts";
 import { startServer as startDaemon } from "./server.ts";
@@ -20,7 +20,7 @@ const tmp = mkdtempSync(join(tmpdir(), "sb-transfer-test-"));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
 function task(id: string, cwd: string): Task {
-  return { id, workspaceId: null, title: id, runner: "claude", cwd, scope: [cwd], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1_000, createdAt: 1_000, updatedAt: 1_000 };
+  return { id, workspaceId: null, title: id, runner: "claude", cwd, scope: [cwd], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1_000, createdAt: 1_000, updatedAt: 1_000 };
 }
 
 /** A HOME with a little of everything the package carries. */
@@ -412,7 +412,7 @@ describe("import", () => {
 });
 
 /** A runner that records how it was started and finishes each turn at once. */
-function recordingAdapter(starts: StartOptions[]): RunnerAdapter {
+function recordingAdapter(starts: StartOptions[], extra: (opts: StartOptions) => AgentEvent[] = () => []): RunnerAdapter {
   return {
     id: "claude",
     async detect() {
@@ -422,6 +422,7 @@ function recordingAdapter(starts: StartOptions[]): RunnerAdapter {
       starts.push(opts);
       queueMicrotask(() => {
         emit({ t: "session.start", runner: "claude", runnerSessionId: opts.resumeSessionId ?? "new-session", cwd: opts.cwd });
+        for (const ev of extra(opts)) emit(ev);
         emit({ t: "session.end", status: "ok", summary: "ok" });
       });
       return { send() {}, respondPermission() {}, abort: async () => {}, close: async () => {}, exited: Promise.resolve(0) };
@@ -473,6 +474,55 @@ describe("after a migration", () => {
       expect(gone.task.status).toBe("error");
       expect(gone.events.some((e) => e.ev.t === "status" && e.ev.text?.includes("/nonexistent/repo"))).toBe(true);
       expect((await fetch(`${base}/api/health`)).status).toBe(200);
+    } finally {
+      await core.stop();
+    }
+  });
+  test("diff API returns snapshot rows for a removed worktree", async () => {
+    const cfg = emptyHome(join(tmp, "snap"));
+    const db = new Db(cfg.dbPath);
+    db.insertTask(task("snap", "/nonexistent-snap/repo"));
+    // the Task wrote into a worktree that is gone now: a `removed` row, and the copy taken while it existed
+    db.appendEvent("snap", { t: "tool.call", id: "w", name: "Write", input: { file_path: "/nonexistent-snap-wt/wt/n.md" }, summary: "" });
+    db.putTaskDiffSnapshot("snap", { at: 1234, files: [{ path: "/nonexistent-snap-wt/wt/n.md", rel: "n.md", stat: "new", diff: "+note", source: "worktree", root: "/nonexistent-snap-wt/wt", at: 1234 }] });
+    db.close();
+    const core = await startServer({ ...cfg, historyPollMs: 0 }, [recordingAdapter([])], { port: 0, selfdevChecks: false });
+    try {
+      const rows = (await fetch(`http://127.0.0.1:${core.server.port}/api/tasks/snap/diff`).then((r) => r.json())) as Array<{ source: string; rel: string; diff: string; at?: number }>;
+      expect(rows.map((r) => r.source)).toEqual(["removed", "snapshot"]);
+      expect(rows[1]).toMatchObject({ rel: "n.md", diff: "+note", at: 1234 });
+    } finally {
+      await core.stop();
+    }
+  });
+  test("snapshot is taken at the end of a turn", async () => {
+    const cfg = emptyHome(join(tmp, "snapturn"));
+    const repo = join(tmp, "snapturn-repo");
+    mkdirSync(repo);
+    const git = (...a: string[]) => Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", ...a], { cwd: repo });
+    git("init", "-q");
+    writeFileSync(join(repo, "a.txt"), "one\n");
+    git("add", ".");
+    git("commit", "-qm", "init");
+    const db = new Db(cfg.dbPath);
+    db.insertTask({ ...task("turn", repo), runnerSessionId: "sess-turn" });
+    db.close();
+    const adapter = recordingAdapter([], (o) => {
+      writeFileSync(join(o.cwd, "a.txt"), "two\n");
+      return [{ t: "tool.call", id: "w", name: "Write", input: { file_path: join(o.cwd, "a.txt") }, summary: "" }];
+    });
+    const core = await startServer({ ...cfg, historyPollMs: 0 }, [adapter], { port: 0, selfdevChecks: false });
+    try {
+      const base = `http://127.0.0.1:${core.server.port}`;
+      expect((await fetch(`${base}/api/tasks/turn/send`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "go" }) })).status).toBe(200);
+      const read = new Db(cfg.dbPath);
+      try {
+        for (let i = 0; i < 100 && !read.getTaskDiffSnapshot("turn"); i++) await Bun.sleep(50);
+        const snap = read.getTaskDiffSnapshot("turn");
+        expect(snap?.files.map((f) => f.rel)).toEqual(["a.txt"]);
+      } finally {
+        read.close();
+      }
     } finally {
       await core.stop();
     }

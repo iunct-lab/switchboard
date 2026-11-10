@@ -300,6 +300,16 @@ test("a light import still asks a wait on an Issue no list shows: one of no type
   expect(asked).toEqual([13, 14, 15]);
 });
 
+test("a light import asks the decisions an In progress / In review PBI's confirmation lines name, and none a Ready PBI's do", async () => {
+  const body = (n: number) => `## 到達点 / 受け入れ条件\n- [ ] 1. 要る（利用者確認: 回答で確かめる #${n}, #${n + 1} — 方針）\n`;
+  const pbi = (n: number, status: string) => raw(n, { body: body(n + 1), projectItems: { totalCount: 1, nodes: [item(n, status)] } });
+  await importGithubSnapshot(fakeGh({ changed: () => pageOf([pbi(10, "In progress"), pbi(20, "In review"), pbi(30, "Ready")]), open: () => pageOf([]), recheck: (ns) => ({ code: 1, body: { data: { repository: Object.fromEntries(ns.map((n) => [`w${n}`, null])) }, errors: ns.map((n) => ({ type: "NOT_FOUND", path: ["repository", `w${n}`] })) } }) }).gh, db, WS, 1000);
+  const asked: number[] = [];
+  const { gh } = fakeGh({ changed: () => pageOf([]), open: () => pageOf([]), recheck: (ns) => (asked.push(...ns), { code: 1, body: { data: { repository: Object.fromEntries(ns.map((n) => [`w${n}`, null])) }, errors: ns.map((n) => ({ type: "NOT_FOUND", path: ["repository", `w${n}`] })) } }) });
+  await importGithubSnapshot(gh, db, WS, 2000, undefined, false, false);
+  expect(asked).toEqual([11, 12, 21, 22]);
+});
+
 test("a light import reads the Project items of an Issue made in the last hour, and of no older one: the auto-add moves no updatedAt", async () => {
   const made = Date.parse("2026-10-01T00:00:00Z");
   await importGithubSnapshot(fakeGh({ changed: () => pageOf([raw(12, { projectItems: { totalCount: 0, nodes: [] } })]), open: () => pageOf([]) }).gh, db, WS, made);
@@ -357,7 +367,7 @@ test("the pull requests an open PBI waits for are stored with their state", asyn
 
 test("stop waits are rechecked: a pull request a Task's depends stop waits for is asked by number and stored (#2045)", async () => {
   const at = Date.now();
-  const task = (id: string, workspaceId: string) => db.insertTask({ id, workspaceId, title: id, runner: "claude", cwd: dir, scope: [dir], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: at, createdAt: at, updatedAt: at });
+  const task = (id: string, workspaceId: string) => db.insertTask({ id, workspaceId, title: id, runner: "claude", cwd: dir, scope: [dir], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: at, createdAt: at, updatedAt: at });
   const stopOn = (taskId: string, workspaceId: string, key: string) => db.appendEvent(taskId, { t: "stop.record", stop: { id: `${taskId}/overlap`, work: { workspaceId, issue: null, taskId }, op: "overlap", target: "", reason: "depends", evidence: "", safety: "unknown", conditions: [{ key, value: "open", met: false }], answer: null, actions: [], state: "waiting", at } });
   task("t_app", WS.id);
   stopOn("t_app", WS.id, "pr#40");
