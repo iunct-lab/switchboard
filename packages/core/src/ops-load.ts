@@ -327,3 +327,21 @@ export function opsLoad(db: Db, days: number, opts: { now?: number; taskId?: str
   }
   return { available: opts.available, days, hours: [...hours.values()], groups };
 }
+
+/** How far back the largest Task RSS is taken from when a start is judged against the free memory (#1141). */
+const HEADROOM_WINDOW_MS = 24 * 3_600_000;
+
+/**
+ * The unit's free memory (`memory.max` − `memory.current`) and the largest RSS a Task's processes reached together in the last day
+ * (the recorded `owner: "task"` groups of one Task in one sample, summed), for the start check of TaskManager (#1141). null when the cgroup cannot be read, has no
+ * limit, or nothing is recorded yet: then only the count limits.
+ */
+export function memoryHeadroom(db: Db, opts: { now?: number; cgRoot?: string; procRoot?: string } = {}): { free: number; need: number } | null {
+  const cg = readCgroup(opts.cgRoot, opts.procRoot);
+  if (!cg || cg.reading.memMax === null) return null;
+  // a Task's groups (runner, tests, …) are summed per sample: the largest one Task took at once
+  const row = db.sqlite
+    .query("SELECT MAX(rss) AS need FROM (SELECT SUM(rss) AS rss FROM ops_load_groups WHERE owner = 'task' AND ts >= ? GROUP BY ts, task_id)")
+    .get((opts.now ?? Date.now()) - HEADROOM_WINDOW_MS) as { need: number | null } | null;
+  return row?.need ? { free: cg.reading.memMax - cg.reading.memCurrent, need: row.need } : null;
+}

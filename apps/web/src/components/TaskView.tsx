@@ -8,7 +8,7 @@ import { CloudSessionNotice, CloudSourceTag, CopyButton, OriginTag, BackgroundTa
 import { Terminal } from "./Terminal.tsx";
 import { DeviceAuth } from "./DeviceAuth.tsx";
 import { Stops } from "./Stops.tsx";
-import { judgementNote, outcomeLabel } from "../attention.ts";
+import { activeLabel, judgementNote, outcomeLabel } from "../attention.ts";
 import { SINCE, taskTimes } from "../inProgress.ts";
 import { Artifacts } from "./Artifacts.tsx";
 import { artifactsLabel } from "../artifacts.ts";
@@ -20,7 +20,7 @@ import { AnswerArea } from "./Approvals.tsx";
 import { Markdown, MdViewToggle } from "./Markdown.tsx";
 import { useMdView } from "../mdView.ts";
 import { KIND_LABEL, STATE_LABEL, taskAsks } from "../asks.ts";
-import { diffRows } from "../diffView.ts";
+import { diffRows, diffTag } from "../diffView.ts";
 import { abortNote } from "../runners.ts";
 import { t } from "../i18n.ts";
 import { task as m } from "../i18n/task.ts";
@@ -266,9 +266,9 @@ export function TaskView(props: {
       });
   }, [props.task.id, diffKey, tab, cloud]);
   const judgement = judgementNote(props.task);
-  const headStatus = cloud ? (props.task.status === "running" ? t(m.cloudStarting) : t(m.cloudStatusUnchecked)) : SINCE[props.task.status];
+  const headStatus = cloud ? (props.task.status === "running" ? t(m.cloudStarting) : t(m.cloudStatusUnchecked)) : (activeLabel(props.task) ?? SINCE[props.task.status]);
   // a Cloud Task's times line does not name a state its head says is not known (#2030)
-  const times = taskTimes(props.task, Date.now(), cloud ? (props.task.status === "running" ? t(m.startingWord) : t(m.statusUncheckedWord)) : undefined);
+  const times = taskTimes(props.task, Date.now(), cloud ? (props.task.status === "running" ? t(m.startingWord) : t(m.statusUncheckedWord)) : (activeLabel(props.task) ?? undefined));
   const diffShown = useMemo(() => diffRows(diff ?? []), [diff]);
   const diffCount = new Set(diffShown.files.filter((f) => f.stat !== "").map((f) => f.path)).size;
 
@@ -366,7 +366,7 @@ export function TaskView(props: {
             <div key={`${f.source}:${f.path}`} className="diff-file">
               <button className="row link" onClick={() => setOpenFile(openFile === f.path ? null : f.path)} title={f.path}>
                 <span className="t mono">{f.rel}</span>
-                <span className="tag">{f.source === "staging" ? t(m.staging) : t(m.worktree)}</span>
+                <span className="tag">{diffTag(f)}</span>
                 <span className="m num">{f.stat}</span>
               </button>
               <span className="editor-links">

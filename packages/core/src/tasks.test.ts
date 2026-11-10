@@ -4,11 +4,11 @@ import { Database } from "bun:sqlite";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import type { AgentEvent, RunnerAdapter, RunnerSession, Task } from "@switchboard/protocol";
 import { abortOrphanedTasks, Db } from "./db.ts";
 import { STOP_NOTE } from "./evals.ts";
-import { TaskManager, type TurnEnd } from "./tasks.ts";
+import { kitPath, TaskManager, type TurnEnd } from "./tasks.ts";
 
 /**
  * A lingering runner like `claude -p --input-format stream-json`: the first turn ends, the process stays, and the test
@@ -440,5 +440,12 @@ describe("OPS_KIT_REVIEW_RUNNER (#4024)", () => {
 
   test("OPS_KIT_REVIEW_RUNNER is other without the setting", async () => {
     expect((await startedEnv())?.OPS_KIT_REVIEW_RUNNER).toBe("other");
+  });
+});
+
+describe("kitPath", () => {
+  test("kitPath puts the kit's bin first and bun's folder last; without the meta workspace only PATH and bun's folder", () => {
+    expect(kitPath("/m", "/a:/b")).toBe(["/m/ops-kit/bin", "/a:/b", dirname(process.execPath)].join(delimiter));
+    expect(kitPath(null, "/a:/b")).toBe(["/a:/b", dirname(process.execPath)].join(delimiter));
   });
 });

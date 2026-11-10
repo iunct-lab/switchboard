@@ -254,6 +254,8 @@ export const Task = z.object({
    * goes back to when the try is refused. null = no try planned.
    */
   resumePlannedAt: z.number().nullable(),
+  /** When the Task entered the wait for a free run slot (#1141); null = not waiting. Waiting is `status: "idle"` + this, not a new status. */
+  queuedAt: z.number().nullable(),
   /**
    * Shadow run (#99): id of the primary task this one mirrors. A shadow task is a normal task (own transcript, diff,
    * ledger, approvals) created with the primary's cwd / scope / title / prompt on another runner; follow-up turns
@@ -849,6 +851,8 @@ export const Settings = z.object({
   autoStart: AutoStartSettings.prefault({}),
   /** Main reviewer of a PR (#4024); Tasks read it as OPS_KIT_REVIEW_RUNNER at their start. */
   reviewRunner: ReviewRunnerChoice.default("other"),
+  /** How many local Tasks the daemon lets be running / waiting at once; the rest wait for a free slot (#1141). */
+  maxRunners: z.number().int().min(1).max(8).default(3),
   /** The rubric judge (#1219). */
   evals: EvalsSettings.prefault({}),
   /** Name a task after its first turn (#491). */
@@ -949,6 +953,7 @@ export const SettingsPatch = z.object({
     .partial()
     .optional(),
   reviewRunner: ReviewRunnerChoice.optional(),
+  maxRunners: z.number().int().min(1).max(8).optional(),
   /** `{ evals: { judge: { enabled: false } } }` switches the rubric judge off (#1219). */
   evals: z.object({ judge: z.object({ enabled: z.boolean() }).partial().optional() }).partial().optional(),
   titles: z.object({ auto: z.boolean() }).partial().optional(),
@@ -1262,12 +1267,21 @@ export const TaskDiffFile = z.object({
   diff: z.string(),
   /**
    * staging = proposed through Workspace MCP and not yet applied · worktree = the repository as changed by the runner ·
-   * removed = the Task wrote under `path`, which no longer exists; `rel` is the same path, `stat` and `diff` are empty
+   * removed = the Task wrote under `path`, which no longer exists; `rel` is the same path, `stat` and `diff` are empty ·
+   * snapshot = a worktree row copied while the place still existed (#3833), returned under its `removed` row
    */
-  source: z.enum(["staging", "worktree", "removed"]),
+  source: z.enum(["staging", "worktree", "removed", "snapshot"]),
   stagedId: z.string().optional(),
+  /** The top of the working tree a worktree or snapshot row came from. */
+  root: z.string().optional(),
+  /** When a snapshot row was last seen live (ms). */
+  at: z.number().optional(),
 });
 export type TaskDiffFile = z.infer<typeof TaskDiffFile>;
+
+/** The copy of a Task's diff kept in the DB (`task_diffs`, #3833): worktree rows, so a removed worktree can still be shown. */
+export const TaskDiffSnapshot = z.object({ at: z.number(), files: z.array(TaskDiffFile) });
+export type TaskDiffSnapshot = z.infer<typeof TaskDiffSnapshot>;
 
 /** Self-dev (#18): results of the repository's checks after a task on the meta workspace. */
 export const CheckResult = z.object({
@@ -1346,6 +1360,8 @@ export const Queue = z.object({
   waiting: z.array(z.object({ taskId: z.string(), title: z.string(), runner: RunnerId, ask: z.string(), since: z.number() })),
   staged: z.array(z.object({ taskId: z.string(), title: z.string(), pending: z.number() })),
   scheduled: z.array(z.object({ taskId: z.string(), title: z.string(), runner: RunnerId, status: z.string(), scheduleId: z.string(), scheduleTitle: z.string(), costUsd: z.number(), createdAt: z.number() })),
+  /** Tasks waiting for a free run slot (#1141), oldest first; `since` = the Task's `queuedAt`, `position` counts from 1. */
+  queued: z.array(z.object({ taskId: z.string(), title: z.string(), runner: RunnerId, since: z.number(), position: z.number().int() })),
 });
 export type Queue = z.infer<typeof Queue>;
 
@@ -1902,10 +1918,14 @@ export const BacklogItem = z.object({
   /**
    * The acceptance criteria of an In progress / In review PBI still waiting on the user's own check (#523): unchecked lines
    * of `## 到達点 / 受け入れ条件` outside fences with `（利用者確認: …）`. `n` = the line's number among all the section's
-   * checkbox lines (checked ones too, from 1); `text` = the line after `- [ ] `. Empty for the other items.
+   * checkbox lines (checked ones too, from 1); `text` = the line after `- [ ] `. Empty for the other items. A line naming
+   * decisions (`（利用者確認: 回答で確かめる #n — …）`) is not here once every named Issue is stored: their cards ask.
    */
   confirmations: z.array(z.object({ n: z.number(), text: z.string() })),
-  /** An in-progress PBI whose Tasks are all closed and with no confirmation left (#523): its row offers 閉じる. */
+  /**
+   * An in-progress PBI whose Tasks are all closed and with no confirmation left (#523): its row offers 閉じる. Not while a
+   * decision a confirmation line names is still labelled `needs-decision`.
+   */
   closable: z.boolean(),
   /** Labelled `on-hold` (#2930): backlog-next leaves it in every slot and stage; only that firing looks at this, its row's buttons do not. */
   onHold: z.boolean(),

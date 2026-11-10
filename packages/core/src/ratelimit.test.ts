@@ -203,6 +203,54 @@ describe("rate limit: RateLimitResumer (#102)", () => {
     expect(await resumer.tick()).toEqual([]); // nothing left
   });
 
+  test("no free run slot (#1141): a due tick sends nothing and keeps resumeAt (one log line); once another Task ends, the next tick sends, once", async () => {
+    const logs: string[] = [];
+    tasks = new TaskManager(db, new Map([["claude", fakeAdapter([LIMIT_TURN, OK_TURN], starts, sends, ctl)]]), (m) => broadcasts.push(m), { idleMs: -1, maxRunners: () => 1 });
+    resumer = new RateLimitResumer(db, tasks, { enabled: () => enabled, now: () => now, log: (m) => logs.push(m) });
+    resumer.start(3_600_000);
+    const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
+    await settle();
+    const due = db.getTask(t.id)!.resumeAt!;
+    expect(db.getTask(t.id)!.status).toBe("error");
+    // another Task takes the only slot
+    const other = tasks.create({ cwd: home, title: "other", prompt: "hold", runner: "claude" });
+    await settle(); // the fake ends its turn at once; the slot is held by the status below
+    db.updateTask(other.id, { status: "running" });
+    now = due + 1;
+    expect(await resumer.tick()).toEqual([]);
+    expect(await resumer.tick()).toEqual([]);
+    expect(sends).toEqual([]);
+    expect(db.getTask(t.id)!.resumeAt).toBe(due);
+    expect(logs.filter((l) => l.includes("実行枠が空いていない"))).toHaveLength(2); // one line per tick
+    expect(statuses(t.id).some((x) => x.includes("実行枠"))).toBe(false); // not a failure: no stop recorded
+    db.updateTask(other.id, { status: "done" });
+    expect(await resumer.tick()).toEqual([t.id]);
+    await settle();
+    expect(sends).toEqual([RESUME_PROMPT]);
+  });
+
+  test("no free run slot (#1141): two Tasks due and one slot — a tick sends one, the other waits for the next tick", async () => {
+    tasks = new TaskManager(db, new Map([["claude", fakeAdapter([LIMIT_TURN, LIMIT_TURN, [], OK_TURN], starts, sends, ctl)]]), (m) => broadcasts.push(m), { idleMs: -1, maxRunners: () => 1 });
+    resumer = new RateLimitResumer(db, tasks, { enabled: () => enabled, now: () => now, log: () => undefined });
+    resumer.start(3_600_000);
+    const a = tasks.create({ cwd: home, title: "a", prompt: "go", runner: "claude" });
+    await settle();
+    const b = tasks.create({ cwd: home, title: "b", prompt: "go", runner: "claude" });
+    await settle();
+    now = Math.max(db.getTask(a.id)!.resumeAt!, db.getTask(b.id)!.resumeAt!) + 1;
+    const first = await resumer.tick(); // the first resumed turn ([] — no end) holds the only slot
+    expect(first).toHaveLength(1);
+    expect(sends).toEqual([RESUME_PROMPT]);
+    const rest = [a.id, b.id].filter((id) => id !== first[0]);
+    expect(db.getTask(rest[0]!)!.resumeAt).not.toBeNull();
+    await settle();
+    expect(await resumer.tick()).toEqual([]); // the first one's turn is still running
+    db.updateTask(first[0]!, { status: "done" }); // its turn ends: the slot is free again
+    expect(await resumer.tick()).toEqual(rest);
+    await settle();
+    expect(sends).toEqual([RESUME_PROMPT, RESUME_PROMPT]);
+  });
+
   test("lifted early: a report under 100% after the stop resumes on the next tick; a report from before the stop does not", async () => {
     boot([LIMIT_TURN, OK_TURN]);
     const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
@@ -751,7 +799,7 @@ describe("a turn the daemon's stop cut continues on the next start (interrupted.
 
   test("a daemon that died without its shutdown: the next start closes the orphan and plans it the same way; no session, no plan", () => {
     const now = Date.now();
-    const mk = (id: string, sess: string | null) => db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: home, scope: [home], status: "running", runnerSessionId: sess, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
+    const mk = (id: string, sess: string | null) => db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: home, scope: [home], status: "running", runnerSessionId: sess, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
     mk("task_a", "sess-a");
     mk("task_b", null);
     expect(abortOrphanedTasks(db, now)).toEqual(["task_a", "task_b"]);

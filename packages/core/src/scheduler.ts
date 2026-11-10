@@ -149,8 +149,8 @@ export class Scheduler {
     // this must move behind a per-schedule lock (or a DB-level compare-and-swap on lastTaskId) instead.
     // backlog-next decides per workspace and slot instead (#561): its last Task running does not hold the others.
     const prev = (s.action === "prompt" || claudeOnly(s.action)) && s.lastTaskId ? this.db.getTask(s.lastTaskId) : null;
-    if (prev && isWorking(prev, "slot")) {
-      this.note(`${s.title}: skipped (${reason}); previous run ${prev.id} is still ${prev.status}`);
+    if (prev && (isWorking(prev, "slot") || prev.queuedAt !== null)) {
+      this.note(`${s.title}: skipped (${reason}); previous run ${prev.id} is still ${prev.queuedAt !== null ? "queued" : prev.status}`);
       return null;
     }
     if (s.action === "backlog-next") return this.runBacklogNext(s.id, s.title, s.cron, reason);
@@ -407,6 +407,7 @@ export class Scheduler {
     const since = this.now() - 36 * 3600 * 1000;
     const schedules = new Map(this.db.listSchedules().map((s) => [s.id, s.title]));
     const scheduled: Queue["scheduled"] = this.db.scheduledTasks(since).map((t) => ({ taskId: t.id, title: t.title, runner: t.runner, status: t.status, scheduleId: t.scheduleId!, scheduleTitle: schedules.get(t.scheduleId!) ?? "(deleted)", costUsd: this.db.taskCost(t.id).costUsd, createdAt: t.createdAt }));
-    return { waiting, staged, scheduled };
+    const queued: Queue["queued"] = this.db.listQueuedTasks().map((t, i) => ({ taskId: t.id, title: t.title, runner: t.runner, since: t.queuedAt!, position: i + 1 }));
+    return { waiting, staged, scheduled, queued };
   }
 }

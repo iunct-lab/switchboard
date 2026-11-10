@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import type { Task, TaskOutcome, TaskStatus } from "@switchboard/protocol";
-import { attentionList, judgementNote, needsAttention, outcomeDotClass, outcomeLabel, terminalMark } from "./attention.ts";
+import { activeLabel, attentionList, isActive, judgementNote, needsAttention, outcomeDotClass, outcomeLabel, terminalMark } from "./attention.ts";
 
-const task = (id: string, status: TaskStatus, outcome: TaskOutcome, reviewedAt: number | null = null, updatedAt = 1): Task => ({ id, workspaceId: null, title: id, runner: "claude", cwd: "/w", scope: ["/w"], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome, reviewedAt, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 0, createdAt: 0, updatedAt });
+const task = (id: string, status: TaskStatus, outcome: TaskOutcome, reviewedAt: number | null = null, updatedAt = 1): Task => ({ id, workspaceId: null, title: id, runner: "claude", cwd: "/w", scope: ["/w"], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome, reviewedAt, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 0, createdAt: 0, updatedAt, queuedAt: null });
 
 test("needsAttention: a stopped task not reviewed yet that did not come to 完了; never a running or idle one", () => {
   for (const status of ["waiting", "done", "error", "aborted"] as const) {
@@ -47,4 +47,18 @@ test("terminalMark: working / waiting show a mark, done and none do not", () => 
   expect(terminalMark("waiting")).toEqual({ text: "端末: 返事待ち", className: "m term-wait" });
   expect(terminalMark("done")).toBeNull();
   expect(terminalMark(undefined)).toBeNull();
+});
+
+test("activeLabel: running / waiting / background / an idle Task in the run-slot queue; nothing else", () => {
+  const q = (status: TaskStatus, queuedAt: number | null) => ({ ...task("t", status, "unknown"), queuedAt });
+  expect(activeLabel(q("running", null))).toBe("実行中");
+  expect(activeLabel(q("waiting", null))).toBe("承認待ち");
+  expect(activeLabel(q("background", null))).toBe("裏で実行中");
+  expect(activeLabel(q("idle", 5))).toBe("実行枠待ち");
+  for (const status of ["idle", "done", "error", "aborted"] as const) {
+    expect(activeLabel(q(status, null)), status).toBeNull();
+    expect(isActive(q(status, null)), status).toBe(false);
+  }
+  expect(isActive(q("idle", 5))).toBe(true);
+  expect(isActive(q("running", null))).toBe(true);
 });

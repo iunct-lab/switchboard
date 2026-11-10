@@ -247,6 +247,7 @@ export const backlog = msgs({
   budgetNonNegative: { ja: "予算は0以上の数値で入力してください: \"{budget}\"", en: "Enter the budget as a number of 0 or more: \"{budget}\"" },
   queueHeading: { ja: "承認待ち・キュー（朝まとめて）", en: "Waiting for approval · queue (all at once in the morning)" },
   noApprovals: { ja: "承認待ちはありません", en: "Nothing waiting for approval" },
+  queuedPosition: { ja: "実行枠待ち {n} 番目", en: "Waiting for a run slot: #{n}" },
   stagedWrites: { ja: "{n} 件の未適用の書き込み", en: "Writes not applied: {n}" },
   nightlyResults: { ja: "夜間の実行結果（36h）", en: "Nightly results (36h)" },
   nightlyMore: { ja: "残り {n} 件を表示", en: "Show {n} more" },

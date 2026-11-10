@@ -22,7 +22,10 @@ test.skipIf(ls.status !== 0)("docs: this repository's instructions and Issue tem
   const skills = listed.filter((file) => file.endsWith("/SKILL.md"));
   expect(skills).toContain(".claude/skills/flow-loop/SKILL.md");
   const templates = listed.filter((file) => file.startsWith(".github/ISSUE_TEMPLATE/") && file.endsWith(".yml"));
-  expect(templates).toContain(".github/ISSUE_TEMPLATE/task.yml");
+  // The public copy replaces the templates with the kit's own set (config.yml, request.yml), so task.yml is required only
+  // where the private rules file is (the same tell as privateRules above); every template that exists is checked either way.
+  expect(templates.length).toBeGreaterThan(0);
+  if (existsSync(join(root, privateRules))) expect(templates).toContain(".github/ISSUE_TEMPLATE/task.yml");
   const files = ["CLAUDE.md", "docs/merge-gate.md", ...(existsSync(join(root, privateRules)) ? [privateRules] : []), ...skills, ...templates];
   const hits = files.flatMap((file) =>
     read(file)

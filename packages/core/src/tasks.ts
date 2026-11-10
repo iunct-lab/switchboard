@@ -207,6 +207,15 @@ export interface TaskManagerOptions {
   maxStopResumes?: () => number;
   /** The MCP servers a Task's runner gets (#2090, `mcp.yaml` `servers`). Absent = none. */
   mcpServers?: (task: Task) => Record<string, McpServerConfig> | undefined;
+  /** How many local Tasks may run or wait for an answer at once (#1141, `settings.maxRunners`). Absent = no limit. */
+  maxRunners?: () => number;
+  /** The unit's free memory and what the largest recent Task took (#1141): free < need holds a new start back. null / absent = judged by the count alone. */
+  memoryHeadroom?: () => { free: number; need: number } | null;
+  /**
+   * true = never start the waiting Tasks (#1141): a candidate daemon (`SWITCHBOARD_CANDIDATE`) runs on a copy of the database,
+   * whose queue is the live daemon's; starting it there would run those Tasks twice, with their real runner sessions.
+   */
+  holdQueue?: boolean;
 }
 
 /** One word for the shell: in single quotes, a quote inside written as '\''. */
@@ -240,6 +249,16 @@ export function taskAllowRules(metaPath: string, cwd: string): string[] {
 const endsReply = (ev: AgentEvent) => ev.t === "tool.call" || ev.t === "permission.ask" || ev.t === "question.ask" || ev.t === "session.end";
 
 /**
+ * PATH for a Task's runner and for the jobs the daemon starts for it: the kit's bin first (the check in front of `gh`,
+ * #661), then the daemon's own PATH, and the folder of the bun this daemon runs on last (a daemon started by bun's full
+ * path has none in its PATH; last, so that it does not come before the user's own tools). Without the meta workspace
+ * there is no kit bin.
+ */
+export function kitPath(metaPath: string | null, base = process.env.PATH ?? ""): string {
+  return [...(metaPath ? [join(metaPath, "ops-kit/bin")] : []), base, dirname(process.execPath)].join(delimiter);
+}
+
+/**
  * TaskManager owns the lifecycle: create → start adapter → persist/broadcast events → status transitions → ledger.
  * It never decides anything on the agent's behalf: permissions wait for the user, except where the user wrote an
  * explicit allow rule in Knowledge, which is applied and recorded as by: rule (System ENABLES, Agent DECIDES, User APPROVES).
@@ -270,6 +289,11 @@ export class TaskManager {
   private reviewRunner: TaskManagerOptions["reviewRunner"];
   private mcpServers: TaskManagerOptions["mcpServers"];
   private bedrock: TaskManagerOptions["bedrock"];
+  private maxRunners: () => number;
+  private memoryHeadroom: TaskManagerOptions["memoryHeadroom"];
+  private holdQueue: boolean;
+  private draining = false;
+  private stopped = false;
 
   private endListeners = new Set<(taskId: string, task: Task) => void>();
   private backgroundEmptyListeners = new Set<(taskId: string) => void>();
@@ -305,6 +329,81 @@ export class TaskManager {
     this.reviewRunner = opts.reviewRunner;
     this.mcpServers = opts.mcpServers;
     this.bedrock = opts.bedrock;
+    this.maxRunners = opts.maxRunners ?? (() => Infinity);
+    this.memoryHeadroom = opts.memoryHeadroom;
+    this.holdQueue = opts.holdQueue ?? false;
+  }
+
+  /** Local Tasks with a turn in progress: the same count as the busy list and the backlog's stage count (running / waiting). */
+  private occupied(): number {
+    return [...this.db.listTasksByStatus("running"), ...this.db.listTasksByStatus("waiting")].filter((t) => t.executionMode === "local").length;
+  }
+
+  /**
+   * Why a new start has to wait (null = it may start). The count is the limit; the memory is read only while something
+   * runs — with nothing running no event would ever call drain() again, so a first Task is never held for memory.
+   */
+  private slotBlock(): { wait: string; refuse: string; detail: string } | null {
+    const occupied = this.occupied();
+    const max = this.maxRunners();
+    if (occupied >= max) return { wait: "実行枠が埋まっているため待機", refuse: "実行枠が埋まっています", detail: `実行中 ${occupied} / 上限 ${max}` };
+    const mem = occupied > 0 ? this.memoryHeadroom?.() : null;
+    if (mem && mem.free < mem.need) return { wait: "空きメモリ不足のため待機", refuse: "空きメモリが足りません", detail: `空き ${Math.floor(mem.free / 1048576)} MB / 必要 ${Math.ceil(mem.need / 1048576)} MB` };
+    return null;
+  }
+
+  /** How many more Tasks may start now (0 while the memory is short too). */
+  freeSlots(): number {
+    return this.slotBlock() === null ? Math.max(0, this.maxRunners() - this.occupied()) : 0;
+  }
+
+  /**
+   * A first turn that starts a process, or waits for a free slot (#1141): the row stays idle with `queued_at` and the
+   * prompt, so a restart keeps the wait. Cloud Tasks start no local process and are not counted.
+   */
+  private admit(task: Task, prompt: string, atts: Attachment[]): "started" | "queued" {
+    const block = task.executionMode === "local" ? this.slotBlock() : null;
+    if (block === null) {
+      this.startOrFail(task, prompt, atts);
+      return "started";
+    }
+    this.db.setQueued(task.id, prompt, Date.now());
+    const position = this.db.listQueuedTasks().findIndex((t) => t.id === task.id) + 1;
+    this.record(task.id, { t: "status", text: `${block.wait}（${block.detail}、待ち ${position} 番目）` });
+    this.broadcast({ type: "task.updated", task: this.mustGet(task.id) });
+    return "queued";
+  }
+
+  /**
+   * Start the waiting Tasks, oldest first, while a slot is free. Called wherever a Task leaves running / waiting, when
+   * the limit changes and at the daemon's start; there is no timer. A process left open after its turn (nothing in
+   * flight) is closed first so that the processes do not outnumber the limit.
+   */
+  drain(): void {
+    if (this.draining || this.stopped || this.holdQueue) return;
+    this.draining = true;
+    try {
+      while (this.freeSlots() > 0) {
+        const next = this.db.listQueuedTasks()[0];
+        if (!next) break;
+        const prompt = this.db.takeQueued(next.id);
+        if (prompt === null) continue;
+        for (const [id] of this.live) {
+          if (this.live.size < this.maxRunners()) break;
+          const st = this.db.getTask(id)?.status;
+          if (st && !IN_FLIGHT.has(st)) void this.release(id); // takes the entry out of `live` at once
+        }
+        this.record(next.id, { t: "status", text: "実行枠が空いたので開始" });
+        const atts = this.attachments?.listForTask(next.id) ?? [];
+        try {
+          this.startOrFail(this.mustGet(next.id), prompt, atts);
+        } catch {
+          // startOrFail wrote the error on the row; the next one may still start
+        }
+      }
+    } finally {
+      this.draining = false;
+    }
   }
 
   /**
@@ -724,7 +823,7 @@ export class TaskManager {
       effort,
       subagentEffort: cloud ? null : this.subagentEffort?.(input.runner) ?? null,
       origin: "switchboard",
-      resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null,
+      resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null,
       shadowOf: null,
       shadowStopped: false,
       workspaceReason: input.workspaceReason ?? null,
@@ -745,7 +844,7 @@ export class TaskManager {
     afterInsert?.(task);
     this.recordAttachments(task.id, atts);
     const prompt = withAttachments(input.prompt, atts);
-    this.startOrFail(task, prompt, atts);
+    this.admit(task, prompt, atts);
     this.startShadow(task, input, prompt, atts);
     return this.db.getTask(task.id) ?? task;
   }
@@ -843,7 +942,7 @@ export class TaskManager {
       effort: null, // another runner: its own list, so the CLI default (#833)
       subagentEffort: this.subagentEffort?.(runner) ?? null, // the shadow runner's own setting (a shadow is always local)
       origin: "switchboard",
-      resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null,
+      resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null,
       shadowOf: primary.id,
       shadowStopped: false,
       workspaceReason: primary.workspaceReason,
@@ -862,7 +961,10 @@ export class TaskManager {
     this.db.insertTask(shadow);
     this.recordAttachments(shadow.id, atts);
     try {
-      this.startSession(shadow, prompt, undefined, undefined, atts);
+      if (this.admit(shadow, prompt, atts) === "queued") {
+        this.record(primary.id, { t: "status", text: `並走（${runner}）は実行枠待ちです。枠が空くと始まります` });
+        return;
+      }
     } catch (e) {
       const msg = String((e as Error).message ?? e);
       this.record(shadow.id, { t: "error", message: msg });
@@ -964,7 +1066,17 @@ export class TaskManager {
       if (IN_FLIGHT.has(task.status)) throw new ResumeSupersededError(`the task is ${task.status}`);
     }
     if (this.isOverBudget(taskId)) throw new Error(`budget exceeded ($${task.budgetUsd}); raise the budget to continue`);
+    // the run slots (#1141), before the attachments move: a Task still in the queue starts with its first prompt, from
+    // drain() (a reply now would start it without that); a turn that needs a new process waits for a free slot
+    if (task.queuedAt !== null) throw new Error("実行枠待ちの Task です。始まるまで待つか、中断してください");
+    if (!this.live.has(taskId)) this.refuseWithoutSlot(task);
     return task;
+  }
+
+  /** Throws when a new process for `task` would exceed the run slots (#1141). The API answers it with 409. */
+  private refuseWithoutSlot(task: Task): void {
+    const block = task.executionMode === "local" ? this.slotBlock() : null;
+    if (block !== null) throw new Error(`${block.refuse}（${block.detail}）。空くまで待つか、設定の上限を上げてください`);
   }
 
   /**
@@ -1001,6 +1113,7 @@ export class TaskManager {
       this.record(taskId, { t: "status", text: `前のセッション（${resume}）の記録がこの機械に無いため、これまでのやり取りを渡して新しいセッションで続けます` });
       resume = undefined;
     }
+    this.refuseWithoutSlot(task); // again: preflight saw a live process that a release above may have closed
     this.startOrFail(this.withResolvedMode(task), text, atts, resume, preamble);
     return this.mustGet(taskId);
   }
@@ -1083,6 +1196,11 @@ export class TaskManager {
       this.record(taskId, { t: "status", text: "開始プロセスを閉じました。Cloud 作業の停止は確認していません。公式 Web で操作してください。" });
       return this.updateCloudState(taskId);
     }
+    // A Task still waiting for a slot (#1141) has no process: it leaves the wait and ends here
+    if (!live && task.queuedAt !== null && this.db.takeQueued(taskId) !== null) {
+      this.record(taskId, { t: "status", text: "実行枠待ちを取り消し" });
+      task = this.mustGet(taskId);
+    }
     // 中断 also means "do not come back to this on its own" (#102).
     // 中断 forgets any planned resume — a plan still waiting for its GitHub budget read too (#550, onPlanForgotten);
     // a finished task with no plan is not rewritten (its updatedAt is what the backlog reads)
@@ -1118,7 +1236,9 @@ export class TaskManager {
       }
       await this.track(taskId, live.session.abort());
     }
-    return TERMINAL.has(task.status) ? task : this.setStatus(taskId, "aborted");
+    const ended = TERMINAL.has(task.status) ? task : this.setStatus(taskId, "aborted");
+    this.drain();
+    return ended;
   }
 
   /**
@@ -1127,6 +1247,7 @@ export class TaskManager {
    * Returns the ids of those tasks.
    */
   async shutdown(): Promise<string[]> {
+    this.stopped = true; // the turns cut below free their slots; the next daemon starts what waits (#1141), not this one
     const now = Date.now();
     const cut: string[] = [];
     await Promise.all(
@@ -1211,10 +1332,8 @@ export class TaskManager {
         this.record(task.id, { t: "status", text: `scripts/setup を調べられませんでした: ${(e as Error).message ?? e}` });
       }
     }
-    // The check in front of `gh` (#661, docs/design/secret-guard.md): the kit's bin first in the runner's PATH, and
-    // the folder of the bun this daemon runs on last (the check runs on bun; a daemon started by bun's full path has
-    // none in its PATH; last, so that it does not come before the user's own tools)
-    const path = meta ? { PATH: [join(meta.path, "ops-kit/bin"), process.env.PATH ?? "", dirname(process.execPath)].join(delimiter) } : undefined;
+    // The check in front of `gh` (#661, docs/design/secret-guard.md): the order is `kitPath`'s
+    const path = meta ? { PATH: kitPath(meta.path) } : undefined;
     const deviceAuth = this.deviceAuthEnv?.(task.id);
     // #1397: everything the task starts, detached or not, carries this; onTaskEnd stops what still does. The kit's
     // `ops-kit heavy` names the Task of a job holding or waiting for a slot by OPS_KIT_TASK_ID (the kit names no app).
@@ -1603,6 +1722,8 @@ export class TaskManager {
     if (updated && (updated.status !== task.status || updated.runnerSessionId !== task.runnerSessionId)) {
       this.broadcast({ type: "task.updated", task: updated });
     }
+    // a Task that left running / waiting frees a slot (#1141)
+    if (updated && updated.status !== task.status && !IN_FLIGHT.has(updated.status)) this.drain();
   }
 
   /**
@@ -1659,7 +1780,10 @@ export class TaskManager {
     // a move the table lacks is a mistake of whoever asked (an API call on a finished task), not something to store
     if (!t) throw new InvalidTaskTransitionError(taskId, before, status);
     this.broadcast({ type: "task.updated", task: t });
-    if (TERMINAL.has(status) && !TERMINAL.has(before)) this.maybeEnded(taskId);
+    if (TERMINAL.has(status) && !TERMINAL.has(before)) {
+      this.maybeEnded(taskId);
+      this.drain();
+    }
     return t;
   }
 

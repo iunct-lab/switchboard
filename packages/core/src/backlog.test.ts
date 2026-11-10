@@ -18,7 +18,7 @@ import { fakeGh as fakeKitGh } from "../../../ops-kit/src/gh.ts";
 import { ghBoard, overlap, storedMaterial } from "../../../scripts/parallel-guard.ts";
 import { fmtTime } from "./ratelimit.ts";
 import { delegatedNote } from "./evals.ts";
-import { answerStoredDecision, BacklogEditError, checkFieldTypes, buildDirectPrompt, buildStartPrompt, subagentModelAlias, localBacklogSource, canStartStoredBacklog, screenAnswer, confirmationsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, onHoldIn, chooseProcess, flowHeldIn, flowHeldLine, flowRunning, flowStopped, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld, storedIssueHeads, readStoredIssue, editStoredIssue } from "./backlog.ts";
+import { answerStoredDecision, BacklogEditError, checkFieldTypes, buildDirectPrompt, buildStartPrompt, subagentModelAlias, localBacklogSource, canStartStoredBacklog, screenAnswer, confirmationsOf, confirmDecisionsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, onHoldIn, chooseProcess, flowHeldIn, flowHeldLine, flowRunning, flowStopped, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld, storedIssueHeads, readStoredIssue, editStoredIssue } from "./backlog.ts";
 
 // the writer of the waits (#817), read at run time: scripts/ is not type-checked under core's settings
 const guard = "../../../scripts/parallel-guard.ts";
@@ -1042,7 +1042,7 @@ describe("backlog waiting", () => {
     });
     const base = await boot(fake.gh);
     const now = Date.now();
-    core!.db.insertTask({ id: "tsk_owner305", workspaceId: metaId(), title: "#305 実装: PBI: 実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status: "error", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#305 実装: PBI: 実装中の PBI"), statusAt: now, createdAt: now, updatedAt: now });
+    core!.db.insertTask({ id: "tsk_owner305", workspaceId: metaId(), title: "#305 実装: PBI: 実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status: "error", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#305 実装: PBI: 実装中の PBI"), statusAt: now, createdAt: now, updatedAt: now });
     const owner = { number: 305, title: "PBI: 実装中の PBI" };
     expect((await waitsOfItem(base, 307)).waits).toEqual([wait(778, "pr", true, { pbi: owner }), wait(30501, "issue", true, { pbi: owner })]);
     expect(await waitsOfItem(base, 305)).toMatchObject({ lastTask: { id: "tsk_owner305", status: "error" }, activeTaskId: null });
@@ -1120,6 +1120,42 @@ test("GET /api/backlog: an in-progress PBI carries its confirmations; closable o
     node.body = saved.replaceAll("- [ ] 2.", "- [x] 2.").replaceAll("- [ ] 4.", "- [x] 4.");
     const again = (await refreshed(base)).items.find((i) => i.number === 308)!;
     expect(again).toMatchObject({ confirmations: [], closable: true });
+  } finally {
+    node.body = saved;
+  }
+});
+
+test("confirmDecisionsOf: the numbers right after 回答で確かめる in the 利用者確認 parentheses; none in inline code or without the form", () => {
+  expect(confirmDecisionsOf("1. 要る（利用者確認: 回答で確かめる #12 — 方針）")).toEqual([12]);
+  expect(confirmDecisionsOf("1. 要る（利用者確認: 回答で確かめる #12, #34 — 方針）")).toEqual([12, 34]);
+  expect(confirmDecisionsOf("1. 要る（利用者確認: 回答で確かめる #12、#34、#12 — 方針）")).toEqual([12, 34]);
+  expect(confirmDecisionsOf("1. 形だけ `（利用者確認: 回答で確かめる #12 — 方針）` を書く（利用者確認: 画面で見る）")).toEqual([]);
+  expect(confirmDecisionsOf("1. 画面（利用者確認: 画面で見る #12）")).toEqual([]);
+  expect(confirmDecisionsOf("1. 画面（利用者確認: 回答で確かめる — 番号なし）")).toEqual([]);
+});
+
+test("GET /api/backlog: confirmations naming decisions are not the user's; closable follows their needs-decision labels", async () => {
+  const pbi = pages[0] as { data: { repository: { issues: { nodes: Array<{ number: number; body: string }> } } } };
+  const node = pbi.data.repository.issues.nodes.find((n) => n.number === 308)!;
+  const saved = node.body;
+  const named = (ns: string) => saved.replace(/^- \[ \] 2\..*$/m, `- [ ] 2. 方針（利用者確認: 回答で確かめる ${ns} — 方針）`).replace(/^- \[ \] 4\..*$/m, "- [x] 4. 済み");
+  try {
+    const base = await boot(fakeGh().gh);
+    // (a) every named decision is stored and none is needs-decision (#304, #305)
+    node.body = named("#304, #305");
+    const a = (await refreshed(base)).items.find((i) => i.number === 308)!;
+    expect(a).toMatchObject({ confirmations: [], closable: true });
+    // (b) one is still labelled needs-decision (#306)
+    node.body = named("#304, #306");
+    const b = (await refreshed(base)).items.find((i) => i.number === 308)!;
+    expect(b).toMatchObject({ confirmations: [], closable: false });
+    // (c) a number that is not stored keeps its line
+    node.body = named("#9999");
+    const c = (await refreshed(base)).items.find((i) => i.number === 308)!;
+    expect(c).toMatchObject({ confirmations: [{ n: 2, text: "2. 方針（利用者確認: 回答で確かめる #9999 — 方針）" }], closable: false });
+    // backlog-next closes (a) and starts nothing for (b)
+    expect(pickNext([a], "implement")).toMatchObject({ item: { number: 308 }, action: "close" });
+    expect(pickNext([b], "implement")).toBeNull();
   } finally {
     node.body = saved;
   }
@@ -2056,7 +2092,7 @@ test("pickNext answered: backlog-next starts 実装 on an in-progress PBI whose 
   const base = await boot(fake.gh, claude.adapter);
   // #305's last stage Task stopped on the question before it was answered
   const now = Date.now();
-  core!.db.insertTask({ id: "tsk_last305", workspaceId: metaId(), title: "#305 実装: PBI: 実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#305 実装: PBI: 実装中の PBI"), statusAt: now, createdAt: now, updatedAt: now });
+  core!.db.insertTask({ id: "tsk_last305", workspaceId: metaId(), title: "#305 実装: PBI: 実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#305 実装: PBI: 実装中の PBI"), statusAt: now, createdAt: now, updatedAt: now });
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
   const titles = core!.db.listTasks().map((t) => t.title);
@@ -2465,7 +2501,7 @@ test("backlog-next waiting: a 状況確認 started after the waits were written 
   const fake = waitsGh({ i307: [[releaseBody("後回し", [778]), STOPPED]] }, { w778: { __typename: "PullRequest", state: "MERGED" } });
   const base = await boot(fake.gh, holdingClaude().adapter);
   // the row's 状況を確認 only reads and reports (#853): it does not claim, and the waits stand
-  core!.db.insertTask({ id: "tsk_check", workspaceId: metaId(), title: "#307 状況確認: PBI: 実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#307 状況確認: PBI: 実装中の PBI"), statusAt: Date.parse(LATER), createdAt: Date.parse(LATER), updatedAt: Date.now() });
+  core!.db.insertTask({ id: "tsk_check", workspaceId: metaId(), title: "#307 状況確認: PBI: 実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#307 状況確認: PBI: 実装中の PBI"), statusAt: Date.parse(LATER), createdAt: Date.parse(LATER), updatedAt: Date.now() });
   expect(await waitsOfItem(base, 307)).toMatchObject({ waits: [{ number: 778, open: false }], waitsAt: STOPPED });
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
@@ -2475,7 +2511,7 @@ test("backlog-next waiting: a 状況確認 started after the waits were written 
 test("backlog-next waiting: a 状況確認 after an 実装 that made the waits old does not bring them back", async () => {
   const fake = waitsGh({ i307: [[releaseBody("後回し", [778]), STOPPED]] }, { w778: { __typename: "PullRequest", state: "MERGED" } });
   const base = await boot(fake.gh, holdingClaude().adapter);
-  const task = (id: string, title: string, at: number, status: TaskStatus) => core!.db.insertTask({ id, workspaceId: metaId(), title, runner: "claude", cwd: home!, scope: [home!], status, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage(title), statusAt: at, createdAt: at, updatedAt: Date.now() });
+  const task = (id: string, title: string, at: number, status: TaskStatus) => core!.db.insertTask({ id, workspaceId: metaId(), title, runner: "claude", cwd: home!, scope: [home!], status, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage(title), statusAt: at, createdAt: at, updatedAt: Date.now() });
   // the resumed 実装 failed before it claimed, then the row's 状況を確認 ran: the newest stage Task is the check
   task("tsk_impl", "#307 実装: PBI: 実装中の PBI", Date.parse(LATER), "error");
   task("tsk_check", "#307 状況確認: PBI: 実装中の PBI", Date.parse(LATER) + 60_000, "done");
@@ -2488,7 +2524,7 @@ test("backlog-next waiting: a 状況確認 after an 実装 that made the waits o
 test("backlog-next waiting: a stage Task started after the waits were written makes them old — a resumed 実装 that failed before claiming is not started again", async () => {
   const fake = waitsGh({ i307: [[releaseBody("後回し", [778]), STOPPED]] }, { w778: { __typename: "PullRequest", state: "MERGED" } });
   const base = await boot(fake.gh, holdingClaude().adapter);
-  const task = (id: string, at: number, status: TaskStatus) => core!.db.insertTask({ id, workspaceId: metaId(), title: "#307 実装: PBI: 実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#307 実装: PBI: 実装中の PBI"), statusAt: at, createdAt: at, updatedAt: Date.now() });
+  const task = (id: string, at: number, status: TaskStatus) => core!.db.insertTask({ id, workspaceId: metaId(), title: "#307 実装: PBI: 実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#307 実装: PBI: 実装中の PBI"), statusAt: at, createdAt: at, updatedAt: Date.now() });
   // the 実装 that wrote the release started before it: the waits stand
   task("tsk_before", Date.parse(STOPPED) - 3_600_000, "done");
   expect(await waitsOfItem(base, 307)).toMatchObject({ waits: [{ number: 778, open: false }], waitsAt: STOPPED });
@@ -2841,7 +2877,7 @@ describe("on-hold (#2930)", () => {
     // #304 (Ready) also had an 実装 finish with no update since, which alone would log it as 前回から更新が無い
     const base = await boot(onHoldGh(304, 303).gh, holdingClaude().adapter);
     const now = Date.now();
-    core!.db.insertTask({ id: "tsk_last304", workspaceId: metaId(), title: "#304 実装: PBI: Ready の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#304 実装: PBI: Ready の PBI"), statusAt: now, createdAt: now, updatedAt: now });
+    core!.db.insertTask({ id: "tsk_last304", workspaceId: metaId(), title: "#304 実装: PBI: Ready の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#304 実装: PBI: Ready の PBI"), statusAt: now, createdAt: now, updatedAt: now });
     const id = await backlogNextSchedule(base);
     expect((await runSchedule(base, id)).status).toBe(201);
     const titles = startedTasks().map((t) => t.title);
@@ -2862,8 +2898,8 @@ test("backlog-next failed / awaiting reply: a firing leaves a PBI whose last Tas
   const resumeAt = now + 3_600_000;
   const row = { workspaceId: metaId(), runner: "claude" as const, cwd: home!, scope: [home!], runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto" as const, effort: null, origin: "switchboard" as const, shadowOf: null, shadowStopped: false, workspaceReason: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now };
   // #307 (closable, in progress): its 閉じる hit the weekly limit at once, auto-resume planned; #304 (Ready): its 実装 ended asking the person in its conversation
-  core!.db.insertTask({ ...row, id: "tsk_limit307", title: "#307 閉じる: PBI: Task が全部閉じた実装中の PBI", stage: { issue: 307, action: "close" }, status: "error", resumeAt, resumeReason: "limit", resumeWindow: null, resumeSince: null, resumePlannedAt: null, outcome: "failed", reviewedAt: null, archivedAt: null });
-  core!.db.insertTask({ ...row, id: "tsk_ask304", title: "#304 実装: PBI: Ready の PBI", stage: { issue: 304, action: "complete" }, status: "done", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, outcome: "needs_action", reviewedAt: null, archivedAt: null });
+  core!.db.insertTask({ ...row, id: "tsk_limit307", title: "#307 閉じる: PBI: Task が全部閉じた実装中の PBI", stage: { issue: 307, action: "close" }, status: "error", resumeAt, resumeReason: "limit", resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, outcome: "failed", reviewedAt: null, archivedAt: null });
+  core!.db.insertTask({ ...row, id: "tsk_ask304", title: "#304 実装: PBI: Ready の PBI", stage: { issue: 304, action: "complete" }, status: "done", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, outcome: "needs_action", reviewedAt: null, archivedAt: null });
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
   expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#303 Task に分解", "#304 実装", "#307 閉じる"]); // only the two inserted ones
@@ -2887,7 +2923,7 @@ test("backlog-next unchanged: a Ready PBI whose 実装 finished with no update s
   closeTried();
   // #304 (updated 2026-09-20) had an 実装 that finished after that
   const now = Date.now();
-  core!.db.insertTask({ id: "tsk_last304", workspaceId: metaId(), title: "#304 実装: PBI: Ready の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#304 実装: PBI: Ready の PBI"), statusAt: now, createdAt: now, updatedAt: now });
+  core!.db.insertTask({ id: "tsk_last304", workspaceId: metaId(), title: "#304 実装: PBI: Ready の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#304 実装: PBI: Ready の PBI"), statusAt: now, createdAt: now, updatedAt: now });
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
   expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#303 Task に分解", "#304 実装"]); // only the old #304 実装
@@ -3012,7 +3048,7 @@ async function backlogNextSchedule(base: string, budgetUsd?: number, model?: str
  */
 function closeTried(...workspaceIds: string[]) {
   const now = Date.now();
-  for (const workspaceId of workspaceIds.length ? workspaceIds : [metaId()]) core!.db.insertTask({ id: `tsk_close307_${workspaceId}`, workspaceId, title: "#307 閉じる: PBI: Task が全部閉じた実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#307 閉じる: PBI: Task が全部閉じた実装中の PBI"), statusAt: now, createdAt: now, updatedAt: now });
+  for (const workspaceId of workspaceIds.length ? workspaceIds : [metaId()]) core!.db.insertTask({ id: `tsk_close307_${workspaceId}`, workspaceId, title: "#307 閉じる: PBI: Task が全部閉じた実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#307 閉じる: PBI: Task が全部閉じた実装中の PBI"), statusAt: now, createdAt: now, updatedAt: now });
 }
 /** The Tasks but closeTried's. */
 const startedTasks = () => core!.db.listTasks().filter((t) => !t.id.startsWith("tsk_close307_"));
@@ -3359,6 +3395,25 @@ test("backlog-next slots: a running plan Task (from a button too) holds that wor
   expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#303 Task に分解", "#304 実装"]);
 });
 
+test("backlog-next slots: 実行枠待ちの工程 Task は枠を埋め、その Issue のボタンは 409 で taskId を返す (#1141)", async () => {
+  const claude = holdingClaude();
+  const base = await boot(fakeGh().gh, claude.adapter);
+  closeTried();
+  await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ maxRunners: 1 }) });
+  const manual = await (await start(base, 303, { action: "to-tasks" })).json() as Task;
+  for (let i = 0; core!.db.getTask(manual.id)?.status !== "running" && i < 100; i++) await Bun.sleep(10);
+  const queued = await (await start(base, 304, { action: "complete" })).json() as Task;
+  expect(core!.db.getTask(queued.id)!.queuedAt).not.toBeNull();
+  const again = await start(base, 304, { action: "complete" });
+  expect(again.status).toBe(409);
+  expect((await again.json() as { taskId: string }).taskId).toBe(queued.id);
+  const id = await backlogNextSchedule(base);
+  expect((await runSchedule(base, id)).status).toBe(409); // nothing started: both slots are held
+  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠が埋まっている: 工程 Task ${queued.id}`));
+  expect((await scheduleLogAll(base)).join("\n")).toContain("が 実行枠待ち");
+  expect(startedTasks()).toHaveLength(2);
+});
+
 test("backlog-next slots: a running implement Task leaves the plan slot open", async () => {
   const base = await boot(fakeGh().gh, holdingClaude().adapter);
   const manual = await (await start(base, 304, { action: "complete" })).json() as Task;
@@ -3582,7 +3637,7 @@ test("backlog-next slots: Claude usage at 0.8 or more — a stage Task that star
   const id = await backlogNextSchedule(base);
   // #303's plan Task (a button's) is running by the time GitHub answers: after the firing's quota check, before its start
   const meta = core!.db.listWorkspaces().find((w) => w.kind === "meta")!;
-  during = () => { core!.db.insertTask({ id: "task_button303", workspaceId: meta.id, title: "#303 Task に分解: x", runner: "claude", cwd: meta.path, scope: [meta.path], status: "running", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#303 Task に分解: x"), statusAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now() }); };
+  during = () => { core!.db.insertTask({ id: "task_button303", workspaceId: meta.id, title: "#303 Task に分解: x", runner: "claude", cwd: meta.path, scope: [meta.path], status: "running", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#303 Task に分解: x"), statusAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now() }); };
   expect((await runSchedule(base, id)).status).toBe(409);
   expect(core!.db.listTasks().map((t) => t.title.split(":")[0])).toEqual(["#303 Task に分解"]);
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: claude の使用量 five_hour が 85%`));
@@ -3849,6 +3904,7 @@ async function threeWorkspaces(adapter: RunnerAdapter, broken?: "lib", inner: Gh
     return inner(args, cwd);
   };
   const base = await boot(gh, adapter);
+  core!.db.setSetting("settings", { maxRunners: 8 }); // this test counts the Tasks a firing starts, not the run slots (#1141)
   const ids: Record<string, string> = { switchboard: core!.db.listWorkspaces().find((w) => w.kind === "meta")!.id };
   for (const name of ["lib", "app"]) {
     dirs[name] = mkdtempSync(join(home!, `${name}-`));
@@ -3992,7 +4048,7 @@ function moreReadyGh(...numbers: number[]): GhRunner {
 }
 const runningStage = (title: string) => {
   const meta = core!.db.listWorkspaces().find((w) => w.kind === "meta")!;
-  core!.db.insertTask({ id: `task_${title.split(" ")[0]!.slice(1)}`, workspaceId: meta.id, title, runner: "claude", cwd: meta.path, scope: [meta.path], status: "running", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage(title), statusAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now() });
+  core!.db.insertTask({ id: `task_${title.split(" ")[0]!.slice(1)}`, workspaceId: meta.id, title, runner: "claude", cwd: meta.path, scope: [meta.path], status: "running", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage(title), statusAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now() });
 };
 
 test("start race: a button start and a backlog-next firing on the same item make one Task (#936)", async () => {
@@ -5108,7 +5164,7 @@ describe("GET /api/backlog — mockups (#2296)", () => {
     try {
       const base = await boot(fakeGh().gh);
       const at = Date.now() - 60_000;
-      core!.db.insertTask({ id: "tsk_mock", workspaceId: metaId(), title: "mockups", stage: null, runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, statusAt: at, createdAt: at, updatedAt: at });
+      core!.db.insertTask({ id: "tsk_mock", workspaceId: metaId(), title: "mockups", stage: null, runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, statusAt: at, createdAt: at, updatedAt: at });
       const add = async (name: string, body: string, title: string) => {
         writeFileSync(join(home!, name), body);
         const r = await fetch(`${base}/api/tasks/tsk_mock/artifacts`, { method: "POST", body: JSON.stringify({ source: join(home!, name), title }) });

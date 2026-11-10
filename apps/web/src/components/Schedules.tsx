@@ -158,12 +158,19 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
         <div className="row head">
           <h5>{t(m.queueHeading)}</h5>
         </div>
-        {queue && queue.waiting.length === 0 && queue.staged.length === 0 && <div className="muted">{t(m.noApprovals)}</div>}
+        {queue && queue.waiting.length === 0 && queue.staged.length === 0 && queue.queued.length === 0 && <div className="muted">{t(m.noApprovals)}</div>}
         {queue?.waiting.map((w) => (
           <button key={w.taskId} className="row link" onClick={() => props.onOpenTask(w.taskId)}>
             <RunnerPill runner={w.runner} />
             <span className="t">{w.title}</span>
             <span className="m">{w.ask}</span>
+          </button>
+        ))}
+        {queue?.queued.map((q) => (
+          <button key={q.taskId} className="row link" onClick={() => props.onOpenTask(q.taskId)}>
+            <RunnerPill runner={q.runner} />
+            <span className="t">{q.title}</span>
+            <span className="m">{t(m.queuedPosition, { n: q.position })}</span>
           </button>
         ))}
         {queue?.staged.map((s) => (

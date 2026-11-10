@@ -491,7 +491,7 @@ test("resumeReason (#550): a database made before the column gets it on open, an
 
 test("archivedAt (#1164): listTasks() leaves archived Tasks out, listTasks(true) lists only them, and null brings one back", () => {
   const db = new Db(join(dir, "archive.db"));
-  const mk = (id: string, updatedAt: number) => db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "done", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: updatedAt, createdAt: updatedAt, updatedAt });
+  const mk = (id: string, updatedAt: number) => db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "done", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: updatedAt, createdAt: updatedAt, updatedAt });
   mk("t_a", 1);
   mk("t_b", 2);
   expect(db.updateTask("t_a", { archivedAt: 5, updatedAt: 1 })).toMatchObject({ archivedAt: 5, updatedAt: 1 });
@@ -717,7 +717,7 @@ test("opening the database while another connection writes waits instead of fail
 
 test("startup: a migrated `background` task whose jobs died with the daemon goes back to done and plans its resume", () => {
   const db = new Db(join(dir, "switchboard.db"));
-  db.insertTask({ id: "t_bg", workspaceId: "ws", title: "t_bg", runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "background", runnerSessionId: "s1", executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 });
+  db.insertTask({ id: "t_bg", workspaceId: "ws", title: "t_bg", runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "background", runnerSessionId: "s1", executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 });
   db.setTaskBackground("t_bg", { jobs: ["tests"], since: 1 });
   expect(abortOrphanedTasks(db, 10)).toEqual(["t_bg"]);
   const t = db.getTask("t_bg")!;
@@ -729,7 +729,7 @@ test("startup: a migrated `background` task whose jobs died with the daemon goes
 
 test("stage: a stage Task in `background` status, with a daemon job or a reply being judged is still active, until that ends", () => {
   const db = new Db(join(dir, "switchboard.db"));
-  const mk = (id: string, status: "done" | "error" | "running" | "background", issue: number, updatedAt: number) => db.insertTask({ id, workspaceId: "ws", title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue, action: "complete" }, statusAt: updatedAt, createdAt: updatedAt, updatedAt });
+  const mk = (id: string, status: "done" | "error" | "running" | "background", issue: number, updatedAt: number) => db.insertTask({ id, workspaceId: "ws", title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue, action: "complete" }, statusAt: updatedAt, createdAt: updatedAt, updatedAt });
   mk("t_bg", "background", 3621, 1);
   mk("t_err", "error", 7, 2);
   mk("t_plain", "done", 8, 3);
@@ -833,7 +833,7 @@ test("ledger day is the JST date (#2028): a row at 15:30 UTC falls on the next d
 
 test("statusAt moves only on a status change (#2029): title, outcome, 確認済み and a patch to the same status leave it", () => {
   const db = new Db(join(dir, "switchboard.db"));
-  const base = { id: "t1", workspaceId: null, title: "t", runner: "claude" as const, cwd: "/w", scope: ["/w"], status: "running" as const, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard" as const, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown" as const, reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1_000, createdAt: 1_000, updatedAt: 1_000 };
+  const base = { id: "t1", workspaceId: null, title: "t", runner: "claude" as const, cwd: "/w", scope: ["/w"], status: "running" as const, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard" as const, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown" as const, reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1_000, createdAt: 1_000, updatedAt: 1_000 };
   db.insertTask(base);
   expect(db.getTask("t1")!.statusAt).toBe(1_000);
   db.updateTask("t1", { title: "renamed", updatedAt: 2_000 });
@@ -1062,7 +1062,7 @@ test("outbound: an existing DB keeps both on, a new DB has both off", () => {
   const path = join(dir, "db.sqlite");
   const fresh = new Db(path);
   expect(fresh.getSetting<unknown>("settings", null)).toBeNull();
-  fresh.insertTask({ id: "t1", workspaceId: null, title: "t1", runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "done", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 });
+  fresh.insertTask({ id: "t1", workspaceId: null, title: "t1", runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "done", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 });
   fresh.setSetting("settings", { titles: { auto: false } });
   fresh.close();
   // from before this migration: it has Tasks
@@ -1118,7 +1118,7 @@ test("repeated thinking status is folded once at open (#2738)", () => {
 test("migration (#1802): a session.start without effort gets its task's effort (null = \"\"), and a second open changes nothing", () => {
   const path = join(dir, "db-effort.sqlite");
   const d = new Db(path);
-  const base = { workspaceId: null, title: "t", runner: "claude", cwd: "/x", scope: ["/x"] as string[], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 } as const;
+  const base = { workspaceId: null, title: "t", runner: "claude", cwd: "/x", scope: ["/x"] as string[], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 } as const;
   d.insertTask({ ...base, id: "hi", effort: "high" });
   d.insertTask({ ...base, id: "none", effort: null });
   const start = { t: "session.start", runner: "claude", cwd: "/x" } as const;
@@ -1145,6 +1145,46 @@ const oldDb = (path: string) => {
   raw.exec("ALTER TABLE tasks DROP COLUMN background; INSERT INTO workspaces (id, name, path, kind, created_at) VALUES ('w', 'w', '/x', 'git', 1)");
   raw.close();
 };
+
+test("migrate: a database without queued_at / queued_prompt gets both columns added and keeps its rows (#1141)", () => {
+  const path = join(dir, "switchboard.db");
+  new Db(path).close();
+  const raw = new Database(path);
+  raw.exec("ALTER TABLE tasks DROP COLUMN queued_at; ALTER TABLE tasks DROP COLUMN queued_prompt");
+  raw.exec("INSERT INTO tasks (id, title, runner, cwd, scope, status, created_at, updated_at, status_at) VALUES ('t_old', 'old', 'claude', '/x', '[]', 'idle', 1, 1, 1)");
+  raw.close();
+  const db = new Db(path);
+  const cols = (db.sqlite.query("PRAGMA table_info(tasks)").all() as Array<{ name: string }>).map((c) => c.name);
+  expect(cols).toContain("queued_at");
+  expect(cols).toContain("queued_prompt");
+  expect(db.getTask("t_old")!.queuedAt).toBeNull();
+  db.setQueued("t_old", "p", 5);
+  expect(db.getTask("t_old")!.queuedAt).toBe(5);
+  db.close();
+  const again = new Db(path); // idempotent, and the wait survives a reopen
+  expect(again.listQueuedTasks().map((t) => t.id)).toEqual(["t_old"]);
+  again.close();
+});
+
+test("queued_at / queued_prompt are written only by setQueued / takeQueued, and a status that leaves idle clears both (#1141)", () => {
+  const db = new Db(join(dir, "switchboard.db"));
+  const base = { workspaceId: null, title: "t", runner: "claude" as const, cwd: "/w", scope: ["/w"], status: "idle" as const, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard" as const, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown" as const, reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 };
+  const prompt = (id: string) => (db.sqlite.query("SELECT queued_prompt FROM tasks WHERE id = ?").get(id) as { queued_prompt: string | null }).queued_prompt;
+  // a row is never inserted waiting: the wait has no prompt then
+  expect(db.insertTask({ ...base, id: "t_in", queuedAt: 7 }).queuedAt).toBeNull();
+  expect(db.getTask("t_in")!.queuedAt).toBeNull();
+  expect(db.listQueuedTasks()).toEqual([]);
+  db.insertTask({ ...base, id: "t_q" });
+  db.setQueued("t_q", "p", 5);
+  expect(db.updateTask("t_q", { title: "renamed" })!.queuedAt).toBe(5); // another patch keeps the wait
+  expect(prompt("t_q")).toBe("p");
+  expect(db.updateTask("t_q", { status: "running" })!.queuedAt).toBeNull(); // started without takeQueued: the wait is gone
+  expect(db.getTask("t_q")!.queuedAt).toBeNull();
+  expect(prompt("t_q")).toBeNull();
+  db.updateTask("t_q", { status: "idle" }); // back to idle later: it does not come back into the queue
+  expect(db.listQueuedTasks()).toEqual([]);
+  db.close();
+});
 
 test("migrate: an older database is copied to snapshots/*-before-migrate.db.gz as it was, a current one and a missing one are not", async () => {
   const path = join(dir, "switchboard.db");

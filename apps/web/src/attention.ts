@@ -11,6 +11,22 @@ export function needsAttention(t: Task): boolean {
   return t.reviewedAt === null && t.outcome !== "done" && (t.status === "waiting" || !isWorkingStatus(t.status)) && t.status !== "idle";
 }
 
+/**
+ * What a Task that holds or waits for a run slot is called (#1141): 実行中 / 承認待ち, and 実行枠待ち for an idle Task in the
+ * daemon's queue (`queuedAt`). A Task running in the background keeps its own word. Home, the Task screen's head and the
+ * Schedules queue say it with this one function.
+ */
+export function activeLabel(x: Task): string | null {
+  if (x.status === "running") return t(m.running);
+  if (x.status === "waiting") return t(m.statusWaiting);
+  if (x.status === "background") return t(m.statusBackground);
+  return x.status === "idle" && x.queuedAt !== null ? t(m.statusQueued) : null;
+}
+
+export function isActive(x: Task): boolean {
+  return activeLabel(x) !== null;
+}
+
 const RANK: Record<TaskOutcome, number> = { needs_action: 0, failed: 1, done: 2, unknown: 2 };
 
 /** 要対応 → 失敗 → 未判定; newest first within each. */

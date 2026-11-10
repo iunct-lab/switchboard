@@ -113,8 +113,6 @@ export const home = msgs({
   // Home.tsx: the task lists, cost and reports
   activeHeading: { ja: "実行中 · 待ち", en: "Running · Waiting" },
   none: { ja: "なし", en: "None" },
-  waitingApproval: { ja: "承認待ち", en: "Waiting for approval" },
-  running: { ja: "実行中", en: "Running" },
   attentionHeading: { ja: "要対応 · {count}", en: "Needs action · {count}" },
   attentionAll: { ja: "すべて表示（{n} 件）", en: "Show all ({n})" },
   attentionFewer: { ja: "最初の分だけにする", en: "Show the first ones only" },

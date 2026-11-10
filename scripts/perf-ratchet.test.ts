@@ -157,7 +157,8 @@ describe("perf-ratchet bytes against main's (#3921)", () => {
         const r = join(dir, "result.json");
         const journeys = { ...budgets.local.journeys, "open-task": { ...budgets.local.journeys["open-task"], bytes: openTask, responses: evals(evalsBytes) }, "open-task-huge": { bytes: 36106, responses: evals(1000) } };
         writeFileSync(r, JSON.stringify({ runs: 5, journeys, bundle, loaded: budgets.local.loaded }));
-        const p = Bun.spawn([process.execPath, "scripts/perf-ratchet.ts", "check", r, "--base", base, "--env", "local"], { cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" });
+        // the checkout's own budgets are the compared ones: a ceiling raised since origin/main or the tag CI's PERF_BASE_REF is not this test's raised:
+        const p = Bun.spawn([process.execPath, "scripts/perf-ratchet.ts", "check", r, "--base", base, "--env", "local"], { cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe", env: { ...process.env, PERF_BASE_REF: "HEAD" } });
         const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
         return { out: out + err, code };
       };
@@ -342,7 +343,8 @@ describe("perf-ratchet bundle growth (#3167)", () => {
       const run = async (bundle: { js: number; css: number }, journeys = budgets.local.journeys, args = ["--base", base], loaded: object | undefined = budgets.local.loaded) => {
         const r = join(dir, "result.json");
         writeFileSync(r, JSON.stringify({ runs: 5, journeys, bundle, loaded }));
-        const p = Bun.spawn([process.execPath, "scripts/perf-ratchet.ts", "check", r, ...args, "--env", "local"], { cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" });
+        // the checkout's own budgets are the compared ones: a ceiling raised since origin/main or the tag CI's PERF_BASE_REF is not this test's raised:
+        const p = Bun.spawn([process.execPath, "scripts/perf-ratchet.ts", "check", r, ...args, "--env", "local"], { cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe", env: { ...process.env, PERF_BASE_REF: "HEAD" } });
         const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
         return { out: out + err, code };
       };

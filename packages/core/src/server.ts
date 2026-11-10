@@ -4,15 +4,15 @@ import { readCloudPreparation, cloudTransferNotice, prepareTeleportWorktree } fr
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
-import { basename, delimiter, dirname, join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
-import { AskAnswerInput, JobRequest, AutoStartKind, CustomRunnerList, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogQueueInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, type EvalsSummary, InboxAddInput, InboxCloseInput, InboxEditInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskBatch, type AskList, type Backlog, type McpServerConfig, type BacklogQueue, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type ScanCursors, type Workspace, type WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
+import { AskAnswerInput, JobRequest, AutoStartKind, CustomRunnerList, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogQueueInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, type EvalsSummary, InboxAddInput, InboxCloseInput, InboxEditInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type EventEnvelope, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskBatch, type AskList, type Backlog, type McpServerConfig, type BacklogQueue, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type ScanCursors, type Workspace, type WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
 import type { CoreConfig } from "./config.ts";
 import { abortOrphanedTasks, createdIssuesOf, Db, deferredOf, displayPath, type ApiRequestRow } from "./db.ts";
 import { opsLatency } from "./ops-latency.ts";
-import { OpsLoadSampler, opsLoad, readCgroup } from "./ops-load.ts";
+import { OpsLoadSampler, memoryHeadroom, opsLoad, readCgroup } from "./ops-load.ts";
 import { opsResources } from "./ops-resources.ts";
-import { type JobDeps, JobError, recoverJobs, requestJob } from "./jobs.ts";
+import { type JobDeps, JOBS_KEEP_MS, JobError, recoverJobs, requestJob } from "./jobs.ts";
 import { type CleanExit, daemonVersion, endDaemonRun, opsStops, readBootId, readJournal, readReleaseHistory, startDaemonRun } from "./ops-stops.ts";
 import { ArtifactError, ArtifactStore, artifactMime, checkViewKey, withCharset, VIEW_KEY_MS, viewKey } from "./artifacts.ts";
 import { AttachmentError, AttachmentStore, extValue, formatBytes, isActiveContent, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_REQUEST } from "./attachments.ts";
@@ -43,7 +43,7 @@ import { setupScripts } from "./skillsync.ts";
 import { listProcesses, loadProcess } from "./process-defs.ts";
 import { collectProvenance } from "./provenance.ts";
 import { Staging } from "./staging.ts";
-import { collectTaskDiff } from "./taskdiff.ts";
+import { capSnapshot, collectTaskDiff, mergeSnapshot, withSnapshot, WRITE_TOOLS } from "./taskdiff.ts";
 import { parseCron } from "./cron.ts";
 import { FlowCache, flowScope, flowView, type FlowWorkspace } from "./flow.ts";
 import { interventionView } from "./interventions.ts";
@@ -68,7 +68,7 @@ import { DEFAULT_EXAMPLE_COUNT, LlmSuggester, readOnlyMode } from "./suggest-llm
 import { WorkspaceSuggester } from "./suggest-workspace.ts";
 import { heavyStateDir } from "../../../ops-kit/src/heavy.ts";
 import { IN_FLIGHT, isWorking, TURN_DONE, workPhase } from "./task-status.ts";
-import { type NewTaskInput, privateTmpOf, provisionalTitle, sweepPrivateTmps, TaskManager } from "./tasks.ts";
+import { kitPath, type NewTaskInput, privateTmpOf, provisionalTitle, sweepPrivateTmps, TaskManager } from "./tasks.ts";
 import { HistoryImporter } from "./history.ts";
 import { HostIdle, nextWakeFrom } from "./hostidle.ts";
 import { RunnerLogins } from "./runnerlogin.ts";
@@ -559,7 +559,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         writePolicies(db, recordUse(readPolicies(db), id, { at: Date.now(), askId: `approval:${task.id}:${ask.id}`, taskId: task.id, issue: issueOf(task), subject: { kind: "approval", op: ask.kind, target: v.match.subject, conditions: [], head: null } }));
       }
       return v;
-    }, pricing: pricingTable, defaultPermissionMode: savedDefaultMode, subagentEffort: (r) => settings().subagentEffort[r], defaultShadowRunner: () => settings().shadowRunner, attachments, privateTmpRoot: join(cfg.home, "tmp"), heavyStateDir: opts.heavyStateDir ?? heavyStateDir(homedir()), deviceAuthEnv: (id) => ({ DEVICE_AUTH_URL: `${localUrl()}/api/tasks/${id}/device-auth`, DEVICE_AUTH_TOKEN_FILE: cfg.tokenPath, SWITCHBOARD_DAEMON_HOME: cfg.home, BACKLOG_URL: `${localUrl()}/api/backlog`, BACKLOG_TOKEN_FILE: cfg.tokenPath, ...localBacklogEnv(id) }), otelFor: (id) => (settings().outbound.classifierLog ? { endpoint: `${localUrl()}/otel/${id}/v1/logs`, token: mcp.issue(id).token } : undefined), runnerTelemetry: () => settings().outbound.runnerTelemetry, dockerEnv: (id) => ({ DOCKER_MARK_LABEL: `${LABEL_KEY}=${id}`, DOCKER_MARK_LOG: join(dockerLogDir, `${id}.jsonl`) }), maxStopResumes: () => settings().quotaAndResume.maxStopResumes, reviewRunner: () => settings().reviewRunner, mcpServers: startMcpServers, bedrock: (task) => { const b = bedrockOf(task.runner); if (b) bedrockTasks.add(task.id); else bedrockTasks.delete(task.id); return b; } });
+    }, pricing: pricingTable, defaultPermissionMode: savedDefaultMode, subagentEffort: (r) => settings().subagentEffort[r], defaultShadowRunner: () => settings().shadowRunner, attachments, privateTmpRoot: join(cfg.home, "tmp"), heavyStateDir: opts.heavyStateDir ?? heavyStateDir(homedir()), deviceAuthEnv: (id) => ({ DEVICE_AUTH_URL: `${localUrl()}/api/tasks/${id}/device-auth`, DEVICE_AUTH_TOKEN_FILE: cfg.tokenPath, SWITCHBOARD_DAEMON_HOME: cfg.home, BACKLOG_URL: `${localUrl()}/api/backlog`, BACKLOG_TOKEN_FILE: cfg.tokenPath, ...localBacklogEnv(id) }), otelFor: (id) => (settings().outbound.classifierLog ? { endpoint: `${localUrl()}/otel/${id}/v1/logs`, token: mcp.issue(id).token } : undefined), runnerTelemetry: () => settings().outbound.runnerTelemetry, dockerEnv: (id) => ({ DOCKER_MARK_LABEL: `${LABEL_KEY}=${id}`, DOCKER_MARK_LOG: join(dockerLogDir, `${id}.jsonl`) }), maxStopResumes: () => settings().quotaAndResume.maxStopResumes, maxRunners: () => settings().maxRunners, memoryHeadroom: () => memoryHeadroom(db), holdQueue: cfg.candidate, reviewRunner: () => settings().reviewRunner, mcpServers: startMcpServers, bedrock: (task) => { const b = bedrockOf(task.runner); if (b) bedrockTasks.add(task.id); else bedrockTasks.delete(task.id); return b; } });
   // Terminal sessions (#91): what Claude Code wrote to ~/.claude/projects while nobody in Switchboard was watching.
   const claudeDanger = new Set((adapters.find((a) => a.id === "claude")?.permissionModes ?? []).filter((m) => m.danger).map((m) => m.value));
   const history = new HistoryImporter(db, { projectsDir: cfg.claudeProjectsDir, pollMs: cfg.historyPollMs, pricing: pricingTable, broadcast, isLive: (id) => tasks.isLive(id), dangerModes: claudeDanger, log: (m) => console.warn(m) });
@@ -817,7 +817,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   const notSettled = (e: unknown) => (e instanceof BacklogError ? e.message : String((e as Error)?.message ?? e).slice(0, 200));
   /** What an active stage Task (Db's activeStage) is at, for a line in backlog-next's log: its status, else what its ended turn still waits on. */
   const activeAs = (t: Task): string =>
-    IN_FLIGHT.has(t.status) ? t.status : t.status === "background" ? "裏の処理を待っている" : workPhase(t) === "resume" ? "再開を待っている" : t.judgingAt !== null ? "最後の返答の判定を待っている" : "デーモンのジョブを待っている";
+    t.queuedAt !== null ? "実行枠待ち" : IN_FLIGHT.has(t.status) ? t.status : t.status === "background" ? "裏の処理を待っている" : workPhase(t) === "resume" ? "再開を待っている" : t.judgingAt !== null ? "最後の返答の判定を待っている" : "デーモンのジョブを待っている";
   /** A Task's screen mockups (#2221, #2296): its HTML artifacts, not removed; none for a Task that does not exist. */
   const mockupsOf = (id: string) => artifacts.list(id).filter((a) => a.removedAt === null && a.kind !== "url" && (a.mime === "text/html" || a.mime === "application/xhtml+xml"));
   const withActive = (b: Backlog): Backlog => ({
@@ -1320,7 +1320,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     return { status: r.status, body: (await r.json()) as object };
   };
   /** Running and waiting Tasks, and those whose turn ended with background jobs still going: a restart cuts all of them. */
-  const busyTasks = () => db.listWorkingTasks("gate").length;
+  const busyTasks = () => db.listActiveTasks().length;
   /**
    * Why the last promotionFirst held the newest tag (#626): Tasks running (asked again once they end) or a tag that
    * failed. Memory only: a restart forgets it and the next firing makes it again. `GET /api/daemon/release` shows it.
@@ -1917,7 +1917,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     dir: join(cfg.home, "jobs"),
     get env() {
       const meta = db.listWorkspaces().find((w) => w.kind === "meta");
-      return { ...process.env, PATH: [...(meta ? [join(meta.path, "ops-kit/bin")] : []), process.env.PATH ?? "", dirname(process.execPath)].join(delimiter) };
+      return { ...process.env, PATH: kitPath(meta?.path ?? null) };
     },
     command: opts.jobCommand,
     reviewIdleS: cfg.jobReviewIdleS,
@@ -2210,8 +2210,6 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
    * host CloudFront replaces an origin's 502/504 with the "stopped" start page, and the app then leaves for the login page.
    */
   const UPSTREAM_FAILED = 424;
-  /** How far back GET /api/jobs lists ended jobs (#3992); running ones are always listed. */
-  const JOBS_LIST_MS = 7 * 24 * 3600 * 1000;
   /** The largest Webhook delivery read (#887): GitHub's Issue payloads are a few KiB; a larger body is refused unread. */
   const WEBHOOK_MAX_BYTES = 64 * 1024;
   /** A request's body, or null once it is longer than `max` bytes (read no further). */
@@ -2322,6 +2320,44 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   };
   const apiRequestsTimer = setInterval(flushApiRequests, API_REQUESTS_FLUSH_MS);
   apiRequestsTimer.unref();
+  // a copy of the task's diff (#3833), so it can still be shown after its worktree is removed: at each turn's end and every 60 s while running
+  let stopped = false;
+  const snapshotting = new Set<string>();
+  const snapshotAgain = new Set<string>(); // a call that came while one was running: run once more after it, so the last turn's end is not lost
+  // collectTaskDiff reads only write-class tool calls and artifacts from the transcript, so the timer keeps just those, and only the events after the last seq read
+  const snapshotEvents = new Map<string, { seq: number; events: EventEnvelope[] }>();
+  const snapshotTaskDiff = async (taskId: string) => {
+    if (snapshotting.has(taskId)) {
+      snapshotAgain.add(taskId);
+      return;
+    }
+    snapshotting.add(taskId);
+    try {
+      const t = db.getTask(taskId);
+      if (!t) return;
+      const cached = snapshotEvents.get(taskId) ?? { seq: 0, events: [] };
+      const fresh = db.listEvents(taskId, cached.seq);
+      for (const e of fresh) if ((e.ev.t === "tool.call" && WRITE_TOOLS.includes(e.ev.name)) || e.ev.t === "artifact") cached.events.push(e);
+      if (fresh.length) cached.seq = fresh[fresh.length - 1]!.seq;
+      snapshotEvents.set(taskId, cached);
+      const live = await collectTaskDiff(t, cached.events, staging.list(taskId));
+      if (stopped) return;
+      db.putTaskDiffSnapshot(taskId, capSnapshot(mergeSnapshot(db.getTaskDiffSnapshot(taskId), live, Date.now())));
+    } catch (e) {
+      console.warn(`task diff snapshot: ${String((e as Error).message ?? e)}`);
+    } finally {
+      snapshotting.delete(taskId);
+      if (snapshotAgain.delete(taskId) && !stopped) void snapshotTaskDiff(taskId);
+    }
+  };
+  tasks.onTurnEnd((taskId) => void snapshotTaskDiff(taskId));
+  const snapshotTimer = setInterval(() => {
+    const active = [...db.listTasksByStatus("running"), ...db.listTasksByStatus("background")];
+    const ids = new Set(active.map((t) => t.id));
+    for (const id of snapshotEvents.keys()) if (!ids.has(id)) snapshotEvents.delete(id);
+    for (const id of ids) void snapshotTaskDiff(id);
+  }, 60_000);
+  snapshotTimer.unref();
   const logged = (route: string | null, h: AnyHandler | Record<string, AnyHandler>): AnyHandler | Record<string, AnyHandler> => {
     if (!authRequired && route === null) return h;
     const wrap = (fn: AnyHandler): AnyHandler => async (req, srv) => {
@@ -2558,6 +2594,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           // The rubric judge (#1219): on / off only; the runner and model are the judge's
           // The main reviewer of a PR (#4024): Tasks read it as OPS_KIT_REVIEW_RUNNER from their next start or resume
           if (parsed.data.reviewRunner !== undefined) next.reviewRunner = parsed.data.reviewRunner;
+          if (parsed.data.maxRunners !== undefined) next.maxRunners = parsed.data.maxRunners;
           if (parsed.data.titles?.auto !== undefined) next.titles = { ...next.titles, auto: parsed.data.titles.auto };
           if (parsed.data.evals?.judge?.enabled !== undefined) next.evals = { ...next.evals, judge: { ...next.evals.judge, enabled: parsed.data.evals.judge.enabled } };
           // The Tasks that start by themselves (#832): the runner must be detected. A runner change without a model
@@ -2625,6 +2662,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           }
           db.setSetting(SETTINGS_KEY, next);
           logOp(req, srv, "settings.update", { detail: { keys: Object.keys(parsed.data) } });
+          // a raised limit starts the Tasks that waited for it (#1141)
+          if (parsed.data.maxRunners !== undefined) tasks.drain();
           return json({ ...next, runners: runnerInfo(), defaults });
         }),
       },
@@ -3975,7 +4014,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         const t = db.getTask(String(req.params.id));
         if (!t) return bad("not found", 404);
         try {
-          return json(await collectTaskDiff(t, db.listEvents(t.id), staging.list(t.id)));
+          return json(withSnapshot(await collectTaskDiff(t, db.listEvents(t.id), staging.list(t.id)), db.getTaskDiffSnapshot(t.id)));
         } catch (e) {
           return bad(String((e as Error).message ?? e), 500);
         }
@@ -4033,7 +4072,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
        * ended in the last 7 days, newest first.
        */
       "/api/jobs": {
-        GET: () => json(db.listJobs(Date.now() - JOBS_LIST_MS)),
+        GET: () => json(db.listJobs(Date.now() - JOBS_KEEP_MS)),
         POST: async (req) => {
           const parsed = JobRequest.safeParse(await req.json().catch(() => null));
           if (!parsed.success) return bad(parsed.error.message);
@@ -4403,6 +4442,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   // then die on EADDRINUSE. Tasks still running / waiting now belong to nobody.
   const orphaned = abortOrphanedTasks(db, Date.now(), settings().quotaAndResume.maxStopResumes);
   if (orphaned.length) console.warn(`tasks: ${orphaned.length} left running/waiting by a previous daemon marked aborted (${orphaned.join(", ")})`);
+  // The Tasks the previous daemon left waiting for a slot (#1141) start now (a candidate leaves them: `holdQueue`)
+  tasks.drain();
   // their rows were saved at the turn before the cut; the stop just written changes the counts (#2089)
   for (const id of orphaned) {
     const t = db.getTask(id);
@@ -4474,6 +4515,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     await applying;
     server.stop(true);
     clearInterval(apiRequestsTimer);
+    clearInterval(snapshotTimer);
+    stopped = true;
     flushApiRequests();
     db.close();
   };

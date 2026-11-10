@@ -1,12 +1,11 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { isWorkingStatus } from "@switchboard/protocol";
 import type { CloudPreparation, ExecutionMode, CreateTaskInput, LedgerSummary, ReportRow, RoutingSuggestion, RunnerId, RunnerInfo, Task, Workspace } from "@switchboard/protocol";
 import { api, type Health, type InboxNote } from "../api.ts";
 import { fmtUsd, OriginTag, pct, ResumeTag, RunnerPill, ShadowTag } from "./ui.tsx";
 import { AttachButton, AttachmentBar, useAttachments, useDropZone } from "./Attachments.tsx";
 import { ModelSelect } from "./ModelSelect.tsx";
 import { EffortSelect } from "./EffortSelect.tsx";
-import { attentionList, needsAttention, outcomeDotClass, outcomeLabel } from "../attention.ts";
+import { activeLabel, attentionList, isActive, needsAttention, outcomeDotClass, outcomeLabel } from "../attention.ts";
 import { reportMeta } from "../reports.ts";
 import { quotaAsOf, quotaStale, resetLabel, windowLabel } from "../quota.ts";
 import { staleDraft } from "../presets.ts";
@@ -19,7 +18,7 @@ import { startBlockedReason, unavailableNotice, unavailableNotices } from "../ru
 import { t } from "../i18n.ts";
 import { home } from "../i18n/home.ts";
 import { runnerLoginLabel } from "../login.ts";
-import { ago, TASK_STATUS } from "../inProgress.ts";
+import { ago } from "../inProgress.ts";
 
 /** How many 要対応 rows show before すべて (#4066). */
 const ATTENTION_SHOWN = 8;
@@ -239,11 +238,11 @@ export function Home(props: {
       alive = false;
     };
   }, []);
-  const active = useMemo(() => props.tasks.filter((t) => isWorkingStatus(t.status)), [props.tasks]);
+  const active = useMemo(() => props.tasks.filter(isActive), [props.tasks]);
   const attention = useMemo(() => attentionList(props.tasks), [props.tasks]);
   // the first ones (#4066): 60 rows pushed the cost and the reports five screens down on a phone
   const [allAttention, setAllAttention] = useState(false);
-  const recent = useMemo(() => props.tasks.filter((t) => !isWorkingStatus(t.status) && !needsAttention(t)).slice(0, 6), [props.tasks]);
+  const recent = useMemo(() => props.tasks.filter((t) => !isActive(t) && !needsAttention(t)).slice(0, 6), [props.tasks]);
 
   // runners not listed yet (loading, unreachable, no token): no runner reason is given, the button stays disabled as before
   const offRunners = unavailableNotices(props.health?.runners);
@@ -652,11 +651,11 @@ export function Home(props: {
           {active.length === 0 && <div className="muted">{t(home.none)}</div>}
           {active.map((x) => (
             <button key={x.id} className="row link" onClick={() => props.onOpenTask(x.id)}>
-              <span className={`dot ${x.status === "waiting" ? "wait" : "run"}`} />
+              <span className={`dot ${x.status === "waiting" ? "wait" : x.status === "idle" ? "idle" : "run"}`} />
               <span className="t">{x.title}</span>
               <RunnerPill runner={x.runner} />
               <ShadowTag task={x} />
-              <span className="m">{x.status === "waiting" ? t(home.waitingApproval) : x.status === "background" ? TASK_STATUS.background : t(home.running)}</span>
+              <span className="m">{activeLabel(x)}</span>
             </button>
           ))}
           <h5 style={{ marginTop: 14 }}>{t(home.attentionHeading, { count: attention.length })}</h5>

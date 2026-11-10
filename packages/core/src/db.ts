@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { constants, createGzip } from "node:zlib";
-import type { AgentEvent, AskAnswerResult, Artifact, Attachment, BacklogAction, Provenance, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogRepositorySync, BacklogSource, CheckRun, CreatedIssue, EvalSource, EvalsListRow, EventEnvelope, HistorySession, Job, JobKind, JobStatus, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerRow, LedgerSummary, LedgerTaskRow, LlmSuggestion, LoadKind, Journey, PerfSample, PerfSummaryRow, ReportRow, RoutingLogRow, RoutingStats, RunnerId, RunnerStats, Schedule, StagedChange, StopRecord, Task, TaskEvals, TaskOrigin, TaskOutcome, TaskStatus, Workspace, WorkspaceSweep } from "@switchboard/protocol";
+import type { AgentEvent, AskAnswerResult, Artifact, Attachment, BacklogAction, Provenance, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogRepositorySync, BacklogSource, CheckRun, CreatedIssue, EvalSource, EvalsListRow, EventEnvelope, HistorySession, Job, JobKind, JobStatus, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerRow, LedgerSummary, LedgerTaskRow, LlmSuggestion, LoadKind, Journey, PerfSample, PerfSummaryRow, ReportRow, RoutingLogRow, RoutingStats, RunnerId, RunnerStats, Schedule, StagedChange, StopRecord, Task, TaskDiffFile, TaskDiffSnapshot, TaskEvals, TaskOrigin, TaskOutcome, TaskStatus, Workspace, WorkspaceSweep } from "@switchboard/protocol";
 import { teleportWorktreePath } from "./config.ts";
 import { MAX_STOP_RESUMES, planResumeAfterStop } from "./interrupted.ts";
 import { canTransition, IN_FLIGHT, InvalidTaskTransitionError, outcomeOnStatus, type WorkPurpose, workingSql } from "./task-status.ts";
@@ -133,7 +133,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY, workspace_id TEXT, title TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL,
   scope TEXT NOT NULL, status TEXT NOT NULL, runner_session_id TEXT, model TEXT, routing TEXT, budget_usd REAL, schedule_id TEXT,
-  permission_mode TEXT, effort TEXT, subagent_effort TEXT, origin TEXT NOT NULL DEFAULT 'switchboard', resume_at INTEGER, resume_reason TEXT, resume_window TEXT, resume_since INTEGER, resume_planned_at INTEGER, shadow_of TEXT, shadow_stopped INTEGER NOT NULL DEFAULT 0, workspace_reason TEXT,
+  permission_mode TEXT, effort TEXT, subagent_effort TEXT, origin TEXT NOT NULL DEFAULT 'switchboard', resume_at INTEGER, resume_reason TEXT, resume_window TEXT, resume_since INTEGER, resume_planned_at INTEGER, queued_at INTEGER, queued_prompt TEXT, shadow_of TEXT, shadow_stopped INTEGER NOT NULL DEFAULT 0, workspace_reason TEXT,
   outcome TEXT NOT NULL DEFAULT 'unknown', reviewed_at INTEGER, archived_at INTEGER, judged_result TEXT, judged_reason TEXT, judged_by TEXT, judging_at INTEGER, stage_issue INTEGER, stage_action TEXT,
   status_at INTEGER NOT NULL, title_pending INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, provenance TEXT
 );
@@ -228,6 +228,8 @@ CREATE TABLE IF NOT EXISTS task_evals (
   task_id TEXT NOT NULL, source TEXT NOT NULL, by TEXT NOT NULL, rubric TEXT, json TEXT NOT NULL, ts INTEGER NOT NULL,
   PRIMARY KEY (task_id, source)
 );
+-- the copy of a task's diff (#3833): one row per task, so a removed worktree can still be shown; kept out of tasks (listTasks reads that often)
+CREATE TABLE IF NOT EXISTS task_diffs (task_id TEXT PRIMARY KEY, at INTEGER NOT NULL, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS ask_answers (id TEXT PRIMARY KEY, at INTEGER NOT NULL, result TEXT, failure TEXT);
 -- #1755 (local passkeys) was reverted; the table stays empty and unused because migrations only add (schema.test.ts, releases-and-rescue.md)
 CREATE TABLE IF NOT EXISTS passkeys (id TEXT PRIMARY KEY, rp_id TEXT NOT NULL, public_key TEXT NOT NULL, algorithm INTEGER NOT NULL, counter INTEGER NOT NULL, created INTEGER NOT NULL, last_used INTEGER);
@@ -409,15 +411,19 @@ function deepFreeze<T>(v: T): T {
   return v;
 }
 
+/** A Task waiting for a free run slot (#1141): idle with `queued_at` set. */
+const QUEUED_SQL = "(status = 'idle' AND queued_at IS NOT NULL)";
+
 /**
  * A stage Task still at work: running / waiting; a turn ended on background jobs that start its next turn (the
  * `background` mark, cleared when they end or the runner goes); a turn ended on a job it asked the daemon for (`jobs`
  * running, #3992 — local CI or a review whose end resumes it, #3993); or a turn that ended done whose last reply is still
  * being judged (`judging_at`, #493 — until then its outcome is unknown, so a question it ended on does not hold the
  * Issue yet). Starting the same Issue's stage again in any of these runs it twice. `dedupe` also counts a planned resume
- * (it would run the stage again); `slot` (the capacity of a slot) does not (task-status.ts COUNTS).
+ * (it would run the stage again); `slot` (the capacity of a slot) does not (task-status.ts COUNTS). A Task waiting for a
+ * run slot (QUEUED_SQL, #1141) is at work too: it starts on its own once a slot is free.
  */
-const activeStage = (purpose: "dedupe" | "slot") => `(${workingSql(purpose)} OR judging_at IS NOT NULL OR id IN (SELECT task_id FROM jobs WHERE status = 'running'))`;
+const activeStage = (purpose: "dedupe" | "slot") => `(${workingSql(purpose)} OR ${QUEUED_SQL} OR judging_at IS NOT NULL OR id IN (SELECT task_id FROM jobs WHERE status = 'running'))`;
 
 /** Table name -> column names, and `user_version`: what `needsMigration` compares. */
 function schemaShape(db: Database): { tables: Map<string, Set<string>>; version: number } {
@@ -1073,9 +1079,32 @@ export class Db {
     return this.sqlite.query("SELECT * FROM tasks WHERE status = ? ORDER BY updated_at DESC").all(status).map(rowToTask);
   }
 
+  /** Tasks waiting for a free run slot (#1141), in the order they entered: idle with `queued_at` set. */
+  listQueuedTasks(): Task[] {
+    return this.sqlite.query(`SELECT * FROM tasks WHERE ${QUEUED_SQL} ORDER BY queued_at, created_at`).all().map(rowToTask);
+  }
+
+  /** Put a Task in the wait for a run slot with the prompt it will start with (#1141). */
+  setQueued(id: string, prompt: string, at: number): void {
+    this.sqlite.query("UPDATE tasks SET queued_at = ?, queued_prompt = ?, updated_at = ? WHERE id = ?").run(at, prompt, Date.now(), id);
+  }
+
+  /** Take a Task out of the wait: returns the prompt it was queued with (null = it was not waiting) and clears both columns (#1141). */
+  takeQueued(id: string): string | null {
+    const row = this.sqlite.query("SELECT queued_at, queued_prompt FROM tasks WHERE id = ?").get(id) as { queued_at: number | null; queued_prompt: string | null } | null;
+    if (!row || row.queued_at === null) return null;
+    this.sqlite.query("UPDATE tasks SET queued_at = NULL, queued_prompt = NULL, updated_at = ? WHERE id = ?").run(Date.now(), id);
+    return row.queued_prompt;
+  }
+
   /** Tasks that count as working for `purpose` (task-status.ts `isWorking`, in SQL): a turn, an open approval, a wait on background jobs, and for `dedupe` a planned resume. */
   listWorkingTasks(purpose: WorkPurpose): Task[] {
     return this.sqlite.query(`SELECT * FROM tasks WHERE ${workingSql(purpose)} ORDER BY updated_at DESC`).all().map(rowToTask);
+  }
+
+  /** Tasks that hold the daemon (`gate`) or wait for a run slot (#1141): what a restart for a promotion would cut or leave waiting. */
+  listActiveTasks(): Task[] {
+    return this.sqlite.query(`SELECT * FROM tasks WHERE ${workingSql("gate")} OR ${QUEUED_SQL}`).all().map(rowToTask);
   }
 
   /** The Tasks whose judgement of the last reply was under way (#1139): after a restart, those it cut short. */
@@ -1084,8 +1113,9 @@ export class Db {
   }
 
   /**
-   * The newest active stage Task of a backlog Issue in a workspace (#1139): running / waiting, or one whose turn ended but
-   * whose work is not over (activeStage: its runner's background jobs, a daemon job it asked for, its reply being judged).
+   * The newest active stage Task of a backlog Issue in a workspace (#1139): running / waiting, waiting for a run slot (#1141),
+   * or one whose turn ended but whose work is not over (activeStage: its runner's background jobs, a daemon job it asked for,
+   * its reply being judged).
    */
   activeStageTask(workspaceId: string, issue: number): Task | null {
     const r = this.sqlite.query(`SELECT * FROM tasks WHERE workspace_id = ? AND stage_issue = ? AND ${activeStage("dedupe")} ORDER BY updated_at DESC LIMIT 1`).get(workspaceId, issue);
@@ -1170,15 +1200,17 @@ export class Db {
   }
 
   insertTask(t: Task): Task {
+    // A row is never inserted waiting for a run slot: the wait is written only by setQueued / takeQueued (#1141), with its prompt
+    t = { ...t, queuedAt: null };
     if (t.cloudSession) CloudSessionRef.parse(t.cloudSession);
     this.validateCloudSource(t);
     this.sqlite.transaction(() => {
       this.sqlite
         .query(
-          `INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, runner_session_id, model, routing, budget_usd, schedule_id, permission_mode, effort, subagent_effort, origin, resume_at, resume_reason, resume_window, resume_since, resume_planned_at, shadow_of, shadow_stopped, workspace_reason, outcome, reviewed_at, archived_at, judged_result, judged_reason, judged_by, created_at, updated_at, execution_mode, cloud_session, source_cloud_task_id, stage_issue, stage_action, judging_at, status_at, title_pending)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, runner_session_id, model, routing, budget_usd, schedule_id, permission_mode, effort, subagent_effort, origin, resume_at, resume_reason, resume_window, resume_since, resume_planned_at, queued_at, shadow_of, shadow_stopped, workspace_reason, outcome, reviewed_at, archived_at, judged_result, judged_reason, judged_by, created_at, updated_at, execution_mode, cloud_session, source_cloud_task_id, stage_issue, stage_action, judging_at, status_at, title_pending)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(t.id, t.workspaceId, t.title, t.runner, t.cwd, JSON.stringify(t.scope), t.status, t.runnerSessionId, t.model, t.routing ? JSON.stringify(t.routing) : null, t.budgetUsd, t.scheduleId, t.permissionMode, t.effort, t.subagentEffort ?? null, t.origin, t.resumeAt, t.resumeReason, t.resumeWindow, t.resumeSince, t.resumePlannedAt, t.shadowOf, t.shadowStopped ? 1 : 0, t.workspaceReason, t.outcome, t.reviewedAt, t.archivedAt, t.judgedResult, t.judgedReason, t.judgedBy, t.createdAt, t.updatedAt, t.executionMode, t.cloudSession ? JSON.stringify(t.cloudSession) : null, t.sourceCloudTaskId, t.stage?.issue ?? null, t.stage?.action ?? null, t.judgingAt, t.statusAt, t.titlePending ? 1 : 0);
+        .run(t.id, t.workspaceId, t.title, t.runner, t.cwd, JSON.stringify(t.scope), t.status, t.runnerSessionId, t.model, t.routing ? JSON.stringify(t.routing) : null, t.budgetUsd, t.scheduleId, t.permissionMode, t.effort, t.subagentEffort ?? null, t.origin, t.resumeAt, t.resumeReason, t.resumeWindow, t.resumeSince, t.resumePlannedAt, t.queuedAt, t.shadowOf, t.shadowStopped ? 1 : 0, t.workspaceReason, t.outcome, t.reviewedAt, t.archivedAt, t.judgedResult, t.judgedReason, t.judgedBy, t.createdAt, t.updatedAt, t.executionMode, t.cloudSession ? JSON.stringify(t.cloudSession) : null, t.sourceCloudTaskId, t.stage?.issue ?? null, t.stage?.action ?? null, t.judgingAt, t.statusAt, t.titlePending ? 1 : 0);
       if (t.routing) {
         const logRow = this.sqlite.query("INSERT INTO routing_log (task_id, workspace_id, cwd, suggested, rule_id, reason, chosen, ts, suggested_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
         logRow.run(t.id, t.workspaceId, t.cwd, t.routing.suggested, t.routing.ruleId, t.routing.reason, t.runner, t.createdAt, "rule");
@@ -1348,11 +1380,14 @@ export class Db {
     // statusAt moves only when the status does (#2029): a title, outcome or 確認済み change keeps when the task came to it
     // a new turn shows the Task again (#1142): only a stopped one stays archived
     const shown = moves && (IN_FLIGHT.has(patch.status!) || patch.status === "idle") ? { archivedAt: null } : {};
-    const next: Task = { ...cur, ...rule, ...patch, ...shown, updatedAt, statusAt: moves ? updatedAt : cur.statusAt };
+    // The wait for a run slot (#1141) is written only by setQueued / takeQueued; a status that leaves idle ends it (prompt too),
+    // so a Task started some other way does not come back into the queue when it is idle again
+    const queuedAt = moves && patch.status !== "idle" ? null : cur.queuedAt;
+    const next: Task = { ...cur, ...rule, ...patch, ...shown, queuedAt, updatedAt, statusAt: moves ? updatedAt : cur.statusAt };
     this.validateCloudSource(next, cur);
     this.sqlite
-      .query("UPDATE tasks SET status = ?, runner_session_id = ?, model = ?, title = ?, title_pending = ?, budget_usd = ?, permission_mode = ?, effort = ?, resume_at = ?, resume_reason = ?, resume_window = ?, resume_since = ?, resume_planned_at = ?, shadow_stopped = ?, scope = ?, outcome = ?, reviewed_at = ?, archived_at = ?, judged_result = ?, judged_reason = ?, judged_by = ?, judging_at = ?, updated_at = ?, status_at = ?, cloud_session = ?, source_cloud_task_id = ? WHERE id = ?")
-      .run(next.status, next.runnerSessionId, next.model, next.title, next.titlePending ? 1 : 0, next.budgetUsd, next.permissionMode, next.effort, next.resumeAt, next.resumeReason, next.resumeWindow, next.resumeSince, next.resumePlannedAt, next.shadowStopped ? 1 : 0, JSON.stringify(next.scope), next.outcome, next.reviewedAt, next.archivedAt, next.judgedResult, next.judgedReason, next.judgedBy, next.judgingAt, next.updatedAt, next.statusAt, next.cloudSession ? JSON.stringify(next.cloudSession) : null, next.sourceCloudTaskId, id);
+      .query("UPDATE tasks SET status = ?, runner_session_id = ?, model = ?, title = ?, title_pending = ?, budget_usd = ?, permission_mode = ?, effort = ?, resume_at = ?, resume_reason = ?, resume_window = ?, resume_since = ?, resume_planned_at = ?, queued_at = ?, queued_prompt = CASE WHEN ? IS NULL THEN NULL ELSE queued_prompt END, shadow_stopped = ?, scope = ?, outcome = ?, reviewed_at = ?, archived_at = ?, judged_result = ?, judged_reason = ?, judged_by = ?, judging_at = ?, updated_at = ?, status_at = ?, cloud_session = ?, source_cloud_task_id = ? WHERE id = ?")
+      .run(next.status, next.runnerSessionId, next.model, next.title, next.titlePending ? 1 : 0, next.budgetUsd, next.permissionMode, next.effort, next.resumeAt, next.resumeReason, next.resumeWindow, next.resumeSince, next.resumePlannedAt, next.queuedAt, next.queuedAt, next.shadowStopped ? 1 : 0, JSON.stringify(next.scope), next.outcome, next.reviewedAt, next.archivedAt, next.judgedResult, next.judgedReason, next.judgedBy, next.judgingAt, next.updatedAt, next.statusAt, next.cloudSession ? JSON.stringify(next.cloudSession) : null, next.sourceCloudTaskId, id);
     return next;
   }
 
@@ -1602,6 +1637,24 @@ export class Db {
 
   deleteEval(taskId: string, source: EvalSource) {
     this.sqlite.query("DELETE FROM task_evals WHERE task_id = ? AND source = ?").run(taskId, source);
+  }
+
+  /* ---------- diff copy (#3833) ---------- */
+
+  getTaskDiffSnapshot(taskId: string): TaskDiffSnapshot | null {
+    const r = this.sqlite.query("SELECT at, json FROM task_diffs WHERE task_id = ?").get(taskId) as { at: number; json: string } | null;
+    if (!r) return null;
+    try {
+      return { at: r.at, files: JSON.parse(r.json) as TaskDiffFile[] };
+    } catch {
+      return null;
+    }
+  }
+
+  putTaskDiffSnapshot(taskId: string, s: TaskDiffSnapshot) {
+    this.sqlite
+      .query("INSERT INTO task_diffs (task_id, at, json) VALUES (?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET at = excluded.at, json = excluded.json")
+      .run(taskId, s.at, JSON.stringify(s.files));
   }
 
   /** The task's evals as the API returns them. A row that no longer parses (an older counter, an older judge shape) reads as null. */
@@ -2081,6 +2134,8 @@ function migrate(db: Database) {
   if (!cols.has("resume_window")) db.exec("ALTER TABLE tasks ADD COLUMN resume_window TEXT");
   if (!cols.has("resume_since")) db.exec("ALTER TABLE tasks ADD COLUMN resume_since INTEGER");
   if (!cols.has("resume_planned_at")) db.exec("ALTER TABLE tasks ADD COLUMN resume_planned_at INTEGER");
+  if (!cols.has("queued_at")) db.exec("ALTER TABLE tasks ADD COLUMN queued_at INTEGER");
+  if (!cols.has("queued_prompt")) db.exec("ALTER TABLE tasks ADD COLUMN queued_prompt TEXT");
   if (!cols.has("background")) db.exec("ALTER TABLE tasks ADD COLUMN background TEXT");
   if (!cols.has("shadow_of")) db.exec("ALTER TABLE tasks ADD COLUMN shadow_of TEXT");
   const opCols = new Set((db.query("PRAGMA table_info(backlog_operations)").all() as Array<{ name: string }>).map((c) => c.name));
@@ -2446,6 +2501,7 @@ function rowToTask(r: any): Task {
     resumeWindow: r.resume_window ?? null,
     resumeSince: r.resume_since ?? null,
     resumePlannedAt: r.resume_planned_at ?? null,
+    queuedAt: r.queued_at ?? null,
     background: r.background ? JSON.parse(r.background) : null,
     shadowOf: r.shadow_of ?? null,
     shadowStopped: !!r.shadow_stopped,

@@ -131,6 +131,16 @@ export function confirmationsOf(body: string): Array<{ n: number; text: string }
 }
 
 /**
+ * The decisions a confirmation line names to be checked by their answers: the `#n` run right after `回答で確かめる` inside
+ * its `（利用者確認: …）` parentheses, e.g. `（利用者確認: 回答で確かめる #12, #34 — …）`. Inline code does not count, as in
+ * `confirmationsOf`. `[]` = the line names none (or none readable): it stays the user's own check.
+ */
+export function confirmDecisionsOf(text: string): number[] {
+  const m = /（利用者確認:\s*回答で確かめる\s*((?:#\d+(?:\s*[,、，]\s*)?)+)/.exec(text.replace(CODE_SPAN, ""));
+  return m ? [...new Set([...m[1]!.matchAll(/#(\d+)/g)].map((x) => Number(x[1])))] : [];
+}
+
+/**
  * The prerequisites a PBI / Task names (#937): the numbers on its body's first `**前提**:` line outside fences, e.g.
  * `**前提**: #12, #34（リリース）`; `（リリース）` right after one = its merge must reach the running release too. Free text
  * (「前提: #9 が Done」, `## 依存関係`) is not read: nothing is guessed. `なし` = none; a number named twice is one.
@@ -1373,6 +1383,27 @@ function withWaits(waiting: Map<BacklogItem, { numbers: number[]; at: string; ov
 }
 
 /**
+ * Takes the confirmation lines that name decisions (`confirmDecisionsOf`) out of `confirmations` once every named number
+ * is stored: the decisions' own cards ask, not the user's check. One still labelled `needs-decision` keeps the PBI
+ * from being `closable`; the closable rule is `toItem`'s, over what is left. A number not stored leaves its line as is.
+ */
+export function withConfirmDecisions(items: BacklogItem[], targets: Map<number, WaitTarget>): void {
+  for (const i of items) {
+    if (i.type !== "pbi" || i.confirmations.length === 0) continue;
+    let held = false;
+    const left = i.confirmations.filter((c) => {
+      const ns = confirmDecisionsOf(c.text);
+      if (ns.length === 0 || !ns.every((n) => targets.has(n))) return true;
+      if (ns.some((n) => targets.get(n)!.labels.includes("needs-decision"))) held = true;
+      return false;
+    });
+    if (left.length === i.confirmations.length) continue;
+    i.confirmations = left;
+    i.closable = !held && i.stage === "in-progress" && !!i.tasks && i.tasks.total > 0 && i.tasks.done === i.tasks.total && left.length === 0;
+  }
+}
+
+/**
  * Gives each Ready / in-progress PBI its prerequisites (#937) with their states: those its body names (`via` null), and
  * those its open Tasks name, other than the PBI's own open Tasks (their order is the PBI's own business), when every
  * open Task has one not met. One that is still pending and leads back to the PBI (or to the Task naming it) along the
@@ -1554,6 +1585,7 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
       return t ? [{ number: m, state: t.state, labels: { nodes: t.labels.map((name) => ({ name })) }, comments: { nodes: commentsOf(m) } }] : [];
     });
   withWaits(withComments(asked, buildingOf(asked), commentsOf, tasksOf), targets, issues);
+  withConfirmDecisions(items, targets);
   const startable = withPrereqs(items, issues, targets, opts.released ?? (() => null));
   withOverlap(items, issues, startable, pulls, statuses, ws.path, opts.active);
   return { fetchedAt, items, changes: changesOf(ws.id, issues.values()) };

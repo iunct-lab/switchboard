@@ -1,6 +1,7 @@
 import type { Job, JobRequest } from "@switchboard/protocol";
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { childEnv } from "@switchboard/adapter-claude";
 import type { Db } from "./db.ts";
 import { TASK_MARK } from "./detached.ts";
 import { readBootId } from "./ops-stops.ts";
@@ -20,6 +21,9 @@ export class JobError extends Error {
     super(message);
   }
 }
+
+/** How long an ended job stays in the list and keeps its folder (#4276): GET /api/jobs, the resources screen and `ops-kit job list` show the same 7 days. */
+export const JOBS_KEEP_MS = 7 * 24 * 3600 * 1000;
 
 /** A kind's command: argv, then shell text after it that only names the wrapper's variables (`$J`, `$JOB_PROMPT`, `$JOB_OUT`). */
 export type JobCommand = { argv: string[]; tail: string };
@@ -116,6 +120,32 @@ const readExit = (jobDir: string): number | null => {
   }
 };
 
+/**
+ * Removes the folder (`<dir>/<id>`) of each job that ended before the list's period (#4276). The rows stay; a folder
+ * whose number has no row stays too (what is left of a restored database is kept to look at).
+ */
+export function pruneJobDirs(deps: JobDeps): number {
+  if (!existsSync(deps.dir)) return 0;
+  const before = (deps.now ?? Date.now)() - JOBS_KEEP_MS;
+  let n = 0;
+  for (const name of readdirSync(deps.dir)) {
+    if (!/^\d+$/.test(name)) continue;
+    const job = deps.db.getJob(Number(name));
+    if (!job || job.status === "running" || job.endedAt === null || job.endedAt >= before) continue;
+    rmSync(join(deps.dir, name), { recursive: true, force: true });
+    n++;
+  }
+  return n;
+}
+
+const pruneQuietly = (deps: JobDeps) => {
+  try {
+    pruneJobDirs(deps);
+  } catch {
+    // a folder that stays is not worth stopping the record of a job's end
+  }
+};
+
 function finish(deps: JobDeps, id: number): Job | null {
   const jobDir = join(deps.dir, String(id));
   const code = readExit(jobDir);
@@ -123,6 +153,7 @@ function finish(deps: JobDeps, id: number): Job | null {
   const log = join(jobDir, "log");
   const summary = [`${status}（終了コード ${code ?? "なし"}）`, tailLines(log, 20), `ログ: ${log}`].filter(Boolean).join("\n");
   const job = deps.db.finishJob(id, { status, exitCode: code, summary, endedAt: (deps.now ?? Date.now)() });
+  pruneQuietly(deps);
   if (job) deps.onFinish?.(job);
   return job;
 }
@@ -158,9 +189,11 @@ export function requestJob(deps: JobDeps, req: JobRequest): Job {
   const jobDir = join(deps.dir, String(job.id));
   const { argv, tail } = deps.command ? deps.command(resolved) : jobCommand(resolved, deps.reviewIdleS);
   // not the Task's: without its mark (the Task's end stops what carries it, #1397) and without SWITCHBOARD_SUPERVISED
-  // (a Task's variable; local CI's tests fail with it). OPS_KIT_TASK_ID still names the Task to `ops-kit heavy`.
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(deps.env)) if (v !== undefined && k !== TASK_MARK && k !== "SWITCHBOARD_SUPERVISED") env[k] = v;
+  // (a Task's variable; local CI's tests fail with it), and without Claude Code's session markers and the OTEL_*
+  // destinations, as the Task's own claude gets it (`childEnv`). OPS_KIT_TASK_ID still names the Task to `ops-kit heavy`.
+  const env = childEnv(deps.env);
+  delete env[TASK_MARK];
+  delete env.SWITCHBOARD_SUPERVISED;
   Object.assign(env, files, { J: jobDir, OPS_KIT_TASK_ID: req.taskId });
   let proc: ReturnType<typeof Bun.spawn>;
   let log: number | null = null;
@@ -220,4 +253,5 @@ export function recoverJobs(deps: JobDeps): void {
     if (readExit(join(deps.dir, String(job.id))) !== null || pid === null || !sameBoot || !alive(pid)) finish(deps, job.id);
     else watch(job.id, pid);
   }
+  pruneQuietly(deps);
 }

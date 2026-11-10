@@ -3,23 +3,23 @@
     "journeys": {
       "launch": {
         "requests": 13,
-        "layoutCount": 4,
-        "recalcStyleCount": 6,
+        "layoutCount": 5,
+        "recalcStyleCount": 7,
         "layoutShift": 0.1614
       },
       "new-task": {
-        "requests": 13,
+        "requests": 15,
         "layoutCount": 8,
         "recalcStyleCount": 8,
         "layoutShift": 0.042
       },
       "open-task": {
-        "requests": 7,
+        "requests": 9,
         "layoutCount": 4,
         "recalcStyleCount": 4
       },
       "send": {
-        "requests": 6,
+        "requests": 7,
         "recalcStyleCount": 5,
         "layoutShift": 0.0404
       }
