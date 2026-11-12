@@ -1,7 +1,7 @@
-# Tasks in the cloud (Claude Code on the web): Local/Cloud Task usage and contract (PBI #1106)
+# Tasks in the cloud (Claude Code on the web): Local/Cloud Task usage and contract
 
 Investigation date: 2026-10-10. Installed CLI: **2.1.293**.
-This describes the implemented PBI #1106 stack. The first pipe invocation
+This describes the stack implemented on 2026-10-11. The first pipe invocation
 was refused; the later authorized PTY invocation created a session. Local behaviour stays as defined
 in [claude-stream-json.md](claude-stream-json.md).
 
@@ -20,7 +20,7 @@ in [claude-stream-json.md](claude-stream-json.md).
 4. Enter a new task description and press Start. Local model, approval mode,
    attachments, budget and shadow choices are not sent to Cloud. Existing
    session IDs/URLs are refused; this action creates a new session.
-5. Open **公式Cloudで続ける** on the resulting Task. Use the official Web UI
+5. Open **`公式Cloudで続ける`** on the resulting Task. Use the official Web UI
    for replies, approvals, model changes and stopping the Cloud workload.
    Switchboard reports the Cloud state as unconfirmed, and does not report
    unobserved usage or costs as zero. A launcher ending is not completion.
@@ -252,7 +252,7 @@ on an unused port at or above 47911, and cleans up its daemon and browser.
 Unit suite: `env -u SWITCHBOARD_SUPERVISED bun test packages apps ops-kit`;
 type checks: `bun run typecheck`.
 
-Live check (Task #1163, 2026-10-11, CLI **2.1.296**): from the running
+Live check (2026-10-11, CLI **2.1.296**): from the running
 Switchboard, Home → Claude → Cloud on a Private repository Workspace (`main`,
 matching origin) created a real Cloud session. The Task got the validated
 reference and stayed `idle`/`unknown`. The user saw the session in the
@@ -268,13 +268,12 @@ user for pass/fail only, never account identifiers, session URLs or QR
 images. No automatic authentication repair is part of the product.
 
 `--remote-control` exposes a locally running session to other devices; Cloud
-runs on official cloud infrastructure. Teleport/local continuation is PBI
-#1107 and is not an additional creation mode in this PBI.
+runs on official cloud infrastructure. Teleport/local continuation came later (2026-10-13) and is not an additional creation mode in this PBI.
 
-CI の実行は [local-ci 相当検証の手順](local-ci.md) を参照する。
+For running CI, see [the local-ci equivalent verification procedure](local-ci.md).
 
 
-## Teleport contract (Task #1127)
+## Teleport contract (2026-10-11)
 
 Investigated 2026-10-11 with CLI **2.1.296**. Sources:
 [Cloud guide](https://code.claude.com/docs/en/claude-code-on-the-web#continue-a-cloud-session-in-your-terminal),
@@ -391,22 +390,22 @@ correlation, `bun run typecheck`, `git diff --check`. This Task changes only
 this document; no runtime test was added. Subsequent Tasks add parser and
 lifecycle fixtures, safety/E2E tests and branch/real-continuation validation.
 
-## Continue an existing Cloud Task locally (#1107)
+## Continue an existing Cloud Task locally (2026-10-13)
 
-On the stopped Cloud Task, select **ローカルで続ける**. A validated Cloud reference
+On the stopped Cloud Task, select **`ローカルで続ける`**. A validated Cloud reference
 and PTY support are required. This is an explicit action for an existing
 session, not a third execution mode on Home. The official CLI runs on the
 Switchboard host in the Task's saved cwd, not the browser device. Opening a
 Terminal tab, reconnecting or reloading never starts Teleport. The button
 calls `POST /api/tasks/:id/teleport` (409 with the reason when refused); no
-terminal socket is needed (#1306).
+terminal socket is needed (2026-10-16).
 
-**What the person does (#1306).** When the CLI asks nothing, nothing more:
+**What the person does (2026-10-16).** When the CLI asks nothing, nothing more:
 Switchboard waits until the CLI printed `Session resumed` for the saved Cloud
 ID and its output has been quiet for a second, then writes
 `/rename continued-from-cloud` and, once the CLI confirms
 `Session renamed to`, `/exit` (each with Enter 300 ms later, as a separate
-write: the CLI's menu mixes them up otherwise). The name is needed (#1865):
+write: the CLI's menu mixes them up otherwise). The name is needed (2026-10-19):
 the official CLI (seen with 2.1.301 and 2.1.302) writes the resumed
 conversation to its normal log only once this session records an entry, and
 prints `claude --resume <UUID>` on exit only when that log exists; a bare
@@ -418,7 +417,7 @@ before, and the Local Task's conversation screen opens. These two commands
 are the only things Switchboard ever writes to the CLI. When the CLI asks
 something (folder trust, uncommitted changes, branch) it does so before
 `Session resumed`: output that stops for three seconds before that is shown
-on the Cloud Task as the CLI's last lines with **ターミナルで答える**;
+on the Cloud Task as the CLI's last lines with **`ターミナルで答える`**;
 nothing is written. Once the person answers in the terminal and the CLI
 resumes, the same `/rename` and `/exit` follow and the Local Task opens. If
 the CLI does not confirm the name, or `/exit` does not end it, within ten
@@ -449,13 +448,13 @@ the automatic switch, the head also names the Cloud Task it switched from,
 until another screen opens. Brief links back too.
 There is no automatic conversation synchronization back to Cloud.
 
-**Where it runs (#1395).** The continuation never runs in the clone a Local
+**Where it runs (2026-10-19).** The continuation never runs in the clone a Local
 Task may be working in. Switchboard adds a Git worktree at
 `<repo root>/.claude/worktrees/teleport-<Cloud Task id>` (detached at the
 clone's HEAD, a clean checkout: the clone's uncommitted files are not in it),
 runs the official CLI there, and imports the log with that directory as the
 Local Task's cwd; replies then `--resume` in that worktree. The Cloud and Local
-Task screens show **作業コピー: <path>**. Selecting the button again for the same
+Task screens show **`作業コピー: <path>`**. Selecting the button again for the same
 Cloud Task reuses the same worktree and does not touch what is in it; a
 non-worktree directory at that place stops the start untouched.
 
@@ -463,7 +462,7 @@ A Local Task at work (running or waiting) in the clone does not block the
 button and is not stopped or refused: its replies and new Tasks in the clone
 carry on during Teleport. The only start refused for being busy is a Local Task
 at work in this Cloud Task's own worktree (the message names it); a finished
-one there that is only idling is closed first, as before (#1304), and, while
+one there that is only idling is closed first, as before (2026-10-12), and, while
 Teleport/import is active, replies to Tasks in that worktree are refused. The
 only Git changes Switchboard makes are `git worktree add --detach` and one
 `/.claude/worktrees/` line in the clone's `info/exclude` (so the clone's
@@ -480,7 +479,7 @@ continued conversation if needed.
 
 Cancellation, missing proof, mismatched log/Workspace or an ownership
 conflict leaves the result unconfirmed and creates no association. Read the
-Terminal and saved Cloud status; **Local Taskを確認** refreshes the links. Do
+Terminal and saved Cloud status; **`Local Taskを確認`** refreshes the links. Do
 not retry an operation whose Git/history effect is unknown. For an unpushed
 branch, check the Cloud branch on GitHub; for a repo/account mismatch or
 access error, check cwd, the account and GitHub linkage yourself.
@@ -490,50 +489,15 @@ login or provider configuration.
 
 ### Validation scope
 
-The authorized #1127 observation (official CLI 2.1.296) verified Teleport
-output/normal-log UUID correlation and ordinary CLI resume on the same
-branch. It did not establish that the complete new Switchboard flow passes.
-Anonymous fixtures, fake-CLI PTYs and headless Chrome cover software
-behaviour without live Cloud or authentication. On 2026-10-11 the Teleport
-browser E2E passed 17 cases and the existing Local/Cloud creation E2E passed
-15 cases, both with zero browser console errors; the full typecheck passed.
-After #1306 the Teleport E2E (`scripts/claude-teleport-e2e.ts`) passes 19
-cases with zero console errors, including: no terminal input at all with the
-fake CLI receiving only `/exit` and the terminal tab never opened; progress
-moving from Teleport to import; a question shown with no automatic answer and
-Git unchanged, answered in the terminal and followed by the same automatic
-`/exit`; and the earlier failure, cancel, ownership and restart cases. The
-real CLI's acceptance of `/exit` is part of the PBI's user check.
-Since #1865 the fake CLI behaves like the official one: it prints the
-evidence and writes the log only after `/rename`, and a bare `/exit` leaves
-neither, so the E2E fails against the earlier `/exit`-only ending.
-These software checks are not a live acceptance pass. The fixtures'
-diagnostic strings are synthetic, not evidence of every real
-account/provider error wording.
+The fixtures, the fake-CLI PTY tests and the headless-Chrome E2E cover Switchboard's own behaviour without live Cloud or authentication, so they do not show that the whole flow works against a real account. Their diagnostic strings are synthetic and do not cover every real account or provider error wording. Check the flow once with your own account before relying on it.
 
-The #1133 live acceptance run (2026-10-11, CLI 2.1.296, approved by the user)
-used one existing Cloud session, a fresh clone of the repository and a
-separate daemon from the PBI checkout with its own data directory; no new
-Cloud session was created. Results:
+**How to verify with a real account.** Use a subscription account, an existing Cloud session of a repository you can clone, and a daemon with its own data directory. Do not use an API key or an external provider. Starting a new Cloud session needs its own decision, because it creates Cloud work.
 
-| Item | Result |
+| Item | Expected result |
 |---|---|
-| Full target conversation | pass: 2 user prompts, 2 replies and 1 tool call/result imported as a Local Task linked to the Cloud Task |
-| Work branch | **unverified**: the session had no pushed work branch; HEAD, branches, status and stash stayed unchanged |
-| Ordinary CLI `--resume` | pass: opened the conversation and printed the same UUID on exit |
-| Switchboard continuation | pass: a reply from the Local Task resumed the same session and answered from the imported context |
+| Full target conversation | The Cloud conversation (prompts, replies, tool calls and results) is imported as a Local Task that links to the Cloud Task |
+| Work branch | If the Cloud session pushed a work branch, the continuation's worktree is on it; HEAD, branches, status and stash of your clone stay unchanged. A session with no pushed work branch cannot show this item, so it stays unverified |
+| Ordinary CLI `--resume` | The official CLI opens the imported conversation and prints the same UUID on exit |
+| Switchboard continuation | A reply from the Local Task resumes the same session and answers from the imported context |
 
-The run found that the real CLI places words with cursor moves (CSI n C /
-CSI n G) instead of spaces, so the resumed marker was missed and every import
-was reported unconfirmed; the resumed marker now reads those moves as
-spaces (IDs and UUIDs do not). It also found that
-the Teleport child inherited the daemon's `CLAUDE_CODE_*` markers when the
-daemon itself was started from inside a Claude Code session; that turns the
-local log off, so the import stayed unconfirmed. Teleport now starts with the
-same child environment as the Claude adapter (claude-stream-json.md). bun-pty
-adds the given environment to the daemon's own instead of replacing it, so
-the markers are removed with `/usr/bin/env -u` in front of the CLI.
-Checking the work branch needs a Cloud session that pushed one, which is a
-new Cloud creation and needs separate approval. Private conversation,
-identifiers, URLs, QR codes and authentication values are not recorded in
-reports. Unverified items do not count as Task/PBI completion.
+If the import stays unconfirmed, read the Terminal output: the real CLI places words with cursor moves instead of spaces, and a CLI started from inside another Claude Code session inherits that session's `CLAUDE_CODE_*` markers, which turn the local log off. Switchboard handles both, so a remaining failure is a case to look into, not to retry. Private conversation, identifiers, URLs, QR codes and authentication values do not belong in a report. An unverified item does not count as complete.

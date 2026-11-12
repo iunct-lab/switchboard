@@ -56,6 +56,9 @@ export const panels = msgs({
   loggingIn: { ja: "ログイン中: ", en: "Logging in: " },
   logIn: { ja: "ログインする", en: "Log in" },
   approveAll: { ja: "まとめて承認", en: "Approve together" },
+  approveMerges: { ja: "選んだ PR のマージを認める", en: "Allow the chosen PRs to merge" },
+  mergeNoChoice: { ja: "「マージする」の選択肢が無いので、ここでは選べません", en: "It has no 「マージする」 choice, so it cannot be chosen here" },
+  mergeNotSent: { ja: "送りませんでした: {detail}", en: "Not sent: {detail}" },
   mockups: { ja: "画面イメージ", en: "Screen mockups" },
 
   // Interventions.tsx
@@ -187,6 +190,9 @@ export const panels = msgs({
   sendHow: { ja: "送り方", en: "How to send" },
   modeRequest: { ja: "要望として登録", en: "File as a request" },
   modeFix: { ja: "すぐ直す", en: "Fix now" },
+  requestHintUpstream: { ja: "Switchboard への要望は、この環境では Task にせず、元のリポジトリ（upstream）の要望フォームに出します。送ると、本文入りのフォームを開くリンクを出します。", en: "A request for Switchboard is not made into a Task here; it goes to the upstream repository's request form. Sending shows a link that opens the form with your text." },
+  upstreamOpen: { ja: "upstream に要望を出す（GitHub のフォームを開く）", en: "File it upstream (opens the GitHub form)" },
+  upstreamCopyHint: { ja: "upstream は GitHub ではないので、本文をコピーして、そこの要望の受け口に貼ってください。", en: "The upstream is not on GitHub: copy the text and paste it into its request channel." },
   fileTo: { ja: "登録先", en: "File to" },
   fixHint: { ja: "Switchboard を直す Task をすぐ始めます（要望 Issue は作りません）。", en: "Starts a Task that fixes Switchboard right away (no request Issue is made)." },
   requestHint: { ja: "要望や不具合を送ると、{target} のリポジトリに要望 Issue と PBI・Task が作られます。", en: "Sending a request or a bug makes a request Issue, a PBI and Tasks in the repository of {target}." },

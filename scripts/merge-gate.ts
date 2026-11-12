@@ -332,14 +332,14 @@ export function checksFromRuns(runs: WorkflowRun[]): PrFacts["checks"] {
 }
 
 /**
- * When Actions does not start (billing: the job fails with no steps and no runner), or there is no run at all, the local
+ * When Actions does not start (billing: the job fails with no steps and no runner, or the run stays queued), or there is no run at all, the local
  * pass of `bun scripts/local-ci.ts` counts as the CI's success (#387, #914). Only for a run that never started (a CI
  * whose tests really failed still stops the merge) and only when the newest result of the stack's top is a pass whose
  * head has this PR's commits as they are now, by `git cherry` (`localCiOf`, #2940, #3118).
  */
 const LOCAL_CI_SUFFIX = "（Actions が始まらず、ローカルで pass）";
 const LOCAL_CI_ONLY = "local-ci（Actions の run が無く、ローカルで pass）";
-const PROTECTION_DOC = "docs/merge-gate.md の「保護枝とローカルの結果」";
+const PROTECTION_DOC = "docs/merge-gate.md の「Branch protection and local results」";
 
 /**
  * The top of `n`'s stack (#2940): up by the one open PR whose base is this one's head branch. None or two above → here.
@@ -410,6 +410,11 @@ async function checksWithLocalCi(runs: WorkflowRun[], localPass: boolean, run: (
   const checks: PrFacts["checks"] = [];
   for (const r of newestRuns(runs)) {
     const c = toCheck(r);
+    // a run still queued (or waiting) has not started: with the local pass it counts like a run that never started
+    if (localPass && ["queued", "waiting", "requested", "pending"].includes(r.status)) {
+      checks.push({ name: `${r.name}${LOCAL_CI_SUFFIX}`, conclusion: "SUCCESS" });
+      continue;
+    }
     if (localPass && c.conclusion === "FAILURE") {
       const jobs = JSON.parse(await run(["api", `repos/${repo}/actions/runs/${r.id}/jobs`])).jobs as Array<{ steps?: unknown[] }>;
       if (jobs.length > 0 && jobs.every((j) => (j.steps ?? []).length === 0)) {

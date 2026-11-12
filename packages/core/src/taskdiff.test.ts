@@ -10,7 +10,7 @@ let root: string;
 const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com" };
 const git = (cwd: string, args: string[]) => Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: gitEnv });
 const env = (ev: EventEnvelope["ev"], seq: number): EventEnvelope => ({ taskId: "t", seq, ts: 0, ev });
-const task = (cwd: string, scope: string[] = [cwd]): Task => ({ id: "t", workspaceId: null, title: "", runner: "claude", cwd, scope, status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 0, createdAt: 0, updatedAt: 0 });
+const task = (cwd: string, scope: string[] = [cwd]): Task => ({ id: "t", workspaceId: null, title: "", runner: "claude", cwd, scope, status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 0, createdAt: 0, updatedAt: 0 });
 
 beforeAll(() => {
   // tmpdir() is a symlink on macOS (/var → /private/var): the collector must canonicalize roots and paths alike
@@ -250,6 +250,18 @@ describe("task diff (#12)", () => {
     const shown = withSnapshot([{ path: gone, rel: gone, stat: "", diff: "", source: "removed" }], noted);
     expect(shown.some((f) => f.source === "snapshot" && f.rel.includes("files dropped"))).toBe(true);
     expect(mergeSnapshot(noted, [], 9, () => false).files.some((f) => f.rel.includes("files dropped"))).toBe(true);
+    // cutting a copy that already has a note: one note per root, the counts add up, still under the limit
+    const countOf = (x: { rel: string }) => Number(/^… (\d+) files dropped/.exec(x.rel)![1]);
+    const once = capSnapshot({ at: 300, files: Array.from({ length: 50 }, (_, i) => ({ ...big(`g${i}`, 10), at: i })) }, 3000);
+    const first = countOf(once.files.find((f) => f.rel.includes("files dropped"))!);
+    const twice = capSnapshot({ at: 301, files: [...once.files, ...Array.from({ length: 30 }, (_, i) => ({ ...big(`h${i}`, 10), at: 200 + i }))] }, 3000);
+    expect(Buffer.byteLength(JSON.stringify(twice.files))).toBeLessThanOrEqual(3000);
+    const notes = twice.files.filter((f) => f.rel.includes("files dropped"));
+    expect(notes.length).toBe(1);
+    expect(countOf(notes[0]!)).toBeGreaterThan(first);
+    expect(countOf(notes[0]!) + twice.files.length - 1).toBe(first + once.files.length - 1 + 30); // nothing is counted twice or lost
+    // under the limit with an earlier note: the note stays as one row
+    expect(capSnapshot(once, 1_000_000).files.filter((f) => f.rel.includes("files dropped")).map(countOf)).toEqual([first]);
     // under the limit: unchanged
     const same = { at: 1, files: [big("a", 10)] };
     expect(capSnapshot(same, 1_000_000)).toEqual(same);

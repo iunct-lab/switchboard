@@ -1,4 +1,4 @@
-import type { EventEnvelope } from "@switchboard/protocol";
+import type { EventEnvelope, Task } from "@switchboard/protocol";
 import type { TaskDetail } from "./api.ts";
 
 /**
@@ -51,11 +51,48 @@ export function taskReader(deps: {
   let connects = 0;
   /** Tasks with a whole read on its way, and whether a live event of theirs was dropped meanwhile. */
   const loading = new Map<string, boolean>();
-  const follow = (id: string, after: number) =>
-    deps.read(id, after).then(
-      (fetched) => deps.update((prev) => caughtUp(prev, id, fetched)),
-      () => deps.update((prev) => caughtUp(prev, id, null)),
+  /**
+   * The reads on their way per Task, each with the last Task a task.updated sent for it while that read was out (#2834).
+   * The socket sends each change after the read's snapshot, so that Task is the newer one; `updatedAt` cannot tell (a
+   * title or a judgement keeps it). Each read has its own: a read started later does not take an earlier read's. And
+   * a read answering after one started later has answered brings its events only: its Task is the older one.
+   */
+  type Slot = { n: number; task?: Task };
+  let started = 0;
+  const reading = new Map<string, Set<Slot>>();
+  const answered = new Map<string, number>();
+  const begin = (id: string): Slot => {
+    const slot: Slot = { n: ++started };
+    reading.set(id, (reading.get(id) ?? new Set()).add(slot));
+    return slot;
+  };
+  const end = (id: string, slot: Slot): void => {
+    const set = reading.get(id);
+    set?.delete(slot);
+    if (set?.size === 0) reading.delete(id);
+  };
+  /** The Task a read's answer brings: the update that came while it was out, else its own; null when a later read answered. */
+  const settle = (id: string, slot: Slot, fetched: Task): Task | null => {
+    end(id, slot);
+    if ((answered.get(id) ?? 0) > slot.n) return null;
+    answered.set(id, slot.n);
+    return slot.task ?? fetched;
+  };
+  const follow = (id: string, after: number) => {
+    const slot = begin(id);
+    return deps.read(id, after).then(
+      (fetched) => {
+        const task = settle(id, slot, fetched.task);
+        deps.update((prev) =>
+          task ? caughtUp(prev, id, { ...fetched, task }) : prev[id] ? { ...prev, [id]: { ...prev[id]!, events: mergeEvents(prev[id]!.events, fetched.events) } } : prev,
+        );
+      },
+      () => {
+        end(id, slot);
+        deps.update((prev) => caughtUp(prev, id, null));
+      },
     );
+  };
   return {
     connected(): void {
       connects++;
@@ -64,18 +101,25 @@ export function taskReader(deps: {
     load(id: string): Promise<void> {
       const at = connects;
       loading.set(id, false);
+      const slot = begin(id);
       return deps.read(id).then(
         (d) => {
           const dropped = loading.get(id);
           loading.delete(id);
-          deps.update((prev) => ({ ...prev, [id]: { ...d, events: mergeEvents(d.events, prev[id]?.events ?? []) } }));
+          const task = settle(id, slot, d.task);
+          deps.update((prev) => ({ ...prev, [id]: { ...(task || !prev[id] ? { ...d, task: task ?? d.task } : prev[id]!), events: mergeEvents(d.events, prev[id]?.events ?? []) } }));
           if (connects !== at || dropped) void follow(id, lastSeq(d.events));
         },
         (e: Error) => {
           loading.delete(id);
+          end(id, slot);
           deps.failed(e, id);
         },
       );
+    },
+    /** A task.updated came: a read of that Task on its way answers with it instead of its older snapshot (#2834). */
+    updated(task: Task): void {
+      for (const slot of reading.get(task.id) ?? []) slot.task = task;
     },
     /** A live event of a Task the page does not hold came and was dropped. */
     missed(id: string): void {

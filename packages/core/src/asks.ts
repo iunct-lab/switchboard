@@ -1,5 +1,6 @@
 import type { AnswerPolicy, Artifact, Ask, AskAnswerKind, AskQuestion, AskBlocker, AskResume, AskPolicy, ApprovalRuleMatch, BacklogItem, EventEnvelope, PendingApproval, PolicySubject, ScheduleResult, StopSummary, Task } from "@switchboard/protocol";
 import { MERGE_ASK } from "../../../scripts/merge-gate.ts";
+import { afterTime } from "../../../scripts/parallel-guard.ts";
 import { isAnswered, isUnblocked, priorityRank, type GhRunner } from "./backlog.ts";
 import { matchPolicies, POLICY_DEFAULT_DAYS, subjectChanges } from "./policies.ts";
 import { issueOf, NEEDS_PERSON } from "./stops.ts";
@@ -16,7 +17,7 @@ export const ASK_HISTORY_MS = 24 * 60 * 60 * 1000;
 /**
  * The question, choices, recommendation, where it stopped (`**止めた場所**:`, with the first `PR #n` it names; #936) and
  * the Task whose artifacts are its screen mockups (`**画面イメージ**:`, the first id in it; #2221) of a `## 判断待ち`
- * (`**問い**:`) or an operational check (`**確認**:`), in the form of issue-workflow's 「判断待ちの出し方」.
+ * (`**問い**:`), in the form of issue-workflow's 「判断待ちの出し方」.
  * A choice's ` — 許可: <文>` is its grant (#2745), kept in the choice's text too (the reply sends the line as it is).
  * Lines not in that form are left; what is not there is null / empty.
  */
@@ -25,27 +26,56 @@ export function parseAskBlock(text: string): { question: string | null; choices:
   let mockupTask: string | null = null;
   let recommendation: Ask["recommendation"] = null;
   let place: Ask["place"] = null;
+  let inPlace = false;
   const choices: string[] = [];
   let inChoices = false;
   for (const raw of text.split("\n")) {
     const line = raw.trim();
-    const field = /^\*\*(問い|確認|選択肢|推奨|止めた場所|画面イメージ)\*\*[:：]\s*(.*)$/.exec(line);
+    const field = /^\*\*(問い|選択肢|推奨|止めた場所|画面イメージ)\*\*[:：]\s*(.*)$/.exec(line);
     if (field) {
       inChoices = field[1] === "選択肢";
+      inPlace = field[1] === "止めた場所" && place === null;
       const value = field[2]!.trim();
-      if ((field[1] === "問い" || field[1] === "確認") && question === null && value) question = value;
+      if (field[1] === "問い" && question === null && value) question = value;
       if (field[1] === "画面イメージ" && mockupTask === null && value) mockupTask = /[\w-]+/.exec(value)?.[0] ?? null;
-      if (field[1] === "止めた場所" && place === null && value) place = { text: value, pr: Number(/PR #(\d+)/.exec(value)?.[1] ?? 0) || null };
+      if (field[1] === "止めた場所" && place === null && value) place = { text: value, pr: Number(/PR #(\d+)/.exec(value)?.[1] ?? 0) || null, reasons: [], diff: /\+\d+\/-\d+/.exec(value)?.[0] ?? null };
       if (field[1] === "推奨" && value) {
         const cut = value.indexOf(" — ");
         recommendation = cut < 0 ? { choice: value, why: "" } : { choice: value.slice(0, cut).trim(), why: value.slice(cut + 3).trim() };
       }
       continue;
     }
+    if (inPlace && place && /^[-*]?\s*\[(聞く|再チェック)/.test(line)) {
+      place.reasons.push(line.replace(/^[-*]\s*/, ""));
+      place.diff ??= /\+\d+\/-\d+/.exec(line)?.[0] ?? null;
+      continue;
+    }
+    // a standalone diff summary (`+40/-3`, `（+40/-3）`) under 止めた場所 does not end the reasons below it
+    if (inPlace && place && /^[-*]?\s*[（(]?\+\d+\/-\d+[)）]?$/.test(line)) {
+      place.diff ??= /\+\d+\/-\d+/.exec(line)![0];
+      continue;
+    }
     if (inChoices && /^[-*] /.test(line)) choices.push(line.slice(2).trim());
-    else if (line) inChoices = false;
+    else if (line) inChoices = inPlace = false;
   }
   return { question, choices, grants: choices.map(grantOfChoice), recommendation, place, mockupTask };
+}
+
+/**
+ * Where a question tool's questions stopped and what they recommend (#3122), read from the first question: its first line
+ * naming `PR #n` is the place (the lines after it starting `[聞く]` / `[再チェック` are its reasons; the PR's own `+n/-m` line, else the
+ * first `+n/-m` in the question, is the diff, #2790), and the first option whose label ends with ` (Recommended)` is the recommendation (its description is the why).
+ */
+export function questionFacts(questions: AskQuestion[]): { place: Ask["place"]; recommendation: Ask["recommendation"] } {
+  const q = questions[0];
+  if (!q) return { place: null, recommendation: null };
+  const [first = "", ...rest] = q.question.split("\n").map((l) => l.trim());
+  const pr = Number(/PR #(\d+)/.exec(first)?.[1] ?? 0) || null;
+  const reasons = rest.filter((l) => /^[-*]?\s*\[(聞く|再チェック)/.test(l)).map((l) => l.replace(/^[-*]\s*/, ""));
+  const diffOf = (t: string) => /\+\d+\/-\d+/.exec(t)?.[0] ?? null;
+  const place = pr ? { text: first, pr, reasons, diff: diffOf(first) ?? rest.find((l) => /^\+\d+\/-\d+$/.test(l)) ?? rest.map(diffOf).find((d) => d) ?? null } : null;
+  const rec = q.options.find((o) => o.label.endsWith(" (Recommended)"));
+  return { place, recommendation: rec ? { choice: rec.label, why: rec.description ?? "" } : null };
 }
 
 /** The grant of a choice (#2745): what follows ` — 許可: ` in its line; null = none. */
@@ -92,6 +122,8 @@ export const ON_HOLD_RESUME = "保留中（on-hold を外すと次の定期実�
  */
 export function resumeOfIssue(input: {
   answeredAt: number | null;
+  /** The stage Task the answer itself started (server.ts keeps its id): its resume even when it was created before `answeredAt` (GitHub's comment time, later than the start). */
+  startedTaskId?: string | null;
   stageTasks: Array<{ id: string; status: Task["status"]; createdAt: number; updatedAt: number }>;
   failure: { at: number; reason: string } | null;
   blockers: AskBlocker[];
@@ -99,7 +131,7 @@ export function resumeOfIssue(input: {
 }): AskResume | null {
   const { answeredAt, failure, blockers } = input;
   if (answeredAt === null) return null;
-  const t = input.stageTasks.filter((x) => x.createdAt >= answeredAt).sort((a, b) => b.createdAt - a.createdAt)[0];
+  const t = input.stageTasks.filter((x) => x.createdAt >= answeredAt || x.id === input.startedTaskId).sort((a, b) => b.createdAt - a.createdAt)[0];
   if (t) {
     if (IN_FLIGHT.has(t.status)) return { state: "running", reason: null, taskId: t.id, at: t.createdAt };
     if (t.status === "error" || t.status === "aborted") return { state: "failed", reason: `工程 Task が ${t.status}`, taskId: t.id, at: t.updatedAt };
@@ -155,7 +187,7 @@ export function answersOf(a: Pick<Ask, "kind" | "needs" | "state" | "choices" | 
 
 /**
  * The one reply that answers a question tool's questions (#3053): a line per question, `- <question>: <labels joined by
- * ", "> | <free text>`. null = the answers do not fit the questions as they are now (a different count, an option no
+ * ", ">[ — 許可: <文>] | <free text>`. null = the answers do not fit the questions as they are now (a different count, an option no
  * longer offered, more than one option of a single-choice question, a question left unanswered).
  */
 export function questionsReply(questions: AskQuestion[], answers: Array<{ choices: string[]; text?: string }>): string | null {
@@ -166,7 +198,9 @@ export function questionsReply(questions: AskQuestion[], answers: Array<{ choice
     if (q.options.length) {
       const labels = new Set(q.options.map((o) => o.label));
       if (!a.choices.length || (!q.multiSelect && a.choices.length > 1) || a.choices.some((c) => !labels.has(c)) || a.text) return null;
-      lines.push(`- ${q.question}: ${a.choices.join(", ")}`);
+      // a chosen option's ` — 許可: <文>` (#2745) goes at the end of the line, as the person's say on it
+      const grants = a.choices.flatMap((c) => grantOfChoice(q.options.find((o) => o.label === c)?.description ?? "") ?? []);
+      lines.push(`- ${q.question}: ${a.choices.join(", ")}${grants.map((g) => ` — 許可: ${g}`).join("")}`);
     } else {
       const text = a.text?.trim();
       if (!text || a.choices.length) return null;
@@ -297,6 +331,12 @@ const base = (i: BacklogItem): Pick<Ask, "workspace" | "pbi" | "issue" | "task" 
 });
 
 /** A stop series as a question (#939's `next`): decide = a person answers, wait / retry = it goes on by itself, resume = answered, none = resolved. */
+/** The date an open `depends` stop waits for (its `after` condition, #4616), for the reason: "（期日 <日時> まで）". */
+const dueOf = (s: StopSummary): string => {
+  const due = s.reason === "depends" && s.state !== "resolved" ? s.conditions.find((c) => c.key === "after" && !c.met) : undefined;
+  return due ? `（期日 ${due.value} まで）` : "";
+};
+
 function stopAsk(s: StopSummary, shared: Omit<Ask, "id" | "kind" | "needs" | "state" | "at" | "changedAt" | "reason" | "question" | "next" | "source" | "route" | "conditions" | "task">, next: string | null): Ask {
   const answered = s.next === "resume" && s.lastAnswer !== null;
   const [needs, state]: [Ask["needs"], Ask["state"]] =
@@ -310,7 +350,7 @@ function stopAsk(s: StopSummary, shared: Omit<Ask, "id" | "kind" | "needs" | "st
     at: s.firstAt,
     changedAt: answered ? s.lastAnswer!.at : state === "open" ? s.firstAt : s.lastAt,
     task: { id: s.work.taskId, title: null },
-    reason: `${s.reason}: ${s.evidence}`,
+    reason: `${s.reason}: ${s.evidence}${dueOf(s)}`,
     question: null,
     grant: s.reason === "permission" ? s.grant : null,
     next,
@@ -325,13 +365,13 @@ function stopAsk(s: StopSummary, shared: Omit<Ask, "id" | "kind" | "needs" | "st
  * user's check, their waits and their stage Tasks' stops — each with what stands in the way of the item (#936), and an
  * answered one with how it goes on. `approvalPending`: a tool approval of the item's stage Task is waiting.
  */
-export function asksFromBacklog(items: BacklogItem[], now: number, opts: { resumeFailures?: ResumeFailures; approvalPending?: (i: BacklogItem) => boolean; policy?: PolicyEnv; mockups?: MockupsOf } = {}): Ask[] {
+export function asksFromBacklog(items: BacklogItem[], now: number, opts: { resumeFailures?: ResumeFailures; approvalPending?: (i: BacklogItem) => boolean; policy?: PolicyEnv; mockups?: MockupsOf; startedBy?: (workspaceId: string, pbi: number) => string | null } = {}): Ask[] {
   const asks: Ask[] = [];
   for (const i of items) {
     const blockers = blockersOf({ waits: i.waits, stops: i.stopSummary, approvalPending: opts.approvalPending?.(i) ?? false });
     const shared = { ...base(i), blockers };
     const resume = (id: string, answeredAt: number | null) =>
-      resumeOfIssue({ answeredAt, stageTasks: i.lastTask ? [i.lastTask] : [], failure: opts.resumeFailures?.(id) ?? null, blockers, onHold: i.onHold });
+      resumeOfIssue({ answeredAt, startedTaskId: opts.startedBy?.(i.workspaceId, i.number) ?? null, stageTasks: i.lastTask ? [i.lastTask] : [], failure: opts.resumeFailures?.(id) ?? null, blockers, onHold: i.onHold });
     const from = asks.length;
     if (i.stage === "needs-decision") {
       const d = i.decision;
@@ -357,7 +397,8 @@ export function asksFromBacklog(items: BacklogItem[], now: number, opts: { resum
       const id = `decision:${i.workspaceId}#${i.number}@${i.answeredAt}`;
       // a stage Task created after the answer is its resume: answered while it runs or once it failed, resolved once done.
       // Before one is, a stage Task that ended after the answer (it was running when it came) went on past it too
-      const after = !!i.lastTask && i.lastTask.createdAt >= answeredAt;
+      // the one the answer itself started is after it too, even when GitHub's comment time is later than its start
+      const after = !!i.lastTask && (i.lastTask.createdAt >= answeredAt || i.lastTask.id === opts.startedBy?.(i.workspaceId, i.number));
       // no stage Task ever (one that could not start, #936): answered, not gone on yet
       const waiting = isAnswered(i) || !i.lastTask;
       const r = after || waiting ? resume(id, answeredAt) : null;
@@ -380,6 +421,8 @@ export function asksFromBacklog(items: BacklogItem[], now: number, opts: { resum
         });
     }
     for (const c of i.confirmations) {
+      // before its 期日 the line is not asked (#4616); the very time is past, as `afterTime` readers count it
+      if (c.after && afterTime(c.after) > now) continue;
       const at = Date.parse(i.updatedAt);
       asks.push({
         ...shared,
@@ -445,10 +488,8 @@ export interface TaskAskInput {
   approvals: PendingApproval[];
   /** The Tasks changed within ASK_HISTORY_MS, and the live ones. */
   tasks: Task[];
-  /** The Task's last reply (the newest session.end's summary) and that event's seq. */
-  lastReply: (taskId: string) => { text: string; seq: number } | null;
-  /** The question tool's questions of the Task's last turn (#3053, `Db.lastTurnQuestions`). */
-  lastTurnQuestions?: (taskId: string) => AskQuestion[];
+  /** The question tool's questions of the Task's last turn and the seq of the `session.end` that ended it (#3053, `Db.lastTurnQuestions`); null = it never ended a turn. */
+  lastTurnQuestions: (taskId: string) => { questions: AskQuestion[]; seq: number } | null;
   /** The permission.ask / permission.resolved events of these Tasks, oldest first. */
   permissionEvents: (taskIds: string[]) => EventEnvelope[];
   stops: (task: Task) => StopSummary[];
@@ -534,27 +575,33 @@ export function asksFromTasks(input: TaskAskInput): Ask[] {
     const n = issueOf(t);
     const superseded = n !== null && tasks.some((o) => o.id !== t.id && o.workspaceId === t.workspaceId && issueOf(o) === n && o.createdAt > t.updatedAt);
     if (t.outcome === "needs_action" && t.reviewedAt === null && t.status !== "running" && t.status !== "idle" && !superseded) {
-      const reply = input.lastReply(t.id);
-      const questions = input.lastTurnQuestions?.(t.id) ?? [];
-      const checkId = `check:${t.id}:${reply?.seq ?? ""}`;
-      const failed = input.resumeFailures?.(checkId) ?? null;
-      asks.push({
-        ...shared(t, t.id, t.title),
-        // the question tool's questions (#3053) are the check's, not what the reply's text says
-        ...(questions.length ? { question: questions[0]!.question, questions } : reply ? askBlock(reply.text, input.mockups) : { question: null }),
-        id: checkId,
-        // a reply the Task refused (#936: its budget) left the check open; its failure stays visible
-        resume: failed ? { state: "failed", reason: failed.reason, taskId: t.id, at: failed.at } : null,
-        kind: "check",
-        needs: "person",
-        state: "open",
-        at: t.updatedAt,
-        changedAt: t.updatedAt,
-        reason: "運用の確認",
-        next: `Task「${t.title}」の続き`,
-        source: { label: "Task の最後の返答", url: null, taskId: t.id },
-        route: "task",
-      });
+      // the check is the question tool's questions (#3053), and only those: what the reply's text says makes none
+      const turn = input.lastTurnQuestions(t.id);
+      if (turn?.questions.length) {
+        const { questions } = turn;
+        const checkId = `check:${t.id}:${turn.seq}`;
+        const failed = input.resumeFailures?.(checkId) ?? null;
+        asks.push({
+          ...shared(t, t.id, t.title),
+          question: questions[0]!.question,
+          questions,
+          ...questionFacts(questions),
+          // the screen mockups are the asking Task's own artifacts
+          mockups: input.mockups?.(t.id).filter((a) => a.title.startsWith("画面イメージ")) ?? [],
+          id: checkId,
+          // a reply the Task refused (#936: its budget) left the check open; its failure stays visible
+          resume: failed ? { state: "failed", reason: failed.reason, taskId: t.id, at: failed.at } : null,
+          kind: "check",
+          needs: "person",
+          state: "open",
+          at: t.updatedAt,
+          changedAt: t.updatedAt,
+          reason: "運用の確認",
+          next: `Task「${t.title}」の続き`,
+          source: { label: "Task の最後の返答", url: null, taskId: t.id },
+          route: "task",
+        });
+      }
     }
     if (t.resumeAt !== null) {
       const limit = t.resumeAt > now;
@@ -651,6 +698,7 @@ const SCAN_NEXT = "内容の URL を開いて当たりが本物の値か見る�
  *   (a false positive) — the same hits do not come back, new ones do; resolved once a result is clean
  * - an approval-window schedule that fired, while SSO / deploy batches wait (`approvalWindowNote`): open with no answer
  *   (the batches are answered on their cards), resolved once none waits
+ * - the same firing, while security merge checks wait (`securityMergeNote`, #2792): a notice of its own, answered in the batch
  * - the same firing, while the newest tag waits for running Tasks (`promotionNote`, #2148): open with no answer (promoted
  *   from the header's 「新しい版 →」), resolved once the hold is gone
  * A resolved one drops off a day later. Returns the record to keep (the same object when nothing changed).
@@ -661,6 +709,8 @@ export function noticeAsks(
     /** `workspace` = the schedule's (meta), shown as where the notice belongs. */
     scans?: Array<{ schedule: { id: string; title: string }; workspace?: { id: string; name: string } | null; result: ScheduleResult | null }>;
     windows?: Array<{ schedule: { id: string; title: string }; workspace?: { id: string; name: string } | null; note: { title: string; body: string } | null }>;
+    /** approval-window schedules again, with the security merge checks still waiting (`securityMergeNote`, #2792); a notice of its own, one per firing. */
+    merges?: Array<{ schedule: { id: string; title: string }; workspace?: { id: string; name: string } | null; note: { title: string; body: string; at: number } | null }>;
     /** approval-window schedules again, with the promotion held for running Tasks (`promotionNote`); a notice of its own. */
     promotions?: Array<{ schedule: { id: string; title: string }; workspace?: { id: string; name: string } | null; note: { title: string; body: string; at: number } | null }>;
     now: number;
@@ -743,12 +793,13 @@ export function noticeAsks(
   }
   const daily = [
     ...(input.windows ?? []).map((w) => ({ ...w, key: `approval-window:${w.schedule.id}`, first: null, todo: "判断待ちのまとまりのカードでログイン・承認する（待ちが無くなれば解消済み）" })),
+    ...(input.merges ?? []).map((w) => ({ ...w, key: `security-merge:${w.schedule.id}`, first: w.note?.at ?? null, todo: "判断待ちのセキュリティのマージ確認のまとまりから、マージする Task を選んで送る（待ちが無くなれば解消済み）" })),
     ...(input.promotions ?? []).map((w) => ({ ...w, key: `promotion:${w.schedule.id}`, first: w.note?.at ?? null, todo: "ヘッダーの「新しい版 →」から「待たずに昇格する」を押す（昇格するか Task が空いて自動で昇格すれば解消済み）" })),
   ];
   for (const w of daily) {
     if (!w.note) continue; // nothing waits: an open one is resolved below
     const had = record[w.key];
-    // a promotion's first sight is its hold's: the same hold is one notice
+    // a promotion's first sight is its hold's (the same hold is one notice); a security merge note's is its firing's (one a day)
     const at = had && had.resolvedAt === null ? had.at : (w.first ?? now);
     const r = { id: `notice:${w.key}@${at}`, at, resolvedAt: null, question: w.note.title, source: `予定「${w.schedule.title}」`, workspace: w.workspace ?? null };
     if (!same(had, r)) changed = true;

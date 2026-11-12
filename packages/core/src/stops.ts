@@ -1,4 +1,4 @@
-import { RunnerId, StopRecord, type StopChange, type StopNext, type StopSummary, type Task } from "@switchboard/protocol";
+import { isWorkingStatus, RunnerId, StopRecord, type StopChange, type StopNext, type StopSummary, type Task, type TaskStopMark } from "@switchboard/protocol";
 import { z } from "zod";
 import type { Db } from "./db.ts";
 
@@ -7,9 +7,10 @@ import type { Db } from "./db.ts";
  * needs next. The records are the tasks' `stop.record` events — the source of truth, so a restart forgets nothing.
  */
 
-/** The work a stop belongs to: the Issue (workspace + number, so the same number in another repository is other work) or, with none, the task. */
+/** The work a stop belongs to: the Issue (workspace + number, so the same number in another repository is other work), else the schedule, else the task. */
 export function workKey(w: StopRecord["work"]): string {
-  return w.issue !== null ? `${w.workspaceId ?? "-"}#${w.issue}` : `task:${w.taskId}`;
+  if (w.issue !== null) return `${w.workspaceId ?? "-"}#${w.issue}`;
+  return w.scheduleId ? `schedule:${w.scheduleId}` : `task:${w.taskId}`;
 }
 
 const squash = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
@@ -135,12 +136,84 @@ export type StopReport = z.infer<typeof StopReport>;
 /** The Issue a stage Task is for (its `stage` column, #1139); null for any other task. */
 export const issueOf = (task: Pick<Task, "workspaceId" | "stage">): number | null => (task.workspaceId ? task.stage?.issue ?? null : null);
 
-export const stopWork = (task: Task): StopRecord["work"] => ({ workspaceId: task.workspaceId, issue: issueOf(task), taskId: task.id });
+export const stopWork = (task: Task): StopRecord["work"] => {
+  const issue = issueOf(task);
+  return { workspaceId: task.workspaceId, issue, taskId: task.id, ...(issue === null && task.scheduleId ? { scheduleId: task.scheduleId } : {}) };
+};
 
-/** Every stop of the task's work: of all the stage Tasks of its Issue when it has one (another Task on the same Issue stops the same work), else its own. */
+/** How many of a schedule's newest Tasks its stops are read from. */
+const SCHEDULE_TASKS = 30;
+
+/** Every stop of the task's work: of all the stage Tasks of its Issue when it has one (another Task on the same Issue stops the same work), else of its schedule's recent Tasks, else its own. */
 export function stopRecordsFor(db: Db, task: Task): StopRecord[] {
   const issue = issueOf(task);
-  return db.listStopRecords(issue !== null ? db.stageTaskIds(task.workspaceId!, issue) : [task.id]);
+  if (issue !== null) return db.listStopRecords(db.stageTaskIds(task.workspaceId!, issue));
+  return db.listStopRecords(task.scheduleId ? db.recentScheduleTaskIds(task.scheduleId, SCHEDULE_TASKS) : [task.id]);
+}
+
+/**
+ * The last stop of each Task the person may have to act on (#4520): not reviewed (確認済み), not 完了, and stopped — the
+ * same Tasks the web's `needsAttention` lists (waiting, or not working and not idle). Of each, the newest series
+ * (`reduceStops` puts the latest `lastAt` first) among the stops that Task itself reported — not `stopRecordsFor`, which
+ * also reads the other Tasks of the same Issue / schedule (their newer stop is not this Task's last stop) and only the
+ * schedule's latest Tasks (an older Task's own stop would be lost). A Task with no stop record of its own is left out; the
+ * others are not read.
+ */
+export function stopMarks(db: Db, tasks: Task[]): Record<string, TaskStopMark> {
+  const out: Record<string, TaskStopMark> = {};
+  for (const t of tasks) {
+    if (t.reviewedAt !== null || t.outcome === "done") continue;
+    if (t.status !== "waiting" && (isWorkingStatus(t.status) || t.status === "idle")) continue;
+    const s = reduceStops(db.listStopRecords([t.id]))[0];
+    if (s) out[t.id] = { key: s.key, reason: s.reason, state: s.state, conditions: s.conditions, count: s.count };
+  }
+  return out;
+}
+
+/**
+ * The series a schedule keeps stopping on: its latest Task and the one before it (consecutive Tasks, newest first) each
+ * have a stop of it that did not end resolved, it is still waiting / exhausted, and nothing released it — a met condition
+ * to resume on, all its conditions met, or the person's answer (`seq:`) given after the latest stop came, exhausted too
+ * (answerableStops). `count` and `firstAt` are of that run of consecutive Tasks.
+ */
+export function stuckSchedule(db: Db, schedule: { id: string; lastTaskId: string | null }): StopSummary | null {
+  const last = schedule.lastTaskId;
+  if (!last) return null;
+  const ids = db.recentScheduleTaskIds(schedule.id, SCHEDULE_TASKS);
+  const from = ids.indexOf(last);
+  if (from < 0) return null;
+  const records = db.listStopRecords(ids);
+  for (const s of reduceStops(records)) {
+    if (s.work.taskId !== last || (s.state !== "waiting" && s.state !== "exhausted") || s.next === "resume") continue;
+    if (s.conditions.length > 0 && s.conditions.every((c) => c.met)) continue;
+    // per stop of the series: when it first came and its newest state; a Task counts when one of its stops did not end resolved
+    const stops = new Map<string, { taskId: string; at: number; state: StopRecord["state"] }>();
+    for (const r of records) if (stopKey(r) === s.key) stops.set(r.id, { taskId: r.work.taskId, at: stops.get(r.id)?.at ?? r.at, state: r.state });
+    const firstOf = new Map<string, number>();
+    for (const x of stops.values()) if (x.state !== "resolved") firstOf.set(x.taskId, Math.min(firstOf.get(x.taskId) ?? Infinity, x.at));
+    let count = 0;
+    let firstAt = s.lastAt;
+    for (const id of ids.slice(from)) {
+      const at = firstOf.get(id);
+      if (at === undefined) break;
+      count++;
+      firstAt = at;
+    }
+    if (count < 2) continue;
+    // the person answered the latest stop (a stop carries the newest answer known when it came: only a later one is to it)
+    const latest = [...stops].filter(([, x]) => x.taskId === last).sort((a, b) => b[1].at - a[1].at)[0];
+    const answer = latest && records.filter((r) => r.id === latest[0]).at(-1)?.answer;
+    if (latest && answer?.ref.startsWith("seq:") && answer.at > latest[1].at) continue;
+    return { ...s, count, firstAt };
+  }
+  return null;
+}
+
+/** The newest record of each stop the person's reply answers (#4479): the open ones, and one that ran out of retries. */
+export function answerableStops(records: StopRecord[]): StopRecord[] {
+  const latest = new Map<string, StopRecord>();
+  for (const r of records) latest.set(r.id, r);
+  return [...latest.values()].filter((r) => r.state === "waiting" || r.state === "retrying" || r.state === "exhausted");
 }
 
 /** The newest record of each stop of `records` still open (waiting / retrying) — the ones an answer or 中断 moves. */
@@ -284,7 +357,7 @@ export function stopRecoveryPrompt(open: StopSummary[]): string {
     '{"id":"<この停止の短い名前>","op":"<操作>","target":"<対象>","reason":"usage-limit|github-limit|transient|auth|permission|input|decision|depends|disk-full|unknown","safety":"read-only|before-effect|unknown","evidence":"<根拠>","state":"waiting|retrying|exhausted|resolved","conditions":[{"key":"pr#12","value":"open","met":false}],"actions":[{"attempt":1,"what":"<したこと>","ok":null}]}',
     "```",
     `再実行してよいのは、一時障害（通信の切断・タイムアウト・HTTP 502/503/504）で、読み取り専用か何かする前に失敗したと確かめられる操作だけ。同じ操作を最大 ${RETRY_DELAYS_MS.length} 回（${RETRY_DELAYS_MS.map((d) => `${d / 1000} 秒後`).join("、")}）まで。再実行の前に state "retrying" と試行番号を報告し、承認はいつもどおり毎回受ける。成功したら "resolved"、使い切ったら "exhausted" を報告して止まる。認証・権限・入力のエラー、ディスクの空き切れや、何かしたか分からない操作は再実行しない。Workspace MCP の exec.run は自分で再試行するので、その失敗は再実行しない。`,
-    "依存の待ち（depends）は待っている PR・Issue を conditions に pr#N / issue#N で、使用上限（usage-limit）は止めたランナーを runner#<ランナー>（value は戻る時刻を ISO 8601 のタイムゾーンつきで、分からなければ unknown）で書く（ほかの停止は conditions を省く）。並列ガードの overlap が重なり（defer）で進めないと言ったら、その出力の conditions をそのまま写す（前提の待ちを定期実行に引き渡すときの書き方は、手順にあればそれに従う）。",
+    "依存の待ち（depends）は待っている PR・Issue を conditions に pr#N / issue#N で、使用上限（usage-limit）は止めたランナーを runner#<ランナー>（value は戻る時刻を ISO 8601 のタイムゾーンつきで、分からなければ unknown）で書く。日数の経過を待つ（depends）は conditions に {\"key\":\"after\",\"value\":\"<ISO 8601 のタイムゾーンつき日時>\"}（pr#N などと一緒でもよく、全部が済んでから続く。待てるのは 7 日まで）。7 日を超えるなら PBI の工程 Task は占有の解放の --after で引き渡す（ほかの停止は conditions を省く）。並列ガードの overlap が重なり（defer）で進めないと言ったら、その出力の conditions をそのまま写す（前提の待ちを定期実行に引き渡すときの書き方は、手順にあればそれに従う）。",
     'ランナーの自動承認や権限に拒まれて止まった（reason "permission"）なら、拒まれた操作だけを名指しした許可文を "grant" に 1 文で書く（例 "grant":"<対象> に <内容> を登録することだけ許可します"。値や秘密は書かない）。利用者が選べば、その許可文が利用者の返信として 1 回だけ届く。',
     "依頼の範囲外の書き込み（計画モードでの commit・push・マージ、リポジトリの CLAUDE.md が認めていない昇格、依頼に無い Issue を閉じる）はしない。要るなら判断待ちで聞く。",
   ];

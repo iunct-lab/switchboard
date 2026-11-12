@@ -1,4 +1,4 @@
-# CLI update (PBI #1626, request #1625)
+# CLI update
 
 `scripts/update-clis.ts` keeps the host's `claude` and `codex` CLIs on npm's latest, checks that the new one still works through Switchboard's adapter, and puts the old one back when it does not. It runs first in the daily `check-models` schedule ([check-models.md](check-models.md)), so check-models always reads the updated version.
 

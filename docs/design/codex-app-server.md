@@ -89,7 +89,7 @@ Only the main thread (the one without `parentThreadId`) decides the turn state a
 
 ## Cost model
 
-The model is not on the wire in these recordings; the adapter uses the task's model, else `model = "…"` from `~/.codex/config.toml`, else leaves it unset. Codex reports **tokens only** (`inputTokens` incl. `cachedInputTokens`, `cacheWriteInputTokens`, `outputTokens`, `reasoningOutputTokens`). The adapter emits `usage(reported)` with `costUsd` unset; the ledger prices it from `pricing.json` (#14). The subscription's real constraint is `account/rateLimits/updated` (`usedPercent`, `resetsAt`, `planType`).
+The model is not on the wire in these recordings; the adapter uses the task's model, else `model = "…"` from `~/.codex/config.toml`, else leaves it unset. Codex reports **tokens only** (`inputTokens` incl. `cachedInputTokens`, `cacheWriteInputTokens`, `outputTokens`, `reasoningOutputTokens`). The adapter emits `usage(reported)` with `costUsd` unset; the ledger prices it from `pricing.json` (2026-09-06). The subscription's real constraint is `account/rateLimits/updated` (`usedPercent`, `resetsAt`, `planType`).
 
 ## Process lifecycle
 

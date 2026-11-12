@@ -103,7 +103,7 @@ const rescueUrl = `http://127.0.0.1:${rescue.port}`;
 const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0", SWITCHBOARD_REPO_ROOT: repo, SWITCHBOARD_RESCUE_URL: rescueUrl });
 let projectUnreadable = false;
 const imports = importing(sending(gh), () => openPulls);
-const gated: GhRunner = async (args, cwd) => (projectUnreadable && cwd === libDir && args.some((a) => a.includes("projectV2(number:$p){ id }")) ? { code: 0, stdout: '{"data":{"repositoryOwner":{"projectV2":null}}}', stderr: "" } : imports(args, cwd));
+const gated: GhRunner = async (args, cwd) => (projectUnreadable && cwd === libDir && args.some((a) => a.includes("ProjectV2FieldCommon{ name dataType }")) ? { code: 0, stdout: '{"data":{"repositoryOwner":{"projectV2":null}}}', stderr: "" } : imports(args, cwd));
 const core = await startServer(cfg, [adapter, { ...adapter, id: "codex" }], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: gated });
 const base = `http://127.0.0.1:${core.server.port}`;
 await fetch(`${base}/api/workspaces`, { method: "POST", body: JSON.stringify({ path: libDir, name: "lib" }) });
@@ -176,7 +176,7 @@ try {
   /** The backlog's workspace switch: its buttons read "<name> <count>". */
   const tab = (name: string) => press(`[...document.querySelectorAll('.backlog-ws button')].find(b => b.textContent.trim().startsWith(${JSON.stringify(name + " ")}))`, `workspace tab ${name}`);
   /** Back on the backlog, the last list shows first (#441); read = the new one has replaced it. */
-  const read = `!!document.querySelector('.backlog') && !document.querySelector('.backlog .head .hint')?.textContent.includes('読み込み中')`;
+  const read = `!!document.querySelector('.backlog') && !/読み込み中|取り込み中/.test(document.querySelector('.backlog .head .hint')?.textContent ?? '')`;
   await call("Runtime.enable");
   await call("Log.enable");
   await call("Page.enable");
@@ -584,9 +584,11 @@ try {
     }
   };
   await setSweep(2);
+  // the Tasks above still wait for an answer and fill the default of 3 running at once (#1141): a firing's Tasks would wait in the queue with no prompt sent
+  assert((await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ maxRunners: 8 }) })).status === 200, "maxRunners");
   libRequest = true;
   // this schedule's own 今すぐ実行: the meta also has the seeded 床・天井・壁の点検, listed before it
-  await clickIn(`[...document.querySelectorAll('main.schedules .row')].find(r => r.querySelector('.t')?.textContent.trim() === 'バックログを進める')`, "今すぐ実行");
+  await clickIn(`[...document.querySelectorAll('main.schedules .schedule-row')].find(r => r.querySelector('.schedule-title')?.textContent.trim() === 'バックログを進める')`, "今すぐ実行");
   await until(() => core.db.listTasks().length > tasksBefore, "scheduled stage Task");
   // the screen moves to the started Task when the daemon answers, which is after the Task is in the DB: go back after that
   await until(() => evaluate(`!document.querySelector('main.schedules')`), "今すぐ実行 opens the Task");
@@ -730,14 +732,14 @@ try {
   await Bun.sleep(1_100); // the hint shows seconds: the import below starts in another second than the one shown
   await click("再読込");
   const back = Date.now();
-  const lastShown = await until(async () => (await hintNow()).includes("読み込み中") && (await evaluate(`document.querySelectorAll('.backlog .backlog-item').length`)) as number || null, "the last list");
+  const lastShown = await until(async () => (await hintNow()).includes("取り込み中") && (await evaluate(`document.querySelectorAll('.backlog .backlog-item').length`)) as number || null, "the last list");
   const lastShownMs = Date.now() - back;
   const loadingHint = await hintNow();
-  assert(lastShownMs < 1_000 && loadingHint === `${readAt} に GitHub から取得 · 読み込み中…`, `last list after ${lastShownMs} ms, hint: ${loadingHint}`);
+  assert(lastShownMs < 1_000 && loadingHint === `${readAt} に GitHub から取得 · GitHub から取り込み中…`, `last list after ${lastShownMs} ms, hint: ${loadingHint}`);
   const onBacklog = () => evaluate(`location.pathname === "/backlog" && !!document.querySelector('.backlog') && document.querySelector('nav.tabs button.on')?.textContent.trim() === "Backlog"`) as Promise<boolean>;
   while (Date.now() - back < 15_000) { assert(await onBacklog(), `left the backlog after ${Date.now() - back} ms`); await Bun.sleep(250); }
   let replaced = "";
-  while (Date.now() - back < 45_000 && !replaced) { assert(await onBacklog(), `left the backlog after ${Date.now() - back} ms`); const h = await hintNow(); if (!h.includes("読み込み中") && !h.startsWith(readAt)) replaced = h; else await Bun.sleep(250); }
+  while (Date.now() - back < 45_000 && !replaced) { assert(await onBacklog(), `left the backlog after ${Date.now() - back} ms`); const h = await hintNow(); if (!h.includes("取り込み中") && !h.startsWith(readAt)) replaced = h; else await Bun.sleep(250); }
   assert(replaced, `the list was not replaced: ${await hintNow()}`);
   const slowGitHub = { lastShown, lastShownMs, loadingHint, stayedMs: Date.now() - back, replaced };
 
@@ -754,7 +756,7 @@ try {
   // the reads after the answers (3 s) end long before the comments leave their 60 s send window, so look while they are in flight
   await Bun.sleep(1_500);
   const cardsWhileReading = await evaluate(`document.querySelectorAll('section[data-stage="needs-decision"] .decision-card').length`) as number;
-  assert(cardsWhileReading === 0 && (await hintNow()).includes("読み込み中"), `判断待ち after both answers: ${cardsWhileReading}, hint: ${await hintNow()}`);
+  assert(cardsWhileReading === 0 && (await hintNow()).includes("取り込み中"), `判断待ち after both answers: ${cardsWhileReading}, hint: ${await hintNow()}`);
   await until(() => issueWrites.length >= writesBefore + 4 || null, "both answers written", SEND_WAIT_MS); // comment + label, per answer
   writeDelayMs = () => 0;
   delayMs = 0;

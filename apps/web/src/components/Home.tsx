@@ -1,11 +1,11 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import type { CloudPreparation, ExecutionMode, CreateTaskInput, LedgerSummary, ReportRow, RoutingSuggestion, RunnerId, RunnerInfo, Task, Workspace } from "@switchboard/protocol";
+import type { CloudPreparation, ExecutionMode, CreateTaskInput, LedgerSummary, ReportRow, RoutingSuggestion, RunnerId, RunnerInfo, Schedule, TaskStopMark, TaskSummary, Workspace } from "@switchboard/protocol";
 import { api, type Health, type InboxNote } from "../api.ts";
 import { fmtUsd, OriginTag, pct, ResumeTag, RunnerPill, ShadowTag } from "./ui.tsx";
 import { AttachButton, AttachmentBar, useAttachments, useDropZone } from "./Attachments.tsx";
 import { ModelSelect } from "./ModelSelect.tsx";
 import { EffortSelect } from "./EffortSelect.tsx";
-import { activeLabel, attentionList, isActive, needsAttention, outcomeDotClass, outcomeLabel } from "../attention.ts";
+import { activeLabel, attentionGroups, isActive, type AttentionGroup, needsAttention, outcomeDotClass, outcomeLabel } from "../attention.ts";
 import { reportMeta } from "../reports.ts";
 import { quotaAsOf, quotaStale, resetLabel, windowLabel } from "../quota.ts";
 import { staleDraft } from "../presets.ts";
@@ -19,8 +19,10 @@ import { t } from "../i18n.ts";
 import { home } from "../i18n/home.ts";
 import { runnerLoginLabel } from "../login.ts";
 import { ago } from "../inProgress.ts";
+import { REASON_LABEL } from "../interventions.ts";
+import { stuckLine, stuckSchedules } from "../stuck.ts";
 
-/** How many 要対応 rows show before すべて (#4066). */
+/** How many 要対応 rows (groups) show before すべて (#4066). */
 const ATTENTION_SHOWN = 8;
 
 /** The prefix "改善 →" inserted: remembered so a Workspace switch can swap it for the new workspace's brief (and only it). */
@@ -30,7 +32,7 @@ const briefTitle = (ws: Workspace) => (ws.kind === "meta" ? t(home.briefTitleSel
 export function Home(props: {
   health: Health | null;
   workspaces: Workspace[];
-  tasks: Task[];
+  tasks: TaskSummary[];
   ledger: LedgerSummary | null;
   runnerOk: Set<RunnerId>;
   onCreate: (input: CreateTaskInput) => Promise<void>;
@@ -38,6 +40,10 @@ export function Home(props: {
   onError: (msg: string) => void;
   /** Bumped when the knowledge folder changes (inbox notes live there). */
   inboxRev: number;
+  /** Moves on each stop record (#4501): the stuck schedules are read again. */
+  stopRev: number;
+  /** The last stop of each Task (#4520); null until read. Drawn from #4522 on. */
+  stopMarks: Record<string, TaskStopMark> | null;
   onOpenSettings: () => void;
   /** Settings scrolled to its Workspace card (the 「設定で追加 →」 when there is none yet). */
   onOpenWorkspaces: () => void;
@@ -65,6 +71,8 @@ export function Home(props: {
   // Shadow run (#99): null = follow the saved default (Settings.shadowRunner); a click makes it explicit for this task.
   const [shadow, setShadow] = useState<boolean | null>(null);
   /** undefined = not loaded yet (the toggle waits; an untouched creation leaves the choice to the daemon). */
+  // Settings 「Switchboard 自体を開発する」 (#2459): read with the other defaults below; unread = off, so 「このアプリを改善 →」 never shows for a moment and goes
+  const [developSelf, setDevelopSelf] = useState(false);
   const [shadowDefault, setShadowDefault] = useState<RunnerId | null | undefined>(undefined);
   /** 詳細 (#3354): the rarely set values, folded; open or closed as the person left it in this browser. */
   const [detailsOpen, setDetailsOpen] = useState(() => loadDetailsOpen(localStorage));
@@ -203,6 +211,7 @@ export function Home(props: {
         .settings()
         .then((s) => {
           setShadowDefault(s.shadowRunner);
+          setDevelopSelf(s.developSelf);
           // only a runner the person saved: left at its default, the router's own fallback (routing.yaml) stands as before
           savedRunnerRef.current = s.newDefaults.taskRunner !== s.defaults.newDefaults.taskRunner ? s.newDefaults.taskRunner : null;
           const r = startRunner(suggestionRef.current);
@@ -239,7 +248,28 @@ export function Home(props: {
     };
   }, []);
   const active = useMemo(() => props.tasks.filter(isActive), [props.tasks]);
-  const attention = useMemo(() => attentionList(props.tasks), [props.tasks]);
+  const { needs, waiting } = useMemo(() => attentionGroups(props.tasks, props.stopMarks), [props.tasks, props.stopMarks]);
+  const needsCount = needs.reduce((n, g) => n + g.count, 0);
+  // 確認済み of a group (#4522): the existing setOutcome for each Task, not a new API; the rows leave with the tasks' events
+  const reviewGroup = async (g: AttentionGroup) => {
+    try {
+      await Promise.all(g.tasks.map((x) => api.setOutcome(x.id, { reviewed: true })));
+    } catch (e) {
+      props.onError(String((e as Error).message ?? e));
+    }
+  };
+  // Schedules whose Tasks stopped the same way in a row (#4501): read on arriving, when any Task's row changed (a reply, the
+  // next Task ending) and on each stop record (a stop or one resolved within a turn moves no row), not on other events
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const tasksAt = useMemo(() => props.tasks.reduce((m, x) => Math.max(m, x.updatedAt), 0), [props.tasks]);
+  useEffect(() => {
+    let alive = true;
+    api.schedules().then((r) => alive && setSchedules(r), () => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [tasksAt, props.tasks.length, props.stopRev]);
+  const stuck = useMemo(() => stuckSchedules(schedules), [schedules]);
   // the first ones (#4066): 60 rows pushed the cost and the reports five screens down on a phone
   const [allAttention, setAllAttention] = useState(false);
   const recent = useMemo(() => props.tasks.filter((t) => !isActive(t) && !needsAttention(t)).slice(0, 6), [props.tasks]);
@@ -558,20 +588,7 @@ export function Home(props: {
             <button className="ghost" onClick={props.onOpenSettings} title={t(home.defaultsInSettingsTitle)}>{t(home.defaultsInSettings)}</button>
           </div>
           {/* the improve preambles are for an improvement request only, not every request: folded with the rest (#3850) */}
-          {((ws && ws.kind !== "meta") || meta) && (
-            <div className="compose-improve">
-              {ws && ws.kind !== "meta" && (
-                <button className="ghost" onClick={() => void improve(ws)} title={t(home.improveTitle, { name: ws.name })}>
-                  {t(home.improve, { name: ws.name })}
-                </button>
-              )}
-              {meta && (
-                <button className="ghost" onClick={() => void improve(meta)} title={t(home.improveSelfTitle)}>
-                  {t(home.improveSelf)}
-                </button>
-              )}
-            </div>
-          )}
+          <ImproveButtons ws={ws} meta={meta} developSelf={developSelf} onImprove={(w) => void improve(w)} />
         </details>
         {cloud && <div className="cloud-preparation card" role="note">
           <p>{t(home.cloudConsent)}</p>
@@ -645,6 +662,23 @@ export function Home(props: {
         </section>
       )}
 
+      {stuck.length > 0 && (
+        <section className="card stuck-schedules">
+          <h5>{t(home.stuckHeading, { count: stuck.length })}</h5>
+          {stuck.map((s) => (
+            <button key={s.id} className="row link stuck" onClick={() => props.onOpenTask(s.stuck.taskId)}>
+              <span className="dot err" />
+              <span className="t">
+                {s.title}
+                <br />
+                <span className="why">{stuckLine(s, Date.now())}</span>
+              </span>
+              <span className="m">{t(home.stuckOpen)}</span>
+            </button>
+          ))}
+        </section>
+      )}
+
       <div className="grid2">
         <section className="card">
           <h5>{t(home.activeHeading)}</h5>
@@ -658,25 +692,51 @@ export function Home(props: {
               <span className="m">{activeLabel(x)}</span>
             </button>
           ))}
-          <h5 style={{ marginTop: 14 }}>{t(home.attentionHeading, { count: attention.length })}</h5>
-          {attention.length === 0 && <div className="muted">{t(home.none)}</div>}
-          {(allAttention ? attention : attention.slice(0, ATTENTION_SHOWN)).map((t) => (
-            <button key={t.id} className="row link" onClick={() => props.onOpenTask(t.id)}>
-              <span className={`dot ${outcomeDotClass(t.outcome)}`} />
-              <span className="t">{t.title}</span>
-              <RunnerPill runner={t.runner} />
-              <OriginTag origin={t.origin} />
-              <ShadowTag task={t} />
-              {/* when it last moved (#4066): two Tasks of the same stage of one PBI have the same title */}
-              <span className="m">
-                {outcomeLabel(t.outcome)} · {ago(t.updatedAt, Date.now())}
-              </span>
-            </button>
-          ))}
-          {attention.length > ATTENTION_SHOWN && (
+          <h5 style={{ marginTop: 14 }}>{t(home.attentionHeading, { count: needsCount })}</h5>
+          {needs.length === 0 && <div className="muted">{t(home.none)}</div>}
+          {(allAttention ? needs : needs.slice(0, ATTENTION_SHOWN)).map((g) => {
+            const x = g.tasks[0]!;
+            return (
+              <div key={g.key} className="attn-group">
+                <button className="row link" onClick={() => props.onOpenTask(x.id)}>
+                  <span className={`dot ${outcomeDotClass(x.outcome)}`} />
+                  <span className="t">{x.title}</span>
+                  <RunnerPill runner={x.runner} />
+                  <OriginTag origin={x.origin} />
+                  <ShadowTag task={x} />
+                  {/* when it last moved (#4066): two Tasks of the same stage of one PBI have the same title */}
+                  <span className="m">
+                    {outcomeLabel(x.outcome)} · {ago(x.updatedAt, Date.now())}
+                  </span>
+                </button>
+                {g.count > 1 && (
+                  <div className="row sub same-cause">
+                    <span className="m">{t(home.sameCause, { n: g.count })}</span>
+                    <button onClick={() => void reviewGroup(g)}>{t(home.reviewGroup, { n: g.count })}</button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {needs.length > ATTENTION_SHOWN && (
             <button className="ghost link" onClick={() => setAllAttention(!allAttention)}>
-              {allAttention ? t(home.attentionFewer) : t(home.attentionAll, { n: attention.length })}
+              {allAttention ? t(home.attentionFewer) : t(home.attentionAll, { n: needs.length })}
             </button>
+          )}
+          {waiting.length > 0 && (
+            <details className="waiting-folded">
+              <summary>{t(home.waitingFolded, { n: waiting.length })}</summary>
+              {waiting.map((w) => (
+                <button key={w.task.id} className="row link" onClick={() => props.onOpenTask(w.task.id)}>
+                  <span className="dot idle" />
+                  <span className="t">{w.task.title}</span>
+                  <RunnerPill runner={w.task.runner} />
+                  <span className="m">
+                    {w.reason === "depends" && w.conditions.length > 0 ? w.conditions.map((c) => `${c.key}:${c.value}`).join(" ") : REASON_LABEL[w.reason]} · {ago(w.task.updatedAt, Date.now())}
+                  </span>
+                </button>
+              ))}
+            </details>
           )}
           {recent.length > 0 && <h5 style={{ marginTop: 14 }}>{t(home.recentHeading)}</h5>}
           {recent.map((x) => (
@@ -781,6 +841,27 @@ export function DraftEditor(props: { edit: DraftEdit; note: InboxNote; saving: b
           {t(home.save)}
         </button>
       </div>
+    </div>
+  );
+}
+
+/** 「<name> を改善 →」 for the chosen workspace, and 「このアプリを改善 →」 only while Switchboard itself is developed (#2459). */
+export function ImproveButtons({ ws, meta, developSelf, onImprove }: { ws: Workspace | undefined; meta: Workspace | undefined; developSelf: boolean; onImprove: (w: Workspace) => void }) {
+  const own = ws && ws.kind !== "meta" ? ws : undefined;
+  const self = developSelf ? meta : undefined;
+  if (!own && !self) return null;
+  return (
+    <div className="compose-improve">
+      {own && (
+        <button className="ghost" onClick={() => onImprove(own)} title={t(home.improveTitle, { name: own.name })}>
+          {t(home.improve, { name: own.name })}
+        </button>
+      )}
+      {self && (
+        <button className="ghost" onClick={() => onImprove(self)} title={t(home.improveSelfTitle)}>
+          {t(home.improveSelf)}
+        </button>
+      )}
     </div>
   );
 }

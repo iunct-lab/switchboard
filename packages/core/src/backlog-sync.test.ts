@@ -5,8 +5,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BacklogIssueData, BacklogRepositoryKey } from "@switchboard/protocol";
-import { BacklogError, type GhRunner } from "./backlog.ts";
-import { BacklogSync, FULL_READ_MS, HINT_BUDGET, importGithubSnapshot, noticeTargets, POLL_MIN_MS } from "./backlog-sync.ts";
+import { BacklogError, readStoredBacklog, type GhRunner } from "./backlog.ts";
+import { BacklogSync, fetchGithubSnapshot, FULL_READ_MS, HINT_BUDGET, ghConcurrency, importGithubSnapshot, limitGh, noticeTargets, POLL_MIN_MS } from "./backlog-sync.ts";
 import { scanAllRepos } from "./secretscan.ts";
 import { loadConfig } from "./config.ts";
 import { startServer } from "./server.ts";
@@ -70,7 +70,7 @@ function fakeGh(world: World) {
     if (args[0] === "repo") return { code: 0, stdout: "acme/app true\n", stderr: "" };
     if (args[0] === "variable") return { code: 0, stdout: "https://github.com/orgs/acme/projects/1\n", stderr: "" };
     const query = args.find((a) => a.startsWith("query="))!.slice(6);
-    if (query.includes("projectV2(number:$p){ id }")) return { code: 0, stdout: JSON.stringify({ data: { repositoryOwner: { projectV2: { id: "PVT_1" } } } }), stderr: "" };
+    if (query.includes("ProjectV2FieldCommon{ name dataType }")) return { code: 0, stdout: JSON.stringify({ data: { repositoryOwner: { projectV2: { id: "PVT_1", fields: { nodes: [{ name: "Title", dataType: "TITLE" }, { name: "Status", dataType: "SINGLE_SELECT", options: [{ name: "Ready" }] }] } } } } }), stderr: "" };
     const vars = Object.fromEntries(args.flatMap((a, i) => (args[i - 1] === "-f" || args[i - 1] === "-F") && !a.startsWith("query=") ? [a.split(/=(.*)/s).slice(0, 2)] : []));
     if (/w\d+: issue\(number:/.test(query)) {
       const numbers = [...query.matchAll(/w(\d+): /g)].map((m) => Number(m[1]));
@@ -92,9 +92,29 @@ function fakeGh(world: World) {
   return { gh, calls };
 }
 
+/** The calls of one import in a fixed order: its independent reads are asked at once (#3437), so the order they start in is not the contract, the set is. */
+const asked = (calls: string[]) => [...calls].sort();
+
 /** Well past what `raw` Issues were made at: they are not new any more. */
 const LATER = Date.parse("2026-10-20T00:00:00Z");
 const stored = () => Object.fromEntries(db.listBacklogRecords(KEY).map((r) => [`${r.objectKind}:${r.externalId}`, { state: r.fetchState, remote: r.remote }]));
+
+test("a workspace the reads judgement leaves out is not imported: no gh call, from a request or a hint (#2459)", async () => {
+  const calls: string[][] = [];
+  const gh: GhRunner = async (args) => { calls.push(args); throw new Error("must not be called"); };
+  let reads = false;
+  const sync = makeSync(db, gh, undefined, undefined, true, () => reads);
+  await sync.sync(WS);
+  sync.request(WS);
+  sync.startPolling();
+  expect(sync.hint(WS)).toBe(true);
+  await Bun.sleep(5);
+  expect(calls).toEqual([]);
+  // judged at each call: once read, the workspace goes to gh (which here refuses)
+  reads = true;
+  await sync.sync(WS).catch(() => undefined);
+  expect(calls.length).toBeGreaterThan(0);
+});
 
 test("the first import reads every page and every comment page, then stores Issues, comments and Project fields", async () => {
   const twelve = raw(12, { comments: { pageInfo: { hasNextPage: true, endCursor: "cc1" }, nodes: [{ id: "C_12_1", body: "first", createdAt: "2026-10-02T00:00:00Z" }] } });
@@ -105,8 +125,8 @@ test("the first import reads every page and every comment page, then stores Issu
   });
   db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
   await importGithubSnapshot(gh, db, WS, 1000);
-  expect(calls).toEqual(["changed", "comments@cc1", "changed@p2", "open", "pulls"]);
-  expect(db.getWorkspaceBacklogSource(WS.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: true });
+  expect(asked(calls)).toEqual(asked(["changed", "comments@cc1", "changed@p2", "open", "pulls"]));
+  expect(db.getWorkspaceBacklogSource(WS.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: true, projectFields: [{ name: "Status", dataType: "SINGLE_SELECT", options: ["Ready"] }] });
   const s = stored();
   expect(s["issue:I_12"]!.remote).toEqual({
     number: 12, title: "PBI 12", url: "https://github.com/acme/app/issues/12", state: "OPEN", body: "body 12", labels: ["type:pbi"], milestone: "Phase 2",
@@ -151,7 +171,7 @@ test("the next import asks since the cursor; a close, a Project field change and
     open: () => pageOf([{ number: 14, projectItems: { totalCount: 0, nodes: [] } }]),
   });
   await importGithubSnapshot(next.gh, db, WS, 2000);
-  expect(next.calls).toEqual(["changed since 2026-10-05T00:00:00Z", "open", "pulls"]);
+  expect(asked(next.calls)).toEqual(asked(["changed since 2026-10-05T00:00:00Z", "open", "pulls"]));
   const s = stored();
   expect(s["issue:I_12"]).toMatchObject({ state: "fetched", remote: { state: "CLOSED" } });
   expect(s["comment:C_b"]).toEqual({ state: "unavailable", remote: { issue: 12, body: "b", createdAt: "2026-10-02T01:00:00Z" } });
@@ -210,12 +230,12 @@ test("open pull requests are stored with their files by their own read: a cut li
     recheck: () => ({ body: { data: { repository: { w51: openPr(51, { __typename: "PullRequest", state: "CLOSED" }) } } } }),
   });
   await importGithubSnapshot(gh, db, WS, 1000);
-  expect(calls).toEqual(["changed", "open", "pulls"]);
+  expect(asked(calls)).toEqual(asked(["changed", "open", "pulls"]));
   expect(stored()["pull-request:PR_50"]?.remote).toEqual({ number: 50, state: "OPEN", isDraft: true, labels: ["needs-decision"], closes: [50], mergeCommit: null, updatedAt: "2026-10-05T00:00:00Z", files: ["a.ts"], closedAt: null, mergedAt: null });
   expect(stored()["pull-request:PR_51"]?.remote).toMatchObject({ files: null });
   pulls = [openPr(50, { isDraft: true })];
   await importGithubSnapshot(gh, db, WS, 2000);
-  expect(calls.slice(3)).toEqual(["changed since 2026-10-03T00:00:00Z", "open", "pulls", "recheck"]);
+  expect(asked(calls.slice(3))).toEqual(asked(["changed since 2026-10-03T00:00:00Z", "open", "pulls", "recheck"]));
   expect(stored()["pull-request:PR_51"]?.remote).toMatchObject({ state: "CLOSED" });
 });
 
@@ -269,7 +289,7 @@ test("a light import stores an Issue closed since the last one: its updatedAt mo
   const closed = raw(12, { state: "CLOSED", stateReason: "COMPLETED", updatedAt: "2026-10-20T00:00:00Z" });
   const { gh, calls } = fakeGh({ changed: () => pageOf([closed]), open: () => pageOf([]) });
   await importGithubSnapshot(gh, db, WS, 2000, undefined, false, false);
-  expect(calls).toEqual(["changed since 2026-10-03T00:00:00Z", "pulls"]);
+  expect(asked(calls)).toEqual(asked(["changed since 2026-10-03T00:00:00Z", "pulls"]));
   expect((stored()["issue:I_12"]?.remote as BacklogIssueData).state).toBe("CLOSED");
 });
 
@@ -277,10 +297,10 @@ test("a light import does not ask again the stored open Issues, nor a wait on on
   const pbi = raw(12, { comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ id: "C_r", body: "後回し\n<!-- pbi-complete:release waits=13 -->", createdAt: "2026-10-02T00:00:00Z" }] } });
   const first = fakeGh({ changed: () => pageOf([pbi, raw(13)]), open: () => pageOf([{ number: 12, projectItems: { totalCount: 0, nodes: [] } }, { number: 13, projectItems: { totalCount: 0, nodes: [] } }]) });
   await importGithubSnapshot(first.gh, db, WS, 1000, undefined, false, false);
-  expect(first.calls).toEqual(["changed", "open", "pulls"]);
+  expect(asked(first.calls)).toEqual(asked(["changed", "open", "pulls"]));
   const light = fakeGh({ changed: () => pageOf([]), open: () => pageOf([]) });
   await importGithubSnapshot(light.gh, db, WS, LATER, undefined, false, false);
-  expect(light.calls).toEqual(["changed since 2026-10-04T00:00:00Z", "pulls"]);
+  expect(asked(light.calls)).toEqual(asked(["changed since 2026-10-04T00:00:00Z", "pulls"]));
   expect(stored()["issue:I_13"]?.state).toBe("fetched");
 });
 
@@ -361,13 +381,13 @@ test("the pull requests an open PBI waits for are stored with their state", asyn
     recheck: () => ({ body: { data: { repository: { w40: { __typename: "PullRequest", id: "PR_40", number: 40, state: "MERGED", isDraft: false, updatedAt: "2026-10-01T00:00:00Z", files: { totalCount: 0, nodes: [] }, body: "Fixes #13, closes #13", headRefName: "sb/12-x", labels: { totalCount: 1, nodes: [{ name: "x" }] } } } } } }),
   });
   await importGithubSnapshot(gh, db, WS, 1000);
-  expect(calls).toEqual(["changed", "open", "pulls", "recheck"]); // #13 is open: its state is known without asking
+  expect(asked(calls)).toEqual(asked(["changed", "open", "pulls", "recheck"])); // #13 is open: its state is known without asking
   expect(stored()["pull-request:PR_40"]).toEqual({ state: "fetched", remote: { number: 40, state: "MERGED", isDraft: false, labels: ["x"], closes: [12, 13], mergeCommit: null, updatedAt: expect.any(String), files: [], closedAt: null, mergedAt: null } });
 });
 
 test("stop waits are rechecked: a pull request a Task's depends stop waits for is asked by number and stored (#2045)", async () => {
   const at = Date.now();
-  const task = (id: string, workspaceId: string) => db.insertTask({ id, workspaceId, title: id, runner: "claude", cwd: dir, scope: [dir], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: at, createdAt: at, updatedAt: at });
+  const task = (id: string, workspaceId: string) => db.insertTask({ id, workspaceId, title: id, runner: "claude", cwd: dir, scope: [dir], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: at, createdAt: at, updatedAt: at });
   const stopOn = (taskId: string, workspaceId: string, key: string) => db.appendEvent(taskId, { t: "stop.record", stop: { id: `${taskId}/overlap`, work: { workspaceId, issue: null, taskId }, op: "overlap", target: "", reason: "depends", evidence: "", safety: "unknown", conditions: [{ key, value: "open", met: false }], answer: null, actions: [], state: "waiting", at } });
   task("t_app", WS.id);
   stopOn("t_app", WS.id, "pr#40");
@@ -382,7 +402,7 @@ test("stop waits are rechecked: a pull request a Task's depends stop waits for i
     },
   });
   await importGithubSnapshot(gh, db, WS, at);
-  expect(calls).toEqual(["changed", "open", "pulls", "recheck"]);
+  expect(asked(calls)).toEqual(asked(["changed", "open", "pulls", "recheck"]));
   expect((stored()["pull-request:PR_40"]?.remote as { state: string }).state).toBe("MERGED");
 });
 
@@ -525,7 +545,7 @@ test("an import does not write back the Project of a variable changed while it r
   await importGithubSnapshot(gh, db, ws, 1000);
   expect(db.getWorkspaceBacklogSource(ws.id)).toBeNull();
   await importGithubSnapshot(gh, db, db.getWorkspace(ws.id)!, 2000);
-  expect(db.getWorkspaceBacklogSource(ws.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: true });
+  expect(db.getWorkspaceBacklogSource(ws.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: true, projectFields: [{ name: "Status", dataType: "SINGLE_SELECT", options: ["Ready"] }] });
 });
 
 test("BacklogSync: after a write, an import begun before it is not shared; the one after it is, once", async () => {
@@ -651,7 +671,7 @@ test("BacklogSync: a Project variable changed while an import runs gets an impor
   await old;
   for (let i = 0; sync.read(ws).syncing && i < 200; i++) await Bun.sleep(5); // the import the write asked for, if any
   expect(calls.filter((c) => c.startsWith("changed")).length).toBe(3); // the first, the old one, and the PATCH's own
-  expect(db.getWorkspaceBacklogSource(ws.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: true });
+  expect(db.getWorkspaceBacklogSource(ws.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: true, projectFields: [{ name: "Status", dataType: "SINGLE_SELECT", options: ["Ready"] }] });
 });
 
 test("BacklogSync: the first import of a checkout begun before a write through another checkout stores nothing", async () => {
@@ -1450,7 +1470,7 @@ test("public copy: a workspace that resolves to its tree's publicSync.target is 
     expect(error).toBeInstanceOf(BacklogError);
     expect(error?.message).toContain("gh repo set-default");
     expect(error?.message).toContain("GH_REPO");
-    expect(asked.map((a) => a.slice(0, 2))).toEqual([["repo", "view"]]);
+    expect(asked.map((a) => a.slice(0, 2))).toEqual([["variable", "get"], ["repo", "view"]]); // the Project variable starts with the repository read (no query follows)
     expect(db.getWorkspaceBacklogSource(ws.id)).toBeNull();
     expect(db.listBacklogRecords({ service: "github", host: githubHost(), repository: "acme/widget" })).toEqual([]);
 
@@ -1460,7 +1480,7 @@ test("public copy: a workspace that resolves to its tree's publicSync.target is 
     await expect(sync.sync(ws)).rejects.toThrow("gh repo set-default");
     expect(sync.read(ws)).toMatchObject({ fetchedAt: null, items: [], error: expect.stringContaining("publicSync.target") });
     await sync.send(ws);
-    expect(asked.filter((a) => a[0] !== "repo")).toEqual([]);
+    expect(asked.filter((a) => a[0] !== "repo" && a[0] !== "variable")).toEqual([]);
 
     // the daily secret scan only reads: it still checks the repository the clone resolves to
     const scanned: string[][] = [];
@@ -1479,7 +1499,7 @@ test("public copy: the development repository, whose publicSync names the public
     const { gh: github, calls } = fakeGh({ changed: () => pageOf([raw(12)]), open: () => pageOf([]) });
     const gh: GhRunner = async (args, cwd) => (args[0] === "repo" ? { code: 0, stdout: "acme/widget-dev true\n", stderr: "" } : github(args, cwd));
     await importGithubSnapshot(gh, db, ws, 1000);
-    expect(calls).toEqual(["changed", "open", "pulls"]);
+    expect(asked(calls)).toEqual(asked(["changed", "open", "pulls"]));
     expect(db.getWorkspaceBacklogSource(ws.id)).toMatchObject({ repository: "acme/widget-dev" });
   } finally {
     rmSync(path, { recursive: true, force: true });
@@ -1499,7 +1519,7 @@ test("noWrite: a workspace that resolves to a repository its clone marked ops-ki
       return args[0] === "repo" ? { code: 0, stdout: "someone/widget false\n", stderr: "" } : github(args, cwd);
     };
     await expect(importGithubSnapshot(gh, db, ws, 1000)).rejects.toThrow("ops-kit.noWrite");
-    expect(asked.map((a) => a.slice(0, 2))).toEqual([["repo", "view"]]);
+    expect(asked.map((a) => a.slice(0, 2))).toEqual([["variable", "get"], ["repo", "view"]]); // the Project variable starts with the repository read (no query follows)
     expect(db.getWorkspaceBacklogSource(ws.id)).toBeNull();
   } finally {
     rmSync(path, { recursive: true, force: true });
@@ -1544,7 +1564,7 @@ test("an import follows a renamed repository", async () => {
     return args[0] === "repo" ? { code: 0, stdout: "acme/app true\n", stderr: "" } : github(args, cwd);
   };
   await importGithubSnapshot(gh, db, WS, 1000);
-  expect(db.getWorkspaceBacklogSource(WS.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: true });
+  expect(db.getWorkspaceBacklogSource(WS.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: true, projectFields: [{ name: "Status", dataType: "SINGLE_SELECT", options: ["Ready"] }] });
   expect(db.listBacklogRecords(KEY).length).toBeGreaterThan(0);
 });
 
@@ -1554,12 +1574,12 @@ test("an import records the repository's visibility", async () => {
   const asked: string[][] = [];
   const answer = (visibility: string): GhRunner => async (args, cwd) => (args[0] === "repo" ? (asked.push(args), { code: 0, stdout: `acme/app ${visibility}\n`, stderr: "" }) : github(args, cwd));
   await importGithubSnapshot(answer("true"), db, WS, 1000);
-  expect(db.getWorkspaceBacklogSource(WS.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: true });
+  expect(db.getWorkspaceBacklogSource(WS.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: true, projectFields: [{ name: "Status", dataType: "SINGLE_SELECT", options: ["Ready"] }] });
   await importGithubSnapshot(answer("false"), db, WS, 2000);
-  expect(db.getWorkspaceBacklogSource(WS.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: false });
+  expect(db.getWorkspaceBacklogSource(WS.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: false, projectFields: [{ name: "Status", dataType: "SINGLE_SELECT", options: ["Ready"] }] });
   // an answer without the visibility is refused and leaves the registration as it was
   await expect(importGithubSnapshot(answer(""), db, WS, 3000)).rejects.toThrow("リポジトリを特定できません");
-  expect(db.getWorkspaceBacklogSource(WS.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: false });
+  expect(db.getWorkspaceBacklogSource(WS.id)).toEqual({ ...KEY, project: { owner: "acme", number: 1 }, private: false, projectFields: [{ name: "Status", dataType: "SINGLE_SELECT", options: ["Ready"] }] });
   asked.pop();
   // one gh repo view reads both
   expect(asked).toEqual([["repo", "view", "--json", "nameWithOwner,isPrivate", "-q", '"\\(.nameWithOwner) \\(.isPrivate)"'], ["repo", "view", "--json", "nameWithOwner,isPrivate", "-q", '"\\(.nameWithOwner) \\(.isPrivate)"']]);
@@ -1631,4 +1651,198 @@ test("settle answers where the time went: the wait behind an earlier send, the s
   release();
   await under;
   expect((await riding).importMs).toBeGreaterThanOrEqual(Math.floor(ridden) - 1);
+});
+
+test("an import asks its independent reads at once: the same calls as a sequential one, in less than their sum, at most GH_CONCURRENCY together (#3437)", async () => {
+  const twelve = raw(12, { comments: { pageInfo: { hasNextPage: true, endCursor: "cc1" }, nodes: [{ id: "C_12_1", body: "first", createdAt: "2026-10-02T00:00:00Z" }] } });
+  const { gh, calls } = fakeGh({
+    changed: (v) => (v.after ? pageOf([raw(13, { state: "CLOSED", labels: { totalCount: 1, nodes: [{ name: "type:task" }] }, parent: { number: 12 } })]) : pageOf([twelve], "p2")),
+    comments: () => ({ data: { repository: { issue: { comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ id: "C_12_2", body: "second", createdAt: "2026-10-03T00:00:00Z" }] } } } } }),
+    open: () => pageOf([{ number: 12, projectItems: { totalCount: 1, nodes: [item(12, "Ready")] } }]),
+  });
+  const DELAY = 40;
+  let running = 0;
+  let most = 0;
+  let total = 0;
+  const slow: GhRunner = async (args, cwd) => {
+    total++;
+    most = Math.max(most, ++running);
+    await Bun.sleep(DELAY);
+    running--;
+    return gh(args, cwd);
+  };
+  db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
+  const t0 = performance.now();
+  await importGithubSnapshot(slow, db, WS, 1000);
+  const took = performance.now() - t0;
+  // repo, variable, the Project's guard and the five reads of the first test: what a sequential import asks, no more
+  expect(total).toBe(8);
+  expect(asked(calls)).toEqual(asked(["changed", "comments@cc1", "changed@p2", "open", "pulls"]));
+  expect(took).toBeLessThan(total * DELAY * 0.6);
+  expect(most).toBeGreaterThan(1);
+  expect(most).toBeLessThanOrEqual(4);
+  // the order-dependent values are as a sequential import's: the cursor is the newest updatedAt, and the same records are stored
+  expect(db.getBacklogRepository(KEY)).toMatchObject({ cursor: "2026-10-04T00:00:00Z" });
+  expect(Object.keys(stored()).filter((k) => k.startsWith("comment:"))).toEqual(["comment:C_12_1", "comment:C_12_2", "comment:C_13_1"]);
+  expect(stored()["project-item:PVTI_12"]!.remote).toEqual({ issue: 12, owner: "acme", project: 1, fields: { Status: "Ready", "Story Points": 5 } });
+});
+
+test("one of the reads asked at once failing, or the Project's guard refusing, stores nothing (#468, #3437)", async () => {
+  db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
+  const world = { changed: () => pageOf([raw(12)]), open: () => pageOf([{ number: 12, projectItems: { totalCount: 1, nodes: [item(12, "Ready")] } }]) };
+  const hidden: GhRunner = async (args, cwd) => {
+    const query = args.find((a) => a.startsWith("query=")) ?? "";
+    return query.includes("ProjectV2FieldCommon{ name dataType }") ? { code: 0, stdout: JSON.stringify({ data: { repositoryOwner: { projectV2: null } } }), stderr: "" } : fakeGh(world).gh(args, cwd);
+  };
+  await expect(importGithubSnapshot(hidden, db, WS, 1000)).rejects.toThrow("Project acme/1 を読めない");
+  const failing = { ...world, pulls: () => { throw new Error("gh: HTTP 502"); } };
+  await expect(importGithubSnapshot(fakeGh(failing).gh, db, WS, 1000)).rejects.toThrow();
+  expect(db.listBacklogRecords(KEY)).toEqual([]);
+  expect(db.getBacklogRepository(KEY)?.lastSuccessfulSync ?? null).toBeNull();
+});
+
+test("an import asks the Project variable without waiting for the repository, and the named Issues' items with the rechecks (the same calls)", async () => {
+  db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
+  const pbi = raw(12, { comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ id: "C_r", body: "後回し\n<!-- pbi-complete:release waits=13 -->", createdAt: "2026-10-02T00:00:00Z" }] } });
+  const notFound = (ns: number[]) => ({ code: 1, body: { data: { repository: Object.fromEntries(ns.map((n) => [`w${n}`, null])) }, errors: ns.map((n) => ({ type: "NOT_FOUND", path: ["repository", `w${n}`] })) } });
+  await importGithubSnapshot(fakeGh({ changed: () => pageOf([pbi]), open: () => pageOf([]), recheck: notFound }).gh, db, WS, 1000);
+  const { gh, calls } = fakeGh({ changed: () => pageOf([]), open: () => pageOf([]), items: () => ({ totalCount: 0, nodes: [] }), recheck: notFound });
+  const DELAY = 40;
+  const span: Record<string, [number, number]> = {};
+  const slow: GhRunner = async (args, cwd) => {
+    const query = args.find((a) => a.startsWith("query=")) ?? "";
+    const name = args[0] === "repo" || args[0] === "variable" ? args[0] : /w\d+: issue\(number:/.test(query) ? "items" : query.includes("issueOrPullRequest") ? "recheck" : "";
+    const start = performance.now();
+    await Bun.sleep(DELAY);
+    if (name) span[name] = [start, performance.now()];
+    return gh(args, cwd);
+  };
+  await importGithubSnapshot(slow, db, WS, 2000, undefined, false, false, [20]);
+  const overlap = (a: string, b: string) => span[a]![0] < span[b]![1] && span[b]![0] < span[a]![1];
+  expect(overlap("repo", "variable")).toBe(true);
+  expect(overlap("items", "recheck")).toBe(true);
+  expect(asked(calls)).toEqual(asked(["changed since 2026-10-03T00:00:00Z", "pulls", "items 12,20", "recheck"]));
+});
+
+test("an Issue whose Project item the answer made In progress has its confirmation lines' decisions rechecked after it", async () => {
+  db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
+  const pbi = raw(12, { body: "## 到達点 / 受け入れ条件\n- [ ] 1. 要る（利用者確認: 回答で確かめる #99, #100 — 方針）\n" });
+  const notFound = (ns: number[]) => ({ code: 1, body: { data: { repository: Object.fromEntries(ns.map((n) => [`w${n}`, null])) }, errors: ns.map((n) => ({ type: "NOT_FOUND", path: ["repository", `w${n}`] })) } });
+  await importGithubSnapshot(fakeGh({ changed: () => pageOf([pbi]), open: () => pageOf([]), recheck: notFound }).gh, db, WS, 1000);
+  const rechecked: number[][] = [];
+  const { gh } = fakeGh({ changed: () => pageOf([]), open: () => pageOf([]), items: () => ({ totalCount: 1, nodes: [item(12, "In progress")] }), recheck: (ns) => (rechecked.push(ns), notFound(ns)) });
+  await importGithubSnapshot(gh, db, WS, 2000, undefined, false, false, [12]);
+  expect(rechecked).toEqual([[99, 100]]);
+  expect(stored()["project-item:PVTI_12"]!.remote).toMatchObject({ fields: { Status: "In progress" } });
+});
+
+test("a recheck asked early for a PBI the items' answer took out of In progress does not fail the import when it fails", async () => {
+  db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
+  const pbi = raw(12, { body: "## 到達点 / 受け入れ条件\n- [ ] 1. 要る（利用者確認: 回答で確かめる #99, #100 — 方針）\n" });
+  const notFound = (ns: number[]) => ({ code: 1, body: { data: { repository: Object.fromEntries(ns.map((n) => [`w${n}`, null])) }, errors: ns.map((n) => ({ type: "NOT_FOUND", path: ["repository", `w${n}`] })) } });
+  await importGithubSnapshot(fakeGh({ changed: () => pageOf([pbi]), open: () => pageOf([]), recheck: notFound }).gh, db, WS, 1000);
+  await importGithubSnapshot(fakeGh({ changed: () => pageOf([]), open: () => pageOf([]), items: () => ({ totalCount: 1, nodes: [item(12, "In progress")] }), recheck: notFound }).gh, db, WS, 1500, undefined, false, false, [12]);
+  const rechecked: number[][] = [];
+  const failing = (ns: number[]) => (rechecked.push(ns), { code: 1, body: { message: "Bad Gateway" } });
+  const { gh } = fakeGh({ changed: () => pageOf([]), open: () => pageOf([]), items: () => ({ totalCount: 1, nodes: [item(12, "Ready")] }), recheck: failing });
+  await importGithubSnapshot(gh, db, WS, 2000, undefined, false, false, [12]);
+  expect(rechecked).toEqual([[99, 100]]);
+  expect(stored()["project-item:PVTI_12"]!.remote).toMatchObject({ fields: { Status: "Ready" } });
+  // still wanted, the same failure fails the import
+  const still = fakeGh({ changed: () => pageOf([]), open: () => pageOf([]), items: () => ({ totalCount: 1, nodes: [item(12, "In progress")] }), recheck: failing });
+  await expect(importGithubSnapshot(still.gh, db, WS, 3000, undefined, false, false, [12])).rejects.toThrow("gh api graphql");
+  expect(stored()["project-item:PVTI_12"]!.remote).toMatchObject({ fields: { Status: "Ready" } });
+});
+
+test("the repository read failing stores nothing, leaves no call under way and no unhandled rejection", async () => {
+  db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
+  const { gh } = fakeGh({ changed: () => pageOf([raw(12)]), open: () => pageOf([]) });
+  for (const [which, project] of [["repo", true], ["repo", false], ["variable", true]] as const) {
+    let under = 0;
+    const unhandled: unknown[] = [];
+    const on = (e: unknown) => unhandled.push(e);
+    process.on("unhandledRejection", on);
+    const failing: GhRunner = async (args, cwd) => {
+      under++;
+      await Bun.sleep(20);
+      under--;
+      if (args[0] === which) return { code: 1, stdout: "", stderr: `gh: ${which} failed` };
+      if (args[0] === "variable" && !project) return { code: 1, stdout: "", stderr: "gh: variable failed too" };
+      return gh(args, cwd);
+    };
+    await expect(importGithubSnapshot(failing, db, WS, 1000)).rejects.toThrow();
+    expect(under).toBe(0);
+    await Bun.sleep(50);
+    process.off("unhandledRejection", on);
+    expect(unhandled).toEqual([]);
+    expect(db.listBacklogRecords(KEY)).toEqual([]);
+  }
+});
+
+test("a failed read stops the others: no page is asked after the import failed, and it ends after the calls under way (#3437)", async () => {
+  db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
+  // the changed Issues go on page after page; the open Issues fail at once
+  const world = { changed: (v: Record<string, unknown>) => pageOf([raw(12)], `p${Number(String(v.after ?? "p0").slice(1)) + 1}`), open: () => { throw new Error("gh: HTTP 502"); } };
+  const { gh } = fakeGh(world);
+  let under = 0;
+  const after: string[] = [];
+  let failed = false;
+  const slow: GhRunner = async (args, cwd) => {
+    if (failed) after.push(args.join(" "));
+    under++;
+    await Bun.sleep(20);
+    under--;
+    return gh(args, cwd);
+  };
+  await expect(importGithubSnapshot(slow, db, WS, 1000)).rejects.toThrow();
+  failed = true;
+  expect(under).toBe(0);
+  await Bun.sleep(100);
+  expect(after).toEqual([]);
+  expect(db.listBacklogRecords(KEY)).toEqual([]);
+});
+
+test("limitGh: stop refuses the calls waiting for a turn and resolves once those under way end; the bound is overridable (#3437)", async () => {
+  const ended: number[] = [];
+  const { run, stop } = limitGh(async (args) => (await Bun.sleep(20), ended.push(Number(args[0])), { code: 0, stdout: "", stderr: "" }), 2);
+  const calls = [1, 2, 3, 4].map((n) => run([String(n)], "."));
+  calls.forEach((c) => c.catch(() => undefined));
+  await Bun.sleep(5);
+  await stop(new Error("stopped"));
+  expect(ended.sort()).toEqual([1, 2]);
+  expect(await Promise.allSettled(calls)).toMatchObject([{ status: "fulfilled" }, { status: "fulfilled" }, { status: "rejected" }, { status: "rejected" }]);
+  await expect(run(["5"], ".")).rejects.toThrow("stopped");
+  expect([ghConcurrency(undefined), ghConcurrency("2"), ghConcurrency("0"), ghConcurrency("x"), ghConcurrency("1.5")]).toEqual([4, 2, 4, 4, 4]);
+});
+
+test("settle: after it, a read shows both the edit kept here and what changed on GitHub meanwhile (#3437)", async () => {
+  const path = join(dir, "app");
+  mkdirSync(path);
+  const ws = db.upsertWorkspace({ id: WS.id, name: "app", path, kind: "repo" });
+  let remote13 = "first";
+  const { gh } = fakeGh({ changed: () => pageOf([raw(12), raw(13, { title: remote13 })]), open: () => pageOf([]) });
+  const sync = makeSync(db, gh, () => 1_000_000);
+  await sync.settle(ws);
+  db.applyBacklogEdit(KEY, { records: [], operations: [{ issue: "I_12", targetKind: "issue", target: "I_12", kind: "set", field: "title", payload: "edited here", base: "PBI 12" }] });
+  remote13 = "changed on GitHub";
+  await sync.settle(ws);
+  const titles = Object.fromEntries(readStoredBacklog(db, ws).items.map((i) => [i.number, i.title]));
+  expect(titles[12]).toBe("edited here");
+  expect(titles[13]).toBe("changed on GitHub");
+});
+
+test("fetchGithubSnapshot: the stored records are looked up by Issue, not scanned per Issue (#4579)", async () => {
+  // 3,000 Issues read again, each with 30 stored comments: a scan of all the stored records per Issue and kind took seconds and held the event loop
+  const count = 3000;
+  const stored = Array.from({ length: count }, (_, i) => i + 1).flatMap((n) =>
+    Array.from({ length: 30 }, (_, c) => ({ objectKind: "comment" as const, externalId: `C_${n}_${c}`, remote: { issue: n, body: "b", createdAt: "2026-10-02T00:00:00Z" }, fetchState: "fetched" as const })),
+  );
+  const issues = Array.from({ length: count }, (_, i) => raw(i + 1, { labels: { totalCount: 1, nodes: [{ name: "type:task" }] } }));
+  const { gh } = fakeGh({ changed: () => pageOf(issues), open: () => pageOf([]) });
+  const t0 = performance.now();
+  const { records } = await fetchGithubSnapshot(gh, "/Users/dev/app", { owner: "acme", name: "app" }, stored as never, null);
+  const took = performance.now() - t0;
+  // the comments an Issue no longer lists are marked gone: 29 of each 30 (`raw` lists C_n_1)
+  expect(records.filter((r) => r.objectKind === "comment" && r.fetchState === "unavailable").length).toBe(count * 29);
+  expect(took).toBeLessThan(1500);
 });

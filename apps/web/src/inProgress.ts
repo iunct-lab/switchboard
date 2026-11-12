@@ -109,12 +109,14 @@ export const waitUrl = (item: BacklogItem, w: Wait) => item.url.replace(/\/issue
  */
 export function waitText(item: BacklogItem, auto: boolean): { label: string; done: boolean; cond: string; next: string } | null {
   if (item.waitsAt === null) return null;
-  const done = item.waits.every((w) => w.state === "met");
+  const until = item.waitsUntil && !item.waitsUntil.met ? item.waitsUntil : null;
+  const done = item.waits.every((w) => w.state === "met") && !until;
   const cond = [
     item.waits.some((w) => w.reason === "overlap") ? t(m.condOverlap) : null,
     item.waits.some((w) => w.reason === "prerequisite") ? t(m.condPrereq) : null,
     item.waits.some((w) => w.state === "missing") ? t(m.condMissing) : null,
     item.waits.some((w) => w.state === "withdrawn") ? t(m.condWithdrawn) : null,
+    until ? t(m.condUntil, { at: until.at }) : null,
   ].filter(Boolean).join(" / ");
   // not read or withdrawn (#937): nothing changes it by itself, so a person looks whatever backlog-next does
   // a Ready row's button starts 実装; an in-progress row's is 状況を確認, which does not resume it

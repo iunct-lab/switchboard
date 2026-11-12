@@ -290,6 +290,26 @@ Resources:
             Resource:
               - !Sub 'arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${AWS::StackName}-offload'
               - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AWS::StackName}-offload:*'
+          # the image build (#4705): its project and log group, and the one repository it pushes to and the host
+          # reads. By name, as Offload above: OffloadImageRole carries this boundary
+          - Sid: OffloadImage
+            Effect: Allow
+            Action: [codebuild:StartBuild, codebuild:BatchGetBuilds, codebuild:StopBuild, logs:GetLogEvents, ecr:BatchCheckLayerAvailability, ecr:InitiateLayerUpload, ecr:UploadLayerPart, ecr:CompleteLayerUpload, ecr:PutImage, ecr:BatchGetImage, ecr:GetDownloadUrlForLayer, ecr:DescribeImages]
+            Resource:
+              - !Sub 'arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${AWS::StackName}-offload-image'
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AWS::StackName}-offload-image:*'
+              - !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${AWS::StackName}-offload-image'
+          # the CI build (#4706): its project and log group. Its role's ECR pull is within OffloadImage's repository above
+          - Sid: OffloadCi
+            Effect: Allow
+            Action: [codebuild:StartBuild, codebuild:BatchGetBuilds, codebuild:StopBuild, logs:GetLogEvents]
+            Resource:
+              - !Sub 'arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${AWS::StackName}-offload-ci'
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AWS::StackName}-offload-ci:*'
+          - Sid: EcrAuthToken
+            Effect: Allow
+            Action: ecr:GetAuthorizationToken
+            Resource: '*'
           # the roles the deployer names in HostAssumeRoleArns (empty = none): the one statement that can reach a role
           # outside this stack, in any account — whoever deploys decides (the owner's host uses it for the role DAK is
           # developed with)
@@ -345,6 +365,9 @@ Resources:
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/edge-header'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/github-repo'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/github-token'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/offload-ci-project'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/offload-image-project'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/offload-image-repo'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/offload-project'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/session-public-key'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/start-token'
@@ -427,6 +450,24 @@ Resources:
               - Effect: Allow
                 Action: logs:GetLogEvents
                 Resource: !GetAtt OffloadLogs.Arn
+              # the image build (#4705): start, watch and stop its project, read its log, and ask the repository which
+              # tags exist. No push (the project's role pushes) and no other repository
+              - Effect: Allow
+                Action: [codebuild:StartBuild, codebuild:BatchGetBuilds, codebuild:StopBuild]
+                Resource: !GetAtt OffloadImage.Arn
+              - Effect: Allow
+                Action: logs:GetLogEvents
+                Resource: !GetAtt OffloadImageLogs.Arn
+              - Effect: Allow
+                Action: ecr:DescribeImages
+                Resource: !GetAtt OffloadImageRepo.Arn
+              # the CI build (#4706): start, watch and stop its project, read its log
+              - Effect: Allow
+                Action: [codebuild:StartBuild, codebuild:BatchGetBuilds, codebuild:StopBuild]
+                Resource: !GetAtt OffloadCi.Arn
+              - Effect: Allow
+                Action: logs:GetLogEvents
+                Resource: !GetAtt OffloadCiLogs.Arn
               # the daemon's log to its own group (#1490): writes only. No delete and no retention change, so the agent's
               # credentials (the same OS user's) cannot erase what was logged about them
               - Effect: Allow
@@ -811,6 +852,10 @@ Resources:
               - Effect: Allow
                 Action: codebuild:*
                 Resource: !Sub 'arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${AWS::StackName}-*'
+              # the image repository (#4705): this stack's own repositories only
+              - Effect: Allow
+                Action: ecr:*
+                Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${AWS::StackName}-*'
               - Effect: Allow
                 Action: budgets:*
                 Resource: !Sub 'arn:aws:budgets::${AWS::AccountId}:budget/${AWS::StackName}-*'
@@ -835,6 +880,9 @@ Resources:
                 Resource:
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/starter-url'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/offload-project'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/offload-image-project'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/offload-image-repo'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/offload-ci-project'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/distribution-id'
               # the Starter's 5-minute schedule (#1639): a SAM Schedule event is a rule on the default bus
               - Effect: Allow
@@ -986,6 +1034,155 @@ Resources:
       Name: /switchboard/offload-project
       Type: String
       Value: !Ref Offload
+  # ---------- offload image (#4705): the CI image, built here when the Dockerfile's ci stage changes ----------
+  # One build of the `ci` stage of the Dockerfile per content tag, pushed to a repository that keeps the newest 2
+  # (the one in use and the one before it). Not in the VPC; the role below reaches this repository and the upload only.
+  OffloadImageRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub '${AWS::StackName}-offload-image'
+      ImageScanningConfiguration: { ScanOnPush: true }
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"keep the newest 2 images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":2},"action":{"type":"expire"}}]}'
+      Tags: [{ Key: Project, Value: !Ref CostTag }]
+  OffloadImageLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/codebuild/${AWS::StackName}-offload-image'
+      RetentionInDays: 7
+  # what the build may do: write its log, read the upload it unpacks, push to this repository. No parameter, secret or
+  # host path.
+  OffloadImageRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-offload-image'
+      PermissionsBoundary: !Ref Boundary
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{ Effect: Allow, Principal: { Service: codebuild.amazonaws.com }, Action: sts:AssumeRole }]
+      Policies:
+        - PolicyName: build
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt OffloadImageLogs.Arn
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${Data.Arn}/offload/*'
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action: [ecr:BatchCheckLayerAvailability, ecr:InitiateLayerUpload, ecr:UploadLayerPart, ecr:CompleteLayerUpload, ecr:PutImage, ecr:BatchGetImage, ecr:GetDownloadUrlForLayer]
+                Resource: !GetAtt OffloadImageRepo.Arn
+  # The host starts it with SB_OFFLOAD_KEY (the upload of the work tree) and SB_IMAGE_TAG (from the Dockerfile's content).
+  # Privileged for docker; ARM, as the host and the Offload project are.
+  OffloadImage:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-offload-image'
+      ServiceRole: !GetAtt OffloadImageRole.Arn
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            build:
+              commands:
+                # single-quoted: an unquoted `echo "a: b"` is a YAML map, not a command
+                - 'mkdir -p /sb/work && cd /sb/work && aws s3 cp "s3://${Data}/$SB_OFFLOAD_KEY" - | tar -xzf -'
+                - 'aws ecr get-login-password | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com'
+                - 'cd /sb/work && docker build --target ci -f container/Dockerfile -t ${OffloadImageRepo.RepositoryUri}:$SB_IMAGE_TAG .'
+                - 'docker push ${OffloadImageRepo.RepositoryUri}:$SB_IMAGE_TAG'
+                - 'echo "sb-offload: image $SB_IMAGE_TAG"'
+      Artifacts: { Type: NO_ARTIFACTS }
+      Environment: { Type: ARM_CONTAINER, ComputeType: BUILD_GENERAL1_SMALL, Image: aws/codebuild/amazonlinux-aarch64-standard:3.0, PrivilegedMode: true }
+      TimeoutInMinutes: 30
+      QueuedTimeoutInMinutes: 15
+      ConcurrentBuildLimit: 1
+      LogsConfig: { CloudWatchLogs: { Status: ENABLED, GroupName: !Ref OffloadImageLogs } }
+      Tags: [{ Key: Project, Value: !Ref CostTag }]
+  # the host reads the project's name and the repository's URI here: in UserData they would replace the instance
+  OffloadImageProject:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /switchboard/offload-image-project
+      Type: String
+      Value: !Ref OffloadImage
+  OffloadImageRepoUri:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /switchboard/offload-image-repo
+      Type: String
+      Value: !GetAtt OffloadImageRepo.RepositoryUri
+  # ---------- offload CI (#4706): the checks CI runs, in the ci image ----------
+  # The same unpack-and-run as Offload, in the image OffloadImageRepo holds (the host passes the tag it built with
+  # --image-override; :latest is only the project's default). Not Offload itself: that one has docker from CodeBuild's
+  # standard image, and this image has none running (privileged is for the tmpfs mount).
+  OffloadCiLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/codebuild/${AWS::StackName}-offload-ci'
+      RetentionInDays: 7
+  # Offload's role, plus the pull of this one repository (the image is pulled with this role: SERVICE_ROLE)
+  OffloadCiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-offload-ci'
+      PermissionsBoundary: !Ref Boundary
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{ Effect: Allow, Principal: { Service: codebuild.amazonaws.com }, Action: sts:AssumeRole }]
+      Policies:
+        - PolicyName: build
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt OffloadCiLogs.Arn
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${Data.Arn}/offload/*'
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action: [ecr:BatchCheckLayerAvailability, ecr:BatchGetImage, ecr:GetDownloadUrlForLayer]
+                Resource: !GetAtt OffloadImageRepo.Arn
+  # Succeeds whatever the command returns, as Offload (sb-offload reads the last `sb-offload: exit N` line). The first
+  # line of the log says which image tag ran.
+  OffloadCi:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-offload-ci'
+      ServiceRole: !GetAtt OffloadCiRole.Arn
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            build:
+              commands:
+                # single-quoted: an unquoted `echo "a: b"` is a YAML map, not a command
+                - 'echo "sb-offload: image $SB_IMAGE_TAG"'
+                - 'mkdir -p /sb/work && cd /sb/work && aws s3 cp "s3://${Data}/$SB_OFFLOAD_KEY" - | tar -xzf -'
+                - 'cd /sb/work && sh -c "$SB_OFFLOAD_CMD"; c=$?; echo; echo "sb-offload: exit $c"'
+      Artifacts: { Type: NO_ARTIFACTS }
+      Environment: { Type: ARM_CONTAINER, ComputeType: BUILD_GENERAL1_LARGE, Image: !Sub '${OffloadImageRepo.RepositoryUri}:latest', ImagePullCredentialsType: SERVICE_ROLE, PrivilegedMode: true }
+      TimeoutInMinutes: 60
+      QueuedTimeoutInMinutes: 15
+      ConcurrentBuildLimit: 2
+      LogsConfig: { CloudWatchLogs: { Status: ENABLED, GroupName: !Ref OffloadCiLogs } }
+      Tags: [{ Key: Project, Value: !Ref CostTag }]
+  OffloadCiProject:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /switchboard/offload-ci-project
+      Type: String
+      Value: !Ref OffloadCi
   # ---------- cost ----------
   BudgetLow:
     Type: AWS::Budgets::Budget

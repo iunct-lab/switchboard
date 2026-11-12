@@ -288,32 +288,33 @@ describe("ops-load sampler (#2086)", () => {
   });
 });
 
-describe("memoryHeadroom (#1141)", () => {
-  const MB = 1_000_000;
-  const mkDb = () => {
+describe("memoryHeadroom (#1141, #4556)", () => {
+  const MB = 1024 * 1024;
+  const host = (meminfo: string | null, heavy: string | null) => {
     const dir = mkdtempSync(join(tmpdir(), "switchboard-ops-load-headroom-"));
     roots.push(dir);
-    return new Db(join(dir, "x.db"));
+    mkdirSync(join(dir, "proc"));
+    if (meminfo !== null) writeFileSync(join(dir, "proc", "meminfo"), meminfo);
+    if (heavy !== null) {
+      mkdirSync(join(dir, ".config", "ops-kit"), { recursive: true });
+      writeFileSync(join(dir, ".config", "ops-kit", "heavy.json"), heavy);
+    }
+    return { home: dir, procRoot: join(dir, "proc") };
   };
-  const row = { memCurrent: 0, memMax: null, swapCurrent: 0, eventsMax: 0, cpuPct: 0, pressureSome: 0, pressureFull: 0, dockerMem: 0, top: "[]" };
-  const g = (taskId: string | null, owner: "task" | "daemon" | "other", kind: string, rss: number) => ({ taskId, owner, kind, rssBytes: rss, cpuMs: 0, procs: 1 }) as never;
+  const MEMINFO = "MemTotal:        3921000 kB\nMemFree:          100000 kB\nMemAvailable:    1945600 kB\n";
 
-  test("free is memory.max − memory.current; need is the largest sum of one Task's groups in one sample of the last day", () => {
-    const d = mkDb();
-    const host = fakeHost(TREE); // memory.max 3.4 GB, memory.current 3.0 GB
-    const now = 2_000_000_000_000;
-    d.insertOpsLoad(row as never, [g("t_old", "task", "runner", 5_000 * MB)], now - 25 * 3_600_000); // older than a day: left out
-    d.insertOpsLoad(row as never, [g("t1", "task", "runner", 400 * MB), g("t1", "task", "other", 600 * MB), g("t2", "task", "runner", 700 * MB), g(null, "daemon", "daemon", 2_000 * MB)], now - 3_600_000);
-    d.insertOpsLoad(row as never, [g("t1", "task", "runner", 300 * MB)], now - 60_000);
-    expect(memoryHeadroom(d, { now, ...host })).toEqual({ free: 400 * MB, need: 1_000 * MB });
+  test("free is the machine's MemAvailable and floor is ops-kit heavy's minFreeMb — the values the resources screen shows", () => {
+    expect(memoryHeadroom(host(MEMINFO, '{ "minFreeMb": 1000 }'))).toEqual({ free: 1945600 * 1024, floor: 1000 * MB, safety: 300 * MB });
+    expect(memoryHeadroom(host(MEMINFO, '{ "minFreeMb": 1000, "taskMinFreeMb": 200 }'))).toEqual({ free: 1945600 * 1024, floor: 1000 * MB, safety: 200 * MB }); // read apart
+    expect(memoryHeadroom(host(MEMINFO, '{ "minFreeMb": 4000, "taskMinFreeMb": 200 }'))!.safety).toBe(200 * MB); // the floor does not move the valve
+    expect(memoryHeadroom(host(MEMINFO, null))).toEqual({ free: 1945600 * 1024, floor: 1536 * MB, safety: 300 * MB }); // no file: the defaults
   });
 
-  test("null when the unit has no memory limit, the cgroup cannot be read, or nothing is recorded", () => {
-    const d = mkDb();
-    const now = 2_000_000_000_000;
-    expect(memoryHeadroom(d, { now, ...fakeHost(TREE) })).toBeNull(); // nothing recorded
-    d.insertOpsLoad(row as never, [g("t1", "task", "runner", 400 * MB)], now - 60_000);
-    expect(memoryHeadroom(d, { now, ...fakeHost(TREE, { "memory.max": "max\n" }) })).toBeNull();
-    expect(memoryHeadroom(d, { now, cgRoot: "/nonexistent", procRoot: "/nonexistent" })).toBeNull();
+  test("null when /proc/meminfo cannot be read (the count alone decides); a wrong heavy configuration gives the default floor", () => {
+    expect(memoryHeadroom(host(null, null))).toBeNull();
+    expect(memoryHeadroom(host(MEMINFO, '{ "minFreeMb": -1 }'))).toEqual({ free: 1945600 * 1024, floor: 1536 * MB, safety: 300 * MB });
+    // a wrong taskMinFreeMb gives 300 MB without spoiling minFreeMb, and the other way round
+    for (const bad of ['"x"', "-5", "null"]) expect(memoryHeadroom(host(MEMINFO, `{ "minFreeMb": 1000, "taskMinFreeMb": ${bad} }`))).toEqual({ free: 1945600 * 1024, floor: 1000 * MB, safety: 300 * MB });
+    expect(memoryHeadroom(host(MEMINFO, '{ "minFreeMb": -1, "taskMinFreeMb": 200 }'))).toEqual({ free: 1945600 * 1024, floor: 1536 * MB, safety: 200 * MB });
   });
 });

@@ -15,7 +15,7 @@ export interface SettingsGroup {
 }
 
 export const SETTINGS_GROUPS: SettingsGroup[] = [
-  { id: "settings-task-start", title: settings.groupTaskStart, sections: ["新規作成の既定", "承認モードの既定", "自動で始まる Task の既定", "サブエージェントの思考の深さ", "レビューのランナー", "定型の指示", "並走（DAK）の既定"] },
+  { id: "settings-task-start", title: settings.groupTaskStart, sections: ["Switchboard 自体の開発", "新規作成の既定", "承認モードの既定", "自動で始まる Task の既定", "サブエージェントの思考の深さ", "レビューのランナー", "定型の指示", "並走（DAK）の既定"] },
   { id: "settings-resume", title: settings.groupResume, sections: ["使用量と自動再開", "回答の方針"] },
   { id: "settings-judge", title: settings.groupJudge, sections: ["判定と自動選択", "LLM 提案", "タスク名の自動付与"] },
   { id: "settings-model", title: settings.groupModel, sections: ["モデルの選択肢", "モデルの価格"] },

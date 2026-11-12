@@ -22,7 +22,7 @@
  * `unavailable` / `forbidden` that was open is asked again by every full import, so one that comes back is seen.
  */
 import { existsSync } from "node:fs";
-import type { Backlog, BacklogCommentData, BacklogErrorKind, BacklogIssueData, BacklogPullRequestData, BacklogItem, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogSource } from "@switchboard/protocol";
+import type { Backlog, BacklogCommentData, BacklogErrorKind, BacklogIssueData, BacklogPullRequestData, BacklogItem, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogProjectField, BacklogSource } from "@switchboard/protocol";
 import type { BacklogSnapshotEntry, Db } from "./db.ts";
 import { BacklogError, backlogRepoOf, confirmationsOf, confirmDecisionsOf, prereqsOf, projectOf, readStoredBacklog, syncsGithub, waitsOf, type BacklogWorkspace, type GhRunner } from "./backlog.ts";
 import { linkedIssues } from "../../../scripts/task-paths.ts";
@@ -48,7 +48,7 @@ const PR_FIELDS = `id number state isDraft updatedAt closedAt mergedAt headRefNa
 /** The open Issues with their Project items. */
 const OPEN_ISSUES = `query($o:String!,$r:String!,$after:String){ repository(owner:$o,name:$r){ issues(first:100, after:$after, states:OPEN, ${LABELS}){ pageInfo{ hasNextPage endCursor } nodes{ number ${PROJECT_ITEMS} } } } }`;
 const OPEN_PULLS = `query($o:String!,$r:String!,$after:String){ repository(owner:$o,name:$r){ pullRequests(first:50, after:$after, states:OPEN, orderBy:{field:UPDATED_AT, direction:DESC}){ pageInfo{ hasNextPage endCursor } nodes{ ${PR_FIELDS} } } } }`;
-const PROJECT_ID = "query($o:String!,$p:Int!){ repositoryOwner(login:$o){ ... on ProjectV2Owner{ projectV2(number:$p){ id } } } }";
+const PROJECT_ID = "query($o:String!,$p:Int!){ repositoryOwner(login:$o){ ... on ProjectV2Owner{ projectV2(number:$p){ id fields(first:50){ nodes{ ... on ProjectV2FieldCommon{ name dataType } ... on ProjectV2SingleSelectField{ options{ name } } } } } } } }";
 const MORE_COMMENTS = `query($o:String!,$r:String!,$n:Int!,$after:String!){ repository(owner:$o,name:$r){ issue(number:$n){ comments(first:100, after:$after){ ${COMMENTS} } } } }`;
 const recheckQuery = (numbers: number[]) =>
   `query($o:String!,$r:String!){ repository(owner:$o,name:$r){ ${numbers.map((n) => `w${n}: issueOrPullRequest(number:${n}){ __typename ... on Issue{ ${ISSUE} } ... on PullRequest{ ${PR_FIELDS} mergeCommit{ oid } } }`).join(" ")} } }`;
@@ -150,6 +150,56 @@ async function issueEntries(gh: GhRunner, cwd: string, vars: Vars, raw: RawIssue
 const issueNumber = (r: BacklogRecord) => (r.remote ? ("issue" in r.remote ? r.remote.issue : r.remote.number) : null);
 
 /**
+ * How many `gh` one import has running at once: each is a process waiting on GitHub, so the host's cores are not the
+ * bound. `SWITCHBOARD_BACKLOG_GH_READS` (a whole number ≥ 1) overrides it on a host that wants fewer (or more).
+ */
+export const GH_CONCURRENCY = ghConcurrency(process.env.SWITCHBOARD_BACKLOG_GH_READS);
+
+export function ghConcurrency(v: string | undefined): number {
+  const n = Number(v);
+  return v !== undefined && Number.isInteger(n) && n >= 1 ? n : 4;
+}
+
+/**
+ * `gh` run at most `max` at a time, in the order asked. `stop(e)`: no call starts after it (each throws `e`, those
+ * waiting for a turn too), and it resolves once the calls under way have ended — a failed import leaves nothing reading.
+ */
+export function limitGh(gh: GhRunner, max: number): { run: GhRunner; stop: (e: unknown) => Promise<void> } {
+  let active = 0;
+  let stopped: { e: unknown } | null = null;
+  const refuse = () => {
+    if (stopped) throw stopped.e;
+  };
+  const waiting: Array<() => void> = [];
+  const running = new Set<Promise<unknown>>();
+  const run: GhRunner = async (args, cwd) => {
+    refuse();
+    if (active >= max) await new Promise<void>((go) => waiting.push(go));
+    else active++;
+    try {
+      refuse();
+      // started at once (not a turn later): a caller may look at what was asked right after asking
+      const call = (async () => gh(args, cwd))();
+      running.add(call);
+      try {
+        return await call;
+      } finally {
+        running.delete(call);
+      }
+    } finally {
+      const next = waiting.shift();
+      if (next) next();
+      else active--;
+    }
+  };
+  const stop = async (e: unknown) => {
+    stopped ??= { e };
+    while (running.size) await Promise.allSettled([...running]);
+  };
+  return { run, stop };
+}
+
+/**
  * Reads what one import stores, against what is `stored` for the repository. `since` = the cursor: the newest
  * `updatedAt` of the last import (null = read every Issue). `full` = false leaves out what costs as much as there are
  * open Issues: their Project items, and asking again by number the stored ones that list no longer has (a first import
@@ -160,7 +210,15 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
   const vars: Vars = { o: repo.owner, r: repo.name };
   const out = new Map<string, BacklogSnapshotEntry>();
   const put = (e: BacklogSnapshotEntry) => out.set(`${e.objectKind}:${e.externalId}`, e);
-  const children = (kind: BacklogObjectKind, n: number) => stored.filter((r) => r.objectKind === kind && issueNumber(r) === n).map((r) => r.externalId);
+  // the stored records by kind and Issue, made once: `replace` runs per Issue and kind, and a scan of all `stored` each time is quadratic (#4579)
+  const byIssue = new Map<string, string[]>();
+  for (const r of stored) {
+    const key = `${r.objectKind}:${issueNumber(r)}`;
+    const ids = byIssue.get(key);
+    if (ids) ids.push(r.externalId);
+    else byIssue.set(key, [r.externalId]);
+  }
+  const children = (kind: BacklogObjectKind, n: number) => byIssue.get(`${kind}:${n}`) ?? [];
   /** Puts `entries` and marks the stored `kind` records of Issue n they no longer list. */
   const replace = (n: number, kinds: BacklogObjectKind[], entries: BacklogSnapshotEntry[]) => {
     entries.forEach(put);
@@ -170,34 +228,63 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
     }
   };
   const read = new Set<number>();
-  const readIssue = async (raw: RawIssue) => {
-    replace(raw.number, ["comment", "project-item"], await issueEntries(gh, cwd, vars, raw));
-    read.add(raw.number);
+  /** Asked at once, the reads of one import do not wait for each other; what they find is put in the order a sequential read would. A read nobody awaits yet must not be an unhandled rejection. */
+  const started = <T,>(p: Promise<T>) => (p.catch(() => {}), p);
+  const readIssue = (raw: RawIssue) => started(issueEntries(gh, cwd, vars, raw));
+  const putIssue = (n: number, entries: BacklogSnapshotEntry[]) => {
+    replace(n, ["comment", "project-item"], entries);
+    read.add(n);
   };
 
-  let cursor = since;
-  for (let after: string | null = null; ; ) {
-    const { data } = await graphql(gh, cwd, changedQuery(!!since), { ...vars, ...(after ? { after } : {}), ...(since ? { since } : {}) });
-    const issues = page<RawIssue>(data?.repository?.issues, "Issue");
-    for (const raw of issues.nodes) {
-      await readIssue(raw);
-      if (!cursor || raw.updatedAt > cursor) cursor = raw.updatedAt;
+  /** List 1: the Issues changed since the cursor; the pages follow each other by their cursor, each Issue's comment pages are read while the next page is. */
+  const listChanged = async () => {
+    const found: Array<{ raw: RawIssue; entries: Promise<BacklogSnapshotEntry[]> }> = [];
+    for (let after: string | null = null; ; ) {
+      const { data } = await graphql(gh, cwd, changedQuery(!!since), { ...vars, ...(after ? { after } : {}), ...(since ? { since } : {}) });
+      const issues = page<RawIssue>(data?.repository?.issues, "Issue");
+      for (const raw of issues.nodes) found.push({ raw, entries: readIssue(raw) });
+      if (!issues.pageInfo.hasNextPage) break;
+      after = issues.pageInfo.endCursor;
     }
-    if (!issues.pageInfo.hasNextPage) break;
-    after = issues.pageInfo.endCursor;
-  }
-
+    return found;
+  };
+  /** List 2: the open Issues with their Project items. */
   const open = new Set<number>();
   const listsOpen = full || !since;
-  for (let after: string | null = null; listsOpen; ) {
-    const { data } = await graphql(gh, cwd, OPEN_ISSUES, { ...vars, ...(after ? { after } : {}) });
-    const issues = page<{ number: number; projectItems: Counted<RawItem> }>(data?.repository?.issues, "開いた Issue");
-    for (const raw of issues.nodes) {
-      open.add(raw.number);
-      if (!read.has(raw.number)) replace(raw.number, ["project-item"], itemEntries(raw.number, raw.projectItems));
+  const listOpen = async () => {
+    const found: Array<{ number: number; projectItems: Counted<RawItem> }> = [];
+    for (let after: string | null = null; listsOpen; ) {
+      const { data } = await graphql(gh, cwd, OPEN_ISSUES, { ...vars, ...(after ? { after } : {}) });
+      const issues = page<{ number: number; projectItems: Counted<RawItem> }>(data?.repository?.issues, "開いた Issue");
+      found.push(...issues.nodes);
+      if (!issues.pageInfo.hasNextPage) break;
+      after = issues.pageInfo.endCursor;
     }
-    if (!issues.pageInfo.hasNextPage) break;
-    after = issues.pageInfo.endCursor;
+    return found;
+  };
+  /** List 3: the open PRs. */
+  const listPulls = async () => {
+    const found: RawPull[] = [];
+    for (let after: string | null = null; ; ) {
+      const { data } = await graphql(gh, cwd, OPEN_PULLS, { ...vars, ...(after ? { after } : {}) });
+      const pulls = page<RawPull>(data?.repository?.pullRequests, "開いた PR");
+      found.push(...pulls.nodes);
+      if (!pulls.pageInfo.hasNextPage) break;
+      after = pulls.pageInfo.endCursor;
+    }
+    return found;
+  };
+  const pullsRead = started(listPulls());
+
+  let cursor = since;
+  const [changed, opened] = await Promise.all([listChanged(), listOpen()]);
+  for (const { raw, entries } of changed) {
+    putIssue(raw.number, await entries);
+    if (!cursor || raw.updatedAt > cursor) cursor = raw.updatedAt;
+  }
+  for (const raw of opened) {
+    open.add(raw.number);
+    if (!read.has(raw.number)) replace(raw.number, ["project-item"], itemEntries(raw.number, raw.projectItems));
   }
   // without the list, an open Issue is one stored as read and open with the list's labels: closing it moved its
   // updatedAt, so the first read has it. Any other (a wait on an Issue of no type) is asked by number, as it was
@@ -209,70 +296,86 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
 
   // a closed Issue is on no list: a full import asks it too
   const asked = [...new Set(items)].filter((n) => !read.has(n) && !listed.has(n)).sort((a, b) => a - b);
-  for (let i = 0; i < asked.length; i += RECHECK_BATCH) {
-    const batch = asked.slice(i, i + RECHECK_BATCH);
-    const { data } = await graphql(gh, cwd, itemsQuery(batch), vars, true);
-    // one gone or hidden is seen by a full import
-    for (const n of batch) if (data?.repository?.[`w${n}`]) replace(n, ["project-item"], itemEntries(n, data.repository[`w${n}`].projectItems));
-  }
+  const askedBatches = Array.from({ length: Math.ceil(asked.length / RECHECK_BATCH) }, (_, i) => asked.slice(i * RECHECK_BATCH, (i + 1) * RECHECK_BATCH));
+  const askedAnswersRead = started(Promise.all(askedBatches.map((batch) => graphql(gh, cwd, itemsQuery(batch), vars, true))));
 
   const openPulls = new Set<number>();
-  for (let after: string | null = null; ; ) {
-    const { data } = await graphql(gh, cwd, OPEN_PULLS, { ...vars, ...(after ? { after } : {}) });
-    const pulls = page<RawPull>(data?.repository?.pullRequests, "開いた PR");
-    pulls.nodes.forEach((raw) => {
-      put(pullEntry(raw));
-      openPulls.add(raw.number);
-    });
-    if (!pulls.pageInfo.hasNextPage) break;
-    after = pulls.pageInfo.endCursor;
-  }
-
-  // what is known after the two lists: the stored records with this import's on top
-  const known = new Map(stored.map((r) => [`${r.objectKind}:${r.externalId}`, { kind: r.objectKind, id: r.externalId, remote: r.remote, state: r.fetchState }]));
-  for (const [k, e] of out) known.set(k, { kind: e.objectKind, id: e.externalId, remote: e.fetchState === "fetched" ? e.remote : (known.get(k)?.remote ?? null), state: e.fetchState });
-  // an Issue made here and not on GitHub yet (#2266, turning the sync on) is no Issue of GitHub's to ask for
-  const issues = [...known.values()].filter((r) => r.kind === "issue" && r.remote && !r.id.startsWith("sb:")) as Array<{ id: string; remote: BacklogIssueData }>;
-  const stale = !listsOpen ? [] : issues.filter((r) => r.remote.state === "OPEN" && !open.has(r.remote.number) && !read.has(r.remote.number)).map((r) => r.remote.number);
-  const waits = issues
-    .filter((r) => r.remote.state === "OPEN" && r.remote.labels.includes("type:pbi"))
-    .flatMap((pbi) => {
-      const comments = [...known.values()].filter((c) => c.kind === "comment" && c.state === "fetched" && (c.remote as BacklogCommentData | null)?.issue === pbi.remote.number).map((c) => c.remote as BacklogCommentData);
-      return waitsOf(comments.sort((a, b) => a.createdAt.localeCompare(b.createdAt)))?.numbers ?? [];
-    });
-  // the prerequisites an open PBI / Task names (#937) are asked like the waits
-  const prereqs = issues.filter((r) => r.remote.state === "OPEN" && (r.remote.labels.includes("type:pbi") || r.remote.labels.includes("type:task"))).flatMap((r) => prereqsOf(r.remote.body).map((p) => p.number));
-  // and the decisions an open In progress / In review PBI's confirmation lines name to be checked by their answers
-  const working = new Set([...known.values()].filter((r) => r.kind === "project-item" && ["In progress", "In review"].includes(String((r.remote as { fields?: Record<string, unknown> } | null)?.fields?.Status))).map((r) => (r.remote as { issue: number }).issue));
-  const confirmDecisions = issues
-    .filter((r) => r.remote.state === "OPEN" && r.remote.labels.includes("type:pbi") && working.has(r.remote.number))
-    .flatMap((r) => confirmationsOf(r.remote.body).flatMap((c) => confirmDecisionsOf(c.text)));
-  const byNumber = new Map([...known.values()].filter((r) => (r.kind === "issue" || r.kind === "pull-request") && r.remote && !r.id.startsWith("sb:")).map((r) => [(r.remote as { number: number }).number, r]));
-  // a wait on a closed request / PBI / Task is answered by what is stored: reopening it moves its updatedAt, and the
-  // first read lists it then. Another closed Issue is asked again: no list would show it reopened
-  const closed = (n: number) => {
-    const r = byNumber.get(n);
-    const issue = r?.kind === "issue" && r.state === "fetched" ? (r.remote as BacklogIssueData) : null;
-    return !!issue && issue.state === "CLOSED" && issue.labels.some((l) => TYPES.includes(l));
+  const pulls = await pullsRead;
+  for (const raw of pulls) openPulls.add(raw.number);
+  // what is known after the two lists: the stored records with `entries` (this import's) on top. What is asked again
+  // follows from it, so it is worked out twice: before the Project items of the named Issues are in (to start at once), and after
+  const recheckNumbers = (entries: Map<string, BacklogSnapshotEntry>) => {
+    const known = new Map(stored.map((r) => [`${r.objectKind}:${r.externalId}`, { kind: r.objectKind, id: r.externalId, remote: r.remote, state: r.fetchState }]));
+    for (const [k, e] of entries) known.set(k, { kind: e.objectKind, id: e.externalId, remote: e.fetchState === "fetched" ? e.remote : (known.get(k)?.remote ?? null), state: e.fetchState });
+    // an Issue made here and not on GitHub yet (#2266, turning the sync on) is no Issue of GitHub's to ask for
+    const issues = [...known.values()].filter((r) => r.kind === "issue" && r.remote && !r.id.startsWith("sb:")) as Array<{ id: string; remote: BacklogIssueData }>;
+    const stale = !listsOpen ? [] : issues.filter((r) => r.remote.state === "OPEN" && !open.has(r.remote.number) && !read.has(r.remote.number)).map((r) => r.remote.number);
+    const waits = issues
+      .filter((r) => r.remote.state === "OPEN" && r.remote.labels.includes("type:pbi"))
+      .flatMap((pbi) => {
+        const comments = [...known.values()].filter((c) => c.kind === "comment" && c.state === "fetched" && (c.remote as BacklogCommentData | null)?.issue === pbi.remote.number).map((c) => c.remote as BacklogCommentData);
+        return waitsOf(comments.sort((a, b) => a.createdAt.localeCompare(b.createdAt)))?.numbers ?? [];
+      });
+    // the prerequisites an open PBI / Task names (#937) are asked like the waits
+    const prereqs = issues.filter((r) => r.remote.state === "OPEN" && (r.remote.labels.includes("type:pbi") || r.remote.labels.includes("type:task"))).flatMap((r) => prereqsOf(r.remote.body).map((p) => p.number));
+    // and the decisions an open In progress / In review PBI's confirmation lines name to be checked by their answers
+    const working = new Set([...known.values()].filter((r) => r.kind === "project-item" && ["In progress", "In review"].includes(String((r.remote as { fields?: Record<string, unknown> } | null)?.fields?.Status))).map((r) => (r.remote as { issue: number }).issue));
+    const confirmDecisions = issues
+      .filter((r) => r.remote.state === "OPEN" && r.remote.labels.includes("type:pbi") && working.has(r.remote.number))
+      .flatMap((r) => confirmationsOf(r.remote.body).flatMap((c) => confirmDecisionsOf(c.text)));
+    const byNumber = new Map([...known.values()].filter((r) => (r.kind === "issue" || r.kind === "pull-request") && r.remote && !r.id.startsWith("sb:")).map((r) => [(r.remote as { number: number }).number, r]));
+    // a wait on a closed request / PBI / Task is answered by what is stored: reopening it moves its updatedAt, and the
+    // first read lists it then. Another closed Issue is asked again: no list would show it reopened
+    const closed = (n: number) => {
+      const r = byNumber.get(n);
+      const issue = r?.kind === "issue" && r.state === "fetched" ? (r.remote as BacklogIssueData) : null;
+      return !!issue && issue.state === "CLOSED" && issue.labels.some((l) => TYPES.includes(l));
+    };
+    // a stored open PR the full list no longer has was closed or merged: asked again by its number (#1059)
+    const gone = [...known.values()].filter((r) => r.kind === "pull-request" && (r.remote as BacklogPullRequestData | null)?.state === "OPEN").map((r) => (r.remote as BacklogPullRequestData).number).filter((n) => !openPulls.has(n));
+    // and what the Tasks' depends stops wait for (#2045), asked like the waits
+    const numbers = [...new Set([...stale, ...gone, ...[...waits, ...prereqs, ...confirmDecisions, ...stopWaits].filter((n) => !closed(n))])].filter((n) => !read.has(n) && !open.has(n) && !openPulls.has(n)).sort((a, b) => a - b);
+    return { numbers, byNumber };
   };
-  // a stored open PR the full list no longer has was closed or merged: asked again by its number (#1059)
-  const gone = [...known.values()].filter((r) => r.kind === "pull-request" && (r.remote as BacklogPullRequestData | null)?.state === "OPEN").map((r) => (r.remote as BacklogPullRequestData).number).filter((n) => !openPulls.has(n));
-  // and what the Tasks' depends stops wait for (#2045), asked like the waits
-  const numbers = [...new Set([...stale, ...gone, ...[...waits, ...prereqs, ...confirmDecisions, ...stopWaits].filter((n) => !closed(n))])].filter((n) => !read.has(n) && !open.has(n) && !openPulls.has(n)).sort((a, b) => a - b);
-  for (let i = 0; i < numbers.length; i += RECHECK_BATCH) {
-    const batch = numbers.slice(i, i + RECHECK_BATCH);
-    const { data, errors } = await graphql(gh, cwd, recheckQuery(batch), vars, true);
-    for (const n of batch) {
-      const node = data?.repository?.[`w${n}`];
-      if (node?.__typename === "Issue") await readIssue(node);
-      else if (node?.__typename === "PullRequest")
-        put(pullEntry(node));
-      else {
-        const type = errors.find((e) => e.path?.[1] === `w${n}`)?.type;
-        if (type !== "NOT_FOUND" && type !== "FORBIDDEN") throw new BacklogError(`gh api graphql（再確認）の応答に #${n} がありません`);
-        const prev = byNumber.get(n);
-        if (prev) put({ objectKind: prev.kind, externalId: prev.id, remote: null, fetchState: type === "FORBIDDEN" ? "forbidden" : "unavailable" } as BacklogSnapshotEntry);
-      }
+  // the rechecks do not wait for the items' answer: they are asked for what the items cannot change, and the rest after
+  const askRecheck = (numbers: number[]) => {
+    const batches = Array.from({ length: Math.ceil(numbers.length / RECHECK_BATCH) }, (_, i) => numbers.slice(i * RECHECK_BATCH, (i + 1) * RECHECK_BATCH));
+    // a batch's failure counts only for the numbers still wanted after the items: one asked early and no longer needed does not fail the import
+    return started(Promise.all(batches.map((batch) => graphql(gh, cwd, recheckQuery(batch), vars, true).then((answer) => ({ answer }), (error: unknown) => ({ error })))).then((answers) => batches.flatMap((batch, i) => batch.map((n) => ({ n, ...answers[i]! })))));
+  };
+  const early = new Map(out);
+  for (const e of pulls.map(pullEntry)) early.set(`${e.objectKind}:${e.externalId}`, e);
+  const firstNumbers = recheckNumbers(early).numbers;
+  const firstRead = askRecheck(firstNumbers);
+
+  const askedAnswers = await askedAnswersRead;
+  askedBatches.forEach((batch, i) => {
+    // one gone or hidden is seen by a full import
+    for (const n of batch) if (askedAnswers[i]!.data?.repository?.[`w${n}`]) replace(n, ["project-item"], itemEntries(n, askedAnswers[i]!.data.repository[`w${n}`].projectItems));
+  });
+  for (const raw of pulls) put(pullEntry(raw));
+
+  // the items may have moved a PBI to In progress: what its confirmation lines name is asked now (normally nothing)
+  const { numbers, byNumber } = recheckNumbers(out);
+  const firstAsked = new Set(firstNumbers);
+  const laterRead = askRecheck(numbers.filter((n) => !firstAsked.has(n)));
+  const wanted = new Set(numbers);
+  const answered = new Map<number, Awaited<ReturnType<typeof graphql>>>();
+  for (const r of [...(await firstRead), ...(await laterRead)].filter(({ n }) => wanted.has(n))) {
+    if ("error" in r) throw r.error;
+    answered.set(r.n, r.answer!);
+  }
+  // the Issues' comment pages are asked together, what comes back is put in the order of the numbers
+  const rechecked = numbers.map((n) => { const answer = answered.get(n)!; return { n, node: answer.data?.repository?.[`w${n}`], errors: answer.errors, entries: answer.data?.repository?.[`w${n}`]?.__typename === "Issue" ? readIssue(answer.data.repository[`w${n}`]) : null }; });
+  for (const { n, node, errors, entries } of rechecked) {
+    if (entries) putIssue(node.number, await entries);
+    else if (node?.__typename === "PullRequest")
+      put(pullEntry(node));
+    else {
+      const type = errors.find((e) => e.path?.[1] === `w${n}`)?.type;
+      if (type !== "NOT_FOUND" && type !== "FORBIDDEN") throw new BacklogError(`gh api graphql（再確認）の応答に #${n} がありません`);
+      const prev = byNumber.get(n);
+      if (prev) put({ objectKind: prev.kind, externalId: prev.id, remote: null, fetchState: type === "FORBIDDEN" ? "forbidden" : "unavailable" } as BacklogSnapshotEntry);
     }
   }
   return { records: [...out.values()], cursor };
@@ -288,20 +391,42 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
  * Project's auto-add comes after the Issue, without moving its updatedAt. Throws BacklogError.
  */
 export async function importGithubSnapshot(gh: GhRunner, db: Db, ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">, now = Date.now(), superseded = (_key: BacklogRepositoryKey) => false, enabling = false, full = true, items: number[] = []): Promise<{ key: BacklogRepositoryKey; changed: boolean; project: BacklogSource["project"] | null }> {
-  const { repo, owner, name, private: isPrivate } = await backlogRepoOf(gh, ws.path);
-  await refuseAnotherCheckout(gh, ws, db.getWorkspaceBacklogSource(ws.id), repo);
+  const limited = limitGh(gh, GH_CONCURRENCY);
+  gh = limited.run;
+  // the Project (and its guard, #468) is asked without waiting for the repository: both need only the checkout's path
+  const guard = projectOf(gh, ws).then(async (p) => ({ project: p, fields: await requireReadableProject(gh, ws.path, p) }));
+  guard.catch(() => {});
+  const { repo, owner, name, private: isPrivate } = await (async () => {
+    try {
+      const found = await backlogRepoOf(gh, ws.path);
+      await refuseAnotherCheckout(gh, ws, db.getWorkspaceBacklogSource(ws.id), found.repo);
+      return found;
+    } catch (e) {
+      await limited.stop(e);
+      await Promise.allSettled([guard]);
+      throw e;
+    }
+  })();
   const key: BacklogRepositoryKey = { service: "github", host: githubHost(), repository: repo };
   let changed = false;
   let project: BacklogSource["project"] | null = null;
   try {
-    project = await projectOf(gh, ws);
-    await requireReadableProject(gh, ws.path, project);
+    // the Project's guard (#468, started above) and the read go at once; nothing is stored unless the guard passed too
     const stored = db.listBacklogRecords(key);
     const recent = stored.flatMap((r) => {
       const issue = r.objectKind === "issue" && r.fetchState === "fetched" && !r.externalId.startsWith("sb:") ? (r.remote as BacklogIssueData | null) : null;
       return issue?.state === "OPEN" && Date.parse(issue.createdAt) >= now - NEW_ISSUE_ITEMS_MS ? [issue.number] : [];
     });
-    const snap = await fetchGithubSnapshot(gh, ws.path, { owner, name }, stored, db.getBacklogRepository(key)?.cursor ?? null, full, [...items, ...recent], stopWaitNumbers(db, ws.id, now));
+    const reading = fetchGithubSnapshot(gh, ws.path, { owner, name }, stored, db.getBacklogRepository(key)?.cursor ?? null, full, [...items, ...recent], stopWaitNumbers(db, ws.id, now));
+    reading.catch(() => {});
+    // one failed read stops the others: no page is asked after the import failed, and it ends once those under way have
+    const [readable, snap] = await Promise.all([guard, reading]).catch(async (e: unknown) => {
+      await limited.stop(e);
+      await Promise.allSettled([guard, reading]);
+      throw e;
+    });
+    project = readable.project;
+    const projectFields = readable.fields;
     changed = changedFrom(stored, snap.records);
     // the daemon wrote to the repository while this read: what it read is older than what the read-back stores; or
     // the workspace's GitHub sync was turned off meanwhile, its first import too (#2266): nothing of GitHub is stored then
@@ -314,7 +439,7 @@ export async function importGithubSnapshot(gh: GhRunner, db: Db, ws: Pick<Backlo
     // not when its Project variable changed meanwhile (that forgot the source, and the next import reads the new one).
     // Turning the sync on (#2266) and the numbers it gave stay
     const kept = current?.service === key.service && current.host === key.host && current.repository === key.repository ? { ...(current.enabling ? { enabling: current.enabling } : {}), ...(current.numbers ? { numbers: current.numbers } : {}) } : {};
-    if ((db.getWorkspace(ws.id)?.projectVar ?? null) === (ws.projectVar ?? null)) db.setWorkspaceBacklogSource(ws.id, { ...key, project, private: isPrivate, ...kept });
+    if ((db.getWorkspace(ws.id)?.projectVar ?? null) === (ws.projectVar ?? null)) db.setWorkspaceBacklogSource(ws.id, { ...key, project: readable.project, private: isPrivate, projectFields, ...kept });
   } catch (e) {
     const at = e instanceof BacklogError && e.response ? retryAtFromResponse(e.response, now)?.at : null;
     if (at) db.setBacklogRetryAt(key, at);
@@ -328,10 +453,16 @@ export async function importGithubSnapshot(gh: GhRunner, db: Db, ws: Pick<Backlo
  * Issue without an error, which reads as "not in the Project" and would mark every stored item gone. It answers such a
  * Project as null, with no error or with NOT_FOUND / FORBIDDEN. A limit or a refused login still fails as itself. Throws BacklogError.
  */
-async function requireReadableProject(gh: GhRunner, cwd: string, project: BacklogSource["project"]): Promise<void> {
+async function requireReadableProject(gh: GhRunner, cwd: string, project: BacklogSource["project"]): Promise<BacklogProjectField[]> {
   const { data } = await graphql(gh, cwd, PROJECT_ID, { o: project.owner, p: project.number }, true);
-  if (!data?.repositoryOwner?.projectV2?.id) throw new BacklogError(`Project ${project.owner}/${project.number} を読めない（トークンの権限）`);
+  const p = data?.repositoryOwner?.projectV2;
+  if (!p?.id) throw new BacklogError(`Project ${project.owner}/${project.number} を読めない（トークンの権限）`);
+  // the same answer gives the fields a value can be written to (#1545), in the Project's order; the others (ITERATION,
+  // TITLE, LABELS …) are no field a `set` sends
+  const nodes = (p.fields?.nodes ?? []) as Array<{ name?: string; dataType?: string; options?: Array<{ name: string }> }>;
+  return nodes.flatMap((f) => (f.name && (WRITABLE as readonly string[]).includes(f.dataType ?? "") ? [{ name: f.name, dataType: f.dataType as BacklogProjectField["dataType"], options: (f.options ?? []).map((o) => o.name) }] : []));
 }
+const WRITABLE = ["SINGLE_SELECT", "NUMBER", "TEXT", "DATE"] as const;
 
 /** Whether `records` read something other than what was `stored` (a value, or how a record was read). */
 function changedFrom(stored: BacklogRecord[], records: BacklogSnapshotEntry[]): boolean {
@@ -523,8 +654,9 @@ export class BacklogSync {
   /** How GitLab is asked (#892): the signed-in glab. */
   glab: Sh = runGlab;
   /** `sink`: gets the measure of every gh call and of every sync answered without one (#895). */
+  /** `reads`: whether the workspace is read at all (the `developSelf` setting leaves the meta workspace out); judged at each call. */
   /** `sends`: false on a daemon that must not write to GitHub (sb-rescue's candidate runs on a copy of the database: what it sent, the daemon would send again). */
-  constructor(private db: Db, gh: GhRunner, private clock = () => Date.now(), private sink?: MetricSink, private sends = true) {
+  constructor(private db: Db, gh: GhRunner, private clock = () => Date.now(), private sink?: MetricSink, private sends = true, private reads: (ws: Pick<BacklogWorkspace, "id">) => boolean = () => true) {
     this.limits = new GithubRetryState(clock);
     this.gh = !sink ? gh : async (args, cwd) => {
       // a runner that throws (or rejects) is a failed call too (#987 recheck)
@@ -546,6 +678,8 @@ export class BacklogSync {
    * what it finds is no reason to read again within a minute (one shared with an import under way goes by that import's).
    */
   sync(ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">, notice?: { echo: boolean }, opts?: { full?: boolean; readBack?: boolean }): Promise<void> {
+    // a workspace the instance does not read (#2459): nothing is asked of GitHub, by a hint or a poll either (both come here)
+    if (!this.reads(ws)) return Promise.resolve();
     const now = this.clock();
     // the repository the workspace reads, for the measures of what asks nothing (null before its first import)
     const source = this.db.getWorkspaceBacklogSource(ws.id);
@@ -970,12 +1104,16 @@ export class BacklogSync {
     return f && !(f.until !== undefined && f.until <= this.clock()) ? f.message : null;
   }
 
-  /** The stored backlog of the workspace and its sync state; never asks GitHub. `opts` goes to readStoredBacklog (#937). */
-  read(ws: Pick<BacklogWorkspace, "id" | "name" | "path">, opts: Parameters<typeof readStoredBacklog>[2] = {}): StoredBacklog {
+  /** Whether an import is under way (one queued after a write too) and why the last failed; reads no records. */
+  state(ws: Pick<BacklogWorkspace, "id">): Pick<StoredBacklog, "syncing" | "error" | "errorKind"> {
     const f = this.failures.get(ws.id);
     const failed = f && !(f.until !== undefined && f.until <= this.clock()) ? f : null;
-    const error = failed?.message ?? null;
-    // one queued after a write is under way too
-    return { ...readStoredBacklog(this.db, ws, { ...opts, importFailed: error !== null, now: this.clock() }), syncing: this.running.has(ws.id) || this.next.has(ws.id), error, errorKind: failed ? (failed.kind ?? "other") : null };
+    return { syncing: this.running.has(ws.id) || this.next.has(ws.id), error: failed?.message ?? null, errorKind: failed ? (failed.kind ?? "other") : null };
+  }
+
+  /** The stored backlog of the workspace and its sync state; never asks GitHub. `opts` goes to readStoredBacklog (#937). */
+  read(ws: Pick<BacklogWorkspace, "id" | "name" | "path">, opts: Parameters<typeof readStoredBacklog>[2] = {}): StoredBacklog {
+    const state = this.state(ws);
+    return { ...readStoredBacklog(this.db, ws, { ...opts, importFailed: state.error !== null, now: this.clock() }), ...state };
   }
 }

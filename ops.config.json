@@ -18,7 +18,7 @@
   },
   "publicSync": {
     "target": "iunct-lab/switchboard",
-    "include": [".claude/", ".gitattributes", ".github/", ".gitignore", "AGENTS.md", "CLAUDE.md", "LICENSE", "NOTICE", "README.md", "SECURITY.md", "apps/", "aws/", "bun.lock", "bunfig.toml", "docs/", "ops-kit/", "ops.config.json", "package.json", "packages/", "rescue/", "scripts/", "tsconfig.base.json"],
+    "include": [".claude/", ".dockerignore", ".gitattributes", ".github/", ".gitignore", "AGENTS.md", "CLAUDE.md", "LICENSE", "NOTICE", "README.md", "SECURITY.md", "apps/", "aws/", "bun.lock", "bunfig.toml", "container/", "docs/", "ops-kit/", "ops.config.json", "package.json", "packages/", "rescue/", "scripts/", "tsconfig.base.json"],
     "exclude": [
       ".github/workflows/project-autoadd.yml",
       "docs/design/asks.md",
@@ -28,6 +28,7 @@
       "docs/design/backlog.md",
       "docs/design/claude-history-import.md",
       "docs/design/codex-stage-check.md",
+      "docs/design/dev-history.md",
       "docs/design/evals.md",
       "docs/design/feedback.md",
       "docs/design/github-api-budget.md",
@@ -61,5 +62,6 @@
     "serviceUsers": ["switchboard"],
     "allowRefs": ["private/CLAUDE.md", ".github/workflows/project-autoadd.yml"],
     "versioning": "independent"
-  }
+  },
+  "depsCheck": { "extraConditions": ["typecheck と test を通す。"] }
 }

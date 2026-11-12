@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { isWorkingStatus, type Ask, AskAnswer, DeviceAuthView, PolicyInput, StopSummary, EventEnvelope, Task, TaskDiffFile, TaskOutcome, TeleportProgress } from "@switchboard/protocol";
+import { isWorkingStatus, type Ask, AskAnswer, DeviceAuthView, PolicyInput, StopSummary, EventEnvelope, Task, TaskDiffFile, TaskOutcome, TaskSummary, TeleportProgress } from "@switchboard/protocol";
 import { api, OLDER_PAGE, type TaskDetail } from "../api.ts";
 import { journeyCancel, journeyEnd, journeyStart } from "../perf.ts";
 import { eventsArchiveNotice } from "../events-archive.ts";
@@ -37,7 +37,7 @@ export function TaskView(props: {
   onSend: (text: string, attachmentIds?: string[]) => Promise<void>;
   onPermission: (id: string, decision: "allow" | "deny") => void;
   onError: (msg: string) => void;
-  shadowTask?: Task;
+  shadowTask?: TaskSummary;
   /** health.features.pty: the daemon can open a shell. False = no terminal tab. */
   pty?: boolean;
   /** Phones only (#369): the Brief is not beside the chat there; this lays it over the screen. */
@@ -369,18 +369,6 @@ export function TaskView(props: {
                 <span className="tag">{diffTag(f)}</span>
                 <span className="m num">{f.stat}</span>
               </button>
-              <span className="editor-links">
-                {f.source === "worktree" && (
-                  <>
-                    <a className="btn ghost" href={`vscode://file${encodeURI(f.path)}`} title={t(m.openInVscode)}>
-                      VS Code
-                    </a>
-                    <a className="btn ghost" href={`cursor://file${encodeURI(f.path)}`} title={t(m.openInCursor)}>
-                      Cursor
-                    </a>
-                  </>
-                )}
-              </span>
               {openFile === f.path && <pre className="diff">{f.diff || t(m.noDiff)}</pre>}
             </div>
           ))}

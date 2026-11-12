@@ -5,7 +5,7 @@ description: 新しいリポジトリを雛形から作り、GitHub 側（リポ
 
 # 新しいリポジトリを作る（雛形 → GitHub 側 → 初期コミット → 登録 → 開始条件 → 報告）
 
-何が要り、どこまで揃えば開始してよいかの正本は `docs/design/new-repo.md`（3 つの層・用途による違い・手作業で残るもの・開始してよい条件）。ここは**それを実行する順番とコマンド**だけで、条件は写さない。雛形は `ops-kit/template/`（`ops-kit/README.md` の「雛形（新しいリポジトリ）」にファイルとプレースホルダの表）。手順をスクリプトやデーモンのコードにしない。失敗しても作ったものを消さず、作ったものを報告して止まる（削除は人が行う）。
+何が要り、どこまで揃えば開始してよいかの正本は `docs/design/new-repo.md`（The three layers・Differences by purpose・What stays manual・Conditions to start）。ここは**それを実行する順番とコマンド**だけで、条件は写さない。雛形は `ops-kit/template/`（`ops-kit/README.md` の「雛形（新しいリポジトリ）」にファイルとプレースホルダの表）。手順をスクリプトやデーモンのコードにしない。失敗しても作ったものを消さず、作ったものを報告して止まる（削除は人が行う）。
 
 前提: 自分は Switchboard の Task で、`$SWITCHBOARD_REPO_ROOT` が Switchboard のチェックアウトを指す。
 
@@ -23,9 +23,9 @@ description: 新しいリポジトリを雛形から作り、GitHub 側（リポ
 | Area | 値の一覧（`__AREA__` を数だけ増やす）。ラベル `area:<値>` も同じ数 |
 | Phase | 使うか。使うなら `ops-kit/fixtures/config-with-phase.json` の `phase` / `milestone` を `ops.config.json` に、`pbi.yml` に Phase の dropdown を足す。使わないなら何もしない |
 | テストの 3 コマンド | 型検査 `__TEST_TYPECHECK__` / 全体 `__TEST_ALL__`（`ci.yml` の `run:` にも入る。別の言語ならその step に書き換える）/ 1 件 `__TEST_ONE__` |
-| 互換の前提・動いている実物と反映の OK | `__COMPAT__` / `__LIVE_CHECK__` / `__DEPLOY_OK__`。用途ごとの違いは `docs/design/new-repo.md` の「用途による違い」の表から選ぶ |
+| 互換の前提・動いている実物と反映の OK | `__COMPAT__` / `__LIVE_CHECK__` / `__DEPLOY_OK__`。用途ごとの違いは `docs/design/new-repo.md` の「Differences by purpose」の表から選ぶ |
 | 置き場所 | `<dir>` = `$(dirname "$SWITCHBOARD_REPO_ROOT")/<name>`（Switchboard のチェックアウトの隣） |
-| project-autoadd | `docs/design/new-repo.md` の「手作業で残るもの」の 3 に従う。既定は置かない（PAT の登録と更新が要る。雛形に入っていて Project の変数があると動き、PAT が無いと失敗する）。置かないなら 3 で `.github/workflows/project-autoadd.yml` を消す。置くなら PAT をリポジトリのシークレットに登録する旨を 6 で報告する |
+| project-autoadd | `docs/design/new-repo.md` の「What stays manual」の 3 に従う。既定は置かない（PAT の登録と更新が要る。雛形に入っていて Project の変数があると動き、PAT が無いと失敗する）。置かないなら 3 で `.github/workflows/project-autoadd.yml` を消す。置くなら PAT をリポジトリのシークレットに登録する旨を 6 で報告する |
 | そのほか | `__KIT_REPO__`（Switchboard のリポジトリの `owner/name`）、`__TASK_CHECK__`、`__QUOTA_CHECK__`（この環境の値） |
 
 期待: 上の全部に値がある。足りないものは聞く（推測で埋めない）。
@@ -116,7 +116,7 @@ curl -s -X PATCH $B/api/workspaces/$ID -H "authorization: Bearer $K" -H 'content
 
 ## 5. 開始してよい条件
 
-`docs/design/new-repo.md` の「開始してよい条件」の表を上から実行し、条件ごとに通った / 通らないを控える。3 の `lint_backlog.sh`、2 の変数、4 のバックログ画面は済んでいる。スキルの印は、その workspace から Task を 1 つ起動したあとでないと出ない（未起動なら「未確認（最初の Task の後）」）。マージ判定は最初の PR で確かめる。通らない条件は直せるものを直し、直せなければ表に残して報告する。
+`docs/design/new-repo.md` の「Conditions to start」の表を上から実行し、条件ごとに通った / 通らないを控える。3 の `lint_backlog.sh`、2 の変数、4 のバックログ画面は済んでいる。スキルの印は、その workspace から Task を 1 つ起動したあとでないと出ない（未起動なら「未確認（最初の Task の後）」）。マージ判定は最初の PR で確かめる。通らない条件は直せるものを直し、直せなければ表に残して報告する。
 
 期待: 表の 6 行すべてに「通った / 通らない / 未確認」がある。
 
@@ -126,7 +126,7 @@ curl -s -X PATCH $B/api/workspaces/$ID -H "authorization: Bearer $K" -H 'content
 新しいリポジトリ <owner>/<name>（private）
 作ったもの: リポジトリ <URL> / Project <URL> / 変数 <PREFIX>_PROJECT_URL / ラベル <n> 件 / 初期コミット <sha> / workspace <id>（<dir>）
 | 開始してよい条件 | 結果 |
-利用者確認: Project のビュー 2 つを手で作る（Backlog = `no:parent-issue`、Task Board = `has:parent-issue`。`docs/design/new-repo.md` の「手作業で残るもの」の 1）。project-autoadd を置いたときだけ PAT の登録（同 3）
+利用者確認: Project のビュー 2 つを手で作る（Backlog = `no:parent-issue`、Task Board = `has:parent-issue`。`docs/design/new-repo.md` の「What stays manual」の 1）。project-autoadd を置いたときだけ PAT の登録（同 3）
 ```
 
 Project のリポジトリへのひも付けとラベルは 2 で済ませているので、利用者確認に入れない。秘密の値は報告に書かない（`issue-workflow` の「Issue・PR・コメントに書かない値」）。期待: 作ったもの・条件の表・利用者確認の 3 つが埋まっている。
@@ -154,7 +154,7 @@ CI の手順は `ops.config.json` の `ci.steps`（`{"ci":{"steps":[{"name":"tes
 
 登録は 4 のとおり。ただし `POST /api/workspaces` の本文に `"backlog":"switchboard"` を足す（`-d '{"path":"<dir>","backlog":"switchboard"}'`。無いと既定の `github` で登録され、バックログが GitHub に向く）。`projectVar` の PATCH は**しない**（Project が無い）。バックログは Switchboard に置かれ、取込みの確認（`/api/backlog?refresh=1`）は要らない。返りが workspace の id なら済み。
 
-5 は GitHub 由来を飛ばす。「Project の URL」（変数）と「バックログ画面」の Project 由来の取込みは対象外、「マージ判定」は最初の変更で `--change` で確かめる（`merge-gate.ts --change <変更>`）。残るのは `lint_backlog.sh` の代わりの `ops-kit lint --fresh`（新しい workspace を名指しして `<dir>` で走らせる: `cd <dir> && env -u GH_REPO BACKLOG_WORKSPACE=$ID ops-kit lint --fresh`。自分の Task の `GH_REPO` / `BACKLOG_WORKSPACE` を継ぐと元のバックログを検査する。最後の行 `violations: 0`）、スキル、CLAUDE.md の 4 項目（雛形の節名は `docs/design/new-repo.md` の表と同じ）。
+5 は GitHub 由来を飛ばす。`docs/design/new-repo.md` の表の「The Project URL」（変数）と「The backlog screen」の Project 由来の取込みは対象外、「The merge judgement」は最初の変更で `--change` で確かめる（`merge-gate.ts --change <変更>`）。残るのは `lint_backlog.sh` の代わりの `ops-kit lint --fresh`（新しい workspace を名指しして `<dir>` で走らせる: `cd <dir> && env -u GH_REPO BACKLOG_WORKSPACE=$ID ops-kit lint --fresh`。自分の Task の `GH_REPO` / `BACKLOG_WORKSPACE` を継ぐと元のバックログを検査する。最後の行 `violations: 0`）、スキル、CLAUDE.md の 4 項目（雛形の節名は `docs/design/new-repo.md` の表と同じ）。
 
 6 の報告からは、リポジトリ・Project・変数・ラベル・Project のビューの利用者確認・PAT を外す。
 

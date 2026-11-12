@@ -8,7 +8,7 @@ import { delimiter, dirname, join } from "node:path";
 import type { AgentEvent, RunnerAdapter, RunnerSession, Task } from "@switchboard/protocol";
 import { abortOrphanedTasks, Db } from "./db.ts";
 import { STOP_NOTE } from "./evals.ts";
-import { kitPath, TaskManager, type TurnEnd } from "./tasks.ts";
+import { kitPath, taskAllowRules, TaskManager, type TurnEnd } from "./tasks.ts";
 
 /**
  * A lingering runner like `claude -p --input-format stream-json`: the first turn ends, the process stays, and the test
@@ -447,5 +447,22 @@ describe("kitPath", () => {
   test("kitPath puts the kit's bin first and bun's folder last; without the meta workspace only PATH and bun's folder", () => {
     expect(kitPath("/m", "/a:/b")).toBe(["/m/ops-kit/bin", "/a:/b", dirname(process.execPath)].join(delimiter));
     expect(kitPath(null, "/a:/b")).toBe(["/a:/b", dirname(process.execPath)].join(delimiter));
+  });
+});
+
+describe("task allow rules", () => {
+  test("allow rules for stack pushes and backlog writes", () => {
+    const rules = taskAllowRules("/meta", "/work");
+    for (const r of ["Bash(gh stack submit:*)", "Bash(gh stack push:*)", "Bash(ops-kit pr push-rebased)", "Bash(ops-kit backlog:*)"]) expect(rules).toContain(r);
+    // no bare push, no merge, no raw API: the merge stays with the gate and the rewrite push with its one command
+    expect(rules.filter((r) => /git push|gh (pr|stack) merge|gh api/.test(r))).toEqual([]);
+  });
+
+  test("allow rules for promotion and guard release", () => {
+    const rules = taskAllowRules("/meta", "/work");
+    for (const r of ["Bash(bun scripts/promote.ts:*)", "Bash(bun /meta/scripts/promote.ts:*)", "Bash(bun scripts/parallel-guard.ts release:*)", "Bash(bun /meta/scripts/parallel-guard.ts release:*)"]) expect(rules).toContain(r);
+    // no bare curl, and no claim / overlap / bare prefix of the guard
+    expect(rules.filter((r) => /curl/.test(r))).toEqual([]);
+    expect(rules.filter((r) => /parallel-guard\.ts(:\*| claim| overlap)/.test(r))).toEqual([]);
   });
 });

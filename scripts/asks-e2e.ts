@@ -18,6 +18,9 @@
  * #3058: a question tool's three questions (two with options, one without) on one card — a free-text field only on the
  * one without, one 回答する once all are answered, one reply — on the 判断待ち screen at 1280 and the Task screen at 390;
  * a card whose one question has no options takes no answer (Task を開く); nothing sideways at 390.
+ * #2794: two Tasks of two Workspaces stopped on a merge check with a `[聞く] セキュリティ` line are one batch:security-merge card
+ * (a row each, none chosen) — one chosen and 選んだ PR のマージを認める sends "merge" to that Task only, the other row stays — at
+ * 1280 and 390 (nothing sideways).
  */
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -47,12 +50,13 @@ pages[0].data.repository.issues.nodes.push({ ...structuredClone(issue(304)), num
 const waitStates: Json = { w779: { __typename: "PullRequest", state: "OPEN" }, w306: { __typename: "Issue", state: "OPEN" } };
 // #936: the PRs merge checks stop at — #12's head is the one its [merge-ask] named, #13 was pushed to since
 const ASKED = "a".repeat(40);
-const heads: Record<string, string> = { "12": ASKED, "13": "d".repeat(40), "14": "e".repeat(40) };
+const heads: Record<string, string> = { "12": ASKED, "13": "d".repeat(40), "14": "e".repeat(40), "16": ASKED, "17": ASKED };
 
 const home = mkdtempSync(join(tmpdir(), "sb-asks-e2e-"));
 const gh: GhRunner = async (args, cwd) => {
   // #1673: the second Workspace is no GitHub repository (its one question is a Task's tool approval)
-  if (cwd.endsWith("/second")) return { code: 1, stdout: "", stderr: "not a git repository" };
+  // (the merge check of #2794 reads its PR in this Workspace too: `pr view` is answered)
+  if (cwd.endsWith("/second") && !(args[0] === "pr" && args[1] === "view")) return { code: 1, stdout: "", stderr: "not a git repository" };
   if (args[0] === "repo") return { code: 0, stdout: "acme/app true\n", stderr: "" };
   if (args[0] === "variable") return { code: 0, stdout: "https://github.com/users/acme/projects/11\n", stderr: "" };
   if (args[0] === "issue") {
@@ -77,6 +81,8 @@ if (origin.status === 0) Object.assign(process.env, { GIT_CONFIG_COUNT: "1", GIT
 
 const checkOf = (pr: number) => `PR #${pr} を出しました。\n\n**確認**: PR #${pr} をマージしてよいか\n**選択肢**:\n- A: マージする — 影響: main に入る\n- B: 待つ — 影響: 後続が止まる\n**推奨**: A — CI が緑\n**止めた場所**: PR #${pr}`;
 const CHECK = checkOf(12);
+/** #2794: a merge check that stopped on a security reason (the `[聞く]` line under 止めた場所), in the "secmerge<PR>" prompts. */
+const securityCheckOf = (pr: number) => `${checkOf(pr).replace(`**止めた場所**: PR #${pr}`, `**止めた場所**: PR #${pr}（+40/-3）`)}\n- [聞く] セキュリティ: packages/core/src/tasks.ts`;
 // #2221: the Task whose artifacts are the screen mockups, named by the "checkmock" reply
 let mockTask = "";
 const mockCheck = () => `**確認**: どちらの画面にするか\n**選択肢**:\n- A: 上に並べる — 影響: 1 回で届く\n- B: 下に並べる — 影響: 2 回で届く\n**推奨**: A — 手数が少ない\n**画面イメージ**: ${mockTask}`;
@@ -103,7 +109,7 @@ const runner = (id: RunnerId): RunnerAdapter => ({
   start(opts, emit) {
     let exit!: (c: number | null) => void;
     const exited = new Promise<number | null>((r) => (exit = r));
-    const summary = opts.prompt === "checkmock" ? mockCheck() : opts.prompt === "check" ? CHECK : opts.prompt === "check14" ? checkOf(14) : opts.prompt === "checknopr" ? "**確認**: 続けるか\n**選択肢**:\n- A: はい — 影響: 進む\n- B: いいえ — 影響: 止まる" : opts.prompt === "check13" ? checkOf(13) : opts.prompt === "limit" || opts.prompt === "budget" ? "**確認**: 続けるか\n**選択肢**:\n- A: 続ける — 影響: 進む" : "done";
+    const summary = opts.prompt.startsWith("secmerge") ? securityCheckOf(Number(opts.prompt.slice(8))) : opts.prompt === "checkmock" ? mockCheck() : opts.prompt === "check" ? CHECK : opts.prompt === "check14" ? checkOf(14) : opts.prompt === "checknopr" ? "**確認**: 続けるか\n**選択肢**:\n- A: はい — 影響: 進む\n- B: いいえ — 影響: 止まる" : opts.prompt === "check13" ? checkOf(13) : opts.prompt === "limit" || opts.prompt === "budget" ? "**確認**: 続けるか\n**選択肢**:\n- A: 続ける — 影響: 進む" : "done";
     const execAsk = (command: string): AgentEvent[] => [{ t: "permission.ask", id: "perm1", kind: "exec", tool: "Bash", input: { command }, detail: command }];
     const asked = QUESTION_SCRIPTS[opts.prompt];
     const script: AgentEvent[] = asked ? [{ t: "question.ask", id: "q1", questions: asked }, { t: "session.end", status: "ok", summary: "Waiting for your choices" }] : opts.prompt.includes("/pbi-complete") ? [] : opts.prompt === "exec" ? execAsk("bun test packages/core") : opts.prompt === "exec2" ? execAsk("bun test apps/web") : opts.prompt === "exec3" ? execAsk("git status --short") : opts.prompt === "write" ? [{ t: "permission.ask", id: "perm1", kind: "write", tool: "Write", input: { file_path: "/tmp/x" }, detail: "write x" }] : [{ t: "session.end", status: "ok", summary }];
@@ -144,6 +150,10 @@ const imported = async (refresh: boolean) => {
 };
 const windowOver = async () => { core.db.sqlite.query("UPDATE backlog_operations SET retry_at = NULL WHERE kind = 'comment' AND status = 'pending' AND attempt = 0").run(); await imported(true); return true; };
 await imported(false);
+// #1177: a Task past settings.maxRunners (default 3) waits idle in the run-slot queue and is no card or resume. The seed Tasks below that stay running / waiting
+// (a tool approval, a stage Task, the checks) are more than 3, so the limit is raised to its largest (8), as a person would in Settings.
+const limit = await fetch(`${base}/api/settings`, { method: "PATCH", headers: { origin: base, "sec-fetch-site": "same-origin", "content-type": "application/json" }, body: JSON.stringify({ maxRunners: 8 }) });
+assert(limit.ok && (await limit.json() as Json).maxRunners === 8, `maxRunners 8: ${limit.status}`);
 const meta = core.db.listWorkspaces().find((w) => w.kind === "meta")!;
 const status = (id: string) => core.db.getTask(id)!.status;
 const task = async (title: string, runnerId: RunnerId, prompt: string, until_: (t: Task["status"]) => boolean, workspaceId = meta.id): Promise<string> => {
@@ -547,6 +557,8 @@ stageOf(ci, 304);
   assert(prev.includes("前回と違うので確認します") && prev.includes("適用しなかった理由: 別の PBI") && prev.includes("対象: approach → approach-b"), `previous: ${prev}`);
   assert(((await asksNow()).find((x) => x.id.startsWith(d308))?.state) === "open", "#308 stays open");
 
+  // the Tasks answered above (their cards are checked) are ended, so they do not hold the run slots the Tasks from here on need (#1177: a Task past the limit waits idle and is no card)
+  await Promise.all([a2, p1, p2, m12].map((id) => post(`/api/tasks/${id}/abort`, {})));
   // (f) what always asks: a security merge check, the runner's refusal, a Knowledge confirm rule
   const sec = await checkTask("セキュリティの確認 Task", "check");
   core.db.appendEvent(sec, { t: "stop.record", stop: { id: "s-sec", work: { workspaceId: meta.id, issue: null, taskId: sec }, op: "gh pr merge", target: "PR #12", reason: "decision", evidence: "merge check", safety: "unknown", conditions: [], answer: null, actions: [], state: "waiting", at: Date.now() - 3_600_000 } } as AgentEvent);
@@ -580,6 +592,7 @@ stageOf(ci, 304);
   await until(() => evaluate(`${rowOf(repo.id)}?.querySelector('.badge')?.textContent === '有効'`), "the badge says 有効 again");
   const p7 = await task("再有効後に許可される Task", "claude", "exec", (s) => s === "waiting" || approvedBy(core.db.listTasks().find((t) => t.title === "再有効後に許可される Task")!.id).length > 0);
   await until(() => approvedBy(p7).length > 0, "the restored policy allows again");
+  await Promise.all([p4, p5, p6, p7].map((id) => post(`/api/tasks/${id}/abort`, {})));
   // what always asks, after the edits above (so that the edited policy is what is tested there): a Knowledge confirm rule
   mkdirSync(join(home, "knowledge", "rules"), { recursive: true });
   writeFileSync(join(home, "knowledge", "rules", "confirm.md"), "---\napproval: { confirm: ['bun test packages*'] }\n---\nrules\n");
@@ -653,6 +666,7 @@ stageOf(ci, 304);
   await shot("asks-policy-settings-390.png");
   report.policies390 = { form: w390, list: wList };
 
+  await Promise.all([once, pr14, pr14b, p3, p8].map((id) => post(`/api/tasks/${id}/abort`, {})));
   // 9. #2221: screen mockups — a Task with two HTML artifacts; #307's ## 判断待ち and an operational check name it
   const mockDir = join(home, "mock");
   mkdirSync(mockDir);
@@ -782,6 +796,47 @@ stageOf(ci, 304);
   await until(() => replies.filter((r) => r.prompt === "questions").length === 2, "the answers on the Task screen reach the Task");
   assert(replies.filter((r) => r.prompt === "questions")[1]!.text === REPLY, "the reply from the Task screen");
   report.questions = { tasks: [q1, q2, qf], reply: REPLY, widths: [1280, 390] };
+
+  // #2794: two Tasks of two Workspaces stopped on a merge check with a security `[聞く]` line: one card (batch:security-merge), a row each,
+  // none chosen, nothing sideways at 390; at 1280 choosing one and pressing the button sends "merge" to that Task alone, the other row stays.
+  const sec1 = await post("/api/tasks", { workspaceId: meta.id, title: "セキュリティの確認 1", prompt: "secmerge16", runner: "codex" });
+  const sec2 = await post("/api/tasks", { workspaceId: second.id, title: "セキュリティの確認 2", prompt: "secmerge17", runner: "codex" });
+  for (const t of [sec1, sec2]) {
+    await until(() => status(t.id) !== "running", `task ${t.id}`);
+    await post(`/api/tasks/${t.id}/outcome`, { outcome: "needs_action" });
+  }
+  const secCard = `document.querySelector('.card[data-batch="batch:security-merge"]')`;
+  const secRows = () => evaluate(`[...(${secCard})?.querySelectorAll('.ask-merge-row') ?? []].map(r => r.dataset.task)`) as Promise<string[]>;
+  const secButton = `[...(${secCard}).querySelectorAll('button')].find(b => b.textContent.trim() === '選んだ PR のマージを認める')`;
+  const tick = (taskId: string) => evaluate(`(${secCard}).querySelector('.ask-merge-row[data-task="${taskId}"] input').click()`);
+  const secMerges = (prompt: string) => replies.filter((r) => r.prompt === prompt && r.text === "A: マージする — 影響: main に入る").length;
+  for (const [width, mobile] of [[390, true], [1280, false]] as const) {
+    await call("Emulation.setTouchEmulationEnabled", { enabled: mobile });
+    await call("Emulation.setDeviceMetricsOverride", { width, height: width === 390 ? 844 : 800, deviceScaleFactor: mobile ? 3 : 1, mobile });
+    await open();
+    const rows = await until(async () => { const r = await secRows(); return r.length === 2 ? r : null; }, `the security-merge card's two rows at ${width}`, secRows);
+    assert(same([...rows].sort(), [sec1.id, sec2.id].sort()), `rows at ${width}: ${JSON.stringify(rows)}`);
+    assert(await evaluate(`[...document.querySelectorAll('.card[data-batch="batch:security-merge"]')].length === 1 && ${secCard}.textContent.includes('[聞く] セキュリティ: packages/core/src/tasks.ts') && ${secCard}.textContent.includes('+40/-3')`), `the card's row text at ${width}`);
+    assert(await evaluate(`[...(${secCard}).querySelectorAll('.ask-merge-ws h6')].length === 2`), `a heading per Workspace at ${width}`);
+    assert(await evaluate(`[...(${secCard}).querySelectorAll('input[type=checkbox]')].every(i => !i.checked) && ${secButton}.disabled`), `nothing chosen at first, the button off at ${width}`);
+    if (mobile) {
+      await sideways(390, "the 判断待ち screen with the security-merge card");
+      assert(await evaluate(`${secButton}.getBoundingClientRect().height >= 44`), "the button is a 44px target at 390");
+      await evaluate(`${secCard}.scrollIntoView({ block: "start" })`);
+      await shot("asks-security-merge-390.png");
+      continue;
+    }
+    await evaluate(`${secCard}.scrollIntoView({ block: "start" })`);
+    await shot("asks-security-merge-1280.png");
+    await tick(sec1.id);
+    assert(await evaluate(`!${secButton}.disabled`), "the button is on once a row is chosen");
+    await evaluate(`${secButton}.click()`);
+    await until(() => secMerges("secmerge16") === 1, "the chosen Task is sent merge", () => replies);
+    await until(() => status(sec1.id) === "running", "the chosen Task is 実行中", () => status(sec1.id));
+    const left = await until(async () => { const r = await secRows(); return r.length === 1 ? r : null; }, "only the other row is left", secRows);
+    assert(left[0] === sec2.id && secMerges("secmerge17") === 0 && status(sec2.id) !== "running", `the other Task waits: ${JSON.stringify(left)} ${status(sec2.id)}`);
+    report.securityMerge = { sent: sec1.id, waiting: sec2.id, widths: [390, 1280] };
+  }
 
   assert(!errors.length, `console errors: ${JSON.stringify(errors)}`);
   console.log(JSON.stringify({ ...report, answered, consoleErrors: errors.length }));

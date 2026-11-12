@@ -127,3 +127,45 @@ test("a failed whole read names its Task, so the page can tell a Task that is no
   await reader.load("task_gone");
   expect(seen).toEqual([["task_gone", "not found"]]);
 });
+
+test("a task.updated during a read beats the read's older snapshot, even with the same updatedAt (#2834: a title keeps it)", async () => {
+  const h = harness();
+  const named = (title: string) => ({ id: "t1", status: "running", title, updatedAt: 5 }) as unknown as TaskDetail["task"];
+  h.reader.connected();
+  const load = h.reader.load("t1"); // the daemon snapshots "Old"; the generated title comes live before the answer
+  h.reader.updated(named("New"));
+  h.reader.updated({ ...named("Other"), id: "t2" }); // a Task not being read: nothing to do
+  h.calls[0]!.answer({ ...detail([1]), task: named("Old") });
+  await load;
+  expect(h.details().t1!.task.title).toBe("New");
+  // a catch-up read: the same
+  h.reader.connected();
+  h.reader.updated(named("Newer"));
+  h.calls[1]!.answer({ ...detail([2]), task: named("New") });
+  await Bun.sleep(0);
+  expect(h.details().t1!.task.title).toBe("Newer");
+  // no update meanwhile: the read's answer stands
+  h.reader.connected();
+  h.calls[2]!.answer({ ...detail([3]), task: named("Read") });
+  await Bun.sleep(0);
+  expect(h.details().t1!.task.title).toBe("Read");
+});
+
+test("a read started later does not take an update an earlier read was told of (#2834: a reconnect while a catch-up is out)", async () => {
+  const h = harness();
+  const named = (title: string) => ({ id: "t1", status: "running", title, updatedAt: 5 }) as unknown as TaskDetail["task"];
+  h.reader.connected();
+  const load = h.reader.load("t1");
+  h.calls[0]!.answer({ ...detail([1]), task: named("Old") });
+  await load;
+  h.reader.connected(); // a catch-up; A comes live while it is out, then the socket drops and B is made offline
+  h.reader.updated(named("A"));
+  h.reader.connected(); // the reconnect's read snapshots B
+  h.calls[2]!.answer({ ...detail([2]), task: named("B") });
+  await Bun.sleep(0);
+  expect(h.details().t1!.task.title).toBe("B");
+  h.calls[1]!.answer({ ...detail([1, 3]), task: named("Old") }); // the earlier catch-up answers last: its events only
+  await Bun.sleep(0);
+  expect(h.details().t1!.task.title).toBe("B");
+  expect(seqs(h.details().t1!.events)).toEqual([1, 2, 3]);
+});

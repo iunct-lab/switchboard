@@ -232,7 +232,7 @@ describe("AdkSession over HTTP/SSE (fake ADK server)", () => {
     expect(c2.events.filter((e) => e.t === "artifact")).toHaveLength(0);
     await s2.close();
     rmSync(dir, { recursive: true, force: true });
-  }, 30_000); // three HTTP turns under a loaded full suite: over the 5 s default (docs/design/perf.md "テストの揺れ")
+  }, 30_000); // three HTTP turns under a loaded full suite: over the 5 s default (docs/design/perf.md "Test flakiness")
 
   test("artifact: one that cannot be fetched is an error entry and the others still come; a name cannot leave the directory", async () => {
     const dir = mkdtempSync(join(tmpdir(), "dak-art-"));

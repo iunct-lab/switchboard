@@ -34,7 +34,9 @@ test("--fixture: imports at once cost one import, a list costs nothing after it;
   expect(by["backlog import x10 at once"]).toMatchObject({ calls: one.calls, shared: 9, single: one.calls });
   // the first import meets the limit; the ten after it ask nothing and say why
   const limited = by["backlog import x10 while limited"]!;
-  expect(limited.byOp["api graphql"]).toBe(1);
+  // the reads of that import start together (#3437): the ones in flight when the limit came, at most the few it runs at once
+  expect(limited.byOp["api graphql"]).toBeGreaterThanOrEqual(1);
+  expect(limited.byOp["api graphql"]).toBeLessThanOrEqual(4);
   expect(limited).toMatchObject({ waited: 10, waits: ["secondary"] });
   expect(by.lint!.calls).toBe(1);
   expect(by.overlap!.calls).toBeGreaterThan(0);
@@ -102,7 +104,7 @@ test("BacklogSync's sink: a runner that throws is measured as a failed call (#98
     ms.length = 0;
     const sync = new BacklogSync(new Db(":memory:"), runner, () => 0, (m) => ms.push(m));
     await expect(sync.sync({ id: "w", path: "/work/app" })).rejects.toThrow("ENOENT");
-    expect(ms.map((m) => [m.op, m.kind, m.ok])).toEqual([["repo view", "call", false]]);
+    expect(ms.map((m) => [m.op, m.kind, m.ok])).toEqual([["variable get", "call", false], ["repo view", "call", false]]) // the Project variable is asked with the repository (#4528);
   }
 });
 

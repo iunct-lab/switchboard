@@ -70,7 +70,7 @@ export function envOf(flag: string | undefined, env: Record<string, string | und
 }
 
 export const BUDGET_PATH = join(import.meta.dir, "perf-budget.json");
-/** How much the same code moves from run to run (docs/design/perf.md の「数の意味」). */
+/** How much the same code moves from run to run (docs/design/perf.md "What the numbers mean"). */
 const BAND: Record<string, number> = { requests: 1, layoutCount: 1, recalcStyleCount: 1, layoutShift: 0.03, healthMaxMs: 10150 };
 const round4 = (n: number) => Math.round(n * 1e4) / 1e4;
 /** The ceilings judged on the high side only: `over` above them, never `improved` below, so `update` never lowers them.
@@ -189,7 +189,7 @@ export function bundleOf(dist: string): Bundle {
 
 /**
  * The bundle's growth over main's tip that fails the check: 1% of main's size, js and css each. The user's rule
- * (2026-10-30), to be looked at again (raised or dropped): change it here and in docs/design/perf.md の「ラチェット」.
+ * (2026-10-30), to be looked at again (raised or dropped): change it here and in docs/design/perf.md "Ratchet (the CI ceilings)".
  */
 export const BUNDLE_GROWTH_LIMIT = 0.01;
 

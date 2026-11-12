@@ -1,0 +1,14 @@
+# what the machine generated stays out of the build context (a node_modules built on a Mac must not enter the image)
+node_modules
+**/node_modules
+.git
+apps/web/dist
+**/dist
+*.log
+*.tsbuildinfo
+# local secrets and the owner's private files never enter an image layer
+.env
+.env.*
+**/.env
+**/.env.*
+private

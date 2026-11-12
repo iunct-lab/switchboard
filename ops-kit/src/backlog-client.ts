@@ -95,11 +95,6 @@ export function filterIssues<T extends { number: number; title: string; state: s
   return issues.filter((i) => (kind === "all" || (kind === "change") === Boolean(i.change)) && (f.state === "all" || i.state.toLowerCase() === f.state) && f.labels.every((l) => i.labels.includes(l)) && (!word || i.title.toLowerCase().includes(word))).sort((a, b) => a.number - b.number);
 }
 
-interface List {
-  syncs: Sync[];
-  items: Array<{ number: number; workspaceId: string; type: string; stage: string; projectStatus?: string | null; title: string }>;
-}
-
 interface Sync {
   workspaceId: string;
   /** Where the workspace's backlog is kept: `github` (synced with GitHub), or another value for one kept only in the app. */
@@ -179,8 +174,12 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
       const [owner, name] = (await repoName(env, opts.cwd)).split("/") as [string, string];
       return { owner, name };
     };
-    const load = (imported = true) => findWorkspace(api, env, { workspace: explicit, cwd: opts.cwd, imported });
-    const workspace = async (imported = true) => (await load(imported)).ws;
+    // looked up once per command: only after a sync (`again`) is it read anew, for the time it says
+    let looked: ReturnType<typeof findWorkspace> | undefined;
+    const workspace = async (imported = true, again = false) => {
+      if (again || !looked) looked = findWorkspace(api, env, { workspace: explicit, cwd: opts.cwd });
+      return imported ? importedOnly(await looked) : (await looked).ws;
+    };
     const settle = async (ws: Sync) => {
       const unsynced = await syncOrStored(api, ws);
       if (unsynced) io.err(unsynced);
@@ -219,7 +218,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
           return 0;
         }
         let ws = await workspace(!fresh);
-        if (fresh) await settle(ws), (ws = await workspace());
+        if (fresh) await settle(ws), (ws = await workspace(true, true));
         const records = (await api("GET", `/records?workspaceId=${encodeURIComponent(ws.workspaceId)}`)) as StoredRecords;
         const items = filterIssues(records.issues, filter).map((i) => ({ number: i.number, type: typeOf(i), state: i.state, status: (i.fields?.Status as string | null | undefined) ?? null, title: i.title, labels: i.labels }));
         // what the last import could not read is kept as it was stored: shown, and said to be not current
@@ -241,7 +240,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
           return 0;
         }
         let ws = await workspace(!fresh);
-        if (fresh) await settle(ws), (ws = await workspace());
+        if (fresh) await settle(ws);
         const d = (await api("GET", `/${encodeURIComponent(issueRef(ref))}?workspaceId=${encodeURIComponent(ws.workspaceId)}`)) as Detail;
         io.out(asJson ? JSON.stringify(d) : formatDetail(d));
         return 0;
@@ -439,7 +438,8 @@ export interface StoredRecords {
 export async function readRecords(env: Record<string, string | undefined>, opts: { fresh: boolean; repo?: string; cwd?: string; fetch?: Fetch }): Promise<StoredRecords & { unsynced: string | null }> {
   try {
     const api = client(env, opts.fetch ?? fetch);
-    const { ws } = await findWorkspace(api, opts.repo ? { ...env, GH_REPO: opts.repo } : env, { cwd: opts.cwd, imported: !opts.fresh });
+    const looked = await findWorkspace(api, opts.repo ? { ...env, GH_REPO: opts.repo } : env, { cwd: opts.cwd });
+    const ws = opts.fresh ? looked.ws : importedOnly(looked);
     const unsynced = opts.fresh ? await syncOrStored(api, ws) : null;
     return { ...((await api("GET", `/records?workspaceId=${encodeURIComponent(ws.workspaceId)}`)) as StoredRecords), unsynced };
   } catch (e) {
@@ -476,22 +476,43 @@ export async function appSync(env: Record<string, string | undefined>, opts: { r
   }
 }
 
+/**
+ * The repository's row of the app's workspaces (`GET /syncs`: each one's sync state, no records read); throws when the app
+ * does not have it. A workspace the app gave (BACKLOG_WORKSPACE) that is not listed is the same.
+ */
+async function findWorkspace(api: ReturnType<typeof client>, env: Record<string, string | undefined>, opts: { workspace?: string; cwd?: string }): Promise<Looked> {
+  const looked = await lookWorkspace(api, env, opts);
+  if (!looked.ws) throw new Unknown(looked.wanted);
+  return { ...looked, ws: looked.ws };
+}
+
+interface Looked { ws: Sync; wanted: string; explicit: string | undefined }
+
 /** The repository's row of the app's list, if it has one; `wanted`: the line that says it has not. */
 async function lookWorkspace(api: ReturnType<typeof client>, env: Record<string, string | undefined>, opts: { workspace?: string; cwd?: string }) {
   // a Task on a workspace whose backlog is kept in the app (#2265) is given its id: no repository to read it by
   const explicit = opts.workspace ?? (env.GH_REPO ? undefined : env.BACKLOG_WORKSPACE || undefined);
-  const list = (await api("GET", "")) as List;
+  const syncs = await listSyncs(api);
   const repo = explicit ? null : await repoName(env, opts.cwd);
-  const ws = list.syncs.find((s) => (explicit ? s.workspaceId === explicit : s.repository?.toLowerCase() === repo!.toLowerCase()));
-  return { ws, list, explicit, wanted: explicit ? `workspace ${explicit} がアプリにありません` : `${repo} のバックログはアプリに取り込まれていません（workspace の登録か --workspace <id>）` };
+  const ws = syncs.find((s) => (explicit ? s.workspaceId === explicit : s.repository?.toLowerCase() === repo!.toLowerCase()));
+  return { ws, explicit, wanted: explicit ? `workspace ${explicit} がアプリにありません` : `${repo} のバックログはアプリに取り込まれていません（workspace の登録か --workspace <id>）` };
 }
 
-/** The workspace of the repository in the app's list. `imported`: one never imported is unknown (exit 2), never "no items" or "not stored". */
-async function findWorkspace(api: ReturnType<typeof client>, env: Record<string, string | undefined>, opts: { workspace?: string; cwd?: string; imported: boolean }): Promise<{ ws: Sync; list: List }> {
-  const { ws, list, wanted } = await lookWorkspace(api, env, opts);
-  if (!ws) throw new Unknown(wanted);
-  if (opts.imported && ws.syncedAt === null) throw new Unknown(`${ws.repository ?? ws.workspaceId} はまだ取り込まれていません（同期 ${ws.sync.state}${ws.sync.reason ? `、${ws.sync.reason}` : ""}）。空の一覧や「保存されていない」として扱わない`);
-  return { ws, list };
+/** The app's workspaces with their sync state: `GET /syncs`, else (404) the old list route, once. */
+async function listSyncs(api: ReturnType<typeof client>): Promise<Sync[]> {
+  try {
+    return ((await api("GET", "/syncs")) as { syncs: Sync[] }).syncs;
+  } catch (e) {
+    // for a daemon older than the kit, until it is promoted (PBI #3362): the old route's `syncs` rows are the same
+    if (e instanceof Refused && e.message.startsWith("backlog: 404")) return ((await api("GET", "")) as { syncs: Sync[] }).syncs;
+    throw e;
+  }
+}
+
+/** One never imported is unknown (exit 2), never "no items" or "not stored". */
+function importedOnly({ ws }: Looked): Sync {
+  if (ws.syncedAt === null) throw new Unknown(`${ws.repository ?? ws.workspaceId} はまだ取り込まれていません（同期 ${ws.sync.state}${ws.sync.reason ? `、${ws.sync.reason}` : ""}）。空の一覧や「保存されていない」として扱わない`);
+  return ws;
 }
 
 /** A connection the sandbox refused (EPERM / EACCES), not an app that is down. */
@@ -531,14 +552,14 @@ export function client(env: Record<string, string | undefined>, f: Fetch) {
 }
 
 /**
- * The GitHub repositories the app syncs, with their workspace (the `syncs` of GET /api/backlog, #3073): what the gh
+ * The GitHub repositories the app syncs, with their workspace (GET /api/backlog/syncs, #3073): what the gh
  * guard stops a direct backlog write to, besides the Task's own. Null when the app cannot be asked (no BACKLOG_URL,
  * not reached, 4xx / 5xx, no answer in 5 seconds): the guard then judges the workspace only, and does not hold gh up
  * for as long as an `ops-kit backlog` command waits.
  */
 export async function syncedRepositories(env: Record<string, string | undefined>, f: Fetch = fetch): Promise<Array<{ repository: string; workspaceId: string }> | null> {
   try {
-    const list = (await client(env, (url, init) => f(url, { ...init, signal: AbortSignal.timeout(5_000) }))("GET", "")) as List;
+    const list = { syncs: await listSyncs(client(env, (url, init) => f(url, { ...init, signal: AbortSignal.timeout(5_000) }))) };
     return list.syncs.flatMap((s) => (s.backlog === "github" && s.repository !== null ? [{ repository: s.repository, workspaceId: s.workspaceId }] : []));
   } catch {
     return null;

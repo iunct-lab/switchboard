@@ -88,6 +88,12 @@ export function declaredPrereqs(body: string): number[] {
   return [];
 }
 
+/** The numbers on the first `**前提**:` line (outside fences) that carry `（リリース）`: `#N（リリース）`. */
+export function releasePrereqs(body: string): number[] {
+  for (const line of unfenced(body)) if (line.startsWith("**前提**:")) return [...new Set([...line.matchAll(/#(\d+)\s*（リリース）/g)].map((m) => Number(m[1])))];
+  return [];
+}
+
 /** The free-text phrasings after `#N` that name a predecessor (#2149), besides `前提: #N` (#1990). A fixed list, not configured. */
 export const PREREQ_PHRASES = ["の後", "のマージ後", "の完了後", "を待つ", "が先"] as const;
 const FREE_PREREQ = new RegExp(`前提[:：]\\s*#(\\d+)|#(\\d+)(?!\\d)[^#\\n]{0,12}?(?:${PREREQ_PHRASES.join("|")})`, "g");
@@ -172,9 +178,14 @@ export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: b
   const project = !withProject ? null : opts.records ? opts.records.project : projectOf(cfg);
   const projectNumber = project?.number ?? 0;
   let rows: Row[];
-  if (opts.records) rows = storedRows(opts.records, withProject);
-  else {
+  // where `（リリース）` on a number is checked against GitHub; null = a backlog kept in the app only (no GitHub behind it)
+  let repoPath: string | null = null;
+  if (opts.records) {
+    rows = storedRows(opts.records, withProject);
+    if (opts.records.service === "github") repoPath = opts.records.repository;
+  } else {
     const repo = await repoOf(gh);
+    repoPath = `${repo.owner}/${repo.name}`;
     rows = await fetchAll(gh, repo.owner, repo.name, project, opts.sleep ?? ((ms) => Bun.sleep(ms)));
   }
   const violations: Violation[] = [];
@@ -191,6 +202,11 @@ export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: b
     const own = (k: number) => k === row.number || k === parent || parentOf.get(k) === row.number || (parent !== null && parentOf.get(k) === parent);
     const named = freeTextPrereqs(body).filter((k) => open.has(k) && !declared.includes(k) && !own(k));
     if (named.length) warnings.push({ issue: row.number, message: freeTextPrereq(named) });
+  };
+  // `（リリース）` is for a PR's number: an Issue's number carries none (it is read as a pull request by the schedule)
+  const released = new Map<number, number[]>();
+  const noteReleased = (row: Row, body: string) => {
+    for (const k of releasePrereqs(body)) released.set(k, [...(released.get(k) ?? []), row.number]);
   };
   const points = STORY_POINTS.join(" / ");
   const isPoint = (n: number) => STORY_POINTS.includes(n);
@@ -214,6 +230,7 @@ export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: b
     if (bodySp === null) bad(n, "PBI 本文に `**Story Points**: N` が無い");
     else if (!isPoint(bodySp)) bad(n, `Story Points は ${points} のどれか（本文: ${bodySp}）`);
     freePrereqs(row, body);
+    noteReleased(row, body);
     if (row.parent) bad(n, `PBI に親 Issue（#${row.parent.number}）が付いている。PBI は親なし（Backlog ビューに出すため）`);
     if (!withProject) continue;
     const item = row.projectItems!.nodes.find((i) => i.project.number === projectNumber);
@@ -241,6 +258,22 @@ export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: b
     if (!row.parent) bad(row.number, "Task に親 PBI（sub-issue の親）が付いていない");
     else if (!labelsOf(row.parent).includes("type:pbi")) bad(row.number, `Task の親 #${row.parent.number} が type:pbi ではない`);
     freePrereqs(row, body);
+    noteReleased(row, body);
+  }
+
+  // one REST call per distinct number: no `pull_request` = an Issue; not found (404) is no violation
+  if (repoPath !== null) {
+    for (const [k, owners] of released) {
+      let found: { pull_request?: unknown } | null;
+      try {
+        found = (await gh.api(`repos/${repoPath}/issues/${k}`)) as { pull_request?: unknown } | null;
+      } catch (e) {
+        if (/HTTP 404/.test((e as Error).message)) continue;
+        throw new LintFetchError(`#${k} が Issue か PR かの取得に失敗: ${(e as Error).message.slice(0, 200)}`);
+      }
+      if (!found || found.pull_request) continue;
+      for (const o of owners) bad(o, `**前提**: の #${k} は Issue なので（リリース）は付けられない。（リリース）は PR の番号にだけ付く。#${k} を閉じた PR の番号に直す`);
+    }
   }
 
   for (const row of rows.filter((r) => labelsOf(r).includes("type:request"))) {

@@ -12,7 +12,7 @@ Rebase and merge does. Nothing calls GitHub, fetches or pushes.
   neither a `forge` in `ops.config.json` nor an `origin`, or its `forge` says `{ "service": "app" }`.
 
 The stage prompts of such a workspace (`buildStartPrompt`'s `localForge`, `packages/core/src/backlog.ts`) tell the Task
-to use changes instead of PRs, and each delivery skill has a 「ローカルの変更では」 paragraph next to the step it replaces.
+to use changes instead of PRs, and each delivery skill has a `ローカルの変更では` paragraph next to the step it replaces.
 A workspace with a remote keeps its PRs.
 
 ## The change
@@ -29,7 +29,7 @@ endpoint:
 | Comment | `POST /api/backlog/:number/comment` (`ops-kit backlog comment`): the review summary, the triage table, and the marks |
 | Merge | `PATCH /api/backlog/:number` with `state: "CLOSED"` and `change: { mergeCommit, mergedAt }` (only together). A closed change is not opened again: make a new one |
 
-The Backlog screen shows a 変更 section when a change is open (the closed ones are folded). A row opens in place with
+The Backlog screen shows a `変更` section when a change is open (the closed ones are folded). A row opens in place with
 the tips, the marks (the newest main review, the newest local CI result, the rechecks of the head; whether they count
 is the merge gate's), the body and every comment (`apps/web/src/changes.ts`).
 
@@ -46,6 +46,10 @@ in one comment as a table.
 throwaway worktree. The result's first line is the same `[local-ci] pass|fail <head> base=<base>`, posted as a comment
 on the change through the `app` row of `reportResult`'s services (`ops-kit/src/forge-app.ts`). It re-reads the change
 before posting and posts nothing if a branch moved. A pass of the same head and base is not run again (`--force`).
+
+The steps are read from `ops.config.json`'s `ci.steps` in the checkout; without that key they come from
+`.github/workflows/ci.yml`. With neither, it exits 2 with one line naming where they go and posts nothing. A repository
+with no test files gets `テスト: なし` in the result.
 
 ## Merge gate
 

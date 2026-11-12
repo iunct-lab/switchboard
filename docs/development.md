@@ -25,7 +25,7 @@ The replay tests read recordings kept outside Git (see the README's Develop sect
 2. Before `bun ops-kit/src/cli.ts bootstrap`, set `fields.area`, `fields.phase` and `milestone.pattern` in `ops.config.json` to your own values. The values in this repository are Switchboard's own packages and Phases, and `bootstrap` would copy them into your Project.
 3. Check the fields and the required sections in `ops.config.json`, then run `bun ops-kit/src/cli.ts bootstrap <Project title>` to create the fields.
 4. If you want new Issues added to the Project automatically, copy `ops-kit/template/.github/workflows/project-autoadd.yml` to `.github/workflows/`, replace `__PREFIX__` with your `envPrefix`, and set the `<PREFIX>_PROJECT_URL` variable and a repository secret `<PREFIX>_PROJECT_TOKEN` that can write the Project. The workflow never runs code from a PR.
-5. Keep `publicSync` in `ops.config.json`. Its `target` is the upstream public repository, and the kit's tools, the `gh` front end and the app's backlog refuse writes when a clone's default write target is that repository. If you publish to a public repository of your own, change `target` to it; you have no permission to `public-sync` to upstream. If a write is refused, see [the kit's note](../ops-kit/README.md#公開側への書き込みが止まったとき).
+5. Keep `publicSync` in `ops.config.json`. Its `target` is the upstream public repository, and the kit's tools, the `gh` front end and the app's backlog refuse writes when a clone's default write target is that repository. If you publish to a public repository of your own, change `target` to it; you have no permission to `public-sync` to upstream. If a write is refused, see [the kit's note](../ops-kit/README.md#%E5%85%AC%E9%96%8B%E5%81%B4%E3%81%B8%E3%81%AE%E6%9B%B8%E3%81%8D%E8%BE%BC%E3%81%BF%E3%81%8C%E6%AD%A2%E3%81%BE%E3%81%A3%E3%81%9F%E3%81%A8%E3%81%8D).
 
 ## 4. Issue and PR templates
 
@@ -49,4 +49,4 @@ Use the workflows in `.github/workflows/` as they are, where you want them:
 
 `CLAUDE.md` holds the values specific to a repository (the repository and Project, the test commands, where to work, release rules). Replace Switchboard's values with yours. Put values that belong only to you in `private/CLAUDE.md`, which `CLAUDE.md` imports and which may be omitted. Keep owner-only values and records under `private/` and do not add rewrites for them to the public sync.
 
-The shared skills are in `ops-kit/skills/` and the entry scripts in `scripts/setup/`; how the kit installs the skills is in [the kit's README](../ops-kit/README.md#スキルの導入). Run your flow (request, PBI, Task, PR, review, merge) on your fork's Issues and PRs.
+The shared skills are in `ops-kit/skills/` and the entry scripts in `scripts/setup/`; how the kit installs the skills is in [the kit's README](../ops-kit/README.md#%E3%82%B9%E3%82%AD%E3%83%AB%E3%81%AE%E5%B0%8E%E5%85%A5). Run your flow (request, PBI, Task, PR, review, merge) on your fork's Issues and PRs.

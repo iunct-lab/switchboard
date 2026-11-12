@@ -84,7 +84,6 @@ describe("runTests", () => {
         ? {}
         : {
             offload: {
-              bun: "1.2.3",
               run: async (script, _cwd, _size) => {
                 st.scripts.push(script);
                 st.inSlotAtOffload = st.inSlot;

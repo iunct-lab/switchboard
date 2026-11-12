@@ -68,7 +68,7 @@ export function importing(legacy: GhRunner, pulls: () => Json[] = () => []): GhR
   };
   return async (args, cwd) => {
     const q = args.find((a) => a.startsWith("query="))?.slice(6) ?? "";
-    if (q.includes("projectV2(number:$p){ id }")) return { code: 0, stdout: JSON.stringify({ data: { repositoryOwner: { projectV2: { id: "PVT_1" } } } }), stderr: "" };
+    if (q.includes("ProjectV2FieldCommon{ name dataType }")) return { code: 0, stdout: JSON.stringify({ data: { repositoryOwner: { projectV2: { id: "PVT_1", fields: { nodes: IMPORT_PROJECT_FIELDS } } } } }), stderr: "" };
     const page = (nodes: Json[], head: string) => ({ code: 0, stdout: head + JSON.stringify({ data: { repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } } } }), stderr: "" });
     if (q.includes("pullRequests(first:50, after:$after")) {
       const r = await ask(cwd, "issues(states:OPEN)");
@@ -148,3 +148,13 @@ const INCLUDED = /^HTTP\/[\d.]+ \d{3}[^\n]*\n[\s\S]*?\r?\n\r?\n/;
 const headOf = (out: string) => INCLUDED.exec(out)?.[0] ?? "";
 const parseIncludedBody = (out: string) => out.replace(INCLUDED, "");
 
+
+/** The fields the fake Project has as the import reads them (#1545): Title and Iteration are no field a value can be written to. */
+export const IMPORT_PROJECT_FIELDS = [
+  { name: "Title", dataType: "TITLE" },
+  { name: "Status", dataType: "SINGLE_SELECT", options: [{ name: "Backlog" }, { name: "Ready" }, { name: "Done" }] },
+  { name: "Priority", dataType: "SINGLE_SELECT", options: [{ name: "P1" }, { name: "P2" }] },
+  { name: "Story Points", dataType: "NUMBER" },
+  { name: "Sprint", dataType: "ITERATION" },
+  { name: "Due", dataType: "DATE" },
+];

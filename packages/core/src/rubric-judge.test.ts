@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentEvent, JudgeSettings, RuleMetrics, RunnerAdapter, RunnerId, RunnerSession, StartOptions } from "@switchboard/protocol";
 import { JUDGE_FALLBACK } from "./judge.ts";
+import { personMessages } from "./evals.ts";
 import { transcriptLines } from "./recap.ts";
 import { DEFAULT_RUBRIC } from "./rubric.ts";
-import { buildRubricPrompt, judgeRubric, parseRubricJudgement, RECAP_CHARS, type RubricJudgeInput } from "./rubric-judge.ts";
+import { buildRubricPrompt, judgeRubric, parseRubricJudgement, LATER_CHARS, RECAP_CHARS, type RubricJudgeInput } from "./rubric-judge.ts";
 
 const METRICS: RuleMetrics = { turns: 1, toolCalls: 3, toolFailures: 1, errors: 0, asks: 0, denials: 0, stops: 0, stopReasons: {}, userInstructions: 0, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false, durationMs: 5000, classifier: null, delegatedModel: null };
 const EVENTS: AgentEvent[] = [
@@ -13,7 +14,7 @@ const EVENTS: AgentEvent[] = [
   { t: "message.delta", role: "assistant", text: "直しました。" },
   { t: "session.end", status: "ok", summary: "直しました。" },
 ];
-const INPUT: RubricJudgeInput = { title: "README の誤字", prompt: "README の誤字を直して", events: EVENTS, metrics: METRICS, rubric: DEFAULT_RUBRIC };
+const INPUT: RubricJudgeInput = { title: "README の誤字", prompt: "README の誤字を直して", later: [], events: EVENTS, metrics: METRICS, rubric: DEFAULT_RUBRIC };
 const SETTINGS: JudgeSettings = { enabled: true, runner: "codex", model: "gpt-6-luna" };
 
 /** Replays `events` for every turn of `id`; the same shape as judge.test.ts's. */
@@ -45,12 +46,13 @@ describe("rubric judge (#1219)", () => {
     const j = await judgeRubric(INPUT, { adapters: new Map([["codex", replayAdapter("codex", answer(GOOD, "gpt-6-luna"), { starts })], ["claude", replayAdapter("claude", [])]]), settings: SETTINGS, cwd: "/tmp/switchboard-home/suggest", onUsage: (runner, ev) => usage.push({ runner, model: ev.model }) });
     expect(Object.keys(j.scores).sort()).toEqual(["communication", "efficiency", "goal", "instructions", "safety"]);
     expect(j.scores.goal).toEqual({ score: 5, reason: "直して報告" });
-    expect(j).toMatchObject({ summary: "小さな修正を確実に終えた", by: "codex:gpt-6-luna", rubric: "switchboard-default@2" });
+    expect(j).toMatchObject({ summary: "小さな修正を確実に終えた", by: "codex:gpt-6-luna", rubric: "switchboard-default@3" });
     expect(j.ts).toBeGreaterThan(0);
     expect(starts[0]).toMatchObject({ cwd: "/tmp/switchboard-home/suggest", model: "gpt-6-luna", permissionMode: "read-only" });
     const prompt = starts[0]!.prompt;
     for (const id of ["goal", "instructions", "efficiency", "communication", "safety"]) expect(prompt).toContain(`- ${id}（`);
     expect(prompt.split("\n").find((l) => l.startsWith("- safety（"))).toContain("案内どおりの経路でやり直したのは迂回に数えない");
+    expect(prompt).toContain("依頼は、最初の依頼文と、その後の利用者の発言（範囲の変更・許可文・選択への答え）で変わった最新のものとして読み");
     expect(prompt).toContain("## 会話");
     expect(prompt).toContain("利用者: README の誤字を直して");
     expect(prompt).toContain("ツール呼び出し 3 / 失敗 1");
@@ -88,6 +90,30 @@ describe("rubric judge (#1219)", () => {
     const j = await judgeRubric(INPUT, { adapters: new Map([["codex", codex], ["claude", claude]]), settings: { enabled: true, runner: "claude", model: "claude-sonnet" }, cwd: "/tmp/x", fallback: { runner: "codex", model: "m" } });
     expect(j.by).toBe("codex:m");
     expect(codexStarts.map((s) => s.model)).toEqual(["m"]);
+  });
+
+  test("the request section carries the person's later messages", () => {
+    const long: AgentEvent[] = Array.from({ length: 200 }, (_, i) => ({ t: "message.delta", role: "assistant", text: `line ${i} ${"x".repeat(100)}\n` }));
+    const events: AgentEvent[] = [{ t: "message.delta", role: "user", text: "調べて" }, { t: "session.end", status: "ok" }, { t: "message.delta", role: "user", text: "実装までやって" }, ...long];
+    const prompt = buildRubricPrompt({ ...INPUT, events, later: ["実装までやって"] });
+    const request = prompt.slice(prompt.indexOf("## 依頼"), prompt.indexOf("## 指標"));
+    expect(request).toContain("その後の利用者の発言（古い順");
+    expect(request).toContain("- 実装までやって");
+    expect(prompt.slice(prompt.indexOf("## 会話"))).not.toContain("実装までやって");
+    expect(buildRubricPrompt(INPUT)).not.toContain("その後の利用者の発言（古い順");
+    // the daemon's own resume message is not the person's: personMessages drops it before it gets here
+    expect(personMessages([...events, { t: "message.delta", role: "user", text: "[Switchboard 自動再開] 続けて" }]).slice(1)).toEqual(["実装までやって"]);
+  });
+
+  test("the later messages are capped", () => {
+    const later = Array.from({ length: 50 }, (_, i) => `発言${i} ${"あ".repeat(990)}`);
+    const prompt = buildRubricPrompt({ ...INPUT, later });
+    const request = prompt.slice(prompt.indexOf("## 依頼"), prompt.indexOf("## 指標"));
+    const kept = request.split("\n").filter((l) => l.startsWith("- 発言"));
+    expect(kept.join("\n").length).toBeLessThanOrEqual(LATER_CHARS);
+    expect(kept.at(-1)).toContain("発言49 ");
+    expect(request).toMatch(/- （古い発言 \d+ 件を省いた）/);
+    expect(request).not.toContain("発言0 ");
   });
 
   test("transcriptLines keeps the newest part past maxChars, marked; the prompt uses RECAP_CHARS", () => {

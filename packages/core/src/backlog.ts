@@ -11,9 +11,10 @@ import { closesOf } from "./backlog-sync.ts";
 import { findSecrets, hostAws } from "../../../ops-kit/src/secrets.ts";
 import { noWriteRefusal } from "../../../ops-kit/src/config.ts";
 import { fieldValue, UsageError, type Field } from "../../../ops-kit/src/set.ts";
+import type { ReleaseReview } from "./release-review.ts";
 import type { SetupScripts } from "./skillsync.ts";
 import { loadProcess, renderEntry, type ProcessDef } from "./process-defs.ts";
-import { judge, type Work } from "../../../scripts/parallel-guard.ts";
+import { afterTime, judge, type Work } from "../../../scripts/parallel-guard.ts";
 import { pathsIn } from "../../../scripts/task-paths.ts";
 import { readdirSync } from "node:fs";
 import type { StoredRecords } from "../../../ops-kit/src/backlog-client.ts";
@@ -126,8 +127,18 @@ const CODE_SPAN = /(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g;
  * The acceptance criteria still waiting on the user's own check (#523): unchecked lines with `（利用者確認: …）`. One
  * inside inline code does not count: a line that only names the form (PBI #523's own) is not a confirmation.
  */
-export function confirmationsOf(body: string): Array<{ n: number; text: string }> {
-  return criteria(body).filter((c) => !c.checked && c.text.replace(CODE_SPAN, "").includes(CONFIRM_MARK)).map(({ n, text }) => ({ n, text }));
+export function confirmationsOf(body: string): Array<{ n: number; text: string; after: string | null }> {
+  return criteria(body).filter((c) => !c.checked && c.text.replace(CODE_SPAN, "").includes(CONFIRM_MARK)).map(({ n, text }) => ({ n, text, after: confirmAfterOf(text) }));
+}
+
+/**
+ * The time a confirmation line says to wait for (#4616): `（利用者確認: 期日 <ISO 8601 with a zone> 以降 — …）`, right after the
+ * parenthesis as `confirmDecisionsOf`'s form is. Inline code does not count. null = no such time, or one `afterTime` cannot read
+ * (no zone, not a time): the line is asked for as before.
+ */
+export function confirmAfterOf(text: string): string | null {
+  const m = /（利用者確認:\s*期日\s*(\S+)\s*以降/.exec(text.replace(CODE_SPAN, ""));
+  return m && !Number.isNaN(afterTime(m[1]!)) ? m[1]! : null;
 }
 
 /**
@@ -250,6 +261,7 @@ export function toItem(raw: RawBacklogIssue, project: number, ws: Pick<BacklogWo
     labels: raw.labels.nodes.map((l) => l.name),
     waits: [],
     waitsAt: null,
+    waitsUntil: null,
     overlap: null,
     prereqs: [],
     stopSummary: [],
@@ -301,7 +313,7 @@ export function otherRepoRules(other: OtherRepo, local = false, localForge = fal
     ? `このリポジトリの \`scripts/setup/\` の ${setup.copies.join("、")} は共通キットを呼ばない写しなので使わない。代わりに ${meta} の \`scripts/setup/\` の同じ名前の入口に \`${projectUrl}\` を付けて使う。`
     : "";
   const project = localForge ? LOCAL_ISSUE_RULES + localChangeRules(`${meta}/`) : local ? LOCAL_BACKLOG_RULES : own ? "" : `Project の URL はリポジトリ変数 \`${other.projectVar ?? "SWITCHBOARD_PROJECT_URL"}\` にあり、Project を触るスクリプトには \`${projectUrl}\` を付けて渡す。`;
-  return `スキル（\`.claude/skills/…\`）は Switchboard がこのリポジトリに置いたもの（Git 管理外）を使ってください。${scripts}${copies}スキルは Switchboard 向けに書かれているので、次のように読み替えてください: スキル中の「このリポジトリ」「開発リポジトリ」はこのリポジトリ。${project}${localForge ? "" : `${local ? "\`scripts/merge-gate.ts\`・\`scripts/local-ci.ts\`" : "\`scripts/merge-gate.ts\`・\`scripts/parallel-guard.ts\`・\`scripts/local-ci.ts\`"} の既定の対象は実行する場所（環境変数・作業ツリー・スクリプトの clone）で変わるので、必ず \`--repo <このリポジトリの owner/name>\` を付けて実行し、その判定に従う（自分で条件を確かめて代わりにしない）。再チェックの手順は \`${meta}/docs/merge-gate.md\` の「再チェック」（その中の \`-R <owner/name>\` と \`origin\` はこのリポジトリ。印は必ずこのリポジトリの PR に付ける）。Actions が始まらない（ジョブのステップ 0 件）ときは、このリポジトリの作業ツリーから \`bun ${meta}/scripts/local-ci.ts <PR> --repo <このリポジトリの owner/name>\` で CI を回す（作業ツリーの origin が \`--repo\` と違えば何も投稿せず exit 2）。回すのはスタックの一番上で 1 回（全部の PR の指摘の処理が済んでから。いつ回し、どう数えるかは \`${meta}/docs/merge-gate.md\` の「ローカル CI を回す時と数え方」）。PR をマージするたびに、\`git fetch origin\` のあと \`bun ${meta}/scripts/release-tag.ts $(git rev-parse origin/main) --repo <このリポジトリの owner/name>\` でそのマージにタグと Release を付け（タグの無い前のマージもその Release に入る）、出力を PBI の結果に書く。main をタグの状態に戻すときは \`bun ${meta}/scripts/rollback-pr.ts <tag> --repo <このリポジトリの owner/name>\` で PR を作り、ふつうの PR と同じくレビューと merge-gate を通してマージする。`}ビルド・テスト・ブランチ・コミットの決まりは、このリポジトリの CLAUDE.md / AGENTS.md / README がスキルと食い違えばこのリポジトリの方に従う。Switchboard のリポジトリ自体は変更しない。`;
+  return `スキル（\`.claude/skills/…\`）は Switchboard がこのリポジトリに置いたもの（Git 管理外）を使ってください。${scripts}${copies}スキルは Switchboard 向けに書かれているので、次のように読み替えてください: スキル中の「このリポジトリ」「開発リポジトリ」はこのリポジトリ。${project}${localForge ? "" : `${local ? "\`scripts/merge-gate.ts\`・\`scripts/local-ci.ts\`" : "\`scripts/merge-gate.ts\`・\`scripts/parallel-guard.ts\`・\`scripts/local-ci.ts\`"} の既定の対象は実行する場所（環境変数・作業ツリー・スクリプトの clone）で変わるので、必ず \`--repo <このリポジトリの owner/name>\` を付けて実行し、その判定に従う（自分で条件を確かめて代わりにしない）。再チェックの手順は \`${meta}/docs/merge-gate.md\` の「Recheck」（その中の \`-R <owner/name>\` と \`origin\` はこのリポジトリ。印は必ずこのリポジトリの PR に付ける）。Actions が始まらない（ジョブのステップ 0 件）ときは、このリポジトリの作業ツリーから \`bun ${meta}/scripts/local-ci.ts <PR> --repo <このリポジトリの owner/name>\` で CI を回す（作業ツリーの origin が \`--repo\` と違えば何も投稿せず exit 2）。回すのはスタックの一番上で 1 回（全部の PR の指摘の処理が済んでから。いつ回し、どう数えるかは \`${meta}/docs/merge-gate.md\` の「When to run local CI and how it counts」）。PR をマージするたびに、\`git fetch origin\` のあと \`bun ${meta}/scripts/release-tag.ts $(git rev-parse origin/main) --repo <このリポジトリの owner/name>\` でそのマージにタグと Release を付け（タグの無い前のマージもその Release に入る）、出力を PBI の結果に書く。main をタグの状態に戻すときは \`bun ${meta}/scripts/rollback-pr.ts <tag> --repo <このリポジトリの owner/name>\` で PR を作り、ふつうの PR と同じくレビューと merge-gate を通してマージする。`}ビルド・テスト・ブランチ・コミットの決まりは、このリポジトリの CLAUDE.md / AGENTS.md / README がスキルと食い違えばこのリポジトリの方に従う。Switchboard のリポジトリ自体は変更しない。`;
 }
 
 /**
@@ -319,7 +331,7 @@ export const LOCAL_BACKLOG_RULES = LOCAL_ISSUE_RULES + "PR・レビュー・CI�
  * Switchboard checkout is (`` in its own, `<meta>/` in another's): its scripts and docs/merge-gate.md.
  */
 export const localChangeRules = (root: string) =>
-  `この workspace の変更はアプリに置く（リモートは使わない）。PR の代わりにローカルの「変更」で、レビュー・ローカル CI・マージ判定・マージを行う（各スキルの「ローカルの変更では」の行）。\`gh pr\` / \`gh stack\` / \`git push\` / \`git fetch\`・リリースタグ・\`ops-kit pull-main\` は使わない。枝は \`git checkout -b sb/<Task>-<topic>\` で 1 本ずつ（積まず、マージしてから次の枝を main から切る）。変更は \`ops-kit backlog create --title <題> --body-file <本文> --head <枝> --base main\`（本文の 1 行 \`Backlog-Task: <Task>\`。閉じるキーワードと \`#<番号>\` は書かない）。ローカル CI は \`bun ${root}scripts/local-ci.ts --change <変更>\`、マージ判定は \`bun ${root}scripts/merge-gate.ts --change <変更>\`、マージは \`bun ${root}scripts/local-merge.ts <変更>\`（判定をもう一度通し、Task も閉じる）。どれも \`--repo\` は付けない。マージ判定が \`[再チェック <kind>]\` で止めたら、\`${root}docs/merge-gate.md\` の「再チェック」を、PR の情報を \`ops-kit backlog view <変更>\`、差分を \`git diff main...<枝>\` に読み替えて回し、印（\`[recheck] <kind> pass <head の sha>\`）は \`ops-kit backlog comment <変更>\` で変更に付ける。\`[merge-ask]\` / \`[merge-answer]\` の印も変更のコメントに付ける（形は同じ文書の「記録の印」）。リリースタグは無いので、決定ログの「戻すなら <tag>」は「戻すなら: タグなし（変更 #<変更> の mergeCommit の前）」と書く。`;
+  `この workspace の変更はアプリに置く（リモートは使わない）。PR の代わりにローカルの「変更」で、レビュー・ローカル CI・マージ判定・マージを行う（各スキルの「ローカルの変更では」の行）。\`gh pr\` / \`gh stack\` / \`git push\` / \`git fetch\`・リリースタグ・\`ops-kit pull-main\` は使わない。枝は \`git checkout -b sb/<Task>-<topic>\` で 1 本ずつ（積まず、マージしてから次の枝を main から切る）。変更は \`ops-kit backlog create --title <題> --body-file <本文> --head <枝> --base main\`（本文の 1 行 \`Backlog-Task: <Task>\`。閉じるキーワードと \`#<番号>\` は書かない）。ローカル CI は \`bun ${root}scripts/local-ci.ts --change <変更>\`、マージ判定は \`bun ${root}scripts/merge-gate.ts --change <変更>\`、マージは \`bun ${root}scripts/local-merge.ts <変更>\`（判定をもう一度通し、Task も閉じる）。どれも \`--repo\` は付けない。マージ判定が \`[再チェック <kind>]\` で止めたら、\`${root}docs/merge-gate.md\` の「Recheck」を、PR の情報を \`ops-kit backlog view <変更>\`、差分を \`git diff main...<枝>\` に読み替えて回し、印（\`[recheck] <kind> pass <head の sha>\`）は \`ops-kit backlog comment <変更>\` で変更に付ける。\`[merge-ask]\` / \`[merge-answer]\` の印も変更のコメントに付ける（形は同じ文書の「Record marks」）。リリースタグは無いので、決定ログの「戻すなら <tag>」は「戻すなら: タグなし（変更 #<変更> の mergeCommit の前）」と書く。`;
 
 /** The form of a ## 状況 (#522), the same in a 状況確認 and in a resume of a stalled PBI (#578). */
 const REPORT_FORMAT = "`## 状況` で始まるコメントを 1 件書いてください。中身は `### 済んだこと` / `### 残り` / `### 止まっている理由`（動いているなら「動いている」とその Task）/ `### 次にやること`。";
@@ -634,7 +646,7 @@ export const unchangedIn = (items: BacklogItem[], slot: Slot) =>
  * A Ready / in-progress PBI with a wait or a prerequisite not met (#817, #1046, #937): still open, not read, withdrawn,
  * in a cycle or not judged. backlog-next leaves it; its row's button does not.
  */
-const isWaiting = (i: BacklogItem) => i.waits.some((w) => w.state !== "met") || i.prereqs.some((p) => p.state !== "met");
+const isWaiting = (i: BacklogItem) => i.waits.some((w) => w.state !== "met") || (!!i.waitsUntil && !i.waitsUntil.met) || i.prereqs.some((p) => p.state !== "met");
 
 /**
  * A Ready / in-progress PBI whose waits closed or became deferred (#817).
@@ -812,20 +824,28 @@ export function taskDecision(tasks: SubTask[], fallbackAt: string): NonNullable<
 }
 
 /** A /pbi-complete occupancy mark (scripts/parallel-guard.ts); a release may name what the PBI waits for (`waits=603,778`). */
-const PBI_COMPLETE_MARK = /<!-- pbi-complete:(claim|takeover|release)(?: (\S+))? -->/;
+const PBI_COMPLETE_MARK = /<!-- pbi-complete:(claim|takeover|release)(?: (\S+))?(?: (after=\S+))? -->/;
+
+/** What a PBI waits for, as `waitsOf` reads it from a release mark: `after` = the `after=` time as written, when it is a time with a zone. */
+type PbiWait = { numbers: number[]; at: string; overlap: boolean; after: string | null };
 
 /**
  * What a PBI waits for (#817) and when that was written: the numbers of its newest /pbi-complete mark when that is a
- * release with `waits=`, and no ## 回答 came after it. A later release without waits or a later claim clears it, so
- * nothing else has to. null = it waits for nothing.
+ * release with `waits=`, and its `after=` date (#4616; a release with only a date waits too), and no ## 回答 came after
+ * it. A later release without either or a later claim clears it, so nothing else has to. null = it waits for nothing.
  */
-export function waitsOf(comments: Comment[]): { numbers: number[]; at: string; overlap: boolean } | null {
+export function waitsOf(comments: Comment[]): PbiWait | null {
   let at = comments.length - 1;
   while (at >= 0 && !PBI_COMPLETE_MARK.test(comments[at]!.body)) at--;
   const m = at >= 0 ? PBI_COMPLETE_MARK.exec(comments[at]!.body) : null;
-  const list = m?.[1] === "release" ? /^(?:waits|overlap)=(\d+(?:,\d+)*)$/.exec(m[2] ?? "")?.[1] : undefined;
-  if (!list || comments.slice(at + 1).some((c) => c.body.trimStart().startsWith(ANSWER_HEADING))) return null;
-  return { numbers: [...new Set(list.split(",").map(Number))], at: comments[at]!.createdAt, overlap: m![2]!.startsWith("overlap=") };
+  if (m?.[1] !== "release" || comments.slice(at + 1).some((c) => c.body.trimStart().startsWith(ANSWER_HEADING))) return null;
+  const tokens = [m[2], m[3]].filter((t): t is string => !!t);
+  const first = tokens.find((t) => !t.startsWith("after="));
+  const list = first && /^(?:waits|overlap)=(\d+(?:,\d+)*)$/.exec(first)?.[1];
+  const date = tokens.find((t) => t.startsWith("after="))?.slice("after=".length);
+  const after = date && !Number.isNaN(afterTime(date)) ? date : null;
+  if (!list && !after) return null;
+  return { numbers: list ? [...new Set(list.split(",").map(Number))] : [], at: comments[at]!.createdAt, overlap: !!first?.startsWith("overlap="), after };
 }
 
 /** The last status report of an in-progress item (#522). */
@@ -1305,8 +1325,8 @@ const buildingOf = (asked: BacklogItem[]) => asked.filter((i) => i.stage === "in
  * needs-decision items their open question, in-progress ones their last status report, their Tasks' questions and their
  * newest answer. Returns the waits of Ready and in-progress PBIs (#817), for `withWaits`.
  */
-function withComments(asked: BacklogItem[], building: number[], commentsOf: (n: number) => Comment[], tasksOf: (n: number) => SubTask[]): Map<BacklogItem, { numbers: number[]; at: string; overlap: boolean }> {
-  const waiting = new Map<BacklogItem, { numbers: number[]; at: string; overlap: boolean }>();
+function withComments(asked: BacklogItem[], building: number[], commentsOf: (n: number) => Comment[], tasksOf: (n: number) => SubTask[]): Map<BacklogItem, PbiWait> {
+  const waiting = new Map<BacklogItem, PbiWait>();
   for (const i of asked) {
     const nodes = commentsOf(i.number);
     if (i.stage === "needs-decision") {
@@ -1364,7 +1384,7 @@ function pbiOf(n: number, t: WaitTarget, issues: Map<number, BacklogIssueData>):
  * Gives each waiting item its waits with their states, why it waits (#1046) and the PBI that moves each forward
  * (`pbiOf`). A number with no known state stays, with `open: null`: not taken as closed.
  */
-function withWaits(waiting: Map<BacklogItem, { numbers: number[]; at: string; overlap: boolean }>, targets: Map<number, WaitTarget>, issues: Map<number, BacklogIssueData>): void {
+function withWaits(waiting: Map<BacklogItem, PbiWait>, targets: Map<number, WaitTarget>, issues: Map<number, BacklogIssueData>, now: number): void {
   for (const [i, w] of waiting) {
     const reason = w.overlap ? ("overlap" as const) : ("prerequisite" as const);
     i.waits = w.numbers.flatMap((n): BacklogItem["waits"] => {
@@ -1379,6 +1399,7 @@ function withWaits(waiting: Map<BacklogItem, { numbers: number[]; at: string; ov
       return [{ number: n, kind: t.kind, open: openOf(state), state, reason, pbi: pbiOf(n, t, issues) }];
     });
     i.waitsAt = w.at;
+    if (w.after) i.waitsUntil = { at: w.after, met: afterTime(w.after) <= now };
   }
 }
 
@@ -1455,7 +1476,7 @@ function withPrereqs(items: BacklogItem[], issues: Map<number, BacklogIssueData>
  * the checkout, whose top level the paths in a Task's body are read against (what `readOthers` asks GitHub for).
  * #2754: judged per Task that can start (`startable`), so one free Task lets the PBI go; with none, all its open Tasks as one.
  */
-function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIssueData>, startable: Map<number, number[]>, pulls: Array<{ number: number; isDraft: boolean; labels: string[]; closes: number[]; updatedAt: string; files: string[] | null; state: string }>, statuses: Map<number, string | number | null>, root: string, active: (pbi: number) => boolean = () => false): void {
+export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIssueData>, startable: Map<number, number[]>, pulls: Array<{ number: number; isDraft: boolean; labels: string[]; closes: number[]; updatedAt: string; files: string[] | null; state: string }>, statuses: Map<number, string | number | null>, root: string, active: (pbi: number) => boolean = () => false): void {
   const mine = items.filter((i) => i.type === "pbi" && (i.stage === "ready" || i.stage === "in-progress"));
   if (!mine.length) return;
   const top = new Map<string, boolean>();
@@ -1473,7 +1494,9 @@ function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIssueData>
   }
   const names = [...top].map(([name, dir]) => ({ name, dir }));
   const taskPaths = (n: number) => pathsIn(issues.get(n)?.body ?? "", names);
-  const working = [...issues.values()].filter((t) => t.state === "OPEN" && t.labels.includes("type:task") && !t.labels.includes("needs-decision") && statuses.get(t.number) === "In progress");
+  // a Task of a PBI that waits for a date (#4616) is not at work: nothing of it changes before the date
+  const dated = new Set(items.filter((i) => !!i.waitsUntil && !i.waitsUntil.met).map((i) => i.number));
+  const working = [...issues.values()].filter((t) => t.state === "OPEN" && t.labels.includes("type:task") && !t.labels.includes("needs-decision") && statuses.get(t.number) === "In progress" && !(t.parent !== null && dated.has(t.parent)));
   const now = new Date();
   for (const i of mine) {
     const own = new Set<number>([i.number, ...(issues.get(i.number)?.subIssues ?? [])]);
@@ -1584,7 +1607,7 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
       const t = issues.get(m);
       return t ? [{ number: m, state: t.state, labels: { nodes: t.labels.map((name) => ({ name })) }, comments: { nodes: commentsOf(m) } }] : [];
     });
-  withWaits(withComments(asked, buildingOf(asked), commentsOf, tasksOf), targets, issues);
+  withWaits(withComments(asked, buildingOf(asked), commentsOf, tasksOf), targets, issues, now);
   withConfirmDecisions(items, targets);
   const startable = withPrereqs(items, issues, targets, opts.released ?? (() => null));
   withOverlap(items, issues, startable, pulls, statuses, ws.path, opts.active);
@@ -1658,7 +1681,7 @@ export function readStoredIssue(db: Db, ws: Pick<BacklogWorkspace, "id">, ref: n
   });
   return {
     workspaceId: ws.id, issue, comments: comments.sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
-    fields: item ? (item.remote as BacklogProjectItemData).fields : (create?.project?.fields ?? null), fetchedAt: rec.fetchedAt, fetchState: rec.fetchState,
+    fields: item ? (item.remote as BacklogProjectItemData).fields : (create?.project?.fields ?? null), projectFields: source.projectFields ?? [], fetchedAt: rec.fetchedAt, fetchState: rec.fetchState,
     localId: typeof ref === "string" ? ref : rec.externalId.startsWith("local:") ? rec.externalId.slice("local:".length) : null, pending: pending.length,
     held, limits: SYNC_LIMITS, changeRefs: null,
     sync: syncOf(db, all.filter((o) => family.has(o.issue)), { lastSuccessfulSync: freshAt(db.getBacklogRepository(source)?.lastSuccessfulSync ?? null, rec), retryAt: db.getBacklogRepository(source)?.retryAt ?? null, fetchState: rec.externalId.startsWith("local:") && !rec.remote ? "fetched" : rec.fetchState, importFailed: opts.importFailed, now: opts.now ?? Date.now() }),
@@ -1818,7 +1841,8 @@ export async function latestTag(git: (args: string[]) => Promise<string>): Promi
 export type PromotionStep =
   | { action: "pick" }
   | { action: "promote"; tag: string; sha: string }
-  | { action: "wait"; reason: string; failed?: { tag: string; sha: string; reason: string } };
+  | { action: "review" }
+  | { action: "wait"; reason: string; failed?: { tag: string; sha: string; reason: string }; review?: ReleaseReview };
 
 /**
  * Before a backlog-next firing picks an item: bring the running app up to the newest tag (#282). Only under sb-rescue.
@@ -1827,13 +1851,20 @@ export type PromotionStep =
  * is the person's call, not a failure of the version. `latestInCurrent`: the tag's commit is already part of what runs
  * (a newer commit was promoted by hand) — going back to the tag would undo that.
  */
-export function promotionStep(s: { status: ReleaseState; latest: { tag: string; sha: string } | null; busyTasks: number; latestInCurrent?: boolean }): PromotionStep {
+export function promotionStep(s: { status: ReleaseState; latest: { tag: string; sha: string } | null; busyTasks: number; latestInCurrent?: boolean; review?: ReleaseReview | "start" | null }): PromotionStep {
   const { status, latest } = s;
   if (!status.managed || !latest || latest.sha === status.current || s.latestInCurrent) return { action: "pick" };
   const failure = status.history.find((h) =>
     (h.to === latest.sha && !h.ok && h.action === "rejected") ||
     (h.from === latest.sha && h.action === "auto-rollback"));
   if (failure) return { action: "wait", reason: `昇格に失敗した版のまま: ${latest.tag}`, failed: { tag: latest.tag, sha: latest.sha, reason: failure.reason } };
+  // a public copy's clone (the caller passed `review`): the tag is asked for only once its diff was checked and found ok (#4569)
+  if (s.review === "start") return { action: "review" };
+  if (s.review && s.review.state !== "ok") {
+    const r = s.review;
+    const reason = r.state === "running" ? `${latest.tag} の差分を確認中` : r.state === "concern" ? `${latest.tag} の差分の確認で懸念 ${r.findings.length} 件` : `${latest.tag} の差分を確かめられなかった: ${r.reason}`;
+    return { action: "wait", reason, review: r };
+  }
   // a promotion in flight: the next check must not ask for the same tag again
   if (status.busy) return { action: "wait", reason: `sb-rescue が ${status.busy} の最中なので ${latest.tag} の昇格を待つ` };
   if (s.busyTasks > 0) return { action: "wait", reason: `${s.busyTasks} 件の Task が動いているので ${latest.tag} の昇格を待つ` };

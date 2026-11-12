@@ -52,7 +52,7 @@ export type StopCondition = z.infer<typeof StopCondition>;
 export const StopRecord = z.object({
   /** Never cut: it tells an update of a stop from a new one. */
   id: z.string().max(200),
-  work: z.object({ workspaceId: z.string().nullable(), issue: z.number().int().positive().nullable(), taskId: z.string() }),
+  work: z.object({ workspaceId: z.string().nullable(), issue: z.number().int().positive().nullable(), taskId: z.string(), scheduleId: z.string().nullable().optional() }),
   op: clip(100),
   target: clip(200).default(""),
   reason: StopReasonCode.catch("unknown").default("unknown"),

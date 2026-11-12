@@ -7,7 +7,7 @@ import type { AgentEvent, BacklogIssueData, BacklogPullRequestData, BacklogSourc
 import { createClaudeParser } from "@switchboard/adapter-claude";
 import { Db, type BacklogSnapshotEntry } from "./db.ts";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
-import { collectInterventions, interventionView, summarizeInterventions, type InterventionLookup } from "./interventions.ts";
+import { collectInterventions, interventionView, summarizeInterventions, warmInterventions, type InterventionLookup } from "./interventions.ts";
 import { loadConfig } from "./config.ts";
 import { startServer } from "./server.ts";
 
@@ -36,6 +36,9 @@ const pull = (n: number, over: Partial<BacklogPullRequestData> = {}): BacklogSna
   remote: { number: n, state: "OPEN", isDraft: false, labels: [], closes: [], mergeCommit: null, updatedAt: iso(T0), files: [], closedAt: null, mergedAt: null, ...over },
 });
 const comment = (n: number, id: string, body: string, at: number): BacklogSnapshotEntry => ({ objectKind: "comment", externalId: id, remote: { issue: n, body, createdAt: iso(at) }, fetchState: "fetched" });
+
+/** The repositories whose stored records the Db holds a copy of (what `warmInterventions` fills). */
+const copied = (d: Db): string[] => [...(d as unknown as { backlogRecordsCopy: Map<string, unknown> }).backlogRecordsCopy.keys()];
 
 /** A workspace whose last import stored `records`; no records = a source that was never imported. */
 function workspace(records: BacklogSnapshotEntry[] | null, name = "app", repository = "acme/app") {
@@ -79,6 +82,20 @@ describe("collect", () => {
     expect(kinds(r)).toEqual(["resume:3:3", "approval:30:3", "decision:3:3", "decision:30:3"]);
     expect(r.items.map((i) => i.ref)).toEqual([`task:${stage}`, `task:${t}#seq:2`, "comment:C_1", `task:${t}#seq:5`]);
     expect(r.items.find((i) => i.kind === "resume")).toMatchObject({ taskId: stage, afterWaits: false });
+  });
+
+  test("warming reads the stored records of a cold start and changes no count", () => {
+    const ws = workspace([issue(3, ["type:pbi"], { subIssues: [30] }), issue(30, ["type:task"], { parent: 3 })]);
+    const t = task(ws.id, { title: "#30 x", createdAt: T0 + MIN });
+    say(t, "request", T0 + MIN);
+    db.appendEventAt(t, { t: "status", text: "x" } as AgentEvent, T0 + MIN + 1);
+    say(t, "こうしてください", T0 + 10 * MIN);
+    db.close();
+    db = new Db(join(dir, "switchboard.db")); // a start: nothing read yet
+    expect(copied(db)).toEqual([]);
+    warmInterventions(db, db.listWorkspaces());
+    expect(copied(db)).toEqual(["github/github.com/acme/app"]);
+    expect(kinds(collectInterventions(db, db.listWorkspaces()))).toEqual(["decision:30:3"]);
   });
 
   test("a message of several chunks is one", () => {
@@ -409,6 +426,7 @@ describe("api interventions", () => {
     const gh = async () => { throw new Error("no GitHub call"); };
     const core = await startServer(loadConfig({ SWITCHBOARD_HOME: dir, SWITCHBOARD_PORT: "0", SWITCHBOARD_CLAUDE_PROJECTS: join(dir, "none"), SWITCHBOARD_HISTORY_POLL_MS: "0" }), [], { port: 0, selfdevChecks: false, dryRunRestart: true, gh });
     try {
+      expect(copied(core.db)).toEqual(["github/github.com/acme/app"]); // warmed before the first request
       const v = (await (await fetch(`http://127.0.0.1:${core.server.port}/api/interventions`)).json()) as InterventionView;
       const w = sevenDays(v).current;
       expect(w.total).toBe(2); // the answer and the approval

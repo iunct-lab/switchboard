@@ -301,7 +301,7 @@ export class HistoryImporter {
           permissionMode: mode,
           effort: null,
           origin: "terminal",
-          resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null,
+          resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null,
           shadowOf: null,
           shadowStopped: false,
           workspaceReason: null,

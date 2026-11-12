@@ -640,7 +640,7 @@ describe("the forms gh accepts", () => {
     ]) {
       expect({ argv, r: run(argv) }).toMatchObject({ argv, r: { code: 1, called: null } });
     }
-  }, 30_000); // time assumption (the flake of #2939): a bun process per form, over the 5 s default under load (5039 ms failed; docs/design/perf.md "テストの揺れ")
+  }, 30_000); // time assumption (the flake of #2939): a bun process per form, over the 5 s default under load (5039 ms failed; docs/design/perf.md "Test flakiness")
 
   test("a body sent as JSON is read string by string, with its own line breaks", () => {
     const file = join(dir, "input.json");

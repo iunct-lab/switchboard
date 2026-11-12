@@ -6,6 +6,17 @@ import { teleportWorktreePath } from "./config.ts";
 
 export const cloudTransferNotice = "Cloud を選んで開始すると、公式 CLI の自動 Bundle 転送を了承します。GitHub clone では未pushコミット・未コミット変更が反映されない場合があります。自動 Bundle では全ブランチの履歴・追跡ファイルの変更が送られ得ます。未追跡ファイルは含まれず、秘密情報が必ず除外される保証はありません。Switchboard は commit/push や強制 Bundle を行いません。";
 
+/** `owner/name` of a github.com remote URL (ssh or https), or null. Credentials, ports, query/fragment and the .git suffix are dropped. */
+export function githubRepoOfRemote(remote: string): string | null {
+  const ssh = /^git@github\.com:([^\s?#]+)$/.exec(remote);
+  let path = ssh?.[1];
+  if (!path) {
+    try { const u = new URL(remote); if (u.hostname === "github.com" && ["https:", "ssh:"].includes(u.protocol)) path = u.pathname.replace(/^\//, ""); } catch {}
+  }
+  const clean = path?.replace(/\.git$/, "");
+  return clean && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(clean) ? clean : null;
+}
+
 /** Read-only local Git observations. Never fetch: remote refs may be stale. */
 export function readCloudPreparation(cwd: string): CloudPreparation {
   const warnings = [cloudTransferNotice];
@@ -21,17 +32,7 @@ export function readCloudPreparation(cwd: string): CloudPreparation {
   const branch = git("symbolic-ref", "--quiet", "--short", "HEAD");
   const status = git("status", "--porcelain");
   const remote = git("remote", "get-url", "origin");
-  let repository: string | null = null;
-  // Accept only github.com, stripping credentials, ports, query/fragment and the .git suffix.
-  if (remote) {
-    const ssh = /^git@github\.com:([^\s?#]+)$/.exec(remote);
-    let path = ssh?.[1];
-    if (!path) {
-      try { const u = new URL(remote); if (u.hostname === "github.com" && ["https:", "ssh:"].includes(u.protocol)) path = u.pathname.replace(/^\//, ""); } catch {}
-    }
-    const clean = path?.replace(/\.git$/, "");
-    if (clean && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(clean)) repository = clean;
-  }
+  const repository = remote ? githubRepoOfRemote(remote) : null;
   if (!repository) warnings.push("origin の GitHub リポジトリは判定できません。公式 CLI がローカル Bundle を使う場合があります。");
   if (!branch) warnings.push("detached HEAD です。開始対象のブランチを確認してください。");
   const head = git("rev-parse", "--verify", "HEAD");

@@ -7,6 +7,7 @@ import { pipeline } from "node:stream/promises";
 import { constants, createGzip } from "node:zlib";
 import type { AgentEvent, AskAnswerResult, Artifact, Attachment, BacklogAction, Provenance, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogRepositorySync, BacklogSource, CheckRun, CreatedIssue, EvalSource, EvalsListRow, EventEnvelope, HistorySession, Job, JobKind, JobStatus, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerRow, LedgerSummary, LedgerTaskRow, LlmSuggestion, LoadKind, Journey, PerfSample, PerfSummaryRow, ReportRow, RoutingLogRow, RoutingStats, RunnerId, RunnerStats, Schedule, StagedChange, StopRecord, Task, TaskDiffFile, TaskDiffSnapshot, TaskEvals, TaskOrigin, TaskOutcome, TaskStatus, Workspace, WorkspaceSweep } from "@switchboard/protocol";
 import { teleportWorktreePath } from "./config.ts";
+import { RULES_BY } from "./evals.ts";
 import { MAX_STOP_RESUMES, planResumeAfterStop } from "./interrupted.ts";
 import { canTransition, IN_FLIGHT, InvalidTaskTransitionError, outcomeOnStatus, type WorkPurpose, workingSql } from "./task-status.ts";
 import { backlogFieldValue, conflictRevision, mergeBacklogField, sameBacklogValue } from "./backlog-merge.ts";
@@ -133,7 +134,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY, workspace_id TEXT, title TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL,
   scope TEXT NOT NULL, status TEXT NOT NULL, runner_session_id TEXT, model TEXT, routing TEXT, budget_usd REAL, schedule_id TEXT,
-  permission_mode TEXT, effort TEXT, subagent_effort TEXT, origin TEXT NOT NULL DEFAULT 'switchboard', resume_at INTEGER, resume_reason TEXT, resume_window TEXT, resume_since INTEGER, resume_planned_at INTEGER, queued_at INTEGER, queued_prompt TEXT, shadow_of TEXT, shadow_stopped INTEGER NOT NULL DEFAULT 0, workspace_reason TEXT,
+  permission_mode TEXT, effort TEXT, subagent_effort TEXT, origin TEXT NOT NULL DEFAULT 'switchboard', resume_at INTEGER, resume_reason TEXT, resume_window TEXT, resume_since INTEGER, resume_planned_at INTEGER, queued_at INTEGER, queued_prompt TEXT, deferred_prompt TEXT, shadow_of TEXT, shadow_stopped INTEGER NOT NULL DEFAULT 0, workspace_reason TEXT,
   outcome TEXT NOT NULL DEFAULT 'unknown', reviewed_at INTEGER, archived_at INTEGER, judged_result TEXT, judged_reason TEXT, judged_by TEXT, judging_at INTEGER, stage_issue INTEGER, stage_action TEXT,
   status_at INTEGER NOT NULL, title_pending INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, provenance TEXT
 );
@@ -1059,6 +1060,12 @@ export class Db {
     return r ? rowToTask(r) : null;
   }
 
+  /** The newest Task of an origin with exactly this title (a release check is `<title> <tag>`, #4569); null = none. */
+  findTaskByOrigin(origin: Task["origin"], title: string): Task | null {
+    const r = this.sqlite.query("SELECT * FROM tasks WHERE origin = ? AND title = ? ORDER BY created_at DESC LIMIT 1").get(origin, title);
+    return r ? rowToTask(r) : null;
+  }
+
   /** The task's provenance (K1), written once right after creation; a task from before it was recorded has none. */
   setTaskProvenance(id: string, p: Provenance): void {
     this.sqlite.query("UPDATE tasks SET provenance = ? WHERE id = ?").run(JSON.stringify(p), id);
@@ -1135,6 +1142,11 @@ export class Db {
     return (this.sqlite.query("SELECT id FROM tasks WHERE workspace_id = ? AND stage_issue = ?").all(workspaceId, issue) as Array<{ id: string }>).map((r) => r.id);
   }
 
+  /** The ids of a schedule's newest Tasks, newest first. */
+  recentScheduleTaskIds(scheduleId: string, limit: number): string[] {
+    return (this.sqlite.query("SELECT id FROM tasks WHERE schedule_id = ? ORDER BY created_at DESC LIMIT ?").all(scheduleId, limit) as Array<{ id: string }>).map((r) => r.id);
+  }
+
   /** Every stage Task taking a slot (as activeStageTask's, less a planned resume), whatever the workspace (#1139). */
   listActiveStageTasks(): Task[] {
     return this.sqlite.query(`SELECT * FROM tasks WHERE stage_issue IS NOT NULL AND ${activeStage("slot")}`).all().map(rowToTask);
@@ -1183,20 +1195,22 @@ export class Db {
 
   /**
    * The question tool's questions of the Task's last turn (#3053): those of the `question.ask` events between the last
-   * `session.end` and the one before it, in order. Read from the events, so they outlive a restart of the daemon.
+   * `session.end` and the one before it, in order, with the seq of the last `session.end` (#3122); null when it never ended a
+   * turn. Read from the events, so they outlive a restart of the daemon.
    */
-  lastTurnQuestions(taskId: string): AskQuestion[] {
+  lastTurnQuestions(taskId: string): { questions: AskQuestion[]; seq: number } | null {
     const end = '{"t":"session.end",';
     const ask = '{"t":"question.ask",';
     const ends = this.sqlite.query("SELECT seq FROM events WHERE task_id = ? AND substr(json, 1, length(?)) = ? ORDER BY seq DESC LIMIT 2").all(taskId, end, end) as Array<{ seq: number }>;
-    if (!ends.length) return [];
+    if (!ends.length) return null;
     const rows = this.sqlite
       .query("SELECT json FROM events WHERE task_id = ? AND seq < ? AND seq > ? AND substr(json, 1, length(?)) = ? ORDER BY seq")
       .all(taskId, ends[0]!.seq, ends[1]?.seq ?? -1, ask, ask) as Array<{ json: string }>;
-    return rows.flatMap((r) => {
+    const questions = rows.flatMap((r) => {
       const qs = AskQuestion.array().safeParse((JSON.parse(r.json) as { questions?: unknown }).questions);
       return qs.success ? qs.data : [];
     });
+    return { questions, seq: ends[0]!.seq };
   }
 
   insertTask(t: Task): Task {
@@ -1207,10 +1221,10 @@ export class Db {
     this.sqlite.transaction(() => {
       this.sqlite
         .query(
-          `INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, runner_session_id, model, routing, budget_usd, schedule_id, permission_mode, effort, subagent_effort, origin, resume_at, resume_reason, resume_window, resume_since, resume_planned_at, queued_at, shadow_of, shadow_stopped, workspace_reason, outcome, reviewed_at, archived_at, judged_result, judged_reason, judged_by, created_at, updated_at, execution_mode, cloud_session, source_cloud_task_id, stage_issue, stage_action, judging_at, status_at, title_pending)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, runner_session_id, model, routing, budget_usd, schedule_id, permission_mode, effort, subagent_effort, origin, resume_at, resume_reason, resume_window, resume_since, resume_planned_at, queued_at, deferred_prompt, shadow_of, shadow_stopped, workspace_reason, outcome, reviewed_at, archived_at, judged_result, judged_reason, judged_by, created_at, updated_at, execution_mode, cloud_session, source_cloud_task_id, stage_issue, stage_action, judging_at, status_at, title_pending)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(t.id, t.workspaceId, t.title, t.runner, t.cwd, JSON.stringify(t.scope), t.status, t.runnerSessionId, t.model, t.routing ? JSON.stringify(t.routing) : null, t.budgetUsd, t.scheduleId, t.permissionMode, t.effort, t.subagentEffort ?? null, t.origin, t.resumeAt, t.resumeReason, t.resumeWindow, t.resumeSince, t.resumePlannedAt, t.queuedAt, t.shadowOf, t.shadowStopped ? 1 : 0, t.workspaceReason, t.outcome, t.reviewedAt, t.archivedAt, t.judgedResult, t.judgedReason, t.judgedBy, t.createdAt, t.updatedAt, t.executionMode, t.cloudSession ? JSON.stringify(t.cloudSession) : null, t.sourceCloudTaskId, t.stage?.issue ?? null, t.stage?.action ?? null, t.judgingAt, t.statusAt, t.titlePending ? 1 : 0);
+        .run(t.id, t.workspaceId, t.title, t.runner, t.cwd, JSON.stringify(t.scope), t.status, t.runnerSessionId, t.model, t.routing ? JSON.stringify(t.routing) : null, t.budgetUsd, t.scheduleId, t.permissionMode, t.effort, t.subagentEffort ?? null, t.origin, t.resumeAt, t.resumeReason, t.resumeWindow, t.resumeSince, t.resumePlannedAt, t.queuedAt, t.deferredPrompt, t.shadowOf, t.shadowStopped ? 1 : 0, t.workspaceReason, t.outcome, t.reviewedAt, t.archivedAt, t.judgedResult, t.judgedReason, t.judgedBy, t.createdAt, t.updatedAt, t.executionMode, t.cloudSession ? JSON.stringify(t.cloudSession) : null, t.sourceCloudTaskId, t.stage?.issue ?? null, t.stage?.action ?? null, t.judgingAt, t.statusAt, t.titlePending ? 1 : 0);
       if (t.routing) {
         const logRow = this.sqlite.query("INSERT INTO routing_log (task_id, workspace_id, cwd, suggested, rule_id, reason, chosen, ts, suggested_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
         logRow.run(t.id, t.workspaceId, t.cwd, t.routing.suggested, t.routing.ruleId, t.routing.reason, t.runner, t.createdAt, "rule");
@@ -1369,7 +1383,7 @@ export class Db {
    * an `outcome` in the patch sets the outcome by rule (#492, `outcomeOnStatus` in task-status.ts) — the one place the rule lives. A status the table (`TASK_TRANSITIONS`) does
    * does not allow is not stored: it throws `InvalidTaskTransitionError` (#1140).
    */
-  updateTask(id: string, patch: Partial<Pick<Task, "sourceCloudTaskId" | "cloudSession" | "status" | "runnerSessionId" | "model" | "title" | "titlePending" | "budgetUsd" | "permissionMode" | "effort" | "resumeAt" | "resumeReason" | "resumeWindow" | "resumeSince" | "resumePlannedAt" | "shadowStopped" | "scope" | "outcome" | "reviewedAt" | "archivedAt" | "judgedResult" | "judgedReason" | "judgedBy" | "judgingAt" | "updatedAt">>): Task | null {
+  updateTask(id: string, patch: Partial<Pick<Task, "sourceCloudTaskId" | "cloudSession" | "status" | "runnerSessionId" | "model" | "title" | "titlePending" | "budgetUsd" | "permissionMode" | "effort" | "resumeAt" | "resumeReason" | "resumeWindow" | "resumeSince" | "resumePlannedAt" | "deferredPrompt" | "shadowStopped" | "scope" | "outcome" | "reviewedAt" | "archivedAt" | "judgedResult" | "judgedReason" | "judgedBy" | "judgingAt" | "updatedAt">>): Task | null {
     if (patch.cloudSession) CloudSessionRef.parse(patch.cloudSession);
     const cur = this.getTask(id);
     if (!cur) return null;
@@ -1386,8 +1400,8 @@ export class Db {
     const next: Task = { ...cur, ...rule, ...patch, ...shown, queuedAt, updatedAt, statusAt: moves ? updatedAt : cur.statusAt };
     this.validateCloudSource(next, cur);
     this.sqlite
-      .query("UPDATE tasks SET status = ?, runner_session_id = ?, model = ?, title = ?, title_pending = ?, budget_usd = ?, permission_mode = ?, effort = ?, resume_at = ?, resume_reason = ?, resume_window = ?, resume_since = ?, resume_planned_at = ?, queued_at = ?, queued_prompt = CASE WHEN ? IS NULL THEN NULL ELSE queued_prompt END, shadow_stopped = ?, scope = ?, outcome = ?, reviewed_at = ?, archived_at = ?, judged_result = ?, judged_reason = ?, judged_by = ?, judging_at = ?, updated_at = ?, status_at = ?, cloud_session = ?, source_cloud_task_id = ? WHERE id = ?")
-      .run(next.status, next.runnerSessionId, next.model, next.title, next.titlePending ? 1 : 0, next.budgetUsd, next.permissionMode, next.effort, next.resumeAt, next.resumeReason, next.resumeWindow, next.resumeSince, next.resumePlannedAt, next.queuedAt, next.queuedAt, next.shadowStopped ? 1 : 0, JSON.stringify(next.scope), next.outcome, next.reviewedAt, next.archivedAt, next.judgedResult, next.judgedReason, next.judgedBy, next.judgingAt, next.updatedAt, next.statusAt, next.cloudSession ? JSON.stringify(next.cloudSession) : null, next.sourceCloudTaskId, id);
+      .query("UPDATE tasks SET status = ?, runner_session_id = ?, model = ?, title = ?, title_pending = ?, budget_usd = ?, permission_mode = ?, effort = ?, resume_at = ?, resume_reason = ?, resume_window = ?, resume_since = ?, resume_planned_at = ?, queued_at = ?, queued_prompt = CASE WHEN ? IS NULL THEN NULL ELSE queued_prompt END, deferred_prompt = ?, shadow_stopped = ?, scope = ?, outcome = ?, reviewed_at = ?, archived_at = ?, judged_result = ?, judged_reason = ?, judged_by = ?, judging_at = ?, updated_at = ?, status_at = ?, cloud_session = ?, source_cloud_task_id = ? WHERE id = ?")
+      .run(next.status, next.runnerSessionId, next.model, next.title, next.titlePending ? 1 : 0, next.budgetUsd, next.permissionMode, next.effort, next.resumeAt, next.resumeReason, next.resumeWindow, next.resumeSince, next.resumePlannedAt, next.queuedAt, next.queuedAt, next.deferredPrompt, next.shadowStopped ? 1 : 0, JSON.stringify(next.scope), next.outcome, next.reviewedAt, next.archivedAt, next.judgedResult, next.judgedReason, next.judgedBy, next.judgingAt, next.updatedAt, next.statusAt, next.cloudSession ? JSON.stringify(next.cloudSession) : null, next.sourceCloudTaskId, id);
     return next;
   }
 
@@ -1657,7 +1671,7 @@ export class Db {
       .run(taskId, s.at, JSON.stringify(s.files));
   }
 
-  /** The task's evals as the API returns them. A row that no longer parses (an older counter, an older judge shape) reads as null. */
+  /** The task's evals as the API returns them. A row that no longer parses (an older counter, an older judge shape), or a rules row of another counter version, reads as null. */
   evalsOf(taskId: string): TaskEvals {
     const rules = this.getEval(taskId, "rules");
     const judge = this.getEval(taskId, "judge");
@@ -1665,7 +1679,7 @@ export class Db {
     const r = rules ? RuleEval.safeParse(rules.json) : null;
     const j = judge ? JudgeEval.safeParse(judge.json) : null;
     const h = human ? HumanEval.safeParse(human.json) : null;
-    return { rules: r?.success ? r.data : null, judge: j?.success ? j.data : null, human: h?.success ? h.data : null, models: this.taskStarts([taskId]).get(taskId)?.models ?? [] };
+    return { rules: r?.success && rules?.by === RULES_BY ? r.data : null, judge: j?.success ? j.data : null, human: h?.success ? h.data : null, models: this.taskStarts([taskId]).get(taskId)?.models ?? [] };
   }
 
   /**
@@ -1704,7 +1718,7 @@ export class Db {
       .query(
         `SELECT t.id AS taskId, t.title AS title, t.runner AS runner, t.workspace_id AS workspaceId, t.status AS status, t.outcome AS outcome, t.updated_at AS updatedAt, t.subagent_effort AS subagentEffort,
                 (SELECT COALESCE(SUM(cost_usd), 0) FROM ledger WHERE task_id = t.id) AS costUsd,
-                r.json AS rulesJson, j.json AS judgeJson, j.ts AS judgeTs, h.json AS humanJson
+                r.json AS rulesJson, r.by AS rulesBy, j.json AS judgeJson, j.ts AS judgeTs, h.json AS humanJson
          FROM tasks t
          LEFT JOIN task_evals r ON r.task_id = t.id AND r.source = 'rules'
          LEFT JOIN task_evals j ON j.task_id = t.id AND j.source = 'judge'
@@ -1713,7 +1727,7 @@ export class Db {
            AND (? IS NULL OR j.ts >= ?) AND (? IS NULL OR j.ts < ?) AND (? = 0 OR h.task_id IS NOT NULL)
          ORDER BY t.updated_at DESC LIMIT ?`,
       )
-      .all(q.workspaceId ?? null, q.workspaceId ?? null, q.runner ?? null, q.runner ?? null, q.judgedFrom ?? null, q.judgedFrom ?? null, q.judgedTo ?? null, q.judgedTo ?? null, q.rated ? 1 : 0, q.limit) as Array<{ taskId: string; title: string; runner: RunnerId; workspaceId: string | null; status: TaskStatus; outcome: TaskOutcome; updatedAt: number; subagentEffort: string | null; costUsd: number; rulesJson: string | null; judgeJson: string | null; judgeTs: number | null; humanJson: string | null }>;
+      .all(q.workspaceId ?? null, q.workspaceId ?? null, q.runner ?? null, q.runner ?? null, q.judgedFrom ?? null, q.judgedFrom ?? null, q.judgedTo ?? null, q.judgedTo ?? null, q.rated ? 1 : 0, q.limit) as Array<{ taskId: string; title: string; runner: RunnerId; workspaceId: string | null; status: TaskStatus; outcome: TaskOutcome; updatedAt: number; subagentEffort: string | null; costUsd: number; rulesJson: string | null; rulesBy: string | null; judgeJson: string | null; judgeTs: number | null; humanJson: string | null }>;
     const parse = <T>(json: string | null, schema: { safeParse: (v: unknown) => { success: boolean; data?: T } }): T | null => {
       if (!json) return null;
       try {
@@ -1725,7 +1739,7 @@ export class Db {
     };
     const starts = this.taskStarts(rows.map((r) => r.taskId));
     return rows.map((r) => {
-      const rules = parse(r.rulesJson, RuleEval);
+      const rules = r.rulesBy === RULES_BY ? parse(r.rulesJson, RuleEval) : null;
       const judge = parse(r.judgeJson, JudgeEval);
       const human = parse(r.humanJson, HumanEval);
       const scores = judge ? Object.fromEntries(Object.entries(judge.scores).map(([k, v]) => [k, v.score])) : {};
@@ -2136,6 +2150,7 @@ function migrate(db: Database) {
   if (!cols.has("resume_planned_at")) db.exec("ALTER TABLE tasks ADD COLUMN resume_planned_at INTEGER");
   if (!cols.has("queued_at")) db.exec("ALTER TABLE tasks ADD COLUMN queued_at INTEGER");
   if (!cols.has("queued_prompt")) db.exec("ALTER TABLE tasks ADD COLUMN queued_prompt TEXT");
+  if (!cols.has("deferred_prompt")) db.exec("ALTER TABLE tasks ADD COLUMN deferred_prompt TEXT");
   if (!cols.has("background")) db.exec("ALTER TABLE tasks ADD COLUMN background TEXT");
   if (!cols.has("shadow_of")) db.exec("ALTER TABLE tasks ADD COLUMN shadow_of TEXT");
   const opCols = new Set((db.query("PRAGMA table_info(backlog_operations)").all() as Array<{ name: string }>).map((c) => c.name));
@@ -2430,7 +2445,7 @@ function rowToWorkspace(r: any): Workspace {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function rowToSchedule(r: any): Schedule {
-  return { id: r.id, title: r.title, cron: r.cron, workspaceId: r.workspace_id, runner: r.runner, model: r.model ?? "", effort: r.effort ?? "", prompt: r.prompt, action: r.action ?? "prompt", budgetUsd: r.budget_usd ?? null, enabled: r.enabled === 1, lastRunAt: r.last_run_at ?? null, lastTaskId: r.last_task_id ?? null, nextRunAt: r.next_run_at ?? null, lastResult: r.last_result ? (JSON.parse(r.last_result) as Schedule["lastResult"]) : null, createdAt: r.created_at };
+  return { id: r.id, title: r.title, cron: r.cron, workspaceId: r.workspace_id, runner: r.runner, model: r.model ?? "", effort: r.effort ?? "", prompt: r.prompt, action: r.action ?? "prompt", budgetUsd: r.budget_usd ?? null, enabled: r.enabled === 1, lastRunAt: r.last_run_at ?? null, lastTaskId: r.last_task_id ?? null, nextRunAt: r.next_run_at ?? null, lastResult: r.last_result ? (JSON.parse(r.last_result) as Schedule["lastResult"]) : null, stuck: null, createdAt: r.created_at };
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2502,6 +2517,7 @@ function rowToTask(r: any): Task {
     resumeSince: r.resume_since ?? null,
     resumePlannedAt: r.resume_planned_at ?? null,
     queuedAt: r.queued_at ?? null,
+    deferredPrompt: r.deferred_prompt ?? null,
     background: r.background ? JSON.parse(r.background) : null,
     shadowOf: r.shadow_of ?? null,
     shadowStopped: !!r.shadow_stopped,

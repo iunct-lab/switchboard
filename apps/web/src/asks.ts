@@ -310,10 +310,47 @@ export function policyInput(form: PolicyForm | null): PolicyInput | undefined {
 
 /* ---------- batches (#2046) ---------- */
 
-export const BATCH_LABEL: Record<AskBatch["kind"], string> = { sso: t(m.batchSso), deploy: t(m.batchDeploy) };
+export const BATCH_LABEL: Record<AskBatch["kind"], string> = { sso: t(m.batchSso), deploy: t(m.batchDeploy), "security-merge": t(m.batchSecurityMerge) };
 
 /** A batch's Task lines: the Task, its operation and when it stopped. */
 export const batchLines = (b: Pick<AskBatch, "asks">, now = Date.now()) => b.asks.map((a) => ({ taskId: a.taskId, text: `${a.title} — ${a.op} — ${jstClock(a.at, now)}` }));
+
+/** The merge choice of a check (`A: マージする — …`, as the daemon's mergeChoiceOf reads it: 「マージしない」・「待つ」 are not it). */
+const hasMergeChoice = (a: Ask) => a.choices.some((c) => /^[A-Za-z0-9]+\s*[:：.．)）]\s*マージする/.test(c));
+
+/** How long a Task has waited: 「14 時間」 (rounded up, 「N 分」 under an hour). */
+const waitedText = (at: number, now: number) => {
+  const min = Math.max(0, Math.ceil((now - at) / 60_000));
+  return min < 60 ? t(m.waitedMinutes, { n: min }) : t(m.waitedHours, { n: Math.ceil(min / 60) });
+};
+
+/**
+ * The security-merge batch's rows (#2778): a PR per row with its Task, the `[聞く]` lines it stopped with, `+add/-del` and
+ * how long it has waited. `selectable` = its question (in `asks`) has a 「マージする」 choice, the one the answer sends.
+ */
+export const mergeBatchRows = (b: Pick<AskBatch, "asks">, now = Date.now(), asks: Ask[] = []) =>
+  b.asks.map((a) => ({
+    askId: a.askId,
+    taskId: a.taskId,
+    workspaceId: a.workspaceId,
+    pr: a.pr ?? null,
+    title: a.title,
+    reasons: a.reasons ?? [],
+    diff: a.diff ?? null,
+    waited: waitedText(a.at, now),
+    selectable: asks.some((k) => k.id === a.askId && hasMergeChoice(k)),
+  }));
+
+/**
+ * The Tasks a press sends "merge" to: the rows chosen by their question (`askId`, a new one for each question a Task asks),
+ * so a Task that asks again about another PR is not chosen by the tick on the question it asked before.
+ */
+export const mergeChosen = (rows: ReadonlyArray<{ askId: string; taskId: string; selectable: boolean }>, on: ReadonlySet<string>) =>
+  rows.filter((r) => r.selectable && on.has(r.askId)).map((r) => r.taskId);
+
+/** The question of each row `mergeChosen` picks (same order): sent with the Tasks so the daemon can tell the question changed. */
+export const mergeChosenAskIds = (rows: ReadonlyArray<{ askId: string; taskId: string; selectable: boolean }>, on: ReadonlySet<string>) =>
+  rows.filter((r) => r.selectable && on.has(r.askId)).map((r) => r.askId);
 
 /**
  * The questions a batch shows: their own cards are left out of the list (answered on the batch's card), and so are the

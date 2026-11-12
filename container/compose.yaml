@@ -1,0 +1,28 @@
+# The stand-alone mode (#4042): one daemon in the image of container/Dockerfile. Start it with container/up.sh, which
+# also sets DOCKER_GID. The project name fixes the volumes' names (switchboard_sb-home ...) wherever the clone is.
+name: switchboard
+services:
+  switchboard:
+    build:
+      context: ..
+      dockerfile: container/Dockerfile
+    image: sb-local
+    restart: unless-stopped
+    ports:
+      # the machine's 127.0.0.1 only; the relay in the container (container/relay.ts) makes the daemon see loopback
+      - "127.0.0.1:47831:47831"
+    volumes:
+      - sb-home:/home/switchboard/.switchboard
+      - sb-claude:/home/switchboard/.claude
+      - sb-codex:/home/switchboard/.codex
+      - sb-repos:/home/switchboard/repos
+      # a task's docker is the machine's dockerd, through its socket
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:-0}"
+
+volumes:
+  sb-home:
+  sb-claude:
+  sb-codex:
+  sb-repos:

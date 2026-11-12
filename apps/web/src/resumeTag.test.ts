@@ -4,12 +4,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { Task } from "@switchboard/protocol";
 import { fmtClock, ResumeTag } from "./components/ui.tsx";
 import { Brief } from "./components/Brief.tsx";
+import { resumeBlock } from "./resumeTag.ts";
 
 // A task waiting on GitHub's API limit (#550) reads differently from one stopped on the runner's usage limit (#102).
 
 const noop = () => undefined;
 const at = Date.UTC(2026, 9, 13, 1, 0, 0);
-const task: Task = { id: "task_gh", executionMode: "local", cloudSession: null, sourceCloudTaskId: null, workspaceId: null, title: "t", runner: "claude", cwd: "/fixture", scope: ["/fixture"], status: "done", runnerSessionId: "sess-1", model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: at, resumeReason: "github", resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "done", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 };
+const task: Task = { id: "task_gh", executionMode: "local", cloudSession: null, sourceCloudTaskId: null, workspaceId: null, title: "t", runner: "claude", cwd: "/fixture", scope: ["/fixture"], status: "done", runnerSessionId: "sess-1", model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: at, resumeReason: "github", deferredPrompt: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "done", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 };
 
 test("ResumeTag: a GitHub wait says so (the Rail's compact form too); the runner's limit and no reason read as before; no plan, no tag", () => {
   const github = renderToStaticMarkup(createElement(ResumeTag, { resumeAt: at, reason: "github" }));
@@ -70,4 +71,31 @@ test("ResumeTag: a disk wait says so, with the threshold in its title (the Rail'
   expect(brief({}, false)).toContain("自動再開は OFF");
   expect(brief({})).toContain("自動再開の設定はデーモンに接続すると表示されます");
   expect(brief({ runnerSessionId: null }, true)).toContain("再開できるセッションがありません");
+});
+
+test("deferred start: a Task made at the limit reads 開始待ち, the Brief says it has not started, and 今すぐ再開 works without a session; the limit's own no-session case still cannot", () => {
+  const start = { ...task, resumeReason: "start" as const, runnerSessionId: null, deferredPrompt: "go" };
+  const tag = renderToStaticMarkup(createElement(ResumeTag, { resumeAt: at, reason: "start" }));
+  expect(tag).toContain(`開始待ち ${fmtClock(at)}`);
+  expect(tag).toContain("ランナーの使用上限の直前のため");
+  expect(renderToStaticMarkup(createElement(ResumeTag, { resumeAt: at, reason: "start", compact: true }))).toContain(">開始待ち<");
+  const on = resumeBlock(start, true);
+  expect(on.parts).toEqual(["ランナーの使用上限の直前のため、まだ始めていません。", { b: fmtClock(at) }, " に始めます。"]);
+  expect(on.canResumeNow).toBe(true);
+  // OFF and an unknown setting still say why and that it has not started; neither promises an automatic start
+  expect(resumeBlock(start, false).parts).toEqual(["ランナーの使用上限の直前のため、まだ始めていません。", { b: fmtClock(at) }, " 以降に始められます。自動再開は OFF（Home のランナー設定で ON にできます）。"]);
+  expect(resumeBlock(start, undefined).parts).toEqual(["ランナーの使用上限の直前のため、まだ始めていません。", { b: fmtClock(at) }, " 以降に始められます。自動再開の設定はデーモンに接続すると表示されます。"]);
+  expect(resumeBlock(start, undefined).canResumeNow).toBe(true);
+  expect(resumeBlock(start, false).canResumeNow).toBe(true);
+  const brief = (over: object, autoResume?: boolean) => renderToStaticMarkup(createElement(Brief, { task: { ...task, ...over }, ledger: null, onAbort: noop, open: true, onClose: noop, ...(autoResume === undefined ? {} : { runners: [{ id: "claude", autoResume, models: [], efforts: [] }] as never }) }));
+  const html = brief(start, true);
+  expect(html).toContain("まだ始めていません。");
+  expect(html).not.toContain("止まりました");
+  expect(html).toMatch(/<button class="pri"[^>]*>今すぐ再開<\/button>/);
+  // the usage limit with no session stays unpressable, and the other reasons read as before
+  const limitNoSession = { ...task, resumeReason: "limit" as const, runnerSessionId: null };
+  expect(resumeBlock(limitNoSession, true).canResumeNow).toBe(false);
+  expect(brief(limitNoSession, true)).toMatch(/<button class="pri" disabled=""[^>]*>今すぐ再開<\/button>/);
+  expect(resumeBlock({ ...task, resumeReason: "limit" as const }, true).canResumeNow).toBe(true);
+  expect(resumeBlock({ ...task, resumeReason: "github" as const }, true).heading).toBe("GitHub の API 上限");
 });

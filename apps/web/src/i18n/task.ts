@@ -80,6 +80,9 @@ export const task = msgs({
   prevWhy: { ja: "適用しなかった理由: {why}", en: "Why it was not applied: {why}" },
   applied: { ja: "方針で回答: {summary}", en: "Answered by policy: {summary}" },
   batchSso: { ja: "SSO のログイン待ち", en: "Waiting for SSO login" },
+  batchSecurityMerge: { ja: "セキュリティの確認待ちのマージ", en: "Merges waiting on a security check" },
+  waitedMinutes: { ja: "{n} 分", en: "{n} min" },
+  waitedHours: { ja: "{n} 時間", en: "{n} h" },
   batchDeploy: { ja: "配備の承認待ち", en: "Waiting for deploy approval" },
 
   // inProgress.ts: a backlog row's buttons and its Task's state
@@ -122,6 +125,7 @@ export const task = msgs({
   waitUnknown: { ja: "判定できない", en: "cannot tell" },
   condOverlap: { ja: "相手が閉じてファイルの重なりが解けたら", en: "once the other side closes and the file overlap clears" },
   condPrereq: { ja: "前提が完了したら", en: "once the prerequisites are done" },
+  condUntil: { ja: "期日（{at}）を過ぎたら", en: "once the date ({at}) has passed" },
   condMissing: { ja: "未取得の相手は状態が分からない", en: "the state of one not read is unknown" },
   condWithdrawn: { ja: "取り下げた相手は完了とみなさない", en: "a withdrawn one does not count as done" },
   byHandReady: { ja: "「実装する」で再開", en: "resume with \"Implement\"" },
@@ -208,6 +212,9 @@ export const task = msgs({
   resumeDiskTitle: { ja: "ディスクの空き切れで停止。空きが 1 GiB に戻るまで待ちます（5 分ごとに確認。自動再開はランナーごとの設定。Task の Brief から今すぐ再開・取り消しができます）", en: "Stopped: the disk is full. Waits until 1 GiB is free again (checked every 5 minutes. Auto-resume is set per runner. Resume now or cancel from the Task's Brief)" },
   resumeDiskCompact: { ja: "空き待ち", en: "Waiting for space" },
   resumeDisk: { ja: "空き待ち（{when} に確認）", en: "Waiting for space (checks at {when})" },
+  resumeStartTitle: { ja: "ランナーの使用上限の直前のため、{when} に始めます（Task の Brief から今すぐ始める・取り消しができます）", en: "The runner is close to its usage limit, so it starts at {when} (start now or cancel from the Task's Brief)" },
+  resumeStartCompact: { ja: "開始待ち", en: "Waiting to start" },
+  resumeStart: { ja: "開始待ち {when}", en: "Waiting to start, {when}" },
   resumePlannedTitle: { ja: "ランナーの使用上限で停止。{when} に 1 回試し、だめなら {planned} に再開（自動再開はランナーごとの設定。Task の Brief から今すぐ再開・取り消しができます）", en: "Stopped at the runner's usage limit. Tries once at {when}, otherwise resumes at {planned} (auto-resume is set per runner. Resume now or cancel from the Task's Brief)" },
   resumePlanned: { ja: "再開待ち {when} に試す", en: "Waiting to resume, tries at {when}" },
   resumeTitle: { ja: "ランナーの使用上限で停止。{when} に枠が戻る見込み（自動再開はランナーごとの設定。Task の Brief から今すぐ再開・取り消しができます）", en: "Stopped at the runner's usage limit. The quota should be back at {when} (auto-resume is set per runner. Resume now or cancel from the Task's Brief)" },
@@ -269,8 +276,6 @@ export const task = msgs({
   recorded: { ja: "記録 {time}", en: "Recorded {time}" },
   staging: { ja: "ステージング", en: "Staging" },
   worktree: { ja: "作業ツリー", en: "Working tree" },
-  openInVscode: { ja: "VS Code で開く", en: "Open in VS Code" },
-  openInCursor: { ja: "Cursor で開く", en: "Open in Cursor" },
   noDiff: { ja: "(差分なし)", en: "(no diff)" },
 
   // TaskView.tsx: the conversation and the composer

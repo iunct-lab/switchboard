@@ -162,7 +162,7 @@ function Editor(props: { target: EditTarget; onChanged: () => void; onError: (ms
   const change = (patch: Partial<EditForm>) =>
     setForm((f) => {
       const next = { ...f!, ...patch };
-      if (last.current) localStorage.setItem(key, JSON.stringify({ form: next, base: { issue: last.current.issue, fields: last.current.fields } }));
+      if (last.current) localStorage.setItem(key, JSON.stringify({ form: next, base: { issue: last.current.issue, fields: last.current.fields, projectFields: last.current.projectFields } }));
       return next;
     });
   const save = () => {
@@ -307,15 +307,31 @@ function Editor(props: { target: EditTarget; onChanged: () => void; onError: (ms
         <label className="hint">{t(m.fieldParent)}</label>
         <input value={form.parent} disabled={!writable || saving} inputMode="numeric" onChange={set("parent")} />
       </div>
-      {detail.fields === null ? (
-        <div className="hint">{t(m.noProjectFields)}</div>
+      {detail.projectFields.length === 0 ? (
+        <div className="hint">{t(m.projectFieldsUnread)}</div>
       ) : (
-        Object.keys(form.fields).map((k) => (
-          <div className="row" key={k}>
-            <label className="hint">{k}</label>
-            <input value={form.fields[k]} disabled={!writable || saving} onChange={(e) => change({ fields: { ...form.fields, [k]: e.target.value } })} />
-          </div>
-        ))
+        <>
+          {detail.fields === null && <div className="hint">{t(m.notInProject)}</div>}
+          {detail.projectFields.map((pf) => {
+            const value = form.fields[pf.name] ?? "";
+            const onChange = (e: { target: { value: string } }) => change({ fields: { ...form.fields, [pf.name]: e.target.value } });
+            return (
+              <div className="row" key={pf.name}>
+                <label className="hint">{pf.name}</label>
+                {pf.dataType === "SINGLE_SELECT" ? (
+                  <select value={value} disabled={!writable || saving} onChange={onChange}>
+                    <option value="">{t(m.fieldNone)}</option>
+                    {[...(value && !pf.options.includes(value) ? [value] : []), ...pf.options].map((o) => (
+                      <option key={o} value={o}>{o}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input value={value} disabled={!writable || saving} inputMode={pf.dataType === "NUMBER" ? "numeric" : undefined} onChange={onChange} />
+                )}
+              </div>
+            );
+          })}
+        </>
       )}
       <button className="pri" disabled={saving || !writable} onClick={save}>
         {t(m.save)}

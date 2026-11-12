@@ -51,6 +51,12 @@ export function ResumeTag(props: { resumeAt: Task["resumeAt"]; reason: Task["res
         {props.compact ? t(m.resumeGithubCompact) : t(m.resumeGithub, { when })}
       </span>
     );
+  if (props.reason === "start")
+    return (
+      <span className="tag resume" title={t(m.resumeStartTitle, { when })}>
+        {props.compact ? t(m.resumeStartCompact) : t(m.resumeStart, { when })}
+      </span>
+    );
   if (props.reason === "disk")
     return (
       <span className="tag resume" title={t(m.resumeDiskTitle)}>

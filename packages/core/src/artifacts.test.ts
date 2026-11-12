@@ -330,7 +330,7 @@ describe("reports across tasks (#1835)", () => {
     for (const q of ["?limit=0", "?limit=101", "?limit=1.5", "?limit=abc", "?limit=", "?limit=%20", "?limit=1e1"]) expect((await reports(q)).status).toBe(400);
     expect((await reports()).status).toBe(200); // absent = the default
     const at = Date.now();
-    core.db.insertSchedule({ id: "sch_rep", title: "評価の週報", cron: "0 19 * * 0", workspaceId: "ws_rep", runner: "claude", model: "", effort: "", prompt: "p", action: "prompt", budgetUsd: null, enabled: true, lastRunAt: null, lastTaskId: null, nextRunAt: null, lastResult: null, createdAt: at });
+    core.db.insertSchedule({ id: "sch_rep", title: "評価の週報", cron: "0 19 * * 0", workspaceId: "ws_rep", runner: "claude", model: "", effort: "", prompt: "p", action: "prompt", budgetUsd: null, enabled: true, lastRunAt: null, lastTaskId: null, nextRunAt: null, lastResult: null, stuck: null, createdAt: at });
     const t3 = "tsk_rep3";
     core.db.insertTask({ ...mkTask(t3, work), title: "weekly", scheduleId: "sch_rep" });
     writeFileSync(join(work, "w.html"), "<p>w</p>");

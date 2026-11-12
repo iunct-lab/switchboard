@@ -3,7 +3,7 @@
  * is applied to the stored records at once, as if the service had answered it. The edit functions in backlog.ts are the
  * same for every workspace; only where their operations go differs (BacklogSync.send).
  */
-import type { BacklogCommentData, BacklogIssueData, BacklogObjectKind, BacklogProjectItemData, BacklogPullRequestData, BacklogSource } from "@switchboard/protocol";
+import type { BacklogCommentData, BacklogIssueData, BacklogObjectKind, BacklogProjectField, BacklogProjectItemData, BacklogPullRequestData, BacklogSource } from "@switchboard/protocol";
 import { applyBacklogField, type BacklogOperation, type BacklogSnapshotEntry, type Db } from "./db.ts";
 import { BacklogEditError, type BacklogCreatePayload } from "./backlog.ts";
 import { existsSync } from "node:fs";
@@ -173,6 +173,24 @@ export function checkLocalFields(dir: string, input: { fields?: Record<string, s
   if (m !== undefined && m !== null && !(cfg.milestone && new RegExp(cfg.milestone.pattern).test(m)))
     throw new BacklogEditError(`Milestone は ${m} にできません（${cfg.milestone ? `${cfg.milestone.pattern} に合うもの` : "milestone.pattern がありません"}。${source}）`, 422);
   return fields ? out : fields;
+}
+
+/**
+ * The fields a backlog kept here can set (#1545), as the Project's definitions are for one on GitHub: the choices of
+ * `checkLocalFields` (a single select each; Story Points a number). A `ops.config.json` that cannot be read gives none.
+ */
+export function localProjectFields(dir: string): BacklogProjectField[] {
+  let cfg: OpsConfig;
+  try {
+    cfg = existsSync(join(dir, CONFIG_FILE)) ? loadConfig(join(dir, CONFIG_FILE)) : defaultConfig();
+  } catch {
+    return [];
+  }
+  const select = (name: string, options: readonly (string | number)[] | undefined): BacklogProjectField[] => (options ? [{ name, dataType: "SINGLE_SELECT", options: options.map(String) }] : []);
+  return [
+    ...select("Status", STATUS_OPTIONS), ...select("Area", cfg.fields.area), ...select("Kind", cfg.fields.kind), ...select("Priority", cfg.fields.priority), ...select("Phase", cfg.fields.phase),
+    { name: "Story Points", dataType: "NUMBER", options: [] },
+  ];
 }
 
 /** A branch's tip in a checkout (#2485): 40 hex, or null when there is no such branch (or no git there). Read, never kept. */

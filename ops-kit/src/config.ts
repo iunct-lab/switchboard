@@ -105,6 +105,8 @@ export const OpsConfig = z
     forge: ForgeConfig.optional(),
     /** The local CI's steps (#3932); omitted = `.github/workflows/ci.yml`'s. */
     ci: CiConfig.optional(),
+    /** `ops-kit deps-check` (#3775): what this repository adds to the tool's own `## 更新の条件`, a line each. */
+    depsCheck: z.object({ extraConditions: z.array(z.string().min(1)) }).strict().optional(),
   })
   .strict();
 export type OpsConfig = z.infer<typeof OpsConfig>;

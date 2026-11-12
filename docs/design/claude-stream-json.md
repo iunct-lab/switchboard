@@ -14,7 +14,7 @@ claude -p \
   --permission-mode <mode> [--model X] [--resume <session_id>] [--add-dir <dir>]...
 ```
 
-`--permission-mode` is always passed (#58, `docs/design/permission-modes.md`). Without it `claude -p` starts in `default`
+`--permission-mode` is always passed (2026-09-07, `docs/design/permission-modes.md`). Without it `claude -p` starts in `default`
 (Manual: every tool asks) and — unlike the interactive terminal — ignores `permissions.defaultMode`; an interactive
 `claude` on Pro / Max / Team starts in `auto`. So the adapter's default is `auto`: Claude Code's own classifier
 approves safe actions and only the uncertain ones reach the host as `can_use_tool`. Accepted values (2.1.263):
@@ -69,10 +69,10 @@ Without step 1 (or without `--permission-prompt-tool stdio`) any tool that needs
 ## Cost model
 
 - `result.total_cost_usd` is computed at API list price even on a subscription. Switchboard shows it as **API-equivalent** cost.
-- `total_cost_usd` and `modelUsage` (per model: `costUSD`, `inputTokens`, `outputTokens`, `cacheReadInputTokens`, `cacheCreationInputTokens`; no 1-hour cache split) are the **session's running totals**, not the turn's: they grow over the turns of one process and carry on after `--resume` (recorded with Claude Code 2.1.311, `fixtures/resume-cost.jsonl`: two Haiku processes of one session, the second `--resume`d — its `total_cost_usd` includes the first's). `modelUsage` includes subagents' models. `result.usage` counts this process only and leaves subagents out. The parser emits one `usage(reported, cumulative: true)` per model of `modelUsage` (none when it is empty, as on a missing session); the Ledger books the difference from the previous total (#2353).
+- `total_cost_usd` and `modelUsage` (per model: `costUSD`, `inputTokens`, `outputTokens`, `cacheReadInputTokens`, `cacheCreationInputTokens`; no 1-hour cache split) are the **session's running totals**, not the turn's: they grow over the turns of one process and carry on after `--resume` (recorded with Claude Code 2.1.311, `fixtures/resume-cost.jsonl`: two Haiku processes of one session, the second `--resume`d — its `total_cost_usd` includes the first's). `modelUsage` includes subagents' models. `result.usage` counts this process only and leaves subagents out. The parser emits one `usage(reported, cumulative: true)` per model of `modelUsage` (none when it is empty, as on a missing session); the Ledger books the difference from the previous total (2026-10-24).
 - `rate_limit_event` gives the subscription's real constraint: 5-hour and 7-day window utilization.
 
-## Resume (verified 2026-09-05, issue #2)
+## Resume (verified 2026-09-05)
 
 Recorded fixtures (outside Git; record your own outside Git with the `runner-adapter-recording` skill): `fixtures/resume-turn.jsonl` (same session id re-announced by `system/init`, answer drawn from the earlier process) and `fixtures/resume-missing.jsonl` (`--resume` of an unknown id).
 
@@ -90,7 +90,7 @@ Eval log (real Claude Code 2.1.261, model `claude-haiku-4-5-20251001`): task "Re
 
 `<uuid>` is the `uuid` of the turn's last top-level `assistant` line, the same value as the line's `uuid` in the transcript. The parser carries it as `session.end.turn`. Lines with `parent_tool_use_id` are a subagent's and live in a transcript of their own, so they do not count. A turn with no `assistant` line has no `turn`.
 
-## Session log (`~/.claude/projects`) — reading terminal sessions (issue #91)
+## Session log (`~/.claude/projects`) — reading terminal sessions (2026-09-09)
 
 Verified 2026-09-09 against logs written by Claude Code **2.1.263** (interactive terminal and `claude -p` alike). Mapping in
 `packages/adapters/claude/src/history.ts`; recorded shape in `fixtures/terminal-session.jsonl` (values sanitized; outside Git; record your own outside Git with the `runner-adapter-recording` skill).

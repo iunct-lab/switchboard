@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { buildImportGraph, classify, findStaleReads, findUndeclared, formatSelection, parseReads, select, selectFrom, selectPerf } from "./test-select";
+import { buildImportGraph, classify, findStaleReads, findUndeclared, formatSelection, parseReads, select, selectFrom } from "./test-select";
 
 /** 偽のツリー。パス → 中身。 */
 function tree(src: Record<string, string>) {
@@ -280,24 +280,6 @@ describe("selectFrom / formatSelection", () => {
   test("1 行目が件数か full で、続けてテストと理由", () => {
     expect(formatSelection({ tests: ["a.test.ts"], reasons: { "a.test.ts": "a.ts → a.test.ts" } })).toBe("selected: 1\na.test.ts  a.ts → a.test.ts");
     expect(formatSelection({ tests: ["a.test.ts"], reasons: { "a.test.ts": "全テスト" }, full: "bun.lock: 依存の定義や設定" })).toBe("full: bun.lock: 依存の定義や設定\na.test.ts  全テスト");
-  });
-});
-
-describe("selectPerf（変更が perf-bench に届くか、#4124）", () => {
-  const src: Record<string, string> = { "scripts/perf-bench.ts": "", "docs/design/a.md": "", "scripts/person-deploy/x.sh": "", "apps/web/src/a.ts": "", "packages/core/src/b.ts": "", "scripts/perf-budget.json": "{}" };
-  const pick = (...changed: string[]) => selectPerf(changed, Object.keys(src), (p) => src[p]!);
-
-  test("docs と person-deploy だけの範囲は届かない", () => {
-    expect(pick("docs/design/a.md", "scripts/person-deploy/x.sh", "aws/README.md").run).toBe(false);
-  });
-
-  test.each(["apps/web/src/a.ts", "packages/core/src/b.ts", "scripts/perf-budget.json"])("%s は届く", (f) => {
-    expect(pick("docs/design/a.md", f).run).toBe(true);
-  });
-
-  test("変更の一覧が空・読めない依存は届く側に倒す", () => {
-    expect(pick().run).toBe(true);
-    expect(selectPerf(["docs/design/a.md"], ["x.ts"], () => "import {").run).toBe(true);
   });
 });
 

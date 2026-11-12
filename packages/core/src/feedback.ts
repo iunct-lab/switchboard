@@ -83,7 +83,7 @@ export const FIX_SCOPE = `## 進め方
 - 作業の場所と枝は CLAUDE.md の「作業の場所」（Task 番号の代わりに \`sb/fix-<topic>\`）。変更にはテストを添える
 - PR の本文に上の利用者の言葉を引用し、.claude/skills/cross-runner-review/SKILL.md で別のランナーにレビューさせ、.claude/skills/review-triage-and-merge/SKILL.md で指摘を処理してマージする。スキルが Issue から作る材料（Task・PBI・再チェックの元要望）は、その引用で代える。スキルが Issue に書く記録は PR に書く
 - cross-runner-review が渡すレビューの材料（fresh clone のコード、PR の本文、差分）を別のランナーと CLAUDE.md の追加のレビュアーに渡すことも、この依頼に含む
-- CI とマージ判定は CLAUDE.md の「マージ判定とローカル CI」。マージ判定（\`scripts/merge-gate.ts\`）が merge を返したらマージし、利用者へ聞き直さない。\`[再チェック <kind>]\` は docs/merge-gate.md の「再チェック」を回す
+- CI とマージ判定は CLAUDE.md の「マージ判定とローカル CI」。マージ判定（\`scripts/merge-gate.ts\`）が merge を返したらマージし、利用者へ聞き直さない。\`[再チェック <kind>]\` は docs/merge-gate.md の「Recheck」を回す
 - マージ判定が \`[聞く]\` で止めたとき、デーモンを再起動する pull、認証は Task の会話で聞く。昇格はリポジトリの CLAUDE.md の決まりに従い、聞かずに昇格してよいと書いていなければ Task の会話で聞く
 - 終わったら最後の行に PR の番号とマージの結果を書く`;
 
@@ -100,4 +100,15 @@ ${FIX_SCOPE}`;
 
 export function fixTitle(text: string): string {
   return `直す: ${head40(text)}`;
+}
+
+/**
+ * Where a request for Switchboard itself goes when this instance does not develop it (#2459): the upstream's request form
+ * with the text filled in (`what` of the public repository's request.yml) when the origin is on GitHub, else only the text to copy.
+ * Nothing is created through the API; the person files it from their own account.
+ */
+export function upstreamRequest({ repo, text }: { repo: string | null; text: string }): { url: string | null; text: string } {
+  if (!repo) return { url: null, text };
+  const q = new URLSearchParams({ template: "request.yml", title: `Request: ${head40(text)}`, what: text });
+  return { url: `https://github.com/${repo}/issues/new?${q}`, text };
 }

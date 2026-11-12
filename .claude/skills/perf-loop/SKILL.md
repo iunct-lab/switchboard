@@ -1,6 +1,6 @@
 ---
 name: perf-loop
-description: Switchboard の速さを計測して改善を回すときに読む。perf-bench で遅いジャーニーを選び、ラボで再現して原因を 1 つに絞り、1 PR 1 改善で前後の表を本文に貼り、同じ PR で perf-ratchet の上限を下げ、マージ後に実測を見るまで。
+description: Switchboard の速さを計測して改善を回すときに読む。perf-bench で遅いジャーニーを選び、ラボで再現して原因を 1 つに絞り、1 PR 1 改善で前後の表を本文に貼り、マージ後に実測を見て、タグが 3 つ続けて下回ってから perf-ratchet の上限を下げるまで。
 ---
 
 # 速さの改善を回す（perf-loop）
@@ -19,13 +19,13 @@ bun run --cwd apps/web build && bun scripts/perf-bench.ts --json perf-result.jso
 
 ## 2. ラボで再現し、原因を 1 つに絞る
 
-- perf-bench と同じ偽ランナーのデーモン + headless Chrome で、選んだジャーニーだけを動かす（作り方は `docs/design/perf.md` の「回し方」と CLAUDE.md のテストの表の「単体で書けない UI / 経路」）
+- perf-bench と同じ偽ランナーのデーモン + headless Chrome で、選んだジャーニーだけを動かす（作り方は `docs/design/perf.md` の「How to run」と CLAUDE.md のテストの表の「単体で書けない UI / 経路」）
 - Chrome の Performance（CDP の `Tracing` / `Performance.getMetrics` の `LayoutCount` / `RecalcStyleCount`）で、どの描画・どのリクエストが効いているかを 1 つに絞る。絞れないうちは直さない
 - 原因の仮説と、それを確かめた数を Task に書く
 
 ## 3. 1 PR 1 改善
 
-1 つの原因だけを直し、PR 本文に前後の表を貼る（下の数は形の見本。launch の layoutShift を直した PR のつもり）。前と後は**同じマシンで続けて**測る（`--runs 5` を前後それぞれ。ms は揺れるので、効いたと言うのは揺れない数か、ms が前後の p90 を越えて動いたとき）。後の結果は 4 で使うので、直した枝で build してから `--json` で残す:
+1 つの原因だけを直し、PR 本文に前後の表を貼る（下の数は形の見本。launch の layoutShift を直した PR のつもり）。前と後は**同じマシンで続けて**測る（`--runs 5` を前後それぞれ。ms は揺れるので、効いたと言うのは揺れない数か、ms が前後の p90 を越えて動いたとき）。直した枝で build してから `--json` で残す:
 
 ```bash
 bun run --cwd apps/web build && bun scripts/perf-bench.ts --json perf-result.json   # 後（直した枝）。前は main の worktree で同じコマンド
@@ -44,20 +44,19 @@ bun run --cwd apps/web build && bun scripts/perf-bench.ts --json perf-result.jso
 | bundle (gzip) | js 186608 → 186650 B、css 6031 → 6031 B | | | | | |
 ```
 
-bundle には上限が無い（`scripts/perf-budget.json` に無い）。タグの CI の `perf-ratchet.ts check` が main の先端との差を `bundle:` の行に出し（PR の local-ci は perf を測らないので、コメントには出ない）、js か css が 1% 以上増えたら `grew:` で赤にする（`docs/design/perf.md` の「ラチェット」の Bundle）。表の bundle の行は前後の比較のために書く。
+bundle には上限が無い（`scripts/perf-budget.json` に無い）。タグの CI の `perf-ratchet.ts check` が前のタグ（`PERF_BASE_REF`。最初のタグは `origin/main` の先端）との差を `bundle:` の行に出し（PR の local-ci は perf を測らないので、コメントには出ない）、js か css が 1% 以上増えたら `grew:` を出す（perf の手順は合否に数えず、`grew:` は Release の警告に残るだけでタグは pass。`docs/design/perf.md` の「Ratchet (the CI ceilings)」の Bundle）。表の bundle の行は前後の比較のために書く。
 
-## 4. 上限を下げる（マージの前に、同じ PR で）
+## 4. 上限を下げる（マージの後、タグが 3 つ続けて下回ってから）
 
-PR のローカル CI は perf を測らないので、上限を下げ忘れても PR では落ちない。ただしタグの CI のラチェットが「良くなった」で落ちる（両側のゲート）ので、マージの前に同じ PR で上限を下げる。`perf-result.json` は 3 の「後」の結果（1 の前の結果を渡すと何も下がらない）:
+改善の PR では上限を下げない。タグの CI は「良くなった」（`improved:`）では落ちず、Release の `## CI` に下げられる上限として残すだけ。1 回の低い値で下げると、同じコードの次の高い値が `over` になる（揺れ）ので、`update` は直近 3 タグ（`LOWER_AFTER`）が続けて `ceiling − 2 × 幅` を下回った数だけを、その 3 つの最大 + 幅に下げる。マージの後、タグが 3 つ付いて tag CI が測ってから回す（`perf-records` 枝の `counts.tsv` を読むので、結果ファイルは渡さない）:
 
 ```bash
-bun scripts/perf-ratchet.ts update perf-result.json                  # このホストの上限（local）を下げる
-bun scripts/perf-ratchet.ts update <Actions の結果>.json --env github  # Actions の上限。check が落ちた run の log の最後に出る JSON をファイルにして渡す
+bun scripts/perf-ratchet.ts update                  # このホストの上限（local）。タグが 3 つに満たない数は `waiting <key>: n/3` と出る
 ```
 
-`update` は下げる方向にしか書き換えない。bundle と `bytes`（`open-task` / `open-task-huge`）は上限が無いので下げるものも無い（main の先端との増分で判定する。`docs/design/perf.md` の「ラチェット」の冒頭）。上限は環境ごとに 2 組（`github` / `local`）あり、片方だけ下げると、もう片方は次の CI で「良くなった」と出る — 両方下げる。
+下がった `scripts/perf-budget.json` は別の PR で出す（上限を下げるだけの PR）。`update` は下げる方向にしか書き換えない。bundle と `bytes`（`open-task` / `open-task-huge`）は上限が無いので下げるものも無い（前のタグとの増分を `grew:` に出す。`docs/design/perf.md` の「Ratchet (the CI ceilings)」の冒頭）。`loaded.healthMaxMs` は下げない。上限は環境ごとに 2 組（`github` / `local`）ある。`counts.tsv` に行を書くのはタグの CI（`local`）だけなので、`update --env github` は `waiting` のままで `github` の上限は下がらない。`github` の上限は手で下げる（`docs/design/perf.md` の「Initial values」の末尾の by hand）。
 
-**上限を上げたい**（機能を足して数が増えるなど）ときは、`scripts/perf-budget.json` を手で上げる（bundle と `bytes` は上限が無いので書き換えない。1% 未満の増えで利用者に聞かない・上限を上げる PR を出さない。止まらずに通り、推移は `bun scripts/perf-ratchet.ts history` で追う）。PR のローカル CI は perf を測らないので、上げた PR も 1% 以上増えた PR も PR では落ちない。タグの CI でも、比べる相手の main がタグ自身か後のコミットなので、タグ自身の増えは `raised:` / `grew:` に出ない（出るのは後の main で上限や bundle が下がったときで、タグの増えではない。`docs/design/perf.md` の「ラチェット」の冒頭）。bundle と `bytes` の増えはマージの前に聞かず、`bun scripts/perf-ratchet.ts history` で追い、直す要望を起票するか前のタグへ戻す。上限を手で上げるのは利用者の判断なので、上げる PR はマージの前に運用の確認として聞く（理由と前後の表を添える）。
+**上限を上げたい**（機能を足して数が増えるなど）ときは、`scripts/perf-budget.json` を手で上げる（bundle と `bytes` は上限が無いので書き換えない。1% 未満の増えで利用者に聞かない・上限を上げる PR を出さない。止まらずに通り、推移は `bun scripts/perf-ratchet.ts history` で追う）。PR のローカル CI は perf を測らないので、上げた PR も 1% 以上増えた PR も PR では落ちない。タグの CI では、比べる相手は前のタグなので、そのタグが足した増えが `raised:` / `grew:` に出る（タグに複数のマージがあれば和。どのマージかは `history` と `git log` で追う。`docs/design/perf.md` の「Ratchet (the CI ceilings)」の冒頭）。`raised:` / `grew:` だけのタグは pass。bundle と `bytes` の増えはマージの前に聞かず、`bun scripts/perf-ratchet.ts history` で追い、直す要望を起票するか前のタグへ戻す。上限を手で上げるのは利用者の判断なので、上げる PR はマージの前に運用の確認として聞く（理由と前後の表を添える）。
 
 ## 5. マージ後に実測を見る
 

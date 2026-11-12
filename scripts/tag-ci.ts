@@ -5,11 +5,7 @@
  * adds the result to the end of that tag's GitHub Release: `[tag-ci] pass|fail <sha>`. A fail walks back to the tag
  * before it, until a pass or a tag that already has a result; the tags walked past are not run. Before the walk, the
  * Releases missing from the newest tags are created (release-tag.ts's repairReleases: a tag whose `gh release create`
- * failed after its push). A tag whose Release still cannot be read is not run and the walk stops there. A perf-ratchet check whose only findings are
- * `raised:` (a ceiling above the tag before's) and `grew:` (the bundle 1% or
- * more above the tag before's; the first tag is compared with origin/main's tip, #4219) counts as a pass: both are the rule for a PR
- * before its merge, not a result of a merged tag. So does `improved:` (a ceiling that can be lowered: the Release keeps the lines), and an `over:` when
- * no file changed since the tag that passed last reaches perf-bench (selectPerf, #4124): a wobble of the measure, kept in the Release.
+ * failed after its push). A tag whose Release still cannot be read is not run and the walk stops there. The perf steps (`bun scripts/perf-bench.ts`, `bun scripts/perf-ratchet.ts`) do not count toward the result: a tag whose only failed steps are perf's is a `[tag-ci] pass`, and the perf-ratchet's lines (`over:` / `raised:` / `grew:` / `improved:`, or a note that it could not judge) stay in the Release's `## CI` as a warning. Only a step that is not perf's turns a tag into a fail.
  * Output: one line of JSON, the tags looked at, newest first. Exit 0 = the newest tag passed (now or before), 1 = it
  * failed, 2 = nothing judged (no tag, no Release, not run, or recordings asked for and missing).
  * With SWITCHBOARD_FIXTURES given, a tag whose recordings are missing on this host is not run and gets no result: that
@@ -36,18 +32,17 @@
  * there is written to stderr and leaves the exit code alone.
  */
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { forgeTargetOf, originOf } from "../ops-kit/src/forge.ts";
 import { withHeavySlot } from "../ops-kit/src/heavy.ts";
 import { findSecrets, hostAws, type HostAws } from "../ops-kit/src/secrets.ts";
-import { repoFiles, selectPerf } from "./test-select.ts";
 import { FILE_DEPS, type Filed, type OpenRequest, commentRequest, fileRequest, openRequests, requestText } from "./file-request.ts";
 import { BYTES_RECORDS_PATH, COUNTS_RECORDS_PATH, envOf, RECORDS_BRANCH, RECORDS_PATH } from "./perf-ratchet.ts";
 import { requireRecordings } from "./recordings.ts";
 import { must, repairReleases, withReleaseLock } from "./release-tag.ts";
-import { checkoutSteps, onlyPerf, perfVerdict, recordBundle, recordBytes, recordCounts, remoteRepo, runCheckout, selectTests, step, stepEnv, TargetError, type Deps } from "./local-ci.ts";
+import { isPerfStep, recordBundle, recordBytes, recordCounts, remoteRepo, runCheckout, selectTests, step, stepEnv, TargetError, type Deps } from "./local-ci.ts";
 
 /** A result's line in a Release's body: pass or fail, then the tag's commit. */
 export const TAG_CI_RESULT = /^\[tag-ci\] (pass|fail) ([0-9a-f]{40})(?=\s|$)/m;
@@ -66,24 +61,62 @@ export function hidePaths(line: string, roots: Record<string, string> = {}, home
   return out.replaceAll(home, "~").replace(/\/(?:home|Users)\/[^/\s]+|\/root(?=\/|\s|$)/g, "~");
 }
 
+/** The heading of the perf warning in a Release's `## CI`; its lines follow, indented by 4 spaces. */
+export const PERF_WARNING_HEADING = "perf の警告（合否には数えない）:";
+
+/** The warning lines (without their indent) a Release's body carries under PERF_WARNING_HEADING; the last heading's, only while the 4-space indented lines follow it. */
+export function warningsOf(body: string): string[] {
+  const lines = body.split("\n");
+  const at = lines.lastIndexOf(PERF_WARNING_HEADING);
+  if (at < 0) return [];
+  const out: string[] = [];
+  for (const l of lines.slice(at + 1)) {
+    if (!l.startsWith("    ")) break;
+    out.push(l.slice(4));
+  }
+  return out;
+}
+
+/** Worsenings counted as streaking: the same key out this many runs in a row (docs/design/perf.md, "Wobble and worsening"). */
+export const PERF_STREAK = 3;
+
+/** One tag CI result's perf warning lines, as read back from its Release. */
+export interface PerfRun { tag: string; sha: string; lines: string[] }
+
+/** The keys of the `over:` / `grew:` warning lines (`over: launch.ms = 900 > 800` -> `launch.ms`); `raised:`, `improved:`, the `bytes:` note and a no-verdict line name none. */
+export function perfKeys(lines: string[]): string[] {
+  const keys: string[] = [];
+  for (const l of lines) {
+    const m = /^\s*(?:over|grew): (\S+)/.exec(l);
+    if (m && !keys.includes(m[1]!)) keys.push(m[1]!);
+  }
+  return keys;
+}
+
+/** The keys of `now` that also stand in each of the first PERF_STREAK - 1 of `earlier` (the warning lines of the earlier results, newest first). Fewer earlier results than that: none. */
+export function perfStreak(now: string[], earlier: string[][]): string[] {
+  const before = earlier.slice(0, PERF_STREAK - 1);
+  if (before.length < PERF_STREAK - 1) return [];
+  const sets = before.map((l) => perfKeys(l));
+  return perfKeys(now).filter((k) => sets.every((s) => s.includes(k)));
+}
+
 /**
- * What goes at the end of the Release's body: the mark, and for a fail (or a raised/grew-only pass) the step and what it
- * named, at most 20 lines, without host paths. When the step's name or its lines have a value usable for auth
- * (`findSecrets`), none of them is written: the mark stays, a note says why the rest is missing.
+ * What goes at the end of the Release's body: the mark, for a fail the step and what it named, and the perf warning
+ * (the perf steps' lines; they do not count toward the result), each at most 20 lines, without host paths. When the
+ * step's name or its lines have a value usable for auth (`findSecrets`), none of them is written: the mark stays, a note
+ * says why the rest is missing.
  */
-export function resultSection(r: { sha: string; ok: boolean; step?: string; fails?: string[]; raisedOnly?: boolean; improved?: boolean; wobble?: string; remeasured?: string; selection?: string }, host: HostAws = hostAws()): string {
-  // the mark's first part (`[tag-ci] pass <sha>`) is what tagResult reads; the words after it say why a perf finding still passes
-  const why = r.wobble !== undefined ? " (wobble: perf-bench に届く変更なし)" : r.remeasured !== undefined ? ` (wobble: 前のタグ ${r.remeasured} も同じ数で外れた)` : r.raisedOnly || r.improved ? ` (${[r.raisedOnly ? "raised/grew" : "", r.improved ? "improved" : ""].filter(Boolean).join("/")} only)` : "";
-  const out = ["", "", "## CI", `[tag-ci] ${r.ok ? "pass" : "fail"} ${r.sha}${why}`, "", "`bun scripts/tag-ci.ts` がこのタグのコミットで `.github/workflows/ci.yml` の手順（local-ci と同じ）を回した。"];
+export function resultSection(r: { sha: string; ok: boolean; step?: string; fails?: string[]; warnings?: string[]; selection?: string }, host: HostAws = hostAws()): string {
+  // the mark is `[tag-ci] pass|fail <sha>` alone: it is what tagResult reads
+  const out = ["", "", "## CI", `[tag-ci] ${r.ok ? "pass" : "fail"} ${r.sha}`, "", "`bun scripts/tag-ci.ts` がこのタグのコミットで `.github/workflows/ci.yml` の手順（local-ci と同じ）を回した。"];
   // an unnamed step's name is its script's first line, which may hold a path or a value as much as its output
   const step = hidePaths(r.step ?? "");
   const detail = [
-    ...(r.raisedOnly ? [`\`${step}\` は前のタグより上げた上限（raised）か前のタグからの 1% 以上の増加（grew）だけで落ちた。マージ済みのタグでは pass と数える:`] : []),
-    ...(r.improved ? [`\`${step}\` は下げられる上限（improved）があった。下げられる上限（\`bun scripts/perf-ratchet.ts update\`）:`] : []),
-    ...(r.wobble !== undefined ? [`\`${step}\` の over は揺れ（範囲に perf-bench に届く変更なし: ${hidePaths(r.wobble)}）。pass と数える:`] : []),
-    ...(r.remeasured !== undefined ? [`\`${step}\` の over は揺れ（前のタグ ${r.remeasured} を同じ手順で測り直しても同じ数で外れた）。pass と数える:`] : []),
     ...(r.ok ? [] : [`\`${step}\` が落ちた:`]),
     ...(r.fails ?? []).slice(0, 20).map((l) => `    ${hidePaths(l)}`),
+    // failedIn reads the lines under "が落ちた:" up to the first line that is not indented: the heading ends them
+    ...(r.warnings?.length ? [PERF_WARNING_HEADING, ...r.warnings.slice(0, 20).map((l) => `    ${hidePaths(l)}`)] : []),
   ];
   if (detail.length === 0) return `${out.join("\n")}\n`;
   const safe = findSecrets(detail.join("\n"), host).length === 0;
@@ -134,6 +167,8 @@ export interface TagCiDeps extends Omit<Deps, "sh"> {
   sh: (cmd: string[], cwd?: string, input?: string) => Promise<string>;
   /** Called when the newest tag has failed, before the walk: what it reports stays if the walk is cut. followUp runs again after the walk. */
   onNewest?: (entries: TagCiEntry[]) => Promise<void>;
+  /** Given for Switchboard itself only: called when a run's perf warning has keys that stood in the warning of the two results before it too (PERF_STREAK in a row). `lines` = this run's warning lines; `earlier` = those results, newest first. */
+  onPerfStreak?: (tag: string, sha: string, keys: string[], lines: string[], earlier: PerfRun[]) => Promise<void>;
   /** Called for a tag not judged because of missing recordings: the public sync's watch names them (#3601). */
   onSkip?: (tag: string, missing: string[]) => void;
   /** With SWITCHBOARD_FIXTURES given, run first: syncs the recordings folder with its branch (Switchboard itself only). Throws on a failure. */
@@ -203,7 +238,7 @@ export interface TagCiEntry { tag: string; sha: string; result: "pass" | "fail";
 
 /**
  * main's bundle and bytes as this tag's run measured them (perf-base.json in `dir`) and the tag's own counts
- * (perf-result.json), pass or fail, on the records branch (#4105; docs/design/perf.md の「bundle の推移」). A failure is logged and changes nothing; a GitLab target is not recorded.
+ * (perf-result.json), pass or fail, on the records branch (#4105; docs/design/perf.md "Bundle history"). A failure is logged and changes nothing; a GitLab target is not recorded.
  */
 export async function recordMeasures(repo: string, root: string, dir: string, tag: string, sha: string, d: Pick<TagCiDeps, "sh" | "log">): Promise<void> {
   const at = new Date().toISOString();
@@ -212,7 +247,7 @@ export async function recordMeasures(repo: string, root: string, dir: string, ta
   await recordCountsOf(repo, root, dir, tag, sha, d, at);
 }
 
-/** The counts of `dir`'s perf-result.json as `tag`'s row on the records branch (a measure of its own: a remeasure of an older tag records them too). */
+/** The counts of `dir`'s perf-result.json as `tag`'s row on the records branch. */
 async function recordCountsOf(repo: string, root: string, dir: string, tag: string, sha: string, d: Pick<TagCiDeps, "sh" | "log">, at = new Date().toISOString()): Promise<void> {
   await recordOne(root, d, "counts", COUNTS_RECORDS_PATH, (r, dr, t, sh) => recordCounts(r, dr, t, envOf(undefined), tag, sha, sh), repo, dir, at);
 }
@@ -234,7 +269,7 @@ async function recordOne(
 }
 
 /** One tag's CI in its own worktree; the result to record. */
-async function runTag(tag: string, before: string | undefined, sha: string, repo: string, root: string, d: TagCiDeps, cache: string, memo: Remeasures) {
+async function runTag(tag: string, before: string | undefined, sha: string, repo: string, root: string, d: TagCiDeps, cache: string) {
   mkdirSync(cache, { recursive: true });
   const dir = mkdtempSync(join(cache, `switchboard.tag-ci-${tag}.`));
   const tmp = mkdtempSync(join(tmpdir(), `switchboard.tag-ci-${tag}-tmp.`));
@@ -253,25 +288,18 @@ async function runTag(tag: string, before: string | undefined, sha: string, repo
     await recordMeasures(repo, root, dir, tag, sha, d);
     // every failed step: a perf step's failure does not stop bun test (#2945)
     const failed = run.results.filter((x) => x.code !== 0);
+    // the perf steps do not count toward the result (runCheckout lets them all keep going): only the others' failures are the tag's, and the perf-ratchet's lines are a warning in the Release
+    const counted = failed.filter((f) => !isPerfStep(f));
+    const perfFailed = failed.some((f) => isPerfStep(f));
     const p = run.perf;
-    // a pass by perf findings that are not a regression of a merged tag: the check is the one failure and every step ran (none was left
-    // unrun after it); raised / grew / improved always, an over only when the range since the tag that passed last holds nothing that reaches perf-bench (a wobble)
-    const perfOnly = !run.ok && !!p && !p.unknown && failed.length === 1 && failed[0]!.run.includes("perf-ratchet") && run.results.length === run.steps.length;
-    const range = perfOnly && p!.over.length > 0 ? await perfRange(tag, repo, root, dir, d) : null;
-    const wobble = range && !range.reaches ? `${range.last}..${tag}` : undefined;
-    // a change that reaches perf-bench: the tag that passed last is measured again, and only an over it did not have is the tag's own (#4124)
-    const again = range?.reaches ? await sameOver(range.last, p!.over, dir, env, repo, root, d, cache, memo) : undefined;
-    const remeasured = again?.same ? range!.last : undefined;
-    const perfPass = perfOnly && (p!.over.length === 0 || wobble !== undefined || remeasured !== undefined);
-    const raisedOnly = perfPass && p!.raised.length + p!.grew.length > 0;
-    const improved = perfPass && p!.improved.length > 0;
-    // failLines has the check's raised: and grew: lines already. The Release keeps 20 lines: each failed step gets its share, so
-    // a check's many lines do not push bun test's (fail) lines out
-    const fails = perfPass ? [...p!.raised, ...p!.grew, ...p!.improved, ...p!.over] : [...(again?.fine ?? []), ...failed.flatMap((f) => (f.fails ?? []).slice(0, Math.floor(20 / failed.length)))];
+    const warnings = !perfFailed ? [] : p && !p.unknown ? [...p.raised, ...p.grew, ...p.improved, ...p.over] : ["perf の判定ができなかった（bench が落ちたか、check が判定の前に止まった）"];
+    // the Release keeps 20 lines: each failed step gets its share
+    const fails = counted.flatMap((f) => (f.fails ?? []).slice(0, Math.floor(20 / counted.length)));
     const test = run.outputs["bun test"];
     const selection = test !== undefined ? await selectionLine(test, before, dir, env, d) : undefined;
-    const step = failed.length ? failed.map((f) => f.name).join(" / ") : undefined;
-    return { sha, ok: run.ok || perfPass, step, fails: fails.map((l) => hidePaths(l, { [dir]: "<checkout>", [tmp]: "<tmp>" })), raisedOnly, improved, wobble, remeasured, selection };
+    const step = counted.length ? counted.map((f) => f.name).join(" / ") : undefined;
+    const hide = (l: string) => hidePaths(l, { [dir]: "<checkout>", [tmp]: "<tmp>" });
+    return { sha, ok: counted.length === 0, step, fails: fails.map(hide), warnings: warnings.map(hide), selection };
   } finally {
     await d.sh(["git", "-C", root, "worktree", "remove", "--force", dir]).catch(() => undefined);
     rmSync(dir, { recursive: true, force: true });
@@ -281,15 +309,10 @@ async function runTag(tag: string, before: string | undefined, sha: string, repo
 
 /** Walks the tags of `repo` (its clone at `root`) newest first: see the file's comment. `cache`: the worktrees and failure logs (~/.cache; tests give their own). */
 export async function tagCi(d: TagCiDeps, repo: string, root: string, cache = join(homedir(), ".cache"), host: HostAws = hostAws()): Promise<TagCiEntry[]> {
-  const memo: Remeasures = new Map();
-  try {
-    return await walkTags(d, repo, root, cache, host, memo);
-  } finally {
-    for (const r of memo.values()) await r.then((m) => ("resultFile" in m ? rmSync(dirname(m.resultFile), { recursive: true, force: true }) : undefined), () => undefined);
-  }
+  return walkTags(d, repo, root, cache, host);
 }
 
-async function walkTags(d: TagCiDeps, repo: string, root: string, cache: string, host: HostAws, memo: Remeasures): Promise<TagCiEntry[]> {
+async function walkTags(d: TagCiDeps, repo: string, root: string, cache: string, host: HostAws): Promise<TagCiEntry[]> {
   // one heavy slot for the whole run (every tag it walks): the same as local-ci, whose steps it runs with every test
   return d.slot(`tag-ci ${repo}`, async () => {
     await d.sh(["git", "-C", root, "fetch", "-q", "origin", "--tags", "--force"]);
@@ -337,14 +360,15 @@ async function walkTags(d: TagCiDeps, repo: string, root: string, cache: string,
         break;
       }
       d.log(`${tag}（${sha.slice(0, 7)}）を回す`);
-      const r = await runTag(tag, tags[i + 1], sha, repo, root, d, cache, memo);
+      const r = await runTag(tag, tags[i + 1], sha, repo, root, d, cache);
       if ("missing" in r) {
         d.log(`${tag}: 録画が足りないので判定しない（印は書かない）: ${r.missing.join(" ")}`);
         d.onSkip?.(tag, r.missing);
         break;
       }
       await d.sh(["gh", "release", "edit", tag, "-R", repo, "--notes-file", "-"], undefined, `${body.trimEnd()}${resultSection(r, host)}`.trimStart());
-      d.log(`${tag}: ${r.ok ? "pass" : "fail"}${r.raisedOnly ? "（raised/grew only）" : ""}${r.improved ? "（improved only）" : ""}${r.wobble !== undefined || r.remeasured !== undefined ? "（wobble）" : ""}`);
+      d.log(`${tag}: ${r.ok ? "pass" : "fail"}${r.warnings.length ? `（perf の警告 ${r.warnings.length} 件）` : ""}`);
+      if (r.warnings.length && d.onPerfStreak) await perfStreakOf(d, tag, sha, r.warnings, tags.slice(i + 1), repo, root);
       out.push({ tag, sha, result: r.ok ? "pass" : "fail", ran: true, ...(r.ok ? {} : { step: hidePaths(r.step ?? ""), fails: r.fails }) });
       if (r.ok) break;
       if (out.length === 1) await d.onNewest?.(out);
@@ -355,6 +379,29 @@ async function walkTags(d: TagCiDeps, repo: string, root: string, cache: string,
     }
     return out;
   });
+}
+
+/**
+ * The warnings of the results of the PERF_STREAK - 1 tags after `tag` that have a mark, newest first; a streak is told to
+ * d.onPerfStreak. Only every few tags gets a result (the tag CI waits for SWITCHBOARD_TAG_CI_MIN_TAGS tags and runs the
+ * newest), so the tags without a mark are passed over with no count of their own: the read stops at those results or at a
+ * Release that cannot be read.
+ */
+async function perfStreakOf(d: TagCiDeps, tag: string, sha: string, lines: string[], older: string[], repo: string, root: string): Promise<void> {
+  try {
+    const earlier: PerfRun[] = [];
+    for (const t of older) {
+      if (earlier.length >= PERF_STREAK - 1) break;
+      const s = (await d.sh(["git", "-C", root, "rev-parse", `${t}^{commit}`])).trim();
+      const body = await d.sh(["gh", "release", "view", t, "-R", repo, "--json", "body", "-q", ".body"]).catch(() => null);
+      if (body === null) break;
+      if (tagResult(body, s)) earlier.push({ tag: t, sha: s, lines: warningsOf(body) });
+    }
+    const keys = perfStreak(lines, earlier.map((e) => e.lines));
+    if (keys.length) await d.onPerfStreak!(tag, sha, keys, lines, earlier);
+  } catch (e) {
+    d.log(`${tag}: perf の悪化が続いたかを読めなかった（${(e as Error).message}）`);
+  }
 }
 
 /** The first tag of `tags` (newest first) whose result is pass, or null. Stops reading at it. */
@@ -484,93 +531,6 @@ async function lastPassBefore(entries: TagCiEntry[], repo: string, root: string,
 }
 
 /**
- * The tag that passed last before `tag` (within 50) and whether a file changed since it reaches perf-bench (selectPerf: apps/web,
- * packages, perf-budget.json): when none does, an `over` in the range is a wobble of the measure, not of the code (#4124). null = no
- * tag passed before, or the range cannot be read: those stay a fail.
- */
-async function perfRange(tag: string, repo: string, root: string, dir: string, d: Pick<TagCiDeps, "sh">): Promise<{ last: string; reaches: boolean } | null> {
-  try {
-    const last = await passBefore(tag, repo, root, d.sh);
-    if (last === null) return null;
-    const changed = (await d.sh(["git", "-C", root, "diff", "--name-only", `${last}..${tag}`])).split("\n").map((l) => l.trim()).filter(Boolean);
-    return { last, reaches: selectPerf(changed, repoFiles(dir), (p) => readFileSync(join(dir, p), "utf8")).run };
-  } catch {
-    return null;
-  }
-}
-
-/** The measures of the tags that passed last, one per tag for the whole walk (several failing tags share the one before them). */
-type Remeasures = Map<string, ReturnType<typeof remeasure>>;
-
-/**
- * Whether every `over` of the tag (`over` lines of perf-ratchet) is also over for `last`, the tag that passed last, measured again
- * by the same steps and judged against this checkout's base and ceilings. `same` = all of them; `fine` = the lines of the ones `last` kept
- * under the ceiling. undefined = the measure or its judgement failed: the fail stays as it was.
- */
-async function sameOver(last: string, over: string[], dir: string, env: Record<string, string>, repo: string, root: string, d: TagCiDeps, cache: string, memo: Remeasures): Promise<{ same: boolean; fine: string[] } | undefined> {
-  if (!memo.has(last)) memo.set(last, d.sh(["git", "-C", root, "rev-parse", `${last}^{commit}`]).then((sha) => remeasure(last, sha.trim(), repo, root, d, cache), (e: unknown) => ({ failed: String(e) })));
-  const m = await memo.get(last)!;
-  if (!("resultFile" in m)) {
-    d.log(`前のタグ ${last} を測り直せなかった（今までどおり fail）: ${m.failed}`);
-    return undefined;
-  }
-  const checked = await d.step(`bun scripts/perf-ratchet.ts check '${m.resultFile}' --base perf-base.json`, dir, env);
-  const before = perfVerdict(checked.output);
-  // A check that passes prints no verdict line (`perf ratchet: ok`): every key of the tag before was under its ceiling
-  if (before.unknown && checked.code !== 0) {
-    d.log(`前のタグ ${last} の判定を読めなかった（今までどおり fail）`);
-    return undefined;
-  }
-  const key = (l: string) => /^over: (\S+) = /.exec(l)?.[1];
-  const kept = new Set(before.over.map(key));
-  const values = numbers(JSON.parse(readFileSync(m.resultFile, "utf8")));
-  const fine = over.filter((l) => !kept.has(key(l))).map((l) => `前のタグ ${last} では収まった: ${key(l)} = ${values.get(key(l) ?? "") ?? "?"} / ${/ = (\S+) /.exec(l)?.[1] ?? "?"}`);
-  return { same: fine.length === 0, fine };
-}
-
-/** Every number of a JSON value by its dotted path (the keys perf-ratchet prints). */
-function numbers(v: unknown, path = "", out = new Map<string, number>()): Map<string, number> {
-  if (typeof v === "number") out.set(path, v);
-  else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) numbers(x, path ? `${path}.${k}` : k, out);
-  return out;
-}
-
-/**
- * The perf steps of the tag `tag` again, in a worktree of its own (the steps of `onlyPerf`: install, web build, perf-bench --runs 5), and
- * its perf-result.json kept in a folder of its own (the caller removes it) with its counts recorded like a tag CI's own. `failed` =
- * the worktree or a step failed, or no result came out.
- */
-export async function remeasure(tag: string, sha: string, repo: string, root: string, d: TagCiDeps, cache: string): Promise<{ resultFile: string } | { failed: string }> {
-  mkdirSync(cache, { recursive: true });
-  const dir = mkdtempSync(join(cache, `switchboard.tag-ci-${tag}.`));
-  const tmp = mkdtempSync(join(tmpdir(), `switchboard.tag-ci-${tag}-tmp.`));
-  try {
-    await d.sh(["git", "-C", root, "worktree", "add", "-q", "--detach", dir, sha]);
-    const env = stepEnv(tmp);
-    const steps = onlyPerf(await checkoutSteps(dir, env));
-    if (steps.length === 0) return { failed: "CI に perf の手順が無い" };
-    for (const s of steps) {
-      d.log(`▶ ${tag} を測り直す: ${s.name}`);
-      const r = await d.step(s.run, dir, env);
-      if (r.code !== 0) return { failed: `${s.name} が exit ${r.code}` };
-    }
-    const made = join(dir, "perf-result.json");
-    if (!existsSync(made)) return { failed: "perf-result.json が残らなかった" };
-    await recordCountsOf(repo, root, dir, tag, sha, d);
-    const keep = mkdtempSync(join(cache, `switchboard.tag-ci-remeasure-${tag}.`));
-    const resultFile = join(keep, "perf-result.json");
-    copyFileSync(made, resultFile);
-    return { resultFile };
-  } catch (e) {
-    return { failed: e instanceof Error ? e.message : String(e) };
-  } finally {
-    await d.sh(["git", "-C", root, "worktree", "remove", "--force", dir]).catch(() => undefined);
-    rmSync(dir, { recursive: true, force: true });
-    rmSync(tmp, { recursive: true, force: true });
-  }
-}
-
-/**
  * See the file's comment. `self` = Switchboard itself (no --repo). It runs on every run, for the newest
  * tag whether it was run now or read from before, and says only what the open request does not say yet: a run whose
  * filing or comment failed is made up by the next one. A fail read from before is read back from its Release.
@@ -616,6 +576,59 @@ export async function followUp(entries: TagCiEntry[], repo: string, root: string
   }
   // filed before the walk, or by a run cut after it: a nearer pass narrows the commits
   if (lastPass && !said.includes(`最後に通ったタグ: ${lastPass}`)) await d.comment(r.open, `最後に通ったタグ: ${lastPass}（間のコミット ${commits.length} 件）。戻す先の候補: ${lastPass}（間のマージ ${commits.length} 件。戻すなら bun scripts/rollback-pr.ts ${lastPass} --repo ${repo}）`);
+}
+
+/** The title of the request for a key that stayed out PERF_STREAK results in a row. */
+export const perfStreakTitle = (key: string): string => `perf が悪化し続けている: ${key}`;
+
+/**
+ * One request per key (`type:request`, `誰の言葉: 定期の検査`), or a comment `<tag>（<sha7>）でも続いた` on the open one
+ * with the same title (once per tag). `lines` = the run's warning lines; the key's own are quoted.
+ */
+export async function perfStreakFollow(tag: string, sha: string, keys: string[], lines: string[], d: FollowDeps, date = new Date().toISOString().slice(0, 10), earlier: PerfRun[] = []): Promise<void> {
+  const named = `${tag}（${sha.slice(0, 7)}）`;
+  for (const key of keys) {
+    const of = (ls: string[]) => ls.filter((l) => perfKeys([l])[0] === key).map((l) => `    ${hidePaths(l)}`);
+    // each tag of the streak with its own line for the key, this run first
+    const mine = [{ tag, sha, lines }, ...earlier].flatMap((r) => [`  ${r.tag}（${r.sha.slice(0, 7)}）:`, ...of(r.lines)]);
+    const req = {
+      title: perfStreakTitle(key),
+      body: [
+        "## 要望",
+        `タグの CI の perf の警告で、\`${key}\` が ${PERF_STREAK} 回の実行続けて天井を超えた・増えた（\`over:\` / \`grew:\`）。揺れではなく悪化の形なので、原因を絞って直してほしい（この要望は直した PBI が閉じる）。`,
+        "",
+        "````text",
+        `続いたタグ: ${named}（この実行が ${PERF_STREAK} 回目）`,
+        "行:",
+        ...mine,
+        "````",
+        "",
+        `各タグの行は Release の \`## CI\` の「${PERF_WARNING_HEADING}」（\`gh release view ${tag} --json body -q .body\`）。1 回や 2 回の外れは揺れとして要望にしない（docs/design/perf.md の「Wobble and worsening」）。`,
+        "",
+        "## 出典",
+        "- 誰の言葉: 定期の検査",
+        `- いつ: ${date}`,
+        "- 経路: タグの CI（scripts/tag-ci.ts）",
+        "",
+        "## 添付",
+        "なし",
+        "",
+        "## 派生 PBI",
+        "",
+        "## 解釈メモ",
+        "- 同じ数の悪化が続く間は、次のタグごとにこの要望にコメントが付く（閉じない）",
+      ].join("\n"),
+    };
+    const r = await d.file(req);
+    if (!("open" in r)) {
+      d.log(`要望を立てた（perf の悪化 ${key}）: ${r.filed === null ? "番号不明" : `#${r.filed}`}`);
+      continue;
+    }
+    if (!(await d.text(r.open)).includes(named)) {
+      await d.comment(r.open, `${named}でも続いた`);
+      d.log(`要望: 既存 ${r.open} にコメントした（${key}）`);
+    }
+  }
 }
 
 /** The repository and its clone from `[--repo <owner/name>]`, as local-ci's resolveTarget reads them (GitHub only: the results go on GitHub Releases). */
@@ -695,7 +708,9 @@ if (import.meta.main) {
   // fixtures.ts's own clone is t.root without --repo; its output goes to stderr: stdout is the JSON only
   const sync = async () => void log((await sh([process.execPath, join(import.meta.dir, "fixtures.ts"), "sync"], t.root)).trim());
   const self = !process.argv.includes("--repo");
-  const entries = await tagCi({ sh, step, log, onNewest: report, onSkip, repair, ...(self ? { sync, onWait } : {}), slot: (name, fn) => withHeavySlot(name, fn) }, t.repo, t.root);
+  const onPerfStreak = (tag: string, sha: string, keys: string[], lines: string[], earlier: PerfRun[]) =>
+    perfStreakFollow(tag, sha, keys, lines, { sh, log, file, comment: commentRequest, open: openRequests, text: requestText, print: log }, undefined, earlier);
+  const entries = await tagCi({ sh, step, log, onNewest: report, onSkip, repair, ...(self ? { sync, onWait, onPerfStreak } : {}), slot: (name, fn) => withHeavySlot(name, fn) }, t.repo, t.root);
   console.log(JSON.stringify(entries));
   await report(entries);
   if (!process.argv.includes("--repo")) {

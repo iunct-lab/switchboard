@@ -26,7 +26,7 @@ const RECORDS = (workspaceId: string) => ({
 /** The app's answer by route: the workspace list, a workspace's records, else `other`. */
 const routes = (other: (method: string, path: string, body: unknown) => { status?: number; body?: unknown } = () => ({ body: {} })) => (method: string, path: string, body: unknown) => {
   const records = /^\/records\?workspaceId=(.+)$/.exec(path);
-  return path === "" ? { body: LIST } : records ? { body: RECORDS(decodeURIComponent(records[1]!)) } : other(method, path, body);
+  return path === "/syncs" ? { body: LIST } : records ? { body: RECORDS(decodeURIComponent(records[1]!)) } : other(method, path, body);
 };
 
 function app(answer: (method: string, path: string, body: unknown) => { status?: number; body?: unknown } | "down" = routes()) {
@@ -52,14 +52,14 @@ async function run(argv: string[], fake = app(), env: Record<string, string | un
 test("list: the stored items of the repository's workspace and how fresh they are, one read and no sync unless --fresh", async () => {
   const r = await run(["list"]);
   expect(r.code).toBe(0);
-  expect(r.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET ", "GET /records?workspaceId=ws1"]);
+  expect(r.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET /syncs", "GET /records?workspaceId=ws1"]);
   expect(r.out).toContain("# acme/app  最終取得 2025-10-09");
   expect(r.out).toContain("同期 synced");
   expect(r.out).toContain("#3\tpbi\tOPEN\tReady\tPBI 3");
   expect(r.out).toContain("#5\ttask\tOPEN\t-\tTask: 実装");
   expect(r.out).not.toContain("other");
   const fresh = await run(["list", "--fresh"]);
-  expect(fresh.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET ", "POST /sync", "GET ", "GET /records?workspaceId=ws1"]);
+  expect(fresh.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET /syncs", "POST /sync", "GET /syncs", "GET /records?workspaceId=ws1"]);
   expect(fresh.calls[1]!.body).toEqual({ workspaceId: "ws1" });
 });
 
@@ -123,13 +123,13 @@ test("nothing is read as current when it cannot be told: no app, the app down, a
   expect((await run(["list"], app(() => "down"))).code).toBe(2);
   // the app cannot reach GitHub (424): the stored copy is the answer, with its last sync and 「GitHub 未同期」
   const detail = { issue: { number: 3, title: "PBI 3", state: "OPEN", labels: [], milestone: null, parent: null, body: "保存した本文", url: "" }, comments: [], fields: null, fetchedAt: 1, localId: null, pending: 1, sync: { state: "pending", reason: "import", lastSuccessfulSync: SYNC.syncedAt } };
-  const unsynced = await run(["view", "3", "--fresh"], app((m, p) => (p === "/sync" ? { status: 424, body: { error: "GitHub の上限" } } : { body: p === "" ? LIST : detail })));
+  const unsynced = await run(["view", "3", "--fresh"], app((m, p) => (p === "/sync" ? { status: 424, body: { error: "GitHub の上限" } } : { body: p === "/syncs" ? LIST : detail })));
   expect(unsynced.code).toBe(0);
   expect(unsynced.err).toContain("GitHub 未同期");
   expect(unsynced.err).toContain("最終同期 2025-10-09");
   expect(unsynced.err).toContain("424 GitHub の上限");
   expect(unsynced.out).toContain("保存した本文");
-  expect(unsynced.calls.map((c) => c.path)).toEqual(["", "/sync", "", "/3?workspaceId=ws1"]);
+  expect(unsynced.calls.map((c) => c.path)).toEqual(["/syncs", "/sync", "/3?workspaceId=ws1"]);
   // the same with --json: stdout keeps its shape, the line goes to stderr
   const json = await run(["list", "--fresh", "--json"], app(routes((m, p) => (p === "/sync" ? { status: 424, body: { error: "GitHub の上限" } } : {}))));
   expect([json.code, JSON.parse(json.out).workspaceId, json.err.includes("GitHub 未同期")]).toEqual([0, "ws1", true]);
@@ -143,10 +143,10 @@ test("nothing is read as current when it cannot be told: no app, the app down, a
   expect(unfetched.out).toBe("");
   for (const argv of [["view", "3"], ["set", "3", "Status", "Ready"], ["edit", "3", "--title", "T"]]) {
     const r = await run(argv, app(() => ({ body: never })));
-    expect([r.code, r.calls.map((c) => c.path)]).toEqual([2, [""]]);
+    expect([r.code, r.calls.map((c) => c.path)]).toEqual([2, ["/syncs"]]);
   }
-  expect((await run(["view", "3"], app((m, p) => (p === "" ? { body: LIST } : { status: 500 })))).code).toBe(2);
-  expect((await run(["view", "3"], app((m, p) => (p === "" ? { body: LIST } : { status: 409, body: { error: "まだ GitHub から取り込んでいません" } })))).code).toBe(2);
+  expect((await run(["view", "3"], app((m, p) => (p === "/syncs" ? { body: LIST } : { status: 500 })))).code).toBe(2);
+  expect((await run(["view", "3"], app((m, p) => (p === "/syncs" ? { body: LIST } : { status: 409, body: { error: "まだ GitHub から取り込んでいません" } })))).code).toBe(2);
 });
 
 test("a sandbox refusal names the approved rerun; the app down keeps its line (#2726)", async () => {
@@ -164,11 +164,11 @@ test("a sandbox refusal names the approved rerun; the app down keeps its line (#
 test("readRecords --fresh: a 424 sync answers the stored records with unsynced; the app down is unknown (#2264)", async () => {
   const records = { workspaceId: "ws1", repository: "acme/app", fetchedAt: SYNC.syncedAt, issues: [] };
   const env = { BACKLOG_URL: "http://app/api/backlog", GH_REPO: "acme/app" };
-  const limited = app((m, p) => (p === "/sync" ? { status: 424, body: { error: "GitHub の上限" } } : { body: p === "" ? LIST : records }));
+  const limited = app((m, p) => (p === "/sync" ? { status: 424, body: { error: "GitHub の上限" } } : { body: p === "/syncs" ? LIST : records }));
   const r = await readRecords(env, { fresh: true, fetch: limited.fetch });
   expect(r).toMatchObject({ workspaceId: "ws1", unsynced: expect.stringContaining("GitHub 未同期") });
-  expect(limited.calls.map((c) => c.path)).toEqual(["", "/sync", "/records?workspaceId=ws1"]);
-  const synced = await readRecords(env, { fresh: true, fetch: app((m, p) => ({ body: p === "" ? LIST : records })).fetch });
+  expect(limited.calls.map((c) => c.path)).toEqual(["/syncs", "/sync", "/records?workspaceId=ws1"]);
+  const synced = await readRecords(env, { fresh: true, fetch: app((m, p) => ({ body: p === "/syncs" ? LIST : records })).fetch });
   expect(synced.unsynced).toBeNull();
   await expect(readRecords(env, { fresh: true, fetch: app(() => "down").fetch })).rejects.toThrow("届きません");
   await expect(readRecords(env, { fresh: true, fetch: app((m, p) => (p === "/sync" ? { status: 503 } : { body: LIST })).fetch })).rejects.toThrow("503");
@@ -186,6 +186,44 @@ test("--help / -h print the usage only and exit 0; triage's usage is the same te
   expect((await run(["triage", "3"], app(), {}, false)).err).toContain(`backlog ${triageUsage(false)}`);
 });
 
+test("a command looks its workspace up once (#3438): set asks GET /syncs once, not the full list, and the saved value shows in the next view", async () => {
+  let stored: unknown = "Ready";
+  const detail = () => ({ issue: { number: 3, title: "PBI 3", state: "OPEN", labels: [], milestone: null, parent: null, subIssues: [], body: "", url: "" }, comments: [], fields: { Status: stored }, fetchedAt: 1, localId: null, pending: 1, held: [], sync: { state: "pending", reason: null, lastSuccessfulSync: 1 } });
+  const fake = app((m, p, body) => {
+    if (m === "PATCH") {
+      stored = (body as { fields: Record<string, unknown> }).fields.Status;
+      return { status: 202, body: { localId: null, operations: ["o"] } };
+    }
+    return p === "/syncs" ? { body: LIST } : { body: detail() };
+  });
+  const set = await run(["set", "3", "Status", "In review"], fake);
+  expect([set.code, set.out]).toEqual([0, "#3 を保存しました"]);
+  expect(fake.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET /syncs", "GET /3?workspaceId=ws1", "PATCH /3"]);
+  const view = await run(["view", "3"], fake);
+  expect(view.out).toContain("In review");
+  // --fresh needs the second look only for list's header: view reads the Issue, not the workspace's time
+  const before = fake.calls.length;
+  const fresh = await run(["view", "3", "--fresh"], fake);
+  expect(fresh.calls.slice(before).map((c) => `${c.method} ${c.path}`)).toEqual(["GET /syncs", "POST /sync", "GET /3?workspaceId=ws1"]);
+});
+
+test("a daemon older than the kit (404 on /syncs) still serves set and view through the old list route, one lookup each (#3438)", async () => {
+  let stored: unknown = "Ready";
+  const fake = app((m, p, body) => {
+    if (p === "/syncs") return { status: 404, body: { error: "not found" } };
+    if (m === "PATCH") {
+      stored = (body as { fields: Record<string, unknown> }).fields.Status;
+      return { status: 202, body: { localId: null, operations: ["o"] } };
+    }
+    return p === "" ? { body: LIST } : { body: { issue: { number: 3, title: "PBI 3", state: "OPEN", labels: [], milestone: null, parent: null, subIssues: [], body: "", url: "" }, comments: [], fields: { Status: stored }, fetchedAt: 1, localId: null, pending: 1, held: [], sync: { state: "pending", reason: null, lastSuccessfulSync: 1 } } };
+  });
+  const set = await run(["set", "3", "Status", "Done"], fake);
+  expect(set.code).toBe(0);
+  expect(fake.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET /syncs", "GET ", "GET /3?workspaceId=ws1", "PATCH /3"]);
+  const view = await run(["view", "3"], fake);
+  expect([view.code, view.out]).toEqual([0, expect.stringContaining("Done")]);
+});
+
 test("triage without a Phase: an empty Phase position is skipped and parent / status are read; with a Phase it is a usage error (exit 1)", async () => {
   const ok = app((m, p) => (m === "GET" ? { body: LIST } : { status: 202, body: { localId: "L1", operations: ["o"] } }));
   expect((await run(["triage", "3", "core", "feature", "P2", "", "891", "Ready"], ok, {}, false)).code).toBe(0);
@@ -201,7 +239,7 @@ test("triage without a Phase: an empty Phase position is skipped and parent / st
 
 test("edits go to the app's routes as its screen sends them; a refusal is exit 1", async () => {
   const detail = { issue: { number: 3 }, fields: { "Story Points": 2, Code: "007" } };
-  const ok = app((m, p) => (m === "GET" ? { body: p === "" ? LIST : detail } : { status: 202, body: { localId: "L1", operations: ["o"] } }));
+  const ok = app((m, p) => (m === "GET" ? { body: p === "/syncs" ? LIST : detail } : { status: 202, body: { localId: "L1", operations: ["o"] } }));
   expect((await run(["edit", "#3", "--title", "T", "--body-file", "-", "--add-label", "a", "--remove-label", "b", "--state", "closed", "--no-milestone"], ok)).code).toBe(0);
   expect((await run(["set", "3", "Story Points", "5"], ok)).code).toBe(0);
   expect((await run(["set", "3", "Code", "001"], ok)).code).toBe(0);
@@ -223,7 +261,7 @@ test("edits go to the app's routes as its screen sends them; a refusal is exit 1
   const refused = await run(["edit", "3", "--title", "T"], app((m) => (m === "GET" ? { body: LIST } : { status: 404, body: { error: "#3 は保存されていません" } })));
   expect(refused).toMatchObject({ code: 1, err: "backlog: 404 #3 は保存されていません" });
   // a value that does not fit its field is refused by the app before it is stored (#3811)
-  const unfit = await run(["set", "3", "Story Points", "abc"], app((m, p) => (m === "GET" ? { body: p === "" ? LIST : detail } : { status: 422, body: { error: "'Story Points' は数値フィールドです。整数だけを渡す（例: 5）: 'abc'" } })));
+  const unfit = await run(["set", "3", "Story Points", "abc"], app((m, p) => (m === "GET" ? { body: p === "/syncs" ? LIST : detail } : { status: 422, body: { error: "'Story Points' は数値フィールドです。整数だけを渡す（例: 5）: 'abc'" } })));
   expect(unfit).toMatchObject({ code: 1, err: "backlog: 422 'Story Points' は数値フィールドです。整数だけを渡す（例: 5）: 'abc'" });
   expect((await run(["edit", "3"])).code).toBe(1);
   // an edit has nothing to wait for: --fresh there is refused, not ignored
@@ -233,7 +271,7 @@ test("edits go to the app's routes as its screen sends them; a refusal is exit 1
 });
 
 test("edit --reason (#3146): not-planned / completed go as stateReason with the close; none sends no reason; one without a close or another value is refused, nothing sent", async () => {
-  const ok = () => app((m, p) => (m === "GET" ? { body: p === "" ? LIST : { issue: { number: 3 } } } : { status: 202, body: { localId: null, operations: ["o"] } }));
+  const ok = () => app((m, p) => (m === "GET" ? { body: p === "/syncs" ? LIST : { issue: { number: 3 } } } : { status: 202, body: { localId: null, operations: ["o"] } }));
   const sent = async (argv: string[]) => {
     const r = await run(argv, ok());
     return [r.code, r.calls.filter((c) => c.method !== "GET").map((c) => c.body)];
@@ -282,7 +320,7 @@ test("BACKLOG_WORKSPACE picks a workspace without GitHub, origin unread (#2265)"
     const local = { ...SYNC, workspaceId: "ws_local", repository: "ws_local" };
     const list = { syncs: [...LIST.syncs, local], items: [] };
     const detail = { issue: { number: 1, title: "PBI 1", state: "OPEN", labels: [], milestone: null, parent: null, body: "", url: "" }, comments: [], fields: null, fetchedAt: 1, localId: null, pending: 0, sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } };
-    const fake = app((m, p) => ({ body: p === "" ? list : detail }));
+    const fake = app((m, p) => ({ body: p === "/syncs" ? list : detail }));
     const out: string[] = [];
     const io = { out: (s: string) => out.push(s), err: (s: string) => out.push(s) };
     expect(await runBacklog(["view", "1"], { BACKLOG_URL: "http://app/api/backlog", BACKLOG_WORKSPACE: "ws_local" }, io, { fetch: fake.fetch, cwd: dir })).toBe(0);
@@ -292,7 +330,7 @@ test("BACKLOG_WORKSPACE picks a workspace without GitHub, origin unread (#2265)"
     expect(fake.calls.at(-1)!.path).toBe("/1?workspaceId=ws1");
     // the records the lint and the parallel guard read
     const records = { workspaceId: "ws_local", service: "app", repository: "ws_local", project: { owner: "app", number: 0 }, fetchedAt: 1, top: [], issues: [], unread: [], pulls: [] };
-    const r = await readRecords({ BACKLOG_URL: "http://app/api/backlog", BACKLOG_WORKSPACE: "ws_local" }, { fresh: false, cwd: dir, fetch: app((m, p) => ({ body: p === "" ? list : records })).fetch });
+    const r = await readRecords({ BACKLOG_URL: "http://app/api/backlog", BACKLOG_WORKSPACE: "ws_local" }, { fresh: false, cwd: dir, fetch: app((m, p) => ({ body: p === "/syncs" ? list : records })).fetch });
     expect([r.workspaceId, r.service]).toEqual(["ws_local", "app"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });

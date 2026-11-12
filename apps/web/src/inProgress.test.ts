@@ -4,7 +4,7 @@ import { activeTaskLine, ago, autoByWorkspace, inProgressState, lastTaskLine, re
 
 const item = (over: Partial<BacklogItem>): BacklogItem => ({
   number: 1, title: "t", url: "u", type: "pbi", stage: "in-progress", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z",
-  tasks: { total: 3, done: 1, doneAt: null }, decision: null, activeTaskId: null, projectStatus: "In progress", lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, flow: false, waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
+  tasks: { total: 3, done: 1, doneAt: null }, decision: null, activeTaskId: null, projectStatus: "In progress", lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, flow: false, waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
 const last = (status: NonNullable<BacklogItem["lastTask"]>["status"]) => ({ id: "task_1", status, updatedAt: 0 });
 
@@ -44,6 +44,12 @@ test("ago: minutes, hours, days", () => {
 
 const wait = (number: number, kind: "issue" | "pr", open: boolean | null, reason: "overlap" | "prerequisite" = "prerequisite", pbi: number | null = null) =>
   ({ number, kind, open, state: open === null ? ("missing" as const) : open ? ("pending" as const) : ("met" as const), reason, pbi: pbi === null ? null : { number: pbi, title: null } });
+
+test("waitText: a date not passed is a wait with the date in the condition; passed, it adds nothing (#4616)", () => {
+  const at = "2026-11-20T09:00:00+09:00";
+  expect(waitText(item({ waits: [], waitsAt: "2026-10-01T00:00:00Z", waitsUntil: { at, met: false } }), true)).toEqual({ label: "待ち", done: false, cond: `期日（${at}）を過ぎたら`, next: "待ちが解けたら再開" });
+  expect(waitText(item({ waits: [], waitsAt: "2026-10-01T00:00:00Z", waitsUntil: { at, met: true } }), true)).toMatchObject({ label: "待ちが解けた", done: true, cond: "" });
+});
 
 test("waitText: nothing / one open / all closed / one not read; the condition by reason; whether backlog-next goes on by itself", () => {
   expect(waitText(item({}), true)).toBeNull();

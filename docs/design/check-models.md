@@ -1,18 +1,18 @@
 # check-models — noticing when the model lists fall behind the CLIs
 
-PBI #248. The model choices in the UI (the list saved on the settings screen's モデルの選択肢, PBI #1400; a runner never saved there offers the bundled `CLAUDE_MODELS` in `packages/adapters/claude/src/index.ts` / `CODEX_MODELS` in `packages/adapters/codex/src/index.ts`) and the price table (`packages/core/config/pricing.json`, with rows entered on the settings screen's モデルの価格 on top, PBI #1402) are kept by hand (PBI #155: Switchboard holds no API key, so it cannot ask the vendors for a model list). When a new model ships, the lists stay behind until someone notices — on 2026-09-23 that someone was the user (#247). `scripts/check-models.ts` notices first, and a schedule turns what it finds into a request Issue.
+The model choices in the UI (the list saved on the settings screen's `モデルの選択肢`; a runner never saved there offers the bundled `CLAUDE_MODELS` in `packages/adapters/claude/src/index.ts` / `CODEX_MODELS` in `packages/adapters/codex/src/index.ts`) and the price table (`packages/core/config/pricing.json`, with rows entered on the settings screen's `モデルの価格` on top) are kept by hand (Switchboard holds no API key, so it cannot ask the vendors for a model list). When a new model ships, the lists stay behind until a person notices. `scripts/check-models.ts` notices first, and a schedule turns what it finds into a request Issue.
 
 ## What it reads
 
 The model tables come from what the installed CLIs carry locally — no vendor API, no API key, no network. The one read over the network is the version check (last item), against the public npm registry, still with no key:
 
-- **claude**: the model table embedded in the executable (`Bun.which("claude")`, resolved to the real file). Its entries look like `{id:"claude-opus-5-5",family:"opus",display_name:"Opus 5.5",…}`; the file (about 240 MB) is scanned chunk by chunk, never read into one string (that got the script OOM-killed on a 3.8 GB host).
+- **claude**: the model table embedded in the executable (`Bun.which("claude")`, resolved to the real file). Its entries look like `{id:"claude-opus-5-5",family:"opus",display_name:"Opus 5.5",…}`; the file (about 240 MB) is scanned chunk by chunk, never read into one string (reading it whole can exhaust memory on a small host).
 - **codex**: `codex debug models --bundled`, the table shipped in the binary. Without `--bundled` codex refreshes the list over the network with the ChatGPT login, so the flag is always given. Only `visibility: "list"` entries count (`"hide"` ones are internal).
-- The two table readers live in `packages/core/src/model-catalog.ts` (since 2026-11-04): this script and the settings screen's 「CLI の表を読む」 (GET `/api/settings/model-candidates`, read only when pressed — never at boot or on a timer) call the same functions.
-- **the model choices** as the daemon offers them: the list saved on the settings screen, from `switchboard.db`'s settings row (read-only; the same `Settings` schema the daemon parses), else the bundled list of that runner; and from the same row the 載せない list (`hiddenModels`), else `SHIPPED_HIDDEN_MODELS`.
-- **the price table** as the daemon layers it: the rows saved on the settings screen's モデルの価格 (the settings row's `prices`, PBI #1402) over `pricing.json` — `~/.switchboard/pricing.json` (or `$SWITCHBOARD_HOME/pricing.json`) first, then the bundled one.
+- The two table readers live in `packages/core/src/model-catalog.ts`: this script and the settings screen's `CLI の表を読む` (GET `/api/settings/model-candidates`, read only when pressed — never at boot or on a timer) call the same functions.
+- **the model choices** as the daemon offers them: the list saved on the settings screen, from `switchboard.db`'s settings row (read-only; the same `Settings` schema the daemon parses), else the bundled list of that runner; and from the same row the `載せない` list (`hiddenModels`), else `SHIPPED_HIDDEN_MODELS`.
+- **the price table** as the daemon layers it: the rows saved on the settings screen's `モデルの価格` (the settings row's `prices`) over `pricing.json` — `~/.switchboard/pricing.json` (or `$SWITCHBOARD_HOME/pricing.json`) first, then the bundled one.
 - **the ledger** in `switchboard.db`, read-only: the claude / codex model names recorded as `source = 'unpriced'` that the price table still does not price.
-- **the CLIs' versions** (#1273, request #1271): `claude --version` / `codex --version` against the npm registry's `latest` of `@anthropic-ai/claude-code` / `@openai/codex` (`PACKAGES`; one GET per runner, 10 s, no key). This is the one read that uses the network: an old CLI carries an old table, so a new model looks like "no drift" until someone notices — on 2026-10-07 that someone was the user again (#1071, Haiku 5.5, while the host's CLI sat at 2.1.289 with auto-update off). The script never updates a CLI itself: `scripts/update-clis.ts` ([cli-update.md](cli-update.md)) runs first in the same schedule, so this read sees the updated version; a CLI still behind here means the update was rolled back or failed. A CLI not on PATH is skipped here (the table line already says so); the registry not answering is reported, not counted.
+- **the CLIs' versions**: `claude --version` / `codex --version` against the npm registry's `latest` of `@anthropic-ai/claude-code` / `@openai/codex` (`PACKAGES`; one GET per runner, 10 s, no key). This is the one read that uses the network: an old CLI carries an old table, so a new model looks like "no drift" until someone notices — check the version with `claude --version` (or `codex --version`) and compare it with the registry's `latest`. The script never updates a CLI itself: `scripts/update-clis.ts` ([cli-update.md](cli-update.md)) runs first in the same schedule, so this read sees the updated version; a CLI still behind here means the update was rolled back or failed. A CLI not on PATH is skipped here (the table line already says so); the registry not answering is reported, not counted.
 
 ## What it reports
 
@@ -26,7 +26,7 @@ unpriced (ledger) new / unknown  past unpriced names: in the CLI's table (the pr
 <runner> version / latest: 分からない（<why>）  `--version` failed / the registry could not be read (report only; exit unchanged)
 ```
 
-"New in the CLI" is measured against the ids a person has looked at and decided to list or leave out — the model choices as above, plus the settings row's `hiddenModels` (the 載せない list of モデルの選択肢), else `SHIPPED_HIDDEN_MODELS` in `packages/core/src/model-catalog.ts` (the ids the bundled list leaves out) — not against "the newest of each family": some models are left out on purpose (`gpt-5.6-terra`), and they would otherwise be reported every day. The ledger line is report only: past rows cannot be fixed.
+"New in the CLI" is measured against the ids a person has looked at and decided to list or leave out — the model choices as above, plus the settings row's `hiddenModels` (the `載せない` list of `モデルの選択肢`), else `SHIPPED_HIDDEN_MODELS` in `packages/core/src/model-catalog.ts` (the ids the bundled list leaves out) — not against "the newest of each family": some models are left out on purpose (`gpt-5.6-terra`), and they would otherwise be reported every day. The ledger line is report only: past rows cannot be fixed.
 
 Exit 0 = no drift / 1 = drift / 2 = cannot tell (a CLI is not installed, or its table read as empty — the CLI's format changed and the script needs fixing). The same meaning as `scripts/merge-gate.ts`.
 
@@ -41,18 +41,18 @@ It runs from the existing scheduler as an ordinary prompt schedule — no new sc
 
 The schedule's time, runner, budget and exact prompt live in the app (the Schedules screen, `GET /api/schedules`), not here.
 
-Registering it is a call to the running daemon, so it is done with the user's OK (PBI #248), not by the PR.
+Registering it is a call to the running daemon, so it is done with the user's OK (decided 2026-10-01), not by the PR.
 
 ### Why not `bun test` / CI
 
-The CLIs are not installed in GitHub Actions, so CI cannot run the check; on the host, a failing test would stop every unrelated PR's local CI and merge whenever a CLI auto-updates. So the check runs on a schedule (PBI #248): late by at most one firing, and nothing else stops.
+The CLIs are not installed in GitHub Actions, so CI cannot run the check; on the host, a failing test would stop every unrelated PR's local CI and merge whenever a CLI auto-updates. So the check runs on a schedule (decided 2026-10-01): late by at most one firing, and nothing else stops.
 
 ## When a request arrives
 
-- `stale`: remove or fix the old / mistyped id in モデルの選択肢 on the 設定 tab (no PR: the next run reads the saved list).
-- `unseen`: press 「CLI の表を読む」 in モデルの選択肢 on the 設定 tab and choose 足す or 載せない for each candidate (no PR: the next run reads the saved list and 載せない list).
-- `価格表未整備`: enter the official price in モデルの価格 on the 設定 tab (no PR: the next run reads the saved prices).
+- `stale`: remove or fix the old / mistyped id in `モデルの選択肢` on the `設定` tab (no PR: the next run reads the saved list).
+- `unseen`: press `CLI の表を読む` in `モデルの選択肢` on the `設定` tab and choose `足す` or `載せない` for each candidate (no PR: the next run reads the saved list and `載せない` list).
+- `価格表未整備`: enter the official price in `モデルの価格` on the `設定` tab (no PR: the next run reads the saved prices).
 - `outdated`: only appears when update-clis rolled back, failed, or could not tell (exit 2: the registry or the rollback link was unreadable, so it changed nothing) — look for the `CLI 更新の失敗` request first (cli-update.md); with none, read the schedule's update-clis lines. Otherwise update the CLI by hand. The request's title carries the installed version only, so one open request stands while the CLI stays, whatever npm publishes meanwhile. The next run says `version: …（最新）` and, if the new table carries a model nobody reviewed, `unseen` follows.
 - Close the request once it is fixed (a `stale`, an `unseen` or a `価格表未整備` on the settings screen); the next run confirms (exit 0). An `outdated` request has no PR: update the CLI, let the next run print `version: …（最新）`, then close the request by hand (the script never closes one).
 
-The model list is a setting since PBI #1400 (request #601); offering a model the installed CLI carries as a candidate on the settings screen, and the 載せない list, since 2026-11-04.
+The model list is a setting since 2026-10-27; offering a model the installed CLI carries as a candidate on the settings screen, and the `載せない` list, since 2026-11-04.

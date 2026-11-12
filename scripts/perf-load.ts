@@ -73,7 +73,7 @@ export function loadGh(issues: number, opts: { generation: number }): GhRunner {
     const query = args.find((a) => a.startsWith("query="))?.slice("query=".length) ?? "";
     const value = (name: string) => args.find((a) => a.startsWith(`${name}=`))?.slice(name.length + 1);
     if (query.includes("rateLimit")) return ok({ rateLimit: { limit: 5000, remaining: 4000, resetAt: new Date(Date.now() + 30 * 60_000).toISOString() } });
-    if (query.includes("projectV2(number:$p){ id }")) return ok({ repositoryOwner: { projectV2: { id: "PVT_load" } } });
+    if (query.includes("ProjectV2FieldCommon{ name dataType }")) return ok({ repositoryOwner: { projectV2: { id: "PVT_load" } } });
     if (query.includes("pullRequests(")) return ok({ repository: { pullRequests: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } });
     if (query.includes("states:OPEN")) return ok({ repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } });
     if (query.includes("states:[OPEN,CLOSED]")) {

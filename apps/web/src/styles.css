@@ -91,6 +91,16 @@ h5 { margin: 0 0 6px; font: 500 10px/1.2 var(--mono); letter-spacing: .1em; text
 .row.link { background: transparent; border-left: 0; border-right: 0; border-top: 0; border-radius: 0; text-align: left; padding: 7px 0; }
 .row .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row .m { font-family: var(--mono); font-size: 10.5px; color: var(--ink3); white-space: nowrap; }
+.row.stuck { background: var(--amber-soft); border-radius: 6px; padding: 6px 8px; margin-bottom: 4px; }
+.row.stuck .t, .main .row.stuck:not(.head) > .t { white-space: normal; display: block; -webkit-line-clamp: unset; overflow-wrap: anywhere; }
+.row.stuck .why { font-size: 12px; color: var(--ink3); }
+/* 要対応 (#4522): a group = the first Task's row, and under it the same-cause line with its 確認済み; 待ち folds below */
+.attn-group { border-bottom: 1px solid var(--line2); }
+.attn-group:last-child { border-bottom: 0; }
+.attn-group > .row { border-bottom: 0; }
+.attn-group > .row.sub { padding-top: 0; padding-bottom: 6px; }
+.waiting-folded { margin-top: 6px; }
+.waiting-folded > summary { cursor: pointer; font-size: 12px; color: var(--ink2); overflow-wrap: anywhere; }
 .bigno { font-family: var(--mono); font-size: 24px; font-variant-numeric: tabular-nums; line-height: 1.1; }
 .bigno small { font-size: 11px; color: var(--ink3); margin-left: 8px; font-family: var(--sans); }
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12px; }
@@ -300,10 +310,8 @@ button.copy { font: 400 10px/1.4 var(--mono); padding: 2px 6px; }
 .transcript[hidden], .terminal-pane[hidden] { display: none; }
 .terminal { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .terminal-host { flex: 1; min-height: 240px; background: #000; border-radius: 4px; padding: 6px; overflow: hidden; }
-.diff-file { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; border-bottom: 1px solid var(--line2); padding: 2px 0; }
+.diff-file { display: grid; grid-template-columns: 1fr; align-items: center; gap: 8px; border-bottom: 1px solid var(--line2); padding: 2px 0; }
 .diff-file .diff { grid-column: 1 / -1; white-space: pre; overflow: auto; max-height: 360px; font-size: 11.5px; background: var(--bg2); padding: 8px; border-radius: 4px; margin: 4px 0 8px; }
-.editor-links { display: flex; gap: 4px; }
-.editor-links .btn { padding: 2px 8px; font-size: 11px; }
 
 .main.ledger { display: flex; flex-direction: column; gap: 12px; max-width: 980px; }
 .ledger-head { display: flex; gap: 28px; flex-wrap: wrap; }
@@ -538,6 +546,15 @@ label.toggle.off { opacity: .45; cursor: default; }
 .ask-quick-row { display: flex; margin-top: 6px; }
 .ask-quick-row button { min-height: 44px; max-width: 100%; }
 .ask-batch-tasks { list-style: none; margin: 8px 0; padding: 0; }
+/* the security merge checks (#2778): a row per PR (checkbox, PR and Task and reasons, then the size and the wait); on a phone the size and wait go under */
+.ask-merge-ws h6 { margin: 10px 0 4px; font-size: 13px; overflow-wrap: anywhere; }
+.ask-merge-row { border-top: 1px solid var(--line); padding: 6px 0; }
+.ask-merge-row label { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: flex-start; }
+.ask-merge-main { display: flex; flex-direction: column; flex: 1 1 14em; min-width: 0; overflow-wrap: anywhere; }
+.ask-merge-main button.link { text-align: left; padding: 0; min-height: 0; overflow-wrap: anywhere; }
+.ask-merge-reason { font-family: ui-monospace, monospace; font-size: 12px; color: var(--ink2); }
+.ask-merge-meta { font-size: 12px; color: var(--ink2); margin-left: auto; white-space: nowrap; }
+.ask-merge-changed { margin-top: 2px; overflow-wrap: anywhere; }
 .ask-workspace-head { margin: 8px 0 4px; font-size: 13px; overflow-wrap: anywhere; }
 .ask-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
 .ask-tags .badge { background: var(--line); color: var(--ink2); font-family: inherit; font-weight: 500; }

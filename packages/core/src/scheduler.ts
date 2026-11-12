@@ -6,6 +6,7 @@ import type { ScanSummary } from "./secretscan.ts";
 import type { TaskManager } from "./tasks.ts";
 import { collectProvenance } from "./provenance.ts";
 import { isWorking } from "./task-status.ts";
+import { stuckSchedule } from "./stops.ts";
 
 /**
  * Scheduler (#20): DAK-style nightly jobs started from Switchboard. A schedule is a cron expression plus everything a
@@ -62,7 +63,7 @@ export class Scheduler {
     /** Claude's 7-day utilization at or above this and an insights or ui-layers firing is skipped (#1838, #3353): the backlog's `backlogQuotaLimit`. */
     private quotaLimit: () => number = () => 0.8,
     /** 上限のときの代わり (#834): the runner a prompt schedule's Task starts on, and the status line when it is another. */
-    private autoRunner: (r: RunnerId) => { runner: RunnerId; note?: string } = (r) => ({ runner: r }),
+    private autoRunner: (r: RunnerId) => { runner: RunnerId; note?: string; deferUntil?: number; deferNote?: string } = (r) => ({ runner: r }),
     /** approval-window (#2046): reads the batches still waiting (判断待ち shows them as a notice, #2866) and says so, in a line. */
     private approvalWindow: (schedule: { id: string; title: string }) => Promise<string> = async () => "approval-window is not available",
     /** The budget of a schedule's Task when the schedule has none: the settings' `defaultBudgetUsd` (null = none). */
@@ -101,6 +102,7 @@ export class Scheduler {
       lastRunAt: null,
       lastTaskId: null,
       lastResult: null,
+      stuck: null,
       nextRunAt: nextRun(input.cron, new Date(this.now()))?.getTime() ?? null,
       createdAt: this.now(),
     };
@@ -153,6 +155,15 @@ export class Scheduler {
       this.note(`${s.title}: skipped (${reason}); previous run ${prev.id} is still ${prev.queuedAt !== null ? "queued" : prev.status}`);
       return null;
     }
+    // A series that keeps stopping on the same thing is not fired by the clock again until it is answered, a condition is met or a Task ends without stopping (#4479); a person's "run now" still goes. backlog-next is held per stage by stopHeld instead.
+    if (reason === "due" && s.action !== "backlog-next") {
+      const stuck = stuckSchedule(this.db, s);
+      if (stuck) {
+        this.db.updateSchedule(id, { nextRunAt: nextRun(s.cron, new Date(this.now()))?.getTime() ?? null });
+        this.note(`${s.title}: 飛ばした (${reason}): 同じ理由で ${stuck.count} 回続けて止まっている（${stuck.reason}）。答えるか条件が成立するまで発火しない`);
+        return null;
+      }
+    }
     if (s.action === "backlog-next") return this.runBacklogNext(s.id, s.title, s.cron, reason);
     if (s.action === "secret-scan") return this.runSecretScan(s.id, s.title, s.cron, reason);
     if (s.action === "approval-window") return this.runApprovalWindow(s.id, s.title, s.cron, reason);
@@ -172,7 +183,7 @@ export class Scheduler {
       }
     }
     // insights and ui-layers run on claude only; a prompt schedule's runner at its limit gives way to the fallback order, on its CLI default model (#834)
-    const { runner, note } = fixed ? { runner: "claude" as const, note: undefined } : this.autoRunner(s.runner);
+    const { runner, note, deferUntil, deferNote } = fixed ? { runner: "claude" as const, note: undefined, deferUntil: undefined, deferNote: undefined } : this.autoRunner(s.runner);
     const task = this.tasks.create({
       workspaceId: ws.id,
       cwd: ws.path,
@@ -189,6 +200,7 @@ export class Scheduler {
       shadowRunner: null,
     }, undefined, (t) => {
       if (note) this.tasks.record(t.id, { t: "status", text: note });
+      if (deferNote) this.tasks.record(t.id, { t: "status", text: deferNote });
       // Provenance (docs/design/process-kernel.md, K1), from the row just inserted; a failure to record never stops the task
       try {
         const meta = this.db.listWorkspaces().find((w) => w.kind === "meta");
@@ -196,9 +208,10 @@ export class Scheduler {
       } catch (e) {
         this.tasks.record(t.id, { t: "status", text: `由来を記録できませんでした: ${(e as Error).message ?? e}` });
       }
-    });
+    }, deferUntil === undefined ? {} : { deferUntil });
     this.db.updateSchedule(id, { lastRunAt: this.now(), lastTaskId: task.id, nextRunAt: nextRun(s.cron, new Date(this.now()))?.getTime() ?? null });
     if (note) this.note(`${s.title}: ${note}`);
+    if (deferNote) this.note(`${s.title}: ${deferNote}`);
     this.note(`${s.title}: started ${task.id} (${reason})`);
     return task;
   }

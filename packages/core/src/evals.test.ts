@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createClaudeParser } from "@switchboard/adapter-claude";
 import type { AgentEvent, EvalsListRow, EventEnvelope, StopRecord, Task } from "@switchboard/protocol";
 import { Db } from "./db.ts";
-import { AUTO_RESUME_HEAD, delegatedNote, evalRequestDraft, isAutomaticUserText, judgeHumanGap, RULES_BY, ruleMetrics, rulesEvalOf, STOP_NOTE, weekStartUtc, weeklyHumanSample } from "./evals.ts";
+import { AUTO_RESUME_HEAD, delegatedNote, evalRequestDraft, isAutomaticUserText, judgeHumanGap, personMessages, RULES_BY, ruleMetrics, rulesEvalOf, STOP_NOTE, weekStartUtc, weeklyHumanSample } from "./evals.ts";
 import { decisionsFromOtlp } from "./otel.ts";
 import { RESUME_PROMPT } from "./ratelimit.ts";
 import { STOP_RESUME_PROMPT } from "./interrupted.ts";
@@ -72,12 +72,13 @@ describe("ruleMetrics (#1218)", () => {
     );
     expect(m.userInstructions).toBe(4);
     expect(m.turns).toBe(4);
+    expect(personMessages(envelopes([user("first"), end("ok"), user(RESUME_PROMPT), user("second, ", "m1"), user("in two chunks", "m1"), user("third", "m3")]).map((e) => e.ev))).toEqual(["first", "second, in two chunks", "third"]);
   });
 
-  test("stops are counted by reason code", () => {
-    const m = ruleMetrics(envelopes([user("x"), stop("s1", "usage-limit"), stop("s2", "github-limit"), stop("s1", "usage-limit"), end("ok")]));
-    expect(m.stops).toBe(3);
-    expect(m.stopReasons).toEqual({ "usage-limit": 2, "github-limit": 1 });
+  test("stops are counted once per stop id", () => {
+    const m = ruleMetrics(envelopes([user("x"), stop("A", "depends"), stop("B", "github-limit"), stop("A", "usage-limit"), stop("A", "usage-limit"), end("ok")]));
+    expect(m.stops).toBe(2);
+    expect(m.stopReasons).toEqual({ "usage-limit": 1, "github-limit": 1 });
   });
 
   test.skipIf(skipRecordings("packages/adapters/claude/fixtures/classifier-stop.jsonl", "packages/core/fixtures/otel-classifier-stop.jsonl"))("classifier (recorded): the recorded stop counts as stopped", () => {
@@ -119,7 +120,7 @@ describe("ruleMetrics (#1218)", () => {
     expect(ruleMetrics(envelopes([user("x"), note("。…")]))).toMatchObject({ daemonStops: 1, lastCutByDaemon: false, lastEnd: null });
   });
 
-  test("delegated model (#2769): the model of the trial's note; null without one or for another status line; a rules@3 row without it reads as null", () => {
+  test("delegated model (#2769): the model of the trial's note; null without one or for another status line; a rules@3 row is counted again", () => {
     expect(ruleMetrics(envelopes([{ t: "status", text: delegatedNote("claude-sonnet-5-5") }, user("x"), end("ok")])).delegatedModel).toBe("claude-sonnet-5-5");
     expect(ruleMetrics(envelopes([user("x"), end("ok")])).delegatedModel).toBeNull();
     expect(ruleMetrics(envelopes([{ t: "status", text: "Task ごとの実装は 自分で行います" }, user("x"), end("ok")])).delegatedModel).toBeNull();
@@ -128,7 +129,22 @@ describe("ruleMetrics (#1218)", () => {
       const db = new Db(join(dir, "switchboard.db"));
       const { delegatedModel: _d, ...old } = ruleMetrics(envelopes([user("x"), end("ok")]));
       db.upsertEval({ taskId: "t1", source: "rules", by: "rules@3", rubric: null, json: { metrics: old, status: "done", outcome: "unknown", costUsd: 0, by: "rules@3", ts: 1 }, ts: 1 });
-      expect(db.evalsOf("t1").rules?.metrics.delegatedModel).toBeNull();
+      expect(db.evalsOf("t1").rules).toBeNull(); // not the current counter: counted again, not read
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an old rules@4 row is counted again", () => {
+    const dir = mkdtempSync(join(tmpdir(), "switchboard-evals-"));
+    try {
+      const db = new Db(join(dir, "switchboard.db"));
+      const metrics = ruleMetrics(envelopes([user("x"), end("ok")]));
+      db.upsertEval({ taskId: "t1", source: "rules", by: "rules@4", rubric: null, json: { metrics, status: "done", outcome: "unknown", costUsd: 0, by: "rules@4", ts: 1 }, ts: 1 });
+      expect(db.evalsOf("t1").rules).toBeNull();
+      db.upsertEval({ taskId: "t1", source: "rules", by: RULES_BY, rubric: null, json: { metrics, status: "done", outcome: "unknown", costUsd: 0, by: RULES_BY, ts: 1 }, ts: 1 });
+      expect(db.evalsOf("t1").rules?.metrics.turns).toBe(1);
       db.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -142,7 +158,7 @@ describe("ruleMetrics (#1218)", () => {
       const { daemonStops: _d, lastCutByDaemon: _l, ...old } = ruleMetrics(envelopes([user("x"), end("ok")]));
       db.upsertEval({ taskId: "t1", source: "rules", by: "rules@1", rubric: null, json: { metrics: old, status: "done", outcome: "unknown", costUsd: 0, by: "rules@1", ts: 1 }, ts: 1 });
       expect(db.evalsOf("t1").rules).toBeNull();
-      expect(RULES_BY).toBe("rules@4");
+      expect(RULES_BY).toBe("rules@5");
       db.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -154,7 +170,7 @@ describe("ruleMetrics (#1218)", () => {
     try {
       const db = new Db(join(dir, "switchboard.db"));
       const now = 1_700_000_000_000;
-      const task: Task = { id: "t1", workspaceId: null, title: "t1", runner: "claude", cwd: dir, scope: [dir], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now };
+      const task: Task = { id: "t1", workspaceId: null, title: "t1", runner: "claude", cwd: dir, scope: [dir], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now };
       db.insertTask(task);
       const events = envelopes([user("go"), { t: "tool.call", id: "a", name: "Read", input: {}, summary: "f" }, { t: "tool.result", id: "a", ok: true, summary: "" }, end("ok")]);
       const first = rulesEvalOf(task, events, { costUsd: 0.5 }, now);

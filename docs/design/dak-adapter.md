@@ -1,12 +1,12 @@
 # DAK adapter — ADK REST `/run_sse` + Workspace MCP
 
-Issue #19, proposal §3 (runner adapters) and §6 Phase 2. Decentralized-Agent-Kit's agent is a Google ADK app in a container (`agent:8000`, `adk web --a2a`). Switchboard does not run it, bundle it or speak A2A; it is an ADK REST client. Recorded fixtures (outside Git; record your own outside Git with the `runner-adapter-recording` skill): `packages/adapters/dak/fixtures/*.sse` (DAK at the time of recording, google-adk 2.x, local llama.cpp model); a deterministic stand-in for tests: `packages/adapters/adk/fixtures/fake-adk.ts`.
+Added 2026-09-06; proposal §3 (runner adapters) and §6 Phase 2. Decentralized-Agent-Kit's agent is a Google ADK app in a container (`agent:8000`, `adk web --a2a`). Switchboard does not run it, bundle it or speak A2A; it is an ADK REST client. Recorded fixtures (outside Git; record your own outside Git with the `runner-adapter-recording` skill): `packages/adapters/dak/fixtures/*.sse` (DAK at the time of recording, google-adk 2.x, local llama.cpp model); a deterministic stand-in for tests: `packages/adapters/adk/fixtures/fake-adk.ts`.
 
 ## Enabling
 
 DAK is off by default. The daemon registers the adapter only when `SWITCHBOARD_DAK_URL` is set to a non-empty value (for example `http://127.0.0.1:8000`, where `docker compose up` in the Decentralized-Agent-Kit repository serves its agent). Without it DAK is not a runner: it is absent from `/api/health` and `/api/settings` `runners`, from the startup log, and from the runner choices on Home, in Settings and in schedules (a runner already saved there, such as an existing schedule's, stays selectable for that value), and Home offers no shadow toggle (Settings keeps its toggle only while a saved shadow default of `dak` exists, so it can be switched off).
 
-DAK is one ADK server among those the daemon registers at start (`docs/design/custom-adapter.md`): the generic ADK adapter with the id `dak`, the label `DAK`, the app `dak_agent` and the artifacts starting with `tool_output_` left out. The variable is its only record. It is not copied into the list of ADK servers saved in Settings (those run as `custom:<name>`), and the reviewer switch that looks at `SWITCHBOARD_DAK_URL` keeps working as before. Like the saved servers, it is read once at start.
+DAK is one ADK server among those the daemon registers at start (`docs/design/custom-adapter.md`): the generic ADK adapter with the id `dak`, the label `DAK`, the app `dak_agent` and the artifacts starting with `tool_output_` left out. The variable is its only record. It is not copied into the list of ADK servers saved in Settings (those run as `custom:<name>`). Like the saved servers, it is read once at start.
 
 With it set, the adapter detects the agent through `/list-apps` and everything below applies as written. An unreachable URL is reported as `unavailable` and DAK stays listed but greyed out.
 
@@ -40,9 +40,9 @@ GET  /apps/dak_agent/users/switchboard/sessions/<id>/artifacts/<name>?version=<n
 
 `send()` during a stream is queued and runs as the next turn. `abort()` (and `close()` once its grace period runs out) cancels the HTTP stream (ADK has no cancel API) and drops open confirmations as denied. Closing the stream is itself the cancel: ADK logs `Root node dak_agent was cancelled.`, LiteLLM's request to the model server is dropped, and the model output of that turn is not saved to the session (observed with llama-server: `srv stop: cancel task`).
 
-**No permission mode** (#58): the adapter reports `permissionModes: []`. What gets confirmed is decided on the DAK side (`require_confirmation` on its MCP toolsets, `adk_request_confirmation`) and, for `exec.run`, by Switchboard's own Workspace MCP policy (`mcp.yaml`); every confirmation still reaches the UI. This is the same behavior as DAK's own `adk web`, so there is nothing to align with a terminal default.
+**No permission mode** (2026-09-07): the adapter reports `permissionModes: []`. What gets confirmed is decided on the DAK side (`require_confirmation` on its MCP toolsets, `adk_request_confirmation`) and, for `exec.run`, by Switchboard's own Workspace MCP policy (`mcp.yaml`); every confirmation still reaches the UI. This is the same behavior as DAK's own `adk web`, so there is nothing to align with a terminal default.
 
-### Long silent turns (#121)
+### Long silent turns (2026-09-14)
 
 The `/run_sse` stream can be silent for many minutes while the turn is healthy. Thought tokens and reply text stream as `partial` events, but ADK emits **nothing** while the model writes function-call arguments. With a local model that is slow and long: Qwen3.8-27B (IQ3_XXS) on an RTX 2080 Ti generates at ~6.8 tok/s, so a 2,400-token tool call (a document passed to a write tool) is six minutes of silence.
 
@@ -55,14 +55,14 @@ The `/run_sse` fetch therefore sets `timeout: streamIdleTimeoutMs`, default **2 
 DAK's agent has no file tools; `agent_config.yaml` lists MCP servers it discovers at boot (`mcp_servers:` → `McpToolset`, `require_confirmation: true`, so every tool call through it is a confirmation → `permission.ask` here). To let it touch the repository of a task:
 
 1. Run Switchboard reachable from Docker: `SWITCHBOARD_HOST=0.0.0.0 SWITCHBOARD_PUBLIC_URL=http://host.docker.internal:47831 bun run core` — off-loopback the local API needs the token (`~/.switchboard/token`), the web UI asks for it once; `/mcp/<taskId>` always needs its per-task token. On Linux add `extra_hosts: ["host.docker.internal:host-gateway"]` to the agent service.
-2. Issue the task's endpoint (Brief → Workspace MCP → エンドポイントを発行) and put it in DAK's `agent/agent_config.yaml`, with the token in the URL rather than in `headers:`:
+2. Issue the task's endpoint (Brief → Workspace MCP → `エンドポイントを発行`) and put it in DAK's `agent/agent_config.yaml`, with the token in the URL rather than in `headers:`:
    ```yaml
    mcp_servers:
      - name: "switchboard"
        url: "http://host.docker.internal:47831/mcp/<taskId>?token=<token>"
        type: "http"
    ```
-   then restart the agent container. The token dies with the task (or on 失効して再発行); the URL is scope-bound, so a stale entry is harmless (401).
+   then restart the agent container. The token dies with the task (or on `失効して再発行`); the URL is scope-bound, so a stale entry is harmless (401).
 
    **`headers:` on this entry is a no-op with the pinned DAK version, not a supported alternative.** google-adk's own
    `StreamableHTTPConnectionParams`/`SseConnectionParams` do accept a `headers` dict and forward it — but DAK's own
@@ -89,10 +89,10 @@ docker run --rm curlimages/curl -s -X POST "http://host.docker.internal:47831/mc
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}'
 ```
 
-## Files (#124)
+## Files (2026-10-06)
 
 **In.** A turn's attachments go out as extra `new_message.parts` after the text part, one each, because DAK runs in a container and cannot open the paths in the prompt: text files (`text/*`, JSON, YAML, SVG) as `{text: "--- <name> ---\n<content>"}`, everything else (images, PDF) as `{inline_data: {mime_type, data: <base64>}}`. A file that cannot be read fails the turn before it is sent. Checked against ADK (google-adk 2.8.0, DAK's fake LLM, 2026-10-01): the model request carries the text as `text` and an image as `image_url` (`data:<mime>;base64,…`), so a model that takes images sees it. Whether a given model understands the image was not checked (the model is the user's choice). `fs.read` of an image through Workspace MCP (`workspace-mcp.md`) is not an image path: ADK hands the tool result to the model as a JSON string, so the model does not see it as an image.
 
 **Out.** `inlineData` parts of a final event (a partial one repeats in the final) and the `artifactDelta` entries of an event are written into the task's attachment directory under their own name (never over a file there: `name-2.ext`, …; an ADK name cannot leave the directory) and emitted as `artifact(file)`; core registers each regular file there as an attachment (a symlink is refused). One that cannot be had (a fetch refused, a fetched artifact without bytes, a write that failed) is a `status` and the others still come (an `inlineData` part without data is skipped, with no status); the turn's abort stops a fetch in flight. Without an attachment directory nothing is written.
 
-**What DAK makes today.** Only DAK's harness saves artifacts, and only to spill a long tool output (`tool_output_*.txt`); no tool hands a file to the person. Those are DAK's own, so the adapter does not fetch a name starting with `tool_output_` (decision A, #124, 2026-10-01): today nothing arrives and nothing noisy shows. When DAK gets a tool that gives the person a file, it arrives through `artifactDelta` with no change here. Where DAK makes a file the person can use today is Workspace MCP `fs.write`, staged as a diff for the person to apply.
+**What DAK makes today.** Only DAK's harness saves artifacts, and only to spill a long tool output (`tool_output_*.txt`); no tool hands a file to the person. Those are DAK's own, so the adapter does not fetch a name starting with `tool_output_` (decision A, 2026-10-01): today nothing arrives and nothing noisy shows. When DAK gets a tool that gives the person a file, it arrives through `artifactDelta` with no change here. Where DAK makes a file the person can use today is Workspace MCP `fs.write`, staged as a diff for the person to apply.

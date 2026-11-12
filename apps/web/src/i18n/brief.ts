@@ -120,14 +120,17 @@ export const brief = msgs({
   resumeNowDiskTitle: { ja: "待たずに今すぐ「続きを」と送る。空きが戻っていなければまた止まり、空き待ちに戻ります", en: "Sends \"continue\" now without waiting. If space is not back yet, it stops again and goes back to waiting for space" },
   resumeNowGithubTitle: { ja: "待たずに今すぐ「続きを」と送る。GitHub の枠がまだ戻っていなければコマンドがまた上限に当たり、次の時刻で待ち直します", en: "Sends \"continue\" now without waiting. If GitHub's quota is not back yet, the commands hit the limit again and it waits for the next time" },
   resumeNowLimitTitle: { ja: "待たずに今すぐ「続きを」と送る。枠がまだ戻っていなければまた止まり、次の時刻で待ち直します", en: "Sends \"continue\" now without waiting. If the quota is not back yet, it stops again and waits for the next time" },
+  startNotYet: { ja: "ランナーの使用上限の直前のため、まだ始めていません。", en: "The runner is close to its usage limit, so it has not started yet. " },
+  startAuto: { ja: " に始めます。", en: ": starts then." },
+  startAutoOff: { ja: " 以降に始められます。自動再開は OFF（Home のランナー設定で ON にできます）。", en: ": it can start from then on. Auto-resume is OFF (turn it ON in the runner settings on Home)." },
+  startAutoUnknown: { ja: " 以降に始められます。自動再開の設定はデーモンに接続すると表示されます。", en: ": it can start from then on. The auto-resume setting shows once connected to the daemon." },
+  resumeNowStartTitle: { ja: "待たずに今すぐ最初のターンを始める。枠がまだ戻っていなければまた止まり、次の時刻で待ち直します", en: "Starts the first turn now without waiting. If the quota is not back yet, it stops again and waits for the next time" },
   resumeNow: { ja: "今すぐ再開", en: "Resume now" },
   cancelResumeTitle: { ja: "自動再開をやめる。返信すればいつでも再開できます", en: "Stops the auto-resume. A reply resumes it any time" },
   cancelResume: { ja: "取り消す", en: "Cancel" },
 
   // Brief.tsx: actions
   actionsHeading: { ja: "操作", en: "Actions" },
-  openInVsCode: { ja: "VS Code で開く", en: "Open in VS Code" },
-  openInEditor: { ja: "エディタで開く", en: "Open in editor" },
   cloudActions: { ja: "Cloudの続行・設定・停止は公式 Web で操作してください。ローカル中断ではCloud作業を止められません。", en: "Continue, configure or stop Cloud work in the official web app. A local abort cannot stop Cloud work." },
   diffTabHint: { ja: "変更したファイルは「差分」タブに。", en: "Changed files are in the Diff tab." },
 

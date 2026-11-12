@@ -46,6 +46,11 @@ function readRepository(db: Db, ws: Pick<Workspace, "id">): Repository | null {
   return { key, issues, ends };
 }
 
+/** Reads every workspace's stored records once, so the first `interventionView` after a start finds the Db's copy filled. The result is dropped. */
+export function warmInterventions(db: Db, workspaces: Workspace[]): void {
+  for (const ws of workspaces) readRepository(db, ws);
+}
+
 /** The Issue a Task worked on: the stage Task's, or the `#N ` its title starts with. */
 const issueOfTask = (t: { title: string; stageIssue: number | null }): number | null => t.stageIssue ?? (/^#(\d+) /.exec(t.title)?.[1] ? Number(/^#(\d+) /.exec(t.title)![1]) : null);
 

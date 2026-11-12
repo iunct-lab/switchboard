@@ -1,13 +1,19 @@
 // test-reads: apps/web/src/scheduleActions.ts apps/web/src/scheduleResult.ts apps/web/src/scheduleEdit.ts apps/web/src/i18n.ts apps/web/src/i18n/backlog.ts
 import { describe, expect, test } from "bun:test";
 import type { BacklogIssueDetail, BacklogSyncInfo } from "@switchboard/protocol";
-import { backlogHeading, createWord, decisionQuestion, syncSummary, draftKey, heldIssueText, issueHref, savedWords, editOf, formAfterRead, formOf, githubSyncText, heldEditName, labelList, loadDraft, loadNewIssueDraft, PROJECT_SETUP_DOC, rebaseForm, syncLine, valueText, workspaceErrorGuide } from "./backlogSync.ts";
+import { backlogHeading, createWord, decisionQuestion, syncSummary, draftKey, heldIssueText, issueHref, savedWords, editOf, formAfterRead, formOf, githubSyncText, heldEditName, labelList, loadDraft, loadNewIssueDraft, PROJECT_SETUP_DOC, type FormBase, rebaseForm, syncLine, valueText, workspaceErrorGuide } from "./backlogSync.ts";
 
 const fmt = (ms: number) => `t${ms}`;
 const info = (over: Partial<BacklogSyncInfo>): BacklogSyncInfo => ({ state: "synced", reason: null, lastSuccessfulSync: 1000, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A", ...over });
-const detail = (over: Partial<BacklogIssueDetail["issue"]> = {}, fields: BacklogIssueDetail["fields"] = { Status: "Ready", "Story Points": 3, Priority: null }): Pick<BacklogIssueDetail, "issue" | "fields"> => ({
+const PROJECT_FIELDS: FormBase["projectFields"] = [
+  { name: "Status", dataType: "SINGLE_SELECT", options: ["Backlog", "Ready", "Done"] },
+  { name: "Story Points", dataType: "NUMBER", options: [] },
+  { name: "Priority", dataType: "SINGLE_SELECT", options: ["P0", "P1", "P2"] },
+];
+const detail = (over: Partial<BacklogIssueDetail["issue"]> = {}, fields: BacklogIssueDetail["fields"] = { Status: "Ready", "Story Points": 3, Priority: null }): FormBase => ({
   issue: { number: 7, title: "題", url: "u", state: "OPEN", stateReason: null, body: "本文", labels: ["type:pbi", "P1"], milestone: null, parent: null, subIssues: [], createdAt: "", updatedAt: "", ...over },
   fields,
+  projectFields: PROJECT_FIELDS,
 });
 
 describe("syncLine", () => {
@@ -46,13 +52,26 @@ describe("editOf", () => {
     const d = detail({ milestone: "Phase 1", parent: 3 });
     expect(editOf(d, { ...formOf(d), milestone: "", parent: "" }).edit).toEqual({ milestone: null, parent: null });
   });
-  test("an Issue not in the Project has no field to edit", () => {
-    expect(formOf(detail({}, null)).fields).toEqual({});
-  });
-  test("the Project's own Title is not a field to edit (it is the Issue's title; GitHub refuses writing it)", () => {
+  test("project fields: laid out by the definition, empty ones too; what it lacks (Title) is not there", () => {
     const d = detail({}, { Title: "題", Status: "Ready" });
-    expect(formOf(d).fields).toEqual({ Status: "Ready" });
+    expect(formOf(d).fields).toEqual({ Status: "Ready", "Story Points": "", Priority: "" });
     expect(editOf(d, { ...formOf(d), title: "新しい題" }).edit).toEqual({ title: "新しい題" });
+    // not in a Project: the same fields, all empty
+    expect(formOf(detail({}, null)).fields).toEqual({ Status: "", "Story Points": "", Priority: "" });
+  });
+  test("project fields: a NUMBER that is not whole digits is an error and sends nothing; digits are a number", () => {
+    const d = detail({}, { Status: "Ready" });
+    for (const bad of ["abc", "1.5", "-1", "3 pts"])
+      expect(editOf(d, { ...formOf(d), fields: { ...formOf(d).fields, "Story Points": bad } })).toEqual({ edit: null, error: "「Story Points」は数値（整数）で入力してください" });
+    expect(editOf(d, { ...formOf(d), fields: { ...formOf(d).fields, "Story Points": " 5 " } }).edit).toEqual({ fields: { "Story Points": 5 } });
+    const had = detail({}, { "Story Points": 3 });
+    expect(editOf(had, { ...formOf(had), fields: { ...formOf(had).fields, "Story Points": "" } }).edit).toEqual({ fields: { "Story Points": null } });
+  });
+  test("project fields: a single select sends the chosen option as text, and none as null", () => {
+    const d = detail({}, null);
+    expect(editOf(d, { ...formOf(d), fields: { ...formOf(d).fields, Priority: "P1" } }).edit).toEqual({ fields: { Priority: "P1" } });
+    const had = detail({}, { Priority: "P0" });
+    expect(editOf(had, { ...formOf(had), fields: { ...formOf(had).fields, Priority: "" } }).edit).toEqual({ fields: { Priority: null } });
   });
 });
 
@@ -65,6 +84,13 @@ describe("drafts and values", () => {
     expect(loadDraft(store, "bad")).toBeNull();
     expect(loadDraft(store, "formOnly")).toBeNull();
     expect(loadDraft(store, "none")).toBeNull();
+  });
+  test("a draft kept before the form came from the Project's definitions keeps its edits", () => {
+    const d = detail({}, { Priority: "P1", Title: "t" });
+    const old = { form: { ...formOf(d), fields: { Priority: "P0" } }, base: { issue: d.issue, fields: d.fields } };
+    const saved = loadDraft({ getItem: () => JSON.stringify(old) }, "k");
+    expect(saved?.form.fields).toEqual({ Priority: "P0" });
+    expect(formAfterRead(null, saved, d).form.fields).toEqual({ ...formOf(d).fields, Priority: "P0" });
   });
   test("a new Issue's draft keeps the kind chosen; one without a kind is a request", () => {
     const store = { getItem: (k: string) => ({ pbi: JSON.stringify({ title: "t", body: "b", kind: "type:pbi" }), old: JSON.stringify({ title: "t", body: "b" }), bad: "{" })[k] ?? null };
@@ -96,7 +122,7 @@ describe("rebaseForm", () => {
     const before = detail({}, { Status: "Ready", Priority: "P1" });
     const after = detail({}, { Status: "Done", Priority: "P1" });
     const typed = { ...formOf(before), fields: { Status: "Ready", Priority: "P0" } };
-    expect(rebaseForm(before, typed, after).fields).toEqual({ Status: "Done", Priority: "P0" });
+    expect(rebaseForm(before, typed, after).fields).toEqual({ Status: "Done", "Story Points": "", Priority: "P0" });
   });
 });
 

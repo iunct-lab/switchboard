@@ -350,6 +350,31 @@ test("lint --no-project does not resolve a missing Project URL", async () => {
   expect(await main(["lint", "--no-project", "--config", path], gh, () => {}, () => {}, Bun.sleep, { ...process.env, BACKLOG_URL: undefined })).toBe(0);
 });
 
+test("lint names another workspace by the app's stored values and checks （リリース）on an Issue against that repository (#4335)", async () => {
+  const pbi = "## ユーザーストーリー\nx\n## 到達点 / 受け入れ条件\n- [ ] 1. x\n## スコープ外\nx\n## 元要望\n#1（x）\n\n**Story Points**: 5\n";
+  const task = "## 親 PBI\n#2\n**前提**: #7（リリース）\n## やること\nx\n## 手順\nx\n## 検証\nx\n## 完了条件\nx\n";
+  const issue = { state: "OPEN", stateReason: null, updatedAt: "", parent: null, subIssues: [] as number[] };
+  const records = {
+    workspaceId: "ws_other", service: "github", repository: "acme/other", project: { owner: "acme", number: 1 }, fetchedAt: 1, unread: [], pulls: [], top: [], comments: [],
+    issues: [
+      { ...issue, number: 2, title: "PBI: x", body: pbi, labels: ["type:pbi"], subIssues: [3], fields: { Status: "Ready", Area: "one", Kind: "bug", Phase: "Phase 0", Priority: "P1", "Story Points": 5 } },
+      { ...issue, number: 3, title: "Task: x", body: task, labels: ["type:task"], parent: 2, fields: { Status: "Backlog" } },
+    ],
+  };
+  const sync = { workspaceId: "ws_other", repository: "acme/other", syncedAt: 1, sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } };
+  const server = Bun.serve({ port: 0, fetch: (req) => Response.json(new URL(req.url).pathname.endsWith("/records") ? records : req.method === "POST" ? {} : { syncs: [sync], items: [] }) });
+  try {
+    const env = { ...process.env, BACKLOG_URL: `http://127.0.0.1:${server.port}/api/backlog`, BACKLOG_WORKSPACE: "ws_other", BACKLOG_TOKEN_FILE: undefined, GH_REPO: undefined };
+    const out: string[] = [];
+    const gh = fakeGh([() => ({ number: 7 })]);
+    expect(await main(["lint", "--fresh", "--config", config], gh, (s) => out.push(s), () => {}, async () => {}, env)).toBe(1);
+    expect(out.join("\n")).toContain("#3: **前提**: の #7 は Issue なので（リリース）は付けられない");
+    expect(gh.calls.map((c) => (c.kind === "api" ? c.path : c.kind))).toEqual(["repos/acme/other/issues/7"]);
+  } finally {
+    server.stop(true);
+  }
+});
+
 test("lint without ops.config.json checks a workspace without GitHub with the template's choices (#2361)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ops-kit.noconfig."));
   const pbi = "## ユーザーストーリー\nx\n## 到達点 / 受け入れ条件\n- [ ] 1. x\n## スコープ外\nx\n## 元要望\n#1（x）\n\n**Story Points**: 5\n";
@@ -391,7 +416,7 @@ describe("set / triage with BACKLOG_URL (#2694)", () => {
         const url = new URL(req.url);
         const path = url.pathname.replace(/^\/api\/backlog/, "");
         calls.push({ method: req.method, path, body: req.method === "PATCH" ? await req.json() : null });
-        if (path === "") return Response.json({ syncs: [sync], items: [] });
+        if (path === "/syncs") return Response.json({ syncs: [sync], items: [] });
         if (req.method === "GET") return Response.json({ issue: { number: 12 }, comments: [], fields: { Status: "Backlog", "Story Points": 3 }, fetchedAt: 1, localId: null, pending: 0 });
         return Response.json({});
       },
@@ -539,7 +564,7 @@ describe("backlog without BACKLOG_URL (#3071)", () => {
       port: 0,
       fetch: (req) => {
         const path = new URL(req.url).pathname.replace(/^\/api\/backlog/, "");
-        if (path === "") return Response.json({ syncs: [sync], items: [] });
+        if (path === "/syncs") return Response.json({ syncs: [sync], items: [] });
         if (path === "/records") return Response.json({ workspaceId: "ws_1", service: "github", repository: "example/repo", project: { owner: "example", number: 1 }, fetchedAt: 1, top: [], unread: [], pulls: [], issues: [stored(task, null), stored(pbi, fields)] });
         return Response.json({ issue: { ...pbi, milestone: pbi.milestone }, comments: [comment, later], fields, fetchedAt: 1, localId: null, pending: 0, sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } });
       },

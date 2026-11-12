@@ -174,6 +174,74 @@ describe("rate limit: RateLimitResumer (#102)", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
+  test("starts a deferred task (#2768): not before its time; once, as the first turn, after it; off = waits, 今すぐ再開 starts; cancel = never starts", async () => {
+    boot([OK_TURN]);
+    const at = now + 3_600_000;
+    const mk = (title: string) => tasks.create({ cwd: home, title, prompt: "go", runner: "claude" }, undefined, undefined, { deferUntil: at });
+    const t = mk("t");
+    // made without a runner: idle, the plan and the held prompt on the row
+    let cur = db.getTask(t.id)!;
+    expect([starts.length, cur.status, cur.resumeAt, cur.resumeReason, cur.deferredPrompt]).toEqual([0, "idle", at, "start", "go"]);
+    expect(await resumer.tick()).toEqual([]); // before its time
+    expect(starts.length).toBe(0);
+    now = at;
+    enabled = false;
+    expect(await resumer.tick()).toEqual([]); // setting off: waits
+    expect(starts.length).toBe(0);
+    enabled = true;
+    expect(await resumer.tick()).toEqual([t.id]);
+    await settle();
+    expect(starts.map((o) => o.prompt)).toEqual(["go"]); // the first turn, no session to resume
+    expect(starts[0]?.resumeSessionId).toBeUndefined();
+    cur = db.getTask(t.id)!;
+    expect([cur.resumeAt, cur.resumeReason, cur.deferredPrompt, cur.status]).toEqual([null, null, null, "done"]);
+    expect(await resumer.tick()).toEqual([]); // once
+    expect(starts.length).toBe(1);
+    // with the setting off, 今すぐ再開 starts it without waiting
+    enabled = false;
+    const u = mk("u");
+    await resumer.resumeNow(u.id);
+    await settle();
+    expect(starts.length).toBe(2);
+    expect(starts[1]?.prompt).toBe("go");
+    expect(db.getTask(u.id)!.deferredPrompt).toBeNull();
+    // cancel: never starts, the prompt goes, one line says so
+    enabled = true;
+    const v = mk("v");
+    resumer.cancel(v.id);
+    cur = db.getTask(v.id)!;
+    expect([cur.resumeAt, cur.resumeReason, cur.deferredPrompt]).toEqual([null, null, null]);
+    expect(statuses(v.id).at(-1)).toBe("開始を取り消しました（この Task は始まりません）");
+    now = at + 1;
+    expect(await resumer.tick()).toEqual([]);
+    expect(starts.length).toBe(2);
+  });
+
+  test("a deferred start refused before its runner starts keeps the plan and the prompt, and tries again after the retry setting (#2768)", async () => {
+    boot([OK_TURN]);
+    const at = now + 3_600_000;
+    const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" }, undefined, undefined, { deferUntil: at });
+    const send = tasks.send.bind(tasks);
+    tasks.send = async () => { throw new Error("a Terminal holds the folder"); };
+    // 今すぐ再開: the error goes to the person, the plan stays as it was
+    await expect(resumer.resumeNow(t.id)).rejects.toThrow("a Terminal holds the folder");
+    let cur = db.getTask(t.id)!;
+    expect([cur.resumeAt, cur.resumeReason, cur.deferredPrompt, cur.status]).toEqual([at, "start", "go", "idle"]);
+    // the due tick: refused, tried again FALLBACK_DELAY_MS later with a line
+    now = at;
+    expect(await resumer.tick()).toEqual([]);
+    cur = db.getTask(t.id)!;
+    expect([cur.resumeAt, cur.resumeReason, cur.deferredPrompt]).toEqual([at + FALLBACK_DELAY_MS, "start", "go"]);
+    expect(statuses(t.id).at(-1)).toContain("開始できませんでした: a Terminal holds the folder");
+    expect(await resumer.tick()).toEqual([]); // not on every tick
+    tasks.send = send;
+    now = at + FALLBACK_DELAY_MS;
+    expect(await resumer.tick()).toEqual([t.id]);
+    await settle();
+    expect(starts.map((o) => o.prompt)).toEqual(["go"]);
+    expect(db.getTask(t.id)!.deferredPrompt).toBeNull();
+  });
+
   test("a limit stop records resumeAt from the turn's quota (+ margin) and a note; the due tick sends the resume prompt on the same session; the setting off only records", async () => {
     boot([LIMIT_TURN, OK_TURN]);
     const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
@@ -799,7 +867,7 @@ describe("a turn the daemon's stop cut continues on the next start (interrupted.
 
   test("a daemon that died without its shutdown: the next start closes the orphan and plans it the same way; no session, no plan", () => {
     const now = Date.now();
-    const mk = (id: string, sess: string | null) => db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: home, scope: [home], status: "running", runnerSessionId: sess, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
+    const mk = (id: string, sess: string | null) => db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: home, scope: [home], status: "running", runnerSessionId: sess, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
     mk("task_a", "sess-a");
     mk("task_b", null);
     expect(abortOrphanedTasks(db, now)).toEqual(["task_a", "task_b"]);
@@ -1270,6 +1338,15 @@ describe("fallbackRunner (#834)", () => {
     const r = fallbackRunner(runner, cfg(fallback), rows(q), installed, now);
     expect(r.runner).toBe(want);
     expect(!!r.from).toBe(moved);
+  });
+
+  test("held (#2768): the decided runner at its limit with no alternative names its window; an empty order too; a moved or free one has none", () => {
+    const hotRow = { claude: [["five_hour", 0.95, later] as [string, number, number]], codex: [["five_hour", 0.99, later] as [string, number, number]] };
+    const want = { runner: "claude" as RunnerId, window: "five_hour", utilization: 0.95, resetsAt: later * 1000 };
+    expect(fallbackRunner("claude", cfg(["codex"]), rows(hotRow), all, now)).toEqual({ runner: "claude", held: want });
+    expect(fallbackRunner("claude", cfg([]), rows(hotRow), all, now)).toEqual({ runner: "claude", held: want });
+    expect(fallbackRunner("claude", cfg(["codex"]), rows({ claude: hotRow.claude }), all, now).held).toBeUndefined(); // moved
+    expect(fallbackRunner("claude", cfg([]), rows({ claude: [["five_hour", 0.5, later]] }), all, now)).toEqual({ runner: "claude" });
   });
 
   test("from names the window; the note is the transcript's line", () => {

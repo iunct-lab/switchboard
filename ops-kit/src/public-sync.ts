@@ -166,6 +166,11 @@ export function personalEmails(text: string): string[] {
   return [...new Set((text.match(EMAIL) ?? []).filter((e) => !EMAIL_OK.test(e)))];
 }
 
+/** Whether tree path `p` is named by an include / exclude entry: a directory (trailing slash) names everything under it, a file only itself. */
+export function underEntry(p: string, entry: string): boolean {
+  return entry.endsWith("/") ? p.startsWith(entry) : p === entry;
+}
+
 /** git at the repository's top: `raw` gives the exit code, `git` the output (or a throw). */
 type Git = { raw: (args: string[], o?: Parameters<Run>[1]) => ReturnType<Run>; git: (args: string[], o?: Parameters<Run>[1]) => string };
 
@@ -186,7 +191,7 @@ export function publicTree(src: string, opts: Pick<Options, "privateRepo" | "tar
     const env = { GIT_INDEX_FILE: join(dir, "index") };
     git(["read-tree", src], { env });
     const all = git(["ls-files", "-z", "--cached"], { env }).split("\0").filter(Boolean); // -z: paths as they are, unquoted
-    const under = (p: string, entry: string) => (entry.endsWith("/") ? p.startsWith(entry) : p === entry);
+    const under = underEntry;
     const named = (p: string) => !opts.include || opts.include.some((e) => under(p, e));
     // a directory written without its trailing slash would match no file: everything under it would go (include: none)
     for (const e of [...(opts.include ?? []), ...(opts.exclude ?? [])]) {

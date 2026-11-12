@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { ciExit, ciSteps } from "./ci";
 import { withHeavySlot } from "../ops-kit/src/heavy";
 import { RECORDS_HEADER } from "./perf-ratchet";
-import { checkoutSteps, DURATION_STEP, groupScript, HOST_TESTS, hostOffload, OFFLOAD_GROUPS, parseGroup, placeSteps, recordBundle, recordBytes, recordCounts, existingPass, failLines, incrementalBase, incrementalSteps, LOCAL_CI_RESULT, localCi, main, mainFork, markerSeconds, narrowTestStep, notify, perfVerdict, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, runCheckout, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepSeconds, stepWithIdle, TargetError, onlyPerf, testsOf, withoutPerf, type Deps, type LocalCiResult } from "./local-ci";
+import { checkoutSteps, groupScript, HOST_TESTS, hostOffload, OFFLOAD_GROUPS, parseGroup, placeSteps, recordBundle, recordBytes, recordCounts, existingPass, failLines, incrementalBase, incrementalSteps, LOCAL_CI_RESULT, localCi, main, mainFork, markerSeconds, narrowTestStep, notify, perfVerdict, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, runCheckout, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepSeconds, stepWithIdle, TargetError, testsOf, withoutPerf, type Deps, type LocalCiResult } from "./local-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
 const ciTs = await Bun.file(new URL("./ci.ts", import.meta.url)).text();
@@ -301,16 +301,6 @@ describe("local-ci", () => {
     expect(ran.at(-1)).toBe("bun test");
   });
 
-  test("onlyPerf: the install, the web build and the perf-bench step, not perf-ratchet's base and check; a CI without perf has none", () => {
-    const names = onlyPerf(ciSteps).map((x) => x.name);
-    expect(names[0]).toBe("bun install --frozen-lockfile");
-    expect(names).toContain("bun run --cwd apps/web build");
-    expect(names).toContain("bun scripts/perf-bench.ts --runs 5 --json perf-result.json");
-    expect(names.some((n) => n.includes("perf-ratchet"))).toBe(false);
-    expect(names).not.toContain("bun test");
-    expect(onlyPerf([{ name: "make", run: "make" }, { name: "bun test", run: "bun test" }])).toEqual([]);
-  });
-
   test("withoutPerf: the range from the web build to the last perf step goes, the install and what follows stay; a CI without it is as it is", () => {
     const names = (xs: Array<{ name: string }>) => xs.map((x) => x.name);
     const dropped = names(ciSteps).filter((n) => !names(withoutPerf(ciSteps)).includes(n));
@@ -362,21 +352,20 @@ describe("local-ci", () => {
     expect(() => stepSeconds(results.filter((x) => x.name !== "bun test"))).toThrow("`bun test`");
   });
 
-  test("test duration ceiling: seconds over the checkout's `local` ceiling fail the run with an over: line, and it exits like a failed step (#1887)", async () => {
+  test("test duration ceiling: seconds over the checkout's `local` ceiling still pass, with an over: line as a warning in the comment and an exit 0 (#1887)", async () => {
     const { d, logged } = deps(undefined, undefined, "1 fail", {}, false, { budget: { local: { durations: { typecheck: 60, test: -1 } } } });
     const r = await localCi(42, "/repo", d, "example/development", CACHE);
-    expect(r.ok).toBe(false);
-    expect(r.seconds).toBeUndefined();
-    expect(ciExit(r.results)).toBe(1);
-    const failed = r.results.at(-1)!;
-    expect(failed.name).toBe(DURATION_STEP);
-    expect(failed.fails![0]).toStartWith("over: durations.test = ");
-    expect(failLines(failed.tail)).toEqual(failed.fails!);
-    expect(logged).toContain(failed.fails![0]!);
+    expect(r.ok).toBe(true);
+    expect(r.seconds).toBeDefined();
+    expect(ciExit(r.results)).toBe(0);
+    expect(r.warnings).toHaveLength(1);
+    expect(r.warnings![0]).toStartWith("over: durations.test = ");
+    expect(logged).toContain(`警告: ${r.warnings![0]}`);
     const body = resultComment(r);
-    expect(passOf(body)).toBeUndefined();
-    expect(body).toContain(`結果: \`${DURATION_STEP}\` が exit 1。\n`); // no log of its own to point to
-    expect(body).toContain(`\n\`\`\`\n${failed.fails![0]}\n\`\`\``);
+    expect(body).toStartWith("[local-ci] pass ");
+    expect(passOf(body)).toBeDefined();
+    expect(body).toContain("所要時間の警告（合否には数えない。`perf-budget.json` の `local.durations`）:\n```\n" + r.warnings![0] + "\n```");
+    expect(body).not.toContain("結果: ");
   });
 
   test("test duration ceiling: within the ceilings, or a budget without them, passes with the seconds (#1887)", async () => {
@@ -384,6 +373,7 @@ describe("local-ci", () => {
       const r = await localCi(42, "/repo", deps(undefined, undefined, "1 fail", {}, false, { budget }).d, "example/development", CACHE);
       expect(r.ok).toBe(true);
       expect(r.seconds).toBeDefined();
+      expect(r.warnings).toBeUndefined();
     }
   });
 
@@ -398,8 +388,8 @@ describe("local-ci", () => {
     };
     const narrowed = "selected: 1\na.test.ts  x";
     expect((await run(narrowed, { typecheck: 60, test: 0.1 })).ok).toBe(true);
-    expect(await run(narrowed, { typecheck: -1, test: 50 })).toMatchObject({ ok: false, selection: { files: ["a.test.ts"] } });
-    expect((await run("full: x", { typecheck: 60, test: 0.1 })).ok).toBe(false);
+    expect(await run(narrowed, { typecheck: -1, test: 50 })).toMatchObject({ ok: true, warnings: [expect.stringContaining("durations.typecheck")], selection: { files: ["a.test.ts"] } });
+    expect((await run("full: x", { typecheck: 60, test: 0.1 })).warnings?.[0]).toContain("durations.test");
   });
 
   test("the comment says what bun test covered; the mark stays (#3297)", () => {
@@ -926,8 +916,6 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
       const fake = x.d.sh;
       x.d.sh = async (cmd, cwd) => (cmd.includes("grep") && cmd.includes("-l") ? `${REC.join("\n")}\n` : fake(cmd, cwd));
       x.d.offload = {
-        bun: "1.4.4",
-        codex: "0.166.0",
         run: async (script, cwd, size) => {
           const start = performance.now();
           await Bun.sleep(30);
@@ -1041,10 +1029,9 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
         writeFileSync(join(bin, "sb-offload"), '#!/bin/sh\nenv\necho "args: $*"\nexit 3\n', { mode: 0o755 });
         process.env.PATH = `${bin}:${saved.path}`;
         const real = hostOffload()!;
-        expect(real.bun).toBe(Bun.version);
         const out = await real.run("echo x", bin, "small");
         expect(out.code).toBe(3);
-        expect(out.output).toContain("args: --size small echo x");
+        expect(out.output).toContain("args: --ci --size small echo x");
         expect(out.output).not.toContain("offloadtesttoken");
       } finally {
         for (const [k, v] of [["GH_TOKEN", saved.gh], ["GITHUB_TOKEN", saved.github], ["PATH", saved.path]] as const) if (v === undefined) delete process.env[k]; else process.env[k] = v;
@@ -1111,6 +1098,14 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
       expect(failLines(stopped[0]!.output)).toEqual(["sb-offload: exit 130（中断）"]);
     });
 
+    test("parseGroup: a step whose begin mark is missing is read from its exit mark (seconds 0)", () => {
+      const s = [{ name: "a", run: "a" }, { name: "b", run: "b" }];
+      const pass = parseGroup("setup\nA\nsb-step: 0 exit 0 12\nsb-step: 1 begin 12\nB\nsb-step: 1 exit 0 15\nsb-offload: exit 0", s, 0);
+      expect(pass.map((r) => [r.name, r.code, r.seconds, r.output])).toEqual([["a", 0, 0, "setup\nA"], ["b", 0, 3, "B"]]);
+      const fail = parseGroup("A\nsb-step: 0 exit 2 12\nsb-offload: exit 2", s, 2);
+      expect(fail.map((r) => [r.name, r.code, r.seconds])).toEqual([["a", 2, 0]]);
+    });
+
     test("recordings: with SWITCHBOARD_FIXTURES, only the steps here get it, the files that read recordings among them; no build's script holds it or its path", async () => {
       const saved = process.env.SWITCHBOARD_FIXTURES;
       const fixtures = mkdtempSync(join(CACHE, "fixtures-"));
@@ -1148,11 +1143,13 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
       }
     });
 
-    test("groupScript: git with PCRE, a tmpfs TMPDIR, not root, this host's Bun and Codex, each step between marks and stopping at a failure", () => {
-      const script = groupScript([{ name: "x", run: "echo 'it'" }], { bun: "1.4.4", codex: "0.166.0", repo: "o/r" });
-      for (const part of ["dnf reinstall -y -q git-core", "mount -t tmpfs", "su - sb -c", "bash -s 'bun-v1.4.4'", "npm i -g '@openai/codex@0.166.0'", "git remote add origin 'https://github.com/o/r.git'", "bun install --frozen-lockfile", `bash -e -c 'echo '\\''it'\\'''; c=$?`, '[ "$c" -eq 0 ] || exit "$c"']) expect(script).toContain(part);
+    test("groupScript: a tmpfs TMPDIR, the image's user switchboard with the image's Chromium, no tool installed, each step between marks and stopping at a failure", () => {
+      const script = groupScript([{ name: "x", run: "echo 'it'" }], { repo: "o/r" });
+      for (const part of ["mount -t tmpfs", "chown -R switchboard /sb/work", 'su - switchboard -c "CHROME_BIN=${CHROME_BIN:-} PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-} bash /tmp/sb-local-ci.sh"', "git remote add origin 'https://github.com/o/r.git'", "bun install --frozen-lockfile", `bash -e -c 'echo '\\''it'\\'''; c=$?`, '[ "$c" -eq 0 ] || exit "$c"']) expect(script).toContain(part);
+      // the image has them: nothing is installed or created in the build
+      for (const gone of ["bun.sh/install", "@openai/codex@", "reinstall", "dnf ", "useradd", "su - sb "]) expect(script).not.toContain(gone);
       // a repository that is not owner/name (a local change's workspace) gets no origin
-      expect(groupScript([], { bun: "1", repo: "ws_1" })).not.toContain("remote add");
+      expect(groupScript([], { repo: "ws_1" })).not.toContain("remote add");
     });
   });
 });
@@ -1441,7 +1438,7 @@ describe("local change (#2488)", () => {
     const posted: unknown[] = [];
     const fetch = async (url: string, init: RequestInit = {}) => {
       const path = url.replace(BACKLOG, "");
-      if (path === "") return new Response(JSON.stringify({ syncs: [{ workspaceId: "ws_l", backlog: "switchboard", repository: "ws_l", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] }));
+      if (path === "/syncs") return new Response(JSON.stringify({ syncs: [{ workspaceId: "ws_l", backlog: "switchboard", repository: "ws_l", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] }));
       if (path === "/7/comment") return posted.push(JSON.parse(String(init.body))), new Response("{}", { status: 202 });
       onRead();
       return new Response(JSON.stringify({ workspaceId: "ws_l", issue: { number: 7, title: "変更", state: "OPEN", labels: [], milestone: null, parent: null, subIssues: [], body: "", url: "", change: { head: "sb/5-x", base: "main", mergeCommit: null, mergedAt: null } }, changeRefs: { head: r.tip("sb/5-x"), base: r.tip("main") }, comments: comments.map((c, i) => ({ id: `sb:${i}`, ...c })), fields: null, fetchedAt: 1, localId: null, pending: 0, held: [], sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } }));
