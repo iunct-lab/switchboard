@@ -1,30 +1,35 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent, AnswerPolicy, AskList, Backlog, RunnerAdapter, RunnerId, RunnerSession } from "@switchboard/protocol";
+import type { AgentEvent, AnswerPolicy, AskList, AskQuestion, Backlog, RunnerAdapter, RunnerId, RunnerSession } from "@switchboard/protocol";
 import { importing } from "../fixtures/github-import.ts";
 import type { GhRunner } from "./backlog.ts";
 import { loadConfig } from "./config.ts";
 import { startServer, type CoreServer } from "./server.ts";
 
-/* The daemon the policy tests (#938) boot: a scripted runner, a fake gh with a PR, and the helpers that ask it things. */
+/* The daemon the policy tests boot: a scripted runner, a fake gh with a PR, and the helpers that ask it things. */
 
 const pages = (await Bun.file(new URL("../fixtures/backlog-graphql.json", import.meta.url)).json()) as unknown[];
 const decisions = (await Bun.file(new URL("../fixtures/backlog-decisions.json", import.meta.url)).json()) as unknown;
 export const HEAD = "c".repeat(40);
 export const DAY = 86_400_000;
 
-export const CHECK = "PR を出しました。\n\n**確認**: PR #12 をマージしてよいか\n**選択肢**:\n- A: マージする\n- B: 待つ\n**推奨**: A — CI が緑\n**止めた場所**: PR #12";
+/** The question tool's one single-choice question about a PR (or none, `pr` = null) that ends a turn: the Task's operational check. */
+export const mergeQuestion = (pr: number | null = 12): AskQuestion => ({ header: null, question: pr === null ? "どう進めますか" : `PR #${pr} をマージしてよいか`, options: [{ label: "マージする (Recommended)", description: "CI が緑" }, { label: "待つ", description: null }], multiSelect: false });
+/** The answer that picks its "マージする" option, as the screen sends it. */
+export const mergeAnswer = { kind: "questions" as const, answers: [{ choices: ["マージする (Recommended)"] }] };
+export const questionTurn = (questions: AskQuestion[] = [mergeQuestion()]): AgentEvent[] => [{ t: "question.ask", id: "q1", questions }, { t: "session.end", status: "ok", summary: "確認をお願いします" }];
 export const EXEC: AgentEvent = { t: "permission.ask", id: "perm1", kind: "exec", tool: "Bash", input: { command: "bun test packages/core" }, detail: "bun test packages/core" };
 
-/** Replays `script`, pausing on a permission.ask until it is answered; a message sent to it replays the script. */
-export function runner(id: RunnerId, script: AgentEvent[], sent: string[] = []): RunnerAdapter {
+/** Replays `first`, pausing on a permission.ask until it is answered; a message sent to it replays `after` (the same script unless given). */
+export function runner(id: RunnerId, first: AgentEvent[], sent: string[] = [], after: AgentEvent[] = first): RunnerAdapter {
   return {
     id,
     detect: async () => ({ available: true, version: "fake" }),
     start(_opts, emit) {
       let resolveExit!: (c: number | null) => void;
       const exited = new Promise<number | null>((r) => (resolveExit = r));
+      let script = first;
       let i = 0;
       let waitingFor: string | null = null;
       const pump = () => {
@@ -40,6 +45,7 @@ export function runner(id: RunnerId, script: AgentEvent[], sent: string[] = []):
         send: (text) => {
           sent.push(text);
           emit({ t: "message.delta", role: "user", text });
+          script = after;
           i = 0;
           queueMicrotask(pump);
         },
@@ -84,7 +90,7 @@ export function harness() {
       if (args.some((a) => a.includes("comments(last:"))) return { code: 0, stdout: JSON.stringify(decisions), stderr: "" };
       return { code: 0, stdout: JSON.stringify(args.includes("after=CURSOR1") ? pages[1] : pages[0]), stderr: "" };
     }) as GhRunner,
-    async boot(confirm: string[] = []) {
+    async boot(confirm: string[] = [], turn: AgentEvent[] = questionTurn()) {
       h.mark = null;
       h.prCalls = 0;
       h.prFails = false;
@@ -95,8 +101,7 @@ export function harness() {
         writeFileSync(join(h.home, "knowledge", "rules", "g.md"), `---\napproval: { confirm: [${confirm.map((c) => `'${c}'`).join(", ")}] }\n---\nrules\n`);
       }
       const cfg = loadConfig({ SWITCHBOARD_HOME: h.home, SWITCHBOARD_KNOWLEDGE: join(h.home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(h.home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
-      const end: AgentEvent = { t: "session.end", status: "ok", summary: CHECK };
-      h.core = await startServer(cfg, [runner("claude", [EXEC]), runner("codex", [end], h.sent)], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: importing(h.gh), backlogAutoImport: true, judge: () => new Promise(() => undefined), rubricJudge: () => new Promise(() => undefined) });
+      h.core = await startServer(cfg, [runner("claude", [EXEC]), runner("codex", turn, h.sent, [{ t: "session.end", status: "ok", summary: "続けます" }])], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: importing(h.gh), backlogAutoImport: true, judge: () => new Promise(() => undefined), rubricJudge: () => new Promise(() => undefined) });
       h.base = `http://127.0.0.1:${h.core.server.port}`;
       await until(async () => !((await fetch(`${h.base}/api/backlog`).then((r) => r.json())) as Backlog).syncs.some((s) => s.syncing));
     },
@@ -105,7 +110,7 @@ export function harness() {
       h.core = null;
       rmSync(h.home, { recursive: true, force: true });
     },
-    // the web page sends its own origin; a Task's curl does not (#938)
+    // the web page sends its own origin; a Task's curl does not
     post: (path: string, body: unknown, headers?: Record<string, string>) => fetch(`${h.base}${path}`, { method: "POST", headers: { "content-type": "application/json", ...(headers ?? { origin: h.base, "sec-fetch-site": "same-origin" }) }, body: JSON.stringify(body) }),
     patch: (path: string, body: unknown, headers?: Record<string, string>) => fetch(`${h.base}${path}`, { method: "PATCH", headers: { "content-type": "application/json", ...(headers ?? { origin: h.base, "sec-fetch-site": "same-origin" }) }, body: JSON.stringify(body) }),
     meta: () => h.core!.db.listWorkspaces().find((w) => w.kind === "meta")!,
@@ -118,7 +123,7 @@ export function harness() {
       await until(async () => h.core!.db.getTask(t.id)!.status === "waiting" || h.core!.db.listEvents(t.id).some((e) => e.ev.t === "permission.resolved"));
       return t.id;
     },
-    /** A Task that ended with an operational check about PR #12, with a decision stop record before it, marked 要対応. */
+    /** A Task that ended with an operational check about PR `#12`, with a decision stop record before it, marked 要対応. */
     async checkTask(title: string, op = "gh pr merge", stop: { reason?: string; evidence?: string } = {}) {
       const t = (await (await h.post("/api/tasks", { cwd: h.home, title, prompt: "open the PR", runner: "codex", workspaceId: h.meta().id })).json()) as { id: string };
       await until(async () => h.core!.db.getTask(t.id)!.status !== "running");

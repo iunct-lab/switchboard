@@ -4,7 +4,7 @@ import { transcriptLines } from "./recap.ts";
 import { rubricKey } from "./rubric.ts";
 import { jsonCandidates, oneLine, readOnlyMode, runSuggestionTurn } from "./suggest-llm.ts";
 
-/** One rubric judgement reads the transcript, so it gets more time than the two-way judge (#493, 60 s). */
+/** One rubric judgement reads the transcript, so it gets more time than the two-way judge (60 s). */
 export const RUBRIC_JUDGE_TIMEOUT_MS = 90_000;
 /** How much of the transcript the judge sees (the newest part). Enough for a day's task; small enough for a lightweight model. */
 export const RECAP_CHARS = 12_000;
@@ -26,19 +26,19 @@ export interface RubricJudgeInput {
 
 export interface RubricJudgeOptions {
   adapters: Map<RunnerId, RunnerAdapter>;
-  /** The same runner / model as the two-way judge (#493): one setting, one subscription. */
+  /** The same runner / model as the two-way judge: one setting, one subscription. */
   settings: JudgeSettings;
   /** Directory the turn runs in — the daemon's data dir, never a repository the agent could edit. */
   cwd: string;
   onUsage?: (runner: RunnerId, ev: Extract<AgentEvent, { t: "usage" }>) => void;
   log?: (msg: string) => void;
   signal?: AbortSignal;
-  /** The two-way judge's fallback (#835), so one setting moves both. Absent = `JUDGE_FALLBACK`. */
+  /** The two-way judge's fallback, so one setting moves both. Absent = `JUDGE_FALLBACK`. */
   fallback?: { runner: RunnerId; model: string };
 }
 
 /**
- * Scores a task against the rubric (#1219): one read-only turn of the configured judge runner, then one of
+ * Scores a task against the rubric: one read-only turn of the configured judge runner, then one of
  * the fallback (`JUDGE_FALLBACK` unless set) when that fails for any reason — the same order as `judgeTurn`. Throws the last error when neither
  * answers; the caller leaves the task unscored.
  */

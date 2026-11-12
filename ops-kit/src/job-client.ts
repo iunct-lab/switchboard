@@ -1,5 +1,5 @@
 /**
- * `ops-kit job` (#3994, PBI #3980): a Task asks the app to run its local CI or a review as the app's own job, instead of
+ * `ops-kit job`: a Task asks the app to run its local CI or a review as the app's own job, instead of
  * keeping its session open on a wait loop. The app's address is the origin of `BACKLOG_URL` and its key the file
  * `BACKLOG_TOKEN_FILE` names — the same pair as `backlog`, so only inside the app's Task. The Task waits by ending its
  * turn on a `depends` stop with `job#<id>`; the app resumes it with the result. There is no command that waits here.

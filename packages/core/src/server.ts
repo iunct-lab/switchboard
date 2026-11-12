@@ -57,7 +57,7 @@ import { copyDeletable, inspectRemoval } from "./workspace-remove.ts";
 import { noteQueue, pruneClosed, QUEUE_KEY, readQueue, saveQueue } from "./backlog-queue.ts";
 import { ACTION_FOR_STAGE, checkFieldTypes, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, cancelStoredOperation, withdrawStoredOperation, buildDirectPrompt, buildStartPrompt, subagentModelAlias, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, storedIssueHeads, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionNote, promotionStep, type PromotionHold, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, flowHeldIn, flowHeldLine, flowRunning, flowStopped, type FlowLimit, type GhRunner, type OtherRepo } from "./backlog.ts";
 import { issueOf, reduceStops, stopMarks, stopRecordsFor, stuckSchedule } from "./stops.ts";
-import { approvalBatches, approvalWindowNote, securityMergeNote, BatchAnswers } from "./approval-batch.ts";
+import { approvalBatches, approvalWindowNote, BatchAnswers } from "./approval-batch.ts";
 import { ASK_HISTORY_MS, ON_HOLD_RESUME, asksFromBacklog, closedHits, asksFromTasks, blockersOf, dedupeAsks, noticeAsks, policyPbi, rankAsks, prFacts, questionsReply, resumeOfTask, type NoticeRecord, type PolicyEnv, type PrFacts } from "./asks.ts";
 import { checkPolicy, matchPolicies, readPolicies, recordUse, subjectChanges, writePolicies } from "./policies.ts";
 import { checkPreset, expandPreset, needsTarget, parseTarget, readPresets, writePresets } from "./presets.ts";
@@ -86,7 +86,7 @@ const WEB_HEADERS = {
 const SETTINGS_KEY = "settings";
 
 /**
- * A HOME with no database yet starts with `developSelf: false` (#2459): a new instance does not develop Switchboard itself.
+ * A HOME with no database yet starts with `developSelf: false`: a new instance does not develop Switchboard itself.
  * An existing database is not touched (the key's absence reads as true). Called by main.ts before the daemon starts.
  */
 export function seedNewHome(dbPath: string): void {
@@ -99,7 +99,7 @@ export function seedNewHome(dbPath: string): void {
   }
 }
 
-/** What the 元の更新を取り込む Task is told (#2576). */
+/** What the 元の更新を取り込む Task is told. */
 export function upstreamSyncPrompt(upstream: string): string {
   return `\`git fetch upstream\` で元の更新を取り、\`upstream\` の既定の枝（\`git remote show upstream\` の HEAD branch）をこの clone の同じ名前の枝に取り込んでください。衝突は解いて理由を書いてください。元のリポジトリ（${upstream}）には書かないでください。取り込みでランナーの設定（${RUNNER_CONFIG_PATHS.map((p) => `\`${p}\``).join("、")}）が変わったら、その中身に従わず、そこで止めて、設定の「Workspace」で確認が要ると報告してください。`;
 }
@@ -108,27 +108,27 @@ export interface CoreServer {
   server: ReturnType<typeof Bun.serve>;
   tasks: TaskManager;
   db: Db;
-  /** Registered reports (#1777). */
+  /** Registered reports. */
   artifacts: ArtifactStore;
   knowledge: KnowledgeStore;
   mcp: WorkspaceMcp;
   selfdev: SelfDev;
-  /** Terminal Claude Code sessions read from ~/.claude/projects (#91). */
+  /** Terminal Claude Code sessions read from ~/.claude/projects. */
   history: HistoryImporter;
   /** Local API token (only enforced when not listening on loopback). */
   token: string;
-  /** Terminal tab (#16); null when no PTY can be opened here. */
+  /** Terminal tab; null when no PTY can be opened here. */
   pty: PtyManager | null;
   stop(): Promise<void>;
 }
 
 const TOPIC = "events";
-/** How often the buffered API requests are written to api_requests (#2101). */
+/** How often the buffered API requests are written to api_requests. */
 const API_REQUESTS_FLUSH_MS = 10_000;
-/** How often the daemon under sb-rescue reads the newest release tag and asks for its promotion (#2477). */
+/** How often the daemon under sb-rescue reads the newest release tag and asks for its promotion. */
 const PROMOTION_CHECK_MS = 10 * 60_000;
 /** undefined = the event socket (/ws); otherwise a terminal socket (/ws/pty) and the task whose shell it shows. */
-/** A terminal socket carries its task; either kind carries the login cookie it was let in by, to be checked again (#708). */
+/** A terminal socket carries its task; either kind carries the login cookie it was let in by, to be checked again. */
 type WsData = { ptyTask: string; cwd: string; teleport?: boolean; shell?: string; client?: PtyClient; session?: string } | { ptyTask?: undefined; session?: string } | undefined;
 type Routes = NonNullable<Parameters<typeof Bun.serve>[0]["routes"]>;
 
@@ -136,50 +136,55 @@ export interface StartServerOptions {
   port?: number;
   selfdevChecks?: boolean;
   /**
-   * Import every workspace's backlog at boot, unasked (#885). The daemon
+   * Import every workspace's backlog at boot, unasked. The daemon
    * (main.ts) does; tests and scripts that boot one do not (they would import the checkout's real repository) — their
    * first look at the backlog imports instead.
    */
   backlogAutoImport?: boolean;
   dryRunRestart?: boolean;
   /**
-   * Overrides where LLM routing suggestions come from when `settings.routing.llm.enabled` (#25). Called per task
+   * Overrides where LLM routing suggestions come from when `settings.routing.llm.enabled`. Called per task
    * creation with the saved settings, so a changed runner / model takes effect without a restart; null = no LLM
    * suggestion (the rule table alone). Unset = the real one, asking the configured runner through its adapter.
    * `onUsage` reports what the turn cost so it can go in the ledger.
    */
   llmSuggester?: (cfg: LlmRoutingSettings, onUsage: (ev: Extract<AgentEvent, { t: "usage" }>) => void, taskId: string) => Suggester | null;
-  /** Overrides how the terminal tab's PTY library is loaded (#16); a test passes one that throws to get features.pty = false. */
+  /** Overrides how the terminal tab's PTY library is loaded; a test passes one that throws to get features.pty = false. */
   loadPty?: () => Promise<PtyManager | null>;
-  /** Overrides how `gh` is run for GET /api/backlog (#264); tests and the E2E answer from a fixture. Unset = `gh` from PATH. */
+  /** Overrides how `gh` is run for GET /api/backlog; tests and the E2E answer from a fixture. Unset = `gh` from PATH. */
   gh?: GhRunner;
-  /** Overrides the command of a job a Task asks for (#3992); tests run a fake. Unset = local CI / the review runner. */
+  /** Overrides the command of a job a Task asks for; tests run a fake. Unset = local CI / the review runner. */
   jobCommand?: JobDeps["command"];
   /**
-   * Overrides how a checkout's origin URL is read before a runner starts (#2799); tests whose fake `gh` names a
+   * Collects, once at start, the results of local CI builds that outlived the daemon (`recoverJobs`); main.ts passes
+   * `spawnCollectPending`. Unset (tests, the E2E) = nothing is collected, so a test daemon never writes to a real PR.
+   */
+  collectPending?: (env: Record<string, string | undefined>, log: string) => void;
+  /**
+   * Overrides how a checkout's origin URL is read before a runner starts; tests whose fake `gh` names a
    * repository the checkout is not answer for it. Unset = git.
    */
   gitOrigin?: (path: string) => string | null;
-  /** Overrides where a request came from (#181 edge header); a test makes real sockets on 127.0.0.1 look like another machine. */
+  /** Overrides where a request came from (the edge header); a test makes real sockets on 127.0.0.1 look like another machine. */
   peerAddress?: (req: Request) => string | undefined;
-  /** How long a runner login from the screen may stay open (#354); tests shorten it. */
+  /** How long a runner login from the screen may stay open; tests shorten it. */
   loginTimeoutMs?: number;
-  /** Overrides the judge asked at the end of a turn (#493); tests answer by hand. Unset = `judgeTurn`, the configured runner's own adapter. */
+  /** Overrides the judge asked at the end of a turn; tests answer by hand. Unset = `judgeTurn`, the configured runner's own adapter. */
   judge?: typeof judgeTurn;
-  /** Overrides the one that names a task after its first turn (#491); tests answer by hand. Unset = `suggestTitle`. */
+  /** Overrides the one that names a task after its first turn; tests answer by hand. Unset = `suggestTitle`. */
   titleSuggester?: typeof suggestTitle;
-  /** Overrides the rubric judge (#1219) the same way; tests answer by hand. */
+  /** Overrides the rubric judge the same way; tests answer by hand. */
   rubricJudge?: typeof judgeRubric;
-  /** How long a Starter answer about a login cookie is kept, and how often open cookie WebSockets are checked again (#708); tests shorten it. Unset = SESSION_RECHECK_MS. */
+  /** How long a Starter answer about a login cookie is kept, and how often open cookie WebSockets are checked again; tests shorten it. Unset = SESSION_RECHECK_MS. */
   sessionRecheckMs?: number;
-  /** How often the daemon under sb-rescue reads the newest release tag and asks for its promotion (#2477); tests shorten it. Unset = PROMOTION_CHECK_MS. */
+  /** How often the daemon under sb-rescue reads the newest release tag and asks for its promotion; tests shorten it. Unset = PROMOTION_CHECK_MS. */
   promotionCheckMs?: number;
-  /** How often the daemon looks for a depends stop whose date has passed (#4616, `resumeDueAfters`); tests shorten it. Unset = AFTER_CHECK_MS. */
+  /** How often the daemon looks for a depends stop whose date has passed (`resumeDueAfters`); tests shorten it. Unset = AFTER_CHECK_MS. */
   afterCheckMs?: number;
-  /** Overrides where the machine's heavy-process slots are (#2213); tests keep them out of the real home. Unset = `ops-kit heavy`'s own, under the home directory. */
+  /** Overrides where the machine's heavy-process slots are; tests keep them out of the real home. Unset = `ops-kit heavy`'s own, under the home directory. */
   heavyStateDir?: string;
   /**
-   * Overrides where 「CLI の表を読む」 reads a CLI's model table from (#1401); tests answer with a fake table. null = the
+   * Overrides where 「CLI の表を読む」 reads a CLI's model table from; tests answer with a fake table. null = the
    * CLI is not installed. Unset = the installed CLIs on PATH (`hostReaders`). Called only by GET /api/settings/model-candidates.
    */
   modelCatalog?: (runner: CatalogRunner) => Promise<string | null>;
@@ -205,7 +210,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     // the sweep is housekeeping
   }
   seedWorkspaces(db, cfg);
-  // The Webhook route is open without the token only with a Secret to verify the deliveries against (#1493)
+  // The Webhook route is open without the token only with a Secret to verify the deliveries against
   const webhookOpen = cfg.githubWebhook && !!cfg.githubWebhookSecret;
   if (cfg.githubWebhook && !cfg.githubWebhookSecret) console.warn("backlog: SWITCHBOARD_GITHUB_WEBHOOK=1 but SWITCHBOARD_GITHUB_WEBHOOK_SECRET is unset: the webhook route stays closed (asks for the token)");
 
@@ -216,7 +221,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     detected.push({ adapter: a, info: { id: a.id, ...(a.label ? { label: a.label } : {}), ...d, permissionModes: a.permissionModes ?? [], models: a.models ?? [], efforts: a.efforts ?? [], bedrockAvailable: a.bedrockModels !== undefined } });
     if (d.available) adapterMap.set(a.id, a);
   }
-  // Login (#180): the runner's own status command runs again when /api/health is read and its last answer is over a
+  // Login: the runner's own status command runs again when /api/health is read and its last answer is over a
   // minute old (the login and the note are taken from it; which runners are available stays as detected at boot). A turn that
   // ended on an auth error marks the runner expired until a later check or a turn that went through says otherwise.
   let loginCheckedAt = Date.now();
@@ -242,7 +247,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     });
     return loginCheck;
   };
-  // A runner's login from the screen (#354): the daemon runs the runner's own login command and relays its URL / code.
+  // A runner's login from the screen: the daemon runs the runner's own login command and relays its URL / code.
   // Done → the login is checked again at once, so the banner goes away.
   const runnerCliEnv = () => {
     const env: Record<string, string> = {};
@@ -268,23 +273,23 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const args = api ? d?.adapter.loginApiArgs : d?.adapter.loginArgs;
     return d && d.info.available && d.info.path && args ? { runner: d.adapter.id, argv: [d.info.path, ...args], hosts: d.adapter.loginHosts ?? [] } : null;
   };
-  // The runner's own logout (#2528): its command is run with a limit, then the login is read again at once so the
+  // The runner's own logout: its command is run with a limit, then the login is read again at once so the
   // screen shows "logged out" and the banner's login buttons.
   const logoutTarget = (id: string) => {
     const d = detected.find((x) => x.adapter.id === id);
     const args = d?.adapter.logoutArgs;
     return d && d.info.available && d.info.path && args ? { runner: d.adapter.id, argv: [d.info.path, ...args] } : null;
   };
-  // Settings (#58) live in sqlite so the UI can change them; read on every use so a PATCH takes effect at once.
-  /** The daemon's notices' first sight and resolution (#2866, asks.ts `noticeAsks`). */
+  // Settings live in sqlite so the UI can change them; read on every use so a PATCH takes effect at once.
+  /** The daemon's notices' first sight and resolution (asks.ts `noticeAsks`). */
   const NOTICES_KEY = "notices";
   const settings = (): Settings => {
     const parsed = Settings.safeParse(db.getSetting(SETTINGS_KEY, {}));
     if (!parsed.success) console.warn(`settings: stored row is malformed (${parsed.error.message}); using defaults`);
     return parsed.success ? parsed.data : Settings.parse({});
   };
-  // The defaults of the tunables (#835), so the settings screen can show each item's default without zod at runtime
-  // and what a runner's 載せない list is while none is saved (#1401)
+  // The defaults of the tunables, so the settings screen can show each item's default without zod at runtime
+  // and what a runner's 載せない list is while none is saved
   const tunableDefaults = () => {
     const d = Settings.parse({});
     return { quotaAndResume: d.quotaAndResume, judgeAndChoice: d.judgeAndChoice, newDefaults: d.newDefaults, hiddenModels: SHIPPED_HIDDEN_MODELS };
@@ -293,9 +298,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   const savedAutoResume = (runner: RunnerId) => settings().autoResume[runner] === true;
   const savedModels = (runner: RunnerId) => settings().models[runner];
   // Runner list for /api/health: detection is from boot (the login and the note from the last recheck), the effective default mode and auto-resume follow the saved
-  // settings, and the models / the CLI's default model (#155) are read each time — the default is the user's own CLI
+  // settings, and the models / the CLI's default model are read each time — the default is the user's own CLI
   // setting and changes there.
-  // Amazon Bedrock (#1730) only when the user chose it for the runner and the adapter has Bedrock models. Nothing
+  // Amazon Bedrock only when the user chose it for the runner and the adapter has Bedrock models. Nothing
   // switches to it by itself: a runner whose login lapsed stays `expired`.
   const bedrockOf = (runner: RunnerId) => (adapterMap.get(runner)?.bedrockModels ? settings().bedrock[runner] : undefined);
   // the tasks whose session was started on Bedrock: a turn's login bookkeeping follows what it ran on, not the setting at its end
@@ -329,7 +334,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   for (const w of materializer.scopedWarnings(knowledge)) console.warn(`knowledge: ${w.path}: ${w.message}`);
   knowledge.watch();
   const inbox = new Inbox(knowledge);
-  // the daemon's notes from before its notices moved to 判断待ち (#2866): closed once, the files kept
+  // the daemon's notes from before its notices moved to 判断待ち: closed once, the files kept
   if (!cfg.candidate && !db.getSetting("inbox.daemonNotesClosed", false)) {
     try {
       const n = inbox.closeDaemonNotes();
@@ -343,7 +348,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   let server!: ReturnType<typeof Bun.serve>;
   const broadcast = (msg: ServerMessage) => server?.publish(TOPIC, JSON.stringify(msg));
   knowledge.onChange(() => broadcast({ type: "knowledge.updated", count: knowledge.list().length }));
-  // A Task's approval wait (#662, docs/design/device-auth.md): memory and the WebSocket only, never the DB.
+  // A Task's approval wait (docs/design/device-auth.md): memory and the WebSocket only, never the DB.
   const deviceAuths = new DeviceAuths((taskId, auth) => broadcast({ type: "task.deviceAuth", taskId, auth }));
   type SuggestCtxInput = { workspaceId?: string; cwd?: string; title?: string; prompt: string; scope?: string[]; kind?: string };
   const routingContext = (input: SuggestCtxInput): RoutingContext => {
@@ -354,7 +359,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   };
   const suggestFor = (input: SuggestCtxInput) => suggestRunner(routing.table, routingContext(input));
   const ruleSuggester = new RuleSuggester(() => routing.table);
-  // Where a suggestion turn runs (#25): an empty directory of its own, never `cfg.home` (the API token and the
+  // Where a suggestion turn runs: an empty directory of its own, never `cfg.home` (the API token and the
   // sqlite file live there) and never a repository. Read-only mode stops writes, not reads, and the text in that
   // prompt — task titles from the Inbox and imported sessions — is not the daemon's to trust.
   const suggestDir = join(cfg.home, "suggest");
@@ -380,11 +385,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     // the task is already in the log by the time it is asked about: it is no example of itself
     return new LlmSuggester({ adapter, cwd: suggestDir, model: llmCfg.model, permissionMode: ro.mode, examples: () => db.routingLog(DEFAULT_EXAMPLE_COUNT + 1).filter((r) => r.taskId !== taskId), onUsage, log: (m) => console.warn(m) });
   };
-  /** Stopped with the daemon (#1143): a suggestion turn still running ends, and nothing is written past the database's close. */
+  /** Stopped with the daemon: a suggestion turn still running ends, and nothing is written past the database's close. */
   const adviceStop = new AbortController();
   const adviceRunning = new Set<Promise<void>>();
   /**
-   * The LLM's proposal for a task that exists (#25, #1143): nothing waits for it. The rule table has already decided, and
+   * The LLM's proposal for a task that exists: nothing waits for it. The rule table has already decided, and
    * the task runs on without it; the answer is kept on the task when it comes in time, also after the task ended. `ctx`
    * was taken before the task was created, so the task is not its own history. Only task creation pays for it:
    * `POST /api/tasks/suggest` (typed into on every keystroke) stays rule-table-only.
@@ -439,14 +444,14 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         afterInsert?.(t);
       }, deferUntil === undefined ? {} : { deferUntil });
     } finally {
-      // a Task held at the limit (#2768) asks no LLM now: the advice would spend the very quota it waits for
+      // a Task held at the limit asks no LLM now: the advice would spend the very quota it waits for
       if (deferUntil === undefined) for (const id of saved) runRoutingAdvice(id, ctx);
     }
   };
   /** Thrown by `chooseWorkspace`: the 409 body. Never a silent default — that would read as "the daemon chose this". */
   const pickYourself = (why: string) => new Error(`Workspace を選んでください（${why}）`);
   /**
-   * "自動" (#135): `POST /api/tasks` without cwd and workspaceId. One read-only turn of the routing runner
+   * "自動": `POST /api/tasks` without cwd and workspaceId. One read-only turn of the routing runner
    * (`routing.llm` runner / model; `enabled` is not consulted — leaving the select on 自動 is the instruction,
    * `enabled` is the switch for runner suggestions) picks among the registered Workspaces.
    */
@@ -473,25 +478,25 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   };
   const approval = new ApprovalRules(knowledge, (task) => (task.workspaceId ? db.getWorkspace(task.workspaceId) : null), (id) => db.getWorkspace(id), () => ({ list: readPolicies(db), pbiOpen: (wsId, n) => { const ws = wsId ? db.getWorkspace(wsId) : null; return !!ws && storedBacklog(ws).items.some((i) => i.number === n); } }));
   const pricing = loadPricing([join(cfg.home, "pricing.json"), join(cfg.codeRoot, "packages", "core", "config", "pricing.json")]);
-  // The settings screen's price rows (#1402) over the file's table, read on every use so a PATCH prices the next usage
+  // The settings screen's price rows over the file's table, read on every use so a PATCH prices the next usage
   const pricingTable = (): PricingTable => ({ ...pricing.table, models: { ...pricing.table.models, ...settings().prices } });
-  // Attachments (#125): uploads wait in <home>/attachments/inbox until a turn sends them; a day-old leftover is swept at boot.
+  // Attachments: uploads wait in <home>/attachments/inbox until a turn sends them; a day-old leftover is swept at boot.
   const attachments = new AttachmentStore(db, cfg.attachmentsDir);
   const swept = attachments.sweep();
   if (swept) console.log(`attachments: removed ${swept} upload(s) that were never sent`);
-  // Artifacts (#1777): reports registered on the Task screen, copied under <home>/artifacts; a removed one is deleted a day later.
+  // Artifacts: reports registered on the Task screen, copied under <home>/artifacts; a removed one is deleted a day later.
   const artifacts = new ArtifactStore(db, cfg.artifactsDir, { privateTmp: (taskId) => privateTmpOf(join(cfg.home, "tmp"), taskId), deny: [cfg.tokenPath, cfg.dbPath, `${cfg.dbPath}-wal`, `${cfg.dbPath}-shm`], tmpRoots: [tmpdir()] });
   const sweptArtifacts = artifacts.sweep();
   if (sweptArtifacts) console.log(`artifacts: removed ${sweptArtifacts} registered report(s) removed a day ago`);
   const teleportCwds = new Set<string>();
   const teleportCwd = (cwd: string) => { try { return realpathSync(cwd); } catch { return resolve(cwd); } };
-  // "Continue locally" (#1306): memory only, like deviceAuths. Started by POST /api/tasks/:id/teleport, not by a terminal socket.
+  // "Continue locally": memory only, like deviceAuths. Started by POST /api/tasks/:id/teleport, not by a terminal socket.
   const teleports = new Map<string, TeleportProgress>();
   const setTeleport = (taskId: string, p: TeleportProgress) => {
     const was = teleports.get(taskId);
     if (was && was.phase === p.phase && was.question === p.question && was.message === p.message) return; // the same state again (a start, then the CLI's own first report)
     teleports.set(taskId, p); broadcast({ type: "task.teleport", taskId, progress: p }); };
-  // Claude Code in a terminal tab (#1574): memory only, like teleports; a socket on /ws is sent them all after hello (task.terminals).
+  // Claude Code in a terminal tab: memory only, like teleports; a socket on /ws is sent them all after hello (task.terminals).
   const terminals = new Map<string, TerminalStatus>();
   const setTerminal = (taskId: string, status: TerminalStatus | null) => {
     if (status === null) terminals.delete(taskId); else terminals.set(taskId, status);
@@ -504,14 +509,14 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     if (!pty || !task || task.runner !== "claude" || task.executionMode !== "cloud" || !task.cloudSession || tasks.isLive(task.id) || !existsSync(task.cwd) || !bin) {
       return "Cloudセッション・停止済みlauncher・cwd・Claude CLIを確認してください。";
     }
-    // The continuation runs in its own worktree (#1395): reservation, release and the busy check are about that
+    // The continuation runs in its own worktree: reservation, release and the busy check are about that
     // directory only, so a Local Task at work in the clone is neither stopped nor refused.
     let work: string;
     try { work = prepareTeleportWorktree(task.cwd, task.id); } catch (e) { return String((e as Error).message ?? e); }
     const cwd = teleportCwd(work);
     if (teleportCwds.has(cwd)) return "同じcwdのTeleport Terminalが使用中です。終了後に開始してください。";
     // Only a turn in flight blocks: a finished Local Task's process idles for the next reply (idleMs) or is already
-    // closing; Teleport starts once every one of them has exited. An archived one (#1142) can still hold its process.
+    // closing; Teleport starts once every one of them has exited. An archived one can still hold its process.
     const held = [...db.listTasks(), ...db.listTasks(true)].filter(t => t.executionMode === "local" && t.runner === "claude" && teleportCwd(t.cwd) === cwd && tasks.holdsProcess(t.id));
     const busy = held.find(t => isWorking(t, "gate"));
     if (busy) return `この Cloud Task の続きの Local Task「${busy.title.replace(/[\x00-\x1f\x7f]/g, " ")}」が作業中です。終わってから押してください。`;
@@ -544,11 +549,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     });
     return null;
   };
-  // The compose projects each task started (the kit's `docker` front writes them; #1418)
+  // The compose projects each task started (the kit's `docker` front writes them)
   const dockerLogDir = join(cfg.home, "docker");
   mkdirSync(dockerLogDir, { recursive: true });
   const mcpPolicy = loadMcpPolicy([join(cfg.home, "mcp.yaml"), join(cfg.codeRoot, "packages", "core", "config", "mcp.yaml")]);
-  // what a Task's Claude reads instead of the user-wide MCP servers (#2090): mcp.yaml `servers`, for its Workspace
+  // what a Task's Claude reads instead of the user-wide MCP servers: mcp.yaml `servers`, for its Workspace
   const taskMcpServers = (t: Task) => mcpServersFor(mcpPolicy, t.workspaceId ? (db.getWorkspace(t.workspaceId)?.name ?? null) : null);
   // The servers added in Settings as the adapters were built from them (main.ts reads the same row before this starts): a change
   // to the saved list takes effect on the next start, so what is sent and where follow this, not the row as it is now.
@@ -565,40 +570,40 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const ep = mcp.issue(t.id);
     return { workspace: { type: "http", url: ep.url, headers: { authorization: `Bearer ${ep.token}` } } };
   };
-  // a Task on a workspace whose backlog is kept here only (#2265): the kit's `backlog` picks it by id, not by a GitHub repository
+  // a Task on a workspace whose backlog is kept here only: the kit's `backlog` picks it by id, not by a GitHub repository
   const localBacklogEnv = (id: string): Record<string, string> => {
     const wsId = db.getTask(id)?.workspaceId;
     return wsId && db.getWorkspace(wsId)?.backlog === "switchboard" ? { BACKLOG_WORKSPACE: wsId } : {};
   };
   const tasks = new TaskManager(db, adapterMap, broadcast, { artifacts, originOf: opts.gitOrigin, beforeResume: t => { if (t.runner === "claude" && teleportCwds.has(teleportCwd(t.cwd))) throw new Error("Teleport Terminalが使用中です。終了後にLocal Taskを再開してください。"); }, idleMs: cfg.runnerIdleMs, suggest: (input) => suggestFor(input), approval: (task, ask) => {
       const v = approval.evaluate(task, ask);
-      // a saved policy answered it (#938): the use is kept with the policy
+      // a saved policy answered it: the use is kept with the policy
       if (v.decision === "allow" && v.match.source.startsWith("policy:")) {
         const id = v.match.source.slice("policy:".length);
         writePolicies(db, recordUse(readPolicies(db), id, { at: Date.now(), askId: `approval:${task.id}:${ask.id}`, taskId: task.id, issue: issueOf(task), subject: { kind: "approval", op: ask.kind, target: v.match.subject, conditions: [], head: null } }));
       }
       return v;
     }, pricing: pricingTable, defaultPermissionMode: savedDefaultMode, subagentEffort: (r) => settings().subagentEffort[r], defaultShadowRunner: () => settings().shadowRunner, attachments, privateTmpRoot: join(cfg.home, "tmp"), heavyStateDir: opts.heavyStateDir ?? heavyStateDir(homedir()), deviceAuthEnv: (id) => ({ DEVICE_AUTH_URL: `${localUrl()}/api/tasks/${id}/device-auth`, DEVICE_AUTH_TOKEN_FILE: cfg.tokenPath, SWITCHBOARD_DAEMON_HOME: cfg.home, BACKLOG_URL: `${localUrl()}/api/backlog`, BACKLOG_TOKEN_FILE: cfg.tokenPath, ...localBacklogEnv(id) }), otelFor: (id) => (settings().outbound.classifierLog ? { endpoint: `${localUrl()}/otel/${id}/v1/logs`, token: mcp.issue(id).token } : undefined), runnerTelemetry: () => settings().outbound.runnerTelemetry, dockerEnv: (id) => ({ DOCKER_MARK_LABEL: `${LABEL_KEY}=${id}`, DOCKER_MARK_LOG: join(dockerLogDir, `${id}.jsonl`) }), maxStopResumes: () => settings().quotaAndResume.maxStopResumes, maxRunners: () => settings().maxRunners, memoryHeadroom: () => (process.env.NODE_ENV === "test" ? null : memoryHeadroom()) /* the test daemons do not wait on the host's memory */, holdQueue: cfg.candidate, reviewRunner: () => settings().reviewRunner, mcpServers: startMcpServers, bedrock: (task) => { const b = bedrockOf(task.runner); if (b) bedrockTasks.add(task.id); else bedrockTasks.delete(task.id); return b; } });
-  // Terminal sessions (#91): what Claude Code wrote to ~/.claude/projects while nobody in Switchboard was watching.
+  // Terminal sessions: what Claude Code wrote to ~/.claude/projects while nobody in Switchboard was watching.
   const claudeDanger = new Set((adapters.find((a) => a.id === "claude")?.permissionModes ?? []).filter((m) => m.danger).map((m) => m.value));
   const history = new HistoryImporter(db, { projectsDir: cfg.claudeProjectsDir, pollMs: cfg.historyPollMs, pricing: pricingTable, broadcast, isLive: (id) => tasks.isLive(id), dangerModes: claudeDanger, log: (m) => console.warn(m) });
 
-  // Terminal tab (#16): null when no PTY can be opened in this distribution.
+  // Terminal tab: null when no PTY can be opened in this distribution.
   const pty = await (opts.loadPty ?? (() => PtyManager.load()))();
 
-  // Local API token (#31): enforced only off-loopback. Workspace MCP always needs its per-task token.
+  // Local API token: enforced only off-loopback. Workspace MCP always needs its per-task token.
   const token = loadOrCreateToken(cfg.tokenPath);
   const authRequired = !isLoopback(cfg.host);
-  // DNS rebinding (#1135): with no token asked, every route checks the Host names this machine (or the configured public
+  // DNS rebinding: with no token asked, every route checks the Host names this machine (or the configured public
   // URL, which is what its clients send). Off loopback the token / cookie guards instead and the Host is not looked at.
   const allowedHosts = new Set(LOOPBACK_HOSTNAMES);
   if (cfg.publicUrl && URL.canParse(cfg.publicUrl)) allowedHosts.add(new URL(cfg.publicUrl).hostname);
   else if (cfg.publicUrl) console.warn(`SWITCHBOARD_PUBLIC_URL is not a URL (${cfg.publicUrl}); only loopback names are allowed as Host`);
   const hostOk = (req: Request) => authRequired || hostAllowed(req, allowedHosts);
-  // The token, or on the cloud host the login cookie from the starter Lambda (#211) whose passkey the Starter still
-  // knows (#708); /mcp keeps its per-task tokens. `session` is the cookie that let it in, for a WebSocket's recheck.
+  // The token, or on the cloud host the login cookie from the starter Lambda whose passkey the Starter still
+  // knows; /mcp keeps its per-task tokens. `session` is the cookie that let it in, for a WebSocket's recheck.
   const sessionCheck = makeSessionCheck({ publicKey: cfg.sessionPublicKey, starterUrl: cfg.starterUrl, edge: cfg.edgeHeaderValue, keepMs: opts.sessionRecheckMs });
-  // On the cloud host (the passkey login is on) a token counts only from this machine (#748): the runners' /mcp calls and
+  // On the cloud host (the passkey login is on) a token counts only from this machine: the runners' /mcp calls and
   // sb-rescue's probe. From anywhere else — CloudFront's VPC origin included — only the cookie. Judged by the connection's
   // peer, never a header. A Mac (no public key) is unchanged.
   type Peer = { requestIP(r: Request): { address: string } | null } | undefined;
@@ -627,7 +632,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     void mcp.revoke(taskId);
     deviceAuths.clear(taskId);
     pty?.close(taskId);
-    // What the task detached (setsid / nohup) with the daemon's mark in its environment (#1397); a task with a
+    // What the task detached (setsid / nohup) with the daemon's mark in its environment; a task with a
     // resume planned keeps it, as at the start
     if (task.resumeAt !== null) return;
     // (a `done` task may be resumed with its files: those are swept at the start, sweepPrivateTmps)
@@ -636,7 +641,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     } catch {
       // what cannot be removed stays; the cleanup below goes on
     }
-    // its compose projects and labelled containers, unless another task still open started the same project (#1418)
+    // its compose projects and labelled containers, unless another task still open started the same project
     void cleanupContainers(taskId, { logDir: dockerLogDir, isOpen: (id) => tasks.isLive(id) || ((t) => t !== null && !["done", "error", "aborted"].includes(t.status))(db.getTask(id)) }).then((r) => {
       if (r) tasks.record(taskId, { t: "status", text: "skipped" in r ? `コンテナの片付けを飛ばしました（${r.skipped}）` : `コンテナを片付けました（プロジェクト ${r.projects.length} 件、コンテナ ${r.containers} 件${r.failed > 0 ? `、失敗 ${r.failed} 件` : ""}）` });
     }).catch(() => undefined);
@@ -645,27 +650,27 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     }).catch(() => undefined);
   });
 
-  // Self-dev (#18): after a turn on the meta workspace finishes successfully, run the repository's checks.
+  // Self-dev: after a turn on the meta workspace finishes successfully, run the repository's checks.
   // Off inside `bun test` and inside a check subprocess (no recursion) unless a test opts in explicitly.
   const checksOn = opts.selfdevChecks ?? checksEnabledByDefault();
   const selfdev = new SelfDev(db, cfg.repoRoot, (taskId, run) => broadcast({ type: "checks.updated", taskId, ok: run.ok }));
-  // the backlog is read from what was imported (#885); GitHub is asked by the sync only, and for its budget (#549, below)
-  // the candidate runs on a copy of the database: it sends nothing, or what it sent would be sent again (#886)
+  // the backlog is read from what was imported; GitHub is asked by the sync only, and for its budget (below)
+  // the candidate runs on a copy of the database: it sends nothing, or what it sent would be sent again
   const backlog = new BacklogSync(db, opts.gh ?? runGh, undefined, undefined, !cfg.candidate, (ws) => { const w = db.getWorkspace(ws.id); return !w || backlogReads(w); });
   const clones = new WorkspaceClones(db, opts.gh ?? runGh, cfg.repoRoot, () => broadcast({ type: "workspaces.updated" }));
-  // GitHub's GraphQL budget (#549): read at most once a minute, for backlog-next, the stage buttons and the ledger
+  // GitHub's GraphQL budget: read at most once a minute, for backlog-next, the stage buttons and the ledger
   const githubBudget = new GithubBudgetCache(opts.gh ?? runGh, undefined, undefined, undefined, () => backlog.hostWait());
-  // the flow of the closed PBIs (#651): the stored backlog, and GitHub for the merged PRs, so an hour is held; the repository is the import's, as for the backlog
+  // the flow of the closed PBIs: the stored backlog, and GitHub for the merged PRs, so an hour is held; the repository is the import's, as for the backlog
   const flowWorkspaces = (): FlowWorkspace[] => db.listWorkspaces().map((w) => ({ id: w.id, name: w.name, path: w.path, repository: db.getWorkspaceBacklogSource(w.id)?.repository ?? null }));
   const flow = new FlowCache((now) => flowView(opts.gh ?? runGh, flowWorkspaces(), db, 30, now), () => flowScope(flowWorkspaces()));
-  // a request that was out when the daemon stopped is looked for before it is sent again (#886)
+  // a request that was out when the daemon stopped is looked for before it is sent again
   db.recoverBacklogOperations();
   /**
    * A workspace's stored backlog, without waiting for GitHub. One never imported and not tried yet gets its import asked
    * for, once: a failed one is asked again by 再読込, the daemon's boot or the scheduled sweep, not by every look.
    */
   const storedBacklog = (ws: Workspace, released?: (oid: string) => boolean | null): StoredBacklog => {
-    // a PBI whose stage Task runs counts as other work in the overlap judgement, before its Tasks are In progress (#3228)
+    // a PBI whose stage Task runs counts as other work in the overlap judgement, before its Tasks are In progress
     const active = (n: number) => !!activeStageTask(ws.id, n);
     const stored = backlog.read(ws, { released, active });
     if (stored.fetchedAt !== null || stored.error || stored.syncing) return stored;
@@ -681,15 +686,15 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     backlog.request(ws);
     return { fetchedAt, ...backlog.state(ws) };
   };
-  /** Whether the backlog reads the workspace (#2459): the meta workspace only on an instance that develops Switchboard itself. The one judgement; BacklogSync.sync and the lists use it. */
+  /** Whether the backlog reads the workspace: the meta workspace only on an instance that develops Switchboard itself. The one judgement; BacklogSync.sync and the lists use it. */
   function backlogReads(ws: Pick<Workspace, "kind">): boolean {
     return ws.kind !== "meta" || settings().developSelf;
   }
   const metaWorkspace = () => db.listWorkspaces().find((w) => w.kind === "meta");
   const DEVELOP_SELF_OFF = "Switchboard 自体を開発しない設定です（設定画面で切り替え）";
   /**
-   * Evals (#1218): the rules row is counted at each turn's end (below); a task without one — from before #1218, or
-   * read while its first turn runs — is counted now and the row kept, so the list (#1221) never reads every task's
+   * Evals: the rules row is counted at each turn's end (below); a task without one — from before rule metrics were counted, or
+   * read while its first turn runs — is counted now and the row kept, so the list never reads every task's
    * events. A Cloud task has no events here and is not evaluated.
    */
   const countRules = (t: Task) => {
@@ -698,16 +703,16 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     return row.json;
   };
   const evalsFor = (t: Task): TaskEvals => {
-    if (t.executionMode === "cloud") return { ...db.evalsOf(t.id), rules: null }; // no events here to count; the person may still rate it (#1220)
+    if (t.executionMode === "cloud") return { ...db.evalsOf(t.id), rules: null }; // no events here to count; the person may still rate it
     const stored = db.evalsOf(t.id);
     const rules = stored.rules ?? countRules(t);
     // status, outcome and cost move after the turn's end (the judge, the person, a process that dies without a session.end): the task's own values win over the row's snapshot
     return { ...stored, rules: { ...rules, status: t.status, outcome: t.outcome, costUsd: db.taskCost(t.id).costUsd } };
   };
   /**
-   * The runner a Task that starts by itself is decided on, before 上限のときの代わり: the kind's own (#1337) when it is
+   * The runner a Task that starts by itself is decided on, before 上限のときの代わり: the kind's own when it is
    * detected, else the caller's (a schedule's), else the saved one; only a saved one that is not detected falls back to
-   * claude. null = none to start on. startMetaTask starts on it, and backlog-next reads its usage (#834).
+   * claude. null = none to start on. startMetaTask starts on it, and backlog-next reads its usage.
    */
   const decidedRunner = (kind: AutoStartKind, runner?: RunnerId): RunnerId | null => {
     const auto = settings().autoStart;
@@ -717,13 +722,13 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     return adapterMap.has(configured) ? configured : !runner && adapterMap.has("claude") ? "claude" : null;
   };
   /**
-   * 上限のときの代わり (#834): the runner a Task that starts by itself (a stage button, feedback, a schedule) starts on,
+   * 上限のときの代わり: the runner a Task that starts by itself (a stage button, feedback, a schedule) starts on,
    * and the transcript's status line when it is not the decided one.
    */
   const autoRunner = (decided: RunnerId): { runner: RunnerId; note?: string; deferUntil?: number; deferNote?: string } => {
     const now = Date.now();
     const r = fallbackRunner(decided, settings().autoStart, (x) => db.quotaFor(x), (x) => adapterMap.has(x), now);
-    // no way round the limit (#2768): the Task is made without starting and starts when the window resets
+    // no way round the limit: the Task is made without starting and starts when the window resets
     if (r.held) return { runner: r.runner, deferUntil: r.held.resetsAt + RESUME_MARGIN_MS, deferNote: deferNote(r.held, now) };
     return r.from ? { runner: r.runner, note: fallbackNote(r.runner, r.from, now) } : { runner: r.runner };
   };
@@ -731,7 +736,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
    * A fixed-prompt Task on the meta workspace (feedback, backlog stage buttons, backlog-next): the saved
    * 自動で始まる Task の既定 (`settings.autoStart`), else claude. A schedule passes its own runner and id. A backlog stage button on another
    * workspace's Issue, and a request filed for another workspace, pass that workspace (`ws`). The kind's own choice
-   * (`autoStart.byKind`, #1337) wins over both, when its runner is detected; otherwise it is as if there were none.
+   * (`autoStart.byKind`) wins over both, when its runner is detected; otherwise it is as if there were none.
    */
   const startMetaTask = async (req: { kind: AutoStartKind; title: string; prompt: string; attachmentIds?: string[]; runner?: RunnerId; model?: string; effort?: string; scheduleId?: string; shadowRunner?: null; budgetUsd?: number | null; ws?: Workspace; stage?: Task["stage"]; process?: string; processReason?: string; note?: string }): Promise<{ task: Task } | { error: string; status: number }> => {
     const meta = req.ws ?? metaWorkspace();
@@ -742,11 +747,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     if (own && adapterMap.has(own.runner)) req = { ...req, runner: own.runner, model: own.model, effort: own.effort };
     const decided = decidedRunner(req.kind, req.runner);
     if (!decided) return { error: "ランナーが検出されていません", status: 409 };
-    // the decided runner at its limit: the order's next one, on its CLI default model and effort (#834)
+    // the decided runner at its limit: the order's next one, on its CLI default model and effort
     const { runner, note, deferUntil, deferNote: held } = autoRunner(decided);
     // the saved model goes with the saved runner only; a caller's own runner brings its own model (empty = the CLI default)
     const model = note ? "" : req.runner ? req.model : runner === auto.runner ? auto.model : "";
-    // the effort follows the same rule (#833); a saved one the runner no longer lists falls back to the CLI default
+    // the effort follows the same rule; a saved one the runner no longer lists falls back to the CLI default
     const wanted = note ? "" : req.runner ? req.effort : runner === auto.runner ? auto.effort : "";
     const effort = wanted && !tasks.checkEffort(runner, wanted) ? wanted : "";
     if (req.attachmentIds?.length) {
@@ -774,7 +779,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     }
   };
   /**
-   * A request Task (request-to-backlog): the feedback button's 要望 and a throwaway app used on enough days (#3682).
+   * A request Task (request-to-backlog): the feedback button's 要望 and a throwaway app used on enough days.
    * `workspaceId` files it in that workspace's repository, as its backlog stage buttons act there; omitted = the meta.
    * An artifact source must name a known artifact; its 出典 gets the Task it came from and where its copy is.
    */
@@ -793,7 +798,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     return startMetaTask({ kind: "request", ws, title: feedbackTitle(input.text), prompt, attachmentIds: input.attachmentIds });
   };
   /**
-   * Task ごとの実装のモデル（試験, #2769) of an 実装 Task that starts now: the saved one while the Task starts on claude
+   * Task ごとの実装のモデル（試験） of an 実装 Task that starts now: the saved one while the Task starts on claude
    * (its kind's runner, after 上限のときの代わり) and the model has a subagent alias; else "" — the prompt as before.
    */
   const completeTaskModelFor = (runner?: RunnerId): string => {
@@ -805,10 +810,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   /** A stage Task runs on the workspace whose repository the Issue is in, so another repository's #n is not the meta's #n. */
   const activeStageTask = (workspaceId: string, n: number) => db.activeStageTask(workspaceId, n);
   // Issues whose stage Task is being created right now (`<workspaceId>:<n>` → n): nothing awaits in startMetaTask since the routing turn moved
-  // after creation (#1143), but the running/waiting check must not depend on that staying so.
+  // after creation, but the running/waiting check must not depend on that staying so.
   const startingStage = new Map<string, { n: number; action: BacklogAction }>();
   /**
-   * Starts one stage Task of an Issue (#936): the button, backlog-next and the resume after an answer all come here, so
+   * Starts one stage Task of an Issue: the button, backlog-next and the resume after an answer all come here, so
    * the same Issue never has two. A running / waiting one, or one being created, is answered instead of a second; nothing
    * awaits between that check and the mark, and the mark is taken off however the start ends.
    */
@@ -830,12 +835,12 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     startingStage.set(key, { n: item.number, action });
     try {
       const other = otherRepo(input.meta, ws);
-      // the person's newest answer on the screen goes in as their words (#2745)
+      // the person's newest answer on the screen goes in as their words
       const source = action === "check" ? null : db.getWorkspaceBacklogSource(ws.id);
       const answer = source ? screenAnswer(db, source, item.number) : null;
       // the stage runs under the pipeline candidate (docs/design/process-kernel.md, K4); its definition is the meta checkout's, like the skills, not the running release's.
       // A checkout without it (behind, or mid-edit) answers like any other reason a stage cannot start, so a button gets its 409 and a sweep skips the item
-      // 直行で直す (#3690) runs under the direct candidate, the stages under the pipeline
+      // 直行で直す runs under the direct candidate, the stages under the pipeline
       let def;
       try {
         def = loadProcess(action === "direct" ? "p1-direct" : "p0-pipeline", input.meta.path);
@@ -849,19 +854,19 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       startingStage.delete(key);
     }
   };
-  /** Why `backlog.settle` failed, for a line in backlog-next's log (#2264). */
+  /** Why `backlog.settle` failed, for a line in backlog-next's log. */
   const notSettled = (e: unknown) => (e instanceof BacklogError ? e.message : String((e as Error)?.message ?? e).slice(0, 200));
   /** What an active stage Task (Db's activeStage) is at, for a line in backlog-next's log: its status, else what its ended turn still waits on. */
   const activeAs = (t: Task): string =>
     t.queuedAt !== null ? "実行枠待ち" : IN_FLIGHT.has(t.status) ? t.status : t.status === "background" ? "裏の処理を待っている" : workPhase(t) === "resume" ? "再開を待っている" : t.judgingAt !== null ? "最後の返答の判定を待っている" : "デーモンのジョブを待っている";
-  /** A Task's screen mockups (#2221, #2296): its HTML artifacts, not removed; none for a Task that does not exist. */
+  /** A Task's screen mockups: its HTML artifacts, not removed; none for a Task that does not exist. */
   const mockupsOf = (id: string) => artifacts.list(id).filter((a) => a.removedAt === null && a.kind !== "url" && (a.mime === "text/html" || a.mime === "application/xhtml+xml"));
   const withActive = (b: Backlog): Backlog => ({
     ...b,
     items: b.items.map((i) => {
       const t = db.lastStageTask(i.workspaceId, i.number);
-      // an 実装 started after the waits were written makes them old (#817): it claimed, or it ended before it could —
-      // then it is not started again by itself. A 状況確認 only reads, so the newest 実装 is the one compared (#853)
+      // an 実装 started after the waits were written makes them old: it claimed, or it ended before it could —
+      // then it is not started again by itself. A 状況確認 only reads, so the newest 実装 is the one compared
       const impl = i.waitsAt ? db.lastStageTask(i.workspaceId, i.number, "complete") : null;
       const old = !!impl && impl.createdAt > Date.parse(i.waitsAt!);
       const item: BacklogItem = {
@@ -875,19 +880,19 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       return { ...item, replyWaiting: isReplyWaiting(item) };
     }),
   });
-  /** Every workspace's stored backlog with its stage Tasks (#885, withActive); `refresh` imports each first (GET /api/backlog). */
+  /** Every workspace's stored backlog with its stage Tasks (withActive); `refresh` imports each first (GET /api/backlog). */
   const readBacklog = async (refresh: boolean): Promise<Backlog> => {
     const read = await Promise.all(db.listWorkspaces().filter(backlogReads).map(async (ws) => {
       if (!existsSync(ws.path)) return { ws, stored: null };
       if (refresh) await backlog.sync(ws, undefined, { full: true }).catch(() => undefined);
-      // the prerequisites judged as backlog-next judges them (#937)
+      // the prerequisites judged as backlog-next judges them
       return { ws, stored: await storedBacklogReleased(ws) };
     }));
     const errors = read.flatMap(({ ws, stored }) => {
       const message = !stored ? "workspace directory does not exist" : (stored.error ?? (stored.fetchedAt === null ? "まだ GitHub から取り込んでいません" : null));
       return message ? [{ workspaceId: ws.id, workspaceName: ws.name, message, kind: stored?.errorKind ?? ("other" as const) }] : [];
     });
-    // a workspace kept only here was never read from GitHub: its time is not "imported from GitHub" (#2362)
+    // a workspace kept only here was never read from GitHub: its time is not "imported from GitHub"
     const imported = read.flatMap(({ ws, stored }) => (ws.backlog === "github" && stored?.fetchedAt != null ? [stored.fetchedAt] : []));
     return withActive({
       fetchedAt: imported.length ? Math.min(...imported) : Date.now(),
@@ -900,8 +905,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   /** One workspace's row of `syncs`: what GET /api/backlog and GET /api/backlog/syncs both answer. */
   const syncEntry = (ws: Workspace, stored: Pick<StoredBacklog, "fetchedAt" | "syncing" | "error">) => ({ workspaceId: ws.id, backlog: ws.backlog, enabling: enablingOf(db, db.getWorkspaceBacklogSource(ws.id)), repository: db.getWorkspaceBacklogSource(ws.id)?.repository ?? null, syncing: stored.syncing, syncedAt: stored.fetchedAt, ...workspaceSyncOf(db, ws, { importFailed: stored.error !== null }) });
   /**
-   * A queued PBI's stored Issue (#3955): its title, and whether it is closed; null when not stored. Made once per call that
-   * looks up several rows, so a workspace's Issues are read once, not once per row (#4120).
+   * A queued PBI's stored Issue: its title, and whether it is closed; null when not stored. Made once per call that
+   * looks up several rows, so a workspace's Issues are read once, not once per row.
    */
   const queuedIssues = () => {
     const heads = new Map<string, ReturnType<typeof storedIssueHeads>>();
@@ -910,7 +915,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       return heads.get(e.workspaceId)!.get(e.number) ?? null;
     };
   };
-  /** The stored queue without the PBIs whose stored Issue is closed (#3955): those go to its `ended`, stored. Read and written at once, no wait between. */
+  /** The stored queue without the PBIs whose stored Issue is closed: those go to its `ended`, stored. Read and written at once, no wait between. */
   const prunedQueue = (): BacklogQueue => {
     const queue = readQueue(db);
     const issueOf = queuedIssues();
@@ -918,13 +923,13 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     if (pruned !== queue) db.setSetting(QUEUE_KEY, pruned);
     return pruned;
   };
-  /** Called after each PUT of the queue (#3955), with the queue before and after: an enabled queue starts what it may (#3966). */
+  /** Called after each PUT of the queue, with the queue before and after: an enabled queue starts what it may. */
   const onQueueSaved = (before: BacklogQueue, after: BacklogQueue): void => {
     if (after.enabled && !cfg.candidate) void startFromQueue(before.enabled ? "saved" : "enabled");
   };
-  /** A start that failed after an answer (#936), by the question's id: kept in `ask_answers` for a day (#1139). */
+  /** A start that failed after an answer, by the question's id: kept in `ask_answers` for a day. */
   const failed = (id: string) => db.askAnswer(id)?.failure ?? null;
-  /** What the saved policies (#938) need from the daemon: the subject of a tool approval and the Knowledge confirm rules. */
+  /** What the saved policies need from the daemon: the subject of a tool approval and the Knowledge confirm rules. */
   const policyEnv = (b: Backlog): PolicyEnv => ({
     policies: readPolicies(db),
     pbiOpen: (n) => b.items.some((i) => i.number === n),
@@ -942,16 +947,16 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     },
   });
   /**
-   * The questions now (#935): the open ones and those answered / resolved within the day, one per
+   * The questions now: the open ones and those answered / resolved within the day, one per
    * question, from the stored backlog (no GitHub call) and the Tasks.
    */
   /**
-   * A policy that did not apply because the PR's head changed (#938), by the question's id: the list does not read PRs, so
+   * A policy that did not apply because the PR's head changed, by the question's id: the list does not read PRs, so
    * the difference is kept when applying read it, and shown as the question's `previous` until it is answered or gone.
    */
   /**
    * A decision's id names its answer's time, so the question a policy answered shows under another id once the answer is
-   * read back: each use of a decision is tied to the answered question of its Issue, in order, and kept (#938).
+   * read back: each use of a decision is tied to the answered question of its Issue, in order, and kept.
    */
   const tieAnswers = (all: Ask[]) => {
     const list = readPolicies(db);
@@ -972,7 +977,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   };
   const headMisses = new Map<string, NonNullable<Ask["policy"]["previous"]>>();
   /**
-   * The daemon's notices (#2866) from the current state: a workspace a Task cannot use (#2799: a rebuild that cloned it
+   * The daemon's notices from the current state: a workspace a Task cannot use (a rebuild that cloned it
    * from elsewhere, or could not). Their first sight and resolution are kept in one setting, written only when they move.
    */
   const currentNotices = (now: number, batches: AskBatch[]): Ask[] => {
@@ -989,13 +994,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     };
     // a disabled scan's last findings are still there: only a clean result resolves them
     const scans = db.listSchedules().filter((s) => s.action === "secret-scan").map((s) => ({ schedule: { id: s.id, title: s.title }, workspace: where(s.workspaceId), result: s.lastResult }));
-    // approval-window (#2054): once a firing ran, the batches still waiting, as of now
+    // approval-window: once a firing ran, the batches still waiting, as of now
     const windows = db.listSchedules().filter((s) => s.action === "approval-window" && s.enabled && s.lastResult).map((s) => ({ schedule: { id: s.id, title: s.title }, workspace: where(s.workspaceId), note: approvalWindowNote(batches) }));
-    // the same firing (#2792): the security merge checks still waiting, a notice of its own
-    const merges = db.listSchedules().filter((s) => s.action === "approval-window" && s.enabled && s.lastRunAt).map((s) => ({ schedule: { id: s.id, title: s.title }, workspace: where(s.workspaceId), note: securityMergeNote(batches, s.lastRunAt, now) }));
-    // the same firing (#2148): the newest tag held for running Tasks since before it fired
+    // the same firing: the newest tag held for running Tasks since before it fired
     const promotions = db.listSchedules().filter((s) => s.action === "approval-window" && s.enabled && s.lastRunAt).map((s) => ({ schedule: { id: s.id, title: s.title }, workspace: where(s.workspaceId), note: promotionNote(promotionHold, busyTasks(), s.lastRunAt, now) }));
-    const { asks, record } = noticeAsks({ unusable, scans, windows, merges, promotions, now }, had);
+    const { asks, record } = noticeAsks({ unusable, scans, windows, promotions, now }, had);
     if (record !== had) db.setSetting(NOTICES_KEY, record);
     return asks;
   };
@@ -1020,12 +1023,12 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     tieAnswers(all);
     for (const id of headMisses.keys()) if (!all.some((a) => a.id === id && (a.state === "open" || a.state === "held"))) headMisses.delete(id);
     const asks = all.map((a) => (headMisses.has(a.id) ? { ...a, policy: { ...a.policy, previous: headMisses.get(a.id)! } } : a));
-    // the same stop records as above, each Task's own (#2046)
+    // the same stop records as above, each Task's own
     const batches = batchAnswers.decorate(approvalBatches([...live.values()].map((t) => ({ task: t, records: db.listStopRecords([t.id]) })), asks));
-    // the daemon's notices (#2866) last: one of them reads the batches
+    // the daemon's notices last: one of them reads the batches
     return { backlog: b, asks: rankAsks(dedupeAsks([...asks, ...currentNotices(now, batches)]), b.items), batches };
   };
-  /** One login / one approval for the Tasks of a batch (#2046). */
+  /** One login / one approval for the Tasks of a batch. */
   const batchAnswers: BatchAnswers = new BatchAnswers({
     // the person approved this Task's own operation: not copied to a shadow running alongside it
     send: (taskId, text) => tasks.send(taskId, text, { mirror: false }),
@@ -1033,27 +1036,25 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     stopRecords: (id) => db.listStopRecords([id]),
     batches: async () => (await currentAsks()).batches,
     deviceAuth: (id) => deviceAuths.get(id),
-    ask: async (id) => (await currentAsks()).asks.find((a) => a.id === id) ?? null,
-    answerAsk: (id, answer) => submitAnswer(id, answer),
   });
-  /** A stage Task's permission stop with a tool approval waiting is answered by that approval, not refused (#936). */
+  /** A stage Task's permission stop with a tool approval waiting is answered by that approval, not refused. */
   const approvalPendingOf = () => {
     const approving = tasks.pendingApprovals().map((a) => db.getTask(a.taskId)).filter((t) => t !== null);
     return (i: BacklogItem) => approving.some((t) => t.workspaceId === i.workspaceId && t.stage?.issue === i.number);
   };
-  /** A Task's answer as it goes on now (#936): its resume read again from the Task (running, the usage limit, failed). */
+  /** A Task's answer as it goes on now: its resume read again from the Task (running, the usage limit, failed). */
   const nowOf = (r: AskAnswerResult): AskAnswerResult => {
     const a = r.ask;
     const t = a && !a.issue && a.task && a.state === "answered" ? db.getTask(a.task.id) : null;
     return t && a ? { ...r, ask: { ...a, resume: resumeOfTask({ task: t, repliedAt: a.changedAt, failure: failed(a.id) }) } } : r;
   };
-  /** An answer being written, by the question's id (#936): a second answer to the same question waits for it. */
+  /** An answer being written, by the question's id: a second answer to the same question waits for it. */
   const answering = new Map<string, Promise<{ status: number; body: object }>>();
-  // What an answer answered, by the question's id, is `ask_answers` for a day (#936, #1139): a resend whose reply was lost gets it again, nothing written twice.
+  // What an answer answered, by the question's id, is `ask_answers` for a day: a resend whose reply was lost gets it again, nothing written twice.
 
   /**
-   * Answers one question of the backlog (#936): checked against the question now (changed → 409 and nothing written),
-   * written where it was asked (kept here and sent to GitHub, #886), then — only after that, and unless a hold or something
+   * Answers one question of the backlog: checked against the question now (changed → 409 and nothing written),
+   * written where it was asked (kept here and sent to GitHub), then — only after that, and unless a hold or something
    * an answer does not take away stands in the way — the work goes on through startStage.
    */
   const answerAsk = async (id: string, answer: AskAnswer, pre: { pr: number; facts: PrFacts } | null = null, by: AnswerPolicy | null = null): Promise<{ status: number; body: object }> => {
@@ -1070,7 +1071,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       const why = ask.blockers.length ? ask.blockers.map((b) => b.detail) : ["この問いには画面から答えられません"];
       return changed("回答だけでは進められない問いです", why, ask);
     }
-    // a daemon's notice (#2866): only a scan's is answered, by closing it as a false positive — the same findings stay closed
+    // a daemon's notice: only a scan's is answered, by closing it as a false positive — the same findings stay closed
     if (ask.kind === "notice") {
       if (answer.kind !== "dismiss" || !ask.answers.includes("dismiss")) return { status: 422, body: { error: "このお知らせは閉じるだけです" } };
       const record = db.getSetting<NoticeRecord>(NOTICES_KEY, {});
@@ -1080,8 +1081,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       // the question as it is after the answer: closed, so the screen keeps no button on it
       return { status: 200, body: { ask: { ...ask, state: "resolved", changedAt: Date.now(), answers: [] }, already: false, changes: [] } satisfies AskAnswerResult };
     }
-    if (!ask.issue && ask.task && (ask.kind === "approval" || ask.kind === "check" || ask.kind === "stop")) return answerTask(id, ask, answer, pre, by);
-    // a stage Task's stop is answered on its Issue by its grant only (#2745): the ## 回答 the next stage Task gets as the person's words
+    if (!ask.issue && ask.task && (ask.kind === "approval" || ask.kind === "check" || ask.kind === "stop")) return answerTask(id, ask, answer, by);
+    // a stage Task's stop is answered on its Issue by its grant only: the ## 回答 the next stage Task gets as the person's words
     const granted = ask.kind === "stop" && answer.kind === "grant";
     if (ask.kind !== "decision" && ask.kind !== "confirmation" && !granted) return { status: 422, body: { error: `${ask.kind} の問いにはここから答えられません` } };
     if (granted && !ask.grant) return { status: 409, body: { error: "許可文がありません" } };
@@ -1135,7 +1136,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     if (!item) return done(null);
     const blockers = blockersOf({ waits: item.waits, stops: item.stopSummary, approvalPending: approvalPendingOf()(item) });
     if (blockers.length) return done({ state: "queued", reason: blockers.map((b) => b.detail).join("・"), taskId: null, at });
-    // a saved policy's answer is backlog-next's, not the person's: an item on hold does not go on from it (#2930)
+    // a saved policy's answer is backlog-next's, not the person's: an item on hold does not go on from it
     if (by && item.onHold) return done({ state: "queued", reason: ON_HOLD_RESUME, taskId: null, at });
     const action = ask.kind === "confirmation" ? (item.closable ? "close" : null) : item.stage === "in-progress" ? "complete" : (ACTION_FOR_STAGE[item.stage] ?? null);
     if (!action) return done(null);
@@ -1165,7 +1166,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     return !cur || cur.revokedAt !== null || (cur.expiresAt !== null && Date.now() >= cur.expiresAt) ? "方針が無効になったか期限が切れたため、答えませんでした" : null;
   };
 
-  /** The one line that says a saved policy answered (#938): written with the answer, where the person reads it. */
+  /** The one line that says a saved policy answered: written with the answer, where the person reads it. */
   const basisLine = (p: AnswerPolicy, subject: PolicySubject | null) => {
     const scope = { once: "今回のみ", pbi: "この PBI 内", repo: "このリポジトリ" }[p.scope];
     const when = [...p.when, ...(subject?.conditions.filter((c) => c.key === "merge-ask") ?? [])].map((c) => `${c.key}=${c.value}`).join(" ");
@@ -1173,8 +1174,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   };
 
   /**
-   * One answer, once (#936): a resend gets the first one's result, a second at the same time waits for the first. The
-   * screen's POST and a saved policy's application (#938) both come through here.
+   * One answer, once: a resend gets the first one's result, a second at the same time waits for the first. The
+   * screen's POST and a saved policy's application both come through here.
    */
   const submitAnswer = async (id: string, answer: AskAnswer, policy?: PolicyInput, by: AnswerPolicy | null = null, pre: { pr: number; facts: PrFacts } | null = null): Promise<{ status: number; body: object }> => {
     // no await from here until the answer is in `answering`: a second one for the same question waits for it
@@ -1191,7 +1192,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     try {
       const r = await p;
       // only an answer closes the question: a hold leaves it open to the person, who answers it later by the same id
-      // a notice closed by dismiss (#2866) is remembered the same way: it comes back resolved
+      // a notice closed by dismiss is remembered the same way: it comes back resolved
       const closed = (r.body as AskAnswerResult).ask;
       if (r.status === 200 && (closed?.state === "answered" || (closed?.kind === "notice" && closed.state === "resolved"))) db.rememberAskAnswer(id, { at: Date.now(), result: r.body as AskAnswerResult });
       return r;
@@ -1201,7 +1202,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   };
 
   /**
-   * Answers the open questions a saved policy matches (#938), through the same answer as the screen's, with the policy and
+   * Answers the open questions a saved policy matches, through the same answer as the screen's, with the policy and
    * its basis written with it. Run when a Task's turn ends and when backlog-next fires; never on a timer of its own. A
    * question the policy does not match, or whose answer is refused (changed, GitHub down), stays the person's.
    */
@@ -1212,7 +1213,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       const { asks, backlog: b } = await currentAsks();
       for (const ask of asks) {
         if (judgeStop.signal.aborted) return;
-        if (ask.state !== "open" || ask.needs !== "person" || (ask.kind !== "check" && ask.kind !== "decision") || !ask.subject || !ask.answers.length || ask.blockers.some((b) => b.kind === "runner")) continue;
+        if (ask.state !== "open" || ask.needs !== "person" || ask.kind !== "decision" || !ask.subject || !ask.answers.length || ask.blockers.some((b) => b.kind === "runner")) continue;
         let subject = ask.subject;
         const ws = ask.workspace ? db.getWorkspace(ask.workspace.id) : null;
         const source = ws ? db.getWorkspaceBacklogSource(ws.id) : null;
@@ -1236,8 +1237,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         const moved = hit ? undefined : matched.misses.find((x) => x.why === "PR の差分が変わった");
         if (moved) headMisses.set(ask.id, { id: moved.policy.id, answer: moved.policy.answer, at: moved.policy.updatedAt, why: moved.why, changes: subjectChanges(moved.policy.uses[0]?.subject ?? moved.policy.from, subject) });
         else headMisses.delete(ask.id);
-        if (!hit || !ask.answers.includes(hit.answer.kind)) continue;
+        if (!hit) continue;
         const bare = (c: string) => c.replace(/^[^:]*: /, "");
+        if (!ask.answers.includes(hit.answer.kind)) continue;
         const answer: AskAnswer = hit.answer.kind === "choice" ? { kind: "choice", choice: ask.choices.find((c) => bare(c) === bare((hit.answer as { choice: string }).choice)) ?? hit.answer.choice, ...(hit.answer.note ? { note: hit.answer.note } : {}) } : hit.answer;
         const r = await submitAnswer(ask.id, answer, undefined, hit, pre);
         if (r.status === 200 && !(r.body as AskAnswerResult).already) {
@@ -1249,7 +1251,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   };
 
   /**
-   * An answer that is saved as a policy too (#938): the policy is checked first (a refusal is 409 and nothing is written or
+   * An answer that is saved as a policy too: the policy is checked first (a refusal is 409 and nothing is written or
    * sent), the answer goes the usual way, and only an answer that was written saves it.
    */
   const answerWithPolicy = async (id: string, answer: AskAnswer, input: PolicyInput): Promise<{ status: number; body: object }> => {
@@ -1287,20 +1289,20 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   };
 
   /**
-   * Answers one question of a Task (#936): a tool approval through the Task's pending permission, a check or a stop of a
-   * Task with no Issue as the person's reply — the reply is its record and its resume. A check about a PR that moved since
-   * is 409 with nothing sent. A reply the Task refuses (its budget) is not sent: the question stays open, its resume failed.
+   * Answers one question of a Task: a tool approval through the Task's pending permission, a check or a stop of a
+   * Task with no Issue as the person's reply — the reply is its record and its resume. A Task's question reads no PR: the
+   * Task checks what it stopped at again when it goes on (a merge goes through merge-gate again). A reply the Task refuses
+   * (its budget) is not sent: the question stays open, its resume failed.
    */
-  const answerTask = async (id: string, ask: Ask, answer: AskAnswer, pre: { pr: number; facts: PrFacts } | null = null, by: AnswerPolicy | null = null): Promise<{ status: number; body: object }> => {
+  const answerTask = async (id: string, ask: Ask, answer: AskAnswer, by: AnswerPolicy | null = null): Promise<{ status: number; body: object }> => {
     const taskId = ask.task!.id;
-    let moved: string[] = [];
     const changed = (error: string, changes: string[]) => ({ status: 409, body: { error, changes, current: ask } satisfies AskChanged });
     if (!ask.answers.includes(answer.kind) || (answer.kind === "choice" && !ask.choices.includes(answer.choice))) return changed("選択肢が変わりました", ["選択肢が変わりました"]);
-    // a question tool's questions (#3053) are answered all at once, each with what it offers now
+    // a question tool's questions are answered all at once, each with what it offers now
     const toQuestions = answer.kind === "questions" ? questionsReply(ask.questions, answer.answers) : null;
     if (answer.kind === "questions" && toQuestions === null) return changed("選択肢が変わりました", ["選択肢が変わりました"]);
     const at = Date.now();
-    const result = (state: Ask["state"], resume: Ask["resume"]): { status: number; body: AskAnswerResult } => ({ status: 200, body: { ask: { ...ask, state, changedAt: at, answers: state === "answered" ? [] : ask.answers, resume }, already: false, changes: moved } });
+    const result = (state: Ask["state"], resume: Ask["resume"]): { status: number; body: AskAnswerResult } => ({ status: 200, body: { ask: { ...ask, state, changedAt: at, answers: state === "answered" ? [] : ask.answers, resume }, already: false, changes: [] } });
     if (ask.kind === "approval") {
       try {
         const t = tasks.respondPermission(taskId, id.slice(`approval:${taskId}:`.length), answer.kind === "allow" ? "allow" : "deny");
@@ -1309,7 +1311,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         return changed("承認は既に答えられたか、Task が終わりました", ["承認は既に答えられたか、Task が終わりました"]);
       }
     }
-    // a grant (#2745) goes as it is, once: the person's say on the refused operation, no policy basis
+    // a grant goes as it is, once: the person's say on the refused operation, no policy basis
     if (answer.kind === "grant") {
       if (!ask.grant) return { status: 409, body: { error: "許可文がありません" } };
       try {
@@ -1321,25 +1323,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         return result(ask.state, { state: "failed", reason: failure.reason, taskId, at });
       }
     }
-    // as on the Issue side: a choice (it may approve the merge; so may an option of the questions) is refused on a PR that moved; a text goes with what moved
-    const picks = answer.kind === "choice" || (answer.kind === "questions" && answer.answers.some((a) => a.choices.length > 0));
-    if (ask.place?.pr) {
-      const ws = ask.workspace ? db.getWorkspace(ask.workspace.id) : null;
-      const source = ws ? db.getWorkspaceBacklogSource(ws.id) : null;
-      // a PR whose repository is not known (the Task has no workspace with a backlog source) cannot be checked: a choice
-      // is not given to it, a text goes saying so
-      if (!ws || !source) {
-        moved = [`PR #${ask.place.pr} の差分を確かめられません（Task の workspace に GitHub の取込み元がありません）`];
-        if (picks) return changed("対象の PR を確かめられないので、選択肢では答えられません。自由文で答えてください", moved);
-      } else try {
-        moved = (pre?.pr === ask.place.pr ? pre.facts : await prFacts(opts.gh ?? runGh, ws.path, source.repository, ask.place.pr, ask.at)).changes;
-        if (moved.length && picks) return changed("問いの後で対象の PR が変わりました。選択肢では答えられません。自由文で確かめ直しを頼むか、新しい問いを待ってください", moved);
-      } catch (e) {
-        return { status: UPSTREAM_FAILED, body: { error: `PR #${ask.place.pr} を確かめられない: ${String((e as Error).message ?? e)}` } };
-      }
-    }
-    const said = answer.kind === "choice" ? `${answer.choice}${answer.note ? `\n\n${answer.note}` : ""}` : answer.kind === "text" ? answer.text : (toQuestions ?? "");
-    const text = moved.length ? `${said}\n\n（この回答は問いの時点の PR へのものです。回答の時点で: ${moved.join(" / ")}）` : said;
+    const text = answer.kind === "choice" ? `${answer.choice}${answer.note ? `\n\n${answer.note}` : ""}` : answer.kind === "text" ? answer.text : (toQuestions ?? "");
     const gone = policyGone(by);
     if (gone) return changed(gone, [gone]);
     try {
@@ -1352,7 +1336,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     }
   };
 
-  /** sb-rescue's view of the releases (#178); `managed: false` when not under sb-rescue or when it does not answer. */
+  /** sb-rescue's view of the releases; `managed: false` when not under sb-rescue or when it does not answer. */
   type RescueStatus = ReleaseState & { previous: string | null; state: string; busy: string | null; lastError: string | null };
   const releaseStatus = async (): Promise<RescueStatus | { managed: false; error?: string }> => {
     if (!cfg.rescueUrl) return { managed: false };
@@ -1373,20 +1357,20 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   /** Running and waiting Tasks, and those whose turn ended with background jobs still going: a restart cuts all of them. */
   const busyTasks = () => db.listActiveTasks().length;
   /**
-   * Why the last promotionFirst held the newest tag (#626): Tasks running (asked again once they end) or a tag that
+   * Why the last promotionFirst held the newest tag: Tasks running (asked again once they end) or a tag that
    * failed. Memory only: a restart forgets it and the next firing makes it again. `GET /api/daemon/release` shows it.
-   * `since` (#2148): when it began to hold that tag, kept while the same tag is held (promoteWhenIdle clears the hold
+   * `since`: when it began to hold that tag, kept while the same tag is held (promoteWhenIdle clears the hold
    * before it asks again, so the first sight is kept apart in `heldSince`).
    */
   let promotionHold: PromotionHold | null = null;
   let heldSince: { tag: string; at: number } | null = null;
   /**
-   * The last promotion this daemon asked sb-rescue for (#2479) — or why it could not ask. Memory only, like promotionHold:
+   * The last promotion this daemon asked sb-rescue for — or why it could not ask. Memory only, like promotionHold:
    * a promotion restarts the daemon, and sb-rescue's `history` has the result after that. `GET /api/daemon/release` shows it.
    */
   let promotionAsked: { tag: string; sha: string; at: number; by: "check" | "backlog-next" | "idle"; error?: string } | null = null;
   /**
-   * The check of a public copy's new tag (#4569): under `<home>/release-review/<tag>/`, a detached tree of the tag
+   * The check of a public copy's new tag: under `<home>/release-review/<tag>/`, a detached tree of the tag
    * (`tree/`) and the diff from the running version (`diff.patch`), and a read-only Task in that folder (the prompt is this
    * version's own). The Task's cwd is the folder, not the tree: a runner reads its project settings (Claude Code's
    * `.claude/settings.json` hooks, Codex's `.codex/`) from its cwd, and the tag's own must not run. No shadow runner (a
@@ -1445,7 +1429,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   tasks.onTurnEnd(releaseReviewEnded);
   tasks.onTaskEnd(releaseReviewEnded);
   /**
-   * The newest release of a public copy's clone (#4569), for 動いている版: `ahead` counts from what runs (from HEAD when
+   * The newest release of a public copy's clone, for 動いている版: `ahead` counts from what runs (from HEAD when
    * nothing is managed). Reads the tags already fetched (the interval check fetches), so it makes no network call. Null for a
    * development origin or a clone with no tag.
    */
@@ -1461,7 +1445,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     return t ? releaseReviewOf(t, db.lastReply(t.id)?.text ?? null, r) : null;
   };
   let rechecking = false;
-  /** Before picking (#282): bring the app up to the newest tag, or hold everything while that tag failed to start. */
+  /** Before picking: bring the app up to the newest tag, or hold everything while that tag failed to start. */
   const promotionFirst = async (meta: Workspace, { report, by }: { report: boolean; by: "check" | "backlog-next" | "idle" }): Promise<string | null> => {
     const status = await releaseStatus();
     if (!status.managed) return null;
@@ -1469,7 +1453,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const current = (status as ReleaseState).current;
     // exit 0 = the tag's commit is an ancestor of what runs (git throws on any other exit)
     const latestInCurrent = !!latest && !!current && latest.sha !== current && (await git(["merge-base", "--is-ancestor", latest.sha, current]).then(() => true, () => false));
-    // a public copy's clone checks the tag's diff first (#4569): the check is the Task of origin release-review titled with the tag
+    // a public copy's clone checks the tag's diff first: the check is the Task of origin release-review titled with the tag
     const publicCopy = !!latest && (await git(["remote", "get-url", "origin"]).then((u) => isPublicCopy(u, cfg.repoRoot), () => false));
     let review: ReleaseReview | "start" | undefined;
     if (publicCopy) {
@@ -1512,7 +1496,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     return step.reason;
   };
   /**
-   * Whether a merge commit is in the release that runs (#937), for the `（リリース）` prerequisites: only Switchboard's own
+   * Whether a merge commit is in the release that runs, for the `（リリース）` prerequisites: only Switchboard's own
    * workspace (meta) under sb-rescue can tell — `git merge-base --is-ancestor <oid> <current>`, once per commit while
    * `current` stays; anything else answers null (cannot tell, so not met), a commit the checkout does not have too. The commits asked about are the ones the
    * stored prerequisites name.
@@ -1541,7 +1525,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     return storedBacklog(ws, (oid) => known.of.get(oid) ?? null);
   };
   /**
-   * The one way to ask for the newest tag (#2477): the backlog-next firing, a Task ending and the interval check come
+   * The one way to ask for the newest tag: the backlog-next firing, a Task ending and the interval check come
    * here, and while one asks, the others get its answer, so the same tag is not asked for twice. Only the check does not
    * report a failed tag as ## 判断待ち; a caller that reports and joined a check asks once more when that check found a
    * failed tag (a failed tag is never promoted, so asking again cannot ask /api/promote twice).
@@ -1559,7 +1543,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     promotionAsking = { asking, report };
     return asking;
   };
-  /** A promotion held only by running Tasks is asked for as soon as none runs (#626), not at the next firing. */
+  /** A promotion held only by running Tasks is asked for as soon as none runs, not at the next firing. */
   const promoteWhenIdle = () => {
     if (!promotionHold || promotionHold.failed || busyTasks() > 0) return;
     if (!metaWorkspace()) return;
@@ -1571,22 +1555,22 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   tasks.onBackgroundEmpty(promoteWhenIdle);
   /**
    * Why the slot's items are left, one line each in backlog-next's words (`<what>: #N …`; the firing puts the workspace
-   * and the slot before each). The backlog queue says it the same way for its own items (#3966).
+   * and the slot before each). The backlog queue says it the same way for its own items.
    */
   const leftLines = (items: BacklogItem[], slot: Slot, flow?: FlowLimit): string[] => {
     const out: string[] = [];
-    // on hold (#2930): named on this line only, whatever else would also leave it
+    // on hold: named on this line only, whatever else would also leave it
     const onHold = onHoldIn(items, slot);
     if (onHold.length) out.push(`保留: ${onHold.map((i) => `#${i.number}`).join(" ")}`);
     const unheld = items.filter((i) => !i.onHold);
-    // a Task that ended asking the person, or failed, with no update to the Issue since (#1275); named under that, not as unchanged
+    // a Task that ended asking the person, or failed, with no update to the Issue since; named under that, not as unchanged
     const replyWaiting = replyWaitingIn(unheld, slot);
     if (replyWaiting.length) out.push(`返事待ち: ${replyWaiting.map((i) => `#${i.number}`).join(" ")}`);
     const failed = failedIn(unheld, slot);
     if (failed.length) out.push(`前回の Task が失敗したまま更新が無い: ${failed.map((i) => `#${i.number}${i.lastTask!.resumeAt ? `（使用上限、${fmtTime(i.lastTask!.resumeAt, Date.now())} に戻る）` : ""}`).join(" ")}`);
     const unchanged = unchangedIn(unheld, slot).filter((i) => !failedSince(i) && !awaitingReply(i));
     if (unchanged.length) out.push(`前回から更新が無い: ${unchanged.map((i) => `#${i.number}`).join(" ")}`);
-    // what holds them (#817, #937): an overlap still open, a prerequisite not done yet, one a person has to look at
+    // what holds them: an overlap still open, a prerequisite not done yet, one a person has to look at
     const held = heldIn(unheld, slot);
     for (const [label, of] of HELD_LINES) {
       const rows = held.flatMap(({ item, pending, stuck }) => {
@@ -1595,22 +1579,22 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       });
       if (rows.length) out.push(`${label}: ${rows.join(" ")}`);
     }
-    // PBIs whose Tasks' files other work touches (#1044): left before a session starts only to find that out
+    // PBIs whose Tasks' files other work touches: left before a session starts only to find that out
     const overlapped = overlapIn(unheld, slot, undefined, flow);
     const touching = overlapped.filter((i) => i.overlap!.hits.length > 0);
     if (touching.length) out.push(`重なり: ${touching.map((i) => `#${i.number}（${i.overlap!.hits.map((h) => `${h.ref}: ${h.path}`).join("・")}）`).join(" ")}`);
     const undecided = overlapped.filter((i) => i.overlap!.unknown !== null);
     if (undecided.length) out.push(`重なりを判定できない: ${undecided.map((i) => `#${i.number}（${i.overlap!.unknown}）`).join(" ")}`);
-    // stalled PBIs whose newest ## 状況 counts as many closed Tasks as now (#578)
+    // stalled PBIs whose newest ## 状況 counts as many closed Tasks as now
     const spinning = spinningIn(unheld, slot);
     if (spinning.length) out.push(`前回の再開から進んでいない: ${spinning.map((i) => `#${i.number}`).join(" ")}`);
     return out;
   };
   /**
-   * One backlog-next firing (#267, #561): for every registered workspace and each of its two slots (implement / plan),
+   * One backlog-next firing: for every registered workspace and each of its two slots (implement / plan),
    * start the slot's next item while fewer stage Tasks of that slot run there than the workspace's own slots allow
-   * (`Workspace.sweep`, #2656; read per firing). While the usage of the runner it starts them on is high, one stage Task at most runs anywhere; while the newest tag waits to be
-   * promoted, nothing starts anywhere. `only` (#1879): one workspace's implement slot and those items only, the waits
+   * (`Workspace.sweep`; read per firing). While the usage of the runner it starts them on is high, one stage Task at most runs anywhere; while the newest tag waits to be
+   * promoted, nothing starts anywhere. `only`: one workspace's implement slot and those items only, the waits
    * of which an import closed; the same checks hold.
    */
   const startNext = async (scheduleId: string, only?: { workspaceId: string; numbers: number[] }): Promise<BacklogNextResult> => {
@@ -1629,13 +1613,13 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       const starting = [...startingStage].filter(([k, v]) => k.startsWith(`${wsId}:`) && SLOT_OF_ACTION[v.action] === slot).map(([, v]) => `#${v.n} の工程 Task を開始しているところ`);
       return [...tasks, ...starting];
     };
-    // The usage that counts is the one of the runner each stage Task starts on (#834): its kind's as startMetaTask decides
+    // The usage that counts is the one of the runner each stage Task starts on: its kind's as startMetaTask decides
     // it (the kind's own, else the schedule's), after 上限のときの代わり; read once per firing.
     const schedule = db.getSchedule(scheduleId);
-    // every action, 直行で直す (#3690) too: a request starts in the candidate its own criteria choose (#4322)
+    // every action, 直行で直す too: a request starts in the candidate its own criteria choose
     const sweepActions = BacklogAction.options;
     // the candidates' definitions (the meta checkout's, like startStage's). Unreadable: no request is started on a guess —
-    // each is left with why (PR #4359 review); 直行で直す is the meta workspace's only, like its button (server.ts /start)
+    // each is left with why; 直行で直す is the meta workspace's only, like its button (server.ts /start)
     let defsError = "";
     const defs = (() => { try { return listProcesses(meta?.path); } catch (e) { defsError = (e as Error).message ?? String(e); return []; } })();
     const defsFor = (ws: Workspace) => (ws.kind === "meta" ? defs : defs.filter((d) => !d.auto));
@@ -1644,7 +1628,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     // since only a turn of that runner writes a new one (resetsAt is in seconds).
     const limit = settings().quotaAndResume.backlogQuotaLimit;
     const windowAt = (r: RunnerId | null, at: number) => (r ? db.quotaFor(r).find((q) => q.utilization >= at && q.resetsAt * 1000 > Date.now()) : undefined);
-    // A window at its limit (#1275): the stage Task would end at once on the limit, so it is not started.
+    // A window at its limit: the stage Task would end at once on the limit, so it is not started.
     const fullOf = (r: RunnerId | null) => {
       const w = windowAt(r, QUOTA_FULL);
       return w ? `${r} の使用量 ${w.window} が ${Math.round(w.utilization * 100)}%: ${fmtTime(w.resetsAt * 1000, Date.now())} に戻るまで始めない` : "";
@@ -1674,25 +1658,25 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     // nothing could start: GitHub is not read
     if (sweepActions.every(stageHeld)) return { started, skipped: lines(sweepActions.map((a) => loginHeld(a) || fullOf(targetOf[a]) || `${usageOf(targetOf[a])}: 工程 Task が動いているので始めない`)) };
     skipped.push(...lines(sweepActions.map(loginHeld)), ...lines(sweepActions.map((a) => fullOf(targetOf[a]))), ...lines(sweepActions.map((a) => (fullOf(targetOf[a]) ? "" : usageOf(targetOf[a])))).map((u) => `${u}: 全体で 1 件まで`));
-    // a saved policy answers the decisions it matches before the next one is picked (#938)
+    // a saved policy answers the decisions it matches before the next one is picked
     await applyPolicies();
     const SLOTS: Slot[] = only ? ["implement"] : ["implement", "plan"];
     const SLOT_NAME: Record<Slot, string> = { implement: "実装の枠", plan: "計画の枠" };
-    // an enabled backlog queue starts the 実装 slot's PBIs itself, in its order (#3956); the firing moves the 計画 slot only.
+    // an enabled backlog queue starts the 実装 slot's PBIs itself, in its order; the firing moves the 計画 slot only.
     // Read again where it is used: the queue may be enabled while GitHub is read
     const queued = () => readQueue(db).enabled;
-    // a workspace's stored items the sweep may pick from; read again after each start, so the next candidate's overlap counts the PBI just started (#3228)
+    // a workspace's stored items the sweep may pick from; read again after each start, so the next candidate's overlap counts the PBI just started
     const load = async (ws: Workspace) => {
       const all = withActive({ fetchedAt: 0, items: (await storedBacklogReleased(ws)).items, errors: [], changes: [], syncs: [] }).items;
       const judged = all.filter((i) => !only || only.numbers.includes(i.number)).map((item) => ({ item, can: canStartStoredBacklog(item) }));
-      // flow PBIs in progress are counted on the whole backlog, not only the numbers a narrow firing reads (#4082)
+      // flow PBIs in progress are counted on the whole backlog, not only the numbers a narrow firing reads
       return { items: judged.filter((j) => j.can.ok).map((j) => j.item), syncHeld: judged.flatMap((j) => (j.can.ok ? [] : [`#${j.item.number}（${j.can.why}）`])), flowRunning: flowRunning(all), flowStopped: flowStopped(all) };
     };
-    // read every workspace that has a free slot in parallel (#441); one GitHub cannot be read for goes on with what is stored (#2264)
+    // read every workspace that has a free slot in parallel; one GitHub cannot be read for goes on with what is stored
     const read = await Promise.all(db.listWorkspaces().filter((ws) => backlogReads(ws) && (!only || ws.id === only.workspaceId)).map(async (ws) => {
       if (!SLOTS.some((slot) => busy(ws.id, slot).length < ws.sweep[slot])) return { ws, items: [] as BacklogItem[], syncHeld: [] as string[], unsynced: null, flowRunning: 0, flowStopped: 0 };
       if (!existsSync(ws.path)) return { ws, error: "workspace directory does not exist" };
-      // the stored data is what is true (#2264): GitHub is brought up to date first when it can be reached, and when it
+      // the stored data is what is true: GitHub is brought up to date first when it can be reached, and when it
       // cannot (a limit, an outage) the workspace goes on with what is stored; only an Issue with a conflict is not picked
       // a narrow firing comes right after the import that cleared the waits: it is not read again here (the read right before a start still is)
       const unsynced = only ? null : await backlog.settle(ws).then(() => null, (e) => notSettled(e));
@@ -1707,7 +1691,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       if (r.unsynced) skipped.push(`${ws.name}: GitHub と照合できない（保存データで進める）: ${r.unsynced}`);
       if (r.syncHeld.length) skipped.push(`${ws.name}: 競合があるので自動では始めない: ${r.syncHeld.join(" ")}`);
       const picked = new Set<number>();
-      // flow PBIs started from Ready in this firing: still ready in `r.items`, so counted as in progress here (#4082)
+      // flow PBIs started from Ready in this firing: still ready in `r.items`, so counted as in progress here
       const flowStarted = new Set<number>();
       const flow = (): FlowLimit => ({ limit: settings().quotaAndResume.flowLimit, running: r.flowRunning + flowStarted.size, stopped: r.flowStopped });
       for (const slot of SLOTS) {
@@ -1741,8 +1725,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             skipped.push(`${ws.name}: #${next.item.number} を始めない: 候補の定義を読めません: ${defsError}`);
             continue;
           }
-          // read again right before the start (#909): the sweep may have taken long since this workspace was read, and an
-          // edit may have been kept meanwhile — GitHub when it can be reached, the stored data either way (#2264)
+          // read again right before the start: the sweep may have taken long since this workspace was read, and an
+          // edit may have been kept meanwhile — GitHub when it can be reached, the stored data either way
           const late = await backlog.settle(ws).then(() => null, (e) => notSettled(e));
           if (late && !r.unsynced) skipped.push(`${ws.name}: GitHub と照合できない（保存データで進める）: ${late}`);
           const fresh = withActive({ fetchedAt: 0, items: (await storedBacklogReleased(ws)).items, errors: [], changes: [], syncs: [] }).items.find((i) => i.number === next.item.number);
@@ -1758,18 +1742,18 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             skipped.push(`${ws.name}: #${next.item.number} を始めない: ${can.ok ? "照合の間に変わった（次の発火で選び直す）" : can.why}`);
             continue;
           }
-          // the usage of the runner this action starts on (#834): another item of the slot may start on another runner
+          // the usage of the runner this action starts on: another item of the slot may start on another runner
           const why = stageHeld(again.action);
           if (why) {
             skipped.push(`${ws.name}: #${next.item.number} を始めない: ${why}`);
             continue;
           }
-          // the queue enabled since this workspace was read: the 実装 slot is the queue's now (#3956)
+          // the queue enabled since this workspace was read: the 実装 slot is the queue's now
           if (slot === "implement" && queued()) {
             skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: キューに任せる`);
             break;
           }
-          // Unattended: no shadow (#99, like prompt schedules) and the schedule's budget applies to the stage Task.
+          // Unattended: no shadow (like prompt schedules) and the schedule's budget applies to the stage Task.
           const t = await startStage({
             ws, meta, item: again.item, action: again.action, resume: again.resume && { tasksDone: again.item.tasks!.done }, processReason: again.reason,
             extra: { runner: schedule?.runner, model: schedule?.model, effort: schedule?.effort, scheduleId, shadowRunner: null, budgetUsd: schedule?.budgetUsd },
@@ -1796,28 +1780,28 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           for (let k = skipped.length - 1; k >= 0; k--) if (skipped[k]!.startsWith(head)) skipped.splice(k, 1);
           skipped.push(...now);
         }
-        // the flow PBIs left, said after the starts: one started in this firing may be what holds the next (#4082)
+        // the flow PBIs left, said after the starts: one started in this firing may be what holds the next
         const flowLine = reported && flowHeldLine(flowHeldIn(r.items.filter((i) => !flowStarted.has(i.number)), slot, flow()), flow());
         if (flowLine) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: ${flowLine}`);
       }
     }
     return { started, skipped };
   };
-  // secret-scan (#775): every registered repository through the kit's scan-issues; its result is on the schedule, 判断待ち's notice is read from it (#2866)
+  // secret-scan: every registered repository through the kit's scan-issues; its result is on the schedule, 判断待ち's notice is read from it
   const scanSecrets = async (s: { id: string; title: string }, cursors: ScanCursors) => {
     const meta = metaWorkspace();
     if (!meta) return { lines: ["meta workspace がない（共通キットの scan-issues を呼べない）"], summary: { repos: 0, hits: 0, failed: 1 } };
     const r = await scanAllRepos({ workspaces: db.listWorkspaces(), metaPath: meta.path, gh: opts.gh ?? runGh, cursors });
     return r;
   };
-  // Scheduler (#20): cron-fired tasks, morning queue view.
-  // approval-window (#2046): the SSO / deploy batches still waiting; 判断待ち shows them as a notice from this firing on (#2866)
+  // Scheduler: cron-fired tasks, morning queue view.
+  // approval-window: the SSO / deploy batches still waiting; 判断待ち shows them as a notice from this firing on
   const approvalWindow = async () => {
     const note = approvalWindowNote((await currentAsks()).batches);
     return note ? note.title : "待ちなし";
   };
   const scheduler = new Scheduler(db, tasks, Date.now, startNext, scanSecrets, () => settings().quotaAndResume.backlogQuotaLimit, autoRunner, approvalWindow, () => settings().quotaAndResume.defaultBudgetUsd);
-  // The monthly floor / ceiling / walls check (#3353) is there from the start: put in once, so one the person deleted
+  // The monthly floor / ceiling / walls check is there from the start: put in once, so one the person deleted
   // stays deleted (a setting, not a migration: the row is theirs to change or remove from Schedules)
   const seedMeta = metaWorkspace();
   if (seedMeta && !db.getSetting("uiLayers.seeded", false)) {
@@ -1829,14 +1813,14 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     }
   }
   /**
-   * After an import that stored a change (#1879): the PBIs whose waits it closed and no stage Task runs for go on now, in
+   * After an import that stored a change: the PBIs whose waits it closed and no stage Task runs for go on now, in
    * the implement slot of an enabled backlog-next schedule, not at its next firing. No schedule enabled, or the backlog
    * queue enabled (its own start takes the 実装 slot), nothing starts.
    */
-  /** The actions of the 実装 slot the backlog queue starts (#3966). */
+  /** The actions of the 実装 slot the backlog queue starts. */
   const SLOT_ACTIONS = BacklogAction.options.filter((a) => SLOT_OF_ACTION[a] === "implement");
   const resumeUnblocked = async (wsId: string) => {
-    // an enabled backlog queue starts the 実装 slot's PBIs itself (#3956)
+    // an enabled backlog queue starts the 実装 slot's PBIs itself
     if (readQueue(db).enabled) return;
     const schedule = db.listSchedules().find((s) => s.action === "backlog-next" && s.enabled);
     const ws = schedule && db.getWorkspace(wsId);
@@ -1846,7 +1830,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     if (numbers.length) await scheduler.runUnblocked(schedule.id, ws.id, numbers);
   };
   /**
-   * The backlog queue's own start (#3966): no schedule and no managing Task. While the queue is enabled and fewer of its
+   * The backlog queue's own start: no schedule and no managing Task. While the queue is enabled and fewer of its
    * PBIs' 実装 Tasks (stage Tasks of the implement slot) run or wait than its `concurrency`, the next PBI in the queue's
    * order that may go starts as the row's button starts it (`startStage`; the runner of 自動で始まる Task の既定). What
    * holds the others is judged as backlog-next judges it, and said in its words (`leftLines`). What it decided goes to
@@ -1884,7 +1868,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       [...startingStage].filter(([k, v]) => queued.has(k) && SLOT_OF_ACTION[v.action] === "implement").length
     );
   };
-  /** Why an action of the 実装 slot does not start now: its runner's usage at the limit, as backlog-next's (#1275, #834); "" = it may. */
+  /** Why an action of the 実装 slot does not start now: its runner's usage at the limit, as backlog-next's; "" = it may. */
   const queueUsage = (action: BacklogAction): string => {
     const decided = decidedRunner(action);
     const runner = decided ? autoRunner(decided).runner : null;
@@ -1930,14 +1914,14 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       const items = judged.filter((j) => j.can.ok).map((j) => j.item);
       const notReady = items.filter((i) => !i.onHold && (i.stage === "needs-tasks" || i.stage === "request" || i.stage === "needs-decision"));
       if (notReady.length) lines.push(`${ws.name}: まだ Ready でない: ${notReady.map((i) => `#${i.number}（${i.stage === "needs-decision" ? "判断待ち" : "Task 分解前"}）`).join(" ")}`);
-      // flow PBIs in progress are counted on the whole backlog, not only the queued ones (#4082)
+      // flow PBIs in progress are counted on the whole backlog, not only the queued ones
       const running = flowRunning(stored);
       const stopped = flowStopped(stored);
       lines.push(...leftLines(items, "implement", { limit: settings().quotaAndResume.flowLimit, running, stopped }).map((l) => `${ws.name}: ${l}`));
       read.push({ ws, items, flowRunning: running, flowStopped: stopped });
     }
     const picked = new Set<string>();
-    // flow PBIs started from Ready in this run: still ready in `items`, so counted as in progress here (#4082)
+    // flow PBIs started from Ready in this run: still ready in `items`, so counted as in progress here
     const flowStarted = new Set<string>();
     const flowOf = (ws: Workspace, running: number, stopped: number): FlowLimit => ({ limit: settings().quotaAndResume.flowLimit, running: running + [...flowStarted].filter((k) => k.startsWith(`${ws.id}:`)).length, stopped });
     let startedAny = false;
@@ -1973,7 +1957,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         break;
       }
       startedAny = true;
-      // the next candidate is judged against what this start took (#3228): the workspace's queued items read again from the stored data
+      // the next candidate is judged against what this start took: the workspace's queued items read again from the stored data
       const mine = read.find((x) => x.ws.id === ws.id)!;
       const queued = new Set(live.items.filter((e) => e.workspaceId === ws.id).map((e) => e.number));
       mine.items = withActive({ fetchedAt: 0, items: (await storedBacklogReleased(ws)).items, errors: [], changes: [], syncs: [] }).items.filter((i) => queued.has(i.number) && canStartStoredBacklog(i).ok);
@@ -1981,14 +1965,14 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       if (p.item.flow && p.item.stage === "ready") flowStarted.add(queueKey(ws.id, p.item.number));
       lines.push(`${ws.name} #${p.item.number} を ${p.action} で開始 ${t.task.id}`);
     }
-    // an overlap that only the starts made is said too, as the first read's line with them counted (#3228)
+    // an overlap that only the starts made is said too, as the first read's line with them counted
     for (const { ws, items, flowRunning: running, flowStopped: stopped } of read) {
       if (!reread.has(ws.id)) continue;
       const head = `${ws.name}: 重なり`;
       for (let k = lines.length - 1; k >= 0; k--) if (lines[k]!.startsWith(head)) lines.splice(k, 1);
       lines.push(...leftLines(items, "implement", flowOf(ws, running, stopped)).filter((l) => l.startsWith("重なり")).map((l) => `${ws.name}: ${l}`));
     }
-    // the flow PBIs left, said after the starts: one started in this run may be what holds the next (#4082)
+    // the flow PBIs left, said after the starts: one started in this run may be what holds the next
     for (const { ws, items, flowRunning: running, flowStopped: stopped } of read) {
       const flowLine = flowHeldLine(flowHeldIn(items.filter((i) => !flowStarted.has(queueKey(ws.id, i.number))), "implement", flowOf(ws, running, stopped)), flowOf(ws, running, stopped));
       if (flowLine) lines.push(`${ws.name}: ${flowLine}`);
@@ -1998,7 +1982,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     finish();
   };
   /**
-   * A stage Task's turn or the Task ended (#3966): an 実装 frees a place, and a Task に分解 may have made a queued PBI
+   * A stage Task's turn or the Task ended: an 実装 frees a place, and a Task に分解 may have made a queued PBI
    * Ready — the queue may start its next.
    */
   const queueTaskEnded = (_id: string, task: Task) => {
@@ -2025,25 +2009,25 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     });
   }
   if (!cfg.candidate) backlog.onImported((wsId) => void resumeUnblocked(wsId).catch((e) => console.error(`[backlog] resume after the import of ${wsId}: ${String((e as Error)?.message ?? e)}`)));
-  // a Task started by hand that stopped on other work (its depends stop's pr#N / issue#N) goes on once that closed (#2045);
+  // a Task started by hand that stopped on other work (its depends stop's pr#N / issue#N) goes on once that closed;
   // after every import, so a wait already closed when the stop came, or a turn that could not be sent, is tried again
   if (!cfg.candidate) backlog.onImported((wsId) => void resumeDepends({ db, tasks, workspaceId: wsId, now: Date.now() }).catch((e) => console.error(`[backlog] depends resume after the import of ${wsId}: ${String((e as Error)?.message ?? e)}`)), { every: true });
   if (!cfg.candidate) {
     scheduler.start();
-    // the queue goes on where it was (#3966): what ended while no daemon ran
+    // the queue goes on where it was: what ended while no daemon ran
     void startFromQueue("boot");
-    // the stored backlog is brought up to date at boot (#885); reading it does not wait for this
-    // what was kept before the stop is sent (a wait still running is waited for by a timer, #886)
-    // and read again by itself from then on (#887), more often while it changes
+    // the stored backlog is brought up to date at boot; reading it does not wait for this
+    // what was kept before the stop is sent (a wait still running is waited for by a timer)
+    // and read again by itself from then on, more often while it changes
     if (opts.backlogAutoImport) {
       backlog.startPolling();
       for (const ws of db.listWorkspaces()) if (backlogReads(ws) && existsSync(ws.path)) backlog.request(ws), backlog.send(ws);
     }
   }
-  // Usage-limit auto-resume (#102): a task stopped on the runner's limit is continued once it lifts, per-runner setting.
+  // Usage-limit auto-resume: a task stopped on the runner's limit is continued once it lifts, per-runner setting.
   const resumer = new RateLimitResumer(db, tasks, { enabled: savedAutoResume, tunables: () => settings().quotaAndResume, log: (m) => console.log(m), githubBudget: (cwd) => githubBudget.get(cwd) });
   if (!cfg.candidate) resumer.start();
-  // Leftovers of tasks that ended while no daemon ran (#1397): a task that is over and has nothing planned
+  // Leftovers of tasks that ended while no daemon ran: a task that is over and has nothing planned
   if (!cfg.candidate) {
     void stopEndedTasksProcesses((id) => {
       const t = db.getTask(id);
@@ -2052,7 +2036,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       for (const [id, n] of stopped) if (n > 0) tasks.record(id, { t: "status", text: `前回のデーモンの間に残った、切り離されたプロセスを ${n} 件止めました` });
     }).catch(() => undefined);
   }
-  // Jobs a Task asks for (#3992): the daemon's children, with the kit's bin first on PATH as a Task has it (ops-kit
+  // Jobs a Task asks for: the daemon's children, with the kit's bin first on PATH as a Task has it (ops-kit
   // heavy / idle-run). A candidate runs on a copy of the database: the live daemon's jobs are not its to end.
   const jobDeps: JobDeps = {
     db,
@@ -2063,7 +2047,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     },
     command: opts.jobCommand,
     reviewIdleS: cfg.jobReviewIdleS,
-    // a Task that stopped on `job#<id>` goes on with the job's result (#3993), without waiting for the next import
+    // a build that ended while the daemon was down: its result is written to the PR at the next start (recoverJobs)
+    ...(opts.collectPending ? { collectPending: () => opts.collectPending!(jobDeps.env, join(jobDeps.dir, "collect-pending.log")) } : {}),
+    // a Task that stopped on `job#<id>` goes on with the job's result, without waiting for the next import
     onFinish: (job) => {
       const workspaceId = db.getTask(job.taskId)?.workspaceId ?? null;
       void resumeDepends({ db, tasks, workspaceId, now: Date.now() })
@@ -2073,11 +2059,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     },
   };
   if (!cfg.candidate) recoverJobs(jobDeps);
-  // Stopping an idle cloud host (#181): only where the environment set a stop command. Core decides when; the command
+  // Stopping an idle cloud host: only where the environment set a stop command. Core decides when; the command
   // (sb-stop on the host) registers the wake-up and shuts the machine down.
   let wsCount = 0;
   // Sockets let in by a login cookie: asked about afresh every SESSION_RECHECK_MS (not from the kept answers, so one
-  // period is the most a removed passkey's socket stays), closed once the passkey is gone (#708).
+  // period is the most a removed passkey's socket stays), closed once the passkey is gone.
   const cookieSockets = new Set<ServerWebSocket<WsData>>();
   const recheckTimer = setInterval(() => {
     for (const ws of cookieSockets) {
@@ -2088,7 +2074,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       });
     }
   }, opts.sessionRecheckMs ?? SESSION_RECHECK_MS);
-  // Under sb-rescue the newest tag is read every PROMOTION_CHECK_MS with no schedule registered (#2477). The result is
+  // Under sb-rescue the newest tag is read every PROMOTION_CHECK_MS with no schedule registered. The result is
   // noted only when it differs from the last check's: a Task that runs for hours does not add the same line every time.
   let lastCheck: string | null | undefined;
   const promotionTimer = cfg.rescueUrl ? setInterval(() => {
@@ -2107,7 +2093,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   const hostIdle =
     cfg.idleStopCmd && !cfg.candidate
       ? new HostIdle(
-          () => ({ running: db.listTasksByStatus("running").length, waiting: db.listTasksByStatus("waiting").length, background: tasks.backgroundJobs() + db.listJobs(Number.MAX_SAFE_INTEGER).length /* the running jobs (#3992) */, ws: wsCount, pty: pty?.size ?? 0, nextWakeAt: nextWakeAt() }),
+          () => ({ running: db.listTasksByStatus("running").length, waiting: db.listTasksByStatus("waiting").length, background: tasks.backgroundJobs() + db.listJobs(Number.MAX_SAFE_INTEGER).length /* the running jobs */, ws: wsCount, pty: pty?.size ?? 0, nextWakeAt: nextWakeAt() }),
           (at) => {
             const arg = at === null ? "-" : new Date(at).toISOString();
             console.log(`hostidle: idle for 20 minutes; running ${cfg.idleStopCmd} ${arg}`);
@@ -2122,7 +2108,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   hostIdle?.start();
   tasks.onTurnEnd(() => hostIdle?.touch());
   if (!cfg.candidate) resumeJobsOnTurnEnd(db, tasks);
-  // a stop that waits on a date (#4616) goes on once the date has passed, in a workspace with no import too
+  // a stop that waits on a date goes on once the date has passed, in a workspace with no import too
   const afterTimer = cfg.candidate ? null : setInterval(() => {
     void resumeDueAfters({ db, tasks, now: Date.now() }).catch((e) => console.error(`[stops] depends resume after a date: ${String((e as Error)?.message ?? e)}`));
   }, opts.afterCheckMs ?? AFTER_CHECK_MS);
@@ -2130,7 +2116,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   const isMeta = (t: { workspaceId: string | null }) => !!t.workspaceId && db.getWorkspace(t.workspaceId)?.kind === "meta";
   let restarting = false;
   tasks.onTurnEnd((taskId, t, turn) => {
-    // A turn on Amazon Bedrock (#1730) says nothing about the Claude account's login, either way
+    // A turn on Amazon Bedrock says nothing about the Claude account's login, either way
     if (bedrockTasks.has(taskId)) return;
     if (turn.end.status === "ok") {
       // a turn that went through proves the login, also over a status-command answer from before the person logged in
@@ -2146,14 +2132,14 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   });
   tasks.onTurnEnd((taskId, t) => {
     if (!isMeta(t)) return;
-    // A shadow (#99) of a meta task shares the workspace but must not invalidate the primary's checks nor start a
+    // A shadow of a meta task shares the workspace but must not invalidate the primary's checks nor start a
     // second, concurrent check run on the same tree.
     if (t.shadowOf) return;
     selfdev.invalidate(); // the tree changed: earlier runs no longer vouch for it
     if (TURN_DONE.has(t.status) && checksOn && !restarting) void selfdev.run(taskId).catch(() => undefined);
   });
 
-  // Evals (#1218): the rule counts of every finished turn. Synchronous and cheap; a failure must not stop the turn's end.
+  // Evals: the rule counts of every finished turn. Synchronous and cheap; a failure must not stop the turn's end.
   tasks.onTurnEnd((taskId, t) => {
     if (t.executionMode === "cloud") return;
     try {
@@ -2163,7 +2149,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     }
   });
 
-  // insights (#1838): the schedule's Task ran `/insights` as its first turn; the report Claude Code wrote becomes the
+  // insights: the schedule's Task ran `/insights` as its first turn; the report Claude Code wrote becomes the
   // Task's artifact. Only that turn is looked at (a follow-up sent to the Task later is an ordinary turn and must not
   // sweep in a report another run — a terminal's, say — made meanwhile), and only a report written since the turn
   // started (an older one is another run's too). A failure is a line on the Task.
@@ -2174,7 +2160,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const file = join(cfg.claudeUsageDataDir, "report.html");
     try {
       // the Task's creation, not the runner's session.start: /insights analyses and writes the report before Claude Code
-      // reports its session (#1958); the listener runs for the first turn only, so this is that turn's start
+      // reports its session; the listener runs for the first turn only, so this is that turn's start
       const started = t.createdAt;
       if (statSync(file).mtimeMs <= started) {
         tasks.record(taskId, { t: "status", text: `report.html がこの実行の開始より古いので成果物に写しません（${file}）` });
@@ -2191,10 +2177,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   });
 
   /**
-   * The automatic judgement (#493): a turn that ended done, on a task the rule left unknown, is judged from its last
+   * The automatic judgement: a turn that ended done, on a task the rule left unknown, is judged from its last
    * reply in the background. The judgement is always kept (judged*); the outcome takes it only while it is still
-   * unknown — the person may have set it meanwhile, and theirs wins. A shadow (#99) is not judged: the primary is
-   * enough, and it would spend the quota twice. `judgingAt` (a column, #1139) marks the reply being judged: a new turn
+   * unknown — the person may have set it meanwhile, and theirs wins. A shadow is not judged: the primary is
+   * enough, and it would spend the quota twice. `judgingAt` (a column) marks the reply being judged: a new turn
    * clears it, so a judgement of an older reply writes nothing, and a daemon restart that cut one short has it judged again.
    */
   const judgeStop = new AbortController(); // aborted by stopAll before the database closes
@@ -2212,7 +2198,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         const cur = db.getTask(taskId);
         // a turn has started since: this judges a reply that is no longer the last one
         if (!cur || cur.judgingAt !== at || !TURN_DONE.has(cur.status)) return;
-        // updatedAt stays: like 確認済み (#492), a judgement is not activity and must not move the task in the list
+        // updatedAt stays: like 確認済み, a judgement is not activity and must not move the task in the list
         const next = db.updateTask(taskId, { judgedResult: j.result, judgedReason: j.reason, judgedBy: `${j.runner}:${j.model}`, judgingAt: null, ...(cur.outcome === "unknown" ? { outcome: j.result } : {}), updatedAt: cur.updatedAt });
         if (next) broadcast({ type: "task.updated", task: next });
         void applyPolicies();
@@ -2228,9 +2214,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         queueTaskFreed(taskId, "judged");
       });
   };
-  // a saved policy may answer what this Task's turn left open (#938)
+  // a saved policy may answer what this Task's turn left open
   tasks.onTurnEnd(() => void applyPolicies());
-  // the Task sent on to log in for an SSO batch: once it went on, the rest go on (#2046)
+  // the Task sent on to log in for an SSO batch: once it went on, the rest go on
   tasks.onTurnEnd((taskId) => void batchAnswers.turnEnded(taskId).catch((e) => console.warn(`sso batch: ${String((e as Error).message ?? e)}`)));
   tasks.onTurnEnd((taskId, t, turn) => {
     const lastReply = turn.end.summary?.trim() ?? "";
@@ -2239,10 +2225,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   });
 
   /**
-   * The title after the first turn (#491): a task whose title is still provisional is named once, in the background,
+   * The title after the first turn: a task whose title is still provisional is named once, in the background,
    * from its request and the turn's last reply. `titlePending` is cleared first, so it is one try per task; a title
    * the person changed meanwhile (PATCH) is kept. A turn that ended in an error or an abort is not named (the next one
-   * is). A shadow (#99) shows the primary's title, and Cloud is not asked.
+   * is). A shadow shows the primary's title, and Cloud is not asked.
    */
   const titling = new Set<string>(); // naming in flight; a rename (PATCH) takes the task out, so its title is not overwritten
   tasks.onTurnEnd((taskId, t, turn) => {
@@ -2271,9 +2257,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   });
 
   /**
-   * The rubric judge (#1219): a turn that ended done is scored against the rubric in the background, on the judge
+   * The rubric judge: a turn that ended done is scored against the rubric in the background, on the judge
    * runner (`settings.judge`); the row replaces the task's previous one and the screen is told to read it again.
-   * The rubric is read once at boot — the person's edit takes effect on the next start. Not a shadow (#99), not Cloud.
+   * The rubric is read once at boot — the person's edit takes effect on the next start. Not a shadow, not Cloud.
    * `rubricSeq` drops a score of an older reply, as `judgingAt` does for the two-way judge.
    */
   const rubric = loadRubric(cfg.home, (m) => console.warn(m));
@@ -2295,7 +2281,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         const cur = db.getTask(taskId);
         if (!cur || rubricSeq.get(taskId) !== seq) return; // deleted, or a newer scoring took over (that one answers the screen)
         // a turn in flight, or a message the person sent since: this scored a transcript that is no longer the task's. (a status
-        // event — a model or mode change, a shadow's error — is not a new transcript; the #493 judge keeps its row then too)
+        // event — a model or mode change, a shadow's error — is not a new transcript; the turn judge keeps its row then too)
         const stale = IN_FLIGHT.has(cur.status) || db.listEvents(taskId, lastSeq).some((e) => e.ev.t === "message.delta" && e.ev.role === "user");
         if (!stale) db.upsertEval({ taskId, source: "judge", by: j.by, rubric: j.rubric, json: j, ts: j.ts });
         broadcast({ type: "evals.updated", taskId }); // also when dropped: the screen's 再評価 is waiting on it
@@ -2311,12 +2297,12 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       });
   };
   tasks.onTurnEnd((taskId, t, turn) => {
-    // a turn that ended without a reply is not scored, as #493 does not judge it: there is no work reported to score
+    // a turn that ended without a reply is not scored, as the turn judge does not judge it: there is no work reported to score
     if (t.executionMode === "cloud" || t.shadowOf || !TURN_DONE.has(t.status) || !settings().evals.judge.enabled || !turn.end.summary?.trim()) return;
     judgeEvals(taskId, t);
   });
 
-  // A reply is copied to the task's shadow (#99); a terminal turn on either side goes in before it.
+  // A reply is copied to the task's shadow; a terminal turn on either side goes in before it.
   const catchUpWithShadow = (taskId: string) => {
     if (db.getTask(taskId)?.executionMode === "cloud") return;
     history.catchUp(taskId);
@@ -2337,7 +2323,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       clearTimeout(timer);
     }
   };
-  // content-length so the request's bytes can be recorded (#2101) without reading the body again
+  // content-length so the request's bytes can be recorded without reading the body again
   const json = (data: unknown, status = 200) => {
     const body = JSON.stringify(data);
     return new Response(body, { status, headers: { "content-type": "application/json;charset=utf-8", "content-length": String(Buffer.byteLength(body)) } });
@@ -2350,14 +2336,14 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       return e instanceof ArtifactError ? bad(e.message, e.status) : bad(String((e as Error).message ?? e), 500);
     }
   };
-  /** A backlog Issue in a path (#886): its number, or the local id of one made here. */
+  /** A backlog Issue in a path: its number, or the local id of one made here. */
   const issueRef = (p: string): number | string => (/^\d+$/.test(p) ? Number(p) : p);
   /**
    * What the daemon answers when something it depends on (gh / GitHub, sb-rescue) failed. Never 502/504: on the cloud
    * host CloudFront replaces an origin's 502/504 with the "stopped" start page, and the app then leaves for the login page.
    */
   const UPSTREAM_FAILED = 424;
-  /** The largest Webhook delivery read (#887): GitHub's Issue payloads are a few KiB; a larger body is refused unread. */
+  /** The largest Webhook delivery read: GitHub's Issue payloads are a few KiB; a larger body is refused unread. */
   const WEBHOOK_MAX_BYTES = 64 * 1024;
   /** A request's body, or null once it is longer than `max` bytes (read no further). */
   const readCapped = async (req: Request, max: number): Promise<Uint8Array | null> => {
@@ -2371,7 +2357,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     }
     return Buffer.concat(chunks);
   };
-  /** Tasks (a shadow too) running or waiting in a workspace (#2600): named for it, or working inside its directory (a worktree made under it). */
+  /** Tasks (a shadow too) running or waiting in a workspace: named for it, or working inside its directory (a worktree made under it). */
   const runningTasksIn = (ws: Workspace) => db.listWorkingTasks("slot").filter((t) => t.workspaceId === ws.id || t.cwd === ws.path || t.cwd.startsWith(`${ws.path}/`)).length;
 
   const readJson = async <T>(req: Request, parse: (x: unknown) => T): Promise<T> => parse(await req.json().catch(() => ({})));
@@ -2379,8 +2365,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   // Every /api route except health goes through the token check when off-loopback.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   type AnyHandler = (req: any, srv: any) => any;
-  // The strongest operations (#1491): a request that came in on the cookie also needs the Starter's 5-minute passkey
-  // check (`sb_recent`, #497), as sb-rescue's screen does. A token (this machine, a Mac) is unchanged: `session` is unset.
+  // The strongest operations: a request that came in on the cookie also needs the Starter's 5-minute passkey
+  // check (`sb_recent`), as sb-rescue's screen does. A token (this machine, a Mac) is unchanged: `session` is unset.
   const recentRefusal = (req: Request, session: string | undefined) =>
     session !== undefined && !recentOk(req, cfg.sessionPublicKey, session) ? json({ error: "操作の前にパスキーで確かめてください", reason: "recent" }, 401) : null;
   // `authorize` again (the answer is kept): a session that ended while the body was still arriving is refused, not taken for a token.
@@ -2390,11 +2376,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   };
   const strong = (fn: AnyHandler): AnyHandler => async (req, srv) => (await recentCheck(req, srv)) ?? fn(req, srv);
   /**
-   * Making or changing a saved answer policy (#938) lasts past one answer, so it is a person's: it needs the passkey check
+   * Making or changing a saved answer policy lasts past one answer, so it is a person's: it needs the passkey check
    * of `strong`, and it is refused to a Task. A runner can read the daemon's token, so a token is taken only from the web
    * UI's own page (this origin and Sec-Fetch-Site: same-origin); on the cloud host, where the passkey login is on, only the
    * cookie counts. Without the passkey login that is a check on how the request looks, not a proof: a Task on this machine,
-   * which runs as the same user, can forge both headers. Answers a Task gives to its own approval are unchanged (#936): they allow one thing, once.
+   * which runs as the same user, can forge both headers. Answers a Task gives to its own approval are unchanged: they allow one thing, once.
    */
   const humanCheck = async (req: Request, srv: Peer): Promise<Response | null> => {
     const auth = await authorize(req, srv);
@@ -2411,14 +2397,14 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     edgeOk(req, cfg.edgeHeaderValue, peerOf(req, srv));
   const notViaEdge = () => json({ error: "配信元を経由してください" }, 403);
   const notAllowedHost = () => json({ error: `host not allowed: open http://127.0.0.1:${server?.port ?? cfg.port} or set SWITCHBOARD_PUBLIC_URL` }, 403);
-  // The request log (#1490), only where a login guards the daemon (off loopback). The client is CloudFront's viewer
+  // The request log, only where a login guards the daemon (off loopback). The client is CloudFront's viewer
   // address, believed only on a request that carried the shared header; otherwise the connection's peer.
   const clientOf = (req: Request, srv: Peer) => {
     // the header itself must match (peer left out): a loopback peer is let through by viaEdge without one
     const viewer = cfg.edgeHeaderValue && edgeOk(req, cfg.edgeHeaderValue, undefined) ? req.headers.get("cloudfront-viewer-address") : null;
     return viewer || peerOf(req, srv);
   };
-  // Failed entrances and logins per address (#1492), the Starter's rule: 10 in 10 minutes, then 429 for everything.
+  // Failed entrances and logins per address, the Starter's rule: 10 in 10 minutes, then 429 for everything.
   // Not counted: this machine's own peers (the runners' /mcp, sb-rescue's probe), and on the cloud host a request
   // without CloudFront's viewer address (until it is delivered everyone looks like one address and would lock out
   // the person). Only refusals made by the entrance and the guards go through `refused`, never a handler's 403.
@@ -2449,7 +2435,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   const logOp = (req: Request, srv: Peer, op: string, extra: { task?: string; detail?: unknown } = {}, from = clientOf(req, srv)) => {
     if (authRequired) console.log(opLine({ t: Date.now(), from, op, ...extra }));
   };
-  // Every guardAll route's time and size go to api_requests (#2101), written every 10 s; `route` = the route's key, so
+  // Every guardAll route's time and size go to api_requests, written every 10 s; `route` = the route's key, so
   // the fallback `fetch` (route null: static files, unknown paths) is not recorded. The access log stays the cloud host's.
   let apiRequests: ApiRequestRow[] = [];
   let apiRequestsFailed = false;
@@ -2467,7 +2453,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   };
   const apiRequestsTimer = setInterval(flushApiRequests, API_REQUESTS_FLUSH_MS);
   apiRequestsTimer.unref();
-  // a copy of the task's diff (#3833), so it can still be shown after its worktree is removed: at each turn's end and every 60 s while running
+  // a copy of the task's diff, so it can still be shown after its worktree is removed: at each turn's end and every 60 s while running
   let stopped = false;
   const snapshotting = new Set<string>();
   const snapshotAgain = new Set<string>(); // a call that came while one was running: run once more after it, so the last turn's end is not lost
@@ -2530,7 +2516,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     if (typeof h === "function") return wrap(h);
     return Object.fromEntries(Object.entries(h).map(([k, v]) => [k, wrap(v)]));
   };
-  // The entrance of every route: the CDN's header (#181), then the Host on loopback (#1135).
+  // The entrance of every route: the CDN's header, then the Host on loopback.
   const entryGuard = (h: AnyHandler | Record<string, AnyHandler>): AnyHandler | Record<string, AnyHandler> => {
     const wrap = (fn: AnyHandler): AnyHandler => (req, srv) => (!viaEdge(req, srv) ? refused(req, srv, notViaEdge()) : !hostOk(req) ? refused(req, srv, notAllowedHost()) : fn(req, srv));
     if (typeof h === "function") return wrap(h);
@@ -2555,31 +2541,31 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   server = Bun.serve({
     hostname: cfg.host,
     port: opts.port ?? cfg.port,
-    // #441: Bun's default 10 s cut a response still waiting on GitHub (backlog, answer, start) → CloudFront 502 → stopped page → Home.
+    // Bun's default 10 s cut a response still waiting on GitHub (backlog, answer, start) → CloudFront 502 → stopped page → Home.
     idleTimeout: 120,
-    // One upload may carry MAX_ATTACHMENTS_PER_REQUEST files of MAX_ATTACHMENT_BYTES each (#125), plus multipart overhead.
+    // One upload may carry MAX_ATTACHMENTS_PER_REQUEST files of MAX_ATTACHMENT_BYTES each, plus multipart overhead.
     maxRequestBodySize: MAX_ATTACHMENTS_PER_REQUEST * MAX_ATTACHMENT_BYTES + 1024 * 1024,
     routes: guardAll({
       // Open so the UI can learn whether a token is needed; paths and runner details only for authorized callers.
       "/api/health": async (req, srv) => {
-        // `login` tells the UI how a person gets in before it is authorized: the cloud host's passkey page (#211) or the token.
+        // `login` tells the UI how a person gets in before it is authorized: the cloud host's passkey page or the token.
         const login = cfg.sessionPublicKey ? "passkey" : "token";
         const auth = await authorize(req, srv);
         if (!auth.ok) return json({ ok: true, protocol: PROTOCOL_VERSION, authRequired, login });
         // /api/health is open to other origins (the UI learns whether a token is needed); a forced run is not.
-        // Only the forced run is waited for; otherwise the check runs behind and this answers with the last one (#3734).
+        // Only the forced run is waited for; otherwise the check runs behind and this answers with the last one.
         // refreshLogins never rejects (a failing detect() is caught inside), so the one not waited for cannot go unhandled.
         const force = new URL(req.url).searchParams.has("recheck") && sameOrigin(req);
         const check = refreshLogins(force);
         if (force) await check;
-        // busyTasks: the Tasks a restart would stop, so sb-rescue's status poll never reads every task (#2814).
+        // busyTasks: the Tasks a restart would stop, so sb-rescue's status poll never reads every task.
         return json({ ok: true, protocol: PROTOCOL_VERSION, login, session: (auth.session && sessionTimes(auth.session, cfg.sessionPublicKey)) || undefined, runners: runnerInfo(), home: cfg.home, homeDisplay: cfg.homeDisplay, homeIsTemp: cfg.homeIsTemp, repoRoot: cfg.repoRoot, authRequired, features: { pty: pty !== null }, archive: archiveProblem(cfg.home), routing: { llm: { ...settings().routing.llm, available: adapterMap.has(settings().routing.llm.runner) } }, mcp: { base: `${publicUrl()}/mcp/<taskId>` }, busyTasks: db.listWorkingTasks("gate").map(({ id, title, status }) => ({ id, title, status })) });
       },
 
-      // Settings the UI can change (#58). A saved default mode must be one the runner offers and must not skip
+      // Settings the UI can change. A saved default mode must be one the runner offers and must not skip
       // approvals (danger modes are a per-task choice, never a default — schedules run unattended on the default);
       // null clears it, also for a runner that is no longer detected.
-      // A runner's own login, from the screen (#354). The pasted code goes to the CLI's stdin only.
+      // A runner's own login, from the screen. The pasted code goes to the CLI's stdin only.
       "/api/runners/:id/login": {
         GET: (req) => {
           const v = runnerLogins.get(req.params.id as RunnerId);
@@ -2624,7 +2610,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           return v ? json(v) : bad("no login in progress", 404);
         },
       },
-      // 「CLI の表を読む」 (#1401): read only when asked (the claude executable is about 240 MB), never at boot or on a timer
+      // 「CLI の表を読む」: read only when asked (the claude executable is about 240 MB), never at boot or on a timer
       "/api/settings/model-candidates": {
         GET: async () => {
           const read = opts.modelCatalog ?? ((r: CatalogRunner) => hostReaders()[r]());
@@ -2684,7 +2670,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             if (!adapterMap.has(runner as RunnerId)) return bad(`runner "${runner}" is not installed`);
             next.autoResume[runner] = true;
           }
-          // Amazon Bedrock (#1730): only a runner with Bedrock models can be switched; null goes back to its own login
+          // Amazon Bedrock: only a runner with Bedrock models can be switched; null goes back to its own login
           for (const [runner, v] of Object.entries(parsed.data.bedrock ?? {})) {
             if (v === null) {
               delete next.bedrock[runner];
@@ -2693,7 +2679,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             if (!adapterMap.get(runner as RunnerId)?.bedrockModels) return bad(`runner "${runner}" cannot run on Amazon Bedrock`);
             next.bedrock[runner] = { region: v.region };
           }
-          // The model choices (#1400): the whole list per runner, null = back to the bundled list. A runner that has no
+          // The model choices: the whole list per runner, null = back to the bundled list. A runner that has no
           // list of its own (dak: its model is set on its side) or is not detected cannot have one. The id is not checked
           // against the CLI (`--model` takes any id); a blank or repeated one, or an empty list, is refused.
           for (const [runner, list] of Object.entries(parsed.data.models ?? {})) {
@@ -2712,7 +2698,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             if (dup) return bad(`model "${dup.value}" is listed twice`);
             next.models[runner] = rows;
           }
-          // The 載せない list (#1401): the whole list per runner, null = back to the bundled list's. Only a runner with a
+          // The 載せない list: the whole list per runner, null = back to the bundled list's. Only a runner with a
           // model list of its own; blank ids are dropped, an empty list hides nothing.
           for (const [runner, ids] of Object.entries(parsed.data.hiddenModels ?? {})) {
             if (ids === null) {
@@ -2724,7 +2710,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             if (!adapter.models?.length) return bad(`runner "${runner}" has no model list`);
             next.hiddenModels[runner] = [...new Set(ids.map((id) => id.trim()).filter(Boolean))];
           }
-          // LLM routing suggestions (#25): a partial patch; the runner must be detected because the suggestion is
+          // LLM routing suggestions: a partial patch; the runner must be detected because the suggestion is
           // produced by that runner's own adapter. Enabling it spends that subscription's quota per task creation.
           if (parsed.data.routing?.llm) {
             const patch = parsed.data.routing.llm;
@@ -2733,33 +2719,33 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             if (next.routing.llm.enabled && !adapterMap.has(next.routing.llm.runner)) return bad(`runner "${next.routing.llm.runner}" is not installed`);
           }
           if (parsed.data.outbound) next.outbound = { ...next.outbound, ...parsed.data.outbound };
-          // Shadow run (#99): the default shadow runner must be detected; null switches the default off.
+          // Shadow run: the default shadow runner must be detected; null switches the default off.
           if (parsed.data.shadowRunner !== undefined) {
             if (parsed.data.shadowRunner !== null && !adapterMap.has(parsed.data.shadowRunner)) return bad(`runner "${parsed.data.shadowRunner}" is not installed`);
             next.shadowRunner = parsed.data.shadowRunner;
           }
-          // The automatic judgement (#493): a partial patch; a runner that is not detected cannot be chosen
+          // The automatic judgement: a partial patch; a runner that is not detected cannot be chosen
           if (parsed.data.judge) {
             const patch = parsed.data.judge;
             if (patch.runner !== undefined && !adapterMap.has(patch.runner)) return bad(`runner "${patch.runner}" is not installed`);
             next.judge = { ...next.judge, ...patch };
           }
-          // The rubric judge (#1219): on / off only; the runner and model are the judge's
-          // The main reviewer of a PR (#4024): Tasks read it as OPS_KIT_REVIEW_RUNNER from their next start or resume
+          // The rubric judge: on / off only; the runner and model are the judge's
+          // The main reviewer of a PR: Tasks read it as OPS_KIT_REVIEW_RUNNER from their next start or resume
           if (parsed.data.reviewRunner !== undefined) next.reviewRunner = parsed.data.reviewRunner;
           if (parsed.data.maxRunners !== undefined) next.maxRunners = parsed.data.maxRunners;
           if (parsed.data.developSelf !== undefined) next.developSelf = parsed.data.developSelf;
           if (parsed.data.titles?.auto !== undefined) next.titles = { ...next.titles, auto: parsed.data.titles.auto };
           if (parsed.data.evals?.judge?.enabled !== undefined) next.evals = { ...next.evals, judge: { ...next.evals.judge, enabled: parsed.data.evals.judge.enabled } };
-          // The Tasks that start by themselves (#832): the runner must be detected. A runner change without a model
-          // goes back to that runner's CLI default (a model belongs to one runner); so does the effort (#833). A sent
+          // The Tasks that start by themselves: the runner must be detected. A runner change without a model
+          // goes back to that runner's CLI default (a model belongs to one runner); so does the effort. A sent
           // effort must be one the runner lists; a kept one is not checked again (startMetaTask drops it if stale).
-          // A kind's own choice (#1337) follows the same rules over that kind's saved one, else over the common
+          // A kind's own choice follows the same rules over that kind's saved one, else over the common
           // values; null removes it (back to the common values). The common runner's change leaves the kinds alone.
           if (parsed.data.autoStart) {
             const { byKind, ...patch } = parsed.data.autoStart;
             if (patch.runner !== undefined && !adapterMap.has(patch.runner)) return bad(`runner "${patch.runner}" is not installed`);
-            // the fallback order (#834) is replaced whole; a runner it adds must be detected. One already in the saved
+            // the fallback order is replaced whole; a runner it adds must be detected. One already in the saved
             // order may stay while it is not detected (fallbackRunner skips it), so the order can still be edited around it.
             const missing = patch.fallback?.find((r) => !adapterMap.has(r) && !next.autoStart.fallback.includes(r));
             if (missing) return bad(`runner "${missing}" is not installed`);
@@ -2782,7 +2768,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
               if (kindWhy) return bad(kindWhy);
               next.autoStart.byKind[kind] = choice;
             }
-            // Task ごとの実装のモデル（試験, #2769): a Claude model of claude's list, while 実装 runs on claude. A later runner change keeps it; the start leaves it out then
+            // Task ごとの実装のモデル（試験）: a Claude model of claude's list, while 実装 runs on claude. A later runner change keeps it; the start leaves it out then
             const taskModel = patch.completeTaskModel;
             if (taskModel) {
               if ((next.autoStart.byKind.complete ?? next.autoStart).runner !== "claude") return bad("Task ごとのモデル（試験）は「実装」のランナーが claude のときだけ選べます");
@@ -2790,7 +2776,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
               if (!listed.includes(taskModel) || !subagentModelAlias(taskModel)) return bad(`model "${taskModel}" is not one of claude's`);
             }
           }
-          // The tunables (#835): a partial patch over the saved group, null = the whole group back to the defaults.
+          // The tunables: a partial patch over the saved group, null = the whole group back to the defaults.
           // Read on every use, so the next use takes the new value without a restart.
           const defaults = tunableDefaults();
           const { quotaAndResume: qr, judgeAndChoice: jc, newDefaults: nd } = parsed.data;
@@ -2807,7 +2793,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
               return bad(String((e as Error).message ?? e));
             }
           }
-          // Model prices (#1402): a blank model name is refused; null drops the row (back to pricing.json's row)
+          // Model prices: a blank model name is refused; null drops the row (back to pricing.json's row)
           for (const [model, row] of Object.entries(parsed.data.prices ?? {})) {
             const name = model.trim();
             if (!name) return bad("model name is empty");
@@ -2816,7 +2802,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           }
           db.setSetting(SETTINGS_KEY, next);
           logOp(req, srv, "settings.update", { detail: { keys: Object.keys(parsed.data) } });
-          // a raised limit starts the Tasks that waited for it (#1141)
+          // a raised limit starts the Tasks that waited for it
           if (parsed.data.maxRunners !== undefined) tasks.drain();
           return json({ ...next, runners: runnerInfo(), defaults });
         }),
@@ -2885,8 +2871,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         POST: async (req) => {
           const id = String(req.params.id);
           // secret-scan reads every repository (minutes, past the request's idle timeout) and starts no Task: answered at
-          // once, its lines go to the schedules log (#775)
-          // approval-window (#2046) starts no Task either: answered the same way
+          // once, its lines go to the schedules log
+          // approval-window starts no Task either: answered the same way
           const kind = db.getSchedule(id)?.action;
           if (kind === "secret-scan" || kind === "approval-window") {
             void scheduler.runNow(id, "manual").catch((e) => scheduler.note(`${kind}: 始められない (manual): ${String((e as Error).message ?? e)}`));
@@ -2903,7 +2889,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       },
       "/api/schedules/log": () => json(scheduler.recentLog()),
       /**
-       * Saved instructions (#940). Expanding builds the text to put in the request / reply box and
+       * Saved instructions. Expanding builds the text to put in the request / reply box and
        * writes nothing: the Task is created or the reply sent by POST /api/tasks / send as before, approval and all.
        */
       "/api/presets": {
@@ -2965,11 +2951,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         },
       },
       "/api/queue": () => json(scheduler.queue()),
-      /** Unanswered permission asks across all tasks, newest first (#26: the phone-sized 承認 screen). */
+      /** Unanswered permission asks across all tasks, newest first (the phone-sized 承認 screen). */
       "/api/approvals": () => json(tasks.pendingApprovals()),
 
       /**
-       * The questions waiting on the user across the Tasks and every workspace's backlog (#935): the
+       * The questions waiting on the user across the Tasks and every workspace's backlog: the
        * open ones and those answered / resolved within the day, one per question. The backlog is the stored copy, as GET
        * /api/backlog reads it without refresh — no GitHub call.
        */
@@ -2978,11 +2964,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         return json({ fetchedAt: b.fetchedAt, asks, errors: b.errors, batches } satisfies AskList);
       },
 
-      /** The saved answer policies (#938), newest change first. */
+      /** The saved answer policies, newest change first. */
       "/api/policies": {
         GET: () => json({ policies: readPolicies(db).sort((a, b) => b.updatedAt - a.updatedAt) } satisfies PolicyList),
       },
-      /** Edits a policy's target / conditions / expiry with the same checks as saving, or revokes / restores it (#938). */
+      /** Edits a policy's target / conditions / expiry with the same checks as saving, or revokes / restores it. */
       "/api/policies/:id": {
         PATCH: async (req, srv) => {
           const refusal = await humanCheck(req, srv);
@@ -3012,7 +2998,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       },
 
       /**
-       * Answers one question and goes on (#936): `{ id, answer }` as on screen. 200 = written (and the
+       * Answers one question and goes on: `{ id, answer }` as on screen. 200 = written (and the
        * work asked to go on), `ask` with its resume; `already` = it was answered before (a resend, or a second click while
        * the first was written) and nothing was written again. 409 = the question changed (AskChanged), nothing written.
        */
@@ -3020,17 +3006,15 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         POST: async (req, srv) => {
           const parsed = AskAnswerInput.safeParse(await req.json().catch(() => null));
           if (!parsed.success) return bad(parsed.error.message);
-          const { id, answer, policy, taskIds, askIds } = parsed.data;
-          // a batch is answered by pressing its one button (#2046): never a policy, never a text of the person's own
+          const { id, answer, policy, taskIds } = parsed.data;
+          // a batch is answered by pressing its one button: never a policy, never a text of the person's own
           if (id.startsWith("batch:")) {
             if (policy || answer.kind !== "allow") return bad("まとまりへの回答は allow だけです（方針には保存できません）");
-            const r = await batchAnswers.answer(id, taskIds, askIds);
+            const r = await batchAnswers.answer(id, taskIds);
             return json(r.body, r.status);
           }
-          // a grant allows one operation once (#2745): never saved to be used again
+          // a grant allows one operation once: never saved to be used again
           if (policy && answer.kind === "grant") return bad("許可文は方針に保存できません");
-          // nor a question tool's answers (#3053): they answer that one turn's questions
-          if (policy && answer.kind === "questions") return bad("質問ツールへの回答は方針に保存できません");
           if (policy) {
             const refusal = await humanCheck(req, srv);
             if (refusal) return refusal;
@@ -3050,7 +3034,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         },
       },
 
-      // A Task's approval wait (#662): the kit's `device-auth` puts and deletes it, the screen reads it. The values stay
+      // A Task's approval wait: the kit's `device-auth` puts and deletes it, the screen reads it. The values stay
       // out of every error and log; only a Task whose runner is attached may put one.
       "/api/tasks/:id/device-auth": {
         GET: (req) => (db.getTask(String(req.params.id)) ? json(deviceAuths.get(String(req.params.id))) : bad("not found", 404)),
@@ -3083,7 +3067,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         },
       },
 
-      // Staged writes (#11): list, apply (re-checks scope and that the file did not move on), reject.
+      // Staged writes: list, apply (re-checks scope and that the file did not move on), reject.
       // Ownership is checked before anything is touched: a staged id must belong to the task in the URL.
       "/api/tasks/:id/staging": (req) => {
         const t = db.getTask(String(req.params.id));
@@ -3122,10 +3106,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         },
       },
 
-      // the per-task tokens too count only from this machine on the cloud host (#748): the runners call 127.0.0.1
+      // the per-task tokens too count only from this machine on the cloud host: the runners call 127.0.0.1
       "/mcp/:id": (req, srv) => (tokenCounts(req, srv) ? mcp.handle(String(req.params.id), tokenFromRequest(req, true), req) : refused(req, srv, bad("unauthorized", 401))),
 
-      // A Claude Task's OpenTelemetry logs (#2236, docs/design/claude-otel.md): its MCP token, the classifier's decisions
+      // A Claude Task's OpenTelemetry logs (docs/design/claude-otel.md): its MCP token, the classifier's decisions
       // kept as the task's events and nothing else of the body, the rules row counted again (the logs come after the turn's end)
       "/otel/:id/v1/logs": {
         POST: async (req, srv) => {
@@ -3146,10 +3130,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       "/api/workspaces": {
         GET: () => json(db.listWorkspaces()),
         /**
-         * `backlog`: `switchboard` keeps the workspace's backlog in Switchboard only (#2265): its source is set now and
+         * `backlog`: `switchboard` keeps the workspace's backlog in Switchboard only: its source is set now and
          * stored as an empty import, so it reads as current and nothing asks GitHub. Absent = `github` (a path already
-         * registered keeps its own). A path already registered with the other one is 409 (switching is #2266).
-         * `ownCopy` (with `repo`, #2579): someone else's repository is also copied to a new private `<you>/<name>`, the
+         * registered keeps its own). A path already registered with the other one is 409 (switching is turning the GitHub sync on or off).
+         * `ownCopy` (with `repo`): someone else's repository is also copied to a new private `<you>/<name>`, the
          * clone's origin; 400 on a repository you can push to, 409 when `<you>/<name>` is already there.
          */
         POST: strong(async (req, srv) => {
@@ -3174,7 +3158,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           }
           if (!body.path || !existsSync(body.path)) return bad("path must exist");
           const had = db.listWorkspaces().find((w) => w.path === body.path);
-          if (had && body.backlog !== undefined && had.backlog !== backlogAt) return bad(`この workspace のバックログは ${had.backlog} に置いています。切り替えは #2266 です`, 409);
+          if (had && body.backlog !== undefined && had.backlog !== backlogAt) return bad(`この workspace のバックログは ${had.backlog} に置いています。切り替えは GitHub 同期の有効・無効で行います`, 409);
           const ws = registerWorkspace(db, { path: body.path, name: body.name ?? basename(body.path), backlog: backlogAt, had });
           logOp(req, srv, "workspace.add", { detail: { path: body.path, backlog: backlogAt } });
           broadcast({ type: "workspaces.updated" });
@@ -3185,13 +3169,13 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       /**
        * A workspace's settings. `projectVar`: the repository variable its Project URL is under, for the backlog (null =
        * SWITCHBOARD_PROJECT_URL). Only the name is kept; the URL stays in the repository. `backlog: "switchboard"` turns
-       * its GitHub sync off (#2266): the source and every record stay (GitHub's numbers, comments, fields) and are marked
+       * its GitHub sync off: the source and every record stay (GitHub's numbers, comments, fields) and are marked
        * `disabled`, with every other workspace of the same repository's (they share the records); one never imported gets a
-       * source kept here only, as a registration with it does (#2265). Already off: 200, nothing changes.
+       * source kept here only, as a registration with it does. Already off: 200, nothing changes.
        */
       "/api/workspaces/:id": {
         /**
-         * Removes the registration (#2600); `deleteCopy` deletes the directory too, only a Git checkout next to this one
+         * Removes the registration; `deleteCopy` deletes the directory too, only a Git checkout next to this one
          * (`copyDeletable`). A running Task there or a schedule that names it refuses (409). Tasks keep their history. The
          * stored backlog is the repository's: it goes only with the last workspace of that repository.
          */
@@ -3230,7 +3214,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           const id = String(req.params.id);
           if (!db.getWorkspace(id)) return bad("not found", 404);
           const body = await readJson(req, (x) => x as { projectVar?: unknown; backlog?: unknown; sweep?: unknown });
-          // backlog-next's slots (#2656): on their own, read from the next firing
+          // backlog-next's slots: on their own, read from the next firing
           if (body.sweep !== undefined) {
             if (body.projectVar !== undefined || body.backlog !== undefined) return bad("sweep is changed on its own");
             const sweep = WorkspaceSweep.partial().strict().safeParse(body.sweep);
@@ -3279,12 +3263,12 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             broadcast({ type: "workspaces.updated" });
             return json(db.getWorkspace(id));
           }
-          // a backlog kept here only (#2265), or one whose GitHub sync is off (#2266), reads no GitHub Project
+          // a backlog kept here only, or one whose GitHub sync is off, reads no GitHub Project
           if (db.getWorkspace(id)!.backlog === "switchboard" && body.projectVar !== undefined) return bad("この workspace のバックログは Switchboard に置いているので、GitHub の Project は読みません", 409);
           const v = typeof body.projectVar === "string" ? body.projectVar.trim() : body.projectVar;
           if (v !== null && v !== "" && (typeof v !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(v))) return bad("projectVar must be a repository variable name (letters, digits, _) or null");
           const next = v ? v : null;
-          // the same name again keeps the stored backlog; another one forgets its source until an import reads it (#885)
+          // the same name again keeps the stored backlog; another one forgets its source until an import reads it
           if ((db.getWorkspace(id)!.projectVar ?? null) === next) return json(db.getWorkspace(id));
           const ws = db.setWorkspaceProjectVar(id, next);
           // not an import begun with the old variable: it does not write its source back (backlog-sync.ts)
@@ -3294,7 +3278,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         },
       },
 
-      /** What removing the workspace would do (#2600), for the confirmation `DELETE /api/workspaces/:id` follows. */
+      /** What removing the workspace would do, for the confirmation `DELETE /api/workspaces/:id` follows. */
       "/api/workspaces/:id/removal": {
         GET: async (req) => {
           const ws = db.getWorkspace(String(req.params.id));
@@ -3306,7 +3290,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         },
       },
 
-      /** A foreign repository's runner config (#2576): what Tasks would read, and the person's confirmation of exactly that content. */
+      /** A foreign repository's runner config: what Tasks would read, and the person's confirmation of exactly that content. */
       "/api/workspaces/:id/runner-config": {
         GET: (req) => {
           const ws = db.getWorkspace(String(req.params.id));
@@ -3326,7 +3310,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         }),
       },
 
-      /** Brings a foreign repository's updates in (#2576) by a Task: the fetch, the merge and its conflicts are the Task's. Unconfirmed runner config answers 409 like any start. */
+      /** Brings a foreign repository's updates in by a Task: the fetch, the merge and its conflicts are the Task's. Unconfirmed runner config answers 409 like any start. */
       "/api/workspaces/:id/upstream-sync": {
         POST: async (req) => {
           const ws = db.getWorkspace(String(req.params.id));
@@ -3344,15 +3328,15 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       },
 
       /**
-       * Open requests and PBIs of every registered workspace's repository and the stage each is at (#264, #294), as the
-       * last import stored them (#885): no GitHub call, no wait. A workspace never imported is in `errors` (its import is
+       * Open requests and PBIs of every registered workspace's repository and the stage each is at, as the
+       * last import stored them: no GitHub call, no wait. A workspace never imported is in `errors` (its import is
        * asked for, see `storedBacklog`); one whose import failed keeps its stored items and has the reason there. ?refresh=1 (the screen's 再読込) imports
        * every workspace first and answers what is stored then — a failed import (a limit, an outage) still answers the
        * stored copy, with the reason.
        */
       "/api/backlog": {
         GET: async (req) => json(await readBacklog(new URL(req.url).searchParams.get("refresh") === "1")),
-        /** A new Issue in the workspace's repository (#886): stored here (202, its `localId` and `number`) and created on GitHub later. */
+        /** A new Issue in the workspace's repository: stored here (202, its `localId` and `number`) and created on GitHub later. */
         POST: async (req) => {
           const parsed = BacklogCreateInput.safeParse(await req.json().catch(() => null));
           if (!parsed.success) return bad(parsed.error.message);
@@ -3361,20 +3345,20 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           if (!db.getWorkspace(workspaceId)) return bad("workspace not found", 404);
           if (!source) return bad("まだ GitHub から取り込んでいません", 409);
           try {
-            // a local change (#2485): its branches are read in the workspace's checkout
+            // a local change: its branches are read in the workspace's checkout
             if (input.change) checkLocalChange(db, source, db.getWorkspace(workspaceId)!.path, input.change);
-            // a backlog kept here only (#2265) has no service to refuse a parent that is not there, and its fields take
+            // a backlog kept here only has no service to refuse a parent that is not there, and its fields take
             // the choices of the workspace's ops.config.json
             if (!syncsGithub(source)) {
               checkLocalParent(db, source, input.parent);
               input.fields = checkLocalFields(db.getWorkspace(workspaceId)!.path, input) ?? null;
             } else if (source.service === "github") {
-              // a choice is fixed to the config's spelling or refused before it is stored (#3795)
+              // a choice is fixed to the config's spelling or refused before it is stored
               input.fields = checkFieldChoices(db.getWorkspace(workspaceId)!.path, input.fields) ?? null;
             }
             const made = createStoredIssue(db, source, input);
             backlog.send(db.getWorkspace(workspaceId)!);
-            // a backlog kept here only (#2265) numbers it at once; GitHub's numbers it once it is sent (null until then)
+            // a backlog kept here only numbers it at once; GitHub's numbers it once it is sent (null until then)
             const number = readStoredIssue(db, { id: workspaceId }, made.localId)?.issue.number || null;
             return json({ ...made, number }, 202);
           } catch (e) {
@@ -3384,20 +3368,20 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         },
       },
 
-      /** People's interventions and why work stopped, the last 7 and 30 days against the period before each (#651). Counted at each look from the records and the stored Issues: no GitHub call. */
+      /** People's interventions and why work stopped, the last 7 and 30 days against the period before each. Counted at each look from the records and the stored Issues: no GitHub call. */
       "/api/interventions": {
         GET: () => json(interventionView(db, db.listWorkspaces())),
       },
 
-      /** How long the PBIs closed in the last 30 days took, stage by stage, and in the 30 days before (#651). Held for an hour; ?refresh=1 reads again. */
+      /** How long the PBIs closed in the last 30 days took, stage by stage, and in the 30 days before. Held for an hour; ?refresh=1 reads again. */
       "/api/flow": {
         GET: async (req) => json(await flow.get(new URL(req.url).searchParams.get("refresh") === "1")),
       },
 
       /**
-       * A GitHub Webhook delivery (#887): open without the token (GitHub cannot carry it) once the user opened it
+       * A GitHub Webhook delivery: open without the token (GitHub cannot carry it) once the user opened it
        * (`cfg.githubWebhook` and `cfg.githubWebhookSecret`; else the token is asked as anywhere). The delivery must carry
-       * X-Hub-Signature-256, the HMAC-SHA256 of the body under the Secret (#1493); a missing or wrong one is 401 and
+       * X-Hub-Signature-256, the HMAC-SHA256 of the body under the Secret; a missing or wrong one is 401 and
        * starts nothing. It is only a notice — the
        * workspaces of the repository / Project it names are imported (BacklogSync.hint: at most one per minute each,
        * ten in all), and nothing of the payload is stored or followed. The body is read up to 64 KiB. The answer is the
@@ -3423,9 +3407,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       },
 
       /**
-       * Brings one workspace's stored backlog up to date (#918, the kit's `backlog … --fresh`): what is kept here is sent,
+       * Brings one workspace's stored backlog up to date (the kit's `backlog … --fresh`): what is kept here is sent,
        * then the repository is imported (`BacklogSync.settle`). 200 once stored (read it then with GET); 424 with the reason when GitHub cannot be
-       * read now (a limit, an outage) — the kit then answers what is stored, said to be not synced (#2264).
+       * read now (a limit, an outage) — the kit then answers what is stored, said to be not synced.
        */
       "/api/backlog/sync": {
         POST: async (req) => {
@@ -3444,7 +3428,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       },
 
       /**
-       * Only the `syncs` of GET /api/backlog (#3438): each workspace's id, repository and sync state, with no record read
+       * Only the `syncs` of GET /api/backlog: each workspace's id, repository and sync state, with no record read
        * (the kit looks its workspace up by it before every command). Same rows, so a workspace never imported has its
        * import asked for here too (`storedBacklog`).
        */
@@ -3453,7 +3437,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       },
 
       /**
-       * The stored records of one workspace (#919): what the kit's lint and parallel guard read instead of asking GitHub
+       * The stored records of one workspace: what the kit's lint and parallel guard read instead of asking GitHub
        * (`readStoredRecords`). 409 = never imported (nothing is read as current); bring it up to date with POST /sync first.
        */
       "/api/backlog/records": {
@@ -3466,7 +3450,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       },
 
       /**
-       * The backlog queue (#3955): the PBIs to implement, in the order the person chose, kept in the daemon. GET drops the
+       * The backlog queue: the PBIs to implement, in the order the person chose, kept in the daemon. GET drops the
        * PBIs whose stored Issue is closed (to `ended`, stored); PUT changes the fields it names (400 when one does
        * not parse) and answers the queue as stored.
        */
@@ -3485,7 +3469,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       },
 
       /**
-       * One stored Issue (#885): body, comments and the Project's fields as shown (with the edits not sent yet, #886),
+       * One stored Issue: body, comments and the Project's fields as shown (with the edits not sent yet),
        * without asking GitHub. `:number` is its number, or the local id of an Issue made here. 404 = not stored.
        */
       "/api/backlog/:number": {
@@ -3494,18 +3478,18 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           if (!ws) return bad("workspace not found", 404);
           const detail = readStoredIssue(db, ws, issueRef(req.params.number ?? ""), { importFailed: backlog.importError(ws) !== null });
           if (!detail) return bad(`#${req.params.number} は保存されていません`, 404);
-          // a local change's tips (#2485), read now: they move with every commit and are not kept
+          // a local change's tips, read now: they move with every commit and are not kept
           const change = detail.issue.change;
           const source = db.getWorkspaceBacklogSource(ws.id);
           const projectFields = source && !syncsGithub(source) ? localProjectFields(ws.path) : detail.projectFields;
           return json({ ...detail, projectFields, changeRefs: change ? { head: branchTip(ws.path, change.head), base: branchTip(ws.path, change.base) } : null });
         },
         /**
-         * Edits it (#886): stored here at once (202, the operations) and sent to GitHub later. Or, with `resolve` alone,
-         * a choice on a held conflict (#887): 202 with the operation, 409 when none is held there or it moved since read.
-         * With `retry` alone, a failed operation of the Issue sent again (#2885): 202, 409 when it is not a failed one of it.
+         * Edits it: stored here at once (202, the operations) and sent to GitHub later. Or, with `resolve` alone,
+         * a choice on a held conflict: 202 with the operation, 409 when none is held there or it moved since read.
+         * With `retry` alone, a failed operation of the Issue sent again: 202, 409 when it is not a failed one of it.
          * With `cancel` alone, a comment still inside its 60 s send window taken back: 202, 409 when it is past it or not one.
-         * With `withdraw` alone, an `unknown` / `failed` operation of it taken back (#3804), nothing sent: 202, 409 likewise.
+         * With `withdraw` alone, an `unknown` / `failed` operation of it taken back, nothing sent: 202, 409 likewise.
          */
         PATCH: async (req) => {
           const parsed = BacklogEditInput.safeParse(await req.json().catch(() => null));
@@ -3524,7 +3508,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             } else if (source.service === "github" && edit.fields && !resolve && !retry && !cancel && !withdraw) {
               edit.fields = checkFieldChoices(db.getWorkspace(workspaceId)!.path, edit.fields);
               const fixed = edit.fields!;
-              // a value that does not fit its field is refused before it is stored (#3811); GitHub out of reach (or waited
+              // a value that does not fit its field is refused before it is stored; GitHub out of reach (or waited
               // for: nothing is asked of it meanwhile, docs/design/github-api-budget.md) stores it, the send checks last
               const defs = backlog.waitUntil({ id: workspaceId }) > Date.now() ? null : await readProjectFields(opts.gh ?? runGh, db, db.getWorkspace(workspaceId)!.path, source).catch(() => null);
               if (defs) checkFieldTypes(defs, fixed);
@@ -3541,9 +3525,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       },
 
       /**
-       * Answers a needs-decision item (#266): `## 回答` on the Issue, then its label off — stored here at once (202) and
-       * sent to GitHub in that order (#886), so an answer is not lost while GitHub cannot be reached. With `confirm`,
-       * answers one confirmation of an in-progress PBI instead (#523; `answerStoredConfirmation`).
+       * Answers a needs-decision item: `## 回答` on the Issue, then its label off — stored here at once (202) and
+       * sent to GitHub in that order, so an answer is not lost while GitHub cannot be reached. With `confirm`,
+       * answers one confirmation of an in-progress PBI instead (`answerStoredConfirmation`).
        */
       "/api/backlog/:number/answer": {
         POST: async (req) => {
@@ -3561,7 +3545,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           const { confirm } = parsed.data;
           try {
             if (confirm) {
-              // a confirmation of an in-progress PBI (#523): that line of its body as stored, the body it is sent with (#886)
+              // a confirmation of an in-progress PBI: that line of its body as stored, the body it is sent with
               const c = item.confirmations.find((x) => x.n === confirm.n);
               if (!c) return bad(`#${n} に確認待ちの受け入れ条件 ${confirm.n} はありません`, 409);
               if (!answerStoredConfirmation(db, source, n, { ...c, ok: confirm.ok, reason: parsed.data.text })) return bad(`#${n} の本文が変わりました。再読込してください`, 409);
@@ -3569,7 +3553,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
               return json({ ok: true }, 202);
             }
             if (item.stage !== "needs-decision") return bad(`#${n} は判断待ちではありません`, 409);
-            // a question asked on one of an in-progress PBI's Tasks is answered on that Task (#562), the one on screen only
+            // a question asked on one of an in-progress PBI's Tasks is answered on that Task, the one on screen only
             const asked = item.decision?.issue ?? n;
             if (parsed.data.issue !== undefined && parsed.data.issue !== asked) return bad(`#${n} の問いは #${asked} に変わりました。読み直してから回答してください`, 409);
             answerStoredDecision(db, source, asked, parsed.data.text, Date.now(), { screen: true });
@@ -3582,7 +3566,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         },
       },
 
-      /** A plain comment on a stored Issue (#910): kept here at once (202) and sent to GitHub later, as an answer is. */
+      /** A plain comment on a stored Issue: kept here at once (202) and sent to GitHub later, as an answer is. */
       "/api/backlog/:number/comment": {
         POST: async (req) => {
           const parsed = BacklogCommentInput.safeParse(await req.json().catch(() => null));
@@ -3603,7 +3587,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       },
 
       /**
-       * Starts the next stage of one backlog item as a Task with the stage skill's fixed prompt (#265), on the workspace
+       * Starts the next stage of one backlog item as a Task with the stage skill's fixed prompt, on the workspace
        * whose repository the Issue is in; another workspace's Task reads the skills from the meta workspace.
        */
       "/api/backlog/:number/start": {
@@ -3617,7 +3601,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           const meta = metaWorkspace();
           if (ws.kind !== "meta" && !meta) return bad("meta workspace がありません（工程のスキルはそこから読みます）", 409);
           const n = Number(req.params.number);
-          // the stored data is what is true (#2264): GitHub is brought up to date first when it can be reached, and a
+          // the stored data is what is true: GitHub is brought up to date first when it can be reached, and a
           // limit or an outage does not hold the start
           await backlog.settle(ws).catch(() => undefined);
           const stored = storedBacklog(ws);
@@ -3628,10 +3612,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           const can = canStartStoredBacklog(item);
           if (!can.ok) return bad(`#${n} は始めません: ${can.why}`, 409);
           const { action } = parsed.data;
-          // 閉じる (#523) goes with closable, not with a stage; complete on an in-progress item is backlog-next's resume
-          // of a stalled one (#578), started from a waiting row's 続きを始める (#1045)
+          // 閉じる goes with closable, not with a stage; complete on an in-progress item is backlog-next's resume
+          // of a stalled one, started from a waiting row's 続きを始める
           const resume = action === "complete" && item.stage === "in-progress";
-          // 直行で直す (#3690) only from a request with no PBI yet, like PBI にする; it is not a stage, so backlog-next never picks it
+          // 直行で直す only from a request with no PBI yet, like PBI にする; it is not a stage, so backlog-next never picks it
           if (action === "direct" && item.stage !== "request") return bad(`直行で始められるのは派生 PBI の無い要望だけです（#${n} は ${item.stage}）`, 409);
           // another repository's worktree and branch rules are its own (the PBI's scope: the meta workspace first)
           if (action === "direct" && ws.kind !== "meta") return bad("直行で始められるのは meta workspace の要望だけです", 409);
@@ -3648,7 +3632,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           const parsed = FeedbackInput.safeParse(await req.json().catch(() => null));
           if (!parsed.success) return bad(parsed.error.message);
           if (parsed.data.mode === "request") {
-            // a request for Switchboard itself, on an instance that does not develop it, goes upstream (#2459): no Task is made
+            // a request for Switchboard itself, on an instance that does not develop it, goes upstream: no Task is made
             const target = parsed.data.workspaceId ? db.getWorkspace(parsed.data.workspaceId) : metaWorkspace();
             if (target?.kind === "meta" && !settings().developSelf) {
               // a moved or removed meta directory makes the spawn throw: the text to copy is still answered
@@ -3719,7 +3703,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             const why = tasks.checkEffort(parsed.data.runner, parsed.data.effort);
             if (why) return bad(why);
           }
-          // An explicit shadow runner (#99) is checked here so the caller learns at once; a saved default that is
+          // An explicit shadow runner is checked here so the caller learns at once; a saved default that is
           // not detected is skipped with a note on the task instead (the task itself must still start).
           if (parsed.data.shadowRunner) {
             if (parsed.data.shadowRunner === parsed.data.runner) return bad("shadowRunner must differ from runner");
@@ -3737,13 +3721,13 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             }
           }
           try {
-            // cwd omitted: the named Workspace's path, or — with no Workspace named either — "自動" (#135). The LLM
+            // cwd omitted: the named Workspace's path, or — with no Workspace named either — "自動". The LLM
             // turn comes after every check above and after the runner check, so a request that cannot become a task
             // does not spend a turn first.
             if (!adapterMap.has(parsed.data.runner)) throw new Error(`runner "${parsed.data.runner}" is not installed`);
             const chosen = parsed.data.cwd === undefined && !named ? await chooseWorkspace(parsed.data) : null;
             const settled = chosen ? { ...parsed.data, workspaceId: chosen.workspace.id, cwd: chosen.workspace.path, workspaceReason: chosen.reason } : { ...parsed.data, cwd: parsed.data.cwd ?? named!.path };
-            // A skill command on an Issue (`/pbi-complete 123`) is named by the Issue's title at once (#491); a local backlog's numbers are not GitHub's
+            // A skill command on an Issue (`/pbi-complete 123`) is named by the Issue's title at once; a local backlog's numbers are not GitHub's
             const issueTitle = settled.title === undefined && (chosen?.workspace ?? named)?.backlog !== "switchboard" ? await skillCommandTitle(settled.prompt, settled.cwd, opts.gh ?? runGh) : null;
             const input = issueTitle ? { ...settled, title: issueTitle } : settled;
             // What the Workspace choice spent belongs to the task it was asked about, under the runner that answered (not
@@ -3768,7 +3752,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         GET: () => json(listProcesses(metaWorkspace()?.path).map((d) => ({ id: d.id, version: d.version, title: d.title, fits: d.fits }))),
       },
 
-      // The last stop of each Task that may need the person (#4520). Before `/api/tasks/:id`, which would read "stops" as an id.
+      // The last stop of each Task that may need the person. Before `/api/tasks/:id`, which would read "stops" as an id.
       "/api/tasks/stops": { GET: () => json(stopMarks(db, db.listTasks())) },
 
       "/api/tasks/suggest": {
@@ -3786,7 +3770,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         },
       },
 
-      // Decision log (#25). JSON for the UI; `?format=jsonl` is the training-data export — one example per line,
+      // Decision log. JSON for the UI; `?format=jsonl` is the training-data export — one example per line,
       // newest first, so `| head -n` is a valid (if newest-biased) sample and the whole body never has to be parsed.
       "/api/routing/log": (req) => {
         const q = new URL(req.url).searchParams;
@@ -3798,10 +3782,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         return new Response(rows.map(line).join("\n") + (rows.length ? "\n" : ""), { headers: { "content-type": "application/x-ndjson; charset=utf-8" } });
       },
 
-      // Agreement rate per suggester (#25): the Ledger's ルーティング一致率 card.
+      // Agreement rate per suggester: the Ledger's ルーティング一致率 card.
       "/api/routing/stats": (req) => json(db.routingStats(clampDays(new URL(req.url).searchParams.get("days")))),
 
-      // Terminal history (#91): status of the session-log import, and a pass on request (the UI's 今すぐ取り込む).
+      // Terminal history: status of the session-log import, and a pass on request (the UI's 今すぐ取り込む).
       "/api/history": () => json(history.status()),
       "/api/history/import": {
         POST: () => {
@@ -3813,8 +3797,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         },
       },
 
-      // The events (#1142): the last `limit` (200 by default; 0 = none, the rest only), or with ?before=<seq> the `limit` just
-      // before that seq. ?after=<seq>: every event past that seq (the web's catch-up after a dropped WebSocket, #1137), never cut.
+      // The events: the last `limit` (200 by default; 0 = none, the rest only), or with ?before=<seq> the `limit` just
+      // before that seq. ?after=<seq>: every event past that seq (the web's catch-up after a dropped WebSocket), never cut.
       // The rest is always whole.
       "/api/tasks/:id": {
         GET: (req) => {
@@ -3827,7 +3811,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         const events = q.has("after") ? db.listEvents(t.id, afterSeq(q.get("after"))) : limit === 0 ? [] : before !== null ? db.listEventsBefore(t.id, Number(before), limit) : db.listEventsTail(t.id, limit);
         return json({ task: t, mcpServers: t.runner === "claude" && t.executionMode !== "cloud" ? Object.keys(taskMcpServers(t)) : [], events, cost: db.taskCost(t.id), history: t.executionMode === "cloud" ? null : history.forTask(t.id), localContinuations: db.listLocalTasksForCloud(t.id), sourceCloudTask: t.sourceCloudTaskId ? db.getTask(t.sourceCloudTaskId) : null, attachments: attachments.listForTask(t.id), teleport: teleports.get(t.id) ?? null, stopSummary: reduceStops(stopRecordsFor(db, t)), eventsArchive: db.eventsArchiveOf(t.id), createdIssues: createdIssuesOf(db.sqlite, t.id), deferred: deferredOf(db.sqlite, t.id) });
         },
-        // The person renames the task (#491): it is not set again automatically.
+        // The person renames the task: it is not set again automatically.
         PATCH: async (req) => {
           const parsed = PatchTaskInput.safeParse(await req.json().catch(() => ({})));
           if (!parsed.success) return bad(parsed.error.message);
@@ -3842,7 +3826,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         },
       },
 
-      // "Continue locally" (#1306): starts the official Teleport without a terminal socket; progress comes as task.teleport.
+      // "Continue locally": starts the official Teleport without a terminal socket; progress comes as task.teleport.
       "/api/tasks/:id/teleport": {
         POST: (req) => {
           const id = String(req.params.id);
@@ -3871,7 +3855,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         },
       },
 
-      // Attachments (#125). Upload first (multipart, one or more `file` fields), then send the ids with a turn.
+      // Attachments. Upload first (multipart, one or more `file` fields), then send the ids with a turn.
       "/api/attachments": {
         POST: async (req) => {
           // The whole body is buffered by formData(); an upload that cannot fit is refused from its length first.
@@ -3918,7 +3902,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         },
       },
 
-      // Across Tasks, newest first: the HTML artifacts of every task (#1835) and every artifact (#1833). Both read
+      // Across Tasks, newest first: the HTML artifacts of every task and every artifact. Both read
       // the same q / before / limit (acrossQuery) and the same query, so the two lists filter and page alike.
       "/api/reports": (req) => {
         const o = acrossQuery(new URL(req.url), db);
@@ -3930,7 +3914,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           return typeof o === "string" ? bad(o) : json(db.listArtifactsAcross({ ...o, htmlOnly: false }));
         },
       },
-      // Artifacts (#1777): reports registered from the Task screen. Register copies the file; the original may go.
+      // Artifacts: reports registered from the Task screen. Register copies the file; the original may go.
       "/api/tasks/:id/artifacts": {
         GET: (req) => (db.getTask(String(req.params.id)) ? json(artifacts.list(String(req.params.id))) : bad("not found", 404)),
         POST: async (req) => {
@@ -3944,7 +3928,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       "/api/artifacts/:id": {
         DELETE: (req) => artifactResult(() => json(artifacts.remove(String(req.params.id)))),
       },
-      // A throwaway app read the API through the screen (#3682): count the local day; on the APP_REQUEST_DAYS-th day
+      // A throwaway app read the API through the screen: count the local day; on the APP_REQUEST_DAYS-th day
       // Switchboard starts a request Task for it, once per artifact.
       "/api/artifacts/:id/app-use": {
         POST: async (req) => {
@@ -4036,7 +4020,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         },
       },
 
-      // Usage-limit resume (#102): continue now instead of waiting, or forget the planned resume.
+      // Usage-limit resume: continue now instead of waiting, or forget the planned resume.
       "/api/tasks/:id/resume": {
         POST: async (req) => {
           if (!db.getTask(String(req.params.id))) return bad("not found", 404);
@@ -4052,7 +4036,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         },
       },
 
-      // Change the mode of an existing task (#58): live for Claude, next turn for Codex, resume otherwise.
+      // Change the mode of an existing task: live for Claude, next turn for Codex, resume otherwise.
       "/api/tasks/:id/permission-mode": {
         POST: async (req, srv) => {
           const t = db.getTask(String(req.params.id));
@@ -4073,7 +4057,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         },
       },
 
-      // Change the model of an existing task (#155): the next turn resumes the session with it. null / "" = CLI default.
+      // Change the model of an existing task: the next turn resumes the session with it. null / "" = CLI default.
       "/api/tasks/:id/model": {
         POST: async (req) => {
           const t = db.getTask(String(req.params.id));
@@ -4163,14 +4147,14 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         }),
       },
 
-      // Releases (#178). Under sb-rescue the daemon runs from an immutable release, so new code arrives by promoting
+      // Releases. Under sb-rescue the daemon runs from an immutable release, so new code arrives by promoting
       // a commit, and sb-rescue does all of it (candidate check, switch, automatic rollback). The daemon only relays:
       // it cannot be trusted to judge or survive its own replacement.
       "/api/daemon/release": async () => {
         const s = await releaseStatus();
         if (!s.managed) return json({ ...s, latestRelease: await latestRelease(null).catch(() => null) });
         try {
-          // `ahead` (#1660): commits in HEAD that the running version lacks — 0 when HEAD is the running version or inside it;
+          // `ahead`: commits in HEAD that the running version lacks — 0 when HEAD is the running version or inside it;
           // null when it cannot be counted (the running version is not in this checkout, git failed).
           // `behind` is its pair: commits in the running version that HEAD lacks. > 0 with `ahead` 0 = HEAD is an ancestor of what
           // runs (the checkout does not follow the tag), so "up to date" and promoting HEAD would be wrong.
@@ -4179,7 +4163,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             s.current ? git(["rev-list", "--count", `${s.current}..HEAD`]).then(Number, () => null) : Promise.resolve(null),
             s.current ? git(["rev-list", "--count", `HEAD..${s.current}`]).then(Number, () => null) : Promise.resolve(null),
           ]);
-          // a public copy's clone (#4569): the newest release and the check of its diff (null on a development origin)
+          // a public copy's clone: the newest release and the check of its diff (null on a development origin)
           const latest = await latestRelease(s.current).catch(() => null);
           const review = latest ? releaseReviewFor(latest) : null;
           return json({ managed: true, latestRelease: latest, review, rescuePage: cfg.rescuePageUrl, head, headSubject, ahead, behind, busyTasks: busyTasks(), dirty: dirty !== "", current: s.current, previous: s.previous, state: s.state, busy: s.busy, lastError: s.lastError ?? null, history: s.history.slice(0, 5), asked: promotionAsked, hold: promotionHold ? { ...promotionHold, busyTasks: busyTasks() } : null });
@@ -4187,7 +4171,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           return json({ managed: false, error: `sb-rescue did not answer at ${cfg.rescueUrl}: ${String((e as Error).message ?? e)}` });
         }
       },
-      // Check the newest release's diff again (#4569) after it could not be checked or found a concern. Promotion itself stays
+      // Check the newest release's diff again after it could not be checked or found a concern. Promotion itself stays
       // `/api/daemon/promote`: the dialog on the screen is the confirmation (a mark on the API would not stop a caller of it).
       "/api/daemon/release/review": {
         POST: strong(async () => {
@@ -4254,7 +4238,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       "/api/ledger/summary": async () => json({ ...db.ledgerSummary(), github: await githubBudget.get(metaWorkspace()?.path ?? cfg.codeRoot) }),
       "/api/ledger/daily": (req) => json(db.ledgerDaily(clampDays(new URL(req.url).searchParams.get("days")))),
       "/api/ledger/tasks": (req) => json(db.ledgerTasks(clampDays(new URL(req.url).searchParams.get("days")))),
-      // Ledger (#1836): the period per runner × model. `days` is an integer 1..90 (absent = 7); anything else is 400, not rounded.
+      // Ledger: the period per runner × model. `days` is an integer 1..90 (absent = 7); anything else is 400, not rounded.
       "/api/ledger/models": (req) => {
         const raw = new URL(req.url).searchParams.get("days");
         const days = raw === null ? 7 : /^[0-9]+$/.test(raw) ? Number(raw) : NaN;
@@ -4284,10 +4268,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         if (!Number.isInteger(days) || days < 1 || days > 90) return bad("days must be an integer 1..90");
         return json(opsLoad(db, days, { taskId: sp.get("task") ?? undefined, available: readCgroup() !== null }));
       },
-      // now, for the resources screen (#3332): read when asked; the screen asks every 5 s only while it is shown
+      // now, for the resources screen: read when asked; the screen asks every 5 s only while it is shown
       "/api/ops/resources": () => json(opsResources(db, { home: homedir() })),
       /**
-       * Jobs a Task asks the daemon to run (#3992, jobs.ts): local CI or a review, as the daemon's child. POST answers
+       * Jobs a Task asks the daemon to run (jobs.ts): local CI or a review, as the daemon's child. POST answers
        * 202 with the job (its `id` is what the Task waits on as `job#<id>`); GET lists the running ones and those that
        * ended in the last 7 days, newest first.
        */
@@ -4315,14 +4299,14 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           return json({ task: tasks.setBudget(t.id, b), overBudget: tasks.isOverBudget(t.id) });
         },
       },
-      // The Evals list (#1221): newest first, up to `limit` (100, at most 500), filtered by workspace / runner.
+      // The Evals list: newest first, up to `limit` (100, at most 500), filtered by workspace / runner.
       "/api/evals": (req) => {
         const url = new URL(req.url);
         const limit = Math.min(500, Math.max(1, Math.floor(Number(url.searchParams.get("limit")) || 100)));
         const runner = url.searchParams.get("runner");
         if (runner && !RunnerId.safeParse(runner).success) return bad("unknown runner");
         const rows = db.evalsList({ workspaceId: url.searchParams.get("workspaceId") || undefined, runner: (runner as RunnerId | null) || undefined, limit });
-        // a local task without a readable rules row (from before #1218, still in its first turn, or a row this version cannot read) is
+        // a local task without a readable rules row (from before rule metrics were counted, still in its first turn, or a row this version cannot read) is
         // counted here and the row kept, as the Brief does, so the two agree. Paid once per task; one task that cannot be counted
         // stays at null rather than failing the list.
         for (const row of rows) {
@@ -4338,7 +4322,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         }
         return json(rows);
       },
-      // The Insights summary (#1877): this week's ask-to-rate sample (from the tasks judged the week before) and the
+      // The Insights summary: this week's ask-to-rate sample (from the tasks judged the week before) and the
       // human − judge gap over every rated task. Counted on each read; the week turns over by itself.
       "/api/evals/summary": (req) => {
         const workspaceId = new URL(req.url).searchParams.get("workspaceId") || undefined;
@@ -4354,13 +4338,13 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         if (!t) return bad("not found", 404);
         return json(evalsFor(t));
       },
-      // 改善要望にする (#1221): the draft the feedback dialog opens with; the person edits and sends it through /api/feedback.
+      // 改善要望にする: the draft the feedback dialog opens with; the person edits and sends it through /api/feedback.
       "/api/tasks/:id/evals/draft": (req) => {
         const t = db.getTask(String(req.params.id));
         if (!t) return bad("not found", 404);
         return json({ text: evalRequestDraft(t, evalsFor(t)) });
       },
-      // 再評価 (#1219): scores the task as it stands now, in the background; the result arrives as evals.updated. Works even with the automatic judge off.
+      // 再評価: scores the task as it stands now, in the background; the result arrives as evals.updated. Works even with the automatic judge off.
       "/api/tasks/:id/evals/judge": {
         POST: (req) => {
           const t = db.getTask(String(req.params.id));
@@ -4373,7 +4357,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         },
       },
 
-      // The person's own rating (#1220): optional, one per task, replaced on every PUT; never touches the task row itself.
+      // The person's own rating: optional, one per task, replaced on every PUT; never touches the task row itself.
       "/api/tasks/:id/evals/human": {
         PUT: async (req) => {
           const t = db.getTask(String(req.params.id));
@@ -4401,7 +4385,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           const parsed = SetOutcomeInput.safeParse(await req.json().catch(() => null));
           if (!parsed.success) return bad(parsed.error.message);
           const task = tasks.setOutcome(t.id, parsed.data);
-          // an outcome of 要対応 is what makes a Task's check a question (#938)
+          // an outcome of 要対応 is what makes a Task's check a question
           void applyPolicies();
           return json({ task });
         },
@@ -4560,7 +4544,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         return bad("websocket upgrade failed", 426);
       },
 
-      // Terminal tab (#16): the task's shell. Same rules as /ws — this socket can run anything the daemon's user can.
+      // Terminal tab: the task's shell. Same rules as /ws — this socket can run anything the daemon's user can.
       "/ws/pty": async (req, srv) => {
         if (!sameOrigin(req)) return refused(req, srv, bad("cross-origin request refused", 403));
         const auth = await authorize(req, srv, true, true);
@@ -4570,7 +4554,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         if (!pty) return bad("no terminal in this distribution", 404);
         const task = db.getTask(new URL(req.url).searchParams.get("task") ?? "");
         if (!task) return bad("task not found", 404);
-        // ?shell=<id>: coming back to that session only (#1137); without it, the task's session or a new one. A reconnect
+        // ?shell=<id>: coming back to that session only; without it, the task's session or a new one. A reconnect
         // starts nothing, so the cap does not apply: a gone shell must be told 4404 even when the others fill the cap.
         const shell = new URL(req.url).searchParams.get("shell") ?? undefined;
         if (shell === undefined && !pty.has(task.id) && pty.size >= MAX_PTY_SESSIONS) return bad(`too many terminals open (max ${MAX_PTY_SESSIONS}); close one first`, 429);
@@ -4662,9 +4646,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   // then die on EADDRINUSE. Tasks still running / waiting now belong to nobody.
   const orphaned = abortOrphanedTasks(db, Date.now(), settings().quotaAndResume.maxStopResumes);
   if (orphaned.length) console.warn(`tasks: ${orphaned.length} left running/waiting by a previous daemon marked aborted (${orphaned.join(", ")})`);
-  // The Tasks the previous daemon left waiting for a slot (#1141) start now (a candidate leaves them: `holdQueue`)
+  // The Tasks the previous daemon left waiting for a slot start now (a candidate leaves them: `holdQueue`)
   tasks.drain();
-  // their rows were saved at the turn before the cut; the stop just written changes the counts (#2089)
+  // their rows were saved at the turn before the cut; the stop just written changes the counts
   for (const id of orphaned) {
     const t = db.getTask(id);
     if (t && t.executionMode !== "cloud") {
@@ -4675,14 +4659,14 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       }
     }
   }
-  // The host's load once a minute (#2086). A candidate on a spare port shares the unit: the live daemon samples it
+  // The host's load once a minute. A candidate on a spare port shares the unit: the live daemon samples it
   const opsLoadSampler = cfg.candidate ? null : new OpsLoadSampler(db, { home: cfg.home });
   opsLoadSampler?.start();
-  // This start's row in daemon_runs (#2085): closes the previous one with its cause. A candidate runs on a copy.
+  // This start's row in daemon_runs: closes the previous one with its cause. A candidate runs on a copy.
   let runId = cfg.candidate
     ? null
     : startDaemonRun(db, { now: Date.now(), version: daemonVersion(cfg), bootId: readBootId(), journal: readJournal, history: readReleaseHistory(cfg.home), orphaned: orphaned.filter((id) => db.getTask(id)?.executionMode !== "cloud") });
-  // A judgement the last daemon was cut off in (#1139) is made again, once; a mark that no longer fits is dropped.
+  // A judgement the last daemon was cut off in is made again, once; a mark that no longer fits is dropped.
   const cutOff = db.listTasksJudging();
   let rejudged = 0;
   for (const t of cutOff) {
@@ -4703,8 +4687,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   });
 
   // The /mcp endpoint has its own per-task token; health is open so the UI can learn whether a token is needed; a GitHub
-  // Webhook (#887) cannot carry the token and only asks for an import, once the user opened it.
-  // The CDN's origin header (#181) and, on loopback, the Host (#1135) come before everything, the open routes included: a
+  // Webhook cannot carry the token and only asks for an import, once the user opened it.
+  // The CDN's origin header and, on loopback, the Host come before everything, the open routes included: a
   // cloud host answers nothing to a request that went around CloudFront, a Mac nothing to a page on a rebinding name.
   function guardAll<T extends Routes>(routes: T): T {
     return Object.fromEntries(Object.entries(routes).map(([path, h]) => [path, logged(path, limitedGuard(entryGuard(path === "/api/health" || path === "/ws" || path === "/ws/pty" || path.startsWith("/mcp/") || path.startsWith("/otel/") || path.startsWith("/artifacts/") || (path === "/api/backlog/webhooks/github" && webhookOpen) ? (h as AnyHandler) : guard(h as AnyHandler))))])) as T;
@@ -4732,7 +4716,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     if (runId !== null) endDaemonRun(db, runId, { cleanExit, endedAt: Date.now(), taskIds: cut });
     runId = null; // a second stop finds the database closed
     judgeStop.abort();
-    // a policy being applied (#938) finishes before the database goes
+    // a policy being applied finishes before the database goes
     await applying;
     server.stop(true);
     clearInterval(apiRequestsTimer);
@@ -4793,8 +4777,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   };
 }
 
-/** What a Task on another workspace is told about its repository (#557); a `scripts/setup` that cannot be read counts as none. */
-/** What holds a PBI in backlog-next's log (#817, #937): a wait or a prerequisite not met. */
+/** What a Task on another workspace is told about its repository; a `scripts/setup` that cannot be read counts as none. */
+/** What holds a PBI in backlog-next's log: a wait or a prerequisite not met. */
 type Held = ReturnType<typeof heldIn>[number]["pending"][number];
 /** One per line of the log: overlaps still open (待ち), prerequisites not done yet (前提), ones a person has to look at. */
 const HELD_LINES: Array<[string, (pending: Held[], stuck: Held[]) => Held[]]> = [
@@ -4849,7 +4833,7 @@ function knowledgeError(e: unknown): string {
  * is why the emptiness check comes first: `?limit=` alone used to mean "one row".)
  */
 /**
- * The query of a list across Tasks (#1835, #1833), or the error's text. `limit` is an integer 1..100 (default 20);
+ * The query of a list across Tasks, or the error's text. `limit` is an integer 1..100 (default 20);
  * `q` is trimmed, blank = none, at most 200 characters; `before` must name an artifact (the previous page's last row).
  */
 function acrossQuery(url: URL, db: Db): { q?: string; before?: string; limit: number } | string {

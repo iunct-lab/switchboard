@@ -113,7 +113,7 @@ export async function runDeviceAuth(argv: string[], env: Record<string, string |
   const shown = joined.length > 200 ? `${joined.slice(0, 199)}…` : joined;
   const deadline = Date.now() + expiresInSec * 1000;
   const child = Bun.spawn(command, { stdin: "inherit", stdout: "pipe", stderr: "pipe", env: env as Record<string, string> });
-  // Stops the command and what it started (`sh -c "<login> …"`, #992). Found from the parent links before the command
+  // Stops the command and what it started (`sh -c "<login> …"`). Found from the parent links before the command
   // goes (afterwards they hang off init); the command stays in the caller's process group and session, so a runner that
   // kills its tool's whole group still reaches all of them.
   const stop = () => {

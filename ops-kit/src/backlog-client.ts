@@ -7,11 +7,11 @@ import { triage } from "./triage.ts";
 import { findSecrets, hostAws } from "./secrets.ts";
 
 /**
- * `ops-kit backlog …` (#918): the backlog the app running the Task stored, read and edited through its API — the same
+ * `ops-kit backlog …`: the backlog the app running the Task stored, read and edited through its API — the same
  * routes as its screen — instead of asking GitHub each time. Reads answer what is stored (and how fresh); `--fresh`
  * asks the app to send what it keeps and import the repository first. Edits are stored there and sent to GitHub by
  * the app later. Nothing here writes the app's database or asks GitHub: when the app cannot be reached, nothing is
- * read as current (exit 2). The stored data is what is true (#2264): when the app cannot reach GitHub, `--fresh`
+ * read as current (exit 2). The stored data is what is true: when the app cannot reach GitHub, `--fresh`
  * answers what is stored with its last sync and 「GitHub 未同期」. The app's address comes in `BACKLOG_URL`, its key in the file `BACKLOG_TOKEN_FILE` names.
  */
 
@@ -69,13 +69,13 @@ type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 
 /**
  * One line of `backlog list`: `#<number>\t<type>\t<OPEN|CLOSED>\t<Status|->\t<title>` (type = `change` for a local
- * change (#3969), else the x of a `type:x` label, else `-`).
+ * change, else the x of a `type:x` label, else `-`).
  */
 export function listRow(i: { number: number; title: string; state: string; type: string; status: string | null }): string {
   return `#${i.number}\t${i.type}\t${i.state}\t${i.status ?? "-"}\t${i.title}`;
 }
 
-/** A local change shares the Issues' numbers (#2463) but is not one (#3969): its row says `change`. */
+/** A local change shares the Issues' numbers but is not one: its row says `change`. */
 const typeOf = (i: { labels: string[]; change?: unknown }) => (i.change ? "change" : i.labels.find((l) => l.startsWith("type:"))?.slice("type:".length) || "-");
 
 export interface ListFilter {
@@ -84,7 +84,7 @@ export interface ListFilter {
   /** Every one of these labels. */
   labels: string[];
   state: "open" | "closed" | "all";
-  /** Issues, local changes or both (#3969); absent = Issues, so an open change is not counted as an open Issue. */
+  /** Issues, local changes or both; absent = Issues, so an open change is not counted as an open Issue. */
   kind?: "issue" | "change" | "all";
 }
 
@@ -140,7 +140,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
     const fresh = has("--fresh");
     const asJson = has("--json");
     const api = client(env, opts.fetch ?? fetch);
-    // outside the app's Task: GitHub itself, in the same shape (#3071). Never when BACKLOG_URL is set and the app is down
+    // outside the app's Task: GitHub itself, in the same shape. Never when BACKLOG_URL is set and the app is down
     const direct = !env.BACKLOG_URL && opts.gh ? { gh: opts.gh, project: opts.project ?? (async () => null) } : null;
     // the Project's fields on GitHub need the repository's ops.config.json (its Project)
     const config = async () => {
@@ -154,7 +154,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         throw new Refused(`GitHub の Project のフィールドを書くには ops.config.json（Project の URL）が要ります: ${(e as Error).message}`);
       }
     };
-    // a value written straight to GitHub is checked against this clone's ops.config.json first (#3795): a choice that
+    // a value written straight to GitHub is checked against this clone's ops.config.json first: a choice that
     // differs only in case is written as the choice, one not there is refused before anything is written. Not when
     // GH_REPO names another repository than origin's (another Project, whose choices are not this config's)
     const choose = async (fields: Record<string, string>): Promise<Record<string, string>> => {
@@ -194,7 +194,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
     const edit = async (ref: string, body: Record<string, unknown>) => {
       const ws = await workspace();
       await api("PATCH", `/${encodeURIComponent(issueRef(ref))}`, { workspaceId: ws.workspaceId, ...body });
-      // pending or not shows in `view` (送信待ち): a backlog kept in the app is applied at once (#2265)
+      // pending or not shows in `view` (送信待ち): a backlog kept in the app is applied at once
       io.out(`#${issueRef(ref)} を保存しました`);
       return 0;
     };
@@ -265,7 +265,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         }
         const ws = await workspace();
         const r = (await api("POST", "", { workspaceId: ws.workspaceId, title, body: body ?? "", labels, milestone: milestone ?? null, parent: parent ? number(parent) : null, fields: Object.keys(fields).length ? fields : null, ...(head && base ? { change: { head, base } } : {}) })) as { localId: string; number?: number | null };
-        // a backlog kept in the app numbers it at once (#2265); GitHub's once it is sent
+        // a backlog kept in the app numbers it at once; GitHub's once it is sent
         io.out(typeof r.number === "number" ? `#${r.number} を作りました（localId ${r.localId}）` : `作りました（送信待ち）: localId ${r.localId}。番号が付く前も backlog view ${r.localId} で読める`);
         return 0;
       }
@@ -277,7 +277,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         const remove = takeAll("--remove-label");
         const state = take("--state");
         const reasonArg = take("--reason");
-        // the CLI's spelling → the API's value (#3146); only with a close
+        // the CLI's spelling → the API's value; only with a close
         const REASONS = { completed: "COMPLETED", "not-planned": "NOT_PLANNED" } as const;
         const reason = reasonArg !== undefined && Object.hasOwn(REASONS, reasonArg) ? REASONS[reasonArg as keyof typeof REASONS] : undefined;
         const milestone = has("--no-milestone") ? null : take("--milestone");
@@ -322,13 +322,13 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         if (!ref || !field || value === undefined || extra.length) throw new Refused("backlog set <issue> <field> <value>");
         noSecrets(value);
         if (direct) {
-          // an empty value empties the field (#3810): not a choice to check
+          // an empty value empties the field: not a choice to check
           const chosen = value === "" ? value : (await choose({ [field]: value }))[field]!;
           await setField(direct.gh, await config(), number(ref), field, chosen, note);
           io.out(`#${number(ref)} を保存しました`);
           return 0;
         }
-        // an empty value empties the field (#3810): the app sends a clear for null
+        // an empty value empties the field: the app sends a clear for null
         if (value === "") return await edit(ref, { fields: { [field]: null } });
         // GitHub's field type decides when it is sent (backlog-send.ts): a number only where the stored value is one
         const ws = await workspace();
@@ -354,7 +354,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         return await edit(ref, { project: true, fields, ...(parent ? { parent: number(parent) } : {}) });
       }
       case "retry": {
-        // a send GitHub refused waits held, and the Issue's edits after it with it (#2885): each failed one goes back
+        // a send GitHub refused waits held, and the Issue's edits after it with it: each failed one goes back
         const [ref, ...extra] = args;
         if (!ref || extra.length) throw new Refused("backlog retry <issue>");
         if (direct) throw new Refused("retry はアプリの Task の中だけ（BACKLOG_URL が無いので送り直すものがありません）");
@@ -377,7 +377,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         return 0;
       }
       case "withdraw": {
-        // a held post or edit taken back (#3804): nothing written to GitHub, the Issue's edits after it go on
+        // a held post or edit taken back: nothing written to GitHub, the Issue's edits after it go on
         const reason = take("--reason") ?? "エージェントが中身を確かめて取り下げ";
         const [ref, ...extra] = args;
         if (!ref || extra.length || !reason.trim()) throw new Refused("backlog withdraw <issue> [--reason <文>]");
@@ -410,10 +410,10 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
   }
 }
 
-/** What `GET /api/backlog/records` answers (#919): the stored records the kit's lint and parallel guard read instead of GitHub. */
+/** What `GET /api/backlog/records` answers: the stored records the kit's lint and parallel guard read instead of GitHub. */
 export interface StoredRecords {
   workspaceId: string;
-  /** `github`; any other = a backlog kept in the app only (#2265): no GitHub Issue or Project behind it. */
+  /** `github`; any other = a backlog kept in the app only: no GitHub Issue or Project behind it. */
   service: string;
   repository: string;
   project: { owner: string; number: number };
@@ -430,9 +430,9 @@ export interface StoredRecords {
 }
 
 /**
- * The stored records of the repository (`repo`, else GH_REPO, else BACKLOG_WORKSPACE, else origin) for the kit's checks (#919); with `fresh`,
+ * The stored records of the repository (`repo`, else GH_REPO, else BACKLOG_WORKSPACE, else origin) for the kit's checks; with `fresh`,
  * the app sends what it keeps and imports first, and when it cannot reach GitHub the stored records are answered with
- * `unsynced` (#2264). Throws BacklogUnknown when it cannot be told (no app, not imported, 5xx): a check then answers
+ * `unsynced`. Throws BacklogUnknown when it cannot be told (no app, not imported, 5xx): a check then answers
  * "could not check" (exit 2), never a pass.
  */
 export async function readRecords(env: Record<string, string | undefined>, opts: { fresh: boolean; repo?: string; cwd?: string; fetch?: Fetch }): Promise<StoredRecords & { unsynced: string | null }> {
@@ -448,7 +448,7 @@ export async function readRecords(env: Record<string, string | undefined>, opts:
 }
 
 /**
- * `POST /sync` (#2264): null once the app sent what it keeps and imported; the line to show when it could not reach
+ * `POST /sync`: null once the app sent what it keeps and imported; the line to show when it could not reach
  * GitHub (424) — what is stored is answered then. Anything else it cannot tell (no app, 5xx, 401, not imported) throws.
  */
 async function syncOrStored(api: ReturnType<typeof client>, ws: Sync): Promise<string | null> {
@@ -462,7 +462,7 @@ async function syncOrStored(api: ReturnType<typeof client>, ws: Sync): Promise<s
 }
 
 /**
- * Whether the app syncs the repository (`repo`, else as `readRecords`) (#3069): its workspace, or null when the list does
+ * Whether the app syncs the repository (`repo`, else as `readRecords`): its workspace, or null when the list does
  * not have it. A workspace the app gave (BACKLOG_WORKSPACE) that is not listed, and an app that cannot be asked, throw
  * BacklogUnknown: neither means the app does not know the repository.
  */
@@ -490,7 +490,7 @@ interface Looked { ws: Sync; wanted: string; explicit: string | undefined }
 
 /** The repository's row of the app's list, if it has one; `wanted`: the line that says it has not. */
 async function lookWorkspace(api: ReturnType<typeof client>, env: Record<string, string | undefined>, opts: { workspace?: string; cwd?: string }) {
-  // a Task on a workspace whose backlog is kept in the app (#2265) is given its id: no repository to read it by
+  // a Task on a workspace whose backlog is kept in the app is given its id: no repository to read it by
   const explicit = opts.workspace ?? (env.GH_REPO ? undefined : env.BACKLOG_WORKSPACE || undefined);
   const syncs = await listSyncs(api);
   const repo = explicit ? null : await repoName(env, opts.cwd);
@@ -503,7 +503,7 @@ async function listSyncs(api: ReturnType<typeof client>): Promise<Sync[]> {
   try {
     return ((await api("GET", "/syncs")) as { syncs: Sync[] }).syncs;
   } catch (e) {
-    // for a daemon older than the kit, until it is promoted (PBI #3362): the old route's `syncs` rows are the same
+    // for a daemon older than the kit, until it is promoted: the old route's `syncs` rows are the same
     if (e instanceof Refused && e.message.startsWith("backlog: 404")) return ((await api("GET", "")) as { syncs: Sync[] }).syncs;
     throw e;
   }
@@ -538,7 +538,7 @@ export function client(env: Record<string, string | undefined>, f: Fetch) {
       res = await f(`${base.replace(/\/+$/, "")}${path}`, { method, headers: { "content-type": "application/json", ...(key && { authorization: `Bearer ${key}` }) }, ...(body !== undefined && { body: JSON.stringify(body) }), signal: AbortSignal.timeout(120_000) });
     } catch (e) {
       const message = (e as Error).message;
-      // a sandbox closing loopback (Codex's Auto, #2725): an approved rerun reaches the app, so say so instead of asking the user
+      // a sandbox closing loopback (Codex's Auto): an approved rerun reaches the app, so say so instead of asking the user
       if (isSandboxRefusal(e)) throw new Unknown(`backlog: アプリに届きません（${message}）。サンドボックスがこのホストのアプリ（BACKLOG_URL）への接続を止めています。ランナーの承認つきの実行で同じコマンドを 1 回やり直してください（Codex は承認を求める実行。利用者に聞かない）。判定できません`);
       throw new Unknown(`backlog: アプリに届きません（${message}）。判定できません`);
     }
@@ -552,7 +552,7 @@ export function client(env: Record<string, string | undefined>, f: Fetch) {
 }
 
 /**
- * The GitHub repositories the app syncs, with their workspace (GET /api/backlog/syncs, #3073): what the gh
+ * The GitHub repositories the app syncs, with their workspace (GET /api/backlog/syncs): what the gh
  * guard stops a direct backlog write to, besides the Task's own. Null when the app cannot be asked (no BACKLOG_URL,
  * not reached, 4xx / 5xx, no answer in 5 seconds): the guard then judges the workspace only, and does not hold gh up
  * for as long as an `ops-kit backlog` command waits.
@@ -584,19 +584,19 @@ export interface Detail {
   /** The workspace the app answered from; absent in GitHub's own (without BACKLOG_URL). */
   workspaceId?: string;
   issue: { number: number; title: string; state: string; stateReason?: string | null; labels: string[]; milestone: string | null; parent: number | null; subIssues: number[]; body: string; url: string; change?: { head: string; base: string; mergeCommit: string | null; mergedAt: string | null; reviewedHead: string | null } };
-  /** A local change's branch tips now (#2485); absent / null otherwise. */
+  /** A local change's branch tips now; absent / null otherwise. */
   changeRefs?: { head: string | null; base: string | null } | null;
   comments: Array<{ id: string; body: string; createdAt: string }>;
   fields: Record<string, string | number | null> | null;
   fetchedAt: number | null;
   localId: string | null;
   pending: number;
-  /** The edits held, not sent (#887, #2885); none in GitHub's own (without BACKLOG_URL). */
+  /** The edits held, not sent; none in GitHub's own (without BACKLOG_URL). */
   held?: Array<{ operation: string; kind: "create" | "set" | "comment"; field: string | null; status: "conflict" | "failed" | "unknown"; reason: string | null }>;
   sync: { state: string; reason: string | null; lastSuccessfulSync: number | null };
 }
 
-/** A close that was not a completion (#3146); completed and none read as before. */
+/** A close that was not a completion; completed and none read as before. */
 const REASON = { NOT_PLANNED: " not planned", DUPLICATE: " duplicate" } as const;
 const HELD = { conflict: "競合", failed: "失敗", unknown: "結果不明" } as const;
 const HELD_KIND = { create: "新規作成", comment: "コメント" } as const;
@@ -617,7 +617,7 @@ export function formatDetail(d: Detail): string {
   ].join("\n");
 }
 
-/** A local change's line (#2485): its branches and their tips now, or the commit it was merged as. */
+/** A local change's line: its branches and their tips now, or the commit it was merged as. */
 function changeLine(c: NonNullable<Detail["issue"]["change"]>, refs: Detail["changeRefs"]): string {
   const sha = (x: string | null | undefined) => (x ? x.slice(0, 7) : "なし");
   const tips = c.mergeCommit ? `MERGED ${c.mergeCommit.slice(0, 7)} (reviewed ${sha(c.reviewedHead)})` : `head ${sha(refs?.head)} base ${sha(refs?.base)}`;

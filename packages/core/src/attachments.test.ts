@@ -29,7 +29,7 @@ function fakeAdapter(id: RunnerId, starts: StartOptions[], sends: string[], opts
           if (first) emit({ t: "session.start", runner: id, runnerSessionId: `${id}-sess-${starts.length}`, cwd: startOpts.cwd });
           emit({ t: "message.delta", role: "user", text });
           emit({ t: "message.delta", role: "assistant", text: "ok" });
-          // "make-file": the runner hands back a file it made (#124: DAK's artifacts) — and one it points at elsewhere
+          // "make-file": the runner hands back a file it made (DAK's artifacts) — and one it points at elsewhere
           if (text.startsWith("make-file") && startOpts.attachmentDir) {
             mkdirSync(startOpts.attachmentDir, { recursive: true });
             writeFileSync(join(startOpts.attachmentDir, "made.md"), "# made\n");
@@ -83,7 +83,7 @@ const claudeStarts: StartOptions[] = [];
 const claudeSends: string[] = [];
 const codexStarts: StartOptions[] = [];
 const codexSends: string[] = [];
-/** What each live send() got as its attachments (#124), across both fake runners. */
+/** What each live send() got as its attachments, across both fake runners. */
 const sentAttachments: Attachment[][] = [];
 const names = (atts: Attachment[] | undefined) => (atts ?? []).map((a) => a.name);
 
@@ -114,7 +114,7 @@ afterAll(async () => {
   rmSync(home, { recursive: true, force: true });
 });
 
-describe("attachments (#125)", () => {
+describe("attachments", () => {
   test("an upload lands in attachments/inbox with its mime and is served back with the same bytes", async () => {
     const r = await upload([{ name: "shot.png", type: "image/png", bytes: PNG }]);
     expect(r.status).toBe(201);
@@ -155,7 +155,7 @@ describe("attachments (#125)", () => {
     expect(start.scope).toEqual([home, dir]);
     expect(start.prompt).toBe(`hello${attachmentNote([{ ...a, taskId: task.id, path: join(dir, "shot.png") }])}`);
     expect(start.prompt).toContain(`- ${join(dir, "shot.png")} (image/png, 16 B)`);
-    expect(start.attachments?.map((x) => x.path)).toEqual([join(dir, "shot.png")]); // the adapter gets them too (#124)
+    expect(start.attachments?.map((x) => x.path)).toEqual([join(dir, "shot.png")]); // the adapter gets them too
     expect(existsSync(join(dir, "shot.png"))).toBe(true);
     expect(existsSync(dirname(a.path))).toBe(false); // the inbox folder is gone
     const d = await detail(task.id);
@@ -214,7 +214,7 @@ describe("attachments (#125)", () => {
     expect(codexSends).not.toContain(expect.stringContaining(dir)); // not handed to the old process
     const restarted = codexStarts[before + 1]!;
     expect(restarted.resumeSessionId).toBe(`codex-sess-${before + 1}`);
-    expect(restarted.scope).toEqual([home, dir, join(home, "heavy")]); // a Codex start also gets the heavy slots (#2213)
+    expect(restarted.scope).toEqual([home, dir, join(home, "heavy")]); // a Codex start also gets the heavy slots
     expect(restarted.prompt).toContain(join(dir, "shot.png"));
     expect(names(restarted.attachments)).toEqual(["shot.png"]);
     const d = await detail(task.id);
@@ -222,7 +222,7 @@ describe("attachments (#125)", () => {
     expect(d.events.some((e) => e.ev.t === "status" && e.ev.text.includes("プロセスを再開します（--resume）"))).toBe(true);
   });
 
-  test("a file the runner made in the task's attachment directory is registered and recorded as an attachment; others, and a symlink out of it, are not (#124)", async () => {
+  test("a file the runner made in the task's attachment directory is registered and recorded as an attachment; others, and a symlink out of it, are not", async () => {
     writeFileSync(join(home, "elsewhere.md"), "not the task's");
     const task = (await j(await createTask({ prompt: "make-file please" }))) as Task;
     await settle(task.id);
@@ -346,7 +346,7 @@ describe("attachments (#125)", () => {
     const dir = join(home, "attachments", task.id);
     const shadowStart = codexStarts[before]!;
     expect(shadowStart.prompt).toContain(join(dir, "shot.png"));
-    expect(shadowStart.scope).toEqual([home, dir, join(home, "heavy")]); // a Codex start also gets the heavy slots (#2213)
+    expect(shadowStart.scope).toEqual([home, dir, join(home, "heavy")]); // a Codex start also gets the heavy slots
     expect(names(shadowStart.attachments)).toEqual(["shot.png"]);
     const shadow = core.db.shadowTaskOf(task.id)!;
     await settle(shadow.id);

@@ -26,7 +26,7 @@ export interface LlmSuggesterOptions {
 }
 
 /**
- * Asks a runner which runner a task should go to (#25). Advice only: `CompositeSuggester` attaches the answer next
+ * Asks a runner which runner a task should go to. Advice only: `CompositeSuggester` attaches the answer next
  * to the rule table's suggestion, and the person still picks. One turn, no tools, JSON out — anything else throws,
  * and the composite then falls back to the rule table.
  */
@@ -44,7 +44,7 @@ export class LlmSuggester implements Suggester {
   }
 }
 
-/** What one suggestion turn needs: shared by the runner suggester here and the Workspace suggester (#135). */
+/** What one suggestion turn needs: shared by the runner suggester here and the Workspace suggester. */
 export type SuggestionTurnOptions = Pick<LlmSuggesterOptions, "adapter" | "cwd" | "model" | "permissionMode" | "onUsage" | "log">;
 
 /** One turn of the runner, collected as text. The session is always closed, including when the caller gives up. */
@@ -53,7 +53,7 @@ export async function runSuggestionTurn(opts: SuggestionTurnOptions, prompt: str
   let failure: string | null = null;
   let done!: () => void;
   const finished = new Promise<void>((r) => (done = r));
-  // not saved (#2908): these turns run hundreds of times a day and would fill the 200 sessions `/insights` reads and
+  // not saved: these turns run hundreds of times a day and would fill the 200 sessions `/insights` reads and
   // ~/.claude/projects; nothing resumes them
   const session = opts.adapter.start({ cwd: opts.cwd, scope: [opts.cwd], prompt, model: opts.model || undefined, permissionMode: opts.permissionMode, persistSession: false, env: { [DAEMON_JOB_MARK]: "judge" } }, (ev) => {
     if (ev.t === "message.delta" && ev.role === "assistant") out += ev.text;

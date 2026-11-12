@@ -14,7 +14,7 @@ function attr(attrs: unknown, key: string): string | null {
 const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 
 /**
- * The classifier's decisions in an OTLP/HTTP JSON logs request (#2236, docs/design/claude-otel.md): the `tool_decision`
+ * The classifier's decisions in an OTLP/HTTP JSON logs request (docs/design/claude-otel.md): the `tool_decision`
  * records whose `classifier_verdict` is allow or block. Everything else in the body — other events, the account
  * attributes, the tool's parameters, `no_verdict` / `unavailable` — is not returned, so nothing of it is kept.
  */

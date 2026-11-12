@@ -9,21 +9,21 @@ import { isWorking } from "./task-status.ts";
 import { stuckSchedule } from "./stops.ts";
 
 /**
- * Scheduler (#20): DAK-style nightly jobs started from Switchboard. A schedule is a cron expression plus everything a
+ * Scheduler: DAK-style nightly jobs started from Switchboard. A schedule is a cron expression plus everything a
  * task needs; each firing creates an ordinary task (same approvals, same ledger, same budget). A schedule never
  * overlaps itself: while its last task is still running or waiting, a due firing is skipped and noted.
  * The queue (`/api/queue`) is the morning view: tasks waiting for an approval, staged writes to apply, and what the
  * schedules did overnight.
  */
-/** What a backlog-next firing did (#267, #561): the stage Tasks it started, and why each workspace / slot started nothing. */
-/** `promotion`: the firing asked for the newest tag, or stopped on it (a Task running, a tag that failed): it started nothing else (#2479). */
+/** What a backlog-next firing did: the stage Tasks it started, and why each workspace / slot started nothing. */
+/** `promotion`: the firing asked for the newest tag, or stopped on it (a Task running, a tag that failed): it started nothing else. */
 export type BacklogNextResult = { started: Array<{ task: Task; label: string }>; skipped: string[]; promotion?: string };
 
-/** What the insights schedule's Task sends (#1838): the built-in command alone — Claude Code expands it only as the whole message. */
+/** What the insights schedule's Task sends: the built-in command alone — Claude Code expands it only as the whole message. */
 export const INSIGHTS_PROMPT = "/insights";
 
 /**
- * What the ui-layers schedule's Task is told (#3353): the monthly floor / ceiling / walls check (docs/design/ui-layers.md,
+ * What the ui-layers schedule's Task is told: the monthly floor / ceiling / walls check (docs/design/ui-layers.md,
  * docs/design/scheduler.md). The scripts count and write; the Task reads the code and writes the ratings and findings.
  */
 export const UI_LAYERS_PROMPT = `床・天井・壁の月次の点検をしてください（docs/design/ui-layers.md の原則）。このリポジトリの root で、作業ファイルは W=$(mktemp -d /tmp/switchboard.ui-layers.XXXXXX) の下に置きます。
@@ -36,7 +36,7 @@ export const UI_LAYERS_PROMPT = `床・天井・壁の月次の点検をして�
 
 指標が悪くなっても何も止めません。マージ・リリース・画面の修正・PBI の作成はしません。最後に、作った要望の番号（無ければ「なし」）と評価の要約を 3 行で返してください。`;
 
-/** The kinds that run on claude only and fire as a Task of their own on a fixed instruction (#1838, #3353). */
+/** The kinds that run on claude only and fire as a Task of their own on a fixed instruction. */
 const claudeOnly = (action: string): action is "insights" | "ui-layers" => action === "insights" || action === "ui-layers";
 
 export class Scheduler {
@@ -44,7 +44,7 @@ export class Scheduler {
   private log: string[] = [];
   /** backlog-next / secret-scan / approval-window schedules whose firing is still in progress. */
   private starting = new Set<string>();
-  /** A runUnblocked asked while a firing was in progress (#1879): per schedule, the items per workspace, run after it. */
+  /** A runUnblocked asked while a firing was in progress: per schedule, the items per workspace, run after it. */
   private unblocked = new Map<string, Map<string, Set<number>>>();
   /** The backlog-next firings in progress that read one workspace's items only, with what they read. */
   private narrow = new Map<string, { workspaceId: string; numbers: number[] }>();
@@ -60,11 +60,11 @@ export class Scheduler {
     private now: () => number = Date.now,
     private startNext: (scheduleId: string, only?: { workspaceId: string; numbers: number[] }) => Promise<BacklogNextResult> = async () => ({ started: [], skipped: ["backlog-next is not available"] }),
     private scanSecrets: (schedule: { id: string; title: string }, cursors: ScanCursors) => Promise<{ lines: string[]; summary: ScanSummary; cursors?: ScanCursors }> = async () => ({ lines: ["secret-scan is not available"], summary: { repos: 0, hits: 0, failed: 1 } }),
-    /** Claude's 7-day utilization at or above this and an insights or ui-layers firing is skipped (#1838, #3353): the backlog's `backlogQuotaLimit`. */
+    /** Claude's 7-day utilization at or above this and an insights or ui-layers firing is skipped: the backlog's `backlogQuotaLimit`. */
     private quotaLimit: () => number = () => 0.8,
-    /** 上限のときの代わり (#834): the runner a prompt schedule's Task starts on, and the status line when it is another. */
+    /** 上限のときの代わり: the runner a prompt schedule's Task starts on, and the status line when it is another. */
     private autoRunner: (r: RunnerId) => { runner: RunnerId; note?: string; deferUntil?: number; deferNote?: string } = (r) => ({ runner: r }),
-    /** approval-window (#2046): reads the batches still waiting (判断待ち shows them as a notice, #2866) and says so, in a line. */
+    /** approval-window: reads the batches still waiting (判断待ち shows them as a notice) and says so, in a line. */
     private approvalWindow: (schedule: { id: string; title: string }) => Promise<string> = async () => "approval-window is not available",
     /** The budget of a schedule's Task when the schedule has none: the settings' `defaultBudgetUsd` (null = none). */
     private defaultBudgetUsd: () => number | null = () => null,
@@ -82,8 +82,7 @@ export class Scheduler {
     const ws = this.db.getWorkspace(input.workspaceId);
     if (!ws) throw new Error("workspace not found");
     if (!existsSync(ws.path)) throw new Error("workspace directory does not exist");
-    // backlog-next and secret-scan are one schedule each, kept on the meta workspace; a firing works on every workspace
-    // (#561, #775).
+    // backlog-next and secret-scan are one schedule each, kept on the meta workspace; a firing works on every workspace.
     if (action !== "prompt" && ws.kind !== "meta") throw new Error(`${action} runs on the meta workspace only`);
     const effortWhy = input.effort ? this.tasks.checkEffort(input.runner, input.effort) : undefined;
     if (effortWhy) throw new Error(effortWhy);
@@ -122,7 +121,7 @@ export class Scheduler {
     const action = patch.action ?? cur.action;
     if (action !== "prompt" && this.db.getWorkspace(patch.workspaceId ?? cur.workspaceId)?.kind !== "meta") throw new Error(`${action} runs on the meta workspace only`);
     const cron = patch.cron ?? cur.cron;
-    // an effort belongs to one runner's list (#833): a runner change without one goes back to the CLI default. Only a
+    // an effort belongs to one runner's list: a runner change without one goes back to the CLI default. Only a
     // sent effort is checked, so a kept one the runner no longer lists does not block e.g. turning the schedule off.
     const runner = patch.runner ?? cur.runner;
     if (claudeOnly(action) && runner !== "claude") throw new Error(`${action} runs on claude`);
@@ -149,13 +148,13 @@ export class Scheduler {
     // observe `s.lastTaskId`'s task between the read and the create. This is incidental, not structural: if
     // `tasks.create()` ever becomes async, or a real async step (e.g. an I/O-bound validation) is inserted below,
     // this must move behind a per-schedule lock (or a DB-level compare-and-swap on lastTaskId) instead.
-    // backlog-next decides per workspace and slot instead (#561): its last Task running does not hold the others.
+    // backlog-next decides per workspace and slot instead: its last Task running does not hold the others.
     const prev = (s.action === "prompt" || claudeOnly(s.action)) && s.lastTaskId ? this.db.getTask(s.lastTaskId) : null;
     if (prev && (isWorking(prev, "slot") || prev.queuedAt !== null)) {
       this.note(`${s.title}: skipped (${reason}); previous run ${prev.id} is still ${prev.queuedAt !== null ? "queued" : prev.status}`);
       return null;
     }
-    // A series that keeps stopping on the same thing is not fired by the clock again until it is answered, a condition is met or a Task ends without stopping (#4479); a person's "run now" still goes. backlog-next is held per stage by stopHeld instead.
+    // A series that keeps stopping on the same thing is not fired by the clock again until it is answered, a condition is met or a Task ends without stopping; a person's "run now" still goes. backlog-next is held per stage by stopHeld instead.
     if (reason === "due" && s.action !== "backlog-next") {
       const stuck = stuckSchedule(this.db, s);
       if (stuck) {
@@ -173,7 +172,7 @@ export class Scheduler {
     const fixed = claudeOnly(s.action);
     if (fixed) {
       // the report's session summaries (insights) and the check's reading (ui-layers) spend the subscription: not while
-      // Claude's 7-day window is at the backlog's threshold (#1838, #3353)
+      // Claude's 7-day window is at the backlog's threshold
       const limit = this.quotaLimit();
       const hot = this.db.quotaFor("claude").find((q) => q.window === "seven_day" && q.utilization >= limit && q.resetsAt * 1000 > this.now());
       if (hot) {
@@ -182,7 +181,7 @@ export class Scheduler {
         return null;
       }
     }
-    // insights and ui-layers run on claude only; a prompt schedule's runner at its limit gives way to the fallback order, on its CLI default model (#834)
+    // insights and ui-layers run on claude only; a prompt schedule's runner at its limit gives way to the fallback order, on its CLI default model
     const { runner, note, deferUntil, deferNote } = fixed ? { runner: "claude" as const, note: undefined, deferUntil: undefined, deferNote: undefined } : this.autoRunner(s.runner);
     const task = this.tasks.create({
       workspaceId: ws.id,
@@ -195,7 +194,7 @@ export class Scheduler {
       budgetUsd: s.budgetUsd ?? this.defaultBudgetUsd() ?? undefined,
       scheduleId: s.id,
       kind: "maintenance",
-      // Unattended runs get no shadow (#99): the one-active-run guard and the queue's scheduled section only know the
+      // Unattended runs get no shadow: the one-active-run guard and the queue's scheduled section only know the
       // primary, and a shadow of every nightly run would pile up asks nobody is there to answer.
       shadowRunner: null,
     }, undefined, (t) => {
@@ -217,7 +216,7 @@ export class Scheduler {
   }
 
   /**
-   * An import closed the waits of `numbers` in a workspace (#1879): a backlog-next firing of that workspace's implement
+   * An import closed the waits of `numbers` in a workspace: a backlog-next firing of that workspace's implement
    * slot and those items only, not waiting for the next one. While a firing is in progress the items are kept and run
    * after it (a full one read each workspace once, maybe before the wait cleared), but the ones a narrow firing under
    * way reads (the import its own read sets off comes back with them). The schedule's times stay; only a start is logged — what is not started now is started by the next
@@ -241,7 +240,7 @@ export class Scheduler {
     return r && "promotion" in r ? null : r;
   }
 
-  /** backlog-next (#267, #561): the daemon picks the items and starts their stage Tasks; one firing at a time per schedule. */
+  /** backlog-next: the daemon picks the items and starts their stage Tasks; one firing at a time per schedule. */
   private async runBacklogNext(id: string, title: string, cron: string, reason: "manual" | "due" | "unblocked", only?: { workspaceId: string; numbers: number[] }): Promise<Task | { promotion: string } | null> {
     // a full firing that comes during a narrow one waits for it (a narrow one reads one workspace's items only: the
     // firing it would take the place of is not made up until the next due time)
@@ -292,7 +291,7 @@ export class Scheduler {
   }
 
   /**
-   * secret-scan (#775): the daemon checks every registered repository itself, no runner and no Actions; a line per
+   * secret-scan: the daemon checks every registered repository itself, no runner and no Actions; a line per
    * repository goes to the log. One firing at a time per schedule, like backlog-next. Starts no Task (null).
    */
   private async runSecretScan(id: string, title: string, cron: string, reason: "manual" | "due"): Promise<null> {
@@ -302,8 +301,8 @@ export class Scheduler {
     }
     this.starting.add(id);
     try {
-      // The result stays on the schedule (#1274): the log is memory, gone with a restart — without this, a clean day left
-      // no trace to tell "0 hits" from "did not run". 判断待ち's notice is read from it too (#2866).
+      // The result stays on the schedule: the log is memory, gone with a restart — without this, a clean day left
+      // no trace to tell "0 hits" from "did not run". 判断待ち's notice is read from it too.
       // each repository is read from where the last firing left it (kept on the schedule, so a restart keeps it too)
       const before = this.db.getSchedule(id)?.lastResult?.cursors ?? {};
       let r: { lines: string[]; summary: ScanSummary; cursors?: ScanCursors };
@@ -331,7 +330,7 @@ export class Scheduler {
     }
   }
 
-  /** approval-window (#2046): no runner, no Task — its line in the log and on the schedule. One firing at a time, like secret-scan. */
+  /** approval-window: no runner, no Task — its line in the log and on the schedule. One firing at a time, like secret-scan. */
   private async runApprovalWindow(id: string, title: string, cron: string, reason: "manual" | "due"): Promise<null> {
     if (this.starting.has(id)) {
       this.note(`${title}: 飛ばした (${reason}): 前の発火がまだ終わっていない`);

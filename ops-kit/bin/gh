@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 // gh-guard
-// The check in front of `gh` (#661, docs/design/secret-guard.md). A write whose text holds a value that signs someone
-// in stops here, and so does a write from a clone of the public copy that still writes there (#2466) or to a repository
-// the clone marked `ops-kit.noWrite` (#2576); everything else goes to the real gh unchanged.
+// The check in front of `gh` (docs/design/secret-guard.md). A write whose text holds a value that signs someone
+// in stops here, and so does a write from a clone of the public copy that still writes there or to a repository
+// the clone marked `ops-kit.noWrite`; everything else goes to the real gh unchanged.
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,8 +37,8 @@ const reads = bodiesOf(argv, (path) => {
   }
 }, !process.stdin.isTTY);
 
-// In the app's Task, the backlog of its workspace, and of the other repositories the app syncs (#3073), is written
-// through the app (#2694), whatever form the write takes: written here, the app's next edit starts from the value
+// In the app's Task, the backlog of its workspace, and of the other repositories the app syncs, is written
+// through the app, whatever form the write takes: written here, the app's next edit starts from the value
 // before it and is sent as a conflict. A repository the app does not know goes on. Before the secret check: nothing
 // is sent either way. The app is asked only for a backlog write named elsewhere than the workspace
 const backlog = process.env.BACKLOG_URL ? backlogWrite(argv, (reads ?? []).map((r) => r.text)) : null;
@@ -73,11 +73,11 @@ if (hits.length > 0) {
   console.error("値を伏せて（<profile>、<account-id>、XXXX-XXXX）書き直してください。承認が要るなら、DEVICE_AUTH_URL があれば device-auth -- <command> で動かし、無ければ値を出さずに Task の会話で聞いて止めます（issue-workflow の「Issue・PR・コメントに書かない値」）");
   process.exit(1);
 }
-// A clone of the public copy whose default still writes there (#2466). A write named elsewhere goes; one that names
+// A clone of the public copy whose default still writes there. A write named elsewhere goes; one that names
 // the public copy, or nothing, stops when GH_REPO or `gh repo view` is the public copy. `gh repo view` answers from the
 // remotes, not GH_REPO, so `-R "$(gh repo view …)"` names the public copy although GH_REPO points elsewhere; it is
 // asked only for such a write, so a read and a write named elsewhere cost no call. A repository the clone marked
-// `ops-kit.noWrite` stops by name, whatever the default is (#2576)
+// `ops-kit.noWrite` stops by name, whatever the default is
 const write = writeTargetOf(argv, process.env);
 if (write && (write.repo === null ? noWriteTargets().length > 0 : noWriteRefusal(write.repo) !== null)) {
   const view = () => {

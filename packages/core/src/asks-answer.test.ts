@@ -9,17 +9,17 @@ import type { GhRunner } from "./backlog.ts";
 import { loadConfig } from "./config.ts";
 import { startServer, type CoreServer } from "./server.ts";
 
-/* POST /api/asks/answer (#936), the Issue side: a fake runner and a fake gh, as asks.test.ts boots them. */
+/* POST /api/asks/answer, the Issue side: a fake runner and a fake gh, as asks.test.ts boots them. */
 
 const pages = (await Bun.file(new URL("../fixtures/backlog-graphql.json", import.meta.url)).json()) as unknown[];
 const decisions = (await Bun.file(new URL("../fixtures/backlog-decisions.json", import.meta.url)).json()) as { data: { repository: Record<string, { comments: { nodes: Array<{ body: string; createdAt: string }> } }> } };
 const HEAD = "b".repeat(40);
-/** The meta workspace is this checkout, whose origin is not the fake gh's acme/app: no origin to check (#2799; tasks.test.ts checks it). */
+/** The meta workspace is this checkout, whose origin is not the fake gh's acme/app: no origin to check (tasks.test.ts checks it). */
 const FAKE_ORIGIN = () => null;
 const ASKED = "a".repeat(40);
 
 /**
- * The fixtures' gh. `place` replaces where #306's question stopped; `pr` answers `gh pr view` (the PR the question names).
+ * The fixtures' gh. `place` replaces where Issue 306's question stopped; `pr` answers `gh pr view` (the PR the question names).
  * Every call is kept in `calls`.
  */
 type PrView = { state: string; head: string; comments: Array<{ body: string; createdAt: string }>; commits: Array<{ committedDate: string }> };
@@ -77,7 +77,7 @@ async function boot(gh: GhRunner, adapter: RunnerAdapter = holding): Promise<str
 const asks = async (base: string) => ((await (await fetch(`${base}/api/asks`)).json()) as AskList).asks;
 const decisionOf306 = async (base: string) => (await asks(base)).find((a) => a.kind === "decision" && a.pbi?.number === 306)!;
 const answer = (base: string, id: string, a: unknown) => fetch(`${base}/api/asks/answer`, { method: "POST", body: JSON.stringify({ id, answer: a }) });
-/** What waits to be sent to GitHub (#886): per operation, its Issue's number, kind, field and what is sent. */
+/** What waits to be sent to GitHub: per operation, its Issue's number, kind, field and what is sent. */
 const queued = () =>
   core!.db.listPendingBacklogOperations().map((o) => {
     const issue = core!.db.getBacklogRecord({ ...o, objectKind: "issue", externalId: o.issue });
@@ -144,7 +144,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     expect(stageTasks(306)).toHaveLength(1);
   });
 
-  test("a stage Task already active before the answer is not the Task the answer started: no started: record, the card stays answered and queued (#4532)", async () => {
+  test("a stage Task already active before the answer is not the Task the answer started: no started: record, the card stays answered and queued", async () => {
     const base = await boot(fakeGh().gh);
     const t = insertStage("#306 実装: PBI: 判断待ちの PBI", "running", { issue: 306, action: "complete" });
     const ask = await decisionOf306(base);
@@ -166,7 +166,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     await fetch(`${base}/api/workspaces/${meta().id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ sweep: { implement: 3, plan: 0 } }) });
     const [r] = await Promise.all([answer(base, ask.id, { kind: "choice", choice: B }), fetch(`${base}/api/schedules/${id}/run`, { method: "POST" })]);
     expect(r.status).toBe(200);
-    // the firing (its reply awaited above) may pick #306 once answered: it finds that start under way or running, never a second one
+    // the firing (its reply awaited above) may pick Issue 306 once answered: it finds that start under way or running, never a second one
     expect(stageTasks(306)).toHaveLength(1);
   });
 
@@ -248,7 +248,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     expect(body.ask!.resume!.reason).toContain("ランナー側の拒否");
   });
 
-  test("permission stop grant reply: a stage Task's refused stop is answered on its Issue by its grant — a ## 回答 the next stage Task gets as the person's words (#2745)", async () => {
+  test("permission stop grant reply: a stage Task's refused stop is answered on its Issue by its grant — a ## 回答 the next stage Task gets as the person's words", async () => {
     const GRANT = "git push を origin の sb/x にすることだけ許可します";
     const prompts: string[] = [];
     const base = await boot(fakeGh().gh, { ...holding, start: (o) => (prompts.push(o.prompt), holding.start(o, () => {})) });
@@ -282,7 +282,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     const base = await boot(fakeGh().gh);
     expect((await answer(base, "nothing:here", { kind: "text", text: "x" })).status).toBe(409);
     expect((await answer(base, "x", { kind: "nope" })).status).toBe(400);
-    // a stop of #305's stage Task waits for the person, but its answer is not written from here yet
+    // a stop of Issue 305's stage Task waits for the person, but its answer is not written from here yet
     const t = insertStage("#305 実装: PBI: 実装中の PBI", "done", { issue: 305, action: "complete" });
     core!.db.appendEvent(t.id, { t: "stop.record", stop: { id: "s1", work: { workspaceId: meta().id, issue: 305, taskId: t.id }, op: "ask", target: "", reason: "input", evidence: "どちらか", safety: "before-effect", conditions: [], answer: null, actions: [], state: "waiting", at: Date.now() - 1000 } });
     const stop = (await asks(base)).find((a) => a.kind === "stop" && a.pbi?.number === 305)!;
@@ -291,10 +291,10 @@ describe("POST /api/asks/answer — the Issue side", () => {
   });
 });
 
-/* ---------- the Task side (#1011): a tool approval, a check, a stop of a Task with no Issue ---------- */
+/* ---------- the Task side: a tool approval, a check, a stop of a Task with no Issue ---------- */
 
 const ASK_WRITE: AgentEvent = { t: "permission.ask", id: "perm1", kind: "write", tool: "Write", input: { file_path: "/tmp/x" }, detail: "write x" };
-/** An operational check is the question tool's questions of the Task's last turn (#3122), not what the reply's text says. */
+/** An operational check is the question tool's questions of the Task's last turn, not what the reply's text says. */
 const CHECK_QS: AskQuestion[] = [{ header: null, question: "PR #12 をマージしてよいか", options: [{ label: "A: マージする (Recommended)", description: "CI が緑" }, { label: "B: 待つ", description: null }], multiSelect: false }];
 const CONTINUE_QS: AskQuestion[] = [{ header: null, question: "続けるか", options: [{ label: "A: 続ける", description: null }], multiSelect: false }];
 const OPEN_QS: AskQuestion[] = [{ header: null, question: "続けるか", options: [], multiSelect: false }];
@@ -394,79 +394,12 @@ describe("POST /api/asks/answer — task side", () => {
     const base = await boot(fakeGh({ pr: PR(ASKED) }).gh, scripted([checkTurn(), [{ t: "message.delta", role: "assistant", text: "merging" }]]));
     const id = await checkTask(base);
     const ask = await askOf(base, (a) => a.kind === "check" && a.task?.id === id);
-    expect(ask).toMatchObject({ answers: ["questions"], place: { pr: 12 }, recommendation: { choice: "A: マージする (Recommended)", why: "CI が緑" } });
+    expect(ask).toMatchObject({ answers: ["questions"], place: null, recommendation: null });
     const r = await answer(base, ask.id, MERGE_ANSWER);
     expect(r.status).toBe(200);
     expect(((await r.json()) as AskAnswerResult).ask).toMatchObject({ state: "answered", changedAt: expect.any(Number) });
     await until(() => userTurns(id).includes(MERGE_LINE));
     expect(userTurns(id)).toEqual([MERGE_LINE]);
-  });
-
-  // the batch reads the choices of a check (#2778): it follows the question tool's questions in #3123
-  test.skip("merge batch answers only the chosen, unchanged PRs", async () => {
-    const sec = (pr: number) => `**確認**: PR #${pr} をマージしてよいか\n**止めた場所**: PR #${pr} のマージ判定\n[聞く] セキュリティ: security:github（+40/-5）\n**選択肢**:\n- A: マージする — CI が緑\n- B: 待つ`;
-    const turn = (pr: number): AgentEvent[] => [{ t: "message.delta", role: "assistant", text: sec(pr) }, end(sec(pr))];
-    const view = (head: string): PrView => ({ state: "OPEN", head, comments: [{ body: `[merge-ask] security ${ASKED}`, createdAt: new Date(Date.now() - 60_000).toISOString() }], commits: [] });
-    const base = await boot(fakeGh({ prs: { "21": view(ASKED), "22": view(HEAD), "23": view(ASKED) } }).gh, scripted([turn(21), turn(22), turn(23)]));
-    const ids = [await checkTask(base, { title: "t21" }), await checkTask(base, { title: "t22" }), await checkTask(base, { title: "t23", budgetUsd: 0.01 })];
-    await until(async () => ((await (await fetch(`${base}/api/asks`)).json()) as AskList).batches.some((b) => b.id === "batch:security-merge" && b.asks.length === 3));
-    const shown = new Map(((await (await fetch(`${base}/api/asks`)).json()) as AskList).batches.find((b) => b.id === "batch:security-merge")!.asks.map((a) => [a.taskId, a.askId]));
-    const post = (taskIds: string[]) => fetch(`${base}/api/asks/answer`, { method: "POST", body: JSON.stringify({ id: "batch:security-merge", answer: { kind: "allow" }, taskIds, askIds: taskIds.map((t) => shown.get(t) ?? `check:${t}:`) }) });
-    // nothing chosen is nothing sent
-    expect((await post([])).status).toBe(400);
-    expect(((await (await post(["tk_not_in_batch"])).json()) as { results: unknown[] }).results).toMatchObject([{ taskId: "tk_not_in_batch", result: "changed" }]);
-    const r = await post([ids[0]!, ids[1]!]);
-    expect(r.status).toBe(200);
-    const body = (await r.json()) as { results: Array<{ taskId: string; result: string; detail?: string }> };
-    expect(body.results.map((x) => [x.taskId, x.result])).toEqual([[ids[0]!, "sent"], [ids[1]!, "changed"]]);
-    await until(() => userTurns(ids[0]!).length > 0);
-    expect(userTurns(ids[0]!)).toEqual(["A: マージする — CI が緑"]);
-    expect(userTurns(ids[1]!)).toEqual([]);
-    expect(userTurns(ids[2]!)).toEqual([]);
-    // the one sent has left the batch: a resend is changed and nothing is sent again
-    expect(((await (await post([ids[0]!])).json()) as { results: unknown[] }).results).toMatchObject([{ taskId: ids[0]!, result: "changed" }]);
-    expect(userTurns(ids[0]!)).toHaveLength(1);
-    // a Task that refuses the reply (over its budget) is failed, not sent, and still waits in the batch
-    core!.db.insertLedger({ taskId: ids[2]!, runner: "claude", model: "m", inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, costUsd: 1, billedUsd: 0, source: "reported", ts: Date.now() });
-    const refused = (await (await post([ids[2]!])).json()) as { results: Array<{ taskId: string; result: string; detail?: string }> };
-    expect(refused.results).toMatchObject([{ taskId: ids[2]!, result: "failed" }]);
-    expect(refused.results[0]!.detail).toContain("budget exceeded");
-    expect(userTurns(ids[2]!)).toEqual([]);
-  });
-
-  test.skip("merge batch sends nothing to a Task whose question is not the one the screen showed", async () => {
-    const sec = (pr: number) => `**確認**: PR #${pr} をマージしてよいか\n**止めた場所**: PR #${pr} のマージ判定\n[聞く] セキュリティ: security:github（+40/-5）\n**選択肢**:\n- A: マージする — CI が緑\n- B: 待つ`;
-    const turn = (pr: number): AgentEvent[] => [{ t: "message.delta", role: "assistant", text: sec(pr) }, end(sec(pr))];
-    const view: PrView = { state: "OPEN", head: ASKED, comments: [{ body: `[merge-ask] security ${ASKED}`, createdAt: new Date(Date.now() - 60_000).toISOString() }], commits: [] };
-    const base = await boot(fakeGh({ prs: { "31": view, "32": view } }).gh, scripted([turn(31), turn(32)]));
-    const ids = [await checkTask(base, { title: "t31" }), await checkTask(base, { title: "t32" })];
-    const batchOf = async () => ((await (await fetch(`${base}/api/asks`)).json()) as AskList).batches.find((b) => b.id === "batch:security-merge");
-    await until(async () => (await batchOf())?.asks.length === 2);
-    const shown = (await batchOf())!.asks;
-    const askOfTask = (t: string) => shown.find((a) => a.taskId === t)!.askId;
-    const post = (taskIds: string[], askIds: string[]) => fetch(`${base}/api/asks/answer`, { method: "POST", body: JSON.stringify({ id: "batch:security-merge", answer: { kind: "allow" }, taskIds, askIds }) });
-    // the screen saw an earlier question of the first Task (it asked again since): nothing reaches it, the other still goes
-    const r = await post([ids[0]!, ids[1]!], [`${askOfTask(ids[0]!)}:before`, askOfTask(ids[1]!)]);
-    expect(r.status).toBe(200);
-    const body = (await r.json()) as { results: Array<{ taskId: string; result: string; detail?: string }> };
-    expect(body.results.map((x) => [x.taskId, x.result])).toEqual([[ids[0]!, "changed"], [ids[1]!, "sent"]]);
-    expect(body.results[0]!.detail).toContain("問いが変わった");
-    await until(() => userTurns(ids[1]!).length > 0);
-    expect(userTurns(ids[0]!)).toEqual([]);
-    // the second Task's question has left the batch (answered above): that row only is changed, the first still goes
-    const again = (await (await post([ids[1]!, ids[0]!], [askOfTask(ids[1]!), askOfTask(ids[0]!)])).json()) as { results: Array<{ taskId: string; result: string }> };
-    expect(again.results.map((x) => [x.taskId, x.result])).toEqual([[ids[1]!, "changed"], [ids[0]!, "sent"]]);
-    await until(() => userTurns(ids[0]!).length > 0);
-    expect(userTurns(ids[1]!)).toHaveLength(1);
-    // both answered, the batch is gone: a press from the old screen is each row changed, nothing sent
-    await until(async () => !(await batchOf()));
-    const gone = (await (await post([ids[0]!], [askOfTask(ids[0]!)])).json()) as { results: Array<{ taskId: string; result: string }> };
-    expect(gone.results.map((x) => [x.taskId, x.result])).toEqual([[ids[0]!, "changed"]]);
-    expect(userTurns(ids[0]!)).toHaveLength(1);
-    // askIds are required and line up with taskIds; a Task twice is a bad request
-    expect((await post([ids[0]!], [])).status).toBe(400);
-    expect((await fetch(`${base}/api/asks/answer`, { method: "POST", body: JSON.stringify({ id: "batch:security-merge", answer: { kind: "allow" }, taskIds: [ids[0]!] }) })).status).toBe(400);
-    expect((await post([ids[0]!, ids[0]!], [askOfTask(ids[0]!), askOfTask(ids[0]!)])).status).toBe(400);
   });
 
   test("task side: usage limit — the reply's turn stops at the limit; asked again, the answer says it waits for the limit to lift", async () => {
@@ -496,16 +429,6 @@ describe("POST /api/asks/answer — task side", () => {
     expect(((await (await answer(base, ask.id, { kind: "questions", answers: [{ choices: ["A: 続ける"] }] })).json()) as AskAnswerResult).already).toBe(false);
   });
 
-  test("task side: pr changed — the head moved past its [merge-ask]: the option is 409 and nothing is sent", async () => {
-    const base = await boot(fakeGh({ pr: PR(HEAD) }).gh, scripted([checkTurn(), []]));
-    const id = await checkTask(base);
-    const ask = await askOf(base, (a) => a.kind === "check" && a.task?.id === id);
-    const r = await answer(base, ask.id, MERGE_ANSWER);
-    expect(r.status).toBe(409);
-    expect(((await r.json()) as AskChanged).changes).toEqual([`PR #12 の差分が変わりました（${ASKED.slice(0, 7)} → ${HEAD.slice(0, 7)}）`]);
-    expect(userTurns(id)).toEqual([]);
-  });
-
   test("task side: stale approval — answered on the Task's screen first, the answer here is 409 and the runner hears once", async () => {
     const allows: string[] = [];
     const base = await boot(fakeGh().gh, scripted([[ASK_WRITE, { t: "message.delta", role: "assistant", text: "writing" }]], allows));
@@ -517,26 +440,15 @@ describe("POST /api/asks/answer — task side", () => {
     expect(allows).toEqual(["perm1"]);
   });
 
-  test("task side: a check with a stop condition not met takes no answer — a reply would set the Task going", async () => {
-    const base = await boot(fakeGh().gh, scripted([checkTurn(OPEN_QS)]));
+  test("task side: a check with a stop condition not met is still answered — an old stop does not take the options away", async () => {
+    const base = await boot(fakeGh().gh, scripted([checkTurn(CONTINUE_QS), []]));
     const id = await checkTask(base, { workspaceId: undefined });
     core!.db.appendEvent(id, { t: "stop.record", stop: { id: "s1", work: { workspaceId: null, issue: null, taskId: id }, op: "gh pr merge", target: "#12", reason: "depends", evidence: "CI", safety: "before-effect", conditions: [{ key: "ci", value: "failure", met: false }], answer: null, actions: [], state: "waiting", at: Date.now() } });
     const ask = await askOf(base, (a) => a.kind === "check" && a.task?.id === id);
-    expect(ask).toMatchObject({ answers: [], blockers: [{ kind: "condition", detail: "ci: failure" }] });
-    const r = await answer(base, ask.id, { kind: "text", text: "続けて" });
-    expect(r.status).toBe(409);
-    expect(((await r.json()) as AskChanged).changes).toEqual(["ci: failure"]);
-    expect(userTurns(id)).toEqual([]);
-  });
-
-  test("task side: a check about a PR of a Task with no workspace — its PR cannot be checked: an option is 409", async () => {
-    const base = await boot(fakeGh().gh, scripted([checkTurn(), []]));
-    const id = await checkTask(base, { workspaceId: undefined });
-    const ask = await askOf(base, (a) => a.kind === "check" && a.task?.id === id);
-    const r = await answer(base, ask.id, MERGE_ANSWER);
-    expect(r.status).toBe(409);
-    expect(((await r.json()) as AskChanged).changes[0]).toContain("確かめられません");
-    expect(userTurns(id)).toEqual([]);
+    expect(ask).toMatchObject({ answers: ["questions"], blockers: [] });
+    expect((await answer(base, ask.id, { kind: "questions", answers: [{ choices: ["A: 続ける"] }] })).status).toBe(200);
+    await until(() => userTurns(id).length === 1);
+    expect(userTurns(id)).toEqual(["- 続けるか: A: 続ける"]);
   });
 
   test("task side: runner refusal — a Task stopped only by the runner's refusal takes no answer; POST is 409 and nothing is sent", async () => {
@@ -562,7 +474,7 @@ describe("POST /api/asks/answer — task side", () => {
   });
 });
 
-describe("GET /api/asks — mockups (#2221)", () => {
+describe("GET /api/asks — mockups", () => {
   test("mockups: the Task a ## 判断待ち names with **画面イメージ** gives its HTML artifacts, not a removed one nor a text one", async () => {
     const base = await boot(fakeGh({ place: "Task #307\n**画面イメージ**: tsk_mock" }).gh);
     const at = Date.now() - 60_000;

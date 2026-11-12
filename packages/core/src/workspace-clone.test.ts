@@ -11,7 +11,7 @@ import type { GhRunner } from "./backlog.ts";
 import { originMismatch, parseGithubRepo, type WorkspaceClone, unusableWorkspaces } from "./workspace-clone.ts";
 import { Db } from "./db.ts";
 
-// Adding a GitHub repository by name (#2575): cloned next to the checkout; one the owner cannot push to writes nothing back (#2576).
+// Adding a GitHub repository by name: cloned next to the checkout; one the owner cannot push to writes nothing back.
 
 let core: CoreServer | undefined;
 let root: string | undefined;
@@ -31,7 +31,7 @@ const ending: RunnerAdapter = {
 
 /**
  * `git: "full"` clones a real repository with branches main and dev and tag v1 from `<root>/gh/<owner>/<name>.git`;
- * the clone reads https://github.com/ as `<root>/gh/`, so the fetch and push of an own copy (#2579) stay on disk.
+ * the clone reads https://github.com/ as `<root>/gh/`, so the fetch and push of an own copy stay on disk.
  * `mine` is what `gh api repos/me/<name>` answers (absent = 404).
  */
 async function boot(fake: { push?: boolean | "missing"; cloneFails?: string; hold?: Promise<void>; git?: "clone" | "fork" | "full"; renamedTo?: string; mine?: "exists" | "error"; createFails?: string; createMakesNothing?: boolean } = {}) {
@@ -358,7 +358,7 @@ test("workspace clone: a registered workspace at the path keeps its backlog (409
   expect(ws.backlog).toBe("github");
 }, 30_000);
 
-test("originMismatch: a checkout whose origin is not the registered GitHub repository, in any URL form (#2799)", () => {
+test("originMismatch: a checkout whose origin is not the registered GitHub repository, in any URL form", () => {
   root = mkdtempSync(join(tmpdir(), "switchboard.origin."));
   const dir = root;
   const origin = (url: string | null) => {
@@ -440,7 +440,7 @@ test("unusableWorkspaces lists a missing folder and a wrong origin of a GitHub r
   }
 });
 
-test("GET /api/asks: a workspace that cannot be used is a notice until it is fixed, never an Inbox note (#2866)", async () => {
+test("GET /api/asks: a workspace that cannot be used is a notice until it is fixed, never an Inbox note", async () => {
   const { base } = await boot();
   const gone = core!.db.upsertWorkspace({ name: "gone", path: join(root!, "gone"), kind: "repo" });
   core!.db.setWorkspaceBacklogSource(gone.id, { service: "github", host: "github.com", repository: "acme/gone", project: { owner: "acme", number: 1 } });

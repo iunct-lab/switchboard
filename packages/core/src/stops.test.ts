@@ -8,7 +8,7 @@ import { compareStopConditions, FenceReader, issueOf, reduceStops, reportedLimit
 import { parseArtifactFence } from "./artifacts.ts";
 
 let n = 0;
-/** A stop of #939 in workspace ws1 by default: the PR merge waiting on CI. */
+/** A stop of Issue 939 in workspace ws1 by default: the PR merge waiting on CI. */
 const stop = (over: Partial<Omit<StopRecord, "work">> & { work?: Partial<StopRecord["work"]> } = {}): StopRecord =>
   StopRecord.parse({
     id: `s${++n}`,
@@ -154,7 +154,7 @@ describe("reduceStops", () => {
   test("an answer goes to the newest stop at its own target, not to a newer stop of another target of the same work", () => {
     const a = stop({ reason: "decision", target: "PR #12" });
     const b = stop({ reason: "decision", target: "PR #13", at: a.at + 1000 });
-    const toA = { ref: "seq:5", at: b.at + 500 }; // after both stopped; the newest stop at PR #12 is a
+    const toA = { ref: "seq:5", at: b.at + 500 }; // after both stopped; the newest stop at PR 12 is a
     const a2 = stop({ reason: "decision", target: "PR #12", answer: toA, at: b.at + 1000 });
     expect(reduceStops([a, b, a2]).find((x) => x.target === "PR #12")).toMatchObject({ changes: [{ kind: "answer" }], next: "resume" });
   });
@@ -227,7 +227,7 @@ describe("StopFenceReader", () => {
   });
 });
 
-describe("reserveStopRetry / stopRecoveryPrompt (#949)", () => {
+describe("reserveStopRetry / stopRecoveryPrompt", () => {
   const tried = (n: number, state: StopRecord["state"] = "retrying") => stop({ reason: "transient", safety: "read-only", state, actions: Array.from({ length: n }, (_, i) => ({ attempt: i + 1, at: 1, what: "再試行", ok: null })) });
 
   test("two more tries, 5 s then 30 s, of a passing failure that is harmless to repeat; a resolved stop starts over", () => {
@@ -252,7 +252,7 @@ describe("reserveStopRetry / stopRecoveryPrompt (#949)", () => {
     expect(stopRecoveryPrompt([])).not.toContain("まだ解けていない");
   });
 
-  test("stop grant: the newest stop's grant is the series' grant; the prompt says to write one for a permission stop (#2745)", () => {
+  test("stop grant: the newest stop's grant is the series' grant; the prompt says to write one for a permission stop", () => {
     const a = stop({ reason: "permission", grant: "PR #12 をマージすることだけ許可します" });
     const b = stop({ reason: "permission" });
     expect(reduceStops([a])[0]!.grant).toBe("PR #12 をマージすることだけ許可します");
@@ -261,7 +261,7 @@ describe("reserveStopRetry / stopRecoveryPrompt (#949)", () => {
     expect(stopRecoveryPrompt([])).toContain('許可文を "grant" に 1 文で書く');
   });
 
-  test("prompt asks for wait conditions: a depends stop names its PRs / Issues as pr#N / issue#N, copied from overlap (#2045)", () => {
+  test("prompt asks for wait conditions: a depends stop names its PRs / Issues as pr#N / issue#N, copied from overlap", () => {
     const p = stopRecoveryPrompt([]);
     expect(p).toContain('"conditions":[{"key":"pr#12","value":"open","met":false}]');
     expect(p).toContain("pr#N / issue#N");
@@ -274,7 +274,7 @@ describe("reserveStopRetry / stopRecoveryPrompt (#949)", () => {
     expect(p).toContain("7 日を超えるなら PBI の工程 Task は占有の解放の --after で引き渡す");
   });
 
-  test("stop prompt names the runner condition of a usage-limit stop: runner#<runner> with the time (#4408), read by reportedLimit", () => {
+  test("stop prompt names the runner condition of a usage-limit stop: runner#<runner> with the time, read by reportedLimit", () => {
     const p = stopRecoveryPrompt([]);
     expect(p).toContain("使用上限（usage-limit）は止めたランナーを runner#<ランナー>");
     expect(p).toContain("分からなければ unknown");
@@ -290,7 +290,7 @@ describe("reserveStopRetry / stopRecoveryPrompt (#949)", () => {
     expect(reportedLimit(limit({ conditions: [{ key: "runner#nobody", value: "unknown", met: false }] }))).toBeUndefined(); // not a runner id
   });
 
-  test("recovery prompt forbids out-of-scope writes (#1987)", () => {
+  test("recovery prompt forbids out-of-scope writes", () => {
     const p = stopRecoveryPrompt([]);
     expect(p).toContain("依頼の範囲外の書き込み");
     expect(p).toContain("計画モードでの commit・push・マージ");
@@ -299,7 +299,7 @@ describe("reserveStopRetry / stopRecoveryPrompt (#949)", () => {
   });
 });
 
-describe("FenceReader (#1778)", () => {
+describe("FenceReader", () => {
   test("reads its own kind of fence only: another kind, a quoted example and broken JSON are not reports", () => {
     const r = new FenceReader("switchboard-artifact", parseArtifactFence);
     const fence = (body: string) => "```switchboard-artifact\n" + body + "\n```\n";
@@ -407,7 +407,7 @@ describe("stops of a schedule", () => {
   });
 });
 
-describe("stopMarks (#4520)", () => {
+describe("stopMarks", () => {
   const mk = (id: string, over: Partial<Task> = {}) =>
     ({ id, workspaceId: null, title: id, runner: "claude", cwd: "/tmp", scope: [], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1, ...over }) as Task;
   const own = (t: Task, over: Partial<Omit<StopRecord, "work">> = {}) => stop({ ...over, work: { workspaceId: null, issue: null, taskId: t.id } });

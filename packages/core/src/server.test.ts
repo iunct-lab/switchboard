@@ -11,7 +11,7 @@ import { loadConfig } from "./config.ts";
 import type { judgeTurn } from "./judge.ts";
 import { heldWhy, startServer, type CoreServer } from "./server.ts";
 
-/* What a restart of the daemon keeps (#1139): the same SWITCHBOARD_HOME opened by a second startServer, as asks-answer.test.ts boots one. */
+/* What a restart of the daemon keeps: the same SWITCHBOARD_HOME opened by a second startServer, as asks-answer.test.ts boots one. */
 
 const pages = (await Bun.file(new URL("../fixtures/backlog-graphql.json", import.meta.url)).json()) as unknown[];
 const decisions = (await Bun.file(new URL("../fixtures/backlog-decisions.json", import.meta.url)).json()) as unknown;
@@ -77,7 +77,7 @@ const decisionOf306 = async (base: string) => ((await (await fetch(`${base}/api/
 const answer = (base: string, id: string, a: unknown) => fetch(`${base}/api/asks/answer`, { method: "POST", body: JSON.stringify({ id, answer: a }) });
 const comments = () => core!.db.listPendingBacklogOperations().filter((o) => o.kind === "comment").length;
 
-describe("daemon restart (#1139)", () => {
+describe("daemon restart", () => {
   test("再起動: a start that failed after an answer is still failed, with the same reason", async () => {
     const base = await boot();
     const ask = await decisionOf306(base);
@@ -109,7 +109,7 @@ describe("daemon restart (#1139)", () => {
   });
 });
 
-describe("judgement across a restart (#1139)", () => {
+describe("judgement across a restart", () => {
   const post = (base: string, path: string, body: unknown) => fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   const until = async (ok: () => boolean) => {
     for (let n = 0; n < 400 && !ok(); n++) await Bun.sleep(10);

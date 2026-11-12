@@ -102,7 +102,7 @@ describe("findApproval / redact", () => {
     expect(r).toBe(`go to ${WITHHELD}\nenter ${WITHHELD}\n[伏せた行]\nok\n`);
   });
 
-  test("redact withholds a line holding an account id of the host's AWS config, written bare (#2351)", async () => {
+  test("redact withholds a line holding an account id of the host's AWS config, written bare", async () => {
     const out = await withHostAccount((id) => redact(`account list\n${id}\nok\n`, []));
     expect(out).toBe("account list\n[伏せた行]\nok\n");
   });
@@ -149,7 +149,7 @@ describe("ops-kit/bin/device-auth", () => {
   test.each([
     ["on expiry", ["--expires-in", "1"], 200, 124],
     ["when the hand-over is refused", [], 500, 2],
-  ])("%s what the command started is stopped too (#992)", async (_name, opts, status, exit) => {
+  ])("%s what the command started is stopped too", async (_name, opts, status, exit) => {
     const pidFile = join(dir, "left.pid");
     answer = status;
     const started = Date.now();
@@ -175,7 +175,7 @@ describe("ops-kit/bin/device-auth", () => {
     expect(alive()).toBe(false);
   }, 10_000);
 
-  test("device-auth stopped by a signal stops what the command started too, and DELETEs (#992)", async () => {
+  test("device-auth stopped by a signal stops what the command started too, and DELETEs", async () => {
     calls = [];
     const pidFile = join(dir, "left-abort.pid");
     const p = Bun.spawn([BIN, "--", "sh", "-c", `sleep 30 & echo $! > ${pidFile}; echo ${URL_}; echo ${CODE}; wait`], { env: { ...process.env, DEVICE_AUTH_URL: `http://127.0.0.1:${server.port}/x` }, stdout: "pipe", stderr: "pipe" });

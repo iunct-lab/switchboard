@@ -1,16 +1,18 @@
 import { useEffect, useState } from "react";
-import type { FlowView } from "@switchboard/protocol";
+import type { BacklogItem, FlowView } from "@switchboard/protocol";
 import { api } from "../api.ts";
+import { waitSummary } from "../backlogView.ts";
 import { bottleneckLine, flowRows, slowRow } from "../flow.ts";
 import { t } from "../i18n.ts";
 import { panels as m } from "../i18n/panels.ts";
-import { jstTime } from "../time.ts";
+import { jstStamp, jstTime } from "../time.ts";
 
 /**
  * 流れ（直近 30 日）(#651): how long the PBIs closed in the last 30 days took, stage by stage, against the 30 days
  * before. Read apart from the list, so that GitHub being unreadable leaves the list as it is — only this section says why.
  */
-export function Flow() {
+export function Flow(props: { items: BacklogItem[]; now: number }) {
+  const wait = waitSummary(props.items, props.now);
   const [view, setView] = useState<FlowView | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -37,6 +39,27 @@ export function Flow() {
           {t(m.reread)}
         </button>
       </div>
+      {(wait.until.count > 0 || wait.confirm.count > 0) && (
+        <div className="hint" data-flow-wait>
+          {t(m.waitNow)}
+          {wait.until.count > 0 && wait.until.next !== null && <span data-flow-wait-until>{t(m.waitUntil, { n: wait.until.count, at: jstStamp(wait.until.next) })}</span>}
+          {wait.until.count > 0 && wait.confirm.count > 0 && t(m.waitSep)}
+          {wait.confirm.count > 0 && (
+            <span data-flow-wait-confirm>
+              {t(m.waitConfirm, { n: wait.confirm.count })}
+              {wait.confirm.longest && (
+                <>
+                  {t(m.waitLongestPre)}
+                  <a href={wait.confirm.longest.url} target="_blank" rel="noreferrer">
+                    #{wait.confirm.longest.number}
+                  </a>
+                  {t(m.waitLongestPost, { days: wait.confirm.longest.days })}
+                </>
+              )}
+            </span>
+          )}
+        </div>
+      )}
       {failure && <div className="muted">{t(m.flowFailed, { error: failure })}</div>}
       {view?.errors.map((e) => (
         <div key={e.workspace} className="muted" data-flow-error>

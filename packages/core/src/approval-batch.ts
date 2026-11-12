@@ -1,9 +1,9 @@
-import type { Ask, AskAnswer, AskBatch, AskBatchResult, DeviceAuthView, StopRecord, Task } from "@switchboard/protocol";
+import type { Ask, AskBatch, AskBatchResult, DeviceAuthView, StopRecord, Task } from "@switchboard/protocol";
 import { IN_FLIGHT, TURN_DONE } from "./task-status.ts";
 import { stopKey } from "./stops.ts";
 
 /**
- * SSO logins and refused deploys across Tasks (#2046, docs/design/asks.md): each Task stopped on one of them shows once in
+ * SSO logins and refused deploys across Tasks (docs/design/asks.md): each Task stopped on one of them shows once in
  * a batch of its kind, so one login or one approval moves them all. A batch only bundles the questions — each stop stays
  * its own question, answered or folded as before (dedupeAsks).
  */
@@ -12,20 +12,6 @@ import { stopKey } from "./stops.ts";
 export const DEPLOY_WORDS = ["promote", "昇格", "sam deploy", "cloudformation", "changeset", "変更セット", "iam", "deploy", "配置"];
 
 export type BatchKind = AskBatch["kind"];
-
-/** An open merge check whose stop reasons (the `[聞く]` lines under `**止めた場所**:`) include a security one: the person alone settles it. */
-export function isSecurityMergeCheck(a: Ask): boolean {
-  return a.kind === "check" && a.state === "open" && !!a.place?.pr && !!a.task && a.place.reasons.some((r) => r.startsWith("[聞く] セキュリティ"));
-}
-
-/**
- * The choice of a merge check that says to merge: the first whose text after its mark (`A: マージする — …`) starts with
- * 「マージする」, as the choice line is (what a click on it sends, so answerAsk takes it). 「マージしない」 and 「待つ」 do
- * not match. null = it has none, so the batch cannot answer it.
- */
-export function mergeChoiceOf(a: Ask): string | null {
-  return a.choices.find((c) => /^[A-Za-z0-9]+\s*[:：.．)）]\s*マージする/.test(c)) ?? null;
-}
 
 /** sso = an SSO login wait, deploy = a deploy the runner refused; null = neither, or resolved. */
 export function batchKindOf(s: Pick<StopRecord, "reason" | "op" | "target" | "state">): BatchKind | null {
@@ -74,7 +60,7 @@ function eachStop(records: StopRecord[]): { stop: StopRecord; at: number; stoppe
  * `asks` = the questions as listed, for the one each Task shows as (its stop, or the check it folded into).
  */
 export function approvalBatches(entries: { task: Task; records: StopRecord[] }[], asks: Ask[]): AskBatch[] {
-  const lists: Record<BatchKind, AskBatch["asks"]> = { sso: [], deploy: [], "security-merge": [] };
+  const lists: Record<BatchKind, AskBatch["asks"]> = { sso: [], deploy: [] };
   for (const { task, records } of [...entries].sort((a, b) => a.task.createdAt - b.task.createdAt)) {
     if (NOT_WAITING.has(task.status) || task.shadowOf) continue;
     const newest = waitingStop(records);
@@ -84,10 +70,7 @@ export function approvalBatches(entries: { task: Task; records: StopRecord[] }[]
     const shown = asks.find((a) => a.id === id) ?? asks.find((a) => a.task?.id === task.id && a.state === "open" && (a.kind === "stop" || a.kind === "check"));
     lists[kind].push({ askId: shown?.id ?? id, taskId: task.id, title: task.title, workspaceId: task.workspaceId, op: newest.stop.op, at: newest.at });
   }
-  // the merge checks that stopped on a security `[聞く]`, across workspaces, oldest stop first
-  for (const a of [...asks].sort((x, y) => x.at - y.at))
-    if (isSecurityMergeCheck(a)) lists["security-merge"].push({ askId: a.id, taskId: a.task!.id, title: a.task!.title ?? a.task!.id, workspaceId: a.workspace?.id ?? null, op: `PR #${a.place!.pr}`, at: a.at, pr: a.place!.pr, reasons: a.place!.reasons, diff: a.place!.diff });
-  return (["sso", "deploy", "security-merge"] as const).filter((k) => lists[k].length > 0).map((k) => ({ id: `batch:${k}` as const, kind: k, asks: lists[k], loggingIn: null, deviceAuth: null }));
+  return (["sso", "deploy"] as const).filter((k) => lists[k].length > 0).map((k) => ({ id: `batch:${k}` as const, kind: k, asks: lists[k], loggingIn: null, deviceAuth: null }));
 }
 
 /** What the SSO batch's one Task is sent: it logs in for all of them (the runners share the host's SSO cache, docs/design/device-auth.md). */
@@ -104,18 +87,12 @@ export interface BatchDeps {
   /** The batches as GET /api/asks lists them now (decorated). */
   batches: () => Promise<AskBatch[]>;
   deviceAuth: (taskId: string) => DeviceAuthView | null;
-  /** The question as listed now (null = gone). */
-  ask: (askId: string) => Promise<Ask | null>;
-  /** One answer to one question, the same as the screen's (its head check and its once-only included). */
-  answerAsk: (askId: string, answer: AskAnswer) => Promise<{ status: number; body: object }>;
 }
 
-/** What became of one Task's merge check in the security-merge batch: sent = its "merge" went; changed = the question or its PR changed (409), nothing sent; already = answered before; failed = anything else. */
-export type MergeResult = { taskId: string; result: "sent" | "changed" | "already" | "failed"; detail?: string };
-type Answered = { status: number; body: AskBatchResult | { results: MergeResult[]; batch: AskBatch | null } | { error: string } };
+type Answered = { status: number; body: AskBatchResult | { error: string } };
 
 /**
- * The answers to a batch (#2046). sso: one click sends the batch's oldest Task on to log in, and once its turn ends
+ * The answers to a batch. sso: one click sends the batch's oldest Task on to log in, and once its turn ends
  * without a new login stop the rest are sent on — the wait for that is `pendingSso`, memory only (a restart forgets it;
  * the rest stay in the batch, and one more click starts again). deploy: each Task the person chose is sent its approval
  * once; the others wait. Nothing is saved as a policy, and nothing is sent that the person did not press.
@@ -127,13 +104,13 @@ export class BatchAnswers {
   private queue: Promise<unknown> = Promise.resolve();
   constructor(private deps: BatchDeps) {}
 
-  answer(id: string, taskIds: string[] | undefined, askIds?: string[]): Promise<Answered> {
-    const run = this.queue.then(() => this.answerNow(id, taskIds, askIds));
+  answer(id: string, taskIds: string[] | undefined): Promise<Answered> {
+    const run = this.queue.then(() => this.answerNow(id, taskIds));
     this.queue = run.catch(() => undefined);
     return run;
   }
 
-  private async answerNow(id: string, taskIds: string[] | undefined, askIds: string[] | undefined): Promise<Answered> {
+  private async answerNow(id: string, taskIds: string[] | undefined): Promise<Answered> {
     const batch = (await this.deps.batches()).find((b) => b.id === id);
     if (id === "batch:sso") {
       if (this.pendingSso) return { status: 200, body: { sent: [], already: true, batch: batch ?? null } };
@@ -148,7 +125,6 @@ export class BatchAnswers {
       }
       return { status: 200, body: { sent: [first!], already: false, batch: (await this.deps.batches()).find((b) => b.id === id) ?? null } };
     }
-    if (id === "batch:security-merge") return this.securityMerge(batch, taskIds, askIds);
     if (id !== "batch:deploy") return { status: 400, body: { error: `unknown batch: ${id}` } };
     if (!taskIds?.length) return { status: 400, body: { error: "承認する Task を選んでください" } };
     if (!batch) return { status: 409, body: { error: "配備の承認待ちの Task はもうありません" } };
@@ -160,46 +136,6 @@ export class BatchAnswers {
       sent.push(a!.taskId);
     }
     return { status: 200, body: { sent, already: false, batch: (await this.deps.batches()).find((b) => b.id === id) ?? null } };
-  }
-
-  /**
-   * security-merge: only the Tasks the person chose are sent "merge", each through the one-question answer (a PR that moved
-   * since the question is its 409, and the others still go). `askIds` (same order as `taskIds`) = the question the screen
-   * showed for each (required): a Task whose question is not that one by now is `changed` and nothing is sent to it, the
-   * other rows still go. Nothing is chosen by
-   * default, and nothing is saved as a policy.
-   */
-  private async securityMerge(batch: AskBatch | undefined, taskIds: string[] | undefined, askIds: string[] | undefined): Promise<Answered> {
-    if (!taskIds?.length) return { status: 400, body: { error: "マージする Task を選んでください" } };
-    if (!askIds || askIds.length !== taskIds.length) return { status: 400, body: { error: "askIds は taskIds と同じ数・同じ並びで送ってください" } };
-    if (new Set(taskIds).size !== taskIds.length) return { status: 400, body: { error: "同じ Task が 2 回あります" } };
-    const chosen: { taskId: string; askId: string; choice: string; stale: boolean }[] = [];
-    for (const [i, t] of taskIds.entries()) {
-      // no batch any more (the last one answered elsewhere) is the same: each row is changed
-      const entry = batch?.asks.find((a) => a.taskId === t);
-      // the question the screen showed is gone (answered, asked again, left the batch): that row only is changed
-      if (!entry || entry.askId !== askIds[i]) {
-        chosen.push({ taskId: t, askId: askIds[i]!, choice: "", stale: true });
-        continue;
-      }
-      const choice = await this.deps.ask(entry.askId).then((a) => (a ? mergeChoiceOf(a) : null));
-      if (!choice) return { status: 400, body: { error: `「マージする」を選べない Task があります: ${t}` } };
-      chosen.push({ taskId: t, askId: entry.askId, choice, stale: false });
-    }
-    const results: MergeResult[] = [];
-    for (const c of chosen) {
-      if (c.stale) {
-        results.push({ taskId: c.taskId, result: "changed", detail: "問いが変わったか、もう答えられています（画面が見ていた問いと違います）" });
-        continue;
-      }
-      const r = await this.deps.answerAsk(c.askId, { kind: "choice", choice: c.choice });
-      const body = r.body as { already?: boolean; error?: string; ask?: { resume?: { state?: string; reason?: string } | null } };
-      // a reply the Task refuses (its budget) is still 200: the question stays open, its resume failed — nothing was sent
-      if (r.status === 200 && body.ask?.resume?.state === "failed") results.push({ taskId: c.taskId, result: "failed", detail: body.ask.resume.reason });
-      else if (r.status === 200) results.push({ taskId: c.taskId, result: body.already ? "already" : "sent" });
-      else results.push({ taskId: c.taskId, result: r.status === 409 ? "changed" : "failed", detail: body.error });
-    }
-    return { status: 200, body: { results, batch: (await this.deps.batches()).find((b) => b.id === "batch:security-merge") ?? null } };
   }
 
   /**
@@ -242,31 +178,16 @@ export class BatchAnswers {
  */
 const loginStopSince = (records: StopRecord[], since: number) => eachStop(records).some(({ stop: r, stoppedAt }) => r.reason === "auth" && stoppedAt >= since && r.state !== "resolved");
 
-const KIND_TITLE: Record<BatchKind, string> = { sso: "SSO のログイン待ち", deploy: "配備の承認待ち", "security-merge": "セキュリティの確認待ちのマージ" };
+const KIND_TITLE: Record<BatchKind, string> = { sso: "SSO のログイン待ち", deploy: "配備の承認待ち" };
 
 /**
- * The once-a-day note of the batches still waiting (approval-window, #2046): its title has the count, its body a line per
+ * The once-a-day note of the batches still waiting (approval-window): its title has the count, its body a line per
  * Task under its batch. null = nothing waits (no note).
  */
 export function approvalWindowNote(batches: AskBatch[]): { title: string; body: string } | null {
-  // the note counts logins and deploys; the merge checks have their own card
-  const shown = batches.filter((b) => b.asks.length > 0 && b.kind !== "security-merge");
+  const shown = batches.filter((b) => b.asks.length > 0);
   const n = shown.reduce((k, b) => k + b.asks.length, 0);
   if (n === 0) return null;
   const body = shown.map((b) => [`${KIND_TITLE[b.kind]}（${b.asks.length} 件）`, ...b.asks.map((a) => `- ${a.title} — ${a.op}`)].join("\n")).join("\n\n");
   return { title: `SSO・配備の承認待ち: ${n}`, body };
-}
-
-/**
- * The once-a-day note of the security merge checks still waiting (approval-window, #2792): only the checks that were waiting
- * when the schedule last fired count (a check that stops later waits for the next firing), and the note is that firing's
- * (`at` = the firing: one notice per firing, so one a day). Its title has the count and the longest wait (now minus the
- * oldest stop, rounded up to hours), its body a line per PR with its Task. null = not fired yet, or none of them waits.
- */
-export function securityMergeNote(batches: AskBatch[], firedAt: number | null, now: number): { title: string; body: string; at: number } | null {
-  if (firedAt === null) return null;
-  const asks = batches.find((x) => x.kind === "security-merge")?.asks.filter((a) => a.at <= firedAt) ?? [];
-  if (asks.length === 0) return null;
-  const hours = Math.max(1, Math.ceil((now - Math.min(...asks.map((a) => a.at))) / 3_600_000));
-  return { title: `セキュリティのマージ確認 ${asks.length} 件（最長 ${hours} 時間）— 判断待ちから答えられる`, body: asks.map((a) => `- ${a.op} — ${a.title}`).join("\n"), at: firedAt };
 }

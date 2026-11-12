@@ -1,5 +1,5 @@
 /**
- * A backlog kept in Switchboard only (#2265): its edits are not sent anywhere — each operation an edit queued (#886)
+ * A backlog kept in Switchboard only: its edits are not sent anywhere — each operation an edit queued
  * is applied to the stored records at once, as if the service had answered it. The edit functions in backlog.ts are the
  * same for every workspace; only where their operations go differs (BacklogSync.send).
  */
@@ -45,7 +45,7 @@ export function applyLocalOperations(db: Db, source: BacklogSource, now = Date.n
       const next = to === null ? undefined : byNumber(to);
       if (next && !next.value.subIssues.includes(n)) store("issue", next.id, { ...next.value, subIssues: [...next.value.subIssues, n] });
     };
-    // GitHub numbers Issues and pull requests alike: a number one of the PRs it had is not given (#2266)
+    // GitHub numbers Issues and pull requests alike: a number one of the PRs it had is not given
     const pulls = () => db.listBacklogRecords(source, "pull-request").flatMap((r) => ((r.remote as BacklogPullRequestData | null)?.number ? [(r.remote as BacklogPullRequestData).number] : []));
     let applied = 0;
     for (const listed of ops) {
@@ -73,7 +73,7 @@ export function applyLocalOperations(db: Db, source: BacklogSource, now = Date.n
         let next = op.field === "member" && op.payload === false ? null : cur && applyBacklogField(op.targetKind, cur, op.field!, op.payload);
         if (op.targetKind === "issue" && next) {
           const issue = next as BacklogIssueData;
-          // its reason: applyBacklogField (#3146)
+          // its reason: applyBacklogField
           if (op.field === "state") next = { ...issue, closedAt: issue.state === "CLOSED" ? at : null };
           if (op.field === "parent") {
             // the relationship stays whole: a parent not there is dropped with its reason (as a send would be refused;
@@ -98,15 +98,15 @@ export function applyLocalOperations(db: Db, source: BacklogSource, now = Date.n
 
 /**
  * What is decided here at once: a create, a comment, an edit of an Issue made here (`sb:` / `local:`). An edit of an Issue
- * GitHub has — in a workspace whose GitHub sync is off (#2266) — waits for the sync to be on, and is sent then with the
- * check of what it was made on (#887); so does an operation sent or lost on the way (`sending` / `unknown`, …).
+ * GitHub has — in a workspace whose GitHub sync is off — waits for the sync to be on, and is sent then with the
+ * check of what it was made on; so does an operation sent or lost on the way (`sending` / `unknown`, …).
  */
 const appliesHere = (op: BacklogOperation) =>
   op.status === "pending" && !op.remoteId && (op.kind !== "set" || op.issue.startsWith("sb:") || op.issue.startsWith("local:")) &&
-  // a create of turning the sync on (#2266, backlog-enable.ts) makes an Issue made here on GitHub: it waits for GitHub
+  // a create of turning the sync on (backlog-enable.ts) makes an Issue made here on GitHub: it waits for GitHub
   !(op.kind === "create" && "former" in (op.payload as object));
 
-/** The parent an edit of a backlog kept here (#2265) names must be one of its Issues, not the Issue itself: 422 otherwise, before anything is stored. */
+/** The parent an edit of a backlog kept here names must be one of its Issues, not the Issue itself: 422 otherwise, before anything is stored. */
 export function checkLocalParent(db: Db, source: BacklogSource, parent: number | null | undefined, self?: number): void {
   if (parent === undefined || parent === null) return;
   const there = db.listBacklogRecords(source, "issue").some((r) => ((r.remote ?? r.local) as BacklogIssueData | null)?.number === parent);
@@ -141,11 +141,11 @@ export function checkFieldChoices(dir: string, fields: Record<string, string | n
 }
 
 /**
- * The Project fields and the Milestone of an edit of a backlog kept here (#2265), checked against the workspace's
+ * The Project fields and the Milestone of an edit of a backlog kept here, checked against the workspace's
  * `ops.config.json` before anything is stored — there is no GitHub Project to resolve them when sent: Status takes the
  * kit's STATUS_OPTIONS, Area / Kind / Priority / Phase the config's `fields`, Story Points one of the kit's STORY_POINTS (a
  * number; a numeric text, as `ops-kit backlog create --field` sends it, is read as one), the Milestone `milestone.pattern`.
- * null (a value taken off) passes. Without a config the kit's template (`defaultConfig`, #2361) gives the choices; with
+ * null (a value taken off) passes. Without a config the kit's template (`defaultConfig`) gives the choices; with
  * one that cannot be read, any field or Milestone is refused. Throws BacklogEditError 422; returns the fields to store.
  */
 export function checkLocalFields(dir: string, input: { fields?: Record<string, string | number | null> | null; milestone?: string | null }): Record<string, string | number | null> | undefined {
@@ -176,7 +176,7 @@ export function checkLocalFields(dir: string, input: { fields?: Record<string, s
 }
 
 /**
- * The fields a backlog kept here can set (#1545), as the Project's definitions are for one on GitHub: the choices of
+ * The fields a backlog kept here can set, as the Project's definitions are for one on GitHub: the choices of
  * `checkLocalFields` (a single select each; Story Points a number). A `ops.config.json` that cannot be read gives none.
  */
 export function localProjectFields(dir: string): BacklogProjectField[] {
@@ -193,7 +193,7 @@ export function localProjectFields(dir: string): BacklogProjectField[] {
   ];
 }
 
-/** A branch's tip in a checkout (#2485): 40 hex, or null when there is no such branch (or no git there). Read, never kept. */
+/** A branch's tip in a checkout: 40 hex, or null when there is no such branch (or no git there). Read, never kept. */
 export function branchTip(dir: string, branch: string): string | null {
   const r = spawnSync("git", ["-C", dir, "rev-parse", "--verify", "-q", `refs/heads/${branch}^{commit}`], { encoding: "utf8" });
   const sha = r.status === 0 ? r.stdout.trim() : "";
@@ -201,7 +201,7 @@ export function branchTip(dir: string, branch: string): string | null {
 }
 
 /**
- * Checks a new local change (#2485) before anything is stored: only on a backlog kept here (422), both branches there
+ * Checks a new local change before anything is stored: only on a backlog kept here (422), both branches there
  * in the workspace's checkout (422), no other open change of the same branch (409). Throws BacklogEditError.
  */
 export function checkLocalChange(db: Db, source: BacklogSource, dir: string, change: { head: string; base: string }): void {
@@ -213,7 +213,7 @@ export function checkLocalChange(db: Db, source: BacklogSource, dir: string, cha
 }
 
 /**
- * Whether a checkout's changes are kept here (#2490): the kit's `forgeOf` names the app (no remote and no `forge`, or a
+ * Whether a checkout's changes are kept here: the kit's `forgeOf` names the app (no remote and no `forge`, or a
  * `forge` naming it). A `forge` that cannot be read is not (its stage Task then says so where it reads it).
  */
 export function localForgeOf(dir: string): boolean {

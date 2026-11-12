@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 /**
  * The daily archive (aws/host/archive.sh) writes one line to <home>/archive.status: `running <epoch>`, then
- * `ok <epoch> <S3 key>` or `failed <epoch> <exit code>` (#1201). Only a problem is reported; no file (a Mac, a local
+ * `ok <epoch> <S3 key>` or `failed <epoch> <exit code>`. Only a problem is reported; no file (a Mac, a local
  * daemon) or a line that does not parse is no problem — a broken line must not turn the screen red.
  */
 export interface ArchiveProblem {

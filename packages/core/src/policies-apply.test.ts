@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { AnswerPolicy, PolicySubject } from "@switchboard/protocol";
-import { DAY, harness, policyOf, until } from "./policies-harness.ts";
+import { DAY, harness, mergeAnswer, mergeQuestion, policyOf, questionTurn, until } from "./policies-harness.ts";
 import { writePolicies } from "./policies.ts";
 
-/* Saved policies answering the next question (#938): tool approvals, a Task's check, a PBI's decision. */
+/* Saved policies answering the next question: tool approvals, a Task's check, a PBI's decision. */
 
 const h = harness();
 afterEach(() => h.stop());
@@ -19,12 +19,12 @@ const saveApproval = async () => {
 };
 const from = (target: string): PolicySubject => ({ kind: "check", op: "gh pr merge", target, conditions: [], head: null });
 const checkPolicy = (over: Partial<AnswerPolicy> = {}): AnswerPolicy => ({
-  id: "pol_t", scope: "repo", workspaceId: h.meta().id, pbi: null, askId: null, kind: "check", op: "gh pr merge", target: "PR #12", when: [], answer: { kind: "choice", choice: "A: マージする" },
+  id: "pol_t", scope: "repo", workspaceId: h.meta().id, pbi: null, askId: null, kind: "check", op: "gh pr merge", target: "PR #12", when: [], answer: { kind: "choice", choice: "マージする" },
   expiresAt: Date.now() + DAY, revokedAt: null, createdAt: Date.now() - 1000, updatedAt: Date.now() - 1000, from: from("PR #12"), uses: [], ...over,
 });
 const settle = () => Bun.sleep(250);
 
-describe("applying saved policies (#938)", () => {
+describe("applying saved policies", () => {
   test("approval applies: the next permission.ask for a matching command is allowed by the policy, with its source, and the use is kept", async () => {
     await h.boot();
     const p = await saveApproval();
@@ -36,25 +36,28 @@ describe("applying saved policies (#938)", () => {
     expect(after.uses[0]).toMatchObject({ askId: `approval:${second}:perm1`, taskId: second, subject: { op: "exec", target: "bun test packages/core" } });
   });
 
-  // a check is the question tool's questions now (#3122); the policy of a single-choice question is #3123's
-  test.skip("check applies: a policy for the same op answers a later check with a reply that names the policy and its scope; the use is kept", async () => {
+  test("a question tool check takes no policy: the card offers no scope, a saved policy does not answer it, and an answer that asks to save one is 409 with nothing sent or saved", async () => {
     await h.boot();
-    await checkTask("first");
-    const ask = (await asks()).find((x) => x.kind === "check")!;
-    const saved = await post("/api/asks/answer", { id: ask.id, answer: { kind: "choice", choice: "A: マージする" }, policy: { scope: "repo", target: "PR #12", when: [], expiresAt: Date.now() + 7 * DAY } });
-    expect(saved.status).toBe(200);
-    expect(h.sent).toHaveLength(1);
-    const second = await checkTask("second");
-    await until(async () => h.sent.length >= 2);
-    const [p] = await policies();
-    expect(h.sent[1]).toStartWith(`（方針 ${p!.id} を適用: このリポジトリ / gh pr merge PR #12 / 条件 `);
-    expect(h.sent[1]).toContain("A: マージする");
+    // a policy saved for the same op and target (as an older version could) is not applied to a later check
+    writePolicies(h.core!.db, [checkPolicy()]);
+    const t = await checkTask("first");
     await settle();
-    expect(h.sent).toHaveLength(2);
-    expect((await policies())[0]!.uses).toMatchObject([{ taskId: second, subject: { target: "PR #12", head: expect.any(String) } }]);
+    expect(h.sent).toEqual([]);
+    const ask = (await asks()).find((x) => x.task?.id === t && x.kind === "check")!;
+    expect(ask).toMatchObject({ state: "open", subject: null, policy: { scopes: [], note: null, previous: null } });
+    expect((await policies())[0]!.uses).toEqual([]);
+    // asking to save one is 409, also for one option of one question
+    const r = await post("/api/asks/answer", { id: ask.id, answer: mergeAnswer, policy: { scope: "repo", target: "PR #12", when: [], expiresAt: Date.now() + 7 * DAY } });
+    expect(r.status).toBe(409);
+    expect(((await r.json()) as { error: string }).error).toBe("この問いは方針にできません");
+    expect(await policies()).toHaveLength(1);
+    expect(h.sent).toEqual([]);
+    // without a policy the same answer goes as one reply
+    expect((await post("/api/asks/answer", { id: ask.id, answer: mergeAnswer })).status).toBe(200);
+    expect(h.sent).toEqual(["- PR #12 をマージしてよいか: マージする (Recommended)"]);
   });
 
-  /** #306 waiting on a decision a saved policy answers, and backlog-next's firing; returns the choice. */
+  /** Issue 306 waiting on a decision a saved policy answers, and backlog-next's firing; returns the choice. */
   const fireDecision = async (onHold = false) => {
     await h.boot();
     const meta = h.meta();
@@ -88,80 +91,10 @@ describe("applying saved policies (#938)", () => {
     expect(stageTasks()).toHaveLength(1); // the answer goes on with a stage Task
   });
 
-  test("decision on hold: the policy answers, and the work does not go on until the label comes off (#2930)", async () => {
+  test("decision on hold: the policy answers, and the work does not go on until the label comes off", async () => {
     await fireDecision(true);
     expect((await policies())[0]!.uses).toMatchObject([{ issue: 306 }]);
     expect(stageTasks()).toEqual([]);
-  });
-
-  // a check is the question tool's questions now (#3122); the policy of a single-choice question is #3123's
-  test.skip("not applied: expired, revoked, other repository, other PBI, other target, other condition, other choice, a security merge check and a refused permission all leave the question open", async () => {
-    await h.boot();
-    const variants: Array<[string, Partial<AnswerPolicy>, string]> = [
-      ["expired", { expiresAt: Date.now() - 1 }, "期限切れ"],
-      ["revoked", { revokedAt: Date.now() - 1 }, "失効済み"],
-      ["repo", { workspaceId: "other" }, "別のリポジトリ"],
-      ["pbi", { scope: "pbi", pbi: 1 }, "別の PBI"],
-      ["target", { target: "PR #99" }, "対象が違う"],
-      ["when", { when: [{ key: "area", value: "x" }] }, "条件 area が無い"],
-      ["choice", { answer: { kind: "choice", choice: "Z: 別の案" } }, "回答が今回の選択肢に無い"],
-    ];
-    const tasks: string[] = [];
-    // the policies pile up (each misses every ask for its own reason), so the daemon's weighing after the last one still meets each variant's policy
-    const pols: AnswerPolicy[] = [];
-    for (const [name, over, why] of variants) {
-      pols.push(checkPolicy({ id: `pol_${name}`, ...over }));
-      writePolicies(h.core!.db, pols);
-      const t = await checkTask(name);
-      tasks.push(t);
-      // the ask is listed as soon as the outcome is set, with the newest policy's miss reason: wait for that, not a fixed 250 ms
-      let ask: Awaited<ReturnType<typeof asks>>[number] | undefined;
-      await until(async () => (ask = (await asks()).find((x) => x.task?.id === t && x.kind === "check")) !== undefined);
-      expect(ask).toBeDefined();
-      expect(ask!.state).toBe("open");
-      expect(ask!.policy.previous?.why).toBe(why);
-    }
-    // "nothing happens" cannot be waited for by its state: one settle for all of them, then no reply was sent and every ask is still open
-    await settle();
-    expect(h.sent).toEqual([]);
-    expect((await asks()).filter((x) => tasks.includes(x.task?.id ?? "") && x.kind === "check").map((x) => x.state)).toEqual(variants.map(() => "open"));
-  });
-
-  // a check is the question tool's questions now (#3122); the policy of a single-choice question is #3123's
-  test.skip("not applied: a matching policy does not answer a PR carrying a security merge check, nor a refused permission", async () => {
-    await h.boot();
-    writePolicies(h.core!.db, [checkPolicy()]);
-    h.mark = "security,large";
-    const sec = await checkTask("security");
-    const refused = await checkTask("refused", "gh pr merge", { reason: "permission", evidence: "denied by the runner" });
-    await settle();
-    expect(h.sent).toEqual([]);
-    expect((await asks()).filter((x) => [sec, refused].includes(x.task?.id ?? "") && x.kind === "check").map((x) => x.state)).toEqual(["open", "open"]);
-    expect((await policies())[0]!.uses).toEqual([]);
-  });
-
-  // a check is the question tool's questions now (#3122); the policy of a single-choice question is #3123's
-  test.skip("not applied: a policy saved on another head of the PR leaves the question open, and the card says the head changed", async () => {
-    await h.boot();
-    writePolicies(h.core!.db, [checkPolicy({ from: { ...from("PR #12"), head: "a".repeat(40) } })]);
-    const t = await checkTask("moved head");
-    await settle();
-    expect(h.sent).toEqual([]);
-    const ask = (await asks()).find((x) => x.task?.id === t && x.kind === "check")!;
-    expect(ask.state).toBe("open");
-    expect(ask.policy.previous).toMatchObject({ id: "pol_t", why: "PR の差分が変わった", changes: ["PR の差分が変わりました（aaaaaaa → ccccccc）"] });
-  });
-
-  // a check is the question tool's questions now (#3122); the policy of a single-choice question is #3123's
-  test.skip("not applied: a PR question whose PR cannot be read is left to the person", async () => {
-    await h.boot();
-    writePolicies(h.core!.db, [checkPolicy()]);
-    h.prFails = true;
-    const t = await checkTask("no source");
-    await settle();
-    expect(h.sent).toEqual([]);
-    expect(h.prCalls).toBeGreaterThan(0);
-    expect((await asks()).find((x) => x.task?.id === t && x.kind === "check")!.state).toBe("open");
   });
 
   test("edit takes effect: a revoked policy no longer matches the next permission.ask; a corrected target matches it again", async () => {

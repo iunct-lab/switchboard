@@ -19,7 +19,7 @@ const ALLOWED: Record<TaskStatus, TaskStatus[]> = {
   aborted: ["running", "error"],
 };
 
-describe("task status transitions (#1140)", () => {
+describe("task status transitions", () => {
   let home: string;
   let db: Db;
   beforeEach(() => {
@@ -77,7 +77,7 @@ describe("task status transitions (#1140)", () => {
     expect(db.getTask("cn")).toMatchObject({ status: "error", outcome: "unknown" });
   });
 
-  test("isWorkingStatus in protocol equals COUNTS.display for every status (the web uses it, #4213)", () => {
+  test("isWorkingStatus in protocol equals COUNTS.display for every status (the web uses it)", () => {
     for (const st of ALL) expect(isWorkingStatus(st), st).toBe(isWorking({ status: st, resumeAt: null }, "display"));
   });
 
@@ -94,7 +94,7 @@ describe("task status transitions (#1140)", () => {
   });
 });
 
-describe("work phase table (#4208)", () => {
+describe("work phase table", () => {
   test("COUNTS matches the table in docs/design/task-work-phase.md", () => {
     const doc = readFileSync(join(import.meta.dir, "../../../docs/design/task-work-phase.md"), "utf8").split("\n");
     const head = doc.findIndex((l) => /^\| Phase \| dedupe /.test(l));
@@ -112,7 +112,7 @@ describe("work phase table (#4208)", () => {
   });
 });
 
-describe("no side-by-side status comparison (#4072)", () => {
+describe("no side-by-side status comparison", () => {
   // The forms of "is this Task working?" written out by hand. A new one goes through isWorking / isWorkingStatus / IN_FLIGHT / workPhase instead.
   const FORMS = String.raw`status === "running" \|\||IN \('running'|"running", ?"waiting"`;
   // One entry per place that may keep a form: file, the one line that must contain `has` (a second such line fails), and why.

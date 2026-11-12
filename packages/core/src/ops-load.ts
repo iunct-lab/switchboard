@@ -8,7 +8,7 @@ import { readMemInfo } from "./ops-resources.ts";
 import { HEAVY_DEFAULTS, heavyConfig, heavyConfigPath } from "../../../ops-kit/src/heavy.ts";
 
 /**
- * The host's load (#2086): one sample of the daemon's systemd unit — the cgroup's memory,
+ * The host's load: one sample of the daemon's systemd unit — the cgroup's memory,
  * swap, limit hits and CPU — and of the processes in it, each attributed to a task (the TASK_MARK in its environment,
  * the same reading as detached.ts) or to the daemon's own work, and to the kind of operation it is. Linux with
  * cgroup v2 only: anywhere else readCgroup is null and nothing is sampled. Nothing leaves the host.
@@ -237,7 +237,7 @@ export const overLimit = (r: CgroupReading) => r.memMax !== null && r.memCurrent
 const SAMPLE_MS = 60_000;
 
 /**
- * Once a minute (#2086): one sample of the unit into ops_load / ops_load_groups. Where the cgroup cannot be read
+ * Once a minute: one sample of the unit into ops_load / ops_load_groups. Where the cgroup cannot be read
  * (macOS, cgroup v1) nothing is written. `daemonPid` is the daemon's own pid; a test passes its fake tree's.
  */
 export class OpsLoadSampler {
@@ -293,7 +293,7 @@ export class OpsLoadSampler {
 const jstHour = (ts: number) => new Date(ts + 9 * 3_600_000).toISOString().slice(0, 13).replace("T", " ");
 
 /**
- * `GET /api/ops/load` (#2086): the last `days` JST days (as opsStops) per JST hour — the peaks and the times the unit
+ * `GET /api/ops/load`: the last `days` JST days (as opsStops) per JST hour — the peaks and the times the unit
  * reached memory.max (events_max is cumulative: the difference from the row before; a drop means the unit was created
  * again, and then the later value is all new) — and task × owner × kind, largest RSS first. With `taskId` only that
  * task's groups, and no hours.

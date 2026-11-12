@@ -7,7 +7,7 @@ import { archiveProblem } from "./archive-status.ts";
 const home = mkdtempSync(join(tmpdir(), "sb-archive-status-test-"));
 afterAll(() => rmSync(home, { recursive: true, force: true }));
 
-test("archiveProblem reads archive.status: failed, a running that is over 2 hours old, and an ok over 48 hours old are problems (#1201)", () => {
+test("archiveProblem reads archive.status: failed, a running that is over 2 hours old, and an ok over 48 hours old are problems", () => {
   const now = 1_800_000_000_000;
   const s = (hoursAgo: number) => Math.floor((now - hoursAgo * 3600_000) / 1000);
   expect(archiveProblem(home, now)).toBeNull(); // no file: a Mac or a local daemon
@@ -18,7 +18,7 @@ test("archiveProblem reads archive.status: failed, a running that is over 2 hour
     [`running ${s(3)}`, { kind: "stuck", at: s(3) * 1000 }],
     [`failed ${s(5)} 137`, { kind: "failed", at: s(5) * 1000, detail: "137" }],
     ["failed soon 1", null], // a line that does not parse never turns the screen red
-    ["failed 999999999999999999999999999999999999 137", null], // nor one whose time is no date (review #1379)
+    ["failed 999999999999999999999999999999999999 137", null], // nor one whose time is no date
     [`failed ${s(5)} nonsense`, null], // nor one whose fields do not fit its state
     [`failed ${s(5)}`, null],
     [`running ${s(3)} extra`, null],

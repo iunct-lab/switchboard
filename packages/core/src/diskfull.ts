@@ -1,7 +1,7 @@
 import { statfsSync } from "node:fs";
 import { READ_TOOLS } from "./ratelimit.ts";
 
-/** How a full disk reads (#2234): Claude Code's Bash refusal (2.1.305), the OS's error, Node's code. A fake's result pins these; a new wording is added when it shows. */
+/** How a full disk reads: Claude Code's Bash refusal (2.1.305), the OS's error, Node's code. A fake's result pins these; a new wording is added when it shows. */
 export const DISK_FULL_TEXT = /disk is full|no space left on device|ENOSPC/i;
 /** A task stopped by a full disk goes on once this much is free again. */
 export const DISK_FREE_MIN_BYTES = 1024 ** 3;

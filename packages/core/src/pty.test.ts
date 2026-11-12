@@ -47,7 +47,7 @@ const alive = (pid: number) => {
   }
 };
 
-/** A terminal socket that collects what the shell prints. The first frame names the session (PtyAttached, #1137). */
+/** A terminal socket that collects what the shell prints. The first frame names the session (PtyAttached). */
 async function connect(url: string) {
   const ws = new WebSocket(url);
   const term = {
@@ -112,7 +112,7 @@ afterAll(async () => {
   rmSync(home, { recursive: true, force: true });
 });
 
-describe("terminal tab (#16)", () => {
+describe("terminal tab", () => {
   test("health says the terminal is available; /ws/pty opens a shell in the task's cwd and input comes back as output", async () => {
     expect((await fetch(`${base}/api/health`).then(j)).features).toEqual({ pty: true });
     const term = await connect(`${wsBase}/ws/pty?task=${taskId}`);
@@ -283,7 +283,7 @@ describe("terminal tab (#16)", () => {
     }
   });
 
-  test("operation log (#1490): opening the shell and creating a task in a danger mode each leave a line with the task id; none on loopback", async () => {
+  test("operation log: opening the shell and creating a task in a danger mode each leave a line with the task id; none on loopback", async () => {
     const h = mkdtempSync(join(tmpdir(), "sb-pty-oplog-"));
     const adapter = { ...idleAdapter(), permissionModes: [{ value: "plan", label: "plan" }, { value: "yolo", label: "yolo", danger: true }] } as RunnerAdapter;
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY, SWITCHBOARD_HOST: "0.0.0.0" }), [adapter], { port: 0 });
@@ -363,7 +363,7 @@ const closedWith = async (term: Awaited<ReturnType<typeof connect>>) => {
   return term.code;
 };
 
-describe("reconnect (#1137)", () => {
+describe("reconnect", () => {
   test("a socket that comes back with ?shell= gets the same shell: what it missed, then what follows; no second shell", () => daemon(async (b, id, pty) => {
     const a = await connect(`ws://${b}/ws/pty?task=${id}`);
     expect(a.shell).toMatch(/^[0-9a-f-]{36}$/);
@@ -526,7 +526,7 @@ async function teleportBusyFixture(env: Record<string, string>, run: (f: {
   } finally { letExit(); await c.stop(); rmSync(h, { recursive: true, force: true }); rmSync(other, { recursive: true, force: true }); }
 }
 
-/** A git clone with one commit: Teleport continues in a worktree of it (#1395). */
+/** A git clone with one commit: Teleport continues in a worktree of it. */
 function gitClone(dir: string) {
   const g = (...a: string[]) => { const p = Bun.spawnSync(["git", ...a], { cwd: dir, stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }); if (p.exitCode !== 0) throw new Error(p.stderr.toString()); return p.stdout.toString().trim(); };
   g("init", "-q"); writeFileSync(join(dir, "tracked"), "one"); g("add", "tracked"); g("commit", "-qm", "init");
@@ -617,7 +617,7 @@ test("a Local Task at work in the continuation worktree blocks a second Teleport
   expect(calls).toEqual([{ bin, args: ["--teleport", id], cwd: wc }]);
 }));
 
-test("an archived Local Task idling in the continuation worktree is closed before Teleport too (#1164)", () => teleportBusyFixture({}, async ({ base, h, bin, id, calls, finish, closed, letExit, create }) => {
+test("an archived Local Task idling in the continuation worktree is closed before Teleport too", () => teleportBusyFixture({}, async ({ base, h, bin, id, calls, finish, closed, letExit, create }) => {
   const g = gitClone(h);
   const cloud = await create({ cwd: h, title: "Teleport", prompt: "cloud", executionMode: "cloud" });
   const wc = workCopy(h, cloud.id);
@@ -762,7 +762,7 @@ await m.startTeleport("t", ${JSON.stringify(dir)}, ${JSON.stringify(bin)}, "sess
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-describe("Teleport without the terminal (#1347)", () => {
+describe("Teleport without the terminal", () => {
   const cloudId = "session_0123456789abcdefghijklmn", UUID = "22222222-2222-4222-8222-222222222222";
   const FAST = { exitQuietMs: 50, questionQuietMs: 150, exitWaitMs: 300 };
   /** A fake official CLI run through the real PTY. `body` is the shell after the --help branch; stdin is recorded in ./input. */
@@ -780,7 +780,7 @@ describe("Teleport without the terminal (#1347)", () => {
   }
   const until = async (f: () => boolean, ms = 5000) => { for (let t = Date.now(); !f() && Date.now() - t < ms;) await Bun.sleep(10); };
 
-  // Like the official CLI (#1865): the resumed conversation is logged only once the session records an entry, and the
+  // Like the official CLI: the resumed conversation is logged only once the session records an entry, and the
   // evidence prints only when that log exists. `/rename` is the recorded entry; `/exit` alone prints nothing.
   const cli = `echo "Teleport ${cloudId}"; echo "Session resumed"; named=; while IFS= read -r line; do printf '%s\\n' "$line" >> input;
 case "$line" in "/rename "*) named=1; echo "Session renamed to: \${line#/rename }";; "/exit") [ -n "$named" ] && echo "claude --resume ${UUID}"; exit 0;; esac; done`;
@@ -836,7 +836,7 @@ case "$line" in "/rename "*) named=1; echo "Session renamed to: \${line#/rename 
     }));
 });
 
-describe("Claude Code's status in the terminal (#1574)", () => {
+describe("Claude Code's status in the terminal", () => {
   // The sequences Claude Code 2.1.311 printed in a PTY for one prompt that needed a permission, then /exit, each in the
   // chunk it came in. The recording replayed below is a later version's (RECORDED).
   const ESC = "\x1b", BEL = "\x07";

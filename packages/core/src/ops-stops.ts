@@ -5,7 +5,7 @@ import type { CoreConfig } from "./config.ts";
 import { type Db, jstDay, jstDayStart } from "./db.ts";
 
 /**
- * One row per daemon start (#2085): when it started and ended, why it ended, and which
+ * One row per daemon start: when it started and ended, why it ended, and which
  * tasks it cut mid-turn. The stopping daemon writes what it knows (its own exit, the tasks its shutdown cut); the next
  * start decides the cause from local records only — its own clean exit, the version, sb-rescue's history.jsonl,
  * systemd's journal, the boot id. Nothing is sent anywhere.
@@ -150,7 +150,7 @@ export function endDaemonRun(db: Db, id: number, end: { cleanExit: CleanExit; en
 }
 
 /**
- * `GET /api/ops/stops` (#2092): the runs that ended within the last `days` JST days (as `ledgerDaily`), per day of the
+ * `GET /api/ops/stops`: the runs that ended within the last `days` JST days (as `ledgerDaily`), per day of the
  * end × cause. `turns` adds up each run's cut tasks; `taskIds` is the distinct tasks.
  */
 export function opsStops(db: Db, days: number, now = Date.now()): OpsStops {

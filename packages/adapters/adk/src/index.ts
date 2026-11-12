@@ -33,7 +33,7 @@ export interface AdkAdapterOptions {
   /**
    * Idle timeout for the `/run_sse` stream: how long it may go without a single byte before the turn is treated as
    * dead (Bun's fetch `timeout` resets on every byte). Default 2 h. A healthy turn can be silent for many minutes, so
-   * this must not be short (#121); it stays finite so a server that died without closing the connection (paused
+   * this must not be short; it stays finite so a server that died without closing the connection (paused
    * container, sleeping host, half-open TCP) still ends the turn. Above DAK's own LiteLLM `request_timeout` (6000 s),
    * so a stalled model call surfaces as the server's error first.
    */
@@ -57,7 +57,7 @@ export function createAdkAdapter(options: AdkAdapterOptions): RunnerAdapter {
   return {
     id: o.id,
     label: o.label,
-    // No permission knob (#58): the agent decides what to confirm (`require_confirmation` / adk_request_confirmation),
+    // No permission knob: the agent decides what to confirm (`require_confirmation` / adk_request_confirmation),
     // and exec.run approvals come from Switchboard's own Workspace MCP policy. Every confirmation still reaches the UI.
     permissionModes: [],
     async detect(): Promise<RunnerDetection> {
@@ -160,7 +160,7 @@ class AdkSession implements RunnerSession {
       // `timeout` (Bun, idle): a turn can be silent for many minutes — a local LLM writing a long tool call streams
       // nothing, because ADK emits no partial events for function-call arguments. Bun's default (360 s) cut such
       // turns ("The operation timed out."), ADK cancelled the turn and dropped its output, so every retry replayed
-      // the same prompt into the same cut (#121). See `streamIdleTimeoutMs`; the user's abort still stops it at once.
+      // the same prompt into the same cut. See `streamIdleTimeoutMs`; the user's abort still stops it at once.
       const r = await fetch(`${this.o.baseUrl}/run_sse`, { method: "POST", headers: { "content-type": "application/json", accept: "text/event-stream", ...authHeaders(this.o) }, body: JSON.stringify(body), signal: this.controller.signal, timeout: this.o.streamIdleTimeoutMs });
       if (!r.ok || !r.body) {
         const text = await r.text().catch(() => "");
@@ -201,7 +201,7 @@ class AdkSession implements RunnerSession {
       return;
     }
     // The turn is over some other way (done and clean, errored, or aborted): a confirmation left open on it cannot
-    // be answered on a dead stream — resolve it as denied by timeout (no person answered it: #651) so the UI does not show a prompt that will never resolve.
+    // be answered on a dead stream — resolve it as denied by timeout (no person answered it) so the UI does not show a prompt that will never resolve.
     if (this.pendingAsks.size > 0) {
       for (const id of this.pendingAsks.keys()) this.emit({ t: "permission.resolved", id, decision: "deny", by: "timeout" });
       this.pendingAsks.clear();
@@ -224,7 +224,7 @@ class AdkSession implements RunnerSession {
       this.emit({ t: "status", text: `unparsed: ${data.slice(0, 200)}` });
       return;
     }
-    // Files the agent made (#124), saved before the event's own mapping so they are on disk by the turn's end. A file
+    // Files the agent made, saved before the event's own mapping so they are on disk by the turn's end. A file
     // that cannot be had is said and skipped; the turn goes on.
     const { baseUrl, app, user, timeoutMs } = this.o;
     const sessionUrl = `${baseUrl}/apps/${encodeURIComponent(app)}/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(this.sessionId ?? "")}`;

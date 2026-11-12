@@ -13,14 +13,14 @@ export interface GhClient {
   run(args: string[]): Promise<string>;
 }
 
-/** `kind`: a limit, an outage or an auth failure (#894) — not asked again by a retry loop; null = any other failure. */
+/** `kind`: a limit, an outage or an auth failure — not asked again by a retry loop; null = any other failure. */
 export class GhError extends Error {
   constructor(message: string, readonly kind: GithubFailure | null = null) {
     super(message);
   }
 }
 
-/** What a failed GitHub answer says about the next call (#894): an auth / permission failure is never retried by itself. */
+/** What a failed GitHub answer says about the next call: an auth / permission failure is never retried by itself. */
 export type GithubFailure = "primary" | "secondary" | "transient" | "auth";
 
 /** A GitHub answer as gh shows it: the status and headers (`--include`), the GraphQL errors, the message on stderr. */
@@ -120,8 +120,8 @@ export const waitMessage = (w: { until: number; reason: GithubFailure }) => `Git
 export const githubHost = () => process.env.GH_HOST || "github.com";
 
 /**
- * One call to GitHub as measured (#895): what kind of call, on which repository, and what GitHub said about its limit —
- * never the arguments, the bodies or the credentials. `shared`: a backlog import that joined one under way (#885); `waited`: refused while
+ * One call to GitHub as measured: what kind of call, on which repository, and what GitHub said about its limit —
+ * never the arguments, the bodies or the credentials. `shared`: a backlog import that joined one under way; `waited`: refused while
  * waiting for a limit (neither reached GitHub). `cost` is GraphQL's own count when the answer carries it, else null.
  */
 export interface GithubCallMetric {
@@ -198,7 +198,7 @@ async function spawn(state: GithubRetryState, sink: MetricSink | undefined, args
 
 /**
  * `state`: shared by the calls of one client, so a limit met by one call stops the next ones until GitHub's time.
- * `sink`: gets the measure of every call (#895).
+ * `sink`: gets the measure of every call.
  */
 export function realGh(state = new GithubRetryState(), sink?: MetricSink): GhClient {
   return {

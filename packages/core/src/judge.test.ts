@@ -100,7 +100,7 @@ describe("judgeTurn", () => {
   });
 });
 
-describe("judgeTurn settings tunables (#835)", () => {
+describe("judgeTurn settings tunables", () => {
   const CLAUDE_JUDGE: JudgeSettings = { enabled: true, runner: "claude", model: "claude-sonnet" };
   test("the fallback from the settings: the configured runner fails, the given runner and model judge once", async () => {
     const codexStarts: StartOptions[] = [];

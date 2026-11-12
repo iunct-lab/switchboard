@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { loadConfig } from "./config.ts";
 import { startServer } from "./server.ts";
 
-// Test daemons must not read the developer's real ~/.claude/projects (#91): point the importer at a folder that does not exist.
+// Test daemons must not read the developer's real ~/.claude/projects: point the importer at a folder that does not exist.
 const NO_HISTORY = { SWITCHBOARD_CLAUDE_PROJECTS: join(tmpdir(), "switchboard-test-no-claude-projects"), SWITCHBOARD_HISTORY_POLL_MS: "0" };
 
 /**
@@ -81,18 +81,18 @@ describe("dev UI through the Vite proxy (apps/web/vite.config.ts)", () => {
     expect(JSON.parse(hello).type).toBe("hello");
   });
 
-  test("a report's own URL (/artifacts/<key>/…, #1777) reaches the daemon, not Vite's page", async () => {
+  test("a report's own URL (/artifacts/<key>/…) reaches the daemon, not Vite's page", async () => {
     const r = await fetch(`${page}/artifacts/${"a".repeat(20)}/index.html`, { headers: browser });
     expect(r.status).toBe(403);
     expect(await r.json()).toEqual({ error: "forbidden" });
   });
 
-  test("the dev page answers with frame-src 'self' (#3728): a link in a report's frame cannot load another site into it", async () => {
+  test("the dev page answers with frame-src 'self': a link in a report's frame cannot load another site into it", async () => {
     const csp = (await fetch(`${page}/`)).headers.get("content-security-policy") ?? "";
     expect(csp).toContain("frame-src 'self'");
   });
 
-  test("a report served through the proxy keeps the daemon's sandbox CSP, not the dev page's (#3728)", async () => {
+  test("a report served through the proxy keeps the daemon's sandbox CSP, not the dev page's", async () => {
     // A task row is all the artifact store needs (no runner is started); its scope is the folder the report sits in.
     const work = join(home, "report");
     mkdirSync(work, { recursive: true });
@@ -107,7 +107,7 @@ describe("dev UI through the Vite proxy (apps/web/vite.config.ts)", () => {
     expect(r.headers.get("content-security-policy")).toBe("sandbox allow-scripts; frame-ancestors 'self'");
   });
 
-  test("the terminal socket (/ws/pty, #16) goes through the same proxy rule: the daemon answers, not the Origin check", async () => {
+  test("the terminal socket (/ws/pty) goes through the same proxy rule: the daemon answers, not the Origin check", async () => {
     const r = await fetch(`${page}/ws/pty?task=nope`, { headers: { ...browser, upgrade: "websocket", connection: "upgrade" } });
     // 404 from the daemon's own route — a refused Origin would be 403, an unproxied path would be Vite's index.html (200).
     // Which 404 depends on whether this machine can open a PTY; both come after the Origin check.

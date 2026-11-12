@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { createGitlabMr, gitlabAuth, GitlabError, gitlabMrDiscussions, resolveGitlabDiscussion, startGitlabDiscussion, viewGitlabMr, gitlabId, glabApi, parentIn, projectPath, readGitlabIssue, readGitlabIssues, readGitlabNotes, statusOf } from "./forge-gitlab.ts";
 import { ForgeRefused, type ForgeTarget } from "./forge.ts";
 
-// GitLab through the signed-in glab (#892): only glab is run, on the target's host; no login is kept or printed.
+// GitLab through the signed-in glab: only glab is run, on the target's host; no login is kept or printed.
 
 const lab: ForgeTarget = { service: "gitlab", host: "gitlab.example.com", repository: "group/sub/app" };
 
@@ -57,7 +57,7 @@ function fakeGlab(routes: (path: string) => unknown | { status: number }) {
   return { sh, calls };
 }
 
-describe("forge-gitlab read (#892)", () => {
+describe("forge-gitlab read", () => {
   const P = "projects/group%2Fapp";
   const app: ForgeTarget = { ...lab, repository: "group/app" };
   test("the Issues of a state, every page, as the backlog stores them; notes without GitLab's own", async () => {
@@ -98,7 +98,7 @@ describe("forge-gitlab read (#892)", () => {
   });
 });
 
-describe("forge-gitlab merge requests (#923)", () => {
+describe("forge-gitlab merge requests", () => {
   const mrs = require("../fixtures/gitlab-merge-requests.json") as { mr: Record<string, unknown>; discussions: Array<{ id: string; notes: Array<Record<string, unknown>> }> };
   const app: ForgeTarget = { ...lab, repository: "group/app" };
   const P = "projects/group%2Fapp/merge_requests";

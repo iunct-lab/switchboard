@@ -27,8 +27,8 @@ describe("sameOrigin", () => {
   });
 });
 
-/** DNS rebinding (#1135): on loopback the Host must name this machine, whatever the Origin says. The port is not compared. */
-describe("hostAllowed (#1135)", () => {
+/** DNS rebinding: on loopback the Host must name this machine, whatever the Origin says. The port is not compared. */
+describe("hostAllowed", () => {
   const withPublic = new Set([...LOOPBACK_HOSTNAMES, "host.docker.internal"]);
   test.each([
     ["Vite dev server", "localhost:5173", LOOPBACK_HOSTNAMES, true],
@@ -52,9 +52,9 @@ describe("hostAllowed (#1135)", () => {
   });
 });
 
-// The daemon end to end (#1135): a page on a rebinding name whose address became 127.0.0.1 sends its own name as Host and
+// The daemon end to end: a page on a rebinding name whose address became 127.0.0.1 sends its own name as Host and
 // Origin, so they match; the Host check stops it on every route before the Origin check or the (loopback-off) token.
-describe("loopback Host check (#1135)", () => {
+describe("loopback Host check", () => {
   const homes: string[] = [];
   afterAll(() => { for (const h of homes) rmSync(h, { recursive: true, force: true }); });
   const boot = async (extra: Record<string, string> = {}) => {
@@ -114,7 +114,7 @@ describe("loopback Host check (#1135)", () => {
   });
 });
 
-describe("edge header (#181)", () => {
+describe("edge header", () => {
   const withHeader = (v?: string) => new Request("http://example/api/tasks", { headers: v === undefined ? {} : { [EDGE_HEADER]: v } });
   test.each([
     ["not configured: everything passes", undefined, undefined, "203.0.113.5", true],
@@ -188,7 +188,7 @@ describe("edge header (#181)", () => {
   });
 });
 
-// The cloud host's login cookie (#211): the starter Lambda signs `sb_session` after a passkey check; the daemon checks it.
+// The cloud host's login cookie: the starter Lambda signs `sb_session` after a passkey check; the daemon checks it.
 describe("sb_session cookie", () => {
   // The Starter's side (aws/auth.ts): an Ed25519 seed signs; the daemon holds only the public key.
   const privateOf = (seedHex: string) => createPrivateKey({ key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), Buffer.from(seedHex, "hex")]), format: "der", type: "pkcs8" });
@@ -206,7 +206,7 @@ describe("sb_session cookie", () => {
   };
   const withCookie = (cookie: string) => new Request("http://127.0.0.1:47831/api/tasks", { headers: { cookie: `other=1; ${cookie}` } });
 
-  test("sessionTimes: a valid cookie value's idle time and cap; null for an expired or foreign-key one, or without a key (#498)", () => {
+  test("sessionTimes: a valid cookie value's idle time and cap; null for an expired or foreign-key one, or without a key", () => {
     const now = 1_800_000_000_000;
     const value = (c: string) => c.slice(`${SESSION_COOKIE}=`.length);
     expect(sessionTimes(value(cookieOf(SEED, "pk1", now + 9000, now + 3000)), KEY, now)).toEqual({ idleUntil: now + 3000, expiresAt: now + 9000 });
@@ -215,12 +215,12 @@ describe("sb_session cookie", () => {
     expect(sessionTimes(value(cookieOf(SEED, "pk1", now + 9000)), undefined, now)).toBeNull(); // no key (a Mac)
   });
 
-  test("sessionOk: a cookie signed by the Starter's key passes; expired, tampered, another key's, or an HMAC keyed with the public key does not (#701)", () => {
+  test("sessionOk: a cookie signed by the Starter's key passes; expired, tampered, another key's, or an HMAC keyed with the public key does not", () => {
     const now = 1_800_000_000_000;
     expect(sessionOk(withCookie(cookieOf(SEED, "pk1", now + 60_000)), KEY, now)).toBe(true);
     expect(sessionOk(withCookie(cookieOf(SEED, "pk1", now - 1)), KEY, now)).toBe(false);
     expect(sessionOk(withCookie(cookieOf("b".repeat(64), "pk1", now + 60_000)), KEY, now)).toBe(false);
-    // #498: past the cap (idle time left), past the idle time (cap left), idle beyond the cap, the old two-field body
+    // past the cap (idle time left), past the idle time (cap left), idle beyond the cap, the old two-field body
     expect(sessionOk(withCookie(cookieOf(SEED, "pk1", now - 1, now + 60_000)), KEY, now)).toBe(false);
     expect(sessionOk(withCookie(cookieOf(SEED, "pk1", now + 60_000, now - 1)), KEY, now)).toBe(false);
     expect(sessionOk(withCookie(cookieOf(SEED, "pk1", now + 60_000, now + 120_000)), KEY, now)).toBe(false);
@@ -237,7 +237,7 @@ describe("sb_session cookie", () => {
   });
 
   const homes: string[] = [];
-  /** A stand-in for the Starter's GET /_auth/status (#708): `loggedIn` (or a 500) as set, each request kept. */
+  /** A stand-in for the Starter's GET /_auth/status: `loggedIn` (or a 500) as set, each request kept. */
   const starter = { answer: true as boolean | 500, seen: [] as Array<{ path: string; edge: string | null; cookie: string | null }> };
   const starterServer = Bun.serve({ port: 0, fetch: (req) => (starter.seen.push({ path: new URL(req.url).pathname, edge: req.headers.get(EDGE_HEADER), cookie: req.headers.get("cookie") }), starter.answer === 500 ? new Response("", { status: 500 }) : Response.json({ state: "running", registered: true, loggedIn: starter.answer })) });
   const starterUrl = `http://127.0.0.1:${starterServer.port}/`;
@@ -264,7 +264,7 @@ describe("sb_session cookie", () => {
       ws.onclose = () => resolve(false);
     });
 
-  test("/api/health says when the login ends only to the cookie that let the request in; the token and strangers get no session (#498)", async () => {
+  test("/api/health says when the login ends only to the cookie that let the request in; the token and strangers get no session", async () => {
     const core = await boot(KEY);
     const base = `http://127.0.0.1:${core.server.port}`;
     try {
@@ -293,7 +293,7 @@ describe("sb_session cookie", () => {
       expect((await fetch(`${base}/api/tasks`, { headers: { cookie: good } })).status).toBe(200);
       expect((await fetch(`${base}/api/tasks`, { headers: { cookie: cookieOf(SEED, "pk1", Date.now() - 1) } })).status).toBe(401);
       expect((await fetch(`${base}/api/tasks`, { headers: { cookie: cookieOf("c".repeat(64), "pk1", Date.now() + 60_000) } })).status).toBe(401);
-      const forged = forgedOf("pk1", Date.now() + 60_000); // made with what the host holds (#701)
+      const forged = forgedOf("pk1", Date.now() + 60_000); // made with what the host holds
       expect((await fetch(`${base}/api/tasks`, { headers: { cookie: forged } })).status).toBe(401);
       expect(await wsOpens(`ws://127.0.0.1:${core.server.port}/ws`, { cookie: forged })).toBe(false);
       expect((await fetch(`${base}/api/tasks`, { headers: { authorization: `Bearer ${core.token}` } })).status).toBe(200); // the token still works
@@ -304,7 +304,7 @@ describe("sb_session cookie", () => {
     }
   });
 
-  test("after the Starter's logout (#1850): no sb_session, or an emptied one, gets 401 and health still says passkey", async () => {
+  test("after the Starter's logout: no sb_session, or an emptied one, gets 401 and health still says passkey", async () => {
     const core = await boot(KEY);
     const base = `http://127.0.0.1:${core.server.port}`;
     try {
@@ -328,7 +328,7 @@ describe("sb_session cookie", () => {
       const good = cookieOf(SEED, "pk1", Date.now() + 60_000);
       const upgrade = { upgrade: "websocket", connection: "Upgrade", "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==", "sec-websocket-version": "13" };
       expect((await fetch(`${base}/ws/pty?task=nope`, { headers: upgrade })).status).toBe(401);
-      expect(await (await fetch(`${base}/ws/pty?task=nope`, { headers: { ...upgrade, cookie: good } })).json()).toMatchObject({ reason: "recent" }); // authenticated, but the shell needs sb_recent (#1491)
+      expect(await (await fetch(`${base}/ws/pty?task=nope`, { headers: { ...upgrade, cookie: good } })).json()).toMatchObject({ reason: "recent" }); // authenticated, but the shell needs sb_recent
       const recent = (() => { const body = Buffer.from(`pk1.${Date.now() + 60_000}`).toString("base64url"); return `${RECENT_COOKIE}=${body}.${sign(null, Buffer.from(`recent:${body}`), privateOf(SEED)).toString("base64url")}`; })();
       expect((await fetch(`${base}/ws/pty?task=nope`, { headers: { ...upgrade, cookie: `${good}; ${recent}` } })).status).toBe(404); // past auth (the task does not exist)
       expect((await fetch(`${base}/mcp/task_x`, { method: "POST", headers: { cookie: good, "content-type": "application/json" }, body: "{}" })).status).toBe(401);
@@ -350,7 +350,7 @@ describe("sb_session cookie", () => {
     }
   });
 
-  // The cloud host's request log (#1490): one JSON line per request, metadata only.
+  // The cloud host's request log: one JSON line per request, metadata only.
   const logLines = (spy: { mock: { calls: unknown[][] } }, kind: string) =>
     spy.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith("{") && l.includes(`"log":"${kind}"`)).map((l) => JSON.parse(l) as Record<string, unknown>);
 
@@ -445,7 +445,7 @@ describe("sb_session cookie", () => {
     expect(sessionOk(req2, KEY, now)).toBe(true);
   });
 
-  test("only a 32-byte public key in base64url turns the cookie login on; the old HMAC key is not read (#701)", () => {
+  test("only a 32-byte public key in base64url turns the cookie login on; the old HMAC key is not read", () => {
     const home = mkdtempSync(join(tmpdir(), "switchboard-test-shortkey-"));
     homes.push(home);
     expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_SESSION_PUBLIC_KEY: "short-key" }).sessionPublicKey).toBeUndefined();
@@ -453,7 +453,7 @@ describe("sb_session cookie", () => {
     expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_SESSION_PUBLIC_KEY: KEY }).sessionPublicKey).toBe(KEY);
   });
 
-  test("the rescue page a person opens (#399): the host's outside URL + /rescue/, sb-rescue's own address on a Mac, none outside sb-rescue", () => {
+  test("the rescue page a person opens: the host's outside URL + /rescue/, sb-rescue's own address on a Mac, none outside sb-rescue", () => {
     const home = mkdtempSync(join(tmpdir(), "switchboard-test-rescuepage-"));
     homes.push(home);
     const rescue = "http://127.0.0.1:47841";
@@ -463,7 +463,7 @@ describe("sb_session cookie", () => {
     expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_WEB_URL: "https://d1.example.net" }).rescuePageUrl).toBeUndefined();
   });
 
-  test("a removed passkey's cookie is refused within SESSION_RECHECK_MS: the daemon asks the Starter and caches the answer (#701)", async () => {
+  test("a removed passkey's cookie is refused within SESSION_RECHECK_MS: the daemon asks the Starter and caches the answer", async () => {
     let t = 1_800_000_000_000;
     const seen: Request[] = [];
     let loggedIn = true;
@@ -499,7 +499,7 @@ describe("sb_session cookie", () => {
     }
   });
 
-  test("no answer from the Starter refuses the cookie; the edge header is sent (#701)", async () => {
+  test("no answer from the Starter refuses the cookie; the edge header is sent", async () => {
     const core = await boot(KEY, { value: "edge-secret-1", peer: "203.0.113.9" });
     const base = `http://127.0.0.1:${core.server.port}`;
     try {
@@ -521,7 +521,7 @@ describe("sb_session cookie", () => {
     }
   });
 
-  test("a WebSocket's upgrade asks the Starter afresh, while plain requests use the kept answer (#708)", async () => {
+  test("a WebSocket's upgrade asks the Starter afresh, while plain requests use the kept answer", async () => {
     const core = await boot(KEY, undefined, { recheckMs: 60_000 });
     const base = `http://127.0.0.1:${core.server.port}`;
     try {
@@ -535,7 +535,7 @@ describe("sb_session cookie", () => {
     }
   });
 
-  test("an open WebSocket authorized by a revoked cookie is closed at the next recheck (#701)", async () => {
+  test("an open WebSocket authorized by a revoked cookie is closed at the next recheck", async () => {
     const core = await boot(KEY, undefined, { recheckMs: 100 });
     const port = core.server.port;
     const open = (headers: Record<string, string>, url = `ws://127.0.0.1:${port}/ws`) =>
@@ -557,7 +557,7 @@ describe("sb_session cookie", () => {
     }
   });
 
-  test("on the cloud host a token from off the machine is refused: API, WebSocket ?token= and /mcp; the cookie still works (#701)", async () => {
+  test("on the cloud host a token from off the machine is refused: API, WebSocket ?token= and /mcp; the cookie still works", async () => {
     let peer = "10.0.1.5";
     const home = mkdtempSync(join(tmpdir(), "switchboard-test-offhost-"));
     homes.push(home);
@@ -593,7 +593,7 @@ describe("sb_session cookie", () => {
     }
   });
 
-  test("on the cloud host the token still works from loopback, and a Mac is unchanged (#701)", async () => {
+  test("on the cloud host the token still works from loopback, and a Mac is unchanged", async () => {
     const cloud = await boot(KEY, { value: "", peer: "127.0.0.1" });
     try {
       expect((await fetch(`http://127.0.0.1:${cloud.server.port}/api/tasks`, { headers: { authorization: `Bearer ${cloud.token}` } })).status).toBe(200);
@@ -620,7 +620,7 @@ describe("sb_session cookie", () => {
     }
   });
 
-  // The daemon's failure limit (#1492): the Starter's rule (aws/auth.ts) — 10 refusals in 10 minutes, then 429.
+  // The daemon's failure limit: the Starter's rule (aws/auth.ts) — 10 refusals in 10 minutes, then 429.
   describe("failure limit", () => {
     const EDGE = "edge-secret-1";
     const VIEWER = "cloudfront-viewer-address";
@@ -756,7 +756,7 @@ describe("sb_session cookie", () => {
     });
   });
 
-  describe("sb_recent (#1491)", () => {
+  describe("sb_recent", () => {
     // The Starter's "checked just now" cookie: the same body, signed over "recent:" + body (aws/auth.ts recentValue).
     const recentCookieOf = (seedHex: string, passkeyId: string, expires: number) => {
       const body = Buffer.from(`${passkeyId}.${expires}`).toString("base64url");
@@ -844,7 +844,7 @@ describe("sb_session cookie", () => {
       }
     });
 
-    test("answer policies (#938): saving or editing one needs the passkey check from a cookie and is refused to a token — a Task can read it — while a plain answer is not", async () => {
+    test("answer policies: saving or editing one needs the passkey check from a cookie and is refused to a token — a Task can read it — while a plain answer is not", async () => {
       const peerRef = { peer: "127.0.0.1" };
       const { core, home } = await bootStrong(peerRef);
       void home;

@@ -1656,7 +1656,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
             </section>
           );
         })}
-      <Flow />
+      <Flow items={shownItems} now={now} />
       {/* after the list's first read (#4119): interventions reads the whole event log in one synchronous pass, which holds the daemon and the list behind it */}
       {(data !== null || failure !== null) && <Interventions inView={(workspaceId) => workspaceId === null || inView(workspaceId)} onOpenTask={props.onOpenTask} />}
     </main>

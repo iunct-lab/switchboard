@@ -18,7 +18,7 @@ const at = (hm: string) => `2026-01-05T${hm}:00Z`;
 const comment = (hm: string, body: string): RawComment => ({ createdAt: at(hm), body });
 
 /**
- * A made-up closed PBI #10: three Tasks with one merged PR each, both forms of the claim mark, reviews by three reviewers
+ * A made-up closed PBI 10: three Tasks with one merged PR each, both forms of the claim mark, reviews by three reviewers
  * among PR comments that are not reviews, the PBI's own pbi-complete claim, and one ask answered on the PBI. With
  * `marks = false` the claims, the reviews and the ask / answer are left out, as when the skills left none.
  */
@@ -46,16 +46,16 @@ describe("flow", () => {
     const f = flowOfPbi(madeUpPbi(), at("08:50"));
     expect(f.stages).toEqual({
       request: 10 * MIN, // 08:50 → PBI 09:00
-      split: 60 * MIN, // PBI → last Task (#13) 10:00
-      wait: 5 * MIN, // 10:00 → first Task claim (#11) 10:05, not the PBI's pbi-complete claim at 10:03
-      build: 10 * MIN, // 10:05 → first PR (#21) 10:15
+      split: 60 * MIN, // PBI → last Task 10:00
+      wait: 5 * MIN, // 10:00 → first Task claim 10:05, not the PBI's pbi-complete claim at 10:03
+      build: 10 * MIN, // 10:05 → first PR 10:15
       "review-wait": 3 * MIN, // PR 21 5m / 22 2m / 23 3m → median
       review: 50 * MIN, // PR 21 40m / 22 50m / 23 60m → median
-      close: 20 * MIN, // last merge (#23) 11:48 → closed 12:08
+      close: 20 * MIN, // last merge 11:48 → closed 12:08
     });
     expect(f.reviewRounds).toEqual([2, 2, 3]);
     expect(f.storyPoints).toBe(5);
-    expect(f.taskIssues).toBe(3); // the PBI's Task Issues (#11, #12, #13)
+    expect(f.taskIssues).toBe(3); // the PBI's Task Issues
   });
 
   test("missing markers are unknown", () => {
@@ -106,18 +106,18 @@ describe("flow", () => {
     const raw = madeUpPbi();
     raw.subIssues.push(late);
     const f = flowOfPbi(raw, null);
-    expect(f.stages.split).toBe(60 * MIN); // #14 came after the first claim (10:05): the split still ends at #13 10:00
+    expect(f.stages.split).toBe(60 * MIN); // Issue 14 came after the first claim (10:05): the split still ends at Issue 13 10:00
     expect(f.stages.wait).toBe(5 * MIN);
     const bare = madeUpPbi(false);
     for (const t of bare.subIssues) t.pullRequests = [];
     bare.subIssues.push(late);
     const g = flowOfPbi(bare, null);
-    expect(g.stages.split).toBe(120 * MIN); // no claim, no PR: the last Task (#14) 11:00
+    expect(g.stages.split).toBe(120 * MIN); // no claim, no PR: the last Task 11:00
     expect(g.stages.wait).toBeNull();
   });
 });
 
-test("a claim taken back by a Task that yielded is not the start (#3069)", () => {
+test("a claim taken back by a Task that yielded is not the start", () => {
   const raw = madeUpPbi();
   const first = flowOfPbi(raw, null);
   raw.subIssues[0]!.comments.push(comment("09:59", "<!-- parallel-guard:task-claim t1 -->\n着手（parallel-guard）"), comment("10:00", "<!-- parallel-guard:withdraw t1 -->\n取り下げ（parallel-guard）"));
@@ -372,7 +372,7 @@ describe("flow view", () => {
       expect(v.current.closed + v.previous.closed).toBe(5);
       expect(v.current.storyPoints + v.previous.storyPoints).toBe(15);
       expect(v.slowest.length).toBeLessThanOrEqual(5);
-      // #1878: the weeks of the 30 days (5 or 6, by the weekday), the request opened this week (or last) counted from the stored values
+      // the weeks of the 30 days (5 or 6, by the weekday), the request opened this week (or last) counted from the stored values
       expect(v.weeks.length).toBeGreaterThanOrEqual(5);
       expect(v.weeks.reduce((n, w) => n + w.requestOpened, 0)).toBe(1);
       expect(issueSearches(calls)).toEqual([]);
@@ -383,7 +383,7 @@ describe("flow view", () => {
   });
 
   test("a PBI stored only in the app is counted", async () => {
-    // #900 is in the app's stored values only: GitHub's Issue search would never answer it, and it is not asked
+    // Issue 900 is in the app's stored values only: GitHub's Issue search would never answer it, and it is not asked
     const calls: string[] = [];
     const only = spec(900, 2, 30);
     const s = stored({ app: { source: SRC("o/r"), specs: [...SPECS, only] } });

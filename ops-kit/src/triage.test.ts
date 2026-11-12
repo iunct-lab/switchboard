@@ -98,7 +98,7 @@ describe("reconcileProject", () => {
   const node = (number: number, projects: string[]) => ({ id: `N${number}`, number, projectItems: { nodes: projects.map((p) => ({ id: `IT${number}`, project: { id: p, number: 1 } })) } });
   const page = (kind: string, nodes: unknown[], next?: string) => () => ({ repository: { [kind]: { pageInfo: { hasNextPage: !!next, endCursor: next ?? null }, nodes } } });
 
-  test("adds only the open Issues / PRs not in the Project (another owner's Project #1 is not it), sets no field; a second run adds nothing", async () => {
+  test("adds only the open Issues / PRs not in the Project (another owner's Project with the same number is not it), sets no field; a second run adds nothing", async () => {
     const gh = fakeGh([
       head,
       page("issues", [node(1, ["P1"]), node(2, [])], "c1"),

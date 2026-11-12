@@ -34,8 +34,8 @@ export const PublicSync = z
 export type PublicSync = z.infer<typeof PublicSync>;
 
 /**
- * Where a repository lives (#920): read by `forgeOf` / `forgeTargetOf` in `forge.ts`. Separate from a workspace's runner
- * settings. GitLab (#892) names its host and project (`group/name`, subgroups too): nothing finds them the way `gh`
+ * Where a repository lives: read by `forgeOf` / `forgeTargetOf` in `forge.ts`. Separate from a workspace's runner
+ * settings. GitLab names its host and project (`group/name`, subgroups too): nothing finds them the way `gh`
  * finds GitHub's. Any other service names neither (they are its implementation's to find).
  */
 export const ForgeConfig = z
@@ -55,7 +55,7 @@ export const ForgeConfig = z
 export type ForgeConfig = z.infer<typeof ForgeConfig>;
 
 /**
- * The local CI's steps of a repository that keeps no CI on GitHub (#3932): `bun scripts/local-ci.ts` runs them in
+ * The local CI's steps of a repository that keeps no CI on GitHub: `bun scripts/local-ci.ts` runs them in
  * place of `.github/workflows/ci.yml`'s. A step's `name` defaults to the first line of its `run`.
  */
 export const CiConfig = z
@@ -101,11 +101,11 @@ export const OpsConfig = z
     /** Accepted and not used: the kit owns the scale (`STORY_POINTS`). Kept so a config that still has it (in any shape) does not fail `.strict()`. */
     storyPoints: z.unknown().optional(),
     publicSync: PublicSync.optional(),
-    /** The service the repository lives on (#920, `forge.ts`); omitted = GitHub. */
+    /** The service the repository lives on (`forge.ts`); omitted = GitHub. */
     forge: ForgeConfig.optional(),
-    /** The local CI's steps (#3932); omitted = `.github/workflows/ci.yml`'s. */
+    /** The local CI's steps; omitted = `.github/workflows/ci.yml`'s. */
     ci: CiConfig.optional(),
-    /** `ops-kit deps-check` (#3775): what this repository adds to the tool's own `## 更新の条件`, a line each. */
+    /** `ops-kit deps-check`: what this repository adds to the tool's own `## 更新の条件`, a line each. */
     depsCheck: z.object({ extraConditions: z.array(z.string().min(1)) }).strict().optional(),
   })
   .strict();
@@ -139,11 +139,11 @@ export function parseConfig(json: unknown, where = CONFIG_FILE): OpsConfig {
 /** The Story Points scale, owned by the kit (not by a repository's config). */
 export const STORY_POINTS: readonly number[] = [1, 2, 3, 5, 8, 13];
 
-/** The kit's template of `ops.config.json`: the choices a workspace kept in the app without its own file is checked with (#2361). */
+/** The kit's template of `ops.config.json`: the choices a workspace kept in the app without its own file is checked with. */
 export const TEMPLATE_CONFIG = join(import.meta.dir, "../template/ops.config.json");
 
 /**
- * The settings of a repository with no `ops.config.json` whose backlog the app keeps (no GitHub, #2361): the template
+ * The settings of a repository with no `ops.config.json` whose backlog the app keeps (no GitHub): the template
  * with its placeholders filled (Area `app`), so no Phase and no Milestone. Copy the template to change them.
  */
 export function defaultConfig(): OpsConfig {
@@ -242,7 +242,7 @@ export function noWriteTargets(cwd = process.cwd()): string[] {
 }
 
 /**
- * Why a write to `repo` is refused by the clone's mark (#2576). Unlike the public copy, which its development
+ * Why a write to `repo` is refused by the clone's mark. Unlike the public copy, which its development
  * repository writes to by name, a marked repository is refused however the write names it.
  */
 export function noWriteMarkRefusal(repo: string, cwd = process.cwd()): string | null {

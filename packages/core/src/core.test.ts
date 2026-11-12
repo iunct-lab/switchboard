@@ -17,7 +17,7 @@ import { seedNewHome, startServer as startDaemon } from "./server.ts";
 import type { suggestTitle } from "./suggest-title.ts";
 
 /**
- * The judge (#493) is on by default and would ask these daemons' fake runners to judge every finished turn, adding
+ * The judge is on by default and would ask these daemons' fake runners to judge every finished turn, adding
  * sessions the tests count. Here it never answers, unless a test passes its own.
  */
 const startServer: typeof startDaemon = (cfg, adapters, opts = {}) => startDaemon(cfg, adapters, { judge: () => new Promise(() => undefined), rubricJudge: () => new Promise(() => undefined), titleSuggester: () => new Promise(() => undefined), ...opts });
@@ -38,9 +38,9 @@ import { makePrivateTmp, privateTmpOf, sweepPrivateTmps, TaskManager, taskAllowR
 import { Scheduler } from "./scheduler.ts";
 import { loadProcess } from "./process-defs.ts";
 
-/** A gh that answers nothing: the ledger summary reads GitHub's budget (#549), which a test must not ask the real GitHub for. */
+/** A gh that answers nothing: the ledger summary reads GitHub's budget, which a test must not ask the real GitHub for. */
 const NO_GH = async () => ({ code: 1, stdout: "", stderr: "no gh in this test" });
-// Test daemons must not read the developer's real ~/.claude/projects (#91): point the importer at a folder that does not exist.
+// Test daemons must not read the developer's real ~/.claude/projects: point the importer at a folder that does not exist.
 const NO_HISTORY = { SWITCHBOARD_CLAUDE_PROJECTS: join(tmpdir(), "switchboard-test-no-claude-projects"), SWITCHBOARD_HISTORY_POLL_MS: "0" };
 
 /** A scripted fake runner: replays the recorded Claude fixture events, pauses on permission.ask until answered. */
@@ -221,7 +221,7 @@ describe("core daemon", () => {
     expect(ws.some((w: { kind: string }) => w.kind === "meta")).toBe(true);
   });
 
-  test("provenance: a task created with a process records it with the bundle hashes, GET /api/processes lists the candidates (#3647)", async () => {
+  test("provenance: a task created with a process records it with the bundle hashes, GET /api/processes lists the candidates", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-prov-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
     try {
@@ -251,7 +251,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("health lists the running and waiting tasks as busyTasks, and not the done ones (#2814)", async () => {
+  test("health lists the running and waiting tasks as busyTasks, and not the done ones", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-busy-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
     const h2 = mkdtempSync(join(tmpdir(), "switchboard-test-busy-off-"));
@@ -282,10 +282,10 @@ describe("core daemon", () => {
     }
   });
 
-  test("effort (#833): health lists each runner's efforts; a task keeps the chosen one and hands it to the adapter; unknown is 400", async () => {
+  test("effort: health lists each runner's efforts; a task keeps the chosen one and hands it to the adapter; unknown is 400", async () => {
     const starts: StartOptions[] = [];
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-effort-"));
-    // a database from before #833: its tasks table has no effort column
+    // a database from before the effort column: its tasks table has no effort column
     const raw = new (require("bun:sqlite").Database)(join(h, "switchboard.db"), { create: true });
     raw.exec(`CREATE TABLE tasks (id TEXT PRIMARY KEY, workspace_id TEXT, title TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, scope TEXT NOT NULL, status TEXT NOT NULL, runner_session_id TEXT, model TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
       INSERT INTO tasks VALUES ('task_old', NULL, 'old', 'claude', '/tmp', '[]', 'done', NULL, NULL, 1, 1);`);
@@ -341,7 +341,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("inbox: a draft is promoted to a task and leaves the list; a closed one cannot be promoted (#2401)", async () => {
+  test("inbox: a draft is promoted to a task and leaves the list; a closed one cannot be promoted", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-inbox-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_KNOWLEDGE: join(h, "knowledge"), SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
     const b = `http://127.0.0.1:${c.server.port}`;
@@ -350,7 +350,7 @@ describe("core daemon", () => {
       const ws = c.db.listWorkspaces().find((w) => w.kind === "meta") ?? c.db.upsertWorkspace({ name: "w", path: h, kind: "repo" });
       const draft = (await (await post("/api/inbox", { text: "do it", title: "draft one" })).json()) as { path: string };
       const other = (await (await post("/api/inbox", { text: "not this", title: "draft two" })).json()) as { path: string };
-      // the settings' default budget reaches a promoted draft as it does any other Task made without one (#3723)
+      // the settings' default budget reaches a promoted draft as it does any other Task made without one
       expect((await fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ quotaAndResume: { defaultBudgetUsd: 3 } }) })).status).toBe(200);
       const r = await post("/api/inbox/promote", { path: draft.path, workspaceId: ws.id, runner: "claude" });
       expect(r.status).toBe(201);
@@ -366,7 +366,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("inbox: an edited draft keeps its edit across a restart and is promoted with the edited body; promoted, closed and empty are refused (#3032)", async () => {
+  test("inbox: an edited draft keeps its edit across a restart and is promoted with the edited body; promoted, closed and empty are refused", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-inbox-edit-"));
     const cfg = loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_KNOWLEDGE: join(h, "knowledge"), SWITCHBOARD_PORT: "0", ...NO_HISTORY });
     const starts: StartOptions[] = [];
@@ -401,7 +401,7 @@ describe("core daemon", () => {
     }
   }, 30_000); // startServer twice and a promoted Task's start: over the 5 s default on a loaded host (docs/design/perf.md "Test flakiness")
 
-  test("health reports a failed daily archive from archive.status, and null without one (#1201)", async () => {
+  test("health reports a failed daily archive from archive.status, and null without one", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-archive-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
     const archive = () => fetch(`http://127.0.0.1:${c.server.port}/api/health`).then(j).then((x) => x.archive);
@@ -415,7 +415,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("health lists each runner's models and what the CLI runs on when the model is left empty (#155)", async () => {
+  test("health lists each runner's models and what the CLI runs on when the model is left empty", async () => {
     let cliDefault: string | undefined = "haiku";
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-models-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { models: ["big", "small"], cliDefaultModel: () => cliDefault }), fakeAdapter(SCRIPT, { id: "dak" })], { port: 0 });
@@ -434,7 +434,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("promote and restart wait for a Task whose turn ended on background jobs, and go once it is done (#4072)", async () => {
+  test("promote and restart wait for a Task whose turn ended on background jobs, and go once it is done", async () => {
     const seen: string[] = [];
     const rescue = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch(req) { seen.push(new URL(req.url).pathname); return Response.json({ started: "promote" }, { status: 202 }); } });
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-bgpromote-"));
@@ -466,7 +466,7 @@ describe("core daemon", () => {
     try {
       expect((await runners())[0].note).toBeUndefined();
       note = "warned";
-      offset += 61_000; await runners(); // over the minute this answer starts the check behind it; the next carries it (#3734)
+      offset += 61_000; await runners(); // over the minute this answer starts the check behind it; the next carries it
       expect((await runners())[0].note).toBe("warned");
       note = undefined;
       offset += 61_000; await runners();
@@ -478,7 +478,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("health shows each runner's login (#180): the status command's answer, rechecked when over a minute old; a turn's auth error marks it expired", async () => {
+  test("health shows each runner's login: the status command's answer, rechecked when over a minute old; a turn's auth error marks it expired", async () => {
     let login: RunnerDetection["login"] = "expired";
     let detects = 0;
     let loginExpiresAt: number | undefined = 1_800_000_000_000;
@@ -503,16 +503,16 @@ describe("core daemon", () => {
       login = "ok";
       expect((await runners())[0].login).toBe("expired");
       expect(detects).toBe(1);
-      offset += 61_000; await runners(); // over the minute this answer starts the check behind it; the next carries it (#3734)
+      offset += 61_000; await runners(); // over the minute this answer starts the check behind it; the next carries it
       expect((await runners())[0]).toMatchObject({ login: "ok", loginExpiresAt: 1_800_000_000_000 });
       expect(detects).toBe(2);
       // the status command still says ok, but a turn ended on the runner's auth error: expired, with what to type
       const t = await fetch(`${b}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: h, title: "t", prompt: "p", runner: "claude" }) }).then(j);
       await waitFor(async () => (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task.status === "error");
       expect((await runners())[0].login).toBe("expired");
-      expect((await runners())[0].loginExpiresAt).toBeUndefined(); // no expiry beside "expired" (#3867)
+      expect((await runners())[0].loginExpiresAt).toBeUndefined(); // no expiry beside "expired"
       expect((await fetch(`${b}/api/tasks/${t.id}`).then(j)).events.some((e: { ev: AgentEvent }) => e.ev.t === "status" && e.ev.text.includes("`fake login`"))).toBe(true);
-      // the next check that says ok clears it, with the expiry it reads now (#3867)
+      // the next check that says ok clears it, with the expiry it reads now
       loginExpiresAt = 1_900_000_000_000;
       offset += 61_000; await runners();
       expect((await runners())[0]).toMatchObject({ login: "ok", loginExpiresAt: 1_900_000_000_000 });
@@ -547,7 +547,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("isAuthText (#180) matches the runners' not-logged-in errors, not their usage limits or other failures", () => {
+  test("isAuthText matches the runners' not-logged-in errors, not their usage limits or other failures", () => {
     expect(isAuthText("claude", "Invalid API key · Please run /login")).toBe(true);
     expect(isAuthText("claude", "OAuth token has expired. Please obtain a new token or refresh your existing token.")).toBe(true);
     expect(isAuthText("codex", "Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.")).toBe(true);
@@ -625,7 +625,7 @@ describe("core daemon", () => {
     ws.close();
   });
 
-  test("GET /api/tasks/:id?after= returns only the events past the cursor, in seq order (#1137)", async () => {
+  test("GET /api/tasks/:id?after= returns only the events past the cursor, in seq order", async () => {
     const created = await fetch(`${base}/api/tasks`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -654,7 +654,7 @@ describe("core daemon", () => {
     for (const bad of ["abc", "-5", "", "1.5e400"]) expect((await fetch(`${base}/api/tasks/${created.id}?after=${bad}`).then(j)).events).toEqual(full.events);
   });
 
-  test("events tail (#1165): GET /api/tasks/:id holds the last `limit` events (200 by default), ?before= the page before, ?limit=0 none; ?after= stays whole", async () => {
+  test("events tail: GET /api/tasks/:id holds the last `limit` events (200 by default), ?before= the page before, ?limit=0 none; ?after= stays whole", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-events-tail-"));
     const long: AgentEvent[] = [];
     for (let i = 0; long.length < 500; i++) long.push({ t: "tool.call", id: `c${i}`, name: "Read", input: { file_path: `src/file${i}.ts` }, summary: `Read src/file${i}.ts` }, { t: "tool.result", id: `c${i}`, ok: true, summary: "40 lines" }, { t: "message.delta", role: "assistant", text: `Step ${i}. `, messageId: `m${i}` });
@@ -669,7 +669,7 @@ describe("core daemon", () => {
       const seqs = (d: { events: Array<{ seq: number }> }) => d.events.map((e) => e.seq);
 
       const tail = await get();
-      expect({ createdIssues: tail.createdIssues, deferred: tail.deferred }).toEqual({ createdIssues: [], deferred: false }); // #1878: counted from the events, none here
+      expect({ createdIssues: tail.createdIssues, deferred: tail.deferred }).toEqual({ createdIssues: [], deferred: false }); // counted from the events, none here
       expect(seqs(tail)).toEqual(all.slice(-200).map((e) => e.seq));
       expect((await get("?limit=50")).events).toHaveLength(50);
       const meta = await get("?limit=0");
@@ -683,7 +683,7 @@ describe("core daemon", () => {
       expect(seqs(await get("?before=1"))).toEqual([]);
       for (const bad of ["abc", "-5", "0", "1.5"]) expect((await fetch(`${b}/api/tasks/${t.id}?before=${bad}`)).status).toBe(400);
 
-      // the catch-up after a dropped WebSocket (#1137) is never cut: everything past the cursor
+      // the catch-up after a dropped WebSocket is never cut: everything past the cursor
       const past = all.slice(11).map((e) => e.seq);
       expect(seqs(await get(`?after=${all[10]!.seq}`))).toEqual(past);
       for (const with_ of ["&limit=0", "&limit=50", "&before=abc", "&before=5"]) expect(seqs(await get(`?after=${all[10]!.seq}${with_}`))).toEqual(past);
@@ -693,7 +693,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("api_requests (#2101): each guardAll route's time and size are written by the route's key, flushed on stop", async () => {
+  test("api_requests: each guardAll route's time and size are written by the route's key, flushed on stop", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-api-requests-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
     const b = `http://127.0.0.1:${c.server.port}`;
@@ -715,7 +715,7 @@ describe("core daemon", () => {
     expect(rows.every((x) => x.ms >= 0)).toBe(true);
   });
 
-  test("api_requests (#2101): a failed write is dropped with one warning, not thrown out of the daemon", async () => {
+  test("api_requests: a failed write is dropped with one warning, not thrown out of the daemon", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-api-requests-fail-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
     const insert = spyOn(c.db, "insertApiRequests").mockImplementation(() => {
@@ -734,7 +734,7 @@ describe("core daemon", () => {
   });
 
   test("a finished task keeps its runner alive briefly, then releases it and resumes with --resume on the next turn", async () => {
-    // the idle window (the flake of #2939): at 60 ms a loaded host left it between "done" and the next request, so the
+    // the idle window (it was flaky at 60 ms): at 60 ms a loaded host left it between "done" and the next request, so the
     // window is long enough for those steps and the release is waited for by its state, not a fixed sleep
     const released = async (id: string) => { for (const t0 = Date.now(); c2.tasks.isLive(id) && Date.now() - t0 < 20_000; ) await Bun.sleep(10); };
     const starts: StartOptions[] = [];
@@ -778,7 +778,7 @@ describe("core daemon", () => {
     }
   }, 30_000); // two idle windows of 2 s and HTTP turns under a loaded full suite: over the 5 s default (docs/design/perf.md "Test flakiness")
 
-  test.skipIf(skipRecordings("packages/core/fixtures/otel-tool-decision.jsonl"))("otel: a recorded tool_decision is kept on its task; another task's token or none is refused (#2236)", async () => {
+  test.skipIf(skipRecordings("packages/core/fixtures/otel-tool-decision.jsonl"))("otel: a recorded tool_decision is kept on its task; another task's token or none is refused", async () => {
     assertRecordings("packages/core/fixtures/otel-tool-decision.jsonl");
     const starts: StartOptions[] = [];
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-otel-"));
@@ -827,7 +827,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("otel: a released runner's last batch is kept while it closes; once it has closed the token is gone (#2236)", async () => {
+  test("otel: a released runner's last batch is kept while it closes; once it has closed the token is gone", async () => {
     const starts: StartOptions[] = [];
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-otel-close-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT.filter((e) => e.t !== "permission.ask"), { starts, lingers: true, closeMs: 400 })], { port: 0, selfdevChecks: false, gh: NO_GH });
@@ -852,7 +852,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("developSelf: a new HOME starts with false, PATCH saves it, an existing database is not written (#2459)", async () => {
+  test("developSelf: a new HOME starts with false, PATCH saves it, an existing database is not written", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-developself-"));
     const env = { SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY };
     try {
@@ -912,7 +912,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("gh guard: every runner starts with the kit's bin first in its PATH, whatever the task's folder (#661)", async () => {
+  test("gh guard: every runner starts with the kit's bin first in its PATH, whatever the task's folder", async () => {
     const starts: StartOptions[] = [];
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-ghguard-"));
     const checkout = join(h, "checkout");
@@ -934,7 +934,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("private tmp: a Codex task in a registered repo gets its own temp directory, kept while done; a symlink in its place stops the start (#787)", async () => {
+  test("private tmp: a Codex task in a registered repo gets its own temp directory, kept while done; a symlink in its place stops the start", async () => {
     const starts: StartOptions[] = [];
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-privtmp-"));
     const checkout = join(h, "checkout");
@@ -962,7 +962,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("heavy slots: a Codex task's sandbox can write the heavy slots' directory; a Claude task's scope is unchanged (#2213)", async () => {
+  test("heavy slots: a Codex task's sandbox can write the heavy slots' directory; a Claude task's scope is unchanged", async () => {
     const starts: StartOptions[] = [];
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-heavyslots-"));
     const checkout = join(h, "checkout");
@@ -1001,7 +1001,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("private tmp: a Codex task without the meta workspace gets none; the sweep removes only old ones the database lets go (#787)", async () => {
+  test("private tmp: a Codex task without the meta workspace gets none; the sweep removes only old ones the database lets go", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-privtmp2-"));
     const bare: StartOptions[] = [];
     const db = new Db(join(h, "bare.sqlite"));
@@ -1030,7 +1030,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("shared tmp guard: every runner gets the kit's deny-shared-tmp as a guard, none without the meta workspace (#764)", async () => {
+  test("shared tmp guard: every runner gets the kit's deny-shared-tmp as a guard, none without the meta workspace", async () => {
     const starts: StartOptions[] = [];
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-tmpguard-"));
     const checkout = join(h, "it's checkout");
@@ -1048,11 +1048,11 @@ describe("core daemon", () => {
       const guard = `'${join(h, "it'\\''s checkout")}/ops-kit/bin/deny-shared-tmp'`;
       expect(starts.map((s) => s.guards)).toEqual([[guard], [guard]]);
       expect(starts.map((s) => s.privateTmp)).toEqual([undefined, undefined]); // Claude runs the guard instead
-      // the skills' operations as allow rules (#2150): the merge gate of this checkout and of the task's own folder
+      // the skills' operations as allow rules: the merge gate of this checkout and of the task's own folder
       expect(starts.map((s) => s.allow?.filter((r) => r.includes("merge-gate")))).toEqual([checkout, other].map(() => ["Bash(bun scripts/merge-gate.ts:*)", `Bash(bun ${checkout}/scripts/merge-gate.ts:*)`]));
       expect(starts[1]!.allow).toContain(`Edit(/${other}/ops-kit/skills/**)`);
       expect(starts[1]!.allow).toContain(`Write(/${other}-*/.claude/skills/**)`);
-      expect(starts[1]!.allow).toContain("Bash(gh stack push:*)"); // the same for a folder other than the checkout (#2782)
+      expect(starts[1]!.allow).toContain("Bash(gh stack push:*)"); // the same for a folder other than the checkout
       expect(starts[1]!.allow).toContain("Bash(ops-kit backlog:*)");
       expect(starts.flatMap((s) => s.allow ?? []).filter((r) => /gh (pr|stack) merge|gh api/.test(r))).toEqual([]);
     } finally {
@@ -1075,7 +1075,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("mcp servers: mcp.yaml servers reach the runner, the ones with workspaces only in those Workspaces' Tasks (#2090)", async () => {
+  test("mcp servers: mcp.yaml servers reach the runner, the ones with workspaces only in those Workspaces' Tasks", async () => {
     const starts: StartOptions[] = [];
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-mcpservers-"));
     for (const name of ["alpha", "beta"]) mkdirSync(join(h, name));
@@ -1093,7 +1093,7 @@ describe("core daemon", () => {
       }
       const docs = { type: "http" as const, url: "http://127.0.0.1:9000/mcp" };
       expect(starts.map((s) => s.mcpServers)).toEqual([{ playwright: { command: "npx" }, docs }, { docs }]);
-      // the task detail names them for the Brief (#2109)
+      // the task detail names them for the Brief
       expect(named).toEqual([["playwright", "docs"], ["docs"]]);
     } finally {
       await c.stop();
@@ -1101,7 +1101,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("a resume whose session record is not on this machine starts a new session with the transcript as a preamble (#179)", async () => {
+  test("a resume whose session record is not on this machine starts a new session with the transcript as a preamble", async () => {
     const starts: StartOptions[] = [];
     const script = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");
     const h2 = mkdtempSync(join(tmpdir(), "switchboard-test-moved-"));
@@ -1113,7 +1113,7 @@ describe("core daemon", () => {
     try {
       const t = await fetch(`${b2}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: h2, title: "t", prompt: "p", runner: "claude" }) }).then(j);
       await waitFor(async () => (await fetch(`${b2}/api/tasks/${t.id}`).then(j)).task.status === "done");
-      // the record is here: an ordinary --resume, no recap (only the stop-report rule every start gets, #949)
+      // the record is here: an ordinary --resume, no recap (only the stop-report rule every start gets)
       await send(t.id, "again");
       expect(starts[1]).toMatchObject({ resumeSessionId: "sess-1", prompt: "again" });
       expect(starts[1]?.preamble).toStartWith("[Switchboard: 止まったときの報告]");
@@ -1152,7 +1152,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("title (#491): without one a task gets the head of the prompt, pending; one the person gave or changed is kept (PATCH)", async () => {
+  test("title: without one a task gets the head of the prompt, pending; one the person gave or changed is kept (PATCH)", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-title-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter([{ t: "session.end", status: "ok" }])], { port: 0, selfdevChecks: false, gh: NO_GH });
     const b = `http://127.0.0.1:${c.server.port}`;
@@ -1188,7 +1188,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("title (#491): the first turn names a provisional task once; a given title, a stage / feedback title, a failed namer, the setting off and a later turn leave it", async () => {
+  test("title: the first turn names a provisional task once; a given title, a stage / feedback title, a failed namer, the setting off and a later turn leave it", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-title-turn-"));
     const calls: Array<{ prompt: string; reply: string }> = [];
     let mode: "ok" | "throw" = "ok";
@@ -1271,7 +1271,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("title (#491): a turn that ended in an error is not named and keeps the title pending for the next one", async () => {
+  test("title: a turn that ended in an error is not named and keeps the title pending for the next one", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-title-error-"));
     let calls = 0;
     const titleSuggester: typeof suggestTitle = async () => (calls++, { title: "名前", runner: "claude", model: "claude-haiku-4-5" });
@@ -1289,7 +1289,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("skill command title (#491): /pbi-complete <n> is named by the Issue's title at once and is not pending; without one gh can read it stays provisional", async () => {
+  test("skill command title: /pbi-complete <n> is named by the Issue's title at once and is not pending; without one gh can read it stays provisional", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-skill-title-"));
     let ghOk = true;
     const gh = async (args: string[]) => (args[0] === "issue" && ghOk ? { code: 0, stdout: "タイトルを見分ける\n", stderr: "" } : { code: 1, stdout: "", stderr: "no gh in this test" });
@@ -1333,7 +1333,7 @@ describe("core daemon", () => {
     expect(log[0]).toMatchObject({ taskId: t.id, suggested: "codex", chosen: "claude", status: "done" });
   });
 
-  test("the routing log carries the task's outcome (status / costUsd / durationMs) and exports as JSONL (#25)", async () => {
+  test("the routing log carries the task's outcome (status / costUsd / durationMs) and exports as JSONL", async () => {
     const dir = join(home, "routing-export-cwd");
     mkdirSync(dir, { recursive: true });
     const t = await fetch(`${base}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: dir, title: "PR review", prompt: "p", runner: "claude" }) }).then(j);
@@ -1358,7 +1358,7 @@ describe("core daemon", () => {
     const past = { id: "task_backwards", workspaceId: null, title: "backwards", runner: "claude" as const, cwd: home, scope: [home], status: "done" as const, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: { suggested: "claude" as const, ruleId: "r", reason: "why", overridden: false, llm: null }, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard" as const, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown" as const, reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 5_000, createdAt: 5_000, updatedAt: 1_000 };
     core.db.insertTask(past);
     expect((await logRows()).find((r) => r.taskId === past.id)!.durationMs).toBe(0);
-    // each row carries its task's outcome (#612): the status alone says "done" for a task that stopped to ask
+    // each row carries its task's outcome: the status alone says "done" for a task that stopped to ask
     expect(row.outcome).toBe(core.db.getTask(t.id)!.outcome);
     for (const outcome of ["done", "needs_action", "failed"] as const) {
       const id = `task_outcome_${outcome}`;
@@ -1386,7 +1386,7 @@ describe("core daemon", () => {
     for (const q of ["?limit=nonsense", "?limit=", "?limit=0", "?limit=-5"]) expect(await logRows(q)).toHaveLength(all.length);
   });
 
-  test("maxRunners (#1141): 既定 3、PATCH で 1〜8 だけ受ける（0 / 9 は 400）、sqlite に残る、/api/queue は空の queued を返す", async () => {
+  test("maxRunners: 既定 3、PATCH で 1〜8 だけ受ける（0 / 9 は 400）、sqlite に残る、/api/queue は空の queued を返す", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-max-runners-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0 });
     const b = `http://${"127.0.0.1"}:${c.server.port}`;
@@ -1408,7 +1408,7 @@ describe("core daemon", () => {
     }
   }, 20000);
 
-  describe("maxRunners の待ち列 (#1177)", () => {
+  describe("maxRunners の待ち列", () => {
     const post = (b: string, path: string, body?: unknown) => fetch(`${b}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) });
     const patchRunners = (b: string, n: number) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ maxRunners: n }) });
     const create = (b: string, cwd: string, title: string, runner = "claude") => post(b, "/api/tasks", { cwd, title, prompt: title, runner }).then(j);
@@ -1684,7 +1684,7 @@ describe("core daemon", () => {
     }, 20000);
   });
 
-  test("settings: reviewRunner is other until set, keeps what PATCH saved, and refuses other values (#4024)", async () => {
+  test("settings: reviewRunner is other until set, keeps what PATCH saved, and refuses other values", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-review-runner-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0 });
     const b = `http://${"127.0.0.1"}:${c.server.port}`;
@@ -1704,7 +1704,7 @@ describe("core daemon", () => {
     }
   }, 20000);
 
-  test("suggester: the LLM proposal rides along, and a disabled one leaves the rule table in charge (#25)", async () => {
+  test("suggester: the LLM proposal rides along, and a disabled one leaves the rule table in charge", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-suggester-"));
     const dir = join(h, "repo");
     mkdirSync(dir, { recursive: true });
@@ -1748,7 +1748,7 @@ describe("core daemon", () => {
     }
   }, 20000);
 
-  describe("routing advice (#1143)", () => {
+  describe("routing advice", () => {
     const script = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");
     const ANSWER = { runner: "dak" as const, reason: "後から届いた", ruleId: "llm", model: null, available: true, alternatives: [], llm: null };
     const deferred = () => {
@@ -1959,7 +1959,7 @@ describe("core daemon", () => {
     });
   });
 
-  test("what the LLM suggestion turn spent is billed to the task under the runner that answered (#25)", async () => {
+  test("what the LLM suggestion turn spent is billed to the task under the runner that answered", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-llmcost-"));
     const dir = join(h, "repo");
     mkdirSync(dir, { recursive: true });
@@ -1970,7 +1970,7 @@ describe("core daemon", () => {
         kind: "llm",
         async suggest(ctx) {
           onUsage({ t: "usage", source: "reported", model: "cheap-model", inputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.02 });
-          // a second model of the same turn (Claude's `modelUsage`, #2353): billed too, not overwritten
+          // a second model of the same turn (Claude's `modelUsage`): billed too, not overwritten
           onUsage({ t: "usage", source: "reported", model: "cheaper-model", inputTokens: 10, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.001 });
           return { runner: "dak", reason: `${cfg.runner} が答えた`, ruleId: "llm", model: null, available: ctx.available.has("dak"), alternatives: [], llm: null };
         },
@@ -1994,7 +1994,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("late LLM suggestion preserves task outcome and rule log (#1143)", async () => {
+  test("late LLM suggestion preserves task outcome and rule log", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-late-llm-"));
     const env = { SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY };
     const script = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");
@@ -2041,7 +2041,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("late LLM suggestion is idempotent and ignores missing task (#1143)", async () => {
+  test("late LLM suggestion is idempotent and ignores missing task", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-late-llm-once-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result"))], { port: 0, selfdevChecks: false, gh: NO_GH });
     const broadcasts = spyOn(c.tasks as unknown as { broadcast: (m: unknown) => void }, "broadcast");
@@ -2084,7 +2084,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("routing stats: agreement per suggester over the window (#25)", async () => {
+  test("routing stats: agreement per suggester over the window", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-routingstats-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0 });
     const b = `http://127.0.0.1:${c.server.port}`;
@@ -2127,7 +2127,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("routing stats: per-runner outcomes, cost and duration medians (#612)", async () => {
+  test("routing stats: per-runner outcomes, cost and duration medians", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-runnerstats-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0 });
     const b = `http://127.0.0.1:${c.server.port}`;
@@ -2244,7 +2244,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("settings prices (#1402): a price entered in the settings prices the next usage without a restart, wins over pricing.json's row, and null brings the row back", async () => {
+  test("settings prices: a price entered in the settings prices the next usage without a restart, wins over pricing.json's row, and null brings the row back", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-prices-"));
     const script: AgentEvent[] = [
       { t: "session.start", runner: "codex", runnerSessionId: "c1", cwd: "/tmp" },
@@ -2327,7 +2327,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("effort of an existing task (#1802): POST /api/tasks/:id/effort applies from the next turn; session.start carries the effort it started with", async () => {
+  test("effort of an existing task: POST /api/tasks/:id/effort applies from the next turn; session.start carries the effort it started with", async () => {
     const starts: StartOptions[] = [];
     const script = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-effort-change-"));
@@ -2384,7 +2384,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("model of an existing task (#155): POST /api/tasks/:id/model releases the idle process, the next turn resumes the session with the new model; a turn in flight keeps its process", async () => {
+  test("model of an existing task: POST /api/tasks/:id/model releases the idle process, the next turn resumes the session with the new model; a turn in flight keeps its process", async () => {
     const starts: StartOptions[] = [];
     const script = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-model-"));
@@ -2448,7 +2448,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("bedrock (#1730): PATCH saves a region per runner, null goes back, a runner without bedrockModels is 400, the health lists the Bedrock models and the kind", async () => {
+  test("bedrock: PATCH saves a region per runner, null goes back, a runner without bedrockModels is 400, the health lists the Bedrock models and the kind", async () => {
     const starts: StartOptions[] = [];
     const h = mkdtempSync(join(tmpdir(), "switchboard-bedrock-"));
     const cwd = mkdtempSync(join(tmpdir(), "switchboard-bedrock-cwd-"));
@@ -2473,7 +2473,7 @@ describe("core daemon", () => {
       const saved = await patch({ bedrock: { claude: { region: "ap-northeast-1", accessKey: "x" } } }).then(j);
       expect(saved.bedrock).toEqual({ claude: { region: "ap-northeast-1" } });
       expect(await run("claude")).toMatchObject({ login: "ok", loginKind: "bedrock" });
-      expect((await run("claude")).loginExpiresAt).toBeUndefined(); // the Claude account's expiry does not apply on Bedrock (#3867)
+      expect((await run("claude")).loginExpiresAt).toBeUndefined(); // the Claude account's expiry does not apply on Bedrock
       expect((await run("claude")).models.map((x: { value: string }) => x.value)).toEqual(["global.anthropic.claude-haiku-5-5"]);
       expect((await run("dak")).bedrockAvailable).toBe(false);
       await create();
@@ -2544,7 +2544,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("bedrock (#1731): codex with bedrockModels can be switched, lists the Bedrock models, shows no expired login and bills at the API price", async () => {
+  test("bedrock: codex with bedrockModels can be switched, lists the Bedrock models, shows no expired login and bills at the API price", async () => {
     const starts: StartOptions[] = [];
     const h = mkdtempSync(join(tmpdir(), "switchboard-bedrock-codex-"));
     // a codex-like runner: tokens only, the model it was started with
@@ -2585,7 +2585,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("permission modes (#58): resolved at creation (explicit → saved default → adapter default), validated, switched live or on resume", async () => {
+  test("permission modes: resolved at creation (explicit → saved default → adapter default), validated, switched live or on resume", async () => {
     const starts: StartOptions[] = [];
     const modeChanges: string[] = [];
     const script = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");
@@ -2686,7 +2686,7 @@ describe("core daemon", () => {
       expect(starts2.length).toBe(3); // idle now → restarted with the new mode
       expect(starts2[2]).toMatchObject({ permissionMode: "auto", resumeSessionId: "sess-1" });
       await waitFor(async () => (await fetch(`${b9}/api/tasks/${t.id}`).then(j)).task.status === "done");
-      // a task from before #58 (permission_mode NULL) resolves its mode when resumed and records it
+      // a task from before permission modes (permission_mode NULL) resolves its mode when resumed and records it
       await c9.tasks.release(t.id);
       expect(c9.tasks.isLive(t.id)).toBe(false);
       c9.db.updateTask(t.id, { permissionMode: null });
@@ -2716,7 +2716,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("usage-limit auto-resume (#102): the stop is recorded with resumeAt, the setting is per runner and validated, resume now / cancel through the API", async () => {
+  test("usage-limit auto-resume: the stop is recorded with resumeAt, the setting is per runner and validated, resume now / cancel through the API", async () => {
     const starts: StartOptions[] = [];
     const banner = "You've hit your session limit · resets 4:10am (Asia/Tokyo)";
     const script: AgentEvent[] = [
@@ -2796,9 +2796,9 @@ describe("core daemon", () => {
     raw.close();
     const db = new Db(p);
     expect(db.getTask("task_old")).toMatchObject({ budgetUsd: null, routing: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null });
-    expect(db.listTasksWithResume()).toEqual([]); // the #102 column exists on an upgraded database too
-    expect(db.listHistoryImports()).toEqual([]); // the #91 table exists on an upgraded database too
-    // staging from before #12 (no diff_text / stat): inserts must not fail on the user's real database (#66)
+    expect(db.listTasksWithResume()).toEqual([]); // the auto-resume column exists on an upgraded database too
+    expect(db.listHistoryImports()).toEqual([]); // the history imports table exists on an upgraded database too
+    // staging from before the diff view (no diff_text / stat): inserts must not fail on the user's real database
     const scols = (db.sqlite.query("PRAGMA table_info(staging)").all() as Array<{ name: string }>).map((c) => c.name);
     expect(scols).toEqual(expect.arrayContaining(["diff_text", "stat"]));
     db.insertStaged({ id: "st1", taskId: "task_old", path: "/tmp/x", rel: "x", kind: "write", before: null, after: "a", status: "pending", ts: 1, decidedAt: null, diff: "+a", stat: "+1 −0" });
@@ -2811,7 +2811,7 @@ describe("core daemon", () => {
     db.close();
   });
 
-  test("autoStart (#832): the default is claude with the CLI's model; PATCH is partial, refuses an undetected runner and resets the model with the runner", async () => {
+  test("autoStart: the default is claude with the CLI's model; PATCH is partial, refuses an undetected runner and resets the model with the runner", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-autostart-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { lingers: true }), fakeAdapter(SCRIPT, { id: "codex", lingers: true })], { port: 0 });
     const b = `http://127.0.0.1:${c.server.port}`;
@@ -2831,10 +2831,10 @@ describe("core daemon", () => {
     }
   });
 
-  test("autoStart effort (#833): empty by default; PATCH keeps one the runner lists, refuses another, and empties it with a runner change; a settings row from before reads as empty", async () => {
+  test("autoStart effort: empty by default; PATCH keeps one the runner lists, refuses another, and empties it with a runner change; a settings row from before reads as empty", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-autostart-effort-"));
     const pre = new Db(join(h, "switchboard.db"));
-    pre.setSetting("settings", { autoStart: { runner: "claude", model: "m" } }); // saved by #832, before the effort
+    pre.setSetting("settings", { autoStart: { runner: "claude", model: "m" } }); // saved before the effort existed
     pre.close();
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { lingers: true, efforts: ["low", "high"] }), fakeAdapter(SCRIPT, { id: "codex", lingers: true, efforts: ["medium"] })], { port: 0 });
     const b = `http://127.0.0.1:${c.server.port}`;
@@ -2860,7 +2860,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("settings models (#1400): no row = the bundled list; PATCH adds, removes and reorders without a restart; null brings the bundled list back; an empty list, a blank or duplicate id, dak and an undetected runner are 400; Bedrock keeps its own list", async () => {
+  test("settings models: no row = the bundled list; PATCH adds, removes and reorders without a restart; null brings the bundled list back; an empty list, a blank or duplicate id, dak and an undetected runner are 400; Bedrock keeps its own list", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-settings-models-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { models: ["big", "small"], bedrockModels: ["global.big"] }), fakeAdapter(SCRIPT, { id: "dak" })], { port: 0 });
     const b = `http://127.0.0.1:${c.server.port}`;
@@ -2890,7 +2890,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("model candidates (#1401): read only when asked; the CLI's models neither listed nor hidden, with the table's names; 載せない hides one until null brings it back; a runner not detected, a missing CLI, an empty table and a failed read answer why", async () => {
+  test("model candidates: read only when asked; the CLI's models neither listed nor hidden, with the table's names; 載せない hides one until null brings it back; a runner not detected, a missing CLI, an empty table and a failed read answer why", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-model-candidates-"));
     const asked: string[] = [];
     const tables: Record<string, () => string | null> = {
@@ -2942,10 +2942,10 @@ describe("core daemon", () => {
     }
   });
 
-  test("autoStart by kind (#1337): PATCH saves one kind and leaves the others to 共通; null removes it; an undetected runner and an unknown effort are 400; a runner change resets that kind's model and effort; a row without byKind reads as {}", async () => {
+  test("autoStart by kind: PATCH saves one kind and leaves the others to 共通; null removes it; an undetected runner and an unknown effort are 400; a runner change resets that kind's model and effort; a row without byKind reads as {}", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-autostart-kind-"));
     const pre = new Db(join(h, "switchboard.db"));
-    pre.setSetting("settings", { autoStart: { runner: "claude", model: "m", effort: "high" } }); // saved before #1337
+    pre.setSetting("settings", { autoStart: { runner: "claude", model: "m", effort: "high" } }); // saved before autoStart by kind
     pre.close();
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { lingers: true, efforts: ["low", "high"] }), fakeAdapter(SCRIPT, { id: "codex", lingers: true, efforts: ["medium"] })], { port: 0 });
     const b = `http://127.0.0.1:${c.server.port}`;
@@ -2982,7 +2982,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("complete task model (#2769): 同じ by default; PATCH saves a Claude model of claude's list and GET reads it; another runner's 実装, an unknown model or one without a subagent alias is 400; \"\" goes back to 同じ", async () => {
+  test("complete task model: 同じ by default; PATCH saves a Claude model of claude's list and GET reads it; another runner's 実装, an unknown model or one without a subagent alias is 400; \"\" goes back to 同じ", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-task-model-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { lingers: true, models: ["claude-opus-5-5", "claude-sonnet-5-5", "m-plain"] }), fakeAdapter(SCRIPT, { id: "codex", lingers: true, models: ["gpt-6"] })], { port: 0 });
     const b = `http://127.0.0.1:${c.server.port}`;
@@ -3009,7 +3009,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("autoStart fallback (#834): the order is empty and the threshold 0.9 by default; PATCH replaces the order whole and refuses an undetected runner or a threshold out of range", async () => {
+  test("autoStart fallback: the order is empty and the threshold 0.9 by default; PATCH replaces the order whole and refuses an undetected runner or a threshold out of range", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-fallback-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { lingers: true }), fakeAdapter(SCRIPT, { id: "codex", lingers: true })], { port: 0 });
     const b = `http://127.0.0.1:${c.server.port}`;
@@ -3034,7 +3034,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("autoStart fallback (#834): feedback and a prompt schedule start on the order's next runner while the decided one is at its limit, on the CLI default model, with a status line; not when every runner is, nor with an empty order", async () => {
+  test("autoStart fallback: feedback and a prompt schedule start on the order's next runner while the decided one is at its limit, on the CLI default model, with a status line; not when every runner is, nor with an empty order", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-fallback-start-"));
     const claudeStarts: StartOptions[] = [];
     const codexStarts: StartOptions[] = [];
@@ -3056,7 +3056,7 @@ describe("core daemon", () => {
       expect(codexStarts[0]!.model).toBeUndefined();
       expect(codexStarts[0]!.effort).toBeUndefined();
       expect(statuses(task.id)).toEqual([`claude が上限（0.95、${fmtTime(inHour * 1000, Date.now())} に戻る）のため codex で開始`]);
-      // a kind's own runner (#1337) at its limit gives way the same
+      // a kind's own runner at its limit gives way the same
       c.db.setSetting("settings", { autoStart: { runner: "codex", byKind: { fix: { runner: "claude", model: "m-fix", effort: "" } }, fallback: ["claude", "codex"] } });
       const [, fixed] = await feedback("直して", "fix");
       expect(fixed.runner).toBe("codex");
@@ -3071,7 +3071,7 @@ describe("core daemon", () => {
       expect(codexStarts[2]!.model).toBeUndefined();
       expect(statuses(ran.id)).toEqual([`claude が上限（0.95、${fmtTime(inHour * 1000, Date.now())} に戻る）のため codex で開始`]);
       expect(JSON.stringify(await fetch(`${b}/api/schedules/log`).then(j))).toContain("nightly: claude が上限");
-      // (d) codex at its limit too: the decided runner, held until it resets (#2768; "defers an automatic start at the limit")
+      // (d) codex at its limit too: the decided runner, held until it resets ("defers an automatic start at the limit")
       c.db.upsertQuota("codex", "seven_day", 0.97, inHour);
       c.db.setSetting("settings", { autoStart: { runner: "claude", fallback: ["codex"] } });
       const [, both] = await feedback("どちらも上限");
@@ -3094,7 +3094,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("defers an automatic start at the limit (#2768): with no runner to give way to, feedback is made without starting a runner and starts when the window resets; a runner in the order still takes it now", async () => {
+  test("defers an automatic start at the limit: with no runner to give way to, feedback is made without starting a runner and starts when the window resets; a runner in the order still takes it now", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-defer-start-"));
     const claudeStarts: StartOptions[] = [];
     const codexStarts: StartOptions[] = [];
@@ -3150,7 +3150,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("settings tunables (#835): the defaults are the constants core used; PATCH is partial per group, null puts a group back, out of range is 400 and saves nothing", async () => {
+  test("settings tunables: the defaults are the constants core used; PATCH is partial per group, null puts a group back, out of range is 400 and saves nothing", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-tunables-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { lingers: true }), fakeAdapter(SCRIPT, { id: "codex", lingers: true })], { port: 0 });
     const b = `http://127.0.0.1:${c.server.port}`;
@@ -3213,7 +3213,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("autoStart (#832): a database saved before it starts at the runner of routing.llm; one that has it is left alone", () => {
+  test("autoStart: a database saved before it starts at the runner of routing.llm; one that has it is left alone", () => {
     const p = join(mkdtempSync(join(tmpdir(), "switchboard-test-autostart-mig-")), "sb.db");
     const first = new Db(p);
     first.setSetting("settings", { routing: { llm: { enabled: true, runner: "codex" } } });
@@ -3230,7 +3230,7 @@ describe("core daemon", () => {
     empty.close();
   });
 
-  test("a daemon start closes tasks a previous daemon left running / waiting, and reports a temp data directory (#64)", async () => {
+  test("a daemon start closes tasks a previous daemon left running / waiting, and reports a temp data directory", async () => {
     const h11 = mkdtempSync(join(tmpdir(), "switchboard-test11-"));
     try {
       // what a crashed / replaced daemon leaves behind
@@ -3290,7 +3290,7 @@ describe("core daemon", () => {
     expect(isTempDir("/tmpfoo/bar")).toBe(false);
   });
 
-  test("SWITCHBOARD_REPO_ROOT: the meta workspace is the tree agents edit; the web UI and config defaults come from the running code (#178)", () => {
+  test("SWITCHBOARD_REPO_ROOT: the meta workspace is the tree agents edit; the web UI and config defaults come from the running code", () => {
     const here = loadConfig({ SWITCHBOARD_HOME: home });
     expect(here.repoRoot).toBe(here.codeRoot);
     const released = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_REPO_ROOT: join(home, "checkout") });
@@ -3299,7 +3299,7 @@ describe("core daemon", () => {
     expect(released.webDist).toBe(join(here.codeRoot, "apps", "web", "dist"));
   });
 
-  test("SWITCHBOARD_REPO_ROOT: shipped defaults are read from the running code, not from the checkout agents edit (#178)", async () => {
+  test("SWITCHBOARD_REPO_ROOT: shipped defaults are read from the running code, not from the checkout agents edit", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-coderoot-"));
     const checkout = join(h, "checkout");
     mkdirSync(join(checkout, "packages", "core", "config"), { recursive: true });
@@ -3316,7 +3316,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("candidate: a daemon started on a copy of the database starts no schedules, resumes or log imports (#178)", async () => {
+  test("candidate: a daemon started on a copy of the database starts no schedules, resumes or log imports", async () => {
     const spies = [spyOn(Scheduler.prototype, "start"), spyOn(RateLimitResumer.prototype, "start"), spyOn(HistoryImporter.prototype, "start")];
     try {
       for (const [candidate, calls] of [["1", 0], [undefined, 1]] as const) {
@@ -3335,7 +3335,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("promote: a daemon under sb-rescue relays the commit and reports the release; without sb-rescue it says so (#178)", async () => {
+  test("promote: a daemon under sb-rescue relays the commit and reports the release; without sb-rescue it says so", async () => {
     expect(await fetch(`${base}/api/daemon/release`).then(j)).toEqual({ managed: false, latestRelease: null });
     expect((await fetch(`${base}/api/daemon/promote`, { method: "POST", body: "{}" })).status).toBe(409);
 
@@ -3385,7 +3385,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("promote: release counts the commits between the running version and HEAD (ahead, behind) and the running tasks (#1660)", async () => {
+  test("promote: release counts the commits between the running version and HEAD (ahead, behind) and the running tasks", async () => {
     const repo = mkdtempSync(join(tmpdir(), "switchboard-test-ahead-"));
     const git = (...a: string[]) => Bun.spawnSync(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...a]).stdout.toString().trim();
     git("init", "-q"); git("commit", "-q", "--allow-empty", "-m", "first"); git("commit", "-q", "--allow-empty", "-m", "second: the head");
@@ -3436,7 +3436,7 @@ describe("core daemon", () => {
     expect(noChecks.status).toBe(409);
     expect(((await noChecks.json()) as { error: string }).error).toContain("checks");
     // dry run: the argv is the running daemon's own command line
-    // run inside a Switchboard Task it inherits SWITCHBOARD_SUPERVISED=1, so unset it for this call only (#500)
+    // run inside a Switchboard Task it inherits SWITCHBOARD_SUPERVISED=1, so unset it for this call only
     const supervised = process.env.SWITCHBOARD_SUPERVISED;
     delete process.env.SWITCHBOARD_SUPERVISED;
     try {
@@ -3476,7 +3476,7 @@ describe("core daemon", () => {
     expect((await fetch(`${base}/api/schedules/${s.id}`)).status).toBe(404);
   });
 
-  test("schedules API: stuck (#4500) is set when the newest Tasks of a schedule stopped the same way, null otherwise", async () => {
+  test("schedules API: stuck is set when the newest Tasks of a schedule stopped the same way, null otherwise", async () => {
     const wsId = (await fetch(`${base}/api/workspaces`).then(j)).find((w: { kind: string }) => w.kind === "meta").id;
     const mkSchedule = (title: string) => fetch(`${base}/api/schedules`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title, cron: "@nightly", workspaceId: wsId, runner: "claude", prompt: "p" }) }).then(j);
     const stuck = await mkSchedule("stuck-sch");
@@ -3492,7 +3492,7 @@ describe("core daemon", () => {
     for (const id of [stuck.id, fine.id]) await fetch(`${base}/api/schedules/${id}`, { method: "DELETE" });
   });
 
-  test("backlogSweep (#561) is gone from the settings (#2656): GET has no such key, a PATCH of it changes nothing", async () => {
+  test("backlogSweep is gone from the settings: GET has no such key, a PATCH of it changes nothing", async () => {
     const patch = (body: unknown) => fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     expect("backlogSweep" in (await fetch(`${base}/api/settings`).then(j))).toBe(false);
     expect("backlogSweep" in (await patch({ backlogSweep: { implement: 2 } }).then(j))).toBe(false);
@@ -3500,7 +3500,7 @@ describe("core daemon", () => {
     expect(core.db.listWorkspaces().every((w) => w.sweep.implement === 1)).toBe(true);
   });
 
-  test("workspace sweep (#2656): PATCH one side keeps the other, 0〜3 only, survives reopening the DB", async () => {
+  test("workspace sweep: PATCH one side keeps the other, 0〜3 only, survives reopening the DB", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-sweep-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
     try {
@@ -3561,7 +3561,7 @@ async function waitFor(pred: () => Promise<boolean>, ms = 3000) {
   throw new Error("timeout waiting for condition");
 }
 
-describe("automatic judgement (#493)", () => {
+describe("automatic judgement", () => {
   // the real adapters echo the prompt as a user message first; the judge reads the task's first one as the request
   const ok: AgentEvent[] = [{ t: "message.delta", role: "user", text: "依頼文" }, ...SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result")];
   const post = (url: string, body?: unknown, method = "POST") => fetch(url, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -3582,7 +3582,7 @@ describe("automatic judgement (#493)", () => {
     // codex is slow, so its follow-up turn is still running when a test answers the previous judgement
     startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(ok, { lingers: true }), fakeAdapter(ok, { id: "codex", lingers: true, slowMs: 300 })], { port: 0, selfdevChecks: false, judge });
 
-  test("judge: a turn that ended with a background process left (status background) is judged like a done one (#4212)", async () => {
+  test("judge: a turn that ended with a background process left (status background) is judged like a done one", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-judge-bg-"));
     const { calls, judge } = handJudge();
     const withBackground = [...ok.slice(0, -1), { t: "background", count: 1 } as AgentEvent, ok[ok.length - 1]!];
@@ -3601,7 +3601,7 @@ describe("automatic judgement (#493)", () => {
     }
   });
 
-  test("selfdev: a meta Task's turn that ended with a background process left (status background) runs the checks like a done one (#4212)", async () => {
+  test("selfdev: a meta Task's turn that ended with a background process left (status background) runs the checks like a done one", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-selfdev-bg-"));
     // the meta checkout: a typecheck that passes at once
     const repo = join(h, "repo");
@@ -3622,7 +3622,7 @@ describe("automatic judgement (#493)", () => {
     }
   });
 
-  test("settings tunables (#835): the daemon gives both judges judgeAndChoice's fallback, and the two-way judge its timeout, read per turn", async () => {
+  test("settings tunables: the daemon gives both judges judgeAndChoice's fallback, and the two-way judge its timeout, read per turn", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-judge-tunables-"));
     const { calls, judge } = handJudge();
     const rubricOpts: Array<Parameters<typeof judgeRubric>[1]> = [];
@@ -3808,7 +3808,7 @@ describe("automatic judgement (#493)", () => {
   });
 });
 
-describe("shadow run (#99): the same prompt on a second runner, as a task linked by shadowOf", () => {
+describe("shadow run: the same prompt on a second runner, as a task linked by shadowOf", () => {
   const post = (b: string, path: string, body?: unknown, method = "POST") => fetch(`${b}${path}`, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
   const turn = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result" && e.t !== "quota");
   const dakTurn: AgentEvent[] = [{ t: "session.start", runner: "dak", runnerSessionId: "dak-1", cwd: "/tmp" }, { t: "message.delta", role: "assistant", text: "done (dak)" }, { t: "session.end", status: "ok", summary: "done" }];
@@ -3833,7 +3833,7 @@ describe("shadow run (#99): the same prompt on a second runner, as a task linked
       expect(c.db.listEvents(t.id).some((e) => e.ev.t === "status" && e.ev.text.startsWith("並走（dak）を開始") && e.ev.text.includes("主の auto は引き継がれない"))).toBe(true);
       expect(starts[0]).toMatchObject({ prompt: "p", cwd: h, permissionMode: "auto" });
       expect(dakStarts[0]).toMatchObject({ prompt: "p", cwd: h, scope: [h] });
-      expect(dakStarts[0]!.effort).toBeUndefined(); // the primary's effort is claude's; the shadow keeps its CLI default (#833)
+      expect(dakStarts[0]!.effort).toBeUndefined(); // the primary's effort is claude's; the shadow keeps its CLI default
       expect(c.db.routingLog().map((r) => r.taskId)).not.toContain(s.id);
       expect(c.db.shadowTaskOf(t.id)?.id).toBe(s.id);
       // the router's "previous runner for this repo" is the primary's, not the shadow's (the shadow was created last)
@@ -3883,7 +3883,7 @@ describe("shadow run (#99): the same prompt on a second runner, as a task linked
       await waitFor(async () => sends.includes("resume now"));
       await waitFor(async () => (await fetch(`${b}/api/tasks/${t2.id}`).then(j)).task.status === "done");
       expect(dakSends.length).toBe(dakSendsBefore);
-      // stopping the primary cancels a resume the shadow had planned (#102), and nothing else about it
+      // stopping the primary cancels a resume the shadow had planned, and nothing else about it
       c.db.updateTask(s2.id, { resumeAt: Date.now() + 60_000 });
       await post(b, `/api/tasks/${t2.id}/abort`);
       expect(c.db.getTask(s2.id)).toMatchObject({ resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowStopped: false, status: "done" });
@@ -4002,7 +4002,7 @@ describe("shadow run (#99): the same prompt on a second runner, as a task linked
   });
 });
 
-describe("history import (#91): Claude Code sessions run in a terminal, from ~/.claude/projects", () => {
+describe("history import: Claude Code sessions run in a terminal, from ~/.claude/projects", () => {
   const FIXTURE = recordingText("packages/adapters/claude/fixtures/terminal-session.jsonl");
   const SESSION = "11111111-1111-4111-8111-111111111111";
   const post = (url: string, body?: unknown) => fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) }).then(j);
@@ -4181,8 +4181,8 @@ describe("history import (#91): Claude Code sessions run in a terminal, from ~/.
       expect(t).toMatchObject({ origin: "terminal", runner: "claude", status: "done", runnerSessionId: SESSION, title: "リポジトリ構成の説明", model: "claude-fable-5-1", permissionMode: "acceptEdits", workspaceId: ws.id, cwd: repo, scope: [repo], routing: null, budgetUsd: null });
       expect(t.createdAt).toBe(Date.parse("2026-09-06T12:52:26.186Z")); // first record of the log, not the import time
       expect(t.updatedAt).toBe(Date.parse("2026-09-06T13:10:05.000Z"));
-      expect(t.statusAt).toBe(t.updatedAt); // imported as done: done since the log's last record, not since it began (#2029)
-      expect(t).toMatchObject({ outcome: "unknown", reviewedAt: t.updatedAt }); // watched in the terminal: reviewed (#492)
+      expect(t.statusAt).toBe(t.updatedAt); // imported as done: done since the log's last record, not since it began
+      expect(t).toMatchObject({ outcome: "unknown", reviewedAt: t.updatedAt }); // watched in the terminal: reviewed
       const d = await fetch(`${b}/api/tasks/${t.id}`).then(j);
       expect(d.events).toHaveLength(22);
       expect(d.events[0].ev.t).toBe("session.start");
@@ -4359,7 +4359,7 @@ describe("history import (#91): Claude Code sessions run in a terminal, from ~/.
   });
 });
 
-describe("approvals (#26)", () => {
+describe("approvals", () => {
   test("GET /api/approvals lists every unanswered ask across tasks, newest first; an answered one leaves", async () => {
     const create = (title: string) => fetch(`${base}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: home, title, prompt: "write x", runner: "claude" }) }).then(j);
     const first = await create("approvals-a");
@@ -4386,7 +4386,7 @@ describe("approvals (#26)", () => {
   });
 });
 
-describe("task outcome (#492)", () => {
+describe("task outcome", () => {
   const ok = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");
   const failing: AgentEvent[] = [...ok.filter((e) => e.t !== "session.end"), { t: "session.end", status: "error", summary: "boom" }];
   const post = (url: string, body?: unknown) => fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) }).then(j);
@@ -4431,7 +4431,7 @@ describe("task outcome (#492)", () => {
       await waitFor(async () => (await get(x.id)).status === "aborted");
       expect((await get(x.id)).outcome).toBe("failed");
 
-      // (d) a turn that ends ok → unknown (#493 judges the reply)
+      // (d) a turn that ends ok → unknown (the judge reads the reply)
       const d = await create("dak", "ok");
       await waitFor(async () => (await get(d.id)).status === "done");
       expect(await get(d.id)).toMatchObject({ outcome: "unknown", reviewedAt: null });
@@ -4536,7 +4536,7 @@ describe("task outcome (#492)", () => {
     }
   });
 
-  test("POST /api/tasks/:id/archive (#1164): a stopped Task leaves GET /api/tasks and shows under ?archived=1, comes back on false; a reply brings it back; 409 / 400 / 404", async () => {
+  test("POST /api/tasks/:id/archive: a stopped Task leaves GET /api/tasks and shows under ?archived=1, comes back on false; a reply brings it back; 409 / 400 / 404", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-archive-api-"));
     const c = await daemon(h);
     const b = `http://127.0.0.1:${c.server.port}`;
@@ -4579,7 +4579,7 @@ describe("task outcome (#492)", () => {
     }
   });
 
-  test("migrate(): tasks that stopped before #492 are reviewed (reviewedAt = updatedAt), running / waiting / idle ones are not", () => {
+  test("migrate(): tasks that stopped before reviewedAt existed are reviewed (reviewedAt = updatedAt), running / waiting / idle ones are not", () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-outcome-mig-"));
     try {
       const p = join(h, "old.db");
@@ -4602,7 +4602,7 @@ describe("task outcome (#492)", () => {
   });
 });
 
-describe("repeated stops (#948)", () => {
+describe("repeated stops", () => {
   const R = { id: "ci", op: "gh pr merge", target: "PR #12", reason: "permission", evidence: "マージの承認待ち" };
   const other = (id: string) => "```switchboard-stop\n" + JSON.stringify({ ...R, id }) + "\n```";
   // the report split across deltas and closed by the next message; a quoted one, a tool's output and the person's message are not reports
@@ -4618,7 +4618,7 @@ describe("repeated stops (#948)", () => {
   ];
   const post = (b: string, path: string, body?: object) => fetch(`${b}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
 
-  test("#950: the same permission stop reported again is one series, and the ask stays the person's — nothing is allowed or denied by it", async () => {
+  test("the same permission stop reported again is one series, and the ask stays the person's — nothing is allowed or denied by it", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-stops-"));
     const cfg = loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY });
     const c = await startServer(cfg, [fakeAdapter(script, { lingers: true })], { port: 0 });
@@ -4639,7 +4639,7 @@ describe("repeated stops (#948)", () => {
     }
   });
 
-  test("task detail returns eventsArchive for an archived task and null otherwise (#1439)", async () => {
+  test("task detail returns eventsArchive for an archived task and null otherwise", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-evarch-"));
     const cfg = loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY });
     const c = await startServer(cfg, [fakeAdapter(script, { lingers: true })], { port: 0 });
@@ -4696,7 +4696,7 @@ describe("repeated stops (#948)", () => {
 
       const ran = StopReport.parse({ id: "ran-out", op: "git push", target: "origin", reason: "transient", safety: "read-only", state: "exhausted" });
       expect(c.tasks.recordStop(a.id, ran).ok).toBe(true);
-      // the person's next message answers the open stops and one that ran out of retries (#4479); 中断 cancels the planned retry
+      // the person's next message answers the open stops and one that ran out of retries; 中断 cancels the planned retry
       await post(b, `/api/tasks/${a.id}/send`, { text: "続けて" });
       await waitFor(async () => (await get(a.id)).task.status === "waiting");
       const said = c.db.listEvents(a.id).filter((e) => e.ev.t === "message.delta" && e.ev.role === "user").at(-1)!;
@@ -4728,7 +4728,7 @@ describe("repeated stops (#948)", () => {
     }
   });
 
-  test("a runner's own retries (#949): reserved one attempt at a time up to 2, refused past that or when unsafe; the next start is told the open stops and the retries left", async () => {
+  test("a runner's own retries: reserved one attempt at a time up to 2, refused past that or when unsafe; the next start is told the open stops and the retries left", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-retry-"));
     const starts: StartOptions[] = [];
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT.filter((e) => e.t !== "permission.ask"), { starts })], { port: 0 });
@@ -4758,7 +4758,7 @@ describe("repeated stops (#948)", () => {
   });
 });
 
-describe("grants (#2745): a grant goes to the Task once, as the person's reply", () => {
+describe("grants: a grant goes to the Task once, as the person's reply", () => {
   const GRANT = "定期実行 sch_x を enabled: false で POST /api/schedules に登録することだけ許可します";
   // as the screen sends it (a policy is made from the screen only)
   const post = (b: string, path: string, body: object) => fetch(`${b}${path}`, { method: "POST", headers: { "content-type": "application/json", origin: b, "sec-fetch-site": "same-origin" }, body: JSON.stringify(body) });
@@ -4796,7 +4796,6 @@ describe("grants (#2745): a grant goes to the Task once, as the person's reply",
       const [check] = await asksOf(x.b, x.t.id);
       expect(check).toMatchObject({ kind: "check", answers: ["questions"] });
       const answer = { kind: "questions", answers: [{ choices: ["B: 登録する (Recommended)"] }] };
-      // (a policy from a question tool answer is #3123's)
       expect((await post(x.b, "/api/asks/answer", { id: check!.id, answer })).status).toBe(200);
       await waitFor(async () => x.replies().length > 0);
       expect(x.replies()).toEqual([`- ${question}: B: 登録する (Recommended) — 許可: ${GRANT}`]);
@@ -4824,7 +4823,7 @@ describe("grants (#2745): a grant goes to the Task once, as the person's reply",
   });
 });
 
-describe("task evals (#1218)", () => {
+describe("task evals", () => {
   // the real adapters echo the prompt as a user message first; the counter reads the first one as the request
   const script: AgentEvent[] = [{ t: "message.delta", role: "user", text: "依頼文" }, ...SCRIPT];
   const daemon = (h: string) => startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(script, { lingers: true })], { port: 0, selfdevChecks: false, gh: NO_GH });
@@ -4857,12 +4856,12 @@ describe("task evals (#1218)", () => {
       await waitFor(async () => ((await evals(t.id)).rules?.metrics.turns ?? 0) === 2);
       expect((await evals(t.id)).rules.metrics).toMatchObject({ turns: 2, toolCalls: 2, asks: 2, userInstructions: 1 });
       expect(rows(t.id)).toBe(1);
-      // (b) a task without a row (one from before #1218) is counted when read, and the row is kept
+      // (b) a task without a row (one from before the evals counter) is counted when read, and the row is kept
       c.db.deleteEval(t.id, "rules");
       expect(rows(t.id)).toBe(0);
       expect((await evals(t.id)).rules.metrics.turns).toBe(2);
       expect(rows(t.id)).toBe(1);
-      // a row of the old counter (rules@1, no daemonStops, #2089) does not parse: it is counted again when read and replaced
+      // a row of the old counter (rules@1, no daemonStops) does not parse: it is counted again when read and replaced
       const { daemonStops: _d, lastCutByDaemon: _l, ...oldMetrics } = (await evals(t.id)).rules.metrics;
       c.db.upsertEval({ taskId: t.id, source: "rules", by: "rules@1", rubric: null, json: { metrics: oldMetrics, status: "done", outcome: "unknown", costUsd: 0, by: "rules@1", ts: 1 }, ts: 1 });
       const recounted = (await evals(t.id)).rules;
@@ -4881,7 +4880,7 @@ describe("task evals (#1218)", () => {
     }
   });
 
-  test("a turn cut by a daemon that died (no shutdown) is counted again at the next start: the saved row gets the stop (#2089)", async () => {
+  test("a turn cut by a daemon that died (no shutdown) is counted again at the next start: the saved row gets the stop", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-evals-orphan-"));
     const c = await daemon(h);
     const b = `http://127.0.0.1:${c.server.port}`;
@@ -4907,7 +4906,7 @@ describe("task evals (#1218)", () => {
   });
 });
 
-describe("rubric judge (#1219)", () => {
+describe("rubric judge", () => {
   const script: AgentEvent[] = [{ t: "message.delta", role: "user", text: "依頼文" }, ...SCRIPT.filter((e) => e.t !== "permission.ask")];
   type RubricCall = { input: Parameters<typeof judgeRubric>[0]; opts: Parameters<typeof judgeRubric>[1]; answer: (score: number) => void; fail: (e: Error) => void };
   /** A rubric judge the test answers by hand: each call waits until the test resolves it. */
@@ -4997,7 +4996,7 @@ describe("rubric judge (#1219)", () => {
     }
   });
 
-  test("a turn that ended with a background process left (status background) is scored like a done one (#4212)", async () => {
+  test("a turn that ended with a background process left (status background) is scored like a done one", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-rubric-bg-"));
     const { calls, rubricJudge } = handRubricJudge();
     const withBackground = [...script.slice(0, -1), { t: "background", count: 1 } as AgentEvent, script[script.length - 1]!];
@@ -5058,7 +5057,7 @@ describe("rubric judge (#1219)", () => {
   });
 });
 
-describe("human eval (#1220)", () => {
+describe("human eval", () => {
   const script: AgentEvent[] = [{ t: "message.delta", role: "user", text: "依頼文" }, ...SCRIPT.filter((e) => e.t !== "permission.ask")];
   const send = (url: string, method: string, body?: unknown) => fetch(url, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
 
@@ -5120,7 +5119,7 @@ describe("human eval (#1220)", () => {
   });
 });
 
-describe("evals list (#1221)", () => {
+describe("evals list", () => {
   const script: AgentEvent[] = [{ t: "message.delta", role: "user", text: "依頼文" }, ...SCRIPT.filter((e) => e.t !== "permission.ask")];
   const send = (url: string, method: string, body?: unknown) => fetch(url, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
 
@@ -5162,7 +5161,7 @@ describe("evals list (#1221)", () => {
       expect((await list("?limit=2.5")).length).toBe(2); // a fraction is floored, not handed to SQLite
       expect((await list("?limit=9999")).length).toBe(3); // the cap (500) is not an error
       expect((await list("?workspaceId=nope")).length).toBe(0);
-      // the draft of an improvement request (#1221): the task, its counts, the low criterion, the rating; 404 for no task
+      // the draft of an improvement request: the task, its counts, the low criterion, the rating; 404 for no task
       const draft = (await fetch(`${b}/api/tasks/${a.id}/evals/draft`).then(j)).text as string;
       expect(draft).toContain("Task「first」");
       expect(draft).toContain("- 指標: ツール呼び出し 1 / 失敗 0");
@@ -5199,7 +5198,7 @@ describe("evals list (#1221)", () => {
       rmSync(h, { recursive: true, force: true });
     }
   });
-  test("GET /api/evals: models and efforts from session.start (distinct, in order, empty model skipped, an empty effort counted) (#1801, #1802)", async () => {
+  test("GET /api/evals: models and efforts from session.start (distinct, in order, empty model skipped, an empty effort counted)", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-evals-models-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(script, { lingers: true })], { port: 0, selfdevChecks: false, gh: NO_GH });
     const b = `http://127.0.0.1:${c.server.port}`;
@@ -5233,7 +5232,7 @@ describe("evals list (#1221)", () => {
       rmSync(h, { recursive: true, force: true });
     }
   });
-  test("GET /api/evals/summary: this week's sample from the tasks judged the week before only, and the human − judge gap over the rated ones (#1877)", async () => {
+  test("GET /api/evals/summary: this week's sample from the tasks judged the week before only, and the human − judge gap over the rated ones", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-evals-summary-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(script, { lingers: true })], { port: 0, selfdevChecks: false, gh: NO_GH });
     const b = `http://127.0.0.1:${c.server.port}`;
@@ -5277,7 +5276,7 @@ describe("evals list (#1221)", () => {
   });
 });
 
-describe("task status transitions (#1140)", () => {
+describe("task status transitions", () => {
   const ok = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");
   const post = (url: string, body?: unknown) => fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
   const boot = (h: string, adapters: RunnerAdapter[]) => startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), adapters, { port: 0, selfdevChecks: false });
@@ -5470,7 +5469,7 @@ describe("task status transitions (#1140)", () => {
   });
 });
 
-describe("a runner that cannot start for lack of file descriptors (#1571)", () => {
+describe("a runner that cannot start for lack of file descriptors", () => {
   const emfile = () => Object.assign(new Error("EMFILE: too many open files, posix_spawn"), { code: "EMFILE" });
   const post = (url: string, body: unknown) => fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   /** A daemon whose runner starts the first `okStarts` times and throws EMFILE after that. */
@@ -5563,7 +5562,7 @@ describe("a runner that cannot start for lack of file descriptors (#1571)", () =
   }, 15_000);
 });
 
-describe("ledger: Claude's running totals (#2353)", () => {
+describe("ledger: Claude's running totals", () => {
   test("each turn books what the session's total grew by, per model; a repeat adds nothing; a new session starts from 0", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-ledger-total-"));
     const opus = { t: "usage", source: "reported", model: "claude-opus-5-5", inputTokens: 10, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 1.0, cumulative: true } satisfies AgentEvent;
@@ -5648,7 +5647,7 @@ describe("ledger: Claude's running totals (#2353)", () => {
   });
 });
 
-describe("ledger models (#1836)", () => {
+describe("ledger models", () => {
   test("GET /api/ledger/models: one row per runner × model in the period, costliest first, Tasks counted (not usage rows), unpriced flagged, totals equal to the daily rows; days is an integer 1..90", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-ledger-models-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT.filter((e) => e.t !== "permission.ask"))], { port: 0, selfdevChecks: false, gh: NO_GH });
@@ -5686,7 +5685,7 @@ describe("ledger models (#1836)", () => {
   });
 });
 
-describe("ops stops (#2092)", () => {
+describe("ops stops", () => {
   test("GET /api/ops/stops: closed runs per JST day × cause, cut turns and distinct tasks, the run in progress; days is an integer 1..90", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-ops-stops-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT.filter((e) => e.t !== "permission.ask"))], { port: 0, selfdevChecks: false, gh: NO_GH });
@@ -5719,7 +5718,7 @@ describe("ops stops (#2092)", () => {
   });
 });
 
-describe("ops latency (#2102)", () => {
+describe("ops latency", () => {
   test("GET /api/ops/latency: method × route over the period (largest p90 first) and per JST day (newest first), p50 / p90 / count / bytes p50", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-ops-latency-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
@@ -5795,7 +5794,7 @@ describe("ops resources", () => {
       group(now - 60_000, "t_ci", "task", "test", 700_000_000, 4);
       group(now - 60_000, null, "daemon", "judge", 50_000_000, 1);
       group(now - 60_000, "t_unknown", "task", "runner", 100_000_000, 1);
-      // the jobs Tasks asked for (#3995): one running, one ended an hour ago, one ended 8 days ago (not shown)
+      // the jobs Tasks asked for: one running, one ended an hour ago, one ended 8 days ago (not shown)
       const job = (pr: number) => db.insertJob({ kind: pr === 3 ? "review" : "local-ci", taskId: pr === 2 ? "t_unknown" : "t_ci", pr, runner: pr === 3 ? "codex" : null, cwd: "/w", startedAt: at - 9 * 24 * 3600_000 });
       const running = job(1);
       const ended = job(2);
@@ -5842,7 +5841,7 @@ describe("ops resources", () => {
   });
 });
 
-describe("ops load (#2086)", () => {
+describe("ops load", () => {
   test("GET /api/ops/load: JST hours with peaks and limit hits (a unit created again restarts the count), task × kind largest first, ?task= narrows; days is an integer 1..90", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-ops-load-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT.filter((e) => e.t !== "permission.ask"))], { port: 0, selfdevChecks: false, gh: NO_GH });
@@ -5893,7 +5892,7 @@ describe("ops load (#2086)", () => {
   });
 });
 
-describe("ui-layers schedule (#3353)", () => {
+describe("ui-layers schedule", () => {
   test("ui-layers: the monthly check is put on meta once — a second start adds none, and one the person deleted is not put back", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-ui-layers-"));
     const boot = () => startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
@@ -5939,10 +5938,10 @@ describe("ui-layers schedule (#3353)", () => {
   });
 });
 
-describe("insights schedule (#1838)", () => {
+describe("insights schedule", () => {
   const send = (url: string, method: string, body?: unknown) => fetch(url, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
 
-  test("a report /insights writes before the runner reports its session is still this run's: the daemon compares with the Task's creation (#1958)", async () => {
+  test("a report /insights writes before the runner reports its session is still this run's: the daemon compares with the Task's creation", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-insights-"));
     const usage = join(h, "usage-data");
     mkdirSync(usage);
@@ -6079,7 +6078,7 @@ describe("insights schedule (#1838)", () => {
   }, 30_000); // several runner starts and the reports as artifacts: over the 5 s default on a loaded host (docs/design/perf.md "Test flakiness")
 });
 
-describe("artifact fence (#1778)", () => {
+describe("artifact fence", () => {
   const send = (url: string, method: string, body?: unknown) => fetch(url, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
   const fence = (o: object) => "できました。\n```switchboard-artifact\n" + JSON.stringify(o) + "\n```\n";
   const script = (h: string, reply: string): AgentEvent[] => [
@@ -6118,7 +6117,7 @@ describe("artifact fence (#1778)", () => {
     }
   });
 
-  test("a fence that ends the reply without a newline is read before what ends the reply: its row before the tool row, the stop before 完了 (#1936)", async () => {
+  test("a fence that ends the reply without a newline is read before what ends the reply: its row before the tool row, the stop before 完了", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-artifact-fence-"));
     writeFileSync(join(h, "a.html"), "<h1>a</h1>");
     writeFileSync(join(h, "b.html"), "<h1>b</h1>");
@@ -6145,7 +6144,7 @@ describe("artifact fence (#1778)", () => {
     }
   });
 
-  test("an artifact fence that is the reply's last line, right before an ask, is registered before the ask row (#1936)", async () => {
+  test("an artifact fence that is the reply's last line, right before an ask, is registered before the ask row", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-artifact-fence-"));
     writeFileSync(join(h, "d.html"), "<h1>d</h1>");
     const events: AgentEvent[] = [
@@ -6167,7 +6166,7 @@ describe("artifact fence (#1778)", () => {
     }
   });
 
-  test("an artifact fence that is the reply's last line, right before session.end, is registered before 完了 (#1936)", async () => {
+  test("an artifact fence that is the reply's last line, right before session.end, is registered before 完了", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-artifact-fence-"));
     writeFileSync(join(h, "c.html"), "<h1>c</h1>");
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(script(h, "できました。\n```switchboard-artifact\n" + JSON.stringify({ path: "c.html", title: "C" }) + "\n```"))], { port: 0, selfdevChecks: false, gh: NO_GH });
@@ -6204,7 +6203,7 @@ describe("artifact fence (#1778)", () => {
   });
 });
 
-describe("approval batches (#2046)", () => {
+describe("approval batches", () => {
   const post = (b: string, path: string, body: object) => fetch(`${b}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   /** A daemon whose fake runner ends each turn after `slowMs`; `n` Tasks, each done after its first turn. */
   const boot = async (n: number) => {
@@ -6259,7 +6258,7 @@ describe("approval batches (#2046)", () => {
     }
   });
 
-  test("approval window through the daemon: a fired approval-window schedule is one notice of the batch in 判断待ち until none waits (#2054, #2866)", async () => {
+  test("approval window through the daemon: a fired approval-window schedule is one notice of the batch in 判断待ち until none waits", async () => {
     const x = await boot(2);
     const [a, b2] = x.ts as [Task, Task];
     try {

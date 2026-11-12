@@ -9,7 +9,7 @@ import type { AgentEvent, BacklogIssueData, BacklogRepositoryKey } from "@switch
 import { abortOrphanedTasks, createdIssuesOf, Db, deferredOf, DEFERRED_WORDS, eventsByPrefixSql, EVENTS_PAGE_MAX, issuesInText, needsMigration, sizeClass, snapshotBeforeMigrate, type BacklogSnapshotEntry, type NewBacklogOperation } from "./db.ts";
 import { backlogFieldValue, conflictRevision } from "./backlog-merge.ts";
 
-// The stored backlog (#885): records per repository, kept across a restart and a backup.
+// The stored backlog: records per repository, kept across a restart and a backup.
 
 let dir: string;
 beforeEach(() => {
@@ -112,7 +112,7 @@ test("an import does not move the base of a record with an edit waiting to be se
   db.close();
 });
 
-test("putBacklogSnapshot: a write that throws midway keeps the stored values and the next import catches up (#2815)", () => {
+test("putBacklogSnapshot: a write that throws midway keeps the stored values and the next import catches up", () => {
   const path = join(dir, "switchboard.db");
   let db = new Db(path);
   db.putBacklogSnapshot(A, { records: entries(issue()), cursor: "c1", syncedAt: 1000 });
@@ -137,7 +137,7 @@ test("putBacklogSnapshot: a write that throws midway keeps the stored values and
   db.close();
 });
 
-test("the backlog operations are found by their target (#2815)", () => {
+test("the backlog operations are found by their target", () => {
   const path = join(dir, "switchboard.db");
   new Db(path).close();
   const sqlite = new Database(path, { readonly: true });
@@ -164,7 +164,7 @@ test("a backup (snapshotTo) restores the stored backlog and the sync state", () 
   db.close();
 });
 
-test("a database from before #885 gains the backlog tables and keeps its rows", () => {
+test("a database from before the backlog import gains the backlog tables and keeps its rows", () => {
   const path = join(dir, "switchboard.db");
   new Db(path).close();
   const raw = new Database(path);
@@ -181,7 +181,7 @@ test("a database from before #885 gains the backlog tables and keeps its rows", 
   db.close();
 });
 
-test("a pull request stored before #1183 reads as closing nothing; one with closes keeps them", () => {
+test("a pull request stored before the PR's closes were kept reads as closing nothing; one with closes keeps them", () => {
   const path = join(dir, "switchboard.db");
   new Db(path).close();
   const raw = new Database(path);
@@ -197,7 +197,7 @@ test("a pull request stored before #1183 reads as closing nothing; one with clos
   db.close();
 });
 
-test("a pull request stored before #1059 (no updatedAt / files) is dropped, so the next import reads it again", () => {
+test("a pull request stored before its changed files were kept (no updatedAt / files) is dropped, so the next import reads it again", () => {
   const path = join(dir, "switchboard.db");
   new Db(path).close();
   const raw = new Database(path);
@@ -210,7 +210,7 @@ test("a pull request stored before #1059 (no updatedAt / files) is dropped, so t
   db.close();
 });
 
-test("migration: a local change stored before #3971 gains reviewedHead as null, once; one with it keeps it", () => {
+test("migration: a local change stored before reviewedHead existed gains reviewedHead as null, once; one with it keeps it", () => {
   const path = join(dir, "switchboard.db");
   new Db(path).close();
   const raw = new Database(path);
@@ -230,7 +230,7 @@ test("migration: a local change stored before #3971 gains reviewedHead as null, 
   db.close();
 });
 
-test("migration: records stored before #651 gain closedAt / mergedAt as null, and the next import reads every Issue again, once", () => {
+test("migration: records stored before closedAt / mergedAt existed gain closedAt / mergedAt as null, and the next import reads every Issue again, once", () => {
   const path = join(dir, "switchboard.db");
   new Db(path).close();
   const raw = new Database(path);
@@ -254,7 +254,7 @@ test("migration: records stored before #651 gain closedAt / mergedAt as null, an
   db.close();
 });
 
-test("migration: records stored before #1014 gain stateReason / mergeCommit as null, and the next import reads every Issue again", () => {
+test("migration: records stored before stateReason / mergeCommit existed gain stateReason / mergeCommit as null, and the next import reads every Issue again", () => {
   const path = join(dir, "switchboard.db");
   new Db(path).close();
   const raw = new Database(path);
@@ -287,7 +287,7 @@ test("migration: records stored before #1014 gain stateReason / mergeCommit as n
   db.close();
 });
 
-// Edits made here and the operations that send them (#886).
+// Edits made here and the operations that send them.
 
 const set = (field: string, value: unknown, base: unknown, issue = "I_12"): NewBacklogOperation => ({ issue, targetKind: "issue", target: issue, kind: "set", field, payload: value, base });
 const comment = (body: string, issue = "I_12"): NewBacklogOperation => ({ issue, targetKind: "comment", target: `local:${body}`, kind: "comment", payload: { body } });
@@ -424,7 +424,7 @@ test("a new Issue is told apart by its local id until created; then it and the o
   db.close();
 });
 
-// What an import decides about the edits waiting to be sent, and the user's choice on a conflict (#887, 初期方式 A).
+// What an import decides about the edits waiting to be sent, and the user's choice on a conflict (初期方式 A).
 
 const statusOf = (db: Db) => Object.fromEntries(db.listPendingBacklogOperations(A).map((o) => [o.field ?? o.kind, o.status]));
 const issueRec = (db: Db) => db.getBacklogRecord({ ...A, objectKind: "issue", externalId: "I_12" })!;
@@ -449,7 +449,7 @@ test("an import compares each edit with GitHub's value: one side taken, other fi
   db.close();
 });
 
-test("overwritten (#1329): a conflict found after the write survives an import at the local value; remote sends the found value back, none there is 409, an old revision 409", () => {
+test("overwritten: a conflict found after the write survives an import at the local value; remote sends the found value back, none there is 409, an old revision 409", () => {
   const db = new Db(join(dir, "switchboard.db"));
   db.putBacklogSnapshot(A, { records: entries(issue()), cursor: null, syncedAt: 1000 });
   db.applyBacklogEdit(A, { records: [], operations: [set("title", "v3", "PBI: stored"), set("body", "b3", "## ユーザーストーリー\n本文")] });
@@ -477,19 +477,19 @@ test("overwritten (#1329): a conflict found after the write survives an import a
   db.close();
 });
 
-test("resumeReason (#550): a database made before the column gets it on open, and its rows read as null", () => {
+test("resumeReason: a database made before the column gets it on open, and its rows read as null", () => {
   const path = join(dir, "old-tasks.db");
   const raw = new Database(path);
   raw.exec("CREATE TABLE tasks (id TEXT PRIMARY KEY, workspace_id TEXT, title TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, scope TEXT NOT NULL, status TEXT NOT NULL, runner_session_id TEXT, model TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, routing TEXT, budget_usd REAL, schedule_id TEXT, permission_mode TEXT, origin TEXT NOT NULL DEFAULT 'switchboard', resume_at INTEGER, shadow_of TEXT, shadow_stopped INTEGER NOT NULL DEFAULT 0, workspace_reason TEXT, outcome TEXT NOT NULL DEFAULT 'unknown', reviewed_at INTEGER, judged_result TEXT, judged_reason TEXT, judged_by TEXT, execution_mode TEXT NOT NULL DEFAULT 'local', cloud_session TEXT, source_cloud_task_id TEXT, effort TEXT)");
   raw.exec("INSERT INTO tasks (id, title, runner, cwd, scope, status, created_at, updated_at, resume_at) VALUES ('t_old', 'old', 'claude', '/work/app', '[]', 'done', 1, 1, 1000)");
   raw.close();
   const db = new Db(path);
-  expect((db.sqlite.query("PRAGMA table_info(tasks)").all() as Array<{ name: string }>).map((c) => c.name)).toEqual(expect.arrayContaining(["resume_reason", "resume_window", "resume_since", "resume_planned_at"])); // #2237 too
+  expect((db.sqlite.query("PRAGMA table_info(tasks)").all() as Array<{ name: string }>).map((c) => c.name)).toEqual(expect.arrayContaining(["resume_reason", "resume_window", "resume_since", "resume_planned_at"])); // the early-resume columns too
   expect(db.getTask("t_old")).toMatchObject({ resumeAt: 1000, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null });
   db.close();
 });
 
-test("archivedAt (#1164): listTasks() leaves archived Tasks out, listTasks(true) lists only them, and null brings one back", () => {
+test("archivedAt: listTasks() leaves archived Tasks out, listTasks(true) lists only them, and null brings one back", () => {
   const db = new Db(join(dir, "archive.db"));
   const mk = (id: string, updatedAt: number) => db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "done", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: updatedAt, createdAt: updatedAt, updatedAt });
   mk("t_a", 1);
@@ -504,7 +504,7 @@ test("archivedAt (#1164): listTasks() leaves archived Tasks out, listTasks(true)
   db.close();
 });
 
-test("listEventsTail / listEventsBefore (#1165): the last `limit` events, and the page before a seq, both in seq order", () => {
+test("listEventsTail / listEventsBefore: the last `limit` events, and the page before a seq, both in seq order", () => {
   const db = new Db(join(dir, "events.db"));
   db.sqlite.query("INSERT INTO tasks (id, title, runner, cwd, scope, status, origin, shadow_stopped, outcome, created_at, updated_at, status_at) VALUES ('t_ev', 't', 'claude', '/work/app', '[]', 'done', 'switchboard', 0, 'done', 1, 1, 1)").run();
   for (let i = 0; i < 500; i++) db.appendEvent("t_ev", { t: "message.delta", role: "assistant", text: `${i}` });
@@ -518,11 +518,11 @@ test("listEventsTail / listEventsBefore (#1165): the last `limit` events, and th
   db.close();
 });
 
-/** A done task row for the events of #1878's readers. */
+/** A done task row for the events of the weekly request-count readers. */
 const eventsTask = (db: Db, id: string) =>
   db.sqlite.query("INSERT INTO tasks (id, title, runner, cwd, scope, status, origin, shadow_stopped, outcome, created_at, updated_at, status_at) VALUES (?, 't', 'claude', '/work/app', '[]', 'done', 'switchboard', 0, 'done', 1, 1, 1)").run(id);
 
-test("created issues from events (#1878): the Issue URLs in the successful results of gh issue create / request_issue.sh, and the app's stored creates by localId, once each", () => {
+test("created issues from events: the Issue URLs in the successful results of gh issue create / request_issue.sh, and the app's stored creates by localId, once each", () => {
   const db = new Db(join(dir, "created.db"));
   eventsTask(db, "t_c");
   const call = (id: string, command: string) => db.appendEvent("t_c", { t: "tool.call", id, name: "Bash", input: { command }, summary: command });
@@ -568,7 +568,7 @@ test("created issues from events (#1878): the Issue URLs in the successful resul
   db.close();
 });
 
-test("deferred from final summary (#1878): the last session.end's summary has a word that puts something off", () => {
+test("deferred from final summary: the last session.end's summary has a word that puts something off", () => {
   const db = new Db(join(dir, "deferred.db"));
   ["残した", "見送り", "後回し", "スコープ外", "別 Issue", "別Issue"].forEach((word, i) => {
     eventsTask(db, `t_${i}`);
@@ -586,7 +586,7 @@ test("deferred from final summary (#1878): the last session.end's summary has a 
   db.close();
 });
 
-test("listEventsBefore (#1142): a page that starts inside a streamed message reaches back to the message's first delta", () => {
+test("listEventsBefore: a page that starts inside a streamed message reaches back to the message's first delta", () => {
   const db = new Db(join(dir, "events-msg.db"));
   db.sqlite.query("INSERT INTO tasks (id, title, runner, cwd, scope, status, origin, shadow_stopped, outcome, created_at, updated_at, status_at) VALUES ('t_msg', 't', 'claude', '/work/app', '[]', 'done', 'switchboard', 0, 'done', 1, 1, 1)").run();
   db.appendEvent("t_msg", { t: "tool.call", id: "c1", name: "Read", summary: "Read a" }); // 1
@@ -611,7 +611,7 @@ test("listEventsBefore (#1142): a page that starts inside a streamed message rea
   db.close();
 });
 
-test("overwritten (#1329): a database made before the column gets it on open", () => {
+test("overwritten: a database made before the column gets it on open", () => {
   const path = join(dir, "old.db");
   const raw = new Database(path);
   raw.exec("CREATE TABLE backlog_operations (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, service TEXT NOT NULL, host TEXT NOT NULL, repository TEXT NOT NULL, issue TEXT NOT NULL, target_kind TEXT NOT NULL, target TEXT NOT NULL, kind TEXT NOT NULL, field TEXT, payload TEXT NOT NULL, base TEXT, status TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0, retry_at INTEGER, remote_id TEXT, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)");
@@ -695,7 +695,7 @@ test("a conflict whose value GitHub came to is done; the local value of one GitH
   db.close();
 });
 
-test("opening the database while another connection writes waits instead of failing (BUSY_SNAPSHOT, #1597)", async () => {
+test("opening the database while another connection writes waits instead of failing (BUSY_SNAPSHOT)", async () => {
   const path = join(dir, "busy.sqlite");
   new Db(path).sqlite.close();
   // a busy daemon: small write transactions one after another for about 2 s
@@ -752,12 +752,12 @@ test("stage: a stage Task in `background` status, with a daemon job or a reply b
   expect(db.activeStageTask("ws", 7)!.id).toBe("t_err");
   expect(db.listActiveStageTasks()).toEqual([]);
   db.updateTask("t_err", { resumeAt: null });
-  // a job it asked the daemon for (#3992) keeps it active until the job ends
+  // a job it asked the daemon for keeps it active until the job ends
   const job = db.insertJob({ kind: "local-ci", taskId: "t_plain", pr: 1, runner: null, cwd: "/work/app", startedAt: 4 });
   expect(db.activeStageTask("ws", 8)!.id).toBe("t_plain");
   db.finishJob(job.id, { status: "pass", exitCode: 0, summary: "", endedAt: 5 });
   expect(db.activeStageTask("ws", 8)).toBeNull();
-  // so does its last reply being judged (#493): until then a question it ended on does not show
+  // so does its last reply being judged: until then a question it ended on does not show
   db.updateTask("t_plain", { judgingAt: 6, updatedAt: 3 });
   expect(db.activeStageTask("ws", 8)!.id).toBe("t_plain");
   db.updateTask("t_plain", { judgingAt: null, updatedAt: 3 });
@@ -765,7 +765,7 @@ test("stage: a stage Task in `background` status, with a daemon job or a reply b
   db.close();
 });
 
-test("stage: a database from before #1139 takes the Issue and stage of a stage Task from its title once, and four lookups read the columns", () => {
+test("stage: a database from before the stage columns takes the Issue and stage of a stage Task from its title once, and four lookups read the columns", () => {
   const path = join(dir, "switchboard.db");
   new Db(path).close();
   const raw = new Database(path);
@@ -802,7 +802,7 @@ test("stage: a database from before #1139 takes the Issue and stage of a stage T
   again.close();
 });
 
-test("ask_answers: an answer and a failed start are kept apart, one never drops the other, and the old ones are pruned (#1139)", () => {
+test("ask_answers: an answer and a failed start are kept apart, one never drops the other, and the old ones are pruned", () => {
   const db = new Db(join(dir, "asks.db"));
   const result = { ask: null, already: false, changes: [] };
   db.rememberAskAnswer("a", { at: 100, failure: { at: 100, reason: "no runner" } });
@@ -819,7 +819,7 @@ test("ask_answers: an answer and a failed start are kept apart, one never drops 
   db.close();
 });
 
-test("ledger day is the JST date (#2028): a row at 15:30 UTC falls on the next day, whatever the daemon's time zone", () => {
+test("ledger day is the JST date: a row at 15:30 UTC falls on the next day, whatever the daemon's time zone", () => {
   const db = new Db(join(dir, "switchboard.db"));
   const row = (ts: number, costUsd: number) => ({ taskId: "t1", runner: "claude" as const, model: null, inputTokens: 1, outputTokens: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, costUsd, billedUsd: 0, source: "reported", ts });
   db.insertLedger(row(Date.parse("2026-10-19T14:59:00Z"), 1)); // 23:59 JST on 10/19
@@ -831,7 +831,7 @@ test("ledger day is the JST date (#2028): a row at 15:30 UTC falls on the next d
   db.close();
 });
 
-test("statusAt moves only on a status change (#2029): title, outcome, 確認済み and a patch to the same status leave it", () => {
+test("statusAt moves only on a status change: title, outcome, 確認済み and a patch to the same status leave it", () => {
   const db = new Db(join(dir, "switchboard.db"));
   const base = { id: "t1", workspaceId: null, title: "t", runner: "claude" as const, cwd: "/w", scope: ["/w"], status: "running" as const, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard" as const, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown" as const, reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1_000, createdAt: 1_000, updatedAt: 1_000 };
   db.insertTask(base);
@@ -851,7 +851,7 @@ test("statusAt moves only on a status change (#2029): title, outcome, 確認済�
   db.close();
 });
 
-test("statusAt migration (#2029): a tasks table without status_at gets each row's updated_at", () => {
+test("statusAt migration: a tasks table without status_at gets each row's updated_at", () => {
   const path = join(dir, "switchboard.db");
   new Db(path).close();
   const raw = new Database(path);
@@ -869,7 +869,7 @@ test("statusAt migration (#2029): a tasks table without status_at gets each row'
   check.close();
 });
 
-test("migration (#2656): the global backlogSweep moves to every workspace once and leaves settings", () => {
+test("migration: the global backlogSweep moves to every workspace once and leaves settings", () => {
   const path = join(dir, "switchboard.db");
   const pre = new Db(path);
   pre.upsertWorkspace({ name: "sb", path: "/w/sb", kind: "meta" });
@@ -895,7 +895,7 @@ test("migration (#2656): the global backlogSweep moves to every workspace once a
   again.close();
 });
 
-test("api requests (#2101): saved as given, rows older than 7 days dropped on the next save", () => {
+test("api requests: saved as given, rows older than 7 days dropped on the next save", () => {
   const db = new Db(join(dir, "switchboard.db"));
   const DAY = 24 * 3600 * 1000;
   const now = Date.now();
@@ -909,11 +909,11 @@ test("api requests (#2101): saved as given, rows older than 7 days dropped on th
   db.close();
 });
 
-test("size classes (#2103): small up to 1,000 events, medium up to 5,000, large above; no count is no class", () => {
+test("size classes: small up to 1,000 events, medium up to 5,000, large above; no count is no class", () => {
   expect([0, 1000, 1001, 5000, 5001, null].map(sizeClass)).toEqual(["small", "small", "medium", "medium", "large", null]);
 });
 
-test("ledger migration (#2353): a Task's Claude rows become the difference of the running totals; one-shot rows stay", () => {
+test("ledger migration: a Task's Claude rows become the difference of the running totals; one-shot rows stay", () => {
   const path = join(dir, "switchboard.db");
   new Db(path).close();
   const raw = new Database(path);
@@ -954,7 +954,7 @@ test("ledger migration (#2353): a Task's Claude rows become the difference of th
   again.close();
 });
 
-test("listStopRecords uses the events_stop index (#3080)", () => {
+test("listStopRecords uses the events_stop index", () => {
   const db = new Db(join(dir, "switchboard.db"));
   const stop = (id: string, taskId: string, at: number) => ({ id, work: { workspaceId: null, issue: 7, taskId }, op: "git push", target: "", reason: "permission" as const, evidence: "", safety: "before-effect" as const, conditions: [], answer: null, actions: [], state: "waiting" as const, at });
   db.appendEventAt("t1", { t: "message.delta", role: "assistant", text: "a" }, 1000);
@@ -968,7 +968,7 @@ test("listStopRecords uses the events_stop index (#3080)", () => {
   expect(plan.map((p) => p.detail).join("\n")).toContain("USING INDEX events_stop");
 });
 
-test("listEventsByPrefix reads the partial indexes and returns the rows oldest first (#4174)", () => {
+test("listEventsByPrefix reads the partial indexes and returns the rows oldest first", () => {
   const db = new Db(join(dir, "switchboard.db"));
   const ask = { t: "permission.ask", id: "a1", tool: "Bash", input: {} } as unknown as AgentEvent;
   db.appendEventAt("t1", { t: "message.delta", role: "assistant", text: "x" }, 1000);
@@ -988,7 +988,7 @@ test("listEventsByPrefix reads the partial indexes and returns the rows oldest f
   expect(plan).not.toMatch(/SCAN events$/m); // a bare SCAN is the full table; "SCAN events USING INDEX" reads the partial index only
 });
 
-test("listBacklogRecords keeps a copy until the repository's records change (#3080)", () => {
+test("listBacklogRecords keeps a copy until the repository's records change", () => {
   const db = new Db(join(dir, "switchboard.db"));
   db.putBacklogSnapshot(A, { records: entries(issue()), cursor: "c1", syncedAt: 1000 });
   db.putBacklogSnapshot(B, { records: entries(issue({ title: "other" }), "I_other"), cursor: "c2", syncedAt: 2000 });
@@ -1051,7 +1051,7 @@ test("listBacklogRecords keeps a copy until the repository's records change (#30
   db.close();
 });
 
-test("listPendingBacklogOperations uses the backlog_operations_open index (#3080)", () => {
+test("listPendingBacklogOperations uses the backlog_operations_open index", () => {
   const db = new Db(join(dir, "switchboard.db"));
   const plan = db.sqlite.query("EXPLAIN QUERY PLAN SELECT * FROM backlog_operations WHERE status != 'done' AND (?1 IS NULL OR (service = ?1 AND host = ?2 AND repository = ?3)) ORDER BY seq").all(null, null, null) as Array<{ detail: string }>;
   expect(plan.map((p) => p.detail).join("\n")).toContain("USING INDEX backlog_operations_open");
@@ -1084,7 +1084,7 @@ test("outbound: an existing DB keeps both on, a new DB has both off", () => {
   reopened.close();
 });
 
-test("repeated thinking status is folded once at open (#2738)", () => {
+test("repeated thinking status is folded once at open", () => {
   const path = join(dir, "db.sqlite");
   const thinking = { t: "status", text: "thinking" } as const;
   const d = new Db(path);
@@ -1115,7 +1115,7 @@ test("repeated thinking status is folded once at open (#2738)", () => {
   third.close();
 });
 
-test("migration (#1802): a session.start without effort gets its task's effort (null = \"\"), and a second open changes nothing", () => {
+test("migration: a session.start without effort gets its task's effort (null = \"\"), and a second open changes nothing", () => {
   const path = join(dir, "db-effort.sqlite");
   const d = new Db(path);
   const base = { workspaceId: null, title: "t", runner: "claude", cwd: "/x", scope: ["/x"] as string[], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 } as const;
@@ -1146,7 +1146,7 @@ const oldDb = (path: string) => {
   raw.close();
 };
 
-test("migrate: a database without queued_at / queued_prompt gets both columns added and keeps its rows (#1141)", () => {
+test("migrate: a database without queued_at / queued_prompt gets both columns added and keeps its rows", () => {
   const path = join(dir, "switchboard.db");
   new Db(path).close();
   const raw = new Database(path);
@@ -1166,7 +1166,7 @@ test("migrate: a database without queued_at / queued_prompt gets both columns ad
   again.close();
 });
 
-test("queued_at / queued_prompt are written only by setQueued / takeQueued, and a status that leaves idle clears both (#1141)", () => {
+test("queued_at / queued_prompt are written only by setQueued / takeQueued, and a status that leaves idle clears both", () => {
   const db = new Db(join(dir, "switchboard.db"));
   const base = { workspaceId: null, title: "t", runner: "claude" as const, cwd: "/w", scope: ["/w"], status: "idle" as const, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard" as const, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown" as const, reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 };
   const prompt = (id: string) => (db.sqlite.query("SELECT queued_prompt FROM tasks WHERE id = ?").get(id) as { queued_prompt: string | null }).queued_prompt;

@@ -539,7 +539,7 @@ describe("public-sync", () => {
     expect(pubGit("show", "main:SECURITY.md")).toContain("app-public");
   });
 
-  test("the public kit goes into the tree: the one request form, the close-pull-requests workflow, SECURITY.md where there is none, the policy section before the first heading — and no PBI / Task form (#1742)", () => {
+  test("the public kit goes into the tree: the one request form, the close-pull-requests workflow, SECURITY.md where there is none, the policy section before the first heading — and no PBI / Task form", () => {
     for (const f of ["pbi.yml", "task.yml", "feature_request.yml"]) write(`.github/ISSUE_TEMPLATE/${f}`, `name: ${f}\n`);
     write(".github/ISSUE_TEMPLATE/config.yml", "blank_issues_enabled: true\n");
     write(".github/workflows/project-autoadd.yml", "on: issues\n");

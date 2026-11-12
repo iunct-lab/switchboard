@@ -16,11 +16,11 @@ import type { ReportedTotal } from "./pricing.ts";
 /** The `settings` row of the ADK servers added in Settings (see Db.getCustomRunners). */
 export const CUSTOM_RUNNERS_KEY = "customRunners";
 
-/** One record of an import (#885): `remote` is read only when `fetchState` is `fetched`. */
+/** One record of an import: `remote` is read only when `fetchState` is `fetched`. */
 export type BacklogSnapshotEntry = BacklogRecord extends infer R ? (R extends BacklogRecord ? Pick<R, "objectKind" | "externalId" | "remote" | "fetchState"> : never) : never;
 
 /**
- * One change to the backlog made here and not yet sent to the service (#886). `create` = a new Issue (`payload`: its
+ * One change to the backlog made here and not yet sent to the service. `create` = a new Issue (`payload`: its
  * fields), `set` = one field of a record (`payload`: the value; `field` as `applyBacklogField` reads it), `comment` = a
  * new comment (`payload`: `{ body }`). `issue` = the Issue record it belongs to (`local:<uuid>` until it is created):
  * the operations of one Issue are sent in `seq` order, one after the other. `target` = the record it changes (the Issue,
@@ -35,10 +35,10 @@ export type BacklogOperationKind = "create" | "set" | "comment";
  */
 export type BacklogOperationStatus = "pending" | "sending" | "unknown" | "conflict" | "failed" | "done";
 /**
- * What the read after a write found in GitHub's edit history (#1329): another login's edit of the field between the
+ * What the read after a write found in GitHub's edit history: another login's edit of the field between the
  * check and the write, which the write replaced. `value` absent = the revision's content is gone from the history (the
  * editor and the time stay), or `unreadable` = why the history could not be read (then nothing is known); `since` = the
- * check read's time the history is read from, so a later send can read it again (#3518).
+ * check read's time the history is read from, so a later send can read it again.
  */
 export interface BacklogOverwritten { value?: unknown; editor: string | null; at: string | null; unreadable?: string; since?: string }
 export interface BacklogOperation extends BacklogRepositoryKey {
@@ -58,14 +58,14 @@ export interface BacklogOperation extends BacklogRepositoryKey {
   /** The service's id of what a `create` / `comment` made, once known. */
   remoteId: string | null;
   error: string | null;
-  /** A conflict found after the write (#1329): kept until chosen on, whatever an import reads. */
+  /** A conflict found after the write: kept until chosen on, whatever an import reads. */
   overwritten: BacklogOverwritten | null;
   createdAt: number;
   updatedAt: number;
 }
 /** An operation `applyBacklogEdit` queues (`id`: given, else a new UUID); `replace` = the id of a `pending` one of the same record and field whose payload this replaces instead. */
 export type NewBacklogOperation = Pick<BacklogOperation, "issue" | "targetKind" | "target" | "kind" | "payload"> & { id?: string; field?: string; base?: unknown; replace?: string; /** a comment written earlier (moved when GitHub sync is turned on): sent without the window */ noDelay?: boolean };
-/** A choice on a conflict refused (#887); `status` = the HTTP status the API answers with. Nothing was changed. */
+/** A choice on a conflict refused; `status` = the HTTP status the API answers with. Nothing was changed. */
 /** A comment is sent to GitHub only this long after it is written, and can be taken back until then (it notifies people). */
 export const SEND_DELAY_MS = 60_000;
 /** A comment still inside the window it was written with (not one waiting out a limit or a backoff after a try). */
@@ -82,8 +82,8 @@ export class BacklogResolveError extends Error {
 export type BacklogLocalEntry = { objectKind: BacklogObjectKind; externalId: string; local: unknown };
 
 /**
- * Applies a `set` operation's `value` to a copy of a record's data (#886): an Issue's `title` / `body` / `state` /
- * `stateReason` / `milestone` / `parent` / `change` (a local change's merge, laid over it: #2485), or `label:<name>` (true = on, false = off); a Project item's `field:<name>`. `member` (a
+ * Applies a `set` operation's `value` to a copy of a record's data: an Issue's `title` / `body` / `state` /
+ * `stateReason` / `milestone` / `parent` / `change` (a local change's merge, laid over it), or `label:<name>` (true = on, false = off); a Project item's `field:<name>`. `member` (a
  * Project item in the Project or not) changes no value. Anything else is refused.
  */
 export function applyBacklogField(kind: BacklogObjectKind, data: unknown, field: string, value: unknown): unknown {
@@ -93,11 +93,11 @@ export function applyBacklogField(kind: BacklogObjectKind, data: unknown, field:
     const name = field.slice("label:".length);
     d.labels = value ? [...new Set([...(d.labels ?? []), name])] : (d.labels ?? []).filter((l: string) => l !== name);
   } else if (field.startsWith("field:")) d.fields = { ...d.fields, [field.slice("field:".length)]: value };
-  // a local change's merge (#2485) is laid over its branches
+  // a local change's merge is laid over its branches
   else if (field === "change") d.change = { ...d.change, ...(value as object) };
   else {
     // a close is completed until a `stateReason` operation after it says otherwise, as GitHub answers it; an open Issue
-    // has no reason. A state it already has changes nothing (#3146)
+    // has no reason. A state it already has changes nothing
     if (kind === "issue" && field === "state" && d.state !== value) d.stateReason = value === "CLOSED" ? "COMPLETED" : null;
     if (field !== "member") d[field] = value;
   }
@@ -107,7 +107,7 @@ export function applyBacklogField(kind: BacklogObjectKind, data: unknown, field:
 const isBacklogField = (kind: BacklogObjectKind, field: string | undefined): field is string =>
   !!field && (kind === "issue" ? /^label:./.test(field) || ["title", "body", "state", "stateReason", "milestone", "parent", "change"].includes(field) : kind === "project-item" && (/^field:./.test(field) || field === "member"));
 
-/** The prefixes listEventsByPrefix reads, with the length each events_* index compares (#4174): keep them equal to SCHEMA's WHERE. */
+/** The prefixes listEventsByPrefix reads, with the length each events_* index compares: keep them equal to SCHEMA's WHERE. */
 const EVENT_PREFIX_INDEX: Record<string, number> = {
   '{"t":"permission.ask",': 22,
   '{"t":"permission.resolved",': 27,
@@ -149,9 +149,9 @@ CREATE TABLE IF NOT EXISTS schedules (
 CREATE TABLE IF NOT EXISTS events (
   task_id TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL, json TEXT NOT NULL, PRIMARY KEY (task_id, seq)
 );
--- listStopRecords (#3080): the stop.record rows only, so the backlog list does not read every event's json; the WHERE is that query's, word for word
+-- listStopRecords: the stop.record rows only, so the backlog list does not read every event's json; the WHERE is that query's, word for word
 CREATE INDEX IF NOT EXISTS events_stop ON events (task_id) WHERE substr(json, 1, 19) = '{"t":"stop.record",';
--- listEventsByPrefix (#4174): the intervention events only; each WHERE is the one listEventsByPrefix builds from EVENT_PREFIX_INDEX, word for word
+-- listEventsByPrefix: the intervention events only; each WHERE is the one listEventsByPrefix builds from EVENT_PREFIX_INDEX, word for word
 CREATE INDEX IF NOT EXISTS events_ask ON events (task_id) WHERE substr(json, 1, 22) = '{"t":"permission.ask",';
 CREATE INDEX IF NOT EXISTS events_resolved ON events (task_id) WHERE substr(json, 1, 27) = '{"t":"permission.resolved",';
 CREATE INDEX IF NOT EXISTS events_user_say ON events (task_id) WHERE substr(json, 1, 34) = '{"t":"message.delta","role":"user"';
@@ -223,24 +223,24 @@ CREATE TABLE IF NOT EXISTS backlog_operations (
 );
 CREATE INDEX IF NOT EXISTS backlog_operations_issue ON backlog_operations (service, host, repository, issue);
 CREATE INDEX IF NOT EXISTS backlog_operations_target ON backlog_operations (service, host, repository, target_kind, target);
--- listPendingBacklogOperations (#3080): the few edits not done, without reading every operation; the WHERE is that query's
+-- listPendingBacklogOperations: the few edits not done, without reading every operation; the WHERE is that query's
 CREATE INDEX IF NOT EXISTS backlog_operations_open ON backlog_operations (seq) WHERE status != 'done';
 CREATE TABLE IF NOT EXISTS task_evals (
   task_id TEXT NOT NULL, source TEXT NOT NULL, by TEXT NOT NULL, rubric TEXT, json TEXT NOT NULL, ts INTEGER NOT NULL,
   PRIMARY KEY (task_id, source)
 );
--- the copy of a task's diff (#3833): one row per task, so a removed worktree can still be shown; kept out of tasks (listTasks reads that often)
+-- the copy of a task's diff: one row per task, so a removed worktree can still be shown; kept out of tasks (listTasks reads that often)
 CREATE TABLE IF NOT EXISTS task_diffs (task_id TEXT PRIMARY KEY, at INTEGER NOT NULL, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS ask_answers (id TEXT PRIMARY KEY, at INTEGER NOT NULL, result TEXT, failure TEXT);
--- #1755 (local passkeys) was reverted; the table stays empty and unused because migrations only add (schema.test.ts, releases-and-rescue.md)
+-- the local passkeys were reverted; the table stays empty and unused because migrations only add (schema.test.ts, releases-and-rescue.md)
 CREATE TABLE IF NOT EXISTS passkeys (id TEXT PRIMARY KEY, rp_id TEXT NOT NULL, public_key TEXT NOT NULL, algorithm INTEGER NOT NULL, counter INTEGER NOT NULL, created INTEGER NOT NULL, last_used INTEGER);
--- one row per daemon start (#2085, ops-stops.ts): the stopping daemon writes clean_exit / ended_at, the next start end_reason
+-- one row per daemon start (ops-stops.ts): the stopping daemon writes clean_exit / ended_at, the next start end_reason
 CREATE TABLE IF NOT EXISTS daemon_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER NOT NULL, ended_at INTEGER, end_reason TEXT, end_detail TEXT, clean_exit TEXT,
   version TEXT, boot_id TEXT, interrupted_task_ids TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS daemon_runs_ended ON daemon_runs (ended_at);
--- the host's load once a minute (#2086, ops-load.ts): the unit's cgroup, and task × owner × kind of its processes. 7 days
+-- the host's load once a minute (ops-load.ts): the unit's cgroup, and task × owner × kind of its processes. 7 days
 CREATE TABLE IF NOT EXISTS ops_load (
   ts INTEGER PRIMARY KEY, mem_current INTEGER NOT NULL, mem_max INTEGER, swap_current INTEGER NOT NULL, events_max INTEGER NOT NULL,
   cpu_pct REAL, pressure_some REAL, pressure_full REAL, docker_mem INTEGER, top TEXT NOT NULL
@@ -249,12 +249,12 @@ CREATE TABLE IF NOT EXISTS ops_load_groups (
   ts INTEGER NOT NULL, task_id TEXT, owner TEXT NOT NULL, kind TEXT NOT NULL, rss INTEGER NOT NULL, cpu_ms INTEGER NOT NULL, procs INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ops_load_groups_ts ON ops_load_groups (ts);
--- one row per API request (#2101): the route as guardAll keys it (/api/tasks/:id), until the handler's Response. 7 days
+-- one row per API request: the route as guardAll keys it (/api/tasks/:id), until the handler's Response. 7 days
 CREATE TABLE IF NOT EXISTS api_requests (
   ts INTEGER NOT NULL, method TEXT NOT NULL, route TEXT NOT NULL, status INTEGER NOT NULL, ms REAL NOT NULL, bytes INTEGER
 );
 CREATE INDEX IF NOT EXISTS api_requests_ts ON api_requests (ts);
--- a job a Task asked the daemon to run as the daemon's child (#3992, jobs.ts): local CI or a review. pid = the wrapper shell
+-- a job a Task asked the daemon to run as the daemon's child (jobs.ts): local CI or a review. pid = the wrapper shell
 CREATE TABLE IF NOT EXISTS jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, task_id TEXT NOT NULL, pr INTEGER NOT NULL, runner TEXT, cwd TEXT NOT NULL,
   pid INTEGER, boot_id TEXT, status TEXT NOT NULL, exit_code INTEGER, started_at INTEGER NOT NULL, ended_at INTEGER, summary TEXT
@@ -262,29 +262,29 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS jobs_ended ON jobs (ended_at);
 `;
 
-/** Wait out the write lock Litestream's checkpoint takes for a moment, instead of failing with SQLITE_BUSY (#688). */
+/** Wait out the write lock Litestream's checkpoint takes for a moment, instead of failing with SQLITE_BUSY. */
 const BUSY_TIMEOUT_MS = 5000;
 
-/** How long the everyday journey timings are kept (#639): older rows go when new ones are saved. */
+/** How long the everyday journey timings are kept: older rows go when new ones are saved. */
 const PERF_KEEP_MS = 30 * 24 * 3600 * 1000;
-/** The speed table's period (#2103): the last 7 days against the 7 before them. */
+/** The speed table's period: the last 7 days against the 7 before them. */
 const PERF_PERIOD_MS = 7 * 24 * 3600 * 1000;
 const OPS_LOAD_KEEP_MS = 7 * 24 * 3600 * 1000;
 const API_REQUESTS_KEEP_MS = 7 * 24 * 3600 * 1000;
-/** A row of api_requests (#2101). `bytes` = the response's content-length, null when it has none. */
+/** A row of api_requests. `bytes` = the response's content-length, null when it has none. */
 export type ApiRequestRow = { ts: number; method: string; route: string; status: number; ms: number; bytes: number | null };
-/** A row of ops_load (#2086): the unit's cgroup at one minute; `top` is the JSON of the 10 largest processes. */
+/** A row of ops_load: the unit's cgroup at one minute; `top` is the JSON of the 10 largest processes. */
 export type OpsLoadRow = { memCurrent: number; memMax: number | null; swapCurrent: number; eventsMax: number; cpuPct: number | null; pressureSome: number | null; pressureFull: number | null; dockerMem: number | null; top: string };
 export type OpsLoadGroupRow = { taskId: string | null; owner: "task" | "daemon" | "other"; kind: LoadKind; rssBytes: number; cpuMs: number; procs: number };
 
 /**
- * What a routed task cost and how long it took, for a query over `routing_log r JOIN tasks t` (#25, #612). The
+ * What a routed task cost and how long it took, for a query over `routing_log r JOIN tasks t`. The
  * duration runs to the task's last event rather than `updated_at` (see `routingLog`), clamped at 0.
  */
 const TASK_COST_SQL = "COALESCE((SELECT SUM(cost_usd) FROM ledger l WHERE l.task_id = r.task_id), 0)";
 const TASK_DURATION_SQL = "MAX(COALESCE((SELECT MAX(ts) FROM events e WHERE e.task_id = r.task_id), t.updated_at) - t.created_at, 0)";
 
-/** One evaluation of a task (#1218): `json` is a `RuleEval` for `rules`; `rubric` names the rubric and version a judge used (#1219), null otherwise. */
+/** One evaluation of a task: `json` is a `RuleEval` for `rules`; `rubric` names the rubric and version a judge used, null otherwise. */
 export interface EvalRow {
   taskId: string;
   source: EvalSource;
@@ -295,7 +295,7 @@ export interface EvalRow {
 }
 
 /**
- * The Switchboard Tasks of these workspaces that worked on these Issues (#650): a stage Task of the Issue (`stage_issue`) or a Task whose
+ * The Switchboard Tasks of these workspaces that worked on these Issues: a stage Task of the Issue (`stage_issue`) or a Task whose
  * title starts `#N `. Issue numbers repeat across repositories, so the workspaces (of the repository read) say whose they are.
  * Reads only, so the caller may open the file read-only. `durationMs` is the same creation → last event as routingLog's.
  */
@@ -313,10 +313,10 @@ export function tasksOfIssues(sqlite: Database, issues: number[], workspaceIds: 
     .all(...workspaceIds, ...issues, ...issues.map((n) => `#${n} %`)) as Array<{ id: string; createdAt: number; durationMs: number; costUsd: number; stageIssue: number | null; stageAction: string | null }>;
 }
 
-/** The words of a final report that put something off (#1878): matched as words, so a "スコープ外は無し" counts too. */
+/** The words of a final report that put something off: matched as words, so a "スコープ外は無し" counts too. */
 export const DEFERRED_WORDS = /残した|見送り|後回し|スコープ外|別 ?Issue/;
 
-/** Every GitHub Issue URL in this text (#1878), once each, in the order they appear. */
+/** Every GitHub Issue URL in this text, once each, in the order they appear. */
 export function issuesInText(text: string): CreatedIssue[] {
   const seen = new Set<string>();
   const out: CreatedIssue[] = [];
@@ -331,7 +331,7 @@ export function issuesInText(text: string): CreatedIssue[] {
 }
 
 /**
- * The Issues a Task opened (#1878), in the order it opened them, once each: the Issue URLs in the successful `tool.result` of
+ * The Issues a Task opened, in the order it opened them, once each: the Issue URLs in the successful `tool.result` of
  * each `tool.call` whose input runs `gh issue create` or `request_issue.sh` — one check of the input's JSON, whichever the
  * runner — and the `localId` the app's backlog create prints (`ops-kit backlog create`, and `request_issue.sh` in the app's
  * Task, whatever script ran it; only a create stored while that call ran, so a log of another Task's create shown again is not read), read back to its repository and number through the stored create and its record; one not
@@ -364,7 +364,7 @@ export function createdIssuesOf(sqlite: Database, taskId: string): CreatedIssue[
   return out.filter((x, i) => out.findIndex((y) => y.repo === x.repo && y.number === x.number) === i);
 }
 
-/** Whether a Task's final report put something off (#1878): its last `session.end`'s summary has one of DEFERRED_WORDS. */
+/** Whether a Task's final report put something off: its last `session.end`'s summary has one of DEFERRED_WORDS. */
 export function deferredOf(sqlite: Database, taskId: string): boolean {
   const prefix = '{"t":"session.end",';
   const r = sqlite.query("SELECT json_extract(json, '$.summary') AS text FROM events WHERE task_id = ? AND substr(json, 1, length(?)) = ? ORDER BY seq DESC LIMIT 1").get(taskId, prefix, prefix) as { text: string | null } | null;
@@ -373,7 +373,7 @@ export function deferredOf(sqlite: Database, taskId: string): boolean {
 
 /**
  * The Tasks of these workspaces whose last `session.end` is at `since` or later and whose final report put something off
- * (#1878, deferredOf), with when that turn ended and the Issues they opened (createdIssuesOf). Reads only, like tasksOfIssues.
+ * (deferredOf), with when that turn ended and the Issues they opened (createdIssuesOf). Reads only, like tasksOfIssues.
  */
 export function deferredTasksSince(sqlite: Database, workspaceIds: string[], since: number): Array<{ id: string; endedAt: number; issues: CreatedIssue[] }> {
   if (workspaceIds.length === 0) return [];
@@ -387,11 +387,11 @@ export function deferredTasksSince(sqlite: Database, workspaceIds: string[], sin
   return rows.filter((r) => deferredOf(sqlite, r.id)).map((r) => ({ ...r, issues: createdIssuesOf(sqlite, r.id) }));
 }
 
-/** The most events one page of a Task's conversation returns (#1142): `limit` is clamped to it, and a page that reaches back to a message's start stops there. */
+/** The most events one page of a Task's conversation returns: `limit` is clamped to it, and a page that reaches back to a message's start stops there. */
 export const EVENTS_PAGE_MAX = 5000;
 
 /**
- * Notes which rows of backlog_records were written on this connection (#3080), whichever statement wrote them: what
+ * Notes which rows of backlog_records were written on this connection, whichever statement wrote them: what
  * listBacklogRecords reads again. TEMP: nothing is stored. Another connection's write is not seen: the daemon's is the only one that
  * writes this table, and PRAGMA data_version will not do — it moves with every commit to the file, Litestream's included.
  */
@@ -412,17 +412,17 @@ function deepFreeze<T>(v: T): T {
   return v;
 }
 
-/** A Task waiting for a free run slot (#1141): idle with `queued_at` set. */
+/** A Task waiting for a free run slot: idle with `queued_at` set. */
 const QUEUED_SQL = "(status = 'idle' AND queued_at IS NOT NULL)";
 
 /**
  * A stage Task still at work: running / waiting; a turn ended on background jobs that start its next turn (the
  * `background` mark, cleared when they end or the runner goes); a turn ended on a job it asked the daemon for (`jobs`
- * running, #3992 — local CI or a review whose end resumes it, #3993); or a turn that ended done whose last reply is still
- * being judged (`judging_at`, #493 — until then its outcome is unknown, so a question it ended on does not hold the
+ * running — local CI or a review whose end resumes it); or a turn that ended done whose last reply is still
+ * being judged (`judging_at` — until then its outcome is unknown, so a question it ended on does not hold the
  * Issue yet). Starting the same Issue's stage again in any of these runs it twice. `dedupe` also counts a planned resume
  * (it would run the stage again); `slot` (the capacity of a slot) does not (task-status.ts COUNTS). A Task waiting for a
- * run slot (QUEUED_SQL, #1141) is at work too: it starts on its own once a slot is free.
+ * run slot (QUEUED_SQL) is at work too: it starts on its own once a slot is free.
  */
 const activeStage = (purpose: "dedupe" | "slot") => `(${workingSql(purpose)} OR ${QUEUED_SQL} OR judging_at IS NOT NULL OR id IN (SELECT task_id FROM jobs WHERE status = 'running'))`;
 
@@ -494,7 +494,7 @@ export async function snapshotBeforeMigrate(path: string, home: string, now = ne
 
 export class Db {
   readonly sqlite: Database;
-  /** The records of a repository as last read (#3080), by kind and id, and in the order of the table. Frozen: every caller shares them. */
+  /** The records of a repository as last read, by kind and id, and in the order of the table. Frozen: every caller shares them. */
   private readonly backlogRecordsCopy = new Map<string, { rows: Map<string, BacklogRecord>; records: BacklogRecord[] }>();
 
   constructor(path: string) {
@@ -504,7 +504,7 @@ export class Db {
     this.sqlite.exec("PRAGMA auto_vacuum = INCREMENTAL");
     this.sqlite.exec(SCHEMA);
     migrate(this.sqlite);
-    // #1431: the events archive frees pages with `incremental_vacuum`, which only a file in INCREMENTAL mode gives back.
+    // the events archive frees pages with `incremental_vacuum`, which only a file in INCREMENTAL mode gives back.
     // The mode of an existing file changes only with a VACUUM; once, before the daemon answers.
     if ((this.sqlite.query("PRAGMA auto_vacuum").get() as { auto_vacuum: number }).auto_vacuum !== 2) this.sqlite.exec("PRAGMA auto_vacuum = INCREMENTAL; VACUUM");
     this.sqlite.exec(BACKLOG_RECORDS_CHANGED);
@@ -530,7 +530,7 @@ export class Db {
     return r ? rowToWorkspace(r) : null;
   }
 
-  /** `backlog` is not stored as such: it is read from the workspace's backlog source (#2265, setWorkspaceBacklogSource). */
+  /** `backlog` is not stored as such: it is read from the workspace's backlog source (setWorkspaceBacklogSource). */
   upsertWorkspace(ws: Omit<Workspace, "id" | "createdAt" | "backlog" | "sweep"> & { id?: string }): Workspace {
     const existing = this.sqlite.query("SELECT * FROM workspaces WHERE path = ?").get(ws.path);
     if (existing) {
@@ -542,7 +542,7 @@ export class Db {
     return row;
   }
 
-  /** The hash of the runner config the person confirmed for a foreign repository (#2576). */
+  /** The hash of the runner config the person confirmed for a foreign repository. */
   setRunnerConfigOk(id: string, hash: string): void {
     this.sqlite.query("UPDATE workspaces SET runner_config_ok = ? WHERE id = ?").run(hash, id);
   }
@@ -554,15 +554,15 @@ export class Db {
 
   /**
    * The repository variable the backlog reads the Project URL from; null = back to SWITCHBOARD_PROJECT_URL. The stored
-   * backlog's source goes with it (#885): the workspace reads as not imported until an import reads the new Project.
-   * A workspace whose backlog is kept here only (#2265) has no Project variable: the caller refuses it first.
+   * backlog's source goes with it: the workspace reads as not imported until an import reads the new Project.
+   * A workspace whose backlog is kept here only has no Project variable: the caller refuses it first.
    */
   setWorkspaceProjectVar(id: string, name: string | null): Workspace | null {
     this.sqlite.query("UPDATE workspaces SET project_var = ?, backlog_source = NULL WHERE id = ?").run(name, id);
     return this.getWorkspace(id);
   }
 
-  /** backlog-next's slots of the workspace (#2656); a side not given stays as it is. */
+  /** backlog-next's slots of the workspace; a side not given stays as it is. */
   setWorkspaceSweep(id: string, patch: Partial<WorkspaceSweep>): Workspace | null {
     const ws = this.getWorkspace(id);
     if (!ws) return null;
@@ -571,7 +571,7 @@ export class Db {
     return this.getWorkspace(id);
   }
 
-  /* ---------- stored backlog (#885) ---------- */
+  /* ---------- stored backlog ---------- */
 
   /**
    * Stores one complete import of a repository in one transaction: each entry's record, then the repository's cursor
@@ -597,7 +597,7 @@ export class Db {
         else fetched.run(...key, r.objectKind, r.externalId, JSON.stringify(r.remote), JSON.stringify(r.remote), snap.syncedAt);
       }
       for (const r of snap.records) if (r.fetchState === "fetched") this.mergeBacklogRecord(repo, r.objectKind, r.externalId, r.remote, snap.syncedAt);
-      // an edit waiting to be sent (#886) shows on top of what was read: the fields it does not change follow the service
+      // an edit waiting to be sent shows on top of what was read: the fields it does not change follow the service
       for (const r of this.sqlite.query("SELECT object_kind, external_id FROM backlog_records r WHERE service = ?1 AND host = ?2 AND repository = ?3 AND remote IS NOT NULL AND (local IS NOT NULL OR EXISTS (SELECT 1 FROM backlog_operations o WHERE o.service = ?1 AND o.host = ?2 AND o.repository = ?3 AND o.target_kind = r.object_kind AND o.target = r.external_id AND o.kind = 'set' AND o.status != 'done'))").all(...key) as Array<{ object_kind: BacklogObjectKind; external_id: string }>)
         this.rebaseBacklogRecord(repo, r.object_kind, r.external_id);
       this.sqlite
@@ -615,7 +615,7 @@ export class Db {
       .run(repo.service, repo.host, repo.repository, retryAt);
   }
 
-  /** What the last import of a workspace read (#885); null = never imported. */
+  /** What the last import of a workspace read; null = never imported. */
   getWorkspaceBacklogSource(id: string): BacklogSource | null {
     const r = this.sqlite.query("SELECT backlog_source FROM workspaces WHERE id = ?").get(id) as { backlog_source: string | null } | null;
     return r?.backlog_source ? JSON.parse(r.backlog_source) : null;
@@ -626,7 +626,7 @@ export class Db {
   }
 
   /**
-   * Moves a repository's stored records and operations under another key (#2266: a backlog kept here only, turned to
+   * Moves a repository's stored records and operations under another key (a backlog kept here only, turned to
    * GitHub). The ids do not meet: the records made here are `sb:` ones, GitHub's are its node ids. What is known of the
    * old repository's reads goes with it (the new one has its own).
    */
@@ -636,7 +636,7 @@ export class Db {
     this.sqlite.query("DELETE FROM backlog_repositories WHERE service = ? AND host = ? AND repository = ?").run(from.service, from.host, from.repository);
   }
 
-  /** A repository's stored records, operations and read state (#2600: its last workspace was removed). */
+  /** A repository's stored records, operations and read state (its last workspace was removed). */
   deleteBacklogRepository(key: BacklogRepositoryKey): void {
     this.sqlite.transaction(() => {
       for (const table of ["backlog_records", "backlog_operations", "backlog_repositories"])
@@ -649,7 +649,7 @@ export class Db {
     this.sqlite.query("DELETE FROM workspaces WHERE id = ?").run(id);
   }
 
-  /** A record's value as the service has it, written without a read (#2266: a comment made here moved to its Issue's new number); the repository's read state is not touched. */
+  /** A record's value as the service has it, written without a read (a comment made here moved to its Issue's new number); the repository's read state is not touched. */
   setBacklogRecordRemote(key: BacklogRepositoryKey & { objectKind: BacklogObjectKind; externalId: string }, remote: unknown): void {
     this.sqlite.query("UPDATE backlog_records SET remote = ?1, base = CASE WHEN local IS NULL THEN ?1 ELSE base END WHERE service = ? AND host = ? AND repository = ? AND object_kind = ? AND external_id = ?")
       .run(JSON.stringify(remote), key.service, key.host, key.repository, key.objectKind, key.externalId);
@@ -659,7 +659,7 @@ export class Db {
     this.sqlite.query("DELETE FROM backlog_records WHERE service = ? AND host = ? AND repository = ? AND object_kind = ? AND external_id = ?").run(key.service, key.host, key.repository, key.objectKind, key.externalId);
   }
 
-  /** The stage Tasks of a workspace made before `before` (ms) on Issue `from` go to `to` (#2266), all at once (a `to` that is another's `from` is not moved twice). */
+  /** The stage Tasks of a workspace made before `before` (ms) on Issue `from` go to `to`, all at once (a `to` that is another's `from` is not moved twice). */
   renumberStageIssues(workspaceId: string, numbers: Array<{ from: number; to: number }>, before: number): void {
     const ids = numbers.map((n) => ({ ...n, tasks: this.sqlite.query("SELECT id FROM tasks WHERE workspace_id = ? AND stage_issue = ? AND created_at < ?").all(workspaceId, n.from, before) as Array<{ id: string }> }));
     for (const n of ids) for (const t of n.tasks) this.sqlite.query("UPDATE tasks SET stage_issue = ? WHERE id = ?").run(n.to, t.id);
@@ -671,8 +671,8 @@ export class Db {
   }
 
   /**
-   * A repository's records, of one kind when `kind` is given. Each is read and parsed once, and again only after it is written
-   * (#3080): the backlog list asks for them on every look, and this API blocks the daemon. Frozen — copy before changing.
+   * A repository's records, of one kind when `kind` is given. Each is read and parsed once, and again only after it is written:
+   * the backlog list asks for them on every look, and this API blocks the daemon. Frozen — copy before changing.
    */
   listBacklogRecords(repo: BacklogRepositoryKey, kind?: BacklogObjectKind): BacklogRecord[] {
     const records = this.backlogRecordsOf(repo);
@@ -712,7 +712,7 @@ export class Db {
     return r ? rowToBacklogRecord(r) : null;
   }
 
-  /* ---------- backlog edits waiting to be sent (#886) ---------- */
+  /* ---------- backlog edits waiting to be sent ---------- */
 
   /**
    * Stores an edit in one transaction: the records' `local` values and the operations that send it — both or
@@ -777,7 +777,7 @@ export class Db {
   }
 
   /**
-   * What an answer to a question did (#1139), by the question's id: `result` (what the answer answered, null while only a failed
+   * What an answer to a question did, by the question's id: `result` (what the answer answered, null while only a failed
    * start is known) and `failure` (a start that failed after the answer). A field not passed keeps its value.
    */
   rememberAskAnswer(id: string, row: { at: number; result?: AskAnswerResult | null; failure?: { at: number; reason: string } | null }): void {
@@ -799,7 +799,7 @@ export class Db {
     this.sqlite.query("DELETE FROM ask_answers WHERE at < ?").run(before);
   }
 
-  /** A waiting operation's payload, rewritten (#2266: its `#N` to GitHub's numbers). */
+  /** A waiting operation's payload, rewritten (its `#N` to GitHub's numbers). */
   setBacklogOperationPayload(id: string, payload: unknown, now = Date.now()): void {
     this.sqlite.query("UPDATE backlog_operations SET payload = ?, updated_at = ? WHERE id = ? AND status != 'done'").run(JSON.stringify(payload), now, id);
   }
@@ -861,7 +861,7 @@ export class Db {
   }
 
   /**
-   * What an import read decides about the edits of a record waiting to be sent (#887, 初期方式 A): per field, the
+   * What an import read decides about the edits of a record waiting to be sent (初期方式 A): per field, the
    * first `pending` set of it (one after it was made on the value the first one sends, not on GitHub's) against
    * GitHub's value — already that value, or the edit changed nothing GitHub did not → done; GitHub moved it off the
    * value the edit was made on to another one → `conflict`, held with its base, its value and GitHub's (nothing is
@@ -873,12 +873,12 @@ export class Db {
     for (const op of ops) {
       if (seen.has(op.field!)) continue;
       seen.add(op.field!);
-      // the reason of a close still waiting to be sent before it is not GitHub's yet (#3146): its send decides
+      // the reason of a close still waiting to be sent before it is not GitHub's yet: its send decides
       if (op.field === "stateReason" && ops.some((o) => o.field === "state" && o.seq < op.seq)) continue;
       const value = backlogFieldValue(kind, remote, op.field!);
       if (this.settleBacklogField(ops, op.field!, value, now)) continue;
       if ((op.status !== "pending" && op.status !== "conflict") || value === undefined) continue;
-      // a conflict the write itself found (#1329): GitHub has the value made here, so a read of it decides nothing —
+      // a conflict the write itself found: GitHub has the value made here, so a read of it decides nothing —
       // it stays, with its reason, until chosen on
       if (op.status === "conflict" && op.overwritten) continue;
       const m = mergeBacklogField(op.field!, op.base, op.payload, value);
@@ -903,7 +903,7 @@ export class Db {
   }
 
   /**
-   * GitHub already has what the last edit of a Project field makes (#2924): the ones before it are on their way there,
+   * GitHub already has what the last edit of a Project field makes: the ones before it are on their way there,
    * and nothing is left to choose — all of them are done (one the write itself held, with `overwritten`, stays;
    * `keepLast`: the last one stays to be sent). Only a Project field: a label on and off again (a question, then its
    * answer) is not skipped.
@@ -929,7 +929,7 @@ export class Db {
   }
 
   /**
-   * The user's choice on a held `set` (#887): `local` sends the value made here again, now made on GitHub's value
+   * The user's choice on a held `set`: `local` sends the value made here again, now made on GitHub's value
    * (checked again just before it is written); `remote` keeps GitHub's and drops the edit. `revision` = what the
    * choice saw (conflictRevision of the operation and GitHub's value as stored): another one now → 409, nothing
    * changed. Throws BacklogResolveError: 404 = no such operation of the repository, 409 = not a conflict, the revision
@@ -944,7 +944,7 @@ export class Db {
       if (conflictRevision(op, value) !== revision) throw new BacklogResolveError("競合がこの画面を開いた後に変わりました。読み直してから選んでください", 409);
       if (choice === "local" && value === undefined) throw new BacklogResolveError("GitHub の値を読めていないので、手元の値は送れません。再読込してから選んでください", 409);
       if (op.overwritten) {
-        // found after the write (#1329): GitHub has the value made here. Remote = the other's value goes back as a
+        // found after the write: GitHub has the value made here. Remote = the other's value goes back as a
         // new set on GitHub's current value; local = the edit goes on at GitHub's value (the check will find it done)
         if (choice === "remote" && !("value" in op.overwritten)) throw new BacklogResolveError("相手の値が履歴に残っていないので戻せません。手元を選ぶと今の GitHub の値のまま閉じます", 409);
         if (value === undefined) throw new BacklogResolveError("GitHub の値を読めていないので選べません。再読込してから選んでください", 409);
@@ -962,7 +962,7 @@ export class Db {
   }
 
   /**
-   * A `failed` operation sent again (#2885), its cause put right: back to `pending` as at first (the value the
+   * A `failed` operation sent again, its cause put right: back to `pending` as at first (the value the
    * enabling's second press sets). A create that made its Issue keeps `remoteId`, so it goes on from the steps after
    * it. Throws BacklogResolveError: 404 = no such operation of the repository, 409 = not failed (nothing changed).
    */
@@ -992,7 +992,7 @@ export class Db {
   }
 
   /**
-   * Takes back an operation held `unknown` or `failed` (#3804): nothing is sent to the service for it, it is `done` with
+   * Takes back an operation held `unknown` or `failed`: nothing is sent to the service for it, it is `done` with
    * why (`error`), and the Issue's operations after it go on. A post never made (its target still `local:`) leaves no
    * record behind; a create of an Issue never made takes the Issue's operations after it back with it (they cannot be
    * sent to an Issue that does not exist), its record and its comments' too. 404 = no such operation of the repository,
@@ -1019,7 +1019,7 @@ export class Db {
     })();
   }
 
-  /** The value the last `set` of a field still to send makes (#2924); undefined when there is none. */
+  /** The value the last `set` of a field still to send makes; undefined when there is none. */
   lastBacklogSetValue(repo: BacklogRepositoryKey, targetKind: BacklogObjectKind, target: string, field: string): unknown {
     const r = this.sqlite
       .query("SELECT payload FROM backlog_operations WHERE service = ? AND host = ? AND repository = ? AND target_kind = ? AND target = ? AND kind = 'set' AND field = ? AND status IN ('pending', 'conflict', 'sending', 'unknown') ORDER BY seq DESC LIMIT 1")
@@ -1027,7 +1027,7 @@ export class Db {
     return r ? JSON.parse(r.payload) : undefined;
   }
 
-  /** GitHub's value of a `set`'s field as last imported (#887); undefined = not read (never, or 404 / 403 on the last read). */
+  /** GitHub's value of a `set`'s field as last imported; undefined = not read (never, or 404 / 403 on the last read). */
   backlogRemoteValue(op: BacklogOperation): unknown {
     const rec = op.field ? this.getBacklogRecord({ ...op, objectKind: op.targetKind, externalId: op.target }) : null;
     return rec?.fetchState === "fetched" ? backlogFieldValue(op.targetKind, rec.remote, op.field!) : undefined;
@@ -1050,7 +1050,7 @@ export class Db {
 
   /* ---------- tasks ---------- */
 
-  /** The list (#1142): Tasks not archived; `archived` = only the archived ones. */
+  /** The list: Tasks not archived; `archived` = only the archived ones. */
   listTasks(archived = false): Task[] {
     return this.sqlite.query(`SELECT * FROM tasks WHERE archived_at IS ${archived ? "NOT NULL" : "NULL"} ORDER BY updated_at DESC`).all().map(rowToTask);
   }
@@ -1060,7 +1060,7 @@ export class Db {
     return r ? rowToTask(r) : null;
   }
 
-  /** The newest Task of an origin with exactly this title (a release check is `<title> <tag>`, #4569); null = none. */
+  /** The newest Task of an origin with exactly this title (a release check is `<title> <tag>`); null = none. */
   findTaskByOrigin(origin: Task["origin"], title: string): Task | null {
     const r = this.sqlite.query("SELECT * FROM tasks WHERE origin = ? AND title = ? ORDER BY created_at DESC LIMIT 1").get(origin, title);
     return r ? rowToTask(r) : null;
@@ -1076,7 +1076,7 @@ export class Db {
     return r?.provenance ? safeJson<Provenance | null>(r.provenance, null) : null;
   }
 
-  /** Tasks changed at or after `ms` (#935), newest first. */
+  /** Tasks changed at or after `ms`, newest first. */
   listTasksUpdatedSince(ms: number): Task[] {
     return this.sqlite.query("SELECT * FROM tasks WHERE updated_at >= ? ORDER BY updated_at DESC").all(ms).map(rowToTask);
   }
@@ -1086,17 +1086,17 @@ export class Db {
     return this.sqlite.query("SELECT * FROM tasks WHERE status = ? ORDER BY updated_at DESC").all(status).map(rowToTask);
   }
 
-  /** Tasks waiting for a free run slot (#1141), in the order they entered: idle with `queued_at` set. */
+  /** Tasks waiting for a free run slot, in the order they entered: idle with `queued_at` set. */
   listQueuedTasks(): Task[] {
     return this.sqlite.query(`SELECT * FROM tasks WHERE ${QUEUED_SQL} ORDER BY queued_at, created_at`).all().map(rowToTask);
   }
 
-  /** Put a Task in the wait for a run slot with the prompt it will start with (#1141). */
+  /** Put a Task in the wait for a run slot with the prompt it will start with. */
   setQueued(id: string, prompt: string, at: number): void {
     this.sqlite.query("UPDATE tasks SET queued_at = ?, queued_prompt = ?, updated_at = ? WHERE id = ?").run(at, prompt, Date.now(), id);
   }
 
-  /** Take a Task out of the wait: returns the prompt it was queued with (null = it was not waiting) and clears both columns (#1141). */
+  /** Take a Task out of the wait: returns the prompt it was queued with (null = it was not waiting) and clears both columns. */
   takeQueued(id: string): string | null {
     const row = this.sqlite.query("SELECT queued_at, queued_prompt FROM tasks WHERE id = ?").get(id) as { queued_at: number | null; queued_prompt: string | null } | null;
     if (!row || row.queued_at === null) return null;
@@ -1109,18 +1109,18 @@ export class Db {
     return this.sqlite.query(`SELECT * FROM tasks WHERE ${workingSql(purpose)} ORDER BY updated_at DESC`).all().map(rowToTask);
   }
 
-  /** Tasks that hold the daemon (`gate`) or wait for a run slot (#1141): what a restart for a promotion would cut or leave waiting. */
+  /** Tasks that hold the daemon (`gate`) or wait for a run slot: what a restart for a promotion would cut or leave waiting. */
   listActiveTasks(): Task[] {
     return this.sqlite.query(`SELECT * FROM tasks WHERE ${workingSql("gate")} OR ${QUEUED_SQL}`).all().map(rowToTask);
   }
 
-  /** The Tasks whose judgement of the last reply was under way (#1139): after a restart, those it cut short. */
+  /** The Tasks whose judgement of the last reply was under way: after a restart, those it cut short. */
   listTasksJudging(): Task[] {
     return this.sqlite.query("SELECT * FROM tasks WHERE judging_at IS NOT NULL").all().map(rowToTask);
   }
 
   /**
-   * The newest active stage Task of a backlog Issue in a workspace (#1139): running / waiting, waiting for a run slot (#1141),
+   * The newest active stage Task of a backlog Issue in a workspace: running / waiting, waiting for a run slot,
    * or one whose turn ended but whose work is not over (activeStage: its runner's background jobs, a daemon job it asked for,
    * its reply being judged).
    */
@@ -1129,7 +1129,7 @@ export class Db {
     return r ? rowToTask(r) : null;
   }
 
-  /** The newest-created stage Task of a backlog Issue, of `action` only when given (#1139). */
+  /** The newest-created stage Task of a backlog Issue, of `action` only when given. */
   lastStageTask(workspaceId: string, issue: number, action?: BacklogAction): Task | null {
     const r = action
       ? this.sqlite.query("SELECT * FROM tasks WHERE workspace_id = ? AND stage_issue = ? AND stage_action = ? ORDER BY created_at DESC LIMIT 1").get(workspaceId, issue, action)
@@ -1137,7 +1137,7 @@ export class Db {
     return r ? rowToTask(r) : null;
   }
 
-  /** Ids of every stage Task of a backlog Issue in a workspace (#1139). */
+  /** Ids of every stage Task of a backlog Issue in a workspace. */
   stageTaskIds(workspaceId: string, issue: number): string[] {
     return (this.sqlite.query("SELECT id FROM tasks WHERE workspace_id = ? AND stage_issue = ?").all(workspaceId, issue) as Array<{ id: string }>).map((r) => r.id);
   }
@@ -1147,21 +1147,21 @@ export class Db {
     return (this.sqlite.query("SELECT id FROM tasks WHERE schedule_id = ? ORDER BY created_at DESC LIMIT ?").all(scheduleId, limit) as Array<{ id: string }>).map((r) => r.id);
   }
 
-  /** Every stage Task taking a slot (as activeStageTask's, less a planned resume), whatever the workspace (#1139). */
+  /** Every stage Task taking a slot (as activeStageTask's, less a planned resume), whatever the workspace. */
   listActiveStageTasks(): Task[] {
     return this.sqlite.query(`SELECT * FROM tasks WHERE stage_issue IS NOT NULL AND ${activeStage("slot")}`).all().map(rowToTask);
   }
 
-  /** The `stop.record` events of these tasks (#948), oldest first. */
+  /** The `stop.record` events of these tasks, oldest first. */
   listStopRecords(taskIds: string[]): StopRecord[] {
     // a prefix compare, not json_extract over every event of the task: `t` is always written first (appendEvent's JSON.stringify of `{ t, … }`)
-    // the events_stop index has this WHERE word for word (#3080): change both together, or the index is not used
+    // the events_stop index has this WHERE word for word: change both together, or the index is not used
     const q = this.sqlite.query(`SELECT ts, seq, json FROM events WHERE task_id = ? AND substr(json, 1, 19) = '{"t":"stop.record",'`);
     const rows = taskIds.flatMap((id) => q.all(id) as Array<{ ts: number; seq: number; json: string }>);
     return rows.sort((a, b) => a.ts - b.ts || a.seq - b.seq).map((r) => (JSON.parse(r.json) as { stop: StopRecord }).stop);
   }
 
-  /** The permission.ask / permission.resolved events of these tasks (#935), oldest first; the same prefix compare as listStopRecords. */
+  /** The permission.ask / permission.resolved events of these tasks, oldest first; the same prefix compare as listStopRecords. */
   listPermissionEvents(taskIds: string[]): EventEnvelope[] {
     const prefix = '{"t":"permission.';
     const q = this.sqlite.query("SELECT task_id, ts, seq, json FROM events WHERE task_id = ? AND substr(json, 1, length(?)) = ?");
@@ -1169,15 +1169,15 @@ export class Db {
     return rows.sort((a, b) => a.ts - b.ts || a.seq - b.seq).map((r) => ({ taskId: r.task_id, ts: r.ts, seq: r.seq, ev: JSON.parse(r.json) as AgentEvent }));
   }
 
-  /** Every task, as much as the intervention count (#651) needs of it. */
+  /** Every task, as much as the intervention count needs of it. */
   listTaskRefs(): Array<{ id: string; workspaceId: string | null; title: string; stageIssue: number | null; scheduleId: string | null; createdAt: number }> {
     return (this.sqlite.query("SELECT id, workspace_id, title, stage_issue, schedule_id, created_at FROM tasks ORDER BY created_at").all() as Array<{ id: string; workspace_id: string | null; title: string; stage_issue: number | null; schedule_id: string | null; created_at: number }>)
       .map((r) => ({ id: r.id, workspaceId: r.workspace_id, title: r.title, stageIssue: r.stage_issue, scheduleId: r.schedule_id, createdAt: r.created_at }));
   }
 
   /**
-   * The events of every task whose JSON begins with one of these (#651), oldest first — one UNION ALL of the per-prefix
-   * partial indexes (#4174), with the prefix compare of listStopRecords (`t` is always written first). A prefix not in
+   * The events of every task whose JSON begins with one of these, oldest first — one UNION ALL of the per-prefix
+   * partial indexes, with the prefix compare of listStopRecords (`t` is always written first). A prefix not in
    * EVENT_PREFIX_INDEX throws: add its index to SCHEMA and the table together.
    */
   listEventsByPrefix(prefixes: string[]): EventEnvelope[] {
@@ -1186,7 +1186,7 @@ export class Db {
     return rows.sort((a, b) => a.ts - b.ts || a.seq - b.seq).map((r) => ({ taskId: r.task_id, ts: r.ts, seq: r.seq, ev: JSON.parse(r.json) as AgentEvent }));
   }
 
-  /** A task's last reply (#935): the newest session.end's summary and its seq; null when it never ended a turn. */
+  /** A task's last reply: the newest session.end's summary and its seq; null when it never ended a turn. */
   lastReply(taskId: string): { text: string; seq: number } | null {
     const prefix = '{"t":"session.end",';
     const r = this.sqlite.query("SELECT seq, json_extract(json, '$.summary') AS text FROM events WHERE task_id = ? AND substr(json, 1, length(?)) = ? ORDER BY seq DESC LIMIT 1").get(taskId, prefix, prefix) as { seq: number; text: string | null } | null;
@@ -1194,8 +1194,8 @@ export class Db {
   }
 
   /**
-   * The question tool's questions of the Task's last turn (#3053): those of the `question.ask` events between the last
-   * `session.end` and the one before it, in order, with the seq of the last `session.end` (#3122); null when it never ended a
+   * The question tool's questions of the Task's last turn: those of the `question.ask` events between the last
+   * `session.end` and the one before it, in order, with the seq of the last `session.end`; null when it never ended a
    * turn. Read from the events, so they outlive a restart of the daemon.
    */
   lastTurnQuestions(taskId: string): { questions: AskQuestion[]; seq: number } | null {
@@ -1214,7 +1214,7 @@ export class Db {
   }
 
   insertTask(t: Task): Task {
-    // A row is never inserted waiting for a run slot: the wait is written only by setQueued / takeQueued (#1141), with its prompt
+    // A row is never inserted waiting for a run slot: the wait is written only by setQueued / takeQueued, with its prompt
     t = { ...t, queuedAt: null };
     if (t.cloudSession) CloudSessionRef.parse(t.cloudSession);
     this.validateCloudSource(t);
@@ -1228,7 +1228,7 @@ export class Db {
       if (t.routing) {
         const logRow = this.sqlite.query("INSERT INTO routing_log (task_id, workspace_id, cwd, suggested, rule_id, reason, chosen, ts, suggested_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
         logRow.run(t.id, t.workspaceId, t.cwd, t.routing.suggested, t.routing.ruleId, t.routing.reason, t.runner, t.createdAt, "rule");
-        // An LLM suggestion (#25) is a second opinion on the same decision, so it is a second row rather than a
+        // An LLM suggestion is a second opinion on the same decision, so it is a second row rather than a
         // column: each source is then scored against the same `chosen` on its own (`routingStats`).
         if (t.routing.llm) logRow.run(t.id, t.workspaceId, t.cwd, t.routing.llm.runner, "llm", t.routing.llm.reason, t.runner, t.createdAt, "llm");
       }
@@ -1237,7 +1237,7 @@ export class Db {
   }
 
   /**
-   * Keeps what the LLM proposed for a task that already exists (#1143): the proposal is worked out after the task
+   * Keeps what the LLM proposed for a task that already exists: the proposal is worked out after the task
    * started, so it can arrive at any status, also after the end. Only `routing.llm` and its own log row change: the
    * rule row stays, `chosen` is the runner the task runs on, `ts` is the arrival, and `updatedAt` stays because advice
    * is not a change of the task's own. The first proposal stands; null = nothing written (no such task, no routing,
@@ -1260,7 +1260,7 @@ export class Db {
   /**
    * Runner of the most recent task for the same workspace *or* the same directory (tasks created through the raw API
    * or a scheduler carry no workspaceId) — the routing fallback "what you used last time". Tasks that errored or were
-   * aborted do not count as "used", nor does a shadow (#99): the person chose the primary's runner, not the shadow's.
+   * aborted do not count as "used", nor does a shadow: the person chose the primary's runner, not the shadow's.
    */
   lastRunnerFor(workspaceId: string | undefined, cwd: string | undefined): RunnerId | undefined {
     if (!workspaceId && !cwd) return undefined;
@@ -1271,7 +1271,7 @@ export class Db {
   }
 
   /**
-   * The decision log joined with how each task ended (#25): status, outcome (#492), what it cost, how long it took.
+   * The decision log joined with how each task ended: status, outcome, what it cost, how long it took.
    *
    * `durationMs` is creation → the task's last recorded event, not `updated_at`: every patch stamps `updated_at`,
    * so raising a budget days later would otherwise report days of "work" for a decision that took a minute. It
@@ -1292,7 +1292,7 @@ export class Db {
   }
 
   /**
-   * Agreement rate per suggester over the last `days` days (#25): how often `suggested` was the runner the task
+   * Agreement rate per suggester over the last `days` days: how often `suggested` was the runner the task
    * actually ran on, counted from `routing_log` (one row per suggestion).
    *
    * The two denominators are not the same population and the numbers must not be read as a head-to-head score: a
@@ -1316,7 +1316,7 @@ export class Db {
   }
 
   /**
-   * How each runner's tasks turned out since `since` (#612). Only the rule rows are read: every routed task has
+   * How each runner's tasks turned out since `since`. Only the rule rows are read: every routed task has
    * exactly one, so a task the LLM also proposed for is not counted twice. The medians are taken here rather than in
    * SQL (SQLite has no median) — a window is a few hundred rows.
    */
@@ -1341,7 +1341,7 @@ export class Db {
       .sort((a, b) => b.total - a.total || a.runner.localeCompare(b.runner));
   }
 
-  /** The shadow task mirroring `primaryId` (#99), if one was created with it. At most one: `shadow_of` is unique. */
+  /** The shadow task mirroring `primaryId`, if one was created with it. At most one: `shadow_of` is unique. */
   shadowTaskOf(primaryId: string): Task | null {
     const r = this.sqlite.query("SELECT * FROM tasks WHERE shadow_of = ?").get(primaryId);
     return r ? rowToTask(r) : null;
@@ -1362,7 +1362,7 @@ export class Db {
     const source = this.getTask(t.sourceCloudTaskId);
     let sameCwd = previous?.sourceCloudTaskId === t.sourceCloudTaskId || source?.cwd === t.cwd;
     if (source && !sameCwd) {
-      // The Cloud Task's own cwd, or the worktree that "continue locally" made for it (#1395).
+      // The Cloud Task's own cwd, or the worktree that "continue locally" made for it.
       for (const want of [source.cwd, teleportWorktreePath(source.cwd, source.id)]) {
         try { sameCwd = realpathSync(want) === realpathSync(t.cwd); } catch { /* Missing paths cannot prove identity. */ }
         if (sameCwd) break;
@@ -1380,8 +1380,8 @@ export class Db {
 
   /**
    * `updatedAt` may be given by an importer replaying old records; everything else stamps now. A status change without
-   * an `outcome` in the patch sets the outcome by rule (#492, `outcomeOnStatus` in task-status.ts) — the one place the rule lives. A status the table (`TASK_TRANSITIONS`) does
-   * does not allow is not stored: it throws `InvalidTaskTransitionError` (#1140).
+   * an `outcome` in the patch sets the outcome by rule (`outcomeOnStatus` in task-status.ts) — the one place the rule lives. A status the table (`TASK_TRANSITIONS`) does
+   * does not allow is not stored: it throws `InvalidTaskTransitionError`.
    */
   updateTask(id: string, patch: Partial<Pick<Task, "sourceCloudTaskId" | "cloudSession" | "status" | "runnerSessionId" | "model" | "title" | "titlePending" | "budgetUsd" | "permissionMode" | "effort" | "resumeAt" | "resumeReason" | "resumeWindow" | "resumeSince" | "resumePlannedAt" | "deferredPrompt" | "shadowStopped" | "scope" | "outcome" | "reviewedAt" | "archivedAt" | "judgedResult" | "judgedReason" | "judgedBy" | "judgingAt" | "updatedAt">>): Task | null {
     if (patch.cloudSession) CloudSessionRef.parse(patch.cloudSession);
@@ -1391,10 +1391,10 @@ export class Db {
     if (moves && !canTransition(cur.status, patch.status!)) throw new InvalidTaskTransitionError(id, cur.status, patch.status!);
     const rule = moves && patch.outcome === undefined ? outcomeOnStatus(patch.status!, cur.executionMode) : {};
     const updatedAt = patch.updatedAt ?? Date.now();
-    // statusAt moves only when the status does (#2029): a title, outcome or 確認済み change keeps when the task came to it
-    // a new turn shows the Task again (#1142): only a stopped one stays archived
+    // statusAt moves only when the status does: a title, outcome or 確認済み change keeps when the task came to it
+    // a new turn shows the Task again: only a stopped one stays archived
     const shown = moves && (IN_FLIGHT.has(patch.status!) || patch.status === "idle") ? { archivedAt: null } : {};
-    // The wait for a run slot (#1141) is written only by setQueued / takeQueued; a status that leaves idle ends it (prompt too),
+    // The wait for a run slot is written only by setQueued / takeQueued; a status that leaves idle ends it (prompt too),
     // so a Task started some other way does not come back into the queue when it is idle again
     const queuedAt = moves && patch.status !== "idle" ? null : cur.queuedAt;
     const next: Task = { ...cur, ...rule, ...patch, ...shown, queuedAt, updatedAt, statusAt: moves ? updatedAt : cur.statusAt };
@@ -1405,7 +1405,7 @@ export class Db {
     return next;
   }
 
-  /* ---------- artifacts (#1777) ---------- */
+  /* ---------- artifacts ---------- */
 
   insertArtifact(a: Artifact): void {
     this.sqlite.query("INSERT INTO artifacts (id, task_id, title, kind, source, entry, mime, size, removed_at, created_at, updated_at, app_days, app_request_task_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(a.id, a.taskId, a.title, a.kind, a.source, a.entry, a.mime, a.size, a.removedAt, a.createdAt, a.updatedAt, a.appDays, a.appRequestTaskId);
@@ -1426,7 +1426,7 @@ export class Db {
   }
 
   /**
-   * Artifacts across tasks (#1835 reports, #1833 every artifact): not removed, newest first by `updated_at` so a
+   * Artifacts across tasks (for the reports list and the list of every artifact): not removed, newest first by `updated_at` so a
    * refreshed one rises, with the task's title and the schedule's when a schedule started the task. `htmlOnly` keeps
    * the HTML files and folders (the reports). `q` is a literal part of the title, the original path or the task's
    * title. `before` is the id of the previous page's last row. The task's own state (archived, how old) is not read.
@@ -1460,7 +1460,7 @@ export class Db {
   }
 
   /**
-   * One read through the screen on the local day `day` (#3682): counts a new day once. A removed or unknown artifact
+   * One read through the screen on the local day `day`: counts a new day once. A removed or unknown artifact
    * is not counted (null). `counted` = this call added the day.
    */
   markArtifactAppUse(id: string, day: string): { appDays: number; appRequestTaskId: string | null; counted: boolean } | null {
@@ -1478,7 +1478,7 @@ export class Db {
     this.sqlite.query("DELETE FROM artifacts WHERE id = ?").run(id);
   }
 
-  /* ---------- attachments (#125) ---------- */
+  /* ---------- attachments ---------- */
 
   insertAttachment(a: Attachment): void {
     this.sqlite.query("INSERT INTO attachments (id, task_id, name, mime, size, path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(a.id, a.taskId, a.name, a.mime, a.size, a.path, a.createdAt);
@@ -1507,17 +1507,17 @@ export class Db {
     this.sqlite.query("DELETE FROM attachments WHERE id = ?").run(id);
   }
 
-  /** Tasks waiting on a usage limit (#102): resume_at set. A small live set — the column is cleared as soon as a task moves on. */
+  /** Tasks waiting on a usage limit: resume_at set. A small live set — the column is cleared as soon as a task moves on. */
   listTasksWithResume(): Task[] {
     return this.sqlite.query("SELECT * FROM tasks WHERE resume_at IS NOT NULL ORDER BY resume_at").all().map(rowToTask);
   }
 
-  /** Last quota report of a runner, per window (from `quota` events; #102 reads the saturated window's reset time). */
+  /** Last quota report of a runner, per window (from `quota` events; the saturated window's reset time is read from it). */
   quotaFor(runner: RunnerId): Array<{ window: string; utilization: number; resetsAt: number; ts: number }> {
     return this.sqlite.query("SELECT window, utilization, resets_at AS resetsAt, ts FROM quota WHERE runner = ? ORDER BY window").all(runner) as Array<{ window: string; utilization: number; resetsAt: number; ts: number }>;
   }
 
-  /* ---------- settings (#58): small JSON documents the UI can change ---------- */
+  /* ---------- settings: small JSON documents the UI can change ---------- */
 
   getSetting<T>(key: string, fallback: T): T {
     const r = this.sqlite.query("SELECT json FROM settings WHERE key = ?").get(key) as { json: string } | null;
@@ -1570,7 +1570,7 @@ export class Db {
     return env;
   }
 
-  /* ---------- history imports (#91): which session log feeds which task, and how far it has been read ---------- */
+  /* ---------- history imports: which session log feeds which task, and how far it has been read ---------- */
 
   upsertHistoryImport(row: HistoryImportRow) {
     this.sqlite
@@ -1601,13 +1601,13 @@ export class Db {
     );
   }
 
-  /** The last `limit` events of a task, in seq order (#1142): what the Task screen draws first. */
+  /** The last `limit` events of a task, in seq order: what the Task screen draws first. */
   listEventsTail(taskId: string, limit: number): EventEnvelope[] {
     return this.listEventsBefore(taskId, Number.MAX_SAFE_INTEGER, limit);
   }
 
   /**
-   * The `limit` events just before `beforeSeq`, in seq order (#1142): the page above what the Task screen holds. A reply
+   * The `limit` events just before `beforeSeq`, in seq order: the page above what the Task screen holds. A reply
    * streams as many deltas of one message (hundreds for a long one), so a page that starts inside a message reaches back
    * to the message's first delta: the screen never opens on a reply cut in half. A page stays within `EVENTS_PAGE_MAX`
    * (a longer message is cut there).
@@ -1633,7 +1633,7 @@ export class Db {
     return r?.text ?? null;
   }
 
-  /* ---------- evals (#1218): one row per task and source; a new evaluation replaces the old one ---------- */
+  /* ---------- evals: one row per task and source; a new evaluation replaces the old one ---------- */
 
   upsertEval(row: EvalRow) {
     this.sqlite
@@ -1653,7 +1653,7 @@ export class Db {
     this.sqlite.query("DELETE FROM task_evals WHERE task_id = ? AND source = ?").run(taskId, source);
   }
 
-  /* ---------- diff copy (#3833) ---------- */
+  /* ---------- diff copy ---------- */
 
   getTaskDiffSnapshot(taskId: string): TaskDiffSnapshot | null {
     const r = this.sqlite.query("SELECT at, json FROM task_diffs WHERE task_id = ?").get(taskId) as { at: number; json: string } | null;
@@ -1683,7 +1683,7 @@ export class Db {
   }
 
   /**
-   * What each task started its sessions with (#1801, #1802): the distinct `model` and `effort` of its `session.start`
+   * What each task started its sessions with: the distinct `model` and `effort` of its `session.start`
    * events, in the order first used. A model that is empty is not counted; an effort of "" (the CLI default) is, one that
    * is absent (a start from before it was recorded) is not. Read from the events rather than `tasks.model` / `tasks.effort`
    * (the last one only) or the ledger (judging, routing and a runner's background model share the task id). A task with
@@ -1708,10 +1708,10 @@ export class Db {
   }
 
   /**
-   * The Evals list (#1221): every task (newest first, `limit` of them), filtered by workspace / runner, with the gist of
+   * The Evals list: every task (newest first, `limit` of them), filtered by workspace / runner, with the gist of
    * its rules / judge / human rows. One query: the three eval rows are LEFT JOINed by source, the cost is the ledger's
    * sum. A row that no longer parses reads as null, as in `evalsOf`. `judgedFrom` / `judgedTo` keep the tasks whose judge
-   * row was written in [from, to); `rated` the ones with a human row (the summary, #1877).
+   * row was written in [from, to); `rated` the ones with a human row (the summary).
    */
   evalsList(q: { workspaceId?: string; runner?: RunnerId; judgedFrom?: number; judgedTo?: number; rated?: boolean; limit: number }): EvalsListRow[] {
     const rows = this.sqlite
@@ -1756,7 +1756,7 @@ export class Db {
 
   /* ---------- ledger ---------- */
 
-  /** `reportedTotal`: the running total the row is the difference of (a cumulative report, #2353), kept for the next row. */
+  /** `reportedTotal`: the running total the row is the difference of (a cumulative report), kept for the next row. */
   insertLedger(row: LedgerRow, reportedTotal?: ReportedTotal) {
     this.sqlite
       .query(
@@ -1766,7 +1766,7 @@ export class Db {
       .run(row.taskId, row.runner, row.model, row.inputTokens, row.outputTokens, row.cacheRead, row.cacheWrite, row.cacheWrite1h, row.costUsd, row.billedUsd, row.source, row.ts, reportedTotal ? JSON.stringify(reportedTotal) : null);
   }
 
-  /** The last running total booked for this Task and model (#2353); null before the first. Migrated rows are not one model's. */
+  /** The last running total booked for this Task and model; null before the first. Migrated rows are not one model's. */
   lastReportedTotal(taskId: string, model: string | null): ReportedTotal | null {
     const r = this.sqlite
       .query("SELECT reported_total AS t FROM ledger WHERE task_id = ? AND model IS ? AND reported_total IS NOT NULL AND json_extract(reported_total, '$.migrated') IS NULL ORDER BY id DESC LIMIT 1")
@@ -1775,7 +1775,7 @@ export class Db {
   }
 
   /**
-   * What the Task's migrated rows booked that no later row has counted against yet (#2353): the last migrated total
+   * What the Task's migrated rows booked that no later row has counted against yet: the last migrated total
    * is all the models of its session together, so the first total of each model after it is counted against the rest.
    * 0 for another runner session, or when the Task had none to resume at the migration: a new session does not carry
    * the old total.
@@ -1792,7 +1792,7 @@ export class Db {
     return Math.max(0, r.total - r.used);
   }
 
-  /** Where a task's event bodies went (#1431): the S3 keys (one per line, oldest first), when, and how many rows; null if never moved. */
+  /** Where a task's event bodies went: the S3 keys (one per line, oldest first), when, and how many rows; null if never moved. */
   eventsArchiveOf(taskId: string): { key: string; at: number; count: number } | null {
     const r = this.sqlite.query("SELECT events_archive_key AS key, events_archived_at AS at, events_archived_count AS count FROM tasks WHERE id = ?").get(taskId) as { key: string | null; at: number; count: number } | null;
     return r?.key ? { key: r.key, at: r.at, count: r.count } : null;
@@ -1894,7 +1894,7 @@ export class Db {
       .all() as Array<{ taskId: string; title: string; pending: number }>;
   }
 
-  /* ---------- schedules (#20) ---------- */
+  /* ---------- schedules ---------- */
 
   listSchedules(): Schedule[] {
     return this.sqlite.query("SELECT * FROM schedules ORDER BY created_at").all().map(rowToSchedule);
@@ -1916,7 +1916,7 @@ export class Db {
     const cur = this.getSchedule(id);
     if (!cur) return null;
     const n = { ...cur, ...patch };
-    // a result belongs to the secret-scan action (#1274): a schedule turned into another action starts without one
+    // a result belongs to the secret-scan action: a schedule turned into another action starts without one
     if (patch.action !== undefined && patch.action !== cur.action && patch.lastResult === undefined) n.lastResult = null;
     this.sqlite
       .query("UPDATE schedules SET title = ?, cron = ?, workspace_id = ?, runner = ?, model = ?, effort = ?, prompt = ?, action = ?, budget_usd = ?, enabled = ?, last_run_at = ?, last_task_id = ?, next_run_at = ?, last_result = ? WHERE id = ?")
@@ -1933,7 +1933,7 @@ export class Db {
     return this.sqlite.query("SELECT * FROM tasks WHERE schedule_id IS NOT NULL AND created_at >= ? ORDER BY created_at DESC LIMIT 100").all(sinceTs).map(rowToTask);
   }
 
-  /* ---------- jobs the daemon runs for Tasks (#3992) ---------- */
+  /* ---------- jobs the daemon runs for Tasks ---------- */
 
   insertJob(j: { kind: JobKind; taskId: string; pr: number; runner: "codex" | "claude" | null; cwd: string; startedAt: number }): Job {
     const r = this.sqlite
@@ -1993,7 +1993,7 @@ export class Db {
       .run(runner, window, utilization, resetsAt, ts);
   }
 
-  /** One minute of the host's load (#2086) and its groups, dropping both tables' rows older than 7 days, in one transaction. */
+  /** One minute of the host's load and its groups, dropping both tables' rows older than 7 days, in one transaction. */
   insertOpsLoad(row: OpsLoadRow, groups: OpsLoadGroupRow[], now = Date.now()) {
     const group = this.sqlite.query("INSERT INTO ops_load_groups (ts, task_id, owner, kind, rss, cpu_ms, procs) VALUES (?, ?, ?, ?, ?, ?, ?)");
     this.sqlite.transaction(() => {
@@ -2006,7 +2006,7 @@ export class Db {
     })();
   }
 
-  /** Saves buffered API requests (#2101) and drops those older than 7 days, in one transaction. */
+  /** Saves buffered API requests and drops those older than 7 days, in one transaction. */
   insertApiRequests(rows: ApiRequestRow[], now = Date.now()) {
     const insert = this.sqlite.query("INSERT INTO api_requests (ts, method, route, status, ms, bytes) VALUES (?, ?, ?, ?, ?, ?)");
     this.sqlite.transaction(() => {
@@ -2015,7 +2015,7 @@ export class Db {
     })();
   }
 
-  /** Saves the Web UI's journey timings (#639) and drops those older than 30 days, in one transaction. */
+  /** Saves the Web UI's journey timings and drops those older than 30 days, in one transaction. */
   insertPerfSamples(rows: PerfSample[], now = Date.now()) {
     const insert = this.sqlite.query("INSERT INTO perf_samples (ts, journey, device, build, ms, task_id, bytes, events) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
     this.sqlite.transaction(() => {
@@ -2025,7 +2025,7 @@ export class Db {
   }
 
   /**
-   * Journey timings per journey × device × size (#639, #2103): the last 7 days against the 7 days before them. A
+   * Journey timings per journey × device × size: the last 7 days against the 7 days before them. A
    * comparison by build stopped working once a build lasted a few hours (promoted 8 times a day). p50 / p90 are nearest-rank.
    */
   perfSummary(now = Date.now()): PerfSummaryRow[] {
@@ -2049,7 +2049,7 @@ export class Db {
       .map((g) => ({ journey: g.journey, device: g.device, size: g.size, current: stats(g.current), previous: stats(g.previous) }));
   }
 
-  /** Day × runner totals for the last `days` days (JST calendar days, as the Ledger screen shows them — #2028). */
+  /** Day × runner totals for the last `days` days (JST calendar days, as the Ledger screen shows them). */
   ledgerDaily(days = 7, now = Date.now()): LedgerDaily[] {
     const from = new Date(jstDayStart(now, days - 1));
     const rows = this.sqlite.query("SELECT runner, ts, cost_usd, billed_usd, input_tokens + output_tokens + cache_read + cache_write AS tokens FROM ledger WHERE ts >= ? ORDER BY ts").all(from.getTime()) as Array<{ runner: RunnerId; ts: number; cost_usd: number; billed_usd: number; tokens: number }>;
@@ -2078,7 +2078,7 @@ export class Db {
       .map((r) => ({ ...(r as Omit<LedgerTaskRow, "unpriced"> & { unpriced: number }), unpriced: (r as { unpriced: number }).unpriced === 1 }));
   }
 
-  /** Ledger screen (#1836): the period (the same days as `ledgerDaily`) per runner × model, costliest first; `tasks` counts Tasks, not usage rows (the PBI's 件数). */
+  /** Ledger screen: the period (the same days as `ledgerDaily`) per runner × model, costliest first; `tasks` counts Tasks, not usage rows (the PBI's 件数). */
   ledgerModels(days = 7, now = Date.now()): LedgerModelRow[] {
     const from = new Date(jstDayStart(now, days - 1));
     return (
@@ -2116,14 +2116,14 @@ export class Db {
       byRunnerToday,
       quota,
       topTasks: top,
-      github: null, // the daemon's gh reads it (server.ts); the DB does not keep it (#549)
+      github: null, // the daemon's gh reads it (server.ts); the DB does not keep it
     };
   }
 }
 
 /* ---------- helpers ---------- */
 
-/** The status a runner sends while it thinks, as stored (#2738): the one form in the events. */
+/** The status a runner sends while it thinks, as stored: the one form in the events. */
 const THINKING_JSON = JSON.stringify({ t: "status", text: "thinking" });
 
 type JobRow = { id: number; kind: string; task_id: string; pr: number; runner: string | null; cwd: string; status: string; exit_code: number | null; started_at: number; ended_at: number | null; summary: string | null };
@@ -2161,7 +2161,7 @@ function migrate(db: Database) {
     db.exec("UPDATE backlog_operations SET status = 'pending', retry_at = NULL, error = NULL WHERE status = 'conflict' AND field = 'field:Status' AND overwritten IS NULL");
     db.exec("PRAGMA user_version = 1");
   }
-  // #2738: a run of status `thinking` (a DAK turn writes thousands) buried the reply under the transcript's tail; once, keep
+  // a run of status `thinking` (a DAK turn writes thousands) buried the reply under the transcript's tail; once, keep
   // each run's last row only — the task's last seq and ts do not move, and nothing reads the others (TaskManager now records one)
   if ((db.query("PRAGMA user_version").get() as { user_version: number }).user_version < 2) {
     db.transaction(() => {
@@ -2175,7 +2175,7 @@ function migrate(db: Database) {
       db.exec("PRAGMA user_version = 2");
     })();
   }
-  // #4208: a turn that ended on background jobs is status `background`, not `done` with a mark; once
+  // a turn that ended on background jobs is status `background`, not `done` with a mark; once
   if ((db.query("PRAGMA user_version").get() as { user_version: number }).user_version < 3) {
     db.exec("UPDATE tasks SET status = 'background' WHERE status = 'done' AND background IS NOT NULL");
     db.exec("PRAGMA user_version = 3");
@@ -2197,11 +2197,11 @@ function migrate(db: Database) {
   if (!cols.has("outcome")) db.exec("ALTER TABLE tasks ADD COLUMN outcome TEXT NOT NULL DEFAULT 'unknown'");
   if (!cols.has("reviewed_at")) {
     db.exec("ALTER TABLE tasks ADD COLUMN reviewed_at INTEGER");
-    // Tasks that stopped before #492 count as reviewed, so 要対応 starts empty rather than listing the whole history.
+    // Tasks that stopped before the 確認済み mark existed count as reviewed, so 要対応 starts empty rather than listing the whole history.
     db.exec("UPDATE tasks SET reviewed_at = updated_at WHERE status NOT IN ('running', 'waiting', 'idle')");
   }
   if (!cols.has("archived_at")) db.exec("ALTER TABLE tasks ADD COLUMN archived_at INTEGER");
-  // #1139: a stage Task's Issue and stage were read off its title; they are columns now. Rows from before take them from
+  // a stage Task's Issue and stage were read off its title; they are columns now. Rows from before take them from
   // the title once, here (the title forms are a copy of what startTitle wrote then; nothing reads a title afterwards).
   // One transaction: an interruption between the ALTERs and the backfill would otherwise leave the columns present and the block skipped for good.
   if (!cols.has("stage_issue")) {
@@ -2220,15 +2220,15 @@ function migrate(db: Database) {
   if (!cols.has("judged_result")) db.exec("ALTER TABLE tasks ADD COLUMN judged_result TEXT");
   if (!cols.has("judged_reason")) db.exec("ALTER TABLE tasks ADD COLUMN judged_reason TEXT");
   if (!cols.has("judged_by")) db.exec("ALTER TABLE tasks ADD COLUMN judged_by TEXT");
-  if (!cols.has("judging_at")) db.exec("ALTER TABLE tasks ADD COLUMN judging_at INTEGER"); // #1139
-  if (!cols.has("title_pending")) db.exec("ALTER TABLE tasks ADD COLUMN title_pending INTEGER NOT NULL DEFAULT 0"); // #491: rows from before keep their title
+  if (!cols.has("judging_at")) db.exec("ALTER TABLE tasks ADD COLUMN judging_at INTEGER");
+  if (!cols.has("title_pending")) db.exec("ALTER TABLE tasks ADD COLUMN title_pending INTEGER NOT NULL DEFAULT 0"); // rows from before keep their title
   if (!cols.has("provenance")) db.exec("ALTER TABLE tasks ADD COLUMN provenance TEXT"); // docs/design/process-kernel.md K1: what the task was started with, JSON, written once
-  // #1431: where a finished task's event bodies went (S3 key, when, how many rows); the rows stay, as skeletons.
+  // where a finished task's event bodies went (S3 key, when, how many rows); the rows stay, as skeletons.
   if (!cols.has("events_archive_key")) db.exec("ALTER TABLE tasks ADD COLUMN events_archive_key TEXT");
   if (!cols.has("events_archived_at")) db.exec("ALTER TABLE tasks ADD COLUMN events_archived_at INTEGER");
   if (!cols.has("events_archived_count")) db.exec("ALTER TABLE tasks ADD COLUMN events_archived_count INTEGER");
   if (!cols.has("events_archived_max_seq")) db.exec("ALTER TABLE tasks ADD COLUMN events_archived_max_seq INTEGER");
-  // #2029: when a task came to its status was not kept; rows from before take their last update, the best known bound
+  // when a task came to its status was not kept; rows from before take their last update, the best known bound
   if (!cols.has("status_at")) {
     db.transaction(() => {
       db.exec("ALTER TABLE tasks ADD COLUMN status_at INTEGER");
@@ -2240,7 +2240,7 @@ function migrate(db: Database) {
   if (!wsCols.has("backlog_source")) db.exec("ALTER TABLE workspaces ADD COLUMN backlog_source TEXT");
   if (!wsCols.has("upstream")) db.exec("ALTER TABLE workspaces ADD COLUMN upstream TEXT");
   if (!wsCols.has("runner_config_ok")) db.exec("ALTER TABLE workspaces ADD COLUMN runner_config_ok TEXT");
-  // #2656: backlog-next's slots move from the one setting backlogSweep to every workspace, once
+  // backlog-next's slots move from the one setting backlogSweep to every workspace, once
   if (!wsCols.has("sweep_implement")) {
     db.transaction(() => {
       db.exec("ALTER TABLE workspaces ADD COLUMN sweep_implement INTEGER NOT NULL DEFAULT 1");
@@ -2255,7 +2255,7 @@ function migrate(db: Database) {
     })();
   }
   const logCols = new Set((db.query("PRAGMA table_info(routing_log)").all() as Array<{ name: string }>).map((c) => c.name));
-  // Rows written before #25 are all rule-table suggestions, which is what the default says.
+  // Rows written before the routing log kept who suggested are all rule-table suggestions, which is what the default says.
   if (!logCols.has("suggested_by")) db.exec("ALTER TABLE routing_log ADD COLUMN suggested_by TEXT NOT NULL DEFAULT 'rule'");
   // After the ALTER (the index needs the column). Unique: one shadow per primary; NULLs (every other task) do not collide.
   db.exec("DROP INDEX IF EXISTS tasks_shadow_of");
@@ -2263,7 +2263,7 @@ function migrate(db: Database) {
   const lcols = new Set((db.query("PRAGMA table_info(ledger)").all() as Array<{ name: string }>).map((c) => c.name));
   if (!lcols.has("billed_usd")) db.exec("ALTER TABLE ledger ADD COLUMN billed_usd REAL NOT NULL DEFAULT 0");
   if (!lcols.has("cache_write_1h")) db.exec("ALTER TABLE ledger ADD COLUMN cache_write_1h INTEGER NOT NULL DEFAULT 0");
-  // #2353: Claude's `total_cost_usd` is the session's running total, and every turn booked it whole. The rows of a
+  // Claude's `total_cost_usd` is the session's running total, and every turn booked it whole. The rows of a
   // Task's own turns (a reported usage event of the same Task at the same time; the judge's and the routing's one-shot
   // rows have none and are each a whole fresh session) become the difference from the Task's previous row, a total
   // that went down being a new session. The total (all the models of the session together) stays in reported_total,
@@ -2292,10 +2292,10 @@ function migrate(db: Database) {
       }
     })();
   }
-  // staging gained diff_text / stat with #12; a database from before that made every fs.write / fs.patch fail (#66).
+  // staging gained diff_text / stat after it was first made; a database from before that made every fs.write / fs.patch fail.
   const schCols = new Set((db.query("PRAGMA table_info(schedules)").all() as Array<{ name: string }>).map((c) => c.name));
   if (!schCols.has("action")) db.exec("ALTER TABLE schedules ADD COLUMN action TEXT NOT NULL DEFAULT 'prompt'");
-  // #832: the Tasks that start by themselves ran on routing.llm.runner; they now have settings.autoStart, which starts at that value.
+  // the Tasks that start by themselves ran on routing.llm.runner; they now have settings.autoStart, which starts at that value.
   const settingsRow = db.query("SELECT json FROM settings WHERE key = 'settings'").get() as { json: string } | null;
   if (settingsRow) {
     try {
@@ -2309,15 +2309,15 @@ function migrate(db: Database) {
     }
   }
   if (!schCols.has("model")) db.exec("ALTER TABLE schedules ADD COLUMN model TEXT NOT NULL DEFAULT ''");
-  if (!schCols.has("effort")) db.exec("ALTER TABLE schedules ADD COLUMN effort TEXT NOT NULL DEFAULT ''"); // #833
-  if (!schCols.has("last_result")) db.exec("ALTER TABLE schedules ADD COLUMN last_result TEXT"); // #1274, JSON of ScheduleResult
+  if (!schCols.has("effort")) db.exec("ALTER TABLE schedules ADD COLUMN effort TEXT NOT NULL DEFAULT ''");
+  if (!schCols.has("last_result")) db.exec("ALTER TABLE schedules ADD COLUMN last_result TEXT"); // JSON of ScheduleResult
   const perfCols = new Set((db.query("PRAGMA table_info(perf_samples)").all() as Array<{ name: string }>).map((c) => c.name));
-  if (!perfCols.has("task_id")) db.exec("ALTER TABLE perf_samples ADD COLUMN task_id TEXT"); // #2100; earlier rows stay null
+  if (!perfCols.has("task_id")) db.exec("ALTER TABLE perf_samples ADD COLUMN task_id TEXT"); // earlier rows stay null
   if (!perfCols.has("bytes")) db.exec("ALTER TABLE perf_samples ADD COLUMN bytes INTEGER");
   if (!perfCols.has("events")) db.exec("ALTER TABLE perf_samples ADD COLUMN events INTEGER");
-  // #4055: the backlog queue's last decision gained its time; a queue stored before has none (null), once
+  // the backlog queue's last decision gained its time; a queue stored before has none (null), once
   db.exec(`UPDATE settings SET json = json_set(json, '$.lastNoteAt', json('null')) WHERE key = 'backlogQueue' AND json_valid(json) AND json_type(json, '$.lastNoteAt') IS NULL`);
-  // #3682: the days a throwaway app read the API through the screen, and the request Task started for it
+  // the days a throwaway app read the API through the screen, and the request Task started for it
   const artCols = new Set((db.query("PRAGMA table_info(artifacts)").all() as Array<{ name: string }>).map((c) => c.name));
   if (!artCols.has("app_days")) db.exec("ALTER TABLE artifacts ADD COLUMN app_days INTEGER NOT NULL DEFAULT 0");
   if (!artCols.has("app_last_day")) db.exec("ALTER TABLE artifacts ADD COLUMN app_last_day TEXT");
@@ -2329,23 +2329,23 @@ function migrate(db: Database) {
   // the item that is there, so such an operation is sent again (a create only with the Issue it made: never made twice).
   // GitHub's "Something went wrong" failed it at once too; it is an outage now, sent again (not one failed after 5 tries)
   db.exec(`UPDATE backlog_operations SET status = 'pending', attempt = 0, retry_at = NULL, error = NULL WHERE status = 'failed' AND (error LIKE '%already exists in this project%' OR error LIKE 'gh api %: gh: Something went wrong while executing your query%') AND (kind != 'create' OR remote_id IS NOT NULL)`);
-  // #3971: a local change gained `reviewedHead`; one stored before (merged or not) has none: null, once
+  // a local change gained `reviewedHead`; one stored before (merged or not) has none: null, once
   for (const col of ["remote", "base", "local"])
     db.exec(`UPDATE backlog_records SET ${col} = json_set(${col}, '$.change.reviewedHead', json('null')) WHERE object_kind = 'issue' AND ${col} IS NOT NULL AND json_type(${col}, '$.change') = 'object' AND json_type(${col}, '$.change.reviewedHead') IS NULL`);
-  // #1059: a stored PR gained `updatedAt` and `files`; one stored before is dropped and the next import reads it again
+  // a stored PR gained `updatedAt` and `files`; one stored before is dropped and the next import reads it again
   db.exec(`DELETE FROM backlog_records WHERE object_kind = 'pull-request' AND json_type(remote, '$.files') IS NULL AND json_type(remote, '$.updatedAt') IS NULL`);
-  // #1183: a stored PR gained `closes`; one stored before reads as closing nothing until the next import reads it
+  // a stored PR gained `closes`; one stored before reads as closing nothing until the next import reads it
   for (const col of ["remote", "base", "local"])
     db.exec(`UPDATE backlog_records SET ${col} = json_set(${col}, '$.closes', json('[]')) WHERE object_kind = 'pull-request' AND ${col} IS NOT NULL AND json_type(${col}, '$.closes') IS NULL`);
-  // #1802: a session.start gained `effort` (the effort the process was started with); one recorded before reads as the task's
+  // a session.start gained `effort` (the effort the process was started with); one recorded before reads as the task's
   // own, which no one could change until then ("" = the CLI's default)
   db.exec(`UPDATE events SET json = json_set(json, '$.effort', COALESCE((SELECT effort FROM tasks WHERE id = events.task_id), '')) WHERE substr(json, 1, 21) = '{"t":"session.start",' AND json_type(json, '$.effort') IS NULL`);
-  // #1014: a stored Issue gained `stateReason`, a PR `mergeCommit`; null until the next import, which reads every Issue
+  // a stored Issue gained `stateReason`, a PR `mergeCommit`; null until the next import, which reads every Issue
   // again when a value GitHub gave lacked them (one made here gets them when it is sent)
-  // #651: a stored Issue / PR gained `closedAt` (a PR `mergedAt`): the same, so a closed one is read again for its time
+  // a stored Issue / PR gained `closedAt` (a PR `mergedAt`): the same, so a closed one is read again for its time
   const reasonless = `(object_kind = 'issue' AND (json_type(remote, '$.stateReason') IS NULL OR json_type(remote, '$.closedAt') IS NULL)) OR (object_kind = 'pull-request' AND (json_type(remote, '$.mergeCommit') IS NULL OR json_type(remote, '$.closedAt') IS NULL OR json_type(remote, '$.mergedAt') IS NULL))`;
   // IMMEDIATE: a deferred one reads first and then cannot write when another connection (the daemon, while a CLI such
-  // as events-archive opens the file) committed in between — SQLITE_BUSY_SNAPSHOT, which busy_timeout does not wait out (#1597)
+  // as events-archive opens the file) committed in between — SQLITE_BUSY_SNAPSHOT, which busy_timeout does not wait out
   db.transaction(() => {
     if (db.query(`SELECT 1 FROM backlog_records WHERE remote IS NOT NULL AND (${reasonless}) LIMIT 1`).get()) db.exec("UPDATE backlog_repositories SET cursor = NULL");
     for (const col of ["remote", "base", "local"])
@@ -2355,7 +2355,7 @@ function migrate(db: Database) {
 }
 
 /**
- * Tasks still marked running / waiting when a daemon starts belonged to a daemon that is gone (#64): no process can
+ * Tasks still marked running / waiting when a daemon starts belonged to a daemon that is gone: no process can
  * answer for them. They are closed as aborted — the reason goes into session.end.summary (what the transcript shows
  * under 中断), open permission asks are resolved as denied by timeout so no tool row stays 承認待ち — so they neither
  * look alive in the UI nor sit in the queue — and the turn is planned to continue like one the shutdown cut
@@ -2436,7 +2436,7 @@ function rowToBacklogOperation(r: any): BacklogOperation {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function rowToWorkspace(r: any): Workspace {
-  // a workspace whose backlog is kept here only (#2265), or whose GitHub sync is off (#2266), says so in its source
+  // a workspace whose backlog is kept here only, or whose GitHub sync is off, says so in its source
   // (backlog.ts syncsGithub); none, or a GitHub one = github
   const source = r.backlog_source ? (JSON.parse(r.backlog_source) as BacklogSource) : null;
   const backlog = source && (source.service === "switchboard" || source.disabled) ? "switchboard" : "github";
@@ -2537,7 +2537,7 @@ function rowToTask(r: any): Task {
   };
 }
 
-/** A Task's size class by its event count (#2103); null when the sample has none. */
+/** A Task's size class by its event count; null when the sample has none. */
 export function sizeClass(events: number | null): SizeClass | null {
   return events === null ? null : events <= 1000 ? "small" : events <= 5000 ? "medium" : "large";
 }

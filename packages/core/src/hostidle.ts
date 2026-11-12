@@ -1,5 +1,5 @@
 /**
- * Stopping the machine when nobody uses it (#181). On a cloud host that runs only while in use, the daemon notices
+ * Stopping the machine when nobody uses it. On a cloud host that runs only while in use, the daemon notices
  * that nothing is going on and hands the stop to the environment: `SWITCHBOARD_IDLE_STOP_CMD <next wake ISO | ->`.
  * The command (the host's sb-stop) registers the wake-up and shuts the machine down; core only decides when. Unset
  * (a Mac) = never.

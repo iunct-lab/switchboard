@@ -10,7 +10,7 @@ import { Db, newId } from "./db.ts";
 export const MAX_ARTIFACT_FILE_BYTES = 20 * 1024 * 1024;
 export const MAX_ARTIFACT_DIR_BYTES = 50 * 1024 * 1024;
 export const MAX_ARTIFACT_DIR_FILES = 1000;
-/** A throwaway app read through the screen on this many separate days becomes a request, once (#3682). Not a setting. */
+/** A throwaway app read through the screen on this many separate days becomes a request, once. Not a setting. */
 export const APP_REQUEST_DAYS = 3;
 /** A removed artifact stays this long so "undo" works; the boot sweep deletes it after. */
 export const ARTIFACT_UNDO_MS = 24 * 60 * 60 * 1000;
@@ -55,7 +55,7 @@ export class ArtifactError extends Error {
 type Source = { kind: "url"; url: string } | { kind: "file" | "dir"; path: string };
 
 /**
- * Reports a person registered on the Task screen (#1777). A file or folder is copied to
+ * Reports a person registered on the Task screen. A file or folder is copied to
  * `<dir>/<taskId>/<artifactId>/` when registered, so it still opens after the original is deleted or the
  * working copy / temp directory is cleaned up; a URL is only remembered. Only what is inside the task's scope, its
  * working directory or a temp directory can be registered: this is a read of the person's files on their request,
@@ -103,7 +103,7 @@ export class ArtifactStore {
   }
 
   /**
-   * The daemon's own copy of one file it knows the path of (the insights report, #1838) — outside the task's scope,
+   * The daemon's own copy of one file it knows the path of (the insights report) — outside the task's scope,
    * so without the scope check; the deny list, the store itself and the size limits apply as always.
    */
   addCopy(task: Pick<Task, "id" | "cwd" | "scope">, path: string, title: string): Artifact {
@@ -170,7 +170,7 @@ export class ArtifactStore {
   }
 
   /**
-   * The page read the API through the screen on the local day `day` (#3682). A new day counts once; a removed artifact
+   * The page read the API through the screen on the local day `day`. A new day counts once; a removed artifact
    * is not counted. `due` = this call reached the {@link APP_REQUEST_DAYS}th day (or a later one, when starting the
    * request failed before) and no request was started yet: only the call that adds a day can be due, so two reads on
    * the same day never start two requests.
@@ -411,11 +411,11 @@ function urlTitle(url: string): string {
   return last ? `${u.host}/${last}` : u.host;
 }
 
-/** What an agent's `switchboard-artifact` fence carries (#1778): the file or folder to register (absolute, or relative to the task's working directory) and an optional title. */
+/** What an agent's `switchboard-artifact` fence carries: the file or folder to register (absolute, or relative to the task's working directory) and an optional title. */
 export const ArtifactReport = z.object({ path: z.string().min(1).max(4096), title: z.string().max(200).optional() });
 export type ArtifactReport = z.infer<typeof ArtifactReport>;
 
-/** One fence read: the report, or why its body is not one — a broken fence is told on the Task, not dropped (#1778). */
+/** One fence read: the report, or why its body is not one — a broken fence is told on the Task, not dropped. */
 export type ArtifactFence = { ok: true; report: ArtifactReport } | { ok: false; why: string };
 
 export function parseArtifactFence(json: string): ArtifactFence {
@@ -429,10 +429,10 @@ export function parseArtifactFence(json: string): ArtifactFence {
   return r.success ? { ok: true, report: r.data } : { ok: false, why: `path と title の形ではありません（${r.error.issues.map((i) => `${i.path.join(".") || "本文"}: ${i.message}`).join("; ").slice(0, 200)}）` };
 }
 
-/** How a throwaway page reads the API through the screen (#3674): the copy in the running code's own tree (a release carries `docs/` too). */
+/** How a throwaway page reads the API through the screen: the copy in the running code's own tree (a release carries `docs/` too). */
 export const SCRATCH_APPS_DOC = join(import.meta.dir, "../../../docs/design/scratch-apps.md");
 
-/** What every runner start is told (#1778): how to hand a report over. Short: it goes before the prompt, after the stop report's paragraph. */
+/** What every runner start is told: how to hand a report over. Short: it goes before the prompt, after the stop report's paragraph. */
 export function artifactPrompt(scratchDoc = SCRATCH_APPS_DOC): string {
   return [
     "[Switchboard: 成果物の登録]",

@@ -19,7 +19,7 @@ export const runSpawn: Spawn = async (cmd) => {
 const HIT_LINE = /^https:\/\/\S+: [a-z-]+（\d+ 行目）$/;
 
 /**
- * The counts of one firing (#1274): `repos` = repositories identified from the workspaces (a repository whose scan then
+ * The counts of one firing: `repos` = repositories identified from the workspaces (a repository whose scan then
  * failed counts here too), `hits`, `failed` = scans that failed plus workspaces whose repository could not be identified.
  */
 export interface ScanSummary {
@@ -29,10 +29,10 @@ export interface ScanSummary {
 }
 
 /**
- * The daily check of what is already written (#775): every registered repository once (several checkouts of one
+ * The daily check of what is already written: every registered repository once (several checkouts of one
  * repository are one), each through the kit's `scan-issues` with the host's `gh` login. `lines` are the log of the
  * firing, one per repository, with the places and kinds of its hits only — of scan-issues' output it keeps the hit lines,
- * nothing else, and of a failure its exit code. 判断待ち's notice is read from them (#2866, asks.ts `scanFindings`).
+ * nothing else, and of a failure its exit code. 判断待ち's notice is read from them (asks.ts `scanFindings`).
  * A repository with a cursor is read from its time on (`--since`) and its earlier hits read again (`--recheck`); the
  * time is taken before the scan starts, so what is written during it is read again next time, never missed. A
  * repository that was not checked this time (its scan failed, or its workspace's repository could not be identified)

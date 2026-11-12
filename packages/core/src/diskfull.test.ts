@@ -57,7 +57,7 @@ const CLAUDE_TURN = [start, ...call("Bash", "The disk is full: nothing was run."
 const CODEX_TURN = [start, ...call("exec", "tar: x: Cannot write: No space left on device", false), ...end()];
 const OK_TURN = [start, ...end("ok", "done")];
 
-describe("a turn that says the disk is full (#2234)", () => {
+describe("a turn that says the disk is full", () => {
   let home: string;
   let db: Db;
   let tasks: TaskManager;
@@ -261,7 +261,7 @@ describe("a turn that says the disk is full (#2234)", () => {
   });
 });
 
-describe("diskfull helpers (#2234)", () => {
+describe("diskfull helpers", () => {
   test("diskFullHit: the words, nothing around them; a read tool sees none", () => {
     expect(diskFullHit("Bash", "/x/secret-path: No space left on device\n")).toBe("No space left on device");
     expect(diskFullHit("Bash", "all good")).toBeUndefined();

@@ -8,7 +8,7 @@ import { loadConfig } from "./config.ts";
 import { runnerConfigOf } from "./runner-config.ts";
 import { startServer, upstreamSyncPrompt, type CoreServer } from "./server.ts";
 
-// 元の更新を取り込む (#2576): one Task in the workspace; the steps are in its prompt, not in the daemon.
+// 元の更新を取り込む: one Task in the workspace; the steps are in its prompt, not in the daemon.
 
 let core: CoreServer | undefined;
 let root: string | undefined;

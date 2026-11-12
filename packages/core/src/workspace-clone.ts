@@ -19,7 +19,7 @@ export function parseGithubRepo(input: string): { owner: string; name: string } 
 }
 
 /**
- * Why a runner must not start in the checkout at `path` (#2799): its origin is not the workspace's registered GitHub
+ * Why a runner must not start in the checkout at `path`: its origin is not the workspace's registered GitHub
  * repository (`source`). null = it is, the workspace has no GitHub registration, or the folder has no origin (not a
  * git checkout, or one without an origin: nothing to push to). Reads git only (no network): an origin left at a
  * renamed repository's old name stops too, and the text says how to fix it.
@@ -44,9 +44,9 @@ export function gitOrigin(path: string): string | null {
 }
 
 /**
- * The workspaces a Task cannot use (#2799): registered to a GitHub repository whose folder is gone (a rebuild that could
+ * The workspaces a Task cannot use: registered to a GitHub repository whose folder is gone (a rebuild that could
  * not clone it, or moved a clone of another repository aside) or whose origin is not that repository (originMismatch).
- * Read each time 判断待ち is (#2866): a fixed one is simply not listed any more.
+ * Read each time 判断待ち is: a fixed one is simply not listed any more.
  */
 export function unusableWorkspaces(db: Db, originOf = gitOrigin): Array<{ workspace: { id: string; name: string }; why: string }> {
   const out: Array<{ workspace: { id: string; name: string }; why: string }> = [];
@@ -61,7 +61,7 @@ export function unusableWorkspaces(db: Db, originOf = gitOrigin): Array<{ worksp
   return out;
 }
 
-/** Registers a directory as a workspace. `switchboard` keeps its backlog here only (#2265): the source is set now and stored as an empty import. */
+/** Registers a directory as a workspace. `switchboard` keeps its backlog here only: the source is set now and stored as an empty import. */
 export function registerWorkspace(db: Db, input: { path: string; name: string; backlog: "github" | "switchboard"; had?: Workspace; upstream?: string }): Workspace {
   let ws = db.upsertWorkspace({ path: input.path, name: input.name, kind: "repo", ...(input.upstream ? { upstream: input.upstream } : {}) });
   if (input.backlog === "switchboard" && !input.had) {
@@ -88,7 +88,7 @@ export interface WorkspaceClone {
 }
 
 /**
- * Makes a fresh clone of someone else's repository write nothing back (#2576): its `origin` becomes `upstream`, the only
+ * Makes a fresh clone of someone else's repository write nothing back: its `origin` becomes `upstream`, the only
  * remote (`gh repo clone` of a fork has already added the parent as `upstream`), and the clone is marked for the kit's
  * refusal (`noWriteRefusal`). Throws what git said.
  */
@@ -102,7 +102,7 @@ function detachFromOrigin(path: string, repo: string): void {
 }
 
 /**
- * Makes the private repository `mine` (just created, empty) the clone's `origin` and gh's default (#2579): every branch of
+ * Makes the private repository `mine` (just created, empty) the clone's `origin` and gh's default: every branch of
  * `upstream` and every tag is pushed to it, the checked-out branch first so it becomes the default branch. Throws what git
  * or gh said.
  */
@@ -125,7 +125,7 @@ async function pushToOwnCopy(path: string, mine: string, gh: GhRunner): Promise<
   if (d.code !== 0) throw new Error(`gh repo set-default: ${d.stderr.trim().split("\n").pop() || d.code}`);
 }
 
-/** Clones of GitHub repositories next to the checkout, in memory only: a restart forgets them (#2575). */
+/** Clones of GitHub repositories next to the checkout, in memory only: a restart forgets them. */
 export class WorkspaceClones {
   private readonly rows = new Map<string, WorkspaceClone>();
 
@@ -136,9 +136,9 @@ export class WorkspaceClones {
   }
 
   /**
-   * Checks the target, then clones in the background; a repository the caller cannot push to is added as someone else's
-   * (#2576): its backlog is here, and it writes nothing back to `full_name`, the name it has now (a renamed one answers
-   * under the old name too). `ownCopy` (#2579) also creates a private `<you>/<name>` and makes it the clone's origin and
+   * Checks the target, then clones in the background; a repository the caller cannot push to is added as someone else's:
+   * its backlog is here, and it writes nothing back to `full_name`, the name it has now (a renamed one answers
+   * under the old name too). `ownCopy` also creates a private `<you>/<name>` and makes it the clone's origin and
    * gh's default, the backlog as asked (GitHub when absent). A path that a workspace keeps stays as it is. Throws
    * CloneError for what the request got wrong.
    */
@@ -149,7 +149,7 @@ export class WorkspaceClones {
     if (existsSync(path) || this.rows.get(path)?.state === "cloning") throw new CloneError(`${path} は既にあります。上書きしません`, 409);
     // a workspace still registered at this path (its directory was deleted) keeps its backlog, as the path form says
     const had = this.db.listWorkspaces().find((w) => w.path === path);
-    if (had && opts.backlog !== undefined && had.backlog !== opts.backlog) throw new CloneError(`この workspace のバックログは ${had.backlog} に置いています。切り替えは #2266 です`, 409);
+    if (had && opts.backlog !== undefined && had.backlog !== opts.backlog) throw new CloneError(`この workspace のバックログは ${had.backlog} に置いています。切り替えは GitHub 同期の有効・無効で行います`, 409);
     // reserved before the first await, so a second request for the same name is 409 and runs nothing
     const row: WorkspaceClone = { repo: full, path, state: "cloning", startedAt: Date.now() };
     this.rows.set(path, row);

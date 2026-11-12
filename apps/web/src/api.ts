@@ -209,9 +209,6 @@ export type WorkspaceClone = { repo: string; path: string; state: "cloning" | "f
 
 export type RunnerConfigView = { upstream: string; files: { path: string; content: string }[]; hash: string; confirmed: boolean };
 
-/** The answer to batch:security-merge (#2791): what became of each chosen Task (changed = its PR moved, nothing sent), and the batch after it. */
-export type MergeBatchResult = { results: { taskId: string; result: "sent" | "changed" | "already" | "failed"; detail?: string }[]; batch: AskBatch | null };
-
 export const api = {
   feedback: (text: string, attachmentIds?: string[], screen?: string, mode: "request" | "fix" = "request", workspaceId?: string, source?: FeedbackSource) => req<Task | FeedbackUpstream>("/api/feedback", { method: "POST", body: JSON.stringify({ text, attachmentIds, screen, mode, workspaceId, source }) }),
   /** 改善要望にする (#1221): the draft the feedback dialog opens with for a task's evaluations. */
@@ -297,7 +294,7 @@ export const api = {
   asks: () => req<AskList>("/api/asks"),
   /** #936: answers one question by its id; a 409 carries `body` (AskChanged: what changed, the question now). */
   /** #2046: one press for a batch — sso logs in once, deploy approves the chosen Tasks. */
-  answerBatch: (id: AskBatch["id"], taskIds?: string[], askIds?: string[]) => req<AskBatchResult | MergeBatchResult>("/api/asks/answer", { method: "POST", body: JSON.stringify({ id, answer: { kind: "allow" }, ...(taskIds ? { taskIds } : {}), ...(askIds ? { askIds } : {}) }) }),
+  answerBatch: (id: AskBatch["id"], taskIds?: string[]) => req<AskBatchResult>("/api/asks/answer", { method: "POST", body: JSON.stringify({ id, answer: { kind: "allow" }, ...(taskIds ? { taskIds } : {}) }) }),
   answerAsk: (id: string, answer: AskAnswer, policy?: PolicyInput) => req<AskAnswerResult>("/api/asks/answer", { method: "POST", body: JSON.stringify({ id, answer, ...(policy ? { policy } : {}) }) }),
   /** #938: the saved answer policies, and one edited / revoked. */
   listPolicies: () => req<PolicyList>("/api/policies"),

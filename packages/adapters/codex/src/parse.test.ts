@@ -279,7 +279,7 @@ describe("request building", () => {
   // fixtures/effort-high.jsonl: codex-cli 0.162.1, recorded 2026-10-12 — initialize → thread/start → turn/start built by
   // buildThreadStartParams / buildTurnStartParams with effort "high" (read-only), one turn. Paths, host and installation
   // id are placeholders; thread / turn / item ids are the CLI's random per-run values.
-  test.skipIf(skipRecordings("packages/adapters/codex/fixtures/effort-high.jsonl"))("effort (#833): the recorded turn/start sent effort high, the server took it, and the turn replays to session.end(ok)", async () => {
+  test.skipIf(skipRecordings("packages/adapters/codex/fixtures/effort-high.jsonl"))("effort: the recorded turn/start sent effort high, the server took it, and the turn replays to session.end(ok)", async () => {
     assertRecordings("packages/adapters/codex/fixtures/effort-high.jsonl");
     const lines = await load("effort-high");
     const sent = lines.filter((l) => l.startsWith("> ")).map((l) => JSON.parse(l.slice(2)));
@@ -294,7 +294,7 @@ describe("request building", () => {
     expect(evs.filter((e) => e.t === "session.end")).toEqual([expect.objectContaining({ t: "session.end", status: "ok" })]);
   });
 
-  test("effort (#833): turn/start carries it; thread/start and thread/resume do not; no key when unset or empty", () => {
+  test("effort: turn/start carries it; thread/start and thread/resume do not; no key when unset or empty", () => {
     expect(buildTurnStartParams("t1", "go", { ...opts, effort: "high" }).effort).toBe("high");
     expect(buildTurnStartParams("t1", "go", opts)).not.toHaveProperty("effort");
     expect(buildTurnStartParams("t1", "go", { ...opts, effort: "" })).not.toHaveProperty("effort");
@@ -426,13 +426,13 @@ describe("CodexSession over stdio (fake app-server)", () => {
     expect(defaultModelFromConfig(dir)).toBeUndefined();
   });
 
-  test("effort (#833): the adapter lists the reasoning efforts every listed model takes", () => {
+  test("effort: the adapter lists the reasoning efforts every listed model takes", () => {
     const a = createCodexAdapter({ bin: FAKE });
     expect(a.efforts).toBe(CODEX_EFFORTS);
     expect(CODEX_EFFORTS.map((e) => e.value)).toEqual(["low", "medium", "high", "xhigh", "max"]);
   });
 
-  test("models (#155): the adapter lists its models; cliDefaultModel is the top-level model of config.toml, in either quote style, never a profile's", () => {
+  test("models: the adapter lists its models; cliDefaultModel is the top-level model of config.toml, in either quote style, never a profile's", () => {
     const home = mkdtempSync(join(tmpdir(), "codex-home-"));
     const a = createCodexAdapter({ bin: FAKE, codexHome: home });
     expect(a.models).toBe(CODEX_MODELS);
@@ -531,7 +531,7 @@ describe("CodexSession over stdio (fake app-server)", () => {
   });
 });
 
-describe("login (#180)", () => {
+describe("login", () => {
   /** A stand-in `codex`: `--version` answers, `login status` runs `loginStatus` (shell). */
   function fakeCodex(dir: string, status: string): string {
     const bin = join(dir, `codex-${Math.random().toString(16).slice(2)}`);
@@ -650,7 +650,7 @@ describe("process group (fake codex binary that leaves a child)", () => {
   }
 });
 
-describe("privateTmp (#787)", () => {
+describe("privateTmp", () => {
   const base = { cwd: "/r", scope: ["/r", "/other"], prompt: "p" };
   test("with privateTmp, /tmp is closed and the task's own directory is the one writable root under it", () => {
     expect(buildSandboxPolicy({ ...base, privateTmp: "/tmp/switchboard.task.t1" })).toMatchObject({ type: "workspaceWrite", writableRoots: ["/other", "/tmp/switchboard.task.t1"], excludeSlashTmp: true, excludeTmpdirEnvVar: false });

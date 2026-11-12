@@ -187,7 +187,7 @@ describe("double submit, further", () => {
 
 describe("unknown", () => {
   test("a Task whose PBI is not stored in full cannot be placed; a workspace with no source is unknown too", () => {
-    const stored = workspace([issue(30, ["type:task"], { parent: 3 })]); // #3 itself is not stored
+    const stored = workspace([issue(30, ["type:task"], { parent: 3 })]); // Issue 3 itself is not stored
     const bare = db.upsertWorkspace({ name: "bare", path: join(dir, "bare"), kind: "repo" }); // no source at all
     const t = task(stored.id, { title: "#30 x" });
     resolved(t, "a", "user", T0);
@@ -202,7 +202,7 @@ describe("unknown", () => {
   test("a workspace never imported and an Issue not stored are unknown, not 0", () => {
     const stored = workspace([issue(3, ["type:pbi"])]);
     const fresh = workspace(null, "fresh", "acme/fresh");
-    const a = task(stored.id, { title: "#99 x" }); // #99 is not in the copy
+    const a = task(stored.id, { title: "#99 x" }); // Issue 99 is not in the copy
     say(a, "request", T0);
     resolved(a, "p", "user", T0 + MIN);
     const b = task(fresh.id, { stage: 7 }); // names an Issue of a workspace that was never imported
@@ -258,7 +258,7 @@ describe("after waits", () => {
   });
 });
 
-// ---- the summary (#1027) ----
+// ---- the summary ----
 
 const DAY = 86_400_000;
 const NOW = Date.parse("2026-10-17T12:00:00Z");
@@ -373,7 +373,7 @@ describe("re-asks and reasons", () => {
       stop("c", NOW - 3 * DAY, { reason: "github-limit", state: "waiting", work: { workspaceId: "w", issue: null, taskId: "v" } }),
       stop("d", NOW - 3 * DAY, { reason: "depends", state: "resolved", work: { workspaceId: "w", issue: 70, taskId: "x" } }),
     ];
-    const items = [iv("resume", NOW - 3 * DAY, { issue: 70, taskId: "y" })]; // a person started #70 while it stood
+    const items = [iv("resume", NOW - 3 * DAY, { issue: 70, taskId: "y" })]; // a person started Issue 70 while it stood
     const reasons = Object.fromEntries(sevenDays(summarizeInterventions(items, [], stops, lookupOf([]), NOW)).current.reasons.map((r) => [r.reason, r.notAutoResumed]));
     expect(reasons).toEqual({ transient: 1, "github-limit": 1, depends: 1 });
   });
@@ -389,17 +389,17 @@ describe("completed vs open", () => {
       pbiRec(7, { open: false, closedAt: NOW - DAY, subIssues: [70] }), // closed this week, with something uncounted on it
     ];
     const items = [
-      iv("approval", NOW - 20 * DAY, { pbi: 3 }), iv("decision", NOW - 3 * DAY, { pbi: 3 }), iv("resume", NOW - 2 * DAY, { pbi: 3 }), // 3 in all on #3, 2 of them this week
+      iv("approval", NOW - 20 * DAY, { pbi: 3 }), iv("decision", NOW - 3 * DAY, { pbi: 3 }), iv("resume", NOW - 2 * DAY, { pbi: 3 }), // 3 in all on PBI 3, 2 of them this week
       iv("decision", NOW - 9 * DAY, { pbi: 4 }),
       iv("approval", NOW - DAY, { pbi: 5 }), iv("approval", NOW - 2 * DAY, { pbi: 5 }),
     ];
     const v = summarizeInterventions(items, [{ workspaceId: "w", issue: 70, why: "x" }], [], lookupOf(pbis), NOW);
     const w = sevenDays(v);
-    expect(w.current.completed).toEqual({ pbis: 1, perPbi: 3, unknownPbis: 2 }); // #3 (3 in all); #7 has an uncounted place, #6 has no time
-    expect(w.previous.completed).toEqual({ pbis: 1, perPbi: 1, unknownPbis: 1 }); // #4; #6 again
+    expect(w.current.completed).toEqual({ pbis: 1, perPbi: 3, unknownPbis: 2 }); // PBI 3 (3 in all); 7 has an uncounted place, 6 has no time
+    expect(w.previous.completed).toEqual({ pbis: 1, perPbi: 1, unknownPbis: 1 }); // PBI 4; 6 again
     expect(w.current.done).toEqual({ pbis: 1, interventions: 2 }); // this week's on a PBI closed now
     expect(w.current.open).toEqual({ pbis: 1, interventions: 2 });
-    expect(thirtyDays(v).current.completed.pbis).toBe(2); // #3 and #4 (#7 is unknown, #6 cannot be placed)
+    expect(thirtyDays(v).current.completed.pbis).toBe(2); // PBIs 3 and 4 (7 is unknown, 6 cannot be placed)
   });
 
   test("a PBI an uncounted Issue points to but that is not stored is unknown in every window", () => {

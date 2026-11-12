@@ -65,7 +65,7 @@ describe("ADK /run_sse → AgentEvent (recorded against DAK @ e966c05, google-ad
     expect(events.at(-1)?.t).toBe("session.end");
   });
 
-  test.skipIf(skipRecordings("packages/adapters/dak/fixtures/attachment-image.sse"))("a turn with an image attachment (#124): DAK answers about it; nothing is an artifact (recorded against ADK with DAK's fake LLM, which received the image as image_url)", async () => {
+  test.skipIf(skipRecordings("packages/adapters/dak/fixtures/attachment-image.sse"))("a turn with an image attachment: DAK answers about it; nothing is an artifact (recorded against ADK with DAK's fake LLM, which received the image as image_url)", async () => {
     assertRecordings("packages/adapters/dak/fixtures/attachment-image.sse");
     const { events } = await replay("attachment-image");
     for (const ev of events) expect(() => AgentEvent.parse(ev)).not.toThrow();
@@ -74,7 +74,7 @@ describe("ADK /run_sse → AgentEvent (recorded against DAK @ e966c05, google-ad
     expect(events.at(-1)).toMatchObject({ t: "session.end", status: "ok" });
   });
 
-  test.skipIf(skipRecordings("packages/adapters/dak/fixtures/artifact-spill.sse"))("a long tool output (#124): DAK saves it as a tool_output_* artifact, which is DAK's own spill, so no file is fetched or made", async () => {
+  test.skipIf(skipRecordings("packages/adapters/dak/fixtures/artifact-spill.sse"))("a long tool output: DAK saves it as a tool_output_* artifact, which is DAK's own spill, so no file is fetched or made", async () => {
     assertRecordings("packages/adapters/dak/fixtures/artifact-spill.sse");
     const { events } = await replay("artifact-spill");
     for (const ev of events) expect(() => AgentEvent.parse(ev)).not.toThrow();
@@ -340,7 +340,7 @@ describe("AdkSession over HTTP/SSE (fake ADK server)", () => {
   test("run_sse fetch replaces Bun's default timeout with a long idle timeout (a silent turn must not be cut)", async () => {
     // A local LLM writing a long tool call streams nothing for minutes (ADK emits no partial events for function-call
     // arguments). Bun's default fetch timeout (360 s) cut those turns with "The operation timed out.", ADK then
-    // cancelled the turn, and every retry replayed the same prompt into the same cut (#121).
+    // cancelled the turn, and every retry replayed the same prompt into the same cut.
     const seen: Array<{ url: string; init?: RequestInit & { timeout?: unknown } }> = [];
     const real = globalThis.fetch;
     const spy = spyOn(globalThis, "fetch").mockImplementation(((input: string | URL | Request, init?: RequestInit) => {

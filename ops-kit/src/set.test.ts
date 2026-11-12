@@ -67,7 +67,7 @@ describe("set", () => {
     }
   });
 
-  test("an empty value clears the field; an Issue not in the Project is left as it is (#3810)", async () => {
+  test("an empty value clears the field; an Issue not in the Project is left as it is", async () => {
     const gh = fakeGh([read({ id: "F2", dataType: "NUMBER" }, [{ id: "IT1", project: { number: 1 } }]), () => ({})]);
     const log: string[] = [];
     await setField(gh, withPhase, 3, "Story Points", "", (s) => log.push(s));
@@ -100,7 +100,7 @@ describe("set", () => {
 });
 
 describe("fieldChoice", () => {
-  test("a value that differs from a choice only in case is that choice; Story Points' digits are its number (#3795)", () => {
+  test("a value that differs from a choice only in case is that choice; Story Points' digits are its number", () => {
     expect(fieldChoice(withPhase, "Status", "In Progress")).toBe("In progress");
     expect(fieldChoice(withPhase, "Priority", "p2")).toBe("P2");
     expect(fieldChoice(withPhase, "Area", "ONE")).toBe("one");

@@ -2,7 +2,7 @@ import type { AgentEvent } from "@switchboard/protocol";
 import { cacheWrite1h, permissionKindOf, summarizeToolInput } from "./parse.ts";
 
 /**
- * Pure mapping from Claude Code's own session log to AgentEvent (issue #91).
+ * Pure mapping from Claude Code's own session log to AgentEvent.
  *
  * Claude Code writes every session — the interactive terminal as much as `claude -p` — to
  * `~/.claude/projects/<cwd with every non-alphanumeric character replaced by "-">/<sessionId>.jsonl`, one JSON
@@ -18,7 +18,7 @@ import { cacheWrite1h, permissionKindOf, summarizeToolInput } from "./parse.ts";
  *  - `entrypoint`             `cli` = the terminal; `sdk-cli` = a host driving `claude -p` (Switchboard itself, or
  *                             another program). Only `cli` records are terminal history; the host records its own.
  *  - `remoteSourced: true`   Teleport conversation records still carry `entrypoint: cli`; this metadata
- *                             does not change message, tool or usage parsing (Task #1127 observation).
+ *                             does not change message, tool or usage parsing.
  *  - `isMeta` / `isCompactSummary` / `promptSource: system`   injected by Claude Code, not written by a person.
  *  - `message.model: "<synthetic>"`   text Claude Code produced itself (a rate-limit banner), not a model answer.
  *  - `ai-title`, `permission-mode`, `cost-state`, `attachment`, `system`, `queue-operation`, …   session metadata.

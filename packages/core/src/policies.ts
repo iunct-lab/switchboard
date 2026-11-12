@@ -4,7 +4,7 @@ import { globMatch } from "./approval.ts";
 import type { Db } from "./db.ts";
 
 /**
- * Saved answer policies (#938): one answer reused next time under a scope and conditions. They live in the `settings`
+ * Saved answer policies: one answer reused next time under a scope and conditions. They live in the `settings`
  * table (key `answerPolicies`, a JSON array — one user, a small list) and are matched on structured values only (the
  * tool kind and path / command, or the stop record's op / target / conditions), never on the wording of a question.
  * The Knowledge `approval` rules are read elsewhere and never changed here.
@@ -139,7 +139,7 @@ function missReason(p: AnswerPolicy, ask: PolicyAsk, now: number): string | null
   if (p.workspaceId !== ask.workspaceId) return "別のリポジトリ";
   if (p.scope === "pbi" && (p.pbi !== ask.pbi || !ask.pbiOpen)) return p.pbi !== ask.pbi ? "別の PBI" : "PBI が閉じている";
   if (p.scope === "once" && p.askId !== ask.id) return "別の問い";
-  // a policy saved on a PR's head is not an answer about another one (#938)
+  // a policy saved on a PR's head is not an answer about another one
   if (p.from.head && subject.head && p.from.head !== subject.head) return "PR の差分が変わった";
   if (!targetMatches(p.target, p.kind, subject.op, subject.target)) return "対象が違う";
   for (const w of p.when) {

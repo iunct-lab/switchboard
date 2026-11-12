@@ -69,7 +69,7 @@ describe("preamble", () => {
   });
 });
 
-describe("effort (#833)", () => {
+describe("effort", () => {
   test("effort: every turn/start of the session carries it (the first and a reply); thread/start does not; none without one", async () => {
     const home = mkdtempSync(join(tmpdir(), "sb-codex-effort-"));
     const log = join(home, "wire.jsonl");
@@ -169,7 +169,7 @@ describe("subagent threads", () => {
   });
 });
 
-describe("telemetryArgs (#4308)", () => {
+describe("telemetryArgs", () => {
   test("telemetryArgs: off by default passes analytics.enabled=false, on adds none", () => {
     expect(telemetryArgs({})).toEqual(["-c", "analytics.enabled=false", "-c", "feedback.enabled=false"]);
     expect(telemetryArgs({ runnerTelemetry: false })).toEqual(telemetryArgs({}));
@@ -177,7 +177,7 @@ describe("telemetryArgs (#4308)", () => {
   });
 });
 
-describe("bedrock (#1731)", () => {
+describe("bedrock", () => {
   test("app-server gets the amazon-bedrock provider and region only when StartOptions.bedrock is set", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sb-codex-bedrock-"));
     const bin = join(dir, "codex");
@@ -282,7 +282,7 @@ describe("memories", () => {
   });
 });
 
-describe("question tool (#3057)", () => {
+describe("question tool", () => {
   test("question tool ends the turn: requestUserInput gets the deferred reply for every question once, and the turn ends ok", async () => {
     const home = mkdtempSync(join(tmpdir(), "sb-codex-question-"));
     const log = join(home, "wire.jsonl");

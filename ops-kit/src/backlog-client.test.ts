@@ -5,13 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appSync, BACKLOG_USAGE, BacklogUnknown, readRecords, runBacklog, syncedRepositories, triageUsage } from "./backlog-client.ts";
 
-// `ops-kit backlog` (#918) against a fake app: what it sends, and the exit it gives for each answer. The real app's
+// `ops-kit backlog` against a fake app: what it sends, and the exit it gives for each answer. The real app's
 // routes are checked in packages/core/src/backlog.test.ts ("ops-kit backlog …").
 
 const SYNC = { workspaceId: "ws1", repository: "acme/app", syncedAt: 1_760_000_000_000, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } };
 const LIST = { syncs: [SYNC, { ...SYNC, workspaceId: "ws2", repository: "acme/other" }], items: [{ number: 3, workspaceId: "ws1", type: "pbi", stage: "ready", projectStatus: "Ready", title: "PBI 3" }, { number: 9, workspaceId: "ws2", type: "pbi", stage: "ready", projectStatus: "Ready", title: "other" }] };
 const issue = (number: number, title: string, state: "OPEN" | "CLOSED", labels: string[], status: string | null) => ({ number, title, state, stateReason: null, body: "", labels, parent: null, subIssues: [], updatedAt: "", fields: status === null ? null : { Status: status } });
-/** `GET /records` of a workspace: what `backlog list` reads (#3071). */
+/** `GET /records` of a workspace: what `backlog list` reads. */
 const RECORDS = (workspaceId: string) => ({
   workspaceId,
   service: "github",
@@ -63,7 +63,7 @@ test("list: the stored items of the repository's workspace and how fresh they ar
   expect(fresh.calls[1]!.body).toEqual({ workspaceId: "ws1" });
 });
 
-test("list --search / --label / --state (#3071): filtered from the stored records, open by default; a wrong --state is refused", async () => {
+test("list --search / --label / --state: filtered from the stored records, open by default; a wrong --state is refused", async () => {
   const numbers = async (...argv: string[]) => {
     const r = await run(["list", ...argv]);
     expect(r.code).toBe(0);
@@ -89,7 +89,7 @@ test("list --search / --label / --state (#3071): filtered from the stored record
   expect([wrong.code, wrong.calls.length]).toEqual([1, 0]);
 });
 
-test("list --type (#3969): a local change is not an Issue — left out by default, its row says change", async () => {
+test("list --type: a local change is not an Issue — left out by default, its row says change", async () => {
   const change = { ...issue(7, "変更: local-merge", "OPEN", [], null), change: { head: "sb/7-x", base: "main", mergeCommit: null, mergedAt: null } };
   const withChange = app((m, p) => (p.startsWith("/records") ? { body: { ...RECORDS("ws1"), issues: [...RECORDS("ws1").issues, change] } } : routes()(m, p, undefined)));
   const rows = async (...argv: string[]) => {
@@ -118,7 +118,7 @@ test("the key in BACKLOG_TOKEN_FILE goes as the bearer; --workspace picks a work
   }
 });
 
-test("nothing is read as current when it cannot be told: no app, the app down, a repository not imported, 5xx; GitHub out of reach answers what is stored (#2264)", async () => {
+test("nothing is read as current when it cannot be told: no app, the app down, a repository not imported, 5xx; GitHub out of reach answers what is stored", async () => {
   expect((await run(["list"], app(), { BACKLOG_URL: undefined })).code).toBe(2);
   expect((await run(["list"], app(() => "down"))).code).toBe(2);
   // the app cannot reach GitHub (424): the stored copy is the answer, with its last sync and 「GitHub 未同期」
@@ -149,7 +149,7 @@ test("nothing is read as current when it cannot be told: no app, the app down, a
   expect((await run(["view", "3"], app((m, p) => (p === "/syncs" ? { body: LIST } : { status: 409, body: { error: "まだ GitHub から取り込んでいません" } })))).code).toBe(2);
 });
 
-test("a sandbox refusal names the approved rerun; the app down keeps its line (#2726)", async () => {
+test("a sandbox refusal names the approved rerun; the app down keeps its line", async () => {
   const refused = { fetch: async () => { throw Object.assign(new Error("EPERM: Was there a typo in the url or port?"), { code: "EPERM" }); }, calls: [] };
   const r = await run(["view", "3"], refused as unknown as ReturnType<typeof app>);
   expect(r.code).toBe(2);
@@ -161,7 +161,7 @@ test("a sandbox refusal names the approved rerun; the app down keeps its line (#
   expect(down.err).not.toContain("承認つきの実行");
 });
 
-test("readRecords --fresh: a 424 sync answers the stored records with unsynced; the app down is unknown (#2264)", async () => {
+test("readRecords --fresh: a 424 sync answers the stored records with unsynced; the app down is unknown", async () => {
   const records = { workspaceId: "ws1", repository: "acme/app", fetchedAt: SYNC.syncedAt, issues: [] };
   const env = { BACKLOG_URL: "http://app/api/backlog", GH_REPO: "acme/app" };
   const limited = app((m, p) => (p === "/sync" ? { status: 424, body: { error: "GitHub の上限" } } : { body: p === "/syncs" ? LIST : records }));
@@ -186,7 +186,7 @@ test("--help / -h print the usage only and exit 0; triage's usage is the same te
   expect((await run(["triage", "3"], app(), {}, false)).err).toContain(`backlog ${triageUsage(false)}`);
 });
 
-test("a command looks its workspace up once (#3438): set asks GET /syncs once, not the full list, and the saved value shows in the next view", async () => {
+test("a command looks its workspace up once: set asks GET /syncs once, not the full list, and the saved value shows in the next view", async () => {
   let stored: unknown = "Ready";
   const detail = () => ({ issue: { number: 3, title: "PBI 3", state: "OPEN", labels: [], milestone: null, parent: null, subIssues: [], body: "", url: "" }, comments: [], fields: { Status: stored }, fetchedAt: 1, localId: null, pending: 1, held: [], sync: { state: "pending", reason: null, lastSuccessfulSync: 1 } });
   const fake = app((m, p, body) => {
@@ -207,7 +207,7 @@ test("a command looks its workspace up once (#3438): set asks GET /syncs once, n
   expect(fresh.calls.slice(before).map((c) => `${c.method} ${c.path}`)).toEqual(["GET /syncs", "POST /sync", "GET /3?workspaceId=ws1"]);
 });
 
-test("a daemon older than the kit (404 on /syncs) still serves set and view through the old list route, one lookup each (#3438)", async () => {
+test("a daemon older than the kit (404 on /syncs) still serves set and view through the old list route, one lookup each", async () => {
   let stored: unknown = "Ready";
   const fake = app((m, p, body) => {
     if (p === "/syncs") return { status: 404, body: { error: "not found" } };
@@ -252,7 +252,7 @@ test("edits go to the app's routes as its screen sends them; a refusal is exit 1
     // a number only where the stored value is one; GitHub's field type decides when the app sends it
     ["PATCH", "/3", { workspaceId: "ws1", fields: { "Story Points": 5 } }],
     ["PATCH", "/3", { workspaceId: "ws1", fields: { Code: "001" } }],
-    // an empty value empties the field (#3810)
+    // an empty value empties the field
     ["PATCH", "/3", { workspaceId: "ws1", fields: { "Story Points": null } }],
     ["PATCH", "/3", { workspaceId: "ws1", project: true, fields: { Area: "core", Kind: "feature", Priority: "P2", Phase: "Phase 2", Status: "Ready" }, parent: 891 }],
     ["POST", "/3/comment", { workspaceId: "ws1", text: "from stdin" }],
@@ -260,7 +260,7 @@ test("edits go to the app's routes as its screen sends them; a refusal is exit 1
   ]);
   const refused = await run(["edit", "3", "--title", "T"], app((m) => (m === "GET" ? { body: LIST } : { status: 404, body: { error: "#3 は保存されていません" } })));
   expect(refused).toMatchObject({ code: 1, err: "backlog: 404 #3 は保存されていません" });
-  // a value that does not fit its field is refused by the app before it is stored (#3811)
+  // a value that does not fit its field is refused by the app before it is stored
   const unfit = await run(["set", "3", "Story Points", "abc"], app((m, p) => (m === "GET" ? { body: p === "/syncs" ? LIST : detail } : { status: 422, body: { error: "'Story Points' は数値フィールドです。整数だけを渡す（例: 5）: 'abc'" } })));
   expect(unfit).toMatchObject({ code: 1, err: "backlog: 422 'Story Points' は数値フィールドです。整数だけを渡す（例: 5）: 'abc'" });
   expect((await run(["edit", "3"])).code).toBe(1);
@@ -270,7 +270,7 @@ test("edits go to the app's routes as its screen sends them; a refusal is exit 1
   expect((await run(["nope"])).code).toBe(1);
 });
 
-test("edit --reason (#3146): not-planned / completed go as stateReason with the close; none sends no reason; one without a close or another value is refused, nothing sent", async () => {
+test("edit --reason: not-planned / completed go as stateReason with the close; none sends no reason; one without a close or another value is refused, nothing sent", async () => {
   const ok = () => app((m, p) => (m === "GET" ? { body: p === "/syncs" ? LIST : { issue: { number: 3 } } } : { status: 202, body: { localId: null, operations: ["o"] } }));
   const sent = async (argv: string[]) => {
     const r = await run(argv, ok());
@@ -286,7 +286,7 @@ test("edit --reason (#3146): not-planned / completed go as stateReason with the 
   }
 });
 
-test("view shows the close reason (#3146): [CLOSED not planned] / [CLOSED duplicate]; completed and none as before", async () => {
+test("view shows the close reason: [CLOSED not planned] / [CLOSED duplicate]; completed and none as before", async () => {
   const detail = (state: string, stateReason: string | null) => ({ issue: { number: 3, title: "T", state, stateReason, labels: [], milestone: null, parent: null, subIssues: [], body: "", url: "" }, comments: [], fields: null, fetchedAt: 1, localId: null, pending: 0, held: [], sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } });
   const first = async (state: string, reason: string | null) => (await run(["view", "3"], app(routes((m, p) => (p.startsWith("/3?") ? { body: detail(state, reason) } : { status: 404, body: {} }))))).out.split("\n")[0];
   expect(await first("CLOSED", "NOT_PLANNED")).toBe("#3 T [CLOSED not planned]");
@@ -314,7 +314,7 @@ test("a text holding a value usable to authenticate is not sent at all", async (
   expect(out.join("\n")).not.toContain(id);
 });
 
-test("BACKLOG_WORKSPACE picks a workspace without GitHub, origin unread (#2265)", async () => {
+test("BACKLOG_WORKSPACE picks a workspace without GitHub, origin unread", async () => {
   const dir = mkdtempSync(join(tmpdir(), "backlog-client-local-")); // no Git, no origin
   try {
     const local = { ...SYNC, workspaceId: "ws_local", repository: "ws_local" };
@@ -337,14 +337,14 @@ test("BACKLOG_WORKSPACE picks a workspace without GitHub, origin unread (#2265)"
   }
 });
 
-test("create prints the number a local backlog gives (#2265)", async () => {
+test("create prints the number a local backlog gives", async () => {
   const local = await run(["create", "--title", "PBI: x", "--label", "type:pbi"], app((m) => ({ body: m === "GET" ? LIST : { localId: "u1", number: 1 } })));
   expect([local.code, local.out]).toEqual([0, "#1 を作りました（localId u1）"]);
   const github = await run(["create", "--title", "PBI: x"], app((m) => ({ body: m === "GET" ? LIST : { localId: "u2", number: null } })));
   expect(github.out).toContain("作りました（送信待ち）: localId u2");
 });
 
-test("appSync: the repository's workspace, null when the list does not have it; what cannot be told throws (#3069)", async () => {
+test("appSync: the repository's workspace, null when the list does not have it; what cannot be told throws", async () => {
   const answering = (status: number, body: unknown) => (async () => new Response(JSON.stringify(body), { status })) as unknown as typeof fetch;
   const env = { BACKLOG_URL: "http://app/api/backlog" };
   expect(await appSync(env, { repo: "ACME/other", fetch: answering(200, LIST) })).toEqual({ workspaceId: "ws2" });
@@ -357,7 +357,7 @@ test("appSync: the repository's workspace, null when the list does not have it; 
   await expect(appSync(env, { repo: "acme/app", fetch: down })).rejects.toBeInstanceOf(BacklogUnknown);
 });
 
-test("syncedRepositories: the GitHub repositories the app syncs, with their workspace; null when the app cannot be asked (#3073)", async () => {
+test("syncedRepositories: the GitHub repositories the app syncs, with their workspace; null when the app cannot be asked", async () => {
   const list = { syncs: [{ ...SYNC, backlog: "github" }, { ...SYNC, workspaceId: "ws2", backlog: "github", repository: "acme/other" }, { ...SYNC, workspaceId: "ws3", backlog: "local", repository: null }, { ...SYNC, workspaceId: "ws4", backlog: "github", repository: null }], items: [] };
   const env = { BACKLOG_URL: "http://app/api/backlog" };
   expect(await syncedRepositories(env, app(() => ({ body: list })).fetch)).toEqual([{ repository: "acme/app", workspaceId: "ws1" }, { repository: "acme/other", workspaceId: "ws2" }]);
@@ -375,7 +375,7 @@ test("syncedRepositories: the GitHub repositories the app syncs, with their work
   }
 }, 15_000);
 
-test("view shows held edits with why; retry sends every failed one of the Issue and refuses when none is failed (#2885)", async () => {
+test("view shows held edits with why; retry sends every failed one of the Issue and refuses when none is failed", async () => {
   const held = [
     { operation: "op-create", kind: "create", field: null, status: "failed", reason: "HTTP 403: read:project" },
     { operation: "op-title", kind: "set", field: "title", status: "conflict", reason: "GitHub で変わった" },
@@ -412,7 +412,7 @@ test("view shows held edits with why; retry sends every failed one of the Issue 
   expect([direct, err]).toEqual([1, ["retry はアプリの Task の中だけ（BACKLOG_URL が無いので送り直すものがありません）"]]);
 });
 
-test("withdraw takes back every unknown and failed edit of the Issue, the create last, and the held lines go (#3804)", async () => {
+test("withdraw takes back every unknown and failed edit of the Issue, the create last, and the held lines go", async () => {
   const held = [
     { operation: "op-create", kind: "create", field: null, status: "unknown", reason: "最初の失敗: HTTP 502 / 照合: 送ったかどうかを確かめきれません" },
     { operation: "op-title", kind: "set", field: "title", status: "conflict", reason: "GitHub で変わった" },
@@ -446,7 +446,7 @@ test("withdraw takes back every unknown and failed edit of the Issue, the create
   expect(err).toEqual(["withdraw はアプリの Task の中だけ（BACKLOG_URL が無いので取り下げるものがありません）"]);
 });
 
-test("create --head --base makes a local change; one without the other is refused, nothing sent (#2485)", async () => {
+test("create --head --base makes a local change; one without the other is refused, nothing sent", async () => {
   const fake = app((m) => ({ body: m === "GET" ? LIST : { localId: "u1", number: 7 } }));
   const r = await run(["create", "--title", "変更", "--head", "sb/5-x", "--base", "main"], fake);
   expect([r.code, r.out]).toEqual([0, "#7 を作りました（localId u1）"]);
@@ -461,7 +461,7 @@ test("create --head --base makes a local change; one without the other is refuse
   }
 });
 
-test("view of a local change: its branches and tips on the second line, the merge commit once merged (#2485)", async () => {
+test("view of a local change: its branches and tips on the second line, the merge commit once merged", async () => {
   const detail = (mergeCommit: string | null, refs: object | null, reviewedHead: string | null = null) => ({ issue: { number: 7, title: "変更", state: mergeCommit ? "CLOSED" : "OPEN", stateReason: null, labels: [], milestone: null, parent: null, subIssues: [], body: "", url: "", change: { head: "sb/5-x", base: "main", mergeCommit, mergedAt: mergeCommit ? "2026-11-04T00:00:00Z" : null, reviewedHead } }, changeRefs: refs, comments: [], fields: null, fetchedAt: 1, localId: null, pending: 0, held: [], sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } });
   const second = async (d: object) => (await run(["view", "7"], app(routes((m, p) => (p.startsWith("/7?") ? { body: d } : { status: 404, body: {} }))))).out.split("\n")[1];
   expect(await second(detail(null, { head: "a".repeat(40), base: "b".repeat(40) }))).toBe("変更: sb/5-x → main  head aaaaaaa base bbbbbbb");
@@ -470,7 +470,7 @@ test("view of a local change: its branches and tips on the second line, the merg
   expect(await second(detail("c".repeat(40), { head: null, base: "b".repeat(40) }, "d".repeat(40)))).toBe("変更: sb/5-x → main  MERGED ccccccc (reviewed ddddddd)");
 });
 
-test("outside the app: a choice in another case is written as the choice; one not there is refused before anything is written (#3795)", async () => {
+test("outside the app: a choice in another case is written as the choice; one not there is refused before anything is written", async () => {
   const { fakeGh } = await import("./gh.ts");
   const { loadConfig } = await import("./config.ts");
   const config = async () => loadConfig(join(import.meta.dir, "../fixtures/config-with-phase.json"));

@@ -9,7 +9,7 @@ import { loadConfig } from "./config.ts";
 import { startServer } from "./server.ts";
 
 /**
- * The approval path end to end (#662, docs/design/device-auth.md): a fake runner runs a fake login through the kit's
+ * The approval path end to end (docs/design/device-auth.md): a fake runner runs a fake login through the kit's
  * `device-auth` with the environment the daemon gave it, reports what the command printed as its tool result, then
  * writes the outcome to an Issue with `gh` (through the kit's check in front of it, to a fake gh that records).
  * Made-up values only.
@@ -26,7 +26,7 @@ let base: string;
 /** The first entry of each runner's PATH: the kit's bin, whose gh is the check the write goes through. */
 const kits: string[] = [];
 
-/** The runner's turn: `device-auth --expires-in <n> -- bun login.ts <done>`, then `gh pr comment` with the exit code only (an Issue of the workspace is written through the app, #2694). */
+/** The runner's turn: `device-auth --expires-in <n> -- bun login.ts <done>`, then `gh pr comment` with the exit code only (an Issue of the workspace is written through the app). */
 function runner(): RunnerAdapter {
   return {
     id: "claude",
@@ -103,7 +103,7 @@ function socket() {
   return { msgs, ws, open: new Promise<void>((r) => (ws.onopen = () => r())) };
 }
 
-describe("device auth end to end (#662)", () => {
+describe("device auth end to end", () => {
   test("the screen gets the URL and code; the approval lets the Task go on and only the exit code reaches the Issue; nothing stored holds the values", async () => {
     const { msgs, ws, open } = socket();
     await open;

@@ -17,20 +17,20 @@ test("the kit's candidates are read: p0-pipeline has the 8 stage entries, p1-dir
   expect(Object.keys(loadProcess("p1-direct").entries)).toEqual(["direct"]);
 });
 
-test("p1-direct's entry makes no PBI or Task Issue and leaves one line on the request (#3690)", () => {
+test("p1-direct's entry makes no PBI or Task Issue and leaves one line on the request", () => {
   const text = renderEntry(loadProcess("p1-direct"), "direct", { signal: "#1" });
   expect(text).toContain("PBI・Task Issue は作らない");
   expect(text).toContain("`直行: PR #<番号>`");
 });
 
-test("p1-direct's entry carries the work through review and merge, closes the request, and has a way back (#4326)", () => {
+test("p1-direct's entry carries the work through review and merge, closes the request, and has a way back", () => {
   const text = renderEntry(loadProcess("p1-direct"), "direct", { signal: "#1" });
   expect(text).toContain("cross-runner-review");
   expect(text).toContain("merge-gate.ts <PR> --merge");
   expect(text).toContain("--state closed");
   expect(text).toContain("--add-label direct-returned");
   expect(text).toContain("`直行から戻す: <理由>`");
-  // a request touching an invariant goes back the same way, never just stops (PR #4361 review: without the label it is left for good)
+  // a request touching an invariant goes back the same way, never just stops (without the label it is left for good)
   expect(text).toContain("触れるなら次の行のとおり戻す");
   expect(text).not.toContain("作らずに止め、理由を返答に書く");
 });
@@ -75,7 +75,7 @@ test("listProcesses / loadProcess read a root's ops-kit/processes and refuse an 
   }
 });
 
-test("`auto` is read as the criteria, null when absent, and a wrong type throws with the path (#4324)", () => {
+test("`auto` is read as the criteria, null when absent, and a wrong type throws with the path", () => {
   const def = (auto: string) => parseProcessDef(`---\nid: a\nversion: 1\ntitle: t\n${auto}---\n`, "x.md");
   expect(def("").auto).toBeNull();
   expect(def("auto: { maxBodyChars: 600, excludeLabels: [on-hold] }\n").auto).toEqual({ maxBodyChars: 600, excludeLabels: ["on-hold"] });

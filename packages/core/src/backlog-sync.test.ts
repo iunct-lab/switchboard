@@ -13,7 +13,7 @@ import { startServer } from "./server.ts";
 import { Db } from "./db.ts";
 import { githubHost, type GithubCallMetric } from "../../../ops-kit/src/gh.ts";
 
-// Importing the GitHub backlog into the database (#885): complete or not at all; closed, 404 and 403 told apart.
+// Importing the GitHub backlog into the database: complete or not at all; closed, 404 and 403 told apart.
 
 let dir: string;
 let db: Db;
@@ -92,14 +92,14 @@ function fakeGh(world: World) {
   return { gh, calls };
 }
 
-/** The calls of one import in a fixed order: its independent reads are asked at once (#3437), so the order they start in is not the contract, the set is. */
+/** The calls of one import in a fixed order: its independent reads are asked at once, so the order they start in is not the contract, the set is. */
 const asked = (calls: string[]) => [...calls].sort();
 
 /** Well past what `raw` Issues were made at: they are not new any more. */
 const LATER = Date.parse("2026-10-20T00:00:00Z");
 const stored = () => Object.fromEntries(db.listBacklogRecords(KEY).map((r) => [`${r.objectKind}:${r.externalId}`, { state: r.fetchState, remote: r.remote }]));
 
-test("a workspace the reads judgement leaves out is not imported: no gh call, from a request or a hint (#2459)", async () => {
+test("a workspace the reads judgement leaves out is not imported: no gh call, from a request or a hint", async () => {
   const calls: string[][] = [];
   const gh: GhRunner = async (args) => { calls.push(args); throw new Error("must not be called"); };
   let reads = false;
@@ -166,7 +166,7 @@ test("the next import asks since the cursor; a close, a Project field change and
   await importGithubSnapshot(first.gh, db, WS, 1000);
 
   const next = fakeGh({
-    // #12 closed and one comment deleted; #14 unchanged but its Status moved and then it left the Project
+    // Issue 12 closed and one comment deleted; Issue 14 unchanged but its Status moved and then it left the Project
     changed: () => pageOf([raw(12, { state: "CLOSED", updatedAt: "2026-10-05T00:00:00Z", comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ id: "C_a", body: "a", createdAt: "2026-10-02T00:00:00Z" }] } })]),
     open: () => pageOf([{ number: 14, projectItems: { totalCount: 0, nodes: [] } }]),
   });
@@ -381,11 +381,11 @@ test("the pull requests an open PBI waits for are stored with their state", asyn
     recheck: () => ({ body: { data: { repository: { w40: { __typename: "PullRequest", id: "PR_40", number: 40, state: "MERGED", isDraft: false, updatedAt: "2026-10-01T00:00:00Z", files: { totalCount: 0, nodes: [] }, body: "Fixes #13, closes #13", headRefName: "sb/12-x", labels: { totalCount: 1, nodes: [{ name: "x" }] } } } } } }),
   });
   await importGithubSnapshot(gh, db, WS, 1000);
-  expect(asked(calls)).toEqual(asked(["changed", "open", "pulls", "recheck"])); // #13 is open: its state is known without asking
+  expect(asked(calls)).toEqual(asked(["changed", "open", "pulls", "recheck"])); // Issue 13 is open: its state is known without asking
   expect(stored()["pull-request:PR_40"]).toEqual({ state: "fetched", remote: { number: 40, state: "MERGED", isDraft: false, labels: ["x"], closes: [12, 13], mergeCommit: null, updatedAt: expect.any(String), files: [], closedAt: null, mergedAt: null } });
 });
 
-test("stop waits are rechecked: a pull request a Task's depends stop waits for is asked by number and stored (#2045)", async () => {
+test("stop waits are rechecked: a pull request a Task's depends stop waits for is asked by number and stored", async () => {
   const at = Date.now();
   const task = (id: string, workspaceId: string) => db.insertTask({ id, workspaceId, title: id, runner: "claude", cwd: dir, scope: [dir], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: at, createdAt: at, updatedAt: at });
   const stopOn = (taskId: string, workspaceId: string, key: string) => db.appendEvent(taskId, { t: "stop.record", stop: { id: `${taskId}/overlap`, work: { workspaceId, issue: null, taskId }, op: "overlap", target: "", reason: "depends", evidence: "", safety: "unknown", conditions: [{ key, value: "open", met: false }], answer: null, actions: [], state: "waiting", at } });
@@ -420,7 +420,7 @@ test("a wait on a closed Issue is answered by what is stored; a pull request who
     },
   });
   await importGithubSnapshot(fakeGh(world({ totalCount: 0, nodes: [] }, [raw(12, { comments: release }), raw(13, { state: "CLOSED", labels: { totalCount: 1, nodes: [{ name: "type:task" }] } })])).gh, db, WS, 1000);
-  // the next import has no update: #13 is closed in storage, so only the pull request is asked
+  // the next import has no update: Issue 13 is closed in storage, so only the pull request is asked
   await importGithubSnapshot(fakeGh(world({ totalCount: 0, nodes: [] }, [])).gh, db, WS, 2000);
   expect(asked).toEqual([[40], [40]]);
   // a closed Issue without a type label would not come back in any list when reopened: it is asked again
@@ -450,13 +450,13 @@ test("the prerequisites of open PBIs and Tasks are stored: a pull request with i
     },
   });
   await importGithubSnapshot(fakeGh(world(false)).gh, db, WS, 1000);
-  expect(asked).toEqual([[13, 40, 41, 42]]); // the fenced #99 is not a prerequisite
+  expect(asked).toEqual([[13, 40, 41, 42]]); // the fenced Issue 99 is not a prerequisite
   let s = stored();
   expect(s["pull-request:PR_40"]).toEqual({ state: "fetched", remote: { number: 40, state: "MERGED", isDraft: false, labels: [], closes: [30], mergeCommit: "abc123", updatedAt: expect.any(String), files: [], closedAt: null, mergedAt: null } });
   expect(s["issue:I_41"]).toMatchObject({ state: "fetched", remote: { state: "CLOSED", stateReason: "NOT_PLANNED" } });
   expect(s["issue:I_13"]).toMatchObject({ state: "fetched", remote: { stateReason: "COMPLETED" } });
   expect(s["issue:I_20"]).toMatchObject({ remote: { stateReason: null } });
-  // #42 is gone: kept as it was and marked unavailable; the others are stored with it
+  // Issue 42 is gone: kept as it was and marked unavailable; the others are stored with it
   await importGithubSnapshot(fakeGh(world(true)).gh, db, WS, 2000);
   s = stored();
   expect(s["issue:I_42"]).toMatchObject({ state: "unavailable", remote: { number: 42 } });
@@ -496,7 +496,7 @@ test("BacklogSync: imports at once share one; a read asks nothing and says one i
   expect(sync.read(ws)).toMatchObject({ error: null, fetchedAt: now });
 });
 
-test("BacklogSync.onImported: after an import that stored a change; with every, after each one that stored, changed or not (#2045)", async () => {
+test("BacklogSync.onImported: after an import that stored a change; with every, after each one that stored, changed or not", async () => {
   const ws = db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
   const { gh } = fakeGh({ changed: () => pageOf([raw(12)]), open: () => pageOf([]) });
   const sync = makeSync(db, gh, () => 1000);
@@ -615,7 +615,7 @@ test("BacklogSync: an import of another checkout of the same repository, begun b
   expect(sync.read(a).items.map((i) => i.title)).toEqual(["after"]);
 });
 
-test("BacklogSync measures: shared and waited carry the workspace's repository — two repositories apart, never the path (#994)", async () => {
+test("BacklogSync measures: shared and waited carry the workspace's repository — two repositories apart, never the path", async () => {
   const a = db.upsertWorkspace({ id: "ws_a", name: "wsA", path: "/Users/dev/a", kind: "repo" });
   const b = db.upsertWorkspace({ id: "ws_b", name: "wsB", path: "/Users/dev/lib", kind: "repo" });
   let limited = false;
@@ -722,7 +722,7 @@ test("BacklogSync: a caller waiting on an import that a write made store nothing
   expect(sync.read(ws).items.map((i) => i.title)).toEqual(["new"]);
 });
 
-// Read again by itself (#887): how long until the next read, from what the reads found.
+// Read again by itself: how long until the next read, from what the reads found.
 
 test("BacklogSync reads the open Issues on the first import, on 再読込 and FULL_READ_MS after the last full one, and on no other", async () => {
   let at = 1_000;
@@ -1012,7 +1012,7 @@ test("BacklogSync polls: the timer imports and plans the next read; a workspace 
   }
 });
 
-// A GitHub Webhook (#887): only a notice to import; nothing it says is stored.
+// A GitHub Webhook: only a notice to import; nothing it says is stored.
 
 test("a Webhook delivery names the workspaces of its repository, or of its Project's owner; nothing else of it is read", () => {
   const source = (repository: string, owner = "acme") => ({ ...KEY, repository, project: { owner, number: 1 } });
@@ -1277,7 +1277,7 @@ test("SWITCHBOARD_GITHUB_WEBHOOK=1 without the secret keeps the route closed and
   }
 });
 
-test("after stop a send asks nothing of the database: one that ends after the daemon's stop does not meet it closed (#549)", async () => {
+test("after stop a send asks nothing of the database: one that ends after the daemon's stop does not meet it closed", async () => {
   const own = new Db(join(dir, "stopped.db"));
   own.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
   const sync = makeSync(own, async () => ({ code: 1, stdout: "", stderr: "not asked" }));
@@ -1286,7 +1286,7 @@ test("after stop a send asks nothing of the database: one that ends after the da
   await expect(sync.send(WS)).resolves.toBeUndefined();
 });
 
-test("BacklogSync: the import is the read of the repository's forge (#920): a service ops.config.json names and none supports is the import's failure, said as it is, and GitHub is not asked", async () => {
+test("BacklogSync: the import is the read of the repository's forge: a service ops.config.json names and none supports is the import's failure, said as it is, and GitHub is not asked", async () => {
   const dir = mkdtempSync(join(tmpdir(), "switchboard-forge-"));
   try {
     writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ forge: { service: "gitea" } }));
@@ -1301,7 +1301,7 @@ test("BacklogSync: the import is the read of the repository's forge (#920): a se
   }
 });
 
-test("BacklogSync: a GitLab project is imported through glab (#892): Issues, comments, labels, Milestone and parents are stored under its own key, and GitHub is not asked", async () => {
+test("BacklogSync: a GitLab project is imported through glab: Issues, comments, labels, Milestone and parents are stored under its own key, and GitHub is not asked", async () => {
   const home = mkdtempSync(join(tmpdir(), "switchboard-gitlab-"));
   try {
     const fx = JSON.parse(require("node:fs").readFileSync(join(import.meta.dir, "../../../ops-kit/fixtures/gitlab-issues.json"), "utf8"));
@@ -1335,7 +1335,7 @@ test("BacklogSync: a GitLab project is imported through glab (#892): Issues, com
     expect(db.listBacklogRecords(LAB, "comment").map((r) => [r.externalId, r.remote])).toEqual([["gitlab:note:501", { issue: 12, body: "## 回答\nA でよい", createdAt: "2026-10-02T00:00:00.000Z" }]]);
     expect(db.getBacklogRepository(LAB)?.cursor).toBe("2026-10-03T00:00:00.000Z");
     expect(calls).toEqual([]);
-    // the next import: #13 moved off #12 and #12 is gone (404); unchanged Issues' comments are not read again
+    // the next import: Issue 13 moved off Issue 12 and Issue 12 is gone (404); unchanged Issues' comments are not read again
     opened = [{ ...(fx.opened[1] as object), description: "## 親 PBI\n- なし", updated_at: "2026-10-04T00:00:00.000Z" }];
     closed = [];
     paths.length = 0;
@@ -1347,7 +1347,7 @@ test("BacklogSync: a GitLab project is imported through glab (#892): Issues, com
     expect(calls).toEqual([]);
     // GitHub's wait is GitHub's host's: a GitLab import goes on through it
     (sync as unknown as { limits: { failed: (h: string, r: unknown) => unknown } }).limits.failed(githubHost(), { status: 429, headers: { "retry-after": "3600" } });
-    // #12 reads again with the value it had (stored again as read), #13's body without the section keeps its parent
+    // Issue 12 reads again with the value it had (stored again as read), Issue 13's body without the section keeps its parent
     db.putBacklogSnapshot(LAB, { records: [{ objectKind: "issue", externalId: "gitlab:issue:9002", remote: { ...(rec(13).remote as BacklogIssueData), parent: 12 }, fetchState: "fetched" }], cursor: null, syncedAt: 2000 });
     expect(rec(12).remote).not.toBeNull();
     opened = [fx.opened[0], { ...(fx.opened[1] as object), description: "親の節なし", updated_at: "2026-10-05T00:00:00.000Z" }];
@@ -1360,7 +1360,7 @@ test("BacklogSync: a GitLab project is imported through glab (#892): Issues, com
   }
 });
 
-test("with GitHub sync off, create / answer / start go on stored data and gh is never called (#2266)", async () => {
+test("with GitHub sync off, create / answer / start go on stored data and gh is never called", async () => {
   const home = mkdtempSync(join(tmpdir(), "switchboard-sync-off-"));
   const path = join(home, "app");
   mkdirSync(path);
@@ -1403,7 +1403,7 @@ test("with GitHub sync off, create / answer / start go on stored data and gh is 
     off = true;
     asked.length = 0;
     const made = await send("POST", "/api/backlog", { workspaceId: ws.id, title: "PBI: off", labels: ["type:pbi"] });
-    expect([made.status, made.body.number]).toEqual([202, 12]); // the PR #11 is GitHub's number too
+    expect([made.status, made.body.number]).toEqual([202, 12]); // the PR 11 is GitHub's number too
     expect((await send("POST", "/api/backlog/10/answer", { workspaceId: ws.id, text: "こうする" })).status).toBe(202);
     const ten = (await send("GET", `/api/backlog/10?workspaceId=${ws.id}`)).body;
     expect(ten.comments.map((c: { body: string }) => c.body)).toEqual(["## 判断待ち\nQ", "## 回答\n\nこうする"]);
@@ -1413,10 +1413,10 @@ test("with GitHub sync off, create / answer / start go on stored data and gh is 
     expect((await send("POST", "/api/backlog/10/start", { workspaceId: ws.id, action: "complete" })).status).toBe(201);
     const synced = await send("POST", "/api/backlog/sync", { workspaceId: ws.id });
     expect(synced.status).toBe(200);
-    // where its time went (#3436): the kit reads it no further, the bench does
+    // where its time went: the kit reads it no further, the bench does
     expect(synced.body).toEqual({ workspaceId: ws.id, timings: { queueMs: expect.any(Number), sendMs: expect.any(Number), importMs: expect.any(Number) } });
     expect(asked).toEqual([]);
-    // GitHub's records stay as they were: its ids, numbers, comment and fields (the answer made #10 changed now)
+    // GitHub's records stay as they were: its ids, numbers, comment and fields (the answer made Issue 10 changed now)
     const after = Object.fromEntries(core.db.listBacklogRecords(key).map((r) => [r.externalId, r.remote]));
     for (const id of ["C_10_1", "PVTI_10", "PR_11"]) expect(after[id]).toEqual(before[id]);
     expect({ ...(after.I_10 as object), updatedAt: null }).toEqual({ ...(before.I_10 as object), updatedAt: null });
@@ -1428,7 +1428,7 @@ test("with GitHub sync off, create / answer / start go on stored data and gh is 
   }
 });
 
-test("an import or a send begun before the sync was turned off stores and sends nothing (#2266)", async () => {
+test("an import or a send begun before the sync was turned off stores and sends nothing", async () => {
   db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
   // the first import is under way when the workspace is turned to one kept here
   let release!: () => void;
@@ -1454,7 +1454,7 @@ test("an import or a send begun before the sync was turned off stores and sends 
   expect(db.listPendingBacklogOperations(KEY).map((o) => o.status)).toEqual(["pending"]);
 });
 
-// Synthetic names only (#2467): acme/widget is published, acme/widget-dev is its development repository.
+// Synthetic names only: acme/widget is published, acme/widget-dev is its development repository.
 test("public copy: a workspace that resolves to its tree's publicSync.target is neither imported nor sent; the failure says how to point it elsewhere", async () => {
   const path = mkdtempSync(join(tmpdir(), "switchboard-public-copy-"));
   try {
@@ -1526,7 +1526,7 @@ test("noWrite: a workspace that resolves to a repository its clone marked ops-ki
   }
 });
 
-// The registration a rebuild clones from (#2799): an import of another checkout leaves it; a rename is followed.
+// The registration a rebuild clones from: an import of another checkout leaves it; a rename is followed.
 const PRIVATE_KEY: BacklogRepositoryKey = { service: "github", host: githubHost(), repository: "acme/app-dev" };
 
 test("an import does not overwrite the registered repository with another checkout", async () => {
@@ -1585,7 +1585,7 @@ test("an import records the repository's visibility", async () => {
   expect(asked).toEqual([["repo", "view", "--json", "nameWithOwner,isPrivate", "-q", '"\\(.nameWithOwner) \\(.isPrivate)"'], ["repo", "view", "--json", "nameWithOwner,isPrivate", "-q", '"\\(.nameWithOwner) \\(.isPrivate)"']]);
 });
 
-test("settle answers where the time went: the wait behind an earlier send, the send, the import (#3436)", async () => {
+test("settle answers where the time went: the wait behind an earlier send, the send, the import", async () => {
   const path = join(dir, "app");
   mkdirSync(path);
   const ws = db.upsertWorkspace({ id: WS.id, name: "app", path, kind: "repo" });
@@ -1653,7 +1653,7 @@ test("settle answers where the time went: the wait behind an earlier send, the s
   expect((await riding).importMs).toBeGreaterThanOrEqual(Math.floor(ridden) - 1);
 });
 
-test("an import asks its independent reads at once: the same calls as a sequential one, in less than their sum, at most GH_CONCURRENCY together (#3437)", async () => {
+test("an import asks its independent reads at once: the same calls as a sequential one, in less than their sum, at most GH_CONCURRENCY together", async () => {
   const twelve = raw(12, { comments: { pageInfo: { hasNextPage: true, endCursor: "cc1" }, nodes: [{ id: "C_12_1", body: "first", createdAt: "2026-10-02T00:00:00Z" }] } });
   const { gh, calls } = fakeGh({
     changed: (v) => (v.after ? pageOf([raw(13, { state: "CLOSED", labels: { totalCount: 1, nodes: [{ name: "type:task" }] }, parent: { number: 12 } })]) : pageOf([twelve], "p2")),
@@ -1687,7 +1687,7 @@ test("an import asks its independent reads at once: the same calls as a sequenti
   expect(stored()["project-item:PVTI_12"]!.remote).toEqual({ issue: 12, owner: "acme", project: 1, fields: { Status: "Ready", "Story Points": 5 } });
 });
 
-test("one of the reads asked at once failing, or the Project's guard refusing, stores nothing (#468, #3437)", async () => {
+test("one of the reads asked at once failing, or the Project's guard refusing, stores nothing", async () => {
   db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
   const world = { changed: () => pageOf([raw(12)]), open: () => pageOf([{ number: 12, projectItems: { totalCount: 1, nodes: [item(12, "Ready")] } }]) };
   const hidden: GhRunner = async (args, cwd) => {
@@ -1779,7 +1779,7 @@ test("the repository read failing stores nothing, leaves no call under way and n
   }
 });
 
-test("a failed read stops the others: no page is asked after the import failed, and it ends after the calls under way (#3437)", async () => {
+test("a failed read stops the others: no page is asked after the import failed, and it ends after the calls under way", async () => {
   db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
   // the changed Issues go on page after page; the open Issues fail at once
   const world = { changed: (v: Record<string, unknown>) => pageOf([raw(12)], `p${Number(String(v.after ?? "p0").slice(1)) + 1}`), open: () => { throw new Error("gh: HTTP 502"); } };
@@ -1802,7 +1802,7 @@ test("a failed read stops the others: no page is asked after the import failed, 
   expect(db.listBacklogRecords(KEY)).toEqual([]);
 });
 
-test("limitGh: stop refuses the calls waiting for a turn and resolves once those under way end; the bound is overridable (#3437)", async () => {
+test("limitGh: stop refuses the calls waiting for a turn and resolves once those under way end; the bound is overridable", async () => {
   const ended: number[] = [];
   const { run, stop } = limitGh(async (args) => (await Bun.sleep(20), ended.push(Number(args[0])), { code: 0, stdout: "", stderr: "" }), 2);
   const calls = [1, 2, 3, 4].map((n) => run([String(n)], "."));
@@ -1815,7 +1815,7 @@ test("limitGh: stop refuses the calls waiting for a turn and resolves once those
   expect([ghConcurrency(undefined), ghConcurrency("2"), ghConcurrency("0"), ghConcurrency("x"), ghConcurrency("1.5")]).toEqual([4, 2, 4, 4, 4]);
 });
 
-test("settle: after it, a read shows both the edit kept here and what changed on GitHub meanwhile (#3437)", async () => {
+test("settle: after it, a read shows both the edit kept here and what changed on GitHub meanwhile", async () => {
   const path = join(dir, "app");
   mkdirSync(path);
   const ws = db.upsertWorkspace({ id: WS.id, name: "app", path, kind: "repo" });
@@ -1831,7 +1831,7 @@ test("settle: after it, a read shows both the edit kept here and what changed on
   expect(titles[13]).toBe("changed on GitHub");
 });
 
-test("fetchGithubSnapshot: the stored records are looked up by Issue, not scanned per Issue (#4579)", async () => {
+test("fetchGithubSnapshot: the stored records are looked up by Issue, not scanned per Issue", async () => {
   // 3,000 Issues read again, each with 30 stored comments: a scan of all the stored records per Issue and kind took seconds and held the event loop
   const count = 3000;
   const stored = Array.from({ length: count }, (_, i) => i + 1).flatMap((n) =>

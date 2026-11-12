@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { Db } from "./db.ts";
 
 /**
- * Repeated stops (#939): which stops are the same one again, what changed since the previous one, and what the work
+ * Repeated stops: which stops are the same one again, what changed since the previous one, and what the work
  * needs next. The records are the tasks' `stop.record` events — the source of truth, so a restart forgets nothing.
  */
 
@@ -89,8 +89,8 @@ export function reduceStops(records: StopRecord[]): StopSummary[] {
     // An answer is to the stop at this place (work + op + target) that was newest when it was given: one to another
     // series' stop is not this one's, and one given before anything stopped here answers nothing.
     const owner = (a: NonNullable<StopRecord["answer"]>) => stops.filter((s) => placeKey(s) === placeKey(last) && first.get(s.id)! < a.at).at(-1);
-    // A runner names an Issue comment by URL, which is a pointer, not proof (#948): until the comment is read and its
-    // repository and author checked (#950 — nothing reads it yet), only an answer the daemon saw the person give counts.
+    // A runner names an Issue comment by URL, which is a pointer, not proof: until the comment is read and its
+    // repository and author checked (nothing reads it yet), only an answer the daemon saw the person give counts.
     const ours = (a: StopRecord["answer"]) => !!a && a.ref.startsWith("seq:") && (() => { const o = owner(a); return !!o && stopKey(o) === key; })();
     const changes = compareStopConditions(before.at(-1), last, newest(before)).filter((c) => c.kind !== "answer" || ours(last.answer));
     const lastAnswer = newest(list.filter((x) => x.answer?.ref.startsWith("seq:")));
@@ -120,20 +120,20 @@ export function reduceStops(records: StopRecord[]): StopSummary[] {
 }
 
 /**
- * The only answer a runner may name (#948): a GitHub Issue / PR comment, by URL — never words of its own, which would
- * turn its free text into the person's answer. The URL is a pointer, not proof: whoever resumes on it (#950) reads the
+ * The only answer a runner may name: a GitHub Issue / PR comment, by URL — never words of its own, which would
+ * turn its free text into the person's answer. The URL is a pointer, not proof: whoever resumes on it reads the
  * comment and checks its repository and author. Anything else is dropped (the report itself is kept).
  */
 const COMMENT_URL = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(issues|pull)\/\d+#(issuecomment-|discussion_r|pullrequestreview-)\d+$/;
 
 /**
- * What a runner reports about a stop (#948): task.note's `stop`, or a `switchboard-stop` fence in its own reply. The
+ * What a runner reports about a stop: task.note's `stop`, or a `switchboard-stop` fence in its own reply. The
  * daemon adds the work, the time and — unless the runner names one (an Issue comment it read) — the answer.
  */
 export const StopReport = StopRecord.omit({ work: true, at: true, answer: true }).extend({ id: z.string().min(1).max(100), answer: z.string().max(300).regex(COMMENT_URL).optional().catch(undefined) });
 export type StopReport = z.infer<typeof StopReport>;
 
-/** The Issue a stage Task is for (its `stage` column, #1139); null for any other task. */
+/** The Issue a stage Task is for (its `stage` column); null for any other task. */
 export const issueOf = (task: Pick<Task, "workspaceId" | "stage">): number | null => (task.workspaceId ? task.stage?.issue ?? null : null);
 
 export const stopWork = (task: Task): StopRecord["work"] => {
@@ -152,7 +152,7 @@ export function stopRecordsFor(db: Db, task: Task): StopRecord[] {
 }
 
 /**
- * The last stop of each Task the person may have to act on (#4520): not reviewed (確認済み), not 完了, and stopped — the
+ * The last stop of each Task the person may have to act on: not reviewed (確認済み), not 完了, and stopped — the
  * same Tasks the web's `needsAttention` lists (waiting, or not working and not idle). Of each, the newest series
  * (`reduceStops` puts the latest `lastAt` first) among the stops that Task itself reported — not `stopRecordsFor`, which
  * also reads the other Tasks of the same Issue / schedule (their newer stop is not this Task's last stop) and only the
@@ -209,7 +209,7 @@ export function stuckSchedule(db: Db, schedule: { id: string; lastTaskId: string
   return null;
 }
 
-/** The newest record of each stop the person's reply answers (#4479): the open ones, and one that ran out of retries. */
+/** The newest record of each stop the person's reply answers: the open ones, and one that ran out of retries. */
 export function answerableStops(records: StopRecord[]): StopRecord[] {
   const latest = new Map<string, StopRecord>();
   for (const r of records) latest.set(r.id, r);
@@ -226,7 +226,7 @@ export function openStops(records: StopRecord[]): StopRecord[] {
 const MAX_FENCE = 8_000;
 
 /**
- * Reads one kind of fence (` ```<name> `) out of a runner's reply as it streams (#948, #1778): only a fence opened at the
+ * Reads one kind of fence (` ```<name> `) out of a runner's reply as it streams: only a fence opened at the
  * start of a line, outside any other fence (a quoted example is not a report); its body goes to `parse`, which answers
  * null for anything that is not one. Holds at most one line and one fence body (`MAX_FENCE`); a message id change or
  * `end()` closes the message.
@@ -290,7 +290,7 @@ export class FenceReader<T> {
   }
 }
 
-/** The stop reports (#948): `switchboard-stop` fences checked against StopReport. */
+/** The stop reports: `switchboard-stop` fences checked against StopReport. */
 export class StopFenceReader extends FenceReader<StopReport> {
   constructor() {
     super("switchboard-stop", parseStopReport);
@@ -307,13 +307,13 @@ export function parseStopReport(json: string): StopReport | null {
   }
 }
 
-/** The bounded retry (#949): two more tries of the same operation, 5 s then 30 s after the failure. Fixed, not a setting. */
+/** The bounded retry: two more tries of the same operation, 5 s then 30 s after the failure. Fixed, not a setting. */
 export const RETRY_DELAYS_MS = [5_000, 30_000] as const;
 
 export const lastAttempt = (s: Pick<StopRecord, "actions">) => Math.max(0, ...s.actions.map((a) => a.attempt));
 
 /**
- * Whether the stop may be tried again by itself (#949), and which attempt that is. Only a passing failure (`transient`:
+ * Whether the stop may be tried again by itself, and which attempt that is. Only a passing failure (`transient`:
  * a dropped connection, a timeout, HTTP 502 / 503 / 504) of an operation known to be harmless to repeat — read-only, or
  * failed before it did anything; an auth / permission / input error or an operation that may have done something is
  * never retried. `prev` = this stop's newest record (its attempts so far; a resolved one starts over).
@@ -326,11 +326,11 @@ export function reserveStopRetry(prev: StopRecord | undefined, next: Pick<StopRe
   return { ok: true, attempt: used + 1, delayMs: RETRY_DELAYS_MS[used]! };
 }
 
-/** The runner a usage-limit stop names in its conditions (#4408): `runner#codex` with the time the limit lifts as the value. */
+/** The runner a usage-limit stop names in its conditions: `runner#codex` with the time the limit lifts as the value. */
 export const RUNNER_LIMIT_KEY = /^runner#(.+)$/;
 
 /**
- * The other runner's usage limit a stop reports (#4408): a waiting `usage-limit` stop with a `runner#<runner>` condition.
+ * The other runner's usage limit a stop reports: a waiting `usage-limit` stop with a `runner#<runner>` condition.
  * `resetsAt` (ms) is the condition's value read as a time; `unknown` or anything unreadable leaves it out.
  */
 export function reportedLimit(stop: StopRecord): { runner: RunnerId; resetsAt?: number } | undefined {
@@ -345,8 +345,8 @@ export function reportedLimit(stop: StopRecord): { runner: RunnerId; resetsAt?: 
 }
 
 /**
- * What every runner start is told (#949): how to report a stop (task.note's `stop`, or a `switchboard-stop` fence), the
- * retry rule, not to write beyond the request (#1987), and the stops of its work still open with the retries left. The runner retries its own tools itself;
+ * What every runner start is told: how to report a stop (task.note's `stop`, or a `switchboard-stop` fence), the
+ * retry rule, not to write beyond the request, and the stops of its work still open with the retries left. The runner retries its own tools itself;
  * the daemon never runs its commands. Short: it goes before every start's prompt.
  */
 export function stopRecoveryPrompt(open: StopSummary[]): string {

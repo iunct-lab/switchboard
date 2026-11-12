@@ -39,7 +39,7 @@ const usageOf = (model: string): AgentEvent => ({ t: "usage", source: "reported"
 const answer = (t: string, model: string): AgentEvent[] => [{ t: "message.delta", role: "assistant", text: t }, usageOf(model), { t: "session.end", status: "ok" }];
 const GOOD = '{"scores": {"goal": {"score": 5, "reason": "直して報告"}, "instructions": {"score": 4, "reason": "沿っている"}, "efficiency": {"score": 5, "reason": "無駄なし"}, "communication": {"score": 4, "reason": "短いが分かる"}, "safety": {"score": 5, "reason": "範囲内"}}, "summary": "小さな修正を確実に終えた"}';
 
-describe("rubric judge (#1219)", () => {
+describe("rubric judge", () => {
   test("the configured runner scores: every criterion, by runner:model, the rubric's id@version; asked read-only in the daemon's directory with the criteria and the transcript", async () => {
     const starts: StartOptions[] = [];
     const usage: Array<{ runner: RunnerId; model: string | undefined }> = [];
@@ -83,7 +83,7 @@ describe("rubric judge (#1219)", () => {
     expect(logs.join("\n")).toMatch(/codex.*usage limit/);
   });
 
-  test("settings tunables (#835): the fallback the daemon passes scores instead of Claude Haiku", async () => {
+  test("settings tunables: the fallback the daemon passes scores instead of Claude Haiku", async () => {
     const codexStarts: StartOptions[] = [];
     const claude = replayAdapter("claude", [{ t: "error", message: "rate_limit_error" }, { t: "session.end", status: "error" }]);
     const codex = replayAdapter("codex", answer(GOOD, "m"), { starts: codexStarts });

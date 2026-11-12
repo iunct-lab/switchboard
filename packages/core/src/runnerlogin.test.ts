@@ -33,7 +33,7 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 const spawn = (argv: string[]) => Bun.spawn(argv, { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
 
-describe("RunnerLogins (#354)", () => {
+describe("RunnerLogins", () => {
   test("codex: the device URL and one-time code come out of the ANSI output, not from the URL; done by itself", async () => {
     const done: string[] = [];
     const logins = new RunnerLogins(spawn, (r) => done.push(r));
@@ -65,7 +65,7 @@ describe("RunnerLogins (#354)", () => {
     expect(JSON.stringify(v)).not.toContain(PASTED);
   });
 
-  test("a pasted code with a code-shaped part, echoed back by the CLI, never becomes a relayed code (review #357)", async () => {
+  test("a pasted code with a code-shaped part, echoed back by the CLI, never becomes a relayed code", async () => {
     const echo = script("echoer", `echo "visit: https://claude.example/oauth/authorize"\nprintf "Paste code here if prompted > "\nread code\necho "got $code"\nsleep 0.3\nexit 0`);
     const logins = new RunnerLogins(spawn, () => undefined);
     await logins.start("claude", [echo]);
@@ -74,7 +74,7 @@ describe("RunnerLogins (#354)", () => {
     expect(JSON.stringify(logins.get("claude"))).not.toContain("ABCD-12345");
   });
 
-  test("only a URL on the runner's login hosts is relayed: an update notice printed first is skipped (review #357)", async () => {
+  test("only a URL on the runner's login hosts is relayed: an update notice printed first is skipped", async () => {
     const noisy = script("noisy", `echo "A new version is out: https://github.com/openai/codex/releases"\necho "   https://auth.openai.com/codex/device"\necho "   ABCD-EFGHI"\nsleep 0.3\nexit 0`);
     const logins = new RunnerLogins(spawn, () => undefined);
     const v = await logins.start("codex", [noisy], ["auth.openai.com"]);
@@ -102,7 +102,7 @@ describe("RunnerLogins (#354)", () => {
   });
 });
 
-describe("logout (#2528)", () => {
+describe("logout", () => {
   let home: string;
   let core: Awaited<ReturnType<typeof startServer>>;
   let base: string;
@@ -143,7 +143,7 @@ describe("logout (#2528)", () => {
     expect((await runners()).find((r) => r.id === "claude")).toMatchObject({ login: "ok", loginKind: "console" });
   });
 
-  test("POST /api/runners/claude/logout runs `auth logout`, then health says expired and the kind and the expiry (#3867) are gone; codex has no logout", async () => {
+  test("POST /api/runners/claude/logout runs `auth logout`, then health says expired and the kind and the expiry are gone; codex has no logout", async () => {
     expect((await runners()).find((r) => r.id === "claude")).toMatchObject({ login: "ok", loginKind: "console", loginExpiresAt: 1763597700000 });
     const res = await fetch(`${base}/api/runners/claude/logout`, { method: "POST" });
     expect(res.status).toBe(200);
@@ -157,7 +157,7 @@ describe("logout (#2528)", () => {
   });
 });
 
-describe("the account behind `claude auth status` stays out of the API and the logs (#2528)", () => {
+describe("the account behind `claude auth status` stays out of the API and the logs", () => {
   test("health shows the kind and nothing else of the status output; a missing executable is a 502 for logout", async () => {
     const home = mkdtempSync(join(tmpdir(), "switchboard-test-authkind-"));
     const bin = join(home, "claude");
@@ -183,7 +183,7 @@ describe("the account behind `claude auth status` stays out of the API and the l
   });
 });
 
-describe("/api/health does not wait for the login check (#3734)", () => {
+describe("/api/health does not wait for the login check", () => {
   test("only ?recheck=1 waits; a plain read answers with the last result and the check finishes behind it", async () => {
     const home = mkdtempSync(join(tmpdir(), "switchboard-test-healthwait-"));
     let calls = 0;
@@ -229,7 +229,7 @@ describe("/api/health does not wait for the login check (#3734)", () => {
   }, 20_000);
 });
 
-describe("the API (#354)", () => {
+describe("the API", () => {
   let home: string;
   let core: Awaited<ReturnType<typeof startServer>>;
   let base: string;

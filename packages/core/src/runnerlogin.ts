@@ -1,10 +1,10 @@
 import type { RunnerId } from "@switchboard/protocol";
 
 /**
- * A runner's own login, from the screen (#354). The daemon runs the runner's login command (`claude auth login`,
+ * A runner's own login, from the screen. The daemon runs the runner's login command (`claude auth login`,
  * `codex login --device-auth`) as a child process and relays what it prints — the URL to open and, for a device flow,
  * the one-time code — so nobody opens a terminal. Claude then asks for the code its page shows: `submit` writes it to
- * the child's stdin and forgets it. The credentials are written by the runner itself; Switchboard keeps none (#180),
+ * the child's stdin and forgets it. The credentials are written by the runner itself; Switchboard keeps none,
  * and the pasted code never reaches a log, the DB or an API response.
  *
  * Observed (2026-09-26): codex prints `https://auth.openai.com/codex/device` and a code like `ABCD-EFGHI` (ANSI

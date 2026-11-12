@@ -76,7 +76,7 @@ async function boot(finish: boolean) {
   return { c, base, create };
 }
 
-describe("detached processes of a task (#1397)", () => {
+describe("detached processes of a task", () => {
   test("a detached process of an aborted task is stopped, others are left", async () => {
     const { c, base, create } = await boot(false);
     try {
@@ -140,7 +140,7 @@ describe("taskProcesses", () => {
   });
 });
 
-describe("leftovers at the next start (#1397)", () => {
+describe("leftovers at the next start", () => {
   test("leftovers of ended tasks are stopped at the next start; a task with a resume planned keeps its process", async () => {
     const home = mkdtempSync(join(tmpdir(), "switchboard.detached."));
     const env = { SWITCHBOARD_HOME: home, SWITCHBOARD_PORT: "0", ...NO_HISTORY };

@@ -55,7 +55,7 @@ describe("answer policies", () => {
 
   test("check", () => {
     for (const target of ["*", "**", "**/*", "cmd:*", "cmd:{*,x}", "{a,{*,b}}"]) refused(input({ target }), ctx());
-    // a broad target is warned about on screen, not refused (#1765)
+    // a broad target is warned about on screen, not refused
     expect(checkPolicy(input({ target: "bun *" }), ctx()).ok).toBe(true);
     refused(input({ target: "git push*" }), ctx());
     refused(input({ expiresAt: null }), ctx());
@@ -66,7 +66,7 @@ describe("answer policies", () => {
     expect(refused(input(), ctx({ confirmHit: { source: "rules/a.md", pattern: "bun*", mode: "confirm", subject: "bun test" } }))).toContain("rules/a.md");
     expect(refused(input(), ctx({ runnerRefusal: true }))).toContain("ランナー");
     refused(input({ target: "pr:10" }), ctx({ subject: { ...decision, conditions: [{ key: "merge-ask", value: "security,large" }] }, answer: { kind: "choice", choice: "yes" } }));
-    // merge-gate's security groups (security:<group>, PBI #1873) are security too
+    // merge-gate's security groups (security:<group>) are security too
     refused(input({ target: "pr:10" }), ctx({ subject: { ...decision, conditions: [{ key: "merge-ask", value: "size,security:lockfile" }] }, answer: { kind: "choice", choice: "yes" } }));
     refused(input({ target: "bun test*" }), ctx({ subject: { ...exec, target: "bun test --token ghp_" + "a".repeat(36) } }));
     refused(input({ scope: "pbi" }), ctx({ subject: null }));

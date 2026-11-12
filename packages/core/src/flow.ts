@@ -1,6 +1,6 @@
 /**
- * How long a closed PBI took, stage by stage (#650). Pure: it takes the times of the Issues and comments the app stores
- * (#3070) and of the merged PRs GitHub holds (`createdAt`), and cuts them at the marks the skills leave. The Project's Status history is not read — a Status changed
+ * How long a closed PBI took, stage by stage. Pure: it takes the times of the Issues and comments the app stores
+ * and of the merged PRs GitHub holds (`createdAt`), and cuts them at the marks the skills leave. The Project's Status history is not read — a Status changed
  * through the API leaves no timeline event. A stage whose mark is missing is null, never guessed. docs/design/flow-metrics.md.
  */
 import { FlowStage, type CreatedIssue, type FlowPbi, type FlowStageSummary, type FlowSummary, type FlowView, type FlowWeek } from "@switchboard/protocol";
@@ -68,7 +68,7 @@ export function flowOfPbi(raw: RawPbi, requestCreatedAt: string | null): Omit<Fl
   const firstPrAt = prs.length ? Math.min(...prs.map((p) => ms(p.createdAt))) : null;
   const firstClaim = claims.length ? Math.min(...claims) : null;
   const start = firstClaim ?? firstPrAt;
-  // A Task added after the start (a review fix, an answer's follow-up) is building, not splitting (#2684).
+  // A Task added after the start (a review fix, an answer's follow-up) is building, not splitting.
   const splitTasks = tasks.map((t) => ms(t.createdAt)).filter((at) => start === null || at <= start);
   const splitEndAt = splitTasks.length ? Math.max(...splitTasks) : null;
   const merges = prs.flatMap((p) => (p.mergedAt ? [ms(p.mergedAt)] : []));
@@ -111,7 +111,7 @@ export class FlowError extends Error {}
 const COMMENTS_MAX = 100;
 const comments = `comments(first: ${COMMENTS_MAX}) { totalCount nodes { createdAt body } }`;
 
-/** The PBIs and requests opened and closed in one week (#1878), from the stored times. */
+/** The PBIs and requests opened and closed in one week, from the stored times. */
 export type GrowthCounts = { weekStart: string; pbiOpened: number; pbiClosed: number; requestOpened: number; requestClosed: number };
 
 const DAY = 86_400_000;
@@ -165,7 +165,7 @@ const SEARCH_MAX = 1000;
 
 /**
  * The PRs of `repo` merged on or after `since` (a UTC day), with their comments: the only thing the flow reads from GitHub
- * (#3070; the Issues come from the app's stored values). Each 7 days from `since` is one search (`merged:<day>..<day + 6>`),
+ * (the Issues come from the app's stored values). Each 7 days from `since` is one search (`merged:<day>..<day + 6>`),
  * so the search's 1,000-result cap is per 7 days; a week over it stops the read (FlowError), never a count
  * cut silently. Reads the remaining budget first and nothing under MIN_REMAINING; stops before a page that would take the
  * run over `maxCost`. `cutPrs`: PRs with more comments than one read holds.
@@ -209,7 +209,7 @@ export const closedPbis = (records: StoredRecords, days: number, now: number): S
 
 /**
  * The PBIs closed in the last `days` days, each cut into stages, from the app's stored Issues, comments and Story Points
- * (#3070: a PBI kept in the app only counts too), with the merged PRs read from the code host (`prs`: their Tasks by
+ * (a PBI kept in the app only counts too), with the merged PRs read from the code host (`prs`: their Tasks by
  * `closes`); and each week's PBIs and requests opened and closed, from the stored times.
  */
 export function flowOfStored(records: StoredRecords, prs: StoredFlowPr[], days: number, now: number): { reads: FlowRead[]; growth: GrowthCounts[] } {
@@ -272,7 +272,7 @@ export async function fetchFlow(gh: GhRunner, cwd: string, repo: string | null, 
 const WEEK_COUNTS = ["pbiOpened", "pbiClosed", "requestOpened", "requestClosed", "net", "deferredTasks", "deferredIssues"] as const;
 
 /**
- * The weeks from the one `days` days ago to this one (#1878), an empty week as zeros: the PBIs and requests of the stored values
+ * The weeks from the one `days` days ago to this one, an empty week as zeros: the PBIs and requests of the stored values
  * (`counts`, by `weekStart`), `net` = opened − closed, and the deferred Tasks by when their last turn ended, with the Issues of
  * `repo` they opened.
  */

@@ -33,7 +33,7 @@ export interface CodexAdapterOptions {
   codexHome?: string;
 }
 
-/** The task's own temp directory is the runner's TMPDIR (#787). */
+/** The task's own temp directory is the runner's TMPDIR. */
 export function appServerEnv(opts: StartOptions): Record<string, string> {
   return { ...opts.env, ...(opts.privateTmp ? { TMPDIR: opts.privateTmp } : {}) };
 }
@@ -62,7 +62,7 @@ export const CODEX_PERMISSION_MODES: PermissionModeOption[] = [
 ];
 export const CODEX_DEFAULT_PERMISSION_MODE = "auto";
 
-/** Models offered in the UI (#155). Any other id the CLI accepts can still be typed. */
+/** Models offered in the UI. Any other id the CLI accepts can still be typed. */
 export const CODEX_MODELS: ModelOption[] = [
   { value: "gpt-6.1-sol", label: "GPT-6.1 Sol" },
   { value: "gpt-6-astra", label: "GPT-6 Astra" },
@@ -71,7 +71,7 @@ export const CODEX_MODELS: ModelOption[] = [
 ];
 
 /**
- * The same models by Codex's own Amazon Bedrock ids (#1731): `openai.<id>`, as the CLI's Bedrock table spells them
+ * The same models by Codex's own Amazon Bedrock ids: `openai.<id>`, as the CLI's Bedrock table spells them
  * (codex 0.165.0). GPT-6 Sol has no Bedrock id there, so it is not offered. Offered only while the runner is switched
  * to Bedrock; which of them the account can call is decided by IAM.
  */
@@ -79,7 +79,7 @@ const NO_BEDROCK = new Set(["gpt-6-sol"]);
 export const CODEX_BEDROCK_MODELS: ModelOption[] = CODEX_MODELS.filter((m) => !NO_BEDROCK.has(m.value)).map((m) => ({ value: `openai.${m.value}`, label: m.label }));
 
 /**
- * The model name the session reports (#1731). On Bedrock a plain id (the config.toml default, or the model app-server
+ * The model name the session reports. On Bedrock a plain id (the config.toml default, or the model app-server
  * says it runs, when the task named none) is what Codex calls as `openai.<id>`, and is reported so: the ledger bills a
  * Bedrock id at the API price.
  */
@@ -88,7 +88,7 @@ export function bedrockModelName(opts: Pick<StartOptions, "bedrock">, model: str
 }
 
 /**
- * What makes app-server run on Amazon Bedrock (#1731): only when the user chose it (`opts.bedrock`), two config
+ * What makes app-server run on Amazon Bedrock: only when the user chose it (`opts.bedrock`), two config
  * overrides; without it nothing is added. `~/.codex/config.toml` is not written and no Bedrock API key is used: the CLI
  * takes AWS credentials from the usual AWS places.
  */
@@ -96,12 +96,12 @@ export function bedrockConfigArgs(opts: Pick<StartOptions, "bedrock">): string[]
   return opts.bedrock ? ["-c", 'model_provider="amazon-bedrock"', "-c", `model_providers.amazon-bedrock.aws.region=${JSON.stringify(opts.bedrock.region)}`] : [];
 }
 
-/** Stops app-server's analytics and feedback sending (#4308) unless the user allowed it (`opts.runnerTelemetry`, Settings `outbound.runnerTelemetry`). */
+/** Stops app-server's analytics and feedback sending unless the user allowed it (`opts.runnerTelemetry`, Settings `outbound.runnerTelemetry`). */
 export function telemetryArgs(opts: Pick<StartOptions, "runnerTelemetry">): string[] {
   return opts.runnerTelemetry ? [] : ["-c", "analytics.enabled=false", "-c", "feedback.enabled=false"];
 }
 
-/** Thinking efforts offered in the UI (#833): the reasoning efforts every model above takes (`codex debug models`, 0.162.1). */
+/** Thinking efforts offered in the UI: the reasoning efforts every model above takes (`codex debug models`, 0.162.1). */
 export const CODEX_EFFORTS: ModelOption[] = ["low", "medium", "high", "xhigh", "max"].map((value) => ({ value, label: value }));
 
 export interface CodexPermissionPreset {
@@ -118,7 +118,7 @@ export function resolvePermissionPreset(permissionMode: string | undefined, o: P
       return { approvalPolicy: "untrusted", sandbox: o.sandbox ?? "workspace-write" };
     case "full-access":
       return { approvalPolicy: "never", sandbox: "danger-full-access" };
-    case "on-request": // the pre-#58 name of the default policy; kept as an alias
+    case "on-request": // the earlier name of the default policy; kept as an alias
       return { approvalPolicy: "on-request", sandbox: o.sandbox ?? "workspace-write" };
     default:
       return { approvalPolicy: o.approvalPolicy ?? "on-request", sandbox: o.sandbox ?? "workspace-write" };
@@ -132,7 +132,7 @@ export function resolveApprovalPolicy(permissionMode: string | undefined, fallba
 
 /**
  * Best-effort default model from ~/.codex/config.toml, so usage rows can be priced and the UI can say what an empty
- * model runs on (#155). Only the top-level `model` key counts: one inside a table (`[profiles.x]`) is not the default.
+ * model runs on. Only the top-level `model` key counts: one inside a table (`[profiles.x]`) is not the default.
  */
 export function defaultModelFromConfig(codexHome = join(homedir(), ".codex")): string | undefined {
   try {
@@ -174,7 +174,7 @@ export function buildSandboxPolicy(opts: StartOptions, sandbox: SandboxMode = "w
   if (sandbox === "read-only") return { type: "readOnly", networkAccess: false };
   if (sandbox === "danger-full-access") return { type: "dangerFullAccess" };
   const extra = opts.scope.filter((d) => d && d !== opts.cwd);
-  // privateTmp (#787): /tmp is read-only for the task; its own temp directory (TMPDIR, set in the constructor) is the only place under it
+  // privateTmp: /tmp is read-only for the task; its own temp directory (TMPDIR, set in the constructor) is the only place under it
   if (opts.privateTmp) return { type: "workspaceWrite", writableRoots: [...extra, opts.privateTmp], networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: false };
   return { type: "workspaceWrite", writableRoots: extra, networkAccess: false, excludeSlashTmp: false, excludeTmpdirEnvVar: false };
 }
@@ -196,12 +196,12 @@ function resolveBin(options: CodexAdapterOptions): { exe?: string; fallback: boo
   return existsSync(CHATGPT_APP_CODEX) ? { exe: CHATGPT_APP_CODEX, fallback: true } : { exe: undefined, fallback: false };
 }
 
-/** What to type in a terminal tab when the login has run out (#180). Device flow: works on a machine without a browser. */
+/** What to type in a terminal tab when the login has run out. Device flow: works on a machine without a browser. */
 export const CODEX_LOGIN_HINT = "codex login --device-auth";
 
 /**
  * `codex login status` (0.155.0-alpha.9.2): exit 0 = logged in, 1 = "Not logged in". Its output names the login method,
- * so it is discarded unread; the credential file is never looked at (#180). No answer within `timeoutMs`, or a CLI
+ * so it is discarded unread; the credential file is never looked at. No answer within `timeoutMs`, or a CLI
  * without the subcommand → unknown.
  */
 export async function loginStatus(exe: string, timeoutMs = 10_000): Promise<RunnerLogin> {
@@ -232,7 +232,7 @@ export async function loginStatus(exe: string, timeoutMs = 10_000): Promise<Runn
  */
 const MEMORY_OFF = "features.memories=false";
 /**
- * The question tool in the default mode (#3057): without it the model asks in its reply (`agentMessage` questions with
+ * The question tool in the default mode: without it the model asks in its reply (`agentMessage` questions with
  * `delivery: "async"`) and sleeps 60 s before ending the turn; with it the questions arrive as `item/tool/requestUserInput`
  * (codex-cli 0.165.0 and 0.166.0, no `experimentalApi` capability needed, docs/design/codex-app-server.md).
  */
@@ -392,7 +392,7 @@ class CodexSession implements RunnerSession {
     const thread = started?.thread;
     if (!thread) throw new Error("thread/start returned no thread");
     this.threadId = thread.id;
-    // on Bedrock a usage without a model would be billed as the subscription: fall back to the model app-server runs (#1731)
+    // on Bedrock a usage without a model would be billed as the subscription: fall back to the model app-server runs
     const model = this.opts.model ?? defaultModelFromConfig(this.o.codexHome);
     this.parser.state.model = bedrockModelName(this.opts, model ?? (this.opts.bedrock ? started?.model : undefined));
     for (const ev of this.parser.threadStarted(thread)) this.emit(ev);
@@ -585,7 +585,7 @@ class CodexSession implements RunnerSession {
       const events = this.parser.feed(JSON.stringify({ ...m, id: publicId }));
       const ask = events.find((e) => e.t === "permission.ask");
       if (ask && ask.t === "permission.ask") this.openApprovals.set(ask.id, m.id as RpcId);
-      // the question tool (#3057) is answered at once with the deferred reply: the turn ends, the answers come as the next turn
+      // the question tool is answered at once with the deferred reply: the turn ends, the answers come as the next turn
       else if (events.some((e) => e.t === "question.ask")) this.write(jsonRpcResult(m.id as RpcId, deferredUserInput(m.params)));
       else this.write(jsonRpcError(m.id as RpcId, `Switchboard does not support ${m.method}`));
       for (const ev of events) this.emit(ev);

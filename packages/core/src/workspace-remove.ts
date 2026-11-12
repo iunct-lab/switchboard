@@ -4,7 +4,7 @@ import type { Workspace } from "@switchboard/protocol";
 
 export type CopyDeletable = { ok: true } | { ok: false; code: 400 | 409; reason: string };
 
-/** Whether a workspace's directory may be deleted with its registration (#2600): only a Git checkout directly under the checkout's parent directory. */
+/** Whether a workspace's directory may be deleted with its registration: only a Git checkout directly under the checkout's parent directory. */
 export function copyDeletable(ws: Pick<Workspace, "kind" | "path">, repoRoot: string): CopyDeletable {
   if (ws.kind === "meta") return { ok: false, code: 400, reason: "meta workspace のディレクトリは消せません" };
   if (!existsSync(ws.path)) return { ok: true };

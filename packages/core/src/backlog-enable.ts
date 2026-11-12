@@ -1,6 +1,6 @@
 /**
- * Turning a workspace's GitHub sync on (#2266): a backlog kept here only (#2265), or one whose sync was turned off
- * (#2299), goes to GitHub without losing what was made here. Each step is decided from the stored data, so a press that
+ * Turning a workspace's GitHub sync on: a backlog kept here only, or one whose sync was turned off,
+ * goes to GitHub without losing what was made here. Each step is decided from the stored data, so a press that
  * failed halfway goes on from where it stopped at the next one:
  *
  * 1. a backlog kept here only reads GitHub's into GitHub's key, then its records move there and its source becomes
@@ -118,7 +118,7 @@ function queueCreates(db: Db, source: BacklogSource, now: number): void {
 }
 
 /**
- * `#N` in a text, by the numbers Switchboard gave and GitHub's (#2266): each one once (a number it gave is not
+ * `#N` in a text, by the numbers Switchboard gave and GitHub's: each one once (a number it gave is not
  * rewritten again). `owner/repo#N`, a URL's `/issues/N`, `&#N;` and a number not in the map stay.
  */
 export function renumberRefs(text: string, numbers: Array<{ from: number; to: number }>): string {

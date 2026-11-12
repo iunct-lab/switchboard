@@ -17,7 +17,7 @@ const ask = (over: Partial<Extract<AgentEvent, { t: "permission.ask" }>>): Extra
 const exec = (command: string) => ask({ kind: "exec", tool: "Bash", input: { command }, detail: command });
 const rules: ApprovalRuleSet[] = [{ source: "rules/dak.md", confirm: ["docker-compose*.yml", ".github/**"], allow: ["*.md", "docs/**", "bun test*", "git status"] }];
 
-describe("approval rules (#13)", () => {
+describe("approval rules", () => {
   test("glob semantics: *, **, ?, {a,b}, [!x], basename fallback for path patterns; command patterns need cmd: or a space", () => {
     expect(globMatch("*.md", "README.md")).toBe(true);
     expect(globMatch("*.md", "docs/guide.md")).toBe(true); // basename fallback
@@ -78,7 +78,7 @@ function evaluate(r: ApprovalRuleSet[], a: Extract<AgentEvent, { t: "permission.
   return evaluateRules(r, a, t);
 }
 
-describe("approval rules and saved policies (#938)", () => {
+describe("approval rules and saved policies", () => {
   const NOW = 1_800_000_000_000;
   const policy = (over: Partial<AnswerPolicy> = {}): AnswerPolicy => ({
     id: "pol_1", scope: "repo", workspaceId: "ws", pbi: null, askId: null, kind: "approval", op: "exec", target: "git status*", when: [], answer: { kind: "allow" }, expiresAt: NOW + 1000, revokedAt: null, createdAt: NOW, updatedAt: NOW,

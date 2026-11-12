@@ -4,6 +4,7 @@ import { createAdkAdapter } from "@switchboard/adapter-adk";
 import { createAguiAdapter } from "@switchboard/adapter-agui";
 import { loadConfig } from "./config.ts";
 import { seedNewHome, startServer } from "./server.ts";
+import { spawnCollectPending } from "./jobs.ts";
 import type { Suggester } from "./routing.ts";
 import { relocate } from "./relocate.ts";
 import { shutdownOnce } from "./selfdev.ts";
@@ -13,7 +14,7 @@ import { commitEventsArchive, prepareEventsArchive, readUploaded } from "./event
 
 const cfg = loadConfig();
 
-// `main.ts export <out> [--encrypt <age recipient>]` / `main.ts import <file> [--identity <age key file>]` (#179) move the
+// `main.ts export <out> [--encrypt <age recipient>]` / `main.ts import <file> [--identity <age key file>]` move the
 // history to another machine and exit; with no arguments this is the daemon.
 const [cmd, ...args] = process.argv.slice(2);
 if (cmd === "export" || cmd === "import") {
@@ -36,7 +37,7 @@ if (cmd === "export" || cmd === "import") {
     process.exit(1);
   }
 }
-// `main.ts events-archive prepare <dir> --encrypt <age recipient>` / `events-archive commit <dir>` (#1431): write the bodies
+// `main.ts events-archive prepare <dir> --encrypt <age recipient>` / `events-archive commit <dir>`: write the bodies
 // of old finished tasks' events to encrypted files, and, after `archive.sh` uploaded them, replace the rows with skeletons.
 if (cmd === "events-archive") {
   const [step, dir, ...rest] = args;
@@ -62,7 +63,7 @@ if (cmd === "events-archive") {
     db.close();
   }
 }
-// `main.ts relocate --from <old> --to <new>` (#427): rewrite the history's absolute paths once, with the daemon stopped.
+// `main.ts relocate --from <old> --to <new>`: rewrite the history's absolute paths once, with the daemon stopped.
 if (cmd === "relocate") {
   const flag = (name: string) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
   const from = flag("--from");
@@ -87,7 +88,7 @@ if (cmd === "relocate") {
 // rescue page's "restore the database" offers it), and a failure to take it stops the start. A promotion candidate takes
 // none: its database is a throwaway copy with nothing to restore, and its home is under the system temp directory,
 // often a small RAM-backed filesystem that a second full copy of the database can fill.
-// Before anything opens (and so creates) the database: only a HOME with no database yet starts with developSelf off (#2459).
+// Before anything opens (and so creates) the database: only a HOME with no database yet starts with developSelf off.
 seedNewHome(cfg.dbPath);
 const migrationSnapshot = cfg.candidate ? null : await snapshotBeforeMigrate(cfg.dbPath, cfg.home);
 if (migrationSnapshot) console.log(`schema migration: snapshot ${migrationSnapshot} taken first`);
@@ -117,7 +118,7 @@ const adapters = [
 ];
 
 /**
- * LLM routing suggestions (#25). Off unless the settings say otherwise; `SWITCHBOARD_SUGGESTER=fake` swaps in a
+ * LLM routing suggestions. Off unless the settings say otherwise; `SWITCHBOARD_SUGGESTER=fake` swaps in a
  * stub that spends no quota, for trying the UI. The real, adapter-backed suggester is wired in below it.
  */
 const fakeSuggester: Suggester = {
@@ -128,7 +129,7 @@ const fakeSuggester: Suggester = {
   },
 };
 
-const core = await startServer(cfg, adapters, { backlogAutoImport: true, llmSuggester: process.env.SWITCHBOARD_SUGGESTER === "fake" ? () => fakeSuggester : undefined });
+const core = await startServer(cfg, adapters, { backlogAutoImport: true, collectPending: (env, log) => spawnCollectPending(cfg.repoRoot, env, log), llmSuggester: process.env.SWITCHBOARD_SUGGESTER === "fake" ? () => fakeSuggester : undefined });
 // Off loopback (SWITCHBOARD_HOST=0.0.0.0, the cloud host) the runner list is only for authorized callers: ask as one.
 const health = (await fetch(`http://127.0.0.1:${core.server.port}/api/health`, { headers: { authorization: `Bearer ${core.token}` } }).then((r) => r.json())) as {
   runners: Array<{ id: string; available: boolean; version?: string; note?: string }>;

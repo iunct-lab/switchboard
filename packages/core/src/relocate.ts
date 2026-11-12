@@ -5,7 +5,7 @@ import { claudeProjectDirName } from "@switchboard/adapter-claude";
 import type { CoreConfig } from "./config.ts";
 
 /**
- * Moving the history to other paths (#427): after an import from a Mac, the database still holds the Mac's HOME and
+ * Moving the history to other paths: after an import from a Mac, the database still holds the Mac's HOME and
  * repository folder, and Claude Code's session folders are named after them. This rewrites both once, from the old
  * prefix to the new one (run it once per prefix: the repository folder, then HOME). Session logs' contents are not
  * touched — resuming needs only the file's place and the cwd Switchboard passes (docs/design/cloud-hosting.md §5).

@@ -10,7 +10,7 @@ import { createStoredIssue, editStoredIssue, localBacklogSource, type GhRunner }
 import { applyLocalOperations, localForgeOf } from "./backlog-local.ts";
 import { Db } from "./db.ts";
 
-// A workspace whose backlog is kept in Switchboard only (#2265): no GitHub Issue or Project, and gh never asked for it.
+// A workspace whose backlog is kept in Switchboard only: no GitHub Issue or Project, and gh never asked for it.
 
 let core: CoreServer | undefined;
 let home: string | undefined;
@@ -61,7 +61,7 @@ async function boot() {
   return { base, cwds, dir, add, send, local, create, view } as const;
 }
 
-test("a workspace without GitHub registers, reads as imported and never calls gh (#2265)", async () => {
+test("a workspace without GitHub registers, reads as imported and never calls gh", async () => {
   const { base, cwds, dir, add } = await boot();
   const path = dir("local");
   const res = await add(path, "switchboard");
@@ -81,7 +81,7 @@ test("a workspace without GitHub registers, reads as imported and never calls gh
   const all = (await (await fetch(`${base}/api/workspaces`)).json()) as Workspace[];
   expect(all.find((w) => w.id === ws.id)?.backlog).toBe("switchboard");
   expect(all.find((w) => w.kind === "meta")?.backlog).toBe("github");
-  // a body with another place is 400; the same path again with the other place is 409 (switching is #2266), with none it stays
+  // a body with another place is 400; the same path again with the other place is 409 (switching is PATCH /api/workspaces/:id with backlog: "switchboard"), with none it stays
   expect((await add(dir("x"), "gitlab")).status).toBe(400);
   const nulled = await fetch(`${base}/api/workspaces`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: dir("y"), backlog: null }) });
   expect(nulled.status).toBe(400);
@@ -89,7 +89,7 @@ test("a workspace without GitHub registers, reads as imported and never calls gh
   expect(((await (await add(path)).json()) as Workspace).backlog).toBe("switchboard");
 });
 
-test("two local workspaces keep their records apart (#2265)", async () => {
+test("two local workspaces keep their records apart", async () => {
   const { add, dir } = await boot();
   const a = (await (await add(dir("a"), "switchboard")).json()) as Workspace;
   const b = (await (await add(dir("b"), "switchboard")).json()) as Workspace;
@@ -101,7 +101,7 @@ test("two local workspaces keep their records apart (#2265)", async () => {
   expect(core!.db.listBacklogRecords(sb)).toEqual([]);
 });
 
-test("a local workspace refuses projectVar (#2265)", async () => {
+test("a local workspace refuses projectVar", async () => {
   const { base, add, dir } = await boot();
   const ws = (await (await add(dir("local"), "switchboard")).json()) as Workspace;
   const res = await fetch(`${base}/api/workspaces/${ws.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectVar: "OTHER_PROJECT_URL" }) });
@@ -110,7 +110,7 @@ test("a local workspace refuses projectVar (#2265)", async () => {
   expect(core!.db.getWorkspaceBacklogSource(ws.id)?.service).toBe("switchboard");
 });
 
-test("a local create is numbered at once; a Task under it is its sub-issue (#2265)", async () => {
+test("a local create is numbered at once; a Task under it is its sub-issue", async () => {
   const { base, cwds, local, create, view } = await boot();
   const ws = await local();
   const pbi = await create(ws, { title: "PBI: x", labels: ["type:pbi"] });
@@ -127,7 +127,7 @@ test("a local create is numbered at once; a Task under it is its sub-issue (#226
   expect(cwds.filter((c) => c === ws.path)).toEqual([]);
 });
 
-test("a local Issue's stage starts by number (#2265)", async () => {
+test("a local Issue's stage starts by number", async () => {
   const { local, create, send } = await boot();
   const ws = await local();
   await create(ws, { title: "PBI: x", labels: ["type:pbi"] });
@@ -139,7 +139,7 @@ test("a local Issue's stage starts by number (#2265)", async () => {
   expect(prompts.at(-1)).toContain("#1");
 });
 
-test("two local workspaces both have a #1 and keep them apart (#2265)", async () => {
+test("two local workspaces both have an Issue 1 and keep them apart", async () => {
   const { local, create, view, base } = await boot();
   const a = await local("a");
   const b = await local("b");
@@ -151,7 +151,7 @@ test("two local workspaces both have a #1 and keep them apart (#2265)", async ()
   expect(items.filter((i) => i.number === 1 && (i.workspaceId === a.id || i.workspaceId === b.id)).map((i) => i.title).sort()).toEqual(["A の PBI", "B の PBI"]);
 });
 
-test("on-hold: a local label is added and removed the same way, and the list reads it (#2930)", async () => {
+test("on-hold: a local label is added and removed the same way, and the list reads it", async () => {
   const { base, local, create, send } = await boot();
   const ws = await local();
   await create(ws, { title: "PBI: a", labels: ["type:pbi"] });
@@ -163,7 +163,7 @@ test("on-hold: a local label is added and removed the same way, and the list rea
   expect(await onHold()).toBe(false);
 });
 
-test("a local comment, label, state and parent change are applied at once (#2265)", async () => {
+test("a local comment, label, state and parent change are applied at once", async () => {
   const { local, create, view, send } = await boot();
   const ws = await local();
   await create(ws, { title: "PBI: a", labels: ["type:pbi"] });
@@ -195,7 +195,7 @@ test("a local comment, label, state and parent change are applied at once (#2265
   expect((await view(ws, 3)).issue).toMatchObject({ state: "CLOSED", closedAt: expect.any(String) });
 });
 
-test("a parent gone by the time it is applied drops that edit only; the old parent keeps its Task (#2265)", () => {
+test("a parent gone by the time it is applied drops that edit only; the old parent keeps its Task", () => {
   const dir = mkdtempSync(join(tmpdir(), "sb-local-apply-"));
   const db = new Db(join(dir, "switchboard.db"));
   try {
@@ -224,7 +224,7 @@ test("a parent gone by the time it is applied drops that edit only; the old pare
   }
 });
 
-test("close reason: closed with a reason is that reason, without one COMPLETED, opened again null (#3146)", () => {
+test("close reason: closed with a reason is that reason, without one COMPLETED, opened again null", () => {
   const dir = mkdtempSync(join(tmpdir(), "sb-local-reason-"));
   const db = new Db(join(dir, "switchboard.db"));
   try {
@@ -259,7 +259,7 @@ async function configured(t: Awaited<ReturnType<typeof boot>>, name = "configure
   return ws;
 }
 
-test("local fields take the choices of ops.config.json (#2265)", async () => {
+test("local fields take the choices of ops.config.json", async () => {
   const t = await boot();
   const ws = await configured(t);
   const pbi = await t.create(ws, { title: "PBI: x", labels: ["type:pbi"], fields: { Status: "Ready", Priority: "P1", "Story Points": "5" }, milestone: "Phase 2 — デスクトップ化と自己更新" });
@@ -284,7 +284,7 @@ test("local fields take the choices of ops.config.json (#2265)", async () => {
   expect((await t.send("PATCH", "/api/backlog/1", { workspaceId: ws.id, fields: { "Story Points": 13 } })).status).toBe(202);
   expect((await t.send("PATCH", "/api/backlog/1", { workspaceId: ws.id, fields: { "Story Points": 21 } })).status).toBe(422);
   expect((await t.send("PATCH", "/api/backlog/1", { workspaceId: ws.id, fields: { "Story Points": 3 } })).status).toBe(202);
-  // no ops.config.json: the kit's template gives the choices (#2361); what it has not, and any Milestone, is refused
+  // no ops.config.json: the kit's template gives the choices; what it has not, and any Milestone, is refused
   const bare = await t.local("bare");
   expect((await t.create(bare, { title: "PBI: z", labels: ["type:pbi"], fields: { Status: "Ready", Priority: "P1", "Story Points": 5 } })).status).toBe(202);
   expect((await t.send("PATCH", "/api/backlog/1", { workspaceId: bare.id, fields: { Area: "app", Kind: "feature", Status: "In progress" } })).status).toBe(202);
@@ -301,7 +301,7 @@ test("local fields take the choices of ops.config.json (#2265)", async () => {
   expect((await t.create(broken, { title: "PBI: b", labels: ["type:pbi"], fields: { Status: "Ready" } })).status).toBe(422);
 });
 
-test("a local workspace without ops.config.json gets a PBI to ready (#2361)", async () => {
+test("a local workspace without ops.config.json gets a PBI to ready", async () => {
   const t = await boot();
   const ws = await t.local();
   expect((await t.create(ws, { title: "要望: x", labels: ["type:request"] })).status).toBe(202);
@@ -311,7 +311,7 @@ test("a local workspace without ops.config.json gets a PBI to ready (#2361)", as
   expect(item.stage).toBe("ready");
 });
 
-test("a local PBI's Status decides its stage (#2265)", async () => {
+test("a local PBI's Status decides its stage", async () => {
   const t = await boot();
   const ws = await configured(t);
   await t.create(ws, { title: "PBI: x", labels: ["type:pbi"] });
@@ -323,7 +323,7 @@ test("a local PBI's Status decides its stage (#2265)", async () => {
   expect(await stage()).toBe("in-progress");
 });
 
-test("a local workspace's Task gets BACKLOG_WORKSPACE; a GitHub one does not (#2265)", async () => {
+test("a local workspace's Task gets BACKLOG_WORKSPACE; a GitHub one does not", async () => {
   const t = await boot();
   const ws = await t.local();
   await t.create(ws, { title: "PBI: x", labels: ["type:pbi"] });
@@ -339,7 +339,7 @@ test("a local workspace's Task gets BACKLOG_WORKSPACE; a GitHub one does not (#2
   expect(envs.at(-1)).not.toHaveProperty("BACKLOG_WORKSPACE");
 });
 
-test("PATCH backlog switchboard turns sync off and keeps the source (#2266)", async () => {
+test("PATCH backlog switchboard turns sync off and keeps the source", async () => {
   const { base, add, dir, send } = await boot();
   const gh = (await (await add(dir("gh"))).json()) as Workspace;
   const source = { service: "github" as const, host: "github.com", repository: "acme/app", project: { owner: "acme", number: 1 } };
@@ -363,7 +363,7 @@ test("PATCH backlog switchboard turns sync off and keeps the source (#2266)", as
   expect((await send("PATCH", `/api/workspaces/${gh.id}`, { projectVar: "OTHER_PROJECT_URL" })).status).toBe(409);
 });
 
-test("GET /api/backlog/syncs answers the rows of GET /api/backlog's syncs and nothing else (#3438)", async () => {
+test("GET /api/backlog/syncs answers the rows of GET /api/backlog's syncs and nothing else", async () => {
   const { base, add, dir } = await boot();
   const gh = (await (await add(dir("gh"))).json()) as Workspace;
   const source = { service: "github" as const, host: "github.com", repository: "acme/app", project: { owner: "acme", number: 1 } };
@@ -395,7 +395,7 @@ function gitRepo(path: string): { main: string; head: string } {
   return { main: git("rev-parse", "main"), head: git("rev-parse", "sb/9-x") };
 }
 
-test("a local change: made, numbered with the Issues, commented, read with its tips and merged (#2485)", async () => {
+test("a local change: made, numbered with the Issues, commented, read with its tips and merged", async () => {
   const { base, local, create, view, send } = await boot();
   const ws = await local();
   const tips = gitRepo(ws.path);
@@ -435,7 +435,7 @@ test("a local change: made, numbered with the Issues, commented, read with its t
   for (const head of ["main@{0}", "sb/9-x.lock", "sb/", "/sb"]) expect((await create(ws, { title: "x", change: { head, base: "main" } })).status).toBe(400);
 });
 
-test("changes: every open one newest first, then the newest 10 closed (#2485)", async () => {
+test("changes: every open one newest first, then the newest 10 closed", async () => {
   const { base, local, create, send } = await boot();
   const ws = await local();
   gitRepo(ws.path);
@@ -448,7 +448,7 @@ test("changes: every open one newest first, then the newest 10 closed (#2485)", 
   expect(list.changes.map((c) => c.title)).toEqual(["c13", "c12", "c11", "c10", "c9", "c8", "c7", "c6", "c5", "c4", "c3"]);
 });
 
-test("a local change is refused on a GitHub workspace (#2485)", async () => {
+test("a local change is refused on a GitHub workspace", async () => {
   const { add, dir, send } = await boot();
   const gh = (await (await add(dir("gh"))).json()) as Workspace;
   gitRepo(gh.path);
@@ -461,7 +461,7 @@ test("a local change is refused on a GitHub workspace (#2485)", async () => {
   expect(core!.db.listBacklogOperations(source)).toEqual([]);
 });
 
-test("localForgeOf: no origin is the app's; an origin is not; a forge naming the app is, one that cannot be read is not (#2490)", () => {
+test("localForgeOf: no origin is the app's; an origin is not; a forge naming the app is, one that cannot be read is not", () => {
   const dir = mkdtempSync(join(tmpdir(), "sb-local-forge-"));
   try {
     Bun.spawnSync(["git", "init", "-q", dir]);
@@ -477,7 +477,7 @@ test("localForgeOf: no origin is the app's; an origin is not; a forge naming the
   }
 });
 
-test("choice: a GitHub workspace's field values are fixed to the config's spelling or refused before they are stored (#3795)", async () => {
+test("choice: a GitHub workspace's field values are fixed to the config's spelling or refused before they are stored", async () => {
   const { add, dir, send, create, local, view } = await boot();
   const gh = (await (await add(dir("gh"))).json()) as Workspace;
   const source = { service: "github" as const, host: "github.com", repository: "acme/app", project: { owner: "acme", number: 1 } };
@@ -508,7 +508,7 @@ test("choice: a GitHub workspace's field values are fixed to the config's spelli
   expect((await view(ws, m.body.number)).fields?.Status).toBe("In review");
 });
 
-test("project fields (#1545): a workspace without GitHub gets the field definitions from the config's choices", async () => {
+test("project fields: a workspace without GitHub gets the field definitions from the config's choices", async () => {
   const { local, create, view } = await boot();
   const ws = await local();
   const made = await create(ws, { title: "題", body: "本文" });

@@ -2,13 +2,14 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AnswerPolicy, AskAnswerResult } from "@switchboard/protocol";
-import { DAY, harness, HEAD, policyOf } from "./policies-harness.ts";
+import type { AnswerPolicy, AskAnswerResult, PolicyInput } from "@switchboard/protocol";
+import { checkPolicy } from "./policies.ts";
+import { DAY, harness, policyOf } from "./policies-harness.ts";
 
-/* POST /api/asks/answer with a policy, and /api/policies (#938): the harness's daemon (a scripted runner, a fake gh). */
+/* POST /api/asks/answer with a policy, and /api/policies: the harness's daemon (a scripted runner, a fake gh). */
 
 const h = harness();
-const { post, patch, asks, policies, approvalTask, checkTask } = h;
+const { post, patch, asks, policies, approvalTask } = h;
 afterEach(() => h.stop());
 const boot = (confirm?: string[]) => h.boot(confirm);
 
@@ -28,9 +29,8 @@ async function withHostAccount<T>(fn: (id: string) => Promise<T> | T): Promise<T
   }
 }
 
-describe("answers that save a policy (#938)", () => {
-  // a check is the question tool's questions now (#3122); the policy of a single-choice question is #3123's
-  test.skip("save scopes: an approval for the repository, a check for the PBI-less Task and once — each read back with scope, expiry and where it came from", async () => {
+describe("answers that save a policy", () => {
+  test("save scopes: an approval for the repository and once — each read back with scope, expiry and where it came from", async () => {
     await boot();
     const a = await approvalTask("approve");
     const ask = (await asks()).find((x) => x.kind === "approval")!;
@@ -40,20 +40,20 @@ describe("answers that save a policy (#938)", () => {
     const body = (await r.json()) as AskAnswerResult;
     expect(body.policy).toMatchObject({ scope: "repo", kind: "approval", op: "exec", target: "bun test*", from: { target: "bun test packages/core" }, workspaceId: h.meta().id });
     expect(a).toBeTruthy();
-    const c = await checkTask("check");
-    const check = (await asks()).find((x) => x.kind === "check")!;
-    const once = await post("/api/asks/answer", { id: check.id, answer: { kind: "choice", choice: "A: マージする" }, policy: { scope: "once", target: "PR #12", when: [], expiresAt: null } });
+    // the repository's policy would answer the next one itself: revoke it first
+    expect((await patch(`/api/policies/${body.policy!.id}`, { revoked: true })).status).toBe(200);
+    await approvalTask("approve again");
+    const again = (await asks()).find((x) => x.kind === "approval" && x.state === "open")!;
+    const once = await post("/api/asks/answer", { id: again.id, answer: { kind: "allow" }, policy: policyOf({ scope: "once", target: "bun test packages/core", expiresAt: null }) });
     expect(once.status).toBe(200);
-    expect(c).toBeTruthy();
     const list = await policies();
     expect(list.map((p) => p.scope).sort()).toEqual(["once", "repo"]);
     const saved = list.find((p) => p.scope === "once")!;
-    expect(saved).toMatchObject({ askId: check.id, kind: "check", op: "gh pr merge", expiresAt: null, from: { head: HEAD } });
+    expect(saved).toMatchObject({ askId: again.id, kind: "approval", op: "exec", expiresAt: null });
     expect(list.find((p) => p.scope === "repo")!.expiresAt).toBeGreaterThan(Date.now());
   });
 
-  // a check is the question tool's questions now (#3122); the policy of a single-choice question is #3123's
-  test.skip("refuse: a confirm rule, a security merge check, a secret and a scope the question does not offer are 409 with nothing saved or sent", async () => {
+  test("refuse: a confirm rule is 409 with nothing saved or sent", async () => {
     await boot(["bun test*"]);
     const a = await approvalTask("approve");
     const ask = (await asks()).find((x) => x.kind === "approval")!;
@@ -62,26 +62,28 @@ describe("answers that save a policy (#938)", () => {
     expect(r.status).toBe(409);
     expect(((await r.json()) as { error: string }).error).toContain("都度確認");
     expect(h.core!.db.getTask(a)!.status).toBe("waiting");
-    await checkTask("check");
-    const check = (await asks()).find((x) => x.kind === "check")!;
-    const refuse = async (answer: unknown, policy: unknown) => {
-      const x = await post("/api/asks/answer", { id: check.id, answer, policy });
-      expect(x.status).toBe(409);
-      return ((await x.json()) as { error: string }).error;
-    };
-    h.mark = "security,large";
-    expect(await refuse({ kind: "choice", choice: "A: マージする" }, policyOf({ target: "PR #12" }))).toContain("セキュリティ");
-    h.mark = null;
-    expect(await refuse({ kind: "text", text: "key AKIA" + "ABCDEFGHIJKLMNOP" }, policyOf({ target: "PR #12" }))).toContain("秘密");
-    // an account id of the host's AWS config, written bare (#2351)
-    expect(await withHostAccount((id) => refuse({ kind: "text", text: `メモ ${id}` }, policyOf({ target: "PR #12" })))).toContain("秘密");
-    expect(await refuse({ kind: "choice", choice: "A: マージする" }, policyOf({ scope: "pbi", target: "PR #12" }))).toContain("この範囲");
-    expect(await policies()).toEqual([]);
-    expect(h.core!.db.getTask(check.task!.id)!.status).not.toBe("running");
   });
 
-  // a check is the question tool's questions now (#3122); the policy of a single-choice question is #3123's
-  test.skip("edit: a PATCH changes the target and expiry as saving checks them; * is 400, revoked sets revokedAt, once is 409, an unknown id 404", async () => {
+  test("refuse: a scope the question does not offer is 409 with nothing saved or sent", async () => {
+    await boot();
+    const a = await approvalTask("approve");
+    const ask = (await asks()).find((x) => x.kind === "approval")!;
+    expect(ask.policy.scopes).not.toContain("pbi");
+    const r = await post("/api/asks/answer", { id: ask.id, answer: { kind: "allow" }, policy: policyOf({ scope: "pbi" }) });
+    expect(r.status).toBe(409);
+    expect(((await r.json()) as { error: string }).error).toBe("この範囲では保存できません");
+    expect(await policies()).toEqual([]);
+    expect(h.core!.db.getTask(a)!.status).toBe("waiting");
+  });
+
+  test("refuse: an account id of the host's AWS config, written bare in the answer, is not saved", async () => {
+    const subject = { kind: "decision" as const, op: "gh pr merge", target: "PR #12", conditions: [], head: null };
+    const r = await withHostAccount((id) => checkPolicy(policyOf({ target: "PR #12" }) as PolicyInput, { subject, workspaceId: "w1", pbi: null, askId: "a1", answer: { kind: "text", text: `メモ ${id}` }, confirmHit: null, runnerRefusal: false, now: Date.now() }));
+    expect(r.ok).toBe(false);
+    expect(r.ok ? "" : r.error).toContain("秘密");
+  });
+
+  test("edit: a PATCH changes the target and expiry as saving checks them; * is 400, revoked sets revokedAt, once is 409, an unknown id 404", async () => {
     await boot();
     await approvalTask("approve");
     const ask = (await asks()).find((x) => x.kind === "approval")!;
@@ -97,9 +99,10 @@ describe("answers that save a policy (#938)", () => {
     expect((await patch(`/api/policies/${p!.id}`, { revoked: false })).status).toBe(200);
     expect((await policies())[0]!.revokedAt).toBeNull();
     expect((await patch("/api/policies/pol_none", { revoked: true })).status).toBe(404);
-    await checkTask("check");
-    const check = (await asks()).find((x) => x.kind === "check")!;
-    await post("/api/asks/answer", { id: check.id, answer: { kind: "choice", choice: "A: マージする" }, policy: { scope: "once", target: "PR #12", when: [], expiresAt: null } });
+    expect((await patch(`/api/policies/${p!.id}`, { revoked: true })).status).toBe(200);
+    await approvalTask("approve again");
+    const again = (await asks()).find((x) => x.kind === "approval" && x.state === "open")!;
+    await post("/api/asks/answer", { id: again.id, answer: { kind: "allow" }, policy: policyOf({ scope: "once", target: "bun test packages/core", expiresAt: null }) });
     const once = (await policies()).find((x) => x.scope === "once")!;
     expect((await patch(`/api/policies/${once.id}`, { target: "PR #*" })).status).toBe(409);
     expect((await patch(`/api/policies/${once.id}`, { revoked: true })).status).toBe(200);
@@ -127,17 +130,5 @@ describe("answers that save a policy (#938)", () => {
     const [p] = await policies();
     expect((await patch(`/api/policies/${p!.id}`, { revoked: true }, noOrigin)).status).toBe(403);
     expect((await policies())[0]!.revokedAt).toBeNull();
-  });
-
-  // a check is the question tool's questions now (#3122); the policy of a single-choice question is #3123's
-  test.skip("answer fails: when the PR cannot be read the answer is not written and no policy is saved", async () => {
-    await boot();
-    await checkTask("check");
-    const check = (await asks()).find((x) => x.kind === "check")!;
-    h.prFails = true;
-    const r = await post("/api/asks/answer", { id: check.id, answer: { kind: "choice", choice: "A: マージする" }, policy: policyOf({ target: "PR #12" }) });
-    expect(r.status).toBe(424);
-    expect(await policies()).toEqual([]);
-    expect(h.prCalls).toBeGreaterThan(0);
   });
 });

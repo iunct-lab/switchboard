@@ -67,7 +67,7 @@ describe("scanIssues", () => {
     const down = fakeGh([fail, fail, fail]);
     await expect(scanIssues(down, "o/r", sleep)).rejects.toBeInstanceOf(ScanFetchError);
     expect(down.calls.length).toBe(3);
-    // a failure the client classified (a limit, an outage, auth) is not asked again, and the count says so (#894)
+    // a failure the client classified (a limit, an outage, auth) is not asked again, and the count says so
     const limited = fakeGh([() => { throw new GhError("secondary", "secondary"); }]);
     await expect(scanIssues(limited, "o/r", sleep)).rejects.toThrow("（1 回）");
     expect(limited.calls.length).toBe(1);

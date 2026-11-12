@@ -42,7 +42,7 @@ afterAll(async () => {
   rmSync(home, { recursive: true, force: true });
 });
 
-describe("artifacts (#1777)", () => {
+describe("artifacts", () => {
   test("register copies the file; deleting the original keeps it listed, and refresh then says 410 with the old copy intact", async () => {
     const f = join(work, "report.html");
     writeFileSync(f, "<h1>one</h1>");
@@ -179,7 +179,7 @@ describe("artifacts (#1777)", () => {
   });
 });
 
-describe("app-use (#3682)", () => {
+describe("app-use", () => {
   test("a day counts once; only the call that reaches the 3rd day is due, a later day is not once a request is set; a removed artifact does not count", async () => {
     writeFileSync(join(work, "app.html"), "<p>app</p>");
     const a: Artifact = await j(await add("app.html"));
@@ -215,7 +215,7 @@ describe("app-use (#3682)", () => {
   });
 });
 
-describe("serving a report (#1782)", () => {
+describe("serving a report", () => {
   const view = async (id: string): Promise<string> => (await j(await post(`/api/artifacts/${id}/view`))).url;
   const get = (path: string, init?: RequestInit) => fetch(`${base}${path}`, init);
 
@@ -300,7 +300,7 @@ describe("serving a report (#1782)", () => {
   });
 });
 
-describe("reports across tasks (#1835)", () => {
+describe("reports across tasks", () => {
   const reports = (q = "") => fetch(`${base}/api/reports${q}`);
   const addTo = (task: string, source: string) => post(`/api/tasks/${task}/artifacts`, { source }).then(j) as Promise<Artifact>;
 
@@ -341,7 +341,7 @@ describe("reports across tasks (#1835)", () => {
   });
 });
 
-describe("artifacts across tasks (#1833)", () => {
+describe("artifacts across tasks", () => {
   const across = (q = "") => fetch(`${base}/api/artifacts${q}`);
   const addTo = (task: string, source: string) => post(`/api/tasks/${task}/artifacts`, { source }).then(j) as Promise<Artifact>;
   type Row = Artifact & { taskTitle: string; scheduleTitle: string | null };
@@ -425,7 +425,7 @@ describe("artifacts across tasks (#1833)", () => {
   });
 });
 
-describe("addCopy (#1838)", () => {
+describe("addCopy", () => {
   test("the daemon's own copy of a file outside every scope: the ordinary entrance refuses it, addCopy takes it, keeps the deny list and the size limit, and replaces the same path", async () => {
     const outside = mkdtempSync(join(tmpdir(), "switchboard-art-outside-"));
     const f = join(outside, "report.html");
@@ -449,7 +449,7 @@ describe("addCopy (#1838)", () => {
   });
 });
 
-describe("artifactPrompt (#3674)", () => {
+describe("artifactPrompt", () => {
   test("points at the scratch-apps document, by default the one in this code's tree", () => {
     expect(artifactPrompt("/x/docs/design/scratch-apps.md")).toContain("/x/docs/design/scratch-apps.md");
     expect(artifactPrompt()).toContain(SCRATCH_APPS_DOC);

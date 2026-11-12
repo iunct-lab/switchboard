@@ -6,8 +6,8 @@ import { AUTO_RESUME_HEAD } from "./evals.ts";
 import { NEEDS_PERSON, placeKey, stopKey } from "./stops.ts";
 
 /**
- * A person's interventions (#651): approvals, decisions, resumes and allows after the classifier (#2236, not observed yet), counted at each look from Switchboard's records (the
- * tasks and their events) and the stored copy of the Issues (#885). No table of their own and no call to GitHub; what the
+ * A person's interventions: approvals, decisions, resumes and allows after the classifier (not observed yet), counted at each look from Switchboard's records (the
+ * tasks and their events) and the stored copy of the Issues. No table of their own and no call to GitHub; what the
  * records cannot tell is `unknown`, not 0 and not guessed.
  */
 
@@ -98,8 +98,8 @@ export function collectInterventions(db: Db, workspaces: Workspace[], read: Even
   const taskById = new Map(tasks.map((t) => [t.id, t]));
 
   // approvals: the person's answer to an ask, once per ask (a second answer is refused with 409, and an adapter's close is by "timeout").
-  // An allow to an ask the auto-mode classifier stopped is its own kind (#2236), not also an approval. An ordinary block does not ask;
-  // the recorded ask is the classifier's denial limit, answered deny (#3214, docs/design/claude-otel.md)
+  // An allow to an ask the auto-mode classifier stopped is its own kind, not also an approval. An ordinary block does not ask;
+  // the recorded ask is the classifier's denial limit, answered deny (docs/design/claude-otel.md)
   const seenAsk = new Set<string>();
   const events = read;
   const byClassifier = new Set<string>();

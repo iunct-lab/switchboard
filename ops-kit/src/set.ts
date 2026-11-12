@@ -38,7 +38,7 @@ export async function ensureItem(gh: GhClient, projectId: string, projectNumber:
 }
 
 /**
- * A field value as the choice it names (#3795): a value that differs from one of the field's choices only in case is
+ * A field value as the choice it names: a value that differs from one of the field's choices only in case is
  * written as that choice; one no choice matches is refused before anything is stored or written. The choices are the
  * config's (the Project is made from it) and the kit's Status; a field without choices here (TEXT, DATE, …) and null
  * pass as they are. No other spelling is guessed: only the case, which names one choice.
@@ -91,7 +91,7 @@ export async function setField(gh: GhClient, cfg: OpsConfig, num: number, name: 
   if (!issue?.id) throw new Error(`Issue #${num} が ${repo.owner}/${repo.name} にありません`);
   const field = project.field as Field | null;
   if (!field?.id) throw new UsageError(`フィールド '${name}' が Project にありません`);
-  // an empty value empties the field (#3810); an Issue not in the Project has nothing to empty and is not added for it
+  // an empty value empties the field; an Issue not in the Project has nothing to empty and is not added for it
   if (value === "") {
     const found = issue.projectItems.nodes.find((i) => i.project.number === number);
     if (!found) return log(`#${num}  ${name}: Project に無いので空にするものがありません`);

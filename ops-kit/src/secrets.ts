@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 /**
  * Values that let someone sign in or act as the user, found in a text before it is written to an Issue, a pull request
- * or a comment (#661). A hit names the kind and the line, never the value: the report itself goes to a terminal, a log
+ * or a comment. A hit names the kind and the line, never the value: the report itself goes to a terminal, a log
  * or an Issue.
  */
 export interface SecretHit {
@@ -48,12 +48,12 @@ const RULES: Array<{ kind: string; find: (line: string, before: string, host: Ho
   },
   { kind: "aws-key", find: (l) => /(?<![A-Z0-9])(AKIA|ASIA)[0-9A-Z]{16}(?![A-Z0-9])/.test(l) || /aws_(secret_access_key|session_token)\s*[=:]\s*["']?[A-Za-z0-9/+=]{20,}/i.test(l) },
   { kind: "github-token", find: (l) => /(?<![A-Za-z0-9_])(gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})/.test(l) },
-  // GitLab's tokens (#892): personal / OAuth / runner / pipeline-trigger / deploy / feed and the like, `gl…-` then the secret
+  // GitLab's tokens: personal / OAuth / runner / pipeline-trigger / deploy / feed and the like, `gl…-` then the secret
   { kind: "gitlab-token", find: (l) => /(?<![A-Za-z0-9_])(glpat|gloas|glrt|glptt|gldt|glsoat|glcbt|glimt|glagent|glffct|glft|glwt)-[A-Za-z0-9_.-]{20,}/.test(l) },
   { kind: "private-key", find: (l) => /-----BEGIN[A-Z0-9 ]*PRIVATE KEY-----/.test(l) },
   // 20 and more: a token is that long, and a sentence about "Bearer authentication" or "Bearer tokens" is not one
   { kind: "bearer-token", find: (l) => /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/i.test(l) },
-  // Twelve digits are also a part of a UUID, a hash or an id by chance, so they hit by value or by context (#2345), not
+  // Twelve digits are also a part of a UUID, a hash or an id by chance, so they hit by value or by context, not
   // by excepting shapes: see accountIdAt
   { kind: "account-id", find: (l, before, host) => [...l.matchAll(/(?<![0-9])[0-9]{12}(?![0-9])/g)].some((m) => accountIdAt(l, before, m.index!, host)) },
   { kind: "sso-start-url", find: (l) => [...l.matchAll(/([a-z0-9-]+)\.awsapps\.com\/start/g)].some((m) => !placeholder(m[1]!.replace(/^d-/, "")) && m[1] !== "example") },
@@ -77,7 +77,7 @@ const ACCOUNT_CONTEXT = /account|アカウント|プロファイル|(?<![A-Za-z]
  * inside a profile name, where a UUID ends). Any other is only with context: inside an ARN, inside a word named as a
  * profile, or standing apart from letters (`-` and `_` join it to a name) on a line that speaks of an account or AWS.
  * Twelve digits that touch letters (inside hex) take no context, and the two numbers the cloud's documents use as
- * examples are none. An account outside the config written bare with no context is not seen (the answer to #2345).
+ * examples are none. An account outside the config written bare with no context is not seen.
  */
 function accountIdAt(line: string, before: string, at: number, host: HostAws): boolean {
   const id = line.slice(at, at + 12);

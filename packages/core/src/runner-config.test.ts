@@ -11,7 +11,7 @@ import { Scheduler } from "./scheduler.ts";
 import { syncSkills } from "./skillsync.ts";
 import { startServer, type CoreServer } from "./server.ts";
 
-// A foreign repository's runner config runs nothing until the person has seen it (#2576).
+// A foreign repository's runner config runs nothing until the person has seen it.
 
 let core: CoreServer | undefined;
 let root: string | undefined;
@@ -49,7 +49,7 @@ async function boot() {
   const clone = join(base, "widget");
   const own = join(base, "mine");
   for (const d of [home, repoRoot, clone, own]) mkdirSync(d);
-  // the meta checkout carries the kit's process candidates: a stage start reads p0-pipeline from it (#3647)
+  // the meta checkout carries the kit's process candidates: a stage start reads p0-pipeline from it
   cpSync(join(import.meta.dir, "../../../ops-kit/processes"), join(repoRoot, "ops-kit/processes"), { recursive: true });
   write(clone, ".claude/settings.json", '{"hooks":{}}');
   write(own, ".claude/settings.json", '{"hooks":{}}');
@@ -277,7 +277,7 @@ test("runner config: a stage task on an unconfirmed workspace answers with the r
 });
 
 test("runner config: an ownCopy workspace is asked too", async () => {
-  // what workspace-clone registers with ownCopy (#2579): origin is your private copy, upstream the original, backlog on GitHub
+  // what workspace-clone registers with ownCopy: origin is your private copy, upstream the original, backlog on GitHub
   const b = await boot();
   const copy = join(root!, "copy");
   mkdirSync(copy);

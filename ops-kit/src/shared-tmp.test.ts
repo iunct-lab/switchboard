@@ -6,7 +6,7 @@ import { segments, sharedTmpWrites } from "./shared-tmp.ts";
 const HOOK = join(import.meta.dir, "../bin/deny-shared-tmp");
 
 describe("sharedTmpWrites", () => {
-  test("a write or a removal of a fixed name under /tmp is named (#764 acceptance criterion 1)", () => {
+  test("a write or a removal of a fixed name under /tmp is named", () => {
     const stops: [string, string[]][] = [
       ["cat > /tmp/pr.md", ["/tmp/pr.md"]],
       ["echo x >> /tmp/x", ["/tmp/x"]],
@@ -41,7 +41,7 @@ describe("sharedTmpWrites", () => {
     expect(sharedTmpWrites("cat > /tmp/notes.backup")).toEqual(["/tmp/notes.backup"]);
   });
 
-  test("mktemp, its result, reads of /tmp, and other paths are not named (#764 acceptance criterion 2)", () => {
+  test("mktemp, its result, reads of /tmp, and other paths are not named", () => {
     const passes = [
       "W=$(mktemp -d /tmp/sb.pr.XXXXXX)",
       "W=$(mktemp -d /tmp/sb.pr.XXXXXX); echo \"$W\"",

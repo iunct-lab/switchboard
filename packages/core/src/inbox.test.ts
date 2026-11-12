@@ -91,7 +91,7 @@ describe("inbox", () => {
     expect(() => inbox.markPromoted(d.path, "t")).toThrow(/already closed/);
   });
 
-  test("edit rewrites a draft's title and body; hand-added keys, workspace, created and the path stay (#3032)", () => {
+  test("edit rewrites a draft's title and body; hand-added keys, workspace, created and the path stay", () => {
     const d = inbox.add("最初の一行\n二行目", { title: "元の題", workspaceHint: "dak", now: new Date(2026, 8, 9, 10, 0, 0) });
     store.write(d.path, readFileSync(join(store.dir, d.path), "utf8").replace("---\n", "---\ntags: [zenn]\n"));
     const e = inbox.edit(d.path, { title: "直した題", text: "直した本文\r\n\r\n2 行目\n3 行目\n" });
@@ -104,7 +104,7 @@ describe("inbox", () => {
     expect(inbox.edit(d.path, { title: "  ", text: "一行目から\nあと" }).title).toBe("一行目から");
   });
 
-  test("edit refuses promoted and closed notes (EEXIST) and an empty body, and leaves the file as it was (#3032)", () => {
+  test("edit refuses promoted and closed notes (EEXIST) and an empty body, and leaves the file as it was", () => {
     const empty = inbox.add("keep me", { now: new Date(2026, 8, 9, 11, 0, 0) });
     const before = readFileSync(join(store.dir, empty.path), "utf8");
     expect(() => inbox.edit(empty.path, { title: "x", text: " \r\n " })).toThrow(/empty/);
@@ -130,7 +130,7 @@ describe("inbox", () => {
     const store = new KnowledgeStore(join(root, "Knowledge-daemon-notes"), db);
     const inbox = new Inbox(store);
     const draft = inbox.add("my draft");
-    // what the daemon wrote before #2866: a schedule's notice (source) and a workspace's note
+    // what the daemon wrote before notices went to the asks: a schedule's notice (source) and a workspace's note
     store.write("notes/2026-10-27-scan.md", "---\ntitle: 認証の値の検査\ncreated: 2026-10-27T03:00:00.000Z\nstatus: inbox\nsource:\n  schedule: sch_a\n  title: 検査\n---\nhits\n");
     const ws = inbox.add("origin は x、登録は y です", { title: "workspace app を使えません", workspaceHint: "app" });
     expect(inbox.list()).toHaveLength(3);

@@ -1,16 +1,17 @@
 /**
- * Sends the backlog edits kept here (#886, db.ts `backlog_operations`) to GitHub, oldest first. The operations of one
+ * Sends the backlog edits kept here (db.ts `backlog_operations`) to GitHub, oldest first. The operations of one
  * Issue go one after the other: one not done (held, failed, waiting for its time) holds the ones after it, so an answer's
  * label comes off only after the answer is posted. No database transaction is open while GitHub is asked.
  *
- * - A `set` is checked before and after (the 初期方式 A of #887): the field's value on GitHub is read; already the value
+ * - A `set` is checked before and after: the field's value on GitHub is read; already the value
  *   → done; no longer the `base` it was made on → `conflict`, held and nothing written. Only that field is written, and
  *   read again: another value then → `conflict` (someone wrote between the read and the write; what they wrote may
- *   have been overwritten — #899 looks for a way to prevent it).
+ *   have been overwritten — GitHub has no conditional write, so this cannot be prevented; for the fields with an edit
+ *   history (the Issue's fields and a Project item's Status) the read after the write finds their edit as `overwritten`).
  * - A `create` / `comment` carries an invisible marker with the operation's id (not a secret: it signs nothing in).
  *   Its answer lost (an outage after the request went out, a restart while `sending`) → `unknown`: before anything is
  *   posted again, every Issue / comment written since the operation was made is read for the marker. Found → done with
- *   its id; every page read and not found → posted again with the same marker (#3804), and the marked ones read again:
+ *   its id; every page read and not found → posted again with the same marker, and the marked ones read again:
  *   two found (the first one was made after all), the later one is closed / deleted; not all read → still `unknown`,
  *   looked for again by the next send. The error that made it `unknown` is kept in front of the later looks' (`firstError`).
  * - A limit (429, a secondary limit) stops the run until GitHub's time (`Limit`), and so does GitHub not reached at all
@@ -37,7 +38,7 @@ const marked = (body: string, id: string) => `${body}\n\n${marker(id)}`;
 const FIRST = "最初の失敗: ";
 const LOOK = " / 照合: ";
 /**
- * The error an operation still `unknown` is held with (#3804): the one that first made it `unknown` stays in front, the
+ * The error an operation still `unknown` is held with: the one that first made it `unknown` stays in front, the
  * look that left it so (`now`) after it — a later look does not write over why it was held. Any other op: `now`.
  */
 export function firstError(op: Pick<BacklogOperation, "status" | "error">, now: string): string {
@@ -47,7 +48,7 @@ export function firstError(op: Pick<BacklogOperation, "status" | "error">, now: 
 }
 
 /**
- * Of the posts carrying an operation's marker (#3804), the first made (by `order`) is kept and the rest dropped (an
+ * Of the posts carrying an operation's marker, the first made (by `order`) is kept and the rest dropped (an
  * Issue closed, a comment deleted): a post made again while the first one was carried out and showed late, or both
  * answers lost. Resolves to the one kept. A drop that fails goes to `failed` (a limit is kept for the run) and the rest
  * are left: the one kept is the operation's either way.
@@ -73,7 +74,7 @@ const byIid = (a: Record<string, unknown>, b: Record<string, unknown>) => (a.iid
  * The run stops and the operation waits as it was (not a try): `limit` = GitHub said to wait until `until` (its answer
  * in `response`, for the host's wait); `offline` = GitHub was not reached (the repository waits a minute); `auth` = the
  * login was refused (401) — asked again by the next send, not by a time; `off` = the workspace's GitHub sync was turned
- * off (#2266) before the write went out. A permission refused on one thing is not this:
+ * off before the write went out. A permission refused on one thing is not this:
  * that operation is failed.
  */
 export class Limit extends Error {
@@ -117,7 +118,7 @@ const ISSUE_Q = "query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:
 const PROJECT_Q = "query($o:String!,$p:Int!){ repositoryOwner(login:$o){ ... on ProjectV2Owner{ projectV2(number:$p){ id fields(first:50){ nodes{ ... on ProjectV2FieldCommon{ id name dataType } ... on ProjectV2SingleSelectField{ options{ id name } } } } } } } }";
 const ITEM_Q = "query($i:ID!,$f:String!){ node(id:$i){ ... on ProjectV2Item{ fieldValueByName(name:$f){ ... on ProjectV2ItemFieldSingleSelectValue{ name } ... on ProjectV2ItemFieldNumberValue{ number } ... on ProjectV2ItemFieldTextValue{ text } ... on ProjectV2ItemFieldDateValue{ date } } } } }";
 /**
- * The read after a write (#1329): the field's value now, and what the edit history holds since the check read — the
+ * The read after a write: the field's value now, and what the edit history holds since the check read — the
  * timeline events of the fields a `set` can write and, for the body, the content edits — with the login the reads are
  * made under, so another login's edit the write replaced can be told from one's own. One call, as the read after the
  * write was before.
@@ -139,7 +140,7 @@ type ContentEdit = { editedAt: string; editor: { login: string } | null; diff: s
 export interface AfterAnswer { events: HistoryEvent[]; edits: ContentEdit[]; viewer: string }
 
 /**
- * Another login's edit of the field since the check read, as the history tells it (#1329): the latest one, as the
+ * Another login's edit of the field since the check read, as the history tells it: the latest one, as the
  * value the field would read (a body's `diff` is the version's text; one deleted from the history has no value). Null
  * when there is none, or it made the field the value sent (nothing was lost). GitHub's Project automation moving a
  * Status is nobody's edit: Switchboard's value stands over it.
@@ -193,7 +194,7 @@ const SETTLED = "後の編集の値に GitHub が既になっています";
 const ALREADY = "GitHub に断られましたが、読み直すと GitHub は既に送る値でした";
 const VERIFIED = "書いた後の編集履歴を読み直し、ほかの編集を上書きしていないと確かめました";
 
-/** A write that replaced another login's edit of the field (#1329): held with it, for the user to choose. */
+/** A write that replaced another login's edit of the field: held with it, for the user to choose. */
 function overwrote(op: BacklogOperation, theirs: BacklogOverwritten): Outcome {
   const who = `${theirs.editor ?? "誰か"} が ${theirs.at ?? "書く直前"} に`;
   return {
@@ -210,7 +211,7 @@ class Sender {
   private project: { id: string; fields: Array<Field & { name: string }> } | null = null;
   /** Called after each write GitHub took (a post, a field): what was written is read back by an import. */
   onWrite: () => void = () => undefined;
-  /** A limit (or GitHub not reached) met by the read after a write: thrown once the operation's outcome is stored (#1329). */
+  /** A limit (or GitHub not reached) met by the read after a write: thrown once the operation's outcome is stored. */
   stopAfter: Limit | null = null;
   constructor(private gh: GhRunner, private db: Db, private cwd: string, private source: BacklogSource, private now: () => number) {}
   private get o() { return this.source.repository.split("/")[0]!; }
@@ -235,7 +236,7 @@ class Sender {
     return (this.project = { id: p.id, fields: (p.fields.nodes as Array<Field & { name: string }>).filter((f) => f.id) });
   }
 
-  /** The Project's field definitions (#3811): what a set's value is checked against before it is stored. */
+  /** The Project's field definitions: what a set's value is checked against before it is stored. */
   async projectFields(): Promise<Array<Field & { name: string }>> {
     return (await this.projectOf()).fields;
   }
@@ -305,7 +306,7 @@ class Sender {
     return op.targetKind === "issue" || op.field === "field:Status";
   }
 
-  /** The read after a write: the value now and the history since the check (#1329). */
+  /** The read after a write: the value now and the history since the check. */
   private async after(op: BacklogOperation, n: number, since: string): Promise<{ value: unknown; answer: AfterAnswer; complete: boolean }> {
     const item = op.targetKind === "project-item";
     const d = await graphql(this.gh, this.cwd, item ? AFTER_ITEM_Q : op.field === "body" ? AFTER_BODY_Q : AFTER_ISSUE_Q, { o: this.o, r: this.r, n, s: since, ...(item ? { i: op.target, f: op.field!.slice("field:".length) } : {}) });
@@ -350,14 +351,14 @@ class Sender {
       else await call(this.gh, this.cwd, [this.repo(`/issues/${n}/labels/${encodeURIComponent(name)}`), "-X", "DELETE"]);
     } else if (f === "parent") await this.setParent(await this.issue(n), v as number | null);
     else if (f === "milestone") await call(this.gh, this.cwd, [this.repo(`/issues/${n}`), "-X", "PATCH", "-F", `milestone=${(await this.milestone(v as string | null)) ?? "null"}`]);
-    // the reason of a close (#3146): GitHub takes it with the state, closed / not_planned
+    // the reason of a close: GitHub takes it with the state, closed / not_planned
     else if (f === "stateReason") await call(this.gh, this.cwd, [this.repo(`/issues/${n}`), "-X", "PATCH", "-f", "state=closed", "-f", `state_reason=${String(v).toLowerCase()}`]);
     else await call(this.gh, this.cwd, [this.repo(`/issues/${n}`), "-X", "PATCH", "-f", `${f}=${f === "state" ? String(v).toLowerCase() : v}`]);
     return { status: "done" };
   }
 
   /**
-   * GitHub already has what the last edit of the Project field still to send makes (#2924): an edit before it is on its
+   * GitHub already has what the last edit of the Project field still to send makes: an edit before it is on its
    * way there — done, not written or held (GitHub's automation closed the Issue to Done meanwhile). A Project field
    * only: a label put on and taken off again (a question, then its answer) is sent as it was made.
    */
@@ -387,7 +388,7 @@ class Sender {
     const { value: now, at: since } = await this.current(op, n);
     const same = (a: unknown, b: unknown) => sameBacklogValue(op.field!, a, b);
     if (same(now, op.payload)) return op.targetKind === "project-item" && op.field === "member" && op.payload ? this.write(op, n) : { status: "done" };
-    // GitHub already at the last value of the field still to send (#2924): nothing to write, whatever this one's base
+    // GitHub already at the last value of the field still to send: nothing to write, whatever this one's base
     if (this.settled(op, now)) return { status: "done", error: SETTLED };
     if (!same(now, op.base)) {
       const moved = op.field === "field:Status" ? await this.automated(n, now) : null;
@@ -404,7 +405,7 @@ class Sender {
       // what GitHub had is kept with it (and the import after the run reads it in)
       return same(after, op.payload) ? out : { status: "conflict", error: `送った直後の GitHub の値が送った値と違います（${op.field}: GitHub は ${JSON.stringify(after)}）。ほかの編集と重なりました` };
     }
-    // the same read carries the history since the check (#1329): an edit of another login in between was replaced by
+    // the same read carries the history since the check: an edit of another login in between was replaced by
     // this write — held with what it was, so nothing is lost without a word. The history not read whole, or not at
     // all, holds the write as unverified: never pending (a re-send's check would read this value back and call it done)
     let read: Awaited<ReturnType<Sender["after"]>>;
@@ -428,7 +429,7 @@ class Sender {
   }
 
   /**
-   * An unverified conflict (#3518) — written, but the history after the write could not be read (a limit) or not read
+   * An unverified conflict — written, but the history after the write could not be read (a limit) or not read
    * whole — read again from the same check time. GitHub still at the value sent, the history whole and no other login's
    * edit: done, nothing for the user to choose. Another login's edit: the conflict with it. Anything else (not read
    * again, not whole, the value moved since): null, held as it was. The read asked to wait (`waitOf`) throws its
@@ -464,14 +465,14 @@ class Sender {
     return null;
   }
 
-  /** A read or write after the post failed (#3804): its outcome stands, and a limit / GitHub not reached / the login refused stops the run after it. */
+  /** A read or write after the post failed: its outcome stands, and a limit / GitHub not reached / the login refused stops the run after it. */
   private held = (e: unknown) => {
     const wait = e instanceof CallError ? waitOf(e, this.now()) : null;
     if (wait) this.stopAfter = wait;
   };
 
   /**
-   * The marked ones of an operation (#3804), the first made kept: `hits` as read, or read once more after a post made
+   * The marked ones of an operation, the first made kept: `hits` as read, or read once more after a post made
    * again (`made` then, when they cannot be read — the second one, if any, is not looked for again).
    */
   private async keep(path: string, op: BacklogOperation, hits: any[] | null, made: any, order: (a: any, b: any) => number, drop: (x: any) => Promise<unknown>): Promise<any> {
@@ -493,7 +494,7 @@ class Sender {
       c = await call(this.gh, this.cwd, [this.repo(path), "-X", "POST", "-f", `body=${marked(body, op.id)}`]);
       this.onWrite();
       if (typeof c?.node_id !== "string") throw new Error("GitHub の答えにコメントの id がありません");
-      // made again after every page was read without it (#3804): the first one, shown late, stays (the list is oldest first)
+      // made again after every page was read without it: the first one, shown late, stays (the list is oldest first)
       if (op.status === "unknown") c = await this.keep(path, op, null, c, byCreated, drop);
     }
     return { status: "done", remoteId: c.node_id, record: { externalId: c.node_id, remote: { issue: n, body: c.body, createdAt: c.created_at } } };
@@ -507,7 +508,7 @@ class Sender {
     if (!made && op.status === "unknown") {
       const hits = await this.findMarked(path, op.id, op.createdAt);
       if (!hits) return { status: "unknown", error: firstError(op, "作ったかどうかを確かめきれません") };
-      // found: the first made stays (the list is newest first). None, every page read: made again below with the same marker (#3804)
+      // found: the first made stays (the list is newest first). None, every page read: made again below with the same marker
       made = await this.keep(path, op, hits, undefined, byNumber, drop);
     }
     if (!made) {
@@ -528,7 +529,7 @@ class Sender {
     // the Issue exists: kept at once with its id (what the create itself made: open, no parent), so a failure in the
     // steps after it neither makes it again nor leaves the record apart from it
     this.db.setBacklogOperationResult(op.id, { status: "sending", remoteId: made.node_id, record: { externalId: made.node_id, remote: { ...remote, state: "OPEN", stateReason: null, parent: null } } }, this.now());
-    // a duplicate's cleanup met a limit (#3804): the steps after it wait for GitHub's time, from the Issue kept
+    // a duplicate's cleanup met a limit: the steps after it wait for GitHub's time, from the Issue kept
     if (this.stopAfter && (p.state === "CLOSED" || p.parent !== null || p.project)) throw this.stopAfter;
     if (p.state === "CLOSED") await call(this.gh, this.cwd, [this.repo(`/issues/${n}`), "-X", "PATCH", "-f", "state=closed"]);
     if (p.parent !== null) await this.setParent(await this.issue(n), p.parent);
@@ -556,14 +557,14 @@ class Sender {
       const wait = waitOf(e, at);
       if (wait) throw wait;
       const c = retryAtFromResponse(e.response, at);
-      // a write GitHub refused for the state it is in (409 / 412): checked again, held — never failed, nothing was lost (#1329)
+      // a write GitHub refused for the state it is in (409 / 412): checked again, held — never failed, nothing was lost
       if (op.kind === "set" && (e.response.status === 409 || e.response.status === 412)) {
         const { value } = await this.current(op, this.numberOf(op.issue)).catch(() => ({ value: undefined, at: "" }));
         return { status: "conflict", error: `GitHub が書き込みを拒みました（${e.response.status}）。GitHub は ${value === undefined ? "読めませんでした" : JSON.stringify(value)}。照合し直してください` };
       }
       // GitHub answered and refused the input (4xx): nothing was made, a post included
       const refused = c?.kind === "auth" || (c === null && e.response.status !== undefined && e.response.status < 500);
-      // a set refused while GitHub got to the value another way (#3515: the Project's Auto-close closed the Issue
+      // a set refused while GitHub got to the value another way (the Project's Auto-close closed the Issue
       // between the read and the PATCH, which GitHub answers 422): nothing is left to send. A read that meets a limit,
       // does not reach GitHub or finds the login refused waits as any call does (sent again after it); otherwise: failed
       if (refused && op.kind === "set" && !(op.targetKind === "project-item" && op.field === "member")) {
@@ -586,7 +587,7 @@ class Sender {
 }
 
 /**
- * What a run sends to a GitLab project (#2910), by the rules of the GitHub one above: a `set` checked against its base
+ * What a run sends to a GitLab project, by the rules of the GitHub one above: a `set` checked against its base
  * before and read again after (方式 A; GitLab's history is not read, so an edit between the write and the read after it
  * is a conflict only when it left another value), a `create` / `comment` with its marker and looked for after a lost
  * answer. GitLab has no parent (the body's `## 親 PBI` is) and no Project: a set of the parent is refused (failed,
@@ -594,7 +595,7 @@ class Sender {
  */
 class GitlabSender {
   onWrite: () => void = () => undefined;
-  /** A limit or the login refused met after a post was done (its duplicates' cleanup, #3804): the run stops after its outcome is stored. */
+  /** A limit or the login refused met after a post was done (its duplicates' cleanup): the run stops after its outcome is stored. */
   stopAfter: Limit | null = null;
   private target: ForgeTarget;
   constructor(private glab: Sh, private db: Db, source: BacklogSource, private now: () => number) {
@@ -645,7 +646,7 @@ class GitlabSender {
   }
 
   /**
-   * A read or write after the post failed (#3804): its outcome stands, and GitLab's 429, the login refused or GitLab not
+   * A read or write after the post failed: its outcome stands, and GitLab's 429, the login refused or GitLab not
    * reached (no HTTP status, as `send` reads it) stops the run after it. The sync turned off stops the run by itself.
    */
   private held = (e: unknown) => {
@@ -676,7 +677,7 @@ class GitlabSender {
       posting.on = true;
       c = await postGitlabNote(this.glab, this.target, n, marked((op.payload as { body: string }).body, op.id));
       this.onWrite();
-      // made again after every page was read without it (#3804): the first one, shown late, stays
+      // made again after every page was read without it: the first one, shown late, stays
       if (op.status === "unknown") {
         const kept = await this.keep(path, op, null, byId, drop);
         if (kept) c = note(kept);
@@ -707,7 +708,7 @@ class GitlabSender {
       this.onWrite();
       posting.on = false;
       made = { id: i.id, number: i.number, url: i.url, body: i.body, createdAt: i.createdAt, updatedAt: i.updatedAt };
-      // made again after every page was read without it (#3804): the first one, shown late, stays
+      // made again after every page was read without it: the first one, shown late, stays
       if (op.status === "unknown") {
         const kept = await this.keep(path, op, null, byIid, drop);
         if (kept) made = issue(kept);
@@ -715,7 +716,7 @@ class GitlabSender {
     }
     const remote: BacklogIssueData = { number: made.number, title: p.title, url: made.url, state: p.state, stateReason: p.state === "CLOSED" ? "COMPLETED" : null, body: made.body, labels: p.labels, milestone: p.milestone, parent: p.parent, subIssues: [], createdAt: made.createdAt, updatedAt: made.updatedAt, closedAt: null };
     this.db.setBacklogOperationResult(op.id, { status: "sending", remoteId: made.id, record: { externalId: made.id, remote: { ...remote, state: "OPEN", stateReason: null } } }, this.now());
-    // a duplicate's cleanup met a limit (#3804): the close after it waits too, from the Issue kept
+    // a duplicate's cleanup met a limit: the close after it waits too, from the Issue kept
     if (this.stopAfter && p.state === "CLOSED") throw this.stopAfter;
     if (p.state === "CLOSED") await updateGitlabIssue(this.glab, this.target, made.number, { state_event: "close" });
     return { status: "done", remoteId: made.id, record: { externalId: made.id, remote } };
@@ -746,11 +747,11 @@ class GitlabSender {
   }
 }
 
-/** The forge operation a stored one is (#920): a Project item and its fields are `project`, any other field `write`. */
+/** The forge operation a stored one is: a Project item and its fields are `project`, any other field `write`. */
 export const forgeKind = (op: Pick<BacklogOperation, "kind" | "field" | "targetKind">): ForgeKind =>
   op.kind === "create" ? "create" : op.kind === "comment" ? "comment" : op.targetKind === "project-item" || op.field === "member" || op.field?.startsWith("field:") ? "project" : "write";
 
-/** The workspace Project's field definitions, read from GitHub once (#3811). Throws when GitHub is not reached. */
+/** The workspace Project's field definitions, read from GitHub once. Throws when GitHub is not reached. */
 export function readProjectFields(gh: GhRunner, db: Db, cwd: string, source: BacklogSource): Promise<Array<Field & { name: string }>> {
   return new Sender(gh, db, cwd, source, Date.now).projectFields();
 }
@@ -758,7 +759,7 @@ export function readProjectFields(gh: GhRunner, db: Db, cwd: string, source: Bac
 /**
  * Sends what is waiting for one repository (`source`, gh run in `cwd`), oldest first; resolves to how many were done.
  * Throws Limit when GitHub said to wait (the rest waits too). `on` is asked before each operation and each write:
- * false (the workspace's GitHub sync turned off meanwhile, #2266) stops the run there (Limit `off`), the rest waiting
+ * false (the workspace's GitHub sync turned off meanwhile) stops the run there (Limit `off`), the rest waiting
  * as it is. `waits`: an operation not to send yet (it holds the ones of its Issue after it). `onItem` gets the number of
  * the Issue of every Project item operation sent, written or not (GitHub had the value, or it was held as a conflict):
  * what is stored of the item has to be read again.
@@ -779,14 +780,14 @@ export async function sendGithubOperations(gh: GhRunner, db: Db, cwd: string, so
     if (!on()) break;
     // the operation as it is now: one done before it may have given its Issue an id
     let op = db.getBacklogOperation(listed.id)!;
-    // done meanwhile: an import found GitHub at its value, or the user kept GitHub's value on its conflict (#887)
+    // done meanwhile: an import found GitHub at its value, or the user kept GitHub's value on its conflict
     if (op.status === "done") continue;
     // left `sending` by a run that broke off after its request (its result could not be stored): never sent blindly
     if (op.status === "sending") {
       db.setBacklogOperationResult(op.id, { status: op.kind === "set" || op.remoteId ? "pending" : "unknown" }, now());
       op = db.getBacklogOperation(op.id)!;
     }
-    // an unverified conflict of a write (#3518): its history read again, the first held operation of its Issue only
+    // an unverified conflict of a write: its history read again, the first held operation of its Issue only
     if (!held.has(op.issue) && op.status === "conflict" && op.kind === "set" && op.overwritten?.unreadable && op.overwritten.since && source.service === "github" && !waits(op)) {
       const out = await sender.recheck(op);
       if (out) db.setBacklogOperationResult(op.id, out, now());
@@ -809,7 +810,7 @@ export async function sendGithubOperations(gh: GhRunner, db: Db, cwd: string, so
       db.setBacklogOperationResult(op.id, { status: "done", error: "Project から外したので送りません" }, now());
       continue;
     }
-    // through the forge operation of the repository's service (#920): one it does not support, or a value that signs
+    // through the forge operation of the repository's service: one it does not support, or a value that signs
     // in, is held as failed with why — never sent
     const forged: ForgeOperation<BacklogOperation> = { kind: forgeKind(op), target: { service: source.service, host: source.host, repository: source.repository }, texts: textsOf(op.payload), payload: op };
     let run: (op: ForgeOperation<BacklogOperation>) => Promise<Outcome>;
@@ -822,7 +823,7 @@ export async function sendGithubOperations(gh: GhRunner, db: Db, cwd: string, so
       continue;
     }
     if (op.status === "pending") db.setBacklogOperationResult(op.id, { status: "sending", attempt: op.attempt + 1 }, now());
-    // an unknown one looked for (and maybe posted again, #3804) is being sent too: not taken back meanwhile
+    // an unknown one looked for (and maybe posted again) is being sent too: not taken back meanwhile
     else if (op.status === "unknown") db.setBacklogOperationResult(op.id, { status: "sending" }, now());
     let out: Outcome;
     try {
@@ -833,7 +834,7 @@ export async function sendGithubOperations(gh: GhRunner, db: Db, cwd: string, so
       throw e;
     }
     db.setBacklogOperationResult(op.id, { retryAt: null, error: null, ...out }, now());
-    // why a post was first left unknown, for the daemon's log too (#3804): later looks keep it in front of theirs
+    // why a post was first left unknown, for the daemon's log too: later looks keep it in front of theirs
     if (out.status === "unknown" && op.status !== "unknown") console.error(`[backlog] ${source.repository}: ${op.kind} ${op.id} の結果が分かりません: ${out.error ?? ""}`);
     const item = op.targetKind === "project-item" ? sender.numberOf(db.getBacklogOperation(op.id)!.issue) : 0;
     if (item) onItem(item);

@@ -8,7 +8,7 @@ import { loadConfig } from "./config.ts";
 import { startServer } from "./server.ts";
 
 /**
- * "No keys" (README, #180): Switchboard's code never reads, stores or returns the runners' credentials. The runners
+ * "No keys" (README): Switchboard's code never reads, stores or returns the runners' credentials. The runners
  * log in themselves (terminal tab) and a token from Parameter Store reaches `claude` through a wrapper outside this
  * code (scripts/host/claude-wrapper.sh). These tests fail when a change starts touching them.
  */
@@ -25,7 +25,7 @@ const code = (f: string) =>
     .filter((l) => !/^\s*(?:\/\/|\/\*\*?|\*)/.test(l))
     .join("\n");
 
-describe("no keys (#180)", () => {
+describe("no keys", () => {
   test("no source names a credential file or a token variable, not even in a comment", () => {
     expect(SOURCES.length).toBeGreaterThan(50);
     const named = /auth\.json|\.credentials\.json|CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|setup-token/;
@@ -38,8 +38,8 @@ describe("no keys (#180)", () => {
   });
 
   test("only these files build a path into ~/.claude or ~/.codex, and only for what they say", () => {
-    // config.ts: ~/.claude/projects (terminal history, #91) and ~/.codex (its sessions/, for export #179).
-    // adapters: settings.json / config.toml, the CLI's own default model (#155). materializer.ts: a repository's .claude/commands. config.ts / claude-cloud.ts name a repository's .claude/worktrees. runner-config.ts: a foreign repository's own config (.codex, relative to the clone) (the continuation worktree and its info/exclude line, #1395).
+    // config.ts: ~/.claude/projects (terminal history) and ~/.codex (its sessions/, for the history export).
+    // adapters: settings.json / config.toml, the CLI's own default model. materializer.ts: a repository's .claude/commands. config.ts / claude-cloud.ts name a repository's .claude/worktrees. runner-config.ts: a foreign repository's own config (.codex, relative to the clone) (the continuation worktree and its info/exclude line).
     const allowed = ["packages/adapters/claude/src/index.ts", "packages/adapters/codex/src/index.ts", "packages/core/src/claude-cloud.ts", "packages/core/src/config.ts", "packages/core/src/materializer.ts", "packages/core/src/runner-config.ts"];
     // A quoted ".claude" segment or a path continuing into it (`${home}/.claude`). A prompt naming the repository's own
     // `.claude/skills/…` (backlog.ts, feedback.ts) is text for the agent. Strings the UI shows are text too.
@@ -48,7 +48,7 @@ describe("no keys (#180)", () => {
   });
 });
 
-describe("no keys over the API (#180)", () => {
+describe("no keys over the API", () => {
   const TOKEN = "fake-token-xyz-180";
   const saved = { oauth: process.env.CLAUDE_CODE_OAUTH_TOKEN, anthropic: process.env.ANTHROPIC_API_KEY };
   let home: string;

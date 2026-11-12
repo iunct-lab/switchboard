@@ -5,7 +5,7 @@ import { githubHost } from "./gh.ts";
 import { findSecrets, NO_HOST, type HostAws } from "./secrets.ts";
 
 /**
- * The operations the backlog, its sync and the CI report need from the service a repository lives on (#920), apart from
+ * The operations the backlog, its sync and the CI report need from the service a repository lives on, apart from
  * how one service does them. A service is one entry of the map a caller passes to `runForgeOperation` (GitHub's:
  * `forge-github.ts` for the kit, `backlog-sync.ts` / `backlog-send.ts` for the app); a second service adds its entry
  * there and its name to a repository's `ops.config.json` `forge` (docs/design/forge-integration.md). PR and review
@@ -20,15 +20,15 @@ export interface ForgeTarget {
   repository: string | null;
 }
 
-/** What a repository without `forge` lives on: what every repository was before #920. */
+/** What a repository without `forge` lives on: what every repository was before `forge` could be set. */
 export const DEFAULT_SERVICE = "github";
 
-/** A checkout with no remote and no `forge` (#2488): its PRs are local changes kept in the agent management app (`forge-app.ts`). */
+/** A checkout with no remote and no `forge`: its PRs are local changes kept in the agent management app (`forge-app.ts`). */
 export const LOCAL_SERVICE = "app";
 
 /**
  * The repository's service from `<dir>/ops.config.json` (only `forge` is read). None there: LOCAL_SERVICE when the
- * checkout has no `origin` (#2488: its changes, their review and CI live in the app), else DEFAULT_SERVICE. Throws on a
+ * checkout has no `origin` (its changes, their review and CI live in the app), else DEFAULT_SERVICE. Throws on a
  * malformed `forge`. forgeTargetOf keeps GitHub for a checkout without `forge` (the backlog's import reads it so).
  */
 export function forgeOf(dir: string): string {

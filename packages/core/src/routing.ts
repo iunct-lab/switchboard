@@ -4,7 +4,7 @@ import { RunnerId, type LlmSuggestion, type RoutingSuggestion, type WorkspaceKin
 import { z } from "zod";
 
 /**
- * Rule-table routing (proposal §3, issue #6). v1 is pure data: no LLM. The suggestion and the user's actual
+ * Rule-table routing (proposal §3). v1 is pure data: no LLM. The suggestion and the user's actual
  * choice are recorded per task so a later LLM router has training data.
  */
 // Strict: a typo'd key in a user file (`keyword:`) must be an error, not an always-matching empty condition.
@@ -143,7 +143,7 @@ function dedupe(alts: RoutingSuggestion["alternatives"], chosen: RunnerId): Rout
   return alts.filter((a) => (seen.has(a.runner) ? false : (seen.add(a.runner), true)));
 }
 
-/* ---------- suggesters (#25): where a suggestion comes from ---------- */
+/* ---------- suggesters: where a suggestion comes from ---------- */
 
 /**
  * A source of routing suggestions. The rule table is one; an LLM asked through a runner adapter is another. Async
@@ -165,10 +165,10 @@ export class RuleSuggester implements Suggester {
 }
 
 /**
- * Rule table + an optional second opinion (#25). The fallback (the rule table) always decides what is suggested;
+ * Rule table + an optional second opinion. The fallback (the rule table) always decides what is suggested;
  * the primary's answer is attached as `llm` and shown next to it — an LLM proposes, it never routes. A primary that
  * throws, returns something unusable, or takes longer than `timeoutMs` is dropped with a log line and the rule table's
- * suggestion stands. The daemon asks after the task exists (#1143); a misbehaving runner costs a log line, not a task.
+ * suggestion stands. The daemon asks after the task exists; a misbehaving runner costs a log line, not a task.
  */
 export class CompositeSuggester implements Suggester {
   constructor(

@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { createPublicKey, timingSafeEqual, verify } from "node:crypto";
 
 /**
- * Local API token (issue #31). Generated once at ~/.switchboard/token (0600). Required on /api and /ws when the daemon
+ * Local API token. Generated once at ~/.switchboard/token (0600). Required on /api and /ws when the daemon
  * listens on anything but loopback; `/api/health` always reports `authRequired` so the UI knows to ask for it.
  * Workspace MCP endpoints use a separate, per-task, disposable token (see mcp.ts).
  */
@@ -26,7 +26,7 @@ export function isLoopback(host: string): boolean {
 export const LOOPBACK_HOSTNAMES: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /**
- * DNS rebinding defence (#1135): on loopback no token is asked, and a page on a name that now resolves to 127.0.0.1
+ * DNS rebinding defence: on loopback no token is asked, and a page on a name that now resolves to 127.0.0.1
  * sends that name as both Origin and Host, so `sameOrigin` passes. The Host's name must be one of `allowed` (the
  * loopback names, plus SWITCHBOARD_PUBLIC_URL's). The port is not compared; the Origin is not looked at (a same-origin
  * GET has none). No Host header = the request URL's host. Unparsable = refused.
@@ -72,11 +72,11 @@ export function tokenEquals(a: string | null, b: string): boolean {
   return diff === 0;
 }
 
-/** The header CloudFront adds on its way to the origin (#181); the value lives in Parameter Store, never in the repository. */
+/** The header CloudFront adds on its way to the origin; the value lives in Parameter Store, never in the repository. */
 export const EDGE_HEADER = "x-switchboard-edge";
 
 /**
- * Only requests that came through the CDN reach a cloud host (#181, same idea as capsule-host's aws-handler): with
+ * Only requests that came through the CDN reach a cloud host (same idea as capsule-host's aws-handler): with
  * `value` set, a request must carry EDGE_HEADER equal to it. Unset (a Mac) = everything passes. Requests from this
  * machine itself pass too, judged by the peer address, not the listen host: the host listens on 0.0.0.0, and the
  * runners' /mcp calls and sb-rescue's health probe come from 127.0.0.1.
@@ -104,7 +104,7 @@ export function addressKey(ip: string): string {
   return `${full.slice(0, 4).map((g) => parseInt(g || "0", 16).toString(16)).join(":")}::/64`;
 }
 
-/** Refusals at the entrance or the login per address before it waits (#1492); the same numbers as the Starter's. */
+/** Refusals at the entrance or the login per address before it waits; the same numbers as the Starter's. */
 export const MAX_FAILURES = 10;
 export const FAILURE_WINDOW_MS = 10 * 60_000;
 const MAX_TRACKED = 1000;
@@ -132,15 +132,15 @@ export function isLoopbackAddress(address: string): boolean {
   return address === "::1" || address.startsWith("127.") || address.startsWith("::ffff:127.");
 }
 
-/** The session cookie the cloud host's login (the starter Lambda, #211) issues after a passkey check. */
+/** The session cookie the cloud host's login (the starter Lambda) issues after a passkey check. */
 export const SESSION_COOKIE = "sb_session";
-/** The login's limits (#498): 7 days from the sign-in, 24 hours from the last action. The same values as aws/auth.ts and
+/** The login's limits: 7 days from the sign-in, 24 hours from the last action. The same values as aws/auth.ts and
  *  rescue/src/server.ts (aws/session-contract.test.ts pins them). */
 export const SESSION_MAX_MS = 7 * 24 * 3600_000;
 export const SESSION_IDLE_MS = 24 * 3600_000;
 
 /**
- * A valid `sb_session` cookie (#211, #701): `<body>.<sig>` where `body` = base64url of the UTF-8 text
+ * A valid `sb_session` cookie: `<body>.<sig>` where `body` = base64url of the UTF-8 text
  * `<passkeyId>.<idleUntilMs>.<expiresMs>` and `sig` = base64url of the Ed25519 signature over the base64url **text** of `body`, made by
  * the Starter with a seed only it can read (aws/auth.ts `sessionValue`). Checked here with the public key
  * (SWITCHBOARD_SESSION_PUBLIC_KEY, the raw 32 bytes in base64url), so nothing on this machine can make one. Neither time has passed (idle-until, the cap), and idle-until is not past the cap.
@@ -150,7 +150,7 @@ export function sessionOk(req: Request, publicKey: string | undefined, now = Dat
   return sessionValues(req).some((v) => sessionValueOk(v, publicKey, now));
 }
 
-/** When one login cookie value's idle time and cap end (ms), for the screen to show (#498); null when it is not valid. The value is the one the request was let in with. */
+/** When one login cookie value's idle time and cap end (ms), for the screen to show; null when it is not valid. The value is the one the request was let in with. */
 export function sessionTimes(value: string, publicKey: string | undefined, now = Date.now()): { idleUntil: number; expiresAt: number } | null {
   const parts = signedParts(value, publicKey, "", now);
   return parts ? { idleUntil: parts.ms[0]!, expiresAt: parts.ms[1]! } : null;
@@ -162,11 +162,11 @@ function sessionValues(req: Request): string[] {
   return pairs.map((pair) => pair.slice(SESSION_COOKIE.length + 1));
 }
 
-/** How long a Starter answer about a cookie is trusted (#708): a removed passkey is shut out within this. */
+/** How long a Starter answer about a cookie is trusted: a removed passkey is shut out within this. */
 export const SESSION_RECHECK_MS = 5 * 60_000;
 
 /**
- * The cookie check with revocation (#708): a cookie that verifies is then asked about at the Starter's
+ * The cookie check with revocation: a cookie that verifies is then asked about at the Starter's
  * `GET /_auth/status` (`loggedIn` is true only while its passkey is still registered), and the answer is kept per cookie
  * for SESSION_RECHECK_MS. No answer (down, 5 s, not 200) refuses and is not kept. Without the Starter's URL or the
  * public key (a Mac) no cookie is valid. Returns the cookie value that passed, so a WebSocket can be checked again;
@@ -236,7 +236,7 @@ function signedParts(raw: string, publicKey: string | undefined, prefix: string,
   const sigText = raw.slice(dot + 1);
   const sig = Buffer.from(sigText, "base64url");
   // One spelling per signature: decoding skips characters outside the alphabet, so only the canonical text passes (the
-  // revocation check, #708, keeps its answers by the cookie's value).
+  // revocation check keeps its answers by the cookie's value).
   if (sig.length !== 64 || sig.toString("base64url") !== sigText) return undefined;
   try {
     if (!verify(null, Buffer.from(prefix + body), createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: publicKey }, format: "jwk" }), sig)) return undefined;
@@ -249,7 +249,7 @@ function signedParts(raw: string, publicKey: string | undefined, prefix: string,
   return ms.every((t, i) => i === 0 || t >= ms[i - 1]!) ? { id, ms } : undefined;
 }
 
-/** The Starter's "checked by passkey just now" cookie (5 minutes, #497); the daemon's strongest operations ask for it (#1491). */
+/** The Starter's "checked by passkey just now" cookie (5 minutes); the daemon's strongest operations ask for it. */
 export const RECENT_COOKIE = "sb_recent";
 
 /**

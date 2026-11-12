@@ -1,5 +1,5 @@
 // pull-main: fast-forward the main worktree (the first of `git worktree list`) to its upstream.
-// `pbi-complete` 6-6 calls it after a merge; every repository gets the same default (#1244, docs/design/main-pull.md).
+// `pbi-complete` 6-6 calls it after a merge; every repository gets the same default (docs/design/main-pull.md).
 // Anything that would not be a plain fast-forward stops with a one-line reason and changes nothing.
 
 type Run = { ok: boolean; stdout: string; stderr: string };

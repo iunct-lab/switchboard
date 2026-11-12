@@ -12,7 +12,7 @@ import type { StopRecord } from "@switchboard/protocol";
 import { isWorking } from "./task-status.ts";
 
 /**
- * Usage-limit auto-resume (#102). A subscription runner stops a turn when its window (Claude: 5 hours / 7 days) is
+ * Usage-limit auto-resume. A subscription runner stops a turn when its window (Claude: 5 hours / 7 days) is
  * used up; Claude Code prints "You've hit your session limit · resets 4:10am (Asia/Tokyo)" as the turn's result, next
  * to a `rate_limit_event` whose binding window carries the exact reset time. Everything needed to continue is
  * there — the session id for `--resume`, the time — so the daemon records `Task.resumeAt` and, when the runner's
@@ -22,12 +22,12 @@ import { isWorking } from "./task-status.ts";
  * `session.end(error, "You've hit your session limit · resets 4:10am (Asia/Tokyo)")`.
  */
 
-/** The default wording of the follow-up after the head (`quotaAndResume.resumePrompt`, #835). */
+/** The default wording of the follow-up after the head (`quotaAndResume.resumePrompt`). */
 const RESUME_TEXT = "使用上限がリセットされました。中断した箇所から作業を続けてください。";
 /** What the daemon sends to continue. The head says who resumed and why, whatever the wording after it. */
 export const RESUME_PROMPT = `${AUTO_RESUME_HEAD} ${RESUME_TEXT}`;
 /**
- * A GitHub API limit a turn's command met (#550): the line gh / GraphQL prints, at the head of a line of the result.
+ * A GitHub API limit a turn's command met: the line gh / GraphQL prints, at the head of a line of the result.
  * Only at the head: a `grep` or `Read` of a file that quotes it has a path or a line number first.
  */
 export const GITHUB_LIMIT_LINE = /^(?:(?:gh|GraphQL): )?API rate limit (?:already )?exceeded for [^\n]*/m;
@@ -57,7 +57,7 @@ function shellCode(command: string): string {
   return inner.replace(/<<-?\s*["']?(\w+)["']?[\s\S]*?^\s*\1\s*$/gm, "<<").replace(/"(?:\\[\s\S]|[^"\\])*"|'[^']*'/g, '""');
 }
 
-/** Whether a tool call runs a command whose success is proof that GraphQL answers, so the limit a turn met has lifted (#3302). */
+/** Whether a tool call runs a command whose success is proof that GraphQL answers, so the limit a turn met has lifted. */
 export function usesGraphql(tool: string, input: unknown): boolean {
   if (!SHELL_TOOLS.has(tool)) return false;
   const { command, run_in_background } = (input ?? {}) as { command?: unknown; run_in_background?: unknown };
@@ -79,12 +79,12 @@ export const PAST_GRACE_MS = 6 * 3600_000;
 /** A task that hits the limit this many turns in a row *after the daemon resumed it* stops being resumed (a misread time must not loop). */
 export const MAX_CONSECUTIVE_STOPS = 8;
 /**
- * Runners whose limit may be ended before its time — an early report, a try (#2237): Claude only. Codex's limit detection is not verified yet
+ * Runners whose limit may be ended before its time — an early report, a try: Claude only. Codex's limit detection is not verified yet
  * (its wording is a guess), so its waits keep the planned time.
  */
 const EARLY_RUNNERS: ReadonlySet<RunnerId> = new Set(["claude"]);
 /**
- * A wait longer than this tries once at this point (#2237): a limit can lift before its reset (the 7-day window waits
+ * A wait longer than this tries once at this point: a limit can lift before its reset (the 7-day window waits
  * days), and a refused turn costs nothing (docs/design/rate-limit-resume.md, 早く解けた上限).
  */
 export const PROBE_AFTER_MS = 6 * 3600_000;
@@ -179,7 +179,7 @@ export interface QuotaWindow {
  * The reset of the window that stopped the turn: the one the runner names (`limitType`) when it is used up, else the
  * earliest used-up window (waiting for the later one would idle through the earlier one's reset; a second stop simply
  * plans again). Seconds or milliseconds accepted. A reset up to `PAST_GRACE_MS` in the past still counts (lifted late).
- * With the reset, the window's name (#2237: a later report of it under 100 % resumes early).
+ * With the reset, the window's name (a later report of it under 100 % resumes early).
  */
 export function resetFromQuota(windows: QuotaWindow[], now: number, limitType?: string): { at: number; window: string } | undefined {
   const used = windows
@@ -193,7 +193,7 @@ export function resetFromQuota(windows: QuotaWindow[], now: number, limitType?: 
   return best;
 }
 
-/** Where `fallbackRunner` moved a Task from (#834): the decided runner and its window at the limit. */
+/** Where `fallbackRunner` moved a Task from: the decided runner and its window at the limit. */
 export interface FallbackFrom {
   runner: RunnerId;
   window: string;
@@ -203,11 +203,11 @@ export interface FallbackFrom {
 }
 
 /**
- * 上限のときの代わり (#834): the runner a Task that starts by itself starts on. A runner is at its limit while one of its
+ * 上限のときの代わり: the runner a Task that starts by itself starts on. A runner is at its limit while one of its
  * windows is at `fallbackAt` or more and has not reset; a runner with no quota rows (DAK) never is. When `runner` is,
  * the candidates are the order after it, then before it (from the head when it is not in the order); the first
  * installed one not at its limit wins, with `from` naming why. No such candidate (an empty order too) = `runner` as it
- * is, with `held` naming its window: the caller may hold the start until `held.resetsAt` (#2768) instead of starting
+ * is, with `held` naming its window: the caller may hold the start until `held.resetsAt` instead of starting
  * (a stop on the limit is then the automatic resume's).
  */
 export function fallbackRunner(runner: RunnerId, cfg: { fallback: RunnerId[]; fallbackAt: number }, quotaFor: (r: RunnerId) => QuotaWindow[], installed: (r: RunnerId) => boolean, now: number): { runner: RunnerId; from?: FallbackFrom; held?: FallbackFrom } {
@@ -224,12 +224,12 @@ export function fallbackRunner(runner: RunnerId, cfg: { fallback: RunnerId[]; fa
   return next ? { runner: next, from: why } : { runner, held: why };
 }
 
-/** The transcript's status line of a switch (#834): 「claude が上限（0.95、04:10 に戻る）のため codex で開始」. */
+/** The transcript's status line of a switch: 「claude が上限（0.95、04:10 に戻る）のため codex で開始」. */
 export function fallbackNote(runner: RunnerId, from: FallbackFrom, now: number): string {
   return `${from.runner} が上限（${from.utilization.toFixed(2)}、${fmtTime(from.resetsAt, now)} に戻る）のため ${runner} で開始`;
 }
 
-/** The transcript's status line of a held start (#2768): 「claude が上限（0.99、10/26 12:00 に戻る）のため戻る時刻に開始」. */
+/** The transcript's status line of a held start: 「claude が上限（0.99、10/26 12:00 に戻る）のため戻る時刻に開始」. */
 export function deferNote(held: FallbackFrom, now: number): string {
   return `${held.runner} が上限（${held.utilization.toFixed(2)}、${fmtTime(held.resetsAt, now)} に戻る）のため戻る時刻に開始`;
 }
@@ -262,7 +262,7 @@ export function detectLimitStop(runner: RunnerId, texts: Array<string | undefine
  * When to send the follow-up: a little after the reset; `LATE_RETRY_MS` from now when the reset already passed (the
  * runner still refused, so the window lifted late); when no time is known, `FALLBACK_DELAY_MS` doubling with each
  * consecutive stop (`attempt` = 1 for the first) up to `MAX_FALLBACK_DELAY_MS`. Never in the past. `delay` is the
- * setting `quotaAndResume` (#835); absent = those constants.
+ * setting `quotaAndResume`; absent = those constants.
  */
 export function planResumeAt(stop: LimitStop, now: number, attempt = 1, delay: Pick<ResumeTunables, "retryDelayMs" | "retryMaxDelayMs"> = DEFAULT_TUNABLES): number {
   if (stop.resetsAt === undefined) return now + Math.min(delay.retryDelayMs * 2 ** Math.max(0, attempt - 1), delay.retryMaxDelayMs);
@@ -270,7 +270,7 @@ export function planResumeAt(stop: LimitStop, now: number, attempt = 1, delay: P
   return stop.resetsAt + RESUME_MARGIN_MS;
 }
 
-/** The values of the setting `quotaAndResume` the resumer uses (#835). */
+/** The values of the setting `quotaAndResume` the resumer uses. */
 export interface ResumeTunables {
   retryDelayMs: number;
   retryMaxDelayMs: number;
@@ -283,15 +283,15 @@ const DEFAULT_TUNABLES: ResumeTunables = { retryDelayMs: FALLBACK_DELAY_MS, retr
 export interface ResumerOptions {
   /** The runner's auto-resume setting, read on every use so a PATCH takes effect at once. */
   enabled: (runner: RunnerId) => boolean;
-  /** The setting `quotaAndResume` (#835), read on every use like `enabled`. Absent = the constants and `prompt`. */
+  /** The setting `quotaAndResume`, read on every use like `enabled`. Absent = the constants and `prompt`. */
   tunables?: () => ResumeTunables;
   now?: () => number;
   /** The usage-limit follow-up, whole. Ignored when `tunables` is given (its `resumePrompt` after the head is sent). */
   prompt?: string;
   log?: (message: string) => void;
-  /** GitHub's GraphQL budget for a checkout (#550, `GithubBudgetCache`): when a turn met the GitHub limit, the time it comes back. Absent = a fallback delay. */
+  /** GitHub's GraphQL budget for a checkout (`GithubBudgetCache`): when a turn met the GitHub limit, the time it comes back. Absent = a fallback delay. */
   githubBudget?: (cwd: string) => Promise<GithubBudget | null>;
-  /** Free bytes on the disk (#2234); `diskFreeBytes` of the home by default. */
+  /** Free bytes on the disk; `diskFreeBytes` of the home by default. */
   diskFree?: () => number;
 }
 
@@ -312,14 +312,14 @@ export class RateLimitResumer {
   /** Tasks whose current turn was started by the resumer (so its end can be told from a person's turn). */
   private resumedByUs = new Set<string>();
   /**
-   * Tasks whose current turn is the one try before a long wait (#2237), with the time the wait goes back to when it is
+   * Tasks whose current turn is the one try before a long wait, with the time the wait goes back to when it is
    * refused. In memory like `stops`: after a restart a refused try plans afresh.
    */
   private probing = new Map<string, number>();
   /** Tasks whose follow-up is being sent, so a tick during the await cannot send twice. */
   private sending = new Set<string>();
   /**
-   * The turns whose GitHub plan waits for the budget read (#550), as `task#n` with n counting the task's turn ends
+   * The turns whose GitHub plan waits for the budget read, as `task#n` with n counting the task's turn ends
    * here: forgetting the task's plan (a reply, 中断, a cancel — `TaskManager.onPlanForgotten`) takes them out, and the
    * read then plans nothing; a later turn's read does not consume an earlier one's marker.
    */
@@ -327,7 +327,7 @@ export class RateLimitResumer {
   private turnEnds = new Map<string, number>();
   private unsubscribeForget: (() => void) | null = null;
   private unsubscribeStops: (() => void) | null = null;
-  /** The reported usage-limit stop (#4408) each task's standing plan came from: a repeat of it while the plan stands is not a second stop. */
+  /** The reported usage-limit stop each task's standing plan came from: a repeat of it while the plan stands is not a second stop. */
   private reportedPlans = new Map<string, string>();
   /** Tasks that reported a limit stop in the turn now running: its end keeps their count of consecutive stops. */
   private reportedThisTurn = new Set<string>();
@@ -397,7 +397,7 @@ export class RateLimitResumer {
   /** Called on every turn end: records the stop (with the time) or forgets a task that got past it. */
   onTurnEnd(taskId: string, task: Task, turn: TurnEnd): void {
     const ours = this.resumedByUs.delete(taskId);
-    // a limit the turn reported (#4408) keeps the count of stops after it; a turn without one ends the plan it came from
+    // a limit the turn reported keeps the count of stops after it; a turn without one ends the plan it came from
     const reported = this.reportedThisTurn.delete(taskId);
     if (!reported) this.reportedPlans.delete(taskId);
     const probe = this.probing.get(taskId);
@@ -411,7 +411,7 @@ export class RateLimitResumer {
     if (!stop) {
       if (turn.end.status !== "aborted" && turn.diskFull && this.planDisk(taskId, task, turn.diskFull, ours)) return;
       // a turn the runner's limit did not stop (it ended by itself, or on another error) but whose commands met
-      // GitHub's limit waits for GitHub's time (#550); a cut turn (aborted) is the person's, left alone
+      // GitHub's limit waits for GitHub's time; a cut turn (aborted) is the person's, left alone
       if (turn.end.status !== "aborted" && turn.githubLimit) {
         void this.planGithub(taskId, task, turn.githubLimit, ours, turn.githubLimitAt);
         return;
@@ -437,7 +437,7 @@ export class RateLimitResumer {
       return;
     }
     const at = planResumeAt(stop, now, count, tunables);
-    // a long wait tries once first (#2237); with auto-resume off nothing would be sent, so it is planned as before
+    // a long wait tries once first; with auto-resume off nothing would be sent, so it is planned as before
     const enabled = this.opts.enabled(task.runner);
     const tryAt = enabled && EARLY_RUNNERS.has(task.runner) && at - now > PROBE_AFTER_MS ? now + PROBE_AFTER_MS : undefined;
     this.tasks.setResumeAt(taskId, tryAt ?? at, "limit", { ...wait, plannedAt: tryAt === undefined ? null : at });
@@ -458,7 +458,7 @@ export class RateLimitResumer {
   }
 
   /**
-   * A usage limit of another runner that the task reported as a stop (#4408, `runner#<runner>` in its conditions): the
+   * A usage limit of another runner that the task reported as a stop (`runner#<runner>` in its conditions): the
    * resume is planned as for the task's own runner's limit — at the reported time, else the runner's quota row that lifts
    * after the stop, else the retry delay — with the same count of consecutive stops. The same stop reported again with a
    * new time moves the plan without counting a stop; reported as anything but such a limit (resolved / exhausted, another
@@ -511,7 +511,7 @@ export class RateLimitResumer {
   }
 
   /**
-   * The stop a reported-limit plan belongs to (#4408): the newest stop of the task whose latest record in the DB is still a
+   * The stop a reported-limit plan belongs to: the newest stop of the task whose latest record in the DB is still a
    * waiting reported limit (every plan's stop is written last — `planReported` writes a repeat again when it plans), so it
    * holds after a daemon restart. `before` stands for its stop's latest
    * record before the report just written that is no longer such a limit.
@@ -531,10 +531,10 @@ export class RateLimitResumer {
   }
 
   /**
-   * A turn whose commands met GitHub's API limit and ended by itself (#550): planned at GitHub's reset (+ margin) when
+   * A turn whose commands met GitHub's API limit and ended by itself: planned at GitHub's reset (+ margin) when
    * the budget says the limit is still on; a short retry when it is back already; a fallback delay when it cannot be
    * read. The budget is read after the turn, so a turn the person started meanwhile is left alone. A limit met a whole
-   * window ago with the budget back is not what the turn ended on (#3302): nothing is planned or noted.
+   * window ago with the budget back is not what the turn ended on: nothing is planned or noted.
    */
   private async planGithub(taskId: string, task: Task, line: string, ours: boolean, limitAt?: number): Promise<void> {
     const n = (this.turnEnds.get(taskId) ?? 0) + 1;
@@ -570,7 +570,7 @@ export class RateLimitResumer {
   }
 
   /**
-   * A turn that said the disk is full (#2234) waits for space. The words alone do not stop it: a command that printed
+   * A turn that said the disk is full waits for space. The words alone do not stop it: a command that printed
    * them from a log or a source file, or a full `/tmp` on a healthy disk, is not a wait space on this disk would end.
    */
   private planDisk(taskId: string, task: Task, words: string, ours: boolean): boolean {
@@ -637,7 +637,7 @@ export class RateLimitResumer {
   }
 
   /**
-   * Lifted before its reset (#2237): the window that stopped the task was reported under 100 % after the stop (the
+   * Lifted before its reset: the window that stopped the task was reported under 100 % after the stop (the
    * `quota` table; any task of the runner reports it). A report from before the stop, or of another window, is not it.
    */
   private liftedEarly(t: Task): boolean {
@@ -660,7 +660,7 @@ export class RateLimitResumer {
       const github = t.resumeReason === "github";
       const disk = t.resumeReason === "disk";
       this.tasks.record(taskId, { t: "status", text: stopped ? "中断されたターンを今すぐ再開します" : github ? "GitHub の上限の待ちを打ち切って今すぐ再開します" : disk ? "空き待ちを打ち切って今すぐ再開します" : "使用上限の待ちを打ち切って今すぐ再開します" });
-      return await this.tasks.send(taskId, stopped ? STOP_RESUME_PROMPT : this.followUp(t), { mirror: false }); // the shadow's runner (#99) hit no limit
+      return await this.tasks.send(taskId, stopped ? STOP_RESUME_PROMPT : this.followUp(t), { mirror: false }); // the shadow's runner hit no limit
     } finally {
       this.sending.delete(taskId);
     }
@@ -673,7 +673,7 @@ export class RateLimitResumer {
     this.stops.delete(taskId);
     this.resumedByUs.delete(taskId);
     this.probing.delete(taskId);
-    // a GitHub plan still waiting for its budget read is cancelled with it (#550)
+    // a GitHub plan still waiting for its budget read is cancelled with it
     const pending = this.dropPending(taskId);
     if (t.resumeReason === "start") {
       this.tasks.setResumeAt(taskId, null); // also drops the held prompt
@@ -689,7 +689,7 @@ export class RateLimitResumer {
     return updated;
   }
 
-  /** The first turn of a Task made at the limit (#2768); a failure to start is the row's error (startOrFail), not a retry. */
+  /** The first turn of a Task made at the limit; a failure to start is the row's error (startOrFail), not a retry. */
   private async startNow(t: Task, note: string): Promise<Task> {
     if (this.sending.has(t.id)) throw new Error("a resume is already in flight");
     this.sending.add(t.id);
@@ -742,7 +742,7 @@ export class RateLimitResumer {
       const prompt = lastStopWasDaemon(this.db.listEvents(t.id).map((e) => e.ev)) ? STOP_RESUME_PROMPT : this.followUp(t);
       await this.tasks.send(t.id, prompt, { asResume: true });
       this.log(`ratelimit: resumed ${t.id}`);
-      // the failures before this one were the same stop; it is over (#949)
+      // the failures before this one were the same stop; it is over
       const failed = this.tasks.stopOf(t.id, RESUME_STOP);
       if (failed && failed.state !== "resolved") this.tasks.recordStop(t.id, resumeStop({ evidence: failed.evidence, state: "resolved", actions: [...failed.actions, { attempt: failed.actions.length, at: this.now(), what: "再開を送れた", ok: true }].slice(-20) }));
       return true;
@@ -758,7 +758,7 @@ export class RateLimitResumer {
       const msg = String((e as Error).message ?? e);
       const count = (this.stops.get(t.id) ?? 0) + 1;
       this.stops.set(t.id, count);
-      // The same stop as the task's other failed sends (#949): this path's own cap and timer, recorded — never a second retry.
+      // The same stop as the task's other failed sends: this path's own cap and timer, recorded — never a second retry.
       const prev = this.tasks.stopOf(t.id, RESUME_STOP);
       const tried = [...(prev && prev.state !== "resolved" ? prev.actions : []), { attempt: count, at: this.now(), what: "再開を送れなかった", ok: false }].slice(-20);
       if (count > this.tunables().maxLimitStops) {
@@ -781,7 +781,7 @@ export class RateLimitResumer {
   }
 }
 
-/** The stop a failed resume send is recorded as (#949): one per task, waiting on its own timer (`resumeAt`), not on a retry. */
+/** The stop a failed resume send is recorded as: one per task, waiting on its own timer (`resumeAt`), not on a retry. */
 const RESUME_STOP = "resume-send";
 const DISK_STOP = "disk-full";
 const diskStop = (r: Partial<StopReport>): StopReport => ({ id: DISK_STOP, op: "disk.write", target: "", reason: "disk-full", evidence: "", safety: "unknown", conditions: [], actions: [], state: "waiting", ...r });
@@ -826,7 +826,7 @@ function wallClockToEpoch(y: number, m: number, d: number, h: number, min: numbe
   return second;
 }
 
-/** "04:10", or "9/12 04:10" when not today — JST (Asia/Tokyo) whatever the daemon's time zone, the same clock as the Web UI's `fmtClock` (#2028). */
+/** "04:10", or "9/12 04:10" when not today — JST (Asia/Tokyo) whatever the daemon's time zone, the same clock as the Web UI's `fmtClock`. */
 export function fmtTime(at: number, now: number): string {
   const a = wallClock(at, "Asia/Tokyo");
   const n = wallClock(now, "Asia/Tokyo");

@@ -3,7 +3,7 @@ import type { AgentEvent, LedgerRow, PricingTable, RunnerId, Task } from "@switc
 import { PricingTable as PricingSchema } from "@switchboard/protocol";
 
 /**
- * Pricing (proposal Screen D, issue #14): the price table is data, not code. Runners that report tokens but no cost
+ * Pricing (proposal Screen D): the price table is data, not code. Runners that report tokens but no cost
  * (Codex) get an API-equivalent figure from it; subscription runners show 実課金 0 next to the API-equivalent number.
  */
 export function loadPricing(paths: string[], log: (m: string) => void = (m) => console.warn(m)): { table: PricingTable; source: string; problems: string[] } {
@@ -43,7 +43,7 @@ export function resolveModel(table: PricingTable, model: string | null | undefin
   if (model) {
     const tagless = model.replace(/\[[^\]]*\]$/, "");
     const lookup = (n: string) => hit(n) ?? hit(table.aliases[n]) ?? hit(n.replace(/-\d{8}(-v\d+:\d+)?$/, ""));
-    // Amazon Bedrock's form (global.anthropic.claude-haiku-5-5 #1730, openai.gpt-6-luna #1731) is the same model: after the
+    // Amazon Bedrock's form (global.anthropic.claude-haiku-5-5, openai.gpt-6-luna) is the same model: after the
     // id as written (a row or an alias of the user's own wins), the Anthropic or OpenAI row prices it
     const name = tagless.replace(/^([a-z]+\.)?(anthropic|openai)\./, "");
     const direct = lookup(tagless) ?? lookup(name);
@@ -88,8 +88,8 @@ export function billedUsd(table: PricingTable, runner: RunnerId, apiCostUsd: num
 }
 
 /**
- * A model id in Amazon Bedrock's form (`global.anthropic.claude-haiku-5-5`, `us.anthropic.…`, `anthropic.…` #1730,
- * `openai.gpt-6-luna` #1731).
+ * A model id in Amazon Bedrock's form (`global.anthropic.claude-haiku-5-5`, `us.anthropic.…`, `anthropic.…`,
+ * `openai.gpt-6-luna`).
  * Bedrock is metered by AWS whatever the runner's own plan says, so such a row is billed at the API price.
  */
 export function isBedrockModel(model: string): boolean {
@@ -120,7 +120,7 @@ export function ledgerRowFor(table: PricingTable | undefined, task: Pick<Task, "
   };
 }
 
-/** What a ledger row keeps of a cumulative report (#2353): the runner session and its running total for the row's model. */
+/** What a ledger row keeps of a cumulative report: the runner session and its running total for the row's model. */
 export interface ReportedTotal {
   session?: string | null;
   inputTokens?: number;
@@ -138,7 +138,7 @@ const TOTAL_KEYS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWrit
  * The turn's share of a cumulative usage (`ev.cumulative`, Claude's `result`): the difference from `prev`, the previous
  * total of the same Task and model. A total that went down, or one of another runner session, starts again from 0
  * (a new session that does not carry the old one's total). With no `prev`, `credit` is what the Task's migrated rows
- * already booked of this same session, which they could not split by model (#2353; 0 for another session): the
+ * already booked of this same session, which they could not split by model (0 for another session): the
  * model's first total is counted against it, and the part used goes into `carried`. null when nothing grew — a result repeating the last total adds no row.
  */
 export function usageSince(prev: ReportedTotal | null, ev: Extract<AgentEvent, { t: "usage" }>, session: string | null, credit = 0): { usage: Extract<AgentEvent, { t: "usage" }>; total: ReportedTotal } | null {

@@ -1,5 +1,5 @@
 /**
- * The check behind `ops-kit/bin/deny-shared-tmp` (#764, docs/design/shared-tmp-guard.md): which paths a shell command
+ * The check behind `ops-kit/bin/deny-shared-tmp` (docs/design/shared-tmp-guard.md): which paths a shell command
  * is about to write or remove right under `/tmp` by a fixed name. Two sessions of different repositories on one host
  * that pick the same name overwrite each other's files; `W=$(mktemp -d /tmp/<use>.XXXXXX)` gives each its own place.
  *

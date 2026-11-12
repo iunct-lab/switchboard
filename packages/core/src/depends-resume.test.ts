@@ -8,7 +8,7 @@ import { dependsResumePrompt, dependsWaits, jobResumePrompt, resumeDepends, resu
 import { AUTO_RESUME_HEAD } from "./evals.ts";
 import { TaskManager } from "./tasks.ts";
 
-// A Task that stopped on another session's work is resumed when that work closes (#2045): which stops wait on what.
+// A Task that stopped on another session's work is resumed when that work closes: which stops wait on what.
 
 let n = 0;
 const stop = (over: Partial<StopRecord> = {}): StopRecord =>
@@ -34,7 +34,7 @@ const issue = (number: number, state: "OPEN" | "CLOSED", labels = ["type:task"])
 const item = (number: number, status: string | null, project = PROJECT) =>
   rec({ objectKind: "project-item", externalId: `PVTI_${number}_${project.owner}_${project.number}`, remote: { issue: number, owner: project.owner, project: project.number, fields: { Status: status } } });
 
-describe("depends-resume (#2045)", () => {
+describe("depends-resume", () => {
   test("dependsWaits picks open depends stops with wait keys", () => {
     const pick = stop({ conditions: [{ key: "pr#12", value: "open", met: false }, { key: "issue#34", value: "open", met: false }, { key: "issue#35", value: "open", met: true }] });
     const records = [
@@ -46,7 +46,7 @@ describe("depends-resume (#2045)", () => {
       stop({ state: "resolved" }),
     ];
     expect(dependsWaits(records)).toEqual([{ stop: pick, numbers: [12, 34], jobs: [] }]);
-    // a job of the daemon (#3993) is a wait too, kept apart from GitHub's numbers
+    // a job of the daemon is a wait too, kept apart from GitHub's numbers
     const job = stop({ conditions: [{ key: "job#7", value: "done", met: false }, { key: "pr#12", value: "open", met: false }] });
     expect(dependsWaits([job])).toEqual([{ stop: job, numbers: [12], jobs: [7] }]);
     // the newest record of a stop decides: one resolved later is not open
@@ -147,7 +147,7 @@ function fakeAdapter(sends: string[], ctl: { failSend?: boolean } = {}): RunnerA
   };
 }
 
-describe("resumeDepends (#2045)", () => {
+describe("resumeDepends", () => {
   let home: string;
   let db: Db;
   let tasks: TaskManager;
@@ -198,7 +198,7 @@ describe("resumeDepends (#2045)", () => {
     expect(s.answer).toBeNull(); // the daemon's turn is no answer of the person's
   });
 
-  describe("after (#4616)", () => {
+  describe("after", () => {
     // a few days ahead of the real clock: the Task's stops are looked at for a week after it changed
     const DUE = Math.floor((Date.now() + 3 * 24 * 3600_000) / 1000) * 1000;
     const DUE_TEXT = new Date(DUE).toISOString();
@@ -348,7 +348,7 @@ describe("resumeDepends (#2045)", () => {
     await settle();
     expect(sends).toEqual([dependsResumePrompt(["pr#12", "issue#34", "pr#13"])]);
   });
-  describe("job#<id> (#3993)", () => {
+  describe("job#<id>", () => {
     const JOB_WAIT = { ...WAIT, id: "overlap", op: "ops-kit job request", target: "PR #12", evidence: "ローカル CI を頼んだ", conditions: [{ key: "job#1", value: "done", met: false }] };
     const startJob = async (over: { stage?: { issue: number; action: "complete" } } = {}, wait = JOB_WAIT) => {
       const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude", workspaceId: "ws_app", ...over });

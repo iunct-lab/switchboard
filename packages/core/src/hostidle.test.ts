@@ -5,7 +5,7 @@ const NOW = Date.UTC(2026, 8, 25, 12, 0, 0);
 const MIN = 60_000;
 const quiet: IdleInput = { running: 0, waiting: 0, background: 0, ws: 0, pty: 0, nextWakeAt: null };
 
-describe("hostidle (#181)", () => {
+describe("hostidle", () => {
   test("evaluateIdle: any running / waiting task, runner background job, UI socket or terminal keeps the host up; so does something due within 30 minutes", () => {
     expect(evaluateIdle(quiet, NOW)).toEqual({ idle: true, nextWakeAt: null });
     for (const key of ["running", "waiting", "background", "ws", "pty"] as const) expect(evaluateIdle({ ...quiet, [key]: 1 }, NOW).idle).toBe(false);
@@ -42,7 +42,7 @@ describe("hostidle (#181)", () => {
     expect(now - t0).toBeGreaterThanOrEqual(32 * MIN);
   });
 
-  test("touch: a socket that came and went between ticks starts the quiet spell again (review #339)", () => {
+  test("touch: a socket that came and went between ticks starts the quiet spell again", () => {
     let now = NOW;
     const stops: Array<number | null> = [];
     const idle = new HostIdle(() => quiet, (at) => stops.push(at), { now: () => now });

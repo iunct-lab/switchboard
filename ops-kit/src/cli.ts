@@ -207,7 +207,7 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
     };
     return runBacklog(["create", "--title", title, "--body-file", bodyFile, "--label", "type:request", "--field", "Status=Backlog"], env, { out: created, err });
   }
-  // in the app's Task, set / triage are stored in the app like backlog set / triage (#2694): written to GitHub here, the
+  // in the app's Task, set / triage are stored in the app like backlog set / triage: written to GitHub here, the
   // next edit stored in the app starts from the value before it and is sent as a conflict
   if (command === "backlog" || ((command === "set" || command === "triage") && env.BACKLOG_URL)) {
     // the configuration only tells whether triage takes a phase; none is needed to read or edit
@@ -496,7 +496,7 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
   try {
     cfg = loadConfig(configPath);
   } catch (e) {
-    // a workspace kept in the app without GitHub (#2361) is linted with the kit's template when it has no file of its own
+    // a workspace kept in the app without GitHub is linted with the kit's template when it has no file of its own
     if (command === "lint" && !configPath && env.BACKLOG_URL && env.BACKLOG_WORKSPACE && !env.GH_REPO && !hasConfig()) {
       err("ops.config.json が無いので既定の選択肢（ops-kit/template/ops.config.json）で検査");
       cfg = defaultConfig();
@@ -578,7 +578,7 @@ function issueNumber(s: string): number {
   return Number(s.replace(/^#/, ""));
 }
 
-/** `mr …` (#923): GitLab's MR and discussions through glab, on the checkout's GitLab project. */
+/** `mr …`: GitLab's MR and discussions through glab, on the checkout's GitLab project. */
 async function mr(rest: string[], glab: Sh, out: (s: string) => void, err: (s: string) => void): Promise<number> {
   const [sub, ...args] = rest;
   const flag = (name: string) => {

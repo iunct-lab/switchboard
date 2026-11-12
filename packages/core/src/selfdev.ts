@@ -4,11 +4,11 @@ import type { CheckResult, CheckRun } from "@switchboard/protocol";
 import type { Db } from "./db.ts";
 
 /**
- * Self-dev (proposal §5 "Self-dev を成立させる構造", issue #18). When a task on the meta workspace (Switchboard's own
+ * Self-dev (proposal §5 "Self-dev を成立させる構造"). When a task on the meta workspace (Switchboard's own
  * repository) finishes a turn, the daemon runs the repository's checks and shows them in the Brief next to the diff.
  * Only typecheck, about 9 s: like it, the full `bun test` ran on the main working tree and not on the Task's diff, but it
  * took 5–7 h of the host a day, and the failed tests of 2026-10-27..30 also passed on the same commit. local-ci runs the
- * tests on the PR (#3266).
+ * tests on the PR.
  * "適用してデーモン再起動" restarts the daemon on the new code; the UI survives on WebSocket reconnect.
  */
 export const CHECKS: Array<{ kind: CheckResult["kind"]; argv: string[] }> = [
@@ -19,7 +19,7 @@ const TIMEOUT_MS = 10 * 60_000;
 /** Exit code that tells a supervisor (scripts/dev.ts) "respawn me on the current code". */
 export const RESTART_EXIT_CODE = 75;
 /**
- * The daemon's one way out (#1136): SIGINT / SIGTERM and a crash all run `stop` (runners, shells, MCP) under a time limit
+ * The daemon's one way out: SIGINT / SIGTERM and a crash all run `stop` (runners, shells, MCP) under a time limit
  * before `exit`. A second call while stopping is ignored. No respawn here; a supervisor decides that from the exit code.
  */
 export function shutdownOnce(stop: () => Promise<void>, exit: (code: number) => void, timeoutMs = 20_000): (code: number, err?: unknown) => Promise<void> {

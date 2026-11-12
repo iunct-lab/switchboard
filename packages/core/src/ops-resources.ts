@@ -1,7 +1,7 @@
-// The resources screen's one read (#3332, docs/design/ops-metrics.md): the host's free memory now, the machine's heavy-process
+// The resources screen's one read (docs/design/ops-metrics.md): the host's free memory now, the machine's heavy-process
 // slots and who waits for them (`ops-kit heavy`'s files), and the latest minute of the load sampler's task × kind RSS.
 // Read when asked, nothing on a timer, and no walk of /proc's processes: the sampler already did that this minute.
-// Each run is compared with the finished runs of its kind in `ops-kit heavy`'s history (#3335): the median time, whether
+// Each run is compared with the finished runs of its kind in `ops-kit heavy`'s history: the median time, whether
 // this one is past twice of it, and when everything running and waiting would be done.
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";

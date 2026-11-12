@@ -2,7 +2,7 @@ import type { AgentEvent } from "@switchboard/protocol";
 
 /**
  * The task so far, from Switchboard's own transcript, for a runner that cannot `--resume` it: the session was made on
- * another machine and its record did not come along (#179). The user's and the runner's words, and one line per tool
+ * another machine and its record did not come along. The user's and the runner's words, and one line per tool
  * call; the newest part is kept when it is longer than `maxChars`.
  */
 export function recapOf(events: AgentEvent[], maxChars = 24_000): string {
@@ -21,7 +21,7 @@ export function recapOf(events: AgentEvent[], maxChars = 24_000): string {
 
 /**
  * The transcript as lines — the user's and the runner's words, one line per tool call — with the newest part kept
- * when it is longer than `maxChars`. Shared by the recap above and the rubric judge (#1219).
+ * when it is longer than `maxChars`. Shared by the recap above and the rubric judge.
  */
 export function transcriptLines(events: AgentEvent[], maxChars: number): string {
   const lines: string[] = [];
