@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 
 /**
- * Files the agent made (#124): `content.parts[].inlineData` in a finished (non-partial) event, and the artifacts an event
+ * Files the agent made: `content.parts[].inlineData` in a finished (non-partial) event, and the artifacts an event
  * names in `actions.artifactDelta` ({ name: version }), fetched from ADK's REST API. Each is written into the task's
  * attachment directory under a name that is not taken yet (a file there is never overwritten) and returned by path;
  * the adapter emits `artifact(file)` and the daemon registers it as an attachment. Only the version the event names

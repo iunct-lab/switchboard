@@ -2,13 +2,13 @@ import type { AgentEvent, JudgeSettings, RunnerAdapter, RunnerId, TaskJudgement 
 import { jsonCandidates, oneLine, readOnlyMode, runSuggestionTurn } from "./suggest-llm.ts";
 
 /**
- * Who judges when the configured runner cannot (#493): not installed, no read-only mode, its limit, an error, no
+ * Who judges when the configured runner cannot: not installed, no read-only mode, its limit, an error, no
  * answer in time, or an answer that does not read. The person chose Haiku as the stand-in (2026-09-28); it is the
- * default of the setting `judgeAndChoice` (#835), which the daemon passes as `JudgeOptions.fallback`.
+ * default of the setting `judgeAndChoice`, which the daemon passes as `JudgeOptions.fallback`.
  */
 export const JUDGE_FALLBACK = { runner: "claude", model: "claude-haiku-4-5" } as const satisfies { runner: RunnerId; model: string };
 
-/** How long one judging turn may take: a real Haiku turn measured 6.6 s (#141), and nothing waits on it. The default of `judgeAndChoice.judgeTimeoutMs` (#835). */
+/** How long one judging turn may take: a real Haiku turn measured 6.6 s, and nothing waits on it. The default of `judgeAndChoice.judgeTimeoutMs`. */
 export const JUDGE_TIMEOUT_MS = 60_000;
 
 /** The prompt asks for 60 characters; a model that ignores it still gets one line of this length on the task screen. */
@@ -32,14 +32,14 @@ export interface JudgeOptions {
   log?: (msg: string) => void;
   /** Gives up at once (the daemon is stopping): the turn's session is closed and nothing more is tried. */
   signal?: AbortSignal;
-  /** Asked once when the configured runner fails (#835). Absent = `JUDGE_FALLBACK`. */
+  /** Asked once when the configured runner fails. Absent = `JUDGE_FALLBACK`. */
   fallback?: { runner: RunnerId; model: string };
-  /** How long one turn may take (#835). Absent = `JUDGE_TIMEOUT_MS`. */
+  /** How long one turn may take. Absent = `JUDGE_TIMEOUT_MS`. */
   timeoutMs?: number;
 }
 
 /**
- * Judges a finished turn as done / needs action (#493): one read-only turn of the configured runner, and when that
+ * Judges a finished turn as done / needs action: one read-only turn of the configured runner, and when that
  * fails for any reason, one turn of the fallback (`JUDGE_FALLBACK` unless set). Throws the last error when neither answers; the caller then
  * leaves the task unjudged.
  */

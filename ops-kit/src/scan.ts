@@ -17,7 +17,7 @@ export class ScanFetchError extends Error {
 /** Issue and pull request bodies and titles, their comments, and the review comments of pull requests. */
 const LISTS = ["issues?state=all", "issues/comments?", "pulls/comments?"];
 
-/** Tries of one page before the scan has no answer; a page that GitHub answered once wrongly is not a gap (#775). */
+/** Tries of one page before the scan has no answer; a page that GitHub answered once wrongly is not a gap. */
 const RETRIES = 3;
 const RETRY_WAIT_MS = 2000;
 
@@ -26,7 +26,7 @@ async function fetchWithRetry(gh: GhClient, path: string, what: string, sleep: (
     try {
       return await gh.api(path);
     } catch (e) {
-      // a limit, an outage or an auth failure is not asked again (the client waits for GitHub's time, #894), nor what is not there
+      // a limit, an outage or an auth failure is not asked again (the client waits for GitHub's time), nor what is not there
       const gone = /HTTP 404|HTTP 410/.test((e as Error).message);
       if (attempt >= RETRIES || gone || (e instanceof GhError && e.kind !== null)) throw new ScanFetchError(`${what} の取得に失敗（${attempt} 回）: ${(e as Error).message.slice(0, 200)}`, gone);
       await sleep(RETRY_WAIT_MS * attempt);
@@ -49,7 +49,7 @@ function apiOf(repo: string, url: string): string | null {
 }
 
 /**
- * Every text of the repository that an agent or a person wrote on GitHub, checked with findSecrets (#661): the lists
+ * Every text of the repository that an agent or a person wrote on GitHub, checked with findSecrets: the lists
  * above and the review bodies of every pull request. The answer names where and which kind, not the value, and how
  * many texts were read. With `since` (ISO 8601) only what was updated after it is read — the lists by GitHub's
  * `since`, the review bodies of the pull requests updated since then (a review updates its pull request) — and

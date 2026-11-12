@@ -7,7 +7,7 @@ import { loadConfig } from "./config.ts";
 import { CUSTOM_RUNNERS_KEY, Db } from "./db.ts";
 import { startServer, type CoreServer } from "./server.ts";
 
-/* The ADK servers added in Settings (#3384): the `custom:<name>` id, the saved list and GET/PUT /api/custom-runners. */
+/* The ADK servers added in Settings: the `custom:<name>` id, the saved list and GET/PUT /api/custom-runners. */
 
 const SAMPLE: CustomRunner = { port: "adk", name: "sample", label: "Sample agent", url: "http://127.0.0.1:8100", app: "sample_agent", tokenEnv: "SAMPLE_AGENT_TOKEN" };
 
@@ -26,7 +26,7 @@ describe("custom:<name> ids and the list's shape", () => {
   });
 });
 
-describe("port: adk | agui (#3407)", () => {
+describe("port: adk | agui", () => {
   const AGUI: CustomRunner = { port: "agui", name: "ag", label: "AG-UI agent", url: "http://127.0.0.1:8200/agent", tokenEnv: "AG_TOKEN", sendWorkspaceMcp: false };
 
   test("agui takes name, label, url, tokenEnv and sendWorkspaceMcp (default false); no ADK fields, no token value", () => {
@@ -59,7 +59,7 @@ describe("port: adk | agui (#3407)", () => {
   });
 });
 
-describe("sending the Workspace MCP endpoint to an AG-UI agent (#3408)", () => {
+describe("sending the Workspace MCP endpoint to an AG-UI agent", () => {
   const AGUI: CustomRunner = { port: "agui", name: "ag", label: "AG-UI agent", url: "http://127.0.0.1:8200/agent", sendWorkspaceMcp: false };
   const KEY = "A".repeat(43);
 

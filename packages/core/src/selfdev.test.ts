@@ -19,7 +19,7 @@ afterAll(() => {
   rmSync(repo, { recursive: true, force: true });
 });
 
-describe("self-dev checks (#18)", () => {
+describe("self-dev checks", () => {
   test("summarize reads bun test counts and typecheck outcomes", () => {
     expect(summarize("test", " 41 pass\n 0 fail\n", 0)).toBe("41 pass, 0 fail");
     expect(summarize("test", " 40 pass\n 1 fail\n", 1)).toBe("40 pass, 1 fail");
@@ -83,7 +83,7 @@ describe("self-dev checks (#18)", () => {
     }
   });
 
-  test("the checks are typecheck only: the full test suite stays with local-ci, a run still gives its result (#3266)", async () => {
+  test("the checks are typecheck only: the full test suite stays with local-ci, a run still gives its result", async () => {
     const { CHECKS } = await import("./selfdev.ts");
     expect(CHECKS.map((c) => c.kind)).toEqual(["typecheck"]);
     const dir = mkdtempSync(join(tmpdir(), "sb-selfdev-checks-"));
@@ -136,7 +136,7 @@ describe("self-dev checks (#18)", () => {
   }, 40_000);
 });
 
-describe("daemon shutdown (#1136)", () => {
+describe("daemon shutdown", () => {
   test("stop runs once, then exit(0); a crash exits 1; a stop that never returns is cut off; two calls stop once", async () => {
     const quiet = console.log;
     const err = console.error;

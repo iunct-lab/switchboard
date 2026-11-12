@@ -192,7 +192,7 @@ describe("ops-kit/bin/gh", () => {
   });
 });
 
-describe("backlog (#2694): in the app's Task an Issue of the workspace is not written with gh", () => {
+describe("backlog: in the app's Task an Issue of the workspace is not written with gh", () => {
   const task = { BACKLOG_URL: "http://127.0.0.1:1/api/backlog", GH_REPO: "acme/app" };
 
   test("an Issue write of the workspace stops before gh: exit 1, and the ops-kit backlog command to use", () => {
@@ -246,7 +246,7 @@ describe("backlog (#2694): in the app's Task an Issue of the workspace is not wr
     expect(run(["issue", "edit", "5", "--body", "x"], "", awsConfig, { BACKLOG_URL: undefined, GH_REPO: "acme/app" }).called?.argv).toEqual(["issue", "edit", "5", "--body", "x"]);
   });
 
-  describe("#3073: whatever form the write takes", () => {
+  describe("whatever form the write takes", () => {
     const file = (name: string, text: string) => {
       const path = join(dir, name);
       writeFileSync(path, text);
@@ -272,7 +272,7 @@ describe("backlog (#2694): in the app's Task an Issue of the workspace is not wr
       [["project", "item-delete", "1", "--owner", "acme", "--id", "x"], "ops-kit backlog set / triage"],
       [["api", "-X", "POST", "repos/acme/app/issues/5/sub_issues", "-F", "sub_issue_id=1"], "ops-kit backlog edit --parent / --no-parent"],
       [["api", "-X", "POST", "repos/:owner/:repo/issues/5/comments", "-f", "body=x"], "ops-kit backlog comment"],
-      // #3559: a label's definition, in every form
+      // a label's definition, in every form
       [["label", "create", "x", "--color", "fff"], "ops-kit sync-labels"],
       [["label", "edit", "x", "--name", "y", "-R", "acme/app"], "ops-kit sync-labels"],
       [["label", "delete", "x", "--yes"], "ops-kit sync-labels"],
@@ -281,7 +281,7 @@ describe("backlog (#2694): in the app's Task an Issue of the workspace is not wr
       [["api", "graphql", "-f", 'query=mutation{updateLabel(input:{id:"L",name:"y"}){label{id}}}'], "ops-kit sync-labels"],
       [["api", "graphql", "-f", 'query=mutation{deleteLabel(input:{id:"L"}){clientMutationId}}'], "ops-kit sync-labels"],
     ];
-    // #3559: deleting or moving an Issue, which ops-kit backlog has no command for, in every form
+    // deleting or moving an Issue, which ops-kit backlog has no command for, in every form
     const removals = (): string[][] => [
       ["issue", "delete", "5", "--yes"],
       ["issue", "delete", "https://github.com/acme/app/issues/5", "--yes"],
@@ -313,7 +313,7 @@ describe("backlog (#2694): in the app's Task an Issue of the workspace is not wr
       }
     });
 
-    test("locking and pinning an Issue reach gh in every form (#3559: the app does not sync them)", () => {
+    test("locking and pinning an Issue reach gh in every form (the app does not sync them)", () => {
       for (const argv of [
         ["issue", "lock", "5", "--reason", "resolved"],
         ["issue", "unlock", "5"],
@@ -332,7 +332,7 @@ describe("backlog (#2694): in the app's Task an Issue of the workspace is not wr
       expect(backlogWrite(["issue", "transfer", "5", "https://github.com/acme/public/issues/1"])?.repo).toBeNull();
       expect(backlogWrite(["issue", "transfer", "https://github.com/acme/app/issues/5", "acme/public"])?.repo).toBe("acme/app");
       expect(backlogWrite(["label", "clone", "acme/app"])).toEqual({ instead: expect.stringContaining("ops-kit sync-labels"), repo: null });
-      // a label's description that starts with -R names no repository (#4051's review)
+      // a label's description that starts with -R names no repository
       for (const flag of ["--description", "-d", "--name", "-n", "--color", "-c"]) expect([flag, backlogWrite(["label", "create", "x", flag, "-Racme/public"])?.repo]).toEqual([flag, null]);
       expect(run(["label", "create", "x", "--description", "-Racme/public"], "", awsConfig, task)).toMatchObject({ code: 1, called: null });
       expect(backlogWrite(["label", "list", "-R", "acme/app"])).toBeNull();
@@ -380,7 +380,7 @@ describe("backlog (#2694): in the app's Task an Issue of the workspace is not wr
   });
 });
 
-describe("backlog (#3073): the repositories the app syncs", () => {
+describe("backlog: the repositories the app syncs", () => {
   // the fake app runs in its own process: the guard is run with spawnSync, which holds this one's event loop
   let server: ReturnType<typeof Bun.spawn>;
   let port = 0;
@@ -436,8 +436,8 @@ describe("backlog (#3073): the repositories the app syncs", () => {
   });
 });
 
-// Synthetic names only (#2466): acme/widget is published, acme/widget-dev is its development repository, someone/widget a fork.
-describe("public copy (#2466): a write from a clone that still writes to its public copy stops before gh", () => {
+// Synthetic names only: acme/widget is published, acme/widget-dev is its development repository, someone/widget a fork.
+describe("public copy: a write from a clone that still writes to its public copy stops before gh", () => {
   let tree: string;
   let fake: string;
   let calls: string;
@@ -521,7 +521,7 @@ describe("public copy (#2466): a write from a clone that still writes to its pub
     for (const argv of WRITES) expect([argv, gh(argv, { FAKE_DEFAULT: "acme/widget" }, dir).called]).toEqual([argv, [argv]]);
   });
 
-  describe("noWrite: a clone marked ops-kit.noWrite (#2576)", () => {
+  describe("noWrite: a clone marked ops-kit.noWrite", () => {
     let foreign: string;
     const git = (...args: string[]) => Bun.spawnSync(["git", ...args], { cwd: foreign, env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
     beforeAll(() => {
@@ -552,7 +552,7 @@ describe("public copy (#2466): a write from a clone that still writes to its pub
         stops(argv, { FAKE_DEFAULT: "" });
       }
       stops(["issue", "comment", "1", "-b", "x"], { GH_REPO: "someone/widget" });
-      // a switch (`pr close -d`: delete the branch) takes no value: the -R after it still names the mark (#3717's review)
+      // a switch (`pr close -d`: delete the branch) takes no value: the -R after it still names the mark
       stops(["pr", "close", "5", "-d", "-R", "someone/widget"], { GH_REPO: "me/widget", FAKE_DEFAULT: "me/widget" });
     });
 
@@ -640,7 +640,7 @@ describe("the forms gh accepts", () => {
     ]) {
       expect({ argv, r: run(argv) }).toMatchObject({ argv, r: { code: 1, called: null } });
     }
-  }, 30_000); // time assumption (the flake of #2939): a bun process per form, over the 5 s default under load (5039 ms failed; docs/design/perf.md "Test flakiness")
+  }, 30_000); // time assumption (a flake): a bun process per form, over the 5 s default under load (5039 ms failed; docs/design/perf.md "Test flakiness")
 
   test("a body sent as JSON is read string by string, with its own line breaks", () => {
     const file = join(dir, "input.json");

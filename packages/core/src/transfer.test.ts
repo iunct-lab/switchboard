@@ -10,7 +10,7 @@ import { Db } from "./db.ts";
 import { startServer as startDaemon } from "./server.ts";
 
 /**
- * The judge (#493) is on by default and would ask these daemons' fake runners to judge every finished turn, adding
+ * The judge is on by default and would ask these daemons' fake runners to judge every finished turn, adding
  * sessions the tests count. Here it never answers, unless a test passes its own.
  */
 const startServer: typeof startDaemon = (cfg, adapters, opts = {}) => startDaemon(cfg, adapters, { judge: () => new Promise(() => undefined), rubricJudge: () => new Promise(() => undefined), ...opts });

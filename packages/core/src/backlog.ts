@@ -1,7 +1,7 @@
 /**
- * A workspace's GitHub backlog (#264; every registered workspace since #294): open requests and PBIs with the stage each one is stuck at. GitHub is the
- * source of truth; the DB keeps a copy of it (#885, backlog-sync.ts) that `readStoredBacklog` reads. One GraphQL query (100 Issues a page, the same shape as
- * scripts/setup/lint_backlog.sh) instead of one call per Issue, which is slow and runs into the secondary rate limit (#201).
+ * A workspace's GitHub backlog (every registered workspace): open requests and PBIs with the stage each one is stuck at. GitHub is the
+ * source of truth; the DB keeps a copy of it (backlog-sync.ts) that `readStoredBacklog` reads. One GraphQL query (100 Issues a page, the same shape as
+ * scripts/setup/lint_backlog.sh) instead of one call per Issue, which is slow and runs into the secondary rate limit.
  */
 import type { Backlog, BacklogAction, BacklogCommentData, BacklogCreateInput, BacklogEditInput, BacklogFetchState, BacklogHeldEdit, BacklogIssueData, BacklogIssueDetail, BacklogItem, BacklogPrereq, BacklogProjectItemData, BacklogPullRequestData, BacklogRecord, BacklogSource, BacklogStage, BacklogSyncInfo, BacklogSyncState, GithubBudget } from "@switchboard/protocol";
 import { applyBacklogField, BacklogResolveError, type BacklogLocalEntry, type BacklogOperation, type Db, type NewBacklogOperation } from "./db.ts";
@@ -34,8 +34,8 @@ export const runGh: GhRunner = async (args, cwd) => {
 };
 
 /**
- * `response`: what GitHub answered to the failed call (status, headers, errors), to tell a limit from other failures (#894).
- * `kind`: what the owner has to do about it (#2362; BacklogErrorKind), when the place that called gh knows.
+ * `response`: what GitHub answered to the failed call (status, headers, errors), to tell a limit from other failures.
+ * `kind`: what the owner has to do about it (BacklogErrorKind), when the place that called gh knows.
  */
 export class BacklogError extends Error {
   constructor(message: string, readonly response?: GithubResponse, readonly kind?: "gh-login" | "project-var") {
@@ -52,7 +52,7 @@ export interface BacklogWorkspace {
   projectVar?: string;
 }
 
-/** An Issue as `toItem` reads it (built from the stored records, #885). */
+/** An Issue as `toItem` reads it (built from the stored records). */
 export interface RawBacklogIssue {
   number: number;
   title: string;
@@ -97,7 +97,7 @@ const CRITERIA = "## 到達点 / 受け入れ条件";
 const CONFIRM_MARK = "（利用者確認:";
 
 /**
- * The checkbox lines of a PBI's acceptance criteria (#523), outside fences. `n` counts every checkbox line of the section
+ * The checkbox lines of a PBI's acceptance criteria, outside fences. `n` counts every checkbox line of the section
  * from 1, checked ones too, so checking one leaves the others' numbers; `line` = its index in `body.split("\n")`.
  */
 function criteria(body: string): Array<{ n: number; checked: boolean; text: string; line: number }> {
@@ -124,15 +124,15 @@ function criteria(body: string): Array<{ n: number; checked: boolean; text: stri
 const CODE_SPAN = /(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g;
 
 /**
- * The acceptance criteria still waiting on the user's own check (#523): unchecked lines with `（利用者確認: …）`. One
- * inside inline code does not count: a line that only names the form (PBI #523's own) is not a confirmation.
+ * The acceptance criteria still waiting on the user's own check: unchecked lines with `（利用者確認: …）`. One
+ * inside inline code does not count: a line that only names the form (a PBI's own description of the form) is not a confirmation.
  */
 export function confirmationsOf(body: string): Array<{ n: number; text: string; after: string | null }> {
   return criteria(body).filter((c) => !c.checked && c.text.replace(CODE_SPAN, "").includes(CONFIRM_MARK)).map(({ n, text }) => ({ n, text, after: confirmAfterOf(text) }));
 }
 
 /**
- * The time a confirmation line says to wait for (#4616): `（利用者確認: 期日 <ISO 8601 with a zone> 以降 — …）`, right after the
+ * The time a confirmation line says to wait for: `（利用者確認: 期日 <ISO 8601 with a zone> 以降 — …）`, right after the
  * parenthesis as `confirmDecisionsOf`'s form is. Inline code does not count. null = no such time, or one `afterTime` cannot read
  * (no zone, not a time): the line is asked for as before.
  */
@@ -152,9 +152,9 @@ export function confirmDecisionsOf(text: string): number[] {
 }
 
 /**
- * The prerequisites a PBI / Task names (#937): the numbers on its body's first `**前提**:` line outside fences, e.g.
+ * The prerequisites a PBI / Task names: the numbers on its body's first `**前提**:` line outside fences, e.g.
  * `**前提**: #12, #34（リリース）`; `（リリース）` right after one = its merge must reach the running release too. Free text
- * (「前提: #9 が Done」, `## 依存関係`) is not read: nothing is guessed. `なし` = none; a number named twice is one.
+ * (「前提: #N が Done」, `## 依存関係`) is not read: nothing is guessed. `なし` = none; a number named twice is one.
  */
 export function prereqsOf(body: string): Array<{ number: number; release: boolean }> {
   let fence: string | null = null;
@@ -170,8 +170,8 @@ export function prereqsOf(body: string): Array<{ number: number; release: boolea
 }
 
 /**
- * The Task whose artifacts are a PBI's screen mockups (#2296): the first id on its body's first `**画面イメージ**:` line
- * outside fences (a full-width colon too), taken as a question's (`asks.ts`, #2221). null = no such line or no id on it.
+ * The Task whose artifacts are a PBI's screen mockups: the first id on its body's first `**画面イメージ**:` line
+ * outside fences (a full-width colon too), taken as a question's (`asks.ts`). null = no such line or no id on it.
  */
 export function mockupTaskOf(body: string): string | null {
   let fence: string | null = null;
@@ -189,9 +189,9 @@ function field(raw: RawBacklogIssue, project: number, name: string) {
   return item?.fieldValues.nodes.find((v) => v.field?.name === name);
 }
 
-/** The label that keeps backlog-next off a request or PBI still being thought about (#2930). */
+/** The label that keeps backlog-next off a request or PBI still being thought about. */
 export const ON_HOLD_LABEL = "on-hold";
-/** The label of a PBI that improves the development flow itself; at most `flowLimit` of them are in progress at once (#4082). */
+/** The label of a PBI that improves the development flow itself; at most `flowLimit` of them are in progress at once. */
 export const FLOW_LABEL = "flow-improvement";
 
 /**
@@ -208,7 +208,7 @@ export function stageOf(raw: RawBacklogIssue, project: number): BacklogStage | n
   return "needs-tasks";
 }
 
-/** The label a request carries after its direct Task came back without a change (#4322): the pipeline takes it from there. */
+/** The label a request carries after its direct Task came back without a change: the pipeline takes it from there. */
 export const DIRECT_RETURNED_LABEL = "direct-returned";
 
 /**
@@ -235,7 +235,7 @@ export function toItem(raw: RawBacklogIssue, project: number, ws: Pick<BacklogWo
   if (!stage) return null;
   const pbi = raw.labels.nodes.some((l) => l.name === "type:pbi");
   const status = field(raw, project, "Status")?.name ?? null;
-  // an in-progress PBI's, a needs-decision label or not (#523)
+  // an in-progress PBI's, a needs-decision label or not
   const confirmations = pbi && (status === "In progress" || status === "In review") ? confirmationsOf(raw.body) : [];
   const tasks = pbi ? { total: raw.subIssuesSummary.total, done: raw.subIssuesSummary.completed, doneAt: raw.subIssuesSummary.doneAt } : null;
   return {
@@ -284,12 +284,12 @@ export function startTitle(item: Pick<BacklogItem, "number" | "title">, action: 
   return `#${item.number} ${ACTION_NAME[action]}: ${item.title}`;
 }
 
-/** backlog-next's two slots per workspace (#561): implementing a PBI, and planning (to a PBI, to Tasks, a status check). */
+/** backlog-next's two slots per workspace: implementing a PBI, and planning (to a PBI, to Tasks, a status check). */
 export type Slot = "implement" | "plan";
 
 export const SLOT_OF_ACTION: Record<BacklogAction, Slot> = { complete: "implement", close: "implement", "to-pbi": "plan", "to-tasks": "plan", check: "plan", direct: "plan" };
 
-/** What `scripts/setup/` of another repository holds (`setupScripts`), for the instructions of a Task that runs there (#557). */
+/** What `scripts/setup/` of another repository holds (`setupScripts`), for the instructions of a Task that runs there. */
 export interface OtherRepo {
   meta: string;
   projectVar?: string;
@@ -303,7 +303,7 @@ export interface OtherRepo {
 export function otherRepoRules(other: OtherRepo, local = false, localForge = false): string {
   const { meta, setup } = other;
   const projectUrl = `SWITCHBOARD_PROJECT_URL=$(gh variable get ${other.projectVar ?? "SWITCHBOARD_PROJECT_URL"})`;
-  // a backlog kept in Switchboard only (#2265): no GitHub Issue, Project or its variable, so none of the setup scripts for them
+  // a backlog kept in Switchboard only: no GitHub Issue, Project or its variable, so none of the setup scripts for them
   const own = !local && setup.config && setup.kit.length > 0; // the repository's own entries call the kit and it has its own ops.config.json
   const metaScripts = `${own ? "ほかのスクリプト" : "スクリプト"}（\`scripts/…\`）はこのリポジトリには無く、Switchboard のリポジトリ ${meta} からの相対パスです。そこにあるものを、このディレクトリから実行してください。`;
   const scripts = own
@@ -317,7 +317,7 @@ export function otherRepoRules(other: OtherRepo, local = false, localForge = fal
 }
 
 /**
- * What a Task on a backlog kept in Switchboard only (#2265) does instead of GitHub's Issues and Project: the kit's
+ * What a Task on a backlog kept in Switchboard only does instead of GitHub's Issues and Project: the kit's
  * `ops-kit backlog` (it is given the workspace, BACKLOG_WORKSPACE) and `ops-kit lint --fresh`, and the parallel guard
  * without `--repo` (it writes its claims there too).
  */
@@ -326,19 +326,19 @@ export const LOCAL_ISSUE_RULES = "Issue・Project のフィールド・Milestone
 export const LOCAL_BACKLOG_RULES = LOCAL_ISSUE_RULES + "PR・レビュー・CI・マージはリポジトリの PR で行う。ただし PR の本文・コミットには GitHub の閉じるキーワード（close / fix / resolve とその -s / -d 形）も `#<番号>` の形の Task・PBI の参照も書かない（番号は Switchboard の番号で、GitHub の同じ番号の別の Issue を閉じる・参照する）。Task は PR 本文の 1 行 `Backlog-Task: <番号>` と枝 `sb/<番号>-<topic>` で示す。PR をマージしたら `ops-kit backlog edit <Task> --state closed` で Task を閉じる（自動では閉じない）。";
 
 /**
- * What a Task does instead of PRs on a checkout whose changes the app keeps (#2490, the kit's `forgeOf` is its local
+ * What a Task does instead of PRs on a checkout whose changes the app keeps (the kit's `forgeOf` is its local
  * service: no remote, or `forge` names it): the skills' 「ローカルの変更では」 lines, with `scripts` = where the
  * Switchboard checkout is (`` in its own, `<meta>/` in another's): its scripts and docs/merge-gate.md.
  */
 export const localChangeRules = (root: string) =>
   `この workspace の変更はアプリに置く（リモートは使わない）。PR の代わりにローカルの「変更」で、レビュー・ローカル CI・マージ判定・マージを行う（各スキルの「ローカルの変更では」の行）。\`gh pr\` / \`gh stack\` / \`git push\` / \`git fetch\`・リリースタグ・\`ops-kit pull-main\` は使わない。枝は \`git checkout -b sb/<Task>-<topic>\` で 1 本ずつ（積まず、マージしてから次の枝を main から切る）。変更は \`ops-kit backlog create --title <題> --body-file <本文> --head <枝> --base main\`（本文の 1 行 \`Backlog-Task: <Task>\`。閉じるキーワードと \`#<番号>\` は書かない）。ローカル CI は \`bun ${root}scripts/local-ci.ts --change <変更>\`、マージ判定は \`bun ${root}scripts/merge-gate.ts --change <変更>\`、マージは \`bun ${root}scripts/local-merge.ts <変更>\`（判定をもう一度通し、Task も閉じる）。どれも \`--repo\` は付けない。マージ判定が \`[再チェック <kind>]\` で止めたら、\`${root}docs/merge-gate.md\` の「Recheck」を、PR の情報を \`ops-kit backlog view <変更>\`、差分を \`git diff main...<枝>\` に読み替えて回し、印（\`[recheck] <kind> pass <head の sha>\`）は \`ops-kit backlog comment <変更>\` で変更に付ける。\`[merge-ask]\` / \`[merge-answer]\` の印も変更のコメントに付ける（形は同じ文書の「Record marks」）。リリースタグは無いので、決定ログの「戻すなら <tag>」は「戻すなら: タグなし（変更 #<変更> の mergeCommit の前）」と書く。`;
 
-/** The form of a ## 状況 (#522), the same in a 状況確認 and in a resume of a stalled PBI (#578). */
+/** The form of a ## 状況, the same in a 状況確認 and in a resume of a stalled PBI. */
 const REPORT_FORMAT = "`## 状況` で始まるコメントを 1 件書いてください。中身は `### 済んだこと` / `### 残り` / `### 止まっている理由`（動いているなら「動いている」とその Task）/ `### 次にやること`。";
 
 /**
  * What a complete Task is asked for, so the runner's own approval reads the merge of a PR the merge gate passed as part of
- * the request (#1357), and so does its sharing of review material and the Issues the skills file (#2725). The same section as .claude/skills/pbi-complete/SKILL.md names; only `complete` carries it.
+ * the request, and so does its sharing of review material and the Issues the skills file. The same section as .claude/skills/pbi-complete/SKILL.md names; only `complete` carries it.
  */
 const COMPLETE_SCOPE = "この依頼は、マージ判定（`scripts/merge-gate.ts`）が merge を返した PR のマージ、リリースタグ、PBI を閉じるところまでを含みます。.claude/skills/cross-runner-review/SKILL.md が渡すレビューの材料（fresh clone のコード、PR・Task・PBI の本文、差分）を別のランナー（Claude Code / Codex）と CLAUDE.md の追加のレビュアーに渡すこと、スキルの手順が作る Issue（レビュー指摘の Issue 化、要望 Issue と PBI）とコメントも、この依頼に含みます。マージのたびに利用者へ聞き直さないでください。マージ判定が `[聞く]` で止めたとき、デーモンを再起動する pull、認証は、これまでどおり Task の会話で聞いてください（.claude/skills/pbi-complete/SKILL.md の「この依頼が含む範囲」）。昇格はリポジトリの CLAUDE.md の決まりに従い、CLAUDE.md が聞かずに昇格してよいと書いていなければ Task の会話で聞いてください。";
 
@@ -347,12 +347,12 @@ const COMPLETE_SCOPE = "この依頼は、マージ判定（`scripts/merge-gate.
  * into that repository when the runner starts (docs/design/skill-sync.md); `other.meta` is only where `scripts/…` are.
  * The skills are written for this repository, so what to read differently is spelled out.
  *
- * `local` (#2265): the workspace's backlog is kept in Switchboard only — the Task works on it with `ops-kit backlog` alone.
+ * `local`: the workspace's backlog is kept in Switchboard only — the Task works on it with `ops-kit backlog` alone.
  *
- * `resume` (#578): backlog-next resumes a stalled in-progress PBI, which had `tasksDone` closed Tasks when it was picked;
+ * `resume`: backlog-next resumes a stalled in-progress PBI, which had `tasksDone` closed Tasks when it was picked;
  * the ## 状況 it writes first carries that number, so the next firing leaves the PBI until another Task closes.
  *
- * `answer` (#2745): the newest `## 回答` the person gave on the screen (screenAnswer), put in the prompt as the person's
+ * `answer`: the newest `## 回答` the person gave on the screen (screenAnswer), put in the prompt as the person's
  * words — read with a tool, an operation it allows is not the person's say to the runner's approval. Not for a check.
  */
 /** The entries a stage start renders from the pipeline's definition (`ops-kit/processes/p0-pipeline.md`); a definition missing one cannot start a stage. */
@@ -367,13 +367,13 @@ export function buildStartPrompt(item: Pick<BacklogItem, "number"> & Partial<Pic
   // which entry of the definition (docs/design/process-kernel.md, K4): the texts themselves are in the file, not here
   const entry =
     action === "to-tasks"
-      ? subIssues > 0 ? "to-tasks-ready" : "to-tasks" // a PBI in 分解待ち that already has sub-issues is waiting to be made Ready, not to be decomposed again (#1393)
+      ? subIssues > 0 ? "to-tasks-ready" : "to-tasks" // a PBI in 分解待ち that already has sub-issues is waiting to be made Ready, not to be decomposed again
       : action === "complete"
-        ? opts.resume ? "complete-resume" : opts.other ? "complete-other" : "complete" // every complete, from Ready too: backlog-next also uses it to resume an in-progress PBI whose Task was answered (#562); a resume names the skill's file: a slash command is expanded only at the start of a prompt
+        ? opts.resume ? "complete-resume" : opts.other ? "complete-other" : "complete" // every complete, from Ready too: backlog-next also uses it to resume an in-progress PBI whose Task was answered; a resume names the skill's file: a slash command is expanded only at the start of a prompt
         : action;
   // the mark only exists on a resume: an entry that uses it without one is refused by renderEntry, not rendered as 0
   const rendered = renderEntry(def, entry, { n, subIssues, reportFormat: REPORT_FORMAT, ...(opts.resume ? { tasksDoneMark: TASKS_DONE_MARK(opts.resume.tasksDone) } : {}) });
-  // Task ごとの実装のモデル（試験, #2769): every complete entry, a resume too; a model without an alias adds nothing
+  // Task ごとの実装のモデル（試験）: every complete entry, a resume too; a model without an alias adds nothing
   const alias = action === "complete" && opts.taskModel ? subagentModelAlias(opts.taskModel) : null;
   const body = alias ? `${rendered}\n\n${taskModelParagraph(alias)}` : rendered;
   const elsewhere = opts.local
@@ -386,19 +386,19 @@ export function buildStartPrompt(item: Pick<BacklogItem, "number"> & Partial<Pic
 }
 
 /**
- * The Agent tool's `model` alias of a Claude model id (#2769): `claude-sonnet-*` → `sonnet`, and opus / haiku / fable
+ * The Agent tool's `model` alias of a Claude model id: `claude-sonnet-*` → `sonnet`, and opus / haiku / fable
  * alike. null = none (another runner's model, a Bedrock id): the setting refuses it and the prompt leaves it out.
  */
 export function subagentModelAlias(model: string): string | null {
   return /^claude-(sonnet|opus|haiku|fable)-/.exec(model)?.[1] ?? null;
 }
 
-/** The trial's paragraph of an 実装 Task's prompt (#2769): each Task's implementation on a foreground subagent of `alias`; the rest stays here. */
+/** The trial's paragraph of an 実装 Task's prompt: each Task's implementation on a foreground subagent of `alias`; the rest stays here. */
 function taskModelParagraph(alias: string): string {
   return `試験: Task ごとの実装（task-to-pr の着手コメントから PR を出して In review にするまで）は、Agent ツールの model に \`${alias}\` を指定したサブエージェントに前景で任せてください（\`run_in_background\` にしない）。並べる順・レビューの処理・マージ判定・PBI を閉じるのはこの会話で行ってください。`;
 }
 
-/** The person's newest answer on the screen (#2745) as their words, in a fence longer than any run of backticks in it, so the answer cannot close it. */
+/** The person's newest answer on the screen as their words, in a fence longer than any run of backticks in it, so the answer cannot close it. */
 function saidOf(answer: { issue: number; text: string } | null | undefined): string {
   if (!answer) return "";
   const fence = "`".repeat(Math.max(4, ...[...answer.text.matchAll(/`+/g)].map((m) => m[0].length + 1)));
@@ -406,7 +406,7 @@ function saidOf(answer: { issue: number; text: string } | null | undefined): str
 }
 
 /**
- * The first prompt of a 直行で直す (#3690): the `direct` entry of the `p1-direct` candidate with the request as its signal,
+ * The first prompt of a 直行で直す: the `direct` entry of the `p1-direct` candidate with the request as its signal,
  * then the answer to read, a local backlog's rules and the screen answer as a stage Task has them (the meta workspace's
  * only: another repository's is refused before). No PBI or Task Issue: the entry itself says what it leaves on the request.
  */
@@ -417,19 +417,19 @@ export function buildDirectPrompt(item: Pick<BacklogItem, "number">, opts: { loc
   return `${body}\n\n対象: #${n}。始める前に Issue #${n} の最新の \`## 回答\` コメントを読み（\`ops-kit backlog view ${n} --fresh\`。アプリが GitHub と同期してから答え、GitHub に届かなければ保存値と未同期の印で答える）、あればそれに従ってください。${elsewhere}${saidOf(opts.answer)}`;
 }
 
-/** While any usage window of the runner the stage Tasks start on (after 上限のときの代わり, #834) is at or above this, the scheduler starts a stage Task only when none runs anywhere (#267, #561). The default of `quotaAndResume.backlogQuotaLimit` (#835). */
+/** While any usage window of the runner the stage Tasks start on (after 上限のときの代わり) is at or above this, the scheduler starts a stage Task only when none runs anywhere. The default of `quotaAndResume.backlogQuotaLimit`. */
 export const QUOTA_LIMIT = 0.8;
-/** A usage window of the runner the stage Tasks start on at this has hit its limit: a stage Task would end at once, so the scheduler starts none until it resets (#1275). */
+/** A usage window of the runner the stage Tasks start on at this has hit its limit: a stage Task would end at once, so the scheduler starts none until it resets. */
 export const QUOTA_FULL = 1;
 
 /**
- * Below this GraphQL budget left, a Task stopped by GitHub's limit is resumed at the budget's reset (`ratelimit.ts`, #549):
- * twice the heaviest read (`gh project item-list`, about 400 points; #547) still fits. A stage start does not wait on it (#2264).
+ * Below this GraphQL budget left, a Task stopped by GitHub's limit is resumed at the budget's reset (`ratelimit.ts`):
+ * twice the heaviest read (`gh project item-list`, about 400 points) still fits. A stage start does not wait on it.
  */
 export const GITHUB_REMAINING_MIN = 1000;
 
 /**
- * GitHub's GraphQL budget (#549), asked at most once per `ttlMs` (1 point a time): a failed read is kept as long as a
+ * GitHub's GraphQL budget, asked at most once per `ttlMs` (1 point a time): a failed read is kept as long as a
  * good one, so a gh that fails is not asked on every look; calls at the same time share one read. `null` = not known,
  * and a read that takes longer than `timeoutMs` is not known either (a stage button or the ledger does not hang on gh).
  * At 0 left GitHub refuses the read itself: a refusal for its primary limit is 0 left until the time GitHub gave.
@@ -470,7 +470,7 @@ export class GithubBudgetCache {
       if (limit > 0) this.limit = limit;
       return { remaining: 0, limit: this.limit, resetsAt: Math.floor(limited.at / 1000) };
     }
-    // the answer's own headers, when the body does not say (GitHub answers a limited read with 200 and errors — #550)
+    // the answer's own headers, when the body does not say (GitHub answers a limited read with 200 and errors)
     const fromHeaders = (): GithubBudget | null => {
       const remaining = Number(headers["x-ratelimit-remaining"]);
       const limit = Number(headers["x-ratelimit-limit"]);
@@ -497,10 +497,10 @@ const SLOT_STAGES: Record<Slot, BacklogStage[]> = { implement: ["ready"], plan: 
 export const priorityRank = (p: string | null) => (p && /^P[0-3]$/.test(p) ? Number(p[1]) : 4);
 
 /**
- * An in-progress PBI answered since its last stage Task finished (#562): its newest ## 回答 (on it or a Task; answeredAt is
+ * An in-progress PBI answered since its last stage Task finished: its newest ## 回答 (on it or a Task; answeredAt is
  * set for in-progress PBIs only, and a Task's open question makes the PBI needs-decision) is newer than when its last stage
- * Task — any stage, a status check too — last changed, which for a finished one is when it finished (the decision log of
- * #562). So an answer is taken up once. A PBI never started from the backlog has no last stage Task and is left to
+ * Task — any stage, a status check too — last changed, which for a finished one is when it finished.
+ * So an answer is taken up once. A PBI never started from the backlog has no last stage Task and is left to
  * whoever runs it.
  */
 export const isAnswered = (i: BacklogItem) => i.stage === "in-progress" && !!i.answeredAt && !!i.lastTask && Date.parse(i.answeredAt) > i.lastTask.updatedAt;
@@ -508,13 +508,13 @@ export const isAnswered = (i: BacklogItem) => i.stage === "in-progress" && !!i.a
 // TERMINAL, not TURN_ENDED: a Task in `background` is still working, so its item is not stopped.
 const isFinished = (t: NonNullable<BacklogItem["lastTask"]>) => TERMINAL.has(t.status);
 /**
- * Its last stage Task stopped for a reason and nothing about that stop changed since (#950): an open series (waiting /
+ * Its last stage Task stopped for a reason and nothing about that stop changed since: an open series (waiting /
  * exhausted) of that Task with no new cause, answer or condition met against its earlier stop, and it stopped before (or
  * ran out of retries, or still waits on a condition). Starting again would stop at the same place and ask the same thing,
  * so an update to the Issue alone — a label, an unrelated comment — does not release it. A new `## 回答` (isAnswered), a
  * wait that closed (isUnblocked), a person's answer to the stop or its condition met do. A stop waiting for the person's
  * decision, not answered in its Task, holds the first time it comes, and as a new cause too. A condition met is read from
- * the item's own waits / prerequisites (`pr#12`, `issue#3`; #937), so it is not waited for in the runner's own report.
+ * the item's own waits / prerequisites (`pr#12`, `issue#3`), so it is not waited for in the runner's own report.
  */
 export const stopHeld = (i: BacklogItem) => {
   const t = i.lastTask;
@@ -524,7 +524,7 @@ export const stopHeld = (i: BacklogItem) => {
   if (!s || (s.state !== "waiting" && s.state !== "exhausted")) return false;
   // a stop that waits for the person's decision (`next = "decide"`: a question, a login, a permission) holds from the first
   // time, a new cause too (CI waited on, then asked to merge, at the same place): starting again only asks the same, on
-  // top of the Task that asked it (#4082 / #3839 asked to merge, and the queue started their 実装 again within a second).
+  // top of the Task that asked it (two PBIs that asked to merge, and the queue started their 実装 again within a second).
   // The person's reply in that Task (lastAnswer: a first stop has no earlier one to show it as a change), a ## 回答 or
   // 確認済み lets it go
   if (s.next === "decide" && s.lastAnswer === null) return true;
@@ -543,31 +543,31 @@ export const stopHeld = (i: BacklogItem) => {
 const triedThisStage = (i: BacklogItem) => STAGE_ORDER.includes(i.stage) && !!i.lastTask && i.lastTask.action === ACTION_FOR_STAGE[i.stage];
 
 /**
- * Nothing changed since backlog-next last worked on it (#624): its last stage Task was this stage's, it has finished (in any
+ * Nothing changed since backlog-next last worked on it: its last stage Task was this stage's, it has finished (in any
  * way), and the Issue has not been updated since — a comment, ## 回答, body or label counts, whoever wrote it (one account).
- * In-progress PBIs are #578's. A Task that ended asking the person and was marked reviewed does not hold it (#1275).
+ * In-progress PBIs are left to the rule for a stalled PBI (close it when it can be closed, else resume it). A Task that ended asking the person and was marked reviewed does not hold it.
  */
 export const isUnchanged = (i: BacklogItem) => triedThisStage(i) && isFinished(i.lastTask!) && !releasedByReview(i.lastTask!) && Date.parse(i.updatedAt) <= i.lastTask!.updatedAt;
 
 /**
- * Its last stage Task failed (error / aborted) and the Issue was not updated since (#1275). A runner that could not run at
+ * Its last stage Task failed (error / aborted) and the Issue was not updated since. A runner that could not run at
  * all (the usage limit, an organization's setting) ends the Task in seconds and leaves no mark on the Issue — not the
- * ## 状況 of #578 either — so without this an in-progress PBI was resumed every firing (26 times in 30 hours). Any stage. A Task closed since releases it too (`tasks.doneAt`, #1051), which asking the person (`awaitingReply`) does not.
+ * ## 状況 mark of a resume either — so without this an in-progress PBI was resumed every firing (26 times in 30 hours). Any stage. A Task closed since releases it too (`tasks.doneAt`), which asking the person (`awaitingReply`) does not.
  */
 export const failedSince = (i: BacklogItem) =>
   !!i.lastTask && (i.lastTask.status === "error" || i.lastTask.status === "aborted") && !touchedSince(i) && !(i.tasks?.doneAt && Date.parse(i.tasks.doneAt) > i.lastTask.updatedAt);
 
 /**
- * Something happened on the Issue since its last stage Task ended (#1275): the Issue itself was updated, or a ## 回答 came
+ * Something happened on the Issue since its last stage Task ended: the Issue itself was updated, or a ## 回答 came
  * on it or on one of its Tasks (`answeredAt`, which a child's answer sets without touching the parent's `updatedAt`).
  */
 const touchedSince = (i: BacklogItem) => !!i.lastTask && (Date.parse(i.updatedAt) > i.lastTask.updatedAt || (!!i.answeredAt && Date.parse(i.answeredAt) > i.lastTask.updatedAt));
 
-/** The person read the Task that ended asking them and marked it reviewed (#492): that releases the item in every stage (#1275). */
+/** The person read the Task that ended asking them and marked it reviewed: that releases the item in every stage. */
 const releasedByReview = (t: NonNullable<BacklogItem["lastTask"]>) => t.outcome === "needs_action" && t.reviewedAt !== null;
 
 /**
- * Its last stage Task ended asking the person in its own conversation (#1275): outcome needs_action (#492), not reviewed,
+ * Its last stage Task ended asking the person in its own conversation: outcome needs_action, not reviewed,
  * and the Issue not updated since. An operational question is asked in the Task, not on the Issue (CLAUDE.md), so the
  * Issue shows nothing; starting the stage again stops at the same question. A reply resumes the Task (then activeTaskId
  * holds the item), an update to the Issue — a ## 回答 too — or marking the Task reviewed lets it be picked again.
@@ -575,8 +575,8 @@ const releasedByReview = (t: NonNullable<BacklogItem["lastTask"]>) => t.outcome 
 export const awaitingReply = (i: BacklogItem) => !!i.lastTask && isFinished(i.lastTask) && i.lastTask.outcome === "needs_action" && i.lastTask.reviewedAt === null && !touchedSince(i);
 
 /**
- * Its last stage Task, finished, stopped last on a series that waits for the person's decision (`next = "decide"`, #948).
- * backlog-next leaves such an item by `stopHeld`; the row shows it as waiting for a reply (#1619).
+ * Its last stage Task, finished, stopped last on a series that waits for the person's decision (`next = "decide"`).
+ * backlog-next leaves such an item by `stopHeld`; the row shows it as waiting for a reply.
  */
 const decidingStop = (i: BacklogItem) => {
   const t = i.lastTask;
@@ -585,20 +585,20 @@ const decidingStop = (i: BacklogItem) => {
   return s?.next === "decide";
 };
 
-/** Its last stage Task waits for the person's reply (#1619): the item's `replyWaiting`, from the same judgment backlog-next skips by. */
+/** Its last stage Task waits for the person's reply: the item's `replyWaiting`, from the same judgment backlog-next skips by. */
 export const isReplyWaiting = (i: BacklogItem) => awaitingReply(i) || decidingStop(i);
 
-/** The stages a slot's firing picks from: its own, and for the implement slot the in-progress PBIs it resumes or closes (#578). */
+/** The stages a slot's firing picks from: its own, and for the implement slot the in-progress PBIs it resumes or closes. */
 const inSlot = (i: BacklogItem, slot: Slot) => SLOT_STAGES[slot].includes(i.stage) || (slot === "implement" && i.stage === "in-progress");
 
 /**
- * #4082: the limit on flow-improvement PBIs and how many are in progress. `running` is counted by the caller on the whole
+ * The limit on flow-improvement PBIs and how many are in progress. `running` is counted by the caller on the whole
  * workspace backlog (`flowRunning`), not on the candidates it passes (a queue's or a narrow firing's few, the ones already
  * picked taken out), plus what it started from Ready since it read them.
  */
 export type FlowLimit = { limit: number; running: number; stopped?: number };
 /**
- * #4380: the flow PBIs in progress that count against the limit: one with a stage Task running, or one backlog-next would
+ * The flow PBIs in progress that count against the limit: one with a stage Task running, or one backlog-next would
  * go on with (`candidates` without `flow`: a resume, a close, a lifted reply). One it leaves (a reply or decision waited
  * for, a wait on a dependency, no update since, no progress since the last resume, on hold) is stopped and is not counted.
  */
@@ -606,50 +606,50 @@ export function flowRunning(items: BacklogItem[]): number {
   const goes = new Set(candidates(items, "implement").map((c) => c.item));
   return items.filter((i) => i.flow && i.stage === "in-progress" && (i.activeTaskId || goes.has(i))).length;
 }
-/** #4380: the flow PBIs in progress `flowRunning` does not count. */
+/** The flow PBIs in progress `flowRunning` does not count. */
 export const flowStopped = (items: BacklogItem[]) => items.filter((i) => i.flow && i.stage === "in-progress").length - flowRunning(items);
 /**
- * #4082: a Ready flow-improvement PBI (not P0) is left while `limit` or more flow PBIs are in progress. Without a limit
+ * A Ready flow-improvement PBI (not P0) is left while `limit` or more flow PBIs are in progress. Without a limit
  * nothing is held. An in-progress one is never held here: its resume goes on.
  */
 export function flowHeldIn(items: BacklogItem[], slot: Slot, flow?: FlowLimit): BacklogItem[] {
   if (!flow || flow.running < flow.limit) return [];
   return items.filter((i) => i.flow && !i.onHold && i.stage === "ready" && i.priority !== "P0" && inSlot(i, slot) && !i.activeTaskId);
 }
-/** #4082: the report line for the flow PBIs `flowHeldIn` leaves; null when none is left. */
+/** The report line for the flow PBIs `flowHeldIn` leaves; null when none is left. */
 export function flowHeldLine(held: BacklogItem[], { limit, running, stopped }: FlowLimit): string | null {
   if (!held.length) return null;
   return `開発の流れの PBI は同時 ${limit} 件まで（実装中 ${running} 件${stopped ? `、止まっていて数に入れない ${stopped} 件` : ""}）: 待ち ${held.map((i) => `#${i.number}`).join(" ")}`;
 }
-/** The items of a slot backlog-next leaves because they are on hold (#2930); a running stage Task's is not left for that. */
+/** The items of a slot backlog-next leaves because they are on hold; a running stage Task's is not left for that. */
 export const onHoldIn = (items: BacklogItem[], slot: Slot) => items.filter((i) => i.onHold && inSlot(i, slot) && !i.activeTaskId);
 
-/** The items of a slot backlog-next leaves because their last stage Task ended asking the person (#1275). */
+/** The items of a slot backlog-next leaves because their last stage Task ended asking the person. */
 export const replyWaitingIn = (items: BacklogItem[], slot: Slot) =>
   items.filter((i) => inSlot(i, slot) && !i.activeTaskId && !isWaiting(i) && !isUnblocked(i) && awaitingReply(i));
 
 /**
- * The items of a slot backlog-next leaves because their last stage Task failed with no update to the Issue since (#1275); one asking the person is listed as that instead.
- * That failed Task holding the Issue only by its planned resume (dedupe counts it, #4072) is still named here, with the time.
+ * The items of a slot backlog-next leaves because their last stage Task failed with no update to the Issue since; one asking the person is listed as that instead.
+ * That failed Task holding the Issue only by its planned resume (dedupe counts it) is still named here, with the time.
  */
 export const failedIn = (items: BacklogItem[], slot: Slot) =>
   items.filter((i) => inSlot(i, slot) && (!i.activeTaskId || i.activeTaskId === i.lastTask?.id) && !isWaiting(i) && !isUnblocked(i) && !awaitingReply(i) && failedSince(i));
 
-/** Worked on at this stage before and updated since (#624): picked after the items of its slot not yet worked on. */
+/** Worked on at this stage before and updated since: picked after the items of its slot not yet worked on. */
 const isTriedBefore = (i: BacklogItem) => triedThisStage(i) && !isUnchanged(i);
 
-/** The items of a slot backlog-next leaves because nothing changed since the last time (#624); a 閉じる that did not close, too (#578). */
+/** The items of a slot backlog-next leaves because nothing changed since the last time; a 閉じる that did not close, too. */
 export const unchangedIn = (items: BacklogItem[], slot: Slot) =>
   items.filter((i) => (SLOT_STAGES[slot].includes(i.stage) && isUnchanged(i)) || (inSlot(i, slot) && !i.activeTaskId && !isWaiting(i) && !isUnblocked(i) && stopHeld(i)) || (slot === "implement" && i.stage === "in-progress" && i.closable && !i.activeTaskId && !isWaiting(i) && !isAnswered(i) && !isClosable(i)));
 
 /**
- * A Ready / in-progress PBI with a wait or a prerequisite not met (#817, #1046, #937): still open, not read, withdrawn,
+ * A Ready / in-progress PBI with a wait or a prerequisite not met: still open, not read, withdrawn,
  * in a cycle or not judged. backlog-next leaves it; its row's button does not.
  */
 const isWaiting = (i: BacklogItem) => i.waits.some((w) => w.state !== "met") || (!!i.waitsUntil && !i.waitsUntil.met) || i.prereqs.some((p) => p.state !== "met");
 
 /**
- * A Ready / in-progress PBI whose waits closed or became deferred (#817).
+ * A Ready / in-progress PBI whose waits closed or became deferred.
  * waitsAt also preserves the resumption trigger when all parked PRs are removed from the current wait list.
  * It stopped with a release that came before its 実装 finished, so
  * isUnchanged does not hold it. Taken once: the 実装 it starts is a stage Task started after the waits, which makes them
@@ -658,7 +658,7 @@ const isWaiting = (i: BacklogItem) => i.waits.some((w) => w.state !== "met") || 
 export const isUnblocked = (i: BacklogItem) => (i.stage === "in-progress" || i.stage === "ready") && i.waitsAt !== null && !isWaiting(i);
 
 /**
- * The items of a slot backlog-next leaves because of their waits and prerequisites (#817, #937), with what holds each:
+ * The items of a slot backlog-next leaves because of their waits and prerequisites, with what holds each:
  * `pending` = not done yet (goes on by itself once done), `stuck` = withdrawn / missing / cycle / unknown (a person has
  * to act).
  */
@@ -670,31 +670,31 @@ export const heldIn = (items: BacklogItem[], slot: Slot) =>
       return { item, pending: held.filter((x) => x.state === "pending"), stuck: held.filter((x) => x.state !== "pending") };
     });
 
-/** An item whose 実装 would touch what other work touches, or cannot be judged (#1044). */
+/** An item whose 実装 would touch what other work touches, or cannot be judged. */
 const isOverlapped = (i: BacklogItem) => !!i.overlap && (i.overlap.hits.length > 0 || i.overlap.unknown !== null);
 
-/** The mark a resume of a stalled PBI ends its ## 状況 with (#578): how many of its Tasks were closed then. */
+/** The mark a resume of a stalled PBI ends its ## 状況 with: how many of its Tasks were closed then. */
 export const TASKS_DONE_MARK = (n: number) => `<!-- tasks-done: ${n} -->`;
 
-/** The number in a ## 状況's tasks-done mark (#578); null = no report, or one without the mark (a 状況確認's). */
+/** The number in a ## 状況's tasks-done mark; null = no report, or one without the mark (a 状況確認's). */
 export function tasksDoneMark(report: { body: string } | null): number | null {
   const m = report && /<!-- tasks-done: (\d+) -->/.exec(report.body);
   return m ? Number(m[1]) : null;
 }
 
 /**
- * An in-progress PBI whose Tasks are all closed and whose confirmations are all answered (#578): backlog-next starts 閉じる
- * (#523). Left when its last stage Task was a 閉じる that finished with no update to the Issue since, so a 閉じる that
+ * An in-progress PBI whose Tasks are all closed and whose confirmations are all answered: backlog-next starts 閉じる.
+ * Left when its last stage Task was a 閉じる that finished with no update to the Issue since, so a 閉じる that
  * failed is not started again every firing.
  */
 const isClosable = (i: BacklogItem) =>
   i.closable && !(i.lastTask?.action === "close" && isFinished(i.lastTask) && !releasedByReview(i.lastTask) && Date.parse(i.updatedAt) <= i.lastTask.updatedAt);
 
-/** An in-progress PBI with Tasks left and nothing it waits on (#578): backlog-next resumes it (`complete`). */
+/** An in-progress PBI with Tasks left and nothing it waits on: backlog-next resumes it (`complete`). */
 const isStalled = (i: BacklogItem) => i.stage === "in-progress" && !!i.tasks && i.tasks.done < i.tasks.total;
 
 /**
- * A resume that ended before writing its ## 状況 mark (#1051): the last stage Task is a finished 実装, and neither the
+ * A resume that ended before writing its ## 状況 mark: the last stage Task is a finished 実装, and neither the
  * Issue (`updatedAt`), a Task closed since (`tasks.doneAt`) nor a ## 回答 is newer than that Task's start. A resume writes
  * its marked ## 状況 first, and a 実装 started from Ready writes the decision log of its start first, so either one that
  * got that far moved the Issue past the Task.
@@ -707,49 +707,49 @@ const endedUnmarked = (i: BacklogItem) => {
 };
 
 /**
- * A stalled PBI not moved since its last resume (#578): its newest ## 状況 carries the tasks-done mark of as many closed
- * Tasks as now, and no ## 回答 came after that report; or the resume ended before writing a mark (`endedUnmarked`, #1051).
- * A resume that ended asking the person and was marked reviewed releases it too (#1275).
+ * A stalled PBI not moved since its last resume: its newest ## 状況 carries the tasks-done mark of as many closed
+ * Tasks as now, and no ## 回答 came after that report; or the resume ended before writing a mark (`endedUnmarked`).
+ * A resume that ended asking the person and was marked reviewed releases it too.
  */
 const isSpinning = (i: BacklogItem) =>
   isStalled(i) &&
   ((tasksDoneMark(i.report) === i.tasks!.done && !(i.answeredAt && Date.parse(i.answeredAt) > Date.parse(i.report!.at))) || endedUnmarked(i)) &&
   !(i.lastTask && releasedByReview(i.lastTask));
 
-/** The stalled PBIs backlog-next leaves because they did not move since their last resume (#578). */
+/** The stalled PBIs backlog-next leaves because they did not move since their last resume. */
 export const spinningIn = (items: BacklogItem[], slot: Slot) =>
   items.filter((i) => slot === "implement" && !i.activeTaskId && !isWaiting(i) && !isAnswered(i) && isSpinning(i));
 
 /**
- * The one item backlog-next moves on in a slot (#267, #561, #2929): the PBIs to finish first (回答済みの実装中 →
+ * The one item backlog-next moves on in a slot: the PBIs to finish first (回答済みの実装中 →
  * 待ちが解けた Ready・実装中 → 閉じられる実装中 → 止まった実装中), then Priority (P0 first, none last), then within one Priority
  * the items not yet worked on before those worked on and updated since, then the stage (Ready → 分解待ち → 要望), then the
  * oldest. Items waiting for a decision or with a running stage Task are left alone. An answered in-progress PBI goes on with 実装
- * (`complete`), not the in-progress button's 状況確認; so does one whose waits all closed (#817).
- * #624: an item unchanged since its last stage Task of the same stage is left too, and one updated since goes after the
+ * (`complete`), not the in-progress button's 状況確認; so does one whose waits all closed.
+ * An item unchanged since its last stage Task of the same stage is left too, and one updated since goes after the
  * items of the same Priority not yet worked on (an answered in-progress PBI still first).
- * #817: an item waiting for a PR / Issue still open is left, Ready or in progress.
- * #2753: a Ready PBI whose waits all closed takes the same place as such an in-progress one, its stopped Task reviewed or not.
- * #578: any other in-progress PBI is closed (`close`) when it can be, else resumed (`complete`, `resume: true`) unless it
+ * An item waiting for a PR / Issue still open is left, Ready or in progress.
+ * A Ready PBI whose waits all closed takes the same place as such an in-progress one, its stopped Task reviewed or not.
+ * Any other in-progress PBI is closed (`close`) when it can be, else resumed (`complete`, `resume: true`) unless it
  * did not move since its last resume (`spinningIn`).
- * #1051: a resume that ended before writing its mark is left too, until the Issue, a Task or an answer moves.
- * #1275: an item whose last stage Task failed, or ended asking the person, with no update to the Issue since is left in
+ * A resume that ended before writing its mark is left too, until the Issue, a Task or an answer moves.
+ * An item whose last stage Task failed, or ended asking the person, with no update to the Issue since is left in
  * any stage (`failedIn`, `replyWaitingIn`).
- * #2930: an item labelled `on-hold` is left in every slot and stage (`onHoldIn`), and in no other reason's list.
+ * An item labelled `on-hold` is left in every slot and stage (`onHoldIn`), and in no other reason's list.
  */
 export function pickNext(items: BacklogItem[], slot: Slot, order?: number[], flow?: FlowLimit, defs: ProcessDef[] = []): Picked | null {
-  // #1044: an 実装 (`complete`) that would touch what other work touches is not started; the next candidate goes instead
+  // An 実装 (`complete`) that would touch what other work touches is not started; the next candidate goes instead
   return candidates(items, slot, order, flow, defs).find((c) => !(c.action === "complete" && isOverlapped(c.item))) ?? null;
 }
 
-/** The items of the 実装 slot backlog-next leaves for their files overlapping other work, or for that not being judged (#1044). */
+/** The items of the 実装 slot backlog-next leaves for their files overlapping other work, or for that not being judged. */
 export const overlapIn = (items: BacklogItem[], slot: Slot, order?: number[], flow?: FlowLimit) => candidates(items, slot, order, flow).filter((c) => c.action === "complete" && isOverlapped(c.item)).map((c) => c.item);
 
 export type Picked = { item: BacklogItem; action: BacklogAction; resume?: true; reason?: string };
 
 /**
  * The items a slot may move on, in the order backlog-next takes them, each with what it would do. With `order` (the
- * backlog queue's numbers, #3956) the 実装 slot takes only the items in it, in its order; what holds an item is judged as
+ * backlog queue's numbers) the 実装 slot takes only the items in it, in its order; what holds an item is judged as
  * without it.
  */
 function candidates(items: BacklogItem[], slot: Slot, order?: number[], flow?: FlowLimit, defs: ProcessDef[] = []): Picked[] {
@@ -757,13 +757,13 @@ function candidates(items: BacklogItem[], slot: Slot, order?: number[], flow?: F
     isAnswered(i) ? -4 : isUnblocked(i) ? -3 : i.stage !== "in-progress" ? null : isClosable(i) ? -2 : isStalled(i) && !isSpinning(i) ? -1 : null;
   const first = (i: BacklogItem) => resumed(i) ?? 0;
   const tried = (i: BacklogItem) => (isTriedBefore(i) ? 1 : 0);
-  // #1275: a Task that failed or stopped asking, with no update to the Issue since, holds the item in any stage (an unblocked one still goes on, #817)
-  // a request a direct Task ran on (#3690) is not made a PBI after it, whatever that Task came to — unless it came back (`direct-returned`, #4322)
+  // A Task that failed or stopped asking, with no update to the Issue since, holds the item in any stage (an unblocked one still goes on)
+  // a request a direct Task ran on is not made a PBI after it, whatever that Task came to — unless it came back (`direct-returned`)
   const flowHeld = new Set(flowHeldIn(items, slot, flow));
   const open = items.filter((i) => !i.onHold && !flowHeld.has(i) && !i.activeTaskId && (i.lastTask?.action !== "direct" || i.labels.includes(DIRECT_RETURNED_LABEL)) && !isWaiting(i) && (isUnblocked(i) || (!isUnchanged(i) && !failedSince(i) && !awaitingReply(i) && !stopHeld(i))) && (SLOT_STAGES[slot].includes(i.stage) || (slot === "implement" && resumed(i) !== null)));
   const queued = order && slot === "implement" ? (i: BacklogItem) => order.indexOf(i.number) : null;
-  // #2929: the ones to finish first (`resumed`), then Priority, then not yet worked on, then the stage, then the oldest;
-  // the queue's order instead when there is one (#3956)
+  // The ones to finish first (`resumed`), then Priority, then not yet worked on, then the stage, then the oldest;
+  // the queue's order instead when there is one
   const ranked = queued ? open.filter((i) => queued(i) >= 0) : open;
   ranked.sort(
     (a, b) =>
@@ -776,7 +776,7 @@ function candidates(items: BacklogItem[], slot: Slot, order?: number[], flow?: F
   );
   return ranked.map((item) => {
     const r = resumed(item);
-    // a request starts in the candidate its own criteria choose (#4322); the reason goes into the Task's provenance
+    // a request starts in the candidate its own criteria choose; the reason goes into the Task's provenance
     const chosen = r === null && item.stage === "request" ? chooseProcess(item, defs) : null;
     const action: BacklogAction = r === -2 ? "close" : r !== null ? "complete" : chosen ? (chosen.process === "p1-direct" ? "direct" : "to-pbi") : ACTION_FOR_STAGE[item.stage]!;
     return r === -1 ? { item, action, resume: true } : chosen ? { item, action, reason: chosen.reason } : { item, action };
@@ -785,7 +785,7 @@ function candidates(items: BacklogItem[], slot: Slot, order?: number[], flow?: F
 
 export const DECISION_HEADING = "## 判断待ち";
 export const ANSWER_HEADING = "## 回答";
-/** A question put on hold (#936): not an answer — the label stays, nothing resumes, and the question is still the person's. */
+/** A question put on hold: not an answer — the label stays, nothing resumes, and the question is still the person's. */
 export const HOLD_HEADING = "## 保留";
 export const REPORT_HEADING = "## 状況";
 
@@ -801,7 +801,7 @@ function latestHeading(comments: Comment[], heading: string): { body: string; at
 export const latestDecision = (comments: Comment[]) => latestHeading(comments, DECISION_HEADING);
 
 /**
- * When the question `d` was put on hold (#936): the newest `## 保留` after it; a ## 判断待ち asked after the hold reopens it.
+ * When the question `d` was put on hold: the newest `## 保留` after it; a ## 判断待ち asked after the hold reopens it.
  * A labelled Issue without its ## 判断待ち (null) is held by any `## 保留` on it.
  */
 export function heldSince(comments: Comment[], d: { at: string } | null): string | null {
@@ -811,7 +811,7 @@ export function heldSince(comments: Comment[], d: { at: string } | null): string
 }
 
 /**
- * The question an in-progress PBI waits on in one of its open Tasks (#562): the newest ## 判断待ち among the Tasks labelled
+ * The question an in-progress PBI waits on in one of its open Tasks: the newest ## 判断待ち among the Tasks labelled
  * needs-decision; a labelled Task without one still holds the PBI (the label is the record) and says so. null = none waits.
  */
 export function taskDecision(tasks: SubTask[], fallbackAt: string): NonNullable<BacklogItem["decision"]> | null {
@@ -830,8 +830,8 @@ const PBI_COMPLETE_MARK = /<!-- pbi-complete:(claim|takeover|release)(?: (\S+))?
 type PbiWait = { numbers: number[]; at: string; overlap: boolean; after: string | null };
 
 /**
- * What a PBI waits for (#817) and when that was written: the numbers of its newest /pbi-complete mark when that is a
- * release with `waits=`, and its `after=` date (#4616; a release with only a date waits too), and no ## 回答 came after
+ * What a PBI waits for and when that was written: the numbers of its newest /pbi-complete mark when that is a
+ * release with `waits=`, and its `after=` date (a release with only a date waits too), and no ## 回答 came after
  * it. A later release without either or a later claim clears it, so nothing else has to. null = it waits for nothing.
  */
 export function waitsOf(comments: Comment[]): PbiWait | null {
@@ -848,10 +848,10 @@ export function waitsOf(comments: Comment[]): PbiWait | null {
   return { numbers: list ? [...new Set(list.split(",").map(Number))] : [], at: comments[at]!.createdAt, overlap: !!first?.startsWith("overlap="), after };
 }
 
-/** The last status report of an in-progress item (#522). */
+/** The last status report of an in-progress item. */
 export const latestReport = (comments: Comment[]) => latestHeading(comments, REPORT_HEADING);
 
-/** The repository checked out at `cwd` and whether it is private (#2799). */
+/** The repository checked out at `cwd` and whether it is private. */
 export async function repoOf(gh: GhRunner, cwd: string): Promise<{ repo: string; owner: string; name: string; private: boolean }> {
   const answer = (await call(gh, cwd, ["repo", "view", "--json", "nameWithOwner,isPrivate", "-q", '"\\(.nameWithOwner) \\(.isPrivate)"'])).trim();
   const [repo = "", visibility] = answer.split(/\s+/);
@@ -862,7 +862,7 @@ export async function repoOf(gh: GhRunner, cwd: string): Promise<{ repo: string;
 
 /**
  * The repository whose backlog the checkout at `cwd` imports and writes (`repoOf`). A clone of the public copy that
- * still resolves to it, or one marked `ops-kit.noWrite` (`noWriteRefusal`, #2467, #2576), is refused: its backlog is neither imported nor sent, and the
+ * still resolves to it, or one marked `ops-kit.noWrite` (`noWriteRefusal`), is refused: its backlog is neither imported nor sent, and the
  * import's failure says how to point the clone at one's own repository. A read only (the secret scan) uses `repoOf`.
  */
 export async function backlogRepoOf(gh: GhRunner, cwd: string): Promise<{ repo: string; owner: string; name: string; private: boolean }> {
@@ -873,7 +873,7 @@ export async function backlogRepoOf(gh: GhRunner, cwd: string): Promise<{ repo: 
 }
 
 /**
- * A workspace whose backlog is kept in Switchboard only (#2265): no GitHub Issue or Project. Its records are stored
+ * A workspace whose backlog is kept in Switchboard only: no GitHub Issue or Project. Its records are stored
  * under the workspace's id, so two of them never share a number.
  */
 export const LOCAL_BACKLOG = { service: "switchboard", host: "local" } as const;
@@ -881,13 +881,13 @@ export const LOCAL_BACKLOG = { service: "switchboard", host: "local" } as const;
 export const localBacklogSource = (workspaceId: string): BacklogSource => ({ ...LOCAL_BACKLOG, repository: workspaceId, project: { owner: "switchboard", number: 0 } });
 
 /**
- * Whether the workspace's backlog reads and writes its service's Issues — GitHub's Issues and Project (#2266), or a
- * GitLab project's Issues (#892): not one kept here only (#2265), nor one whose sync was turned off. null = a workspace
+ * Whether the workspace's backlog reads and writes its service's Issues — GitHub's Issues and Project, or a
+ * GitLab project's Issues: not one kept here only, nor one whose sync was turned off. null = a workspace
  * not imported yet. (The name is older than GitLab.)
  */
 export const syncsGithub = (s: BacklogSource | null | undefined) => !s || (s.service !== "switchboard" && !s.disabled);
 
-/* ---------- edits kept here and sent to GitHub later (#886) ---------- */
+/* ---------- edits kept here and sent to GitHub later ---------- */
 
 /** An edit refused before anything is stored; `status` = the HTTP status the API answers with. */
 export class BacklogEditError extends Error {
@@ -897,7 +897,7 @@ export class BacklogEditError extends Error {
 }
 
 /**
- * Refuses a value that does not fit its Project field (#3811), before it is stored: checked as the send checks it
+ * Refuses a value that does not fit its Project field, before it is stored: checked as the send checks it
  * (`fieldValue`), against the Project's definitions. `null` (empties the field) fits every field.
  */
 export function checkFieldTypes(defs: Array<Field & { name: string }>, fields: Record<string, string | number | null>): void {
@@ -914,7 +914,7 @@ export function checkFieldTypes(defs: Array<Field & { name: string }>, fields: R
   }
 }
 
-/** Refuses a text with a value that signs in or acts as the user (#661): it would be stored, then posted to GitHub. */
+/** Refuses a text with a value that signs in or acts as the user: it would be stored, then posted to GitHub. */
 function refuseSecrets(...texts: Array<string | undefined>): void {
   const host = hostAws();
   for (const t of texts) {
@@ -953,7 +953,7 @@ const issueIds = (records: Iterable<BacklogRecord>) =>
 const familyOf = (own: string | undefined, subIssues: number[], ids: Map<number, string>) => new Set([own, ...subIssues.map((n) => ids.get(n))].filter((x): x is string => !!x));
 
 function issueRecord(db: Db, source: BacklogSource, ref: number | string): BacklogRecord | null {
-  // while the sync is being turned on (#2266) an Issue made here may still have the number of one of GitHub's: #N is GitHub's
+  // while the sync is being turned on an Issue made here may still have the number of one of GitHub's: #N is GitHub's
   if (typeof ref === "number") return (ref > 0 && db.listBacklogRecords(source, "issue").filter((r) => ((r.local ?? r.remote) as BacklogIssueData | null)?.number === ref).sort((a, b) => Number(a.externalId.startsWith("sb:")) - Number(b.externalId.startsWith("sb:")))[0]) || null;
   const op = db.getBacklogOperation(ref);
   if (!op || op.kind !== "create" || op.repository !== source.repository || op.host !== source.host) return null;
@@ -963,7 +963,7 @@ function issueRecord(db: Db, source: BacklogSource, ref: number | string): Backl
 /** The create operation of an Issue made here while it can still be changed (not sent yet; GitHub has not made it). */
 const pendingCreate = (db: Db, source: BacklogSource, issue: string) => db.listPendingBacklogOperations(source).find((o) => o.kind === "create" && o.issue === issue && o.status === "pending" && !o.remoteId);
 
-/** What a create sends (#886): the Issue's fields, and the Project it goes in with its fields. */
+/** What a create sends: the Issue's fields, and the Project it goes in with its fields. */
 export interface BacklogCreatePayload {
   title: string;
   body: string;
@@ -972,7 +972,7 @@ export interface BacklogCreatePayload {
   milestone: string | null;
   parent: number | null;
   project: { owner: string; number: number; fields: Record<string, string | number | null> } | null;
-  /** A local change's branches (#2485); absent on an Issue. */
+  /** A local change's branches; absent on an Issue. */
   change?: { head: string; base: string };
 }
 
@@ -990,7 +990,7 @@ export function createStoredIssue(db: Db, source: BacklogSource, input: Omit<Bac
 }
 
 /**
- * Edits a stored Issue (#886): each field that changes becomes an operation, sent later, made on the value shown now
+ * Edits a stored Issue: each field that changes becomes an operation, sent later, made on the value shown now
  * (its `base`). An Issue not created yet has its create changed instead. Refused: an Issue not stored, one not read in
  * full (404 / 403 on its last read), a Project change of an Issue whose create is under way. Returns the operations.
  */
@@ -1004,7 +1004,7 @@ export function editStoredIssue(db: Db, source: BacklogSource, ref: number | str
   const added = (input.labels?.add ?? []).filter((l) => !input.labels?.remove.includes(l));
   const labels = (l: string[]) => [...new Set([...l, ...added])].filter((x) => !input.labels?.remove.includes(x));
   const create = pendingCreate(db, source, rec.externalId);
-  // a create sends no reason: closing one with a reason waits for it to be made (#3146)
+  // a create sends no reason: closing one with a reason waits for it to be made
   if (create && input.stateReason) throw new BacklogEditError("作成を GitHub に送っている間は閉じた理由を付けられません。送り終えてから編集してください", 409);
   if (input.change && !cur.change) throw new BacklogEditError(`#${ref} は変更ではありません`, 422);
   // a merged or closed change is not opened again: its branch may have another open one now (make a new change)
@@ -1025,7 +1025,7 @@ export function editStoredIssue(db: Db, source: BacklogSource, ref: number | str
   const was = { ...cur, body: withoutMarker(cur.body) };
   for (const f of ["title", "body", "state", "milestone", "parent"] as const) if (input[f] !== undefined && input[f] !== was[f]) set(f, input[f], was[f]);
   if (input.change) set("change", input.change, was.change ?? null);
-  // after the close (#3146): an Issue closed just now is completed until its reason is changed, as GitHub answers it
+  // after the close: an Issue closed just now is completed until its reason is changed, as GitHub answers it
   // (one closed by a close still waiting to be sent shows that: applyBacklogField). A close that only takes back a
   // reopen still waiting is one with it (Db.applyBacklogEdit) and writes nothing: GitHub keeps its reason, or the one a
   // reason still waiting from before the reopen makes it
@@ -1051,7 +1051,7 @@ export function editStoredIssue(db: Db, source: BacklogSource, ref: number | str
       if (!item.remote) records.push({ objectKind: "project-item", externalId: item.externalId, local: null });
     }
     if (item && input.project !== false && out) member(true);
-    // only emptying fields (#3810) does not put the Issue in the Project: it has nothing to empty there
+    // only emptying fields does not put the Issue in the Project: it has nothing to empty there
     const made = !item && input.project !== false && (input.project === true || Object.values(input.fields ?? {}).some((v) => v !== null));
     if (made) {
       const local: BacklogProjectItemData = { issue: cur.number, owner: source.project.owner, project: source.project.number, fields: { ...input.fields } };
@@ -1072,7 +1072,7 @@ export function editStoredIssue(db: Db, source: BacklogSource, ref: number | str
 }
 
 /**
- * The user's choice on a held conflict of a stored Issue (#887): the held `set` of `field` (as the held edit names it)
+ * The user's choice on a held conflict of a stored Issue: the held `set` of `field` (as the held edit names it)
  * goes to Db.resolveBacklogConflict with the revision the choice saw. 404 = no such Issue; 409 = no conflict held on
  * that field (an unknown field too), or the revision is old. Returns the operation chosen on.
  */
@@ -1091,7 +1091,7 @@ export function resolveStoredConflict(db: Db, source: BacklogSource, ref: number
 }
 
 /**
- * A `failed` operation of a stored Issue sent again (#2885): `operation` as the held edit names it. 404 = no such
+ * A `failed` operation of a stored Issue sent again: `operation` as the held edit names it. 404 = no such
  * Issue; 409 = no such operation still to send on this Issue (another Issue's, another repository's, or one sent),
  * or it is not failed. Returns the operation.
  */
@@ -1128,7 +1128,7 @@ export function cancelStoredOperation(db: Db, source: BacklogSource, ref: number
 }
 
 /**
- * Takes back a held operation of the Issue (#3804): one `unknown` or `failed`, with why. Nothing is written to GitHub;
+ * Takes back a held operation of the Issue: one `unknown` or `failed`, with why. Nothing is written to GitHub;
  * the Issue's operations after it go on (a create of an Issue never made takes them back with it). 404 = the Issue is
  * not stored; 409 = no such held operation on this Issue.
  */
@@ -1146,9 +1146,9 @@ export function withdrawStoredOperation(db: Db, source: BacklogSource, ref: numb
   return { operation: op.id };
 }
 
-/** What the check before a send, and the read with the history after it, keep and what they cannot (#887 方式 A, #1329 方式 1′): told with every stored Issue. */
+/** What the check before a send, and the read with the history after it, keep and what they cannot (GitHub's values are read just before a send, and just after it with the edit history, so an edit made in between is caught where a history exists): told with every stored Issue. */
 export const SYNC_LIMITS =
-  "GitHub に送る編集は、送る直前に GitHub の値を確かめ、編集の元から変わっていれば止めて競合として残します。本文・題・状態・ラベル・Milestone・親・Project の Status は、書いた直後に GitHub の編集履歴も読み、確かめてから書くまでの間にほかの人が書いていれば、その値を添えて競合として残します（版の内容が履歴に残っていれば、上書きした値を選んで戻せます。消されていれば編集者と時刻だけが残ります）。Status 以外の Project フィールド（Priority・Story Points・Phase など）には履歴が無く、本文・コメントは 100 版を超えて押し出された版が残らないので、そこは確かめてから書くまでの間の編集を上書きしうる（気づけない）ことがあります。履歴を読めなかったときは、書いた編集を未確認の競合として残します。同じ GitHub アカウントで GitHub の画面から書いた編集は、ほかの人の編集と区別しません（Switchboard の開発リポジトリの Issue #1329）。GitHub Project の自動化が動かした Status は編集として数えず競合にしません（手元の値を送ります。Issue が閉じたことで動いた Status は GitHub の値のままにします）。";
+  "GitHub に送る編集は、送る直前に GitHub の値を確かめ、編集の元から変わっていれば止めて競合として残します。本文・題・状態・ラベル・Milestone・親・Project の Status は、書いた直後に GitHub の編集履歴も読み、確かめてから書くまでの間にほかの人が書いていれば、その値を添えて競合として残します（版の内容が履歴に残っていれば、上書きした値を選んで戻せます。消されていれば編集者と時刻だけが残ります）。Status 以外の Project フィールド（Priority・Story Points・Phase など）には履歴が無く、本文・コメントは 100 版を超えて押し出された版が残らないので、そこは確かめてから書くまでの間の編集を上書きしうる（気づけない）ことがあります。履歴を読めなかったときは、書いた編集を未確認の競合として残します。同じ GitHub アカウントで GitHub の画面から書いた編集は、ほかの人の編集と区別しません（利用者 1 人の運用を前提に、自分のログインの編集は相手と数えません）。GitHub Project の自動化が動かした Status は編集として数えず競合にしません（手元の値を送ります。Issue が閉じたことで動いた Status は GitHub の値のままにします）。";
 
 /** A comment kept here until it is sent: its record and its operation. `extra` goes with the operation (what an answer answers). */
 function comment(issue: BacklogRecord, n: number, body: string, now: number, extra: object = {}): { record: BacklogLocalEntry; op: NewBacklogOperation } {
@@ -1158,8 +1158,8 @@ function comment(issue: BacklogRecord, n: number, body: string, now: number, ext
 }
 
 /**
- * `## 回答` + text on Issue n, then the needs-decision label off (#266), kept here and sent in that order (#886).
- * `screen` = the person gave it on the app's screen (#2745): its comment's operation keeps the mark screenAnswer reads.
+ * `## 回答` + text on Issue n, then the needs-decision label off, kept here and sent in that order.
+ * `screen` = the person gave it on the app's screen: its comment's operation keeps the mark screenAnswer reads.
  */
 export function answerStoredDecision(db: Db, source: BacklogSource, n: number, text: string, now = Date.now(), opts: { screen?: boolean } = {}): void {
   refuseSecrets(text);
@@ -1170,7 +1170,7 @@ export function answerStoredDecision(db: Db, source: BacklogSource, n: number, t
 }
 
 /**
- * The newest `## 回答` of Issue n and its sub-issues (a PBI and its Tasks) when the person gave it on the app's screen (#2745): its comment
+ * The newest `## 回答` of Issue n and its sub-issues (a PBI and its Tasks) when the person gave it on the app's screen: its comment
  * was made here with the `screen` mark. null = there is none, or the newest came from GitHub (written there, or imported
  * only), from a saved policy, or was edited after it was given — only the screen's answer is the person's words to the next stage Task.
  */
@@ -1192,7 +1192,7 @@ export function screenAnswer(db: Db, source: BacklogSource, n: number): { issue:
   return typeof given === "string" && given.trim() === last.body.trim() ? { issue: last.issue, text: given.trimStart().slice(ANSWER_HEADING.length).trim() } : null;
 }
 
-/** `## 保留` + text on Issue n (#936), kept here and sent later: the needs-decision label stays (an answer would take it off). */
+/** `## 保留` + text on Issue n, kept here and sent later: the needs-decision label stays (an answer would take it off). */
 export function holdStoredDecision(db: Db, source: BacklogSource, n: number, text: string, now = Date.now()): void {
   refuseSecrets(text);
   const rec = issueRecord(db, source, n);
@@ -1210,7 +1210,7 @@ export function askStoredDecision(db: Db, source: BacklogSource, n: number, text
   db.applyBacklogEdit(source, { records: [c.record], operations: [c.op, { issue: rec.externalId, targetKind: "issue", target: rec.externalId, kind: "set", field: "label:needs-decision", payload: true, base: false }] }, now);
 }
 
-/** A plain comment (text as written, no heading) on Issue n (#910), kept here and sent later; no label changes. */
+/** A plain comment (text as written, no heading) on Issue n, kept here and sent later; no label changes. */
 export function commentStoredIssue(db: Db, source: BacklogSource, n: number, text: string, now = Date.now()): { operation: string } {
   refuseSecrets(text);
   const rec = issueRecord(db, source, n);
@@ -1221,7 +1221,7 @@ export function commentStoredIssue(db: Db, source: BacklogSource, n: number, tex
 }
 
 /**
- * Answers confirmation `c.n` of PBI n (#523), kept here (#886): false (nothing stored) when that line of the body shown is
+ * Answers confirmation `c.n` of PBI n, kept here: false (nothing stored) when that line of the body shown is
  * no longer an unchecked confirmation with `c.text`. `ok` checks the line (`- [ ]` → `- [x]`, the rest of the body byte
  * for byte, CRLF too; sent with the body it was made on, so a body changed on GitHub meanwhile is held, not overwritten)
  * and says it was confirmed; otherwise the body is left and `reason` is written. The labels are not touched.
@@ -1247,7 +1247,7 @@ export function answerStoredConfirmation(db: Db, source: BacklogSource, n: numbe
 async function call(gh: GhRunner, cwd: string, args: string[]): Promise<string> {
   const r = await gh(args, cwd);
   if (r.code !== 0) {
-    // gh's own wording for a missing or refused login (#2362): the backlog then says to log in, not this text
+    // gh's own wording for a missing or refused login: the backlog then says to log in, not this text
     const login = /gh auth login|not logged in|authentication required/i.test(r.stderr) ? "gh-login" : undefined;
     throw new BacklogError(`gh ${args.slice(0, 2).join(" ")}: ${(r.stderr.trim() || `exit ${r.code}`).slice(0, 200)}`, responseOf(r.stdout, r.stderr), login);
   }
@@ -1269,7 +1269,7 @@ export interface BacklogProject {
 export async function projectOf(gh: GhRunner, ws: Pick<BacklogWorkspace, "path" | "projectVar">): Promise<BacklogProject> {
   const varName = ws.projectVar ?? "SWITCHBOARD_PROJECT_URL";
   const variable = () => call(gh, ws.path, ["variable", "get", varName]).catch((e: unknown) => {
-    // the variable is not set (#2362): the backlog then shows how to set up a Project, or to go without GitHub
+    // the variable is not set: the backlog then shows how to set up a Project, or to go without GitHub
     if (e instanceof BacklogError && !e.kind && /was not found/i.test(e.message)) throw new BacklogError(e.message, e.response, "project-var");
     throw e;
   });
@@ -1281,8 +1281,8 @@ export async function projectOf(gh: GhRunner, ws: Pick<BacklogWorkspace, "path" 
 }
 
 /**
- * What an Issue or PR a PBI waits for is now (#817): its type, state (OPEN / CLOSED / MERGED), Draft, labels and, for
- * a PR, the Issues it closes (#1183; `[]` for an Issue).
+ * What an Issue or PR a PBI waits for is now: its type, state (OPEN / CLOSED / MERGED), Draft, labels and, for
+ * a PR, the Issues it closes (`[]` for an Issue).
  */
 export interface WaitTarget {
   kind: "issue" | "pr";
@@ -1290,14 +1290,14 @@ export interface WaitTarget {
   isDraft: boolean;
   labels: string[];
   closes: number[];
-  /** An Issue's (#937); null for a PR, or not read. */
+  /** An Issue's; null for a PR, or not read. */
   stateReason: string | null;
-  /** A merged PR's merge commit (#937); null otherwise. */
+  /** A merged PR's merge commit; null otherwise. */
   mergeCommit: string | null;
 }
 
 /**
- * How one prerequisite stands (#937) from what is stored of it (`t`; undefined = not stored): an Issue is met when closed
+ * How one prerequisite stands from what is stored of it (`t`; undefined = not stored): an Issue is met when closed
  * as completed (or closed with no reason read), withdrawn when closed as not planned / a duplicate; a PR is met when
  * merged, withdrawn when closed unmerged. `release` needs the merge commit in the running release too (`released`; null
  * = cannot tell); an Issue cannot be released, so that is not judged. Open is pending, a Draft too.
@@ -1312,18 +1312,18 @@ export function prereqState(t: WaitTarget | undefined, need: BacklogPrereq["need
   return r === null ? "unknown" : r ? "met" : "pending";
 }
 
-/** A wait's `open` as #821's screen reads it (#937): false = met, true = pending, null = anything else. */
+/** A wait's `open` as the Backlog screen reads it: false = met, true = pending, null = anything else. */
 const openOf = (state: BacklogPrereq["state"]) => (state === "met" ? false : state === "pending" ? true : null);
 
-/** The items whose comments are read: needs-decision, in-progress, and Ready PBIs (their waits, #817). */
+/** The items whose comments are read: needs-decision, in-progress, and Ready PBIs (their waits). */
 const askedOf = (items: BacklogItem[]) => items.filter((i) => i.stage === "needs-decision" || i.stage === "in-progress" || (i.stage === "ready" && i.type === "pbi"));
-/** In-progress PBIs, whose Tasks are read too (#562). */
+/** In-progress PBIs, whose Tasks are read too. */
 const buildingOf = (asked: BacklogItem[]) => asked.filter((i) => i.stage === "in-progress" && i.type === "pbi").map((i) => i.number);
 
 /**
- * Gives the asked items what their comments say, wherever the comments came from (GitHub, or what is stored; #885):
+ * Gives the asked items what their comments say, wherever the comments came from (GitHub, or what is stored):
  * needs-decision items their open question, in-progress ones their last status report, their Tasks' questions and their
- * newest answer. Returns the waits of Ready and in-progress PBIs (#817), for `withWaits`.
+ * newest answer. Returns the waits of Ready and in-progress PBIs, for `withWaits`.
  */
 function withComments(asked: BacklogItem[], building: number[], commentsOf: (n: number) => Comment[], tasksOf: (n: number) => SubTask[]): Map<BacklogItem, PbiWait> {
   const waiting = new Map<BacklogItem, PbiWait>();
@@ -1348,7 +1348,7 @@ function withComments(asked: BacklogItem[], building: number[], commentsOf: (n: 
     i.answeredAt = [nodes, ...tasks.map((t) => t.comments.nodes)].map((c) => latestHeading(c, ANSWER_HEADING)?.at).filter((a): a is string => !!a).sort().at(-1) ?? null;
     const d = taskDecision(tasks, i.updatedAt);
     if (d) {
-      // a Task's question holds its PBI (#562): shown and answered where the PBI's own questions are
+      // a Task's question holds its PBI: shown and answered where the PBI's own questions are
       i.stage = "needs-decision";
       i.decision = d;
       i.heldAt = heldSince(tasks.find((t) => t.number === d.issue)?.comments.nodes ?? [], d);
@@ -1362,7 +1362,7 @@ function withComments(asked: BacklogItem[], building: number[], commentsOf: (n: 
 }
 
 /**
- * The PBI that moves a wait forward (#1183), from the stored Issues: an Issue that is a PBI is its own, else its
+ * The PBI that moves a wait forward, from the stored Issues: an Issue that is a PBI is its own, else its
  * parent; a PR's is the first one the Issues it closes give. null = none found (不明).
  */
 function pbiOf(n: number, t: WaitTarget, issues: Map<number, BacklogIssueData>): BacklogItem["waits"][number]["pbi"] {
@@ -1381,7 +1381,7 @@ function pbiOf(n: number, t: WaitTarget, issues: Map<number, BacklogIssueData>):
 }
 
 /**
- * Gives each waiting item its waits with their states, why it waits (#1046) and the PBI that moves each forward
+ * Gives each waiting item its waits with their states, why it waits and the PBI that moves each forward
  * (`pbiOf`). A number with no known state stays, with `open: null`: not taken as closed.
  */
 function withWaits(waiting: Map<BacklogItem, PbiWait>, targets: Map<number, WaitTarget>, issues: Map<number, BacklogIssueData>, now: number): void {
@@ -1394,7 +1394,7 @@ function withWaits(waiting: Map<BacklogItem, PbiWait>, targets: Map<number, Wait
       // These PRs are deliberately parked, not prerequisites that must be completed first.
       if (t.kind === "pr" && (t.isDraft || decision)) return [];
       if (w.overlap && t.kind === "issue" && decision) return [];
-      // an overlap is over once the other side closes; a prerequisite only once it is done (#937)
+      // an overlap is over once the other side closes; a prerequisite only once it is done
       const state = w.overlap ? (t.state === "OPEN" ? "pending" : "met") : prereqState(t, t.kind === "pr" ? "merged" : "done", () => null);
       return [{ number: n, kind: t.kind, open: openOf(state), state, reason, pbi: pbiOf(n, t, issues) }];
     });
@@ -1425,11 +1425,11 @@ export function withConfirmDecisions(items: BacklogItem[], targets: Map<number, 
 }
 
 /**
- * Gives each Ready / in-progress PBI its prerequisites (#937) with their states: those its body names (`via` null), and
+ * Gives each Ready / in-progress PBI its prerequisites with their states: those its body names (`via` null), and
  * those its open Tasks name, other than the PBI's own open Tasks (their order is the PBI's own business), when every
  * open Task has one not met. One that is still pending and leads back to the PBI (or to the Task naming it) along the
  * open Issues' prerequisites — a PBI leading on to its open Tasks' — is a `cycle`. Answers each PBI's open Tasks that can
- * start now (#2754): every prerequisite in another PBI or PR met, and none naming one of the PBI's own open Tasks.
+ * start now: every prerequisite in another PBI or PR met, and none naming one of the PBI's own open Tasks.
  */
 function withPrereqs(items: BacklogItem[], issues: Map<number, BacklogIssueData>, targets: Map<number, WaitTarget>, released: (oid: string) => boolean | null): Map<number, number[]> {
   const named = (n: number) => {
@@ -1468,13 +1468,13 @@ function withPrereqs(items: BacklogItem[], issues: Map<number, BacklogIssueData>
 }
 
 /**
- * Gives each Ready / in-progress PBI the files its Tasks name that other work touches too (#1044), by the rule of
+ * Gives each Ready / in-progress PBI the files its Tasks name that other work touches too, by the rule of
  * scripts/task-paths.ts (`pathsIn`) and scripts/parallel-guard.ts (`judge`, STALE_HOURS) read from the stored records, so that backlog-next
  * does not start a session that would only find the overlap itself. The other work: an open PR that is not a Draft, not
  * `needs-decision` and not the PBI's own (it closes neither the PBI nor one of its Tasks), and an In progress Task of
  * another PBI that is not `needs-decision`. A PR whose files are not all stored cannot be judged (`unknown`). `root` =
  * the checkout, whose top level the paths in a Task's body are read against (what `readOthers` asks GitHub for).
- * #2754: judged per Task that can start (`startable`), so one free Task lets the PBI go; with none, all its open Tasks as one.
+ * Judged per Task that can start (`startable`), so one free Task lets the PBI go; with none, all its open Tasks as one.
  */
 export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIssueData>, startable: Map<number, number[]>, pulls: Array<{ number: number; isDraft: boolean; labels: string[]; closes: number[]; updatedAt: string; files: string[] | null; state: string }>, statuses: Map<number, string | number | null>, root: string, active: (pbi: number) => boolean = () => false): void {
   const mine = items.filter((i) => i.type === "pbi" && (i.stage === "ready" || i.stage === "in-progress"));
@@ -1494,7 +1494,7 @@ export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIss
   }
   const names = [...top].map(([name, dir]) => ({ name, dir }));
   const taskPaths = (n: number) => pathsIn(issues.get(n)?.body ?? "", names);
-  // a Task of a PBI that waits for a date (#4616) is not at work: nothing of it changes before the date
+  // a Task of a PBI that waits for a date is not at work: nothing of it changes before the date
   const dated = new Set(items.filter((i) => !!i.waitsUntil && !i.waitsUntil.met).map((i) => i.number));
   const working = [...issues.values()].filter((t) => t.state === "OPEN" && t.labels.includes("type:task") && !t.labels.includes("needs-decision") && statuses.get(t.number) === "In progress" && !(t.parent !== null && dated.has(t.parent)));
   const now = new Date();
@@ -1515,7 +1515,7 @@ export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIss
       if (own.has(t.number) || (t.parent !== null && own.has(t.parent))) continue;
       others.push({ ref: `Task #${t.number}`, task: t.number, paths: taskPaths(t.number), updatedAt: t.updatedAt });
     }
-    // a PBI whose stage Task runs now (#3228): its open child Tasks are the other work too, even while their Status is not In progress yet
+    // a PBI whose stage Task runs now: its open child Tasks are the other work too, even while their Status is not In progress yet
     for (const m of issues.values()) {
       if (m.number === i.number || m.state !== "OPEN" || !m.labels.includes("type:pbi") || !active(m.number)) continue;
       for (const n of m.subIssues) {
@@ -1532,7 +1532,7 @@ export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIss
 }
 
 /**
- * The backlog of a workspace as stored by its last import (#885), without asking GitHub: the same items, stages,
+ * The backlog of a workspace as stored by its last import, without asking GitHub: the same items, stages,
  * questions, reports, answers and waits as GitHub's own answer would give, from the records read in full (`fetched`). `fetchedAt` = when
  * the last complete import was stored. A workspace never imported answers `fetchedAt: null` and no items — never an
  * empty list as if read.
@@ -1559,7 +1559,7 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
     if (r.objectKind === "issue" && r.remote?.number === 0) continue;
     if (r.objectKind === "issue" && r.remote) {
       issues.set(r.remote.number, r.remote);
-      // as GitHub last answered, not as shown (#908)
+      // as GitHub last answered, not as shown
       const stored = storedIssues.get(r.externalId);
       readOf.set(r.remote.number, { externalId: r.externalId, fetchedAt: stored?.fetchedAt ?? null, fetchState: stored?.fetchState ?? "unfetched" });
       targets.set(r.remote.number, { kind: "issue", state: r.remote.state, isDraft: false, labels: r.remote.labels, closes: [], stateReason: r.remote.stateReason, mergeCommit: null });
@@ -1614,7 +1614,7 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
   return { fetchedAt, items, changes: changesOf(ws.id, issues.values()) };
 }
 
-/** The local changes (#2485) among a workspace's Issues: every open one, then the newest 10 closed; newest first each. */
+/** The local changes among a workspace's Issues: every open one, then the newest 10 closed; newest first each. */
 function changesOf(workspaceId: string, issues: Iterable<BacklogIssueData>): Backlog["changes"] {
   const all = [...issues].flatMap((i) => (i.change ? [{ workspaceId, number: i.number, title: i.title, state: i.state, head: i.change.head, base: i.change.base, mergeCommit: i.change.mergeCommit, mergedAt: i.change.mergedAt, updatedAt: i.updatedAt }] : []));
   const newest = (a: { updatedAt: string; number: number }, b: { updatedAt: string; number: number }) => b.updatedAt.localeCompare(a.updatedAt) || b.number - a.number;
@@ -1622,7 +1622,7 @@ function changesOf(workspaceId: string, issues: Iterable<BacklogIssueData>): Bac
 }
 
 /**
- * The records as shown (#886), each with its shown value as `remote` (and `fetched`): an edit not sent yet over what GitHub answered,
+ * The records as shown, each with its shown value as `remote` (and `fetched`): an edit not sent yet over what GitHub answered,
  * and the records made here. A Project item whose last edit takes it out of the Project is not shown.
  */
 function shownRecords(db: Db, source: BacklogSource): BacklogRecord[] {
@@ -1636,7 +1636,7 @@ function shownRecords(db: Db, source: BacklogSource): BacklogRecord[] {
 }
 
 /**
- * The state and title of every stored Issue of the workspace, read in one pass (#4120): what the queue needs of a PBI, as
+ * The state and title of every stored Issue of the workspace, read in one pass: what the queue needs of a PBI, as
  * `readStoredIssue` shows it, without its comments, Project item or sync state. Empty when the workspace has no source.
  */
 export function storedIssueHeads(db: Db, ws: Pick<BacklogWorkspace, "id">): Map<number, { state: BacklogIssueData["state"]; title: string }> {
@@ -1653,8 +1653,8 @@ export function storedIssueHeads(db: Db, ws: Pick<BacklogWorkspace, "id">): Map<
 }
 
 /**
- * One stored Issue of the workspace's repository (#885), without asking GitHub; null = not stored. `ref`: its number, or
- * the local id of an Issue made here (#886) — before GitHub numbers it and after. It shows the edits not sent yet.
+ * One stored Issue of the workspace's repository, without asking GitHub; null = not stored. `ref`: its number, or
+ * the local id of an Issue made here — before GitHub numbers it and after. It shows the edits not sent yet.
  */
 export function readStoredIssue(db: Db, ws: Pick<BacklogWorkspace, "id">, ref: number | string, opts: { importFailed?: boolean; now?: number } = {}): BacklogIssueDetail | null {
   const source = db.getWorkspaceBacklogSource(ws.id);
@@ -1689,7 +1689,7 @@ export function readStoredIssue(db: Db, ws: Pick<BacklogWorkspace, "id">, ref: n
 }
 
 /**
- * The stored records of a workspace as the kit's checks read them (#919, `GET /api/backlog/records`): every Issue as
+ * The stored records of a workspace as the kit's checks read them (`GET /api/backlog/records`): every Issue as
  * shown with its Project fields, the pull requests, the checkout's top level (what a Task body's paths are read
  * against) and the Issues whose last read was not complete (`unread`: never read as current). null = never imported.
  */
@@ -1722,8 +1722,8 @@ export function readStoredRecords(db: Db, ws: Pick<BacklogWorkspace, "id" | "pat
 }
 
 /**
- * The three values of a held conflict (#887) and the revision a choice names. A conflict the write found afterwards
- * (#1329) shows the other's value from the history, not GitHub's (which is the value made here); its revision still
+ * The three values of a held conflict and the revision a choice names. A conflict the write found afterwards
+ * shows the other's value from the history, not GitHub's (which is the value made here); its revision still
  * names what GitHub has, as the choice does.
  */
 function conflictOf(db: Db, o: BacklogOperation): NonNullable<BacklogHeldEdit["conflict"]> {
@@ -1734,18 +1734,18 @@ function conflictOf(db: Db, o: BacklogOperation): NonNullable<BacklogHeldEdit["c
 }
 
 /**
- * When an Issue was last known to be current (#908): an import reads only what changed since its cursor, so a complete
+ * When an Issue was last known to be current: an import reads only what changed since its cursor, so a complete
  * one vouches for every record it did not return (`repoAt`), and the record's own read can only be as late. A record GitHub
  * did not answer for (404 / 403 / never read) is vouched for by neither: its last own read.
  */
 const freshAt = (repoAt: number | null, rec: { fetchedAt: number | null; fetchState: BacklogFetchState } | undefined) =>
   rec && rec.fetchState === "fetched" ? Math.max(rec.fetchedAt ?? 0, repoAt ?? 0) || null : rec?.fetchedAt ?? null;
 
-/** What a sync is judged on besides the operations (#908). `importFailed`: the workspace's last import failed or is held back. */
+/** What a sync is judged on besides the operations. `importFailed`: the workspace's last import failed or is held back. */
 interface SyncAt { lastSuccessfulSync: number | null; retryAt: number | null; fetchState?: BacklogFetchState; importFailed?: boolean; now: number }
 
 /**
- * How one Issue, or a workspace's whole repository, stands against GitHub (#908), from the stored operations and when it
+ * How one Issue, or a workspace's whole repository, stands against GitHub, from the stored operations and when it
  * was last read. Conflict wins, then what cannot be sent or told (a refused edit, a record GitHub no longer shows or
  * never read, a failed import), then what waits; `unknown` (a lost answer) waits, to be looked for before it is sent again.
  * A failed read never moves `lastSuccessfulSync`.
@@ -1773,9 +1773,9 @@ export function syncOf(db: Db, ops: BacklogOperation[], at: SyncAt): BacklogSync
 }
 
 /**
- * A workspace's sync as a whole (#908): its repository's operations, when it was last imported, the Issues made here
+ * A workspace's sync as a whole: its repository's operations, when it was last imported, the Issues made here
  * that GitHub has not numbered yet (no number: no stage can start on them), and the numbered Issues that hold operations
- * not sent — a conflict or a send held by an Issue with no row in the list (Closed ones) is opened from here (#1872).
+ * not sent — a conflict or a send held by an Issue with no row in the list (Closed ones) is opened from here.
  * A workspace never imported is `unfetched`.
  */
 export function workspaceSyncOf(db: Db, ws: Pick<BacklogWorkspace, "id">, opts: { importFailed?: boolean; now?: number } = {}): {
@@ -1810,7 +1810,7 @@ export function workspaceSyncOf(db: Db, ws: Pick<BacklogWorkspace, "id">, opts: 
 }
 
 /**
- * Whether a stage may start on this item: the stored data is what is true (#2264), so only a conflict held here (#887)
+ * Whether a stage may start on this item: the stored data is what is true, so only a conflict held here
  * stops it. GitHub's side of the sync (edits waiting to be sent, a failed or old import, an Issue it did not return) is
  * shown, never a reason not to start — what is kept here is sent once GitHub can be reached.
  */
@@ -1819,7 +1819,7 @@ export function canStartStoredBacklog(item: Pick<BacklogItem, "sync">): { ok: tr
   return c.length ? { ok: false, why: `競合が解消されていない（${c.map((x) => x.field ?? "作成").join("・")}）` } : { ok: true };
 }
 
-/* ---------- the version the sweep runs on (#282) ---------- */
+/* ---------- the version the sweep runs on ---------- */
 
 /** What the backlog sweep needs from sb-rescue's /api/status: the current release and the newest history entries. */
 export interface ReleaseState {
@@ -1845,7 +1845,7 @@ export type PromotionStep =
   | { action: "wait"; reason: string; failed?: { tag: string; sha: string; reason: string }; review?: ReleaseReview };
 
 /**
- * Before a backlog-next firing picks an item: bring the running app up to the newest tag (#282). Only under sb-rescue.
+ * Before a backlog-next firing picks an item: bring the running app up to the newest tag. Only under sb-rescue.
  * A tag whose promotion was rejected or that rolled back by itself is never asked for again, and while it is the newest
  * tag nothing new is started — the next merges would be built on a version that does not run. A rollback chosen by hand
  * is the person's call, not a failure of the version. `latestInCurrent`: the tag's commit is already part of what runs
@@ -1858,7 +1858,7 @@ export function promotionStep(s: { status: ReleaseState; latest: { tag: string; 
     (h.to === latest.sha && !h.ok && h.action === "rejected") ||
     (h.from === latest.sha && h.action === "auto-rollback"));
   if (failure) return { action: "wait", reason: `昇格に失敗した版のまま: ${latest.tag}`, failed: { tag: latest.tag, sha: latest.sha, reason: failure.reason } };
-  // a public copy's clone (the caller passed `review`): the tag is asked for only once its diff was checked and found ok (#4569)
+  // a public copy's clone (the caller passed `review`): the tag is asked for only once its diff was checked and found ok
   if (s.review === "start") return { action: "review" };
   if (s.review && s.review.state !== "ok") {
     const r = s.review;
@@ -1871,11 +1871,11 @@ export function promotionStep(s: { status: ReleaseState; latest: { tag: string; 
   return { action: "promote", tag: latest.tag, sha: latest.sha };
 }
 
-/** Why a promotionFirst held the newest tag (#626), and since when it has held that tag (#2148). */
+/** Why a promotionFirst held the newest tag, and since when it has held that tag. */
 export type PromotionHold = { tag: string; failed: boolean; reason: string; since: number };
 
 /**
- * The once-a-day notice of a promotion held for running Tasks (#2148): only a hold that began before the approval-window
+ * The once-a-day notice of a promotion held for running Tasks: only a hold that began before the approval-window
  * schedule's last firing (`firedAt`, 00:00 UTC), so a hold is told at the next firing after it began and a new tag
  * waits for the next day. A failed tag is told by its own ## 判断待ち; no Task running = promoteWhenIdle promotes it.
  * `at` = the hold's `since`: the notice's id, so the same hold back after a moment without it (promoteWhenIdle clears it

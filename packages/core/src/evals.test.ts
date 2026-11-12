@@ -21,7 +21,7 @@ const stop = (id: string, reason: StopRecord["reason"]): AgentEvent => ({
   stop: { id, work: { workspaceId: null, issue: null, taskId: "t" }, op: "gh", target: "", reason, evidence: "", safety: "unknown", conditions: [], answer: null, actions: [], state: "waiting", at: 1 },
 });
 
-describe("ruleMetrics (#1218)", () => {
+describe("ruleMetrics", () => {
   test("counts tool calls, failures (ok:false only), errors, asks and denials; the last end and the duration", () => {
     const m = ruleMetrics(
       envelopes([
@@ -90,7 +90,7 @@ describe("ruleMetrics (#1218)", () => {
     expect(m.classifier).toEqual({ allowed: 1, denied: 1, byCategory: { interfere_with_workloads: 1 } });
   });
 
-  test("classifier (#2236): allowed and stopped calls, the stopped ones per kind; null when nothing was recorded", () => {
+  test("classifier: allowed and stopped calls, the stopped ones per kind; null when nothing was recorded", () => {
     const d = (verdict: "allow" | "block", category: string | null = null): AgentEvent => ({ t: "classifier.decision", verdict, category, mode: "auto", tool: "Bash", callId: null });
     const ask = (reason?: "classifier"): AgentEvent => ({ t: "permission.ask", id: "p", kind: "exec", tool: "Bash", input: {}, detail: "x", ...(reason ? { reason } : {}) });
     const m = ruleMetrics(envelopes([user("x"), d("allow"), d("allow"), d("block", "Irreversible Local Destruction"), d("block"), ask("classifier"), ask(), end("ok")]));
@@ -120,7 +120,7 @@ describe("ruleMetrics (#1218)", () => {
     expect(ruleMetrics(envelopes([user("x"), note("。…")]))).toMatchObject({ daemonStops: 1, lastCutByDaemon: false, lastEnd: null });
   });
 
-  test("delegated model (#2769): the model of the trial's note; null without one or for another status line; a rules@3 row is counted again", () => {
+  test("delegated model: the model of the trial's note; null without one or for another status line; a rules@3 row is counted again", () => {
     expect(ruleMetrics(envelopes([{ t: "status", text: delegatedNote("claude-sonnet-5-5") }, user("x"), end("ok")])).delegatedModel).toBe("claude-sonnet-5-5");
     expect(ruleMetrics(envelopes([user("x"), end("ok")])).delegatedModel).toBeNull();
     expect(ruleMetrics(envelopes([{ t: "status", text: "Task ごとの実装は 自分で行います" }, user("x"), end("ok")])).delegatedModel).toBeNull();
@@ -194,7 +194,7 @@ describe("ruleMetrics (#1218)", () => {
   });
 });
 
-describe("evalRequestDraft (#1221)", () => {
+describe("evalRequestDraft", () => {
   const task = { id: "task_1", title: "README を\n直す", runner: "claude" as const };
   const rules = { metrics: { turns: 2, toolCalls: 7, toolFailures: 2, errors: 1, asks: 0, denials: 0, stops: 1, stopReasons: { "usage-limit": 1 }, userInstructions: 3, lastEnd: "ok" as const, daemonStops: 0, lastCutByDaemon: false, durationMs: 1000, classifier: null, delegatedModel: null }, status: "done" as const, outcome: "done" as const, costUsd: 0.1, by: RULES_BY, ts: 1 };
   test("the task, the counts, the criteria at 3 or below with their reasons, the summary, the rating, then the line to fill", () => {

@@ -6,7 +6,7 @@ import { KnowledgeFrontmatter as FrontmatterSchema } from "@switchboard/protocol
 import type { Db } from "./db.ts";
 
 /**
- * Knowledge Store (proposal Screen C, issue #7).
+ * Knowledge Store (proposal Screen C).
  * The source of truth is ONE Markdown folder the user owns (default ~/Knowledge, ideally a git repo).
  * sqlite (FTS5) is only an index: it can be dropped and rebuilt from the folder at any time.
  *

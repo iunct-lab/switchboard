@@ -20,13 +20,13 @@ describe("BatchAnswers.turnEnded", () => {
   const run = async (status: TaskStatus) => {
     const sent: string[] = [];
     const batch = { id: "batch:sso", kind: "sso", asks: [{ taskId: "t2" }], loggingIn: null, deviceAuth: null } as unknown as AskBatch;
-    const b = new BatchAnswers({ send: async (id) => void sent.push(id), task: () => task(status), stopRecords: () => [], batches: async () => [batch], deviceAuth: () => null, ask: async () => null, answerAsk: async () => ({ status: 200, body: {} }) });
+    const b = new BatchAnswers({ send: async (id) => void sent.push(id), task: () => task(status), stopRecords: () => [], batches: async () => [batch], deviceAuth: () => null });
     b.pendingSso = { first: "t1", rest: ["t2"], at: 0 };
     await b.turnEnded("t1");
     return sent;
   };
 
-  test("the rest are sent on when the first Task's turn ended with a background process left; not when it errored (#4212)", async () => {
+  test("the rest are sent on when the first Task's turn ended with a background process left; not when it errored", async () => {
     expect(await run("done")).toEqual(["t2"]);
     expect(await run("background")).toEqual(["t2"]);
     expect(await run("error")).toEqual([]);

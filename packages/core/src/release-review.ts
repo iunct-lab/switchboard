@@ -3,7 +3,7 @@ import type { Task } from "@switchboard/protocol";
 import { isWorking } from "./task-status.ts";
 
 /**
- * The check a public copy's clone makes of a new release before it is promoted (#4569). Pure functions only: the
+ * The check a public copy's clone makes of a new release before it is promoted. Pure functions only: the
  * prompt and the reading of the result live in the running version's code, never in the tree being checked, and the
  * result is read from the check Task's last reply (no table of its own).
  */

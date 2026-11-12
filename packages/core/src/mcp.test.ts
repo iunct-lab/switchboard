@@ -10,7 +10,7 @@ import { loadConfig } from "./config.ts";
 import { absolutePathEntries, classifyCommand, DEFAULT_POLICY, loadMcpPolicy, mcpServersFor, minimalEnv, osResolve, parseArgv, safeRealpath, safeRegExp, Scope, resolveCommand } from "./mcp.ts";
 import { startServer } from "./server.ts";
 
-// Test daemons must not read the developer's real ~/.claude/projects (#91): point the importer at a folder that does not exist.
+// Test daemons must not read the developer's real ~/.claude/projects: point the importer at a folder that does not exist.
 const NO_HISTORY = { SWITCHBOARD_CLAUDE_PROJECTS: join(tmpdir(), "switchboard-test-no-claude-projects"), SWITCHBOARD_HISTORY_POLL_MS: "0" };
 
 /** A runner that just stays alive (like DAK running in a container) so the task keeps a live session. */
@@ -110,7 +110,7 @@ describe("scope + exec policy (pure)", () => {
     });
   }
 
-  test("classifyCommand: a path riding in an option is checked like an operand, and `--` is not trusted to end the options (#2021)", () => {
+  test("classifyCommand: a path riding in an option is checked like an operand, and `--` is not trusted to end the options", () => {
     const s = new Scope([repo]);
     for (const policy of [DEFAULT_POLICY, loadMcpPolicy([join(import.meta.dir, "..", "config", "mcp.yaml")])]) {
       const v = (c: string) => ({ c, v: classifyCommand(c, policy.exec, s).verdict });
@@ -137,7 +137,7 @@ describe("scope + exec policy (pure)", () => {
     }
   });
 
-  test("classifyCommand: relative words resolve from the cwd the command runs in, and options that read a list of file names ask (#2024)", () => {
+  test("classifyCommand: relative words resolve from the cwd the command runs in, and options that read a list of file names ask", () => {
     const s = new Scope([repo]);
     mkdirSync(join(repo, "sub"), { recursive: true });
     const link = join(repo, "sub", "link");
@@ -157,7 +157,7 @@ describe("scope + exec policy (pure)", () => {
     }
   });
 
-  test("classifyCommand: `..` after a symlink is read the way the OS opens it, recursion that follows symlinks asks, jq is not read-only (#2031)", () => {
+  test("classifyCommand: `..` after a symlink is read the way the OS opens it, recursion that follows symlinks asks, jq is not read-only", () => {
     const s = new Scope([repo]);
     // link-out leads to outside: the OS opens link-out/../outside/secret.txt as outside/secret.txt; the spelling says repo/outside/…
     expect(osResolve(`${repo}/link-out/../outside/secret.txt`)).toBe(join(realpathSync(outside), "secret.txt"));
@@ -256,7 +256,7 @@ describe("scope + exec policy (pure)", () => {
     const env = minimalEnv("/tmp");
     delete process.env.SWITCHBOARD_SECRET_TEST;
     expect(Object.keys(env).sort()).toEqual(["GIT_NO_LAZY_FETCH", "GIT_OPTIONAL_LOCKS", "HOME", "LANG", "PATH", "PWD", "TERM", "TMPDIR", ...(process.env.LC_ALL ? ["LC_ALL"] : [])].sort());
-    // no relative PATH entry (a program the task put in its folder), and no place for temporary files (#2031)
+    // no relative PATH entry (a program the task put in its folder), and no place for temporary files
     const path = process.env.PATH;
     process.env.PATH = `.:node_modules/.bin:${path ?? "/usr/bin:/bin"}`;
     try {
@@ -271,7 +271,7 @@ describe("scope + exec policy (pure)", () => {
     expect(new Scope([repo, outside]).gitCeilings).toBe([dirname(realpathSync(repo)), dirname(realpathSync(outside))].join(":"));
   });
 
-  test("a folder above a root with ':' in its name is no ceiling git keeps (it splits there), so git asks in that scope (#2002)", () => {
+  test("a folder above a root with ':' in its name is no ceiling git keeps (it splits there), so git asks in that scope", () => {
     const colon = join(home, "a:b", "root");
     mkdirSync(colon, { recursive: true });
     const p = DEFAULT_POLICY.exec;
@@ -283,7 +283,7 @@ describe("scope + exec policy (pure)", () => {
   });
 });
 
-describe("servers a Task gets (#2090)", () => {
+describe("servers a Task gets", () => {
   test("mcpServersFor: without workspaces every Task, with workspaces only the named ones, never to a Task without a Workspace", () => {
     const playwright = { command: "npx", args: ["@playwright/mcp@latest", "--headless"] };
     const docs = { type: "http" as const, url: "http://127.0.0.1:9000/mcp" };
@@ -350,7 +350,7 @@ describe("Workspace MCP over HTTP", () => {
     token = ep.token;
   });
 
-  test("exec.run's read-only git finds no repository above the scope: the ceiling is in the environment the command runs in (#2002)", async () => {
+  test("exec.run's read-only git finds no repository above the scope: the ceiling is in the environment the command runs in", async () => {
     // a scope that is a subfolder of a repository: git status there, without the ceiling, would read the whole repository
     const outer = join(home, "outer-repo");
     mkdirSync(join(outer, "sub"), { recursive: true });
@@ -400,7 +400,7 @@ describe("Workspace MCP over HTTP", () => {
     await c.close();
   });
 
-  test("task.note records a structured stop (#948) next to a note, refuses an empty call and a retry reserved twice", async () => {
+  test("task.note records a structured stop next to a note, refuses an empty call and a retry reserved twice", async () => {
     const c = await connect();
     const stop = { id: "net", op: "exec.run", target: "gh api", reason: "transient", safety: "read-only", evidence: "HTTP 503", state: "retrying", actions: [{ attempt: 1, at: 1, what: "再試行", ok: null }] };
     expect(text(await c.callTool({ name: "task.note", arguments: { text: "503 なので 5 秒後にもう一度", stop } }))).toBe("noted");
@@ -414,7 +414,7 @@ describe("Workspace MCP over HTTP", () => {
     await c.close();
   });
 
-  test("exec.run retries a run the system could not start for now (#949): 5 s then 30 s at most, recorded as the task's stop; a missing folder is not retried; each retry is approved again, a denied one is not run", async () => {
+  test("exec.run retries a run the system could not start for now: 5 s then 30 s at most, recorded as the task's stop; a missing folder is not retried; each retry is approved again, a denied one is not run", async () => {
     const c = await connect();
     const waits: number[] = [];
     let busy = 0; // how many next starts fail with EAGAIN
@@ -604,7 +604,7 @@ describe("Workspace MCP over HTTP", () => {
     expect(ask.input.reason).toContain("outside the task scope");
     await fetch(`${base}/api/tasks/${taskId}/permission`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: ask.id, decision: "deny" }) });
     expect((await pending).isError).toBe(true);
-    // a relative word is checked from the cwd the command runs in (#2024): sub/out-link leads outside
+    // a relative word is checked from the cwd the command runs in: sub/out-link leads outside
     mkdirSync(join(repo, "sub"), { recursive: true });
     symlinkSync(join(outside, "secret.txt"), join(repo, "sub", "out-link"));
     try {
@@ -643,7 +643,7 @@ describe("cross-origin defence on loopback", () => {
   });
 });
 
-describe("local API token (#31)", () => {
+describe("local API token", () => {
   test("health reports authRequired=false on loopback and the token file exists with the daemon's token", async () => {
     const h = await fetch(`${base}/api/health`).then(j);
     expect(h.authRequired).toBe(false);
@@ -676,7 +676,7 @@ describe("local API token (#31)", () => {
   });
 });
 
-describe("staged writes (#11)", () => {
+describe("staged writes", () => {
   let taskId: string;
   let url: string;
   let token: string;
@@ -773,7 +773,7 @@ describe("staged writes (#11)", () => {
   });
 });
 
-describe("exec.run process groups (#1136)", () => {
+describe("exec.run process groups", () => {
   let dir: string;
   let daemon: Awaited<ReturnType<typeof startServer>>;
   let api: string;

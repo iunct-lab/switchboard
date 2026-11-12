@@ -82,7 +82,7 @@ export class TeleportOutput {
     const resumed = this.resumed || /Session\s+resumed/.test(terminalText(this.tail, true));
     return resumed && this.targets.size === 1 && this.targets.has(this.cloudId);
   }
-  /** The CLI confirmed `/rename`: this session has recorded an entry, so its normal log exists (#1865). */
+  /** The CLI confirmed `/rename`: this session has recorded an entry, so its normal log exists. */
   get renamed(): boolean {
     return this.named || /Session\s+renamed\s+to/.test(terminalText(this.tail, true));
   }
@@ -125,7 +125,7 @@ export async function supportedTeleportArgs(bin: string, cwd: string, cloudId: s
 }
 
 /**
- * The worktree "continue locally" runs in (#1395), so a Local Task working in the clone is never touched. The only Git
+ * The worktree "continue locally" runs in, so a Local Task working in the clone is never touched. The only Git
  * changes are `worktree add --detach` and one `info/exclude` line; an existing worktree is reused as it is. Returns
  * the worktree's directory. Throws a message for the screen.
  */

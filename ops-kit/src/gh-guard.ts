@@ -2,7 +2,7 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { delimiter, join } from "node:path";
 
 /**
- * The check in front of `gh` (#661, docs/design/secret-guard.md): what a `gh` command is about to write to GitHub,
+ * The check in front of `gh` (docs/design/secret-guard.md): what a `gh` command is about to write to GitHub,
  * as the texts findSecrets reads. `ops-kit/bin/gh` is first in the PATH of every runner the agent manager starts.
  */
 /** The first line of the guard's file after the shebang; realCommand knows another copy of the guard by it. */
@@ -221,12 +221,12 @@ export interface BacklogWrite {
 
 /**
  * A write to the backlog (Issues, their comments and labels, the Project's items) the app's Task makes in place of
- * `ops-kit backlog` (#2694, #3073), whatever form it takes: `gh issue create / comment / edit / close / reopen / delete /
+ * `ops-kit backlog`, whatever form it takes: `gh issue create / comment / edit / close / reopen / delete /
  * transfer`, `gh label create / edit / delete / clone`, `gh api`
  * with a method other than GET / HEAD (or a field and no method) on `repos/<o>/<r>/issues…` or `…/labels…`, a graphql
  * mutation that names one of BACKLOG_MUTATIONS in `texts` (the fields and the `--input` bodiesOf read), and
  * `gh project item-add / item-edit / item-delete / item-archive`. Locking and pinning an Issue pass in every form: the app
- * does not sync them (#3559). `repo` is the repository it names (`-R` / `--repo`,
+ * does not sync them. `repo` is the repository it names (`-R` / `--repo`,
  * before the group too, the URL given for the Issue, or the path of `gh api`), null when it names none — gh then writes
  * to GH_REPO or the checkout's; graphql and `gh project` are read as naming none (their node id or Project is not asked
  * of GitHub). Null for anything else: a read, a pull request, Actions, git, contents, a release.
@@ -284,7 +284,7 @@ function apiBacklogWrite(argv: string[], at: number, texts: string[]): BacklogWr
     : /^issues\/[^/]+\/labels(\/|$)/.test(rest) ? LABEL_INSTEAD
     : /^issues\/[^/]+\/(sub_issues?|parent)(\/|$)/.test(rest) ? PARENT_INSTEAD
     : /^issues\/[^/]+\/transfer$/.test(rest) ? NO_EQUIVALENT
-    // locking is not a value the app syncs: it does not conflict with the app's copy (#3559)
+    // locking is not a value the app syncs: it does not conflict with the app's copy
     : /^issues\/[^/]+\/lock$/.test(rest) ? null
     : "ops-kit backlog edit";
   return instead === null ? null : { instead, repo };
@@ -299,7 +299,7 @@ const READS: Record<string, Set<string>> = {
 };
 
 /**
- * Where a write goes (#2466): the repository it names (`-R` / `--repo`, else the URL given for the Issue or pull
+ * Where a write goes: the repository it names (`-R` / `--repo`, else the URL given for the Issue or pull
  * request, else `GH_REPO`), null when it names none (gh then writes to the checkout's default). Null for anything
  * that does not write: a read of `issue` / `pr` / `label` / `release`, `gh api` with GET, any other group.
  * `gh api` writes with a method other than GET / HEAD, or with a field and no method (gh then sends POST);

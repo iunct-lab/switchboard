@@ -6,8 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Db, needsMigration } from "./db.ts";
 
-// `bun main.ts` listening off loopback (the cloud host, #181): /api/health tells an unauthorized caller only whether a
-// token is needed, so the startup banner must ask with the token. It crashed on `health.runners` on the first deploy (#232).
+// `bun main.ts` listening off loopback (the cloud host): /api/health tells an unauthorized caller only whether a
+// token is needed, so the startup banner must ask with the token. It crashed on `health.runners` on the first deploy.
 test("main.ts starts off loopback and prints its runners (it reads its own health with the token)", async () => {
   const home = mkdtempSync(join(tmpdir(), "switchboard-test-main-"));
   const p = Bun.spawn(["bun", join(import.meta.dir, "main.ts")], {
@@ -19,7 +19,7 @@ test("main.ts starts off loopback and prints its runners (it reads its own healt
     let out = "";
     const reader = p.stdout.getReader();
     const deadline = Date.now() + 20_000;
-    // one read in flight at a time: a read left behind by the 500 ms tick still gets its chunk, so no output is lost (#387)
+    // one read in flight at a time: a read left behind by the 500 ms tick still gets its chunk, so no output is lost
     let pending = reader.read();
     while (!/runner codex/.test(out) && Date.now() < deadline) {
       const r = await Promise.race([pending, Bun.sleep(500).then(() => null)]);
@@ -38,7 +38,7 @@ test("main.ts starts off loopback and prints its runners (it reads its own healt
   }
 }, 30_000);
 
-// #1136: the runners lead their own process groups, so stopping the daemon takes what a runner left behind with it.
+// the runners lead their own process groups, so stopping the daemon takes what a runner left behind with it.
 test("SIGTERM takes the runners' children with the daemon", async () => {
   const home = mkdtempSync(join(tmpdir(), "switchboard-test-main-"));
   const bin = join(home, "bin");
@@ -106,7 +106,7 @@ test("SIGTERM takes the runners' children with the daemon", async () => {
   }
 }, 40_000);
 
-// #2558: DAK is opt-in. The URL that points at it is also the switch that registers it.
+// DAK is opt-in. The URL that points at it is also the switch that registers it.
 type HealthRunner = { id: string; label?: string; available: boolean; note?: string };
 async function bootAndRead(extraEnv: Record<string, string>, seed?: (home: string) => void, check?: (home: string) => void): Promise<{ out: string; runners: string[]; info: HealthRunner[] }> {
   const home = mkdtempSync(join(tmpdir(), "switchboard-test-main-"));
@@ -170,7 +170,7 @@ test("main.ts lists DAK when SWITCHBOARD_DAK_URL is set", async () => {
   expect(runners).toContain("dak");
 }, 40_000);
 
-// #3386: the ADK servers saved in Settings are read at start and run as `custom:<name>` with their label, next to the
+// the ADK servers saved in Settings are read at start and run as `custom:<name>` with their label, next to the
 // DAK of SWITCHBOARD_DAK_URL; a server that does not answer is listed as unavailable with the reason.
 test("main.ts registers the saved ADK servers as custom:<name> and DAK from SWITCHBOARD_DAK_URL", async () => {
   const adk = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => (new URL(req.url).pathname === "/list-apps" ? Response.json(["x_app", "dak_agent"]) : new Response("no", { status: 404 })) });

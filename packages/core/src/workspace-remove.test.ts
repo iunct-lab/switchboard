@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Db } from "./db.ts";
 import { copyDeletable, inspectRemoval } from "./workspace-remove.ts";
 
-// What may go with a removed registration (#2600): the copy's reach and what it would lose; the stored backlog of one repository.
+// What may go with a removed registration: the copy's reach and what it would lose; the stored backlog of one repository.
 
 let root: string;
 afterEach(() => rmSync(root, { recursive: true, force: true }));

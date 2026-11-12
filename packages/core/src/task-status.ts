@@ -1,5 +1,5 @@
 /**
- * Which status a Task may move to, and what outcome the move implies (#1140).
+ * Which status a Task may move to, and what outcome the move implies.
  * TaskManager checks `canTransition` before it writes, and `Db.updateTask` throws
  * `InvalidTaskTransitionError` for a move the table does not have, so a row never takes a status it may not have.
  */
@@ -82,9 +82,9 @@ export class InvalidTaskTransitionError extends Error {
 }
 
 /**
- * The outcome a status change implies (#492): waiting on the person → needs_action, error / aborted → failed, a new
- * turn → unknown, no longer reviewed and no longer judged (#493: the judgement was of the previous reply). done / idle
- * keep what the task has (the turn's start made it unknown; the last reply is judged by #493). A Cloud Task is never
+ * The outcome a status change implies: waiting on the person → needs_action, error / aborted → failed, a new
+ * turn → unknown, no longer reviewed and no longer judged (the judgement was of the previous reply). done / idle
+ * keep what the task has (the turn's start made it unknown; the last reply is judged afterwards by `judge.ts`). A Cloud Task is never
  * judged here, so its outcome stays unknown.
  */
 export function outcomeOnStatus(status: TaskStatus, executionMode: Task["executionMode"]): Partial<Pick<Task, "outcome" | "reviewedAt" | "judgedResult" | "judgedReason" | "judgedBy" | "judgingAt">> {

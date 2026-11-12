@@ -1677,15 +1677,15 @@ describe("aws/host offload (#678)", () => {
 case "$1 $2" in
   "ssm get-parameter") case "$4" in */offload-ci-project) echo sb-host-offload-ci ;; */offload-image-project) echo sb-host-offload-image ;; */offload-image-repo) echo 1.dkr.ecr.r.amazonaws.com/sb-host-offload-image ;; *) echo sb-host-offload ;; esac ;;
   "ecr describe-images") [ -f "$FAKE/noimage" ] && { echo "An error occurred (ImageNotFoundException) when calling the DescribeImages operation" >&2; exit 254; }; echo '{}' ;;
-  "s3 cp") cp "$3" "$S3OUT" ;;
+  "s3 cp") cp "$3" "$S3OUT"; case "$4" in *.fixtures.tar.gz) cp "$3" "$S3OUT.fixtures" ;; *.names.json) cp "$3" "$S3OUT.names" ;; esac ;;
   "codebuild start-build") [ -f "$FAKE/busy" ] && { rm "$FAKE/busy"; echo "An error occurred (AccountLimitExceededException) when calling the StartBuild operation: Cannot have more than 2 active builds for the project" >&2; exit 254; }; echo "$4:build-1" ;;
   "codebuild batch-get-builds") if [ -f "$FAKE/status-$4" ]; then cat "$FAKE/status-$4"; else cat "$FAKE/status"; fi ;;
   "logs get-log-events") case "$*" in *--next-token*) echo '{"events":[],"nextForwardToken":"f/2"}' ;; *) if [ -f "$FAKE/events-$6.json" ]; then cat "$FAKE/events-$6.json"; elif [ -f "$FAKE/full.json" ] && [ -f "$FAKE/seen" ]; then cat "$FAKE/full.json"; else touch "$FAKE/seen"; cat "$FAKE/events.json"; fi ;; esac ;;
 esac
 exit 0`,
     );
-  const setLog = (status: string, lines: string[]) => {
-    writeFileSync(join(fakeDir, "status"), `${status}\t/aws/codebuild/sb-host-offload\tbuild-1\n`);
+  const setLog = (status: string, lines: string[], computeType?: string) => {
+    writeFileSync(join(fakeDir, "status"), `${status}\t/aws/codebuild/sb-host-offload\tbuild-1${computeType ? `\t${computeType}` : ""}\n`);
     writeFileSync(join(fakeDir, "events.json"), JSON.stringify({ events: lines.map((message) => ({ message: `${message}\n` })), nextForwardToken: "f/2" }));
   };
   const offload = (args: string[], env: Record<string, string> = {}) => {
@@ -1786,7 +1786,7 @@ exit 0`,
     }
     const none = offload(["--size", "large"]);
     expect(none.code).toBe(2);
-    expect(none.err).toContain("usage: sb-offload [--size small|medium|large] [--ci] <command…>");
+    expect(none.err).toContain("usage: sb-offload [--size small|medium|large] [--ci [--fixtures <dir>] [--names <file>]] [--detach] <command…>");
     expect(calls()).toEqual([]);
   });
 
@@ -1800,7 +1800,7 @@ exit 0`,
     const logCalls = calls().filter((l) => l.startsWith("aws logs get-log-events"));
     expect(logCalls[0]).toBe("aws logs get-log-events --log-group-name /aws/codebuild/sb-host-offload --log-stream-name build-1 --start-from-head --output json");
     expect(logCalls[1]).toContain("--next-token f/2"); // only what is new
-    expect(calls()).toContain("aws codebuild batch-get-builds --ids sb-host-offload:build-1 --query builds[0].[buildStatus,logs.groupName,logs.streamName] --output text");
+    expect(calls()).toContain("aws codebuild batch-get-builds --ids sb-host-offload:build-1 --query builds[0].[buildStatus,logs.groupName,logs.streamName,environment.computeType] --output text");
   });
 
   test("sb-offload reads the log again from the head when late events were skipped, and prints what was missing (#4494)", () => {
@@ -1875,6 +1875,66 @@ exit 0`,
       expect(calls().filter((l) => l.startsWith("aws codebuild start-build"))).toHaveLength(1);
     } finally {
       cleanup();
+    }
+  });
+
+  test("sb-offload --ci --fixtures --names puts two more one-time objects, removes all three, and keeps the names out of every argument and log (#4711)", () => {
+    const dockerfile = join(repo, "container", "Dockerfile");
+    mkdirSync(join(repo, "container"), { recursive: true });
+    writeFileSync(dockerfile, "FROM scratch\n");
+    const fx = join(dir, "fx-4711");
+    mkdirSync(join(fx, "claude"), { recursive: true });
+    writeFileSync(join(fx, "claude", "a.jsonl"), "recorded\n");
+    const namesFile = join(dir, "names-4711.json");
+    writeFileSync(namesFile, JSON.stringify({ names: ["sso-prod"], accountIds: ["123456789012"] }));
+    try {
+      awsFake();
+      setLog("SUCCEEDED", ["ok", "sb-offload: exit 0"]);
+      const r = offload(["--ci", "--fixtures", fx, "--names", namesFile, "bun", "test"]);
+      expect(r.code).toBe(0);
+      const c = calls();
+      const cps = c.filter((l) => l.startsWith("aws s3 cp"));
+      expect(cps).toHaveLength(3);
+      const base = /s3:\/\/[^/]*\/(offload\/[^ ]*)\.tar\.gz /.exec(cps[0]!)![1]!;
+      expect(cps[1]).toMatch(new RegExp(`^aws s3 cp \\S+/fixtures\\.tar\\.gz s3://\\S+/${base}\\.fixtures\\.tar\\.gz `));
+      expect(cps[2]).toContain(`aws s3 cp ${namesFile} s3://`);
+      expect(cps[2]).toContain(`/${base}.names.json `);
+      // the fixtures are the directory's content, packed
+      const list = Bun.spawnSync(["tar", "-tzf", `${out}.fixtures`]).stdout.toString();
+      expect(list).toContain("claude/a.jsonl");
+      // all three are removed at the end
+      const rms = c.filter((l) => l.startsWith("aws s3 rm")).map((l) => l.split(" ")[3]!.replace(/^s3:\/\/[^/]*\//, ""));
+      expect(rms.sort()).toEqual([`${base}.fixtures.tar.gz`, `${base}.names.json`, `${base}.tar.gz`].sort());
+      // the build is told they exist, by a flag and not by a value
+      const ci = c.find((l) => l.startsWith("aws codebuild start-build"))!;
+      expect(ci).toContain('"name":"SB_OFFLOAD_FIXTURES","value":"1"');
+      expect(ci).toContain('"name":"SB_OFFLOAD_NAMES","value":"1"');
+      // no name or account id in an argument, the output or the error
+      for (const v of ["sso-prod", "123456789012"]) {
+        expect(c.join("\n")).not.toContain(v);
+        expect(r.out + r.err).not.toContain(v);
+      }
+      // without them: one object, no flags
+      awsFake();
+      setLog("SUCCEEDED", ["sb-offload: exit 0"]);
+      offload(["--ci", "bun", "test"]);
+      expect(calls().filter((l) => l.startsWith("aws s3 cp"))).toHaveLength(1);
+      expect(calls().filter((l) => l.startsWith("aws s3 rm"))).toHaveLength(1);
+      expect(calls().join("\n")).not.toMatch(/SB_OFFLOAD_(FIXTURES|NAMES)/);
+      // only with --ci, and only an existing directory / file: nothing is uploaded
+      for (const [args, msg] of [
+        [["--fixtures", fx, "true"], "go with --ci"],
+        [["--names", namesFile, "true"], "go with --ci"],
+        [["--ci", "--fixtures", join(dir, "nope"), "true"], "is not a directory"],
+        [["--ci", "--names", join(dir, "nope"), "true"], "is not a file"],
+      ] as const) {
+        const e = offload([...args]);
+        expect(e.code).toBe(2);
+        expect(e.err).toContain(msg);
+        expect(calls()).toEqual([]);
+      }
+    } finally {
+      rmSync(join(repo, "container"), { recursive: true, force: true });
     }
   });
 
@@ -1991,6 +2051,74 @@ exit 0`);
     setLog("SUCCEEDED", ["sb-offload: exit 0"]);
     offload(["true"]);
     expect(calls().some((l) => l.includes("stop-build"))).toBe(false);
+  }, 30_000);
+
+  test("sb-offload --detach prints the build id and returns without stopping the build or removing the uploads (#4712)", () => {
+    awsFake();
+    setLog("IN_PROGRESS", ["building"]);
+    mkdirSync(join(repo, "container"), { recursive: true });
+    writeFileSync(join(repo, "container", "Dockerfile"), "FROM scratch\n");
+    const names = join(dir, "detach-names.json");
+    writeFileSync(names, "{}");
+    try {
+    const r = offload(["--ci", "--names", names, "--detach", "bun", "test"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toBe("sb-offload: started sb-host-offload-ci:build-1\n");
+    const c = calls();
+    expect(c.filter((l) => l.startsWith("aws s3 cp "))).toHaveLength(2); // the work tree and the names
+    expect(c.filter((l) => l.startsWith("aws s3 rm ") || l.startsWith("aws codebuild stop-build"))).toEqual([]);
+    expect(c.some((l) => l.startsWith("aws logs get-log-events") || l.startsWith("aws codebuild batch-get-builds"))).toBe(false); // it does not wait
+    expect(readdirSync(join(home, ".cache")).filter((f) => f.startsWith("sb-offload."))).toEqual([]);
+    } finally {
+      rmSync(join(repo, "container"), { recursive: true, force: true });
+    }
+  });
+
+  test("sb-offload --collect reads an ended build's log and exits as the call would have, without sending anything or needing git (#4712)", () => {
+    awsFake();
+    const cases: [string, string[], number][] = [["SUCCEEDED", ["ok", "sb-offload: exit 0"], 0], ["FAILED", ["1 failed", "sb-offload: exit 1"], 1], ["TIMED_OUT", ["still building"], 124], ["STOPPED", ["building"], 130]];
+    for (const [status, lines, code] of cases) {
+      setLog(status, lines);
+      const r = offload(["--collect", "sb-host-offload:build-1"], { PATH: `${sleepBin}:${join(dir, "bin")}:/usr/bin:/bin` });
+      expect(r.code).toBe(code);
+      expect(r.out).toBe(lines.map((l) => `${l}\n`).join(""));
+      const c = calls();
+      expect(c).toContain("aws codebuild batch-get-builds --ids sb-host-offload:build-1 --query builds[0].[buildStatus,logs.groupName,logs.streamName,environment.computeType] --output text");
+      expect(c.filter((l) => /^aws (s3|ssm|ecr)|start-build|stop-build/.test(l))).toEqual([]);
+    }
+    // not in a work tree: it is not needed; the 137 hint is for the size the build ran on, which --collect reads from the build
+    setLog("FAILED", ["Killed", "sb-offload: exit 137"], "BUILD_GENERAL1_MEDIUM");
+    const nogit = offload(["--collect", "sb-host-offload:build-1"], { PATH: `${sleepBin}:${join(dir, "bin")}:/usr/bin:/bin` });
+    expect(nogit.code).toBe(137);
+    expect(nogit.err).toContain("out of memory on medium; retry with --size large");
+    // a build id with no build is not the command's failure
+    writeFileSync(join(fakeDir, "status"), "None\tNone\tNone\tNone\n");
+    const none = offload(["--collect", "sb-host-offload:nope"], { PATH: `${sleepBin}:${join(dir, "bin")}:/usr/bin:/bin` });
+    expect(none.code).toBe(2);
+    expect(none.err).toContain("no build sb-host-offload:nope");
+    // the size is the build's own
+    expect(offload(["--size", "medium", "--collect", "sb-host-offload:build-1"]).code).toBe(2);
+    // a command next to --collect is refused
+    expect(offload(["--collect", "sb-host-offload:build-1", "true"]).code).toBe(2);
+    expect(offload(["--collect"]).code).toBe(2);
+  });
+
+  test("sb-offload --collect does not stop the build when it is terminated (#4712)", async () => {
+    awsFake();
+    setLog("IN_PROGRESS", ["building"]);
+    rmSync(log, { force: true });
+    expect(existsSync(join(dir, "bin", "sleep"))).toBe(false);
+    const p = Bun.spawn(["bash", join(HERE, "offload.sh"), "--collect", "sb-host-offload:build-1"], {
+      cwd: home,
+      env: { PATH: `${join(dir, "bin")}:/usr/bin:/bin`, SB_HOST_ENV: join(dir, "host.env"), HOME: home, FAKE: fakeDir, S3OUT: out },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    for (const t0 = Date.now(); !calls().some((l) => l.startsWith("aws logs get-log-events") && l.includes("--next-token")) && Date.now() - t0 < 20_000; ) await Bun.sleep(50);
+    p.kill("SIGTERM");
+    expect(await p.exited).toBe(130);
+    expect(calls().filter((l) => l.includes("stop-build"))).toEqual([]);
+    expect(await new Response(p.stderr).text()).not.toContain("stopped");
   }, 30_000);
 
   test("sb-offload says why and exits 2 without the host env (on a Mac)", () => {

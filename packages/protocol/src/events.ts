@@ -13,7 +13,7 @@ export const PermissionDecision = z.enum(["allow", "deny"]);
 export type PermissionDecision = z.infer<typeof PermissionDecision>;
 
 
-/** Which Knowledge approval rule matched a permission.ask (issue #13). */
+/** Which Knowledge approval rule matched a permission.ask. */
 export const ApprovalRuleMatch = z.object({
   /** Knowledge path of the document, e.g. rules/dak.md */
   source: z.string(),
@@ -25,9 +25,9 @@ export const ApprovalRuleMatch = z.object({
 export type ApprovalRuleMatch = z.infer<typeof ApprovalRuleMatch>;
 
 /**
- * Why work stopped (#939), as a code — never read from free text. `transient` = a network drop / timeout / HTTP 502·503·504;
+ * Why work stopped, as a code — never read from free text. `transient` = a network drop / timeout / HTTP 502·503·504;
  * `auth` / `permission` / `input` are never retried; `decision` = waiting on the person's answer; `depends` = waiting on
- * another Issue / PR; `disk-full` = waiting for space (#2234), never retried; `unknown` = nothing said why (never joined with a stop whose evidence differs).
+ * another Issue / PR; `disk-full` = waiting for space, never retried; `unknown` = nothing said why (never joined with a stop whose evidence differs).
  */
 export const StopReasonCode = z.enum(["usage-limit", "github-limit", "transient", "auth", "permission", "input", "decision", "depends", "disk-full", "unknown"]);
 export type StopReasonCode = z.infer<typeof StopReasonCode>;
@@ -38,12 +38,12 @@ export type StopState = z.infer<typeof StopState>;
 
 const clip = (n: number) => z.string().transform((s) => s.slice(0, n));
 
-/** One thing a stop waits on (#939): `key` names it (`pr#12`, `resetsAt`), `value` is how it stands, `met` = it no longer holds the work back. */
+/** One thing a stop waits on: `key` names it (`pr#12`, `resetsAt`), `value` is how it stands, `met` = it no longer holds the work back. */
 export const StopCondition = z.object({ key: clip(200), value: clip(200), met: z.boolean() });
 export type StopCondition = z.infer<typeof StopCondition>;
 
 /**
- * One stop of a piece of work (#939), recorded by the daemon as `stop.record`. Same work + op + target + reason = the same
+ * One stop of a piece of work, recorded by the daemon as `stop.record`. Same work + op + target + reason = the same
  * series. `work`: the Issue it is for (workspace + number) or, with none, the task. `evidence` is a short reason in words
  * — never a credential or a command's raw output. `answer` = the person's newest answer known at the stop (`seq:<n>` of
  * a permission.resolved / send, or an Issue comment URL). `actions` = what was done about it (retries, with their result).
@@ -57,20 +57,20 @@ export const StopRecord = z.object({
   target: clip(200).default(""),
   reason: StopReasonCode.catch("unknown").default("unknown"),
   evidence: clip(300).default(""),
-  /** Whether running it again is known to be harmless (#949): read-only, or it failed before it did anything. unknown = never retried by itself. */
+  /** Whether running it again is known to be harmless: read-only, or it failed before it did anything. unknown = never retried by itself. */
   safety: z.enum(["read-only", "before-effect", "unknown"]).catch("unknown").default("unknown"),
   conditions: z.array(StopCondition).transform((a) => a.slice(-20)).default([]),
   answer: z.object({ ref: clip(300), at: z.number() }).nullable().default(null),
   actions: z.array(z.object({ attempt: z.number().int(), at: z.number().default(0), what: clip(200), ok: z.boolean().nullable() })).transform((a) => a.slice(-20)).default([]),
   state: StopState.catch("waiting").default("waiting"),
-  /** A permission stop's grant (#2745): one sentence that allows only the refused operation, sent as the person's reply when they choose to. Never a secret. */
+  /** A permission stop's grant: one sentence that allows only the refused operation, sent as the person's reply when they choose to. Never a secret. */
   grant: clip(300).nullable().optional(),
   at: z.number(),
 });
 export type StopRecord = z.infer<typeof StopRecord>;
 
 /**
- * One question of a runner's question tool (#3053: Claude's AskUserQuestion, Codex's requestUserInput). `options` empty =
+ * One question of a runner's question tool (Claude's AskUserQuestion, Codex's requestUserInput). `options` empty =
  * the question takes free text; `multiSelect` = more than one option may be chosen.
  */
 export const AskQuestion = z.object({
@@ -94,7 +94,7 @@ export const AgentEvent = z.discriminatedUnion("t", [
     cwd: z.string(),
     model: z.string().optional(),
     permissionMode: z.string().optional(),
-    /** core が付ける、そのプロセスを起動した思考の深さ。"" = CLI 既定（#1802） */
+    /** core が付ける、そのプロセスを起動した思考の深さ。"" = CLI 既定 */
     effort: z.string().optional(),
     runnerVersion: z.string().optional(),
   }),
@@ -126,13 +126,13 @@ export const AgentEvent = z.discriminatedUnion("t", [
     input: z.unknown().optional(),
     detail: z.string(),
     toolUseId: z.string().optional(),
-    /** Claude Code's auto-mode classifier stopped the call and asks the user, as at its denial limit; an ordinary block does not ask (#2236, #3214, docs/design/claude-otel.md). */
+    /** Claude Code's auto-mode classifier stopped the call and asks the user, as at its denial limit; an ordinary block does not ask (docs/design/claude-otel.md). */
     reason: z.literal("classifier").optional(),
     /** Set by the daemon when a Knowledge approval rule matched (confirm → still asked, with the reason shown). */
     rule: ApprovalRuleMatch.optional(),
   }),
   /**
-   * The runner's question tool asked the person (#3053). The adapter declines the call at once (QUESTION_DEFERRED_REPLY),
+   * The runner's question tool asked the person. The adapter declines the call at once (QUESTION_DEFERRED_REPLY),
    * so the turn ends; the daemon marks the Task as needing action and the answers come back as one reply (docs/design/asks.md).
    */
   z.object({ t: z.literal("question.ask"), id: z.string(), questions: z.array(AskQuestion) }),
@@ -157,7 +157,7 @@ export const AgentEvent = z.discriminatedUnion("t", [
     cacheWrite1hTokens: z.number().optional(),
     costUsd: z.number().optional(),
     /**
-     * true = the tokens and costUsd are this runner session's running total for `model` (Claude's `result`, #2353),
+     * true = the tokens and costUsd are this runner session's running total for `model` (Claude's `result`),
      * not this turn's: the daemon books the difference from the session's previous total.
      */
     cumulative: z.boolean().optional(),
@@ -169,7 +169,7 @@ export const AgentEvent = z.discriminatedUnion("t", [
     windows: z.record(z.string(), z.object({ utilization: z.number(), resetsAt: z.number() })),
     /** The runner's own verdict, as reported (Claude `rate_limit_info.status`: allowed | allowed_warning | rejected …). */
     status: z.string().optional(),
-    /** The window the runner names as the binding one (Claude `rateLimitType`, e.g. five_hour) — which reset to wait for (#102). */
+    /** The window the runner names as the binding one (Claude `rateLimitType`, e.g. five_hour) — which reset to wait for. */
     limitType: z.string().optional(),
   }),
   z.object({
@@ -179,8 +179,8 @@ export const AgentEvent = z.discriminatedUnion("t", [
     stat: z.string().optional(),
   }),
   /**
-   * A file of the task's (#125): one the person attached to the turn that follows, or one the runner made (#124,
-   * DAK's artifacts — recorded after the runner's `artifact(file)`). Always recorded by the daemon, never emitted by an
+   * A file of the task's: one the person attached to the turn that follows, or one the runner made
+   * (DAK's artifacts — recorded after the runner's `artifact(file)`). Always recorded by the daemon, never emitted by an
    * adapter. Bytes: GET /api/attachments/:id.
    */
   z.object({
@@ -190,9 +190,9 @@ export const AgentEvent = z.discriminatedUnion("t", [
     mime: z.string(),
     size: z.number(),
   }),
-  /** A stop of the task's work (#939). Always recorded by the daemon, never emitted by an adapter. */
+  /** A stop of the task's work. Always recorded by the daemon, never emitted by an adapter. */
   z.object({ t: z.literal("stop.record"), stop: StopRecord }),
-  /** The artifact an agent's `switchboard-artifact` fence registered (#1778). Recorded by the daemon, never emitted by an adapter. */
+  /** The artifact an agent's `switchboard-artifact` fence registered. Recorded by the daemon, never emitted by an adapter. */
   z.object({ t: z.literal("artifact.saved"), id: z.string(), title: z.string() }),
   /**
    * How many background jobs the runner still has (Claude `system/background_tasks_changed`: run_in_background shells,
@@ -200,7 +200,7 @@ export const AgentEvent = z.discriminatedUnion("t", [
    */
   z.object({ t: z.literal("background"), count: z.number().int().nonnegative(), jobs: z.array(z.string()).optional() }),
   /**
-   * Claude Code's auto-mode classifier decided a tool call without asking (#2236): its OpenTelemetry `tool_decision`,
+   * Claude Code's auto-mode classifier decided a tool call without asking: its OpenTelemetry `tool_decision`,
    * received on the daemon's loopback `/otel/:id/v1/logs` (docs/design/claude-otel.md). Recorded by the daemon, never
    * emitted by an adapter. Only these values are kept; the account, the tool's parameters and every other event are dropped.
    */
@@ -219,7 +219,7 @@ export const AgentEvent = z.discriminatedUnion("t", [
     status: z.enum(["ok", "error", "aborted"]),
     summary: z.string().optional(),
     durationMs: z.number().optional(),
-    /** The runner's own pointer to this turn, where a fork can start (#2999): Claude's transcript uuid, Codex's turn id. */
+    /** The runner's own pointer to this turn, where a fork can start: Claude's transcript uuid, Codex's turn id. */
     turn: z.string().optional(),
   }),
   z.object({ t: z.literal("error"), message: z.string() }),

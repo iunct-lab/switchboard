@@ -1,5 +1,5 @@
 /**
- * How an edit made here stands against what GitHub has (#887, 初期方式 A): one field at a time, the value it was made
+ * How an edit made here stands against what GitHub has (初期方式 A): one field at a time, the value it was made
  * on (`base`), the value made here (`local`) and GitHub's (`remote`). Both the import (Db.putBacklogSnapshot) and the
  * send (backlog-send.ts, read just before and just after the write) decide with these, so they never disagree on
  * whether two values are the same. A body is never merged: both sides changed it → a conflict, kept with all three.
@@ -50,7 +50,7 @@ export function mergeBacklogField(field: string, base: unknown, local: unknown, 
 }
 
 /**
- * What a choice on a conflict must have seen (#887): changes when the operation, its base, the value made here or
+ * What a choice on a conflict must have seen: changes when the operation, its base, the value made here or
  * GitHub's value moves — GitHub's value not read (undefined) is not its null (no milestone, no parent) — so a choice
  * made on an older screen is refused (409).
  */

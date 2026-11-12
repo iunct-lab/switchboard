@@ -1,5 +1,5 @@
 /**
- * A fake GitHub for the backlog import (#885), built on a gh that answers like the fixtures of the GitHub read before it
+ * A fake GitHub for the backlog import, built on a gh that answers like the fixtures of the GitHub read before it
  * (`backlog-graphql.json` pages, `backlog-decisions.json` comments): tests and scripts/github-api-bench.ts keep those
  * fixtures and their per-test variations.
  */
@@ -7,7 +7,7 @@ import type { GhRunner } from "../src/backlog.ts";
 
 type Json = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 /**
- * Answers the import's queries (#885) from a gh that answers like the fixtures: pages of open Issues (the query names
+ * Answers the import's queries from a gh that answers like the fixtures: pages of open Issues (the query names
  * `issues(states:OPEN`), their comments and Tasks (`comments(last:`), the states of the waits (`issueOrPullRequest`).
  * A PBI's Tasks are its Tasks in the comments answer, then made up to its subIssuesSummary. A failed or malformed
  * answer goes to the import as it is.
@@ -104,7 +104,7 @@ export function importing(legacy: GhRunner, pulls: () => Json[] = () => []): GhR
   };
 }
 /**
- * The sends of the backlog edits kept here (#886, backlog-send.ts) for a gh that answers like the fixtures: a comment
+ * The sends of the backlog edits kept here (backlog-send.ts) for a gh that answers like the fixtures: a comment
  * (its marker taken off) and a label taken off become the `gh issue comment` / `gh issue edit --remove-label` calls those
  * fixtures record, and the check before a label change reads the Issue from the import's answer. Put it under
  * `importing`: `importing(sending(gh))`.
@@ -149,7 +149,7 @@ const headOf = (out: string) => INCLUDED.exec(out)?.[0] ?? "";
 const parseIncludedBody = (out: string) => out.replace(INCLUDED, "");
 
 
-/** The fields the fake Project has as the import reads them (#1545): Title and Iteration are no field a value can be written to. */
+/** The fields the fake Project has as the import reads them: Title and Iteration are no field a value can be written to. */
 export const IMPORT_PROJECT_FIELDS = [
   { name: "Title", dataType: "TITLE" },
   { name: "Status", dataType: "SINGLE_SELECT", options: [{ name: "Backlog" }, { name: "Ready" }, { name: "Done" }] },

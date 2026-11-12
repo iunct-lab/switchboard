@@ -28,7 +28,7 @@ test("skills: the shared skills carry no command or path of one repository", () 
   expect(hits).toEqual([]);
 });
 
-test("skills: what must not be written to an Issue is said once, in issue-workflow, and the others point there (#661)", () => {
+test("skills: what must not be written to an Issue is said once, in issue-workflow, and the others point there", () => {
   const read = (name: string) => readFileSync(join(skills, name, "SKILL.md"), "utf8");
   const section = "Issue・PR・コメントに書かない値";
   const rules = read("issue-workflow");
@@ -41,18 +41,18 @@ test("skills: what must not be written to an Issue is said once, in issue-workfl
   expect(read("pbi-complete")).toContain("ops-kit scan-issues");
 });
 
-test("skills: scan-issues runs through the kit's command in every repository, not an entry (#969)", () => {
+test("skills: scan-issues runs through the kit's command in every repository, not an entry", () => {
   const read = (name: string) => readFileSync(join(skills, name, "SKILL.md"), "utf8");
   for (const name of readdirSync(skills)) expect({ name, skips: read(name).includes("入口が無い") }).toEqual({ name, skips: false });
   const rules = read("issue-workflow");
   const owned = rules.slice(rules.indexOf("## 使う側のリポジトリが持つもの"), rules.indexOf("\n## ", rules.indexOf("## 使う側のリポジトリが持つもの") + 1));
   expect(owned).toContain("`ops-kit <command>`");
   expect(owned).not.toContain("scan_issues.sh");
-  // the daily scheduled scan reads the difference: closing a PBI runs no full scan (#2119)
+  // the daily scheduled scan reads the difference: closing a PBI runs no full scan
   for (const name of ["issue-workflow", "pbi-complete"]) expect({ name, says: read(name).includes("PBI を閉じるたびには走らせない") }).toEqual({ name, says: true });
 });
 
-test("skills: the main worktree is pulled by the kit's command in every repository, not by CLAUDE.md's steps (#1244)", () => {
+test("skills: the main worktree is pulled by the kit's command in every repository, not by CLAUDE.md's steps", () => {
   const read = (name: string) => readFileSync(join(skills, name, "SKILL.md"), "utf8");
   const complete = read("pbi-complete");
   expect(complete).toContain("ops-kit pull-main");
@@ -63,7 +63,7 @@ test("skills: the main worktree is pulled by the kit's command in every reposito
   expect(owned).toContain("pull-main");
 });
 
-test("skills: a mechanism every repository needs goes to the shared kit, said in request-to-backlog and pointed to from pbi-to-tasks (#765)", () => {
+test("skills: a mechanism every repository needs goes to the shared kit, said in request-to-backlog and pointed to from pbi-to-tasks", () => {
   const section = (name: string, heading: string) => {
     const text = readFileSync(join(skills, name, "SKILL.md"), "utf8");
     const start = text.indexOf(heading);
@@ -78,7 +78,7 @@ test("skills: a mechanism every repository needs goes to the shared kit, said in
   expect(readFileSync(join(skills, "issue-workflow", "SKILL.md"), "utf8")).toContain("共通キットを持つリポジトリの `owner/name`");
 });
 
-test("skills: a request's 出典 says whose words it is — 利用者 only with the user's own words (誰の言葉, #1818)", () => {
+test("skills: a request's 出典 says whose words it is — 利用者 only with the user's own words (誰の言葉)", () => {
   const text = readFileSync(join(skills, "request-to-backlog", "SKILL.md"), "utf8");
   expect(text).toContain("- 誰の言葉: <利用者 / エージェント / 定期の検査 のどれか 1 つ");
   expect(text).not.toContain("誰から:");
@@ -89,7 +89,7 @@ test("skills: a request's 出典 says whose words it is — 利用者 only with 
   for (const word of ["利用者の文そのものを引ける場所", "「利用者が認めた」「利用者の決定」は、`利用者` の根拠にしない", "引けなければ `エージェント` にする"]) expect(rule).toContain(word);
 });
 
-test("skills: a request is checked against the repository's premises before it becomes a PBI (前提と照らす, #1819)", () => {
+test("skills: a request is checked against the repository's premises before it becomes a PBI (前提と照らす)", () => {
   const read = (name: string) => readFileSync(join(skills, name, "SKILL.md"), "utf8");
   const request = read("request-to-backlog");
   const start = request.indexOf("### 2.5 前提と照らす");
@@ -120,13 +120,13 @@ test("cross-runner-review: an extra reviewer that can be off says its switch in 
   expect(text).toContain("CLAUDE.md が名指しし、有効の条件を満たしていれば");
 });
 
-test("cross-runner-review: the Intent check also asks whether design document changes are in scope (#4116)", () => {
+test("cross-runner-review: the Intent check also asks whether design document changes are in scope", () => {
   const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
   expect(text).toContain("design documents");
   expect(text).toContain("out-of-scope edits");
 });
 
-test("cross-runner-review: OPS_KIT_REVIEW_RUNNER=same picks the same runner with its own mark; no value keeps the other runner (#4026)", () => {
+test("cross-runner-review: OPS_KIT_REVIEW_RUNNER=same picks the same runner with its own mark; no value keeps the other runner", () => {
   const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
   const chosen = "（同じランナーの別セッション。設定による選択）";
   const substitute = "（同じランナーの別セッション。<上限のランナー> が利用上限のため代替）";
@@ -165,14 +165,14 @@ function runCloneSweep(availKb: number) {
   return { status: run.status, out: run.stdout, left };
 }
 
-test("cross-runner-review: step 1 removes only this repository's clones of merged or closed PRs (#796)", () => {
+test("cross-runner-review: step 1 removes only this repository's clones of merged or closed PRs", () => {
   const { status, out, left } = runCloneSweep(1_000_000);
   expect(status).toBe(0);
   expect(left).toEqual(["app.review3.Ghi789", "app.review4.Jkl012", "app.reviewx.Mno345", "other.review1.Abc123"]);
   expect(out).not.toContain("STOP:");
 });
 
-test("cross-runner-review: step 1 stops before cloning when /tmp has less than MIN_KB free (#796)", () => {
+test("cross-runner-review: step 1 stops before cloning when /tmp has less than MIN_KB free", () => {
   const { out } = runCloneSweep(100);
   expect(out).toContain("STOP: /tmp の空きが 100 KB");
   expect(out).toMatch(/^\d+\t.*other\.review1\.Abc123$/m); // du's top entries are reported
@@ -215,7 +215,7 @@ const CLAUDE_LINE = /"\$M\/claude\.md"/;
 const CODEX_TALKS = 'while [ $# -gt 0 ]; do [ "$1" = -o ] && o=$2; shift; done; for i in 1 2 3 4 5 6 7 8; do echo step $i; sleep 0.2; done; echo "### Findings" > "$o"';
 const CLAUDE_TALKS = `for i in 1 2 3 4 5 6 7 8; do echo '{"type":"assistant"}'; sleep 0.2; done; echo '{"type":"result","result":"### Findings"}'`;
 
-test("cross-runner-review: a stuck reviewer is cut by the skill's own command, with the reason in the log (#3310)", () => {
+test("cross-runner-review: a stuck reviewer is cut by the skill's own command, with the reason in the log", () => {
   const stuck = 'echo \'{"type":"system"}\'; sleep 600';
   const codex = runReviewCommand(CODEX_LINE, stuck);
   expect(codex.exit).toBe("124");
@@ -226,7 +226,7 @@ test("cross-runner-review: a stuck reviewer is cut by the skill's own command, w
   expect(claude.files["claude.md"]?.trim()).toBe("");
 }, 15_000);
 
-test("cross-runner-review: a reviewer that keeps talking past the threshold finishes, and its result is the file (#3310)", () => {
+test("cross-runner-review: a reviewer that keeps talking past the threshold finishes, and its result is the file", () => {
   const codex = runReviewCommand(CODEX_LINE, CODEX_TALKS);
   expect(codex.exit).toBe("0");
   expect(codex.files["codex.md"]).toContain("### Findings");
@@ -235,7 +235,7 @@ test("cross-runner-review: a reviewer that keeps talking past the threshold fini
   expect(claude.files["claude.md"]?.trim()).toBe("### Findings");
 }, 15_000);
 
-test("cross-runner-review: a cut follow-up review posts nothing, not even the previous output (#3310)", () => {
+test("cross-runner-review: a cut follow-up review posts nothing, not even the previous output", () => {
   const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8").split("\n");
   const from = text.findIndex((l) => l.startsWith('rm -f "$M/fix-review.md"'));
   const check = text.findIndex((l) => l.startsWith('[ "$RC" = 0 ]'));
@@ -261,7 +261,7 @@ test("cross-runner-review: a cut follow-up review posts nothing, not even the pr
   expect(run(CODEX_TALKS)).toContain("POSTED");
 }, 15_000);
 
-test("cross-runner-review: every review command goes through idle-run, and the skill says what to do with 124 (#3310)", () => {
+test("cross-runner-review: every review command goes through idle-run, and the skill says what to do with 124", () => {
   const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
   const commands = text.split("\n").filter((l) => /^(# )?\( .*(exec --sandbox|claude -p)/.test(l));
   expect(commands.length).toBe(4);
@@ -273,14 +273,14 @@ test("cross-runner-review: every review command goes through idle-run, and the s
   for (const word of ["exit 124", "無進捗で打ち切り（<秒> 秒出力なし）", "ops-kit job request review", "一度だけやり直す", "止まって報告する"]) expect({ word, says: text.includes(word) }).toEqual({ word, says: true });
 });
 
-test("skills: the review clones are removed by their own path, and a cut session's leftovers only after gh says MERGED / CLOSED (#796)", () => {
+test("skills: the review clones are removed by their own path, and a cut session's leftovers only after gh says MERGED / CLOSED", () => {
   for (const name of ["cross-runner-review", "review-triage-and-merge"]) {
     const text = readFileSync(join(skills, name, "SKILL.md"), "utf8");
     expect({ name, glob: text.includes("glob で消さない"), state: text.includes("MERGED / CLOSED") }).toEqual({ name, glob: true, state: true });
   }
 });
 
-test("skills: public-release-gate runs both runners apart with the seeds, the models and the three-way triage (#1727)", () => {
+test("skills: public-release-gate runs both runners apart with the seeds, the models and the three-way triage", () => {
   const text = readFileSync(join(skills, "public-release-gate", "SKILL.md"), "utf8");
   const seeds = text.slice(text.indexOf("## 観点の種"), text.indexOf("## 指示"));
   for (const seed of ["鍵と認証の値", "個人情報", "ライセンスと NOTICE", "各ランナーと LLM 提供者の規約", "商標と名前", "依存のライセンス", "録画 fixture とテストデータ", "内部のホスト名・URL・クラウドの ID", "secrets を使う workflow", "コンテナ像と配布物", "Issue 番号の参照", "既定の設定の安全性", "同期のコミットの本文", "検査済みでも見る", "Git で管理するファイルか", "外部への通信", "検査の一覧そのもの", "運用の記録と発言の転載", "配布経路の固定", "公開側で自動で動く投稿", "製品の表示の正確さ", "伏せ字の痕跡", "隠れた内容", "ブラウザに残るデータ", "公開側の CI が確かめる範囲", "Actions のログの公開", "ホストの安全姿勢の開示", "コードに埋め込んだプロンプト", "第三者について公に述べる値", "利用者の会話・履歴の取り込みと保管", "実行可能な成果物の通信", "通知による二次開示", "バックアップの保持と削除", "移行・バックアップの完全性", "書き出すデータの境界", "二次処理と提供者間のデータ共有", "他アプリのデータの不可逆な削除", "利用者側に残る識別子", "ブラウザへの HTML 注入", "サーバーログのデータ保持", "利用者間の記憶の分離", "決済・認証の検証の完全性", "破壊的な後片付け", "公開時に読者のマシンで実行される設定", "依存取得先の乗っ取り・認証情報の混入"]) expect({ seed, listed: seeds.includes(`| ${seed} |`) }).toEqual({ seed, listed: true });
@@ -293,7 +293,7 @@ test("skills: public-release-gate runs both runners apart with the seeds, the mo
 
 const BACKLOG_BY_GH = /gh issue (create|edit|comment|close|reopen|view|list|delete|transfer)|gh api [^\n]*\/issues|addSubIssue|removeSubIssue|updateProjectV2|gh project (item-|field-)|scripts\/setup\/(triage_issue|set_project_field|lint_backlog)/;
 
-test("skills: the backlog is read and written only through ops-kit backlog (#3072)", () => {
+test("skills: the backlog is read and written only through ops-kit backlog", () => {
   /** The lines that stay: not the backlog of a repository the app syncs, or a read before going public. */
   const ALLOWED: { file: string; has: string }[] = [
     { file: "skills/issue-workflow/SKILL.md", has: "Project 全件を読み" }, // the warning itself
@@ -344,7 +344,7 @@ test("skills: the backlog is read and written only through ops-kit backlog (#307
   expect(review).not.toContain("BACKLOG_WORKSPACE");
 });
 
-test("skills: the five delivery skills say what a workspace without a remote does instead of PRs (#2490)", () => {
+test("skills: the five delivery skills say what a workspace without a remote does instead of PRs", () => {
   const read = (name: string) => readFileSync(join(skills, name, "SKILL.md"), "utf8");
   for (const name of ["task-to-pr", "cross-runner-review", "review-triage-and-merge", "pbi-complete", "stacked-pr-delivery"]) {
     expect(`${name}: ${read(name).includes("**ローカルの変更では**")}`).toBe(`${name}: true`);
@@ -366,7 +366,7 @@ test("skills: the five delivery skills say what a workspace without a remote doe
   expect(read("stacked-pr-delivery")).toContain("積まない");
 });
 
-test("skills: a PBI closes only when every acceptance criterion links its evidence, said in issue-workflow and pointed to from pbi-complete (#3793)", () => {
+test("skills: a PBI closes only when every acceptance criterion links its evidence, said in issue-workflow and pointed to from pbi-complete", () => {
   const read = (name: string) => readFileSync(join(skills, name, "SKILL.md"), "utf8");
   const rules = read("issue-workflow");
   const duty = rules.slice(rules.indexOf("4. **完了時（PBI）**"), rules.indexOf("5. **Milestone**"));
@@ -380,7 +380,7 @@ test("skills: a PBI closes only when every acceptance criterion links its eviden
   expect(four).toContain("1 で在りかの無い行（満たせなかった行を含む）が残っておらず");
 });
 
-test("skills: a 利用者確認 line checked by answering decisions names them and is checked once they are all answered, not asked again (#4259)", () => {
+test("skills: a 利用者確認 line checked by answering decisions names them and is checked once they are all answered, not asked again", () => {
   const read = (name: string) => readFileSync(join(skills, name, "SKILL.md"), "utf8");
   const rules = read("issue-workflow");
   const start = rules.indexOf("### 利用者確認の項目");

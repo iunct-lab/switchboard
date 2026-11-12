@@ -2,7 +2,7 @@ import type { ForgeImpl } from "./forge.ts";
 import type { GhClient } from "./gh.ts";
 
 /**
- * GitHub's side of the kit's forge operations (#920), through the signed-in `gh` (no credential is kept here).
+ * GitHub's side of the kit's forge operations, through the signed-in `gh` (no credential is kept here).
  * `sh` runs a command and throws on a non-zero exit.
  */
 export interface Verification {
@@ -18,7 +18,7 @@ export const githubForge = (sh: (cmd: string[]) => Promise<string>): ForgeImpl<V
 });
 
 /**
- * Resolve one pull request review thread: the one mutation a Task is allowed (#2150) instead of a general `gh api graphql`.
+ * Resolve one pull request review thread: the one mutation a Task is allowed instead of a general `gh api graphql`.
  * Throws when GitHub does not answer that the thread is resolved.
  */
 export async function resolveReviewThread(gh: GhClient, threadId: string): Promise<void> {

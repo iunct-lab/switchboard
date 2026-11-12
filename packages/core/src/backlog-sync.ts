@@ -1,16 +1,16 @@
 /**
- * Imports a repository's GitHub backlog into the database (#885): its requests, PBIs and Tasks (closed ones too), every
- * comment of them, their Project items, and the pull requests a PBI waits for (#817). Stored only when every page was
+ * Imports a repository's GitHub backlog into the database: its requests, PBIs and Tasks (closed ones too), every
+ * comment of them, their Project items, and the pull requests a PBI waits for. Stored only when every page was
  * read (Db.putBacklogSnapshot): a failed import stores nothing, and the cursor and lastSuccessfulSync stay where the
  * last complete one left them.
  *
  * One import is up to four reads. 1. The Issues updated since the cursor (all of them the first time), in full. 2. The
  * open Issues with their Project items only: a Project field change does not touch the Issue's updatedAt. This one is
  * read only by a full import (`full`): it costs what the open Issues number. 3. The open pull requests with their
- * changed files (#1059; the pages after the first only when there are more than 50), by every import. In place of
+ * changed files (the pages after the first only when there are more than 50), by every import. In place of
  * 2, the Project items of the Issues named only (`items`). 4. Per number,
  * the stored open Issues (full imports only) and open PRs the lists no longer have (closed into another label, moved, deleted, hidden), the
- * targets of the PBIs' waits, of the Tasks' depends stops (#2045) and the prerequisites open PBIs and Tasks name (#937, `**前提**:`; a pull request with its
+ * targets of the PBIs' waits, of the Tasks' depends stops and the prerequisites open PBIs and Tasks name (`**前提**:`; a pull request with its
  * merge commit, an Issue with how it was closed): an Issue comes back in full, a 404 marks the record `unavailable` and a 403 `forbidden`,
  * neither erases what was stored. A comment or Project item that a complete read of its Issue no longer lists is
  * marked `unavailable`.
@@ -55,9 +55,9 @@ const recheckQuery = (numbers: number[]) =>
 /** The Project items of the Issues named: what a light import reads of those it has to (`items`). */
 const itemsQuery = (numbers: number[]) =>
   `query($o:String!,$r:String!){ repository(owner:$o,name:$r){ ${numbers.map((n) => `w${n}: issue(number:${n}){ number ${PROJECT_ITEMS} }`).join(" ")} } }`;
-/** The Issues a PR closes (#1183): the rule of `scripts/task-paths.ts` (`linkedIssues`). No duplicates, ascending. */
+/** The Issues a PR closes: the rule of `scripts/task-paths.ts` (`linkedIssues`). No duplicates, ascending. */
 export const closesOf = (body: string | null, headRefName: string | null): number[] => [...new Set(linkedIssues({ body, headRefName }))].sort((a, b) => a - b);
-/** A PR as stored (#1059): `files` null = more than the 100 read, so what it touches is not fully known. */
+/** A PR as stored: `files` null = more than the 100 read, so what it touches is not fully known. */
 function pullEntry(raw: RawPull): BacklogSnapshotEntry {
   const text = (v: unknown) => typeof v === "string";
   if (!text(raw?.id) || typeof raw.number !== "number" || !text(raw.state) || !text(raw.updatedAt)) throw new BacklogError("gh api graphql（PR）の応答の形が想定と違います");
@@ -210,7 +210,7 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
   const vars: Vars = { o: repo.owner, r: repo.name };
   const out = new Map<string, BacklogSnapshotEntry>();
   const put = (e: BacklogSnapshotEntry) => out.set(`${e.objectKind}:${e.externalId}`, e);
-  // the stored records by kind and Issue, made once: `replace` runs per Issue and kind, and a scan of all `stored` each time is quadratic (#4579)
+  // the stored records by kind and Issue, made once: `replace` runs per Issue and kind, and a scan of all `stored` each time is quadratic
   const byIssue = new Map<string, string[]>();
   for (const r of stored) {
     const key = `${r.objectKind}:${issueNumber(r)}`;
@@ -307,7 +307,7 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
   const recheckNumbers = (entries: Map<string, BacklogSnapshotEntry>) => {
     const known = new Map(stored.map((r) => [`${r.objectKind}:${r.externalId}`, { kind: r.objectKind, id: r.externalId, remote: r.remote, state: r.fetchState }]));
     for (const [k, e] of entries) known.set(k, { kind: e.objectKind, id: e.externalId, remote: e.fetchState === "fetched" ? e.remote : (known.get(k)?.remote ?? null), state: e.fetchState });
-    // an Issue made here and not on GitHub yet (#2266, turning the sync on) is no Issue of GitHub's to ask for
+    // an Issue made here and not on GitHub yet (turning the sync on) is no Issue of GitHub's to ask for
     const issues = [...known.values()].filter((r) => r.kind === "issue" && r.remote && !r.id.startsWith("sb:")) as Array<{ id: string; remote: BacklogIssueData }>;
     const stale = !listsOpen ? [] : issues.filter((r) => r.remote.state === "OPEN" && !open.has(r.remote.number) && !read.has(r.remote.number)).map((r) => r.remote.number);
     const waits = issues
@@ -316,7 +316,7 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
         const comments = [...known.values()].filter((c) => c.kind === "comment" && c.state === "fetched" && (c.remote as BacklogCommentData | null)?.issue === pbi.remote.number).map((c) => c.remote as BacklogCommentData);
         return waitsOf(comments.sort((a, b) => a.createdAt.localeCompare(b.createdAt)))?.numbers ?? [];
       });
-    // the prerequisites an open PBI / Task names (#937) are asked like the waits
+    // the prerequisites an open PBI / Task names are asked like the waits
     const prereqs = issues.filter((r) => r.remote.state === "OPEN" && (r.remote.labels.includes("type:pbi") || r.remote.labels.includes("type:task"))).flatMap((r) => prereqsOf(r.remote.body).map((p) => p.number));
     // and the decisions an open In progress / In review PBI's confirmation lines name to be checked by their answers
     const working = new Set([...known.values()].filter((r) => r.kind === "project-item" && ["In progress", "In review"].includes(String((r.remote as { fields?: Record<string, unknown> } | null)?.fields?.Status))).map((r) => (r.remote as { issue: number }).issue));
@@ -331,9 +331,9 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
       const issue = r?.kind === "issue" && r.state === "fetched" ? (r.remote as BacklogIssueData) : null;
       return !!issue && issue.state === "CLOSED" && issue.labels.some((l) => TYPES.includes(l));
     };
-    // a stored open PR the full list no longer has was closed or merged: asked again by its number (#1059)
+    // a stored open PR the full list no longer has was closed or merged: asked again by its number
     const gone = [...known.values()].filter((r) => r.kind === "pull-request" && (r.remote as BacklogPullRequestData | null)?.state === "OPEN").map((r) => (r.remote as BacklogPullRequestData).number).filter((n) => !openPulls.has(n));
-    // and what the Tasks' depends stops wait for (#2045), asked like the waits
+    // and what the Tasks' depends stops wait for, asked like the waits
     const numbers = [...new Set([...stale, ...gone, ...[...waits, ...prereqs, ...confirmDecisions, ...stopWaits].filter((n) => !closed(n))])].filter((n) => !read.has(n) && !open.has(n) && !openPulls.has(n)).sort((a, b) => a - b);
     return { numbers, byNumber };
   };
@@ -382,7 +382,7 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
 }
 
 /**
- * Imports the backlog of the repository checked out at `ws.path` (#885) and stores it when complete — unless
+ * Imports the backlog of the repository checked out at `ws.path` and stores it when complete — unless
  * `superseded` says a write to the repository came after it began (nothing is stored then) — with the
  * repository and the Project the workspace reads (`projectOf`). On a failure
  * nothing is stored; when GitHub said when to come back (a limit), that time is kept as the repository's `retryAt`.
@@ -393,7 +393,7 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
 export async function importGithubSnapshot(gh: GhRunner, db: Db, ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">, now = Date.now(), superseded = (_key: BacklogRepositoryKey) => false, enabling = false, full = true, items: number[] = []): Promise<{ key: BacklogRepositoryKey; changed: boolean; project: BacklogSource["project"] | null }> {
   const limited = limitGh(gh, GH_CONCURRENCY);
   gh = limited.run;
-  // the Project (and its guard, #468) is asked without waiting for the repository: both need only the checkout's path
+  // the Project (and its guard) is asked without waiting for the repository: both need only the checkout's path
   const guard = projectOf(gh, ws).then(async (p) => ({ project: p, fields: await requireReadableProject(gh, ws.path, p) }));
   guard.catch(() => {});
   const { repo, owner, name, private: isPrivate } = await (async () => {
@@ -411,7 +411,7 @@ export async function importGithubSnapshot(gh: GhRunner, db: Db, ws: Pick<Backlo
   let changed = false;
   let project: BacklogSource["project"] | null = null;
   try {
-    // the Project's guard (#468, started above) and the read go at once; nothing is stored unless the guard passed too
+    // the Project's guard (started above) and the read go at once; nothing is stored unless the guard passed too
     const stored = db.listBacklogRecords(key);
     const recent = stored.flatMap((r) => {
       const issue = r.objectKind === "issue" && r.fetchState === "fetched" && !r.externalId.startsWith("sb:") ? (r.remote as BacklogIssueData | null) : null;
@@ -429,7 +429,7 @@ export async function importGithubSnapshot(gh: GhRunner, db: Db, ws: Pick<Backlo
     const projectFields = readable.fields;
     changed = changedFrom(stored, snap.records);
     // the daemon wrote to the repository while this read: what it read is older than what the read-back stores; or
-    // the workspace's GitHub sync was turned off meanwhile, its first import too (#2266): nothing of GitHub is stored then
+    // the workspace's GitHub sync was turned off meanwhile, its first import too: nothing of GitHub is stored then
     // — unless this is the read that turns it on (enableGithubSync: it writes the source itself, after the records moved)
     const current = db.getWorkspaceBacklogSource(ws.id);
     if (superseded(key) || (!enabling && current && !syncsGithub(current))) return { key, changed, project };
@@ -437,7 +437,7 @@ export async function importGithubSnapshot(gh: GhRunner, db: Db, ws: Pick<Backlo
     if (enabling) return { key, changed, project };
     // which repository and Project this workspace reads, so its backlog is read from storage without asking GitHub;
     // not when its Project variable changed meanwhile (that forgot the source, and the next import reads the new one).
-    // Turning the sync on (#2266) and the numbers it gave stay
+    // Turning the sync on and the numbers it gave stay
     const kept = current?.service === key.service && current.host === key.host && current.repository === key.repository ? { ...(current.enabling ? { enabling: current.enabling } : {}), ...(current.numbers ? { numbers: current.numbers } : {}) } : {};
     if ((db.getWorkspace(ws.id)?.projectVar ?? null) === (ws.projectVar ?? null)) db.setWorkspaceBacklogSource(ws.id, { ...key, project: readable.project, private: isPrivate, projectFields, ...kept });
   } catch (e) {
@@ -449,7 +449,7 @@ export async function importGithubSnapshot(gh: GhRunner, db: Db, ws: Pick<Backlo
 }
 
 /**
- * Refuses an import whose token cannot read the Project (#468): GitHub then leaves the Project's items out of every
+ * Refuses an import whose token cannot read the Project: GitHub then leaves the Project's items out of every
  * Issue without an error, which reads as "not in the Project" and would mark every stored item gone. It answers such a
  * Project as null, with no error or with NOT_FOUND / FORBIDDEN. A limit or a refused login still fails as itself. Throws BacklogError.
  */
@@ -457,7 +457,7 @@ async function requireReadableProject(gh: GhRunner, cwd: string, project: Backlo
   const { data } = await graphql(gh, cwd, PROJECT_ID, { o: project.owner, p: project.number }, true);
   const p = data?.repositoryOwner?.projectV2;
   if (!p?.id) throw new BacklogError(`Project ${project.owner}/${project.number} を読めない（トークンの権限）`);
-  // the same answer gives the fields a value can be written to (#1545), in the Project's order; the others (ITERATION,
+  // the same answer gives the fields a value can be written to, in the Project's order; the others (ITERATION,
   // TITLE, LABELS …) are no field a `set` sends
   const nodes = (p.fields?.nodes ?? []) as Array<{ name?: string; dataType?: string; options?: Array<{ name: string }> }>;
   return nodes.flatMap((f) => (f.name && (WRITABLE as readonly string[]).includes(f.dataType ?? "") ? [{ name: f.name, dataType: f.dataType as BacklogProjectField["dataType"], options: (f.options ?? []).map((o) => o.name) }] : []));
@@ -474,7 +474,7 @@ function changedFrom(stored: BacklogRecord[], records: BacklogSnapshotEntry[]): 
 }
 
 /**
- * Reads what one import of a GitLab project (#892) stores, against what is `stored` for it; `since` = the cursor (the
+ * Reads what one import of a GitLab project stores, against what is `stored` for it; `since` = the cursor (the
  * newest `updated_at` of the last import). Every open Issue is listed each time and the closed ones updated since the
  * cursor (all the first time); an Issue's comments are read again when its `updated_at` moved. A stored open Issue
  * neither list has (deleted, moved) is read by number: 404 → `unavailable`, 403 → `forbidden`. GitLab CE has no
@@ -529,7 +529,7 @@ export async function fetchGitlabSnapshot(sh: Sh, target: ForgeTarget, stored: B
 }
 
 /**
- * Imports the GitLab project `target` names (#892) for the workspace and stores it when complete — unless `superseded`
+ * Imports the GitLab project `target` names for the workspace and stores it when complete — unless `superseded`
  * says a write came after it began, or the workspace's sync was turned off meanwhile. The workspace's source is the
  * project (no GitHub Project: `project` is the project path with number 0). A failed GitLab call is a BacklogError
  * with the HTTP status only. glab carries the login (`forge-gitlab.ts`).
@@ -554,7 +554,7 @@ export async function importGitlabSnapshot(sh: Sh, db: Db, ws: Pick<BacklogWorks
 }
 
 /**
- * Refuses an import whose checkout is not the workspace's registered GitHub repository (#2799), so a clone of another
+ * Refuses an import whose checkout is not the workspace's registered GitHub repository, so a clone of another
  * repository (a rebuild that cloned a public one of the same name) does not overwrite the registration the rebuild
  * clones from. A registered name GitHub forwards to the checkout's (a rename) is followed. Throws BacklogError.
  */
@@ -566,19 +566,19 @@ async function refuseAnotherCheckout(gh: GhRunner, ws: Pick<BacklogWorkspace, "p
 }
 
 /**
- * How often a workspace's backlog is read again by itself (#887) when no Webhook says so: every minute while it
+ * How often a workspace's backlog is read again by itself when no Webhook says so: every minute while it
  * changes; each read that finds nothing new (or fails) doubles the wait, up to 15 minutes. A limit's time comes first.
  */
 export const POLL_MIN_MS = 60_000;
 export const POLL_MAX_MS = 15 * 60_000;
 /** How long a workspace goes without a full import (`importGithubSnapshot`'s `full`) once the daemon made one. */
 export const FULL_READ_MS = 6 * 3600_000;
-/** A notice (#887, a Webhook) starts at most one import per workspace in this time, and at most HINT_BUDGET in all. */
+/** A notice (a Webhook) starts at most one import per workspace in this time, and at most HINT_BUDGET in all. */
 export const HINT_WINDOW_MS = 60_000;
 export const HINT_BUDGET = 10;
 
 /**
- * The workspaces a GitHub Webhook delivery names (#887): those whose stored backlog is of its `repository.full_name`
+ * The workspaces a GitHub Webhook delivery names: those whose stored backlog is of its `repository.full_name`
  * (Issues, comments, sub-issues), or whose Project's owner is its `organization.login` (a Project item: an
  * Organization's Webhook carries no repository). Nothing else of the payload is read: it is not signed in, and what is
  * stored is only what an import reads from GitHub. Anything not of that shape names none.
@@ -595,18 +595,18 @@ export function noticeTargets(payload: unknown, workspaces: Array<{ id: string; 
 
 const repoName = (k: BacklogRepositoryKey) => `${k.service} ${k.host} ${k.repository}`;
 
-/** A workspace's stored backlog and how its sync stands (#885). */
+/** A workspace's stored backlog and how its sync stands. */
 export interface StoredBacklog {
   /** When the last complete import was stored (ms); null = never imported. */
   fetchedAt: number | null;
   items: BacklogItem[];
-  /** Its local changes (#2485, readStoredBacklog); absent where none are read. */
+  /** Its local changes (readStoredBacklog); absent where none are read. */
   changes?: Backlog["changes"];
   /** An import of the workspace is under way. */
   syncing: boolean;
   /** Why the last import failed (or is not asked, during a limit); null = it succeeded. */
   error: string | null;
-  /** What the owner has to do about `error` (#2362); null with no error. */
+  /** What the owner has to do about `error`; null with no error. */
   errorKind: BacklogErrorKind | null;
 }
 
@@ -622,7 +622,7 @@ export interface SettleTimings {
 }
 
 /**
- * Keeps each workspace's stored backlog in step with GitHub (#885): one import at a time per workspace, which every
+ * Keeps each workspace's stored backlog in step with GitHub: one import at a time per workspace, which every
  * caller of `sync` shares. After a limit or an outage GitHub is not asked until its time (GithubRetryState per host,
  * and the `retryAt` stored with the repository, which outlives a restart): the call is refused with the reason.
  * Reading (`read`) never asks GitHub.
@@ -630,7 +630,7 @@ export interface SettleTimings {
 export class BacklogSync {
   /** `since` = the last write (`seq`) when the import began. */
   private running = new Map<string, { since: number; run: Promise<void>; full: boolean }>();
-  /** The import that follows one begun before a write (#441 review: an answer must not come back with an older copy). */
+  /** The import that follows one begun before a write (an answer must not come back with an older copy). */
   private next = new Map<string, Promise<void>>();
   /**
    * Writes are numbered (`seq`; not timed: the read-back import starts in the same millisecond), and the last one is
@@ -651,15 +651,15 @@ export class BacklogSync {
   private failures = new Map<string, { message: string; until?: number; kind?: BacklogErrorKind }>();
   private limits: GithubRetryState;
   private gh: GhRunner;
-  /** How GitLab is asked (#892): the signed-in glab. */
+  /** How GitLab is asked: the signed-in glab. */
   glab: Sh = runGlab;
-  /** `sink`: gets the measure of every gh call and of every sync answered without one (#895). */
+  /** `sink`: gets the measure of every gh call and of every sync answered without one. */
   /** `reads`: whether the workspace is read at all (the `developSelf` setting leaves the meta workspace out); judged at each call. */
   /** `sends`: false on a daemon that must not write to GitHub (sb-rescue's candidate runs on a copy of the database: what it sent, the daemon would send again). */
   constructor(private db: Db, gh: GhRunner, private clock = () => Date.now(), private sink?: MetricSink, private sends = true, private reads: (ws: Pick<BacklogWorkspace, "id">) => boolean = () => true) {
     this.limits = new GithubRetryState(clock);
     this.gh = !sink ? gh : async (args, cwd) => {
-      // a runner that throws (or rejects) is a failed call too (#987 recheck)
+      // a runner that throws (or rejects) is a failed call too
       const r = await Promise.resolve().then(() => gh(args, cwd)).catch((e: unknown) => {
         sink(callMetric(args, "", String((e as Error)?.message ?? e), 1, clock()));
         throw e;
@@ -678,12 +678,12 @@ export class BacklogSync {
    * what it finds is no reason to read again within a minute (one shared with an import under way goes by that import's).
    */
   sync(ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">, notice?: { echo: boolean }, opts?: { full?: boolean; readBack?: boolean }): Promise<void> {
-    // a workspace the instance does not read (#2459): nothing is asked of GitHub, by a hint or a poll either (both come here)
+    // a workspace the instance does not read: nothing is asked of GitHub, by a hint or a poll either (both come here)
     if (!this.reads(ws)) return Promise.resolve();
     const now = this.clock();
     // the repository the workspace reads, for the measures of what asks nothing (null before its first import)
     const source = this.db.getWorkspaceBacklogSource(ws.id);
-    // a backlog kept here only (#2265), or one whose GitHub sync is off (#2266): what is stored is the newest there is —
+    // a backlog kept here only, or one whose GitHub sync is off: what is stored is the newest there is —
     // nothing is asked, waited for or read again
     if (source && !syncsGithub(source)) {
       this.db.putBacklogSnapshot(source, { records: [], cursor: null, syncedAt: now });
@@ -716,7 +716,7 @@ export class BacklogSync {
       } else this.sink?.(noCall("backlog", "shared", now, null, repo));
       return next;
     }
-    // the repository's service (#920, its ops.config.json `forge`); a waiting limit is its host's: GitHub's wait does not hold a GitLab import (#892)
+    // the repository's service (its ops.config.json `forge`); a waiting limit is its host's: GitHub's wait does not hold a GitLab import
     let target: ForgeTarget | null = null;
     let refused: unknown = null;
     try {
@@ -761,10 +761,10 @@ export class BacklogSync {
         if (!superseded) this.stored.set(ws.id, since);
         if (!superseded && full) this.fullAt.set(ws.id, now), this.fullAsked.delete(ws.id);
         if (!superseded) for (const n of items) this.touched.get(ws.id)?.delete(n);
-        // GitHub answers again: what was kept while it did not is sent (#886)
+        // GitHub answers again: what was kept while it did not is sent
         this.send(ws);
-        // what was stored changed: a wait it closed may let a PBI go on now (#1879); one that stored nothing is followed by one that does
-        // and every one that stored, changed or not, to whatever waits on what is stored (#2045)
+        // what was stored changed: a wait it closed may let a PBI go on now; one that stored nothing is followed by one that does
+        // and every one that stored, changed or not, to whatever waits on what is stored
         const listeners = superseded ? [] : [...(changed ? this.imported : []), ...this.everyImport];
         for (const l of listeners) {
           try {
@@ -798,7 +798,7 @@ export class BacklogSync {
   private everyImport = new Set<(wsId: string) => void>();
   /**
    * Called with the workspace's id after an import that stored a change; returns the unsubscribe. `every`: after every
-   * import that stored, changed or not (#2045: a wait closed before the stop was reported is in no change).
+   * import that stored, changed or not (a wait closed before the stop was reported is in no change).
    */
   onImported(l: (wsId: string) => void, opts: { every?: boolean } = {}): () => void {
     const set = opts.every ? this.everyImport : this.imported;
@@ -844,13 +844,13 @@ export class BacklogSync {
     return last >= at - HINT_WINDOW_MS;
   }
 
-  /** The send under way per repository (#886): one at a time; one asked for meanwhile runs after it. */
+  /** The send under way per repository: one at a time; one asked for meanwhile runs after it. */
   private sending = new Map<string, Promise<void>>();
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private stopped = false;
 
   /**
-   * Sends the workspace's repository's edits kept here (#886, backlog-send.ts), never during a limit or an outage of the
+   * Sends the workspace's repository's edits kept here (backlog-send.ts), never during a limit or an outage of the
    * host (the same wait as the imports); what was sent is imported back. Tried again by itself at the time the first
    * operation still waiting may go. Resolves when this send is over; never rejects.
    */
@@ -862,7 +862,7 @@ export class BacklogSync {
   private sendTimed(ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">, t?: Pick<SettleTimings, "queueMs" | "sendMs">): Promise<void> {
     if (this.stopped) return Promise.resolve();
     const source = this.db.getWorkspaceBacklogSource(ws.id);
-    // a backlog kept here only (#2265), or one whose GitHub sync is off (#2266): applied at once, nothing goes out — on
+    // a backlog kept here only, or one whose GitHub sync is off: applied at once, nothing goes out — on
     // sb-rescue's candidate too (it sends nothing). An edit of a GitHub record of the latter waits (applyLocalOperations)
     if (source && !syncsGithub(source)) {
       try {
@@ -893,11 +893,11 @@ export class BacklogSync {
   }
 
   private async sendNow(ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">, source: BacklogSource): Promise<void> {
-    // one queued behind another send while the workspace's GitHub sync was turned off (#2266) sends nothing
+    // one queued behind another send while the workspace's GitHub sync was turned off sends nothing
     if (!syncsGithub(this.db.getWorkspaceBacklogSource(ws.id))) return;
     const now = this.clock();
     const stored = this.db.getBacklogRepository(source)?.retryAt;
-    // the wait is the host's: GitHub's does not hold a GitLab project's sends (#2910)
+    // the wait is the host's: GitHub's does not hold a GitLab project's sends
     const until = this.limits.waiting(source.host)?.until ?? (stored && stored > now ? stored : null);
     if (until) return this.later(ws, source, until);
     // what was written is imported back, whatever came of the rest of the run (a conflict, a limit) — after a wait
@@ -906,14 +906,14 @@ export class BacklogSync {
     const held = new Set(this.db.listPendingBacklogOperations(source).flatMap((o) => (o.status === "conflict" ? [o.id] : [])));
     try {
       // each write at once, not at the end of the run: an import that read before it must not judge the edits after
-      // it on the older value (#887)
+      // it on the older value
       await sendGithubOperations(this.gh, this.db, ws.path, source, this.clock, () => {
         wrote = true;
         this.written(ws);
       }, () => syncsGithub(this.db.getWorkspaceBacklogSource(ws.id)), (op) => enablingWaits(this.db.getWorkspaceBacklogSource(ws.id), op), this.glab, (issue) => this.touched.set(ws.id, (this.touched.get(ws.id) ?? new Set()).add(issue)));
     } catch (e) {
       if (!(e instanceof Limit)) throw e;
-      // turned off meanwhile (#2266): nothing more goes, nothing waits for a time
+      // turned off meanwhile: nothing more goes, nothing waits for a time
       if (e.kind === "off") return;
       // a login refused waits for the next send (an edit, an import), and says why where the backlog shows errors (an
       // import would only fail the same way); a limit is the host's, as the imports' are
@@ -923,7 +923,7 @@ export class BacklogSync {
       if (wrote) this.wrote(ws);
       return this.later(ws, source, until);
     }
-    // turning the sync on (#2266): once every Issue made here has GitHub's number, its bodies, parents and comments are
+    // turning the sync on: once every Issue made here has GitHub's number, its bodies, parents and comments are
     // sent next; once they are, GitHub's Project items replace the ones kept here (a create resumed after an outage
     // wrote no post, so nothing else reads them)
     const step = this.db.getWorkspaceBacklogSource(ws.id)?.enabling ? advanceEnabling(this.db, ws.id, this.clock()) : null;
@@ -931,7 +931,7 @@ export class BacklogSync {
     if (step === "ended") this.request(ws);
     const pending = this.db.listPendingBacklogOperations(source);
     if (wrote) this.wrote(ws);
-    // held at the check before the write (#887): nothing written, but GitHub's value it read is not stored — an import
+    // held at the check before the write: nothing written, but GitHub's value it read is not stored — an import
     // reads it, so the choice on the conflict is offered with GitHub's value, not the older copy
     else if (pending.some((o) => o.status === "conflict" && !held.has(o.id))) this.request(ws);
     // only a time still to come when this run began: one past it was looked at in the run (sent, or held behind another
@@ -943,7 +943,7 @@ export class BacklogSync {
 
   /** At the daemon's stop: no send or read waits on a timer any more (it would find the database closed). */
   stop(): void {
-    // a send or an import under way that ends after this neither sends nor sets a timer (#549: one that did, on a closed database)
+    // a send or an import under way that ends after this neither sends nor sets a timer (one that did, on a closed database)
     this.stopped = true;
     this.polling = false;
     for (const t of this.timers.values()) clearTimeout(t);
@@ -963,7 +963,7 @@ export class BacklogSync {
   }
 
   /**
-   * From now on, every workspace asked for is read again by itself (#887): after its wait (`every`; POLL_MAX_MS for one
+   * From now on, every workspace asked for is read again by itself: after its wait (`every`; POLL_MAX_MS for one
    * never imported), and not before the host's or the repository's wait is over. Each import (or refusal during a wait) sets
    * the next time. Per workspace: two checkouts of one repository are read each on their own.
    */
@@ -984,7 +984,7 @@ export class BacklogSync {
   private writtenAt = new Map<string, number>();
 
   /**
-   * A notice that the workspace's repository changed on GitHub (#887, a Webhook): asks for an import — never with
+   * A notice that the workspace's repository changed on GitHub (a Webhook): asks for an import — never with
    * anything the notice said. One per workspace per window (`hintWindow`) and HINT_BUDGET a minute in all start an
    * import at once; the rest are folded into a read no later than the window's end (the poll), and so is one that
    * comes while an import of the workspace runs (that import may have read before the change) or during a wait.
@@ -1020,7 +1020,7 @@ export class BacklogSync {
   }
 
   /**
-   * What GitHub's host is waited for, and until when (ms): no call goes to it meanwhile, the budget's read neither (#549).
+   * What GitHub's host is waited for, and until when (ms): no call goes to it meanwhile, the budget's read neither.
    * After a restart the wait a repository stored counts too, as `sync` counts it; its kind was not stored (`reason` null).
    */
   hostWait(): { until: number; reason: GithubFailure | null } | null {
@@ -1047,7 +1047,7 @@ export class BacklogSync {
   private pollLater(ws: Pick<BacklogWorkspace, "id">): void {
     if (!this.polling) return;
     const source = this.db.getWorkspaceBacklogSource(ws.id);
-    // a backlog kept here only (#2265), or one whose GitHub sync is off (#2266), has nothing to read again
+    // a backlog kept here only, or one whose GitHub sync is off, has nothing to read again
     if (!syncsGithub(source)) return;
     const now = this.clock();
     const wait = this.waitUntil(ws);
@@ -1077,9 +1077,9 @@ export class BacklogSync {
   }
 
   /**
-   * Brings the workspace up to date before a start decides on it (#909): what is kept here is sent (never rejects), then
+   * Brings the workspace up to date before a start decides on it: what is kept here is sent (never rejects), then
    * the repository is imported. Resolves once the import is stored; rejects with BacklogError during a limit or an
-   * outage, or when GitHub cannot be read — a start then goes on with the stored data (#2264).
+   * outage, or when GitHub cannot be read — a start then goes on with the stored data.
    */
   async settle(ws: Pick<BacklogWorkspace, "id" | "path" | "projectVar">): Promise<SettleTimings> {
     const timings: SettleTimings = { queueMs: 0, sendMs: 0, importMs: 0 };
@@ -1111,7 +1111,7 @@ export class BacklogSync {
     return { syncing: this.running.has(ws.id) || this.next.has(ws.id), error: failed?.message ?? null, errorKind: failed ? (failed.kind ?? "other") : null };
   }
 
-  /** The stored backlog of the workspace and its sync state; never asks GitHub. `opts` goes to readStoredBacklog (#937). */
+  /** The stored backlog of the workspace and its sync state; never asks GitHub. `opts` goes to readStoredBacklog. */
   read(ws: Pick<BacklogWorkspace, "id" | "name" | "path">, opts: Parameters<typeof readStoredBacklog>[2] = {}): StoredBacklog {
     const state = this.state(ws);
     return { ...readStoredBacklog(this.db, ws, { ...opts, importFailed: state.error !== null, now: this.clock() }), ...state };

@@ -56,9 +56,6 @@ export const panels = msgs({
   loggingIn: { ja: "ログイン中: ", en: "Logging in: " },
   logIn: { ja: "ログインする", en: "Log in" },
   approveAll: { ja: "まとめて承認", en: "Approve together" },
-  approveMerges: { ja: "選んだ PR のマージを認める", en: "Allow the chosen PRs to merge" },
-  mergeNoChoice: { ja: "「マージする」の選択肢が無いので、ここでは選べません", en: "It has no 「マージする」 choice, so it cannot be chosen here" },
-  mergeNotSent: { ja: "送りませんでした: {detail}", en: "Not sent: {detail}" },
   mockups: { ja: "画面イメージ", en: "Screen mockups" },
 
   // Interventions.tsx
@@ -107,6 +104,12 @@ export const panels = msgs({
 
   // Flow.tsx
   flowHeading: { ja: "流れ（直近 30 日）", en: "Flow (last 30 days)" },
+  waitNow: { ja: "いま ", en: "Now: " },
+  waitUntil: { ja: "期日待ち {n} 件（次の期日 {at}）", en: "{n} waiting for a date (next: {at})" },
+  waitConfirm: { ja: "確認待ち {n} 件", en: "{n} awaiting your confirmation" },
+  waitLongestPre: { ja: "（一番長い ", en: " (longest: " },
+  waitLongestPost: { ja: " · {days} 日）", en: " · {days} days)" },
+  waitSep: { ja: " · ", en: " · " },
   tallied: { ja: "{time} に集計", en: "Tallied at {time}" },
   loadingSuffix: { ja: " · 読み込み中…", en: " · Loading…" },
   flowFailed: { ja: "流れを読めませんでした: {error}", en: "Could not read the flow: {error}" },

@@ -71,7 +71,7 @@ test("Teleport evidence is target-specific, normal-exit only and unique", async 
   const fragmented = new TeleportOutput(id);
   for (const c of `Teleport ${id}\nSession resumed\nclaude --resume ${uuid}\n`) fragmented.feed(c);
   expect(fragmented.finish(0).localSessionId).toBe(uuid);
-  // CLI 2.1.296 in a PTY: words placed by cursor moves, no spaces (seen in the #1133 live check; text here is synthetic)
+  // CLI 2.1.296 in a PTY: words placed by cursor moves, no spaces (seen in a live check; text here is synthetic)
   const drawn = new TeleportOutput(id);
   drawn.feed(`\x1b[2G\u25d3\x1b[4GTeleporting\x1b[16Gsession\u2026 ${id}\r\n\x1b[2G\u25cf\x1b[4GSession\x1b[12Gresumed\r\n\x1b[1C\x1b[4A\x1b[?25hResume this session with:\r\nclaude --resume ${uuid}\r\n`);
   expect(drawn.finish(0).localSessionId).toBe(uuid);

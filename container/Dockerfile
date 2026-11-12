@@ -5,7 +5,7 @@
 # The versions and sha256 below that the host pins too are checked against those scripts by container/versions.test.ts.
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023 AS base
 
-RUN dnf install -y -q git sqlite unzip tar xz gzip shadow-utils findutils && dnf clean all
+RUN dnf install -y -q git sqlite unzip tar xz gzip shadow-utils findutils jq && dnf clean all
 
 # pinned as in aws/host/devtools.sh and node.sh (same versions, same URLs, same sha256)
 ARG DOCKER_VERSION=29.9.3

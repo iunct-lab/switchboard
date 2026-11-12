@@ -8,7 +8,7 @@ import { loadConfig } from "./config.ts";
 import { expandPreset, parseTarget } from "./presets.ts";
 import { startServer, type CoreServer } from "./server.ts";
 
-/* Saved instructions (#940): the pure parts, then /api/presets on a daemon with a fake runner and a fake gh. */
+/* Saved instructions: the pure parts, then /api/presets on a daemon with a fake runner and a fake gh. */
 
 const REPO = "example-org/app";
 
@@ -28,7 +28,7 @@ async function withHostAccount<T>(fn: (id: string) => Promise<T> | T): Promise<T
   }
 }
 
-describe("presets (#940)", () => {
+describe("presets", () => {
   test("parseTarget", () => {
     expect(parseTarget("12")).toEqual({ repo: null, number: 12 });
     expect(parseTarget(" #12 ")).toEqual({ repo: null, number: 12 });
@@ -75,7 +75,7 @@ async function boot(keepHome = false) {
 const send = (base: string, method: string, path: string, body?: unknown) => fetch(`${base}${path}`, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
 const list = async (base: string) => ((await (await fetch(`${base}/api/presets`)).json()) as PresetList).presets;
 
-describe("/api/presets (#940)", () => {
+describe("/api/presets", () => {
   test("crud", async () => {
     const base = await boot();
     const r = await send(base, "POST", "/api/presets", { name: "レビュー対応からマージまで", text: "PR {{target}} のレビューに対応してマージまで" });
@@ -87,7 +87,7 @@ describe("/api/presets (#940)", () => {
     expect((await send(base, "POST", "/api/presets", { name: " ", text: "x" })).status).toBe(400);
     expect((await send(base, "POST", "/api/presets", { name: "許可つき", text: "x", permissionMode: "bypassPermissions" })).status).toBe(400);
     expect((await send(base, "POST", "/api/presets", { name: "秘密", text: `token ghp_${"a1B2".repeat(9)}` })).status).toBe(400);
-    // an account id of the host's AWS config, written bare (#2351)
+    // an account id of the host's AWS config, written bare
     expect((await withHostAccount((id) => send(base, "POST", "/api/presets", { name: "アカウント", text: `メモ ${id}` }))).status).toBe(400);
     const e = await send(base, "PATCH", `/api/presets/${p.id}`, { name: "マージまで", text: "PR {{target}} をマージまで" });
     expect(e.status).toBe(200);

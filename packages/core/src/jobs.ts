@@ -1,5 +1,6 @@
 import type { Job, JobRequest } from "@switchboard/protocol";
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { childEnv } from "@switchboard/adapter-claude";
 import type { Db } from "./db.ts";
@@ -7,9 +8,9 @@ import { TASK_MARK } from "./detached.ts";
 import { readBootId } from "./ops-stops.ts";
 
 /**
- * Jobs a Task asks the daemon to run for it (#3992, PBI #3980): local CI and a review, the long waits a Task used to
+ * Jobs a Task asks the daemon to run for it: local CI and a review, the long waits a Task used to
  * keep its session open for. The daemon starts each as its own detached child — not the Task's — so the Task can end
- * its turn and let its session close; the end is recorded here and (#3993) resumes the Task that waits on `job#<id>`.
+ * its turn and let its session close; the end is recorded here and resumes the Task that waits on `job#<id>`.
  *
  * The kinds are fixed and their argv is built here: a Task names a kind, a PR and files, never a command (a command
  * taken from the request would go around the Task's permissions). The wrapper shell writes the exit code to
@@ -22,8 +23,25 @@ export class JobError extends Error {
   }
 }
 
-/** How long an ended job stays in the list and keeps its folder (#4276): GET /api/jobs, the resources screen and `ops-kit job list` show the same 7 days. */
+/** How long an ended job stays in the list and keeps its folder: GET /api/jobs, the resources screen and `ops-kit job list` show the same 7 days. */
 export const JOBS_KEEP_MS = 7 * 24 * 3600 * 1000;
+
+/**
+ * Where `scripts/local-ci.ts` leaves a record for each build whose result is not yet written to its PR; `--collect` reads and removes them.
+ * The contract with `--collect`: a record whose local-ci process is still alive is that process's to write, and `--collect` leaves it.
+ */
+export const localCiPendingDir = (home = homedir()): string => join(home, ".cache", "switchboard.local-ci-pending");
+
+/**
+ * Production `collectPending`: `bun scripts/local-ci.ts --collect` from the repository root, detached so it outlives this daemon; its
+ * output goes to `log` (next to the jobs' own logs), so a collect that wrote nothing says why.
+ */
+export const spawnCollectPending = (repoRoot: string, env: Record<string, string | undefined>, log: string): void => {
+  mkdirSync(dirname(log), { recursive: true });
+  const out = Bun.file(log);
+  const p = Bun.spawn(["bun", "scripts/local-ci.ts", "--collect"], { cwd: repoRoot, env, stdin: "ignore", stdout: out, stderr: out, detached: true });
+  p.unref();
+};
 
 /** A kind's command: argv, then shell text after it that only names the wrapper's variables (`$J`, `$JOB_PROMPT`, `$JOB_OUT`). */
 export type JobCommand = { argv: string[]; tail: string };
@@ -44,6 +62,10 @@ export type JobDeps = {
   pollMs?: number;
   /** This boot's id (/proc/sys/kernel/random/boot_id); tests give their own. */
   bootId?: () => string | null;
+  /** Where local CI's pending records are (default `localCiPendingDir()`); tests give their own. */
+  pendingDir?: string;
+  /** Collects the results of builds that outlived their daemon (production: `spawnCollectPending`). Called once by `recoverJobs`. */
+  collectPending?: () => void;
   now?: () => number;
 };
 
@@ -121,7 +143,7 @@ const readExit = (jobDir: string): number | null => {
 };
 
 /**
- * Removes the folder (`<dir>/<id>`) of each job that ended before the list's period (#4276). The rows stay; a folder
+ * Removes the folder (`<dir>/<id>`) of each job that ended before the list's period. The rows stay; a folder
  * whose number has no row stays too (what is left of a restored database is kept to look at).
  */
 export function pruneJobDirs(deps: JobDeps): number {
@@ -159,7 +181,7 @@ function finish(deps: JobDeps, id: number): Job | null {
 }
 
 /**
- * Starts a job for a Task (#3992): checks the request, records the job and starts it as the daemon's detached child.
+ * Starts a job for a Task: checks the request, records the job and starts it as the daemon's detached child.
  * Throws JobError (404: no such Task; 400: a folder or file outside the Task's repository).
  */
 export function requestJob(deps: JobDeps, req: JobRequest): Job {
@@ -188,7 +210,7 @@ export function requestJob(deps: JobDeps, req: JobRequest): Job {
   const job = deps.db.insertJob({ kind: req.kind, taskId: req.taskId, pr: req.pr, runner: req.kind === "review" ? req.runner : null, cwd, startedAt: (deps.now ?? Date.now)() });
   const jobDir = join(deps.dir, String(job.id));
   const { argv, tail } = deps.command ? deps.command(resolved) : jobCommand(resolved, deps.reviewIdleS);
-  // not the Task's: without its mark (the Task's end stops what carries it, #1397) and without SWITCHBOARD_SUPERVISED
+  // not the Task's: without its mark (the Task's end stops what carries it) and without SWITCHBOARD_SUPERVISED
   // (a Task's variable; local CI's tests fail with it), and without Claude Code's session markers and the OTEL_*
   // destinations, as the Task's own claude gets it (`childEnv`). OPS_KIT_TASK_ID still names the Task to `ops-kit heavy`.
   const env = childEnv(deps.env);
@@ -231,7 +253,7 @@ const alive = (pid: number) => {
 };
 
 /**
- * At the daemon's start (#3992): each job still running in the table was started by an earlier daemon. One that left
+ * At the daemon's start: each job still running in the table was started by an earlier daemon. One that left
  * its exit code ends with it; one whose process still runs (in this boot) is looked at every `pollMs` until it ends;
  * one whose process is gone, or that started in another boot, without an exit code is aborted.
  */
@@ -245,13 +267,33 @@ export function recoverJobs(deps: JobDeps): void {
     (t as unknown as { unref?: () => void }).unref?.();
   };
   const boot = (deps.bootId ?? readBootId)();
+  let ciLeft = false;
   for (const job of deps.db.listJobs(Number.MAX_SAFE_INTEGER)) {
     if (job.status !== "running") continue;
     const { pid, bootId } = deps.db.jobPid(job.id);
     // a job of another boot is not running whatever its pid is now (a reboot hands pids out again)
     const sameBoot = bootId === null || boot === null || bootId === boot;
-    if (readExit(join(deps.dir, String(job.id))) !== null || pid === null || !sameBoot || !alive(pid)) finish(deps, job.id);
-    else watch(job.id, pid);
+    if (readExit(join(deps.dir, String(job.id))) !== null || pid === null || !sameBoot || !alive(pid)) {
+      finish(deps, job.id);
+      // only a local-ci that is gone left its build to collect; a live one (a restart in the same boot) writes its own result
+      if (job.kind === "local-ci") ciLeft = true;
+    } else watch(job.id, pid);
   }
   pruneQuietly(deps);
+  // a build offloaded from local CI may have ended while the daemon was down: write its result to the PR (once per start)
+  if (deps.collectPending && (ciLeft || hasPending(deps.pendingDir ?? localCiPendingDir()))) {
+    try {
+      deps.collectPending();
+    } catch (e) {
+      console.error(`[jobs] collect pending: ${String((e as Error)?.message ?? e)}`);
+    }
+  }
 }
+
+const hasPending = (dir: string): boolean => {
+  try {
+    return readdirSync(dir).length > 0;
+  } catch {
+    return false;
+  }
+};

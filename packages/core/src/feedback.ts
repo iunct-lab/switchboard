@@ -1,6 +1,6 @@
 import { LOCAL_BACKLOG_RULES, type OtherRepo, otherRepoRules } from "./backlog.ts";
 
-/** Where a request came from besides the button (#1221 evals, #3682 a throwaway app with the folder its copy is in). */
+/** Where a request came from besides the button (evals, a throwaway app with the folder its copy is in). */
 export type FeedbackSource = { kind: "eval"; taskId: string } | { kind: "artifact"; artifactId: string; taskId: string; copy: string };
 
 const oneLine = (v: string) => v.replace(/\s+/g, "");
@@ -13,11 +13,11 @@ function sourceLine(source: FeedbackSource): string {
  * The request goes in as the user wrote it, for the agent to tidy without changing its intent; a longer fence keeps backticks in a report inside the block.
  * `other` = the request is for another registered workspace's repository: the Task runs there and files it in that
  * repository and its Project, reading the skills as a backlog stage Task on that workspace does.
- * `auto` = Switchboard filed it by itself (#3682, a throwaway app read on enough days), not the person through the button.
+ * `auto` = Switchboard filed it by itself (a throwaway app read on enough days), not the person through the button.
  */
 export function buildFeedbackPrompt({ text, when, screen, other, local, source, auto }: { text: string; when: Date; screen?: string; other?: OtherRepo; local?: boolean; source?: FeedbackSource; auto?: boolean }): string {
   const fence = "`".repeat(Math.max(4, ...Array.from(text.matchAll(/`+/g), (m) => m[0].length + 1)));
-  // a workspace whose backlog is kept in Switchboard only (#2265, #2344): the Issues are made there, not in the GitHub repository
+  // a workspace whose backlog is kept in Switchboard only: the Issues are made there, not in the GitHub repository
   const where = local
     ? `あなたは Switchboard に登録された workspace（このディレクトリ）で動いている。要望 Issue・PBI・Task はこの workspace の Switchboard のバックログに作る（GitHub には作らない）。${other ? otherRepoRules(other, true) : LOCAL_BACKLOG_RULES}`
     : other
@@ -40,7 +40,7 @@ ${fence}
 ${auto ? "- 誰の言葉: 定期の検査（使い捨てアプリが使われた日数から Switchboard が起こした）\n自動" : "- 誰の言葉: 利用者\nフィードバックボタン"}、${when.toISOString()}${screen ? `\n画面: ${screen.replace(/\s+/g, " ").trim()}` : ""}${source ? `\n${sourceLine(source)}` : ""}`;
 }
 
-/** 新しいリポジトリ (#1447): the steps live in the skill; this only points at it and hands over the name and purpose as data. */
+/** 新しいリポジトリ: the steps live in the skill; this only points at it and hands over the name and purpose as data. */
 export function buildNewRepoPrompt({ name, purpose, when }: { name: string; purpose: string; when: Date }): string {
   const fenced = (text: string) => {
     const fence = "`".repeat(Math.max(4, ...Array.from(text.matchAll(/`+/g), (m) => m[0].length + 1)));
@@ -87,7 +87,7 @@ export const FIX_SCOPE = `## 進め方
 - マージ判定が \`[聞く]\` で止めたとき、デーモンを再起動する pull、認証は Task の会話で聞く。昇格はリポジトリの CLAUDE.md の決まりに従い、聞かずに昇格してよいと書いていなければ Task の会話で聞く
 - 終わったら最後の行に PR の番号とマージの結果を書く`;
 
-/** すぐ直す (#263): the meta workspace's brief, then the user's words as they are, where they came from, then how to carry the fix to main. No request is filed. */
+/** すぐ直す: the meta workspace's brief, then the user's words as they are, where they came from, then how to carry the fix to main. No request is filed. */
 export function buildFixPrompt({ brief, text, when, screen }: { brief: string; text: string; when: Date; screen?: string }): string {
   // The brief ends with 「やってほしいこと:」; the request follows it directly, as with Home's 改善 →.
   return `${brief.replace(/\n*$/, "\n")}${text}
@@ -103,7 +103,7 @@ export function fixTitle(text: string): string {
 }
 
 /**
- * Where a request for Switchboard itself goes when this instance does not develop it (#2459): the upstream's request form
+ * Where a request for Switchboard itself goes when this instance does not develop it: the upstream's request form
  * with the text filled in (`what` of the public repository's request.yml) when the origin is on GitHub, else only the text to copy.
  * Nothing is created through the API; the person files it from their own account.
  */

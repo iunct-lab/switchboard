@@ -23,12 +23,12 @@ export class AttachmentError extends Error {
 }
 
 /**
- * Files attached to a turn (#125). They live in the daemon's data directory — `<dir>/inbox/<id>/<name>` from the
+ * Files attached to a turn. They live in the daemon's data directory — `<dir>/inbox/<id>/<name>` from the
  * upload until a turn sends them, `<dir>/<taskId>/<name>` from then on — and never inside a repository (a
  * checkout must not show them in `git status`). Runners get the absolute path in the prompt: Claude and Codex run
  * on this machine with their own file tools, and the task's scope is widened to the task's attachment directory
  * so the read needs no extra permission (`--add-dir` for Claude, the sandbox roots for Codex, Workspace MCP's
- * Scope). DAK, which cannot see host paths, gets the contents in its message instead (#124), and the files it makes
+ * Scope). DAK, which cannot see host paths, gets the contents in its message instead, and the files it makes
  * come back the other way: its adapter writes them into the task's directory and the daemon `register`s them.
  */
 export class AttachmentStore {
@@ -114,7 +114,7 @@ export class AttachmentStore {
   }
 
   /**
-   * A file a runner wrote into the task's directory (#124: DAK's artifacts) becomes one of the task's attachments.
+   * A file a runner wrote into the task's directory (DAK's artifacts) becomes one of the task's attachments.
    * Only a regular file directly in `taskDir(taskId)` (a symlink is not one: it could point out of the directory),
    * not registered yet, is taken; anything else is undefined.
    */

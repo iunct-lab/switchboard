@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { runJob, stopExample } from "./job-client.ts";
 
-// `ops-kit job` (#3994): a Task asks the app for its local CI / review as the app's job, through BACKLOG_URL's origin.
+// `ops-kit job`: a Task asks the app for its local CI / review as the app's job, through BACKLOG_URL's origin.
 
 const ENV = { BACKLOG_URL: "http://127.0.0.1:4777/api/backlog", OPS_KIT_TASK_ID: "task_1" };
 
@@ -18,7 +18,7 @@ function run(argv: string[], answer: (url: string, init?: RequestInit) => Respon
 }
 const job = (over: Record<string, unknown> = {}) => Response.json({ id: 7, kind: "local-ci", taskId: "task_1", pr: 12, runner: null, status: "running", exitCode: null, ...over }, { status: 202 });
 
-describe("ops-kit job (#3994)", () => {
+describe("ops-kit job", () => {
   test("request local-ci posts the kind, PR, cwd and Task, and prints job#<id> and the stop to paste", async () => {
     const r = await run(["request", "local-ci", "12"], () => job());
     expect(r.code).toBe(0);

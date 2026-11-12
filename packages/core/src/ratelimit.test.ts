@@ -20,7 +20,7 @@ const QUOTA: AgentEvent = { t: "quota", runner: "claude", windows: { five_hour: 
 const LIMIT_TURN: AgentEvent[] = [{ t: "session.start", runner: "claude", runnerSessionId: "sess-1", cwd: "/tmp" }, QUOTA, { t: "message.delta", role: "assistant", text: BANNER }, { t: "session.end", status: "error", summary: BANNER }];
 const OK_TURN: AgentEvent[] = [{ t: "session.start", runner: "claude", runnerSessionId: "sess-1", cwd: "/tmp" }, { t: "message.delta", role: "assistant", text: "done" }, { t: "session.end", status: "ok", summary: "done" }];
 
-describe("rate limit: recognising the stop and its reset time (#102)", () => {
+describe("rate limit: recognising the stop and its reset time", () => {
   test("Claude's banner and API rate-limit errors count; look-alikes and ordinary errors do not; Codex on wording only", () => {
     expect(isLimitText("claude", BANNER)).toBe(true);
     expect(isLimitText("claude", "You've hit your limit · resets 4pm")).toBe(true);
@@ -76,7 +76,7 @@ describe("rate limit: recognising the stop and its reset time (#102)", () => {
     expect(resetFromQuota([five, { window: "seven_day", utilization: 0.995, resetsAt: WEEK_RESET }], now)?.at).toBe(RESETS_AT * 1000); // 99.5 % is not used up
     expect(resetFromQuota([five, week], now)?.at).toBe(RESETS_AT * 1000); // both used up, none named → the earlier reset
     expect(resetFromQuota([five, week], now, "seven_day")?.at).toBe(WEEK_RESET * 1000); // the runner says the weekly one binds
-    expect(resetFromQuota([five, week], now, "seven_day")?.window).toBe("seven_day"); // with the window's name (#2237)
+    expect(resetFromQuota([five, week], now, "seven_day")?.window).toBe("seven_day"); // with the window's name
     expect(resetFromQuota([five, week], now, "five_hour")?.at).toBe(RESETS_AT * 1000);
     expect(resetFromQuota([{ ...five, utilization: 0.5 }, week], now, "five_hour")?.at).toBe(WEEK_RESET * 1000); // named but not used up → the other
     expect(resetFromQuota([{ window: "five_hour", utilization: 1, resetsAt: Math.floor(now / 1000) - 60 }], now)?.at).toBe((Math.floor(now / 1000) - 60) * 1000); // a minute ago: lifted late
@@ -137,7 +137,7 @@ function fakeAdapter(turns: AgentEvent[][], starts: StartOptions[], sends: strin
   };
 }
 
-describe("rate limit: RateLimitResumer (#102)", () => {
+describe("rate limit: RateLimitResumer", () => {
   let home: string;
   let db: Db;
   let tasks: TaskManager;
@@ -174,7 +174,7 @@ describe("rate limit: RateLimitResumer (#102)", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("starts a deferred task (#2768): not before its time; once, as the first turn, after it; off = waits, 今すぐ再開 starts; cancel = never starts", async () => {
+  test("starts a deferred task: not before its time; once, as the first turn, after it; off = waits, 今すぐ再開 starts; cancel = never starts", async () => {
     boot([OK_TURN]);
     const at = now + 3_600_000;
     const mk = (title: string) => tasks.create({ cwd: home, title, prompt: "go", runner: "claude" }, undefined, undefined, { deferUntil: at });
@@ -217,7 +217,7 @@ describe("rate limit: RateLimitResumer (#102)", () => {
     expect(starts.length).toBe(2);
   });
 
-  test("a deferred start refused before its runner starts keeps the plan and the prompt, and tries again after the retry setting (#2768)", async () => {
+  test("a deferred start refused before its runner starts keeps the plan and the prompt, and tries again after the retry setting", async () => {
     boot([OK_TURN]);
     const at = now + 3_600_000;
     const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" }, undefined, undefined, { deferUntil: at });
@@ -271,7 +271,7 @@ describe("rate limit: RateLimitResumer (#102)", () => {
     expect(await resumer.tick()).toEqual([]); // nothing left
   });
 
-  test("no free run slot (#1141): a due tick sends nothing and keeps resumeAt (one log line); once another Task ends, the next tick sends, once", async () => {
+  test("no free run slot: a due tick sends nothing and keeps resumeAt (one log line); once another Task ends, the next tick sends, once", async () => {
     const logs: string[] = [];
     tasks = new TaskManager(db, new Map([["claude", fakeAdapter([LIMIT_TURN, OK_TURN], starts, sends, ctl)]]), (m) => broadcasts.push(m), { idleMs: -1, maxRunners: () => 1 });
     resumer = new RateLimitResumer(db, tasks, { enabled: () => enabled, now: () => now, log: (m) => logs.push(m) });
@@ -297,7 +297,7 @@ describe("rate limit: RateLimitResumer (#102)", () => {
     expect(sends).toEqual([RESUME_PROMPT]);
   });
 
-  test("no free run slot (#1141): two Tasks due and one slot — a tick sends one, the other waits for the next tick", async () => {
+  test("no free run slot: two Tasks due and one slot — a tick sends one, the other waits for the next tick", async () => {
     tasks = new TaskManager(db, new Map([["claude", fakeAdapter([LIMIT_TURN, LIMIT_TURN, [], OK_TURN], starts, sends, ctl)]]), (m) => broadcasts.push(m), { idleMs: -1, maxRunners: () => 1 });
     resumer = new RateLimitResumer(db, tasks, { enabled: () => enabled, now: () => now, log: () => undefined });
     resumer.start(3_600_000);
@@ -444,7 +444,7 @@ describe("rate limit: RateLimitResumer (#102)", () => {
     boot([[LIMIT_TURN[0]!, both, LIMIT_TURN[3]!], [LIMIT_TURN[0]!, LIMIT_TURN[3]!]]);
     const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
     await settle();
-    expect(db.getTask(t.id)!.resumePlannedAt).toBe(WEEK_RESET * 1000 + RESUME_MARGIN_MS); // days away: tried once at 6 h first (#2237)
+    expect(db.getTask(t.id)!.resumePlannedAt).toBe(WEEK_RESET * 1000 + RESUME_MARGIN_MS); // days away: tried once at 6 h first
     // a second task stops without a quota report of its own → the table's five_hour (fresh from task 1) applies
     db.upsertQuota("claude", "five_hour", 1.02, RESETS_AT, now);
     db.upsertQuota("claude", "seven_day", 0.3, WEEK_RESET, now);
@@ -576,7 +576,7 @@ describe("rate limit: RateLimitResumer (#102)", () => {
     expect(await resumer.tick()).toEqual([]);
     expect(db.getTask(t.id)!.resumeAt).toBe(now + LATE_RETRY_MS);
     expect(statuses(t.id).at(-1)).toContain("再試行します");
-    // recorded as the task's stop (#949), waiting on this path's own timer — not a second retry of its own
+    // recorded as the task's stop, waiting on this path's own timer — not a second retry of its own
     expect(tasks.stopOf(t.id, "resume-send")).toMatchObject({ op: "resume.send", reason: "transient", state: "waiting", conditions: [{ key: "resumeAt", met: false }], actions: [{ attempt: 1, ok: false }] });
     // and the retry goes through
     now += LATE_RETRY_MS + 1;
@@ -610,7 +610,7 @@ describe("rate limit: RateLimitResumer (#102)", () => {
     expect(await resumer.tick()).toEqual([]);
   });
 
-  // a usage limit of another runner that the task reported as a stop (#4408)
+  // a usage limit of another runner that the task reported as a stop
   const reportOf = (over: Record<string, unknown> = {}): Parameters<TaskManager["recordStop"]>[1] =>
     parseStopReport(JSON.stringify({ id: "codex-limit", op: "codex review", target: "PR", reason: "usage-limit", safety: "unknown", evidence: "Codex の週の上限", state: "waiting", conditions: [{ key: "runner#codex", value: "2026-09-11T04:00:00+09:00", met: false }], actions: [], ...over }))!;
   const REPORTED_RESET = Date.parse("2026-09-11T04:00:00+09:00");
@@ -912,7 +912,7 @@ describe("a turn the daemon's stop cut continues on the next start (interrupted.
   });
 });
 
-describe("settings tunables (#835): the resumer and the daemon-stop resume read quotaAndResume on every use", () => {
+describe("settings tunables: the resumer and the daemon-stop resume read quotaAndResume on every use", () => {
   let home: string;
   let db: Db;
   let starts: StartOptions[];
@@ -1038,7 +1038,7 @@ describe("settings tunables (#835): the resumer and the daemon-stop resume read 
   });
 });
 
-describe("GitHub API limit met by a turn's commands (#550)", () => {
+describe("GitHub API limit met by a turn's commands", () => {
   const LINE = "GraphQL: API rate limit already exceeded for user ID 1.";
   const GH_RESET = RESETS_AT + 1200;
   const call = (id: string, name: string, input: unknown, summary: string, ok: boolean): AgentEvent[] => [
@@ -1318,7 +1318,7 @@ describe("GitHub API limit met by a turn's commands (#550)", () => {
   });
 });
 
-describe("fallbackRunner (#834)", () => {
+describe("fallbackRunner", () => {
   const now = Date.parse("2026-10-24T03:00:00Z");
   const later = Math.floor(now / 1000) + 3600; // seconds, like the quota rows
   const rows = (q: Partial<Record<RunnerId, Array<[string, number, number]>>>) => (r: RunnerId) => (q[r] ?? []).map(([window, utilization, resetsAt]) => ({ window, utilization, resetsAt }));
@@ -1340,7 +1340,7 @@ describe("fallbackRunner (#834)", () => {
     expect(!!r.from).toBe(moved);
   });
 
-  test("held (#2768): the decided runner at its limit with no alternative names its window; an empty order too; a moved or free one has none", () => {
+  test("held: the decided runner at its limit with no alternative names its window; an empty order too; a moved or free one has none", () => {
     const hotRow = { claude: [["five_hour", 0.95, later] as [string, number, number]], codex: [["five_hour", 0.99, later] as [string, number, number]] };
     const want = { runner: "claude" as RunnerId, window: "five_hour", utilization: 0.95, resetsAt: later * 1000 };
     expect(fallbackRunner("claude", cfg(["codex"]), rows(hotRow), all, now)).toEqual({ runner: "claude", held: want });
@@ -1356,7 +1356,7 @@ describe("fallbackRunner (#834)", () => {
   });
 });
 
-describe("fmtTime (#2040): JST whatever the daemon's time zone", () => {
+describe("fmtTime: JST whatever the daemon's time zone", () => {
   test("fmtTime: the same JST day → HH:MM; another JST day → M/D HH:MM", () => {
     const now = Date.parse("2026-10-19T08:03:00Z");
     expect(fmtTime(now, now)).toBe("17:03");

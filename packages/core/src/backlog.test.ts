@@ -20,9 +20,9 @@ import { fmtTime, RESUME_MARGIN_MS } from "./ratelimit.ts";
 import { delegatedNote } from "./evals.ts";
 import { answerStoredDecision, BacklogEditError, checkFieldTypes, buildDirectPrompt, buildStartPrompt, subagentModelAlias, localBacklogSource, canStartStoredBacklog, screenAnswer, confirmationsOf, confirmAfterOf, confirmDecisionsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, onHoldIn, chooseProcess, flowHeldIn, flowHeldLine, flowRunning, flowStopped, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld, storedIssueHeads, readStoredIssue, editStoredIssue, waitsOf, isUnblocked, withOverlap } from "./backlog.ts";
 
-// the writer of the waits (#817), read at run time: scripts/ is not type-checked under core's settings
+// the writer of the waits, read at run time: scripts/ is not type-checked under core's settings
 const guard = "../../../scripts/parallel-guard.ts";
-/** The meta workspace is this checkout, whose origin is not the fake gh's acme/app: no origin to check (#2799; tasks.test.ts checks it). */
+/** The meta workspace is this checkout, whose origin is not the fake gh's acme/app: no origin to check (tasks.test.ts checks it). */
 const FAKE_ORIGIN = () => null;
 const { releaseBody } = (await import(guard)) as { releaseBody: (reason: string, waits?: number[], overlap?: boolean, after?: string) => string };
 const FIXTURE_STAGE_NAMES: Record<string, BacklogAction> = { "PBI にする": "to-pbi", "Task に分解": "to-tasks", "実装": "complete", "状況確認": "check", "閉じる": "close" };
@@ -50,11 +50,11 @@ function fakeGh(fail?: { code: number; stderr: string }, failIssueWrite = false)
     const page = args.includes("after=CURSOR1") ? pages[1] : pages[0];
     return { code: 0, stdout: JSON.stringify(page), stderr: "" };
   };
-  // GitHub's budget (#549) is not a read of the backlog
+  // GitHub's budget is not a read of the backlog
   return { gh, calls, cwds, graphql: () => calls.filter((a) => a[0] === "api" && !a.some((x) => x.includes("rateLimit"))).length };
 }
 
-/** fakeGh with the 分解待ち #303 already decomposed into 2 open sub-issues, its Status still Backlog (#1393). */
+/** fakeGh with the 分解待ち Issue 303 already decomposed into 2 open sub-issues, its Status still Backlog. */
 function decomposedGh() {
   const fake = fakeGh();
   const gh: GhRunner = async (args, cwd) => {
@@ -66,7 +66,7 @@ function decomposedGh() {
   };
   return { ...fake, gh };
 }
-/** fakeGh with `numbers` labelled on-hold (#2930). */
+/** fakeGh with `numbers` labelled on-hold. */
 function onHoldGh(...numbers: number[]) {
   const fake = fakeGh();
   const gh: GhRunner = async (args, cwd) => {
@@ -78,10 +78,10 @@ function onHoldGh(...numbers: number[]) {
   };
   return { ...fake, gh };
 }
-/** The prompt a decomposed PBI in 分解待ち is started with: make it Ready, do not decompose it again (#1393). */
+/** The prompt a decomposed PBI in 分解待ち is started with: make it Ready, do not decompose it again. */
 const DECOMPOSED_READY = (n: number, total: number) => `PBI #${n} は Task（sub-issue ${total} 件）に分解済みですが、Project の Status が Ready になっていません。`;
 
-/** fakeGh, answering GitHub's GraphQL budget with `remaining` of 5,000 points, back at `resetAt` (#549). */
+/** fakeGh, answering GitHub's GraphQL budget with `remaining` of 5,000 points, back at `resetAt`. */
 function budgetGh(remaining: number, resetAt = new Date(Date.now() + 40 * 60_000).toISOString()) {
   const fake = fakeGh();
   const gh: GhRunner = async (args, cwd) => {
@@ -104,7 +104,7 @@ function limitedGh() {
   return { ...fake, gh, limited };
 }
 
-/** The list once the imports under way are stored (`refresh`: asks for them first; #885 answers what is stored meanwhile). */
+/** The list once the imports under way are stored (`refresh`: asks for them first; a plain read answers what is stored meanwhile). */
 async function refreshed(base: string, refresh = true): Promise<Backlog> {
   let body = (await (await fetch(`${base}/api/backlog${refresh ? "?refresh=1" : ""}`)).json()) as Backlog;
   while (body.syncs.some((x) => x.syncing)) {
@@ -116,7 +116,7 @@ async function refreshed(base: string, refresh = true): Promise<Backlog> {
 
 let core: CoreServer | undefined;
 let home: string | undefined;
-/** The open PRs of the fake GitHub (#1044): `{ number, files, labels?, isDraft?, headRefName?, body? }`. */
+/** The open PRs of the fake GitHub: `{ number, files, labels?, isDraft?, headRefName?, body? }`. */
 let openPulls: Array<Record<string, unknown>> = [];
 const savedProjectUrl = process.env.SWITCHBOARD_PROJECT_URL;
 beforeEach(() => { delete process.env.SWITCHBOARD_PROJECT_URL; });
@@ -130,7 +130,7 @@ afterEach(async () => {
 async function boot(gh: GhRunner, adapter: RunnerAdapter | RunnerAdapter[] = { id: "claude", detect: async () => ({ available: false }), start() { throw new Error("no runs"); } }, env: Record<string, string> = {}, llmSuggester?: () => Suggester, outer: (gh: GhRunner) => GhRunner = (g) => g, extra: Partial<StartServerOptions> = {}) {
   home = mkdtempSync(join(tmpdir(), "sb-backlog-"));
   const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0", ...env });
-  // as the daemon starts: every workspace is imported at boot (#885); the tests begin once it is stored
+  // as the daemon starts: every workspace is imported at boot; the tests begin once it is stored
   core = await startServer(cfg, [adapter].flat(), { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: FAKE_ORIGIN, gh: outer(importing(gh, () => openPulls)), llmSuggester, backlogAutoImport: true, ...extra });
   const base = `http://127.0.0.1:${core.server.port}`;
   await refreshed(base, false);
@@ -143,17 +143,17 @@ test("GET /api/backlog: stage per request / PBI, Project fields, Task counts, bo
   const r = await fetch(`${base}/api/backlog`);
   expect(r.status).toBe(200);
   const body = await r.json() as Backlog;
-  // the first look waits for the first import (#885): nothing was stored before it
+  // the first look waits for the first import: nothing was stored before it
   expect(body.syncs).toEqual([{ workspaceId: expect.any(String), backlog: "github", enabling: null, repository: "acme/app", syncing: false, syncedAt: body.fetchedAt, creates: [], issues: [], sync: expect.objectContaining({ state: "synced", reason: null, lastSuccessfulSync: body.fetchedAt, guarantee: "A" }) }]);
   expect(body.items.map((i) => [i.number, i.type, i.stage])).toEqual([
     [306, "pbi", "needs-decision"], // label wins over Status In progress
     [305, "pbi", "in-progress"], // In review
     [304, "pbi", "ready"],
     [303, "pbi", "needs-tasks"], // Backlog
-    [302, "request", "request"], // "#12" in the original does not count; only the 派生 PBI section does
-    // 301 has "#303" under 派生 PBI → not returned
+    [302, "request", "request"], // an Issue reference in the original body does not count; only the 派生 PBI section does
+    // 301 names 303 under 派生 PBI → not returned
     [307, "pbi", "in-progress"], // In progress
-    [308, "pbi", "in-progress"], // In review, with confirmations (#523); the newest created first
+    [308, "pbi", "in-progress"], // In review, with confirmations; the newest created first
   ]);
   expect(body.items[1]).toMatchObject({ priority: "P0", storyPoints: 5, tasks: { total: 3, done: 1, doneAt: expect.any(String) }, decision: null, url: "https://github.com/acme/app/issues/305", createdAt: "2026-09-20T05:00:00Z" });
   // Project 11's fields only (the item also sits in project 7 with Status Done)
@@ -182,7 +182,7 @@ test("GET /api/backlog: reads what is stored, without a gh call; ?refresh=1 impo
   expect(again.syncs.map((x) => x.syncing)).toEqual([false]);
 });
 
-test("developSelf off: the meta workspace is not read, others are (#2459)", async () => {
+test("developSelf off: the meta workspace is not read, others are", async () => {
   const fake = fakeGh();
   const base = await boot(fake.gh);
   const meta = core!.db.listWorkspaces().find((w) => w.kind === "meta")!;
@@ -213,7 +213,7 @@ test("developSelf off: the meta workspace is not read, others are (#2459)", asyn
   expect(new Set(back.items.map((i) => i.workspaceId))).toEqual(new Set([meta.id, other.id]));
 });
 
-test("GET /api/backlog after a restart with GitHub failing, and from a restored backup: the stored list and questions, with the reason (#885)", async () => {
+test("GET /api/backlog after a restart with GitHub failing, and from a restored backup: the stored list and questions, with the reason", async () => {
   const base = await boot(fakeGh().gh);
   const before = await (await fetch(`${base}/api/backlog`)).json() as Backlog;
   expect(before.items.find((i) => i.number === 306)!.decision).not.toBeNull();
@@ -244,7 +244,7 @@ test("GET /api/backlog after a restart with GitHub failing, and from a restored 
   }
 });
 
-test("GET /api/backlog/:number: the stored body, comments and Project fields; 404 when not stored (#885)", async () => {
+test("GET /api/backlog/:number: the stored body, comments and Project fields; 404 when not stored", async () => {
   const base = await boot(fakeGh().gh);
   await fetch(`${base}/api/backlog`);
   const meta = core!.db.listWorkspaces().find((w) => w.kind === "meta")!;
@@ -257,7 +257,7 @@ test("GET /api/backlog/:number: the stored body, comments and Project fields; 40
   expect((await fetch(`${base}/api/backlog/306?workspaceId=nope`)).status).toBe(404);
 });
 
-test("GET /api/backlog: gh failing → the workspace and the reason in errors, never an empty list as if read (kind gh-login, #2362)", async () => {
+test("GET /api/backlog: gh failing → the workspace and the reason in errors, never an empty list as if read (kind gh-login)", async () => {
   const base = await boot(fakeGh({ code: 1, stderr: "To get started with GitHub CLI, please run:  gh auth login\n" + "x".repeat(400) }).gh);
   const r = await fetch(`${base}/api/backlog`);
   expect(r.status).toBe(200);
@@ -298,7 +298,7 @@ test("GET /api/backlog: a Project the token cannot read is an error of that work
   expect((await refreshed(base)).errors[0]!.message).toContain("API rate limit exceeded");
 });
 
-test("GET /api/backlog: fetchedAt is the GitHub workspaces' import, not a workspace kept only here (#2362)", async () => {
+test("GET /api/backlog: fetchedAt is the GitHub workspaces' import, not a workspace kept only here", async () => {
   const base = await boot(fakeGh().gh);
   const dir = mkdtempSync(join(home!, "local-"));
   copyFileSync(join(import.meta.dir, "../../../ops.config.json"), join(dir, "ops.config.json"));
@@ -375,7 +375,7 @@ test("GET /api/backlog: every registered workspace; one that fails does not hide
   expect(body.items.filter((i) => i.workspaceId === lib.id && i.workspaceName === "lib")).toHaveLength(7);
   expect(body.errors).toEqual([{ workspaceId: broken.id, workspaceName: "broken", message: expect.stringContaining("HTTP 404"), kind: "other" }]);
 
-  // a plain read asks GitHub for none, the failed workspace neither (its import is asked again by 再読込, #885)
+  // a plain read asks GitHub for none, the failed workspace neither (its import is asked again by 再読込)
   const calls = ok.cwds.length;
   const again = await (await fetch(`${base}/api/backlog`)).json() as Backlog;
   expect(ok.cwds.length).toBe(calls);
@@ -460,17 +460,17 @@ test("GET /api/backlog: an in-progress item carries its Project Status, the Issu
   const lib304 = await run(libId, "#304 実装: PBI: lib の Ready の PBI", "ok");
   const meta3040 = await run(metaId(), "#3040 実装: 別の番号", "ok"); // another number that shares a digit prefix
   expect([done.status, failed.status]).toEqual(["done", "error"]);
-  // the same stop from both of #305's Tasks is one series of 2 (#948); lib's #304 and the meta's #3040 are other work
+  // the same stop from both of Issue 305's Tasks is one series of 2; lib's Issue 304 and the meta's Issue 3040 are other work
   const merge = { id: "m", op: "gh pr merge", target: "PR #9", reason: "depends" as const, evidence: "CI", safety: "unknown" as const, conditions: [], actions: [], state: "waiting" as const };
   for (const t of [first, done, lib304, meta3040]) expect(core!.tasks.recordStop(t.id, merge).ok).toBe(true);
 
   const items = (await (await fetch(`${base}/api/backlog`)).json() as Backlog).items;
   const mine = (n: number) => items.find((i) => i.number === n && i.workspaceId === metaId())!;
   expect(mine(305)).toMatchObject({ projectStatus: "In review", updatedAt: "2026-09-27T05:00:00Z", lastTask: { id: done.id, status: "done", statusAt: done.statusAt, createdAt: done.createdAt, updatedAt: done.updatedAt }, activeTaskId: null });
-  expect(typeof mine(305).lastTask!.statusAt).toBe("number"); // when it came to done (#2029), not when it was made
+  expect(typeof mine(305).lastTask!.statusAt).toBe("number"); // when it came to done, not when it was made
   expect(done.statusAt).toBeGreaterThanOrEqual(done.createdAt);
   expect(mine(307)).toMatchObject({ projectStatus: "In progress", updatedAt: "2026-09-12T07:00:00Z", lastTask: { id: failed.id, status: "error", statusAt: failed.statusAt, updatedAt: failed.updatedAt } });
-  // no stage Task of its own: the other workspace's #304 and the meta's #3040 are not it
+  // no stage Task of its own: the other workspace's Issue 304 and the meta's Issue 3040 are not it
   expect(mine(304)).toMatchObject({ projectStatus: "Ready", lastTask: null });
   expect(items.find((i) => i.number === 304 && i.workspaceId === libId)!.lastTask).toMatchObject({ status: "done" });
   expect(mine(302)).toMatchObject({ projectStatus: null, lastTask: null, report: null });
@@ -478,7 +478,7 @@ test("GET /api/backlog: an in-progress item carries its Project Status, the Issu
   expect(mine(304).stopSummary).toEqual([]);
   expect(items.find((i) => i.number === 304 && i.workspaceId === libId)!.stopSummary).toMatchObject([{ count: 1, work: { workspaceId: libId, issue: 304 } }]);
   expect(mine(307).stopSummary).toEqual([]);
-  // #1619: the row reads replyWaiting from the daemon — #305's last Task ended asking the person (needs_action, not reviewed)
+  // the row reads replyWaiting from the daemon — Issue 305's last Task ended asking the person (needs_action, not reviewed)
   expect(mine(305).replyWaiting).toBe(false);
   core!.db.updateTask(done.id, { outcome: "needs_action" });
   const asked = (await (await fetch(`${base}/api/backlog`)).json() as Backlog).items.find((i) => i.number === 305 && i.workspaceId === metaId())!;
@@ -499,7 +499,7 @@ function holdingClaude() {
   return { adapter, starts };
 }
 const metaId = () => core!.db.listWorkspaces().find((w) => w.kind === "meta")!.id;
-/** What waits to be sent to GitHub (#886): per operation, its Issue's number, kind, field and what is sent. */
+/** What waits to be sent to GitHub: per operation, its Issue's number, kind, field and what is sent. */
 const queued = () =>
   core!.db.listPendingBacklogOperations().map((o) => {
     const issue = core!.db.getBacklogRecord({ ...o, objectKind: "issue", externalId: o.issue });
@@ -510,7 +510,7 @@ const metaName = () => core!.db.listWorkspaces().find((w) => w.kind === "meta")!
 const start = (base: string, n: number | string, body: object) =>
   fetch(`${base}/api/backlog/${n}/start`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), ...body }) });
 
-test("defers an automatic start at the limit (#2768): a stage button at the limit with no fallback answers with the Task made without starting, held to the reset", async () => {
+test("defers an automatic start at the limit: a stage button at the limit with no fallback answers with the Task made without starting, held to the reset", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
   const resetSec = Math.floor(Date.now() / 1000) + 3600;
@@ -570,7 +570,7 @@ test("start: another workspace's Issue runs there, uses the skills synced into i
   expect(s.prompt).toContain("`scripts/merge-gate.ts`・`scripts/parallel-guard.ts`・`scripts/local-ci.ts` の既定の対象は実行する場所");
   expect(s.prompt).toContain("必ず `--repo <このリポジトリの owner/name>` を付けて実行し、その判定に従う");
   expect(s.prompt).toContain(`このリポジトリの作業ツリーから \`bun ${meta.path}/scripts/local-ci.ts <PR> --repo <このリポジトリの owner/name>\` で CI を回す`);
-  // the running Task marks lib's #303, not the meta's; the meta's #303 can still start
+  // the running Task marks lib's Issue 303, not the meta's; the meta's Issue 303 can still start
   const items = (await (await fetch(`${base}/api/backlog`)).json() as Backlog).items.filter((i) => i.number === 303);
   expect(items.find((i) => i.workspaceId === lib.id)!.activeTaskId).toBe(task.id);
   expect(items.find((i) => i.workspaceId === meta.id)!.activeTaskId).toBeNull();
@@ -601,7 +601,7 @@ test("start: check on an in-progress PBI creates a Task titled #N 状況確認 w
   expect(items.find((i) => i.number === 307)!.activeTaskId).toBeString();
 });
 
-test("start: a local backlog's stage prompt says ops-kit backlog only, no gh issue / scripts/setup (#2265)", () => {
+test("start: a local backlog's stage prompt says ops-kit backlog only, no gh issue / scripts/setup", () => {
   const other = { meta: "/work/switchboard", projectVar: "APP_PROJECT_URL", setup: { config: true, kit: ["triage_issue.sh"], copies: ["lint_backlog.sh"] } };
   for (const action of ["to-pbi", "to-tasks", "complete", "check", "close"] as const) {
     for (const p of [buildStartPrompt({ number: 1 }, action, { other, local: true }), buildStartPrompt({ number: 1 }, action, { local: true })]) {
@@ -609,7 +609,7 @@ test("start: a local backlog's stage prompt says ops-kit backlog only, no gh iss
       expect(p).toContain("`ops-kit backlog`");
       expect(p).toContain("`ops-kit lint --fresh`");
       expect(p).toContain("`--repo` を付けずに実行する");
-      // the PR names the Task without a closing keyword or #N (it is no GitHub Issue), and the Task is closed by hand after the merge (#2344)
+      // the PR names the Task without a closing keyword or #N (it is no GitHub Issue), and the Task is closed by hand after the merge
       expect(p).toContain("Backlog-Task: <番号>");
       expect(p).toContain("`ops-kit backlog edit <Task> --state closed`");
       // nothing that sends it to GitHub's Issues or Project
@@ -627,7 +627,7 @@ test("start: a local backlog's stage prompt says ops-kit backlog only, no gh iss
   expect(buildStartPrompt({ number: 1 }, "complete", { other })).toContain("APP_PROJECT_URL");
 });
 
-test("start: a local workspace without a remote (localForge) gets local changes, not PRs (#2490)", () => {
+test("start: a local workspace without a remote (localForge) gets local changes, not PRs", () => {
   const other = { meta: "/work/switchboard", projectVar: "APP_PROJECT_URL", setup: { config: true, kit: ["triage_issue.sh"], copies: ["lint_backlog.sh"] } };
   for (const [p, scripts] of [[buildStartPrompt({ number: 1 }, "complete", { other, local: true, localForge: true }), "/work/switchboard/"], [buildStartPrompt({ number: 1 }, "complete", { local: true, localForge: true }), ""]] as const) {
     // the backlog half stays
@@ -657,19 +657,19 @@ test("start: check on a stage other than in-progress is 409", async () => {
   expect(core!.db.listTasks()).toHaveLength(0);
 });
 
-test("start: complete on an in-progress item resumes it (#1045)", async () => {
+test("start: complete on an in-progress item resumes it", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
   const r = await start(base, 305, { action: "complete" });
   expect(r.status).toBe(201);
   expect(((await r.json()) as Task).title.startsWith("#305 実装: ")).toBe(true);
   for (let i = 0; !claude.starts.length && i < 100; i++) await Bun.sleep(10);
-  // the same Task backlog-next starts for a stalled in-progress PBI (#578): the closed Tasks when it was chosen
+  // the same Task backlog-next starts for a stalled in-progress PBI: the closed Tasks when it was chosen
   expect(claude.starts[0]!.prompt).toBe(buildStartPrompt({ number: 305 }, "complete", { resume: { tasksDone: 1 } }));
   expect(claude.starts[0]!.prompt).toContain("PBI #305 は実装中のまま止まっています");
 });
 
-test("complete task model (#2769): with the trial's model the 実装 Task's prompt hands each Task to a sonnet subagent and the transcript says so; another kind gets neither (同じ: the existing complete tests' prompts)", async () => {
+test("complete task model: with the trial's model the 実装 Task's prompt hands each Task to a sonnet subagent and the transcript says so; another kind gets neither (同じ: the existing complete tests' prompts)", async () => {
   const c2 = holdingClaude();
   const base2 = await boot(fakeGh().gh, { ...c2.adapter, models: [{ value: "claude-sonnet-5-5", label: "Sonnet 5.5" }] });
   const notes = (id: string) => core!.db.listEvents(id).flatMap((e) => (e.ev.t === "status" ? [e.ev.text] : []));
@@ -681,7 +681,7 @@ test("complete task model (#2769): with the trial's model the 実装 Task's prom
   expect(c2.starts[0]!.prompt).toBe(buildStartPrompt({ number: 305 }, "complete", { resume: { tasksDone: 1 }, taskModel: "claude-sonnet-5-5" }));
   expect(c2.starts[0]!.prompt).toContain("Agent ツールの model に `sonnet` を指定したサブエージェントに前景で任せてください");
   expect(notes(t.id)).toEqual([delegatedNote("claude-sonnet-5-5")]);
-  // the mark reads back through the Task's evals (#2775)
+  // the mark reads back through the Task's evals
   expect(((await (await fetch(`${base2}/api/tasks/${t.id}/evals`)).json()) as { rules: { metrics: { delegatedModel: string | null } } }).rules.metrics.delegatedModel).toBe("claude-sonnet-5-5");
   // another kind: no paragraph, no note
   const check = await start(base2, 303, { action: "to-tasks" });
@@ -692,7 +692,7 @@ test("complete task model (#2769): with the trial's model the 実装 Task's prom
   expect(notes(ct.id)).toEqual([]);
 });
 
-test("complete task model (#2769): an 実装 Task that starts on codex (its kind's runner changed after the model was saved) gets neither the paragraph nor the note", async () => {
+test("complete task model: an 実装 Task that starts on codex (its kind's runner changed after the model was saved) gets neither the paragraph nor the note", async () => {
   const claude = holdingClaude();
   const codex = holdingClaude();
   const base = await boot(fakeGh().gh, [{ ...claude.adapter, models: [{ value: "claude-sonnet-5-5", label: "Sonnet 5.5" }] }, { ...codex.adapter, id: "codex" }]);
@@ -708,7 +708,7 @@ test("complete task model (#2769): an 実装 Task that starts on codex (its kind
   expect(core!.db.listEvents(t.id).some((e) => e.ev.t === "status" && e.ev.text === delegatedNote("claude-sonnet-5-5"))).toBe(false);
 });
 
-test("buildStartPrompt task model (#2769): every complete entry carries the alias's paragraph; another action, an unaliased model or none leaves the prompt as before", () => {
+test("buildStartPrompt task model: every complete entry carries the alias's paragraph; another action, an unaliased model or none leaves the prompt as before", () => {
   const para = (a: string) => `Agent ツールの model に \`${a}\` を指定したサブエージェントに前景で任せてください`;
   expect(buildStartPrompt({ number: 1 }, "complete", { taskModel: "claude-sonnet-5-5" })).toContain(para("sonnet"));
   expect(buildStartPrompt({ number: 1 }, "complete", { taskModel: "claude-opus-5-5", resume: { tasksDone: 2 } })).toContain(para("opus"));
@@ -721,7 +721,7 @@ test("buildStartPrompt task model (#2769): every complete entry carries the alia
   expect(subagentModelAlias("us.anthropic.claude-sonnet-5-5")).toBeNull();
 });
 
-test("start: complete while the in-progress item's check is running is 409 with its id (#1045)", async () => {
+test("start: complete while the in-progress item's check is running is 409 with its id", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
   const first = await (await start(base, 305, { action: "check" })).json() as Task;
@@ -774,7 +774,7 @@ test("start: to-tasks on a decomposed PBI asks to make it Ready", async () => {
   const item = (await (await fetch(`${base}/api/backlog`)).json() as Backlog).items.find((i) => i.number === 303)!;
   expect(item).toMatchObject({ stage: "needs-tasks", tasks: { total: 2, done: 0 } });
   const task = await (await start(base, 303, { action: "to-tasks" })).json() as Task;
-  // the action and the title stay to-tasks' (#1393: no new action)
+  // the action and the title stay to-tasks' (no new action)
   expect(task.title.startsWith("#303 Task に分解: ")).toBe(true);
   for (let i = 0; !claude.starts.length && i < 100; i++) await Bun.sleep(10);
   expect(claude.starts[0]!.prompt).toBe(buildStartPrompt(item, "to-tasks"));
@@ -792,7 +792,7 @@ test("start: the title and the skill follow the action", async () => {
   expect(prompts).toContain(".claude/skills/request-to-backlog/SKILL.md に従い、既存の要望 Issue #302");
 });
 
-test("start: direct on a request starts a p1-direct Task recorded as the direct button; p0 and p1 never run together on it (#3690)", async () => {
+test("start: direct on a request starts a p1-direct Task recorded as the direct button; p0 and p1 never run together on it", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
   const r = await start(base, 302, { action: "direct" });
@@ -809,7 +809,7 @@ test("start: direct on a request starts a p1-direct Task recorded as the direct 
   expect((await start(base, 302, { action: "direct" })).status).toBe(409);
 });
 
-test("buildDirectPrompt: carries the screen answer as the person's words, and a local backlog's rules (PR #3826 review)", () => {
+test("buildDirectPrompt: carries the screen answer as the person's words, and a local backlog's rules", () => {
   const answer = { issue: 302, text: "B: 直す — 許可: X だけ許可します" };
   const said = buildDirectPrompt({ number: 302 }, { answer });
   expect(said).toContain("利用者が画面で答えた Issue #302 の最新の回答（利用者の言葉）:\n\n````text\nB: 直す — 許可: X だけ許可します\n````");
@@ -823,7 +823,7 @@ test("buildDirectPrompt: carries the screen answer as the person's words, and a 
   expect(buildDirectPrompt({ number: 302 })).not.toContain("GitHub には無い");
 });
 
-test("start: direct while PBI にする runs is 409; direct on anything but a request is 409 (#3690)", async () => {
+test("start: direct while PBI にする runs is 409; direct on anything but a request is 409", async () => {
   const base = await boot(fakeGh().gh, holdingClaude().adapter);
   expect((await start(base, 302, { action: "to-pbi" })).status).toBe(201);
   expect((await start(base, 302, { action: "direct" })).status).toBe(409);
@@ -848,7 +848,7 @@ test("start: gh failing is 424 with the reason (not 502, which CloudFront swaps 
   expect(core!.db.listTasks()).toHaveLength(0);
 });
 
-test("start: an imported workspace starts on its stored data while GitHub is at its limit with an edit not sent — 201 (#2264)", async () => {
+test("start: an imported workspace starts on its stored data while GitHub is at its limit with an edit not sent — 201", async () => {
   const fake = limitedGh();
   const base = await boot(fake.gh, holdingClaude().adapter);
   fake.limited.on = true;
@@ -859,13 +859,13 @@ test("start: an imported workspace starts on its stored data while GitHub is at 
   expect(core!.db.listPendingBacklogOperations().filter((o) => o.status !== "done")).toHaveLength(1);
 });
 
-test("start: a conflict held in the stored data is 409 even while GitHub is at its limit (#2264)", async () => {
+test("start: a conflict held in the stored data is 409 even while GitHub is at its limit", async () => {
   const fake = limitedGh();
   const base = await boot(fake.gh, holdingClaude().adapter);
   fake.limited.on = true;
   expect((await patch(base, 304, { title: "手元の題" })).status).toBe(202);
   importedAs(304, { title: "GitHub の題" });
-  // the conflict a send found against GitHub's newer title (#887), held in the stored data
+  // the conflict a send found against GitHub's newer title, held in the stored data
   const op = core!.db.listPendingBacklogOperations()[0]!;
   core!.db.setBacklogOperationResult(op.id, { status: "conflict" });
   const r = await start(base, 304, { action: "complete" });
@@ -886,7 +886,7 @@ test("autoStart: a stage button starts on the saved runner and model; routing.ll
   expect(claude.starts).toHaveLength(0);
 });
 
-test("autoStart effort (#833): a stage button starts with the saved effort", async () => {
+test("autoStart effort: a stage button starts with the saved effort", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
   core!.db.setSetting("settings", { autoStart: { runner: "claude", effort: "high" } });
@@ -896,7 +896,7 @@ test("autoStart effort (#833): a stage button starts with the saved effort", asy
   expect(claude.starts[0]!.effort).toBe("high");
 });
 
-test("autoStart by kind (#1337): to-tasks on codex starts Task に分解 on codex and 実装する on the common claude", async () => {
+test("autoStart by kind: to-tasks on codex starts Task に分解 on codex and 実装する on the common claude", async () => {
   const claude = holdingClaude();
   const codex = holdingClaude();
   const base = await boot(fakeGh().gh, [claude.adapter, { ...codex.adapter, id: "codex", efforts: [{ value: "medium", label: "medium" }] }]);
@@ -910,7 +910,7 @@ test("autoStart by kind (#1337): to-tasks on codex starts Task に分解 on code
   expect(claude.starts.map((x) => [x.model, x.effort])).toEqual([["m-common", "high"]]);
 });
 
-test("autoStart by kind (#1337): a kind whose runner is not detected starts on the common values", async () => {
+test("autoStart by kind: a kind whose runner is not detected starts on the common values", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
   core!.db.setSetting("settings", { autoStart: { runner: "claude", model: "m-common", byKind: { complete: { runner: "codex", model: "m-gone" } } } });
@@ -966,7 +966,7 @@ test("report: an in-progress item carries its newest ## 状況 comment; the othe
   expect(items.find((i) => i.number === 305)!.decision).toBeNull();
 });
 
-/** The fixtures' gh with comments of its own on #304 (Ready) and #307 (in progress), and `states` answering the waits' query (#817). */
+/** The fixtures' gh with comments of its own on Issue 304 (Ready) and Issue 307 (in progress), and `states` answering the waits' query. */
 function waitsGh(own: { i304?: Array<[string, string]>; i307?: Array<[string, string]> }, states: Record<string, unknown> = {}, tasks307?: unknown[], errors?: unknown[]) {
   const fake = fakeGh();
   const repo = (decisions as { data: { repository: Record<string, { comments: { nodes: unknown[] } }> } }).data.repository;
@@ -984,7 +984,7 @@ function waitsGh(own: { i304?: Array<[string, string]>; i307?: Array<[string, st
 const waitsOfItem = async (base: string, n: number) => ((await (await fetch(`${base}/api/backlog`)).json()) as Backlog).items.find((i) => i.number === n)!;
 const STOPPED = "2026-09-30T00:00:00Z";
 const LATER = "2026-09-30T01:00:00Z";
-/** One wait of an item as the daemon gives it (#1046): a prerequisite with no PBI found unless said (#1183). */
+/** One wait of an item as the daemon gives it: a prerequisite with no PBI found unless said. */
 function wait(number: number, kind: "issue" | "pr", open: boolean | null, more: { reason?: "overlap" | "prerequisite"; pbi?: BacklogItem["waits"][number]["pbi"] } = {}): BacklogItem["waits"][number] {
   return { number, kind, open, state: open === null ? "missing" : open ? "pending" : "met", reason: more.reason ?? "prerequisite", pbi: more.pbi ?? null };
 }
@@ -1068,7 +1068,7 @@ describe("backlog waiting", () => {
     expect(await waitsOfItem(base, 307)).toMatchObject({ stage: "needs-decision", waits: [] });
   });
 
-  test("waiting: each wait says why it waits; a number GitHub did not find stays as not read and holds the PBI (#1046; the parent PBI: backlog-stored.test.ts)", async () => {
+  test("waiting: each wait says why it waits; a number GitHub did not find stays as not read and holds the PBI (the parent PBI: backlog-stored.test.ts)", async () => {
     const states = { w603: { __typename: "Issue", state: "OPEN" }, w778: { __typename: "PullRequest", state: "MERGED" }, w999: null };
     const fake = waitsGh({ i304: [[releaseBody("重複", [778, 603], true), STOPPED]], i307: [[releaseBody("前提", [603, 999]), STOPPED]] }, states, undefined, [{ type: "NOT_FOUND", path: ["repository", "w999"], message: "not found" }]);
     const base = await boot(fake.gh);
@@ -1076,11 +1076,11 @@ describe("backlog waiting", () => {
     expect(ready.waits).toEqual([wait(603, "issue", true, { reason: "overlap" }), wait(778, "pr", false, { reason: "overlap" })]);
     const building = await waitsOfItem(base, 307);
     expect(building.waits).toEqual([wait(603, "issue", true), wait(999, "issue", null)]);
-    // not read is not closed: still held once #603 closed
+    // not read is not closed: still held once Issue 603 closed
     expect(pickNext([{ ...building, waits: [wait(603, "issue", false), wait(999, "issue", null)] }], "implement")).toBeNull();
   });
 
-  test("waits owner: a PR's PBI is the parent of the Task it closes; that PBI's stage Task is read from its own item (#1183)", async () => {
+  test("waits owner: a PR's PBI is the parent of the Task it closes; that PBI's stage Task is read from its own item", async () => {
     const fake = waitsGh({ i307: [[releaseBody("後回し", [778, 30501]), STOPPED]] }, {
       w778: { __typename: "PullRequest", state: "OPEN", body: "## 何を\n\nCloses #30501", headRefName: "sb/30501-x" },
       w30501: { __typename: "Issue", state: "OPEN", parent: { number: 305 } },
@@ -1093,7 +1093,7 @@ describe("backlog waiting", () => {
     expect(await waitsOfItem(base, 305)).toMatchObject({ lastTask: { id: "tsk_owner305", status: "error" }, activeTaskId: null });
   });
 
-  test("waits owner: a branch alone names the Task, a PBI waited for is its own, and a PR that names nothing is not found (#1183)", async () => {
+  test("waits owner: a branch alone names the Task, a PBI waited for is its own, and a PR that names nothing is not found", async () => {
     const fake = waitsGh({ i307: [[releaseBody("後回し", [305, 778, 779, 30501]), STOPPED]] }, {
       w778: { __typename: "PullRequest", state: "OPEN", body: "Task は無い", headRefName: "fix-something" },
       w779: { __typename: "PullRequest", state: "OPEN", body: null, headRefName: "sb/30501-only-branch" },
@@ -1135,12 +1135,12 @@ test("confirmations: only unchecked 利用者確認 lines outside fences, number
   // a body edited on GitHub's web form comes back with CRLF: no \r in the text
   expect(confirmationsOf(body.replaceAll("\n", "\r\n"))).toEqual(want);
   expect(confirmationsOf("## 到達点 / 受け入れ条件\n- [ ] 1. ふつう（検証: テスト）\n")).toEqual([]);
-  // a line that names the form in inline code (PBI #523's own criterion 1) is not one
+  // a line that names the form in inline code (a criterion about the form itself) is not one
   expect(confirmationsOf("## 到達点 / 受け入れ条件\n- [ ] 1. 行に `（利用者確認: <何を>）` を付ける（検証: grep）\n- [ ] 2. 画面（利用者確認: `/backlog` で見る）\n"))
     .toEqual([{ n: 2, text: "2. 画面（利用者確認: `/backlog` で見る）", after: null }]);
-  // a code span of two backticks holds a single one; the mark after it is outside (#715 review)
+  // a code span of two backticks holds a single one; the mark after it is outside
   expect(confirmationsOf("## 到達点 / 受け入れ条件\n- [ ] 1. 記号 `` ` `` を出す（利用者確認: `画面` で見える）\n")).toEqual([{ n: 1, text: "1. 記号 `` ` `` を出す（利用者確認: `画面` で見える）", after: null }]);
-  // only the first ## 到達点 / 受け入れ条件 section counts, as section() reads it (#715 review)
+  // only the first ## 到達点 / 受け入れ条件 section counts, as section() reads it
   expect(confirmationsOf("## 到達点 / 受け入れ条件\n- [ ] 1. 実機（利用者確認: 見る）\n## メモ\n## 到達点 / 受け入れ条件\n- [ ] 見本（利用者確認: 数えない）\n")).toEqual([{ n: 1, text: "1. 実機（利用者確認: 見る）", after: null }]);
 });
 
@@ -1201,11 +1201,11 @@ test("GET /api/backlog: confirmations naming decisions are not the user's; closa
   const named = (ns: string) => saved.replace(/^- \[ \] 2\..*$/m, `- [ ] 2. 方針（利用者確認: 回答で確かめる ${ns} — 方針）`).replace(/^- \[ \] 4\..*$/m, "- [x] 4. 済み");
   try {
     const base = await boot(fakeGh().gh);
-    // (a) every named decision is stored and none is needs-decision (#304, #305)
+    // (a) every named decision is stored and none is needs-decision
     node.body = named("#304, #305");
     const a = (await refreshed(base)).items.find((i) => i.number === 308)!;
     expect(a).toMatchObject({ confirmations: [], closable: true });
-    // (b) one is still labelled needs-decision (#306)
+    // (b) one is still labelled needs-decision
     node.body = named("#304, #306");
     const b = (await refreshed(base)).items.find((i) => i.number === 308)!;
     expect(b).toMatchObject({ confirmations: [], closable: false });
@@ -1221,7 +1221,7 @@ test("GET /api/backlog: confirmations naming decisions are not the user's; closa
   }
 });
 
-/** The fixtures' comments answer with Tasks under the in-progress PBIs #305 and #307 (#562). */
+/** The fixtures' comments answer with Tasks under the in-progress PBIs 305 and 307. */
 function taskDecisionGh(tasks: { i305: unknown[]; i307: unknown[] }, own: { i305?: unknown[]; i307?: unknown[] } = {}) {
   const fake = fakeGh();
   const repo = (decisions as { data: { repository: Record<string, { comments: { nodes: unknown[] } }> } }).data.repository;
@@ -1279,7 +1279,7 @@ test("task decision: an answer sent for the question on screen is refused when t
   const fake = taskDecisionGh({ i305: [subTask(322, "OPEN", ["needs-decision"], [["## 判断待ち\n**問い**: 新しい問い", "2026-09-28T05:00:00Z"]])], i307: [] });
   const base = await boot(fake.gh);
   const post = (issue: number) => fetch(`${base}/api/backlog/305/answer`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), text: "A で", issue }) });
-  // the screen showed Task #321's question; GitHub now has #322's
+  // the screen showed Task 321's question; GitHub now has Issue 322's
   const r = await post(321);
   expect(r.status).toBe(409);
   expect(await r.text()).toContain("#322");
@@ -1288,7 +1288,7 @@ test("task decision: an answer sent for the question on screen is refused when t
   expect(queued().map((o) => o[0])).toEqual([322, 322]);
 });
 
-test("stage prompt carries grant: the newest ## 回答 given on the screen goes into the next stage Task's prompt; one from GitHub, from a policy or for a check does not (#2745)", async () => {
+test("stage prompt carries grant: the newest ## 回答 given on the screen goes into the next stage Task's prompt; one from GitHub, from a policy or for a check does not", async () => {
   const GRANT = "B: 登録する — 許可: 定期実行 sch_x を POST /api/schedules に登録することだけ許可します";
   const fake = taskDecisionGh({ i305: [subTask(321, "OPEN", ["type:task", "needs-decision"], [["## 判断待ち\n**問い**: 登録するか", "2026-09-28T03:00:00Z"], ["## 回答\n\nGitHub で書いた回答", "2026-09-28T04:00:00Z"]])], i307: [] });
   const base = await boot(fake.gh);
@@ -1324,7 +1324,7 @@ test("stage prompt carries grant: the newest ## 回答 given on the screen goes 
   expect(taskAllowRules("/meta", "/repo")).toEqual(rulesBefore);
 });
 
-test("hold: a Task's ## 保留 after its ## 判断待ち gives the PBI heldAt; a ## 判断待ち asked after the hold opens it again (#936)", async () => {
+test("hold: a Task's ## 保留 after its ## 判断待ち gives the PBI heldAt; a ## 判断待ち asked after the hold opens it again", async () => {
   const fake = taskDecisionGh({
     i305: [subTask(321, "OPEN", ["needs-decision"], [["## 判断待ち\n**問い**: x", "2026-09-28T03:00:00Z"], ["## 保留\n\nCI を見てから", "2026-09-28T04:00:00Z"]])],
     i307: [subTask(330, "OPEN", ["needs-decision"], [["## 保留", "2026-09-28T01:00:00Z"], ["## 判断待ち\n**問い**: y", "2026-09-28T02:00:00Z"]])],
@@ -1335,7 +1335,7 @@ test("hold: a Task's ## 保留 after its ## 判断待ち gives the PBI heldAt; a
   expect(items.filter((i) => i.stage !== "needs-decision").every((i) => i.heldAt === null)).toBe(true);
 });
 
-test("hold: holding keeps a ## 保留 comment only — the label stays — and the stored read shows the item still asking, held (#936)", async () => {
+test("hold: holding keeps a ## 保留 comment only — the label stays — and the stored read shows the item still asking, held", async () => {
   const fake = fakeGh();
   const base = await boot(fake.gh);
   const source = core!.db.getWorkspaceBacklogSource(metaId())!;
@@ -1355,7 +1355,7 @@ test("task decision: answeredAt is the newest ## 回答 on an in-progress PBI or
   const items = (await (await fetch(`${await boot(fake.gh)}/api/backlog`)).json() as Backlog).items;
   expect(items.find((i) => i.number === 305)!.answeredAt).toBe("2026-09-28T06:00:00Z"); // a closed Task's answer counts
   expect(items.find((i) => i.number === 307)!.answeredAt).toBe("2026-09-27T00:00:00Z"); // the PBI's, newer than the Task's
-  // the needs-decision PBI #306 has a ## 回答 among its comments, but it is not in progress
+  // the needs-decision PBI 306 has a ## 回答 among its comments, but it is not in progress
   expect(items.filter((i) => i.stage !== "in-progress").every((i) => i.answeredAt === null)).toBe(true);
 });
 
@@ -1382,10 +1382,10 @@ test("decision: answering an item that is not waiting is 409; empty text 400; Gi
   expect((await post(306, "  ")).status).toBe(400);
   expect((await post(999, "x")).status).toBe(404);
   expect(fake.calls.filter((a) => a[0] === "issue")).toHaveLength(0);
-  // refused from the stored copy: nothing written, so nothing is imported either (#885)
+  // refused from the stored copy: nothing written, so nothing is imported either
   await Bun.sleep(50);
   expect(fake.calls.length).toBe(before);
-  // GitHub out of reach: the answer is kept all the same (#886)
+  // GitHub out of reach: the answer is kept all the same
   await core!.stop(); core = undefined;
   rmSync(home!, { recursive: true, force: true });
   const down = { on: false };
@@ -1395,7 +1395,7 @@ test("decision: answering an item that is not waiting is 409; empty text 400; Gi
   expect(queued()).toHaveLength(2);
 });
 
-/** The fixtures' gh, and PBI #308's body on GitHub for `issue view --json body`; `--body-file` is read when it is called. */
+/** The fixtures' gh, and PBI 308's body on GitHub for `issue view --json body`; `--body-file` is read when it is called. */
 function confirmGh(body = (pages[0] as { data: { repository: { issues: { nodes: Array<{ number: number; body: string }> } } } }).data.repository.issues.nodes.find((n) => n.number === 308)!.body) {
   const fake = fakeGh();
   const written: string[] = [];
@@ -1479,7 +1479,7 @@ test("confirm: an unknown n, or a line changed since the list was read, is 409 a
   expect(fake.calls.filter((a) => a[0] === "issue")).toHaveLength(0);
 });
 
-/* ---------- edits and new Issues kept here, sent later (#886) ---------- */
+/* ---------- edits and new Issues kept here, sent later ---------- */
 
 const patch = (base: string, ref: number | string, body: object) => fetch(`${base}/api/backlog/${ref}`, { method: "PATCH", body: JSON.stringify({ workspaceId: metaId(), ...body }) });
 const detailOf = async (base: string, ref: number | string) => (await (await fetch(`${base}/api/backlog/${ref}?workspaceId=${metaId()}`)).json()) as BacklogIssueDetail;
@@ -1525,14 +1525,14 @@ test("edit: an Issue put in the Project here shows each later field edit before 
   expect(queued().map((o) => o[2])).toEqual(["member", "field:Status", "field:Priority"]);
 });
 
-/** The Project's field definitions as GitHub answers the send's read of them (#3811). */
+/** The Project's field definitions as GitHub answers the send's read of them. */
 const PROJECT_DEFS = [
   { id: "F_s", name: "Status", dataType: "SINGLE_SELECT", options: [{ id: "o1", name: "Backlog" }, { id: "o2", name: "Ready" }] },
   { id: "F_sp", name: "Story Points", dataType: "NUMBER" },
   { id: "F_d", name: "Due", dataType: "DATE" },
 ];
 
-test("checkFieldTypes (#3811): a value that does not fit its field is a 422; a fitting one and null pass", () => {
+test("checkFieldTypes: a value that does not fit its field is a 422; a fitting one and null pass", () => {
   for (const [fields, msg] of [
     [{ "Story Points": "abc" }, /整数だけ/],
     [{ Status: "Done" }, /選択肢 'Done'/],
@@ -1553,7 +1553,7 @@ test("checkFieldTypes (#3811): a value that does not fit its field is a 422; a f
   expect(() => checkFieldTypes(PROJECT_DEFS, { "Story Points": "5" })).not.toThrow();
 });
 
-test("edit (#3811): a field value that does not fit the Project's field is refused before it is stored; GitHub out of reach stores it", async () => {
+test("edit: a field value that does not fit the Project's field is refused before it is stored; GitHub out of reach stores it", async () => {
   const fake = fakeGh();
   const down = { on: false, reads: 0 };
   const base = await boot(async (args, cwd) => {
@@ -1564,7 +1564,7 @@ test("edit (#3811): a field value that does not fit the Project's field is refus
   });
   const r = await patch(base, 304, { fields: { "Story Points": "abc" } });
   expect(r.status).toBe(422);
-  expect(((await r.json()) as { error: string }).error).toMatch(/選択肢 'abc'/)  // the config's choices first (#3795); the Project's type is read for what has none;
+  expect(((await r.json()) as { error: string }).error).toMatch(/選択肢 'abc'/)  // the config's choices first; the Project's type is read for what has none;
   expect((await patch(base, 304, { fields: { Status: "Done" } })).status).toBe(422);
   expect(core!.db.listPendingBacklogOperations()).toEqual([]);
   // an empty passes (Due has no value, so nothing to send for it); a fitting value is stored
@@ -1587,7 +1587,7 @@ test("edit (#3811): a field value that does not fit the Project's field is refus
   expect(down.reads).toBe(before);
 });
 
-test("project fields (#1545): the import keeps the Project's writable fields in its order, GET returns them, and an edit is checked against them", async () => {
+test("project fields: the import keeps the Project's writable fields in its order, GET returns them, and an edit is checked against them", async () => {
   const fake = fakeGh();
   const base = await boot(async (args, cwd) => {
     if (!args.some((a) => a.includes("ProjectV2FieldCommon{ id name dataType }"))) return fake.gh(args, cwd);
@@ -1644,7 +1644,7 @@ test("edit: an unknown key is 400, an Issue not stored 404, one not read in full
   expect(leaked.status).toBe(422);
   expect(await leaked.text()).not.toContain(token);
   expect((await fetch(`${base}/api/backlog/306/answer`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), text: token }) })).status).toBe(422);
-  // an account id of the host's AWS config, written bare (#2351)
+  // an account id of the host's AWS config, written bare
   const bare = await withHostAccount(async (id) => {
     const r = await patch(base, 304, { body: `メモ\n${id}` });
     return { status: r.status, leaks: (await r.text()).includes(id) };
@@ -1655,7 +1655,7 @@ test("edit: an unknown key is 400, an Issue not stored 404, one not read in full
   expect(core!.db.listPendingBacklogOperations()).toEqual([]);
 });
 
-/* ---------- a choice on a held conflict (#887) ---------- */
+/* ---------- a choice on a held conflict ---------- */
 
 /** An import that read GitHub's Issue n with `over` (as the next import would store it). */
 function importedAs(n: number, over: Record<string, unknown>, fetchState: "fetched" | "forbidden" = "fetched") {
@@ -1676,10 +1676,10 @@ test("resolve: a held conflict shows its three values and what A cannot keep; a 
   const d = await detailOf(base, 304);
   const title = d.held.find((h) => h.field === "title")!;
   expect(title).toMatchObject({ status: "conflict", kind: "set", reason: expect.stringContaining("GitHub の題"), conflict: { base: was.title, local: "手元の題", remote: "GitHub の題", remoteRead: true } });
-  // it is held, not sent, and what the check keeps is told as it is, with what stays open (B is #1329)
+  // it is held, not sent, and what the check keeps is told as it is, with what stays open (the history read after the write)
   expect(d.pending).toBe(2);
   expect(d.limits).toContain("上書きしうる");
-  expect(d.limits).toContain("#1329");
+  expect(d.limits).toContain("同じ GitHub アカウントで GitHub の画面から書いた編集は、ほかの人の編集と区別しません");
   expect(d.limits).toContain("100 版");
   const resolve = (field: string, choice: string, expectedRevision: string, extra = {}) => patch(base, 304, { resolve: { field, choice, expectedRevision }, ...extra });
 
@@ -1702,7 +1702,7 @@ test("resolve: a held conflict shows its three values and what A cannot keep; a 
   expect(after.issue).toMatchObject({ title: "手元の題", body: "GitHub の本文" });
 });
 
-test("overwritten (#1329): a conflict the write found afterwards shows the other's value from the history as remote, not GitHub's; remote sends it back, a gone revision is not readable", async () => {
+test("overwritten: a conflict the write found afterwards shows the other's value from the history as remote, not GitHub's; remote sends it back, a gone revision is not readable", async () => {
   const fake = fakeGh();
   const down = { on: false };
   const base = await boot(async (args, cwd) => (down.on ? { code: 1, stdout: "", stderr: "HTTP 503" } : fake.gh(args, cwd)));
@@ -1728,7 +1728,7 @@ test("overwritten (#1329): a conflict the write found afterwards shows the other
   expect((await detailOf(base, 304)).issue).toMatchObject({ title: "v2", body: "b3" });
 });
 
-test("limits: what the send cannot keep is named per field — the Project fields without a history, the evicted revision, the same login — and nothing is promised (#1329)", async () => {
+test("limits: what the send cannot keep is named per field — the Project fields without a history, the evicted revision, the same login — and nothing is promised", async () => {
   const fake = fakeGh();
   const base = await boot(fake.gh);
   const d = await detailOf(base, 304);
@@ -1736,7 +1736,7 @@ test("limits: what the send cannot keep is named per field — the Project field
   expect(d.limits).toContain("100 版");
   expect(d.limits).toContain("同じ GitHub アカウント");
   expect(d.limits).toContain("消されていれば");
-  expect(d.limits).toContain("#1329");
+  expect(d.limits).toContain("同じ GitHub アカウントで GitHub の画面から書いた編集は、ほかの人の編集と区別しません");
   expect(d.limits).not.toMatch(/保証します|防ぎます/);
 });
 
@@ -1748,7 +1748,7 @@ test("resolve: the same number in another repository is another Issue — a choi
   expect((await patch(base, 304, { title: "手元の題" })).status).toBe(202);
   importedAs(304, { title: "GitHub の題" });
   const held = (await detailOf(base, 304)).held[0]!;
-  // another workspace whose repository has its own #304, nothing held
+  // another workspace whose repository has its own Issue 304, nothing held
   const db = core!.db;
   const mine = db.getWorkspaceBacklogSource(metaId())!;
   const other = db.upsertWorkspace({ id: "ws_tool", name: "tool", path: join(home!, "tool"), kind: "repo" });
@@ -1785,7 +1785,7 @@ test("resolve: a conflict GitHub cannot be read on keeps GitHub's only; a refuse
   expect((await detailOf(base, 304)).held).toEqual([expect.objectContaining({ operation: op.id, status: "failed", reason: expect.stringContaining("403"), conflict: null })]);
 });
 
-/* ---------- a failed operation sent again (#2885) ---------- */
+/* ---------- a failed operation sent again ---------- */
 
 test("retry: a failed set / comment / create goes back to pending; one not failed, of another Issue or another repository is 409 and nothing changes; with an edit 400", async () => {
   const base = await boot(fakeGh().gh);
@@ -1848,7 +1848,7 @@ test("retry: a failed set / comment / create goes back to pending; one not faile
   expect(db.getBacklogOperation(other.id)).toMatchObject({ status: "failed", attempt: 3 });
 });
 
-test("cancel: a comment inside its send window is taken back (202); again, past the window, or not a comment is 409; with an edit 400 (#3719)", async () => {
+test("cancel: a comment inside its send window is taken back (202); again, past the window, or not a comment is 409; with an edit 400", async () => {
   const base = await boot(fakeGh().gh);
   const db = core!.db;
   expect((await fetch(`${base}/api/backlog/304/comment`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), text: "取り消すコメント" }) })).status).toBe(202);
@@ -1888,7 +1888,7 @@ test("send: an answer kept is sent to GitHub once its window has passed; after a
   const base = await boot(fake.gh);
   const posts = () => fake.calls.filter((a) => a[1] === "repos/acme/app/issues/306/comments" && a.includes("POST")).length;
   expect((await fetch(`${base}/api/backlog/306/answer`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), text: "すぐ送る" }) })).status).toBe(202);
-  // inside its 60 s window nothing is posted (#3719); the window over, the next send run posts it
+  // inside its 60 s window nothing is posted; the window over, the next send run posts it
   await Bun.sleep(50);
   expect(posts()).toBe(0);
   core!.db.sqlite.exec("UPDATE backlog_operations SET retry_at = NULL");
@@ -1912,16 +1912,16 @@ test("send: an answer kept is sent to GitHub once its window has passed; after a
   const looked = () => fake.calls.some((a) => a[1]?.startsWith("repos/acme/app/issues/306/comments?"));
   for (let i = 0; i < 100 && !looked(); i++) await Bun.sleep(10);
   expect(looked()).toBe(true);
-  // the look runs with it `sending` (#3804: not taken back meanwhile); this fake cannot answer the list, so it waits unknown
+  // the look runs with it `sending` (not taken back meanwhile); this fake cannot answer the list, so it waits unknown
   for (let i = 0; i < 100 && core.db.listPendingBacklogOperations()[0]?.status === "sending"; i++) await Bun.sleep(10);
   expect(posts()).toBe(0);
   expect(core.db.listPendingBacklogOperations()[0]).toMatchObject({ kind: "comment", status: "unknown" });
 });
 
-test("an answer during a limit is stored, read by the next start, and sent after the limit (#2264)", async () => {
+test("an answer during a limit is stored, read by the next start, and sent after the limit", async () => {
   const fake = limitedGh();
-  // GitHub's REST answers for #306's comments and labels, as backlog-send.test.ts's fake GitHub gives them
-  // and its reads before and after a write (graphql, #887 / #1329) with no one else's edits
+  // GitHub's REST answers for Issue 306's comments and labels, as backlog-send.test.ts's fake GitHub gives them
+  // and its reads before and after a write (graphql) with no one else's edits
   const comments: Array<{ node_id: string; body: string; created_at: string }> = [];
   let labels = ["type:pbi", "needs-decision"];
   const ok = (body: unknown) => ({ code: 0, stdout: `HTTP/2.0 200 OK\ncontent-type: application/json\ndate: ${new Date().toUTCString()}\n\n${JSON.stringify(body)}`, stderr: "" });
@@ -1976,7 +1976,7 @@ test("an answer during a limit is stored, read by the next start, and sent after
 test("start: close on a closable PBI makes #N 閉じる: with the pbi-complete step 6 prompt; not closable is 409", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
-  // #308 has confirmations left, #305 open Tasks, #304 is Ready: none is closable
+  // Issue 308 has confirmations left, Issue 305 open Tasks, Issue 304 is Ready: none is closable
   for (const n of [308, 305, 304]) expect((await start(base, n, { action: "close" })).status).toBe(409);
   const r = await start(base, 307, { action: "close" });
   expect(r.status).toBe(201);
@@ -1992,7 +1992,7 @@ test("start: close on a closable PBI makes #N 閉じる: with the pbi-complete s
   expect((await start(base, 307, { action: "close" })).status).toBe(409);
 });
 
-test("start: the resume of a stalled PBI writes a ## 状況 in the 状況確認's form with the tasks-done mark, asks with ## 判断待ち, else goes on with pbi-complete (#578)", () => {
+test("start: the resume of a stalled PBI writes a ## 状況 in the 状況確認's form with the tasks-done mark, asks with ## 判断待ち, else goes on with pbi-complete", () => {
   const p = buildStartPrompt({ number: 305 }, "complete", { resume: { tasksDone: 3 } });
   expect(p).toContain("PBI #305 は実装中のまま止まっています");
   expect(p).toContain("Issue #305 に `## 状況` で始まるコメントを 1 件書いてください。中身は `### 済んだこと` / `### 残り` / `### 止まっている理由`");
@@ -2012,7 +2012,7 @@ test("start: the resume of a stalled PBI writes a ## 状況 in the 状況確認'
   expect(buildStartPrompt({ number: 7 }, "complete")).not.toContain("tasks-done");
 });
 
-test("start: a complete prompt says the request covers merges the merge gate passes and closing the PBI (#1357)", () => {
+test("start: a complete prompt says the request covers merges the merge gate passes and closing the PBI", () => {
   const other = { meta: "/work/switchboard", setup: { config: false, kit: [], copies: [] } };
   const scope = "この依頼は、マージ判定（`scripts/merge-gate.ts`）が merge を返した PR のマージ、リリースタグ、PBI を閉じるところまでを含みます。";
   for (const opts of [{}, { resume: { tasksDone: 1 } }, { other }, { other, resume: { tasksDone: 1 } }]) {
@@ -2056,7 +2056,7 @@ test("pickNext: Priority (none last), then Ready before 分解待ち before 要�
     item({ number: 8, stage: "in-progress", priority: "P0" }),
   ];
   expect(pickNext(items, "implement")).toEqual({ item: items[4]!, action: "complete" });
-  // the plan slot (#561): 分解待ち before 要望, never a Ready PBI
+  // the plan slot: 分解待ち before 要望, never a Ready PBI
   expect(pickNext(items, "plan")).toMatchObject({ item: { number: 2 }, action: "to-tasks" });
   expect(pickNext([items[0]!], "plan")).toMatchObject({ item: { number: 1 }, action: "to-pbi" });
   expect(pickNext([items[0]!], "implement")).toBeNull();
@@ -2064,7 +2064,7 @@ test("pickNext: Priority (none last), then Ready before 分解待ち before 要�
   expect(pickNext(items.slice(5), "plan")).toBeNull();
 });
 
-test("pickNext queue (#3956): the queue's order over Priority, only the queued items, a held head gives the next, no order is as before", () => {
+test("pickNext queue: the queue's order over Priority, only the queued items, a held head gives the next, no order is as before", () => {
   const items = [
     item({ number: 1, stage: "ready", priority: "P0" }),
     item({ number: 2, stage: "ready", priority: "P3" }),
@@ -2082,7 +2082,7 @@ test("pickNext queue (#3956): the queue's order over Priority, only the queued i
   expect(pickNext(items, "implement")).toMatchObject({ item: { number: 1 } });
 });
 
-test("pickNext: a request goes to 直行で直す or PBI にする by chooseProcess; one a direct Task ran on is left unless it came back (#4322)", () => {
+test("pickNext: a request goes to 直行で直す or PBI にする by chooseProcess; one a direct Task ran on is left unless it came back", () => {
   const at = "2026-09-28T00:00:00Z";
   const direct = (status: TaskStatus) => ({ id: "tsk_direct", status, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "direct" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null });
   const defs = listProcesses();
@@ -2115,7 +2115,7 @@ test("buildStartPrompt: to-tasks on a PBI that already has Tasks asks to make it
   }
 });
 
-/** A fake meta checkout carries the kit's process candidates, as the real one does: a stage start reads `ops-kit/processes/p0-pipeline.md` from the meta workspace (#3647). */
+/** A fake meta checkout carries the kit's process candidates, as the real one does: a stage start reads `ops-kit/processes/p0-pipeline.md` from the meta workspace. */
 function withProcesses(repo: string): void {
   cpSync(join(import.meta.dir, "../../../ops-kit/processes"), join(repo, "ops-kit/processes"), { recursive: true });
 }
@@ -2147,7 +2147,7 @@ test("pickNext answered: an in-progress PBI answered after its last stage Task g
   ];
   expect(pickNext(items, "implement")).toEqual({ item: items[3]!, action: "complete" });
   expect(pickNext([items[0]!, items[4]!], "implement")).toMatchObject({ item: { number: 1 } });
-  // only answered ones: without #4 and #5, Ready is next; the plan slot never takes them
+  // only answered ones: without Issue 4 and Issue 5, Ready is next; the plan slot never takes them
   expect(pickNext(items.slice(0, 3), "implement")).toMatchObject({ item: { number: 1 }, action: "complete" });
   expect(pickNext(items.slice(1), "plan")).toBeNull();
   // a status check that finished after the answer has taken it up; a running stage Task holds it
@@ -2167,14 +2167,14 @@ test("pickNext answered: backlog-next starts 実装 on an in-progress PBI whose 
   const claude = holdingClaude();
   const fake = taskDecisionGh({ i305: [subTask(321, "OPEN", [], [["## 回答\n\nB で", new Date(Date.now() + 60_000).toISOString()]])], i307: [] });
   const base = await boot(fake.gh, claude.adapter);
-  // #305's last stage Task stopped on the question before it was answered
+  // Issue 305's last stage Task stopped on the question before it was answered
   const now = Date.now();
   core!.db.insertTask({ id: "tsk_last305", workspaceId: metaId(), title: "#305 実装: PBI: 実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#305 実装: PBI: 実装中の PBI"), statusAt: now, createdAt: now, updatedAt: now });
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
   const titles = core!.db.listTasks().map((t) => t.title);
   expect(titles).toContainEqual(expect.stringMatching(/^#305 実装: /));
-  expect(titles.some((t) => t.startsWith("#304 "))).toBe(false); // the implement slot went to #305, before Ready #304
+  expect(titles.some((t) => t.startsWith("#304 "))).toBe(false); // the implement slot went to Issue 305, before Ready Issue 304
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("#305 を complete で開始"));
   // the answer may be on a Task: the prompt points there too
   for (let i = 0; !claude.starts.length && i < 100; i++) await Bun.sleep(10);
@@ -2204,7 +2204,7 @@ test("pickNext waiting: an in-progress PBI whose waits all closed goes on with c
   expect(heldIn([waitingReady, waitingBuilding], "plan").map((h) => h.item)).toEqual([]);
   // a running one is busy, not held by its wait
   expect(heldIn([{ ...waitingReady, activeTaskId: "tsk_run" }], "implement").map((h) => h.item)).toEqual([]);
-  // a wait not read (#1046) holds it as an open one does: neither taken as unblocked nor started
+  // a wait not read holds it as an open one does: neither taken as unblocked nor started
   const unread = { ...unblocked, number: 7, waits: [...closed, wait(999, "issue", null)] };
   expect(pickNext([unread, ready], "implement")).toMatchObject({ item: { number: 1 } });
   expect(heldIn([unread], "implement").map((h) => h.item).map((i) => i.number)).toEqual([7]);
@@ -2260,7 +2260,7 @@ test("pickNext stalled: an in-progress PBI with every Task closed is closed; one
   expect(pickNext([{ ...spun, answeredAt: "2026-09-28T23:00:00Z" }], "implement")).toBeNull();
   // a ## 状況 without the mark (a 状況確認's) does not hold it
   expect(pickNext([{ ...stalled, report: report(null) }], "implement")).toMatchObject({ action: "complete", resume: true });
-  // #1051: a resume that ended (done: a failed one is #1275's) before writing its mark is left until the Issue, a Task or an answer moves past its start
+  // a resume that ended (done: a failed one is held by 前回の Task が失敗したまま更新が無い) before writing its mark is left until the Issue, a Task or an answer moves past its start
   const died = { ...stalled, lastTask: { id: "tsk_resume", status: "done" as const, statusAt: Date.parse("2026-09-30T00:00:00Z"), createdAt: Date.parse("2026-09-30T00:00:00Z"), updatedAt: Date.parse("2026-09-30T00:10:00Z"), action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null } };
   expect(pickNext([died], "implement")).toBeNull();
   expect(spinningIn([died], "implement").map((i) => i.number)).toEqual([2]);
@@ -2269,12 +2269,12 @@ test("pickNext stalled: an in-progress PBI with every Task closed is closed; one
   expect(pickNext([{ ...died, answeredAt: "2026-09-30T01:00:00Z" }], "implement")?.item.number).toBe(2); // an answer
   expect(pickNext([{ ...died, tasks: { total: 3, done: 1, doneAt: "2026-09-29T00:00:00Z" } }], "implement")).toBeNull(); // a Task closed before the resume
   expect(pickNext([{ ...died, lastTask: { ...died.lastTask, action: "check" as const } }], "implement")).toMatchObject({ action: "complete", resume: true }); // the last Task was a 状況確認
-  // a resume that failed (error) before writing its mark is #1275's: held until the Issue, an answer or a closed Task is newer than its end
+  // a resume that failed (error) before writing its mark is held by 前回の Task が失敗したまま更新が無い: held until the Issue, an answer or a closed Task is newer than its end
   const failed = { ...died, lastTask: { ...died.lastTask, status: "error" as const } };
   expect(pickNext([failed], "implement")).toBeNull();
   expect(pickNext([{ ...failed, tasks: { total: 3, done: 2, doneAt: "2026-09-30T01:00:00Z" } }], "implement")).toMatchObject({ action: "complete", resume: true });
   expect(pickNext([{ ...failed, tasks: { total: 3, done: 2, doneAt: "2026-09-30T00:05:00Z" } }], "implement")).toBeNull(); // closed before it ended
-  // a Task closing does not answer a question the resume asked the person (#1275)
+  // a Task closing does not answer a question the resume asked the person
   const asking = { ...died, lastTask: { ...died.lastTask, outcome: "needs_action" as const } };
   expect(pickNext([{ ...asking, tasks: { total: 3, done: 2, doneAt: "2026-09-30T01:00:00Z" } }], "implement")).toBeNull();
   expect(tasksDoneMark(report(4))).toBe(4);
@@ -2293,11 +2293,11 @@ test("pickNext stalled: the implement slot's order is 回答済みの実装中 �
   expect(pickNext(all.slice(0, 3), "implement")).toEqual({ item: closable, action: "close" });
   expect(pickNext(all.slice(0, 2), "implement")).toEqual({ item: stalled, action: "complete", resume: true });
   expect(pickNext(all.slice(0, 1), "implement")).toEqual({ item: ready, action: "complete" });
-  // an open wait holds a stalled PBI too (#817)
+  // an open wait holds a stalled PBI too
   expect(pickNext([{ ...stalled, waits: [wait(778, "pr", true)] }, ready], "implement")).toMatchObject({ item: { number: 1 } });
 });
 
-/** fakeGh with two more requests: #320 large, and #302 (small) brought back by its direct Task when `returned` is set (#4322). */
+/** fakeGh with two more requests: Issue 320 large, and Issue 302 (small) brought back by its direct Task when `returned` is set. */
 function requestsGh(returned: { on: boolean }) {
   const fake = fakeGh();
   const gh: GhRunner = async (args, cwd) => {
@@ -2315,7 +2315,7 @@ function requestsGh(returned: { on: boolean }) {
   return { ...fake, gh };
 }
 
-test("backlog-next: each request starts in the candidate its own criteria choose, with the reason; a returned one goes to PBI にする, once; the buttons keep their reasons (#4322)", async () => {
+test("backlog-next: each request starts in the candidate its own criteria choose, with the reason; a returned one goes to PBI にする, once; the buttons keep their reasons", async () => {
   const claude = holdingClaude();
   const returned = { on: false };
   const base = await boot(requestsGh(returned).gh, claude.adapter);
@@ -2344,7 +2344,7 @@ test("backlog-next: each request starts in the candidate its own criteria choose
   expect(startedTasks().filter((x) => x.stage?.issue === 302 && x.stage.action === "direct")).toHaveLength(1);
 });
 
-test("backlog-next: 直行で直す is the meta workspace's only — another repository's small request goes to PBI にする (PR #4359 review)", async () => {
+test("backlog-next: 直行で直す is the meta workspace's only — another repository's small request goes to PBI にする", async () => {
   const claude = holdingClaude();
   const { base, ids } = await threeWorkspaces(claude.adapter, undefined, requestsGh({ on: false }).gh);
   const id = await backlogNextSchedule(base);
@@ -2359,7 +2359,7 @@ test("backlog-next: 直行で直す is the meta workspace's only — another rep
   }
 });
 
-test("backlog-next: unreadable candidate definitions start no request, and say why; other stages go on (PR #4359 review)", async () => {
+test("backlog-next: unreadable candidate definitions start no request, and say why; other stages go on", async () => {
   const claude = holdingClaude();
   const base = await boot(requestsGh({ on: false }).gh, claude.adapter);
   // the meta checkout with a broken p1-direct.md (the real p0-pipeline.md beside it)
@@ -2376,7 +2376,7 @@ test("backlog-next: unreadable candidate definitions start no request, and say w
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("#302 を始めない: 候補の定義を読めません"));
 });
 
-test("start: the buttons record their own reason, not the criteria's (#4322)", async () => {
+test("start: the buttons record their own reason, not the criteria's", async () => {
   const base = await boot(requestsGh({ on: false }).gh, holdingClaude().adapter);
   const d = (await (await start(base, 302, { action: "direct" })).json()) as Task;
   const p = (await (await start(base, 320, { action: "to-pbi" })).json()) as Task;
@@ -2384,7 +2384,7 @@ test("start: the buttons record their own reason, not the criteria's (#4322)", a
   expect(await fetch(`${base}/api/tasks/${p.id}/provenance`).then((r) => r.json())).toMatchObject({ processReason: "backlog stage to-pbi" });
 });
 
-test("backlog-next stalled: the closable #307 is closed and #305, unmoved since its last resume, is left and logged", async () => {
+test("backlog-next stalled: the closable Issue 307 is closed and Issue 305, unmoved since its last resume, is left and logged", async () => {
   const claude = holdingClaude();
   const fake = taskDecisionGh({ i305: [subTask(310, "CLOSED", ["type:task"], []), subTask(311, "OPEN", ["type:task"], []), subTask(312, "OPEN", ["type:task"], [])], i307: [] });
   const base = await boot(fake.gh, claude.adapter);
@@ -2398,7 +2398,7 @@ test("backlog-next stalled: the closable #307 is closed and #305, unmoved since 
   expect(log).toContainEqual(expect.stringContaining("#307 を close で開始"));
 });
 
-test("backlog-next stalled: #305 with a Task closed since its last resume is resumed with 実装 before Ready", async () => {
+test("backlog-next stalled: Issue 305 with a Task closed since its last resume is resumed with 実装 before Ready", async () => {
   const claude = holdingClaude();
   const fake = taskDecisionGh({ i305: [subTask(310, "CLOSED", ["type:task"], []), subTask(311, "CLOSED", ["type:task"], []), subTask(312, "OPEN", ["type:task"], [])], i307: [] });
   const base = await boot(fake.gh, claude.adapter);
@@ -2413,7 +2413,7 @@ test("backlog-next stalled: #305 with a Task closed since its last resume is res
   expect(prompt).toContain("`<!-- tasks-done: 2 -->` を 1 行そのまま入れて");
 });
 
-test("backlog-next stalled: #305 whose last resume ended before writing a mark is left and logged until a Task closes", async () => {
+test("backlog-next stalled: Issue 305 whose last resume ended before writing a mark is left and logged until a Task closes", async () => {
   const claude = holdingClaude();
   const open = [subTask(310, "CLOSED", ["type:task"], []), subTask(311, "CLOSED", ["type:task"], []), subTask(312, "OPEN", ["type:task"], [])];
   const base = await boot(taskDecisionGh({ i305: open, i307: [] }).gh, claude.adapter);
@@ -2426,7 +2426,7 @@ test("backlog-next stalled: #305 whose last resume ended before writing a mark i
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: 前回の再開から進んでいない: #305`));
 });
 
-test("backlog-next stalled: #305 with a Task closed after its unmarked resume began is resumed", async () => {
+test("backlog-next stalled: Issue 305 with a Task closed after its unmarked resume began is resumed", async () => {
   const claude = holdingClaude();
   const now = Date.now();
   const later = new Date(now + 3_600_000).toISOString();
@@ -2450,7 +2450,7 @@ test("backlog-next waiting: an open wait is not started and the log names it; on
   const log = await scheduleLogAll(base);
   expect(log).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: 前提: #304（PR #778 マージ待ち） #307（#603 未完・PR #778 マージ待ち）`));
   expect(log).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: 進められる項目が無い`));
-  // both closed: #307 (in progress) goes before Ready #304
+  // both closed: Issue 307 (in progress) goes before Ready Issue 304
   states.w603.state = "CLOSED";
   states.w778.state = "MERGED";
   expect((await runSchedule(base, id)).status).toBe(201);
@@ -2458,8 +2458,8 @@ test("backlog-next waiting: an open wait is not started and the log names it; on
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("#307 を complete で開始"));
 });
 
-describe("resume when waits clear (#1879)", () => {
-  /** #307 (in progress) waits on PR #778, open; a backlog-next schedule is saved (enabled). */
+describe("resume when waits clear", () => {
+  /** Issue 307 (in progress) waits on PR 778, open; a backlog-next schedule is saved (enabled). */
   async function waitingOn778() {
     const claude = holdingClaude();
     const states: Record<string, Record<string, unknown>> = { w778: { __typename: "PullRequest", state: "OPEN" } };
@@ -2490,7 +2490,7 @@ describe("resume when waits clear (#1879)", () => {
     expect(claude.starts).toHaveLength(1);
     // the import that cleared the waits and the read right before the start: the narrow firing does not read once more first
     expect(waitsCalls.length - reads).toBe(2);
-    // that PBI only, in the implement slot: Ready #304 and #303 (the plan slot) wait for the firing
+    // that PBI only, in the implement slot: Ready Issue 304 and Issue 303 (the plan slot) wait for the firing
     expect(core!.db.listTasks().map((t) => t.title.split(":")[0])).toEqual(["#307 実装"]);
     expect(await scheduleLogAll(base)).toContainEqual(expect.stringMatching(/#307 を complete で開始 \S+ \(待ちが解けた\)$/));
     // the schedule's times stay: the next firing comes when it was due
@@ -2498,7 +2498,7 @@ describe("resume when waits clear (#1879)", () => {
   });
 
   test("resume when waits clear respects slots: a full implement slot, a high usage, a disabled schedule start nothing; two imports start one", async () => {
-    // the implement slot is full: the firing started Ready #304 (and #303 in the plan slot) while #778 was open
+    // the implement slot is full: the firing started Ready Issue 304 (and Issue 303 in the plan slot) while Issue 778 was open
     {
       const { claude, states, base, id } = await waitingOn778();
       expect((await runSchedule(base, id)).status).toBe(201);
@@ -2511,7 +2511,7 @@ describe("resume when waits clear (#1879)", () => {
     // usage at backlogQuotaLimit or more and a stage Task running: one at a time, though the slot has room
     {
       const { claude, states, base, id } = await waitingOn778();
-      core!.db.upsertQuota("claude", "five_hour", 0.85, Math.floor(Date.now() / 1000) + 3600); // over the backlog limit, under fallbackAt (at it the start is held, #2768)
+      core!.db.upsertQuota("claude", "five_hour", 0.85, Math.floor(Date.now() / 1000) + 3600); // over the backlog limit, under fallbackAt (at it the start is held)
       await sweepAll(base, { implement: 2, plan: 0 });
       expect((await runSchedule(base, id)).status).toBe(201);
       expect(claude.starts).toHaveLength(1);
@@ -2543,7 +2543,7 @@ describe("resume when waits clear (#1879)", () => {
   });
 });
 
-test("backlog-next waiting: a wait GitHub did not find is not taken as closed, and the log says it was not read (#1046)", async () => {
+test("backlog-next waiting: a wait GitHub did not find is not taken as closed, and the log says it was not read", async () => {
   const claude = holdingClaude();
   const states = { w603: { __typename: "Issue", state: "CLOSED" }, w999: null };
   const fake = waitsGh({ i307: [[releaseBody("後回し", [603, 999]), STOPPED]] }, states, undefined, [{ type: "NOT_FOUND", path: ["repository", "w999"], message: "not found" }]);
@@ -2577,7 +2577,7 @@ test("backlog-next waiting: resumes a Ready PBI with a free Task", async () => {
 test("backlog-next waiting: a 状況確認 started after the waits were written leaves them; once they closed the next firing starts 実装", async () => {
   const fake = waitsGh({ i307: [[releaseBody("後回し", [778]), STOPPED]] }, { w778: { __typename: "PullRequest", state: "MERGED" } });
   const base = await boot(fake.gh, holdingClaude().adapter);
-  // the row's 状況を確認 only reads and reports (#853): it does not claim, and the waits stand
+  // the row's 状況を確認 only reads and reports: it does not claim, and the waits stand
   core!.db.insertTask({ id: "tsk_check", workspaceId: metaId(), title: "#307 状況確認: PBI: 実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#307 状況確認: PBI: 実装中の PBI"), statusAt: Date.parse(LATER), createdAt: Date.parse(LATER), updatedAt: Date.now() });
   expect(await waitsOfItem(base, 307)).toMatchObject({ waits: [{ number: 778, open: false }], waitsAt: STOPPED });
   const id = await backlogNextSchedule(base);
@@ -2613,7 +2613,7 @@ test("backlog-next waiting: a stage Task started after the waits were written ma
   expect(core!.db.listTasks().filter((t) => t.title.startsWith("#307 実装: "))).toHaveLength(2);
 });
 
-describe("backlog-next prerequisite (#937)", () => {
+describe("backlog-next prerequisite", () => {
   type Pbi = { status?: string; priority: string; body?: string; comments?: Array<[string, string]>; tasks?: Array<{ number: number; state: string; body?: string }> };
   /**
    * A GitHub of Ready PBIs (`pbis`, by number) and what they name (`others`: the answers to the import's recheck, by
@@ -2702,7 +2702,7 @@ describe("backlog-next prerequisite (#937)", () => {
     const merged = git("rev-parse", "HEAD");
     let current = running;
     const rescue = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => (new URL(req.url).pathname === "/api/status" ? Response.json({ current, previous: null, state: "running", busy: null, lastError: null, history: [] }) : new Response("no", { status: 404 })) });
-    // #451's merge commit is not in this checkout: git cannot tell, which is not "not released"
+    // Issue 451's merge commit is not in this checkout: git cannot tell, which is not "not released"
     const gh = prereqGh({ 401: { priority: "P0", body: "**前提**: #450（リリース）" }, 402: { priority: "P1", body: "**前提**: #451（リリース）" } }, {
       w450: { __typename: "PullRequest", state: "MERGED", mergeCommit: { oid: merged } },
       w451: { __typename: "PullRequest", state: "MERGED", mergeCommit: { oid: "0".repeat(40) } },
@@ -2734,7 +2734,7 @@ describe("backlog-next prerequisite (#937)", () => {
     }
   });
 
-  test("GET /api/backlog reads each workspace's stored records once when the release's answers are known (#4119)", async () => {
+  test("GET /api/backlog reads each workspace's stored records once when the release's answers are known", async () => {
     const repo = mkdtempSync(join(tmpdir(), "sb-backlog-repo-"));
     withProcesses(repo);
     const git = (...a: string[]) => Bun.spawnSync(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...a]).stdout.toString().trim();
@@ -2777,13 +2777,13 @@ describe("backlog-next prerequisite (#937)", () => {
     for (const part of ["#401（#402 取り下げ）", "#404（#499 見つからない）", "#405（#406 と循環）", "#406（#405 と循環）"]) expect(line).toContain(part);
   });
 
-  test("with #930: a PBI waiting only on a Draft PR's overlap goes on, while one with a prerequisite not done does not", async () => {
+  test("a PBI waiting only on a Draft PR's overlap goes on, while one with a prerequisite not done does not", async () => {
     const pbis: Record<number, Pbi> = {
       407: { priority: "P1", comments: [[releaseBody("後回し", [460], true), STOPPED]] },
       408: { priority: "P0", body: "**前提**: #409" }, 409: { status: "Backlog", priority: "P3" },
     };
     const base = await boot(prereqGh(pbis, { w460: { __typename: "PullRequest", state: "OPEN", isDraft: true } }), holdingClaude().adapter);
-    await slots(base, 1); // #409 is not Ready: the plan slot would take it
+    await slots(base, 1); // Issue 409 is not Ready: the plan slot would take it
     const id = await backlogNextSchedule(base);
     await runSchedule(base, id);
     expect(core!.db.listTasks().map((t) => t.title.split(":")[0])).toEqual(["#407 実装"]);
@@ -2814,7 +2814,7 @@ test("pickNext unchanged: an item whose last stage Task of the same stage finish
   expect(pickNext([item({ number: 6, stage: "ready", lastTask: last("to-tasks") })], "implement")).toMatchObject({ item: { number: 6 } });
   // a running one is not finished: activeTaskId holds it, and it is not listed as unchanged
   expect(unchangedIn([{ ...unchangedReady, lastTask: last("complete", undefined, "running") }], "implement")).toEqual([]);
-  // 3: updated since → picked, before the untried of a lower Priority (#2929) and after the untried of its own; alone it goes on
+  // 3: updated since → picked, before the untried of a lower Priority and after the untried of its own; alone it goes on
   const updatedReady = { ...unchangedReady, updatedAt: updated };
   expect(pickNext([updatedReady, freshReady], "implement")).toMatchObject({ item: { number: 1 } });
   expect(pickNext([updatedReady, { ...freshReady, priority: "P0" }], "implement")).toMatchObject({ item: { number: 2 } });
@@ -2826,7 +2826,7 @@ test("pickNext unchanged: an item whose last stage Task of the same stage finish
   expect(pickNext([updatedReady, freshReady, answered], "implement")).toMatchObject({ item: { number: 7 }, action: "complete" });
 });
 
-test("pickNext priority: a Ready P0 worked on before goes before an untried Ready P3; a resume or a close of an in-progress PBI still goes first (#2929)", () => {
+test("pickNext priority: a Ready P0 worked on before goes before an untried Ready P3; a resume or a close of an in-progress PBI still goes first", () => {
   const at = "2026-09-28T00:00:00Z";
   const done = { id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null };
   const triedP0 = item({ number: 1, stage: "ready", priority: "P0", lastTask: done, updatedAt: "2026-09-28T01:00:00Z" });
@@ -2845,7 +2845,7 @@ test("pickNext priority: a Ready P0 worked on before goes before an untried Read
   expect(pickNext([triedP2, freshP2New, freshP2Old], "implement")).toMatchObject({ item: { number: 7 } });
 });
 
-test("pickNext priority: the plan slot takes a 分解待ち PBI by Priority, before a request with none (#2929)", () => {
+test("pickNext priority: the plan slot takes a 分解待ち PBI by Priority, before a request with none", () => {
   const at = "2026-09-28T00:00:00Z";
   const done = { id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "to-tasks" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null };
   const triedP1 = item({ number: 1, stage: "needs-tasks", priority: "P1", lastTask: done, updatedAt: "2026-09-28T01:00:00Z", createdAt: "2026-09-02T00:00:00Z" });
@@ -2855,10 +2855,10 @@ test("pickNext priority: the plan slot takes a 分解待ち PBI by Priority, bef
   expect(pickNext([freshRequest, { ...triedP1, lastTask: null, priority: null }], "plan")).toMatchObject({ item: { number: 1 } });
 });
 
-test("pickNext failed: an item whose last stage Task failed with no update to the Issue since is left in any stage; an update, a reply's resume or a closed wait brings it back (#1275)", () => {
+test("pickNext failed: an item whose last stage Task failed with no update to the Issue since is left in any stage; an update, a reply's resume or a closed wait brings it back", () => {
   const at = "2026-09-28T00:00:00Z";
   const failed = (status: TaskStatus = "error", resumeAt: number | null = null) => ({ id: "tsk_last", status, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "failed" as const, reviewedAt: null, resumeAt });
-  // an in-progress PBI with Tasks left: resumed (#578) unless its last Task failed and the Issue was not updated since — the usage-limit case (resumeAt set) and an aborted one alike
+  // an in-progress PBI with Tasks left: resumed unless its last Task failed and the Issue was not updated since — the usage-limit case (resumeAt set) and an aborted one alike
   const stalled = item({ number: 1, stage: "in-progress", tasks: { total: 3, done: 1, doneAt: null }, updatedAt: at });
   expect(pickNext([stalled], "implement")).toMatchObject({ action: "complete", resume: true });
   expect(pickNext([{ ...stalled, lastTask: failed("error", Date.parse("2026-09-30T11:01:00Z")) }], "implement")).toBeNull();
@@ -2866,11 +2866,11 @@ test("pickNext failed: an item whose last stage Task failed with no update to th
   // the Issue updated after it (a comment, a ## 回答) → resumed; an Issue updated at the very time is not newer
   expect(pickNext([{ ...stalled, lastTask: failed(), updatedAt: "2026-09-28T01:00:00Z" }], "implement")).toMatchObject({ action: "complete", resume: true });
   expect(pickNext([{ ...stalled, lastTask: failed(), answeredAt: "2026-09-28T01:00:00Z", updatedAt: "2026-09-28T01:00:00Z" }], "implement")).toMatchObject({ action: "complete" });
-  // a closable one is held the same way; its waits closing still goes on (#817)
+  // a closable one is held the same way; its waits closing still goes on
   const closable = item({ number: 2, stage: "in-progress", tasks: { total: 2, done: 2, doneAt: null }, closable: true, updatedAt: at, lastTask: failed() });
   expect(pickNext([closable], "implement")).toBeNull();
   expect(pickNext([{ ...closable, waits: [wait(778, "pr", false)], waitsAt: at }], "implement")).toMatchObject({ item: { number: 2 } });
-  // a Ready item too (as #624 already does), and the plan slot's stages
+  // a Ready item too (as 前回から更新が無い already does), and the plan slot's stages
   expect(pickNext([item({ number: 3, stage: "ready", updatedAt: at, lastTask: failed() })], "implement")).toBeNull();
   expect(pickNext([item({ number: 4, stage: "needs-tasks", updatedAt: at, lastTask: { ...failed(), action: "to-tasks" } })], "plan")).toBeNull();
   // listed for the log by slot; a running one or one waiting for a PR is not
@@ -2885,7 +2885,7 @@ test("pickNext failed: an item whose last stage Task failed with no update to th
   expect(failedIn([{ ...stalled, lastTask: failed(), answeredAt: "2026-09-28T01:00:00Z" }], "implement")).toEqual([]);
 });
 
-test("pickNext awaiting reply: an item whose last stage Task ended asking the person (needs_action, not reviewed) is left until the Issue is updated or the Task reviewed (#1275)", () => {
+test("pickNext awaiting reply: an item whose last stage Task ended asking the person (needs_action, not reviewed) is left until the Issue is updated or the Task reviewed", () => {
   const at = "2026-09-28T00:00:00Z";
   const asked = (over: Partial<NonNullable<BacklogItem["lastTask"]>> = {}) => ({ id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "needs_action" as const, reviewedAt: null, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, ...over });
   const stalled = item({ number: 1, stage: "in-progress", tasks: { total: 3, done: 1, doneAt: null }, updatedAt: at, lastTask: asked() });
@@ -2904,7 +2904,7 @@ test("pickNext awaiting reply: an item whose last stage Task ended asking the pe
   expect(pickNext([{ ...ready, updatedAt: "2026-09-28T01:00:00Z" }], "implement")).toMatchObject({ item: { number: 2 }, action: "complete" });
   const request = item({ number: 3, stage: "request", type: "request", updatedAt: at, lastTask: asked({ action: "to-pbi" }) });
   expect(pickNext([request], "plan")).toBeNull();
-  // listed for the log by slot, apart from the failed ones (#624's unchanged still lists the Ready one; the firing filters it)
+  // listed for the log by slot, apart from the failed ones (前回から更新が無い still lists the Ready one; the firing filters it)
   expect(replyWaitingIn([stalled, ready, request], "implement").map((i) => i.number)).toEqual([1, 2]);
   expect(replyWaitingIn([stalled, ready, request], "plan").map((i) => i.number)).toEqual([3]);
   expect(failedIn([{ ...stalled, lastTask: asked({ status: "error" }) }], "implement")).toEqual([]);
@@ -2914,22 +2914,22 @@ test("pickNext awaiting reply: an item whose last stage Task ended asking the pe
   const childAnswered = { ...stalled, answeredAt: "2026-09-28T01:00:00Z" };
   expect(pickNext([childAnswered], "implement")).toMatchObject({ action: "complete" });
   expect(replyWaitingIn([childAnswered], "implement")).toEqual([]);
-  // reviewed releases a Ready item and a closable one too, which #624 / #578 would otherwise hold until the Issue changes
+  // reviewed releases a Ready item and a closable one too, which 前回から更新が無い / 前回の再開から進んでいない would otherwise hold until the Issue changes
   const reviewed = asked({ reviewedAt: Date.parse("2026-09-28T02:00:00Z") });
   expect(pickNext([{ ...ready, lastTask: reviewed }], "implement")).toMatchObject({ item: { number: 2 }, action: "complete" });
   expect(unchangedIn([{ ...ready, lastTask: reviewed }], "implement")).toEqual([]);
   expect(pickNext([item({ number: 4, stage: "in-progress", tasks: { total: 2, done: 2, doneAt: null }, closable: true, updatedAt: at, lastTask: { ...reviewed, action: "close" } })], "implement")).toMatchObject({ action: "close" });
-  // a stalled PBI held by #578 (its last resume's tasks-done mark matches): reviewed releases it as well; a done resume reviewed does not
+  // a stalled PBI held by 前回の再開から進んでいない (its last resume's tasks-done mark matches): reviewed releases it as well; a done resume reviewed does not
   const spun = { ...stalled, report: { body: `## 状況\n### 残り\n- #12\n${TASKS_DONE_MARK(1)}`, at: "2026-09-27T23:00:00Z" } };
   expect(pickNext([spun], "implement")).toBeNull();
   expect(pickNext([{ ...spun, lastTask: reviewed }], "implement")).toMatchObject({ action: "complete", resume: true });
   expect(spinningIn([{ ...spun, lastTask: reviewed }], "implement")).toEqual([]);
   expect(pickNext([{ ...spun, lastTask: asked({ outcome: "done", reviewedAt: Date.parse("2026-09-28T02:00:00Z") }) }], "implement")).toBeNull();
-  // one that ended done (nothing asked) and was marked reviewed is still #624's unchanged
+  // one that ended done (nothing asked) and was marked reviewed is still 前回から更新が無い
   expect(pickNext([{ ...ready, lastTask: asked({ outcome: "done", reviewedAt: Date.parse("2026-09-28T02:00:00Z") }) }], "implement")).toBeNull();
 });
 
-describe("on-hold (#2930)", () => {
+describe("on-hold", () => {
   const at = "2026-09-20T00:00:00Z";
   const answered = { answeredAt: at, tasks: { total: 3, done: 1, doneAt: null } };
   const held: Array<[string, "implement" | "plan", Partial<BacklogItem>]> = [
@@ -2951,7 +2951,7 @@ describe("on-hold (#2930)", () => {
   });
 
   test("a firing logs 保留: #N on that line only, starts the next item, and the row's button still starts it", async () => {
-    // #304 (Ready) also had an 実装 finish with no update since, which alone would log it as 前回から更新が無い
+    // Issue 304 (Ready) also had an 実装 finish with no update since, which alone would log it as 前回から更新が無い
     const base = await boot(onHoldGh(304, 303).gh, holdingClaude().adapter);
     const now = Date.now();
     core!.db.insertTask({ id: "tsk_last304", workspaceId: metaId(), title: "#304 実装: PBI: Ready の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#304 実装: PBI: Ready の PBI"), statusAt: now, createdAt: now, updatedAt: now });
@@ -2969,18 +2969,18 @@ describe("on-hold (#2930)", () => {
   });
 });
 
-test("backlog-next failed / awaiting reply: a firing leaves a PBI whose last Task failed on the usage limit or stopped asking, and the log names each with the resume time (#1275)", async () => {
+test("backlog-next failed / awaiting reply: a firing leaves a PBI whose last Task failed on the usage limit or stopped asking, and the log names each with the resume time", async () => {
   const base = await boot(fakeGh().gh, holdingClaude().adapter);
   const now = Date.now();
   const resumeAt = now + 3_600_000;
   const row = { workspaceId: metaId(), runner: "claude" as const, cwd: home!, scope: [home!], runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto" as const, effort: null, origin: "switchboard" as const, shadowOf: null, shadowStopped: false, workspaceReason: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now };
-  // #307 (closable, in progress): its 閉じる hit the weekly limit at once, auto-resume planned; #304 (Ready): its 実装 ended asking the person in its conversation
+  // Issue 307 (closable, in progress): its 閉じる hit the weekly limit at once, auto-resume planned; Issue 304 (Ready): its 実装 ended asking the person in its conversation
   core!.db.insertTask({ ...row, id: "tsk_limit307", title: "#307 閉じる: PBI: Task が全部閉じた実装中の PBI", stage: { issue: 307, action: "close" }, status: "error", resumeAt, resumeReason: "limit", resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, outcome: "failed", reviewedAt: null, archivedAt: null });
   core!.db.insertTask({ ...row, id: "tsk_ask304", title: "#304 実装: PBI: Ready の PBI", stage: { issue: 304, action: "complete" }, status: "done", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, outcome: "needs_action", reviewedAt: null, archivedAt: null });
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
   expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#303 Task に分解", "#304 実装", "#307 閉じる"]); // only the two inserted ones
-  // a stopped Task with its resume planned takes no slot (slot does not count a resume, #4072): the firing names it as failed
+  // a stopped Task with its resume planned takes no slot (slot does not count a resume): the firing names it as failed
   const log = await scheduleLogAll(base);
   expect(log).toContainEqual(expect.stringContaining(`飛ばした (manual): ${metaName()}: 実装の枠: 返事待ち: #304`));
   expect(log).toContainEqual(expect.stringContaining(`飛ばした (manual): ${metaName()}: 実装の枠: 前回の Task が失敗したまま更新が無い: #307（使用上限、${fmtTime(resumeAt, now)} に戻る）`));
@@ -2998,14 +2998,14 @@ test("backlog-next failed / awaiting reply: a firing leaves a PBI whose last Tas
 test("backlog-next unchanged: a Ready PBI whose 実装 finished with no update since is not started and the log names it; its button still starts it", async () => {
   const base = await boot(fakeGh().gh, holdingClaude().adapter);
   closeTried();
-  // #304 (updated 2026-09-20) had an 実装 that finished after that
+  // Issue 304 (updated 2026-09-20) had an 実装 that finished after that
   const now = Date.now();
   core!.db.insertTask({ id: "tsk_last304", workspaceId: metaId(), title: "#304 実装: PBI: Ready の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#304 実装: PBI: Ready の PBI"), statusAt: now, createdAt: now, updatedAt: now });
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
-  expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#303 Task に分解", "#304 実装"]); // only the old #304 実装
+  expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#303 Task に分解", "#304 実装"]); // only the old Issue 304 実装
   const log = await scheduleLogAll(base);
-  expect(log).toContainEqual(expect.stringContaining(`飛ばした (manual): ${metaName()}: 実装の枠: 前回から更新が無い: #304 #307`)); // #307: closeTried's 閉じる (#578)
+  expect(log).toContainEqual(expect.stringContaining(`飛ばした (manual): ${metaName()}: 実装の枠: 前回から更新が無い: #304 #307`)); // Issue 307: closeTried's 閉じる
   expect(log).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: 進められる項目が無い`));
   // the row's button is not held by it
   const r = await start(base, 304, { action: "complete" });
@@ -3013,10 +3013,10 @@ test("backlog-next unchanged: a Ready PBI whose 実装 finished with no update s
   expect(startedTasks().filter((t) => t.title.startsWith("#304 実装: "))).toHaveLength(2);
 });
 
-describe("backlog waitsUntil (#4616)", () => {
+describe("backlog waitsUntil", () => {
   const AT = "2026-11-20T09:00:00+09:00";
   const T = Date.parse(AT);
-  /** The item #307 (in progress) as the daemon builds it at `now`; time is set only while the backlog is built. */
+  /** The item Issue 307 (in progress) as the daemon builds it at `now`; time is set only while the backlog is built. */
   const at = async (base: string, now: number) => {
     setSystemTime(new Date(now));
     try { return await waitsOfItem(base, 307); } finally { setSystemTime(); }
@@ -3106,7 +3106,7 @@ test("backlog-next overlap: a Ready PBI whose Task names a file an open PR chang
     if (args[0] === "issue" || args.includes("POST") || args.includes("PATCH")) writes.push(args);
     return withTask(args, cwd);
   };
-  // #901's files are cut (120 of 100 read): it cannot be judged, and the log says so next to the PR that overlaps
+  // Issue 901's files are cut (120 of 100 read): it cannot be judged, and the log says so next to the PR that overlaps
   openPulls = [{ number: 900, files: ["src/a.ts"], headRefName: "sb/999-x" }, { number: 901, files: [], filesTotal: 120, headRefName: "sb/998-x" }];
   const base = await boot(gh, claude.adapter);
   expect((await waitsOfItem(base, 304)).overlap).toEqual({ hits: [{ ref: "PR #900", path: "src/a.ts" }], unknown: "PR #901 の変更ファイルが記録に無い" });
@@ -3119,7 +3119,7 @@ test("backlog-next overlap: a Ready PBI whose Task names a file an open PR chang
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: 重なり: #304（PR #900: src/a.ts）`));
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: 重なりを判定できない: #304（PR #901 の変更ファイルが記録に無い）`));
   expect(writes).toEqual([]);
-  // the PR closes: the next import reads it and #304 is picked again (the implement slot is #307's 閉じる meanwhile)
+  // the PR closes: the next import reads it and Issue 304 is picked again (the implement slot is Issue 307's 閉じる meanwhile)
   openPulls = [];
   await fetch(`${base}/api/backlog?refresh=1`);
   const ready = (await refreshed(base)).items.find((i) => i.number === 304)!;
@@ -3127,7 +3127,7 @@ test("backlog-next overlap: a Ready PBI whose Task names a file an open PR chang
   expect(pickNext([ready], "implement")).toMatchObject({ item: { number: 304 }, action: "complete" });
 });
 
-/** moreReadyGh(309, 310) whose Ready PBIs #304 / #309 / #310 each have one open Task naming the file given (#3228). */
+/** moreReadyGh(309, 310) whose Ready PBIs 304 / Issue 309 / Issue 310 each have one open Task naming the file given. */
 function overlapReadyGh(files: { 304: string; 309: string; 310: string }, bodies: Partial<Record<304 | 309 | 310, string>> = {}): GhRunner {
   const inner = moreReadyGh(309, 310);
   const task = (number: number, file: string) => ({ number, state: "OPEN", labels: { nodes: [{ name: "type:task" }] }, body: bodies[Math.floor(number / 10) as 304 | 309 | 310] ?? `触る場所: \`${file}\``, comments: { nodes: [] } });
@@ -3146,7 +3146,7 @@ function overlapReadyGh(files: { 304: string; 309: string; 310: string }, bodies
   };
 }
 
-test("backlog-next overlap (#3228): in one firing of implement 2, a Ready PBI whose Task names the path of the PBI started before it is not started, and the log names that Task and the path; the one with another path is", async () => {
+test("backlog-next overlap: in one firing of implement 2, a Ready PBI whose Task names the path of the PBI started before it is not started, and the log names that Task and the path; the one with another path is", async () => {
   const base = await boot(overlapReadyGh({ 304: "src/a.ts", 309: "src/a.ts", 310: "src/c.ts" }), holdingClaude().adapter);
   closeTried();
   expect((await sweepAll(base, { implement: 2, plan: 0 })).status).toBe(200);
@@ -3158,7 +3158,7 @@ test("backlog-next overlap (#3228): in one firing of implement 2, a Ready PBI wh
   expect(log.filter((l) => l.includes("実装の枠: 重なり: "))).toHaveLength(1);
 });
 
-test("backlog-next overlap (#3228): Ready PBIs whose Tasks name different paths all start in one firing", async () => {
+test("backlog-next overlap: Ready PBIs whose Tasks name different paths all start in one firing", async () => {
   const base = await boot(overlapReadyGh({ 304: "src/a.ts", 309: "src/b.ts", 310: "src/c.ts" }), holdingClaude().adapter);
   closeTried();
   expect((await sweepAll(base, { implement: 2, plan: 0 })).status).toBe(200);
@@ -3168,7 +3168,7 @@ test("backlog-next overlap (#3228): Ready PBIs whose Tasks name different paths 
   expect((await scheduleLogAll(base)).some((l) => l.includes("重なり"))).toBe(false);
 });
 
-test("backlog-next overlap (#4382): a Task that only refers to a root file in the middle of a step does not hold back the PBI that touches it", async () => {
+test("backlog-next overlap: a Task that only refers to a root file in the middle of a step does not hold back the PBI that touches it", async () => {
   const base = await boot(overlapReadyGh({ 304: "src/a.ts", 309: "src/b.ts", 310: "src/c.ts" }, { 304: "1. 昇格は CLAUDE.md の規則に従う。`CLAUDE.md` も読む", 309: "触る場所: CLAUDE.md" }), holdingClaude().adapter);
   closeTried();
   expect((await sweepAll(base, { implement: 2, plan: 0 })).status).toBe(200);
@@ -3178,7 +3178,7 @@ test("backlog-next overlap (#4382): a Task that only refers to a root file in th
   expect((await scheduleLogAll(base)).some((l) => l.includes("重なり"))).toBe(false);
 });
 
-test("backlog-next overlap (#4382): a Task that names a root file at the head of a step holds back the PBI that touches it, and the log names the file", async () => {
+test("backlog-next overlap: a Task that names a root file at the head of a step holds back the PBI that touches it, and the log names the file", async () => {
   const base = await boot(overlapReadyGh({ 304: "src/a.ts", 309: "src/b.ts", 310: "src/c.ts" }, { 304: "1. CLAUDE.md: 追記する", 309: "触る場所: CLAUDE.md" }), holdingClaude().adapter);
   closeTried();
   expect((await sweepAll(base, { implement: 2, plan: 0 })).status).toBe(200);
@@ -3195,8 +3195,8 @@ async function backlogNextSchedule(base: string, budgetUsd?: number, model?: str
   return (await r.json() as { id: string }).id;
 }
 /**
- * A 閉じる of the fixtures' closable #307 that finished with no update since (#578), on each workspace: backlog-next leaves
- * it, so a test of the implement slot starts Ready #304 there.
+ * A 閉じる of the fixtures' closable Issue 307 that finished with no update since, on each workspace: backlog-next leaves
+ * it, so a test of the implement slot starts Ready Issue 304 there.
  */
 function closeTried(...workspaceIds: string[]) {
   const now = Date.now();
@@ -3208,7 +3208,7 @@ const runSchedule = (base: string, id: string) => fetch(`${base}/api/schedules/$
 const scheduleLogAll = async (base: string) => await (await fetch(`${base}/api/schedules/log`)).json() as string[];
 const scheduleLog = async (base: string) => (await scheduleLogAll(base)).at(-1) ?? "";
 
-test("backlog-next queue (#3956): with the queue enabled a firing starts no Ready PBI, logs 実装の枠: キューに任せる, and still moves the 計画 slot", async () => {
+test("backlog-next queue: with the queue enabled a firing starts no Ready PBI, logs 実装の枠: キューに任せる, and still moves the 計画 slot", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
   closeTried();
@@ -3223,7 +3223,7 @@ test("backlog-next queue (#3956): with the queue enabled a firing starts no Read
   expect(startedTasks().map((t) => t.title.split(":")[0])).toContain("#304 実装");
 });
 
-test("backlog-next queue (#3956): the queue enabled while a firing reads GitHub takes the 実装 slot from that firing", async () => {
+test("backlog-next queue: the queue enabled while a firing reads GitHub takes the 実装 slot from that firing", async () => {
   const claude = holdingClaude();
   const fake = fakeGh();
   let enableOnRead = false;
@@ -3243,7 +3243,7 @@ test("backlog-next queue (#3956): the queue enabled while a firing reads GitHub 
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: キューに任せる`));
 });
 
-/** The backlog queue's API (#3955) on a test daemon, and a wait for what it starts (#3966). */
+/** The backlog queue's API on a test daemon, and a wait for what it starts. */
 const putQueue = (base: string, body: object) => fetch(`${base}/api/backlog/queue`, { method: "PUT", body: JSON.stringify(body) });
 const getQueue = async (base: string) => (await (await fetch(`${base}/api/backlog/queue`)).json()) as BacklogQueue;
 const queueOf = (...numbers: number[]) => numbers.map((number) => ({ workspaceId: metaId(), number }));
@@ -3255,11 +3255,11 @@ async function until(f: () => boolean | Promise<boolean>, ms = 5000) {
   }
 }
 
-test("startFromQueue (#3966): enabling starts the head with no schedule; its Task's end starts the next; nothing starts while disabled", async () => {
+test("startFromQueue: enabling starts the head with no schedule; its Task's end starts the next; nothing starts while disabled", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
   expect(core!.db.listSchedules().filter((s) => s.action === "backlog-next")).toEqual([]);
-  // #307 can be closed, #304 is Ready: the queue's order, not Priority, says which goes first
+  // Issue 307 can be closed, Issue 304 is Ready: the queue's order, not Priority, says which goes first
   expect((await putQueue(base, { items: queueOf(307, 304) })).status).toBe(200);
   await Bun.sleep(100);
   expect(startedTitles()).toEqual([]);
@@ -3267,7 +3267,7 @@ test("startFromQueue (#3966): enabling starts the head with no schedule; its Tas
   await until(() => startedTitles().length > 0);
   expect(startedTitles()).toEqual(["#307 閉じる"]);
   await until(async () => (await getQueue(base)).lastNote?.includes("#307 を close で開始") ?? false);
-  // its Task ends (aborted: #307 is then left until the Issue moves): the second starts
+  // its Task ends (aborted: Issue 307 is then left until the Issue moves): the second starts
   const first = startedTasks()[0]!;
   await fetch(`${base}/api/tasks/${first.id}/abort`, { method: "POST" });
   await until(() => startedTitles().length > 1);
@@ -3279,7 +3279,7 @@ test("startFromQueue (#3966): enabling starts the head with no schedule; its Tas
   expect(startedTitles().sort()).toEqual(["#304 実装", "#307 閉じる"]);
 });
 
-test("startFromQueue (#3966): concurrency 2 starts two, and no third", async () => {
+test("startFromQueue: concurrency 2 starts two, and no third", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
   await putQueue(base, { items: queueOf(307, 304, 305), concurrency: 2, enabled: true });
@@ -3291,7 +3291,7 @@ test("startFromQueue (#3966): concurrency 2 starts two, and no third", async () 
   expect((await getQueue(base)).lastNote).toBe("同時に動かす数 2 に達している");
 });
 
-test("startFromQueue (#3966): a head waiting for a PR still open is left and named as backlog-next names it; the second starts", async () => {
+test("startFromQueue: a head waiting for a PR still open is left and named as backlog-next names it; the second starts", async () => {
   const claude = holdingClaude();
   const fake = waitsGh({ i304: [[releaseBody("後回し", [778]), STOPPED]] }, { w778: { __typename: "PullRequest", state: "OPEN" } });
   const base = await boot(fake.gh, claude.adapter);
@@ -3304,7 +3304,7 @@ test("startFromQueue (#3966): a head waiting for a PR still open is left and nam
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`キュー: ${metaName()}: 前提: #304（PR #778 マージ待ち） (enabled)`));
 });
 
-test("startFromQueue (#3966): an empty queue says so and starts nothing", async () => {
+test("startFromQueue: an empty queue says so and starts nothing", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
   await putQueue(base, { enabled: true });
@@ -3314,7 +3314,7 @@ test("startFromQueue (#3966): an empty queue says so and starts nothing", async 
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("キュー: キューが空 (enabled)"));
 });
 
-test("startFromQueue (#3966): a queued PBI not yet split is named; a 計画 Task's end runs the queue again", async () => {
+test("startFromQueue: a queued PBI not yet split is named; a 計画 Task's end runs the queue again", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
   await putQueue(base, { items: queueOf(303), enabled: true });
@@ -3329,7 +3329,7 @@ test("startFromQueue (#3966): a queued PBI not yet split is named; a 計画 Task
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`キュー: ${metaName()}: まだ Ready でない: #303（Task 分解前） (task-end)`));
 });
 
-test("startFromQueue (#3966): the queue's start and a backlog-next firing at once start one Task per PBI", async () => {
+test("startFromQueue: the queue's start and a backlog-next firing at once start one Task per PBI", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
   closeTried();
@@ -3341,7 +3341,7 @@ test("startFromQueue (#3966): the queue's start and a backlog-next firing at onc
   expect(startedTitles().filter((t) => t === "#304 実装")).toHaveLength(1);
 });
 
-test("startFromQueue (#3228): with concurrency 2, a queued PBI whose Task names the path of the PBI started before it is not started in the same run; the one with another path is", async () => {
+test("startFromQueue: with concurrency 2, a queued PBI whose Task names the path of the PBI started before it is not started in the same run; the one with another path is", async () => {
   const base = await boot(overlapReadyGh({ 304: "src/a.ts", 309: "src/a.ts", 310: "src/c.ts" }), holdingClaude().adapter);
   closeTried();
   await putQueue(base, { items: queueOf(304, 309, 310), concurrency: 2, enabled: true });
@@ -3351,7 +3351,7 @@ test("startFromQueue (#3228): with concurrency 2, a queued PBI whose Task names 
   expect((await getQueue(base)).lastNote ?? "").toContain("重なり: #309（Task #3041: src/a.ts）");
 });
 
-test("startFromQueue, developSelf off (#2459): a queued PBI of the meta workspace is not started, and the note says why", async () => {
+test("startFromQueue, developSelf off: a queued PBI of the meta workspace is not started, and the note says why", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
   expect((await fetch(`${base}/api/settings`, { method: "PATCH", body: JSON.stringify({ developSelf: false }) })).status).toBe(200);
@@ -3362,7 +3362,7 @@ test("startFromQueue, developSelf off (#2459): a queued PBI of the meta workspac
   expect((await getQueue(base)).lastNote ?? "").toContain("開発しない設定なので読まない: #304");
 });
 
-test("startFromQueue (#3966): at boot an enabled queue goes on", async () => {
+test("startFromQueue: at boot an enabled queue goes on", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
   // stored as a PUT stores it, without the PUT's start: only the boot starts it
@@ -3396,7 +3396,7 @@ test("startFromQueue: a stage Task whose turn ended on a job it asked the daemon
   await claude.started(1);
   const task = startedTasks()[0]!;
   expect(task.title.startsWith("#304 実装")).toBe(true);
-  // the Task asks the daemon for local CI (ops-kit job request, #3992) and ends its turn on it: its work is not over
+  // the Task asks the daemon for local CI (ops-kit job request) and ends its turn on it: its work is not over
   const r = await fetch(`${base}/api/jobs`, { method: "POST", body: JSON.stringify({ kind: "local-ci", taskId: task.id, pr: 900, cwd: task.cwd }) });
   expect(r.status).toBe(202);
   const job = (await r.json()) as { id: number };
@@ -3406,7 +3406,7 @@ test("startFromQueue: a stage Task whose turn ended on a job it asked the daemon
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("キュー: 同時に動かす数 1 に達している (task-end)"));
   await Bun.sleep(200);
   expect(startedTitles()).toEqual(["#304 実装"]);
-  // the job ends: its end runs the queue; #304 is not started again on top of it, the next goes
+  // the job ends: its end runs the queue; Issue 304 is not started again on top of it, the next goes
   writeFileSync(gate, "");
   try {
     await until(() => startedTitles().length > 1, 10_000);
@@ -3438,7 +3438,7 @@ test("startFromQueue: a stage Task that stopped on its job# is resumed by the jo
   } finally {
     rmSync(gate, { force: true });
   }
-  // the job's end resumed the Task first: the queue found its place taken, and #304 runs once
+  // the job's end resumed the Task first: the queue found its place taken, and Issue 304 runs once
   expect(core!.db.getTask(task.id)!.status).toBe("running");
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("キュー: 同時に動かす数 1 に達している (job-end)"));
   await Bun.sleep(200);
@@ -3502,7 +3502,7 @@ test("backlog-next: a schedule without a model starts on the CLI default, not on
   expect(claude.starts[0]!.model).toBeUndefined();
 });
 
-test("backlog-next: a firing starts with the schedule's effort, not autoStart's (schedule effort, #833)", async () => {
+test("backlog-next: a firing starts with the schedule's effort, not autoStart's (schedule effort)", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
   core!.db.setSetting("settings", { autoStart: { runner: "claude", effort: "high" } });
@@ -3512,7 +3512,7 @@ test("backlog-next: a firing starts with the schedule's effort, not autoStart's 
   expect(claude.starts.map((s) => s.effort)).toEqual(claude.starts.map(() => "low"));
 });
 
-test("backlog-next: a schedule without an effort starts on the CLI default, not on autoStart's (schedule effort, #833)", async () => {
+test("backlog-next: a schedule without an effort starts on the CLI default, not on autoStart's (schedule effort)", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
   core!.db.setSetting("settings", { autoStart: { runner: "claude", effort: "high" } });
@@ -3522,7 +3522,7 @@ test("backlog-next: a schedule without an effort starts on the CLI default, not 
   expect(claude.starts[0]!.effort).toBeUndefined();
 });
 
-test("backlog-next by kind (#1337): a kind's own runner wins over the schedule's; a kind without one starts on the schedule's runner and model", async () => {
+test("backlog-next by kind: a kind's own runner wins over the schedule's; a kind without one starts on the schedule's runner and model", async () => {
   const claude = holdingClaude();
   const codex = holdingClaude();
   const base = await boot(fakeGh().gh, [claude.adapter, { ...codex.adapter, id: "codex" }]);
@@ -3536,7 +3536,7 @@ test("backlog-next by kind (#1337): a kind's own runner wins over the schedule's
   expect(started.find((t) => t.title.startsWith("#303 Task に分解"))).toMatchObject({ runner: "claude", model: "m-sched", effort: "low" });
 });
 
-test("backlog-next: the prompt of a button start names the merge gate only as the request's scope (#1357)", async () => {
+test("backlog-next: the prompt of a button start names the merge gate only as the request's scope", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
   await start(base, 304, { action: "complete" });
@@ -3558,7 +3558,7 @@ test("backlog-next slots: a running plan Task (from a button too) holds that wor
   expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#303 Task に分解", "#304 実装"]);
 });
 
-test("backlog-next slots: 実行枠待ちの工程 Task は枠を埋め、その Issue のボタンは 409 で taskId を返す (#1141)", async () => {
+test("backlog-next slots: 実行枠待ちの工程 Task は枠を埋め、その Issue のボタンは 409 で taskId を返す", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
   closeTried();
@@ -3610,7 +3610,7 @@ async function shutdown() {
   rmSync(home!, { recursive: true, force: true });
   core = home = undefined;
 }
-/** backlog quota (#834): a backlog-next schedule on `runner`, with Claude and Codex both detected and holding. */
+/** backlog quota: a backlog-next schedule on `runner`, with Claude and Codex both detected and holding. */
 async function bootTwo(runner: "claude" | "codex") {
   const claude = holdingClaude();
   const codex = holdingClaude();
@@ -3621,7 +3621,7 @@ async function bootTwo(runner: "claude" | "codex") {
   return { base, id: (await r.json() as { id: string }).id, claude: claude.starts, codex: codex.starts };
 }
 
-test("backlog quota (#834): a codex schedule is not held back by Claude's usage; Codex's own at 0.85 holds it to one", async () => {
+test("backlog quota: a codex schedule is not held back by Claude's usage; Codex's own at 0.85 holds it to one", async () => {
   const later = Math.floor(Date.now() / 1000) + 3600;
   const a = await bootTwo("codex");
   core!.db.upsertQuota("claude", "five_hour", 0.85, later);
@@ -3637,7 +3637,7 @@ test("backlog quota (#834): a codex schedule is not held back by Claude's usage;
   expect(await scheduleLogAll(b.base)).toContainEqual(expect.stringContaining(`${metaName()}: 計画の枠: codex の使用量 five_hour が 85%`));
 });
 
-test("backlog quota (#834): a claude schedule at Claude's limit with the fallback codex starts on codex and is judged by Codex's usage", async () => {
+test("backlog quota: a claude schedule at Claude's limit with the fallback codex starts on codex and is judged by Codex's usage", async () => {
   const later = Math.floor(Date.now() / 1000) + 3600;
   const a = await bootTwo("claude");
   core!.db.upsertQuota("claude", "five_hour", 0.95, later);
@@ -3656,7 +3656,7 @@ test("backlog quota (#834): a claude schedule at Claude's limit with the fallbac
   expect(await scheduleLogAll(b.base)).toContainEqual(expect.stringContaining("codex の使用量 five_hour が 85%（80% 以上）: 全体で 1 件まで"));
 });
 
-test("backlog quota (#834): a kind's own runner (#1337) is judged by its own usage — 実装 on claude at its limit is left while the plan slot starts on codex", async () => {
+test("backlog quota: a kind's own runner is judged by its own usage — 実装 on claude at its limit is left while the plan slot starts on codex", async () => {
   const later = Math.floor(Date.now() / 1000) + 3600;
   const now = Date.now();
   const a = await bootTwo("codex");
@@ -3765,7 +3765,7 @@ test("backlog-next login: after logging in again (ok, expiry in 30 days) the nex
   }
 });
 
-test("backlog-next slots: settings tunables (#835) — backlogQuotaLimit 0.5 holds back at Claude usage 0.6, read at each firing", async () => {
+test("backlog-next slots: settings tunables — backlogQuotaLimit 0.5 holds back at Claude usage 0.6, read at each firing", async () => {
   const base = await boot(fakeGh().gh, holdingClaude().adapter);
   closeTried();
   core!.db.upsertQuota("claude", "five_hour", 0.6, Math.floor(Date.now() / 1000) + 3600);
@@ -3778,7 +3778,7 @@ test("backlog-next slots: settings tunables (#835) — backlogQuotaLimit 0.5 hol
   expect(await scheduleLog(base)).toContain("飛ばした (manual): claude の使用量 five_hour が 60%（50% 以上）: 工程 Task が動いているので始めない");
 });
 
-test("backlog-next slots: settings tunables (#835) — with the default threshold, Claude usage 0.6 starts per slot", async () => {
+test("backlog-next slots: settings tunables — with the default threshold, Claude usage 0.6 starts per slot", async () => {
   const base = await boot(fakeGh().gh, holdingClaude().adapter);
   closeTried();
   core!.db.upsertQuota("claude", "five_hour", 0.6, Math.floor(Date.now() / 1000) + 3600);
@@ -3791,14 +3791,14 @@ test("backlog-next slots: Claude usage at 0.8 or more — a stage Task that star
   const ok = fakeGh();
   let during: (() => void) | null = null;
   const gh: GhRunner = async (args, cwd) => {
-    // a read of the backlog, not of GitHub's budget (#549), which comes before the quota check
+    // a read of the backlog, not of GitHub's budget, which comes before the quota check
     if (args[0] === "api" && !args.some((a) => a.includes("rateLimit")) && during) { during(); during = null; }
     return ok.gh(args, cwd);
   };
   const base = await boot(gh, holdingClaude().adapter);
   core!.db.upsertQuota("claude", "five_hour", 0.85, Math.floor(Date.now() / 1000) + 3600);
   const id = await backlogNextSchedule(base);
-  // #303's plan Task (a button's) is running by the time GitHub answers: after the firing's quota check, before its start
+  // Issue 303's plan Task (a button's) is running by the time GitHub answers: after the firing's quota check, before its start
   const meta = core!.db.listWorkspaces().find((w) => w.kind === "meta")!;
   during = () => { core!.db.insertTask({ id: "task_button303", workspaceId: meta.id, title: "#303 Task に分解: x", runner: "claude", cwd: meta.path, scope: [meta.path], status: "running", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#303 Task に分解: x"), statusAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now() }); };
   expect((await runSchedule(base, id)).status).toBe(409);
@@ -3819,7 +3819,7 @@ test("backlog-next slots: Claude usage at 0.8 or more — one start per firing, 
   expect(core!.db.listTasks()).toHaveLength(1);
 });
 
-test("backlog-next slots: a button's Task holds that slot while its routing turn is still thinking; the other slot starts (#1143)", async () => {
+test("backlog-next slots: a button's Task holds that slot while its routing turn is still thinking; the other slot starts", async () => {
   let release!: () => void;
   const held = new Promise<void>((r) => (release = r));
   const slow: Suggester = { suggest: async () => (await held, { runner: "claude", reason: "slow", ruleId: "llm", model: null, available: true, alternatives: [], llm: null }) };
@@ -3830,13 +3830,13 @@ test("backlog-next slots: a button's Task holds that slot while its routing turn
   const button = await start(base, 304, { action: "complete" }); // answered with the suggester still held
   expect(button.status).toBe(201);
   expect(core!.db.listTasks().map((t) => [t.title.split(":")[0], t.status, t.routing?.llm])).toEqual([["#304 実装", "running", null]]);
-  // the button holds the implement slot; the plan slot still starts #303
+  // the button holds the implement slot; the plan slot still starts Issue 303
   expect((await runSchedule(base, id)).status).toBe(201);
   expect(core!.db.listTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#303 Task に分解", "#304 実装"]);
   release();
 });
 
-test("backlog-next slots: Claude usage at 100% — the firing starts nothing and names the window and when it is back; a reset row does not count (#1275)", async () => {
+test("backlog-next slots: Claude usage at 100% — the firing starts nothing and names the window and when it is back; a reset row does not count", async () => {
   const base = await boot(fakeGh().gh, holdingClaude().adapter);
   closeTried();
   const now = Date.now();
@@ -3863,7 +3863,7 @@ test("backlog-next: a high usage row whose window has already reset does not hol
   expect(core!.db.listTasks()).toHaveLength(2);
 });
 
-test("backlog-next picks a local Ready PBI with gh throwing (#2265)", async () => {
+test("backlog-next picks a local Ready PBI with gh throwing", async () => {
   const throwing: GhRunner = async () => { throw new Error("spawn gh ENOENT"); };
   const claude = holdingClaude();
   const base = await boot(throwing, claude.adapter);
@@ -3882,7 +3882,7 @@ test("backlog-next picks a local Ready PBI with gh throwing (#2265)", async () =
 });
 
 describe("GitHub budget", () => {
-  test("GitHub budget: backlog-next starts on the stored data at 500 points left with the import refused for the limit, and logs no budget line (#2264)", async () => {
+  test("GitHub budget: backlog-next starts on the stored data at 500 points left with the import refused for the limit, and logs no budget line", async () => {
     const low = budgetGh(500);
     const limited = { on: false };
     const gh: GhRunner = async (args, cwd) =>
@@ -3900,7 +3900,7 @@ describe("GitHub budget", () => {
     expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("GitHub と照合できない（保存データで進める）"));
   });
 
-  test("GitHub budget: a stage button starts its Task below 1,000 points left — the budget holds no start (#2264)", async () => {
+  test("GitHub budget: a stage button starts its Task below 1,000 points left — the budget holds no start", async () => {
     const base = await boot(budgetGh(500).gh, holdingClaude().adapter);
     expect((await start(base, 304, { action: "complete" })).status).toBe(201);
     expect(core!.db.listTasks().map((t) => t.title.split(":")[0])).toContain("#304 実装");
@@ -3934,7 +3934,7 @@ describe("GitHub budget", () => {
     expect(calls).toBe(3);
   });
 
-  test("GitHub budget: at 0 left GitHub refuses the read itself — that refusal is 0 left until its reset; the budget does not hold a stage button (the import before it is #909's, and passes here)", async () => {
+  test("GitHub budget: at 0 left GitHub refuses the read itself — that refusal is 0 left until its reset; the budget does not hold a stage button (the import before it is the settled-state wait's, and passes here)", async () => {
     const reset = Math.floor(Date.now() / 1000) + 1800;
     const fake = fakeGh();
     const gh: GhRunner = async (args, cwd) => {
@@ -3946,7 +3946,7 @@ describe("GitHub budget", () => {
     expect((await start(base, 304, { action: "complete" })).status).toBe(201);
   });
 
-  test("GitHub budget: a limited read GitHub answers with 200 and no rateLimit in the body is read from the answer's headers (#550)", async () => {
+  test("GitHub budget: a limited read GitHub answers with 200 and no rateLimit in the body is read from the answer's headers", async () => {
     const reset = Math.floor(Date.now() / 1000) + 1800;
     const fake = fakeGh();
     const gh: GhRunner = async (args, cwd) => {
@@ -3982,7 +3982,7 @@ describe("GitHub budget", () => {
     core!.db.setBacklogRetryAt(core!.db.getWorkspaceBacklogSource(metaId())!, Date.now() + 10 * 60_000);
     expect(((await (await fetch(`${base}/api/ledger/summary`)).json()) as { github: unknown }).github).toBeNull();
     expect(asked.filter((a) => a.some((x) => x.includes("rateLimit")))).toHaveLength(0);
-    // a start goes on the stored data during the wait (#2264), without asking GitHub
+    // a start goes on the stored data during the wait, without asking GitHub
     expect((await start(base, 304, { action: "complete" })).status).toBe(201);
     expect(asked.filter((a) => a.some((x) => x.includes("rateLimit")))).toHaveLength(0);
   });
@@ -4051,7 +4051,7 @@ test("backlog-next: the unattended stage Task gets no shadow and carries the sch
 });
 
 /** A fake gh for the meta workspace and two more (lib, app), each its own repository; `broken` answers 404 for every call. */
-/** backlog-next's slots (#2656) of every registered workspace, through the API; the last response. */
+/** backlog-next's slots of every registered workspace, through the API; the last response. */
 async function sweepAll(base: string, sweep: { implement?: number; plan?: number }): Promise<Response> {
   let r: Response | undefined;
   for (const w of core!.db.listWorkspaces()) r = await fetch(`${base}/api/workspaces/${w.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ sweep }) });
@@ -4067,7 +4067,7 @@ async function threeWorkspaces(adapter: RunnerAdapter, broken?: "lib", inner: Gh
     return inner(args, cwd);
   };
   const base = await boot(gh, adapter);
-  core!.db.setSetting("settings", { maxRunners: 8 }); // this test counts the Tasks a firing starts, not the run slots (#1141)
+  core!.db.setSetting("settings", { maxRunners: 8 }); // this test counts the Tasks a firing starts, not the run slots
   const ids: Record<string, string> = { switchboard: core!.db.listWorkspaces().find((w) => w.kind === "meta")!.id };
   for (const name of ["lib", "app"]) {
     dirs[name] = mkdtempSync(join(home!, `${name}-`));
@@ -4119,12 +4119,12 @@ test("backlog-next slots: one firing starts an implement and a plan stage Task o
 });
 
 test("backlog-next slots: the workspace's sweep applies from the next firing — implement 2 starts two implementations on one workspace, plan 0 none", async () => {
-  // a second Ready PBI (#309, a copy of #304) on the first page
+  // a second Ready PBI (Issue 309, a copy of Issue 304) on the first page
   const page = structuredClone(pages[0]) as { data: { repository: { issues: { nodes: RawBacklogIssue[] } } } };
   const nodes = page.data.repository.issues.nodes;
   nodes.push({ ...structuredClone(nodes.find((n) => n.number === 304)!), number: 309, title: "もう 1 件の Ready" });
   const ok = fakeGh();
-  // its comments too: a Ready PBI's are read for its waits (#817)
+  // its comments too: a Ready PBI's are read for its waits
   const comments = structuredClone(decisions) as { data: { repository: Record<string, unknown> } };
   comments.data.repository.i309 = { comments: { nodes: [] } };
   const gh: GhRunner = async (args, cwd) =>
@@ -4134,7 +4134,7 @@ test("backlog-next slots: the workspace's sweep applies from the next firing —
   closeTried();
   const settings = (body: { implement?: number; plan?: number }) => sweepAll(base, body);
   const id = await backlogNextSchedule(base);
-  // plan 0 with no plan Task running: #303 waits to be split, yet no plan Task starts, and the log says nothing of that slot
+  // plan 0 with no plan Task running: Issue 303 waits to be split, yet no plan Task starts, and the log says nothing of that slot
   expect((await settings({ implement: 1, plan: 0 })).status).toBe(200);
   expect((await runSchedule(base, id)).status).toBe(201);
   expect(startedTasks().map((t) => t.title.split(":")[0])).toEqual(["#304 実装"]);
@@ -4145,14 +4145,14 @@ test("backlog-next slots: the workspace's sweep applies from the next firing —
   expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#304 実装", "#309 実装"]);
   expect((await runSchedule(base, id)).status).toBe(409);
   expect(await scheduleLog(base)).toContain(`${metaName()}: 実装の枠が埋まっている`);
-  // back to plan 1: the next firing starts #303
+  // back to plan 1: the next firing starts Issue 303
   expect((await settings({ plan: 1 })).status).toBe(200);
   expect((await runSchedule(base, id)).status).toBe(201);
   expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#303 Task に分解", "#304 実装", "#309 実装"]);
 });
 
-test("backlog-next flow limit (#4082): with implement 2, a firing starts one flow PBI, logs the other as waiting, and starts the one without the label", async () => {
-  // #304 and its copies #309 / #310 are Ready; #304 and #309 carry flow-improvement
+test("backlog-next flow limit: with implement 2, a firing starts one flow PBI, logs the other as waiting, and starts the one without the label", async () => {
+  // Issue 304 and its copies Issue 309 / Issue 310 are Ready; Issue 304 and Issue 309 carry flow-improvement
   const inner = moreReadyGh(309, 310);
   const gh: GhRunner = async (args, cwd) => {
     const r = await inner(args, cwd);
@@ -4174,7 +4174,7 @@ test("backlog-next flow limit (#4082): with implement 2, a firing starts one flo
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: 開発の流れの PBI は同時 1 件まで（実装中 1 件）: 待ち #${waiting}`));
 });
 
-test("backlog-next slots per workspace (#2656): lib implement 2 starts two, app and meta at implement 0 start none and log no slot line", async () => {
+test("backlog-next slots per workspace: lib implement 2 starts two, app and meta at implement 0 start none and log no slot line", async () => {
   const { base, ids } = await threeWorkspaces(holdingClaude().adapter, undefined, moreReadyGh(309));
   closeTried(...Object.values(ids));
   const meta = core!.db.listWorkspaces().find((w) => w.kind === "meta")!;
@@ -4195,7 +4195,7 @@ test("backlog-next slots per workspace (#2656): lib implement 2 starts two, app 
   expect(again.includes("app:") || again.includes(`${meta.name}:`)).toBe(false);
 });
 
-/** The fixtures' gh with more Ready PBIs on the first page: copies of #304 numbered `numbers`, with no comments. */
+/** The fixtures' gh with more Ready PBIs on the first page: copies of Issue 304 numbered `numbers`, with no comments. */
 function moreReadyGh(...numbers: number[]): GhRunner {
   const page = structuredClone(pages[0]) as { data: { repository: { issues: { nodes: RawBacklogIssue[] } } } };
   const nodes = page.data.repository.issues.nodes;
@@ -4214,21 +4214,21 @@ const runningStage = (title: string) => {
   core!.db.insertTask({ id: `task_${title.split(" ")[0]!.slice(1)}`, workspaceId: meta.id, title, runner: "claude", cwd: meta.path, scope: [meta.path], status: "running", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage(title), statusAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now() });
 };
 
-test("start race: a button start and a backlog-next firing on the same item make one Task (#936)", async () => {
+test("start race: a button start and a backlog-next firing on the same item make one Task", async () => {
   const base = await boot(fakeGh().gh, holdingClaude().adapter);
   closeTried();
   await sweepAll(base, { implement: 2, plan: 1 });
   const id = await backlogNextSchedule(base);
   const button = start(base, 304, { action: "complete" });
-  // implement 2: the slot has room, the firing picks #304 too — and leaves it to the button
+  // implement 2: the slot has room, the firing picks Issue 304 too — and leaves it to the button
   expect((await runSchedule(base, id)).status).toBe(201);
   expect((await button).status).toBe(201);
   expect(startedTasks().filter((t) => t.title.startsWith("#304 ")).length).toBe(1);
 });
 
-test("start race: a firing skips an item whose stage Task started after GitHub was read, and starts the next one (#936)", async () => {
+test("start race: a firing skips an item whose stage Task started after GitHub was read, and starts the next one", async () => {
   let first = true;
-  // while the firing starts #304, a stage Task of #309 starts elsewhere (a button, an answer's resume): GitHub was read before it
+  // while the firing starts Issue 304, a stage Task of Issue 309 starts elsewhere (a button, an answer's resume): GitHub was read before it
   const routing: Suggester = { suggest: async () => {
     if (first) { first = false; runningStage("#309 実装: Ready の写し 309"); }
     return { runner: "claude", reason: "r", ruleId: "llm", model: null, available: true, alternatives: [], llm: null };
@@ -4240,11 +4240,11 @@ test("start race: a firing skips an item whose stage Task started after GitHub w
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
   expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#304 実装", "#309 実装", "#310 実装"]);
-  // #309 is not picked at all now: the read after #304's start (#3228) already shows its stage Task, so there is no "工程 Task が動いている" skip line
+  // Issue 309 is not picked at all now: the read after Issue 304's start already shows its stage Task, so there is no "工程 Task が動いている" skip line
   expect(startedTasks().filter((t) => t.title.startsWith("#309 実装"))).toHaveLength(1); // the one started elsewhere only
 });
 
-test("backlog-next slots: a workspace whose GitHub cannot be read goes on with what is stored (nothing, never imported); the others start (#2264)", async () => {
+test("backlog-next slots: a workspace whose GitHub cannot be read goes on with what is stored (nothing, never imported); the others start", async () => {
   const { base, ids } = await threeWorkspaces(holdingClaude().adapter, "lib");
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
@@ -4276,7 +4276,7 @@ test("start: stage endings read answers once and delegate decision procedure to 
   for (const action of ["to-pbi", "to-tasks", "complete", "close"] as const) {
     const p = buildStartPrompt({ number: 7 }, action);
     expect(p).toContain("始める前に Issue #7 の最新の `## 回答`");
-    expect(p).toContain("`ops-kit backlog view 7 --fresh`"); // the latest answer from the app, imported first (#919)
+    expect(p).toContain("`ops-kit backlog view 7 --fresh`"); // the latest answer from the app, imported first
     expect(p.match(/続きから進めてください/g)).toHaveLength(1);
     expect(p).not.toContain("`## 判断待ち` を出して止め");
     expect(p).not.toContain("Task に付いた `## 回答` も読み");
@@ -4315,14 +4315,14 @@ test("promote: promotionStep — only under sb-rescue, only a newer tag, never w
   }
   // what runs already contains the tag's commit (a newer commit promoted by hand): never go back to the tag
   expect(promotionStep({ status: released(), latest: v2, busyTasks: 0, latestInCurrent: true })).toEqual({ action: "pick" });
-  // sb-rescue is promoting: the next check does not ask for the same tag again (#2477)
+  // sb-rescue is promoting: the next check does not ask for the same tag again
   expect(promotionStep({ status: released({ busy: "promote" }), latest: v2, busyTasks: 0 })).toEqual({ action: "wait", reason: "sb-rescue が promote の最中なので v0.2.0 の昇格を待つ" });
   // a failure of another commit does not hold this one
   expect(promotionStep({ status: released({ history: [{ action: "rejected", from: "aaa", to: "ccc", ok: false, reason: "x" }] }), latest: v2, busyTasks: 0 }).action).toBe("promote");
 });
 
 /**
- * The failure report's stored backlog: PBI #499, its Task #500 and (when `pr`) PR #501 closing #500, in a Db under `source`.
+ * The failure report's stored backlog: PBI 499, its Task 500 and (when `pr`) PR 501 closing Issue 500, in a Db under `source`.
  * Its gh answers `gh pr view` only (`prView`: the PR's body and branch, else "not a PR") and counts every call.
  */
 function reportStore(source: BacklogSource, opts: { pr?: boolean; prView?: { body: string; headRefName: string } } = {}) {
@@ -4423,7 +4423,7 @@ async function releasedDaemon(history: ReleaseState["history"] = [], runningNewe
   return { repo, sha, promoted, statusAsked, rescue, env: { SWITCHBOARD_REPO_ROOT: repo, SWITCHBOARD_RESCUE_URL: `http://127.0.0.1:${rescue.port}` } };
 }
 
-test("promote: a firing of the items whose waits cleared (#1879) asks for the newer tag first, logs it, and starts nothing", async () => {
+test("promote: a firing of the items whose waits cleared asks for the newer tag first, logs it, and starts nothing", async () => {
   const r = await releasedDaemon();
   try {
     const claude = holdingClaude();
@@ -4451,7 +4451,7 @@ test("promote: under sb-rescue a newer tag is promoted first, and that firing st
     expect([res.status, await res.json()]).toEqual([202, { promotion: "v0.2.0 の昇格を依頼" }]);
     expect(r.promoted).toEqual([r.sha]);
     expect(await scheduleLog(base)).toContain("v0.2.0 の昇格を依頼 (manual)");
-    // what was asked is shown on 動いている版 (#2479): the tag, the sha, who asked
+    // what was asked is shown on 動いている版: the tag, the sha, who asked
     const asked = ((await (await fetch(`${base}/api/daemon/release`)).json()) as { asked: { tag: string; sha: string; by: string; error?: string } | null }).asked;
     expect(asked).toMatchObject({ tag: "v0.2.0", sha: r.sha, by: "backlog-next" });
     expect(asked!.error).toBeUndefined();
@@ -4480,7 +4480,7 @@ test("promote: while the newest tag is one that failed, nothing is promoted or s
   const r = await releasedDaemon([{ action: "auto-rollback", from: "SHA", to: "old", ok: false, reason: "went back by itself: health" }]);
   const fake = fakeGh();
   try {
-    // the PBI is read on a phone: the rescue page it names is the host's outside URL, not sb-rescue's own address (#399)
+    // the PBI is read on a phone: the rescue page it names is the host's outside URL, not sb-rescue's own address
     const base = await boot(fake.gh, holdingClaude().adapter, { ...r.env, SWITCHBOARD_WEB_URL: "https://d1.example.net" });
     await refreshed(base);
     const source = core!.db.getWorkspaceBacklogSource(metaId())!;
@@ -4495,7 +4495,7 @@ test("promote: while the newest tag is one that failed, nothing is promoted or s
     expect(await scheduleLog(base)).toContain("昇格に失敗した版のまま: v0.2.0（判断待ち: #499） (manual)");
     expect(r.promoted).toEqual([]);
     expect(core!.db.listTasks()).toHaveLength(0);
-    // kept in the app and sent from there: comment then label, on #499
+    // kept in the app and sent from there: comment then label, on Issue 499
     const ops = core!.db.listBacklogOperations(source).filter((o) => o.kind === "comment" || o.field === "label:needs-decision");
     expect(ops.map((o) => [o.kind, o.field ?? null])).toEqual([["comment", null], ["set", "label:needs-decision"]]);
     expect((ops[0]!.payload as { body: string }).body).toContain("救援画面: https://d1.example.net/rescue/");
@@ -4600,7 +4600,7 @@ test("promote: check — backlog-next that joins a check of a failed tag still w
   }
 }, 30_000);
 
-test("promote: a request sb-rescue refuses is answered with 202 and shown as asked.error (#2479)", async () => {
+test("promote: a request sb-rescue refuses is answered with 202 and shown as asked.error", async () => {
   const r = await releasedDaemon([], false, { refuse: true });
   try {
     const base = await boot(fakeGh().gh, holdingClaude().adapter, r.env);
@@ -4641,7 +4641,7 @@ test("promote: when idle — a promotion held by a running Task is asked for as 
     expect(r.promoted).toEqual([]);
     expect(await scheduleLog(base)).toContain("1 件の Task が動いているので v0.2.0 の昇格を待つ");
     expect(await releaseHold(base)).toMatchObject({ tag: "v0.2.0", failed: false, busyTasks: 1 });
-    // the same tag held again keeps when it began (#2148)
+    // the same tag held again keeps when it began
     const since = ((await releaseHold(base)) as { since: number }).since;
     expect((await runSchedule(base, id)).status).toBe(202);
     expect(((await releaseHold(base)) as { since: number }).since).toBe(since);
@@ -4658,7 +4658,7 @@ test("promote: when idle — a promotion held by a running Task is asked for as 
     expect(r.promoted).toEqual([r.sha]);
     // promoted: the notice is resolved
     expect((await notices()).map((a) => a.state)).toEqual(["resolved"]);
-    // ordering (the flake of #2939): the line is written after sb-rescue answers, later than `promoted` grows
+    // ordering (a flake): the line is written after sb-rescue answers, later than `promoted` grows
     const text = "バックログを進める: Task が空いたので v0.2.0 の昇格を依頼";
     for (const t0 = Date.now(); !(await scheduleLog(base)).includes(text) && Date.now() - t0 < 20_000; ) await Bun.sleep(10);
     expect(await scheduleLog(base)).toContain(text);
@@ -4809,7 +4809,7 @@ test("stageOf: PBI by Project Status of this Project only", () => {
   expect(stageOf(raw(["type:pbi"], ""), 11)).toBe("needs-tasks");
 });
 
-test("a workspace names the repository variable its Project URL is under (PATCH /api/workspaces/:id); unset = SWITCHBOARD_PROJECT_URL (kind project-var, #2362)", async () => {
+test("a workspace names the repository variable its Project URL is under (PATCH /api/workspaces/:id); unset = SWITCHBOARD_PROJECT_URL (kind project-var)", async () => {
   const fake = fakeGh();
   const gh: GhRunner = async (args, cwd) => {
     if (args[0] === "variable" && args[2] !== "CAPSULE_PROJECT_URL") return { code: 1, stdout: "", stderr: `variable ${args[2]} was not found` };
@@ -4846,9 +4846,9 @@ test("a workspace names the repository variable its Project URL is under (PATCH 
   expect(((await (await patch({ projectVar: "  " })).json()) as { projectVar?: string }).projectVar).toBeUndefined();
 });
 
-describe("otherRepoRules: the scripts/setup of the repository (#557)", () => {
+describe("otherRepoRules: the scripts/setup of the repository", () => {
   const rules = (setup: { config: boolean; kit: string[]; copies: string[] }) => otherRepoRules({ meta: "/work/switchboard", projectVar: "LIB_URL", setup });
-  // local-ci once on the top of a stack (#2940): the rule's place in the meta's docs
+  // local-ci once on the top of a stack: the rule's place in the meta's docs
   const kept = ["--repo <このリポジトリの owner/name>", "`bun /work/switchboard/scripts/local-ci.ts <PR> --repo", "回すのはスタックの一番上で 1 回", "`/work/switchboard/docs/merge-gate.md` の「When to run local CI and how it counts」"];
 
   test("otherRepoRules: its own entries and ops.config.json are used, with OPS_KIT; no Project URL variable is handed over", () => {
@@ -4883,7 +4883,7 @@ test("otherRepoRules: after a merge the Task tags it with release-tag.ts --repo;
   expect(rules.match(/[^。]*実行しない/g)).toBeNull();
 });
 
-test("PATCH /api/workspaces/:id: the same projectVar keeps the stored backlog; another one forgets it and imports again (#885)", async () => {
+test("PATCH /api/workspaces/:id: the same projectVar keeps the stored backlog; another one forgets it and imports again", async () => {
   const fake = fakeGh();
   const base = await boot(fake.gh);
   const meta = core!.db.listWorkspaces().find((w) => w.kind === "meta")!;
@@ -4902,7 +4902,7 @@ test("PATCH /api/workspaces/:id: the same projectVar keeps the stored backlog; a
   expect(after.items.length).toBeGreaterThan(0);
 });
 
-test("a workspace registered over the API and given its projectVar is in GET /api/backlog with no errors, even with 0 Issues (#1447)", async () => {
+test("a workspace registered over the API and given its projectVar is in GET /api/backlog with no errors, even with 0 Issues", async () => {
   const fake = fakeGh();
   // a Project with no Issue yet: the same answers, an empty page for the GraphQL reads
   const gh: GhRunner = async (args, cwd) => {
@@ -4929,7 +4929,7 @@ test("a workspace registered over the API and given its projectVar is in GET /ap
   expect(after.items.filter((i) => i.workspaceId === created.id)).toEqual([]);
 });
 
-test("GET /api/backlog before the first import: no items, the workspace in errors and its import under way — never an empty list as if read (#885)", async () => {
+test("GET /api/backlog before the first import: no items, the workspace in errors and its import under way — never an empty list as if read", async () => {
   const ok = fakeGh();
   let release!: () => void;
   const held = new Promise<void>((r) => (release = r));
@@ -4965,7 +4965,7 @@ test("prereqsOf: the first **前提** line outside fences, its numbers once each
   expect(prereqsOf("")).toEqual([]);
 });
 
-test("prereqState: Issues, pull requests and releases by how they closed; not stored is missing (#937)", () => {
+test("prereqState: Issues, pull requests and releases by how they closed; not stored is missing", () => {
   const issue = (state: string, stateReason: string | null = null): WaitTarget => ({ kind: "issue", state, isDraft: false, labels: [], closes: [], stateReason, mergeCommit: null });
   const pr = (state: string, more: Partial<WaitTarget> = {}): WaitTarget => ({ kind: "pr", state, isDraft: false, labels: [], closes: [], stateReason: null, mergeCommit: state === "MERGED" ? "m1" : null, ...more });
   const none = () => null;
@@ -4986,7 +4986,7 @@ test("prereqState: Issues, pull requests and releases by how they closed; not st
   expect(prereqState(undefined, "done", none)).toBe("missing");
 });
 
-test("replyWaiting: the row's waiting for a reply is backlog-next's awaitingReply, or the last stage Task's newest stop waiting for a decision (#1619)", () => {
+test("replyWaiting: the row's waiting for a reply is backlog-next's awaitingReply, or the last stage Task's newest stop waiting for a decision", () => {
   const at = "2026-09-28T00:00:00Z";
   const later = "2026-09-28T01:00:00Z";
   const last = (over: Partial<NonNullable<BacklogItem["lastTask"]>> = {}) => ({ id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "needs_action" as const, reviewedAt: null, resumeAt: null, ...over });
@@ -5016,7 +5016,7 @@ test("replyWaiting: the row's waiting for a reply is backlog-next's awaitingRepl
   expect(isReplyWaiting({ ...stopped, lastTask: last({ status: "running", outcome: "unknown" }) })).toBe(false);
 });
 
-test("#950: a stop that came again with nothing changed holds the item through an unrelated Issue update; an answer, a met condition or a new cause lets it go once", () => {
+test("a stop that came again with nothing changed holds the item through an unrelated Issue update; an answer, a met condition or a new cause lets it go once", () => {
   const last = { id: "tsk_last", status: "done" as const, statusAt: 1, createdAt: 1, updatedAt: Date.parse("2026-09-10T00:00:00Z"), action: "complete" as const, outcome: "done" as const, reviewedAt: null, resumeAt: null };
   const stopOf = (over: Partial<BacklogItem["stopSummary"][number]> = {}): BacklogItem["stopSummary"][number] => ({
     key: "k", work: { workspaceId: "ws_meta", issue: 3, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "depends", evidence: "CI", safety: "unknown",
@@ -5070,15 +5070,15 @@ test("#950: a stop that came again with nothing changed holds the item through a
   const nowAsks = stopOf({ key: "k2", reason: "decision", count: 1, lastAt: 9, unchanged: false, changes: [{ kind: "cause", detail: "depends → decision" }], next: "decide" });
   expect(stopHeld({ ...base, stopSummary: [stopOf(), nowAsks] })).toBe(true);
   expect(stopHeld({ ...base, stopSummary: [stopOf(), { ...nowAsks, lastAnswer: { ref: "seq:9", at: 10 } }] })).toBe(false);
-  // an unmet condition's value moving is not a condition met; and an Issue #12 met is not PR #12 met
+  // an unmet condition's value moving is not a condition met; and an Issue 12 met is not PR 12 met
   const moved = stopOf({ unchanged: false, changes: [{ kind: "condition", detail: "pr#12: open → draft" }], conditions: [{ key: "pr#12", value: "draft", met: false }] });
   expect(stopHeld({ ...base, stopSummary: [moved] })).toBe(true);
   expect(stopHeld({ ...base, stopSummary: [moved], prereqs: [{ number: 12, kind: "issue", need: "done", state: "met", via: null }] })).toBe(true);
 });
 
-/* ---------- a start goes on the stored data; only a conflict holds it (#909, #2264) ---------- */
+/* ---------- a start goes on the stored data; only a conflict holds it ---------- */
 
-describe("start gate: only a conflict in the stored data holds a start (#909, #2264)", () => {
+describe("start gate: only a conflict in the stored data holds a start", () => {
   const tasksOf304 = () => core!.db.listTasks().filter((t) => t.title.startsWith("#304 "));
   /** GitHub unreachable while `down.on`; the same fake answers once it is up. */
   const bootDown = async (claude = holdingClaude()) => {
@@ -5123,7 +5123,7 @@ describe("start gate: only a conflict in the stored data holds a start (#909, #2
     expect(tasksOf304()).toHaveLength(1);
   });
 
-  /** Runs backlog-next once with #307 (picked to 閉じる) changed by `change` on GitHub between the sweep's read and the read right before its start. */
+  /** Runs backlog-next once with Issue 307 (picked to 閉じる) changed by `change` on GitHub between the sweep's read and the read right before its start. */
   const sweepWith307Changed = async (change: (i: Record<string, any>) => Record<string, unknown>) => { // eslint-disable-line @typescript-eslint/no-explicit-any
     const fake = fakeGh();
     const changed = { from: Infinity };
@@ -5131,7 +5131,7 @@ describe("start gate: only a conflict in the stored data holds a start (#909, #2
     const gh: GhRunner = async (args, cwd) => {
       const r = await fake.gh(args, cwd);
       if (!args.includes("query=issues(states:OPEN)")) return r;
-      // each read of the Issues starts on the first page; #307 is on the second
+      // each read of the Issues starts on the first page; Issue 307 is on the second
       if (!args.includes("after=CURSOR1")) reads++;
       if (reads < changed.from) return r;
       const body = JSON.parse(r.stdout);
@@ -5140,7 +5140,7 @@ describe("start gate: only a conflict in the stored data holds a start (#909, #2
     };
     const base = await boot(gh, holdingClaude().adapter);
     await refreshed(base);
-    // the sweep's first read still sees #307 as it was and picks it to close; the read right before its start sees the change (a read asks the three lists at once, so the change starts at the next read's first ask, not in the middle of the first read's pages)
+    // the sweep's first read still sees Issue 307 as it was and picks it to close; the read right before its start sees the change (a read asks the three lists at once, so the change starts at the next read's first ask, not in the middle of the first read's pages)
     changed.from = reads + 3;
     await runSchedule(base, await backlogNextSchedule(base));
     expect(reads).toBeGreaterThanOrEqual(changed.from);
@@ -5167,7 +5167,7 @@ describe("start gate: only a conflict in the stored data holds a start (#909, #2
   });
 });
 
-describe("canStartStoredBacklog (#2264)", () => {
+describe("canStartStoredBacklog", () => {
   const NOW = 1_000_000;
   const sync = (over: Partial<BacklogItem["sync"]>): Pick<BacklogItem, "sync"> => ({ sync: { state: "synced", reason: null, lastSuccessfulSync: NOW - 1000, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A", ...over } });
   test("only a conflict held in the stored data is refused, with the field", () => {
@@ -5179,7 +5179,7 @@ describe("canStartStoredBacklog (#2264)", () => {
   });
 });
 
-test("comment: a plain comment is kept here at once (202) as a comment operation — no heading, no label change — and refused for a secret or an unknown Issue (#910)", async () => {
+test("comment: a plain comment is kept here at once (202) as a comment operation — no heading, no label change — and refused for a secret or an unknown Issue", async () => {
   const fake = fakeGh();
   const down = { on: false };
   const base = await boot(async (args, cwd) => (down.on ? { code: 1, stdout: "", stderr: "HTTP 503" } : fake.gh(args, cwd)));
@@ -5197,12 +5197,12 @@ test("comment: a plain comment is kept here at once (202) as a comment operation
   expect((await fetch(`${base}/api/backlog/304/comment`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), text: "  " }) })).status).toBe(400);
 });
 
-test("stage Tasks are found by their stage column: a renamed one still counts, a plain Task titled like one does not, another workspace's #n is not mixed in (#1139)", async () => {
+test("stage Tasks are found by their stage column: a renamed one still counts, a plain Task titled like one does not, another workspace's #n is not mixed in", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
   closeTried();
   const item = async (n: number, workspaceId = metaId()) => ((await (await fetch(`${base}/api/backlog`)).json()) as Backlog).items.find((i) => i.number === n && i.workspaceId === workspaceId)!;
-  // (a) a button's Task renamed by hand is still #303's active and last Task
+  // (a) a button's Task renamed by hand is still Issue 303's active and last Task
   const manual = await (await start(base, 303, { action: "to-tasks" })).json() as Task;
   for (let i = 0; core!.db.getTask(manual.id)?.status !== "running" && i < 100; i++) await Bun.sleep(10);
   expect(manual.stage).toEqual({ issue: 303, action: "to-tasks" });
@@ -5217,15 +5217,15 @@ test("stage Tasks are found by their stage column: a renamed one still counts, a
   core!.db.insertTask({ ...core!.db.getTask(manual.id)!, id: "tsk_lib303", workspaceId: libId, cwd: lib, title: "lib の Task", stage: { issue: 304, action: "complete" }, status: "running", createdAt: Date.now() + 2, updatedAt: Date.now() + 2 });
   expect(await item(304)).toMatchObject({ activeTaskId: null, lastTask: null });
   expect(await item(304, libId)).toMatchObject({ activeTaskId: "tsk_lib303", lastTask: { id: "tsk_lib303" } });
-  // and the plain Task titled like an 実装 holds no implement slot: backlog-next still starts #304's
+  // and the plain Task titled like an 実装 holds no implement slot: backlog-next still starts Issue 304's
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
   expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toContain("#304 実装"); // the plain Task holds no implement slot
 });
 
-/* ---------- the kit's common commands on the stored backlog (#918) ---------- */
+/* ---------- the kit's common commands on the stored backlog ---------- */
 
-test("ops-kit backlog: reads answer what is stored with GitHub out of reach and no runner; an edit stores what the screen's does; --fresh with GitHub out of reach answers what is stored (#2264); no app is exit 2", async () => {
+test("ops-kit backlog: reads answer what is stored with GitHub out of reach and no runner; an edit stores what the screen's does; --fresh with GitHub out of reach answers what is stored; no app is exit 2", async () => {
   const fake = fakeGh();
   const down = { on: false };
   const base = await boot(async (args, cwd) => (down.on ? (fake.calls.push(args), { code: 1, stdout: "", stderr: "HTTP 503" }) : fake.gh(args, cwd)));
@@ -5263,7 +5263,7 @@ test("ops-kit backlog: reads answer what is stored with GitHub out of reach and 
   expect((await cli("edit", "305", "--title", "ghp_" + "a".repeat(36))).code).toBe(1);
   expect((await patch(base, 305, { title: "ghp_" + "a".repeat(36) })).status).toBe(422);
   expect((await detailOf(base, 305)).issue.title).toBe("同じ題");
-  // --fresh asks for a send and an import; GitHub out of reach: the stored copy, said to be not synced (#2264)
+  // --fresh asks for a send and an import; GitHub out of reach: the stored copy, said to be not synced
   const unsynced = await cli("list", "--fresh");
   expect([unsynced.code, unsynced.out.includes("GitHub 未同期"), unsynced.out.includes("#304")]).toEqual([0, true, true]);
   await core!.stop();
@@ -5271,7 +5271,7 @@ test("ops-kit backlog: reads answer what is stored with GitHub out of reach and 
   expect((await cli("list")).code).toBe(2);
 });
 
-test("GET /api/backlog/records (#919): lint and the parallel guard read the stored records with GitHub out of reach, --fresh too (#2264)", async () => {
+test("GET /api/backlog/records: lint and the parallel guard read the stored records with GitHub out of reach, --fresh too", async () => {
   const fake = fakeGh();
   const down = { on: false };
   const base = await boot(async (args, cwd) => (down.on ? (fake.calls.push(args), { code: 1, stdout: "", stderr: "HTTP 503" }) : fake.gh(args, cwd)));
@@ -5290,7 +5290,7 @@ test("GET /api/backlog/records (#919): lint and the parallel guard read the stor
   expect([0, 1]).toContain(code);
   expect(lines.join("\n")).toContain("アプリの保存値を検査（acme/app");
   expect(kitGh.calls).toHaveLength(0);
-  // the guard on a stored Task (the fixture's #30400 names no path): judged from the records, so it gets to the paths, never to gh
+  // the guard on a stored Task (the fixture's Issue 30400 names no path): judged from the records, so it gets to the paths, never to gh
   const noGh = async (): Promise<string> => { throw new Error("no gh"); };
   await expect(overlap({ ...ghBoard("acme/app", noGh), material: async () => storedMaterial(await readRecords(env, { fresh: false }), 30400) }, 30400, false)).rejects.toThrow("パスが無い");
   expect(fake.calls.length).toBe(asked);
@@ -5315,7 +5315,7 @@ test("GET /api/backlog/records (#919): lint and the parallel guard read the stor
   expect((await fetch(`${base}/api/backlog/records?workspaceId=nope`)).status).toBe(404);
 });
 
-describe("GET /api/backlog — mockups (#2296)", () => {
+describe("GET /api/backlog — mockups", () => {
   test("mockupTaskOf: the first **画面イメージ** line outside fences, its first id; a full-width colon too", () => {
     expect(mockupTaskOf("## 元要望\n#1\n\n**Story Points**: 5\n**前提**: なし\n**画面イメージ**: task_1105031b45fa（Backlog の行）\n")).toBe("task_1105031b45fa");
     expect(mockupTaskOf("**画面イメージ**：tsk-a\n**画面イメージ**: tsk_b")).toBe("tsk-a");
@@ -5359,7 +5359,7 @@ describe("GET /api/backlog — mockups (#2296)", () => {
   });
 });
 
-test("storedIssueHeads reads each stored Issue's state and title as readStoredIssue does (#4120)", () => {
+test("storedIssueHeads reads each stored Issue's state and title as readStoredIssue does", () => {
   const dir = mkdtempSync(join(tmpdir(), "sb-heads-"));
   const db = new Db(join(dir, "switchboard.db"));
   try {
@@ -5367,7 +5367,7 @@ test("storedIssueHeads reads each stored Issue's state and title as readStoredIs
     const data = (n: number, title: string, state: "OPEN" | "CLOSED") => ({ number: n, title, url: `https://github.com/acme/app/issues/${n}`, state, stateReason: null, body: "", labels: [], milestone: null, parent: null, subIssues: [], createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-02T00:00:00Z", closedAt: null });
     const rec = (externalId: string, v: ReturnType<typeof data>) => ({ objectKind: "issue" as const, externalId, fetchState: "fetched" as const, remote: v });
     const ws = db.upsertWorkspace({ name: "app", path: "/Users/dev/app", kind: "repo" });
-    // #5: an `sb:` record with the number of one of GitHub's, stored first
+    // Issue 5: an `sb:` record with the number of one of GitHub's, stored first
     db.putBacklogSnapshot(source, { records: [rec("sb:5", data(5, "ここで作った 5", "OPEN")), rec("I_5", data(5, "GitHub の 5", "CLOSED")), rec("I_1", data(1, "GitHub の 1", "OPEN")), rec("I_2", data(2, "GitHub の 2", "OPEN"))], cursor: null, syncedAt: 5000 });
     db.setWorkspaceBacklogSource(ws.id, source);
     editStoredIssue(db, source, 2, { state: "CLOSED", stateReason: "COMPLETED" }); // not sent yet
@@ -5386,7 +5386,7 @@ test("storedIssueHeads reads each stored Issue's state and title as readStoredIs
   }
 });
 
-describe("flow-improvement limit (#4082)", () => {
+describe("flow-improvement limit", () => {
   const flowItem = (over: Partial<BacklogItem>) => item({ flow: true, ...over });
   const working = flowItem({ number: 1, stage: "in-progress", projectStatus: "In progress", activeTaskId: "t1", tasks: { total: 3, done: 1, doneAt: null } });
   const limit = (n: number, items: BacklogItem[]) => ({ limit: n, running: flowRunning(items), stopped: flowStopped(items) });
@@ -5430,12 +5430,12 @@ describe("flow-improvement limit (#4082)", () => {
     expect(flowHeldIn([working, next], "implement", limit(2, [working]))).toEqual([]);
   });
 
-  // #4380: an in-progress flow PBI backlog-next leaves (a reply, decision or wait it is stuck on) does not use the limit
+  // an in-progress flow PBI backlog-next leaves (a reply, decision or wait it is stuck on) does not use the limit
   const at = "2026-09-28T00:00:00Z";
   const asked = { id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "needs_action" as const, reviewedAt: null, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null };
   const progress = { stage: "in-progress" as const, projectStatus: "In progress", tasks: { total: 3, done: 1, doneAt: null }, updatedAt: at };
 
-  test("flow (#4380): a flow PBI in progress that waits for a reply, a decision or a dependency is not counted, so a Ready flow PBI is taken", () => {
+  test("flow: a flow PBI in progress that waits for a reply, a decision or a dependency is not counted, so a Ready flow PBI is taken", () => {
     const next = flowItem({ number: 2, priority: "P1" });
     const reply = flowItem({ number: 10, ...progress, lastTask: asked });
     // a decision stop on a Task that ended done (no reply waited for): only the stop holds it
@@ -5456,7 +5456,7 @@ describe("flow-improvement limit (#4082)", () => {
     }
   });
 
-  test("flow (#4380): one with a stage Task running, and one that backlog-next resumes next, are still counted", () => {
+  test("flow: one with a stage Task running, and one that backlog-next resumes next, are still counted", () => {
     const next = flowItem({ number: 2, priority: "P1" });
     expect(flowRunning([working])).toBe(1);
     expect(flowStopped([working])).toBe(0);
@@ -5473,7 +5473,7 @@ describe("flow-improvement limit (#4082)", () => {
     expect(flowStopped([flowItem({ number: 15, ...progress, onHold: true })])).toBe(1);
   });
 
-  test("flowHeldLine (#4380): says how many in-progress flow PBIs were left out of the count", () => {
+  test("flowHeldLine: says how many in-progress flow PBIs were left out of the count", () => {
     const a = flowItem({ number: 4077, priority: "P1" });
     const stuck = flowItem({ number: 10, ...progress, lastTask: asked });
     const all = [working, stuck, a];
@@ -5493,7 +5493,7 @@ describe("flow-improvement limit (#4082)", () => {
 });
 
 
-describe("chooseProcess: the candidate a request starts in (#4324)", () => {
+describe("chooseProcess: the candidate a request starts in", () => {
   const defs = (max: number) => [
     parseProcessDef("---\nid: p0-pipeline\nversion: 1\ntitle: p0\n---\n", "p0.md"),
     parseProcessDef(`---\nid: p1-direct\nversion: 1\ntitle: p1\nauto: { maxBodyChars: ${max}, excludeLabels: [needs-decision, flow-improvement] }\n---\n`, "p1.md"),
@@ -5724,7 +5724,7 @@ describe("release review", () => {
   });
 });
 
-test("developSelf off: a stage on the meta workspace is refused (#2459)", async () => {
+test("developSelf off: a stage on the meta workspace is refused", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
   expect((await fetch(`${base}/api/settings`, { method: "PATCH", body: JSON.stringify({ developSelf: false }) })).status).toBe(200);

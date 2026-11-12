@@ -49,7 +49,7 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-describe("syncSkills (#469)", () => {
+describe("syncSkills", () => {
   test("syncSkills: コピー — copies the standard skills into both targets as real folders and excludes them", () => {
     const r = syncSkills({ metaPath: meta, cwd: repo });
     expect(r.linked.sort()).toEqual(["issue-workflow", "task-to-pr"]);
@@ -268,7 +268,7 @@ describe("syncSkills (#469)", () => {
   });
 });
 
-describe("setupScripts (#557)", () => {
+describe("setupScripts", () => {
   const put = (dir: string, rel: string, body: string) => {
     mkdirSync(join(dir, rel, ".."), { recursive: true });
     writeFileSync(join(dir, rel), body);

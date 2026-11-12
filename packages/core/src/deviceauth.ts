@@ -1,7 +1,7 @@
 import type { DeviceAuthView } from "@switchboard/protocol";
 
 /**
- * A Task's wait for an approval elsewhere (#662, docs/design/device-auth.md): a command the agent ran through the
+ * A Task's wait for an approval elsewhere (docs/design/device-auth.md): a command the agent ran through the
  * kit's `device-auth` printed a URL and a one-time code (an SSO device login), and the person approves it in their own
  * browser. The daemon holds it in memory only — never the DB, never an event — and hands it to the screen over a
  * WebSocket message that is not stored. A restart forgets it; the code expires on its own within minutes anyway.

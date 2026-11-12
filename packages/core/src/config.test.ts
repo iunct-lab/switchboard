@@ -14,7 +14,7 @@ afterAll(() => {
   for (const d of made) rmSync(d, { recursive: true, force: true });
 });
 
-describe("knowledgeDir (#2865)", () => {
+describe("knowledgeDir", () => {
   test("a temporary data folder keeps Knowledge inside it, not in the user's ~/Knowledge", () => {
     const home = dir(tmpdir(), "sb-config-");
     expect(loadConfig({ SWITCHBOARD_HOME: home }).knowledgeDir).toBe(join(home, "Knowledge"));

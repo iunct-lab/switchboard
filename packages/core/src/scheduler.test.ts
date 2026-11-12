@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AgentEvent, type AskBatch, type RunnerAdapter, type RunnerSession, type StartOptions, StopRecord, type Task } from "@switchboard/protocol";
-import { approvalWindowNote, securityMergeNote } from "./approval-batch.ts";
+import { approvalWindowNote } from "./approval-batch.ts";
 import { loadConfig } from "./config.ts";
 import { Db } from "./db.ts";
 import { Scheduler, UI_LAYERS_PROMPT } from "./scheduler.ts";
@@ -63,7 +63,7 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true });
 });
 
-describe("scheduler (#20)", () => {
+describe("scheduler", () => {
   test("create validates the cron and workspace, computes nextRunAt", () => {
     const sc = new Scheduler(db, tasks, () => now);
     const s = sc.create({ title: "nightly", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "p" });
@@ -91,7 +91,7 @@ describe("scheduler (#20)", () => {
     expect(db.getSchedule(s.id)!.nextRunAt).toBe(Date.parse("2026-09-08T03:00:00")); // still advances so it isn't stuck
   });
 
-  test("a schedule whose last two Tasks stopped the same way is not fired by the clock; an answer releases it; a manual run still fires (#4496)", async () => {
+  test("a schedule whose last two Tasks stopped the same way is not fired by the clock; an answer releases it; a manual run still fires", async () => {
     const sc = new Scheduler(db, tasks, () => now);
     const s = sc.create({ title: "nightly", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "p" });
     const stopOf = (taskId: string, at: number, over: Record<string, unknown> = {}) =>
@@ -122,7 +122,7 @@ describe("scheduler (#20)", () => {
     expect(await fire("2026-09-10T03:00:00")).toHaveLength(1);
   });
 
-  test("defers at the limit (#2768): a prompt schedule whose runner has no way round the limit is made without starting and logs why", async () => {
+  test("defers at the limit: a prompt schedule whose runner has no way round the limit is made without starting and logs why", async () => {
     const at = Date.parse("2026-09-06T04:00:00") + 60_000;
     const held = { runner: "claude" as const, deferUntil: at, deferNote: "claude が上限（0.99、04:00 に戻る）のため戻る時刻に開始" };
     const sc = new Scheduler(db, tasks, () => now, undefined, undefined, undefined, (r) => ({ ...held, runner: r }));
@@ -153,7 +153,7 @@ describe("scheduler (#20)", () => {
     expect(next.find((t) => t.scheduleId === plain.id)!.budgetUsd).toBeNull();
   });
 
-  test("tick skips a schedule whose previous run waits for a run slot, however long since (#1141)", async () => {
+  test("tick skips a schedule whose previous run waits for a run slot, however long since", async () => {
     const sc = new Scheduler(db, tasks, () => now);
     const s = sc.create({ title: "nightly", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "p" });
     now = Date.parse("2026-09-06T03:00:00");
@@ -207,7 +207,7 @@ describe("scheduler (#20)", () => {
     expect(sc.update(s.id, { model: "" }).model).toBe("");
   });
 
-  test("a schedule's effort starts its task with it; empty is the CLI default; one the runner does not list is refused (schedule effort, #833)", async () => {
+  test("a schedule's effort starts its task with it; empty is the CLI default; one the runner does not list is refused (schedule effort)", async () => {
     const sc = new Scheduler(db, tasks, () => now);
     const s = sc.create({ title: "e", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", effort: "high", prompt: "p" });
     expect(s.effort).toBe("high");
@@ -290,7 +290,7 @@ describe("scheduler (#20)", () => {
     expect(q.scheduled[0]).toMatchObject({ taskId: started.id, scheduleTitle: "nightly", costUsd: 0.5 });
   });
 
-  test("queue().queued lists the Tasks waiting for a run slot in queuedAt order, and takeQueued takes one out (#1141)", () => {
+  test("queue().queued lists the Tasks waiting for a run slot in queuedAt order, and takeQueued takes one out", () => {
     const base = db.getTask(tasks.create({ workspaceId: wsId, cwd: home, title: "base", prompt: "p", runner: "claude" }).id)!;
     const mk = (id: string, createdAt: number): Task => ({ ...base, id, title: id, status: "idle", queuedAt: null, createdAt, updatedAt: createdAt, statusAt: createdAt });
     db.insertTask(mk("tsk_q_late", 1));
@@ -311,7 +311,7 @@ describe("scheduler (#20)", () => {
   });
 });
 
-describe("scheduler backlog-next (#267)", () => {
+describe("scheduler backlog-next", () => {
   let repoId: string;
   beforeEach(() => {
     // backlog-next works on the meta workspace's backlog only
@@ -343,7 +343,7 @@ describe("scheduler backlog-next (#267)", () => {
     expect((await first).map((x) => x.id)).toEqual([t.id]);
   });
 
-  test("runUnblocked (#1879): one asked while another workspace's run is under way is kept and run after it; one asked during a full firing too", async () => {
+  test("runUnblocked: one asked while another workspace's run is under way is kept and run after it; one asked during a full firing too", async () => {
     let release!: () => void;
     const calls: Array<{ workspaceId: string; numbers: number[] } | undefined> = [];
     let hold = true;
@@ -382,7 +382,7 @@ describe("scheduler backlog-next (#267)", () => {
     expect(calls).toEqual([undefined, { workspaceId: "ws_b", numbers: [2] }]);
   });
 
-  test("runUnblocked (#1879): a due firing during a narrow one waits for it and runs, and what was kept is left to it", async () => {
+  test("runUnblocked: a due firing during a narrow one waits for it and runs, and what was kept is left to it", async () => {
     let release!: () => void;
     const calls: Array<{ workspaceId: string; numbers: number[] } | undefined> = [];
     let hold = true;
@@ -429,7 +429,7 @@ describe("scheduler backlog-next (#267)", () => {
     expect(db.getSchedule(s.id)!.nextRunAt).toBe(Date.parse("2026-09-07T03:00:00"));
   });
 
-  test("backlog-next parallel: every started Task and every skip is a log line; its last Task still running does not hold the next firing (#561)", async () => {
+  test("backlog-next parallel: every started Task and every skip is a log line; its last Task still running does not hold the next firing", async () => {
     const started = [1, 2, 3, 4, 5, 6].map((n) => ({ task: tasks.create({ workspaceId: wsId, cwd: home, title: `#${n} 実装: x`, prompt: "p", runner: "claude" }), label: `ws${n} #${n} を complete` }));
     let calls = 0;
     const sc = new Scheduler(db, tasks, () => now, async () => (calls++, { started, skipped: ["lib: GitHub を読めない: HTTP 404"] }));
@@ -459,7 +459,7 @@ describe("scheduler backlog-next (#267)", () => {
   });
 });
 
-describe("scheduler secret-scan (#775)", () => {
+describe("scheduler secret-scan", () => {
   let repoId: string;
   beforeEach(() => {
     repoId = wsId;
@@ -510,7 +510,7 @@ describe("scheduler secret-scan (#775)", () => {
     expect(scans.map((c) => c.at(-1)).sort()).toEqual(["o/clean", "o/down", "o/leak", "o/nokit"]);
     expect(scans[0]!.slice(1, 3)).toEqual([join(home, "meta", "ops-kit/src/cli.ts"), "scan-issues"]);
     expect(db.getSchedule(s.id)).toMatchObject({ lastRunAt: now, nextRunAt: Date.parse("2026-09-09T04:00:00") });
-    // the result stays on the schedule (#1274): counts and the log lines, read back from the database
+    // the result stays on the schedule: counts and the log lines, read back from the database
     const kept = db.getSchedule(s.id)!.lastResult!;
     expect(kept).toMatchObject({ at: now, repos: 4, hits: 2, failed: 3 });
     expect(kept.lines).toContain("o/clean: 0 件（scanned 12）");
@@ -573,7 +573,7 @@ describe("scheduler secret-scan (#775)", () => {
     expect(db.getSchedule(s.id)!.lastResult!.cursors).toEqual(kept);
   });
 
-  test("secret-scan: a scan that throws leaves a failed result with the reason, and the schedule still moves to the next day (#1274)", async () => {
+  test("secret-scan: a scan that throws leaves a failed result with the reason, and the schedule still moves to the next day", async () => {
     setUp();
     const sc = new Scheduler(db, tasks, () => now, undefined, async () => { throw new Error(`gh is not logged in ${token}`); });
     const s = sc.create({ title: "検査", cron: "0 4 * * *", workspaceId: wsId, runner: "claude", prompt: "", action: "secret-scan" });
@@ -608,7 +608,7 @@ describe("scheduler secret-scan (#775)", () => {
     expect(db.getSchedule(s2.id)).toMatchObject({ action: "prompt", lastResult: null, lastRunAt: now });
   });
 
-  test("a database from before schedules kept a result reads its rows with none (lastResult, #1274)", () => {
+  test("a database from before schedules kept a result reads its rows with none (lastResult)", () => {
     const p = join(home, "old-result.sqlite");
     const raw = new (require("bun:sqlite").Database)(p);
     raw.exec(`CREATE TABLE schedules (id TEXT PRIMARY KEY, title TEXT NOT NULL, cron TEXT NOT NULL, workspace_id TEXT NOT NULL, runner TEXT NOT NULL, prompt TEXT NOT NULL, budget_usd REAL, enabled INTEGER NOT NULL DEFAULT 1, last_run_at INTEGER, last_task_id TEXT, next_run_at INTEGER, created_at INTEGER NOT NULL, action TEXT NOT NULL DEFAULT 'prompt', model TEXT NOT NULL DEFAULT '');
@@ -628,7 +628,7 @@ describe("scheduler secret-scan (#775)", () => {
     expect(r.lines).toContain("  https://github.com/o/leak/issues/3: github-token（2 行目）");
     expect(r.lines).toContain("  https://github.com/o/leak/issues/3#issuecomment-9: account-id（1 行目）");
     expect(r.lines).toContain("o/down: 検査できなかった（exit 2）");
-    // what 判断待ち's notice reads from them (#2866)
+    // what 判断待ち's notice reads from them
     const f = scanFindings({ at: 0, ...r.summary, lines: r.lines });
     expect(f.hits).toHaveLength(2);
     expect(f.failed).toHaveLength(3);
@@ -679,7 +679,7 @@ describe("scheduler secret-scan (#775)", () => {
       const log = async () => (await (await fetch(`${base}/api/schedules/log`)).json()) as string[];
       for (const t0 = Date.now(); !(await log()).some((l) => l.includes("acme/app: 当たり")) && Date.now() - t0 < 20_000; ) await Bun.sleep(25);
       expect(await log()).toContainEqual(expect.stringContaining("検査: acme/app: 当たり 1 件（scanned 7） (manual)"));
-      // no Inbox note (#2866): the notice is in 判断待ち
+      // no Inbox note: the notice is in 判断待ち
       expect(await (await fetch(`${base}/api/inbox`)).json()).toEqual([]);
       const notices = async () => ((await (await fetch(`${base}/api/asks`)).json()) as { asks: Array<{ id: string; kind: string; state: string; question: string; reason: string; source: { label: string }; answers: string[] }> }).asks.filter((a) => a.kind === "notice");
       const [n] = await notices();
@@ -705,7 +705,7 @@ describe("scheduler secret-scan (#775)", () => {
       expect((await fetch(`${base}/api/schedules/${s.id}/run`, { method: "POST" })).status).toBe(202);
       for (const t0 = Date.now(); (await hitLines()) < 2 && Date.now() - t0 < 20_000; ) await Bun.sleep(25);
       expect(await notices()).toEqual([]);
-      // the result is on the schedule (#1274): what the API hands the Schedules screen
+      // the result is on the schedule: what the API hands the Schedules screen
       const kept = (await (await fetch(`${base}/api/schedules/${s.id}`)).json()) as { lastResult: { repos: number; hits: number; failed: number; lines: string[] } | null };
       expect(kept.lastResult).toMatchObject({ repos: 1, hits: 1, failed: 0, lines: ["acme/app: 当たり 1 件（scanned 7）", "  https://github.com/acme/app/issues/9: device-code（1 行目）"] });
     } finally {
@@ -714,7 +714,7 @@ describe("scheduler secret-scan (#775)", () => {
   }, 30_000); // a bun subprocess under a loaded full suite: over the 5 s default (docs/design/perf.md "Test flakiness")
 });
 
-describe("scheduler approval-window (#2046)", () => {
+describe("scheduler approval-window", () => {
   beforeEach(() => {
     mkdirSync(join(home, "meta"));
     wsId = db.upsertWorkspace({ name: "m", path: join(home, "meta"), kind: "meta" }).id;
@@ -760,44 +760,8 @@ describe("scheduler approval-window (#2046)", () => {
     expect(started).toHaveLength(0);
   });
 
-  test("security merge memo", async () => {
-    const hour = 3_600_000;
-    const sc = new Scheduler(db, tasks, () => now, undefined, undefined, undefined, undefined, async () => "待ちなし");
-    const s = sc.create({ title: "承認待ち", cron: "0 0 * * *", workspaceId: wsId, runner: "claude", prompt: "", action: "approval-window" });
-    const stop = (n: number, at: number) => ({ askId: `a${n}`, taskId: `tk_${n}`, title: `Task ${n}`, workspaceId: null, op: `PR #${n}`, at, pr: n });
-    const batch = (...at: number[]): AskBatch[] => (at.length ? [{ id: "batch:security-merge", kind: "security-merge", asks: at.map((x, i) => stop(i + 1, x)), loggingIn: null, deviceAuth: null }] : []);
-    const shown = (bs: AskBatch[], at: number, record = {}) =>
-      noticeAsks({ unusable: [], merges: [{ schedule: { id: s.id, title: "承認待ち" }, workspace: null, note: securityMergeNote(bs, db.getSchedule(s.id)!.lastRunAt, at) }], now: at }, record);
-    // not fired yet: nothing, however long they wait
-    expect(shown(batch(s.nextRunAt! - 5 * hour), s.nextRunAt! - hour).asks).toEqual([]);
-    now = s.nextRunAt!;
-    await sc.tick();
-    const fired = now;
-    // two waiting at the firing: one notice, its title has the count and the longest wait in hours (rounded up)
-    const first = shown(batch(fired - 5 * hour + 1, fired - hour), fired);
-    expect(first.asks).toHaveLength(1);
-    expect(first.asks[0]).toMatchObject({ kind: "notice", state: "open", question: "セキュリティのマージ確認 2 件（最長 5 時間）— 判断待ちから答えられる" });
-    expect(first.asks[0]!.reason).toBe("- PR #1 — Task 1\n- PR #2 — Task 2");
-    // later the same day: still that one notice, and a check that stopped after the firing is not in it (it waits for the next)
-    const again = shown(batch(fired - 5 * hour + 1, fired - hour, fired + hour), fired + 2 * hour, first.record);
-    expect(again.asks.map((a) => a.id)).toEqual([first.asks[0]!.id]);
-    expect(again.asks[0]!.question).toStartWith("セキュリティのマージ確認 2 件");
-    // a check that stops at noon after a firing with none waiting: no notice until the next firing
-    expect(shown(batch(fired + 12 * hour), fired + 12 * hour + 1).asks).toEqual([]);
-    // all answered: the open one is resolved; one stopping again that day does not bring a second notice
-    const resolved = shown([], fired + 3 * hour, again.record);
-    expect(resolved.asks.map((a) => [a.id, a.state])).toEqual([[first.asks[0]!.id, "resolved"]]);
-    expect(shown(batch(fired + 4 * hour), fired + 5 * hour, resolved.record).asks.filter((a) => a.state === "open")).toEqual([]);
-    // the next firing: the one that stopped since is that day's notice
-    now = db.getSchedule(s.id)!.nextRunAt!;
-    await sc.tick();
-    const next = shown(batch(fired + 4 * hour), now, resolved.record);
-    expect(next.asks.filter((a) => a.state === "open").map((a) => a.question)).toEqual(["セキュリティのマージ確認 1 件（最長 20 時間）— 判断待ちから答えられる"]);
-    expect(next.asks.find((a) => a.state === "open")!.id).not.toBe(first.asks[0]!.id);
-  });
-
   test("daily promotion memo", async () => {
-    // the approval-window firing at 00:00 UTC is what a held promotion waits for (#2148)
+    // the approval-window firing at 00:00 UTC is what a held promotion waits for
     const sc = new Scheduler(db, tasks, () => now, undefined, undefined, undefined, undefined, async () => "待ちなし");
     const s = sc.create({ title: "承認待ち", cron: "0 0 * * *", workspaceId: wsId, runner: "claude", prompt: "", action: "approval-window" });
     const hour = 3_600_000;
@@ -845,7 +809,7 @@ describe("scheduler approval-window (#2046)", () => {
   });
 });
 
-describe("scheduler ui-layers (#3353)", () => {
+describe("scheduler ui-layers", () => {
   test("ui-layers: claude only on meta; a firing starts the check's Task with its fixed instruction, and a hot 7-day window skips it with the reason", async () => {
     const metaPath = join(home, "meta");
     mkdirSync(metaPath);
@@ -872,7 +836,7 @@ describe("scheduler ui-layers (#3353)", () => {
   });
 });
 
-test("UI_LAYERS_PROMPT names scripts that exist, with flags they read (#3353)", () => {
+test("UI_LAYERS_PROMPT names scripts that exist, with flags they read", () => {
   const root = join(import.meta.dir, "../../..");
   const calls = [...UI_LAYERS_PROMPT.matchAll(/bun (scripts\/[\w-]+\.ts)([^。（\n]*)/g)];
   expect(calls.map((c) => c[1])).toEqual(["scripts/ui-layers-metrics.ts", "scripts/ui-layers-placement.ts", "scripts/ui-layers-report.ts", "scripts/ui-layers-requests.ts"]);

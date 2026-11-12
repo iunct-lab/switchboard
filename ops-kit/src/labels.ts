@@ -20,7 +20,7 @@ export function parseLabels(yaml: string): Label[] {
 }
 
 /**
- * Make the repository's labels match `want` (#916): create the missing ones, update the color / description (and the
+ * Make the repository's labels match `want`: create the missing ones, update the color / description (and the
  * case of the name) of the changed ones. A label of the repository that `want` does not list is never deleted
  * (the `skip-delete` of the workflow it replaces), so a second run changes nothing. GitHub compares names without case.
  * `dryRun`: only list the changes. Resolves to the changes, `create <name>` / `update <name>`.

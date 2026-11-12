@@ -75,7 +75,7 @@ describe("LlmSuggester (recorded Claude replay)", () => {
     // the session is always released, and what the turn cost is reported so the caller can bill it
     expect(closes).toEqual([0]);
     // the recording carries a per-call `turn` counter as well as the runner's final `reported` figures, one per model
-    // of `modelUsage` (#2353); only the reported ones may be billed (they carry a model and a cost — TaskManager makes the
+    // of `modelUsage`; only the reported ones may be billed (they carry a model and a cost — TaskManager makes the
     // same choice), and together they are the turn's `total_cost_usd`
     expect(recorded().filter((e) => e.t === "usage")).toHaveLength(3);
     expect(usage.map((u) => [u.source, u.model])).toEqual([["reported", "claude-haiku-4-5-20251001"], ["reported", "claude-haiku-4-5"]]);
@@ -101,7 +101,7 @@ describe("LlmSuggester (recorded Claude replay)", () => {
     expect(await run([{ t: "message.delta", role: "assistant", text: '{"runner": "codex", "reason": "済んだ"}' }, { t: "permission.ask", id: "p1", kind: "other", tool: "ExitPlanMode", detail: "計画を承認" }])).toMatchObject({ runner: "codex" });
   });
 
-  test("runSuggestionTurn starts the runner with persistSession false (#2908)", async () => {
+  test("runSuggestionTurn starts the runner with persistSession false", async () => {
     const starts: StartOptions[] = [];
     const events: AgentEvent[] = [{ t: "message.delta", role: "assistant", text: "答え" }, { t: "session.end", status: "ok" }];
     expect(await runSuggestionTurn({ adapter: replayAdapter(events, { starts }), cwd: "/tmp/h" }, "p", new AbortController().signal)).toBe("答え");
@@ -130,7 +130,7 @@ describe("LlmSuggester (recorded Claude replay)", () => {
     expect(p).toContain("title: Codex のレビュー指摘に返信する");
     expect(p).toContain("| 提案元 | 提案 | 実際 | 状態 | 結果 | USD | 所要 | title |");
     expect(p).toContain("| rule | codex | codex | done | done | 0.4200 | 900s | PR のレビューコメントに返信する |");
-    // the status says only that the runner stopped; the outcome says whether it needs the person (#612)
+    // the status says only that the runner stopped; the outcome says whether it needs the person
     expect(p).toContain("| rule | claude | claude | waiting | needs_action | 1.8000 | 2400s |");
     expect(buildPrompt(CTX, [])).toContain("（まだ記録がありません）");
     // an untrusted title cannot run over the table or break its columns

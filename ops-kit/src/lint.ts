@@ -94,7 +94,7 @@ export function releasePrereqs(body: string): number[] {
   return [];
 }
 
-/** The free-text phrasings after `#N` that name a predecessor (#2149), besides `前提: #N` (#1990). A fixed list, not configured. */
+/** The free-text phrasings after `#N` that name a predecessor, besides `前提: #N`. A fixed list, not configured. */
 export const PREREQ_PHRASES = ["の後", "のマージ後", "の完了後", "を待つ", "が先"] as const;
 const FREE_PREREQ = new RegExp(`前提[:：]\\s*#(\\d+)|#(\\d+)(?!\\d)[^#\\n]{0,12}?(?:${PREREQ_PHRASES.join("|")})`, "g");
 
@@ -121,7 +121,7 @@ async function fetchAll(gh: GhClient, owner: string, name: string, project: { ow
     let page: any;
     for (let attempt = 1; ; attempt++) {
       // GraphQL fails now and then: up to 3 tries, no wait after the last; a limit, an outage or an auth failure is not
-      // asked again (the client waits for GitHub's time, #894)
+      // asked again (the client waits for GitHub's time)
       try {
         page = await gh.graphql(lintQuery(withProject, project?.owner), { ro: owner, rn: name, after, ...projectVars });
         break;
@@ -145,7 +145,7 @@ async function fetchAll(gh: GhClient, owner: string, name: string, project: { ow
 const TYPES = ["type:pbi", "type:task", "type:request"];
 
 /**
- * The rows the query would answer, from the records the app stored (#919): its open PBIs, Tasks and requests, the
+ * The rows the query would answer, from the records the app stored: its open PBIs, Tasks and requests, the
  * parents' labels from the stored Issues, the fields in the workspace's Project. An open one whose last read was not
  * complete fails (exit 2): what is stored of it is not read as current.
  */
@@ -170,7 +170,7 @@ export function storedRows(r: StoredRecords, withProject: boolean): Row[] {
 
 /**
  * Check the open PBIs, Tasks and requests against the writing rules, reading every one of them with one paged query —
- * or, given `records` (#919), from what the app stored, with the Project the app reads for the workspace.
+ * or, given `records`, from what the app stored, with the Project the app reads for the workspace.
  * `withProject: false` skips what needs the Project (Story Points there, Status) — for a gh without the project scope.
  */
 export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: boolean; sleep?: (ms: number) => Promise<void>; records?: StoredRecords } = {}): Promise<{ violations: Violation[]; warnings: Violation[]; fetched: number }> {
@@ -190,10 +190,10 @@ export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: b
   }
   const violations: Violation[] = [];
   const bad = (issue: number, message: string) => violations.push({ issue, message });
-  // shown, but not counted: the exit stays what the violations make it (#1990)
+  // shown, but not counted: the exit stays what the violations make it
   const warnings: Violation[] = [];
   // a predecessor named only in free text: an open PBI or Task, not on the **前提**: line, and not the Issue's own
-  // parent, child or sibling Task (the stack's order). A closed one is met and stops nothing (#2149)
+  // parent, child or sibling Task (the stack's order). A closed one is met and stops nothing
   const open = new Set(rows.filter((r) => labelsOf(r).some((l) => l === "type:pbi" || l === "type:task")).map((r) => r.number));
   const parentOf = new Map(rows.map((r) => [r.number, r.parent?.number ?? null]));
   const freePrereqs = (row: Row, body: string) => {

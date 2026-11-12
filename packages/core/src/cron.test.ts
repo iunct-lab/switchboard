@@ -3,7 +3,7 @@ import { matches, nextRun, parseCron } from "./cron.ts";
 
 const at = (s: string) => new Date(s); // local time
 
-describe("cron (#20)", () => {
+describe("cron", () => {
   test("parses fields, lists, ranges, steps, names and aliases; rejects nonsense", () => {
     const s = parseCron("0,30 9-17/2 * * mon-fri");
     expect([...s.minute]).toEqual([0, 30]);

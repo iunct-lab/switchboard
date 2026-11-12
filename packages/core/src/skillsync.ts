@@ -3,7 +3,7 @@ import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, re
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
 
 /**
- * Development-standard skills in every repository a task runs in (#469, docs/design/skill-sync.md): before a runner
+ * Development-standard skills in every repository a task runs in (docs/design/skill-sync.md): before a runner
  * starts, each skill of the meta workspace is copied into the task's repository where Claude Code and Codex read
  * project skills, and the copies are listed in `.git/info/exclude` so the repository's tracked files never change.
  * A copy, not a link: the permission check resolves a link to where it points, outside the repository's workspace.
@@ -41,7 +41,7 @@ export interface SetupScripts {
 const stem = (f: string) => f.slice(0, f.length - extname(f).length);
 
 /**
- * Which of the repository's `scripts/setup` entries are copies of the meta's tools (#557). Only names the meta has
+ * Which of the repository's `scripts/setup` entries are copies of the meta's tools. Only names the meta has
  * (without the extension) count, so a repository's own scripts are not called copies. Nothing is changed: the scripts
  * are tracked files of the repository, not copies placed like the skills. A file that cannot be read throws.
  */

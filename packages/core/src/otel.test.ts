@@ -5,7 +5,7 @@ import { decisionsFromOtlp } from "./otel.ts";
 const rec = (attrs: Record<string, string | number>) => ({ attributes: Object.entries(attrs).map(([key, v]) => ({ key, value: typeof v === "number" ? { intValue: v } : { stringValue: v } })) });
 const body = (...records: unknown[]) => ({ resourceLogs: [{ resource: { attributes: [] }, scopeLogs: [{ scope: { name: "com.anthropic.claude_code.events" }, logRecords: records }] }] });
 
-describe("decisionsFromOtlp (#2236)", () => {
+describe("decisionsFromOtlp", () => {
   test("a block keeps its category; an allow has none; only the five values come out", () => {
     const out = decisionsFromOtlp(body(
       rec({ "event.name": "tool_decision", decision: "reject", source: "config", classifier_verdict: "block", classifier_category: "Irreversible Local Destruction", permission_mode: "auto", tool_name: "Bash", tool_use_id: "toolu_b", "user.email": "dev@example.com", tool_parameters: "{\"command\":\"rm -rf x\"}" }),

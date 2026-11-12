@@ -82,7 +82,7 @@ const OPEN_Q = (kind: "issues" | "pullRequests") =>
   `${kind}(states:OPEN, first:100, after:$c){ pageInfo{ hasNextPage endCursor } nodes{ id number projectItems(first:10){ nodes{ id project{ id number } } } } }`;
 
 /**
- * Put every open Issue and PR that is not in the Project yet into it, without fields (#916): what `project-autoadd.yml`
+ * Put every open Issue and PR that is not in the Project yet into it, without fields: what `project-autoadd.yml`
  * does on open / reopen, for when Actions does not run. An item already there is not touched (its Status stays), so a
  * second run adds nothing. `dryRun`: only list what would be added. Resolves to the numbers added (or to add).
  */

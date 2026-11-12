@@ -1,5 +1,5 @@
 /**
- * A fake GitHub for the backlog's send and import tests (#886, #2266): its Issues, Project items and every write; `fail`
+ * A fake GitHub for the backlog's send and import tests: its Issues, Project items and every write; `fail`
  * answers a call instead of it (after carrying it out when `after`). `now` = the time its answers are dated.
  */
 import type { GhRunner } from "./backlog.ts";
@@ -18,7 +18,7 @@ export function fakeGithub(now: () => number) {
   const items = new Map<string, { issue: string; fields: Record<string, string | number | null> }>([["PVTI_I_12", { issue: "I_12", fields: { Status: "Backlog" } }]]);
   const writes: string[] = [];
   const fail: Array<{ match: (a: string[]) => boolean; status: number; headers?: string; after?: boolean; stderr?: string }> = [];
-  // GitHub's edit history (#1329): who wrote which field to what, when (`deleted`: the revision's content is gone)
+  // GitHub's edit history: who wrote which field to what, when (`deleted`: the revision's content is gone)
   const history: Array<{ issue: number; by: string; at: string; field: string; value?: unknown; deleted?: boolean }> = [];
   // autoAdd: the Project's own auto-add puts a new Issue in it, and an add of one already there is refused as GitHub does
   // next: the number GitHub gives the next Issue made (0 = 100 + how many it has)
@@ -59,7 +59,7 @@ export function fakeGithub(now: () => number) {
           : ev(e, { __typename: "ProjectV2ItemStatusChangedEvent", status: e.value, project: { id: e.value === "Other" ? "P_other" : "P_1" } }));
         // GitHub lists the content edits newest first, the body's whole life (no `since` on them)
         const edits = history.filter((e) => e.issue === v.n && e.field === "body").reverse().map((e) => ({ editedAt: e.at, editor: { login: e.by }, diff: e.deleted ? null : e.value, deletedAt: e.deleted ? e.at : null }));
-        // the body's content edits are asked for a body write only (#1384 review)
+        // the body's content edits are asked for a body write only
         if (q.includes("userContentEdits") && state.lastWrite !== "body") throw new Error(`the body's edits were asked after a write of ${state.lastWrite || "nothing"}`);
         const issue = i && { id: i.node_id, title: i.title, body: i.body, state: i.state, stateReason: i.stateReason ?? null, closedAt: i.closedAt ?? null, milestone: milestones.find((m) => m.number === i.milestone) ?? null, parent: i.parent && { id: issues.get(i.parent)!.node_id, number: i.parent }, labels: { nodes: i.labels.map((name) => ({ name })) },
           timelineItems: { pageInfo: { hasNextPage: state.historyNext }, nodes: events }, userContentEdits: { pageInfo: { hasNextPage: state.editsNext }, nodes: edits } };

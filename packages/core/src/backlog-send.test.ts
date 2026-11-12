@@ -11,7 +11,7 @@ import { backlogFieldValue, conflictRevision } from "./backlog-merge.ts";
 import { BacklogSync } from "./backlog-sync.ts";
 import { fakeGithub as makeFakeGithub, type Issue } from "./backlog-fake-github.ts";
 
-// Sending the edits kept here (#886) to a fake GitHub: what it ends up with, and what was asked of it.
+// Sending the edits kept here to a fake GitHub: what it ends up with, and what was asked of it.
 
 const S: BacklogSource = { service: "github", host: "github.com", repository: "acme/app", project: { owner: "acme", number: 1 } };
 const fakeGithub = () => makeFakeGithub(() => t);
@@ -84,9 +84,9 @@ test("a field is written only while GitHub still has the value it was made on; o
   expect(g.issues.get(12)!.body).toBe("GitHub で書いた本文");
 });
 
-test("an edit an import held as a conflict is not written; one whose conflict is chosen on during a run is not sent (#887)", async () => {
+test("an edit an import held as a conflict is not written; one whose conflict is chosen on during a run is not sent", async () => {
   const g = fakeGithub();
-  // #3 first: the run reaches #12 after it
+  // Issue 3 first: the run reaches Issue 12 after it
   editStoredIssue(db, S, 3, { title: "親の新しい題" });
   editStoredIssue(db, S, 12, { title: "手元の題" });
   // an import reads another title on GitHub: held before any send
@@ -95,7 +95,7 @@ test("an edit an import held as a conflict is not written; one whose conflict is
   db.putBacklogSnapshot(S, { records: [{ objectKind: "issue", externalId: "I_12", remote: { ...twelve, title: "GitHub の題" }, fetchState: "fetched" }], cursor: null, syncedAt: 2 });
   const held = db.listPendingBacklogOperations(S).find((o) => o.issue === "I_12")!;
   expect(held.status).toBe("conflict");
-  // while the run writes #3, the user keeps GitHub's title of #12
+  // while the run writes Issue 3, the user keeps GitHub's title of Issue 12
   const gh: GhRunner = async (args, cwd) => {
     const r = await g.gh(args, cwd);
     if (args.includes("PATCH") && db.getBacklogOperation(held.id)!.status === "conflict") db.resolveBacklogConflict(S, held.id, "remote", conflictRevision(db.getBacklogOperation(held.id)!, "GitHub の題"));
@@ -108,7 +108,7 @@ test("an edit an import held as a conflict is not written; one whose conflict is
   expect(backlogFieldValue("issue", db.getBacklogRecord({ ...S, objectKind: "issue", externalId: "I_12" })!.local ?? db.getBacklogRecord({ ...S, objectKind: "issue", externalId: "I_12" })!.remote, "title")).toBe("GitHub の題");
 });
 
-test("A's window, replayed (#887): an edit on GitHub between the check and the write is overwritten and not seen; one after the write is held — neither is told as kept", async () => {
+test("A's window, replayed: an edit on GitHub between the check and the write is overwritten and not seen; one after the write is held — neither is told as kept", async () => {
   const g = fakeGithub();
   const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
   db.setWorkspaceBacklogSource(ws.id, S);
@@ -122,13 +122,13 @@ test("A's window, replayed (#887): an edit on GitHub between the check and the w
   editStoredIssue(db, S, 12, { title: "手元の v3" });
   expect(await send(gh)).toBe(1);
   // v2 is gone and nothing here saw it: the check after the write reads its own v3 (the fake's history has no event
-  // for the edit — with one, the read after the write holds the edit: the tests of #1329 below)
+  // for the edit — with one, the read after the write holds the edit: the history tests below)
   expect(g.issues.get(12)!.title).toBe("手元の v3");
   expect(db.listPendingBacklogOperations(S)).toEqual([]);
   // what is told with the Issue says so, and does not claim it was kept
   const told = readStoredIssue(db, ws, 12)!;
   expect(told.limits).toContain("上書きしうる");
-  expect(told.limits).toContain("#1329");
+  expect(told.limits).toContain("同じ GitHub アカウントで GitHub の画面から書いた編集は、ほかの人の編集と区別しません");
   expect(told.limits).toContain("Project フィールド");
   expect(told.limits).not.toMatch(/保証します|防ぎます/);
 
@@ -192,7 +192,7 @@ test("the state and a Project field of an Issue are written, each checked first"
   expect(g.writes.map((w) => (w.includes("updateProjectV2ItemFieldValue") ? "updateProjectV2ItemFieldValue" : w))).toEqual(["PATCH repos/acme/app/issues/12", "updateProjectV2ItemFieldValue"]);
 });
 
-test("close with a reason (#3146): the close, then state_reason=not_planned; a completed one changed alone; a close without a reason sends none", async () => {
+test("close with a reason: the close, then state_reason=not_planned; a completed one changed alone; a close without a reason sends none", async () => {
   const g = fakeGithub();
   const patches: string[][] = [];
   const gh: GhRunner = async (args, cwd) => {
@@ -250,13 +250,13 @@ test("close with a reason (#3146): the close, then state_reason=not_planned; a c
   d2.close();
 });
 
-test("close with a reason (#3146): another login's reason in the window is held", () => {
+test("close with a reason: another login's reason in the window is held", () => {
   const after = (stateReason: string) => ({ events: [{ __typename: "ClosedEvent", actor: { login: "them" }, createdAt: "2026-10-02T00:00:00Z", stateReason }], edits: [], viewer: "me" });
   expect(theirEdit("stateReason", after("DUPLICATE"), "2026-10-01T00:00:00Z", "", "NOT_PLANNED")).toMatchObject({ value: "DUPLICATE", editor: "them" });
   expect(theirEdit("stateReason", after("NOT_PLANNED"), "2026-10-01T00:00:00Z", "", "NOT_PLANNED")).toBeNull();
 });
 
-test("Status の順の変更が競合しない (#2694): two Status edits stored one after the other are sent as the later; one written to GitHub around the store is held", async () => {
+test("Status の順の変更が競合しない: two Status edits stored one after the other are sent as the later; one written to GitHub around the store is held", async () => {
   // a Task's order: In progress, then In review, both stored here; the second is made on the first
   const g = fakeGithub();
   editStoredIssue(db, S, 12, { fields: { Status: "In progress" } });
@@ -277,7 +277,7 @@ test("Status の順の変更が競合しない (#2694): two Status edits stored 
   d2.close();
 });
 
-test("後の編集が GitHub と同じなら競合にしない (#2924): GitHub already at the last of the field's edits settles all of them; another last value is still held", async () => {
+test("後の編集が GitHub と同じなら競合にしない: GitHub already at the last of the field's edits settles all of them; another last value is still held", async () => {
   const done = () => db.listPendingBacklogOperations(S).filter((o) => o.field === "field:Status");
   // a Task's comment between its Status edits keeps them apart (a pending set is replaced only while nothing follows it)
   const stack = (d: Db, ...values: string[]) => values.forEach((v, i) => { if (i) commentStoredIssue(d, S, 12, `PR: #${i}`); editStoredIssue(d, S, 12, { fields: { Status: v } }); });
@@ -491,7 +491,7 @@ test("a create whose later step fails for good keeps the Issue it made: the reco
   expect([...g.issues.values()].filter((i) => i.title === "選択肢の無い Status")).toHaveLength(1);
 });
 
-test("a failed create retried after its cause is put right (#2885): the Issue is not made twice, its Project item and fields are set and the edits after it are sent", async () => {
+test("a failed create retried after its cause is put right: the Issue is not made twice, its Project item and fields are set and the edits after it are sent", async () => {
   const g = fakeGithub();
   const { localId } = createStoredIssue(db, S, { title: "Project に入れない PBI", body: "", labels: [], milestone: null, parent: null, fields: { Status: "Ready" } });
   // the token cannot write the Project: the Issue is made, its Project item refused
@@ -515,7 +515,7 @@ test("a failed create retried after its cause is put right (#2885): the Issue is
   expect(statuses()).toEqual([]);
 });
 
-test("a retried operation refused again is failed with the new reason and not tried again by itself (#2885)", async () => {
+test("a retried operation refused again is failed with the new reason and not tried again by itself", async () => {
   const g = fakeGithub();
   editStoredIssue(db, S, 12, { title: "書けない題" });
   g.fail.push({ match: (a) => a.includes("PATCH"), status: 403, stderr: "HTTP 403: 最初の理由" });
@@ -549,7 +549,7 @@ test("a permission refused on one thing fails that operation only; the login ref
   expect(db.listPendingBacklogOperations(S)[0]).toMatchObject({ status: "pending", attempt: 0, error: expect.stringContaining("ログイン") });
 });
 
-test("a Project field emptied here (#3810): GitHub's field is cleared, and a closed Issue's stored item has no value for it after the send's read-back", async () => {
+test("a Project field emptied here: GitHub's field is cleared, and a closed Issue's stored item has no value for it after the send's read-back", async () => {
   const g = fakeGithub();
   const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
   db.setWorkspaceBacklogSource(ws.id, S);
@@ -596,7 +596,7 @@ test("a Project field emptied here (#3810): GitHub's field is cleared, and a clo
   expect(editStoredIssue(db, S, 12, { fields: { "Story Points": null } }).operations).toEqual([]);
 });
 
-test("emptying a field of an Issue not in the Project (#3810) stores nothing and does not put it there, as the set outside a Task", () => {
+test("emptying a field of an Issue not in the Project stores nothing and does not put it there, as the set outside a Task", () => {
   expect(editStoredIssue(db, S, 3, { fields: { "Story Points": null } }).operations).toEqual([]);
   expect(db.listBacklogRecords(S, "project-item").map((r) => r.externalId)).toEqual(["PVTI_I_12"]);
   // a value still puts it there
@@ -617,18 +617,18 @@ test("a field read again right after it was written: another value there is held
   expect(db.listPendingBacklogOperations(S)[0]).toMatchObject({ status: "conflict", error: expect.stringContaining('GitHub は "あちらの題"') });
 });
 
-test("422 で断られた set (#3515): GitHub が既に送る値なら done で後ろも送られ、読み直しても違う値なら failed", async () => {
+test("422 で断られた set: GitHub が既に送る値なら done で後ろも送られ、読み直しても違う値なら failed", async () => {
   const g = fakeGithub();
   editStoredIssue(db, S, 12, { state: "CLOSED" });
   commentStoredIssue(db, S, 12, "閉じた後の結果");
   editStoredIssue(db, S, 3, { state: "CLOSED" });
-  // #12: the Project's Auto-close closes it between the check and the PATCH, which GitHub refuses with 422
+  // Issue 12: the Project's Auto-close closes it between the check and the PATCH, which GitHub refuses with 422
   const gh: GhRunner = async (args, cwd) => {
     if (args.includes("PATCH") && args.includes("repos/acme/app/issues/12")) g.issues.get(12)!.state = "CLOSED";
     return g.gh(args, cwd);
   };
   g.fail.push({ match: (a) => a.includes("PATCH") && a.includes("repos/acme/app/issues/12"), status: 422 });
-  // #3: refused, and GitHub is still OPEN
+  // Issue 3: refused, and GitHub is still OPEN
   g.fail.push({ match: (a) => a.includes("PATCH") && a.includes("repos/acme/app/issues/3"), status: 422 });
   const [closing] = db.listPendingBacklogOperations(S);
   expect(await send(gh)).toBe(2);
@@ -638,7 +638,7 @@ test("422 で断られた set (#3515): GitHub が既に送る値なら done で�
   expect(g.issues.get(3)!.state).toBe("OPEN");
 });
 
-test("422 で断られた set の読み直し (#3515): 上限なら待って送り直し、ほかの失敗なら failed", async () => {
+test("422 で断られた set の読み直し: 上限なら待って送り直し、ほかの失敗なら failed", async () => {
   const g = fakeGithub();
   editStoredIssue(db, S, 12, { state: "CLOSED" });
   // the read after the refusal meets a limit: the run stops, the edit waits for the time and is not failed
@@ -708,11 +708,11 @@ test("a Project item added and taken out again before anything was sent: nothing
   expect(g.issues.get(3)!.title).toBe("その後の編集");
 });
 
-// The read after a write carries the history (#1329): what another login wrote in the window is held, not lost.
+// The read after a write carries the history: what another login wrote in the window is held, not lost.
 
 const later = () => new Date(t + 1000).toISOString();
 
-test("history (#1329): another login's edit between the check and the write is held with its value, editor and time — for each field the history tells; one that made the field the value sent is nothing lost", async () => {
+test("history: another login's edit between the check and the write is held with its value, editor and time — for each field the history tells; one that made the field the value sent is nothing lost", async () => {
   const cases: Array<{ edit: object; field: string; theirs: { field: string; value?: unknown; deleted?: boolean }; expect: Record<string, unknown> | "done" }> = [
     { edit: { title: "手元の題" }, field: "title", theirs: { field: "title", value: "相手の題" }, expect: { value: "相手の題" } },
     { edit: { body: "手元の本文" }, field: "body", theirs: { field: "body", value: "相手の本文" }, expect: { value: "相手の本文" } },
@@ -742,7 +742,7 @@ test("history (#1329): another login's edit between the check and the write is h
   }
 });
 
-test("history (#1329): the history refused or not read whole after the write holds the edit as unverified — never failed or pending; a write refused with 412 or 409 is held too", async () => {
+test("history: the history refused or not read whole after the write holds the edit as unverified — never failed or pending; a write refused with 412 or 409 is held too", async () => {
   const g = fakeGithub();
   const afterRead = (a: string[]) => a.some((x) => x.includes("timelineItems"));
   // refused (403): GitHub has the value, nothing is known of the window
@@ -771,7 +771,7 @@ test("history (#1329): the history refused or not read whole after the write hol
   d3.close();
 });
 
-test("history (#1329): two edits of theirs in the same second keep the newer; another Project's Status change is not this one's; a limit met by the read after the write keeps the outcome and stops the run", async () => {
+test("history: two edits of theirs in the same second keep the newer; another Project's Status change is not this one's; a limit met by the read after the write keeps the outcome and stops the run", async () => {
   // two revisions of the body at the same second, the older one the value sent: the newer is what was overwritten
   const g = fakeGithub();
   g.history.push({ issue: 12, by: "them", at: later(), field: "body", value: "手元の本文" }, { issue: 12, by: "them", at: later(), field: "body", value: "相手の新しい本文" });
@@ -800,7 +800,7 @@ test("history (#1329): two edits of theirs in the same second keep the newer; an
   d3.close();
 });
 
-test("unreadable の未確認の競合 (#3518): 上限が戻った後の送信で履歴を読み直し、ほかの編集が無ければ done、あれば競合、読み切れない・旧形式は今どおり", async () => {
+test("unreadable の未確認の競合: 上限が戻った後の送信で履歴を読み直し、ほかの編集が無ければ done、あれば競合、読み切れない・旧形式は今どおり", async () => {
   const afterRead = (a: string[]) => a.some((x) => x.includes("timelineItems"));
   const unverified = async (d: Db, g: ReturnType<typeof fakeGithub>) => {
     g.fail.push({ match: afterRead, status: 429, headers: "retry-after: 120\n" });
@@ -861,7 +861,7 @@ test("unreadable の未確認の競合 (#3518): 上限が戻った後の送信�
   d4.close();
 });
 
-test("unreadable の未確認の競合 (#3518): Project の Status は自動化の変更を相手の編集と数えず、Project の読みの上限は送信を止めて保留のまま", async () => {
+test("unreadable の未確認の競合: Project の Status は自動化の変更を相手の編集と数えず、Project の読みの上限は送信を止めて保留のまま", async () => {
   const afterRead = (a: string[]) => a.some((x) => x.includes("timelineItems"));
   const projectRead = (a: string[]) => a.some((x) => x.includes("projectV2(number:"));
   const g = fakeGithub();
@@ -882,7 +882,7 @@ test("unreadable の未確認の競合 (#3518): Project の Status は自動化�
   expect(db.getBacklogOperation(op!.id)).toMatchObject({ status: "done", error: expect.stringContaining("確かめました") });
 });
 
-test("history (#1329): a title write does not ask for the body's edits — a body edit of theirs in the history is not its concern", async () => {
+test("history: a title write does not ask for the body's edits — a body edit of theirs in the history is not its concern", async () => {
   const g = fakeGithub();
   g.history.push({ issue: 12, by: "them", at: later(), field: "body", value: "相手の本文" });
   editStoredIssue(db, S, 12, { title: "v3" }, t);
@@ -890,7 +890,7 @@ test("history (#1329): a title write does not ask for the body's edits — a bod
   expect(db.listPendingBacklogOperations(S)).toEqual([]);
 });
 
-test("history (#1329): the body's edits have no since — a page that reaches back before the check read is whole, however many edits the body had; one that does not is not", async () => {
+test("history: the body's edits have no since — a page that reaches back before the check read is whole, however many edits the body had; one that does not is not", async () => {
   // an old edit of theirs (before the check read) on a body edited many times: the newest page reaches past the window
   const g = fakeGithub();
   g.state.editsNext = true;
@@ -910,7 +910,7 @@ test("history (#1329): the body's edits have no since — a page that reaches ba
   d2.close();
 });
 
-test("history (#1329): one's own login's edit is not another's; the read after the write stays one call", async () => {
+test("history: one's own login's edit is not another's; the read after the write stays one call", async () => {
   const g = fakeGithub();
   let reads = 0;
   const counted: GhRunner = async (args, cwd) => {
@@ -925,14 +925,14 @@ test("history (#1329): one's own login's edit is not another's; the read after t
   expect(reads).toBe(2);
 });
 
-test("chosen (#1329): remote on a conflict found after the write sends the other's value back on the next run, and GitHub comes to it", async () => {
+test("chosen: remote on a conflict found after the write sends the other's value back on the next run, and GitHub comes to it", async () => {
   const g = fakeGithub();
   g.history.push({ issue: 12, by: "them", at: later(), field: "title", value: "相手の題" });
   editStoredIssue(db, S, 12, { title: "手元の題" }, t);
   expect(await send(g.gh)).toBe(0);
   const op = db.listPendingBacklogOperations(S)[0]!;
   expect(g.issues.get(12)!.title).toBe("手元の題");
-  // the import after the run reads the local value back: the conflict stays (#1354)
+  // the import after the run reads the local value back: the conflict stays
   db.putBacklogSnapshot(S, { records: [{ objectKind: "issue", externalId: "I_12", remote: { ...(db.getBacklogRecord({ ...S, objectKind: "issue", externalId: "I_12" })!.remote as BacklogIssueData), title: "手元の題" }, fetchState: "fetched" }], cursor: null, syncedAt: t });
   expect(db.getBacklogOperation(op.id)).toMatchObject({ status: "conflict" });
   db.resolveBacklogConflict(S, op.id, "remote", conflictRevision(db.getBacklogOperation(op.id)!, db.backlogRemoteValue(db.getBacklogOperation(op.id)!)));
@@ -1073,7 +1073,7 @@ test("BacklogSync: a limit is kept for the repository and the host and nothing i
   expect(sync.read(ws).error).toContain("ログイン");
 });
 
-test("BacklogSync: an import that read before a write of a send run under way stores nothing, so the next edit of the field is not judged on the older value (#887)", async () => {
+test("BacklogSync: an import that read before a write of a send run under way stores nothing, so the next edit of the field is not judged on the older value", async () => {
   const g = fakeGithub();
   const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
   db.setWorkspaceBacklogSource(ws.id, S);
@@ -1111,7 +1111,7 @@ test("BacklogSync: an import that read before a write of a send run under way st
   expect(db.listPendingBacklogOperations(S)).toEqual([]);
 });
 
-test("BacklogSync: the notice of the daemon's own send (#887) reads what it wrote, sends nothing more, and leaves the notice window as it was", async () => {
+test("BacklogSync: the notice of the daemon's own send reads what it wrote, sends nothing more, and leaves the notice window as it was", async () => {
   const g = fakeGithub();
   const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
   db.setWorkspaceBacklogSource(ws.id, S);
@@ -1174,7 +1174,7 @@ test("BacklogSync: an echo that comes while the read-back runs, or to another ch
   sync.stop();
 });
 
-test("BacklogSync: an edit held at the check before the write is offered with GitHub's value it found (an import reads it); a refused write is held as failed with why (#887)", async () => {
+test("BacklogSync: an edit held at the check before the write is offered with GitHub's value it found (an import reads it); a refused write is held as failed with why", async () => {
   const g = fakeGithub();
   const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
   db.setWorkspaceBacklogSource(ws.id, S);
@@ -1307,7 +1307,7 @@ test("a GraphQL error GitHub answered (an input it refuses) fails the operation 
   expect(db.listPendingBacklogOperations(S)[0]).toMatchObject({ status: "failed", attempt: 1 });
 });
 
-test("a create whose answer was lost and that GitHub does not have is made again once every page is read (#3804)", async () => {
+test("a create whose answer was lost and that GitHub does not have is made again once every page is read", async () => {
   const g = fakeGithub();
   createStoredIssue(db, S, { title: "新しい", body: "", labels: [], milestone: null, parent: null, fields: null });
   // GitHub answers 502 and makes nothing
@@ -1323,7 +1323,7 @@ test("a create whose answer was lost and that GitHub does not have is made again
   expect(made[0]!.body).toMatch(/<!-- switchboard-op:[0-9a-f-]+ -->$/);
 });
 
-test("a comment whose answer was lost and that GitHub does not have is posted again; its label waits for it (#3804)", async () => {
+test("a comment whose answer was lost and that GitHub does not have is posted again; its label waits for it", async () => {
   const g = fakeGithub();
   answerStoredDecision(db, S, 12, "A で");
   g.fail.push({ match: (a) => a[1]!.endsWith("/comments") && a.includes("POST"), status: 502 });
@@ -1341,7 +1341,7 @@ test("a comment whose answer was lost and that GitHub does not have is posted ag
   expect(g.issues.get(12)!.labels).toEqual(["type:pbi"]);
 });
 
-test("an unknown create whose look cannot read the list is not made again: it waits unknown, its first error kept in front (#3804)", async () => {
+test("an unknown create whose look cannot read the list is not made again: it waits unknown, its first error kept in front", async () => {
   const g = fakeGithub();
   createStoredIssue(db, S, { title: "新しい", body: "", labels: [], milestone: null, parent: null, fields: null });
   g.fail.push({ match: (a) => a[1] === "repos/acme/app/issues" && a.includes("POST"), status: 502 });
@@ -1359,7 +1359,7 @@ test("an unknown create whose look cannot read the list is not made again: it wa
   expect(op().error!.match(/最初の失敗/g)).toHaveLength(1);
 });
 
-test("a held failed edit and an unknown comment taken back: nothing written, the held lines and the waiting count go, the edits after them are sent (#3804)", async () => {
+test("a held failed edit and an unknown comment taken back: nothing written, the held lines and the waiting count go, the edits after them are sent", async () => {
   const g = fakeGithub();
   const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
   db.setWorkspaceBacklogSource(ws.id, S);
@@ -1393,7 +1393,7 @@ test("a held failed edit and an unknown comment taken back: nothing written, the
   expect(() => withdrawStoredOperation(db, S, 3, { operation: pending.id, reason: "x" })).toThrow("取り下げられる操作");
 });
 
-test("an unknown comment is not taken back while it is being looked for and sent; an operation of the enabling of GitHub sync never is (#3804)", async () => {
+test("an unknown comment is not taken back while it is being looked for and sent; an operation of the enabling of GitHub sync never is", async () => {
   const g = fakeGithub();
   answerStoredDecision(db, S, 12, "A で");
   g.fail.push({ match: (a) => a[1]!.endsWith("/comments") && a.includes("POST"), status: 502 });
@@ -1415,7 +1415,7 @@ test("an unknown comment is not taken back while it is being looked for and sent
   expect(() => db.withdrawBacklogOperation(S, localId, "x")).toThrow("GitHub 同期の有効化の操作は取り下げられません");
 });
 
-test("an unknown create of an Issue never made, taken back: the edits made to it go with it, and nothing is left to send (#3804)", async () => {
+test("an unknown create of an Issue never made, taken back: the edits made to it go with it, and nothing is left to send", async () => {
   const g = fakeGithub();
   const { localId } = createStoredIssue(db, S, { title: "作らない", body: "", labels: [], milestone: null, parent: null, fields: null });
   editStoredIssue(db, S, localId, { title: "作らない（直した）" });
@@ -1428,7 +1428,7 @@ test("an unknown create of an Issue never made, taken back: the edits made to it
   expect(g.writes).toEqual([]);
 });
 
-test("a create failed after the Issue was made (its Project item refused), taken back: the Issue stays, no Project step is sent, and the comment behind it is sent (#3794)", async () => {
+test("a create failed after the Issue was made (its Project item refused), taken back: the Issue stays, no Project step is sent, and the comment behind it is sent", async () => {
   const g = fakeGithub();
   const { localId } = createStoredIssue(db, S, { title: "Project に入れない作成", body: "", labels: [], milestone: null, parent: null, fields: { Status: "Ready" } });
   g.fail.push({ match: (a) => a.some((x) => x.includes("addProjectV2ItemById")), status: 403 });
@@ -1454,7 +1454,7 @@ test("a create failed after the Issue was made (its Project item refused), taken
   expect(statuses()).toEqual([]);
 });
 
-test("both answers lost (the first post and the one made again): the next look finds two, keeps the first made and drops the other (#3804)", async () => {
+test("both answers lost (the first post and the one made again): the next look finds two, keeps the first made and drops the other", async () => {
   const g = fakeGithub();
   const { localId } = createStoredIssue(db, S, { title: "二度失う", body: "", labels: [], milestone: null, parent: null, fields: null });
   answerStoredDecision(db, S, 12, "A で");
@@ -1467,14 +1467,14 @@ test("both answers lost (the first post and the one made again): the next look f
   for (const id of [op.id, comment.id]) db.setBacklogOperationResult(id, { status: "unknown" });
   g.writes.length = 0;
   expect(await send(g.gh)).toBe(3);
-  // the list is newest first: the first made (#200) stays, #201 is closed; the older comment stays
+  // the list is newest first: the first made stays, Issue 201 is closed; the older comment stays
   expect(db.getBacklogOperation(localId)!.remoteId).toBe("I_200");
   expect([g.issues.get(200)!.state, g.issues.get(201)!.state, g.issues.get(201)!.stateReason]).toEqual(["OPEN", "CLOSED", "NOT_PLANNED"]);
   expect(g.issues.get(12)!.comments.map((c) => c.node_id)).toEqual(["IC_12_0"]);
   expect(g.writes.filter((w) => w.startsWith("PATCH") || w.includes("deleteIssueComment"))).toEqual(["PATCH repos/acme/app/issues/201", expect.stringContaining("deleteIssueComment")]);
 });
 
-test("a limit on the close of the second one: the operation is done with the first, and the run stops for GitHub's time (#3804)", async () => {
+test("a limit on the close of the second one: the operation is done with the first, and the run stops for GitHub's time", async () => {
   const g = fakeGithub();
   const { localId } = createStoredIssue(db, S, { title: "制限", body: "", labels: [], milestone: null, parent: null, fields: null });
   editStoredIssue(db, S, 12, { title: "後ろの編集" });
@@ -1488,7 +1488,7 @@ test("a limit on the close of the second one: the operation is done with the fir
   expect(g.issues.get(12)!.title).toBe("PBI");
 });
 
-test("a limit on the close of the second one holds the create's own steps too: its parent waits, then is set from the Issue kept (#3804)", async () => {
+test("a limit on the close of the second one holds the create's own steps too: its parent waits, then is set from the Issue kept", async () => {
   const g = fakeGithub();
   const { localId } = createStoredIssue(db, S, { title: "親つき", body: "", labels: [], milestone: null, parent: 3, fields: null });
   const op = db.getBacklogOperation(localId)!;
@@ -1506,7 +1506,7 @@ test("a limit on the close of the second one holds the create's own steps too: i
   expect([...g.issues.values()].filter((i) => i.title === "親つき")).toHaveLength(2);
 });
 
-test("made again and the first one shows up after all: the later one is closed (an Issue) or deleted (a comment), one left (#3804)", async () => {
+test("made again and the first one shows up after all: the later one is closed (an Issue) or deleted (a comment), one left", async () => {
   const g = fakeGithub();
   const { localId } = createStoredIssue(db, S, { title: "新しい", body: "", labels: [], milestone: null, parent: null, fields: null });
   answerStoredDecision(db, S, 12, "A で");
@@ -1626,7 +1626,7 @@ test("an add to the Project failed before as already there is sent again and tak
   expect([...g.issues.values()].filter((i) => i.title === "作れていない")).toHaveLength(0);
 });
 
-/* ---------- the forge operation of the repository's service (#920) ---------- */
+/* ---------- the forge operation of the repository's service ---------- */
 
 test("an operation is sent through its service's forge operation: a service not supported, or a value that signs in, is held as failed and nothing is sent", async () => {
   const g = fakeGithub();
@@ -1647,7 +1647,7 @@ test("an operation is sent through its service's forge operation: a service not 
   expect(g.writes).toEqual([]);
 });
 
-/* ---------- GitLab (#2910) ---------- */
+/* ---------- GitLab ---------- */
 
 const LAB: BacklogSource = { service: "gitlab", host: "gitlab.example.com", repository: "group/app", project: { owner: "group/app", number: 0 } };
 
@@ -1770,7 +1770,7 @@ test("GitLab: a comment and a create carry their marker; a lost answer is looked
   expect(db.listBacklogRecords(LAB, "issue").find((r) => r.externalId === `gitlab:issue:${made.id}`)?.remote).toMatchObject({ number: 13, parent: 12, state: "OPEN" });
 });
 
-test("GitLab: a create or a comment whose answer was lost and that GitLab does not have is made again once every page is read; a look that fails keeps the first error (#3804)", async () => {
+test("GitLab: a create or a comment whose answer was lost and that GitLab does not have is made again once every page is read; a look that fails keeps the first error", async () => {
   const g = fakeGitlab();
   seedLab();
   createStoredIssue(db, LAB, { title: "作られなかった", body: "本文", labels: [], milestone: null, parent: null, fields: null });
@@ -1794,7 +1794,7 @@ test("GitLab: a create or a comment whose answer was lost and that GitLab does n
   expect(g.issues.get(12)!.labels).toEqual(["type:pbi"]);
 });
 
-test("GitLab: made again and the first one shows up after all: the later Issue is closed, the later note deleted (#3804)", async () => {
+test("GitLab: made again and the first one shows up after all: the later Issue is closed, the later note deleted", async () => {
   const g = fakeGitlab();
   seedLab();
   const { localId } = createStoredIssue(db, LAB, { title: "遅れて見える", body: "本文", labels: [], milestone: null, parent: null, fields: null });
@@ -1820,7 +1820,7 @@ test("GitLab: made again and the first one shows up after all: the later Issue i
   expect(g.issues.get(12)!.notes.map((n) => n.id)).toEqual([firstNote]);
 });
 
-test("GitLab: both answers lost: the next look finds two, keeps the first made and closes / deletes the other; a 429 on the cleanup stops the run with the operation done (#3804)", async () => {
+test("GitLab: both answers lost: the next look finds two, keeps the first made and closes / deletes the other; a 429 on the cleanup stops the run with the operation done", async () => {
   const g = fakeGitlab();
   seedLab();
   const { localId } = createStoredIssue(db, LAB, { title: "二度失う", body: "本文", labels: [], milestone: null, parent: null, fields: null });
@@ -1844,7 +1844,7 @@ test("GitLab: both answers lost: the next look finds two, keeps the first made a
   expect(g.issues.get(21)!.state).toBe("opened"); // left: nothing looks for it again
 });
 
-test("GitLab: a 429 on the cleanup holds the create's close too, sent after the wait from the Issue kept (#3804)", async () => {
+test("GitLab: a 429 on the cleanup holds the create's close too, sent after the wait from the Issue kept", async () => {
   for (const unreached of [false, true]) await holdsTheClose(unreached);
 });
 
@@ -1942,7 +1942,7 @@ test("forgeKind: a Project item and its fields are project, a create and a comme
   for (const field of ["title", "body", "state", "label:type:pbi", "milestone", "parent"]) expect(forgeKind({ kind: "set", field, targetKind: "issue" })).toBe("write");
 });
 
-test("a run stops before the next operation once the sync is turned off; the rest waits as it is (#2266)", async () => {
+test("a run stops before the next operation once the sync is turned off; the rest waits as it is", async () => {
   const g = fakeGithub();
   editStoredIssue(db, S, 3, { title: "親の新しい題" });
   editStoredIssue(db, S, 12, { title: "手元の題" });
@@ -1958,7 +1958,7 @@ test("a run stops before the next operation once the sync is turned off; the res
   expect(statuses()).toEqual([["set", "title", "pending"]]);
 });
 
-test("a set whose read was out when the sync was turned off writes nothing; it waits as it was (#2266)", async () => {
+test("a set whose read was out when the sync was turned off writes nothing; it waits as it was", async () => {
   const g = fakeGithub();
   editStoredIssue(db, S, 12, { title: "手元の題" });
   let on = true;
@@ -1972,7 +1972,7 @@ test("a set whose read was out when the sync was turned off writes nothing; it w
   expect(statuses()).toEqual([["set", "title", "pending"]]);
 });
 
-test("a comment is sent only after its window (60 s), and can be taken back inside it; a set after it waits for it (#3719)", async () => {
+test("a comment is sent only after its window (60 s), and can be taken back inside it; a set after it waits for it", async () => {
   const g = fakeGithub();
   const kept = commentWindowed(db, S, 12, "送る", t).operation;
   expect(db.getBacklogOperation(kept)).toMatchObject({ status: "pending", retryAt: t + SEND_DELAY_MS });
@@ -1998,11 +1998,11 @@ test("a comment is sent only after its window (60 s), and can be taken back insi
   expect(g.issues.get(12)!.comments).toHaveLength(1);
 });
 
-test("a comment whose window ends during a send run still gets its timer (#3719)", async () => {
+test("a comment whose window ends during a send run still gets its timer", async () => {
   const g = fakeGithub();
   const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
   db.setWorkspaceBacklogSource(ws.id, S);
-  // the run takes longer than the window: the edit of #3 after the comment moves the clock past the comment's time
+  // the run takes longer than the window: the edit of Issue 3 after the comment moves the clock past the comment's time
   const gh: GhRunner = async (args, cwd) => {
     const r = await g.gh(args, cwd);
     if (args.includes("PATCH")) t += 2 * SEND_DELAY_MS;
@@ -2025,7 +2025,7 @@ test("a comment whose window ends during a send run still gets its timer (#3719)
   expect(timers).toEqual([]);
 });
 
-test("inSendWindow: only a comment still in the window it was written with — not one waiting out a backoff or a limit (#3719)", () => {
+test("inSendWindow: only a comment still in the window it was written with — not one waiting out a backoff or a limit", () => {
   const op = { kind: "comment" as const, status: "pending" as const, attempt: 0, createdAt: t, retryAt: t + SEND_DELAY_MS };
   expect(inSendWindow(op, t)).toBe(true);
   expect(inSendWindow(op, t + SEND_DELAY_MS)).toBe(false);
@@ -2034,7 +2034,7 @@ test("inSendWindow: only a comment still in the window it was written with — n
   expect(inSendWindow({ ...op, kind: "set" }, t)).toBe(false);
 });
 
-test("a comment past its window, sent, or not a comment is not taken back: 409; no such operation: 404 (#3719)", async () => {
+test("a comment past its window, sent, or not a comment is not taken back: 409; no such operation: 404", async () => {
   const g = fakeGithub();
   const late = commentWindowed(db, S, 12, "遅い", t).operation;
   expect(() => cancelStoredOperation(db, S, 12, late, t + SEND_DELAY_MS)).toThrow(expect.objectContaining({ status: 409 }));

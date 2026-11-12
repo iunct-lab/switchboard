@@ -99,7 +99,7 @@ describe("repoOf", () => {
   });
 });
 
-describe("noWrite: a clone marked ops-kit.noWrite (#2576)", () => {
+describe("noWrite: a clone marked ops-kit.noWrite", () => {
   const foreign = () => {
     const dir = repoWithOrigin(null);
     Bun.spawnSync(["git", "remote", "add", "upstream", "https://github.com/someone/widget.git"], { cwd: dir, env: { ...process.env } });
@@ -120,7 +120,7 @@ describe("noWrite: a clone marked ops-kit.noWrite (#2576)", () => {
   });
 
   test("noWrite: origin is mine and upstream is marked → repoOf is mine, writes to upstream stop", async () => {
-    // a workspace with its own private copy (#2579): origin is the copy, gh's default chosen on it
+    // a workspace with its own private copy: origin is the copy, gh's default chosen on it
     const dir = foreign();
     Bun.spawnSync(["git", "remote", "add", "origin", "https://github.com/me/widget.git"], { cwd: dir, env: { ...process.env } });
     expect(await repoOf(fakeGh([]), {}, dir)).toEqual({ owner: "me", name: "widget" });
@@ -138,7 +138,7 @@ describe("noWrite: a clone marked ops-kit.noWrite (#2576)", () => {
   });
 });
 
-describe("GitHub limits (#894)", () => {
+describe("GitHub limits", () => {
   const now = 1_000_000;
   const kindOf = (stdout: string, stderr: string) => retryAtFromResponse(responseOf(stdout, stderr), now);
 
@@ -179,7 +179,7 @@ describe("GitHub limits (#894)", () => {
     expect(waits).toEqual([120_000, 240_000, 480_000, 900_000, 900_000, 900_000, 900_000]); // the 429 was the first
     expect(s.failed("github.com", { status: 401, message: "Bad credentials" })).toEqual({ kind: "auth", until: null });
     expect(s.failed("github.com", { status: 404 })).toBeNull();
-    s.succeeded("github.com", t); // a call begun before the failure was recorded (or in its millisecond) leaves the wait (#984 review)
+    s.succeeded("github.com", t); // a call begun before the failure was recorded (or in its millisecond) leaves the wait
     expect(s.waiting("github.com")).not.toBeNull();
     s.succeeded("github.com", t + 1);
     expect(s.waiting("github.com")).toBeNull();
@@ -190,7 +190,7 @@ describe("GitHub limits (#894)", () => {
   });
 });
 
-describe("realGh's measures (#895)", () => {
+describe("realGh's measures", () => {
   test("a call refused during a wait is one `waited` measure, and gh is not started", async () => {
     const state = new GithubRetryState();
     state.failed("github.com", { status: 429, headers: { "retry-after": "600" } });

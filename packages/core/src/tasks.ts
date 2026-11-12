@@ -29,7 +29,7 @@ interface LiveSession {
   held: AgentEvent[];
   /** What the runner's exit still has to do once the held events are in. */
   afterHeld?: () => void;
-  /** The agent's `switchboard-artifact` fences in its replies (#1778), read like the stop reports. */
+  /** The agent's `switchboard-artifact` fences in its replies, read like the stop reports. */
   artifactReader: FenceReader<ArtifactFence>;
   /** Unanswered permission.ask by id, with when it was asked (kept in memory: an ask lives only as long as its runner). */
   pendingPermissions: Map<string, { ask: Extract<AgentEvent, { t: "permission.ask" }>; at: number }>;
@@ -37,7 +37,7 @@ interface LiveSession {
   hostAsks: Map<string, (d: PermissionDecision) => void>;
   /** ask id → rule that auto-allowed it, so the adapter's permission.resolved can carry the rule. */
   ruleMatches: Map<string, ApprovalRuleMatch>;
-  /** The last event recorded for this task is the status `thinking`: a runner's next one adds nothing, so it is not recorded (#2738). */
+  /** The last event recorded for this task is the status `thinking`: a runner's next one adds nothing, so it is not recorded. */
   thinkingRecorded?: boolean;
   /** The budget value whose crossing was already noted in the transcript (avoids a note per usage event). */
   budgetNoted?: number;
@@ -47,29 +47,29 @@ interface LiveSession {
   background?: number;
   /**
    * The next turn must restart the runner (--resume) instead of reusing this process: its mode changed and it could
-   * not switch live, or its scope grew (an attachment directory, #125) and roots are only read at start.
+   * not switch live, or its scope grew (an attachment directory) and roots are only read at start.
    */
   restartNext?: boolean;
   /**
-   * The task's model was changed (#155) while this process — started with the old one — is still attached. Its
+   * The task's model was changed while this process — started with the old one — is still attached. Its
    * session.start (Claude reports one per turn) names the old model and must not write it back over the choice.
    */
   modelChanged?: boolean;
-  /** The thinking effort this process was started with ("" = the CLI's default); core stamps it on the session.start it records (#1802). */
+  /** The thinking effort this process was started with ("" = the CLI's default); core stamps it on the session.start it records. */
   effort: string;
-  /** `error` messages of the turn in flight (bounded), handed to turn-end listeners with the session.end (#102). */
+  /** `error` messages of the turn in flight (bounded), handed to turn-end listeners with the session.end. */
   turnErrors: string[];
-  /** The turn's tool calls not yet answered: id → the tool and its input as one key (#550). */
+  /** The turn's tool calls not yet answered: id → the tool and its input as one key. */
   turnCalls: Map<string, { name: string; key: string; graphql: boolean }>;
-  /** The GitHub limit lines the turn's commands met and when, per command key, oldest first; a later success of the same command takes its line out (#550), of a command using GraphQL all of them (#3302). */
+  /** The GitHub limit lines the turn's commands met and when, per command key, oldest first; a later success of the same command takes its line out, of a command using GraphQL all of them. */
   turnGithub: Map<string, { line: string; at: number }>;
-  /** The disk-full words a failed command of the turn met (#2234); the resumer looks at the disk itself before it waits. */
+  /** The disk-full words a failed command of the turn met; the resumer looks at the disk itself before it waits. */
   turnDisk?: string;
-  /** The last quota report of the turn in flight — the runner's own view of the window that stopped it (#102). */
+  /** The last quota report of the turn in flight — the runner's own view of the window that stopped it. */
   turnQuota?: Extract<AgentEvent, { t: "quota" }>;
-  /** The turn in flight asked the person through the runner's question tool (#3053): its ok end leaves the Task 要対応. */
+  /** The turn in flight asked the person through the runner's question tool: its ok end leaves the Task 要対応. */
   turnQuestion?: boolean;
-  /** `switchboard-stop` reports in the runner's reply as it streams (#948). */
+  /** `switchboard-stop` reports in the runner's reply as it streams. */
   stopReader: StopFenceReader;
 }
 
@@ -78,11 +78,11 @@ export interface TurnEnd {
   end: Extract<AgentEvent, { t: "session.end" }>;
   errors: string[];
   quota?: Extract<AgentEvent, { t: "quota" }>;
-  /** The last GitHub limit line a command of the turn met and never got past (#550). */
+  /** The last GitHub limit line a command of the turn met and never got past. */
   githubLimit?: string;
-  /** When the command met `githubLimit`; a limit a whole window old has no claim on the turn's end (#3302). */
+  /** When the command met `githubLimit`; a limit a whole window old has no claim on the turn's end. */
   githubLimitAt?: number;
-  /** The disk-full words a command or an error of the turn carried (#2234). */
+  /** The disk-full words a command or an error of the turn carried. */
   diskFull?: string;
 }
 
@@ -94,19 +94,19 @@ export class ResumeSupersededError extends Error {
 }
 
 /**
- * What `create()` takes: the API's input with the Workspace settled. `cwd` is optional on the wire ("自動", #135) and
+ * What `create()` takes: the API's input with the Workspace settled. `cwd` is optional on the wire ("自動") and
  * resolved by the server before this point; `workspaceReason` is the daemon's own record of that choice, which is
  * why it is not a field of `CreateTaskInput` (a client cannot claim a task was auto-routed).
  */
 export type NewTaskInput = Omit<CreateTaskInput, "executionMode"> & { cwd: string; executionMode?: CreateTaskInput["executionMode"]; workspaceReason?: string; stage?: Task["stage"]; origin?: Task["origin"] };
 
-/** The title a task has until its first turn ends (#491): the head of the prompt, on one line. */
+/** The title a task has until its first turn ends: the head of the prompt, on one line. */
 export function provisionalTitle(prompt: string): string {
   return oneLine(prompt).slice(0, 48);
 }
 
 /**
- * The temp directory only this task writes under (StartOptions.privateTmp, #787): `<root>/<task id>`, where the root is
+ * The temp directory only this task writes under (StartOptions.privateTmp): `<root>/<task id>`, where the root is
  * the daemon's own (`<home>/tmp`), so that another daemon, or one started on a copy of the database, never shares it.
  */
 export function privateTmpOf(root: string, taskId: string): string {
@@ -129,7 +129,7 @@ export function makePrivateTmp(root: string, taskId: string): string {
 }
 
 /**
- * Removes the directories of tasks the database lets go (#787). A `done` task is not over (a follow-up resumes the same
+ * Removes the directories of tasks the database lets go. A `done` task is not over (a follow-up resumes the same
  * thread and its files), so those wait for this sweep at the daemon's start: older than `maxAgeMs` by their mtime.
  */
 export function sweepPrivateTmps(root: string, maxAgeMs: number, removable: (taskId: string) => boolean, now = Date.now()): number {
@@ -156,9 +156,9 @@ export function sweepPrivateTmps(root: string, maxAgeMs: number, removable: (tas
 }
 
 export interface TaskManagerOptions {
-  /** How a checkout's origin URL is read for the start check (#2799, originMismatch). Unset = git. */
+  /** How a checkout's origin URL is read for the start check (originMismatch). Unset = git. */
   originOf?: (path: string) => string | null;
-  /** Where a Codex task's own temp directory is made (#787): `<daemon home>/tmp`. Unset = none is made. */
+  /** Where a Codex task's own temp directory is made: `<daemon home>/tmp`. Unset = none is made. */
   privateTmpRoot?: string;
   /**
    * The machine's heavy-process slots (`ops-kit heavy`, the kit's README "重い処理の枠"): added to a Codex task's scope
@@ -175,44 +175,44 @@ export interface TaskManagerOptions {
    */
   suggest?: (input: NewTaskInput, scope: string[]) => RoutingSuggestion | undefined;
   /**
-   * Knowledge approval rules (#13). "allow" answers the ask at once (recorded as by: rule); "ask" leaves it to the
+   * Knowledge approval rules. "allow" answers the ask at once (recorded as by: rule); "ask" leaves it to the
    * user, optionally with the confirm rule that matched so the UI can show why. Absent = ask every time.
    */
   approval?: (task: Task, ask: Extract<AgentEvent, { t: "permission.ask" }>) => { decision: "ask" | "allow"; match?: ApprovalRuleMatch };
-  /** Price table (#14): usage without a reported cost is priced from it; billing decides what counts as 実課金. */
+  /** Price table: usage without a reported cost is priced from it; billing decides what counts as 実課金. */
   pricing?: () => PricingTable;
-  /** Saved Amazon Bedrock region of the runner (#1730); undefined = the runner's own login. Not for cloud runs. */
+  /** Saved Amazon Bedrock region of the runner; undefined = the runner's own login. Not for cloud runs. */
   bedrock?: (task: Task) => { region: string } | undefined;
-  /** Saved per-runner default permission mode (#58); undefined = the adapter's own default. */
+  /** Saved per-runner default permission mode; undefined = the adapter's own default. */
   defaultPermissionMode?: (runner: RunnerId) => string | undefined;
   /** Saved subagent thinking effort of the runner (setting `subagentEffort`); undefined = same as the task. Fixed on a local Task when it is created. */
   subagentEffort?: (runner: RunnerId) => string | undefined;
-  /** Saved shadow runner (#99), used when a creation does not say; null / undefined = no shadow by default. */
+  /** Saved shadow runner, used when a creation does not say; null / undefined = no shadow by default. */
   defaultShadowRunner?: () => RunnerId | null | undefined;
-  /** Files attached to turns (#125). Absent = `attachmentIds` are refused. */
+  /** Files attached to turns. Absent = `attachmentIds` are refused. */
   attachments?: AttachmentStore;
-  /** The artifacts store (#1778): where an agent's `switchboard-artifact` fence registers a report. Unset = fences are read and refused. */
+  /** The artifacts store: where an agent's `switchboard-artifact` fence registers a report. Unset = fences are read and refused. */
   artifacts?: ArtifactStore;
-  /** Where the kit's `device-auth` sends a Task's approval wait (#662): added to the runner's environment. */
+  /** Where the kit's `device-auth` sends a Task's approval wait: added to the runner's environment. */
   deviceAuthEnv?: (taskId: string) => Record<string, string>;
-  /** Where a Task's runner sends its OpenTelemetry logs (#2236, docs/design/claude-otel.md): the daemon's loopback port and the Task's token. */
+  /** Where a Task's runner sends its OpenTelemetry logs (docs/design/claude-otel.md): the daemon's loopback port and the Task's token. */
   otelFor?: (taskId: string) => { endpoint: string; token: string } | undefined;
   /** Settings `outbound.runnerTelemetry`: true = the runner CLI's own telemetry is not stopped. */
   runnerTelemetry?: () => boolean;
-  /** What the kit's `docker` front reads (#1418): the label for the task's containers and the file its compose projects are written to. */
+  /** What the kit's `docker` front reads: the label for the task's containers and the file its compose projects are written to. */
   dockerEnv?: (taskId: string) => Record<string, string>;
-  /** The main reviewer the kit's cross-runner-review picks (#4024, `settings.reviewRunner`). Absent = "other". */
+  /** The main reviewer the kit's cross-runner-review picks (`settings.reviewRunner`). Absent = "other". */
   reviewRunner?: () => "other" | "same";
-  /** How many daemon stops in a row a turn is resumed after (#835, `quotaAndResume.maxStopResumes`). Absent = `MAX_STOP_RESUMES`. */
+  /** How many daemon stops in a row a turn is resumed after (`quotaAndResume.maxStopResumes`). Absent = `MAX_STOP_RESUMES`. */
   maxStopResumes?: () => number;
-  /** The MCP servers a Task's runner gets (#2090, `mcp.yaml` `servers`). Absent = none. */
+  /** The MCP servers a Task's runner gets (`mcp.yaml` `servers`). Absent = none. */
   mcpServers?: (task: Task) => Record<string, McpServerConfig> | undefined;
-  /** How many local Tasks may run or wait for an answer at once (#1141, `settings.maxRunners`). Absent = no limit. */
+  /** How many local Tasks may run or wait for an answer at once (`settings.maxRunners`). Absent = no limit. */
   maxRunners?: () => number;
-  /** The machine's free memory (MemAvailable), the floor of `ops-kit heavy` and the safety valve `taskMinFreeMb` (#1141, #4556): free < safety holds a new start back; safety <= free < floor only warns. null / absent = judged by the count alone. */
+  /** The machine's free memory (MemAvailable), the floor of `ops-kit heavy` and the safety valve `taskMinFreeMb`: free < safety holds a new start back; safety <= free < floor only warns. null / absent = judged by the count alone. */
   memoryHeadroom?: () => { free: number; floor: number; safety: number } | null;
   /**
-   * true = never start the waiting Tasks (#1141): a candidate daemon (`SWITCHBOARD_CANDIDATE`) runs on a copy of the database,
+   * true = never start the waiting Tasks: a candidate daemon (`SWITCHBOARD_CANDIDATE`) runs on a copy of the database,
    * whose queue is the live daemon's; starting it there would run those Tasks twice, with their real runner sessions.
    */
   holdQueue?: boolean;
@@ -226,16 +226,16 @@ function shellQuote(s: string): string {
 }
 
 /**
- * The Claude Code allow rules a task gets (#2150, docs/design/permission-modes.md): the operations the skills ask for, so that
+ * The Claude Code allow rules a task gets (docs/design/permission-modes.md): the operations the skills ask for, so that
  * auto mode does not stop them. Only the merge through the merge gate (it merges on a merge verdict only; a bare `gh pr merge`
  * stays with auto mode), resolving a review thread (not a general `gh api graphql`), the marks (`gh pr comment`; the check in
  * front of `gh` still reads them), editing the skills of the task's folder and its worktrees (`<cwd>-<topic>`, CLAUDE.md), and
- * three writes that reach the backlog or the stack's own branches only (#2782): `gh stack submit` / `gh stack push` write the
+ * three writes that reach the backlog or the stack's own branches only: `gh stack submit` / `gh stack push` write the
  * stack's branches and nothing else; the rewrite push is the one line `ops-kit pr push-rebased` (it refuses the default branch
  * itself, and a bare `git push --force-with-lease:*` is never allowed because a prefix match would let a main target through);
  * `ops-kit backlog` goes through the app, which checks the values it writes.
  * Not a fence: the same OS user can do all of it by another way (the loopback trust model).
- * #3779: promotion (`scripts/promote.ts` checks the CLAUDE.md conditions itself) and the parallel guard's `release` (a step of the skills; `claim` / `overlap` stay out).
+ * Also allowed: promotion (`scripts/promote.ts` checks the CLAUDE.md conditions itself) and the parallel guard's `release` (a step of the skills; `claim` / `overlap` stay out).
  */
 export function taskAllowRules(metaPath: string, cwd: string): string[] {
   const skills = [cwd, `${cwd}-*`].flatMap((root) => ["ops-kit/skills", ".claude/skills"].map((dir) => `/${root}/${dir}/**`));
@@ -257,15 +257,15 @@ export function taskAllowRules(metaPath: string, cwd: string): string[] {
 }
 
 /**
- * What ends the runner's reply and is recorded after the fences it closes (#948, #1936): a tool call, an ask, the session's
+ * What ends the runner's reply and is recorded after the fences it closes: a tool call, an ask, the session's
  * end. The person's next message closes them too, but after it is recorded — its files are recorded before it, and a row
  * between them would split them.
  */
 const endsReply = (ev: AgentEvent) => ev.t === "tool.call" || ev.t === "permission.ask" || ev.t === "question.ask" || ev.t === "session.end";
 
 /**
- * PATH for a Task's runner and for the jobs the daemon starts for it: the kit's bin first (the check in front of `gh`,
- * #661), then the daemon's own PATH, and the folder of the bun this daemon runs on last (a daemon started by bun's full
+ * PATH for a Task's runner and for the jobs the daemon starts for it: the kit's bin first (the check in front of `gh`),
+ * then the daemon's own PATH, and the folder of the bun this daemon runs on last (a daemon started by bun's full
  * path has none in its PATH; last, so that it does not come before the user's own tools). Without the meta workspace
  * there is no kit bin.
  */
@@ -314,7 +314,7 @@ export class TaskManager {
   private endListeners = new Set<(taskId: string, task: Task) => void>();
   private backgroundEmptyListeners = new Set<(taskId: string) => void>();
   private turnEndListeners = new Set<(taskId: string, task: Task, turn: TurnEnd) => void>();
-  /** Told whenever a task's planned resume is forgotten, or a person starts a turn (#550: a plan still being made must be dropped too). */
+  /** Told whenever a task's planned resume is forgotten, or a person starts a turn (a plan still being made must be dropped too). */
   private planForgottenListeners = new Set<(taskId: string) => void>();
   private stopRecordedListeners = new Set<(taskId: string, stop: StopRecord, prev: StopRecord | undefined) => void>();
 
@@ -400,7 +400,7 @@ export class TaskManager {
   }
 
   /**
-   * A first turn that starts a process, or waits for a free slot (#1141): the row stays idle with `queued_at` and the
+   * A first turn that starts a process, or waits for a free slot: the row stays idle with `queued_at` and the
    * prompt, so a restart keeps the wait. Cloud Tasks start no local process and are not counted.
    */
   private admit(task: Task, prompt: string, atts: Attachment[]): "started" | "queued" {
@@ -482,7 +482,7 @@ export class TaskManager {
     return undefined;
   }
 
-  /** Why `effort` cannot be used with `runner` (#833; undefined = fine): the same closed list as permission modes. */
+  /** Why `effort` cannot be used with `runner` (undefined = fine): the same closed list as permission modes. */
   checkEffort(runner: RunnerId, effort: string): string | undefined {
     const adapter = this.adapters.get(runner);
     if (!adapter) return `runner "${runner}" is not installed`;
@@ -508,7 +508,7 @@ export class TaskManager {
   }
 
   /**
-   * Change the mode of an existing task (#58). A live session that can switch does so now (Claude at once, Codex from
+   * Change the mode of an existing task. A live session that can switch does so now (Claude at once, Codex from
    * its next turn); one that cannot is released if idle so the next turn resumes with the new mode. The change is
    * recorded in the transcript either way.
    */
@@ -548,7 +548,7 @@ export class TaskManager {
     return updated;
   }
 
-  /** The LLM's proposal, arrived after the task was created (#1143). Advice: the status, the outcome and the runner stay. */
+  /** The LLM's proposal, arrived after the task was created. Advice: the status, the outcome and the runner stay. */
   attachLlmSuggestion(taskId: string, suggestion: LlmSuggestion): Task | null {
     const updated = this.db.attachLlmSuggestion(taskId, suggestion);
     if (updated) this.broadcast({ type: "task.updated", task: updated });
@@ -556,7 +556,7 @@ export class TaskManager {
   }
 
   /**
-   * Change the model of an existing task (#155); null = back to the CLI's default. One path for every runner: the
+   * Change the model of an existing task; null = back to the CLI's default. One path for every runner: the
    * process that is running keeps the model it was started with, so it is released (now if idle, else before the next
    * turn — `restartNext`) and the next turn resumes the same session with the new model.
    */
@@ -579,7 +579,7 @@ export class TaskManager {
   }
 
   /**
-   * Change the thinking effort of an existing task (#1802); null = back to the CLI's default. The same path as the
+   * Change the thinking effort of an existing task; null = back to the CLI's default. The same path as the
    * model: the process keeps the effort it was started with, so it is released (now if idle, else before the next
    * turn — `restartNext`) and the next turn resumes the same session with the new one. The caller checks the value
    * (`checkEffort`).
@@ -608,7 +608,7 @@ export class TaskManager {
   }
 
   /**
-   * Called with every stop the runner reported (#4408) and the record of the same id before it (from the DB, so it holds
+   * Called with every stop the runner reported and the record of the same id before it (from the DB, so it holds
    * across a daemon restart). A repeat of the same report comes too, as `stop === prev` (a resumed turn reports the same
    * stop again).
    */
@@ -687,10 +687,10 @@ export class TaskManager {
   }
 
   /**
-   * Record a stop the runner reported (#948): task.note's `stop` or a `switchboard-stop` fence. Its id is the runner's
+   * Record a stop the runner reported: task.note's `stop` or a `switchboard-stop` fence. Its id is the runner's
    * within this task. The answer is the one it names (an Issue comment), else the newest one this stop or the same
    * work + op + target already had — never one made up from the conversation. The same report twice (a note and a
-   * fence) is recorded once. A retry (#949) is reserved only by the bounded rule (`reserveStopRetry`) and only for the
+   * fence) is recorded once. A retry is reserved only by the bounded rule (`reserveStopRetry`) and only for the
    * next attempt: one refused is recorded as waiting / exhausted with the reason, and the caller hears why.
    */
   recordStop(taskId: string, report: StopReport): { ok: true; stop: StopRecord } | { ok: false; why: string } {
@@ -724,12 +724,12 @@ export class TaskManager {
     return { ok: true, stop };
   }
 
-  /** This task's stop `reportId` as last recorded (#949); undefined when it never stopped so. */
+  /** This task's stop `reportId` as last recorded; undefined when it never stopped so. */
   stopOf(taskId: string, reportId: string): StopRecord | undefined {
     return this.db.listStopRecords([taskId]).filter((r) => r.id === `${taskId}/${reportId}`).at(-1);
   }
 
-  /** Move the task's own open stops (#948): an answer the person gave (to an exhausted stop too, `pick`), or 中断 cancelling a planned retry. */
+  /** Move the task's own open stops: an answer the person gave (to an exhausted stop too, `pick`), or 中断 cancelling a planned retry. */
   private moveOpenStops(taskId: string, f: (s: StopRecord) => StopRecord | null, pick = openStops) {
     for (const s of pick(this.db.listStopRecords([taskId]))) {
       const next = f(s);
@@ -737,7 +737,7 @@ export class TaskManager {
     }
   }
 
-  /** Every unanswered permission.ask of every live task, newest first (#26). */
+  /** Every unanswered permission.ask of every live task, newest first. */
   pendingApprovals(): PendingApproval[] {
     const out: PendingApproval[] = [];
     for (const [taskId, live] of this.live) {
@@ -763,7 +763,7 @@ export class TaskManager {
   }
 
   /**
-   * The person's say on what the task came to (#492): 確認済み on / off, the outcome by hand, or both. Setting it to
+   * The person's say on what the task came to: 確認済み on / off, the outcome by hand, or both. Setting it to
    * needs_action / failed without `reviewed` takes 確認済み off, so the task is back under 要対応. The list order
    * (updatedAt) does not move.
    */
@@ -777,7 +777,7 @@ export class TaskManager {
     return t;
   }
 
-  /** The person's new title (#491): kept as it is from now on, never set again automatically. */
+  /** The person's new title: kept as it is from now on, never set again automatically. */
   rename(taskId: string, title: string): Task {
     // An imported terminal session takes its title from Claude's own log on every import, so a rename would not stay
     if (this.mustGet(taskId).origin !== "switchboard") throw new Error("ターミナルから取り込んだ Task のタイトルは Claude 側のものなので変えられません");
@@ -786,7 +786,7 @@ export class TaskManager {
     return t;
   }
 
-  /** Hide a stopped Task from the list, or bring it back (#1142). Like setOutcome, the list order does not move. */
+  /** Hide a stopped Task from the list, or bring it back. Like setOutcome, the list order does not move. */
   setArchived(taskId: string, archived: boolean): Task {
     const cur = this.mustGet(taskId);
     if (IN_FLIGHT.has(cur.status) || cur.status === "idle") throw new Error("a running or idle task cannot be archived");
@@ -802,8 +802,8 @@ export class TaskManager {
   }
 
   /**
-   * Plan (or forget) a resume after a usage-limit stop (#102) a GitHub limit (#550) or a full disk (#2234, `reason`). Any turn that starts
-   * clears it. `wait` (#2237): the quota window that stopped the turn and when, for resuming early; and, when `resumeAt`
+   * Plan (or forget) a resume after a usage-limit stop, a GitHub limit or a full disk (`reason`). Any turn that starts
+   * clears it. `wait`: the quota window that stopped the turn and when, for resuming early; and, when `resumeAt`
    * is a try before a long wait, the time the wait goes back to (`plannedAt`). Absent = none.
    */
   setResumeAt(taskId: string, resumeAt: number | null, reason: NonNullable<Task["resumeReason"]> = "limit", wait: { window?: string | null; since?: number | null; plannedAt?: number | null } = {}): Task {
@@ -830,7 +830,7 @@ export class TaskManager {
 
   /**
    * `precomputed` is for the one caller that has to run the router before this point: `POST /api/tasks` with LLM
-   * suggestions on (#25) awaits an async suggester, which cannot happen inside this synchronous method. It is still
+   * suggestions on awaits an async suggester, which cannot happen inside this synchronous method. It is still
    * the daemon's own suggestion for this very input — never anything a client sent — and everything else (the
    * scheduler, Inbox promotion) keeps getting the rule table computed here. `afterInsert` runs once the row exists and
    * before the runner starts: what the suggestion turns cost is billed there, so a task that then fails to start (it
@@ -843,14 +843,14 @@ export class TaskManager {
     if (input.model !== undefined || input.permissionMode !== undefined || input.effort !== undefined || input.budgetUsd !== undefined || input.scheduleId !== undefined || input.shadowRunner || input.attachmentIds?.length || input.scope?.some((p) => p !== input.cwd)) return "Cloud はモデル・権限・予算・スケジュール・並走・添付・追加scopeを指定できません。公式 Web で操作してください。";
   }
 
-  /** A foreign repository's runner config nobody confirmed (#2576), for a Task that would read it; null = none. */
+  /** A foreign repository's runner config nobody confirmed, for a Task that would read it; null = none. */
   private unconfirmedRunnerConfig(at: { workspaceId?: string | null; cwd: string }): RunnerConfigUnconfirmed | null {
     const ws = foreignWorkspaceOf(this.db.listWorkspaces(), at).find((w) => runnerConfigOf(w.path).hash !== this.db.getRunnerConfigOk(w.id));
     return ws ? new RunnerConfigUnconfirmed(ws.name) : null;
   }
 
   /**
-   * `opts.deferUntil` (#2768): the row is made without starting a runner (status idle); `resumeAt` = that time and
+   * `opts.deferUntil`: the row is made without starting a runner (status idle); `resumeAt` = that time and
    * `resumeReason` = "start", and the prompt waits in `deferredPrompt` for `startDeferred` (the resume tick, or 今すぐ再開).
    */
   create(input: NewTaskInput, precomputed?: RoutingSuggestion, afterInsert?: (task: Task) => void, opts: { deferUntil?: number } = {}): Task {
@@ -864,7 +864,7 @@ export class TaskManager {
     if (unconfirmed) throw unconfirmed;
     const now = Date.now();
     const id = newId("task");
-    // Attachments (#125): their directory (deterministic from the id) is in the scope from the start so the first
+    // Attachments: their directory (deterministic from the id) is in the scope from the start so the first
     // turn can read them without asking; the files themselves move only once nothing else can refuse the creation.
     const attDir = input.attachmentIds?.length ? this.attachmentDir(id) : null;
     const scope = Array.from(new Set([input.cwd, ...(input.scope ?? []), ...(attDir ? [attDir] : [])]));
@@ -922,7 +922,7 @@ export class TaskManager {
     return this.db.getTask(task.id) ?? task;
   }
 
-  /** The first turn of a Task made without starting (#2768): the plan and the held prompt go, the prompt is sent as an ordinary first turn. */
+  /** The first turn of a Task made without starting: the plan and the held prompt go, the prompt is sent as an ordinary first turn. */
   async startDeferred(taskId: string): Promise<Task> {
     const t = this.mustGet(taskId);
     if (t.resumeReason !== "start" || t.deferredPrompt === null) throw new Error(`task ${taskId} is not waiting to start`);
@@ -992,11 +992,11 @@ export class TaskManager {
   }
 
   /**
-   * Shadow run (#99): the same prompt on a second runner, as its own task linked by `shadowOf`. The primary is
+   * Shadow run: the same prompt on a second runner, as its own task linked by `shadowOf`. The primary is
    * already running; nothing here may fail it — an unavailable default runner or a runner that will not start is
    * noted in the primary's transcript instead. Copied: workspace, cwd / scope, title, the prompt, the budget (the
    * same cap on each side — a paid shadow is capped like the primary, a free runner never reaches it). Not copied: routing (routing_log is
-   * training data for #25 and the shadow was not a decision), scheduleId (the schedule did not run it), the
+   * training data for the LLM routing suggestion and the shadow was not a decision), scheduleId (the schedule did not run it), the
    * permission mode (modes are runner-native; the shadow gets its own runner's saved / adapter default, and the
    * primary's transcript says which — the two may differ in what they can touch in the shared cwd).
    */
@@ -1031,7 +1031,7 @@ export class TaskManager {
       budgetUsd: primary.budgetUsd,
       scheduleId: null,
       permissionMode,
-      effort: null, // another runner: its own list, so the CLI default (#833)
+      effort: null, // another runner: its own list, so the CLI default
       subagentEffort: this.subagentEffort?.(runner) ?? null, // the shadow runner's own setting (a shadow is always local)
       origin: "switchboard",
       resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null,
@@ -1071,22 +1071,22 @@ export class TaskManager {
   }
 
   /**
-   * Follow-up turn. A turn sent to a primary task is copied to its shadow (#99) once the primary took it; a turn sent
+   * Follow-up turn. A turn sent to a primary task is copied to its shadow once the primary took it; a turn sent
    * to the shadow itself stays there. A shadow the user stopped (`shadowStopped`, set by abort()) is left alone;
    * so is one waiting on an approval (a turn pushed into it would end the open confirmation as denied on DAK) — that
    * is noted on both sides, and the person can send the text to the shadow by hand after answering. Anything else
    * — done, errored, aborted by a daemon restart, mid-turn (queued by the adapter) — gets the copy. A copy that
    * fails (a budget the user put on the shadow, a runner that will not resume) is noted on both transcripts, since
    * the person is looking at the primary; it is never raised here. `mirror: false` (the resumer's 今すぐ再開) and
-   * `asResume` turns (#102: the daemon continuing this task after its own runner's limit lifted) are not copied —
-   * the shadow's runner was not stopped by that. `daemon` (#2045: the daemon continuing a task whose waits closed) is
+   * `asResume` turns (the daemon continuing this task after its own runner's limit lifted) are not copied —
+   * the shadow's runner was not stopped by that. `daemon` (the daemon continuing a task whose waits closed) is
    * the daemon's own turn with no plan behind it: it is not copied, answers no stop, clears no planned resume, and is
    * refused (ResumeSupersededError) while the task runs, waits or has a resume planned, or when 中断 or a reply came
    * while it waited for the runner's process to close.
    */
   async send(taskId: string, text: string, opts: { asResume?: boolean; daemon?: boolean; mirror?: boolean; attachmentIds?: string[] } = {}): Promise<Task> {
     // Everything that can refuse the turn (unknown task, a superseded resume, the budget) runs before any file moves:
-    // a refused turn leaves the uploads in the inbox, reusable. Attachments (#125) are taken once, by the primary;
+    // a refused turn leaves the uploads in the inbox, reusable. Attachments are taken once, by the primary;
     // the shadow reads the same files (its scope is widened to them).
     await this.preflight(taskId, opts);
     const atts = this.takeAttachments(opts.attachmentIds, taskId);
@@ -1094,7 +1094,7 @@ export class TaskManager {
     text = withAttachments(text, atts);
     const before = this.db.nextSeq(taskId);
     const task = await this.dispatch(taskId, text, atts);
-    // The person's turn answers the task's open stops (#948), by its user message (none echoed = nothing recorded).
+    // The person's turn answers the task's open stops, by its user message (none echoed = nothing recorded).
     if (!opts.asResume && !opts.daemon) {
       const said = this.db.listEvents(taskId, before - 1).find((e) => e.ev.t === "message.delta" && e.ev.role === "user");
       if (said) this.moveOpenStops(taskId, (s) => ({ ...s, answer: { ref: `seq:${said.seq}`, at: said.ts } }), answerableStops);
@@ -1118,7 +1118,7 @@ export class TaskManager {
 
   /**
    * One task's follow-up turn. Reuses the live process; otherwise restarts the runner with --resume once any release
-   * has finished. A person's turn supersedes a planned resume (#102) the moment it is asked for; the resumer's own
+   * has finished. A person's turn supersedes a planned resume the moment it is asked for; the resumer's own
    * turn (`asResume`) only goes out if the plan is still there after the wait — a reply or 中断 that landed meanwhile
    * wins (ResumeSupersededError, nothing sent).
    */
@@ -1158,14 +1158,14 @@ export class TaskManager {
       if (IN_FLIGHT.has(task.status)) throw new ResumeSupersededError(`the task is ${task.status}`);
     }
     if (this.isOverBudget(taskId)) throw new Error(`budget exceeded ($${task.budgetUsd}); raise the budget to continue`);
-    // the run slots (#1141), before the attachments move: a Task still in the queue starts with its first prompt, from
+    // the run slots, before the attachments move: a Task still in the queue starts with its first prompt, from
     // drain() (a reply now would start it without that); a turn that needs a new process waits for a free slot
     if (task.queuedAt !== null) throw new Error("実行枠待ちの Task です。始まるまで待つか、中断してください");
     if (!this.live.has(taskId)) this.refuseWithoutSlot(task);
     return task;
   }
 
-  /** Throws when a new process for `task` would exceed the run slots (#1141). The API answers it with 409. */
+  /** Throws when a new process for `task` would exceed the run slots. The API answers it with 409. */
   private refuseWithoutSlot(task: Task): void {
     const block = task.executionMode === "local" ? this.slotBlock() : null;
     if (block !== null) throw new Error(`${block.refuse}（${block.detail}）。${block.hint}`);
@@ -1173,7 +1173,7 @@ export class TaskManager {
 
   /**
    * Hand the text to the runner: the live process, or a restart with --resume. `atts` = the turn's attachments: the
-   * scope must cover their folders, and the adapter gets them with the text (DAK sends the contents, #124).
+   * scope must cover their folders, and the adapter gets them with the text (DAK sends the contents).
    */
   private async dispatch(taskId: string, text: string, atts: Attachment[]): Promise<Task> {
     let task = this.mustGet(taskId);
@@ -1195,10 +1195,10 @@ export class TaskManager {
       return this.setStatus(taskId, "running");
     }
     if (widened && live) this.record(taskId, { t: "status", text: "添付ディレクトリを scope に加えたので、プロセスを再開します（--resume）" });
-    task = this.mustGet(taskId); // the release above was awaited: a model (#155) or mode chosen meanwhile is the one to start with
+    task = this.mustGet(taskId); // the release above was awaited: a model or mode chosen meanwhile is the one to start with
     let resume = task.runnerSessionId ?? undefined;
     let preamble: string | undefined;
-    // A task moved from another machine (#179) whose session record did not come along: `--resume` would fail at once
+    // A task moved from another machine whose session record did not come along: `--resume` would fail at once
     // (error_during_execution), so start a new session and hand it the transcript Switchboard kept.
     if (resume && this.adapters.get(task.runner)?.hasSession?.(resume) === false) {
       preamble = recapOf(this.db.listEvents(taskId).map((e) => e.ev));
@@ -1290,17 +1290,17 @@ export class TaskManager {
       this.record(taskId, { t: "status", text: "開始プロセスを閉じました。Cloud 作業の停止は確認していません。公式 Web で操作してください。" });
       return this.updateCloudState(taskId);
     }
-    // A Task still waiting for a slot (#1141) has no process: it leaves the wait and ends here
+    // A Task still waiting for a slot has no process: it leaves the wait and ends here
     if (!live && task.queuedAt !== null && this.db.takeQueued(taskId) !== null) {
       this.record(taskId, { t: "status", text: "実行枠待ちを取り消し" });
       task = this.mustGet(taskId);
     }
-    // 中断 also means "do not come back to this on its own" (#102).
-    // 中断 forgets any planned resume — a plan still waiting for its GitHub budget read too (#550, onPlanForgotten);
+    // 中断 also means "do not come back to this on its own".
+    // 中断 forgets any planned resume — a plan still waiting for its GitHub budget read too (onPlanForgotten);
     // a finished task with no plan is not rewritten (its updatedAt is what the backlog reads)
     if (task.resumeAt !== null) task = this.setResumeAt(taskId, null);
     else for (const l of this.planForgottenListeners) l(taskId);
-    // Stopping a shadow (#99) is the user saying "no more copies" — whatever state it is in (mid-turn, done, error).
+    // Stopping a shadow is the user saying "no more copies" — whatever state it is in (mid-turn, done, error).
     // Only this path sets the flag: a daemon restart that closes a shadow as aborted does not detach it.
     const primaryId = task.shadowOf;
     if (primaryId && !task.shadowStopped) {
@@ -1310,13 +1310,13 @@ export class TaskManager {
       this.record(primaryId, { t: "status", text: `並走（${task.runner}）を停止しました。以後の返信は写されません` });
     }
     // Stopping the primary does not stop its shadow (independent tasks), but a resume the shadow had planned on its
-    // own (#102) is a turn nobody asked for any more — a paid shadow must not come back hours after the request died.
+    // own is a turn nobody asked for any more — a paid shadow must not come back hours after the request died.
     const shadow = primaryId ? null : this.db.shadowTaskOf(taskId);
     if (shadow && shadow.resumeAt !== null) {
       this.setResumeAt(shadow.id, null);
       this.record(shadow.id, { t: "status", text: "並走元が中断されたので、予定していた自動再開を取り消しました（返信すれば続けられます）" });
     }
-    // 中断 cancels a planned retry (#948): the stop waits for the person again.
+    // 中断 cancels a planned retry: the stop waits for the person again.
     this.moveOpenStops(taskId, (s) => (s.state === "retrying" ? { ...s, state: "waiting", actions: [...s.actions, { attempt: Math.max(0, ...s.actions.map((a) => a.attempt)), at: Date.now(), what: "中断で再試行を取り消し", ok: false }].slice(-20) } : null));
     // A task waiting on background jobs is stopped like a running one: aborted, not released (its jobs go with the process)
     if (task.status === "background") task = this.setStatus(taskId, "aborted");
@@ -1343,7 +1343,7 @@ export class TaskManager {
   async shutdown(): Promise<string[]> {
     this.stopped = true;
     clearInterval(this.drainTimer);
-    // the turns cut below free their slots; the next daemon starts what waits (#1141), not this one
+    // the turns cut below free their slots; the next daemon starts what waits, not this one
     const now = Date.now();
     const cut: string[] = [];
     await Promise.all(
@@ -1369,7 +1369,7 @@ export class TaskManager {
   /* ---------- internals ---------- */
 
   /**
-   * Tasks from before #58 carry no mode (NULL). Resuming one goes through the same resolution as a new task (saved
+   * Tasks from before the approval mode was kept per Task carry no mode (NULL). Resuming one goes through the same resolution as a new task (saved
    * runner default → adapter default) and records the result, so the row says what the resumed turn ran with.
    */
   private withResolvedMode(task: Task): Task {
@@ -1385,7 +1385,7 @@ export class TaskManager {
   private startSession(task: Task, prompt: string, resumeSessionId: string | undefined, preamble?: string, attachments: Attachment[] = []) {
     const adapter = this.adapters.get(task.runner);
     if (!adapter) throw new Error(`runner "${task.runner}" is not installed`);
-    // A task moved from another machine (#179) whose folder is not here: say so on the task and fail like a start
+    // A task moved from another machine whose folder is not here: say so on the task and fail like a start
     // that threw (callers note it on a primary / answer 409), instead of a spawn error with no trace on the task.
     if (!existsSync(task.cwd)) {
       const msg = `作業フォルダ ${task.cwd} がこの機械に無いため、ランナーを起動できません`;
@@ -1393,7 +1393,7 @@ export class TaskManager {
       this.setStatus(task.id, "error");
       throw new Error(msg);
     }
-    // A checkout that is not the workspace's registered repository (#2799: a rebuild that cloned a public one of the
+    // A checkout that is not the workspace's registered repository (a rebuild that cloned a public one of the
     // same name) would take the task's worktrees, pushes and PRs there: it does not start, the same way
     const mismatch = task.workspaceId ? originMismatch(task.cwd, this.db.getWorkspaceBacklogSource(task.workspaceId), this.originOf) : null;
     if (mismatch) {
@@ -1401,7 +1401,7 @@ export class TaskManager {
       this.setStatus(task.id, "error");
       throw new Error(mismatch);
     }
-    // A new process reads the config again: a Task continued after it changed is refused as a new one is (#2576)
+    // A new process reads the config again: a Task continued after it changed is refused as a new one is
     const unconfirmed = this.unconfirmedRunnerConfig(task);
     if (unconfirmed) {
       this.record(task.id, { t: "status", text: unconfirmed.message });
@@ -1409,7 +1409,7 @@ export class TaskManager {
       throw unconfirmed;
     }
     if (task.executionMode === "cloud") { this.startCloudSession(task, prompt, adapter); return; }
-    // Development-standard skills where the runner reads them (#469). A skill that cannot be placed never stops the task.
+    // Development-standard skills where the runner reads them. A skill that cannot be placed never stops the task.
     const meta = this.db.listWorkspaces().find((w) => w.kind === "meta");
     if (meta) {
       try {
@@ -1419,7 +1419,7 @@ export class TaskManager {
       } catch (e) {
         this.record(task.id, { t: "status", text: `スキルを置けませんでした: ${(e as Error).message ?? e}` });
       }
-      // Copies of the operating tools that do not call the shared kit (#557); noted, never stopped on.
+      // Copies of the operating tools that do not call the shared kit; noted, never stopped on.
       try {
         for (const name of setupScripts({ metaPath: meta.path, cwd: task.cwd }).copies) {
           this.record(task.id, { t: "status", text: `scripts/setup/${name} は共通キットを呼ばない写しです。検査の結果が共通スキルとずれることがあります` });
@@ -1428,21 +1428,21 @@ export class TaskManager {
         this.record(task.id, { t: "status", text: `scripts/setup を調べられませんでした: ${(e as Error).message ?? e}` });
       }
     }
-    // The check in front of `gh` (#661, docs/design/secret-guard.md): the order is `kitPath`'s
+    // The check in front of `gh` (docs/design/secret-guard.md): the order is `kitPath`'s
     const path = meta ? { PATH: kitPath(meta.path) } : undefined;
     const deviceAuth = this.deviceAuthEnv?.(task.id);
-    // #1397: everything the task starts, detached or not, carries this; onTaskEnd stops what still does. The kit's
+    // Everything the task starts, detached or not, carries this; onTaskEnd stops what still does. The kit's
     // `ops-kit heavy` names the Task of a job holding or waiting for a slot by OPS_KIT_TASK_ID (the kit names no app).
-    // OPS_KIT_REVIEW_RUNNER (#4024): the setting's value at this start or resume; a later change waits for the next one
+    // OPS_KIT_REVIEW_RUNNER: the setting's value at this start or resume; a later change waits for the next one
     const env = { ...path, ...deviceAuth, ...this.dockerEnv?.(task.id), SWITCHBOARD_TASK_ID: task.id, OPS_KIT_TASK_ID: task.id, OPS_KIT_REVIEW_RUNNER: this.reviewRunner?.() ?? "other" };
-    // The stop for writes to fixed names right under /tmp (#764, docs/design/shared-tmp-guard.md): the kit's hook
+    // The stop for writes to fixed names right under /tmp (docs/design/shared-tmp-guard.md): the kit's hook
     const guards = meta ? [shellQuote(join(meta.path, "ops-kit/bin/deny-shared-tmp"))] : undefined;
     const allow = meta ? taskAllowRules(meta.path, task.cwd) : undefined;
-    // How to report a stop and when to retry (#949), with the work's stops still open: before every start's prompt.
+    // How to report a stop and when to retry, with the work's stops still open: before every start's prompt.
     const recovery = stopRecoveryPrompt(reduceStops(stopRecordsFor(this.db, task)).filter((s) => s.state !== "resolved"));
-    // The insights schedule's Task (#1838) sends `/insights` and nothing else: Claude Code expands a built-in slash
+    // The insights schedule's Task sends `/insights` and nothing else: Claude Code expands a built-in slash
     // command only when it is the whole user message, so nothing goes in front of it (no recap, no stop report).
-    // The ui-layers schedule's Task (#3353) keeps the usual preamble: its instruction is text, and it registers its report
+    // The ui-layers schedule's Task keeps the usual preamble: its instruction is text, and it registers its report
     // through the artifact fence the preamble describes.
     const bare = !!task.scheduleId && this.db.getSchedule(task.scheduleId)?.action === "insights";
     preamble = bare ? undefined : [preamble, recovery, artifactPrompt()].filter((p): p is string => !!p).join("\n\n");
@@ -1451,10 +1451,10 @@ export class TaskManager {
     const live: LiveSession = { session: undefined as unknown as RunnerSession, held: [], pendingPermissions: new Map(), hostAsks: new Map(), ruleMatches: new Map(), effort: task.effort ?? "", turnErrors: [], turnCalls: new Map(), turnGithub: new Map(), stopReader: new StopFenceReader(), artifactReader: new FenceReader("switchboard-artifact", parseArtifactFence) };
     this.live.set(task.id, live);
     try {
-      // For the runner that cannot run the hook (Codex, #787): a temp directory of the task's own, removed when it ends.
+      // For the runner that cannot run the hook (Codex): a temp directory of the task's own, removed when it ends.
       // Not made = the task does not start (the error below), never a Codex without the stop.
       const privateTmp = meta && task.runner === "codex" && this.privateTmpRoot ? makePrivateTmp(this.privateTmpRoot, task.id) : undefined;
-      // The heavy slots are writable to the sandbox too (#2213): only for this start, never into the saved scope
+      // The heavy slots are writable to the sandbox too: only for this start, never into the saved scope
       const heavy = meta && task.runner === "codex" ? this.heavySlotsDir(task.id) : undefined;
       live.session = adapter.start(
         { cwd: task.cwd, scope: heavy && !task.scope.includes(heavy) ? [...task.scope, heavy] : task.scope, prompt, model: task.model ?? undefined, permissionMode: task.permissionMode ?? undefined, effort: task.effort ?? undefined, subagentEffort: task.subagentEffort ?? undefined, resumeSessionId, preamble, env, guards, allow, privateTmp, bedrock: this.bedrock?.(task), attachments, attachmentDir: this.attachments?.taskDir(task.id), mcpServers: this.mcpServers?.(task), otel: this.otelFor?.(task.id), runnerTelemetry: this.runnerTelemetry?.() ?? false },
@@ -1551,7 +1551,7 @@ export class TaskManager {
   }
 
   /**
-   * Budget (#15): once cumulative API-equivalent spend passes the task's budget, further turns are refused (409)
+   * Budget: once cumulative API-equivalent spend passes the task's budget, further turns are refused (409)
    * until the user raises the budget or stops the task. The crossing is noted once per turn in the transcript; the
    * decision itself is a UI action (×2 / 中断), not a permission.ask — a running turn is never interrupted, and a
    * synthetic ask arriving next to session.end would leave the task in a contradictory state.
@@ -1631,7 +1631,7 @@ export class TaskManager {
       return;
     }
     if (ev.t === "cloud.session.created") return;
-    // a DAK turn sends thousands of them in a row and buries the reply under the transcript's tail (#2738)
+    // a DAK turn sends thousands of them in a row and buries the reply under the transcript's tail
     const thinking = ev.t === "status" && ev.text === "thinking";
     if (thinking && live.thinkingRecorded) return;
     // Approval rules run before the ask is persisted so the recorded event carries the matched rule.
@@ -1647,9 +1647,9 @@ export class TaskManager {
       if (m) ev = { ...ev, rule: m };
       live.ruleMatches.delete(ev.id);
     }
-    if (ev.t === "session.start") ev = { ...ev, effort: live.effort }; // the runner does not name its effort; core knows what it was started with (#1802)
+    if (ev.t === "session.start") ev = { ...ev, effort: live.effort }; // the runner does not name its effort; core knows what it was started with
     // a fence whose closing line ends the reply (no newline after it) is only read when the reply ends: read it before the
-    // event that ends the reply is recorded, so its stop / artifact row comes before the tool row or 完了 (#1936)
+    // event that ends the reply is recorded, so its stop / artifact row comes before the tool row or 完了
     if (endsReply(ev)) this.readFences(taskId, live, ev);
     const env = this.db.appendEvent(taskId, ev);
     live.thinkingRecorded = thinking;
@@ -1713,7 +1713,7 @@ export class TaskManager {
           this.db.insertLedger(ledgerRowFor(this.pricing?.(), task, ev, env.ts));
           this.checkBudget(taskId, live, task);
         } else if (ev.source === "reported") {
-          // a running total of the session (Claude, #2353): the row is what it grew by since the last one of this model
+          // a running total of the session (Claude): the row is what it grew by since the last one of this model
           const prev = this.db.lastReportedTotal(taskId, ev.model ?? null);
           const turn = usageSince(prev, ev, task.runnerSessionId, prev ? 0 : this.db.migratedCredit(taskId, task.runnerSessionId));
           if (turn) {
@@ -1723,7 +1723,7 @@ export class TaskManager {
         }
         break;
       case "artifact": {
-        // A file the runner made in the task's attachment directory (#124) is one of the task's files from here on.
+        // A file the runner made in the task's attachment directory is one of the task's files from here on.
         const a = ev.kind === "file" ? this.attachments?.register(taskId, ev.path) : undefined;
         if (a) this.recordAttachments(taskId, [a]);
         break;
@@ -1736,8 +1736,8 @@ export class TaskManager {
         live.turnCalls.set(ev.id, { name: ev.name, key: `${ev.name}:${JSON.stringify(ev.input ?? null)}`, graphql: usesGraphql(ev.name, ev.input) });
         break;
       case "tool.result": {
-        // a GitHub limit line at the head of a command's result (#550); the same command succeeding later takes it out,
-        // and any command using GraphQL succeeding takes all of them out (#3302)
+        // a GitHub limit line at the head of a command's result; the same command succeeding later takes it out,
+        // and any command using GraphQL succeeding takes all of them out
         const call = live.turnCalls.get(ev.id);
         live.turnCalls.delete(ev.id);
         if (call) {
@@ -1757,10 +1757,10 @@ export class TaskManager {
         // Only an in-flight turn can end. A late session.end (e.g. the process being released) must not
         // rewrite a task that already finished.
         if (IN_FLIGHT.has(task.status)) {
-          // a turn that asked through the question tool ends on the person's answer (#3053): 要対応 at once, not judged
+          // a turn that asked through the question tool ends on the person's answer: 要対応 at once, not judged
           // a turn that ended ok with jobs left is `background`, not `done`; a failed or aborted one is shown as such (the mark stays)
           this.transition(taskId, ev.status === "ok" ? (live.background ?? 0) > 0 ? "background" : "done" : ev.status === "aborted" ? "aborted" : "error", ev.status === "ok" && live.turnQuestion ? { outcome: "needs_action" } : {});
-          // A shadow's turn that ended in error (#99) — a session the agent lost, an ADK error — is invisible from the
+          // A shadow's turn that ended in error — a session the agent lost, an ADK error — is invisible from the
           // primary, which is where the person is looking; the copies stop matching from here on.
           if (ev.status === "error" && task.shadowOf) this.record(task.shadowOf, { t: "status", text: `並走（${task.runner}）のターンがエラーで終わりました（${ev.summary ?? ""}）。ここから先の会話は並走と食い違います` });
         }
@@ -1818,12 +1818,12 @@ export class TaskManager {
     if (updated && (updated.status !== task.status || updated.runnerSessionId !== task.runnerSessionId)) {
       this.broadcast({ type: "task.updated", task: updated });
     }
-    // a Task that left running / waiting frees a slot (#1141)
+    // a Task that left running / waiting frees a slot
     if (updated && updated.status !== task.status && !IN_FLIGHT.has(updated.status)) this.drain();
   }
 
   /**
-   * Stop reports in the runner's own reply (#948): assistant text only — a tool's output or the person's message is
+   * Stop reports in the runner's own reply: assistant text only — a tool's output or the person's message is
    * never read; a tool call, an ask, the turn's end or the person's message closes the message. A person's answer to an ask answers the task's open stops that wait on one.
    */
   private readStops(taskId: string, live: LiveSession, ev: AgentEvent, seq: number, ts: number) {
@@ -1835,7 +1835,7 @@ export class TaskManager {
   }
 
   /**
-   * The runner's `switchboard-stop` (#948) and `switchboard-artifact` (#1778) fences: a reply's text feeds them, and what
+   * The runner's `switchboard-stop` and `switchboard-artifact` fences: a reply's text feeds them, and what
    * ends the reply (`endsReply`, the person's next message) closes a fence still open in it.
    */
   private readFences(taskId: string, live: LiveSession, ev: AgentEvent) {
@@ -1847,7 +1847,7 @@ export class TaskManager {
   }
 
   /**
-   * An agent's `switchboard-artifact` fence (#1778): registered as a path typed on the 成果物 tab would be — the same
+   * An agent's `switchboard-artifact` fence: registered as a path typed on the 成果物 tab would be — the same
    * scope, the same limits, the same path replacing its copy. A refusal is one status line on the Task, never a stop.
    */
   private saveArtifact(taskId: string, fence: ArtifactFence) {
@@ -1884,7 +1884,7 @@ export class TaskManager {
   }
 
   /**
-   * The one place a task's status is written (#1140): checked against the table (task-status.ts) first, and `null`
+   * The one place a task's status is written: checked against the table (task-status.ts) first, and `null`
    * when the move is not allowed, with the row untouched. The outcome follows by rule in `Db.updateTask`.
    */
   private transition(taskId: string, status: Task["status"], extra: Partial<Pick<Task, "outcome" | "runnerSessionId" | "model" | "resumeAt" | "resumeReason" | "resumeWindow" | "resumeSince" | "resumePlannedAt">> = {}): Task | null {

@@ -18,76 +18,76 @@ export interface StartOptions {
   scope: string[];
   prompt: string;
   model?: string;
-  /** Run on Amazon Bedrock in this region (#1730). Set only when the user chose it in the settings; the adapter turns it into its CLI's own variables. */
+  /** Run on Amazon Bedrock in this region. Set only when the user chose it in the settings; the adapter turns it into its CLI's own variables. */
   bedrock?: { region: string };
   /**
-   * The daemon's loopback endpoint for this Task's OpenTelemetry logs and the token it checks (#2236,
-   * docs/design/claude-otel.md). Claude Code sends its `tool_decision` events there; other runners ignore it.
+   * The daemon's loopback endpoint for this Task's OpenTelemetry logs and the token it checks
+   * (docs/design/claude-otel.md). Claude Code sends its `tool_decision` events there; other runners ignore it.
    */
   otel?: { endpoint: string; token: string };
   /** true = do not stop the runner CLI's own telemetry (Settings `outbound.runnerTelemetry`). Unset = the adapter stops it. */
   runnerTelemetry?: boolean;
   /** Runner-native permission mode (one of RunnerAdapter.permissionModes). Unset = the adapter's default. */
   permissionMode?: string;
-  /** Runner-native thinking effort (one of RunnerAdapter.efforts, #833). Unset = the CLI's own default. */
+  /** Runner-native thinking effort (one of RunnerAdapter.efforts). Unset = the CLI's own default. */
   effort?: string;
   /** Thinking effort of the subagents the runner starts. Unset = same as the task. */
   subagentEffort?: string;
   /** Resume a previous runner session (runner-native id). */
   resumeSessionId?: string;
   /**
-   * Fork instead of continuing (#2999): start a new session holding `resumeSessionId`'s conversation up to and including
+   * Fork instead of continuing: start a new session holding `resumeSessionId`'s conversation up to and including
    * `turn` (`session.end.turn`). The source session is left as it is. Only on adapters with `forks`.
    */
   fork?: { turn: string };
   /**
-   * `false` = the runner keeps no record of the session on disk (#2908): a one-off turn that is never resumed, such as
+   * `false` = the runner keeps no record of the session on disk: a one-off turn that is never resumed, such as
    * the daemon's judge and suggestion turns. Claude Code gets `--no-session-persistence` (not with `resumeSessionId`,
    * which needs the session file); other runners ignore it. Unset = saved as before.
    */
   persistSession?: boolean;
   /**
    * Sent to the runner ahead of the first prompt but not shown as the user's message: the daemon's recap of the
-   * task when the session to resume is not on this machine (#179).
+   * task when the session to resume is not on this machine.
    */
   preamble?: string;
   /**
    * Variables added to the runner's process, over the ones it inherits: the PATH that puts the check in front of
-   * `gh` (#661, docs/design/secret-guard.md).
+   * `gh` (docs/design/secret-guard.md).
    */
   env?: Record<string, string>;
   /**
    * Commands to run before each shell command (absolute paths, quoted for the shell). Each gets the runner's hook input
-   * on its standard input; exit 2 stops the command (#764, docs/design/shared-tmp-guard.md). Claude Code makes them
-   * PreToolUse hooks for Bash. Codex has no hook it can trust without a record in ~/.codex (#787), so it uses `privateTmp`.
+   * on its standard input; exit 2 stops the command (docs/design/shared-tmp-guard.md). Claude Code makes them
+   * PreToolUse hooks for Bash. Codex has no hook it can trust without a record in ~/.codex, so it uses `privateTmp`.
    */
   guards?: string[];
   /**
-   * Claude Code permission rules (`permissions.allow`) for the operations the skills ask for (#2150): the merge through the
+   * Claude Code permission rules (`permissions.allow`) for the operations the skills ask for: the merge through the
    * merge gate, resolving a review thread, the merge gate's marks, editing the skills in the working tree. Claude Code puts
    * them in the same `--settings` as `guards`; Codex does not read them.
    */
   allow?: string[];
   /**
-   * A directory only this task writes under (#787): the temp area of a runner that cannot run `guards`. Codex makes it
+   * A directory only this task writes under: the temp area of a runner that cannot run `guards`. Codex makes it
    * TMPDIR and a writable root and closes the rest of /tmp, so a fixed name there fails with a read-only error and
    * cannot meet another session's files. Claude Code ignores it. The daemon creates it and removes it when the task ends.
    */
   privateTmp?: string;
   /**
-   * Files attached to the first prompt (#125). Their paths are already in `prompt`; an adapter whose runner cannot
-   * reach the paths (DAK in its container, #124) sends the contents along. Others ignore it.
+   * Files attached to the first prompt. Their paths are already in `prompt`; an adapter whose runner cannot
+   * reach the paths (DAK in its container) sends the contents along. Others ignore it.
    */
   attachments?: Attachment[];
   /**
-   * Where files the runner makes may be written (#124): the task's attachment directory. An adapter whose runner
+   * Where files the runner makes may be written: the task's attachment directory. An adapter whose runner
    * hands files back (DAK's artifacts) writes them here and emits `artifact(file)`; the daemon registers each as an
    * attachment. Unset = the daemon has no attachment store.
    */
   attachmentDir?: string;
   /**
    * The MCP servers Switchboard hands the task, and only those: Claude Code reads no other MCP configuration
-   * (`--strict-mcp-config`), so the user-wide ones in ~/.claude.json are not started per task (#2090). Other runners
+   * (`--strict-mcp-config`), so the user-wide ones in ~/.claude.json are not started per task. Other runners
    * ignore it.
    */
   mcpServers?: Record<string, McpServerConfig>;
@@ -99,7 +99,7 @@ export interface RunnerSession {
   /** Answer a pending permission.ask. `by` says who decided (default user; the daemon passes "rule" for auto-allows). */
   respondPermission(id: string, decision: PermissionDecision, reason?: string, by?: "user" | "rule"): void;
   /**
-   * Switch the permission mode of the live session (#58). Claude applies it at once (`set_permission_mode`) and
+   * Switch the permission mode of the live session. Claude applies it at once (`set_permission_mode`) and
    * resolves once the runner confirmed (rejects if it refused), Codex from the next turn (`turn/start` overrides).
    * Adapters that cannot switch a live process omit it; the daemon then releases the idle process so the next turn
    * resumes with the new mode.
@@ -123,13 +123,13 @@ export interface RunnerDetection {
   path?: string;
   note?: string;
   /**
-   * Whether the runner's own login is usable, judged from the runner's own status command (#180). Switchboard never
+   * Whether the runner's own login is usable, judged from the runner's own status command. Switchboard never
    * reads the credential files. Absent = the runner has no such login (DAK).
    */
   login?: RunnerLogin;
-  /** Which login it is while `login` is `ok` (#2528). */
+  /** Which login it is while `login` is `ok`. */
   loginKind?: LoginKind;
-  /** When the login runs out, epoch ms (#3867); absent = not known. */
+  /** When the login runs out, epoch ms; absent = not known. */
   loginExpiresAt?: number;
   /** What to type in a terminal tab to log in again. */
   loginHint?: string;
@@ -147,13 +147,13 @@ export interface RunnerAdapter {
   readonly permissionModes?: PermissionModeOption[];
   /** Mode used when StartOptions.permissionMode is unset — the same one the runner's own terminal starts in. */
   readonly defaultPermissionMode?: string;
-  /** Models this runner offers, in display order (#155). Omit / empty when the runner picks its model itself (DAK). */
+  /** Models this runner offers, in display order. Omit / empty when the runner picks its model itself (DAK). */
   readonly models?: ModelOption[];
-  /** Models when run on Amazon Bedrock (#1730), in display order. Having this = the runner can be switched to Bedrock. */
+  /** Models when run on Amazon Bedrock, in display order. Having this = the runner can be switched to Bedrock. */
   readonly bedrockModels?: ModelOption[];
-  /** Thinking efforts this runner offers, in display order (#833). Omit / empty when the runner decides itself (DAK). */
+  /** Thinking efforts this runner offers, in display order. Omit / empty when the runner decides itself (DAK). */
   readonly efforts?: ModelOption[];
-  /** The runner can start from a past turn (`StartOptions.fork`, #2999). Omit when it cannot (DAK). */
+  /** The runner can start from a past turn (`StartOptions.fork`). Omit when it cannot (DAK). */
   readonly forks?: boolean;
   /** The oldest CLI version `forks` was recorded on: compare with `RunnerDetection.version`. */
   readonly forkMinVersion?: string;
@@ -171,20 +171,20 @@ export interface RunnerAdapter {
    */
   hasSession?(sessionId: string): boolean;
   /**
-   * The runner's own login command, after its executable (#354): the daemon runs it and relays the URL / device code
+   * The runner's own login command, after its executable: the daemon runs it and relays the URL / device code
    * it prints to the screen, so nobody opens a terminal. Omit when the runner has no login of its own (DAK).
    */
   readonly loginArgs?: string[];
   /** The same login with an Anthropic Console account instead of a Claude account (claude: `--console`); the screen offers it as a second button. */
   readonly loginApiArgs?: string[];
-  /** The runner's own logout command, after its executable (#2528): the screen logs out first, then picks a login again. */
+  /** The runner's own logout command, after its executable: the screen logs out first, then picks a login again. */
   readonly logoutArgs?: string[];
   /** Hosts the login URL may be on: another URL the CLI prints first (an update notice) is not relayed. */
   readonly loginHosts?: string[];
 }
 
 /**
- * What an adapter answers its runner's question tool with at once (#3053): the questions are on the person's screen, so the
+ * What an adapter answers its runner's question tool with at once: the questions are on the person's screen, so the
  * model ends the turn and the answers come as the next user message. Both runners ended cleanly on this (2026-10-29).
  */
 export const QUESTION_DEFERRED_REPLY =

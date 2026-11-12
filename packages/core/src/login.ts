@@ -1,7 +1,7 @@
 import type { RunnerId } from "@switchboard/protocol";
 
 /**
- * A turn that ended on the runner's own "not logged in" error (#180). The runner's status command (`detect()`) only
+ * A turn that ended on the runner's own "not logged in" error. The runner's status command (`detect()`) only
  * runs every minute and may say "logged in" while the server has revoked the token, so the turn's error text also marks
  * the login expired. Same shape as `LIMIT_TEXT` in ratelimit.ts; the text is the runner's, never a credential.
  */

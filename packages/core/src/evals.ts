@@ -2,8 +2,8 @@ import type { AgentEvent, EvalsListRow, EventEnvelope, RuleEval, RuleMetrics, Ta
 import { DEFAULT_RUBRIC } from "./rubric.ts";
 
 /**
- * Evals (#1218): what a task's own record says about how it went, counted by rules — no model, no person. The counts
- * feed the task screen now and the rubric judge (#1219) and the list (#1221) later. Stored in `task_evals`
+ * Evals: what a task's own record says about how it went, counted by rules — no model, no person. The counts
+ * feed the task screen now and the rubric judge and the list later. Stored in `task_evals`
  * (`Db.upsertEval`) under `source: rules`, one row per task; `RULES_BY` names the counter so a change in what is
  * counted tells old rows apart.
  */
@@ -19,7 +19,7 @@ export function isAutomaticUserText(text: string): boolean {
 /** The transcript note a daemon stop leaves (interrupted.ts); also how the resumer, its cap and the counts below recognise one. Here, not there, because interrupted.ts imports this file. */
 export const STOP_NOTE = "デーモンの停止でターンが中断されました";
 
-/** How the transcript note of Task ごとの実装のモデル（試験, #2769) begins; the model follows it. */
+/** How the transcript note of Task ごとの実装のモデル（試験) begins; the model follows it. */
 export const DELEGATED_HEAD = "Task ごとの実装は ";
 const DELEGATED_TAIL = " に任せます（試験）";
 
@@ -138,7 +138,7 @@ export function rulesEvalOf(task: Task, events: EventEnvelope[], cost: { costUsd
 const criterionTitle = (id: string) => DEFAULT_RUBRIC.criteria.find((c) => c.id === id)?.title ?? id;
 
 /**
- * The draft of an improvement request from a task's evaluations (#1221): the task, its counts in one line, the rubric
+ * The draft of an improvement request from a task's evaluations: the task, its counts in one line, the rubric
  * criteria scored 3 or below with their reasons, the person's rating, then a line for what the person wants changed.
  * The person edits it in the feedback dialog before it is sent; nothing is filed from here.
  */
@@ -158,14 +158,14 @@ export function evalRequestDraft(task: Pick<Task, "id" | "title" | "runner">, e:
   return lines.join("\n");
 }
 
-/** The Monday 0:00 UTC of the week `now` falls in (ms). The weekly sample (#1877) is picked from the week before it. */
+/** The Monday 0:00 UTC of the week `now` falls in (ms). The weekly sample is picked from the week before it. */
 export function weekStartUtc(now: number): number {
   const d = new Date(now);
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
 }
 
 /**
- * The tasks asked to be rated this week (#1877), from the rows judged in the week before: sorted by the judge's
+ * The tasks asked to be rated this week, from the rows judged in the week before: sorted by the judge's
  * average and cut into low / middle / high bands, one from each band in turn, at most 5. In a band a kind
  * (workspace × runner) not picked yet comes first, then the lowest taskId — the same rows give the same picks, so
  * nothing is stored. Fewer than 3 candidates → all of them.
@@ -191,7 +191,7 @@ export function weeklyHumanSample(rows: EvalsListRow[]): EvalsListRow[] {
   return picked;
 }
 
-/** How far the person's rating sits from the judge (#1877): human − the judge's average over the tasks with both, mean to one decimal. Not used to correct anything. */
+/** How far the person's rating sits from the judge: human − the judge's average over the tasks with both, mean to one decimal. Not used to correct anything. */
 export function judgeHumanGap(rows: EvalsListRow[]): { count: number; mean: number | null } {
   const diffs = rows.flatMap((r) => (r.judge && r.human ? [r.human.rating - r.judge.average] : []));
   return { count: diffs.length, mean: diffs.length ? Math.round((diffs.reduce((a, b) => a + b, 0) / diffs.length) * 10) / 10 : null };

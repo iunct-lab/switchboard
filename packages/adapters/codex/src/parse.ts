@@ -228,7 +228,7 @@ function mapServerRequest(id: string, method: string, p: Any, s: CodexParserStat
       ];
     }
     case "item/tool/requestUserInput": {
-      // the question tool (#3057): its questions go to the person; the session answers each with the deferred reply
+      // the question tool: its questions go to the person; the session answers each with the deferred reply
       const r = p as ToolRequestUserInputParams;
       const questions = (r.questions ?? []).map((q) => ({
         header: q.header || null,
@@ -386,7 +386,7 @@ export function jsonRpcNotification(method: string, params?: unknown): string {
   return JSON.stringify(params === undefined ? { jsonrpc: "2.0", method } : { jsonrpc: "2.0", method, params }) + "\n";
 }
 /**
- * The answer to a requestUserInput (#3057): every question gets QUESTION_DEFERRED_REPLY, so the model ends the turn
+ * The answer to a requestUserInput: every question gets QUESTION_DEFERRED_REPLY, so the model ends the turn
  * ("Waiting for your choices", recorded 2026-11-05 on codex-cli 0.166.0) and the person's answers come as the next turn.
  */
 export function deferredUserInput(params: unknown): ToolRequestUserInputResponse {

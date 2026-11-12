@@ -3,7 +3,7 @@ import type { Verification } from "./forge-github.ts";
 import { runBacklog } from "./backlog-client.ts";
 
 /**
- * The agent management app's side of the kit's forge operations (#2488): a repository with no remote, whose PRs are local changes kept in
+ * The agent management app's side of the kit's forge operations: a repository with no remote, whose PRs are local changes kept in
  * the app. `verification` = a comment on the change `pr`, through the kit's backlog client (BACKLOG_URL and
  * BACKLOG_WORKSPACE, its key): without them, or refused, it fails with the reason — never sent some other way.
  */

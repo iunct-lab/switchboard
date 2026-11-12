@@ -17,7 +17,7 @@ const fakeAdapter: RunnerAdapter = {
   },
 };
 
-describe("everyday journey timings (#639)", () => {
+describe("everyday journey timings", () => {
   let home: string;
   let core: Awaited<ReturnType<typeof startServer>>;
   let base: string;
@@ -42,7 +42,7 @@ describe("everyday journey timings (#639)", () => {
       { journey: "launch", device: "mobile", build: "abc123", ms: 900, task_id: null, bytes: null, events: null },
       { journey: "open-task", device: "desktop", build: "abc123", ms: 120, task_id: "t1", bytes: 3_300_000, events: 33_110 },
     ]);
-    // the shape before #2100 (a tab not reloaded since the update) is refused, not saved without the Task's size
+    // the shape before the Task's size was sent (a tab not reloaded since the update) is refused, not saved without the Task's size
     const { taskId: _t, bytes: _b, events: _e, ...old } = sample();
     expect((await post([old])).status).toBe(400);
     // an unknown journey, more than 50 at once, nothing, or not a list: 400 and nothing saved

@@ -220,7 +220,7 @@ export function userMessage(app: string, user: string, session: string, text: st
 }
 
 /**
- * Attachments (#124) as message parts, one each: text files (text/*, JSON, YAML, SVG) as a text part headed by the
+ * Attachments as message parts, one each: text files (text/*, JSON, YAML, SVG) as a text part headed by the
  * file name, everything else (images, PDF, …) as `inline_data` — the agent may run elsewhere and cannot open the paths in
  * the prompt. Reads the files now: a file that cannot be read throws here, before the turn is said or sent.
  */

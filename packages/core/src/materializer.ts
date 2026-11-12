@@ -5,7 +5,7 @@ import { unifiedDiff } from "./diff.ts";
 import { type KnowledgeStore } from "./knowledge.ts";
 
 /**
- * Materializer (proposal Screen C, right half; issue #8).
+ * Materializer (proposal Screen C, right half).
  * Knowledge documents declare `targets` in frontmatter; the materializer writes them into the files each tool reads:
  *   claude     → ~/.claude/CLAUDE.md
  *   agents-md  → ~/.codex/AGENTS.md    (codex is an alias)

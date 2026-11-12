@@ -18,7 +18,7 @@ export interface ClaudeParserState {
   seenToolCalls: Set<string>;
   /** tool_use id → {name, path} for write-class tools, so a successful tool_result can become artifact(diff). */
   writes: Map<string, { name: string; path: string }>;
-  /** The turn's latest top-level `assistant` line: the uuid `--resume-session-at` takes (#2999). */
+  /** The turn's latest top-level `assistant` line: the uuid `--resume-session-at` takes. */
   lastAssistantUuid?: string;
 }
 
@@ -135,7 +135,7 @@ export function mapClaudeMessage(m: Any, s: ClaudeParserState): AgentEvent[] {
       const r = m.request;
       if (r?.subtype === "can_use_tool" && typeof m.request_id === "string") {
         const tool = String(r.tool_name ?? "tool");
-        // the question tool (#3056) is not an approval: its questions go to the person, the adapter declines the call
+        // the question tool is not an approval: its questions go to the person, the adapter declines the call
         if (tool === "AskUserQuestion") {
           out.push({ t: "question.ask", id: m.request_id, questions: askQuestionsOf(r.input) });
           break;
@@ -162,7 +162,7 @@ export function mapClaudeMessage(m: Any, s: ClaudeParserState): AgentEvent[] {
           windows[k] = { utilization: num(v?.utilization), resetsAt: num(v?.resetsAt) };
         }
         // `rateLimitType` names the window Claude Code is judging by (`resetsAt` at the top repeats that window's reset);
-        // `status` is its verdict. Kept so a limit stop can wait for the right window (#102).
+        // `status` is its verdict. Kept so a limit stop can wait for the right window.
         out.push({ t: "quota", runner: "claude", windows, status: str(info.status), limitType: str(info.rateLimitType) });
       }
       break;
@@ -171,7 +171,7 @@ export function mapClaudeMessage(m: Any, s: ClaudeParserState): AgentEvent[] {
       // `total_cost_usd` and `modelUsage` are the session's running totals, not this turn's: they grow over the turns of
       // one process and carry on after `--resume` (recorded with Claude Code 2.1.311, resume-cost.jsonl); `result.usage`
       // counts this process only and leaves out subagents. So one usage per model of `modelUsage`, marked cumulative —
-      // the daemon books the difference (#2353). `modelUsage` has no 1-hour cache split; the cost is the runner's own.
+      // the daemon books the difference. `modelUsage` has no 1-hour cache split; the cost is the runner's own.
       const mu = m.modelUsage && typeof m.modelUsage === "object" ? (m.modelUsage as Record<string, Any>) : {};
       for (const [model, v] of Object.entries(mu)) {
         out.push({
@@ -264,7 +264,7 @@ export function initializeLine(requestId = "init-1"): string {
 }
 
 /**
- * AskUserQuestion's `questions` as the protocol's (#3056): `header` / an option's `description` absent → null,
+ * AskUserQuestion's `questions` as the protocol's: `header` / an option's `description` absent → null,
  * `multiSelect` absent → false. A malformed entry is left out.
  */
 export function askQuestionsOf(input: unknown): AskQuestion[] {

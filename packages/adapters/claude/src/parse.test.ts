@@ -102,7 +102,7 @@ describe("claude stream-json → AgentEvent (recorded replay)", () => {
   });
 });
 
-describe("result → usage per model (#2353)", () => {
+describe("result → usage per model", () => {
   test("every model of modelUsage is its own cumulative usage, with that model's cost and tokens", () => {
     const p = createClaudeParser();
     const evs = p.feed(JSON.stringify({
@@ -121,7 +121,7 @@ describe("result → usage per model (#2353)", () => {
   });
 });
 
-describe("--resume (recorded against Claude Code 2.1.261, issue #2)", () => {
+describe("--resume (recorded against Claude Code 2.1.261)", () => {
   test.skipIf(skipRecordings("packages/adapters/claude/fixtures/resume-turn.jsonl"))("a resumed process re-announces the same session id and answers from the earlier context", () => {
     assertRecordings("packages/adapters/claude/fixtures/resume-turn.jsonl");
     const p = createClaudeParser();
@@ -142,11 +142,11 @@ describe("--resume (recorded against Claude Code 2.1.261, issue #2)", () => {
     assertRecordings("packages/adapters/claude/fixtures/resume-turn.jsonl");
     const p = createClaudeParser();
     const usage = resumeFixture.split("\n").flatMap((l) => p.feed(l)).filter((e) => e.t === "usage");
-    // the result's figures are modelUsage's, which has no 1-hour split (the cost is the runner's own, #2353)
+    // the result's figures are modelUsage's, which has no 1-hour split (the cost is the runner's own)
     expect(usage.map((e) => (e.t === "usage" ? [e.source, e.cacheWriteTokens, e.cacheWrite1hTokens] : []))).toEqual([["turn", 585, 585], ["reported", 585, undefined]]);
   });
 
-  test.skipIf(skipRecordings("packages/adapters/claude/fixtures/fork-turn.jsonl"))("fork: new session id, answers pelican not heron (Claude Code 2.1.314, #2999)", () => {
+  test.skipIf(skipRecordings("packages/adapters/claude/fixtures/fork-turn.jsonl"))("fork: new session id, answers pelican not heron (Claude Code 2.1.314)", () => {
     assertRecordings("packages/adapters/claude/fixtures/fork-turn.jsonl");
     // one process of two turns (pelican, then heron), a process forked at the first turn's session.end.turn, and the parent resumed after it
     const p = createClaudeParser();
@@ -202,7 +202,7 @@ describe("--resume (recorded against Claude Code 2.1.261, issue #2)", () => {
     expect(evs.filter((e) => e.t === "usage" && e.source === "reported")).toHaveLength(0); // modelUsage is empty: nothing spent
   });
 
-  test.skipIf(skipRecordings("packages/adapters/claude/fixtures/resume-cost.jsonl"))("the result's cost is the session's running total, and --resume carries it on (Claude Code 2.1.311, #2353)", () => {
+  test.skipIf(skipRecordings("packages/adapters/claude/fixtures/resume-cost.jsonl"))("the result's cost is the session's running total, and --resume carries it on (Claude Code 2.1.311)", () => {
     assertRecordings("packages/adapters/claude/fixtures/resume-cost.jsonl");
     // two processes of one session: the second was started with --resume
     const results = resumeCostFixture.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l)).filter((m) => m.type === "result");
@@ -229,7 +229,7 @@ describe("--resume (recorded against Claude Code 2.1.261, issue #2)", () => {
     expect(flow).toEqual(["session.start", "background 1", "session.end", "background 0", "session.start", "session.end"]);
   });
 
-  test.skipIf(skipRecordings("packages/adapters/claude/fixtures/guard-unavailable.jsonl"))("guard unavailable (fixtures/guard-unavailable.jsonl): the blocked Bash replays as tool.result ok:false with the hook's reason (Claude Code 2.1.311, #1573)", () => {
+  test.skipIf(skipRecordings("packages/adapters/claude/fixtures/guard-unavailable.jsonl"))("guard unavailable (fixtures/guard-unavailable.jsonl): the blocked Bash replays as tool.result ok:false with the hook's reason (Claude Code 2.1.311)", () => {
     assertRecordings("packages/adapters/claude/fixtures/guard-unavailable.jsonl");
     // the guard in --settings points at a path that does not exist, with onFailure "block"; the model runs `touch ./made` once
     const p = createClaudeParser();
@@ -265,7 +265,7 @@ describe("--resume (recorded against Claude Code 2.1.261, issue #2)", () => {
     expect(resumed).not.toContain("--no-session-persistence");
   });
 
-  test("buildArgs: effort becomes --effort, also on a resume; none when unset or empty (#833)", () => {
+  test("buildArgs: effort becomes --effort, also on a resume; none when unset or empty", () => {
     const flag = (args: string[]) => (args.includes("--effort") ? args[args.indexOf("--effort") + 1] : undefined);
     expect(flag(buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", effort: "high" }))).toBe("high");
     expect(flag(buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", effort: "low", resumeSessionId: "abc" }))).toBe("low");
@@ -284,7 +284,7 @@ describe("--resume (recorded against Claude Code 2.1.261, issue #2)", () => {
     expect(buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", guards: [] })).not.toContain("--settings");
   });
 
-  test("task settings allow skill operations: allow goes to permissions.allow in the same --settings as the hooks (#2150)", () => {
+  test("task settings allow skill operations: allow goes to permissions.allow in the same --settings as the hooks", () => {
     const settings = (o: { guards?: string[]; allow?: string[] }) => {
       const args = buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", ...o });
       expect(args.filter((a) => a === "--settings").length).toBeLessThanOrEqual(1);
@@ -300,7 +300,7 @@ describe("--resume (recorded against Claude Code 2.1.261, issue #2)", () => {
     expect(settings({ guards: [], allow: [] })).toBeUndefined();
   });
 
-  test("buildArgs: always --strict-mcp-config with only the handed MCP servers in --mcp-config (#2090)", () => {
+  test("buildArgs: always --strict-mcp-config with only the handed MCP servers in --mcp-config", () => {
     const config = (args: string[]) => (args.includes("--strict-mcp-config") ? args[args.indexOf("--mcp-config") + 1] : undefined);
     expect(config(buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p" }))).toBe('{"mcpServers":{}}');
     const playwright = { command: "npx", args: ["@playwright/mcp@latest", "--headless"] };
@@ -522,7 +522,7 @@ describe("spawn plumbing", () => {
   });
 });
 
-describe("models (#155)", () => {
+describe("models", () => {
   test("cliDefaultModel is the model of the user's settings.json, read on every call; absent when unset, missing or malformed", () => {
     const dir = mkdtempSync(join(tmpdir(), "claude-home-"));
     try {
@@ -541,7 +541,7 @@ describe("models (#155)", () => {
   });
 });
 
-describe("efforts (#833)", () => {
+describe("efforts", () => {
   test.skipIf(skipRecordings("packages/adapters/claude/fixtures/effort-high.jsonl"))("effort: a turn recorded with --effort high (fixtures/effort-high.jsonl) replays as session.start … session.end(ok)", async () => {
     assertRecordings("packages/adapters/claude/fixtures/effort-high.jsonl");
     const lines = (recordingText("packages/adapters/claude/fixtures/effort-high.jsonl")).split("\n").filter(Boolean);
@@ -562,7 +562,7 @@ describe("efforts (#833)", () => {
   });
 });
 
-describe("login (#180)", () => {
+describe("login", () => {
   /** A stand-in `claude`: `--version` answers, `auth status` runs `authStatus` (shell). */
   function fakeClaude(dir: string, authStatus: string): string {
     const bin = join(dir, `claude-${Math.random().toString(16).slice(2)}`);
@@ -586,7 +586,7 @@ describe("login (#180)", () => {
     }
   });
 
-  test("loginKind is the authMethod of `claude auth status` (#2528): claude.ai / api_key → console / absent or an old CLI → none; the account never reaches the detection", async () => {
+  test("loginKind is the authMethod of `claude auth status`: claude.ai / api_key → console / absent or an old CLI → none; the account never reaches the detection", async () => {
     const dir = mkdtempSync(join(tmpdir(), "claude-login-"));
     const who = `"email":"someone@example.com","orgName":"Acme Org","accountName":"Some Person"`;
     const kind = async (stdout: string, exit = 0) => createClaudeAdapter({ bin: fakeClaude(dir, `echo '${stdout}'; exit ${exit}`) }).detect();
@@ -607,7 +607,7 @@ describe("login (#180)", () => {
     }
   });
 
-  test("loginExpiresAt of `claude auth status` (#3867): ISO or a number (s below 1e12, else ms) → epoch ms; absent, unreadable or not JSON → none; the account never reaches the detection", async () => {
+  test("loginExpiresAt of `claude auth status`: ISO or a number (s below 1e12, else ms) → epoch ms; absent, unreadable or not JSON → none; the account never reaches the detection", async () => {
     const dir = mkdtempSync(join(tmpdir(), "claude-login-"));
     const status = async (stdout: string) => loginStatus(fakeClaude(dir, `echo '${stdout}'; exit 0`));
     try {
@@ -629,7 +629,7 @@ describe("login (#180)", () => {
     }
   });
 
-  test("a multibyte character cut at the end of stderr does not break the stdout JSON (#2528)", async () => {
+  test("a multibyte character cut at the end of stderr does not break the stdout JSON", async () => {
     const dir = mkdtempSync(join(tmpdir(), "claude-login-"));
     try {
       // 0xE3 0x81 is the first two bytes of あ: stderr ends mid-character while stdout is valid JSON
@@ -640,7 +640,7 @@ describe("login (#180)", () => {
     }
   });
 
-  test("the claude adapter offers `auth logout` (#2528)", () => {
+  test("the claude adapter offers `auth logout`", () => {
     expect(createClaudeAdapter().logoutArgs).toEqual(["auth", "logout"]);
   });
 

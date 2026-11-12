@@ -4,7 +4,7 @@ import { join, relative, resolve } from "node:path";
 import type { Workspace } from "@switchboard/protocol";
 import { SKILL_MARKER, SKILL_TARGETS } from "./skillsync.ts";
 
-/** What a runner reads from the repository at the start of a Task (#2576): before anyone has looked, a foreign repository's copy must not run. */
+/** What a runner reads from the repository at the start of a Task: before anyone has looked, a foreign repository's copy must not run. */
 export const RUNNER_CONFIG_PATHS = [".claude/settings.json", ".claude/settings.local.json", ".claude/CLAUDE.md", ".claude/skills", ".claude/agents", ".claude/commands", ".claude/rules", ".claude/hooks", ".agents/skills", ".codex", "CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".mcp.json"];
 
 const SHOWN_BYTES = 256 * 1024;

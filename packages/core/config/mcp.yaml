@@ -1,4 +1,4 @@
-# mcp.yaml — Workspace MCP policy (proposal §3 "Workspace MCP", issue #10).
+# mcp.yaml — Workspace MCP policy (proposal §3 "Workspace MCP").
 #
 # exec.run: a command runs IMMEDIATELY only when all of these hold; anything else raises permission.ask and waits:
 #   - it parses as a single argv (quotes ok) with no shell syntax at all: no ; | & < > $ ` ( ) { } newline
@@ -16,7 +16,7 @@
 # It is then spawned WITHOUT a shell, with a minimal environment (PATH with its absolute entries only, HOME, PWD, TERM,
 # LANG, LC_ALL when set, a TMPDIR that does not exist, GIT_OPTIONAL_LOCKS=0, GIT_NO_LAZY_FETCH=1, and GIT_CEILING_DIRECTORIES set
 # to the folders above the scope, so git finds no repository that holds the scope), in the task cwd.
-# servers: the MCP servers a Claude Task gets (#2090), and the only ones it reads — the user-wide ones in ~/.claude.json
+# servers: the MCP servers a Claude Task gets, and the only ones it reads — the user-wide ones in ~/.claude.json
 # and a project's .mcp.json are not started (--strict-mcp-config). The shape is Claude Code's `mcpServers`; `workspaces`
 # (Workspace names) limits one to the Tasks of those Workspaces, without it every Task gets it. None by default:
 #   servers:

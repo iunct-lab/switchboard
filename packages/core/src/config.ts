@@ -6,7 +6,7 @@ export interface CoreConfig {
   /** Data directory: sqlite db, logs. Override with SWITCHBOARD_HOME. */
   home: string;
   /**
-   * `home` lives under a temporary directory (#64): everything written there can vanish, and a later start without
+   * `home` lives under a temporary directory: everything written there can vanish, and a later start without
    * the same SWITCHBOARD_HOME shows none of it. Surfaced in the boot log, /api/health and the UI.
    */
   homeIsTemp: boolean;
@@ -17,72 +17,72 @@ export interface CoreConfig {
   host: string;
   /**
    * The repository agents edit: registered as the "meta" workspace, where self-dev checks run. SWITCHBOARD_REPO_ROOT
-   * sets it when the daemon runs from an immutable release (#178); otherwise it is the tree this code lives in.
+   * sets it when the daemon runs from an immutable release; otherwise it is the tree this code lives in.
    */
   repoRoot: string;
   /** The tree this running code lives in (a release directory under sb-rescue): built web UI and shipped config defaults. */
   codeRoot: string;
   /**
-   * Started by sb-rescue on a copy of the database to see whether this version boots (#178, SWITCHBOARD_CANDIDATE=1).
+   * Started by sb-rescue on a copy of the database to see whether this version boots (SWITCHBOARD_CANDIDATE=1).
    * Nothing may act on that copy by itself: no schedules, no usage-limit resumes, no session-log import.
    */
   candidate: boolean;
-  /** sb-rescue's address when it started this daemon from a release (#178, SWITCHBOARD_RESCUE_URL): promotion goes through it. */
+  /** sb-rescue's address when it started this daemon from a release (SWITCHBOARD_RESCUE_URL): promotion goes through it. */
   rescueUrl?: string;
-  /** 人が開く救援画面の URL（#399）。sb-rescue の管理下のときだけ: クラウドホストは SWITCHBOARD_WEB_URL の /rescue/、Mac は rescueUrl。 */
+  /** 人が開く救援画面の URL。sb-rescue の管理下のときだけ: クラウドホストは SWITCHBOARD_WEB_URL の /rescue/、Mac は rescueUrl。 */
   rescuePageUrl?: string;
   /** Optional built web UI to serve when present. */
   webDist: string;
   /** How long a finished runner process is kept alive for follow-ups before it is released (then `--resume` is used). */
   runnerIdleMs: number;
-  /** How long a review job (#3992) may print nothing before `ops-kit idle-run` cuts it (seconds). Default 900, as cross-runner-review runs it. */
+  /** How long a review job may print nothing before `ops-kit idle-run` cuts it (seconds). Default 900, as cross-runner-review runs it. */
   jobReviewIdleS: number;
   /**
    * The Markdown folder that is the source of truth for rules / commands / notes. Override with SWITCHBOARD_KNOWLEDGE.
    * Default ~/Knowledge, or <home>/Knowledge when the data folder is temporary (a test or a fake-runner daemon must not
-   * write into the user's Inbox, #2865).
+   * write into the user's Inbox).
    */
   knowledgeDir: string;
-  /** Local API token file (issue #31). Required on /api and /ws when `host` is not loopback. */
+  /** Local API token file. Required on /api and /ws when `host` is not loopback. */
   tokenPath: string;
-  /** Public base URL handed to MCP clients (e.g. inside Docker use http://host.docker.internal:47831). On loopback its host name is also an allowed Host (#1135). */
+  /** Public base URL handed to MCP clients (e.g. inside Docker use http://host.docker.internal:47831). On loopback its host name is also an allowed Host. */
   publicUrl?: string;
-  /** Claude Code's session logs (#91). Override with SWITCHBOARD_CLAUDE_PROJECTS; tests point it at an empty folder. */
+  /** Claude Code's session logs. Override with SWITCHBOARD_CLAUDE_PROJECTS; tests point it at an empty folder. */
   claudeProjectsDir: string;
-  /** Where Claude Code writes its /insights report (`report.html`, #1838): `<CLAUDE_CONFIG_DIR or ~/.claude>/usage-data`. Override with SWITCHBOARD_CLAUDE_USAGE_DATA (tests). */
+  /** Where Claude Code writes its /insights report (`report.html`): `<CLAUDE_CONFIG_DIR or ~/.claude>/usage-data`. Override with SWITCHBOARD_CLAUDE_USAGE_DATA (tests). */
   claudeUsageDataDir: string;
-  /** Codex's home: session logs under `sessions/` (#179, moved by export / import). Override with SWITCHBOARD_CODEX_HOME. */
+  /** Codex's home: session logs under `sessions/` (moved by export / import). Override with SWITCHBOARD_CODEX_HOME. */
   codexHome: string;
-  /** Uploaded attachments (#124), inside `home`. */
+  /** Uploaded attachments, inside `home`. */
   attachmentsDir: string;
-  /** Registered reports (#1777), inside `home`: `<taskId>/<artifactId>/…`. */
+  /** Registered reports, inside `home`: `<taskId>/<artifactId>/…`. */
   artifactsDir: string;
   /** How often the logs are re-read for terminal sessions; 0 = only at boot and on POST /api/history/import. */
   historyPollMs: number;
   /**
-   * The environment's stop command (#181, SWITCHBOARD_IDLE_STOP_CMD): called with the next wake time (ISO, or "-")
+   * The environment's stop command (SWITCHBOARD_IDLE_STOP_CMD): called with the next wake time (ISO, or "-")
    * after 20 idle minutes. Only a machine that may be stopped sets it (the cloud host); unset = the daemon never asks.
    */
   idleStopCmd?: string;
   /**
-   * The CDN's shared origin header value (#181, SWITCHBOARD_EDGE_HEADER_VALUE): set on a cloud host, every request not
-   * from this machine must carry it. Unset = no check (a Mac, the Tailscale route of #26).
+   * The CDN's shared origin header value (SWITCHBOARD_EDGE_HEADER_VALUE): set on a cloud host, every request not
+   * from this machine must carry it. Unset = no check (a Mac, the Tailscale route).
    */
   edgeHeaderValue?: string;
   /**
-   * GitHub's Webhook may reach POST /api/backlog/webhooks/github without the token (#887, SWITCHBOARD_GITHUB_WEBHOOK=1):
+   * GitHub's Webhook may reach POST /api/backlog/webhooks/github without the token (SWITCHBOARD_GITHUB_WEBHOOK=1):
    * the user opens it, as it is the one route anyone who reaches the daemon may call. Off = it asks for the token as
-   * every other route does. It opens only with `githubWebhookSecret` as well (#1493).
+   * every other route does. It opens only with `githubWebhookSecret` as well.
    */
   githubWebhook: boolean;
   /** The Webhook's Secret on GitHub (SWITCHBOARD_GITHUB_WEBHOOK_SECRET): each delivery's X-Hub-Signature-256 must match it. Unset = the route stays closed. */
   githubWebhookSecret?: string;
   /**
-   * Verifies the cloud host's login cookie (`sb_session`, #211, #701; SWITCHBOARD_SESSION_PUBLIC_KEY): the Ed25519 public
+   * Verifies the cloud host's login cookie (`sb_session`; SWITCHBOARD_SESSION_PUBLIC_KEY): the Ed25519 public
    * key, raw 32 bytes in base64url. The seed that signs stays with the Starter. Unset = tokens only.
    */
   sessionPublicKey?: string;
-  /** The cloud host's Starter (SWITCHBOARD_STARTER_URL): asked whether a login cookie's passkey is still registered (#708). */
+  /** The cloud host's Starter (SWITCHBOARD_STARTER_URL): asked whether a login cookie's passkey is still registered. */
   starterUrl?: string;
 }
 

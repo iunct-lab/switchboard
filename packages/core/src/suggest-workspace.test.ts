@@ -61,7 +61,7 @@ describe("WorkspaceSuggester (recorded Claude replay)", () => {
     expect(out.workspaceId).toBe("ws_dak");
     expect(out.reason.length).toBeGreaterThan(0);
     expect(starts[0]).toMatchObject({ cwd: "/tmp/switchboard-home/suggest", scope: ["/tmp/switchboard-home/suggest"], model: "claude-haiku-4-5", permissionMode: "plan" });
-    // one per model of the result's `modelUsage` (#2353)
+    // one per model of the result's `modelUsage`
     expect(usage.map((u) => [u.source, u.model])).toEqual([["reported", "claude-haiku-4-5-20251001"], ["reported", "claude-haiku-4-5"]]);
   });
 
@@ -89,7 +89,7 @@ describe("WorkspaceSuggester (recorded Claude replay)", () => {
   });
 });
 
-describe("POST /api/tasks without cwd and workspaceId (#135)", () => {
+describe("POST /api/tasks without cwd and workspaceId", () => {
   /** A daemon with two repositories besides the meta workspace, and a runner that answers the Workspace question by name. */
   async function boot(adapters: RunnerAdapter[]) {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-autows-"));
@@ -170,7 +170,7 @@ describe("POST /api/tasks without cwd and workspaceId (#135)", () => {
     }
   });
 
-  test("review #148: a Workspace whose directory is gone is refused before anything is asked, and a task that fails to start still carries the selection turn's cost", async () => {
+  test("a Workspace whose directory is gone is refused before anything is asked, and a task that fails to start still carries the selection turn's cost", async () => {
     const starts: StartOptions[] = [];
     const inner = chooser(starts, (p) => idOf(p, "beta"));
     // the task turn cannot start; the selection turn (asked first) can
@@ -196,7 +196,7 @@ describe("POST /api/tasks without cwd and workspaceId (#135)", () => {
     }
   });
 
-  test("settings tunables (#835): judgeAndChoice.workspaceChoiceTimeoutMs gives up on a runner that does not answer, read at each choice", async () => {
+  test("settings tunables: judgeAndChoice.workspaceChoiceTimeoutMs gives up on a runner that does not answer, read at each choice", async () => {
     const never: RunnerAdapter = {
       ...replayAdapter(() => []),
       start(o, emit) {

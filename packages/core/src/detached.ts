@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
- * Processes a task left behind (#1397). The runner's environment carries
+ * Processes a task left behind. The runner's environment carries
  * SWITCHBOARD_TASK_ID; anything the task started (setsid and nohup keep the environment) still has it in
  * /proc/<pid>/environ after leaving the process tree. Linux only: without /proc nothing is found.
  */
@@ -18,7 +18,7 @@ export const read = (path: string): string | undefined => {
 
 export const HOME_MARK = "SWITCHBOARD_DAEMON_HOME";
 
-/** What the daemon itself started a process for (`judge` = a scoring / rubric / suggestion turn), for the load sampler (#2086). */
+/** What the daemon itself started a process for (`judge` = a scoring / rubric / suggestion turn), for the load sampler. */
 export const DAEMON_JOB_MARK = "SWITCHBOARD_DAEMON_JOB";
 
 export const statFields = (procRoot: string, pid: number): string[] | undefined => {

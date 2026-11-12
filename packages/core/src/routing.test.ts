@@ -93,7 +93,7 @@ describe("routing rule table", () => {
   });
 });
 
-describe("CompositeSuggester (#25)", () => {
+describe("CompositeSuggester", () => {
   const rule = new RuleSuggester(() => table);
   const ctx: RoutingContext = { ...base, title: "PR review", prompt: "" };
   const never = new AbortController().signal;

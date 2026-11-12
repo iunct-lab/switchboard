@@ -86,7 +86,7 @@ const sample = (tree = TREE) => {
 };
 const byPid = (a: Attributed[]) => new Map(a.map((p) => [p.pid, p]));
 
-describe("ops-load (#2086)", () => {
+describe("ops-load", () => {
   test("readCgroup reads the unit, PSI and docker's unit", () => {
     const { cg, host } = sample();
     expect(cg.dir).toBe(join(host.cgRoot, "system.slice", "switchboard.service"));
@@ -226,7 +226,7 @@ describe("ops-load (#2086)", () => {
   });
 });
 
-describe("ops-load sampler (#2086)", () => {
+describe("ops-load sampler", () => {
   const db = () => {
     const dir = mkdtempSync(join(tmpdir(), "switchboard-ops-load-db-"));
     roots.push(dir);
@@ -288,7 +288,7 @@ describe("ops-load sampler (#2086)", () => {
   });
 });
 
-describe("memoryHeadroom (#1141, #4556)", () => {
+describe("memoryHeadroom", () => {
   const MB = 1024 * 1024;
   const host = (meminfo: string | null, heavy: string | null) => {
     const dir = mkdtempSync(join(tmpdir(), "switchboard-ops-load-headroom-"));

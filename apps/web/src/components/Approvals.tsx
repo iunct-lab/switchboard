@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import type { Artifact, Ask, AskAnswer, AskBatch, AskChanged, AskList, PendingApproval, PolicyInput } from "@switchboard/protocol";
 import { api } from "../api.ts";
 import { ArtifactBody } from "./Artifacts.tsx";
@@ -8,12 +8,53 @@ import { t } from "../i18n.ts";
 import { panels as m } from "../i18n/panels.ts";
 import { task as tm } from "../i18n/task.ts";
 import { answerOf, answersOf, type QuestionChoice } from "../questions.ts";
-import { answerButtons, answerTarget, withoutGrant, appliedLine, askCardParts, questionHead, BATCH_LABEL, batchLines, mergeBatchRows, mergeChosen, mergeChosenAskIds, UNKNOWN_WORKSPACE, blockerLines, groupAsks, hiddenByBatches, isQuick, quickGroups, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, resumeLabel, scopeLabel, STATE_LABEL, issueOpenHref, unblockLinks, unblocksLine, workspaceChips, workspaceKey, workspaceSections, type Answered, type PolicyForm } from "../asks.ts";
+import { answerButtons, answerTarget, withoutGrant, appliedLine, askCardParts, questionHead, BATCH_LABEL, batchLines, blockerLines, groupAsks, hiddenByBatches, isQuick, quickGroups, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, resumeLabel, scopeLabel, STATE_LABEL, issueOpenHref, unblockLinks, unblocksLine, workspaceChips, workspaceKey, workspaceSections, type Answered, type PolicyForm } from "../asks.ts";
+
+/** The 「次回も使う」 form of a card (#938): the range, target, conditions and expiry, and what would be saved. */
+function PolicyDetails(props: { ask: Ask; busy: boolean; form: PolicyForm; setForm: Dispatch<SetStateAction<PolicyForm | null>>; policy: PolicyInput | undefined; answerText: string }) {
+  const { ask: x, busy, form, setForm, policy, answerText } = props;
+  return (
+    <details className="ask-policy" onToggle={(e) => { const open = e.currentTarget.open; setForm((f) => (f && f.opened !== open ? { ...f, opened: open } : f)); }}>
+      <summary>{t(m.policyReuse, { scope: scopeLabel(form.scope, x) })}</summary>
+      <div className="ask-policy-body">
+        {x.policy.scopes.map((s) => (
+          <label key={s} className="ask-policy-scope">
+            <input type="radio" name={`scope-${x.id}`} checked={form.scope === s} disabled={busy} onChange={() => setForm({ ...form, scope: s })} /> {scopeLabel(s, x)}
+          </label>
+        ))}
+        {form.scope !== "once" && (
+          <>
+            <label className="ask-policy-field">
+              {t(m.policyTarget)}
+              <input value={form.target} disabled={busy} onChange={(e) => setForm({ ...form, target: e.target.value })} />
+            </label>
+            {form.when.map((w, i) => (
+              <label key={w.key} className="ask-policy-scope">
+                <input type="checkbox" checked={w.on} disabled={busy} onChange={(e) => setForm({ ...form, when: form.when.map((y, j) => (j === i ? { ...y, on: e.target.checked } : y)) })} /> {t(m.policyCondition, { key: w.key, value: w.value })}
+              </label>
+            ))}
+            <label className="ask-policy-field">
+              {t(m.policyExpires)}
+              <input type="date" value={form.expires} disabled={busy} onChange={(e) => setForm({ ...form, expires: e.target.value })} />
+            </label>
+            {policy && (
+              <ul className="hint ask-policy-summary">
+                {policySummary(x, policy, answerText).map((l) => (
+                  <li key={l}>{l}</li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
+      </div>
+    </details>
+  );
+}
 
 /**
  * A question tool's questions on a card (#3058): a fieldset per question — its options (checkboxes for multiSelect), or a
- * free-text field for a question without options — and one 回答する once every question has an answer. No policy: the
- * answers are that turn's.
+ * free-text field for a question without options — and one 回答する once every question has an answer. The first
+ * question's text is the card's own question above, so its fieldset does not say it again.
  */
 function QuestionFields(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAnswer) => void }) {
   const { ask: x, busy } = props;
@@ -24,11 +65,13 @@ function QuestionFields(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAnswe
     <div className="ask-questions">
       {x.questions.map((q, i) => (
         <fieldset key={i}>
-          <legend>
-            {q.header && <span className="tag">{q.header}</span>}
-            {q.question}
-            {q.multiSelect && <span className="hint">{t(tm.multiSelect)}</span>}
-          </legend>
+          {(q.header || i > 0 || q.multiSelect) && (
+            <legend>
+              {q.header && <span className="tag">{q.header}</span>}
+              {i > 0 && q.question}
+              {q.multiSelect && <span className="hint">{t(tm.multiSelect)}</span>}
+            </legend>
+          )}
           {q.options.map((o) => (
             <label key={o.label} className="opt">
               <input
@@ -51,7 +94,9 @@ function QuestionFields(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAnswe
       <button className="pri" disabled={busy || !answer} title={answer ? "" : t(tm.answerAllTitle)} onClick={() => answer && props.onAnswer(answer)}>
         {t(tm.answer)}
       </button>
-      <div className="hint ask-send">{t(m.sendTyped, { target: answerTarget(x), next: x.next ?? t(m.unknown) })}</div>
+      <div className="hint ask-send">
+        {t(tm.sendChosen, { target: answerTarget(x), next: x.next ?? t(m.unknown) })}
+      </div>
     </div>
   );
 }
@@ -72,7 +117,7 @@ export function AnswerArea(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAn
             {l}
           </div>
         ))}
-        <QuestionFields ask={x} busy={busy} onAnswer={(a) => props.onAnswer(a)} />
+        <QuestionFields ask={x} busy={busy} onAnswer={props.onAnswer} />
       </div>
     );
   return <AnswerButtons {...props} />;
@@ -96,42 +141,7 @@ function AnswerButtons(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAnswer
           {l}
         </div>
       ))}
-      {(buttons.length > 0 || takesText) && form && (
-        <details className="ask-policy" onToggle={(e) => { const open = e.currentTarget.open; setForm((f) => (f && f.opened !== open ? { ...f, opened: open } : f)); }}>
-          <summary>{t(m.policyReuse, { scope: scopeLabel(form.scope, x) })}</summary>
-          <div className="ask-policy-body">
-            {x.policy.scopes.map((s) => (
-              <label key={s} className="ask-policy-scope">
-                <input type="radio" name={`scope-${x.id}`} checked={form.scope === s} disabled={busy} onChange={() => setForm({ ...form, scope: s })} /> {scopeLabel(s, x)}
-              </label>
-            ))}
-            {form.scope !== "once" && (
-              <>
-                <label className="ask-policy-field">
-                  {t(m.policyTarget)}
-                  <input value={form.target} disabled={busy} onChange={(e) => setForm({ ...form, target: e.target.value })} />
-                </label>
-                {form.when.map((w, i) => (
-                  <label key={w.key} className="ask-policy-scope">
-                    <input type="checkbox" checked={w.on} disabled={busy} onChange={(e) => setForm({ ...form, when: form.when.map((y, j) => (j === i ? { ...y, on: e.target.checked } : y)) })} /> {t(m.policyCondition, { key: w.key, value: w.value })}
-                  </label>
-                ))}
-                <label className="ask-policy-field">
-                  {t(m.policyExpires)}
-                  <input type="date" value={form.expires} disabled={busy} onChange={(e) => setForm({ ...form, expires: e.target.value })} />
-                </label>
-                {policy && (
-                  <ul className="hint ask-policy-summary">
-                    {policySummary(x, policy, buttons[0]?.send ?? t(m.typedText)).map((l) => (
-                      <li key={l}>{l}</li>
-                    ))}
-                  </ul>
-                )}
-              </>
-            )}
-          </div>
-        </details>
-      )}
+      {(buttons.length > 0 || takesText) && form && <PolicyDetails ask={x} busy={busy} form={form} setForm={setForm} policy={policy} answerText={buttons[0]?.send ?? t(m.typedText)} />}
       {/* a grant's note (not saved as a policy, #2745) is the API's refusal only: the card is as its mockup */}
       {x.policy.note && !form && !x.grant && !x.grants.some(Boolean) && <div className="hint ask-policy-note">{x.policy.note}</div>}
       {buttons.length > 0 && (
@@ -339,7 +349,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
         ))}
       </section>
       {batches.map((b) => (
-        <BatchCard key={b.id} batch={b} asks={all} onOpenTask={props.onOpenTask} onError={props.onError} onDone={load} />
+        <BatchCard key={b.id} batch={b} onOpenTask={props.onOpenTask} onError={props.onError} onDone={load} />
       ))}
       {unlisted.map((a) => (
         <section key={askId(a)} className="card ask approval" data-ask={askId(a)}>
@@ -492,28 +502,15 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
  * The Tasks stopped on the same wait, across Workspaces (#2046): sso = one 「ログインする」 sends the oldest Task on to log
  * in (its device code shows here), the rest go on after it; deploy = the chosen Tasks (all at first) get the approval.
  */
-export function BatchCard(props: { batch: AskBatch; asks: Ask[]; onOpenTask: (id: string) => void; onError: (m: string) => void; onDone: () => void }) {
+export function BatchCard(props: { batch: AskBatch; onOpenTask: (id: string) => void; onError: (m: string) => void; onDone: () => void }) {
   const { batch: b } = props;
   const [off, setOff] = useState<Set<string>>(new Set());
-  // security-merge: nothing is chosen at first (the others start with everything chosen); a tick is on the question (its askId)
-  const [on, setOn] = useState<Set<string>>(new Set());
-  // security-merge: what became of the Tasks sent last (a PR that moved shows its sentence under its row)
-  const [notSent, setNotSent] = useState<Map<string, string>>(new Map());
   const [busy, setBusy] = useState(false);
-  const merge = b.kind === "security-merge";
-  const rows = merge ? mergeBatchRows(b, Date.now(), props.asks) : [];
-  const chosen = merge ? mergeChosen(rows, on) : b.asks.map((a) => a.taskId).filter((id) => !off.has(id));
+  const chosen = b.asks.map((a) => a.taskId).filter((id) => !off.has(id));
   const press = () => {
     setBusy(true);
     api
-      .answerBatch(b.id, b.kind === "sso" ? undefined : chosen, merge ? mergeChosenAskIds(rows, on) : undefined)
-      .then((r) => {
-        if ("results" in r) {
-          setNotSent(new Map(r.results.flatMap((x) => (x.result === "changed" || x.result === "failed" ? [[x.taskId, x.detail ?? ""] as const] : []))));
-          // what was sent is no longer chosen; a row left (changed / failed) is chosen again by a new tick
-          setOn(new Set());
-        }
-      })
+      .answerBatch(b.id, b.kind === "sso" ? undefined : chosen)
       .catch((e) => props.onError(t(m.batchFailed, { batch: BATCH_LABEL[b.kind], error: String(e.message ?? e) })))
       // read again either way: a failure part way leaves the Tasks already sent out of the batch
       .finally(() => {
@@ -521,38 +518,6 @@ export function BatchCard(props: { batch: AskBatch; asks: Ask[]; onOpenTask: (id
         props.onDone();
       });
   };
-  if (merge) {
-    const names = new Map(props.asks.flatMap((a) => (a.workspace ? [[a.workspace.id, a.workspace.name] as const] : [])));
-    const sections = [...new Set(rows.map((r) => r.workspaceId ?? ""))].map((key) => ({ key, name: names.get(key) ?? UNKNOWN_WORKSPACE, rows: rows.filter((r) => (r.workspaceId ?? "") === key) }));
-    return (
-      <section className="card ask ask-batch ask-merge-batch" data-batch={b.id}>
-        <h5>
-          {BATCH_LABEL[b.kind]} <span className="hint">{rows.length}</span>
-        </h5>
-        {sections.map((sec) => (
-          <div key={sec.key} className="ask-merge-ws">
-            <h6>{sec.name} <span className="hint">{sec.rows.length}</span></h6>
-            {sec.rows.map((r) => (
-              <div key={r.taskId} className="ask-merge-row" data-task={r.taskId}>
-                <label>
-                  <input type="checkbox" checked={on.has(r.askId)} disabled={busy || !r.selectable} title={r.selectable ? undefined : t(m.mergeNoChoice)} onChange={(e) => setOn((s) => { const n = new Set(s); if (e.target.checked) n.add(r.askId); else n.delete(r.askId); return n; })} />
-                  <span className="ask-merge-main">
-                    <span>{r.pr !== null ? `PR #${r.pr}` : ""} · <button type="button" className="ghost link" onClick={(ev) => { ev.preventDefault(); props.onOpenTask(r.taskId); }}>{r.title}</button></span>
-                    {r.reasons.map((x, i) => <span key={i} className="ask-merge-reason">{x}</span>)}
-                  </span>
-                  <span className="ask-merge-meta">{r.diff && <>{r.diff} · </>}{r.waited}</span>
-                </label>
-                {notSent.has(r.taskId) && <div className="hint warn ask-merge-changed">{t(m.mergeNotSent, { detail: notSent.get(r.taskId) ?? "" })}</div>}
-              </div>
-            ))}
-          </div>
-        ))}
-        <div className="approval-actions">
-          <button className="pri" disabled={busy || chosen.length === 0} onClick={press}>{t(m.approveMerges)}</button>
-        </div>
-      </section>
-    );
-  }
   return (
     <section className="card ask ask-batch" data-batch={b.id}>
       <h5>

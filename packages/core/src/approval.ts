@@ -10,7 +10,7 @@ import { issueOf } from "./stops.ts";
 const SHELL_SYNTAX = /[;|&<>$`(){}\n\r]/;
 
 /**
- * Approval rules (issue #13). Knowledge documents carry
+ * Approval rules. Knowledge documents carry
  *   approval: { confirm: ["docker-compose*.yml", ".github/**"], allow: ["*.md", "bun test*"] }
  * Patterns are globs matched against the path a write touches (relative to the scope root, and absolute) or the
  * command an exec runs. `confirm` always wins over `allow`; with no match the default stays "ask every time".
@@ -74,7 +74,7 @@ export function subjectsOf(ask: Extract<AgentEvent, { t: "permission.ask" }>, ta
   return { kind: "path", values, blocked };
 }
 
-/** The saved answer policies (#938) an approval is also checked against, after the Knowledge `confirm` rules and before `allow`. */
+/** The saved answer policies an approval is also checked against, after the Knowledge `confirm` rules and before `allow`. */
 export interface PolicyView {
   list: AnswerPolicy[];
   pbiOpen: (workspaceId: string | null, number: number) => boolean;
@@ -106,13 +106,13 @@ export function evaluate(rules: ApprovalRuleSet[], ask: Extract<AgentEvent, { t:
   return { decision: "ask" };
 }
 
-/** The `confirm` rule that fires on a tool approval, or null (what always asks, #938: a saved policy never overrides it). */
+/** The `confirm` rule that fires on a tool approval, or null (what always asks: a saved policy never overrides it). */
 export function confirmHitOf(rules: ApprovalRuleSet[], ask: Extract<AgentEvent, { t: "permission.ask" }>, task: Task): ApprovalRuleMatch | null {
   const v = evaluate(rules, ask, task);
   return v.decision === "ask" && v.match?.mode === "confirm" ? v.match : null;
 }
 
-/** The `confirm` rule that fires on a stop record's `<op> <target>` read as a command (#938), or null. */
+/** The `confirm` rule that fires on a stop record's `<op> <target>` read as a command, or null. */
 export function confirmHitOfCommand(rules: ApprovalRuleSet[], command: string): ApprovalRuleMatch | null {
   for (const r of rules) for (const pattern of r.confirm) if (globMatch(pattern, command, true)) return { source: r.source, pattern, mode: "confirm", subject: command };
   return null;
@@ -125,12 +125,12 @@ export class ApprovalRules {
     private workspaceById: (id: string) => Workspace | null = () => null,
     private policies: () => Omit<PolicyView, "now"> = () => ({ list: [], pbiOpen: () => true }),
   ) {}
-  /** The confirm rule a Task's tool approval hits (#938), or null. */
+  /** The confirm rule a Task's tool approval hits, or null. */
   confirmHit(task: Task, ask: Extract<AgentEvent, { t: "permission.ask" }>): ApprovalRuleMatch | null {
     const ws = this.workspaceOf(task);
     return confirmHitOf(rulesFromDocs(this.store.list(), ws), ask, task);
   }
-  /** The confirm rule a saved policy's subject hits (#938): an approval's path / command, or a stop record's `<op> <target>`. */
+  /** The confirm rule a saved policy's subject hits: an approval's path / command, or a stop record's `<op> <target>`. */
   confirmOf(workspaceId: string | null, kind: string, op: string, target: string): ApprovalRuleMatch | null {
     const rules = rulesFromDocs(this.store.list(), workspaceId ? this.workspaceById(workspaceId) : null);
     if (kind !== "approval") return confirmHitOfCommand(rules, `${op} ${target}`);

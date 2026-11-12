@@ -87,7 +87,7 @@ describe("model-catalog", () => {
   });
 
   test("hostReaders: a codex that does not answer is stopped at the limit and the read fails with the limit", async () => {
-    // The limit ends before Bun's idleTimeout (120 s) would close the settings request with no reason shown (#3845).
+    // The limit ends before Bun's idleTimeout (120 s) would close the settings request with no reason shown.
     expect(CODEX_CATALOG_TIMEOUT_MS).toBeLessThan(120_000);
     const dir = mkdtempSync(join(tmpdir(), "switchboard.model-catalog."));
     try {

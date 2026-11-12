@@ -7,7 +7,7 @@ import { newId } from "./db.ts";
 import type { Scope } from "./mcp.ts";
 
 /**
- * Staged writes (proposal §3 "Workspace MCP", issue #11). `fs.write` / `fs.patch` never touch the repository:
+ * Staged writes (proposal §3 "Workspace MCP"). `fs.write` / `fs.patch` never touch the repository:
  * the change is stored here with the file's content at staging time, shown to the user as a diff, and only written
  * when they apply it. A file that changed underneath a staged edit is a conflict and must be re-staged.
  *

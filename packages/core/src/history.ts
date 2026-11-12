@@ -31,7 +31,7 @@ const MAX_HEAD_BYTES = 8 * 1024 * 1024;
 const CHUNK = 64 * 1024;
 
 /**
- * Terminal sessions (#91). Claude Code logs every session under `~/.claude/projects/<dir>/<sessionId>.jsonl`;
+ * Terminal sessions. Claude Code logs every session under `~/.claude/projects/<dir>/<sessionId>.jsonl`;
  * Switchboard already relies on that folder for `--resume`. The importer reads it and turns sessions the person ran
  * in a terminal into tasks with `origin: "terminal"`, so they sit next to the tasks Switchboard started, with the
  * same transcript, the same ledger and the same 差分 tab.
@@ -307,7 +307,7 @@ export class HistoryImporter {
           workspaceReason: null,
           titlePending: false,
           outcome: "unknown",
-          // the person watched it in the terminal (#492): not listed under 要対応; a continued turn keeps it reviewed
+          // the person watched it in the terminal: not listed under 要対応; a continued turn keeps it reviewed
           reviewedAt: s.lastTs ?? events.at(-1)!.ts,
           archivedAt: null,
           judgedResult: null,

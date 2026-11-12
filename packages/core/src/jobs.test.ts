@@ -6,10 +6,10 @@ import { join } from "node:path";
 import type { Job, JobRequest, Task } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import { Db } from "./db.ts";
-import { jobCommand, JobError, JOBS_KEEP_MS, type JobDeps, pruneJobDirs, recoverJobs, requestJob, sameRepository } from "./jobs.ts";
+import { jobCommand, JobError, JOBS_KEEP_MS, type JobDeps, pruneJobDirs, localCiPendingDir, recoverJobs, requestJob, sameRepository } from "./jobs.ts";
 import { startServer } from "./server.ts";
 
-// Jobs a Task asks the daemon to run (#3992): the daemon's child, not the Task's; its end is recorded once.
+// Jobs a Task asks the daemon to run: the daemon's child, not the Task's; its end is recorded once.
 
 const mkTask = (id: string, cwd: string): Task => {
   const at = Date.now();
@@ -50,7 +50,7 @@ function fake(script: string) {
 }
 const local = (cwd = repo): JobRequest => ({ kind: "local-ci", taskId: "t1", pr: 12, cwd });
 
-describe("jobs (#3992)", () => {
+describe("jobs", () => {
   test("a job is the daemon's child and its end is recorded with the log's tail", async () => {
     const { deps, ended } = fake("echo hello; sleep 0.3; exit 3");
     const job = requestJob(deps, local());
@@ -236,6 +236,49 @@ test("pruneJobDirs removes the folders of jobs that ended more than 7 days ago; 
   d.close();
 });
 
+test("recoverJobs collects the results left by local CI once: a local-ci job left running or a pending record, not a review or nothing", () => {
+  const pendingDir = join(root, "pending-collect");
+  rmSync(pendingDir, { recursive: true, force: true });
+  let calls = 0;
+  const deps = (): JobDeps => ({ db, dir: join(root, "jobs-collect"), env: {}, bootId: () => "boot-now", pollMs: 60_000, pendingDir, collectPending: () => { calls++; } });
+  const leave = (kind: "local-ci" | "review") => {
+    const j = db.insertJob({ kind, taskId: "t1", pr: 1, runner: kind === "review" ? "claude" : null, cwd: repo, startedAt: Date.now() });
+    db.setJobPid(j.id, 999_999_999, "boot-now");
+    return j;
+  };
+  const ends = (id: number) => db.finishJob(id, { status: "aborted", exitCode: null, summary: "", endedAt: Date.now() });
+  // nothing left, no pending directory
+  recoverJobs(deps());
+  expect(calls).toBe(0);
+  // a review alone does not
+  const review = leave("review");
+  recoverJobs(deps());
+  expect(calls).toBe(0);
+  ends(review.id);
+  // a local-ci job left running does, once (even with a review beside it)
+  const ci = leave("local-ci");
+  leave("review");
+  recoverJobs(deps());
+  expect(calls).toBe(1);
+  expect(db.getJob(ci.id)!.status).toBe("aborted");
+  // a local-ci job still alive in this boot (a restart while it waits on its build) writes its own result: no collect
+  const live = db.insertJob({ kind: "local-ci", taskId: "t1", pr: 1, runner: null, cwd: repo, startedAt: Date.now() });
+  db.setJobPid(live.id, process.pid, "boot-now");
+  recoverJobs(deps());
+  expect(calls).toBe(1);
+  expect(db.getJob(live.id)!.status).toBe("running");
+  ends(live.id);
+  // an empty pending directory does not; a record in it does
+  mkdirSync(pendingDir, { recursive: true });
+  recoverJobs(deps());
+  expect(calls).toBe(1);
+  writeFileSync(join(pendingDir, "123.json"), "{}");
+  recoverJobs(deps());
+  expect(calls).toBe(2);
+  // the path is one place for the collector to share
+  expect(localCiPendingDir("/h")).toBe("/h/.cache/switchboard.local-ci-pending");
+});
+
 test("a job's end and recoverJobs prune the folder of a job that ended more than 7 days ago", async () => {
   const day = 24 * 3600 * 1000;
   const { deps, ended } = fake("exit 0");
@@ -255,7 +298,7 @@ test("a job's end and recoverJobs prune the folder of a job that ended more than
   expect(existsSync(atStart)).toBe(false);
 });
 
-describe("/api/jobs (#3992)", () => {
+describe("/api/jobs", () => {
   test("POST answers 400 outside the repository and 202 with the job; GET lists it", async () => {
     const home = join(root, "home");
     const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_PORT: "0", SWITCHBOARD_CLAUDE_PROJECTS: join(tmpdir(), "switchboard-test-no-claude-projects"), SWITCHBOARD_HISTORY_POLL_MS: "0" });

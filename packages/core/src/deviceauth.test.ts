@@ -43,7 +43,7 @@ function lingering(starts: StartOptions[]): RunnerAdapter {
 
 const j = (r: Response) => r.json() as Promise<any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-describe("DeviceAuths (#662)", () => {
+describe("DeviceAuths", () => {
   test("refuses a URL that is not https, an over-long code and a wait outside 1–900 s, without the value in the message", () => {
     const auths = new DeviceAuths(() => undefined);
     const ok = { url: URL_, code: CODE, command: "cloud login", expiresInSec: 60 };
@@ -74,7 +74,7 @@ describe("DeviceAuths (#662)", () => {
   });
 });
 
-describe("/api/tasks/:id/device-auth (#662)", () => {
+describe("/api/tasks/:id/device-auth", () => {
   let home: string;
   let core: Awaited<ReturnType<typeof startServer>>;
   let base: string;
@@ -112,7 +112,7 @@ describe("/api/tasks/:id/device-auth (#662)", () => {
     const env = starts.at(-1)?.env ?? {};
     expect(env.DEVICE_AUTH_URL).toBe(`${base}/api/tasks/${task.id}/device-auth`);
     expect(env.DEVICE_AUTH_TOKEN_FILE).toBe(join(home, "token"));
-    // the kit's `backlog` reaches the stored backlog the same way (#918)
+    // the kit's `backlog` reaches the stored backlog the same way
     expect([env.BACKLOG_URL, env.BACKLOG_TOKEN_FILE]).toEqual([`${base}/api/backlog`, join(home, "token")]);
 
     expect(await fetch(`${base}/api/tasks/${task.id}/device-auth`).then(j)).toBeNull();

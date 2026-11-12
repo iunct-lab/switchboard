@@ -22,7 +22,7 @@ describe("config", () => {
     expect(defaultConfig().storyPoints).toBeUndefined();
   });
 
-  test("defaultConfig is the kit's template with Area app, no Phase and no Milestone (#2361)", () => {
+  test("defaultConfig is the kit's template with Area app, no Phase and no Milestone", () => {
     const template = JSON.parse(require("node:fs").readFileSync(TEMPLATE_CONFIG, "utf8"));
     const cfg = defaultConfig();
     expect(cfg.fields).toEqual({ area: ["app"], kind: template.fields.kind, priority: template.fields.priority });
@@ -30,7 +30,7 @@ describe("config", () => {
     expect([cfg.fields.phase, cfg.milestone]).toEqual([undefined, undefined]);
   });
 
-  test("a config with forge parses (#920); its keys are checked", () => {
+  test("a config with forge parses; its keys are checked", () => {
     const base = JSON.parse(require("node:fs").readFileSync(join(fixtures, "config-no-phase.json"), "utf8"));
     expect(parseConfig({ ...base, forge: { service: "github" } }).forge).toEqual({ service: "github" });
     expect(() => parseConfig({ ...base, forge: { service: "" } })).toThrow(/forge\.service/);
@@ -39,7 +39,7 @@ describe("config", () => {
     expect(loadConfig(join(import.meta.dir, "../../ops.config.json")).forge).toEqual({ service: "github" });
   });
 
-  test("GitLab's forge names its host and project (#892); GitHub's names neither", () => {
+  test("GitLab's forge names its host and project; GitHub's names neither", () => {
     const base = JSON.parse(require("node:fs").readFileSync(join(fixtures, "config-no-phase.json"), "utf8"));
     const lab = { service: "gitlab", host: "gitlab.example.com", project: "group/sub/app" };
     expect(parseConfig({ ...base, forge: lab }).forge).toEqual(lab);

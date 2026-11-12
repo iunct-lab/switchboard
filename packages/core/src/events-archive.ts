@@ -4,7 +4,7 @@ import type { Database } from "bun:sqlite";
 import { ageBinary } from "./transfer.ts";
 
 /**
- * Moving the bodies of a finished task's events out of the database (#1431).
+ * Moving the bodies of a finished task's events out of the database.
  *
  * Two steps with the upload between them, which is the shell's (`aws/host/archive.sh`, like `export`): `prepare` writes
  * one encrypted file per old finished task and a manifest; `commit` replaces the rows of the tasks the shell reports as
@@ -116,7 +116,7 @@ export function commitEventsArchive(db: Database, outDir: string, uploaded: Map<
     const key = uploaded.get(m.taskId);
     if (!key) continue;
     // IMMEDIATE: a deferred one reads first and then cannot write once the daemon committed in between — SQLITE_BUSY_SNAPSHOT,
-    // which busy_timeout does not wait out ("database is locked" failed the 2026-10-20 archive after the upload; #1597 is the same)
+    // which busy_timeout does not wait out ("database is locked" failed the 2026-10-20 archive after the upload)
     const moved = db.transaction(() => {
       const t = db.query("SELECT status, events_archive_key AS key, events_archived_max_seq AS maxSeq FROM tasks WHERE id = ?").get(m.taskId) as { status: string; key: string | null; maxSeq: number | null } | null;
       // Already archived up to this seq: the same manifest twice. (A seq, not a ts: an import keeps the time a record happened.)

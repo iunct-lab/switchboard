@@ -8,7 +8,7 @@ import { Db } from "./db.ts";
 import baseline from "./schema-baseline.json";
 
 /**
- * Migrations are additive (#178, docs/design/releases-and-rescue.md): a rollback puts an older daemon on the newer
+ * Migrations are additive (docs/design/releases-and-rescue.md): a rollback puts an older daemon on the newer
  * database without restoring it, so a table or column that a released version reads must never go away or change name.
  * schema-baseline.json is append-only — a line is added with the column, and never removed or edited.
  */
@@ -58,7 +58,7 @@ test("busy_timeout is 5000", () => {
   }
 });
 
-// #688: Litestream's checkpoint holds the write lock for a moment; without busy_timeout the daemon's INSERT threw SQLITE_BUSY and the daemon exited.
+// Litestream's checkpoint holds the write lock for a moment; without busy_timeout the daemon's INSERT threw SQLITE_BUSY and the daemon exited.
 test("waits for another process's write lock instead of failing with SQLITE_BUSY", async () => {
   const dir = mkdtempSync(join(tmpdir(), "switchboard-busy-"));
   const path = join(dir, "switchboard.db");
@@ -87,7 +87,7 @@ test("waits for another process's write lock instead of failing with SQLITE_BUSY
   }
 });
 
-test("migration moves a done task with a background mark to background once (#4208)", () => {
+test("migration moves a done task with a background mark to background once", () => {
   const dir = mkdtempSync(join(tmpdir(), "switchboard-bgstatus-"));
   try {
     const path = join(dir, "switchboard.db");

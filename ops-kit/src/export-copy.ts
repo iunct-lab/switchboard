@@ -3,7 +3,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, 
 import { dirname, join, relative, resolve, sep } from "node:path";
 
 /**
- * A copy of the kit for a repository that cannot read this one (a public repository vendors it, #205 criterion 6).
+ * A copy of the kit for a repository that cannot read this one (a public repository vendors it).
  * The copy holds what runs (no tests, no test fixtures), `KIT_VERSION` says which commit it came from, and it is
  * checked against the private-words list before it replaces anything: a hit removes the copy and fails.
  */
@@ -53,7 +53,7 @@ function kitVersion(kit: string, now: Date): string {
   return [`commit ${head.stdout.trim()}`, `date ${now.toISOString()}`, ...(dirty ? ["dirty キットに未コミットの変更があった"] : [])].join("\n") + "\n";
 }
 
-/** What goes into the copy, from the kit's root. Only `--help`'s config example comes from fixtures/, only `lint`'s default choices (#2361) from template/. */
+/** What goes into the copy, from the kit's root. Only `--help`'s config example comes from fixtures/, only `lint`'s default choices from template/. */
 const PARTS = ["README.md", "src", "skills", "bin", "public", "package.json", "fixtures/config-with-phase.json", "template/ops.config.json"];
 
 export interface ExportOptions {

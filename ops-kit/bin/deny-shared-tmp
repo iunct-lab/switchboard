@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // deny-shared-tmp
-// Claude Code's PreToolUse hook for Bash (#764, docs/design/shared-tmp-guard.md). A command that writes or removes a
+// Claude Code's PreToolUse hook for Bash (docs/design/shared-tmp-guard.md). A command that writes or removes a
 // fixed name right under /tmp stops here with exit 2; the reason goes to the agent on the standard error. Input that
 // cannot be read lets the command through, so a fault of the hook never stops every Bash call.
 import { sharedTmpWrites } from "../src/shared-tmp.ts";

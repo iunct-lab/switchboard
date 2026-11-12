@@ -60,7 +60,7 @@ describe("preamble", () => {
   });
 });
 
-describe("telemetryEnv (#4308)", () => {
+describe("telemetryEnv", () => {
   test("telemetryEnv: off by default adds the disabling variables, on adds none", () => {
     const off = { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", DISABLE_TELEMETRY: "1", DISABLE_ERROR_REPORTING: "1", DISABLE_AUTOUPDATER: "1" };
     expect(telemetryEnv({})).toEqual(off);
@@ -100,7 +100,7 @@ describe("telemetryEnv (#4308)", () => {
   });
 });
 
-describe("bedrock (#1730)", () => {
+describe("bedrock", () => {
   test("the child gets CLAUDE_CODE_USE_BEDROCK and AWS_REGION only when StartOptions.bedrock is set, even if the parent env has CLAUDE_CODE_USE_BEDROCK", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sb-claude-bedrock-"));
     const bin = join(dir, "claude");
@@ -133,7 +133,7 @@ describe("bedrock (#1730)", () => {
   });
 });
 
-describe("question tool (#3056)", () => {
+describe("question tool", () => {
   test("question tool ends the turn: AskUserQuestion is declined once with the deferred reply, nothing left pending", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sb-claude-question-"));
     const got = join(dir, "reply.jsonl");

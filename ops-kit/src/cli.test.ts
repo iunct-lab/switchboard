@@ -283,7 +283,7 @@ describe("cli", () => {
     }
   });
 
-  test("mr uses GitLab's own MR and discussions through glab in a GitLab checkout; a GitHub one is told to use gh (#923)", async () => {
+  test("mr uses GitLab's own MR and discussions through glab in a GitLab checkout; a GitHub one is told to use gh", async () => {
     const home = mkdtempSync(join(tmpdir(), "ops-kit-cli-mr-"));
     const was = process.cwd();
     const calls: string[][] = [];
@@ -350,7 +350,7 @@ test("lint --no-project does not resolve a missing Project URL", async () => {
   expect(await main(["lint", "--no-project", "--config", path], gh, () => {}, () => {}, Bun.sleep, { ...process.env, BACKLOG_URL: undefined })).toBe(0);
 });
 
-test("lint names another workspace by the app's stored values and checks （リリース）on an Issue against that repository (#4335)", async () => {
+test("lint names another workspace by the app's stored values and checks （リリース）on an Issue against that repository", async () => {
   const pbi = "## ユーザーストーリー\nx\n## 到達点 / 受け入れ条件\n- [ ] 1. x\n## スコープ外\nx\n## 元要望\n#1（x）\n\n**Story Points**: 5\n";
   const task = "## 親 PBI\n#2\n**前提**: #7（リリース）\n## やること\nx\n## 手順\nx\n## 検証\nx\n## 完了条件\nx\n";
   const issue = { state: "OPEN", stateReason: null, updatedAt: "", parent: null, subIssues: [] as number[] };
@@ -375,7 +375,7 @@ test("lint names another workspace by the app's stored values and checks （リ�
   }
 });
 
-test("lint without ops.config.json checks a workspace without GitHub with the template's choices (#2361)", async () => {
+test("lint without ops.config.json checks a workspace without GitHub with the template's choices", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ops-kit.noconfig."));
   const pbi = "## ユーザーストーリー\nx\n## 到達点 / 受け入れ条件\n- [ ] 1. x\n## スコープ外\nx\n## 元要望\n#1（x）\n\n**Story Points**: 5\n";
   const task = "## 親 PBI\n#2\n## やること\nx\n## 手順\nx\n## 検証\nx\n## 完了条件\nx\n";
@@ -405,7 +405,7 @@ test("lint without ops.config.json checks a workspace without GitHub with the te
   }
 });
 
-describe("set / triage with BACKLOG_URL (#2694)", () => {
+describe("set / triage with BACKLOG_URL", () => {
   // a fake app: what it was asked, and the stored fields of the one Issue
   function fakeApp() {
     const calls: Array<{ method: string; path: string; body: unknown }> = [];
@@ -550,7 +550,7 @@ describe("request with BACKLOG_URL", () => {
   });
 });
 
-describe("backlog without BACKLOG_URL (#3071)", () => {
+describe("backlog without BACKLOG_URL", () => {
   // the same two Issues, stored in a fake app and answered by a fake GitHub
   const pbi = { number: 12, title: "PBI: 題", state: "OPEN", labels: ["type:pbi", "area:one"], body: "本文の行", url: "https://github.com/example/repo/issues/12", milestone: "Phase 0 — 始まり", parent: null };
   const task = { number: 13, title: "Task: 実装", state: "OPEN", labels: ["type:task"], body: "", url: "", milestone: null, parent: 12 };
@@ -592,7 +592,7 @@ describe("backlog without BACKLOG_URL (#3071)", () => {
   test("list and view read GitHub itself and show what the app shows for the same Issues", async () => {
     const app = fakeApp();
     try {
-      // GitHub's word search is wider than a part of the title: #13 comes back and is filtered out as in the app
+      // GitHub's word search is wider than a part of the title: `#13` comes back and is filtered out as in the app
       const search = () => ({ search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [ghIssue(task, null), ghIssue(pbi, fields), {}] } });
       const direct = await cli(["backlog", "list", "--label", "type:pbi"], { BACKLOG_URL: undefined }, [search]);
       const stored = await cli(["backlog", "list", "--label", "type:pbi"], { BACKLOG_URL: app.url }, []);
@@ -624,11 +624,11 @@ describe("backlog without BACKLOG_URL (#3071)", () => {
       expect(graphql(view.gh.calls[1])?.vars).toEqual({ o: "example", n: "repo", num: 12, after: "c100" });
       expect(view.lines[3]).toContain("同期 github  送信待ち 0");
       expect(graphql(view.gh.calls[0])?.vars).toEqual({ o: "example", n: "repo", num: 12, after: null });
-      // pbi-complete reads the Tasks of a PBI this way wherever it runs (#3072)
+      // pbi-complete reads the Tasks of a PBI this way wherever it runs
       const viewJson = await cli(["backlog", "view", "12", "--json"], { BACKLOG_URL: undefined }, [issue, page2]);
       expect(JSON.parse(viewJson.lines.join("\n")).issue.subIssues).toEqual([13]);
       expect(graphql(viewJson.gh.calls[0])?.query).toContain("subIssues");
-      // the reason of a close is read from GitHub too (#3146)
+      // the reason of a close is read from GitHub too
       const closed = () => ({ repository: { issue: { ...issue().repository.issue, state: "CLOSED", stateReason: "NOT_PLANNED", comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } });
       const viewClosed = await cli(["backlog", "view", "12"], { BACKLOG_URL: undefined }, [closed]);
       expect(viewClosed.lines[0]).toEndWith("[CLOSED not planned]");
@@ -710,7 +710,7 @@ describe("backlog without BACKLOG_URL (#3071)", () => {
         ["issue", "edit", "12", "-R", "example/repo", "--title", "新しい題", "--add-label", "area:two", "--remove-label", "area:one", "--remove-milestone"],
         ["issue", "close", "12", "-R", "example/repo"],
       ]);
-      // a reason goes with the close in one PATCH (#3146): an Issue closed already gets its reason changed too
+      // a reason goes with the close in one PATCH: an Issue closed already gets its reason changed too
       const reasoned = await cli(["backlog", "edit", "12", "--state", "closed", "--reason", "not-planned"], { BACKLOG_URL: undefined }, [() => ""]);
       expect([reasoned.code, reasoned.gh.calls.map(runOf)]).toEqual([0, [["api", "-X", "PATCH", "repos/example/repo/issues/12", "-f", "state=closed", "-f", "state_reason=not_planned"]]]);
       const parentless = await cli(["backlog", "edit", "13", "--body-file", join(dir, "body.md"), "--state", "open", "--no-parent"], { BACKLOG_URL: undefined }, [readBody, () => "", () => ({ repository: { child: { id: "I13", parent: { id: "I12" } } } }), () => ({})]);

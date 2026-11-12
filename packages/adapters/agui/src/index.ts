@@ -300,7 +300,7 @@ class AguiSession implements RunnerSession {
     this.emit({ t: "session.end", status: "ok" });
   }
 
-  /** Permission asks left open are denied by timeout (no person answered: #651); questions just go. */
+  /** Permission asks left open are denied by timeout (no person answered); questions just go. */
   private dropPending() {
     for (const [id, p] of this.pending) if (p.kind === "permission" && !this.answers.has(id)) this.emit({ t: "permission.resolved", id, decision: "deny", by: "timeout" });
     this.pending.clear();

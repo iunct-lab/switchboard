@@ -27,7 +27,7 @@ beforeAll(() => {
 });
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
-describe("task diff (#12)", () => {
+describe("task diff", () => {
   test("touchedPaths collects write-class tool calls (incl. NotebookEdit) and artifacts, resolving relative paths against the scope root", () => {
     const paths = touchedPaths(
       [

@@ -11,7 +11,7 @@ export * from "./history.ts";
 export { claudeFolderTrust, cloudTrustGuidance } from "./cloud.ts";
 
 /**
- * Permission modes of Claude Code 2.1.x as `--permission-mode` / `set_permission_mode` accept them (#58). `manual`
+ * Permission modes of Claude Code 2.1.x as `--permission-mode` / `set_permission_mode` accept them. `manual`
  * is the CLI's alias for `default`; the config value is what goes on the wire.
  */
 export const CLAUDE_PERMISSION_MODES: PermissionModeOption[] = [
@@ -29,7 +29,7 @@ export const CLAUDE_PERMISSION_MODES: PermissionModeOption[] = [
  */
 export const CLAUDE_DEFAULT_PERMISSION_MODE = "auto";
 
-/** Models offered in the UI (#155). `--model` takes any id or alias, so one that is missing here can still be typed. */
+/** Models offered in the UI. `--model` takes any id or alias, so one that is missing here can still be typed. */
 export const CLAUDE_MODELS: ModelOption[] = [
   { value: "claude-fable-5-1", label: "Fable 5.1" },
   { value: "claude-opus-5-5", label: "Opus 5.5" },
@@ -39,7 +39,7 @@ export const CLAUDE_MODELS: ModelOption[] = [
 ];
 
 /**
- * The same models by their Amazon Bedrock ids (#1730): the global inference profile of each (`global.` + the id the
+ * The same models by their Amazon Bedrock ids: the global inference profile of each (`global.` + the id the
  * CLI's own Bedrock table has as `anthropic.<id>`). Offered only while the runner is switched to Bedrock; which of
  * them the account can call is up to IAM.
  */
@@ -47,7 +47,7 @@ export const CLAUDE_MODELS: ModelOption[] = [
 const BEDROCK_SPELLING: Record<string, string> = { "claude-haiku-4-5": "claude-haiku-4-5-20251001-v1:0" };
 export const CLAUDE_BEDROCK_MODELS: ModelOption[] = CLAUDE_MODELS.map((m) => ({ value: `global.anthropic.${BEDROCK_SPELLING[m.value] ?? m.value}`, label: m.label }));
 
-/** Thinking efforts offered in the UI (#833): the values `claude --effort` takes. */
+/** Thinking efforts offered in the UI: the values `claude --effort` takes. */
 export const CLAUDE_EFFORTS: ModelOption[] = ["low", "medium", "high", "xhigh", "max"].map((value) => ({ value, label: value }));
 
 /**
@@ -87,7 +87,7 @@ export function childEnv(base: NodeJS.ProcessEnv = process.env, extra: Record<st
 }
 
 /**
- * What makes the child run on Amazon Bedrock (#1730): only when the user chose it (`opts.bedrock`). Without it nothing
+ * What makes the child run on Amazon Bedrock: only when the user chose it (`opts.bedrock`). Without it nothing
  * is added, and `childEnv` has already dropped the parent's `CLAUDE_CODE_USE_BEDROCK`, so a lapsed Claude login never
  * turns into Bedrock by itself. No AWS key is passed or read: the CLI takes credentials from the usual AWS places.
  */
@@ -96,7 +96,7 @@ export function bedrockEnv(opts: Pick<StartOptions, "bedrock">): Record<string, 
 }
 
 /**
- * Stops the CLI's own non-essential sending (#4308) unless the user allowed it (`opts.runnerTelemetry`, Settings
+ * Stops the CLI's own non-essential sending unless the user allowed it (`opts.runnerTelemetry`, Settings
  * `outbound.runnerTelemetry`): telemetry, error reports, the auto-updater. Auto mode's classifier is a model call, not
  * telemetry, so it still works (checked against the real CLI).
  */
@@ -110,7 +110,7 @@ export function subagentEnv(opts: Pick<StartOptions, "subagentEffort">): Record<
 }
 
 /**
- * Where the child sends its OpenTelemetry logs (#2236, docs/design/claude-otel.md): only the daemon's loopback port for
+ * Where the child sends its OpenTelemetry logs (docs/design/claude-otel.md): only the daemon's loopback port for
  * this Task, with the Task's token. Metrics and traces are off; `classifier_category` needs `OTEL_LOG_TOOL_DETAILS`.
  */
 export function otelEnv(opts: Pick<StartOptions, "otel">): Record<string, string> {
@@ -148,28 +148,28 @@ export function buildArgs(opts: StartOptions, extra: string[] = []): string[] {
   for (const dir of opts.scope) {
     if (dir && dir !== opts.cwd) args.push("--add-dir", dir);
   }
-  // the guards (#764) as PreToolUse hooks for Bash and the skills' operations as allow rules (#2150), in one --settings;
+  // the guards as PreToolUse hooks for Bash and the skills' operations as allow rules, in one --settings;
   // Claude Code adds them to the repository's own hooks and rules. A guard that cannot run blocks the call
-  // (onFailure, Claude Code 2.1.295) instead of letting the Bash through unchecked (#1573)
+  // (onFailure, Claude Code 2.1.295) instead of letting the Bash through unchecked
   const hooks = opts.guards?.length
     ? { PreToolUse: [{ matcher: "Bash", hooks: opts.guards.map((command) => ({ type: "command", command, onFailure: "block" })) }] }
     : undefined;
   const permissions = opts.allow?.length ? { allow: opts.allow } : undefined;
   if (hooks || permissions) args.push("--settings", JSON.stringify({ ...(hooks ? { hooks } : {}), ...(permissions ? { permissions } : {}) }));
-  // only the MCP servers Switchboard hands over: the user-wide ones would start per task, used or not (#2090)
+  // only the MCP servers Switchboard hands over: the user-wide ones would start per task, used or not
   args.push("--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers: opts.mcpServers ?? {} }));
   args.push(...extra);
   return args;
 }
 
-/** What to type in a terminal tab when the login has run out (#180). Prints a URL to open elsewhere, then takes the code. */
+/** What to type in a terminal tab when the login has run out. Prints a URL to open elsewhere, then takes the code. */
 export const CLAUDE_LOGIN_HINT = "claude auth login";
 
 /**
  * `claude auth status` (2.1.281): exit 0 = logged in, 1 = not. Of its stdout only `authMethod` is read (`claude.ai` =
- * a Claude account, `api_key` = an Anthropic Console account, #2528); the account, email and organization it also
- * names are never looked at, and the credential files neither (#180). `loginExpiresAt` (from 2.1.318) is read too, as
- * `expiresAt` in epoch ms (#3867). No answer within `timeoutMs`, or a CLI without the subcommand → unknown.
+ * a Claude account, `api_key` = an Anthropic Console account); the account, email and organization it also
+ * names are never looked at, and the credential files neither. `loginExpiresAt` (from 2.1.318) is read too, as
+ * `expiresAt` in epoch ms. No answer within `timeoutMs`, or a CLI without the subcommand → unknown.
  */
 export async function loginStatus(exe: string, timeoutMs = 10_000): Promise<{ login: RunnerLogin; kind?: LoginKind; expiresAt?: number }> {
   try {
@@ -216,7 +216,7 @@ function loginFieldsOf(stdout: string): { kind?: LoginKind; expiresAt?: number }
 
 /**
  * An ISO 8601 date-time with a zone (`2026-11-20T00:15:00Z`, `…+09:00`), or a number: seconds below 1e12, milliseconds
- * from it (the shape on 2.1.318 is not yet seen, #3867). Anything else, and a date that does not exist (Feb 30), is none.
+ * from it (the shape on 2.1.318 is not yet seen). Anything else, and a date that does not exist (Feb 30), is none.
  */
 function expiresAtOf(v: unknown): number | undefined {
   if (typeof v === "number") return Number.isFinite(v) && v > 0 ? (v < 1e12 ? v * 1000 : v) : undefined;
@@ -468,7 +468,7 @@ class ClaudeSession implements RunnerSession {
         this.turnActive = false;
       }
       if (m?.type === "control_request" && m.request?.subtype === "can_use_tool") {
-        // the question tool (#3056) is declined at once with the deferred reply: the turn ends, the answers come as the next message
+        // the question tool is declined at once with the deferred reply: the turn ends, the answers come as the next message
         if (m.request.tool_name === "AskUserQuestion") this.write(permissionResponseLine(m.request_id, "deny", m.request.input, QUESTION_DEFERRED_REPLY));
         else this.pending.set(m.request_id, m.request.input);
       }

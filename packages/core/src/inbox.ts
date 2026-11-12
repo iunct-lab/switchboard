@@ -3,7 +3,7 @@ import type { InboxNote, KnowledgeDoc } from "@switchboard/protocol";
 import type { KnowledgeStore } from "./knowledge.ts";
 
 /**
- * Inbox (proposal Screen A, issue #9): notes that are not yet tied to a repository.
+ * Inbox (proposal Screen A): notes that are not yet tied to a repository.
  * A note is just a Markdown file under notes/ in the Knowledge folder with a little frontmatter;
  * promoting it to a Task records the task id on the note instead of deleting anything.
  */
@@ -89,8 +89,8 @@ export class Inbox {
   }
 
   /**
-   * Closes, once, the notes the daemon left before its notices moved to 判断待ち (#2866): open notes with a `source` in their
-   * frontmatter (a schedule's notice, #2401) or titled `workspace … を使えません` (#2802). The user's drafts are left;
+   * Closes, once, the notes the daemon left before its notices moved to 判断待ち: open notes with a `source` in their
+   * frontmatter (a schedule's notice) or titled `workspace … を使えません`. The user's drafts are left;
    * the files stay in notes/. Returns how many were closed.
    */
   closeDaemonNotes(now = new Date()): number {
@@ -132,7 +132,7 @@ export class Inbox {
   }
 
   /**
-   * Rewrite a draft's title and body (#3032). The other frontmatter keys and the path stay: the file name came from the
+   * Rewrite a draft's title and body. The other frontmatter keys and the path stay: the file name came from the
    * first title, and promotion and close address the note by it. Without a title the current one stays.
    */
   edit(path: string, input: { title?: string; text: string }): InboxNote {

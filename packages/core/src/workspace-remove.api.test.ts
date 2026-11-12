@@ -7,7 +7,7 @@ import type { RunnerAdapter, Workspace, WorkspaceRemoval } from "@switchboard/pr
 import { loadConfig } from "./config.ts";
 import { startServer, type CoreServer } from "./server.ts";
 
-// Removing a registration and, when asked, the local copy (#2600).
+// Removing a registration and, when asked, the local copy.
 
 let core: CoreServer | undefined;
 let root: string | undefined;
@@ -170,7 +170,7 @@ test("two workspaces of one repository share the stored backlog: it stays until 
   for (const w of [a, b]) probe.setWorkspaceBacklogSource(w.id, source as any);
   probe.putBacklogSnapshot(source, { records: [{ objectKind: "issue", externalId: "I_1", remote: { number: 1 }, fetchState: "fetched" }] as any, cursor: null, syncedAt: 1 });
   expect((await t.send("DELETE", `/api/workspaces/${a.id}`)).status).toBe(200);
-  // straight from the table: the daemon wrote it, and a Db's list keeps its own copy (#3080)
+  // straight from the table: the daemon wrote it, and a Db's list keeps its own copy
   const stored = () => (probe.sqlite.query("SELECT COUNT(*) AS n FROM backlog_records WHERE repository = ?").get(source.repository) as { n: number }).n;
   expect(stored()).toBe(1);
   expect((await t.send("DELETE", `/api/workspaces/${b.id}`)).status).toBe(200);

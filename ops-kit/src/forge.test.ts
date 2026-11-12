@@ -7,7 +7,7 @@ import { DEFAULT_SERVICE, forgeOf, LOCAL_SERVICE, forgeTargetOf, ForgeRefused, r
 import { githubForge } from "./forge-github.ts";
 import { appForge } from "./forge-app.ts";
 
-// The forge operations (#920): the service is picked by the target, what is not supported is said, nothing that signs in goes out.
+// The forge operations: the service is picked by the target, what is not supported is said, nothing that signs in goes out.
 
 const github: ForgeTarget = { service: "github", host: "github.com", repository: "example/app" };
 
@@ -69,7 +69,7 @@ describe("forge", () => {
     }
   });
 
-  test("GitLab's target is the host and project its forge names, only when the checkout's origin is that project (#892)", () => {
+  test("GitLab's target is the host and project its forge names, only when the checkout's origin is that project", () => {
     const dir = mkdtempSync(join(tmpdir(), "ops-kit-forge-"));
     try {
       writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ forge: { service: "gitlab", host: "gitlab.example.com", project: "Group/Sub/App" } }));
@@ -103,7 +103,7 @@ describe("forge", () => {
     await expect(runForgeOperation({ kind: "verification", target: { ...github, repository: null }, payload: { pr: 9, body: "c" } }, { github: impl })).rejects.toThrow("リポジトリ");
   });
 
-  test("a checkout with no origin and no forge is the app (#2488); a forge named still wins; forgeTargetOf stays GitHub", () => {
+  test("a checkout with no origin and no forge is the app; a forge named still wins; forgeTargetOf stays GitHub", () => {
     const dir = mkdtempSync(join(tmpdir(), "ops-kit-forge-local-"));
     try {
       Bun.spawnSync(["git", "init", "-q", dir]);
@@ -127,7 +127,7 @@ describe("forge", () => {
     }
   });
 
-  test("the app's verification is a comment on the change through the app's API (#2488); without the app it fails, nothing sent", async () => {
+  test("the app's verification is a comment on the change through the app's API; without the app it fails, nothing sent", async () => {
     const calls: Array<{ method: string; path: string; body: unknown }> = [];
     const fetch = async (url: string, init: RequestInit = {}) => {
       const path = url.replace("http://app/api/backlog", "");

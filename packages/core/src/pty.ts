@@ -1,8 +1,8 @@
-// Terminal tab (#16): one interactive shell per task, in the task's cwd. The PTY is bun-pty (bun:ffi) inside the
+// Terminal tab: one interactive shell per task, in the task's cwd. The PTY is bun-pty (bun:ffi) inside the
 // daemon — no bridge process. A shell outlives its WebSocket clients; it ends when
 // the task ends (onTaskEnd), when the user exits it, when close() is called, or with the daemon.
 // The first frame to a socket is PtyAttached (the session's id); after that, output as raw strings. A socket that comes
-// back with ?shell=<id> is attached to that session only — never to a new shell (#1137).
+// back with ?shell=<id> is attached to that session only — never to a new shell.
 import { childEnv } from "@switchboard/adapter-claude";
 import type { TerminalStatus } from "@switchboard/protocol";
 import type { IPty } from "bun-pty";
@@ -24,11 +24,11 @@ const TELEPORT_ENTER_DELAY_MS = 300;
 /** The name `/rename` gives the continued session: a fixed word, so nothing from the Cloud Task is typed into the CLI. */
 export const TELEPORT_SESSION_NAME = "continued-from-cloud";
 
-/** The first frame to a terminal socket: which session it is on, for ?shell= when it comes back (#1137). */
+/** The first frame to a terminal socket: which session it is on, for ?shell= when it comes back. */
 export type PtyAttached = { type: "attached"; shell: string };
 
 /**
- * Claude Code's Program Status Protocol (OSC 7501, #1574): `ESC ] 7501 ; state=<s>:app=claude-code[:…] BEL`. Claude Code
+ * Claude Code's Program Status Protocol (OSC 7501): `ESC ] 7501 ; state=<s>:app=claude-code[:…] BEL`. Claude Code
  * sends it only when the terminal answers its `ESC ] 7501 ; ?` question before the device attributes reply, and xterm.js
  * does not answer, so the shell's session answers it (PTY_STATUS_REPLY). The output itself goes to the clients unchanged.
  */
@@ -125,7 +125,7 @@ export class PtyManager {
     }
   }
 
-  /** Active shells and imports (#181: keep the host alive until the result is delivered). */
+  /** Active shells and imports (keep the host alive until the result is delivered). */
   get size(): number {
     return [...this.sessions.values()].filter(s => s.pty !== null || s.kind === "importing").length;
   }
@@ -183,7 +183,7 @@ export class PtyManager {
       // Nothing is ever written before the CLI has resumed the target session: its questions (trust, stash, branch) are
       // the user's. After that, once it has been quiet, `/rename` records one local entry without asking the model: the
       // CLI writes the resumed conversation to its normal log only once this session records something, and prints the
-      // evidence (`claude --resume <UUID>`) only when that log exists (#1865). Once it confirms, one `/exit` ends it.
+      // evidence (`claude --resume <UUID>`) only when that log exists. Once it confirms, one `/exit` ends it.
       const t = this.timings;
       let timer: ReturnType<typeof setTimeout> | undefined, stage: "wait" | "naming" | "exiting" = "wait", typing = false, asking = false;
       const emit = (p: TeleportProgress) => { try { progress(p); } catch { /* A broken observer must not stop the CLI. */ } };

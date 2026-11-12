@@ -1,7 +1,7 @@
 import { SESSION_COOKIE } from "./auth";
 
 /**
- * The cloud host's request log (#1490): one JSON line per request and per strong operation, written to stdout (sb-rescue
+ * The cloud host's request log: one JSON line per request and per strong operation, written to stdout (sb-rescue
  * puts that in daemon.log; the CloudWatch agent ships it). Metadata only — never a body, a query, a cookie or a token.
  */
 
@@ -16,7 +16,7 @@ export function authKind(req: Request): AuthKind {
   return "none";
 }
 
-/** `ms` = until the handler returned its Response (#2101; the transfer is not in it), to 0.1 ms. */
+/** `ms` = until the handler returned its Response (the transfer is not in it), to 0.1 ms. */
 export function accessLine(e: { t: number; from: string | undefined; method: string; path: string; status: number; auth: AuthKind; ms: number }): string {
   return JSON.stringify({ log: "access", t: new Date(e.t).toISOString(), from: e.from ?? null, method: e.method, path: e.path, status: e.status, auth: e.auth, ms: Math.round(e.ms * 10) / 10 });
 }

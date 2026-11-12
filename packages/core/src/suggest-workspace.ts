@@ -20,7 +20,7 @@ export interface WorkspaceChoice {
 }
 
 /**
- * Asks a runner which registered Workspace a task belongs in (#135), when the person left the select on "自動".
+ * Asks a runner which registered Workspace a task belongs in, when the person left the select on "自動".
  * Same turn as `LlmSuggester` (one read-only turn, JSON out), but the answer decides rather than advises, so there
  * is no rule table to fall back to: anything unusable throws, and `POST /api/tasks` answers 409.
  */

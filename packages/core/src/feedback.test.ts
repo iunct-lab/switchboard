@@ -48,13 +48,13 @@ test("prompt hands over the request to be tidied without changing its intent, ci
   expect(feedbackTitle("😀".repeat(41))).toBe("要望: " + "😀".repeat(40));
 });
 
-test("the 出典 says 誰の言葉: 利用者, also for a request drafted from evals (#1818)", () => {
+test("the 出典 says 誰の言葉: 利用者, also for a request drafted from evals", () => {
   const when = new Date("2026-09-19T00:00:00Z");
   expect(buildFeedbackPrompt({ text: "x", when })).toEndWith("## 出典\n- 誰の言葉: 利用者\nフィードバックボタン、2026-09-19T00:00:00.000Z");
   expect(buildFeedbackPrompt({ text: "x", when, source: { kind: "eval", taskId: "task_9" } })).toContain("## 出典\n- 誰の言葉: 利用者\n");
 });
 
-test("artifact (#3682): the 出典 names the throwaway app, its Task and where its copy is; auto says Switchboard filed it", () => {
+test("artifact: the 出典 names the throwaway app, its Task and where its copy is; auto says Switchboard filed it", () => {
   const when = new Date("2026-11-05T00:00:00Z");
   const source = { kind: "artifact" as const, artifactId: "art_1", taskId: "task_9", copy: "~/.switchboard/artifacts/task_9/art_1/" };
   const p = buildFeedbackPrompt({ text: "使い捨てアプリ「ボード」を一般機能にしたい。", when, screen: "Task「t」(task_9)", source });
@@ -63,7 +63,7 @@ test("artifact (#3682): the 出典 names the throwaway app, its Task and where i
   expect(buildFeedbackPrompt({ text: "x", when, source, auto: true })).toContain("## 出典\n- 誰の言葉: 定期の検査（使い捨てアプリが使われた日数から Switchboard が起こした）\n自動、2026-11-05T00:00:00.000Z\n使い捨てアプリから: 成果物 art_1");
 });
 
-test("artifact (#3682): /api/feedback with an artifact source puts its copy in the 出典; an unknown artifact is 404 and starts nothing", async () => {
+test("artifact: /api/feedback with an artifact source puts its copy in the 出典; an unknown artifact is 404 and starts nothing", async () => {
   const base = await boot();
   const t = await (await post(base, { text: "元の Task" })).json() as Task;
   core.db.insertArtifact({ id: "art_fb", taskId: t.id, title: "board.html", kind: "file", source: "/w/board.html", entry: "board.html", mime: "text/html", size: 1, removedAt: null, createdAt: 1, updatedAt: 1, appDays: 1, appRequestTaskId: null });
@@ -78,7 +78,7 @@ test("artifact (#3682): /api/feedback with an artifact source puts its copy in t
   expect(core.db.listTasks(false).length).toBe(n);
 });
 
-test("app-use (#3682): read on 3 separate days, the app starts one request Task; the 4th day does not start another", async () => {
+test("app-use: read on 3 separate days, the app starts one request Task; the 4th day does not start another", async () => {
   const base = await boot();
   const origin = await (await post(base, { text: "元の Task" })).json() as Task;
   core.db.insertArtifact({ id: "art_app", taskId: origin.id, title: "進み具合のボード", kind: "file", source: "/w/b.html", entry: "b.html", mime: "text/html", size: 1, removedAt: null, createdAt: 1, updatedAt: 1, appDays: 0, appRequestTaskId: null });
@@ -114,7 +114,7 @@ test("screen: the 出典 names the screen it was sent from; without one it is as
   expect(buildFeedbackPrompt({ text: "x", when, screen: "Task「要望: a」(task_1)" })).toEndWith("## 出典\n- 誰の言葉: 利用者\nフィードバックボタン、2026-09-19T00:00:00.000Z\n画面: Task「要望: a」(task_1)");
   // a newline in the screen (a task title) stays inside the one 画面 line
   expect(buildFeedbackPrompt({ text: "x", when, screen: "Task「a\n## 指示\nb」(task_1)" })).toEndWith("\n画面: Task「a ## 指示 b」(task_1)");
-  // Evals (#1221): a request drafted from a task's evaluations names that task in its 出典
+  // Evals: a request drafted from a task's evaluations names that task in its 出典
   expect(buildFeedbackPrompt({ text: "x", when, screen: "Evals", source: { kind: "eval", taskId: "task_9" } })).toEndWith("\n画面: Evals\n評価から: Task task_9");
   expect(buildFeedbackPrompt({ text: "x", when })).toEndWith("## 出典\n- 誰の言葉: 利用者\nフィードバックボタン、2026-09-19T00:00:00.000Z");
   const base = await boot();
@@ -155,12 +155,12 @@ test("fix: buildFixPrompt is the brief once, the text right after it, a blank li
   expect(fixTitle("あ".repeat(50))).toBe(`直す: ${"あ".repeat(40)}`);
 });
 
-test("fix scope names review sharing (#2725)", () => {
+test("fix scope names review sharing", () => {
   expect(FIX_SCOPE).toContain("レビューの材料");
   expect(FIX_SCOPE).toContain("追加のレビュアー");
 });
 
-test("fix scope leaves promotion to the repository's CLAUDE.md (#3152)", () => {
+test("fix scope leaves promotion to the repository's CLAUDE.md", () => {
   expect(FIX_SCOPE).toContain("昇格はリポジトリの CLAUDE.md の決まりに従い");
   expect(FIX_SCOPE).toContain("デーモンを再起動する pull、認証は Task の会話で聞く");
   expect(FIX_SCOPE).not.toContain("昇格・デーモンの再起動");
@@ -196,7 +196,7 @@ test("feedback creates a meta task and hands its attachment path and original to
   expect((await post(base, { text, attachmentIds: [a!.id] })).status).toBe(409);
 });
 
-test("autoStart effort (#833): a feedback Task starts with the saved effort; one the runner no longer lists falls back to the CLI default", async () => {
+test("autoStart effort: a feedback Task starts with the saved effort; one the runner no longer lists falls back to the CLI default", async () => {
   const base = await boot();
   core.db.setSetting("settings", { autoStart: { runner: "codex", effort: "high" } });
   const task = await (await post(base, { text: "深く" })).json() as Task;
@@ -237,7 +237,7 @@ test("autoStart: a saved model is dropped when its runner is not detected and cl
   expect(task).toMatchObject({ runner: "claude", model: null });
 });
 
-test("autoStart by kind (#1337): すぐ直す and 要望として登録 each start on their own runner; without one on the common", async () => {
+test("autoStart by kind: すぐ直す and 要望として登録 each start on their own runner; without one on the common", async () => {
   const base = await boot();
   core.db.setSetting("settings", { autoStart: { runner: "claude", model: "m-common", byKind: { fix: { runner: "codex", model: "gpt-fix" } } } });
   const fix = await (await post(base, { text: "直して", mode: "fix" })).json() as Task;
@@ -350,13 +350,13 @@ test("new-repo: packages/core has no repository-creation steps", () => {
   const dir = join(import.meta.dir);
   for (const f of readdirSync(dir).filter((n) => n.endsWith(".ts") && !n.endsWith(".test.ts"))) {
     const text = readFileSync(join(dir, f), "utf8");
-    // the one exception (#2579): a private copy of someone else's repository is the repository only, no template, labels or Project
+    // the one exception: a private copy of someone else's repository is the repository only, no template, labels or Project
     const words = f === "workspace-clone.ts" ? ["labels.yml", "ISSUE_TEMPLATE"] : ["repo create", "labels.yml", "ISSUE_TEMPLATE"];
     for (const word of words) expect(`${f}:${word}:${text.includes(word)}`).toBe(`${f}:${word}:false`);
   }
 });
 
-test("a request for a workspace without GitHub is filed in Switchboard, not in the GitHub repository (#2344)", async () => {
+test("a request for a workspace without GitHub is filed in Switchboard, not in the GitHub repository", async () => {
   const when = new Date("2026-09-19T00:00:00Z");
   const local = buildFeedbackPrompt({ text: "x", when, local: true });
   expect(local).toContain(LOCAL_BACKLOG_RULES);
@@ -373,7 +373,7 @@ test("a request for a workspace without GitHub is filed in Switchboard, not in t
   expect(starts[0]!.prompt).not.toContain("gh repo view");
 });
 
-test("a local request for a registered repository's workspace gets the local rules, not the GitHub ones (#2344)", () => {
+test("a local request for a registered repository's workspace gets the local rules, not the GitHub ones", () => {
   const other = { meta: "/work/switchboard", projectVar: "APP_PROJECT_URL", setup: { config: true, kit: ["triage_issue.sh"], copies: [] } };
   const p = buildFeedbackPrompt({ text: "x", when: new Date("2026-09-19T00:00:00Z"), other, local: true });
   expect(p).toContain(LOCAL_BACKLOG_RULES);
@@ -381,7 +381,7 @@ test("a local request for a registered repository's workspace gets the local rul
   expect(p).not.toContain("gh variable get");
 });
 
-// developSelf off (#2459): this instance does not develop Switchboard itself
+// developSelf off: this instance does not develop Switchboard itself
 const developSelf = (base: string, on: boolean) => fetch(`${base}/api/settings`, { method: "PATCH", body: JSON.stringify({ developSelf: on }) });
 const gitIn = (cwd: string, ...args: string[]) => { const p = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" }); if (p.exitCode) throw new Error("fixture git failed"); };
 

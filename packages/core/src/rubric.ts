@@ -4,7 +4,7 @@ import { Rubric } from "@switchboard/protocol";
 import defaultRubric from "./rubric.default.json";
 
 /**
- * The rubric the judge scores a task against (#1219). The default ships here; the person edits their own copy at
+ * The rubric the judge scores a task against. The default ships here; the person edits their own copy at
  * `rubricPath(home)` (Text stays text — no screen, no table). Read once at boot: an edit takes effect on the next start.
  */
 export const DEFAULT_RUBRIC: Rubric = Rubric.parse(defaultRubric);

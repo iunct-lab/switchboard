@@ -1,11 +1,11 @@
 /**
- * A Task resumed when what it waited for closed (#2045). A runner that stops on another session's work (parallel-guard's
+ * A Task resumed when what it waited for closed. A runner that stops on another session's work (parallel-guard's
  * overlap) reports a `depends` stop whose conditions name the PRs / Issues it waits for (`pr#N` / `issue#N`). The backlog
- * import reads those again with the waits of #817, and once every one is closed the stop is over.
+ * import reads those again as the waits the Backlog screen shows, and once every one is closed the stop is over.
  *
  * This file decides which stops are over, from what the import stored (it asks GitHub nothing), and after each import
  * continues each such Task (`resumeDepends`). A stop may also wait on a job the daemon runs for the Task (`job#<id>`,
- * #3993, jobs.ts): that one is over when the job ends, and the end of a job runs `resumeDepends` too.
+ * jobs.ts): that one is over when the job ends, and the end of a job runs `resumeDepends` too.
  */
 import type { BacklogIssueData, BacklogPullRequestData, BacklogRecord, BacklogSource, Job, StopRecord } from "@switchboard/protocol";
 import type { Db } from "./db.ts";
@@ -15,9 +15,9 @@ import { issueOf, openStops, type StopReport } from "./stops.ts";
 import { ResumeSupersededError, type TaskManager } from "./tasks.ts";
 import { isWorking } from "./task-status.ts";
 
-/** A wait key of a stop's condition: a PR or an Issue of the workspace's repository, by number, or a job of the daemon (#3993), by id. */
+/** A wait key of a stop's condition: a PR or an Issue of the workspace's repository, by number, or a job of the daemon, by id. */
 export const WAIT_KEY = /^(pr|issue|job)#(\d+)$/;
-/** A job the daemon runs for the Task (#3993): its id is no number on GitHub, and is read from the jobs table. */
+/** A job the daemon runs for the Task: its id is no number on GitHub, and is read from the jobs table. */
 export const JOB_KEY = /^job#(\d+)$/;
 /** A wait for a date: the condition's value is an ISO 8601 time with a time zone, like the `runner#<runner>` value of a usage limit. */
 export const AFTER_KEY = "after";
@@ -27,8 +27,8 @@ export const STOP_WAITS_MS = 7 * 24 * 3600_000;
 
 /**
  * The open `depends` stops that wait only on PRs / Issues / jobs (every condition a WAIT_KEY, at least one not met yet),
- * with what they still wait for: `numbers` the PRs / Issues (GitHub's), `jobs` the daemon's jobs (#3993), `after` the
- * latest date (ms) among the stop's `after` conditions (#4616; a value that is no time with a zone is not a wait). A stop
+ * with what they still wait for: `numbers` the PRs / Issues (GitHub's), `jobs` the daemon's jobs, `after` the
+ * latest date (ms) among the stop's `after` conditions (a value that is no time with a zone is not a wait). A stop
  * with any other condition is not one of these.
  */
 export function dependsWaits(records: StopRecord[]): { stop: StopRecord; numbers: number[]; jobs: number[]; after?: number }[] {
@@ -56,7 +56,7 @@ export type WaitState = "closed" | "open" | "unknown";
 export const waitsClosed = (w: { numbers: number[]; jobs?: number[]; after?: number }, stateOf: (n: number) => WaitState, jobStateOf: (id: number) => WaitState = () => "unknown", now: number = Date.now()): boolean =>
   w.numbers.every((n) => stateOf(n) === "closed") && (w.jobs ?? []).every((id) => jobStateOf(id) === "closed") && (w.after === undefined || now >= w.after);
 
-/** How a waited-for job stands (#3993): running is open, ended (pass / fail / aborted) is closed, no such job is unknown. */
+/** How a waited-for job stands: running is open, ended (pass / fail / aborted) is closed, no such job is unknown. */
 export const jobWaitState = (db: Pick<Db, "getJob">) => (id: number): WaitState => {
   const job = db.getJob(id);
   return !job ? "unknown" : job.status === "running" ? "open" : "closed";
@@ -99,7 +99,7 @@ export const dependsResumePrompt = (keys: string[], afters: string[] = []) =>
   `${AUTO_RESUME_HEAD} ${[...(keys.length ? [`待っていた ${keys.join("、")} が片づきました`] : []), ...afters.map((a) => `期日 ${a} を過ぎました`)].join("。")}。並列ガードの overlap をやり直してから、中断した箇所から作業を続けてください。`;
 
 /**
- * The follow-up turn of a Task whose waited-for jobs ended (#3993): each job's result and summary (status, exit code, the
+ * The follow-up turn of a Task whose waited-for jobs ended: each job's result and summary (status, exit code, the
  * log's last lines and its path), and the other keys that closed with them.
  */
 export function jobResumePrompt(jobs: Job[], others: string[] = [], afters: string[] = []): string {
@@ -112,14 +112,14 @@ export function jobResumePrompt(jobs: Job[], others: string[] = [], afters: stri
  * After an import of the workspace: every open depends stop (of its Tasks changed in the last week) whose waits all
  * closed is recorded `resolved` under the same id, its conditions met. A Task started by hand then gets one follow-up
  * turn (`dependsResumePrompt`, every key of those stops), in the same runner session — once no depends stop of it still
- * waits (a runner that stopped twice has two stops; one still open holds the turn back). A stage Task (one for an Issue, #1139) gets none: what comes next
- * is backlog-next's, which starts the PBI's next stage Task (#817) — sending here too would run two on one PBI.
+ * waits (a runner that stopped twice has two stops; one still open holds the turn back). A stage Task (one for an Issue) gets none: what comes next
+ * is backlog-next's, which starts the PBI's next stage Task — sending here too would run two on one PBI.
  * Left as it is: a stop with a wait still open or not read, and a Task with no runner session, one running or waiting,
  * or one with a resume planned (that resume continues it). The record is written before the turn, so the next import
  * does not send a second; a turn that could not be sent puts it back to waiting with the reason, and the next import
  * tries again. One given up for a turn that came first (中断, a reply, a planned resume) stays resolved: that turn goes
  * on. Runs after every import of the workspace that stored (BacklogSync.onImported's `every`), and after a job of one
- * of its Tasks ended (#3993; `workspaceId` null = the Tasks without a workspace, whose waits can only be jobs). A stop
+ * of its Tasks ended (`workspaceId` null = the Tasks without a workspace, whose waits can only be jobs). A stop
  * that waits on a job gets its turn on a stage Task too, with the jobs' results (`jobResumePrompt`): it waits on its own
  * PR's CI or review, which backlog-next does not start. Returns the ids of the Tasks it sent a turn to.
  */
@@ -138,7 +138,7 @@ export async function resumeDepends(deps: { db: Db; tasks: Pick<TaskManager, "se
     // a stop on a job stays open while another depends stop of the Task still waits: resolved alone, its result would
     // not be in the turn the last one sends
     if (jobKeys.length && closed.length < waits.length) continue;
-    // a stage Task (#1139) gets no turn here for a PR / Issue — that is backlog-next's — but does for its own jobs
+    // a stage Task gets no turn here for a PR / Issue — that is backlog-next's — but does for its own jobs
     const turn = issueOf(task) === null || jobKeys.length > 0;
     if (turn && (!task.runnerSessionId || isWorking(task, "dedupe"))) continue;
     const report = (w: (typeof waits)[number], state: StopRecord["state"], what: string, ok: boolean): StopReport => ({
@@ -173,7 +173,7 @@ export async function resumeDepends(deps: { db: Db; tasks: Pick<TaskManager, "se
 }
 
 /**
- * A job can end before its Task wrote the stop on it and ended the turn (#3993): `resumeDepends` at the job's end then
+ * A job can end before its Task wrote the stop on it and ended the turn: `resumeDepends` at the job's end then
  * skips the Task (it is running), and a Task without a workspace has no import to look again. So the end of a turn of
  * a Task with a stop on a job looks again. Returns the unsubscribe.
  */
@@ -189,7 +189,7 @@ export const AFTER_CHECK_MS = 5 * 60_000;
 
 /**
  * A date passes without any import or job saying so, and a workspace whose backlog is kept here only, or a Task without a
- * workspace, has no import at all (#4616). So every AFTER_CHECK_MS the daemon runs `resumeDepends` for each workspace
+ * workspace, has no import at all. So every AFTER_CHECK_MS the daemon runs `resumeDepends` for each workspace
  * (null = no workspace) that has a Task with an open depends stop whose date has passed. Returns the Tasks it sent a turn to.
  */
 export async function resumeDueAfters(deps: { db: Db; tasks: Pick<TaskManager, "send" | "recordStop">; now: number }): Promise<string[]> {

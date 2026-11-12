@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import type { Ask, AskBatch } from "@switchboard/protocol";
-import { answerButtons, askCardParts, batchLines, mergeBatchRows, mergeChosen, mergeChosenAskIds, questionHead, hiddenByBatches, grantOf, taskAsks, withoutGrant, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, broadTarget, previousLines, scopeLabel, blockerLines, groupAsks, isQuick, keptAnswers, KIND_LABEL, quickGroups, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, issueOpenHref, unblockLinks, unblocksLine, workspaceChips, workspaceSections, type Answered } from "./asks.ts";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { AnswerArea } from "./components/Approvals.tsx";
+import { answerButtons, askCardParts, batchLines, questionHead, hiddenByBatches, grantOf, taskAsks, withoutGrant, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, broadTarget, previousLines, scopeLabel, blockerLines, groupAsks, isQuick, keptAnswers, KIND_LABEL, quickGroups, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, issueOpenHref, unblockLinks, unblocksLine, workspaceChips, workspaceSections, type Answered } from "./asks.ts";
 
 const ask = (over: Partial<Ask>): Ask => ({
   id: "a", kind: "decision", needs: "person", state: "open", at: 1, changedAt: 1, workspace: null, pbi: null, issue: null, task: null, reason: null, question: null, choices: [], grants: [], grant: null, recommendation: null, next: null,
@@ -104,6 +107,9 @@ test("askFacts: every fact is there, a null one says 不明; the recommendation 
   expect(by["推奨と根拠"]!.value).toBe("A — 画面を増やさない");
   expect(by["元の記録"]).toEqual({ label: "元の記録", value: "#9 の ## 判断待ち", href: "https://github.com/o/r/issues/9" });
   expect(askFacts(ask({ recommendation: { choice: "A", why: "" } })).find((f) => f.label === "推奨と根拠")!.value).toBe("A");
+  // a question tool's check: its options carry ` (Recommended)`, so no 推奨と根拠 that would say 不明
+  const q = { header: null, question: "PR #1 をマージしてよいか", options: [{ label: "マージする (Recommended)", description: null }], multiSelect: false };
+  expect(askFacts(ask({ kind: "check", questions: [q] })).map((f) => f.label)).not.toContain("推奨と根拠");
   // a task with no title is named by its id
   expect(askFacts(ask({ task: { id: "tk_1", title: null } })).find((f) => f.label === "Task")!.value).toBe("tk_1");
 });
@@ -293,37 +299,6 @@ test("batch lines and hidden asks", () => {
   expect(hiddenByBatches(mine, [{ ...batch, asks: [], loggingIn: { taskId: "tk_c", title: "C" } }]).map((a) => a.id)).toEqual(["approval:tk_c:p1"]);
 });
 
-test("merge batch rows", () => {
-  const now = Date.parse("2026-11-12T12:00:00Z");
-  const batch: AskBatch = {
-    id: "batch:security-merge",
-    kind: "security-merge",
-    asks: [
-      { askId: "check:tk_a:1", taskId: "tk_a", title: "A", workspaceId: "ws_1", op: "PR #10", at: now - 13.2 * 3_600_000, pr: 10, reasons: ["[聞く] セキュリティ: a.ts"], diff: "+48/-3" },
-      { askId: "check:tk_b:1", taskId: "tk_b", title: "B", workspaceId: "ws_2", op: "PR #11", at: now - 20 * 60_000, pr: 11, reasons: ["[聞く] セキュリティ: b.lock"], diff: null },
-    ],
-    loggingIn: null,
-    deviceAuth: null,
-  };
-  const asks = [ask({ id: "check:tk_a:1", choices: ["A: マージする — 通す", "B: 待つ"] }), ask({ id: "check:tk_b:1", choices: ["A: マージしない", "B: 待つ"] }), ask({ id: "decision:x" })];
-  expect(mergeBatchRows(batch, now, asks)).toEqual([
-    { askId: "check:tk_a:1", taskId: "tk_a", workspaceId: "ws_1", pr: 10, title: "A", reasons: ["[聞く] セキュリティ: a.ts"], diff: "+48/-3", waited: "14 時間", selectable: true },
-    { askId: "check:tk_b:1", taskId: "tk_b", workspaceId: "ws_2", pr: 11, title: "B", reasons: ["[聞く] セキュリティ: b.lock"], diff: null, waited: "20 分", selectable: false },
-  ]);
-  // a question that is not listed any more cannot be chosen
-  expect(mergeBatchRows(batch, now, []).map((r) => r.selectable)).toEqual([false, false]);
-  // the questions in the batch leave the list; the others stay
-  expect(hiddenByBatches(asks, [batch]).map((a) => a.id)).toEqual(["decision:x"]);
-  // a tick is on the question: chosen and selectable is sent, one that cannot be chosen is not
-  const rows = mergeBatchRows(batch, now, asks);
-  expect(mergeChosen(rows, new Set(["check:tk_a:1", "check:tk_b:1"]))).toEqual(["tk_a"]);
-  // the question each chosen Task showed goes with it, in the same order
-  expect(mergeChosenAskIds(rows, new Set(["check:tk_a:1", "check:tk_b:1"]))).toEqual(["check:tk_a:1"]);
-  // the Task asked again about another PR: the tick on its earlier question does not choose the new one
-  const asked = { ...batch, asks: [{ ...batch.asks[0]!, askId: "check:tk_a:2", op: "PR #12", pr: 12 }] };
-  expect(mergeChosen(mergeBatchRows(asked, now, [ask({ id: "check:tk_a:2", choices: ["A: マージする — 通す"] })]), new Set(["check:tk_a:1"]))).toEqual([]);
-});
-
 test("answerButtons: a scan notice (#2866) is closed by 誤検知として閉じる only", () => {
   const b = answerButtons(ask({ kind: "notice", answers: ["dismiss"], question: "認証の値の検査: 当たり 1 件 / 検査できなかった 0 リポジトリ" }));
   expect(b.map((x) => [x.label, x.answer])).toEqual([["誤検知として閉じる", { kind: "dismiss" }]]);
@@ -422,4 +397,20 @@ test("unblockLinks / issueOpenHref: an Issue with no url (a workspace without Gi
   expect(issueOpenHref(ask({ route: "issue", issue: { number: 1, url: "" } }))).toBeNull();
   expect(issueOpenHref(ask({ route: "issue", issue: { number: 2, url: "https://github.com/o/r/issues/2" } }))).toBe("https://github.com/o/r/issues/2");
   expect(issueOpenHref(ask({ route: "none", issue: { number: 2, url: "https://github.com/o/r/issues/2" } }))).toBeNull();
+});
+
+test("question tool card: the answer area has no 「次回も使う」 form, and the first question's text is not said again in its fieldset (the card has it once, line breaks kept)", () => {
+  const q = { question: "PR #12 をマージしてよいか\n理由: 影響は小さい", options: [{ label: "マージする (Recommended)", description: "影響: 小" }, { label: "待つ", description: "" }], multiSelect: false };
+  const one = ask({ kind: "check", question: q.question, answers: ["questions"], questions: [q] });
+  expect(initialPolicyForm(one)).toBeNull();
+  const html = renderToStaticMarkup(createElement(AnswerArea, { ask: one, busy: false, onAnswer: () => undefined }));
+  expect(html).not.toContain("次回も使う");
+  expect(html).not.toContain("PR #12");
+  expect(html).toContain("マージする (Recommended)");
+  expect(html).not.toContain("<legend");
+  // a second question is named by its own legend, with its line breaks in the text
+  const two = ask({ kind: "check", answers: ["questions"], questions: [q, { ...q, question: "二つ目\n補足", header: "運用" }] });
+  const html2 = renderToStaticMarkup(createElement(AnswerArea, { ask: two, busy: false, onAnswer: () => undefined }));
+  expect(html2).toContain("二つ目\n補足");
+  expect(html2.match(/PR #12/g)).toBeNull();
 });

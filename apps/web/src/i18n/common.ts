@@ -19,6 +19,10 @@ export const common = msgs({
   quoted: { ja: "「{text}」", en: "\"{text}\"" },
   // backlogView.ts: a board tile's marks (#3707)
   markWaits: { ja: "待ち", en: "Waiting" },
+  markUntil: { ja: "期日 {at} · あと {left}", en: "Due {at} · {left} left" },
+  markConfirm: { ja: "確認待ち {n} 日", en: "Awaiting confirmation {n} d" },
+  leftDays: { ja: "{n} 日", en: "{n} d" },
+  leftHours: { ja: "{n} 時間", en: "{n} h" },
   markPrereq: { ja: "前提待ち", en: "Prerequisite pending" },
   markStuck: { ja: "進められない", en: "Cannot proceed" },
   markOverlap: { ja: "重なり", en: "Overlap" },

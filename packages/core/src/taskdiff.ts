@@ -5,7 +5,7 @@ import type { AgentEvent, EventEnvelope, StagedChange, Task, TaskDiffFile, TaskD
 import { safeRealpath } from "./mcp.ts";
 
 /**
- * "差分" tab (proposal Screen B, issue #12): the files a task changed, as diffs, with deep links to the editor.
+ * "差分" tab (proposal Screen B): the files a task changed, as diffs, with deep links to the editor.
  * Sources, in order: staged writes (not yet applied), then the working tree of each scope root that is inside a git
  * repository (compared with HEAD), restricted to the paths the transcript shows the runner touched (Write/Edit tool
  * calls, artifact events). If the transcript names nothing, every change under the root is shown (the runner may have
@@ -55,7 +55,7 @@ const droppedNote = (n: number) => `… ${n} files dropped (snapshot truncated)`
 const DROPPED_NOTE = /^… (\d+) files dropped \(snapshot truncated\)$/; // reads back what droppedNote wrote
 
 /**
- * The next copy of a Task's diff (#3833): the live worktree rows (seen now), plus the rows of the previous copy whose
+ * The next copy of a Task's diff: the live worktree rows (seen now), plus the rows of the previous copy whose
  * working tree no longer exists (kept as they were, with the time they were last seen). Staging and removed rows are not copied.
  */
 export function mergeSnapshot(prev: TaskDiffSnapshot | null, live: TaskDiffFile[], at: number, exists: (p: string) => boolean = existsSync): TaskDiffSnapshot {

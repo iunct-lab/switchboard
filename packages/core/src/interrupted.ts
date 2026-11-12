@@ -4,15 +4,15 @@ import { AUTO_RESUME_HEAD, isAutomaticUserText, STOP_NOTE } from "./evals.ts";
 
 /**
  * Turns cut by the daemon itself stopping — the host shutting down (a Spot interruption, a stop from the console), a
- * promotion's restart, a crash — are continued by the next daemon the way a usage-limit stop is (#102): `resumeAt` is
+ * promotion's restart, a crash — are continued by the next daemon the way a usage-limit stop is: `resumeAt` is
  * set to the moment of the stop, and `RateLimitResumer` sends the follow-up on its first tick after the start when the
  * runner's auto-resume is on. Without it, a host that shuts down in the middle of a turn leaves the task as `error`
  * after the start until a person writes to it.
  */
 
-/** The note a GitHub API limit stop writes (#550, ratelimit.ts): not a daemon stop. */
+/** The note a GitHub API limit stop writes (ratelimit.ts): not a daemon stop. */
 export const GITHUB_NOTE = "GitHub の API 上限で待機";
-/** The note a full disk writes (#2234, ratelimit.ts): not a daemon stop. */
+/** The note a full disk writes (ratelimit.ts): not a daemon stop. */
 export const DISK_NOTE = "ディスクの空き切れで停止";
 /** What the daemon sends to continue after a stop. The runner's commands in flight were killed with it. */
 export const STOP_RESUME_PROMPT = `${AUTO_RESUME_HEAD} デーモン（ホスト）の停止でターンが中断されました。実行中だったコマンドやバックグラウンドの処理は終了しています。状態を確かめてから、中断した箇所から作業を続けてください。`;
@@ -50,7 +50,7 @@ export function lastStopWasDaemon(events: AgentEvent[]): boolean {
 /**
  * Plan the continuation of a task whose turn the stop cut: a note in the transcript and `resumeAt = now`. Nothing is
  * planned without a runner session to resume, nor after `max` stops in a row (the note says so). `max` is the setting
- * `quotaAndResume.maxStopResumes` (#835); absent = `MAX_STOP_RESUMES`.
+ * `quotaAndResume.maxStopResumes`; absent = `MAX_STOP_RESUMES`.
  * `record` writes the note (the TaskManager's, so the UI sees it; the bare database at start-up).
  */
 export function planResumeAfterStop(db: Db, task: Task, now: number, record: (ev: AgentEvent) => void, max = MAX_STOP_RESUMES): boolean {

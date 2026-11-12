@@ -3,15 +3,15 @@ import type { GhRunner } from "./backlog.ts";
 import { oneLine, readOnlyMode, runSuggestionTurn } from "./suggest-llm.ts";
 
 /**
- * Who names a task after its first turn (#491), in this order: the person chose codex `gpt-6-luna`, and Haiku when it
- * cannot answer (2026-09-28, the same answer as the judge's, #493). Not a setting: only `Settings.titles.auto` is.
+ * Who names a task after its first turn, in this order: the person chose codex `gpt-6-luna`, and Haiku when it
+ * cannot answer (2026-09-28, the same answer as the judge's). Not a setting: only `Settings.titles.auto` is.
  */
 export const TITLE_RUNNERS: Array<{ runner: RunnerId; model: string }> = [
   { runner: "codex", model: "gpt-6-luna" },
   { runner: "claude", model: "claude-haiku-4-5" },
 ];
 
-/** How long one turn may take: a real Haiku turn measured 6.6 s (#141), and nothing waits on it. */
+/** How long one turn may take: a real Haiku turn measured 6.6 s, and nothing waits on it. */
 export const TITLE_TIMEOUT_MS = 60_000;
 
 const TITLE_CHARS = 60;
@@ -96,7 +96,7 @@ const SKILL_TITLE_CHARS = 120;
 const GH_TIMEOUT_MS = 5000;
 
 /**
- * The title of a task started with a skill command (#491): `/<command> #<n> <the Issue's title>`, so nothing waits on a
+ * The title of a task started with a skill command: `/<command> #<n> <the Issue's title>`, so nothing waits on a
  * model. null when the prompt is no such command or `gh` cannot say (no answer in 5 s, a failure, an empty title).
  */
 export async function skillCommandTitle(prompt: string, cwd: string, gh: GhRunner, timeoutMs = GH_TIMEOUT_MS): Promise<string | null> {

@@ -212,7 +212,7 @@ describe("daemon stop", () => {
   });
 });
 
-describe("the checkout's origin (#2799)", () => {
+describe("the checkout's origin", () => {
   const git = (...args: string[]) => expect(spawnSync("git", ["-C", home, ...args]).status).toBe(0);
   const registered = { service: "github" as const, host: "github.com", repository: "acme/app-dev", project: { owner: "acme", number: 1 } };
 
@@ -421,7 +421,7 @@ describe("background jobs of a task whose turn ended", () => {
   });
 });
 
-describe("OPS_KIT_REVIEW_RUNNER (#4024)", () => {
+describe("OPS_KIT_REVIEW_RUNNER", () => {
   /** The env the runner was started with, under a TaskManager given `reviewRunner` (or none). */
   async function startedEnv(reviewRunner?: () => "other" | "same"): Promise<Record<string, string> | undefined> {
     let seen: Record<string, string> | undefined;

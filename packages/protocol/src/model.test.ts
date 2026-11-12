@@ -19,7 +19,7 @@ test("Cloud references reject foreign hosts, credentials, query strings and mism
   for (const bad of ["abc", "session_a/../b", "session_a?x=1"]) expect(CloudSessionRef.safeParse({ id: bad, url: `https://claude.ai/code/${bad}` }).success).toBe(false);
 });
 
-describe("what zod 4 changed, kept as zod 3 had it (#2968)", () => {
+describe("what zod 4 changed, kept as zod 3 had it", () => {
   test("an empty settings row still fills the nested defaults: .prefault, not 4's .default that stops at {}", () => {
     const s = Settings.parse({});
     expect(s.routing.llm.timeoutMs).toBe(5000);

@@ -546,15 +546,6 @@ label.toggle.off { opacity: .45; cursor: default; }
 .ask-quick-row { display: flex; margin-top: 6px; }
 .ask-quick-row button { min-height: 44px; max-width: 100%; }
 .ask-batch-tasks { list-style: none; margin: 8px 0; padding: 0; }
-/* the security merge checks (#2778): a row per PR (checkbox, PR and Task and reasons, then the size and the wait); on a phone the size and wait go under */
-.ask-merge-ws h6 { margin: 10px 0 4px; font-size: 13px; overflow-wrap: anywhere; }
-.ask-merge-row { border-top: 1px solid var(--line); padding: 6px 0; }
-.ask-merge-row label { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: flex-start; }
-.ask-merge-main { display: flex; flex-direction: column; flex: 1 1 14em; min-width: 0; overflow-wrap: anywhere; }
-.ask-merge-main button.link { text-align: left; padding: 0; min-height: 0; overflow-wrap: anywhere; }
-.ask-merge-reason { font-family: ui-monospace, monospace; font-size: 12px; color: var(--ink2); }
-.ask-merge-meta { font-size: 12px; color: var(--ink2); margin-left: auto; white-space: nowrap; }
-.ask-merge-changed { margin-top: 2px; overflow-wrap: anywhere; }
 .ask-workspace-head { margin: 8px 0 4px; font-size: 13px; overflow-wrap: anywhere; }
 .ask-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
 .ask-tags .badge { background: var(--line); color: var(--ink2); font-family: inherit; font-weight: 500; }
@@ -692,7 +683,7 @@ label.toggle.off { opacity: .45; cursor: default; }
 /* a question tool's questions on a card (#3058): a fieldset each, one 回答する; wraps on a phone */
 .ask-questions { display: grid; gap: 8px; margin: 6px 0; min-width: 0; overflow-wrap: anywhere; }
 .ask-questions fieldset { border: 0; padding: 0; margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-.ask-questions legend { padding: 0; margin-bottom: 4px; font-weight: 600; }
+.ask-questions legend { padding: 0; margin-bottom: 4px; font-weight: 600; white-space: pre-line; }
 .ask-questions legend .tag { margin: 0 6px 0 0; }
 .ask-questions .opt { display: flex; gap: 6px; align-items: baseline; cursor: pointer; }
 .ask-questions textarea { width: 100%; box-sizing: border-box; }
@@ -792,6 +783,8 @@ table.evals-table td button.open { font: inherit; color: inherit; padding: 0; te
 /* a question card (#4068): what it is about and the question above the answer buttons; the facts the records lack in one line */
 .ask .ask-title { font-weight: 600; margin: 4px 0 2px; overflow-wrap: anywhere; }
 .ask .ask-question { margin: 2px 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* the Task screen's card: a question tool's question keeps its lines there too */
+.task-asks .ask > b { white-space: pre-line; overflow-wrap: anywhere; }
 .ask details.ask-question > summary { cursor: pointer; }
 .ask details.ask-question .q-less { display: none; }
 /* open: the first lines and 全文 give way to 畳む, the whole question under it */

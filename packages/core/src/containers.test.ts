@@ -71,7 +71,7 @@ async function boot() {
 }
 const callLines = () => readFileSync(calls, "utf8").split("\n").filter(Boolean);
 
-describe("containers of an ended task (#1418)", () => {
+describe("containers of an ended task", () => {
   test("compose projects and labelled containers of an ended task are removed", async () => {
     const { c, create, abort } = await boot();
     try {

@@ -12,7 +12,7 @@ import { z } from "zod";
 import { lastAttempt, RETRY_DELAYS_MS, StopReport } from "./stops.ts";
 
 /**
- * Workspace MCP (proposal §3, issue #10; per-task tokens cover #31).
+ * Workspace MCP (proposal §3; per-task tokens are its local API auth).
  * The daemon is an MCP server so runners without their own file tools (DAK) — or Claude/Codex via --mcp-config — can
  * touch the local repository *through Switchboard's guards*:
  *   fs.list / fs.read / fs.grep   read within the task's scope only (realpath + prefix check, symlinks resolved);
@@ -26,7 +26,7 @@ export interface McpPolicy {
   fs: { maxReadBytes: number; maxListEntries: number; maxGrepMatches: number; maxGrepFileBytes: number; maxGrepFiles: number };
   sessions: { maxPerTask: number; idleMs: number };
   /**
-   * The MCP servers a Claude Task gets (#2090), the only ones it reads. `workspaces` (Workspace names) limits one to
+   * The MCP servers a Claude Task gets, the only ones it reads. `workspaces` (Workspace names) limits one to
    * the Tasks of those Workspaces; without it every Task gets it.
    */
   servers: Record<string, McpServerConfig & { workspaces?: string[] }>;
@@ -71,7 +71,7 @@ export function loadMcpPolicy(paths: string[]): McpPolicy {
   return DEFAULT_POLICY;
 }
 
-/** The `servers` entries that are objects with `workspaces` absent or a list: a bare `name:` or `workspaces: x` is left out and named on the console, not fatal for every Task (#2136 review). */
+/** The `servers` entries that are objects with `workspaces` absent or a list: a bare `name:` or `workspaces: x` is left out and named on the console, not fatal for every Task. */
 function validServers(raw: unknown): McpPolicy["servers"] {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
   const ok = (v: unknown): v is McpPolicy["servers"][string] =>
@@ -82,7 +82,7 @@ function validServers(raw: unknown): McpPolicy["servers"] {
   return Object.fromEntries(Object.entries(raw).filter(([, v]) => ok(v)));
 }
 
-/** The servers of `policy` a Task of `workspace` (its name; null = no Workspace) gets, without `workspaces` (#2090). */
+/** The servers of `policy` a Task of `workspace` (its name; null = no Workspace) gets, without `workspaces`. */
 export function mcpServersFor(policy: McpPolicy, workspace: string | null): Record<string, McpServerConfig> {
   const out: Record<string, McpServerConfig> = {};
   for (const [name, { workspaces, ...server }] of Object.entries(policy.servers)) {
@@ -97,9 +97,9 @@ export interface TaskBridge {
   record(taskId: string, ev: AgentEvent): void;
   /** Raise permission.ask on the task and resolve with the user's decision (or a Knowledge allow rule the user wrote). */
   askPermission(taskId: string, ask: Omit<Extract<AgentEvent, { t: "permission.ask" }>, "t" | "id">): Promise<PermissionDecision>;
-  /** Record a stop the runner reported (#948); refused when it reserves a retry the rule does not allow (#949). */
+  /** Record a stop the runner reported; refused when it reserves a retry the rule does not allow. */
   recordStop(taskId: string, report: StopReport): { ok: true } | { ok: false; why: string };
-  /** The task's stop `reportId` as last recorded (#949). */
+  /** The task's stop `reportId` as last recorded. */
   stopOf(taskId: string, reportId: string): StopRecord | undefined;
   /** Staged writes: nothing here touches the repository until the user applies it in the UI. */
   staging?: {
@@ -400,10 +400,10 @@ async function readCapped(stream: ReadableStream<Uint8Array> | null | number, ma
   return { text, truncated };
 }
 
-/** Why a process could not start that may pass by itself (#949). */
+/** Why a process could not start that may pass by itself. */
 const PASSING_SPAWN = new Set(["EAGAIN", "EMFILE", "ENFILE", "ENOMEM"]);
 
-/** A failure that may pass (#949): what it was, whether repeating is harmless, and the result to answer with if it is not retried. */
+/** A failure that may pass: what it was, whether repeating is harmless, and the result to answer with if it is not retried. */
 class PassingFailure extends Error {
   constructor(
     message: string,
@@ -449,13 +449,13 @@ export class WorkspaceMcp {
     private baseUrl: () => string = () => "",
   ) {}
 
-  /** How a retry waits (#949); a test replaces it. */
+  /** How a retry waits; a test replaces it. */
   sleep: (ms: number) => Promise<void> = (ms) => Bun.sleep(ms);
-  /** How exec.run starts a process; a test replaces it to make a start fail for a passing reason (#949). */
+  /** How exec.run starts a process; a test replaces it to make a start fail for a passing reason. */
   spawn: typeof Bun.spawn = Bun.spawn;
 
   /**
-   * exec.run's bounded retry (#949): a passing failure of a run that is harmless to repeat (the system could not start
+   * exec.run's bounded retry: a passing failure of a run that is harmless to repeat (the system could not start
    * it for now, or a read-only command timed out) is tried again by the rule of `reserveStopRetry` — recorded as the
    * task's stop before the wait, resolved on success, exhausted when the tries are used up. Anything else, and a refused
    * retry, is answered as before. The stop's id comes from the command and its folder, and its tries from the task's
@@ -516,7 +516,7 @@ export class WorkspaceMcp {
     return { url: `${this.baseUrl()}/mcp/${taskId}`, token: ep.token };
   }
 
-  /** Whether `token` is the task's current endpoint token (the same check as `handle`): the OpenTelemetry route's (#2236). */
+  /** Whether `token` is the task's current endpoint token (the same check as `handle`): the OpenTelemetry route's. */
   verify(taskId: string, token: string | null): boolean {
     const ep = this.endpoints.get(taskId);
     return !!ep && tokenEquals(token, ep.token);
@@ -723,7 +723,7 @@ export class WorkspaceMcp {
           const dir = scope.resolve(cwd ?? ".");
           const cls = classifyCommand(command, execPolicy, scope, dir);
           const issued = this.endpoints.get(taskId);
-          // one run, approval included: a retry asks again like the first time (#949)
+          // one run, approval included: a retry asks again like the first time
           const once = async () => {
             let argv: string[];
             let env: Record<string, string>;
@@ -750,7 +750,7 @@ export class WorkspaceMcp {
                 return this.spawn(argv, { cwd: dir, stdout: "pipe", stderr: "pipe", env, detached: true });
               } catch (e) {
                 // nothing ran. Only the system being short for now (processes, files, memory) passes; a missing folder or
-                // program (ENOENT), or no permission, is the input's and is never retried (#949)
+                // program (ENOENT), or no permission, is the input's and is never retried
                 if (!PASSING_SPAWN.has((e as { code?: string }).code ?? "")) throw e;
                 throw new PassingFailure(`起動できませんでした: ${String((e as Error).message ?? e).slice(0, 200)}`, "before-effect");
               }
@@ -856,7 +856,7 @@ function readHeadBytes(file: string, bytes: number): Buffer {
 
 type NonTextContent = { type: "image"; data: string; mimeType: string } | { type: "resource"; resource: { uri: string; mimeType: string; blob: string } };
 
-/** A tool reply that is not text (fs.read of an image / a binary, #124), with what the transcript shows instead of the bytes. */
+/** A tool reply that is not text (fs.read of an image / a binary), with what the transcript shows instead of the bytes. */
 class NonText {
   constructor(
     readonly content: NonTextContent,

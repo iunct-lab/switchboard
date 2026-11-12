@@ -778,7 +778,11 @@ describe("aws/template.yaml offload CI (#4706)", () => {
     const commands = (spec: string) => (Bun.YAML.parse(spec.replace(/^ {10}/gm, "")) as { phases: { build: { commands: unknown[] } } }).phases.build.commands;
     const body = (r: string) => r.slice(r.indexOf("BuildSpec: !Sub |\n") + "BuildSpec: !Sub |\n".length, r.indexOf("      Artifacts:"));
     // the unpack and the run are Offload's, word for word; only the tag line comes first
-    expect(commands(body(p))).toEqual(['echo "sb-offload: image $SB_IMAGE_TAG"', ...commands(body(resource("Offload")))]);
+    const ci = commands(body(p)) as string[];
+    const offload = commands(body(resource("Offload"))) as string[];
+    // the recordings and the names (#4711) come between the unpack and the run
+    expect([ci[0], ci[1], ci[ci.length - 1]]).toEqual(['echo "sb-offload: image $SB_IMAGE_TAG"', offload[0], offload[1]]);
+    expect(ci).toHaveLength(5);
     expect(resource("OffloadCiLogs")).toContain("LogGroupName: !Sub '/aws/codebuild/${AWS::StackName}-offload-ci'");
     expect(resource("OffloadCiProject")).toContain("Name: /switchboard/offload-ci-project");
     expect(resource("OffloadCiProject")).toContain("Value: !Ref OffloadCi");
@@ -797,6 +801,30 @@ describe("aws/template.yaml offload CI (#4706)", () => {
       "Allow\n                Action: [ecr:BatchCheckLayerAvailability, ecr:BatchGetImage, ecr:GetDownloadUrlForLayer]\n                Resource: !GetAtt OffloadImageRepo.Arn",
     ]);
     expect(role).not.toMatch(/ssm:|secretsmanager:|kms:|s3:PutObject|s3:\*|ecr:\*|ecr:Put|ecr:Upload/);
+  });
+
+  test("the recordings and the names are read from the one-time objects, read-only, and no value or token reaches the build (#4711)", () => {
+    const role = resource("OffloadCiRole");
+    // the ci build can read offload/* and write its log, nothing else: no put, no delete, no parameter, no secret
+    expect(role).not.toMatch(/s3:Put|s3:Delete|s3:Abort|ssm:|secretsmanager:|logs:\*/);
+    expect(statements(role, "- Effect: ").filter((st) => /s3:/.test(st)).map((st) => st.split("\n").slice(1, 3).join("\n"))).toEqual(["                Action: s3:GetObject\n                Resource: !Sub '${Data.Arn}/offload/*'"]);
+    const p = resource("OffloadCi");
+    expect(p).not.toMatch(/GH_TOKEN|GITHUB_TOKEN|[Tt]oken|EnvironmentVariables|SecretsManager|ParameterStore|SECRETS_MANAGER/);
+    const spec = p.slice(p.indexOf("BuildSpec: !Sub |\n"), p.indexOf("      Artifacts:"));
+    // the recordings are unpacked from their object into the CI user's folder, and never copied back
+    expect(spec).toContain('if [ -n "$SB_OFFLOAD_FIXTURES" ]');
+    expect(spec).toContain(".fixtures.tar.gz\" - | tar -xzf - -C \"$D\"");
+    expect(spec).toContain("D=/home/switchboard/.switchboard/fixtures");
+    expect(spec).not.toMatch(/s3 (mv|rm|sync)|s3 cp [^\n]* s3:/);
+    // the names become ~/.aws/config without echoing a value: set +x, 600, the JSON deleted once read
+    expect(spec).toContain('if [ -n "$SB_OFFLOAD_NAMES" ]');
+    expect(spec).toContain("set +x");
+    expect(spec).toContain("rm -f /sb/names.json");
+    // a names file that cannot be read stops the build with a fixed line, not bun's message (it can quote the JSON)
+    expect(spec).toMatch(/names\.json --only-show-errors \\\s+&& \( umask 077;[\s\S]*\) >\/dev\/null 2>&1 \\\s+\|\| \{ rm -f \/sb\/names\.json; echo "sb-offload: the names for the public-tree check could not be read"; exit 1; \}/);
+    expect(spec).toContain("chmod 600 /home/switchboard/.aws/config");
+    expect(spec).toContain("sso_account_id = ");
+    expect(spec).not.toMatch(/echo [^\n]*(accountIds|sso_account_id|j\.names)/);
   });
 
   test("the instance role names this project and its log; the boundary names them, not by !GetAtt", () => {

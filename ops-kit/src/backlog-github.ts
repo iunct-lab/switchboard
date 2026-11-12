@@ -7,7 +7,7 @@ import type { GhClient } from "./gh.ts";
 import { setField } from "./set.ts";
 
 /**
- * `ops-kit backlog …` without BACKLOG_URL (#3071): outside the app's Task, the same commands read and write GitHub
+ * `ops-kit backlog …` without BACKLOG_URL: outside the app's Task, the same commands read and write GitHub
  * itself, in the same shape as with the app. Only when there is no BACKLOG_URL: an app that cannot be reached is never
  * replaced by GitHub (backlog-client.ts).
  */
@@ -147,7 +147,7 @@ export interface EditInput {
   add: string[];
   remove: string[];
   state?: "OPEN" | "CLOSED";
-  /** Why it is closed (#3146), only with `state: "CLOSED"`: closing it, or changing the reason of one closed. */
+  /** Why it is closed, only with `state: "CLOSED"`: closing it, or changing the reason of one closed. */
   stateReason?: "COMPLETED" | "NOT_PLANNED";
   /** null: remove it. */
   milestone?: string | null;

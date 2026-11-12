@@ -3,7 +3,7 @@ import type { Verification } from "./forge-github.ts";
 import { findSecrets, NO_HOST, type HostAws } from "./secrets.ts";
 
 /**
- * GitLab's side of the forge operations (#892), through the signed-in `glab` CLI: `glab api` carries the login of the
+ * GitLab's side of the forge operations, through the signed-in `glab` CLI: `glab api` carries the login of the
  * host it is given, so no credential is kept, read or printed here, and `gh` (GitHub's login) is never pointed at a
  * GitLab host. `sh` runs a command and throws on a non-zero exit. docs/design/forge-integration.md.
  */
@@ -150,7 +150,7 @@ export async function readGitlabNotes(sh: Sh, target: ForgeTarget, iid: number):
   return notes.filter((n) => !n.system).map((n) => ({ id: gitlabId("note", n.id), issue: iid, body: n.body, createdAt: n.created_at }));
 }
 
-/* ---------- writes (#2910): what the backlog's sender sends ---------- */
+/* ---------- writes: what the backlog's sender sends ---------- */
 
 /** Sets an Issue's fields (`title`, `description`, `state_event`, `add_labels`, `remove_labels`, `milestone_id`). */
 export async function updateGitlabIssue(sh: Sh, target: ForgeTarget, iid: number, fields: Record<string, string>): Promise<void> {
@@ -193,7 +193,7 @@ export async function findGitlabMarked(sh: Sh, target: ForgeTarget, path: string
   return null;
 }
 
-/* ---------- merge requests (#923): GitLab's own MR, review and discussions — nothing of them is kept here ---------- */
+/* ---------- merge requests: GitLab's own MR, review and discussions — nothing of them is kept here ---------- */
 
 /** An MR as it is now: `head` / `base` = the sha its diff is between; `mergeStatus` = GitLab's `detailed_merge_status`. */
 export interface GitlabMr {
@@ -285,7 +285,7 @@ export async function resolveGitlabDiscussion(sh: Sh, target: ForgeTarget, iid: 
   if (!resolvable.length || !resolvable.every((n) => n.resolved)) throw new GitlabError(`${id} が resolve にならなかった`, null);
 }
 
-/* ---------- the merge gate and the local CI's report (#924) ---------- */
+/* ---------- the merge gate and the local CI's report ---------- */
 
 /** GitLab's `verification` (the local CI's result): a note on the MR (`pr` = the MR's iid). */
 export const gitlabForge = (sh: Sh): ForgeImpl<Verification, void> => ({

@@ -6,7 +6,7 @@ import { BacklogEditInput, type BacklogIssueData, type BacklogSource } from "@sw
 import { BacklogEditError, createStoredIssue, editStoredIssue, commentStoredIssue, isUnblocked, overlapIn, pickNext, readStoredBacklog, readStoredIssue, heldIn, workspaceSyncOf } from "./backlog.ts";
 import { Db, type BacklogSnapshotEntry } from "./db.ts";
 
-// The backlog read from what the last import stored (#885): no GitHub involved — readStoredBacklog takes no gh at all.
+// The backlog read from what the last import stored: no GitHub involved — readStoredBacklog takes no gh at all.
 
 let dir: string;
 let db: Db;
@@ -38,7 +38,7 @@ function imported(records: BacklogSnapshotEntry[]) {
 
 const byNumber = (ws: { id: string; name: string; path: string }) => Object.fromEntries(readStoredBacklog(db, ws).items.map((i) => [i.number, i]));
 
-test("a GitHub #12 and a GitLab #12 are two records (#892): each workspace reads its own, with its comments", () => {
+test("a GitHub Issue 12 and a GitLab Issue 12 are two records: each workspace reads its own, with its comments", () => {
   const LAB: BacklogSource = { service: "gitlab", host: "gitlab.example.com", repository: "acme/app", project: { owner: "acme/app", number: 0 } };
   const hub = imported([issue(12, ["type:pbi"], { title: "GitHub の #12" }), comment(12, "IC_1", "GitHub のコメント", "2026-10-02T00:00:00Z")]);
   const lab = db.upsertWorkspace({ name: "lab", path: "/Users/dev/lab", kind: "repo" });
@@ -53,7 +53,7 @@ test("a GitHub #12 and a GitLab #12 are two records (#892): each workspace reads
   expect(db.listBacklogRecords(LAB).map((r) => r.externalId).sort()).toEqual(["gitlab:issue:900", "gitlab:note:5"]);
 });
 
-test("a comment made here keeps its seq across the send (#3069)", () => {
+test("a comment made here keeps its seq across the send", () => {
   const ws = imported([issue(12, ["type:pbi"]), comment(12, "IC_old", "取り込んだだけ", "2026-10-01T00:00:00Z")]);
   const first = commentStoredIssue(db, SOURCE, 12, "1 件目", Date.parse("2026-10-03T00:00:00Z")).operation;
   commentStoredIssue(db, SOURCE, 12, "2 件目", Date.parse("2026-10-03T00:00:01Z"));
@@ -85,7 +85,7 @@ test("stages, Project fields of the workspace's Project and Task counts come fro
     issue(2, ["type:request"], { body: "## 派生 PBI\n- #3" }),
     issue(3, ["type:pbi"], { subIssues: [30, 31] }), item(3, { Status: "Ready", Priority: "P1", "Story Points": 5 }),
     issue(30, ["type:task"], { state: "CLOSED" }), issue(31, ["type:task"]),
-    issue(4, ["type:pbi"]), item(4, { Status: "Ready" }, "other"), // another owner's Project #1
+    issue(4, ["type:pbi"]), item(4, { Status: "Ready" }, "other"), // another owner's Project 1
     issue(5, ["type:pbi"]), item(5, { Status: "In review" }),
     issue(6, ["type:pbi"], { state: "CLOSED" }),
     { ...issue(7, ["type:pbi"]), fetchState: "unavailable" },
@@ -123,12 +123,12 @@ test("a PBI's waits carry the stored states; a Draft or needs-decision pull requ
     pr(40, false), pr(41, true), pr(42, false, ["needs-decision"]),
   ]);
   const items = byNumber(ws);
-  // a prerequisite waits for a Task even while it asks; an overlap wait does not (#817)
+  // a prerequisite waits for a Task even while it asks; an overlap wait does not
   expect(items[20]).toMatchObject({ waits: [{ number: 40, kind: "pr", open: true }, { number: 13, kind: "issue", open: false }, { number: 14, kind: "issue", open: true }], waitsAt: "2026-10-02T00:00:00Z" });
   expect(items[21]!.waits).toEqual([{ number: 40, kind: "pr", open: true, state: "pending", reason: "overlap", pbi: null }]);
 });
 
-test("waiting: each wait says why (overlap / prerequisite) and the PBI that moves it (an Issue's parent, the parent of what a PR closes); a number not stored stays, neither open nor closed (#1046, #1183)", () => {
+test("waiting: each wait says why (overlap / prerequisite) and the PBI that moves it (an Issue's parent, the parent of what a PR closes); a number not stored stays, neither open nor closed", () => {
   const ws = imported([
     issue(20, ["type:pbi"]), item(20, { Status: "In progress" }),
     comment(20, "c1", "<!-- pbi-complete:release waits=13,99 -->", "2026-10-02T00:00:00Z"),
@@ -146,14 +146,14 @@ test("waiting: each wait says why (overlap / prerequisite) and the PBI that move
     { number: 13, kind: "issue", open: false, state: "met", reason: "overlap", pbi: { number: 30, title: "#30" } },
     { number: 40, kind: "pr", open: false, state: "met", reason: "overlap", pbi: { number: 30, title: "#30" } },
   ]);
-  // not read is not closed: #20 is held and listed under 待ち, #21 (all closed) goes on
+  // not read is not closed: Issue 20 is held and listed under 待ち, Issue 21 (all closed) goes on
   expect(heldIn(Object.values(items), "implement").map((h) => h.item.number)).toEqual([20]);
   expect(isUnblocked(items[20]!)).toBe(false);
   expect(pickNext([items[20]!], "implement")).toBeNull();
   expect(pickNext([items[20]!, items[21]!], "implement")).toMatchObject({ item: { number: 21 }, action: "complete" });
 });
 
-describe("pickNext prerequisite (#937)", () => {
+describe("pickNext prerequisite", () => {
   const pbi = (n: number, priority: string, body = "", over: Partial<BacklogIssueData> = {}) => [issue(n, ["type:pbi"], { body, ...over }), item(n, { Status: "Ready", Priority: priority })];
   const closed = (n: number, stateReason: BacklogIssueData["stateReason"]) => issue(n, ["type:pbi"], { state: "CLOSED", stateReason });
   const pick = (ws: { id: string; name: string; path: string }) => pickNext(readStoredBacklog(db, ws).items, "implement")?.item.number ?? null;
@@ -181,7 +181,7 @@ describe("pickNext prerequisite (#937)", () => {
       { number: 40, kind: "pr", need: "release", state: "unknown", via: 11 },
     ]);
     expect(pick(ws)).toBe(2);
-    // released: #11 is free to go, so the PBI goes on
+    // released: Issue 11 is free to go, so the PBI goes on
     const released = readStoredBacklog(db, ws, { released: (oid) => oid === "m40" }).items;
     expect(released.find((i) => i.number === 1)!.prereqs).toEqual([]);
     expect(pickNext(released, "implement")?.item.number).toBe(1);
@@ -209,7 +209,7 @@ describe("pickNext prerequisite (#937)", () => {
   });
 });
 
-test("waiting: a waits= pull request closed unmerged holds the PBI as withdrawn; an overlap= one closed unmerged lets it go on (#937)", () => {
+test("waiting: a waits= pull request closed unmerged holds the PBI as withdrawn; an overlap= one closed unmerged lets it go on", () => {
   const ws = imported([
     issue(20, ["type:pbi"]), item(20, { Status: "In progress" }), comment(20, "c1", "<!-- pbi-complete:release waits=40 -->", "2026-10-02T00:00:00Z"),
     issue(21, ["type:pbi"]), item(21, { Status: "In progress" }), comment(21, "c2", "<!-- pbi-complete:release overlap=40 -->", "2026-10-02T00:00:00Z"),
@@ -243,7 +243,7 @@ test("a database restored from a backup (snapshotTo) answers the same backlog an
   }
 });
 
-describe("pickNext overlap (#1044)", () => {
+describe("pickNext overlap", () => {
   // PBI n with one open Task n0 naming `file`, Ready
   const pbi = (n: number, priority: string, file: string, status = "Ready") => [
     issue(n, ["type:pbi"], { subIssues: [n * 10] }), item(n, { Status: status, Priority: priority }), issue(n * 10, ["type:task"], { body: `触る場所: \`${file}\``, parent: n }),
@@ -333,7 +333,7 @@ describe("pickNext overlap (#1044)", () => {
     }
   });
 
-  test("a PBI whose stage Task runs (active) holds its open Tasks as the other work, Ready or not; one that does not overlap starts too; without active nothing changes (#3228)", () => {
+  test("a PBI whose stage Task runs (active) holds its open Tasks as the other work, Ready or not; one that does not overlap starts too; without active nothing changes", () => {
     const ws = imported([...pbi(1, "P0", "src/a.ts"), ...pbi(2, "P1", "src/a.ts"), ...pbi(3, "P2", "src/c.ts")]);
     const read = (active?: (n: number) => boolean) => readStoredBacklog(db, ws, { active }).items;
     const at = (items: ReturnType<typeof read>, n: number) => items.find((i) => i.number === n)!;
@@ -378,7 +378,7 @@ describe("pickNext overlap (#1044)", () => {
   });
 });
 
-describe("sync of each item and of the workspace (#908)", () => {
+describe("sync of each item and of the workspace", () => {
   const NOW = 10_000;
   const sync = (ws: { id: string; name: string; path: string }, over: Parameters<typeof readStoredBacklog>[2] = {}) =>
     Object.fromEntries(readStoredBacklog(db, ws, { now: NOW, ...over }).items.map((i) => [i.number, i.sync]));
@@ -487,7 +487,7 @@ describe("sync of each item and of the workspace (#908)", () => {
     expect(workspaceSyncOf(db, ws, { now: NOW }).creates).toEqual([]);
   });
 
-  test("the workspace lists the Issues that hold operations, Closed ones too, by number (#1872)", () => {
+  test("the workspace lists the Issues that hold operations, Closed ones too, by number", () => {
     const ws = imported([issue(1, ["type:pbi"]), issue(2, ["type:pbi"], { state: "CLOSED" }), issue(3, ["type:pbi"], { state: "CLOSED" }), issue(4, ["type:pbi"], { state: "CLOSED" })]);
     db.setBacklogOperationResult(edit(ws, 2, "mine"), { status: "conflict", error: "moved" });
     db.applyBacklogEdit(SOURCE, { records: [], operations: [{ issue: "I_3", targetKind: "comment", target: "local:c3", kind: "comment", payload: { body: "hi" } }] }, 1);
@@ -509,7 +509,7 @@ describe("sync of each item and of the workspace (#908)", () => {
   });
 });
 
-describe("close with a reason (#3146)", () => {
+describe("close with a reason", () => {
   const reasonOf = (ws: { id: string }, ref: number | string) => {
     const i = readStoredIssue(db, ws, ref)!.issue;
     return { state: i.state, stateReason: i.stateReason };

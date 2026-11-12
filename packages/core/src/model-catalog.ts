@@ -1,7 +1,7 @@
 /**
- * The model tables the installed CLIs carry (PBI #248, #1401): claude — the table embedded in the installed executable;
+ * The model tables the installed CLIs carry: claude — the table embedded in the installed executable;
  * codex — `codex debug models --bundled`, the table shipped in the binary (without `--bundled` it refreshes over the
- * network, so the flag is always given). Local data only: no vendor API, no API key (#155). Read by
+ * network, so the flag is always given). Local data only: no vendor API, no API key. Read by
  * `scripts/check-models.ts` and by the settings screen's 「CLI の表を読む」 (GET /api/settings/model-candidates), only
  * when asked: the claude executable is about 240 MB.
  */

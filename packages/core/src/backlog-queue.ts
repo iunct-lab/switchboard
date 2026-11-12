@@ -1,5 +1,5 @@
 /**
- * The backlog queue (#3955): the PBIs the person chose to implement, in order, across the workspaces. One row of
+ * The backlog queue: the PBIs the person chose to implement, in order, across the workspaces. One row of
  * `settings` (`QUEUE_KEY`), not part of `Settings`, so a settings PATCH and a queue PUT do not write over each other.
  */
 import { BacklogQueue, type BacklogQueueEnded, type BacklogQueueEntry, type BacklogQueueInput } from "@switchboard/protocol";
@@ -61,7 +61,7 @@ export function pruneClosed(queue: BacklogQueue, closed: (e: BacklogQueueEntry) 
   };
 }
 
-/** Keeps what the queue's last start decided (#3966), on the queue as stored now. */
+/** Keeps what the queue's last start decided, on the queue as stored now. */
 export function noteQueue(db: Db, lines: string[], now = Date.now()): BacklogQueue {
   const queue = { ...readQueue(db), lastNote: lines.join("\n"), lastNoteAt: now };
   db.setSetting(QUEUE_KEY, queue);

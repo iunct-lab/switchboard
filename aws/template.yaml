@@ -1169,6 +1169,20 @@ Resources:
                 # single-quoted: an unquoted `echo "a: b"` is a YAML map, not a command
                 - 'echo "sb-offload: image $SB_IMAGE_TAG"'
                 - 'mkdir -p /sb/work && cd /sb/work && aws s3 cp "s3://${Data}/$SB_OFFLOAD_KEY" - | tar -xzf -'
+                # the recordings (#4711): read from the one-time object next to the work tree, never written back
+                - 'if [ -n "$SB_OFFLOAD_FIXTURES" ]; then D=/home/switchboard/.switchboard/fixtures; mkdir -p "$D" && aws s3 cp "s3://${Data}/$(echo "$SB_OFFLOAD_KEY" | sed "s/[.]tar[.]gz$//").fixtures.tar.gz" - | tar -xzf - -C "$D" && chown -R switchboard: /home/switchboard/.switchboard; fi'
+                # the host's AWS names and account ids (#4711) become the CI user's ~/.aws/config; no value is echoed, and the JSON is deleted once read
+                - |
+                  if [ -n "$SB_OFFLOAD_NAMES" ]; then
+                    set +x
+                    mkdir -p /home/switchboard/.aws
+                    # a fixed line on failure, never the content or bun's message (it can quote the JSON)
+                    aws s3 cp "s3://${Data}/$(echo "$SB_OFFLOAD_KEY" | sed "s/[.]tar[.]gz$//").names.json" /sb/names.json --only-show-errors \
+                      && ( umask 077; bun -e 'const j = await Bun.file("/sb/names.json").json(); const names = j.names ?? []; const ids = j.accountIds ?? []; let o = ""; (names.length ? names.map((n) => "[profile " + n + "]") : ["[default]"]).forEach((h, i) => { o += h + "\n"; if (i === 0) for (const id of ids) o += "sso_account_id = " + id + "\n"; }); await Bun.write("/home/switchboard/.aws/config", o);' ) >/dev/null 2>&1 \
+                      || { rm -f /sb/names.json; echo "sb-offload: the names for the public-tree check could not be read"; exit 1; }
+                    rm -f /sb/names.json
+                    chown -R switchboard: /home/switchboard/.aws && chmod 600 /home/switchboard/.aws/config
+                  fi
                 - 'cd /sb/work && sh -c "$SB_OFFLOAD_CMD"; c=$?; echo; echo "sb-offload: exit $c"'
       Artifacts: { Type: NO_ARTIFACTS }
       Environment: { Type: ARM_CONTAINER, ComputeType: BUILD_GENERAL1_LARGE, Image: !Sub '${OffloadImageRepo.RepositoryUri}:latest', ImagePullCredentialsType: SERVICE_ROLE, PrivilegedMode: true }

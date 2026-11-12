@@ -9,7 +9,7 @@ import { createZstdCompress, type ZstdCompress } from "node:zlib";
 import type { CoreConfig } from "./config.ts";
 
 /**
- * Moving the history to another machine (#179): one tar.zst with the database snapshot, Claude Code's and Codex's
+ * Moving the history to another machine: one tar.zst with the database snapshot, Claude Code's and Codex's
  * session logs, attachments and the Knowledge folder. Absolute paths are not rewritten here; `relocate` (relocate.ts)
  * matches them to the target's HOME and repository folder after the import (docs/design/cloud-hosting.md §5).
  */
@@ -43,7 +43,7 @@ function packageDirs(cfg: CoreConfig) {
  * `encryptTo`: an age recipient (public key); the package is then readable only with the matching identity.
  * Files go into the package one at a time, straight from their sources: tar → zstd → (age) → `out`. Only the database
  * snapshot is staged, and no more than one read chunk is held at once, so the history never sits in memory or in a
- * copy as a whole (a 3.8 GB host was oom-killed doing that, #1201).
+ * copy as a whole (a 3.8 GB host was oom-killed doing that).
  */
 export async function exportHistory(cfg: CoreConfig, out: string, opts: { encryptTo?: string } = {}): Promise<Manifest> {
   const ageBin = opts.encryptTo ? ageBinary() : null;
@@ -197,7 +197,7 @@ function walk(source: string, entry: string, skip: { dev: number; ino: number })
 /**
  * The ustar header for a regular file (0644; import restores modes from the manifest). A name over 100 bytes or
  * outside ASCII goes in a PAX extended header before it, as UTF-8 exactly as given — Bun.Archive (and /usr/bin/tar,
- * not used: macOS writes names with dakuten as NFD, #256) read it back as is. A size past the 11 octal digits does too.
+ * not used: macOS writes names with dakuten as NFD) read it back as is. A size past the 11 octal digits does too.
  */
 function tarHeader(name: string, size: number): Uint8Array {
   const bytes = Buffer.from(name);

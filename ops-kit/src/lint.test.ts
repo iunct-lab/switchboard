@@ -133,7 +133,7 @@ describe("lint", () => {
 
   test("requests: a 出典 without 誰の言葉, or with another value, is a violation (誰の言葉)", async () => {
     const line = "要望の「## 出典」に「- 誰の言葉: 利用者 / エージェント / 定期の検査」の行が無い";
-    // #3 the old 誰から, #4 values other than the three, #5 the line outside 出典; #6 passes (a note may follow the value)
+    // `#3` the old 誰から, `#4` values other than the three, `#5` the line outside 出典; `#6` passes (a note may follow the value)
     expect(await lines("request-speaker")).toEqual([`#3: ${line}`, `#4: ${line}`, `#5: ${line}`, "violations: 3  warnings: 0  (api errors: 0)"]);
     expect(speakerOf("## 出典\n- 誰の言葉: エージェント\n")).toBe("エージェント");
     expect(speakerOf("## 要望\nx\n")).toBeNull();
@@ -165,7 +165,7 @@ describe("lint", () => {
     expect(ok.violations).toEqual([]);
     await expect(lint(fakeGh([fail, fail, fail]), cfg, { sleep: async (ms) => void waits.push(ms) })).rejects.toThrow(/open の Issue の取得に失敗: secondary rate limit/);
     expect(waits).toEqual([2000, 2000, 4000]);
-    // a limit or an auth failure the client classified is not asked again (#894)
+    // a limit or an auth failure the client classified is not asked again
     for (const kind of ["secondary", "auth"] as const) {
       const gh = fakeGh([() => { throw new GhError(kind, kind); }]);
       await expect(lint(gh, cfg, { sleep: async (ms) => void waits.push(ms) })).rejects.toThrow(LintFetchError);
@@ -230,7 +230,7 @@ describe("lint", () => {
   const pbiNode = (number: number, body = okPbi.body) => ({ ...okPbi, number, body });
   const taskNode = (number: number, parent: number, body = okTask.body) => ({ ...okTask, number, body, parent: { number: parent, labels: { nodes: [{ name: "type:pbi" }] } } });
 
-  test("lint: free-text prerequisite warns — 前提: #n only in free text; not with a **前提**: line or only in a fence (#1990); a Task too (#2149)", async () => {
+  test("lint: free-text prerequisite warns — 前提: #n only in free text; not with a **前提**: line or only in a fence; a Task too", async () => {
     const log = (line: string) => `${okPbi.body}\n## 決定ログ\n\n- 2026-10-19: ${line}\n`;
     const free = pageOf([
       pbiNode(888),
@@ -252,7 +252,7 @@ describe("lint", () => {
 
   test("lint: free-text prerequisite phrasings and tasks warn", async () => {
     const step = (line: string) => `${okTask.body}\n## 手順\n1. ${line}\n`;
-    // #10 with Tasks #11-#18; #30, another PBI, with the open Tasks #1413 and #2096
+    // `#10` with Tasks `#11`-`#18`; `#30`, another PBI, with the open Tasks `#1413` and `#2096`
     const free = pageOf([
       pbiNode(10),
       taskNode(11, 10),
@@ -266,7 +266,7 @@ describe("lint", () => {
       taskNode(16, 10, `${step("`#1413 の後` と ``#1413 の後`` と ``a`#1413 の後`b`` と ``a` #1413 の後 `b と書く")}\n\`\`\`\n#1413 の後\n\`\`\`\n`), // (e) inline code, fence
       pbiNode(17, `${okPbi.body}\n## Tasks\n順番: #2096 のマージ後\n`), // (f) a PBI's Tasks line
       taskNode(18, 10, step("#1413 の完了後、#30 を待つ。#2096 が先")),
-      pbiNode(19, `${okPbi.body}\n## Tasks\n#31 の後に #10 の後、#17 を待つ\n`), // #31 is its own Task; #10 / #17 are other PBIs
+      pbiNode(19, `${okPbi.body}\n## Tasks\n#31 の後に #10 の後、#17 を待つ\n`), // `#31` is its own Task; `#10` / `#17` are other PBIs
       taskNode(31, 19, step("#19 の後、#32 が先")), // its parent, and a sibling
       taskNode(32, 19),
     ]);
@@ -300,7 +300,7 @@ describe("lint", () => {
     expect(missing).toBe(2);
   });
 
-  /** The page GitHub answered, as the app would have stored it (#919): parents not in the page are stored with their labels. */
+  /** The page GitHub answered, as the app would have stored it: parents not in the page are stored with their labels. */
   const recordsOf = (name: string): StoredRecords => {
     const nodes = page(name)().repository.issues.nodes as any[];
     const issue = (n: number, labels: string[], over: Partial<StoredRecords["issues"][number]> = {}): StoredRecords["issues"][number] => ({ number: n, title: "", url: "", state: "OPEN", stateReason: null, body: "", labels, parent: null, subIssues: [], createdAt: "", updatedAt: "", closedAt: null, fields: null, ...over });
@@ -313,7 +313,7 @@ describe("lint", () => {
     return { workspaceId: "w", service: "github", repository: "example/repo", project: { owner: "example", number: 1 }, fetchedAt: 1, top: [], issues: [...issues, ...parents, issue(99, ["type:pbi"], { state: "CLOSED" })], unread: [], pulls: [], comments: [] };
   };
 
-  test("lint from the app's stored records (#919): the same violations as GitHub's answer, without asking GitHub", async () => {
+  test("lint from the app's stored records: the same violations as GitHub's answer, without asking GitHub", async () => {
     for (const name of ["ok", "no-parent", "sp-mismatch", "sp-13", "ready-without-tasks", "request-missing-source", "request-speaker", "missing-section", "priority"]) {
       const gh = fakeGh([]);
       const stored = await lint(gh, cfg, { records: recordsOf(name), sleep: noSleep });
@@ -331,9 +331,9 @@ describe("lint", () => {
   });
 });
 
-describe("（リリース）on an Issue (#4335)", () => {
+describe("（リリース）on an Issue", () => {
   const msg = (n: number) => `#11: **前提**: の #${n} は Issue なので（リリース）は付けられない。（リリース）は PR の番号にだけ付く。#${n} を閉じた PR の番号に直す`;
-  /** The `ok` page with `prefix` put on top of Task #11's body. */
+  /** The `ok` page with `prefix` put on top of Task `#11`'s body. */
   const pageWith = (prefix: string) => () => {
     const d = page("ok")();
     const t = d.repository.issues.nodes.find((n: any) => n.number === 11);

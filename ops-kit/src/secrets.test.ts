@@ -71,7 +71,7 @@ describe("findSecrets", () => {
     for (const line of fine) expect({ line, hits: findSecrets(line) }).toEqual({ line, hits: [] });
   });
 
-  test("the wider rules of #775: a short fine-grained token, a lowercase bearer, a key heading with digits", () => {
+  test("the wider rules: a short fine-grained token, a lowercase bearer, a key heading with digits", () => {
     for (const [kind, line] of [
       ["github-token", `token ${"github_pat"}_${A(22)}`],
       ["bearer-token", `authorization: bearer ${A(20)}==`],
@@ -137,7 +137,7 @@ describe("account-id", () => {
   });
 });
 
-// The cases of the test of a repository that kept a scan of its own (named in #775), with its kinds read as ours
+// The cases of the test of a repository that kept a scan of its own, with its kinds read as ours
 // (device-login-url → approval-url, aws-access-key → aws-key, bearer → bearer-token, aws-account-id → account-id). The
 // common rules have to find at least what that scan finds before the repository can drop it
 describe("own-scan parity", () => {
@@ -218,7 +218,7 @@ describe("aws-profile", () => {
   });
 
   test("a name that is a plain word hits only where it is named as a profile or a session", () => {
-    // a made-up example (#2078): a dictionary word that says it is a stand-in, not a name on any host
+    // a made-up example: a dictionary word that says it is a stand-in, not a name on any host
     const plain = { names: ["placeholder"], accountIds: [] };
     for (const l of ["aws sso login --profile placeholder", "AWS_PROFILE=placeholder", "[profile Placeholder]", "sso_session = placeholder", '"profile": "placeholder"']) {
       expect({ l, hits: findSecrets(l, plain) }).toEqual({ l, hits: [{ kind: "aws-profile", line: 1 }] });

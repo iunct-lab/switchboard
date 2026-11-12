@@ -10,7 +10,7 @@ import { billedUsd, isBedrockModel, ledgerRowFor, loadPricing, priceUsage, resol
 
 const { table, source } = loadPricing([join(import.meta.dir, "..", "config", "pricing.json")]);
 
-describe("pricing (#14)", () => {
+describe("pricing", () => {
   test("GPT-6.1 Sol is its own row: cache reads are $0.10, not gpt-6-sol's $0.20", () => {
     expect(resolveModel(table, "gpt-6.1-sol", "codex")).toMatchObject({
       name: "gpt-6.1-sol",
@@ -69,7 +69,7 @@ describe("pricing (#14)", () => {
     expect(billedUsd(table, "dak", 1.23)).toBe(1.23);
   });
 
-  test("billedUsd: a Bedrock model id is billed at the API price under a subscription runner (#1730)", () => {
+  test("billedUsd: a Bedrock model id is billed at the API price under a subscription runner", () => {
     expect(isBedrockModel("global.anthropic.claude-haiku-5-5")).toBe(true);
     expect(isBedrockModel("anthropic.claude-haiku-5-5")).toBe(true);
     expect(isBedrockModel("claude-haiku-5-5")).toBe(false);
@@ -78,7 +78,7 @@ describe("pricing (#14)", () => {
     expect(billedUsd(table, "claude", 1.23, null)).toBe(0);
   });
 
-  test("every Bedrock id of the claude adapter is priced (#1730)", () => {
+  test("every Bedrock id of the claude adapter is priced", () => {
     const u = { inputTokens: 1000, outputTokens: 1000, cacheReadTokens: 0, cacheWriteTokens: 0 };
     for (const m of CLAUDE_BEDROCK_MODELS) expect(priceUsage(table, m.value, "claude", u)).toMatchObject({ priced: true });
     expect(priceUsage(table, "global.anthropic.claude-haiku-5-5", "claude", u).model).toBe("claude-haiku-5-5");
@@ -91,7 +91,7 @@ describe("pricing (#14)", () => {
     expect(priceUsage(table, "us.anthropic.claude-haiku-5-5", "claude", u).costUsd).toBe(priceUsage(table, "claude-haiku-5-5", "claude", u).costUsd);
   });
 
-  test("every Bedrock id of the codex adapter is priced and billed at the API price (#1731)", () => {
+  test("every Bedrock id of the codex adapter is priced and billed at the API price", () => {
     const u = { inputTokens: 1000, outputTokens: 1000, cacheReadTokens: 0, cacheWriteTokens: 0 };
     for (const m of CODEX_BEDROCK_MODELS) {
       const p = priceUsage(table, m.value, "codex", u);
@@ -182,7 +182,7 @@ describe("pricing (#14)", () => {
   });
 });
 
-describe("usageSince (#2353)", () => {
+describe("usageSince", () => {
   const total = (costUsd: number, tokens = 0): Extract<AgentEvent, { t: "usage" }> => ({ t: "usage", source: "reported", model: "m", inputTokens: tokens, outputTokens: tokens, cacheReadTokens: tokens, cacheWriteTokens: tokens, costUsd, cumulative: true });
   test("the difference from the previous total of the session; the event loses its cumulative mark", () => {
     const first = usageSince(null, total(1.0, 10), "s")!;

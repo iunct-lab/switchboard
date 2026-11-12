@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { BacklogItem } from "@switchboard/protocol";
-import { applyView, DEFAULT_VIEW, itemMarks, loadView, resetView, saveView, VIEW_KEY, viewSummary, type BacklogView } from "./backlogView.ts";
+import { applyView, DEFAULT_VIEW, itemMarks, loadView, resetView, saveView, VIEW_KEY, viewSummary, waitSummary, type BacklogView } from "./backlogView.ts";
 
 const item = (number: number, over: Partial<BacklogItem> = {}): BacklogItem =>
   ({ number, title: `題 ${number}`, type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z", ...over }) as BacklogItem;
@@ -130,7 +130,7 @@ describe("layout", () => {
 describe("itemMarks", () => {
   // the shape inProgress.test.ts builds a row with: nothing to mark
   const row = (over: Partial<BacklogItem> = {}): BacklogItem =>
-    item(1, { url: "https://github.com/o/r/issues/1", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], stopSummary: [], ...over });
+    item(1, { url: "https://github.com/o/r/issues/1", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, waits: [], waitsAt: null, waitsUntil: null, confirmations: [], overlap: null, prereqs: [], stopSummary: [], ...over });
   const wait = (state: BacklogItem["waits"][number]["state"]) => ({ kind: "pr", number: 9, state, reason: "overlap", open: state !== "met", pbi: null }) as unknown as BacklogItem["waits"][number];
   const prereq = (state: BacklogItem["prereqs"][number]["state"]) => ({ number: 7, kind: "issue", need: "done", state, via: null }) as BacklogItem["prereqs"][number];
   const stop = (next: "decide" | "wait", state: "waiting" | "resolved" = "waiting", count = 1) =>
@@ -144,6 +144,49 @@ describe("itemMarks", () => {
     expect(itemMarks(row({ waitsAt: "2026-11-01T00:00:00Z", waits: [wait("pending")] }), true)).toEqual([{ key: "waits", label: "待ち", warn: false }]);
     expect(keys(row({ waitsAt: "2026-11-01T00:00:00Z", waits: [wait("met")] }))).toEqual([]);
     expect(keys(row({ waitsAt: null, waitsUntil: null, waits: [wait("pending")] }))).toEqual([]);
+  });
+  const NOW = Date.parse("2026-11-12T00:00:00+09:00");
+  const ago = (h: number) => new Date(NOW - h * 3_600_000).toISOString();
+  const ahead = (h: number) => new Date(NOW + h * 3_600_000).toISOString();
+  const marks = (i: BacklogItem) => itemMarks(i, false, NOW).filter((x) => x.key === "until" || x.key === "confirm");
+  test("期日 · あと: before the date (hours, then days); none once it has passed", () => {
+    expect(marks(row({ waitsAt: "x", waitsUntil: { at: ahead(6), met: false } }))).toEqual([{ key: "until", label: "期日 11/12 06:00 · あと 6 時間", warn: false }]);
+    expect(marks(row({ waitsAt: "x", waitsUntil: { at: ahead(60), met: false } }))[0]!.label).toBe("期日 11/14 12:00 · あと 2 日");
+    expect(marks(row({ waitsAt: "x", waitsUntil: { at: ago(1), met: true } }))).toEqual([]);
+    expect(marks(row({ waitsUntil: null }))).toEqual([]);
+  });
+  test("確認待ち N 日 counts from the later of the 期日 and tasks.doneAt once every Task is closed; a future 期日, an open Task and no start give none", () => {
+    const conf = (after: string | null) => [{ n: 1, text: "x", after }];
+    const tasks = (doneAt: string | null) => ({ total: 1, done: 1, doneAt });
+    const days = (h: number) => ago(24 * h);
+    // 期日 only, doneAt only, both (the later one), neither
+    expect(marks(row({ confirmations: conf(days(3)), tasks: tasks(null) }))[0]!.label).toBe("確認待ち 3 日");
+    expect(marks(row({ confirmations: conf(null), tasks: tasks(days(9)) }))).toEqual([{ key: "confirm", label: "確認待ち 9 日", warn: true }]);
+    expect(marks(row({ confirmations: conf(days(2)), tasks: tasks(days(5)) }))[0]!.label).toBe("確認待ち 2 日");
+    expect(marks(row({ confirmations: conf(days(5)), tasks: tasks(days(1)) }))[0]!.label).toBe("確認待ち 1 日");
+    expect(marks(row({ confirmations: conf(null), tasks: tasks(null) }))).toEqual([]);
+    expect(marks(row({ confirmations: conf(ahead(5)), tasks: tasks(days(9)) }))).toEqual([]);
+    expect(marks(row({ confirmations: [], tasks: tasks(days(9)) }))).toEqual([]);
+    // a Task still open: not answerable yet, whatever closed before it; no Tasks at all: the 期日 alone
+    expect(marks(row({ confirmations: conf(null), tasks: { total: 3, done: 1, doneAt: days(9) } }))).toEqual([]);
+    expect(marks(row({ confirmations: conf(days(3)), tasks: { total: 3, done: 2, doneAt: days(1) } }))).toEqual([]);
+    expect(marks(row({ confirmations: conf(days(3)), tasks: { total: 0, done: 0, doneAt: null } }))[0]!.label).toBe("確認待ち 3 日");
+  });
+  test("確認待ち warns from 7 days, not at 6", () => {
+    const one = (d: number) => marks(row({ confirmations: [{ n: 1, text: "x", after: null }], tasks: { total: 1, done: 1, doneAt: ago(24 * d) } }))[0]!;
+    expect(one(6).warn).toBe(false);
+    expect(one(7).warn).toBe(true);
+  });
+  test("waitSummary: none, 期日 only, 確認待ち only, both; the longest wait (ties to the smaller number); PBIs only", () => {
+    const until = (n: number, h: number, over: Partial<BacklogItem> = {}) => row({ number: n, url: `u/${n}`, waitsAt: "x", waitsUntil: { at: ahead(h), met: false }, ...over });
+    const confirm = (n: number, d: number, over: Partial<BacklogItem> = {}) =>
+      row({ number: n, url: `u/${n}`, confirmations: [{ n: 1, text: "x", after: null }], tasks: { total: 1, done: 1, doneAt: ago(24 * d) }, ...over });
+    expect(waitSummary([row()], NOW)).toEqual({ until: { count: 0, next: null }, confirm: { count: 0, longest: null } });
+    expect(waitSummary([until(1, 60), until(2, 6)], NOW)).toEqual({ until: { count: 2, next: NOW + 6 * 3_600_000 }, confirm: { count: 0, longest: null } });
+    expect(waitSummary([confirm(5, 3), confirm(3, 9), confirm(2, 9), confirm(4, 1)], NOW)).toEqual({ until: { count: 0, next: null }, confirm: { count: 4, longest: { number: 2, url: "u/2", days: 9 } } });
+    const both = waitSummary([until(1, 6), confirm(2, 2)], NOW);
+    expect([both.until.count, both.confirm.count, both.confirm.longest?.number]).toEqual([1, 1, 2]);
+    expect(waitSummary([until(1, 6, { type: "request" }), confirm(2, 9, { type: "request" }), confirm(3, 9, { stage: "needs-decision" })], NOW).confirm.count).toBe(0);
   });
   test("前提待ち for a pending prerequisite, 進められない (warn) for one a person fixes, none for a met one", () => {
     expect(itemMarks(row({ prereqs: [prereq("pending")] }), false)).toEqual([{ key: "prereq", label: "前提待ち", warn: false }]);

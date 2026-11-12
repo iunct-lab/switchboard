@@ -80,9 +80,6 @@ export const task = msgs({
   prevWhy: { ja: "適用しなかった理由: {why}", en: "Why it was not applied: {why}" },
   applied: { ja: "方針で回答: {summary}", en: "Answered by policy: {summary}" },
   batchSso: { ja: "SSO のログイン待ち", en: "Waiting for SSO login" },
-  batchSecurityMerge: { ja: "セキュリティの確認待ちのマージ", en: "Merges waiting on a security check" },
-  waitedMinutes: { ja: "{n} 分", en: "{n} min" },
-  waitedHours: { ja: "{n} 時間", en: "{n} h" },
   batchDeploy: { ja: "配備の承認待ち", en: "Waiting for deploy approval" },
 
   // inProgress.ts: a backlog row's buttons and its Task's state
@@ -315,6 +312,7 @@ export const task = msgs({
   writeAnswer: { ja: "回答を書く", en: "Write an answer" },
   answerAllTitle: { ja: "すべての質問に答えると送れます", en: "Answer every question to send" },
   answer: { ja: "回答する", en: "Answer" },
+  sendChosen: { ja: "送る: 回答 → {target}、続き: {next}", en: "Sends: your answers → {target}, then: {next}" },
 
   // DeviceAuth.tsx
   approveAt: { ja: "{host} で承認してください", en: "Approve at {host}" },
