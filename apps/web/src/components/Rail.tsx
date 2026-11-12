@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { isWorkingStatus, type Task, type TerminalStatus, type Workspace } from "@switchboard/protocol";
+import { isWorkingStatus, type TaskStopMark, type TaskSummary, type TerminalStatus, type Workspace } from "@switchboard/protocol";
 import { OriginTag, BackgroundTag, ResumeTag, ShadowTag } from "./ui.tsx";
-import { attentionList, outcomeDotClass, outcomeLabel, terminalMark } from "../attention.ts";
+import { attentionGroups, outcomeDotClass, outcomeLabel, terminalMark } from "../attention.ts";
 import { taskTimes } from "../inProgress.ts";
 import { filterTasks, PAGE, STATUS_FILTERS, type StatusFilter } from "../taskList.ts";
 import { t } from "../i18n.ts";
@@ -9,7 +9,7 @@ import { home } from "../i18n/home.ts";
 import { listTitle } from "../taskTitle.ts";
 
 /** The tooltip's line of when a Task started and since when it is in its status, JST (#2030); the row itself has no room. */
-const timesLine = (t: Task) => {
+const timesLine = (t: TaskSummary) => {
   const x = taskTimes(t, Date.now());
   return `${x.started} · ${x.since}`;
 };
@@ -20,9 +20,9 @@ function TerminalMark(props: { status: TerminalStatus | undefined }) {
   return mark && <span className={mark.className}>{mark.text}</span>;
 }
 
-const dotClass = (s: Task["status"]) => (s === "running" || s === "background" ? "run" : s === "waiting" ? "wait" : s === "error" ? "err" : "idle");
+const dotClass = (s: TaskSummary["status"]) => (s === "running" || s === "background" ? "run" : s === "waiting" ? "wait" : s === "error" ? "err" : "idle");
 
-export function Rail(props: { workspaces: Workspace[]; tasks: Task[]; currentTaskId?: string; approvals: number; approvalsOpen: boolean; onApprovals: () => void; listOpen: boolean; onToggleList: () => void; onOpenTask: (id: string) => void; onHome: () => void; onFeedback: () => void; onShowArchived: () => void; terminals: Record<string, TerminalStatus> }) {
+export function Rail(props: { workspaces: Workspace[]; tasks: TaskSummary[]; currentTaskId?: string; approvals: number; approvalsOpen: boolean; onApprovals: () => void; listOpen: boolean; onToggleList: () => void; onOpenTask: (id: string) => void; onHome: () => void; onFeedback: () => void; onShowArchived: () => void; terminals: Record<string, TerminalStatus>; stopMarks: Record<string, TaskStopMark> | null }) {
   // the Tasks group (#1142): searched and filtered in what the page holds, drawn PAGE rows at a time
   const [q, setQ] = useState("");
   const [status, setStatus] = useState<StatusFilter>("all");
@@ -32,13 +32,13 @@ export function Rail(props: { workspaces: Workspace[]; tasks: Task[]; currentTas
   const rows = filterTasks(props.tasks, { q, status, archived });
   // the groups above and the counts leave the archived ones out
   const live = props.tasks.filter((t) => t.archivedAt === null);
-  const byWs = new Map<string | null, Task[]>();
+  const byWs = new Map<string | null, TaskSummary[]>();
   for (const t of live) {
     const k = t.workspaceId;
     byWs.set(k, [...(byWs.get(k) ?? []), t]);
   }
   const active = live.filter((t) => isWorkingStatus(t.status) || props.terminals[t.id] === "waiting");
-  const attention = attentionList(live);
+  const attention = attentionGroups(live, props.stopMarks).needs;
   return (
     <aside className={`rail ${props.listOpen ? "open" : ""}`}>
       <button className={`it rail-approvals ${props.approvalsOpen ? "on" : ""}`} onClick={props.onApprovals} title={t(home.approvalsTitle)}>
@@ -66,13 +66,16 @@ export function Rail(props: { workspaces: Workspace[]; tasks: Task[]; currentTas
       {attention.length > 0 && (
         <>
           <div className="grp">{t(home.railAttention, { count: attention.length })}</div>
-          {attention.map((t) => (
-            <button key={t.id} className={`it ${props.currentTaskId === t.id ? "on" : ""}`} onClick={() => props.onOpenTask(t.id)} title={`${t.title}\n${outcomeLabel(t.outcome)}\n${timesLine(t)}`}>
-              <span className="t">{listTitle(t.title)}</span>
-              <span className="m">{outcomeLabel(t.outcome)}</span>
-              <span className={`dot ${outcomeDotClass(t.outcome)}`} />
-            </button>
-          ))}
+          {attention.map((g) => {
+            const t = g.tasks[0]!;
+            return (
+              <button key={g.key} className={`it ${g.tasks.some((x) => x.id === props.currentTaskId) ? "on" : ""}`} onClick={() => props.onOpenTask(t.id)} title={`${t.title}\n${outcomeLabel(t.outcome)}\n${timesLine(t)}`}>
+                <span className="t">{listTitle(t.title)}</span>
+                <span className="m">{g.count > 1 ? `${outcomeLabel(t.outcome)} ×${g.count}` : outcomeLabel(t.outcome)}</span>
+                <span className={`dot ${outcomeDotClass(t.outcome)}`} />
+              </button>
+            );
+          })}
         </>
       )}
       <div className="grp">Workspace</div>

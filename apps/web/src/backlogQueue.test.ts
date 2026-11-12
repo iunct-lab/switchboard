@@ -180,7 +180,7 @@ describe("pickTop (#3959)", () => {
     item(5, { stage: "in-progress", priority: "P0" }),
     item(6, { type: "request", stage: "request", priority: "P0" }),
     item(7, { priority: "P0", storyPoints: 1 }),
-  ].map((i) => ({ url: `https://github.com/acme/app/issues/${i.number}`, waits: [], waitsAt: null, prereqs: [], stopSummary: [], replyWaiting: false, lastTask: null, overlap: null, ...i }) as BacklogItem);
+  ].map((i) => ({ url: `https://github.com/acme/app/issues/${i.number}`, waits: [], waitsAt: null, waitsUntil: null, prereqs: [], stopSummary: [], replyWaiting: false, lastTask: null, overlap: null, ...i }) as BacklogItem);
   const nums = (xs: BacklogItem[]) => xs.map((i) => i.number);
   const q = queue({ items: [e(7)] });
 

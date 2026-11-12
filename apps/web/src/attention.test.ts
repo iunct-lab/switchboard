@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import type { Task, TaskOutcome, TaskStatus } from "@switchboard/protocol";
-import { activeLabel, attentionList, isActive, judgementNote, needsAttention, outcomeDotClass, outcomeLabel, terminalMark } from "./attention.ts";
+import type { StopReasonCode, StopState, Task, TaskOutcome, TaskStatus, TaskStopMark } from "@switchboard/protocol";
+import { activeLabel, attentionGroups, attentionList, isActive, judgementNote, needsAttention, outcomeDotClass, outcomeLabel, terminalMark } from "./attention.ts";
 
 const task = (id: string, status: TaskStatus, outcome: TaskOutcome, reviewedAt: number | null = null, updatedAt = 1): Task => ({ id, workspaceId: null, title: id, runner: "claude", cwd: "/w", scope: ["/w"], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome, reviewedAt, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 0, createdAt: 0, updatedAt, queuedAt: null });
 
@@ -61,4 +61,41 @@ test("activeLabel: running / waiting / background / an idle Task in the run-slot
   }
   expect(isActive(q("idle", 5))).toBe(true);
   expect(isActive(q("running", null))).toBe(true);
+});
+
+const mark = (reason: StopReasonCode, state: StopState, key = "k", conditions: TaskStopMark["conditions"] = []): TaskStopMark => ({ key, reason, state, conditions, count: 1 });
+const split = (m: TaskStopMark | undefined, outcome: TaskOutcome = "needs_action") => {
+  const r = attentionGroups([task("t", "done", outcome)], m ? { t: m } : {});
+  return r.needs.length === 1 && r.waiting.length === 0 ? "needs" : r.waiting.length === 1 && r.needs.length === 0 ? "waiting" : "?";
+};
+
+test("attentionGroups: waiting / exhausted on a reason that needs the person stays under needs", () => {
+  for (const reason of ["decision", "auth", "permission", "input", "disk-full", "unknown"] as const) for (const state of ["waiting", "exhausted"] as const) expect(split(mark(reason, state)), `${reason} ${state}`).toBe("needs");
+});
+
+test("attentionGroups: resolved, and depends waiting with its conditions, go to waiting", () => {
+  expect(split(mark("decision", "resolved"))).toBe("waiting");
+  const conditions = [{ key: "pr#12", value: "open", met: false }];
+  const r = attentionGroups([task("t", "done", "needs_action")], { t: mark("depends", "waiting", "k", conditions) });
+  expect(r.needs).toEqual([]);
+  expect(r.waiting.map((w) => [w.task.id, w.conditions])).toEqual([["t", conditions]]);
+});
+
+test("attentionGroups: no mark, a failed Task and marks not loaded stay under needs; other reasons fold whatever their state", () => {
+  expect(split(undefined)).toBe("needs");
+  expect(split(mark("depends", "resolved"), "failed")).toBe("needs");
+  expect(split(mark("depends", "exhausted"))).toBe("waiting");
+  expect(split(mark("transient", "exhausted"))).toBe("waiting");
+  expect(split(mark("transient", "retrying"))).toBe("waiting");
+  expect(split(mark("usage-limit", "waiting"))).toBe("waiting");
+  const r = attentionGroups([task("a", "done", "needs_action"), task("b", "done", "needs_action")], null);
+  expect(r.needs.length).toBe(2);
+  expect(r.waiting).toEqual([]);
+});
+
+test("attentionGroups: Tasks of the same key are one group with the count, placed at the newest; order as attentionList", () => {
+  const ts = [task("a", "done", "needs_action", null, 5), task("f", "error", "failed", null, 9), task("b", "done", "needs_action", null, 7), task("c", "done", "needs_action", null, 6), task("n", "done", "needs_action", null, 8)];
+  const marks = { a: mark("decision", "waiting", "same"), b: mark("decision", "waiting", "same"), c: mark("decision", "waiting", "same"), n: mark("input", "waiting", "other") };
+  const { needs } = attentionGroups(ts, marks);
+  expect(needs.map((g) => [g.key, g.count, g.tasks.map((x) => x.id)])).toEqual([["other", 1, ["n"]], ["same", 3, ["b", "c", "a"]], ["task:f", 1, ["f"]]]);
 });

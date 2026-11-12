@@ -19,12 +19,12 @@ import { currentRepo } from "./repo.ts";
  * which grows across a repository's issues.
  */
 
-import { prereqsOf, prereqState, type WaitTarget } from "../packages/core/src/backlog.ts";
+import { prereqsOf, prereqState, waitsOf, type WaitTarget } from "../packages/core/src/backlog.ts";
 import { appSync, BacklogUnknown, readRecords, type StoredRecords } from "../ops-kit/src/backlog-client.ts";
 import { linkedIssues, overlaps, pathsIn } from "./task-paths.ts";
 
 export const STALE_HOURS = 72;
-const MARKER = /<!-- pbi-complete:(claim|takeover|release)(?: (\S+))? -->/;
+const MARKER = /<!-- pbi-complete:(claim|takeover|release)(?: (\S+))?(?: (after=\S+))? -->/;
 const TASK_CLAIM = /^<!-- parallel-guard:task-claim(?: (\S+))? -->/;
 const WITHDRAW = /<!-- parallel-guard:withdraw (\S+) -->/;
 /** The tokens taken back (#2265): a claim with one of them does not count. */
@@ -60,7 +60,7 @@ export interface Work { ref: string; task?: number; paths: string[]; updatedAt: 
 export interface Hit { ref: string; path: string; updatedAt: string }
 export interface Verdict { verdict: "go" | "defer"; blocking: Hit[]; stale: Hit[] }
 /** A prerequisite (#937): `sibling` = a Task of the same PBI (its order is the stack's, so it does not wait). */
-export interface Prereq { ref: string; state: ReturnType<typeof prereqState>; sibling: boolean }
+export interface Prereq { ref: string; state: ReturnType<typeof prereqState>; sibling: boolean; fix?: string }
 
 /** The prerequisites' verdict: `stop` (a person has to fix the body), `wait` (another PBI's, not done yet) or null. */
 export function prereqVerdict(prereqs: Prereq[]): "wait" | "stop" | null {
@@ -209,23 +209,40 @@ export async function claim(board: Board, pbi: number, takeover: boolean): Promi
  * A release, with the PRs / Issues the PBI waits for when it stopped on an overlap or an unfinished prerequisite
  * (`waits=603,778`, read back by the backlog, #817). `holder()` skips the list; a later release without it clears the wait.
  */
-export function releaseBody(reason: string, waits: number[] = [], overlap = false): string {
+export function releaseBody(reason: string, waits: number[] = [], overlap = false, after?: string): string {
   const list = [...new Set(waits)].sort((a, b) => a - b);
-  return `<!-- pbi-complete:release${list.length ? ` ${overlap ? "overlap" : "waits"}=${list.join(",")}` : ""} -->\n/pbi-complete 終了: ${reason}`;
+  return `<!-- pbi-complete:release${list.length ? ` ${overlap ? "overlap" : "waits"}=${list.join(",")}` : ""}${after ? ` after=${after}` : ""} -->\n/pbi-complete 終了: ${reason}`;
 }
 
-/** `release <PBI> <理由…> [--waits n,n | --overlap-waits n,n]`'s words after the PBI; null = usage (no reason, a malformed or repeated --waits). */
-export function releaseArgs(words: string[]): { reason: string; waits: number[]; overlap?: boolean } | null {
+/** A time with a zone (ISO 8601, `Z` or `±hh:mm`) in ms; NaN when it is not one: a time with no zone is not read as local time (#4616). */
+export const afterTime = (value: string): number =>
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i.test(value.trim()) ? Date.parse(value) : NaN;
+
+/** A PBI whose last release waits for a date still ahead (#4616, `after=`): its In progress Tasks are no one's overlap until then. */
+export const waitsForDate = (comments: { body: string; createdAt: string }[], now: number): boolean => {
+  const after = waitsOf(comments)?.after;
+  return !!after && afterTime(after) > now;
+};
+
+/**
+ * `release <PBI> <理由…> [--waits n,n | --overlap-waits n,n] [--after <ISO 8601 with a zone>]`'s words after the PBI; null = usage
+ * (no reason, a malformed or repeated --waits / --after, a time that is no time or has no zone).
+ */
+export function releaseArgs(words: string[]): { reason: string; waits: number[]; overlap?: boolean; after?: string } | null {
   if (words.includes("--waits") && words.includes("--overlap-waits")) return null;
   const flag = words.includes("--overlap-waits") ? "--overlap-waits" : "--waits";
   const at = words.indexOf(flag);
   if (at >= 0 && (!/^[1-9]\d*(,[1-9]\d*)*$/.test(words[at + 1] ?? "") || words.lastIndexOf(flag) !== at)) return null;
-  const reason = (at >= 0 ? words.filter((_, i) => i !== at && i !== at + 1) : words).join(" ");
-  return reason ? { reason, waits: at >= 0 ? words[at + 1]!.split(",").map(Number) : [], ...(flag === "--overlap-waits" ? { overlap: true } : {}) } : null;
+  const afterAt = words.indexOf("--after");
+  const after = afterAt >= 0 ? words[afterAt + 1] : undefined;
+  if (afterAt >= 0 && (words.lastIndexOf("--after") !== afterAt || !after || Number.isNaN(afterTime(after)))) return null;
+  const flagged = new Set([...(at >= 0 ? [at, at + 1] : []), ...(afterAt >= 0 ? [afterAt, afterAt + 1] : [])]);
+  const reason = words.filter((_, i) => !flagged.has(i)).join(" ");
+  return reason ? { reason, waits: at >= 0 ? words[at + 1]!.split(",").map(Number) : [], ...(flag === "--overlap-waits" ? { overlap: true } : {}), ...(after ? { after } : {}) } : null;
 }
 
-export async function release(board: Board, pbi: number, reason: string, waits: number[] = [], overlap = false): Promise<void> {
-  await board.post(pbi, releaseBody(reason, waits, overlap));
+export async function release(board: Board, pbi: number, reason: string, waits: number[] = [], overlap = false, after?: string): Promise<void> {
+  await board.post(pbi, releaseBody(reason, waits, overlap, after));
 }
 
 /** Project owner and number from SWITCHBOARD_PROJECT_URL (the variable, as scripts/setup/*.sh read it). */
@@ -238,7 +255,7 @@ async function project(repo: string, run: Run): Promise<{ owner: string; number:
 
 /**
  * What the overlap check reads (#919): the top level of the repository, the Task with its PBI, the open PRs, the other
- * In progress Tasks (in the Project, not `needs-decision`) and each prerequisite's state — from GitHub (`ghMaterial`)
+ * In progress Tasks (in the Project, not `needs-decision`, not under a PBI that waits for a date still ahead) and each prerequisite's state — from GitHub (`ghMaterial`)
  * or from the records the app stored (`storedMaterial`), judged the same way (`readOthers`).
  */
 export interface Material {
@@ -251,7 +268,7 @@ export interface Material {
   target: (n: number) => Promise<WaitTarget | undefined>;
 }
 
-export async function ghMaterial(repo: string, task: number, run: Run = gh): Promise<Material> {
+export async function ghMaterial(repo: string, task: number, run: Run = gh, now = Date.now()): Promise<Material> {
   const [owner, name] = repo.split("/");
   const top = lines(await run(["api", `repos/${repo}/contents`, "-q", '.[] | {name, dir: (.type == "dir")}'])) as { name: string; dir: boolean }[];
   const issue = JSON.parse(
@@ -269,20 +286,27 @@ export async function ghMaterial(repo: string, task: number, run: Run = gh): Pro
   const tasks = lines(
     await run([
       "api", "graphql", "--paginate",
-      "-f", 'query=query($o:String!,$r:String!,$endCursor:String){ repository(owner:$o,name:$r){ issues(states:OPEN, labels:["type:task"], first:100, after:$endCursor){ pageInfo{ hasNextPage endCursor } nodes{ number body updatedAt labels(first:100){ nodes{ name } } projectItems(first:10){ nodes{ project{ number owner{ ... on Organization{ login } ... on User{ login } } } fieldValueByName(name:"Status"){ ... on ProjectV2ItemFieldSingleSelectValue{ name } } } } } } } }',
+      "-f", 'query=query($o:String!,$r:String!,$endCursor:String){ repository(owner:$o,name:$r){ issues(states:OPEN, labels:["type:task"], first:100, after:$endCursor){ pageInfo{ hasNextPage endCursor } nodes{ number body updatedAt parent{ number } labels(first:100){ nodes{ name } } projectItems(first:10){ nodes{ project{ number owner{ ... on Organization{ login } ... on User{ login } } } fieldValueByName(name:"Status"){ ... on ProjectV2ItemFieldSingleSelectValue{ name } } } } } } } }',
       "-f", `o=${owner}`, "-f", `r=${name}`,
-      "-q", ".data.repository.issues.nodes[] | {number, body, updatedAt, labels, projectItems}",
+      "-q", ".data.repository.issues.nodes[] | {number, body, updatedAt, parent, labels, projectItems}",
     ]),
-  ) as { number: number; body: string; updatedAt: string; labels: { nodes: { name: string }[] }; projectItems: { nodes: { project: { number: number; owner: { login?: string } }; fieldValueByName: { name?: string } | null }[] } }[];
+  ) as { number: number; body: string; updatedAt: string; parent?: { number: number } | null; labels: { nodes: { name: string }[] }; projectItems: { nodes: { project: { number: number; owner: { login?: string } }; fieldValueByName: { name?: string } | null }[] } }[];
+  // A Project is numbered within its owner: another owner's Project #2 is not this one
+  const inProgress = tasks.filter((t) => {
+    const item = t.projectItems.nodes.find((i) => String(i.project.number) === p.number && i.project.owner.login?.toLowerCase() === p.owner.toLowerCase());
+    return item?.fieldValueByName?.name === "In progress" && !t.labels.nodes.some((l) => l.name === "needs-decision");
+  });
+  // a PBI whose last release waits for a date still ahead (#4616) holds its Tasks' files no more: every comment of it is
+  // read, as holder() reads them, for each parent of an In progress Task (a few)
+  const dateWaiting = new Set<number>();
+  for (const n of new Set(inProgress.flatMap((t) => (t.parent ? [t.parent.number] : [])))) {
+    if (waitsForDate((await comments(repo, n, run)).map((c) => ({ body: c.body, createdAt: "" })), now)) dateWaiting.add(n);
+  }
   return {
     top,
     issue: { body: issue.body, parent: issue.parent && { number: issue.parent.number, body: issue.parent.body, subIssues: issue.parent.subIssues.nodes.map((n: { number: number }) => n.number) } },
     prs: prs.map((pr) => ({ number: pr.number, linked: linkedIssues(pr), updatedAt: pr.updatedAt, files: pr.files.map((f) => f.path), isDraft: pr.isDraft, labels: pr.labels.map((l) => l.name) })),
-    // A Project is numbered within its owner: another owner's Project #2 is not this one
-    working: tasks.filter((t) => {
-      const item = t.projectItems.nodes.find((i) => String(i.project.number) === p.number && i.project.owner.login?.toLowerCase() === p.owner.toLowerCase());
-      return item?.fieldValueByName?.name === "In progress" && !t.labels.nodes.some((l) => l.name === "needs-decision");
-    }),
+    working: inProgress.filter((t) => !t.parent || !dateWaiting.has(t.parent.number)),
     target: async (n) => {
       try {
         const r = JSON.parse(await run(["api", `repos/${repo}/issues/${n}`, "-q", "{state, state_reason, merged: (.pull_request.merged_at != null), pr: (.pull_request != null)}"])) as { state: string; state_reason: string | null; merged: boolean; pr: boolean };
@@ -300,7 +324,7 @@ export async function ghMaterial(repo: string, task: number, run: Run = gh): Pro
  * The same material from the app's stored records (#919), read after the app sent and imported (`--fresh`): no GitHub
  * call. A Task not stored cannot be judged (an error, exit 2); a PR stored without all its files, only where it counts (`readOthers`).
  */
-export function storedMaterial(r: StoredRecords, task: number): Material {
+export function storedMaterial(r: StoredRecords, task: number, now = Date.now()): Material {
   const issues = new Map(r.issues.map((i) => [i.number, i]));
   const mine = issues.get(task);
   if (!mine || r.unread.includes(task)) throw new Error(`Task #${task} がアプリに保存されていない（または最後の取込みで読めなかった）`);
@@ -312,7 +336,8 @@ export function storedMaterial(r: StoredRecords, task: number): Material {
     top: r.top.map((t) => ({ ...t })),
     issue: { body: mine.body, parent: parent ? { number: parent.number, body: parent.body, subIssues: parent.subIssues } : null },
     prs,
-    working: r.issues.filter((t) => t.state === "OPEN" && t.labels.includes("type:task") && !t.labels.includes("needs-decision") && t.fields?.Status === "In progress"),
+    // a Task whose PBI waits for a date still ahead (#4616) holds no file until then
+    working: r.issues.filter((t) => t.state === "OPEN" && t.labels.includes("type:task") && !t.labels.includes("needs-decision") && t.fields?.Status === "In progress" && !(t.parent !== null && waitsForDate(r.comments.filter((c) => c.issue === t.parent), now))),
     target: async (n) => {
       const p = pulls.get(n);
       if (p) return { kind: "pr", state: p.state, isDraft: p.isDraft, labels: p.labels, closes: p.closes, mergeCommit: p.mergeCommit, stateReason: null };
@@ -378,7 +403,8 @@ async function readPrereqs(bodies: string[], siblings: Set<number>, target: Mate
     const t = await target(n);
     // a PR's （リリース） is judged as merged here (see above)
     const state = prereqState(t, t?.kind === "pr" ? "merged" : release ? "release" : "done", () => null);
-    out.push({ ref: `${t?.kind === "pr" ? "PR " : ""}#${n}`, state, sibling: siblings.has(n) });
+    const fix = t?.kind === "issue" && release && state === "unknown" ? "Issue に（リリース）が付いている。この Issue を閉じた PR の番号に書き直す" : undefined;
+    out.push({ ref: `${t?.kind === "pr" ? "PR " : ""}#${n}`, state, sibling: siblings.has(n), ...(fix ? { fix } : {}) });
   }
   return out;
 }
@@ -427,7 +453,7 @@ if (import.meta.main) {
   const n = Number(num);
   const usage = () => {
     console.error(
-      "usage: bun scripts/parallel-guard.ts claim <PBI> [--takeover] | release <PBI> <理由> [--waits <n,n,...>] | overlap <Task> [--claimed]  [--repo <owner/name>]",
+      "usage: bun scripts/parallel-guard.ts claim <PBI> [--takeover] | release <PBI> <理由> [--waits <n,n,...>] [--after <ISO 8601 のタイムゾーンつき日時>] | overlap <Task> [--claimed]  [--repo <owner/name>]",
     );
     process.exit(2);
   };
@@ -466,7 +492,7 @@ if (import.meta.main) {
     } else if (cmd === "release") {
       const r = releaseArgs(more);
       if (!r) usage();
-      await release(board, n!, r!.reason, r!.waits, r!.overlap);
+      await release(board, n!, r!.reason, r!.waits, r!.overlap, r!.after);
     } else if (cmd === "overlap") {
       const v = await overlap(board, n!, more.includes("--claimed"));
       console.log(JSON.stringify(v, null, 2));

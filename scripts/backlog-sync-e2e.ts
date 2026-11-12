@@ -370,6 +370,8 @@ if (MODE_BROWSER) {
       await until(() => evaluate(`!!document.querySelector('.rail')`), "Rail");
       await press(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Backlog')`, "Backlog");
       await until(() => evaluate(`document.querySelectorAll('.backlog section[data-stage]').length === 5 && !document.querySelector('.backlog .head .hint')?.textContent.includes('読み込み中')`), "the list");
+      // the new Issue form is drawn once the workspaces' own request is back, which can be after the list (a run failed on it, #4499)
+      await until(() => evaluate(`!!document.querySelector('details.backlog-new')`), "the new Issue form");
     };
     // #4064: an Issue only on the sync line sits under the folded 同期 line: open it as a person would
     const unfold = async (n: number) => {

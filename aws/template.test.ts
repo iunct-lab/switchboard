@@ -171,12 +171,12 @@ describe("aws/template.yaml (#229)", () => {
     expect(resource("Boundary")).toContain("Action: [ec2:StartInstances, ec2:StopInstances, ec2:CreateReplaceRootVolumeTask]");
   });
 
-  test("the boundary names this stack's resources; '*' only for Describe and for KMS through SSM / EC2 (re-review #338)", () => {
+  test("the boundary names this stack's resources; '*' only for Describe, ECR's GetAuthorizationToken (no resource level) and for KMS through SSM / EC2 (re-review #338)", () => {
     const boundary = resource("Boundary");
     for (const st of boundary.split("- Sid: ").slice(1)) {
       if (!st.includes("Resource: '*'")) continue;
       const sid = st.split("\n")[0];
-      expect(["Describe", "ManagedKeysThroughServices", "AgentMetrics", "CostRead"]).toContain(sid);
+      expect(["Describe", "ManagedKeysThroughServices", "AgentMetrics", "CostRead", "EcrAuthToken"]).toContain(sid);
       if (sid === "ManagedKeysThroughServices") expect(st).toContain("kms:ViaService");
       if (sid === "AgentMetrics") expect(st).toContain("'cloudwatch:namespace': CWAgent");
     }
@@ -499,9 +499,9 @@ describe("aws/template.yaml memory alarms (#540)", () => {
     expect(deploy).toContain("Action: [cloudwatch:PutMetricAlarm, cloudwatch:DeleteAlarms, cloudwatch:TagResource, cloudwatch:UntagResource, cloudwatch:ListTagsForResource]\n                Resource: !Sub 'arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${AWS::StackName}-*'");
     expect(deploy).toContain("Action: cloudwatch:DescribeAlarms\n                Resource: '*'");
     expect(deploy).not.toMatch(/cloudwatch:\*|sns:\*|PutMetricData/);
-    // nothing else in the boundary changed: its statements are the ones before plus Countries (#1639), AgentMetrics and HostLogs (#1490), CostRead and BudgetRead (#2278), BedrockMantle (#1731)
+    // nothing else in the boundary changed: its statements are the ones before plus OffloadImage and EcrAuthToken (#4705), OffloadCi (#4706), Countries (#1639), AgentMetrics and HostLogs (#1490), CostRead and BudgetRead (#2278), BedrockMantle (#1731)
     const sids = resource("Boundary").split("- Sid: ").slice(1).map((x) => x.split("\n")[0]);
-    expect(sids).toEqual(["Parameters", "RegisterCode", "Buckets", "Wake", "ThisInstance", "RootReplacement", "Describe", "Stack", "Bedrock", "BedrockMantle", "CostRead", "BudgetRead", "OwnRoles", "Countries", "AgentMetrics", "OwnLogs", "HostLogs", "Offload", "HostAssumeRoles", "DakFunction", "ManagedKeysThroughServices"]);
+    expect(sids).toEqual(["Parameters", "RegisterCode", "Buckets", "Wake", "ThisInstance", "RootReplacement", "Describe", "Stack", "Bedrock", "BedrockMantle", "CostRead", "BudgetRead", "OwnRoles", "Countries", "AgentMetrics", "OwnLogs", "HostLogs", "Offload", "OffloadImage", "OffloadCi", "EcrAuthToken", "HostAssumeRoles", "DakFunction", "ManagedKeysThroughServices"]);
   });
 });
 
@@ -564,7 +564,7 @@ describe("aws/template.yaml offload (#678)", () => {
     expect(role).toContain(`Action: logs:GetLogEvents\n                Resource: ${logsArn}`);
     expect(role).toContain("Action: [s3:PutObject, s3:DeleteObject]\n                Resource: !Sub '${Data.Arn}/offload/*'");
     // nothing broader: no other CodeBuild action (no project edits, no role override), no other log group
-    expect(role.match(/codebuild:/g)).toHaveLength(3);
+    expect(role.match(/codebuild:/g)).toHaveLength(9); // the offload project's 3, the image project's 3 (#4705) and the CI project's 3 (#4706)
     expect(role).not.toMatch(/codebuild:\*|iam:PassRole\n\s+Resource: !GetAtt OffloadRole|logs:\*/);
     const boundary = resource("Boundary");
     const offload = statements(boundary, "- Sid: ").find((st) => st.startsWith("Offload\n"));
@@ -683,5 +683,132 @@ describe("aws/template.yaml temporary countries (#1639)", () => {
     expect(deploy).toContain("sns:ListTagsForResource"); // CloudFormation reads the topic back
     expect(deploy).toContain("arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${AWS::StackName}-*");
     expect(deploy).not.toMatch(/sns:\*/);
+  });
+});
+
+describe("aws/template.yaml offload image (#4705)", () => {
+  const statements = (body: string, sep: string) => body.split(sep).slice(1);
+
+  test("the repository keeps the newest 2 images, scans on push and is tagged Project", () => {
+    const repo = resource("OffloadImageRepo");
+    expect(repo).toContain("Type: AWS::ECR::Repository");
+    expect(repo).toContain("RepositoryName: !Sub '${AWS::StackName}-offload-image'");
+    expect(repo).toContain("ImageScanningConfiguration: { ScanOnPush: true }");
+    expect(repo).toContain("Tags: [{ Key: Project, Value: !Ref CostTag }]");
+    const lifecycle = JSON.parse(repo.match(/LifecyclePolicyText: '(.*)'/)![1]!);
+    expect(lifecycle.rules).toEqual([
+      { rulePriority: 1, description: "keep the newest 2 images", selection: { tagStatus: "any", countType: "imageCountMoreThan", countNumber: 2 }, action: { type: "expire" } },
+    ]);
+  });
+
+  test("the project builds the ci stage of one tag, arm and privileged, in no VPC", () => {
+    const p = resource("OffloadImage");
+    expect(p).toContain("Name: !Sub '${AWS::StackName}-offload-image'");
+    expect(p).toContain("ServiceRole: !GetAtt OffloadImageRole.Arn");
+    expect(p).toContain("Environment: { Type: ARM_CONTAINER, ComputeType: BUILD_GENERAL1_SMALL, Image: aws/codebuild/amazonlinux-aarch64-standard:3.0, PrivilegedMode: true }");
+    expect(p).toContain("GroupName: !Ref OffloadImageLogs");
+    expect(p).toContain("Type: NO_SOURCE");
+    expect(p).not.toMatch(/VpcConfig|Cache:|SecondarySources|FileSystemLocations/);
+    const spec = p.slice(p.indexOf("BuildSpec: !Sub |\n") + "BuildSpec: !Sub |\n".length, p.indexOf("      Artifacts:"));
+    const commands = (Bun.YAML.parse(spec.replace(/^ {10}/gm, "")) as { phases: { build: { commands: unknown[] } } }).phases.build.commands;
+    expect(commands).toEqual([
+      'mkdir -p /sb/work && cd /sb/work && aws s3 cp "s3://${Data}/$SB_OFFLOAD_KEY" - | tar -xzf -',
+      'aws ecr get-login-password | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com',
+      "cd /sb/work && docker build --target ci -f container/Dockerfile -t ${OffloadImageRepo.RepositoryUri}:$SB_IMAGE_TAG .",
+      "docker push ${OffloadImageRepo.RepositoryUri}:$SB_IMAGE_TAG",
+      'echo "sb-offload: image $SB_IMAGE_TAG"',
+    ]);
+    expect(resource("OffloadImageLogs")).toContain("LogGroupName: !Sub '/aws/codebuild/${AWS::StackName}-offload-image'");
+    expect(resource("OffloadImageProject")).toContain("Name: /switchboard/offload-image-project");
+    expect(resource("OffloadImageProject")).toContain("Value: !Ref OffloadImage");
+    expect(resource("OffloadImageRepoUri")).toContain("Name: /switchboard/offload-image-repo");
+    expect(resource("OffloadImageRepoUri")).toContain("Value: !GetAtt OffloadImageRepo.RepositoryUri");
+  });
+
+  test("the build role carries the boundary and may push only to this repository", () => {
+    const role = resource("OffloadImageRole");
+    expect(role).toContain("PermissionsBoundary: !Ref Boundary");
+    const allows = statements(role, "- Effect: ").map((st) => st.split("\n").slice(0, 3).join("\n"));
+    expect(allows).toEqual([
+      "Allow\n                Action: [logs:CreateLogStream, logs:PutLogEvents]\n                Resource: !GetAtt OffloadImageLogs.Arn",
+      "Allow\n                Action: s3:GetObject\n                Resource: !Sub '${Data.Arn}/offload/*'",
+      "Allow\n                Action: ecr:GetAuthorizationToken\n                Resource: '*'",
+      "Allow\n                Action: [ecr:BatchCheckLayerAvailability, ecr:InitiateLayerUpload, ecr:UploadLayerPart, ecr:CompleteLayerUpload, ecr:PutImage, ecr:BatchGetImage, ecr:GetDownloadUrlForLayer]\n                Resource: !GetAtt OffloadImageRepo.Arn",
+    ]);
+    expect(role).not.toMatch(/ssm:|secretsmanager:|kms:|s3:PutObject|s3:\*|ecr:\*/);
+  });
+
+  test("the instance role starts the image project, reads its log and describes only this repository; the boundary names them, not by !GetAtt", () => {
+    const role = resource("InstanceRole");
+    expect(role).toContain("Action: [codebuild:StartBuild, codebuild:BatchGetBuilds, codebuild:StopBuild]\n                Resource: !GetAtt OffloadImage.Arn");
+    expect(role).toContain("Action: logs:GetLogEvents\n                Resource: !GetAtt OffloadImageLogs.Arn");
+    expect(role).toContain("Action: ecr:DescribeImages\n                Resource: !GetAtt OffloadImageRepo.Arn");
+    expect(role.match(/ecr:/g)).toHaveLength(1);
+    // the host reads the two parameters (sb-offload --ci, #4707; the list is the scripts' names)
+    expect(role).toContain("parameter/switchboard/offload-image-project'");
+    expect(role).toContain("parameter/switchboard/offload-image-repo'");
+    const boundary = resource("Boundary");
+    const image = statements(boundary, "- Sid: ").find((st) => st.startsWith("OffloadImage\n"));
+    expect(image).toContain("project/${AWS::StackName}-offload-image'");
+    expect(image).toContain("log-group:/aws/codebuild/${AWS::StackName}-offload-image:*'");
+    expect(image).toContain("repository/${AWS::StackName}-offload-image'");
+    expect(image).not.toContain("!GetAtt");
+    expect(image).not.toMatch(/ecr:\*|ecr:Delete|ecr:Set/);
+    const token = statements(boundary, "- Sid: ").find((st) => st.startsWith("EcrAuthToken\n"));
+    expect(token).toContain("Action: ecr:GetAuthorizationToken\n            Resource: '*'");
+    const deploy = resource("DeployRole");
+    expect(deploy).toContain("Action: ecr:*\n                Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${AWS::StackName}-*'");
+    expect(deploy).toContain("parameter/switchboard/offload-image-project'");
+    expect(deploy).toContain("parameter/switchboard/offload-image-repo'");
+  });
+});
+
+describe("aws/template.yaml offload CI (#4706)", () => {
+  const statements = (body: string, sep: string) => body.split(sep).slice(1);
+
+  test("the project runs the work tree in the ECR image with the service role, as Offload, and logs the tag first", () => {
+    const p = resource("OffloadCi");
+    expect(p).toContain("Name: !Sub '${AWS::StackName}-offload-ci'");
+    expect(p).toContain("ServiceRole: !GetAtt OffloadCiRole.Arn");
+    expect(p).toContain("Environment: { Type: ARM_CONTAINER, ComputeType: BUILD_GENERAL1_LARGE, Image: !Sub '${OffloadImageRepo.RepositoryUri}:latest', ImagePullCredentialsType: SERVICE_ROLE, PrivilegedMode: true }");
+    expect(p).toContain("ConcurrentBuildLimit: 2");
+    expect(p).toContain("TimeoutInMinutes: 60");
+    expect(p).toContain("GroupName: !Ref OffloadCiLogs");
+    expect(p).not.toMatch(/VpcConfig|Cache:|SecondarySources|FileSystemLocations/);
+    const commands = (spec: string) => (Bun.YAML.parse(spec.replace(/^ {10}/gm, "")) as { phases: { build: { commands: unknown[] } } }).phases.build.commands;
+    const body = (r: string) => r.slice(r.indexOf("BuildSpec: !Sub |\n") + "BuildSpec: !Sub |\n".length, r.indexOf("      Artifacts:"));
+    // the unpack and the run are Offload's, word for word; only the tag line comes first
+    expect(commands(body(p))).toEqual(['echo "sb-offload: image $SB_IMAGE_TAG"', ...commands(body(resource("Offload")))]);
+    expect(resource("OffloadCiLogs")).toContain("LogGroupName: !Sub '/aws/codebuild/${AWS::StackName}-offload-ci'");
+    expect(resource("OffloadCiProject")).toContain("Name: /switchboard/offload-ci-project");
+    expect(resource("OffloadCiProject")).toContain("Value: !Ref OffloadCi");
+    // Offload keeps its standard image (it has docker running)
+    expect(resource("Offload")).toContain("Image: aws/codebuild/amazonlinux-aarch64-standard:3.0");
+  });
+
+  test("the build role carries the boundary and may only pull from this repository", () => {
+    const role = resource("OffloadCiRole");
+    expect(role).toContain("PermissionsBoundary: !Ref Boundary");
+    const allows = statements(role, "- Effect: ").map((st) => st.split("\n").slice(0, 3).join("\n"));
+    expect(allows).toEqual([
+      "Allow\n                Action: [logs:CreateLogStream, logs:PutLogEvents]\n                Resource: !GetAtt OffloadCiLogs.Arn",
+      "Allow\n                Action: s3:GetObject\n                Resource: !Sub '${Data.Arn}/offload/*'",
+      "Allow\n                Action: ecr:GetAuthorizationToken\n                Resource: '*'",
+      "Allow\n                Action: [ecr:BatchCheckLayerAvailability, ecr:BatchGetImage, ecr:GetDownloadUrlForLayer]\n                Resource: !GetAtt OffloadImageRepo.Arn",
+    ]);
+    expect(role).not.toMatch(/ssm:|secretsmanager:|kms:|s3:PutObject|s3:\*|ecr:\*|ecr:Put|ecr:Upload/);
+  });
+
+  test("the instance role names this project and its log; the boundary names them, not by !GetAtt", () => {
+    const role = resource("InstanceRole");
+    expect(role).toContain("Action: [codebuild:StartBuild, codebuild:BatchGetBuilds, codebuild:StopBuild]\n                Resource: !GetAtt OffloadCi.Arn");
+    expect(role).toContain("Action: logs:GetLogEvents\n                Resource: !GetAtt OffloadCiLogs.Arn");
+    // the host reads the parameter (sb-offload --ci, #4707)
+    expect(role).toContain("parameter/switchboard/offload-ci-project'");
+    const ci = statements(resource("Boundary"), "- Sid: ").find((st) => st.startsWith("OffloadCi\n"));
+    expect(ci).toContain("project/${AWS::StackName}-offload-ci'");
+    expect(ci).toContain("log-group:/aws/codebuild/${AWS::StackName}-offload-ci:*'");
+    expect(ci).not.toMatch(/!GetAtt|codebuild:\*|logs:\*/);
+    expect(resource("DeployRole")).toContain("parameter/switchboard/offload-ci-project'");
   });
 });

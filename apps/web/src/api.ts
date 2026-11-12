@@ -1,4 +1,4 @@
-import type { AnswerPolicy, Artifact, AskAnswer, AskAnswerResult, AskBatch, AskBatchResult, AskList, Attachment, Backlog, BacklogAction, BacklogCreateInput, BacklogEditInput, BacklogIssueDetail, BacklogQueue, BacklogQueueInput, CheckRun, CloudPreparation, CreatedIssue, CreateTaskInput, CustomRunner, DeviceAuthView, EvalsListRow, EvalsSummary, EventEnvelope, FeedbackInput, FlowView, Footprint, HistoryScanResult, HistorySession, HistoryStatus, InboxNote, InterventionView, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerSummary, LedgerTaskRow, ModelCandidates, OpsLatency, OpsLoad, OpsResources, OpsStops, PendingApproval, PerfSample, PerfSummaryRow, PolicyInput, PolicyList, PolicyPatch, Preset, PresetExpandInput, PresetExpansion, PresetInput, PresetList, PricingTable, Queue, ReportRow, RoutingLogRow, RoutingStats, RoutingSuggestion, RunnerId, RunnerInfo, Schedule, ScheduleInput, ServerMessage, Settings, SettingsPatch, StagedChange, StopSummary, SuggestInput, Task, TaskDiffFile, TaskEvals, TaskOutcome, TeleportProgress, Workspace, WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
+import type { AnswerPolicy, Artifact, AskAnswer, AskAnswerResult, AskBatch, AskBatchResult, AskList, Attachment, Backlog, BacklogAction, BacklogCreateInput, BacklogEditInput, BacklogIssueDetail, BacklogQueue, BacklogQueueInput, CheckRun, CloudPreparation, CreatedIssue, CreateTaskInput, CustomRunner, DeviceAuthView, EvalsListRow, EvalsSummary, EventEnvelope, FeedbackInput, FlowView, Footprint, HistoryScanResult, HistorySession, HistoryStatus, InboxNote, InterventionView, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerSummary, LedgerTaskRow, ModelCandidates, OpsLatency, OpsLoad, OpsResources, OpsStops, PendingApproval, PerfSample, PerfSummaryRow, PolicyInput, PolicyList, PolicyPatch, Preset, PresetExpandInput, PresetExpansion, PresetInput, PresetList, PricingTable, Queue, ReportRow, RoutingLogRow, RoutingStats, RoutingSuggestion, RunnerId, RunnerInfo, Schedule, ScheduleInput, ServerMessage, Settings, SettingsPatch, StagedChange, StopSummary, SuggestInput, Task, TaskDiffFile, TaskEvals, TaskOutcome, TaskStopMark, TaskSummary, TeleportProgress, Workspace, WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
 import { acrossParams, type AcrossQuery } from "./reports.ts";
 import { hasTypedText, hostStopped, LEAVE_STOPPED, loginRoute, stoppedRoute, type LoginMode } from "./login.ts";
 import type { ReleaseStatus } from "./release.ts";
@@ -194,6 +194,9 @@ export async function apiRaw(path: string, init?: RequestInit): Promise<{ status
   }
 }
 
+/** The answer to a request for Switchboard itself on an instance that does not develop it (#2459): no Task; `url` opens the upstream form with the text filled in, null when the origin is not on GitHub. */
+export interface FeedbackUpstream { upstream: { url: string | null; text: string } }
+
 /** GET / PATCH /api/settings: the saved settings, the runners, and the defaults of the tunables (#835) for the settings screen. */
 /** `defaults.hiddenModels` (#1401): each runner's 載せない list while none is saved. */
 export type SettingsResponse = Settings & { runners: RunnerInfo[]; defaults: Pick<Settings, "quotaAndResume" | "judgeAndChoice" | "newDefaults" | "hiddenModels"> };
@@ -206,8 +209,11 @@ export type WorkspaceClone = { repo: string; path: string; state: "cloning" | "f
 
 export type RunnerConfigView = { upstream: string; files: { path: string; content: string }[]; hash: string; confirmed: boolean };
 
+/** The answer to batch:security-merge (#2791): what became of each chosen Task (changed = its PR moved, nothing sent), and the batch after it. */
+export type MergeBatchResult = { results: { taskId: string; result: "sent" | "changed" | "already" | "failed"; detail?: string }[]; batch: AskBatch | null };
+
 export const api = {
-  feedback: (text: string, attachmentIds?: string[], screen?: string, mode: "request" | "fix" = "request", workspaceId?: string, source?: FeedbackSource) => req<Task>("/api/feedback", { method: "POST", body: JSON.stringify({ text, attachmentIds, screen, mode, workspaceId, source }) }),
+  feedback: (text: string, attachmentIds?: string[], screen?: string, mode: "request" | "fix" = "request", workspaceId?: string, source?: FeedbackSource) => req<Task | FeedbackUpstream>("/api/feedback", { method: "POST", body: JSON.stringify({ text, attachmentIds, screen, mode, workspaceId, source }) }),
   /** 改善要望にする (#1221): the draft the feedback dialog opens with for a task's evaluations. */
   evalsDraft: (id: string) => req<{ text: string }>(`/api/tasks/${id}/evals/draft`),
   /** A runner's own login from the screen (#354): the URL / device code it prints, or a box for its page's code. */
@@ -240,7 +246,8 @@ export const api = {
   setWorkspaceSweep: (id: string, sweep: Partial<WorkspaceSweep>) => req<Workspace>(`/api/workspaces/${id}`, { method: "PATCH", body: JSON.stringify({ sweep }) }),
   setWorkspaceProjectVar: (id: string, projectVar: string | null) => req<Workspace>(`/api/workspaces/${id}`, { method: "PATCH", body: JSON.stringify({ projectVar }) }),
   workspaceBrief: (id: string) => req<{ workspaceId: string; text: string }>(`/api/workspaces/${id}/brief`),
-  tasks: (opts: { archived?: boolean } = {}) => req<Task[]>(opts.archived ? "/api/tasks?archived=1" : "/api/tasks"),
+  taskStops: () => req<Record<string, TaskStopMark>>("/api/tasks/stops"),
+  tasks: (opts: { archived?: boolean } = {}) => req<TaskSummary[]>(opts.archived ? "/api/tasks?archived=1" : "/api/tasks"),
   // after: only the events past that seq (the catch-up after a dropped WebSocket, #1137)
   /** The Task without its events (#1142): what a turn's end changes besides them (cost, stops, history). */
   taskMeta: (id: string) => req<TaskDetail>(`/api/tasks/${id}?limit=0`),
@@ -290,7 +297,7 @@ export const api = {
   asks: () => req<AskList>("/api/asks"),
   /** #936: answers one question by its id; a 409 carries `body` (AskChanged: what changed, the question now). */
   /** #2046: one press for a batch — sso logs in once, deploy approves the chosen Tasks. */
-  answerBatch: (id: AskBatch["id"], taskIds?: string[]) => req<AskBatchResult>("/api/asks/answer", { method: "POST", body: JSON.stringify({ id, answer: { kind: "allow" }, ...(taskIds ? { taskIds } : {}) }) }),
+  answerBatch: (id: AskBatch["id"], taskIds?: string[], askIds?: string[]) => req<AskBatchResult | MergeBatchResult>("/api/asks/answer", { method: "POST", body: JSON.stringify({ id, answer: { kind: "allow" }, ...(taskIds ? { taskIds } : {}), ...(askIds ? { askIds } : {}) }) }),
   answerAsk: (id: string, answer: AskAnswer, policy?: PolicyInput) => req<AskAnswerResult>("/api/asks/answer", { method: "POST", body: JSON.stringify({ id, answer, ...(policy ? { policy } : {}) }) }),
   /** #938: the saved answer policies, and one edited / revoked. */
   listPolicies: () => req<PolicyList>("/api/policies"),
@@ -323,6 +330,7 @@ export const api = {
   runChecks: (id: string) => req<{ run: CheckRun | null; running: boolean; meta: boolean; current: boolean }>(`/api/tasks/${id}/checks`, { method: "POST" }),
   restartDaemon: (taskId?: string, force = false) => req<{ restarting: boolean; supervised: boolean; argv: string[] }>("/api/daemon/restart", { method: "POST", body: JSON.stringify({ taskId, force }) }),
   release: () => req<ReleaseStatus>("/api/daemon/release"),
+  recheckRelease: () => req<{ started: "review"; tag: string }>("/api/daemon/release/review", { method: "POST" }),
   promote: (commit: string, force = false) => req<{ started: string; commit: string }>("/api/daemon/promote", { method: "POST", body: JSON.stringify({ commit, force }) }),
   /** How often a person stepped in and what made work stop, the last 7 and 30 days against the period before each (#651); counted from the daemon's records at each look. */
   interventions: () => req<InterventionView>("/api/interventions"),

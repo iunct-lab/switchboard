@@ -2,12 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { t } from "./i18n.ts";
 import { app } from "./i18n/app.ts";
 import { home } from "./i18n/home.ts";
-import type { DeviceAuthView, EventEnvelope, LedgerSummary, PendingApproval, ServerMessage, Task, TeleportProgress, TerminalStatus, Workspace } from "@switchboard/protocol";
+import type { DeviceAuthView, EventEnvelope, LedgerSummary, PendingApproval, ServerMessage, Task, TaskStopMark, TaskSummary, TeleportProgress, TerminalStatus, Workspace } from "@switchboard/protocol";
 import { applyApprovalEvent, mergeFetched } from "./approvals.ts";
 import { mergeEvents, taskReader } from "./catchup.ts";
+import { openTask as openTaskShown, upsertSummary } from "./taskList.ts";
 import { noticesFor, showNotice } from "./notify.ts";
 import { Approvals } from "./components/Approvals.tsx";
 import { api, connectEvents, getToken, setToken, type Health, type TaskDetail, type WorkspaceClone } from "./api.ts";
+import { attentionList } from "./attention.ts";
 import { journeyCancel, journeyEnd, journeyStart } from "./perf.ts";
 import { loginRoute, runnerLoginLabel, sessionLabel, sessionRefreshDelay, STUCK_MESSAGE, STUCK_LOGIN, STUCK_RESCUE, withoutFromAuth } from "./login.ts";
 import { newVersionLink, rescueLink, type ReleaseStatus } from "./release.ts";
@@ -60,7 +62,7 @@ export function App() {
       if (n === clonesSeq.current) setClones(c);
     }).catch(() => undefined);
   }, []);
-  const [tasks, setTasks] = useState<Task[]>([]);
+  const [tasks, setTasks] = useState<TaskSummary[]>([]);
   const [listed, setListed] = useState(false); // the first task list came back
   const [ledger, setLedger] = useState<LedgerSummary | null>(null);
   const [details, setDetails] = useState<Record<string, TaskDetail>>({});
@@ -76,6 +78,9 @@ export function App() {
   const [briefOpen, setBriefOpen] = useState(false);
   const [connected, setConnected] = useState(false);
   const [knowledgeRev, setKnowledgeRev] = useState(0);
+  // bumped on each stop record (#4501): Home reads the schedules stuck on a stop again (a record does not move a Task's row)
+  const [stopRev, setStopRev] = useState(0);
+  const [stopMarks, setStopMarks] = useState<Record<string, TaskStopMark> | null>(null);
   const [tokenDraft, setTokenDraft] = useState("");
   const [checksRev, setChecksRev] = useState(0);
   // Evals (#1219): per task, how many times its judge row changed; the open task's Brief reads its evals again on its own count only
@@ -284,7 +289,7 @@ export function App() {
           openTask(id);
         });
       // a task's ask can come before the render that lists it: the next notice names it all the same
-      if (m.type === "task.updated") tasksRef.current = [m.task, ...tasksRef.current.filter((t) => t.id !== m.task.id)];
+      if (m.type === "task.updated") tasksRef.current = upsertSummary(tasksRef.current, m.task);
       if (m.type === "event") {
         const env: EventEnvelope = m.env;
         setApprovals((prev) => applyApprovalEvent(prev, env));
@@ -296,7 +301,10 @@ export function App() {
           const events = mergeEvents(d.events, [env]);
           return events === d.events ? prev : { ...prev, [env.taskId]: { ...d, events } };
         });
-        if (env.ev.t === "stop.record") refreshTaskMeta(env.taskId); // the stop series (#939) is derived from the records
+        if (env.ev.t === "stop.record") {
+          refreshTaskMeta(env.taskId); // the stop series (#939) is derived from the records
+          setStopRev((n) => n + 1);
+        }
         if (env.ev.t === "usage" || env.ev.t === "quota" || env.ev.t === "session.end") {
           void refreshLedger();
           if (env.ev.t !== "quota") refreshTaskMeta(env.taskId);
@@ -400,20 +408,33 @@ export function App() {
   );
   /** A task as the daemon now has it — from the socket or from a request's response — into the list and the open detail. */
   const upsertTask = useCallback((task: Task) => {
-    setTasks((prev) => {
-      const i = prev.findIndex((t) => t.id === task.id);
-      if (i < 0) return [task, ...prev];
-      const next = [...prev];
-      next[i] = task;
-      return next;
-    });
+    reader.updated(task);
+    setTasks((prev) => upsertSummary(prev, task));
     setDetails((prev) => (prev[task.id] ? { ...prev, [task.id]: { ...prev[task.id]!, task } } : prev));
-  }, []);
+  }, [reader]);
   // Archived Tasks (#1142) are read only when the rail asks to show them; Home leaves them out
   const live = useMemo(() => tasks.filter((t) => t.archivedAt === null), [tasks]);
+  // The last stop of each Task (#4480): read again when the 要対応 candidates (their ids and updatedAt) change, and on each
+  // stop record (`stopRev`: a record does not move a Task's row). A failed read keeps the last value; an answer that comes
+  // after a newer read started is dropped, so an older answer does not put back marks already gone.
+  const candidatesSig = useMemo(() => attentionList(live).map((t) => `${t.id}:${t.updatedAt}`).join(","), [live]);
+  useEffect(() => {
+    if (!authorized || candidatesSig === "") return;
+    let current = true;
+    api.taskStops().then((marks) => current && setStopMarks(marks)).catch(() => undefined);
+    return () => {
+      current = false;
+    };
+  }, [authorized, candidatesSig, stopRev]);
   const showArchived = useCallback(() => {
     archivedShown.current = true;
-    api.tasks({ archived: true }).then((list) => list.forEach(upsertTask)).catch((e) => setError(String(e.message ?? e)));
+    api.tasks({ archived: true }).then((list) => setTasks((prev) => list.reduce((acc, s) => {
+      const i = acc.findIndex((t) => t.id === s.id);
+      if (i < 0) return [s, ...acc];
+      const next = [...acc];
+      next[i] = s;
+      return next;
+    }, prev))).catch((e) => setError(String(e.message ?? e)));
   }, [upsertTask]);
   const archiveTask = useCallback((id: string, archived: boolean) => {
     api.setArchived(id, archived).then(upsertTask).catch((e) => setError(String(e.message ?? e)));
@@ -427,15 +448,18 @@ export function App() {
         journeyCancel("new-task");
         throw e;
       });
-      setTasks((prev) => [t, ...prev.filter((x) => x.id !== t.id)]);
+      setTasks((prev) => upsertSummary(prev, t));
       openTask(t.id);
     },
     [openTask],
   );
 
   const current = view.name === "task" ? details[view.id] : undefined;
+  const shown = useRef<Task | undefined>(undefined);
   // a Task the daemon answered 404 for is gone even while the list still has it (removed from the database meanwhile)
-  const currentTask = view.name === "task" && !missing.has(view.id) ? tasks.find((t) => t.id === view.id) ?? current?.task : undefined;
+  // the list holds summaries only (#2834): the open Task is its detail's, kept on screen while a failed catch-up reads it again
+  shown.current = view.name === "task" ? openTaskShown(shown.current, view.id, current?.task) : undefined;
+  const currentTask = view.name === "task" && !missing.has(view.id) ? shown.current : undefined;
   const runnerOk = useMemo(() => new Set((health?.runners ?? []).filter((r) => r.available).map((r) => r.id)), [health]);
 
   return (
@@ -560,7 +584,7 @@ export function App() {
       <div className="body">
         {authorized && (
           <>
-        <Rail onFeedback={() => openFeedback()} workspaces={workspaces} tasks={tasks} currentTaskId={view.name === "task" ? view.id : undefined} approvals={approvals.length} approvalsOpen={view.name === "approvals"} onApprovals={() => setView({ name: "approvals" })} listOpen={railListOpen} onToggleList={() => setRailListOpen((o) => !o)} onOpenTask={openTaskFromRail} onHome={() => setView({ name: "home" })} onShowArchived={showArchived} terminals={terminals} />
+        <Rail onFeedback={() => openFeedback()} workspaces={workspaces} tasks={tasks} currentTaskId={view.name === "task" ? view.id : undefined} approvals={approvals.length} approvalsOpen={view.name === "approvals"} onApprovals={() => setView({ name: "approvals" })} listOpen={railListOpen} onToggleList={() => setRailListOpen((o) => !o)} onOpenTask={openTaskFromRail} onHome={() => setView({ name: "home" })} onShowArchived={showArchived} terminals={terminals} stopMarks={stopMarks} />
 
         {view.name === "home" && (
           <Home
@@ -573,6 +597,8 @@ export function App() {
             onOpenTask={openTask}
             onError={setError}
             inboxRev={knowledgeRev}
+            stopRev={stopRev}
+            stopMarks={stopMarks}
             onOpenSettings={() => setView({ name: "settings" })}
             onOpenWorkspaces={() => openSettingsAt("workspace")}
             onOpenReport={(id) => setView({ name: "evals", report: id })}

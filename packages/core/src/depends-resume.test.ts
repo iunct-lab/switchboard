@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StopRecord, type AgentEvent, type BacklogRecord, type RunnerAdapter, type RunnerSession } from "@switchboard/protocol";
 import { Db, type BacklogSnapshotEntry } from "./db.ts";
-import { dependsResumePrompt, dependsWaits, jobResumePrompt, resumeDepends, resumeJobsOnTurnEnd, stateFromRecords, waitsClosed } from "./depends-resume.ts";
+import { dependsResumePrompt, dependsWaits, jobResumePrompt, resumeDepends, resumeDueAfters, resumeJobsOnTurnEnd, stateFromRecords, waitsClosed } from "./depends-resume.ts";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
 import { TaskManager } from "./tasks.ts";
 
@@ -52,6 +52,34 @@ describe("depends-resume (#2045)", () => {
     // the newest record of a stop decides: one resolved later is not open
     const later = { ...pick, state: "resolved" as const, at: pick.at + 1 };
     expect(dependsWaits([pick, later])).toEqual([]);
+  });
+
+  test("after: a date with a time zone is a wait, kept apart from the numbers; a value that is no such time is not one", () => {
+    const due = "2026-11-20T09:00:00+09:00";
+    const only = stop({ conditions: [{ key: "after", value: due, met: false }] });
+    const both = stop({ conditions: [{ key: "pr#12", value: "open", met: false }, { key: "after", value: due, met: false }] });
+    expect(dependsWaits([only, both])).toEqual([
+      { stop: only, numbers: [], jobs: [], after: Date.parse(due) },
+      { stop: both, numbers: [12], jobs: [], after: Date.parse(due) },
+    ]);
+    // no zone, or no time at all: nothing to wait for by the clock
+    expect(dependsWaits([stop({ conditions: [{ key: "after", value: "2026-11-20T09:00:00", met: false }] }), stop({ conditions: [{ key: "after", value: "soon", met: false }] })])).toEqual([]);
+    // a date already marked met is over
+    expect(dependsWaits([stop({ conditions: [{ key: "after", value: due, met: true }] })])).toEqual([]);
+  });
+
+  test("after: waitsClosed is open before the date, closed at it and after", () => {
+    const at = Date.parse("2026-11-20T00:00:00Z");
+    const states = () => "closed" as const;
+    expect(waitsClosed({ numbers: [], after: at }, states, undefined, at - 1)).toBe(false);
+    expect(waitsClosed({ numbers: [], after: at }, states, undefined, at)).toBe(true);
+    expect(waitsClosed({ numbers: [], after: at }, states, undefined, at + 1)).toBe(true);
+    expect(waitsClosed({ numbers: [12], after: at }, () => "open", undefined, at + 1)).toBe(false);
+  });
+
+  test("dependsResumePrompt after names the date that passed", () => {
+    expect(dependsResumePrompt([], ["2026-11-20T09:00:00+09:00"])).toContain("期日 2026-11-20T09:00:00+09:00 を過ぎました");
+    expect(dependsResumePrompt(["pr#12"], ["2026-11-20T09:00:00+09:00"])).toContain("待っていた pr#12 が片づきました。期日 2026-11-20T09:00:00+09:00 を過ぎました");
   });
 
   test("waitsClosed needs every wait closed", () => {
@@ -170,6 +198,69 @@ describe("resumeDepends (#2045)", () => {
     expect(s.answer).toBeNull(); // the daemon's turn is no answer of the person's
   });
 
+  describe("after (#4616)", () => {
+    // a few days ahead of the real clock: the Task's stops are looked at for a week after it changed
+    const DUE = Math.floor((Date.now() + 3 * 24 * 3600_000) / 1000) * 1000;
+    const DUE_TEXT = new Date(DUE).toISOString();
+    const waitAfter = (conditions: { key: string; value: string; met: boolean }[]) => ({ ...WAIT, conditions });
+    const startAfter = async (conditions: { key: string; value: string; met: boolean }[], workspaceId = "ws_app") => {
+      const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude", workspaceId });
+      await settle();
+      expect(tasks.recordStop(t.id, waitAfter(conditions)).ok).toBe(true);
+      return t;
+    };
+    const at = (now: number, workspaceId: string | null = "ws_app") => resumeDepends({ db, tasks, workspaceId, now });
+
+    test("after: not sent before the date, sent at it and after, with the date in the turn", async () => {
+      const t = await startAfter([{ key: "after", value: DUE_TEXT, met: false }]);
+      expect(await at(DUE - 1)).toEqual([]);
+      await settle();
+      expect(sends).toEqual([]);
+      expect(stopOf(t.id).state).toBe("waiting");
+      expect(await at(DUE)).toEqual([t.id]); // exactly at the date is over
+      await settle();
+      expect(sends).toEqual([dependsResumePrompt([], [DUE_TEXT])]);
+      expect(stopOf(t.id)).toMatchObject({ state: "resolved", conditions: [{ key: "after", met: true }] });
+      expect(await at(DUE + 1000)).toEqual([]); // not sent twice
+    });
+
+    test("after: sent after the date too", async () => {
+      const t = await startAfter([{ key: "after", value: DUE_TEXT, met: false }]);
+      expect(await at(DUE + 3600_000)).toEqual([t.id]);
+    });
+
+    test("after with pr#N: waits for both", async () => {
+      const t = await startAfter([{ key: "pr#12", value: "open", met: false }, { key: "after", value: DUE_TEXT, met: false }]);
+      store([pr(12, "OPEN")]);
+      expect(await at(DUE + 1)).toEqual([]); // the date is past, the PR is not
+      store([pr(12, "MERGED")]);
+      expect(await at(DUE - 1)).toEqual([]); // the PR is closed, the date is not past
+      expect(await at(DUE)).toEqual([t.id]);
+      await settle();
+      expect(sends).toEqual([dependsResumePrompt(["pr#12"], [DUE_TEXT])]);
+    });
+
+    test("after: a Task of a workspace that is not backlog-synced is sent too", async () => {
+      db.upsertWorkspace({ id: "ws_other", name: "other", path: home, kind: "repo" });
+      const t = await startAfter([{ key: "after", value: DUE_TEXT, met: false }], "ws_other");
+      expect(await at(DUE - 1, "ws_other")).toEqual([]);
+      expect(await at(DUE, "ws_other")).toEqual([t.id]);
+    });
+
+    test("after: resumeDueAfters sends without an import, to a workspace that is not backlog-synced and to a Task without a workspace", async () => {
+      db.upsertWorkspace({ id: "ws_other", name: "other", path: home, kind: "repo" });
+      const other = await startAfter([{ key: "after", value: DUE_TEXT, met: false }], "ws_other");
+      const none = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
+      await settle();
+      expect(tasks.recordStop(none.id, waitAfter([{ key: "after", value: DUE_TEXT, met: false }])).ok).toBe(true);
+      expect(await resumeDueAfters({ db, tasks, now: DUE - 1 })).toEqual([]);
+      expect((await resumeDueAfters({ db, tasks, now: DUE })).sort()).toEqual([other.id, none.id].sort());
+      await settle();
+      expect(sends).toEqual([dependsResumePrompt([], [DUE_TEXT]), dependsResumePrompt([], [DUE_TEXT])]);
+      expect(await resumeDueAfters({ db, tasks, now: DUE + 1000 })).toEqual([]); // once
+    });
+  });
+
   test("stage task stop is only resolved: backlog-next starts what comes next", async () => {
     const t = await start({ stage: { issue: 50, action: "complete" } });
     store([pr(12, "MERGED"), issue(34, "CLOSED")]);
@@ -281,6 +372,18 @@ describe("resumeDepends (#2045)", () => {
       expect(sends[0]).toContain("error: 2 tests failed");
       expect(stopOf(t.id)).toMatchObject({ state: "resolved", conditions: [{ key: `job#${job.id}`, met: true }] });
       expect(await resume()).toEqual([]); // once
+    });
+
+    test("after with a job: goes on once both are over, and the turn says the date passed", async () => {
+      const due = Math.floor((Date.now() + 24 * 3600_000) / 1000) * 1000;
+      const dueText = new Date(due).toISOString();
+      const { t, job } = await startJob({}, { ...JOB_WAIT, conditions: [{ key: "job#1", value: "done", met: false }, { key: "after", value: dueText, met: false }] });
+      const ended = end(job.id, 0);
+      expect(await resumeDepends({ db, tasks, workspaceId: "ws_app", now: due - 1 })).toEqual([]); // the job ended, the date is not past
+      expect(await resumeDepends({ db, tasks, workspaceId: "ws_app", now: due })).toEqual([t.id]);
+      await settle();
+      expect(sends).toEqual([jobResumePrompt([ended], [], [dueText])]);
+      expect(sends[0]).toContain(`期日 ${dueText} を過ぎました`);
     });
 
     test("a stop on a PR and a job goes on once both closed", async () => {

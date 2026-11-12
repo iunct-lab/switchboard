@@ -12,8 +12,8 @@
  * (run again). Each failed step's whole output stays in a log dir under ~/.cache (a perf step's failure does not stop
  * `bun test`, so a run can have two, #2945); the perf steps do not run here (the tag CI's, #4076).
  * After every step passed, the type check's and bun test's seconds are compared with the `local` ceilings of the checkout's
- * scripts/perf-budget.json (#1887), bun test's only when every test ran (#3297): over one → a failure like a failed step,
- * named `DURATION_STEP`. A checkout without that file or those ceilings is not compared.
+ * scripts/perf-budget.json (#1887), bun test's only when every test ran (#3297): over one → still a pass, with the `over:`
+ * lines as a warning in the comment (`warnings`). A checkout without that file or those ceilings is not compared.
  * `bun test` runs the tests of the checkout's scripts/test-select.ts for what the PR and the PRs below it changed; a
  * change it cannot judge, or a selection that cannot be read, runs all of them, and so does `--all`. Only this script
  * narrows: tag-ci's `runCheckout` runs every test, and the other steps run, except in an incremental run (below) (#3297).
@@ -123,19 +123,6 @@ export function withoutPerf(steps: Step[]): Step[] {
   return [...steps.slice(0, build), ...steps.slice(last + 1)];
 }
 
-/**
- * The steps that measure perf and nothing else (#4124): the install, then from the web build to the last perf step, without
- * perf-ratchet's own steps (main's base and the check judge a result against a checkout of their own; the one who asks judges it).
- * A CI without the build or a perf step has none to run: empty.
- */
-export function onlyPerf(steps: Step[]): Step[] {
-  const build = steps.findIndex((s) => s.run.trim() === "bun run --cwd apps/web build");
-  const last = steps.map((s) => isPerfStep(s)).lastIndexOf(true);
-  if (build < 0 || last < build) return [];
-  const install = steps.slice(0, build).filter((s) => s.run.trim().startsWith("bun install"));
-  return [...install, ...steps.slice(build, last + 1).filter((s) => !s.run.includes("perf-ratchet"))];
-}
-
 /** The step of ci.yml that runs scripts/ci.ts: Actions runs those steps in one go, local-ci one by one (#912). */
 export const SHARED_ENTRY = "bun scripts/ci.ts";
 
@@ -196,7 +183,7 @@ export function workflowSteps(yaml: string): Step[] {
 /** `seconds`: a pass's type check and bun test seconds (#1886), for a checkout with scripts/ci.ts. */
 /** `selection`: what chose this run's tests, none with `--all` (#3297). `bundle`: the perf check's `bundle:` and `grew:` lines, pass or fail. */
 /** `incremental`: this run was only the commits since the earlier pass `pass` (`incrementalBase`). */
-export interface LocalCiResult { sha: string; base: string; results: StepResult[]; ok: boolean; seconds?: StepSeconds; conflict?: boolean; perf?: PerfVerdict; selection?: TestSelection; bundle?: string[]; incremental?: { pass: string; commits: number; files: number } }
+export interface LocalCiResult { sha: string; base: string; results: StepResult[]; ok: boolean; seconds?: StepSeconds; conflict?: boolean; warnings?: string[]; perf?: PerfVerdict; selection?: TestSelection; bundle?: string[]; incremental?: { pass: string; commits: number; files: number } }
 
 /** What a run's bun test covered, for the comment: the seen line and the machine line; a selection's reason can list every changed file. */
 function testsLines(s: TestSelection | undefined): string[] {
@@ -223,6 +210,7 @@ export function resultComment(r: LocalCiResult): string {
     ...head,
     ...(r.incremental ? [`増分: ${r.incremental.pass.slice(0, 7)} の pass の後の ${r.incremental.commits} コミット（変更 ${r.incremental.files} ファイル）で、型検査と選んだテストだけ`] : []),
     ...testsLines(r.selection),
+    ...(r.warnings?.length ? ["", "所要時間の警告（合否には数えない。`perf-budget.json` の `local.durations`）:", "```", ...r.warnings, "```"] : []),
     ...(r.bundle?.length ? ["", "bundle（gzip、マージ後と main の先端の差）:", ...r.bundle.map((l) => `    ${l}`)] : []),
     // a fenced block: 4 spaces right after a paragraph line are no code block in CommonMark (they join the paragraph)
     ...failed.flatMap((f) => {
@@ -253,8 +241,8 @@ export interface Deps {
 /** The size of an off-host build, `sb-offload --size`. */
 export type OffloadSize = "small" | "medium" | "large";
 
-/** `run`: one build of `script` with `cwd`'s work tree; its code is sb-offload's (the script's, or 124 timed out / 130 stopped / 1 failed before it). `bun` / `codex`: the versions the build installs, this host's. */
-export interface Offload { run: (script: string, cwd: string, size: OffloadSize) => Promise<{ code: number; output: string }>; bun: string; codex?: string }
+/** `run`: one build of `script` with `cwd`'s work tree in the ci image (`sb-offload --ci`); its code is sb-offload's (the script's, or 124 timed out / 130 stopped / 1 failed before it). */
+export interface Offload { run: (script: string, cwd: string, size: OffloadSize) => Promise<{ code: number; output: string }> }
 
 /**
  * The steps that run off the host on the cloud host, by name, in groups of one build each run at the same time (the
@@ -311,18 +299,19 @@ export function placeSteps(steps: Step[], tests: string[] | null | undefined, re
 const MARK = /^sb-step: (\d+) (begin|exit) (?:(\d+) )?([\d.]+)$/;
 
 /**
- * One build's script: as root, a git with PCRE (the image's has none), a tmpfs TMPDIR, a user other than root and the
- * Codex CLI; then as that user Bun of this host's version, the work tree as one commit with `origin` (a URL, no
- * credentials), the install, and each step in `bash -e -c` between its marks, stopping at the first that fails.
+ * One build's script, run by `sb-offload --ci` in the ci image (git with PCRE, Bun, Codex CLI, Chromium are the image's):
+ * as root, a tmpfs TMPDIR and the work tree's owner; then as the image's user `switchboard` (a login `su -`, so the
+ * build's own environment, its credentials included, does not reach the steps; only the image's CHROME_BIN and
+ * PLAYWRIGHT_BROWSERS_PATH are passed) the work tree as one commit with `origin` (a URL, no credentials), the install,
+ * and each step in `bash -e -c` between its marks, stopping at the first that fails.
  * Nothing of this host's environment goes in (no token, no recordings). docs/design/local-ci-offload.md.
  */
-export function groupScript(steps: Step[], o: { bun: string; codex?: string; repo?: string }): string {
+export function groupScript(steps: Step[], o: { repo?: string }): string {
   const origin = o.repo && /^[\w.-]+\/[\w.-]+$/.test(o.repo) ? ` && git remote add origin ${quote(`https://github.com/${o.repo}.git`)}` : "";
   const user = [
     "set -u",
     "cd /sb/work",
-    `curl -fsSL https://bun.sh/install | bash -s ${quote(`bun-v${o.bun}`)} >/tmp/bun-install.log 2>&1 || { cat /tmp/bun-install.log; echo "sb-setup: bun ${o.bun} を入れられない"; exit 1; }`,
-    'export PATH="$HOME/.bun/bin:$PATH" CI=true TMPDIR="$(mktemp -d /sb/tmp/t.XXXXXX)"',
+    'export CI=true TMPDIR="$(mktemp -d /sb/tmp/t.XXXXXX)"',
     "git config --global user.name local-ci && git config --global user.email local-ci@localhost && git config --global init.defaultBranch main",
     `{ git init -q${origin} && git add -A && git commit -qm local-ci; } || { echo "sb-setup: git の作業ツリーを作れない"; exit 1; }`,
     'bun install --frozen-lockfile >/tmp/install.log 2>&1 || { cat /tmp/install.log; echo "sb-setup: bun install が失敗"; exit 1; }',
@@ -336,11 +325,9 @@ export function groupScript(steps: Step[], o: { bun: string; codex?: string; rep
     "cat > /tmp/sb-local-ci.sh <<'SB_LOCAL_CI_EOF'",
     user,
     "SB_LOCAL_CI_EOF",
-    'dnf install -y -q shadow-utils >/dev/null 2>&1; dnf reinstall -y -q git-core >/dev/null 2>&1 || { echo "sb-setup: git-core を入れ直せない"; exit 1; }',
     'mkdir -p /sb/tmp && mount -t tmpfs -o size=2g,mode=1777 tmpfs /sb/tmp || { echo "sb-setup: tmpfs を作れない"; exit 1; }',
-    ...(o.codex ? [`npm i -g ${quote(`@openai/codex@${o.codex}`)} >/dev/null 2>&1 || { echo "sb-setup: Codex CLI ${o.codex} を入れられない"; exit 1; }`] : []),
-    'useradd -m sb && chown -R sb /sb/work && chmod 644 /tmp/sb-local-ci.sh || { echo "sb-setup: ユーザーを作れない"; exit 1; }',
-    "su - sb -c 'bash /tmp/sb-local-ci.sh'",
+    'chown -R switchboard /sb/work && chmod 644 /tmp/sb-local-ci.sh || { echo "sb-setup: 作業ツリーの持ち主を switchboard にできない"; exit 1; }',
+    `su - switchboard -c "CHROME_BIN=\${CHROME_BIN:-} PLAYWRIGHT_BROWSERS_PATH=\${PLAYWRIGHT_BROWSERS_PATH:-} bash /tmp/sb-local-ci.sh"`,
   ].join("\n");
 }
 
@@ -351,7 +338,8 @@ const offloadReason = (code: number) => `sb-offload: exit ${code}（${code === 1
  * The steps of one build from its log, by their marks: each one's output, code and seconds. A step that began without
  * an exit mark, or the first step when none began (the setup failed), gets sb-offload's code (1 when that is 0) and
  * its reason; the steps after it did not run and are left out. A build that ends non-zero after every step passed
- * fails its last step with that code and reason.
+ * fails its last step with that code and reason. A begin mark may be missing (a lossy log): an exit mark is enough to
+ * read the step, its output starting after the previous step's exit mark and its seconds 0.
  */
 export function parseGroup(output: string, steps: Step[], code: number): Array<Step & { code: number; output: string; seconds: number; tail: string }> {
   const lines = output.split("\n");
@@ -361,12 +349,14 @@ export function parseGroup(output: string, steps: Step[], code: number): Array<S
     if (m) marks.set(`${m[1]} ${m[2]}`, { line, at: Number(m[4]), ...(m[3] === undefined ? {} : { code: Number(m[3]) }) });
   });
   const out: Array<Step & { code: number; output: string; seconds: number; tail: string }> = [];
+  let from = 0;
   for (const [i, s] of steps.entries()) {
     const begin = marks.get(`${i} begin`);
     const exit = marks.get(`${i} exit`);
-    if (begin && exit) {
-      const text = lines.slice(begin.line + 1, exit.line).join("\n");
-      out.push({ ...s, code: exit.code!, output: text, seconds: exit.at - begin.at, tail: text.split("\n").slice(-30).join("\n") });
+    if (exit) {
+      const text = lines.slice(begin ? begin.line + 1 : from, exit.line).join("\n");
+      from = exit.line + 1;
+      out.push({ ...s, code: exit.code!, output: text, seconds: begin ? exit.at - begin.at : 0, tail: text.split("\n").slice(-30).join("\n") });
       if (exit.code !== 0) break;
       continue;
     }
@@ -388,13 +378,10 @@ export function parseGroup(output: string, steps: Step[], code: number): Array<S
 export function hostOffload(): Offload | undefined {
   const bin = Bun.which("sb-offload", { PATH: process.env.PATH ?? "" });
   if (!bin) return undefined;
-  const codex = Bun.which("codex", { PATH: process.env.PATH ?? "" }) ? /(\d+\.\d+\.\d+\S*)/.exec(Bun.spawnSync(["codex", "--version"]).stdout.toString())?.[1] : undefined;
   const env = Object.fromEntries(Object.entries(process.env).filter(([k, v]) => v !== undefined && !["GH_TOKEN", "GITHUB_TOKEN", "SWITCHBOARD_FIXTURES"].includes(k))) as Record<string, string>;
   return {
-    bun: Bun.version,
-    ...(codex ? { codex } : {}),
     run: async (script, cwd, size) => {
-      const p = Bun.spawn([bin, "--size", size, script], { cwd, env, stdout: "pipe", stderr: "pipe" });
+      const p = Bun.spawn([bin, "--ci", "--size", size, script], { cwd, env, stdout: "pipe", stderr: "pipe" });
       const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
       return { code, output: `${out}${err}` };
     },
@@ -502,9 +489,6 @@ export function incrementalSteps(steps: Step[], files: string[]): Step[] | undef
   return keep.every((k) => kept.some((s) => s.run.trim() === k)) ? narrowTestStep(kept, files) : undefined;
 }
 
-/** What the result's table calls the comparison of the seconds, which no step of the CI runs. */
-export const DURATION_STEP = "所要時間の上限（perf-budget.json の local.durations）";
-
 /** The seconds over the `local` ceilings of the budget in `dir`, as `over:` lines (failLines' form); none without that budget. */
 export async function durationOver(dir: string, seconds: StepSeconds): Promise<string[]> {
   const path = join(dir, "scripts/perf-budget.json");
@@ -560,11 +544,9 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
         // the host's `local` ceilings (docs/design/local-ci-offload.md); the ceilings are on the high side only
         const off = (s: string) => run.offloaded.includes(s);
         const over = seconds ? await durationOver(dir, { typecheck: off(SECONDS_STEPS.typecheck) ? 0 : seconds.typecheck, test: selection?.files || off(SECONDS_STEPS.test) ? 0 : seconds.test }) : [];
-        if (over.length === 0) return { sha, base, results, ok: true, ...(seconds ? { seconds } : {}), ...narrowed, ...bundle, ...incremental };
-        for (const l of over) d.log(l);
-        d.log(`✗ ${DURATION_STEP}`);
-        // a result of its own: the comment names it, and the exit (ciExit) reads the results
-        return { sha, base, results: [...results, { name: DURATION_STEP, run: "", code: 1, seconds: 0, tail: over.join("\n"), fails: over }], ok: false, ...narrowed, ...bundle, ...incremental };
+        // a pass whatever the seconds: the comment carries the lines as a warning (the ceilings do not decide the merge)
+        for (const l of over) d.log(`警告: ${l}`);
+        return { sha, base, results, ok: true, ...(seconds ? { seconds } : {}), ...(over.length ? { warnings: over } : {}), ...narrowed, ...bundle, ...incremental };
       }
       return { sha, base, results, ok: false, ...narrowed, ...bundle, ...incremental };
     } finally {
@@ -672,7 +654,8 @@ async function appendRecord(repo: string, path: string, header: string, rows: st
  * `withPerf`: false = the steps without the perf ones (`withoutPerf`): a PR's local CI; the tag CI measures (#4076).
  */
 export async function runCheckout(dir: string, env: Record<string, string>, label: string, d: Omit<Deps, "slot"> & { slot?: Deps["slot"] }, cache: string, tests?: string[] | null, repo?: string, withPerf = true, incremental = false): Promise<{ steps: Step[]; results: StepResult[]; ok: boolean; perf?: PerfVerdict; outputs: Record<string, string>; bundle: string[]; offloaded: string[]; incremental: boolean }> {
-  const all = await checkoutSteps(dir, env);
+  // a perf step never stops the steps after it, whatever the repository's CI says: perf does not decide the result (docs/design/perf.md)
+  const all = (await checkoutSteps(dir, env)).map((s) => (isPerfStep(s) ? { ...s, keepGoing: true } : s));
   const listed = withPerf ? all : withoutPerf(all);
   // incremental: `tests` came from the commits since an earlier pass, so they narrow only the install, type check and test steps; a CI without those runs every test
   const inc = incremental && tests ? incrementalSteps(listed, tests) : undefined;
@@ -694,7 +677,7 @@ export async function runCheckout(dir: string, env: Record<string, string>, labe
     // the builds start first: sb-offload sends the work tree as it is, before the steps here write in it
     const off = plan.groups.map((g) => {
       d.log(`▶ 外（${g.size}）: ${g.steps.map((s) => s.name).join(" → ")}`);
-      return offload.run(groupScript(g.steps, { bun: offload.bun, ...(offload.codex ? { codex: offload.codex } : {}), ...(repo ? { repo } : {}) }), dir, g.size).then((r) => parseGroup(r.output, g.steps, r.code));
+      return offload.run(groupScript(g.steps, { ...(repo ? { repo } : {}) }), dir, g.size).then((r) => parseGroup(r.output, g.steps, r.code));
     });
     // the steps here hold a heavy slot (when given) while the builds are awaited without one; the builds started above
     const here = await (d.slot ? d.slot(`${label} (host)`, () => runCi(plan.host, runHere)) : runCi(plan.host, runHere));

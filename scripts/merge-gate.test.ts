@@ -301,6 +301,14 @@ describe("responsibility", () => {
     },
   );
 
+  test("ops.config.json alone (where the CI steps live) is a responsibility recheck, not security:github", () => {
+    const j = judge(base({ files: [{ path: "ops.config.json", additions: 3, deletions: 1 }] }), off);
+    expect(j.ask).toEqual([]);
+    expect(j.ask).not.toContain("security:github");
+    expect(j.recheck).toEqual(["responsibility"]);
+    expect(j.reasons).toEqual(["[再チェック responsibility] 責務: ops.config.json"]);
+  });
+
   test("docs/design alone is not a responsibility file (the scope is the main review's, #4078)", () => {
     const design = { path: "docs/design/x.md", additions: 1, deletions: 0 };
     expect(judge(base({ files: [design] }), off)).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [] });
@@ -668,7 +676,7 @@ describe("merge-gate readPr", () => {
      * owner, a minute apart. `runs: false` = no Actions run at all; `conclusion`: the one run's (default failure).
      * `root` / `from`: where merge-gate fetches to and from (default the clone and "GitHub").
      */
-    const facts = (opts: { n?: number; comment?: string; comments?: string[]; steps: number; runs?: boolean; conclusion?: string; mergeState?: string; above?: Record<string, number[]>; top?: string[]; head?: string; baseTip?: string; root?: string; from?: string }) => {
+    const facts = (opts: { n?: number; comment?: string; comments?: string[]; steps: number; runs?: boolean; conclusion?: string; status?: string; mergeState?: string; above?: Record<string, number[]>; top?: string[]; head?: string; baseTip?: string; root?: string; from?: string }) => {
       const n = opts.n ?? 1;
       const bodies = opts.comments ?? (opts.comment ? [opts.comment] : []);
       const v = {
@@ -680,7 +688,7 @@ describe("merge-gate readPr", () => {
         mergeStateStatus: opts.mergeState ?? "CLEAN",
         comments: [...view.comments, ...owner(bodies)],
       };
-      const r = { workflow_runs: opts.runs === false ? [] : [{ id: 7, name: "CI", status: "completed", conclusion: opts.conclusion ?? "failure", created_at: "2026-09-24T12:00:00Z" }] };
+      const r = { workflow_runs: opts.runs === false ? [] : [{ id: 7, name: "CI", status: opts.status ?? "completed", conclusion: opts.status ? null : opts.conclusion ?? "failure", created_at: "2026-09-24T12:00:00Z" }] };
       const jobs = { jobs: [{ name: "test", steps: Array.from({ length: opts.steps }, () => ({ name: "x" })) }] };
       const asked: string[] = [];
       const run = async (args: string[]) => {
@@ -776,6 +784,14 @@ describe("merge-gate readPr", () => {
       expect(f.localCi).toBeUndefined();
     });
 
+    test("a run still queued + the pass → SUCCESS; without the pass it is 未完了; in_progress stays 未完了 even with the pass", async () => {
+      const queued = await facts({ comment: pass(S.b1!), steps: 0, status: "queued" }).read();
+      expect(queued.checks).toEqual(SUCCESS);
+      expect(reasons(queued)).toEqual([]);
+      expect(reasons(await facts({ steps: 0, status: "queued" }).read())).toContain("CI のチェック CI が 未完了");
+      expect(reasons(await facts({ comment: pass(S.b1!), steps: 0, status: "in_progress" }).read())).toContain("CI のチェック CI が 未完了");
+    });
+
     test("the older head-only mark, a mark not at the start, or none: FAILURE with no note; the jobs are not read", async () => {
       for (const comment of [`[local-ci] pass ${S.b1}`, `ok ${pass(S.b1!)}`, undefined]) {
         const x = facts({ comment, steps: 0 });
@@ -794,7 +810,7 @@ describe("merge-gate readPr", () => {
 
     test("BLOCKED with the local pass: the base branch's protection stops it, and the reason says local-ci cannot meet it", async () => {
       const f = await facts({ comment: pass(S.b1!), steps: 0, mergeState: "BLOCKED" }).read();
-      expect(reasons(f)).toEqual(["mergeStateStatus が BLOCKED: base の枝の保護（必須のチェックか承認）がマージを止めている。local-ci の結果は PR コメントで、GitHub の必須チェックにはならない（docs/merge-gate.md の「保護枝とローカルの結果」）"]);
+      expect(reasons(f)).toEqual(["mergeStateStatus が BLOCKED: base の枝の保護（必須のチェックか承認）がマージを止めている。local-ci の結果は PR コメントで、GitHub の必須チェックにはならない（docs/merge-gate.md の「Branch protection and local results」）"]);
       // without a local pass BLOCKED is said as before
       expect(reasons({ ...f, localCi: undefined, checks: [{ name: "CI", conclusion: "SUCCESS" }] })).toEqual(["mergeStateStatus が CLEAN でない: BLOCKED"]);
     });
@@ -1217,7 +1233,7 @@ describe("local change (#2487)", () => {
     const fetch = async (url: string) => {
       const path = url.replace(BACKLOG, "");
       calls.push(path);
-      const body = path === ""
+      const body = path === "/syncs"
         ? { syncs: [{ workspaceId: "ws_local", backlog: "switchboard", repository: "ws_local", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] }
         : { issue: { number: 7, title: "変更", state, labels: [], milestone: null, parent: null, subIssues: [], body: "", url: "", change: { head: "sb/5-x", base: "main", mergeCommit: null, mergedAt: null } }, changeRefs: { head: r.tip("sb/5-x"), base: r.tip("main") }, comments: comments.map((c, i) => ({ id: `sb:${i}`, ...c })), fields: null, fetchedAt: 1, localId: null, pending: 0, held: [], sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } };
       return new Response(JSON.stringify(body));
@@ -1250,7 +1266,7 @@ describe("local change (#2487)", () => {
     const g = await gate(r, [REVIEW, pass(r)]);
     expect(g.code).toBe(0);
     expect(g.j).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [] });
-    expect(g.calls).toEqual(["", "/7?workspaceId=ws_local"]);
+    expect(g.calls).toEqual(["/syncs", "/7?workspaceId=ws_local"]);
   });
 
   test("(b) a commit after the review: no newer main review stops", async () => {
@@ -1314,7 +1330,7 @@ describe("local change (#2487)", () => {
   test("not judged (2): not a change, a branch gone, a PR number or --repo or a merge mode with it", async () => {
     const r = fresh();
     for (const extra of [["12"], ["--repo", "a/b"], ["--merge"]]) expect((await gate(r, [REVIEW], extra)).code).toBe(2);
-    const noChange = async (url: string) => new Response(JSON.stringify(url.endsWith("/api/backlog") ? { syncs: [{ workspaceId: "ws_local", backlog: "switchboard", repository: "ws_local", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] } : { issue: { number: 7, title: "x", state: "OPEN", labels: [], milestone: null, parent: null, subIssues: [], body: "", url: "" }, changeRefs: null, comments: [], fields: null, fetchedAt: 1, localId: null, pending: 0, sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } }));
+    const noChange = async (url: string) => new Response(JSON.stringify(url.endsWith("/api/backlog/syncs") ? { syncs: [{ workspaceId: "ws_local", backlog: "switchboard", repository: "ws_local", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] } : { issue: { number: 7, title: "x", state: "OPEN", labels: [], milestone: null, parent: null, subIssues: [], body: "", url: "" }, changeRefs: null, comments: [], fields: null, fetchedAt: 1, localId: null, pending: 0, sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } }));
     const err: string[] = [];
     expect(await main(["--change", "7"], async () => { throw new Error("gh"); }, () => {}, (s) => err.push(s), () => undefined, async () => { throw new Error("glab"); }, r.dir, { env: { BACKLOG_URL: BACKLOG, BACKLOG_WORKSPACE: "ws_local" }, fetch: noChange })).toBe(2);
     expect(err.join("")).toContain("#7 は変更ではない");

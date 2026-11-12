@@ -1,8 +1,11 @@
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { LoadKind, OpsLoad, OpsLoadGroup, OpsLoadHour } from "@switchboard/protocol";
 import { type Db, jstDayStart } from "./db.ts";
 import { DAEMON_JOB_MARK, HOME_MARK, read, statFields, TASK_MARK } from "./detached.ts";
+import { readMemInfo } from "./ops-resources.ts";
+import { HEAVY_DEFAULTS, heavyConfig, heavyConfigPath } from "../../../ops-kit/src/heavy.ts";
 
 /**
  * The host's load (#2086): one sample of the daemon's systemd unit — the cgroup's memory,
@@ -328,20 +331,29 @@ export function opsLoad(db: Db, days: number, opts: { now?: number; taskId?: str
   return { available: opts.available, days, hours: [...hours.values()], groups };
 }
 
-/** How far back the largest Task RSS is taken from when a start is judged against the free memory (#1141). */
-const HEADROOM_WINDOW_MS = 24 * 3_600_000;
+/** The default of `taskMinFreeMb` in `~/.config/ops-kit/heavy.json`: below this much free memory a Task start is held back. */
+export const TASK_MIN_FREE_MB_DEFAULT = 300;
 
 /**
- * The unit's free memory (`memory.max` − `memory.current`) and the largest RSS a Task's processes reached together in the last day
- * (the recorded `owner: "task"` groups of one Task in one sample, summed), for the start check of TaskManager (#1141). null when the cgroup cannot be read, has no
- * limit, or nothing is recorded yet: then only the count limits.
+ * The machine's free memory (MemAvailable), the floor of `ops-kit heavy` (`minFreeMb`) and the safety valve of a Task
+ * start (`taskMinFreeMb`, default 300 MB), for TaskManager's start check: below the floor a start only gets a warning
+ * (the floor is sized for heavy jobs, not for one runner process); below the safety valve it is held back. null when
+ * /proc/meminfo cannot be read: then only the count limits. A value that cannot be read gives its default (the memory
+ * is still judged; `ops-kit heavy` itself refuses to run on a wrong file). The two values are read apart: a wrong one
+ * does not spoil the other.
  */
-export function memoryHeadroom(db: Db, opts: { now?: number; cgRoot?: string; procRoot?: string } = {}): { free: number; need: number } | null {
-  const cg = readCgroup(opts.cgRoot, opts.procRoot);
-  if (!cg || cg.reading.memMax === null) return null;
-  // a Task's groups (runner, tests, …) are summed per sample: the largest one Task took at once
-  const row = db.sqlite
-    .query("SELECT MAX(rss) AS need FROM (SELECT SUM(rss) AS rss FROM ops_load_groups WHERE owner = 'task' AND ts >= ? GROUP BY ts, task_id)")
-    .get((opts.now ?? Date.now()) - HEADROOM_WINDOW_MS) as { need: number | null } | null;
-  return row?.need ? { free: cg.reading.memMax - cg.reading.memCurrent, need: row.need } : null;
+export function memoryHeadroom(opts: { home?: string; procRoot?: string } = {}): { free: number; floor: number; safety: number } | null {
+  const mem = readMemInfo(opts.procRoot);
+  if (!mem) return null;
+  const home = opts.home ?? homedir();
+  let minFreeMb = HEAVY_DEFAULTS.minFreeMb;
+  try {
+    minFreeMb = heavyConfig(home).minFreeMb;
+  } catch {}
+  let safetyMb = TASK_MIN_FREE_MB_DEFAULT;
+  try {
+    const v = (JSON.parse(readFileSync(heavyConfigPath(home), "utf8")) as { taskMinFreeMb?: unknown }).taskMinFreeMb;
+    if (typeof v === "number" && Number.isFinite(v) && v >= 0) safetyMb = v;
+  } catch {}
+  return { free: mem.availableBytes, floor: minFreeMb * 1024 * 1024, safety: safetyMb * 1024 * 1024 };
 }

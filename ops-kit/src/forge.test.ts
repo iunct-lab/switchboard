@@ -132,7 +132,7 @@ describe("forge", () => {
     const fetch = async (url: string, init: RequestInit = {}) => {
       const path = url.replace("http://app/api/backlog", "");
       calls.push({ method: init.method ?? "GET", path, body: init.body ? JSON.parse(String(init.body)) : undefined });
-      return new Response(JSON.stringify(path === "" ? { syncs: [{ workspaceId: "ws_l", backlog: "local", repository: "ws_l", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] } : { id: "c" }), { status: path === "" ? 200 : 202 });
+      return new Response(JSON.stringify(path === "/syncs" ? { syncs: [{ workspaceId: "ws_l", backlog: "local", repository: "ws_l", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] } : { id: "c" }), { status: path === "/syncs" ? 200 : 202 });
     };
     const target = { service: LOCAL_SERVICE, host: "local", repository: "ws_l" };
     const env = { BACKLOG_URL: "http://app/api/backlog", BACKLOG_WORKSPACE: "ws_l" };

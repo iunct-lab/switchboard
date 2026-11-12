@@ -22,7 +22,7 @@ pins: <name> <pinned> → <latest>（security）
 
 With `--file-request`, one `要望:` line per request says it was filed, was already open, or could not be filed (the exit code stays). `<n>` counts distinct advisories (one advisory has a row per package). A nonzero count of unreadable ones adds `/ unknown <n>`. With nothing pending, the single line `異常なし（更新 0 / 再起動待ち なし / 固定版の遅れ 0）`.
 
-Exit 0 = nothing pending / 1 = something is / 2 = cannot tell (`判定できない（<why>）`: a dnf or distributor read failed. It never says 異常なし and files nothing). The same input gives the same exit code with or without `--file-request`.
+Exit 0 = nothing pending / 1 = something is / 2 = cannot tell (`判定できない（<why>）`: a dnf or distributor read failed. It never says `異常なし` and files nothing). The same input gives the same exit code with or without `--file-request`.
 
 ## What it files
 
@@ -36,9 +36,9 @@ Exit 0 = nothing pending / 1 = something is / 2 = cannot tell (`判定できな�
 It runs from the existing scheduler as an ordinary prompt schedule, with no new schedule action. The prompt:
 
 1. runs `bun scripts/check-host-security.ts --file-request` once and reports the exit code and output as they are
-2. on exit 0, reports 異常なし with the counts and ends
-3. on exit 2, reports 判定できない with the reason and ends, without filing or answering anything
-4. on exit 1, for an open `ホストの更新待ち:` request with no `## 判断待ち` yet: finds each advisory's CVEs on its ALAS page (`https://alas.aws.amazon.com/AL2023/<advisory id>.html`) and reads their pages on the Amazon Linux security center, compares what they say (network or local, what is required) with this host's setup (no VM, rootless docker, unprivileged user namespaces on, and local paths count when code running on the host can reach them), and adds a `## 判断待ち` comment in the form the decisions screen reads (`**問い**:`, `**選択肢**:`, `**推奨**:`; issue-workflow's 「判断待ちの出し方」), then the `needs-decision` label. Under the block, the comment gives each advisory one of 届く / 届かない / 判定できない with a one-line reason, and lists a pending reboot and a pinned tool behind a security release as they stand. A request with only a reboot or a pin gets the same comment and label. 判定できない counts as 届く. Critical and Important go to the user's decisions this way; scoring the CVEs itself is not done, Amazon's severity stands
+2. on exit 0, reports `異常なし` with the counts and ends
+3. on exit 2, reports `判定できない` with the reason and ends, without filing or answering anything
+4. on exit 1, for an open `ホストの更新待ち:` request with no `## 判断待ち` yet: finds each advisory's CVEs on its ALAS page (`https://alas.aws.amazon.com/AL2023/<advisory id>.html`) and reads their pages on the Amazon Linux security center, compares what they say (network or local, what is required) with your host's setup (check the setup the host is built for in "2. Prerequisite: the runtime environment Switchboard needs" of [cloud-hosting.md](cloud-hosting.md): whether it is a VM, how docker runs, whether unprivileged user namespaces are on; on a different host, re-check each of these, and note that local paths count when code running on the host can reach them), and adds a `## 判断待ち` comment in the form the decisions screen reads (`**問い**:`, `**選択肢**:`, `**推奨**:`; issue-workflow's `判断待ちの出し方`), then the `needs-decision` label. Under the block, the comment gives each advisory one of `届く` / `届かない` / `判定できない` with a one-line reason, and lists a pending reboot and a pinned tool behind a security release as they stand. A request with only a reboot or a pin gets the same comment and label. `判定できない` counts as `届く`. Critical and Important go to the user's decisions this way; scoring the CVEs itself is not done, Amazon's severity stands
 5. does not reboot, stop, promote, change packages, use root or change files
 
 The schedule's time, runner, budget and exact prompt live in the app (the Schedules screen, `GET /api/schedules`), not here. Registering it is a call to the running daemon, so it is done with the user's OK, not by the PR.

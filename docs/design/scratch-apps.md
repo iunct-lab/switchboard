@@ -18,7 +18,7 @@ refused. Instead it asks the screen around it with `postMessage`, and the screen
   `refresh` (it makes the daemon import from GitHub), or a `body` JSON cannot write (a cycle, a BigInt) is 400.
 - At most 20 requests per 10 seconds for one open artifact; past that the answer is 429 and nothing is read.
 - The screen answers only the frame of the artifact it shows; a message from any other window or frame is ignored.
-- Opened on its own (the 新しいタブ button, no screen around it), nothing answers; the client below fails after 3 seconds.
+- Opened on its own (the `新しいタブ` button, no screen around it), nothing answers; the client below fails after 3 seconds.
 
 The bridge reads what the Task's agent can already read on localhost; it gives the page no new rights.
 
@@ -29,9 +29,9 @@ A throwaway page is not tested, so a wrong button must not become an operation n
 
 - The screen posts `{ type: "switchboard-api-pending", id }` to the frame at once (the client stops its 3-second timer),
   then shows a dialog over the artifact: the artifact's title, the method and path, the body (its first 2,000
-  characters), and two buttons, やめる (focused) and 実行する. 実行する takes a press only after 0.5 s, so a click aimed at the
+  characters), and two buttons, `やめる` (focused) and `実行する`. `実行する` takes a press only after 0.5 s, so a click aimed at the
   page under it does not run the operation unread.
-- Only 実行する calls the API; the answer is the API's status and JSON as for a read. やめる, Esc, a press outside the
+- Only `実行する` calls the API; the answer is the API's status and JSON as for a read. `やめる`, Esc, a press outside the
   box, or leaving the artifact (another tab, another artifact) calls nothing and answers `{ ok: false, status: 0, body: { error: "利用者が断った" } }`.
 - One dialog at a time: a write that comes while one is open waits until it closes; leaving the artifact declines the
   waiting ones too. There is no "don't ask again" and no
@@ -60,7 +60,7 @@ A row on the page (a Task in a queue, for example) can move Switchboard's screen
   so the browser's back returns to the screen that showed the artifact (not to the artifact tab itself, which is not
   in the URL).
 - As with a read, only the frame of the artifact shown is heard, and the 20-per-10-seconds limit counts these too.
-- Opened on its own (the 新しいタブ button), nothing hears the request and nothing happens; the client below sends
+- Opened on its own (the `新しいタブ` button), nothing hears the request and nothing happens; the client below sends
   nothing then.
 
 ## When a throwaway app keeps being used
@@ -70,12 +70,12 @@ for a page (a read, or a write the person ran; a refused or declined one is not 
 today (`POST /api/artifacts/:id/app-use`); the daemon counts
 each local day once per artifact (`appDays` on the artifact).
 
-- The artifact's row shows 要望にする once its page has used the bridge. It opens the feedback dialog with the draft
-  「使い捨てアプリ「<title>」を一般機能にしたい。」 and the artifact as its source (`source: { kind: "artifact", artifactId }`);
-  the request's `## 出典` gets the line 「使い捨てアプリから: 成果物 <id>（Task <id>）、写し <folder of the copy>」.
+- The artifact's row shows `要望にする` once its page has used the bridge. It opens the feedback dialog with the draft
+  `使い捨てアプリ「<title>」を一般機能にしたい。` and the artifact as its source (`source: { kind: "artifact", artifactId }`);
+  the request's `## 出典` gets the line `使い捨てアプリから: 成果物 <id>（Task <id>）、写し <folder of the copy>`.
 - On the 3rd separate day (`APP_REQUEST_DAYS` in `packages/core/src/artifacts.ts`, not a setting) Switchboard starts
   that request Task itself, once per artifact; its `## 出典` says Switchboard filed it. The row then shows
-  要望の Task を始めました with a link to that Task. If the Task cannot start (no meta workspace), the next day that
+  `要望の Task を始めました` with a link to that Task. If the Task cannot start (no meta workspace), the next day that
   counts tries again.
 - The request Task reads the page from the copy's folder, which stays as the artifact's copy. A removed artifact is
   not counted and starts no request. Turning the app into a feature is the ordinary request → PBI → Task flow.
@@ -107,7 +107,7 @@ function sbOpen(path) {
 ```
 
 `sbApi("/api/tasks").then(rows => …)` reads; `sbApi("/api/tasks/" + id + "/abort", "POST")` asks the person first. A
-refusal, a failed call, or やめる (status 0, `利用者が断った`) rejects with the status on the error.
+refusal, a failed call, or `やめる` (status 0, `利用者が断った`) rejects with the status on the error.
 `sbOpen("/task/" + id)` moves the screen to that Task (`id` as `/api/tasks` gives it).
 
 ## What is worth reading

@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appBoard, claim, ghBoard, ghMaterial, holder, judge, lastClaim, overlap, readOthers, release, releaseArgs, releaseBody, STALE_HOURS, storedMaterial, waitConditions, type Work } from "./parallel-guard";
+import { afterTime, appBoard, claim, ghBoard, ghMaterial, holder, judge, lastClaim, overlap, readOthers, release, releaseArgs, releaseBody, STALE_HOURS, storedMaterial, waitConditions, type Work } from "./parallel-guard";
 import { linkedIssues, pathsIn, scopeIn } from "./task-paths";
 import type { StoredRecords } from "../ops-kit/src/backlog-client";
 
@@ -135,6 +135,7 @@ function github(opts: {
   projects?: Record<number, { number: number; owner: { login: string }; status: string }[]>; // other Projects a Task is in, listed first
   prs?: { number: number; headRefName: string; body: string; files: string[]; isDraft?: boolean; labels?: { name: string }[] }[];
   decisionTasks?: number[];
+  taskParents?: Record<number, number>; // the PBI of a Task listed by the issues query
   comments?: Record<number, { id: number; body: string }[]>;
   beforePost?: (issue: number) => void;
 }) {
@@ -168,7 +169,7 @@ function github(opts: {
     if (args[0] === "variable") return "https://github.com/orgs/example/projects/8\n";
     if (args[1] === "graphql" && args.some((a) => a.includes("issues("))) {
       return Object.entries(opts.bodies).map(([n, body]) => JSON.stringify({
-        number: Number(n), body, updatedAt: fresh, labels: { nodes: opts.decisionTasks?.includes(Number(n)) ? [{ name: "needs-decision" }] : [] },
+        number: Number(n), body, updatedAt: fresh, parent: opts.taskParents?.[Number(n)] ? { number: opts.taskParents[Number(n)] } : null, labels: { nodes: opts.decisionTasks?.includes(Number(n)) ? [{ name: "needs-decision" }] : [] },
         projectItems: { nodes: [
           ...(opts.projects?.[Number(n)] ?? []).map(({ status, ...project }) => ({ project, fieldValueByName: { name: status } })),
           { project: { number: 8, owner: { login: "example" } }, fieldValueByName: { name: opts.inProgress?.includes(Number(n)) ? "In progress" : "Backlog" } },
@@ -226,6 +227,39 @@ describe("parallel-guard claim", () => {
     const g = github({ bodies: {} });
     await claim(ghBoard("acme/lib", g.run), 7, false);
     expect(g.calls.filter((a) => a.includes("POST"))[0]).toContain("repos/acme/lib/issues/7/comments");
+  });
+});
+
+describe("parallel-guard after (#4616)", () => {
+  const AT = "2026-11-20T09:00:00+09:00";
+  test("--after is written into the release mark, with or without waits, and holder() still reads it as a release", () => {
+    expect(releaseBody("期日待ち", [], false, AT)).toBe(`<!-- pbi-complete:release after=${AT} -->\n/pbi-complete 終了: 期日待ち`);
+    expect(releaseBody("x", [778, 603], false, "2026-11-20T00:00:00Z").split("\n")[0]).toBe("<!-- pbi-complete:release waits=603,778 after=2026-11-20T00:00:00Z -->");
+    expect(releaseBody("x", [52], true, AT).split("\n")[0]).toBe(`<!-- pbi-complete:release overlap=52 after=${AT} -->`);
+    for (const body of [releaseBody("x", [], false, AT), releaseBody("x", [603], false, AT)]) {
+      expect(holder([{ id: 1, body: "<!-- pbi-complete:claim t1 -->" }, { id: 2, body }])).toBeNull();
+    }
+  });
+
+  test("the CLI's words: --after splits out of the reason and goes with --waits; a time with no zone, an unreadable time, a missing or repeated value is a usage error", () => {
+    expect(releaseArgs(["期日待ち", "--after", AT])).toEqual({ reason: "期日待ち", waits: [], after: AT });
+    expect(releaseArgs(["--after", "2026-11-20T00:00:00Z", "後回し", "--waits", "9"])).toEqual({ reason: "後回し", waits: [9], after: "2026-11-20T00:00:00Z" });
+    expect(releaseArgs(["x", "--overlap-waits", "9", "--after", AT])).toEqual({ reason: "x", waits: [9], overlap: true, after: AT });
+    for (const bad of [["x", "--after", "2026-11-20T09:00:00"], ["x", "--after", "2026-11-20"], ["x", "--after", "あした"], ["x", "--after"], ["--after", AT], ["x", "--after", AT, "--after", AT]]) expect(releaseArgs(bad)).toBeNull();
+  });
+
+  test("afterTime reads only a time with a zone", () => {
+    expect(afterTime(AT)).toBe(Date.parse(AT));
+    expect(afterTime("2026-11-20T00:00:00Z")).toBe(Date.parse("2026-11-20T00:00:00Z"));
+    expect(afterTime("2026-11-20T00:00:00")).toBeNaN();
+    // a date Date.parse reads but no marker can carry (a space) is no ISO 8601 time, so --after refuses it
+    expect(afterTime("Fri, 20 Nov 2026 00:00:00Z")).toBeNaN();
+    expect(releaseArgs(["x", "--after", "Fri, 20 Nov 2026 00:00:00Z"])).toBeNull();
+  });
+
+  test("release posts the mark with the date", async () => {
+    const g = github({ bodies: {} }); await release(ghBoard(REPO, g.run), 7, "期日待ち", [], false, AT);
+    expect(g.comments[7]![0]!.body).toContain(`release after=${AT}`);
   });
 });
 
@@ -312,6 +346,22 @@ describe("parallel-guard readOthers", () => {
     const r = await readOthers(11, await ghMaterial(REPO, 11, g.run));
     expect(r.paths).toEqual(["packages/core/src/db.ts"]);
     expect(r.others.map((w) => w.ref)).toEqual(["PR #72", "Task #30"]);
+  });
+
+  test("after: from GitHub too, an In progress Task whose PBI waits for a date still ahead holds no file, however many comments follow the mark", async () => {
+    const material = (after: string) => {
+      const later = Array.from({ length: 40 }, (_, i) => ({ id: 200 + i, body: `進み ${i}` }));
+      const g = github({
+        bodies: { 11: "packages/core/src/db.ts", 12: "packages/core/src/db.ts" },
+        parents: { 11: { number: 10, subs: [11] } },
+        inProgress: [12],
+        taskParents: { 12: 59 },
+        comments: { 59: [{ id: 150, body: `<!-- pbi-complete:release after=${after} -->\n/pbi-complete 終了: 期日待ち` }, ...later] },
+      });
+      return ghMaterial(REPO, 11, g.run, now.getTime());
+    };
+    expect((await readOthers(11, await material("2026-10-01T00:00:00Z"))).others.map((w) => w.ref)).toEqual([]);
+    expect((await readOthers(11, await material("2026-09-28T12:00:00Z"))).others.map((w) => w.ref)).toEqual(["Task #12"]); // at the date it holds again
   });
 
   // Codex's follow-up on #485: a root file only an open PR adds is not in the repository's root yet
@@ -446,6 +496,13 @@ describe("parallel-guard prereqs (#937)", () => {
     for (const [line, targets, ref, state] of cases) expect(await overlap(ghBoard(REPO, task(line, { targets }).run), 52, false, now)).toMatchObject({ verdict: "stop", prereqs: [{ ref, state }] });
   });
 
+  test("an Issue named （リリース） carries how to fix it; a PR does not", async () => {
+    const issue = await overlap(ghBoard(REPO, task("**前提**: #71（リリース）", { targets: { 71: { state: "closed" } } }).run), 52, false, now);
+    expect(issue.prereqs[0]).toMatchObject({ ref: "#71", state: "unknown", fix: expect.stringContaining("PR の番号に書き直す") });
+    const pr = await overlap(ghBoard(REPO, task("**前提**: #70（リリース）", { targets: { 70: { state: "open", pr: true } } }).run), 52, false, now);
+    expect(pr.prereqs[0]).not.toHaveProperty("fix");
+  });
+
   test("a merged （リリース） prerequisite goes: whether it runs is the daemon's to judge before it starts the PBI", async () => {
     expect(await overlap(ghBoard(REPO, task("**前提**: #70（リリース）", { targets: { 70: { state: "closed", pr: true, merged: true } } }).run), 52, false, now)).toMatchObject({ verdict: "go", prereqs: [{ ref: "PR #70", state: "met" }] });
     expect(await overlap(ghBoard(REPO, task("**前提**: #70（リリース）", { targets: { 70: { state: "open", pr: true } } }).run), 52, false, now)).toMatchObject({ verdict: "wait" });
@@ -490,6 +547,14 @@ describe("parallel-guard from the app's stored records (#919)", () => {
     // a stored Task In progress on the file blocks as one read from GitHub does
     const t = records([issue(40, { body: db }), issue(60, { body: db, fields: inProgress })]);
     expect((await overlap({ ...ghBoard(REPO, g.run), material: async () => storedMaterial(t, 40) }, 40, false, now)).blocking.map((h) => h.ref)).toEqual(["Task #60"]);
+  });
+
+  test("after: an In progress Task whose PBI waits for a date still ahead holds no file until the date", async () => {
+    const mark = (after: string) => ({ issue: 59, body: `<!-- pbi-complete:release after=${after} -->\n/pbi-complete 終了: 期日待ち`, createdAt: fresh });
+    const t = (after: string) => ({ ...records([issue(40, { body: db }), issue(59, { labels: ["type:pbi"], subIssues: [60] }), issue(60, { parent: 59, body: db, fields: inProgress })]), comments: [mark(after)] });
+    const run = (x: StoredRecords) => overlap({ ...ghBoard(REPO, github({ bodies: {} }).run), material: async () => storedMaterial(x, 40, now.getTime()) }, 40, false, now);
+    expect((await run(t("2026-10-01T00:00:00Z"))).verdict).toBe("go"); // the date is ahead
+    expect((await run(t("2026-09-28T12:00:00Z"))).blocking.map((h) => h.ref)).toEqual(["Task #60"]); // at the date it holds again
   });
 
   test("prerequisites are judged from the stored Issues and PRs; one not stored or not read is missing", async () => {
@@ -547,7 +612,7 @@ describe("parallel-guard on a backlog kept in the app (#2265)", () => {
       const path = url.replace("http://app/api/backlog", "");
       calls.push(`${method} ${path}`);
       const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
-      if (method === "GET" && path === "") return json({ syncs: [{ workspaceId: "ws_l", repository: "ws_l", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] });
+      if (method === "GET" && path === "/syncs") return json({ syncs: [{ workspaceId: "ws_l", repository: "ws_l", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] });
       if (method === "GET" && path.startsWith("/records")) return json(records);
       const m = /^\/(\d+)(\/comment)?/.exec(path)!;
       const n = Number(m[1]);
@@ -580,7 +645,7 @@ describe("parallel-guard on a backlog kept in the app (#2265)", () => {
     expect(lastClaim(a.comments[40]!.map((c) => ({ id: c.seq, body: c.body })))).toBeUndefined();
     // #60 still goes when it marks again (#40's mark is taken back); only the app was asked
     expect((await overlap(a.board, 60, true, now)).verdict).toBe("go");
-    expect([...a.calls, ...b.calls].every((c) => /^(GET|POST) (|\/records\?.*|\/\d+(\?.*|\/comment))$/.test(c))).toBe(true);
+    expect([...a.calls, ...b.calls].every((c) => /^(GET|POST) (\/syncs|\/records\?.*|\/\d+(\?.*|\/comment))$/.test(c))).toBe(true);
   });
 });
 
@@ -620,7 +685,7 @@ describe("parallel-guard on a GitHub-synced backlog through the app (#3069)", ()
       const url = new URL(req.url);
       const path = url.pathname.replace("/api/backlog", "");
       const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
-      if (path === "") return json({ syncs: [{ workspaceId: "ws_g", repository: "acme/lib", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] });
+      if (path === "/syncs") return json({ syncs: [{ workspaceId: "ws_g", repository: "acme/lib", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] });
       if (path === "/records") return json({ workspaceId: "ws_g", service: "github", repository: "acme/lib", project: { owner: "acme", number: 1 }, fetchedAt: 1, top: [{ name: "packages", dir: true }], issues: [task], unread: [], pulls: [], comments: [] });
       if (path === "/sync") {
         imports += 1;
@@ -694,7 +759,7 @@ describe("parallel-guard on a GitHub-synced backlog through the app (#3069)", ()
     const fetch = (async (url: string, init: RequestInit = {}) => {
       const path = url.replace("http://app/api/backlog", "");
       const json = (body: unknown) => new Response(JSON.stringify(body));
-      if (path === "") return json({ syncs: [{ workspaceId: "ws_g", repository: "acme/lib", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] });
+      if (path === "/syncs") return json({ syncs: [{ workspaceId: "ws_g", repository: "acme/lib", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] });
       if (path.startsWith("/records")) return json({ workspaceId: "ws_g", service: "github" });
       if ((init.method ?? "GET") === "GET") return json({ comments });
       seq += 1;

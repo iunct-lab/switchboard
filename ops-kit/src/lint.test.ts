@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { main } from "./cli.ts";
 import { loadConfig } from "./config.ts";
 import { fakeGh, GhError, type FakeCall } from "./gh.ts";
-import { formatLint, lint, LintFetchError, speakerOf } from "./lint.ts";
+import { formatLint, lint, LintFetchError, releasePrereqs, speakerOf } from "./lint.ts";
 import type { StoredRecords } from "./backlog-client.ts";
 
 const fixtures = join(import.meta.dir, "../fixtures");
@@ -328,5 +328,62 @@ describe("lint", () => {
     await expect(lint(fakeGh([]), cfg, { records: { ...r, unread: [r.issues[0]!.number] } })).rejects.toThrow(LintFetchError);
     // a closed one is not checked, so it does not stop the check
     expect((await lint(fakeGh([]), cfg, { records: { ...r, unread: [99] } })).violations).toEqual([]);
+  });
+});
+
+describe("（リリース）on an Issue (#4335)", () => {
+  const msg = (n: number) => `#11: **前提**: の #${n} は Issue なので（リリース）は付けられない。（リリース）は PR の番号にだけ付く。#${n} を閉じた PR の番号に直す`;
+  /** The `ok` page with `prefix` put on top of Task #11's body. */
+  const pageWith = (prefix: string) => () => {
+    const d = page("ok")();
+    const t = d.repository.issues.nodes.find((n: any) => n.number === 11);
+    t.body = `${prefix}\n${t.body}`;
+    return d;
+  };
+  const notFound = () => { throw new GhError("gh api failed (exit 1): gh: Not Found (HTTP 404)"); };
+  /** One REST answer per number the script names: an Issue, a PR, or a 404. */
+  const answers = (kinds: Record<number, "issue" | "pr" | "404">) =>
+    Array.from({ length: 6 }, () => (c: FakeCall) => {
+      const n = Number((c as { path: string }).path.split("/").pop());
+      if (kinds[n] === "404") return notFound();
+      return kinds[n] === "pr" ? { number: n, pull_request: {} } : { number: n };
+    });
+  const paths = (g: { calls: FakeCall[] }) => g.calls.flatMap((c) => (c.kind === "api" ? [c.path] : []));
+
+  test("releasePrereqs reads only the first **前提**: line outside fences", () => {
+    expect(releasePrereqs("**前提**: #1（リリース）, #2, #3 （リリース）\n**前提**: #9（リリース）")).toEqual([1, 3]);
+    expect(releasePrereqs("```\n**前提**: #5（リリース）\n```\n**前提**: #6")).toEqual([]);
+  });
+
+  test("an Issue with （リリース） is a violation; a PR, an Issue without it, and a 404 are not; a number is asked once", async () => {
+    const g = fakeGh([pageWith("**前提**: #20（リリース）, #21（リリース）, #22, #23（リリース）, #24（リリース）, #20（リリース）"), ...answers({ 20: "issue", 21: "pr", 22: "issue", 23: "404", 24: "issue" })]);
+    const r = await lint(g, cfg, { sleep: noSleep });
+    expect(formatLint(r.violations)).toEqual([msg(20), msg(24), "violations: 2  warnings: 0  (api errors: 0)"]);
+    expect(paths(g)).toEqual(["repos/example/repo/issues/20", "repos/example/repo/issues/21", "repos/example/repo/issues/23", "repos/example/repo/issues/24"]);
+  });
+
+  test("a fenced **前提**: line is not read, and nothing is asked", async () => {
+    const g = fakeGh([pageWith("```\n**前提**: #20（リリース）\n```"), ...answers({ 20: "issue" })]);
+    expect((await lint(g, cfg, { sleep: noSleep })).violations).toEqual([]);
+    expect(paths(g)).toEqual([]);
+  });
+
+  test("from the app's stored records the stored repository is asked; a backlog kept in the app only asks nothing", async () => {
+    const d = pageWith("**前提**: #20（リリース）")();
+    const issue = (n: any): StoredRecords["issues"][number] => ({ number: n.number, title: "", url: "", state: "OPEN", stateReason: null, body: n.body, labels: n.labels.nodes.map((l: any) => l.name), parent: n.parent?.number ?? null, subIssues: [], createdAt: "", updatedAt: "", closedAt: null, fields: null });
+    const nodes = d.repository.issues.nodes as any[];
+    const records: StoredRecords = { workspaceId: "w", service: "github", repository: "stored/repo", project: { owner: "example", number: 1 }, fetchedAt: 1, top: [], issues: [...nodes.map(issue), issue({ number: 10, body: "", labels: { nodes: [{ name: "type:pbi" }] }, parent: null })].filter((x, i, a) => a.findIndex((y) => y.number === x.number) === i), unread: [], pulls: [], comments: [] };
+    const g = fakeGh(answers({ 20: "issue" }));
+    const r = await lint(g, cfg, { records, withProject: false, sleep: noSleep });
+    expect(formatLint(r.violations)).toContain(msg(20));
+    expect(paths(g)).toEqual(["repos/stored/repo/issues/20"]);
+    const local = fakeGh([]);
+    expect((await lint(local, cfg, { records: { ...records, service: "app" }, withProject: false, sleep: noSleep })).violations.some((v) => v.message.includes("リリース"))).toBe(false);
+    expect(local.calls).toHaveLength(0);
+  });
+
+  test("a failure other than 404 is a fetch error (exit 2), never a pass", async () => {
+    const g = fakeGh([pageWith("**前提**: #20（リリース）"), () => { throw new GhError("gh api failed (exit 1): HTTP 500"); }]);
+    await expect(lint(g, cfg, { sleep: noSleep })).rejects.toBeInstanceOf(LintFetchError);
   });
 });

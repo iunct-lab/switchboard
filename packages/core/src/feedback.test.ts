@@ -14,10 +14,10 @@ import { LOCAL_BACKLOG_RULES } from "./backlog.ts";
 let core: CoreServer;
 let home: string;
 const starts: StartOptions[] = [];
-async function boot(ids: RunnerId[] = ["claude", "codex"]) {
+async function boot(ids: RunnerId[] = ["claude", "codex"], env: Record<string, string> = {}) {
   starts.length = 0;
   home = mkdtempSync(join(tmpdir(), "sb-feedback-"));
-  const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
+  const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0", ...env });
   const adapters: RunnerAdapter[] = ids.map((id) => ({
     id, detect: async () => ({ available: true }), efforts: [{ value: "high", label: "high" }],
     start(opts, emit) {
@@ -379,4 +379,56 @@ test("a local request for a registered repository's workspace gets the local rul
   expect(p).toContain(LOCAL_BACKLOG_RULES);
   expect(p).not.toContain("gh repo view");
   expect(p).not.toContain("gh variable get");
+});
+
+// developSelf off (#2459): this instance does not develop Switchboard itself
+const developSelf = (base: string, on: boolean) => fetch(`${base}/api/settings`, { method: "PATCH", body: JSON.stringify({ developSelf: on }) });
+const gitIn = (cwd: string, ...args: string[]) => { const p = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" }); if (p.exitCode) throw new Error("fixture git failed"); };
+
+test("developSelf off: fix is refused", async () => {
+  const base = await boot();
+  expect((await developSelf(base, false)).status).toBe(200);
+  const r = await post(base, { text: "直して", mode: "fix" });
+  expect(r.status).toBe(409);
+  expect(await r.text()).toContain("Switchboard 自体を開発しない設定です");
+  expect(core.db.listTasks()).toHaveLength(0);
+  // on again: the next call starts it, without a restart
+  expect((await developSelf(base, true)).status).toBe(200);
+  expect((await post(base, { text: "直して", mode: "fix" })).status).toBe(201);
+});
+
+test("developSelf off: a request for Switchboard answers the upstream form", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sb-feedback-meta-"));
+  gitIn(dir, "init", "-q"); gitIn(dir, "remote", "add", "origin", "https://github.com/acme/switchboard.git");
+  const base = await boot(["claude", "codex"], { SWITCHBOARD_REPO_ROOT: dir });
+  const meta = core.db.listWorkspaces().find((w) => w.kind === "meta")!;
+  expect(meta.path).toBe(dir);
+  await developSelf(base, false);
+  for (const body of [{ text: "要望 本文 & more" }, { text: "要望 本文 & more", workspaceId: meta.id }]) {
+    const r = await post(base, body);
+    expect(r.status).toBe(200);
+    const { upstream } = await r.json() as { upstream: { url: string | null; text: string } };
+    expect(upstream.url!.startsWith("https://github.com/acme/switchboard/issues/new?template=request.yml&")).toBe(true);
+    expect(new URL(upstream.url!).searchParams.get("what")).toBe("要望 本文 & more");
+    expect(new URL(upstream.url!).searchParams.get("title")).toBe("Request: 要望 本文 & more");
+    expect(upstream.text).toBe("要望 本文 & more");
+  }
+  expect(core.db.listTasks()).toHaveLength(0);
+  // an origin that is not on GitHub: the text to copy only
+  gitIn(dir, "remote", "set-url", "origin", "https://git.example.invalid/acme/switchboard.git");
+  expect(await (await post(base, { text: "コピー" })).json()).toEqual({ upstream: { url: null, text: "コピー" } });
+  expect(starts).toHaveLength(0);
+  rmSync(dir, { recursive: true, force: true });
+  // the meta directory is gone: git cannot start there, the text to copy is still answered
+  expect(await (await post(base, { text: "消えた" })).json()).toEqual({ upstream: { url: null, text: "消えた" } });
+});
+
+test("developSelf off: a request for another workspace still starts a Task", async () => {
+  const base = await boot();
+  const dir = mkdtempSync(join(home, "lib-"));
+  const lib = (await (await fetch(`${base}/api/workspaces`, { method: "POST", body: JSON.stringify({ path: dir, name: "lib" }) })).json()) as { id: string };
+  await developSelf(base, false);
+  const r = await post(base, { text: "lib の要望", workspaceId: lib.id });
+  expect(r.status).toBe(201);
+  expect(await r.json() as Task).toMatchObject({ workspaceId: lib.id });
 });

@@ -65,7 +65,7 @@ export type Journey = z.infer<typeof Journey>;
  * session the person ran in a terminal, imported from `~/.claude/projects`. The origin never changes: a terminal
  * session continued from Switchboard (`--resume`) stays `terminal`, and the other way round.
  */
-export const TaskOrigin = z.enum(["switchboard", "terminal"]);
+export const TaskOrigin = z.enum(["switchboard", "terminal", "release-review"]);
 export type TaskOrigin = z.infer<typeof TaskOrigin>;
 
 /**
@@ -238,10 +238,15 @@ export const Task = z.object({
   background: z.object({ jobs: z.array(z.string()), since: z.number() }).nullable().optional(),
   resumeAt: z.number().nullable(),
   /**
-   * What `resumeAt` waits for (#550): the runner's usage limit, GitHub's API limit a turn met in its commands, or space on a full disk (#2234). null =
+   * What `resumeAt` waits for (#550): the runner's usage limit, GitHub's API limit a turn met in its commands, space on a full disk (#2234), or `start`: a Task made at the limit that has not run a turn yet (#2768). null =
    * no plan, or a plan made before #550 (treated as the runner's limit).
    */
-  resumeReason: z.enum(["limit", "github", "disk"]).nullable(),
+  resumeReason: z.enum(["limit", "github", "disk", "start"]).nullable(),
+  /**
+   * A Task made without starting (`resumeReason: "start"`, #2768): the prompt (attachment lines included) its first turn
+   * sends when `resumeAt` comes. null = not waiting to start.
+   */
+  deferredPrompt: z.string().nullable(),
   /**
    * A usage-limit wait (#2237): the window that stopped the turn (`five_hour`, `seven_day`, …; from the quota report) and
    * when it stopped (ms). A report of that window under 100 % after `resumeSince` resumes the task before `resumeAt`.
@@ -291,6 +296,58 @@ export const Task = z.object({
   updatedAt: z.number(),
 });
 export type Task = z.infer<typeof Task>;
+
+/** What the Task list needs of a Task (rail, Home, attention, notices). The rest is read from GET /api/tasks/:id when a Task is opened. */
+export const TaskSummary = Task.pick({
+  id: true,
+  title: true,
+  status: true,
+  archivedAt: true,
+  workspaceId: true,
+  outcome: true,
+  reviewedAt: true,
+  updatedAt: true,
+  createdAt: true,
+  statusAt: true,
+  cwd: true,
+  origin: true,
+  resumeAt: true,
+  resumeReason: true,
+  resumePlannedAt: true,
+  background: true,
+  queuedAt: true,
+  shadowOf: true,
+  shadowStopped: true,
+  runner: true,
+  executionMode: true,
+});
+export type TaskSummary = z.infer<typeof TaskSummary>;
+
+export function taskSummary(t: Task): TaskSummary {
+  return {
+    id: t.id,
+    title: t.title,
+    status: t.status,
+    archivedAt: t.archivedAt,
+    workspaceId: t.workspaceId,
+    outcome: t.outcome,
+    reviewedAt: t.reviewedAt,
+    updatedAt: t.updatedAt,
+    createdAt: t.createdAt,
+    statusAt: t.statusAt,
+    cwd: t.cwd,
+    origin: t.origin,
+    resumeAt: t.resumeAt,
+    resumeReason: t.resumeReason,
+    resumePlannedAt: t.resumePlannedAt,
+    background: t.background,
+    queuedAt: t.queuedAt,
+    shadowOf: t.shadowOf,
+    shadowStopped: t.shadowStopped,
+    runner: t.runner,
+    executionMode: t.executionMode,
+  };
+}
 
 /* ---------- Evals (#1218): what a task's record says about how it went ---------- */
 
@@ -477,6 +534,9 @@ export const FeedbackInput = z.object({
   ]).optional(),
 });
 export type FeedbackInput = z.infer<typeof FeedbackInput>;
+/** The 200 of POST /api/feedback when the request is for Switchboard itself and this instance does not develop it (#2459): no Task; where to file it upstream. */
+export const FeedbackUpstream = z.object({ upstream: z.object({ url: z.string().nullable(), text: z.string() }) });
+export type FeedbackUpstream = z.infer<typeof FeedbackUpstream>;
 
 /** 新しいリポジトリ (#1447): the name and what it is for. Everything else is decided in the Task's conversation. */
 export const NewRepoInput = z.object({
@@ -843,6 +903,12 @@ export const Settings = z.object({
   autoResume: z.record(z.string(), z.boolean()).default({}),
   /** Shadow run (#99): runner every new task is mirrored to unless the creation says otherwise; null = off. */
   shadowRunner: RunnerId.nullable().default(null),
+  /**
+   * Whether this instance develops Switchboard itself (#2459). false: the backlog does not read the meta workspace (no gh call,
+   * no row). The key's absence = true, so a database and a test that never set it behave as before; a new HOME starts with false
+   * (`seedNewHome`, written by main.ts).
+   */
+  developSelf: z.boolean().default(true),
   /** LLM runner suggestions (#25). Off by default: switching it on spends the runner's quota on every task creation. */
   routing: RoutingSettings.prefault({}),
   /** Judge each finished turn as done / needs action (#493). On by default: it spends the runner's quota once per turn. */
@@ -915,6 +981,7 @@ export const SettingsPatch = z.object({
    */
   hiddenModels: z.record(z.string(), z.array(z.string()).nullable()).optional(),
   shadowRunner: RunnerId.nullable().optional(),
+  developSelf: z.boolean().optional(),
   /** Partial: `{ outbound: { classifierLog: true } }` leaves the other value alone. */
   outbound: z.object({ classifierLog: z.boolean(), runnerTelemetry: z.boolean() }).partial().optional(),
   /** Partial: `{ routing: { llm: { enabled: true } } }` leaves the saved runner / model alone. */
@@ -1336,6 +1403,8 @@ export const Schedule = z.object({
   nextRunAt: z.number().nullable(),
   /** The last secret-scan firing's result (#1274); null on the other actions and before the first firing. */
   lastResult: ScheduleResult.nullable(),
+  /** Set by the list API only (#4479): the schedule's Tasks stopped the same way in a row; `taskId` is the newest one's. null elsewhere. */
+  stuck: z.object({ count: z.number().int(), reason: z.string(), evidence: z.string(), firstAt: z.number(), taskId: z.string() }).nullable(),
   createdAt: z.number(),
 });
 export type Schedule = z.infer<typeof Schedule>;
@@ -1548,7 +1617,7 @@ export const Ask = z.object({
   /** The kinds of answer it takes (#936); empty = not answered from the screen (automatic, or the runner refused). */
   answers: z.array(AskAnswerKind),
   /** Where the work stopped (`**止めた場所**:`), with the first `PR #n` it names (#936: a merge check is about that PR's head). */
-  place: z.object({ text: z.string(), pr: z.number().nullable() }).nullable(),
+  place: z.object({ text: z.string(), pr: z.number().nullable(), /** The `[聞く]` / `[再チェック` lines under `**止めた場所**:` (merge-gate's reasons); empty = none. */ reasons: z.array(z.string()).default([]), /** The first `+<n>/-<m>` of the place; null = none. */ diff: z.string().nullable().default(null) }).nullable(),
   /** The screen mockups to compare before answering (#2221): the HTML artifacts, not removed, of the Task the question's `**画面イメージ**:` names. */
   mockups: z.array(Artifact).default([]),
   blockers: z.array(AskBlocker),
@@ -1573,6 +1642,8 @@ export const AskAnswerInput = z.object({
   policy: PolicyInput.optional(),
   /** `batch:deploy` (#2046): the Tasks of the batch the person approves; the others wait. */
   taskIds: z.array(z.string()).max(50).optional(),
+  /** `batch:security-merge` (required there): the question each of `taskIds` had on the screen (same order); a Task whose question is not that one by now is not sent. */
+  askIds: z.array(z.string()).max(50).optional(),
 });
 export type AskAnswerInput = z.infer<typeof AskAnswerInput>;
 /**
@@ -1650,6 +1721,13 @@ export const StopSummary = z.object({
   next: StopNext,
 });
 export type StopSummary = z.infer<typeof StopSummary>;
+
+/**
+ * The last stop of a Task, for the 要対応 list (#4520): the newest series' key, reason, state, conditions and how many
+ * times it stopped. Read from the `stop.record` events by `GET /api/tasks/stops`; it is not on `Task`.
+ */
+export const TaskStopMark = StopSummary.pick({ key: true, reason: true, state: true, conditions: true, count: true });
+export type TaskStopMark = z.infer<typeof TaskStopMark>;
 
 /** One session log the daemon follows (#91): which task it feeds and how far it has been read. */
 export const HistorySession = z.object({
@@ -1920,8 +1998,9 @@ export const BacklogItem = z.object({
    * of `## 到達点 / 受け入れ条件` outside fences with `（利用者確認: …）`. `n` = the line's number among all the section's
    * checkbox lines (checked ones too, from 1); `text` = the line after `- [ ] `. Empty for the other items. A line naming
    * decisions (`（利用者確認: 回答で確かめる #n — …）`) is not here once every named Issue is stored: their cards ask.
+   * `after` = the time (ISO 8601 with a zone) a line says `期日 … 以降` (#4616): not asked before it; still counted for `closable`.
    */
-  confirmations: z.array(z.object({ n: z.number(), text: z.string() })),
+  confirmations: z.array(z.object({ n: z.number(), text: z.string(), after: z.string().nullable() })),
   /**
    * An in-progress PBI whose Tasks are all closed and with no confirmation left (#523): its row offers 閉じる. Not while a
    * decision a confirmation line names is still labelled `needs-decision`.
@@ -1960,6 +2039,8 @@ export const BacklogItem = z.object({
   overlap: z.object({ hits: z.array(z.object({ ref: z.string(), path: z.string() })), unknown: z.string().nullable() }).nullable(),
   /** When that release was written (ISO string); retained when deferred waits are filtered out so the item can resume, null when no release applies. Compared with an 実装 stage Task's creation time. */
   waitsAt: z.string().nullable(),
+  /** A date the PBI waits for (the release mark's `after=`, #4616): `at` as written, `met` = it has passed when the backlog was built. null = no date. */
+  waitsUntil: z.object({ at: z.string(), met: z.boolean() }).nullable(),
   /**
    * The prerequisites of a Ready / in-progress PBI (#937): those its body names, and those its open Tasks name outside
    * the PBI when every open Task has one not met (one Task free to go lets the PBI go on). Empty for the other items.
@@ -2092,9 +2173,10 @@ export type Backlog = z.infer<typeof Backlog>;
  * first; `askId` = the question it shows as on its own (the stop, or what it folded into).
  */
 export const AskBatch = z.object({
-  id: z.enum(["batch:sso", "batch:deploy"]),
-  kind: z.enum(["sso", "deploy"]),
-  asks: z.array(z.object({ askId: z.string(), taskId: z.string(), title: z.string(), workspaceId: z.string().nullable(), op: z.string(), at: z.number() })),
+  id: z.enum(["batch:sso", "batch:deploy", "batch:security-merge"]),
+  kind: z.enum(["sso", "deploy", "security-merge"]),
+  /** security-merge only: the merge check's PR, the `[聞く]` / `[再チェック` lines it stopped with, and its `+add/-del`. sso / deploy do not set them. */
+  asks: z.array(z.object({ askId: z.string(), taskId: z.string(), title: z.string(), workspaceId: z.string().nullable(), op: z.string(), at: z.number(), pr: z.number().nullable().optional(), reasons: z.array(z.string()).optional(), diff: z.string().nullable().optional() })),
   /** sso: the Task sent on to log in (no longer in `asks`), until its turn ends; the others are sent on after it. */
   loggingIn: z.object({ taskId: z.string(), title: z.string() }).nullable().default(null),
   /** sso: that Task's device code (#662), while it waits for the person's approval. */
@@ -2208,6 +2290,17 @@ export const BacklogRepositorySync = BacklogRepositoryKey.extend({ cursor: z.str
 export type BacklogRepositorySync = z.infer<typeof BacklogRepositorySync>;
 
 /**
+ * One field of the workspace's Project a value can be written to (#1545): its name, its type (the four `fieldValue`
+ * sends; ITERATION, TITLE, LABELS … are not here) and, for a single select, its choices in the Project's order.
+ */
+export const BacklogProjectField = z.object({
+  name: z.string(),
+  dataType: z.enum(["SINGLE_SELECT", "NUMBER", "TEXT", "DATE"]),
+  options: z.array(z.string()),
+});
+export type BacklogProjectField = z.infer<typeof BacklogProjectField>;
+
+/**
  * Where a workspace's backlog comes from (#885): its repository and the Project it reads (`projectVar` /
  * SWITCHBOARD_PROJECT_URL; a Project number is unique per owner only). Written by each import, so the stored backlog is
  * read without asking GitHub which repository the checkout is. `disabled`: the workspace's GitHub sync is off (#2266) —
@@ -2229,6 +2322,11 @@ export const BacklogSource = BacklogRepositoryKey.extend({
    * and `repository` (#2799): a renamed repository's old name may now be a public one.
    */
   private: z.boolean().optional(),
+  /**
+   * The Project's writable fields, in its order, written by each import (#1545). Absent on a backlog kept here (its
+   * choices are `ops.config.json`'s) and, until its next import, on a source stored before.
+   */
+  projectFields: z.array(BacklogProjectField).optional(),
 });
 export type BacklogSource = z.infer<typeof BacklogSource>;
 
@@ -2264,6 +2362,8 @@ export const BacklogIssueDetail = z.object({
    */
   comments: z.array(BacklogCommentData.extend({ id: z.string(), seq: z.number().nullable().default(null) })),
   fields: z.record(z.string(), z.union([z.string(), z.number(), z.null()])).nullable(),
+  /** The fields of the Project a value can be written to (#1545): what the edit form offers; `fields` is checked against them. */
+  projectFields: z.array(BacklogProjectField).default([]),
   fetchedAt: z.number().nullable(),
   fetchState: BacklogFetchState,
   /** An Issue made here (#886): the id it is read and edited by before GitHub gives it a number (0 until then), and after. */

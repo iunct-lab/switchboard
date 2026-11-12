@@ -104,6 +104,9 @@ export function heldIssueText(i: Backlog["syncs"][number]["issues"][number]): st
   return `#${i.number} ${i.title}${parts.length ? t(m.paren, { text: parts.join(" · ") }) : ""}`;
 }
 
+/** What the edit form is made from: the Issue, its Project values, and the Project's fields (the definition the form is laid out by). */
+export type FormBase = Pick<BacklogIssueDetail, "issue" | "fields" | "projectFields">;
+
 /** The values of the edit form, all strings as typed; `labels` is comma-separated. */
 export interface EditForm {
   title: string;
@@ -118,7 +121,7 @@ export interface EditForm {
 export const labelList = (s: string) => [...new Set(s.split(",").map((x) => x.trim()).filter(Boolean))];
 
 /** The form as it opens: the Issue as the daemon shows it (its stored edits on top of GitHub's). */
-export function formOf(d: Pick<BacklogIssueDetail, "issue" | "fields">): EditForm {
+export function formOf(d: FormBase): EditForm {
   return {
     title: d.issue.title,
     body: d.issue.body,
@@ -126,17 +129,17 @@ export function formOf(d: Pick<BacklogIssueDetail, "issue" | "fields">): EditFor
     state: d.issue.state,
     milestone: d.issue.milestone ?? "",
     parent: d.issue.parent === null ? "" : String(d.issue.parent),
-    // the Project's own Title is the Issue's title as GitHub shows it in the Project: edited as 題, not as a field
-    fields: Object.fromEntries(Object.entries(d.fields ?? {}).filter(([k]) => k !== "Title").map(([k, v]) => [k, v === null ? "" : String(v)])),
+    // laid out by the Project's definition (#1546), a field with no value too; what the definition lacks (Title) is not here
+    fields: Object.fromEntries(d.projectFields.map((f) => [f.name, String(d.fields?.[f.name] ?? "")])),
   };
 }
 
 /**
  * The PATCH that makes the Issue what the form says: only what changed (a field left alone follows GitHub), null when
- * nothing did. A Project field typed as a number stays a number when it was one; an emptied one is null. A parent that
- * is not a number is `error`, nothing is sent.
+ * nothing did. A Project field is sent as its definition's type (a NUMBER as a number, only whole digits; anything else is
+ * `error`); an emptied one is null. A parent that is not a number is `error` too, nothing is sent.
  */
-export function editOf(d: Pick<BacklogIssueDetail, "issue" | "fields">, f: EditForm): { edit: Omit<BacklogEditInput, "workspaceId"> | null; error: string | null } {
+export function editOf(d: FormBase, f: EditForm): { edit: Omit<BacklogEditInput, "workspaceId"> | null; error: string | null } {
   const was = formOf(d);
   const edit: Omit<BacklogEditInput, "workspaceId"> = {};
   if (f.title.trim() !== was.title.trim()) edit.title = f.title;
@@ -156,8 +159,11 @@ export function editOf(d: Pick<BacklogIssueDetail, "issue" | "fields">, f: EditF
   const fields: Record<string, string | number | null> = {};
   for (const [k, v] of Object.entries(f.fields)) {
     if (v === (was.fields[k] ?? "")) continue;
+    const type = d.projectFields.find((p) => p.name === k)?.dataType;
+    if (!type) continue;
     const text = v.trim();
-    fields[k] = text === "" ? null : typeof d.fields?.[k] === "number" && Number.isFinite(Number(text)) ? Number(text) : text;
+    if (type === "NUMBER" && text !== "" && !/^[0-9]+$/.test(text)) return { edit: null, error: t(m.fieldNotInteger, { name: k }) };
+    fields[k] = text === "" ? null : type === "NUMBER" ? Number(text) : text;
   }
   if (Object.keys(fields).length) edit.fields = fields;
   return { edit: Object.keys(edit).length ? edit : null, error: null };
@@ -172,14 +178,18 @@ export const draftKey = (workspaceId: string, number: number | string) => `switc
 /** A kept draft: the form as typed and the read it was typed over (`base`), so a later read rebases it (rebaseForm). */
 export interface EditDraft {
   form: EditForm;
-  base: Pick<BacklogIssueDetail, "issue" | "fields">;
+  base: FormBase;
 }
 
 export function loadDraft(store: Pick<Storage, "getItem">, key: string): EditDraft | null {
   try {
     const v = JSON.parse(store.getItem(key) ?? "null") as EditDraft | null;
     const f = v?.form;
-    return f && typeof f.title === "string" && typeof f.body === "string" && typeof f.fields === "object" && v.base?.issue ? v : null;
+    if (!(f && typeof f.title === "string" && typeof f.body === "string" && typeof f.fields === "object" && v.base?.issue)) return null;
+    // a draft kept before the form was built from the Project's definitions (#1546) has none in its base: the fields it
+    // was typed over stand for them, so formOf(base) is the form it was typed from and the rebase keeps every edit
+    if (!Array.isArray(v.base.projectFields)) v.base.projectFields = Object.keys(v.base.fields ?? {}).filter((k) => k !== "Title").map((name) => ({ name, dataType: "TEXT" as const, options: [] }));
+    return v;
   } catch {
     return null;
   }
@@ -190,18 +200,18 @@ export function loadDraft(store: Pick<Storage, "getItem">, key: string): EditDra
  * its base (a reload), else the Issue as read. `keep` is the kept draft stored again over the new read (null = none was
  * kept), so a value given up meanwhile (a conflict's choice) does not come back from storage on a reopen or reload.
  */
-export function formAfterRead(shown: { form: EditForm; base: Pick<BacklogIssueDetail, "issue" | "fields"> } | null, saved: EditDraft | null, d: Pick<BacklogIssueDetail, "issue" | "fields">): { form: EditForm; keep: EditDraft | null } {
+export function formAfterRead(shown: { form: EditForm; base: FormBase } | null, saved: EditDraft | null, d: FormBase): { form: EditForm; keep: EditDraft | null } {
   const from = shown ?? saved;
   if (!from) return { form: formOf(d), keep: null };
   const form = rebaseForm(from.base, from.form, d);
-  return { form, keep: saved ? { form, base: { issue: d.issue, fields: d.fields } } : null };
+  return { form, keep: saved ? { form, base: { issue: d.issue, fields: d.fields, projectFields: d.projectFields } } : null };
 }
 
 /**
  * The form after the Issue was read again (a choice on a conflict, a save elsewhere): what the person changed since
  * the old read stays, everything they did not touch follows the new read — so a stale value never goes back out.
  */
-export function rebaseForm(before: Pick<BacklogIssueDetail, "issue" | "fields">, form: EditForm, after: Pick<BacklogIssueDetail, "issue" | "fields">): EditForm {
+export function rebaseForm(before: FormBase, form: EditForm, after: FormBase): EditForm {
   const was = formOf(before);
   const now = formOf(after);
   const pick = <K extends Exclude<keyof EditForm, "fields">>(k: K) => (form[k] !== was[k] ? form[k] : now[k]);

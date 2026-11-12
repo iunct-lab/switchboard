@@ -452,7 +452,7 @@ ${clone}`);
     const list = sh.match(/^SCRIPTS="(.+)"$/m)![1].split(/\s+/).map((p) => p.split(":") as [string, string]);
     const installed = [[self[1], self[2]] as [string, string], ...list].map(([src, dst]) => `aws/host/${src} ${dst}`).sort();
     const doc = readFileSync(join(HERE, "..", "..", "docs", "design", "cloud-hosting.md"), "utf8");
-    const section = doc.slice(doc.indexOf("### 6.5 "), doc.indexOf("#### 見直す契機"));
+    const section = doc.slice(doc.indexOf("### 6.5 "), doc.indexOf("#### When to revisit"));
     const listed = [...section.matchAll(/^\| `(aws\/host\/[^`]+)` \| `([^`]+)` \|$/gm)].map((m) => `${m[1]} ${m[2]}`).sort();
     expect(listed).toEqual(installed);
   });
@@ -1125,8 +1125,9 @@ exit 0`);
     expect(readdirSync(join(home, ".cache")).filter((f) => f.startsWith("sb-runner-sync."))).toEqual([]); // cleaned up
   });
 
-  // this test failed at 4-5 s (under its limit) and the 20 ms is not the cause: the marker's mtime is the run's start, so
-  // the write is always newer. Not reproduced in the flake work of #2939; the open question is on #3525
+  // this test failed at 4-5 s (under its limit; ~2 s short = the two same-second waits skipped). The 20 ms is not the cause.
+  // The cause (#3525): the marker's mtime (coarse kernel clock) can land in the second before date's, so a run in the key's
+  // second did not wait. The test just below fixes that boundary
   test("runner-sync uploads a base first, then only the files that changed into the same set, and nothing on an unchanged day", () => {
     awsFake();
     fresh();
@@ -1149,6 +1150,38 @@ exit 0`);
     sync();
     expect(keys().filter((k) => k !== base).length).toBe(3);
     expect(existsSync(`${out}.overwrites`)).toBe(false); // no key is written twice, so the bucket keeps no old versions
+  }, 20000);
+
+  test("runner-sync waits when the marker's mtime is in the second before the last key's (coarse mtime vs date)", () => {
+    awsFake();
+    fresh();
+    sync();
+    const set = keys()[0]!.split("/")[2]!;
+    // a clock the test holds: `date +%s` reads it and `sleep` moves it, so the run is always in the last key's second
+    const bin = join(dir, "bin-clock");
+    const clock = join(dir, "clock");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "date"), `#!/bin/sh\n[ "$1" = +%s ] && exec cat "${clock}"\nexec /usr/bin/date "$@"\n`);
+    writeFileSync(join(bin, "sleep"), `#!/bin/sh\necho $(( $(cat "${clock}") + $1 )) > "${clock}"\n`);
+    chmodSync(join(bin, "date"), 0o755);
+    chmodSync(join(bin, "sleep"), 0o755);
+    const s = Number(set); // the base's second: the marker (s - 1) stays older than the file written below
+    writeFileSync(clock, `${s}\n`);
+    const since = join(home, ".switchboard", "runner-sync.since");
+    writeFileSync(since, `${s}\n`); // the last key was named by second s ...
+    Bun.spawnSync(["touch", "-d", `@${s - 1}`, since]); // ... and the marker's mtime landed in s - 1
+    touchAfter(join(home, ".claude", "projects", "-work", "s1.jsonl"), "boundary\n");
+    expect(sync({ PATH: `${bin}:${join(dir, "bin")}:/usr/bin:/bin` }).code).toBe(0);
+    expect(keys().filter((k) => !k.endsWith("/base.tar.zst"))).toEqual([`archive/runner/${set}/${s + 1}.tar.zst`]); // it waited out second s
+    expect(readFileSync(since, "utf8").trim()).toBe(`${s + 1}`);
+    // a marker without a second (the empty one an older run left) also waits: its last key's second is not known
+    writeFileSync(clock, `${s + 1}\n`);
+    writeFileSync(since, "");
+    Bun.spawnSync(["touch", "-d", `@${s - 1}`, since]);
+    touchAfter(join(home, ".claude", "projects", "-work", "s1.jsonl"), "empty marker\n");
+    expect(sync({ PATH: `${bin}:${join(dir, "bin")}:/usr/bin:/bin` }).code).toBe(0);
+    expect(keys().filter((k) => !k.endsWith("/base.tar.zst")).at(-1)).toBe(`archive/runner/${set}/${s + 2}.tar.zst`);
+    expect(existsSync(`${out}.overwrites`)).toBe(false);
   }, 20000);
 
   test("runner-sync starts a new set after 7 days and when the state is unreadable", () => {
@@ -1642,11 +1675,12 @@ describe("aws/host offload (#678)", () => {
       "aws",
       `echo "aws $*" >> "${log}"
 case "$1 $2" in
-  "ssm get-parameter") echo sb-host-offload ;;
+  "ssm get-parameter") case "$4" in */offload-ci-project) echo sb-host-offload-ci ;; */offload-image-project) echo sb-host-offload-image ;; */offload-image-repo) echo 1.dkr.ecr.r.amazonaws.com/sb-host-offload-image ;; *) echo sb-host-offload ;; esac ;;
+  "ecr describe-images") [ -f "$FAKE/noimage" ] && { echo "An error occurred (ImageNotFoundException) when calling the DescribeImages operation" >&2; exit 254; }; echo '{}' ;;
   "s3 cp") cp "$3" "$S3OUT" ;;
-  "codebuild start-build") [ -f "$FAKE/busy" ] && { rm "$FAKE/busy"; echo "An error occurred (AccountLimitExceededException) when calling the StartBuild operation: Cannot have more than 2 active builds for the project" >&2; exit 254; }; echo "sb-host-offload:build-1" ;;
-  "codebuild batch-get-builds") cat "$FAKE/status" ;;
-  "logs get-log-events") case "$*" in *--next-token*) echo '{"events":[],"nextForwardToken":"f/2"}' ;; *) cat "$FAKE/events.json" ;; esac ;;
+  "codebuild start-build") [ -f "$FAKE/busy" ] && { rm "$FAKE/busy"; echo "An error occurred (AccountLimitExceededException) when calling the StartBuild operation: Cannot have more than 2 active builds for the project" >&2; exit 254; }; echo "$4:build-1" ;;
+  "codebuild batch-get-builds") if [ -f "$FAKE/status-$4" ]; then cat "$FAKE/status-$4"; else cat "$FAKE/status"; fi ;;
+  "logs get-log-events") case "$*" in *--next-token*) echo '{"events":[],"nextForwardToken":"f/2"}' ;; *) if [ -f "$FAKE/events-$6.json" ]; then cat "$FAKE/events-$6.json"; elif [ -f "$FAKE/full.json" ] && [ -f "$FAKE/seen" ]; then cat "$FAKE/full.json"; else touch "$FAKE/seen"; cat "$FAKE/events.json"; fi ;; esac ;;
 esac
 exit 0`,
     );
@@ -1752,7 +1786,7 @@ exit 0`,
     }
     const none = offload(["--size", "large"]);
     expect(none.code).toBe(2);
-    expect(none.err).toContain("usage: sb-offload [--size small|medium|large] <command…>");
+    expect(none.err).toContain("usage: sb-offload [--size small|medium|large] [--ci] <command…>");
     expect(calls()).toEqual([]);
   });
 
@@ -1761,11 +1795,97 @@ exit 0`,
     setLog("SUCCEEDED", ["[Container] Running command sh -c ...", "3 passed, 1 failed", "sb-offload: exit 3"]);
     const r = offload(["pytest"]);
     expect(r.out).toBe("[Container] Running command sh -c ...\n3 passed, 1 failed\nsb-offload: exit 3\n");
+    expect(r.err).not.toContain("read the log again");
     expect(r.code).toBe(3);
     const logCalls = calls().filter((l) => l.startsWith("aws logs get-log-events"));
     expect(logCalls[0]).toBe("aws logs get-log-events --log-group-name /aws/codebuild/sb-host-offload --log-stream-name build-1 --start-from-head --output json");
     expect(logCalls[1]).toContain("--next-token f/2"); // only what is new
     expect(calls()).toContain("aws codebuild batch-get-builds --ids sb-host-offload:build-1 --query builds[0].[buildStatus,logs.groupName,logs.streamName] --output text");
+  });
+
+  test("sb-offload reads the log again from the head when late events were skipped, and prints what was missing (#4494)", () => {
+    awsFake();
+    const all = ["sb-step: 0 begin", "[Container] Running command sh -c ...", "first output", "3 passed", "sb-offload: exit 0"];
+    setLog("SUCCEEDED", [all[1], all[3], all[4]]); // the first pass lost "begin" and "first output"
+    writeFileSync(join(fakeDir, "full.json"), JSON.stringify({ events: all.map((message) => ({ message: `${message}\n` })), nextForwardToken: "f/2" }));
+    rmSync(join(fakeDir, "seen"), { force: true });
+    const r = offload(["bun", "test"]);
+    rmSync(join(fakeDir, "full.json"));
+    rmSync(join(fakeDir, "seen"), { force: true });
+    expect(r.code).toBe(0);
+    expect(r.err).toContain("sb-offload: read the log again from the head (2 lines were missing)");
+    expect(r.out.endsWith(`${all.join("\n")}\n`)).toBe(true); // the whole log is printed again at the end
+    // when nothing was missing, nothing is said or printed again (the tests above)
+  });
+
+  test("sb-offload --ci runs the command in the ci image tagged with the Dockerfile's hash, building the image first only when the repository lacks the tag (#4707)", () => {
+    const dockerfile = join(repo, "container", "Dockerfile");
+    mkdirSync(join(repo, "container"), { recursive: true });
+    writeFileSync(dockerfile, "FROM scratch\n");
+    const tag = new Bun.CryptoHasher("sha256").update("FROM scratch\n").digest("hex").slice(0, 12);
+    const imageLog = ["sb-offload: image " + tag];
+    const ciLines = ["sb-offload: image " + tag, "ok", "sb-offload: exit 0"];
+    const cleanup = () => {
+      for (const f of ["noimage", "status-sb-host-offload-image:build-1", "events-image-1.json"]) rmSync(join(fakeDir, f), { force: true });
+      rmSync(join(repo, "container"), { recursive: true, force: true });
+    };
+    try {
+      // 1. the tag is in the repository: no image build; the CI project starts with the tag as its image
+      awsFake();
+      setLog("SUCCEEDED", ciLines);
+      const have = offload(["--ci", "git", "grep", "-P", "x"]);
+      expect(have.code).toBe(0);
+      expect(have.out).toBe(ciLines.join("\n") + "\n");
+      const c1 = calls();
+      expect(c1).toContain("aws ssm get-parameter --name /switchboard/offload-ci-project --query Parameter.Value --output text");
+      expect(c1).toContain(`aws ecr describe-images --repository-name sb-host-offload-image --image-ids imageTag=${tag}`);
+      expect(c1.filter((l) => l.startsWith("aws codebuild start-build"))).toHaveLength(1);
+      expect(c1.join("\n")).not.toContain("--project-name sb-host-offload-image"); // the image project is not started
+      const ci = c1.find((l) => l.startsWith("aws codebuild start-build"))!;
+      expect(ci).toContain("--project-name sb-host-offload-ci --compute-type-override BUILD_GENERAL1_SMALL --image-override " + `1.dkr.ecr.r.amazonaws.com/sb-host-offload-image:${tag} `); // 3
+      expect(ci).toContain(`"name":"SB_IMAGE_TAG","value":"${tag}"`);
+      expect(ci).toContain('"name":"SB_OFFLOAD_CMD","value":"git grep -P x"');
+
+      // 2. no such tag: the image build starts first and is waited for, its log is read; then the CI build starts
+      awsFake();
+      writeFileSync(join(fakeDir, "noimage"), "");
+      writeFileSync(join(fakeDir, "status-sb-host-offload-image:build-1"), "SUCCEEDED\t/aws/codebuild/sb-host-offload-image\timage-1\n");
+      writeFileSync(join(fakeDir, "events-image-1.json"), JSON.stringify({ events: imageLog.map((message) => ({ message: `${message}\n` })), nextForwardToken: "f/2" }));
+      setLog("SUCCEEDED", ciLines);
+      const built = offload(["--ci", "bun", "test"]);
+      expect(built.code).toBe(0);
+      expect(built.err).toContain(`no ci image ${tag} yet; building it, started sb-host-offload-image:build-1\n`);
+      expect(built.out).toBe(imageLog.join("\n") + "\n" + ciLines.join("\n") + "\n");
+      const starts = calls().filter((l) => l.startsWith("aws codebuild start-build"));
+      expect(starts).toHaveLength(2);
+      expect(starts[0]).toContain("--project-name sb-host-offload-image --environment-variables-override ");
+      expect(starts[0]).toContain(`"name":"SB_IMAGE_TAG","value":"${tag}"`);
+      expect(starts[0]).not.toContain("--image-override");
+      expect(starts[1]).toContain(`--project-name sb-host-offload-ci --compute-type-override BUILD_GENERAL1_SMALL --image-override 1.dkr.ecr.r.amazonaws.com/sb-host-offload-image:${tag} `);
+      expect(calls().findIndex((l) => l.includes("--project-name sb-host-offload-ci"))).toBeGreaterThan(calls().findIndex((l) => l.includes("batch-get-builds --ids sb-host-offload-image:build-1")));
+
+      // a failed image build stops with 1 and starts no CI build
+      awsFake();
+      writeFileSync(join(fakeDir, "noimage"), "");
+      writeFileSync(join(fakeDir, "status-sb-host-offload-image:build-1"), "FAILED\t/aws/codebuild/sb-host-offload-image\timage-1\n");
+      writeFileSync(join(fakeDir, "events-image-1.json"), JSON.stringify({ events: [{ message: "docker build failed\n" }], nextForwardToken: "f/2" }));
+      const failed = offload(["--ci", "true"]);
+      expect(failed.code).toBe(1);
+      expect(failed.err).toContain(`the ci image ${tag} could not be built (FAILED)`);
+      expect(calls().filter((l) => l.startsWith("aws codebuild start-build"))).toHaveLength(1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("sb-offload without --ci reads no image parameter and does not look at ECR, and starts the offload project as before (#4707)", () => {
+    awsFake();
+    setLog("SUCCEEDED", ["sb-offload: exit 0"]);
+    const r = offload(["--size", "medium", "docker", "version"]);
+    expect(r.code).toBe(0);
+    const c = calls().join("\n");
+    expect(c).not.toMatch(/ecr |offload-image|offload-ci|--image-override|SB_IMAGE_TAG/);
+    expect(c).toContain("--project-name sb-host-offload --compute-type-override BUILD_GENERAL1_MEDIUM --environment-variables-override ");
   });
 
   test("sb-offload exits 124 on a timeout and 1 on a failure without the exit line", () => {

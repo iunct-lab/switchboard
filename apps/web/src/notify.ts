@@ -1,4 +1,4 @@
-import type { ServerMessage, Task, TerminalStatus } from "@switchboard/protocol";
+import type { ServerMessage, TaskSummary, TerminalStatus } from "@switchboard/protocol";
 import { t } from "./i18n.ts";
 import { home } from "./i18n/home.ts";
 
@@ -21,7 +21,7 @@ export type Notice = { key: string; taskId: string; title: string; body: string 
  * and not the same wait again on a reconnect.
  * `tasks` is the list before this message is applied; `seen` is kept across messages and grows here.
  */
-export function noticeFor(m: ServerMessage, tasks: Task[], seen: Set<string>): Notice | null {
+export function noticeFor(m: ServerMessage, tasks: TaskSummary[], seen: Set<string>): Notice | null {
   if (m.type === "event") {
     const { taskId, ev } = m.env;
     if (ev.t !== "permission.ask" && ev.t !== "permission.resolved") return null;
@@ -60,7 +60,7 @@ export function noticeFor(m: ServerMessage, tasks: Task[], seen: Set<string>): N
 }
 
 /** noticeFor, and task.terminals: what is after hello, with a notice for each Task it calls for (see noticeFor). */
-export function noticesFor(m: ServerMessage, tasks: Task[], seen: Set<string>): Notice[] {
+export function noticesFor(m: ServerMessage, tasks: TaskSummary[], seen: Set<string>): Notice[] {
   if (m.type !== "task.terminals") {
     const n = noticeFor(m, tasks, seen);
     return n ? [n] : [];
@@ -74,7 +74,7 @@ export function noticesFor(m: ServerMessage, tasks: Task[], seen: Set<string>): 
 }
 
 /** `live`: a change now, not the state resent after hello. A null status (the shell ended) forgets the Task. */
-function terminalNotice(taskId: string, status: TerminalStatus | null, live: boolean, tasks: Task[], seen: Set<string>): Notice | null {
+function terminalNotice(taskId: string, status: TerminalStatus | null, live: boolean, tasks: TaskSummary[], seen: Set<string>): Notice | null {
   const key = `${taskId}\u0000terminal`, known = `${key}\u0000known`;
   if (status !== "waiting") {
     seen.delete(key);

@@ -130,7 +130,7 @@ describe("layout", () => {
 describe("itemMarks", () => {
   // the shape inProgress.test.ts builds a row with: nothing to mark
   const row = (over: Partial<BacklogItem> = {}): BacklogItem =>
-    item(1, { url: "https://github.com/o/r/issues/1", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], ...over });
+    item(1, { url: "https://github.com/o/r/issues/1", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], stopSummary: [], ...over });
   const wait = (state: BacklogItem["waits"][number]["state"]) => ({ kind: "pr", number: 9, state, reason: "overlap", open: state !== "met", pbi: null }) as unknown as BacklogItem["waits"][number];
   const prereq = (state: BacklogItem["prereqs"][number]["state"]) => ({ number: 7, kind: "issue", need: "done", state, via: null }) as BacklogItem["prereqs"][number];
   const stop = (next: "decide" | "wait", state: "waiting" | "resolved" = "waiting", count = 1) =>
@@ -143,7 +143,7 @@ describe("itemMarks", () => {
   test("待ち while a wait is open; none once every wait is met", () => {
     expect(itemMarks(row({ waitsAt: "2026-11-01T00:00:00Z", waits: [wait("pending")] }), true)).toEqual([{ key: "waits", label: "待ち", warn: false }]);
     expect(keys(row({ waitsAt: "2026-11-01T00:00:00Z", waits: [wait("met")] }))).toEqual([]);
-    expect(keys(row({ waitsAt: null, waits: [wait("pending")] }))).toEqual([]);
+    expect(keys(row({ waitsAt: null, waitsUntil: null, waits: [wait("pending")] }))).toEqual([]);
   });
   test("前提待ち for a pending prerequisite, 進められない (warn) for one a person fixes, none for a met one", () => {
     expect(itemMarks(row({ prereqs: [prereq("pending")] }), false)).toEqual([{ key: "prereq", label: "前提待ち", warn: false }]);

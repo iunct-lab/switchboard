@@ -3,7 +3,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { readCloudPreparation } from "./claude-cloud.ts";
+import { githubRepoOfRemote, readCloudPreparation } from "./claude-cloud.ts";
 import { cloudTrustGuidance } from "@switchboard/adapter-claude";
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
@@ -50,4 +50,12 @@ test("folder trust: only a known-untrusted folder gets the guidance warning", ()
     writeFileSync(join(cfg, ".claude.json"), JSON.stringify({ projects: { [dirname(realpathSync(d))]: { hasTrustDialogAccepted: true } } }));
     expect(warned()).toBe(false);                                   // ancestor only: unknown, no warning
   } finally { if (old === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = old; }
+});
+
+test("githubRepoOfRemote: github.com over https and ssh as owner/name; credentials, port, .git dropped; others null", () => {
+  expect(githubRepoOfRemote("https://github.com/acme/app.git")).toBe("acme/app");
+  expect(githubRepoOfRemote("https://user:fixture-secret@github.com:443/acme/app")).toBe("acme/app");
+  expect(githubRepoOfRemote("git@github.com:acme/app.git")).toBe("acme/app");
+  expect(githubRepoOfRemote("https://gitlab.com/acme/app.git")).toBeNull();
+  expect(githubRepoOfRemote("not a url")).toBeNull();
 });

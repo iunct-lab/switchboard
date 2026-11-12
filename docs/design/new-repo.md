@@ -1,93 +1,93 @@
-# 新しいリポジトリを始める（何が要り、どこまで揃えば開始してよいか）
+# Starting a new repository (what is needed, and how much must be in place to start)
 
-PBI #1445、要望 #1444。新しいリポジトリを Switchboard の開発資産（共通スキル・`ops-kit`・バックログ画面・マージ判定）で回し始めるとき、何を自分で持ち、何を Switchboard が置き、何が GitHub 側の設定かを 1 か所に集める。**規則そのものは正本に書かれている**。ここは正本へのリンクと 1 行の要約だけを持ち、同じ規則を 2 か所に書かない。
+Written on 2026-10-17, from a request of 2026-10-13. When you start running a new repository with Switchboard's development assets (the common skills, `ops-kit`, the backlog screen, the merge judgement), this gathers in one place what you keep yourself, what Switchboard places, and what is a setting on the GitHub side. **The rules themselves are written in their sources of truth.** This document holds only links to the sources of truth and a one-line summary, and does not write the same rule in two places.
 
 
-## 3 つの層
+## The three layers
 
-| 層 | もの | 置き場所 | 正本 |
+| Layer | What | Where it lives | Source of truth |
 |---|---|---|---|
-| A | 設定 `ops.config.json`（Project の URL・`envPrefix`・Area などの選択肢・必須の節。Story Points の尺度はキットが持つ） | リポジトリの root | [使う側の設定](../../ops-kit/README.md#使う側の設定opsconfigjson) |
-| A | `scripts/setup/` の入口（`lint_backlog.sh` / `set_project_field.sh` / `triage_issue.sh` / `request_issue.sh`。`bootstrap_project.sh` は Project を作る側だけ） | リポジトリの `scripts/setup/` | [入口（使う側のリポジトリ）](../../ops-kit/README.md#入口使う側のリポジトリ) |
-| A | `CLAUDE.md` / `AGENTS.md`（そのリポジトリ固有の値。テスト・作業の場所と枝・live check・反映の OK ほか） | リポジトリの root | [使う側のリポジトリが持つもの](../../ops-kit/skills/issue-workflow/SKILL.md#使う側のリポジトリが持つもの) |
-| A | Issue テンプレ・PR テンプレ・`labels.yml`・workflows（`labels.yml` / `ci.yml`）・`.gitignore` | リポジトリの `.github/` と root | [雛形（新しいリポジトリ）](../../ops-kit/README.md#雛形新しいリポジトリ) |
-| B | 共通スキル 10 本（`.claude/skills/<name>` と `.agents/skills/<name>` へ、Task のランナーを起動する直前にコピーし、`info/exclude` で Git の管理対象から外す） | Switchboard が Task の起動時に置く | [skill-sync.md 置き方](skill-sync.md#置き方) |
-| B | `gh` の前段（認証に使える値を Issue・PR に書かせない）と定期の検査 | Task の `PATH` の先頭（`ops-kit/bin`） | [secret-guard.md 部品](secret-guard.md#部品) |
-| B | 他リポジトリの読み替え（`--repo` つきのマージ判定・並列ガード・タグ付け、`otherRepoRules`） | Switchboard のスクリプトとステージの指示 | [releases-and-rescue.md Other repositories](releases-and-rescue.md#other-repositories) |
-| B | バックログ画面（Issue・Project の値の取込み。workspace ごとの `projectVar`） | Switchboard のデーモン | |
-| C | Issue・sub-issue・Milestone（要望 → PBI → Task の階層） | GitHub | [issue-workflow](../../ops-kit/skills/issue-workflow/SKILL.md) |
-| C | Project とそのフィールド（Area / Kind / Priority / Story Points、Status）。ビューは作れない | GitHub（`bootstrap_project.sh` が作る） | [bootstrap.ts](../../ops-kit/src/bootstrap.ts) の `bootstrap` |
-| C | リポジトリ変数 `<PREFIX>_PROJECT_URL`（Project の URL。バックログ画面とスクリプトが読む。`<PREFIX>` は `envPrefix`） | GitHub のリポジトリ変数（`gh variable set`） | [使う側の設定](../../ops-kit/README.md#使う側の設定opsconfigjson) |
-| C | Actions: `labels.yml`（ラベル同期）・`ci.yml`。`project-autoadd`（Project 自動追加）は任意（「手作業で残るもの」の 3）。認証の値の検査は、デーモンの予定（種類「認証の値の検査」。利用者が定期タスクの画面で作る。起動時に勝手には作られない）が登録済みの全リポジトリに回し、Actions の `secret-scan.yml` はホストの外の予備（週に 1 回。[secret-guard.md](secret-guard.md#定期の検査)） | GitHub Actions | [雛形](../../ops-kit/README.md#雛形新しいリポジトリ)、[secret-guard.md 定期の検査](secret-guard.md#定期の検査) |
+| A | The configuration `ops.config.json` (the Project URL, `envPrefix`, choices such as Area, required sections. The kit holds the Story Points scale) | The root of the repository | [ops-kit/README.md](../../ops-kit/README.md), `使う側の設定` (configuration on the consumer side) |
+| A | The entry points of `scripts/setup/` (`lint_backlog.sh` / `set_project_field.sh` / `triage_issue.sh` / `request_issue.sh`. `bootstrap_project.sh` is only for the side that creates the Project) | `scripts/setup/` of the repository | [ops-kit/README.md](../../ops-kit/README.md), `入口（使う側のリポジトリ）` (entry points of the consumer repository) |
+| A | `CLAUDE.md` / `AGENTS.md` (values specific to that repository. Tests, working place and branch, live check, the OK for rollout, and so on) | The root of the repository | [issue-workflow](../../ops-kit/skills/issue-workflow/SKILL.md), `使う側のリポジトリが持つもの` (what the consumer repository holds) |
+| A | Issue templates, PR templates, `labels.yml`, workflows (`labels.yml` / `ci.yml`), `.gitignore` | `.github/` of the repository and the root | [ops-kit/README.md](../../ops-kit/README.md), `雛形（新しいリポジトリ）` (template for a new repository) |
+| B | The 10 common skills (copied to `.claude/skills/<name>` and `.agents/skills/<name>` just before a Task's runner starts, and excluded from Git management with `info/exclude`) | Switchboard places them when a Task starts | [skill-sync.md How skills are placed](skill-sync.md#how-skills-are-placed) |
+| B | The front of `gh` (keeping values that can authenticate out of Issues and PRs) and the scheduled scan | The head of the Task's `PATH` (`ops-kit/bin`) | [secret-guard.md Parts](secret-guard.md#parts) |
+| B | Rereading for other repositories (the merge judgement, the parallel guard and the tagging with `--repo`, `otherRepoRules`) | Switchboard's scripts and the instructions of the stages | [releases-and-rescue.md Other repositories](releases-and-rescue.md#other-repositories) |
+| B | The backlog screen (importing the values of Issues and the Project. `projectVar` per workspace) | Switchboard's daemon | |
+| C | Issues, sub-issues, Milestones (the hierarchy request → PBI → Task) | GitHub | [issue-workflow](../../ops-kit/skills/issue-workflow/SKILL.md) |
+| C | The Project and its fields (Area / Kind / Priority / Story Points, Status). Views cannot be made | GitHub (`bootstrap_project.sh` creates it) | `bootstrap` in [bootstrap.ts](../../ops-kit/src/bootstrap.ts) |
+| C | The repository variable `<PREFIX>_PROJECT_URL` (the Project URL. The backlog screen and the scripts read it. `<PREFIX>` is `envPrefix`) | A GitHub repository variable (`gh variable set`) | [ops-kit/README.md](../../ops-kit/README.md), `使う側の設定` (configuration on the consumer side) |
+| C | Actions: `labels.yml` (label sync) and `ci.yml`. `project-autoadd` (automatic addition to the Project) is optional (3 of "What stays manual"). The scan for authentication values is run over all registered repositories by the daemon's schedule (the kind `認証の値の検査`. The user creates it on the scheduled-tasks screen; it is not created on its own at startup), and `secret-scan.yml` in Actions is a backup outside the host (once a week; [secret-guard.md](secret-guard.md#scheduled-scan)) | GitHub Actions | [ops-kit/README.md](../../ops-kit/README.md), `雛形（新しいリポジトリ）`, [secret-guard.md Scheduled scan](secret-guard.md#scheduled-scan) |
 
-層 A は Switchboard が無くても要る（リポジトリが自分で持つ）。層 B は Switchboard から Task を起動して初めて効く。層 C は GitHub の側で、Actions が始まらない間は動かないものがある（`labels.yml` / `ci.yml`。Actions 無しで回す仕組みは #890 / #891 の範囲で、ここでは現状だけを書く）。
+Layer A is needed even without Switchboard (the repository holds it itself). Layer B takes effect only once a Task is started from Switchboard. Layer C is on the GitHub side, and some of it does not run while Actions does not start (`labels.yml` / `ci.yml`. The mechanisms for running without Actions are described in their own documents ([local-ci.md](local-ci.md) for running CI without Actions), and this writes only the state as of 2026-10-23).
 
-## 用途による違い
+## Differences by purpose
 
-リポジトリの用途で違うのは、`CLAUDE.md` の次の 2 項目に書く内容。ほかの項目（テスト・作業の場所と枝・live check の書き方・マージ判定）は用途によらず同じ型。
+What differs by the purpose of the repository is what is written in these two items of `CLAUDE.md`. The other items (tests, working place and branch, how to write the live check, the merge judgement) are the same shape whatever the purpose.
 
-| 用途 | 互換の前提（`CLAUDE.md` の互換層の項目） | 動いている実物と反映の OK（`CLAUDE.md` の「Task と動いているコード」の項目） |
+| Purpose | Compatibility premise (the compatibility-layer item of `CLAUDE.md`) | The running real thing and the OK for rollout (the item `Task と動いているコード` of `CLAUDE.md`) |
 |---|---|---|
-| 期限なしのアプリ（利用者が使い続ける） | 利用者の有無と、旧形式を読む層を置くか。データは migration で 1 回移すのか | 実物は利用者の環境。反映（再起動・配置）は利用者の OK を取ってから |
-| バックエンドの置き換え・新規追加 | 旧バックエンドとの併存期間と、外部クライアントの有無。切り戻しの手段 | 動いている旧バックエンドは触らない。新しい側の dev で確かめ、本番への切り替えは利用者の OK |
-| 独自のモニタリング | 観測対象に影響を与えないこと（読み取りだけか）。保存するデータの形の互換 | 監視が動いている間の変更は、監視の欠測が出ない反映の手順と、その OK |
+| An app with no deadline (the user keeps using it) | Whether there is a user, and whether to put in a layer that reads the old format. Whether the data is moved once by a migration | The real thing is the user's environment. Rollout (restart, deployment) is done after getting the user's OK |
+| Replacing or newly adding a backend | The period during which the old backend coexists, and whether there are external clients. The means of switching back | Do not touch the running old backend. Check on the new side's dev, and the switch to production needs the user's OK |
+| A monitoring of its own | Not affecting the observed target (read-only or not). Compatibility of the shape of the stored data | A change while the monitoring runs needs a rollout procedure that causes no gap in the observations, and the OK for it |
 
-GitHub を使わないリポジトリ（リモートなし）は、`ops-kit/template/` でなく単体の `ops-kit/template-local/` で作る（`.github/` と `scripts/setup/` を持たず、起票・ローカル CI・マージ判定・マージ・main の更新を Task の指示文と同じ手順で書く）。正本はこの雛形と、スキル `.claude/skills/new-repo` の 7（新しく作る手順と、前の雛形で作った既存のリポジトリへの写し方）。手順はここに写さない。
+A repository that does not use GitHub (no remote) is made not with `ops-kit/template/` but with the standalone `ops-kit/template-local/` (it has no `.github/` and no `scripts/setup/`, and writes filing, local CI, the merge judgement, merging and updating main in the same procedure as the Task's instruction text). The source of truth is this template and item 7 of the skill `.claude/skills/new-repo` (the procedure for making a new one, and how to copy to an existing repository made with the earlier template). The procedure is not copied here.
 
-この 2 列に収まらない違いが出たら、表に足さず PBI #1445 の決定ログに書く。
+When a difference appears that does not fit these two columns, it is not added to the table; decide it for that repository and write it in that repository's own `CLAUDE.md`.
 
-## 手作業で残るもの
+## What stays manual
 
-Switchboard の道具では置けず、人が 1 回やるもの。
+What Switchboard's tools cannot place and a person does once.
 
-1. **Project のビュー 2 つ**。GitHub の API では Project のビューを作れない（`ops-kit/src/bootstrap.ts` の注記「Views cannot be made through the API」）。Project の画面で、ビュー `Backlog`（フィルタ `no:parent-issue`。要望と PBI）と `Task Board`（フィルタ `has:parent-issue`。Task）を作る。フィールドは `bootstrap_project.sh` が作る
-2. **Actions が始まらない間のラベル作成**。`labels.yml` の workflow はラベルを main への push で同期するが、Actions が動かない間（請求の問題など）は同期されない。そのときは `.github/labels.yml` の項目を `gh label create <name> --color <hex> --description <text> -R <owner/name>` で 1 件ずつ作る（作り済みなら `gh label edit`）。Actions 無しで同期する仕組みは #890
-3. **Project 自動追加（`project-autoadd`）を置かない判断**。Project に Issue を自動で入れる workflow は、Project への書き込み権限を持つ PAT の登録と更新が要る。それが要らない構成にするなら置かない。置かない場合は、新しい Issue を `scripts/setup/triage_issue.sh` で Project に入れる（Web 画面から直接作った Issue は、それを実行するまで Project に入らない）。置くなら PAT をリポジトリのシークレットに登録する
+1. **The two Project views**. The GitHub API cannot create a Project view (the note "Views cannot be made through the API" in `ops-kit/src/bootstrap.ts`). On the Project screen, create the view `Backlog` (filter `no:parent-issue`; requests and PBIs) and `Task Board` (filter `has:parent-issue`; Tasks). The fields are created by `bootstrap_project.sh`
+2. **Creating labels while Actions does not start**. The `labels.yml` workflow syncs labels on a push to main, but while Actions does not run (a billing problem and the like) they are not synced. Then run `ops-kit sync-labels` (it reads `.github/labels.yml`, creates what is missing and fixes colors and descriptions; `--dry-run` shows the changes first). Inside a Switchboard Task, run it as `env -u BACKLOG_URL ops-kit sync-labels`
+3. **The decision not to place the Project auto-add (`project-autoadd`)**. A workflow that automatically puts Issues into the Project needs a PAT with write permission to the Project to be registered and renewed. If you choose a setup that does not need that, do not place it. If you do not place it, put new Issues into the Project with `scripts/setup/triage_issue.sh` (an Issue created directly on the web screen does not go into the Project until you run it). If you place it, register the PAT in the repository secrets
 
-## 開始してよい条件
+## Conditions to start
 
-リポジトリの Definition of Ready。次の 6 つが全部通れば、そのリポジトリで `/pbi-complete` などを始めてよい。条件を検査するスクリプトは置かない（この表が正本。手順を Runner が実行する形は #1446）。`<PREFIX>` は `ops.config.json` の `envPrefix`。
+The repository's Definition of Ready. When all of the following 6 pass, you may start `/pbi-complete` and the like in that repository. No script that checks the conditions is placed (this table is the source of truth. The form in which a runner runs the procedure is the skill named below, added 2026-10-21). `<PREFIX>` is the `envPrefix` of `ops.config.json`.
 
-| 条件 | コマンド | 期待結果 | 層 |
+| Condition | Command | Expected result | Layer |
 |---|---|---|---|
-| バックログの規則 | `bash scripts/setup/lint_backlog.sh` | 最後の行が `violations: 0`、exit 0 | A |
-| Project の URL | `gh variable get <PREFIX>_PROJECT_URL -R <owner/name>` | `https://github.com/<orgs\|users>/<owner>/projects/<n>` | C |
-| バックログ画面 | `curl -s -H "Authorization: Bearer $(cat ~/.switchboard/token)" localhost:47831/api/backlog \| jq '{ws:[.items[].workspaceName]\|unique, errors}'`（トークンの置き場は README の「Data lives in」。値は書かない） | `ws` にそのリポジトリの workspace 名があり、`errors`（`{ workspaceId, workspaceName, message }` の配列）にその workspace の項目が 1 件も無い（`message` の文によらない。失敗した取込みは保存値を返すので、`ws` だけでは足りない） | B |
-| スキル | そのリポジトリから Task を 1 つ起動したあと `ls .claude/skills/*/.switchboard-skill .agents/skills/*/.switchboard-skill \| wc -l` | 20（共通スキル 10 本 × 2 か所。印は [skill-sync.md](skill-sync.md#見分け方switchboard-が置いたもの)） | B |
-| マージ判定 | 最初の PR で `bun <switchboard>/scripts/merge-gate.ts <PR> --repo <owner/name>; echo $?` | 0（merge）か 1（stop）。2（判定不能）は未達 | B |
-| `CLAUDE.md` の 4 項目 | `grep -nE '^## (テスト\|作業の場所\|.*live check\|.*動いているコード)' CLAUDE.md` | 4 項目が各 1 件以上: テストの 3 コマンド（型検査・全体・1 件）、作業の場所と枝、live check、反映に要る OK | A |
+| The backlog rules | `bash scripts/setup/lint_backlog.sh` | The last line is `violations: 0`, exit 0 | A |
+| The Project URL | `gh variable get <PREFIX>_PROJECT_URL -R <owner/name>` | `https://github.com/<orgs\|users>/<owner>/projects/<n>` | C |
+| The backlog screen | `curl -s -H "Authorization: Bearer $(cat ~/.switchboard/token)" localhost:47831/api/backlog \| jq '{ws:[.items[].workspaceName]\|unique, errors}'` (the place of the token is in "Data lives in" of the README. Do not write the value) | `ws` holds the repository's workspace name, and `errors` (an array of `{ workspaceId, workspaceName, message }`) has no entry for that workspace (whatever the sentence in `message`. A failed import returns the saved values, so `ws` alone is not enough) | B |
+| The skills | After starting one Task from that repository, `ls .claude/skills/*/.switchboard-skill .agents/skills/*/.switchboard-skill \| wc -l` | 20 (10 common skills × 2 places. For the marker, see [skill-sync.md](skill-sync.md#how-to-tell-the-copies-switchboard-placed)) | B |
+| The merge judgement | In the first PR, `bun <switchboard>/scripts/merge-gate.ts <PR> --repo <owner/name>; echo $?` | 0 (merge) or 1 (stop). 2 (cannot judge) is not met | B |
+| The 4 items of `CLAUDE.md` | `grep -nE '^## (テスト\|作業の場所\|.*live check\|.*動いているコード)' CLAUDE.md` | Each of the 4 items at least once: the 3 test commands (typecheck, all, one), the working place and branch, the live check, and the OK needed for rollout | A |
 
-この表と「手作業で残るもの」を実行する手順（決めること → GitHub 側 → 初期コミット → 登録 → 開始条件 → 報告）は、Switchboard 専用のスキル `.claude/skills/new-repo`（#1446）。
+The procedure that carries out this table and "What stays manual" (what to decide → the GitHub side → the initial commit → registration → the start conditions → report) is Switchboard's own skill `.claude/skills/new-repo` (2026-10-21).
 
-## 既存のリポジトリを追加する
+## Adding an existing repository
 
-GitHub にあるリポジトリを、名前だけで Workspace に追加する入口（PBI #2575）。push できないリポジトリは下の「他者のリポジトリ」になる。ホストのシェルに入れない利用者のための経路で、パスは打たない。
+An entry for adding a repository that exists on GitHub to the Workspace by name alone (added 2026-10-25). A repository you cannot push to becomes "Other people's repositories" below. It is a route for users who cannot get into the host's shell, and you do not type a path.
 
-- 入口: 設定の先頭の「Workspace」カードの「GitHub から」。`owner/name` か `https://github.com/owner/name`（末尾の `.git` と `/` は可）を入れて「追加」。API は `POST /api/workspaces` の `repo`（`path` とはどちらか一方）
-- 置き場所: Switchboard のチェックアウトの隣（`<repoRoot の親>/<name>`）。置き場所の設定は無い（新しく作る場合と同じ）
-- 断る入力（400）: `-` で始まる名前、`.` / `..`、github.com 以外の URL、余分な `/`。clone の引数は配列で渡り、シェルを通らない。同じ名前のディレクトリが既にあれば 409（上書きしない）
-- clone の前に `gh api repos/<owner>/<name>` の `permissions.push` を確かめる。読めなければ 404 で、clone も登録もしない。push できなければ「他者のリポジトリ」として追加する
-- 進み具合: 要求は 202 ですぐ返り、clone は裏で進む。進行中と失敗（gh の最後の行）は `GET /api/workspaces/clones` に出て、状態が変わるたびに `workspaces.updated` で画面が読み直す。成功すると Workspace の一覧に出る。進み具合は保存しないので、デーモンの再起動で消える
-- 途中で落ちたとき: clone の途中のディレクトリは残る。次の追加は 409 になるので、人が消す（登録を外すときに「ローカルのコピーも消す」を選べば消せる。下の「登録を外す」）
-- 「GitHub と連携しない」の印は「GitHub から」にも効き、その workspace のバックログは Switchboard に置かれる
-- ホストにあるディレクトリを追加する欄（`path`）は今までどおり
+- Entry: the `GitHub から` button of the `Workspace` card at the top of Settings. Enter `owner/name` or `https://github.com/owner/name` (a trailing `.git` and `/` are allowed) and press `追加`. The API is the `repo` of `POST /api/workspaces` (either this or `path`)
+- Place: next to Switchboard's checkout (`<parent of repoRoot>/<name>`). There is no setting for the place (the same as when creating a new one)
+- Inputs it refuses (400): a name starting with `-`, `.` / `..`, a URL other than github.com, and an extra `/`. The clone's arguments are passed as an array and do not go through the shell. If a directory of the same name already exists, 409 (it does not overwrite)
+- Before the clone, it checks `permissions.push` of `gh api repos/<owner>/<name>`. If it cannot be read, 404, with no clone and no registration. If it cannot push, it is added as "Other people's repositories"
+- Progress: the request returns 202 at once, and the clone proceeds in the background. What is in progress and failures (the last line of gh) appear in `GET /api/workspaces/clones`, and the screen rereads through `workspaces.updated` each time the state changes. On success it appears in the Workspace list. Progress is not saved, so a daemon restart erases it
+- When it fails midway: the directory of a clone that stopped midway remains. The next add gives 409, so a person deletes it (when removing the registration, choosing `ローカルのコピーも消す` can delete it. See "Removing a registration" below)
+- The mark `GitHub と連携しない` also works for `GitHub から`, and that workspace's backlog is kept in Switchboard
+- The field for adding a directory on the host (`path`) is as before
 
-### 他者のリポジトリ
+### Other people's repositories
 
-push できないリポジトリは、GitHub に何も作らず書かない workspace として追加する（正本は `packages/core/src/workspace-clone.ts` と `packages/core/src/runner-config.ts`）。
+A repository you cannot push to is added as a workspace that creates nothing on GitHub and does not write (the source of truth is `packages/core/src/workspace-clone.ts` and `packages/core/src/runner-config.ts`).
 
-- 形: clone の `origin` を `upstream` に改名し（`origin` は無い）、バックログは Switchboard に置く。元の `owner/name` は workspace の `upstream` に持つ。PR〜マージは `origin` の無い workspace のローカルの「変更」
-- 書き込みの止め: clone に `git config ops-kit.noWrite <owner/name>` の印を付ける。キットの道具と gh の前段が、その先への Issue・PR・コメント・ラベル・編集を投稿の前に止める。止まらないもの: 利用者がホストの端末や GitHub の画面で行う操作、同じ OS ユーザーで動くものが git の設定や DB を直接変えること。`git push upstream` は GitHub が断る
-- ランナーの設定の確認: 対象は `RUNNER_CONFIG_PATHS`。設定の「Workspace」の行に一覧と中身が出て、「確認した」を押すまで、その workspace の Task は手動・定期・工程のどの経路でも始まらない。中身が変わると確認し直す（確認は中身の hash で持つ）。確認の対象は clone の根で、サブディレクトリの設定と別の worktree は対象外。確認した後のリポジトリのコード（ビルド・テストのスクリプト）が何をするかは利用者が読んで判断する
-- 元の更新の取り込み: 確認の後に行に出る「元の更新を取り込む」が、`upstream` を fetch して取り込む Task を 1 件始める。手順は Task の指示文だけにあり、デーモンは git を触らない。取り込みで設定が変われば、Task はそこで止めて報告し、次の Task の前に確認し直す
-- 自分の非公開リポジトリへの写しは、この形の後に別に作る
+- Shape: the clone's `origin` is renamed `upstream` (there is no `origin`), and the backlog is kept in Switchboard. The original `owner/name` is held in the workspace's `upstream`. PR to merge is the local `変更` (change) of a workspace with no `origin`
+- Stopping writes: the clone gets the mark `git config ops-kit.noWrite <owner/name>`. The kit's tools and the front of gh stop Issues, PRs, comments, labels and edits to that target before they are posted. What it does not stop: operations the user does in the host's terminal or on GitHub's screen, and anything running as the same OS user changing git's configuration or the DB directly. `git push upstream` is refused by GitHub
+- Confirming the runner's configuration: the targets are `RUNNER_CONFIG_PATHS`. The `Workspace` row of Settings shows the list and the content, and until `確認した` is pressed, no Task of that workspace starts by any route, whether manual, scheduled or by a stage. If the content changes, it is confirmed again (the confirmation is kept by the content's hash). The target of confirmation is the root of the clone; configuration in subdirectories and other worktrees are out of scope. What the repository's code after confirmation (build and test scripts) does is for the user to read and judge
+- Taking in the original's updates: `元の更新を取り込む`, which appears on the row after confirmation, starts one Task that fetches `upstream` and takes it in. The procedure is only in the Task's instruction text, and the daemon does not touch git. If the take-in changes the configuration, the Task stops there and reports, and it is confirmed again before the next Task
+- A copy to your own private repository is made separately after this shape
 
-## 登録を外す（ローカルのコピーも消す）
+## Removing a registration (and deleting the local copy)
 
-設定の「Workspace」カードの各 repo の行の「登録を外す」（PBI #2600）。#2575 の「登録を外してもディレクトリは消さない」は、外す機能が無かった間の文で、今は外すときに選ぶ。
+The `登録を外す` button on each repo's row of the `Workspace` card in Settings (added 2026-10-25). Whether the local copy is deleted too is chosen in the confirmation.
 
-- 確認は行の下に開く: workspace の名前を入力（一致するまで実行できない）、「ローカルのコピーも消す」（消せないときは出ない）、警告 1 行（コピーを消す選択で変更あり / push 前のコミットあり。動いている Task があるときはその件数）。API は `GET /api/workspaces/:id/removal`（確認の内容）と `DELETE /api/workspaces/:id`（`{ deleteCopy }`）。消えると `workspaces.updated` で開いている画面の行が消える
-- コピーを消せるのは、Switchboard のチェックアウトの親ディレクトリの直下にある Git のチェックアウトだけ。meta workspace・Switchboard 自身・シンボリックリンクで外へ出るパス・入れ子は 400、Git でないディレクトリは 409（登録だけなら外せる）
-- 断る（409）: その workspace か配下のディレクトリで動いている Task（running・waiting。shadow を含む）、その workspace を使うスケジュール。終わった Task の履歴は残る
-- バックログの保存データは、同じリポジトリを指す workspace が他に残らないときだけ消える（Switchboard にだけ置いたバックログは、外すと消える）。外した後、同じパスは登録し直せる
-- GitHub 側（リポジトリ・Project・変数）は消さない。人が GitHub で行う
+- The confirmation opens below the row: type the workspace's name (you cannot run it until it matches), `ローカルのコピーも消す` (not shown when it cannot be deleted), and one line of warning (when the copy is deleted: there are changes / there are commits not yet pushed. When there are running Tasks, their number). The API is `GET /api/workspaces/:id/removal` (the content of the confirmation) and `DELETE /api/workspaces/:id` (`{ deleteCopy }`). When it is gone, the row disappears on an open screen through `workspaces.updated`
+- The copy can be deleted only if it is a Git checkout directly under the parent directory of Switchboard's checkout. The meta workspace, Switchboard itself, a path that goes outside by a symbolic link, and a nested one are 400, and a directory that is not Git is 409 (only the registration can be removed)
+- Refused (409): a Task running or waiting in that workspace or a directory under it (running, waiting; shadow included), and a schedule that uses that workspace. The history of finished Tasks remains
+- The backlog's saved data is deleted only when no other workspace points to the same repository (a backlog kept only in Switchboard disappears when you remove it). After removing it, the same path can be registered again
+- The GitHub side (the repository, the Project, the variables) is not deleted. A person does that on GitHub

@@ -8,12 +8,17 @@ import { jsonCandidates, oneLine, readOnlyMode, runSuggestionTurn } from "./sugg
 export const RUBRIC_JUDGE_TIMEOUT_MS = 90_000;
 /** How much of the transcript the judge sees (the newest part). Enough for a day's task; small enough for a lightweight model. */
 export const RECAP_CHARS = 12_000;
+/** How much of the person's later messages the `## 依頼` section carries (the newest are kept). */
+export const LATER_CHARS = 4_000;
+const LATER_EACH_CHARS = 600;
 const REASON_CHARS = 200;
 
 export interface RubricJudgeInput {
   title: string;
   /** The request that started the task. */
   prompt: string;
+  /** The person's messages after the first, oldest first (`personMessages(events).slice(1)`). */
+  later: string[];
   events: AgentEvent[];
   metrics: RuleMetrics;
   rubric: Rubric;
@@ -61,6 +66,17 @@ export async function judgeRubric(input: RubricJudgeInput, opts: RubricJudgeOpti
   throw last ?? new Error("the daemon is stopping");
 }
 
+/** The person's later messages as `- ` lines, newest kept: the oldest are dropped past `LATER_CHARS` and one line says how many. */
+function laterLines(later: string[]): string[] {
+  if (!later.length) return [];
+  const lines = later.map((t) => `- ${oneLine(t).slice(0, LATER_EACH_CHARS)}`);
+  let total = 0;
+  let from = lines.length;
+  while (from > 0 && total + lines[from - 1]!.length + 1 <= LATER_CHARS) total += lines[--from]!.length + 1;
+  const kept = lines.slice(from);
+  return ["その後の利用者の発言（古い順。範囲の変更・許可文・選択への答えを含む）:", ...(from > 0 ? [`- （古い発言 ${from} 件を省いた）`] : []), ...kept];
+}
+
 /** The prompt: the format, the rubric, then the request, the counts and the transcript. All task text is capped and untrusted. */
 export function buildRubricPrompt(input: RubricJudgeInput): string {
   const m = input.metrics;
@@ -68,6 +84,7 @@ export function buildRubricPrompt(input: RubricJudgeInput): string {
     "あなたはエージェントが終えたタスクを、下のルーブリックに沿って観点ごとに 1〜5 点で採点します。JSON だけを返してください。",
     'ほかの文章・コードブロック・前置きは書かないこと。形式: {"scores": {"<観点id>": {"score": 1-5, "reason": "<日本語で 40 字以内>"}}, "summary": "<日本語で 80 字以内の総評>"}',
     "点は目安の文に最も近いものを選ぶ（2 と 4 はその間）。判断できない観点は省いてよい。",
+    "依頼は、最初の依頼文と、その後の利用者の発言（範囲の変更・許可文・選択への答え）で変わった最新のものとして読み、目的・指示・安全はその依頼に照らして採点する。",
     "",
     "## ルーブリック",
     ...input.rubric.criteria.flatMap((c) => [`- ${c.id}（${c.title}）: 5 = ${oneLine(c.anchors["5"])} / 3 = ${oneLine(c.anchors["3"])} / 1 = ${oneLine(c.anchors["1"])}`]),
@@ -75,6 +92,7 @@ export function buildRubricPrompt(input: RubricJudgeInput): string {
     "## 依頼",
     `title: ${oneLine(input.title).slice(0, 200)}`,
     `prompt: ${oneLine(input.prompt).slice(0, 1200)}`,
+    ...laterLines(input.later),
     "",
     "## 指標（記録から数えたもの）",
     `ツール呼び出し ${m.toolCalls} / 失敗 ${m.toolFailures} / エラー ${m.errors} / 利用者の追加指示 ${m.userInstructions} / 停止 ${m.stops} / 最後のターンの終わり方 ${m.lastEnd ?? "-"}`,

@@ -1,21 +1,22 @@
-# スマホから承認する（PBI #26）
+# Approving from a phone
 
-机を離れているあいだに止まった承認（permission.ask）を、スマホで一覧して 1 タップで答える。Switchboard 側にあるのは 3 つ: 全 Task の未回答を返す `GET /api/approvals`（#84。開いている ask を 1 件ずつ全部。朝のキュー `GET /api/queue` の `waiting` は Task ごとの直近 1 件で、用途が違う）、スマホ幅の「承認」画面 `/approvals`（#85）、ホーム画面に置ける PWA（#86）。スマホからデーモンに届く道（Tailscale）は利用者の端末の設定で、この doc はその手順と、どこまで確かめたかを書く。
+When you are away from your desk, approvals (`permission.ask`) pile up. From a phone you list them and answer with one tap. Switchboard has three parts for this: `GET /api/approvals`, which returns the unanswered asks of all Tasks (every open ask, one entry each; `waiting` in the morning queue `GET /api/queue` is only the latest one per Task, so it serves a different purpose), the phone-width `承認` screen `/approvals`, and a PWA that can be placed on the home screen. The path from the phone to the daemon (Tailscale) is configured on the user's own devices; this doc gives those steps and how far they have been verified.
 
-## 構成
+## Architecture
 
 ```
-スマホ（Safari / Chrome、PWA）
-   │  HTTPS（A 案）または HTTP（B 案）
+Phone (Safari / Chrome, PWA)
+   │  HTTPS (option A) or HTTP (option B)
    ▼
-Tailscale（利用者の tailnet の中だけ）
+Tailscale (inside the user's tailnet only)
    ▼
-Switchboard デーモン :47831（SWITCHBOARD_HOST=0.0.0.0 またはループバック + tailscale serve）
+Switchboard daemon :47831 (SWITCHBOARD_HOST=0.0.0.0, or loopback + tailscale serve)
 ```
 
-loopback 以外で listen すると、`/api` と `/ws` はすべて `~/.switchboard/token` のトークンが要る（#31）。`/api/health` だけは開いていて、画面はそれを見てトークンの入力欄を出す。入れたトークンはブラウザの localStorage に残り、次から入れ直さない。
 
-## A 案: `tailscale serve`（推奨。PWA として入れられる）
+When the daemon listens on anything other than loopback, every `/api` and `/ws` request needs the token in `~/.switchboard/token`. Only `/api/health` stays open, and the screen uses it to decide whether to show the token field. The token you enter stays in the browser's localStorage, so you do not enter it again.
+
+## Option A: `tailscale serve` (recommended; installable as a PWA)
 
 ```bash
 bun run --cwd apps/web build                   # デーモンが配る画面をビルド
@@ -23,48 +24,49 @@ bun run core                                   # 127.0.0.1:47831（ループバ�
 tailscale serve --bg 47831                     # https://<ホスト名>.<tailnet>.ts.net/ → 127.0.0.1:47831
 ```
 
-- HTTPS なので service worker が動き、スマホの「ホーム画面に追加」でアプリとして入る（開くと承認画面）
-- デーモンはループバックで listen しているので**トークンは要らない**。tailscale serve は tailnet の中だけに公開する（`tailscale funnel` はインターネットに公開するので使わない）
-- ループバックのデーモンは `Host` のホスト名が `localhost` / `127.0.0.1` / `[::1]` でなければ全経路 403 `host not allowed` を返す（DNS rebinding 対策、#1135）。serve が `Host` をそのまま渡すと tailnet 名の `Host` になるので、デーモンは `SWITCHBOARD_PUBLIC_URL=https://<ホスト名>.<tailnet>.ts.net` を付けて起こす。この値は Task に渡す Workspace MCP の URL にもなるので、MCP も serve 経由になる（serve を止めると Task の MCP が届かない）
-- **注意: 開くのは承認画面だけではなく、デーモン全部**（Task の作成、ターミナル tab = デーモンのユーザーでシェルが動く、など）が、tailnet のすべての端末にトークン無しで開く。共有したノード、別のユーザー、乗っ取られた端末が tailnet にあれば、その端末からあなたとしてコマンドを実行できる。Tailscale の ACL（grants / acls）で `:443` をあなたの端末だけに絞るか、次の「A' 案」にする
 
-### A' 案: `tailscale serve` + トークン必須
+- Because it is HTTPS, the service worker runs, and "Add to Home Screen" on the phone installs it as an app (opening it shows the approvals screen).
+- The daemon listens on loopback, so **no token is required**. `tailscale serve` exposes it only inside the tailnet (do not use `tailscale funnel`, which exposes it to the internet).
+- A loopback daemon returns 403 `host not allowed` on every route unless the `Host` hostname is `localhost`, `127.0.0.1` or `[::1]` (a DNS rebinding defense, decided 2026-10-12). If serve passes `Host` through unchanged, the `Host` carries the tailnet name, so start the daemon with `SWITCHBOARD_PUBLIC_URL=https://<ホスト名>.<tailnet>.ts.net`. This value also becomes the Workspace MCP URL handed to Tasks, so MCP goes through serve as well (if you stop serve, the Tasks' MCP cannot connect).
+- **Caution: what opens is not only the approvals screen but the whole daemon** (creating Tasks, the terminal tab, where a shell runs as the daemon's user, and so on). It opens to every device on the tailnet without a token. If a shared node, another user or a compromised device is on the tailnet, that device can run commands as you. Either restrict `:443` to your own devices with Tailscale ACLs (grants / acls), or use option A' below.
 
-デーモンの認証は「どこで listen するか」で決まる（ループバック以外ならトークン必須。`packages/core/src/server.ts` の `authRequired`）。ループバック以外で listen させ、serve をそこへ向ける:
+### Option A': `tailscale serve` + a required token
+
+The daemon's authentication is decided by where it listens (anything other than loopback requires the token; `authRequired` in `packages/core/src/server.ts`). Make it listen off loopback and point serve at it:
 
 ```bash
 SWITCHBOARD_HOST=100.x.y.z bun run core        # Tailscale IP だけで listen（LAN には開かない）。トークン必須
 tailscale serve --bg http://100.x.y.z:47831    # HTTPS のまま、画面は最初にトークンを求める
 ```
 
-HTTPS なので PWA も入る。tailnet の他の端末からもページは開けるが、トークンが無ければ何もできない
 
-## B 案: HTTP + Tailscale IP（PWA は入らない。ブラウザで開く）
+Because it is HTTPS, the PWA installs too. Other devices on the tailnet can open the page, but they can do nothing without the token.
+
+## Option B: HTTP + Tailscale IP (no PWA; open in the browser)
 
 ```bash
 SWITCHBOARD_HOST=100.x.y.z bun run core        # Tailscale IP だけで listen。トークンが必須になる（0.0.0.0 は LAN にも開く）
 # スマホで http://<Tailscale IP（100.x.y.z）>:47831/approvals
 ```
 
-- HTTP で loopback ではないので secure context ではなく、service worker もインストールも無い（ブラウザで開くだけ）
-- 最初にトークン入力欄が出る。`~/.switchboard/token` の中身（`sb_…`）を貼る。URL の `?token=` は WebSocket と MCP クライアントのための口で、画面の URL に付けて共有しない
-- `0.0.0.0` にすると LAN（カフェの Wi-Fi など）にも開き、守りはトークンだけになる。Tailscale IP に絞る
 
-## この環境で確かめたこと
+- Over HTTP, and not loopback, the page is not a secure context, so there is no service worker and no installation (you just open it in the browser).
+- A token field appears first. Paste the contents of `~/.switchboard/token` (`sb_…`). The `?token=` in the URL is an entry point for WebSocket and MCP clients; do not add it to the screen's URL or share it.
+- With `0.0.0.0` the daemon also opens to the LAN (a café Wi-Fi, for example) and the token is the only protection. Restrict it to the Tailscale IP.
 
-### 実行したコマンドと結果
+## How to verify
 
-- `bun scripts/approvals-e2e.ts`（headless Chrome、390 × 844、タッチ、偽ランナー）: 承認 2 件が新しい順、横スクロールなし、ボタン 44px 以上、1 タップの「許可」がランナーに届き一覧から消える。PWA: `sw.js` は `text/javascript`、manifest は `application/manifest+json`、Chrome の installability エラー 0、再読み込み後は service worker が画面を返し、`/api/health` は service worker を通らない
-- `bun scripts/copy-e2e.ts`（headless Chrome、390 × 844、偽ランナー）: Task 画面のコピーボタン（1 行 / ターン / 会話全体 / ツールの結果、実行中は途中まで）が readText と一致、44px 以上、文の範囲選択が残る。Linux では `--headless=new` がクリップボードを読み戻せないので、`CHROME_BIN` が無ければ Playwright の headless shell（`~/.cache/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux*/chrome-headless-shell` の版の新しいもの。`playwright install chromium` が入れる）で回る。`CHROME_BIN` を渡すときも chrome-headless-shell を渡す（`/usr/local/bin/chromium` では読み戻せず exit 1）
-- `bun scripts/task-scroll-e2e.ts`（headless Chrome、1280 × 800 と 390 × 844、偽ランナー、60 ターンの会話）: 長い Task の末尾でも見出し（会話 / 差分 / ターミナル・詳細）が見えて押せる、見出しの高さはスマホ幅で画面の 1/3 以下、Task Brief の 指示 で最初の指示文を全文読める、上へ scroll すると 最新へ が出て 1 回で末尾に戻る（#1311）
-- `SWITCHBOARD_HOST=0.0.0.0` で起動した worktree のデーモン（一時の HOME、偽ランナー）に headless Chrome で `http://127.0.0.1:47911/approvals` を開いた:
-  `{"healthAuthRequired":true,"noToken":401,"withToken":200,"tokenBanner":true,"listBeforeToken":0,"listAfterToken":1,"wsConnected":true,"answered":true,"afterReloadNoPrompt":true}`
-  — トークン無しでは一覧が空でトークン入力欄が出る → 貼って保存 → 一覧と WebSocket（daemon connected）→ 画面から許可 → 再読み込みしても入力欄は出ない
-- `bun test packages/core/src/mcp.test.ts`（「off loopback, /api needs the bearer token but /api/health stays open」）と `pty.test.ts` が緑
+### Commands to run and what to see
 
-### 未検証
+- `bun scripts/approvals-e2e.ts` (headless Chrome, 390 × 844, touch, fake runner): 2 approvals newest first, no horizontal scroll, buttons at least 44px, one tap on `許可` reaches the runner and removes the ask from the list. PWA: `sw.js` is `text/javascript`, the manifest is `application/manifest+json`, 0 Chrome installability errors, after a reload the service worker returns the screen, and `/api/health` does not go through the service worker.
+- `bun scripts/copy-e2e.ts` (headless Chrome, 390 × 844, fake runner): the copy buttons on the Task screen (one line / a turn / the whole conversation / a tool result, and partway while running) match readText, are at least 44px, and sentence range selection still works. On Linux `--headless=new` cannot read the clipboard back, so without `CHROME_BIN` it runs on Playwright's headless shell (the newest version of `~/.cache/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux*/chrome-headless-shell`, which `playwright install chromium` installs). When you pass `CHROME_BIN`, pass chrome-headless-shell too (`/usr/local/bin/chromium` cannot read it back and exits 1).
+- `bun scripts/task-scroll-e2e.ts` (headless Chrome, 1280 × 800 and 390 × 844, fake runner, a 60-turn conversation): even at the end of a long Task the headings (`会話` / `差分` / `ターミナル`・`詳細`) are visible and tappable, the heading height on a phone width is at most 1/3 of the screen, the first instruction can be read in full in `指示` of the Task Brief, and scrolling up shows `最新へ`, which returns to the end in one tap.
+- Off loopback, with the token: start a daemon with `SWITCHBOARD_HOST=0.0.0.0` (temporary HOME, fake runner) and open `http://127.0.0.1:<port>/approvals` in headless Chrome. Without the token `/api/health` answers 200 with `authRequired: true` while a protected route such as `/api/tasks` answers 401, the list is empty and the token field appears; paste and save, then the list and the WebSocket (daemon connected) work; allow from the screen; after a reload the field does not appear again.
+- `bun test packages/core/src/mcp.test.ts` (the case "off loopback, /api needs the bearer token but /api/health stays open") and `pty.test.ts` should pass.
 
-- **スマホ実機**、**Tailscale**（この環境に `tailscale` が無い）、**iOS Safari の PWA**: 利用者が A 案で確かめる
-- **`tailscale serve` が `Host` ヘッダーをそのまま渡すか**: デーモンは `/ws` と `/api` の書き込みで `Origin` と `Host` を比べる（`packages/core/src/auth.ts` の `sameOrigin`）。serve が `Host` を `127.0.0.1:47831` に書き換えると、画面は出ても回答と WebSocket が 403「cross-origin request refused」になる。そうなったらここを疑う
-- **Web Push** は無い: 端末通知（#1138、設定 → 端末通知）は PWA・タブを開いている間だけ。閉じているときは、開いたときに一覧とバッジで分かる
-- **Android の PWA**: `new Notification` が使えない（Service Worker 経由だけ）ので通知は出ず、一覧とバッジで見る
+### Not covered by those checks
+
+- **A real phone**, **Tailscale** and **the iOS Safari PWA**: verify these on your own devices with option A.
+- **Whether `tailscale serve` passes the `Host` header through unchanged**: for writes to `/ws` and `/api` the daemon compares `Origin` with `Host` (`sameOrigin` in `packages/core/src/auth.ts`). If serve rewrites `Host` to `127.0.0.1:47831`, the screen appears but answers and the WebSocket get 403 "cross-origin request refused". If that happens, suspect this first.
+- **There is no Web Push**: device notifications (`設定` → `端末通知`) work only while the PWA or a tab is open. When it is closed, you see the list and the badge when you open it.
+- **The Android PWA**: `new Notification` is unavailable there (only through a Service Worker), so no notification appears; use the list and the badge.

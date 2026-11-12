@@ -1,32 +1,32 @@
-# main-pull（マージ後の main の作業ツリーの更新）
+# main-pull (updating the main worktree after a merge)
 
-`pbi-complete` の 6-6 は、PBI を閉じたあと main の作業ツリーを更新する。以前は「CLAUDE.md の手順で」と任せていたため、手順の無いリポジトリでは毎回 pull されずに止まった（#829。PBI #1244）。
-どのリポジトリでも同じ既定として、キットの CLI `ops-kit pull-main` が行う。
+Step 6-6 of `pbi-complete` updates the main worktree after the PBI is closed. It used to be left to "follow the procedure in CLAUDE.md", so in a repository with no such procedure the pull never happened and the work stopped there (found 2026-10-14).
+As the default that is the same in every repository, the kit's CLI `ops-kit pull-main` does it.
 
-## 部品
+## Parts
 
-| 部品 | 役割 |
+| Part | Role |
 |---|---|
-| `ops-kit pull-main`（`ops-kit/src/pull-main.ts`） | main の作業ツリー（`git worktree list` の最初）を upstream に fast-forward する。設定を読まない。どの worktree の中からでも呼べる |
-| `pbi-complete` 6-6 | マージ後にこのコマンドを呼ぶ。出力の 1 行を報告の `main:` に書く |
-| 使う側の `CLAUDE.md` | 既定を変える点だけ（例: pull が動いているサービスを再起動するので利用者の OK を取る） |
+| `ops-kit pull-main` (`ops-kit/src/pull-main.ts`) | Fast-forwards the main worktree (the first in `git worktree list`) to its upstream. It reads no configuration. It can be called from inside any worktree |
+| `pbi-complete` 6-6 | Calls this command after the merge. Writes the one output line in the report's `main:` |
+| The consuming repository's `CLAUDE.md` | Only the points that change the default (for example: pull restarts the running service, so ask the user for an OK) |
 
-## 判定
+## Outcomes
 
-| 状態 | 出力 | exit | 変えるもの |
+| State | Output | exit | What it changes |
 |---|---|---|---|
-| fast-forward できる | `pulled <old>..<new> (<branch> <- <upstream>)` | 0 | 作業ツリーとブランチ |
-| すでに同じ | `up to date <sha>` | 0 | 無し |
-| ローカルのコミットが先行・分岐 | `not pulled: cannot fast-forward (…)` | 1 | 無し |
-| 未コミットの変更（untracked を含む）が取り込むファイルと重なる | `not pulled: uncommitted changes overlap: <パス>` | 1 | 無し |
-| detached HEAD | `not pulled: detached HEAD` | 1 | 無し |
-| upstream 無し | `not pulled: no upstream for <branch>` | 1 | 無し |
-| fetch できない | `fetch failed: …`（標準エラー） | 2 | 無し |
-| Git でない | `not a git repository: <dir>`（標準エラー） | 2 | 無し |
+| Can fast-forward | `pulled <old>..<new> (<branch> <- <upstream>)` | 0 | The worktree and the branch |
+| Already the same | `up to date <sha>` | 0 | Nothing |
+| Local commits are ahead or diverged | `not pulled: cannot fast-forward (…)` | 1 | Nothing |
+| Uncommitted changes (including untracked) overlap the files to be brought in | `not pulled: uncommitted changes overlap: <パス>` | 1 | Nothing |
+| Detached HEAD | `not pulled: detached HEAD` | 1 | Nothing |
+| No upstream | `not pulled: no upstream for <branch>` | 1 | Nothing |
+| Cannot fetch | `fetch failed: …` (standard error) | 2 | Nothing |
+| Not a Git repository | `not a git repository: <dir>` (standard error) | 2 | Nothing |
 
-## やらないこと
+## Non-goals
 
-- rebase / merge / stash（別のセッションの作業を壊さない。止めて理由を出す）
-- 設定・環境変数・オプション（既定を変えたいリポジトリは CLAUDE.md に書く）
-- `scripts/setup/` の入口（#969 の方針）
-- 依存の更新やビルド、動いているコードの更新（昇格・再起動）の自動化
+- rebase / merge / stash (it does not break another session's work; it stops and gives the reason)
+- Configuration, environment variables, options (a repository that wants a different default writes it in CLAUDE.md)
+- An entry point under `scripts/setup/` (the policy decided 2026-10-06)
+- Automating dependency updates, builds, or updates of the running code (promotion, restart)

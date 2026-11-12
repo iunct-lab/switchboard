@@ -1,4 +1,4 @@
-import type { EvalsListRow, EventEnvelope, RuleEval, RuleMetrics, Task, TaskEvals } from "@switchboard/protocol";
+import type { AgentEvent, EvalsListRow, EventEnvelope, RuleEval, RuleMetrics, Task, TaskEvals } from "@switchboard/protocol";
 import { DEFAULT_RUBRIC } from "./rubric.ts";
 
 /**
@@ -7,7 +7,7 @@ import { DEFAULT_RUBRIC } from "./rubric.ts";
  * (`Db.upsertEval`) under `source: rules`, one row per task; `RULES_BY` names the counter so a change in what is
  * counted tells old rows apart.
  */
-export const RULES_BY = "rules@4";
+export const RULES_BY = "rules@5";
 
 /** How every message the daemon sends by itself begins (`RESUME_PROMPT`, `STOP_RESUME_PROMPT`): not the person's instruction. */
 export const AUTO_RESUME_HEAD = "[Switchboard 自動再開]";
@@ -35,33 +35,48 @@ export function delegatedModelOf(text: string): string | null {
 }
 
 /**
+ * The person's messages in order (the first is the request). Consecutive user deltas are one message (a streamed message
+ * arrives in chunks; any other event between them ends it) unless a delta carries a `messageId` the one before did not —
+ * two follow-ups typed while the runner was silent. The daemon's own resume messages are not the person's.
+ */
+export function personMessages(events: AgentEvent[]): string[] {
+  const out: string[] = [];
+  let text: string | null = null; // the user message being assembled; null = not in one
+  let id: string | undefined; // its messageId, when the adapter gave one
+  const flush = () => {
+    if (text !== null && !isAutomaticUserText(text)) out.push(text);
+    text = null;
+    id = undefined;
+  };
+  for (const ev of events) {
+    if (ev.t === "message.delta" && ev.role === "user") {
+      if (text !== null && ev.messageId && ev.messageId !== id) flush(); // an id after a different id, or after id-less chunks: a new message
+      text = (text ?? "") + ev.text;
+      id = ev.messageId ?? id;
+    } else flush();
+  }
+  flush();
+  return out;
+}
+
+/**
  * The counts over a task's events. Consecutive user deltas are one message (a streamed message arrives in chunks; any
  * other event between them ends it — `recapOf` cuts only on a role change, a tool call or a turn's end) unless a delta
  * carries a `messageId` the one before did not — two follow-ups typed while the runner was silent. Two follow-ups without ids and nothing between them read as one: a known under-count, not worth a
  * second rule. The first message is the request; later ones are the person's instructions unless the daemon sent them.
  * A daemon stop's note marks the turn it cut until the next user message (the daemon's own resume included): `shutdown`
  * writes the note before that turn's `session.end`, `abortOrphanedTasks` after it, so the turn's end is not the boundary.
+ * A stop is counted once per `stop.id`, under the reason of its last record (a record is rewritten as the stop moves on).
  */
 export function ruleMetrics(events: EventEnvelope[]): RuleMetrics {
   const m: RuleMetrics = { turns: 0, toolCalls: 0, toolFailures: 0, errors: 0, asks: 0, denials: 0, stops: 0, stopReasons: {}, userInstructions: 0, lastEnd: null, daemonStops: 0, lastCutByDaemon: false, durationMs: null, classifier: null, delegatedModel: null };
-  let userMessages = 0;
-  let userText: string | null = null; // the user message being assembled; null = not in one
-  let userId: string | undefined; // its messageId, when the adapter gave one
+  const stopIds = new Map<string, string>(); // stop.id -> reason of its last record
   let cut = false; // a daemon stop's note since the last user message
-  const flushUser = () => {
-    if (userText !== null && !isAutomaticUserText(userText)) userMessages++;
-    userText = null;
-    userId = undefined;
-  };
   for (const { ev } of events) {
     if (ev.t === "message.delta" && ev.role === "user") {
-      if (userText !== null && ev.messageId && ev.messageId !== userId) flushUser(); // an id after a different id, or after id-less chunks: a new message
-      userText = (userText ?? "") + ev.text;
-      userId = ev.messageId ?? userId;
       cut = false;
       continue;
     }
-    flushUser();
     switch (ev.t) {
       case "session.end":
         m.turns++;
@@ -95,13 +110,13 @@ export function ruleMetrics(events: EventEnvelope[]): RuleMetrics {
         m.delegatedModel ??= delegatedModelOf(ev.text);
         break;
       case "stop.record":
-        m.stops++;
-        m.stopReasons[ev.stop.reason] = (m.stopReasons[ev.stop.reason] ?? 0) + 1;
+        stopIds.set(ev.stop.id, ev.stop.reason);
         break;
     }
   }
-  flushUser();
-  m.userInstructions = Math.max(0, userMessages - 1);
+  m.stops = stopIds.size;
+  for (const reason of stopIds.values()) m.stopReasons[reason] = (m.stopReasons[reason] ?? 0) + 1;
+  m.userInstructions = Math.max(0, personMessages(events.map((e) => e.ev)).length - 1);
   m.lastCutByDaemon = m.lastEnd !== null && cut;
   if (events.length) m.durationMs = events[events.length - 1]!.ts - events[0]!.ts;
   return m;

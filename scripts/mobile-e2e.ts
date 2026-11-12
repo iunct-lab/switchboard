@@ -344,7 +344,7 @@ try {
       await tap(`document.querySelector('.schedules .fields textarea')`, true);
       await call("Input.insertText", { text: "added from a phone" });
       await tap(`document.querySelector('.schedules .fields button.pri')`, true);
-      await until(() => evaluate(`[...document.querySelectorAll('.schedules .row .t')].some(t => t.textContent.includes(${JSON.stringify(name)}))`), `${label}: the schedule is listed`);
+      await until(() => evaluate(`[...document.querySelectorAll('main.schedules .schedule-row .schedule-title')].some(t => t.textContent.includes(${JSON.stringify(name)}))`), `${label}: the schedule is listed`);
       const listed = await overflow(width); // the new schedule's row (cron, next run, three buttons) fits too
       assert(listed.over <= 0, `${label}: the schedule row scrolls sideways by ${listed.over}: ${JSON.stringify(listed.wide)}`);
       measured.added = 1;

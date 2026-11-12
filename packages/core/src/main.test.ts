@@ -1,9 +1,10 @@
 // test-reads: packages/core/src/main.ts
 import { expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Db } from "./db.ts";
+import { Db, needsMigration } from "./db.ts";
 
 // `bun main.ts` listening off loopback (the cloud host, #181): /api/health tells an unauthorized caller only whether a
 // token is needed, so the startup banner must ask with the token. It crashed on `health.runners` on the first deploy (#232).
@@ -107,7 +108,7 @@ test("SIGTERM takes the runners' children with the daemon", async () => {
 
 // #2558: DAK is opt-in. The URL that points at it is also the switch that registers it.
 type HealthRunner = { id: string; label?: string; available: boolean; note?: string };
-async function bootAndRead(extraEnv: Record<string, string>, seed?: (home: string) => void): Promise<{ out: string; runners: string[]; info: HealthRunner[] }> {
+async function bootAndRead(extraEnv: Record<string, string>, seed?: (home: string) => void, check?: (home: string) => void): Promise<{ out: string; runners: string[]; info: HealthRunner[] }> {
   const home = mkdtempSync(join(tmpdir(), "switchboard-test-main-"));
   seed?.(home);
   const env: Record<string, string | undefined> = { ...process.env, SWITCHBOARD_HOME: home, SWITCHBOARD_HOST: "127.0.0.1", SWITCHBOARD_PORT: "0", SWITCHBOARD_CANDIDATE: "1", SWITCHBOARD_HISTORY_POLL_MS: "0", SWITCHBOARD_CLAUDE_PROJECTS: join(home, "none"), SWITCHBOARD_SUPERVISED: "" };
@@ -131,6 +132,7 @@ async function bootAndRead(extraEnv: Record<string, string>, seed?: (home: strin
     const port = /switchboard core  http:\/\/127\.0\.0\.1:(\d+)/.exec(out)?.[1];
     expect(port).toBeDefined();
     const health = (await (await fetch(`http://127.0.0.1:${port}/api/health`)).json()) as { runners: HealthRunner[] };
+    check?.(home);
     return { out, runners: health.runners.map((r) => r.id), info: health.runners };
   } finally {
     p.kill();
@@ -145,6 +147,21 @@ test("main.ts lists no DAK runner unless SWITCHBOARD_DAK_URL is set", async () =
   expect(out).not.toMatch(/runner dak/);
   expect(runners).not.toContain("dak");
   expect(runners.every((r) => r === "claude" || r === "codex")).toBe(true);
+}, 40_000);
+
+// A promotion candidate runs on a throwaway copy in a tmpfs home: the migration runs, the copy before it is not taken.
+test("main.ts as a candidate migrates an older database without taking the snapshot before it", async () => {
+  const dbPath = (home: string) => join(home, "switchboard.db");
+  await bootAndRead({}, (home) => {
+    new Db(dbPath(home)).close();
+    const raw = new Database(dbPath(home));
+    raw.exec("ALTER TABLE tasks DROP COLUMN background");
+    raw.close();
+    expect(needsMigration(dbPath(home))).toBe(true); // the precondition: this DB needs a migration (else the test proves nothing)
+  }, (home) => {
+    expect(existsSync(join(home, "snapshots"))).toBe(false);
+    expect(needsMigration(dbPath(home))).toBe(false);
+  });
 }, 40_000);
 
 test("main.ts lists DAK when SWITCHBOARD_DAK_URL is set", async () => {

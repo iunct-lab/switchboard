@@ -88,6 +88,9 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
     <main className="main settings">
       <SettingsToc />
       <SettingsGroupHeading id="settings-task-start" />
+      <SettingsCard title={t(settings.developSelfCard)}>
+        <DevelopSelfToggle checked={s.developSelf} disabled={saving} onChange={(on) => void save({ developSelf: on })} />
+      </SettingsCard>
       <SettingsCard title={t(settings.newDefaults)} className="tunables">
         <div className="row" style={{ alignItems: "center", gap: 6 }}>
           <span className="hint">{t(settings.newTaskRunner)}</span>
@@ -1235,5 +1238,18 @@ function CustomRunnersSection(props: { onError: (msg: string) => void }) {
       {error && <div className="error">{error}</div>}
       {changed && <div className="hint">{t(settings.adkSaved)}</div>}
     </SettingsCard>
+  );
+}
+
+/** 「Switchboard 自体の開発」 (#2459): off = Switchboard's own backlog is not read, no improve / すぐ直す, requests go upstream. */
+export function DevelopSelfToggle({ checked, disabled, onChange }: { checked: boolean; disabled: boolean; onChange: (developSelf: boolean) => void }) {
+  return (
+    <>
+      <label className="hint toggle">
+        <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+        {t(settings.developSelfToggle)}
+      </label>
+      <div className="muted">{t(settings.developSelfHint)}</div>
+    </>
   );
 }

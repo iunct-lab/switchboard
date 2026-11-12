@@ -87,14 +87,18 @@ flock -w 60 9 || { echo "runner-sync: another run has held the lock for 60 s" >&
 # a run that 作り直す's time limit killed leaves its scratch (bash's EXIT trap does not run on TERM): clear old ones
 find "$HOME/.cache" -maxdepth 1 -name 'sb-runner-sync.*' -mmin +60 -exec rm -rf {} + 2>/dev/null || true
 STATE="$HOME/.switchboard/runner-sync.state"   # the current <set>
-SINCE="$HOME/.switchboard/runner-sync.since"   # empty; its mtime is the start of the last run that uploaded
+SINCE="$HOME/.switchboard/runner-sync.since"   # its mtime is the start of the last run that uploaded; its text is the second that run named its key by
 SAVED="$HOME/.switchboard/runner-sync.dirs"    # the folders the current set holds (apart from STATE: an sb-runner-sync not yet replaced reads that one)
 TMP="$(mktemp -d "$HOME/.cache/sb-runner-sync.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT   # not /tmp: it is RAM here
-# keys are named by the second and written once: a run in the same second as the last upload (its NOW <= the marker's
-# mtime, which was set right after it) waits, or it would write over that difference and lose it
+# keys are named by the second and written once: a run in the same second as the last upload waits, or it would write
+# over that difference and lose it. The second is the one the last run named its key by (date), kept as the marker's
+# text: its mtime comes from the kernel's coarse clock, which can lag date by some ms, so a run started just after a
+# second boundary got an mtime in the second before its key's, and the next run did not wait (#3525)
 NOW="$(date +%s)"
-if [ -f "$SINCE" ] && [ "$NOW" -le "$(stat -c %Y "$SINCE")" ]; then sleep 1; NOW="$(date +%s)"; fi
-touch "$TMP/since.new"   # before tar reads anything: a file written while it runs is newer than this and goes next time
+LAST=; [ -f "$SINCE" ] && read -r LAST < "$SINCE" || true
+[ ! -f "$SINCE" ] || [[ "$LAST" =~ ^[0-9]{10}$ ]] || LAST="$NOW"   # a marker without a second (the empty one an older run left): its second is not known, so wait
+if [ -n "$LAST" ] && [ "$NOW" -le "$LAST" ]; then sleep 1; NOW="$(date +%s)"; fi
+echo "$NOW" > "$TMP/since.new"   # before tar reads anything: a file written while it runs is newer than this and goes next time
 SET=; [ -f "$STATE" ] && [ -f "$SINCE" ] && read -r SET < "$STATE" || true
 [[ "$SET" =~ ^[0-9]{10}$ ]] || SET=   # no state, or an unreadable one (the old "<sha256> <epoch>" too): a new base
 [ -z "$SET" ] || [ $((NOW - SET)) -lt "$REFRESH" ] || SET=

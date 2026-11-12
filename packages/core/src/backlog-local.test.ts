@@ -363,6 +363,19 @@ test("PATCH backlog switchboard turns sync off and keeps the source (#2266)", as
   expect((await send("PATCH", `/api/workspaces/${gh.id}`, { projectVar: "OTHER_PROJECT_URL" })).status).toBe(409);
 });
 
+test("GET /api/backlog/syncs answers the rows of GET /api/backlog's syncs and nothing else (#3438)", async () => {
+  const { base, add, dir } = await boot();
+  const gh = (await (await add(dir("gh"))).json()) as Workspace;
+  const source = { service: "github" as const, host: "github.com", repository: "acme/app", project: { owner: "acme", number: 1 } };
+  core!.db.setWorkspaceBacklogSource(gh.id, source);
+  core!.db.putBacklogSnapshot(source, { records: [], cursor: null, syncedAt: 1_700_000_000_000 });
+  const light = (await (await fetch(`${base}/api/backlog/syncs`)).json()) as Record<string, unknown>;
+  const full = (await (await fetch(`${base}/api/backlog`)).json()) as Backlog;
+  expect(Object.keys(light)).toEqual(["syncs"]);
+  expect(light.syncs).toEqual(full.syncs);
+  expect(full.syncs.find((s) => s.workspaceId === gh.id)).toMatchObject({ repository: "acme/app", syncedAt: 1_700_000_000_000, sync: { state: expect.any(String), pendingCount: 0 } });
+});
+
 /** A git repository in `path` with `main` and a branch `sb/9-x` one commit ahead; the tips. */
 function gitRepo(path: string): { main: string; head: string } {
   const git = (...args: string[]) => {
@@ -493,4 +506,15 @@ test("choice: a GitHub workspace's field values are fixed to the config's spelli
   const m = await create(ws, { title: "z", fields: { Status: "in review" } });
   expect(m.status).toBe(202);
   expect((await view(ws, m.body.number)).fields?.Status).toBe("In review");
+});
+
+test("project fields (#1545): a workspace without GitHub gets the field definitions from the config's choices", async () => {
+  const { local, create, view } = await boot();
+  const ws = await local();
+  const made = await create(ws, { title: "題", body: "本文" });
+  expect(made.status).toBe(202);
+  const defs = (await view(ws, made.body.number)).projectFields;
+  expect(defs.map((f) => f.name)).toEqual(["Status", "Area", "Kind", "Priority", "Story Points"]);
+  expect(defs[0]).toMatchObject({ dataType: "SINGLE_SELECT", options: expect.arrayContaining(["Backlog", "Ready"]) });
+  expect(defs[4]).toEqual({ name: "Story Points", dataType: "NUMBER", options: [] });
 });

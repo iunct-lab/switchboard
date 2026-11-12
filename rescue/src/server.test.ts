@@ -724,7 +724,7 @@ test("tmp: sweep — without a press, the old working directory goes on the inte
     rmSync(root, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   }
-}, 50_000); // load (the flake of #2939): two sweeps in turn, each allowed its 20 s wait; 21 s failed on the old 20 s limit (docs/design/perf.md "テストの揺れ")
+}, 50_000); // load (the flake of #2939): two sweeps in turn, each allowed its 20 s wait; 21 s failed on the old 20 s limit (docs/design/perf.md "Test flakiness")
 
 test("tmp: GET /api/tmp shows the usage and the entries; POST /api/tmp/clean removes only the old working directory (#797)", async () => {
   const r = (await fetch(`${base}/api/tmp`).then((r) => r.json())) as { usage: { total: number; percent: number }; entries: Array<{ name: string; removable: boolean }>; cleanable: { names: string[]; bytes: number } };
@@ -740,7 +740,7 @@ test("tmp: GET /api/tmp shows the usage and the entries; POST /api/tmp/clean rem
   expect(await cleaned.json()).toMatchObject({ removed: [OLD_DIR], skipped: [{ name: NEW_DIR, keep: "recent" }, { name: "../etc", keep: "name" }] });
   expect(readdirSync(tmpRoot)).toEqual([NEW_DIR]);
   oldDir(); // back for the tests that follow
-}, 30_000); // time assumption (the flake of #2939): inUse walks the host's /proc on each read, over the 5 s default under load (6 s failed; docs/design/perf.md "テストの揺れ")
+}, 30_000); // time assumption (the flake of #2939): inUse walks the host's /proc on each read, over the 5 s default under load (6 s failed; docs/design/perf.md "Test flakiness")
 
 test("tmp: the owner's press takes the age they pick and any name; force takes everything of theirs; the sweep's judgment stays its own", async () => {
   const at = (name: string, hoursAgo: number) => {

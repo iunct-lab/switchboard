@@ -96,7 +96,7 @@ exec bun "${OPS_KIT:-$R/ops-kit}/src/cli.ts" lint --config "$R/ops.config.json" 
 
 重い処理（ローカル CI、全テスト・型検査、偽ランナーのデーモン + headless Chrome）は、`ops-kit heavy [--name <名前>] -- <コマンド…>` で包んで始める。マシンの枠が空いていて空きメモリが下限以上のときだけコマンドを動かし、そうでなければ待つ。待つ間は理由（枠を持っているコマンド・作業フォルダ・開始時刻、または空きメモリと下限）を stderr に 1 行出し（理由が変わるたびに 1 行）、待ったあとで始めるときは「始めます」を出す。エラーにはしない。exit はコマンドの exit。
 
-- **上限はマシンの値**: `~/.config/ops-kit/heavy.json` の `{ "max": 1, "minFreeMb": 1536 }`（どちらも省略でき、ファイルが無ければこの既定）。`max` は同時に走る重い処理の数、`minFreeMb` は始める前に要る空きメモリ（Linux の MemAvailable、MB。読めない OS では数だけで決める）。リポジトリ（`ops.config.json`）にも環境変数にも置かない。リポジトリごとに書くと、マシン 1 つの数にならない
+- **上限はマシンの値**: `~/.config/ops-kit/heavy.json` の `{ "max": 1, "minFreeMb": 1536 }`（どちらも省略でき、ファイルが無ければこの既定）。`max` は同時に走る重い処理の数、`minFreeMb` は始める前に要る空きメモリ（Linux の MemAvailable、MB。読めない OS では数だけで決める）。Task を動かすアプリが Task を始めるときは `minFreeMb` ではなく、同じファイルの `taskMinFreeMb`（既定はそのアプリが持つ。`ops-kit heavy` は読まない）で止める。リポジトリ（`ops.config.json`）にも環境変数にも置かない。リポジトリごとに書くと、マシン 1 つの数にならない
 - **枠はマシンで 1 つ**: `~/.local/state/ops-kit/heavy/` の `slot-<i>.json`。どのリポジトリ・作業ツリー・Task から呼んでも同じ枠を取り合う。持ち主が死んだ枠（`kill -9`、Task の中断、デーモンの停止）は次に待つ処理が取り直す
 - **大きいマシンでの上げ方**: 設定ファイルを書くだけ（コードもリポジトリも変えない）。例: 16 GB のマシンで `{ "max": 3 }`。4 GB 程度なら既定の 1 のまま
 - **誰が持ち、誰が待っているか**: 待っている処理は同じ置き場に `wait-<pid>-<id>.json`（名前・作業フォルダ・待ち始めた時刻・理由 `slot` / `memory`）を置き、理由が変わったときだけ書き直し、枠を取ったら消す。枠と待ちはほかのプロセスから `readHeavyState(home)`（`src/heavy.ts`）で読める（終わったプロセスのものは返さない）。環境変数 `OPS_KIT_TASK_ID` があれば、その値を Task の id として枠と待ちに載せる（Task を動かすアプリが付ける）
@@ -155,6 +155,23 @@ exec bun "${OPS_KIT:-$R/ops-kit}/src/cli.ts" lint --config "$R/ops.config.json" 
 | `__QUOTA_CHECK__` | ランナーの利用上限の見方（コマンドか画面） | `CLAUDE.md.tmpl` |
 
 Phase は雛形に入れない（使うなら `fixtures/config-with-phase.json` の `phase` / `milestone` と `pbi.yml` の Phase の dropdown を足す）。
+
+## 依存の検査（`deps-check`）
+
+`ops-kit deps-check [--file-request]` は、リポジトリの依存が更新を要するかを調べて表にする。見るのは作業ディレクトリ（リポジトリの root）の下だけで、どの道具を使うかは lockfile で決める（設定にしない）。`bun.lock` があれば bun、`uv.lock` を持つディレクトリ（root に限らない。`node_modules` / `.venv` / `.git` は見ない）があれば uv。両方あれば表は 1 つにまとめ、「場所」の列（bun は workspace の名前、uv は `uv.lock` のディレクトリ）で分ける。調べるだけで、ファイルは書かない。
+
+| | bun | uv |
+|---|---|---|
+| 更新できる依存 | `bun outdated --filter '*'` | `uv lock --upgrade --dry-run`（各ディレクトリで。`uv lock --check` も回し、lock が合っていなければ「## 出典」に書く）。表と条件に入れるのは、そのディレクトリの `pyproject.toml` の直接の依存（`[project].dependencies`・`[project.optional-dependencies]`・`[dependency-groups]`。名前は PEP 503 で揃える）と、pip-audit が脆弱性を挙げた依存だけ（bun の直接の依存の粒度にそろえる。推移的な依存は脆弱性が無ければ入れない）。`pyproject.toml` が読めないディレクトリは絞らず全部を出し、その旨を 1 行出す。要約の outdated の件数は絞った後 |
+| 脆弱性 | `bun audit --json` | `uv export --frozen --no-emit-project --no-emit-local --format requirements-txt` を `uvx pip-audit`（`-r /dev/stdin --no-deps --disable-pip -f json`、標準入力）に渡す。pip-audit が起動できない・失敗した・出力が読めないディレクトリは、その旨を 1 行出し、要約の行にも「未検査」と書いて、脆弱性は検査せず outdated だけで判定する（pip-audit を入れない） |
+| 公開日・ライセンス | `bun info <pkg> time` / `license` | PyPI の JSON（`https://pypi.org/pypi/<pkg>/json`）。パッケージごとに 1 回 |
+
+- **当たる条件**（どれか 1 つで表に載る）: 脆弱性、major の遅れ（候補の major が今より大きい。`0.x` では minor）、今の版の公開から 90 日以上で、より新しい版がある。今の版の公開日が読めない依存は、当たる条件には数えず、出力と本文の「## 出典」に 1 行で名指しする（黙って外さず、それだけでは起票しない）。これを満たす依存が 1 件でもあれば「当たった」。表には候補の公開日とライセンスを付ける（読めなければ「不明」）
+- **既出**: `bun.lock` / `package.json` / `uv.lock` / `pyproject.toml` を変える開いた PR が名指す依存は表から除き、「既出」として PR 番号を書く。開いた PR を読めなければ、本文に「既出の確認なし」と書く
+- **exit**: 0 = 当たらない、1 = 当たった、2 = 道具が走らなかった・lockfile が無い・要望を出せなかった。道具の出力が読めないときは 2（当たらないと読み違えない）。例外は pip-audit で、上のとおり outdated だけで判定し、未検査を名指しする
+- **`--file-request`**: 当たれば題「依存の更新: <YYYY-MM>」の要望を 1 件起票する。同じ題の開いた要望があれば、起票せずそのコメントに足す。本文は `## 要望`（表）・`## 出典`（検査した道具と結果）・`## 更新の条件`（使った道具ごとの既定の文。bun は lockfile と `package.json` 以外を触らず `--minimum-release-age` を付ける、uv は `uv.lock` と `pyproject.toml` 以外を触らず `uv tree` の差分を貼る、など。候補は公開から 7 日以上の版だけ、major は 1 パッケージ 1 PR）。当たらなければ「要望: 当たらないので起票しない」と出して何も起票しない。最後に「要望: …」の 1 行を出す
+- **`depsCheck.extraConditions`**: `ops.config.json` の文字列の配列。リポジトリ固有の条件で、既定の文のあとに `## 更新の条件` へ足す（既定の文は置き換えない）
+- **定期実行から呼ぶ形**: 週 1 回などの定期実行が、そのリポジトリの作業ツリーで `ops-kit deps-check --file-request` を 1 回呼び、出力の最後の行（起票した番号か、当たらなかったこと）と件数を報告する。起票は要望のコマンド（`ops-kit request`）の経路で、PBI 化は要望の流れ（`request-to-backlog`）に任せる。負荷は、`uv.lock` のディレクトリの数 ×（`uv` の解決 + pip-audit）と、候補のパッケージの数だけの PyPI の読み
 
 ## 公開リポジトリへの同期
 

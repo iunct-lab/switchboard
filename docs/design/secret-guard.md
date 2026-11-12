@@ -1,112 +1,112 @@
-# secret-guard（認証に使える値を Issue や PR に書かせない）
+# secret-guard (keeping values that can authenticate out of Issues and PRs)
 
-Switchboard が起動したランナーの `gh` の前段に検査を置く（PBI #661）。認証に使える値を含む文を Issue・PR・コメントに書こうとすると、GitHub に送る前に止まる。決まりの文は共通スキル `issue-workflow` の「Issue・PR・コメントに書かない値」。
+A check sits in front of `gh` for the runners Switchboard starts (2026-09-30). When a runner tries to write text that holds a value that can authenticate into an Issue, a PR or a comment, it is stopped before anything is sent to GitHub. The rule itself is in the common skill `issue-workflow`, under `Issue・PR・コメントに書かない値`.
 
-発端: 無人の実行のエージェントは、クラウドの管理者権限の一時セッション用の device code と承認 URL を Issue コメントに書くことがある。この仕組みの前は、決まりにも仕組みにも止めるものが無かった。エージェントはホストの AWS の SSO のプロファイル名も Issue のコメントに書くことがある。値の形をしていない名前は規則に無かった（#1093、#1243）。
+Origin: an unattended agent can write the device code and approval URL of a cloud administrator's temporary session into an Issue comment. Before this mechanism, neither a rule nor a mechanism stopped it. Agents also sometimes write the host's AWS SSO profile name in an Issue comment. A name that does not look like a value was not covered by any rule (added 2026-10-14).
 
-## 部品
+## Parts
 
-| 部品 | 場所 | 役割 |
+| Part | Where | Role |
 |---|---|---|
-| 検査 | `ops-kit/src/secrets.ts` の `findSecrets` | 文の中の値を見つけ、種類と行番号を返す。値は返さない。ホストの AWS の設定（`AWS_CONFIG_FILE`、無ければ `~/.aws/config`）の名前とアカウント ID は `hostAws` が読み、呼ぶ側の入口（前段、`scan-text`、`scan-issues`、`ops-kit backlog` の送信前、ローカル CI の投稿）が 1 回ずつ渡す |
-| 前段 | `ops-kit/bin/gh`（`ops-kit/src/gh-guard.ts`） | 書き込みの本文を検査し、当たれば exit 1。続けて公開側の写しと `ops-kit.noWrite` の先への書き込みを検査し（下の「公開側の写しへの書き込み」）、当たれば exit 1。どちらにも当たらなければ本物の `gh` にそのまま渡す |
-| 配線 | `packages/core/src/tasks.ts` の `startSession` | ランナーに渡す `PATH` の先頭に meta workspace の `ops-kit/bin`、末尾にデーモンの `bun` のフォルダを置く（`StartOptions.env`） |
-| ホストの対話シェル | `/etc/profile.d/sb-gh-guard.sh`（`aws/host/sb-gh-guard.sh` を `bootstrap.sh` が置く） | クラウドのホストの、ホストのユーザーの端末タブ（`bash -i`）とログインシェルの `PATH` の先頭に meta のチェックアウトの `ops-kit/bin`、末尾に `bun` のフォルダを置く。Switchboard を通さずに手で動かす `claude` / `codex` の投稿も、どのリポジトリでも前段を通る（#824）。チェックアウトが無ければ `PATH` を変えない。root やほかのユーザーのシェルは変えない（チェックアウトはエージェントが書けるので、root の `PATH` の先に置かない） |
-| 定期の検査 | デーモンの予定「認証の値の検査」（`action: "secret-scan"`、`packages/core/src/secretscan.ts`） | 登録済みの全リポジトリに `scan-issues` を発火ごとに、前回からの差分で走らせ、当たりか検査できなかったリポジトリがあれば判断待ちにお知らせを出す（#2866） |
-| 後からの検査 | `ops-kit scan-issues [<owner/name>]`（キットの `bin` の `ops-kit`。中身は `bun ops-kit/src/cli.ts scan-issues`。入口の無いリポジトリでも同じ） | 既に書かれた Issue・コメント・PR のレビューコメントとレビュー本文を検査する。引数なしは全部、`--since <ISO 8601>` はその時刻より後に更新されたもの（PR のレビュー本文はその間に更新された PR のものだけ）、`--recheck <URL>` は前回の当たりを差分の外でも読み直す（消えていれば当たりなし）。1 ページの取得は 3 回までやり直し、読めなければ「当たりなし」と言わず exit 2。最後に `hits: N / scanned: M`（読んだ文の数） |
+| Check | `findSecrets` in `ops-kit/src/secrets.ts` | Finds values in a text and returns the kind and the line number. It does not return the value. The names and account IDs in the host's AWS config (`AWS_CONFIG_FILE`, otherwise `~/.aws/config`) are read by `hostAws`, and each entry point of the caller (the front, `scan-text`, `scan-issues`, before sending in `ops-kit backlog`, the posting of local CI) passes them once |
+| Front | `ops-kit/bin/gh` (`ops-kit/src/gh-guard.ts`) | Checks the body of a write and exits 1 on a hit. Then checks writes to the public copy and to the target of `ops-kit.noWrite` (see "Writes to the public copy" below) and exits 1 on a hit. If neither hits, it hands the command to the real `gh` unchanged |
+| Wiring | `startSession` in `packages/core/src/tasks.ts` | Puts the meta workspace's `ops-kit/bin` at the head of the `PATH` handed to the runner and the daemon's `bun` folder at the end (`StartOptions.env`) |
+| The host's interactive shell | `/etc/profile.d/sb-gh-guard.sh` (`bootstrap.sh` places `aws/host/sb-gh-guard.sh`) | On a cloud host, puts the meta checkout's `ops-kit/bin` at the head of the `PATH` of the host user's terminal tab (`bash -i`) and of login shells, and the `bun` folder at the end. A post made by a `claude` / `codex` that is started by hand without going through Switchboard also passes the front, in any repository (decided 2026-10-03). If the checkout is missing, `PATH` is not changed. The shells of root and of other users are not changed (an agent can write to the checkout, so it is not put ahead of root's `PATH`) |
+| Scheduled scan | The daemon's schedule `認証の値の検査` (secret scan) (`action: "secret-scan"`, `packages/core/src/secretscan.ts`) | On every firing, runs `scan-issues` over all registered repositories, on the difference since the last run, and raises a notice in the pending-decisions list if any repository has a hit or could not be scanned (2026-10-29) |
+| Later scan | `ops-kit scan-issues [<owner/name>]` (`ops-kit` in the kit's `bin`; it runs `bun ops-kit/src/cli.ts scan-issues`. The same for a repository without an entry point) | Scans Issues, comments, and the review comments and review bodies of PRs that were already written. With no argument it reads everything; `--since <ISO 8601>` reads what was updated after that time (the review bodies of PRs only for the PRs updated in that period); `--recheck <URL>` rereads the previous hits even outside the difference (if one is gone, no hit). The fetch of one page is retried up to 3 times, and if it still cannot be read it exits 2 rather than saying "no hits". The last line is `hits: N / scanned: M` (the number of texts read) |
 
-## 止める場所
+## Where it stops writes
 
-ランナーの hook ではなく `PATH` にした。ランナーの hook はランナーごとに渡し方と信頼の扱いが違い（Codex の hook は利用者が信頼した定義しか動かさず、その記録は `~/.codex` に置くのでホストの作り直しで消える。`shared-tmp-guard.md`）、ホームに置くと作り直しで消える。`PATH` は Task の作業フォルダがどのリポジトリでも、ランナーが Claude Code でも Codex でも同じ 1 か所で効く。
+It is on `PATH`, not in a runner's hook. A runner's hook is handed over and trusted differently per runner (Codex runs only hook definitions the user has trusted, and records that trust under `~/.codex`; see `shared-tmp-guard.md`), and anything placed only in the home directory is lost when a host is rebuilt or replaced without carrying the home directory over. `PATH` works in one place no matter which repository the Task's working folder is in and no matter whether the runner is Claude Code or Codex.
 
-`/tmp` の固定名の歯止めは、Claude Code には hook（ホームではなく共通キットに置き `--settings` で渡す）、Codex にはサンドボックスで効かせる（`shared-tmp-guard.md`）。`gh` の前段は Codex にも効かせるため `PATH` のまま。
+The guard against fixed names under `/tmp` works through a hook for Claude Code (placed in the common kit rather than the home directory and passed with `--settings`) and through the sandbox for Codex (`shared-tmp-guard.md`). The front of `gh` stays on `PATH` so that it also works for Codex.
 
-- どの経路で始めた Task（工程ボタン、手で作った Task、スケジュール、並走、再開）にも効く。`startSession` はスキルを置く場所（`docs/design/skill-sync.md`）と同じ
-- meta workspace が無いときは `PATH` を変えない
-- 前段は `PATH` から前段を除いた最初の `gh` を本物として呼ぶ。無ければ exit 127。別のチェックアウトの前段（ファイルの 2 行目が `// gh-guard`）も飛ばすので、`PATH` に前段が 2 つあっても呼び合わない
-- `ops-kit/bin/docker`（#1417）も同じ探し方（`realCommand`）で本物の `docker` を呼ぶ。ファイルの 2 行目は `// docker-mark`。呼び出し側が `DOCKER_MARK_LABEL`（`key=value`）を渡したときだけ `run` / `create` にその label を足し、`DOCKER_MARK_LOG` があれば compose のプロジェクト名を記録する（共通キットに固有語を置かないので、Task の印は core が渡す）。片付けは #1419
-- 前段は `bun` で動く。デーモンはフルパスの `bun` で起動されることがあるので（`scripts/setup.sh`、再起動の `process.execPath`）、配線がデーモンの `bun` のフォルダ（`dirname(process.execPath)`）も `PATH` の末尾に足す（末尾なので、利用者の `PATH` にある道具より前に来ない）
+- It works for a Task started by any route (a stage button, a hand-made Task, a schedule, a parallel run, a resume). `startSession` is the same place that places the skills (`docs/design/skill-sync.md`)
+- If there is no meta workspace, `PATH` is not changed
+- The front calls the first `gh` on `PATH`, after removing the front itself, as the real one. If there is none, it exits 127. It also skips the front of another checkout (a file whose second line is `// gh-guard`), so even with two fronts on `PATH` they do not call each other
+- `ops-kit/bin/docker` (added 2026-10-15) finds the real `docker` the same way (`realCommand`). The second line of the file is `// docker-mark`. Only when the caller passes `DOCKER_MARK_LABEL` (`key=value`) does it add that label to `run` / `create`, and if `DOCKER_MARK_LOG` is set it records the compose project name (the common kit holds no product-specific words, so core passes the Task's mark). The cleanup was added on 2026-10-15
+- The front runs on `bun`. The daemon may be started with a full-path `bun` (`scripts/setup.sh`, `process.execPath` on restart), so the wiring also adds the daemon's `bun` folder (`dirname(process.execPath)`) at the end of `PATH` (at the end, so it does not come ahead of the tools on the user's `PATH`)
 
 ## Merges
 
 The guard does not judge `gh pr merge` or `gh stack merge`: they reach the real `gh` like any other command, and only their body and subject are checked (below). Running the repository's merge judgement before a merge is the default procedure the skills describe, not a gate in front of `gh`. When the user allows a merge outside that judgement in the Task's conversation, the Task merges with `gh pr merge` / `gh stack merge`.
 
-A gate that stopped every merge the judgement did not pass was in place from 2026-11-01 and was taken out on 2026-11-02 at the user's direction: a rule fixed in code left no room for a merge the user had allowed, and the user then had to merge by hand.
+There is no gate in front of `gh` that stops every merge the judgement did not pass: a rule fixed in code would leave no room for a merge the user has allowed.
 
-## 検査する書き込み
+## Writes it checks
 
-| コマンド | 読む文 |
+| Command | Text it reads |
 |---|---|
-| `gh issue create（new）/ comment / edit` | `--title`、`--body`、`--body-file`（`-` は標準入力） |
-| `gh pr create（new）/ comment / edit / review` | 同じ |
+| `gh issue create (new) / comment / edit` | `--title`, `--body`, `--body-file` (`-` is standard input) |
+| `gh pr create (new) / comment / edit / review` | The same |
 | `gh issue close` / `gh pr close` | `--comment` |
-| `gh pr merge` | `--body`、`--body-file`（`-` は標準入力）、`--subject`（マージのコミットの本文と題） |
-| `gh release create（new）/ edit` | `--title`、`--notes`、`--notes-file`（`-` は標準入力）。添付ファイルは読まない |
-| `gh gist create（new）/ edit` | ファイルの引数の中身（`create` は全部、`edit` は id の次。`-` とファイルの無い `create` はパイプの標準入力）、`--add` のファイル、`--desc`。`gh` が広げるパターン（`'*.md'`）は前段も広げて読む |
-| `gh api` | `-f key=value` の value、`-F key=@file` のファイル（`@-` は標準入力）、`--input`（JSON なら中の文字列を 1 つずつ） |
+| `gh pr merge` | `--body`, `--body-file` (`-` is standard input), `--subject` (the body and subject of the merge commit) |
+| `gh release create (new) / edit` | `--title`, `--notes`, `--notes-file` (`-` is standard input). Attached files are not read |
+| `gh gist create (new) / edit` | The contents of the file arguments (all of them for `create`, after the id for `edit`; `-` and a `create` with no file read the piped standard input), the files of `--add`, `--desc`. A pattern `gh` expands (`'*.md'`) is also expanded and read by the front |
+| `gh api` | The value of `-f key=value`, the file of `-F key=@file` (`@-` is standard input), `--input` (for JSON, each string inside) |
 
-- フラグの書き方は `gh` が受ける形を全部読む: `--body x`、`--body=x`、`-b x`、`-b=x`、`-bx`、短いフラグをまとめた `-cb x`（まとめて読むのはサブコマンドごとの既知のスイッチの文字だけ。知らない文字があれば、表に無いフラグの値（`-Hfeat`）として読まない）。サブコマンドの前にフラグがあっても読む
-- 1 文字のフラグはサブコマンドごとに読む（`-c` は `pr close` では文、`pr review` ではスイッチ。`-t` は `pr merge` では題、`gh api` では読まないテンプレート）。前段のフラグとスイッチの表は「グループ → サブコマンド」の 1 つ
-- `gh api` はメソッドに関係なく読む。フィールドは GitHub に送る文なので、検索の `-f q=…` に値があっても止まる
-- 標準入力はバイトのまま読み、同じバイトを本物の `gh` に渡す。パイプやファイル記述子（`<(…)`）の本文は 1 回しか読めないので、読んだ内容を一時ファイル（権限 600）に置き、引数をそのパスに差し替えて渡す。`gh` が戻ったら消す
-- それ以外の引数・終了コード・出力は変えない
-- 読めないファイルは、そのファイルだけ検査せずに渡す（`gh` が自分の言葉で失敗を伝える）。同じコマンドのほかの文は検査する
+- It reads every way of writing a flag that `gh` accepts: `--body x`, `--body=x`, `-b x`, `-b=x`, `-bx`, and short flags bundled together such as `-cb x` (only the known switch letters of each subcommand are read as a bundle; if there is an unknown letter, it is not read as the value of a flag not in the table (`-Hfeat`)). It reads flags that come before the subcommand too
+- One-letter flags are read per subcommand (`-c` is a text in `pr close` and a switch in `pr review`; `-t` is the subject in `pr merge` and an unread template in `gh api`). The front's table of flags and switches is a single "group → subcommand" table
+- `gh api` is read whatever the method. A field is text sent to GitHub, so it is stopped even when a value appears in a search `-f q=…`
+- Standard input is read as bytes, and the same bytes are handed to the real `gh`. The body of a pipe or file descriptor (`<(…)`) can be read only once, so what was read is put in a temporary file (permission 600), the argument is replaced with its path, and it is handed over. It is deleted when `gh` returns
+- Everything else (the other arguments, the exit code, the output) is unchanged
+- An unreadable file is passed on unchecked, only that file (`gh` reports the failure in its own words). The other texts of the same command are checked
 
-検査する種類: `approval-url`（`user_code=` 付きの URL）、`device-code`、`aws-key`、`github-token`、`private-key`、`bearer-token`、`account-id`、`sso-start-url`、`invite-secret`（`#k=` の値）、`aws-profile`（下）。伏せた書き方（`XXXX-XXXX`、`#k=…`、`<profile>`）は当たらない。
+Kinds it checks: `approval-url` (a URL with `user_code=`), `device-code`, `aws-key`, `github-token`, `private-key`, `bearer-token`, `account-id`, `sso-start-url`, `invite-secret` (the value after `#k=`), `aws-profile` (below). Masked writings (`XXXX-XXXX`, `#k=…`, `<profile>`) do not hit.
 
-`account-id` は 12 桁の数字を、値と文脈で見る（#2345）。12 桁は UUID・ハッシュ・id の中にも偶然に現れるので、形の例外を足していくのではなく、当たる理由のあるものだけを当てる。
-- 値: 検査が動くホストの AWS の設定（`AWS_CONFIG_FILE`、無ければ `~/.aws/config`。`aws-profile` と同じファイル 1 つ）に書かれた 12 桁（`sso_account_id`、`role_arn` などの ARN の中）は、前後が数字でなければ語が無くても、どこに書かれても当たる（裸、`dev<12 桁>-admin` のようにプロファイル名に埋まったもの、UUID の最後の区切りの位置）。設定の値は比べるのに使うだけで、ファイルに書かず、ハッシュにもしない
-- 文脈: 設定に無い 12 桁は、ARN の中（`arn:aws:iam::<12 桁>:`。`:` が `%3A` でも）、プロファイルとして名指しされた語の中（`--profile dev<12 桁>-admin`、`AWS_PROFILE=`）、または前後が英数字でない（`-` と `_` は可。`Admin-<12 桁>`、`<12 桁>_Admin`）12 桁で、同じ行か直前のラベルにアカウントの語（`account` / `アカウント` / `プロファイル`）か AWS の語（`aws` / `iam` / `sso` / `arn` / `role` / `profile`）があるときに当たる。英字に接する 12 桁（16 進の hash や DER の接頭辞の中）は、AWS の語が同じ行にあっても文脈では当てない。文脈のある行の偶然の 12 桁（AWS の request id の UUID など）は当たる
-- 当たらないもの: 設定に無いアカウントの、文脈の無い 12 桁（裸で書かれた別のアカウントの ID も外れる。セキュリティの範囲を狭める判断として #2345 で受け入れた）。伏せた書き方と、クラウドの文書の例の 2 つの番号（`123456789012` / `000000000000`）
-- 設定の無い場所（Actions の `secret-scan.yml`、利用者の手元）では、文脈のある 12 桁だけが当たる
+`account-id` looks at 12-digit numbers by value and by context (decided 2026-10-23). A 12-digit number also appears by accident inside UUIDs, hashes and ids, so rather than adding exceptions by shape, it hits only what has a reason to hit.
+- Value: a 12-digit number written in the AWS config of the host where the check runs (`AWS_CONFIG_FILE`, otherwise `~/.aws/config`; the same one file as `aws-profile`) (`sso_account_id`, inside an ARN such as `role_arn`) hits wherever it is written, with no word needed, as long as it is not adjacent to other digits (bare, embedded in a profile name such as `dev<12 digits>-admin`, at the position of the last group of a UUID). The config's values are used only for comparison; they are not written to a file and not hashed
+- Context: a 12-digit number not in the config hits when it is inside an ARN (`arn:aws:iam::<12 digits>:`, also when `:` is `%3A`), inside a word named as a profile (`--profile dev<12 digits>-admin`, `AWS_PROFILE=`), or is a 12-digit number not adjacent to alphanumerics (`-` and `_` are fine: `Admin-<12 digits>`, `<12 digits>_Admin`) and the same line or the preceding label has an account word (`account` / `アカウント` / `プロファイル`) or an AWS word (`aws` / `iam` / `sso` / `arn` / `role` / `profile`). A 12-digit number adjacent to letters (inside a hex hash or a DER prefix) is not hit by context even when an AWS word is on the same line. An accidental 12-digit number on a line with context (such as the UUID of an AWS request id) hits
+- Does not hit: a 12-digit number of an account not in the config with no context (a bare ID of another account also passes; this was accepted on 2026-10-23 as a decision that narrows the scope of the security check). Masked writings, and the two numbers used as examples in the cloud document (`123456789012` / `000000000000`)
+- Where there is no config (`secret-scan.yml` in Actions, the user's own machine), only 12-digit numbers with context hit
 
-例外の一覧や設定は持たない。誤検知で投稿が止まったら、規則を直して無くす（#661 の方針）。
+It keeps no list of exceptions and no configuration. When a false positive stops a post, the rule is fixed so that it goes away (the policy decided 2026-09-30).
 
-`aws-profile` は、検査が動くホストの AWS の設定（`AWS_CONFIG_FILE`、無ければ `~/.aws/config`）の `[profile <名前>]` と `[sso-session <名前>]` の名前を、単語として含む行に当たる（SSO のセッション名も）。名前の形からは見分けられないので、規則は名前を設定から読む。`default` は名前として読まない。名前の前後が英数字・`_`・`-` のとき（`<名前>-host`）は別の語なので当たらず、大文字小文字は区別しない。英字だけの名前は普通の語（名詞）と区別できないので、`--profile <名前>`、`AWS_PROFILE=<名前>`、`[profile <名前>]`、`sso_session = <名前>` のようにプロファイル・セッションとして名指しされた位置だけで当たる（2026-10-14、実際の設定の名前が 1 つのリポジトリの散文に 245 行出て、規則を狭めた。誤検知は一覧や設定で除かず、規則を直す）。設定が読めないホスト（Actions の `secret-scan.yml`）では何にも当たらない。当たりは種類と行番号だけで、名前は出さない。切る設定は無い。
+`aws-profile` hits a line that contains, as a word, a name of a `[profile <name>]` or `[sso-session <name>]` in the AWS config of the host where the check runs (`AWS_CONFIG_FILE`, otherwise `~/.aws/config`) (SSO session names too). The shape of a name cannot tell it apart, so the rule reads the names from the config. `default` is not read as a name. When the characters before or after the name are alphanumerics, `_` or `-` (`<name>-host`), it is a different word and does not hit, and case is not distinguished. A name made only of letters cannot be told from an ordinary word (a noun), so it hits only in a position where it is named as a profile or session: `--profile <name>`, `AWS_PROFILE=<name>`, `[profile <name>]`, `sso_session = <name>` (a name that is an ordinary word floods prose with false positives, so the rule was narrowed on 2026-10-14. False positives are not removed by a list or configuration; the rule is fixed). On a host where the config cannot be read (`secret-scan.yml` in Actions), it hits nothing. A hit gives only the kind and the line number, never the name. There is no setting to turn it off.
 
-## 公開側の写しへの書き込み
+## Writes to the public copy
 
-2 つ目の検査。公開に出す木を clone して自分のリポジトリで開発する人の工程が、公開側に書かないようにする。公開側の判定はキットの `publicCopyRefusal`（`ops-kit/src/config.ts`）で、リポジトリの名前を持たない: 最寄りの `ops.config.json` の `publicSync.target`（文字列だけを読む。`parseConfig` は通さない）と書き込み先が同じなら止める。
+The second check. It keeps the process of someone who clones the tree that is published and develops in their own repository from writing to the public side. The judgement for the public side is the kit's `publicCopyRefusal` (`ops-kit/src/config.ts`), which holds no repository name: it stops when the write target equals the `publicSync.target` of the nearest `ops.config.json` (only the string is read; `parseConfig` is not run).
 
-- 書き込み（`writeTargetOf`）: `issue` / `pr` / `label` / `release` の読み取り以外のサブコマンド、`gh api` の GET / HEAD 以外（メソッドが無くフィールドがあれば POST）、`graphql` の mutation。先は `-R` / `--repo`（グループの前後どこでも）、Issue・PR の URL、`GH_REPO` の順。`{owner}/{repo}` と `graphql` は `GH_REPO`
-- 先がほかのリポジトリなら通す。先が公開側か未指定なら、`GH_REPO` が公開側、または本物の `gh repo view` が公開側のとき止める。`gh repo view` は `GH_REPO` を見ずに remote から答えるので、`GH_REPO` だけ直した clone の `-R "$(gh repo view …)"` も止まる。読み取りとほかを名指しした書き込みでは `gh repo view` を呼ばない
-- 開発元の clone は `gh repo view` が開発元なので、公開側を `-R` で名指しする操作（同期の PR、要望 Issue への返信とクローズ）は通る
-- clone の git の設定 `ops-kit.noWrite`（`owner/name`、複数可。他者のリポジトリから追加した workspace の印）の先は、`noWriteMarkRefusal` が名指しでも既定でも止める。公開側と違い、そこへ書いてよい clone は無いので `gh repo view` の答えを待たず、先を指定しない書き込みは `gh repo view` が答えないときも止める。印の判定は `noWriteMarkRefusal`、公開側は `publicCopyRefusal`、`repoOf` と `backlogRepoOf` は両方をまとめた `noWriteRefusal` を通す。印の無い clone は今どおり
-- キットの道具の `repoOf`（`ops-kit/src/gh.ts`）と、デーモンのバックログの `backlogRepoOf`（`packages/core/src/backlog.ts`。取込み・昇格の失敗の報告・指示のプリセットの対象）も同じ判定で止める。デーモンでは取込みの失敗としてバックログ画面に文が出て、送信元が保存されないので送信も起きない。読み取りだけの定期の秘密の検査は止めない
+- Writes (`writeTargetOf`): the non-read subcommands of `issue` / `pr` / `label` / `release`, `gh api` other than GET / HEAD (with no method but with fields, POST), and a `graphql` mutation. The target is, in order, `-R` / `--repo` (anywhere before or after the group), the URL of an Issue or PR, then `GH_REPO`. `{owner}/{repo}` and `graphql` use `GH_REPO`
+- If the target is another repository, it passes. If the target is the public side or unspecified, it stops when `GH_REPO` is the public side or when the real `gh repo view` says the public side. `gh repo view` answers from the remote without looking at `GH_REPO`, so a `-R "$(gh repo view …)"` in a clone where only `GH_REPO` was fixed also stops. For reads and for writes that name another repository, `gh repo view` is not called
+- In the development origin's clone, `gh repo view` says the development origin, so operations that name the public side with `-R` (the sync PR, replying to and closing the request Issues) pass
+- The targets of the clone's git config `ops-kit.noWrite` (`owner/name`, several allowed; the mark of a workspace added from someone else's repository) are stopped by `noWriteMarkRefusal` both when named and by default. Unlike the public side, no clone may write there, so it does not wait for the answer of `gh repo view`, and a write that does not specify a target is also stopped when `gh repo view` does not answer. The judgement of the mark is `noWriteMarkRefusal` and that of the public side is `publicCopyRefusal`; `repoOf` and `backlogRepoOf` go through `noWriteRefusal`, which combines the two. A clone without the mark is as before
+- The kit's tool `repoOf` (`ops-kit/src/gh.ts`) and the daemon's backlog `backlogRepoOf` (`packages/core/src/backlog.ts`; the targets of import, the report of a failed promotion, and the instruction presets) stop by the same judgement. In the daemon, a sentence appears on the backlog screen as an import failure and the sender is not saved, so no sending happens either. The scheduled secret scan, which only reads, is not stopped
 
-## アプリの Task の中の Issue への直接の書き込み（#2694）
+## Direct writes to Issues from inside an app Task
 
-- `BACKLOG_URL` がある（アプリの Task の中）とき、その workspace のリポジトリ（`GH_REPO`、無ければ origin。`ops-kit backlog` と同じ決め方）と、アプリが同期しているほかの GitHub のリポジトリ（`GET /api/backlog` の `syncs`。問い合わせるのは workspace 以外を名指ししたバックログへの書き込みのときだけ。アプリに届かない・5 秒で答えなければ workspace だけで判定し、stderr に 1 行）のバックログ（Issue・コメント・ラベル・Project の item）への書き込みは、書き方によらず秘密の検査の前に書かずに exit 1 で止め、代わりの `ops-kit backlog` のコマンドを案内する（`backlogWrite`。直接書くと、アプリの次の編集の元が古くなり送るときに競合する。`backlog-sync.md` の「アプリの Task の中の書く経路」）。止めるもの: `gh issue create（new）/ comment / edit / close / reopen / delete / transfer`、`gh label create / edit / delete / clone`（ラベルの定義。案内は `ops-kit sync-labels`）、`gh api` の `repos/<o>/<r>/issues…` と `repos/<o>/<r>/labels…` への GET / HEAD 以外（メソッド無しでフィールドありは POST。`labels` はラベルの定義で、案内は `ops-kit sync-labels`。`issues/<n>/lock` は通す）、`gh api graphql` の Issue・コメント・ラベル（定義の `createLabel` / `updateLabel` / `deleteLabel` も）・sub-issue・Project の item の mutation と `deleteIssue` / `transferIssue`（名前の一覧は `BACKLOG_MUTATIONS`。フィールドと `--input` の中身から読む）、`gh project item-add / item-edit / item-delete / item-archive`。graphql と `gh project` は node id や Project を GitHub に引き直さず、名指しの無い `gh issue` と同じく workspace への書き込みとみなす
-- 通すもの: `-R` / `--repo`・Issue の URL・`gh api` のパスがアプリの知らないリポジトリ（公開側の Issue への返信など）、PR（`gh pr comment` と `pulls/…`。REST では PR も Issue なので `issues/<PR番号>/comments` は止まり、graphql の `addComment` も node id を引き直さないので止まる）、Actions、git の参照、contents、Release、読み取り、graphql の query と Project・フィールドの作成（`createProjectV2*`）、Issue のロックとピン留め（`gh issue lock / unlock / pin / unpin`、REST の `issues/<n>/lock`、graphql の `lockLockable` / `unlockLockable` / `pinIssue` / `unpinIssue`。アプリが同期する値ではなく保存と競合しない。止める基準は「アプリの保存と競合するか」（#3559））。強制ではなく歯止め（同じ OS ユーザーの Task は本物の `gh` を呼べる）
-- 一時の抜け道: `ops-kit backlog` が壊れている・アプリに届かないときだけ、その 1 回だけ `env -u BACKLOG_URL gh …` で書く（止めたときの案内の 2 行目）。秘密の検査と公開側の検査は残る。直接書いた値はアプリの次の取込みで入り、その Issue に送信待ちがあれば競合する
-- `ops-kit backlog` に代わりの無い操作（Issue の delete / transfer。CLI・REST の `issues/<n>/transfer`・graphql）は、止めたときの案内が 1 行で「その操作は `env -u BACKLOG_URL gh …` で書いてよい」と言い、上の 2 行目（壊れているときだけ）は出さない（`NO_EQUIVALENT`。Task の中でその操作をしたいときの書き方がこの 1 行で決まる）
+- When `BACKLOG_URL` is present (inside an app Task), a write to the backlog (Issues, comments, labels, Project items) of that workspace's repository (`GH_REPO`, otherwise origin; decided the same way as `ops-kit backlog`) and of the other GitHub repositories the app syncs (`syncs` of `GET /api/backlog`; it is asked only for a write to a backlog that names something other than the workspace; if the app is unreachable or does not answer within 5 seconds, it decides with the workspace alone and prints one line to stderr) is stopped with exit 1 without being written, before the secret check, however it is written, and the front points to the equivalent `ops-kit backlog` command (`backlogWrite`. A direct write makes the source of the app's next edit stale and conflicts when it is sent). What it stops: `gh issue create (new) / comment / edit / close / reopen / delete / transfer`, `gh label create / edit / delete / clone` (label definitions; the guidance is `ops-kit sync-labels`), the non-GET / HEAD writes of `gh api` to `repos/<o>/<r>/issues…` and `repos/<o>/<r>/labels…` (with no method but with fields, POST. `labels` is the label definition, and the guidance is `ops-kit sync-labels`. `issues/<n>/lock` passes), the mutations of `gh api graphql` on Issues, comments, labels (also the definitions `createLabel` / `updateLabel` / `deleteLabel`), sub-issues and Project items, and `deleteIssue` / `transferIssue` (the list of names is `BACKLOG_MUTATIONS`; read from the fields and from the content of `--input`), and `gh project item-add / item-edit / item-delete / item-archive`. graphql and `gh project` do not look up a node id or a Project on GitHub, and are treated as a write to the workspace, the same as an unnamed `gh issue`
+- What it passes: a `-R` / `--repo`, an Issue URL or a `gh api` path that is a repository the app does not know (such as a reply to an Issue on the public side), PRs (`gh pr comment` and `pulls/…`; in REST a PR is also an Issue, so `issues/<PR number>/comments` is stopped, and graphql's `addComment` is also stopped because it does not look up the node id), Actions, git refs, contents, Releases, reads, graphql queries and the creation of Projects and fields (`createProjectV2*`), and locking and pinning of Issues (`gh issue lock / unlock / pin / unpin`, REST `issues/<n>/lock`, graphql `lockLockable` / `unlockLockable` / `pinIssue` / `unpinIssue`; these are not values the app syncs and do not conflict with its storage. The criterion for stopping is "does it conflict with the app's storage" (decided 2026-11-06)). It is a brake, not enforcement (a Task of the same OS user can call the real `gh`)
+- A temporary way around: only when `ops-kit backlog` is broken or cannot reach the app, write that one time with `env -u BACKLOG_URL gh …` (the second line of the guidance when it stops). The secret check and the public-side check remain. A directly written value enters at the app's next import, and if that Issue has a pending send, it conflicts
+- For an operation that has no equivalent in `ops-kit backlog` (Issue delete / transfer; the CLI, REST `issues/<n>/transfer`, graphql), the guidance when it stops is one line saying "that operation may be written with `env -u BACKLOG_URL gh …`", and the second line above (only when broken) is not shown (`NO_EQUIVALENT`. This one line decides how to write the operation when a Task wants to do it)
 
-## 止めないもの
+## What it does not stop
 
-- 本文を対話のエディタで書く `gh`（コマンドに文が無い）
-- `gh` を使わない投稿（`curl` で API を直接叩く、MCP の GitHub ツール）
-- ホストの外（ブラウザなど）で書くもの
-- 上の表に無いコマンド
+- A `gh` that writes the body in an interactive editor (the command has no text)
+- Posts that do not use `gh` (calling the API directly with `curl`, the GitHub tool of MCP)
+- What is written outside the host (a browser and the like)
+- Commands not in the table above
 
-これらは `scan-issues` が後から見つける（`gh pr review --body` で書いたレビュー本文も読む）。下の定期の検査が走らせる。
+`scan-issues` finds these afterwards (it also reads review bodies written with `gh pr review --body`). The scheduled scan below runs it.
 
-## 定期の検査
+## Scheduled scan
 
-既に書かれたものの検査は共通の仕組みで 1 つ: デーモンの予定（#775）。登録済みの全リポジトリを、発火ごとに同じ規則で見る。
+The scan of what is already written is one common mechanism: the daemon's schedule (2026-10-17). It looks at all registered repositories with the same rules on every firing.
 
-- Actions の `secret-scan.yml` はホストの AWS の設定を持たないので `aws-profile` は当てない（ホストの定期の検査が見る）
-- 予定は利用者が定期タスクの画面で作る（種類「認証の値の検査」。いつ回すかは定期タスクの画面の値）。`backlog-next` と同じく meta workspace に置き、ランナーも Task も使わない（LLM の分を使わない）。起動時に勝手には作らない
-- 1 回の発火で、登録済みのワークスペースごとに `gh repo view` でリポジトリを求め、同じリポジトリ（複数の作業フォルダ）は 1 回にまとめ、meta のチェックアウトの `ops-kit/src/cli.ts scan-issues <owner/name>` を順に走らせる。読むのはホストの `gh` のログイン（バックログ画面と同じ）。新しいトークンも Actions の分も使わない
-- リポジトリごとに、前回読み始めた時刻と当たりの URL を予定の結果（`schedules.last_result` の `cursors`）に残し、次の発火は `--since <その時刻> --recheck <URL>...` で差分だけを読む。時刻は起動の直前に取るので、検査の間に書かれたものは次に読み直す。記録の無いリポジトリは全件、検査できなかったリポジトリは前回の記録のまま
-- 結果はリポジトリごとに 1 行、定期タスクの画面のログに残る: `0 件（scanned M）` / `当たり N 件` と場所 / `検査できなかった`（exit 2、起動の失敗、リポジトリを特定できないワークスペース。書くのは exit の番号だけで、失敗の出力は写さない — 何を引用しているか分からないため）
-- 当たりか検査できなかったリポジトリがあれば、Home のお知らせ欄に 1 件。同じ予定の前のお知らせは新しいものが来たら閉じる。読んだら閉じる。題は「認証の値の検査: 当たり N 件 / 検査できなかった K リポジトリ」、本文は利用者のすること（URL を開いて本物か見る / 本物なら値を無効にしてからコメントを削除 / 誤検知なら閉じる）+ URL と種類とリポジトリ名だけ（`scan-issues` の出力のうち当たりの行の形のものだけを写すので、値は入らない）。0 件の日はメモを作らない
-- ホストが止まっていた日は、起きたときの最初の確認で 1 回走る（期限を過ぎた予定は 1 回だけ発火し、次はその cron の次の時刻。予定はホストを起こす時刻にも入る）
-- `.github/workflows/secret-scan.yml`（このリポジトリを週に 1 回）はホストの外の予備として残る
+- `secret-scan.yml` in Actions has no host AWS config, so it does not hit `aws-profile` (the host's scheduled scan looks at it)
+- The user creates the schedule on the scheduled-tasks screen (the kind `認証の値の検査`. When it runs is a value on the scheduled-tasks screen). Like `backlog-next`, it is placed in the meta workspace, and uses neither a runner nor a Task (it uses none of the LLM allowance). It is not created on its own at startup
+- On one firing, for each registered workspace it finds the repository with `gh repo view`, merges the same repository (several working folders) into one, and runs the meta checkout's `ops-kit/src/cli.ts scan-issues <owner/name>` in turn. What it reads is the host's `gh` login (the same as the backlog screen). It uses neither a new token nor Actions' share
+- Per repository, it keeps in the schedule's result (`cursors` of `schedules.last_result`) the time it last started reading and the URLs of the hits, and the next firing reads only the difference with `--since <that time> --recheck <URL>...`. The time is taken just before the run, so what is written during the scan is read again next time. A repository with no record is read in full, and a repository that could not be scanned keeps the previous record
+- The result goes to the log of the scheduled-tasks screen, one line per repository: `0 件（scanned M）` / `当たり N 件` and the places / `検査できなかった` (exit 2, a failure to start, a workspace whose repository cannot be identified. Only the exit number is written, and the output of the failure is not copied, because it is not known what it quotes)
+- If any repository has a hit or could not be scanned, one notice goes into the notices section of Home. When a new one comes, the previous notice of the same schedule is closed. It is closed when read. The title is `認証の値の検査: 当たり N 件 / 検査できなかった K リポジトリ`; the body is what the user should do (open the URL and check that it is real / if real, revoke the value and then delete the comment / if a false positive, close it) plus only the URL, the kind and the repository name (only the lines of `scan-issues` output in the shape of a hit are copied, so no value gets in). On a day with 0 hits, no note is made
+- On a day the host was stopped, it runs once at the first check after waking (a schedule past its time fires only once, and the next is the next time of that cron. Schedules also go into the time that wakes the host)
+- `.github/workflows/secret-scan.yml` (this repository, once a week) remains as a backup outside the host
 
-個別のリポジトリに同じ仕組み（自前の検査・hook・定期のワークフロー）を作らない。規則・止め方・定期の検査が 2 つずつになり、片方だけ直す・片方だけ抜けることになる。リポジトリごとのワークフローは、他のリポジトリを読むトークンか、リポジトリごとの写しが要る。足りない規則や読む範囲は共通の側に足す（#775 で capsule-host の分を共通に寄せた）。
+Do not build the same mechanism (your own scan, hook or periodic workflow) in an individual repository. The rules, the way of stopping and the scheduled scan would each exist twice, and one would be fixed or omitted without the other. A per-repository workflow needs a token that reads other repositories or a copy per repository. A missing rule or reading range is added on the common side (on 2026-10-17 the per-repository scan was moved to the common mechanism).
 
-## やらないこと
+## Out of scope
 
-- 検査を切る設定・フラグ・環境変数。誤検知は `findSecrets` の規則を直して無くす
-- 当たった値の自動の削除や伏せ字への書き換え。削除は利用者の判断（編集では履歴に元の文が残る）
-- 無人の実行で承認を受ける経路。別の PBI（#662）
+- A setting, flag or environment variable that turns the check off. A false positive is fixed by correcting the rules of `findSecrets` so that it goes away
+- Automatic deletion of a hit value or rewriting it with masking characters. Deletion is the user's decision (an edit leaves the original text in the history)
+- A route for an unattended run to receive approval. It is handled separately

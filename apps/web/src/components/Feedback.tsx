@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { Task, Workspace } from "@switchboard/protocol";
-import { api, type FeedbackSource } from "../api.ts";
-import { feedbackTargets, type FeedbackTarget } from "../feedbackTarget.ts";
+import { api, type FeedbackSource, type FeedbackUpstream } from "../api.ts";
+import { developSelfPerOpening, feedbackModes, feedbackTargets, sentMode, type FeedbackTarget } from "../feedbackTarget.ts";
 import { AttachButton, AttachmentBar, useAttachments, useDropZone } from "./Attachments.tsx";
+import { copyText } from "../clipboard.ts";
 import { t } from "../i18n.ts";
+import { task as taskMsgs } from "../i18n/task.ts";
 import { feedbackScreens, panels as m } from "../i18n/panels.ts";
 
 /**
@@ -92,7 +94,14 @@ export function FeedbackDialog({ open, screen, workspaces, workspace, prefill, o
   // opened before the list was read: the meta workspace, where the daemon files a request that names none
   const targets = feedbackTargets(workspaces, workspace);
   const shown = target || targets.initial;
+  // the setting is read at each opening, so a change in Settings counts from the next one (no reload); unread = off
+  const [developSelf, setDevelopSelf] = useState(false);
+  const modes = feedbackModes(developSelf, shown ? { id: shown, name: "" } : undefined, workspaces);
+  // the answer of a request for Switchboard itself on an instance that does not develop it: a link or the text, no Task
+  const [upstream, setUpstream] = useState<FeedbackUpstream["upstream"] | null>(null);
   const submitting = useRef(false);
+  // made once: each opening resets the setting to off and keeps only its own answer
+  const [readDevelopSelf] = useState(() => developSelfPerOpening(() => api.settings().then((s) => s.developSelf), setDevelopSelf));
   // whether the text came from a prefill (#1221), so a close without sending clears it
   const prefilled = useRef(false);
   const attach = useAttachments(setMessage);
@@ -102,6 +111,8 @@ export function FeedbackDialog({ open, screen, workspaces, workspace, prefill, o
     if (open) {
       setMode("request"); // every opening starts on 要望として登録, also after closing without sending
       setTarget(targets.initial);
+      setUpstream(null);
+      readDevelopSelf().catch((e) => onError(String((e as Error).message ?? e)));
       // a draft from a task's evaluations (#1221) goes in once, when the dialog opens, over whatever was kept from a closed dialog; the
       // person edits it from there, and closing unsent drops it (the next plain open must not send it without its 出典)
       if (prefill) {
@@ -143,13 +154,19 @@ export function FeedbackDialog({ open, screen, workspaces, workspace, prefill, o
     setSending(true);
     setMessage(null);
     try {
-      const task = await api.feedback(text, attach.ids, screen, mode, mode === "request" && shown ? shown : undefined, mode === "request" ? prefill?.source : undefined);
+      const how = sentMode(modes, mode);
+      const sent = await api.feedback(text, attach.ids, screen, how, how === "request" && shown ? shown : undefined, how === "request" ? prefill?.source : undefined);
       attach.clear();
-      setText("");
       prefilled.current = false;
       setMode("request");
+      if ("upstream" in sent) {
+        // no Task: the dialog stays to show where to file it, with the text still there to copy
+        setUpstream(sent.upstream);
+        return;
+      }
+      setText("");
       onClose();
-      onSent(task);
+      onSent(sent);
     } catch (e) {
       const error = String((e as Error).message ?? e);
       setMessage(error);
@@ -160,11 +177,13 @@ export function FeedbackDialog({ open, screen, workspaces, workspace, prefill, o
     <dialog ref={dialog} className="feedback-dialog" aria-labelledby="feedback-title" onCancel={(e) => { e.preventDefault(); if (!locked) onClose(); }}>
       <form onSubmit={submit}>
         <h2 id="feedback-title">{t(m.feedback)}</h2>
+        {modes.fix && (
         <fieldset disabled={locked} className="row feedback-mode">
           <legend className="hint">{t(m.sendHow)}</legend>
           <label><input type="radio" name="feedback-mode" value="request" checked={mode === "request"} onChange={() => setMode("request")} /> {t(m.modeRequest)}</label>
           <label><input type="radio" name="feedback-mode" value="fix" checked={mode === "fix"} onChange={() => setMode("fix")} /> {t(m.modeFix)}</label>
         </fieldset>
+        )}
         {mode === "request" && targets.list.length > 1 && (
           <fieldset disabled={locked} className="row feedback-target">
             <label htmlFor="feedback-workspace">{t(m.fileTo)}</label>
@@ -175,11 +194,11 @@ export function FeedbackDialog({ open, screen, workspaces, workspace, prefill, o
             </select>
           </fieldset>
         )}
-        <p className="hint">{mode === "fix" ? t(m.fixHint) : t(m.requestHint, { target: targets.list.find((w) => w.id === shown)?.name ?? t(m.targetFallback) })}</p>
+        <p className="hint">{mode === "fix" && modes.fix ? t(m.fixHint) : modes.upstream ? t(m.requestHintUpstream) : t(m.requestHint, { target: targets.list.find((w) => w.id === shown)?.name ?? t(m.targetFallback) })}</p>
         <p className="hint feedback-screen">{prefill?.artifact ? sentFromArtifact(screen, prefill.artifact) : t(m.sentFrom, { screen: shownScreen(screen) })}</p>
         <fieldset disabled={locked} className={`dropzone ${drop.dropping ? "dropping" : ""}`} {...(!locked ? drop.handlers : {})}>
           <label htmlFor="feedback-text">{t(m.bodyLabel)}</label>
-          <textarea ref={textarea} id="feedback-text" rows={7} required maxLength={20_000} value={text} onChange={(e) => setText(e.target.value)} onPaste={drop.onPaste} placeholder={t(m.bodyPlaceholder)} />
+          <textarea ref={textarea} id="feedback-text" rows={7} required maxLength={20_000} value={text} onChange={(e) => { setText(e.target.value); setUpstream(null); }} onPaste={drop.onPaste} placeholder={t(m.bodyPlaceholder)} />
           <div className="row">
             <button type="button" onClick={capture}>{t(m.capture)}</button>
             <AttachButton onFiles={attach.add} />
@@ -187,6 +206,7 @@ export function FeedbackDialog({ open, screen, workspaces, workspace, prefill, o
           </div>
           <AttachmentBar items={attach.items} onRemove={attach.remove} busy={attach.busy} />
         </fieldset>
+        {upstream && <FeedbackUpstreamBox upstream={upstream} onCopyError={setMessage} />}
         {capturing && <p role="status">{t(m.capturing)}</p>}
         {message && <p className="error" role="alert">{message}</p>}
         <div className="feedback-actions">
@@ -195,5 +215,20 @@ export function FeedbackDialog({ open, screen, workspaces, workspace, prefill, o
         </div>
       </form>
     </dialog>
+  );
+}
+
+/** Where a request for Switchboard itself goes when this instance does not develop it (#2459): the form link, else the text to copy. */
+export function FeedbackUpstreamBox({ upstream, onCopyError }: { upstream: FeedbackUpstream["upstream"]; onCopyError: (message: string) => void }) {
+  return (
+    <div className="feedback-upstream" role="status">
+      {upstream.url
+        ? <a href={upstream.url} target="_blank" rel="noreferrer">{t(m.upstreamOpen)}</a>
+        : <>
+            <p className="hint">{t(m.upstreamCopyHint)}</p>
+            <pre className="feedback-upstream-text">{upstream.text}</pre>
+            <button type="button" onClick={() => void copyText(upstream.text).catch((e) => onCopyError(String((e as Error).message ?? e)))}>{t(taskMsgs.copy)}</button>
+          </>}
+    </div>
   );
 }

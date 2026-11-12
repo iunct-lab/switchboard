@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { isWorkingStatus, type CheckRun, Footprint, LedgerSummary, OpsLoad, RunnerInfo, StagedChange, Task, TaskEvals, Workspace } from "@switchboard/protocol";
+import { isWorkingStatus, type CheckRun, Footprint, LedgerSummary, OpsLoad, RunnerInfo, StagedChange, Task, TaskEvals, TaskSummary, Workspace } from "@switchboard/protocol";
 import { outcomeLabel } from "../attention.ts";
 import { taskLoadLine } from "../ops.ts";
 import { api, type TaskDetail } from "../api.ts";
@@ -7,6 +7,7 @@ import type { ReleaseStatus } from "../release.ts";
 import { ReleasePanel } from "./ReleasePanel.tsx";
 import { fmtClock, fmtUsd, githubBudgetLabel, githubBudgetLow, pct, RunnerPill } from "./ui.tsx";
 import { windowLabel } from "../quota.ts";
+import { resumeBlock } from "../resumeTag.ts";
 import { ModelSelect } from "./ModelSelect.tsx";
 import { EffortSelect } from "./EffortSelect.tsx";
 import { AttachmentGallery } from "./Attachments.tsx";
@@ -19,7 +20,36 @@ import { brief as m } from "../i18n/brief.ts";
 /** How long 再評価 shows 判定中 without word from the daemon: the judge's 90 s, a fallback turn, and slack. */
 const JUDGING_WAIT_MS = 200_000;
 
-export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSummary | null; onAbort: () => void; checksRev?: number; evalsRev?: number; /** 改善要望にする (#1221): opens the feedback dialog with a draft from this task's evaluations. */ onImprove?: (taskId: string) => void; onRestarting?: () => void; runners?: RunnerInfo[]; noTerminal?: boolean; onTask?: (t: Task) => void; tasks?: Task[]; onOpenTask?: (id: string) => void; workspaces?: Workspace[]; open: boolean; onClose: () => void; /** 評価をお願い (#1877): scroll to 自分の評価 once the evals are read, then onFocused */ focus?: "human"; onFocused?: () => void }) {
+/** What the side panel reads when a task opens. */
+export type SideReads = {
+  fp: Footprint;
+  load: OpsLoad;
+  evals: TaskEvals;
+  checks: { run: CheckRun | null; running: boolean; meta: boolean; current: boolean };
+  staged: Array<Omit<StagedChange, "before" | "after">>;
+};
+
+/** Reads all at once and returns the ones that answered, so the caller can put them in state in one go (one commit, not one per response).
+ * A read that fails is left out and the others still show; the order the answers arrive in does not change the result. */
+export async function readSide(reads: { [K in keyof SideReads]: () => Promise<SideReads[K]> }): Promise<Partial<SideReads>> {
+  const keys = Object.keys(reads) as Array<keyof SideReads>;
+  const settled = await Promise.allSettled(keys.map((k) => reads[k]()));
+  const out: Record<string, unknown> = {};
+  settled.forEach((r, i) => {
+    if (r.status === "fulfilled") out[keys[i]!] = r.value;
+  });
+  return out as Partial<SideReads>;
+}
+
+/** Drops the batch's evals, checks and staged changes when a newer read of the same kind started after the batch (`at` is each
+ * kind's read counter when the batch started, `now` when it answered): that read's answer is the newer one, whichever lands last. */
+export function freshSide(r: Partial<SideReads>, at: Record<"evals" | "checks" | "staged", number>, now: Record<"evals" | "checks" | "staged", number>): Partial<SideReads> {
+  const out = { ...r };
+  for (const k of ["evals", "checks", "staged"] as const) if (at[k] !== now[k]) delete out[k];
+  return out;
+}
+
+export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSummary | null; onAbort: () => void; checksRev?: number; evalsRev?: number; /** 改善要望にする (#1221): opens the feedback dialog with a draft from this task's evaluations. */ onImprove?: (taskId: string) => void; onRestarting?: () => void; runners?: RunnerInfo[]; noTerminal?: boolean; onTask?: (t: Task) => void; tasks?: TaskSummary[]; onOpenTask?: (id: string) => void; workspaces?: Workspace[]; open: boolean; onClose: () => void; /** 評価をお願い (#1877): scroll to 自分の評価 once the evals are read, then onFocused */ focus?: "human"; onFocused?: () => void }) {
   // Shadow run (#99): the linked task, whichever side this one is. Derived from the task list so no extra fetch is needed.
   const shadowTask = props.task.shadowOf ? undefined : props.tasks?.find((t) => t.shadowOf === props.task.id);
   const primaryTask = props.task.shadowOf ? props.tasks?.find((t) => t.id === props.task.shadowOf) : undefined;
@@ -81,16 +111,8 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
       .catch((e) => setModeErr(String(e.message ?? e)))
       .finally(() => setModeBusy(false));
   };
-  useEffect(() => {
-    setFp(null);
-    api.footprint(props.task.id).then(setFp).catch(() => undefined);
-  }, [props.task.id]);
   // the host's load this task caused (#2086): one line under the footprint
   const [load, setLoad] = useState<OpsLoad | null>(null);
-  useEffect(() => {
-    setLoad(null);
-    api.opsLoad(7, props.task.id).then(setLoad).catch(() => undefined);
-  }, [props.task.id]);
   const loadLine = load ? (load.available ? taskLoadLine(load.groups) : t(m.loadUnavailable)) : null;
 
   const quota = (props.ledger?.quota ?? []).filter((q) => q.runner === props.task.runner);
@@ -120,6 +142,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
   const artifacts = props.detail?.events.filter((e) => e.ev.t === "artifact" || (e.ev.t === "status" && e.ev.text.startsWith("staged change rejected"))).length ?? 0;
   // Self-dev (#18): checks of this repository after a task on the meta workspace
   const [checks, setChecks] = useState<{ run: CheckRun | null; running: boolean; meta: boolean; current: boolean } | null>(null);
+  const checksSeq = useRef(0);
   const [checkOpen, setCheckOpen] = useState<string | null>(null);
   const [restartMsg, setRestartMsg] = useState<string | null>(null);
   const ended = props.detail?.events.filter((e) => e.ev.t === "session.end").length ?? 0;
@@ -136,7 +159,36 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
     setJudging(false);
     setJudgeErr(null);
   }, [props.task.id]);
+  // Opening a task reads the footprint, the load, the evals, the checks and the staged changes together and puts the answers in
+  // state in one go: each answer on its own is a commit, and a commit that changes the panel is a style recalculation of its own.
+  // The effects below for the evals, the checks and the staged changes skip the read this one covers and read again on their own triggers.
+  const firstRead = useRef(new Set<string>());
   useEffect(() => {
+    const id = props.task.id;
+    const at = { evals: ++evalsSeq.current, checks: ++checksSeq.current, staged: ++stagingSeq.current };
+    firstRead.current = new Set(["evals", "checks", "staged"]);
+    setFp(null);
+    setLoad(null);
+    let live = true;
+    void readSide({ fp: () => api.footprint(id), load: () => api.opsLoad(7, id), evals: () => api.taskEvals(id), checks: () => api.checks(id), staged: () => api.staging(id) }).then((r) => {
+      if (!live) return;
+      const f = freshSide(r, at, { evals: evalsSeq.current, checks: checksSeq.current, staged: stagingSeq.current });
+      if (f.fp) setFp(f.fp);
+      if (f.load) setLoad(f.load);
+      if (f.evals) {
+        setEvals(f.evals);
+        if (props.evalsRev) setJudging(false);
+      }
+      if (f.checks) setChecks(f.checks);
+      if (f.staged) setStaged(f.staged);
+    });
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- evalsRev is read once, as the evals effect reads it; a later change is its trigger
+  }, [props.task.id]);
+  useEffect(() => {
+    if (firstRead.current.delete("evals")) return; // the read on opening is in the batch above
     const seq = ++evalsSeq.current;
     api
       .taskEvals(props.task.id)
@@ -204,7 +256,14 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
     setRestartMsg(null);
   }, [props.task.id]);
   useEffect(() => {
-    api.checks(props.task.id).then(setChecks).catch(() => undefined);
+    if (firstRead.current.delete("checks")) return;
+    const seq = ++checksSeq.current;
+    api
+      .checks(props.task.id)
+      .then((c) => {
+        if (seq === checksSeq.current) setChecks(c);
+      })
+      .catch(() => undefined);
   }, [props.task.id, props.checksRev, ended]);
   // Releases (#178): under sb-rescue new code arrives by promoting a commit (ReleasePanel); sb-rescue checks it and goes back by itself.
   const [release, setRelease] = useState<ReleaseStatus | null>(null);
@@ -242,6 +301,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
       .catch(() => undefined);
   };
   useEffect(() => {
+    if (firstRead.current.delete("staged")) return;
     void loadStaged();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.task.id, artifacts]);
@@ -553,47 +613,17 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
         </div>}
       </div>
 
-      {!cloud && props.task.resumeAt !== null && (
+      {!cloud && props.task.resumeAt !== null && (() => {
+        const rb = resumeBlock(props.task, autoResumeOn);
+        return (
         <div className="blk">
-          <h5>{props.task.resumeReason === "disk" ? t(m.resumeDiskHeading) : props.task.resumeReason === "github" ? t(m.resumeGithubHeading) : t(m.resumeLimitHeading)}</h5>
+          <h5>{rb.heading}</h5>
           <div className="hint">
-            {props.task.resumeReason === "disk" ? t(m.resumeDiskStopped) : props.task.resumeReason === "github" ? t(m.resumeGithubWaiting) : t(m.resumeLimitStopped)}
-            {props.task.resumeReason === "disk" ? (
-              !props.task.runnerSessionId ? (
-                t(m.resumeNoSession)
-              ) : autoResumeOn === false ? (
-                t(m.diskAutoOff)
-              ) : autoResumeOn === true ? (
-                <>
-                  {t(m.diskAutoOnBefore)}<b>{fmtClock(props.task.resumeAt)}</b>{t(m.diskAutoOnAfter)}
-                </>
-              ) : (
-                t(m.diskAutoUnknown)
-              )
-            ) : !props.task.runnerSessionId ? (
-              <>
-                <b>{fmtClock(props.task.resumeAt)}</b>{t(m.limitNoSession)}
-              </>
-            ) : autoResumeOn === true && props.task.resumePlannedAt !== null ? (
-              <>
-                <b>{fmtClock(props.task.resumeAt)}</b>{t(m.limitTryOnce)}<b>{fmtClock(props.task.resumePlannedAt)}</b>{t(m.limitTryOnceAfter)}
-              </>
-            ) : autoResumeOn === true ? (
-              <>
-                <b>{fmtClock(props.task.resumeAt)}</b>{t(m.limitAutoOn)}
-              </>
-            ) : autoResumeOn === false ? (
-              <>
-                <b>{fmtClock(props.task.resumeAt)}</b>{t(m.limitAutoOff)}
-              </>
-            ) : (
-              <>
-                <b>{fmtClock(props.task.resumeAt)}</b>{t(m.limitAutoUnknown)}
-              </>
-            )}
+            {rb.stopped}
+            {rb.parts.map((p, i) => (typeof p === "string" ? <Fragment key={i}>{p}</Fragment> : <b key={i}>{p.b}</b>))}
           </div>
           <div className="actions" style={{ marginTop: 6 }}>
-            <button className="pri" disabled={resumeBusy || busy || !props.task.runnerSessionId} onClick={() => resumeCall(() => api.resumeNow(props.task.id))} title={props.task.resumeReason === "disk" ? t(m.resumeNowDiskTitle) : props.task.resumeReason === "github" ? t(m.resumeNowGithubTitle) : t(m.resumeNowLimitTitle)}>
+            <button className="pri" disabled={resumeBusy || busy || !rb.canResumeNow} onClick={() => resumeCall(() => api.resumeNow(props.task.id))} title={rb.nowTitle}>
               {t(m.resumeNow)}
             </button>
             <button disabled={resumeBusy} onClick={() => resumeCall(() => api.cancelResume(props.task.id))} title={t(m.cancelResumeTitle)}>
@@ -602,7 +632,8 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
           </div>
           {resumeErr && <div className="hint warn">{resumeErr}</div>}
         </div>
-      )}
+        );
+      })()}
 
       <div className="blk">
         <h5>{t(m.actionsHeading)}</h5>
@@ -610,9 +641,6 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
           <button disabled={cloud || !busy} onClick={props.onAbort}>
             {t(m.abort)}
           </button>
-          <a className="btn" href={`vscode://file${props.task.cwd}`} title={t(m.openInVsCode)}>
-            {t(m.openInEditor)}
-          </a>
         </div>
         <div className="hint" style={{ marginTop: 6 }}>
           {cloud ? t(m.cloudActions) : t(m.diffTabHint)}

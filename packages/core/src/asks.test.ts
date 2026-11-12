@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, AnswerPolicy, ApprovalRuleMatch, Artifact, AskList, AskQuestion, PolicySubject, Backlog, BacklogItem, EventEnvelope, PendingApproval, RunnerAdapter, RunnerId, RunnerSession, StopRecord, StopSummary, Task } from "@switchboard/protocol";
 import { importing } from "../fixtures/github-import.ts";
-import { answersOf, ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, closedHits, grantOfChoice, noticeAsks, ON_HOLD_RESUME, parseAskBlock, rankAsks, resumeOfIssue, resumeOfTask } from "./asks.ts";
+import { answersOf, ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, closedHits, grantOfChoice, noticeAsks, ON_HOLD_RESUME, parseAskBlock, questionFacts, questionsReply, rankAsks, resumeOfIssue, resumeOfTask } from "./asks.ts";
 import { approvalBatches } from "./approval-batch.ts";
 import { heldSince, type GhRunner } from "./backlog.ts";
 import { reduceStops } from "./stops.ts";
@@ -15,8 +15,12 @@ import { startServer, type CoreServer } from "./server.ts";
 const NOW = Date.parse("2026-10-07T12:00:00Z");
 const ISSUES = "https://github.com/o/r/issues";
 
+/** `lastTurnQuestions` of a Task whose last turn asked one question tool question (#3122); options are `label` or `[label, description]`; a null question = it never ended a turn. */
+const turnOf = (question: string | null, options: Array<string | [string, string]> = []) => (): { questions: AskQuestion[]; seq: number } | null =>
+  question === null ? null : { questions: [{ header: null, question, options: options.map((o) => (typeof o === "string" ? { label: o, description: null } : { label: o[0], description: o[1] })), multiSelect: false }], seq: 9 };
+
 const item = (over: Partial<BacklogItem>): BacklogItem => ({
-  number: 1, title: "t", url: `${ISSUES}/${over.number ?? 1}`, type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-10-07T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, flow: false, bodyChars: 0, labels: [], waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
+  number: 1, title: "t", url: `${ISSUES}/${over.number ?? 1}`, type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-10-07T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, flow: false, bodyChars: 0, labels: [], waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
 
 const stop = (over: Partial<StopSummary>): StopSummary => ({
@@ -27,19 +31,17 @@ const stop = (over: Partial<StopSummary>): StopSummary => ({
 const DECISION = ["## 判断待ち", "**問い**: どちらの読みで作るか", "**選択肢**:", "- A: 既存の画面を置き換える — 影響: URL はそのまま", "- B: 新しい画面 — 影響: Rail が増える", "**推奨**: A — 画面を増やさない", "**止めた場所**: Task #9"].join("\n");
 
 describe("parseAskBlock", () => {
-  test("a ## 判断待ち and an operational check give the question, two choices and the recommendation with its reason", () => {
+  test("a ## 判断待ち gives the question, two choices and the recommendation with its reason", () => {
     expect(parseAskBlock(DECISION)).toEqual({
       question: "どちらの読みで作るか",
       choices: ["A: 既存の画面を置き換える — 影響: URL はそのまま", "B: 新しい画面 — 影響: Rail が増える"],
       grants: [null, null],
       recommendation: { choice: "A", why: "画面を増やさない" },
-      place: { text: "Task #9", pr: null },
+      place: { text: "Task #9", pr: null, reasons: [], diff: null },
       mockupTask: null,
     });
-    const check = parseAskBlock("前置き\n\n**確認**: PR #12 をマージしてよいか\n**選択肢**:\n- A: マージする\n- B: 待つ\n**推奨**: A — CI が緑\n");
-    expect(check.question).toBe("PR #12 をマージしてよいか");
-    expect(check.choices).toEqual(["A: マージする", "B: 待つ"]);
-    expect(check.recommendation).toEqual({ choice: "A", why: "CI が緑" });
+    // a reply's `**確認**:` is not read (#3122): an operational check comes from the question tool only
+    expect(parseAskBlock("前置き\n\n**確認**: PR #12 をマージしてよいか\n**選択肢**:\n- A: マージする\n").question).toBeNull();
   });
 
   test("text without a recommendation has recommendation null; text without the form has nothing", () => {
@@ -48,8 +50,8 @@ describe("parseAskBlock", () => {
   });
 
   test("place: **止めた場所** gives its text and the first PR it names; a place without a PR has pr null", () => {
-    expect(parseAskBlock("**確認**: マージしてよいか\n**止めた場所**: PR #12（+40/-3）、PR #13 の下").place).toEqual({ text: "PR #12（+40/-3）、PR #13 の下", pr: 12 });
-    expect(parseAskBlock("**問い**: どちらか\n**止めた場所**: Task #9 の手順 2").place).toEqual({ text: "Task #9 の手順 2", pr: null });
+    expect(parseAskBlock("**問い**: マージしてよいか\n**止めた場所**: PR #12（+40/-3）、PR #13 の下").place).toEqual({ text: "PR #12（+40/-3）、PR #13 の下", pr: 12, reasons: [], diff: "+40/-3" });
+    expect(parseAskBlock("**問い**: どちらか\n**止めた場所**: Task #9 の手順 2").place).toEqual({ text: "Task #9 の手順 2", pr: null, reasons: [], diff: null });
   });
 });
 
@@ -132,6 +134,30 @@ describe("answers (#936)", () => {
     expect(s).toMatchObject({ kind: "stop", state: "answered", resume: { state: "queued" } });
   });
 
+  test("a stage Task started by the answer is its resume even when GitHub's comment time is later", () => {
+    const createdAt = Date.parse("2026-10-07T11:00:00Z");
+    const answeredAt = new Date(createdAt + 5000).toISOString();
+    const lastTask = { id: "tk_new", status: "running" as const, statusAt: createdAt, createdAt, updatedAt: createdAt, action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null };
+    const [a] = asksFromBacklog([item({ number: 2, stage: "in-progress", answeredAt, lastTask })], NOW, { startedBy: (w, n) => (w === "ws_meta" && n === 2 ? "tk_new" : null) });
+    expect(a).toMatchObject({ state: "answered", resume: { state: "running", taskId: "tk_new" } });
+    // still its resume once the running Task is updated after the answer (a title or a permission), and resolved once done
+    const startedBy = () => "tk_new";
+    const [b] = asksFromBacklog([item({ number: 2, stage: "in-progress", answeredAt, lastTask: { ...lastTask, updatedAt: createdAt + 10000 } })], NOW, { startedBy });
+    expect(b).toMatchObject({ state: "answered", resume: { state: "running", taskId: "tk_new" } });
+    const [c] = asksFromBacklog([item({ number: 2, stage: "in-progress", answeredAt, lastTask: { ...lastTask, status: "done", updatedAt: createdAt + 10000 } })], NOW, { startedBy });
+    expect(c).toMatchObject({ state: "resolved", resume: null });
+  });
+
+  test("a running stage Task from before the answer, not started by it, stays queued", () => {
+    const createdAt = Date.parse("2026-10-07T11:00:00Z");
+    const answeredAt = new Date(createdAt + 5000).toISOString();
+    const lastTask = { id: "tk_old", status: "running" as const, statusAt: createdAt, createdAt, updatedAt: createdAt, action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null };
+    for (const startedBy of [undefined, () => null, () => "tk_other"]) {
+      const [a] = asksFromBacklog([item({ number: 2, stage: "in-progress", answeredAt, lastTask })], NOW, { startedBy });
+      expect(a).toMatchObject({ state: "answered", resume: { state: "queued", reason: "次の定期実行で再開" } });
+    }
+  });
+
   test("resume task: the usage limit queues, running runs, error fails; no reply is null", () => {
     const t = (over: Partial<Task>) => ({ id: "tk_1", status: "idle", resumeAt: null, updatedAt: NOW, ...over }) as Task;
     expect(resumeOfTask({ task: t({}), repliedAt: null, failure: null })).toBeNull();
@@ -170,24 +196,22 @@ describe("answers (#936)", () => {
 
 describe("grants (#2745)", () => {
   const GRANT = "定期実行 sch_x を enabled: false で POST /api/schedules に登録することだけ許可します";
-  const CHECK = `**確認**: 定期実行を登録してよいか\n**選択肢**:\n- A: 登録しない\n- B: 登録する — 許可: ${GRANT}\n**推奨**: B — 確かめるため`;
+  const OPTIONS: Array<[string, string]> = [["A: 登録しない", "何もしない"], ["B: 登録する (Recommended)", `確かめるため — 許可: ${GRANT}`]];
   const task = (over: Partial<Task> = {}): Task =>
     ({ id: "tk_g", workspaceId: null, title: "t", runner: "claude", cwd: "/tmp", scope: [], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, origin: "switchboard", resumeAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: NOW - 600_000, createdAt: NOW - 600_000, updatedAt: NOW - 60_000, ...over }) as Task;
-  const fromTasks = (t: Task, stops: StopSummary[], reply: string | null) =>
-    asksFromTasks({ approvals: [], tasks: [t], lastReply: () => (reply ? { text: reply, seq: 9 } : null), permissionEvents: () => [], stops: () => stops, workspaceName: () => null, now: NOW, policy: { policies: [], pbiOpen: () => true, approval: () => ({ subject: null, confirmHit: null }), confirm: () => null } });
+  const fromTasks = (t: Task, stops: StopSummary[], reply: string | null, options: Array<string | [string, string]> = ["A: はい", "B: いいえ"]) =>
+    asksFromTasks({ approvals: [], tasks: [t], lastTurnQuestions: turnOf(reply, options), permissionEvents: () => [], stops: () => stops, workspaceName: () => null, now: NOW, policy: { policies: [], pbiOpen: () => true, approval: () => ({ subject: null, confirmHit: null }), confirm: () => null } });
   const refused = (over: Partial<StopSummary> = {}) =>
     stop({ key: "task:tk_g\u0000POST /api/schedules\u0000\u0000permission\u0000", work: { workspaceId: null, issue: null, taskId: "tk_g" }, op: "POST /api/schedules", target: "", reason: "permission", evidence: "auto mode denied", next: "decide", ...over });
 
-  test("choice grant: a choice's ` — 許可: ` is its grant, in the order of the choices; a choice without one is null and its text stays whole", () => {
-    const b = parseAskBlock(CHECK);
-    expect(b.choices).toEqual(["A: 登録しない", `B: 登録する — 許可: ${GRANT}`]);
-    expect(b.grants).toEqual([null, GRANT]);
+  test("choice grant: a chosen option's ` — 許可: ` ends its line of the one reply; an option without one adds none", () => {
     expect(grantOfChoice("A: 登録しない — 影響: なし")).toBeNull();
     expect(grantOfChoice("A: x — 許可：全角の区切り")).toBe("全角の区切り");
-    const [check] = fromTasks(task(), [], CHECK);
-    expect(check).toMatchObject({ kind: "check", grants: [null, GRANT], grant: null, answers: ["choice", "text"] });
-    // a grant is not saved as a policy
-    expect(check!.policy).toMatchObject({ scopes: [], note: "許可文は 1 回きりで、方針には保存しません" });
+    const [check] = fromTasks(task(), [], "定期実行を登録してよいか", OPTIONS);
+    expect(check).toMatchObject({ kind: "check", grant: null, answers: ["questions"] });
+    const qs = check!.questions;
+    expect(questionsReply(qs, [{ choices: ["B: 登録する (Recommended)"] }])).toBe(`- 定期実行を登録してよいか: B: 登録する (Recommended) — 許可: ${GRANT}`);
+    expect(questionsReply(qs, [{ choices: ["A: 登録しない"] }])).toBe("- 定期実行を登録してよいか: A: 登録しない");
   });
 
   test("permission stop grant: a permission stop with a grant is not in the way and is answered by it; one without stays the runner's refusal", () => {
@@ -204,20 +228,31 @@ describe("grants (#2745)", () => {
   });
 
   test("permission stop grant: folded into the Task's check, the grant stays answerable and is not saved as a policy", () => {
-    const list = dedupeAsks(fromTasks(task(), [refused({ grant: GRANT })], "**確認**: 続けるか\n**選択肢**:\n- A: はい"));
+    const list = dedupeAsks(fromTasks(task(), [refused({ grant: GRANT })], "続けるか", ["A: はい"]));
     expect(list).toHaveLength(1);
-    expect(list[0]).toMatchObject({ kind: "check", grant: GRANT, answers: ["grant", "choice", "text"], policy: { scopes: [], note: "許可文は 1 回きりで、方針には保存しません" } });
+    expect(list[0]).toMatchObject({ kind: "check", grant: GRANT, answers: ["grant", "questions"], policy: { scopes: [], note: "許可文は 1 回きりで、方針には保存しません" } });
     // a stop without a grant folds as before
-    expect(dedupeAsks(fromTasks(task(), [refused({ reason: "input" })], "**確認**: 続けるか"))[0]).toMatchObject({ kind: "check", grant: null, answers: [] });
+    expect(dedupeAsks(fromTasks(task(), [refused({ reason: "input" })], "続けるか", []))[0]).toMatchObject({ kind: "check", grant: null, answers: [] });
   });
 });
 
 describe("asksFromBacklog", () => {
+  test("利用者確認: a line with a 期日 is not asked before it, and is from the time itself on", () => {
+    const line = (n: number, after: string | null) => ({ n, text: `${n}. 出ない（利用者確認: 期日 ${after} 以降 — 確認）`, after });
+    const ids = (now: number) =>
+      asksFromBacklog([item({ number: 4, stage: "in-progress", confirmations: [line(1, "2026-10-07T12:00:00Z"), line(2, "2026-10-07T21:00:01+09:00"), { n: 3, text: "3. 画面（利用者確認: 画面）", after: null }] })], now)
+        .filter((a) => a.kind === "confirmation").map((a) => a.id);
+    expect(ids(NOW - 1)).toEqual(["confirm:ws_meta#4:3"]);
+    expect(ids(NOW)).toEqual(["confirm:ws_meta#4:1", "confirm:ws_meta#4:3"]);
+    expect(ids(NOW + 3_600_000)).toEqual(["confirm:ws_meta#4:1", "confirm:ws_meta#4:2", "confirm:ws_meta#4:3"]);
+  });
+
+
   test("from backlog: a decision, two confirmations, an open wait, a decide stop and a usage-limit stop", () => {
     const asks = asksFromBacklog(
       [
         item({ number: 3, stage: "needs-decision", decision: { body: DECISION, at: "2026-10-07T10:00:00Z", issue: 9 } }),
-        item({ number: 4, stage: "in-progress", confirmations: [{ n: 2, text: "PC で見える（利用者確認: 画面）" }, { n: 3, text: "スマホで見える（利用者確認: 画面）" }] }),
+        item({ number: 4, stage: "in-progress", confirmations: [{ n: 2, text: "PC で見える（利用者確認: 画面）", after: null }, { n: 3, text: "スマホで見える（利用者確認: 画面）", after: null }] }),
         item({ number: 6, waits: [{ number: 70, kind: "pr", open: true, state: "pending", reason: "prerequisite", pbi: null }, { number: 71, kind: "issue", open: false, state: "met", reason: "prerequisite", pbi: null }], waitsAt: "2026-10-07T09:00:00Z" }),
         item({ number: 5, stage: "in-progress", stopSummary: [stop({}), stop({ key: "ws_meta#5\u0000codex exec\u0000\u0000usage-limit\u0000", op: "codex exec", target: "", reason: "usage-limit", evidence: "5h window", next: "wait", conditions: [{ key: "resetsAt", value: "2026-10-07T15:00:00Z", met: false }] })] }),
       ],
@@ -239,6 +274,16 @@ describe("asksFromBacklog", () => {
     expect(wait.conditions).toEqual([{ key: "pr#70", value: "open", met: false }, { key: "issue#71", value: "closed", met: true }]);
     const limit = auto.find((a) => a.kind === "stop")!;
     expect(limit).toMatchObject({ id: "stop:ws_meta#5|codex exec||usage-limit|", reason: "usage-limit: 5h window", task: { id: "tk_5" }, conditions: [{ key: "resetsAt" }] });
+  });
+
+  test("after: a depends stop with a date is an auto wait that names the date in its reason", () => {
+    const due = "2026-11-20T09:00:00+09:00";
+    const asks = asksFromBacklog([item({ number: 5, stage: "in-progress", stopSummary: [stop({ key: "ws_meta#5\u0000overlap\u0000\u0000depends\u0000", op: "overlap", target: "", reason: "depends", evidence: "3 日分の集計を待つ", next: "wait", conditions: [{ key: "after", value: due, met: false }] })] })], NOW);
+    const a = asks.find((x) => x.kind === "stop")!;
+    expect(a).toMatchObject({ needs: "auto", state: "open", reason: `depends: 3 日分の集計を待つ（期日 ${due} まで）` });
+    // a stop without a date, and one whose date is met, say nothing of it
+    const plain = asksFromBacklog([item({ number: 5, stage: "in-progress", stopSummary: [stop({ reason: "depends", evidence: "e", next: "wait", conditions: [{ key: "pr#12", value: "open", met: false }] })] })], NOW).find((x) => x.kind === "stop")!;
+    expect(plain.reason).toBe("depends: e");
   });
 
   test("missing: a needs-decision item without its ## 判断待ち has no question, but its PBI and source are known", () => {
@@ -389,11 +434,11 @@ describe("mockups (#2221)", () => {
     expect(of(`${DECISION}\n**画面イメージ**: tk_gone`).mockups).toEqual([]);
   });
 
-  test("mockups: an operational check's reply with **画面イメージ** has them too; other questions have none", () => {
-    const t = { id: "tk_c", workspaceId: null, title: "t", status: "done", outcome: "needs_action", reviewedAt: null, resumeAt: null, stage: null, createdAt: NOW - 600_000, updatedAt: NOW - 60_000 } as unknown as Task;
-    const list = asksFromTasks({ approvals: [], tasks: [t], lastReply: () => ({ text: "**確認**: どちらの画面にするか\n**画面イメージ**: `tk_m`", seq: 9 }), permissionEvents: () => [], stops: () => [], workspaceName: () => null, now: NOW, mockups });
+  test("mockups: an operational check has the asking Task's own 画面イメージ artifacts; other questions have none", () => {
+    const t = { id: "tk_m", workspaceId: null, title: "t", status: "done", outcome: "needs_action", reviewedAt: null, resumeAt: null, stage: null, createdAt: NOW - 600_000, updatedAt: NOW - 60_000 } as unknown as Task;
+    const list = asksFromTasks({ approvals: [], tasks: [t], lastTurnQuestions: turnOf("どちらの画面にするか", ["A", "B"]), permissionEvents: () => [], stops: () => [], workspaceName: () => null, now: NOW, mockups });
     expect(list.find((a) => a.kind === "check")!.mockups).toEqual(two);
-    const backlog = asksFromBacklog([item({ number: 4, stage: "in-progress", confirmations: [{ n: 1, text: "見える（利用者確認: 画面）" }] })], NOW, { mockups });
+    const backlog = asksFromBacklog([item({ number: 4, stage: "in-progress", confirmations: [{ n: 1, text: "見える（利用者確認: 画面）", after: null }] })], NOW, { mockups });
     expect(backlog.map((a) => a.mockups)).toEqual([[]]);
   });
 });
@@ -406,7 +451,33 @@ describe("asksFromTasks", () => {
   const approval = (taskId: string, id: string, askedAt: number): PendingApproval => ({ taskId, taskTitle: "t", workspace: null, id, kind: "write", tool: "Write", input: {}, detail: `write ${id}`, askedAt });
   const taskStop = (taskId: string, over: Partial<StopSummary>) => stop({ key: `task:${taskId}\u0000${over.op ?? "op"}\u0000\u0000${over.reason ?? "decision"}\u0000`, work: { workspaceId: null, issue: null, taskId }, ...over });
   const build = (tasks: Task[], extra: { approvals?: PendingApproval[]; stops?: StopSummary[]; reply?: string } = {}) =>
-    dedupeAsks(asksFromTasks({ approvals: extra.approvals ?? [], tasks, lastReply: () => (extra.reply === undefined ? null : { text: extra.reply, seq: 9 }), permissionEvents: () => [], stops: () => extra.stops ?? [], workspaceName: () => null, now: NOW }));
+    dedupeAsks(asksFromTasks({ approvals: extra.approvals ?? [], tasks, lastTurnQuestions: turnOf(extra.reply ?? null, ["A: はい"]), permissionEvents: () => [], stops: () => extra.stops ?? [], workspaceName: () => null, now: NOW }));
+
+  test("a reply's text makes no check", () => {
+    // the reply carries a `**確認**:` block but the turn asked no question tool question: nothing is asked of the person
+    const reply = "PR を出しました。\n\n**確認**: PR #12 をマージしてよいか\n**選択肢**:\n- A: マージする\n- B: 待つ";
+    const t = task({ outcome: "needs_action", status: "done" });
+    const list = asksFromTasks({ approvals: [], tasks: [t], lastTurnQuestions: () => ({ questions: [], seq: 9 }), permissionEvents: () => [], stops: () => [], workspaceName: () => null, now: NOW });
+    expect(reply).toContain("**確認**");
+    expect(list.filter((a) => a.kind === "check")).toEqual([]);
+    expect(build([t])).toEqual([]);
+  });
+
+  test("questionFacts reads the PR, reasons and the recommended option", () => {
+    const q = (question: string, options: Array<[string, string | null]>): AskQuestion[] => [{ header: null, question, options: options.map(([label, description]) => ({ label, description })), multiSelect: false }];
+    const facts = questionFacts(q("PR #12 をマージしてよいか\n[聞く] セキュリティ: security:github（+40/-5）\n- [再チェック web] 未実施\n補足の行", [["A: 待つ", null], ["B: マージする (Recommended)", "CI が緑"]]));
+    expect(facts.place).toEqual({ text: "PR #12 をマージしてよいか", pr: 12, reasons: ["[聞く] セキュリティ: security:github（+40/-5）", "[再チェック web] 未実施"], diff: "+40/-5" });
+    expect(facts.recommendation).toEqual({ choice: "B: マージする (Recommended)", why: "CI が緑" });
+    // the diff on the first line wins; no PR, no mark = nothing
+    expect(questionFacts(q("PR #3（+1/-2）を見てよいか\n[聞く] x（+9/-9）", [["A", null]])).place).toMatchObject({ pr: 3, diff: "+1/-2" });
+    // the PR's +add/-del on a line of its own (the skill pastes it after the reasons) is the diff too
+    expect(questionFacts(q("PR #4 をマージしてよいか\n+40/-5\n[聞く] セキュリティ: x", [["A", null]])).place).toMatchObject({ pr: 4, diff: "+40/-5", reasons: ["[聞く] セキュリティ: x"] });
+    // the PR's own line wins over a size inside a reason
+    expect(questionFacts(q("PR #4 をマージしてよいか\n[聞く] x（+9/-9）\n+40/-5", [["A", null]])).place).toMatchObject({ diff: "+40/-5" });
+    expect(questionFacts(q("続けるか", [["A", null]]))).toEqual({ place: null, recommendation: null });
+    expect(questionFacts(q("続けるか", [["A (Recommended) 以外", null], ["B (Recommended)", null]])).recommendation).toEqual({ choice: "B (Recommended)", why: "" });
+    expect(questionFacts([])).toEqual({ place: null, recommendation: null });
+  });
 
   test("a resumeAt in the past is the resume after an interruption, its condition met", () => {
     const at = NOW - 1_000;
@@ -420,7 +491,7 @@ describe("asksFromTasks", () => {
       { taskId: "tk_1", ts, ev: { t: "permission.resolved", id: "p1", decision: "allow", by: "user" } },
     ] as unknown as EventEnvelope[];
     const stateOf = (status: Task["status"]) =>
-      asksFromTasks({ approvals: [], tasks: [task({ status, updatedAt: ts + 1_000 })], lastReply: () => null, permissionEvents: () => events, stops: () => [], workspaceName: () => null, now: NOW }).find((a) => a.kind === "approval")?.state;
+      asksFromTasks({ approvals: [], tasks: [task({ status, updatedAt: ts + 1_000 })], lastTurnQuestions: turnOf(null), permissionEvents: () => events, stops: () => [], workspaceName: () => null, now: NOW }).find((a) => a.kind === "approval")?.state;
     expect(stateOf("done")).toBe("resolved");
     expect(stateOf("background")).toBe("resolved");
     expect(stateOf("running")).toBe("answered");
@@ -429,7 +500,7 @@ describe("asksFromTasks", () => {
   test("fold: a check and a person's stop go into the newest open approval with their conditions; two approvals stay two", () => {
     const t = task({ outcome: "needs_action", status: "done" });
     const stops = [taskStop(t.id, { reason: "input", conditions: [{ key: "answer", value: "none", met: false }] })];
-    const asks = build([t], { approvals: [approval(t.id, "p1", NOW - 5_000), approval(t.id, "p2", NOW - 1_000)], stops, reply: "**確認**: 続けるか" });
+    const asks = build([t], { approvals: [approval(t.id, "p1", NOW - 5_000), approval(t.id, "p2", NOW - 1_000)], stops, reply: "続けるか" });
     expect(asks.map((a) => a.id)).toEqual([`approval:${t.id}:p2`, `approval:${t.id}:p1`]);
     expect(asks[0]!.conditions).toEqual([{ key: "answer", value: "none", met: false }]);
   });
@@ -438,7 +509,7 @@ describe("asksFromTasks", () => {
     const t = task({ outcome: "needs_action", status: "done" });
     const decide = taskStop(t.id, { op: "a", reason: "input", next: "decide" });
     const waits = taskStop(t.id, { op: "b", reason: "permission", next: "wait", conditions: [{ key: "pr#3", value: "open", met: false }] });
-    const asks = build([t], { stops: [waits, decide], reply: "**確認**: 続けるか" });
+    const asks = build([t], { stops: [waits, decide], reply: "続けるか" });
     expect(asks.map((a) => `${a.kind}/${a.needs}`)).toEqual(["check/person", "stop/auto"]);
     expect(asks[0]!.question).toBe("続けるか");
   });
@@ -448,7 +519,7 @@ describe("asksFromTasks", () => {
     const pbi = asksFromBacklog([item({ number: 2, stage: "in-progress", answeredAt, lastTask: { id: "tk", status: "done", statusAt: NOW - 7_200_000, createdAt: NOW - 7_200_000, updatedAt: NOW - 7_200_000, action: "complete", outcome: "unknown" as const, reviewedAt: null, resumeAt: null } })], NOW);
     const before = task({ id: "tk_a", workspaceId: "ws_meta", title: "#2 実装", stage: { issue: 2, action: "complete" }, outcome: "needs_action", status: "done", createdAt: Date.parse(answeredAt) - 120_000, updatedAt: Date.parse(answeredAt) - 60_000 });
     const after = task({ id: "tk_b", workspaceId: "ws_meta", title: "#2 実装", stage: { issue: 2, action: "complete" }, outcome: "needs_action", status: "done", createdAt: Date.parse(answeredAt) - 90_000, updatedAt: Date.parse(answeredAt) + 60_000 });
-    const fromTasks = asksFromTasks({ approvals: [], tasks: [before, after], lastReply: () => ({ text: "**確認**: 続けるか", seq: 9 }), permissionEvents: () => [], stops: () => [], workspaceName: () => "switchboard", now: NOW });
+    const fromTasks = asksFromTasks({ approvals: [], tasks: [before, after], lastTurnQuestions: turnOf("続けるか"), permissionEvents: () => [], stops: () => [], workspaceName: () => "switchboard", now: NOW });
     expect(dedupeAsks([...pbi, ...fromTasks]).map((a) => `${a.kind}/${a.state}/${a.task?.id ?? "-"}`)).toEqual(["check/open/tk_b", "decision/answered/-"]);
   });
 
@@ -458,7 +529,7 @@ describe("asksFromTasks", () => {
     const at = { createdAt: Date.parse(answeredAt) - 120_000, updatedAt: Date.parse(answeredAt) - 60_000 };
     const renamed = task({ id: "tk_r", workspaceId: "ws_meta", title: "renamed", stage: { issue: 2, action: "complete" }, outcome: "needs_action", status: "done", ...at });
     const plain = task({ id: "tk_p", workspaceId: "ws_meta", title: "#2 実装", stage: null, outcome: "needs_action", status: "done", ...at });
-    const kinds = (t: Task) => dedupeAsks([...pbi, ...asksFromTasks({ approvals: [], tasks: [t], lastReply: () => ({ text: "**確認**: 続けるか", seq: 9 }), permissionEvents: () => [], stops: () => [], workspaceName: () => "switchboard", now: NOW })]).map((a) => `${a.kind}/${a.state}`);
+    const kinds = (t: Task) => dedupeAsks([...pbi, ...asksFromTasks({ approvals: [], tasks: [t], lastTurnQuestions: turnOf("続けるか"), permissionEvents: () => [], stops: () => [], workspaceName: () => "switchboard", now: NOW })]).map((a) => `${a.kind}/${a.state}`);
     expect(kinds(renamed)).toEqual(["decision/answered"]);
     expect(kinds(plain)).toEqual(["check/open", "decision/answered"]);
   });
@@ -467,7 +538,7 @@ describe("asksFromTasks", () => {
     const old = task({ id: "tk_old", workspaceId: "ws_meta", title: "#2 実装", stage: { issue: 2, action: "complete" }, outcome: "needs_action", status: "done", createdAt: NOW - 7_200_000, updatedAt: NOW - 3_600_000 });
     const next = task({ id: "tk_next", workspaceId: "ws_meta", title: "#2 実装", stage: { issue: 2, action: "complete" }, status: "running", createdAt: NOW - 600_000 });
     const other = task({ id: "tk_other", workspaceId: "ws_meta", title: "#3 実装", stage: { issue: 3, action: "complete" }, status: "running", createdAt: NOW - 600_000 });
-    const build2 = (tasks: Task[]) => asksFromTasks({ approvals: [], tasks, lastReply: () => ({ text: "**確認**: 続けるか", seq: 9 }), permissionEvents: () => [], stops: () => [], workspaceName: () => null, now: NOW }).map((a) => `${a.kind}/${a.task?.id}`);
+    const build2 = (tasks: Task[]) => asksFromTasks({ approvals: [], tasks, lastTurnQuestions: turnOf("続けるか"), permissionEvents: () => [], stops: () => [], workspaceName: () => null, now: NOW }).map((a) => `${a.kind}/${a.task?.id}`);
     expect(build2([old, other])).toEqual(["check/tk_old"]);
     expect(build2([old, next])).toEqual([]);
     // one that started before the old one stopped (its check is newer), or in another workspace, does not count
@@ -496,7 +567,7 @@ const fakeGh: GhRunner = async (args) => {
   return { code: 0, stdout: JSON.stringify(args.includes("after=CURSOR1") ? pages[1] : pages[0]), stderr: "" };
 };
 
-const CHECK = "PR を出しました。\n\n**確認**: PR #12 をマージしてよいか\n**選択肢**:\n- A: マージする\n- B: 待つ\n**推奨**: A — CI が緑\n**止めた場所**: PR #12";
+const CHECK_QS: AskQuestion[] = [{ header: null, question: "PR #12 をマージしてよいか\n[聞く] セキュリティ: security:github（+40/-5）", options: [{ label: "A: マージする (Recommended)", description: "CI が緑" }, { label: "B: 待つ", description: null }], multiSelect: false }];
 const ASK: AgentEvent = { t: "permission.ask", id: "perm1", kind: "write", tool: "Write", input: { file_path: "/tmp/x" }, detail: "write x" };
 
 /** A scripted runner (core.test.ts's fakeAdapter, cut down): replays `script`, pausing on a permission.ask until it is answered; lingers after its turn. */
@@ -553,7 +624,7 @@ describe("GET /api/asks", () => {
     home = mkdtempSync(join(tmpdir(), "sb-asks-"));
     const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
     const end = (summary: string): AgentEvent => ({ t: "session.end", status: "ok", summary });
-    core = await startServer(cfg, [runner("claude", [ASK, { t: "message.delta", role: "assistant", text: "writing" }]), runner("codex", [end(CHECK)])], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: importing(fakeGh), backlogAutoImport: true, judge: () => new Promise(() => undefined), rubricJudge: () => new Promise(() => undefined) });
+    core = await startServer(cfg, [runner("claude", [ASK, { t: "message.delta", role: "assistant", text: "writing" }]), runner("codex", [{ t: "question.ask", id: "q0", questions: CHECK_QS }, end("PR を出しました。")])], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: importing(fakeGh), backlogAutoImport: true, judge: () => new Promise(() => undefined), rubricJudge: () => new Promise(() => undefined) });
     base = `http://127.0.0.1:${core.server.port}`;
     await until(async () => !((await fetch(`${base}/api/backlog`).then((r) => r.json())) as Backlog).syncs.some((s) => s.syncing));
   });
@@ -584,7 +655,7 @@ describe("GET /api/asks", () => {
     const person = list.filter((x) => x.needs === "person" && x.state === "open" && x.kind !== "notice");
     expect(person.map((x) => x.kind).sort()).toEqual(["approval", "check", "confirmation", "confirmation", "decision"]);
     expect(person.find((x) => x.kind === "approval")).toMatchObject({ id: `approval:${a}:perm1`, question: "write x", route: "approval", task: { id: a, title: "approve me" }, source: { taskId: a } });
-    expect(person.find((x) => x.kind === "check")).toMatchObject({ question: "PR #12 をマージしてよいか", choices: ["A: マージする", "B: 待つ"], recommendation: { choice: "A", why: "CI が緑" }, route: "task", source: { taskId: c } });
+    expect(person.find((x) => x.kind === "check")).toMatchObject({ question: "PR #12 をマージしてよいか\n[聞く] セキュリティ: security:github（+40/-5）", questions: CHECK_QS, choices: [], place: { pr: 12, diff: "+40/-5" }, recommendation: { choice: "A: マージする (Recommended)", why: "CI が緑" }, route: "task", source: { taskId: c } });
     expect(person.find((x) => x.kind === "decision")).toMatchObject({ pbi: { number: 306 }, question: "保存先をどちらにするか", route: "backlog" });
     for (const x of person) expect(x.workspace).toEqual({ id: meta().id, name: meta().name });
     expect(person.find((x) => x.kind === "decision")!.source.url).toStartWith("https://github.com/acme/app/issues/");
@@ -676,6 +747,47 @@ describe("GET /api/asks", () => {
   });
 });
 
+describe("question tool answer on a moved PR (#3122)", () => {
+  const ASKED = "a".repeat(40);
+  const MOVED = "b".repeat(40);
+  let core: CoreServer | null = null;
+  let home = "";
+  afterEach(async () => {
+    await core?.stop();
+    core = null;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("question tool answer refused on a moved PR", async () => {
+    // a fake gh: the PR's head is not the one the [merge-ask] mark named
+    const gh: GhRunner = async (args) =>
+      args[0] === "pr" && args[1] === "view"
+        ? { code: 0, stdout: JSON.stringify({ state: "OPEN", headRefOid: MOVED, comments: [{ body: `[merge-ask] security ${ASKED}`, createdAt: new Date(Date.now() - 60_000).toISOString() }], commits: [] }), stderr: "" }
+        : fakeGh(args, "");
+    home = mkdtempSync(join(tmpdir(), "sb-asks-moved-"));
+    const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
+    const script: AgentEvent[] = [{ t: "question.ask", id: "q1", questions: CHECK_QS }, { t: "session.end", status: "ok", summary: "確認をお願いします" }];
+    core = await startServer(cfg, [runner("claude", script), runner("codex", [])], { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: () => null, gh: importing(gh), backlogAutoImport: true, judge: () => new Promise(() => undefined), rubricJudge: () => new Promise(() => undefined) });
+    const base = `http://127.0.0.1:${core.server.port}`;
+    const post = (path: string, body: unknown) => fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    for (let n = 0; n < 400 && ((await fetch(`${base}/api/backlog`).then((r) => r.json())) as Backlog).syncs.some((s) => s.syncing); n++) await Bun.sleep(10);
+    const meta = core.db.listWorkspaces().find((w) => w.kind === "meta")!;
+    const t = (await (await post("/api/tasks", { cwd: home, title: "ask me", prompt: "open the PR", runner: "claude", workspaceId: meta.id })).json()) as Task;
+    for (let n = 0; n < 400 && core.db.getTask(t.id)!.status !== "done"; n++) await Bun.sleep(10);
+    const check = (((await fetch(`${base}/api/asks`).then((r) => r.json())) as AskList).asks).find((a) => a.kind === "check" && a.task?.id === t.id)!;
+    expect(check).toMatchObject({ answers: ["questions"], place: { pr: 12 } });
+    const userTurns = () => core!.db.listEvents(t.id).filter((e) => e.ev.t === "message.delta" && e.ev.role === "user").length;
+    // an option chosen: 409 with what moved, nothing reaches the runner
+    const r = await post("/api/asks/answer", { id: check.id, answer: { kind: "questions", answers: [{ choices: ["A: マージする (Recommended)"] }] } });
+    expect(r.status).toBe(409);
+    expect(((await r.json()) as { changes: string[] }).changes).toEqual([`PR #12 の差分が変わりました（${ASKED.slice(0, 7)} → ${MOVED.slice(0, 7)}）`]);
+    // a free text alone is not offered by this card (the send box answers it): 409 too
+    expect((await post("/api/asks/answer", { id: check.id, answer: { kind: "text", text: "確かめ直して" } })).status).toBe(409);
+    await Bun.sleep(50);
+    expect(userTurns()).toBe(0);
+  });
+});
+
 describe("policy (#938)", () => {
   const DECIDE = "## 判断待ち\n**問い**: マージしてよいか\n**選択肢**:\n- A: マージする\n- B: 待つ\n**推奨**: A — CI が緑\n**止めた場所**: PR #12";
   const decisionStop = (over: Partial<StopSummary> = {}) => stop({ op: "gh pr merge", target: "PR #13", reason: "decision", firstAt: NOW - 10_800_000, conditions: [{ key: "area", value: "web", met: true }], ...over });
@@ -696,7 +808,7 @@ describe("policy (#938)", () => {
   const task = (over: Partial<Task>) =>
     ({ id: "tk_1", workspaceId: null, title: "t", runner: "claude", cwd: "/tmp", scope: [], status: "waiting", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, origin: "switchboard", resumeAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: NOW - 600_000, createdAt: NOW - 600_000, updatedAt: NOW - 60_000, ...over }) as Task;
   const fromTasks = (approvals: PendingApproval[], policies: AnswerPolicy[] = [], confirmHit: ApprovalRuleMatch | null = null, stops: StopSummary[] = [], tasks: Task[] = [task({})], reply: string | null = null) =>
-    asksFromTasks({ approvals, tasks, lastReply: () => (reply ? { text: reply, seq: 9 } : null), permissionEvents: () => [], stops: () => stops, workspaceName: () => null, now: NOW, policy: env(policies, confirmHit) });
+    asksFromTasks({ approvals, tasks, lastTurnQuestions: turnOf(reply, ["A: はい", "B: いいえ"]), permissionEvents: () => [], stops: () => stops, workspaceName: () => null, now: NOW, policy: env(policies, confirmHit) });
   const exec = (command: string, id = "p1"): PendingApproval => ({ taskId: "tk_1", taskTitle: "t", workspace: null, id, kind: "exec", tool: "Bash", input: { command }, detail: command, askedAt: NOW - 1000 });
 
   test("policy: subject — an exec approval is op exec and the command, a network one has none; a check / decision takes the newest series before it, head null, no GitHub call", () => {
@@ -710,7 +822,7 @@ describe("policy (#938)", () => {
     ghCalls = 0;
     expect(decide([], [old, newer, later]).subject).toEqual({ kind: "decision", op: "gh pr merge", target: "PR #13", conditions: [{ key: "area", value: "web" }], head: null });
     expect(ghCalls).toBe(0);
-    const check = fromTasks([], [], null, [decisionStop({ firstAt: NOW - 120_000 })], [task({ outcome: "needs_action" })], "**確認**: 続けるか\n**選択肢**:\n- A: はい\n- B: いいえ")[0]!;
+    const check = fromTasks([], [], null, [decisionStop({ firstAt: NOW - 120_000 })], [task({ outcome: "needs_action" })], "続けるか")[0]!;
     expect(check).toMatchObject({ kind: "check", subject: { kind: "check", op: "gh pr merge" } });
   });
 
@@ -718,10 +830,10 @@ describe("policy (#938)", () => {
     const a = decide([], [decisionStop()]);
     expect(a.policy).toMatchObject({ scopes: ["once", "pbi", "repo"], note: null });
     expect(a.policy.defaults).toMatchObject({ target: "PR #13", when: [{ key: "area", value: "web" }], expiresAt: NOW + 30 * 86_400_000 });
-    const t = fromTasks([], [], null, [decisionStop({ firstAt: NOW - 120_000 })], [task({ outcome: "needs_action" })], "**確認**: 続けるか\n**選択肢**:\n- A: はい")[0]!;
+    const t = fromTasks([], [], null, [decisionStop({ firstAt: NOW - 120_000 })], [task({ outcome: "needs_action" })], "続けるか")[0]!;
     expect(t.policy.scopes).toEqual(["once", "repo"]);
     // a stage Task's own question belongs to the PBI it works on
-    const staged = fromTasks([], [], null, [decisionStop({ firstAt: NOW - 120_000 })], [task({ outcome: "needs_action", workspaceId: "ws_meta", stage: { issue: 938, action: "complete" } })], "**確認**: 続けるか\n**選択肢**:\n- A: はい")[0]!;
+    const staged = fromTasks([], [], null, [decisionStop({ firstAt: NOW - 120_000 })], [task({ outcome: "needs_action", workspaceId: "ws_meta", stage: { issue: 938, action: "complete" } })], "続けるか")[0]!;
     expect(staged.policy.scopes).toEqual(["once", "pbi", "repo"]);
     expect(decide([], []).policy).toMatchObject({ scopes: ["once"], note: "操作と対象が記録されていないため、今回のみ" });
     const refused = asksFromBacklog([item({ number: 5, stage: "in-progress", stopSummary: [stop({ reason: "permission", evidence: "denied by the runner", next: "decide" })] })], NOW, { policy: env() })[0]!;
@@ -776,22 +888,42 @@ describe("approvalBatches (#2046)", () => {
       // stopped on the login again after the answer: a new stop, carrying the earlier answer (recordStop), unanswered
       { task: h, records: [sso(h, NOW - 9_000, { answer: { ref: "seq:3", at: NOW - 8_000 } }), sso(h, NOW - 5_000, { id: "tk_h/sso2", answer: { ref: "seq:3", at: NOW - 8_000 } })] },
     ];
-    const asks = dedupeAsks(entries.flatMap((x) => asksFromTasks({ approvals: [], tasks: [x.task], lastReply: () => null, permissionEvents: () => [], stops: () => reduceStops(x.records), workspaceName: (id) => id, now: NOW })));
+    const asks = dedupeAsks(entries.flatMap((x) => asksFromTasks({ approvals: [], tasks: [x.task], lastTurnQuestions: turnOf(null), permissionEvents: () => [], stops: () => reduceStops(x.records), workspaceName: (id) => id, now: NOW })));
     const batches = approvalBatches(entries, asks);
     expect(batches.map((x) => x.id)).toEqual(["batch:sso", "batch:deploy"]);
-    // oldest Task first, across workspaces; each one's question as listed (a needs_action Task's stop folds into its check)
+    // oldest Task first, across workspaces; each one's question as listed (a needs_action Task with no question tool question has no check, so its stop stays its own)
     expect(batches[0]!.asks).toEqual([
-      { askId: "check:tk_a:", taskId: "tk_a", title: "title tk_a", workspaceId: "ws_1", op: "aws sso login", at: NOW - 50_000 },
-      { askId: "check:tk_b:", taskId: "tk_b", title: "title tk_b", workspaceId: "ws_2", op: "aws sso login", at: NOW - 40_000 },
-      { askId: "check:tk_j:", taskId: "tk_j", title: "title tk_j", workspaceId: null, op: "aws sso login", at: NOW - 9_000 },
-      // its stop asks nothing on its own (asked and answered before, #939), so it is not folded
+      { askId: "stop:task:tk_a|aws sso login||auth|", taskId: "tk_a", title: "title tk_a", workspaceId: "ws_1", op: "aws sso login", at: NOW - 50_000 },
+      { askId: "stop:task:tk_b|aws sso login||auth|", taskId: "tk_b", title: "title tk_b", workspaceId: "ws_2", op: "aws sso login", at: NOW - 40_000 },
+      { askId: "stop:task:tk_j|aws sso login||auth|", taskId: "tk_j", title: "title tk_j", workspaceId: null, op: "aws sso login", at: NOW - 9_000 },
+      // asked and answered before (#939)
       { askId: "stop:task:tk_h|aws sso login||auth|", taskId: "tk_h", title: "title tk_h", workspaceId: null, op: "aws sso login", at: NOW - 5_000 },
     ]);
     expect(batches[1]!.asks.map((x) => [x.taskId, x.op, x.workspaceId])).toEqual([["tk_c", "POST /api/daemon/promote", "ws_3"]]);
+    expect(batches.some((x) => x.kind === "security-merge")).toBe(false);
     expect(batches[0]!.asks.every((x) => asks.some((q) => q.id === x.askId))).toBe(true);
     // a kind with no Task has no batch
     expect(approvalBatches(entries.slice(1, 3), asks).map((x) => x.kind)).toEqual(["sso"]);
     expect(approvalBatches([], [])).toEqual([]);
+  });
+
+  test("security merge checks fold into one across tasks", () => {
+    const reply = (pr: number, reason: string) => `PR #${pr} をマージしてよいか\n${reason}`;
+    const sec = (pr: number, diff: string) => reply(pr, `[聞く] セキュリティ: security:github（+${diff}）\n[聞く] rescue`);
+    const mk = (id: string, ws: string, createdAt: number, text: string | null) => {
+      const t = task(id, { workspaceId: ws, createdAt, updatedAt: createdAt });
+      return { task: t, records: [] as StopRecord[], asks: asksFromTasks({ approvals: [], tasks: [t], lastTurnQuestions: turnOf(text, ["A: マージする", "B: 待つ"]), permissionEvents: () => [], stops: () => [], workspaceName: (i) => i, now: NOW }) };
+    };
+    const xs = [
+      mk("tk_new", "ws_2", NOW - 100_000, sec(22, "12/-3")),
+      mk("tk_old", "ws_1", NOW - 300_000, sec(21, "40/-5")),
+      mk("tk_rescue", "ws_1", NOW - 200_000, reply(23, "[聞く] rescue")),
+      mk("tk_plain", "ws_2", NOW - 150_000, "続けてよいか"),
+    ];
+    const batches = approvalBatches(xs.map(({ task: t, records }) => ({ task: t, records })), dedupeAsks(xs.flatMap((x) => x.asks)));
+    expect(batches.map((b) => b.id)).toEqual(["batch:security-merge"]);
+    expect(batches[0]!.asks.map((a) => [a.taskId, a.workspaceId, a.pr, a.diff])).toEqual([["tk_old", "ws_1", 21, "+40/-5"], ["tk_new", "ws_2", 22, "+12/-3"]]);
+    expect(batches[0]!.asks[0]!.reasons).toEqual(["[聞く] セキュリティ: security:github（+40/-5）", "[聞く] rescue"]);
   });
 });
 

@@ -9,7 +9,7 @@ import { ASK_HISTORY_MS } from "./asks.ts";
 import type { GhRunner } from "./backlog.ts";
 import { loadConfig } from "./config.ts";
 import type { judgeTurn } from "./judge.ts";
-import { startServer, type CoreServer } from "./server.ts";
+import { heldWhy, startServer, type CoreServer } from "./server.ts";
 
 /* What a restart of the daemon keeps (#1139): the same SWITCHBOARD_HOME opened by a second startServer, as asks-answer.test.ts boots one. */
 
@@ -148,5 +148,13 @@ describe("judgement across a restart (#1139)", () => {
     await Bun.sleep(100);
     expect(calls).toEqual([]);
     expect(core!.db.getTask(t.id)).toMatchObject({ judgedResult: null, judgingAt: null });
+  });
+});
+
+describe("heldWhy", () => {
+  test("an Issue named （リリース） says to rewrite it as a PR number; a PR keeps the old sentence", () => {
+    const x = (kind: string) => ({ kind, number: 71, state: "unknown", need: "release" }) as unknown as Parameters<typeof heldWhy>[0];
+    expect(heldWhy(x("issue"))).toBe("#71 は Issue に（リリース）が付いている（PR の番号に直す）");
+    expect(heldWhy(x("pr"))).toBe("PR #71 の反映を確かめられない");
   });
 });

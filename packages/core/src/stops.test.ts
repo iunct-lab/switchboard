@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { StopRecord } from "@switchboard/protocol";
-import { compareStopConditions, FenceReader, issueOf, reduceStops, reportedLimit, reserveStopRetry, StopFenceReader, stopKey, stopRecoveryPrompt } from "./stops.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { StopRecord, type Task } from "@switchboard/protocol";
+import { Db } from "./db.ts";
+import { compareStopConditions, FenceReader, issueOf, reduceStops, reportedLimit, reserveStopRetry, StopFenceReader, stopKey, stopMarks, stopRecordsFor, stopRecoveryPrompt, stopWork, stuckSchedule } from "./stops.ts";
 import { parseArtifactFence } from "./artifacts.ts";
 
 let n = 0;
@@ -264,6 +268,12 @@ describe("reserveStopRetry / stopRecoveryPrompt (#949)", () => {
     expect(p).toContain("overlap が重なり（defer）で進めないと言ったら、その出力の conditions をそのまま写す");
   });
 
+  test("stop prompt names the after condition of a date wait and the route for waits over 7 days", () => {
+    const p = stopRecoveryPrompt([]);
+    expect(p).toContain('{"key":"after","value":"<ISO 8601 のタイムゾーンつき日時>"}');
+    expect(p).toContain("7 日を超えるなら PBI の工程 Task は占有の解放の --after で引き渡す");
+  });
+
   test("stop prompt names the runner condition of a usage-limit stop: runner#<runner> with the time (#4408), read by reportedLimit", () => {
     const p = stopRecoveryPrompt([]);
     expect(p).toContain("使用上限（usage-limit）は止めたランナーを runner#<ランナー>");
@@ -302,5 +312,142 @@ describe("FenceReader (#1778)", () => {
     expect(r.feed("途中\n```switchboard-artifact\n" + JSON.stringify({ path: "b.html" }))).toEqual([]);
     expect(r.feed("\n```")).toEqual([]);
     expect(r.end()).toEqual([{ ok: true, report: { path: "b.html" } }]);
+  });
+});
+
+describe("stops of a schedule", () => {
+  const mk = (id: string, scheduleId: string | null, createdAt: number) =>
+    ({ id, workspaceId: null, title: id, runner: "claude", cwd: "/tmp", scope: [], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: createdAt, createdAt, updatedAt: createdAt }) as Task;
+  const open = () => {
+    const dir = mkdtempSync(join(tmpdir(), "switchboard.t4495."));
+    return { db: new Db(join(dir, "t.db")), dir };
+  };
+  const stopOf = (task: Task, over: Partial<Omit<StopRecord, "work">> = {}) =>
+    stop({ op: "schedule run", target: "", reason: "input", evidence: "need input", ...over, work: { workspaceId: null, issue: null, taskId: task.id, ...(task.scheduleId ? { scheduleId: task.scheduleId } : {}) } });
+
+  test("two Tasks of one schedule are one series; another schedule is another", () => {
+    const a1 = mk("a1", "sa", 1), a2 = mk("a2", "sa", 2), b1 = mk("b1", "sb", 3);
+    expect(stopWork(a1)).toMatchObject({ scheduleId: "sa" });
+    expect(stopKey(stopOf(a1))).toBe(stopKey(stopOf(a2)));
+    expect(stopKey(stopOf(a1))).not.toBe(stopKey(stopOf(b1)));
+    expect(reduceStops([stopOf(a1), stopOf(a2)])).toMatchObject([{ count: 2 }]);
+    expect(reduceStops([stopOf(a1), stopOf(b1)])).toHaveLength(2);
+    // a record without scheduleId (an old one) stays the Task's own work
+    expect(stopKey(stopOf(mk("x", null, 4)))).not.toBe(stopKey(stopOf(mk("y", null, 5))));
+  });
+
+  test("stuckSchedule: returned at two stops; null after an answer or a Task that did not stop", () => {
+    const { db, dir } = open();
+    try {
+      const t = [mk("a1", "sa", 1), mk("a2", "sa", 2), mk("a3", "sa", 3)];
+      for (const x of t) db.insertTask(x);
+      expect(db.recentScheduleTaskIds("sa", 2)).toEqual(["a3", "a2"]);
+      db.appendEvent("a1", { t: "stop.record", stop: stopOf(t[0]!) });
+      expect(stuckSchedule(db, { id: "sa", lastTaskId: "a1" })).toBeNull(); // once
+      const s2 = stopOf(t[1]!);
+      db.appendEvent("a2", { t: "stop.record", stop: s2 });
+      expect(stuckSchedule(db, { id: "sa", lastTaskId: "a2" })).toMatchObject({ count: 2, state: "waiting" });
+      expect(stuckSchedule(db, { id: "sa", lastTaskId: "a3" })).toBeNull(); // the latest Task ended without stopping
+      expect(stuckSchedule(db, { id: "sa", lastTaskId: null })).toBeNull();
+      expect(stuckSchedule(db, { id: "sb", lastTaskId: "a2" })).toBeNull();
+      expect(stopRecordsFor(db, t[2]!)).toHaveLength(2);
+      // the person answered: a resumable series is not stuck
+      db.appendEvent("a2", { t: "stop.record", stop: { ...s2, answer: { ref: "seq:9", at: s2.at + 1 }, at: s2.at + 1 } });
+      expect(stuckSchedule(db, { id: "sa", lastTaskId: "a2" })).toBeNull();
+    } finally {
+      db.close?.();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("stuckSchedule: a Task whose stop ended resolved breaks the run", () => {
+    const { db, dir } = open();
+    try {
+      const t = [mk("d1", "sd", 1), mk("d2", "sd", 2)];
+      for (const x of t) db.insertTask(x);
+      const s1 = stopOf(t[0]!);
+      db.appendEvent("d1", { t: "stop.record", stop: s1 });
+      db.appendEvent("d1", { t: "stop.record", stop: { ...s1, state: "resolved", at: s1.at + 1 } });
+      db.appendEvent("d2", { t: "stop.record", stop: stopOf(t[1]!) });
+      expect(stuckSchedule(db, { id: "sd", lastTaskId: "d2" })).toBeNull();
+    } finally {
+      db.close?.();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("stuckSchedule: only consecutive Tasks count; an exhausted stop is released by the person writing or its conditions met", () => {
+    const { db, dir } = open();
+    try {
+      const t = [mk("c1", "sc", 1), mk("c2", "sc", 2), mk("c3", "sc", 3), mk("c4", "sc", 4)];
+      for (const x of t) db.insertTask(x);
+      db.appendEvent("c1", { t: "stop.record", stop: stopOf(t[0]!) });
+      // c2 ended without stopping: c1 and c3 are not consecutive
+      db.appendEvent("c3", { t: "stop.record", stop: stopOf(t[2]!) });
+      expect(stuckSchedule(db, { id: "sc", lastTaskId: "c3" })).toBeNull();
+      const s4 = stopOf(t[3]!, { state: "exhausted" });
+      db.appendEvent("c4", { t: "stop.record", stop: s4 });
+      expect(stuckSchedule(db, { id: "sc", lastTaskId: "c4" })).toMatchObject({ count: 2, state: "exhausted", firstAt: db.listStopRecords(["c3"])[0]!.at });
+      // its conditions all met: released
+      db.appendEvent("c4", { t: "stop.record", stop: { ...s4, conditions: [{ key: "lock", value: "gone", met: true }], at: s4.at + 1 } });
+      expect(stuckSchedule(db, { id: "sc", lastTaskId: "c4" })).toBeNull();
+      db.appendEvent("c4", { t: "stop.record", stop: { ...s4, at: s4.at + 2 } });
+      expect(stuckSchedule(db, { id: "sc", lastTaskId: "c4" })).not.toBeNull();
+      // a daemon's own turn (a user-role message) is no answer, nor is an answer older than the stop: still stuck
+      db.appendEvent("c4", { t: "message.delta", role: "user", text: "続けてください" });
+      db.appendEvent("c4", { t: "stop.record", stop: { ...s4, answer: { ref: "seq:1", at: s4.at - 1 }, at: s4.at + 3 } });
+      expect(stuckSchedule(db, { id: "sc", lastTaskId: "c4" })).not.toBeNull();
+      // the person answered the exhausted stop (TaskManager.send records it, answerableStops): released
+      db.appendEvent("c4", { t: "stop.record", stop: { ...s4, answer: { ref: "seq:7", at: s4.at + 4 }, at: s4.at + 4 } });
+      expect(stuckSchedule(db, { id: "sc", lastTaskId: "c4" })).toBeNull();
+    } finally {
+      db.close?.();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("stopMarks (#4520)", () => {
+  const mk = (id: string, over: Partial<Task> = {}) =>
+    ({ id, workspaceId: null, title: id, runner: "claude", cwd: "/tmp", scope: [], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1, ...over }) as Task;
+  const own = (t: Task, over: Partial<Omit<StopRecord, "work">> = {}) => stop({ ...over, work: { workspaceId: null, issue: null, taskId: t.id } });
+
+  test("the newest series of a stopped Task; no record, 確認済み and 完了 are left out", () => {
+    const dir = mkdtempSync(join(tmpdir(), "switchboard.t4520."));
+    const db = new Db(join(dir, "t.db"));
+    try {
+      const a = mk("a"), none = mk("none"), reviewed = mk("rv", { reviewedAt: 5 }), done = mk("dn", { outcome: "done" }), running = mk("rn", { status: "running" }), idle = mk("id", { status: "idle" });
+      for (const t of [a, none, reviewed, done, running, idle]) {
+        db.insertTask(t);
+        if (t.id !== "none") db.appendEvent(t.id, { t: "stop.record", stop: own(t, { reason: "transient", evidence: "HTTP 503" }) });
+      }
+      db.appendEvent("a", { t: "stop.record", stop: own(a, { reason: "decision", evidence: "どちらか決めてください", conditions: [{ key: "pr#7", value: "open", met: false }] }) });
+      // the Task's own stops are read only for the Tasks that may need the person
+      const marks = stopMarks(db, db.listTasks());
+      expect(Object.keys(marks)).toEqual(["a"]);
+      expect(marks.a).toEqual({ key: expect.any(String), reason: "decision", state: "waiting", conditions: [{ key: "pr#7", value: "open", met: false }], count: 1 });
+    } finally {
+      db.close?.();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a newer stop of another Task of the same schedule is not this Task's last stop", () => {
+    const dir = mkdtempSync(join(tmpdir(), "switchboard.t4520."));
+    const db = new Db(join(dir, "t.db"));
+    try {
+      const older = mk("old", { scheduleId: "sch1", createdAt: 1 }), newer = mk("new", { scheduleId: "sch1", createdAt: 2 });
+      for (const t of [older, newer]) db.insertTask(t);
+      db.appendEvent("old", { t: "stop.record", stop: stop({ reason: "decision", evidence: "どちらか決めてください", work: { workspaceId: "ws1", issue: 939, taskId: "old" } }) });
+      db.appendEvent("new", { t: "stop.record", stop: stop({ reason: "depends", state: "resolved", work: { workspaceId: "ws1", issue: 939, taskId: "new" } }) });
+      // more newer Tasks of the schedule than stopRecordsFor reads: the old Task's own stop is still its mark
+      for (let i = 0; i < 40; i++) db.insertTask(mk(`later${i}`, { scheduleId: "sch1", createdAt: 10 + i, status: "running" }));
+      const marks = stopMarks(db, db.listTasks());
+      expect(marks.old).toMatchObject({ reason: "decision", state: "waiting" });
+      expect(marks.new).toMatchObject({ reason: "depends", state: "resolved" });
+    } finally {
+      db.close?.();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -64,7 +64,7 @@ export async function runTests(picked: Picked, d: RunDeps): Promise<number> {
   // 外のビルドを先に始め、ホストの手順の間だけ枠を持つ
   const started = (offFiles ? groups : []).map((g) => ({
     g,
-    done: d.offload!.run(groupScript(g.steps, { bun: d.offload!.bun, ...(d.offload!.codex ? { codex: d.offload!.codex } : {}), ...(d.repo ? { repo: d.repo } : {}) }), ROOT, g.size).catch((e) => ({ code: 1, output: `sb-offload: ${e instanceof Error ? e.message : String(e)}` })),
+    done: d.offload!.run(groupScript(g.steps, { ...(d.repo ? { repo: d.repo } : {}) }), ROOT, g.size).catch((e) => ({ code: 1, output: `sb-offload: ${e instanceof Error ? e.message : String(e)}` })),
   }));
   let hostCode = 0;
   if (hostFiles.length) {

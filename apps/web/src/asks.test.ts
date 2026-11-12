@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Ask, AskBatch } from "@switchboard/protocol";
-import { answerButtons, askCardParts, batchLines, questionHead, hiddenByBatches, grantOf, taskAsks, withoutGrant, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, broadTarget, previousLines, scopeLabel, blockerLines, groupAsks, isQuick, keptAnswers, KIND_LABEL, quickGroups, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, issueOpenHref, unblockLinks, unblocksLine, workspaceChips, workspaceSections, type Answered } from "./asks.ts";
+import { answerButtons, askCardParts, batchLines, mergeBatchRows, mergeChosen, mergeChosenAskIds, questionHead, hiddenByBatches, grantOf, taskAsks, withoutGrant, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, broadTarget, previousLines, scopeLabel, blockerLines, groupAsks, isQuick, keptAnswers, KIND_LABEL, quickGroups, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, issueOpenHref, unblockLinks, unblocksLine, workspaceChips, workspaceSections, type Answered } from "./asks.ts";
 
 const ask = (over: Partial<Ask>): Ask => ({
   id: "a", kind: "decision", needs: "person", state: "open", at: 1, changedAt: 1, workspace: null, pbi: null, issue: null, task: null, reason: null, question: null, choices: [], grants: [], grant: null, recommendation: null, next: null,
@@ -291,6 +291,37 @@ test("batch lines and hidden asks", () => {
   // the Task logging in: its open stop is left out too, its other questions stay
   const mine = [ask({ id: "stop:task:tk_c|x||auth|", kind: "stop", state: "open", task: { id: "tk_c", title: "C" } }), ask({ id: "approval:tk_c:p1", kind: "approval", state: "open", task: { id: "tk_c", title: "C" } })];
   expect(hiddenByBatches(mine, [{ ...batch, asks: [], loggingIn: { taskId: "tk_c", title: "C" } }]).map((a) => a.id)).toEqual(["approval:tk_c:p1"]);
+});
+
+test("merge batch rows", () => {
+  const now = Date.parse("2026-11-12T12:00:00Z");
+  const batch: AskBatch = {
+    id: "batch:security-merge",
+    kind: "security-merge",
+    asks: [
+      { askId: "check:tk_a:1", taskId: "tk_a", title: "A", workspaceId: "ws_1", op: "PR #10", at: now - 13.2 * 3_600_000, pr: 10, reasons: ["[聞く] セキュリティ: a.ts"], diff: "+48/-3" },
+      { askId: "check:tk_b:1", taskId: "tk_b", title: "B", workspaceId: "ws_2", op: "PR #11", at: now - 20 * 60_000, pr: 11, reasons: ["[聞く] セキュリティ: b.lock"], diff: null },
+    ],
+    loggingIn: null,
+    deviceAuth: null,
+  };
+  const asks = [ask({ id: "check:tk_a:1", choices: ["A: マージする — 通す", "B: 待つ"] }), ask({ id: "check:tk_b:1", choices: ["A: マージしない", "B: 待つ"] }), ask({ id: "decision:x" })];
+  expect(mergeBatchRows(batch, now, asks)).toEqual([
+    { askId: "check:tk_a:1", taskId: "tk_a", workspaceId: "ws_1", pr: 10, title: "A", reasons: ["[聞く] セキュリティ: a.ts"], diff: "+48/-3", waited: "14 時間", selectable: true },
+    { askId: "check:tk_b:1", taskId: "tk_b", workspaceId: "ws_2", pr: 11, title: "B", reasons: ["[聞く] セキュリティ: b.lock"], diff: null, waited: "20 分", selectable: false },
+  ]);
+  // a question that is not listed any more cannot be chosen
+  expect(mergeBatchRows(batch, now, []).map((r) => r.selectable)).toEqual([false, false]);
+  // the questions in the batch leave the list; the others stay
+  expect(hiddenByBatches(asks, [batch]).map((a) => a.id)).toEqual(["decision:x"]);
+  // a tick is on the question: chosen and selectable is sent, one that cannot be chosen is not
+  const rows = mergeBatchRows(batch, now, asks);
+  expect(mergeChosen(rows, new Set(["check:tk_a:1", "check:tk_b:1"]))).toEqual(["tk_a"]);
+  // the question each chosen Task showed goes with it, in the same order
+  expect(mergeChosenAskIds(rows, new Set(["check:tk_a:1", "check:tk_b:1"]))).toEqual(["check:tk_a:1"]);
+  // the Task asked again about another PR: the tick on its earlier question does not choose the new one
+  const asked = { ...batch, asks: [{ ...batch.asks[0]!, askId: "check:tk_a:2", op: "PR #12", pr: 12 }] };
+  expect(mergeChosen(mergeBatchRows(asked, now, [ask({ id: "check:tk_a:2", choices: ["A: マージする — 通す"] })]), new Set(["check:tk_a:1"]))).toEqual([]);
 });
 
 test("answerButtons: a scan notice (#2866) is closed by 誤検知として閉じる only", () => {

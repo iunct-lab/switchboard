@@ -3,7 +3,7 @@ import { createCodexAdapter } from "@switchboard/adapter-codex";
 import { createAdkAdapter } from "@switchboard/adapter-adk";
 import { createAguiAdapter } from "@switchboard/adapter-agui";
 import { loadConfig } from "./config.ts";
-import { startServer } from "./server.ts";
+import { seedNewHome, startServer } from "./server.ts";
 import type { Suggester } from "./routing.ts";
 import { relocate } from "./relocate.ts";
 import { shutdownOnce } from "./selfdev.ts";
@@ -84,8 +84,12 @@ if (cmd === "relocate") {
 }
 
 // The first open of the database on a start moves its schema: when that changes it, a snapshot is taken first (the
-// rescue page's "restore the database" offers it), and a failure to take it stops the start.
-const migrationSnapshot = await snapshotBeforeMigrate(cfg.dbPath, cfg.home);
+// rescue page's "restore the database" offers it), and a failure to take it stops the start. A promotion candidate takes
+// none: its database is a throwaway copy with nothing to restore, and its home is under the system temp directory,
+// often a small RAM-backed filesystem that a second full copy of the database can fill.
+// Before anything opens (and so creates) the database: only a HOME with no database yet starts with developSelf off (#2459).
+seedNewHome(cfg.dbPath);
+const migrationSnapshot = cfg.candidate ? null : await snapshotBeforeMigrate(cfg.dbPath, cfg.home);
 if (migrationSnapshot) console.log(`schema migration: snapshot ${migrationSnapshot} taken first`);
 
 // Adapters are plugins: any subset may be missing. Missing binaries / unreachable servers are reported, not fatal.

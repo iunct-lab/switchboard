@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, truncateSync, utimesSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { AgentEvent, AskList, RunnerAdapter, RunnerDetection, RunnerId, RoutingStats, RunnerSession, Schedule, StartOptions, Task, Workspace } from "@switchboard/protocol";
+import type { AgentEvent, AskList, AskQuestion, RunnerAdapter, RunnerDetection, RunnerId, RoutingStats, RunnerSession, Schedule, StartOptions, Task, Workspace } from "@switchboard/protocol";
 import { OpsLatency, OpsLoad, OpsResources, OpsStops } from "@switchboard/protocol";
 import { Database } from "bun:sqlite";
 import { isTempDir, loadConfig, teleportWorktreePath } from "./config.ts";
@@ -13,7 +13,7 @@ import * as heavyModule from "../../../ops-kit/src/heavy.ts";
 import * as opsLoadModule from "./ops-load.ts";
 import { opsResources, readMemInfo } from "./ops-resources.ts";
 import { measureFootprint } from "./footprint.ts";
-import { startServer as startDaemon } from "./server.ts";
+import { seedNewHome, startServer as startDaemon } from "./server.ts";
 import type { suggestTitle } from "./suggest-title.ts";
 
 /**
@@ -28,7 +28,7 @@ import { HistoryImporter } from "./history.ts";
 import { isAuthText } from "./login.ts";
 import { JUDGE_FALLBACK, JUDGE_TIMEOUT_MS, type judgeTurn } from "./judge.ts";
 import type { judgeRubric } from "./rubric-judge.ts";
-import { FALLBACK_DELAY_MS, fmtTime, MAX_CONSECUTIVE_STOPS, MAX_FALLBACK_DELAY_MS, RateLimitResumer, RESUME_PROMPT } from "./ratelimit.ts";
+import { FALLBACK_DELAY_MS, fmtTime, MAX_CONSECUTIVE_STOPS, MAX_FALLBACK_DELAY_MS, RateLimitResumer, RESUME_MARGIN_MS, RESUME_PROMPT } from "./ratelimit.ts";
 import { QUOTA_LIMIT } from "./backlog.ts";
 import { AUTO_RESUME_HEAD, weekStartUtc } from "./evals.ts";
 import { MAX_STOP_RESUMES } from "./interrupted.ts";
@@ -258,7 +258,7 @@ describe("core daemon", () => {
     const off = await startServer(loadConfig({ SWITCHBOARD_HOME: h2, SWITCHBOARD_PORT: "0", ...NO_HISTORY, SWITCHBOARD_HOST: "0.0.0.0" }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
     try {
       const now = Date.now();
-      const mk = (id: string, status: "running" | "waiting" | "done" | "background") => c.db.insertTask({ id, workspaceId: null, title: `title ${id}`, runner: "claude", cwd: h, scope: [h], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
+      const mk = (id: string, status: "running" | "waiting" | "done" | "background") => c.db.insertTask({ id, workspaceId: null, title: `title ${id}`, runner: "claude", cwd: h, scope: [h], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
       mk("task_busy_run", "running");
       mk("task_busy_wait", "waiting");
       mk("task_busy_done", "done");
@@ -399,7 +399,7 @@ describe("core daemon", () => {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
     }
-  }, 30_000); // startServer twice and a promoted Task's start: over the 5 s default on a loaded host (docs/design/perf.md "テストの揺れ")
+  }, 30_000); // startServer twice and a promoted Task's start: over the 5 s default on a loaded host (docs/design/perf.md "Test flakiness")
 
   test("health reports a failed daily archive from archive.status, and null without one (#1201)", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-archive-"));
@@ -442,7 +442,7 @@ describe("core daemon", () => {
     const url = `http://127.0.0.1:${c.server.port}`;
     try {
       const now = Date.now();
-      c.db.insertTask({ id: "task_bg_gate", workspaceId: null, title: "bg", runner: "claude", cwd: h, scope: [h], status: "background", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
+      c.db.insertTask({ id: "task_bg_gate", workspaceId: null, title: "bg", runner: "claude", cwd: h, scope: [h], status: "background", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
       expect((await fetch(`${url}/api/daemon/promote`, { method: "POST", body: "{}" })).status).toBe(409);
       expect((await fetch(`${url}/api/daemon/restart`, { method: "POST", body: "{}" })).status).toBe(409);
       expect(seen).toEqual([]);
@@ -776,7 +776,7 @@ describe("core daemon", () => {
       await c2.stop();
       rmSync(h2, { recursive: true, force: true });
     }
-  }, 30_000); // two idle windows of 2 s and HTTP turns under a loaded full suite: over the 5 s default (docs/design/perf.md "テストの揺れ")
+  }, 30_000); // two idle windows of 2 s and HTTP turns under a loaded full suite: over the 5 s default (docs/design/perf.md "Test flakiness")
 
   test.skipIf(skipRecordings("packages/core/fixtures/otel-tool-decision.jsonl"))("otel: a recorded tool_decision is kept on its task; another task's token or none is refused (#2236)", async () => {
     assertRecordings("packages/core/fixtures/otel-tool-decision.jsonl");
@@ -849,6 +849,37 @@ describe("core daemon", () => {
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("developSelf: a new HOME starts with false, PATCH saves it, an existing database is not written (#2459)", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-test-developself-"));
+    const env = { SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY };
+    try {
+      // no database yet: seeded with false
+      seedNewHome(loadConfig(env).dbPath);
+      let c = await startServer(loadConfig(env), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
+      let b = `http://127.0.0.1:${c.server.port}`;
+      expect((await fetch(`${b}/api/settings`).then(j)).developSelf).toBe(false);
+      expect((await fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ developSelf: true }) })).status).toBe(200);
+      await c.stop();
+      // a database that exists is left alone: the saved true stays, and so would a missing key (reads as true)
+      seedNewHome(loadConfig(env).dbPath);
+      c = await startServer(loadConfig(env), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
+      b = `http://127.0.0.1:${c.server.port}`;
+      expect((await fetch(`${b}/api/settings`).then(j)).developSelf).toBe(true);
+      await c.stop();
+    } finally {
+      rmSync(h, { recursive: true, force: true });
+    }
+    // a database made without the seed (every other test, an owner's existing one): the key is absent = true
+    const h2 = mkdtempSync(join(tmpdir(), "switchboard-test-developself-"));
+    const c2 = await startServer(loadConfig({ SWITCHBOARD_HOME: h2, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
+    try {
+      expect((await fetch(`http://127.0.0.1:${c2.server.port}/api/settings`).then(j)).developSelf).toBe(true);
+    } finally {
+      await c2.stop();
+      rmSync(h2, { recursive: true, force: true });
     }
   });
 
@@ -1021,6 +1052,8 @@ describe("core daemon", () => {
       expect(starts.map((s) => s.allow?.filter((r) => r.includes("merge-gate")))).toEqual([checkout, other].map(() => ["Bash(bun scripts/merge-gate.ts:*)", `Bash(bun ${checkout}/scripts/merge-gate.ts:*)`]));
       expect(starts[1]!.allow).toContain(`Edit(/${other}/ops-kit/skills/**)`);
       expect(starts[1]!.allow).toContain(`Write(/${other}-*/.claude/skills/**)`);
+      expect(starts[1]!.allow).toContain("Bash(gh stack push:*)"); // the same for a folder other than the checkout (#2782)
+      expect(starts[1]!.allow).toContain("Bash(ops-kit backlog:*)");
       expect(starts.flatMap((s) => s.allow ?? []).filter((r) => /gh (pr|stack) merge|gh api/.test(r))).toEqual([]);
     } finally {
       await c.stop();
@@ -1322,7 +1355,7 @@ describe("core daemon", () => {
     core.tasks.setBudget(t.id, 100); // stamps updated_at days-later-style without the task doing any work
     expect((await logRows()).find((r) => r.taskId === t.id)!.durationMs).toBe(row.durationMs);
     // …and a record whose timestamps run backwards (an import) reports 0 rather than a negative duration
-    const past = { id: "task_backwards", workspaceId: null, title: "backwards", runner: "claude" as const, cwd: home, scope: [home], status: "done" as const, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: { suggested: "claude" as const, ruleId: "r", reason: "why", overridden: false, llm: null }, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard" as const, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown" as const, reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 5_000, createdAt: 5_000, updatedAt: 1_000 };
+    const past = { id: "task_backwards", workspaceId: null, title: "backwards", runner: "claude" as const, cwd: home, scope: [home], status: "done" as const, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: { suggested: "claude" as const, ruleId: "r", reason: "why", overridden: false, llm: null }, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard" as const, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown" as const, reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 5_000, createdAt: 5_000, updatedAt: 1_000 };
     core.db.insertTask(past);
     expect((await logRows()).find((r) => r.taskId === past.id)!.durationMs).toBe(0);
     // each row carries its task's outcome (#612): the status alone says "done" for a task that stopped to ask
@@ -1481,7 +1514,7 @@ describe("core daemon", () => {
         await c.tasks.releaseAndWait(done.id);
         const r = await post(b, `/api/tasks/${done.id}/send`, { text: "again" });
         expect(r.status).toBe(409);
-        expect(JSON.stringify(await r.json())).toContain("実行枠が埋まっています");
+        expect(JSON.stringify(await r.json())).toContain("実行枠が埋まっています（実行中 1 / 上限 1）。空くまで待つか、Settings の同時に動かす Task の上限を上げてください");
         expect(await statusOf(b, done.id)).toBe("done");
         await patchRunners(b, 2);
         expect((await post(b, `/api/tasks/${done.id}/send`, { text: "again" })).status).toBe(200);
@@ -1510,27 +1543,116 @@ describe("core daemon", () => {
       }
     }, 20000);
 
-    test("maxRunners 空きメモリ: free < need なら待ち列に入り（理由が文に出る）、free ≥ need なら始まる。何も動いていなければ待たせない", async () => {
+    test("maxRunners 空きメモリ: free < safety なら待ち列に入り（安全弁が文に出る）、safety ≤ free < floor は警告だけで始まる。何も動いていなければ待たせない", async () => {
       const home = mkdtempSync(join(tmpdir(), "switchboard-test-queue-mem-"));
       const starts: StartOptions[] = [];
-      let headroom: { free: number; need: number } | null = { free: 100 * 1048576, need: 500 * 1048576 };
+      const MB = 1048576;
+      let headroom: { free: number; floor: number; safety: number } | null = { free: 100 * MB, floor: 500 * MB, safety: 200 * MB };
       const db = new Db(join(home, "t.sqlite"));
       const tm = new TaskManager(db, new Map([["claude", fakeAdapter(SCRIPT, { lingers: true, starts })]]), () => undefined, { maxRunners: () => 8, memoryHeadroom: () => headroom });
+      const warnings = (id: string) => db.listEvents(id).filter((e) => e.ev.t === "status" && e.ev.text.includes("空きメモリが少ない")).length;
       try {
         const input = (title: string) => ({ cwd: home, title, prompt: title, runner: "claude" as const });
         const t1 = tm.create(input("t1"));
         expect(t1.status).toBe("running"); // nothing ran: not held for memory (no event would call drain again)
+        expect(warnings(t1.id)).toBe(0);
+        // (a) below the safety valve: queued, the reason names the valve
         const t2 = tm.create(input("t2"));
         expect(t2.status).toBe("idle");
         expect(t2.queuedAt).not.toBeNull();
-        expect(db.listEvents(t2.id).some((e) => e.ev.t === "status" && e.ev.text.includes("空きメモリ不足のため待機（空き 100 MB / 必要 500 MB"))).toBe(true);
+        expect(db.listEvents(t2.id).some((e) => e.ev.t === "status" && e.ev.text.includes("空きメモリ不足のため待機（空き 100 MB / 安全弁 200 MB"))).toBe(true);
         expect(tm.freeSlots()).toBe(0);
-        headroom = { free: 500 * 1048576, need: 500 * 1048576 };
-        tm.drain();
+        // (b) between the valve and the floor: starts at once with one warning line
+        headroom = { free: 300 * MB, floor: 500 * MB, safety: 200 * MB };
+        tm.drain(); // the queued t2 starts now (a free slot and above the valve)
         expect(starts.map((s) => s.prompt)).toEqual(["t1", "t2"]);
-        expect(db.getTask(t2.id)!.queuedAt).toBeNull();
-        headroom = null; // unreadable: the count alone
+        expect(warnings(t2.id)).toBe(1); // a start from the queue warns the same way
+        const t3 = tm.create(input("t3"));
+        expect(t3.queuedAt).toBeNull();
+        expect(starts.map((s) => s.prompt)).toEqual(["t1", "t2", "t3"]);
+        expect(warnings(t3.id)).toBe(1);
+        expect(db.listEvents(t3.id).some((e) => e.ev.t === "status" && e.ev.text === "空きメモリが少ない（空き 300 MB / 下限 500 MB）が、安全弁（200 MB）以上なので続けます")).toBe(true);
+        // (c) a reply that needs a new process goes ahead with the same line
+        await tm.abort(t3.id);
+        await tm.send(t3.id, "reply");
+        expect(starts.map((s) => s.prompt)).toEqual(["t1", "t2", "t3", "reply"]);
+        expect(warnings(t3.id)).toBe(2);
+        // (d) below the valve the reply is refused, naming the value and where it lives
+        await tm.abort(t3.id);
+        headroom = { free: 100 * MB, floor: 500 * MB, safety: 200 * MB };
+        await expect(tm.send(t3.id, "again")).rejects.toThrow("空きメモリが足りません（空き 100 MB / 安全弁 200 MB）。空くまで待つか、安全弁（~/.config/ops-kit/heavy.json の taskMinFreeMb、既定 300）を下げてください");
+        // (e) unreadable: the count alone
+        headroom = null;
         expect(tm.freeSlots()).toBe(6);
+      } finally {
+        await tm.shutdown();
+        db.close();
+        rmSync(home, { recursive: true, force: true });
+      }
+    }, 20000);
+    test("maxRunners 待ち列の再確認: メモリ不足で待つ Task は空きが戻れば drain() を呼ばずに始まり、待ち列が空ならメモリを読まない", async () => {
+      const home = mkdtempSync(join(tmpdir(), "switchboard-test-queue-tick-"));
+      const starts: StartOptions[] = [];
+      const MB = 1048576;
+      let free = 100 * MB;
+      let reads = 0;
+      const db = new Db(join(home, "t.sqlite"));
+      const hold = new Promise<never>(() => undefined); // keeps t1's turn in flight: something runs, so the memory is read
+      const tm = new TaskManager(db, new Map([["claude", fakeAdapter(SCRIPT, { lingers: true, starts, gate: hold })]]), () => undefined, {
+        maxRunners: () => 8,
+        memoryHeadroom: () => (reads++, { free, floor: 500 * MB, safety: 200 * MB }),
+        drainTickMs: 20,
+      });
+      try {
+        const input = (title: string) => ({ cwd: home, title, prompt: title, runner: "claude" as const });
+        tm.create(input("t1"));
+        const t2 = tm.create(input("t2"));
+        expect(t2.queuedAt).not.toBeNull();
+        await new Promise((r) => setTimeout(r, 80)); // several ticks: still short of memory, still waiting
+        expect(db.getTask(t2.id)!.queuedAt).not.toBeNull();
+        free = 400 * MB;
+        await waitFor(async () => db.getTask(t2.id)!.queuedAt === null); // no drain() call from here
+        expect(starts.map((s) => s.prompt)).toEqual(["t1", "t2"]);
+        // the queue is empty now: the ticks read nothing
+        const before = reads;
+        await new Promise((r) => setTimeout(r, 100));
+        expect(reads).toBe(before);
+      } finally {
+        await tm.shutdown();
+        db.close();
+        rmSync(home, { recursive: true, force: true });
+      }
+    }, 20000);
+
+    test("maxRunners 待ち列の空きメモリ: ターンの終わった Task のプロセスが残るときは先に閉じ、続けて待ち列の Task が始まる", async () => {
+      const home = mkdtempSync(join(tmpdir(), "switchboard-test-queue-idle-"));
+      const starts: StartOptions[] = [];
+      const MB = 1048576;
+      const db = new Db(join(home, "t.sqlite"));
+      const hold = new Promise<never>(() => undefined);
+      const adapters = new Map<RunnerId, RunnerAdapter>([
+        ["claude", fakeAdapter(SCRIPT.filter((e) => e.t !== "permission.ask"), { lingers: true, starts })],
+        ["codex", fakeAdapter(SCRIPT, { id: "codex", lingers: true, starts, gate: hold })], // its turn stays in flight
+      ]);
+      let idleId = "";
+      // the memory is back once the idle Task's process is gone
+      const tm = new TaskManager(db, adapters, () => undefined, {
+        maxRunners: () => 8,
+        memoryHeadroom: () => ({ free: idleId && tm.holdsProcess(idleId) ? 100 * MB : 400 * MB, floor: 500 * MB, safety: 200 * MB }),
+        drainTickMs: 3_600_000, // no tick: only the release can start the queue
+      });
+      try {
+        const input = (title: string, runner: RunnerId) => ({ cwd: home, title, prompt: title, runner });
+        const t1 = tm.create(input("t1", "claude"));
+        idleId = t1.id;
+        await waitFor(async () => !["running", "waiting"].includes(db.getTask(t1.id)!.status)); // the turn ended; the process stays open
+        expect(tm.holdsProcess(t1.id)).toBe(true);
+        tm.create(input("running", "codex"));
+        const t3 = tm.create(input("t3", "claude"));
+        expect(t3.queuedAt).not.toBeNull(); // short of memory: queued, and the idle process is closed at once
+        await waitFor(async () => db.getTask(t3.id)!.queuedAt === null);
+        expect(tm.holdsProcess(t1.id)).toBe(false);
+        expect(starts.map((s) => s.prompt)).toEqual(["t1", "running", "t3"]);
       } finally {
         await tm.shutdown();
         db.close();
@@ -2254,7 +2376,7 @@ describe("core daemon", () => {
       expect((await post(`/api/tasks/nope/effort`, { effort: "high" })).status).toBe(404);
       // a Cloud task has no process of ours
       const now = Date.now();
-      c.db.insertTask({ id: "cloud1", workspaceId: null, title: "cloud", runner: "claude", cwd: h, scope: [h], status: "running", runnerSessionId: null, executionMode: "cloud", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
+      c.db.insertTask({ id: "cloud1", workspaceId: null, title: "cloud", runner: "claude", cwd: h, scope: [h], status: "running", runnerSessionId: null, executionMode: "cloud", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
       expect((await post(`/api/tasks/cloud1/effort`, { effort: "high" })).status).toBe(409);
     } finally {
       await c.stop();
@@ -2501,7 +2623,7 @@ describe("core daemon", () => {
       expect(saved.defaultPermissionMode).toEqual({ claude: "plan" });
       expect(saved.runners[0].defaultPermissionMode).toBe("plan");
       expect((await fetch(`${b8}/api/health`).then(j)).runners[0].defaultPermissionMode).toBe("plan");
-      expect(c8.db.getSetting("settings", {})).toEqual({ defaultPermissionMode: { claude: "plan" }, subagentEffort: {}, autoResume: {}, bedrock: {}, shadowRunner: null, routing: { llm: { enabled: false, runner: "claude", model: "", timeoutMs: 5000 } }, judge: { enabled: true, runner: "codex", model: "gpt-6-luna" }, autoStart: { runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" }, reviewRunner: "other", maxRunners: 3, evals: { judge: { enabled: true } }, titles: { auto: true }, quotaAndResume: { backlogQuotaLimit: 0.8, retryDelayMs: 900_000, retryMaxDelayMs: 14_400_000, maxLimitStops: 8, resumePrompt: "使用上限がリセットされました。中断した箇所から作業を続けてください。", maxStopResumes: 2, thinSample: 5, flowLimit: 1, defaultBudgetUsd: null }, judgeAndChoice: { judgeFallbackRunner: "claude", judgeFallbackModel: "claude-haiku-4-5", judgeTimeoutMs: 60_000, workspaceChoiceTimeoutMs: 60_000 }, newDefaults: { taskRunner: "claude", scheduleCron: "0 3 * * *" }, prices: {}, models: {}, hiddenModels: {}, outbound: { classifierLog: false, runnerTelemetry: false } });
+      expect(c8.db.getSetting("settings", {})).toEqual({ developSelf: true, defaultPermissionMode: { claude: "plan" }, subagentEffort: {}, autoResume: {}, bedrock: {}, shadowRunner: null, routing: { llm: { enabled: false, runner: "claude", model: "", timeoutMs: 5000 } }, judge: { enabled: true, runner: "codex", model: "gpt-6-luna" }, autoStart: { runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" }, reviewRunner: "other", maxRunners: 3, evals: { judge: { enabled: true } }, titles: { auto: true }, quotaAndResume: { backlogQuotaLimit: 0.8, retryDelayMs: 900_000, retryMaxDelayMs: 14_400_000, maxLimitStops: 8, resumePrompt: "使用上限がリセットされました。中断した箇所から作業を続けてください。", maxStopResumes: 2, thinSample: 5, flowLimit: 1, defaultBudgetUsd: null }, judgeAndChoice: { judgeFallbackRunner: "claude", judgeFallbackModel: "claude-haiku-4-5", judgeTimeoutMs: 60_000, workspaceChoiceTimeoutMs: 60_000 }, newDefaults: { taskRunner: "claude", scheduleCron: "0 3 * * *" }, prices: {}, models: {}, hiddenModels: {}, outbound: { classifierLog: false, runnerTelemetry: false } });
       const t4 = await post("/api/tasks", { cwd: h8, title: "t4", prompt: "p", runner: "claude" }).then(j);
       expect(t4.permissionMode).toBe("plan");
       expect(starts[2]?.permissionMode).toBe("plan");
@@ -2949,14 +3071,14 @@ describe("core daemon", () => {
       expect(codexStarts[2]!.model).toBeUndefined();
       expect(statuses(ran.id)).toEqual([`claude が上限（0.95、${fmtTime(inHour * 1000, Date.now())} に戻る）のため codex で開始`]);
       expect(JSON.stringify(await fetch(`${b}/api/schedules/log`).then(j))).toContain("nightly: claude が上限");
-      // (d) codex at its limit too: the decided runner, no status
+      // (d) codex at its limit too: the decided runner, held until it resets (#2768; "defers an automatic start at the limit")
       c.db.upsertQuota("codex", "seven_day", 0.97, inHour);
       c.db.setSetting("settings", { autoStart: { runner: "claude", fallback: ["codex"] } });
       const [, both] = await feedback("どちらも上限");
       expect(both.runner).toBe("claude");
-      await until(() => claudeStarts.length > 0);
-      expect(statuses(both.id)).toEqual([]);
-      // (e) an empty order: claude as before
+      expect(both.resumeReason).toBe("start");
+      expect(claudeStarts).toHaveLength(0);
+      // (e) an empty order: the decided runner, held the same
       c.db.upsertQuota("codex", "seven_day", 0.1, inHour);
       c.db.setSetting("settings", { autoStart: { runner: "claude" } });
       const [, none] = await feedback("順が空");
@@ -2966,6 +3088,43 @@ describe("core daemon", () => {
       c.db.setSetting("settings", { autoStart: { runner: "claude", fallback: ["codex"] } });
       const [, reset] = await feedback("戻った後");
       expect(reset.runner).toBe("claude");
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("defers an automatic start at the limit (#2768): with no runner to give way to, feedback is made without starting a runner and starts when the window resets; a runner in the order still takes it now", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-test-defer-start-"));
+    const claudeStarts: StartOptions[] = [];
+    const codexStarts: StartOptions[] = [];
+    const quiet = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "quota");
+    const asked: string[] = []; // the LLM routing advice: a held Task asks none (it would spend the quota it waits for)
+    const advice: Suggester = { async suggest(ctx) { asked.push(ctx.title); return { runner: "codex", reason: "llm", ruleId: "llm", model: null, available: true, alternatives: [], llm: null }; } };
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(quiet, { starts: claudeStarts }), fakeAdapter(quiet, { id: "codex", starts: codexStarts })], { port: 0, selfdevChecks: false, dryRunRestart: true, llmSuggester: () => advice });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    const feedback = (text: string) => fetch(`${b}/api/feedback`, { method: "POST", body: JSON.stringify({ text }) }).then(async (r) => [r.status, await r.json()] as [number, Task]);
+    const statuses = (id: string) => c.db.listEvents(id).flatMap((e) => (e.ev.t === "status" ? [e.ev.text] : []));
+    try {
+      const resetSec = Math.floor(Date.now() / 1000) + 3600;
+      c.db.upsertQuota("claude", "seven_day", 0.99, resetSec);
+      c.db.setSetting("settings", { autoStart: { runner: "claude", model: "m-claude", fallback: [] }, routing: { llm: { enabled: true, runner: "claude", model: "", timeoutMs: 5000 } } });
+      const [status, task] = await feedback("上限の間の要望");
+      expect(status).toBe(201);
+      expect(task).toMatchObject({ runner: "claude", status: "idle", resumeReason: "start", resumeAt: resetSec * 1000 + RESUME_MARGIN_MS, model: "m-claude" });
+      expect(statuses(task.id)).toEqual([`claude が上限（0.99、${fmtTime(resetSec * 1000, Date.now())} に戻る）のため戻る時刻に開始`]);
+      await Bun.sleep(100);
+      expect(claudeStarts).toHaveLength(0);
+      expect(asked).toEqual([]);
+      // a runner to give way to: started now on it, as before
+      c.db.setSetting("settings", { autoStart: { runner: "claude", fallback: ["codex"] }, routing: { llm: { enabled: true, runner: "claude", model: "", timeoutMs: 5000 } } });
+      const [, other] = await feedback("代わりがある");
+      expect(other).toMatchObject({ runner: "codex", resumeReason: null, resumeAt: null });
+      for (let i = 0; codexStarts.length === 0 && i < 200; i++) await Bun.sleep(10);
+      expect(codexStarts).toHaveLength(1);
+      expect(claudeStarts).toHaveLength(0);
+      for (let i = 0; asked.length === 0 && i < 200; i++) await Bun.sleep(10);
+      expect(asked).toHaveLength(1); // a Task started now still gets the advice
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
@@ -3077,7 +3236,7 @@ describe("core daemon", () => {
       // what a crashed / replaced daemon leaves behind
       const pre = new Db(join(h11, "switchboard.db"));
       const now = Date.now();
-      const mk = (id: string, status: "running" | "waiting" | "done") => pre.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: h11, scope: [h11], status, runnerSessionId: "sess-" + id, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
+      const mk = (id: string, status: "running" | "waiting" | "done") => pre.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: h11, scope: [h11], status, runnerSessionId: "sess-" + id, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
       mk("task_run", "running");
       mk("task_wait", "waiting");
       mk("task_done", "done");
@@ -3177,7 +3336,7 @@ describe("core daemon", () => {
   });
 
   test("promote: a daemon under sb-rescue relays the commit and reports the release; without sb-rescue it says so (#178)", async () => {
-    expect(await fetch(`${base}/api/daemon/release`).then(j)).toEqual({ managed: false });
+    expect(await fetch(`${base}/api/daemon/release`).then(j)).toEqual({ managed: false, latestRelease: null });
     expect((await fetch(`${base}/api/daemon/promote`, { method: "POST", body: "{}" })).status).toBe(409);
 
     const seen: Array<{ path: string; auth: string | null; body: unknown }> = [];
@@ -3226,7 +3385,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("promote: release counts the commits from the running version to HEAD and the running tasks (#1660)", async () => {
+  test("promote: release counts the commits between the running version and HEAD (ahead, behind) and the running tasks (#1660)", async () => {
     const repo = mkdtempSync(join(tmpdir(), "switchboard-test-ahead-"));
     const git = (...a: string[]) => Bun.spawnSync(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...a]).stdout.toString().trim();
     git("init", "-q"); git("commit", "-q", "--allow-empty", "-m", "first"); git("commit", "-q", "--allow-empty", "-m", "second: the head");
@@ -3239,15 +3398,15 @@ describe("core daemon", () => {
     const url = `http://127.0.0.1:${c.server.port}`;
     try {
       const rel = () => fetch(`${url}/api/daemon/release`).then(j);
-      expect(await rel()).toMatchObject({ head, headSubject: "second: the head", ahead: 0, busyTasks: 0 });
+      expect(await rel()).toMatchObject({ head, headSubject: "second: the head", ahead: 0, behind: 0, busyTasks: 0 });
       current = first;
-      expect((await rel()).ahead).toBe(1);
+      expect(await rel()).toMatchObject({ ahead: 1, behind: 0 });
       git("commit", "-q", "--allow-empty", "-m", "third");
       current = git("rev-parse", "HEAD");
       git("reset", "-q", "--hard", head); // HEAD is now inside the running version
-      expect((await rel()).ahead).toBe(0);
+      expect(await rel()).toMatchObject({ ahead: 0, behind: 1 }); // the running version is ahead of HEAD
       current = "d".repeat(40);
-      expect((await rel()).ahead).toBeNull();
+      expect(await rel()).toMatchObject({ ahead: null, behind: null });
       await fetch(`${url}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: h, title: "busy", prompt: "p", runner: "claude" }) });
       expect((await rel()).busyTasks).toBe(1);
     } finally {
@@ -3315,6 +3474,22 @@ describe("core daemon", () => {
     const del = await fetch(`${base}/api/schedules/${s.id}`, { method: "DELETE" });
     expect(del.status).toBe(200);
     expect((await fetch(`${base}/api/schedules/${s.id}`)).status).toBe(404);
+  });
+
+  test("schedules API: stuck (#4500) is set when the newest Tasks of a schedule stopped the same way, null otherwise", async () => {
+    const wsId = (await fetch(`${base}/api/workspaces`).then(j)).find((w: { kind: string }) => w.kind === "meta").id;
+    const mkSchedule = (title: string) => fetch(`${base}/api/schedules`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title, cron: "@nightly", workspaceId: wsId, runner: "claude", prompt: "p" }) }).then(j);
+    const stuck = await mkSchedule("stuck-sch");
+    const fine = await mkSchedule("fine-sch");
+    for (const [i, id] of ["k1", "k2"].entries()) {
+      core.db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: "/tmp", scope: [], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: stuck.id, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1000 + i, createdAt: 1000 + i, updatedAt: 1000 + i } as Task);
+      core.db.appendEvent(id, { t: "stop.record", stop: { id: `${id}/s`, work: { workspaceId: null, issue: null, taskId: id, scheduleId: stuck.id }, op: "schedule run", target: "", reason: "input", evidence: "need input", safety: "unknown", conditions: [], answer: null, actions: [], state: "waiting", at: 1000 + i } });
+    }
+    core.db.sqlite.query("UPDATE schedules SET last_task_id = 'k2' WHERE id = ?").run(stuck.id);
+    const list = await fetch(`${base}/api/schedules`).then(j);
+    expect(list.find((x: { id: string }) => x.id === stuck.id).stuck).toEqual({ count: 2, reason: "input", evidence: "need input", firstAt: 1000, taskId: "k2" });
+    expect(list.find((x: { id: string }) => x.id === fine.id).stuck).toBeNull();
+    for (const id of [stuck.id, fine.id]) await fetch(`${base}/api/schedules/${id}`, { method: "DELETE" });
   });
 
   test("backlogSweep (#561) is gone from the settings (#2656): GET has no such key, a PATCH of it changes nothing", async () => {
@@ -4110,7 +4285,7 @@ describe("history import (#91): Claude Code sessions run in a terminal, from ~/.
       mkdirSync(join(projects, claudeProjectDirName(other)), { recursive: true });
       writeFileSync(join(projects, claudeProjectDirName(other), "44444444-4444-4444-8444-444444444444.jsonl"), FIXTURE.replaceAll("/work/repo", other).replaceAll(SESSION, "44444444-4444-4444-8444-444444444444"));
       // (c) a task Switchboard ran (origin switchboard) whose session the person later continued in a terminal
-      const mine = c.db.insertTask({ id: "task_mine", workspaceId: null, title: "mine", runner: "claude", cwd: repo, scope: [repo], status: "done", runnerSessionId: "33333333-3333-4333-8333-333333333333", executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 });
+      const mine = c.db.insertTask({ id: "task_mine", workspaceId: null, title: "mine", runner: "claude", cwd: repo, scope: [repo], status: "done", runnerSessionId: "33333333-3333-4333-8333-333333333333", executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 });
       const fileC = join(pdir, "33333333-3333-4333-8333-333333333333.jsonl");
       writeFileSync(fileC, FIXTURE.replaceAll("/work/repo", repo).replaceAll(SESSION, "33333333-3333-4333-8333-333333333333"));
       age(fileC);
@@ -4281,7 +4456,7 @@ describe("task outcome (#492)", () => {
       const p = join(h, "switchboard.db");
       const db = new Db(p);
       const now = Date.now();
-      const mk = (id: string, status: Task["status"]) => db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: h, scope: [h], status, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
+      const mk = (id: string, status: Task["status"]) => db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: h, scope: [h], status, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
       mk("t1", "running");
       expect(db.updateTask("t1", { status: "waiting" })?.outcome).toBe("needs_action");
       expect(db.updateTask("t1", { status: "running", outcome: "done" })?.outcome).toBe("done");
@@ -4519,12 +4694,15 @@ describe("repeated stops (#948)", () => {
       expect(c.tasks.recordStop(a.id, retry).ok).toBe(true);
       expect(c.tasks.recordStop(a.id, retry)).toMatchObject({ ok: false });
 
-      // the person's next message answers the open stops; 中断 cancels the planned retry
+      const ran = StopReport.parse({ id: "ran-out", op: "git push", target: "origin", reason: "transient", safety: "read-only", state: "exhausted" });
+      expect(c.tasks.recordStop(a.id, ran).ok).toBe(true);
+      // the person's next message answers the open stops and one that ran out of retries (#4479); 中断 cancels the planned retry
       await post(b, `/api/tasks/${a.id}/send`, { text: "続けて" });
       await waitFor(async () => (await get(a.id)).task.status === "waiting");
       const said = c.db.listEvents(a.id).filter((e) => e.ev.t === "message.delta" && e.ev.role === "user").at(-1)!;
       d = await get(a.id);
       expect(d.stopSummary.find((s: { op: string }) => s.op === "gh pr merge")).toMatchObject({ count: 1, lastAnswer: { ref: `seq:${said.seq}` } });
+      expect(d.stopSummary.find((s: { op: string }) => s.op === "git push")).toMatchObject({ state: "exhausted", lastAnswer: { ref: `seq:${said.seq}` } });
       await post(b, `/api/tasks/${a.id}/abort`);
       expect((await get(a.id)).stopSummary.find((s: { op: string }) => s.op === "exec.run")).toMatchObject({ state: "waiting", actions: [{ attempt: 1 }, { what: "中断で再試行を取り消し" }] });
 
@@ -4585,12 +4763,13 @@ describe("grants (#2745): a grant goes to the Task once, as the person's reply",
   // as the screen sends it (a policy is made from the screen only)
   const post = (b: string, path: string, body: object) => fetch(`${b}${path}`, { method: "POST", headers: { "content-type": "application/json", origin: b, "sec-fetch-site": "same-origin" }, body: JSON.stringify(body) });
   /** A daemon whose fake runner says `text` and ends its turn; `sends` = what the Task was sent after. */
-  const boot = async (text: string) => {
+  const boot = async (text: string, questions: AskQuestion[] = []) => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-grant-"));
     const cfg = loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY });
     const script: AgentEvent[] = [
       { t: "session.start", runner: "claude", runnerSessionId: "sess-g", cwd: "/tmp" },
       { t: "message.delta", role: "assistant", text, messageId: "m1" },
+      ...(questions.length ? [{ t: "question.ask", id: "q1", questions } satisfies AgentEvent] : []),
       { t: "session.end", status: "ok", summary: text },
     ];
     const sends: string[] = [];
@@ -4609,18 +4788,18 @@ describe("grants (#2745): a grant goes to the Task once, as the person's reply",
     expect(taskAllowRules(x.c.db.getWorkspace(x.c.db.listWorkspaces().find((w) => w.kind === "meta")!.id)!.path, x.h)).toEqual(x.rules);
   };
 
-  test("choice grant reply: choosing a choice with a grant sends the choice's line, grant and all, as it is", async () => {
-    const choice = `B: 登録する — 許可: ${GRANT}`;
-    const x = await boot(`**確認**: 定期実行を登録してよいか\n**選択肢**:\n- A: 登録しない\n- ${choice}\n**推奨**: B — 確かめるため`);
+  test("choice grant reply: choosing an option with a grant sends its question's line with the grant at its end", async () => {
+    const question = "定期実行を登録してよいか";
+    const x = await boot("確認をお願いします", [{ header: null, question, options: [{ label: "A: 登録しない", description: null }, { label: "B: 登録する (Recommended)", description: `確かめるため — 許可: ${GRANT}` }], multiSelect: false }]);
     try {
       await post(x.b, `/api/tasks/${x.t.id}/outcome`, { outcome: "needs_action" });
       const [check] = await asksOf(x.b, x.t.id);
-      expect(check).toMatchObject({ kind: "check", grants: [null, GRANT], answers: ["choice", "text"] });
-      // a grant is not saved as a policy
-      expect((await post(x.b, "/api/asks/answer", { id: check!.id, answer: { kind: "choice", choice }, policy: { scope: "once", target: "x", when: [], expiresAt: null } })).status).toBe(409);
-      expect((await post(x.b, "/api/asks/answer", { id: check!.id, answer: { kind: "choice", choice } })).status).toBe(200);
+      expect(check).toMatchObject({ kind: "check", answers: ["questions"] });
+      const answer = { kind: "questions", answers: [{ choices: ["B: 登録する (Recommended)"] }] };
+      // (a policy from a question tool answer is #3123's)
+      expect((await post(x.b, "/api/asks/answer", { id: check!.id, answer })).status).toBe(200);
       await waitFor(async () => x.replies().length > 0);
-      expect(x.replies()).toEqual([choice]);
+      expect(x.replies()).toEqual([`- ${question}: B: 登録する (Recommended) — 許可: ${GRANT}`]);
       await noneSaved(x);
     } finally {
       await x.c.stop();
@@ -4668,7 +4847,7 @@ describe("task evals (#1218)", () => {
       const first = await evals(t.id);
       expect(first.judge).toBeNull();
       expect(first.human).toBeNull();
-      expect(first.rules).toMatchObject({ status: "done", by: "rules@4", metrics: { turns: 1, toolCalls: 1, toolFailures: 0, asks: 1, denials: 0, userInstructions: 0, lastEnd: "ok" } });
+      expect(first.rules).toMatchObject({ status: "done", by: "rules@5", metrics: { turns: 1, toolCalls: 1, toolFailures: 0, asks: 1, denials: 0, userInstructions: 0, lastEnd: "ok" } });
       expect(first.rules.costUsd).toBeGreaterThan(0);
       // a second turn: the person's follow-up counts as one instruction; still one row
       await post(`${b}/api/tasks/${t.id}/send`, { text: "続けて" });
@@ -4687,9 +4866,9 @@ describe("task evals (#1218)", () => {
       const { daemonStops: _d, lastCutByDaemon: _l, ...oldMetrics } = (await evals(t.id)).rules.metrics;
       c.db.upsertEval({ taskId: t.id, source: "rules", by: "rules@1", rubric: null, json: { metrics: oldMetrics, status: "done", outcome: "unknown", costUsd: 0, by: "rules@1", ts: 1 }, ts: 1 });
       const recounted = (await evals(t.id)).rules;
-      expect(recounted.by).toBe("rules@4");
+      expect(recounted.by).toBe("rules@5");
       expect(recounted.metrics).toMatchObject({ daemonStops: 0, lastCutByDaemon: false });
-      expect(c.db.getEval(t.id, "rules")?.by).toBe("rules@4");
+      expect(c.db.getEval(t.id, "rules")?.by).toBe("rules@5");
       // (c) the task's status / outcome / cost of the moment, not the snapshot the turn's end stored (the person or the judge sets the outcome afterwards)
       await post(`${b}/api/tasks/${t.id}/outcome`, { outcome: "done" });
       expect((await evals(t.id)).rules).toMatchObject({ status: "done", outcome: "done" });
@@ -4767,7 +4946,7 @@ describe("rubric judge (#1219)", () => {
       const t = await post(`${b}/api/tasks`, { cwd: h, title: "rubric", prompt: "依頼文", runner: "claude" }).then(j);
       await waitFor(async () => (await get(t.id)).status === "done");
       await waitFor(async () => calls.length === 1);
-      expect(calls[0]!.input).toMatchObject({ title: "rubric", prompt: "依頼文", rubric: { id: "switchboard-default", version: 2 } });
+      expect(calls[0]!.input).toMatchObject({ title: "rubric", prompt: "依頼文", rubric: { id: "switchboard-default", version: 3 } });
       expect(calls[0]!.input.metrics.toolCalls).toBe(1);
       expect(calls[0]!.opts.settings).toMatchObject({ runner: "codex", model: "gpt-6-luna" });
       expect((await evals(t.id)).judge).toBeNull();
@@ -4775,9 +4954,9 @@ describe("rubric judge (#1219)", () => {
       calls[0]!.answer(4);
       await waitFor(async () => rows(t.id) === 1);
       const e = await evals(t.id);
-      expect(e.judge).toMatchObject({ scores: { goal: { score: 4, reason: "goal 4" }, safety: { score: 4 } }, summary: "総評 4", rubric: "switchboard-default@2", by: "codex:gpt-6-luna" });
+      expect(e.judge).toMatchObject({ scores: { goal: { score: 4, reason: "goal 4" }, safety: { score: 4 } }, summary: "総評 4", rubric: "switchboard-default@3", by: "codex:gpt-6-luna" });
       expect(Object.keys(e.judge.scores)).toHaveLength(5);
-      expect(c.db.getEval(t.id, "judge")).toMatchObject({ by: "codex:gpt-6-luna", rubric: "switchboard-default@2" });
+      expect(c.db.getEval(t.id, "judge")).toMatchObject({ by: "codex:gpt-6-luna", rubric: "switchboard-default@3" });
       await waitFor(async () => updated.includes(t.id));
       expect(ledgerRows(t.id)).toBe(before + 1);
       // (b) a second turn: judged again, the row is replaced, still one
@@ -4797,7 +4976,7 @@ describe("rubric judge (#1219)", () => {
       expect((await post(`${b}/api/tasks/nope/evals/judge`)).status).toBe(404);
       // nothing to score yet: a task with no request in its transcript
       const now = Date.now();
-      c.db.insertTask({ id: "empty", workspaceId: null, title: "empty", runner: "claude", cwd: h, scope: [h], status: "idle", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
+      c.db.insertTask({ id: "empty", workspaceId: null, title: "empty", runner: "claude", cwd: h, scope: [h], status: "idle", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
       expect((await post(`${b}/api/tasks/empty/evals/judge`)).status).toBe(409);
       // (d) switched off: the next done turn is not judged; 再評価 still works
       expect(await post(`${b}/api/settings`, { evals: { judge: { enabled: false } } }, "PATCH").then(j)).toMatchObject({ evals: { judge: { enabled: false } } });
@@ -4930,7 +5109,7 @@ describe("human eval (#1220)", () => {
       expect((await evals(t.id)).human).toBeNull();
       // (e) a Cloud task has no events here to count, but the person may rate it: rules stays null, human comes back
       const now = Date.now();
-      c.db.insertTask({ id: "cloudy", workspaceId: null, title: "cloud", runner: "claude", cwd: h, scope: [h], status: "done", runnerSessionId: null, executionMode: "cloud", cloudSession: { id: "session_cloudy", url: "https://claude.ai/code/session_cloudy" }, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
+      c.db.insertTask({ id: "cloudy", workspaceId: null, title: "cloud", runner: "claude", cwd: h, scope: [h], status: "done", runnerSessionId: null, executionMode: "cloud", cloudSession: { id: "session_cloudy", url: "https://claude.ai/code/session_cloudy" }, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
       expect(await send(`${b}/api/tasks/cloudy/evals/human`, "PUT", { rating: 5, comment: "cloud" }).then(j)).toMatchObject({ rules: null, judge: null, human: { rating: 5, comment: "cloud" } });
       expect(await evals("cloudy")).toMatchObject({ rules: null, human: { rating: 5 } });
     } finally {
@@ -4962,7 +5141,7 @@ describe("evals list (#1221)", () => {
       c.db.upsertEval({ taskId: a.id, source: "judge", by: "codex:gpt-6-luna", rubric: "switchboard-default@1", json: { scores: { goal: { score: 4, reason: "" }, safety: { score: 5, reason: "" }, efficiency: { score: 2, reason: "" } }, summary: "総評", rubric: "switchboard-default@1", by: "codex:gpt-6-luna", ts: 1 }, ts: 1 });
       // a task that never ran: no eval rows, still listed
       const now = Date.now() + 10_000;
-      c.db.insertTask({ id: "idle1", workspaceId: null, title: "idle", runner: "codex", cwd: h, scope: [h], status: "idle", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
+      c.db.insertTask({ id: "idle1", workspaceId: null, title: "idle", runner: "codex", cwd: h, scope: [h], status: "idle", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
       const rows = await list();
       expect(rows.map((r) => r.taskId)).toEqual(["idle1", z.id, a.id]); // newest first
       const idle = rows[0]!;
@@ -4995,6 +5174,26 @@ describe("evals list (#1221)", () => {
       // a row whose json no longer reads is null, like evalsOf
       c.db.sqlite.query("UPDATE task_evals SET json = '{\"old\": true}' WHERE task_id = ? AND source = 'judge'").run(a.id);
       expect((await list()).find((r) => r.taskId === a.id)!.judge).toBeNull();
+      // a rules@4 row (stops counted per record) is counted again by stop id when listed and when read, and replaced
+      const stopRecord = (sid: string, reason: "depends" | "usage-limit" | "github-limit", at: number) =>
+        c.db.appendEvent(z.id, { t: "stop.record", stop: { id: `${z.id}/${sid}`, work: { workspaceId: null, issue: null, taskId: z.id, scheduleId: null }, op: "op", target: "", reason, evidence: "", safety: "unknown", conditions: [], answer: null, actions: [], state: "waiting", at } });
+      stopRecord("A", "depends", 1);
+      stopRecord("A", "depends", 2);
+      stopRecord("A", "usage-limit", 3);
+      stopRecord("B", "github-limit", 4);
+      const asRules4 = () => {
+        const old = c.db.getEval(z.id, "rules")!;
+        const oldJson = old.json as { metrics: Record<string, unknown> };
+        c.db.upsertEval({ ...old, by: "rules@4", json: { ...oldJson, by: "rules@4", metrics: { ...oldJson.metrics, stops: 4, stopReasons: { depends: 2, "usage-limit": 1, "github-limit": 1 } } } });
+      };
+      asRules4();
+      expect((await list()).find((r) => r.taskId === z.id)!.rules.stops).toBe(2);
+      expect(c.db.getEval(z.id, "rules")?.by).toBe("rules@5");
+      asRules4();
+      const read = (await fetch(`${b}/api/tasks/${z.id}/evals`).then(j)).rules.metrics;
+      expect(read.stops).toBe(2);
+      expect(read.stopReasons).toEqual({ "usage-limit": 1, "github-limit": 1 });
+      expect(c.db.getEval(z.id, "rules")?.by).toBe("rules@5");
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
@@ -5006,7 +5205,7 @@ describe("evals list (#1221)", () => {
     const b = `http://127.0.0.1:${c.server.port}`;
     try {
       const now = Date.now();
-      const task = (id: string, effort: string | null, at: number) => c.db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: h, scope: [h], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort, subagentEffort: effort === "high" ? "medium" : null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: at, createdAt: at, updatedAt: at });
+      const task = (id: string, effort: string | null, at: number) => c.db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: h, scope: [h], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort, subagentEffort: effort === "high" ? "medium" : null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: at, createdAt: at, updatedAt: at });
       const start = (id: string, model?: string, effort?: string) => c.db.appendEvent(id, { t: "session.start", runner: "claude", cwd: h, ...(model === undefined ? {} : { model }), ...(effort === undefined ? {} : { effort }) });
       task("mixed", "high", now + 3);
       task("single", null, now + 2);
@@ -5041,7 +5240,7 @@ describe("evals list (#1221)", () => {
     try {
       const now = Date.now();
       const week = weekStartUtc(now);
-      const task = (id: string, workspaceId: string | null = null) => c.db.insertTask({ id, workspaceId, title: id, runner: "claude", cwd: h, scope: [h], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
+      const task = (id: string, workspaceId: string | null = null) => c.db.insertTask({ id, workspaceId, title: id, runner: "claude", cwd: h, scope: [h], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
       const judge = (id: string, score: number, ts: number) => c.db.upsertEval({ taskId: id, source: "judge", by: "x", rubric: "r@1", json: { scores: { goal: { score, reason: "" } }, summary: "", rubric: "r@1", by: "x", ts }, ts });
       const rate = (id: string, rating: number) => c.db.upsertEval({ taskId: id, source: "human", by: "user", rubric: null, json: { rating, comment: "", by: "user", ts: now }, ts: now });
       task("last1"); judge("last1", 2, week - 1);
@@ -5559,7 +5758,7 @@ describe("ops latency (#2102)", () => {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
     }
-  }, 30_000); // startServer and the API round trips: over the 5 s default on a loaded host (docs/design/perf.md "テストの揺れ")
+  }, 30_000); // startServer and the API round trips: over the 5 s default on a loaded host (docs/design/perf.md "Test flakiness")
 });
 
 describe("ops resources", () => {
@@ -5569,7 +5768,7 @@ describe("ops resources", () => {
     const procs = spyOn(opsLoadModule, "readProcs");
     try {
       const now = Date.now();
-      db.insertTask({ id: "t_ci", workspaceId: null, title: "PBI の local-ci", runner: "claude", cwd: h, scope: [h], status: "running", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
+      db.insertTask({ id: "t_ci", workspaceId: null, title: "PBI の local-ci", runner: "claude", cwd: h, scope: [h], status: "running", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
       // ops-kit heavy's files: one holding the slot in Task t_ci, one waiting outside a Task, one of a process that is gone
       const state = join(h, ".local", "state", "ops-kit", "heavy");
       mkdirSync(state, { recursive: true });
@@ -5786,7 +5985,7 @@ describe("insights schedule (#1838)", () => {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
     }
-  }, 30_000); // the runner's start and the report as an artifact: over the 5 s default on a loaded host (docs/design/perf.md "テストの揺れ")
+  }, 30_000); // the runner's start and the report as an artifact: over the 5 s default on a loaded host (docs/design/perf.md "Test flakiness")
 
   test("action insights: claude only and no prompt; a firing's Task sends /insights alone, no preamble; the report newer than the Task is its artifact, an old or missing one is a line on the Task; a hot 7-day window skips; no overlap; the usage is in the ledger", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-insights-"));
@@ -5877,7 +6076,7 @@ describe("insights schedule (#1838)", () => {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
     }
-  }, 30_000); // several runner starts and the reports as artifacts: over the 5 s default on a loaded host (docs/design/perf.md "テストの揺れ")
+  }, 30_000); // several runner starts and the reports as artifacts: over the 5 s default on a loaded host (docs/design/perf.md "Test flakiness")
 });
 
 describe("artifact fence (#1778)", () => {

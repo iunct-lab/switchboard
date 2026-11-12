@@ -1,150 +1,150 @@
-# リポジトリのあるサービスの操作（#920）
+# Operations on the service that hosts the repository
 
-バックログの取込み・編集の送信・ローカル CI の結果の報告を、「何をするか」（共通の操作）と「そのサービスでどうするか」（サービスの実装）に分ける。サービスは GitHub と、足している途中の GitLab（PBI #892。下の「GitLab」）。足す場所は下の「第二のサービスを足すとき」に名指しする。汎用の provider の階層・登録型のプラグイン・ランナー（Claude / Codex / DAK）ごとの分岐は作らない。PR とレビューは各サービスの標準のもの（GitHub は gh、GitLab はキットの `mr`。下の「MR・レビュー」）。
+Importing the backlog, sending edits, and reporting local CI results are split into "what to do" (the common operations) and "how to do it on that service" (the service implementations). The services are GitHub and GitLab (see "GitLab" below). The place to add one is named in "Adding a second service" below. We build no generic provider hierarchy, no registration-type plugins, and no per-runner (Claude / Codex / DAK) branching. PRs and reviews use each service's standard tools (GitHub uses gh; GitLab uses the kit's `mr`, see "MRs and reviews" below).
 
-## 対象（`ForgeTarget`）
+## Target (`ForgeTarget`)
 
-`{ service, host, repository }`。サービスはリポジトリの `ops.config.json` の `forge`（[`config.ts`](../../ops-kit/src/config.ts) の `ForgeConfig`、読むのは [`forge.ts`](../../ops-kit/src/forge.ts) の `forgeOf`）:
+`{ service, host, repository }`. The service is read from `forge` in the repository's `ops.config.json` (`ForgeConfig` in [`config.ts`](../../ops-kit/src/config.ts); it is read by `forgeOf` in [`forge.ts`](../../ops-kit/src/forge.ts)):
 
 ```json
 "forge": { "service": "github" }
 "forge": { "service": "gitlab", "host": "gitlab.example.com", "project": "group/sub/app" }
 ```
 
-- GitHub の host とリポジトリはサービスの実装が今までの場所から取る（取込みは `gh repo view` と `githubHost()`、送信は保存元のキー、ローカル CI は origin の `owner/name`）。GitHub の設定に書けるのは `service` だけで、ほかのキーは不正（読まない値を書けるようにしない）
-- GitLab は `host`（名前だけ。`https://`・ポート・パスは不正）と `project`（全体のパス。サブグループも）が必須。`forgeTargetOf(dir, origin)` が checkout の `origin` の host・パス（大文字小文字は区別しない）と照合し、違えば `ForgeUnsupported` で何も送らない。remote は変えない
-- `forge` の無いリポジトリは `github`（#920 より前の全部のリポジトリ）。このリポジトリの設定には 1 回書き足した
+- For GitHub, the service implementation takes the host and repository from where it always did (the import uses `gh repo view` and `githubHost()`, sending uses the key of the stored source, and local CI uses the origin's `owner/name`). The only key allowed in a GitHub setting is `service`; any other key is invalid (we do not allow writing values that are never read)
+- GitLab requires `host` (a name only; `https://`, a port, or a path is invalid) and `project` (the full path, subgroups included). `forgeTargetOf(dir, origin)` checks them against the host and path of the checkout's `origin` (case-insensitive), and if they differ it raises `ForgeUnsupported` and sends nothing. It does not change the remote
+- A repository without `forge` is `github` (every repository before the forge split).
 - A checkout with neither a `forge` nor an `origin` is `app` (`LOCAL_SERVICE`) for `forgeOf`: its changes are kept in the agent management app instead of PRs, and are reviewed, run, judged and merged there ([local-changes.md](local-changes.md)). A checkout with an origin is the same with `"forge": { "service": "app" }`. `forgeTargetOf` still reads a checkout without a `forge` as `github` (the backlog import reads it)
-- Workspace のランナーの設定（`projectVar` など）とは別。リポジトリがどこにあるかはリポジトリが持つ
-- バックログの置き場（workspace の `backlog`: `github` / `switchboard`、#2265）とも別。GitHub 連携の無い workspace でも、PR・CI の報告は `forge` のサービスのまま
-- 資格情報は持たない。各サービスの既存の CLI のログイン（GitHub は `gh`、GitLab は `glab`）に任せる。Project の URL は今までどおり `projectUrl` / `<envPrefix>_PROJECT_URL` / リポジトリ変数
+- This is separate from the workspace's runner settings (`projectVar` and so on). Where the repository lives is held by the repository
+- It is also separate from where the backlog is kept (the workspace's `backlog`: `github` / `switchboard`). Even a workspace without the GitHub integration keeps its PR and CI reports on the `forge` service
+- It holds no credentials. It relies on the login of each service's existing CLI (`gh` for GitHub, `glab` for GitLab). The Project URL is as before: `projectUrl` / `<envPrefix>_PROJECT_URL` / the repository variable
 
-## 操作（`ForgeOperation`）と実行（`runForgeOperation`）
+## Operations (`ForgeOperation`) and running them (`runForgeOperation`)
 
-| 種類 | 何をするか | GitHub の実装 |
+| Kind | What it does | GitHub implementation |
 |---|---|---|
-| `read` | サービスの Issue・コメント・Project・PR を取り込む | `importGithubSnapshot`（[`backlog-sync.ts`](../../packages/core/src/backlog-sync.ts)） |
-| `write` | Issue のフィールド（題・本文・状態・ラベル・Milestone・親）を書く | `Sender.send`（[`backlog-send.ts`](../../packages/core/src/backlog-send.ts)） |
-| `create` | Issue を作る | 同上 |
-| `comment` | コメントを書く（回答を含む） | 同上 |
-| `project` | Project への出し入れとフィールド | 同上 |
-| `verification` | 検査の結果を PR に報告する（ローカル CI の合格） | `githubForge`（[`forge-github.ts`](../../ops-kit/src/forge-github.ts)、`gh pr comment`） |
+| `read` | Imports the service's Issues, comments, Project and PRs | `importGithubSnapshot` ([`backlog-sync.ts`](../../packages/core/src/backlog-sync.ts)) |
+| `write` | Writes the fields of an Issue (title, body, state, labels, Milestone, parent) | `Sender.send` ([`backlog-send.ts`](../../packages/core/src/backlog-send.ts)) |
+| `create` | Creates an Issue | Same as above |
+| `comment` | Writes a comment (including an answer) | Same as above |
+| `project` | Moves items in and out of the Project, and its fields | Same as above |
+| `verification` | Reports the result of a check to the PR (local CI passing) | `githubForge` ([`forge-github.ts`](../../ops-kit/src/forge-github.ts), `gh pr comment`) |
 
 `app` has `verification` only: the result becomes a comment on the change in the app (`appForge`, [`forge-app.ts`](../../ops-kit/src/forge-app.ts), one row of `reportResult`'s services). It goes the way `ops-kit backlog comment` goes and needs `BACKLOG_URL` and `BACKLOG_WORKSPACE`; without them it fails with the reason and is not sent any other way.
 
-送信待ちの操作の種類は `forgeKind`（`backlog-send.ts`）で決まる: `create` / `comment` はそのまま、Project 項目と `field:*`・`member` は `project`、ほかの `set` は `write`。
+The kind of a pending send operation is decided by `forgeKind` (`backlog-send.ts`): `create` / `comment` stay as they are, Project items, `field:*` and `member` are `project`, and every other `set` is `write`.
 
-`runForgeOperation(op, services)` は `op.target.service` の実装の `op.kind` を呼ぶ。呼ぶ前に（`checkForgeOperation`）:
+`runForgeOperation(op, services)` calls the `op.kind` of the implementation for `op.target.service`. Before calling (`checkForgeOperation`):
 
-- 対応していないサービス・その操作の無いサービスは `ForgeUnsupported`（「サービス gitlab には対応していません（対応: github）」）。別の方法で代わりに行わない。取込みなら workspace の取込みの失敗（画面の errors）、送信待ちの操作ならその操作を `failed`（理由つき、何も送らない）、ローカル CI なら報告の失敗
-- 送る文（`op.texts`。送信待ちの操作は `textsOf(payload)`）に認証に使える値があれば `ForgeRefused`（`findSecrets`。キットはホストの AWS の名前も見る）。編集の保存のとき（422）に加えて、外へ送る直前にもう一度見る（古い DB から戻した操作など、保存の検査を通らずに入ったものも送らない）
+- A service that is not supported, or a service without that operation, raises `ForgeUnsupported` (`サービス gitlab には対応していません（対応: github）`). It is never done another way instead. For an import this becomes the workspace's import failure (errors on the screen), for a pending send operation the operation is marked `failed` (with the reason, nothing is sent), and for local CI a failure of the report
+- If the text to be sent (`op.texts`; for a pending send operation, `textsOf(payload)`) contains a value usable for authentication, it raises `ForgeRefused` (`findSecrets`; the kit also looks for the host's AWS names). Besides when an edit is saved (422), it checks again just before sending out (so operations that entered without passing the save check, such as ones restored from an old DB, are not sent either)
 
-サービスの分岐はこの 1 か所（呼び出しごとの `services` の表）だけで、core・ランナーの側に `service === "github"` の分岐を増やさない。
+The service branching lives in this one place (the per-call `services` table), and we do not add `service === "github"` branches on the core or runner side.
 
-## 第二のサービスを足すとき
+## Adding a second service
 
-1. `ops.config.json` の `forge.service` にその名前（例 `gitlab`）を書く（host やリポジトリを設定から読むなら、そのとき `ForgeConfig` に足して実装が読む）
-2. 取込み: `backlog-sync.ts` の `BacklogSync` の取込み（`runForgeOperation({ kind: "read" … }, { github: …, gitlab: … })`）の表に、そのサービスの `read`（保存の形は `putBacklogSnapshot` の記録。キーの `service` / `host` はそのサービスのもの）
-3. 送信: `backlog-send.ts` の `sendGithubOperations` の `services` の表に `write` / `create` / `comment` / `project`。足さない種類は対応していないと言って `failed` になる（GitLab は `project` を足していない）
-4. ローカル CI の報告: `scripts/local-ci.ts` の `reportResult` の表に `verification`（キットの側は `forge-github.ts` の隣に `forge-<service>.ts`）
-5. 保存の型: `BacklogRepositoryKey.service`（[`model.ts`](../../packages/protocol/src/model.ts)）にその値を足す（DB の列は既に `service` を持つ。`gitlab` は足した）
+1. Write its name (for example `gitlab`) in `forge.service` of `ops.config.json` (if the host or repository is read from the config, add it to `ForgeConfig` then and have the implementation read it)
+2. Import: in the table of `BacklogSync`'s import in `backlog-sync.ts` (`runForgeOperation({ kind: "read" … }, { github: …, gitlab: … })`), add that service's `read` (the stored form is the record of `putBacklogSnapshot`; the `service` / `host` of the key are that service's)
+3. Sending: in the `services` table of `sendGithubOperations` in `backlog-send.ts`, add `write` / `create` / `comment` / `project`. A kind that is not added is reported as unsupported and becomes `failed` (GitLab has not added `project`)
+4. Local CI report: in the `reportResult` table of `scripts/local-ci.ts`, add `verification` (on the kit side, `forge-<service>.ts` next to `forge-github.ts`)
+5. Stored type: add its value to `BacklogRepositoryKey.service` ([`model.ts`](../../packages/protocol/src/model.ts)) (the DB column already has `service`; `gitlab` has been added)
 
-## GitLab（#892）
+## GitLab
 
-[`forge-gitlab.ts`](../../ops-kit/src/forge-gitlab.ts)。通信は利用者がログインした `glab` だけ（`glab api --hostname <host> projects/<全体のパスを encode>/…`、REST API v4）。キットは glab を同梱・導入しない。
+[`forge-gitlab.ts`](../../ops-kit/src/forge-gitlab.ts). The only channel is the `glab` the user has logged in to (`glab api --hostname <host> projects/<encoded full path>/…`, REST API v4). The kit neither bundles nor installs glab.
 
-- ログインの確かめ: `gitlabAuth`（`glab auth status --hostname <host>`）。ログインしていない・glab が無いときは「<host> の glab にログインしていません」とだけ返し、glab の出力（トークンを含みうる）は返さない。ログインは利用者が行う
-- `gh` を GitLab の host に向けない。GitLab の操作が走らせるのは `glab` だけ
-- 保存のキーは `{ service: "gitlab", host, repository: <project の全体のパス> }`。番号は `iid`、外部 id は種類つきの全体の id（`gitlab:issue:<id>` / `gitlab:note:<id>`）。GitHub の #12 と GitLab の #12 は別の記録
+- Checking the login: `gitlabAuth` (`glab auth status --hostname <host>`). When not logged in or when glab is missing, it returns only `<host> の glab にログインしていません` and does not return glab's output (which may contain a token). The user does the login
+- `gh` is never pointed at a GitLab host. The only thing a GitLab operation runs is `glab`
+- The key of the stored data is `{ service: "gitlab", host, repository: <full path of the project> }`. The number is the `iid`, and the external id is the full id with its kind (`gitlab:issue:<id>` / `gitlab:note:<id>`). GitHub issue 12 and GitLab issue 12 are different records
 
-### 取込み（`read`）
+### Import (`read`)
 
-`BacklogSync` の取込みの表の `gitlab`（`importGitlabSnapshot` / `fetchGitlabSnapshot`、[`backlog-sync.ts`](../../packages/core/src/backlog-sync.ts)）。Switchboard の保存データが正本で、GitLab は同期先の 1 つ（#2266 の有効・無効はそのまま効く。`syncsGithub` は名前より広く、`switchboard` でも無効でもない同期先すべて）。
+The `gitlab` entry of the `BacklogSync` import table (`importGitlabSnapshot` / `fetchGitlabSnapshot`, [`backlog-sync.ts`](../../packages/core/src/backlog-sync.ts)). The data stored in Switchboard is the source of truth, and GitLab is one of the sync targets (the enable / disable switch applies as it is; `syncsGithub` is wider than its name, covering every sync target that is neither `switchboard` nor disabled).
 
-- 毎回: open の Issue を全部と、closed のうちカーソル（前回の最新の `updated_at`）以降に更新されたもの（初回は全部）。`type:*` ラベルのもの（と、既に保存したもの）を保存する
-- コメントは GitLab の notes のうち `system` でないもの。Issue の `updated_at` が動いたときだけ読み直し、無くなったものは `unavailable`
-- どちらの一覧にも出ない保存済みの open の Issue は番号で読む: 404 → `unavailable`、403 → `forbidden`
-- 状態は `opened` / `closed`。閉じ方は 1 つなので closed は `COMPLETED`（取り下げ（NOT_PLANNED）は GitLab から読めない）
-- 親: GitLab CE に sub-issue は無いので、本文の `## 親 PBI` の節の最初の行の `#N`（節があって番号が無ければ親なし、節が無ければ保存してある親のまま）。親の `subIssues` は、それを親とする Issue
-- Project の項目は作らない。GitLab のボードの列はラベルなので、ラベルとして見える。Status・Priority・Story Points などの Project のフィールドは GitLab には無い（送りの扱いは #2910）
-- workspace の source は `{ …キー, project: { owner: <project のパス>, number: 0 } }`（GitHub の Project は読まない）
-- glab の失敗は `BacklogError`「GitLab（<host>）: glab api が失敗しました（HTTP <status>）」で、取込みの失敗として画面に出る。glab の出力はそのまま出さない
-- 利用制限の待ちは host ごと。GitHub の待ちは GitLab の取込みを止めない（GitLab の 429 の待ちは送り（#2910）だけが持つ）
-- 一覧で読めた Issue は、値が同じでも前に 403 / 404 だったなら読めたとして保存し直す
+- Every time: all open Issues, and the closed ones updated at or after the cursor (the latest `updated_at` of the previous run; everything on the first run). Those with a `type:*` label (and those already stored) are stored
+- Comments are the GitLab notes that are not `system`. They are re-read only when the Issue's `updated_at` has moved, and the ones that are gone become `unavailable`
+- A stored open Issue that appears in neither list is read by its number: 404 → `unavailable`, 403 → `forbidden`
+- The state is `opened` / `closed`. There is one way to close, so closed is `COMPLETED` (withdrawal (NOT_PLANNED) cannot be read from GitLab)
+- Parent: GitLab CE has no sub-issues, so it is the `#N` on the first line of the `## 親 PBI` section of the body (if the section exists but has no number, there is no parent; if there is no section, the stored parent stays). The parent's `subIssues` are the Issues that have it as their parent
+- No Project items are made. A GitLab board's columns are labels, so they show up as labels. Project fields such as Status, Priority and Story Points do not exist in GitLab (sending treats them as described in "Sending" below)
+- The workspace's source is `{ …key, project: { owner: <path of the project>, number: 0 } }` (the GitHub Project is not read)
+- A glab failure is `BacklogError` `GitLab（<host>）: glab api が失敗しました（HTTP <status>）`, shown on the screen as an import failure. glab's output is not shown as it is
+- Rate-limit waits are per host. A GitHub wait does not stop a GitLab import (a GitLab 429 wait is held only by sending)
+- An Issue that could be read from the list is saved again as readable, even if its values are the same, when it was 403 / 404 before
 
-### 送り（`write` / `create` / `comment`）
+### Sending (`write` / `create` / `comment`)
 
-`sendGithubOperations` の `services` の表の `gitlab`（`GitlabSender`、[`backlog-send.ts`](../../packages/core/src/backlog-send.ts)）。共通の送信待ち（`backlog_operations`）と順番・保留の決まりはそのまま。
+The `gitlab` entry of the `services` table of `sendGithubOperations` (`GitlabSender`, [`backlog-send.ts`](../../packages/core/src/backlog-send.ts)). The shared pending-send table (`backlog_operations`) and the rules for order and holding stay as they are.
 
-- set: 題・本文・状態（`state_event` close / reopen）・ラベル（`add_labels` / `remove_labels`）・Milestone（題から id、無しは `0`）。送る前に読んで元の値と比べ（違えば `conflict`、何も書かない）、書いた直後にもう一度読む（違えば `conflict`）。初期方式 A のうち、GitHub の編集履歴の照合（#1329）は GitLab では読まないので、書く直前の他人の編集は、値が送った値と違うときだけ分かる
-- 親の set は `failed`（「GitLab には無いフィールドです（parent）。親は本文の ## 親 PBI で書きます」）、Project の項目とフィールドは `project` の操作で GitLab に無いので `failed`（「サービス gitlab の project には対応していません」）。どちらも何も送らない。作成の Project のフィールドは送らない（作成は通る）
-- create / comment は本文に印 `<!-- switchboard-op:<id> -->`。答えを失ったら（送った後の 5xx・接続できない）`unknown` にし、次の送りで一覧（Issue は `created_after`、note は新しい順）から印を探す。全ページを読みきって見つからなければ同じ印で送り直し、照合でも送り直した直後でも印つきが 2 件以上あれば先に作った方を残して後の Issue は close、後の note は消す（GitHub と同じ。[backlog-sync.md](backlog-sync.md) の「二重投稿を避ける」）。作った Issue の id（`remoteId`）があるのに一覧に無いときは送り直さない
-- 401 はログインの待ち（`Limit auth`）、429 は 1 分の待ち（`Limit`）、送る前に接続できない（HTTP の状態が無い）は 1 分の待ち、409 / 412 は `conflict`、ほかの 4xx は `failed`、5xx は `pending`（GitHub と同じ回数まで）。答えを失った作成・コメントは、印を探す読みが失敗しても `unknown` のまま
-- 待ちは host ごと（`source.host`）。GitHub の待ちは GitLab の送りを止めない
+- set: title, body, state (`state_event` close / reopen), labels (`add_labels` / `remove_labels`), and Milestone (id from the title; none is `0`). It reads before sending and compares with the original values (if they differ, `conflict` and nothing is written), and reads again right after writing (if they differ, `conflict`). The check against GitHub's edit history is not read on GitLab, so another person's edit just before the write is detected only when the value differs from the one sent
+- A parent set is `failed` (`GitLab には無いフィールドです（parent）。親は本文の ## 親 PBI で書きます`), and Project items and fields are `project` operations, which GitLab does not have, so they are `failed` (`サービス gitlab の project には対応していません`). Neither sends anything. The Project fields of a creation are not sent (the creation itself goes through)
+- create / comment put the marker `<!-- switchboard-op:<id> -->` in the body. When the answer is lost (a 5xx after sending, or no connection), it becomes `unknown`, and the next send looks for the marker in the list (Issues by `created_after`, notes newest first). If it is not found after reading every page, it sends again with the same marker; if two or more marked ones exist, whether at the check or right after resending, the earlier-created one is kept and the later Issue is closed (the later note is deleted) (the same as GitHub's sender in [`backlog-send.ts`](../../packages/core/src/backlog-send.ts)). When the created Issue's id (`remoteId`) exists but is not in the list, it does not resend
+- 401 is a wait for login (`Limit auth`), 429 is a 1-minute wait (`Limit`), failing to connect before sending (no HTTP status) is a 1-minute wait, 409 / 412 is `conflict`, other 4xx is `failed`, and 5xx is `pending` (up to the same number of times as GitHub). A creation or comment whose answer was lost stays `unknown` even if the read that looks for the marker fails
+- Waits are per host (`source.host`). A GitHub wait does not stop a GitLab send
 
-### MR・レビュー（`ops-kit mr`、#923）
+### MRs and reviews (`ops-kit mr`)
 
-PR とレビューは各サービスの標準のものを使う（自前の MR・レビューの画面や保存は作らない）。GitLab では、ブランチは標準の `git push`、MR と discussion は `glab api` で [`forge-gitlab.ts`](../../ops-kit/src/forge-gitlab.ts) の関数とキットの `mr` の入口から使う。
+PRs and reviews use each service's standard tools (we build no MR or review screen or storage of our own). On GitLab, the branch uses the standard `git push`, and MRs and discussions go through `glab api`, used from the functions in [`forge-gitlab.ts`](../../ops-kit/src/forge-gitlab.ts) and the kit's `mr` entry point.
 
-| 操作 | GitLab の API | GitHub での対応 |
+| Operation | GitLab API | GitHub equivalent |
 |---|---|---|
 | `mr create --source --target --title --body-file` | `POST merge_requests` | `gh pr create` |
-| `mr view <iid>`（JSON: head / base の sha・状態・`detailed_merge_status`） | `GET merge_requests/:iid` | `gh pr view` |
-| `mr discussions <iid>`（JSON: id・resolvable・resolved・note の位置（新旧の path と行。消した行は旧だけ）） | `GET merge_requests/:iid/discussions`（GitLab 自身の note は除く） | review threads |
-| `mr note <iid> --body-file [--path --line]` | `POST merge_requests/:iid/discussions`（`--path` / `--line` があれば今の差分の新しいファイルのその行の position。old_path は差分のそのファイルの元のパス（名前を変えたファイルは違う）。差分に無いファイルは送らない） | インラインコメント |
+| `mr view <iid>` (JSON: head / base sha, state, `detailed_merge_status`) | `GET merge_requests/:iid` | `gh pr view` |
+| `mr discussions <iid>` (JSON: id, resolvable, resolved, position of the note (new and old path and line; for a removed line, the old one only)) | `GET merge_requests/:iid/discussions` (GitLab's own notes are excluded) | review threads |
+| `mr note <iid> --body-file [--path --line]` | `POST merge_requests/:iid/discussions` (with `--path` / `--line`, the position at that line of the new file in the current diff. old_path is the original path of that file in the diff (different for a renamed file). A file not in the diff is not sent) | inline comment |
 | `mr resolve <iid> <discussion id>…` | `PUT merge_requests/:iid/discussions/:id?resolved=true` | `ops-kit pr resolve-thread` |
 
-- MR の番号は `iid`、discussion の id は GitLab の 40 桁の 16 進。GitHub の PR 番号・`PRRT_` のスレッド id とは混ぜない
-- resolved は「resolvable な note がすべて resolved」。resolvable な note の無い discussion（要約のコメント）は未解決に数えない
-- 投稿する題・本文は `findSecrets` を通し、当たれば何も送らない（`ForgeRefused`）
-- `forge` が gitlab でないリポジトリでは `mr` は何もせず exit 2（PR は gh を使う）
-- CE に無い承認（Approvals）の API は前提にしない。レビューの証跡は discussion と note
+- An MR's number is the `iid`, and a discussion's id is GitLab's 40-digit hexadecimal. They are not mixed with GitHub's PR numbers or `PRRT_` thread ids
+- resolved means "every resolvable note is resolved". A discussion with no resolvable note (a summary comment) does not count as unresolved
+- The title and body to be posted go through `findSecrets`, and on a hit nothing is sent (`ForgeRefused`)
+- In a repository whose `forge` is not gitlab, `mr` does nothing and exits 2 (PRs use gh)
+- The Approvals API, which CE does not have, is not assumed. The evidence of review is the discussions and notes
 
-### マージ判定とローカル CI の報告（#924）
+### Merge decision and reporting local CI
 
-`scripts/merge-gate.ts` は `--repo` が無く checkout の `forge` が gitlab なら、その MR（番号は `iid`）を `readGitlabPr` で読み、GitHub と同じ `judge`（impact・`[聞く]`・`[再チェック]`・`[merge-answer]`）で判定する。読むのは GitLab の標準の API だけ（承認（有料）は読まない）。
+When `scripts/merge-gate.ts` has no `--repo` and the checkout's `forge` is gitlab, it reads that MR (the number is the `iid`) with `readGitlabPr` and decides with the same `judge` as GitHub (impact, `[聞く]`, `[再チェック]`, `[merge-answer]`). It reads only GitLab's standard API (it does not read approvals, which are paid).
 
-| PrFacts | GitLab で読むもの |
+| PrFacts | What is read on GitLab |
 |---|---|
-| `files` | `merge_requests/:iid/diffs` の差分の `+` / `-` の行数。名前を変えたファイルは元のパスも入れる（保護するパスから外す変更も数える）。GitLab が省いた差分（`too_large`）があれば判定しない（exit 2） |
-| `headCommittedAt` | `commits` の `authored_date` の最新 |
-| `checks` | head の pipeline（MR の `head_pipeline`）。sha が head のときだけ。無い・古いときは、head と target の枝の今の先端の `[local-ci] pass` |
-| `unresolvedThreads` | resolvable で resolved でない discussion |
-| `mergeState` | `detailed_merge_status`。`mergeable` = CLEAN、ローカル CI で数えたときの `ci_must_pass` / `ci_still_running` = UNSTABLE、計算中（`checking` など）は判定しない（exit 2） |
-| 印（`[codex] review`・`[local-ci]`・`[recheck]`・`[merge-ask]` / `[merge-answer]`） | MR の notes のうち、書いた人の project の access level が Developer（30）以上のもの |
-| `designRulesTouched` | README.md を触った MR は触ったとみなす（GitLab では節を読まない。`[再チェック design-rules]`） |
+| `files` | The `+` / `-` line counts of the diffs in `merge_requests/:iid/diffs`. For a renamed file the original path is included too (a change that moves a file out of a protected path is counted as well). If GitLab omitted a diff (`too_large`), no decision is made (exit 2) |
+| `headCommittedAt` | The latest `authored_date` in `commits` |
+| `checks` | The head pipeline (the MR's `head_pipeline`). Only when its sha is the head. When there is none or it is stale, the `[local-ci] pass` at the current tips of the head and target branches |
+| `unresolvedThreads` | Discussions that are resolvable and not resolved |
+| `mergeState` | `detailed_merge_status`. `mergeable` = CLEAN; `ci_must_pass` / `ci_still_running` when counted by local CI = UNSTABLE; while it is computing (`checking` and so on), no decision is made (exit 2) |
+| Markers (`[codex] review`, `[local-ci]`, `[recheck]`, `[merge-ask]` / `[merge-answer]`) | The MR's notes whose author's access level in the project is Developer (30) or higher |
+| `designRulesTouched` | An MR that touched README.md counts as having touched them (GitLab does not read the sections; `[再チェック design-rules]`) |
 
-- `--merge` は `PUT merge_requests/:iid/merge` に判定した head の `sha` を付けて GitLab にマージさせる（head が動いていれば GitLab が 409 で断る）。`--merge-stack` は無い（exit 2）
-- ローカル CI（`bun scripts/local-ci.ts <iid>`）は GitLab の checkout では MR を回す: head は `refs/merge-requests/<iid>/head`（MR の sha と違えば止まる）、base は target の枝の先端。結果の報告（`verification`）は MR の note（`reportResult` の表の `gitlab`）
-- 秘密の検査（`findSecrets`）は GitLab のトークン（`glpat-` など `gl…-` の接頭辞）も見る
+- `--merge` has GitLab merge with `PUT merge_requests/:iid/merge`, adding the `sha` of the head that was judged (if the head has moved, GitLab refuses with 409). There is no `--merge-stack` (exit 2)
+- Local CI (`bun scripts/local-ci.ts <iid>`) runs the MR in a GitLab checkout: the head is `refs/merge-requests/<iid>/head` (it stops if it differs from the MR's sha), and the base is the tip of the target branch. The result report (`verification`) is a note on the MR (the `gitlab` entry of the `reportResult` table)
+- The secret check (`findSecrets`) also looks for GitLab tokens (the `gl…-` prefixes such as `glpat-`)
 
-### GitHub との差異と、まだ無いもの
+### Differences from GitHub, and what does not exist yet
 
-| | GitHub | GitLab（CE / Free） |
+| | GitHub | GitLab (CE / Free) |
 |---|---|---|
-| Project のフィールド（Status・Priority・Story Points など） | Project v2 | 無い。保存データ（Switchboard）だけで持ち、送りは `failed`（差異として見える） |
-| ボード | Project のビュー | 標準のボードの列はラベル。ラベルとして読み書きする |
-| 親・sub-issue | sub-issue | 無い。本文の `## 親 PBI` から読む。親の set は送らない |
-| 閉じ方 | COMPLETED / NOT_PLANNED / DUPLICATE | closed だけ（COMPLETED として読む） |
-| 照合（初期方式 A） | 前後の読み + 編集履歴（#1329） | 前後の読みだけ。書く直前の他人の編集は、値が送った値と違うときだけ分かる |
-| 承認 | review の承認 | 有料の Approvals は前提にしない。discussion と note が証跡 |
-| マージ | `gh pr merge --match-head-commit` / `gh stack merge` | `PUT …/merge` に sha。スタックのマージは無い |
-| 認証 | `gh` のログイン | `glab` のログイン（`gitlabAuth`。足りなければ「ログインしていません」とだけ言う） |
+| Project fields (Status, Priority, Story Points, and so on) | Project v2 | None. Kept only in the stored data (Switchboard), and sending is `failed` (visible as a difference) |
+| Board | Project views | The standard board's columns are labels. They are read and written as labels |
+| Parent / sub-issue | sub-issue | None. Read from the `## 親 PBI` section of the body. A parent set is not sent |
+| Way of closing | COMPLETED / NOT_PLANNED / DUPLICATE | closed only (read as COMPLETED) |
+| Check | Reads before and after, plus the edit history | Reads before and after only. Another person's edit just before the write is detected only when the value differs from the one sent |
+| Approval | review approval | The paid Approvals are not assumed. Discussions and notes are the evidence |
+| Merge | `gh pr merge --match-head-commit` / `gh stack merge` | `PUT …/merge` with the sha. There is no stack merge |
+| Authentication | `gh` login | `glab` login (`gitlabAuth`; when it is missing, it says only `ログインしていません`) |
 
-実 GitLab を使い始めるときに要るもの（glab の導入とログイン、OSS GitLab の起動、Git の remote の切り替え）は [`gitlab-adoption.md`](gitlab-adoption.md) で比べる。使ってよいかの安全性の調査（直近の脆弱性・glab・トークンの最小権限）は [`gitlab-security.md`](gitlab-security.md)。ここでは何もしない。どれも利用者の確認の後だけ。
+What is needed to start using a real GitLab (installing glab and logging in, starting an OSS GitLab, switching the Git remote) is compared in [`gitlab-adoption.md`](gitlab-adoption.md). The safety survey on whether it is acceptable to use (recent vulnerabilities, glab, least privilege for the token) is [`gitlab-security.md`](gitlab-security.md). Nothing is done here. Each of them happens only after the user confirms.
 
-今の形のまま残っていること（どの PBI にも渡していない事実）:
+Current limits:
 
-- 設定画面の同期の文言は「GitHub 同期」のまま（#2266 の有効・無効の操作は GitLab の source にも効く）
-- GitLab の取込みは定期の読み直しだけ（Webhook の通知は読まない）
+- The sync wording in the settings screen is still `GitHub 同期` (the enable / disable operation also applies to a GitLab source)
+- The GitLab import is only the periodic re-read (webhook notifications are not read)
 
-## 検証
+## Verification
 
-- `ops-kit/src/forge.test.ts`: 対象のサービス・ホスト・リポジトリがそのまま実装に渡ること、未対応のサービス・操作、送る直前の秘密の検査（AWS の名前も）、`forgeOf`、`forgeTargetOf`（GitLab の origin の照合）、GitHub の `verification` が前と同じ `gh pr comment`
-- `ops-kit/src/forge-gitlab.test.ts`: glab だけを target の host で呼ぶ、ログインしていないときに glab の出力を返さない
-- `packages/core/src/backlog-stored.test.ts`「a GitHub #12 and a GitLab #12 are two records」
-- `ops-kit/src/forge-gitlab.test.ts`「forge-gitlab read」（[`gitlab-issues.json`](../../ops-kit/fixtures/gitlab-issues.json) の再生）、`packages/core/src/backlog-sync.test.ts`「a GitLab project is imported through glab」
-- `packages/core/src/backlog-send.test.ts`「forge operation」: 秘密を含む操作と別サービスの操作は `failed` で GitHub に何も書かない、`forgeKind`。「GitLab:」の 4 件: 元の値との照合と書いた後の読み、無いフィールドの `failed`、印による再送の防止、401 / 429 / 4xx / 5xx
-- `packages/core/src/backlog-sync.test.ts`「the import is the read of the repository's forge」: 対応していない `forge.service` の workspace は取込みの失敗（理由つき）で GitHub に聞かない
-- `scripts/local-ci.test.ts`「forge verification」、`ops-kit/src/config.test.ts`「forge」「GitLab's forge」
-- `scripts/forge-e2e.ts`（`env -u SWITCHBOARD_SUPERVISED bun scripts/forge-e2e.ts`）: 一時 DB・ローカルの bare repo・偽 GitHub・偽 glab で、同じ番号の分離、取込み、両側の編集と conflict（GitLab と GitHub）、コメントと作成の答えを失ったときの印（GitLab と GitHub）、git の push から MR・discussion・resolve、古い head の合格と未解決の discussion でのマージの stop、ローカル CI の結果の note、判定した head でのマージ、GitHub の設定に戻した後の取込みが GitHub を読んでその checkout が GitHub の記録を読み、GitLab の保存データを消さないこと、外への接続 0 を続けて確かめる
+- `ops-kit/src/forge.test.ts`: the target's service, host and repository are passed to the implementation as they are; unsupported services and operations; the secret check just before sending (AWS names too); `forgeOf`; `forgeTargetOf` (matching a GitLab origin); and GitHub's `verification` being the same `gh pr comment` as before
+- `ops-kit/src/forge-gitlab.test.ts`: only glab is called, on the target's host; glab's output is not returned when not logged in
+- `packages/core/src/backlog-stored.test.ts`, the test that a GitHub issue 12 and a GitLab issue 12 are two records
+- `ops-kit/src/forge-gitlab.test.ts` "forge-gitlab read" (replay of [`gitlab-issues.json`](../../ops-kit/fixtures/gitlab-issues.json)), `packages/core/src/backlog-sync.test.ts` "a GitLab project is imported through glab"
+- `packages/core/src/backlog-send.test.ts` "forge operation": an operation containing a secret and an operation for another service are `failed` and write nothing to GitHub; `forgeKind`. The 4 "GitLab:" tests: the check against the original values and the read after writing, `failed` for a missing field, preventing a resend by the marker, and 401 / 429 / 4xx / 5xx
+- `packages/core/src/backlog-sync.test.ts` "the import is the read of the repository's forge": a workspace with an unsupported `forge.service` is an import failure (with the reason) and does not ask GitHub
+- `scripts/local-ci.test.ts` "forge verification", `ops-kit/src/config.test.ts` "forge" and "GitLab's forge"
+- `scripts/forge-e2e.ts` (`env -u SWITCHBOARD_SUPERVISED bun scripts/forge-e2e.ts`): with a temporary DB, a local bare repo, a fake GitHub and a fake glab, it checks in sequence the separation of identical numbers, the import, edits on both sides and conflicts (GitLab and GitHub), the marker when the answer to a comment or creation is lost (GitLab and GitHub), from a git push through the MR, discussions and resolve, the merge stop on a stale-head pass and on an unresolved discussion, the note for the local CI result, the merge at the head that was judged, that after switching back to the GitHub setting the import reads GitHub and that checkout reads GitHub's records and does not delete GitLab's stored data, and that outbound connections are 0

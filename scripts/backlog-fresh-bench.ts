@@ -65,7 +65,7 @@ const table = (title: string, rows: Array<[string, number[]]>) => console.log([`
 const wanted = process.env.BACKLOG_WORKSPACE || undefined;
 const repo = wanted ? null : (process.env.GH_REPO ?? (await sh(["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]))).toLowerCase();
 const findWorkspace = async () => {
-  const r = await api("GET", "");
+  const r = await api("GET", "/syncs");
   const ws = (r.json?.syncs ?? []).find((s: any) => (wanted ? s.workspaceId === wanted : s.repository?.toLowerCase() === repo));
   if (!ws) throw new Error(`workspace が見つかりません（${wanted ?? repo}）`);
   return { id: ws.workspaceId as string, ms: r.ms };
@@ -125,19 +125,18 @@ if (setRuns > 0) {
   console.log(`\n${spent(g, g2, setRuns, "set")}`);
 
   // the calls `backlog set` makes, one by one (ops-kit/src/backlog-client.ts)
-  const lookup: number[] = [], read: number[] = [], lookup2: number[] = [], patch: number[] = [], calls: number[] = [];
+  const lookup: number[] = [], read: number[] = [], patch: number[] = [], calls: number[] = [];
   try {
     for (let i = 0; i < setRuns; i++) {
       const t = performance.now();
       const a = await findWorkspace();
       const d = await api("GET", `/${issue}?workspaceId=${encodeURIComponent(a.id)}`);
-      const b = await findWorkspace();
-      const p = await api("PATCH", `/${issue}`, { workspaceId: b.id, fields: { Status: valueAt(i) } });
+      const p = await api("PATCH", `/${issue}`, { workspaceId: a.id, fields: { Status: valueAt(i) } });
       if (p.status >= 300) throw new Error(`PATCH が ${p.status}: ${JSON.stringify(p.json)}`);
-      lookup.push(a.ms), read.push(d.ms), lookup2.push(b.ms), patch.push(p.ms), calls.push(performance.now() - t);
+      lookup.push(a.ms), read.push(d.ms), patch.push(p.ms), calls.push(performance.now() - t);
     }
   } finally {
     await restore();
   }
-  table(`backlog set の呼び出し × ${setRuns}`, [["全体（呼び出しの和）", calls], ["findWorkspace（GET 一覧）", lookup], ["GET /:number（数値かを見る）", read], ["findWorkspace（2 回目）", lookup2], ["PATCH", patch]]);
+  table(`backlog set の呼び出し × ${setRuns}`, [["全体（呼び出しの和）", calls], ["findWorkspace（GET /syncs）", lookup], ["GET /:number（数値かを見る）", read], ["PATCH", patch]]);
 }

@@ -1,199 +1,199 @@
-# Switchboard をクラウドで動かす — 使うときだけ起動し、壊れても戻せる
+# Running Switchboard in the cloud — start only when used, recover when broken
 
-AWS に常駐デーモンを置き、使うときだけ起動する構成。実装は `aws/template.yaml`・`aws/starter.ts`・`aws/host/`、配備手順は `aws/README.md`。
+A setup that puts a resident daemon on AWS and starts it only when it is used. The implementation is `aws/template.yaml`, `aws/starter.ts` and `aws/host/`; the deployment procedure is `aws/README.md`.
 
-## 1. 配備の前提
+## 1. Deployment prerequisites
 
-自分の AWS アカウントとリージョンを選ぶ。必要なリポジトリだけに書ける GitHub トークンを用意する。稼働時間とデータ成長率から費用を見積もる。ブラウザからの復旧経路を、通常のデーモンとは別に持つ。
+Choose your own AWS account and region. Prepare a GitHub token that can write only to the repositories you need. Estimate the cost from the running hours and the data growth rate. Keep a recovery path from the browser that is separate from the normal daemon.
 
-## 2. 前提: Switchboard に要る実行環境
+## 2. Prerequisite: the runtime environment Switchboard needs
 
-- 常駐デーモン: HTTP + WebSocket、PTY（`packages/core/src/pty.ts`）、sqlite（WAL）、git worktree
-- ランナーは子プロセス（`claude -p` の stream-json、`codex app-server`）。1 ターンで数分〜数十分
-- 背景処理: 履歴の取り込み（30 秒ごと）、利用上限で止まった Task の再開（`resume_at`、`packages/core/src/ratelimit.ts`）、スケジューラ
+- Resident daemon: HTTP + WebSocket, PTY (`packages/core/src/pty.ts`), sqlite (WAL), git worktree
+- Runners are child processes (`claude -p` with stream-json, `codex app-server`). One turn takes minutes to tens of minutes
+- Background work: importing history (every 30 seconds), resuming Tasks stopped by a usage limit (`resume_at`, `packages/core/src/ratelimit.ts`), the scheduler
 
-関数型の実行基盤（Lambda など）は 15 分の上限があり、常駐する WebSocket / PTY / sqlite と合わない。作り直しに近いので対象外にする（案）。
-「使うときだけ起動する VM」にして、起動と停止をデーモン自身と小さな外部部品で制御する。
+A function-style platform (Lambda and the like) has a 15-minute limit and does not fit a resident WebSocket / PTY / sqlite. It is close to a rewrite, so it is out of scope (proposal).
+Make it a "VM that starts only when used", and control starting and stopping with the daemon itself and a small external part.
 
-### 2.1 開発ツール（#371）
+### 2.1 Development tools
 
-デーモンが動くだけでは、ランナーが開発（Stacked PR、E2E、登録した workspace のテスト）をできない。`aws/host/devtools.sh` を bootstrap が root で 1 回走らせる（もう一度走らせても、あるものは飛ばす。node だけは固定した版と違えば入れ替える）。
+Just having the daemon run does not let a runner do development (Stacked PRs, E2E, tests of a registered workspace). Bootstrap runs `aws/host/devtools.sh` once as root (running it again skips what is already there; only node is replaced when it differs from the pinned version).
 
-| 何のため | 入れるもの | 入れ方 |
+| Purpose | What is installed | How |
 |---|---|---|
-| Stacked PR（`pbi-complete`） | gh-stack | `gh extension install --pin` |
-| skills の枠の確認 | sqlite3 | dnf |
-| E2E（`scripts/*-e2e.ts`） | Chromium（Playwright の arm64 版。Google は Linux arm64 の Chrome を出していない）、その実行ライブラリと Noto CJK | Playwright（版固定）、ライブラリとフォントは dnf。`/usr/local/bin/chromium` を unit の `CHROME_BIN` / `CHROME_PATH` が指す |
-| Claude の画面操作 | Playwright MCP（headless、同じ Chromium） | `claude mcp add -s user`（版固定） |
-| Claude の設定 | 自分で選んだ JSON 設定 | `bash aws/host/claude-settings.sh ~/.claude/settings.json <patch.json>`。未指定なら既存設定を変えない |
-| Python のリポジトリ（DAK など）の単体テスト | uv と Python 3.11 / 3.12 / 3.14、gitleaks（コミットのフック） | 版と sha256 を固定、Python は uv |
-| compose を使うリポジトリ（DAK など）の結合テスト | docker と compose | **rootless**（Docker の static 版 + rootless extras、ネットワークは pasta）。版と sha256 を固定 |
-| 登録した workspace の IaC | SAM CLI | 版と sha256 を固定 |
-| Playwright と MCP を動かす | node（LTS） | 版と sha256 を `aws/host/node.sh` に固定。起動のたびに `sb-host-update` も走らせ、固定した版と違えば入れ替える（§6.5） |
-| コミット | git の author | トークンの持ち主（`gh api user`）の noreply アドレス |
+| Stacked PRs (`pbi-complete`) | gh-stack | `gh extension install --pin` |
+| Checking the usage quota in skills | sqlite3 | dnf |
+| E2E (`scripts/*-e2e.ts`) | Chromium (Playwright's arm64 build; Google does not ship Chrome for Linux arm64), its runtime libraries and Noto CJK | Playwright (version pinned); libraries and fonts by dnf. The unit's `CHROME_BIN` / `CHROME_PATH` point at `/usr/local/bin/chromium` |
+| Claude's screen operation | Playwright MCP (headless, the same Chromium) | `claude mcp add -s user` (version pinned) |
+| Claude's settings | A JSON settings file you choose | `bash aws/host/claude-settings.sh ~/.claude/settings.json <patch.json>`. If none is given, the existing settings are left unchanged |
+| Unit tests of Python repositories (DAK and others) | uv and Python 3.11 / 3.12 / 3.14, gitleaks (commit hook) | Versions and sha256 pinned; Python through uv |
+| Integration tests of repositories that use compose (DAK and others) | docker and compose | **rootless** (Docker's static build + rootless extras, networking by pasta). Versions and sha256 pinned |
+| IaC of a registered workspace | SAM CLI | Version and sha256 pinned |
+| Running Playwright and MCP | node (LTS) | Version and sha256 pinned in `aws/host/node.sh`. `sb-host-update` also runs at every start and replaces node when it differs from the pinned version (§6.5) |
+| Commits | The git author | The noreply address of the token's owner (`gh api user`) |
 
-- **利用者に root を渡さない**（sudoers は §6 のまま）。そのため docker は rootless で、docker グループも system の dockerd も作らない。`/usr/local/bin/docker` が、応答しなければ `dockerd-up` で起動してからコマンドを渡す。dockerd はデーモンの unit の cgroup の中で動き、systemd のユーザーセッションが無いので cgroupfs を使う。デーモンの unit が再起動するとコンテナも止まり、次の `docker` でまた起動する
-- この機械に収まらない docker の検証（`docker compose up --build` のような重いビルドはメモリを使い切って固めるので、`sb-dockerd` は 1.5 GiB で打ち切る）は、明示の `sb-offload <command>` で CodeBuild の 1 回のビルドに出す（#678）。作業ツリーだけを送り、ログと終了コードが返り、ビルドが終われば機械は手放される。`docker` 自体は黙って外に向けない（bind mount や localhost が前提の検証が壊れる）。`build` / `compose up` のときに 1 行だけ案内を出す。機械の大きさは呼び出しごとに選び（`--size small|medium|large`）、指定しなければ最小で走る（#2304。最大は large で、`sb-offload` を通す限り費用の上限は変わらない）。CodeBuild にするのは、実行ごとに作って捨てることが仕組みで保証されるから。一時 EC2 は止め忘れと Spot の空きを自分で扱うことになり、インスタンスを大きくするのは常に費用がかかる。仕組みと費用は `aws/README.md` の Offload。
-- devtools が失敗しても bootstrap は止めない（#389）。記録して先へ進み、デーモンと sb-rescue は起動する（開発ツールが欠けるだけ。作り直すでやり直せる）
-- root で展開する tar は `--no-same-owner`（tarball の中の所有者 uid が Switchboard を動かす OS ユーザーと同じになりうる。#375）
-- 実 LLM や大型 Docker イメージは RAM・ディスクを圧迫する。`/tmp` が tmpfs の場合、大きな作業ファイルを置かない。
+- **No root for the user** (sudoers stays as in §6). So docker is rootless, and neither a docker group nor a system dockerd is created. `/usr/local/bin/docker` starts it with `dockerd-up` if it does not answer, then hands the command over. dockerd runs inside the daemon unit's cgroup, and because there is no systemd user session it uses cgroupfs. When the daemon's unit restarts the containers stop too, and the next `docker` starts them again
+- Docker checks that do not fit on this machine (a heavy build such as `docker compose up --build` uses up the memory and freezes it, so `sb-dockerd` cuts it off at 1.5 GiB) go out to a single CodeBuild build with an explicit `sb-offload <command>`. Only the work tree is sent, the log and exit code come back, and the machine is released when the build ends. `docker` itself is never silently redirected outside (a check that assumes bind mounts or localhost would break). One line of guidance is printed on `build` / `compose up`. The machine size is chosen per call (`--size small|medium|large`), and without it the smallest runs (the largest is large, and as long as it goes through `sb-offload` the cost ceiling does not change). CodeBuild is used because the mechanism guarantees a machine is created for each run and thrown away. A temporary EC2 instance would mean handling forgotten stops and Spot availability ourselves, and making the instance larger always costs money. The mechanism and cost are in the Offload section of `aws/README.md`.
+- Bootstrap does not stop even if devtools fails. It records the failure and goes on, and the daemon and sb-rescue start (only the development tools are missing; a rebuild can retry)
+- A tarball extracted as root uses `--no-same-owner` (the owner uid inside a tarball can equal the OS user that runs Switchboard)
+- A real LLM or a large Docker image strains RAM and disk. When `/tmp` is tmpfs, do not put large working files there.
 
-## 3. 構成: EC2 を使うときだけ起動する
+## 3. Architecture: start EC2 only when it is used
 
-- 自分の AWS アカウントに専用スタックを作る。リージョン・インスタンスタイプ・稼働時間を選ぶ
-- IaC は SAM（変換は CloudFormation 側）。配置は `aws cloudformation package` + `aws cloudformation deploy --no-execute-changeset` で変更セットを見てから実行する（SAM CLI はテンプレートの `Fn::ForEach` を読めない。#465）
-- 入口は CloudFront。共有ヘッダーをオリジン側で確かめる
-- ログインはパスキー（WebAuthn）
-- ログインの流れ（#211）: URL を開く → 認可されていなければ UI が `/_auth/?next=<元のパス>` へ移る → 起動用 Lambda（CloudFront の `/_auth/*`、機械が止まっていても動く）のページで Face ID / 指紋 → Lambda が `sb_session` Cookie（HttpOnly・Secure・署名つき。ログインから 7 日、または最後の操作から 24 時間で切れる）を出す → 止まっていれば同じ画面の「起動する」→ 動いたら元のパスへ。この Cookie 1 つで Switchboard の画面（`/api`・`/ws`・`/ws/pty`）と救援画面（`/rescue/`）に入れる。Cookie は起動用 Lambda だけが読める Ed25519 の seed（`/switchboard/session-signing-key`）で署名し、デーモンと sb-rescue は公開鍵（`SWITCHBOARD_SESSION_PUBLIC_KEY`、sb-env が `/switchboard/session-public-key` から渡す）で署名と期限（アイドル期限と上限の両方が未来で、アイドル期限が上限を越えない）を確かめる。上限 7 日・アイドル 24 時間は 3 か所（`aws/auth.ts`・`packages/core/src/auth.ts`・`rescue/src/server.ts`）に同じ値で置き、`aws/session-contract.test.ts` が食い違いを止める。古い 2 項目の Cookie は読まない（切り替えで再ログイン 1 回）。反映は Lambda（配置。`aws/README.md` の Deploy）を先に、次にデーモン、最後に救援画面。アイドル期限の延ばし方は次の項目。インスタンスには公開鍵しか無いので、その上のエージェントは Cookie を作れない（#701）。Cookie の形は `sb_session=<body>.<sig>`: body は UTF-8 の `<passkeyId>.<idleUntilMs>.<expiresMs>`（アイドル期限、上限の順。最後を上限にするのは、旧版が最後を期限と読むため）を base64url にした文字列、sig はその **base64url の文字列** への Ed25519 の署名を base64url にしたもの（正準な表記だけを通す）。署名が通っても、デーモンと sb-rescue は起動用 Lambda の `/_auth/status` に「そのパスキーがまだ登録されているか」を Cookie と共有ヘッダを付けて問い、答えを Cookie ごとに 5 分覚える。問えなければ通さない。開いている WebSocket は 5 分ごとに問い直し、消えていれば閉じる（#708）。UI は `/api/health` の `login`（`passkey` / `token`）でどちらのログインかを決め、ログイン後に戻っても拒まれたら（`?from=auth`）もう一度移らずに「デーモンの再起動が要る」と出す（ループしない）。**人がトークンを入力・コピーする場面は無い**。デーモンのトークンはインスタンスの中（ループバック: ランナーの `/mcp`、sb-rescue の死活確認、エージェントの `curl`）でだけ通り、外（CloudFront 経由）からは Cookie だけが通る（#748。判定は接続の相手のアドレスで、ヘッダは見ない）。起動トークンは機械（GitHub Actions、sb-rescue の作り直す）のために残る
-- ログインの期限の延長（#498）: 画面（チャット画面と救援画面）が状態を変える操作（GET / HEAD 以外）の後に、起動用 Lambda の `POST /_auth/renew` を間引いて呼ぶ。起動・停止・作り直しが通ったときは、その応答の Cookie でも延びる。見るだけ・自動の読み直し・WebSocket（ターミナルの入力を含む）では延びない。Lambda は Cookie の上限と passkeyId を変えずにアイドル期限を 24 時間先（上限まで）にした Cookie を出す。署名できるのは Lambda だけなので、デーモンと救援画面は Cookie を出さない（#701）。
-- ログインの期限の表示（#498）: `/api/health` と `/_auth/status` が、Cookie で入った要求にだけ `session: { idleUntil, expiresAt }`（ms）を返す（Cookie は HttpOnly のまま）。チャット画面は足元の状態バーに「ログイン 〜まで」（早い方）を出し、その時刻に `/api/health` を読み直す。延びていれば新しい時刻、切れていれば既存の流れでパスキーのログイン（`/_auth/?next=…`）へ移る。起動画面（`/_auth/`）はログイン済みの表示に「ログイン 〜まで（最長 〜）」を 1 行出す。救援画面には出さない。
-- 重要な操作は直近のパスキー確認（#497、デーモンは #1491）: 起動用 Lambda は `/_auth/login`・`/_auth/register` のたびに `sb_recent` Cookie（HttpOnly・Secure・SameSite=Lax、5 分）も出す。形は `sb_session` と同じ body に、署名の入力の前に `recent:` を付けたもの（`sb_session` の値を `sb_recent` に貼っても、その逆も通らない）で、passkeyId が `sb_session` と同じであること。次の操作は、Cookie で入った人にはこれも求め、無ければ 401 `reason: "recent"`。トークン・ループバック（インスタンスの中）は求めない。
+- Create a dedicated stack in your own AWS account. Choose the region, instance type and running hours
+- IaC is SAM (the transform happens on the CloudFormation side). Deployment is `aws cloudformation package` + `aws cloudformation deploy --no-execute-changeset`: look at the change set before executing it (SAM CLI cannot read `Fn::ForEach` in the template)
+- The entry point is CloudFront. The origin checks the shared header
+- Login is by passkey (WebAuthn)
+- The login flow: open the URL → if not authorized, the UI moves to `/_auth/?next=<original path>` → on the page of the start Lambda (CloudFront's `/_auth/*`, which works even while the machine is stopped), Face ID / fingerprint → the Lambda issues the `sb_session` cookie (HttpOnly, Secure, signed; it expires 7 days after login or 24 hours after the last operation) → if the machine is stopped, `起動する` on the same page → once it is running, go to the original path. This one cookie gets you into the Switchboard screens (`/api`, `/ws`, `/ws/pty`) and the rescue page (`/rescue/`). The cookie is signed with an Ed25519 seed that only the start Lambda can read (`/switchboard/session-signing-key`), and the daemon and sb-rescue check the signature and the expiry (both the idle expiry and the cap are in the future, and the idle expiry does not exceed the cap) with the public key (`SWITCHBOARD_SESSION_PUBLIC_KEY`, which sb-env passes from `/switchboard/session-public-key`). The cap of 7 days and the idle limit of 24 hours are held with the same values in three places (`aws/auth.ts`, `packages/core/src/auth.ts`, `rescue/src/server.ts`), and `aws/session-contract.test.ts` stops any mismatch. The old two-field cookie is not read (the switch costs one re-login). The rollout order is the Lambda first (deployment; Deploy in `aws/README.md`), then the daemon, then the rescue page. How the idle expiry is extended is in the next item. The instance holds only the public key, so an agent on it cannot make a cookie. The cookie's form is `sb_session=<body>.<sig>`: body is the base64url of the UTF-8 string `<passkeyId>.<idleUntilMs>.<expiresMs>` (idle expiry, then cap; the cap goes last because older versions read the last field as the expiry), and sig is the base64url of an Ed25519 signature over that **base64url string** (only the canonical form is accepted). Even when the signature passes, the daemon and sb-rescue ask the start Lambda's `/_auth/status`, with the cookie and the shared header, whether "that passkey is still registered", and remember the answer for 5 minutes per cookie. If they cannot ask, they do not let the request through. An open WebSocket asks again every 5 minutes and closes if the passkey is gone. The UI decides which login applies from `login` in `/api/health` (`passkey` / `token`), and if it is still refused after returning from login (`?from=auth`), it does not move again but shows "a daemon restart is needed" (no loop). **There is no place where a person types or copies a token.** The daemon's token passes only inside the instance (loopback: the runner's `/mcp`, sb-rescue's liveness check, the agent's `curl`), and from outside (through CloudFront) only the cookie passes (decided 2026-10-05; the decision goes by the peer address of the connection and does not look at headers). The start token remains for machines (GitHub Actions, sb-rescue's rebuild)
+- Extending the login expiry: after an operation that changes state (anything but GET / HEAD) on a screen (the chat screen and the rescue page), the screen calls the start Lambda's `POST /_auth/renew`, throttled. When a start, stop or rebuild goes through, the cookie in its response extends it too. Viewing only, automatic re-reads and WebSocket (including terminal input) do not extend it. The Lambda issues a cookie with the idle expiry 24 hours ahead (up to the cap), keeping the cookie's cap and passkeyId. Only the Lambda can sign, so the daemon and the rescue page do not issue cookies.
+- Showing the login expiry: `/api/health` and `/_auth/status` return `session: { idleUntil, expiresAt }` (ms) only to requests that came in with a cookie (the cookie stays HttpOnly). The chat screen shows "`ログイン 〜まで`" (the earlier of the two) in the status bar at the bottom and re-reads `/api/health` at that time. If it was extended it shows the new time; if it has expired it moves to the passkey login through the existing flow (`/_auth/?next=…`). The start page (`/_auth/`) shows one line, "`ログイン 〜まで（最長 〜）`", in the logged-in display. It is not shown on the rescue page.
+- Important operations need a recent passkey check (the daemon side too): on every `/_auth/login` and `/_auth/register` the start Lambda also issues an `sb_recent` cookie (HttpOnly, Secure, SameSite=Lax, 5 minutes). Its form is the same body as `sb_session`, with `recent:` put before the signature input (pasting an `sb_session` value into `sb_recent` or the reverse does not pass), and its passkeyId must be the same as `sb_session`'s. For the operations below, a person who came in with a cookie must also present it, and without it the answer is 401 `reason: "recent"`. Token and loopback (inside the instance) are not asked for it.
 
-  | 操作 | 受ける側 | Cookie で入った人 | token・loopback |
+  | Operation | Receiving side | Person who came in with a cookie | token / loopback |
   |---|---|---|---|
-  | 起動・作り直す（`/_auth/start` `/_auth/rebuild`、#497） | 起動用 Lambda | 直近の確認が要る | 求めない（機械の起動トークン） |
-  | 救援画面の状態を変える POST（再起動・戻す・プロモート・DB 復元・作り直す・エージェントの起動と停止、#497） | sb-rescue | 直近の確認が要る | 求めない |
-  | デーモンの 7 か所（#1491）: ターミナル（`/ws/pty`）、`POST /api/daemon/restart`・`promote`、ワークスペース登録（`POST /api/workspaces`）、設定の保存（`PATCH /api/settings`）、危険モードの Task 作成（`POST /api/tasks`）、危険モードへの切り替え（`POST /api/tasks/:id/permission-mode`） | デーモン | 直近の確認が要る | 求めない |
+  | Start / rebuild (`/_auth/start` `/_auth/rebuild`) | Start Lambda | A recent check is required | Not required (the machine's start token) |
+  | State-changing POSTs of the rescue page (restart, roll back, promote, DB restore, rebuild, start and stop the agent) | sb-rescue | A recent check is required | Not required |
+  | Seven places in the daemon: the terminal (`/ws/pty`), `POST /api/daemon/restart` and `promote`, workspace registration (`POST /api/workspaces`), saving settings (`PATCH /api/settings`), creating a Task in danger mode (`POST /api/tasks`), switching to danger mode (`POST /api/tasks/:id/permission-mode`) | Daemon | A recent check is required | Not required |
 
-  見るだけ（起動画面の状態、救援画面とその状態・ログ）、日常の操作（閲覧・返信・承認）、`/mcp`（既に利用者の承認を通る）は求めない。Web UI は 401 `recent` を受けたら「操作の前にパスキーで確かめてください」とボタンを出し、押されたら同じオリジンの `/_auth/login` でパスキーを確かめて（自動では出さない。Safari は利用者の操作の中でしか WebAuthn を呼べない）同じ操作を 1 回だけ送り直す（ターミナルタブは `/ws/pty` と同じ URL への GET で理由を読み、1 回だけ開き直す）。救援画面も同じ流れ。確認用のエンドポイントやサーバー側の記録は持たない。起動・作り直しのたびにセッションを切る仕組みは作らない（#494 の利用者判断: 起動をこの確認の対象に入れて代える）。ブラウザでの流れは `scripts/recent-e2e.ts`
-- 最初のパスキー（と全部の端末を失ったとき）は、エージェントがチャットに出す 1 回限り・期限つきの登録リンク（`/_auth/#register=<code>`、コードは `/switchboard/register-code`。本数の上限の対象外）で登録する。2 台目からは、ログイン済みの端末の `/_auth/#devices`（機械が止まっていれば `/_auth/` にも出る）の「登録済みのパスキー」（端末名・登録日時・最後に使った日時・この端末）から: 「別の端末を追加」は、その要求のためのパスキーの署名を付けた `POST /_auth/device-code` で 1 回限り・10 分のコードを受け取り、同じ形のリンクを出す（Cookie だけでは、`sb_recent` があっても出せない。新しいコードは前のコードを無効にする。起動用 Lambda は SHA-256 だけを `auth/passkeys.json` に置き、インスタンスのロールは読めない。この経路で増やせるのは 5 本まで）。各行の「削除」は確認ダイアログの後に同じくその場の署名を付けた `POST /_auth/passkeys/delete`（最後の 1 本は 409）。#414。全部の Cookie を無効にするときは seed と公開鍵を作り直して 2 つのパラメータを入れ替え、インスタンスを再起動（EC2 の Reboot）して sb-env に読み直させる（救援画面の「再起動」は使えない: sb-rescue は再起動まで古い公開鍵を持ち、新しい Cookie を拒むので画面に入れない）。1 台の端末を締め出すときは上の「削除」か、ログイン済みの端末が無ければ `auth/passkeys.json` からそのパスキーを消す（画面と `/rescue/` も 5 分以内）。端末のパスワードマネージャーにはそのパスキーが残り選ぶ画面に出るが、選ぶとログインのページが `PublicKeyCredential.signalUnknownCredential` で端末に知らせ（起動用 Lambda は一覧に無い id を 401 `reason: "unknown"` で返す。署名の失敗とは区別する）、対応するブラウザでは次から選ぶ画面に出ない。対応しない端末では文で案内し、端末の設定から消す（#1312）
-- CI の AWS 接続は GitHub OIDC で、長期キーを GitHub Secrets に置かない
-- 費用は AWS Budgets で通知する
+  Viewing only (the start page's status, the rescue page and its state and log), everyday operations (viewing, replying, approving) and `/mcp` (which already passes the user's approval) are not asked for it. When the Web UI receives 401 `recent` it shows a button, "`操作の前にパスキーで確かめてください`", and when it is pressed it checks the passkey at the same origin's `/_auth/login` (it is not shown automatically: Safari can call WebAuthn only inside a user action) and resends the same operation once (the terminal tab reads the reason with a GET to the same URL as `/ws/pty` and reopens once). The rescue page follows the same flow. There is no endpoint for the check and no server-side record. No mechanism is built that cuts the session at every start or rebuild (the user decided to put starting under this check instead). The browser flow is `scripts/recent-e2e.ts`
+- The first passkey (and the case where every device is lost) is registered with a one-time, expiring registration link that the agent puts in the chat (`/_auth/#register=<code>`, the code is `/switchboard/register-code`; not counted against the limit on the number of passkeys). From the second device on, use "`登録済みのパスキー`" (device name, registration time, last used time, this device) in `/_auth/#devices` of an already logged-in device (it also shows in `/_auth/` when the machine is stopped). "`別の端末を追加`" receives a one-time, 10-minute code with `POST /_auth/device-code`, which carries a passkey signature made for that very request, and shows a link of the same form (a cookie alone cannot do it, even with `sb_recent`; a new code invalidates the previous one; the start Lambda puts only the SHA-256 in `auth/passkeys.json`, which the instance role cannot read; this route can add up to 5 passkeys). Each row's "`削除`" is, after a confirmation dialog, `POST /_auth/passkeys/delete`, again with an on-the-spot signature (the last remaining one gives 409). To invalidate every cookie, regenerate the seed and public key, swap the two parameters, and restart the instance (EC2 Reboot) so that sb-env re-reads them (the rescue page's "`再起動`" cannot be used: sb-rescue keeps the old public key until the restart and rejects the new cookie, so you cannot get into the page). To shut out one device, use the "`削除`" above, or, if there is no logged-in device, remove that passkey from `auth/passkeys.json` (the screens and `/rescue/` too, within 5 minutes). The passkey stays in the device's password manager and appears on the selection screen, but when it is chosen, the login page tells the device with `PublicKeyCredential.signalUnknownCredential` (the start Lambda answers an id not in the list with 401 `reason: "unknown"`, distinguished from a signature failure), and on supporting browsers it stops appearing on the selection screen from then on. On devices that do not support it, the page explains in text, and the passkey is removed in the device's settings
+- CI's AWS connection is GitHub OIDC; no long-lived keys are placed in GitHub Secrets
+- Cost is notified by AWS Budgets
 
 ```text
-スマホ / PC のブラウザ
-  │ https://<distribution>.cloudfront.net（パスキーでログイン → 署名つき Cookie）
+Phone / PC browser
+  │ https://<distribution>.cloudfront.net (log in with a passkey → signed cookie)
   ▼
-CloudFront（キャッシュしない。Cookie はオリジンのデーモンと sb-rescue が確かめ、無ければ UI がログイン画面へ移す）
-  │ 共有ヘッダーを付けてオリジンへ
-  ├──▶ EC2 t4g.medium（Graviton, 4 GB, リージョンは配備時に選ぶ。既定はオンデマンド）
-  │      CloudFront の VPC origin でインスタンスの id に届く。受信は CloudFront のプレフィックスリストだけ許可し、共有ヘッダーも確かめる
-  │      ├ switchboard（不変リリース, systemd）
-  │      ├ sb-rescue（救援サービス, §6）
-  │      ├ EBS gp3 20 GB（/home/switchboard、リポジトリは /home/switchboard/repos）
-  │      └ Litestream → S3（sqlite を常時複製）
-  ├──▶ /_auth*: 起動用 Lambda（Function URL）のログインと起動の画面（ec2:StartInstances と、この 1 台だけ）
-  │      Function URL を直接叩いても共有ヘッダーが無ければ全ルート（/status も）403（#1493）。機械（Actions の host.yml・sb-rescue）は start token に加えて共有ヘッダーを送る。反映の順は、sb-rescue を新しい版にしてから（`bun run rescue:install` をやり直して sb-rescue を再起動。昇格ではデーモンしか替わらない）Lambda を deploy する（先に Lambda だと救援画面の作り直すが 403）。start token の誤りでの SSM の読み直しは 10 秒に 1 回まで
-  │  EC2 が止まっていて応答しない（502 / 504）
-  └──▶ CloudFront のエラーページとして S3 の「起動ページ」（/_start/）→ /_auth へ
-EventBridge Scheduler（resume_at / 定期実行の時刻に起こす）──▶ 起動用 Lambda
+CloudFront (no caching. The daemon and sb-rescue at the origin check the cookie; without it the UI moves to the login screen)
+  │ adds the shared header and goes to the origin
+  ├──▶ EC2 t4g.medium (Graviton, 4 GB, the region is chosen at deployment. On-demand by default)
+  │      CloudFront's VPC origin reaches the instance by its id. Inbound allows only CloudFront's prefix list, and the shared header is checked too
+  │      ├ switchboard (immutable release, systemd)
+  │      ├ sb-rescue (rescue service, §6)
+  │      ├ EBS gp3 20 GB (/home/switchboard, repositories in /home/switchboard/repos)
+  │      └ Litestream → S3 (continuous sqlite replication)
+  ├──▶ /_auth*: the start Lambda (Function URL)'s login and start pages (ec2:StartInstances, and this one instance only)
+  │      Hitting the Function URL directly without the shared header gets 403 on every route (/status too). Machines (Actions' host.yml, sb-rescue) send the shared header in addition to the start token. The order of rollout is: first put sb-rescue on the new version (redo `bun run rescue:install` and restart sb-rescue; a promotion replaces only the daemon), then deploy the Lambda (Lambda first would make the rescue page's rebuild return 403). SSM re-reads on a wrong start token are limited to once per 10 seconds
+  │  When EC2 is stopped and does not answer (502 / 504)
+  └──▶ CloudFront's error page is S3's "start page" (/_start/) → /_auth
+EventBridge Scheduler (wakes it at resume_at / the scheduled run's time) ──▶ start Lambda
 ```
 
-`aws/template.yaml` の `Cdn` は**オリジンのフェイルオーバー（origin group）は使っていない**。origin group は GET / HEAD しか切り替えないため、止まっている間の 502 / 504 を `CustomErrorResponses` で起動ページ（`aws/startpage/index.html`）に差し替える。ログインと「起動する」「作り直す」のボタンは `/_auth*` の起動用 Lambda（`aws/starter.ts`、`aws/auth-page.html`）が出す。開いている画面の API が起動ページ（HTML の 502 / 503 / 504）を受けたときは、`/api/health` を 2 秒おいて 2 回聞き直し、2 回ともそのページのときだけ `/_auth` へ移る（`apps/web/src/login.ts` の `hostStopped`）。画面に入力中の文があれば、移ると消えることを確認ダイアログで聞いてから移る（断られたら 1 分は聞き直さない）。動いているのに 1 回の接続の失敗で同じページが返ることがあり、そのたびに移ると入力中の文が消えていた。CloudFront からインスタンスへは公開 IP ではなく VPC origin で届く。
+`Cdn` in `aws/template.yaml` **does not use origin failover (an origin group)**. An origin group switches only GET / HEAD, so a 502 / 504 while the machine is stopped is replaced by the start page (`aws/startpage/index.html`) with `CustomErrorResponses`. The login and the "`起動する`" and "`作り直す`" buttons are shown by the start Lambda of `/_auth*` (`aws/starter.ts`, `aws/auth-page.html`). When the API of an open screen receives the start page (an HTML 502 / 503 / 504), it asks `/api/health` again twice at 2-second intervals, and only when both answers are that page does it move to `/_auth` (`hostStopped` in `apps/web/src/login.ts`). If there is text being typed on the screen, it asks in a confirmation dialog, before moving, whether the text will be lost (if refused, it does not ask again for 1 minute). While the machine was running, a single connection failure could return the same page, and moving every time had erased the text being typed. CloudFront reaches the instance by the VPC origin, not by a public IP.
 
-### 3.1 起動と停止
+### 3.1 Start and stop
 
-- 起動: 停止中の URL は起動ページを表示する。パスキーでログインし「起動する」を押す。予定時刻には EventBridge Scheduler が起こす
-- 停止: 実行中・承認待ちの Task、WebSocket、PTY が無く、30 分以内の再開・定期実行も無い状態が 20 分続いたら、次の起動を予約して shutdown する。数えるのはデーモン自身の DB だけなので、停止コマンド（`SWITCHBOARD_IDLE_STOP_CMD`）はデーモンが起動時に自分の環境から消し、Task・ターミナルとそこから起動した試験用のデーモンには渡さない（渡すと、空の DB を見た試験用のデーモンが、動いている Task ごとインスタンスを止める）
-- 計測: `daemon.log` の起動時刻・`hostidle`・`sb-stop` と `last -x`、DB の `tasks.created_at` を照合する。ブラウザのボタンから応答までの時間は別に測る
-- Spot は中断と容量不足がある。Market の変更はインスタンスの置換になる。注意と切戻しは `aws/README.md`
+- Start: a stopped URL shows the start page. Log in with a passkey and press "`起動する`". At a scheduled time, EventBridge Scheduler wakes it
+- Stop: when there has been no running or approval-waiting Task, WebSocket or PTY, and no resume or scheduled run within 30 minutes, for 20 minutes, it reserves the next start and shuts down. Only the daemon's own DB is counted, so the daemon removes the stop command (`SWITCHBOARD_IDLE_STOP_CMD`) from its own environment at startup and does not pass it to Tasks, the terminal, or the test daemons started from them (if it were passed, a test daemon that saw an empty DB would stop the instance together with the running Tasks)
+- Measurement: match the start times, `hostidle` and `sb-stop` in `daemon.log` with `last -x`, and `tasks.created_at` in the DB. The time from the browser button to the response is measured separately
+- Spot has interruptions and capacity shortages. Changing Market replaces the instance. Cautions and rollback are in `aws/README.md`
 
-### 3.2 月額の計算例
+### 3.2 Monthly cost example
 
-例示 workload は月 175 h と常時 730 h。単価は設計時の東京の例であり、配備前に選んだリージョンの単価を確認する。
+The example workloads are 175 h a month and 730 h (always on). The unit prices are Tokyo examples at design time; check the prices of the region you chose before deploying.
 
-| 項目 | 計算例 |
+| Item | Calculation example |
 |---|---|
-| オンデマンド t4g.medium | $0.0432 × 稼働時間 = 約 $7.56 / $31.54 |
-| IPv4 | $0.005 × 稼働時間 = 約 $0.88 / $3.65 |
-| EBS gp3 20 GB | 20 × $0.096 = $1.92/月 |
-| S3 | 保存 GB × 単価 + PUT・GET。版管理の古い版も数える |
-| CloudWatch・CloudFront・Lambda・Scheduler | メトリクス・アラーム・要求数を加える。無料枠は自分の契約で確認する |
+| On-demand t4g.medium | $0.0432 × running hours = about $7.56 / $31.54 |
+| IPv4 | $0.005 × running hours = about $0.88 / $3.65 |
+| EBS gp3 20 GB | 20 × $0.096 = $1.92/month |
+| S3 | stored GB × unit price + PUT / GET. Old versions under versioning are counted too |
+| CloudWatch, CloudFront, Lambda, Scheduler | Add metrics, alarms and request counts. Check the free tier against your own contract |
 
-無料枠の機械（Oracle Always Free など）は採らない: 枠が予告なく変わり、使われていない機械は 7 日で回収されるので、正本の置き場所にならない。
+Free-tier machines (Oracle Always Free and the like) are not adopted: the tier changes without notice and an unused machine is reclaimed after 7 days, so it cannot be the home of the source of truth.
 
-毎時の定期実行は、停止したインスタンスを毎時起こす。次の予定が 30 分以内なら止まらない。稼働時間を journal から集計し、見積もりと比べる。
-予算アラートは `<stack>-1000jpy`（$7）と `<stack>-3000jpy`（$20）。`Project` の cost allocation tag を有効にする。実費は Cost Explorer で確認する。インスタンスロールは `ce:GetCostAndUsage` / `ce:GetCostForecast` と `budgets:ViewBudget` だけを読める（2026-10 に追加。書き込みは無い。定期タスク「AWS の費用の週報」が使う）。
+An hourly scheduled run wakes the stopped instance every hour. If the next schedule is within 30 minutes, it does not stop. Total the running hours from the journal and compare them with the estimate.
+The budget alerts are `<stack>-1000jpy` ($7) and `<stack>-3000jpy` ($20). Enable the cost allocation tag `Project`. Check the actual cost in Cost Explorer. The instance role can read only `ce:GetCostAndUsage` / `ce:GetCostForecast` and `budgets:ViewBudget` (added in 2026-10; there is no write access; the periodic task "the weekly AWS cost report" uses it).
 
-### 3.3 権限の分離
+### 3.3 Separation of permissions
 
-- インスタンスに置くのは、GitHub から clone したリポジトリ、移行した履歴、ランナーの認証情報だけ
-- GitHub の権限は登録するリポジトリだけの fine-grained token か GitHub App
-- AWS の権限はインスタンスロール。Switchboard に必要な権限だけを付ける。追加ロールは `HostAssumeRoleArns` で明示する。長期のアクセスキーは置かない
+- What goes on the instance is only the repositories cloned from GitHub, the migrated history, and the runners' credentials
+- GitHub permission is a fine-grained token or a GitHub App limited to the registered repositories
+- AWS permission is the instance role. Attach only the permissions Switchboard needs. Additional roles are named explicitly in `HostAssumeRoleArns`. No long-lived access keys are placed
 
-## 4. 認証 — Switchboard のコードは鍵を持たない
+## 4. Authentication — Switchboard's code holds no keys
 
-README の原則「No keys, no telemetry. Your own login, on your own machine.」は、クラウドでも**アプリの層ではそのまま守る**。
-鍵を扱うのはランナー自身と、環境の層（systemd と起動スクリプト、インスタンスロール）だけにする。Switchboard のコードは資格情報を読まず、保存せず、API で返さない。
+The README's principle "No keys, no telemetry. Your own login, on your own machine." is **kept as it is at the application layer** in the cloud too.
+Only the runners themselves and the environment layer (systemd and the startup scripts, the instance role) handle keys. Switchboard's code does not read, store or return credentials through the API.
 
-| 対象 | 方法 | 置き場所 | やり直し |
+| Target | Method | Where it lives | How to redo it |
 |---|---|---|---|
-| Claude Code | ランナー自身のログイン。ターミナル tab で `claude` を起動して `/login`（URL をスマホで開き、コードを貼る）。うまくいかなければ `claude setup-token` を取り、Parameter Store に置く | ランナーが書く `~/.claude/` の資格情報（EBS）。setup-token の場合は Parameter Store | ターミナル tab でもう一度ログイン。setup-token の場合は、AWS コンソール（スマホ可）で Parameter Store の値を更新 |
-| Codex | ランナー自身のログイン。ターミナル tab で `codex login --device-auth` | ランナーが書く `~/.codex/auth.json`（EBS） | 同じ操作をもう一度 |
-| GitHub（clone / push / PR） | `gh auth login`（device flow）をターミナル tab で。対象リポジトリだけの fine-grained token でもよい（要る権限は `aws/README.md`。自分の resource owner と Project の読み書き権限を指定する） | `gh` が書く `~/.config/gh/`。token の場合は Parameter Store | 同上 |
-| 機械を作り直すときに要るもの（Litestream の設定、バックアップの暗号鍵、CloudFront の共有ヘッダー、Cookie の署名鍵） | 起動スクリプトがインスタンスロールで読む | **Parameter Store の SecureString**（標準パラメータ、AWS 管理の KMS 鍵。追加料金なし） | IaC か AWS コンソール |
-| AWS（`HostAssumeRoleArns` で名指ししたロールを引き受けて使うもの） | インスタンスロール | — | — |
+| Claude Code | The runner's own login. Start `claude` in the terminal tab and run `/login` (open the URL on the phone and paste the code). If that does not work, get `claude setup-token` and put it in Parameter Store | The credentials the runner writes to `~/.claude/` (EBS). For setup-token, Parameter Store | Log in again in the terminal tab. For setup-token, update the value in Parameter Store from the AWS console (phone is fine) |
+| Codex | The runner's own login. `codex login --device-auth` in the terminal tab | `~/.codex/auth.json`, written by the runner (EBS) | Do the same again |
+| GitHub (clone / push / PR) | `gh auth login` (device flow) in the terminal tab. A fine-grained token limited to the target repositories also works (the permissions needed are in `aws/README.md`; specify your own resource owner and the Project read / write permission) | `~/.config/gh/`, written by `gh`. For a token, Parameter Store | Same as above |
+| What is needed to rebuild the machine (Litestream's settings, the backup encryption key, CloudFront's shared header, the cookie signing key) | The startup script reads it with the instance role | **Parameter Store SecureString** (standard parameters, AWS-managed KMS key; no extra charge) | IaC or the AWS console |
+| AWS (what uses a role named in `HostAssumeRoleArns` after assuming it) | The instance role | — | — |
 
-- setup-token を Parameter Store に置く場合: `claude` の前に置いた小さなラッパー（環境の層、`scripts/host/claude-wrapper.sh`）が、起動のたびに Parameter Store から読み、`CLAUDE_CODE_OAUTH_TOKEN` にして本物の `claude` を exec する。デーモンは PATH の `claude` を起動するだけで、値を見ない（4.2）
-- Secrets Manager（1 件 $0.40/月）は、自動ローテーションが要らないので使わない
-- Switchboard に足すのは「ログインが切れていると分かる」ことだけ（`/api/health` と Home の警告）。やり直しはターミナル tab か AWS コンソールで行い、専用の入力画面は作らない（2026-09-21 の案）。現行は #354 で、警告の「ログインする」ボタンからランナー自身のログインのコマンド（`claude auth login`、`codex login --device-auth`）を画面で回せる: codex は URL と一度限りのコード、claude は URL とコードを貼る欄。資格情報を書くのはランナーで、貼ったコードはログ・DB・API の応答に残らない（`packages/core/src/runnerlogin.ts`、`apps/web/src/components/RunnerLogin.tsx`）
-- 注意: ランナーのプロセスとその子（エージェントが使うシェル）からは、ランナーの資格情報が見える。setup-token はモデルの呼び出しにしか使えないので、漏れたときの影響は狭い
-- 個人が自分の認証で使う構成を対象とする（利用条件の注意は README の「No keys, no telemetry」）
+- When a setup-token is put in Parameter Store: a small wrapper placed in front of `claude` (environment layer, `scripts/host/claude-wrapper.sh`) reads it from Parameter Store at every start, turns it into `CLAUDE_CODE_OAUTH_TOKEN`, and execs the real `claude`. The daemon only starts the `claude` on PATH and does not see the value (4.2)
+- Secrets Manager ($0.40 per item per month) is not used, because automatic rotation is not needed
+- All Switchboard adds is "knowing that the login has expired" (`/api/health` and the warning on Home). Redoing it is done in the terminal tab or the AWS console, and no dedicated input screen is built (the proposal of 2026-09-21). The current form: the warning's "`ログインする`" button can run the runner's own login command (`claude auth login`, `codex login --device-auth`) on screen: for codex a URL and a one-time code, for claude a URL and a field to paste the code. The runner writes the credentials, and the pasted code is kept in no log, DB or API response (`packages/core/src/runnerlogin.ts`, `apps/web/src/components/RunnerLogin.tsx`)
+- Caution: the runner's process and its children (the shells the agent uses) can see the runner's credentials. A setup-token can be used only for model calls, so the impact of a leak is narrow
+- The target is a setup where an individual uses it with their own authentication (for the usage-terms caution, see "No keys, no telemetry" in the README)
 
-- UI と救援画面への入り方は §3 のパスキー（#211）。Switchboard のコードが持つ秘密はデーモンのトークンだけで、環境の層（Parameter Store → sb-env）から来る。エージェントは同じ OS ユーザーなので読めるが、外からはそのトークンでは入れない（#748）。Cookie を確かめる公開鍵は秘密ではなく、署名の seed は起動用 Lambda だけが読む（#701）
+- Getting into the UI and the rescue page is by the passkey of §3. The only secret Switchboard's code holds is the daemon's token, which comes from the environment layer (Parameter Store → sb-env). The agent is the same OS user, so it can read it, but that token does not get anyone in from outside. The public key that checks the cookie is not a secret, and the signing seed is read only by the start Lambda
 
-- アクセスログ・操作ログ: loopback 以外で待ち受けるときだけ、デーモンが標準出力に 1 行 1 JSON を出す（sb-rescue が `~/.switchboard/daemon.log` に書く。ファイルもローテーションも増やさない）。`{"log":"access"}` は 1 要求 1 行で、時刻・接続元・method・パス（クエリを除く）・status・認証の種類（`cookie` / `token` / `none`。示した種類で、通ったかは status で分かる）。接続元は CloudFront の `CloudFront-Viewer-Address` を、共有ヘッダが通った要求でだけ信じ、無ければ接続相手。`{"log":"op"}` は `pty.open`（Task id）・`task.create.danger`・`daemon.restart`・`daemon.promote`・`settings.update`（変えたキーの名前だけ）・`workspace.add`（パス）。本文・クエリ・Cookie・トークンの値は出さない。loopback は今のまま出さない。見方は `~/.switchboard/daemon.log` を `jq` で絞る
+- Access log and operation log: only when listening on something other than loopback, the daemon writes one JSON per line to standard output (sb-rescue writes it to `~/.switchboard/daemon.log`; no new file or rotation is added). `{"log":"access"}` is one line per request, with the time, the peer, the method, the path (without the query), the status, and the kind of authentication (`cookie` / `token` / `none`; this is the kind presented, and whether it passed is seen from the status). For the peer, CloudFront's `CloudFront-Viewer-Address` is trusted only on requests where the shared header passed; otherwise it is the connection peer. `{"log":"op"}` is `pty.open` (Task id), `task.create.danger`, `daemon.restart`, `daemon.promote`, `settings.update` (only the names of the changed keys) and `workspace.add` (the path). Bodies, queries, cookies and token values are not written. Loopback is not logged, as before. To read it, filter `~/.switchboard/daemon.log` with `jq`
 
-### 4.1 切れていると分かる（#180）
+### 4.1 Detecting an expired login
 
-- `/api/health` のランナー欄に `login`（`ok` / `expired` / `unknown`）と `loginHint`（やり直しに打つコマンド）が出る。判定はランナー自身の状態コマンドの終了コード: `claude auth status`、`codex login status`（0 = ok、非 0 = expired、サブコマンドが無いか 10 秒で答えない = unknown）。`claude auth status` の出力は `authMethod`（`claude.ai` / `api_key`）だけ読み、`loginKind`（`claude.ai` / `console`）として出す。アカウント・メール・組織は読まない（#2528）。DAK には `login` が無い。`POST /api/runners/claude/logout` が `claude auth logout` を走らせ、続けて状態を読み直す（#2528）
-- 状態コマンドは起動時と、`/api/health` を読んだときに前回から 60 秒過ぎていれば走る。Home の「再確認」（`/api/health?recheck=1`）は待たずに走らせる
-- ターンがランナーの「未ログイン」の文（`packages/core/src/login.ts`）で終わったら、状態コマンドが ok と言っていても `expired` にし、Task に `loginHint` を出す。次の確認が ok を返すか、そのランナーのターンが通ると消える
+- The runner entry of `/api/health` carries `login` (`ok` / `expired` / `unknown`) and `loginHint` (the command to type to redo it). The judgment is the exit code of the runner's own status command: `claude auth status`, `codex login status` (0 = ok, non-zero = expired, no such subcommand or no answer in 10 seconds = unknown). Of the output of `claude auth status` only `authMethod` (`claude.ai` / `api_key`) is read and shown as `loginKind` (`claude.ai` / `console`). The account, email and organization are not read. DAK has no `login`. `POST /api/runners/claude/logout` runs `claude auth logout` and then re-reads the state
+- The status command runs at startup and, when `/api/health` is read, if 60 seconds have passed since the last run. The "`再確認`" on Home (`/api/health?recheck=1`) runs it without waiting
+- If a turn ends with the runner's "not logged in" text (`packages/core/src/login.ts`), the state is made `expired` even when the status command says ok, and `loginHint` is shown on the Task. It goes away when the next check returns ok or a turn of that runner goes through
 - Expiry (added 2026-11-05): from Claude Code 2.1.318, `claude auth status` also prints `loginExpiresAt`. Switchboard reads that key and `authMethod`, nothing else, and puts it in the runner entry as `loginExpiresAt` (epoch ms; an ISO 8601 string or a number is accepted). It is left out when the key is missing or unreadable (an older CLI, broken JSON), when `login` is not `ok`, and on Bedrock.
-- When the expiry is known, the runner choice on Home shows it in its tooltip ("Claude のログイン M/D HH:mm まで" and the command to log in again). Only when fewer than 72 hours are left does the claude entry of the status bar at the bottom show the same time in the warning colour (long enough to be seen at least twice across a night).
-- Home は切れているランナーごとに警告を出す（「Task の「ターミナル」tab で `codex login --device-auth` を実行してください」）。ログインはターミナル tab か、警告の「ログインする」ボタン（#354）で、ランナー自身が行う
-- Switchboard のコードが資格情報のファイル名・トークンの変数名を持たないこと、`/api/*` の応答にデーモンの環境のトークンが出ないことは `packages/core/src/nokeys.test.ts` が固定している
+- When the expiry is known, the runner choice on Home shows it in its tooltip ("`Claude のログイン M/D HH:mm まで`" and the command to log in again). Only when fewer than 72 hours are left does the claude entry of the status bar at the bottom show the same time in the warning colour (long enough to be seen at least twice across a night).
+- Home shows a warning for each runner whose login has expired (for codex it tells the user to run `codex login --device-auth` in the Task's "`ターミナル`" tab). The login is done by the runner itself, in the terminal tab or with the warning's "`ログインする`" button
+- That Switchboard's code holds no credential file names or token variable names, and that no token from the daemon's environment appears in `/api/*` responses, is pinned by `packages/core/src/nokeys.test.ts`
 
-### 4.2 setup-token を Parameter Store に置く（Claude、ターミナルでのログインが使えないとき）
+### 4.2 Putting a setup-token in Parameter Store (Claude, when logging in from the terminal is not possible)
 
-1. `claude setup-token` を実行し、表示された token を控える（有効期限は発行時の表示に従う）
-2. `aws ssm put-parameter --name /switchboard/claude-oauth-token --type SecureString --value '<token>' --overwrite`（AWS 管理の KMS 鍵。シェルの履歴に残したくなければ AWS コンソールで作る）。インスタンスロールに `ssm:GetParameter` をこのパラメータだけ許す（IaC は #181）
-3. 本物の `claude` を `/usr/local/lib/claude/bin/claude` などに置き、ラッパーを PATH の前の方に `claude` の名前で置く: `install -m 755 scripts/host/claude-wrapper.sh /usr/local/bin/claude`。PATH は `/usr/local/bin:/usr/local/lib/claude/bin:…` の順（ラッパーは自分のディレクトリを飛ばして、PATH で次に見つかる `claude` を exec する）
-4. デーモンの環境（systemd の unit）に `SWITCHBOARD_CLAUDE_TOKEN_PARAM=/switchboard/claude-oauth-token` を置く。値そのものはどこにも置かない。ラッパーは起動のたびに読むので、ファイルにも残らない
-5. 期限切れ・失効: Home に警告が出る（4.1）。`claude setup-token` をやり直し、AWS コンソール（スマホ可）でパラメータの値を更新して「再確認」。デーモンの再起動は要らない
-- 読めないとき（権限、名前の誤り、ネットワーク）はラッパーが `claude-wrapper: could not read …` を出して止まり、Task はエラーになる。確認: `scripts/host/claude-wrapper.test.ts`（偽の `aws` と偽の `claude`）
+1. Run `claude setup-token` and note the token shown (the validity period follows what is shown at issue)
+2. `aws ssm put-parameter --name /switchboard/claude-oauth-token --type SecureString --value '<token>' --overwrite` (AWS-managed KMS key; if you do not want it in the shell history, create it in the AWS console). Allow `ssm:GetParameter` on this parameter only for the instance role (the IaC does this)
+3. Put the real `claude` at a place such as `/usr/local/lib/claude/bin/claude`, and put the wrapper early on PATH under the name `claude`: `install -m 755 scripts/host/claude-wrapper.sh /usr/local/bin/claude`. PATH is in the order `/usr/local/bin:/usr/local/lib/claude/bin:…` (the wrapper skips its own directory and execs the next `claude` found on PATH)
+4. Put `SWITCHBOARD_CLAUDE_TOKEN_PARAM=/switchboard/claude-oauth-token` in the daemon's environment (the systemd unit). The value itself is placed nowhere. The wrapper reads it at every start, so it is not left in a file either
+5. Expiry or revocation: a warning appears on Home (4.1). Redo `claude setup-token`, update the parameter's value in the AWS console (phone is fine), and press "`再確認`". No daemon restart is needed
+- When it cannot be read (permission, a wrong name, the network) the wrapper prints `claude-wrapper: could not read …` and stops, and the Task ends in an error. Check: `scripts/host/claude-wrapper.test.ts` (a fake `aws` and a fake `claude`)
 
-### 4.3 デーモンの失敗回数制限（#1492）
+### 4.3 The daemon's failure-count limit
 
-Starter（`aws/auth.ts`）と同じ規則を、デーモンの入口にも置く。入口と認証の拒否（`guard` / `entryGuard` / `/ws` / `/ws/pty` / `/mcp/:id` の 401・403、静的配信の `notViaEdge` / `notAllowedHost`）が、同じ接続元キーから 10 分で 10 回に達すると、以後その窓を抜けるまで全ルートに 429（有効な Cookie があっても）。キーは CloudFront-Viewer-Address（共有ヘッダが合うときだけ信じる）のアドレス、IPv6 は /64。数えない要求: 接続相手が loopback のもの（ランナーの `/mcp`、sb-rescue の probe）と、CloudFront を通る構成で Viewer-Address が届かないもの（届くまでは全員が CloudFront の 1 アドレスに見え、利用者ごと締め出すため）。ハンドラが返す 403（他の Task の変更など）は数えない。上限・窓は設定にしない。窓は滑る: 直近 10 分の拒否が 10 回未満になれば解ける（最後の 10 回が 10 分の中に収まらなくなった時点）。デーモンの再起動でも解ける。画面は `/api/health` がログインしていると答えるまで、ほかの `/api` と `/ws` を送らない（Cookie の無いブラウザで開くたびに拒否を数えさせないため）。測り方は `scripts/login-refusals-e2e.ts`。
+The same rule as the Starter's (`aws/auth.ts`) is placed at the daemon's entrance too. When entrance and authentication refusals (`guard` / `entryGuard` / `/ws` / `/ws/pty` / the 401 and 403 of `/mcp/:id`, and `notViaEdge` / `notAllowedHost` of static serving) reach 10 in 10 minutes from the same source key, every route answers 429 from then on (even with a valid cookie) until the window is left. The key is the address in CloudFront-Viewer-Address (trusted only when the shared header matches), and for IPv6 the /64. Requests that are not counted: those whose connection peer is loopback (the runner's `/mcp`, sb-rescue's probe), and those for which Viewer-Address does not arrive in a setup that goes through CloudFront (until it arrives everyone looks like CloudFront's one address, and the users would be locked out together). A 403 returned by a handler (a change to another Task, and so on) is not counted. The limit and the window are not made settings. The window slides: it is released when the refusals in the last 10 minutes fall below 10 (the moment the last 10 no longer fit within 10 minutes). A daemon restart releases it too. The screen sends no other `/api` or `/ws` until `/api/health` answers that it is logged in (so that opening it in a browser without a cookie does not make it count a refusal each time). How it is measured: `scripts/login-refusals-e2e.ts`.
 
-## 5. 履歴の移行（`--resume` できる形で）
+## 5. Migrating history (in a form that can `--resume`)
 
-**既定のパスで作り、import のあと `relocate` で合わせる**（#427）。インスタンスは `HostHome=/home/switchboard`、`ReposDir=/home/switchboard/repos`（template の既定値）のまま作る。書き出したときの HOME やリポジトリ置き場を再現しない（EC2 の上で意味のない外付け SSD のパスを持ち込み続けないため）。
+**Create at the default paths, and match them with `relocate` after the import.** Create the instance with `HostHome=/home/switchboard` and `ReposDir=/home/switchboard/repos` (the template defaults). Do not reproduce the HOME or the repository location at export time (so that the paths of an external SSD, which mean nothing on EC2, are not carried over for good).
 
-- import のあと、デーモンを止めたまま `bun packages/core/src/main.ts relocate --from <書き出したときのリポジトリ置き場> --to /home/switchboard/repos`、続けて `--from <書き出したときの HOME> --to /home/switchboard`（接頭辞 1 組ずつ。HOME の下にリポジトリ置き場があるときもこの順）
-- 書き換えるもの（パス境界で接頭辞を置換。`/home/dev` は `/home/devx` に当たらない）:
-  - DB: `workspaces.path`、`tasks.cwd`、`tasks.scope`（JSON の根）、`routing_log.cwd`、`staging.path`、`attachments.path`、`history_imports.path`
-  - Claude のセッションフォルダ: `~/.claude/projects/<旧の名前>…` を `<新の名前>…` に改名（memory も同じフォルダの下）。`history_imports.path` のフォルダ名の部分も同じ対応で
-- 書き換えないもの: Claude の jsonl・Codex の rollout の中身（中の `cwd` は履歴として旧パスのまま。再開に要るのはファイルの場所と Switchboard が渡す cwd）、`knowledge_docs.path`（`~/Knowledge` からの相対。絶対の行があれば relocate は止まる）
-- 確かめてから書き、どこかで止まれば何も書かない（止まる条件は `packages/core/src/relocate.ts`）
-- 旧パスも読める互換層・旧パスへのシンボリックリンクは作らない（書き換えは 1 回のコマンド）
-- `/private/tmp/...` の worktree など、この機械に無いパスは作らない。そういう Task も一覧・トランスクリプト・diff は表示でき、返信すると「作業フォルダ … がこの機械に無い」と出て Task が error になる（API は 409）。デーモンは止まらない
-- AWS のスタックでは bootstrap が import してすぐデーモンを起動するので、relocate はその後に手で行い、GitHub の workflow の `rebuild`（Actions → host。デーモンを止め、救援画面（sb-rescue）も止めてから）で作り直す（relocate 済みの DB が戻り、Workspace が新しい `ReposDir` に clone され、改名したフォルダが展開される）
+- After the import, with the daemon still stopped, run `bun packages/core/src/main.ts relocate --from <repository location at export time> --to /home/switchboard/repos`, then `--from <HOME at export time> --to /home/switchboard` (one prefix pair at a time; in this order also when the repository location is under HOME)
+- What is rewritten (a prefix is replaced at a path boundary; `/home/dev` does not match `/home/devx`):
+  - DB: `workspaces.path`, `tasks.cwd`, `tasks.scope` (the root of the JSON), `routing_log.cwd`, `staging.path`, `attachments.path`, `history_imports.path`
+  - Claude's session folders: rename `~/.claude/projects/<old name>…` to `<new name>…` (memory is under the same folder). The folder-name part of `history_imports.path` follows the same mapping
+- What is not rewritten: the contents of Claude's jsonl and Codex's rollout (the `cwd` inside stays the old path as history; what resuming needs is the file's location and the cwd Switchboard passes), and `knowledge_docs.path` (relative to `~/Knowledge`; if an absolute row exists, relocate stops)
+- It checks before writing, and if it stops anywhere it writes nothing (the stop conditions are in `packages/core/src/relocate.ts`)
+- No compatibility layer that can also read old paths and no symbolic link to the old path is made (rewriting is a single command)
+- Paths that do not exist on this machine, such as a worktree under `/private/tmp/...`, are not created. Such a Task can still show its list entry, transcript and diff, and replying shows `作業フォルダ … がこの機械に無い` ("the working folder … is not on this machine") and the Task becomes error (the API returns 409). The daemon does not stop
+- On the AWS stack bootstrap starts the daemon right after the import, so relocate is done by hand afterwards, and the machine is rebuilt with the GitHub workflow's `rebuild` (Actions → host; stop the daemon and also the rescue page (sb-rescue) first) (the relocated DB comes back, the Workspaces are cloned into the new `ReposDir`, and the renamed folders are extracted)
 
-### パッケージ
+### Package
 
-`bun packages/core/src/main.ts export <out>`（#218, #219）が作る 1 ファイル（tar を zstd で圧縮。`--encrypt` なら age で暗号化）:
+One file made by `bun packages/core/src/main.ts export <out>` (a tar compressed with zstd; encrypted with age under `--encrypt`):
 
 ```text
-manifest.json      版、書き出した機械の名前（`host`）、HOME、作成日時、件数（tasks と各フォルダのファイル数。元が無ければ null）、各ファイルの sha256 と権限、空のフォルダ
-switchboard.db     DB のスナップショット（VACUUM INTO。WAL を含む一貫した状態。sb-rescue と同じ方式）
-claude/projects/   ~/.claude/projects（登録 Workspace 以外も含める）
+manifest.json      version, the name of the exporting machine (`host`), HOME, creation time, counts (tasks and the number of files in each folder; null if the source is missing), each file's sha256 and permissions, empty folders
+switchboard.db     a snapshot of the DB (VACUUM INTO. A consistent state including the WAL. The same method as sb-rescue)
+claude/projects/   ~/.claude/projects (including those other than registered Workspaces)
 codex/sessions/    ~/.codex/sessions
 attachments/       ~/.switchboard/attachments
-knowledge/         ~/Knowledge（フォルダごと。git なら .git も入る）
+knowledge/         ~/Knowledge (the whole folder; with git, .git is included)
 ```
 
-ファイルを 1 つずつソースから読んで tar → zstd →（age）へ流す。写しを作るのは DB のスナップショットだけで、メモリに全体を載せない（#1201。全部をメモリで扱うと、3.8 GB のメモリでは GB 単位の履歴の日次アーカイブが oom-kill されるため。500 MB の偽の履歴でピーク 2.1 GB → 92 MB）。
-作業ディレクトリ（DB のスナップショット）は RAM 上の /tmp ではなく `~/.switchboard/export-<pid>`。oom-kill などで後片づけが動かなかった分は、次の export が開始時に持ち主のプロセスが居ない `export-*` として消す（#1201）。
+It reads files one by one from the source and streams them into tar → zstd → (age). The only copy it makes is the DB snapshot, and it never holds the whole thing in memory (handling everything in memory would get the daily archive of gigabytes of history oom-killed on a host with a few GB of memory).
+The working directory (the DB snapshot) is not the RAM-backed /tmp but `~/.switchboard/export-<pid>`. What cleanup did not remove after an oom-kill or the like is removed by the next export at its start, as an `export-*` whose owner process is gone.
 
-日次アーカイブ（`sb-archive`、`aws/host/archive.sh`）は結果を `~/.switchboard/archive.status` に 1 行で書く。失敗した・始まったまま 2 時間終わらない（oom-kill などで後片づけが動かない）・48 時間成功していない、のどれかなら、デーモンの `/api/health` の `archive` が Web UI の上部に赤いバナーを出す。次の成功で消える（#1201）。
+The daily archive (`sb-archive`, `aws/host/archive.sh`) writes its result as one line to `~/.switchboard/archive.status`. If it failed, if it started and has not finished in 2 hours (cleanup does not run after an oom-kill or the like), or if it has not succeeded for 48 hours, the daemon's `/api/health` `archive` shows a red banner at the top of the Web UI. It goes away on the next success.
 
-### 手元から S3 に移した履歴（#1431）
+### History moved from the local disk to S3
 
-日次アーカイブは、アーカイブを上げたあとに、終わって（`done` / `error` / `aborted`）最後の更新から 30 日たった Task の会話の出来事（`events`）を Task ごとに 1 ファイルにして `s3://<DataBucket>/history/events/<年>/<taskId>.<最後の seq>.jsonl.zst.age` に置き、置けた Task だけ手元の行を骨に置き換える。暗号化の鍵は日次アーカイブと同じ（`/switchboard/archive-age-pubkey`。秘密鍵は利用者が持つ）。`history/` には期限が無く、インスタンスのロールは新しいキーにしか書けない（上書きも削除もできない。消すのは利用者が自分の認証で）。上げ損ねた Task は手元の行を残して次の日にまた試し、`archive.status` は `failed <epoch> 3` になる（バナーが出る）。移した Task を再開して終わると、30 日後に `seq` の続きの分が別のファイルになる。Task の `events_archive_key` に置いたキーが古い順に 1 行ずつ残る。
+After uploading the archive, the daily archive takes the conversation events (`events`) of each Task that has finished (`done` / `error` / `aborted`) and was last updated 30 days ago, makes one file per Task, puts it at `s3://<DataBucket>/history/events/<year>/<taskId>.<last seq>.jsonl.zst.age`, and replaces the local rows with a skeleton only for the Tasks that were put there. The encryption key is the same as the daily archive's (`/switchboard/archive-age-pubkey`; the user holds the private key). `history/` has no expiry, and the instance role can write only to new keys (it can neither overwrite nor delete; deleting is done by the user with their own credentials). A Task that failed to upload keeps its local rows and is tried again the next day, and `archive.status` becomes `failed <epoch> 3` (the banner appears). If a moved Task is resumed and finishes, 30 days later the part after `seq` becomes a separate file. The keys placed in the Task's `events_archive_key` stay, one line each, oldest first.
 
-取り出し方（1 件。ファイルは 1 行 1 出来事の `{"seq":…,"ts":…,"json":"<元の行>"}`）:
+How to get one back (the file is one event per line, `{"seq":…,"ts":…,"json":"<the original row>"}`):
 
 ```bash
 sqlite3 -readonly ~/.switchboard/switchboard.db "select events_archive_key, events_archived_count from tasks where id = '<taskId>'"
@@ -203,15 +203,15 @@ wc -l < <taskId>.jsonl                                  # = events_archived_coun
 jq -c '.json | fromjson' <taskId>.jsonl | head          # 出来事そのもの
 ```
 
-インスタンスのロールは `history/` を読めるが、秘密鍵はインスタンスに無いので復号は利用者の端末で行う。
+The instance role can read `history/`, but the private key is not on the instance, so decryption is done on the user's device.
 
-### 古い会話記録を S3 に移す（#1432）
+### Moving old runner transcripts to S3
 
-日次アーカイブは、`~/.claude/projects` と `~/.codex/sessions` のうち新しい方からルートディスクの 10 %（`archive.sh` の `RUNNER_KEEP_MB`。`/etc/switchboard-host.env` の `SB_RUNNER_KEEP_MB` で上書き）まで手元に残し、それを超える古いファイルを、1 回の実行ごとに 1 つの `runner-<UTC 日時>.tar.zst.age`（日次アーカイブと同じ鍵）にして `s3://<DataBucket>/history/runner/` に置く（新しいキーにだけ書ける: `If-None-Match: *`）。`history/` に期限は無い。置けたことを確かめてから手元のファイルを消し、上げ損ねたら何も消さず `archive.status` は `failed <epoch> 4` になる（次の日にまた試す。events の上げ損ね `3` が同じ日にあれば `3` が出る）。
+The daily archive keeps on the local disk, of `~/.claude/projects` and `~/.codex/sessions`, the newer files up to 10 % of the root disk (`RUNNER_KEEP_MB` in `archive.sh`; overridden by `SB_RUNNER_KEEP_MB` in `/etc/switchboard-host.env`), packs the older files beyond that into one `runner-<UTC date-time>.tar.zst.age` per run (the same key as the daily archive), and puts it in `s3://<DataBucket>/history/runner/` (written to new keys only: `If-None-Match: *`). `history/` has no expiry. It deletes the local files only after confirming they were uploaded, and if the upload fails it deletes nothing and `archive.status` becomes `failed <epoch> 4` (it is tried again the next day; if the events failure `3` happens on the same day, `3` is shown).
 
-消さないもの: `memory/` の下（会話記録ではなく Claude が読む）、動いている・待っている（`running` / `waiting` / `idle`）Task と、再開の予定（`resume_at`）がある Task の session id をパスに含むファイル（DB を読み取りで開いて引く。DB が無い・読めなければ何も移さない）。上げている間に更新された（mtime か大きさが上げる前と違う）ファイルも消さない（確かめてから消すまでの間は 1 ファイルずつの短い隙で、そこに追記が入る確率は無視できるとして残す）。
+What it does not delete: anything under `memory/` (it is not a conversation transcript; Claude reads it), and files whose path contains the session id of a running or waiting (`running` / `waiting` / `idle`) Task or of a Task with a scheduled resume (`resume_at`) (looked up by opening the DB read-only; if the DB is missing or unreadable, nothing is moved). Files that were updated during the upload (mtime or size differs from before the upload) are not deleted either (between checking and deleting there is a short gap per file, and the chance that an append lands in it is treated as negligible, so the file is kept).
 
-一覧は手元の `~/.switchboard/runner-archive.tsv`（1 行 1 ファイル: `元のパス（~ から）<TAB>session id<TAB>S3 のキー<TAB>移した日`）。
+The list is the local `~/.switchboard/runner-archive.tsv` (one file per line: `original path (from ~)<TAB>session id<TAB>S3 key<TAB>date moved`).
 
 ```bash
 grep <session id> ~/.switchboard/runner-archive.tsv          # どのキーに入っているか
@@ -219,41 +219,41 @@ aws s3 cp s3://<DataBucket>/<キー> .
 age -d -i <秘密鍵のファイル> runner-<日時>.tar.zst.age | zstd -d | tar -x -C <展開先> <元のパス>
 ```
 
-Claude Code は自分でも、既定では 30 日より古い会話記録を消す（`cleanupPeriodDays`。この版での値は動いている機械で確かめる: #1441）。手元の量を超えたものに加え、25 日より古いもの（`archive.sh` の `RUNNER_MAX_AGE_DAYS`。Claude の掃除の 30 日より前）も必ず移すので、インスタンスが動いていれば 30 日の掃除より前に S3 に残る。移した Task を `--resume` しても、手元にファイルが無いので前の文脈なしで続く（`## 再開に要るファイル`と同じ）。`runner-sync` は変えない: 手元が減れば土台と差分も小さくなる。
+Claude Code itself also deletes transcripts older than 30 days by default (`cleanupPeriodDays`; check the value in this version on a running machine). In addition to what exceeds the local quota, anything older than 25 days (`RUNNER_MAX_AGE_DAYS` in `archive.sh`; before Claude's 30-day cleanup) is always moved too, so while the instance is running they are left in S3 before the 30-day cleanup. Even if a moved Task is `--resume`d, the file is not local, so it continues without the earlier context (the same as `## Files needed to resume`). `runner-sync` is unchanged: when the local volume shrinks, the base and the differences get smaller too.
 
-### 手順
+### Procedure
 
-1. **書き出す**。**先にデーモンを止め、ターミナルの Claude / Codex も閉じる**。DB は VACUUM INTO で一貫したコピーになるが、ランナーのログと添付はそのあとに順にコピーするので、動いていると DB とファイルが食い違うことがある（例: DB を写したあとで添付が Task に移ると、行はあるのにファイルが無い）
+1. **Export.** **Stop the daemon first, and close the terminal's Claude / Codex.** The DB becomes a consistent copy with VACUUM INTO, but the runners' logs and attachments are copied one after another afterwards, so if things are running the DB and the files can disagree (for example, if an attachment moves to a Task after the DB was copied, the row exists but the file does not)
 
    ```bash
    age-keygen -o ~/switchboard-migration.key        # 鍵は利用者が持つ。公開鍵（age1…）が表示される
    bun packages/core/src/main.ts export ~/switchboard-export.tar.zst.age --encrypt age1…
    ```
 
-   既存のファイルには書かない（同じ名前があれば止まる）。出力は 0600。`age` が無ければ入れる（`scripts/setup.sh` が有無を表示する）
-2. **転送**: `scp ~/switchboard-export.tar.zst.age <host>:` か、S3 経由（`aws s3 cp` で置いて、取り込むときに取る）。暗号化してあるので置き場所は選ばない。鍵ファイルは別の経路で（パスワードマネージャなど）
-3. **取り込む**。**デーモンを止めてから**、空の HOME に:
+   It does not write to an existing file (it stops if the same name exists). The output is 0600. If `age` is missing, install it (`scripts/setup.sh` shows whether it is there)
+2. **Transfer**: `scp ~/switchboard-export.tar.zst.age <host>:`, or via S3 (put it with `aws s3 cp` and fetch it at import time). It is encrypted, so the place does not matter. Send the key file by a separate route (a password manager, for example)
+3. **Import.** **After stopping the daemon**, into an empty HOME:
 
    ```bash
    bun packages/core/src/main.ts import ~/switchboard-export.tar.zst.age --identity ~/switchboard-migration.key
    ```
 
-   import が止まる条件（どれも何も書かずに止まる）:
-   - 取り込む側の DB に Task が 1 件以上ある、または `~/.claude/projects`・`~/.codex/sessions`・`~/.switchboard/attachments`・`~/Knowledge` のどれかが空でない（マージも上書きもしない。`--force` は無い）
-   - 暗号化されているのに `--identity` が無い / 鍵が違う
-   - 展開したものが manifest と合わない（ファイルの過不足、sha256、Task 件数、フォルダごとのファイル数、パッケージの外を指す空フォルダ）。シンボリックリンクは展開されず、置かれない（パッケージは通常ファイルだけを運ぶ。ファイルの権限と空のフォルダは manifest に書いて戻す）
-4. **パスを合わせる**（デーモンを止めたまま）: 上の 2 回の `relocate`。出力の件数（列ごとの行数と改名したフォルダ数）を控える
-5. **ランナーにログインする**（資格情報はパッケージに入れない。§4）: `claude` の `/login`、`codex login --device-auth`
-6. **確かめる**: デーモンを起動して `curl -s localhost:47831/api/tasks | jq length` が manifest の `tasks` と同じ。移した Task に 1 行返信して、ランナーが `--resume`（Claude）/ `thread/resume`（Codex）で前の会話の続きから答えること
+   Conditions under which the import stops (all of them stop without writing anything):
+   - The importing side's DB has one or more Tasks, or any of `~/.claude/projects`, `~/.codex/sessions`, `~/.switchboard/attachments` and `~/Knowledge` is not empty (it neither merges nor overwrites; there is no `--force`)
+   - It is encrypted but there is no `--identity` / the key is wrong
+   - What was extracted does not match the manifest (missing or extra files, sha256, the Task count, the number of files per folder, an empty folder pointing outside the package). Symbolic links are not extracted and not placed (the package carries regular files only; file permissions and empty folders are written to the manifest and restored)
+4. **Match the paths** (with the daemon still stopped): the two `relocate` runs above. Note the counts in the output (the rows per column and the number of renamed folders)
+5. **Log in to the runners** (credentials are not put in the package; §4): `/login` of `claude`, `codex login --device-auth`
+6. **Check**: start the daemon, and `curl -s localhost:47831/api/tasks | jq length` is the same as the manifest's `tasks`. Reply with one line to a moved Task, and check that the runner answers from where the earlier conversation left off with `--resume` (Claude) / `thread/resume` (Codex)
 
-### 再開に要るファイル（2026-09-23 に調べた結果）
+### Files needed to resume (findings of 2026-09-23)
 
-| ランナー | 要るもの | 要らない（初回起動で作り直される） | 確かめ方 |
+| Runner | What is needed | What is not needed (recreated at first start) | How it was checked |
 |---|---|---|---|
-| Codex（codex-cli 0.155.0-alpha.9.2） | `~/.codex/sessions/**/rollout-*.jsonl` だけ | `state_5.sqlite`・`thread_history_1.sqlite`・`logs_2.sqlite` などの SQLite、`installation_id`、`shell_snapshots/` など（初回起動で生成された） | `CODEX_HOME` を一時ディレクトリにして rollout 1 本だけを `sessions/2026/09/22/` に置き、`codex app-server` に `initialize` → `thread/resume {threadId, cwd}`（ターンは送らない）。結果は `ok: turns 5`、`thread.path` はコピーした rollout を指した。stderr の `401 Unauthorized`（`wss://api.openai.com/v1/responses`）は `auth.json` が無いことによる事前接続の失敗で、resume 自体は通った |
-| Claude Code（2.1.280） | `~/.claude/projects/<cwd を - でつないだ名前>/<sessionId>.jsonl` だけ | `.claude.json`、`backups/`、`sessions/`（初回起動で生成された） | `CLAUDE_CONFIG_DIR` を一時ディレクトリにしてセッションファイル 1 本だけを置き、`claude -p --resume <id> </dev/null`（プロンプトなし、資格情報なし）。存在しない id では `No conversation found with session ID`、置いた id では `No deferred tool marker found in the resumed session … Provide a prompt to continue the conversation.`（セッションは見つかり、続けるプロンプトが無いと言っている）= ファイルだけで見つかる |
+| Codex (codex-cli 0.155.0-alpha.9.2) | Only `~/.codex/sessions/**/rollout-*.jsonl` | SQLite files such as `state_5.sqlite`, `thread_history_1.sqlite` and `logs_2.sqlite`, `installation_id`, `shell_snapshots/` and the like (generated at first start) | Make `CODEX_HOME` a temporary directory, put only one rollout in `sessions/2026/09/22/`, and send `codex app-server` `initialize` → `thread/resume {threadId, cwd}` (no turn is sent). The thread comes back with its turns and `thread.path` points at the copied rollout. A `401 Unauthorized` on stderr comes from the pre-connection that lacks `auth.json`; it does not stop the resume |
+| Claude Code (2.1.280) | Only `~/.claude/projects/<the cwd joined with ->/<sessionId>.jsonl` | `.claude.json`, `backups/`, `sessions/` (generated at first start) | Make `CLAUDE_CONFIG_DIR` a temporary directory, put only one session file, and run `claude -p --resume <id> </dev/null` (no prompt, no credentials). For a nonexistent id: `No conversation found with session ID`; for the placed id: `No deferred tool marker found in the resumed session … Provide a prompt to continue the conversation.` (the session was found, and it says there is no prompt to continue with) = it is found from the file alone |
 
-再現手順（`<id>` はセッション / スレッドの id、`<cwd>` はそのセッションの作業フォルダ、`<enc cwd>` は `<cwd>` の `/` と `.` を `-` にした名前）:
+Reproduction steps (`<id>` is the session / thread id, `<cwd>` is that session's working folder, and `<enc cwd>` is the name made by turning the `/` and `.` of `<cwd>` into `-`):
 
 ```bash
 # Codex: rollout 1 本だけの CODEX_HOME で app-server に resume だけを送る（turn/start は送らない = 枠を使わない）
@@ -264,7 +264,7 @@ cd <cwd> && codex app-server --listen stdio://
 < {"id":1,"result":{"codexHome":"<CODEX_HOME>",…}}
 > {"jsonrpc":"2.0","method":"initialized"}
 > {"jsonrpc":"2.0","id":2,"method":"thread/resume","params":{"threadId":"<id>","cwd":"<cwd>","approvalPolicy":"untrusted","sandbox":"read-only"}}
-< {"id":2,"result":{"thread":{"id":"<id>","path":"<CODEX_HOME>/sessions/2026/09/22/rollout-…-<id>.jsonl","turns":[…5 件…],…},…}}
+< {"id":2,"result":{"thread":{"id":"<id>","path":"<CODEX_HOME>/sessions/2026/09/22/rollout-…-<id>.jsonl","turns":[…],…},…}}
 
 # Claude Code: セッション 1 本だけの設定ディレクトリで、資格情報もプロンプトも無しに --resume
 export CLAUDE_CONFIG_DIR=$(mktemp -d); mkdir -p "$CLAUDE_CONFIG_DIR/projects/<enc cwd>"
@@ -274,60 +274,60 @@ cd <cwd> && env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN claude -p --resu
 # 知らない id なら → No conversation found with session ID: <id>
 ```
 
-どちらも資格情報（Codex の `auth.json`、Claude の Keychain / `.credentials.json`）は別で、手順 4 のログインで作る。`~/.codex/plugins` など再生成できるものは入れない（#179 のスコープ外）。
+In both, the credentials (Codex's `auth.json`, Claude's Keychain / `.credentials.json`) are separate and are made by the login of step 4. Things that can be regenerated, such as `~/.codex/plugins`, are not included (out of scope for this migration).
 
-実ランナーで「移した Task に返信して続きから答える」ことは 1 回だけ確かめる（お金がかかるので利用者の承認後。結果は #179 の決定ログ）。
+Checking that "a moved Task answers from where it left off when replied to" with a real runner is done only once (it costs money, so do it after the user's approval).
 
-保管と費用: 圧縮後は年 0.5 GB 前後で、S3 に 10 年分置いても月 10 円台。容量より中身（コードや秘密）が問題なので、暗号化してから置く。
+Storage and cost: compressed it is around 0.5 GB a year, and even ten years in S3 is in the teens of yen a month. The contents (code and secrets) matter more than the volume, so it is put there after encryption.
 
-## 6. 壊れても戻せる — 復旧の設計
+## 6. Recoverable when broken — recovery design
 
-要求は、自己更新でエラーになっても SSH で無理やり入るような手順にしないこと。3 段で守る。
+The requirement is that even when a self-update ends in an error, recovery should not require forcing a way in over SSH. It is protected in three stages.
 
-### 6.1 動いているデーモンは、編集中のツリーから動かさない
+### 6.1 Do not run the live daemon from a tree being edited
 
-- 開発用の `bun run dev` の自己更新（`docs/design/self-dev.md`）は、作業ツリーのコードで再起動する。壊れた変更がそのまま動いているデーモンになる
-- 実運用は `~/.switchboard/releases/<sha>/`（`git archive` + `bun install --frozen-lockfile` + Web のビルド。単一バイナリ #21 は not planned で閉じた）を不変のリリースとして置き、`current` / `previous` のシンボリックリンクで切り替える（現行の仕様は `docs/design/releases-and-rescue.md`）
-- エージェントが編集するのは `<repos>/switchboard` の worktree だけ。マージしてリリースを作るまで、動いているデーモンには影響しない
+- The self-update of the development `bun run dev` (`docs/design/self-dev.md`) restarts with the work tree's code. A broken change becomes the running daemon as it is
+- In production, `~/.switchboard/releases/<sha>/` (`git archive` + `bun install --frozen-lockfile` + the Web build; a single binary was closed as not planned on 2026-10-11) is placed as an immutable release and switched with the `current` / `previous` symbolic links (the current specification is `docs/design/releases-and-rescue.md`)
+- What the agent edits is only the worktrees of `<repos>/switchboard`. Until it is merged and a release is made, the running daemon is not affected
 
-### 6.2 昇格は自動で試し、ダメなら自動で戻す
+### 6.2 Promote automatically with a trial, and roll back automatically if it fails
 
-「適用してデーモン再起動」を「この版を昇格」に置き換える:
+Replace "apply and restart the daemon" with "promote this version":
 
-1. リリースを作る（現行: 機械の上で build する。`rescue/src/releases.ts`。CI は緑のマージにタグを付けるだけで、成果物は置かない）
-2. 昇格の直前に DB のスナップショットを取る（現行: `VACUUM INTO` の `snapshots/`、新しい 10 個。Litestream の複製は別に常時）
-3. 候補の版を別ポートで起動する。DB はスナップショットの複製を使う。`/api/health`、Task 一覧、WebSocket の接続、ランナーの検出を確かめる
-4. 通ったら `current` を切り替えて本番のポートで再起動する。60 秒以内に同じ確認が通らなければ（現行は、その 10 秒後にも通ること）、`previous` に戻して再起動する
-5. 結果は救援サービス（6.3）に記録し、UI に出す
+1. Make the release (currently: build on the machine. `rescue/src/releases.ts`. CI only tags a green merge and places no artifacts)
+2. Take a DB snapshot just before the promotion (currently: `VACUUM INTO` into `snapshots/`, the newest 10. Litestream's replication runs separately and continuously)
+3. Start the candidate version on another port. The DB is a copy of the snapshot. Check `/api/health`, the Task list, the WebSocket connection and runner detection
+4. If it passes, switch `current` and restart on the production port. If the same check does not pass within 60 seconds (currently it must also pass 10 seconds after that), return to `previous` and restart
+5. The result is recorded in the rescue service (6.3) and shown in the UI
 
-DB のマイグレーションは追加だけにする（列を消さない）。古い版が新しいスキーマで動けるので、戻すときに DB を戻さずに済む。
-戻しても壊れているときのために、スナップショットへの復元ボタンも用意する。
+DB migrations are additive only (no column is dropped). An old version can run on the new schema, so rolling back does not need the DB to be rolled back.
+For the case where it is still broken after rolling back, a restore button to the snapshot is also provided.
 
-### 6.3 Switchboard とは別に動く救援サービス（sb-rescue）
+### 6.3 A rescue service that runs separately from Switchboard (sb-rescue)
 
-- Switchboard とコードを共有しない、小さな独立プロセス（systemd の別 unit）。**エージェントの自己更新の対象にしない**（変更は人がレビューした PR だけで、自動では昇格させない）
-- 同じ CloudFront とパスキーの後ろの `/rescue` に、スマホで使える 1 画面を出す（CloudFront のビヘイビアで sb-rescue のポートへ振り分ける）:
-  - 今の版、状態、直近のログ 200 行、昇格の履歴
-  - [再起動] [前の版に戻す] [版を選んで戻す] [DB をスナップショットから戻す]
-  - [救援エージェントを起動]: `claude -p` を、落ちた版のログと直近の差分つきで、リポジトリの worktree で走らせる。出力をこの画面に流す。修正は PR にさせる（直接昇格はしない）
-  - 状態を変えるボタンは、Cookie で入った人には直近 5 分のパスキー確認（`sb_recent`、§3）を求める。画面が確認を求めてから続ける（#497）
-- 案では「systemd の `OnFailure=` で、起動に 3 回失敗したら自動で `previous` に戻す」だった。現行は sb-rescue がデーモンを子として動かし、落ちたら 1 / 2 / 4 秒後に再起動、3 回目の後は `failed` で止まって**版は変えない**（昇格の途中でなければ戻す先が正しいとは限らないため）。戻すのは救援画面のボタン（`rescue/src/supervisor.ts`、`docs/design/releases-and-rescue.md`）
+- A small independent process (a separate systemd unit) that shares no code with Switchboard. **It is not a target of the agent's self-update** (changes only by PRs a person reviewed, and never promoted automatically)
+- Behind the same CloudFront and passkey, it shows a one-screen page, usable on a phone, at `/rescue` (a CloudFront behavior routes to sb-rescue's port):
+  - The current version, the state, the last 200 lines of the log, the promotion history
+  - [`再起動`] [`前の版に戻す`] [`版を選んで戻す`] [`DB をスナップショットから戻す`]
+  - [`救援エージェントを起動`]: runs `claude -p` in the repository's worktree with the log of the failed version and the latest diff, and streams the output to this page. The fix is made into a PR (no direct promotion)
+  - Buttons that change state ask a person who came in with a cookie for a passkey check within the last 5 minutes (`sb_recent`, §3). The page asks for the check and then continues
+- In the proposal it was "with systemd's `OnFailure=`, roll back to `previous` automatically after 3 failed starts". The current form is that sb-rescue runs the daemon as a child, restarts it 1 / 2 / 4 seconds after it falls, and after the third time stops at `failed` and **does not change the version** (unless it is in the middle of a promotion, the version to return to is not necessarily right). Returning is done with a button on the rescue page (`rescue/src/supervisor.ts`, `docs/design/releases-and-rescue.md`)
 
-### 6.4 機械ごとダメなとき
+### 6.4 When the whole machine is broken
 
-- 機械の外にあるログインと起動の画面（`/_auth`、起動用 Lambda）に [起動する] [作り直す] を置く。案にあった [強制再起動] は無い（機械の中の再起動は救援画面の [再起動]）
-- 「作り直す」は、IaC から新しいインスタンスを作り、S3 の最新リリース + Litestream + 履歴アーカイブから復元する（案）。現行はインスタンスを作り直さず、ルートボリュームを起動時の状態に交換する（`aws/starter.ts` の `/rebuild`、`CreateReplaceRootVolumeTask`。インスタンスの id と VPC origin が変わらないため）。EC2 が再起動して UserData がもう一度走り、スタックの `GitHubRepo` を clone して `aws/host/bootstrap.sh` を走らせる。bootstrap は最初に `/switchboard/github-repo` の main に乗り換え（`sb-host-update` と同じパラメータ、同じ取り方。読めない・取り直せないときは理由を stderr に出して `GitHubRepo` の clone のまま続ける）、リポジトリを GitHub から clone し直して sb-rescue を入れ、リリースはその機械で build する。S3 にリリースは置かない。sqlite は Litestream から、ランナーの記録は下の退避から戻す。そのため作り直しには GitHub に届くことが要る
-- 同じ操作を GitHub Actions の `workflow_dispatch` にも用意する（GitHub アプリからスマホで実行できる、第 2 の経路。AWS には OIDC で入る）
-- **登録した workspace の clone（#2799）**: 作り直しの bootstrap は、DB の workspace のうち `ReposDir` の下でフォルダが無いものを、`workspaces.backlog_source` の `repository`（`service` が `github` のもの）から clone する。フォルダの名前から組み立てた名前では clone しない（同じ名前の公開リポジトリが clone された）。登録が無い・GitHub でない workspace は clone せず、`bootstrap: not cloning <name>: …` の行を出す
-  - clone の後、clone の中の `gh repo view` が答えるリポジトリ名が登録の `repository` と（大文字小文字を除いて）同じか、登録の `private` が true なら clone も private かを確かめる。違う・答えが無いときは、その clone を消さずに `<path>.unverified-<UTC 時刻>` に退避し、`bootstrap: moved <name> aside: <理由>` を出す（中身を確かめられるように）。`private` はバックログの取り込みが書き、違う checkout の取り込みは登録を書き換えない（`backlog-sync.ts` の `refuseAnotherCheckout`）
-  - 退避や clone の失敗で workspace のフォルダが無いとき、またはフォルダの origin が登録と違うとき、判断待ちに「workspace <name> を使えません」のお知らせが理由と直し方つきで出る（読むたびに今の状態から作り、直れば解消済み。`unusableWorkspaces`、#2866）。その workspace の Task は、ランナーを起動する前に止まり、理由が Task に残る（作る・再開する。`originMismatch`）
-- **ランナーの記録も戻す（#401）**: Switchboard の DB は Litestream から戻るが、ランナー自身の記録（`~/.claude/projects` = Claude の会話ファイル（`--resume` に要る）とメモリの記録、`~/.codex/sessions`）と成果物の写し（`~/.switchboard/artifacts`。行は DB にある）はディスクにしか無い。`sb-runner-sync`（`aws/host/runner-sync.sh`）がこれを tar + zstd にして、**組**として `s3://<data>/archive/runner/<set>/` に置く（#1443）。`<set>` は土台を上げた epoch 秒で、`base.tar.zst`（全部。7 日ごと）と、前回の実行から変わったファイル（ctime）だけの `<epoch>.tar.zst`（差分）が入る。どのキーも 1 回しか書かない（上書きしないので、版管理の古い版ができない）。戻すのは `sb-runner-sync restore`（bootstrap が Switchboard の OS ユーザーとして呼ぶ）で、最新の組の差分を新しい順に、最後に土台を `--skip-old-files` で展開する（各ファイルは最新の版が残り、既にあるファイルは上書きしない。`~/.claude.json` だけは、保存した初回設定と信頼の上に今のファイルを重ねる）。旧形式の `latest.tar.zst`（#1443 まで）は読まない。退避する対象が変わると（`~/.switchboard/runner-sync.dirs` に覚える）、差分では既にあるファイルが入らないので土台から取り直す
-  - いつ: 1 時間ごと（`sb-runner-sync.timer`、変わったファイルがあるときだけ差分を上げる）、自動停止の直前（`sb-stop`）、救援画面の「作り直す」の直前（#403: sb-rescue が `SWITCHBOARD_REBUILD_SAVE_CMD` を実行し、失敗したら・10 秒で終わらなければ作り直さずに理由を出す。理由は 424 で返し、救援画面の状態（`lastError`）にも残す — 502 / 504 は CloudFront が起動ページに差し替え、画面に届かない）。失うのは、救援画面を通らない作り直し（ディスクの故障）で最後の 1 時間まで
-  - 保護: Litestream の複製と同じ（バケットの暗号化、このスタックのインスタンスロールだけが読める）。日次アーカイブ（利用者の age 鍵）とは違い、インスタンスが自分で戻せる。ログイン情報（`~/.claude/.credentials.json`、`~/.codex/auth.json`）は含めない
-  - `archive/` は 30 日で消えるので、7 日ごとに新しい組（土台から）を作る。古い組は上げ直さずに期限で消える。期限は最後に上げたときから数えるので、止めてから 23〜30 日で切れる（古い版として更に 30 日残り、人が S3 のコンソールから戻せる）。**これは作り直すための一時的な退避で、長期のバックアップではない**: 救援画面の作り直すは押した直前に上げ直すので期限は関係なく、効くのは「長く止めた後に救援画面を通らずに作り直す / ディスクが壊れる」ときだけ。なお日次アーカイブも同じ `archive/` にあり、止めている間は作られないので、**約 60 日（30 日 + 古い版の 30 日）以上止めた後にその作り直し・故障が起きると、ランナーの記録はどこからも戻らない**。Switchboard の履歴（DB）は Litestream の複製（`litestream/`、期限なし）から戻る
-  - 作業中のセッションは tar が読んでいる間にも書かれる。GNU tar はそのとき 1 で終わるが、アーカイブは完全なので上げる（そのファイルの最後の行が切れうるだけ。切れた会話ファイルからも `claude --resume` で続きを再開できることを 2026-09-27 に確認）。読めないファイル・フォルダ（tar の 2）のときは上げない（欠けた退避で正しいものを上書きしないため）
-  - 戻すのは「まだ何も無い」（`archive/runner/` に土台が無い）ときだけ飛ばす。それ以外の失敗（`aws` の失敗）では bootstrap を止める（Litestream と同じ。空に近い退避で正しいものを上書きしないため）
-  - 費用の計算例（実測ではない）: 圧縮した土台を 350 MB、1 時間の差分を 5 MB と仮定する。常時稼働なら 1 日に書く量は 350 MB ÷ 7 + 24 × 5 MB = **170 MB**。どのキーも上書きしないので、約 60 日分（`archive/` の 30 日 + 古い版の 30 日）は **10.2 GB**。設計時の S3 Standard 東京 $0.025/GB 月では約 $0.26/月。同じキーを上書きする方式は、版管理により退避全体が回数分残る。
+- [`起動する`] [`作り直す`] are placed on the login and start page outside the machine (`/_auth`, the start Lambda). The [force restart] in the proposal does not exist (a restart inside the machine is the rescue page's [`再起動`])
+- "Rebuild" creates a new instance from IaC and restores from the latest release in S3 + Litestream + the history archive (proposal). The current form does not recreate the instance but replaces the root volume with its state at launch (`/rebuild` of `aws/starter.ts`, `CreateReplaceRootVolumeTask`; because the instance id and the VPC origin do not change). EC2 restarts and UserData runs again, clones the stack's `GitHubRepo`, and runs `aws/host/bootstrap.sh`. Bootstrap first switches to the main of `/switchboard/github-repo` (the same parameter and the same way of fetching as `sb-host-update`; when it cannot be read or fetched again, it prints the reason to stderr and continues with the `GitHubRepo` clone), clones the repositories from GitHub again, installs sb-rescue, and builds the release on that machine. No release is placed in S3. sqlite comes back from Litestream and the runners' records from the save below. So a rebuild needs to reach GitHub
+- The same operation is also provided as GitHub Actions `workflow_dispatch` (a second route that can be run from the GitHub app on a phone; it enters AWS by OIDC)
+- **Cloning registered workspaces**: bootstrap on a rebuild clones those workspaces in the DB whose folder is missing under `ReposDir`, from the `repository` of `workspaces.backlog_source` (those whose `service` is `github`). It does not clone with a name assembled from the folder name (a public repository of the same name had been cloned that way). A workspace with no registration or not on GitHub is not cloned, and a line `bootstrap: not cloning <name>: …` is printed
+  - After the clone, it checks whether the repository name that `gh repo view` inside the clone answers is the same as the registered `repository` (ignoring case), and, if the registered `private` is true, whether the clone is private too. If they differ or there is no answer, it does not delete that clone but moves it aside to `<path>.unverified-<UTC time>` and prints `bootstrap: moved <name> aside: <reason>` (so that the contents can be examined). `private` is written by the backlog import, and an import from a different checkout does not rewrite the registration (`refuseAnotherCheckout` in `backlog-sync.ts`)
+  - When a workspace's folder is missing because of moving aside or a failed clone, or when the folder's origin differs from the registration, a notice "`workspace <name> を使えません`" appears in the awaiting-decision list, with the reason and how to fix it (it is built from the current state each time it is read, and is resolved once fixed; `unusableWorkspaces`). Tasks of that workspace stop before the runner is started, and the reason stays on the Task (create and resume; `originMismatch`)
+- **The runners' records are restored too**: Switchboard's DB comes back from Litestream, but the runners' own records (`~/.claude/projects` = Claude's conversation files (needed by `--resume`) and memory records, `~/.codex/sessions`) and the copy of the artifacts (`~/.switchboard/artifacts`; the rows are in the DB) exist only on the disk. `sb-runner-sync` (`aws/host/runner-sync.sh`) turns them into tar + zstd and puts them as a **set** under `s3://<data>/archive/runner/<set>/`. `<set>` is the epoch seconds at which the base was uploaded, and it holds `base.tar.zst` (everything; every 7 days) and `<epoch>.tar.zst` (the differences: only the files changed since the previous run, by ctime). Every key is written only once (nothing is overwritten, so no old versions arise from versioning). Restoring is `sb-runner-sync restore` (bootstrap calls it as Switchboard's OS user), which extracts the latest set's differences newest first and the base last, with `--skip-old-files` (each file keeps its newest version, and an existing file is not overwritten. Only `~/.claude.json` is the current file laid over the saved first-run setup and trust). The old-format `latest.tar.zst` is not read. When the saved targets change (remembered in `~/.switchboard/runner-sync.dirs`), differences would not bring in files that already exist, so the base is taken again
+  - When: every hour (`sb-runner-sync.timer`; a difference is uploaded only when a file has changed), just before the automatic stop (`sb-stop`), and just before the rescue page's "`作り直す`" (sb-rescue runs `SWITCHBOARD_REBUILD_SAVE_CMD`, and if it fails or does not finish in 10 seconds it does not rebuild and shows the reason. The reason is returned as 424 and also kept in the rescue page's state (`lastError`) — 502 / 504 are replaced by CloudFront with the start page and do not reach the screen). What is lost is, in a rebuild that does not go through the rescue page (a disk failure), up to the last hour
+  - Protection: the same as Litestream's replication (bucket encryption; only this stack's instance role can read it). Unlike the daily archive (the user's age key), the instance can restore it by itself. Login information (`~/.claude/.credentials.json`, `~/.codex/auth.json`) is not included
+  - `archive/` is deleted after 30 days, so a new set (from the base) is made every 7 days. Old sets are not re-uploaded and are removed by the expiry. The expiry counts from the last upload, so it runs out 23 to 30 days after stopping (it remains another 30 days as an old version, and a person can restore it from the S3 console). **This is a temporary save for rebuilding, not a long-term backup**: the rescue page's rebuild uploads again just before it is pressed, so the expiry does not matter, and it matters only when "the machine is rebuilt without going through the rescue page / the disk breaks after a long stop". The daily archive is in the same `archive/` and is not made while the machine is stopped, so **if that rebuild or failure happens after being stopped for about 60 days (30 days + 30 days of old versions) or more, the runners' records come back from nowhere**. Switchboard's history (the DB) comes back from Litestream's replication (`litestream/`, no expiry)
+  - A session in progress is written to even while tar is reading it. GNU tar then ends with 1, but the archive is complete, so it is uploaded (only the last line of that file may be cut; on 2026-09-27 we confirmed that a cut conversation file can still be resumed with `claude --resume`). For unreadable files or folders (tar's 2) it does not upload (so that a missing save does not overwrite a correct one)
+  - Restore is skipped only when "nothing exists yet" (there is no base in `archive/runner/`). For any other failure (a failure of `aws`) bootstrap stops (the same as Litestream: so that a near-empty save does not overwrite a correct one)
+  - A cost example (not measured): assume the compressed base is 350 MB and one hour's difference is 5 MB. Running all the time, the amount written per day is 350 MB ÷ 7 + 24 × 5 MB = **170 MB**. Since no key is overwritten, about 60 days (30 days of `archive/` + 30 days of old versions) come to **10.2 GB**. At S3 Standard Tokyo $0.025/GB-month at design time, that is about $0.26/month. A method that overwrites the same key would keep the whole save as many times as it was written, because of versioning.
 
 - **What a rebuild keeps.** The root volume is replaced and the old one is deleted, so a file comes back only if something outside the disk holds it. These rows sort HOME as it stood on 2026-11-01, when attachments, recordings and notes were lost because they were only in a manual save; `aws/host/host.test.ts` holds the first row to the list in `aws/host/runner-sync.sh`. Restore lays differences over the last base and records no deletions, so a file deleted within the last 7 days can come back.
 
@@ -343,15 +343,15 @@ DB のマイグレーションは追加だけにする（列を消さない）�
 
 - **Recordings have a second copy.** `.switchboard/fixtures` is in the hourly save above, and since 2026-11-05 also on the branch `recordings-vault` of the repository: a stack lost with its bucket loses the hourly save with it, and the recordings were lost twice before (the last time on 2026-11-01). The branch is never merged, and the public sync sends main's tree only. `bun scripts/fixtures.ts save` adds every file of the folder to it (a changed file replaces the branch's, one only on the branch stays), `fetch` writes the files the folder lacks (it overwrites none), and `sync` does both. The scheduled tag CI (`scripts/tag-ci.ts` with `SWITCHBOARD_FIXTURES`) runs `sync` first, so a recording reaches the branch on the next run of that schedule without anyone, and a folder emptied by a rebuild is filled again on that run, before its check for missing recordings (when it runs is the registered schedule's, `GET /api/schedules`). A clone whose origin has no such branch (a public clone, a fork) gets exit 2 with the reason; `save` makes the branch only with `--create`, so a public fork does not publish recordings.
 
-### 6.5 root が main を信頼する経路（#852）
+### 6.5 The path by which root trusts main
 
-信頼境界: main の `aws/host/` は root で走る。main に書けるトークンをインスタンスに渡すなら、main の保護とレビュー経路を配備前に確認する。
+Trust boundary: main's `aws/host/` runs as root. If a token that can write to main is handed to the instance, check main's protection and review path before deploying.
 
-- 経路は 2 つある
-  - 作り直すたび: UserData がスタックの `GitHubRepo` の main を clone し、`aws/host/bootstrap.sh` を root で走らせる（§6.4、`aws/README.md`）。bootstrap は最初に `/switchboard/github-repo` の main を root の clone に取り直し、その bootstrap に乗り換える（`sb-host-update` と同じパラメータ、同じ取り方）。読めない・取り直せないときは理由を stderr に出して、`GitHubRepo` の clone のまま続ける。乗り換えは UserData の clone にこの版の bootstrap があるときだけ効く（`GitHubRepo` が公開側の写しなら、その写しに同期されてから）。作り直した後の確かめ方: `journalctl --no-pager | grep 'bootstrap: running main of'` に行が出る。これが乗り換えの証拠で、`-b` は付けない（bootstrap がカーネル更新で再起動すると、行は 1 つ前の起動に残る）。行が出るのは UserData の clone が別のリポジトリのときだけで、`GitHubRepo` がパラメータと同じなら乗り換えないので出ない。root の clone の origin は `git -c safe.directory=/opt/switchboard-host -C /opt/switchboard-host remote get-url origin` で開発リポジトリを指すことを見る（root 所有なので Switchboard の OS ユーザーには `safe.directory` が要る）。`sb-host-update` も起動のたびに同じ main を取り直すので、origin だけでは乗り換えを示さない
-  - 起動のたび: `sb-host-update`（#435 / PR #803）が main を root 所有の clone に取り直し（履歴つき、blob は後から）、昇格済みのリリースの sha（`~/.switchboard/releases/current` のリンク先の名前。40 桁の 16 進で、main の祖先であるときだけ）を checkout し、全スクリプトの `bash -n` と新しい `sb-env` の試走（一時ファイルへ書き出して 0 で終わる）が通れば、下の表のスクリプトを root で `/usr/local/bin` に入れる。sha が無い・形が違う・祖先でないときは main の先頭を使い、理由を stderr に出す。試走が通らない版は入れず、入っている版のまま起動を続ける。ホストのユーザーの場所から読むのは `current` のリンク先の名前だけで、そこから何も実行しない。ホストのユーザーが選べるのは main の履歴の中のコミットだけ（main に無いコミットは選べない）。`sb-host-update` 自身は、入っている版の出どころ（root 所有の `/opt/switchboard-host.updater` に記録した sha。clone の先頭は昇格で戻るので使わない。記録がまだ無いとき（bootstrap の直後、記録より前のホスト）は、updater を入れた clone の先頭を、clone を入れ替える前に記録に書く）より履歴を前に進むときだけ入れ替える（古いリリースへの昇格では、ほかのスクリプトはその版に戻し、固定と試走をする updater は残す）。取得・checkout・試走は 60 秒の枠を分け合い（unit の起動の 90 秒のうち。残りは sb-env と sb-rescue）、試走に 5 秒残っていなければ入れずに今の版のまま起動する。ホストのユーザーのホームは `/etc/switchboard-host.env` の `SB_HOST_HOME`（bootstrap が書く。この行が入る前に作ったホストは次の作り直すまで main の先頭）。ログは `sb-host-update: <sha> from release` / `from main`。入れ替えは `host-update.sh` の `for src in …` の一覧が正本で、`aws/host/host.test.ts` の "#852" のテストがこの表と突き合わせる。同じ起動で、AL2023 の最新のリポジトリのセキュリティ更新を `sb-security-update` の unit（`dnf --releasever=latest upgrade --security --refresh`、起動は待たない）に渡す（#2186）。root が走らせるのは distribution の署名つきのパッケージだけで、main から root で走る範囲は変わらない。Node.js は dnf のパッケージではないので、同じ起動で `sb-node` を `sb-node-update` の unit に渡す（起動は待たない）。`node.sh` に固定した版と sha256 の nodejs.org の tarball だけを入れ、入っている版が違うときだけ入れ替える
+- There are two paths
+  - On every rebuild: UserData clones the main of the stack's `GitHubRepo` and runs `aws/host/bootstrap.sh` as root (§6.4, `aws/README.md`). Bootstrap first re-fetches the main of `/switchboard/github-repo` into root's clone and switches to that bootstrap (the same parameter and the same way of fetching as `sb-host-update`). When it cannot be read or fetched again, it prints the reason to stderr and continues with the `GitHubRepo` clone. The switch works only when UserData's clone has this version of bootstrap (if `GitHubRepo` is the public copy, after it has been synced to that copy). How to check after a rebuild: a line appears in `journalctl --no-pager | grep 'bootstrap: running main of'`. This is the evidence of the switch, and `-b` is not added (if bootstrap restarts for a kernel update, the line stays in the previous boot). The line appears only when UserData's clone is a different repository; if `GitHubRepo` is the same as the parameter, it does not switch and the line does not appear. Check that the origin of root's clone points at the development repository with `git -c safe.directory=/opt/switchboard-host -C /opt/switchboard-host remote get-url origin` (it is root-owned, so Switchboard's OS user needs `safe.directory`). `sb-host-update` also re-fetches the same main at every start, so the origin alone does not show a switch
+  - On every start: `sb-host-update` re-fetches main into a root-owned clone (with history, blobs later), checks out the sha of the promoted release (the name the `~/.switchboard/releases/current` link points to; 40 hex digits, and only when it is an ancestor of main), and, if `bash -n` of all scripts and a trial run of the new `sb-env` (written out to a temporary file, ending with 0) pass, installs the scripts in the table below into `/usr/local/bin` as root. When the sha is missing, malformed or not an ancestor, it uses main's head and prints the reason to stderr. A version whose trial run fails is not installed and the start continues with the installed version. What it reads from the host user's place is only the name the `current` link points to, and it runs nothing from there. What the host user can choose is only commits within main's history (a commit not in main cannot be chosen). `sb-host-update` itself is replaced only when it moves history forward from the origin of the installed version (the sha recorded in the root-owned `/opt/switchboard-host.updater`; the clone's head is not used because it goes back on promotion. When there is no record yet (right after bootstrap, or a host from before the record), the head of the clone in which the updater was installed is written to the record before the clone is replaced. On a promotion to an older release, the other scripts go back to that version, and the updater, which does the pinning and the trial run, stays). Fetch, checkout and trial run share a 60-second budget (within the unit's 90 seconds at start; the rest goes to sb-env and sb-rescue), and if 5 seconds do not remain for the trial run it installs nothing and starts with the current version. The host user's home is `SB_HOST_HOME` in `/etc/switchboard-host.env` (written by bootstrap; a host built before this line was added uses main's head until the next rebuild). The log is `sb-host-update: <sha> from release` / `from main`. What is replaced is defined by the list of `for src in …` in `host-update.sh`, and the "the main-trust path" test in `aws/host/host.test.ts` checks it against this table. In the same start it hands AL2023's latest repository security updates to the `sb-security-update` unit (`dnf --releasever=latest upgrade --security --refresh`; the start does not wait for it). What root runs is only the distribution's signed packages, and the range that runs as root from main does not change. Node.js is not a dnf package, so in the same start it hands `sb-node` to the `sb-node-update` unit (the start does not wait for it). It installs only the nodejs.org tarball of the version and sha256 pinned in `node.sh`, and replaces it only when the installed version differs
 
-| スクリプト | 入れ先の名前 |
+| Script | Name it is installed under |
 |---|---|
 | `aws/host/host-update.sh` | `sb-host-update` |
 | `aws/host/sb-stop.sh` | `sb-stop` |
@@ -362,33 +362,33 @@ DB のマイグレーションは追加だけにする（列を消さない）�
 | `aws/host/pre-rebuild.sh` | `sb-pre-rebuild` |
 | `aws/host/node.sh` | `sb-node` |
 
-- 受け入れる理由: 権限は増えない。エージェントはもともと main に書け、main を信頼している。変わるのは main の中身が root で動くまでの手間（救援画面の再起動 1 操作）だけ。merge-gate が `aws/host/**` を `[聞く] セキュリティ` にし、利用者の確認なしにはマージしない。ただし merge-gate は助言で、通さずに main を書き換える経路は残る。main を保護できる（ruleset などを付けられる）なら保護する
-- 却下した案
-  - B: root が入れるのは、利用者が Parameter Store に置いた commit だけにする。管理の手間が重い。main を保護できないなら、commit の固定だけを足しても、変えるたびに sha を置く手間に見合わない
-  - B': B に加え、UserData / bootstrap も同じ commit を clone する。B と同じ理由
-  - C: スクリプトの入れ替えをやめる。スクリプトの更新を「作り直す」以外で届けるという #435 の目的を満たさない
+- Why it is accepted: privileges do not increase. The agent can already write to main and trusts main. All that changes is the effort needed before main's contents run as root (one operation on the rescue page, a restart). merge-gate marks `aws/host/**` as `[聞く] セキュリティ` and does not merge without the user's confirmation. But merge-gate is advisory, and a route that rewrites main without going through it remains. If main can be protected (a ruleset or the like can be attached), protect it
+- Rejected alternatives
+  - B: root installs only the commit the user placed in Parameter Store. The management effort is heavy. If main cannot be protected, adding only commit pinning does not pay for the effort of placing a sha at every change
+  - B': in addition to B, UserData / bootstrap also clone the same commit. The same reason as B
+  - C: stop replacing the scripts. It does not meet the purpose of delivering script updates by something other than "rebuild", which is the purpose of `sb-host-update`
 
-#### 見直す契機
+#### When to revisit
 
-- main を保護できるようになった。確かめ方: `gh api repos/<owner>/<repo>/rulesets` が 403「Upgrade to GitHub Pro …」でなくなる。月 1 回の検査が見る: `bun scripts/host-trust-check.ts [--file-request]`（exit 0 = 契機なし / 1 = 契機 / 2 = 判定できない。`--file-request` は契機のとき見直しの要望を 1 件起票し、同じ題の開いた要望があれば重ねない）。merge-audit と同じ月 1 回の定期実行で走る（#1367）
-- インスタンスのトークンで書けるリポジトリ・権限が広がった。確かめ方: トークンを変えるときに `aws/README.md` の `/switchboard/github-token` の行で示す
-- root で走る範囲が増えた。確かめ方: 上の表と `host.test.ts` の "#852" のテスト、`aws/host/**` の PR で merge-gate が `[聞く] セキュリティ` にする
+- Main can now be protected. How to check: `gh api repos/<owner>/<repo>/rulesets` no longer returns 403 "Upgrade to GitHub Pro …". A check looks at it: `bun scripts/host-trust-check.ts [--file-request]` (exit 0 = no trigger / 1 = trigger / 2 = cannot judge. `--file-request` files one request for a review at a trigger, and does not pile on if an open request with the same title exists). It is not scheduled by itself: if you register it, a monthly scheduled run (for example the one that runs merge-audit) is enough, and `GET /api/schedules` shows what is registered
+- The repositories and permissions the instance's token can write have widened. How to check: shown on the `/switchboard/github-token` row of `aws/README.md` when the token is changed
+- The range that runs as root has grown. How to check: the table above and the main-trust-path test in `host.test.ts`, and merge-gate marking `[聞く] セキュリティ` on a PR touching `aws/host/**`
 
-どの段でも、利用者の操作はブラウザ（スマホ可）のボタンだけ。ターミナルと SSH は使わない。
+At every stage, the user's operation is only a button in the browser (a phone is fine). The terminal and SSH are not used.
 
-## 7. DAK との関係
+## 7. Relationship to DAK
 
-DAK は任意の接続先。`SWITCHBOARD_DAK_URL` が未設定なら DAK は登録されない（ランナーの選択肢にも出ない）。DAK アダプタを使う場合は `SWITCHBOARD_DAK_URL` を自分の ADK REST の接続先にする。Switchboard のスタックの配備に DAK の開発ロールは要らない。
+DAK is an optional destination. If `SWITCHBOARD_DAK_URL` is unset, DAK is not registered (it does not appear among the runner choices). When using the DAK adapter, set `SWITCHBOARD_DAK_URL` to your own ADK REST endpoint. Deploying Switchboard's stack does not need DAK's development role.
 
-## 8. 配備の確認
+## 8. Deployment check
 
-`aws/README.md` の初回配備チェックを自分のスタックで実行する。自己更新・履歴の復元・ランナーの再ログイン・起動と停止を確認する。
+Run the first-deployment check of `aws/README.md` on your own stack. Check self-update, history restore, runner re-login, and start and stop.
 
-## 9. 未検証（実測が要るもの）
+## 9. Unverified (needs measurement)
 
-- 選んだリージョンでの Spot の価格・中断頻度・容量
-- ボタンから UI 応答までの時間と CloudFront の起動ページへの切り替え時間
-- RAM に対するランナーの同時実行数
-- setup-token の有効期限と、ラッパー経由での `claude auth status` の終了コード
-- スマホのターミナル（PTY）の切断と再接続
-- 自分の契約の無料枠・実費・予算アラートの集計
+- Spot's price, interruption frequency and capacity in the region chosen
+- The time from the button to the UI response and the time to switch to CloudFront's start page
+- The number of concurrent runners against RAM
+- The validity period of a setup-token, and the exit code of `claude auth status` through the wrapper
+- Disconnection and reconnection of the phone terminal (PTY)
+- The free tier, actual cost and budget-alert totals of your own contract

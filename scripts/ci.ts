@@ -30,6 +30,8 @@ export const ciSteps: Step[] = [
   // typecheck は Codex から型を生成する（scripts/codex_types.ts）ので CI を回す環境にも Codex CLI が要る。入っていれば飛ばし（Codex のあるホストのローカル CI）、無ければ入れる（公開側の Actions。ログインは要らない）
   { name: "Codex CLI for typecheck", run: "if command -v codex >/dev/null; then exit 0; fi\nnpm install -g @openai/codex" },
   { name: "bun run typecheck", run: "bun run typecheck" },
+  // 公開に出す文書（scripts/public-docs.ts list）が英語で、Issue 番号 #N を本文に持たないこと。日本語を残してよいのはコードと画面の模型だけ
+  { name: "public docs: English, no issue numbers", run: "bun scripts/public-docs.ts check" },
   // perf-bench measures this build; bun test does not depend on it
   { name: "bun run --cwd apps/web build", run: "bun run --cwd apps/web build" },
   // perf ratchet (#638): the counts of the four journeys against scripts/perf-budget.json, and the bundle against main's

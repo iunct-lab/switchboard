@@ -24,6 +24,7 @@ The original framing is about different people: beginners want a low floor, expe
 - Values that are not touched on every request are folded or moved to Settings. A proposal that places such a value on the floor (Home, or the main action of a screen) either moves it to the ceiling or states why it must stay on the floor.
 - Confirmations that protect safety are never folded: approvals, the permission mode, and warnings before an operation that cannot be undone stay where the decision is made.
 - No feature is removed for the sake of a lower floor. Only where it is shown changes; what can be done stays the same.
+- A feature that does not work in the current setup (one instance on a remote host such as EC2, the browser on a different device) or that is unused may be removed, but only when the user decides so for that candidate. The agent never removes one on its own judgment. This is separate from the rule above: removing a feature to lower the floor stays forbidden.
 
 ## How a backlog item states it
 
@@ -33,7 +34,7 @@ A backlog item (PBI) that changes how the web UI looks or is operated carries on
 **置き場所**: 床|天井|壁 — <reason>
 ```
 
-The labels are Japanese because the backlog is written in Japanese (床 = floor, 天井 = ceiling, 壁 = walls). Items that do not change the screen do not carry the line. Nothing checks the line automatically; missing lines are found by periodic review rather than by a lint, until it is clear the line is being used.
+The labels are Japanese because the backlog is written in Japanese (`床` = floor, `天井` = ceiling, `壁` = walls). Items that do not change the screen do not carry the line. Nothing checks the line automatically; missing lines are found by periodic review rather than by a lint, until it is clear the line is being used.
 
 ## Relation to the UI language rule
 

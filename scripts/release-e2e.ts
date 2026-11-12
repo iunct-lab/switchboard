@@ -6,8 +6,12 @@
  * backlog-next firing, and an approval-window firing shows 「昇格待ち: <tag>」 in 判断待ち, from where 「新しい版 →」 and
  * 「待たずに昇格する」 promote HEAD. SCREENSHOT=<file.png> also saves what the settings screen looked like, and
  * <file>-asks.png the 判断待ち with the notice.
+ * A public copy's clone (#4569): the fixture's origin is a bare copy named like `publicSync.target`, the fake runner answers
+ * the check Task with the `switchboard-release-review` fence (v1.0.0: ok, v1.1.0: one concern), the first tag is promoted
+ * by itself after the check and the second only through 「懸念を見たうえで更新する」 and its dialog. <file>-public.png is the
+ * settings section at 390 px (phone width).
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../packages/core/src/config.ts";
@@ -31,10 +35,24 @@ const rescue = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
   return new Response("no", { status: 404 });
 } });
 // Stays running until it is stopped, waiting on an approval: the Task counts as busy.
+// The public copy's check (#4569) is a read-only (`plan`) Task: it answers at once with the fence the prompt asks for.
+const checks: Array<{ cwd: string; permissionMode?: string; prompt: string }> = [];
+// A check answers once the gate is open, so a tag can be seen with its check still running.
+let openGate = () => {};
+let gate: Promise<void> = Promise.resolve();
+const closeGate = () => { gate = new Promise<void>((r) => (openGate = r)); };
+const fence = (j: object) => "確認した。\n```switchboard-release-review\n" + JSON.stringify(j) + "\n```";
 const adapter: RunnerAdapter = {
   id: "claude", detect: async () => ({ available: true }),
   models: [{ value: "m-e2e", label: "m-e2e" }],
-  start(_opts, emit) {
+  permissionModes: [{ value: "plan", label: "plan", description: "" }],
+  start(opts, emit) {
+    if (opts.cwd.includes("/release-review/")) {
+      checks.push({ cwd: opts.cwd, permissionMode: opts.permissionMode, prompt: opts.prompt });
+      const concern = opts.prompt.includes("v1.1.0");
+      void gate.then(() => emit({ t: "session.end", status: "ok", summary: fence(concern ? { verdict: "concern", findings: [{ path: "packages/core/src/exfil.ts", why: "起動時に process.env を外の URL へ POST している" }] } : { verdict: "ok", findings: [] }) }));
+      return { send() {}, respondPermission() {}, async abort() {}, async close() {}, exited: new Promise<number | null>(() => {}) };
+    }
     queueMicrotask(() => emit({ t: "permission.ask", id: "perm-e2e", kind: "exec", tool: "Bash", input: { command: "ls" }, detail: "ls" }));
     let exit!: (code: number | null) => void;
     const exited = new Promise<number | null>((r) => (exit = r));
@@ -63,8 +81,12 @@ try {
   let seq = 0;
   const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   const errors: unknown[] = [];
+  // window.confirm: remember the message, answer with `answer` (the update button's dialog)
+  const dialogs: string[] = [];
+  let answer = true;
   ws.onmessage = (event) => {
     const m = JSON.parse(String(event.data));
+    if (m.method === "Page.javascriptDialogOpening") { dialogs.push(m.params.message); void call("Page.handleJavaScriptDialog", { accept: answer }); }
     if (m.id) { const p = pending.get(m.id); pending.delete(m.id); m.error ? p?.reject(new Error(JSON.stringify(m.error))) : p?.resolve(m.result); }
     if (m.method === "Log.entryAdded" && m.params.entry.source === "security") errors.push(m);
     if (m.method === "Runtime.exceptionThrown") errors.push(m);
@@ -174,8 +196,89 @@ try {
   await until(async () => (await panelText()).includes("最新の版が動いています"), "最新の版が動いています");
   assert(await evaluate(`${byText("この版を昇格", "#release button")}.disabled`), "ahead 0 must disable the button");
 
+  // (f) a public copy's clone (#4569): origin is a bare copy named like publicSync.target; the new tags are checked first
+  const bare = join(home, "fake-org", "pub-copy.git");
+  mkdirSync(bare, { recursive: true });
+  Bun.spawnSync(["git", "init", "-q", "--bare", bare]);
+  writeFileSync(join(repo, "ops.config.json"), JSON.stringify({ publicSync: { target: "fake-org/pub-copy" } }));
+  git("add", "ops.config.json");
+  git("commit", "-q", "-m", "chore: the public copy's config");
+  git("remote", "add", "origin", bare);
+  git("push", "-q", "origin", "HEAD:refs/heads/main");
+  running = git("rev-parse", "HEAD");
+  const pub = join(home, "publisher");
+  // the branch that was pushed, not the bare HEAD (it names init.defaultBranch, which may not exist): the tags must descend from what runs
+  Bun.spawnSync(["git", "clone", "-q", "--branch", "main", bare, pub]);
+  assert(Bun.spawnSync(["git", "-C", pub, "merge-base", "--is-ancestor", running, "HEAD"]).exitCode === 0, "the publisher's clone starts from the running version");
+  const release = (tag: string, file: string, body: string) => {
+    writeFileSync(join(pub, file), body);
+    const g = (...a: string[]) => Bun.spawnSync(["git", "-C", pub, "-c", "user.name=t", "-c", "user.email=t@t", ...a]).stdout.toString().trim();
+    g("add", file); g("commit", "-q", "-m", `feat: ${tag}`); g("tag", tag); g("push", "-q", "origin", "HEAD", "--tags");
+    return g("rev-parse", "HEAD");
+  };
+  const releaseInfo = async () => (await (await fetch(`${base}/api/daemon/release`)).json()) as { latestRelease: { tag: string } | null; review: { state: string; findings: unknown[] } | null; hold: { reason: string } | null };
+  const stopped = promoted.length;
+
+  // (f1) v1.0.0: backlog-next starts the check (not a promotion); once it says ok the tag is promoted by itself
+  closeGate();
+  const sha1 = release("v1.0.0", "a.txt", "one\n");
+  await fire("バックログを進める (公開側 v1.0.0)", "backlog-next");
+  await until(() => checks.length === 1, "the check of v1.0.0 starts");
+  assert(promoted.length === stopped, "a tag with no check result must not be promoted");
+  await Bun.sleep(400);
+  assert(promoted.length === stopped, "a tag with the check still running must not be promoted");
+  assert((await releaseInfo()).review?.state === "running", "the check is running");
+  assert(checks[0].permissionMode === "plan" && checks[0].cwd.endsWith("/release-review/v1.0.0"), `check: ${JSON.stringify(checks[0])}`);
+  assert(checks[0].prompt.includes("diff.patch") && checks[0].prompt.includes(`${running}`) && checks[0].prompt.includes(sha1), "the prompt names the diff and the range");
+  openGate();
+  await until(() => promoted.length === stopped + 1, "v1.0.0 promoted after the check said ok");
+  assert(promoted[stopped] === sha1, `promoted ${promoted[stopped]}`);
+  assert(checks.length === 1, "one check for the tag");
+  await until(() => !existsSync(checks[0].cwd), "the check's tree is removed");
+  running = sha1; // sb-rescue switched
+
+  // (f2) v1.1.0: the check finds a concern; nothing is promoted by itself
+  release("v1.1.0", "b.txt", "two\n");
+  await fire("バックログを進める (公開側 v1.1.0)", "backlog-next");
+  const info = await until(async () => { const i = await releaseInfo(); return i.review?.state === "concern" ? i : null; }, "the concern of v1.1.0");
+  assert(info.latestRelease?.tag === "v1.1.0" && info.review?.findings.length === 1, `review: ${JSON.stringify(info.review)}`);
+  assert(checks.length === 2 && checks[1].prompt.includes("v1.1.0"), "the second tag has its own check");
+  await fire("バックログを進める (公開側 v1.1.0 もう一度)", "backlog-next");
+  await Bun.sleep(400);
+  assert(promoted.length === stopped + 1 && checks.length === 2, `a concern must not be promoted nor checked again (promoted ${promoted.length - stopped}, checks ${checks.length})`);
+  assert((await releaseInfo()).hold?.reason.includes("懸念 1 件"), "hold says the concern");
+
+  // the header marks the tag; the settings section shows the concern, and the button asks first
+  // (the page reads the release once per connection, so it is opened again)
+  await call("Page.navigate", { url: base });
+  await until(() => evaluate(`document.querySelector('.new-version')?.textContent === '新しい版 v1.1.0 →'`), "新しい版 v1.1.0 → in the header");
+  await call("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+  await press(`document.querySelector('.new-version')`, "新しい版 v1.1.0 →");
+  const concern = await until(async () => { const t = await panelText(); return t.includes("懸念あり 1 件") ? t : null; }, "懸念あり 1 件 in the section");
+  assert(concern.includes("packages/core/src/exfil.ts: 起動時に process.env を外の URL へ POST している") && concern.includes("確認を通っていない版は自動では上がりません"), `section: ${concern}`);
+  assert(await evaluate(`!!(${byText("確かめ直す", "#release button")})`), "the check-again button for a concern");
+  await evaluate(`document.getElementById('release').scrollIntoView()`);
+  if (process.env.SCREENSHOT) {
+    const r = await evaluate(`(() => { const b = document.getElementById('release').getBoundingClientRect(); return { y: b.top + scrollY, height: b.height }; })()`) as { y: number; height: number };
+    writeFileSync(process.env.SCREENSHOT.replace(/\.png$/, "") + "-public.png", Buffer.from((await call("Page.captureScreenshot", { format: "png", captureBeyondViewport: true, clip: { x: 0, y: r.y, width: 390, height: Math.min(r.height, 1800), scale: 1 } })).data, "base64"));
+  }
+  assert(!(await panelText()).includes("昇格を依頼"), "no promotion asked yet");
+  await call("Emulation.clearDeviceMetricsOverride");
+
+  // the dialog lists the concern; Cancel sends nothing, OK sends the tag
+  answer = false;
+  await press(byText("懸念を見たうえで更新する（v1.1.0）", "#release button"), "懸念を見たうえで更新する");
+  await until(() => dialogs.length === 1, "the dialog (cancel)");
+  await Bun.sleep(300);
+  assert(promoted.length === stopped + 1, "Cancel in the dialog must not promote");
+  answer = true;
+  await press(byText("懸念を見たうえで更新する（v1.1.0）", "#release button"), "懸念を見たうえで更新する (OK)");
+  await until(() => promoted.length === stopped + 2, "v1.1.0 promoted after OK in the dialog");
+  assert(promoted[stopped + 1] === "v1.1.0", `promoted ${promoted[stopped + 1]}`);
+  assert(dialogs.length === 2 && dialogs[1].includes("v1.1.0") && dialogs[1].includes("packages/core/src/exfil.ts") && dialogs[1].includes("起動時に process.env を外の URL へ POST している"), `dialog: ${dialogs[1]}`);
+
   assert(!errors.length, `console errors: ${JSON.stringify(errors)}`);
-  console.log(JSON.stringify({ mark, section: ahead.slice(0, 80), notice: notice.slice(0, 80), promoted: promoted.length, brief: brief.slice(0, 60) }));
+  console.log(JSON.stringify({ mark, section: ahead.slice(0, 80), notice: notice.slice(0, 80), promoted: promoted.length, checks: checks.length, dialog: dialogs[1]?.slice(0, 40), brief: brief.slice(0, 60) }));
 } finally {
   ws?.close();
   chrome.kill();

@@ -7,7 +7,7 @@ import { withHeavySlot } from "../ops-kit/src/heavy";
 import { NO_HOST } from "../ops-kit/src/secrets";
 import type { Filed, OpenRequest } from "./file-request";
 import { stepWithIdle } from "./local-ci";
-import { classifyMiss, failedIn, failedTestFiles, failureRequest, followUp, hidePaths, latestPass, latestPassTag, MAX_TAG_RUNS, parseArgs, waitForMore, REQUEST_TITLE, resolveRepo, resultSection, tagCi, tagCiExit, tagResult, TAG_CI_RESULT, type FollowDeps, type TagCiDeps, type TagCiEntry } from "./tag-ci";
+import { classifyMiss, failedIn, failedTestFiles, failureRequest, followUp, hidePaths, latestPass, latestPassTag, MAX_TAG_RUNS, parseArgs, PERF_STREAK, PERF_WARNING_HEADING, perfKeys, perfStreak, perfStreakFollow, warningsOf, waitForMore, REQUEST_TITLE, resolveRepo, resultSection, tagCi, tagCiExit, tagResult, TAG_CI_RESULT, type FollowDeps, type TagCiDeps, type TagCiEntry } from "./tag-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
 const ciTs = await Bun.file(new URL("./ci.ts", import.meta.url)).text();
@@ -328,196 +328,93 @@ describe("tag-ci", () => {
     expect([...first]).toEqual([["v1.0.0", undefined]]);
   });
 
-  test("previous tag: grew and raised against it reach the Release's CI section with (raised/grew only)", async () => {
+  describe("the perf steps are a warning in the Release, not part of the result (#4690)", () => {
+    const WARNING = "perf の警告（合否には数えない）:";
     const grew = "grew: bundle.js +1.10% (1000 → 1011 B) ≥ 1%: merging is the user's call (docs/design/perf.md)";
-    const raised = "raised: launch.ms = 900 (main 800)";
-    const f = fake([{ tag: "v2.0.0", body: "", fail: { at: CHECK, output: `ceilings: local\n${grew}\n` } }, { tag: "v1.0.0", body: "" }]);
-    await tagCi(f.d, "o/r", "/repo", CACHE);
-    expect(f.bodies.get("v2.0.0")).toContain(`[tag-ci] pass ${shaOf("v2.0.0")} (raised/grew only)`);
-    expect(f.bodies.get("v2.0.0")).toContain(`    ${grew}`);
-    expect(f.bodies.get("v2.0.0")).toContain("前のタグ");
-    const g = fake([{ tag: "v2.0.0", body: "", fail: { at: CHECK, output: `ceilings: local\n${raised}\n` } }, { tag: "v1.0.0", body: "" }]);
-    await tagCi(g.d, "o/r", "/repo", CACHE);
-    expect(g.bodies.get("v2.0.0")).toContain(`(raised/grew only)`);
-    expect(g.bodies.get("v2.0.0")).toContain(`    ${raised}`);
-  });
+    const only = async (output: string) => {
+      const f = fake([{ tag: "v2.0.0", body: "", fail: { at: CHECK, output } }, { tag: "v1.0.0", body: "" }]);
+      const r = await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST);
+      return { f, r, body: f.bodies.get("v2.0.0")! };
+    };
 
-  test("raised only counts as pass", async () => {
-    const raised = { at: CHECK, output: "ceilings: local\nraised: launch.ms = 900 (main 800)\n" };
-    const f = fake([{ tag: "v2.0.0", body: "", fail: raised }, { tag: "v1.0.0", body: "" }]);
-    const r = await tagCi(f.d, "o/r", "/repo", CACHE);
-    expect(r.map((x) => `${x.tag} ${x.result}`)).toEqual(["v2.0.0 pass"]);
-    expect(f.bodies.get("v2.0.0")).toContain(`[tag-ci] pass ${shaOf("v2.0.0")} (raised/grew only)`);
-    expect(f.bodies.get("v2.0.0")).toContain("    raised: launch.ms = 900 (main 800)");
-    expect(tagResult(f.bodies.get("v2.0.0")!, shaOf("v2.0.0"))).toBe("pass");
-    // over next to raised is a fail, and the walk goes on
-    const over = { at: CHECK, output: "ceilings: local\nover: launch.ms = 900 > 800\nraised: launch.ms = 900 (main 800)\n" };
-    const g = fake([{ tag: "v2.0.0", body: "", fail: over }, { tag: "v1.0.0", body: "" }]);
-    expect((await tagCi(g.d, "o/r", "/repo", CACHE)).map((x) => `${x.tag} ${x.result}`)).toEqual(["v2.0.0 fail", "v1.0.0 pass"]);
-  });
-
-  test("improved only is a pass that keeps the lines as ceilings to lower; over is a wobble only when the range since the last pass does not reach perf-bench (#4124)", async () => {
-    const pass = (tag: string) => `[tag-ci] pass ${shaOf(tag)}`;
-    const improved = { at: CHECK, output: "ceilings: local\nimproved: launch.ms = 600 (ceiling 800)\n" };
-    const a = fake([{ tag: "v2.0.0", body: "", fail: improved }, { tag: "v1.0.0", body: "" }]);
-    const ra = await tagCi(a.d, "o/r", "/repo", CACHE, NO_HOST);
-    expect(ra.map((x) => `${x.tag} ${x.result}`)).toEqual(["v2.0.0 pass"]);
-    expect(a.bodies.get("v2.0.0")).toContain(`[tag-ci] pass ${shaOf("v2.0.0")} (improved only)`);
-    expect(a.bodies.get("v2.0.0")).toContain("bun scripts/perf-ratchet.ts update");
-    expect(a.bodies.get("v2.0.0")).toContain("    improved: launch.ms = 600 (ceiling 800)");
-    expect(a.bodies.get("v2.0.0")).not.toContain("が落ちた:");
-    expect(tagResult(a.bodies.get("v2.0.0")!, shaOf("v2.0.0"))).toBe("pass");
-
-    const over = { at: CHECK, output: "ceilings: local\nover: launch.ms = 900 > 800\n" };
-    const tags = [{ tag: "v3.0.0", body: "", fail: over }, { tag: "v2.0.0", body: "" }, { tag: "v1.0.0", body: pass("v1.0.0") }];
-    // (b) the range since v1.0.0 (v2.0.0 had no result) holds only docs: a wobble
-    const b = fake(tags, ciYml, undefined, "docs/design/a.md\naws/README.md\n");
-    expect((await tagCi(b.d, "o/r", "/repo", CACHE, NO_HOST)).map((x) => `${x.tag} ${x.result}`)).toEqual(["v3.0.0 pass"]);
-    expect(b.diffs).toContain("v1.0.0..v3.0.0");
-    expect(b.bodies.get("v3.0.0")).toContain(`[tag-ci] pass ${shaOf("v3.0.0")} (wobble: perf-bench に届く変更なし)`);
-    expect(b.bodies.get("v3.0.0")).toContain("揺れ（範囲に perf-bench に届く変更なし: v1.0.0..v3.0.0）");
-    expect(b.bodies.get("v3.0.0")).toContain("    over: launch.ms = 900 > 800");
-    expect(b.bodies.get("v3.0.0")).not.toContain("が落ちた:");
-    // (c) a change under apps/web reaches it: a fail as before
-    const c = fake(tags, ciYml, undefined, "docs/design/a.md\napps/web/src/main.ts\n");
-    expect((await tagCi(c.d, "o/r", "/repo", CACHE, NO_HOST)).map((x) => `${x.tag} ${x.result}`)).toEqual(["v3.0.0 fail", "v2.0.0 pass"]);
-    expect(c.bodies.get("v3.0.0")).toContain(`[tag-ci] fail ${shaOf("v3.0.0")}`);
-    // (d) no tag passed before: it cannot say what the range is, a fail
-    const d = fake([{ tag: "v3.0.0", body: "", fail: over }, { tag: "v2.0.0", body: "" }], ciYml, undefined, "docs/design/a.md\n");
-    expect((await tagCi(d.d, "o/r", "/repo", CACHE, NO_HOST))[0]!.result).toBe("fail");
-  });
-
-  describe("an over in a range that reaches perf-bench: the tag that passed last is measured again (#4124)", () => {
-    const pass = (tag: string) => `[tag-ci] pass ${shaOf(tag)}`;
-    const over = (...keys: string[]) => ({ at: CHECK, output: `ceilings: local\n${keys.map((k) => `over: ${k} = 9 > ceiling 6\n`).join("")}` });
-    const tags = (fail: { at: string; output: string }) => [{ tag: "v3.0.0", body: "", fail }, { tag: "v2.0.0", body: "" }, { tag: "v1.0.0", body: pass("v1.0.0") }];
-    const REACH = "apps/web/src/main.ts\n";
-    /** The fake with the measure of the previous tag: its perf-bench leaves a result (7 for every count), its check says `before`; `puts` = the records' paths and rows. */
-    function again(t: ReturnType<typeof tags>, changed: string, before: string | "bench fails") {
-      const f = fake(t, ciYml, undefined, changed);
-      const puts: Array<{ path: string; text: string }> = [];
-      const d: TagCiDeps = {
-        ...f.d,
-        step: async (script, cwd, env) => {
-          if (script.includes("scripts/perf-bench.ts")) {
-            if (before === "bench fails" && cwd.includes("tag-ci-v1.0.0.")) return { code: 1, output: "bench failed" };
-            await Bun.write(`${cwd}/perf-result.json`, JSON.stringify({ journeys: { "new-task": { layoutCount: 7 } } }));
-          }
-          if (script.startsWith("bun scripts/perf-ratchet.ts check '")) return { code: before === "ok" || before.includes("perf ratchet: ok") ? 0 : 1, output: before };
-          return f.d.step(script, cwd, env);
-        },
-        sh: async (cmd, cwd, input) => {
-          if (cmd[0] === "gh" && cmd[1] === "api") {
-            if (cmd.includes("PUT")) puts.push({ path: cmd.find((a) => a.includes("/contents/"))!, text: Buffer.from((JSON.parse(readFileSync(cmd[cmd.indexOf("--input") + 1]!, "utf8")) as { content: string }).content, "base64").toString("utf8") });
-            else if (cmd.some((a) => a.includes("/contents/"))) throw new Error("gh api failed: gh: Not Found (HTTP 404)");
-            return "{}";
-          }
-          return f.d.sh(cmd, cwd, input);
-        },
-      };
-      return { f, d, puts };
-    }
-    const results = async (d: TagCiDeps) => (await tagCi(d, "o/r", "/repo", CACHE, NO_HOST)).map((x) => `${x.tag} ${x.result}`);
-
-    test("(a) the tag before is over too: a wobble that passes with the mark; its counts are recorded", async () => {
-      const a = again(tags(over("journeys.new-task.layoutCount")), REACH, "ceilings: local\nover: journeys.new-task.layoutCount = 7 > ceiling 6\n");
-      expect(await results(a.d)).toEqual(["v3.0.0 pass"]);
-      expect(a.f.worktrees).toEqual(["v3.0.0", "v1.0.0"]);
-      expect(a.f.ran.filter((x) => x.tag === "v1.0.0").map((x) => x.script)).toContain("bun scripts/perf-bench.ts --runs 5 --json perf-result.json");
-      expect(a.f.ran.filter((x) => x.tag === "v1.0.0").some((x) => x.script === "bun test")).toBe(false);
-      expect(a.f.bodies.get("v3.0.0")).toContain(`[tag-ci] pass ${shaOf("v3.0.0")} (wobble: 前のタグ v1.0.0 も同じ数で外れた)`);
-      expect(a.f.bodies.get("v3.0.0")).not.toContain("が落ちた:");
-      const counts = a.puts.filter((p) => p.path.endsWith("/counts.tsv") && p.text.includes("\tv1.0.0\t"));
-      expect(counts.map((p) => p.text.split("\n").filter((l) => l.includes("\tv1.0.0\t")))).toEqual([[expect.stringMatching(/\tv1\.0\.0\t[0-9a-f]{40}\tjourneys\.new-task\.layoutCount\t7$/)]]);
+    test("(a) an over alone: a pass, the mark has no reason, the line is under the warning heading", async () => {
+      const { f, r, body } = await only("ceilings: local\nover: launch.ms = 900 > 800\n");
+      expect(r.map((x) => `${x.tag} ${x.result} ${x.ran}`)).toEqual(["v2.0.0 pass true"]);
+      expect(f.worktrees).toEqual(["v2.0.0"]);
+      expect(body).toContain(`\n[tag-ci] pass ${shaOf("v2.0.0")}\n`);
+      expect(body).toContain(`\n${WARNING}\n    over: launch.ms = 900 > 800`);
+      expect(body).not.toContain("が落ちた:");
+      expect(tagResult(body, shaOf("v2.0.0"))).toBe("pass");
+      expect(failedIn(body)).toBeNull();
     });
 
-    test("(b) the tag before stayed under the ceiling: a fail that says so, with the values", async () => {
-      const b = again(tags(over("journeys.new-task.layoutCount")), REACH, "ceilings: local\nimproved: launch.ms = 1 (ceiling 2)\n");
-      expect(await results(b.d)).toEqual(["v3.0.0 fail", "v2.0.0 pass"]);
-      expect(b.f.bodies.get("v3.0.0")).toContain("    前のタグ v1.0.0 では収まった: journeys.new-task.layoutCount = 7 / 9");
+    test("(b) raised, grew, improved alone: a pass with the lines as the warning, in this order", async () => {
+      const raised = "raised: launch.ms = 900 (main 800)";
+      const improved = "improved: launch.ms = 600 (ceiling 800)";
+      for (const lines of [[raised], [grew], [improved], [raised, grew, improved]]) {
+        const { r, body } = await only(`ceilings: local\n${lines.join("\n")}\n`);
+        expect(r.map((x) => `${x.tag} ${x.result}`)).toEqual(["v2.0.0 pass"]);
+        expect(body).toContain(`\n${WARNING}\n${lines.map((l) => `    ${l}`).join("\n")}`);
+        expect(body).not.toContain("が落ちた:");
+      }
     });
 
-    test("(b) the tag before passed its check outright (no verdict line): a fail with the values, not an unknown", async () => {
-      const b = again(tags(over("journeys.new-task.layoutCount")), REACH, "ceilings: local\nperf ratchet: ok\n");
-      expect(await results(b.d)).toEqual(["v3.0.0 fail", "v2.0.0 pass"]);
-      expect(b.f.bodies.get("v3.0.0")).toContain("    前のタグ v1.0.0 では収まった: journeys.new-task.layoutCount = 7 / 9");
+    test("(c) an over and a failed bun test: a fail whose step and lines are bun test's alone; the perf line stays as the warning", async () => {
+      const f = fake([{ tag: "v1.0.0", body: "", fail: { at: CHECK, output: "ceilings: local\nover: launch.ms = 900 > 800\n" } }]);
+      const test = { code: 1, output: "(fail) a > b\n1 fail" };
+      const d: TagCiDeps = { ...f.d, step: async (script, cwd, env) => (script.trim() === "bun test" ? test : f.d.step(script, cwd, env)) };
+      const r = await tagCi(d, "o/r", "/repo", CACHE, NO_HOST);
+      expect(r.map((x) => `${x.tag} ${x.result}`)).toEqual(["v1.0.0 fail"]);
+      expect(r[0]!.step).toBe("bun test");
+      expect(r[0]!.fails).toEqual(["(fail) a > b"]);
+      const body = f.bodies.get("v1.0.0")!;
+      expect(body).toContain(`[tag-ci] fail ${shaOf("v1.0.0")}\n`);
+      expect(failedIn(body)).toEqual({ step: "bun test", fails: ["(fail) a > b"] });
+      expect(body).toContain(`${WARNING}\n    over: launch.ms = 900 > 800`);
     });
 
-    test("(c) no over, or a range that does not reach perf-bench: the tag before is not measured", async () => {
-      const none = again(tags({ at: CHECK, output: "ceilings: local\nimproved: launch.ms = 1 (ceiling 2)\n" }), REACH, "ok");
-      expect(await results(none.d)).toEqual(["v3.0.0 pass"]);
-      expect(none.f.worktrees).toEqual(["v3.0.0"]);
-      const docs = again(tags(over("launch.ms")), "docs/design/a.md\n", "ok");
-      expect(await results(docs.d)).toEqual(["v3.0.0 pass"]);
-      expect(docs.f.worktrees).toEqual(["v3.0.0"]);
+    test("(d) the perf step failed with no verdict (a bench that fell): a pass with a note that it could not judge", async () => {
+      const { r, body } = await only("bench failed\n");
+      expect(r.map((x) => `${x.tag} ${x.result}`)).toEqual(["v2.0.0 pass"]);
+      expect(body).toContain(`${WARNING}\n    perf の判定ができなかった`);
+      expect(tagResult(body, shaOf("v2.0.0"))).toBe("pass");
     });
 
-    test("(d) the measure of the tag before fails: a fail as before", async () => {
-      const x = again(tags(over("launch.ms")), REACH, "bench fails");
-      expect(await results(x.d)).toEqual(["v3.0.0 fail", "v2.0.0 pass"]);
-      expect(x.f.worktrees.filter((t) => t === "v1.0.0")).toEqual(["v1.0.0"]);
-      expect(x.f.bodies.get("v3.0.0")).toContain(`[tag-ci] fail ${shaOf("v3.0.0")}`);
+    test("a perf step without keepGoing in a repository's CI does not stop the steps after it: a pass with the warning", async () => {
+      const yml = `jobs:\n  ci:\n    steps:\n      - run: ${JSON.stringify(CHECK)}\n      - run: echo after\n`;
+      const f = fake([{ tag: "v1.0.0", body: "", fail: { at: CHECK, output: "ceilings: local\nraised: launch.ms = 900 (main 800)\n" } }], yml);
+      const r = await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST);
+      expect(r.map((x) => `${x.tag} ${x.result}`)).toEqual(["v1.0.0 pass"]);
+      expect(f.ran.map((x) => x.script)).toEqual([CHECK, "echo after"]);
+      expect(f.bodies.get("v1.0.0")).toContain("    raised: launch.ms = 900 (main 800)");
     });
 
-    test("(e) two overs and only one of them also over before: a fail that names the other; one measure serves the tags of a walk", async () => {
-      const two = over("journeys.new-task.layoutCount", "journeys.new-task.requests");
-      const e = again([{ tag: "v3.0.0", body: "", fail: two }, { tag: "v2.0.0", body: "", fail: two }, { tag: "v1.0.0", body: pass("v1.0.0") }], REACH, "ceilings: local\nover: journeys.new-task.layoutCount = 7 > ceiling 6\n");
-      expect(await results(e.d)).toEqual(["v3.0.0 fail", "v2.0.0 fail", "v1.0.0 pass"]);
-      expect(e.f.bodies.get("v3.0.0")).toContain("前のタグ v1.0.0 では収まった: journeys.new-task.requests = ? / 9");
-      expect(e.f.bodies.get("v3.0.0")).not.toContain("では収まった: journeys.new-task.layoutCount");
-      // v2.0.0 also fails by the same over: v1.0.0 was measured once for both
-      expect(e.f.worktrees.filter((t) => t === "v1.0.0")).toEqual(["v1.0.0"]);
+    test("the warning keeps at most 20 lines and goes without host paths", () => {
+      const lines = Array.from({ length: 25 }, (_, i) => `over: k${i} = 2 > ceiling 1`);
+      const section = resultSection({ sha: shaOf("v1.0.0"), ok: true, warnings: [...lines, "over: /home/someone/x = 1"] }, NO_HOST);
+      expect(section.split("\n").filter((l) => l.startsWith("    over:"))).toHaveLength(20);
+      expect(resultSection({ sha: shaOf("v1.0.0"), ok: true, warnings: ["see /home/someone/x"] }, NO_HOST)).toContain("    see ~/x");
     });
   });
 
-  test("a perf check that is over is a fail written to the Release: the perf steps run in the tag CI, which a PR's local CI no longer runs (#4076)", async () => {
+  test("a perf check that is over runs in the tag CI (a PR's local CI no longer runs it, #4076) and is a pass with the line as a warning", async () => {
     const over = { at: CHECK, output: "ceilings: local\nover: launch.ms = 900 > 800\n" };
     const f = fake([{ tag: "v1.0.0", body: "", fail: over }]);
     const r = await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST);
-    expect(r.map((x) => `${x.tag} ${x.result}`)).toEqual(["v1.0.0 fail"]);
-    expect(r[0]!.step).toBe("bun scripts/perf-ratchet.ts check perf-result.json");
-    expect(r[0]!.fails).toEqual(["over: launch.ms = 900 > 800"]);
+    expect(r.map((x) => `${x.tag} ${x.result}`)).toEqual(["v1.0.0 pass"]);
+    expect(r[0]).not.toHaveProperty("step");
     expect(f.ran.some((x) => x.script.includes("scripts/perf-bench.ts"))).toBe(true);
-    expect(f.bodies.get("v1.0.0")).toContain(`[tag-ci] fail ${shaOf("v1.0.0")}`);
-    expect(f.bodies.get("v1.0.0")).toContain("over: launch.ms = 900 > 800");
+    expect(f.bodies.get("v1.0.0")).toContain(`[tag-ci] pass ${shaOf("v1.0.0")}`);
+    expect(f.bodies.get("v1.0.0")).toContain("    over: launch.ms = 900 > 800");
   });
 
-  test("grew only (and grew next to raised) counts as pass", async () => {
-    const grew = "grew: bundle.js +1.10% (1000 → 1011 B) ≥ 1%: merging is the user's call (docs/design/perf.md)";
-    const f = fake([{ tag: "v2.0.0", body: "", fail: { at: CHECK, output: `ceilings: local\nbundle: js 1011 B (main 1000 B, +11 B, +1.10%) / css 50 B (main 50 B, +0 B, +0.00%)\n${grew}\n` } }, { tag: "v1.0.0", body: "" }]);
-    const r = await tagCi(f.d, "o/r", "/repo", CACHE);
-    expect(r.map((x) => `${x.tag} ${x.result}`)).toEqual(["v2.0.0 pass"]);
-    expect(f.bodies.get("v2.0.0")).toContain(`[tag-ci] pass ${shaOf("v2.0.0")} (raised/grew only)`);
-    expect(f.bodies.get("v2.0.0")).toContain(`    ${grew}`);
-    const both = { at: CHECK, output: `ceilings: local\nraised: launch.ms = 900 (main 800)\n${grew}\n` };
-    const g = fake([{ tag: "v2.0.0", body: "", fail: both }, { tag: "v1.0.0", body: "" }]);
-    expect((await tagCi(g.d, "o/r", "/repo", CACHE)).map((x) => `${x.tag} ${x.result}`)).toEqual(["v2.0.0 pass"]);
-    expect(g.bodies.get("v2.0.0")).toContain(`    raised: launch.ms = 900 (main 800)\n    ${grew}`);
-  });
-
-  test("raised next to a failed bun test is a fail naming both steps and their lines (the check keeps going, #2945)", async () => {
-    const f = fake([{ tag: "v1.0.0", body: "", fail: { at: CHECK, output: "ceilings: local\nraised: launch.ms = 900 (main 800)\n" } }]);
+  test("a failed bun test with the check's many lines: the Release's fail lines are bun test's, the warning keeps the check's 20", async () => {
     const test = { code: 1, output: "(fail) a > b\n1 fail" };
-    const d: TagCiDeps = { ...f.d, step: async (script, cwd, env) => (script.trim() === "bun test" ? (f.ran.push({ tag: "v1.0.0", script: "bun test" }), test) : f.d.step(script, cwd, env)) };
-    const r = await tagCi(d, "o/r", "/repo", CACHE, NO_HOST);
-    expect(r.map((x) => `${x.tag} ${x.result}`)).toEqual(["v1.0.0 fail"]);
-    expect(r[0]!.step).toBe("bun scripts/perf-ratchet.ts check perf-result.json / bun test");
-    expect(r[0]!.fails).toEqual(["raised: launch.ms = 900 (main 800)", "(fail) a > b"]);
-    expect(f.ran.at(-1)!.script).toBe("bun test");
-    // a check with more lines than the Release keeps does not push bun test's lines out: each step gets its share
     const many = Array.from({ length: 25 }, (_, i) => `over: k${i} = 2 > ceiling 1`).join("\n");
     const g = fake([{ tag: "v1.0.0", body: "", fail: { at: CHECK, output: `ceilings: local\n${many}\n` } }]);
     const r2 = await tagCi({ ...g.d, step: async (script, cwd, env) => (script.trim() === "bun test" ? test : g.d.step(script, cwd, env)) }, "o/r", "/repo", CACHE, NO_HOST);
-    expect(r2[0]!.fails).toHaveLength(11);
-    expect(r2[0]!.fails!.at(-1)).toBe("(fail) a > b");
-  });
-
-  test("raised only is a fail when steps come after the check (they did not run)", async () => {
-    const yml = `jobs:\n  ci:\n    steps:\n      - run: ${JSON.stringify(CHECK)}\n      - run: echo after\n`;
-    const f = fake([{ tag: "v1.0.0", body: "", fail: { at: CHECK, output: "ceilings: local\nraised: launch.ms = 900 (main 800)\n" } }], yml);
-    const r = await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST);
-    expect(r.map((x) => `${x.tag} ${x.result}`)).toEqual(["v1.0.0 fail"]);
-    expect(f.ran.map((x) => x.script)).toEqual([CHECK]);
+    expect(r2[0]!.fails).toEqual(["(fail) a > b"]);
+    expect(g.bodies.get("v1.0.0")!.split("\n").filter((l) => l.startsWith("    over:"))).toHaveLength(20);
   });
 
   test("the failed lines go without host paths, and not at all with a value usable for auth", async () => {
@@ -970,5 +867,84 @@ describe("tag-ci requests", () => {
     const g = fake([{ tag: "v2.0.0", body: "" }]);
     await followUp(await tagCi(g.d, "o/r", "/repo", CACHE, NO_HOST), "o/r", "/repo", false, q.d);
     expect(q.comments).toEqual([]);
+  });
+});
+
+describe("tag-ci: a worsening that stays (perf streak)", () => {
+  const over = (k: string) => `over: ${k} = 900 > 800`;
+  const marked = (tag: string, lines: string[] = []) => `- c\n\n## CI\n[tag-ci] pass ${shaOf(tag)}\n${lines.length ? `\n${PERF_WARNING_HEADING}\n${lines.map((l) => `    ${l}`).join("\n")}\n` : ""}`;
+
+  test("perfKeys reads over: and grew: keys only", () => {
+    expect(PERF_STREAK).toBe(3);
+    expect(perfKeys([over("launch.ms"), "grew: bundle.js +2.00% (1 → 2 B) ≥ 1%: x", "grew: bytes.launch +1.5% (1 → 2 B)", "raised: a = 2 (main 1)", "improved: b = 1 < 2", "bytes: note", "perf の判定ができなかった（bench が落ちたか、check が判定の前に止まった）"])).toEqual(["launch.ms", "bundle.js", "bytes.launch"]);
+  });
+
+  test("warningsOf reads the indented lines under the heading and stops at the first line that is not", () => {
+    expect(warningsOf(`${marked("v1.0.0", ["over: a = 2 > 1", "grew: bundle.x +1%"])}\nafter`)).toEqual(["over: a = 2 > 1", "grew: bundle.x +1%"]);
+    expect(warningsOf(marked("v1.0.0"))).toEqual([]);
+  });
+
+  test("perfStreak: 2 runs give nothing, 3 give the key, a clean run between or another key breaks it", () => {
+    const a = [over("launch.requests"), over("new-task.recalcStyleCount")];
+    expect(perfStreak(a, [[over("launch.requests")]])).toEqual([]);
+    expect(perfStreak(a, [[over("launch.requests")], [over("launch.requests")]])).toEqual(["launch.requests"]);
+    expect(perfStreak(a, [[over("launch.requests")], [], [over("launch.requests")]])).toEqual([]);
+    expect(perfStreak(a, [[over("launch.requests")], [over("launch.layoutCount")]])).toEqual([]);
+    expect(perfStreak(["raised: launch.requests = 2 (main 1)"], [[over("launch.requests")], [over("launch.requests")]])).toEqual([]);
+  });
+
+  const perfFail = { at: CHECK, output: "ceilings: local\nover: launch.requests = 9 > 8\n" };
+
+  test("a run through tagCi: one earlier warning does not call, two do (a tag with no mark is passed over)", async () => {
+    const lines = ["over: launch.requests = 9 > 8"];
+    const calls: Array<{ tag: string; keys: string[] }> = [];
+    const onPerfStreak = async (tag: string, _sha: string, keys: string[]) => void calls.push({ tag, keys });
+    const one = fake([{ tag: "v3.0.0", body: "", fail: perfFail }, { tag: "v2.0.0", body: marked("v2.0.0", lines) }, { tag: "v1.0.0", body: marked("v1.0.0") }]);
+    await tagCi({ ...one.d, onPerfStreak }, "o/r", "/repo", CACHE, NO_HOST);
+    expect(calls).toEqual([]);
+    const two = fake([{ tag: "v4.0.0", body: "", fail: perfFail }, { tag: "v3.0.0", body: "- no mark" }, { tag: "v2.0.0", body: marked("v2.0.0", lines) }, { tag: "v1.0.0", body: marked("v1.0.0", lines) }]);
+    await tagCi({ ...two.d, onPerfStreak }, "o/r", "/repo", CACHE, NO_HOST);
+    expect(calls).toEqual([{ tag: "v4.0.0", keys: ["launch.requests"] }]);
+    // the first run alone: nothing earlier
+    const alone = fake([{ tag: "v1.0.0", body: "", fail: perfFail }]);
+    calls.length = 0;
+    await tagCi({ ...alone.d, onPerfStreak }, "o/r", "/repo", CACHE, NO_HOST);
+    expect(calls).toEqual([]);
+  });
+
+  test("a run through tagCi finds the earlier results past any number of tags without a mark, and hands their lines on", async () => {
+    const lines = ["over: launch.requests = 9 > 8"];
+    const got: Array<{ tag: string; earlier: string[] }> = [];
+    const onPerfStreak = async (tag: string, _sha: string, _keys: string[], _lines: string[], earlier: Array<{ tag: string; lines: string[] }>) =>
+      void got.push({ tag, earlier: earlier.map((e) => `${e.tag} ${e.lines.join(",")}`) });
+    const gap = (from: number) => Array.from({ length: 40 }, (_, i) => ({ tag: `v${from - i}.0.0`, body: "- no mark" }));
+    const f = fake([{ tag: "v90.0.0", body: "", fail: perfFail }, ...gap(89), { tag: "v49.0.0", body: marked("v49.0.0", lines) }, ...gap(48), { tag: "v8.0.0", body: marked("v8.0.0", lines) }]);
+    await tagCi({ ...f.d, onPerfStreak }, "o/r", "/repo", CACHE, NO_HOST);
+    expect(got).toEqual([{ tag: "v90.0.0", earlier: [`v49.0.0 ${lines[0]}`, `v8.0.0 ${lines[0]}`] }]);
+  });
+
+  test("perfStreakFollow files once per key and comments on the open one, once per tag", async () => {
+    const q = requests(fake([]));
+    const lines = ["over: launch.requests = 9 > 8"];
+    await perfStreakFollow("v4.0.0", shaOf("v4.0.0"), ["launch.requests"], lines, q.d, "2026-11-12");
+    expect(q.open.map((o) => o.title)).toEqual(["perf が悪化し続けている: launch.requests"]);
+    expect(q.bodies[0]).toContain("誰の言葉: 定期の検査");
+    expect(q.comments).toEqual([]);
+    await perfStreakFollow("v5.0.0", shaOf("v5.0.0"), ["launch.requests"], lines, q.d, "2026-11-12");
+    await perfStreakFollow("v5.0.0", shaOf("v5.0.0"), ["launch.requests"], lines, q.d, "2026-11-12");
+    expect(q.open).toHaveLength(1);
+    expect(q.comments.map((c) => c.body)).toEqual([`v5.0.0（${shaOf("v5.0.0").slice(0, 7)}）でも続いた`]);
+  });
+
+  test("perfStreakFollow's request names each tag of the streak with its line for the key", async () => {
+    const q = requests(fake([]));
+    const at = (tag: string, n: number) => ({ tag, sha: shaOf(tag), lines: [`over: launch.requests = ${n} > 8`, "over: other.key = 2 > 1"] });
+    await perfStreakFollow("v6.0.0", shaOf("v6.0.0"), ["launch.requests"], at("v6.0.0", 11).lines, q.d, "2026-11-12", [at("v5.0.0", 10), at("v4.0.0", 9)]);
+    const body = q.bodies[0]!;
+    for (const [tag, n] of [["v6.0.0", 11], ["v5.0.0", 10], ["v4.0.0", 9]] as const) {
+      expect(body).toContain(`${tag}（${shaOf(tag).slice(0, 7)}）:`);
+      expect(body).toContain(`over: launch.requests = ${n} > 8`);
+    }
+    expect(body).not.toContain("other.key");
   });
 });

@@ -13,7 +13,7 @@ import { MAX_STOP_RESUMES, planResumeAfterStop } from "./interrupted.ts";
 import { recapOf } from "./recap.ts";
 import { canTransition, IN_FLIGHT, InvalidTaskTransitionError, TERMINAL } from "./task-status.ts";
 import { setupScripts, syncSkills } from "./skillsync.ts";
-import { FenceReader, lastAttempt, openStops, reduceStops, reserveStopRetry, StopFenceReader, stopRecordsFor, stopRecoveryPrompt, stopWork, type StopReport } from "./stops.ts";
+import { answerableStops, FenceReader, lastAttempt, openStops, reduceStops, reserveStopRetry, StopFenceReader, stopRecordsFor, stopRecoveryPrompt, stopWork, type StopReport } from "./stops.ts";
 import { oneLine } from "./suggest-llm.ts";
 import { foreignWorkspaceOf, RunnerConfigUnconfirmed, runnerConfigOf } from "./runner-config.ts";
 import { originMismatch } from "./workspace-clone.ts";
@@ -98,7 +98,7 @@ export class ResumeSupersededError extends Error {
  * resolved by the server before this point; `workspaceReason` is the daemon's own record of that choice, which is
  * why it is not a field of `CreateTaskInput` (a client cannot claim a task was auto-routed).
  */
-export type NewTaskInput = Omit<CreateTaskInput, "executionMode"> & { cwd: string; executionMode?: CreateTaskInput["executionMode"]; workspaceReason?: string; stage?: Task["stage"] };
+export type NewTaskInput = Omit<CreateTaskInput, "executionMode"> & { cwd: string; executionMode?: CreateTaskInput["executionMode"]; workspaceReason?: string; stage?: Task["stage"]; origin?: Task["origin"] };
 
 /** The title a task has until its first turn ends (#491): the head of the prompt, on one line. */
 export function provisionalTitle(prompt: string): string {
@@ -209,13 +209,15 @@ export interface TaskManagerOptions {
   mcpServers?: (task: Task) => Record<string, McpServerConfig> | undefined;
   /** How many local Tasks may run or wait for an answer at once (#1141, `settings.maxRunners`). Absent = no limit. */
   maxRunners?: () => number;
-  /** The unit's free memory and what the largest recent Task took (#1141): free < need holds a new start back. null / absent = judged by the count alone. */
-  memoryHeadroom?: () => { free: number; need: number } | null;
+  /** The machine's free memory (MemAvailable), the floor of `ops-kit heavy` and the safety valve `taskMinFreeMb` (#1141, #4556): free < safety holds a new start back; safety <= free < floor only warns. null / absent = judged by the count alone. */
+  memoryHeadroom?: () => { free: number; floor: number; safety: number } | null;
   /**
    * true = never start the waiting Tasks (#1141): a candidate daemon (`SWITCHBOARD_CANDIDATE`) runs on a copy of the database,
    * whose queue is the live daemon's; starting it there would run those Tasks twice, with their real runner sessions.
    */
   holdQueue?: boolean;
+  /** How often a waiting queue is looked at again while no Task leaves running / waiting (ms, default 30 000). Only a queue that is not empty costs anything. */
+  drainTickMs?: number;
 }
 
 /** One word for the shell: in single quotes, a quote inside written as '\''. */
@@ -227,16 +229,29 @@ function shellQuote(s: string): string {
  * The Claude Code allow rules a task gets (#2150, docs/design/permission-modes.md): the operations the skills ask for, so that
  * auto mode does not stop them. Only the merge through the merge gate (it merges on a merge verdict only; a bare `gh pr merge`
  * stays with auto mode), resolving a review thread (not a general `gh api graphql`), the marks (`gh pr comment`; the check in
- * front of `gh` still reads them) and editing the skills of the task's folder and its worktrees (`<cwd>-<topic>`, CLAUDE.md).
+ * front of `gh` still reads them), editing the skills of the task's folder and its worktrees (`<cwd>-<topic>`, CLAUDE.md), and
+ * three writes that reach the backlog or the stack's own branches only (#2782): `gh stack submit` / `gh stack push` write the
+ * stack's branches and nothing else; the rewrite push is the one line `ops-kit pr push-rebased` (it refuses the default branch
+ * itself, and a bare `git push --force-with-lease:*` is never allowed because a prefix match would let a main target through);
+ * `ops-kit backlog` goes through the app, which checks the values it writes.
  * Not a fence: the same OS user can do all of it by another way (the loopback trust model).
+ * #3779: promotion (`scripts/promote.ts` checks the CLAUDE.md conditions itself) and the parallel guard's `release` (a step of the skills; `claim` / `overlap` stay out).
  */
 export function taskAllowRules(metaPath: string, cwd: string): string[] {
   const skills = [cwd, `${cwd}-*`].flatMap((root) => ["ops-kit/skills", ".claude/skills"].map((dir) => `/${root}/${dir}/**`));
   return [
     "Bash(bun scripts/merge-gate.ts:*)",
     `Bash(bun ${join(metaPath, "scripts/merge-gate.ts")}:*)`,
+    "Bash(bun scripts/promote.ts:*)",
+    `Bash(bun ${join(metaPath, "scripts/promote.ts")}:*)`,
+    "Bash(bun scripts/parallel-guard.ts release:*)",
+    `Bash(bun ${join(metaPath, "scripts/parallel-guard.ts")} release:*)`,
     "Bash(ops-kit pr resolve-thread:*)",
     "Bash(gh pr comment:*)",
+    "Bash(gh stack submit:*)",
+    "Bash(gh stack push:*)",
+    "Bash(ops-kit pr push-rebased)",
+    "Bash(ops-kit backlog:*)",
     ...skills.flatMap((path) => [`Edit(${path})`, `Write(${path})`]),
   ];
 }
@@ -294,6 +309,7 @@ export class TaskManager {
   private holdQueue: boolean;
   private draining = false;
   private stopped = false;
+  private drainTimer: ReturnType<typeof setInterval> | undefined;
 
   private endListeners = new Set<(taskId: string, task: Task) => void>();
   private backgroundEmptyListeners = new Set<(taskId: string) => void>();
@@ -332,6 +348,17 @@ export class TaskManager {
     this.maxRunners = opts.maxRunners ?? (() => Infinity);
     this.memoryHeadroom = opts.memoryHeadroom;
     this.holdQueue = opts.holdQueue ?? false;
+    if (!this.holdQueue) {
+      // a throw here would be uncaught and stop the daemon (main.ts); a failed look is retried at the next tick
+      this.drainTimer = setInterval(() => {
+        try {
+          this.drain();
+        } catch (e) {
+          console.error("[tasks] queue tick failed:", e instanceof Error ? e.message : e);
+        }
+      }, opts.drainTickMs ?? 30_000);
+      this.drainTimer.unref();
+    }
   }
 
   /** Local Tasks with a turn in progress: the same count as the busy list and the backlog's stage count (running / waiting). */
@@ -343,13 +370,28 @@ export class TaskManager {
    * Why a new start has to wait (null = it may start). The count is the limit; the memory is read only while something
    * runs — with nothing running no event would ever call drain() again, so a first Task is never held for memory.
    */
-  private slotBlock(): { wait: string; refuse: string; detail: string } | null {
+  private slotBlock(): { wait: string; refuse: string; detail: string; hint: string; memory?: true } | null {
     const occupied = this.occupied();
     const max = this.maxRunners();
-    if (occupied >= max) return { wait: "実行枠が埋まっているため待機", refuse: "実行枠が埋まっています", detail: `実行中 ${occupied} / 上限 ${max}` };
+    if (occupied >= max) return { wait: "実行枠が埋まっているため待機", refuse: "実行枠が埋まっています", detail: `実行中 ${occupied} / 上限 ${max}`, hint: "空くまで待つか、Settings の同時に動かす Task の上限を上げてください" };
     const mem = occupied > 0 ? this.memoryHeadroom?.() : null;
-    if (mem && mem.free < mem.need) return { wait: "空きメモリ不足のため待機", refuse: "空きメモリが足りません", detail: `空き ${Math.floor(mem.free / 1048576)} MB / 必要 ${Math.ceil(mem.need / 1048576)} MB` };
+    if (mem && mem.free < mem.safety)
+      return {
+        memory: true,
+        wait: "空きメモリ不足のため待機",
+        refuse: "空きメモリが足りません",
+        detail: `空き ${Math.floor(mem.free / 1048576)} MB / 安全弁 ${Math.ceil(mem.safety / 1048576)} MB`,
+        hint: "空くまで待つか、安全弁（~/.config/ops-kit/heavy.json の taskMinFreeMb、既定 300）を下げてください",
+      };
     return null;
+  }
+
+  /** A start that goes ahead with less free memory than the `ops-kit heavy` floor (still above the safety valve): the line to write, else null. */
+  private memoryWarning(task: Task): string | null {
+    if (task.executionMode !== "local" || this.occupied() === 0) return null;
+    const mem = this.memoryHeadroom?.();
+    if (!mem || mem.free < mem.safety || mem.free >= mem.floor) return null;
+    return `空きメモリが少ない（空き ${Math.floor(mem.free / 1048576)} MB / 下限 ${Math.ceil(mem.floor / 1048576)} MB）が、安全弁（${Math.ceil(mem.safety / 1048576)} MB）以上なので続けます`;
   }
 
   /** How many more Tasks may start now (0 while the memory is short too). */
@@ -364,6 +406,8 @@ export class TaskManager {
   private admit(task: Task, prompt: string, atts: Attachment[]): "started" | "queued" {
     const block = task.executionMode === "local" ? this.slotBlock() : null;
     if (block === null) {
+      const warning = this.memoryWarning(task);
+      if (warning) this.record(task.id, { t: "status", text: warning });
       this.startOrFail(task, prompt, atts);
       return "started";
     }
@@ -371,16 +415,32 @@ export class TaskManager {
     const position = this.db.listQueuedTasks().findIndex((t) => t.id === task.id) + 1;
     this.record(task.id, { t: "status", text: `${block.wait}（${block.detail}、待ち ${position} 番目）` });
     this.broadcast({ type: "task.updated", task: this.mustGet(task.id) });
+    // Short of memory while a finished Task's process is still open: close it now rather than after its idle time; if that frees enough, the queue starts at once
+    if (block.memory && this.idleLive().length > 0) void this.releaseIdleForMemory().then(() => this.drain());
     return "queued";
+  }
+
+  /** Attached processes whose Task has no turn in flight (what release() may close). */
+  private idleLive(): string[] {
+    return [...this.live.keys()].filter((id) => {
+      const st = this.db.getTask(id)?.status;
+      return st !== undefined && !IN_FLIGHT.has(st);
+    });
+  }
+
+  /** Close the processes of the Tasks whose turn ended and wait until they are gone (their memory is back). */
+  private async releaseIdleForMemory(): Promise<void> {
+    await Promise.all(this.idleLive().map((id) => this.releaseAndWait(id)));
   }
 
   /**
    * Start the waiting Tasks, oldest first, while a slot is free. Called wherever a Task leaves running / waiting, when
-   * the limit changes and at the daemon's start; there is no timer. A process left open after its turn (nothing in
+   * the limit changes, at the daemon's start and on a timer (`drainTickMs`) that does nothing while the queue is empty. A process left open after its turn (nothing in
    * flight) is closed first so that the processes do not outnumber the limit.
    */
   drain(): void {
     if (this.draining || this.stopped || this.holdQueue) return;
+    if (!this.db.listQueuedTasks()[0]) return; // nothing waits: do not read the memory
     this.draining = true;
     try {
       while (this.freeSlots() > 0) {
@@ -395,8 +455,11 @@ export class TaskManager {
         }
         this.record(next.id, { t: "status", text: "実行枠が空いたので開始" });
         const atts = this.attachments?.listForTask(next.id) ?? [];
+        const task = this.mustGet(next.id);
+        const warning = this.memoryWarning(task);
+        if (warning) this.record(task.id, { t: "status", text: warning });
         try {
-          this.startOrFail(this.mustGet(next.id), prompt, atts);
+          this.startOrFail(task, prompt, atts);
         } catch {
           // startOrFail wrote the error on the row; the next one may still start
         }
@@ -666,9 +729,9 @@ export class TaskManager {
     return this.db.listStopRecords([taskId]).filter((r) => r.id === `${taskId}/${reportId}`).at(-1);
   }
 
-  /** Move the task's own open stops (#948): an answer the person gave, or 中断 cancelling a planned retry. */
-  private moveOpenStops(taskId: string, f: (s: StopRecord) => StopRecord | null) {
-    for (const s of openStops(this.db.listStopRecords([taskId]))) {
+  /** Move the task's own open stops (#948): an answer the person gave (to an exhausted stop too, `pick`), or 中断 cancelling a planned retry. */
+  private moveOpenStops(taskId: string, f: (s: StopRecord) => StopRecord | null, pick = openStops) {
+    for (const s of pick(this.db.listStopRecords([taskId]))) {
       const next = f(s);
       if (next) this.record(taskId, { t: "stop.record", stop: { ...next, at: Date.now() } });
     }
@@ -746,7 +809,7 @@ export class TaskManager {
   setResumeAt(taskId: string, resumeAt: number | null, reason: NonNullable<Task["resumeReason"]> = "limit", wait: { window?: string | null; since?: number | null; plannedAt?: number | null } = {}): Task {
     if (resumeAt !== null) this.requireLocal(this.mustGet(taskId));
     const on = resumeAt !== null;
-    const t = this.db.updateTask(taskId, { resumeAt, resumeReason: on ? reason : null, resumeWindow: on ? (wait.window ?? null) : null, resumeSince: on ? (wait.since ?? null) : null, resumePlannedAt: on ? (wait.plannedAt ?? null) : null });
+    const t = this.db.updateTask(taskId, { resumeAt, resumeReason: on ? reason : null, resumeWindow: on ? (wait.window ?? null) : null, resumeSince: on ? (wait.since ?? null) : null, resumePlannedAt: on ? (wait.plannedAt ?? null) : null, ...(on ? {} : { deferredPrompt: null }) });
     if (!t) throw new Error(`task ${taskId} not found`);
     this.broadcast({ type: "task.updated", task: t });
     if (resumeAt === null) for (const l of this.planForgottenListeners) l(taskId);
@@ -786,7 +849,11 @@ export class TaskManager {
     return ws ? new RunnerConfigUnconfirmed(ws.name) : null;
   }
 
-  create(input: NewTaskInput, precomputed?: RoutingSuggestion, afterInsert?: (task: Task) => void): Task {
+  /**
+   * `opts.deferUntil` (#2768): the row is made without starting a runner (status idle); `resumeAt` = that time and
+   * `resumeReason` = "start", and the prompt waits in `deferredPrompt` for `startDeferred` (the resume tick, or 今すぐ再開).
+   */
+  create(input: NewTaskInput, precomputed?: RoutingSuggestion, afterInsert?: (task: Task) => void, opts: { deferUntil?: number } = {}): Task {
     const why = this.checkCloudInput(input);
     if (why) throw new Error(why);
     const cloud = input.executionMode === "cloud";
@@ -822,8 +889,8 @@ export class TaskManager {
       permissionMode,
       effort,
       subagentEffort: cloud ? null : this.subagentEffort?.(input.runner) ?? null,
-      origin: "switchboard",
-      resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null,
+      origin: input.origin ?? "switchboard",
+      resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null,
       shadowOf: null,
       shadowStopped: false,
       workspaceReason: input.workspaceReason ?? null,
@@ -840,13 +907,38 @@ export class TaskManager {
       updatedAt: now,
     };
     const atts = this.takeAttachments(input.attachmentIds, id); // a bad id throws here: no row, nothing moved
+    const prompt = withAttachments(input.prompt, atts);
+    if (opts.deferUntil !== undefined) {
+      task.resumeAt = opts.deferUntil;
+      task.resumeReason = "start";
+      task.deferredPrompt = prompt;
+    }
     this.db.insertTask(task);
     afterInsert?.(task);
     this.recordAttachments(task.id, atts);
-    const prompt = withAttachments(input.prompt, atts);
+    if (opts.deferUntil !== undefined) return this.db.getTask(task.id) ?? task; // no runner, no shadow: the first turn starts both
     this.admit(task, prompt, atts);
     this.startShadow(task, input, prompt, atts);
     return this.db.getTask(task.id) ?? task;
+  }
+
+  /** The first turn of a Task made without starting (#2768): the plan and the held prompt go, the prompt is sent as an ordinary first turn. */
+  async startDeferred(taskId: string): Promise<Task> {
+    const t = this.mustGet(taskId);
+    if (t.resumeReason !== "start" || t.deferredPrompt === null) throw new Error(`task ${taskId} is not waiting to start`);
+    const prompt = t.deferredPrompt;
+    this.setResumeAt(taskId, null); // also drops deferredPrompt
+    try {
+      return await this.send(taskId, prompt, { mirror: false });
+    } catch (e) {
+      // refused before a runner started (e.g. a Terminal holds the folder): the plan and the prompt come back, so the Task can still start
+      const cur = this.db.getTask(taskId);
+      if (cur && cur.runnerSessionId === null && cur.status === "idle") {
+        const back = this.db.updateTask(taskId, { resumeAt: t.resumeAt, resumeReason: "start", deferredPrompt: prompt });
+        if (back) this.broadcast({ type: "task.updated", task: back });
+      }
+      throw e;
+    }
   }
 
   /** Move the uploads under the task (the store refuses unknown / already-sent ids as a whole). */
@@ -942,7 +1034,7 @@ export class TaskManager {
       effort: null, // another runner: its own list, so the CLI default (#833)
       subagentEffort: this.subagentEffort?.(runner) ?? null, // the shadow runner's own setting (a shadow is always local)
       origin: "switchboard",
-      resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null,
+      resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null,
       shadowOf: primary.id,
       shadowStopped: false,
       workspaceReason: primary.workspaceReason,
@@ -1005,7 +1097,7 @@ export class TaskManager {
     // The person's turn answers the task's open stops (#948), by its user message (none echoed = nothing recorded).
     if (!opts.asResume && !opts.daemon) {
       const said = this.db.listEvents(taskId, before - 1).find((e) => e.ev.t === "message.delta" && e.ev.role === "user");
-      if (said) this.moveOpenStops(taskId, (s) => ({ ...s, answer: { ref: `seq:${said.seq}`, at: said.ts } }));
+      if (said) this.moveOpenStops(taskId, (s) => ({ ...s, answer: { ref: `seq:${said.seq}`, at: said.ts } }), answerableStops);
     }
     const shadow = opts.asResume || opts.daemon || opts.mirror === false ? null : this.db.shadowTaskOf(taskId);
     if (shadow && !shadow.shadowStopped) {
@@ -1076,7 +1168,7 @@ export class TaskManager {
   /** Throws when a new process for `task` would exceed the run slots (#1141). The API answers it with 409. */
   private refuseWithoutSlot(task: Task): void {
     const block = task.executionMode === "local" ? this.slotBlock() : null;
-    if (block !== null) throw new Error(`${block.refuse}（${block.detail}）。空くまで待つか、設定の上限を上げてください`);
+    if (block !== null) throw new Error(`${block.refuse}（${block.detail}）。${block.hint}`);
   }
 
   /**
@@ -1114,6 +1206,8 @@ export class TaskManager {
       resume = undefined;
     }
     this.refuseWithoutSlot(task); // again: preflight saw a live process that a release above may have closed
+    const warning = this.memoryWarning(task);
+    if (warning) this.record(taskId, { t: "status", text: warning });
     this.startOrFail(this.withResolvedMode(task), text, atts, resume, preamble);
     return this.mustGet(taskId);
   }
@@ -1247,7 +1341,9 @@ export class TaskManager {
    * Returns the ids of those tasks.
    */
   async shutdown(): Promise<string[]> {
-    this.stopped = true; // the turns cut below free their slots; the next daemon starts what waits (#1141), not this one
+    this.stopped = true;
+    clearInterval(this.drainTimer);
+    // the turns cut below free their slots; the next daemon starts what waits (#1141), not this one
     const now = Date.now();
     const cut: string[] = [];
     await Promise.all(

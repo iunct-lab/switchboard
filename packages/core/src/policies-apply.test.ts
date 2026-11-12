@@ -36,7 +36,8 @@ describe("applying saved policies (#938)", () => {
     expect(after.uses[0]).toMatchObject({ askId: `approval:${second}:perm1`, taskId: second, subject: { op: "exec", target: "bun test packages/core" } });
   });
 
-  test("check applies: a policy for the same op answers a later check with a reply that names the policy and its scope; the use is kept", async () => {
+  // a check is the question tool's questions now (#3122); the policy of a single-choice question is #3123's
+  test.skip("check applies: a policy for the same op answers a later check with a reply that names the policy and its scope; the use is kept", async () => {
     await h.boot();
     await checkTask("first");
     const ask = (await asks()).find((x) => x.kind === "check")!;
@@ -60,7 +61,7 @@ describe("applying saved policies (#938)", () => {
     const stage = { issue: 306, action: "plan" } as never;
     {
       const c = h.core!;
-      c.db.insertTask({ id: "tsk_stage306", workspaceId: meta.id, title: "#306 計画", stage, runner: "claude", cwd: meta.path, scope: [meta.path], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, statusAt: 1000, createdAt: 1000, updatedAt: 1000 });
+      c.db.insertTask({ id: "tsk_stage306", workspaceId: meta.id, title: "#306 計画", stage, runner: "claude", cwd: meta.path, scope: [meta.path], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, statusAt: 1000, createdAt: 1000, updatedAt: 1000 });
       c.db.appendEvent("tsk_stage306", { t: "stop.record", stop: { id: "s306", work: { workspaceId: meta.id, issue: 306, taskId: "tsk_stage306" }, op: "decide", target: "storage", reason: "decision", evidence: "needs a decision", safety: "unknown", conditions: [], answer: null, actions: [], state: "waiting", at: 1000 } });
     }
     const ask = (await asks()).find((x) => x.kind === "decision" && x.pbi?.number === 306)!;
@@ -93,7 +94,8 @@ describe("applying saved policies (#938)", () => {
     expect(stageTasks()).toEqual([]);
   });
 
-  test("not applied: expired, revoked, other repository, other PBI, other target, other condition, other choice, a security merge check and a refused permission all leave the question open", async () => {
+  // a check is the question tool's questions now (#3122); the policy of a single-choice question is #3123's
+  test.skip("not applied: expired, revoked, other repository, other PBI, other target, other condition, other choice, a security merge check and a refused permission all leave the question open", async () => {
     await h.boot();
     const variants: Array<[string, Partial<AnswerPolicy>, string]> = [
       ["expired", { expiresAt: Date.now() - 1 }, "期限切れ"],
@@ -125,7 +127,8 @@ describe("applying saved policies (#938)", () => {
     expect((await asks()).filter((x) => tasks.includes(x.task?.id ?? "") && x.kind === "check").map((x) => x.state)).toEqual(variants.map(() => "open"));
   });
 
-  test("not applied: a matching policy does not answer a PR carrying a security merge check, nor a refused permission", async () => {
+  // a check is the question tool's questions now (#3122); the policy of a single-choice question is #3123's
+  test.skip("not applied: a matching policy does not answer a PR carrying a security merge check, nor a refused permission", async () => {
     await h.boot();
     writePolicies(h.core!.db, [checkPolicy()]);
     h.mark = "security,large";
@@ -137,7 +140,8 @@ describe("applying saved policies (#938)", () => {
     expect((await policies())[0]!.uses).toEqual([]);
   });
 
-  test("not applied: a policy saved on another head of the PR leaves the question open, and the card says the head changed", async () => {
+  // a check is the question tool's questions now (#3122); the policy of a single-choice question is #3123's
+  test.skip("not applied: a policy saved on another head of the PR leaves the question open, and the card says the head changed", async () => {
     await h.boot();
     writePolicies(h.core!.db, [checkPolicy({ from: { ...from("PR #12"), head: "a".repeat(40) } })]);
     const t = await checkTask("moved head");
@@ -148,7 +152,8 @@ describe("applying saved policies (#938)", () => {
     expect(ask.policy.previous).toMatchObject({ id: "pol_t", why: "PR の差分が変わった", changes: ["PR の差分が変わりました（aaaaaaa → ccccccc）"] });
   });
 
-  test("not applied: a PR question whose PR cannot be read is left to the person", async () => {
+  // a check is the question tool's questions now (#3122); the policy of a single-choice question is #3123's
+  test.skip("not applied: a PR question whose PR cannot be read is left to the person", async () => {
     await h.boot();
     writePolicies(h.core!.db, [checkPolicy()]);
     h.prFails = true;

@@ -51,6 +51,8 @@ export async function collectTaskDiff(task: Task, events: EventEnvelope[], stage
 /** The tool calls whose input names a file the Task wrote. */
 export const WRITE_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit", "fileChange", "fs.write", "fs.patch"];
 const SNAPSHOT_MARK = "\n… (snapshot truncated)";
+const droppedNote = (n: number) => `… ${n} files dropped (snapshot truncated)`;
+const DROPPED_NOTE = /^… (\d+) files dropped \(snapshot truncated\)$/; // reads back what droppedNote wrote
 
 /**
  * The next copy of a Task's diff (#3833): the live worktree rows (seen now), plus the rows of the previous copy whose
@@ -73,26 +75,33 @@ export function mergeSnapshot(prev: TaskDiffSnapshot | null, live: TaskDiffFile[
  * keeps one row that says how many, carrying the root so it follows the place like any copied row.
  */
 export function capSnapshot(s: TaskDiffSnapshot, maxBytes = 1_000_000, exists: (p: string) => boolean = existsSync): TaskDiffSnapshot {
-  const files = s.files.map((f) => ({ ...f }));
+  // the marker rows of an earlier cut are not rows to drop: their counts seed the per-root tally and one summed row is written back
+  const dropped = new Map<string, number>(); // root -> rows dropped
+  const files: TaskDiffFile[] = [];
+  for (const f of s.files) {
+    const m = DROPPED_NOTE.exec(f.rel);
+    if (m) dropped.set(f.root ?? "", (dropped.get(f.root ?? "") ?? 0) + Number(m[1]));
+    else files.push({ ...f });
+  }
+  const note = (root: string, n: number): TaskDiffFile => ({ path: root, rel: droppedNote(n), stat: "", diff: "", source: "worktree", root, at: s.at });
+  const notesSize = () => [...dropped].reduce((a, [root, n]) => a + Buffer.byteLength(JSON.stringify(note(root, n))) + 1, 0);
   const sizes = files.map((f) => Buffer.byteLength(JSON.stringify(f)) + 1);
   let total = 2 + sizes.reduce((a, b) => a + b, 0);
-  while (total > maxBytes) {
+  while (total + notesSize() > maxBytes) {
     let i = 0;
     for (let k = 1; k < files.length; k++) if (files[k]!.diff.length > files[i]!.diff.length) i = k;
     const big = files[i];
     if (!big || big.diff.length <= SNAPSHOT_MARK.length) break;
     const body = big.diff.endsWith(SNAPSHOT_MARK) ? big.diff.slice(0, -SNAPSHOT_MARK.length) : big.diff;
-    const over = total - maxBytes;
+    const over = total + notesSize() - maxBytes;
     big.diff = body.slice(0, Math.max(0, Math.min(Math.floor(body.length / 2), body.length - over - 1))) + SNAPSHOT_MARK;
     const n = Buffer.byteLength(JSON.stringify(big)) + 1;
     total += n - sizes[i]!;
     sizes[i] = n;
   }
-  if (total <= maxBytes) return { at: s.at, files };
+  const notes = () => [...dropped].map(([root, n]) => note(root, n));
+  if (total + notesSize() <= maxBytes) return { at: s.at, files: [...files, ...notes()] };
   const gone = new Set<number>();
-  const dropped = new Map<string, number>(); // root -> rows dropped
-  const note = (root: string, n: number): TaskDiffFile => ({ path: root, rel: `… ${n} files dropped (snapshot truncated)`, stat: "", diff: "", source: "worktree", root, at: s.at });
-  const notesSize = () => [...dropped].reduce((a, [root, n]) => a + Buffer.byteLength(JSON.stringify(note(root, n))) + 1, 0);
   const rebuildable = files.map((f) => !f.root || exists(f.root));
   const order = files.map((_, i) => i).sort((a, b) => Number(rebuildable[b]) - Number(rebuildable[a]) || (files[a]!.at ?? s.at) - (files[b]!.at ?? s.at) || b - a);
   for (const i of order) {
@@ -103,7 +112,7 @@ export function capSnapshot(s: TaskDiffSnapshot, maxBytes = 1_000_000, exists: (
     dropped.set(root, (dropped.get(root) ?? 0) + 1);
   }
   const kept = files.filter((_, i) => !gone.has(i));
-  return { at: s.at, files: [...kept, ...[...dropped].map(([root, n]) => note(root, n))] };
+  return { at: s.at, files: [...kept, ...notes()] };
 }
 
 /** The live rows, with the copied rows of a removed place added right after its `removed` row. */

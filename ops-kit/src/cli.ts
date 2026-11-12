@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, statSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { BACKLOG_USAGE, readRecords, runBacklog, triageUsage } from "./backlog-client.ts";
 import { JOB_USAGE, runJob } from "./job-client.ts";
 import { bootstrap } from "./bootstrap.ts";
@@ -13,8 +13,11 @@ import { createGitlabMr, gitlabMrDiscussions, resolveGitlabDiscussion, runGlab, 
 import { withHeavySlot } from "./heavy.ts";
 import { IDLE_KILLED_LINE, IDLE_SECONDS_MAX, runIdle } from "./idle-run.ts";
 import { formatLint, lint } from "./lint.ts";
+import { findIssueRefs, publicFiles } from "./issue-refs.ts";
 import { pullMain } from "./pull-main.ts";
 import { gitIn, pushRebased } from "./push-rebased.ts";
+import { depsCheck } from "./deps-check.ts";
+import { realDepsCheckDeps } from "./deps-check-io.ts";
 import { check, spawnRun, sync, withStaleNote } from "./public-sync.ts";
 import { checkRequestBody, createRequest } from "./request.ts";
 import { scanIssues } from "./scan.ts";
@@ -26,6 +29,17 @@ import { reconcileProject, triage } from "./triage.ts";
 const SCAN_TEXT_USAGE = `  scan-text <file|->
       文（ファイル、- は標準入力）に認証に使える値（device code、承認 URL、トークン、鍵、アカウント ID、ホストの AWS の設定のプロファイル名・SSO のセッション名など）が無いか検査する
       出力は <file>:<行>: <種類>。値は出さない。exit 0 = 無い、1 = ある、2 = 読めなかった。設定ファイルは要らない`;
+
+const ISSUE_REFS_USAGE = `  issue-refs [<path>...]
+      コードのコメント（//・/* */・SQL の --・シェルや YAML の #・HTML の <!-- -->）とテストの名前（test / it / describe の第 1 引数）にある Issue 番号 #N を出す。文字列のデータ・色コード・URL の # は見ない。*.md と画像などは見ない
+      <path>（リポジトリの top からのファイルかディレクトリ）を渡せばその下の git のファイル、渡さなければ設定の publicSync の include / exclude が選ぶファイル
+      出力は <path>:<行>: <行の文>、最後に hits: <当たり> / files: <読んだファイル>。exit 0 = 無い、1 = ある、2 = 読めなかった（設定・git の失敗）`;
+
+const DEPS_CHECK_USAGE = `  deps-check [--file-request]
+      依存の脆弱性（bun audit / pip-audit）・major の遅れ・現在の版の公開から 90 日以上（bun outdated・bun info / uv lock --upgrade --dry-run・PyPI）を検査して表にする。bun.lock のあるリポジトリと、uv.lock のあるディレクトリ（root に限らない）向け。両方あれば表は 1 つで、場所の列で分ける
+      既出（開いた PR のうち bun.lock / package.json / uv.lock / pyproject.toml を変えるものが扱っている依存）は表から除く。「## 更新の条件」は道具の既定の文に、設定の depsCheck.extraConditions を足す
+      --file-request: 当たれば題「依存の更新: <YYYY-MM>」の要望を 1 件起票し（同じ題の開いた要望があればコメントで足し、送信待ちで番号が無ければ足さない）、最後に「要望: …」の 1 行を出す
+      exit 0 = 当たらない、1 = 当たった、2 = 道具が走らなかった・要望を出せなかった`;
 
 const USAGE = `使い方: bun ops-kit/src/cli.ts <command> [--config <ops.config.json>] ...
 
@@ -70,6 +84,7 @@ ${JOB_USAGE}
       <file> に無いラベルは消さない。--dry-run は変えるものを出すだけ。設定ファイルは要らない
       BACKLOG_URL がある（アプリの Task の中）なら GitHub を読み書きせず exit 1（--dry-run も）。Task の中で反映するなら env -u BACKLOG_URL ops-kit sync-labels
 ${SCAN_TEXT_USAGE}
+${ISSUE_REFS_USAGE}
   scan-issues [<owner/name>] [--since <ISO 8601>] [--recheck <URL>]...
       リポジトリの Issue・PR の題と本文、コメント、PR のレビューコメントとレビュー本文を全部、同じ検査に通す。出力は <URL>: <種類>（<行> 行目）と、最後に hits: <当たり> / scanned: <読んだ文の数>
       --since はその時刻より後に更新されたものだけを読む。--recheck は前回の当たりの場所（URL）を差分の外でも読み直す（何回でも）
@@ -85,6 +100,8 @@ ${SCAN_TEXT_USAGE}
   public-sync --check [--source <ref>]
       送らずに、公開に出すツリーを同期と同じに組み立てて、Private のリポジトリ名・ホームパス・個人のメールアドレス・秘密の形の値（全ファイル。ホストの AWS のプロファイル名・アカウントは、ホストの設定があるときだけ）を検査する（CI 用。公開側に触らない）。--source の既定は HEAD
       exit 0 = 無い（origin が publicSync.target の公開側の写しでは検査しない）、1 = ある、2 = 使い方の誤り
+
+${DEPS_CHECK_USAGE}
 
   mr create --source <branch> --target <branch> --title <t> --body-file <f|->
   mr view <iid> | mr discussions <iid>
@@ -289,6 +306,30 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
       return 127;
     }
   }
+  if (command === "deps-check") {
+    if (rest[0] === "--help" || rest[0] === "-h") {
+      out(DEPS_CHECK_USAGE);
+      return 0;
+    }
+    if (rest.some((a) => a !== "--file-request") || rest.length > 1) return usage(err, "deps-check [--file-request]", 2);
+    let extraConditions: string[] = [];
+    try {
+      extraConditions = loadConfig(configPath).depsCheck?.extraConditions ?? [];
+    } catch (e) {
+      // no ops.config.json is fine for a check that only reads; one that is there and does not read is not
+      if (configPath || hasConfig() || rest.length) {
+        err((e as Error).message);
+        return 2;
+      }
+    }
+    // the kit's own commands (backlog, request) run in process; what they print is kept for the caller
+    const kit = async (argv: string[]) => {
+      const lines: string[] = [];
+      const code = await main([...(configPath ? ["--config", configPath] : []), ...argv], gh, (s) => lines.push(s), err, sleep, env, glab);
+      return { code, out: lines.join("\n") };
+    };
+    return depsCheck({ fileRequest: rest.length === 1, extraConditions }, realDepsCheckDeps(gh, env, kit, { out, err }));
+  }
   if (command === "public-sync") {
     const flags = new Set(["--dry-run", "--adopted", "--adopt-baseline", "--check"]);
     const valued = new Set(["--source", "--target-url"]);
@@ -373,6 +414,38 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
       }
     }
     return failed ? 1 : 0;
+  }
+  if (command === "issue-refs") {
+    if (rest[0] === "--help" || rest[0] === "-h") {
+      out(ISSUE_REFS_USAGE);
+      return 0;
+    }
+    if (rest.some((a) => a.startsWith("-"))) return usage(err, "issue-refs [<path>...]", 2);
+    try {
+      const top = Bun.spawnSync(["git", "rev-parse", "--show-toplevel"], { stdout: "pipe", stderr: "pipe" });
+      if (top.exitCode !== 0) throw new Error(`git rev-parse: ${top.stderr.toString().trim()}`);
+      const cwd = top.stdout.toString().trim();
+      // a path is read from the current directory, as the repository's top-relative path git lists; `.` at the top names every file
+      const named = rest.map((a) => relative(cwd, resolve(a)));
+      const outside = named.find((a) => a === ".." || a.startsWith("../") || isAbsolute(a));
+      if (outside !== undefined) throw new Error(`outside the repository: ${outside}`);
+      const cfg = named.length ? undefined : loadPublicSync(configPath);
+      const files = named.length
+        ? publicFiles(named.includes("") ? undefined : named.map((a) => (statSync(join(cwd, a), { throwIfNoEntry: false })?.isDirectory() ? `${a}/` : a)), [], cwd)
+        : publicFiles(cfg!.include, cfg!.exclude, cwd);
+      let hits = 0;
+      for (const f of files) {
+        for (const r of findIssueRefs(f, readFileSync(join(cwd, f), "utf8"))) {
+          out(`${f}:${r.line}: ${r.text.trim()}`);
+          hits++;
+        }
+      }
+      out(`hits: ${hits} / files: ${files.length}`);
+      return hits > 0 ? 1 : 0;
+    } catch (e) {
+      err(`issue-refs: ${(e as Error).message}`);
+      return 2;
+    }
   }
   // The two checks read no configuration: they run in any directory, with or without an ops.config.json
   if (command === "scan-text" || command === "scan-issues") {

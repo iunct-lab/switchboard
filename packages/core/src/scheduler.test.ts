@@ -3,8 +3,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent, AskBatch, RunnerAdapter, RunnerSession, StartOptions, Task } from "@switchboard/protocol";
-import { approvalWindowNote } from "./approval-batch.ts";
+import { type AgentEvent, type AskBatch, type RunnerAdapter, type RunnerSession, type StartOptions, StopRecord, type Task } from "@switchboard/protocol";
+import { approvalWindowNote, securityMergeNote } from "./approval-batch.ts";
 import { loadConfig } from "./config.ts";
 import { Db } from "./db.ts";
 import { Scheduler, UI_LAYERS_PROMPT } from "./scheduler.ts";
@@ -89,6 +89,51 @@ describe("scheduler (#20)", () => {
     expect((await sc.tick())).toHaveLength(0);
     expect(sc.recentLog().at(-1)).toContain("skipped");
     expect(db.getSchedule(s.id)!.nextRunAt).toBe(Date.parse("2026-09-08T03:00:00")); // still advances so it isn't stuck
+  });
+
+  test("a schedule whose last two Tasks stopped the same way is not fired by the clock; an answer releases it; a manual run still fires (#4496)", async () => {
+    const sc = new Scheduler(db, tasks, () => now);
+    const s = sc.create({ title: "nightly", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "p" });
+    const stopOf = (taskId: string, at: number, over: Record<string, unknown> = {}) =>
+      StopRecord.parse({ id: `st-${taskId}`, op: "schedule run", target: "", reason: "input", evidence: "need input", at, ...over, work: { workspaceId: null, issue: null, taskId, scheduleId: s.id } });
+    const fire = async (iso: string) => {
+      now = Date.parse(iso);
+      const out = await sc.tick();
+      for (const t of out) db.updateTask(t.id, { status: "done" });
+      return out;
+    };
+    const [t1] = await fire("2026-09-06T03:00:00");
+    const [t2] = await fire("2026-09-07T03:00:00");
+    db.appendEvent(t1!.id, { t: "stop.record", stop: stopOf(t1!.id, 1) });
+    db.appendEvent(t2!.id, { t: "stop.record", stop: stopOf(t2!.id, 2) });
+    // (a) the next due time starts nothing, says why, and moves on
+    expect(await fire("2026-09-08T03:00:00")).toHaveLength(0);
+    expect(sc.recentLog().at(-1)).toContain("飛ばした (due): 同じ理由で 2 回続けて止まっている（input）");
+    expect(db.getSchedule(s.id)!.nextRunAt).toBe(Date.parse("2026-09-09T03:00:00"));
+    // (c) a person's run now is not held
+    const manual = await sc.runNow(s.id, "manual");
+    expect(manual && "id" in manual).toBe(true);
+    db.updateTask((manual as Task).id, { status: "done" });
+    // the manual Task ended without stopping, so the series is no longer stuck; stop it again to test (b)
+    db.appendEvent((manual as Task).id, { t: "stop.record", stop: stopOf((manual as Task).id, 3) });
+    expect(await fire("2026-09-09T03:00:00")).toHaveLength(0);
+    // (b) the person answered: the clock fires again
+    db.appendEvent((manual as Task).id, { t: "stop.record", stop: stopOf((manual as Task).id, 4, { answer: { ref: "seq:9", at: 4 } }) });
+    expect(await fire("2026-09-10T03:00:00")).toHaveLength(1);
+  });
+
+  test("defers at the limit (#2768): a prompt schedule whose runner has no way round the limit is made without starting and logs why", async () => {
+    const at = Date.parse("2026-09-06T04:00:00") + 60_000;
+    const held = { runner: "claude" as const, deferUntil: at, deferNote: "claude が上限（0.99、04:00 に戻る）のため戻る時刻に開始" };
+    const sc = new Scheduler(db, tasks, () => now, undefined, undefined, undefined, (r) => ({ ...held, runner: r }));
+    const s = sc.create({ title: "nightly", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "p" });
+    now = Date.parse("2026-09-06T03:00:00");
+    const ran = await sc.tick();
+    const t = ran.find((x) => x.scheduleId === s.id)!;
+    expect(t).toMatchObject({ status: "idle", resumeReason: "start", resumeAt: at });
+    expect(started).toHaveLength(0);
+    expect(db.listEvents(t.id).some((e) => e.ev.t === "status" && e.ev.text === held.deferNote)).toBe(true);
+    expect(sc.recentLog().some((l) => l.includes(`nightly: ${held.deferNote}`))).toBe(true);
   });
 
   test("a schedule without a budget takes the settings' default budget; its own budget is kept", async () => {
@@ -666,7 +711,7 @@ describe("scheduler secret-scan (#775)", () => {
     } finally {
       core.stop();
     }
-  }, 30_000); // a bun subprocess under a loaded full suite: over the 5 s default (docs/design/perf.md "テストの揺れ")
+  }, 30_000); // a bun subprocess under a loaded full suite: over the 5 s default (docs/design/perf.md "Test flakiness")
 });
 
 describe("scheduler approval-window (#2046)", () => {
@@ -713,6 +758,42 @@ describe("scheduler approval-window (#2046)", () => {
     expect(sc.recentLog().join("\n")).toContain("承認待ち: 待ちなし（メモは書かない） (due)");
     // no Task and no runner
     expect(started).toHaveLength(0);
+  });
+
+  test("security merge memo", async () => {
+    const hour = 3_600_000;
+    const sc = new Scheduler(db, tasks, () => now, undefined, undefined, undefined, undefined, async () => "待ちなし");
+    const s = sc.create({ title: "承認待ち", cron: "0 0 * * *", workspaceId: wsId, runner: "claude", prompt: "", action: "approval-window" });
+    const stop = (n: number, at: number) => ({ askId: `a${n}`, taskId: `tk_${n}`, title: `Task ${n}`, workspaceId: null, op: `PR #${n}`, at, pr: n });
+    const batch = (...at: number[]): AskBatch[] => (at.length ? [{ id: "batch:security-merge", kind: "security-merge", asks: at.map((x, i) => stop(i + 1, x)), loggingIn: null, deviceAuth: null }] : []);
+    const shown = (bs: AskBatch[], at: number, record = {}) =>
+      noticeAsks({ unusable: [], merges: [{ schedule: { id: s.id, title: "承認待ち" }, workspace: null, note: securityMergeNote(bs, db.getSchedule(s.id)!.lastRunAt, at) }], now: at }, record);
+    // not fired yet: nothing, however long they wait
+    expect(shown(batch(s.nextRunAt! - 5 * hour), s.nextRunAt! - hour).asks).toEqual([]);
+    now = s.nextRunAt!;
+    await sc.tick();
+    const fired = now;
+    // two waiting at the firing: one notice, its title has the count and the longest wait in hours (rounded up)
+    const first = shown(batch(fired - 5 * hour + 1, fired - hour), fired);
+    expect(first.asks).toHaveLength(1);
+    expect(first.asks[0]).toMatchObject({ kind: "notice", state: "open", question: "セキュリティのマージ確認 2 件（最長 5 時間）— 判断待ちから答えられる" });
+    expect(first.asks[0]!.reason).toBe("- PR #1 — Task 1\n- PR #2 — Task 2");
+    // later the same day: still that one notice, and a check that stopped after the firing is not in it (it waits for the next)
+    const again = shown(batch(fired - 5 * hour + 1, fired - hour, fired + hour), fired + 2 * hour, first.record);
+    expect(again.asks.map((a) => a.id)).toEqual([first.asks[0]!.id]);
+    expect(again.asks[0]!.question).toStartWith("セキュリティのマージ確認 2 件");
+    // a check that stops at noon after a firing with none waiting: no notice until the next firing
+    expect(shown(batch(fired + 12 * hour), fired + 12 * hour + 1).asks).toEqual([]);
+    // all answered: the open one is resolved; one stopping again that day does not bring a second notice
+    const resolved = shown([], fired + 3 * hour, again.record);
+    expect(resolved.asks.map((a) => [a.id, a.state])).toEqual([[first.asks[0]!.id, "resolved"]]);
+    expect(shown(batch(fired + 4 * hour), fired + 5 * hour, resolved.record).asks.filter((a) => a.state === "open")).toEqual([]);
+    // the next firing: the one that stopped since is that day's notice
+    now = db.getSchedule(s.id)!.nextRunAt!;
+    await sc.tick();
+    const next = shown(batch(fired + 4 * hour), now, resolved.record);
+    expect(next.asks.filter((a) => a.state === "open").map((a) => a.question)).toEqual(["セキュリティのマージ確認 1 件（最長 20 時間）— 判断待ちから答えられる"]);
+    expect(next.asks.find((a) => a.state === "open")!.id).not.toBe(first.asks[0]!.id);
   });
 
   test("daily promotion memo", async () => {

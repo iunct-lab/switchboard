@@ -206,10 +206,11 @@ export interface FallbackFrom {
  * 上限のときの代わり (#834): the runner a Task that starts by itself starts on. A runner is at its limit while one of its
  * windows is at `fallbackAt` or more and has not reset; a runner with no quota rows (DAK) never is. When `runner` is,
  * the candidates are the order after it, then before it (from the head when it is not in the order); the first
- * installed one not at its limit wins, with `from` naming why. No such candidate = `runner` as it is (a stop on the
- * limit is then the automatic resume's).
+ * installed one not at its limit wins, with `from` naming why. No such candidate (an empty order too) = `runner` as it
+ * is, with `held` naming its window: the caller may hold the start until `held.resetsAt` (#2768) instead of starting
+ * (a stop on the limit is then the automatic resume's).
  */
-export function fallbackRunner(runner: RunnerId, cfg: { fallback: RunnerId[]; fallbackAt: number }, quotaFor: (r: RunnerId) => QuotaWindow[], installed: (r: RunnerId) => boolean, now: number): { runner: RunnerId; from?: FallbackFrom } {
+export function fallbackRunner(runner: RunnerId, cfg: { fallback: RunnerId[]; fallbackAt: number }, quotaFor: (r: RunnerId) => QuotaWindow[], installed: (r: RunnerId) => boolean, now: number): { runner: RunnerId; from?: FallbackFrom; held?: FallbackFrom } {
   const hot = (r: RunnerId) =>
     quotaFor(r)
       .map((w) => ({ ...w, resetsAt: w.resetsAt > 1e12 ? w.resetsAt : w.resetsAt * 1000 })) // Claude reports seconds
@@ -219,12 +220,18 @@ export function fallbackRunner(runner: RunnerId, cfg: { fallback: RunnerId[]; fa
   const i = cfg.fallback.indexOf(runner);
   const order = i < 0 ? cfg.fallback : [...cfg.fallback.slice(i + 1), ...cfg.fallback.slice(0, i)];
   const next = order.find((r) => r !== runner && installed(r) && !hot(r));
-  return next ? { runner: next, from: { runner, window: at.window, utilization: at.utilization, resetsAt: at.resetsAt } } : { runner };
+  const why = { runner, window: at.window, utilization: at.utilization, resetsAt: at.resetsAt };
+  return next ? { runner: next, from: why } : { runner, held: why };
 }
 
 /** The transcript's status line of a switch (#834): 「claude が上限（0.95、04:10 に戻る）のため codex で開始」. */
 export function fallbackNote(runner: RunnerId, from: FallbackFrom, now: number): string {
   return `${from.runner} が上限（${from.utilization.toFixed(2)}、${fmtTime(from.resetsAt, now)} に戻る）のため ${runner} で開始`;
+}
+
+/** The transcript's status line of a held start (#2768): 「claude が上限（0.99、10/26 12:00 に戻る）のため戻る時刻に開始」. */
+export function deferNote(held: FallbackFrom, now: number): string {
+  return `${held.runner} が上限（${held.utilization.toFixed(2)}、${fmtTime(held.resetsAt, now)} に戻る）のため戻る時刻に開始`;
 }
 
 export interface LimitStop {
@@ -644,6 +651,7 @@ export class RateLimitResumer {
     const t = this.db.getTask(taskId);
     if (!t) throw new Error(`task ${taskId} not found`);
     if (isWorking(t, "slot")) throw new Error("the task is still running");
+    if (t.resumeReason === "start") return this.startNow(t, "待たずに今すぐ開始します");
     if (!t.runnerSessionId) throw new Error("the task has no runner session to resume");
     if (this.sending.has(taskId)) throw new Error("a resume is already in flight");
     this.sending.add(taskId);
@@ -667,6 +675,11 @@ export class RateLimitResumer {
     this.probing.delete(taskId);
     // a GitHub plan still waiting for its budget read is cancelled with it (#550)
     const pending = this.dropPending(taskId);
+    if (t.resumeReason === "start") {
+      this.tasks.setResumeAt(taskId, null); // also drops the held prompt
+      this.tasks.record(taskId, { t: "status", text: "開始を取り消しました（この Task は始まりません）" });
+      return this.db.getTask(taskId) ?? t;
+    }
     if (t.resumeAt === null) {
       if (pending) this.tasks.record(taskId, { t: "status", text: "自動再開を取り消しました（返信すると再開します）" });
       return t;
@@ -676,7 +689,37 @@ export class RateLimitResumer {
     return updated;
   }
 
+  /** The first turn of a Task made at the limit (#2768); a failure to start is the row's error (startOrFail), not a retry. */
+  private async startNow(t: Task, note: string): Promise<Task> {
+    if (this.sending.has(t.id)) throw new Error("a resume is already in flight");
+    this.sending.add(t.id);
+    try {
+      this.tasks.record(t.id, { t: "status", text: note });
+      return await this.tasks.startDeferred(t.id);
+    } finally {
+      this.sending.delete(t.id);
+    }
+  }
+
   private async resume(t: Task): Promise<boolean> {
+    if (t.resumeReason === "start") {
+      try {
+        await this.startNow(t, "リセット時刻になったので開始します");
+        this.log(`ratelimit: started deferred ${t.id}`);
+        return true;
+      } catch (e) {
+        const msg = String((e as Error).message ?? e);
+        this.log(`ratelimit: start of ${t.id} failed: ${msg}`);
+        const cur = this.db.getTask(t.id);
+        if (cur?.resumeReason === "start") {
+          // the plan came back (startDeferred): try again after the resume retry setting, not on every tick
+          const at = this.now() + this.tunables().retryDelayMs;
+          this.tasks.setResumeAt(t.id, at, "start");
+          this.tasks.record(t.id, { t: "status", text: `開始できませんでした: ${msg}（${fmtTime(at, this.now())} にもう一度試します）` });
+        }
+        return false;
+      }
+    }
     if (!t.runnerSessionId) {
       this.tasks.setResumeAt(t.id, null);
       this.tasks.record(t.id, { t: "status", text: "自動再開できません: 再開できるセッションがありません（返信すると新しいセッションで始まります）" });

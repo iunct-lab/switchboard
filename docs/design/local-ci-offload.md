@@ -1,6 +1,6 @@
 # local-ci off the host
 
-On the cloud host (where `sb-offload` is installed, see [aws/README.md](../../aws/README.md) "Offload"), `bun scripts/local-ci.ts <PR>` runs its heavy steps off the host, in small builds of the offload CodeBuild project, so that local-ci runs of several Tasks no longer fill the host's memory. There is no setting or flag: with `sb-offload` on `PATH` the groups below go off the host, without it (any machine that is not the cloud host) every step runs where local-ci runs. The groups are `OFFLOAD_GROUPS` in `scripts/local-ci.ts`. How local-ci itself works is [local-ci.md](local-ci.md).
+On the cloud host (where `sb-offload` is installed, see [aws/README.md](../../aws/README.md) "Offload"), `bun scripts/local-ci.ts <PR>` runs its heavy steps off the host, in small builds of the offload CI project (`sb-offload --ci`), in an image that already holds the tools, so that local-ci runs of several Tasks no longer fill the host's memory. There is no setting or flag: with `sb-offload` on `PATH` the groups below go off the host, without it (any machine that is not the cloud host) every step runs where local-ci runs. The groups are `OFFLOAD_GROUPS` in `scripts/local-ci.ts`. How local-ci itself works is [local-ci.md](local-ci.md).
 
 ## What runs off the host
 
@@ -11,7 +11,9 @@ Two builds, started at the same time (the project runs two builds at a time; a t
 | typecheck | `bun install --frozen-lockfile` → `bun run licenses:check` → `bun run typecheck` | small (2 vCPU / 4 GiB) | the whole build peaks at about 2.1 GB |
 | test | `bun install --frozen-lockfile` → `bun test` without the files that read recordings | small (2 vCPU / 4 GiB) | the whole build peaks at about 2.3 GB; medium gives `bun test` no time back |
 
-The work tree arrives without `.git` and without `node_modules`. Each build first sets up, in about 40 s: the distribution's `git` (the image's has no PCRE, which `git grep -P` needs), a tmpfs as `TMPDIR` (SQLite tests are several times slower on the build's disk), a user other than root for the steps (as root, the tests of unreadable files fail), a one-commit `git init` with `origin` set to the repository's URL without credentials (tests read the repository through git), and Bun (and for the typecheck group the Codex CLI) of the host's versions.
+The builds run in the CI image: the `ci` stage of `container/Dockerfile`, which has git with PCRE (`git grep -P`), Bun and the Codex CLI at the pins of the Dockerfile, Playwright's Chromium and the fonts, and the aws CLI. Nothing is installed at the start of a build any more. The image is made once per content of the Dockerfile: its tag is the first 12 hex digits of the sha256 of `container/Dockerfile`, so a changed Dockerfile or pin is a new tag. `sb-offload --ci` looks for that tag in the image repository; if it is missing it first runs the image project (one build of the `ci` stage, pushed to the repository, which keeps the newest 2 tags), and then starts the build with that tag as its image. The build's log starts with `sb-offload: image <tag>`, so the version a run used is read from the log.
+
+The work tree arrives without `.git` and without `node_modules`. Each build then, in a few seconds: mounts a tmpfs as `TMPDIR` (SQLite tests are several times slower on the build's disk), gives the work tree to the image's unprivileged user `switchboard` and runs the steps as that user through a login `su -` (as root, the tests of unreadable files fail; the build's own environment, its credentials included, does not reach the steps), makes a one-commit `git init` with `origin` set to the repository's URL without credentials (tests read the repository through git), and runs `bun install --frozen-lockfile`. The cost of pulling the image when the build is provisioned is part of the seconds from `started` to the first step; see "Cost" for what is known.
 
 Nothing else is sent: no token, no credentials, no host file, no recordings.
 
@@ -50,4 +52,10 @@ The `local` ceilings in `scripts/perf-budget.json` were measured on the host; a 
 
 ## Cost
 
-A run is two builds of small at USD 0.00425 a build minute: about 1 minute (typecheck) and 9 minutes (test), billed by the started minute, about USD 0.04 a local-ci run.
+A run is two builds of small at USD 0.00425 a build minute, billed by the started minute: about 1 minute (typecheck) and 9 minutes (test), about USD 0.04 a local-ci run. Each build now pulls the CI image before its first step instead of installing tools; whether that is shorter depends on the pull time, so the minutes above are an estimate, not a bound.
+
+What the image adds:
+
+- The image repository holds the newest 2 tags. The image is about 3 GB uncompressed (the pushed, compressed size is shown by `aws ecr describe-images`, field `imageSizeInBytes`); at USD 0.10 a GB-month in ap-northeast-1 that is about USD 0.3 a month if it compresses to half, USD 0.6 at most.
+- The image is built (one small build, about 5 to 10 minutes, about USD 0.04) only when the Dockerfile changes, a few times a month, and by the first `sb-offload --ci` after the change, which waits for it.
+- The CI project runs 2 builds at a time and the docker-check project 2 (`sb-offload` without `--ci`), so up to 4 builds can run together. At the largest size (USD 0.020 a build minute, USD 1.2 an hour a build) the four are USD 4.8 an hour at most, and `sb-offload` starts the CI builds at the size local-ci asks for (small), so the real bound is lower; the image project runs one build at a time and adds at most USD 0.26 an hour.

@@ -1,9 +1,9 @@
 // test-reads: packages/core/fixtures/ ops.config.json scripts/parallel-guard.ts ops-kit/processes/p0-pipeline.md
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setSystemTime, spyOn, test } from "bun:test";
 import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent, Backlog, BacklogAction, BacklogIssueDetail, BacklogQueue, BacklogSource, BacklogItem, RunnerAdapter, StartOptions, Task, TaskStatus } from "@switchboard/protocol";
+import type { AgentEvent, Backlog, BacklogIssueData, BacklogAction, BacklogIssueDetail, BacklogQueue, BacklogSource, BacklogItem, RunnerAdapter, StartOptions, Task, TaskStatus } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import { listProcesses, loadProcess, parseProcessDef } from "./process-defs.ts";
 import type { Suggester } from "./routing.ts";
@@ -16,15 +16,15 @@ import { readRecords, runBacklog } from "../../../ops-kit/src/backlog-client.ts"
 import { main as opsKit } from "../../../ops-kit/src/cli.ts";
 import { fakeGh as fakeKitGh } from "../../../ops-kit/src/gh.ts";
 import { ghBoard, overlap, storedMaterial } from "../../../scripts/parallel-guard.ts";
-import { fmtTime } from "./ratelimit.ts";
+import { fmtTime, RESUME_MARGIN_MS } from "./ratelimit.ts";
 import { delegatedNote } from "./evals.ts";
-import { answerStoredDecision, BacklogEditError, checkFieldTypes, buildDirectPrompt, buildStartPrompt, subagentModelAlias, localBacklogSource, canStartStoredBacklog, screenAnswer, confirmationsOf, confirmDecisionsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, onHoldIn, chooseProcess, flowHeldIn, flowHeldLine, flowRunning, flowStopped, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld, storedIssueHeads, readStoredIssue, editStoredIssue } from "./backlog.ts";
+import { answerStoredDecision, BacklogEditError, checkFieldTypes, buildDirectPrompt, buildStartPrompt, subagentModelAlias, localBacklogSource, canStartStoredBacklog, screenAnswer, confirmationsOf, confirmAfterOf, confirmDecisionsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, onHoldIn, chooseProcess, flowHeldIn, flowHeldLine, flowRunning, flowStopped, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld, storedIssueHeads, readStoredIssue, editStoredIssue, waitsOf, isUnblocked, withOverlap } from "./backlog.ts";
 
 // the writer of the waits (#817), read at run time: scripts/ is not type-checked under core's settings
 const guard = "../../../scripts/parallel-guard.ts";
 /** The meta workspace is this checkout, whose origin is not the fake gh's acme/app: no origin to check (#2799; tasks.test.ts checks it). */
 const FAKE_ORIGIN = () => null;
-const { releaseBody } = (await import(guard)) as { releaseBody: (reason: string, waits?: number[], overlap?: boolean) => string };
+const { releaseBody } = (await import(guard)) as { releaseBody: (reason: string, waits?: number[], overlap?: boolean, after?: string) => string };
 const FIXTURE_STAGE_NAMES: Record<string, BacklogAction> = { "PBI にする": "to-pbi", "Task に分解": "to-tasks", "実装": "complete", "状況確認": "check", "閉じる": "close" };
 /** The `stage` a fixture Task gets from its title, as the button's Task would have it. */
 const fixtureStage = (title: string): Task["stage"] => {
@@ -182,6 +182,37 @@ test("GET /api/backlog: reads what is stored, without a gh call; ?refresh=1 impo
   expect(again.syncs.map((x) => x.syncing)).toEqual([false]);
 });
 
+test("developSelf off: the meta workspace is not read, others are (#2459)", async () => {
+  const fake = fakeGh();
+  const base = await boot(fake.gh);
+  const meta = core!.db.listWorkspaces().find((w) => w.kind === "meta")!;
+  const lib = mkdtempSync(join(home!, "lib-"));
+  const other = (await (await fetch(`${base}/api/workspaces`, { method: "POST", body: JSON.stringify({ path: lib, name: "lib" }) })).json()) as { id: string };
+  const patch = (developSelf: boolean) => fetch(`${base}/api/settings`, { method: "PATCH", body: JSON.stringify({ developSelf }) });
+  const callsAt = (path: string) => fake.cwds.filter((c) => c === path).length;
+  expect(((await (await fetch(`${base}/api/settings`)).json()) as { developSelf: boolean }).developSelf).toBe(true);
+  // on: both are read
+  const on = await refreshed(base);
+  expect(new Set(on.items.map((i) => i.workspaceId))).toEqual(new Set([meta.id, other.id]));
+  // off: no gh call in the meta workspace's directory, and no row, error or sync of it; the other one is still read
+  expect((await patch(false)).status).toBe(200);
+  const metaCalls = callsAt(meta.path);
+  const libCalls = callsAt(lib);
+  const off = await refreshed(base);
+  expect(callsAt(meta.path)).toBe(metaCalls);
+  expect(callsAt(lib)).toBeGreaterThan(libCalls);
+  expect(new Set(off.items.map((i) => i.workspaceId))).toEqual(new Set([other.id]));
+  expect(off.syncs.map((x) => x.workspaceId)).toEqual([other.id]);
+  expect(off.errors.filter((e) => e.workspaceId === meta.id)).toEqual([]);
+  const light = (await (await fetch(`${base}/api/backlog/syncs`)).json()) as { syncs: Array<{ workspaceId: string }> };
+  expect(light.syncs.map((x) => x.workspaceId)).toEqual([other.id]);
+  // back on: the next import reads it again, without a restart
+  expect((await patch(true)).status).toBe(200);
+  const back = await refreshed(base);
+  expect(callsAt(meta.path)).toBeGreaterThan(metaCalls);
+  expect(new Set(back.items.map((i) => i.workspaceId))).toEqual(new Set([meta.id, other.id]));
+});
+
 test("GET /api/backlog after a restart with GitHub failing, and from a restored backup: the stored list and questions, with the reason (#885)", async () => {
   const base = await boot(fakeGh().gh);
   const before = await (await fetch(`${base}/api/backlog`)).json() as Backlog;
@@ -243,7 +274,7 @@ test("GET /api/backlog: gh failing → the workspace and the reason in errors, n
 test("GET /api/backlog: a Project the token cannot read is an error of that workspace, and what was stored stays, not every PBI as 分解待ち", async () => {
   let project: { code: number; stdout: string; stderr: string } | null = null;
   let broken = "";
-  const base = await boot(fakeGh().gh, undefined, {}, undefined, (gh) => async (args, cwd) => (project && cwd === broken && args.some((a) => a.includes("projectV2(number:$p){ id }")) ? project : gh(args, cwd)));
+  const base = await boot(fakeGh().gh, undefined, {}, undefined, (gh) => async (args, cwd) => (project && cwd === broken && args.some((a) => a.includes("ProjectV2FieldCommon{ name dataType }")) ? project : gh(args, cwd)));
   const stored = await refreshed(base);
   const meta = core!.db.listWorkspaces().find((w) => w.kind === "meta")!;
   const lib = mkdtempSync(join(home!, "lib-"));
@@ -479,6 +510,20 @@ const metaName = () => core!.db.listWorkspaces().find((w) => w.kind === "meta")!
 const start = (base: string, n: number | string, body: object) =>
   fetch(`${base}/api/backlog/${n}/start`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), ...body }) });
 
+test("defers an automatic start at the limit (#2768): a stage button at the limit with no fallback answers with the Task made without starting, held to the reset", async () => {
+  const claude = holdingClaude();
+  const base = await boot(fakeGh().gh, claude.adapter);
+  const resetSec = Math.floor(Date.now() / 1000) + 3600;
+  core!.db.upsertQuota("claude", "seven_day", 0.99, resetSec);
+  const r = await start(base, 304, { action: "complete" });
+  expect(r.status).toBe(201);
+  const task = await r.json() as Task;
+  expect(task).toMatchObject({ runner: "claude", status: "idle", resumeReason: "start", resumeAt: resetSec * 1000 + RESUME_MARGIN_MS, stage: { issue: 304, action: "complete" } });
+  expect(core!.db.listEvents(task.id).some((e) => e.ev.t === "status" && e.ev.text.startsWith("claude が上限（0.99、") && e.ev.text.endsWith("のため戻る時刻に開始"))).toBe(true);
+  await Bun.sleep(50);
+  expect(claude.starts).toHaveLength(0);
+});
+
 test("start: complete on a Ready PBI creates a meta Task with the fixed /pbi-complete prompt", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
@@ -591,7 +636,7 @@ test("start: a local workspace without a remote (localForge) gets local changes,
     // changes, not PRs
     expect(p).toContain("この workspace の変更はアプリに置く（リモートは使わない）");
     // the marks that lift a recheck or answer a merge ask go on the change
-    expect(p).toContain(`${scripts}docs/merge-gate.md` + "\` の「再チェック」");
+    expect(p).toContain(`${scripts}docs/merge-gate.md` + "\` の「Recheck」");
     expect(p).toContain("\`ops-kit backlog comment <変更>\` で変更に付ける");
     expect(p).toContain("--head <枝> --base main");
     expect(p).toContain("Backlog-Task: <Task>");
@@ -1042,7 +1087,7 @@ describe("backlog waiting", () => {
     });
     const base = await boot(fake.gh);
     const now = Date.now();
-    core!.db.insertTask({ id: "tsk_owner305", workspaceId: metaId(), title: "#305 実装: PBI: 実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status: "error", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#305 実装: PBI: 実装中の PBI"), statusAt: now, createdAt: now, updatedAt: now });
+    core!.db.insertTask({ id: "tsk_owner305", workspaceId: metaId(), title: "#305 実装: PBI: 実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status: "error", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#305 実装: PBI: 実装中の PBI"), statusAt: now, createdAt: now, updatedAt: now });
     const owner = { number: 305, title: "PBI: 実装中の PBI" };
     expect((await waitsOfItem(base, 307)).waits).toEqual([wait(778, "pr", true, { pbi: owner }), wait(30501, "issue", true, { pbi: owner })]);
     expect(await waitsOfItem(base, 305)).toMatchObject({ lastTask: { id: "tsk_owner305", status: "error" }, activeTaskId: null });
@@ -1085,18 +1130,18 @@ test("confirmations: only unchecked 利用者確認 lines outside fences, number
     "## スコープ外",
     "- [ ] 後ろの節（利用者確認: 数えない）",
   ].join("\n");
-  const want = [{ n: 2, text: "2. 実機（検証: ホスト）（利用者確認: ホストで動く）" }, { n: 5, text: "5. スマホ（利用者確認: スマホで読める）" }];
+  const want = [{ n: 2, text: "2. 実機（検証: ホスト）（利用者確認: ホストで動く）", after: null }, { n: 5, text: "5. スマホ（利用者確認: スマホで読める）", after: null }];
   expect(confirmationsOf(body)).toEqual(want);
   // a body edited on GitHub's web form comes back with CRLF: no \r in the text
   expect(confirmationsOf(body.replaceAll("\n", "\r\n"))).toEqual(want);
   expect(confirmationsOf("## 到達点 / 受け入れ条件\n- [ ] 1. ふつう（検証: テスト）\n")).toEqual([]);
   // a line that names the form in inline code (PBI #523's own criterion 1) is not one
   expect(confirmationsOf("## 到達点 / 受け入れ条件\n- [ ] 1. 行に `（利用者確認: <何を>）` を付ける（検証: grep）\n- [ ] 2. 画面（利用者確認: `/backlog` で見る）\n"))
-    .toEqual([{ n: 2, text: "2. 画面（利用者確認: `/backlog` で見る）" }]);
+    .toEqual([{ n: 2, text: "2. 画面（利用者確認: `/backlog` で見る）", after: null }]);
   // a code span of two backticks holds a single one; the mark after it is outside (#715 review)
-  expect(confirmationsOf("## 到達点 / 受け入れ条件\n- [ ] 1. 記号 `` ` `` を出す（利用者確認: `画面` で見える）\n")).toEqual([{ n: 1, text: "1. 記号 `` ` `` を出す（利用者確認: `画面` で見える）" }]);
+  expect(confirmationsOf("## 到達点 / 受け入れ条件\n- [ ] 1. 記号 `` ` `` を出す（利用者確認: `画面` で見える）\n")).toEqual([{ n: 1, text: "1. 記号 `` ` `` を出す（利用者確認: `画面` で見える）", after: null }]);
   // only the first ## 到達点 / 受け入れ条件 section counts, as section() reads it (#715 review)
-  expect(confirmationsOf("## 到達点 / 受け入れ条件\n- [ ] 1. 実機（利用者確認: 見る）\n## メモ\n## 到達点 / 受け入れ条件\n- [ ] 見本（利用者確認: 数えない）\n")).toEqual([{ n: 1, text: "1. 実機（利用者確認: 見る）" }]);
+  expect(confirmationsOf("## 到達点 / 受け入れ条件\n- [ ] 1. 実機（利用者確認: 見る）\n## メモ\n## 到達点 / 受け入れ条件\n- [ ] 見本（利用者確認: 数えない）\n")).toEqual([{ n: 1, text: "1. 実機（利用者確認: 見る）", after: null }]);
 });
 
 test("GET /api/backlog: an in-progress PBI carries its confirmations; closable only when every Task is done and none is left", async () => {
@@ -1109,7 +1154,7 @@ test("GET /api/backlog: an in-progress PBI carries its confirmations; closable o
     const of = (n: number) => items.find((i) => i.number === n)!;
     expect(of(308)).toMatchObject({
       stage: "in-progress", tasks: { total: 2, done: 2, doneAt: expect.any(String) }, closable: false,
-      confirmations: [{ n: 2, text: "2. ホストで動く（検証: 実機）（利用者確認: クラウドホストの画面で一覧が出る）" }, { n: 4, text: "4. スマホで読める（利用者確認: スマホで開いて文字が切れない）" }],
+      confirmations: [{ n: 2, text: "2. ホストで動く（検証: 実機）（利用者確認: クラウドホストの画面で一覧が出る）", after: null }, { n: 4, text: "4. スマホで読める（利用者確認: スマホで開いて文字が切れない）", after: null }],
     });
     expect(of(305)).toMatchObject({ tasks: { total: 3, done: 1, doneAt: expect.any(String) }, confirmations: [], closable: false });
     expect(of(307)).toMatchObject({ tasks: { total: 2, done: 2, doneAt: expect.any(String) }, confirmations: [], closable: true });
@@ -1123,6 +1168,21 @@ test("GET /api/backlog: an in-progress PBI carries its confirmations; closable o
   } finally {
     node.body = saved;
   }
+});
+
+test("confirmAfterOf: the 期日 right after 利用者確認: with a zone; none without it, with no zone, or in inline code", () => {
+  expect(confirmAfterOf("1. 出ない（利用者確認: 期日 2026-11-20T00:00:00+09:00 以降 — 1 週間で出ないか）")).toBe("2026-11-20T00:00:00+09:00");
+  expect(confirmAfterOf("1. 出ない（利用者確認: 期日 2026-11-20T00:00:00Z 以降 — 確認）")).toBe("2026-11-20T00:00:00Z");
+  expect(confirmAfterOf("1. 見る（利用者確認: 画面を見る）")).toBeNull();
+  expect(confirmAfterOf("1. 見る（利用者確認: 回答で確かめる #12 — 方針）")).toBeNull();
+  // no zone, or not a time: not read
+  expect(confirmAfterOf("1. 見る（利用者確認: 期日 2026-11-20T00:00:00 以降 — 確認）")).toBeNull();
+  expect(confirmAfterOf("1. 見る（利用者確認: 期日 来週 以降 — 確認）")).toBeNull();
+  // the form named in inline code is not one
+  expect(confirmAfterOf("1. 行に `（利用者確認: 期日 2026-11-20T00:00:00Z 以降 — x）` を書く（利用者確認: 画面）")).toBeNull();
+  // confirmationsOf carries it, and the line stays a confirmation
+  expect(confirmationsOf("## 到達点 / 受け入れ条件\n- [ ] 1. 出ない（利用者確認: 期日 2026-11-20T00:00:00Z 以降 — 確認）\n"))
+    .toEqual([{ n: 1, text: "1. 出ない（利用者確認: 期日 2026-11-20T00:00:00Z 以降 — 確認）", after: "2026-11-20T00:00:00Z" }]);
 });
 
 test("confirmDecisionsOf: the numbers right after 回答で確かめる in the 利用者確認 parentheses; none in inline code or without the form", () => {
@@ -1152,7 +1212,7 @@ test("GET /api/backlog: confirmations naming decisions are not the user's; closa
     // (c) a number that is not stored keeps its line
     node.body = named("#9999");
     const c = (await refreshed(base)).items.find((i) => i.number === 308)!;
-    expect(c).toMatchObject({ confirmations: [{ n: 2, text: "2. 方針（利用者確認: 回答で確かめる #9999 — 方針）" }], closable: false });
+    expect(c).toMatchObject({ confirmations: [{ n: 2, text: "2. 方針（利用者確認: 回答で確かめる #9999 — 方針）", after: null }], closable: false });
     // backlog-next closes (a) and starts nothing for (b)
     expect(pickNext([a], "implement")).toMatchObject({ item: { number: 308 }, action: "close" });
     expect(pickNext([b], "implement")).toBeNull();
@@ -1525,6 +1585,23 @@ test("edit (#3811): a field value that does not fit the Project's field is refus
   const before = down.reads;
   expect((await patch(base, 304, { fields: { Status: "Done" } })).status).toBe(202);
   expect(down.reads).toBe(before);
+});
+
+test("project fields (#1545): the import keeps the Project's writable fields in its order, GET returns them, and an edit is checked against them", async () => {
+  const fake = fakeGh();
+  const base = await boot(async (args, cwd) => {
+    if (!args.some((a) => a.includes("ProjectV2FieldCommon{ id name dataType }"))) return fake.gh(args, cwd);
+    return { code: 0, stdout: JSON.stringify({ data: { repositoryOwner: { projectV2: { id: "P_1", fields: { nodes: PROJECT_DEFS } } } } }), stderr: "" };
+  });
+  // Title (TITLE) and Sprint (ITERATION) are no field a value is sent to; the order is the Project's
+  expect((await detailOf(base, 304)).projectFields).toEqual([
+    { name: "Status", dataType: "SINGLE_SELECT", options: ["Backlog", "Ready", "Done"] },
+    { name: "Priority", dataType: "SINGLE_SELECT", options: ["P1", "P2"] },
+    { name: "Story Points", dataType: "NUMBER", options: [] },
+    { name: "Due", dataType: "DATE", options: [] },
+  ]);
+  for (const fields of [{ "Story Points": "abc" }, { "Story Points": 5.5 }, { Priority: "P9" }, { Nope: "x" }]) expect((await patch(base, 304, { fields })).status).toBe(422);
+  expect((await patch(base, 304, { fields: { "Story Points": 5 } })).status).toBe(202);
 });
 
 /** Runs `fn` with AWS_CONFIG_FILE on a made-up config holding one account id, which it is given bare. */
@@ -1964,7 +2041,7 @@ test("start: the prompt says to read the newest ## 回答 first", async () => {
 });
 
 const item = (over: Partial<BacklogItem>): BacklogItem => ({
-  number: 1, title: "t", url: "u", type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, flow: false, bodyChars: 0, labels: [], waits: [], waitsAt: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
+  number: 1, title: "t", url: "u", type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, flow: false, bodyChars: 0, labels: [], waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
 
 test("pickNext: Priority (none last), then Ready before 分解待ち before 要望, then the oldest; skips decisions and running items", () => {
@@ -2092,7 +2169,7 @@ test("pickNext answered: backlog-next starts 実装 on an in-progress PBI whose 
   const base = await boot(fake.gh, claude.adapter);
   // #305's last stage Task stopped on the question before it was answered
   const now = Date.now();
-  core!.db.insertTask({ id: "tsk_last305", workspaceId: metaId(), title: "#305 実装: PBI: 実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#305 実装: PBI: 実装中の PBI"), statusAt: now, createdAt: now, updatedAt: now });
+  core!.db.insertTask({ id: "tsk_last305", workspaceId: metaId(), title: "#305 実装: PBI: 実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#305 実装: PBI: 実装中の PBI"), statusAt: now, createdAt: now, updatedAt: now });
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
   const titles = core!.db.listTasks().map((t) => t.title);
@@ -2160,7 +2237,7 @@ test("pickNext stalled: an in-progress PBI with every Task closed is closed; one
   expect(pickNext([stalled], "implement")).toEqual({ item: stalled, action: "complete", resume: true });
   expect(pickNext([closable, stalled], "plan")).toBeNull();
   // a confirmation left (not closable) with every Task closed: neither closed nor resumed
-  expect(pickNext([{ ...closable, closable: false, confirmations: [{ n: 1, text: "見た目（利用者確認: 画面）" }] }], "implement")).toBeNull();
+  expect(pickNext([{ ...closable, closable: false, confirmations: [{ n: 1, text: "見た目（利用者確認: 画面）", after: null }] }], "implement")).toBeNull();
   // a running stage Task or a question holds it
   expect(pickNext([{ ...closable, activeTaskId: "tsk_run" }, { ...stalled, activeTaskId: "tsk_run" }], "implement")).toBeNull();
   expect(pickNext([{ ...stalled, stage: "needs-decision", decision: { body: "## 判断待ち", at: "2026-09-29T00:00:00Z", issue: 2 } }], "implement")).toBeNull();
@@ -2434,7 +2511,7 @@ describe("resume when waits clear (#1879)", () => {
     // usage at backlogQuotaLimit or more and a stage Task running: one at a time, though the slot has room
     {
       const { claude, states, base, id } = await waitingOn778();
-      core!.db.upsertQuota("claude", "five_hour", 0.9, Math.floor(Date.now() / 1000) + 3600);
+      core!.db.upsertQuota("claude", "five_hour", 0.85, Math.floor(Date.now() / 1000) + 3600); // over the backlog limit, under fallbackAt (at it the start is held, #2768)
       await sweepAll(base, { implement: 2, plan: 0 });
       expect((await runSchedule(base, id)).status).toBe(201);
       expect(claude.starts).toHaveLength(1);
@@ -2501,7 +2578,7 @@ test("backlog-next waiting: a 状況確認 started after the waits were written 
   const fake = waitsGh({ i307: [[releaseBody("後回し", [778]), STOPPED]] }, { w778: { __typename: "PullRequest", state: "MERGED" } });
   const base = await boot(fake.gh, holdingClaude().adapter);
   // the row's 状況を確認 only reads and reports (#853): it does not claim, and the waits stand
-  core!.db.insertTask({ id: "tsk_check", workspaceId: metaId(), title: "#307 状況確認: PBI: 実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#307 状況確認: PBI: 実装中の PBI"), statusAt: Date.parse(LATER), createdAt: Date.parse(LATER), updatedAt: Date.now() });
+  core!.db.insertTask({ id: "tsk_check", workspaceId: metaId(), title: "#307 状況確認: PBI: 実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#307 状況確認: PBI: 実装中の PBI"), statusAt: Date.parse(LATER), createdAt: Date.parse(LATER), updatedAt: Date.now() });
   expect(await waitsOfItem(base, 307)).toMatchObject({ waits: [{ number: 778, open: false }], waitsAt: STOPPED });
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
@@ -2511,7 +2588,7 @@ test("backlog-next waiting: a 状況確認 started after the waits were written 
 test("backlog-next waiting: a 状況確認 after an 実装 that made the waits old does not bring them back", async () => {
   const fake = waitsGh({ i307: [[releaseBody("後回し", [778]), STOPPED]] }, { w778: { __typename: "PullRequest", state: "MERGED" } });
   const base = await boot(fake.gh, holdingClaude().adapter);
-  const task = (id: string, title: string, at: number, status: TaskStatus) => core!.db.insertTask({ id, workspaceId: metaId(), title, runner: "claude", cwd: home!, scope: [home!], status, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage(title), statusAt: at, createdAt: at, updatedAt: Date.now() });
+  const task = (id: string, title: string, at: number, status: TaskStatus) => core!.db.insertTask({ id, workspaceId: metaId(), title, runner: "claude", cwd: home!, scope: [home!], status, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage(title), statusAt: at, createdAt: at, updatedAt: Date.now() });
   // the resumed 実装 failed before it claimed, then the row's 状況を確認 ran: the newest stage Task is the check
   task("tsk_impl", "#307 実装: PBI: 実装中の PBI", Date.parse(LATER), "error");
   task("tsk_check", "#307 状況確認: PBI: 実装中の PBI", Date.parse(LATER) + 60_000, "done");
@@ -2524,7 +2601,7 @@ test("backlog-next waiting: a 状況確認 after an 実装 that made the waits o
 test("backlog-next waiting: a stage Task started after the waits were written makes them old — a resumed 実装 that failed before claiming is not started again", async () => {
   const fake = waitsGh({ i307: [[releaseBody("後回し", [778]), STOPPED]] }, { w778: { __typename: "PullRequest", state: "MERGED" } });
   const base = await boot(fake.gh, holdingClaude().adapter);
-  const task = (id: string, at: number, status: TaskStatus) => core!.db.insertTask({ id, workspaceId: metaId(), title: "#307 実装: PBI: 実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#307 実装: PBI: 実装中の PBI"), statusAt: at, createdAt: at, updatedAt: Date.now() });
+  const task = (id: string, at: number, status: TaskStatus) => core!.db.insertTask({ id, workspaceId: metaId(), title: "#307 実装: PBI: 実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#307 実装: PBI: 実装中の PBI"), statusAt: at, createdAt: at, updatedAt: Date.now() });
   // the 実装 that wrote the release started before it: the waits stand
   task("tsk_before", Date.parse(STOPPED) - 3_600_000, "done");
   expect(await waitsOfItem(base, 307)).toMatchObject({ waits: [{ number: 778, open: false }], waitsAt: STOPPED });
@@ -2877,7 +2954,7 @@ describe("on-hold (#2930)", () => {
     // #304 (Ready) also had an 実装 finish with no update since, which alone would log it as 前回から更新が無い
     const base = await boot(onHoldGh(304, 303).gh, holdingClaude().adapter);
     const now = Date.now();
-    core!.db.insertTask({ id: "tsk_last304", workspaceId: metaId(), title: "#304 実装: PBI: Ready の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#304 実装: PBI: Ready の PBI"), statusAt: now, createdAt: now, updatedAt: now });
+    core!.db.insertTask({ id: "tsk_last304", workspaceId: metaId(), title: "#304 実装: PBI: Ready の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#304 実装: PBI: Ready の PBI"), statusAt: now, createdAt: now, updatedAt: now });
     const id = await backlogNextSchedule(base);
     expect((await runSchedule(base, id)).status).toBe(201);
     const titles = startedTasks().map((t) => t.title);
@@ -2898,8 +2975,8 @@ test("backlog-next failed / awaiting reply: a firing leaves a PBI whose last Tas
   const resumeAt = now + 3_600_000;
   const row = { workspaceId: metaId(), runner: "claude" as const, cwd: home!, scope: [home!], runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto" as const, effort: null, origin: "switchboard" as const, shadowOf: null, shadowStopped: false, workspaceReason: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now };
   // #307 (closable, in progress): its 閉じる hit the weekly limit at once, auto-resume planned; #304 (Ready): its 実装 ended asking the person in its conversation
-  core!.db.insertTask({ ...row, id: "tsk_limit307", title: "#307 閉じる: PBI: Task が全部閉じた実装中の PBI", stage: { issue: 307, action: "close" }, status: "error", resumeAt, resumeReason: "limit", resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, outcome: "failed", reviewedAt: null, archivedAt: null });
-  core!.db.insertTask({ ...row, id: "tsk_ask304", title: "#304 実装: PBI: Ready の PBI", stage: { issue: 304, action: "complete" }, status: "done", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, outcome: "needs_action", reviewedAt: null, archivedAt: null });
+  core!.db.insertTask({ ...row, id: "tsk_limit307", title: "#307 閉じる: PBI: Task が全部閉じた実装中の PBI", stage: { issue: 307, action: "close" }, status: "error", resumeAt, resumeReason: "limit", resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, outcome: "failed", reviewedAt: null, archivedAt: null });
+  core!.db.insertTask({ ...row, id: "tsk_ask304", title: "#304 実装: PBI: Ready の PBI", stage: { issue: 304, action: "complete" }, status: "done", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, outcome: "needs_action", reviewedAt: null, archivedAt: null });
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
   expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#303 Task に分解", "#304 実装", "#307 閉じる"]); // only the two inserted ones
@@ -2923,7 +3000,7 @@ test("backlog-next unchanged: a Ready PBI whose 実装 finished with no update s
   closeTried();
   // #304 (updated 2026-09-20) had an 実装 that finished after that
   const now = Date.now();
-  core!.db.insertTask({ id: "tsk_last304", workspaceId: metaId(), title: "#304 実装: PBI: Ready の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#304 実装: PBI: Ready の PBI"), statusAt: now, createdAt: now, updatedAt: now });
+  core!.db.insertTask({ id: "tsk_last304", workspaceId: metaId(), title: "#304 実装: PBI: Ready の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#304 実装: PBI: Ready の PBI"), statusAt: now, createdAt: now, updatedAt: now });
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
   expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#303 Task に分解", "#304 実装"]); // only the old #304 実装
@@ -2934,6 +3011,81 @@ test("backlog-next unchanged: a Ready PBI whose 実装 finished with no update s
   const r = await start(base, 304, { action: "complete" });
   expect(r.status).toBe(201);
   expect(startedTasks().filter((t) => t.title.startsWith("#304 実装: "))).toHaveLength(2);
+});
+
+describe("backlog waitsUntil (#4616)", () => {
+  const AT = "2026-11-20T09:00:00+09:00";
+  const T = Date.parse(AT);
+  /** The item #307 (in progress) as the daemon builds it at `now`; time is set only while the backlog is built. */
+  const at = async (base: string, now: number) => {
+    setSystemTime(new Date(now));
+    try { return await waitsOfItem(base, 307); } finally { setSystemTime(); }
+  };
+
+  test("a release with only after= waits: before the date it is a wait, at the date and after it is a resumption target", async () => {
+    const fake = waitsGh({ i307: [[releaseBody("期日待ち", [], false, AT), STOPPED]] });
+    const base = await boot(fake.gh);
+    const before = await at(base, T - 1);
+    expect(before).toMatchObject({ waits: [], waitsAt: STOPPED, waitsUntil: { at: AT, met: false } });
+    expect(pickNext([before], "implement")).toBeNull();
+    expect(isUnblocked(before)).toBe(false);
+    expect(heldIn([before], "implement")).toHaveLength(1);
+    for (const now of [T, T + 1]) {
+      const due = await at(base, now);
+      expect(due.waitsUntil).toEqual({ at: AT, met: true });
+      expect(isUnblocked(due)).toBe(true);
+      expect(heldIn([due], "implement")).toHaveLength(0);
+    }
+  });
+
+  test("waits= with after=: it resumes only once both are done", async () => {
+    const states = { w603: { __typename: "Issue", state: "OPEN" } };
+    const fake = waitsGh({ i307: [[releaseBody("両方待ち", [603], false, AT), STOPPED]] }, states);
+    const base = await boot(fake.gh);
+    expect(isUnblocked(await at(base, T - 1))).toBe(false);
+    const after = await at(base, T + 1);
+    expect(after.waitsUntil!.met).toBe(true);
+    expect(after.waits).toEqual([wait(603, "issue", true)]);
+    expect(isUnblocked(after)).toBe(false);
+    states.w603.state = "CLOSED";
+    const both = (await (async () => { setSystemTime(new Date(T + 1)); try { return await refreshed(base); } finally { setSystemTime(); } })()).items.find((i) => i.number === 307)!;
+    expect(isUnblocked(both)).toBe(true);
+  });
+
+  test("a date that is no time with a zone is no wait; a later release without it clears it", () => {
+    const c = (body: string) => [{ body, createdAt: STOPPED }];
+    expect(waitsOf(c("<!-- pbi-complete:release after=2026-11-20T09:00:00 -->"))).toBeNull();
+    expect(waitsOf(c("<!-- pbi-complete:release after=あした -->"))).toBeNull();
+    expect(waitsOf(c(releaseBody("x", [], false, AT)))).toEqual({ numbers: [], at: STOPPED, overlap: false, after: AT });
+    expect(waitsOf(c(releaseBody("x", [5], true, AT)))).toEqual({ numbers: [5], at: STOPPED, overlap: true, after: AT });
+    expect(waitsOf([...c(releaseBody("x", [], false, AT)), { body: releaseBody("完了"), createdAt: LATER }])).toBeNull();
+  });
+
+  test("withOverlap: an In progress Task of a PBI that waits for a date is not the other work; once the date has passed it is", () => {
+    const root = mkdtempSync(join(tmpdir(), "switchboard.t4618."));
+    mkdirSync(join(root, "src"));
+    try {
+      const now = new Date().toISOString();
+      const issue = (number: number, labels: string[], parent: number | null, subIssues: number[], body: string): BacklogIssueData => ({ number, title: `#${number}`, url: "u", state: "OPEN", stateReason: null, body, labels, milestone: null, parent, subIssues, createdAt: now, updatedAt: now, closedAt: null });
+      const issues = new Map([
+        [1, issue(1, ["type:pbi"], null, [11], "")],
+        [11, issue(11, ["type:task"], 1, [], "触る場所: `src/a.ts`")],
+        [2, issue(2, ["type:pbi"], null, [22], "")],
+        [22, issue(22, ["type:task"], 2, [], "触る場所: `src/a.ts`")],
+      ]);
+      const statuses = new Map<number, string | number | null>([[22, "In progress"]]);
+      const run = (until: BacklogItem["waitsUntil"]) => {
+        const items = [item({ number: 1, stage: "ready" }), item({ number: 2, stage: "in-progress", waitsAt: STOPPED, waitsUntil: until })];
+        withOverlap(items, issues, new Map(), [], statuses, root);
+        return items[0]!.overlap;
+      };
+      expect(run({ at: AT, met: true })).toEqual({ hits: [{ ref: "Task #22", path: "src/a.ts" }], unknown: null });
+      expect(run(null)).toEqual({ hits: [{ ref: "Task #22", path: "src/a.ts" }], unknown: null });
+      expect(run({ at: AT, met: false })).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 test("backlog-next overlap: a Ready PBI whose Task names a file an open PR changes is not started and the log names the PR; once it closes the next firing starts it; nothing is written to GitHub", async () => {
@@ -3048,7 +3200,7 @@ async function backlogNextSchedule(base: string, budgetUsd?: number, model?: str
  */
 function closeTried(...workspaceIds: string[]) {
   const now = Date.now();
-  for (const workspaceId of workspaceIds.length ? workspaceIds : [metaId()]) core!.db.insertTask({ id: `tsk_close307_${workspaceId}`, workspaceId, title: "#307 閉じる: PBI: Task が全部閉じた実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#307 閉じる: PBI: Task が全部閉じた実装中の PBI"), statusAt: now, createdAt: now, updatedAt: now });
+  for (const workspaceId of workspaceIds.length ? workspaceIds : [metaId()]) core!.db.insertTask({ id: `tsk_close307_${workspaceId}`, workspaceId, title: "#307 閉じる: PBI: Task が全部閉じた実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#307 閉じる: PBI: Task が全部閉じた実装中の PBI"), statusAt: now, createdAt: now, updatedAt: now });
 }
 /** The Tasks but closeTried's. */
 const startedTasks = () => core!.db.listTasks().filter((t) => !t.id.startsWith("tsk_close307_"));
@@ -3197,6 +3349,17 @@ test("startFromQueue (#3228): with concurrency 2, a queued PBI whose Task names 
   await Bun.sleep(300);
   expect(startedTitles().sort()).toEqual(["#304 実装", "#310 実装"]);
   expect((await getQueue(base)).lastNote ?? "").toContain("重なり: #309（Task #3041: src/a.ts）");
+});
+
+test("startFromQueue, developSelf off (#2459): a queued PBI of the meta workspace is not started, and the note says why", async () => {
+  const claude = holdingClaude();
+  const base = await boot(fakeGh().gh, claude.adapter);
+  expect((await fetch(`${base}/api/settings`, { method: "PATCH", body: JSON.stringify({ developSelf: false }) })).status).toBe(200);
+  await putQueue(base, { items: queueOf(304), enabled: true });
+  await until(async () => (await getQueue(base)).lastNote?.includes("開発しない設定") ?? false);
+  await Bun.sleep(100);
+  expect(startedTitles()).toEqual([]);
+  expect((await getQueue(base)).lastNote ?? "").toContain("開発しない設定なので読まない: #304");
 });
 
 test("startFromQueue (#3966): at boot an enabled queue goes on", async () => {
@@ -3637,7 +3800,7 @@ test("backlog-next slots: Claude usage at 0.8 or more — a stage Task that star
   const id = await backlogNextSchedule(base);
   // #303's plan Task (a button's) is running by the time GitHub answers: after the firing's quota check, before its start
   const meta = core!.db.listWorkspaces().find((w) => w.kind === "meta")!;
-  during = () => { core!.db.insertTask({ id: "task_button303", workspaceId: meta.id, title: "#303 Task に分解: x", runner: "claude", cwd: meta.path, scope: [meta.path], status: "running", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#303 Task に分解: x"), statusAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now() }); };
+  during = () => { core!.db.insertTask({ id: "task_button303", workspaceId: meta.id, title: "#303 Task に分解: x", runner: "claude", cwd: meta.path, scope: [meta.path], status: "running", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#303 Task に分解: x"), statusAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now() }); };
   expect((await runSchedule(base, id)).status).toBe(409);
   expect(core!.db.listTasks().map((t) => t.title.split(":")[0])).toEqual(["#303 Task に分解"]);
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: claude の使用量 five_hour が 85%`));
@@ -4048,7 +4211,7 @@ function moreReadyGh(...numbers: number[]): GhRunner {
 }
 const runningStage = (title: string) => {
   const meta = core!.db.listWorkspaces().find((w) => w.kind === "meta")!;
-  core!.db.insertTask({ id: `task_${title.split(" ")[0]!.slice(1)}`, workspaceId: meta.id, title, runner: "claude", cwd: meta.path, scope: [meta.path], status: "running", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage(title), statusAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now() });
+  core!.db.insertTask({ id: `task_${title.split(" ")[0]!.slice(1)}`, workspaceId: meta.id, title, runner: "claude", cwd: meta.path, scope: [meta.path], status: "running", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage(title), statusAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now() });
 };
 
 test("start race: a button start and a backlog-next firing on the same item make one Task (#936)", async () => {
@@ -4104,7 +4267,7 @@ test("start: another repository gets its recheck location and merge-gate reposit
   for (const p of [otherRepoRules(other), buildStartPrompt({ number: 7 }, "complete", { other })]) {
     expect(p).toContain("`scripts/merge-gate.ts`");
     expect(p).toContain("`--repo <このリポジトリの owner/name>`");
-    expect(p).toContain("`/work/switchboard/docs/merge-gate.md` の「再チェック」");
+    expect(p).toContain("`/work/switchboard/docs/merge-gate.md` の「Recheck」");
     expect(p).toContain("その中の `-R <owner/name>` と `origin` はこのリポジトリ。印は必ずこのリポジトリの PR に付ける");
   }
 });
@@ -4231,15 +4394,23 @@ test("promote: a subject without (#n), or a number that is no stored Issue, repo
 });
 
 /** A checkout with one commit tagged v0.2.0, and a fake sb-rescue whose current release is another commit. */
-async function releasedDaemon(history: ReleaseState["history"] = [], runningNewer = false, { busy = null, promoteDelayMs = 0, refuse = false, statusDelayMs = 0 }: { busy?: string | null; promoteDelayMs?: number; refuse?: boolean; statusDelayMs?: number } = {}) {
+async function releasedDaemon(history: ReleaseState["history"] = [], runningNewer = false, { busy = null, promoteDelayMs = 0, refuse = false, statusDelayMs = 0, origin }: { busy?: string | null; promoteDelayMs?: number; refuse?: boolean; statusDelayMs?: number; origin?: string } = {}) {
   const repo = mkdtempSync(join(tmpdir(), "sb-backlog-repo-"));
   withProcesses(repo);
   const git = (...a: string[]) => Bun.spawnSync(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...a]).stdout.toString().trim();
-  git("init", "-q"); git("commit", "-q", "--allow-empty", "-m", "feat(core): x (#501)"); git("tag", "v0.2.0");
+  git("init", "-q");
+  // origin: a clone of the public copy (its ops.config.json names it) or of a repository that is not; the running version is then a real commit before the tag
+  let before = "";
+  if (origin) {
+    writeFileSync(join(repo, "ops.config.json"), JSON.stringify({ publicSync: { target: "o/pub" } }));
+    git("remote", "add", "origin", origin);
+    git("add", "."); git("commit", "-q", "-m", "base"); before = git("rev-parse", "HEAD");
+  }
+  git("commit", "-q", "--allow-empty", "-m", "feat(core): x (#501)"); git("tag", "v0.2.0");
   const sha = git("rev-parse", "HEAD");
   // runningNewer: what sb-rescue runs is a later, untagged commit on top of the tag (promoted by hand)
   if (runningNewer) git("commit", "-q", "--allow-empty", "-m", "fix: later");
-  let current = runningNewer ? git("rev-parse", "HEAD") : "old";
+  let current = runningNewer ? git("rev-parse", "HEAD") : before || "old";
   const promoted: string[] = [];
   const statusAsked = { pending: 0 };
   const rescue = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
@@ -4336,17 +4507,17 @@ test("promote: while the newest tag is one that failed, nothing is promoted or s
 });
 
 /** A claude adapter whose turns stay running until the test ends them (`end(i)` = the i-th started Task's turn ends ok). */
-function endableClaude() {
+function endableClaude(permissionModes: RunnerAdapter["permissionModes"] = []) {
   const emits: Array<(ev: AgentEvent) => void> = [];
   const adapter: RunnerAdapter = {
-    id: "claude", detect: async () => ({ available: true }),
+    id: "claude", detect: async () => ({ available: true }), permissionModes,
     start(_opts, emit) {
       emits.push(emit);
       return { send() {}, respondPermission() {}, async abort() {}, async close() {}, exited: new Promise(() => {}) };
     },
   };
   const started = async (n: number) => { for (const t0 = Date.now(); emits.length < n && Date.now() - t0 < 20_000; ) await Bun.sleep(10); expect(emits).toHaveLength(n); };
-  return { adapter, started, end: (i: number) => emits[i]!({ t: "session.end", status: "ok" }), emit: (i: number, ev: AgentEvent) => emits[i]!(ev) };
+  return { adapter, started, count: () => emits.length, end: (i: number) => emits[i]!({ t: "session.end", status: "ok" }), emit: (i: number, ev: AgentEvent) => emits[i]!(ev) };
 }
 const releaseHold = async (base: string) => ((await (await fetch(`${base}/api/daemon/release`)).json()) as { hold: unknown }).hold;
 const settle = async (until: () => boolean) => { for (const t0 = Date.now(); !until() && Date.now() - t0 < 20_000; ) await Bun.sleep(10); };
@@ -4496,7 +4667,7 @@ test("promote: when idle — a promotion held by a running Task is asked for as 
     r.rescue.stop(true);
     rmSync(r.repo, { recursive: true, force: true });
   }
-}, 30_000); // a git promotion and HTTP turns under a loaded full suite: over the 5 s default (docs/design/perf.md "テストの揺れ")
+}, 30_000); // a git promotion and HTTP turns under a loaded full suite: over the 5 s default (docs/design/perf.md "Test flakiness")
 
 test("promote: when idle — a Task whose turn ended with background jobs holds the promotion until they end", async () => {
   const r = await releasedDaemon();
@@ -4678,7 +4849,7 @@ test("a workspace names the repository variable its Project URL is under (PATCH 
 describe("otherRepoRules: the scripts/setup of the repository (#557)", () => {
   const rules = (setup: { config: boolean; kit: string[]; copies: string[] }) => otherRepoRules({ meta: "/work/switchboard", projectVar: "LIB_URL", setup });
   // local-ci once on the top of a stack (#2940): the rule's place in the meta's docs
-  const kept = ["--repo <このリポジトリの owner/name>", "`bun /work/switchboard/scripts/local-ci.ts <PR> --repo", "回すのはスタックの一番上で 1 回", "`/work/switchboard/docs/merge-gate.md` の「ローカル CI を回す時と数え方」"];
+  const kept = ["--repo <このリポジトリの owner/name>", "`bun /work/switchboard/scripts/local-ci.ts <PR> --repo", "回すのはスタックの一番上で 1 回", "`/work/switchboard/docs/merge-gate.md` の「When to run local CI and how it counts」"];
 
   test("otherRepoRules: its own entries and ops.config.json are used, with OPS_KIT; no Project URL variable is handed over", () => {
     const r = rules({ config: true, kit: ["lint_backlog.sh"], copies: [] });
@@ -4969,8 +5140,8 @@ describe("start gate: only a conflict in the stored data holds a start (#909, #2
     };
     const base = await boot(gh, holdingClaude().adapter);
     await refreshed(base);
-    // the sweep's first read still sees #307 as it was and picks it to close; the read right before its start sees the change
-    changed.from = reads + 2;
+    // the sweep's first read still sees #307 as it was and picks it to close; the read right before its start sees the change (a read asks the three lists at once, so the change starts at the next read's first ask, not in the middle of the first read's pages)
+    changed.from = reads + 3;
     await runSchedule(base, await backlogNextSchedule(base));
     expect(reads).toBeGreaterThanOrEqual(changed.from);
     expect(core!.db.listTasks().filter((t) => t.title.startsWith("#307 "))).toHaveLength(0);
@@ -5164,7 +5335,7 @@ describe("GET /api/backlog — mockups (#2296)", () => {
     try {
       const base = await boot(fakeGh().gh);
       const at = Date.now() - 60_000;
-      core!.db.insertTask({ id: "tsk_mock", workspaceId: metaId(), title: "mockups", stage: null, runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, statusAt: at, createdAt: at, updatedAt: at });
+      core!.db.insertTask({ id: "tsk_mock", workspaceId: metaId(), title: "mockups", stage: null, runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, statusAt: at, createdAt: at, updatedAt: at });
       const add = async (name: string, body: string, title: string) => {
         writeFileSync(join(home!, name), body);
         const r = await fetch(`${base}/api/tasks/tsk_mock/artifacts`, { method: "POST", body: JSON.stringify({ source: join(home!, name), title }) });
@@ -5354,4 +5525,211 @@ describe("chooseProcess: the candidate a request starts in (#4324)", () => {
     expect(chooseProcess(small, kit).process).toBe("p1-direct");
     expect(chooseProcess(item({ ...small, labels: ["flow-improvement"] }), kit).process).toBe("p0-pipeline");
   });
+});
+
+describe("release review", () => {
+  // local bare repositories named like the public copy and a development repository (a remote on the network would make the tag fetch slow)
+  const remote = (name: string) => { const d = join(mkdtempSync(join(tmpdir(), "sb-origin-")), name); mkdirSync(d, { recursive: true }); Bun.spawnSync(["git", "init", "-q", "--bare", d]); return d; };
+  const PUBLIC = remote("o/pub");
+  const PLAN = [{ value: "plan", label: "plan", description: "" }];
+  const reviews = () => core!.db.listTasks().filter((t) => t.origin === "release-review");
+  const reply = (sha: string, text: string) => text.replace("SHA", sha);
+  const fence = (j: object) => "確認した。\n```switchboard-release-review\n" + JSON.stringify(j) + "\n```";
+
+  test("a public copy's clone: a tag with no check is not promoted, one read-only Task is made, and three entrances at once make one", async () => {
+    const r = await releasedDaemon([], false, { origin: PUBLIC, promoteDelayMs: 100 });
+    const claude = endableClaude(PLAN);
+    try {
+      const base = await boot(fakeGh().gh, claude.adapter, r.env, undefined, undefined, CHECK);
+      const id = await backlogNextSchedule(base);
+      await Promise.all([runSchedule(base, id), runSchedule(base, id)]);
+      await settle(() => reviews().length > 0);
+      await Bun.sleep(300);
+      expect(r.promoted).toEqual([]);
+      expect(reviews()).toHaveLength(1);
+      const t = reviews()[0]!;
+      expect(t).toMatchObject({ permissionMode: "plan", origin: "release-review", title: "リリースの差分確認 v0.2.0" });
+      // the cwd is the folder that holds the tag's tree, not the tree: the tag's own runner settings (hooks) are not read
+      expect(t.cwd.endsWith("/release-review/v0.2.0")).toBe(true);
+      expect(existsSync(join(t.cwd, "tree", ".git"))).toBe(true);
+      expect(existsSync(join(t.cwd, "diff.patch"))).toBe(true);
+      expect(await releaseHold(base)).toMatchObject({ tag: "v0.2.0", failed: false, reason: "v0.2.0 の差分を確認中" });
+      // the check ends ok: the tree and the diff go and the tag is asked for
+      claude.emit(0, { t: "session.end", status: "ok", summary: fence({ verdict: "ok", findings: [] }) });
+      // the stage Tasks backlog-next started meanwhile hold the promotion like any running Task until they end
+      for (let i = 1; i < claude.count(); i++) claude.end(i);
+      await settle(() => r.promoted.length > 0);
+      expect(r.promoted).toEqual([r.sha]);
+      await settle(() => !existsSync(t.cwd));
+      expect(existsSync(t.cwd)).toBe(false);
+      expect(reviews()).toHaveLength(1);
+    } finally {
+      r.rescue.stop(true);
+      rmSync(r.repo, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  for (const [name, summary, hold] of [
+    ["concern", fence({ verdict: "concern", findings: [{ path: "a.ts", why: "fetch" }] }), "v0.2.0 の差分の確認で懸念 1 件"],
+    ["unreadable", "問題ありません", "v0.2.0 の差分を確かめられなかった: 最後の返答が結果の書式"],
+  ] as const) {
+    test(`a public copy's clone: a ${name} result is not promoted and shows in hold.reason`, async () => {
+      const r = await releasedDaemon([], false, { origin: PUBLIC });
+      const claude = endableClaude(PLAN);
+      try {
+        const base = await boot(fakeGh().gh, claude.adapter, r.env, undefined, undefined, CHECK);
+        await claude.started(1);
+        claude.emit(0, { t: "session.end", status: "ok", summary });
+        await settle(() => ((db) => db.lastReply(reviews()[0]!.id) !== null)(core!.db));
+        await Bun.sleep(300);
+        expect(r.promoted).toEqual([]);
+        expect(reviews()).toHaveLength(1);
+        expect(((await releaseHold(base)) as { reason: string; failed: boolean }).reason).toContain(hold);
+        expect(((await releaseHold(base)) as { failed: boolean }).failed).toBe(false);
+        // the hold is not a failure of the version: backlog-next goes on picking (no promotion answer)
+        const res = await runSchedule(base, await backlogNextSchedule(base));
+        expect(await res.json()).not.toHaveProperty("promotion");
+      } finally {
+        r.rescue.stop(true);
+        rmSync(r.repo, { recursive: true, force: true });
+      }
+    }, 30_000);
+  }
+
+  test("a public copy's clone: a check stopped by the usage limit keeps its folder for the resume and is not promoted", async () => {
+    const r = await releasedDaemon([], false, { origin: PUBLIC });
+    const claude = endableClaude(PLAN);
+    try {
+      const base = await boot(fakeGh().gh, claude.adapter, r.env, undefined, undefined, CHECK);
+      await claude.started(1);
+      const t = reviews()[0]!;
+      claude.emit(0, { t: "session.end", status: "error", summary: "You've hit your session limit · resets 4:10am (Asia/Tokyo)" });
+      await settle(() => core!.db.getTask(t.id)?.resumeAt != null);
+      await Bun.sleep(300);
+      expect(existsSync(join(t.cwd, "tree"))).toBe(true);
+      expect(r.promoted).toEqual([]);
+      expect(((await releaseHold(base)) as { reason: string }).reason).toContain("v0.2.0 の差分を確かめられなかった: ランナーの使用上限");
+    } finally {
+      r.rescue.stop(true);
+      rmSync(r.repo, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  const releaseOf = async (base: string) => (await (await fetch(`${base}/api/daemon/release`)).json()) as { latestRelease: { tag: string; sha: string; ahead: number | null } | null; review: { state: string; tag: string; findings: unknown[]; taskId: string } | null; hold: { reason: string } | null };
+  const recheck = (base: string) => fetch(`${base}/api/daemon/release/review`, { method: "POST" });
+
+  test("GET /api/daemon/release shows latestRelease, review and hold, and the re-check starts a new check only from failed or concern (202 / 409)", async () => {
+    const r = await releasedDaemon([], false, { origin: PUBLIC });
+    const claude = endableClaude(PLAN);
+    try {
+      const base = await boot(fakeGh().gh, claude.adapter, r.env, undefined, undefined, CHECK);
+      await claude.started(1);
+      const running = await releaseOf(base);
+      expect(running.latestRelease).toEqual({ tag: "v0.2.0", sha: r.sha, ahead: 1 });
+      expect(running.review).toMatchObject({ state: "running", tag: "v0.2.0", findings: [] });
+      expect(running.hold?.reason).toContain("差分を確認中");
+      expect((await recheck(base)).status).toBe(409); // running
+      claude.emit(0, { t: "session.end", status: "ok", summary: fence({ verdict: "concern", findings: [{ path: "a.ts", why: "fetch" }] }) });
+      await settle(() => core!.db.lastReply(reviews()[0]!.id) !== null);
+      await Bun.sleep(300);
+      const concern = await releaseOf(base);
+      expect(concern.review).toMatchObject({ state: "concern", findings: [{ path: "a.ts", why: "fetch" }], taskId: reviews()[0]!.id });
+      expect(concern.hold?.reason).toContain("懸念 1 件");
+      const again = await recheck(base);
+      expect([again.status, await again.json()]).toEqual([202, { started: "review", tag: "v0.2.0" }]);
+      await settle(() => reviews().length === 2);
+      expect(reviews()).toHaveLength(2);
+      expect((await releaseOf(base)).review?.state).toBe("running");
+      expect((await recheck(base)).status).toBe(409);
+      expect(r.promoted).toEqual([]);
+    } finally {
+      r.rescue.stop(true);
+      rmSync(r.repo, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("the re-check of a check stopped by the usage limit cancels its resume, so the old one cannot run again in the shared folder", async () => {
+    const r = await releasedDaemon([], false, { origin: PUBLIC });
+    const claude = endableClaude(PLAN);
+    try {
+      const base = await boot(fakeGh().gh, claude.adapter, r.env, undefined, undefined, CHECK);
+      await claude.started(1);
+      const old = reviews()[0]!;
+      claude.emit(0, { t: "session.end", status: "error", summary: "You've hit your session limit · resets 4:10am (Asia/Tokyo)" });
+      await settle(() => core!.db.getTask(old.id)?.resumeAt != null);
+      expect((await releaseOf(base)).review?.state).toBe("failed");
+      expect((await recheck(base)).status).toBe(202);
+      await settle(() => reviews().length === 2);
+      expect(core!.db.getTask(old.id)?.resumeAt).toBeNull();
+      expect((await releaseOf(base)).review?.state).toBe("running");
+    } finally {
+      r.rescue.stop(true);
+      rmSync(r.repo, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("the re-check is refused (409) when the check found no concern", async () => {
+    const ok = await releasedDaemon([], false, { origin: PUBLIC });
+    const claude = endableClaude(PLAN);
+    try {
+      const base = await boot(fakeGh().gh, claude.adapter, ok.env, undefined, undefined, CHECK);
+      await claude.started(1);
+      claude.emit(0, { t: "session.end", status: "ok", summary: fence({ verdict: "ok", findings: [] }) });
+      await settle(() => core!.db.lastReply(reviews()[0]!.id) !== null);
+      expect((await recheck(base)).status).toBe(409);
+    } finally {
+      ok.rescue.stop(true);
+      rmSync(ok.repo, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("a development origin has latestRelease and review null and refuses the re-check", async () => {
+    const dev = await releasedDaemon([], false, { origin: remote("o/dev") });
+    try {
+      const base = await boot(fakeGh().gh, holdingClaude().adapter, dev.env, undefined, undefined, CHECK);
+      expect(await releaseOf(base)).toMatchObject({ latestRelease: null, review: null });
+      expect((await recheck(base)).status).toBe(409);
+    } finally {
+      dev.rescue.stop(true);
+      rmSync(dev.repo, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("outside sb-rescue (managed: false) a public copy's clone still shows latestRelease from HEAD, and starts no check", async () => {
+    const r = await releasedDaemon([], false, { origin: PUBLIC });
+    try {
+      const base = await boot(fakeGh().gh, holdingClaude().adapter, { SWITCHBOARD_REPO_ROOT: r.repo }, undefined, undefined, CHECK);
+      const rel = await releaseOf(base);
+      expect(rel).toMatchObject({ managed: false, latestRelease: { tag: "v0.2.0", sha: r.sha, ahead: 0 } });
+      expect(rel.review).toBeUndefined();
+      expect((await recheck(base)).status).toBe(409);
+      expect(reviews()).toHaveLength(0);
+    } finally {
+      r.rescue.stop(true);
+      rmSync(r.repo, { recursive: true, force: true });
+    }
+  });
+
+  test("a clone of a repository that is not the public copy starts no check and keeps promoting", async () => {
+    const r = await releasedDaemon([], false, { origin: remote("o/dev") });
+    try {
+      await boot(fakeGh().gh, holdingClaude().adapter, r.env, undefined, undefined, CHECK);
+      await settle(() => r.promoted.length > 0);
+      expect(r.promoted).toEqual([r.sha]);
+      expect(reviews()).toHaveLength(0);
+    } finally {
+      r.rescue.stop(true);
+      rmSync(r.repo, { recursive: true, force: true });
+    }
+  });
+});
+
+test("developSelf off: a stage on the meta workspace is refused (#2459)", async () => {
+  const claude = holdingClaude();
+  const base = await boot(fakeGh().gh, claude.adapter);
+  expect((await fetch(`${base}/api/settings`, { method: "PATCH", body: JSON.stringify({ developSelf: false }) })).status).toBe(200);
+  const r = await start(base, 304, { action: "complete" });
+  expect(r.status).toBe(409);
+  expect(await r.text()).toContain("Switchboard 自体を開発しない設定です");
+  expect(core!.db.listTasks()).toHaveLength(0);
 });

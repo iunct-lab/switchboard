@@ -175,23 +175,6 @@ export function selectFrom(changed: string[], files: string[], read: (p: string)
   }
 }
 
-/** 変更が届くかを見るとき、テスト 1 本と見なすファイル（#4124。タグの CI の perf の `over` が、perf-bench に届かない範囲の揺れかを決める）。 */
-export const PERF_BENCH = "scripts/perf-bench.ts";
-/** perf-bench が import せずに測る・判定に使うもの。ビルドして測る画面（apps の下の web）、デーモンの応答（packages）と上限。 */
-const PERF_READS = ["apps/web/", "packages/", "scripts/perf-budget.json"];
-
-/** 変更が perf-bench に届くか。テストと同じ決まり（import と上の宣言）で、判定できない変更・読めない依存は届く（run）側に倒す。 */
-export function selectPerf(changed: string[], files: string[], read: (p: string) => string): { run: boolean; reason: string } {
-  try {
-    const s = select(changed, buildImportGraph(files, read), [PERF_BENCH], new Map([[PERF_BENCH, PERF_READS]]));
-    if (s.full) return { run: true, reason: s.full };
-    const why = s.reasons[PERF_BENCH];
-    return why ? { run: true, reason: why } : { run: false, reason: `変更 ${changed.length} ファイルのどれも ${PERF_BENCH} に届かない` };
-  } catch (e) {
-    return { run: true, reason: `依存を読めない: ${e instanceof Error ? e.message : e}` };
-  }
-}
-
 export function formatSelection(s: Selection): string {
   const head = s.full ? `full: ${s.full}` : `selected: ${s.tests.length}`;
   return [head, ...s.tests.map((t) => `${t}  ${s.reasons[t]}`)].join("\n");

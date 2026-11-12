@@ -1,7 +1,7 @@
 # Claude Code OpenTelemetry logs — what the classifier counts come from
 
 Switchboard counts, per Task, the operations Claude Code's auto-mode classifier let through and the ones it stopped
-(#2236). Only allowed operations are invisible on stream-json (`docs/design/claude-stream-json.md`), so the counts come
+(2026-10-30). Only allowed operations are invisible on stream-json (`docs/design/claude-stream-json.md`), so the counts come
 from Claude Code's OpenTelemetry log event `tool_decision`, sent to the daemon's loopback port and nowhere else.
 
 Verified 2026-10-29 against Claude Code **2.1.312** (`claude -p --permission-mode auto`, stream-json, a throwaway

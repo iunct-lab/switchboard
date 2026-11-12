@@ -1,10 +1,11 @@
 import { cleanupContainers, LABEL_KEY } from "./containers.ts";
 import { stopEndedTasksProcesses, stopTaskProcesses } from "./detached.ts";
-import { readCloudPreparation, cloudTransferNotice, prepareTeleportWorktree } from "./claude-cloud.ts";
+import { githubRepoOfRemote, readCloudPreparation, cloudTransferNotice, prepareTeleportWorktree } from "./claude-cloud.ts";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { isPublicCopy, RELEASE_REVIEW_ORIGIN, RELEASE_REVIEW_TITLE, releaseReviewOf, releaseReviewPrompt, type ReleaseReview } from "./release-review.ts";
 import type { ServerWebSocket } from "bun";
 import { AskAnswerInput, JobRequest, AutoStartKind, CustomRunnerList, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogQueueInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, type EvalsSummary, InboxAddInput, InboxCloseInput, InboxEditInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type EventEnvelope, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskBatch, type AskList, type Backlog, type McpServerConfig, type BacklogQueue, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type ScanCursors, type Workspace, type WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
 import type { CoreConfig } from "./config.ts";
@@ -19,7 +20,7 @@ import { AttachmentError, AttachmentStore, extValue, formatBytes, isActiveConten
 import { MAX_PTY_SESSIONS, type PtyAttached, type PtyClient, PtyClientMessage, PtyManager } from "./pty.ts";
 import { accessLine, authKind, opLine } from "./accesslog.ts";
 import { addressKey, EDGE_HEADER, edgeOk, hostAllowed, isLoopback, isLoopbackAddress, LOOPBACK_HOSTNAMES, loadOrCreateToken, makeFailureLimit, makeSessionCheck, recentOk, sameOrigin, SESSION_COOKIE, SESSION_RECHECK_MS, sessionTimes, tokenEquals, tokenFromRequest } from "./auth.ts";
-import { buildFeedbackPrompt, buildFixPrompt, buildNewRepoPrompt, type FeedbackSource, feedbackTitle, fixTitle, newRepoTitle } from "./feedback.ts";
+import { buildFeedbackPrompt, buildFixPrompt, buildNewRepoPrompt, type FeedbackSource, feedbackTitle, fixTitle, newRepoTitle, upstreamRequest } from "./feedback.ts";
 import { measureFootprint } from "./footprint.ts";
 import { loadMcpPolicy, mcpServersFor, WorkspaceMcp } from "./mcp.ts";
 import { decisionsFromOtlp } from "./otel.ts";
@@ -27,17 +28,17 @@ import { ApprovalRules, subjectsOf } from "./approval.ts";
 import { workspaceBrief } from "./brief.ts";
 import { judgeTurn } from "./judge.ts";
 import { skillCommandTitle, suggestTitle } from "./suggest-title.ts";
-import { delegatedNote, evalRequestDraft, judgeHumanGap, RULES_BY, rulesEvalOf, weekStartUtc, weeklyHumanSample } from "./evals.ts";
+import { delegatedNote, evalRequestDraft, judgeHumanGap, personMessages, RULES_BY, rulesEvalOf, weekStartUtc, weeklyHumanSample } from "./evals.ts";
 import { judgeRubric } from "./rubric-judge.ts";
 import { loadRubric } from "./rubric.ts";
 import { claudeCatalog, codexCatalog, hostReaders, modelCandidates, SHIPPED_HIDDEN_MODELS, type CatalogRunner } from "./model-catalog.ts";
 import { ledgerRowFor, loadPricing } from "./pricing.ts";
 import { checksEnabledByDefault, isSupervised, RESTART_EXIT_CODE, restartArgv, SelfDev, spawnDetached } from "./selfdev.ts";
 import { isAuthText, LOGIN_FORCED_RECHECK_MS, LOGIN_RECHECK_MS } from "./login.ts";
-import { fallbackNote, fallbackRunner, fmtTime, RateLimitResumer } from "./ratelimit.ts";
+import { deferNote, fallbackNote, fallbackRunner, fmtTime, RateLimitResumer, RESUME_MARGIN_MS } from "./ratelimit.ts";
 import { type BacklogNextResult, Scheduler } from "./scheduler.ts";
 import { BacklogSync, noticeTargets, type StoredBacklog } from "./backlog-sync.ts";
-import { resumeDepends, resumeJobsOnTurnEnd } from "./depends-resume.ts";
+import { AFTER_CHECK_MS, resumeDepends, resumeDueAfters, resumeJobsOnTurnEnd } from "./depends-resume.ts";
 import { scanAllRepos } from "./secretscan.ts";
 import { setupScripts } from "./skillsync.ts";
 import { listProcesses, loadProcess } from "./process-defs.ts";
@@ -46,8 +47,8 @@ import { Staging } from "./staging.ts";
 import { capSnapshot, collectTaskDiff, mergeSnapshot, withSnapshot, WRITE_TOOLS } from "./taskdiff.ts";
 import { parseCron } from "./cron.ts";
 import { FlowCache, flowScope, flowView, type FlowWorkspace } from "./flow.ts";
-import { interventionView } from "./interventions.ts";
-import { branchTip, checkFieldChoices, checkLocalChange, checkLocalFields, checkLocalParent, localForgeOf } from "./backlog-local.ts";
+import { interventionView, warmInterventions } from "./interventions.ts";
+import { branchTip, checkFieldChoices, checkLocalChange, checkLocalFields, checkLocalParent, localForgeOf, localProjectFields } from "./backlog-local.ts";
 import { readProjectFields } from "./backlog-send.ts";
 import { enableGithubSync, enablingOf } from "./backlog-enable.ts";
 import { RUNNER_CONFIG_PATHS, runnerConfigOf } from "./runner-config.ts";
@@ -55,8 +56,8 @@ import { CloneError, parseGithubRepo, registerWorkspace, unusableWorkspaces, Wor
 import { copyDeletable, inspectRemoval } from "./workspace-remove.ts";
 import { noteQueue, pruneClosed, QUEUE_KEY, readQueue, saveQueue } from "./backlog-queue.ts";
 import { ACTION_FOR_STAGE, checkFieldTypes, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, cancelStoredOperation, withdrawStoredOperation, buildDirectPrompt, buildStartPrompt, subagentModelAlias, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, storedIssueHeads, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionNote, promotionStep, type PromotionHold, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, flowHeldIn, flowHeldLine, flowRunning, flowStopped, type FlowLimit, type GhRunner, type OtherRepo } from "./backlog.ts";
-import { issueOf, reduceStops, stopRecordsFor } from "./stops.ts";
-import { approvalBatches, approvalWindowNote, BatchAnswers } from "./approval-batch.ts";
+import { issueOf, reduceStops, stopMarks, stopRecordsFor, stuckSchedule } from "./stops.ts";
+import { approvalBatches, approvalWindowNote, securityMergeNote, BatchAnswers } from "./approval-batch.ts";
 import { ASK_HISTORY_MS, ON_HOLD_RESUME, asksFromBacklog, closedHits, asksFromTasks, blockersOf, dedupeAsks, noticeAsks, policyPbi, rankAsks, prFacts, questionsReply, resumeOfTask, type NoticeRecord, type PolicyEnv, type PrFacts } from "./asks.ts";
 import { checkPolicy, matchPolicies, readPolicies, recordUse, subjectChanges, writePolicies } from "./policies.ts";
 import { checkPreset, expandPreset, needsTarget, parseTarget, readPresets, writePresets } from "./presets.ts";
@@ -81,6 +82,22 @@ const WEB_HEADERS = {
   "x-content-type-options": "nosniff",
   "referrer-policy": "same-origin",
 };
+
+const SETTINGS_KEY = "settings";
+
+/**
+ * A HOME with no database yet starts with `developSelf: false` (#2459): a new instance does not develop Switchboard itself.
+ * An existing database is not touched (the key's absence reads as true). Called by main.ts before the daemon starts.
+ */
+export function seedNewHome(dbPath: string): void {
+  if (existsSync(dbPath)) return;
+  const db = new Db(dbPath);
+  try {
+    db.setSetting(SETTINGS_KEY, { developSelf: false });
+  } finally {
+    db.close();
+  }
+}
 
 /** What the 元の更新を取り込む Task is told (#2576). */
 export function upstreamSyncPrompt(upstream: string): string {
@@ -157,6 +174,8 @@ export interface StartServerOptions {
   sessionRecheckMs?: number;
   /** How often the daemon under sb-rescue reads the newest release tag and asks for its promotion (#2477); tests shorten it. Unset = PROMOTION_CHECK_MS. */
   promotionCheckMs?: number;
+  /** How often the daemon looks for a depends stop whose date has passed (#4616, `resumeDueAfters`); tests shorten it. Unset = AFTER_CHECK_MS. */
+  afterCheckMs?: number;
   /** Overrides where the machine's heavy-process slots are (#2213); tests keep them out of the real home. Unset = `ops-kit heavy`'s own, under the home directory. */
   heavyStateDir?: string;
   /**
@@ -257,7 +276,6 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     return d && d.info.available && d.info.path && args ? { runner: d.adapter.id, argv: [d.info.path, ...args] } : null;
   };
   // Settings (#58) live in sqlite so the UI can change them; read on every use so a PATCH takes effect at once.
-  const SETTINGS_KEY = "settings";
   /** The daemon's notices' first sight and resolution (#2866, asks.ts `noticeAsks`). */
   const NOTICES_KEY = "notices";
   const settings = (): Settings => {
@@ -410,7 +428,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
    * Creates a routed task on the rule table's suggestion and asks the LLM afterwards. A task whose runner failed to start
    * is saved as an error before `tasks.create` throws, so the advice follows the row rather than the return.
    */
-  const createRouted = (given: NewTaskInput & SuggestCtxInput, afterInsert?: (task: Task) => void): Task => {
+  const createRouted = (given: NewTaskInput & SuggestCtxInput, afterInsert?: (task: Task) => void, deferUntil?: number): Task => {
     const input = withDefaultBudget(given);
     const ctx = routingContext(input);
     const saved: string[] = [];
@@ -419,9 +437,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         saved.push(t.id);
         recordProvenance(t, input);
         afterInsert?.(t);
-      });
+      }, deferUntil === undefined ? {} : { deferUntil });
     } finally {
-      for (const id of saved) runRoutingAdvice(id, ctx);
+      // a Task held at the limit (#2768) asks no LLM now: the advice would spend the very quota it waits for
+      if (deferUntil === undefined) for (const id of saved) runRoutingAdvice(id, ctx);
     }
   };
   /** Thrown by `chooseWorkspace`: the 409 body. Never a silent default — that would read as "the daemon chose this". */
@@ -559,7 +578,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         writePolicies(db, recordUse(readPolicies(db), id, { at: Date.now(), askId: `approval:${task.id}:${ask.id}`, taskId: task.id, issue: issueOf(task), subject: { kind: "approval", op: ask.kind, target: v.match.subject, conditions: [], head: null } }));
       }
       return v;
-    }, pricing: pricingTable, defaultPermissionMode: savedDefaultMode, subagentEffort: (r) => settings().subagentEffort[r], defaultShadowRunner: () => settings().shadowRunner, attachments, privateTmpRoot: join(cfg.home, "tmp"), heavyStateDir: opts.heavyStateDir ?? heavyStateDir(homedir()), deviceAuthEnv: (id) => ({ DEVICE_AUTH_URL: `${localUrl()}/api/tasks/${id}/device-auth`, DEVICE_AUTH_TOKEN_FILE: cfg.tokenPath, SWITCHBOARD_DAEMON_HOME: cfg.home, BACKLOG_URL: `${localUrl()}/api/backlog`, BACKLOG_TOKEN_FILE: cfg.tokenPath, ...localBacklogEnv(id) }), otelFor: (id) => (settings().outbound.classifierLog ? { endpoint: `${localUrl()}/otel/${id}/v1/logs`, token: mcp.issue(id).token } : undefined), runnerTelemetry: () => settings().outbound.runnerTelemetry, dockerEnv: (id) => ({ DOCKER_MARK_LABEL: `${LABEL_KEY}=${id}`, DOCKER_MARK_LOG: join(dockerLogDir, `${id}.jsonl`) }), maxStopResumes: () => settings().quotaAndResume.maxStopResumes, maxRunners: () => settings().maxRunners, memoryHeadroom: () => memoryHeadroom(db), holdQueue: cfg.candidate, reviewRunner: () => settings().reviewRunner, mcpServers: startMcpServers, bedrock: (task) => { const b = bedrockOf(task.runner); if (b) bedrockTasks.add(task.id); else bedrockTasks.delete(task.id); return b; } });
+    }, pricing: pricingTable, defaultPermissionMode: savedDefaultMode, subagentEffort: (r) => settings().subagentEffort[r], defaultShadowRunner: () => settings().shadowRunner, attachments, privateTmpRoot: join(cfg.home, "tmp"), heavyStateDir: opts.heavyStateDir ?? heavyStateDir(homedir()), deviceAuthEnv: (id) => ({ DEVICE_AUTH_URL: `${localUrl()}/api/tasks/${id}/device-auth`, DEVICE_AUTH_TOKEN_FILE: cfg.tokenPath, SWITCHBOARD_DAEMON_HOME: cfg.home, BACKLOG_URL: `${localUrl()}/api/backlog`, BACKLOG_TOKEN_FILE: cfg.tokenPath, ...localBacklogEnv(id) }), otelFor: (id) => (settings().outbound.classifierLog ? { endpoint: `${localUrl()}/otel/${id}/v1/logs`, token: mcp.issue(id).token } : undefined), runnerTelemetry: () => settings().outbound.runnerTelemetry, dockerEnv: (id) => ({ DOCKER_MARK_LABEL: `${LABEL_KEY}=${id}`, DOCKER_MARK_LOG: join(dockerLogDir, `${id}.jsonl`) }), maxStopResumes: () => settings().quotaAndResume.maxStopResumes, maxRunners: () => settings().maxRunners, memoryHeadroom: () => (process.env.NODE_ENV === "test" ? null : memoryHeadroom()) /* the test daemons do not wait on the host's memory */, holdQueue: cfg.candidate, reviewRunner: () => settings().reviewRunner, mcpServers: startMcpServers, bedrock: (task) => { const b = bedrockOf(task.runner); if (b) bedrockTasks.add(task.id); else bedrockTasks.delete(task.id); return b; } });
   // Terminal sessions (#91): what Claude Code wrote to ~/.claude/projects while nobody in Switchboard was watching.
   const claudeDanger = new Set((adapters.find((a) => a.id === "claude")?.permissionModes ?? []).filter((m) => m.danger).map((m) => m.value));
   const history = new HistoryImporter(db, { projectsDir: cfg.claudeProjectsDir, pollMs: cfg.historyPollMs, pricing: pricingTable, broadcast, isLive: (id) => tasks.isLive(id), dangerModes: claudeDanger, log: (m) => console.warn(m) });
@@ -632,7 +651,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   const selfdev = new SelfDev(db, cfg.repoRoot, (taskId, run) => broadcast({ type: "checks.updated", taskId, ok: run.ok }));
   // the backlog is read from what was imported (#885); GitHub is asked by the sync only, and for its budget (#549, below)
   // the candidate runs on a copy of the database: it sends nothing, or what it sent would be sent again (#886)
-  const backlog = new BacklogSync(db, opts.gh ?? runGh, undefined, undefined, !cfg.candidate);
+  const backlog = new BacklogSync(db, opts.gh ?? runGh, undefined, undefined, !cfg.candidate, (ws) => { const w = db.getWorkspace(ws.id); return !w || backlogReads(w); });
   const clones = new WorkspaceClones(db, opts.gh ?? runGh, cfg.repoRoot, () => broadcast({ type: "workspaces.updated" }));
   // GitHub's GraphQL budget (#549): read at most once a minute, for backlog-next, the stage buttons and the ledger
   const githubBudget = new GithubBudgetCache(opts.gh ?? runGh, undefined, undefined, undefined, () => backlog.hostWait());
@@ -653,7 +672,21 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     backlog.request(ws);
     return backlog.read(ws, { released, active });
   };
+  /** What `storedBacklog` answers apart from the items (no record read); a workspace never imported and not tried yet gets its import asked for, as there. */
+  const lightBacklog = (ws: Workspace): Pick<StoredBacklog, "fetchedAt" | "syncing" | "error"> => {
+    const source = db.getWorkspaceBacklogSource(ws.id);
+    const fetchedAt = source ? db.getBacklogRepository(source)?.lastSuccessfulSync ?? null : null;
+    const before = backlog.state(ws);
+    if (fetchedAt !== null || before.error || before.syncing) return { fetchedAt, ...before };
+    backlog.request(ws);
+    return { fetchedAt, ...backlog.state(ws) };
+  };
+  /** Whether the backlog reads the workspace (#2459): the meta workspace only on an instance that develops Switchboard itself. The one judgement; BacklogSync.sync and the lists use it. */
+  function backlogReads(ws: Pick<Workspace, "kind">): boolean {
+    return ws.kind !== "meta" || settings().developSelf;
+  }
   const metaWorkspace = () => db.listWorkspaces().find((w) => w.kind === "meta");
+  const DEVELOP_SELF_OFF = "Switchboard 自体を開発しない設定です（設定画面で切り替え）";
   /**
    * Evals (#1218): the rules row is counted at each turn's end (below); a task without one — from before #1218, or
    * read while its first turn runs — is counted now and the row kept, so the list (#1221) never reads every task's
@@ -687,9 +720,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
    * 上限のときの代わり (#834): the runner a Task that starts by itself (a stage button, feedback, a schedule) starts on,
    * and the transcript's status line when it is not the decided one.
    */
-  const autoRunner = (decided: RunnerId): { runner: RunnerId; note?: string } => {
+  const autoRunner = (decided: RunnerId): { runner: RunnerId; note?: string; deferUntil?: number; deferNote?: string } => {
     const now = Date.now();
     const r = fallbackRunner(decided, settings().autoStart, (x) => db.quotaFor(x), (x) => adapterMap.has(x), now);
+    // no way round the limit (#2768): the Task is made without starting and starts when the window resets
+    if (r.held) return { runner: r.runner, deferUntil: r.held.resetsAt + RESUME_MARGIN_MS, deferNote: deferNote(r.held, now) };
     return r.from ? { runner: r.runner, note: fallbackNote(r.runner, r.from, now) } : { runner: r.runner };
   };
   /**
@@ -708,7 +743,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const decided = decidedRunner(req.kind, req.runner);
     if (!decided) return { error: "ランナーが検出されていません", status: 409 };
     // the decided runner at its limit: the order's next one, on its CLI default model and effort (#834)
-    const { runner, note } = autoRunner(decided);
+    const { runner, note, deferUntil, deferNote: held } = autoRunner(decided);
     // the saved model goes with the saved runner only; a caller's own runner brings its own model (empty = the CLI default)
     const model = note ? "" : req.runner ? req.model : runner === auto.runner ? auto.model : "";
     // the effort follows the same rule (#833); a saved one the runner no longer lists falls back to the CLI default
@@ -730,8 +765,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     try {
       const task = createRouted(input, (t) => {
         if (note) tasks.record(t.id, { t: "status", text: note });
+        if (held) tasks.record(t.id, { t: "status", text: held });
         if (req.note) tasks.record(t.id, { t: "status", text: req.note });
-      });
+      }, deferUntil);
       return { task };
     } catch (e) {
       return { error: String((e as Error).message ?? e), status: 409 };
@@ -834,14 +870,14 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         lastTask: t ? { id: t.id, status: t.status, statusAt: t.statusAt, createdAt: t.createdAt, updatedAt: t.updatedAt, action: t.stage?.action ?? null, outcome: t.outcome, reviewedAt: t.reviewedAt, resumeAt: t.resumeAt } : null,
         stopSummary: reduceStops(db.listStopRecords(db.stageTaskIds(i.workspaceId, i.number))),
         mockups: i.mockupTask ? mockupsOf(i.mockupTask) : [],
-        ...(old ? { waits: [], waitsAt: null } : {}),
+        ...(old ? { waits: [], waitsAt: null, waitsUntil: null } : {}),
       };
       return { ...item, replyWaiting: isReplyWaiting(item) };
     }),
   });
   /** Every workspace's stored backlog with its stage Tasks (#885, withActive); `refresh` imports each first (GET /api/backlog). */
   const readBacklog = async (refresh: boolean): Promise<Backlog> => {
-    const read = await Promise.all(db.listWorkspaces().map(async (ws) => {
+    const read = await Promise.all(db.listWorkspaces().filter(backlogReads).map(async (ws) => {
       if (!existsSync(ws.path)) return { ws, stored: null };
       if (refresh) await backlog.sync(ws, undefined, { full: true }).catch(() => undefined);
       // the prerequisites judged as backlog-next judges them (#937)
@@ -858,9 +894,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       items: read.flatMap(({ stored }) => stored?.items ?? []),
       changes: read.flatMap(({ stored }) => stored?.changes ?? []),
       errors,
-      syncs: read.flatMap(({ ws, stored }) => (stored ? [{ workspaceId: ws.id, backlog: ws.backlog, enabling: enablingOf(db, db.getWorkspaceBacklogSource(ws.id)), repository: db.getWorkspaceBacklogSource(ws.id)?.repository ?? null, syncing: stored.syncing, syncedAt: stored.fetchedAt, ...workspaceSyncOf(db, ws, { importFailed: stored.error !== null }) }] : [])),
+      syncs: read.flatMap(({ ws, stored }) => (stored ? [syncEntry(ws, stored)] : [])),
     });
   };
+  /** One workspace's row of `syncs`: what GET /api/backlog and GET /api/backlog/syncs both answer. */
+  const syncEntry = (ws: Workspace, stored: Pick<StoredBacklog, "fetchedAt" | "syncing" | "error">) => ({ workspaceId: ws.id, backlog: ws.backlog, enabling: enablingOf(db, db.getWorkspaceBacklogSource(ws.id)), repository: db.getWorkspaceBacklogSource(ws.id)?.repository ?? null, syncing: stored.syncing, syncedAt: stored.fetchedAt, ...workspaceSyncOf(db, ws, { importFailed: stored.error !== null }) });
   /**
    * A queued PBI's stored Issue (#3955): its title, and whether it is closed; null when not stored. Made once per call that
    * looks up several rows, so a workspace's Issues are read once, not once per row (#4120).
@@ -953,9 +991,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const scans = db.listSchedules().filter((s) => s.action === "secret-scan").map((s) => ({ schedule: { id: s.id, title: s.title }, workspace: where(s.workspaceId), result: s.lastResult }));
     // approval-window (#2054): once a firing ran, the batches still waiting, as of now
     const windows = db.listSchedules().filter((s) => s.action === "approval-window" && s.enabled && s.lastResult).map((s) => ({ schedule: { id: s.id, title: s.title }, workspace: where(s.workspaceId), note: approvalWindowNote(batches) }));
+    // the same firing (#2792): the security merge checks still waiting, a notice of its own
+    const merges = db.listSchedules().filter((s) => s.action === "approval-window" && s.enabled && s.lastRunAt).map((s) => ({ schedule: { id: s.id, title: s.title }, workspace: where(s.workspaceId), note: securityMergeNote(batches, s.lastRunAt, now) }));
     // the same firing (#2148): the newest tag held for running Tasks since before it fired
     const promotions = db.listSchedules().filter((s) => s.action === "approval-window" && s.enabled && s.lastRunAt).map((s) => ({ schedule: { id: s.id, title: s.title }, workspace: where(s.workspaceId), note: promotionNote(promotionHold, busyTasks(), s.lastRunAt, now) }));
-    const { asks, record } = noticeAsks({ unusable, scans, windows, promotions, now }, had);
+    const { asks, record } = noticeAsks({ unusable, scans, windows, merges, promotions, now }, had);
     if (record !== had) db.setSetting(NOTICES_KEY, record);
     return asks;
   };
@@ -967,7 +1007,6 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const fromTasks = asksFromTasks({
       approvals: tasks.pendingApprovals(),
       tasks: [...live.values()],
-      lastReply: (id) => db.lastReply(id),
       lastTurnQuestions: (id) => db.lastTurnQuestions(id),
       permissionEvents: (ids) => db.listPermissionEvents(ids),
       stops: (t) => reduceStops(db.listStopRecords([t.id])),
@@ -977,7 +1016,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       policy,
       mockups: mockupsOf,
     });
-    const all = rankAsks(dedupeAsks([...asksFromBacklog(b.items, now, { approvalPending: approvalPendingOf(), resumeFailures: failed, policy, mockups: mockupsOf }), ...fromTasks]), b.items);
+    const all = rankAsks(dedupeAsks([...asksFromBacklog(b.items, now, { approvalPending: approvalPendingOf(), resumeFailures: failed, policy, mockups: mockupsOf, startedBy: (w, n) => db.askAnswer(`started:${w}#${n}`)?.result?.ask?.resume?.taskId ?? null }), ...fromTasks]), b.items);
     tieAnswers(all);
     for (const id of headMisses.keys()) if (!all.some((a) => a.id === id && (a.state === "open" || a.state === "held"))) headMisses.delete(id);
     const asks = all.map((a) => (headMisses.has(a.id) ? { ...a, policy: { ...a.policy, previous: headMisses.get(a.id)! } } : a));
@@ -994,6 +1033,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     stopRecords: (id) => db.listStopRecords([id]),
     batches: async () => (await currentAsks()).batches,
     deviceAuth: (id) => deviceAuths.get(id),
+    ask: async (id) => (await currentAsks()).asks.find((a) => a.id === id) ?? null,
+    answerAsk: (id, answer) => submitAnswer(id, answer),
   });
   /** A stage Task's permission stop with a tool approval waiting is answered by that approval, not refused (#936). */
   const approvalPendingOf = () => {
@@ -1085,6 +1126,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     }
     backlog.send(ws);
     const at = Date.now();
+    // an earlier answer's started Task is not this answer's resume
+    if (db.askAnswer(`started:${ws.id}#${pbi}`)) db.rememberAskAnswer(`started:${ws.id}#${pbi}`, { at, result: null });
     const done = (resume: Ask["resume"]): { status: number; body: AskAnswerResult } => ({ status: 200, body: { ask: { ...ask, state: answer.kind === "hold" ? "held" : "answered", changedAt: at, answers: [], resume }, already: false, changes: moved } });
     if (answer.kind === "hold") return done(null);
     // the work goes on from the item as stored now (the answer is in it): a hold or what an answer does not take away stops it here
@@ -1097,7 +1140,14 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const action = ask.kind === "confirmation" ? (item.closable ? "close" : null) : item.stage === "in-progress" ? "complete" : (ACTION_FOR_STAGE[item.stage] ?? null);
     if (!action) return done(null);
     const r = await startStage({ ws, meta: meta ?? ws, item, action });
-    if ("task" in r) return done({ state: "running", reason: null, taskId: r.task.id, at });
+    // the Task the answer started is its resume even when GitHub's comment time (answeredAt after the next sync) is later than its start
+    const started = (taskId: string) => {
+      const d = done({ state: "running", reason: null, taskId, at });
+      db.rememberAskAnswer(`started:${ws.id}#${pbi}`, { at, result: d.body });
+      return d;
+    };
+    if ("task" in r) return started(r.task.id);
+    // an active one is from before the answer (even an idle one awaiting judging), not started by it: the card stays 再開待ち
     if ("active" in r) return done({ state: "running", reason: null, taskId: r.active.id, at });
     if ("starting" in r) return done({ state: "running", reason: "工程 Task を開始しているところ", taskId: null, at });
     // kept for the question and for the answered one it became (its id names the answer's time)
@@ -1271,7 +1321,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         return result(ask.state, { state: "failed", reason: failure.reason, taskId, at });
       }
     }
-    // as on the Issue side: a choice (it may approve the merge) is refused on a PR that moved; a text goes with what moved
+    // as on the Issue side: a choice (it may approve the merge; so may an option of the questions) is refused on a PR that moved; a text goes with what moved
+    const picks = answer.kind === "choice" || (answer.kind === "questions" && answer.answers.some((a) => a.choices.length > 0));
     if (ask.place?.pr) {
       const ws = ask.workspace ? db.getWorkspace(ask.workspace.id) : null;
       const source = ws ? db.getWorkspaceBacklogSource(ws.id) : null;
@@ -1279,10 +1330,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       // is not given to it, a text goes saying so
       if (!ws || !source) {
         moved = [`PR #${ask.place.pr} の差分を確かめられません（Task の workspace に GitHub の取込み元がありません）`];
-        if (answer.kind === "choice") return changed("対象の PR を確かめられないので、選択肢では答えられません。自由文で答えてください", moved);
+        if (picks) return changed("対象の PR を確かめられないので、選択肢では答えられません。自由文で答えてください", moved);
       } else try {
         moved = (pre?.pr === ask.place.pr ? pre.facts : await prFacts(opts.gh ?? runGh, ws.path, source.repository, ask.place.pr, ask.at)).changes;
-        if (moved.length && answer.kind === "choice") return changed("問いの後で対象の PR が変わりました。選択肢では答えられません。自由文で確かめ直しを頼むか、新しい問いを待ってください", moved);
+        if (moved.length && picks) return changed("問いの後で対象の PR が変わりました。選択肢では答えられません。自由文で確かめ直しを頼むか、新しい問いを待ってください", moved);
       } catch (e) {
         return { status: UPSTREAM_FAILED, body: { error: `PR #${ask.place.pr} を確かめられない: ${String((e as Error).message ?? e)}` } };
       }
@@ -1334,6 +1385,82 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
    * a promotion restarts the daemon, and sb-rescue's `history` has the result after that. `GET /api/daemon/release` shows it.
    */
   let promotionAsked: { tag: string; sha: string; at: number; by: "check" | "backlog-next" | "idle"; error?: string } | null = null;
+  /**
+   * The check of a public copy's new tag (#4569): under `<home>/release-review/<tag>/`, a detached tree of the tag
+   * (`tree/`) and the diff from the running version (`diff.patch`), and a read-only Task in that folder (the prompt is this
+   * version's own). The Task's cwd is the folder, not the tree: a runner reads its project settings (Claude Code's
+   * `.claude/settings.json` hooks, Codex's `.codex/`) from its cwd, and the tag's own must not run. No shadow runner (a
+   * second runner would start with its own permission mode). Null = started; else why it could not start.
+   */
+  const startReleaseReview = async (tag: string, sha: string, current: string): Promise<string | null> => {
+    const meta = metaWorkspace();
+    if (!meta) return `${tag} の差分を確認できない: meta workspace がありません`;
+    const dir = join(cfg.home, "release-review", tag);
+    const tree = join(dir, "tree");
+    const diffFile = join(dir, "diff.patch");
+    try {
+      const auto = settings().autoStart;
+      const configured = adapterMap.has(auto.runner) ? auto.runner : adapterMap.has("claude") ? "claude" : null;
+      if (!configured) return `${tag} の差分を確認できない: ランナーが検出されていません`;
+      const { runner, note } = autoRunner(configured);
+      const permissionMode = runner === "claude" ? "plan" : runner === "codex" ? "read-only" : null;
+      if (!permissionMode) return `${tag} の差分を確認できない: ${runner} は読み取りだけの権限で動かせない`;
+      await removeReviewTree(tag);
+      mkdirSync(dir, { recursive: true });
+      await git(["worktree", "add", "--detach", tree, sha]);
+      await Bun.write(diffFile, await git(["diff", `${current}..${sha}`]));
+      const stat = await git(["diff", "--stat", `${current}..${sha}`]);
+      const model = note ? "" : runner === auto.runner ? auto.model : "";
+      const effort = !note && runner === auto.runner && auto.effort && !tasks.checkEffort(runner, auto.effort) ? auto.effort : "";
+      tasks.create({
+        workspaceId: meta.id, cwd: dir, scope: [dir], runner, shadowRunner: null, title: `${RELEASE_REVIEW_TITLE} ${tag}`, origin: RELEASE_REVIEW_ORIGIN, permissionMode,
+        prompt: releaseReviewPrompt({ from: current, to: sha, tag, diffFile, tree, stat }),
+        ...(model ? { model } : {}), ...(effort ? { effort } : {}),
+      }, undefined, (t) => { if (note) tasks.record(t.id, { t: "status", text: note }); });
+      return null;
+    } catch (e) {
+      await removeReviewTree(tag);
+      return `${tag} の差分の確認を始められなかった: ${String((e as Error).message ?? e)}`;
+    }
+  };
+  const removeReviewTree = async (tag: string) => {
+    const dir = join(cfg.home, "release-review", tag);
+    await git(["worktree", "remove", "--force", join(dir, "tree")]).catch(() => undefined);
+    rmSync(dir, { recursive: true, force: true });
+  };
+  // the check's turn ended (a finished Task keeps its session, so the turn end, not only the Task end): its tree and diff
+  // go, and the tag is asked about again. Read after the other turn-end listeners (the usage-limit one registers later and
+  // sets resumeAt): a check that will resume keeps its folder.
+  const releaseReviewEnded = (id: string, task: Task) => {
+    if (task.origin !== RELEASE_REVIEW_ORIGIN) return;
+    void Bun.sleep(0).then(() => {
+      if (db.getTask(id)?.resumeAt !== null) return;
+      return removeReviewTree(task.title.slice(RELEASE_REVIEW_TITLE.length + 1)).then(() => {
+      if (!metaWorkspace()) return;
+        promotionHold = null;
+        return askPromotion("idle");
+      });
+    }).catch(() => undefined);
+  };
+  tasks.onTurnEnd(releaseReviewEnded);
+  tasks.onTaskEnd(releaseReviewEnded);
+  /**
+   * The newest release of a public copy's clone (#4569), for 動いている版: `ahead` counts from what runs (from HEAD when
+   * nothing is managed). Reads the tags already fetched (the interval check fetches), so it makes no network call. Null for a
+   * development origin or a clone with no tag.
+   */
+  const latestRelease = async (current: string | null): Promise<{ tag: string; sha: string; ahead: number | null } | null> => {
+    if (!(await git(["remote", "get-url", "origin"]).then((u) => isPublicCopy(u, cfg.repoRoot), () => false))) return null;
+    const tag = (await git(["tag", "-l", "v*", "--sort=-v:refname"]).catch(() => "")).split("\n")[0]?.trim();
+    if (!tag) return null;
+    const sha = await git(["rev-list", "-n", "1", tag]);
+    return { tag, sha, ahead: await git(["rev-list", "--count", `${current ?? "HEAD"}..${sha}`]).then(Number, () => null) };
+  };
+  const releaseReviewFor = (r: { tag: string; sha: string }): ReleaseReview | null => {
+    const t = db.findTaskByOrigin(RELEASE_REVIEW_ORIGIN, `${RELEASE_REVIEW_TITLE} ${r.tag}`);
+    return t ? releaseReviewOf(t, db.lastReply(t.id)?.text ?? null, r) : null;
+  };
+  let rechecking = false;
   /** Before picking (#282): bring the app up to the newest tag, or hold everything while that tag failed to start. */
   const promotionFirst = async (meta: Workspace, { report, by }: { report: boolean; by: "check" | "backlog-next" | "idle" }): Promise<string | null> => {
     const status = await releaseStatus();
@@ -1342,13 +1469,24 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const current = (status as ReleaseState).current;
     // exit 0 = the tag's commit is an ancestor of what runs (git throws on any other exit)
     const latestInCurrent = !!latest && !!current && latest.sha !== current && (await git(["merge-base", "--is-ancestor", latest.sha, current]).then(() => true, () => false));
+    // a public copy's clone checks the tag's diff first (#4569): the check is the Task of origin release-review titled with the tag
+    const publicCopy = !!latest && (await git(["remote", "get-url", "origin"]).then((u) => isPublicCopy(u, cfg.repoRoot), () => false));
+    let review: ReleaseReview | "start" | undefined;
+    if (publicCopy) {
+      const t = db.findTaskByOrigin(RELEASE_REVIEW_ORIGIN, `${RELEASE_REVIEW_TITLE} ${latest!.tag}`);
+      review = t ? releaseReviewOf(t, db.lastReply(t.id)?.text ?? null, latest!) : "start";
+    }
     // counted after the last await: a Task that ends while git runs either counts as ended here or finds the hold set
-    const step = promotionStep({ status: status as ReleaseState, latest, busyTasks: busyTasks(), latestInCurrent });
-    const heldTag = step.action === "wait" ? (step.failed?.tag ?? latest!.tag) : null;
+    const step = promotionStep({ status: status as ReleaseState, latest, busyTasks: busyTasks(), latestInCurrent, review });
+    let reviewNote: string | null = null;
+    if (step.action === "review") reviewNote = await startReleaseReview(latest!.tag, latest!.sha, current!);
+    const heldTag = step.action === "wait" ? (step.failed?.tag ?? latest!.tag) : step.action === "review" ? latest!.tag : null;
     if (heldTag === null) heldSince = null;
     else if (heldSince?.tag !== heldTag) heldSince = { tag: heldTag, at: Date.now() };
-    promotionHold = step.action === "wait" ? { tag: heldTag!, failed: !!step.failed, reason: step.reason, since: heldSince!.at } : null;
+    promotionHold = step.action === "wait" ? { tag: heldTag!, failed: !!step.failed, reason: step.reason, since: heldSince!.at } : step.action === "review" ? { tag: heldTag!, failed: false, reason: reviewNote ?? `${latest!.tag} の差分を確認中`, since: heldSince!.at } : null;
     if (step.action === "pick") return null;
+    // a check started, running, or not ok is not a failure of the version: the backlog goes on while it holds (hold.reason shows it)
+    if (step.action === "review" || (step.action === "wait" && step.review)) return null;
     if (step.action === "promote") {
       const asked = { tag: step.tag, sha: step.sha, at: Date.now(), by };
       try {
@@ -1551,7 +1689,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       return { items: judged.filter((j) => j.can.ok).map((j) => j.item), syncHeld: judged.flatMap((j) => (j.can.ok ? [] : [`#${j.item.number}（${j.can.why}）`])), flowRunning: flowRunning(all), flowStopped: flowStopped(all) };
     };
     // read every workspace that has a free slot in parallel (#441); one GitHub cannot be read for goes on with what is stored (#2264)
-    const read = await Promise.all(db.listWorkspaces().filter((ws) => !only || ws.id === only.workspaceId).map(async (ws) => {
+    const read = await Promise.all(db.listWorkspaces().filter((ws) => backlogReads(ws) && (!only || ws.id === only.workspaceId)).map(async (ws) => {
       if (!SLOTS.some((slot) => busy(ws.id, slot).length < ws.sweep[slot])) return { ws, items: [] as BacklogItem[], syncHeld: [] as string[], unsynced: null, flowRunning: 0, flowStopped: 0 };
       if (!existsSync(ws.path)) return { ws, error: "workspace directory does not exist" };
       // the stored data is what is true (#2264): GitHub is brought up to date first when it can be reached, and when it
@@ -1778,6 +1916,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         lines.push(`${ws?.name ?? id}: workspace が無い: ${order.map((n) => `#${n}`).join(" ")}`);
         continue;
       }
+      if (!backlogReads(ws)) {
+        lines.push(`${ws.name}: Switchboard 自体を開発しない設定なので読まない: ${order.map((n) => `#${n}`).join(" ")}`);
+        continue;
+      }
       const stored = withActive({ fetchedAt: 0, items: (await storedBacklogReleased(ws)).items, errors: [], changes: [], syncs: [] }).items;
       const all = stored.filter((i) => order.includes(i.number));
       const missing = order.filter((n) => !all.some((i) => i.number === n));
@@ -1895,7 +2037,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     // and read again by itself from then on (#887), more often while it changes
     if (opts.backlogAutoImport) {
       backlog.startPolling();
-      for (const ws of db.listWorkspaces()) if (existsSync(ws.path)) backlog.request(ws), backlog.send(ws);
+      for (const ws of db.listWorkspaces()) if (backlogReads(ws) && existsSync(ws.path)) backlog.request(ws), backlog.send(ws);
     }
   }
   // Usage-limit auto-resume (#102): a task stopped on the runner's limit is continued once it lifts, per-runner setting.
@@ -1980,6 +2122,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   hostIdle?.start();
   tasks.onTurnEnd(() => hostIdle?.touch());
   if (!cfg.candidate) resumeJobsOnTurnEnd(db, tasks);
+  // a stop that waits on a date (#4616) goes on once the date has passed, in a workspace with no import too
+  const afterTimer = cfg.candidate ? null : setInterval(() => {
+    void resumeDueAfters({ db, tasks, now: Date.now() }).catch((e) => console.error(`[stops] depends resume after a date: ${String((e as Error)?.message ?? e)}`));
+  }, opts.afterCheckMs ?? AFTER_CHECK_MS);
+  afterTimer?.unref();
   const isMeta = (t: { workspaceId: string | null }) => !!t.workspaceId && db.getWorkspace(t.workspaceId)?.kind === "meta";
   let restarting = false;
   tasks.onTurnEnd((taskId, t, turn) => {
@@ -2142,7 +2289,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const events = db.listEvents(taskId);
     const lastSeq = events[events.length - 1]?.seq ?? 0;
     const jc = settings().judgeAndChoice;
-    void (opts.rubricJudge ?? judgeRubric)({ title: t.title, prompt: db.firstUserText(taskId) ?? "", events: events.map((e) => e.ev), metrics, rubric }, { adapters: adapterMap, settings: settings().judge, cwd: suggestDir, onUsage, log: (m) => console.warn(m), signal: judgeStop.signal, fallback: { runner: jc.judgeFallbackRunner, model: jc.judgeFallbackModel } })
+    void (opts.rubricJudge ?? judgeRubric)({ title: t.title, prompt: db.firstUserText(taskId) ?? "", later: personMessages(events.map((e) => e.ev)).slice(1), events: events.map((e) => e.ev), metrics, rubric }, { adapters: adapterMap, settings: settings().judge, cwd: suggestDir, onUsage, log: (m) => console.warn(m), signal: judgeStop.signal, fallback: { runner: jc.judgeFallbackRunner, model: jc.judgeFallbackModel } })
       .then((j) => {
         if (judgeStop.signal.aborted) return;
         const cur = db.getTask(taskId);
@@ -2399,6 +2546,12 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     return Object.fromEntries(Object.entries(h).map(([k, v]) => [k, wrap(v)]));
   };
 
+  // Read the stored records before listening, so the first GET /api/interventions finds them cached instead of queueing behind the read (it only reads).
+  try {
+    warmInterventions(db, db.listWorkspaces());
+  } catch (e) {
+    console.warn(`interventions: warm-up failed: ${(e as Error).message}`);
+  }
   server = Bun.serve({
     hostname: cfg.host,
     port: opts.port ?? cfg.port,
@@ -2595,6 +2748,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           // The main reviewer of a PR (#4024): Tasks read it as OPS_KIT_REVIEW_RUNNER from their next start or resume
           if (parsed.data.reviewRunner !== undefined) next.reviewRunner = parsed.data.reviewRunner;
           if (parsed.data.maxRunners !== undefined) next.maxRunners = parsed.data.maxRunners;
+          if (parsed.data.developSelf !== undefined) next.developSelf = parsed.data.developSelf;
           if (parsed.data.titles?.auto !== undefined) next.titles = { ...next.titles, auto: parsed.data.titles.auto };
           if (parsed.data.evals?.judge?.enabled !== undefined) next.evals = { ...next.evals, judge: { ...next.evals.judge, enabled: parsed.data.evals.judge.enabled } };
           // The Tasks that start by themselves (#832): the runner must be detected. A runner change without a model
@@ -2690,7 +2844,13 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       },
 
       "/api/schedules": {
-        GET: () => json(scheduler.list()),
+        GET: () =>
+          json(
+            scheduler.list().map((s) => {
+              const st = stuckSchedule(db, s);
+              return { ...s, stuck: st && { count: st.count, reason: st.reason, evidence: st.evidence, firstAt: st.firstAt, taskId: st.work.taskId } };
+            }),
+          ),
         POST: async (req) => {
           const parsed = ScheduleInput.safeParse(await req.json().catch(() => ({})));
           if (!parsed.success) return bad(parsed.error.message);
@@ -2860,11 +3020,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         POST: async (req, srv) => {
           const parsed = AskAnswerInput.safeParse(await req.json().catch(() => null));
           if (!parsed.success) return bad(parsed.error.message);
-          const { id, answer, policy, taskIds } = parsed.data;
+          const { id, answer, policy, taskIds, askIds } = parsed.data;
           // a batch is answered by pressing its one button (#2046): never a policy, never a text of the person's own
           if (id.startsWith("batch:")) {
             if (policy || answer.kind !== "allow") return bad("まとまりへの回答は allow だけです（方針には保存できません）");
-            const r = await batchAnswers.answer(id, taskIds);
+            const r = await batchAnswers.answer(id, taskIds, askIds);
             return json(r.body, r.status);
           }
           // a grant allows one operation once (#2745): never saved to be used again
@@ -3284,6 +3444,15 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       },
 
       /**
+       * Only the `syncs` of GET /api/backlog (#3438): each workspace's id, repository and sync state, with no record read
+       * (the kit looks its workspace up by it before every command). Same rows, so a workspace never imported has its
+       * import asked for here too (`storedBacklog`).
+       */
+      "/api/backlog/syncs": {
+        GET: () => json({ syncs: db.listWorkspaces().filter((ws) => backlogReads(ws) && existsSync(ws.path)).map((ws) => syncEntry(ws, lightBacklog(ws))) }),
+      },
+
+      /**
        * The stored records of one workspace (#919): what the kit's lint and parallel guard read instead of asking GitHub
        * (`readStoredRecords`). 409 = never imported (nothing is read as current); bring it up to date with POST /sync first.
        */
@@ -3327,7 +3496,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           if (!detail) return bad(`#${req.params.number} は保存されていません`, 404);
           // a local change's tips (#2485), read now: they move with every commit and are not kept
           const change = detail.issue.change;
-          return json({ ...detail, changeRefs: change ? { head: branchTip(ws.path, change.head), base: branchTip(ws.path, change.base) } : null });
+          const source = db.getWorkspaceBacklogSource(ws.id);
+          const projectFields = source && !syncsGithub(source) ? localProjectFields(ws.path) : detail.projectFields;
+          return json({ ...detail, projectFields, changeRefs: change ? { head: branchTip(ws.path, change.head), base: branchTip(ws.path, change.base) } : null });
         },
         /**
          * Edits it (#886): stored here at once (202, the operations) and sent to GitHub later. Or, with `resolve` alone,
@@ -3442,6 +3613,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           const ws = db.getWorkspace(parsed.data.workspaceId);
           if (!ws) return bad("workspace not found", 404);
           if (!existsSync(ws.path)) return bad("workspace directory does not exist", 409);
+          if (ws.kind === "meta" && !settings().developSelf) return bad(DEVELOP_SELF_OFF, 409);
           const meta = metaWorkspace();
           if (ws.kind !== "meta" && !meta) return bad("meta workspace がありません（工程のスキルはそこから読みます）", 409);
           const n = Number(req.params.number);
@@ -3476,9 +3648,23 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           const parsed = FeedbackInput.safeParse(await req.json().catch(() => null));
           if (!parsed.success) return bad(parsed.error.message);
           if (parsed.data.mode === "request") {
+            // a request for Switchboard itself, on an instance that does not develop it, goes upstream (#2459): no Task is made
+            const target = parsed.data.workspaceId ? db.getWorkspace(parsed.data.workspaceId) : metaWorkspace();
+            if (target?.kind === "meta" && !settings().developSelf) {
+              // a moved or removed meta directory makes the spawn throw: the text to copy is still answered
+              let remote = "";
+              try {
+                const p = Bun.spawnSync(["git", "remote", "get-url", "origin"], { cwd: target.path, stdout: "pipe", stderr: "ignore", timeout: 3000 });
+                if (p.exitCode === 0) remote = p.stdout.toString().trim();
+              } catch {
+                remote = "";
+              }
+              return json({ upstream: upstreamRequest({ repo: remote ? githubRepoOfRemote(remote) : null, text: parsed.data.text }) });
+            }
             const r = await startRequestTask(parsed.data);
             return "task" in r ? json(r.task, 201) : bad(r.error, r.status);
           }
+          if (!settings().developSelf) return bad(DEVELOP_SELF_OFF, 409);
           const meta = metaWorkspace();
           // no meta workspace: startMetaTask answers 409; the brief only needs one to exist
           if (!meta) return bad("meta workspace がありません", 409);
@@ -3581,6 +3767,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       "/api/processes": {
         GET: () => json(listProcesses(metaWorkspace()?.path).map((d) => ({ id: d.id, version: d.version, title: d.title, fits: d.fits }))),
       },
+
+      // The last stop of each Task that may need the person (#4520). Before `/api/tasks/:id`, which would read "stops" as an id.
+      "/api/tasks/stops": { GET: () => json(stopMarks(db, db.listTasks())) },
 
       "/api/tasks/suggest": {
         POST: async (req) => {
@@ -3979,18 +4168,49 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       // it cannot be trusted to judge or survive its own replacement.
       "/api/daemon/release": async () => {
         const s = await releaseStatus();
-        if (!s.managed) return json(s);
+        if (!s.managed) return json({ ...s, latestRelease: await latestRelease(null).catch(() => null) });
         try {
           // `ahead` (#1660): commits in HEAD that the running version lacks — 0 when HEAD is the running version or inside it;
           // null when it cannot be counted (the running version is not in this checkout, git failed).
-          const [head, dirty, headSubject, ahead] = await Promise.all([
+          // `behind` is its pair: commits in the running version that HEAD lacks. > 0 with `ahead` 0 = HEAD is an ancestor of what
+          // runs (the checkout does not follow the tag), so "up to date" and promoting HEAD would be wrong.
+          const [head, dirty, headSubject, ahead, behind] = await Promise.all([
             git(["rev-parse", "HEAD"]), git(["status", "--porcelain"]), git(["log", "-1", "--format=%s", "HEAD"]),
             s.current ? git(["rev-list", "--count", `${s.current}..HEAD`]).then(Number, () => null) : Promise.resolve(null),
+            s.current ? git(["rev-list", "--count", `HEAD..${s.current}`]).then(Number, () => null) : Promise.resolve(null),
           ]);
-          return json({ managed: true, rescuePage: cfg.rescuePageUrl, head, headSubject, ahead, busyTasks: busyTasks(), dirty: dirty !== "", current: s.current, previous: s.previous, state: s.state, busy: s.busy, lastError: s.lastError ?? null, history: s.history.slice(0, 5), asked: promotionAsked, hold: promotionHold ? { ...promotionHold, busyTasks: busyTasks() } : null });
+          // a public copy's clone (#4569): the newest release and the check of its diff (null on a development origin)
+          const latest = await latestRelease(s.current).catch(() => null);
+          const review = latest ? releaseReviewFor(latest) : null;
+          return json({ managed: true, latestRelease: latest, review, rescuePage: cfg.rescuePageUrl, head, headSubject, ahead, behind, busyTasks: busyTasks(), dirty: dirty !== "", current: s.current, previous: s.previous, state: s.state, busy: s.busy, lastError: s.lastError ?? null, history: s.history.slice(0, 5), asked: promotionAsked, hold: promotionHold ? { ...promotionHold, busyTasks: busyTasks() } : null });
         } catch (e) {
           return json({ managed: false, error: `sb-rescue did not answer at ${cfg.rescueUrl}: ${String((e as Error).message ?? e)}` });
         }
+      },
+      // Check the newest release's diff again (#4569) after it could not be checked or found a concern. Promotion itself stays
+      // `/api/daemon/promote`: the dialog on the screen is the confirmation (a mark on the API would not stop a caller of it).
+      "/api/daemon/release/review": {
+        POST: strong(async () => {
+          const s = await releaseStatus();
+          if (!s.managed) return bad("this daemon does not run from a release (start it with sb-rescue)", 409);
+          const latest = await latestRelease(s.current).catch(() => null);
+          if (!latest) return bad("this clone has no public release to check", 409);
+          const review = releaseReviewFor(latest);
+          if (review?.state === "running" || rechecking) return bad(`${latest.tag} の差分を確認中です`, 409);
+          if (!review || (review.state !== "failed" && review.state !== "concern")) return bad(`${latest.tag} は確かめ直す状態ではありません`, 409);
+          rechecking = true;
+          try {
+            // the old check waiting to resume (a usage limit) is superseded: it shares the folder, and its end would remove the new one's
+            if (review.state === "failed") { const old = db.getTask(review.taskId); if (old?.resumeAt != null) tasks.setResumeAt(old.id, null); }
+            const why = await startReleaseReview(latest.tag, latest.sha, s.current!);
+            if (why) return bad(why, 500);
+            promotionHold = null;
+            await askPromotion("idle").catch(() => undefined); // the hold now says the check is running
+            return json({ started: "review", tag: latest.tag }, 202);
+          } finally {
+            rechecking = false;
+          }
+        }),
       },
       "/api/daemon/promote": {
         POST: strong(async (req, srv) => {
@@ -4495,6 +4715,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     await Promise.all(adviceRunning);
     clearInterval(recheckTimer);
     if (promotionTimer) clearInterval(promotionTimer);
+    if (afterTimer) clearInterval(afterTimer);
     history.stop();
     knowledge.close();
     scheduler.stop();
@@ -4582,7 +4803,7 @@ const HELD_LINES: Array<[string, (pending: Held[], stuck: Held[]) => Held[]]> = 
   ["進められない", (_, stuck) => stuck],
 ];
 /** `PR #12 マージ待ち`, `#13 取り下げ`, …; an overlap is named alone (it waits for the other side to close). */
-function heldWhy(x: Held): string {
+export function heldWhy(x: Held): string {
   const ref = `${x.kind === "pr" ? "PR " : ""}#${x.number}`;
   if ("reason" in x && x.reason === "overlap") return x.state === "missing" ? `${ref} 見つからない` : ref;
   const need = "need" in x ? x.need : x.kind === "pr" ? "merged" : "done";
@@ -4590,6 +4811,7 @@ function heldWhy(x: Held): string {
   if (x.state === "withdrawn") return `${ref} 取り下げ`;
   if (x.state === "missing") return `${ref} 見つからない`;
   if (x.state === "cycle") return `${ref} と循環`;
+  if (x.kind === "issue" && need === "release") return `${ref} は Issue に（リリース）が付いている（PR の番号に直す）`;
   return need === "release" ? `${ref} の反映を確かめられない` : `${ref} 判定できない`;
 }
 

@@ -1,7 +1,7 @@
 import { currentRepo } from "./repo.ts";
 /**
  * bun scripts/merge-audit.ts [--since YYYY-MM-DD] [--until YYYY-MM-DD] — who lifted which kind of a large PR, per kind
- * (PBI #752). Reads the record marks on the PRs (docs/merge-gate.md の「記録の印」: `[merge-ask]`, `[merge-answer]`,
+ * (PBI #752). Reads the record marks on the PRs (docs/merge-gate.md の「Record marks」: `[merge-ask]`, `[merge-answer]`,
  * `[recheck]`) and main's commits; keeps nothing (the marks are the record). REST only (the GraphQL budget is shared).
  *
  * One line per kind with anything to count (the default period is the last 7 days, until inclusive); security is one line
@@ -210,7 +210,7 @@ export function requestFor(ps: Proposal[], source: { date: string }): { title: s
   const title = `マージ規則の見直し: ${sorted.map((p) => `${p.kind} を聞くへ`).join(" / ")}`;
   const body = [
     "## 要望",
-    "マージの記録の印（docs/merge-gate.md の「記録の印」）の集計から、merge-gate の分け（利用者に聞く / 再チェックで外せる）を変える案が出ました。見直してください。",
+    "マージの記録の印（docs/merge-gate.md の「Record marks」）の集計から、merge-gate の分け（利用者に聞く / 再チェックで外せる）を変える案が出ました。見直してください。",
     "",
     ...sorted.map((p) => `- ${proposalText(p)}`),
     "",
