@@ -5873,7 +5873,7 @@ describe("ops resources", () => {
       expect(r.memory).toEqual({ availableBytes: 1_000_000 * 1024, totalBytes: 3_921_000 * 1024, swapUsedBytes: 100_000 * 1024, floorBytes: 1536 * 1024 * 1024 });
       expect(r.slots.max).toBe(1);
       expect(r.slots.running).toEqual([{ pid: live, name: "local-ci 3639", cwd: "/w", taskId: "t_ci", taskTitle: "PBI の local-ci", queuedAt: "2026-11-03T10:00:00.000Z", startedAt: "2026-11-03T10:00:05.000Z", typicalMs: 600_000, samples: 497, verdict: "long" }]);
-      expect(r.slots.waiting).toEqual([{ pid: live, name: "bun test", cwd: "/w", taskId: null, taskTitle: null, queuedAt: "2026-11-03T10:01:00.000Z", reason: "slot", typicalMs: 1_200_000, samples: 3 }]);
+      expect(r.slots.waiting).toEqual([{ pid: live, name: "bun test", cwd: "/w", taskId: null, taskTitle: null, queuedAt: "2026-11-03T10:01:00.000Z", reason: "slot", memoryOnly: false, typicalMs: 1_200_000, samples: 3 }]);
       expect(r.eta).toEqual({ etaMs: 1_200_000, unknown: 0 }); // the local-ci is past its median: the bun test's 20 minutes
       expect(r.consumers!.at).toBe(now - 60_000);
       expect(r.consumers!.groups.map((g) => `${g.taskId}/${g.taskTitle}/${g.kind}/${g.rssBytes}/${g.procs}`)).toEqual([
@@ -5892,7 +5892,7 @@ describe("ops resources", () => {
       expect(opsResources(db, { home: h, procRoot: join(h, "none") }).memory).toBeNull();
       // no ops-kit heavy on this machine yet: the defaults and no jobs
       const empty = mkdtempSync(join(tmpdir(), "switchboard-ops-resources-empty-"));
-      expect(opsResources(db, { home: empty, procRoot: proc }).slots).toEqual({ max: 1, running: [], waiting: [] });
+      expect(opsResources(db, { home: empty, procRoot: proc }).slots).toEqual({ max: 1, running: [], beside: [], waiting: [] });
       expect(opsResources(db, { home: empty, procRoot: proc }).eta).toEqual({ etaMs: null, unknown: 0 });
       rmSync(empty, { recursive: true, force: true });
     } finally {

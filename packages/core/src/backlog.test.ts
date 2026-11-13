@@ -66,6 +66,18 @@ function decomposedGh() {
   };
   return { ...fake, gh };
 }
+/** fakeGh with Issue 308 (confirmations left, Tasks all closed) holding one more open Task. */
+function openTaskAndConfirmationGh() {
+  const fake = fakeGh();
+  const gh: GhRunner = async (args, cwd) => {
+    const r = await fake.gh(args, cwd);
+    if (!r.stdout.includes('"subIssuesSummary"')) return r;
+    const page = JSON.parse(r.stdout) as { data?: { repository?: { issues?: { nodes: { number: number; subIssuesSummary: { total: number; completed: number } }[] } } } };
+    for (const node of page.data?.repository?.issues?.nodes ?? []) if (node.number === 308) node.subIssuesSummary = { total: node.subIssuesSummary.total, completed: node.subIssuesSummary.total - 1 };
+    return { ...r, stdout: JSON.stringify(page) };
+  };
+  return { ...fake, gh };
+}
 /** fakeGh with `numbers` labelled on-hold. */
 function onHoldGh(...numbers: number[]) {
   const fake = fakeGh();
@@ -908,6 +920,19 @@ test("autoStart by kind: to-tasks on codex starts Task に分解 on codex and �
   for (let i = 0; (!codex.starts.length || !claude.starts.length) && i < 100; i++) await Bun.sleep(10);
   expect(codex.starts.map((x) => [x.model, x.effort])).toEqual([["m-plan", "medium"]]);
   expect(claude.starts.map((x) => [x.model, x.effort])).toEqual([["m-common", "high"]]);
+});
+
+test("start runner: a runner in the body starts that one Task on it over the kind's default, and the saved autoStart does not change; an undetected one is 409", async () => {
+  const claude = holdingClaude();
+  const codex = holdingClaude();
+  const base = await boot(fakeGh().gh, [claude.adapter, { ...codex.adapter, id: "codex" }]);
+  core!.db.setSetting("settings", { autoStart: { runner: "claude", model: "m-common", byKind: { complete: { runner: "claude", model: "m-impl" } } } });
+  const settings = async () => (await (await fetch(`${base}/api/settings`)).json() as { autoStart: unknown }).autoStart;
+  const before = await settings();
+  const task = await (await start(base, 304, { action: "complete", runner: "codex", model: "gpt-x" })).json() as Task;
+  expect(task).toMatchObject({ runner: "codex", model: "gpt-x" });
+  expect(await settings()).toEqual(before);
+  expect((await start(base, 303, { action: "to-tasks", runner: "dak" })).status).toBe(409);
 });
 
 test("autoStart by kind: a kind whose runner is not detected starts on the common values", async () => {
@@ -1976,8 +2001,8 @@ test("an answer during a limit is stored, read by the next start, and sent after
 test("start: close on a closable PBI makes #N 閉じる: with the pbi-complete step 6 prompt; not closable is 409", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
-  // Issue 308 has confirmations left, Issue 305 open Tasks, Issue 304 is Ready: none is closable
-  for (const n of [308, 305, 304]) expect((await start(base, n, { action: "close" })).status).toBe(409);
+  // Issue 305 has open Tasks, Issue 304 is Ready: neither can be closed
+  for (const n of [305, 304]) expect((await start(base, n, { action: "close" })).status).toBe(409);
   const r = await start(base, 307, { action: "close" });
   expect(r.status).toBe(201);
   expect(((await r.json()) as Task).title).toBe("#307 閉じる: PBI: Task が全部閉じた実装中の PBI");
@@ -1990,6 +2015,21 @@ test("start: close on a closable PBI makes #N 閉じる: with the pbi-complete s
   const items = (await (await fetch(`${base}/api/backlog`)).json() as Backlog).items;
   expect(items.find((i) => i.number === 307)!.activeTaskId).toBeString();
   expect((await start(base, 307, { action: "close" })).status).toBe(409);
+});
+
+test("start: close through the API also takes an in-progress PBI whose Tasks are all closed with 利用者確認 left; open Tasks and 利用者確認 together stay 409", async () => {
+  const claude = holdingClaude();
+  const base = await boot(fakeGh().gh, claude.adapter);
+  const items = (await (await fetch(`${base}/api/backlog`)).json() as Backlog).items;
+  // the screen's button still needs none left
+  const i308 = items.find((i) => i.number === 308)!;
+  expect(i308.closable).toBe(false);
+  expect(i308.tasks!.done).toBe(i308.tasks!.total);
+  const r = await start(base, 308, { action: "close" });
+  expect(r.status).toBe(201);
+  expect(((await r.json()) as Task).title.startsWith("#308 閉じる: ")).toBe(true);
+  const mixed = await boot(openTaskAndConfirmationGh().gh, holdingClaude().adapter);
+  expect((await start(mixed, 308, { action: "close" })).status).toBe(409);
 });
 
 test("start: the resume of a stalled PBI writes a ## 状況 in the 状況確認's form with the tasks-done mark, asks with ## 判断待ち, else goes on with pbi-complete", () => {
@@ -3602,7 +3642,7 @@ test("backlog-next: a schedule without an effort starts on the CLI default, not 
   expect(claude.starts[0]!.effort).toBeUndefined();
 });
 
-test("backlog-next by kind: a kind's own runner wins over the schedule's; a kind without one starts on the schedule's runner and model", async () => {
+test("backlog-next by kind: the schedule's runner and model win over a kind's own runner", async () => {
   const claude = holdingClaude();
   const codex = holdingClaude();
   const base = await boot(fakeGh().gh, [claude.adapter, { ...codex.adapter, id: "codex" }]);
@@ -3612,7 +3652,7 @@ test("backlog-next by kind: a kind's own runner wins over the schedule's; a kind
   expect((await runSchedule(base, id)).status).toBe(201);
   const started = core!.db.listTasks().filter((t) => t.scheduleId === id);
   expect(started.map((t) => t.title.split(":")[0]).sort()).toEqual(["#303 Task に分解", "#304 実装"]);
-  expect(started.find((t) => t.title.startsWith("#304 実装"))).toMatchObject({ runner: "codex", model: "m-impl", effort: null });
+  expect(started.find((t) => t.title.startsWith("#304 実装"))).toMatchObject({ runner: "claude", model: "m-sched", effort: "low" });
   expect(started.find((t) => t.title.startsWith("#303 Task に分解"))).toMatchObject({ runner: "claude", model: "m-sched", effort: "low" });
 });
 
@@ -3736,23 +3776,14 @@ test("backlog quota: a claude schedule at Claude's limit with the fallback codex
   expect(await scheduleLogAll(b.base)).toContainEqual(expect.stringContaining("codex の使用量 five_hour が 85%（80% 以上）: 全体で 1 件まで"));
 });
 
-test("backlog quota: a kind's own runner is judged by its own usage — 実装 on claude at its limit is left while the plan slot starts on codex", async () => {
+test("backlog quota: the schedule's runner is judged, not the kind's own — claude at its limit does not hold 実装 of a codex schedule whose kind default is claude", async () => {
   const later = Math.floor(Date.now() / 1000) + 3600;
-  const now = Date.now();
   const a = await bootTwo("codex");
   core!.db.upsertQuota("claude", "seven_day", 1, later);
   core!.db.setSetting("settings", { autoStart: { byKind: { complete: { runner: "claude", model: "", effort: "" } } } });
   expect((await runSchedule(a.base, a.id)).status).toBe(201);
-  expect(startedTasks().map((t) => [t.title.split(":")[0], t.runner])).toEqual([["#303 Task に分解", "codex"]]);
+  expect(startedTasks().map((t) => [t.title.split(":")[0], t.runner, !!t.scheduleId]).sort()).toEqual([["#303 Task に分解", "codex", true], ["#304 実装", "codex", true]]);
   expect(a.claude).toHaveLength(0);
-  expect(await scheduleLogAll(a.base)).toContainEqual(expect.stringContaining(`${metaName()}: #304 を始めない: claude の使用量 seven_day が 100%: ${fmtTime(later * 1000, now)} に戻るまで始めない`));
-  await shutdown();
-  // with the fallback codex, 実装 gives way to codex too and both slots start
-  const b = await bootTwo("codex");
-  core!.db.upsertQuota("claude", "seven_day", 1, later);
-  core!.db.setSetting("settings", { autoStart: { byKind: { complete: { runner: "claude", model: "", effort: "" } }, fallback: ["codex"] } });
-  expect((await runSchedule(b.base, b.id)).status).toBe(201);
-  expect(startedTasks().map((t) => t.runner)).toEqual(["codex", "codex"]);
 });
 
 /** backlog-next login: a Claude and a Codex that say `login` / `loginExpiresAt` from detect() (read again after a minute); the schedule runs on `runner`. */

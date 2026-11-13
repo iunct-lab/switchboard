@@ -53,6 +53,7 @@ export function runOwner(r: { taskId: string | null; taskTitle: string | null })
 /** What a waiting run waits for: the slot's holders (Task and run), or the free memory against the floor. */
 export function waitLine(wait: ResourceWait, running: ResourceRun[], memory: OpsResources["memory"]): string {
   if (wait.reason === "memory") {
+    if (wait.memoryOnly) return t(common.resWaitMemoryOnly); // it takes no slot: the free memory is all it waits for
     const m = memoryLine(memory);
     if (!m) return t(common.resWaitMemoryUnknown);
     // the kit decided on its own read; this one may already be above the floor before its next look

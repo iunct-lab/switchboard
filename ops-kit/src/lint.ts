@@ -71,6 +71,18 @@ export function bodyStoryPoints(body: string): number | null {
   return null;
 }
 
+/**
+ * Why a body about to be saved over `before` is broken (null when it is not): its first line is the `null` that
+ * `jq -r .body` prints for a missing key, or, for a PBI, it loses a required section (`pbiSections`) or the
+ * `**Story Points**:` line that `before` had. A section `before` already lacked is not asked for.
+ */
+export function bodyLoss(before: string, after: string, isPbi: boolean, pbiSections: string[]): string | null {
+  if (after.split("\n").find((l) => l.trim())?.trim() === "null") return "本文の先頭が null だけ（jq -r .body は null を出す。本文は .issue.body にある）";
+  if (!isPbi) return null;
+  const lost = [...pbiSections.filter((s) => hasSection(before, s) && !hasSection(after, s)).map((s) => `「## ${s}」`), ...(bodyStoryPoints(before) !== null && bodyStoryPoints(after) === null ? ["「**Story Points**:」の行"] : [])];
+  return lost.length ? `PBI の必須の節が無くなる: ${lost.join("、")}` : null;
+}
+
 /** Each line outside fences (``` / ~~~): the same reading as core's prereqsOf. */
 function* unfenced(body: string): Generator<string> {
   let fence: string | null = null;

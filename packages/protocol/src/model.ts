@@ -190,7 +190,8 @@ export type RoutingStats = z.infer<typeof RoutingStats>;
 
 /**
  * The stage a row's button starts: request → PBI, PBI → Tasks (Ready), Ready → merged (/pbi-complete), in-progress → 状況確認.
- * `close`: a `closable` in-progress PBI → its results written and closed (pbi-complete step 6); not tied to a stage.
+ * `close`: an in-progress PBI whose Tasks are all closed → its results written and closed (pbi-complete step 6); not tied to a stage.
+ *   The UI offers it only when `closable` (user confirmations done too); the API also takes one with confirmations left (`closableByApi`).
  * `direct`: a request → one Task of the `p1-direct` candidate, no PBI or Task Issue; only the person's button starts it.
  */
 export const BacklogAction = z.enum(["to-pbi", "to-tasks", "complete", "check", "close", "direct"]);
@@ -1159,8 +1160,8 @@ export type RunVerdict = z.infer<typeof RunVerdict>;
  */
 export const ResourceRun = z.object({ pid: z.number(), name: z.string(), cwd: z.string(), taskId: z.string().nullable(), taskTitle: z.string().nullable(), queuedAt: z.string(), startedAt: z.string(), typicalMs: z.number().nullable(), samples: z.number(), verdict: RunVerdict });
 export type ResourceRun = z.infer<typeof ResourceRun>;
-/** A job waiting for a slot (`slot`) or for the free memory to rise above the floor (`memory`). */
-export const ResourceWait = z.object({ pid: z.number(), name: z.string(), cwd: z.string(), taskId: z.string().nullable(), taskTitle: z.string().nullable(), queuedAt: z.string(), reason: z.enum(["slot", "memory"]), typicalMs: z.number().nullable(), samples: z.number() });
+/** A job waiting for a slot (`slot`) or for the free memory to rise above the floor (`memory`). `memoryOnly`: it takes no slot, so it does not count in when the slots are free. */
+export const ResourceWait = z.object({ pid: z.number(), name: z.string(), cwd: z.string(), taskId: z.string().nullable(), taskTitle: z.string().nullable(), queuedAt: z.string(), reason: z.enum(["slot", "memory"]), memoryOnly: z.boolean(), typicalMs: z.number().nullable(), samples: z.number() });
 export type ResourceWait = z.infer<typeof ResourceWait>;
 /** What a Task can ask the daemon to run for it: the kinds are fixed and the daemon builds their argv — no command is taken. */
 export const JobKind = z.enum(["local-ci", "review"]);
@@ -1200,12 +1201,12 @@ export const OpsJob = Job.omit({ summary: true, cwd: true }).extend({ taskTitle:
 export type OpsJob = z.infer<typeof OpsJob>;
 /**
  * `GET /api/ops/resources`: now. `memory` null: no /proc/meminfo (macOS). `consumers` is the latest minute of
- * ops_load_groups (null: none in the last 7 days), largest RSS first. `eta`: ms from now until everything running and
- * waiting would be done by their kinds' medians (null: nothing running or waiting); `unknown` runs had no median and are left out.
+ * ops_load_groups (null: none in the last 7 days), largest RSS first. `eta`: ms from now until everything holding a slot and
+ * waiting for one would be done (`beside` runs and `memoryOnly` waits take no slot and are left out) by their kinds' medians (null: nothing running or waiting); `unknown` runs had no median and are left out.
  */
 export const OpsResources = z.object({
   memory: z.object({ availableBytes: z.number(), totalBytes: z.number(), swapUsedBytes: z.number(), floorBytes: z.number() }).nullable(),
-  slots: z.object({ max: z.number(), running: z.array(ResourceRun), waiting: z.array(ResourceWait) }),
+  slots: z.object({ max: z.number(), running: z.array(ResourceRun), beside: z.array(ResourceRun), waiting: z.array(ResourceWait) }),
   eta: z.object({ etaMs: z.number().nullable(), unknown: z.number() }),
   consumers: z
     .object({
@@ -2070,7 +2071,7 @@ export const BacklogItem = z.object({
 export type BacklogItem = z.infer<typeof BacklogItem>;
 
 /** `workspaceId`: the registered workspace whose repository the Issue is in (#n is per repository). */
-export const BacklogStartInput = z.object({ workspaceId: z.string(), action: BacklogAction });
+export const BacklogStartInput = z.object({ workspaceId: z.string(), action: BacklogAction, runner: RunnerId.optional(), model: z.string().optional(), effort: z.string().optional() });
 export type BacklogStartInput = z.infer<typeof BacklogStartInput>;
 
 /**

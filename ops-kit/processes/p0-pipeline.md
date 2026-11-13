@@ -44,4 +44,4 @@ PBI #{{n}} の今の状況を確認してください。sub-issue の Task（状
 
 ## entry close
 
-.claude/skills/pbi-complete/SKILL.md の「6. PBI を閉じる」に従い、PBI #{{n}} の受け入れ条件を検証結果つきで埋め、## 結果 を書いて閉じてください（Task は全部閉じ、利用者確認の項目も確認済みです）。
+.claude/skills/pbi-complete/SKILL.md の「6. PBI を閉じる」に従い、PBI #{{n}} の受け入れ条件を検証結果つきで埋め、## 結果 を書いて閉じてください（Task は全部閉じています。利用者確認の項目や判断待ちが残っていれば、同じ節の 4 のとおり閉じずに In review のまま残し、残った項目を報告してください）。

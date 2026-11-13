@@ -6,7 +6,7 @@ const MB = 1024 * 1024;
 const GB = 1024 * MB;
 const memory: NonNullable<OpsResources["memory"]> = { availableBytes: 1 * GB, totalBytes: 3.7 * GB, swapUsedBytes: 1.1 * GB, floorBytes: 1.5 * GB };
 const run = (o: Partial<ResourceRun>): ResourceRun => ({ pid: 1, name: "local-ci 3320", cwd: "/w", taskId: "t1", taskTitle: "キャッシュの読みを直す", queuedAt: "2026-11-03T10:00:00Z", startedAt: "2026-11-03T10:00:00Z", typicalMs: null, samples: 0, verdict: "none", ...o });
-const wait = (o: Partial<ResourceWait>): ResourceWait => ({ pid: 2, name: "review codex", cwd: "/w", taskId: "t2", taskTitle: "リソース画面の実装", queuedAt: "2026-11-03T10:05:00Z", reason: "slot", typicalMs: null, samples: 0, ...o });
+const wait = (o: Partial<ResourceWait>): ResourceWait => ({ pid: 2, name: "review codex", cwd: "/w", taskId: "t2", taskTitle: "リソース画面の実装", queuedAt: "2026-11-03T10:05:00Z", reason: "slot", memoryOnly: false, typicalMs: null, samples: 0, ...o });
 
 test("resources: a slot wait names the holder's Task and run, a memory wait the free memory and the floor", () => {
   expect(waitLine(wait({}), [run({})], memory)).toBe("枠: キャッシュの読みを直す の local-ci 3320");
@@ -16,6 +16,7 @@ test("resources: a slot wait names the holder's Task and run, a memory wait the 
   expect(waitLine(wait({ reason: "memory" }), [], memory)).toBe("空きメモリ 1.0 GB < 下限 1.5 GB");
   expect(waitLine(wait({ reason: "memory" }), [], null)).toBe("空きメモリ（下限未満）");
   expect(waitLine(wait({ reason: "memory" }), [], { ...memory, availableBytes: 2 * GB })).toBe("空きメモリ 2.0 GB（下限 1.5 GB を超えた。次の見回りで枠を見る）"); // read after the free memory rose, before the kit looks again
+  expect(waitLine(wait({ reason: "memory", memoryOnly: true }), [run({})], memory)).toBe("メモリ（枠なし）"); // a run that takes no slot waits for the memory only
   expect(runOwner({ taskId: null, taskTitle: null })).toBe("Task の外");
 });
 

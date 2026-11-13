@@ -4,7 +4,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { BACKLOG_USAGE, readRecords, runBacklog, triageUsage } from "./backlog-client.ts";
 import { JOB_USAGE, runJob } from "./job-client.ts";
 import { bootstrap } from "./bootstrap.ts";
-import { defaultConfig, findConfig, loadConfig, loadPublicSync, projectOf, publicCopyRefusal, resolveProject, type OpsConfig } from "./config.ts";
+import { defaultConfig, findConfig, loadConfig, loadPublicSync, projectOf, publicCopyRefusal, resolveProject, sectionName, type OpsConfig } from "./config.ts";
 import { realGh, repoOf, type GhClient } from "./gh.ts";
 import { exportCopy } from "./export-copy.ts";
 import { resolveReviewThread } from "./forge-github.ts";
@@ -227,7 +227,15 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
         return null;
       }
     };
-    return runBacklog(command === "backlog" ? rest : args, env, { out, err }, { phase, gh, project, config });
+    // the PBI's required sections, for an edit's check (none when the configuration cannot be read: null and Story Points only)
+    const pbiSections = () => {
+      try {
+        return loadConfig(configPath).sections.pbi.map(sectionName);
+      } catch {
+        return [];
+      }
+    };
+    return runBacklog(command === "backlog" ? rest : args, env, { out, err }, { phase, gh, project, config, pbiSections });
   }
   if (command === "job") {
     if (rest[0] === "--help" || rest[0] === "-h") {

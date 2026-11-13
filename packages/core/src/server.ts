@@ -55,7 +55,7 @@ import { RUNNER_CONFIG_PATHS, runnerConfigOf } from "./runner-config.ts";
 import { CloneError, parseGithubRepo, registerWorkspace, unusableWorkspaces, WorkspaceClones } from "./workspace-clone.ts";
 import { copyDeletable, inspectRemoval } from "./workspace-remove.ts";
 import { noteQueue, pruneClosed, QUEUE_KEY, readQueue, saveQueue } from "./backlog-queue.ts";
-import { ACTION_FOR_STAGE, checkFieldTypes, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, cancelStoredOperation, withdrawStoredOperation, buildDirectPrompt, buildStartPrompt, subagentModelAlias, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, storedIssueHeads, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, overlapLine, isOverlapped, promotionNote, promotionStep, type PromotionHold, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, flowHeldIn, flowHeldLine, flowRunning, flowStopped, type FlowLimit, type GhRunner, type OtherRepo } from "./backlog.ts";
+import { ACTION_FOR_STAGE, closableByApi, checkFieldTypes, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, cancelStoredOperation, withdrawStoredOperation, buildDirectPrompt, buildStartPrompt, subagentModelAlias, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, storedIssueHeads, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, overlapLine, isOverlapped, promotionNote, promotionStep, type PromotionHold, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, flowHeldIn, flowHeldLine, flowRunning, flowStopped, type FlowLimit, type GhRunner, type OtherRepo } from "./backlog.ts";
 import { issueOf, reduceStops, stopMarks, stopRecordsFor, stuckSchedule } from "./stops.ts";
 import { approvalBatches, approvalWindowNote, BatchAnswers } from "./approval-batch.ts";
 import { ASK_HISTORY_MS, ON_HOLD_RESUME, asksFromBacklog, closedHits, asksFromTasks, blockersOf, dedupeAsks, noticeAsks, policyPbi, rankAsks, prFacts, questionsReply, resumeOfTask, type NoticeRecord, type PolicyEnv, type PrFacts } from "./asks.ts";
@@ -715,12 +715,13 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     return { ...stored, rules: { ...rules, status: t.status, outcome: t.outcome, costUsd: db.taskCost(t.id).costUsd } };
   };
   /**
-   * The runner a Task that starts by itself is decided on, before 上限のときの代わり: the kind's own when it is
-   * detected, else the caller's (a schedule's), else the saved one; only a saved one that is not detected falls back to
+   * The runner a Task that starts by itself is decided on, before 上限のときの代わり: the caller's (a start request's,
+   * or a schedule's) when it is detected, else the kind's own when it is detected, else the saved one; only a saved one that is not detected falls back to
    * claude. null = none to start on. startMetaTask starts on it, and backlog-next reads its usage.
    */
   const decidedRunner = (kind: AutoStartKind, runner?: RunnerId): RunnerId | null => {
     const auto = settings().autoStart;
+    if (runner && adapterMap.has(runner)) return runner;
     const own = auto.byKind[kind];
     if (own && adapterMap.has(own.runner)) return own.runner;
     const configured = runner ?? auto.runner;
@@ -740,8 +741,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   /**
    * A fixed-prompt Task on the meta workspace (feedback, backlog stage buttons, backlog-next): the saved
    * 自動で始まる Task の既定 (`settings.autoStart`), else claude. A schedule passes its own runner and id. A backlog stage button on another
-   * workspace's Issue, and a request filed for another workspace, pass that workspace (`ws`). The kind's own choice
-   * (`autoStart.byKind`) wins over both, when its runner is detected; otherwise it is as if there were none.
+   * workspace's Issue, and a request filed for another workspace, pass that workspace (`ws`). The caller's runner
+   * wins over the kind's own choice (`autoStart.byKind`), which wins over the saved one, each when its runner is detected.
    */
   const startMetaTask = async (req: { kind: AutoStartKind; title: string; prompt: string; attachmentIds?: string[]; runner?: RunnerId; model?: string; effort?: string; scheduleId?: string; shadowRunner?: null; budgetUsd?: number | null; ws?: Workspace; stage?: Task["stage"]; process?: string; processReason?: string; note?: string }): Promise<{ task: Task } | { error: string; status: number }> => {
     const meta = req.ws ?? metaWorkspace();
@@ -749,7 +750,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     if (!existsSync(meta.path)) return { error: "workspace directory does not exist", status: 409 };
     const auto = settings().autoStart;
     const own = auto.byKind[req.kind];
-    if (own && adapterMap.has(own.runner)) req = { ...req, runner: own.runner, model: own.model, effort: own.effort };
+    if (!(req.runner && adapterMap.has(req.runner)) && own && adapterMap.has(own.runner)) req = { ...req, runner: own.runner, model: own.model, effort: own.effort };
     const decided = decidedRunner(req.kind, req.runner);
     if (!decided) return { error: "ランナーが検出されていません", status: 409 };
     // the decided runner at its limit: the order's next one, on its CLI default model and effort
@@ -3637,19 +3638,20 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           if (!item) return bad(`#${req.params.number} はバックログにありません`, 404);
           const can = canStartStoredBacklog(item);
           if (!can.ok) return bad(`#${n} は始めません: ${can.why}`, 409);
-          const { action } = parsed.data;
-          // 閉じる goes with closable, not with a stage; complete on an in-progress item is backlog-next's resume
+          const { action, runner: wantRunner, model: wantModel, effort: wantEffort } = parsed.data;
+          if (wantRunner && !adapterMap.has(wantRunner)) return bad("ランナーが検出されていません", 409);
+          // 閉じる goes with closableByApi (Tasks all closed, 利用者確認 may remain), not with a stage; complete on an in-progress item is backlog-next's resume
           // of a stalled one, started from a waiting row's 続きを始める
           const resume = action === "complete" && item.stage === "in-progress";
           // 直行で直す only from a request with no PBI yet, like PBI にする; it is not a stage, so backlog-next never picks it
           if (action === "direct" && item.stage !== "request") return bad(`直行で始められるのは派生 PBI の無い要望だけです（#${n} は ${item.stage}）`, 409);
           // another repository's worktree and branch rules are its own (the PBI's scope: the meta workspace first)
           if (action === "direct" && ws.kind !== "meta") return bad("直行で始められるのは meta workspace の要望だけです", 409);
-          if (action !== "direct" && (action === "close" ? !item.closable : !(ACTION_FOR_STAGE[item.stage] === action || resume))) return bad(`#${n} は ${item.stage}${action === "close" ? "（閉じられない）" : ""} なので ${action} は始められません`, 409);
+          if (action !== "direct" && (action === "close" ? !closableByApi(item) : !(ACTION_FOR_STAGE[item.stage] === action || resume))) return bad(`#${n} は ${item.stage}${action === "close" ? "（閉じられない）" : ""} なので ${action} は始められません`, 409);
           // the row's button does not start what backlog-next leaves for its overlap: the reason is the log's;
           // a running stage Task is the 409 with its taskId below (the row opens it), not a refusal
           if (action === "complete" && !activeStageTask(ws.id, n) && isOverlapped(item)) return json({ error: overlapLine([item]).join("・") }, 409);
-          const r = await startStage({ ws, meta: meta!, item, action, resume: resume ? { tasksDone: item.tasks?.done ?? 0 } : undefined });
+          const r = await startStage({ ws, meta: meta!, item, action, resume: resume ? { tasksDone: item.tasks?.done ?? 0 } : undefined, ...(wantRunner ? { extra: { runner: wantRunner, model: wantModel, effort: wantEffort } } : {}) });
           if ("active" in r) return json({ error: `#${n} の工程 Task が実行中です`, taskId: r.active.id }, 409);
           if ("starting" in r) return json({ error: `#${n} の工程 Task を開始しているところです`, taskId: null }, 409);
           return "task" in r ? json(r.task, 201) : bad(r.error, r.status);

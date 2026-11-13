@@ -68,18 +68,20 @@ export function verdict(elapsedMs: number, typical: Typical | undefined): RunVer
 }
 
 /**
- * When everything running and waiting would be done, in ms from `now`: each slot is free when its running run has had its
+ * When everything running and waiting for a slot would be done (a wait of a job that takes no slot, `memoryOnly`, is left out), in ms from `now`: each slot is free when its running run has had its
  * median (0 once past it), and the waiting runs, oldest first, each take the slot free earliest for their kind's median.
  * Runs with no median are counted in `unknown` and left out. Nothing running or waiting gives `etaMs` null. The free
  * memory's return is not in it: when it rises depends on other Tasks.
  */
 export function estimateDone(
   running: Array<{ name: string; startedAt: string }>,
-  waiting: Array<{ name: string; queuedAt: string }>,
+  allWaiting: Array<{ name: string; queuedAt: string; memoryOnly?: boolean }>,
   max: number,
   typical: Map<string, Typical>,
   now: number,
 ): { etaMs: number | null; unknown: number } {
+  // a job that takes no slot (`memoryOnly`) does not use the slots' time: it is not waited for here
+  const waiting = allWaiting.filter((w) => !w.memoryOnly);
   if (!running.length && !waiting.length) return { etaMs: null, unknown: 0 };
   let unknown = 0;
   const median = (name: string) => {
@@ -142,7 +144,8 @@ export function opsResources(db: Db, opts: { home: string; procRoot?: string; no
     slots: {
       max: heavy.config.max,
       running: heavy.running.map((r) => ({ ...r, taskTitle: title(r.taskId), ...of(r.name), verdict: verdict(now - Date.parse(r.startedAt), of(r.name)) })),
-      waiting: heavy.waiting.map((w) => ({ ...w, taskTitle: title(w.taskId), ...of(w.name) })),
+      beside: heavy.beside.map((r) => ({ ...r, taskTitle: title(r.taskId), ...of(r.name), verdict: verdict(now - Date.parse(r.startedAt), of(r.name)) })),
+      waiting: heavy.waiting.map((w) => ({ ...w, memoryOnly: w.memoryOnly === true, taskTitle: title(w.taskId), ...of(w.name) })),
     },
     eta: estimateDone(heavy.running, heavy.waiting, heavy.config.max, typical, now),
     consumers: latest?.ts

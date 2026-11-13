@@ -497,9 +497,10 @@ export class Db {
   /** The records of a repository as last read, by kind and id, and in the order of the table. Frozen: every caller shares them. */
   private readonly backlogRecordsCopy = new Map<string, { rows: Map<string, BacklogRecord>; records: BacklogRecord[] }>();
 
-  constructor(path: string) {
+  /** `busyTimeoutMs`: a batch beside the daemon (the host's archive) waits longer than the daemon's own few seconds. */
+  constructor(path: string, opts: { busyTimeoutMs?: number } = {}) {
     this.sqlite = new Database(path, { create: true });
-    this.sqlite.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;`);
+    this.sqlite.exec(`PRAGMA busy_timeout = ${opts.busyTimeoutMs ?? BUSY_TIMEOUT_MS}; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;`);
     // Only a database with no tables yet takes this; an older file is switched once below.
     this.sqlite.exec("PRAGMA auto_vacuum = INCREMENTAL");
     this.sqlite.exec(SCHEMA);

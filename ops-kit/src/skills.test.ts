@@ -101,6 +101,9 @@ test("skills: a request is checked against the repository's premises before it b
   const scope = request.slice(request.indexOf("### 3. PBI を書く"), request.indexOf("\n### 4. "));
   for (const word of ["`## 守れる範囲`", "守れないものを受け入れ条件にしない"]) expect(scope).toContain(word);
   const tasks = read("pbi-to-tasks");
+  // the body is read from .issue.body (.body is null: writing it back emptied PBIs), fresh, before Ready writes Tasks and the log
+  const ready = tasks.slice(tasks.indexOf("### 5. PBI を Ready にする"), tasks.indexOf("\n## 報告"));
+  expect(ready).toContain("`ops-kit backlog view <PBI> --fresh --json | jq -r .issue.body");
   expect(tasks).toMatch(/前提.*矛盾していたら.*Task にしない。PBI に `## 判断待ち`.*Ready にしない。.*`request-to-backlog` の「2\.5 前提と照らす」/);
   const own = read("issue-workflow");
   const list = own.slice(own.indexOf("使う側のリポジトリが持つもの"), own.indexOf("\n## 階層"));
