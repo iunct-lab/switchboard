@@ -37,6 +37,8 @@ export interface CoreConfig {
   runnerIdleMs: number;
   /** How long a review job may print nothing before `ops-kit idle-run` cuts it (seconds). Default 900, as cross-runner-review runs it. */
   jobReviewIdleS: number;
+  /** How long sb-dockerd may run with no container and no docker client before the daemon stops it (ms). */
+  dockerdIdleMs: number;
   /**
    * The Markdown folder that is the source of truth for rules / commands / notes. Override with SWITCHBOARD_KNOWLEDGE.
    * Default ~/Knowledge, or <home>/Knowledge when the data folder is temporary (a test or a fake-runner daemon must not
@@ -115,6 +117,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig {
     webDist: join(codeRoot, "apps", "web", "dist"),
     runnerIdleMs: numberOr(env.SWITCHBOARD_RUNNER_IDLE_MS, 10 * 60 * 1000),
     jobReviewIdleS: numberOr(env.SWITCHBOARD_JOB_REVIEW_IDLE_S, 900),
+    dockerdIdleMs: positiveOr(env.SWITCHBOARD_DOCKERD_IDLE_MIN, 10) * 60_000,
     knowledgeDir: env.SWITCHBOARD_KNOWLEDGE ? resolve(expandHome(env.SWITCHBOARD_KNOWLEDGE)) : join(homeIsTemp ? home : homedir(), "Knowledge"),
     tokenPath: env.SWITCHBOARD_TOKEN_FILE ?? join(home, "token"),
     publicUrl: env.SWITCHBOARD_PUBLIC_URL,
@@ -153,6 +156,11 @@ function numberOr(raw: string | undefined, fallback: number): number {
   if (raw === undefined || raw === "") return fallback;
   const n = Number(raw);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function positiveOr(raw: string | undefined, fallback: number): number {
+  const n = numberOr(raw, fallback);
+  return n > 0 ? n : fallback;
 }
 
 /** Walk up until we find the workspace root package.json named "switchboard". */

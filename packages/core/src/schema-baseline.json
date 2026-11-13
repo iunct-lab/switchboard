@@ -25,6 +25,7 @@
   "perf_samples": ["ts","journey","device","build","ms","task_id","bytes","events"],
   "quota": ["runner","window","utilization","resets_at","ts"],
   "routing_log": ["id","task_id","workspace_id","cwd","suggested","rule_id","reason","chosen","ts","suggested_by"],
+  "schedule_log": ["ts","schedule_id","text"],
   "schedules": ["id","title","cron","workspace_id","runner","prompt","budget_usd","enabled","last_run_at","last_task_id","next_run_at","created_at","action","model","last_result","effort"],
   "settings": ["key","json"],
   "staging": ["id","task_id","path","rel","kind","before_text","after_text","status","ts","decided_at","diff_text","stat"],

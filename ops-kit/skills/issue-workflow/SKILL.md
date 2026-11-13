@@ -236,8 +236,8 @@ Issue は「何をやったか」の正本。PR の説明は補助。**本文 1 
 2. **逸脱時**: スコープを削る・増やす・別案にする、検証できないと分かった、依存が壊れていた — その都度コメント（`ops-kit backlog comment`）。
    「なぜ」を必ず書く。判断が利用者に属する（お金・他 OS・破壊的変更・要件の解釈）なら、**止めて聞く**。マージ判定が merge を返した PR のマージは依頼の範囲なので聞かない（`pbi-complete` の「この依頼が含む範囲」）。聞く場所は問いの種類で分ける（「判断待ちの出し方」。実装の判断は Issue、運用の確認は Task の会話）。
 
-3. **完了時（Task）**: PR の `Closes #N` でマージ時に自動 close される（それで良い）。GitHub 連携の無い workspace（`BACKLOG_WORKSPACE` がある）の Task は GitHub に無く自動では閉じないので、マージの後に `ops-kit backlog edit <Task> --state closed` で閉じる（PR は `Backlog-Task: <Task>`。`pbi-complete` はこの Task も閉じてから PBI を閉じる）。**マージ直後に結果コメント**（下のテンプレ、マージ日入り。`ops-kit backlog comment <Task> --body-file "$W/result.md"`）
-   を書き、Project の Status を Done にする（`ops-kit backlog set <Task> Status Done`）。結果コメントの無い Task は「閉じているが未完了」として扱う。
+3. **完了時（Task）**: PR の `Closes #N` でマージ時に自動 close される（それで良い）。手順が残る PR は `Refs #N` で、マージしても Task は閉じず、Status を In review から In progress に戻して残りを次の PR で終える（`task-to-pr` の 5）。GitHub 連携の無い workspace（`BACKLOG_WORKSPACE` がある）の Task は GitHub に無く自動では閉じないので、マージの後に `ops-kit backlog edit <Task> --state closed` で閉じる（PR は `Backlog-Task: <Task>`。`pbi-complete` はこの Task も閉じてから PBI を閉じる）。**マージ直後に結果コメント**（下のテンプレ、マージ日入り。`ops-kit backlog comment <Task> --body-file "$W/result.md"`）
+   を書き、Project の Status を Done にする（`ops-kit backlog set <Task> Status Done`）。`Refs #N` の PR では結果コメントは途中経過（マージした PR と残りの手順）にし、Status は In review から In progress に戻す（Done にしない）。結果コメントの無い Task は「閉じているが未完了」として扱う。
 4. **完了時（PBI）**: 受け入れ条件のチェックボックスを埋め、各行の行末に証跡の在りかを書く — その条件を満たした Task の結果コメントか PR の URL、実行したコマンドと出力（テスト名、画面で見た事実も）、利用者の判断で決まった条件は `## 回答` のコメントの URL。在りかを書けない行は `- [ ]` のまま理由を書き、その PBI は閉じない（後から満たしたかを辿れないまま閉じない）。`（利用者確認: …）` の行は利用者の返事が無いまま自分でチェックしない（返事の記録は「利用者確認の項目」の「会話で返事を受けたら」。名指しした判断待ちが全部回答済みの行は、同じ節の「判断待ちへの回答で確かめる行」でチェックする）。「結果」節を書いてから**手動で** close（`ops-kit backlog edit <PBI> --state closed`。PR から Closes しない）。
 5. **Milestone**: PBI が閉じるたびに Milestone の説明を更新する（残り / やらないと決めたもの）。全 PBI が Done か「やらない」なら Milestone を close。
 6. **決まりはメモリではなく記載に**: 利用者の指摘から決まり（どう振る舞うか）ができたら、記載（スキル・テンプレート・CLAUDE.md・docs）に書く。どのリポジトリでも同じなら共通キットのスキル、そのリポジトリだけなら CLAUDE.md か docs。ランナーのメモリ（Claude Code の auto memory など）には、ホスト・アカウント・経緯の事実だけを置く。メモリは書いたランナーにしか届かず（Codex は Claude のメモリを読まない）、記載と食い違っても誰も気づかない。記載と食い違うメモリを見つけたら、記載に揃えて直すか消す
@@ -328,7 +328,7 @@ ops-kit backlog edit <n> --add-label on-hold      # 外す: --remove-label on-ho
 
 Status 遷移（Project の Status。設定するのは作業者 = このワークフローを実行する LLM）:
 - PBI: Backlog →（Task が揃った）Ready →（最初の Task に着手）In progress →（結果節を書いた）Done
-- Task: Backlog →（着手コメント）In progress →（PR を作った）In review →（マージ + 結果コメント）Done
+- Task: Backlog →（着手コメント）In progress →（PR を作った）In review →（マージ + 結果コメント）Done。`Refs` の PR なら（マージ + 途中経過のコメント）In progress に戻り、次の PR で同じ道をたどる（記録の義務 3）
 
 結果コメントのテンプレ（Task）:
 ```
@@ -392,7 +392,7 @@ GitHub API の注意（GraphQL の 1 時間の枠は 1 ユーザー 5,000 ポイ
 - 短時間に十数回叩くと secondary rate limit（毎分）で GraphQL が全部 403 になる。当たったら数分待つ。
 
 Project: `ops.config.json` の `projectUrl`（Status: Backlog / Ready / In progress / In review / Done。Story Points: 数値）。
-Ready は「Task が全部 sub-issue で揃った PBI」にだけ付ける。Task 自身は Backlog → In progress → In review（PR あり）→ Done。
+Ready は「Task が全部 sub-issue で揃った PBI」にだけ付ける。Task 自身は Backlog → In progress → In review（PR あり）→ Done（`Refs` の PR のマージ後は In progress に戻る）。
 
 ### GitHub の接続・認証の切り分け
 

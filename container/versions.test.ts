@@ -1,4 +1,4 @@
-// test-reads: container/Dockerfile aws/host/devtools.sh aws/host/node.sh
+// test-reads: container/Dockerfile aws/host/devtools.sh aws/host/node.sh aws/host/host.test.ts ops-kit/src/cli.test.ts
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -61,5 +61,42 @@ describe("container/Dockerfile pins", () => {
     expect(dockerfile).toContain("useradd -u 1000 -m -d /home/switchboard switchboard");
     expect(dockerfile).toContain("/home/switchboard/repos");
     expect(dockerfile).not.toMatch(/x86_64|amd64/);
+  });
+});
+
+// The ci stage is where `sb-offload --ci` runs aws/host/host.test.ts and ops-kit/src/cli.test.ts; a command they call that the image lacks fails there
+// and not on the host. One table, command -> the dnf package of the base or ci stage ("-" = the base image already has it: coreutils, bash, grep).
+describe("ci stage tools", () => {
+  const stageInstall = (stage: string): string[] => {
+    const m = new RegExp(`FROM \\S+ AS ${stage}\\b[\\s\\S]*?RUN dnf install -y -q ([^\\n&\\\\]*(?:\\\\\\n[^\\n&\\\\]*)*)`).exec(dockerfile);
+    return (m?.[1] ?? "").replace(/\\\n/g, " ").split(/\s+/).filter(Boolean);
+  };
+  const installed = new Set([...stageInstall("base"), ...stageInstall("ci")]);
+  const tools: Record<string, string> = {
+    bash: "-", grep: "-", id: "-", mv: "-", touch: "-", sha256sum: "-",
+    git: "git", sqlite3: "sqlite", tar: "tar", find: "findutils", zstd: "zstd",
+    rsync: "rsync", ps: "procps-ng", pgrep: "procps-ng", file: "file", cmp: "diffutils", // cmp: aws/host/pre-rebuild.sh, aws/host/runner-sync.sh
+    // the repository's own command, on PATH from ops-kit/bin
+    "ops-kit": "-",
+  };
+
+  test("every command in the table has its package in the base or ci stage's dnf install", () => {
+    expect(installed.size).toBeGreaterThan(10);
+    for (const [cmd, pkg] of Object.entries(tools)) {
+      if (pkg !== "-") expect({ cmd, installed: installed.has(pkg) }).toEqual({ cmd, installed: true });
+    }
+  });
+
+  // tests run `bun` from dirname(process.execPath); the npm package has only bun.exe there, so the Dockerfile links it
+  test("the image links bun next to the bun.exe that process.execPath names", () => {
+    expect(dockerfile).toMatch(/ln -s bun\.exe \/usr\/local\/lib\/nodejs\/lib\/node_modules\/bun\/bin\/bun\s/);
+  });
+
+  test("a command the two test files spawn is in the table", () => {
+    const missing: string[] = [];
+    for (const f of ["aws/host/host.test.ts", "ops-kit/src/cli.test.ts"]) {
+      for (const m of read(f).matchAll(/Bun\.spawn(?:Sync)?\(\[\s*"([^"]+)"/g)) if (!(m[1]! in tools)) missing.push(`${f}: ${m[1]}`);
+    }
+    expect([...new Set(missing)]).toEqual([]);
   });
 });

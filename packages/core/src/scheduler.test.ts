@@ -7,7 +7,8 @@ import { type AgentEvent, type AskBatch, type RunnerAdapter, type RunnerSession,
 import { approvalWindowNote } from "./approval-batch.ts";
 import { loadConfig } from "./config.ts";
 import { Db } from "./db.ts";
-import { Scheduler, UI_LAYERS_PROMPT } from "./scheduler.ts";
+import { nextRun } from "./cron.ts";
+import { missedRuns, Scheduler, UI_LAYERS_PROMPT } from "./scheduler.ts";
 import { scanAllRepos } from "./secretscan.ts";
 import { noticeAsks, scanFindings } from "./asks.ts";
 import { promotionNote, type PromotionHold } from "./backlog.ts";
@@ -428,6 +429,7 @@ describe("scheduler backlog-next", () => {
     now = Date.parse("2026-09-06T03:00:00");
     expect(await sc.tick()).toHaveLength(0);
     expect(sc.recentLog().at(-1)).toContain("飛ばした (due): Claude の使用量 five_hour が 85%");
+    expect(db.recentScheduleLog(1)[0]!.scheduleId).toBe(s.id);
     expect(db.getSchedule(s.id)!.nextRunAt).toBe(Date.parse("2026-09-07T03:00:00"));
   });
 
@@ -573,6 +575,18 @@ describe("scheduler secret-scan", () => {
     const broken = new Scheduler(db, tasks, () => now, undefined, async () => { throw new Error("x"); });
     await broken.runNow(s.id, "manual");
     expect(db.getSchedule(s.id)!.lastResult!.cursors).toEqual(kept);
+  });
+
+  test("secret-scan: a firing while the previous scan still reads is skipped and kept with its schedule id (#3770)", async () => {
+    setUp();
+    let release!: () => void;
+    const sc = new Scheduler(db, tasks, () => now, undefined, () => new Promise((r) => (release = () => r({ lines: [], summary: { repos: 0, hits: 0, failed: 0 } }))));
+    const s = sc.create({ title: "検査", cron: "0 4 * * *", workspaceId: wsId, runner: "claude", prompt: "", action: "secret-scan" });
+    const first = sc.runNow(s.id, "manual");
+    expect(await sc.runNow(s.id, "manual")).toBeNull();
+    expect(db.recentScheduleLog(1)[0]).toMatchObject({ scheduleId: s.id, text: "検査: 飛ばした (manual): 前の検査がまだ終わっていない" });
+    release();
+    await first;
   });
 
   test("secret-scan: a scan that throws leaves a failed result with the reason, and the schedule still moves to the next day", async () => {
@@ -749,6 +763,7 @@ describe("scheduler approval-window", () => {
     const first = slow.runNow(s.id, "manual");
     expect(await slow.runNow(s.id, "manual")).toBeNull();
     expect(slow.recentLog().join("\n")).toContain("承認待ち: 飛ばした (manual): 前の発火がまだ終わっていない");
+    expect(db.recentScheduleLog(1)[0]!.scheduleId).toBe(s.id);
     release();
     await first;
     expect(slow.recentLog().join("\n")).toContain("承認待ち: 遅いメモ (manual)");
@@ -827,6 +842,7 @@ describe("scheduler ui-layers", () => {
     expect(await sc.runNow(s.id)).toBeNull();
     expect(db.listTasks()).toHaveLength(0);
     expect(sc.recentLog().at(-1)).toMatch(/点検: ui-layers を飛ばした \(manual\): Claude の 7 日枠が 85% で閾値 80% 以上/);
+    expect(db.recentScheduleLog(1)[0]!.scheduleId).toBe(s.id);
 
     // under it: one Task on claude with the fixed instruction, tied to the schedule
     db.upsertQuota("claude", "seven_day", 0.5, now / 1000 + 3600);
@@ -848,4 +864,86 @@ test("UI_LAYERS_PROMPT names scripts that exist, with flags they read", () => {
     for (const [flag] of rest!.matchAll(/--[\w-]+/g)) expect(`${script} ${flag}: ${src.includes(`"${flag}"`)}`).toBe(`${script} ${flag}: true`);
   }
   expect(readFileSync(join(root, "scripts/ui-layers-report.ts"), "utf8")).toContain('"--history"');
+});
+
+describe("scheduler log in the database (#3770)", () => {
+  const setup = async () => {
+    const sc = new Scheduler(db, tasks, () => now);
+    const s = sc.create({ title: "nightly", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "p" });
+    const t = await sc.runNow(s.id);
+    return { sc, s, t: t as Task };
+  };
+
+  test("a skipped firing is kept with its schedule id", async () => {
+    const { sc, s, t } = await setup();
+    db.updateTask(t.id, { status: "running" });
+    expect(await sc.runNow(s.id)).toBeNull();
+    const rows = db.recentScheduleLog(10);
+    expect(rows.at(-1)).toMatchObject({ scheduleId: s.id, ts: now });
+    expect(rows.at(-1)!.text).toContain(`nightly: skipped (manual); previous run ${t.id} is still running`);
+  });
+
+  test("a log line that cannot be written does not throw from note", () => {
+    const broken = Object.assign(Object.create(db), { addScheduleLog: () => { throw new Error("database is closed"); } }) as typeof db;
+    const sc = new Scheduler(broken, tasks, () => now);
+    expect(() => sc.note("after shutdown", "sch_x")).not.toThrow();
+  });
+
+  test("a firing due after a stop fires once and keeps the count of the runs that passed", async () => {
+    const { sc, s } = await setup();
+    db.updateTask(db.getSchedule(s.id)!.lastTaskId as string, { status: "done" });
+    const day = 24 * 3600 * 1000;
+    db.updateSchedule(s.id, { nextRunAt: nextRun("0 3 * * *", new Date(now - 3 * day))!.getTime() });
+    const started = await sc.tick();
+    expect(started).toHaveLength(1);
+    const row = db.recentScheduleLog(10).find((r) => r.text.includes("停止中に過ぎた"));
+    expect(row).toMatchObject({ scheduleId: s.id, text: "nightly: 停止中に過ぎた 2 回を飛ばした (due)" });
+    expect(db.recentScheduleLog(10).filter((r) => r.text.includes("started"))).toHaveLength(2);
+  });
+
+  test("runs that pass while the daemon is up (a long firing held the ticker) are written apart from a stop", async () => {
+    const { sc, s } = await setup();
+    const day = 24 * 3600 * 1000;
+    expect(await sc.tick()).toHaveLength(0); // the first tick since the start: nothing due
+    db.updateTask(db.getSchedule(s.id)!.lastTaskId as string, { status: "done" });
+    db.updateSchedule(s.id, { nextRunAt: nextRun("0 3 * * *", new Date(now - 3 * day))!.getTime() });
+    expect(await sc.tick()).toHaveLength(1);
+    const texts = db.recentScheduleLog(10).map((r) => r.text);
+    expect(texts).toContain("nightly: 前の発火が長引いて過ぎた 2 回を飛ばした (due)");
+    expect(texts.some((t) => t.includes("停止中に過ぎた"))).toBe(false);
+  });
+
+  test("missedRuns counts after from and before to, and stops at the cap", () => {
+    const h = 3600 * 1000;
+    const from = Date.UTC(2026, 0, 1, 0, 0);
+    expect(missedRuns("0 * * * *", from, from + 3 * h)).toBe(2);
+    expect(missedRuns("0 * * * *", from, from)).toBe(0);
+    expect(missedRuns("0 * * * *", from, from + 5000 * h)).toBe(1000);
+    expect(missedRuns("0 * * * *", from, from + 5000 * h, 5)).toBe(5);
+  });
+
+  test("a Scheduler made again on the same db returns the earlier lines", async () => {
+    const { sc } = await setup();
+    sc.note("before the restart");
+    const again = new Scheduler(db, tasks, () => now);
+    expect(again.recentLog().at(-1)).toBe(`${new Date(now).toISOString()} before the restart`);
+    expect(again.recentLog()).toEqual(sc.recentLog());
+  });
+
+  test("recentLog is the last 50 lines, oldest first", () => {
+    const sc = new Scheduler(db, tasks, () => now);
+    for (let i = 0; i < 60; i++) sc.note(`line ${i}`);
+    const log = sc.recentLog();
+    expect(log).toHaveLength(50);
+    expect(log[0]).toContain("line 10");
+    expect(log.at(-1)).toContain("line 59");
+  });
+
+  test("a line from 91 days ago is dropped by the next write", () => {
+    const sc = new Scheduler(db, tasks, () => now);
+    db.addScheduleLog({ ts: now - 91 * 24 * 3600 * 1000, scheduleId: null, text: "old" });
+    db.addScheduleLog({ ts: now - 89 * 24 * 3600 * 1000, scheduleId: null, text: "recent" });
+    sc.note("new");
+    expect(db.recentScheduleLog(10).map((r) => r.text)).toEqual(["recent", "new"]);
+  });
 });

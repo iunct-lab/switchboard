@@ -1003,3 +1003,74 @@ describe("tag-ci: a worsening that stays (perf streak)", () => {
     expect(body).not.toContain("other.key");
   });
 });
+
+describe("tag-ci: known failures (known-failures.json at the tag's commit)", () => {
+  const entry = (test: string, until: string) => ({ test, issue: 4800, until });
+  // the registry is read at the tag's own sha: `git ls-tree <sha> -- known-failures.json`, then `git show <sha>:known-failures.json`
+  const withRegistry = (f: ReturnType<typeof fake>, registry: unknown[] | string, today: string, shown: string[] = []): TagCiDeps => ({
+    ...f.d,
+    today,
+    sh: async (cmd, cwd, input) => {
+      if (cmd.includes("ls-tree") && cmd.at(-1) === "known-failures.json") return "known-failures.json\n";
+      if (cmd.includes("show") && cmd.at(-1)!.endsWith(":known-failures.json")) {
+        shown.push(cmd.at(-1)!);
+        return typeof registry === "string" ? registry : JSON.stringify(registry);
+      }
+      return f.d.sh(cmd, cwd, input);
+    },
+  });
+  // bun 1.4's output: the file's heading, `(fail)` lines without the file, the summary
+  const fails = (...lines: string[]) => ({ at: "bun test", output: ["a.test.ts:", ...lines, "", " 0 pass", ` ${lines.length} fail`].join("\n") });
+
+  test("only registered failures: pass, the release lists what was subtracted", async () => {
+    const f = fake([{ tag: "v1.0.0", body: "", fail: fails("(fail) a > b [3.00ms]") }]);
+    const shown: string[] = [];
+    const r = await tagCi(withRegistry(f, [entry("a.test.ts > a > b", "2026-12-01")], "2026-11-13", shown), "o/r", "/repo", CACHE, NO_HOST);
+    expect(r.map((x) => x.result)).toEqual(["pass"]);
+    expect(tagCiExit(r)).toBe(0);
+    expect(shown).toEqual([`${shaOf("v1.0.0")}:known-failures.json`]);
+    const body = f.bodies.get("v1.0.0")!;
+    expect(tagResult(body, shaOf("v1.0.0"))).toBe("pass");
+    expect(body).toContain(`[tag-ci] pass ${shaOf("v1.0.0")}`);
+    expect(body).toContain("既知の失敗を差し引いた（known-failures.json、このタグのコミットの登録）:\n- `a.test.ts > a > b`（#4800、期限 2026-12-01）");
+    expect(body).not.toContain("が落ちた:");
+    expect(failedIn(body)).toBeNull();
+  });
+
+  test("an unregistered failure mixed in: fail, the lines are the unregistered ones only", async () => {
+    const f = fake([{ tag: "v1.0.0", body: "", fail: fails("(fail) a > b", "(fail) c > d") }]);
+    const r = await tagCi(withRegistry(f, [entry("a.test.ts > a > b", "2026-12-01")], "2026-11-13"), "o/r", "/repo", CACHE, NO_HOST);
+    expect(r.map((x) => x.result)).toEqual(["fail"]);
+    const body = f.bodies.get("v1.0.0")!;
+    expect(body).toContain("`bun test` が落ちた:\n    (fail) c > d");
+    expect(failedIn(body)).toEqual({ step: "bun test", fails: ["(fail) c > d"] });
+    expect(body).not.toContain("(fail) a > b");
+  });
+
+  test("an expired entry is not subtracted and is named", async () => {
+    const f = fake([{ tag: "v1.0.0", body: "", fail: fails("(fail) a > b") }]);
+    const r = await tagCi(withRegistry(f, [entry("a.test.ts > a > b", "2026-11-12")], "2026-11-13"), "o/r", "/repo", CACHE, NO_HOST);
+    expect(r.map((x) => x.result)).toEqual(["fail"]);
+    const body = f.bodies.get("v1.0.0")!;
+    expect(body).toContain("`bun test` が落ちた:\n    (fail) a > b");
+    expect(body).toContain("期限切れで差し引かなかった:\n- `a.test.ts > a > b`（#4800、期限 2026-11-12）");
+  });
+
+  test("a registry that cannot be read: nothing subtracted, the Release says so and the walk goes on", async () => {
+    const f = fake([{ tag: "v1.0.0", body: "", fail: fails("(fail) a > b") }]);
+    const r = await tagCi(withRegistry(f, `[{"test":"a.test.ts > a > b","issue":4800}]`, "2026-11-13"), "o/r", "/repo", CACHE, NO_HOST);
+    expect(r.map((x) => x.result)).toEqual(["fail"]);
+    const body = f.bodies.get("v1.0.0")!;
+    expect(body).toContain(`[tag-ci] fail ${shaOf("v1.0.0")}`);
+    expect(body).toContain("known-failures.json（このタグのコミットの登録）を読めなかったので差し引いていない: known-failures.json: line 1: until must be");
+  });
+
+  test("another failed step beside bun test: nothing is subtracted", async () => {
+    const f = fake([{ tag: "v1.0.0", body: "", fail: fails("(fail) a > b") }]);
+    const d = withRegistry(f, [entry("a.test.ts > a > b", "2026-12-01")], "2026-11-13");
+    const step = d.step!;
+    const r = await tagCi({ ...d, step: async (s, c, ...rest) => (s.trim() === "bun run typecheck" ? { code: 1, output: "error TS1" } : step(s, c, ...rest)) }, "o/r", "/repo", CACHE, NO_HOST);
+    expect(r.map((x) => x.result)).toEqual(["fail"]);
+    expect(f.bodies.get("v1.0.0")).not.toContain("既知の失敗を差し引いた");
+  });
+});

@@ -1,9 +1,9 @@
 // test-reads: packages/core/src/config.ts packages/core/src/server.ts
 import { recordingText, skipRecordings, assertRecordings } from "../../../scripts/recordings.ts";
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, truncateSync, utimesSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, truncateSync, utimesSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import type { AgentEvent, AskList, AskQuestion, RunnerAdapter, RunnerDetection, RunnerId, RoutingStats, RunnerSession, Schedule, StartOptions, Task, Workspace } from "@switchboard/protocol";
 import { OpsLatency, OpsLoad, OpsResources, OpsStops, TaskSummary } from "@switchboard/protocol";
 import { Database } from "bun:sqlite";
@@ -132,8 +132,23 @@ const j = (r: Response) => r.json() as Promise<any>;
 let home: string;
 let core: Awaited<ReturnType<typeof startServer>>;
 let base: string;
+const savedPath = process.env.PATH;
+let noDockerPath = "";
 
 beforeAll(async () => {
+  // The end of a task also runs the container cleanup, which records a status line a moment after `done` when `docker` is on PATH
+  // (the CI image has the CLI and no dockerd). Tests that read a task's events or times right after `done` would see that line
+  // arrive in the middle of their reads, so the file runs without docker on PATH; none of it uses docker (containers.test.ts does).
+  // A directory that holds `docker` stands in as a copy of itself without it, so what else lives there (bun, gh, node) is still found.
+  const shim = mkdtempSync(join(tmpdir(), "switchboard-test-nodocker-"));
+  noDockerPath = shim;
+  process.env.PATH = (savedPath ?? "").split(delimiter).map((d, i) => {
+    if (d === "" || !existsSync(join(d, "docker"))) return d;
+    const copy = join(shim, String(i));
+    mkdirSync(copy);
+    for (const name of readdirSync(d)) if (name !== "docker") try { symlinkSync(join(d, name), join(copy, name)); } catch { /* a name that cannot be linked is left out */ }
+    return copy;
+  }).join(delimiter);
   home = mkdtempSync(join(tmpdir(), "switchboard-test-"));
   const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_PORT: "0", ...NO_HISTORY });
   core = await startServer(cfg, [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: NO_GH });
@@ -141,6 +156,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  process.env.PATH = savedPath;
+  rmSync(noDockerPath, { recursive: true, force: true });
   await core.stop();
   rmSync(home, { recursive: true, force: true });
 });

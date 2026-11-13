@@ -38,10 +38,11 @@ function idleAdapter(): RunnerAdapter {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const j = (r: Response) => r.json() as Promise<any>;
+/** A process that is gone, or killed and waiting for its parent to reap it: in a container with no init, the orphan's new parent never does, so a zombie is not "still running". */
 const alive = (pid: number) => {
   try {
     process.kill(pid, 0);
-    return true;
+    return !/^\d+ \(.*\) [ZX]/s.test(readFileSync(`/proc/${pid}/stat`, "utf8"));
   } catch {
     return false;
   }

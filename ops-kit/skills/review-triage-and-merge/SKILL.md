@@ -42,7 +42,11 @@ git commit -am "fix(<area>): review follow-ups for #<PR> — <何を>"     # ame
 gh stack rebase && gh stack push        # 下の枝を直したら上に cascade（stacked-pr-delivery）。単発なら git push
 ```
 
-修正を push したら `cross-runner-review` の 4（修正後の見直し）を回す。
+見直しを頼む前に、修正した指摘ごとに、指摘の `Scenario:`（入力・状態）を再現して直ったことを確かめる。テストで書ける指摘は、2 の表の「修正」の行の回帰テスト（修正前に fail を見たもの）が pass すること。テストで書けない指摘（文書・手順・PR 本文）は、Scenario の入力・状態を再現したコマンドと出力か、直した行の `path:line` を読み直した結果。再現して直っていなければ、見直しを頼まずに直し続ける。
+
+修正が Task の手順・受け入れ条件から外れたら（別の直し方にした、範囲を広げた・削った）、見直しの前に PR 本文の「逸脱」の項（`task-to-pr` の「レビュアーへ」）と Task のコメント（`ops-kit backlog comment <Task>`）を更新し、PBI の決定ログ（`ops-kit backlog edit <PBI>`）に日付つきで 1 行書く。
+
+修正を push するたびに（ローカルの変更ではコミットするたびに）、見直しの前に PR 本文を今の実装に合わせ（今の本文を `gh pr view $N --json body -q .body > "$W/pr.md"` で取って直し、`gh pr edit $N --body-file "$W/pr.md"`。`W` は `W=$(mktemp -d /tmp/<リポジトリ名>.triage<PR番号>.XXXXXX)` で作り、4 の要約にも使う。ローカルの変更では今の本文を `ops-kit backlog view <変更> --json | jq -r .issue.body > "$W/pr.md"` で取り（`gh pr view` は呼ばない）、`ops-kit backlog edit <変更> --body-file "$W/pr.md"` で直す。概要・レビュアーへ・テスト観点のうち修正で変わったもの。squash でマージするリポジトリではこれがマージのメッセージになる）、それから `cross-runner-review` の 4（修正後の見直し）を回す。5 のチェックリストの「PR 本文が今の差分と一致」は最後の確認として残す。
 
 **1 回のレビューの修正は 1 コミットにまとめてから見直しを頼む**。nit ごとにコミットすると、コミットごとに新しい見直しが次の端のケースを見つけ、収束しない（nit は直さなくてよいもの）。直すのは blocker / should-fix と、同じコミットに入る 1 行程度の nit だけ。ほかの nit は対処不要か記録（Issue）にする。直し方は、端のケースを広げる推測より、限界を書いた保守的な規則を選ぶ。文書に「〜だけ」「全部」のような網羅の主張を書かない。
 
@@ -53,7 +57,7 @@ gh stack rebase && gh stack push        # 下の枝を直したら上に cascade
 **1 コメント 1 返信**。返信の型:
 
 ```
-修正: <何をどう直したか> — <commit sha 短縮>、テスト <name>（追加先: 既存 / 単体 / 新規）
+修正: <何をどう直したか> — <commit sha 短縮>。確かめた方法: <回帰テスト名（追加先: 既存 / 単体 / 新規）か、Scenario を再現したコマンドと結果>
 Issue 化: #<n>（<なぜこの PR の外か>）
 対処不要: <根拠>。<ファイル / Issue / doc>
 回答: <事実>
@@ -112,7 +116,7 @@ gh pr view <next> --json baseRefName,mergeable,mergeStateStatus   # base=main �
 ```
 
 マージ直後:
-1. Task に結果コメント（`issue-workflow` のテンプレ: PR / 変更 / 検証 / レビュー指摘と対応 / 残したもの。`ops-kit backlog comment <Task> --body-file "$W/result.md"`）、`ops-kit backlog set <Task> Status Done`。Task は PR の `Closes` で自動では閉じないことがあるので、open のままなら続けて `ops-kit backlog edit <Task> --state closed`
+1. PR が `Refs #<Task>` なら、Task に途中経過のコメント（マージした PR と残りの手順）を書き、Status を `In review` から `In progress` に戻して閉じない（残りの手順は次の PR で終える。`issue-workflow` の記録の義務 3）。`Closes #<Task>` なら、Task に結果コメント（`issue-workflow` のテンプレ: PR / 変更 / 検証 / レビュー指摘と対応 / 残したもの。`ops-kit backlog comment <Task> --body-file "$W/result.md"`）、`ops-kit backlog set <Task> Status Done`。Task は PR の `Closes` で自動では閉じないことがあるので、open のままなら続けて `ops-kit backlog edit <Task> --state closed`
 2. `git fetch -q origin && git ls-tree -r --name-only origin/main | grep -i <消したもの>` で復活ファイルが無いか（fetch しないと古い origin/main を見る。`-r` が無いと直下しか出ない）
 3. `cross-runner-review` で作ったレビュー用ディレクトリ（`/tmp/<リポジトリ名>.review<PR番号>.XXXXXX` の実際のパス）を消す。glob で消さない。切れたセッションの残りは、次のレビューの前（`cross-runner-review` の 1）に同じリポジトリ名 + `gh` で MERGED / CLOSED と確かめたものだけ消える。worktree はスタックが全部入ってから `git worktree remove`
 4. PBI の全 Task が Done なら PBI の結果節（`pbi-complete`）

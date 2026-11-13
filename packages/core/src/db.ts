@@ -254,6 +254,11 @@ CREATE TABLE IF NOT EXISTS api_requests (
   ts INTEGER NOT NULL, method TEXT NOT NULL, route TEXT NOT NULL, status INTEGER NOT NULL, ms REAL NOT NULL, bytes INTEGER
 );
 CREATE INDEX IF NOT EXISTS api_requests_ts ON api_requests (ts);
+-- the schedules log (scheduler.note): one row per line, schedule_id when it belongs to one schedule. 90 days
+CREATE TABLE IF NOT EXISTS schedule_log (
+  ts INTEGER NOT NULL, schedule_id TEXT, text TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS schedule_log_ts ON schedule_log (ts);
 -- a job a Task asked the daemon to run as the daemon's child (jobs.ts): local CI or a review. pid = the wrapper shell
 CREATE TABLE IF NOT EXISTS jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, task_id TEXT NOT NULL, pr INTEGER NOT NULL, runner TEXT, cwd TEXT NOT NULL,
@@ -271,6 +276,8 @@ const PERF_KEEP_MS = 30 * 24 * 3600 * 1000;
 const PERF_PERIOD_MS = 7 * 24 * 3600 * 1000;
 const OPS_LOAD_KEEP_MS = 7 * 24 * 3600 * 1000;
 const API_REQUESTS_KEEP_MS = 7 * 24 * 3600 * 1000;
+/** How long the schedules log keeps its lines. */
+export const SCHEDULE_LOG_KEEP_MS = 90 * 24 * 3600 * 1000;
 /** A row of api_requests. `bytes` = the response's content-length, null when it has none. */
 export type ApiRequestRow = { ts: number; method: string; route: string; status: number; ms: number; bytes: number | null };
 /** A row of ops_load: the unit's cgroup at one minute; `top` is the JSON of the 10 largest processes. */
@@ -2020,6 +2027,20 @@ export class Db {
       for (const r of rows) insert.run(r.ts, r.method, r.route, r.status, r.ms, r.bytes);
       this.sqlite.query("DELETE FROM api_requests WHERE ts < ?").run(now - API_REQUESTS_KEEP_MS);
     })();
+  }
+
+  /** Saves a schedules log line and drops those older than 90 days, in one transaction. */
+  addScheduleLog(row: { ts: number; scheduleId: string | null; text: string }) {
+    this.sqlite.transaction(() => {
+      this.sqlite.query("INSERT INTO schedule_log (ts, schedule_id, text) VALUES (?, ?, ?)").run(row.ts, row.scheduleId, row.text);
+      this.sqlite.query("DELETE FROM schedule_log WHERE ts < ?").run(row.ts - SCHEDULE_LOG_KEEP_MS);
+    })();
+  }
+
+  /** The last `limit` lines of the schedules log, oldest first. */
+  recentScheduleLog(limit: number): Array<{ ts: number; scheduleId: string | null; text: string }> {
+    const rows = this.sqlite.query("SELECT ts, schedule_id, text FROM schedule_log ORDER BY ts DESC, rowid DESC LIMIT ?").all(limit) as Array<{ ts: number; schedule_id: string | null; text: string }>;
+    return rows.reverse().map((r) => ({ ts: r.ts, scheduleId: r.schedule_id, text: r.text }));
   }
 
   /** Saves the Web UI's journey timings and drops those older than 30 days, in one transaction. */
