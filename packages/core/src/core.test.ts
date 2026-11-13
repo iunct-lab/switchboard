@@ -2623,7 +2623,7 @@ describe("core daemon", () => {
       expect(saved.defaultPermissionMode).toEqual({ claude: "plan" });
       expect(saved.runners[0].defaultPermissionMode).toBe("plan");
       expect((await fetch(`${b8}/api/health`).then(j)).runners[0].defaultPermissionMode).toBe("plan");
-      expect(c8.db.getSetting("settings", {})).toEqual({ developSelf: true, defaultPermissionMode: { claude: "plan" }, subagentEffort: {}, autoResume: {}, bedrock: {}, shadowRunner: null, routing: { llm: { enabled: false, runner: "claude", model: "", timeoutMs: 5000 } }, judge: { enabled: true, runner: "codex", model: "gpt-6-luna" }, autoStart: { runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" }, reviewRunner: "other", maxRunners: 3, evals: { judge: { enabled: true } }, titles: { auto: true }, quotaAndResume: { backlogQuotaLimit: 0.8, retryDelayMs: 900_000, retryMaxDelayMs: 14_400_000, maxLimitStops: 8, resumePrompt: "使用上限がリセットされました。中断した箇所から作業を続けてください。", maxStopResumes: 2, thinSample: 5, flowLimit: 1, defaultBudgetUsd: null }, judgeAndChoice: { judgeFallbackRunner: "claude", judgeFallbackModel: "claude-haiku-4-5", judgeTimeoutMs: 60_000, workspaceChoiceTimeoutMs: 60_000 }, newDefaults: { taskRunner: "claude", scheduleCron: "0 3 * * *" }, prices: {}, models: {}, hiddenModels: {}, outbound: { classifierLog: false, runnerTelemetry: false } });
+      expect(c8.db.getSetting("settings", {})).toEqual({ developSelf: true, defaultPermissionMode: { claude: "plan" }, subagentEffort: {}, autoResume: {}, bedrock: {}, shadowRunner: null, routing: { llm: { enabled: false, runner: "claude", model: "", timeoutMs: 5000 } }, judge: { enabled: true, runner: "codex", model: "gpt-6-luna" }, autoStart: { runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" }, reviewRunner: "other", maxRunners: 3, evals: { judge: { enabled: true } }, titles: { auto: true }, quotaAndResume: { backlogQuotaLimit: 0.8, retryDelayMs: 900_000, retryMaxDelayMs: 14_400_000, maxLimitStops: 8, resumePrompt: "使用上限がリセットされました。中断した箇所から作業を続けてください。", maxStopResumes: 2, thinSample: 5, flowLimit: 1, defaultBudgetUsd: null, fableBudgetUsd: null }, judgeAndChoice: { judgeFallbackRunner: "claude", judgeFallbackModel: "claude-haiku-4-5", judgeTimeoutMs: 60_000, workspaceChoiceTimeoutMs: 60_000 }, newDefaults: { taskRunner: "claude", scheduleCron: "0 3 * * *" }, prices: {}, models: {}, hiddenModels: {}, outbound: { classifierLog: false, runnerTelemetry: false } });
       const t4 = await post("/api/tasks", { cwd: h8, title: "t4", prompt: "p", runner: "claude" }).then(j);
       expect(t4.permissionMode).toBe("plan");
       expect(starts[2]?.permissionMode).toBe("plan");
@@ -3131,6 +3131,26 @@ describe("core daemon", () => {
     }
   });
 
+  test("settings fable default budget: the initial value is null; PATCH saves it, null clears it, a non-positive value is 400", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-test-fablebudget-"));
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { lingers: true })], { port: 0 });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    const get = () => fetch(`${b}/api/settings`).then(j);
+    const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    try {
+      expect((await get()).quotaAndResume.fableBudgetUsd).toBeNull();
+      expect((await patch({ quotaAndResume: { fableBudgetUsd: 150 } })).status).toBe(200);
+      expect((await get()).quotaAndResume).toMatchObject({ fableBudgetUsd: 150, defaultBudgetUsd: null });
+      expect((await patch({ quotaAndResume: { fableBudgetUsd: 0 } })).status).toBe(400);
+      expect((await get()).quotaAndResume.fableBudgetUsd).toBe(150);
+      expect((await patch({ quotaAndResume: { fableBudgetUsd: null } })).status).toBe(200);
+      expect((await get()).quotaAndResume.fableBudgetUsd).toBeNull();
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
   test("defaultBudgetUsd: the settings' one value is the budget of a Task made without one; an explicit budget is kept; null puts it back to none", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-defbudget-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { lingers: true })], { port: 0 });
@@ -3142,6 +3162,13 @@ describe("core daemon", () => {
       expect((await patch({ quotaAndResume: { defaultBudgetUsd: 2 } })).status).toBe(200);
       expect((await create({})).budgetUsd).toBe(2);
       expect((await create({ budgetUsd: 5 })).budgetUsd).toBe(5);
+      // a Fable Task takes the Fable value first (#1989); other models and an unset Fable value keep the general one
+      expect((await create({ model: "claude-fable-5-1" })).budgetUsd).toBe(2);
+      expect((await patch({ quotaAndResume: { fableBudgetUsd: 7 } })).status).toBe(200);
+      expect((await create({ model: "claude-fable-5-1" })).budgetUsd).toBe(7);
+      expect((await create({ model: "claude-opus-5" })).budgetUsd).toBe(2);
+      expect((await create({ model: "claude-fable-5-1", budgetUsd: 5 })).budgetUsd).toBe(5);
+      expect((await patch({ quotaAndResume: { fableBudgetUsd: null } })).status).toBe(200);
       expect((await patch({ quotaAndResume: { defaultBudgetUsd: 0 } })).status).toBe(400); // positive only
       expect((await patch({ quotaAndResume: { defaultBudgetUsd: null } })).status).toBe(200);
       expect((await create({})).budgetUsd).toBeNull();
@@ -3160,7 +3187,7 @@ describe("core daemon", () => {
       // (a) the defaults are today's constants, and GET says what they are
       const first = await get();
       const constants = {
-        quotaAndResume: { backlogQuotaLimit: QUOTA_LIMIT, retryDelayMs: FALLBACK_DELAY_MS, retryMaxDelayMs: MAX_FALLBACK_DELAY_MS, maxLimitStops: MAX_CONSECUTIVE_STOPS, resumePrompt: first.quotaAndResume.resumePrompt, maxStopResumes: MAX_STOP_RESUMES, thinSample: 5, flowLimit: 1, defaultBudgetUsd: null },
+        quotaAndResume: { backlogQuotaLimit: QUOTA_LIMIT, retryDelayMs: FALLBACK_DELAY_MS, retryMaxDelayMs: MAX_FALLBACK_DELAY_MS, maxLimitStops: MAX_CONSECUTIVE_STOPS, resumePrompt: first.quotaAndResume.resumePrompt, maxStopResumes: MAX_STOP_RESUMES, thinSample: 5, flowLimit: 1, defaultBudgetUsd: null, fableBudgetUsd: null },
         judgeAndChoice: { judgeFallbackRunner: JUDGE_FALLBACK.runner, judgeFallbackModel: JUDGE_FALLBACK.model, judgeTimeoutMs: JUDGE_TIMEOUT_MS, workspaceChoiceTimeoutMs: 60_000 },
         newDefaults: { taskRunner: "claude", scheduleCron: "0 3 * * *" },
       };

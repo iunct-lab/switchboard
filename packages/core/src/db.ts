@@ -1137,6 +1137,12 @@ export class Db {
     return r ? rowToTask(r) : null;
   }
 
+  /** The stage Task of `actions` in a workspace that left its slot (not activeStage) last. */
+  lastEndedStageTask(workspaceId: string, actions: BacklogAction[]): Task | null {
+    const r = this.sqlite.query(`SELECT * FROM tasks WHERE workspace_id = ? AND stage_action IN (${actions.map(() => "?").join(", ")}) AND NOT ${activeStage("slot")} ORDER BY status_at DESC LIMIT 1`).get(workspaceId, ...actions);
+    return r ? rowToTask(r) : null;
+  }
+
   /** Ids of every stage Task of a backlog Issue in a workspace. */
   stageTaskIds(workspaceId: string, issue: number): string[] {
     return (this.sqlite.query("SELECT id FROM tasks WHERE workspace_id = ? AND stage_issue = ?").all(workspaceId, issue) as Array<{ id: string }>).map((r) => r.id);

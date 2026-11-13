@@ -367,7 +367,14 @@ ops-kit backlog retry <num>   # GitHub が断った（failed）編集を、原�
 ops-kit lint --fresh                           # 規約の検査（作った・書き直したら必ず。violations: 0 かつ exit 0 で合格）
 ```
 
-- **本文を書き換える前に、読んだ本文を確かめる**: 読み取りが（アプリの再起動などで）空で返っても、空の本文の `edit --body-file` は受け付けられ、そのまま GitHub に送られる。読む → 直す → 送るは `&&` でつなぎ、送る前に `[ -s "$W/body.md" ] && head -1 "$W/body.md" | grep -q '^## '` を挟む。元の本文は、書き換えが GitHub に届いたのを見るまで `$W` に残す
+- **backlog に書く連結コマンドは前段の失敗で止める**: 読む → 直す → 送るを 1 回の Bash でつなぐなら `set -euo pipefail` で始め、途中が失敗したら次の書き込みに進まない。本文や番号を作る前段（`python3`・`jq` など）の失敗を `2>/dev/null` で隠さない（隠すと空の本文のまま `edit` まで進む。読み取りが（アプリの再起動などで）空で返っても、空の本文の `edit --body-file` は受け付けられ、そのまま GitHub に送られる）。送る前に `[ -s "$W/body.md" ] && head -1 "$W/body.md" | grep -q '^## '` を挟み、通らなければ `|| exit 1` で止める（`&&` の途中の失敗は `set -e` では止まらず、後ろに足した書き込みが走る）。Issue 番号は `create` や `view` の出力を `grep` で切り出さず（送信待ちの Issue や別の `#N` を拾う）、`ops-kit backlog view <番号か localId> --json | jq -e '.issue.number | select(. > 0)'` で取る（番号の付く前は `.issue.number` が 0 なので `select(. > 0)` が要る。出力が無く非 0 で終わったら書き込まずに待つか止める）。元の本文は、書き換えが GitHub に届いたのを見るまで `$W` に残す。2026-11-02 の週に、番号の取り違えから無関係の Issue の親・フィールドを書き換えた事故があった
+  ```bash
+  set -euo pipefail
+  N=$(ops-kit backlog view <番号か localId> --json | jq -e '.issue.number | select(. > 0)')
+  ops-kit backlog view "$N" --fresh --json | jq -r '.issue.body' > "$W/orig.md"; <直す> "$W/orig.md" > "$W/body.md"
+  [ -s "$W/body.md" ] && head -1 "$W/body.md" | grep -q '^## ' || { echo "本文が空か ## で始まらない" >&2; exit 1; }
+  ops-kit backlog edit "$N" --body-file "$W/body.md"
+  ```
 
 - **`--fresh` が要るとき**: 最新の `## 回答` を読むとき（工程の開始・再開）、着手・マージ・閉じるの判断の前。アプリに送信と取込みを済ませてから答える。正本はアプリの保存データで、GitHub は同期先: アプリが GitHub に届かない（上限・障害）ときは保存値と「GitHub 未同期」（最終同期の時刻つき、stderr）で答えて exit 0 なので、その値でそのまま進める。exit 2 はアプリに届かない・未取得だけで「判定できない」（下の「GitHub の接続・認証の切り分け」をしてから止める）。PR・レビュー・マージ判定は GitHub が正のまま（`merge-gate` は毎回 GitHub を読む）
 - lint は `BACKLOG_URL` があればアプリの保存値を読む（`--fresh` で取込みをさせる。アプリが知らないリポジトリでは exit 2）。並列ガードの `overlap` はアプリが同期しているリポジトリならアプリの保存値を読み、GitHub 同期の workspace では先に取込みをさせる。どちらも GitHub に届かなければ保存値で判定し「GitHub 未同期」を出す。占有（claim / release）と着手の印は、アプリが同期しているリポジトリではアプリの保存のコメントに書き、先着は書いた順（`comments[].seq`）で決める（消せないので、譲るときは取り下げの印を書く）。`--repo` は付けなくてよい（付けてもアプリの保存に書く）。アプリが知らないリポジトリと `BACKLOG_URL` の無い環境だけが GitHub に書いて読み、先着はコメントの id で決める（譲るときは印を消す）

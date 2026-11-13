@@ -238,6 +238,7 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
         <TextField label={t(settings.resumePrompt)} hint={t(settings.resumePromptHint)} value={qr.resumePrompt} def={d.quotaAndResume.resumePrompt} multiline disabled={saving} onSave={(v) => save({ quotaAndResume: { resumePrompt: v } })} />
         <NumberField label={t(settings.maxStopResumes)} unit={t(settings.unitTimes)} value={qr.maxStopResumes} def={d.quotaAndResume.maxStopResumes} disabled={saving} onSave={(v) => save({ quotaAndResume: { maxStopResumes: v } })} />
         <NumberField label={t(settings.thinSample)} unit={t(settings.unitItems)} hint={t(settings.thinSampleHint)} value={qr.thinSample} def={d.quotaAndResume.thinSample} disabled={saving} onSave={(v) => save({ quotaAndResume: { thinSample: v } })} />
+        <BudgetField label={t(settings.fableBudget)} hint={t(settings.fableBudgetHint)} value={qr.fableBudgetUsd} def={d.quotaAndResume.fableBudgetUsd} disabled={saving} onSave={(v) => save({ quotaAndResume: { fableBudgetUsd: v } })} />
         <ResetButton disabled={saving} onClick={() => save({ quotaAndResume: null })} />
       </SettingsCard>
 
@@ -758,6 +759,29 @@ function NumberField(props: { label: string; unit?: string; scale?: number; step
       <span className="hint">{props.unit ?? ""}</span>
       <span className="muted">{t(settings.defaultValue, { value: `${shown(props.def)}${props.unit ? ` ${props.unit}` : ""}` })}</span>
     </label>
+  );
+}
+
+/** A budget in USD that may be empty (= none): an emptied box saves null, a positive number saves itself, anything else is not saved. */
+function BudgetField(props: { label: string; hint?: string; value: number | null; def: number | null; disabled: boolean; onSave: (v: number | null) => Promise<void> }) {
+  const shown = (v: number | null) => (v === null ? "" : String(v));
+  const [text, setText] = useState<string | null>(null);
+  const commit = (typed: string) => {
+    setText(null);
+    const n = typed.trim() === "" ? null : Number(typed);
+    if (n === props.value || (n !== null && !(n > 0))) return;
+    void props.onSave(n);
+  };
+  return (
+    <>
+      <label className="num-field">
+        <span className="hint">{props.label}</span>
+        <input type="number" step={1} min={0} aria-label={props.label} value={text ?? shown(props.value)} disabled={props.disabled} onChange={(e) => setText(e.target.value)} onBlur={(e) => commit(e.currentTarget.value)} onKeyDown={(e) => e.key === "Enter" && commit(e.currentTarget.value)} style={{ width: 88 }} />
+        <span className="hint" />
+        <span className="muted">{t(settings.defaultValue, { value: props.def === null ? t(settings.noBudget) : `$${props.def}` })}</span>
+      </label>
+      {props.hint && <div className="hint">{props.hint}</div>}
+    </>
   );
 }
 

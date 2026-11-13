@@ -765,6 +765,18 @@ test("stage: a stage Task in `background` status, with a daemon job or a reply b
   db.close();
 });
 
+test("stage: lastEndedStageTask picks the stage Task that left its slot last, not the one created last", () => {
+  const db = new Db(join(dir, "switchboard.db"));
+  const mk = (id: string, status: "done" | "running", action: "complete" | "to-tasks", createdAt: number, statusAt: number) => db.insertTask({ id, workspaceId: "ws", title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue: Number(id.slice(2)), action }, statusAt, createdAt, updatedAt: statusAt });
+  mk("t_1", "done", "complete", 1, 30); // created first, ended last
+  mk("t_2", "done", "complete", 2, 20); // created later, ended earlier
+  mk("t_3", "running", "complete", 3, 40); // still in its slot
+  mk("t_4", "done", "to-tasks", 4, 50); // not an action asked for
+  expect(db.lastEndedStageTask("ws", ["complete", "close"])!.id).toBe("t_1");
+  expect(db.lastEndedStageTask("other", ["complete", "close"])).toBeNull();
+  db.close();
+});
+
 test("stage: a database from before the stage columns takes the Issue and stage of a stage Task from its title once, and four lookups read the columns", () => {
   const path = join(dir, "switchboard.db");
   new Db(path).close();

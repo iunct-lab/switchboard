@@ -69,7 +69,7 @@ import { DEFAULT_EXAMPLE_COUNT, LlmSuggester, readOnlyMode } from "./suggest-llm
 import { WorkspaceSuggester } from "./suggest-workspace.ts";
 import { heavyStateDir } from "../../../ops-kit/src/heavy.ts";
 import { IN_FLIGHT, isWorking, TURN_DONE, workPhase } from "./task-status.ts";
-import { kitPath, type NewTaskInput, privateTmpOf, provisionalTitle, sweepPrivateTmps, TaskManager } from "./tasks.ts";
+import { isFableModel, kitPath, type NewTaskInput, privateTmpOf, provisionalTitle, sweepPrivateTmps, TaskManager } from "./tasks.ts";
 import { HistoryImporter } from "./history.ts";
 import { HostIdle, nextWakeFrom } from "./hostidle.ts";
 import { RunnerLogins } from "./runnerlogin.ts";
@@ -424,9 +424,14 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       tasks.record(t.id, { t: "status", text: `由来を記録できませんでした: ${(e as Error).message ?? e}` });
     }
   };
+  /** The settings' default budget for a Task of this model: a Fable Task takes `fableBudgetUsd` first (#1989), then `defaultBudgetUsd` (null = none). */
+  const defaultBudgetFor = (model: string | null | undefined): number | null => {
+    const qr = settings().quotaAndResume;
+    return (isFableModel(model) ? qr.fableBudgetUsd : null) ?? qr.defaultBudgetUsd;
+  };
   /** A local Task made without a budget takes the settings' default (null = none); an explicit one is kept. Cloud Tasks do not take it. */
-  const withDefaultBudget = <T extends { budgetUsd?: number | null }>(given: T): T => {
-    const defaultBudget = settings().quotaAndResume.defaultBudgetUsd;
+  const withDefaultBudget = <T extends { budgetUsd?: number | null; model?: string | null }>(given: T): T => {
+    const defaultBudget = defaultBudgetFor(given.model);
     return given.budgetUsd === undefined && defaultBudget !== null ? { ...given, budgetUsd: defaultBudget } : given;
   };
   /**
@@ -583,7 +588,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         writePolicies(db, recordUse(readPolicies(db), id, { at: Date.now(), askId: `approval:${task.id}:${ask.id}`, taskId: task.id, issue: issueOf(task), subject: { kind: "approval", op: ask.kind, target: v.match.subject, conditions: [], head: null } }));
       }
       return v;
-    }, pricing: pricingTable, defaultPermissionMode: savedDefaultMode, subagentEffort: (r) => settings().subagentEffort[r], defaultShadowRunner: () => settings().shadowRunner, attachments, privateTmpRoot: join(cfg.home, "tmp"), heavyStateDir: opts.heavyStateDir ?? heavyStateDir(homedir()), deviceAuthEnv: (id) => ({ DEVICE_AUTH_URL: `${localUrl()}/api/tasks/${id}/device-auth`, DEVICE_AUTH_TOKEN_FILE: cfg.tokenPath, SWITCHBOARD_DAEMON_HOME: cfg.home, BACKLOG_URL: `${localUrl()}/api/backlog`, BACKLOG_TOKEN_FILE: cfg.tokenPath, ...localBacklogEnv(id) }), otelFor: (id) => (settings().outbound.classifierLog ? { endpoint: `${localUrl()}/otel/${id}/v1/logs`, token: mcp.issue(id).token } : undefined), runnerTelemetry: () => settings().outbound.runnerTelemetry, dockerEnv: (id) => ({ DOCKER_MARK_LABEL: `${LABEL_KEY}=${id}`, DOCKER_MARK_LOG: join(dockerLogDir, `${id}.jsonl`) }), maxStopResumes: () => settings().quotaAndResume.maxStopResumes, maxRunners: () => settings().maxRunners, memoryHeadroom: () => (process.env.NODE_ENV === "test" ? null : memoryHeadroom()) /* the test daemons do not wait on the host's memory */, holdQueue: cfg.candidate, reviewRunner: () => settings().reviewRunner, mcpServers: startMcpServers, bedrock: (task) => { const b = bedrockOf(task.runner); if (b) bedrockTasks.add(task.id); else bedrockTasks.delete(task.id); return b; } });
+    }, pricing: pricingTable, defaultPermissionMode: savedDefaultMode, subagentEffort: (r) => settings().subagentEffort[r], defaultShadowRunner: () => settings().shadowRunner, defaultFableBudget: () => settings().quotaAndResume.fableBudgetUsd, attachments, privateTmpRoot: join(cfg.home, "tmp"), heavyStateDir: opts.heavyStateDir ?? heavyStateDir(homedir()), deviceAuthEnv: (id) => ({ DEVICE_AUTH_URL: `${localUrl()}/api/tasks/${id}/device-auth`, DEVICE_AUTH_TOKEN_FILE: cfg.tokenPath, SWITCHBOARD_DAEMON_HOME: cfg.home, BACKLOG_URL: `${localUrl()}/api/backlog`, BACKLOG_TOKEN_FILE: cfg.tokenPath, ...localBacklogEnv(id) }), otelFor: (id) => (settings().outbound.classifierLog ? { endpoint: `${localUrl()}/otel/${id}/v1/logs`, token: mcp.issue(id).token } : undefined), runnerTelemetry: () => settings().outbound.runnerTelemetry, dockerEnv: (id) => ({ DOCKER_MARK_LABEL: `${LABEL_KEY}=${id}`, DOCKER_MARK_LOG: join(dockerLogDir, `${id}.jsonl`) }), maxStopResumes: () => settings().quotaAndResume.maxStopResumes, maxRunners: () => settings().maxRunners, memoryHeadroom: () => (process.env.NODE_ENV === "test" ? null : memoryHeadroom()) /* the test daemons do not wait on the host's memory */, holdQueue: cfg.candidate, reviewRunner: () => settings().reviewRunner, mcpServers: startMcpServers, bedrock: (task) => { const b = bedrockOf(task.runner); if (b) bedrockTasks.add(task.id); else bedrockTasks.delete(task.id); return b; } });
   // Terminal sessions: what Claude Code wrote to ~/.claude/projects while nobody in Switchboard was watching.
   const claudeDanger = new Set((adapters.find((a) => a.id === "claude")?.permissionModes ?? []).filter((m) => m.danger).map((m) => m.value));
   const history = new HistoryImporter(db, { projectsDir: cfg.claudeProjectsDir, pollMs: cfg.historyPollMs, pricing: pricingTable, broadcast, isLive: (id) => tasks.isLive(id), dangerModes: claudeDanger, log: (m) => console.warn(m) });
@@ -853,6 +858,17 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     } finally {
       startingStage.delete(key);
     }
+  };
+  // the login GitHub refused (the import's failure kind): a stage is not started on it, a stored edit could not be sent either
+  const ghLoginRefused = (ws: Workspace) => syncsGithub(db.getWorkspaceBacklogSource(ws.id)) && backlog.state(ws).errorKind === "gh-login";
+  // the last implement-slot (complete / close, SLOT_OF_ACTION) stage Task ended on an `auth` stop and no import has succeeded since: the login is taken as still out (a successful settle moves lastSuccessfulSync and so lifts it)
+  const authStopHeld = (ws: Workspace): string | null => {
+    const source = db.getWorkspaceBacklogSource(ws.id);
+    if (!source || !syncsGithub(source)) return null;
+    const t = db.lastEndedStageTask(ws.id, ["complete", "close"]);
+    const stop = t ? db.listStopRecords([t.id]).at(-1) : undefined;
+    if (!t || !stop || stop.reason !== "auth" || stop.state === "resolved") return null;
+    return (db.getBacklogRepository(source)?.lastSuccessfulSync ?? 0) < t.statusAt ? `直前の工程 Task ${t.id} が認証で止まり、その後 GitHub から取り込めていない` : null;
   };
   /** Why `backlog.settle` failed, for a line in backlog-next's log. */
   const notSettled = (e: unknown) => (e instanceof BacklogError ? e.message : String((e as Error)?.message ?? e).slice(0, 200));
@@ -1674,13 +1690,13 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     };
     // read every workspace that has a free slot in parallel; one GitHub cannot be read for goes on with what is stored
     const read = await Promise.all(db.listWorkspaces().filter((ws) => backlogReads(ws) && (!only || ws.id === only.workspaceId)).map(async (ws) => {
-      if (!SLOTS.some((slot) => busy(ws.id, slot).length < ws.sweep[slot])) return { ws, items: [] as BacklogItem[], syncHeld: [] as string[], unsynced: null, flowRunning: 0, flowStopped: 0 };
+      if (!SLOTS.some((slot) => busy(ws.id, slot).length < ws.sweep[slot])) return { ws, items: [] as BacklogItem[], syncHeld: [] as string[], unsynced: null, ghLoginHeld: null, flowRunning: 0, flowStopped: 0 };
       if (!existsSync(ws.path)) return { ws, error: "workspace directory does not exist" };
       // the stored data is what is true: GitHub is brought up to date first when it can be reached, and when it
       // cannot (a limit, an outage) the workspace goes on with what is stored; only an Issue with a conflict is not picked
       // a narrow firing comes right after the import that cleared the waits: it is not read again here (the read right before a start still is)
       const unsynced = only ? null : await backlog.settle(ws).then(() => null, (e) => notSettled(e));
-      return { ws, ...(await load(ws)), unsynced };
+      return { ws, ...(await load(ws)), unsynced, ghLoginHeld: unsynced && ghLoginRefused(ws) ? unsynced : null };
     }));
     for (const r of read) {
       const { ws } = r;
@@ -1703,6 +1719,12 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         let reported = false;
         let reread = false;
         for (let n = 0; ; n++) {
+          // the import was refused the login: the 実装 slot starts nothing until it is back (the 計画 slot and the buttons go on)
+          const authHeld = slot === "implement" ? (r.ghLoginHeld ?? authStopHeld(ws)) : null;
+          if (authHeld) {
+            if (n === 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: GitHub の認証切れ: 始めない（${authHeld}）`);
+            break;
+          }
           const running = busy(ws.id, slot);
           if (running.length >= ws.sweep[slot]) {
             if (ws.sweep[slot] > 0 && n === 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}が埋まっている: ${running.join(" / ")}`);
@@ -1728,6 +1750,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           // read again right before the start: the sweep may have taken long since this workspace was read, and an
           // edit may have been kept meanwhile — GitHub when it can be reached, the stored data either way
           const late = await backlog.settle(ws).then(() => null, (e) => notSettled(e));
+          if (late && slot === "implement" && ghLoginRefused(ws)) {
+            skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: GitHub の認証切れ: 始めない（${late}）`);
+            break;
+          }
           if (late && !r.unsynced) skipped.push(`${ws.name}: GitHub と照合できない（保存データで進める）: ${late}`);
           const fresh = withActive({ fetchedAt: 0, items: (await storedBacklogReleased(ws)).items, errors: [], changes: [], syncs: [] }).items.find((i) => i.number === next.item.number);
           const can = fresh ? canStartStoredBacklog(fresh) : { ok: false as const, why: "バックログから無くなった" };
@@ -1800,7 +1826,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const note = approvalWindowNote((await currentAsks()).batches);
     return note ? note.title : "待ちなし";
   };
-  const scheduler = new Scheduler(db, tasks, Date.now, startNext, scanSecrets, () => settings().quotaAndResume.backlogQuotaLimit, autoRunner, approvalWindow, () => settings().quotaAndResume.defaultBudgetUsd);
+  const scheduler = new Scheduler(db, tasks, Date.now, startNext, scanSecrets, () => settings().quotaAndResume.backlogQuotaLimit, autoRunner, approvalWindow, defaultBudgetFor);
   // The monthly floor / ceiling / walls check is there from the start: put in once, so one the person deleted
   // stays deleted (a setting, not a migration: the row is theirs to change or remove from Schedules)
   const seedMeta = metaWorkspace();

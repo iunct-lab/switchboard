@@ -155,6 +155,17 @@ export function sweepPrivateTmps(root: string, maxAgeMs: number, removable: (tas
   return n;
 }
 
+/**
+ * True for any Fable version (claude-fable-5-1, claude-fable-5-2, ...), with a trailing context tag (`[1m]`), in
+ * Amazon Bedrock's form (global.anthropic.claude-fable-5-2) and as the bare alias `fable`. Not for Opus / Sonnet /
+ * Haiku or no model. The same reading of the name as `resolveModel` in pricing.ts.
+ */
+export function isFableModel(model: string | null | undefined): boolean {
+  if (!model) return false;
+  const name = model.replace(/\[[^\]]*\]$/, "").replace(/^([a-z]+\.)?(anthropic|openai)\./, "");
+  return name === "fable" || name.startsWith("claude-fable-");
+}
+
 export interface TaskManagerOptions {
   /** How a checkout's origin URL is read for the start check (originMismatch). Unset = git. */
   originOf?: (path: string) => string | null;
@@ -189,6 +200,8 @@ export interface TaskManagerOptions {
   subagentEffort?: (runner: RunnerId) => string | undefined;
   /** Saved shadow runner, used when a creation does not say; null / undefined = no shadow by default. */
   defaultShadowRunner?: () => RunnerId | null | undefined;
+  /** Settings `quotaAndResume.fableBudgetUsd`: the budget a Fable Task gets when it has none (#1989). Unset / null = none. */
+  defaultFableBudget?: () => number | null;
   /** Files attached to turns. Absent = `attachmentIds` are refused. */
   attachments?: AttachmentStore;
   /** The artifacts store: where an agent's `switchboard-artifact` fence registers a report. Unset = fences are read and refused. */
@@ -292,6 +305,7 @@ export class TaskManager {
   private defaultPermissionMode: TaskManagerOptions["defaultPermissionMode"];
   private subagentEffort: TaskManagerOptions["subagentEffort"];
   private defaultShadowRunner: TaskManagerOptions["defaultShadowRunner"];
+  private defaultFableBudget: TaskManagerOptions["defaultFableBudget"];
   private attachments: TaskManagerOptions["attachments"];
   private artifacts: TaskManagerOptions["artifacts"];
   private privateTmpRoot: string | undefined;
@@ -333,6 +347,7 @@ export class TaskManager {
     this.defaultPermissionMode = opts.defaultPermissionMode;
     this.subagentEffort = opts.subagentEffort;
     this.defaultShadowRunner = opts.defaultShadowRunner;
+    this.defaultFableBudget = opts.defaultFableBudget;
     this.attachments = opts.attachments;
     this.artifacts = opts.artifacts;
     this.privateTmpRoot = opts.privateTmpRoot;
@@ -561,10 +576,13 @@ export class TaskManager {
    * turn — `restartNext`) and the next turn resumes the same session with the new model.
    */
   async setModel(taskId: string, model: string | null): Promise<Task> {
-    this.requireLocal(this.mustGet(taskId));
-    const updated = this.db.updateTask(taskId, { model });
+    const before = this.mustGet(taskId);
+    this.requireLocal(before);
+    const budget = this.fableBudgetFor({ ...before, model }, before.model);
+    const updated = this.db.updateTask(taskId, budget === null ? { model } : { model, budgetUsd: budget });
     if (!updated) throw new Error(`task ${taskId} not found`);
     this.broadcast({ type: "task.updated", task: updated });
+    if (budget !== null) this.noteFableBudget(taskId, budget);
     const name = model ?? "CLI default";
     const live = this.live.get(taskId);
     if (!live) {
@@ -576,6 +594,23 @@ export class TaskManager {
     live.modelChanged = true;
     if (updated.status !== "running" && updated.status !== "waiting") await this.release(taskId);
     return updated;
+  }
+
+  /**
+   * The settings' Fable budget (#1989) for a local Task without a budget whose model has just become Fable (`before` was
+   * not Fable); null = nothing to add. Only the change to Fable adds it, so a budget the user removed later stays removed.
+   */
+  private fableBudgetFor(task: Task, before: string | null | undefined): number | null {
+    const budget = this.defaultFableBudget?.() ?? null;
+    if (budget === null || task.executionMode === "cloud" || task.budgetUsd !== null || isFableModel(before) || !isFableModel(task.model)) return null;
+    return budget;
+  }
+
+  private noteFableBudget(taskId: string, budget: number): void {
+    const text = `Fable のため既定の予算 $${budget} を付けました`;
+    const live = this.live.get(taskId);
+    if (live) this.onEvent(taskId, live, { t: "status", text });
+    else this.record(taskId, { t: "status", text });
   }
 
   /**
@@ -884,7 +919,7 @@ export class TaskManager {
       runnerSessionId: null, executionMode: input.executionMode ?? "local", cloudSession: null, sourceCloudTaskId: null,
       model: input.model ?? null,
       routing: suggestion ? { suggested: suggestion.runner, ruleId: suggestion.ruleId, reason: suggestion.reason, overridden: suggestion.runner !== input.runner, llm: suggestion.llm ?? null } : null,
-      budgetUsd: input.budgetUsd ?? null,
+      budgetUsd: input.budgetUsd ?? (!cloud && isFableModel(input.model) ? this.defaultFableBudget?.() ?? null : null),
       scheduleId: input.scheduleId ?? null,
       permissionMode,
       effort,
@@ -1695,6 +1730,12 @@ export class TaskManager {
             live.turnQuestion = undefined;
           }
           if (!(IN_FLIGHT.has(task.status) || ownTurn) || !this.transition(taskId, "running", extra)) this.db.updateTask(taskId, extra);
+          const budget = this.fableBudgetFor({ ...task, model: extra.model }, task.model);
+          const budgeted = budget === null ? null : this.db.updateTask(taskId, { budgetUsd: budget });
+          if (budgeted && budget !== null) {
+            this.broadcast({ type: "task.updated", task: budgeted });
+            this.noteFableBudget(taskId, budget);
+          }
         }
         break;
       case "permission.ask":

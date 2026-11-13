@@ -8,7 +8,7 @@ import { delimiter, dirname, join } from "node:path";
 import type { AgentEvent, RunnerAdapter, RunnerSession, Task } from "@switchboard/protocol";
 import { abortOrphanedTasks, Db } from "./db.ts";
 import { STOP_NOTE } from "./evals.ts";
-import { kitPath, taskAllowRules, TaskManager, type TurnEnd } from "./tasks.ts";
+import { isFableModel, kitPath, taskAllowRules, TaskManager, type TurnEnd } from "./tasks.ts";
 
 /**
  * A lingering runner like `claude -p --input-format stream-json`: the first turn ends, the process stays, and the test
@@ -464,5 +464,65 @@ describe("task allow rules", () => {
     // no bare curl, and no claim / overlap / bare prefix of the guard
     expect(rules.filter((r) => /curl/.test(r))).toEqual([]);
     expect(rules.filter((r) => /parallel-guard\.ts(:\*| claim| overlap)/.test(r))).toEqual([]);
+  });
+});
+
+describe("fable default budget (#1989)", () => {
+  let fableBudget: number | null;
+  beforeEach(() => {
+    fableBudget = 200;
+    tasks = new TaskManager(db, new Map([["claude", fakeAdapter(fakes)]]), () => undefined, { idleMs: IDLE_MS, defaultFableBudget: () => fableBudget });
+  });
+  const make = (extra: { model?: string; budgetUsd?: number } = {}) => {
+    const wsId = db.upsertWorkspace({ name: "w", path: home, kind: "repo" }).id;
+    return tasks.create({ workspaceId: wsId, cwd: home, title: "t", prompt: "p", runner: "claude", ...extra });
+  };
+  const notes = (id: string) => db.listEvents(id).map((e) => e.ev).filter((ev) => ev.t === "status" && ev.text.includes("既定の予算"));
+
+  test("fable default budget on create", async () => {
+    expect(make({ model: "claude-fable-5-1" }).budgetUsd).toBe(200);
+    expect(make({ model: "fable" }).budgetUsd).toBe(200);
+    expect(make({ model: "claude-fable-5-2[1m]" }).budgetUsd).toBe(200);
+    expect(make({ model: "claude-fable-5-1", budgetUsd: 5 }).budgetUsd).toBe(5);
+    expect(make({ model: "claude-opus-5" }).budgetUsd).toBeNull();
+    expect(make().budgetUsd).toBeNull();
+    fableBudget = null; // the initial setting: no default
+    expect(make({ model: "claude-fable-5-1" }).budgetUsd).toBeNull();
+    await sleep(0);
+  });
+
+  test("fable default budget on model switch", async () => {
+    const t = make({ model: "claude-opus-5" });
+    await sleep(0);
+    expect(t.budgetUsd).toBeNull();
+    // the screen's switch
+    expect((await tasks.setModel(t.id, "claude-fable-5-1")).budgetUsd).toBe(200);
+    expect(db.getTask(t.id)!.budgetUsd).toBe(200);
+    expect(notes(t.id)).toEqual([{ t: "status", text: "Fable のため既定の予算 $200 を付けました" }]);
+    // the runner's report
+    const r = make({ model: "claude-opus-5" });
+    await sleep(0);
+    fakes[1]!.emit({ t: "session.start", runner: "claude", runnerSessionId: "s", cwd: "/", model: "global.anthropic.claude-fable-5-2" });
+    expect(db.getTask(r.id)!.budgetUsd).toBe(200);
+    expect(notes(r.id).length).toBe(1);
+    // only the change to Fable adds it: a budget the user removed stays removed on the next turn's report
+    tasks.setBudget(r.id, null);
+    fakes[1]!.emit({ t: "session.start", runner: "claude", runnerSessionId: "s", cwd: "/", model: "global.anthropic.claude-fable-5-2" });
+    expect(db.getTask(r.id)!.budgetUsd).toBeNull();
+    expect(notes(r.id).length).toBe(1);
+    // a budget already set is kept; no default sets nothing
+    const k = make({ model: "claude-opus-5", budgetUsd: 5 });
+    await sleep(0);
+    expect((await tasks.setModel(k.id, "claude-fable-5-1")).budgetUsd).toBe(5);
+    expect(notes(k.id)).toEqual([]);
+    fableBudget = null;
+    const n = make({ model: "claude-opus-5" });
+    await sleep(0);
+    expect((await tasks.setModel(n.id, "claude-fable-5-1")).budgetUsd).toBeNull();
+  });
+
+  test("isFableModel reads every Fable version, the context tag, the Bedrock form and the alias", () => {
+    for (const m of ["claude-fable-5-1", "claude-fable-5-2", "claude-fable-5-1[1m]", "global.anthropic.claude-fable-5-2", "anthropic.claude-fable-5-1", "fable"]) expect(isFableModel(m)).toBe(true);
+    for (const m of ["claude-opus-5", "claude-sonnet-5", "claude-haiku-5", "opus", "gpt-6", "", null, undefined]) expect(isFableModel(m)).toBe(false);
   });
 });

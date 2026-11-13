@@ -1,12 +1,12 @@
 // test-reads: .github/workflows/ci.yml scripts/ci.ts scripts/recordings.ts
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { ciExit, ciSteps } from "./ci";
 import { withHeavySlot } from "../ops-kit/src/heavy";
 import { RECORDS_HEADER } from "./perf-ratchet";
-import { checkoutSteps, groupScript, HOST_TESTS, hostOffload, OFFLOAD_GROUPS, parseGroup, placeSteps, recordBundle, recordBytes, recordCounts, existingPass, failLines, incrementalBase, incrementalSteps, LOCAL_CI_RESULT, localCi, main, mainFork, markerSeconds, narrowTestStep, notify, perfVerdict, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, runCheckout, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepSeconds, stepWithIdle, TargetError, testsOf, withoutPerf, type Deps, type LocalCiResult } from "./local-ci";
+import { checkoutSteps, ciScript, hostOffload, parseBuild, runBuild, recordBundle, recordBytes, recordCounts, existingPass, failLines, incrementalBase, incrementalSteps, LOCAL_CI_RESULT, localCi, main, mainFork, markerSeconds, narrowTestStep, notify, perfVerdict, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, runCheckout, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepSeconds, stepWithIdle, TargetError, testsOf, withoutPerf, collectPending, OffloadStartError, pendingDirOf, recordLive, writePending, type Deps, type LocalCiResult, type Offload } from "./local-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
 const ciTs = await Bun.file(new URL("./ci.ts", import.meta.url)).text();
@@ -908,120 +908,179 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     expect(await resolveTarget(["7", "--repo", "o/r"], appTree, appTree, run("https://github.com/o/r.git", appTree).sh).catch((err) => err)).toBeInstanceOf(TargetError);
   });
   describe("off the host: sb-offload (#2305)", () => {
-    const REC = ["packages/core/src/core.test.ts", "packages/adapters/claude/src/parse.test.ts"];
-    /** The fake deps with a fake offload: each build's script, size and when it started and ended; `answer` gives a group's code and log from its steps. */
-    const withOffload = (answer?: (steps: string[], script: string) => { code: number; output: string } | undefined, o: Parameters<typeof deps>[5] = {}, failAt?: string) => {
-      const x = deps(failAt, undefined, "1 fail", {}, false, o);
-      const builds: Array<{ script: string; size: string; cwd: string; start: number; end: number }> = [];
-      const fake = x.d.sh;
-      x.d.sh = async (cmd, cwd) => (cmd.includes("grep") && cmd.includes("-l") ? `${REC.join("\n")}\n` : fake(cmd, cwd));
+    // a started build's record stays until its result is posted (`main`): one test's is not the next one's
+    const forget = () => rmSync(pendingDirOf(CACHE), { recursive: true, force: true });
+    afterEach(forget);
+    /** The fake deps with a fake build: each call's script, options and cwd; `answer` gives the code and log from the steps (names read from the script). The host's `step` and `slot` fail the test when the CI's steps use them. */
+    const withOffload = (answer?: (steps: string[], script: string) => { code: number; output: string } | undefined, o: Parameters<typeof deps>[5] = {}, fixtures?: { dir: string; required: boolean }) => {
+      const x = deps(undefined, undefined, "1 fail", {}, false, o);
+      const builds: Array<{ script: string; o: { size: string; fixtures?: string; names?: string }; cwd: string; names?: string }> = [];
+      const slots: string[] = [];
+      x.d.slot = async (name, fn) => (slots.push(name), fn());
+      const answers = new Map<string, Promise<{ code: number; output: string }>>();
       x.d.offload = {
-        run: async (script, cwd, size) => {
-          const start = performance.now();
-          await Bun.sleep(30);
-          const names = [...script.matchAll(/^bash -e -c '(.*?)'; c=\$\?/gm)].map((m) => m[1]!.replaceAll(`'\\''`, "'"));
-          const given = answer?.(names, script);
-          builds.push({ script, size, cwd, start, end: performance.now() });
-          if (given) return given;
-          return { code: 0, output: names.flatMap((n, i) => [`sb-step: ${i} begin 100`, `ran ${n}`, "", `sb-step: ${i} exit 0 ${101 + i}`]).join("\n") };
+        ...(fixtures ? { fixtures } : {}),
+        // a build is its start and its collect: the answer is made at the start and read at the collect
+        collect: (build) => answers.get(build) ?? Promise.reject(new Error(`no build ${build}`)),
+        start: async (script, cwd, run) => {
+          await Bun.sleep(5);
+          const steps = [...script.matchAll(/^bash -e -c '([\s\S]*?)'; c=\$\?/gm)].map((m) => m[1]!.replaceAll(`'\\''`, "'"));
+          // the names file as it is while the build runs (it is removed after)
+          builds.push({ script, o: run, cwd, ...(run.names ? { names: readFileSync(run.names, "utf8") } : {}) });
+          const given = answer?.(steps, script);
+          const build = `build-${builds.length}`;
+          answers.set(build, Promise.resolve(given ?? { code: 0, output: steps.flatMap((n, i) => [`sb-step: ${i} begin 100`, `ran ${n}`, "", `sb-step: ${i} exit 0 ${101 + i}`]).join("\n") }));
+          return { build };
         },
       };
-      return { ...x, builds };
+      return { ...x, builds, slots };
     };
+    const sentOf = (script: string) => [...script.matchAll(/^bash -e -c '([\s\S]*?)'; c=/gm)].map((m) => m[1]!.replaceAll(`'\\''`, "'"));
 
-    test("typecheck, licenses and bun test go to the builds, not to a step here; the rest stays here, the files that read recordings too", async () => {
-      const { d, ran, builds } = withOffload();
+    test("every step of the CI goes to one build, in order; no step runs here and no slot is taken", async () => {
+      const { d, ran, builds, slots } = withOffload();
       const r = await localCi(42, "/repo", d, "example/development", CACHE);
       expect(r.ok).toBe(true);
-      const sent = builds.map((b) => [...b.script.matchAll(/^bash -e -c '(.*?)'; c=/gm)].map((m) => m[1]));
-      expect(sent).toEqual([["bun run licenses:check", "bun run typecheck"], [`bun test --path-ignore-patterns='\\''${REC[0]}'\\'' --path-ignore-patterns='\\''${REC[1]}'\\''`]]);
-      for (const moved of ["bun run licenses:check", "bun run typecheck", "bun test"]) expect(ran).not.toContain(moved);
-      // git over the checkout and the install: here (a PR's run has no web build nor perf)
-      expect(ran).toContain(ciSteps[0]!.run.trim());
-      expect(ran).not.toContain("bun run --cwd apps/web build");
-      expect(ran).toContain(`bun test './${REC[0]}' './${REC[1]}'`);
-      // the results in the CI's order, with the host's recordings run after bun test
-      expect(r.results.map((x) => x.name)).toEqual([...prSteps.map((s) => s.name), HOST_TESTS]);
-      expect(r.results.find((x) => x.name === "bun test")!.seconds).toBe(1);
-      expect(resultComment(r)).toContain(`| \`${HOST_TESTS}\` | pass |`);
+      expect(builds).toHaveLength(1);
+      expect(sentOf(builds[0]!.script)).toEqual(prSteps.map((s) => s.run.trim()));
+      expect(builds[0]!.o.size).toBe("small");
+      // the host ran none of the CI's steps and held no heavy slot for them
+      expect(ran).toEqual([]);
+      expect(slots).toEqual([]);
+      // the results in the CI's order, the seconds from the build's marks
+      expect(r.results.map((x) => x.name)).toEqual(prSteps.map((s) => s.name));
+      // the fake's marks: step i takes i + 1 seconds
+      expect(r.results.map((x) => x.seconds)).toEqual(prSteps.map((_, i) => i + 1));
     });
 
-    test("the heavy slot is held for the steps here only, not while the builds are awaited; without sb-offload the whole run is in it", async () => {
-      /** `d.slot` that counts how deep inside it the code is, and the names it was given. */
-      const track = (d: Deps) => {
-        const t = { inside: 0, names: [] as string[], atBuild: [] as number[], atStep: [] as Array<{ step: string; inside: number }>, atGit: [] as number[] };
-        d.slot = async (name, fn) => {
-          t.names.push(name);
-          t.inside++;
-          try { return await fn(); } finally { t.inside--; }
-        };
-        const step = d.step;
-        d.step = (script, cwd, env) => { t.atStep.push({ step: script.trim(), inside: t.inside }); return step(script, cwd, env); };
-        const sh = d.sh;
-        d.sh = (cmd, cwd) => { if (cmd.includes("worktree") && cmd.includes("add")) t.atGit.push(t.inside); return sh(cmd, cwd); };
-        return t;
-      };
-      const off = withOffload();
-      const t = track(off.d);
-      const run = off.d.offload!.run;
-      off.d.offload!.run = (script, cwd, size) => { t.atBuild.push(t.inside); return run(script, cwd, size); };
-      expect((await localCi(42, "/repo", off.d, "example/development", CACHE)).ok).toBe(true);
-      // the builds (two) were awaited outside the slot, the worktree was made outside it, and the steps here ran inside it
-      expect(t.atBuild).toEqual([0, 0]);
-      expect(t.atGit).toEqual([0]);
-      expect(t.atStep.length).toBeGreaterThan(0);
-      expect(t.atStep.every((x) => x.inside === 1)).toBe(true);
-      expect(t.names).toHaveLength(1);
-      expect(t.names[0]).toEndWith("(host)");
-
-      const plain = deps();
-      const p = track(plain.d);
-      expect((await localCi(42, "/repo", plain.d, "example/development", CACHE)).ok).toBe(true);
-      expect(p.names).toEqual(["local-ci example/development#42"]);
-      expect(p.atGit).toEqual([1]);
-      expect(p.atStep.every((x) => x.inside === 1)).toBe(true);
-
-      // sb-offload, but a CI with no step the builds take (`make check` only): no build, and its steps here are in the slot
-      const none = withOffload(undefined, { noCiTs: true });
-      const n = track(none.d);
-      expect((await localCi(42, "/repo", none.d, "example/development", CACHE)).ok).toBe(true);
-      expect(none.builds).toHaveLength(0);
-      expect(n.atStep.length).toBeGreaterThan(0);
-      expect(n.atStep.every((x) => x.inside === 1)).toBe(true);
+    test("another repository's CI (steps whatever their names) runs in the build too", async () => {
+      const { d, ran, builds } = withOffload(undefined, { noCiTs: true });
+      expect((await localCi(42, "/repo", d, "example/development", CACHE)).ok).toBe(true);
+      expect(builds).toHaveLength(1);
+      expect(sentOf(builds[0]!.script)).toEqual(["make check"]);
+      expect(ran).toEqual([]);
     });
 
-    test("the two builds run at the same time, each with its size", async () => {
-      const { d, builds } = withOffload();
-      await localCi(42, "/repo", d, "example/development", CACHE);
-      expect(builds.map((b) => b.size)).toEqual(OFFLOAD_GROUPS.map((g) => g.size));
-      expect(builds.every((b) => b.size === "small")).toBe(true);
-      const [a, b] = builds;
-      expect(Math.max(a!.start, b!.start)).toBeLessThan(Math.min(a!.end, b!.end));
-    });
-
-    test("bun test failing off the host: the comment names it with its (fail) lines, a fail mark", async () => {
-      const { d } = withOffload((names) => (names[0]!.startsWith("bun test") ? { code: 1, output: "sb-offload: sent the work tree\nsb-step: 0 begin 10\n(fail) a > b [1ms]\n1 fail\n\nsb-step: 0 exit 1 20\nsb-offload: exit 1" } : undefined));
+    test("a step that fails stops the build's steps: the comment names it with its (fail) lines, a fail mark", async () => {
+      const { d } = withOffload((steps) => (steps.length ? { code: 1, output: "sb-offload: sent the work tree\nsb-step: 0 begin 10\nok\n\nsb-step: 0 exit 0 11\nsb-step: 1 begin 11\n(fail) a > b [1ms]\n1 fail\n\nsb-step: 1 exit 1 20\nsb-offload: exit 1" } : undefined));
       const r = await localCi(42, "/repo", d, "example/development", CACHE);
       expect(r.ok).toBe(false);
       const body = resultComment(r);
       expect(LOCAL_CI_RESULT.exec(body)?.[1]).toBe("fail");
-      expect(body).toContain("結果: `bun test` が exit 1");
+      expect(body).toContain(`結果: \`${prSteps[1]!.name}\` が exit 1`);
       expect(body).toContain("(fail) a > b [1ms]");
-      expect(r.results.find((x) => x.name === "bun test")!.log).toStartWith(CACHE);
+      expect(r.results.find((x) => x.name === prSteps[1]!.name)!.log).toStartWith(CACHE);
       // after the step that stopped the run, nothing is listed (as one run here would have stopped)
-      expect(r.results.at(-1)!.name).toBe("bun test");
+      expect(r.results.at(-1)!.name).toBe(prSteps[1]!.name);
     });
 
-    test("the scripts carry no token or recordings, and the real sb-offload runs without a GitHub token in its environment", async () => {
+    test("required (SWITCHBOARD_FIXTURES given here) exports it in the build so a missing recording fails; without it the script does not, and a pass reads as a pass", async () => {
+      const dir = mkdtempSync(join(CACHE, "fixtures-"));
+      const required = withOffload(undefined, {}, { dir, required: true });
+      expect((await localCi(42, "/repo", required.d, "example/development", CACHE)).ok).toBe(true);
+      expect(required.builds[0]!.script).toContain("export SWITCHBOARD_FIXTURES=$HOME/.switchboard/fixtures");
+      expect(required.builds[0]!.o.fixtures).toBe(dir);
+      // the host's path is an argument of the call, not in the script
+      expect(required.builds[0]!.script).not.toContain(dir);
+      forget();
+      // a recording missing: the test fails in the build, and that is the run's failure
+      const missing = withOffload((steps) => (steps.length ? { code: 1, output: `sb-step: 0 begin 10\n\nsb-step: 0 exit 0 11\nsb-step: 1 begin 11\n(fail) adapter > replays [1ms]\nerror: recording missing\n\nsb-step: 1 exit 1 12\nsb-offload: exit 1` } : undefined), {}, { dir, required: true });
+      const r = await localCi(42, "/repo", missing.d, "example/development", CACHE);
+      expect(r.ok).toBe(false);
+      expect(resultComment(r)).toContain("(fail) adapter > replays [1ms]");
+      forget();
+      // not required (the usual directory only): the same files are sent, nothing is exported
+      const usual = withOffload(undefined, {}, { dir, required: false });
+      expect((await localCi(42, "/repo", usual.d, "example/development", CACHE)).ok).toBe(true);
+      expect(usual.builds[0]!.script).not.toContain("SWITCHBOARD_FIXTURES");
+      expect(usual.builds[0]!.o.fixtures).toBe(dir);
+      forget();
+      // no recordings at all: no --fixtures
+      const none = withOffload();
+      await localCi(42, "/repo", none.d, "example/development", CACHE);
+      expect(none.builds[0]!.o.fixtures).toBeUndefined();
+      expect(none.builds[0]!.script).not.toContain("SWITCHBOARD_FIXTURES");
+    });
+
+    test("the host's AWS names go in a file of mode 600 passed by path and removed after; the script, the log and the comment hold none of the values", async () => {
+      const home = mkdtempSync(join(CACHE, "aws-"));
+      const config = join(home, "config");
+      writeFileSync(config, "[sso-session sso-prod]\nsso_start_url = https://example.invalid/start\n[profile sso-prod]\nsso_account_id = 123456789012\n");
+      const saved = process.env.AWS_CONFIG_FILE;
+      process.env.AWS_CONFIG_FILE = config;
+      try {
+        const { d, builds, logged } = withOffload();
+        let path = "";
+        let mode = 0;
+        const start = d.offload!.start;
+        d.offload!.start = async (script, cwd, o) => {
+          path = o.names ?? "";
+          mode = o.names ? statSync(o.names).mode & 0o777 : 0;
+          return start(script, cwd, o);
+        };
+        const r = await localCi(42, "/repo", d, "example/development", CACHE);
+        expect(r.ok).toBe(true);
+        expect(path).toContain("switchboard.names.");
+        expect(mode).toBe(0o600);
+        expect(JSON.parse(builds[0]!.names!)).toEqual({ names: ["sso-prod"], accountIds: ["123456789012"] });
+        // removed once the build had started, directory and all
+        expect(existsSync(path)).toBe(false);
+        expect(existsSync(join(path, ".."))).toBe(false);
+        for (const text of [builds[0]!.script, logged.join("\n"), resultComment(r), JSON.stringify(builds[0]!.o)]) {
+          expect(text).not.toContain("sso-prod");
+          expect(text).not.toContain("123456789012");
+        }
+        // the path is the only thing of it on the call
+        expect(builds[0]!.o.names).toBe(path);
+      } finally {
+        if (saved === undefined) delete process.env.AWS_CONFIG_FILE;
+        else process.env.AWS_CONFIG_FILE = saved;
+      }
+      forget();
+      // a host with no AWS config: no file, no --names
+      const none = mkdtempSync(join(CACHE, "no-aws-"));
+      process.env.AWS_CONFIG_FILE = join(none, "missing");
+      try {
+        const { d, builds } = withOffload();
+        await localCi(42, "/repo", d, "example/development", CACHE);
+        expect(builds[0]!.o.names).toBeUndefined();
+      } finally {
+        if (saved === undefined) delete process.env.AWS_CONFIG_FILE;
+        else process.env.AWS_CONFIG_FILE = saved;
+      }
+    });
+
+    test("the names file is removed when the build fails to start, too", async () => {
+      const home = mkdtempSync(join(CACHE, "aws-"));
+      writeFileSync(join(home, "config"), "[profile sso-prod]\nsso_account_id = 123456789012\n");
+      const saved = process.env.AWS_CONFIG_FILE;
+      process.env.AWS_CONFIG_FILE = join(home, "config");
+      try {
+        let path = "";
+        const offload: Offload = { start: async (_s, _c, o) => ((path = o.names ?? ""), Promise.reject(new Error("no build"))), collect: () => Promise.reject(new Error("unused")) };
+        await expect(runBuild(offload, [{ name: "x", run: "x" }], "/repo")).rejects.toThrow("no build");
+        expect(path).not.toBe("");
+        expect(existsSync(path)).toBe(false);
+      } finally {
+        if (saved === undefined) delete process.env.AWS_CONFIG_FILE;
+        else process.env.AWS_CONFIG_FILE = saved;
+      }
+    });
+
+    test("the scripts carry no token or recordings' place, and the real sb-offload runs without a GitHub token or the recordings' variable in its environment", async () => {
       const { d, builds, envs } = withOffload();
-      const saved = { gh: process.env.GH_TOKEN, github: process.env.GITHUB_TOKEN, path: process.env.PATH };
+      const saved = { gh: process.env.GH_TOKEN, github: process.env.GITHUB_TOKEN, path: process.env.PATH, fixtures: process.env.SWITCHBOARD_FIXTURES, config: process.env.AWS_CONFIG_FILE };
       process.env.GH_TOKEN = "gho_offloadtesttoken";
       process.env.GITHUB_TOKEN = "ghs_offloadtesttoken";
+      const fixtures = mkdtempSync(join(CACHE, "fixtures-env-"));
+      process.env.SWITCHBOARD_FIXTURES = fixtures;
+      process.env.AWS_CONFIG_FILE = join(fixtures, "none");
       const bin = mkdtempSync(join(CACHE, "bin-"));
       try {
         await localCi(42, "/repo", d, "example/development", CACHE);
         for (const b of builds) {
-          expect(b.script).not.toMatch(/GH_TOKEN|GITHUB_TOKEN|offloadtesttoken|SWITCHBOARD_FIXTURES/);
+          expect(b.script).not.toMatch(/GH_TOKEN|GITHUB_TOKEN|offloadtesttoken/);
+          expect(b.script).not.toContain(fixtures);
           // origin is the repository's URL with no credentials
           expect(b.script).toContain("git remote add origin 'https://github.com/example/development.git'");
         }
@@ -1029,13 +1088,48 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
         writeFileSync(join(bin, "sb-offload"), '#!/bin/sh\nenv\necho "args: $*"\nexit 3\n', { mode: 0o755 });
         process.env.PATH = `${bin}:${saved.path}`;
         const real = hostOffload()!;
-        const out = await real.run("echo x", bin, "small");
+        // SWITCHBOARD_FIXTURES given: the recordings go by --fixtures and the run needs them
+        expect(real.fixtures).toEqual({ dir: fixtures, required: true });
+        // a build that did not start: sb-offload's code and what it printed
+        const out = (await real.start("echo x", bin, { size: "small", fixtures, names: "/n/names.json" }).catch((e: unknown) => e)) as OffloadStartError;
+        expect(out).toBeInstanceOf(OffloadStartError);
         expect(out.code).toBe(3);
-        expect(out.output).toContain("args: --ci --size small echo x");
+        expect(out.output).toContain(`args: --ci --detach --fixtures ${fixtures} --names /n/names.json --size small echo x`);
         expect(out.output).not.toContain("offloadtesttoken");
+        expect(out.output).not.toContain("SWITCHBOARD_FIXTURES");
+        expect(((await real.start("echo x", bin, { size: "small" }).catch((e: unknown) => e)) as OffloadStartError).output).toContain("args: --ci --detach --size small echo x");
+        // started: the id is the `started` line's, among the image build's lines; collect asks for that id alone
+        writeFileSync(join(bin, "sb-offload"), '#!/bin/sh\necho "sb-offload: image abc"\necho "args: $*"\n[ "$1" = --collect ] && { echo "sb-step: 0 exit 0 5"; echo "sb-offload: exit 0"; exit 0; }\necho "sb-offload: started proj:1234"\n', { mode: 0o755 });
+        expect(await real.start("echo x", bin, { size: "small" })).toEqual({ build: "proj:1234" });
+        expect(await real.collect("proj:1234")).toEqual({ code: 0, output: "sb-offload: image abc\nargs: --collect proj:1234\nsb-step: 0 exit 0 5\nsb-offload: exit 0\n" });
+        // not given: the usual directory, only when it exists, and not required
+        delete process.env.SWITCHBOARD_FIXTURES;
+        const home = mkdtempSync(join(CACHE, "home-"));
+        const savedHome = process.env.HOME;
+        process.env.HOME = home;
+        try {
+          expect(hostOffload()!.fixtures).toBeUndefined();
+          mkdirSync(join(home, ".switchboard", "fixtures"), { recursive: true });
+          expect(hostOffload()!.fixtures).toEqual({ dir: join(home, ".switchboard", "fixtures"), required: false });
+        } finally {
+          if (savedHome === undefined) delete process.env.HOME;
+          else process.env.HOME = savedHome;
+        }
       } finally {
-        for (const [k, v] of [["GH_TOKEN", saved.gh], ["GITHUB_TOKEN", saved.github], ["PATH", saved.path]] as const) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+        for (const [k, v] of [["GH_TOKEN", saved.gh], ["GITHUB_TOKEN", saved.github], ["PATH", saved.path], ["SWITCHBOARD_FIXTURES", saved.fixtures], ["AWS_CONFIG_FILE", saved.config]] as const) if (v === undefined) delete process.env[k]; else process.env[k] = v;
       }
+    });
+
+    test("the mark is posted by the host's sh through the injected post; the build's script has no gh", async () => {
+      const { d, builds } = withOffload();
+      const r = await localCi(42, "/repo", d, "example/development", CACHE);
+      const posted: Array<{ body: string; run: Deps["sh"] }> = [];
+      const sent = await notify({ pr: 42, repo: "example/development", root: "/repo" }, r, d, async (_t, body, run) => void posted.push({ body, run }), async () => ({ head: SHA, base: BASE }));
+      expect(sent).toBe(true);
+      expect(posted).toHaveLength(1);
+      expect(posted[0]!.run).toBe(d.sh);
+      expect(posted[0]!.body.split("\n")[0]).toBe(`[local-ci] pass ${SHA} base=${BASE}`);
+      expect(builds[0]!.script).not.toMatch(/\bgh\b|\[local-ci\]/);
     });
 
     test("without sb-offload every step runs here, as before", async () => {
@@ -1049,20 +1143,45 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
       const { d, ran } = deps();
       const r = await localCi(42, "/repo", d, "example/development", CACHE);
       expect(ran).toEqual(prSteps.map((s) => s.run.trim()));
-      expect(r.results.map((x) => x.name)).not.toContain(HOST_TESTS);
+      expect(r.results.map((x) => x.name)).toEqual(prSteps.map((s) => s.name));
+    });
+
+    test("the heavy slot is taken for the whole run without sb-offload, and not at all with it (the worktree is made outside)", async () => {
+      const track = (d: Deps) => {
+        const t = { names: [] as string[], atGit: [] as number[], inside: 0 };
+        d.slot = async (name, fn) => {
+          t.names.push(name);
+          t.inside++;
+          try { return await fn(); } finally { t.inside--; }
+        };
+        const sh = d.sh;
+        d.sh = (cmd, cwd) => { if (cmd.includes("worktree") && cmd.includes("add")) t.atGit.push(t.inside); return sh(cmd, cwd); };
+        return t;
+      };
+      const plain = deps();
+      const p = track(plain.d);
+      expect((await localCi(42, "/repo", plain.d, "example/development", CACHE)).ok).toBe(true);
+      expect(p.names).toEqual(["local-ci example/development#42"]);
+      expect(p.atGit).toEqual([1]);
+      const off = withOffload();
+      const o = track(off.d);
+      expect((await localCi(42, "/repo", off.d, "example/development", CACHE)).ok).toBe(true);
+      expect(o.names).toEqual([]);
+      expect(o.atGit).toEqual([0]);
     });
 
     test("a build that timed out, was stopped or failed before its steps: a failure with the reason, never run again here", async () => {
       for (const [code, reason] of [[124, "時間切れ"], [130, "中断"], [1, "ビルドの失敗"]] as const) {
-        const { d, ran } = withOffload((names) => (names[0]!.startsWith("bun test") ? { code, output: code === 124 ? "sb-step: 0 begin 10\n(pass) x\n" : "sb-offload: no free build in 15 minutes (2 run at a time)" } : undefined));
+        forget();
+        const { d, ran } = withOffload((steps) => (steps.length ? { code, output: code === 124 ? "sb-step: 0 begin 10\n(pass) x\n" : "sb-offload: no free build in 15 minutes (2 run at a time)" } : undefined));
         const r = await localCi(42, "/repo", d, "example/development", CACHE);
-        const t = r.results.find((x) => x.name === "bun test")!;
+        const t = r.results.at(-1)!;
         expect(t.code).toBe(code);
         expect(t.fails).toContain(`sb-offload: exit ${code}（${reason}）`);
         const body = resultComment(r);
         expect(LOCAL_CI_RESULT.exec(body)?.[1]).toBe("fail");
         expect(body).toContain(`sb-offload: exit ${code}（${reason}）`);
-        expect(ran.some((s) => s.startsWith("bun test --path"))).toBe(false);
+        expect(ran).toEqual([]);
       }
     });
 
@@ -1071,85 +1190,316 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
       const { d } = withOffload(undefined, { budget });
       const r = await localCi(42, "/repo", d, "example/development", CACHE);
       expect(r.ok).toBe(true);
-      expect(r.seconds).toEqual({ typecheck: 2, test: 1 });
+      expect(r.seconds).toEqual({ typecheck: prSteps.findIndex((s) => s.name === "bun run typecheck") + 1, test: prSteps.findIndex((s) => s.name === "bun test") + 1 });
     });
 
-    test("placeSteps: a narrowed selection is split between the build and here; a group the CI does not have is left out", () => {
-      const steps = [{ name: "bun install --frozen-lockfile", run: "bun install --frozen-lockfile" }, { name: "bun test", run: "bun test" }];
-      const p = placeSteps(steps, ["a.test.ts", REC[0]!], REC);
-      expect(p.groups).toEqual([{ size: "small", steps: [{ name: "bun test", run: "bun test './a.test.ts'" }] }]);
-      expect(p.host).toEqual([steps[0], { name: HOST_TESTS, run: `bun test './${REC[0]}'` }]);
-      expect(p.order).toEqual(["bun install --frozen-lockfile", "bun test", HOST_TESTS]);
-      expect(placeSteps(steps, ["a.test.ts"], REC).host[1]).toEqual({ name: HOST_TESTS, run: 'echo "no test files selected"' });
-    });
-
-    test("parseGroup: each step between its marks with its seconds; the steps after a failure are not listed; no mark at all is the setup's failure", () => {
+    test("parseBuild: each step between its marks with its seconds; the steps after a failure are not listed; no mark at all is the setup's failure", () => {
       const s = [{ name: "a", run: "a" }, { name: "b", run: "b" }, { name: "c", run: "c" }];
       const log = "setup\nsb-step: 0 begin 10.5\nA\n\nsb-step: 0 exit 0 12\nsb-step: 1 begin 12\nB\n\nsb-step: 1 exit 2 15\nsb-offload: exit 2";
-      expect(parseGroup(log, s, 2).map((r) => [r.name, r.code, r.seconds, r.output])).toEqual([["a", 0, 1.5, "A\n"], ["b", 2, 3, "B\n"]]);
-      const setup = parseGroup("sb-setup: bun install が失敗\nsb-offload: exit 1", s, 1);
+      expect(parseBuild(log, s, 2).map((r) => [r.name, r.code, r.seconds, r.output])).toEqual([["a", 0, 1.5, "A\n"], ["b", 2, 3, "B\n"]]);
+      const setup = parseBuild("sb-setup: bun install が失敗\nsb-offload: exit 1", s, 1);
       expect(setup.map((r) => [r.name, r.code])).toEqual([["a", 1]]);
       expect(setup[0]!.output).toContain("sb-setup: bun install が失敗");
       // a build that ended 0 without the step's exit mark is no pass
-      expect(parseGroup("sb-step: 0 begin 1\n", s, 0)[0]!.code).toBe(1);
+      expect(parseBuild("sb-step: 0 begin 1\n", s, 0)[0]!.code).toBe(1);
       // every step marked a pass, but the build was stopped before it ended: no pass either
-      const stopped = parseGroup("sb-step: 0 begin 1\nA\nsb-step: 0 exit 0 2\n", [s[0]!], 130);
+      const stopped = parseBuild("sb-step: 0 begin 1\nA\nsb-step: 0 exit 0 2\n", [s[0]!], 130);
       expect(stopped.map((r) => [r.name, r.code])).toEqual([["a", 130]]);
       expect(failLines(stopped[0]!.output)).toEqual(["sb-offload: exit 130（中断）"]);
     });
 
-    test("parseGroup: a step whose begin mark is missing is read from its exit mark (seconds 0)", () => {
+    test("parseBuild: a step whose begin mark is missing is read from its exit mark (seconds 0)", () => {
       const s = [{ name: "a", run: "a" }, { name: "b", run: "b" }];
-      const pass = parseGroup("setup\nA\nsb-step: 0 exit 0 12\nsb-step: 1 begin 12\nB\nsb-step: 1 exit 0 15\nsb-offload: exit 0", s, 0);
+      const pass = parseBuild("setup\nA\nsb-step: 0 exit 0 12\nsb-step: 1 begin 12\nB\nsb-step: 1 exit 0 15\nsb-offload: exit 0", s, 0);
       expect(pass.map((r) => [r.name, r.code, r.seconds, r.output])).toEqual([["a", 0, 0, "setup\nA"], ["b", 0, 3, "B"]]);
-      const fail = parseGroup("A\nsb-step: 0 exit 2 12\nsb-offload: exit 2", s, 2);
+      const fail = parseBuild("A\nsb-step: 0 exit 2 12\nsb-offload: exit 2", s, 2);
       expect(fail.map((r) => [r.name, r.code, r.seconds])).toEqual([["a", 2, 0]]);
     });
 
-    test("recordings: with SWITCHBOARD_FIXTURES, only the steps here get it, the files that read recordings among them; no build's script holds it or its path", async () => {
-      const saved = process.env.SWITCHBOARD_FIXTURES;
-      const fixtures = mkdtempSync(join(CACHE, "fixtures-"));
-      for (const given of [fixtures, undefined]) {
-        if (given === undefined) delete process.env.SWITCHBOARD_FIXTURES;
-        else process.env.SWITCHBOARD_FIXTURES = given;
-        try {
-          const { d, ran, envs, builds } = withOffload();
-          await localCi(42, "/repo", d, "example/development", CACHE);
-          const at = ran.indexOf(`bun test './${REC[0]}' './${REC[1]}'`);
-          expect(at).toBeGreaterThanOrEqual(0);
-          // the host's run of the recordings reads them when given, and skips them (as before) when not
-          expect(envs[at]!.SWITCHBOARD_FIXTURES).toBe(given);
-          for (const b of builds) {
-            expect(b.script).not.toContain("SWITCHBOARD_FIXTURES");
-            expect(b.script).not.toContain(fixtures);
-          }
-          // the real sb-offload's environment (what hostOffload starts it with) has neither
-          const bin = mkdtempSync(join(CACHE, "bin-fixtures-"));
-          writeFileSync(join(bin, "sb-offload"), "#!/bin/sh\nenv\n", { mode: 0o755 });
-          const path = process.env.PATH;
-          process.env.PATH = `${bin}:${path}`;
-          try {
-            const out = await hostOffload()!.run("x", bin, "small");
-            expect(out.output).toContain("PATH=");
-            expect(out.output).not.toContain("SWITCHBOARD_FIXTURES");
-            expect(out.output).not.toContain(fixtures);
-          } finally {
-            process.env.PATH = path;
-          }
-        } finally {
-          if (saved === undefined) delete process.env.SWITCHBOARD_FIXTURES;
-          else process.env.SWITCHBOARD_FIXTURES = saved;
-        }
-      }
+    test("a keepGoing step's failure does not stop the build's later steps, as runCi's does not", () => {
+      const s = [{ name: "a", run: "a", keepGoing: true }, { name: "b", run: "b" }];
+      const script = ciScript(s, {});
+      expect(script).toContain(`bash -e -c 'a'; c=$?; echo; echo "sb-step: 0 exit $c $(date +%s.%N)"\n`);
+      expect(script).toContain(`bash -e -c 'b'; c=$?; echo; echo "sb-step: 1 exit $c $(date +%s.%N)"; [ "$c" -eq 0 ] || exit "$c"`);
+      expect(parseBuild("sb-step: 0 begin 1\nsb-step: 0 exit 3 2\nsb-step: 1 begin 2\nsb-step: 1 exit 0 4\n", s, 0).map((r) => [r.name, r.code])).toEqual([["a", 3], ["b", 0]]);
     });
 
-    test("groupScript: a tmpfs TMPDIR, the image's user switchboard with the image's Chromium, no tool installed, each step between marks and stopping at a failure", () => {
-      const script = groupScript([{ name: "x", run: "echo 'it'" }], { repo: "o/r" });
+    describe("pending: a started build's record and --collect", () => {
+      const FILE = join(pendingDirOf(CACHE), "example_development-42.json");
+      const passLog = (steps: Array<{ name: string }>) => steps.flatMap((_, i) => [`sb-step: ${i} begin 100`, "ok", "", `sb-step: ${i} exit 0 ${101 + i}`]).join("\n");
+      /** A local-ci cut off while it waits for its build: the build has started (its record is written) and the wait never ends. */
+      const cutOff = async () => {
+        const x = withOffload();
+        x.d.offload!.collect = () => new Promise(() => {});
+        void localCi(42, "/repo", x.d, "example/development", CACHE);
+        for (let i = 0; i < 300 && !existsSync(FILE); i++) await Bun.sleep(10);
+        expect(existsSync(FILE)).toBe(true);
+        return JSON.parse(readFileSync(FILE, "utf8")) as { build: string; steps: Array<{ name: string }>; [k: string]: unknown };
+      };
+      /** `main(["--collect"])` on a host whose build ends with `answer`; the head the PR names now is `head`. */
+      const collect = async (rec: { build: string; steps: Array<{ name: string }> }, o: { head?: string; post?: () => Promise<void>; output?: string; code?: number; live?: boolean; during?: () => void } = {}) => {
+        const y = deps(undefined, undefined, "", {}, false, { heads: [o.head ?? SHA] });
+        const asked: string[] = [];
+        let started = 0;
+        y.d.offload = { start: async () => (started++, Promise.reject(new Error("no build is started"))), collect: async (b) => (asked.push(b), o.during?.(), { code: o.code ?? 0, output: o.output ?? passLog(rec.steps) }) };
+        const posted: string[] = [];
+        const code = await main(["--collect"], "/repo", y.d, async (_t, body) => (posted.push(body), o.post?.()), "/repo", CACHE, { env: {} }, () => o.live ?? false);
+        return { code, posted, asked, started, logged: y.logged };
+      };
+
+      test("pending: a local-ci cut off after the build started is finished by --collect, which writes the mark and removes the record", async () => {
+        const rec = await cutOff();
+        const r = await collect(rec);
+        expect(r.asked).toEqual([rec.build]);
+        expect(r.started).toBe(0);
+        expect(r.posted).toHaveLength(1);
+        expect(r.posted[0]!.split("\n")[0]).toBe(`[local-ci] pass ${SHA} base=${BASE}`);
+        expect(r.code).toBe(0);
+        expect(existsSync(FILE)).toBe(false);
+      });
+
+      test("pending: a failed build is posted as a fail from its log", async () => {
+        const rec = await cutOff();
+        const r = await collect(rec, { code: 1, output: "sb-step: 0 begin 10\n(fail) a > b [1ms]\n\nsb-step: 0 exit 1 11\nsb-offload: exit 1" });
+        expect(r.posted[0]!.split("\n")[0]).toBe(`[local-ci] fail ${SHA} base=${BASE}`);
+        expect(r.posted[0]).toContain("(fail) a > b [1ms]");
+        expect(r.code).toBe(0);
+        expect(existsSync(FILE)).toBe(false);
+      });
+
+      test("pending: a head that moved is not posted and the record is removed", async () => {
+        const rec = await cutOff();
+        const r = await collect(rec, { head: "9".repeat(40) });
+        expect(r.posted).toEqual([]);
+        expect(r.code).toBe(0);
+        expect(existsSync(FILE)).toBe(false);
+      });
+
+      test("pending: a post that fails keeps the record and exits 1", async () => {
+        const rec = await cutOff();
+        const r = await collect(rec, { post: () => Promise.reject(new Error("HTTP 403")) });
+        expect(r.code).toBe(1);
+        expect(existsSync(FILE)).toBe(true);
+        // the next --collect posts it
+        expect((await collect(rec)).code).toBe(0);
+        expect(existsSync(FILE)).toBe(false);
+      });
+
+      test("pending: a build with no log is removed when older than 7 days and kept when younger", async () => {
+        const rec = await cutOff();
+        const r = await collect(rec, { code: 2, output: `sb-offload: no build ${rec.build}\n` });
+        expect(r.code).toBe(1);
+        expect(r.posted).toEqual([]);
+        expect(existsSync(FILE)).toBe(true);
+        writeFileSync(FILE, JSON.stringify({ ...rec, repo: "example/development", pr: 42, root: "/repo", head: SHA, base: BASE, at: Date.now() - 8 * 24 * 3600 * 1000, ciTs: true }));
+        const old = await collect(rec, { code: 2, output: `sb-offload: no build ${rec.build}\n` });
+        expect(old.code).toBe(0);
+        expect(old.posted).toEqual([]);
+        expect(old.logged.join("\n")).toContain("7 日より古い");
+        expect(existsSync(FILE)).toBe(false);
+      });
+
+      test("pending: no record is nothing to do, and the record holds the PR, the head and base and the build, no token or AWS name", async () => {
+        expect((await collect({ build: "x", steps: [] })).code).toBe(0);
+        const rec = await cutOff();
+        expect(Object.keys(rec).sort()).toEqual(["at", "base", "boot", "build", "ciTs", "head", "pid", "pr", "repo", "root", "selection", "steps"]);
+        expect(rec).toMatchObject({ repo: "example/development", pr: 42, head: SHA, base: BASE, root: "/repo" });
+        expect(rec.build).toMatch(/^build-/);
+        const text = readFileSync(FILE, "utf8");
+        expect(text).not.toMatch(/GH_TOKEN|GITHUB_TOKEN|token|accountIds|names/i);
+        expect(statSync(FILE).mode & 0o777).toBe(0o600);
+      });
+
+      test("pending: a second local-ci of the same head and base starts no build; it takes the pending build's result", async () => {
+        const rec = await cutOff();
+        const again = withOffload();
+        const asked: string[] = [];
+        again.d.offload!.collect = async (b) => (asked.push(b), { code: 0, output: passLog(rec.steps) });
+        const r = await localCi(42, "/repo", again.d, "example/development", CACHE);
+        expect(again.builds).toHaveLength(0);
+        expect(asked).toEqual([rec.build]);
+        expect(r.ok).toBe(true);
+        expect(r.sha).toBe(SHA);
+        // another head: a build of its own (and the record is now its)
+        const moved = withOffload();
+        moved.d.offload!.collect = () => new Promise(() => {});
+        const x = deps(undefined, undefined, "", {}, false, { heads: ["8".repeat(40)] });
+        moved.d.sh = x.d.sh;
+        void localCi(42, "/repo", moved.d, "example/development", CACHE);
+        for (let i = 0; i < 300 && moved.builds.length === 0; i++) await Bun.sleep(10);
+        expect(moved.builds).toHaveLength(1);
+      });
+
+      test("pending: a build that ended before its steps is posted as a fail, not left as unreadable", async () => {
+        for (const [code, reason] of [[1, "ビルドの失敗"], [124, "時間切れ"], [130, "中断"]] as const) {
+          const rec = await cutOff();
+          const r = await collect(rec, { code, output: `sb-offload: proj:1 ended FAILED without the command's exit code\n` });
+          expect(r.posted).toHaveLength(1);
+          expect(r.posted[0]!.split("\n")[0]).toBe(`[local-ci] fail ${SHA} base=${BASE}`);
+          expect(r.posted[0]).toContain(`exit ${code}（${reason}）`);
+          expect(r.code).toBe(0);
+          expect(existsSync(FILE)).toBe(false);
+        }
+      });
+
+      test("pending: a record another run wrote over while its build was awaited is not removed", async () => {
+        const rec = await cutOff();
+        const other = { ...rec, build: "build-other", head: "8".repeat(40) };
+        const r = await collect(rec, { during: () => writeFileSync(FILE, JSON.stringify(other)) });
+        expect(r.posted).toHaveLength(1);
+        expect(JSON.parse(readFileSync(FILE, "utf8")).build).toBe("build-other");
+      });
+
+      test("pending: a record whose local-ci is still alive is left to it; --collect does not even ask for the build", async () => {
+        const rec = await cutOff();
+        const r = await collect(rec, { live: true });
+        expect(r.asked).toEqual([]);
+        expect(r.posted).toEqual([]);
+        expect(r.code).toBe(0);
+        expect(existsSync(FILE)).toBe(true);
+        const at = (boot: string | null, cmd: string | null) => ({ p: { ...(rec as never), pid: 4242, boot } as never, boot, cmd });
+        for (const [w, live] of [[at("b1", "bun scripts/local-ci.ts 42"), true], [at("b1", "sleep 100"), false], [at("b1", null), false], [{ ...at("b1", "bun scripts/local-ci.ts 42"), boot: "b2" }, false], [at(null, "bun scripts/local-ci.ts 42"), false]] as const) {
+          expect(recordLive(w.p, w.boot, () => w.cmd)).toBe(live);
+        }
+        // this process itself is not "another local-ci"
+        expect(recordLive({ ...(rec as never), pid: process.pid, boot: "b1" } as never, "b1", () => "local-ci")).toBe(false);
+      });
+
+      test("pending: a record whose build is gone is dropped by the next run of that head, which builds on its own", async () => {
+        const rec = await cutOff();
+        const again = withOffload();
+        const base = again.d.offload!.collect;
+        const asked: string[] = [];
+        again.d.offload!.collect = async (b) => (asked.push(b), asked.length === 1 ? { code: 2, output: `sb-offload: no build ${b}\n` } : base(b));
+        const r = await localCi(42, "/repo", again.d, "example/development", CACHE);
+        // the old one was asked for, then one was started and awaited
+        expect(asked).toHaveLength(2);
+        expect(again.builds).toHaveLength(1);
+        expect(r.ok).toBe(true);
+        expect(existsSync(FILE)).toBe(true);
+      });
+
+      test("pending: a build that cannot be started is the first step's failure, with sb-offload's code and output", async () => {
+        const x = withOffload();
+        x.d.offload!.start = async () => Promise.reject(new OffloadStartError(2, "sb-offload: no free build in 15 minutes\n"));
+        const r = await localCi(42, "/repo", x.d, "example/development", CACHE);
+        expect(r.ok).toBe(false);
+        expect(r.results[0]!.code).toBe(2);
+        expect(r.results[0]!.fails).toContain("sb-offload: exit 2（ビルドの失敗）");
+        // nothing started: no record
+        expect(existsSync(FILE)).toBe(false);
+      });
+
+      test("pending: main keeps the record when the head and base cannot be read after the build, and drops it when a pass for the head is already there", async () => {
+        const root = mkdtempSync(join(CACHE, "main-root-"));
+        Bun.spawnSync(["git", "init", "-q", root]);
+        Bun.spawnSync(["git", "-C", root, "remote", "add", "origin", "https://github.com/example/development.git"]);
+        try {
+          forget();
+          const x = withOffload();
+          const fake = x.d.sh;
+          let gh = 0;
+          x.d.sh = async (cmd, cwd) => {
+            if (cmd.includes("get-url")) return "https://github.com/example/development.git\n";
+            // reusablePass, localCi's read, then notify's read fails
+            if (cmd[0] === "gh" && ++gh >= 3) throw new Error("gh: temporary failure");
+            return fake(cmd, cwd);
+          };
+          expect(await main(["42"], root, x.d, async () => undefined, root, CACHE)).toBe(1);
+          expect(existsSync(FILE)).toBe(true);
+
+          // a pass of this head is there: the record of a build for it is not left for --collect to post a second mark
+          const y = withOffload();
+          const fy = y.d.sh;
+          y.d.sh = async (cmd, cwd) => {
+            if (cmd.includes("get-url")) return "https://github.com/example/development.git\n";
+            if (cmd[0] === "gh" && cmd.includes("headRefOid,comments")) return JSON.stringify({ headRefOid: SHA, comments: [{ body: `[local-ci] pass ${SHA} base=${BASE}\n`, createdAt: "2026-11-01T00:00:00Z", url: "https://x/42#c", authorAssociation: "MEMBER" }] });
+            return fy(cmd, cwd);
+          };
+          expect(existsSync(FILE)).toBe(true);
+          expect(await main(["42"], root, y.d, async () => undefined, root, CACHE)).toBe(0);
+          expect(existsSync(FILE)).toBe(false);
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      });
+
+      test("pending: a SUCCEEDED build whose log is gone says nothing: not a fail; kept when young, removed when old, and a build of its own for the next run", async () => {
+        const gone = "sb-offload: proj:1 ended SUCCEEDED without the command's exit code\n";
+        const rec = await cutOff();
+        const young = await collect(rec, { code: 1, output: gone });
+        expect(young.posted).toEqual([]);
+        expect(young.code).toBe(1);
+        expect(existsSync(FILE)).toBe(true);
+        writeFileSync(FILE, JSON.stringify({ ...rec, repo: "example/development", pr: 42, root: "/repo", head: SHA, base: BASE, at: Date.now() - 8 * 24 * 3600 * 1000, ciTs: true }));
+        const old = await collect(rec, { code: 1, output: gone });
+        expect(old.posted).toEqual([]);
+        expect(old.code).toBe(0);
+        expect(existsSync(FILE)).toBe(false);
+        // the next run of that head: not a fail from it, a build of its own
+        const rec2 = await cutOff();
+        const again = withOffload();
+        const base = again.d.offload!.collect;
+        let first = true;
+        again.d.offload!.collect = async (b) => (first ? ((first = false), { code: 1, output: gone }) : base(b));
+        const r = await localCi(42, "/repo", again.d, "example/development", CACHE);
+        expect(rec2.build).toBeString();
+        expect(again.builds).toHaveLength(1);
+        expect(r.ok).toBe(true);
+      });
+
+      test("pending: main removes only the record of the build it awaited", async () => {
+        const root = mkdtempSync(join(CACHE, "main-root-"));
+        Bun.spawnSync(["git", "init", "-q", root]);
+        Bun.spawnSync(["git", "-C", root, "remote", "add", "origin", "https://github.com/example/development.git"]);
+        try {
+          forget();
+          const x = withOffload();
+          const fake = x.d.sh;
+          x.d.sh = async (cmd, cwd) => (cmd.includes("get-url") ? "https://github.com/example/development.git\n" : fake(cmd, cwd));
+          // while it posts, a run of the same head and base (--force) writes its own build's record
+          const code = await main(["42"], root, x.d, async () => {
+            const mine = JSON.parse(readFileSync(FILE, "utf8"));
+            writeFileSync(FILE, JSON.stringify({ ...mine, build: "build-force" }));
+          }, root, CACHE);
+          expect(code).toBe(0);
+          expect(JSON.parse(readFileSync(FILE, "utf8")).build).toBe("build-force");
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      });
+
+      test("pending: main removes the record once the mark is posted, and keeps it when the post fails (the next run of that head takes the build's result)", async () => {
+        const root = mkdtempSync(join(CACHE, "main-root-"));
+        Bun.spawnSync(["git", "init", "-q", root]);
+        Bun.spawnSync(["git", "-C", root, "remote", "add", "origin", "https://github.com/example/development.git"]);
+        try {
+          for (const [fail, kept] of [[true, true], [false, false]] as const) {
+            forget();
+            const x = withOffload();
+            const fake = x.d.sh;
+            x.d.sh = async (cmd, cwd) => (cmd.includes("get-url") ? "https://github.com/example/development.git\n" : fake(cmd, cwd));
+            const code = await main(["42"], root, x.d, async () => (fail ? Promise.reject(new Error("HTTP 403")) : undefined), root, CACHE);
+            expect(code).toBe(fail ? 1 : 0);
+            expect(existsSync(FILE)).toBe(kept);
+          }
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      });
+    });
+
+    test("ciScript: a tmpfs TMPDIR, the image's user switchboard with the image's Chromium, no tool installed, each step between marks and stopping at a failure", () => {
+      const script = ciScript([{ name: "x", run: "echo 'it'" }], { repo: "o/r" });
       for (const part of ["mount -t tmpfs", "chown -R switchboard /sb/work", 'su - switchboard -c "CHROME_BIN=${CHROME_BIN:-} PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-} bash /tmp/sb-local-ci.sh"', "git remote add origin 'https://github.com/o/r.git'", "bun install --frozen-lockfile", `bash -e -c 'echo '\\''it'\\'''; c=$?`, '[ "$c" -eq 0 ] || exit "$c"']) expect(script).toContain(part);
       // the image has them: nothing is installed or created in the build
       for (const gone of ["bun.sh/install", "@openai/codex@", "reinstall", "dnf ", "useradd", "su - sb "]) expect(script).not.toContain(gone);
       // a repository that is not owner/name (a local change's workspace) gets no origin
-      expect(groupScript([], { repo: "ws_1" })).not.toContain("remote add");
+      expect(ciScript([], { repo: "ws_1" })).not.toContain("remote add");
+      // SWITCHBOARD_FIXTURES only for a run that needs the recordings
+      expect(ciScript([], {})).not.toContain("SWITCHBOARD_FIXTURES");
+      expect(ciScript([], { fixtures: { required: false } })).not.toContain("SWITCHBOARD_FIXTURES");
+      expect(ciScript([], { fixtures: { required: true } })).toContain("export SWITCHBOARD_FIXTURES=$HOME/.switchboard/fixtures\n");
     });
   });
 });
