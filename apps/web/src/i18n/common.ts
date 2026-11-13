@@ -141,6 +141,8 @@ export const common = msgs({
   resWaitMemoryUnknown: { ja: "空きメモリ（下限未満）", en: "Free memory (below the floor)" },
   resWaitMemoryBelow: { ja: "空きメモリ {free} < 下限 {floor}", en: "Free memory {free} < floor {floor}" },
   resWaitMemoryAbove: { ja: "空きメモリ {free}（下限 {floor} を超えた。次の見回りで枠を見る）", en: "Free memory {free} (above the floor {floor}; the next check looks at the slots)" },
+  resWaitMemoryOnly: { ja: "メモリ（枠なし）", en: "Memory (no slot)" },
+  resBeside: { ja: "枠なし", en: "no slot" },
   resWaitSlot: { ja: "枠: {holders}", en: "Slot: {holders}" },
   resSlotHolder: { ja: "{owner} の {name}", en: "{name} of {owner}" },
   resSlotHolderSep: { ja: "、", en: ", " },

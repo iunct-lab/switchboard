@@ -97,6 +97,8 @@ Task 本文（`.github/ISSUE_TEMPLATE/task.yml` の見出し。「やること�
 
 ### 5. PBI を Ready にする
 
+本文は `ops-kit backlog view <PBI> --fresh --json | jq -r .issue.body > "$W/pbi.md"` で取り（`--fresh` で GitHub の新しい本文を読む）、書き足して `ops-kit backlog edit <PBI> --body-file "$W/pbi.md"` で戻す（`.body` は `null` になる）。
+
 1. PBI の `## Tasks` に着手順を 1 行（`sub-issue 参照。順番: core → web`）
 2. 決定ログに「YYYY-MM-DD: Task 分解（#a, #b, #c）。被覆: …。Story Points N → M（理由）」
 3. `issue-workflow` の「Ready の判定（PBI）」の 5 つを確かめる（伝える・投稿する受け入れ条件の投稿先の名指しを含む）

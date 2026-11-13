@@ -13,6 +13,7 @@ import { Db, snapshotBeforeMigrate } from "./db.ts";
 import { commitEventsArchive, prepareEventsArchive, readUploaded } from "./events-archive.ts";
 
 const cfg = loadConfig();
+const ARCHIVE_BUSY_TIMEOUT_MS = 60_000;
 
 // `main.ts export <out> [--encrypt <age recipient>]` / `main.ts import <file> [--identity <age key file>]` move the
 // history to another machine and exit; with no arguments this is the daemon.
@@ -46,7 +47,9 @@ if (cmd === "events-archive") {
     console.error("usage: bun packages/core/src/main.ts events-archive prepare <dir> --encrypt <age recipient>\n       bun packages/core/src/main.ts events-archive commit <dir>");
     process.exit(2);
   }
-  const db = new Db(cfg.dbPath);
+  // Opening writes (the auto_vacuum pragma, migrate), and the daemon can hold the write lock for longer than its own
+  // 5 s wait (a backlog sync of about 20 s, 2026-11-13): the daily archive waits up to a minute instead of failing.
+  const db = new Db(cfg.dbPath, { busyTimeoutMs: ARCHIVE_BUSY_TIMEOUT_MS });
   try {
     if (step === "prepare") {
       const entries = await prepareEventsArchive(db.sqlite, dir, { encryptTo: recipient });

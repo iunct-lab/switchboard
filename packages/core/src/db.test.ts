@@ -1221,3 +1221,17 @@ test("migrate: an older database is copied to snapshots/*-before-migrate.db.gz a
   new Db(path).close();
   expect(needsMigration(path)).toBe(false);
 });
+
+test("a Db opened with a longer busyTimeoutMs waits out another connection's write lock held past the default 5 s", async () => {
+  const path = join(dir, "wait.sqlite");
+  new Db(path).close();
+  // another process holds the write lock for 6 s, a little longer than the default wait
+  const writer = Bun.spawn(["bun", "-e", `import { Database } from "bun:sqlite"; const d = new Database(process.argv[1]); d.exec("BEGIN IMMEDIATE"); d.exec("CREATE TABLE IF NOT EXISTS w (x)"); console.log("locked"); await Bun.sleep(6000); d.exec("COMMIT");`, path], { stdout: "pipe" });
+  const reader = writer.stdout.getReader();
+  expect(new TextDecoder().decode((await reader.read()).value)).toContain("locked");
+  const started = Date.now();
+  const db = new Db(path, { busyTimeoutMs: 30_000 });
+  expect(Date.now() - started).toBeGreaterThan(5000);
+  db.close();
+  await writer.exited;
+}, 20_000);

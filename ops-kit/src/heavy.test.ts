@@ -128,12 +128,24 @@ test("heavy: --memory-only starts beside a held slot, waits only for memory, tak
 
     // the only slot is held: a memory-only job still starts, and leaves no slot file of its own
     let slotsWhileRunning: string[] = [];
+    let stateWhileRunning: ReturnType<typeof readHeavyState> | undefined;
     const lines: string[] = [];
     await withHeavySlot("review codex", async () => {
       slotsWhileRunning = readdirSync(heavyStateDir(home)).filter((f) => f.startsWith("slot-"));
+      stateWhileRunning = readHeavyState(home);
     }, { ...held, memoryOnly: true, log: (l) => lines.push(l) });
     expect(slotsWhileRunning).toEqual(["slot-0.json"]); // the holder's alone
     expect(lines).toEqual([]);
+    // while it runs it is listed beside the slots, not among the holders; when it ends, the list is empty again
+    expect(stateWhileRunning!.beside.map((r) => r.name)).toEqual(["review codex"]);
+    expect(stateWhileRunning!.running.map((r) => r.name)).toEqual(["local-ci 1"]);
+    expect(readHeavyState(home).beside).toEqual([]);
+    expect(readdirSync(heavyStateDir(home)).filter((f) => f.startsWith("free-"))).toEqual([]);
+
+    // a job waiting for a slot is not memory-only
+    const slotWaiter = withHeavySlot("local-ci 2", async () => {}, held);
+    for (let i = 0; i < 250 && !readHeavyState(home).waiting.length; i++) await Bun.sleep(10);
+    expect(readHeavyState(home).waiting.map((w) => [w.name, w.reason, w.memoryOnly ?? false])).toEqual([["local-ci 2", "slot", false]]);
 
     // below the floor it waits, listed as memory, and starts once the memory is back
     let free = 1000;
@@ -142,18 +154,19 @@ test("heavy: --memory-only starts beside a held slot, waits only for memory, tak
     const low = withHeavySlot("review claude", async () => {
       started = performance.now() - t0;
     }, { ...held, mem: () => free, memoryOnly: true });
-    for (let i = 0; i < 250 && !readHeavyState(home).waiting.length; i++) await Bun.sleep(10);
-    expect(readHeavyState(home).waiting.map((w) => [w.name, w.reason])).toEqual([["review claude", "memory"]]);
+    for (let i = 0; i < 250 && readHeavyState(home).waiting.length < 2; i++) await Bun.sleep(10);
+    expect(readHeavyState(home).waiting.map((w) => [w.name, w.reason, w.memoryOnly ?? false]).sort()).toEqual([["local-ci 2", "slot", false], ["review claude", "memory", true]]);
     expect(started).toBe(0);
     free = 2000;
     await low;
     expect(started).toBeGreaterThan(0);
-    expect(readHeavyState(home).waiting).toEqual([]);
+    expect(readHeavyState(home).waiting.map((w) => w.name)).toEqual(["local-ci 2"]);
     expect(readHeavyState(home).running.map((r) => r.name)).toEqual(["local-ci 1"]);
 
     release();
     await holder;
-    expect(readHeavyHistory(home).map((e) => e.name)).toEqual(["review codex", "review claude", "local-ci 1"]);
+    await slotWaiter;
+    expect(readHeavyHistory(home).map((e) => e.name)).toEqual(["review codex", "review claude", "local-ci 1", "local-ci 2"]);
     expect(readdirSync(heavyStateDir(home)).filter((f) => f.startsWith("slot-"))).toEqual([]);
   });
 });
@@ -279,7 +292,7 @@ const heavyCli = (home: string, taskId: string, name: string) =>
 test("heavy: a waiter is readable with its task and reason", async () => {
   await scratch(async (home) => {
     configure(home, { minFreeMb: 0 });
-    expect(readHeavyState(home)).toEqual({ config: { max: 1, minFreeMb: 0 }, running: [], waiting: [] }); // no directory yet
+    expect(readHeavyState(home)).toEqual({ config: { max: 1, minFreeMb: 0 }, running: [], beside: [], waiting: [] }); // no directory yet
     const holder = heavyCli(home, "task_a", "local-ci 1");
     await slotHeld(home);
     const waiter = heavyCli(home, "task_b", "bun test");

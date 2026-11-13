@@ -50,4 +50,9 @@ test("eta: the last end when the waiting runs take the earliest free slot in the
   expect(estimateDone(late, [...waiting, { name: "new thing", queuedAt: iso(T0) }], 2, typical, now)).toEqual({ etaMs: 20 * MIN, unknown: 2 });
   // nothing running or waiting: no eta
   expect(estimateDone([], [], 1, typical, now)).toEqual({ etaMs: null, unknown: 0 });
+  // a wait that takes no slot (memoryOnly) changes nothing, and alone it leaves no eta
+  const beside = { name: "review codex", queuedAt: iso(T0), memoryOnly: true };
+  expect(estimateDone(running, [beside, ...waiting], 1, typical, now)).toEqual({ etaMs: 36 * MIN, unknown: 0 });
+  expect(estimateDone(late, [...waiting, { name: "new thing", queuedAt: iso(T0), memoryOnly: true }], 2, typical, now)).toEqual({ etaMs: 20 * MIN, unknown: 1 });
+  expect(estimateDone([], [beside], 1, typical, now)).toEqual({ etaMs: null, unknown: 0 });
 });

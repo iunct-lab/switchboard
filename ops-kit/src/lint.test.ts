@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { main } from "./cli.ts";
 import { loadConfig } from "./config.ts";
 import { fakeGh, GhError, type FakeCall } from "./gh.ts";
-import { formatLint, lint, LintFetchError, releasePrereqs, speakerOf } from "./lint.ts";
+import { bodyLoss, formatLint, lint, LintFetchError, releasePrereqs, speakerOf } from "./lint.ts";
 import type { StoredRecords } from "./backlog-client.ts";
 
 const fixtures = join(import.meta.dir, "../fixtures");
@@ -385,5 +385,37 @@ describe("（リリース）on an Issue", () => {
   test("a failure other than 404 is a fetch error (exit 2), never a pass", async () => {
     const g = fakeGh([pageWith("**前提**: #20（リリース）"), () => { throw new GhError("gh api failed (exit 1): HTTP 500"); }]);
     await expect(lint(g, cfg, { sleep: noSleep })).rejects.toBeInstanceOf(LintFetchError);
+  });
+});
+
+describe("bodyLoss", () => {
+  const sections = ["ユーザーストーリー", "到達点 / 受け入れ条件", "スコープ外"];
+  const before = "## ユーザーストーリー\nx\n## 到達点 / 受け入れ条件\n- [ ] 1\n## スコープ外\nなし\n\n**Story Points**: 3\n";
+  test("a body that starts with null is refused, with or without text after it, for any kind of Issue", () => {
+    expect(bodyLoss(before, "null\n", true, sections)).toContain("null");
+    expect(bodyLoss(before, "\n  null  \n## 続き\n", false, sections)).toContain("null");
+    expect(bodyLoss("", "null", false, [])).toContain("null");
+    // null later in the text, or as a part of a word, is a body
+    expect(bodyLoss("", "## 背景\nnull\n", false, [])).toBeNull();
+    expect(bodyLoss("", "nullable な値\n", false, [])).toBeNull();
+  });
+  test("a PBI that loses a section or the Story Points line is refused, naming each; edits that keep them pass", () => {
+    const noCriteria = before.replace("## 到達点 / 受け入れ条件\n- [ ] 1\n", "");
+    expect(bodyLoss(before, noCriteria, true, sections)).toContain("到達点 / 受け入れ条件");
+    expect(bodyLoss(before, noCriteria, true, sections)).not.toContain("スコープ外");
+    const noPoints = before.replace("**Story Points**: 3\n", "");
+    expect(bodyLoss(before, noPoints, true, sections)).toContain("Story Points");
+    expect(bodyLoss(before, "## 何か別の本文\n", true, sections)).toMatch(/ユーザーストーリー.*到達点.*スコープ外.*Story Points/);
+    expect(bodyLoss(before, `${before}\n## 決定ログ\n- 追記\n`, true, sections)).toBeNull();
+    expect(bodyLoss(before, before.replace("x\n", "書き換えた\n"), true, sections)).toBeNull();
+  });
+  test("what the stored body already lacked is not asked for, and only a PBI is held to its sections", () => {
+    const old = "## ユーザーストーリー\nx\n## 到達点 / 受け入れ条件\n- [ ] 1\n";
+    expect(bodyLoss(old, `${old}## スコープ外\nなし\n`, true, sections)).toBeNull();
+    expect(bodyLoss(old, old.replace("## 到達点 / 受け入れ条件\n- [ ] 1\n", ""), true, sections)).toContain("到達点");
+    expect(bodyLoss(before, "## 全然違う\n", false, sections)).toBeNull();
+    // the sections come from the configuration of the repository: another heading is the one that is held
+    expect(bodyLoss("## 目的\nx\n", "## 経緯\nx\n", true, ["目的"])).toContain("「## 目的」");
+    expect(bodyLoss("## 目的\nx\n", "## 目的\ny\n", true, ["目的"])).toBeNull();
   });
 });

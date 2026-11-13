@@ -1,5 +1,5 @@
 // test-reads: ops-kit/fixtures/
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -238,7 +238,7 @@ test("triage without a Phase: an empty Phase position is skipped and parent / st
 });
 
 test("edits go to the app's routes as its screen sends them; a refusal is exit 1", async () => {
-  const detail = { issue: { number: 3 }, fields: { "Story Points": 2, Code: "007" } };
+  const detail = { issue: { number: 3, body: "", labels: [] }, fields: { "Story Points": 2, Code: "007" } };
   const ok = app((m, p) => (m === "GET" ? { body: p === "/syncs" ? LIST : detail } : { status: 202, body: { localId: "L1", operations: ["o"] } }));
   expect((await run(["edit", "#3", "--title", "T", "--body-file", "-", "--add-label", "a", "--remove-label", "b", "--state", "closed", "--no-milestone"], ok)).code).toBe(0);
   expect((await run(["set", "3", "Story Points", "5"], ok)).code).toBe(0);
@@ -268,6 +268,88 @@ test("edits go to the app's routes as its screen sends them; a refusal is exit 1
   const fresh = await run(["edit", "3", "--title", "T", "--fresh"]);
   expect([fresh.code, fresh.calls]).toEqual([1, []]);
   expect((await run(["nope"])).code).toBe(1);
+});
+
+// a clone whose origin is acme/app: the repository the edit's section check takes the configuration for
+const clone = mkdtempSync(join(tmpdir(), "ops-kit.edit-clone."));
+Bun.spawnSync(["git", "init", "-q"], { cwd: clone });
+Bun.spawnSync(["git", "remote", "add", "origin", "https://github.com/acme/app.git"], { cwd: clone });
+afterAll(() => rmSync(clone, { recursive: true, force: true }));
+
+const PBI_BODY = "## ユーザーストーリー\nx\n## 到達点 / 受け入れ条件\n- [ ] 1\n## スコープ外\nなし\n\n**Story Points**: 3\n";
+/** An app that stores #3 as `stored` (labels `labels`) and takes its PATCH; `edit` runs `backlog edit 3 --body-file -` with `body` on the standard input. */
+async function editBody(body: string, opts: { stored?: string; labels?: string[]; sections?: string[]; extra?: string[]; env?: Record<string, string | undefined> } = {}) {
+  const fake = app((m, p) => (m === "GET" ? { body: p === "/syncs" ? LIST : { issue: { number: 3, body: opts.stored ?? PBI_BODY, labels: opts.labels ?? ["type:pbi"] } } } : { status: 202, body: { localId: null, operations: ["o"] } }));
+  const out: string[] = [];
+  const err: string[] = [];
+  const code = await runBacklog(["edit", "3", "--body-file", "-", ...(opts.extra ?? [])], { BACKLOG_URL: "http://app/api/backlog", GH_REPO: undefined, ...opts.env }, { out: (s) => out.push(s), err: (s) => err.push(s), stdin: async () => body }, { fetch: fake.fetch, cwd: clone, pbiSections: () => opts.sections ?? ["ユーザーストーリー", "到達点 / 受け入れ条件", "スコープ外"] });
+  return { code, out: out.join("\n"), err: err.join("\n"), patches: fake.calls.filter((c) => c.method === "PATCH") };
+}
+
+test("edit: a body of null, or a PBI body that loses a required section or the Story Points line, is refused with the reason and nothing is sent", async () => {
+  for (const body of ["null\n", `null\n${PBI_BODY}`]) {
+    const r = await editBody(body);
+    expect([r.code, r.patches.length]).toEqual([1, 0]);
+    expect(r.err).toContain("backlog edit: 保存しません");
+    expect(r.err).toContain("jq -r .issue.body");
+  }
+  const noCriteria = await editBody(PBI_BODY.replace("## 到達点 / 受け入れ条件\n- [ ] 1\n", ""));
+  expect([noCriteria.code, noCriteria.patches.length]).toEqual([1, 0]);
+  expect(noCriteria.err).toContain("到達点 / 受け入れ条件");
+  const noPoints = await editBody(PBI_BODY.replace("**Story Points**: 3\n", ""));
+  expect([noPoints.code, noPoints.patches.length]).toEqual([1, 0]);
+  expect(noPoints.err).toContain("Story Points");
+  // --allow-empty is for an empty body only: a PBI cannot be emptied
+  const emptied = await editBody("", { extra: ["--allow-empty"] });
+  expect([emptied.code, emptied.patches.length]).toEqual([1, 0]);
+});
+
+test("edit: a log line added, or a section the stored body already lacked added, is sent; a Task is not held to the PBI's sections", async () => {
+  const log = await editBody(`${PBI_BODY}\n## 決定ログ\n- 追記\n`);
+  expect([log.code, log.patches.map((c) => c.body)]).toEqual([0, [{ workspaceId: "ws1", body: `${PBI_BODY}\n## 決定ログ\n- 追記\n` }]]);
+  const old = "## ユーザーストーリー\nx\n## 到達点 / 受け入れ条件\n- [ ] 1\n\n**Story Points**: 3\n";
+  expect((await editBody(PBI_BODY, { stored: old })).code).toBe(0);
+  expect((await editBody("## やること\n別\n", { labels: ["type:task"] })).code).toBe(0);
+});
+
+test("edit: the required sections are the configuration's, not fixed; none known (another repository named) holds only null and the Story Points line", async () => {
+  const mine = "## 目的\nx\n\n**Story Points**: 2\n";
+  const r = await editBody("## 経緯\ny\n\n**Story Points**: 2\n", { stored: mine, sections: ["目的"] });
+  expect([r.code, r.patches.length]).toEqual([1, 0]);
+  expect(r.err).toContain("「## 目的」");
+  expect((await editBody("## 目的\ny\n\n**Story Points**: 2\n", { stored: mine, sections: ["目的"] })).code).toBe(0);
+  // GH_REPO names a repository other than origin's: its sections are not this clone's
+  const other = await editBody("## 経緯\ny\n\n**Story Points**: 2\n", { stored: mine, sections: ["目的"], env: { GH_REPO: "acme/other" } });
+  expect(other.code).toBe(0);
+  expect((await editBody("## 経緯\ny\n", { stored: mine, sections: ["目的"], env: { GH_REPO: "acme/other" } })).code).toBe(1);
+  // --workspace naming this clone's repository keeps the configuration's sections; another repository's does not, and the hint names the workspace
+  const named = await editBody("## 経緯\ny\n\n**Story Points**: 2\n", { stored: mine, sections: ["目的"], extra: ["--workspace", "ws1"] });
+  expect([named.code, named.patches.length]).toEqual([1, 0]);
+  expect(named.err).toContain("view 3 --workspace ws1 --json");
+  expect((await editBody("## 経緯\ny\n\n**Story Points**: 2\n", { stored: mine, sections: ["目的"], extra: ["--workspace", "ws2"] })).code).toBe(0);
+});
+
+test("empty: an edit or a create whose body is empty or only blanks is refused and nothing is sent, unless --allow-empty; a comment is always refused", async () => {
+  const sent = async (argv: string[], body: string) => {
+    const fake = app((m, p) => (m === "GET" ? { body: p === "/syncs" ? LIST : { issue: { number: 3, body: "古い", labels: ["type:task"] } } } : { status: 202, body: { localId: null, operations: ["o"] } }));
+    const err: string[] = [];
+    const code = await runBacklog(argv, { BACKLOG_URL: "http://app/api/backlog", GH_REPO: "acme/app" }, { out: () => {}, err: (s) => err.push(s), stdin: async () => body }, { fetch: fake.fetch });
+    return { code, err: err.join("\n"), writes: fake.calls.filter((c) => c.method !== "GET").length, reads: fake.calls.filter((c) => c.method === "GET").length };
+  };
+  for (const body of ["", "  \n\n"]) {
+    for (const argv of [["edit", "3", "--body-file", "-"], ["create", "--title", "T", "--body-file", "-"]]) {
+      const r = await sent(argv, body);
+      expect([argv[0], r.code, r.writes]).toEqual([argv[0], 1, 0]);
+      expect(r.err).toContain(`backlog ${argv[0]}: 本文が空なので保存しません`);
+      // refused before the stored body is read
+      expect(r.reads).toBe(0);
+      const allowed = await sent([...argv, "--allow-empty"], body);
+      expect([argv[0], allowed.code, allowed.writes]).toEqual([argv[0], 0, 1]);
+    }
+    const comment = await sent(["comment", "3", "--body-file", "-"], body);
+    expect([comment.code, comment.writes]).toEqual([1, 0]);
+    expect((await sent(["comment", "3", "--body-file", "-", "--allow-empty"], "text")).code).toBe(1);
+  }
 });
 
 test("edit --reason: not-planned / completed go as stateReason with the close; none sends no reason; one without a close or another value is refused, nothing sent", async () => {

@@ -3,6 +3,7 @@ import { commentOnGithub, createOnGithub, editOnGithub, listFromGithub, viewFrom
 import { projectOf, type OpsConfig } from "./config.ts";
 import { repoOf, type GhClient } from "./gh.ts";
 import { fieldChoice, setField, UsageError } from "./set.ts";
+import { bodyLoss } from "./lint.ts";
 import { triage } from "./triage.ts";
 import { findSecrets, hostAws } from "./secrets.ts";
 
@@ -27,10 +28,12 @@ export const BACKLOG_USAGE = `  backlog list [--search <語>] [--label <l>]... [
       GitHub が受け付けなかった（失敗で保留中の）編集を、原因を直した後に全部送り直す（アプリの Task の中だけ）。無ければ 1
   backlog withdraw <issue> [--reason <文>]
       結果不明・失敗で保留中の編集を、GitHub に何も書かずに全部取り下げる（中身を確かめてから。アプリの Task の中だけ）。無ければ 1
-  backlog create --title <t> [--body-file <f|->] [--label <l>]... [--milestone <m>] [--parent <n>] [--field <name>=<value>]... [--head <枝> --base <枝>]
+  backlog create --title <t> [--body-file <f|->] [--label <l>]... [--milestone <m>] [--parent <n>] [--field <name>=<value>]... [--head <枝> --base <枝>] [--allow-empty]
+      --allow-empty: 本文が空（空白と改行だけも）でも送る。無ければ空の本文は送らず 1（前段の失敗で空になった本文を保存しない）
       --head / --base: PR の代わりのローカルの「変更」として作る（GitHub 連携の無い workspace だけ。両方そろえる）
   backlog edit <issue> [--title <t>] [--body-file <f|->] [--add-label <l>]... [--remove-label <l>]... [--state open|closed]
-               [--reason completed|not-planned] [--milestone <m> | --no-milestone] [--parent <n> | --no-parent]
+               [--reason completed|not-planned] [--milestone <m> | --no-milestone] [--parent <n> | --no-parent] [--allow-empty]
+      --body-file: 本文が先頭 null だけ、または type:pbi の必須の節・**Story Points**: の行を失う本文は保存せず 1（押し切る口は無い。節を消す --allow-empty でも同じ）
       --reason: 閉じた理由（--state closed と一緒だけ。重複・やらないと決めた Issue は not-planned。閉じている Issue の理由の付け替えも同じ形）
   backlog comment <issue> --body-file <f|->
   backlog set <issue> <field> <value>
@@ -47,6 +50,8 @@ export const BACKLOG_USAGE = `  backlog list [--search <語>] [--label <l>]... [
       （--fresh は何もしない、--workspace は 1、set / triage / --field は ops.config.json の Project）。
       BACKLOG_URL があってアプリに届かなければ GitHub に切り替えず 2
       リポジトリは --workspace <id>、無ければ GH_REPO、無ければ BACKLOG_WORKSPACE（GitHub 連携の無い workspace の Task にアプリが渡す）、無ければ origin`;
+
+const EMPTY_BODY = (sub: string) => `backlog ${sub}: 本文が空なので保存しません（--body-file の前段の失敗を確かめる。空にするなら --allow-empty）`;
 
 export interface BacklogIo {
   out: (s: string) => void;
@@ -110,7 +115,7 @@ interface Sync {
  * through `gh`, with the Status of `project` (null = none: Status `-`) and the Project of `config` for set / triage /
  * `--field` (it throws when there is none). With BACKLOG_URL, gh is never used, even when the app cannot be reached.
  */
-export async function runBacklog(argv: string[], env: Record<string, string | undefined>, io: BacklogIo, opts: { fetch?: Fetch; cwd?: string; phase?: boolean; gh?: GhClient; project?: () => Promise<Project>; config?: () => Promise<OpsConfig> } = {}): Promise<number> {
+export async function runBacklog(argv: string[], env: Record<string, string | undefined>, io: BacklogIo, opts: { fetch?: Fetch; cwd?: string; phase?: boolean; gh?: GhClient; project?: () => Promise<Project>; config?: () => Promise<OpsConfig>; pbiSections?: () => string[] } = {}): Promise<number> {
   const args = [...argv];
   const take = (flag: string): string | undefined => {
     const at = args.indexOf(flag);
@@ -157,13 +162,11 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
     // a value written straight to GitHub is checked against this clone's ops.config.json first: a choice that
     // differs only in case is written as the choice, one not there is refused before anything is written. Not when
     // GH_REPO names another repository than origin's (another Project, whose choices are not this config's)
+    const ownRepo = async () => !env.GH_REPO || (await repoName(env, opts.cwd)).toLowerCase() === (await repoName({ ...env, GH_REPO: undefined }, opts.cwd).catch(() => "")).toLowerCase();
     const choose = async (fields: Record<string, string>): Promise<Record<string, string>> => {
       // no field named: nothing to check, and no config asked for (a plain create needs none)
       if (!Object.keys(fields).length) return fields;
-      if (env.GH_REPO) {
-        const origin = await repoName({ ...env, GH_REPO: undefined }, opts.cwd).catch(() => "");
-        if ((await repoName(env, opts.cwd)).toLowerCase() !== origin.toLowerCase()) return fields;
-      }
+      if (!(await ownRepo())) return fields;
       const c = await config();
       return Object.fromEntries(Object.entries(fields).map(([name, value]) => [name, String(fieldChoice(c, name, value))]));
     };
@@ -248,13 +251,15 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
       case "create": {
         const title = take("--title");
         const body = await text(take("--body-file"));
+        const allowEmpty = has("--allow-empty");
         const labels = takeAll("--label");
         const milestone = take("--milestone");
         const parent = take("--parent");
         const fields = Object.fromEntries(takeAll("--field").map(fieldPair));
         const head = take("--head");
         const base = take("--base");
-        if (!title || args.length || !head !== !base) throw new Refused("backlog create --title <t> [--body-file <f|->] [--label <l>]... [--milestone <m>] [--parent <n>] [--field <name>=<value>]... [--head <枝> --base <枝>]");
+        if (!title || args.length || !head !== !base) throw new Refused("backlog create --title <t> [--body-file <f|->] [--label <l>]... [--milestone <m>] [--parent <n>] [--field <name>=<value>]... [--head <枝> --base <枝>] [--allow-empty]");
+        if (body !== undefined && !body.trim() && !allowEmpty) throw new Refused(EMPTY_BODY("create"));
         if (direct && head) throw new Refused("--head / --base（ローカルの変更）はアプリの Task の中だけ（BACKLOG_URL が要る）");
         noSecrets(title, body, milestone, ...labels, ...Object.values(fields).map(String));
         if (direct) {
@@ -273,6 +278,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         const [ref] = args.splice(0, 1);
         const title = take("--title");
         const body = await text(take("--body-file"));
+        const allowEmpty = has("--allow-empty");
         const add = takeAll("--add-label");
         const remove = takeAll("--remove-label");
         const state = take("--state");
@@ -283,8 +289,27 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         const milestone = has("--no-milestone") ? null : take("--milestone");
         const parent = has("--no-parent") ? null : take("--parent");
         if (!ref || args.length || (state !== undefined && !/^(open|closed)$/i.test(state)) || (reasonArg !== undefined && (!reason || state?.toLowerCase() !== "closed")))
-          throw new Refused("backlog edit <issue> [--title <t>] [--body-file <f|->] [--add-label <l>]... [--remove-label <l>]... [--state open|closed] [--reason completed|not-planned（--state closed と一緒だけ）] [--milestone <m> | --no-milestone] [--parent <n> | --no-parent]");
+          throw new Refused("backlog edit <issue> [--title <t>] [--body-file <f|->] [--add-label <l>]... [--remove-label <l>]... [--state open|closed] [--reason completed|not-planned（--state closed と一緒だけ）] [--milestone <m> | --no-milestone] [--parent <n> | --no-parent] [--allow-empty]");
+        if (body !== undefined && !body.trim() && !allowEmpty) throw new Refused(EMPTY_BODY("edit"));
         noSecrets(title, body, milestone ?? undefined, ...add);
+        // a body that loses what the Issue had is not saved: read the Issue as it is now, before anything is sent
+        if (body !== undefined) {
+          let now: Detail;
+          let own: boolean;
+          if (direct) {
+            now = await viewFromGithub(direct.gh, await githubRepo(), null, number(ref));
+            own = await ownRepo();
+          } else {
+            const ws = await workspace();
+            now = (await api("GET", `/${encodeURIComponent(issueRef(ref))}?workspaceId=${encodeURIComponent(ws.workspaceId)}`)) as Detail;
+            // --workspace names a workspace: this clone's repository when its repository is origin's
+            own = explicit === undefined ? await ownRepo() : !!ws.repository && ws.repository.toLowerCase() === (await repoName({ ...env, GH_REPO: undefined }, opts.cwd).catch(() => "")).toLowerCase();
+          }
+          // another repository than this clone's: its sections are not this config's, only null and Story Points are checked
+          const sections = own && opts.pbiSections ? opts.pbiSections() : [];
+          const lost = bodyLoss(now.issue.body, body, now.issue.labels.includes("type:pbi"), sections);
+          if (lost) throw new Refused(`backlog edit: 保存しません — ${lost}。本文は ops-kit backlog view ${ref.replace(/^#/, "")}${explicit !== undefined ? ` --workspace ${explicit}` : ""} --json | jq -r .issue.body で取る`);
+        }
         const input: Record<string, unknown> = {
           ...(title !== undefined && { title }),
           ...(body !== undefined && { body }),

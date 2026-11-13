@@ -123,7 +123,7 @@ export function Resources(props: { onOpenTask: (id: string) => void }) {
               </div>
             )}
             <h5>{t(m.resRunningHeading)}</h5>
-            {r.slots.running.length === 0 ? (
+            {r.slots.running.length + r.slots.beside.length === 0 ? (
               <div className="muted">{t(m.resNone)}</div>
             ) : (
               <div className="table-scroll">
@@ -139,10 +139,13 @@ export function Resources(props: { onOpenTask: (id: string) => void }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {r.slots.running.map((x) => (
+                  {[...r.slots.running.map((x) => ({ x, beside: false })), ...r.slots.beside.map((x) => ({ x, beside: true }))].map(({ x, beside }) => (
                     <tr key={`${x.pid}/${x.startedAt}`} data-resources-run={x.name}>
                       <td>{task(x)}</td>
-                      <td>{x.name}</td>
+                      <td>
+                        {x.name}
+                        {beside && <span className="hint" data-resources-beside> {t(m.resBeside)}</span>}
+                      </td>
                       <td className="mono">{x.cwd}</td>
                       <td className="num">{since(x.startedAt, now)}</td>
                       <td className="num" data-resources-typical>{typicalLabel(x)}</td>

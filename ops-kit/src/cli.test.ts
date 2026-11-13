@@ -1,5 +1,5 @@
 // test-reads: ops-kit/fixtures/ ops-kit/bin/ .github/labels.yml
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -581,6 +581,8 @@ describe("backlog without BACKLOG_URL", () => {
   });
   const ghIssue = (i: typeof pbi | typeof task, f: Record<string, string | number> | null) => ({ number: i.number, title: i.title, state: i.state, labels: { nodes: i.labels.map((name) => ({ name })) }, projectItems: items(f) });
   const graphql = (c: FakeCall | undefined) => (c?.kind === "graphql" ? c : null);
+  /** GitHub's answer to the read of an Issue's stored body that an edit with a body makes first. */
+  const viewed = (i: { number: number; title: string; state: string; labels: string[]; body: string }) => ({ repository: { issue: { ...i, stateReason: null, url: "", labels: { nodes: i.labels.map((name) => ({ name })) }, milestone: null, parent: null, subIssues: { nodes: [] }, comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } });
   const cli = async (argv: string[], env: Record<string, string | undefined>, responses: Parameters<typeof fakeGh>[0]) => {
     const out: string[] = [];
     const err: string[] = [];
@@ -713,11 +715,11 @@ describe("backlog without BACKLOG_URL", () => {
       // a reason goes with the close in one PATCH: an Issue closed already gets its reason changed too
       const reasoned = await cli(["backlog", "edit", "12", "--state", "closed", "--reason", "not-planned"], { BACKLOG_URL: undefined }, [() => ""]);
       expect([reasoned.code, reasoned.gh.calls.map(runOf)]).toEqual([0, [["api", "-X", "PATCH", "repos/example/repo/issues/12", "-f", "state=closed", "-f", "state_reason=not_planned"]]]);
-      const parentless = await cli(["backlog", "edit", "13", "--body-file", join(dir, "body.md"), "--state", "open", "--no-parent"], { BACKLOG_URL: undefined }, [readBody, () => "", () => ({ repository: { child: { id: "I13", parent: { id: "I12" } } } }), () => ({})]);
+      const parentless = await cli(["backlog", "edit", "13", "--body-file", join(dir, "body.md"), "--state", "open", "--no-parent"], { BACKLOG_URL: undefined }, [() => viewed(task), readBody, () => "", () => ({ repository: { child: { id: "I13", parent: { id: "I12" } } } }), () => ({})]);
       expect(parentless.code).toBe(0);
-      expect(runOf(parentless.gh.calls[1]!)).toEqual(["issue", "reopen", "13", "-R", "example/repo"]);
-      expect(graphql(parentless.gh.calls[3])?.query).toContain("removeSubIssue");
-      expect(graphql(parentless.gh.calls[3])?.vars).toEqual({ p: "I12", c: "I13" });
+      expect(runOf(parentless.gh.calls[2]!)).toEqual(["issue", "reopen", "13", "-R", "example/repo"]);
+      expect(graphql(parentless.gh.calls[4])?.query).toContain("removeSubIssue");
+      expect(graphql(parentless.gh.calls[4])?.vars).toEqual({ p: "I12", c: "I13" });
 
       const comment = await cli(["backlog", "comment", "12", "--body-file", join(dir, "body.md")], { BACKLOG_URL: undefined }, [(c) => (readBody(c), "")]);
       expect([comment.code, comment.lines]).toEqual([0, ["#12 にコメントを保存しました"]]);
@@ -749,6 +751,66 @@ describe("backlog without BACKLOG_URL", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  describe("a body that would break the Issue or empty it is not written", () => {
+    const stored = "## ユーザーストーリー\nx\n## 到達点 / 受け入れ条件\n- [ ] 1\n## スコープ外\nなし\n## 元要望\n#1（x）\n\n**Story Points**: 5\n";
+    const gh = (labels: string[], body = stored) => [() => viewed({ number: 12, title: "PBI: 題", state: "OPEN", labels, body })];
+    // the sections are those of this clone's configuration: a clone of example/repo, not GH_REPO naming it
+    const cwd = process.cwd();
+    let clone = "";
+    let dir = "";
+    beforeAll(() => {
+      clone = mkdtempSync(join(tmpdir(), "ops-kit.edit-clone."));
+      dir = mkdtempSync(join(tmpdir(), "ops-kit.edit-body."));
+      Bun.spawnSync(["git", "init", "-q"], { cwd: clone });
+      Bun.spawnSync(["git", "remote", "add", "origin", "https://github.com/example/repo.git"], { cwd: clone });
+      process.chdir(clone);
+    });
+    afterAll(() => {
+      process.chdir(cwd);
+      rmSync(clone, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    });
+    const edit = (body: string, labels: string[], extra: string[] = [], current = stored) => {
+      writeFileSync(join(dir, "body.md"), body);
+      return cli(["backlog", "edit", "12", "--body-file", join(dir, "body.md"), ...extra], { BACKLOG_URL: undefined, GH_REPO: undefined }, [...gh(labels, current), () => "", () => ""]);
+    };
+    const written = (r: { gh: { calls: FakeCall[] } }) => r.gh.calls.filter((c) => c.kind === "run");
+
+    test("edit: null, or a PBI that loses a section or the Story Points line, exits 1 with the reason and gh edit is not called", async () => {
+      for (const body of ["null\n", `null\n${stored}`, stored.replace("## スコープ外\nなし\n", ""), stored.replace("**Story Points**: 5\n", "")]) {
+        const r = await edit(body, ["type:pbi"]);
+        expect([r.code, written(r).length, r.gh.calls.length]).toEqual([1, 0, 1]);
+        expect(r.err).toContain("backlog edit: 保存しません");
+      }
+      expect((await edit(stored.replace("## スコープ外\nなし\n", ""), ["type:pbi"])).err).toContain("スコープ外");
+      // a section is the configuration's: 元要望 is held too, and an emptied PBI cannot go through --allow-empty
+      expect((await edit(stored.replace("## 元要望\n#1（x）\n", ""), ["type:pbi"])).err).toContain("元要望");
+      expect((await edit("", ["type:pbi"], ["--allow-empty"])).code).toBe(1);
+    });
+
+    test("edit: a log line added, a section the stored body lacked added, or a Task rewritten is written", async () => {
+      expect((await edit(`${stored}\n## 決定ログ\n- 追記\n`, ["type:pbi"])).code).toBe(0);
+      const old = stored.replace("## スコープ外\nなし\n", "");
+      expect((await edit(stored, ["type:pbi"], [], old)).code).toBe(0);
+      expect(written(await edit("## やること\n別\n", ["type:task"])).length).toBe(1);
+    });
+
+    test("empty: an edit or a create with an empty or blank body exits 1 and gh is not called; --allow-empty writes it; a comment is refused", async () => {
+      for (const body of ["", "  \n\n"]) {
+        writeFileSync(join(dir, "empty.md"), body);
+        for (const argv of [["backlog", "edit", "12", "--body-file", join(dir, "empty.md")], ["backlog", "create", "--title", "t", "--body-file", join(dir, "empty.md")], ["backlog", "comment", "12", "--body-file", join(dir, "empty.md")]]) {
+          const r = await cli(argv, { BACKLOG_URL: undefined, GH_REPO: undefined }, []);
+          expect([argv[1], r.code, r.gh.calls.length]).toEqual([argv[1], 1, 0]);
+          if (argv[1] !== "comment") expect(r.err).toContain(`backlog ${argv[1]}: 本文が空なので保存しません`);
+        }
+        const create = await cli(["backlog", "create", "--title", "t", "--body-file", join(dir, "empty.md"), "--allow-empty"], { BACKLOG_URL: undefined, GH_REPO: undefined }, [() => "https://github.com/example/repo/issues/22\n"]);
+        expect([create.code, create.lines]).toEqual([0, ["#22 を作りました（GitHub）"]]);
+        const taskEdit = await cli(["backlog", "edit", "13", "--body-file", join(dir, "empty.md"), "--allow-empty"], { BACKLOG_URL: undefined, GH_REPO: undefined }, [() => viewed({ number: 13, title: "Task: 実装", state: "OPEN", labels: ["type:task"], body: "古い" }), () => ""]);
+        expect([taskEdit.code, written(taskEdit).length]).toEqual([0, 1]);
+      }
+    });
   });
 
   test("set / triage / --field without a Project in ops.config.json are refused, and nothing is written", async () => {

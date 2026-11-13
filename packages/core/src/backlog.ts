@@ -206,6 +206,14 @@ function field(raw: RawBacklogIssue, project: number, name: string) {
   return item?.fieldValues.nodes.find((v) => v.field?.name === name);
 }
 
+/**
+ * Whether `POST /api/backlog/:number/start` accepts `close`: an in-progress PBI whose Tasks are all closed, with 利用者確認 left or not
+ * (the stage Task keeps it open while one is pending). `closable`, which the screen's button reads, still needs none left.
+ */
+export function closableByApi(item: Pick<BacklogItem, "stage" | "tasks">): boolean {
+  return item.stage === "in-progress" && !!item.tasks && item.tasks.total > 0 && item.tasks.done === item.tasks.total;
+}
+
 /** The label that keeps backlog-next off a request or PBI still being thought about. */
 export const ON_HOLD_LABEL = "on-hold";
 /** The label of a PBI that improves the development flow itself; at most `flowLimit` of them are in progress at once. */
