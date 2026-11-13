@@ -18,7 +18,7 @@ the job runs, so the session closes at the timeout like any other finished turn.
 ## What a Task does
 
 ```bash
-ops-kit job request local-ci <PR> [--cwd <dir>] [--fixtures <dir>]
+ops-kit job request local-ci <PR> [--cwd <dir>] [--fixtures <dir>] [--local]
 ops-kit job request review <PR> --runner codex|claude --prompt <file> --out <file> [--cwd <dir>]
 ops-kit job list [--json]
 ```
@@ -50,6 +50,8 @@ A stop whose conditions are all `pr#N`, `issue#N` or `job#<id>` is resumed by th
 backlog import. A `job#<id>` closes when the job ends (pass, fail or aborted), and the end of a job runs the same
 resume. The resume message carries each job's kind, runner, PR, status, exit code and a summary, so the Task reads the
 result and continues. A Task whose job has not ended is not resumed.
+A job's result reaches the Task without waiting for its PR or Issue waits, which are resumed on their own when they close.
+Results are batched only while the same Task still waits on a running job: the last job's end sends one message with every result.
 
 ## After the daemon restarts
 

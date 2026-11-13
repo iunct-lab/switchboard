@@ -956,12 +956,13 @@ export async function reusablePass(t: { pr: number; repo: string; root: string; 
   return existingPass(t.pr, t.repo, run).catch(() => undefined);
 }
 
-/** The PR, the repository and its clone from the arguments: `<PR> [--repo <owner/name>] [--all] [--force]`. */
-export async function resolveTarget(argv: string[], cwd: string, scriptRoot: string, run: Deps["sh"]): Promise<{ pr: number; repo: string; root: string; all?: true; force?: true }> {
-  const args = argv.filter((a) => a !== "--all" && a !== "--force");
+/** The PR, the repository and its clone from the arguments: `<PR> [--repo <owner/name>] [--all] [--force] [--local]`. `--local`: every step here, not in the off-host build. */
+export async function resolveTarget(argv: string[], cwd: string, scriptRoot: string, run: Deps["sh"]): Promise<{ pr: number; repo: string; root: string; all?: true; force?: true; local?: true }> {
+  const args = argv.filter((a) => a !== "--all" && a !== "--force" && a !== "--local");
   const flags = {
     ...(argv.includes("--all") ? { all: true as const } : {}),
     ...(argv.includes("--force") ? { force: true as const } : {}),
+    ...(argv.includes("--local") ? { local: true as const } : {}),
   };
   const pr = Number(args.find((a) => /^\d+$/.test(a)));
   if (!pr) throw new TargetError("PR 番号が無い");
@@ -1137,8 +1138,13 @@ export async function main(args: string[], cwd: string, d: Deps, post = reportRe
     t = await resolveTarget(args, cwd, scriptRoot, d.sh);
   } catch (e) {
     if (!(e instanceof TargetError)) throw e;
-    console.error(`${e.message}\nusage: bun scripts/local-ci.ts <PR> [--repo <owner/name>] [--all] [--force]`);
+    console.error(`${e.message}\nusage: bun scripts/local-ci.ts <PR> [--repo <owner/name>] [--all] [--force] [--local]`);
     return 2;
+  }
+  // `--local`: the host's own steps even where a build off the host could be used (the slot is taken as without sb-offload)
+  if (t.local) {
+    const { offload: _off, ...here } = d;
+    d = here;
   }
   const url = await reusablePass(t, d.sh);
   if (url) {
@@ -1161,7 +1167,9 @@ export async function main(args: string[], cwd: string, d: Deps, post = reportRe
     const { posted, readFailed } = await notifyKeeping(t, r, d, post);
     // written, or not to be (moved): the record has done its work. A post that failed or a head and base that could not be read leaves it: the next run of the same head and base takes this build's result
     if (!readFailed) {
-      if (r.build) clearPending(cache ?? join(homedir(), ".cache"), t.repo, t.pr, r.build);
+      // a --local run has no build of its own; an off-host build's record of this head and base would make `--collect` post a second mark
+      const gone = r.build ?? (t.local ? pendingFor(cache ?? join(homedir(), ".cache"), t.repo, t.pr, r.sha, r.base)?.build : undefined);
+      if (gone) clearPending(cache ?? join(homedir(), ".cache"), t.repo, t.pr, gone);
     }
     if (!posted) return 1;
   } catch (e) {

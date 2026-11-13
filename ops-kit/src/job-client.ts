@@ -8,8 +8,9 @@
 import { isAbsolute, resolve } from "node:path";
 import { BacklogUnknown, client } from "./backlog-client.ts";
 
-export const JOB_USAGE = `  job request local-ci <PR> [--cwd <dir>] [--fixtures <dir>]
+export const JOB_USAGE = `  job request local-ci <PR> [--cwd <dir>] [--fixtures <dir>] [--local]
       アプリにローカル CI（scripts/local-ci.ts <PR>）を仕事として頼む。仕事はアプリの子として重い処理の枠を取って走り、Task のセッションの子にならない
+      --local は外のビルドを使えるホストでも全手順をこのマシンで回す（既定は外。外のビルドが無ければ指定せずにここで回る）
       --fixtures は録画庫（絶対パス）。仕事の環境に録画庫として渡り（変数の名前はアプリが決める）、録画の不足を失敗にする
   job request review <PR> --runner codex|claude --prompt <file> --out <file> [--cwd <dir>]
       アプリにレビュー（cross-runner-review の codex exec / claude -p）を仕事として頼む。--prompt を読み --out に書く（どちらも --cwd の中）
@@ -59,6 +60,8 @@ export async function runJob(argv: string[], env: Record<string, string | undefi
       const prompt = take("--prompt");
       const outFile = take("--out");
       const fixtures = take("--fixtures");
+      const local = args.includes("--local");
+      if (local) args.splice(args.indexOf("--local"), 1);
       const [kind, prArg, ...extra] = args;
       const pr = Number(prArg);
       if (!Number.isInteger(pr) || pr <= 0 || extra.length) throw new Usage(`使い方:\n${JOB_USAGE}`);
@@ -67,9 +70,9 @@ export async function runJob(argv: string[], env: Record<string, string | undefi
       if (kind === "local-ci") {
         if (runner || prompt || outFile) throw new Usage("local-ci は --runner / --prompt / --out を取りません");
         if (fixtures !== undefined && !isAbsolute(fixtures)) throw new Usage(`--fixtures は絶対パスで渡してください: ${fixtures}`);
-        body = { kind, taskId: env.OPS_KIT_TASK_ID, pr, cwd, ...(fixtures !== undefined && { fixtures }) };
+        body = { kind, taskId: env.OPS_KIT_TASK_ID, pr, cwd, ...(fixtures !== undefined && { fixtures }), ...(local && { local }) };
       } else if (kind === "review") {
-        if (fixtures !== undefined) throw new Usage("review は --fixtures を取りません");
+        if (fixtures !== undefined || local) throw new Usage("review は --fixtures / --local を取りません");
         if ((runner !== "codex" && runner !== "claude") || !prompt || !outFile) throw new Usage("review は --runner codex|claude と --prompt <file> と --out <file> が要ります");
         body = { kind, taskId: env.OPS_KIT_TASK_ID, pr, runner, cwd, promptFile: resolve(cwd, prompt), outFile: resolve(cwd, outFile) };
       } else throw new Usage(`仕事の種類は local-ci か review です: ${kind ?? "(なし)"}`);

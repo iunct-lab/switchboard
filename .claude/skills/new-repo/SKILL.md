@@ -5,7 +5,7 @@ description: 新しいリポジトリを雛形から作り、GitHub 側（リポ
 
 # 新しいリポジトリを作る（雛形 → GitHub 側 → 初期コミット → 登録 → 開始条件 → 報告）
 
-何が要り、どこまで揃えば開始してよいかの正本は `docs/design/new-repo.md`（The three layers・Differences by purpose・What stays manual・Conditions to start）。ここは**それを実行する順番とコマンド**だけで、条件は写さない。雛形は `ops-kit/template/`（`ops-kit/README.md` の「雛形（新しいリポジトリ）」にファイルとプレースホルダの表）。手順をスクリプトやデーモンのコードにしない。失敗しても作ったものを消さず、作ったものを報告して止まる（削除は人が行う）。
+何が要り、どこまで揃えば開始してよいかの正本は `docs/design/new-repo.md`（The three layers・Differences by purpose・What stays manual・Conditions to start）。ここは**それを実行する順番とコマンド**だけで、条件は写さない。雛形は `ops-kit/template/`（`ops-kit/README.md` の「Templates (new repositories)」にファイルとプレースホルダの表）。手順をスクリプトやデーモンのコードにしない。失敗しても作ったものを消さず、作ったものを報告して止まる（削除は人が行う）。
 
 前提: 自分は Switchboard の Task で、`$SWITCHBOARD_REPO_ROOT` が Switchboard のチェックアウトを指す。
 
@@ -84,7 +84,7 @@ mv <dir>/CLAUDE.md.tmpl <dir>/CLAUDE.md; mv <dir>/AGENTS.md.tmpl <dir>/AGENTS.md
 rm <dir>/.github/workflows/project-autoadd.yml     # 1 で「置かない」としたとき。置くなら残して `__PREFIX__` を置換する
 ```
 
-`ops-kit/README.md` の「雛形」の表の `__NAME__` を、1 で決めた値で全ファイルに置換する（`__KIT_HOME_VAR__` は `SWITCHBOARD_REPO_ROOT`。`__AREA__` は 1 行 / 1 要素のところを Area の数だけ増やす）。仕組みは `sed` で足りる。置換のコマンドは作らない。
+`ops-kit/README.md` の「Templates (new repositories)」の表の `__NAME__` を、1 で決めた値で全ファイルに置換する（`__KIT_HOME_VAR__` は `SWITCHBOARD_REPO_ROOT`。`__AREA__` は 1 行 / 1 要素のところを Area の数だけ増やす）。仕組みは `sed` で足りる。置換のコマンドは作らない。
 
 ```bash
 grep -rnE '__[A-Z_]+__' <dir> --exclude-dir=.git                                  # 期待: 0 件
@@ -133,7 +133,7 @@ Project のリポジトリへのひも付けとラベルは 2 で済ませてい
 
 ## 7. GitHub を使わないリポジトリ
 
-雛形は `ops-kit/template-local/`（`.github/` と `scripts/setup/` を持たない単体の 1 式。ファイルは `ops-kit/README.md` の「雛形（新しいリポジトリ）」）。1 のうち、owner・可視性・`<PREFIX>_PROJECT_URL` の変数・project-autoadd・`__KIT_REPO__`・`__QUOTA_CHECK__` は要らない（`envPrefix` そのものは `ops.config.json` の `__PREFIX__` に置くので決める）。Phase を使うなら `ops.config.json` に `phase` / `milestone` を足すだけ（`pbi.yml` は無い）。リモートが無いので、`gh` も `git push` も使わない。
+雛形は `ops-kit/template-local/`（`.github/` と `scripts/setup/` を持たない単体の 1 式。ファイルは `ops-kit/README.md` の「Templates (new repositories)」）。1 のうち、owner・可視性・`<PREFIX>_PROJECT_URL` の変数・project-autoadd・`__KIT_REPO__`・`__QUOTA_CHECK__` は要らない（`envPrefix` そのものは `ops.config.json` の `__PREFIX__` に置くので決める）。Phase を使うなら `ops.config.json` に `phase` / `milestone` を足すだけ（`pbi.yml` は無い）。リモートが無いので、`gh` も `git push` も使わない。
 
 ### 7-1. 新しく作る
 

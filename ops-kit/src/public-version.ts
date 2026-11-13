@@ -152,7 +152,7 @@ export function independentSync(opts: Options, run: Run, publish: (publication: 
       state = { completed: { ...state.pending!, commit } }; save();
       return `${head}\n${out}`;
     }
-    if (main && !base && !pending) throw new Error("independent version baseline missing; run ops-kit public-sync --adopt-baseline --source <vX.Y.Z> (see README: 独立した公開バージョン)");
+    if (main && !base && !pending) throw new Error("independent version baseline missing; run ops-kit public-sync --adopt-baseline --source <vX.Y.Z> (see README: Independent public versions)");
     if (!main && base) throw new Error("public main missing for recorded baseline");
     if (main) {
       git(["fetch", "-q", url, "+refs/heads/main:refs/public-sync/version-main"]);

@@ -2,7 +2,7 @@
 // machine's slots is free and the free memory is above the floor; otherwise wait and say why. A job run with `memoryOnly`
 // (a review session) takes no slot and waits only while the free memory is below the floor.
 // The limit is the machine's, not a repository's: the configuration and the slots live under the home directory, so every
-// repository, working tree and Task on the machine takes from the same slots (the kit README, 重い処理の枠).
+// repository, working tree and Task on the machine takes from the same slots (the kit README, Heavy-process slots).
 import { appendFileSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";

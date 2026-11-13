@@ -29,6 +29,15 @@ describe("ops-kit job", () => {
     expect(r.out).toContain('"reason":"depends"');
   });
 
+  test("request local-ci --local sends local: true; a review with --local is a usage error (1)", async () => {
+    const ok = await run(["request", "local-ci", "12", "--local"], () => job());
+    expect(ok.code).toBe(0);
+    expect(ok.calls[0]!.body).toEqual({ kind: "local-ci", taskId: "task_1", pr: 12, cwd: "/work/app", local: true });
+    const bad = await run(["request", "review", "12", "--runner", "codex", "--prompt", "p", "--out", "o", "--local"], () => job());
+    expect(bad.code).toBe(1);
+    expect(bad.calls).toHaveLength(0);
+  });
+
   test("request local-ci --fixtures sends the absolute folder; a relative one and one on a review are usage errors (1) and call nothing", async () => {
     const ok = await run(["request", "local-ci", "12", "--fixtures", "/home/u/fixtures"], () => job());
     expect(ok.code).toBe(0);

@@ -1,42 +1,42 @@
 # ops-kit
 
-GitHub の Issue と Project で回す開発の流れ（要望 → PBI → Task → PR → レビュー → マージ）の道具と共通のスキル。
-使う側のリポジトリは、設定ファイル `ops.config.json` と、そのリポジトリだけの手順を書いたスキルだけを持つ。キットのコードは持たない。
+Tools and shared skills for a development flow driven by GitHub Issues and a Project (request → PBI → Task → PR → review → merge).
+A consuming repository holds only the configuration file `ops.config.json` and the skills that describe procedures specific to that repository. It does not hold the kit's code.
 
-キットには、どのリポジトリにも固有の値（リポジトリ名、Project の番号や URL、選択肢の値、パス、アカウント）を書かない。固有の値は使う側の `ops.config.json` に、固有の手順は使う側のスキルに置く。禁止語の一覧は使う人がキットの外に置き、`export-copy` に指定する。キットのテストは合成語の一覧を使う。
+The kit never contains values specific to any one repository (repository names, Project numbers or URLs, option values, paths, accounts). Specific values go in the consuming repository's `ops.config.json`, and specific procedures go in the consuming repository's skills. The list of forbidden words is kept outside the kit by whoever uses it and passed to `export-copy`. The kit's tests use a list of synthetic words.
 
-## 中身
+## Contents
 
-| 場所 | 中身 |
+| Location | Contents |
 |---|---|
-| `src/cli.ts` | コマンド。`bun ops-kit/src/cli.ts --help` で全部の使い方と設定の例が出る |
-| `skills/` | どのリポジトリでも同じスキル 10 本: `issue-workflow` / `request-to-backlog` / `pbi-to-tasks` / `task-to-pr` / `cross-runner-review` / `review-with-subagent` / `review-triage-and-merge` / `stacked-pr-delivery` / `pbi-complete` / `public-release-gate` |
-| `bin/` | `PATH` に置いて使う 4 本: `ops-kit`（`src/cli.ts` と同じ。設定の要らない `scan-text` / `scan-issues` をどこからでも）/ `gh`（`gh` の前段。認証に使える値を含む書き込みを止める）/ `deny-shared-tmp`（Claude Code の PreToolUse の hook。`/tmp` 直下に固定の名前で書くコマンドを止める）/ `device-auth`（別の場所での承認を求めるコマンドを動かし、URL とコードをエージェントの読む出力から外す） |
-| `template/` | 新しいリポジトリの雛形（設定・入口・`.github/`）。下の「雛形（新しいリポジトリ）」 |
-| `public/` | 公開リポジトリに置く 1 式: README に入れる方針の節（`README.section.md`）、要望だけの Issue テンプレ（`.github/ISSUE_TEMPLATE/request.yml` と `config.yml`）、`SECURITY.md` の雛形、メンバー以外の PR を閉じる workflow（`.github/workflows/close-pull-requests.yml`）。値は公開先の `owner/name` を入れる `__PUBLIC_REPO__` だけ。`public-sync` が公開に出すツリーに入れる（下の「公開リポジトリへの同期」）。公開に出すツリーにも入るのはキットの一部だから: fork した人が自分の公開先へ `public-sync` するときに使う。上流の公開リポジトリの運用には使わない |
-| `fixtures/` | テストが使う架空の設定と応答 |
+| `src/cli.ts` | The commands. `bun ops-kit/src/cli.ts --help` prints the usage of every command and a configuration example |
+| `skills/` | 10 skills that are the same in every repository: `issue-workflow` / `request-to-backlog` / `pbi-to-tasks` / `task-to-pr` / `cross-runner-review` / `review-with-subagent` / `review-triage-and-merge` / `stacked-pr-delivery` / `pbi-complete` / `public-release-gate` |
+| `bin/` | 4 programs to put on `PATH`: `ops-kit` (same as `src/cli.ts`; runs `scan-text` / `scan-issues`, which need no configuration, from anywhere) / `gh` (a front for `gh`; stops writes that contain a value usable for authentication) / `deny-shared-tmp` (a Claude Code PreToolUse hook; stops commands that write to a fixed name directly under `/tmp`) / `device-auth` (runs a command that asks for approval elsewhere and keeps the URL and code out of the output the agent reads) |
+| `template/` | The template for a new repository (configuration, entry points, `.github/`). See "Templates (new repositories)" below |
+| `public/` | The set placed in a public repository: the policy section to put in the README (`README.section.md`), the request-only Issue template (`.github/ISSUE_TEMPLATE/request.yml` and `config.yml`), a `SECURITY.md` template, and a workflow that closes pull requests from non-members (`.github/workflows/close-pull-requests.yml`). The only value is `__PUBLIC_REPO__`, which takes the public `owner/name`. `public-sync` adds it to the tree it publishes (see "Syncing to the public repository" below). It is also part of the published tree because it is part of the kit: someone who forks uses it when running `public-sync` to their own public repository. It is not used to operate the upstream public repository |
+| `fixtures/` | Fictional configuration and responses used by the tests |
 
-コマンド（`--help` と同じ。どれも `--config <ops.config.json>` を取れる。省くと今のディレクトリから上へ探す）:
+Commands (same as `--help`; each accepts `--config <ops.config.json>`, and if omitted searches upward from the current directory):
 
-| コマンド | すること | 設定 |
+| Command | What it does | Configuration |
 |---|---|---|
-| `set <issue> <field> <value>` | Issue 1 件の Project のフィールドを 1 つ設定する | 要る |
-| `triage <issue> <area> <kind> <priority> [<phase>] [<parent>] [<status>]` | Issue を Project に入れ、Area / Kind / Priority /（Phase）/ Status と親を設定する | 要る |
-| `reconcile-project [--dry-run]` | open の Issue / PR のうち Project に無いものだけを入れる（フィールドは付けない。Actions の autoadd の代わり）。`BACKLOG_URL` があると（アプリの Task の中）止まる（exit 1）。代わり: 取り込み済みの要望・PBI・Task 1 件なら `backlog triage`、ほかは Task の外で回す | 要る |
-| `lint [--no-project] [--fresh]` | open の PBI / Task / 要望が設定の必須の節とキットの Story Points の尺度を満たすか、1 つのクエリ（ページ送り）で検査する。`BACKLOG_URL` があればアプリの保存値を読む（`--fresh` で先に取込み。GitHub に届かなければ保存値のまま） | 要る |
-| `bootstrap <title> [--dry-run]` | Project と、設定にあって Project に無いフィールドを作る。`BACKLOG_URL` があると（アプリの Task の中）止まる（exit 1）。代わり: Task の外で回す（新しいリポジトリは `new-repo` スキルの手順） | 要る |
-| `request <title> <body-file>` | 要望 Issue を作り、Project に Backlog で入れる | 要る |
-| `backlog list\|view\|create\|edit\|comment\|set\|triage …` | キットを同梱するアプリが保存したバックログを、そのアプリの API（`BACKLOG_URL`）で読み書きする。読むのは保存値と鮮度、`--fresh` で最新化を待つ（アプリが GitHub に届かなければ保存値と「GitHub 未同期」で exit 0）。`BACKLOG_URL` が無い環境では GitHub に直接つないで同じ形で出す・書く（`gh` のログインで。`--fresh` は何もしない）。`BACKLOG_URL` があってアプリに届かなければ exit 2（GitHub に切り替えない） | `BACKLOG_URL` があれば要らない（`triage` の Phase だけ読む）。無ければ list / view の Status と set / triage / `--field` に Project を読む（無ければ Status は `-`、書き込みは断る） |
-| `sync-labels [<file>] [--dry-run]` | ラベルを `.github/labels.yml` に合わせる（作る・直すだけで、消さない）。`BACKLOG_URL` があると（アプリの Task の中）止まる（exit 1）。代わり: `env -u BACKLOG_URL ops-kit sync-labels` | 要らない |
-| `scan-text <file\|->` | 文に認証に使える値が無いか検査する（値は出さない） | 要らない |
-| `scan-issues [<owner/name>] [--since <ISO>] [--recheck <URL>]...` | リポジトリの Issue・PR・コメントを全部（`--since` ならその時刻より後の更新だけと、`--recheck` の前回の当たり）、同じ検査に通す | 要らない |
-| `public-sync [--source <ref>] [--dry-run] [--adopted] [--target-url <url>]` / `public-sync --check [--source <ref>]` | main のツリーだけを公開リポジトリへ送る。`--check` は送らずに、公開に出すツリーの検査だけを CI で走らせる（下の「公開リポジトリへの同期」） | 要る（`publicSync` だけ） |
-| `export-copy <dest> --words-file <file>` | キットを読めないリポジトリが同梱するコピーを作る（下の「公開リポジトリ」） | 要らない |
-| `heavy [--memory-only] [--name <名前>] -- <コマンド…>` | 重い処理の枠をマシンで 1 つ取ってからコマンドを動かす。枠が埋まっている・空きメモリが下限未満の間は待ち、理由を 1 行出す。`--memory-only` は枠を取らず空きメモリだけを待つ。上限は `~/.config/ops-kit/heavy.json`（既定 `max` 1・`minFreeMb` 1536） | 要らない |
+| `set <issue> <field> <value>` | Sets one Project field of one Issue | Required |
+| `triage <issue> <area> <kind> <priority> [<phase>] [<parent>] [<status>]` | Adds an Issue to the Project and sets Area / Kind / Priority / (Phase) / Status and the parent | Required |
+| `reconcile-project [--dry-run]` | Adds only the open Issues / PRs that are not yet in the Project (sets no fields; replaces the Actions autoadd). Stops (exit 1) when `BACKLOG_URL` is set (inside an app Task). Instead: for one imported request, PBI, or Task use `backlog triage`; otherwise run it outside a Task | Required |
+| `lint [--no-project] [--fresh]` | Checks, with a single query (paginated), that open PBIs / Tasks / requests have the required sections from the configuration and meet the kit's Story Points scale. If `BACKLOG_URL` is set it reads the app's stored values (`--fresh` imports first; if GitHub is unreachable it keeps the stored values) | Required |
+| `bootstrap <title> [--dry-run]` | Creates the Project and the fields that are in the configuration but not in the Project. Stops (exit 1) when `BACKLOG_URL` is set (inside an app Task). Instead: run it outside a Task (for a new repository, follow the `new-repo` skill) | Required |
+| `request <title> <body-file>` | Creates a request Issue and adds it to the Project as Backlog | Required |
+| `backlog list\|view\|create\|edit\|comment\|set\|triage …` | Reads and writes the backlog stored by the app that bundles the kit, through that app's API (`BACKLOG_URL`). What it reads is the stored values and their freshness; `--fresh` waits for a refresh (if the app cannot reach GitHub, it prints the stored values and `GitHub 未同期` and exits 0). In an environment without `BACKLOG_URL` it connects to GitHub directly and prints / writes in the same form (with the `gh` login; `--fresh` does nothing). If `BACKLOG_URL` is set but the app is unreachable it exits 2 (it does not switch to GitHub) | Not required if `BACKLOG_URL` is set (only the Phase of `triage` is read). Otherwise the Project is read for Status in list / view and for set / triage / `--field` (without it Status is `-` and writes are refused) |
+| `sync-labels [<file>] [--dry-run]` | Makes the labels match `.github/labels.yml` (creates and fixes only; never deletes). Stops (exit 1) when `BACKLOG_URL` is set (inside an app Task). Instead: `env -u BACKLOG_URL ops-kit sync-labels` | Not required |
+| `scan-text <file\|->` | Checks a text for values usable for authentication (does not print the values) | Not required |
+| `scan-issues [<owner/name>] [--since <ISO>] [--recheck <URL>]...` | Runs all Issues, PRs, and comments of a repository (with `--since`, only those updated after that time, plus the previous hits given by `--recheck`) through the same check | Not required |
+| `public-sync [--source <ref>] [--dry-run] [--adopted] [--target-url <url>]` / `public-sync --check [--source <ref>]` | Sends only the tree of main to the public repository. `--check` sends nothing and runs only the check of the tree to be published, in CI (see "Syncing to the public repository" below) | Required (`publicSync` only) |
+| `export-copy <dest> --words-file <file>` | Makes a copy to bundle in a repository that cannot read the kit (see "The public repository" below) | Not required |
+| `heavy [--memory-only] [--name <name>] -- <command…>` | Takes one heavy-process slot on the machine, then runs the command. While the slots are full or free memory is below the floor, it waits and prints the reason on one line. `--memory-only` takes no slot and waits only for free memory. The limits are in `~/.config/ops-kit/heavy.json` (defaults `max` 1, `minFreeMb` 1536) | Not required |
 
-## 使う側の設定（`ops.config.json`）
+## Configuration in the consuming repository (ops.config.json)
 
-リポジトリの root に置く。型は `src/config.ts`（不正なキーや値はコマンドが理由を出して止まる）。値はすべて架空の例:
+Placed at the repository root. The type is in `src/config.ts` (an invalid key or value makes the command stop with the reason). All values are fictional examples:
 
 ```json
 {
@@ -59,29 +59,29 @@ GitHub の Issue と Project で回す開発の流れ（要望 → PBI → Task 
 }
 ```
 
-| キー | 意味 |
+| Key | Meaning |
 |---|---|
-| `projectUrl` | 省略可。Project の URL（`https://github.com/(users\|orgs)/<owner>/projects/<n>`）。追跡するファイルに置かないなら省き、リポジトリ変数に置く（下） |
-| `owner` | 省略可。Project の持ち主（既定は `projectUrl` の持ち主。`@me` はログイン中のユーザー） |
-| `envPrefix` | 環境変数の接頭辞。`<envPrefix>_PROJECT_URL` があれば `projectUrl` より優先し、`<envPrefix>_PROJECT_OWNER` は持ち主だけを変える |
-| `fields.area` / `kind` / `priority` | Project の単一選択フィールドの選択肢 |
-| `fields.phase` | 省略可。Project が Phase を使うときだけ。あると `triage` が `<phase>` を取る |
-| `milestone.pattern` | 省略可。Phase の Milestone の題が満たす正規表現 |
-| `sections.pbi` / `task` / `request` | 各 Issue に要る `##` の見出し。`{ "name", "hint" }` にすると違反の行に `hint` が付く |
-| `sections.origin` | 省略可。PBI の元要望の節。最初の空でない行が `pattern` に合うこと |
-| `publicSync.target` | `public-sync` の送り先の公開リポジトリ（`<owner>/<name>`）。Private のリポジトリと同じなら止まる |
-| `publicSync.include` | 省略可。公開側に送るものを名指しする（パス。ディレクトリは末尾 `/`）。名指ししていない最上位のエントリ（あとから足したものも）は送らない。名指ししたディレクトリの下に足したファイルは送るので、そこで外すものは `exclude` に書く。省略はツリー全部 |
-| `publicSync.exclude` | `include` の中で送らないもの（Private だけで意味を持つもの。ディレクトリは末尾 `/`） |
-| `publicSync.rewrite` | 本文中の Private のリポジトリ名を公開リポジトリ名に書き換えるファイル（脆弱性の報告先など） |
-| `publicSync.versioning` | 省略可。`"independent"` は独立した公開版（下記）。省略時は開発タグをそのまま公開版に使う |
-| `publicSync.serviceUsers` | 省略可。人ではない OS の利用者の名前（ホストの雛形のサービスの利用者など、そのホームを文書に書いているもの）。同期を回す利用者の名前のパスの検査がこの名前を見ない |
-| `publicSync.allowRefs` | 省略可。公開に出す文書が名指ししてよい、`exclude` が外すパス（意図して残す参照。例: fork した人が置く `private/CLAUDE.md`）。`exclude` が外さないパスを書くと設定の誤りで止まる |
+| `projectUrl` | Optional. The Project URL (`https://github.com/(users\|orgs)/<owner>/projects/<n>`). If you do not want it in a tracked file, omit it and put it in a repository variable (below) |
+| `owner` | Optional. The owner of the Project (defaults to the owner of `projectUrl`; `@me` is the logged-in user) |
+| `envPrefix` | The prefix of the environment variables. If `<envPrefix>_PROJECT_URL` is set it takes precedence over `projectUrl`, and `<envPrefix>_PROJECT_OWNER` changes only the owner |
+| `fields.area` / `kind` / `priority` | The options of the Project's single-select fields |
+| `fields.phase` | Optional. Only when the Project uses Phase. If present, `triage` takes `<phase>` |
+| `milestone.pattern` | Optional. The regular expression that the title of a Phase Milestone must satisfy |
+| `sections.pbi` / `task` / `request` | The `##` headings each Issue needs. With `{ "name", "hint" }`, the violation line gets the `hint` |
+| `sections.origin` | Optional. The origin-request section of a PBI. The first non-empty line must match `pattern` |
+| `publicSync.target` | The public repository (`<owner>/<name>`) that `public-sync` sends to. It stops if this is the same as the private repository |
+| `publicSync.include` | Optional. Names what is sent to the public side (paths; directories end with `/`). Top-level entries that are not named (including ones added later) are not sent. Files added under a named directory are sent, so list what to leave out there in `exclude`. Omitted means the whole tree |
+| `publicSync.exclude` | What `include` does not send (things meaningful only in the private repository; directories end with `/`) |
+| `publicSync.rewrite` | Files in which the private repository name in the text is rewritten to the public repository name (for example the vulnerability report destination) |
+| `publicSync.versioning` | Optional. `"independent"` is an independent public version (below). If omitted, the development tag is used as the public version as is |
+| `publicSync.serviceUsers` | Optional. Names of OS users that are not people (for example the service user of the host template, whose home appears in a document). The home-path check on the name of the user running the sync does not look at these names |
+| `publicSync.allowRefs` | Optional. Paths removed by `exclude` that a published document may name (references kept on purpose; for example `private/CLAUDE.md`, which someone who forks places). Listing a path that `exclude` does not remove stops with a configuration error |
 
-リポジトリは `GH_REPO`、無ければ `origin` から読む。Project の URL は環境変数 `<envPrefix>_PROJECT_URL`、設定の `projectUrl`、同名のリポジトリ変数（`gh variable get <envPrefix>_PROJECT_URL`）の順で読む（Project を使わないコマンドは変数を読まない）。リポジトリ変数に置くなら `gh variable set <envPrefix>_PROJECT_URL --body https://github.com/orgs/example/projects/7`。
+The repository is read from `GH_REPO`, or from `origin` if that is not set. The Project URL is read in this order: the environment variable `<envPrefix>_PROJECT_URL`, `projectUrl` in the configuration, the repository variable of the same name (`gh variable get <envPrefix>_PROJECT_URL`) (commands that do not use the Project do not read the variable). To put it in a repository variable: `gh variable set <envPrefix>_PROJECT_URL --body https://github.com/orgs/example/projects/7`.
 
-## 入口（使う側のリポジトリ）
+## Entry points (consuming repository)
 
-コマンドを直接呼んでもよいが、リポジトリに薄い入口を置くと、キットの場所と設定の場所を毎回書かずに済む。入口はそのリポジトリの Git 管理のファイルで、キットのコードは持たない:
+You may call the commands directly, but a thin entry point in the repository saves writing the kit's location and the configuration's location every time. The entry point is a Git-tracked file of that repository and does not hold the kit's code:
 
 ```bash
 #!/usr/bin/env bash
@@ -90,157 +90,157 @@ R="$(cd "$(dirname "$0")/../.." && pwd)"
 exec bun "${OPS_KIT:-$R/ops-kit}/src/cli.ts" lint --config "$R/ops.config.json" "$@"
 ```
 
-`OPS_KIT` はキットの場所（既定はリポジトリの中の `ops-kit/`。キットを持つリポジトリの外から使うならそのチェックアウトの `ops-kit`、公開リポジトリなら同梱したコピー）。`set` / `triage` / `bootstrap` / `request` も同じ形。
+`OPS_KIT` is the location of the kit (by default `ops-kit/` inside the repository; when used from outside the repository that holds the kit, the `ops-kit` of its checkout; for a public repository, the bundled copy). `set` / `triage` / `bootstrap` / `request` take the same form.
 
-## 重い処理の枠
+## Heavy-process slots
 
-重い処理（ローカル CI、全テスト・型検査、偽ランナーのデーモン + headless Chrome）は、`ops-kit heavy [--name <名前>] -- <コマンド…>` で包んで始める。マシンの枠が空いていて空きメモリが下限以上のときだけコマンドを動かし、そうでなければ待つ。待つ間は理由（枠を持っているコマンド・作業フォルダ・開始時刻、または空きメモリと下限）を stderr に 1 行出し（理由が変わるたびに 1 行）、待ったあとで始めるときは「始めます」を出す。エラーにはしない。exit はコマンドの exit。
+Start heavy processes (local CI, the full test suite and type checks, a fake-runner daemon plus headless Chrome) wrapped in `ops-kit heavy [--name <name>] -- <command…>`. It runs the command only when a slot on the machine is free and free memory is at or above the floor, and otherwise waits. While waiting it prints the reason (the command holding the slot, its working folder and start time, or the free memory and the floor) on one line to stderr (one line each time the reason changes), and when it starts after waiting it prints `始めます`. Waiting is not an error. The exit is the command's exit.
 
-- **上限はマシンの値**: `~/.config/ops-kit/heavy.json` の `{ "max": 1, "minFreeMb": 1536 }`（どちらも省略でき、ファイルが無ければこの既定）。`max` は同時に走る重い処理の数、`minFreeMb` は始める前に要る空きメモリ（Linux の MemAvailable、MB。読めない OS では数だけで決める）。Task を動かすアプリが Task を始めるときは `minFreeMb` ではなく、同じファイルの `taskMinFreeMb`（既定はそのアプリが持つ。`ops-kit heavy` は読まない）で止める。リポジトリ（`ops.config.json`）にも環境変数にも置かない。リポジトリごとに書くと、マシン 1 つの数にならない
-- **枠はマシンで 1 つ**: `~/.local/state/ops-kit/heavy/` の `slot-<i>.json`。どのリポジトリ・作業ツリー・Task から呼んでも同じ枠を取り合う。持ち主が死んだ枠（`kill -9`、Task の中断、デーモンの停止）は次に待つ処理が取り直す
-- **大きいマシンでの上げ方**: 設定ファイルを書くだけ（コードもリポジトリも変えない）。例: 16 GB のマシンで `{ "max": 3 }`。4 GB 程度なら既定の 1 のまま
-- **誰が持ち、誰が待っているか**: 待っている処理は同じ置き場に `wait-<pid>-<id>.json`（名前・作業フォルダ・待ち始めた時刻・理由 `slot` / `memory`）を置き、理由が変わったときだけ書き直し、枠を取ったら消す。枠と待ちはほかのプロセスから `readHeavyState(home)`（`src/heavy.ts`）で読める（終わったプロセスのものは返さない）。環境変数 `OPS_KIT_TASK_ID` があれば、その値を Task の id として枠と待ちに載せる（Task を動かすアプリが付ける）
-- **入れ子は外側の枠の中で動く**: 枠を持つ処理の子孫（`ops-kit heavy -- bun scripts/local-ci.ts …` の中のローカル CI など）が `ops-kit heavy` か `withHeavySlot` を呼ぶと、新しい枠を取らず、待たずに外側の枠の中で動く（空きメモリの下限も待たない）。見分けは環境変数ではなく、生きている枠の持ち主の pid が呼んだ処理の祖先（`/proc/<pid>/stat` の ppid をたどる）にあるか（ローカル CI は手順を `env -i` で回すので、環境変数は途中で消える）。そのときは「枠を持つ処理の中なので、外側の枠の中で動きます」を 1 行出し、履歴（`history.jsonl`）には名前の末尾に ` (入れ子)` を付けて残す。`/proc` が無い OS では祖先が分からず、今までどおり枠を待つ
-- **席を取らない処理**（`--memory-only`）: 枠（`slot-<i>.json`）を取らず、空きメモリが下限 `minFreeMb` を下回る間だけ待つ（待ちの一覧には理由 `memory` で出る）。枠を持つ処理が走っていても始まり、終わると履歴に名前つきで残る。レビューのセッション（`cross-runner-review` の Codex・`claude -p`）はこれで包む。レビュー専用の値は作らない（待つのは同じ下限）
-- **置き場に書けないとき**: サンドボックスで書けない Task（Codex の Task など）では「枠を取らずに動かします」を 1 行出して、待たずに動く（作業を止めない）。Task を動かすアプリが置き場をその Task の書ける場所に足していれば、ほかと同じ数に入る
+- **The limits are machine values**: `{ "max": 1, "minFreeMb": 1536 }` in `~/.config/ops-kit/heavy.json` (both can be omitted, and without the file these are the defaults). `max` is the number of heavy processes running at once, and `minFreeMb` is the free memory needed before starting (Linux MemAvailable, in MB; on an OS where it cannot be read, only the count decides). When the app that runs Tasks starts a Task, it stops on `taskMinFreeMb` in the same file (the default belongs to that app; `ops-kit heavy` does not read it), not on `minFreeMb`. Do not put them in the repository (`ops.config.json`) or in an environment variable. Written per repository, it would not be one number for the machine
+- **One set of slots per machine**: `slot-<i>.json` in `~/.local/state/ops-kit/heavy/`. Whichever repository, working tree, or Task calls it, they compete for the same slots. A slot whose owner died (`kill -9`, an interrupted Task, a stopped daemon) is taken over by the next waiting process
+- **Raising it on a bigger machine**: just write the configuration file (no code or repository change). Example: `{ "max": 3 }` on a 16 GB machine. On about 4 GB, keep the default 1
+- **Who holds a slot and who is waiting**: a waiting process puts `wait-<pid>-<id>.json` (name, working folder, the time it started waiting, reason `slot` / `memory`) in the same directory, rewrites it only when the reason changes, and removes it when it takes a slot. Other processes can read the slots and the waits with `readHeavyState(home)` (`src/heavy.ts`) (entries of finished processes are not returned). If the environment variable `OPS_KIT_TASK_ID` is set, its value is recorded in the slot and the wait as the Task id (set by the app that runs Tasks)
+- **A nested call runs inside the outer slot**: when a descendant of a process holding a slot (for example local CI inside `ops-kit heavy -- bun scripts/local-ci.ts …`) calls `ops-kit heavy` or `withHeavySlot`, it takes no new slot and runs inside the outer slot without waiting (it does not wait for the free-memory floor either). It is recognized not by an environment variable but by whether the pid of a live slot's owner is an ancestor of the calling process (following ppid in `/proc/<pid>/stat`) (local CI runs its steps with `env -i`, so environment variables vanish on the way). In that case it prints one line `枠を持つ処理の中なので、外側の枠の中で動きます` and leaves ` (入れ子)` at the end of the name in the history (`history.jsonl`). On an OS without `/proc` the ancestors are unknown and it waits for a slot as before
+- **Processes that take no seat** (`--memory-only`): it takes no slot (`slot-<i>.json`) and waits only while free memory is below the floor `minFreeMb` (it appears in the list of waits with reason `memory`). It starts even while a process holds a slot, and after it ends it is left in the history with its name. Wrap review sessions (Codex and `claude -p` of `cross-runner-review`) in it. No review-specific value is made (it waits on the same floor)
+- **When the directory cannot be written**: in a Task that cannot write in its sandbox (such as a Codex Task), it prints one line `枠を取らずに動かします` and runs without waiting (it does not stop the work). If the app that runs Tasks has added the directory to what that Task can write, it counts toward the same number as the others
 
-**足し方**: 手で打つ重い処理のコマンドを `ops-kit heavy --name "<何か>" -- …` で包む（スキル・`CLAUDE.md` のコマンドの行）。ほかの包み（`ops-kit idle-run` など）があれば `ops-kit heavy` をいちばん外にする（枠を待つ間を無進捗と数えない）。1 回の実行全体で枠を持つスクリプト（ローカル CI・タグの CI）が回す手順（CI の手順・`package.json` の scripts）の中には入れない（入れ子は待たずに外側の枠の中で動くが、二重に包んでも枠は増えず意味が無い）。自分で枠を取るスクリプトを `ops-kit heavy` で包まない。
+**How to add it**: wrap the heavy commands you type by hand in `ops-kit heavy --name "<something>" -- …` (the command lines in skills and `CLAUDE.md`). If there are other wrappers (such as `ops-kit idle-run`), make `ops-kit heavy` the outermost (so the time spent waiting for a slot is not counted as no progress). Do not put it inside the steps run by a script that holds a slot for a whole run (local CI, tag CI) (the steps of CI, the scripts in `package.json`) (a nested call runs inside the outer slot without waiting, but wrapping twice adds no slot and is pointless). Do not wrap a script that takes its own slot in `ops-kit heavy`.
 
-**通さないもの**: Task そのものの数（Task を動かすアプリの上限）、ホストの外で動く処理（別のコンテナのレビュアーへの `curl`、ホストの外の docker の build）。
+**What does not go through it**: the number of Tasks themselves (the limit of the app that runs Tasks), and processes that run outside the host (a `curl` to a reviewer in another container, a docker build outside the host).
 
-## スキルの導入
+## Installing the skills
 
-スキルの実体は `skills/` の 1 つだけで、写しを手で持たない。キットを持つアプリが、Task のランナーを起動する直前に、各リポジトリの `.claude/skills/<name>`（Claude Code）と `.agents/skills/<name>`（Codex）へ `skills/` のコピーを置き、Git の管理対象から外す（キットの親のリポジトリの `docs/design/skill-sync.md`）。Claude Code と Codex は同じ中身を読み、`skills/` を直すと次の起動で置き直される。導入のコマンドは無い。
+The skills have a single source, `skills/`, and no copy is kept by hand. The app that holds the kit, just before starting a Task's runner, places a copy of `skills/` at `.claude/skills/<name>` (Claude Code) and `.agents/skills/<name>` (Codex) in each repository, and excludes it from Git tracking (`docs/design/skill-sync.md` in the kit's parent repository). Claude Code and Codex read the same content, and if you fix `skills/` it is put back at the next start. There is no install command.
 
-確かめ方: そのアプリから Task を起動したあと、作業フォルダで `ls .claude/skills .agents/skills` に上の 10 本が出る。
+How to check: after starting a Task from that app, `ls .claude/skills .agents/skills` in the working folder shows the 10 skills above.
 
-リポジトリだけの手順は、そのリポジトリの `.claude/skills/<別の名前>` に Git 管理で置く（キットのコピーと名前が重ならなければ触られない）。共通のスキルが「使う側のリポジトリが持つもの」と書いた値は、そのリポジトリの `CLAUDE.md`（Codex なら `AGENTS.md`）に書く。
+Put procedures specific to a repository, tracked in Git, at that repository's `.claude/skills/<another name>` (it is left alone as long as the name does not overlap with a kit copy). Write the values that the shared skills call "what the consuming repository holds" in that repository's `CLAUDE.md` (`AGENTS.md` for Codex).
 
-## 候補の定義（`processes/`）
+## Candidate definitions (processes/)
 
-開発プロセスの候補を、1 候補 1 ファイルのデータとして置く（キットの親のリポジトリの `docs/design/process-kernel.md` の K4）。`processes/<id>.md` は、frontmatter（`id`（ファイル名と同じ）・整数の `version`・`title`・`fits`（向く仕事を 1 行ずつ））と、Task に渡す入口の文を `## entry <name>` の節に持つ（`{{n}}` などの穴は、キットの親のアプリが埋める）。今あるのは `p0-pipeline`（上の流れそのもの。キットの親のアプリは工程の Task の最初のプロンプトをこのファイルから描画する）と `p1-direct`（直行型。定義だけで、起動する経路はまだ無い）。候補の文を直すのはこのファイルを直すことで、アプリのコードは変えない（アプリ側の描画は、この定義と同じ一連の変更で入る）。
+Candidate development processes are placed as data, one file per candidate (K4 of `docs/design/process-kernel.md` in the kit's parent repository). `processes/<id>.md` has frontmatter (`id` (the same as the file name), an integer `version`, `title`, and `fits` (the kinds of work it suits, one per line)) and, in `## entry <name>` sections, the entry text passed to a Task (placeholders such as `{{n}}` are filled in by the kit's parent app). What exists now is `p0-pipeline` (the flow above itself; the kit's parent app renders the first prompt of a stage's Task from this file) and `p1-direct` (the direct type; definition only, with no path that starts it yet). Fixing a candidate's text means fixing this file, and the app's code does not change (the app-side rendering lands in the same series of changes as this definition).
 
-どの候補も越えてはならない線は `invariants.md` の 1 つにある（所有者だけが変える。候補・スキルの「作法」はここに入れない）。
+The line that no candidate may cross is in one place, `invariants.md` (only the owner changes it; the "manners" of candidates and skills do not go in there).
 
-## 雛形（新しいリポジトリ）
+## Templates (new repositories)
 
-`template/` は、キットを使う新しいリポジトリの土台。固有の値は `__NAME__` 形のプレースホルダで、生成・適用のコマンドは無い（ファイルを写して値を置き換える手順は、使う側（キットの親）のスキルが持つ）。
+`template/` is the base of a new repository that uses the kit. The specific values are placeholders of the form `__NAME__`, and there is no command to generate or apply it (the procedure for copying files and replacing values belongs to the skills of the consuming side (the kit's parent)).
 
-| 場所 | 中身 |
+| Location | Contents |
 |---|---|
-| `ops.config.json` | 設定（`envPrefix`・Area・必須の節。Project の URL は置かず、リポジトリ変数 `<PREFIX>_PROJECT_URL` に置く: `gh variable set <PREFIX>_PROJECT_URL --body https://github.com/orgs/<owner>/projects/<n>`（ユーザーの Project なら `orgs` を `users` に）） |
-| `scripts/setup/` | 入口 4 本: `lint_backlog.sh` / `set_project_field.sh` / `triage_issue.sh` / `request_issue.sh`（実行ビット付き） |
+| `ops.config.json` | The configuration (`envPrefix`, Area, required sections. The Project URL is not placed here but in the repository variable `<PREFIX>_PROJECT_URL`: `gh variable set <PREFIX>_PROJECT_URL --body https://github.com/orgs/<owner>/projects/<n>` (for a user's Project, change `orgs` to `users`)) |
+| `scripts/setup/` | 4 entry points: `lint_backlog.sh` / `set_project_field.sh` / `triage_issue.sh` / `request_issue.sh` (with the execute bit) |
 | `.github/ISSUE_TEMPLATE/` | `bug_report.yml` / `config.yml` / `feature_request.yml` / `pbi.yml` / `task.yml` |
-| `.github/PULL_REQUEST_TEMPLATE.md` | PR 本文の型 |
-| `.github/labels.yml` | ラベル体系（Area は 1 件だけ置いてある。値の数だけ足す） |
-| `.github/workflows/` | `labels.yml`（ラベルの同期）/ `ci.yml`（Bun / TypeScript の最小。ほかの言語は run の行を書き換える）/ 任意の `project-autoadd.yml`（設定は下の fork の手順） |
-| `.gitignore` | 汎用の行だけ |
-| `CLAUDE.md.tmpl` / `AGENTS.md.tmpl` | このリポジトリ固有の値の置き場（`issue-workflow` の「使う側のリポジトリが持つもの」の項目の節立て）。`.tmpl` なのは、キットの下を読んだランナーが入れ子の指示として読み込まないため。置くときに外す |
-| `template-local/` | GitHub を使わないリポジトリ用の、単体で完結する 1 式（`template/` を外して作る手順ではなく別に持つ）。`ops.config.json` / `.gitignore` / `AGENTS.md.tmpl` は `template/` の写し。`CLAUDE.md.tmpl` は起票を `ops-kit backlog create`、ローカル CI・マージ判定・マージを `--change` の 3 スクリプト、main の更新を `local-merge.ts` と書き、`README.md.tmpl`（設計ルール・ライセンスの見出し）と `docs/change-template.md`（変更の本文のひな形 `Backlog-Task: <Task>`）を持つ。`.github/` と `scripts/setup/` は置かない |
+| `.github/PULL_REQUEST_TEMPLATE.md` | The form of a PR body |
+| `.github/labels.yml` | The label scheme (one Area is placed; add as many as there are values) |
+| `.github/workflows/` | `labels.yml` (label sync) / `ci.yml` (minimal for Bun / TypeScript; for other languages rewrite the run lines) / an optional `project-autoadd.yml` (settings are in the fork steps below) |
+| `.gitignore` | Generic lines only |
+| `CLAUDE.md.tmpl` / `AGENTS.md.tmpl` | The place for values specific to the repository (the section layout follows the items of "what the consuming repository holds" in `issue-workflow`). They are `.tmpl` so that a runner that reads under the kit does not load them as nested instructions. Remove the suffix when placing them |
+| `template-local/` | A self-contained set for a repository that does not use GitHub (kept separately, not a procedure made by removing from `template/`). `ops.config.json` / `.gitignore` / `AGENTS.md.tmpl` are copies of those in `template/`. `CLAUDE.md.tmpl` writes filing as `ops-kit backlog create`, local CI, the merge decision, and merging as the three `--change` scripts, and updating main as `local-merge.ts`, and it has `README.md.tmpl` (the headings for design rules and license) and `docs/change-template.md` (the template of a change body, `Backlog-Task: <Task>`). `.github/` and `scripts/setup/` are not placed |
 
-| プレースホルダ | 入れる値 | 出てくるファイル |
+| Placeholder | Value to put in | Files where it appears |
 |---|---|---|
-| `__OWNER__` | GitHub の owner | `.github/ISSUE_TEMPLATE/config.yml`、`CLAUDE.md.tmpl` |
-| `__REPO__` | リポジトリ名 | `.github/ISSUE_TEMPLATE/config.yml`、`CLAUDE.md.tmpl`、`AGENTS.md.tmpl` |
-| `__PREFIX__` | `envPrefix`（Project の URL の変数は `<PREFIX>_PROJECT_URL`、workflow を動かす変数は `<PREFIX>_ACTIONS`） | `ops.config.json`、`.github/workflows/project-autoadd.yml`、`.github/workflows/ci.yml`、`.github/workflows/labels.yml` |
-| `__AREA__` | Area の値。配列・options・ラベル・PR テンプレでは 1 件だけ置いてあり、値の数だけ増やす | `ops.config.json`、`.github/ISSUE_TEMPLATE/*.yml`、`.github/labels.yml`、`.github/PULL_REQUEST_TEMPLATE.md` |
-| `__TEST_ALL__` | 全体のテストのコマンド | `.github/workflows/ci.yml`、`.github/ISSUE_TEMPLATE/task.yml`、`.github/PULL_REQUEST_TEMPLATE.md`、`CLAUDE.md.tmpl` |
-| `__KIT_HOME_VAR__` | キットを持つリポジトリの root を指す環境変数の名前 | `scripts/setup/*.sh` |
-| `__TEST_TYPECHECK__` / `__TEST_ONE__` | 型検査のコマンド / 1 件だけのテストのコマンド | `CLAUDE.md.tmpl` |
-| `__COMPAT__` | 互換の前提（利用者・外部クライアントの有無） | `CLAUDE.md.tmpl` |
-| `__LIVE_CHECK__` | 動いている実物で確かめる方法 | `CLAUDE.md.tmpl` |
-| `__DEPLOY_OK__` | 動いている実物への反映と、誰の OK が要るか | `CLAUDE.md.tmpl` |
-| `__KIT_REPO__` | キットを持つリポジトリの `owner/name`（共通の仕組みの要望の起票先） | `CLAUDE.md.tmpl` |
-| `__TASK_CHECK__` | エージェント管理アプリの Task として起動されたことの見分け方 | `CLAUDE.md.tmpl` |
-| `__QUOTA_CHECK__` | ランナーの利用上限の見方（コマンドか画面） | `CLAUDE.md.tmpl` |
+| `__OWNER__` | The GitHub owner | `.github/ISSUE_TEMPLATE/config.yml`, `CLAUDE.md.tmpl` |
+| `__REPO__` | The repository name | `.github/ISSUE_TEMPLATE/config.yml`, `CLAUDE.md.tmpl`, `AGENTS.md.tmpl` |
+| `__PREFIX__` | `envPrefix` (the Project URL variable is `<PREFIX>_PROJECT_URL`, and the variable that runs workflows is `<PREFIX>_ACTIONS`) | `ops.config.json`, `.github/workflows/project-autoadd.yml`, `.github/workflows/ci.yml`, `.github/workflows/labels.yml` |
+| `__AREA__` | The Area values. In the array, options, labels, and PR template only one is placed; increase it to the number of values | `ops.config.json`, `.github/ISSUE_TEMPLATE/*.yml`, `.github/labels.yml`, `.github/PULL_REQUEST_TEMPLATE.md` |
+| `__TEST_ALL__` | The command for the whole test suite | `.github/workflows/ci.yml`, `.github/ISSUE_TEMPLATE/task.yml`, `.github/PULL_REQUEST_TEMPLATE.md`, `CLAUDE.md.tmpl` |
+| `__KIT_HOME_VAR__` | The name of the environment variable that points at the root of the repository holding the kit | `scripts/setup/*.sh` |
+| `__TEST_TYPECHECK__` / `__TEST_ONE__` | The type-check command / the command for a single test | `CLAUDE.md.tmpl` |
+| `__COMPAT__` | The compatibility premise (whether there are users or external clients) | `CLAUDE.md.tmpl` |
+| `__LIVE_CHECK__` | How to check on the running real thing | `CLAUDE.md.tmpl` |
+| `__DEPLOY_OK__` | Applying changes to the running real thing, and whose OK is needed | `CLAUDE.md.tmpl` |
+| `__KIT_REPO__` | The `owner/name` of the repository that holds the kit (where requests about the shared mechanism are filed) | `CLAUDE.md.tmpl` |
+| `__TASK_CHECK__` | How to tell that it was started as a Task of the agent management app | `CLAUDE.md.tmpl` |
+| `__QUOTA_CHECK__` | How to see a runner's usage limit (a command or a screen) | `CLAUDE.md.tmpl` |
 
-Phase は雛形に入れない（使うなら `fixtures/config-with-phase.json` の `phase` / `milestone` と `pbi.yml` の Phase の dropdown を足す）。
+Phase is not in the template (if you use it, add `phase` / `milestone` of `fixtures/config-with-phase.json` and the Phase dropdown of `pbi.yml`).
 
-## 依存の検査（`deps-check`）
+## Dependency checks (deps-check)
 
-`ops-kit deps-check [--file-request]` は、リポジトリの依存が更新を要するかを調べて表にする。見るのは作業ディレクトリ（リポジトリの root）の下だけで、どの道具を使うかは lockfile で決める（設定にしない）。`bun.lock` があれば bun、`uv.lock` を持つディレクトリ（root に限らない。`node_modules` / `.venv` / `.git` は見ない）があれば uv。両方あれば表は 1 つにまとめ、「場所」の列（bun は workspace の名前、uv は `uv.lock` のディレクトリ）で分ける。調べるだけで、ファイルは書かない。
+`ops-kit deps-check [--file-request]` checks whether the repository's dependencies need updating and prints a table. It looks only under the working directory (the repository root), and which tool to use is decided by the lockfile (not configurable). If there is a `bun.lock`, it uses bun; if there is a directory with a `uv.lock` (not only the root; `node_modules` / `.venv` / `.git` are not searched), it uses uv. If both exist, it merges them into one table and separates them by the `場所` column (for bun the workspace name, for uv the directory of the `uv.lock`). It only checks and writes no files.
 
 | | bun | uv |
 |---|---|---|
-| 更新できる依存 | `bun outdated --filter '*'` | `uv lock --upgrade --dry-run`（各ディレクトリで。`uv lock --check` も回し、lock が合っていなければ「## 出典」に書く）。表と条件に入れるのは、そのディレクトリの `pyproject.toml` の直接の依存（`[project].dependencies`・`[project.optional-dependencies]`・`[dependency-groups]`。名前は PEP 503 で揃える）と、pip-audit が脆弱性を挙げた依存だけ（bun の直接の依存の粒度にそろえる。推移的な依存は脆弱性が無ければ入れない）。`pyproject.toml` が読めないディレクトリは絞らず全部を出し、その旨を 1 行出す。要約の outdated の件数は絞った後 |
-| 脆弱性 | `bun audit --json` | `uv export --frozen --no-emit-project --no-emit-local --format requirements-txt` を `uvx pip-audit`（`-r /dev/stdin --no-deps --disable-pip -f json`、標準入力）に渡す。pip-audit が起動できない・失敗した・出力が読めないディレクトリは、その旨を 1 行出し、要約の行にも「未検査」と書いて、脆弱性は検査せず outdated だけで判定する（pip-audit を入れない） |
-| 公開日・ライセンス | `bun info <pkg> time` / `license` | PyPI の JSON（`https://pypi.org/pypi/<pkg>/json`）。パッケージごとに 1 回 |
+| Updatable dependencies | `bun outdated --filter '*'` | `uv lock --upgrade --dry-run` (in each directory; it also runs `uv lock --check`, and if the lock does not match it writes that in `## 出典`). What goes into the table and the condition is only the direct dependencies in that directory's `pyproject.toml` (`[project].dependencies`, `[project.optional-dependencies]`, `[dependency-groups]`; names normalized per PEP 503) and the dependencies pip-audit reports a vulnerability for (matching the granularity of bun's direct dependencies; transitive dependencies are not included unless they have a vulnerability). For a directory whose `pyproject.toml` cannot be read, it does not narrow and shows everything, and prints one line saying so. The outdated count in the summary is after narrowing |
+| Vulnerabilities | `bun audit --json` | Passes the output of `uv export --frozen --no-emit-project --no-emit-local --format requirements-txt` to `uvx pip-audit` (`-r /dev/stdin --no-deps --disable-pip -f json`, via standard input). For a directory where pip-audit cannot start, failed, or printed unreadable output, it prints one line saying so, also writes `未検査` in the summary line, skips the vulnerability check, and decides from outdated only (without pip-audit) |
+| Release date and license | `bun info <pkg> time` / `license` | PyPI JSON (`https://pypi.org/pypi/<pkg>/json`), once per package |
 
-- **当たる条件**（どれか 1 つで表に載る）: 脆弱性、major の遅れ（候補の major が今より大きい。`0.x` では minor）、今の版の公開から 90 日以上で、より新しい版がある。今の版の公開日が読めない依存は、当たる条件には数えず、出力と本文の「## 出典」に 1 行で名指しする（黙って外さず、それだけでは起票しない）。これを満たす依存が 1 件でもあれば「当たった」。表には候補の公開日とライセンスを付ける（読めなければ「不明」）
-- **既出**: `bun.lock` / `package.json` / `uv.lock` / `pyproject.toml` を変える開いた PR が名指す依存は表から除き、「既出」として PR 番号を書く。開いた PR を読めなければ、本文に「既出の確認なし」と書く
-- **exit**: 0 = 当たらない、1 = 当たった、2 = 道具が走らなかった・lockfile が無い・要望を出せなかった。道具の出力が読めないときは 2（当たらないと読み違えない）。例外は pip-audit で、上のとおり outdated だけで判定し、未検査を名指しする
-- **`--file-request`**: 当たれば題「依存の更新: <YYYY-MM>」の要望を 1 件起票する。同じ題の開いた要望があれば、起票せずそのコメントに足す。本文は `## 要望`（表）・`## 出典`（検査した道具と結果）・`## 更新の条件`（使った道具ごとの既定の文。bun は lockfile と `package.json` 以外を触らず `--minimum-release-age` を付ける、uv は `uv.lock` と `pyproject.toml` 以外を触らず `uv tree` の差分を貼る、など。候補は公開から 7 日以上の版だけ、major は 1 パッケージ 1 PR）。当たらなければ「要望: 当たらないので起票しない」と出して何も起票しない。最後に「要望: …」の 1 行を出す
-- **`depsCheck.extraConditions`**: `ops.config.json` の文字列の配列。リポジトリ固有の条件で、既定の文のあとに `## 更新の条件` へ足す（既定の文は置き換えない）
-- **定期実行から呼ぶ形**: 週 1 回などの定期実行が、そのリポジトリの作業ツリーで `ops-kit deps-check --file-request` を 1 回呼び、出力の最後の行（起票した番号か、当たらなかったこと）と件数を報告する。起票は要望のコマンド（`ops-kit request`）の経路で、PBI 化は要望の流れ（`request-to-backlog`）に任せる。負荷は、`uv.lock` のディレクトリの数 ×（`uv` の解決 + pip-audit）と、候補のパッケージの数だけの PyPI の読み
+- **Triggering conditions** (any one puts a dependency in the table): a vulnerability, a major lag (the candidate's major is greater than the current one; for `0.x`, the minor), or the current version was released 90 or more days ago and a newer version exists. A dependency whose current version's release date cannot be read is not counted as meeting a condition, and is named on one line in the output and in the body's `## 出典` (it is not dropped silently, and is not filed on that alone). If even one dependency meets this, it is a "hit". The table adds the candidate's release date and license (`不明` if unreadable)
+- **Already reported**: a dependency named by an open PR that changes `bun.lock` / `package.json` / `uv.lock` / `pyproject.toml` is removed from the table and written as `既出` with the PR number. If open PRs cannot be read, the body says `既出の確認なし`
+- **exit**: 0 = no hit, 1 = hit, 2 = a tool did not run, there is no lockfile, or the request could not be filed. If a tool's output cannot be read it is 2 (it is not misread as no hit). The exception is pip-audit, which as above decides from outdated only and names the unchecked
+- **`--file-request`**: on a hit, files one request titled `依存の更新: <YYYY-MM>`. If an open request with the same title exists, it adds to that request as a comment instead of filing. The body has `## 要望` (the table), `## 出典` (the tools checked and the results), and `## 更新の条件` (a default sentence per tool used: for bun, touch nothing but the lockfile and `package.json` and add `--minimum-release-age`; for uv, touch nothing but `uv.lock` and `pyproject.toml` and paste the `uv tree` diff; and so on; candidates are only versions released 7 or more days ago, and a major is one PR per package). On no hit it prints `要望: 当たらないので起票しない` and files nothing. Finally it prints one line `要望: …`
+- **`depsCheck.extraConditions`**: an array of strings in `ops.config.json`. Repository-specific conditions, added to `## 更新の条件` after the default sentence (they do not replace the default)
+- **How a scheduled run calls it**: a periodic run (for example weekly) calls `ops-kit deps-check --file-request` once in that repository's working tree, and reports the last line of the output (the number filed, or that there was no hit) and the count. Filing goes through the request command (`ops-kit request`), and turning it into a PBI is left to the request flow (`request-to-backlog`). The load is the number of `uv.lock` directories × (the `uv` resolution + pip-audit), plus as many PyPI reads as there are candidate packages
 
-## 公開リポジトリへの同期
+## Syncing to the public repository
 
-`public-sync` は Private の main の**ツリーだけ**を、履歴なしで公開リポジトリへ送る（`git commit-tree <ツリー> -p <公開側の main>` で 1 コミット作るので、Private のコミットは祖先にならない）。設定は `ops.config.json` の `publicSync` だけを読む（ほかのキーは見ない）。Private のリポジトリ名は `GH_REPO`、無ければ `origin`。
+`public-sync` sends only the **tree** of the private main to the public repository, without history (it makes one commit with `git commit-tree <tree> -p <public main>`, so the private commits do not become ancestors). It reads only `publicSync` of `ops.config.json` (it does not look at other keys). The private repository name is `GH_REPO`, or `origin` if that is not set.
 
-- 初回（公開側の `main` が空）は `main` へ根のコミットを push する。2 回目からは `sync/<タグ>`（タグでなければ `sync/<公開ツリーの短い sha>`）を push して PR を開き、そのまま **Rebase and merge** でマージする（公開側の PR は開いた時点で公開されるので、人のマージは公開を止める確認にならない。公開側の CI の結果は待たない）。マージに失敗したら PR は開いたまま理由を出して止まり、次の実行がもう一度マージする。題が `vX.Y.Z` なら同じ実行で公開側にタグと Release を付ける。公開側のコミット・枝・PR・Release には Private の情報を出さない: 題は版（タグ名）だけで本文は無い（Private のコミットの題は内部のメモなので一覧にしない。Private の sha も Issue 番号も出ない）。どの Private のコミットから送ったかは Private の `origin` の ref `refs/public-sync/trees/<公開側のツリー>` に残し、次回はこれで前回を見つける（ツリーで引くので公開側のマージの仕方によらない。公開側の `main` のツリーに記録が無ければ「main changed after the last sync」で止まる）。設定（`publicSync`）は送るツリー（`--source`）の `ops.config.json` を読む（作業ツリーが古くても、新しいタグに古い除外は当たらない）。前回送ったものより古い `--source` は送らない（公開側を戻さない）
-- 公開側の `main` が最後の同期のあとに変わっていたら、上書きしないよう止まる。その変更を Private に取り込んでから `--adopted` を付けて回す（このときは開いた同期の PR をマージせず、閉じるよう求めて止まる）
-- ツリーのうち `publicSync.include` が名指しするものだけを残し（省略はツリー全部。名指しした項目がツリーに無ければ出力に出す）、`publicSync.exclude` を外し、`publicSync.rewrite` のファイルは Private のリポジトリ名を公開側の名前に置き換える
-- workflow の job は、リポジトリ変数が `on` のリポジトリでだけ動く: 開発元・雛形の `ci.yml` と `labels.yml` は `<PREFIX>_ACTIONS`、公開側の 1 式の `close-pull-requests.yml` は `PUBLIC_ACTIONS`（公開側の 1 式は `envPrefix` を持たない）。変数の無い写しではどの job も走らないので、Actions が許可されていない場所に置いても失敗のメールが来ず、写しの上の PR も閉じない。公開先には `PUBLIC_ACTIONS` を、条件の入った workflow を同期する前に `on` で置く（無いと PR が閉じない）。Release のアーカイブから root の `.github` を外すなら `.gitattributes` に `/.github/ export-ignore`
-- そのあと公開側の 1 式（`public/`）をツリーに入れる（入れる / 入れないの設定は無い。`__PUBLIC_REPO__` は `publicSync.target`）: `.github/ISSUE_TEMPLATE/` を要望のテンプレ（`request.yml` + `config.yml`）だけに置き換える、PR を閉じる workflow（`.github/workflows/close-pull-requests.yml`）を足す、`SECURITY.md` はリポジトリに無いとき（root・`.github/`・`docs/` のどこにも）だけ雛形を入れる、`README.md` の `## How this repository works` の節を置き換える（無ければ最初の `## ` 見出しの前、見出しが無ければ末尾に差し込む。コードブロックの中の `## ` は見出しに数えない。`README.md` が無ければ止まる）。出力の `public kit:` の行がしたことを言う
-- 送る前の検査（1 件でも当たれば何も送らず exit 1）: 公開側で変わる行（初回はツリー全部）に、キットの秘密の規則（gh の前段と同じ。ホストの AWS のプロファイル名・SSO のセッション名・アカウント ID も）に当たる値（出すのは種類とファイル名だけ）。Private のリポジトリ名（名前全体の一致。ファイルの中・パス名・コミット本文）、ホームパス（macOS のホームディレクトリの形。`dev` / `example` / `me` / `x` / `<you>` の名前は通す）、個人のメールアドレス（例示用ドメイン・GitHub・Anthropic の公開アドレスは通す）。対象はツリー（バイナリも）、コミット本文、author / committer。ホストに依らない秘密の規則は、変わる行だけでなくツリー全部にも当てる（ホストの値の無い環境の下の `--check` と同じ。出すのはファイルと行と種類）
-- 公開に出すツリーの Markdown（`*.md`）が `publicSync.exclude` の外すパスを名指ししていても止まる（公開側の読者は開けない）。当てるのは exclude のファイルそのもののパスと、exclude のディレクトリの下のパス。長いパスの一部（`a/docs/x.md`・`/private/tmp`）、ディレクトリだけの名指し（`private/`）、`.md` 以外のファイル、`ops.config.json` は当てない。意図して残す参照は `publicSync.allowRefs` に書く。出すのはファイルと行と名指したパス
-- 公開に出すツリーの Markdown の地の文にコミットハッシュの形の値（7〜40 桁の 16 進で、数字と a-f の両方を含む）があっても止まる（公開側の読者は Private のコミットを開けない。何を指すかを文で書く）。インラインコード・コードフェンスの中は当てない（例の値はそこに入れる）。出すのはファイルと行と値
-- 同期を回している OS の利用者名（`os.userInfo().username`、大文字と小文字は区別しない。空か、上の置き換え名か、`publicSync.serviceUsers` の名前なら見ない。見るのは同期を回す利用者の名前だけで、録画などを作った別の利用者の名前は見ない）がパスの形（`/home/<you>`・`/Users/<you>`・`pytest-of-<you>`・`C:\Users\<you>`。JSON や JS の文字列の `C:\\Users\\<you>` も）でファイルの中・パス名・コミット本文にあっても止まる
-- `--source <ref>`（既定 `origin/main`）はタグでも指せる。タグを指すと同期のコミットと PR の題がその名前だけになる（`v1.2.0`。タグでなければ `sync`）。題が `vX.Y.Z` の同期が公開側の main に入ると、同じ実行（マージに失敗したときは次の実行）で公開側のそのコミットに同じ名前のタグと GitHub Release が付く（`gh release create --target`、本文は無い。push しない。`--target-url` のときは付けない）。`--dry-run` は除外・書き換え・検査の結果と作るツリーの sha を出して終わる（公開側に届かなくてもよい。何も push しない。公開側に届くときは比較のために `refs/public-sync/main` へ fetch する）。`--target-url` は公開先の URL を差し替える（テストの bare リポジトリ用）
-- `--check`（`--source` の既定は `HEAD`）は、同期と同じ関数でツリーを組み立て、同じ関数でツリーの中の Private のリポジトリ名（ファイルと行、パス名）・ホームパス・個人のメールアドレスと、秘密の規則（全ファイルの全行。前回の公開から変わっていないファイルも。出すのはファイルと行と種類で、値は出さない）を検査する。ホストの AWS のプロファイル名・SSO のセッション名・アカウント ID の値は、検査を回す環境に AWS の設定（`AWS_CONFIG_FILE`、なければ `~/.aws/config`）があるときだけ数える（Actions には無いので数えない。ホストで回すローカルの CI では数える）。公開側には触らない（ネットワークも `gh` も要らない）ので、PR の CI に入れて、同期より前のマージの前に止める（例: CI の手順に `bun ops-kit/src/cli.ts public-sync --check`）。題・author に依る検査と、同期する OS の利用者名は同期のときだけ見る（ARN などの形で分かるアカウント ID はホストの値が無くても当たり、例示は `123456789012`）。同じ関数で、公開に出す文書が外すパスを名指ししていないか、地の文にコミットハッシュの形の値がないかも見る（上の送る前の検査と同じ。`publicSync.allowRefs` の参照は通す）。`origin`（か `GH_REPO`）が `publicSync.target` の clone（公開側の写しの CI）では検査せずに exit 0
-- exit 0 = 送った / 送るものが無い / dry-run、1 = 止まった（理由は stderr）、2 = 使い方の誤り
+- The first time (the public `main` is empty), it pushes a root commit to `main`. From the second time, it pushes `sync/<tag>` (`sync/<short sha of the public tree>` if it is not a tag), opens a PR, and merges it right away with **Rebase and merge** (a PR on the public side is public the moment it is opened, so a human merge is not a check that stops publication; it does not wait for the public side's CI result). If the merge fails, the PR stays open, it stops with the reason, and the next run merges it again. If the title is `vX.Y.Z`, the same run puts a tag and a Release on the public side. Private information does not appear in the public side's commits, branches, PRs, and Releases: the title is only the version (the tag name) and there is no body (the titles of private commits are internal notes, so they are not listed; neither private shas nor Issue numbers appear). Which private commit it was sent from is kept in the ref `refs/public-sync/trees/<public-side tree>` of the private `origin`, and the next run finds the previous one with it (it is looked up by tree, so it does not depend on how the public side merged. If there is no record for the tree of the public `main`, it stops with "main changed after the last sync"). The configuration (`publicSync`) is read from the `ops.config.json` of the tree being sent (`--source`) (even if the working tree is old, an old exclusion does not apply to a new tag). A `--source` older than the last one sent is not sent (the public side is not rolled back)
+- If the public `main` changed after the last sync, it stops so as not to overwrite. Take that change into the private repository, then run with `--adopted` (in that case it does not merge the open sync PR, and stops, asking you to close it)
+- Of the tree it keeps only what `publicSync.include` names (omitted means the whole tree; if a named item is not in the tree, it appears in the output), removes `publicSync.exclude`, and in the files of `publicSync.rewrite` replaces the private repository name with the public-side name
+- A workflow job runs only in a repository whose repository variable is `on`: for the `ci.yml` and `labels.yml` of the development origin and the template it is `<PREFIX>_ACTIONS`, and for `close-pull-requests.yml` of the public set it is `PUBLIC_ACTIONS` (the public set has no `envPrefix`). In a copy without the variable no job runs, so even if it is placed where Actions are not allowed no failure email comes, and PRs on the copy are not closed either. On the public target, set `PUBLIC_ACTIONS` to `on` before syncing a workflow that has the condition (without it PRs are not closed). To remove the root `.github` from the Release archive, put `/.github/ export-ignore` in `.gitattributes`
+- After that it adds the public set (`public/`) to the tree (there is no setting to include or not; `__PUBLIC_REPO__` is `publicSync.target`): it replaces `.github/ISSUE_TEMPLATE/` with only the request templates (`request.yml` + `config.yml`), adds the workflow that closes PRs (`.github/workflows/close-pull-requests.yml`), puts in the `SECURITY.md` template only when the repository has none (in none of the root, `.github/`, and `docs/`), and replaces the `## How this repository works` section of `README.md` (if there is none, it inserts it before the first `## ` heading, or at the end if there is no heading; a `## ` inside a code block does not count as a heading; if there is no `README.md` it stops). The `public kit:` line of the output says what it did
+- Checks before sending (if even one hits, nothing is sent and it exits 1): in the lines that change on the public side (the whole tree the first time), a value that matches the kit's secret rules (the same as the `gh` front; including the host's AWS profile name, SSO session name, and account ID) (only the kind and the file name are printed); the private repository name (a whole-name match; in file contents, path names, and commit messages); a home path (the form of a macOS home directory; the names `dev` / `example` / `me` / `x` / `<you>` pass); and a personal email address (example domains and the public addresses of GitHub and Anthropic pass). The targets are the tree (binaries too), commit messages, and author / committer. The host-independent secret rules are applied to the whole tree, not only the changed lines (the same as `--check` below in an environment without host values; the file, line, and kind are printed)
+- It also stops if a Markdown file (`*.md`) in the tree to be published names a path that `publicSync.exclude` removes (a reader on the public side cannot open it). What is matched is the path of an excluded file itself and paths under an excluded directory. Part of a longer path (`a/docs/x.md`, `/private/tmp`), naming only a directory (`private/`), non-`.md` files, and `ops.config.json` are not matched. Write references kept on purpose in `publicSync.allowRefs`. The file, line, and named path are printed
+- It also stops if the plain prose of a Markdown file in the published tree has a value shaped like a commit hash (7 to 40 hexadecimal digits that contain both digits and a-f) (a reader on the public side cannot open private commits; say in words what it points at). Inside inline code and code fences it is not matched (put example values there). The file, line, and value are printed
+- It also stops if the user name of the OS running the sync (`os.userInfo().username`, case-insensitive; not checked if it is empty, the replacement name above, or a name in `publicSync.serviceUsers`; it looks only at the name of the user running the sync, not at the name of another user who made recordings and the like) appears in a path form (`/home/<you>`, `/Users/<you>`, `pytest-of-<you>`, `C:\Users\<you>`, and also `C:\\Users\\<you>` in a JSON or JS string) in file contents, path names, or commit messages
+- `--source <ref>` (default `origin/main`) can also point at a tag. When it points at a tag, the title of the sync commit and PR is only that name (`v1.2.0`; `sync` if it is not a tag). When a sync titled `vX.Y.Z` enters the public main, in the same run (the next run if the merge failed) a tag and a GitHub Release of the same name are put on that commit on the public side (`gh release create --target`, no body; no push; not put with `--target-url`). `--dry-run` prints the results of exclusion, rewriting, and checks and the sha of the tree it would make, and ends (the public side need not be reachable; nothing is pushed; when the public side is reachable it fetches into `refs/public-sync/main` for comparison). `--target-url` replaces the URL of the public target (for a bare repository in tests)
+- `--check` (the default of `--source` is `HEAD`) builds the tree with the same function as the sync and, with the same functions, checks the private repository name in the tree (file and line, and path names), home paths, personal email addresses, and the secret rules (every line of every file, including files unchanged since the last publication; the file, line, and kind are printed, never the value). The values of the host's AWS profile name, SSO session name, and account ID are counted only when the environment running the check has AWS configuration (`AWS_CONFIG_FILE`, or `~/.aws/config` if unset) (Actions has none, so they are not counted; local CI run on the host counts them). It does not touch the public side (it needs neither the network nor `gh`), so put it in a PR's CI to stop before merging, ahead of the sync (for example, in the CI steps: `bun ops-kit/src/cli.ts public-sync --check`). Checks that depend on the title or author, and the OS user name of the syncing user, are looked at only at sync time (an account ID recognizable by its form, such as in an ARN, matches even without host values, and the example is `123456789012`). With the same function it also checks whether a published document names a path that is removed, and whether the prose contains a value shaped like a commit hash (the same as the checks before sending above; references in `publicSync.allowRefs` pass). In a clone whose `origin` (or `GH_REPO`) is `publicSync.target` (the CI of the public copy), it does not check and exits 0
+- exit 0 = sent / nothing to send / dry-run, 1 = stopped (the reason is on stderr), 2 = misuse
 
-## 公開リポジトリ
+## The public repository
 
-キットを直接参照できないリポジトリには、生成したコピーを同梱する:
+To a repository that cannot refer to the kit directly, bundle a generated copy:
 
 ```bash
-bun ops-kit/src/cli.ts export-copy <公開リポジトリ>/vendor/ops-kit --words-file <禁止語の一覧ファイル>
-cat <公開リポジトリ>/vendor/ops-kit/KIT_VERSION    # commit <sha> / date <日時>（未コミットの変更から作ったら dirty の行）
-(cd <公開リポジトリ>/vendor/ops-kit && bun install)  # 依存は zod だけ。リポジトリの workspaces に足してもよい
+bun ops-kit/src/cli.ts export-copy <public-repository>/vendor/ops-kit --words-file <forbidden-words-file>
+cat <public-repository>/vendor/ops-kit/KIT_VERSION    # commit <sha> / date <date-time> (a dirty line if made from uncommitted changes)
+(cd <public-repository>/vendor/ops-kit && bun install)  # the only dependency is zod; you may also add it to the repository's workspaces
 ```
 
-- コピーに入るもの: `src/`（`*.test.ts` を除く）、`skills/`、`bin/`、`README.md`、`package.json`、キットの親のリポジトリの `LICENSE`、`tsconfig.json`（キットの外の基本設定を取り込んだもの）、`--help` が出す設定の例（`fixtures/config-with-phase.json`）。テストと残りの fixtures は入らない。リンクはリンク先の中身として入る（検査もその中身にかかる）
-- 著作者の表示: キットには親のリポジトリの名前も著作者の名前も書けない（固有語の検査）ので、コピーは `LICENSE` だけを持ち、親の `NOTICE` は入れない。同梱する公開リポジトリが、自分の `NOTICE` に「`vendor/ops-kit` は <親のリポジトリ> の ops-kit のコピー（Apache-2.0）」と著作者の表示を書く
-- 出所と版は `KIT_VERSION`。コピーを直さない（直すのはキット。コピーは作り直す）
-- 非公開の情報が入らない検査: コピーを作ったあと、指定した一覧の語でコピーの全ファイルの名前と中身を検索し、1 件でもあればコピーを消して exit 1（前のコピーはそのまま残る）。一覧の指定が無い場合や、指定したファイルが無い場合は理由を出して停止する（検査は省略しない）。一覧は UTF-8 で 1 行に 1 語を書き、空行と `#` で始まる行は無視する。名前と中身の照合では大文字・小文字を区別しない
-- `<dest>` は無い・空・前のコピー（`KIT_VERSION` がある）のどれか。前のコピーは置き換え、それ以外のディレクトリには書かない
-- 入口は `OPS_KIT=<リポジトリ>/vendor/ops-kit` か、入口のキットの場所を `vendor/ops-kit` にする。スキルは上の「スキルの導入」と同じくアプリが置く（コピーの `skills/` は、アプリを使わずに読むときのため）
+- What goes into the copy: `src/` (excluding `*.test.ts`), `skills/`, `bin/`, `README.md`, `package.json`, the `LICENSE` of the kit's parent repository, `tsconfig.json` (with the base configuration from outside the kit merged in), and the configuration example that `--help` prints (`fixtures/config-with-phase.json`). The tests and the remaining fixtures do not go in. A symbolic link goes in as the content of its target (and the check applies to that content)
+- Attribution: the kit cannot contain the name of the parent repository or of the author (the check for specific words), so the copy has only `LICENSE` and does not include the parent's `NOTICE`. The public repository that bundles it writes the attribution in its own `NOTICE`: "`vendor/ops-kit` is a copy of the ops-kit of <parent repository> (Apache-2.0)"
+- The origin and the version are in `KIT_VERSION`. Do not fix the copy (fix the kit; the copy is rebuilt)
+- The check that no non-public information gets in: after making the copy, it searches the names and contents of all files of the copy for the words in the specified list, and if there is even one hit it deletes the copy and exits 1 (the previous copy is left as it was). If no list is specified, or the specified file does not exist, it stops with the reason (the check is not skipped). The list is UTF-8 with one word per line, and blank lines and lines starting with `#` are ignored. Matching of names and contents is case-insensitive
+- `<dest>` is one of: missing, empty, or a previous copy (it has `KIT_VERSION`). A previous copy is replaced; it does not write into any other directory
+- For the entry point, use `OPS_KIT=<repository>/vendor/ops-kit`, or make the kit location of the entry point `vendor/ops-kit`. The app places the skills as in "Installing the skills" above (the copy's `skills/` is for reading without the app)
 
-## fork して開発を始める
+## Starting development on a fork
 
-このキットを持つアプリの fork して開発する手順は、そのリポジトリの [`docs/development.md`](../docs/development.md)。
+The procedure for forking and developing the app that holds this kit is in that repository's [`docs/development.md`](../docs/development.md).
 
-## 公開側への書き込みが止まったとき
+## When writes to the public side are refused
 
-既定の書き込み先（`GH_REPO`、無ければ `gh repo view`）が最寄りの `ops.config.json` の `publicSync.target` と同じ clone では、書き込みが止まり、次の文が出る: 「書き込み先 <owner/name> は、この clone の ops.config.json の publicSync.target（公開側の写し）です。自分のリポジトリに向けてから実行してください: …」。判定にリポジトリの名前は使わない。上流の開発元は既定が開発元なので止まらない。
+In a clone where the default write target (`GH_REPO`, or `gh repo view` if unset) is the same as the nearest `ops.config.json`'s `publicSync.target`, writes are stopped and the following sentence is printed: `書き込み先 <owner/name> は、この clone の ops.config.json の publicSync.target（公開側の写し）です。自分のリポジトリに向けてから実行してください: …`. The decision does not use a repository name. The upstream development origin is not stopped because its default is the development origin.
 
-直し方:
+How to fix it:
 
-1. `git remote -v` で、`origin` が自分のリポジトリか確かめる。上流を clone したままなら、自分のリポジトリを remote に足す（`git remote add <名前> <自分の URL>`）か `origin` を付け替える。
-2. `gh repo set-default <自分の owner/name>` を実行する。`gh repo view` の答えが変わり、`-R "$(gh repo view …)"` で書く工程も自分のリポジトリに向く。
-3. `GH_REPO=<自分の owner/name>` でも `gh` の書き込みは自分に向くが、`gh repo view` の答えは変わらない。`-R "$(gh repo view …)"` で上流を名指しした書き込みは止まったままなので、2 を使う。
+1. With `git remote -v`, check that `origin` is your own repository. If you still have the upstream cloned, add your own repository as a remote (`git remote add <name> <your URL>`) or repoint `origin`.
+2. Run `gh repo set-default <your owner/name>`. The answer of `gh repo view` changes, and steps that write with `-R "$(gh repo view …)"` also point at your own repository.
+3. `GH_REPO=<your owner/name>` also points `gh` writes at your own, but the answer of `gh repo view` does not change. Writes that name the upstream with `-R "$(gh repo view …)"` stay stopped, so use 2.
 
-守れる範囲: キットの道具（`ops-kit` のコマンドと `scripts/setup/` の入口）、`gh` の前段（`ops-kit/bin/gh`）を通る `gh`、キットを持つアプリのバックログの取込みと送信。前段を `PATH` に置かない端末で叩く `gh` と GitHub の画面での操作は止まらない。
+What it protects: the kit's tools (the `ops-kit` commands and the entry points of `scripts/setup/`), `gh` going through the `gh` front (`ops-kit/bin/gh`), and the backlog import and send of the app that holds the kit. A `gh` run in a terminal that does not put the front on `PATH`, and operations in the GitHub UI, are not stopped.
 
-## 更新
+## Updating
 
-- キットを直したら、キットを参照する使う側（入口が `OPS_KIT` かキットのチェックアウトを指す）は何もしない。次の実行から新しいキットが動き、スキルは次の Task の起動で置き直される
-- 同梱したコピーは追随しない。更新するときは `export-copy` を同じ `<dest>` にもう一度実行し、`KIT_VERSION` の差分ごとコミットする
-- 設定の形を変えたら（`src/config.ts`）、使う側の `ops.config.json` を直す。古い形を読む層は作らない
+- When the kit is fixed, a consuming side that refers to the kit (its entry point points at `OPS_KIT` or at a checkout of the kit) does nothing. The new kit runs from the next execution, and the skills are placed again at the next Task start
+- A bundled copy does not follow. To update, run `export-copy` again to the same `<dest>` and commit it with the diff of `KIT_VERSION`
+- If the shape of the configuration changes (`src/config.ts`), fix the consuming side's `ops.config.json`. No layer that reads the old shape is made
 
-### 独立した公開バージョン
+### Independent public versions
 
-新しい公開先で `publicSync.versioning: "independent"` を設定すると、開発側のタグとは独立して公開版を採番する。省略時の動作は変わらない。`--source` は private origin に存在し、main に含まれる厳密な `vX.Y.Z` タグを指定する（開発側のタグを先に fetch する）。初回は開発版の番号に関係なく公開側を `v0.1.0` とし、その source を基準にする。
+Setting `publicSync.versioning: "independent"` on a new public target numbers public versions independently of the development tags. The behavior when it is omitted does not change. `--source` names an exact `vX.Y.Z` tag that exists in the private origin and is contained in main (fetch the development tags first). The first time, regardless of the development version number, the public side is `v0.1.0`, and that source becomes the baseline.
 
-次回からは前回公開の source から今回の source までの開発タグの遷移を調べ、最大の区分（major > minor > patch）を公開側で **1 回だけ**上げる。patch が 3 回なら公開 patch を 1、patch が 3 回と minor が 2 回なら公開 minor を 1 上げる。major は minor と patch を、minor は patch を 0 に戻す。v0 系も同じ規則で、major を含めば v1.0.0 になりうる。回数の閾値は無い。
+From the next time on, it examines the transitions of development tags from the previously published source to this source, and raises the largest level (major > minor > patch) on the public side **once**. If there were 3 patches, the public patch goes up by 1; if there were 3 patches and 2 minors, the public minor goes up by 1. A major resets minor and patch to 0, and a minor resets patch to 0. The v0 series follows the same rule, and if a major is included it can become v1.0.0. There is no threshold on the count.
 
-公開ツリーが同じなら増やさず、前回公開の基準も進めない。次に公開差分ができたとき、公開に出ない変更も含めた全区間で最大区分を選ぶ。開発タグの分岐・逆行・同一コミットへの複数版・記録済みタグの移動や削除・基準欠落は推測せず停止する（台帳が無い公開済みの公開先では、下の移行を指す）。
+If the public tree is the same, it does not increase and does not advance the previous publication's baseline. When the next public difference appears, the largest level is chosen over the whole interval, including changes that are not published. It stops without guessing on a development tag that forks or goes backward, several versions on the same commit, a recorded tag moved or deleted, or a missing baseline (for an already published target with no ledger, the stop points to the migration below).
 
-公開済みで台帳もリリースタグも無い公開先（独立採番なしの同期で公開してきたもの）は、作り直さずに `ops-kit public-sync --adopt-baseline --source <vX.Y.Z>` で独立採番へ移す。先に `publicSync.versioning: "independent"` を private main に入れて origin に push する（移行は送るツリーを作らないので、設定は `--source` のタグではなく origin/main のものを読む）。`--source` は、公開 main のツリーの出所の記録（private origin の `refs/public-sync/trees/<ツリー>`）が指すコミットにある開発タグ。先に `--dry-run` を付けて、source のタグとコミット、公開 main のコミットとツリー、付ける公開版 `v0.1.0` を確かめてから実行する。公開側の履歴は書き換えず、コミットも足さない。今の公開 main の先頭のコミットに公開タグと Release `v0.1.0` を付け、台帳の基準をそのコミットにする（公開 main の題は前の同期のまま。次の版から題が版になる）。次からは通常の同期が v0.1.0 を基準に上の規則で採番する。次のどれかなら、公開側にも private origin にも書かずに止まる: 台帳が既にある / 公開 main が無い / 公開 main のツリーの出所の記録が無い（先に `--adopted` の通常の同期で記録のあるツリーにする）/ 記録が指すコミットが `--source` のタグと違う / 公開側に `vX.Y.Z` のタグか Release が既にある / 開いた同期 PR がある。途中で失敗したら（Release の作成など）、同じコマンドを同じ `--source` で実行し直すと、版を変えずに足りない処理だけを補う。
+A public target that has been published but has neither a ledger nor release tags (one published with a sync that does not use independent numbering) is moved to independent numbering without rebuilding, with `ops-kit public-sync --adopt-baseline --source <vX.Y.Z>`. First put `publicSync.versioning: "independent"` into the private main and push it to origin (the migration builds no tree to send, so the configuration is read from origin/main, not from the `--source` tag). `--source` is the development tag on the commit that the record of the origin of the public main's tree (`refs/public-sync/trees/<tree>` of the private origin) points at. First add `--dry-run` and check the source's tag and commit, the public main's commit and tree, and the public version `v0.1.0` to be put, then run it. It does not rewrite the public history and adds no commit. It puts a public tag and Release `v0.1.0` on the current head commit of the public main and makes that commit the ledger's baseline (the title of the public main stays as the previous sync's; from the next version the title becomes the version). From then on, a normal sync numbers from v0.1.0 as the baseline under the rule above. In any of the following cases it stops without writing to the public side or the private origin: a ledger already exists / there is no public main / there is no record of the origin of the public main's tree (first make it a tree with a record by a normal sync with `--adopted`) / the commit the record points at differs from the `--source` tag / a `vX.Y.Z` tag or Release already exists on the public side / there is an open sync PR. If it fails midway (for example creating the Release), running the same command again with the same `--source` supplies only the missing steps without changing the version.
 
-`--dry-run` は source、前回の基準、区分、予定公開版、検査済み tree を示し、公開側・private origin へ書かない。独立採番では基準の取り違えを避けるため、公開先の読み取りに失敗した場合は初回と推測せず停止する。初回は空のPrivateリポジトリを作成してから実行する。作成前の検査は空のローカルbareを `--target-url` に渡して行える（GitHub Releaseは作らない）。公開側の題・枝・タグは公開版のみ。公開 Release の本文は空で、開発側の件名・Issue・sha を転記しない。package.json の版は書き換えない。
+`--dry-run` shows the source, the previous baseline, the level, the planned public version, and the checked tree, and writes to neither the public side nor the private origin. With independent numbering, to avoid mistaking the baseline, if reading the public target fails it stops and does not assume it is the first time. For the first time, create an empty private repository and then run it. The check before creating can be done by passing an empty local bare repository to `--target-url` (no GitHub Release is made). The title, branch, and tag on the public side are only the public version. The body of the public Release is empty, and it does not transcribe development-side subjects, Issues, or shas. It does not rewrite the version in package.json.
 
-source・公開 tree・公開版・開発タグの対応と未完了計画は、private origin の `refs/public-sync/versions/<公開先URLのSHA-256>` に保存する。同じ prefix に `-lock` を付けた ref を、期待値付き push で実行ごとに取得・解放する。別 clone の同時実行は停止する。処理が失敗しても未完了計画は残る。公開側に届いていない計画（公開 main が前の完了のコミットのまま、計画の版のタグ・Release・開いた同期 PR が無い）は、次の同期が渡された `--source` で置き換え（出力の 1 行目が `version: replaced unfinished plan …`、`--dry-run` は `would replace`）、版はその source から決まる。届きかけている計画は**失敗した操作をむやみに再実行せず、公開側と台帳を確認してから**同じ `--source` で再開する。違う `--source` は、再開に使うタグと届いているもの（公開 main の移動・同期 PR の番号・タグ・Release）を 1 行目に出して停止する。同じ `--source` でも対象が変わると停止する。タグ・Release が既にあれば、その公開コミットとの一致を確認して不足した処理だけを補う。
+The correspondence of source, public tree, public version, and development tag, and the unfinished plan, are stored in `refs/public-sync/versions/<SHA-256 of the public target URL>` of the private origin. A ref with `-lock` appended to the same prefix is acquired and released on every run with a push that carries an expected value. Concurrent runs from another clone stop. If processing fails, the unfinished plan remains. A plan that has not reached the public side (the public main is still at the previous completion's commit, and there is no tag, Release, or open sync PR of the plan's version) is replaced by the next sync with the `--source` it is given (the first line of the output is `version: replaced unfinished plan …`, and `--dry-run` says `would replace`), and the version is decided from that source. A plan that has partly reached the public side is resumed with the same `--source` **after checking the public side and the ledger, without blindly re-running the failed operation**. A different `--source` stops, printing on the first line the tag to use for resuming and what has arrived (the public main's movement, the sync PR's number, the tag, and the Release). Even with the same `--source`, it stops if the target changed. If the tag and Release already exist, it confirms that they match that public commit and supplies only the missing steps.
 
-プロセスが強制終了した場合、lock は自動で奪わない。復旧では元の実行が終了したことを確認し、`git ls-remote origin 'refs/public-sync/versions/*'` で該当の lock と状態を読む。公開 main・sync 枝・PR・タグ・Release と未完了計画を照合し、lock の観測した object ID を期待値にした `git push --force-with-lease=<lock-ref>:<観測したID> origin :<lock-ref>` でその lock だけを解除してから再開する。途中の実行が残る間や、書き込み結果が不明なまま解除しない。台帳や公開タグを消して採番をやり直さない。
+If the process is killed, the lock is not taken over automatically. For recovery, confirm that the original run has ended and read the lock and the state with `git ls-remote origin 'refs/public-sync/versions/*'`. Cross-check the public main, the sync branch, the PR, the tag, the Release, and the unfinished plan, then release only that lock with `git push --force-with-lease=<lock-ref>:<observed-ID> origin :<lock-ref>`, using the object ID observed for the lock as the expected value, and then resume. Do not release it while a run is in progress or while the result of a write is unknown. Do not delete the ledger or a public tag to redo the numbering.

@@ -10,6 +10,12 @@ export function linkedIssues(pr: { body: string | null; headRefName: string | nu
   return linked;
 }
 
+/** A span with a space whose first word, after any `VAR=value`, is a bare command name (`bun`, `grep -n`), not a path or a file. */
+const isCommand = (span: string) => {
+  const [head, ...rest] = span.trim().replace(/^(?:[A-Za-z_]\w*=\S*[ \t]+)+/, "").split(/[ \t]+/);
+  return rest.length > 0 && !!head && /^[\w-]+$/.test(head);
+};
+
 const FILE_EXT = /\.(?:tsx?|[cm]?js|json|md|ya?ml|toml|lock|sh|css|html|sql|txt)$/;
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -49,13 +55,19 @@ function touchLines(text: string): string {
  * Repository paths named in an Issue body. `top` is the repository's root (plus what open PRs add to it): its
  * directories start a path anywhere in the body. A name without a directory (a root file such as `package.json`, or a backticked
  * word that ends in a file extension, so a file no branch has yet is still seen) counts only on `touchLines`.
- * `path:line` loses the line; a directory keeps its trailing slash.
+ * `path:line` loses the line; a directory keeps its trailing slash. For overlaps, a glob (`docs/design/*.md`, `docs/a-*.md`) is
+ * not a path, nor the directory before its wildcard, and a backticked span that starts with a command word and has a space
+ * (`bun test scripts/a.test.ts`) names what is checked or searched, not touched. `scope` (merge-gate's) keeps both, as before.
  */
-export function pathsIn(text: string, top: { name: string; dir: boolean }[]): string[] {
+export function pathsIn(body: string, top: { name: string; dir: boolean }[], { scope = false }: { scope?: boolean } = {}): string[] {
+  const text = scope ? body : body.replace(/`[^`\n]*`/g, (span) => (isCommand(span.slice(1, -1)) ? " " : span));
   const dirs = top.filter((t) => t.dir).map((t) => esc(t.name));
   const files = top.filter((t) => !t.dir).map((t) => esc(t.name));
   const touch = touchLines(text);
-  const scan = (alt: string, from: string) => [...from.matchAll(new RegExp(`(?<![\\w./-])(?:${alt})(?![\\w-])`, "g"))].map((m) => m[0]);
+  // a match whose rest of the word reaches a wildcard is the head of a glob
+  const glob = (from: string, end: number) => !scope && /^[\w.@\/-]*[*?{[]/.test(from.slice(end));
+  const scan = (alt: string, from: string) =>
+    [...from.matchAll(new RegExp(`(?<![\\w./-])(?:${alt})(?![\\w-])`, "g"))].filter((m) => !glob(from, m.index + m[0].length)).map((m) => m[0]);
   const found = [
     ...(dirs.length ? scan(`(?:${dirs.join("|")})\\/[\\w.@\\/-]*[\\w\\/]`, text) : []),
     ...(files.length ? scan(`(?:${files.join("|")})`, touch) : []),
@@ -77,7 +89,7 @@ export function pathsIn(text: string, top: { name: string; dir: boolean }[]): st
 export function scopeIn(text: string, top: { name: string; dir: boolean }[]): string[] {
   const dirs = new Set(top.filter((t) => t.dir).map((t) => `${t.name}/`));
   const alone = [...text.matchAll(/`([^`\s]+\/)`/g)].map((m) => m[1]!).filter((d) => dirs.has(d));
-  return [...new Set([...pathsIn(text, top), ...alone])];
+  return [...new Set([...pathsIn(text, top, { scope: true }), ...alone])];
 }
 
 export const overlaps = (a: string, b: string) =>

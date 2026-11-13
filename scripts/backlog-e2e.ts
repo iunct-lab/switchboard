@@ -525,8 +525,8 @@ try {
   await until(() => evaluate(`${read} && (${readyRow(304)}?.textContent ?? "").includes("最後の Task: 中断")`), "Ready #304 back to 中断 once reviewed");
   replyWaiting.ready = true;
   // 重なり (#1044): #304's two Tasks name `src/overlap.ts` and an open PR (#950, not its own) changes it → under the row
-  // 「重なり: PR #950（src/overlap.ts）」 with the PR linked; the row's 実装する still starts it, with pbi-complete as before
-  // (the session's own `overlap` judges); the scheduled firing below leaves it and logs why
+  // 「重なり: PR #950（src/overlap.ts）」 with the PR linked; the row's 実装する starts no Task and says why in the error
+  // banner, as the log words it (#4348); the scheduled firing below leaves it and logs why
   const dec304 = decisions.data.repository.i304 as { subIssues?: unknown };
   dec304.subIssues = { nodes: [3041, 3042].map((number) => ({ number, state: "OPEN", labels: { nodes: [{ name: "type:task" }] }, body: "触る場所: `src/overlap.ts`", comments: { nodes: [] } })) };
   openPulls = [{ number: 950, files: ["src/overlap.ts"], headRefName: "sb/999-x" }];
@@ -536,10 +536,9 @@ try {
   assert(overlapShown.text === "重なり: PR #950（src/overlap.ts）" && JSON.stringify(overlapShown.links) === JSON.stringify(["https://github.com/acme/app/pull/950"]) && !(await evaluate(`!!${overlapOf("lib")}`)), `overlap: ${JSON.stringify(overlapShown)}`);
   const startedBefore = prompts.length;
   await clickIn(readyRow(304), "実装する");
-  await until(() => evaluate(taskScreen("#304 実装: ")), "#304's Task from the button despite the overlap");
-  assert(prompts.length === startedBefore + 1 && prompts.at(-1)!.startsWith("/pbi-complete 304"), `overlap button prompt: ${prompts.at(-1)}`);
-  await click("Backlog");
-  await until(() => evaluate(read), "backlog after the overlapping 実装する");
+  const refused = await until(() => evaluate(`[...document.querySelectorAll('.banner.error[role="alert"]')].map((b) => b.textContent).find((t) => t.includes('重なり')) ?? null`) as Promise<string | null>, "#304's overlap refusal in the error banner");
+  assert(refused.includes("重なり: #304（PR #950: src/overlap.ts）") && prompts.length === startedBefore && !!(await evaluate(read)), `overlap button: ${refused} prompts ${prompts.length - startedBefore}`);
+  await evaluate(`[...document.querySelectorAll('.banner.error[role="alert"]')].find((b) => b.textContent.includes('重なり'))?.querySelector('button')?.click()`);
   // (e) 閉じる on #307 (#531), its check Task stopped above → the close Task's screen, its prompt asks for pbi-complete's
   // step 6; back on the backlog the row is 実行中 without 閉じられる
   // the list still has the check Task as running until it is read again

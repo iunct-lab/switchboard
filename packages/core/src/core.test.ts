@@ -5,7 +5,7 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rm
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentEvent, AskList, AskQuestion, RunnerAdapter, RunnerDetection, RunnerId, RoutingStats, RunnerSession, Schedule, StartOptions, Task, Workspace } from "@switchboard/protocol";
-import { OpsLatency, OpsLoad, OpsResources, OpsStops } from "@switchboard/protocol";
+import { OpsLatency, OpsLoad, OpsResources, OpsStops, TaskSummary } from "@switchboard/protocol";
 import { Database } from "bun:sqlite";
 import { isTempDir, loadConfig, teleportWorktreePath } from "./config.ts";
 import { abortOrphanedTasks, Db } from "./db.ts";
@@ -2532,7 +2532,8 @@ describe("core daemon", () => {
       const lowStarts = () => starts.filter((s) => s.subagentEffort === "low").length;
       const before = lowStarts();
       const cx2 = await post("/api/tasks", { cwd: h, title: "cx2", prompt: "p", runner: "codex", shadowRunner: "claude" }).then(j);
-      const shadow = ((await fetch(`${b}/api/tasks`).then(j)) as Task[]).find((x) => x.shadowOf === cx2.id)!;
+      const shadowId = ((await fetch(`${b}/api/tasks`).then(j)) as TaskSummary[]).find((x) => x.shadowOf === cx2.id)!.id;
+      const shadow = (await fetch(`${b}/api/tasks/${shadowId}`).then(j)).task as Task;
       expect(shadow).toMatchObject({ runner: "claude", subagentEffort: "low" });
       await waitFor(async () => lowStarts() > before);
       expect((await patch({ subagentEffort: { claude: null, codex: null } }).then(j)).subagentEffort).toEqual({});
@@ -2623,7 +2624,7 @@ describe("core daemon", () => {
       expect(saved.defaultPermissionMode).toEqual({ claude: "plan" });
       expect(saved.runners[0].defaultPermissionMode).toBe("plan");
       expect((await fetch(`${b8}/api/health`).then(j)).runners[0].defaultPermissionMode).toBe("plan");
-      expect(c8.db.getSetting("settings", {})).toEqual({ developSelf: true, defaultPermissionMode: { claude: "plan" }, subagentEffort: {}, autoResume: {}, bedrock: {}, shadowRunner: null, routing: { llm: { enabled: false, runner: "claude", model: "", timeoutMs: 5000 } }, judge: { enabled: true, runner: "codex", model: "gpt-6-luna" }, autoStart: { runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" }, reviewRunner: "other", maxRunners: 3, evals: { judge: { enabled: true } }, titles: { auto: true }, quotaAndResume: { backlogQuotaLimit: 0.8, retryDelayMs: 900_000, retryMaxDelayMs: 14_400_000, maxLimitStops: 8, resumePrompt: "使用上限がリセットされました。中断した箇所から作業を続けてください。", maxStopResumes: 2, thinSample: 5, flowLimit: 1, defaultBudgetUsd: null, fableBudgetUsd: null }, judgeAndChoice: { judgeFallbackRunner: "claude", judgeFallbackModel: "claude-haiku-4-5", judgeTimeoutMs: 60_000, workspaceChoiceTimeoutMs: 60_000 }, newDefaults: { taskRunner: "claude", scheduleCron: "0 3 * * *" }, prices: {}, models: {}, hiddenModels: {}, outbound: { classifierLog: false, runnerTelemetry: false } });
+      expect(c8.db.getSetting("settings", {})).toEqual({ developSelf: true, defaultPermissionMode: { claude: "plan" }, subagentEffort: {}, autoResume: {}, bedrock: {}, shadowRunner: null, routing: { llm: { enabled: false, runner: "claude", model: "", timeoutMs: 5000 } }, judge: { enabled: true, runner: "codex", model: "gpt-6-luna", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600 }, autoStart: { runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" }, reviewRunner: "other", maxRunners: 3, evals: { judge: { enabled: true } }, titles: { auto: true }, quotaAndResume: { backlogQuotaLimit: 0.8, retryDelayMs: 900_000, retryMaxDelayMs: 14_400_000, maxLimitStops: 8, resumePrompt: "使用上限がリセットされました。中断した箇所から作業を続けてください。", maxStopResumes: 2, thinSample: 5, flowLimit: 1, defaultBudgetUsd: null, fableBudgetUsd: null }, judgeAndChoice: { judgeFallbackRunner: "claude", judgeFallbackModel: "claude-haiku-4-5", judgeTimeoutMs: 60_000, workspaceChoiceTimeoutMs: 60_000 }, newDefaults: { taskRunner: "claude", scheduleCron: "0 3 * * *" }, prices: {}, models: {}, hiddenModels: {}, outbound: { classifierLog: false, runnerTelemetry: false } });
       const t4 = await post("/api/tasks", { cwd: h8, title: "t4", prompt: "p", runner: "claude" }).then(j);
       expect(t4.permissionMode).toBe("plan");
       expect(starts[2]?.permissionMode).toBe("plan");
@@ -3697,7 +3698,7 @@ describe("automatic judgement", () => {
       const a = await create("judged");
       await turnDone(a.id, 1);
       expect(calls[0]!.input).toEqual({ title: "judged", prompt: "依頼文", lastReply: "done" });
-      expect(calls[0]!.opts).toMatchObject({ settings: { enabled: true, runner: "codex", model: "gpt-6-luna" }, cwd: join(h, "suggest") });
+      expect(calls[0]!.opts).toMatchObject({ settings: { enabled: true, runner: "codex", model: "gpt-6-luna", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600 }, cwd: join(h, "suggest") });
       calls[0]!.answer("needs_action");
       await waitFor(async () => updates.some((t) => t.id === a.id && t.outcome === "needs_action" && t.judgedResult === "needs_action"));
       expect(await get(a.id)).toMatchObject({ outcome: "needs_action", judgedResult: "needs_action", judgedReason: "選択を求めている", judgedBy: "codex:gpt-6-luna", status: "done" });
@@ -3773,19 +3774,25 @@ describe("automatic judgement", () => {
         return t;
       };
       const off = await post(`${b}/api/settings`, { judge: { enabled: false } }, "PATCH").then(j);
-      expect(off.judge).toEqual({ enabled: false, runner: "codex", model: "gpt-6-luna" });
+      expect(off.judge).toEqual({ enabled: false, runner: "codex", model: "gpt-6-luna", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600 });
       await run("off");
       expect(calls).toHaveLength(0);
 
       const on = await post(`${b}/api/settings`, { judge: { enabled: true, runner: "claude", model: "claude-haiku-4-5" } }, "PATCH").then(j);
-      expect(on.judge).toEqual({ enabled: true, runner: "claude", model: "claude-haiku-4-5" });
+      expect(on.judge).toEqual({ enabled: true, runner: "claude", model: "claude-haiku-4-5", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600 });
       await run("on");
       expect(calls).toHaveLength(1);
-      expect(calls[0]!.opts.settings).toEqual({ enabled: true, runner: "claude", model: "claude-haiku-4-5" });
+      expect(calls[0]!.opts.settings).toEqual({ enabled: true, runner: "claude", model: "claude-haiku-4-5", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600 });
 
       const missing = await post(`${b}/api/settings`, { judge: { runner: "dak" } }, "PATCH");
       expect(missing.status).toBe(400);
       expect((await fetch(`${b}/api/settings`).then(j)).judge.runner).toBe("claude");
+
+      // the input caps: a partial patch keeps the runner / model; not a positive integer → 400
+      const caps = await post(`${b}/api/settings`, { judge: { recapChars: 30_000 } }, "PATCH").then(j);
+      expect(caps.judge).toEqual({ enabled: true, runner: "claude", model: "claude-haiku-4-5", recapChars: 30_000, laterChars: 4_000, laterEachChars: 600 });
+      expect((await post(`${b}/api/settings`, { judge: { laterChars: 0 } }, "PATCH")).status).toBe(400);
+      expect((await fetch(`${b}/api/settings`).then(j)).judge.laterChars).toBe(4_000);
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
@@ -3851,9 +3858,9 @@ describe("shadow run: the same prompt on a second runner, as a task linked by sh
     try {
       const t = await post(b, "/api/tasks", { cwd: h, title: "t", prompt: "p", runner: "claude", shadowRunner: "dak", budgetUsd: 1, effort: "high" }).then(j);
       expect(t).toMatchObject({ runner: "claude", shadowOf: null, shadowStopped: false, budgetUsd: 1, permissionMode: "auto", effort: "high" });
-      const all = (await fetch(`${b}/api/tasks`).then(j)) as Task[];
+      const all = (await fetch(`${b}/api/tasks`).then(j)) as TaskSummary[];
       expect(all.length).toBe(2);
-      const s = all.find((x) => x.shadowOf === t.id)!;
+      const s = (await fetch(`${b}/api/tasks/${all.find((x) => x.shadowOf === t.id)!.id}`).then(j)).task as Task;
       // a normal task on the other runner, carrying the primary's request and budget but none of its bookkeeping
       expect(s).toMatchObject({ runner: "dak", title: "t", cwd: h, scope: [h], workspaceId: t.workspaceId, routing: null, budgetUsd: 1, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", shadowStopped: false });
       // the primary's transcript says the shadow started and with which mode (modes are runner-native, not inherited)
@@ -4204,7 +4211,7 @@ describe("history import: Claude Code sessions run in a terminal, from ~/.claude
       expect(r).toMatchObject({ files: 1, created: 1, appended: 0, skippedForeign: 0, errors: [] });
       const tasks = await fetch(`${b}/api/tasks`).then(j);
       expect(tasks).toHaveLength(1);
-      const t = tasks[0];
+      const t = (await fetch(`${b}/api/tasks/${tasks[0].id}`).then(j)).task;
       expect(t).toMatchObject({ origin: "terminal", runner: "claude", status: "done", runnerSessionId: SESSION, title: "リポジトリ構成の説明", model: "claude-fable-5-1", permissionMode: "acceptEdits", workspaceId: ws.id, cwd: repo, scope: [repo], routing: null, budgetUsd: null });
       expect(t.createdAt).toBe(Date.parse("2026-09-06T12:52:26.186Z")); // first record of the log, not the import time
       expect(t.updatedAt).toBe(Date.parse("2026-09-06T13:10:05.000Z"));
@@ -4325,7 +4332,7 @@ describe("history import: Claude Code sessions run in a terminal, from ~/.claude
       const r = c.history.scan();
       expect(r).toMatchObject({ files: 4, created: 0, appended: 1, skippedForeign: 1, skippedOtherHost: 1, errors: [] });
       expect(c.history.scan()).toMatchObject({ skippedOtherHost: 0, skippedForeign: 1 }); // the sdk-only file is not re-read until it grows
-      const tasks = (await fetch(`${b}/api/tasks`).then(j)) as Task[];
+      const tasks = (await fetch(`${b}/api/tasks`).then(j)) as TaskSummary[];
       expect(tasks.map((t) => t.id).sort()).toEqual([live.id, mine.id].sort()); // no new task
       const m = await fetch(`${b}/api/tasks/${mine.id}`).then(j);
       expect(m.task).toMatchObject({ origin: "switchboard", title: "mine", permissionMode: "auto" }); // the log does not rename or re-mode a Switchboard task
@@ -4343,7 +4350,8 @@ describe("history import: Claude Code sessions run in a terminal, from ~/.claude
       // the workspace arrives later: the foreign session comes in on the next pass
       await post(`${b}/api/workspaces`, { path: other });
       expect(c.history.scan()).toMatchObject({ created: 1, skippedForeign: 0 });
-      expect(((await fetch(`${b}/api/tasks`).then(j)) as Task[]).find((t) => t.origin === "terminal")).toMatchObject({ cwd: other, runnerSessionId: "44444444-4444-4444-8444-444444444444" });
+      const imported = ((await fetch(`${b}/api/tasks`).then(j)) as TaskSummary[]).find((t) => t.origin === "terminal")!;
+      expect((await fetch(`${b}/api/tasks/${imported.id}`).then(j)).task).toMatchObject({ cwd: other, runnerSessionId: "44444444-4444-4444-8444-444444444444" });
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
@@ -4364,7 +4372,8 @@ describe("history import: Claude Code sessions run in a terminal, from ~/.claude
       writeFileSync(file, FIXTURE.replaceAll("/work/repo", real).replaceAll('"permissionMode":"acceptEdits"', '"permissionMode":"bypass"'));
       age(file);
       expect(c.history.scan()).toMatchObject({ created: 1, skippedForeign: 0, errors: [] });
-      const t = ((await fetch(`${b}/api/tasks`).then(j)) as Task[])[0]!;
+      const listedId = ((await fetch(`${b}/api/tasks`).then(j)) as TaskSummary[])[0]!.id;
+      const t = (await fetch(`${b}/api/tasks/${listedId}`).then(j)).task as Task;
       expect(t).toMatchObject({ origin: "terminal", cwd: real, permissionMode: null }); // bypass is not inherited; the last `permission-mode` was acceptEdits → also replaced
       // the person types one more turn in the terminal and gets an answer (end_turn, file still "hot"), then replies
       // from Switchboard before the next pass: the terminal turn — and its end — go in before the reply
@@ -4563,13 +4572,39 @@ describe("task outcome", () => {
     }
   });
 
+  test("GET /api/tasks returns only the list fields", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-list-fields-"));
+    const c = await daemon(h);
+    const b = `http://127.0.0.1:${c.server.port}`;
+    try {
+      const t = await post(`${b}/api/tasks`, { cwd: h, title: "ok", prompt: "p", runner: "dak" });
+      await waitFor(async () => (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task.status === "done");
+      const keys = Object.keys(TaskSummary.shape).sort();
+      const listed = (await fetch(`${b}/api/tasks`).then(j)) as Array<Record<string, unknown>>;
+      expect(listed.map((x) => x.id)).toEqual([t.id]);
+      expect(Object.keys(listed[0]!).sort()).toEqual(keys);
+      expect(listed[0]).not.toHaveProperty("routing");
+      expect(listed[0]).not.toHaveProperty("scope");
+      expect(listed[0]).not.toHaveProperty("permissionMode");
+      // the detail still carries them
+      expect((await fetch(`${b}/api/tasks/${t.id}`).then(j)).task).toHaveProperty("scope");
+      await fetch(`${b}/api/tasks/${t.id}/archive`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ archived: true }) });
+      const archived = (await fetch(`${b}/api/tasks?archived=1`).then(j)) as Array<Record<string, unknown>>;
+      expect(archived.map((x) => x.id)).toEqual([t.id]);
+      expect(Object.keys(archived[0]!).sort()).toEqual(keys);
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
   test("POST /api/tasks/:id/archive: a stopped Task leaves GET /api/tasks and shows under ?archived=1, comes back on false; a reply brings it back; 409 / 400 / 404", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-archive-api-"));
     const c = await daemon(h);
     const b = `http://127.0.0.1:${c.server.port}`;
     try {
       const get = async (id: string): Promise<Task> => (await fetch(`${b}/api/tasks/${id}`).then(j)).task;
-      const ids = async (q = "") => ((await fetch(`${b}/api/tasks${q}`).then(j)) as Task[]).map((t) => t.id);
+      const ids = async (q = "") => ((await fetch(`${b}/api/tasks${q}`).then(j)) as TaskSummary[]).map((t) => t.id);
       const t = await post(`${b}/api/tasks`, { cwd: h, title: "ok", prompt: "p", runner: "dak" });
       await waitFor(async () => (await get(t.id)).status === "done");
       const before = await get(t.id);

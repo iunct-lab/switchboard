@@ -157,7 +157,7 @@ describe("resumeDepends", () => {
   const SOURCE = { ...KEY, project: PROJECT, private: true };
   const WAIT = { id: "overlap", op: "parallel-guard overlap", target: "Task #52", reason: "depends" as const, evidence: "PR #12 と同じファイル", safety: "read-only" as const, conditions: [{ key: "pr#12", value: "open", met: false }, { key: "issue#34", value: "open", met: false }], actions: [], state: "waiting" as const };
   const store = (records: BacklogRecord[]) => db.putBacklogSnapshot(KEY, { records: records.map((r) => ({ objectKind: r.objectKind, externalId: r.externalId, remote: r.remote, fetchState: r.fetchState }) as BacklogSnapshotEntry), cursor: null, syncedAt: Date.now() });
-  const stopOf = (id: string) => db.listStopRecords([id]).filter((r) => r.id === `${id}/overlap`).at(-1)!;
+  const stopOf = (id: string, stop = "overlap") => db.listStopRecords([id]).filter((r) => r.id === `${id}/${stop}`).at(-1)!;
   const start = async (over: { stage?: { issue: number; action: "complete" } } = {}) => {
     const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude", workspaceId: "ws_app", ...over });
     await settle();
@@ -398,18 +398,54 @@ describe("resumeDepends", () => {
       expect(sends[0]).toContain("pr#12");
     });
 
-    test("a job stop is held while another depends stop waits, so the last turn still carries the job's result", async () => {
-      const { t, job } = await startJob({ stage: { issue: 50, action: "complete" } });
+    test("a job stop is not held by a PR wait: its result is sent at once, and the PR gets its own turn later", async () => {
+      const { t, job } = await startJob();
       expect(tasks.recordStop(t.id, { ...WAIT, id: "pr", conditions: [{ key: "pr#12", value: "open", met: false }] }).ok).toBe(true);
       end(job.id);
-      expect(await resume()).toEqual([]); // the PR still waits: nothing resolved, nothing sent
-      expect(stopOf(t.id).state).toBe("waiting");
-      store([pr(12, "MERGED")]);
       expect(await resume()).toEqual([t.id]);
       await settle();
       expect(sends).toHaveLength(1);
       expect(sends[0]).toContain(`job#${job.id} local-ci PR #12: fail`);
-      expect(stopOf(t.id).state).toBe("resolved");
+      expect(stopOf(t.id, "overlap").state).toBe("resolved");
+      expect(stopOf(t.id, "pr").state).toBe("waiting");
+      store([pr(12, "MERGED")]);
+      expect(await resume()).toEqual([t.id]);
+      await settle();
+      expect(sends).toHaveLength(2);
+      expect(sends[1]).toBe(dependsResumePrompt(["pr#12"]));
+    });
+
+    test("a stage Task gets its job's result past an open PR wait, and the PR's close only resolves the stop (backlog-next's)", async () => {
+      const { t, job } = await startJob({ stage: { issue: 50, action: "complete" } });
+      expect(tasks.recordStop(t.id, { ...WAIT, id: "pr", conditions: [{ key: "pr#12", value: "open", met: false }] }).ok).toBe(true);
+      end(job.id);
+      expect(await resume()).toEqual([t.id]);
+      await settle();
+      expect(sends).toHaveLength(1);
+      expect(sends[0]).toContain(`job#${job.id} local-ci PR #12: fail`);
+      expect(stopOf(t.id, "pr").state).toBe("waiting");
+      store([pr(12, "MERGED")]);
+      expect(await resume()).toEqual([]);
+      await settle();
+      expect(sends).toHaveLength(1);
+      expect(stopOf(t.id, "pr").state).toBe("resolved");
+    });
+
+    test("two job stops: nothing is sent when the first ends, and one turn carries both results when the second ends", async () => {
+      const { t, job } = await startJob();
+      const job2 = db.insertJob({ kind: "local-ci", taskId: t.id, pr: 12, runner: null, cwd: home, startedAt: Date.now() });
+      expect(tasks.recordStop(t.id, { ...JOB_WAIT, id: "second", conditions: [{ key: `job#${job2.id}`, value: "done", met: false }] }).ok).toBe(true);
+      end(job.id);
+      expect(await resume()).toEqual([]);
+      expect(stopOf(t.id, "overlap").state).toBe("waiting");
+      end(job2.id);
+      expect(await resume()).toEqual([t.id]);
+      await settle();
+      expect(sends).toHaveLength(1);
+      expect(sends[0]).toContain(`job#${job.id} `);
+      expect(sends[0]).toContain(`job#${job2.id} `);
+      expect(stopOf(t.id, "overlap").state).toBe("resolved");
+      expect(stopOf(t.id, "second").state).toBe("resolved");
     });
 
     test("a job that ended while the Task was still in its turn is picked up when the turn ends (resumeJobsOnTurnEnd)", async () => {

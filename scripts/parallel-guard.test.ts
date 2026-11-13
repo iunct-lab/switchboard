@@ -68,6 +68,29 @@ describe("parallel-guard pathsIn: a name without a directory (#4382)", () => {
   });
 });
 
+describe("parallel-guard pathsIn: globs and commands are not touched paths", () => {
+  test("a glob is not a path, nor the directory before its wildcard", () => {
+    expect(pathsIn("`grep -n x docs/design/*.md` と packages/core/src/*.test.ts、apps/web/src/{a,b}.ts、docs/a?.md", top)).toEqual([]);
+    expect(pathsIn("docs/design/x.md と packages/core/src/ 以下", top)).toEqual(["docs/design/x.md", "packages/core/src/"]);
+  });
+
+  test("a backticked span with a space is a command: what it names is checked, not touched", () => {
+    const body = "1. `scripts/a.ts` `resolveTarget`: 直す\n確認: `bun test scripts/a.test.ts packages/core/src/b.test.ts` と `bun scripts/public-docs.ts check docs/x.md` が通る";
+    expect(pathsIn(body, top)).toEqual(["scripts/a.ts"]);
+    expect(scopeIn(body, top)).toEqual(["packages/core/src/b.test.ts", "docs/x.md", "scripts/a.ts"]); // merge-gate keeps them
+  });
+
+  test("a glob whose wildcard follows a word is not a path either; merge-gate's scope keeps the directory before a wildcard", () => {
+    expect(pathsIn("docs/design/foo-*.md と packages/adapters/claude-*/src", top)).toEqual([]);
+    expect(scopeIn("`packages/core/src/*.test.ts`", top)).toEqual(["packages/core/src/"]);
+  });
+
+  test("a span with a space that starts with a path is not a command", () => {
+    expect(pathsIn("触る: `docs/a.md の節`、`./x.sh --y` と `bun x docs/b.md`", top)).toEqual(["docs/a.md"]);
+    expect(pathsIn("`FOO=1 bun test docs/c.md` と `A=1 B=2 bun x docs/d.md`", top)).toEqual([]);
+  });
+});
+
 test("scopeIn: a top directory alone in backticks counts for merge-gate, pathsIn and a glob do not make it one", () => {
   const body = "`docs/` と packages/core/ を触る。`scripts/*.ts`、`apps/<name>/x`、`docs/… の下`、`packages/{a,b}.ts`、`nothere/`";
   expect(pathsIn("`docs/` だけ", top)).toEqual([]);
@@ -329,7 +352,18 @@ describe("parallel-guard readOthers", () => {
       prs: [{ number: 49, headRefName: "sb/52-binary", body: "", files: ["packages/core/src/config.ts"], isDraft: deferred }],
     });
     expect((await overlap(ghBoard(REPO, make(true).run), 11, false, now)).verdict).toBe("go");
-    expect((await overlap(ghBoard(REPO, make(false).run), 11, false, now)).blocking.map((h) => h.ref)).toEqual(["PR #49", "Task #52"]);
+    // the ready PR stands for the Task: its files hold, the Task's body no longer adds to them
+    expect((await overlap(ghBoard(REPO, make(false).run), 11, false, now)).blocking.map((h) => h.ref)).toEqual(["PR #49"]);
+  });
+
+  test("a Task with a ready PR is judged by the PR's files, not by what its body planned", async () => {
+    const make = (draft: boolean) => github({
+      bodies: { 11: "触る: `packages/core/src/server.ts`", 52: "触る: `packages/core/src/server.ts`、`packages/core/src/jobs.ts`" },
+      inProgress: [52],
+      prs: [{ number: 49, headRefName: "sb/52-x", body: "", files: ["packages/core/src/jobs.ts"], isDraft: draft }],
+    });
+    expect((await overlap(ghBoard(REPO, make(false).run), 11, false, now)).verdict).toBe("go");
+    expect((await overlap(ghBoard(REPO, make(true).run), 11, false, now)).blocking.map((h) => h.ref)).toEqual(["Task #52"]);
   });
 
   test("leaves out the Task's own PBI (its Tasks and their PRs) and Tasks that are not In progress", async () => {
